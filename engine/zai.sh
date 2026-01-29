@@ -5,13 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNS="${ROOT}/runs"
 
 usage() {
-  cat <<EOF
-Usage: $0 <RUN_ID>
+  cat <<'EOF'
+Usage: zai.sh <RUN_ID>
 
-Calls the z.ai API (glm-4.7) with the contents of runs/<RUN_ID>/request.txt,
-writes the response to runs/<RUN_ID>/result.txt, and emits result & usage
-metadata for the caller. ZAI_API_KEY must already be exported (e.g.
-source ~/ronny-ops/scripts/load-secrets.sh).
+Calls the OpenAI-compatible z.ai endpoint with `model=zai-coding-plan/glm-4.7`
+and writes the minted completion to `runs/<RUN_ID>/result.txt`.
+
+It prints RESULT=<path> and optional USAGE_* lines for every token count that
+appears in the response, letting the caller log cost/usage.
 EOF
   exit 1
 }
@@ -22,83 +23,86 @@ run_id="${1:-}"
 run_dir="${RUNS}/${run_id}"
 request_file="${run_dir}/request.txt"
 result_file="${run_dir}/result.txt"
+response_file="${run_dir}/zai_response.json"
 
-[[ -f "${request_file}" ]] || { echo "FAIL: missing request file: ${request_file}"; exit 1; }
-[[ -n "${ZAI_API_KEY:-}" ]] || { echo "FAIL: ZAI_API_KEY is not set; source ~/ronny-ops/scripts/load-secrets.sh" >&2; exit 1; }
+[[ -f "${request_file}" ]] || { echo "FAIL: missing request file: ${request_file}" >&2; exit 1; }
+[[ -n "${OPENAI_API_KEY:-}" ]] || {
+  echo "FAIL: OPENAI_API_KEY is not set; load ~/ronny-ops/scripts/load-secrets.sh" >&2
+  exit 1
+}
 
-payload=$(python3 - "$request_file" <<'PY'
+payload="$(python3 - "${request_file}" <<'PY'
 import json, sys
 
-with open(sys.argv[1], encoding="utf-8") as fh:
-    request = fh.read()
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    request = fh.read().strip()
 
 payload = {
-    "model": "glm-4.7",
-    "messages": [
-        {
-            "role": "system",
-            "content": "You are a deterministic task runner that answers literally and concisely."
-        },
-        {"role": "user", "content": request}
-    ],
+    "model": "zai-coding-plan/glm-4.7",
     "temperature": 0,
     "max_tokens": 400,
-    "top_p": 1,
-    "presence_penalty": 0,
-    "frequency_penalty": 0
+    "messages": [
+        {"role": "system", "content": "You are a deterministic assistant that answers literally."},
+        {"role": "user", "content": request}
+    ],
 }
 print(json.dumps(payload))
 PY
-)
+)"
 
-response_file="$(mktemp)"
-trap 'rm -f "${response_file}"' EXIT
+http_code="$(
+  curl -sS -o "${response_file}" -w "%{http_code}" \
+    -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+    -H "Content-Type: application/json" \
+    --data-binary "${payload}" \
+    "https://api.z.ai/api/paas/v4/chat/completions" || true
+)"
 
-curl -sS -X POST \
-  -H "Authorization: Bearer ${ZAI_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
-  --data-binary "${payload}" \
-  "https://api.z.ai/api/paas/v4/chat/completions" >"${response_file}"
+if [[ "${http_code}" != "200" ]]; then
+  err_msg="$(python3 - "${response_file}" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+try:
+    payload = json.load(open(path, "r", encoding="utf-8"))
+except Exception as exc:
+    raise SystemExit(f"<non-JSON: {exc}>")
+
+msg = payload.get("error", {}).get("message")
+if msg:
+    print(msg)
+else:
+    print("<non-200 HTTP response>")
+PY
+)"
+  echo "FAIL: z.ai(OpenAI-compatible) returned HTTP ${http_code}: ${err_msg}" >&2
+  exit 1
+fi
 
 python3 - "${response_file}" "${result_file}" <<'PY'
 import json, sys
 
-response_path = sys.argv[1]
-result_path = sys.argv[2]
-
-with open(response_path, encoding="utf-8") as fh:
+resp_path, out_path = sys.argv[1], sys.argv[2]
+with open(resp_path, "r", encoding="utf-8") as fh:
     data = json.load(fh)
-
-if "error" in data:
-    error = data["error"]
-    message = error.get("message", "(no message)")
-    raise SystemExit(f"FAIL: z.ai reported an error: {message}")
 
 choices = data.get("choices", [])
 if not choices:
     raise SystemExit("FAIL: z.ai response missing choices")
 
-message = choices[0].get("message", {}).get("content", "")
-if not message:
-    raise SystemExit("FAIL: z.ai returned an empty response")
+content = choices[0].get("message", {}).get("content", "")
+with open(out_path, "w", encoding="utf-8") as out_f:
+    out_f.write(content.strip() + "\n")
 
-if not message.endswith("\n"):
-    message += "\n"
+usage = data.get("usage", {}) or {}
+def emit(name, value):
+    if isinstance(value, int):
+        print(f"{name}={value}")
 
-with open(result_path, "w", encoding="utf-8") as out:
-    out.write(message)
-
-usage = data.get("usage", {})
-print(f"RESULT={result_path}")
-if usage:
-    total = usage.get("total_tokens")
-    if total is not None:
-        print(f"USAGE_TOTAL_TOKENS={total}")
-    prompt = usage.get("prompt_tokens")
-    if prompt is not None:
-        print(f"USAGE_PROMPT_TOKENS={prompt}")
-    completion = usage.get("completion_tokens")
-    if completion is not None:
-        print(f"USAGE_COMPLETION_TOKENS={completion}")
+emit("USAGE_INPUT_TOKENS", usage.get("prompt_tokens"))
+emit("USAGE_OUTPUT_TOKENS", usage.get("completion_tokens"))
+emit("USAGE_TOTAL_TOKENS", usage.get("total_tokens"))
 PY
+
+echo "RESULT=${result_file}"
