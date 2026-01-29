@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RUNS="${ROOT}/runs"
+RECEIPTS="${ROOT}/receipts/sessions"
+SPINE_STATE="${ROOT}/.spine"
+
+usage() {
+  cat <<USAGE
+spine: detachable front door
+
+Commands:
+  spine doctor
+  spine start
+  spine run --task <path>
+  spine receipt --run-id <RUN_ID> --status <0|1> --note "<text>"
+  spine closeout --run-id <RUN_ID>
+
+USAGE
+}
+
+doctor() {
+  echo "SPINE DOCTOR"
+  echo "root: ${ROOT}"
+  [[ -d "${ROOT}/cli/bin" ]] && echo "ok: cli/bin" || echo "FAIL: cli/bin"
+  [[ -d "${ROOT}/engine" ]] && echo "ok: engine" || echo "FAIL: engine"
+  [[ -f "${ROOT}/docs/RECEIPTS_CONTRACT.md" ]] && echo "ok: receipts contract" || echo "FAIL: receipts contract"
+  command -v git >/dev/null 2>&1 && echo "ok: git" || echo "WARN: git missing"
+  echo "done"
+}
+
+start() {
+  local run_id="R$(date -u +%Y%m%d-%H%M%S)"
+  mkdir -p "${RUNS}/${run_id}" "${RECEIPTS}/${run_id}" "${SPINE_STATE}"
+  echo "${run_id}" > "${SPINE_STATE}/latest_run_id"
+  cat > "${RUNS}/${run_id}/run.md" <<EOF2
+# Run
+RUN_ID: ${run_id}
+UTC: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+EOF2
+  echo "${run_id}"
+}
+
+run_task() {
+  local task=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --task) shift; task="${1:-}";;
+      *) echo "Unknown arg: $1"; exit 1;;
+    esac
+    shift
+  done
+
+  [[ -n "${task}" ]] || { echo "FAIL: --task required"; exit 1; }
+  [[ -f "${task}" ]] || { echo "FAIL: task file not found: ${task}"; exit 1; }
+
+  local run_id=""
+  if [[ -f "${SPINE_STATE}/latest_run_id" ]]; then
+    run_id="$(cat "${SPINE_STATE}/latest_run_id")"
+  fi
+  [[ -n "${run_id}" ]] || { echo "FAIL: no run started. Run: spine start"; exit 1; }
+
+  cp "${task}" "${RUNS}/${run_id}/task.txt"
+  echo "RUN_ID=${run_id}"
+  echo "TASK=${task}"
+  echo "NOTE: This scaffold doesn't call an LLM yet. It proves the boring lifecycle."
+  echo "Next: wire engine/runner to Claude/OpenAI behind a single adapter."
+}
+
+receipt() {
+  local run_id="" status="" note=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run-id) shift; run_id="${1:-}";;
+      --status) shift; status="${1:-}";;
+      --note) shift; note="${1:-}";;
+      *) echo "Unknown arg: $1"; exit 1;;
+    esac
+    shift
+  done
+
+  [[ -n "${run_id}" ]] || { echo "FAIL: --run-id required"; exit 1; }
+  [[ -n "${status}" ]] || { echo "FAIL: --status required"; exit 1; }
+
+  local out="${RECEIPTS}/${run_id}/receipt.md"
+  cat > "${out}" <<EOF2
+# Receipt
+RUN_ID: ${run_id}
+UTC timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+Command invoked: spine run
+Inputs (file paths):
+- runs/${run_id}/task.txt
+Outputs (file paths):
+- receipts/sessions/${run_id}/receipt.md
+Exit status: ${status}
+Notes: ${note:-—}
+EOF2
+  echo "${out}"
+}
+
+closeout() {
+  local run_id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run-id) shift; run_id="${1:-}";;
+      *) echo "Unknown arg: $1"; exit 1;;
+    esac
+    shift
+  done
+
+  [[ -n "${run_id}" ]] || { echo "FAIL: --run-id required"; exit 1; }
+  echo "Closed: ${run_id}"
+  echo "Receipt: receipts/sessions/${run_id}/receipt.md"
+}
+
+cmd="${1:-}"
+shift || true
+case "${cmd}" in
+  doctor) doctor ;;
+  start) start ;;
+  run) run_task "$@" ;;
+  receipt) receipt "$@" ;;
+  closeout) closeout "$@" ;;
+  ""|help|-h|--help) usage ;;
+  *) echo "Unknown command: ${cmd}"; usage; exit 1 ;;
+esac
