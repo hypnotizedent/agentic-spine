@@ -8,10 +8,10 @@ usage() {
   cat <<EOF
 Usage: $0 <RUN_ID>
 
-Selects an engine provider (local|claude|openai) via \$SPINE_ENGINE_PROVIDER
+Selects an engine provider (local|claude|zai|openai) via \$SPINE_ENGINE_PROVIDER
 and executes the provider script with <RUN_ID>.
 
-Defaults to 'local' and currently only the local provider is implemented.
+Defaults to 'local' while the Claude/z.ai runners are under active experimentation.
 EOF
   exit 1
 }
@@ -27,6 +27,9 @@ case "${provider}" in
     ;;
   claude)
     provider_script="${ROOT}/engine/claude.sh"
+    ;;
+  zai)
+    provider_script="${ROOT}/engine/zai.sh"
     ;;
   openai)
     provider_script="${ROOT}/engine/openai.sh"

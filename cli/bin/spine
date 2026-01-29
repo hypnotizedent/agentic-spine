@@ -68,12 +68,36 @@ run_task() {
 
   local runner="${ROOT}/engine/run.sh"
   [[ -x "${runner}" ]] || { echo "FAIL: missing engine adapter: ${runner}"; exit 1; }
-  local result_path
-  result_path="$("${runner}" "${run_id}")"
+  local runner_output
+  runner_output="$("${runner}" "${run_id}")"
+
+  local result_path=""
+  local usage_total=""
+  local usage_prompt=""
+  local usage_completion=""
+  while IFS= read -r line; do
+    case "${line}" in
+      RESULT=*) result_path="${line#RESULT=}";;
+      USAGE_TOTAL_TOKENS=*) usage_total="${line#*=}";;
+      USAGE_PROMPT_TOKENS=*) usage_prompt="${line#*=}";;
+      USAGE_COMPLETION_TOKENS=*) usage_completion="${line#*=}";;
+    esac
+  done <<< "$(printf '%s\n' "${runner_output}")"
+
+  [[ -n "${result_path}" ]] || { echo "FAIL: engine did not return result path"; exit 1; }
 
   # Write receipt (auto) listing request/result artifacts
   local out="${RECEIPTS}/${run_id}/receipt.md"
   mkdir -p "${RECEIPTS}/${run_id}"
+
+  local usage_section=""
+  if [[ -n "${usage_total}" ]] || [[ -n "${usage_prompt}" ]] || [[ -n "${usage_completion}" ]]; then
+    usage_section=$'\nUsage tokens:'
+    [[ -n "${usage_total}" ]] && usage_section+=$'\n- total: '"${usage_total}"
+    [[ -n "${usage_prompt}" ]] && usage_section+=$'\n- prompt: '"${usage_prompt}"
+    [[ -n "${usage_completion}" ]] && usage_section+=$'\n- completion: '"${usage_completion}"
+  fi
+
   cat > "${out}" <<EOF2
 # Receipt
 RUN_ID: ${run_id}
@@ -89,9 +113,18 @@ Exit status: 0
 Notes: v0.1 MOU (extract REQUEST + write result)
 EOF2
 
+  if [[ -n "${usage_section}" ]]; then
+    cat >> "${out}" <<EOF3
+${usage_section}
+EOF3
+  fi
+
   echo "RUN_ID=${run_id}"
   echo "TASK=${task}"
   echo "RESULT=${result_path}"
+  [[ -n "${usage_total}" ]] && echo "USAGE_TOTAL_TOKENS=${usage_total}"
+  [[ -n "${usage_prompt}" ]] && echo "USAGE_PROMPT_TOKENS=${usage_prompt}"
+  [[ -n "${usage_completion}" ]] && echo "USAGE_COMPLETION_TOKENS=${usage_completion}"
   echo "${out}"
 }
 

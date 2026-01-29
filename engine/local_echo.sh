@@ -27,4 +27,4 @@ mkdir -p "${run_dir}"
 cat "${request_file}" > "${result_file}"
 chmod 644 "${result_file}"
 
-echo "${result_file}"
+echo "RESULT=${result_file}"
