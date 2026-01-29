@@ -55,17 +55,21 @@ run_task() {
   [[ -n "${task}" ]] || { echo "FAIL: --task required"; exit 1; }
   [[ -f "${task}" ]] || { echo "FAIL: task file not found: ${task}"; exit 1; }
 
-  local run_id=""
-  if [[ -f "${SPINE_STATE}/latest_run_id" ]]; then
-    run_id="$(cat "${SPINE_STATE}/latest_run_id")"
-  fi
-  [[ -n "${run_id}" ]] || { echo "FAIL: no run started. Run: spine start"; exit 1; }
+  # Always mint a fresh run for each task run (Ronny-proof MOU)
+  local run_id
+  run_id="$(start)"
+
+  # Write a failure receipt if anything after this point errors out.
+  trap 'receipt --run-id "${run_id}" --status 1 --note "local scaffold run" >/dev/null 2>&1 || true' ERR
 
   cp "${task}" "${RUNS}/${run_id}/task.txt"
   echo "RUN_ID=${run_id}"
   echo "TASK=${task}"
   echo "NOTE: This scaffold doesn't call an LLM yet. It proves the boring lifecycle."
   echo "Next: wire engine/runner to Claude/OpenAI behind a single adapter."
+
+  receipt --run-id "${run_id}" --status 0 --note "local scaffold run"
+  trap - ERR
 }
 
 receipt() {
