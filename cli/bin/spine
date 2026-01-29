@@ -59,17 +59,41 @@ run_task() {
   local run_id
   run_id="$(start)"
 
-  # Write a failure receipt if anything after this point errors out.
-  trap 'receipt --run-id "${run_id}" --status 1 --note "local scaffold run" >/dev/null 2>&1 || true' ERR
-
+  mkdir -p "${RUNS}/${run_id}"
   cp "${task}" "${RUNS}/${run_id}/task.txt"
+
+  # Extract the ## REQUEST section (deterministic) into runs/<RUN_ID>/request.txt
+  perl -0777 -ne 'if (s/^.*?^## REQUEST\s*\n//ms) { s/\n\s*\z//; print } else { die "FAIL: task missing ## REQUEST\n" }' \
+    "${RUNS}/${run_id}/task.txt" > "${RUNS}/${run_id}/request.txt"
+
+  # v0 runner: write a placeholder "result" proving execution plumbing
+  {
+    echo "HELLO TASK OK"
+    date -u +%F
+    echo "${ROOT}"
+  } > "${RUNS}/${run_id}/result.txt"
+
+  # Write receipt (auto) listing request/result artifacts
+  local out="${RECEIPTS}/${run_id}/receipt.md"
+  mkdir -p "${RECEIPTS}/${run_id}"
+  cat > "${out}" <<EOF2
+# Receipt
+RUN_ID: ${run_id}
+UTC timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+Command invoked: spine run --task ${task}
+Inputs (file paths):
+- runs/${run_id}/task.txt
+Outputs (file paths):
+- runs/${run_id}/request.txt
+- runs/${run_id}/result.txt
+- receipts/sessions/${run_id}/receipt.md
+Exit status: 0
+Notes: v0.1 MOU (extract REQUEST + write result)
+EOF2
+
   echo "RUN_ID=${run_id}"
   echo "TASK=${task}"
-  echo "NOTE: This scaffold doesn't call an LLM yet. It proves the boring lifecycle."
-  echo "Next: wire engine/runner to Claude/OpenAI behind a single adapter."
-
-  receipt --run-id "${run_id}" --status 0 --note "local scaffold run"
-  trap - ERR
+  echo "${out}"
 }
 
 receipt() {
