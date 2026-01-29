@@ -66,12 +66,10 @@ run_task() {
   perl -0777 -ne 'if (s/^.*?^## REQUEST\s*\n//ms) { s/\n\s*\z//; print } else { die "FAIL: task missing ## REQUEST\n" }' \
     "${RUNS}/${run_id}/task.txt" > "${RUNS}/${run_id}/request.txt"
 
-  # v0 runner: write a placeholder "result" proving execution plumbing
-  {
-    echo "HELLO TASK OK"
-    date -u +%F
-    echo "${ROOT}"
-  } > "${RUNS}/${run_id}/result.txt"
+  local runner="${ROOT}/engine/local_echo.sh"
+  [[ -x "${runner}" ]] || { echo "FAIL: missing engine runner: ${runner}"; exit 1; }
+  local result_path
+  result_path="$("${runner}" "${run_id}")"
 
   # Write receipt (auto) listing request/result artifacts
   local out="${RECEIPTS}/${run_id}/receipt.md"
@@ -93,6 +91,7 @@ EOF2
 
   echo "RUN_ID=${run_id}"
   echo "TASK=${task}"
+  echo "RESULT=${result_path}"
   echo "${out}"
 }
 
