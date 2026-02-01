@@ -14,10 +14,25 @@
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
-LOOPS_FILE="$SPINE_REPO/mailroom/state/open_loops.jsonl"
+STATE_DIR="$SPINE_REPO/mailroom/state"
+LOOPS_FILE="$STATE_DIR/open_loops.jsonl"
 RECEIPTS_DIR="$SPINE_REPO/receipts/sessions"
 OUTBOX_DIR="$SPINE_REPO/mailroom/outbox"
-LEDGER="$SPINE_REPO/mailroom/state/ledger.csv"
+LEDGER="$STATE_DIR/ledger.csv"
+
+# Dependency check - jq required for JSONL parsing
+check_deps() {
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "ERROR: jq is required for ops loops JSONL parsing." >&2
+        echo "Install: brew install jq" >&2
+        exit 2
+    fi
+}
+
+# Ensure state directory exists before any writes
+ensure_state_dir() {
+    mkdir -p "$STATE_DIR"
+}
 
 usage() {
     cat <<'EOF'
@@ -58,7 +73,7 @@ extract_loops_from_receipt() {
     local receipt_dir="$1"
     local receipt_file="$receipt_dir/receipt.md"
 
-    [[ -f "$receipt_file" ]] || return
+    [[ -f "$receipt_file" ]] || return 0
 
     # Extract run_key from receipt
     local run_key
@@ -67,7 +82,7 @@ extract_loops_from_receipt() {
 
     # Skip if loop already exists for this run
     if loop_exists_for_run "$run_key"; then
-        return
+        return 0
     fi
 
     # Extract status
@@ -181,7 +196,7 @@ list_loops() {
 
     if [[ ! -s "$LOOPS_FILE" ]]; then
         echo "(no loops)"
-        return
+        return 0
     fi
 
     case "$filter" in
@@ -273,7 +288,7 @@ summary() {
 
     if [[ ! -s "$LOOPS_FILE" ]]; then
         echo "No loops recorded."
-        return
+        return 0
     fi
 
     echo "By Status:"
@@ -296,20 +311,29 @@ summary() {
 # Main
 case "${1:-}" in
     list)
+        check_deps
+        ensure_state_dir
         list_loops "${2:---open}"
         ;;
     collect)
+        ensure_state_dir
         collect_loops
         ;;
     close)
         [[ -z "${2:-}" ]] && { echo "Usage: ops loops close <loop_id>"; exit 1; }
+        check_deps
+        ensure_state_dir
         close_loop "$2"
         ;;
     show)
         [[ -z "${2:-}" ]] && { echo "Usage: ops loops show <loop_id>"; exit 1; }
+        check_deps
+        ensure_state_dir
         show_loop "$2"
         ;;
     summary)
+        check_deps
+        ensure_state_dir
         summary
         ;;
     -h|--help|"")

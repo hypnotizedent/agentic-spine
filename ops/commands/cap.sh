@@ -12,9 +12,15 @@
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+STATE_DIR="$SPINE_REPO/mailroom/state"
 CAP_FILE="$SPINE_REPO/ops/capabilities.yaml"
 RECEIPTS="$SPINE_REPO/receipts/sessions"
-LEDGER="$SPINE_REPO/mailroom/state/ledger.csv"
+LEDGER="$STATE_DIR/ledger.csv"
+
+# Ensure state directory exists before any writes
+ensure_state_dir() {
+    mkdir -p "$STATE_DIR"
+}
 
 usage() {
     cat <<'EOF'
@@ -192,7 +198,8 @@ EOF
     cp "$output_file" "$receipt_dir/output.txt"
     rm -f "$output_file"
 
-    # Append to ledger
+    # Append to ledger (ensure state dir exists)
+    ensure_state_dir
     echo "$run_key,$end_time,$start_time,$end_time,$([ $exit_code -eq 0 ] && echo "done" || echo "failed"),$name,receipt.md,,capability" >> "$LEDGER"
 
     echo ""
