@@ -1,0 +1,86 @@
+# CORE_LOCK v1.0
+
+**Locked:** 2026-02-01
+**Status:** ACTIVE
+**Gate Version:** drift-gate.sh v1.3
+
+---
+
+## Core SSOT Paths
+
+| Surface | Canonical Path | Env Override |
+|---------|---------------|--------------|
+| Mailroom | `$SPINE_REPO/mailroom/` | - |
+| Inbox | `$SPINE_REPO/mailroom/inbox/` | `SPINE_INBOX` |
+| Outbox | `$SPINE_REPO/mailroom/outbox/` | `SPINE_OUTBOX` |
+| State | `$SPINE_REPO/mailroom/state/` | `SPINE_STATE` |
+| Logs | `$SPINE_REPO/mailroom/logs/` | `SPINE_LOGS` |
+| Receipts | `$SPINE_REPO/receipts/sessions/` | - |
+
+## Runtime Model
+
+**Single runtime: Mailroom**
+
+All work (terminal and daemon) flows through mailroom:
+- Terminal commands enqueue to `mailroom/inbox/queued/`
+- Watcher processes through lanes: `queued/ → running/ → done/ | failed/`
+- Every run produces: outbox result + receipt + ledger entry
+
+## Identity System
+
+**Single identity: run_key = queued filename stem**
+
+Format: `<session>__<slug>__R<id>`
+Example: `S20260201-173900__unified-test__R8888`
+
+This key is used everywhere:
+- Outbox result: `<run_key>__RESULT.md`
+- Receipt folder: `receipts/sessions/R<run_key>/`
+- Ledger row: `run_id` column
+
+## Entry Points
+
+| Entry | Path | Purpose |
+|-------|------|---------|
+| CLI | `bin/ops` | Human entrypoint (enqueues to mailroom) |
+| Watcher | `agents/active/hot-folder-watcher.sh` | Daemon runtime |
+| LaunchAgent | `com.ronny.agent-inbox` | Persistent watcher |
+
+## Drift Gates
+
+All must PASS for core to be healthy:
+
+| Gate | Enforces |
+|------|----------|
+| D1 | Top-level dirs bounded (8 only) |
+| D2 | No `runs/` directory |
+| D3 | Entrypoint smoke (`bin/ops preflight`) |
+| D4 | Watcher running (warn only) |
+| D5 | No legacy coupling (`~/agent`, `ronny-ops`) |
+| D6 | Receipts exist for recent sessions |
+| D7 | Executables only in allowed zones |
+| D8 | No backup clutter |
+| D10 | Logs under mailroom only |
+| D11 | `~/agent` is symlink to mailroom |
+| D12 | This file exists |
+
+## Rules
+
+1. **No new runtime surfaces outside mailroom**
+2. **If gates pass, core is healthy**
+3. **Legacy is archived, never deleted** (`.archive/`)
+4. **All work produces receipts** (no exceptions)
+5. **Provider/model recorded in every receipt**
+
+## Archived Legacy
+
+Located in `.archive/` (excluded from gates, recoverable):
+- `legacy-root/runs/` - old CLI run traces
+- `legacy-root/examples/` - old CLI examples
+- `legacy-root/tasks/` - old CLI tasks
+- `surfaces/quarantine/` - deprecated scripts
+- `bin/ops-import-info-only.sh` - one-time import tool
+
+---
+
+_If this file is missing, the repo is not a valid spine core._

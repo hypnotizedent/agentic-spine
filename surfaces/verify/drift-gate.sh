@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════
+# drift-gate.sh - Constitutional drift detector (v1.3)
+# ═══════════════════════════════════════════════════════════════
+#
+# Enforces the Minimal Spine Constitution.
+# Run after any change. Must pass before merge.
+#
+# Exit: 0 = PASS, 1 = FAIL
+#
+# ═══════════════════════════════════════════════════════════════
+set -euo pipefail
+
+SP="${SPINE_ROOT:-$HOME/Code/agentic-spine}"
+cd "$SP"
+FAIL=0
+
+pass(){ echo "PASS"; }
+fail(){ echo "FAIL $*"; FAIL=1; }
+warn(){ echo "WARN $*"; }
+
+echo "=== DRIFT GATE (v1.3) ==="
+
+# D1: Top-level directory policy (8 only)
+echo -n "D1 top-level dirs... "
+EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(_imports|agents|bin|docs|mailroom|ops|receipts|surfaces)/$' || true)"
+[[ -z "$EXTRA" ]] && pass || fail "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"
+
+# D2: No runs/ trace
+echo -n "D2 one trace (no runs/)... "
+[[ ! -d runs ]] && pass || fail "runs/ exists"
+
+# D3: Entrypoint smoke
+echo -n "D3 entrypoint smoke... "
+./bin/ops preflight >/dev/null 2>&1 && pass || fail "bin/ops preflight failed"
+
+# D4: Watcher (warn only, no fail)
+echo -n "D4 watcher... "
+if pgrep -fl "fswatch.*agentic-spine/mailroom/inbox/queued" >/dev/null 2>&1; then
+  pass
+else
+  warn "(not detected)"
+fi
+
+# D5: No executable ~/agent coupling
+echo -n "D5 no legacy coupling... "
+COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops agents/active surfaces/verify 2>/dev/null \
+  | rg -v '^[[:space:]]*#' \
+  | rg -v 'foundation-gate.sh' \
+  | rg -v 'drift-gate.sh' || true)"
+[[ -z "$COUPLE" ]] && pass || fail "legacy coupling found"
+
+# D6: Receipts exist (latest 5 have receipt.md)
+echo -n "D6 receipts exist... "
+MISSING=0
+for s in $(ls -1t receipts/sessions 2>/dev/null | head -5); do
+  [[ -f "receipts/sessions/$s/receipt.md" ]] || MISSING=$((MISSING+1))
+done
+[[ "$MISSING" -eq 0 ]] && pass || fail "$MISSING missing receipt.md"
+
+# D7: Executables only in four zones
+echo -n "D7 executables bounded... "
+BAD="$(find . -type f -name "*.sh" \
+  | rg -v '^\./(bin/|ops/|agents/active/|surfaces/verify/)' \
+  | rg -v '^\./(_imports/|docs/|receipts/|mailroom/|\.git/|\.spine/|\.archive/)' || true)"
+[[ -z "$BAD" ]] && pass || fail "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"
+
+# D8: No backup clutter
+echo -n "D8 no backup clutter... "
+BK="$(find bin ops -maxdepth 1 -type f 2>/dev/null | rg '\.bak|fix_bak' || true)"
+[[ -z "$BK" ]] && pass || fail "backup files"
+
+# D10: No spurious top-level logs (must be under mailroom/)
+echo -n "D10 logs under mailroom... "
+if [[ -d "$SP/logs" ]]; then
+  fail "spurious \$SPINE/logs exists (should be mailroom/logs)"
+else
+  pass
+fi
+
+# D11: ~/agent must be symlink to mailroom (if exists)
+echo -n "D11 home surface... "
+if [[ -e "$HOME/agent" ]]; then
+  if [[ -L "$HOME/agent" ]]; then
+    TARGET="$(readlink "$HOME/agent")"
+    if [[ "$TARGET" == *"agentic-spine/mailroom"* ]]; then
+      pass
+    else
+      fail "~/agent symlink points to wrong target: $TARGET"
+    fi
+  else
+    fail "~/agent is a directory (should be symlink to mailroom)"
+  fi
+else
+  pass  # doesn't exist, that's fine
+fi
+
+# D12: CORE_LOCK.md must exist (repo validity marker)
+echo -n "D12 core lock exists... "
+[[ -f "$SP/docs/CORE_LOCK.md" ]] && pass || fail "docs/CORE_LOCK.md missing"
+
+# D9: Receipt stamps (NEW - going-forward enforcement)
+# Only check the LATEST receipt for stamps (legacy receipts are grandfathered)
+echo -n "D9 receipt stamps... "
+LATEST="$(ls -1t receipts/sessions 2>/dev/null | head -1)"
+if [[ -n "$LATEST" ]] && [[ -f "receipts/sessions/$LATEST/receipt.md" ]]; then
+  STAMP_FILE="receipts/sessions/$LATEST/receipt.md"
+  HAS_REPO=$(rg -q "repo_sha" "$STAMP_FILE" 2>/dev/null && echo 1 || echo 0)
+  HAS_TREE=$(rg -q "tree_sha" "$STAMP_FILE" 2>/dev/null && echo 1 || echo 0)
+  HAS_GOV=$(rg -q "gov_hash" "$STAMP_FILE" 2>/dev/null && echo 1 || echo 0)
+  HAS_MAP=$(rg -q "map_hash" "$STAMP_FILE" 2>/dev/null && echo 1 || echo 0)
+
+  if [[ "$HAS_REPO" == "1" && "$HAS_TREE" == "1" && "$HAS_GOV" == "1" && "$HAS_MAP" == "1" ]]; then
+    pass
+  else
+    # Warn but don't fail for now (transition period)
+    warn "latest receipt missing stamps (legacy OK)"
+  fi
+else
+  warn "no receipts to check"
+fi
+
+echo
+[[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
+exit "$FAIL"
