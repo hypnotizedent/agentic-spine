@@ -1,0 +1,135 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Capability Registry - Governed actions the spine can execute
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Each capability is an allowed action with:
+#   - name: unique identifier
+#   - command: what to run
+#   - safety: read-only | mutating | destructive
+#   - approval: auto | manual
+#   - description: what it does
+#
+# Rule: Only capabilities listed here can be executed via `ops cap run`
+# ═══════════════════════════════════════════════════════════════════════════
+
+version: "1.0"
+updated: "2026-02-01"
+
+capabilities:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # SPINE HEALTH (always safe)
+  # ─────────────────────────────────────────────────────────────────────────
+
+  spine.verify:
+    description: "Run drift gates to verify spine health"
+    command: "./surfaces/verify/drift-gate.sh"
+    cwd: "$SPINE_REPO"
+    safety: read-only
+    approval: auto
+    outputs: ["stdout"]
+
+  spine.replay:
+    description: "Run replay test to verify determinism"
+    command: "./surfaces/verify/replay-test.sh --compare"
+    cwd: "$SPINE_REPO"
+    safety: read-only
+    approval: auto
+    outputs: ["stdout"]
+
+  spine.status:
+    description: "Show watcher and queue status"
+    command: "./agents/active/agent-status.sh"
+    cwd: "$SPINE_REPO"
+    safety: read-only
+    approval: auto
+    outputs: ["stdout"]
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # MONOLITH READ (safe exploration)
+  # ─────────────────────────────────────────────────────────────────────────
+
+  monolith.tree:
+    description: "List directory structure of allowed paths"
+    command: "ls -la"
+    cwd: "$HOME/Code"
+    safety: read-only
+    approval: auto
+    args:
+      - name: path
+        required: false
+        default: "."
+        validate: "^[a-zA-Z0-9_./-]+$"
+    outputs: ["stdout"]
+
+  monolith.search:
+    description: "Search code with ripgrep"
+    command: "rg"
+    cwd: "$HOME/Code"
+    safety: read-only
+    approval: auto
+    args:
+      - name: pattern
+        required: true
+      - name: path
+        required: false
+        default: "."
+    outputs: ["stdout"]
+
+  monolith.git_status:
+    description: "Show git status of a repo"
+    command: "git status"
+    cwd: "$HOME/Code"
+    safety: read-only
+    approval: auto
+    args:
+      - name: repo
+        required: false
+        default: "agentic-spine"
+    outputs: ["stdout"]
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # INFRASTRUCTURE (read-only checks)
+  # ─────────────────────────────────────────────────────────────────────────
+
+  infra.docker_ps:
+    description: "List running Docker containers"
+    command: "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
+    safety: read-only
+    approval: auto
+    outputs: ["stdout"]
+
+  infra.gh_issue:
+    description: "Get GitHub issue details"
+    command: "gh issue view"
+    safety: read-only
+    approval: auto
+    args:
+      - name: issue_number
+        required: true
+        validate: "^[0-9]+$"
+    outputs: ["stdout"]
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # FUTURE: MUTATING (require manual approval)
+  # ─────────────────────────────────────────────────────────────────────────
+
+  # git.commit:
+  #   description: "Create a git commit"
+  #   command: "git commit -m"
+  #   safety: mutating
+  #   approval: manual
+  #   args:
+  #     - name: message
+  #       required: true
+  #   outputs: ["stdout"]
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Safety Levels
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# read-only:   Cannot modify state. Safe to run autonomously.
+# mutating:    Modifies state but is recoverable. Requires receipt.
+# destructive: Cannot be undone. Requires manual approval + confirmation.
+#
+# ═══════════════════════════════════════════════════════════════════════════
