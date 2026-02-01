@@ -2,7 +2,7 @@
 
 **Locked:** 2026-02-01
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v1.3
+**Gate Version:** drift-gate.sh v1.4
 
 ---
 
