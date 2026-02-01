@@ -11,7 +11,7 @@ Usage: $0 <RUN_ID>
 Selects an engine provider (local|claude|zai|openai) via \$SPINE_ENGINE_PROVIDER
 and executes the provider script with <RUN_ID>.
 
-Defaults to 'local' while the Claude/z.ai runners are under active experimentation.
+Defaults to 'openai' with a Claude fallback in case the OpenAI call fails.
 EOF
   exit 1
 }
@@ -19,7 +19,7 @@ EOF
 run_id="${1:-}"
 [[ -n "${run_id}" ]] || usage
 
-provider="${SPINE_ENGINE_PROVIDER:-local}"
+provider="${SPINE_ENGINE_PROVIDER:-openai}"
 
 case "${provider}" in
   local)
@@ -42,4 +42,26 @@ esac
 
 [[ -x "${provider_script}" ]] || { echo "FAIL: engine script missing or not executable: ${provider_script}"; exit 1; }
 
-"${provider_script}" "${run_id}"
+provider_requested="${provider}"
+provider_used=""
+provider_error=""
+output=""
+
+if [[ "${provider}" == "openai" ]]; then
+  if output="$("${provider_script}" "${run_id}" 2>&1)"; then
+    provider_used="openai"
+  else
+    provider_error="${output}"
+    provider_used="claude"
+    echo "[engine] OpenAI provider failed; falling back to Anthropic" >&2
+    output="$("${ROOT}/engine/claude.sh" "${run_id}" 2>&1)"
+  fi
+else
+  provider_used="${provider}"
+  output="$("${provider_script}" "${run_id}" 2>&1)"
+fi
+
+printf 'PROVIDER_REQUESTED=%s\n' "${provider_requested}"
+printf 'PROVIDER_USED=%s\n' "${provider_used}"
+[[ -n "${provider_error}" ]] && printf 'PROVIDER_ERROR=%s\n' "${provider_error}"
+printf '%s\n' "${output}"

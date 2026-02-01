@@ -16,3 +16,5 @@ receipts/sessions/<RUN_ID>/receipt.md
 
 ## Rule
 If there is no receipt, the run did not happen.
+
+A run is successful if `runs/<RUN_ID>/request.txt`, `runs/<RUN_ID>/result.txt`, and `receipts/sessions/<RUN_ID>/receipt.md` all exist; the receipt must document the provider chosen (requested vs. actual) and surface any provider error so failures are provable.
