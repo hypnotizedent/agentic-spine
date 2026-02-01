@@ -159,7 +159,8 @@ run_cap() {
 | Status | $([ $exit_code -eq 0 ] && echo "done" || echo "failed") |
 | Exit Code | $exit_code |
 | Generated | $end_time |
-| Safety | $safety |
+| Model | local (capability) |
+| Context | $safety |
 
 ## Inputs
 
