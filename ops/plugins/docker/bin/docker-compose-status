@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# docker-compose-status - Read-only docker compose status per stack
+#
+# Outputs per-stack health with reason codes.
+# No restarts, no deploys, no mutations.
+# STOP=2 on preconditions (missing binding, yq, etc.)
+#
+# Reason codes:
+#   ssh_timeout       - Cannot connect to host
+#   dir_missing       - Stack directory doesn't exist
+#   compose_missing   - No docker-compose.yml or compose.yml
+#   docker_unreachable- Docker daemon not accessible
+#   compose_ps_failed - docker compose ps failed
+#
+# Usage:
+#   docker-compose-status           # check all targets
+#   docker-compose-status <host>    # check specific host
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING="$SPINE_ROOT/ops/bindings/docker.compose.targets.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+
+[[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+
+HOST_FILTER="${1:-}"
+
+# Read targets list
+TARGET_KEYS="$(yq -r '.targets | keys | .[]' "$BINDING" 2>/dev/null || true)"
+[[ -n "${TARGET_KEYS:-}" ]] || stop "binding has no targets: $BINDING"
+
+echo "docker.compose.status"
+echo "binding: $BINDING"
+
+total_stacks=0
+total_ok=0
+total_degraded=0
+total_down=0
+
+for key in $TARGET_KEYS; do
+  # Filter if specific host requested
+  if [[ -n "$HOST_FILTER" && "$key" != "$HOST_FILTER" ]]; then
+    continue
+  fi
+
+  ssh_target="$(yq -r ".targets.\"$key\".ssh_target" "$BINDING")"
+  timeout_sec="$(yq -r ".targets.\"$key\".connect_timeout_sec // 5" "$BINDING")"
+
+  echo
+  echo "host: $key (ssh_target=$ssh_target)"
+
+  # Pull stacks array
+  stack_count="$(yq -r ".targets.\"$key\".stacks | length" "$BINDING" 2>/dev/null || echo 0)"
+  if [[ "$stack_count" -le 0 ]]; then
+    echo "stacks: 0"
+    continue
+  fi
+
+  # Check host reachability quickly (non-interactive)
+  ssh_opts=(-o "BatchMode=yes" -o "ConnectTimeout=$timeout_sec" -o "StrictHostKeyChecking=no" -o "UserKnownHostsFile=/dev/null" -o "LogLevel=ERROR")
+
+  if ! ssh "${ssh_opts[@]}" "$ssh_target" "true" >/dev/null 2>&1; then
+    echo "stacks: $stack_count"
+    echo "STATUS: UNREACHABLE reason=ssh_timeout"
+    total_stacks=$((total_stacks + stack_count))
+    total_down=$((total_down + stack_count))
+    continue
+  fi
+
+  echo "stacks: $stack_count"
+  printf "%-16s %-10s %-14s %s\n" "STACK" "STATUS" "running/total" "note"
+
+  # Iterate stacks
+  for i in $(seq 0 $((stack_count-1))); do
+    name="$(yq -r ".targets.\"$key\".stacks[$i].name" "$BINDING")"
+    path="$(yq -r ".targets.\"$key\".stacks[$i].path" "$BINDING")"
+
+    total_stacks=$((total_stacks + 1))
+
+    # Remote inspection script (reason-coded)
+    remote_script='
+set -euo pipefail
+PATHX="$1"
+
+# expand ~ manually (check for literal tilde prefix)
+case "$PATHX" in
+  "~/"*) PATHX="$HOME/${PATHX:2}" ;;
+  "~") PATHX="$HOME" ;;
+esac
+
+if [[ ! -d "$PATHX" ]]; then
+  echo "status=down reason=dir_missing running=0 total=0 note="
+  exit 0
+fi
+
+cd "$PATHX"
+
+FILE=""
+if [[ -f docker-compose.yml ]]; then FILE="docker-compose.yml"; fi
+if [[ -z "$FILE" && -f compose.yml ]]; then FILE="compose.yml"; fi
+if [[ -z "$FILE" ]]; then
+  echo "status=down reason=compose_missing running=0 total=0 note="
+  exit 0
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "status=down reason=docker_cmd_missing running=0 total=0 note="
+  exit 0
+fi
+
+# Verify docker reachable
+if ! docker info >/dev/null 2>&1; then
+  echo "status=down reason=docker_unreachable running=0 total=0 note="
+  exit 0
+fi
+
+# Get compose ps as JSON
+if ! docker compose -f "$FILE" ps --format json 2>/dev/null > /tmp/compose_ps.json; then
+  echo "status=down reason=compose_ps_failed running=0 total=0 note="
+  exit 0
+fi
+
+# Parse NDJSON (one JSON object per line) with python3
+read TOTAL RUNNING EXITED < <(python3 - <<PY
+import json
+try:
+    data = []
+    with open("/tmp/compose_ps.json") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    data.append(json.loads(line))
+                except:
+                    pass
+    total = len(data)
+    running = sum(1 for s in data if (s.get("State") or "").lower() == "running")
+    exited = sum(1 for s in data if (s.get("State") or "").lower() == "exited")
+    print(total, running, exited)
+except:
+    print(0, 0, 0)
+PY
+)
+
+STATUS="ok"
+NOTE=""
+if [[ "$TOTAL" -eq 0 ]]; then STATUS="down"; NOTE="no_services"; fi
+if [[ "$EXITED" -gt 0 ]]; then STATUS="degraded"; NOTE="${EXITED}_exited"; fi
+if [[ "$RUNNING" -eq 0 && "$TOTAL" -gt 0 ]]; then STATUS="down"; NOTE="none_running"; fi
+
+echo "status=$STATUS reason=none running=$RUNNING total=$TOTAL note=$NOTE"
+'
+
+    # Run remote and parse key=val output
+    line="$(ssh "${ssh_opts[@]}" "$ssh_target" "bash -c '$remote_script' _ '$path'" 2>/dev/null || echo "status=down reason=ssh_error running=0 total=0 note=")"
+
+    status="$(echo "$line" | sed -n 's/.*status=\([^ ]*\).*/\1/p')"
+    reason="$(echo "$line" | sed -n 's/.*reason=\([^ ]*\).*/\1/p')"
+    running="$(echo "$line" | sed -n 's/.*running=\([^ ]*\).*/\1/p')"
+    total="$(echo "$line" | sed -n 's/.*total=\([^ ]*\).*/\1/p')"
+    note="$(echo "$line" | sed -n 's/.*note=\([^ ]*\).*/\1/p')"
+
+    [[ -n "${status:-}" ]] || { status="down"; reason="parse_error"; running="0"; total="0"; note=""; }
+
+    # Format note for display
+    display_note=""
+    if [[ -n "$note" && "$note" != "none" ]]; then
+      display_note="$note"
+    elif [[ "$reason" != "none" ]]; then
+      display_note="reason=$reason"
+    fi
+
+    printf "%-16s %-10s %-14s %s\n" "$name" "$status" "${running}/${total}" "$display_note"
+
+    # Tally
+    case "$status" in
+      ok) total_ok=$((total_ok + 1)) ;;
+      degraded) total_degraded=$((total_degraded + 1)) ;;
+      *) total_down=$((total_down + 1)) ;;
+    esac
+  done
+done
+
+echo
+echo "summary: $total_stacks stacks | $total_ok ok | $total_degraded degraded | $total_down down"
+
+if [[ "$total_down" -gt 0 || "$total_degraded" -gt 0 ]]; then
+  exit 1
+fi
+exit 0
