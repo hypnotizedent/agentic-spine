@@ -143,6 +143,18 @@ else
   warn "api-preconditions verifier not present"
 fi
 
+# D14: Cloudflare surface drift gate (no legacy smells, read-only)
+echo -n "D14 cloudflare drift gate... "
+if [[ -x "$SP/surfaces/verify/cloudflare-drift-gate.sh" ]]; then
+  if "$SP/surfaces/verify/cloudflare-drift-gate.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "cloudflare-drift-gate.sh failed"
+  fi
+else
+  warn "cloudflare drift gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
