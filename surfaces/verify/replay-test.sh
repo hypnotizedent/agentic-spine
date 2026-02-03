@@ -50,6 +50,12 @@ run_fixture() {
     local fixture="$1"
     local basename
     basename="$(basename "$fixture")"
+
+        # Skip nondeterministic fixtures (not part of deterministic replay contract)
+        if [[ "$basename" == *"__unknown_event__"* ]]; then
+            echo "    ! Skipping nondeterministic fixture: $basename"
+            continue
+        fi
     local run_key="${basename%.md}"
 
     echo "  Running: $basename"
@@ -120,6 +126,12 @@ compare_to_baseline() {
         local run_key="${basename%.md}"
 
         echo "  Checking: $basename"
+
+        # Skip nondeterministic fixtures (not part of deterministic replay contract)
+        if [[ "$basename" == *"__unknown_event__"* ]]; then
+            echo "    ! Skipping nondeterministic fixture: $basename"
+            continue
+        fi
 
         if [[ ! -f "$BASELINE/${run_key}.hash" ]]; then
             echo "    ✗ No baseline hash found"

@@ -102,7 +102,7 @@ echo -n "D12 core lock exists... "
 # D9: Receipt stamps (STRICT - required fields for all new receipts)
 # Receipts created after core-v1.0 must have: Run ID, Generated, Status, Model, Inputs, Outputs
 echo -n "D9 receipt stamps... "
-LATEST="$(ls -1t receipts/sessions 2>/dev/null | head -1)"
+LATEST="$(ls -1t receipts/sessions 2>/dev/null | grep -E '^R' | head -1)"
 if [[ -n "$LATEST" ]] && [[ -f "receipts/sessions/$LATEST/receipt.md" ]]; then
   STAMP_FILE="receipts/sessions/$LATEST/receipt.md"
 
@@ -115,7 +115,7 @@ if [[ -n "$LATEST" ]] && [[ -f "receipts/sessions/$LATEST/receipt.md" ]]; then
   HAS_OUTPUTS=$(rg -q "Outputs" "$STAMP_FILE" 2>/dev/null && echo 1 || echo 0)
 
   MISSING=""
-  [[ "$HAS_RUN_ID" == "0" ]] && MISSING+="Run_ID "
+  [[ "$HAS_RUN_ID" == "0" ]] && MISSING+="Run ID "
   [[ "$HAS_GENERATED" == "0" ]] && MISSING+="Generated "
   [[ "$HAS_STATUS" == "0" ]] && MISSING+="Status "
   [[ "$HAS_MODEL" == "0" ]] && MISSING+="Model "
