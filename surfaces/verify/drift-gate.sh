@@ -131,6 +131,18 @@ else
   warn "no receipts to check"
 fi
 
+# D13: API capability secrets preconditions (locked rule)
+echo -n "D13 api capability preconditions... "
+if [[ -x "$SP/surfaces/verify/api-preconditions.sh" ]]; then
+  if "$SP/surfaces/verify/api-preconditions.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "api-preconditions.sh failed"
+  fi
+else
+  warn "api-preconditions verifier not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
