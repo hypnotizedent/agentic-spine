@@ -85,7 +85,16 @@ run_cap() {
         exit 1
     fi
 
+
     # Extract capability config
+    # Optional preconditions: .requires[] (capabilities to run first)
+    # - Used to enforce secrets preflight for API-touching capabilities.
+    local requires_list=()
+    while IFS= read -r req; do
+        [[ -z "${req:-}" || "${req:-}" == "null" ]] && continue
+        requires_list+=("$req")
+    done < <(yq e ".capabilities.\"$name\".requires[]?" "$CAP_FILE" 2>/dev/null || true)
+
     local cmd
     cmd="$(yq e ".capabilities.\"$name\".command" "$CAP_FILE")"
     local cwd
@@ -126,6 +135,27 @@ run_cap() {
             echo "ABORTED"
             exit 1
         fi
+    fi
+
+
+    # Run preconditions (if any) BEFORE executing the main command.
+    # Guard recursion to avoid loops.
+    if (( ${#requires_list[@]} > 0 )); then
+        local stack="${OPS_CAP_STACK:-}"
+        stack=",$stack,$name,"
+        export OPS_CAP_STACK="${stack}"
+        for req in "${requires_list[@]}"; do
+            if [[ "${stack}" == *",${req},"* ]]; then
+                echo "ERROR: requires cycle detected: ${name} -> ${req}"
+                exit 1
+            fi
+            echo ""
+            echo "== PRECONDITION: ${req} =="
+            "$SPINE_REPO/bin/ops" cap run "${req}"
+        done
+        echo ""
+        echo "== PRECONDITIONS OK =="
+        echo ""
     fi
 
     echo "Executing..."
