@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+STATE="${ROOT}/.spine"
+RECEIPTS="${ROOT}/receipts/sessions"
+
+# Defaults: start cheap + safe
+CAP_TOTAL="${SPINE_BUDGET_MAX_TOTAL_TOKENS:-300}"
+
+run_id="${1:-}"
+if [[ -z "${run_id}" ]]; then
+  if [[ -f "${STATE}/latest_run_id" ]]; then
+    run_id="$(cat "${STATE}/latest_run_id")"
+  else
+    echo "FAIL: no RUN_ID provided and no .spine/latest_run_id found" >&2
+    exit 1
+  fi
+fi
+
+receipt="${RECEIPTS}/${run_id}/receipt.md"
+[[ -f "${receipt}" ]] || { echo "FAIL: receipt not found: ${receipt}" >&2; exit 1; }
+
+# Extract provider + tokens from receipt (best effort)
+provider_used="$(awk -F': ' '/^Provider used:/ {print $2; exit}' "${receipt}" 2>/dev/null || true)"
+total="$(awk -F': ' '/^- total:/ {print $2; exit}' "${receipt}" 2>/dev/null || true)"
+[[ -n "${total}" ]] || total="0"
+
+ok="1"
+dr="Proceed."
+if [[ "${total}" -gt "${CAP_TOTAL}" ]]; then
+  ok="0"
+  dr="Stop. Lower max_tokens, simplify request, or use SPINE_ENGINE_PROVIDER=local for debugging."
+fi
+
+# Emit machine-friendly + human-friendly output
+echo "RUN_ID=${run_id}"
+echo "RECEIPT=${receipt}"
+echo "PROVIDER_USED=${provider_used:-unknown}"
+echo "TOTAL_TOKENS=${total}"
+echo "CAP_TOTAL_TOKENS=${CAP_TOTAL}"
+echo "BUDGET_OK=${ok}"
+echo "DR=${dr}"
