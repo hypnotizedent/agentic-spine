@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
-A="$SPINE/agents/active"
+A="$SPINE/ops/runtime/inbox"
 
 sub="${1:-help}"
 shift || true

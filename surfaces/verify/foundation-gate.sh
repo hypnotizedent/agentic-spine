@@ -45,10 +45,10 @@ fi
 
 # T3: No executable legacy ~/agent coupling in runnable areas
 echo "T3: No legacy ~/agent coupling in runnable code"
-if rg -n '(\$HOME/agent|~/agent)' bin ops agents/active surfaces cli \
+if rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces cli \
   | rg -v '^[[:space:]]*#' | rg -v 'foundation-gate.sh' >/dev/null; then
   echo "Executable legacy coupling found:"
-  rg -n '(\$HOME/agent|~/agent)' bin ops agents/active surfaces cli | rg -v '^[[:space:]]*#' | rg -v 'foundation-gate.sh'
+  rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces cli | rg -v '^[[:space:]]*#' | rg -v 'foundation-gate.sh'
   exit 1
 else
   echo "OK: no executable legacy coupling"
