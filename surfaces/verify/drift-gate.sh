@@ -47,7 +47,9 @@ echo -n "D5 no legacy coupling... "
 COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops agents/active surfaces/verify 2>/dev/null \
   | rg -v '^[[:space:]]*#' \
   | rg -v 'foundation-gate.sh' \
-  | rg -v 'drift-gate.sh' || true)"
+  | rg -v 'drift-gate.sh' \
+  | rg -v 'cloudflare-drift-gate.sh' \
+  | rg -v 'github-actions-gate.sh' || true)"
 [[ -z "$COUPLE" ]] && pass || fail "legacy coupling found"
 
 # D6: Receipts exist (latest 5 have receipt.md)
@@ -153,6 +155,18 @@ if [[ -x "$SP/surfaces/verify/cloudflare-drift-gate.sh" ]]; then
   fi
 else
   warn "cloudflare drift gate not present"
+fi
+
+# D15: GitHub Actions surface drift gate (no legacy smells, read-only, no leak fields)
+echo -n "D15 github actions drift gate... "
+if [[ -x "$SP/surfaces/verify/github-actions-gate.sh" ]]; then
+  if "$SP/surfaces/verify/github-actions-gate.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "github-actions-gate.sh failed"
+  fi
+else
+  warn "github actions drift gate not present"
 fi
 
 echo
