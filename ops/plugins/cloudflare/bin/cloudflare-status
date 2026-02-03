@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.status — spine-native Cloudflare read-only status
+# Requires: secrets.binding, secrets.auth.status, secrets.projects.status
+# Outputs: zones count + per-zone DNS record counts (no values)
+
+# Root of repo (this file lives at ops/plugins/cloudflare/bin/)
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+# Re-exec ourselves under secrets injection (single capability receipt; no nested caps)
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+
+# Prefer API token (recommended). Do NOT print token.
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  echo "STOP: CLOUDFLARE_API_TOKEN not present in injected environment." >&2
+  exit 2
+fi
+
+# Fetch zones (names + ids only)
+ZONES_JSON="$(curl -fsS \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "${CF_API}/zones?per_page=50")" || {
+    echo "STOP: Cloudflare zones request failed (network/auth)." >&2
+    exit 2
+  }
+
+# Pass JSON to Python via pipe
+echo "$ZONES_JSON" | python3 -c '
+import json, sys, urllib.request, urllib.error
+
+data = json.load(sys.stdin)
+if not data.get("success", False):
+    print("STOP: Cloudflare API returned success=false for zones.", file=sys.stderr)
+    sys.exit(2)
+
+zones = data.get("result", [])
+print("cloudflare.status")
+print(f"zones: {len(zones)}")
+
+# Pull env from parent bash
+import os
+api = os.environ.get("CLOUDFLARE_API_BASE", "https://api.cloudflare.com/client/v4").rstrip("/")
+token = os.environ["CLOUDFLARE_API_TOKEN"]
+
+def get(url):
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+for z in zones:
+    zid = z.get("id")
+    name = z.get("name", "<unknown>")
+    # Ask for 1 record but read total_count (no values)
+    url = f"{api}/zones/{zid}/dns_records?per_page=1"
+    try:
+        j = get(url)
+        if not j.get("success", False):
+            print(f"- {name}: STOP (dns_records success=false)")
+            continue
+        total = (j.get("result_info") or {}).get("total_count")
+        print(f"- {name}: dns_records={total}")
+    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        print(f"- {name}: STOP (dns_records request failed)")
+        continue
+'
