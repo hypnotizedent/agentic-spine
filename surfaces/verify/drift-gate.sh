@@ -55,8 +55,11 @@ COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops agents/active surfaces/verify 2
 # D6: Receipts exist (latest 5 have receipt.md)
 echo -n "D6 receipts exist... "
 MISSING=0
-for s in $(ls -1t receipts/sessions 2>/dev/null | head -5); do
+COUNT=0
+for s in $(ls -1t receipts/sessions 2>/dev/null); do
   [[ -f "receipts/sessions/$s/receipt.md" ]] || MISSING=$((MISSING+1))
+  COUNT=$((COUNT+1))
+  [[ "$COUNT" -ge 5 ]] && break
 done
 [[ "$MISSING" -eq 0 ]] && pass || fail "$MISSING missing receipt.md"
 
@@ -104,7 +107,11 @@ echo -n "D12 core lock exists... "
 # D9: Receipt stamps (STRICT - required fields for all new receipts)
 # Receipts created after core-v1.0 must have: Run ID, Generated, Status, Model, Inputs, Outputs
 echo -n "D9 receipt stamps... "
-LATEST="$(ls -1t receipts/sessions 2>/dev/null | head -1)"
+LATEST=""
+for s in $(ls -1t receipts/sessions 2>/dev/null); do
+  LATEST="$s"
+  break
+done
 if [[ -n "$LATEST" ]] && [[ -f "receipts/sessions/$LATEST/receipt.md" ]]; then
   STAMP_FILE="receipts/sessions/$LATEST/receipt.md"
 
