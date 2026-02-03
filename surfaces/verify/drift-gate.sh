@@ -51,7 +51,8 @@ COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces/veri
   | rg -v 'cloudflare-drift-gate.sh' \
   | rg -v 'github-actions-gate.sh' \
   | rg -v 'd18-docker-compose-drift.sh' \
-  | rg -v 'd19-backup-drift.sh' || true)"
+  | rg -v 'd19-backup-drift.sh' \
+  | rg -v 'd20-secrets-drift.sh' || true)"
 [[ -z "$COUPLE" ]] && pass || fail "legacy coupling found"
 
 # D6: Receipts exist (latest 5 have receipt.md)
@@ -224,6 +225,18 @@ if [[ -x "$SP/surfaces/verify/d19-backup-drift.sh" ]]; then
   fi
 else
   warn "backup drift gate not present"
+fi
+
+# D20: Secrets surface drift gate (non-leaky, non-mutating, read-only status only)
+echo -n "D20 secrets drift gate... "
+if [[ -x "$SP/surfaces/verify/d20-secrets-drift.sh" ]]; then
+  if "$SP/surfaces/verify/d20-secrets-drift.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d20-secrets-drift.sh failed"
+  fi
+else
+  warn "secrets drift gate not present"
 fi
 
 echo
