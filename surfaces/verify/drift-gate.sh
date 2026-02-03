@@ -102,7 +102,7 @@ fi
 
 # D12: CORE_LOCK.md must exist (repo validity marker)
 echo -n "D12 core lock exists... "
-[[ -f "$SP/docs/CORE_LOCK.md" ]] && pass || fail "docs/CORE_LOCK.md missing"
+[[ -f "$SP/docs/core/CORE_LOCK.md" ]] && pass || fail "docs/core/CORE_LOCK.md missing"
 
 # D9: Receipt stamps (STRICT - required fields for all new receipts)
 # Receipts created after core-v1.0 must have: Run ID, Generated, Status, Model, Inputs, Outputs
@@ -174,6 +174,18 @@ if [[ -x "$SP/surfaces/verify/github-actions-gate.sh" ]]; then
   fi
 else
   warn "github actions drift gate not present"
+fi
+
+# D16: Canonical docs quarantine (no competing truths)
+echo -n "D16 docs quarantine... "
+if [[ -x "$SP/surfaces/verify/d16-docs-quarantine.sh" ]]; then
+  if "$SP/surfaces/verify/d16-docs-quarantine.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d16-docs-quarantine.sh failed"
+  fi
+else
+  warn "docs quarantine gate not present"
 fi
 
 echo
