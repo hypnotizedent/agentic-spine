@@ -43,7 +43,7 @@ This key is used everywhere:
 | Entry | Path | Purpose |
 |-------|------|---------|
 | CLI | `bin/ops` | Human entrypoint (enqueues to mailroom) |
-| Watcher | `agents/active/hot-folder-watcher.sh` | Daemon runtime |
+| Watcher | `ops/runtime/inbox/hot-folder-watcher.sh` | Daemon runtime |
 | LaunchAgent | `com.ronny.agent-inbox` | Persistent watcher |
 
 ## Drift Gates

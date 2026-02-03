@@ -23,7 +23,7 @@ echo "=== DRIFT GATE (v1.4) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
-EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(_imports|agents|bin|docs|fixtures|mailroom|ops|receipts|surfaces)/$' || true)"
+EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(bin|docs|fixtures|mailroom|ops|receipts|surfaces)/$' || true)"
 [[ -z "$EXTRA" ]] && pass || fail "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"
 
 # D2: No runs/ trace
@@ -44,7 +44,7 @@ fi
 
 # D5: No executable ~/agent coupling
 echo -n "D5 no legacy coupling... "
-COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops agents/active surfaces/verify 2>/dev/null \
+COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces/verify 2>/dev/null \
   | rg -v '^[[:space:]]*#' \
   | rg -v 'foundation-gate.sh' \
   | rg -v 'drift-gate.sh' \
@@ -66,7 +66,7 @@ done
 # D7: Executables only in four zones
 echo -n "D7 executables bounded... "
 BAD="$(find . -type f -name "*.sh" \
-  | rg -v '^\./(bin/|ops/|agents/active/|surfaces/verify/)' \
+  | rg -v '^\./(bin/|ops/|surfaces/verify/)' \
   | rg -v '^\./(_imports/|docs/|receipts/|mailroom/|\.git/|\.spine/|\.archive/)' || true)"
 [[ -z "$BAD" ]] && pass || fail "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"
 
@@ -186,6 +186,18 @@ if [[ -x "$SP/surfaces/verify/d16-docs-quarantine.sh" ]]; then
   fi
 else
   warn "docs quarantine gate not present"
+fi
+
+# D17: Root allowlist (no agents/, _imports/, or other drift magnets at root)
+echo -n "D17 root allowlist... "
+if [[ -x "$SP/surfaces/verify/d17-root-allowlist.sh" ]]; then
+  if "$SP/surfaces/verify/d17-root-allowlist.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d17-root-allowlist.sh failed"
+  fi
+else
+  warn "root allowlist gate not present"
 fi
 
 echo
