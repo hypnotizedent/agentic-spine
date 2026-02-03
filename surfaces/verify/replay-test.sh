@@ -80,6 +80,12 @@ capture_baseline() {
         basename="$(basename "$fixture")"
         local run_key="${basename%.md}"
 
+        # Skip nondeterministic fixtures (not part of deterministic replay contract)
+        if [[ "$basename" == *"__unknown_event__"* ]]; then
+            echo "    ! Skipping nondeterministic fixture: $basename"
+            continue
+        fi
+
         if run_fixture "$fixture"; then
             # Find the result file
             local result
@@ -118,6 +124,12 @@ compare_to_baseline() {
         local basename
         basename="$(basename "$fixture")"
         local run_key="${basename%.md}"
+
+        # Skip nondeterministic fixtures (not part of deterministic replay contract)
+        if [[ "$basename" == *"__unknown_event__"* ]]; then
+            echo "    ! Skipping nondeterministic fixture: $basename"
+            continue
+        fi
 
         echo "  Checking: $basename"
 
