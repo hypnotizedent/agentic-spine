@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# ssh-target-status - Connectivity check for declared SSH targets
+#
+# Read-only. No prompts. No known_hosts writes.
+# STOP=2 on preconditions (missing binding, missing yq).
+#
+# Failure reasons:
+#   FAIL_CONNECT  - TCP connect timeout (host down/unreachable)
+#   FAIL_AUTH     - SSH auth denied (wrong user/key)
+#   FAIL_REMOTE   - Connected but remote command failed
+#
+# Usage:
+#   ssh-target-status           # check all targets
+#   ssh-target-status <id>      # check specific target
+#   ssh-target-status --list    # list target IDs only
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING_FILE="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+# STOP=2 for preconditions
+if [[ ! -f "$BINDING_FILE" ]]; then
+  echo "STOP (2): missing binding file: $BINDING_FILE"
+  exit 2
+fi
+
+if ! command -v yq >/dev/null 2>&1; then
+  echo "STOP (2): yq is required but not found"
+  echo "Install: brew install yq"
+  exit 2
+fi
+
+TARGET_FILTER="${1:-}"
+
+# Handle --list flag
+if [[ "$TARGET_FILTER" == "--list" ]]; then
+  yq -r '.ssh.targets[].id' "$BINDING_FILE"
+  exit 0
+fi
+
+# Read defaults
+DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$BINDING_FILE")"
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$BINDING_FILE")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$BINDING_FILE")"
+DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$BINDING_FILE")"
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$BINDING_FILE")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$BINDING_FILE")"
+
+COUNT="$(yq -r '.ssh.targets | length' "$BINDING_FILE" 2>/dev/null || echo "0")"
+if [[ "$COUNT" == "0" ]]; then
+  echo "STOP (2): no ssh.targets configured in $BINDING_FILE"
+  exit 2
+fi
+
+fail=0
+checked=0
+
+echo "ssh.target.status"
+echo "binding: $BINDING_FILE"
+echo "targets: $COUNT"
+echo
+
+# Iterate targets
+for i in $(seq 0 $((COUNT-1))); do
+  id="$(yq -r ".ssh.targets[$i].id" "$BINDING_FILE")"
+  host="$(yq -r ".ssh.targets[$i].host" "$BINDING_FILE")"
+  user="$(yq -r ".ssh.targets[$i].user // \"${DEF_USER}\"" "$BINDING_FILE")"
+  port="$(yq -r ".ssh.targets[$i].port // ${DEF_PORT}" "$BINDING_FILE")"
+  # Per-target timeout override
+  timeout="$(yq -r ".ssh.targets[$i].connect_timeout_sec // ${DEF_TO}" "$BINDING_FILE")"
+
+  # Filter if specific target requested
+  if [[ -n "$TARGET_FILTER" && "$id" != "$TARGET_FILTER" ]]; then
+    continue
+  fi
+
+  if [[ "$id" == "null" || "$host" == "null" ]]; then
+    echo "- id: (invalid) -> FAIL reason=binding_schema"
+    fail=1
+    continue
+  fi
+
+  checked=$((checked + 1))
+
+  # Build SSH options for this target
+  ssh_opts=(
+    -o "ConnectTimeout=${timeout}"
+    -o "StrictHostKeyChecking=${DEF_STRICT}"
+    -o "UserKnownHostsFile=${DEF_KNOWN_HOSTS}"
+    -o "NumberOfPasswordPrompts=0"
+    -o "LogLevel=ERROR"
+  )
+  if [[ "$DEF_BATCH" == "true" ]]; then
+    ssh_opts+=(-o "BatchMode=yes")
+  fi
+
+  # Lightweight remote command: just echo + hostname
+  cmd='echo "__OK__"; hostname 2>/dev/null || uname -n 2>/dev/null || echo "unknown"'
+
+  # Time the connection (use python3 for portable ms timing)
+  start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+
+  # Capture both stdout and exit code
+  set +e
+  out="$(ssh "${ssh_opts[@]}" -p "$port" "${user}@${host}" "$cmd" 2>&1)"
+  ssh_exit=$?
+  set -e
+
+  end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  dur_ms=$((end_ms - start_ms))
+
+  # Classify the result
+  if echo "$out" | grep -q '^__OK__$'; then
+    # Success: extract hostname from second line
+    remote_name="$(echo "$out" | grep -A1 '^__OK__$' | tail -1 | tr -d '\r')"
+    [[ -z "$remote_name" || "$remote_name" == "__OK__" ]] && remote_name="unknown"
+    echo "- id: $id host: $host user: $user -> OK (${dur_ms}ms) name: ${remote_name}"
+  else
+    # Failure: classify reason
+    timeout_threshold_ms=$((timeout * 1000 - 500))  # within 500ms of timeout = connect issue
+
+    if [[ $dur_ms -ge $timeout_threshold_ms ]]; then
+      reason="connect_timeout"
+    elif echo "$out" | grep -qiE "permission denied|authentication failed|no more authentication"; then
+      reason="auth_denied"
+    elif echo "$out" | grep -qiE "connection refused|connection reset|no route"; then
+      reason="connect_refused"
+    elif echo "$out" | grep -qiE "host key verification failed"; then
+      reason="host_key_mismatch"
+    elif [[ $ssh_exit -eq 255 && $dur_ms -lt 2000 ]]; then
+      # Fast failure with exit 255 usually means auth or connect issue
+      reason="auth_or_connect"
+    else
+      reason="unknown"
+    fi
+
+    echo "- id: $id host: $host user: $user -> FAIL (${dur_ms}ms) reason=${reason}"
+    fail=1
+  fi
+done
+
+echo
+
+if [[ "$checked" == "0" && -n "$TARGET_FILTER" ]]; then
+  echo "STOP (2): target '$TARGET_FILTER' not found in binding"
+  exit 2
+fi
+
+if [[ "$fail" == "1" ]]; then
+  echo "status: FAIL (some targets unreachable)"
+  exit 1
+fi
+
+echo "status: OK (all targets reachable)"
+exit 0
