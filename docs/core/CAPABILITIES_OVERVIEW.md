@@ -44,6 +44,11 @@ Capabilities:
 - `github.actions.status` — workflow run counts + latest conclusion
 - `github.labels.status` — declared vs live label parity
 
+### mcp.*
+Purpose: validate MCP inventory integrity against workbench configs.
+Capabilities:
+- `mcp.inventory.status` — MCP inventory vs MCPJungle config parity (read-only)
+
 ### Stack alignment
 For stack inventory context, see `docs/core/STACK_ALIGNMENT.md`.
 The canonical stack list is `docs/governance/STACK_REGISTRY.yaml`.

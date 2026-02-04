@@ -25,9 +25,9 @@ Prevent duplicate scripts, scattered utilities, and configuration drift. All scr
 
 | Directory | Purpose |
 |-----------|---------|
-| `~/ronny-ops/scripts/` | Main scripts directory |
-| `~/ronny-ops/mint-os/scripts/` | Mint OS specific |
-| `~/ronny-ops/infrastructure/scripts/` | Infrastructure automation |
+| `~/Code/workbench/scripts/` | Main scripts directory |
+| `~/Code/workbench/mint-os/scripts/` | Mint OS specific |
+| `~/Code/workbench/infra/scripts/` | Infrastructure automation |
 
 ### ❌ DO NOT put scripts in:
 - Root of any repo
@@ -45,9 +45,9 @@ Prevent duplicate scripts, scattered utilities, and configuration drift. All scr
 
 | Script | Location | Purpose |
 |--------|----------|---------|
-| `mint` | `~/ronny-ops/scripts/mint` | RAG CLI (ask, health, index) |
+| `mint` | `~/Code/workbench/scripts/mint` | RAG CLI (ask, health, index) |
 | `infisical-agent.sh` | Canonical: `ops/tools/infisical-agent.sh` / Vendored: `scripts/agents/infisical-agent.sh` | Secrets management with caching |
-| `load-secrets.sh` | `~/ronny-ops/scripts/load-secrets.sh` | Shell startup secrets loader |
+| `load-secrets.sh` | `~/Code/workbench/scripts/root/load-secrets.sh` | Shell startup secrets loader |
 
 ### Infisical Agent Commands (Updated 2026-01-22):
 
@@ -157,10 +157,10 @@ screen -X -S <name> quit      # Kill session
 Run this to find potential duplicates:
 ```bash
 # Find duplicate script names
-find ~/ronny-ops -type f -name "*.sh" | xargs -n1 basename | sort | uniq -d
+find ~/Code/workbench -type f -name "*.sh" | xargs -n1 basename | sort | uniq -d
 
 # Find scripts with same purpose (grep for similar functions)
-grep -l "function_name" ~/ronny-ops/**/*.sh
+grep -l "function_name" ~/Code/workbench/**/*.sh
 ```
 
 ---

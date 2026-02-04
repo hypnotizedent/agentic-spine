@@ -26,7 +26,7 @@
 
 ## Project Catalog (SSOT)
 
-Generated from: `ronny-ops/infrastructure/data/secrets_inventory.json`  
+Generated from: `~/Code/workbench/infra/data/secrets_inventory.json`  
 Last updated: 2026-02-03
 
 | lifecycle | project_name | project_id | env | keys | notes |

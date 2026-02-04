@@ -41,7 +41,7 @@ Every doc is reachable from an index in 2 clicks
 ## CURRENT STRUCTURE (Authoritative)
 
 ```
-ronny-ops/
+workbench/
 ├── 00_CLAUDE.md                 # Session protocol (entry point)
 ├── AGENTS.md                    # Agent routing
 ├── README.md                    # Repo overview
@@ -207,7 +207,7 @@ Run this to verify no unexpected root entries exist:
 
 ```bash
 TS="$(date +%F_%H%M)"
-R="$HOME/ronny-ops"
+R="$HOME/Code/workbench"
 OUT="$R/receipts/repo_root_drift_${TS}.log"
 mkdir -p "$R/receipts"
 

@@ -278,22 +278,41 @@ else
   warn "github labels drift gate not present"
 fi
 
-# D25: Secrets CLI hash parity (canonical vs vendored infisical-agent.sh)
+# D25: Secrets CLI hash parity (canonical vs vendored infisical-agent.sh + cloudflare-agent.sh)
 echo -n "D25 secrets cli hash... "
 WB="${WORKBENCH_ROOT:-$HOME/Code/workbench}"
-CANONICAL_CLI="$SP/ops/tools/infisical-agent.sh"
-VENDORED_CLI="$WB/scripts/agents/infisical-agent.sh"
-if [[ ! -f "$CANONICAL_CLI" ]]; then
+
+# Check infisical-agent.sh
+CANONICAL_INFISICAL="$SP/ops/tools/infisical-agent.sh"
+VENDORED_INFISICAL="$WB/scripts/agents/infisical-agent.sh"
+if [[ ! -f "$CANONICAL_INFISICAL" ]]; then
   fail "canonical infisical-agent.sh missing"
-elif [[ ! -f "$VENDORED_CLI" ]]; then
+elif [[ ! -f "$VENDORED_INFISICAL" ]]; then
   warn "(workbench copy missing — spine-only mode)"
 else
-  C_HASH=$(shasum -a 256 "$CANONICAL_CLI" | awk '{print $1}')
-  V_HASH=$(shasum -a 256 "$VENDORED_CLI" | awk '{print $1}')
-  if [[ "$C_HASH" == "$V_HASH" ]]; then
+  IC_HASH=$(shasum -a 256 "$CANONICAL_INFISICAL" | awk '{print $1}')
+  IV_HASH=$(shasum -a 256 "$VENDORED_INFISICAL" | awk '{print $1}')
+  if [[ "$IC_HASH" == "$IV_HASH" ]]; then
     pass
   else
-    fail "hash mismatch (canonical vs vendored)"
+    fail "hash mismatch (infisical-agent: canonical vs vendored)"
+  fi
+fi
+
+# Check cloudflare-agent.sh
+CANONICAL_CF="$SP/ops/tools/cloudflare-agent.sh"
+VENDORED_CF="$WB/scripts/agents/cloudflare-agent.sh"
+if [[ ! -f "$CANONICAL_CF" ]]; then
+  fail "canonical cloudflare-agent.sh missing"
+elif [[ ! -f "$VENDORED_CF" ]]; then
+  warn "(workbench copy missing — spine-only mode)"
+else
+  CF_HASH=$(shasum -a 256 "$CANONICAL_CF" | awk '{print $1}')
+  CV_HASH=$(shasum -a 256 "$VENDORED_CF" | awk '{print $1}')
+  if [[ "$CF_HASH" == "$CV_HASH" ]]; then
+    pass
+  else
+    fail "hash mismatch (cloudflare-agent: canonical vs vendored)"
   fi
 fi
 
