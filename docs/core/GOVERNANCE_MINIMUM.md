@@ -1,5 +1,8 @@
 # Governance Minimum (Portable Invariants)
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 This is the smallest governance set required for the spine to remain regression-proof.
 
 ## Core invariants

@@ -1,5 +1,8 @@
 # CAPABILITIES_OVERVIEW (core)
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 This document defines **what agents are allowed to do** and **how** they do it inside `agentic-spine`.
 
 ## Canonical rule
@@ -18,11 +21,32 @@ Rules:
 Status: IMPLEMENTED (see Secrets canon section below).
 
 ### cloudflare.*
-Purpose: allow agents to make Cloudflare changes (DNS, tunnels, etc.) with receipts.
+Purpose: read-only Cloudflare status (zones, DNS counts, tunnel inventory).
 Rules:
 - Changes must be explicit, minimal, and reversible.
 - Every change requires an admissible receipt session.
-Status: NOT IMPLEMENTED (placeholder).
+Status: IMPLEMENTED.
+Capabilities:
+- `cloudflare.status` — zone + DNS record counts (read-only)
+- `cloudflare.dns.status` — DNS record counts per bound zone
+- `cloudflare.tunnel.status` — tunnel inventory + timestamps
+- `cloudflare.inventory.sync` — verify metadata matches live
+
+### github.*
+Purpose: read-only GitHub repo health, queue counts, actions status, and label parity.
+Rules:
+- All capabilities are read-only (no mutations).
+- Label parity compares `.github/labels.yml` (declared) vs live GitHub labels.
+Status: IMPLEMENTED.
+Capabilities:
+- `github.status` — branch, HEAD, clean state, tags
+- `github.queue.status` — open PR + issue counts
+- `github.actions.status` — workflow run counts + latest conclusion
+- `github.labels.status` — declared vs live label parity
+
+### Stack alignment
+For stack inventory context, see `docs/core/STACK_ALIGNMENT.md`.
+The canonical stack list is `docs/governance/STACK_REGISTRY.yaml`.
 
 ## Prohibitions
 - No printing or echoing secrets.
@@ -31,7 +55,7 @@ Status: NOT IMPLEMENTED (placeholder).
 
 ## Secrets canon
 
-This repo ships a spine-native secrets surface. It is NOT dependent on ronny-ops.
+This repo ships a spine-native secrets surface. It is NOT dependent on the workbench monolith.
 
 **Binding (non-secret):**
 - `ops/bindings/secrets.binding.yaml` (Infisical api_url + project + environment)

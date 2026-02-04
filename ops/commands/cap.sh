@@ -78,15 +78,19 @@ run_cap() {
     shift
     local args=("$@")
 
-    # Validate capability exists
+    # ── Temp file cleanup trap ──
+    _cap_tmp=""
+    cleanup_cap() { [[ -n "$_cap_tmp" ]] && rm -f "$_cap_tmp" 2>/dev/null || true; }
+    trap cleanup_cap EXIT INT TERM
+
+    # ── Config extraction & validation ──
     if ! yq e ".capabilities.\"$name\"" "$CAP_FILE" | grep -q "description"; then
         echo "ERROR: Unknown capability: $name"
         echo "Run 'ops cap list' to see available capabilities."
         exit 1
     fi
 
-
-    # Extract capability config
+    # ── Load capability configuration from YAML ──
     # Optional preconditions: .requires[] (capabilities to run first)
     # - Used to enforce secrets preflight for API-touching capabilities.
     local requires_list=()
@@ -106,16 +110,17 @@ run_cap() {
     local desc
     desc="$(yq e ".capabilities.\"$name\".description" "$CAP_FILE")"
 
-    # Expand env vars in cwd
+    # ── Expand environment variables ──
     cwd="$(eval echo "$cwd")"
 
-    # Generate run key
+    # ── Generate collision-proof run key ──
     local ts
     ts="$(date +%Y%m%d-%H%M%S)"
     local rand
     rand="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 4 || echo "$$")"
     local run_key="CAP-${ts}__${name}__R${rand}"
 
+    # ── Display execution banner ──
     echo "════════════════════════════════════════"
     echo "CAPABILITY: $name"
     echo "════════════════════════════════════════"
@@ -127,7 +132,7 @@ run_cap() {
     echo "CWD:         $cwd"
     echo ""
 
-    # Check approval for mutating/destructive
+    # ── Approval gate (manual safety level) ──
     if [[ "$approval" == "manual" ]]; then
         echo "⚠️  This capability requires manual approval."
         read -r -p "Type 'yes' to proceed: " confirm
@@ -137,9 +142,7 @@ run_cap() {
         fi
     fi
 
-
-    # Run preconditions (if any) BEFORE executing the main command.
-    # Guard recursion to avoid loops.
+    # ── Execute preconditions (dependency chain, cycle guard) ──
     if (( ${#requires_list[@]} > 0 )); then
         local stack="${OPS_CAP_STACK:-}"
         stack=",$stack,$name,"
@@ -161,10 +164,11 @@ run_cap() {
     echo "Executing..."
     echo "────────────────────────────────────────"
 
-    # Execute and capture output
+    # ── Execute capability command, capture output ──
     local start_time
     start_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local output_file="/tmp/cap_${run_key}_output.txt"
+    _cap_tmp="$output_file"
     local exit_code=0
 
     if (cd "$cwd" && $cmd "${args[@]}" 2>&1 | tee "$output_file"); then
@@ -178,7 +182,7 @@ run_cap() {
 
     echo "────────────────────────────────────────"
 
-    # Write receipt
+    # ── Write receipt (markdown + SHA256) ──
     local receipt_dir="$RECEIPTS/R${run_key}"
     mkdir -p "$receipt_dir"
 
@@ -224,11 +228,12 @@ run_cap() {
 _Receipt written by ops cap_
 EOF
 
-    # Copy output to receipt dir
+    # Copy output to receipt dir, then clean temp
     cp "$output_file" "$receipt_dir/output.txt"
     rm -f "$output_file"
+    _cap_tmp=""
 
-    # Append to ledger (ensure state dir exists)
+    # ── Append ledger entry (CSV) ──
     ensure_state_dir
     echo "$run_key,$end_time,$start_time,$end_time,$([ $exit_code -eq 0 ] && echo "done" || echo "failed"),$name,receipt.md,,capability" >> "$LEDGER"
 

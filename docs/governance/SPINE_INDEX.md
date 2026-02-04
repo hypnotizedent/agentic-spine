@@ -1,4 +1,8 @@
 # SPINE INDEX
+
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 Generated: 2026-02-01T03:25:38-05:00
 
 ## Entrypoints

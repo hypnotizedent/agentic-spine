@@ -68,7 +68,16 @@ loop_exists_for_run() {
     grep -q "\"run_key\":\"$run_key\"" "$LOOPS_FILE" 2>/dev/null
 }
 
-# Extract open loops from a receipt
+# Extract open loops from a receipt (file-based rule engine).
+#
+# Scans a receipt directory and applies three rules to decide whether
+# the run produces an open loop requiring human or agent follow-up.
+#
+# Rule 1: Non-OK status         → open loop (high severity)
+# Rule 2: Outbox markers        → open loop (WARNING/NEEDS_INPUT/BLOCKED = action required)
+# Rule 3: Dry-run outputs       → open loop (low severity, requires explicit approval)
+#
+# If a loop is created it is appended to the JSONL ledger (append-only).
 extract_loops_from_receipt() {
     local receipt_dir="$1"
     local receipt_file="$receipt_dir/receipt.md"
@@ -102,7 +111,7 @@ extract_loops_from_receipt() {
     local next_action=""
     local owner="unassigned"
 
-    # Rule 1: Non-OK status → loop
+    # ── Rule 1: Non-OK status → open loop ──
     case "$status" in
         done|DONE|ok|OK|pass|PASS|success|SUCCESS)
             ;;
@@ -120,7 +129,7 @@ extract_loops_from_receipt() {
             ;;
     esac
 
-    # Rule 2: Check outbox for warning/needs_input markers
+    # ── Rule 2: Outbox markers (WARNING/NEEDS_INPUT/BLOCKED) → action required ──
     if [[ -f "$outbox_file" ]]; then
         if grep -qiE "WARNING:|NEEDS_INPUT:|BLOCKED|MANUAL|APPROVAL" "$outbox_file" 2>/dev/null; then
             needs_loop=true
@@ -129,7 +138,7 @@ extract_loops_from_receipt() {
             next_action="Review outbox and take required action"
         fi
 
-        # Rule 3: Check for "dry-run" markers
+        # ── Rule 3: Dry-run outputs → require explicit approval ──
         if grep -qiE "dry.run|DRY_RUN|--dry" "$outbox_file" 2>/dev/null; then
             needs_loop=true
             severity="low"
@@ -147,7 +156,7 @@ extract_loops_from_receipt() {
         fi
     fi
 
-    # Write loop if needed
+    # ── Write section: JSONL append-only ledger ──
     if [[ "$needs_loop" == "true" ]]; then
         local loop_id
         loop_id="$(gen_loop_id "$run_key" "$(echo "$run_key" | cut -d'_' -f3 | head -c10)")"
@@ -159,7 +168,7 @@ extract_loops_from_receipt() {
         [[ -n "$outbox_file" ]] && evidence+=",\"$outbox_file\""
         evidence+="]"
 
-        # Write JSONL record
+        # Append JSONL record (append-only, never overwrite)
         cat >> "$LOOPS_FILE" <<EOF
 {"loop_id":"$loop_id","run_key":"$run_key","created_at":"$created_at","status":"open","severity":"$severity","owner":"$owner","title":"$title","next_action":"$next_action","evidence":$evidence}
 EOF

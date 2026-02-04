@@ -1,5 +1,8 @@
 # Canonical Governance Index
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 The files in this directory are the **authoritative sources** for agent governance
 within agentic-spine.
 

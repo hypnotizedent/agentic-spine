@@ -5,7 +5,7 @@ allowed-tools: Bash(gh:*)
 ---
 
 If argument is a number:
-`gh issue view $ARGUMENTS --repo hypnotizedent/ronny-ops`
+`gh issue view $ARGUMENTS --repo hypnotizedent/agentic-spine`
 
 If argument is "new" or empty:
 Ask the user for:
@@ -13,6 +13,6 @@ Ask the user for:
 - Description of the problem or feature
 - Which pillar (mint-os, infrastructure, media-stack, finance, home-assistant, immich)
 
-Then create: `gh issue create --repo hypnotizedent/ronny-ops --title "..." --body "..." --label "<pillar>"`
+Then create: `gh issue create --repo hypnotizedent/agentic-spine --title "..." --body "..." --label "<pillar>"`
 
 Remember: NO GITHUB ISSUE = NO WORK

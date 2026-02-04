@@ -1,5 +1,8 @@
 # Spine Session Header (Canonical)
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 Copy this block into any new session working on agentic-spine.
 
 ```

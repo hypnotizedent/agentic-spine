@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# docs.lint — Enforce canonical doc hierarchy, metadata headers, README registration
+# Safety: read-only (scans files, no modifications)
+
+ROOT="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+DOCS="$ROOT/docs"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+_need rg
+
+if [[ ! -d "$DOCS" ]]; then
+  echo "STOP: docs/ not found at $DOCS" >&2
+  exit 2
+fi
+
+echo "docs.lint"
+echo "root: $ROOT"
+echo
+
+ERRORS=0
+WARNINGS=0
+
+err()  { echo "ERROR: $*"; ERRORS=$((ERRORS+1)); }
+warn() { echo "WARN:  $*"; WARNINGS=$((WARNINGS+1)); }
+
+# ─────────────────────────────────────────────────────────────────────────
+# CHECK 1: No loose files at docs/ root (except allowlist)
+# ─────────────────────────────────────────────────────────────────────────
+echo "--- Check 1: Loose files at docs/ root ---"
+ALLOWED_ROOT="README.md OPERATOR_CHEAT_SHEET.md CONTRIBUTING.md .DS_Store"
+
+for f in "$DOCS"/*; do
+  [[ -d "$f" ]] && continue
+  name="$(basename "$f")"
+  if ! echo "$ALLOWED_ROOT" | grep -qw "$name"; then
+    err "loose file at docs/ root: $name (move to appropriate subfolder)"
+  fi
+done
+echo "  $(find "$DOCS" -maxdepth 1 -type f -not -name ".DS_Store" | wc -l | tr -d ' ') files at root (3 allowed)"
+
+# ─────────────────────────────────────────────────────────────────────────
+# CHECK 2: Known folders only
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Check 2: Folder allowlist ---"
+ALLOWED_DIRS="core governance extract plan brain legacy"
+
+for d in "$DOCS"/*/; do
+  name="$(basename "$d")"
+  if ! echo "$ALLOWED_DIRS" | grep -qw "$name"; then
+    err "unknown folder: docs/$name/ (not in allowlist)"
+  fi
+done
+echo "  $(find "$DOCS" -maxdepth 1 -type d -not -path "$DOCS" | wc -l | tr -d ' ') subdirectories"
+
+# ─────────────────────────────────────────────────────────────────────────
+# CHECK 3: Metadata headers (status line in first 10 lines)
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Check 3: Metadata headers ---"
+HAS_HEADER=0
+MISSING_HEADER=0
+
+for f in $(find "$DOCS" -name "*.md" \
+  -not -path "*/legacy/*" \
+  -not -path "*/_imported/*" \
+  -not -path "*/_audits/*" \
+  -not -path "*/_receipts_meta/*" \
+  -not -name "README.md" \
+  -not -name "CONTRIBUTING.md" \
+  -not -name "tomorrow.md" \
+  | sort); do
+
+  # Check first 10 lines for status indicator
+  if head -10 "$f" | grep -qiE '(^status:|^\*\*Status|> \*\*Status)'; then
+    HAS_HEADER=$((HAS_HEADER+1))
+  else
+    rel="${f#$ROOT/}"
+    warn "no metadata header: $rel"
+    MISSING_HEADER=$((MISSING_HEADER+1))
+  fi
+done
+echo "  $HAS_HEADER with header, $MISSING_HEADER missing"
+
+# ─────────────────────────────────────────────────────────────────────────
+# CHECK 4: README.md registration
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Check 4: README.md registration ---"
+REGISTERED=0
+UNREGISTERED=0
+
+for f in $(find "$DOCS/core" "$DOCS/governance" "$DOCS/extract" -maxdepth 1 -name "*.md" -o -name "*.yaml" 2>/dev/null | sort); do
+  name="$(basename "$f")"
+  if grep -q "$name" "$DOCS/README.md" 2>/dev/null; then
+    REGISTERED=$((REGISTERED+1))
+  else
+    rel="${f#$ROOT/}"
+    warn "not in README.md: $rel"
+    UNREGISTERED=$((UNREGISTERED+1))
+  fi
+done
+echo "  $REGISTERED registered, $UNREGISTERED unregistered"
+
+# ─────────────────────────────────────────────────────────────────────────
+# CHECK 5: Legacy isolation (no runtime links to docs/legacy/)
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Check 5: Legacy isolation ---"
+LEGACY_REFS="$(rg -n "docs/legacy/" "$ROOT/ops/" "$ROOT/surfaces/" "$ROOT/agents/" "$ROOT/bin/" "$ROOT/mailroom/" 2>/dev/null \
+  | grep -v "quarantine\|FORBIDDEN\|FORBID\|DENY\|legacy.*reference\|legacy.*archive\|_imports\|docs-lint" || true)"
+
+if [[ -n "$LEGACY_REFS" ]]; then
+  err "runtime code references docs/legacy/:"
+  echo "$LEGACY_REFS" | head -10
+else
+  echo "  No runtime references to docs/legacy/ (clean)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# CHECK 6: No forbidden patterns outside quarantine
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Check 6: Forbidden patterns ---"
+FORBIDDEN="$(rg -n -S '(ronny-ops|LaunchAgents|launchd|\.plist)' "$DOCS" \
+  -g'!docs/core/**' -g'!docs/legacy/**' -g'!docs/governance/**' -g'!docs/extract/**' -g'!docs/brain/**' \
+  2>/dev/null || true)"
+
+if [[ -n "$FORBIDDEN" ]]; then
+  err "forbidden patterns found outside quarantine zones:"
+  echo "$FORBIDDEN" | head -10
+else
+  echo "  No forbidden patterns outside quarantine (clean)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# CHECK 7: SSOT path validation
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Check 7: SSOT path existence ---"
+SSOT_OK=0; SSOT_EXT=0; SSOT_MISS=0
+if command -v yq >/dev/null 2>&1 && [[ -f "$DOCS/governance/SSOT_REGISTRY.yaml" ]]; then
+  while IFS= read -r p; do
+    [[ -z "$p" || "$p" == "null" ]] && continue
+    if [[ "$p" == docs/* || "$p" == ops/* || "$p" == surfaces/* ]]; then
+      if [[ -f "$ROOT/$p" ]]; then
+        SSOT_OK=$((SSOT_OK+1))
+      else
+        err "SSOT path missing: $p"
+        SSOT_MISS=$((SSOT_MISS+1))
+      fi
+    else
+      SSOT_EXT=$((SSOT_EXT+1))
+    fi
+  done < <(yq eval '.ssots[].path // ""' "$DOCS/governance/SSOT_REGISTRY.yaml" 2>/dev/null)
+  echo "  $SSOT_OK spine-local OK, $SSOT_EXT external (cross-repo), $SSOT_MISS missing"
+else
+  echo "  SKIP: yq not found or SSOT_REGISTRY.yaml missing"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# SUMMARY
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "errors: $ERRORS"
+echo "warnings: $WARNINGS"
+
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "status: FAIL"
+  exit 1
+else
+  echo "status: OK"
+fi

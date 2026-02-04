@@ -2,7 +2,7 @@
 
 **Locked:** 2026-02-01
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v1.4
+**Gate Version:** drift-gate.sh v1.5
 
 ---
 
@@ -63,6 +63,17 @@ All must PASS for core to be healthy:
 | D10 | Logs under mailroom only |
 | D11 | `~/agent` is symlink to mailroom |
 | D12 | This file exists |
+| D13 | API capability secrets preconditions |
+| D14 | Cloudflare surface drift (no legacy smells) |
+| D15 | GitHub Actions surface drift (read-only, no leaks) |
+| D16 | Docs quarantine (no competing truths) |
+| D17 | Root allowlist (no drift magnets at root) |
+| D18 | Docker compose surface drift (read-only) |
+| D19 | Backup surface drift (read-only, no secret printing) |
+| D20 | Secrets surface drift (non-leaky, read-only) |
+| D22 | Nodes surface drift (read-only SSH, no credentials) |
+| D23 | Services health surface drift (no verbose curl) |
+| D24 | GitHub labels surface drift (read-only, no mutations) |
 
 ## Rules
 

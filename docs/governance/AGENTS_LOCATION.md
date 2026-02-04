@@ -1,5 +1,8 @@
 # AGENTS LOCATION CONTRACT
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 Authoritative: agentic-spine/agents/
 - agents/ = definitions, contracts, examples (portable, no runtime deps)
 - ops/ + surfaces/ = runtime tooling (commands + verification scripts)

@@ -8,28 +8,36 @@ github_issue: "#541"
 
 # Governance Index
 
-> **Purpose:** Human-readable guide to how governance works in ronny-ops.
-> 
+> **Purpose:** Human-readable guide to how governance works in agentic-spine.
+>
 > This is the entry point for understanding rules, authority, and conflict resolution.
+>
+> **Stack governance:** `docs/governance/STACK_REGISTRY.yaml` is the spine's SSOT
+> for stack inventory (what stacks exist, compose paths, owners, status).
 
 ---
 
 ## Quick Start: The Entry Chain
 
+> **Workbench-side:** The entry chain below applies to workbench sessions (`~/Code/workbench`). For the spine's own entry point, see [docs/README.md](../README.md) and [SPINE_STATE.md](../core/SPINE_STATE.md).
+
+> **Workbench root:** `~/Code/workbench` (formerly `ronny-ops`).
+> All relative paths below are under the workbench unless prefixed with `$SPINE_REPO`.
+
 Every agent session follows this path:
 
 ```
-00_CLAUDE.md              ← START HERE: Session protocol
+~/Code/workbench/00_CLAUDE.md              ← START HERE: Session protocol
     ↓
-.brain/rules.md           ← The 5 rules (auto-injected at startup)
+~/Code/workbench/.brain/rules.md           ← The 5 rules (auto-injected at startup)
     ↓
-AGENTS.md / CLAUDE.md     ← Full agent instructions
+~/Code/workbench/AGENTS.md / CLAUDE.md     ← Full agent instructions
     ↓
-Pillar entrypoints        ← Domain-specific context
-    ├── mint-os/AGENTS_START_HERE.md
-    ├── infrastructure/SERVICE_REGISTRY.md
-    ├── media-stack/MEDIA_STACK_CONTEXT.md
-    └── (other pillars)/*_CONTEXT.md
+Pillar entrypoints                          ← Domain-specific context
+    ├── ~/Code/workbench/mint-os/AGENTS_START_HERE.md
+    ├── ~/Code/workbench/infrastructure/SERVICE_REGISTRY.md
+    ├── ~/Code/workbench/media-stack/MEDIA_STACK_CONTEXT.md
+    └── ~/Code/workbench/(other pillars)/*_CONTEXT.md
 ```
 
 **The 5 Rules:**
@@ -60,16 +68,21 @@ Pillar entrypoints        ← Domain-specific context
 
 ### Single Sources of Truth (by Domain)
 
+> **Workbench SSOTs:** The table below lists workbench-side truth sources. For the spine's own SSOT registry, see [SSOT_REGISTRY.yaml](SSOT_REGISTRY.yaml).
+
+> All paths below are under `~/Code/workbench/` (the workbench monolith).
+
 | Domain | SSOT | Scope |
 |--------|------|-------|
-| Services/Topology | `infrastructure/SERVICE_REGISTRY.md` | What runs where |
-| Database Schema | `mint-os/docs/SCHEMA_TRUTH.md` | Column names, tables |
-| Quote System | `mint-os/docs/QUOTE_SINGLE_SOURCE_OF_TRUTH.md` | Quote creation flow |
-| Shopify | `infrastructure/shopify-mcp/SHOPIFY_SSOT.md` | Shopify integration |
-| Files/MinIO | `mint-os/docs/modules/files/SPEC.md` | File upload/storage |
-| Incidents | `infrastructure/docs/INCIDENTS_LOG.md` | What failed before |
-| Agents | `infrastructure/data/agents_inventory.json` | Agent scripts registry |
-| Updates | `infrastructure/data/updates_inventory.json` | Update mechanisms registry |
+| Services/Topology | `~/Code/workbench/infrastructure/SERVICE_REGISTRY.md` | What runs where |
+| Database Schema | `~/Code/workbench/mint-os/docs/SCHEMA_TRUTH.md` | Column names, tables |
+| Quote System | `~/Code/workbench/mint-os/docs/QUOTE_SINGLE_SOURCE_OF_TRUTH.md` | Quote creation flow |
+| Shopify | `~/Code/workbench/infrastructure/shopify-mcp/SHOPIFY_SSOT.md` | Shopify integration |
+| Files/MinIO | `~/Code/workbench/mint-os/docs/modules/files/SPEC.md` | File upload/storage |
+| Incidents | `~/Code/workbench/infrastructure/docs/INCIDENTS_LOG.md` | What failed before |
+| Agents | `~/Code/workbench/infrastructure/data/agents_inventory.json` | Agent scripts registry |
+| Updates | `~/Code/workbench/infrastructure/data/updates_inventory.json` | Update mechanisms registry |
+| Stacks | `$SPINE_REPO/docs/governance/STACK_REGISTRY.yaml` | Stack inventory (spine-native) |
 
 For the complete list: `cat docs/governance/SSOT_REGISTRY.yaml`
 
@@ -149,7 +162,7 @@ Defined in `docs/governance/SEARCH_EXCLUSIONS.md`:
 | System | Config |
 |--------|--------|
 | Git | `.gitignore` |
-| RAG | `infrastructure/docs/rag/WORKSPACE_MANIFEST.json` |
+| RAG | `~/Code/workbench/infrastructure/docs/rag/WORKSPACE_MANIFEST.json` |
 | Scripts | Various `--exclude` flags |
 
 ### Verifying Exclusions Work
@@ -159,7 +172,7 @@ Defined in `docs/governance/SEARCH_EXCLUSIONS.md`:
 find . -path "*/.worktrees/*" -name "*.md" 2>/dev/null | head -5
 
 # Check RAG manifest
-jq '.criticalPatterns.excludes' infrastructure/docs/rag/WORKSPACE_MANIFEST.json
+jq '.criticalPatterns.excludes' ~/Code/workbench/infrastructure/docs/rag/WORKSPACE_MANIFEST.json
 ```
 
 ---
@@ -260,7 +273,7 @@ Before adding `status: authoritative` or claiming SSOT:
 | [docs/DOC_MAP.md](../DOC_MAP.md) | Navigation SSOT (start here) |
 | [SSOT_REGISTRY.yaml](SSOT_REGISTRY.yaml) | Machine-readable SSOT list |
 | [ARCHIVE_POLICY.md](ARCHIVE_POLICY.md) | What archived means |
-| [infrastructure/docs/AUTHORITY_INDEX.md](../../infrastructure/docs/AUTHORITY_INDEX.md) | Document registry |
+| `~/Code/workbench/infrastructure/docs/AUTHORITY_INDEX.md` | Document registry (workbench) |
 
 ---
 

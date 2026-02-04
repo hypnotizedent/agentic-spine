@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# docs.status — Verify workbench infrastructure docs extraction integrity
+# Safety: read-only (counts files, no modifications)
+
+WORKBENCH="${WORKBENCH:-$HOME/Code/workbench}"
+DOCS_DIR="$WORKBENCH/docs/infrastructure"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+_need find
+
+if [[ ! -d "$DOCS_DIR" ]]; then
+  echo "STOP: docs/infrastructure not found at $DOCS_DIR" >&2
+  exit 2
+fi
+
+echo "docs.status"
+echo "path: $DOCS_DIR"
+echo
+
+# Count by subdirectory
+printf "%-25s %-6s %-14s %s\n" "directory" "count" "expected" "status"
+printf "%-25s %-6s %-14s %s\n" "-------------------------" "------" "--------------" "----------"
+
+TOTAL=0
+DEGRADED=0
+
+# Associative array of expected minimums
+declare -A EXPECTED=(
+  [runbooks]=30
+  [reference]=16
+  [audits]=7
+  [rag]=6
+  [guides]=6
+  [plans]=4
+  [architecture]=4
+  [locations]=3
+  [homelab]=3
+  [cloudflare]=3
+  [mcp]=3
+  [domains]=2
+  [hardware]=2
+  [secrets]=2
+  [microsoft]=2
+  [n8n]=4
+  [shopify]=1
+  [storage]=1
+  [vaultwarden]=1
+)
+
+for dir in $(find "$DOCS_DIR" -mindepth 1 -maxdepth 1 -type d | sort); do
+  name="$(basename "$dir")"
+  count="$(find "$dir" -type f \( -name '*.md' -o -name '*.yaml' -o -name '*.json' \) | wc -l | tr -d ' ')"
+  expected="${EXPECTED[$name]:-0}"
+  status="OK"
+  if [[ "$expected" -gt 0 ]] && [[ "$count" -lt "$expected" ]]; then
+    status="DRIFT"
+    DEGRADED=$((DEGRADED+1))
+  fi
+  printf "%-25s %-6s %-14s %s\n" "$name" "$count" "$expected" "$status"
+  TOTAL=$((TOTAL + count))
+done
+
+# Top-level files
+TOP_COUNT="$(find "$DOCS_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+TOP_STATUS="OK"
+if [[ "$TOP_COUNT" -lt 20 ]]; then TOP_STATUS="DRIFT"; fi
+printf "%-25s %-6s %-14s %s\n" "(top-level)" "$TOP_COUNT" "20" "$TOP_STATUS"
+TOTAL=$((TOTAL + TOP_COUNT))
+
+echo
+echo "total_files: $TOTAL"
+echo "expected_minimum: 120"
+if [[ "$TOTAL" -ge 120 ]]; then
+  echo "status: OK"
+else
+  echo "status: DRIFT (below minimum)"
+fi
+echo "degraded_dirs: $DEGRADED"

@@ -1,5 +1,8 @@
 # The Rules
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 ```
 1. NO ISSUE = NO WORK       → gh issue list --state open
 2. NO GUESSING = RAG FIRST  → mint ask "question"

@@ -1,5 +1,8 @@
 # Agentic Spine (Detachable)
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 Core is intentionally small:
 1) `spine doctor`   -> prints truth (green/red)
 2) `spine start`    -> creates a RUN_ID + run folder

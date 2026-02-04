@@ -1,5 +1,8 @@
 # Cloudflare Binding (SSOT)
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 ## Purpose
 Make Cloudflare metadata (zones, tunnels, guardrails) a spine-native binding so agents never guess names or IDs.
 

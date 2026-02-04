@@ -19,7 +19,7 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v1.4) ==="
+echo "=== DRIFT GATE (v1.5) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -54,7 +54,8 @@ COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces/veri
   | rg -v 'd19-backup-drift.sh' \
   | rg -v 'd20-secrets-drift.sh' \
   | rg -v 'd22-nodes-drift.sh' \
-  | rg -v 'd23-health-drift.sh' || true)"
+  | rg -v 'd23-health-drift.sh' \
+  | rg -v 'd24-github-labels-drift.sh' || true)"
 [[ -z "$COUPLE" ]] && pass || fail "legacy coupling found"
 
 # D6: Receipts exist (latest 5 have receipt.md)
@@ -263,6 +264,18 @@ if [[ -x "$SP/surfaces/verify/d23-health-drift.sh" ]]; then
   fi
 else
   warn "health drift gate not present"
+fi
+
+# D24: GitHub labels drift gate
+echo -n "D24 github labels drift gate... "
+if [[ -x "$SP/surfaces/verify/d24-github-labels-drift.sh" ]]; then
+  if "$SP/surfaces/verify/d24-github-labels-drift.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d24-github-labels-drift.sh failed"
+  fi
+else
+  warn "github labels drift gate not present"
 fi
 
 echo

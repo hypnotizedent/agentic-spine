@@ -13,9 +13,11 @@ scope: repository-structure
 >
 > **Registered in:** `docs/governance/SSOT_REGISTRY.yaml` (id: repo-structure)
 
+> **Note:** This document was imported from the workbench monolith. The folder hierarchy below describes the workbench layout. For the spine's own folder rules, see [CONTRIBUTING.md](../CONTRIBUTING.md).
+
 ## PURPOSE
 
-This document is the ONLY authority for where folders and files belong in ronny-ops. Any agent, script, or documentation referencing file placement MUST match these rules. Conflicts mean the other source is WRONG.
+This document is the ONLY authority for where folders and files belong in the workbench monolith (`~/Code/workbench`, formerly `ronny-ops`). Any agent, script, or documentation referencing file placement MUST match these rules. Conflicts mean the other source is WRONG.
 
 ## CRITICAL RULE
 

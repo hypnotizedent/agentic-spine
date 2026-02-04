@@ -1,5 +1,8 @@
 # Compose Authority Map
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 **Date:** 2026-01-24
 **Scope:** Documentation only (no runtime changes)
 **Policy:** Archived compose files under `.archive/` are **non-authoritative** per `docs/governance/ARCHIVE_POLICY.md`.

@@ -6,7 +6,7 @@
 - Governance index: [`docs/governance/GOVERNANCE_INDEX.md`](../docs/governance/GOVERNANCE_INDEX.md)
 - Global agent rules: [`00_CLAUDE.md`](../00_CLAUDE.md)
 
-Agent memory and context system for ronny-ops.
+Agent memory and context system for the agentic-spine.
 
 ## Setup
 
