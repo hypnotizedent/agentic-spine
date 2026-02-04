@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2
+  exit 2
+fi
+
+ZONES="$(curl -fsS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" "${CF_API}/zones?per_page=50")"
+echo "$ZONES" | python3 -c '
+import json, os, sys, urllib.request
+
+print("cloudflare.dns.status")
+zones = json.load(sys.stdin).get("result", [])
+print(f"zones: {len(zones)}")
+api = os.environ.get("CLOUDFLARE_API_BASE", "https://api.cloudflare.com/client/v4").rstrip("/")
+token = os.environ["CLOUDFLARE_API_TOKEN"]
+
+for zone in zones:
+    zid = zone.get("id")
+    name = zone.get("name")
+    req = urllib.request.Request(f"{api}/zones/{zid}/dns_records?per_page=1", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode())
+            total = (data.get("result_info") or {}).get("total_count", 0)
+            print(f"- {name}: dns_records={total}")
+    except Exception as exc:
+        print(f"- {name}: STOP (dns_records request failed: {exc})")
+'

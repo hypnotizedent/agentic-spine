@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+if [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+  echo "STOP: CLOUDFLARE_ACCOUNT_ID missing" >&2
+  exit 2
+fi
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2
+  exit 2
+fi
+
+TUNNELS_JSON=$(curl -fsS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" "${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/tunnels")
+echo "$TUNNELS_JSON" | python3 -c '
+import json, sys
+
+print("cloudflare.tunnel.status")
+data = json.load(sys.stdin)
+if not data.get("success", False):
+    print("STOP: tunnels API returned success=false")
+    sys.exit(2)
+tunnels = data.get("result", [])
+print(f"tunnels: {len(tunnels)}")
+for tunnel in tunnels:
+    name = tunnel.get("name", "<unknown>")
+    tunnel_id = tunnel.get("id", "<missing>")
+    created = tunnel.get("created_at", "unknown")
+    print(f"- {name}: id={tunnel_id} created={created}")
+'

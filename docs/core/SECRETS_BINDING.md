@@ -30,6 +30,7 @@ This repo ships a spine-native secrets surface. It is NOT dependent on ronny-ops
 
 **Binding (non-secret):**
 - `ops/bindings/secrets.binding.yaml` (Infisical api_url + project + environment)
+- `ops/bindings/cloudflare.inventory.yaml` (Cloudflare zone/tunnel metadata is now part of the core binding registry)
 
 **Auth (operator-owned, outside repo):**
 - `~/.config/infisical/credentials` (perm 600)
