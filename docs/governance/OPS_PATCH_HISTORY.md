@@ -49,6 +49,26 @@ Proof:
 - Workbench `git status`: clean, deferred folders excluded
 - Receipt keys: CAP-20260204-025408__spine.verify, CAP-20260204-025410__spine.replay
 
+## Strict De-ronny-ops Pass — Workbench + Spine (2026-02-04)
+
+Changes:
+- SSH-audited 9 hosts: 3 servers still have `~/ronny-ops` (docker-host, automation-stack, media-stack); Proxmox/HA/NAS/vault have no repos
+- Established canonical paths: Mac `~/Code/workbench`, servers `~/workbench`
+- Strict de-ronny-ops across 63 workbench files: dotfiles (aliases, compat, Hammerspoon, Raycast, SSH), scripts (load-secrets, governance.sh, ai.sh, bootstrap, finance, system-status), infra (env.sh.template, n8n backup), 10+ runbooks
+- Rewrote Hammerspoon init.lua: all hotkeys invoke spine capabilities
+- Added canonical host path table to `docs/LEGACY_TIES.md`
+- Quarantined 7 deferred directories with `DEFERRED.md` gate files + .gitignore
+- Updated `docs/WORKBENCH_CONTRACT.md` with deferred directories section
+- Remaining ronny-ops references (intentional): 21 in scripts (GitHub URLs, AnythingLLM slugs, CI drift patterns), 2 in dotfiles (compat filename references)
+
+Proof:
+- `docs.lint`: 0 errors, 0 warnings
+- `spine.verify`: D1–D24 PASS
+- `spine.replay`: 4/4 match
+- `spine.status`: watcher healthy
+- Workbench pushed: `08df4f2` (5 commits total this session)
+- Receipt keys: CAP-20260204-031638__spine.verify, CAP-20260204-031639__spine.replay
+
 ## Expected behavior
 - `ops ai` outside git repo:
   - fails with: `ERROR: REPO_ROOT not set and not in a git repo.`
