@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+LOOPS_FILE="$SPINE_REPO/mailroom/state/open_loops.jsonl"
+
+count_lines() {
+  local pattern="$1"
+  local file="$2"
+  local count
+  count="$(grep -c "$pattern" "$file" 2>/dev/null || true)"
+  echo "$count"
+}
+
+echo "=== LOOP SUMMARY ==="
+echo ""
+
+if [[ ! -s "$LOOPS_FILE" ]]; then
+  echo "By Status:"
+  echo "  Open:   0"
+  echo "  Closed: 0"
+  echo ""
+  echo "By Severity (open only):"
+  echo "  High:   0"
+  echo "  Medium: 0"
+  echo "  Low:    0"
+  echo ""
+  echo "By Owner (open only):"
+  echo "  (none)"
+  exit 0
+fi
+
+open_count="$(count_lines '\"status\":\"open\"' "$LOOPS_FILE")"
+closed_count="$(count_lines '\"status\":\"closed\"' "$LOOPS_FILE")"
+
+echo "By Status:"
+echo "  Open:   $open_count"
+echo "  Closed: $closed_count"
+echo ""
+
+echo "By Severity (open only):"
+high_count="$(grep '\"status\":\"open\"' "$LOOPS_FILE" 2>/dev/null | grep -c '\"severity\":\"high\"' || true)"
+medium_count="$(grep '\"status\":\"open\"' "$LOOPS_FILE" 2>/dev/null | grep -c '\"severity\":\"medium\"' || true)"
+low_count="$(grep '\"status\":\"open\"' "$LOOPS_FILE" 2>/dev/null | grep -c '\"severity\":\"low\"' || true)"
+echo "  High:   $high_count"
+echo "  Medium: $medium_count"
+echo "  Low:    $low_count"
+echo ""
+
+echo "By Owner (open only):"
+if [[ "$open_count" == "0" ]]; then
+  echo "  (none)"
+else
+  grep '\"status\":\"open\"' "$LOOPS_FILE" 2>/dev/null | \
+    python3 - <<'PY'
+import json, sys
+from collections import Counter
+counts = Counter()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if obj.get("status") != "open":
+        continue
+    counts[obj.get("owner","unassigned")] += 1
+for owner in sorted(counts):
+    print(f"  {owner}: {counts[owner]}")
+PY
+fi

@@ -49,6 +49,11 @@ Purpose: validate MCP inventory integrity against workbench configs.
 Capabilities:
 - `mcp.inventory.status` — MCP inventory vs MCPJungle config parity (read-only)
 
+### loops.*
+Purpose: report open-loop ledger status (open/closed counts).
+Capabilities:
+- `loops.status` — open loop summary (read-only)
+
 ### Stack alignment
 For stack inventory context, see `docs/core/STACK_ALIGNMENT.md`.
 The canonical stack list is `docs/governance/STACK_REGISTRY.yaml`.
