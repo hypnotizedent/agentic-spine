@@ -4,20 +4,20 @@
 > **Last verified:** 2026-02-04
 
 ```
-1. NO ISSUE = NO WORK       → gh issue list --state open
+1. NO OPEN LOOPS = NO WORK  → ./bin/ops loops list --open
 2. NO GUESSING = RAG FIRST  → mint ask "question"
 3. NO INVENTING             → match existing patterns
 4. FIX ONE THING            → verify before next
-5. UPDATE MEMORY            → Ctrl+9 when done
+5. WORK GENERATES RECEIPTS  → ./bin/ops cap run <name>
 ```
 
 ## Commands
 
 ```bash
-mint ask "question"         # Query RAG
-mint health                 # Check RAG status
-gh issue list               # See open issues
-gh issue close N            # Close issue
+./bin/ops loops list --open  # See open work
+./bin/ops cap run <name>     # Run governed capability
+mint ask "question"          # Query RAG
+mint health                  # Check RAG status
 ```
 
 ## Approval Required

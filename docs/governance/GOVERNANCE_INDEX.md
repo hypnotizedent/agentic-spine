@@ -41,11 +41,11 @@ Pillar entrypoints                          ← Domain-specific context
 ```
 
 **The 5 Rules:**
-1. NO ISSUE = NO WORK → `gh issue list --state open`
+1. NO OPEN LOOPS = NO WORK → `./bin/ops loops list --open`
 2. NO GUESSING = RAG FIRST → `mint ask "question"`
 3. NO INVENTING → match existing patterns
 4. FIX ONE THING → verify before next
-5. UPDATE MEMORY → Ctrl+9 when done
+5. WORK GENERATES RECEIPTS → `./bin/ops cap run <name>`
 
 ---
 
@@ -182,8 +182,8 @@ jq '.criticalPatterns.excludes' ~/Code/workbench/infrastructure/docs/rag/WORKSPA
 ```
 START: Agent has a question about "truth"
     │
-    ├─▶ Is there a GitHub Issue for this?
-    │       NO → Create issue first: `gh issue create`
+    ├─▶ Is there an open loop for this?
+    │       NO → Record work via `./bin/ops loops collect`
     │      YES ↓
     │
     ├─▶ Does RAG have an answer?
