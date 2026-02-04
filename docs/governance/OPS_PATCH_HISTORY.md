@@ -30,6 +30,25 @@ Proof:
 - `spine.replay`: 4/4 deterministic match
 - Receipt keys: CAP-20260204-022915__docs.lint, CAP-20260204-022919__spine.verify
 
+## Workbench Portability + Spine README Alignment (2026-02-04)
+
+Changes:
+- Spine README: replaced `./cli/bin/spine` with `./bin/ops`, removed ronny-ops secrets loading, added `~/.config/infisical/credentials` path
+- Created `hypnotizedent/workbench` (private) — 473 files tracked across infra/docs/dotfiles/scripts
+- Workbench .gitignore: deferred folders (immich, home-assistant, media-stack, mint-os), .DS_Store, .env, *.log
+- Archived 5 runtime-bleed scripts to `.archive/legacy-runtime/` (supervisor-start/closeout/exit-prompt, terminal-closeout/bootstrap)
+- Added Legacy Path Map to `docs/LEGACY_TIES.md` (9 path translations)
+- Added legacy callouts to 8 workbench docs (README, 00-overview, AUTHORITY_INDEX, MCP_AUTHORITY, RAG_ARCHITECTURE, LAPTOP, CLOUDFLARE_GOVERNANCE, WORKBENCH_CONTRACT)
+- `docs/WORKBENCH_CONTRACT.md` is now canonical (root copy redirects)
+
+Proof:
+- `docs.lint`: 0 errors, 0 warnings
+- `spine.verify`: D1–D24 PASS
+- `spine.replay`: 4/4 match
+- `spine.status`: watcher healthy
+- Workbench `git status`: clean, deferred folders excluded
+- Receipt keys: CAP-20260204-025408__spine.verify, CAP-20260204-025410__spine.replay
+
 ## Expected behavior
 - `ops ai` outside git repo:
   - fails with: `ERROR: REPO_ROOT not set and not in a git repo.`
