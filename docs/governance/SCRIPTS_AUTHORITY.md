@@ -46,7 +46,7 @@ Prevent duplicate scripts, scattered utilities, and configuration drift. All scr
 | Script | Location | Purpose |
 |--------|----------|---------|
 | `mint` | `~/ronny-ops/scripts/mint` | RAG CLI (ask, health, index) |
-| `infisical-agent.sh` | `~/ronny-ops/scripts/agents/infisical-agent.sh` | Secrets management with caching |
+| `infisical-agent.sh` | Canonical: `ops/tools/infisical-agent.sh` / Vendored: `scripts/agents/infisical-agent.sh` | Secrets management with caching |
 | `load-secrets.sh` | `~/ronny-ops/scripts/load-secrets.sh` | Shell startup secrets loader |
 
 ### Infisical Agent Commands (Updated 2026-01-22):

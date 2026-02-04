@@ -52,9 +52,9 @@ record_checksum() {
 
 for proj in "${INFISICAL_PROJECTS[@]}"; do
   count="error"
-  if [[ -x "$REPO_ROOT/scripts/agents/infisical-agent.sh" ]]; then
+  if [[ -x "$REPO_ROOT/ops/tools/infisical-agent.sh" ]]; then
     set +e
-    count=$("$REPO_ROOT/scripts/agents/infisical-agent.sh" list "$proj" prod 2>/dev/null | wc -l)
+    count=$("$REPO_ROOT/ops/tools/infisical-agent.sh" list "$proj" prod 2>/dev/null | wc -l)
     status=$?
     set -e
     if [[ $status -ne 0 ]]; then

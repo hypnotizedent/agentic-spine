@@ -278,6 +278,25 @@ else
   warn "github labels drift gate not present"
 fi
 
+# D25: Secrets CLI hash parity (canonical vs vendored infisical-agent.sh)
+echo -n "D25 secrets cli hash... "
+WB="${WORKBENCH_ROOT:-$HOME/Code/workbench}"
+CANONICAL_CLI="$SP/ops/tools/infisical-agent.sh"
+VENDORED_CLI="$WB/scripts/agents/infisical-agent.sh"
+if [[ ! -f "$CANONICAL_CLI" ]]; then
+  fail "canonical infisical-agent.sh missing"
+elif [[ ! -f "$VENDORED_CLI" ]]; then
+  warn "(workbench copy missing — spine-only mode)"
+else
+  C_HASH=$(shasum -a 256 "$CANONICAL_CLI" | awk '{print $1}')
+  V_HASH=$(shasum -a 256 "$VENDORED_CLI" | awk '{print $1}')
+  if [[ "$C_HASH" == "$V_HASH" ]]; then
+    pass
+  else
+    fail "hash mismatch (canonical vs vendored)"
+  fi
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

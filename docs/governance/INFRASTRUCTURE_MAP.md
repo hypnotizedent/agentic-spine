@@ -154,8 +154,8 @@ https://files.ronny.works/suppliers/              ← Product images
 > **Legacy example:** These commands reference the old ronny-ops layout. The spine uses `ops cap run secrets.exec` instead. See [SECRETS_POLICY.md](SECRETS_POLICY.md).
 
 ```bash
-export CLOUDFLARE_API_TOKEN=$(~/ronny-ops/scripts/agents/infisical-agent.sh get infrastructure prod CLOUDFLARE_API_TOKEN)
-export CLOUDFLARE_ACCOUNT_ID=$(~/ronny-ops/scripts/agents/infisical-agent.sh get infrastructure prod CLOUDFLARE_ACCOUNT_ID)
+export CLOUDFLARE_API_TOKEN=$(./ops/tools/infisical-agent.sh get infrastructure prod CLOUDFLARE_API_TOKEN)
+export CLOUDFLARE_ACCOUNT_ID=$(./ops/tools/infisical-agent.sh get infrastructure prod CLOUDFLARE_ACCOUNT_ID)
 cd mint-os/apps/artwork && pnpm build && npx wrangler pages deploy dist/ --project-name=mint-os-artwork
 ```
 
@@ -210,11 +210,11 @@ ssh docker-host "docker ps --format 'table {{.Names}}\t{{.Status}}' | grep mint-
 **Single Source of Truth:** Infisical at `secrets.ronny.works`
 
 ```bash
-# Get a secret
-./scripts/agents/infisical-agent.sh get mint-os-api prod SECRET_NAME
+# Get a secret (canonical path from spine; vendored at scripts/agents/ in workbench)
+./ops/tools/infisical-agent.sh get mint-os-api prod SECRET_NAME
 
 # List all secrets
-./scripts/agents/infisical-agent.sh list mint-os-api prod
+./ops/tools/infisical-agent.sh list mint-os-api prod
 ```
 
 ---
