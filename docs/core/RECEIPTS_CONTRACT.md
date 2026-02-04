@@ -1,5 +1,8 @@
 # Receipts Contract (Authoritative)
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 A receipt is a proof artifact written after every run.
 
 ## Location

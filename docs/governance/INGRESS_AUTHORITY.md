@@ -1,5 +1,8 @@
 # Ingress Authority
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 > **Purpose**: Document the routing layer between DNS and stacks — the "middle bridge" that connects hostnames to services.
 
 ---
@@ -227,6 +230,36 @@ docker logs homelab-cloudflared --tail 50
 - [ ] Confirm "likely tunnel" hostnames in tables above
 - [ ] Document any hostnames that bypass tunnel (direct to origin)
 - [ ] Add automation to detect tunnel config drift
+
+### Why TBD Entries Exist
+
+The "Hostnames with Unknown Routing" tables above contain entries marked TBD.
+These are DNS records confirmed present in Cloudflare zone exports but whose
+routing path (tunnel vs direct vs inactive) has not been verified against the
+live dashboard.
+
+**Verification commands:**
+
+```bash
+# Check if a hostname resolves through the tunnel (CNAME to cfargotunnel.com)
+dig +short CNAME <hostname>
+
+# List tunnel public hostnames (requires CF API token with tunnel:read)
+# Not yet automated — manual dashboard check recommended
+
+# Verify domain routing registry completeness
+yq eval '.zones[].hostnames[] | select(.stack == "TBD") | .hostname' \
+  docs/governance/DOMAIN_ROUTING_REGISTRY.yaml
+```
+
+**Categories of TBD entries:**
+
+| Category | Count | Reason |
+|----------|-------|--------|
+| Apex/www domains | 4 | No service deployed; DNS reserved |
+| Inactive domains | 8 | DNS record exists but service not deployed |
+| Pending services | 10 | Service planned, compose stack not created yet |
+| DNS-only records | 2 | DKIM/DMARC policy records, no routing target |
 
 ---
 

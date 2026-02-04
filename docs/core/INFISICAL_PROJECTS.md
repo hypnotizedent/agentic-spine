@@ -1,5 +1,8 @@
 # Infisical Projects (Canonical Map)
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 **Purpose:** Prevent agent confusion. Agents MUST NOT guess which Infisical project to use.  
 **Rule:** The spine runtime binds exactly ONE project at a time via `ops/bindings/secrets.binding.yaml`.  
 **Enforcement:** All API-touching capabilities require: `[secrets.binding, secrets.auth.status]`

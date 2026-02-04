@@ -1,5 +1,8 @@
 # Capability Backlog (Spine)
 
+> **Status:** draft
+> **Last verified:** 2026-02-04
+
 Authority: agentic-spine only. Legacy is reference-only; never executed.
 
 ## The 8 boring-project capabilities

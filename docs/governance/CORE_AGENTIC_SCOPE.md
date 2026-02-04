@@ -322,9 +322,30 @@ This is spine's "immune system."
 
 ---
 
+## Reference Audit: ronny-ops/workbench Mentions
+
+Audit of 120+ `ronny-ops` and `workbench` references across the docs tree
+(performed 2026-02-04). Each reference was categorized and given a treatment:
+
+| Category | Count | Treatment | Examples |
+|----------|-------|-----------|----------|
+| Constraints/guards | ~25 | KEEP | AGENT_CONTRACT, CORE_LOCK, D5 |
+| Verification gates | ~32 | KEEP | d16, d18, docs-lint |
+| Historical audit | ~34 | KEEP | _audits/\*, legacy/\* |
+| Extraction tracking | ~22 | KEEP | AGENTIC_GAP_MAP, STACK_ALIGNMENT |
+| Stale instructions | 7 | FIXED | AGENTS_GOVERNANCE, REPO_STRUCTURE_AUTHORITY, SCRIPTS_AUTHORITY, INFRASTRUCTURE_MAP, GOVERNANCE_INDEX, brain/README, issue.md |
+
+**Decision:** Constraint declarations, verification gates, historical audits, and
+extraction tracking references are intentional and remain as-is. Only the 7 docs
+carrying actionable ronny-ops instructions were edited to add workbench callouts
+or update scope references to `agentic-spine`.
+
+---
+
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|----------|
 | 1.0 | 2026-02-01 | Initial version - defines CORE invariants and promotion rules |
 | 1.1 | 2026-02-01 | Added authority rule, import enforcement, core-readiness checklist, invariant statement |
+| 1.2 | 2026-02-04 | Added reference audit table for ronny-ops/workbench mentions |

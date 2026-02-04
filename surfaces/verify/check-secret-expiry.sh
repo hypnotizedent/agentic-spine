@@ -68,16 +68,24 @@ infisical_auth() {
     exit 1
   fi
 
-  local response
-  response=$(curl -s -X POST "${INFISICAL_API_URL}/api/v1/auth/universal-auth/login" \
+  local response http_code body
+  response=$(curl -s -w "\n%{http_code}" -X POST "${INFISICAL_API_URL}/api/v1/auth/universal-auth/login" \
     -H "Content-Type: application/json" \
     -d "{\"clientId\": \"${INFISICAL_CLIENT_ID}\", \"clientSecret\": \"${INFISICAL_CLIENT_SECRET}\"}")
 
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" != "200" ]]; then
+    log_error "Auth failed: HTTP $http_code"
+    exit 1
+  fi
+
   local token
-  token=$(echo "$response" | jq -r '.accessToken // empty')
+  token=$(echo "$body" | jq -r '.accessToken // empty')
 
   if [[ -z "$token" ]]; then
-    log_error "Auth failed"
+    log_error "Auth failed: no access token in response"
     exit 1
   fi
 
@@ -90,8 +98,18 @@ get_secrets_with_metadata() {
   local env="${2:-prod}"
   local token="$3"
 
-  curl -s -X GET "${INFISICAL_API_URL}/api/v3/secrets/raw?workspaceId=${project_id}&environment=${env}" \
-    -H "Authorization: Bearer $token"
+  local response
+  response=$(curl -s -X GET "${INFISICAL_API_URL}/api/v3/secrets/raw?workspaceId=${project_id}&environment=${env}" \
+    -H "Authorization: Bearer $token")
+
+  # Validate response is parseable JSON with a secrets array
+  if ! echo "$response" | jq -e '.secrets' >/dev/null 2>&1; then
+    log_error "Invalid response for project $project_id (env: $env)"
+    echo '{"secrets":[]}'
+    return
+  fi
+
+  echo "$response"
 }
 
 # Calculate days since date
@@ -256,11 +274,16 @@ send_teams_alert() {
 EOF
 )
 
-  curl -s -X POST "$TEAMS_WEBHOOK_URL" \
+  local webhook_status
+  webhook_status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$TEAMS_WEBHOOK_URL" \
     -H "Content-Type: application/json" \
-    -d "$payload" > /dev/null
+    -d "$payload")
 
-  log_success "Teams alert sent"
+  if [[ "$webhook_status" =~ ^2 ]]; then
+    log_success "Teams alert sent (HTTP $webhook_status)"
+  else
+    log_error "Teams alert failed: HTTP $webhook_status"
+  fi
 }
 
 # Generate JSON report

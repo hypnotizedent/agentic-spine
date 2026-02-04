@@ -21,6 +21,8 @@ Prevent duplicate scripts, scattered utilities, and configuration drift. All scr
 
 ### Authorized Script Directories:
 
+> **Workbench context:** The paths below reference the workbench monolith (`~/Code/workbench`). For spine-native scripts, see [VERIFY_SURFACE_INDEX.md](VERIFY_SURFACE_INDEX.md) and [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md).
+
 | Directory | Purpose |
 |-----------|---------|
 | `~/ronny-ops/scripts/` | Main scripts directory |

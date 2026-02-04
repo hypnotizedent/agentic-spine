@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra.extraction.status — Track infrastructure extraction coverage into workbench
+# Safety: read-only (checks file existence only)
+
+WORKBENCH="${WORKBENCH:-$HOME/Code/workbench}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+_need find
+_need awk
+
+echo "infra.extraction.status"
+echo "workbench: $WORKBENCH"
+echo
+
+# 23 asset groups defined inline: check_group name path min_count
+# "path" is relative to $WORKBENCH
+# "min_count" is minimum expected files for EXTRACTED status
+
+printf "%-22s %-6s %-6s %-14s\n" "asset_group" "found" "min" "status"
+printf "%-22s %-6s %-6s %-14s\n" "----------------------" "------" "------" "--------------"
+
+EXTRACTED=0
+PARTIAL=0
+NOT_EXTRACTED=0
+TOTAL_GROUPS=0
+
+check_group() {
+  local name="$1" path="$2" min="$3"
+  local full_path="$WORKBENCH/$path"
+  local count=0
+
+  TOTAL_GROUPS=$((TOTAL_GROUPS+1))
+
+  if [[ ! -d "$full_path" ]]; then
+    count=0
+  elif [[ "$name" == "authority-docs" ]]; then
+    count="$(find "$full_path" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+  else
+    count="$(find "$full_path" -type f | wc -l | tr -d ' ')"
+  fi
+
+  local status
+  if [[ "$count" -ge "$min" ]]; then
+    status="EXTRACTED"
+    EXTRACTED=$((EXTRACTED+1))
+  elif [[ "$count" -gt 0 ]]; then
+    status="PARTIAL"
+    PARTIAL=$((PARTIAL+1))
+  else
+    status="NOT_EXTRACTED"
+    NOT_EXTRACTED=$((NOT_EXTRACTED+1))
+  fi
+
+  printf "%-22s %-6s %-6s %-14s\n" "$name" "$count" "$min" "$status"
+}
+
+check_group "runbooks"         "docs/infrastructure/runbooks"      30
+check_group "reference"        "docs/infrastructure/reference"     16
+check_group "locations"        "docs/infrastructure/locations"     3
+check_group "hardware"         "docs/infrastructure/hardware"      2
+check_group "architecture"     "docs/infrastructure/architecture"  4
+check_group "audits"           "docs/infrastructure/audits"        5
+check_group "cloudflare-docs"  "docs/infrastructure/cloudflare"    3
+check_group "domains"          "docs/infrastructure/domains"       2
+check_group "guides"           "docs/infrastructure/guides"        6
+check_group "homelab"          "docs/infrastructure/homelab"       3
+check_group "rag-docs"         "docs/infrastructure/rag"           6
+check_group "secrets-docs"     "docs/infrastructure/secrets"       2
+check_group "authority-docs"   "docs/infrastructure"               18
+check_group "mcp-docs"         "docs/infrastructure/mcp"           3
+check_group "microsoft-docs"   "docs/infrastructure/microsoft"     2
+check_group "n8n-docs"         "docs/infrastructure/n8n"           3
+check_group "compose-stacks"   "infra/compose"                     8
+check_group "n8n-workflows"    "infra/compose/n8n/workflows"       30
+check_group "mcpjungle"        "infra/compose/mcpjungle"           10
+check_group "data-inventories" "infra/data"                        6
+check_group "templates"        "infra/templates"                   5
+check_group "cloudflare-ops"   "infra/cloudflare"                  3
+check_group "dotfiles-ssh"     "dotfiles/ssh"                      3
+
+echo
+COVERAGE=$(awk -v e="$EXTRACTED" -v p="$PARTIAL" -v t="$TOTAL_GROUPS" 'BEGIN{printf "%.1f", (e + 0.5 * p) / t * 100}')
+echo "extracted: $EXTRACTED"
+echo "partial: $PARTIAL"
+echo "not_extracted: $NOT_EXTRACTED"
+echo "total_groups: $TOTAL_GROUPS"
+echo "coverage: ${COVERAGE}%"
+
+if (( EXTRACTED + PARTIAL >= TOTAL_GROUPS - 2 )); then
+  echo "status: OK"
+else
+  echo "status: INCOMPLETE"
+fi

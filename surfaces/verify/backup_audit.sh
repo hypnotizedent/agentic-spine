@@ -1,6 +1,7 @@
 #!/bin/bash
+# STATUS: data-generator (writes backup_inventory.json; not a verifier)
 # Backup Audit Script
-# Governance: docs/runbooks/BACKUP_GOVERNANCE.md
+# Governance: docs/governance/BACKUP_GOVERNANCE.md
 # Issue: #622
 # Purpose: Generate JSON inventory of VM/CT backups (read-only)
 

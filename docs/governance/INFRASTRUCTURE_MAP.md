@@ -150,6 +150,9 @@ https://files.ronny.works/suppliers/              ← Product images
 | **files-api** | `apps/files-api/` | `files.mintprints.co` | ❌ DOES NOT EXIST (#539) |
 
 **Deploy Cloudflare Pages Apps:**
+
+> **Legacy example:** These commands reference the old ronny-ops layout. The spine uses `ops cap run secrets.exec` instead. See [SECRETS_POLICY.md](SECRETS_POLICY.md).
+
 ```bash
 export CLOUDFLARE_API_TOKEN=$(~/ronny-ops/scripts/agents/infisical-agent.sh get infrastructure prod CLOUDFLARE_API_TOKEN)
 export CLOUDFLARE_ACCOUNT_ID=$(~/ronny-ops/scripts/agents/infisical-agent.sh get infrastructure prod CLOUDFLARE_ACCOUNT_ID)
@@ -158,13 +161,15 @@ cd mint-os/apps/artwork && pnpm build && npx wrangler pages deploy dist/ --proje
 
 ### Sync Commands
 
+> **Legacy example:** These commands reference the old ronny-ops layout. The spine uses `ops cap run secrets.exec` instead. See [SECRETS_POLICY.md](SECRETS_POLICY.md).
+
 ```bash
 # Sync job-estimator code to docker-host
 rsync -avz --exclude 'node_modules' --exclude 'build' \
   /Users/ronnyworks/ronny-ops/mint-os/apps/job-estimator/ \
   docker-host:~/stacks/mint-os/job-estimator/
 
-# Sync supplier scripts to docker-host  
+# Sync supplier scripts to docker-host
 rsync -avz --delete \
   /Users/ronnyworks/ronny-ops/mint-os/scripts/suppliers/ \
   docker-host:~/stacks/mint-os/scripts/suppliers/

@@ -1,10 +1,17 @@
 # Agents Governance (SSOT)
+
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 Tracks: #634
 
 ## Purpose
-Define the lifecycle and verification contract for agent scripts and related automation in ronny-ops.
+Define the lifecycle and verification contract for agent scripts and related automation in the agentic-spine.
 
 ## Sources of Truth
+
+> **Workbench-side:** The paths below reference the workbench monolith (`~/Code/workbench`). For the spine's own agent contracts, see `agents/contracts/` and [CORE_AGENTIC_SCOPE.md](CORE_AGENTIC_SCOPE.md).
+
 - Inventory (machine-readable): `infrastructure/data/agents_inventory.json`
 - Verification script: `scripts/infra/agents_verify.sh`
 - Reference reports:

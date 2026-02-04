@@ -1,5 +1,8 @@
 # Plan Schema (Authoritative)
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 A plan is a sequential list of steps to be executed by agents.
 
 ## Format (YAML)

@@ -1,5 +1,8 @@
 # Canonical Docs Contract
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 This repository has a single canonical documentation surface:
 
 - **CANONICAL**: docs/core/**

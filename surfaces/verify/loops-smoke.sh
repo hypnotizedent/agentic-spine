@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# STATUS: smoke-test (not called by any gate; run manually)
 # ═══════════════════════════════════════════════════════════════════════════
 # loops-smoke.sh - Verify ops loops creates state dir when missing
 # ═══════════════════════════════════════════════════════════════════════════

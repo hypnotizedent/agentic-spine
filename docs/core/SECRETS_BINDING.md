@@ -1,5 +1,8 @@
 # Secrets Binding (SSOT)
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 Purpose: eliminate "which Infisical project?" confusion by defining ONE canonical binding for this spine.
 
 ## Rule

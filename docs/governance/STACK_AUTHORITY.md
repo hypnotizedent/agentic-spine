@@ -1,5 +1,8 @@
 # Stack Authority
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 This document defines the rules of record for where **authoritative compose configs** live, what counts as an **active stack**, and how deploy automation interacts with these stacks.
 
 ## Non-negotiables

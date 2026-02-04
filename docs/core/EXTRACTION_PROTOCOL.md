@@ -1,5 +1,8 @@
 # Extraction Protocol (Canonical)
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 Goal: Extract capabilities from legacy repos without importing runtime smells.
 
 ## Hard Rules

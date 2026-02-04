@@ -1,5 +1,8 @@
 # Operator Cheat Sheet
 
+> **Status:** authoritative
+> **Last verified:** 2026-02-04
+
 Quick reference for spine operations and governance tasks.
 
 ## Common Operations
