@@ -35,6 +35,8 @@
 #
 # Canonical runtime:
 #   mailroom/* + fswatch watcher (watches mailroom/inbox/queued)
+#   Watcher managed by launchd: com.ronny.agent-inbox
+#   Do not manually run hot-folder-watcher.sh; use launchd.
 #
 # NO HOME DRIFT ROOTS:
 #   ~/agent, ~/runs, ~/log, ~/logs MUST NOT exist.
@@ -64,15 +66,17 @@
 # If ANY fail: STOP. Fix spine core before doing any other work.
 #
 # ────────────────────────────────────────────────────────────────
-# 4) CAPABILITY SURFACE (34 governed capabilities)
+# 4) CAPABILITY SURFACE (36 governed capabilities)
 # ────────────────────────────────────────────────────────────────
 # All privileged actions via: ./bin/ops cap run <name>
 # Full list:                  ./bin/ops cap list
 #
-# SPINE HEALTH (3)
+# SPINE HEALTH (5)
 #   spine.verify             Drift gates (25 checks)
 #   spine.replay             Replay determinism (5 fixtures)
 #   spine.status             Watcher + queue status
+#   spine.watcher.status     Canonical watcher status (launchd + PID + lock)
+#   spine.watcher.restart    Restart launchd watcher [MUTATING]
 #
 # SECRETS (8) — Infisical-backed, no-leak guarantees
 #   secrets.status           Configuration presence check
@@ -133,7 +137,7 @@
 # D1  Top-level directory policy (7 allowed dirs)
 # D2  No runs/ trace
 # D3  Entrypoint smoke (bin/ops preflight)
-# D4  Watcher process check (warn-only)
+# D4  Watcher launchd check (warn-only)
 # D5  No legacy ~/agent coupling
 # D6  Receipts exist (latest 5 have receipt.md)
 # D7  Executables bounded to allowed zones
@@ -194,7 +198,7 @@
 # │   └── state/        ledger.csv, open_loops.jsonl, locks/
 # ├── ops/              Commands, plugins, bindings, runtime, tools
 # │   ├── bindings/     7 YAML binding files
-# │   ├── capabilities.yaml  Capability registry (34 entries)
+# │   ├── capabilities.yaml  Capability registry (36 entries)
 # │   ├── commands/     CLI subcommands
 # │   ├── plugins/      Surface plugins (cloudflare, github, secrets, ...)
 # │   ├── runtime/      Inbox processor, watcher

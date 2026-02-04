@@ -34,12 +34,18 @@ echo -n "D2 one trace (no runs/)... "
 echo -n "D3 entrypoint smoke... "
 ./bin/ops preflight >/dev/null 2>&1 && pass || fail "bin/ops preflight failed"
 
-# D4: Watcher (warn only, no fail)
+# D4: Watcher (launchd canonical; warn only, no fail)
 echo -n "D4 watcher... "
-if pgrep -fl "fswatch.*agentic-spine/mailroom/inbox/queued" >/dev/null 2>&1; then
-  pass
+WATCHER_INFO="$(launchctl list com.ronny.agent-inbox 2>/dev/null || true)"
+if [[ -n "$WATCHER_INFO" ]]; then
+  WATCHER_PID="$(echo "$WATCHER_INFO" | sed -n 's/.*"PID" = \([0-9]*\).*/\1/p')"
+  if [[ -n "$WATCHER_PID" ]]; then
+    pass
+  else
+    warn "(loaded but no PID)"
+  fi
 else
-  warn "(not detected)"
+  warn "(launchd service not loaded)"
 fi
 
 # D5: No executable ~/agent coupling

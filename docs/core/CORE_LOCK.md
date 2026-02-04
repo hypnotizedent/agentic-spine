@@ -44,7 +44,9 @@ This key is used everywhere:
 |-------|------|---------|
 | CLI | `bin/ops` | Human entrypoint (enqueues to mailroom) |
 | Watcher | `ops/runtime/inbox/hot-folder-watcher.sh` | Daemon runtime |
-| LaunchAgent | `com.ronny.agent-inbox` | Persistent watcher |
+| LaunchAgent | `com.ronny.agent-inbox` | **Canonical** persistent watcher |
+
+**Launchd is the only canonical watcher runtime.** Do not manually run `hot-folder-watcher.sh` in production; use launchd via `ops cap run spine.watcher.restart` for restarts. Manual runs are for debugging only.
 
 ## Drift Gates
 
