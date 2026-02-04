@@ -36,16 +36,27 @@ echo -n "D3 entrypoint smoke... "
 
 # D4: Watcher (launchd canonical; warn only, no fail)
 echo -n "D4 watcher... "
-WATCHER_INFO="$(launchctl list com.ronny.agent-inbox 2>/dev/null || true)"
-if [[ -n "$WATCHER_INFO" ]]; then
-  WATCHER_PID="$(echo "$WATCHER_INFO" | sed -n 's/.*"PID" = \([0-9]*\).*/\1/p')"
-  if [[ -n "$WATCHER_PID" ]]; then
+WATCHER_PRINT="$(launchctl print "gui/$(id -u)/com.ronny.agent-inbox" 2>/dev/null || true)"
+if [[ -n "$WATCHER_PRINT" ]]; then
+  WATCHER_STATE="$(echo "$WATCHER_PRINT" | awk -F' = ' '/state =/{print $2; exit}')"
+  WATCHER_PID="$(echo "$WATCHER_PRINT" | awk '/pid =/{print $3; exit}')"
+  if [[ "$WATCHER_STATE" == "running" && -n "$WATCHER_PID" ]]; then
     pass
   else
-    warn "(loaded but no PID)"
+    warn "(loaded but state=$WATCHER_STATE pid=${WATCHER_PID:-none})"
   fi
 else
-  warn "(launchd service not loaded)"
+  WATCHER_INFO="$(launchctl list com.ronny.agent-inbox 2>/dev/null || true)"
+  if [[ -n "$WATCHER_INFO" ]]; then
+    WATCHER_PID="$(echo "$WATCHER_INFO" | sed -n 's/.*"PID" = \([0-9]*\).*/\1/p')"
+    if [[ -n "$WATCHER_PID" ]]; then
+      pass
+    else
+      warn "(loaded but no PID)"
+    fi
+  else
+    warn "(launchd service not loaded)"
+  fi
 fi
 
 # D5: No executable ~/agent coupling
