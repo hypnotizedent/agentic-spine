@@ -5,23 +5,35 @@ Detachable spine: one CLI front door + receipts + boring lifecycle.
 ## Quickstart
 
 ```bash
-./cli/bin/spine doctor
-RUN_ID=$(./cli/bin/spine start)
-./cli/bin/spine run --task examples/example_task.txt
-./cli/bin/spine receipt --run-id "$RUN_ID" --status 0 --note "bootstrap example"
-./cli/bin/spine closeout --run-id "$RUN_ID"
-cat receipts/sessions/"$RUN_ID"/receipt.md
+./bin/ops cap run spine.verify
+./bin/ops cap run spine.replay
+./bin/ops cap run spine.status
 ```
 
-## Secrets + z.ai provider
-
-Before you can call the z.ai provider you must load secrets from the `ronny-ops`
-workspace because no API keys are stored in this repository. The simplest pattern is:
+## Capabilities
 
 ```bash
-source ~/ronny-ops/scripts/load-secrets.sh
-cd ~/Code/agentic-spine
-SPINE_ENGINE_PROVIDER=zai ./cli/bin/spine run --task examples/hello.task.md
+./bin/ops cap list                    # list all registered capabilities
+./bin/ops cap run <name>              # execute a capability and produce a receipt
+./bin/ops run --inline "..."          # run an inline task
+./bin/ops run --file <path>           # run a task from file
 ```
 
-`load-secrets.sh` exports `ZAI_API_KEY` (in addition to the existing INFISICAL/OpenAI/Claude tokens), so the script you source only injects environment variables and never prints raw secrets. The z.ai provider is the `engine/zai.sh` runner; it keeps `max_tokens` at 400, `temperature` at 0, makes a single completion call, and the receipt now lists the API usage so you can monitor token spend.
+## Secrets
+
+Secrets are loaded from Infisical via the local credentials file.
+No API keys are stored in this repository.
+
+```bash
+source ~/.config/infisical/credentials
+SPINE_ENGINE_PROVIDER=zai ./bin/ops run --task examples/hello.task.md
+```
+
+The credentials file exports `ZAI_API_KEY`, `INFISICAL_TOKEN`, and other
+provider tokens as environment variables. It never prints raw secrets.
+
+## z.ai Provider
+
+The z.ai provider (`engine/zai.sh`) makes a single completion call with
+`max_tokens=400`, `temperature=0`. Receipts include API usage for token
+spend monitoring.
