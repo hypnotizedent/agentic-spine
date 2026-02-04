@@ -52,7 +52,9 @@ COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces/veri
   | rg -v 'github-actions-gate.sh' \
   | rg -v 'd18-docker-compose-drift.sh' \
   | rg -v 'd19-backup-drift.sh' \
-  | rg -v 'd20-secrets-drift.sh' || true)"
+  | rg -v 'd20-secrets-drift.sh' \
+  | rg -v 'd22-nodes-drift.sh' \
+  | rg -v 'd23-health-drift.sh' || true)"
 [[ -z "$COUPLE" ]] && pass || fail "legacy coupling found"
 
 # D6: Receipts exist (latest 5 have receipt.md)
@@ -237,6 +239,30 @@ if [[ -x "$SP/surfaces/verify/d20-secrets-drift.sh" ]]; then
   fi
 else
   warn "secrets drift gate not present"
+fi
+
+# D22: Nodes surface drift gate (read-only SSH, no credentials, no mutations)
+echo -n "D22 nodes drift gate... "
+if [[ -x "$SP/surfaces/verify/d22-nodes-drift.sh" ]]; then
+  if "$SP/surfaces/verify/d22-nodes-drift.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d22-nodes-drift.sh failed"
+  fi
+else
+  warn "nodes drift gate not present"
+fi
+
+# D23: Services health surface drift gate (no verbose curl, no auth printing)
+echo -n "D23 health drift gate... "
+if [[ -x "$SP/surfaces/verify/d23-health-drift.sh" ]]; then
+  if "$SP/surfaces/verify/d23-health-drift.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d23-health-drift.sh failed"
+  fi
+else
+  warn "health drift gate not present"
 fi
 
 echo
