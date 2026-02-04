@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# services-health-status - Read-only HTTP health probe for declared services
+#
+# No auth headers printed. No verbose curl. No mutations.
+# STOP=2 on preconditions (missing binding, yq, curl).
+#
+# Usage:
+#   services-health-status           # check all endpoints
+#   services-health-status <id>      # check specific endpoint
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+[[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+
+FILTER="${1:-}"
+
+DEF_CONNECT="$(yq -r '.defaults.connect_timeout_sec // 5' "$BINDING")"
+DEF_MAX="$(yq -r '.defaults.max_time_sec // 10' "$BINDING")"
+
+COUNT="$(yq -r '.endpoints | length' "$BINDING" 2>/dev/null || echo 0)"
+[[ "$COUNT" -gt 0 ]] || stop "no endpoints configured in $BINDING"
+
+echo "services.health.status"
+echo "binding: $BINDING"
+echo "endpoints: $COUNT"
+echo
+printf "%-16s %-16s %-8s %-10s %s\n" "ID" "HOST" "STATUS" "TIME" "NOTE"
+
+fail=0
+checked=0
+
+for i in $(seq 0 $((COUNT-1))); do
+  id="$(yq -r ".endpoints[$i].id" "$BINDING")"
+  host="$(yq -r ".endpoints[$i].host" "$BINDING")"
+  url="$(yq -r ".endpoints[$i].url" "$BINDING")"
+  expect="$(yq -r ".endpoints[$i].expect // 200" "$BINDING")"
+
+  if [[ -n "$FILTER" && "$id" != "$FILTER" ]]; then
+    continue
+  fi
+
+  checked=$((checked + 1))
+
+  # Time the request (ms)
+  start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+
+  set +e
+  http_code="$(curl -fsS -o /dev/null -w "%{http_code}" \
+    --connect-timeout "$DEF_CONNECT" \
+    --max-time "$DEF_MAX" \
+    "$url" 2>/dev/null)"
+  curl_exit=$?
+  set -e
+
+  end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  dur_ms=$((end_ms - start_ms))
+
+  if [[ "$curl_exit" -eq 0 && "$http_code" == "$expect" ]]; then
+    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "OK" "${dur_ms}ms" ""
+  elif [[ "$curl_exit" -eq 0 ]]; then
+    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "DEGRADED" "${dur_ms}ms" "http=$http_code expected=$expect"
+    fail=1
+  elif [[ "$curl_exit" -eq 28 ]]; then
+    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "TIMEOUT" "${dur_ms}ms" "connect/max timeout"
+    fail=1
+  elif [[ "$curl_exit" -eq 7 ]]; then
+    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "REFUSED" "${dur_ms}ms" "connection refused"
+    fail=1
+  else
+    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "FAIL" "${dur_ms}ms" "curl_exit=$curl_exit"
+    fail=1
+  fi
+done
+
+echo
+
+if [[ "$checked" -eq 0 && -n "$FILTER" ]]; then
+  echo "STOP (2): endpoint '$FILTER' not found in binding"
+  exit 2
+fi
+
+if [[ "$fail" -eq 1 ]]; then
+  echo "status: FAIL (some endpoints unhealthy)"
+  exit 1
+fi
+
+echo "status: OK (all endpoints healthy)"
+exit 0
