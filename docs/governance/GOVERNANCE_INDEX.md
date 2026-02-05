@@ -129,12 +129,7 @@ For the complete list: `cat docs/governance/SSOT_REGISTRY.yaml`
 > **Tooling Index:** External references are allowed only via
 > [WORKBENCH_TOOLING_INDEX.md](WORKBENCH_TOOLING_INDEX.md).
 
-**Allowed external tooling (via Tooling Index only):**
-- `~/Code/workbench/infra/compose/`
-- `~/Code/workbench/infra/cloudflare/`
-- `~/Code/workbench/infra/data/`
-- `~/Code/workbench/infra/templates/`
-- `~/Code/workbench/scripts/mint` (RAG CLI)
+**Allowed external tooling:** See [WORKBENCH_TOOLING_INDEX.md](WORKBENCH_TOOLING_INDEX.md) for the complete list of approved workbench entry points.
 
 **Historical references:** Audit files under `docs/governance/_audits/` may contain paths
 to the deprecated `ronny-ops` repository. These are point-in-time captures for historical

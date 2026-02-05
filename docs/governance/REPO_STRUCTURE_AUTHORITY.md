@@ -51,39 +51,25 @@ Every doc is reachable from an index in 2 clicks
 ```
 workbench/
 ├── README.md                    # Repo overview
-│
-├── docs/                        # Cross-pillar documentation
-│   └── governance/              # Authority docs, SOPs, rules
-│
-├── mint-os/                     # PILLAR: Print shop management (LEGACY)
-├── modules/                     # PILLAR: Extracted microservices (NEW)
-│   ├── README.md                # Module standards and index
-│   ├── MODULE_EXTRACTION_GUIDE.md
-│   └── files-api/               # LEGACY (extracted to github:hypnotizedent/artwork-module)
-├── artwork-module/              # NOT IN THIS REPO - see github:hypnotizedent/artwork-module
-├── media-stack/                 # PILLAR: Jellyfin, *arr stack
-├── finance/                     # PILLAR: Firefly, Ghostfolio
-├── home-assistant/              # PILLAR: Home automation
-├── immich/                      # PILLAR: Photo management
-│
-├── infrastructure/              # DevOps, servers, shared infra
-│   ├── docs/                    # Infra documentation
-│   ├── mcps/                    # MCP servers
-│   ├── skills/                  # Reusable agent skills
-│   ├── cloudflare/              # Cloudflare IaC
-│   ├── pihole/                  # Pi-hole configs
-│   ├── n8n/                     # n8n workflows
-│   └── ...                      # Other infra services
-│
-├── scripts/                     # Shared scripts (cross-pillar)
-│   ├── agents/                  # Agent helper scripts
-│   ├── backup/                  # Backup scripts
-│   ├── rag/                     # RAG indexing scripts
-│   └── ...
-│
-├── .archive/                    # Archived content (out of scope)
-├── .github/                     # GitHub Actions, templates
-└── .githooks/                   # Git hooks
+├── WORKBENCH_CONTRACT.md        # Canonical rules for this repo
+├── bin/                         # Entry points (ops/mint/work helpers)
+├── bootstrap/                   # Mac setup helpers
+├── docs/                        # Documentation (core + legacy)
+│   ├── governance/              # Workbench governance (reference)
+│   ├── infrastructure/          # Core infra index (authoritative in workbench)
+│   ├── legacy/                  # Quarantined reference (read-only)
+│   └── receipts/                # Workbench session receipts
+├── dotfiles/                    # Shell/editor configs
+├── infra/                       # Canonical infra configs + inventories
+│   ├── compose/                 # Docker compose stacks
+│   ├── cloudflare/              # DNS/tunnel exports
+│   ├── data/                    # Machine-readable inventories
+│   ├── templates/               # Templates/scaffolds
+│   ├── networking/              # Network configs
+│   ├── storage/                 # Storage configs
+│   └── backups/                 # Backup configs
+├── scripts/                     # Operational scripts
+└── .archive/                    # Archived content (out of scope)
 ```
 
 > **Spine session entry:** [`docs/governance/SESSION_PROTOCOL.md`](SESSION_PROTOCOL.md). The old `workbench/00_CLAUDE.md` is archived and should not be used at runtime.
@@ -92,63 +78,29 @@ workbench/
 
 ## LAYER DEFINITIONS
 
-Think in 4 layers: **Product → Platform → Infra → Ops**
+Think in 4 layers: **Docs → Infra → Tooling → Ops**
 
 | Layer | Folder | Contains | Examples |
 |-------|--------|----------|----------|
-| **Product** | `mint-os/`, `media-stack/`, etc. | Business logic, apps | Mint OS API, Jellyfin configs |
-| **Platform** | `infrastructure/mcps/`, `infrastructure/skills/` | Shared tooling | MCP servers, agent skills |
-| **Infra** | `infrastructure/cloudflare/`, `infrastructure/pihole/` | IaC, desired state | Terraform, Docker configs |
-| **Ops** | Workbench runbooks (quarantined; see WORKBENCH_TOOLING_INDEX.md) | Runtime procedures | Backup runbooks, incident docs |
+| **Docs** | `docs/` | Core index + quarantined reference | `docs/infrastructure/`, `docs/legacy/` |
+| **Infra** | `infra/` | Canonical configs + inventories | `infra/compose/`, `infra/data/`, `infra/cloudflare/` |
+| **Tooling** | `bin/`, `scripts/`, `dotfiles/`, `bootstrap/` | CLI + local setup | `bin/ops`, `scripts/root/` |
+| **Ops** | `docs/legacy/infrastructure/runbooks/` | Runbooks (read-only) | Backup/incident guides |
 
 ---
 
-## THE 8 PILLARS
+## EXTERNAL PILLARS (NOT IN WORKBENCH)
 
-Each pillar is a self-contained product area with its own docs:
+The workbench is **tooling only**. Product pillars live in other repos.
+If any of these folders appear in workbench, it is drift:
 
-| Pillar | Path | Purpose |
-|--------|------|---------|
-| **mint-os** | `mint-os/` | Print shop management system (LEGACY - being decomposed) |
-| **modules** | `modules/` | LEGACY scaffolds - extracted modules live in own repos |
-| **Artwork Module** | `github:hypnotizedent/artwork-module` | Files/artwork API (EXTRACTED) |
-| **media-stack** | `media-stack/` | Jellyfin, Sonarr, Radarr, etc. |
-| **finance** | `finance/` | Firefly III, Ghostfolio |
-| **home-assistant** | `home-assistant/` | Home automation |
-| **immich** | `immich/` | Photo/video management |
-| **infrastructure** | `infrastructure/` | DevOps, servers, shared infra |
-
-### Module Extraction Pattern
-
-mint-os is being decomposed into standalone modules:
-
-| Module | Status | Location |
-|--------|--------|----------|
-| **Artwork Module** | ✅ Extracted | `github:hypnotizedent/artwork-module` |
-| `pricing-api` | Planned | TBD |
-| `shipping-api` | Planned | TBD |
-
-**Reference Implementation:** `github:hypnotizedent/artwork-module` demonstrates the module pattern.
-**Extraction Guide:** `modules/MODULE_EXTRACTION_GUIDE.md`
-**Legacy Path:** `modules/files-api/` is tombstoned - see `modules/files-api/LEGACY.md`
-
-### Pillar Internal Structure
-
-Each pillar SHOULD follow:
-
-```
-<pillar>/
-├── README.md                    # Pillar overview
-├── CLAUDE.md or *_CONTEXT.md    # Agent entry point
-├── docs/
-│   ├── reference/               # REF_* docs
-│   ├── plans/                   # PLAN_* docs
-│   ├── runbooks/                # RUNBOOK_* docs
-│   ├── sessions/                # Session handoffs
-│   └── architecture/            # Architecture docs
-├── scripts/                     # Pillar-specific scripts
-└── ...                          # Service-specific folders
-```
+- `mint-os/`
+- `media-stack/`
+- `finance/`
+- `home-assistant/`
+- `immich/`
+- `modules/`
+- `artwork-module/`
 
 ---
 
@@ -162,8 +114,7 @@ Each pillar SHOULD follow:
 | `temp/`, `tmp/` | Transient | Don't commit |
 | `misc/`, `notes/` | Junk drawer | Archive or delete |
 | `old/`, `backup/` | Dead weight | `.archive/` |
-| `dotfiles/` | Belongs in infra | `infrastructure/dotfiles/` |
-| Any new pillar | Without governance | Discuss first |
+| Any new top-level folder | Unreviewed drift | Update this doc first |
 
 ---
 
@@ -175,38 +126,18 @@ Each pillar SHOULD follow:
 
 | Entry | Type | Purpose |
 |-------|------|---------|
-| `modules/` | dir | Deployable microservices (preferred home for new code) |
-| `infrastructure/` | dir | Platform, tooling, ops configs |
-| `docs/` | dir | Cross-pillar documentation |
-| `scripts/` | dir | Shared scripts |
-| `receipts/` | dir | Execution proof (timestamped, gitignored) |
-| `_evidence/` | dir | Stable artifacts supporting claims |
-| `logs/` | dir | Local logs (gitignored, non-authoritative) |
 | `.archive/` | dir | Archived content (out of scope) |
-| `.github/` | dir | GitHub Actions, templates |
-| `.githooks/` | dir | Git hooks |
-| `.brain/` | dir | Local agent context (gitignored) |
-| `.claude/` | dir | Claude Code settings |
-| `.opencode/` | dir | OpenCode settings |
-| `.agent/` | dir | Agent context |
-| `.venv/` | dir | Python virtual environment |
-| `.worktrees/` | dir | Git worktrees |
-| `.external-repos/` | dir | External repo references |
-| `.mcp.json` | file | MCP server config |
-| `.cursorrules` | file | Cursor editor rules |
+| `.git/` | dir | Git metadata |
 | `.DS_Store` | file | macOS metadata (gitignored) |
-| `mint-os/` | dir | PILLAR: Print shop (legacy) |
-| `media-stack/` | dir | PILLAR: Media services |
-| `finance/` | dir | PILLAR: Financial tools |
-| `home-assistant/` | dir | PILLAR: Home automation |
-| `immich/` | dir | PILLAR: Photo management |
-| `artwork-module/` | dir | LEGACY: Historical extraction notes |
-| `README.md` | file | Repo overview |
-| `AGENTS.md` | file | Agent routing |
-| `CLAUDE.md` | file | Claude Code entry (mirrors AGENTS.md) |
-| `opencode.json` | file | OpenCode config |
-| `.claudeignore` | file | Claude Code exclusions |
 | `.gitignore` | file | Git exclusions |
+| `README.md` | file | Repo overview |
+| `WORKBENCH_CONTRACT.md` | file | Canonical rules for this repo |
+| `bin/` | dir | Entry points (ops/mint/work helpers) |
+| `bootstrap/` | dir | Mac setup helpers |
+| `docs/` | dir | Core index + legacy reference |
+| `dotfiles/` | dir | Shell/editor configs |
+| `infra/` | dir | Canonical infra configs + inventories |
+| `scripts/` | dir | Operational scripts |
 
 ### Drift Check Command
 
@@ -215,13 +146,13 @@ Run this to verify no unexpected root entries exist:
 ```bash
 TS="$(date +%F_%H%M)"
 R="$HOME/Code/workbench"
-OUT="$R/receipts/repo_root_drift_${TS}.log"
-mkdir -p "$R/receipts"
+OUT="$R/docs/receipts/repo_root_drift_${TS}.log"
+mkdir -p "$R/docs/receipts"
 
 cd "$R" || exit 1
 
 # Allowlist regex (update ONLY via PR to this doc)
-ALLOW='^(\.git|\.github|\.githooks|\.archive|\.brain|\.claude|\.opencode|\.agent|\.venv|\.worktrees|\.external-repos|\.mcp\.json|\.cursorrules|\.DS_Store|modules|infrastructure|docs|scripts|receipts|_evidence|logs|mint-os|media-stack|finance|home-assistant|immich|artwork-module|README\.md|AGENTS\.md|CLAUDE\.md|opencode\.json|\.claudeignore|\.gitignore)$'
+ALLOW='^(\.git|\.archive|\.DS_Store|\.gitignore|README\.md|WORKBENCH_CONTRACT\.md|bin|bootstrap|docs|dotfiles|infra|scripts)$'
 
 {
   echo "=== REPO ROOT DRIFT CHECK @ $TS ==="
@@ -255,14 +186,13 @@ echo "WROTE: $OUT"
 
 | File Pattern | MUST Go In | Example |
 |--------------|------------|---------|
-| `*_AUTHORITY.md` | `docs/governance/` or pillar `docs/` | `INFRASTRUCTURE_AUTHORITY.md` |
-| `*_RULES.md` | `docs/governance/` | `RAG_INDEXING_RULES.md` |
-| `*_SOP.md` | `docs/governance/` | `ISSUE_CLOSURE_SOP.md` |
-| `REF_*.md` | `*/docs/reference/` | `mint-os/docs/reference/REF_API.md` |
-| `PLAN_*.md` | `*/docs/plans/` | `mint-os/docs/plans/PLAN_SHOPIFY.md` |
-| `*_RUNBOOK.md` | `docs/governance/` | `docs/governance/MAILROOM_RUNBOOK.md` |
-| `*-HANDOFF.md` | `*/docs/sessions/` | `mint-os/docs/sessions/2026-01-22-HANDOFF.md` |
-| `SPEC.md` | `modules/<module>/` | `modules/files-api/SPEC.md` |
+| `*_AUTHORITY.md` | `docs/infrastructure/` (core) or `docs/governance/` (policy) | `docs/infrastructure/AUTHORITY_INDEX.md` |
+| `*_RULES.md` | `docs/governance/` | `docs/governance/RAG_INDEXING_RULES.md` |
+| `*_SOP.md` | `docs/governance/` | `docs/governance/ISSUE_CLOSURE_SOP.md` |
+| `REF_*.md` | `docs/legacy/infrastructure/reference/` | `docs/legacy/infrastructure/reference/REF_PIHOLE.md` |
+| `PLAN_*.md` | `docs/legacy/infrastructure/reference/plans/` | `docs/legacy/infrastructure/reference/plans/PLAN_AGENTS_2026-01-25.md` |
+| `*_RUNBOOK.md` | `docs/legacy/infrastructure/runbooks/` | `docs/legacy/infrastructure/runbooks/BACKUP_PROTOCOL.md` |
+| `*_RECEIPT.md` | `docs/receipts/` | `docs/receipts/SESSION_20260204-154330__core-gap-sweep.md` |
 
 ---
 

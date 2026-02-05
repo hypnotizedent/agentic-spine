@@ -62,6 +62,29 @@ If it doesn't fit Move A or Move B, it's not ready to extract. Document it and w
 3. `backup.status` — Likely Move A first (doc-only)
 4. `deploy.status` — Likely Move A first (doc-only)
 
+## Trace Gate (Mandatory)
+
+Before marking any extraction complete, run the trace gate:
+
+1. **Path scan** — verify no conflicting path references:
+   ```bash
+   rg -n "(ronny-ops|~/Code/workbench|workbench|infrastructure/docs)" docs ops surfaces bin \
+     -g'!receipts/**' -g'!mailroom/outbox/**'
+   ```
+   - **Allowed:** WORKBENCH_TOOLING_INDEX.md
+   - **Historical:** docs/legacy/**, docs/governance/_audits/**
+   - **Conflict:** any other location (must resolve)
+
+2. **Lint verification:**
+   ```bash
+   ./bin/ops cap run docs.lint
+   ./bin/ops cap run spine.verify
+   ```
+
+3. **Document in mailroom** — if the extraction touches governance docs, create a mailroom item with the trace matrix.
+
+Workbench paths live only in WORKBENCH_TOOLING_INDEX.md. All other references are conflicts.
+
 ## Drift Gate Pattern
 
 After extraction, consider adding a drift gate (D18, D19, etc.) if the capability:

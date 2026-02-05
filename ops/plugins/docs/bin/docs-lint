@@ -140,7 +140,13 @@ fi
 echo ""
 echo "--- Check 6b: External doc leaks ---"
 WORKBENCH_DOCS="$(rg -n "workbench/docs" "$DOCS" -g'!docs/governance/WORKBENCH_TOOLING_INDEX.md' 2>/dev/null || true)"
-INFRA_DOCS="$(rg -n "infrastructure/docs" "$DOCS" 2>/dev/null || true)"
+# Exclude code blocks (rg command examples) and EXTRACTION_PROTOCOL (scan syntax)
+INFRA_DOCS="$(rg -n "infrastructure/docs" "$DOCS" -g'!docs/core/EXTRACTION_PROTOCOL.md' 2>/dev/null | grep -v 'rg -n\|rg .*infrastructure' || true)"
+# Exclude: WORKBENCH_TOOLING_INDEX (canonical), LEGACY_DEPRECATION (policy/examples), source attribution patterns
+WORKBENCH_INFRA="$(rg -n "~/Code/workbench/infra" "$DOCS" \
+  -g'!docs/governance/WORKBENCH_TOOLING_INDEX.md' \
+  -g'!docs/governance/LEGACY_DEPRECATION.md' \
+  2>/dev/null | grep -v 'Source Attribution\|Seeded from\|Source:' || true)"
 
 if [[ -n "$WORKBENCH_DOCS" ]]; then
   err "workbench docs referenced outside WORKBENCH_TOOLING_INDEX.md:"
@@ -154,6 +160,13 @@ if [[ -n "$INFRA_DOCS" ]]; then
   echo "$INFRA_DOCS" | head -10
 else
   echo "  No infrastructure/docs references (clean)"
+fi
+
+if [[ -n "$WORKBENCH_INFRA" ]]; then
+  err "workbench/infra paths outside WORKBENCH_TOOLING_INDEX.md:"
+  echo "$WORKBENCH_INFRA" | head -10
+else
+  echo "  No workbench/infra paths outside Tooling Index (clean)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
