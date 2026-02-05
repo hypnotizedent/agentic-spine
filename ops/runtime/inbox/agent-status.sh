@@ -19,18 +19,32 @@ LEDGER="${STATE_DIR}/ledger.csv"
 
 echo "== LAUNCHD =="
 echo "service: $LABEL"
-WATCHER_INFO="$(launchctl list "$LABEL" 2>/dev/null || true)"
-if [[ -n "$WATCHER_INFO" ]]; then
-  WATCHER_PID="$(echo "$WATCHER_INFO" | sed -n 's/.*"PID" = \([0-9]*\).*/\1/p')"
-  WATCHER_EXIT="$(echo "$WATCHER_INFO" | sed -n 's/.*"LastExitStatus" = \([0-9]*\).*/\1/p')"
-  if [[ -n "$WATCHER_PID" ]]; then
+WATCHER_PRINT="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null || true)"
+if [[ -n "$WATCHER_PRINT" ]]; then
+  WATCHER_STATE="$(echo "$WATCHER_PRINT" | awk -F' = ' '/state =/{print $2; exit}')"
+  WATCHER_PID="$(echo "$WATCHER_PRINT" | awk '/pid =/{print $3; exit}')"
+  if [[ "$WATCHER_STATE" == "running" && -n "$WATCHER_PID" ]]; then
     echo "state: running"
     echo "pid: $WATCHER_PID"
   else
-    echo "state: loaded (not running; last_exit=${WATCHER_EXIT:-unknown})"
+    echo "state: ${WATCHER_STATE:-unknown}"
+    [[ -n "$WATCHER_PID" ]] && echo "pid: $WATCHER_PID"
   fi
 else
-  echo "state: not loaded"
+  # Fallback for older launchctl output formats
+  WATCHER_INFO="$(launchctl list "$LABEL" 2>/dev/null || true)"
+  if [[ -n "$WATCHER_INFO" ]]; then
+    WATCHER_PID="$(echo "$WATCHER_INFO" | sed -n 's/.*"PID" = \([0-9]*\).*/\1/p')"
+    WATCHER_EXIT="$(echo "$WATCHER_INFO" | sed -n 's/.*"LastExitStatus" = \([0-9]*\).*/\1/p')"
+    if [[ -n "$WATCHER_PID" ]]; then
+      echo "state: running"
+      echo "pid: $WATCHER_PID"
+    else
+      echo "state: loaded (not running; last_exit=${WATCHER_EXIT:-unknown})"
+    fi
+  else
+    echo "state: not loaded"
+  fi
 fi
 
 echo
