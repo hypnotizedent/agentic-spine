@@ -99,7 +99,7 @@ Think in 4 layers: **Product → Platform → Infra → Ops**
 | **Product** | `mint-os/`, `media-stack/`, etc. | Business logic, apps | Mint OS API, Jellyfin configs |
 | **Platform** | `infrastructure/mcps/`, `infrastructure/skills/` | Shared tooling | MCP servers, agent skills |
 | **Infra** | `infrastructure/cloudflare/`, `infrastructure/pihole/` | IaC, desired state | Terraform, Docker configs |
-| **Ops** | `infrastructure/docs/runbooks/` | Runtime procedures | Backup runbooks, incident docs |
+| **Ops** | Workbench runbooks (quarantined; see WORKBENCH_TOOLING_INDEX.md) | Runtime procedures | Backup runbooks, incident docs |
 
 ---
 
@@ -260,7 +260,7 @@ echo "WROTE: $OUT"
 | `*_SOP.md` | `docs/governance/` | `ISSUE_CLOSURE_SOP.md` |
 | `REF_*.md` | `*/docs/reference/` | `mint-os/docs/reference/REF_API.md` |
 | `PLAN_*.md` | `*/docs/plans/` | `mint-os/docs/plans/PLAN_SHOPIFY.md` |
-| `RUNBOOK_*.md` | `*/docs/runbooks/` | `infrastructure/docs/runbooks/RUNBOOK_BACKUP.md` |
+| `*_RUNBOOK.md` | `docs/governance/` | `docs/governance/MAILROOM_RUNBOOK.md` |
 | `*-HANDOFF.md` | `*/docs/sessions/` | `mint-os/docs/sessions/2026-01-22-HANDOFF.md` |
 | `SPEC.md` | `modules/<module>/` | `modules/files-api/SPEC.md` |
 
@@ -272,7 +272,7 @@ echo "WROTE: $OUT"
 2. **Service docs live with service** — README + runbook links in each pillar
 3. **Decisions are ADRs** — `docs/architecture/decisions/ADR-####-title.md`
 4. **Runbooks are step-by-step** — Symptoms → Checks → Fix → Verify → Rollback
-5. **One canonical inventory** — `infrastructure/SERVICE_REGISTRY.md`
+5. **One canonical inventory** — `docs/governance/SERVICE_REGISTRY.yaml`
 6. **No misc/temp/old/notes** — Archive or delete
 7. **Every category folder has a README** — Explains what's in it
 
@@ -400,8 +400,7 @@ If you need to change allowed directories or rules:
 | `docs/governance/SESSION_PROTOCOL.md` | References this for folder rules |
 | `AGENTS.md` | Routes agents to correct pillars |
 | `RAG_INDEXING_RULES.md` | Defines what gets indexed based on structure |
-| `infrastructure/docs/INDEX.md` | Role-based entry point |
+| `WORKBENCH_TOOLING_INDEX.md` | External tooling references (read-only) |
 | `mint-os/docs/reference/INDEX.md` | Pillar-specific doc catalog |
 | `.githooks/pre-commit` | Enforces structure rules on commit |
 | `.github/workflows/documentation-lint.yml` | Enforces naming conventions on PR |
-| `infrastructure/docs/locations/LAPTOP.md#home-contract` | Home folder zones + workspace rules |

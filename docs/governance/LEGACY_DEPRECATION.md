@@ -26,7 +26,7 @@ scope: legacy-handling
 | `/ronnyworks/ronny-ops` | Deprecated repo name | **Legacy** |
 | `~/ronny-ops` | Deprecated home path | **Legacy** |
 | `~/Code/workbench` | Current workbench monolith | **External** (not spine-native) |
-| `workbench/infrastructure/*` | Workbench infra docs | **External reference only** |
+| Workbench documentation tree (docs/) | Workbench infra docs | **External reference only** |
 
 ---
 
@@ -40,7 +40,7 @@ scope: legacy-handling
 | Extraction tracking | "Legacy path: `ronny-ops/modules/files-api`" | Tracks migration |
 | Constraint declarations | "D16: legacy isolation from `ronny-ops`" | Defines boundary |
 | Source attribution | "Seeded from: `~/Code/workbench/infra/data/*.json`" | Credits original |
-| Workbench SSOT pointers | "For services topology, see `~/Code/workbench/infrastructure/SERVICE_REGISTRY.md`" | Points to external authority |
+| Workbench tooling references | "See WORKBENCH_TOOLING_INDEX.md for approved tooling paths" | Centralized external pointer |
 
 ### Forbidden (Runtime Dependency)
 
@@ -147,8 +147,10 @@ This policy is enforced by:
 
 1. **D16 (legacy isolation)** — `docs/legacy/` quarantine zone
 2. **docs.lint CHECK 6** — forbidden pattern scan outside allowed contexts
-3. **PR review** — reviewers should check for unauthorized legacy promotion
-4. **SESSION_PROTOCOL checklist** — agents verify spine is self-contained before work
+3. **External reference rule** — External doc references are allowed only via
+   [WORKBENCH_TOOLING_INDEX.md](WORKBENCH_TOOLING_INDEX.md)
+4. **PR review** — reviewers should check for unauthorized legacy promotion
+5. **SESSION_PROTOCOL checklist** — agents verify spine is self-contained before work
 
 ---
 
@@ -160,6 +162,7 @@ This policy is enforced by:
 | [GOVERNANCE_INDEX.md](GOVERNANCE_INDEX.md) | Lists workbench SSOTs as external references |
 | [REPO_STRUCTURE_AUTHORITY.md](REPO_STRUCTURE_AUTHORITY.md) | References this policy |
 | [../core/SPINE_STATE.md](../core/SPINE_STATE.md) | Declares no-legacy-dependency invariant |
+| [WORKBENCH_TOOLING_INDEX.md](WORKBENCH_TOOLING_INDEX.md) | Centralized workbench entry points (read-only) |
 
 ---
 

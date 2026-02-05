@@ -29,9 +29,8 @@ This document establishes:
 4. **Stream Deck Integration** - Physical buttons mapped to infrastructure actions
 
 **Related Documents:**
-- `infrastructure/SERVICE_REGISTRY.md` - Detailed service-level info (ports, containers)
-- `infrastructure/docs/locations/SHOP.md` - Shop physical infrastructure
-- `infrastructure/docs/locations/HOME.md` - Home physical infrastructure
+- `docs/governance/SERVICE_REGISTRY.yaml` - Service-level endpoints and health checks
+- `docs/governance/WORKBENCH_TOOLING_INDEX.md` - External infra tooling (read-only)
 
 ---
 
@@ -167,7 +166,7 @@ ssh proxmox-home "qm list"
 
 ### Current State
 
-Stream Deck is configured for Home Assistant control only (`home-assistant/docs/devices/STREAM_DECK.md`). This section extends it to infrastructure operations.
+Stream Deck is configured for Home Assistant control only (see the Home Assistant repo docs). This section extends it to infrastructure operations.
 
 ### MVP Button Layout (Infrastructure)
 
@@ -258,9 +257,9 @@ These items need verification and should be updated as discovered:
 
 | Runbook | Purpose | Script |
 |---------|---------|--------|
-| `docs/runbooks/REBOOT_HEALTH_GATE.md` | Pre/post reboot validation | `scripts/infra/reboot_gate.sh` |
-| `docs/runbooks/BACKUP_GOVERNANCE.md` | Backup what/where/how/verify | `scripts/infra/backup_verify.sh` |
-| `infrastructure/docs/runbooks/COLD_START_RECOVERY.md` | Full recovery after power loss | - |
+| `docs/governance/REBOOT_HEALTH_GATE.md` | Pre/post reboot validation | `scripts/infra/reboot_gate.sh` |
+| `docs/governance/BACKUP_GOVERNANCE.md` | Backup what/where/how/verify | `scripts/infra/backup_verify.sh` |
+| External recovery runbook | Cold start recovery (workbench tooling; see WORKBENCH_TOOLING_INDEX.md) | - |
 
 ### Latest Audit
 

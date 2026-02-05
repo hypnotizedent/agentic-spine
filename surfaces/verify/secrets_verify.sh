@@ -1,6 +1,6 @@
 #!/bin/bash
 # Secrets Inventory Verification Script
-# Governance: infrastructure/docs/runbooks/INFISICAL_GOVERNANCE.md
+# Governance: docs/governance/SECRETS_POLICY.md
 # Issue: #628
 # Purpose: Validate secrets inventory structure and check for committed secrets (read-only)
 

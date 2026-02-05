@@ -23,19 +23,17 @@ Prevent duplicate scripts, scattered utilities, and configuration drift. All scr
 
 For spine-native scripts, see [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) and the `ops/` directory.
 
-### External Script Directories (Workbench)
+### External Script Exception (Workbench)
 
 > **⚠️ External Reference (Read-Only)**
 >
-> The paths below reference the workbench monolith (`~/Code/workbench`). These are
-> **not governed by the spine**. Do not execute these from a spine session.
+> The only approved external script reference in the spine is the workbench
+> RAG CLI. All other workbench scripts are quarantined and must not be referenced.
 > See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for the external reference policy.
 
-| Directory | Purpose | Status |
-|-----------|---------|--------|
-| `~/Code/workbench/scripts/` | Main scripts directory | external |
-| `~/Code/workbench/mint-os/scripts/` | Mint OS specific | external |
-| `~/Code/workbench/infra/scripts/` | Infrastructure automation | external |
+| Script | Purpose | Status |
+|--------|---------|--------|
+| `~/Code/workbench/scripts/mint` | RAG CLI (ask, health, index) | external (allowed) |
 
 ### ❌ DO NOT put scripts in:
 - Root of any repo
@@ -47,15 +45,14 @@ For spine-native scripts, see [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) and the
 
 ## REGISTERED SCRIPTS
 
-> **Full registry:** See [infrastructure/docs/runbooks/SCRIPTS_REGISTRY.md](../../infrastructure/docs/runbooks/SCRIPTS_REGISTRY.md)
+> **Spine-native registry:** See [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md)
 
 ### Core CLI Tools:
 
 | Script | Location | Purpose |
 |--------|----------|---------|
 | `mint` | `~/Code/workbench/scripts/mint` | RAG CLI (ask, health, index) |
-| `infisical-agent.sh` | Canonical: `ops/tools/infisical-agent.sh` / Vendored: `scripts/agents/infisical-agent.sh` | Secrets management with caching |
-| `load-secrets.sh` | `~/Code/workbench/scripts/root/load-secrets.sh` | Shell startup secrets loader |
+| `infisical-agent.sh` | Canonical: `ops/tools/infisical-agent.sh` | Secrets management with caching |
 
 ### Infisical Agent Commands (Updated 2026-01-22):
 

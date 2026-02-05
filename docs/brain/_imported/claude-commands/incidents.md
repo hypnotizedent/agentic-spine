@@ -1,16 +1,18 @@
 ---
 description: Check incident history - what failed before?
-allowed-tools: Read, Bash(grep:*)
+allowed-tools: Read, Bash(mint:*)
 ---
 
-Read `infrastructure/docs/INCIDENTS_LOG.md` - this is the SSOT for incident history.
+Incident history lives in the workbench (external, read-only). Use RAG first:
 
-If $ARGUMENTS is provided, search for related incidents:
-`grep -i "$ARGUMENTS" infrastructure/docs/INCIDENTS_LOG.md`
+`cd ~/Code/workbench && mint ask "incident $ARGUMENTS"`
+
+If you need to browse manually, use [WORKBENCH_TOOLING_INDEX.md](../../governance/WORKBENCH_TOOLING_INDEX.md).
+Do not treat external docs as spine authority.
 
 Common patterns to check:
 - Tailscale DNS issues → `tailscale up --accept-dns=false --reset`
 - Docker host issues → Check DOCKER_HOST env var
-- RAG not working → Check SERVICE_REGISTRY.md RAG Operations section
+- RAG not working → Check SERVICE_REGISTRY.yaml RAG Operations section
 
 Present any relevant past incidents and their fixes before proceeding.

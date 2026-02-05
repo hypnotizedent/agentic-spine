@@ -85,32 +85,16 @@ the `stack_id` in STACK_REGISTRY.yaml is the durable key.
 
 ---
 
-## Infrastructure Documentation Index (Workbench)
+## Workbench Infrastructure Reference
 
-> Agents stay within `~/Code/`. All infrastructure docs extracted from ronny-ops now live
-> in `~/Code/workbench/docs/infrastructure/`. This section maps where to find them.
-
-| Topic | Workbench Path | File Count |
-|-------|---------------|-----------|
-| **Service Registry (SSOT)** | `workbench/docs/infrastructure/SERVICE_REGISTRY.md` + `.yaml` | 2 |
-| **Governance & Authority** | `workbench/docs/infrastructure/AUTHORITY_INDEX.md`, `GOVERNANCE_MANIFEST.yaml`, `MCP_AUTHORITY.md` | 3 |
-| **Locations** | `workbench/docs/infrastructure/locations/{HOME,LAPTOP,SHOP}.md` | 3 |
-| **Hardware** | `workbench/docs/infrastructure/hardware/` | 2 |
-| **Runbooks** | `workbench/docs/infrastructure/runbooks/` | 30 |
-| **Reference** | `workbench/docs/infrastructure/reference/` | 16 |
-| **Secrets** | `workbench/docs/infrastructure/secrets/` | 2 |
-| **Cloudflare** | `workbench/docs/infrastructure/cloudflare/` | 3 |
-| **MCP** | `workbench/docs/infrastructure/mcp/` | 3 |
-| **RAG** | `workbench/docs/infrastructure/rag/` | 6 |
-| **n8n** | `workbench/docs/infrastructure/n8n/` | 4 |
-| **Microsoft** | `workbench/docs/infrastructure/microsoft/` | 2 |
-| **Compose stacks** | `workbench/infra/compose/{mcpjungle,n8n,mint-os,storage,dashy,pihole}` | 92 |
-| **Data inventories** | `workbench/infra/data/*.json` | 6 |
-| **Templates** | `workbench/infra/templates/` | 6 |
-| **Cloudflare ops** | `workbench/infra/cloudflare/` | 4 |
-| **Full index** | `workbench/docs/infrastructure/README.md` | — |
-
-**Verification:** `ops cap run docs.status` + `ops cap run infra.extraction.status`
+> **External Reference (Read-Only)**
+>
+> Workbench infrastructure docs are **not spine-governed**. For a centralized
+> list of workbench entry points, see:
+>
+> → **[WORKBENCH_TOOLING_INDEX.md](../governance/WORKBENCH_TOOLING_INDEX.md)**
+>
+> Or query directly: `cd ~/Code/workbench && mint ask "question"`
 
 ---
 
@@ -122,4 +106,4 @@ the `stack_id` in STACK_REGISTRY.yaml is the durable key.
 | `ops/capabilities.yaml` (`docker.compose.status`) | Runtime compose health per stack |
 | `docs/core/DEVICE_IDENTITY_SSOT.md` | Device/VM identity (where stacks run) |
 | `docs/core/AGENTIC_GAP_MAP.md` | Extraction coverage tracking (23 asset groups) |
-| `~/Code/workbench/docs/infrastructure/README.md` | Full workbench infra docs index |
+| `docs/governance/WORKBENCH_TOOLING_INDEX.md` | External tooling references (read-only) |

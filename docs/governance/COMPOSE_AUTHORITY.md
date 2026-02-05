@@ -3,9 +3,18 @@ status: authoritative
 owner: "@ronny"
 last_verified: 2026-02-05
 scope: compose-locations
+source_repo: workbench
 ---
 
 # Compose Authority Map
+
+> **⚠️ External Reference (Workbench-Owned)**
+>
+> The compose file paths in this document point to the workbench monolith
+> (`~/Code/workbench`). The spine does not own these files—it only maps
+> where they live. For actual compose operations, work in the workbench repo.
+>
+> See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for external reference policy.
 
 **Date:** 2026-01-24
 **Scope:** Documentation only (no runtime changes)

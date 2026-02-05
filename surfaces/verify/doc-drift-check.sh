@@ -142,12 +142,11 @@ echo -e "${YELLOW}[6/7] Checking archive structure...${NC}"
 # Archives should be in pillar/docs/.archive/, not pillar/.archive/
 BAD_ARCHIVES=$(find . -type d -name ".archive" -not -path "*/docs/.archive" -not -path "./.archive" | grep -v "node_modules" || true)
 # Exclude acceptable pillar-level archives:
-# - infrastructure/docs/secrets/.archive/ (sensitive docs)
 # - immich/.archive/ (legacy content)
 # - home-assistant/.archive/ (legacy content)
 # - media-stack/docs/.archive/ (acceptable location)
 # - mint-os/apps/admin/docs/.archive/ (app-specific)
-BAD_ARCHIVES=$(echo "$BAD_ARCHIVES" | grep -v "infrastructure/docs/secrets/.archive" | grep -v "immich/.archive" | grep -v "home-assistant/.archive" | grep -v "media-stack/docs/.archive" | grep -v "mint-os/apps/admin/docs/.archive" || true)
+BAD_ARCHIVES=$(echo "$BAD_ARCHIVES" | grep -v "immich/.archive" | grep -v "home-assistant/.archive" | grep -v "media-stack/docs/.archive" | grep -v "mint-os/apps/admin/docs/.archive" || true)
 if [ -n "$BAD_ARCHIVES" ]; then
     echo -e "${YELLOW}WARNING: Archives outside docs/.archive/:${NC}"
     echo "$BAD_ARCHIVES" | while read f; do echo "  - $f"; done

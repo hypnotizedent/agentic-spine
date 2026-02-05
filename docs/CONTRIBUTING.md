@@ -11,10 +11,8 @@
 |--------|---------------|---------|
 | `docs/core/` | Spine invariants — contracts, bindings, locks, gap map | `AGENT_CONTRACT.md`, `CORE_LOCK.md`, `SECRETS_BINDING.md` |
 | `docs/governance/` | SSOTs, authority pages, registries, audits | `GOVERNANCE_INDEX.md`, `STACK_REGISTRY.yaml`, `SCRIPTS_AUTHORITY.md` |
-| `docs/extract/` | Extraction protocols, capability backlogs, planning inputs | `CAPABILITY_BACKLOG.md` |
-| `docs/plan/` | Session planning, orientation docs | `tomorrow.md` |
 | `docs/brain/` | Agent memory, context injection, imported commands | `README.md`, `rules.md` |
-| `docs/legacy/` | Archived imports (quarantined, reference only) | `_imports/` |
+| `docs/legacy/` | Archived imports + retired planning/extraction docs (reference only) | `_imports/` |
 | `docs/` (root) | Index + cheat sheet only | `README.md`, `OPERATOR_CHEAT_SHEET.md`, `CONTRIBUTING.md` |
 
 **Rule:** New docs must go into one of the named folders above. Do not create
@@ -25,7 +23,7 @@ loose files at `docs/` root. The only permitted root-level files are
 
 ## Metadata Header
 
-Every `.md` file (except README files and session planning docs) should include
+Every `.md` file (except README files) should include
 a status line in the first 10 lines. Two formats are acceptable:
 
 **YAML front matter:**

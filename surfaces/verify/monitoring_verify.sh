@@ -1,6 +1,6 @@
 #!/bin/bash
 # Monitoring Inventory Verification Script
-# Governance: infrastructure/docs/runbooks/MONITORING_GOVERNANCE.md
+# Governance: docs/governance/WORKBENCH_TOOLING_INDEX.md (external tooling only)
 # Issue: #628
 # Purpose: Validate monitoring inventory and optionally check endpoint health (read-only)
 

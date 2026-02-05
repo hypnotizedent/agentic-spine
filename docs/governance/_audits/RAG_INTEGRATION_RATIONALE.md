@@ -354,7 +354,7 @@ Before escalating to Tier 2:
 | File count | 434 md/sh files at depth 3 |
 | Governance | `docs/governance/RAG_INDEXING_RULES.md` |
 | Exclusions | `docs/governance/SEARCH_EXCLUSIONS.md` |
-| Manifest | `infrastructure/docs/rag/WORKSPACE_MANIFEST.json` |
+| Manifest | Workbench RAG manifest (external; see WORKBENCH_TOOLING_INDEX.md) |
 | SSOT Registry | `docs/governance/SSOT_REGISTRY.yaml` (50+ entries) |
 
 ---

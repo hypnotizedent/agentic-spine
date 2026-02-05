@@ -1,5 +1,5 @@
 ---
-status: reference
+status: historical
 owner: "@ronny"
 last_verified: 2026-01-25
 verification_method: table inventory reconciliation (#460)
@@ -8,38 +8,29 @@ github_issue: "#460"
 sources: []
 ---
 
-> **⚠️ Workbench Reference Document (Mint OS)**
+> **⚠️ Historical Capture (Mint OS)**
 >
-> This document is a **reference copy** of the Mint OS infrastructure schema, imported
-> from the workbench monolith for context. It is **not spine-governed**. The spine does
-> not own Mint OS database tables, MinIO buckets, or Mint OS container configs.
+> This document is a **point-in-time reference** of the Mint OS infrastructure schema,
+> imported from the workbench monolith for historical context. It is **not spine-governed**
+> and may be stale. The spine does not own Mint OS database tables, MinIO buckets, or
+> Mint OS container configs.
 >
-> **Do not execute INSERT/UPDATE commands from this document in a spine session.**
-> Query the workbench or Mint OS directly for authoritative schema answers.
+> **Do not execute commands or act on paths in this document from a spine session.**
+> Query the workbench or Mint OS directly for authoritative answers:
+> `cd ~/Code/workbench && mint ask "question"`
 >
-> See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for the external reference policy.
+> **Current authority:** See [GOVERNANCE_INDEX.md](GOVERNANCE_INDEX.md) for spine-native
+> SSOTs. See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for external reference policy.
 
-# STOP - READ THIS ENTIRE FILE BEFORE ANY DATA/FILE OPERATION
+# Mint OS Infrastructure Map (Historical Reference)
 
-> **This file is the SINGLE SOURCE OF TRUTH for ALL:**
-> - Database tables, columns, and relationships
-> - MinIO buckets and file URL patterns
-> - Container configurations
-> - Query patterns and INSERT templates
+> **⚠️ Historical Context Only**
 >
-> **BEFORE you:**
-> - Upload ANY file to MinIO
-> - INSERT/UPDATE ANY database record
-> - Create ANY new table or column
-> - Change ANY infrastructure component
+> The claims below were accurate when imported from workbench. They describe
+> workbench-owned infrastructure, not spine authority. For current truth,
+> query workbench RAG or check workbench docs directly.
 >
-> **YOU MUST:**
-> 1. Read the relevant section of this file
-> 2. Query existing patterns: `SELECT * FROM table LIMIT 5`
-> 3. Match the pattern EXACTLY
-> 4. If no pattern exists, STOP and ask
->
-> **Violations will break production. No exceptions.**
+> This document is preserved for reference during audits and migrations.
 
 ---
 

@@ -1,7 +1,7 @@
 ---
 status: deprecated
 deprecated_date: 2026-01-25
-superseded_by: infrastructure/SERVICE_REGISTRY.md
+superseded_by: docs/governance/SERVICE_REGISTRY.yaml
 reason: Governance cleanup - consolidated to single SSOT
 ---
 
@@ -11,11 +11,11 @@ reason: Governance cleanup - consolidated to single SSOT
 
 ## Canonical Replacement
 
-→ **[infrastructure/SERVICE_REGISTRY.md](../../infrastructure/SERVICE_REGISTRY.md)**
+→ **[SERVICE_REGISTRY.yaml](SERVICE_REGISTRY.yaml)** (spine-native)
 
 ## Why
 
-This file duplicated content that already existed in SERVICE_REGISTRY.md (registered SSOT, Priority 1). During governance cleanup, all infrastructure authority was consolidated there.
+This file duplicated content that already existed in SERVICE_REGISTRY.yaml (registered SSOT, Priority 1). During governance cleanup, all infrastructure authority was consolidated there.
 
 ## Do Not
 
@@ -23,4 +23,4 @@ This file duplicated content that already existed in SERVICE_REGISTRY.md (regist
 - Reference this file
 - Create new content here
 
-All infrastructure configuration lives in SERVICE_REGISTRY.md.
+All infrastructure configuration lives in SERVICE_REGISTRY.yaml.

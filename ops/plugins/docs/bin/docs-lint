@@ -45,7 +45,7 @@ echo "  $(find "$DOCS" -maxdepth 1 -type f -not -name ".DS_Store" | wc -l | tr -
 # ─────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- Check 2: Folder allowlist ---"
-ALLOWED_DIRS="core governance extract plan brain legacy"
+ALLOWED_DIRS="core governance brain legacy"
 
 for d in "$DOCS"/*/; do
   name="$(basename "$d")"
@@ -70,7 +70,6 @@ for f in $(find "$DOCS" -name "*.md" \
   -not -path "*/_receipts_meta/*" \
   -not -name "README.md" \
   -not -name "CONTRIBUTING.md" \
-  -not -name "tomorrow.md" \
   | sort); do
 
   # Check first 10 lines for status indicator
@@ -92,7 +91,7 @@ echo "--- Check 4: README.md registration ---"
 REGISTERED=0
 UNREGISTERED=0
 
-for f in $(find "$DOCS/core" "$DOCS/governance" "$DOCS/extract" -maxdepth 1 -name "*.md" -o -name "*.yaml" 2>/dev/null | sort); do
+for f in $(find "$DOCS/core" "$DOCS/governance" -maxdepth 1 -name "*.md" -o -name "*.yaml" 2>/dev/null | sort); do
   name="$(basename "$f")"
   if grep -q "$name" "$DOCS/README.md" 2>/dev/null; then
     REGISTERED=$((REGISTERED+1))
@@ -125,7 +124,7 @@ fi
 echo ""
 echo "--- Check 6: Forbidden patterns ---"
 FORBIDDEN="$(rg -n -S '(ronny-ops|LaunchAgents|launchd|\.plist)' "$DOCS" \
-  -g'!docs/core/**' -g'!docs/legacy/**' -g'!docs/governance/**' -g'!docs/extract/**' -g'!docs/brain/**' \
+  -g'!docs/core/**' -g'!docs/legacy/**' -g'!docs/governance/**' -g'!docs/brain/**' \
   2>/dev/null || true)"
 
 if [[ -n "$FORBIDDEN" ]]; then
@@ -133,6 +132,28 @@ if [[ -n "$FORBIDDEN" ]]; then
   echo "$FORBIDDEN" | head -10
 else
   echo "  No forbidden patterns outside quarantine (clean)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# CHECK 6b: External doc leaks
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Check 6b: External doc leaks ---"
+WORKBENCH_DOCS="$(rg -n "workbench/docs" "$DOCS" -g'!docs/governance/WORKBENCH_TOOLING_INDEX.md' 2>/dev/null || true)"
+INFRA_DOCS="$(rg -n "infrastructure/docs" "$DOCS" 2>/dev/null || true)"
+
+if [[ -n "$WORKBENCH_DOCS" ]]; then
+  err "workbench docs referenced outside WORKBENCH_TOOLING_INDEX.md:"
+  echo "$WORKBENCH_DOCS" | head -10
+else
+  echo "  No workbench docs references outside Tooling Index (clean)"
+fi
+
+if [[ -n "$INFRA_DOCS" ]]; then
+  err "forbidden infrastructure/docs references found:"
+  echo "$INFRA_DOCS" | head -10
+else
+  echo "  No infrastructure/docs references (clean)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────

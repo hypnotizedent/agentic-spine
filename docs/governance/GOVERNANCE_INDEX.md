@@ -47,15 +47,15 @@ Pillar entrypoints (per stack)
 
 ---
 
-## Infrastructure Truth (5 Spine-Native Docs)
+## Infrastructure Canon (8 Required-Reading Docs)
 
 > **⚠️ Read This Before Opening Any Infrastructure Doc**
 >
-> The workbench monolith (`~/Code/workbench/docs/infrastructure/`) contains **120+ files**
-> copied from legacy repos. Most are historical captures with no spine-native meaning.
-> **Do not read those docs unless you're auditing.**
+> The workbench monolith contains **120+ infrastructure docs** copied from legacy repos.
+> Most are historical captures with no spine-native meaning. **Do not read those docs
+> unless you're auditing.**
 >
-> The **only execution-worthy infrastructure docs** are the 5 spine-native files below.
+> The **only execution-worthy infrastructure docs** are the 8 spine-native files below.
 > Everything else is external reference—query the workbench directly if you need it.
 
 | # | Spine-Native Doc | What It Governs |
@@ -65,9 +65,13 @@ Pillar entrypoints (per stack)
 | 3 | [REPO_STRUCTURE_AUTHORITY.md](REPO_STRUCTURE_AUTHORITY.md) | Where files/folders belong |
 | 4 | [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) | How legacy docs can be promoted to spine authority |
 | 5 | [SSOT_REGISTRY.yaml](SSOT_REGISTRY.yaml) | Machine-readable authority registry |
+| 6 | [MAILROOM_RUNBOOK.md](MAILROOM_RUNBOOK.md) | Queue operations, ledger, logs, health checks |
+| 7 | [SECRETS_POLICY.md](SECRETS_POLICY.md) | Secrets management rules + Infisical binding |
+| 8 | [SERVICE_REGISTRY.yaml](SERVICE_REGISTRY.yaml) | Services topology + health check definitions |
 
-**For infrastructure details beyond these 5 docs:**
+**For infrastructure details beyond these 8 docs:**
 - Query workbench directly: `cd ~/Code/workbench && mint ask "question"`
+- See [WORKBENCH_TOOLING_INDEX.md](WORKBENCH_TOOLING_INDEX.md) for workbench entry points
 - Or check the spine's bindings: `ops/bindings/*.yaml` (seeded snapshots, not authoritative)
 
 ---
@@ -110,31 +114,27 @@ For the complete list: `cat docs/governance/SSOT_REGISTRY.yaml`
 
 ## Legacy References (External — Read-Only)
 
-> **⚠️ External Repository References (120+ Files)**
+> **⚠️ External Repository References (Read-Only)**
 >
-> The workbench monolith (`~/Code/workbench/docs/infrastructure/`) contains 120+ files:
-> runbooks, audits, architecture docs, reference guides, and historical captures.
+> The workbench monolith contains a large documentation tree (runbooks, audits,
+> architecture docs, reference guides, historical captures). **These are NOT
+> governed by the spine.**
 >
-> **These are NOT governed by the spine.** The spine points to a handful of them for
-> cross-repo context but does not claim authority over their content.
->
-> **Do not execute commands or act on these paths from within a spine session.**
-> If you need infrastructure answers beyond the 5 spine-native docs above, query the
+> **Do not execute commands or act on external doc paths from within a spine session.**
+> If you need infrastructure answers beyond the spine-native docs above, query the
 > workbench directly: `cd ~/Code/workbench && mint ask "question"`
 >
 > See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for the full policy.
+>
+> **Tooling Index:** External references are allowed only via
+> [WORKBENCH_TOOLING_INDEX.md](WORKBENCH_TOOLING_INDEX.md).
 
-| Domain | External SSOT | Status |
-|--------|---------------|--------|
-| Services/Topology | `~/Code/workbench/infrastructure/SERVICE_REGISTRY.md` | reference |
-| Database Schema | `~/Code/workbench/mint-os/docs/SCHEMA_TRUTH.md` | reference |
-| Quote System | `~/Code/workbench/mint-os/docs/QUOTE_SINGLE_SOURCE_OF_TRUTH.md` | reference |
-| Shopify | `~/Code/workbench/infrastructure/shopify-mcp/SHOPIFY_SSOT.md` | reference |
-| Files/MinIO | `~/Code/workbench/mint-os/docs/modules/files/SPEC.md` | reference |
-| Incidents | `~/Code/workbench/infrastructure/docs/INCIDENTS_LOG.md` | reference |
-| Agents Inventory | `~/Code/workbench/infrastructure/data/agents_inventory.json` | reference |
-| Updates Inventory | `~/Code/workbench/infrastructure/data/updates_inventory.json` | reference |
-| RAG Manifest | `~/Code/workbench/infrastructure/docs/rag/WORKSPACE_MANIFEST.json` | reference |
+**Allowed external tooling (via Tooling Index only):**
+- `~/Code/workbench/infra/compose/`
+- `~/Code/workbench/infra/cloudflare/`
+- `~/Code/workbench/infra/data/`
+- `~/Code/workbench/infra/templates/`
+- `~/Code/workbench/scripts/mint` (RAG CLI)
 
 **Historical references:** Audit files under `docs/governance/_audits/` may contain paths
 to the deprecated `ronny-ops` repository. These are point-in-time captures for historical
@@ -150,17 +150,17 @@ When two documents disagree, use this process:
 
 ```bash
 # Find both documents in the registry
-yq '.ssots[] | select(.path | contains("SERVICE_REGISTRY"))' docs/governance/SSOT_REGISTRY.yaml
-yq '.ssots[] | select(.path | contains("SCHEMA_TRUTH"))' docs/governance/SSOT_REGISTRY.yaml
+yq '.ssots[] | select(.id == "service-registry")' docs/governance/SSOT_REGISTRY.yaml
+yq '.ssots[] | select(.id == "secrets-policy")' docs/governance/SSOT_REGISTRY.yaml
 ```
 
 ### Step 2: Compare Priority
 
 Lower priority number wins:
-- Priority 1 = Foundational (SERVICE_REGISTRY, SCHEMA_TRUTH, REPO_STRUCTURE)
-- Priority 2 = Domain-specific (QUOTE_SSOT, SHOPIFY_SSOT, FILES_SPEC)
+- Priority 1 = Foundational (SERVICE_REGISTRY, REPO_STRUCTURE, SESSION_PROTOCOL)
+- Priority 2 = Domain-specific (SECRETS_POLICY, MAILROOM_RUNBOOK, BACKUP_GOVERNANCE)
 - Priority 3 = Operational (RAG rules, exclusions)
-- Priority 4 = Index/pointers (AUTHORITY_INDEX, this doc)
+- Priority 4 = Index/pointers (this doc)
 
 ### Step 3: Check Scope
 
@@ -179,7 +179,7 @@ If still unclear, create an issue and tag @ronny.
 ## Conflict Resolution Example
 
 **Scenario:** Agent finds conflicting port numbers:
-- `SERVICE_REGISTRY.md` says MinIO is on port 9000
+- `SERVICE_REGISTRY.yaml` says MinIO is on port 9000
 - Some old doc says MinIO is on port 9005
 
 **Resolution:**
@@ -328,8 +328,6 @@ Before adding `status: authoritative` or claiming SSOT:
 | [SSOT_REGISTRY.yaml](SSOT_REGISTRY.yaml) | Machine-readable SSOT list |
 | [ARCHIVE_POLICY.md](ARCHIVE_POLICY.md) | What archived means |
 | [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) | Legacy/external reference policy |
-
-> **External (workbench):** `~/Code/workbench/infrastructure/docs/AUTHORITY_INDEX.md` — Document registry for the workbench monolith. Reference only; not spine-governed.
 
 ---
 

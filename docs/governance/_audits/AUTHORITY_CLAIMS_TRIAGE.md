@@ -35,15 +35,15 @@
 | `docs/governance/SECRETS_POLICY.md` | secrets-management | 2 |
 | `docs/runbooks/BACKUP_GOVERNANCE.md` | backup-strategy | 2 |
 | `docs/runbooks/REBOOT_HEALTH_GATE.md` | reboot-validation | 2 |
-| `infrastructure/SERVICE_REGISTRY.md` | services-topology | 1 |
-| `infrastructure/docs/AUTHORITY_INDEX.md` | document-registry | 4 |
-| `infrastructure/docs/INCIDENTS_LOG.md` | incident-history | 2 |
-| `infrastructure/docs/SSOT.md` | ssot-index | 4 |
+| Workbench service registry | services-topology | 1 |
+| Workbench authority index (external) | document-registry | 4 |
+| Workbench incidents log (external) | incident-history | 2 |
+| Workbench SSOT index (external) | ssot-index | 4 |
 | `infrastructure/shopify-mcp/SHOPIFY_SSOT.md` | shopify-integration | 2 |
 | `mint-os/docs/QUOTE_SINGLE_SOURCE_OF_TRUTH.md` | quote-creation | 2 |
 | `mint-os/docs/SCHEMA_TRUTH.md` | database-schema | 1 |
 | `mint-os/docs/modules/files/SPEC.md` | files-minio | 2 |
-| `infrastructure/docs/rag/WORKSPACE_MANIFEST.json` | rag-config | 3 |
+| Workbench RAG manifest (external) | rag-config | 3 |
 
 ---
 
@@ -79,7 +79,7 @@ These define real policy/constraints that agents/people must follow.
 | `docs/governance/ISSUE_CLOSURE_SOP.md` | issue-workflow | 3 | SOP is policy |
 | `docs/governance/AGENT_BOUNDARIES.md` | agent-rules | 2 | Defines agent constraints |
 | `docs/governance/SPEC_REQUIRED_SOP.md` | spec-workflow | 3 | SOP is policy |
-| `infrastructure/MCP_AUTHORITY.md` | mcp-servers | 2 | Rules for MCP servers |
+| Workbench MCP authority (external) | mcp-servers | 2 | Rules for MCP servers |
 | `mint-os/docs/modules/shipping/SPEC.md` | shipping-module | 2 | SPEC is policy |
 
 ### ⚠️ NEEDS REVIEW (3)
@@ -89,10 +89,10 @@ Read content before deciding.
 | Path | Question |
 |------|----------|
 | `infrastructure/RAG_ARCHITECTURE.md` | Is this policy or architecture snapshot? |
-| `infrastructure/docs/modules/docs/SPEC.md` | Is this active or legacy? |
-| `infrastructure/docs/modules/homelab/SPEC.md` | Is this active or legacy? |
-| `infrastructure/docs/AGENT_CONTEXT_PACK.md` | Is this policy or just a bundle? |
-| `infrastructure/docs/runbooks/RUNBOOK_INCIDENT.md` | Is this active or superseded by INCIDENTS_LOG? |
+| Workbench docs module spec (external) | Is this active or legacy? |
+| Workbench homelab module spec (external) | Is this active or legacy? |
+| Workbench agent context pack (external) | Is this policy or just a bundle? |
+| Workbench incident runbook (external) | Is this active or superseded by incidents log? |
 | `mint-os/INFRASTRUCTURE_MAP.md` | Is this a snapshot or does it define rules? |
 | `docs/governance/INFRASTRUCTURE_AUTHORITY.md` | What's its scope vs SERVICE_REGISTRY? |
 | `mint-os/docs/architecture/FILE_ARCHITECTURE_GOVERNANCE.md` | Overlaps with files/SPEC.md? |

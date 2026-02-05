@@ -51,7 +51,8 @@ The authority chain. When in doubt, these are the source of truth.
 | [REPO_STRUCTURE_AUTHORITY.md](governance/REPO_STRUCTURE_AUTHORITY.md) | Where files and directories belong |
 | [COMPOSE_AUTHORITY.md](governance/COMPOSE_AUTHORITY.md) | Where compose stacks belong + authority rules |
 | [SCRIPTS_AUTHORITY.md](governance/SCRIPTS_AUTHORITY.md) | What scripts exist and are safe to run |
-| [INFRASTRUCTURE_MAP.md](governance/INFRASTRUCTURE_MAP.md) | Full infrastructure schema (deep reference) |
+| [INFRASTRUCTURE_MAP.md](governance/INFRASTRUCTURE_MAP.md) | Historical infrastructure schema capture (workbench-owned) |
+| [WORKBENCH_TOOLING_INDEX.md](governance/WORKBENCH_TOOLING_INDEX.md) | Centralized workbench entry points (read-only reference) |
 | [CORE_AGENTIC_SCOPE.md](governance/CORE_AGENTIC_SCOPE.md) | What's in-scope for the spine vs external |
 | [DOMAIN_ROUTING_REGISTRY.yaml](governance/DOMAIN_ROUTING_REGISTRY.yaml) | Domain routing rules |
 | [AGENT_BOUNDARIES.md](governance/AGENT_BOUNDARIES.md) | Agent boundary constraints |
@@ -118,9 +119,7 @@ How assets move from the workbench monolith into the spine.
 |-----|---------------|
 | [AGENTIC_GAP_MAP.md](core/AGENTIC_GAP_MAP.md) | What has moved, what remains — 23 asset groups at 100% coverage |
 | [EXTRACTION_PROTOCOL.md](core/EXTRACTION_PROTOCOL.md) | Step-by-step extraction procedure + drift gate expectations |
-| [WORKBENCH_MIGRATION_QUEUE.md](extract/WORKBENCH_MIGRATION_QUEUE.md) | 123 workbench docs catalogued — migration queue (0 needed) |
 | [STACK_ALIGNMENT.md](core/STACK_ALIGNMENT.md) | Stack docs mapped to spine references + workbench infrastructure index |
-| [INPUT_cowork_capability_matrix_2026-02-03.md](extract/INPUT_cowork_capability_matrix_2026-02-03.md) | Capability planning input |
 
 ---
 
@@ -129,9 +128,7 @@ How assets move from the workbench monolith into the spine.
 | Doc | Purpose |
 |-----|---------|
 | [OPERATOR_CHEAT_SHEET.md](OPERATOR_CHEAT_SHEET.md) | Quick commands and governance rituals |
-| [plan/tomorrow.md](plan/tomorrow.md) | Current session orientation |
 | [brain/README.md](brain/README.md) | Agent memory, context injection, hotkey reference |
-| [extract/CAPABILITY_BACKLOG.md](extract/CAPABILITY_BACKLOG.md) | Queued capability extractions |
 | [core/REPLAY_FIXTURES.md](core/REPLAY_FIXTURES.md) | Replay fixtures guide for deterministic tests |
 
 ---
@@ -144,8 +141,6 @@ How assets move from the workbench monolith into the spine.
 | `docs/governance/` | SSOTs, authority pages, audits, canonical indexes |
 | `docs/brain/` | Agent memory system + imported context |
 | `docs/legacy/` | Archived legacy imports (quarantined by D16/D17, reference only) |
-| `docs/extract/` | Extraction backlog + capability planning inputs |
-| `docs/plan/` | Active session planning docs |
 
 ---
 
