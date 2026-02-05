@@ -26,7 +26,7 @@
 
 | Path | Scope | Priority |
 |------|-------|----------|
-| `00_CLAUDE.md` | session-entry | 1 |
+| `docs/governance/SESSION_PROTOCOL.md` | session-entry | 1 |
 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | device-naming-identity | 1 |
 | `docs/governance/GOVERNANCE_INDEX.md` | governance-guide | 4 |
 | `docs/governance/RAG_INDEXING_RULES.md` | rag-quality | 3 |

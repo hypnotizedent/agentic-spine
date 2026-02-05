@@ -1,9 +1,19 @@
 # Agent Dispatch Pipeline Gap Scan
 
+> **⚠️ Historical Capture (2026-01-26)**
+>
+> This document is a point-in-time audit snapshot. Paths and commands reference the
+> legacy `ronny-ops` repository layout and launchd wiring.
+>
+> **Do not execute commands or act on paths in this document.**
+>
+> **Current authority:** See [SESSION_PROTOCOL.md](../SESSION_PROTOCOL.md) and
+> [GOVERNANCE_INDEX.md](../GOVERNANCE_INDEX.md) for live governance.
+
 **Date:** 2026-01-26 22:38 PST
 **Auditor:** Claude (Terminal Operator)
 **Scope:** Verify docs/runbook vs script behavior vs launchd wiring vs runtime layout
-**Status: LEGACY** — Historical audit snapshot. Path authority now at `infrastructure/docs/AUTHORITY_INDEX.md` → SPINE
+**Status: historical** — Read-only reference; do not execute
 
 ---
 

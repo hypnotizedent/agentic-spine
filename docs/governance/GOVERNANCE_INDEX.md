@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-01-24
+last_verified: 2026-02-05
 scope: governance-guide
 github_issue: "#541"
 ---
@@ -19,25 +19,23 @@ github_issue: "#541"
 
 ## Quick Start: The Entry Chain
 
-> **Workbench-side:** The entry chain below applies to workbench sessions (`~/Code/workbench`). For the spine's own entry point, see [docs/README.md](../README.md) and [SPINE_STATE.md](../core/SPINE_STATE.md).
+> **Spine root:** `/Users/ronnyworks/Code/agentic-spine`  
+> **Entry doc:** [`docs/governance/SESSION_PROTOCOL.md`](SESSION_PROTOCOL.md) is the session protocol for the spine. Read it before doing anything else in this repo.
 
-> **Workbench root:** `~/Code/workbench` (formerly `ronny-ops`).
-> All relative paths below are under the workbench unless prefixed with `$SPINE_REPO`.
-
-Every agent session follows this path:
+Every agent session in the spine follows this path:
 
 ```
-~/Code/workbench/00_CLAUDE.md              ← START HERE: Session protocol
+/Users/ronnyworks/Code/agentic-spine/docs/governance/SESSION_PROTOCOL.md ← START HERE: Session protocol
     ↓
-~/Code/workbench/.brain/rules.md           ← The 5 rules (auto-injected at startup)
+/Users/ronnyworks/Code/agentic-spine/docs/brain/README.md     ← Brain rules, hotkeys, and context injection helpers
     ↓
-~/Code/workbench/AGENTS.md / CLAUDE.md     ← Full agent instructions
+/Users/ronnyworks/Code/agentic-spine/docs/governance/GOVERNANCE_INDEX.md ← Governance overview + SSOT mapping
     ↓
-Pillar entrypoints                          ← Domain-specific context
-    ├── ~/Code/workbench/mint-os/AGENTS_START_HERE.md
-    ├── ~/Code/workbench/infrastructure/SERVICE_REGISTRY.md
-    ├── ~/Code/workbench/media-stack/MEDIA_STACK_CONTEXT.md
-    └── ~/Code/workbench/(other pillars)/*_CONTEXT.md
+Pillar entrypoints (per stack)
+    ├── /Users/ronnyworks/Code/agentic-spine/docs/governance/SSOT_REGISTRY.yaml
+    ├── /Users/ronnyworks/Code/agentic-spine/docs/governance/REPO_STRUCTURE_AUTHORITY.md
+    ├── /Users/ronnyworks/Code/agentic-spine/docs/governance/AGENTS_GOVERNANCE.md
+    └── other SSOTs listed in `SSOT_REGISTRY.yaml`
 ```
 
 **The 5 Rules:**
@@ -46,6 +44,31 @@ Pillar entrypoints                          ← Domain-specific context
 3. NO INVENTING → match existing patterns
 4. FIX ONE THING → verify before next
 5. WORK GENERATES RECEIPTS → `./bin/ops cap run <name>`
+
+---
+
+## Infrastructure Truth (5 Spine-Native Docs)
+
+> **⚠️ Read This Before Opening Any Infrastructure Doc**
+>
+> The workbench monolith (`~/Code/workbench/docs/infrastructure/`) contains **120+ files**
+> copied from legacy repos. Most are historical captures with no spine-native meaning.
+> **Do not read those docs unless you're auditing.**
+>
+> The **only execution-worthy infrastructure docs** are the 5 spine-native files below.
+> Everything else is external reference—query the workbench directly if you need it.
+
+| # | Spine-Native Doc | What It Governs |
+|---|------------------|-----------------|
+| 1 | [SESSION_PROTOCOL.md](SESSION_PROTOCOL.md) | Entry point/checklist for every agent session |
+| 2 | [GOVERNANCE_INDEX.md](GOVERNANCE_INDEX.md) | Roadmap to SSOTs + legacy reference callout (this file) |
+| 3 | [REPO_STRUCTURE_AUTHORITY.md](REPO_STRUCTURE_AUTHORITY.md) | Where files/folders belong |
+| 4 | [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) | How legacy docs can be promoted to spine authority |
+| 5 | [SSOT_REGISTRY.yaml](SSOT_REGISTRY.yaml) | Machine-readable authority registry |
+
+**For infrastructure details beyond these 5 docs:**
+- Query workbench directly: `cd ~/Code/workbench && mint ask "question"`
+- Or check the spine's bindings: `ops/bindings/*.yaml` (seeded snapshots, not authoritative)
 
 ---
 
@@ -65,26 +88,57 @@ Pillar entrypoints                          ← Domain-specific context
 | `ISSUE_CLOSURE_SOP.md` | How to close issues properly |
 | `AGENT_BOUNDARIES.md` | What agents can/cannot do |
 | `SUPERVISOR_CHECKLIST.md` | Verify work before shipping |
+| `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |
 
 ### Single Sources of Truth (by Domain)
 
-> **Workbench SSOTs:** The table below lists workbench-side truth sources. For the spine's own SSOT registry, see [SSOT_REGISTRY.yaml](SSOT_REGISTRY.yaml).
-
-> All paths below are under `~/Code/workbench/` (the workbench monolith).
+> **Spine-native SSOTs:** For the canonical registry of spine-governed SSOTs, see [SSOT_REGISTRY.yaml](SSOT_REGISTRY.yaml).
 
 | Domain | SSOT | Scope |
 |--------|------|-------|
-| Services/Topology | `~/Code/workbench/infrastructure/SERVICE_REGISTRY.md` | What runs where |
-| Database Schema | `~/Code/workbench/mint-os/docs/SCHEMA_TRUTH.md` | Column names, tables |
-| Quote System | `~/Code/workbench/mint-os/docs/QUOTE_SINGLE_SOURCE_OF_TRUTH.md` | Quote creation flow |
-| Shopify | `~/Code/workbench/infrastructure/shopify-mcp/SHOPIFY_SSOT.md` | Shopify integration |
-| Files/MinIO | `~/Code/workbench/mint-os/docs/modules/files/SPEC.md` | File upload/storage |
-| Incidents | `~/Code/workbench/infrastructure/docs/INCIDENTS_LOG.md` | What failed before |
-| Agents | `~/Code/workbench/infrastructure/data/agents_inventory.json` | Agent scripts registry |
-| Updates | `~/Code/workbench/infrastructure/data/updates_inventory.json` | Update mechanisms registry |
-| Stacks | `$SPINE_REPO/docs/governance/STACK_REGISTRY.yaml` | Stack inventory (spine-native) |
+| Session Entry | `docs/governance/SESSION_PROTOCOL.md` | Agent startup protocol |
+| Repo Structure | `docs/governance/REPO_STRUCTURE_AUTHORITY.md` | Where files belong |
+| Stacks | `docs/governance/STACK_REGISTRY.yaml` | Stack inventory |
+| Device Identity | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device naming/IPs |
+| Secrets Policy | `docs/governance/SECRETS_POLICY.md` | Secrets management |
+| Agent Boundaries | `docs/governance/AGENT_BOUNDARIES.md` | What agents can/cannot do |
+| Scripts Registry | `docs/governance/SCRIPTS_REGISTRY.md` | Canonical scripts index |
 
 For the complete list: `cat docs/governance/SSOT_REGISTRY.yaml`
+
+---
+
+## Legacy References (External — Read-Only)
+
+> **⚠️ External Repository References (120+ Files)**
+>
+> The workbench monolith (`~/Code/workbench/docs/infrastructure/`) contains 120+ files:
+> runbooks, audits, architecture docs, reference guides, and historical captures.
+>
+> **These are NOT governed by the spine.** The spine points to a handful of them for
+> cross-repo context but does not claim authority over their content.
+>
+> **Do not execute commands or act on these paths from within a spine session.**
+> If you need infrastructure answers beyond the 5 spine-native docs above, query the
+> workbench directly: `cd ~/Code/workbench && mint ask "question"`
+>
+> See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for the full policy.
+
+| Domain | External SSOT | Status |
+|--------|---------------|--------|
+| Services/Topology | `~/Code/workbench/infrastructure/SERVICE_REGISTRY.md` | reference |
+| Database Schema | `~/Code/workbench/mint-os/docs/SCHEMA_TRUTH.md` | reference |
+| Quote System | `~/Code/workbench/mint-os/docs/QUOTE_SINGLE_SOURCE_OF_TRUTH.md` | reference |
+| Shopify | `~/Code/workbench/infrastructure/shopify-mcp/SHOPIFY_SSOT.md` | reference |
+| Files/MinIO | `~/Code/workbench/mint-os/docs/modules/files/SPEC.md` | reference |
+| Incidents | `~/Code/workbench/infrastructure/docs/INCIDENTS_LOG.md` | reference |
+| Agents Inventory | `~/Code/workbench/infrastructure/data/agents_inventory.json` | reference |
+| Updates Inventory | `~/Code/workbench/infrastructure/data/updates_inventory.json` | reference |
+| RAG Manifest | `~/Code/workbench/infrastructure/docs/rag/WORKSPACE_MANIFEST.json` | reference |
+
+**Historical references:** Audit files under `docs/governance/_audits/` may contain paths
+to the deprecated `ronny-ops` repository. These are point-in-time captures for historical
+context only. See the disclaimer in each audit file.
 
 ---
 
@@ -159,21 +213,21 @@ Defined in `docs/governance/SEARCH_EXCLUSIONS.md`:
 
 ### Where Exclusions Are Configured
 
-| System | Config |
-|--------|--------|
-| Git | `.gitignore` |
-| RAG | `~/Code/workbench/infrastructure/docs/rag/WORKSPACE_MANIFEST.json` |
-| Scripts | Various `--exclude` flags |
+| System | Config | Notes |
+|--------|--------|-------|
+| Git | `.gitignore` | Spine-native |
+| RAG | `~/Code/workbench/.../WORKSPACE_MANIFEST.json` | External (see Legacy References) |
+| Scripts | Various `--exclude` flags | Per-script |
 
 ### Verifying Exclusions Work
 
 ```bash
 # Should return nothing (excluded from search)
 find . -path "*/.worktrees/*" -name "*.md" 2>/dev/null | head -5
-
-# Check RAG manifest
-jq '.criticalPatterns.excludes' ~/Code/workbench/infrastructure/docs/rag/WORKSPACE_MANIFEST.json
 ```
+
+> **Note:** RAG manifest lives in the workbench monolith. See the Legacy References
+> section above for the external SSOT policy.
 
 ---
 
@@ -273,7 +327,9 @@ Before adding `status: authoritative` or claiming SSOT:
 | [docs/DOC_MAP.md](../DOC_MAP.md) | Navigation SSOT (start here) |
 | [SSOT_REGISTRY.yaml](SSOT_REGISTRY.yaml) | Machine-readable SSOT list |
 | [ARCHIVE_POLICY.md](ARCHIVE_POLICY.md) | What archived means |
-| `~/Code/workbench/infrastructure/docs/AUTHORITY_INDEX.md` | Document registry (workbench) |
+| [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) | Legacy/external reference policy |
+
+> **External (workbench):** `~/Code/workbench/infrastructure/docs/AUTHORITY_INDEX.md` — Document registry for the workbench monolith. Reference only; not spine-governed.
 
 ---
 
@@ -323,7 +379,7 @@ Before adding `status: authoritative` or claiming SSOT:
 | `AUTHORITY_INDEX.md` | Older doc registry (being superseded) |
 | `REPO_STRUCTURE_AUTHORITY.md` | Where files belong |
 | `SEARCH_EXCLUSIONS.md` | What's excluded from search |
-| `00_CLAUDE.md` | Session entry point |
+| `docs/governance/SESSION_PROTOCOL.md` | Session entry point |
 
 ---
 
@@ -331,6 +387,7 @@ Before adding `status: authoritative` or claiming SSOT:
 
 | Date | Change | Issue |
 |------|--------|-------|
+| 2026-02-05 | Added Legacy References section; spine-native SSOTs table | — |
 | 2026-01-24 | Added SSOT Claims Guardrail section | #541 |
 | 2026-01-23 | Created as part of Agent Clarity epic | #541 |
 
@@ -350,6 +407,8 @@ Before adding `status: authoritative` or claiming SSOT:
 - `INFRASTRUCTURE_AUTHORITY.md`
 - `INGRESS_AUTHORITY.md`
 - `ISSUE_CLOSURE_SOP.md`
+- `LEGACY_DEPRECATION.md`
+- `MAILROOM_RUNBOOK.md`
 - `MD_SURFACE_AUDIT.md`
 - `MINT_OS_COMPOSE_LAYERS.md`
 - `PORTABILITY_ASSUMPTIONS.md`
@@ -363,4 +422,3 @@ Before adding `status: authoritative` or claiming SSOT:
 - `STACK_AUTHORITY.md`
 
 <!-- AUTO: GOVERNANCE_DOC_INDEX_END -->
-

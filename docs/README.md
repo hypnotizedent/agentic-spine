@@ -5,7 +5,7 @@
 > doc in two hops, never leave `/Code`.
 >
 > **Status:** authoritative
-> **Last verified:** 2026-02-04
+> **Last verified:** 2026-02-05
 
 ---
 
@@ -22,6 +22,7 @@ The invariants. If a drift gate fails, one of these was violated.
 | [SPINE.md](core/SPINE.md) | Spine architecture and design principles |
 | [SPINE_SESSION_HEADER.md](core/SPINE_SESSION_HEADER.md) | Session header format for agent context |
 | [SPINE_STATE.md](core/SPINE_STATE.md) | Canonical spine state — what lives here, no legacy deps |
+| [SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) | Spine-native session protocol (entry point) |
 
 ---
 
@@ -43,6 +44,7 @@ The authority chain. When in doubt, these are the source of truth.
 | Doc | Scope |
 |-----|-------|
 | [GOVERNANCE_INDEX.md](governance/GOVERNANCE_INDEX.md) | Entry point — rules, authority chain, general governance |
+| [SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) | Entry point for every agent inside the spine |
 | [STACK_REGISTRY.yaml](governance/STACK_REGISTRY.yaml) | What stacks exist, where they run |
 | [SERVICE_REGISTRY.yaml](governance/SERVICE_REGISTRY.yaml) | Service-level inventory (ports, health URLs) |
 | [SSOT_REGISTRY.yaml](governance/SSOT_REGISTRY.yaml) | Priority list of truth sources agents follow |
@@ -59,6 +61,8 @@ The authority chain. When in doubt, these are the source of truth.
 | [CANONICAL.md](governance/CANONICAL.md) | Canonical doc definitions |
 | [EXCLUDED_SURFACES.md](governance/EXCLUDED_SURFACES.md) | Explicitly excluded from spine scope |
 | [ISSUE_CLOSURE_SOP.md](governance/ISSUE_CLOSURE_SOP.md) | When and how to close GitHub issues |
+| [LEGACY_DEPRECATION.md](governance/LEGACY_DEPRECATION.md) | Rules for legacy/external repository references |
+| [MAILROOM_RUNBOOK.md](governance/MAILROOM_RUNBOOK.md) | Mailroom queue operations, ledger, logs, health checks |
 | [RAG_INDEXING_RULES.md](governance/RAG_INDEXING_RULES.md) | What gets indexed to RAG knowledge base |
 | [SEARCH_EXCLUSIONS.md](governance/SEARCH_EXCLUSIONS.md) | What directories/files are excluded from search |
 | [SECRETS_POLICY.md](governance/SECRETS_POLICY.md) | Governance-grade secrets management rules |
@@ -127,6 +131,7 @@ How assets move from the workbench monolith into the spine.
 | [plan/tomorrow.md](plan/tomorrow.md) | Current session orientation |
 | [brain/README.md](brain/README.md) | Agent memory, context injection, hotkey reference |
 | [extract/CAPABILITY_BACKLOG.md](extract/CAPABILITY_BACKLOG.md) | Queued capability extractions |
+| [core/REPLAY_FIXTURES.md](core/REPLAY_FIXTURES.md) | Replay fixtures guide for deterministic tests |
 
 ---
 

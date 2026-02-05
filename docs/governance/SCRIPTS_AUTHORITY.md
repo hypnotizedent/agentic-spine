@@ -19,15 +19,23 @@ Prevent duplicate scripts, scattered utilities, and configuration drift. All scr
 
 ## SCRIPT LOCATIONS
 
-### Authorized Script Directories:
+### Spine-Native Scripts
 
-> **Workbench context:** The paths below reference the workbench monolith (`~/Code/workbench`). For spine-native scripts, see [VERIFY_SURFACE_INDEX.md](VERIFY_SURFACE_INDEX.md) and [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md).
+For spine-native scripts, see [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) and the `ops/` directory.
 
-| Directory | Purpose |
-|-----------|---------|
-| `~/Code/workbench/scripts/` | Main scripts directory |
-| `~/Code/workbench/mint-os/scripts/` | Mint OS specific |
-| `~/Code/workbench/infra/scripts/` | Infrastructure automation |
+### External Script Directories (Workbench)
+
+> **⚠️ External Reference (Read-Only)**
+>
+> The paths below reference the workbench monolith (`~/Code/workbench`). These are
+> **not governed by the spine**. Do not execute these from a spine session.
+> See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for the external reference policy.
+
+| Directory | Purpose | Status |
+|-----------|---------|--------|
+| `~/Code/workbench/scripts/` | Main scripts directory | external |
+| `~/Code/workbench/mint-os/scripts/` | Mint OS specific | external |
+| `~/Code/workbench/infra/scripts/` | Infrastructure automation | external |
 
 ### ❌ DO NOT put scripts in:
 - Root of any repo

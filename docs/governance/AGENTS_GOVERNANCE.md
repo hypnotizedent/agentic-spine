@@ -10,30 +10,31 @@ Define the lifecycle and verification contract for agent scripts and related aut
 
 ## Sources of Truth
 
-> **Workbench-side:** The paths below reference the workbench monolith (`~/Code/workbench`). For the spine's own agent contracts, see `agents/contracts/` and [CORE_AGENTIC_SCOPE.md](CORE_AGENTIC_SCOPE.md).
+> **Spine-native:** Agent automation lives inside this repo. Trust the files below instead of legacy workbench paths (archived elsewhere).
 
-- Inventory (machine-readable): `infrastructure/data/agents_inventory.json`
-- Verification script: `scripts/infra/agents_verify.sh`
+- Inventory (machine-readable): `ops/agents/` contains the active agent entry scripts and metadata.
+- Verification script: `surfaces/verify/agents_verify.sh` (runs every agent through the spine health gate).
 - Reference reports:
-  - `docs/runbooks/AGENTS_VERIFICATION_REPORT_2026-01-25.md`
-  - `docs/runbooks/AGENTS_GAPS_REPORT_2026-01-25.md`
+  - `docs/governance/AUDIT_VERIFICATION.md`
+  - `docs/governance/_audits/AGENT_RUNTIME_AUDIT.md`
+  - `docs/governance/CORE_AGENTIC_SCOPE.md`
 
 ## Lifecycle
-- **Create**: add agent script + add entry to inventory
-- **Change**: update agent + update inventory metadata
-- **Retire**: disable in inventory (`enabled: false`) and document rationale
-- **Verify**: run `scripts/infra/agents_verify.sh` and store receipt in `receipts/`
+- **Create**: add an agent script under `ops/agents/` and document it in this file or on the governance board.
+- **Change**: update the script + update any metadata stored in `receipts/` or the ledger so the change is auditable.
+- **Retire**: disable the script, archive its receipt trail, and document the rationale in a session handoff.
+- **Verify**: run `./surfaces/verify/agents_verify.sh` (or `./bin/ops cap run spine.verify`) and store the resulting receipt in `receipts/sessions/`.
 
 ## Safety Rules
 - No secrets in inventory (names/paths only; never values)
 - Verification output must not print secret content
 - Any automation changes (launchd/cron/GHA) are out of scope unless explicitly tracked by an issue/plan
 
-## Schema Reference
-See `docs/runbooks/PR_SCOPE_AGENTS_2026-01-25.md` for schema contract.
+## References
+See `docs/governance/CORE_AGENTIC_SCOPE.md` for the invariants that every agent implementation must strengthen.
 
 ## Verification
 ```bash
-./scripts/infra/agents_verify.sh
+./surfaces/verify/agents_verify.sh
 ```
 Exit 0 = PASS, non-zero = FAIL

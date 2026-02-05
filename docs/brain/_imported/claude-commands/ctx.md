@@ -5,9 +5,9 @@ allowed-tools: Read, Bash(cat:*), Bash(ls:*)
 
 Load the session context by reading these files in order:
 
-1. First read `00_CLAUDE.md` - the session protocol
-2. Then read `infrastructure/docs/INCIDENTS_LOG.md` - what failed before
-3. Then check for recent handoffs: `ls -la docs/sessions/*HANDOFF* 2>/dev/null | tail -3`
+1. Start with `docs/governance/SESSION_PROTOCOL.md` – the spine-native session protocol.
+2. Read `docs/governance/GOVERNANCE_INDEX.md` to understand the governance map and primary SSOTs.
+3. Check for recent handoffs: `ls -la docs/sessions/*HANDOFF* 2>/dev/null | tail -3`
 4. If a handoff exists from the last 48 hours, read it
 
 After loading context, summarize:

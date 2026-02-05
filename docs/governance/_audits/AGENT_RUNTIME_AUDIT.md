@@ -1,8 +1,19 @@
 # Agent Runtime Audit
+
+> **⚠️ Historical Capture (2026-01-26)**
+>
+> This document is a point-in-time audit snapshot. Paths and commands reference the
+> legacy `ronny-ops` repository layout and `~/agent/` runtime structure.
+>
+> **Do not execute commands or act on paths in this document.**
+>
+> **Current authority:** See [SESSION_PROTOCOL.md](../SESSION_PROTOCOL.md) and
+> [GOVERNANCE_INDEX.md](../GOVERNANCE_INDEX.md) for live governance.
+
 - Generated: 2026-01-26T22:24:24-05:00
 - Auditor: Terminal Operator
 - Purpose: Verify agent runtime layout matches desired state
-- **Status: LEGACY** — Historical audit snapshot. Path authority now at `infrastructure/docs/AUTHORITY_INDEX.md` → SPINE
+- **Status: historical** — Read-only reference; do not execute
 
 ---
 

@@ -14,10 +14,18 @@ scope: repository-structure
 > **Registered in:** `docs/governance/SSOT_REGISTRY.yaml` (id: repo-structure)
 
 > **Note:** This document was imported from the workbench monolith. The folder hierarchy below describes the workbench layout. For the spine's own folder rules, see [CONTRIBUTING.md](../CONTRIBUTING.md).
+>
+> **Legacy Policy:** See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for rules about promoting workbench content to spine authority.
 
 ## PURPOSE
 
 This document is the ONLY authority for where folders and files belong in the workbench monolith (`~/Code/workbench`, formerly `ronny-ops`). Any agent, script, or documentation referencing file placement MUST match these rules. Conflicts mean the other source is WRONG.
+
+> **⚠️ Workbench-Scoped Document**
+>
+> The folder hierarchy below describes the workbench monolith layout, not the spine.
+> This document is maintained in the spine for reference continuity. Do not confuse
+> workbench paths with spine paths. For spine structure, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## CRITICAL RULE
 
@@ -42,8 +50,6 @@ Every doc is reachable from an index in 2 clicks
 
 ```
 workbench/
-├── 00_CLAUDE.md                 # Session protocol (entry point)
-├── AGENTS.md                    # Agent routing
 ├── README.md                    # Repo overview
 │
 ├── docs/                        # Cross-pillar documentation
@@ -79,6 +85,8 @@ workbench/
 ├── .github/                     # GitHub Actions, templates
 └── .githooks/                   # Git hooks
 ```
+
+> **Spine session entry:** [`docs/governance/SESSION_PROTOCOL.md`](SESSION_PROTOCOL.md). The old `workbench/00_CLAUDE.md` is archived and should not be used at runtime.
 
 ---
 
@@ -196,7 +204,6 @@ Each pillar SHOULD follow:
 | `README.md` | file | Repo overview |
 | `AGENTS.md` | file | Agent routing |
 | `CLAUDE.md` | file | Claude Code entry (mirrors AGENTS.md) |
-| `00_CLAUDE.md` | file | Session protocol |
 | `opencode.json` | file | OpenCode config |
 | `.claudeignore` | file | Claude Code exclusions |
 | `.gitignore` | file | Git exclusions |
@@ -214,7 +221,7 @@ mkdir -p "$R/receipts"
 cd "$R" || exit 1
 
 # Allowlist regex (update ONLY via PR to this doc)
-ALLOW='^(\.git|\.github|\.githooks|\.archive|\.brain|\.claude|\.opencode|\.agent|\.venv|\.worktrees|\.external-repos|\.mcp\.json|\.cursorrules|\.DS_Store|modules|infrastructure|docs|scripts|receipts|_evidence|logs|mint-os|media-stack|finance|home-assistant|immich|artwork-module|README\.md|AGENTS\.md|CLAUDE\.md|00_CLAUDE\.md|opencode\.json|\.claudeignore|\.gitignore)$'
+ALLOW='^(\.git|\.github|\.githooks|\.archive|\.brain|\.claude|\.opencode|\.agent|\.venv|\.worktrees|\.external-repos|\.mcp\.json|\.cursorrules|\.DS_Store|modules|infrastructure|docs|scripts|receipts|_evidence|logs|mint-os|media-stack|finance|home-assistant|immich|artwork-module|README\.md|AGENTS\.md|CLAUDE\.md|opencode\.json|\.claudeignore|\.gitignore)$'
 
 {
   echo "=== REPO ROOT DRIFT CHECK @ $TS ==="
@@ -274,18 +281,18 @@ echo "WROTE: $OUT"
 ## TRACEABILITY CHAIN
 
 ```
-00_CLAUDE.md (session entry)
+docs/governance/SESSION_PROTOCOL.md (session entry)
     ↓
-AGENTS.md (agent routing)
+docs/brain/README.md (rules + context helpers)
     ↓
-docs/governance/* (rules & authority)
+docs/governance/GOVERNANCE_INDEX.md (rules, SSOT map)
     ↓
-<pillar>/CLAUDE.md or *_CONTEXT.md (pillar entry)
+docs/governance/SSOT_REGISTRY.yaml (canonical authority list)
     ↓
-<pillar>/docs/reference/INDEX.md (pillar docs)
+<pillar>/*_CONTEXT.md or pillar READMEs (domain entry)
 ```
 
-Every agent should be able to trace from `00_CLAUDE.md` to any authoritative doc in 2-3 hops.
+Every agent should be able to trace from `docs/governance/SESSION_PROTOCOL.md` to any authoritative doc in 2-3 hops.
 
 ---
 
@@ -390,7 +397,7 @@ If you need to change allowed directories or rules:
 
 | Doc | Relationship |
 |-----|--------------|
-| `00_CLAUDE.md` | References this for folder rules |
+| `docs/governance/SESSION_PROTOCOL.md` | References this for folder rules |
 | `AGENTS.md` | Routes agents to correct pillars |
 | `RAG_INDEXING_RULES.md` | Defines what gets indexed based on structure |
 | `infrastructure/docs/INDEX.md` | Role-based entry point |

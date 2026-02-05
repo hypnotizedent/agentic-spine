@@ -1,9 +1,19 @@
 # RAG Integration Rationale for Hot-Folder Watcher
 
+> **⚠️ Historical Capture (2026-01-26)**
+>
+> This document is a point-in-time audit snapshot. Paths reference the legacy
+> `ronny-ops` repository layout (`scripts/agents/hot-folder-watcher.sh`).
+>
+> **Do not execute commands or act on paths in this document.**
+>
+> **Current authority:** See [SESSION_PROTOCOL.md](../SESSION_PROTOCOL.md) and
+> [GOVERNANCE_INDEX.md](../GOVERNANCE_INDEX.md) for live governance.
+
 > **Audit Date:** 2026-01-26
 > **Auditor:** Terminal Operator (Parallel Track)
 > **Subject:** scripts/agents/hot-folder-watcher.sh
-> **Status:** Read-only analysis; no code changes made
+> **Status: historical** — Read-only reference; no code changes made
 
 ---
 

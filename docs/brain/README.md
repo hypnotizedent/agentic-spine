@@ -4,7 +4,7 @@
 ## Routing
 - Navigation SSOT: [`docs/DOC_MAP.md`](../docs/DOC_MAP.md)
 - Governance index: [`docs/governance/GOVERNANCE_INDEX.md`](../docs/governance/GOVERNANCE_INDEX.md)
-- Global agent rules: [`00_CLAUDE.md`](../00_CLAUDE.md)
+- Global agent rules: [`docs/governance/SESSION_PROTOCOL.md`](../docs/governance/SESSION_PROTOCOL.md)
 
 Agent memory and context system for the agentic-spine.
 

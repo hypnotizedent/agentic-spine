@@ -8,6 +8,17 @@ github_issue: "#460"
 sources: []
 ---
 
+> **⚠️ Workbench Reference Document (Mint OS)**
+>
+> This document is a **reference copy** of the Mint OS infrastructure schema, imported
+> from the workbench monolith for context. It is **not spine-governed**. The spine does
+> not own Mint OS database tables, MinIO buckets, or Mint OS container configs.
+>
+> **Do not execute INSERT/UPDATE commands from this document in a spine session.**
+> Query the workbench or Mint OS directly for authoritative schema answers.
+>
+> See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for the external reference policy.
+
 # STOP - READ THIS ENTIRE FILE BEFORE ANY DATA/FILE OPERATION
 
 > **This file is the SINGLE SOURCE OF TRUTH for ALL:**

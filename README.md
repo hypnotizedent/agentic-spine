@@ -19,18 +19,38 @@ Detachable spine: one CLI front door + receipts + boring lifecycle.
 ./bin/ops run --file <path>           # run a task from file
 ```
 
-## Secrets
+## Secrets: the gating layer
 
-Secrets are loaded from Infisical via the local credentials file.
-No API keys are stored in this repository.
+The spine treats secrets as a core invariant. Every API-facing capability is gated
+by the Infisical surface under `ops/plugins/secrets/bin`, and receipts record the
+status of those gates before any mutating work runs. Follow this flow before you
+run something that touches secrets or external APIs:
 
-```bash
-source ~/.config/infisical/credentials
-SPINE_ENGINE_PROVIDER=zai ./bin/ops run --task examples/hello.task.md
-```
+1. Source your credentials file so the tokens become available:
 
-The credentials file exports `ZAI_API_KEY`, `INFISICAL_TOKEN`, and other
-provider tokens as environment variables. It never prints raw secrets.
+   ```bash
+   source ~/.config/infisical/credentials
+   ```
+
+2. Prove the secrets surface is wired in:
+
+   ```bash
+   ./bin/ops cap run secrets.binding
+   ./bin/ops cap run secrets.auth.status
+   ./bin/ops cap run secrets.projects.status
+   ./bin/ops cap run secrets.status
+   ./bin/ops cap run secrets.cli.status
+   ```
+
+3. When you need to run something that *uses* secrets (runners, webhooks, etc.),
+   do it through `secrets.exec`. That capability injects the env vars without ever
+   writing them to disk.
+
+No API keys are stored in this repo. The credentials file exports values such as
+`ZAI_API_KEY`, `INFISICAL_TOKEN`, and other provider tokens as env vars; utility
+scripts read them via `secrets.exec`, never via a checked-in file. Set
+`SPINE_ENGINE_PROVIDER=zai` (or another provider) in the same shell before you
+invoke `./bin/ops run`.
 
 ## z.ai Provider
 
