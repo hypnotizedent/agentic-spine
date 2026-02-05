@@ -118,6 +118,7 @@ How assets move from the workbench monolith into the spine.
 |-----|---------------|
 | [AGENTIC_GAP_MAP.md](core/AGENTIC_GAP_MAP.md) | What has moved, what remains — 23 asset groups at 100% coverage |
 | [EXTRACTION_PROTOCOL.md](core/EXTRACTION_PROTOCOL.md) | Step-by-step extraction procedure + drift gate expectations |
+| [WORKBENCH_MIGRATION_QUEUE.md](extract/WORKBENCH_MIGRATION_QUEUE.md) | 123 workbench docs catalogued — migration queue (0 needed) |
 | [STACK_ALIGNMENT.md](core/STACK_ALIGNMENT.md) | Stack docs mapped to spine references + workbench infrastructure index |
 | [INPUT_cowork_capability_matrix_2026-02-03.md](extract/INPUT_cowork_capability_matrix_2026-02-03.md) | Capability planning input |
 
