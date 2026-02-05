@@ -210,41 +210,25 @@ list_loops() {
 
     case "$filter" in
         --open)
-            grep '"status":"open"' "$LOOPS_FILE" 2>/dev/null | while read -r line; do
-                local loop_id severity owner title
-                loop_id="$(echo "$line" | jq -r '.loop_id')"
-                severity="$(echo "$line" | jq -r '.severity')"
-                owner="$(echo "$line" | jq -r '.owner')"
-                title="$(echo "$line" | jq -r '.title')"
+            while IFS=$'\t' read -r loop_id severity owner title; do
                 printf "  [%s] %-12s %-15s %s\n" "$severity" "$owner" "$loop_id" "$title"
-            done
+            done < <(jq -s -r 'reduce .[] as $i ({}; .[$i.loop_id]=$i) | .[] | select(.status=="open") | "\(.loop_id)\t\(.severity)\t\(.owner)\t\(.title)"' "$LOOPS_FILE")
             ;;
         --closed)
-            grep '"status":"closed"' "$LOOPS_FILE" 2>/dev/null | while read -r line; do
-                local loop_id severity owner title
-                loop_id="$(echo "$line" | jq -r '.loop_id')"
-                severity="$(echo "$line" | jq -r '.severity')"
-                owner="$(echo "$line" | jq -r '.owner')"
-                title="$(echo "$line" | jq -r '.title')"
+            while IFS=$'\t' read -r loop_id severity owner title; do
                 printf "  [%s] %-12s %-15s %s\n" "$severity" "$owner" "$loop_id" "$title"
-            done
+            done < <(jq -s -r 'reduce .[] as $i ({}; .[$i.loop_id]=$i) | .[] | select(.status=="closed") | "\(.loop_id)\t\(.severity)\t\(.owner)\t\(.title)"' "$LOOPS_FILE")
             ;;
         --all)
-            while read -r line; do
-                local loop_id severity owner title status
-                loop_id="$(echo "$line" | jq -r '.loop_id')"
-                severity="$(echo "$line" | jq -r '.severity')"
-                owner="$(echo "$line" | jq -r '.owner')"
-                title="$(echo "$line" | jq -r '.title')"
-                status="$(echo "$line" | jq -r '.status')"
+            while IFS=$'\t' read -r loop_id status severity owner title; do
                 printf "  [%s] %-6s %-12s %-15s %s\n" "$severity" "$status" "$owner" "$loop_id" "$title"
-            done < "$LOOPS_FILE"
+            done < <(jq -s -r 'reduce .[] as $i ({}; .[$i.loop_id]=$i) | .[] | "\(.loop_id)\t\(.status)\t\(.severity)\t\(.owner)\t\(.title)"' "$LOOPS_FILE")
             ;;
     esac
 
     echo ""
     local open_count
-    open_count="$(grep -c '"status":"open"' "$LOOPS_FILE" 2>/dev/null || echo 0)"
+    open_count="$(jq -s -r 'reduce .[] as $i ({}; .[$i.loop_id]=$i) | [.[] | select(.status=="open")] | length' "$LOOPS_FILE")"
     echo "Open loops: $open_count"
 }
 

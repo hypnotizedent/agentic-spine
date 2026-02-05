@@ -24,7 +24,6 @@ scope: external-tooling
 | `~/Code/workbench/infra/cloudflare/` | Cloudflare exports and tunnel configs | tooling only |
 | `~/Code/workbench/infra/data/` | Machine-readable inventories | read-only snapshots |
 | `~/Code/workbench/infra/templates/` | Templates and scaffolds | read-only |
-| `~/Code/workbench/scripts/root/mint` | RAG CLI (`mint ask`, `mint index`) | deferred (RAG paused; future home TBD) |
 
 ---
 
@@ -34,6 +33,14 @@ scope: external-tooling
 - Do not treat workbench content as spine authority.
 - External references must flow through this index or be removed.
 - To promote a workbench doc, follow [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md).
+
+---
+
+## Deferred Tooling (Not Active)
+
+| Path | Purpose | Notes |
+|------|---------|-------|
+| `~/Code/workbench/scripts/root/mint` | RAG CLI (`mint ask`, `mint index`) | RAG paused; future home TBD |
 
 ---
 

@@ -103,7 +103,7 @@ ping -c1 nas pihole-home ha vault
 |----------|-------|
 | Location | Shop building |
 | Subnet | 192.168.12.0/24 |
-| Gateway | TBD (verify upstream router) |
+| Gateway | 192.168.12.1 (Dell N2024P) |
 | Switch mgmt IP | 192.168.12.1 (Dell N2024P) |
 | iDRAC IP | 192.168.254.11 (UNVERIFIED - may have changed) |
 | Proxmox Host | `pve` (Dell R730XD) |
@@ -117,10 +117,8 @@ ssh pve "qm list"
 ```
 
 **Known Unknowns (Shop):**
-- Dell N2024P switch credentials unknown post-reset (LOOP-N2024P-DIAG-20260205)
 - iDRAC IP may have changed during network reconfiguration
 - NVR is isolated, no Tailscale access
-- Upstream gateway IP needs verification
 
 ---
 
@@ -343,9 +341,8 @@ These items need verification and should be updated as discovered:
 - `tailscale ip -4` → 100.85.186.7 (macbook)
 - `tailscale status` → Full device list verified
 
-**Open Loop:**
-- LOOP-N2024P-DIAG-20260205 (Dell N2024P post-reset diagnostics)
-- Next action: Console access required for switch diagnostics
+**Closed Loop:**
+- LOOP-N2024P-DIAG-20260205 (Dell N2024P post-reset diagnostics complete)
 
 **IP Conflict Resolution:**
 - SERVICE_REGISTRY.yaml macbook IP corrected: 100.115.158.91 → 100.85.186.7
