@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# agent-park-inbox.sh - Move inbox files to parked backup
+#
+# Usage: agent-park-inbox.sh [KEEP_REGEX]
+#
+# Arguments:
+#   KEEP_REGEX  Optional regex of filenames to keep (not park)
+#
+# Examples:
+#   agent-park-inbox.sh                  # Park all inbox files
+#   agent-park-inbox.sh "^S2026"         # Keep files starting with S2026
+#
+# Parked files go to: mailroom/state/backups/inbox-parked/<timestamp>/
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  sed -n '3,14p' "$0" | sed 's/^# //' | sed 's/^#//'
+  exit 0
+fi
+
 # SPINE paths (canonical)
 SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
 INBOX="${SPINE_INBOX:-$SPINE/mailroom/inbox}"

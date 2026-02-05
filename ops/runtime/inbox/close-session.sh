@@ -3,6 +3,8 @@
 # close-session.sh - Generate session closeout packet
 # ═══════════════════════════════════════════════════════════════
 #
+# Usage: close-session.sh
+#
 # Called by: Hammerspoon Ctrl+9
 #
 # Produces:
@@ -21,6 +23,11 @@
 #   - Learnings (optional)
 #
 # ═══════════════════════════════════════════════════════════════
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  sed -n '5,22p' "$0" | sed 's/^# //' | sed 's/^#//'
+  exit 0
+fi
 
 set -eo pipefail
 

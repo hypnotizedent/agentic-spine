@@ -1,7 +1,11 @@
-# Ingress Authority
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: ingress-routing
+---
 
-> **Status:** authoritative
-> **Last verified:** 2026-02-04
+# Ingress Authority
 
 > **Purpose**: Document the routing layer between DNS and stacks — the "middle bridge" that connects hostnames to services.
 

@@ -2,7 +2,18 @@
 set -euo pipefail
 
 # agent-restart.sh — Restart the canonical launchd watcher
+#
+# Usage: agent-restart.sh
+#
+# Stops the hot-folder-watcher LaunchAgent, clears stale locks/PID,
+# and restarts it. Use when the watcher is stuck or after config changes.
+#
 # Safety: mutating (stops and starts the watcher service)
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  sed -n '3,10p' "$0" | sed 's/^# //' | sed 's/^#//'
+  exit 0
+fi
 
 LABEL="com.ronny.agent-inbox"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"

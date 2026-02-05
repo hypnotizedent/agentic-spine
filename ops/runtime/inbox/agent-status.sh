@@ -2,10 +2,23 @@
 set -euo pipefail
 
 # agent-status.sh — Canonical watcher status (launchd + PID + lock)
-# Safety: read-only except for stale-lock cleanup
-# NOTE: This script auto-clears stale PID files and lock dirs when the
-#       recorded PID is no longer alive. This is intentional — a dead
-#       watcher's lock must not block restart via launchd KeepAlive.
+#
+# Usage: agent-status.sh
+#
+# Displays:
+#   - LaunchAgent state (running/loaded/not loaded)
+#   - PID file status (alive/stale/absent)
+#   - Lock status (held/free)
+#   - Queue counts (queued/running/done/failed/parked)
+#   - Last 10 ledger entries
+#   - Latest outbox result
+#
+# Safety: read-only except for stale-lock cleanup (auto-clears dead PIDs)
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  sed -n '3,15p' "$0" | sed 's/^# //' | sed 's/^#//'
+  exit 0
+fi
 
 LABEL="com.ronny.agent-inbox"
 SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"

@@ -1,7 +1,11 @@
-# Stack Authority
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: stack-rules
+---
 
-> **Status:** authoritative
-> **Last verified:** 2026-02-04
+# Stack Authority
 
 This document defines the rules of record for where **authoritative compose configs** live, what counts as an **active stack**, and how deploy automation interacts with these stacks.
 

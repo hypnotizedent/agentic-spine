@@ -1,3 +1,10 @@
+---
+status: reference
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: audit-verification
+---
+
 # Optimization Audit Verification
 
 ## Date: 2026-02-01

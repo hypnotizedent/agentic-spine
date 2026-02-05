@@ -1,7 +1,11 @@
-# SPINE INDEX
+---
+status: reference
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: spine-structure
+---
 
-> **Status:** authoritative
-> **Last verified:** 2026-02-04
+# SPINE INDEX
 
 Generated: 2026-02-01T03:25:38-05:00
 

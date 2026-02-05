@@ -1,7 +1,12 @@
-# Agents Governance (SSOT)
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: agent-lifecycle
+github_issue: "#634"
+---
 
-> **Status:** authoritative
-> **Last verified:** 2026-02-04
+# Agents Governance (SSOT)
 
 Tracks: #634
 

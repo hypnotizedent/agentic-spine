@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# agent-watchdog.sh — Check watcher health and alert if unhealthy
+#
+# Usage: agent-watchdog.sh
+#
+# Checks:
+#   - fswatch process count (expects 1)
+#   - hot-folder-watcher.sh process count (expects >=1)
+#
+# If unhealthy, writes alert to outbox and logs to watchdog.out
+# Intended to run periodically via cron or launchd.
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  sed -n '3,12p' "$0" | sed 's/^# //' | sed 's/^#//'
+  exit 0
+fi
+
 # SPINE paths (canonical)
 SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
 OUTBOX="${SPINE_OUTBOX:-$SPINE/mailroom/outbox}"

@@ -1,7 +1,11 @@
-# AGENTS LOCATION CONTRACT
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: agent-locations
+---
 
-> **Status:** authoritative
-> **Last verified:** 2026-02-04
+# AGENTS LOCATION CONTRACT
 
 Authoritative: agentic-spine/agents/
 - agents/ = definitions, contracts, examples (portable, no runtime deps)

@@ -1,7 +1,11 @@
-# OPS Patch History (Spine-native)
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: ops-hardening-log
+---
 
-> **Status:** authoritative
-> **Last verified:** 2026-02-04
+# OPS Patch History (Spine-native)
 
 Purpose: record proof of critical ops path hardening (no ronny-ops fallback).
 

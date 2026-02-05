@@ -1,7 +1,11 @@
-## Explicitly Excluded (Config)
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: exclusion-rules
+---
 
-> **Status:** authoritative
-> **Last verified:** 2026-02-04
+# Explicitly Excluded Surfaces
 
 The following config surfaces are **out of scope** for /Code admission:
 

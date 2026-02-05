@@ -1,7 +1,11 @@
-# Compose Authority Map
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: compose-locations
+---
 
-> **Status:** authoritative
-> **Last verified:** 2026-02-04
+# Compose Authority Map
 
 **Date:** 2026-01-24
 **Scope:** Documentation only (no runtime changes)

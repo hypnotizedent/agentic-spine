@@ -1,8 +1,13 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: core-boundaries
+---
+
 # CORE Agentic Scope
 
 **Version:** 1.0
-**Last Updated:** 2026-02-01
-**Status:** Authoritative
 
 ---
 

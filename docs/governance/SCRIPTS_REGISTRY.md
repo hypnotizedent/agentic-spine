@@ -1,7 +1,11 @@
-# SCRIPTS REGISTRY (SPINE-NATIVE)
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-05
+scope: scripts-inventory
+---
 
-> **Status:** authoritative
-> **Last verified:** 2026-02-04
+# SCRIPTS REGISTRY (SPINE-NATIVE)
 
 Principle: only scripts listed here are allowed as official operator surfaces.
 
