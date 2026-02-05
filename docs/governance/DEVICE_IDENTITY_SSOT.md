@@ -1,11 +1,11 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-01-25
-verification_method: preflight-checks
+last_verified: 2026-02-05
+verification_method: spine-capabilities
 scope: all-infrastructure
 github_issue: "#615"
-parent_issues: ["#440", "#609"]
+parent_issues: ["#440", "#609", "#32"]
 ---
 
 # DEVICE IDENTITY SSOT
@@ -15,7 +15,7 @@ parent_issues: ["#440", "#609"]
 > Before referencing ANY host, IP, or service → CHECK THIS DOCUMENT.
 > Before creating ANY new device/VM/service → FOLLOW THESE RULES.
 >
-> Last Verified: January 25, 2026
+> Last Verified: February 5, 2026
 
 ---
 
@@ -63,6 +63,63 @@ This document establishes:
 |---------|---------|----------|
 | `{stack}-{service}` | `mint-os-postgres` | Stack-owned service |
 | `{service}` | `minio` | Standalone infrastructure |
+
+---
+
+## Sites / Physical Locations
+
+### MacBook (Mobile Workstation)
+
+| Property | Value |
+|----------|-------|
+| Tailscale hostname | `macbook` |
+| Tailscale IP | 100.85.186.7 |
+| Role | Workstation, RAG Hub, Spine CLI |
+| Network | Mobile (any network via Tailscale) |
+| Verification | `tailscale ip -4` → 100.85.186.7 |
+
+### Home Minilab
+
+| Property | Value |
+|----------|-------|
+| Location | Home residence |
+| Subnet | 192.168.1.0/24 (ISP router) |
+| Gateway | ISP router (DHCP) |
+| Proxmox Host | `proxmox-home` (Beelink Mini) |
+| LXCs | pihole-home, download-home |
+| NAS | Synology 918+ (`nas`) |
+| Home Assistant | `ha` (VM on proxmox-home) |
+| Vaultwarden | `vault` (LXC on proxmox-home) |
+
+**Verification:**
+```bash
+ssh proxmox-home "qm list && pct list"
+ping -c1 nas pihole-home ha vault
+```
+
+### Shop Rack (R730XD + N2024P)
+
+| Property | Value |
+|----------|-------|
+| Location | Shop building |
+| Subnet | 192.168.12.0/24 |
+| Gateway | 192.168.12.1 (Ubiquiti gateway) |
+| Switch mgmt IP | 10.1.1.242 (Dell N2024P - UNVERIFIED, see #618) |
+| iDRAC IP | 192.168.254.11 (UNVERIFIED - may have changed) |
+| Proxmox Host | `pve` (Dell R730XD) |
+| Production VMs | docker-host, automation-stack, media-stack, immich-1 |
+| NVR | Isolated network (physical access required) |
+
+**Verification:**
+```bash
+ssh pve "qm list"
+# For switch/iDRAC: physical access or console cable required
+```
+
+**Known Unknowns (Shop):**
+- Dell N2024P switch credentials unknown post-reset (LOOP-N2024P-DIAG-20260205)
+- iDRAC IP may have changed during network reconfiguration
+- NVR is isolated, no Tailscale access
 
 ---
 
@@ -264,6 +321,28 @@ These items need verification and should be updated as discovered:
 ### Latest Audit
 
 - `docs/audits/BACKUP_AUDIT_2026-01-25.md` - Current backup status + gaps
+
+---
+
+## Evidence / Receipts
+
+### 2026-02-05 Physical Truth Baseline (#32)
+
+| Capability | Receipt | Status |
+|------------|---------|--------|
+| nodes.status | `receipts/sessions/RCAP-20260205-155125__nodes.status__Rzvvh72648/receipt.md` | 10/11 OK |
+| services.health.status | `receipts/sessions/RCAP-20260205-155156__services.health.status__R5omv73468/receipt.md` | 5/5 OK |
+
+**Verification Commands Run:**
+- `tailscale ip -4` → 100.85.186.7 (macbook)
+- `tailscale status` → Full device list verified
+
+**Open Loop:**
+- LOOP-N2024P-DIAG-20260205 (Dell N2024P post-reset diagnostics)
+- Next action: Console access required for switch diagnostics
+
+**IP Conflict Resolution:**
+- SERVICE_REGISTRY.yaml macbook IP corrected: 100.115.158.91 → 100.85.186.7
 
 ---
 
