@@ -74,7 +74,7 @@ This document establishes:
 |----------|-------|
 | Tailscale hostname | `macbook` |
 | Tailscale IP | 100.85.186.7 |
-| Role | Workstation, RAG Hub, Spine CLI |
+| Role | Workstation, Spine CLI (RAG paused) |
 | Network | Mobile (any network via Tailscale) |
 | Verification | `tailscale ip -4` → 100.85.186.7 |
 
@@ -83,8 +83,8 @@ This document establishes:
 | Property | Value |
 |----------|-------|
 | Location | Home residence |
-| Subnet | 192.168.1.0/24 (ISP router) |
-| Gateway | ISP router (DHCP) |
+| Subnet | 10.0.0.0/24 |
+| Gateway | 10.0.0.1 (Ubiquiti UDR) |
 | Proxmox Host | `proxmox-home` (Beelink Mini) |
 | LXCs | pihole-home, download-home |
 | NAS | Synology 918+ (`nas`) |
@@ -103,11 +103,11 @@ ping -c1 nas pihole-home ha vault
 |----------|-------|
 | Location | Shop building |
 | Subnet | 192.168.12.0/24 |
-| Gateway | 192.168.12.1 (Ubiquiti gateway) |
-| Switch mgmt IP | 10.1.1.242 (Dell N2024P - UNVERIFIED, see #618) |
+| Gateway | TBD (verify upstream router) |
+| Switch mgmt IP | 192.168.12.1 (Dell N2024P) |
 | iDRAC IP | 192.168.254.11 (UNVERIFIED - may have changed) |
 | Proxmox Host | `pve` (Dell R730XD) |
-| Production VMs | docker-host, automation-stack, media-stack, immich-1 |
+| Production VMs | docker-host, automation-stack (core); media-stack, immich-1 (deferred) |
 | NVR | Isolated network (physical access required) |
 
 **Verification:**
@@ -120,6 +120,7 @@ ssh pve "qm list"
 - Dell N2024P switch credentials unknown post-reset (LOOP-N2024P-DIAG-20260205)
 - iDRAC IP may have changed during network reconfiguration
 - NVR is isolated, no Tailscale access
+- Upstream gateway IP needs verification
 
 ---
 
@@ -134,11 +135,16 @@ ssh pve "qm list"
 | docker-host VM | `docker-host` | 100.92.156.118 | Mint OS + Production | Shop | `ssh docker-host docker ps` |
 | Beelink Mini | `proxmox-home` | 100.103.99.62 | Proxmox Host (Home) | Home | `ssh proxmox-home uptime` |
 
-### Tier 2: Production Services
+### Tier 2: Production Services (Core)
 
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
 | automation-stack VM | `automation-stack` | 100.98.70.70 | n8n + Ollama | Shop | `curl -s http://automation-stack:5678/healthz` |
+
+### Deferred (Out of Scope for Foundational Core)
+
+| Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
+|--------|-------------------|--------------|------|----------|--------------|
 | media-stack VM | `media-stack` | 100.117.1.53 | Jellyfin + *arr | Shop | `ssh media-stack docker ps \| head -5` |
 | immich-1 VM | `immich-1` | 100.114.101.50 | Photos (Shop) | Shop | `curl -s http://immich-1:2283/api/server-info/ping` |
 
@@ -330,7 +336,7 @@ These items need verification and should be updated as discovered:
 
 | Capability | Receipt | Status |
 |------------|---------|--------|
-| nodes.status | `receipts/sessions/RCAP-20260205-155125__nodes.status__Rzvvh72648/receipt.md` | 10/11 OK |
+| nodes.status | `receipts/sessions/RCAP-20260205-155125__nodes.status__Rzvvh72648/receipt.md` | FAIL (media-stack deferred) |
 | services.health.status | `receipts/sessions/RCAP-20260205-155156__services.health.status__R5omv73468/receipt.md` | 5/5 OK |
 
 **Verification Commands Run:**

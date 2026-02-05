@@ -15,4 +15,4 @@ Ask the user for:
 
 Then create: `gh issue create --repo hypnotizedent/agentic-spine --title "..." --body "..." --label "<pillar>"`
 
-Remember: NO GITHUB ISSUE = NO WORK
+GitHub issues are optional. Mailroom loops + receipts are the canonical work state.

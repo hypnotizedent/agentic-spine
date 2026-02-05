@@ -11,6 +11,9 @@ github_issue: "#541"
 > **Purpose:** Standard operating procedure for closing GitHub issues in the
 > agentic-spine repository. Agents and operators follow this checklist before
 > marking any issue as closed.
+>
+> **Note:** GitHub issues are optional. The mailroom (loops + receipts) is the
+> canonical work state. Use this SOP only when a GitHub issue exists.
 
 ---
 
@@ -20,7 +23,7 @@ Before closing an issue, all applicable items must be satisfied:
 
 - [ ] **Code merged:** All related PRs are merged to `main`.
 - [ ] **Drift gates pass:** `./bin/ops cap run spine.verify` exits 0.
-- [ ] **Receipt exists:** A session receipt in `receipts/sessions/` references the issue number.
+- [ ] **Receipt exists (if issue used):** A session receipt in `receipts/sessions/` references the issue number.
 - [ ] **Docs updated:** Any governance or SSOT docs affected by the change are current.
 - [ ] **No open loops:** `./bin/ops loops list --open` shows no loops referencing this issue.
 

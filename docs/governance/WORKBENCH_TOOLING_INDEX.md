@@ -12,7 +12,7 @@ scope: external-tooling
 > This is the only approved place to reference workbench tooling from the spine.
 > Workbench documentation is quarantined and not authoritative.
 >
-> **Query first:** `cd ~/Code/workbench && mint ask "question"`
+> **Query first (when RAG is enabled):** `cd ~/Code/workbench && ./scripts/root/mint ask "question"`
 
 ---
 
@@ -24,7 +24,7 @@ scope: external-tooling
 | `~/Code/workbench/infra/cloudflare/` | Cloudflare exports and tunnel configs | tooling only |
 | `~/Code/workbench/infra/data/` | Machine-readable inventories | read-only snapshots |
 | `~/Code/workbench/infra/templates/` | Templates and scaffolds | read-only |
-| `~/Code/workbench/scripts/mint` | RAG CLI (`mint ask`, `mint index`) | use from workbench repo |
+| `~/Code/workbench/scripts/root/mint` | RAG CLI (`mint ask`, `mint index`) | deferred (RAG paused; future home TBD) |
 
 ---
 

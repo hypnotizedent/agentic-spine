@@ -33,7 +33,7 @@ Define the lifecycle and verification contract for agent scripts and related aut
 ## Safety Rules
 - No secrets in inventory (names/paths only; never values)
 - Verification output must not print secret content
-- Any automation changes (launchd/cron/GHA) are out of scope unless explicitly tracked by an issue/plan
+- Any automation changes (launchd/cron/GHA) are out of scope unless explicitly tracked by a mailroom loop or plan
 
 ## References
 See `docs/governance/CORE_AGENTIC_SCOPE.md` for the invariants that every agent implementation must strengthen.
