@@ -1,11 +1,11 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-05
+last_verified: 2026-02-06
 verification_method: spine-capabilities
 scope: all-infrastructure
 github_issue: "#615"
-parent_issues: ["#440", "#609", "#32"]
+parent_issues: ["#440", "#609", "#32", "#625"]
 ---
 
 # DEVICE IDENTITY SSOT
@@ -105,10 +105,11 @@ ping -c1 nas pihole-home ha vault
 | Subnet | 192.168.12.0/24 |
 | Gateway | 192.168.12.1 (Dell N2024P) |
 | Switch mgmt IP | 192.168.12.1 (Dell N2024P) |
-| iDRAC IP | 192.168.254.11 (UNVERIFIED - may have changed) |
+| iDRAC | `idrac-shop` — 192.168.12.250 (LAN-only) |
 | Proxmox Host | `pve` (Dell R730XD) |
 | Production VMs | docker-host, automation-stack (core); media-stack, immich-1 (deferred) |
-| NVR | Isolated network (physical access required) |
+| NVR | `nvr-shop` — 192.168.12.216 (LAN-only) |
+| WiFi AP | `ap-shop` — 192.168.12.249 (LAN-only) |
 
 **Verification:**
 ```bash
@@ -116,9 +117,86 @@ ssh pve "qm list"
 # For switch/iDRAC: physical access or console cable required
 ```
 
-**Known Unknowns (Shop):**
-- iDRAC IP may have changed during network reconfiguration
-- NVR is isolated, no Tailscale access
+**LAN-only endpoints (Shop):**
+- `switch-shop` — 192.168.12.1
+- `idrac-shop` — 192.168.12.250
+- `nvr-shop` — 192.168.12.216
+- `ap-shop` — 192.168.12.249
+
+---
+
+## Foundational Host SSOTs
+
+This SSOT is intentionally small: **names + identity + high-level network**.
+Deep, mutable infra detail lives in the per-location SSOT docs:
+
+- [MACBOOK_SSOT.md](MACBOOK_SSOT.md) - Workstation baseline (hardware + local services)
+- [MINILAB_SSOT.md](MINILAB_SSOT.md) - Home minilab baseline (Beelink + NAS + home VMs/LXCs)
+- [SHOP_SERVER_SSOT.md](SHOP_SERVER_SSOT.md) - Shop rack baseline (R730XD + switch + NVR + UPS)
+
+## Canonical Network Summary
+
+### Tailscale Host Table (Canonical)
+
+| Host | Tailscale IP | Location | Role |
+|------|-------------|----------|------|
+| macbook | 100.85.186.7 | Mobile | Workstation + Spine CLI (RAG deferred) |
+| pve | 100.96.211.33 | Shop | Proxmox VE (shop hypervisor) |
+| docker-host | 100.92.156.118 | Shop | Production docker (Mint OS) |
+| automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
+| proxmox-home | 100.103.99.62 | Home | Proxmox VE (home host) |
+| nas | 100.102.199.111 | Home | Synology NAS |
+| vault | 100.93.142.63 | Home | Vaultwarden (password manager) |
+| ha | 100.67.120.1 | Home | Home Assistant |
+| pihole-home | 100.105.148.96 | Home | Pi-hole |
+| download-home | 100.125.138.110 | Home | Downloads (*arr) (deferred) |
+
+### LAN Endpoints (No Tailscale)
+
+| Location | Canonical Name | LAN IP | Purpose |
+|----------|----------------|--------|---------|
+| Home | `udr-home` | 10.0.0.1 | Gateway / UniFi controller |
+| Shop | `switch-shop` | 192.168.12.1 | Switch + gateway (Dell N2024P) |
+| Shop | `idrac-shop` | 192.168.12.250 | Out-of-band management (iDRAC) |
+| Shop | `nvr-shop` | 192.168.12.216 | Camera recorder (NVR) |
+| Shop | `ap-shop` | 192.168.12.249 | WiFi access point |
+
+### Subnet Table
+
+| Subnet | Location | Gateway | DHCP Range | Notes |
+|--------|----------|---------|------------|-------|
+| 192.168.12.0/24 | Shop | 192.168.12.1 (N2024P) | .100-.199 | Production infrastructure |
+| 10.0.0.0/24 | Home | 10.0.0.1 (UDR) | .100-.199 | Home lab |
+| 100.x.x.x/32 | Tailscale | MagicDNS | N/A | Mesh overlay network |
+
+### Quick Checks
+
+```bash
+# All Tailscale devices
+tailscale status
+
+# Tier 1 health (critical infrastructure)
+for host in pve docker-host proxmox-home; do
+  echo "=== $host ===" && ssh -o ConnectTimeout=5 $host uptime 2>/dev/null || echo "UNREACHABLE"
+done
+
+# Service endpoints
+curl -s https://mintprints-api.ronny.works/health
+curl -s https://secrets.ronny.works/api/status
+curl -s http://automation-stack:5678/healthz
+```
+
+### Dashboards
+
+| Dashboard | URL | Purpose |
+|-----------|-----|---------|
+| Mint OS Admin | https://admin.mintprints.co | Business operations |
+| Grafana | https://grafana.ronny.works | Monitoring |
+| n8n | https://n8n.ronny.works | Automation workflows |
+| Proxmox (Shop) | https://pve:8006 | VM management |
+| Proxmox (Home) | https://proxmox-home:8006 | LXC management |
+| Home Assistant | http://ha:8123 | Home automation |
+| Infisical | https://secrets.ronny.works | Secrets management |
 
 ---
 
@@ -128,7 +206,7 @@ ssh pve "qm list"
 
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
-| MacBook Pro M4 | `macbook` | 100.85.186.7 | Workstation + RAG Hub | Mobile | `ping macbook` |
+| MacBook Pro M4 | `macbook` | 100.85.186.7 | Workstation + Spine CLI (RAG deferred) | Mobile | `ping macbook` |
 | Dell R730XD | `pve` | 100.96.211.33 | Proxmox Host (Shop) | Shop | `ssh pve uptime` |
 | docker-host VM | `docker-host` | 100.92.156.118 | Mint OS + Production | Shop | `ssh docker-host docker ps` |
 | Beelink Mini | `proxmox-home` | 100.103.99.62 | Proxmox Host (Home) | Home | `ssh proxmox-home uptime` |
@@ -204,8 +282,8 @@ curl -s https://secrets.ronny.works/api/status
 curl -s http://automation-stack:5678/healthz
 # Expected: {"status":"ok"}
 
-# RAG Stack (MacBook only)
-curl -s http://localhost:3002/api/ping
+# Optional: local RAG stack (currently deferred)
+# curl -s http://localhost:3002/api/ping
 # Expected: {"online":true}
 ```
 
@@ -258,14 +336,13 @@ Stream Deck is configured for Home Assistant control only (see the Home Assistan
 
 ## Known Unknowns
 
-These items need verification and should be updated as discovered:
+These are intentionally tracked as **few consolidated loops** (to prevent loop sprawl):
 
-| Item | Unknown | How to Verify | Priority |
-|------|---------|---------------|----------|
-| NVR IP | Currently isolated | Physical access to NVR | P2 |
-| iDRAC IP | Was 192.168.254.11, may have changed | F2 at POST or DHCP scan | P3 |
-| Dell N2024P Switch | Last-known mgmt IP: 10.1.1.242 (UNVERIFIED). Creds unknown. BYPASSED. | Console cable + password recovery | P2 (#618) |
-| HP Laptops | Model numbers, specs | Physical inspection | P3 |
+| Loop | What is unfinished | Priority |
+|------|--------------------|----------|
+| `OL_SHOP_BASELINE_FINISH` | MD1400 drive inventory, camera channel map, AP settings, cron/backup schedules | P2 |
+| `OL_HOME_BASELINE_FINISH` | NAS drive models/RAID, NAS backup strategy, home cron schedules, download-home SSH access | P2 |
+| `OL_MACBOOK_BASELINE_FINISH` | Hotkeys/shortcuts inventory, scheduled tasks inventory | P3 |
 
 ---
 
@@ -282,14 +359,14 @@ These items need verification and should be updated as discovered:
 ### Updating an IP
 
 1. Update this document FIRST
-2. Update `infrastructure/SERVICE_REGISTRY.md` if service-level detail exists
+2. Update `docs/governance/SERVICE_REGISTRY.yaml` if service-level mapping changes
 3. Commit with `fix(identity): update {device} IP`
 
 ### Removing a Device
 
 1. Move to "Decommissioned" section (don't delete immediately)
 2. Document decommission date and reason
-3. Remove from SERVICE_REGISTRY.md
+3. Remove from `docs/governance/SERVICE_REGISTRY.yaml`
 4. After 30 days, remove from this doc entirely
 
 ---
@@ -351,22 +428,32 @@ These items need verification and should be updated as discovered:
 
 ## Quick Reference Card
 
-Print this or add to Stream Deck "cheat sheet" button:
+> **Note:** Detailed host tables, subnet info, and dashboards are now in the
+> [Canonical Network Summary](#canonical-network-summary) section above.
+
+**Print-friendly summary:**
 
 ```
-CRITICAL HOSTS:
-  macbook     100.85.186.7   (you are here)
-  docker-host 100.92.156.118 (production)
-  pve         100.96.211.33  (proxmox shop)
-  proxmox-home 100.103.99.62 (proxmox home)
+CRITICAL HOSTS (Tier 1):
+  macbook      100.85.186.7    Workstation + RAG
+  docker-host  100.92.156.118  Mint OS production
+  pve          100.96.211.33   Proxmox (shop)
+  proxmox-home 100.103.99.62   Proxmox (home)
+
+SUBNETS:
+  192.168.12.0/24  Shop (R730XD, VMs)
+  10.0.0.0/24      Home (Beelink, NAS)
+  100.x.x.x        Tailscale mesh
 
 QUICK CHECKS:
-  tailscale status           # All devices
-  ssh docker-host docker ps  # Containers
-  ssh pve qm list            # VMs
+  tailscale status             # All devices
+  ssh docker-host docker ps    # Containers
+  ssh pve qm list              # Shop VMs
+  ssh proxmox-home pct list    # Home LXCs
 
 DASHBOARDS:
-  https://admin.mintprints.co     # Mint OS
-  https://grafana.ronny.works     # Monitoring
-  https://n8n.ronny.works         # Automation
+  https://admin.mintprints.co  # Mint OS
+  https://grafana.ronny.works  # Monitoring
+  https://n8n.ronny.works      # Automation
+  https://secrets.ronny.works  # Infisical
 ```

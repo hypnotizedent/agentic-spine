@@ -34,6 +34,9 @@ The invariants. If a drift gate fails, one of these was violated.
 | [CLOUD_FLARE_BINDING.md](core/CLOUD_FLARE_BINDING.md) | Cloudflare zone/tunnel binding |
 | [INFISICAL_PROJECTS.md](core/INFISICAL_PROJECTS.md) | Infisical project inventory (names + counts) |
 | [DEVICE_IDENTITY_SSOT.md](governance/DEVICE_IDENTITY_SSOT.md) | Device/VM identity (hostnames, Tailscale IPs) |
+| [SHOP_SERVER_SSOT.md](governance/SHOP_SERVER_SSOT.md) | Shop rack infrastructure (R730XD, VMs, storage, cameras) |
+| [MACBOOK_SSOT.md](governance/MACBOOK_SSOT.md) | Workstation infrastructure (RAG stack, dev tooling) |
+| [MINILAB_SSOT.md](governance/MINILAB_SSOT.md) | Home minilab (Beelink, NAS, home VMs/LXCs) |
 
 ---
 
@@ -67,6 +70,7 @@ The authority chain. When in doubt, these are the source of truth.
 | [RAG_INDEXING_RULES.md](governance/RAG_INDEXING_RULES.md) | What gets indexed to RAG knowledge base |
 | [SEARCH_EXCLUSIONS.md](governance/SEARCH_EXCLUSIONS.md) | What directories/files are excluded from search |
 | [SECRETS_POLICY.md](governance/SECRETS_POLICY.md) | Governance-grade secrets management rules |
+| [SSOT_UPDATE_TEMPLATE.md](governance/SSOT_UPDATE_TEMPLATE.md) | Receipt-driven SSOT update workflow |
 | [BACKUP_GOVERNANCE.md](governance/BACKUP_GOVERNANCE.md) | Backup strategy, verification, freshness rules |
 | [REBOOT_HEALTH_GATE.md](governance/REBOOT_HEALTH_GATE.md) | Safe reboot procedures and health gates |
 | [INFRASTRUCTURE_AUTHORITY.md](governance/INFRASTRUCTURE_AUTHORITY.md) | Infrastructure authority rules |

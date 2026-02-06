@@ -104,6 +104,9 @@ Pillar entrypoints (per stack)
 | Repo Structure | `docs/governance/REPO_STRUCTURE_AUTHORITY.md` | Where files belong |
 | Stacks | `docs/governance/STACK_REGISTRY.yaml` | Stack inventory |
 | Device Identity | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device naming/IPs |
+| Workstation | `docs/governance/MACBOOK_SSOT.md` | MacBook baseline (hardware + local services) |
+| Home Minilab | `docs/governance/MINILAB_SSOT.md` | Home baseline (Beelink + NAS + home VMs/LXCs) |
+| Shop Rack | `docs/governance/SHOP_SERVER_SSOT.md` | Shop baseline (R730XD + switch + NVR + UPS) |
 | Secrets Policy | `docs/governance/SECRETS_POLICY.md` | Secrets management |
 | Agent Boundaries | `docs/governance/AGENT_BOUNDARIES.md` | What agents can/cannot do |
 | Scripts Registry | `docs/governance/SCRIPTS_REGISTRY.md` | Canonical scripts index |

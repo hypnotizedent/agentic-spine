@@ -166,8 +166,71 @@ if [[ -n "$WORKBENCH_INFRA" ]]; then
   err "workbench/infra paths outside WORKBENCH_TOOLING_INDEX.md:"
   echo "$WORKBENCH_INFRA" | head -10
 else
-  echo "  No workbench/infra paths outside Tooling Index (clean)"
+echo "  No workbench/infra paths outside Tooling Index (clean)"
 fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# CHECK 6c: Secret-like strings in docs (never allowed)
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Check 6c: Secret leaks (docs) ---"
+
+# Keep output safe: file:line only (never echo the full line content).
+scan_doc_file_for_secrets() {
+  local f="$1"
+  local rel="${f#$ROOT/}"
+
+  # RTSP URLs almost always embed credentials; never allow them in docs.
+  while IFS= read -r hit; do
+    # hit format: path:line:rtsp://
+    local line_no
+    line_no="$(echo "$hit" | cut -d: -f2)"
+    err "rtsp:// found in docs: $rel:$line_no (store RTSP URLs in Infisical)"
+  done < <(rg -n -o "rtsp://" "$f" 2>/dev/null || true)
+
+  # Table cells that contain password values (must be -, <REDACTED>, or Infisical reference).
+  while IFS= read -r hit; do
+    # hit format: rel:line
+    err "password value found in docs table: $hit (store credentials in Infisical)"
+  done < <(awk -v rel="$rel" '
+    BEGIN { IGNORECASE=1 }
+    {
+      n=split($0,a,"|");
+      if (n < 4) { next }
+      key=a[2]; val=a[3];
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key);
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", val);
+      k=tolower(key);
+      if (k=="password" || k=="admin password") {
+        v=tolower(val);
+        if (val=="" || val=="-" || val=="<REDACTED>" || index(v,"infisical")>0) { next }
+        printf("%s:%d\n", rel, NR);
+      }
+    }
+  ' "$f")
+
+  # Inline \"user / pass\" patterns.
+  while IFS= read -r hit; do
+    err "inline credential pattern found in docs: $hit (store credentials in Infisical)"
+  done < <(awk -v rel="$rel" '
+    BEGIN { IGNORECASE=1 }
+    /(admin|root)[[:space:]]+\/[[:space:]]+[^[:space:]]+/ {
+      if ($0 ~ /<REDACTED>/) { next }
+      if (tolower($0) ~ /infisical/) { next }
+      printf("%s:%d\n", rel, NR);
+    }
+  ' "$f")
+}
+
+while IFS= read -r -d '' f; do
+  scan_doc_file_for_secrets "$f"
+done < <(find "$DOCS" -name "*.md" \
+  -not -path "*/legacy/*" \
+  -not -path "*/_imported/*" \
+  -not -path "*/_audits/*" \
+  -not -path "*/_receipts_meta/*" \
+  -print0 \
+  | sort -z)
 
 # ─────────────────────────────────────────────────────────────────────────
 # CHECK 7: SSOT path validation
