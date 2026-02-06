@@ -19,22 +19,22 @@ github_issue: "#541"
 
 ## Quick Start: The Entry Chain
 
-> **Spine root:** `/Users/ronnyworks/Code/agentic-spine`  
+> **Spine root:** `/Users/ronnyworks/code/agentic-spine`  
 > **Entry doc:** [`docs/governance/SESSION_PROTOCOL.md`](SESSION_PROTOCOL.md) is the session protocol for the spine. Read it before doing anything else in this repo.
 
 Every agent session in the spine follows this path:
 
 ```
-/Users/ronnyworks/Code/agentic-spine/docs/governance/SESSION_PROTOCOL.md ← START HERE: Session protocol
+/Users/ronnyworks/code/agentic-spine/docs/governance/SESSION_PROTOCOL.md ← START HERE: Session protocol
     ↓
-/Users/ronnyworks/Code/agentic-spine/docs/brain/README.md     ← Brain rules, hotkeys, and context injection helpers
+/Users/ronnyworks/code/agentic-spine/docs/brain/README.md     ← Brain rules, hotkeys, and context injection helpers
     ↓
-/Users/ronnyworks/Code/agentic-spine/docs/governance/GOVERNANCE_INDEX.md ← Governance overview + SSOT mapping
+/Users/ronnyworks/code/agentic-spine/docs/governance/GOVERNANCE_INDEX.md ← Governance overview + SSOT mapping
     ↓
 Pillar entrypoints (per stack)
-    ├── /Users/ronnyworks/Code/agentic-spine/docs/governance/SSOT_REGISTRY.yaml
-    ├── /Users/ronnyworks/Code/agentic-spine/docs/governance/REPO_STRUCTURE_AUTHORITY.md
-    ├── /Users/ronnyworks/Code/agentic-spine/docs/governance/AGENTS_GOVERNANCE.md
+    ├── /Users/ronnyworks/code/agentic-spine/docs/governance/SSOT_REGISTRY.yaml
+    ├── /Users/ronnyworks/code/agentic-spine/docs/governance/REPO_STRUCTURE_AUTHORITY.md
+    ├── /Users/ronnyworks/code/agentic-spine/docs/governance/AGENTS_GOVERNANCE.md
     └── other SSOTs listed in `SSOT_REGISTRY.yaml`
 ```
 

@@ -12,7 +12,7 @@ scope: external-tooling
 > This is the only approved place to reference workbench tooling from the spine.
 > Workbench documentation is quarantined and not authoritative.
 >
-> **Query first (when RAG is enabled):** `cd ~/Code/workbench && ./scripts/root/mint ask "question"`
+> **Query first (when RAG is enabled):** `cd ~/code/workbench && ./scripts/root/mint ask "question"`
 
 ---
 
@@ -20,10 +20,10 @@ scope: external-tooling
 
 | Path | Purpose | Notes |
 |------|---------|-------|
-| `~/Code/workbench/infra/compose/` | Compose stacks and runtime configs | tooling only |
-| `~/Code/workbench/infra/cloudflare/` | Cloudflare exports and tunnel configs | tooling only |
-| `~/Code/workbench/infra/data/` | Machine-readable inventories | read-only snapshots |
-| `~/Code/workbench/infra/templates/` | Templates and scaffolds | read-only |
+| `~/code/workbench/infra/compose/` | Compose stacks and runtime configs | tooling only |
+| `~/code/workbench/infra/cloudflare/` | Cloudflare exports and tunnel configs | tooling only |
+| `~/code/workbench/infra/data/` | Machine-readable inventories | read-only snapshots |
+| `~/code/workbench/infra/templates/` | Templates and scaffolds | read-only |
 
 ---
 
@@ -40,7 +40,7 @@ scope: external-tooling
 
 | Path | Purpose | Notes |
 |------|---------|-------|
-| `~/Code/workbench/scripts/root/mint` | RAG CLI (`mint ask`, `mint index`) | RAG paused; future home TBD |
+| `~/code/workbench/scripts/root/mint` | RAG CLI (`mint ask`, `mint index`) | RAG paused; future home TBD |
 
 ---
 

@@ -7,13 +7,13 @@ scope: session-entry
 
 # Session Protocol (Spine-native)
 
-> **Purpose:** Entry point for every agent working inside `/Users/ronnyworks/Code/agentic-spine`.
+> **Purpose:** Entry point for every agent working inside `/Users/ronnyworks/code/agentic-spine`.
 > **Why:** Legacy workbench-era session docs are archived and no longer
 > represent the spine runtime entry path.
 
 ## Before you run anything
 
-1. Confirm you are in the spine repo (`cd /Users/ronnyworks/Code/agentic-spine`).
+1. Confirm you are in the spine repo (`cd /Users/ronnyworks/code/agentic-spine`).
 2. Read this document start to finish so you understand how sessions are assembled.
 3. Open `docs/brain/README.md` to see the hotkeys, memory rules, and context injection process.
 4. Browse `docs/governance/GOVERNANCE_INDEX.md` to learn how governance knowledge is structured and where single sources of truth live.

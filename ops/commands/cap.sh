@@ -11,7 +11,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 STATE_DIR="$SPINE_REPO/mailroom/state"
 CAP_FILE="$SPINE_REPO/ops/capabilities.yaml"
 RECEIPTS="$SPINE_REPO/receipts/sessions"

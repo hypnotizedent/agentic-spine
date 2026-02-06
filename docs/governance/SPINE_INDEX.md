@@ -24,4 +24,4 @@ Generated: 2026-02-01T03:25:38-05:00
 ## Brain docs (imported docs-only)
 - docs/brain/
 
-Proof: /Users/ronnyworks/Code/agentic-spine/receipts/sessions/ADHOC_20260201_032538_LOCK_ADMISSIONS_INDEX
+Proof: /Users/ronnyworks/code/agentic-spine/receipts/sessions/ADHOC_20260201_032538_LOCK_ADMISSIONS_INDEX

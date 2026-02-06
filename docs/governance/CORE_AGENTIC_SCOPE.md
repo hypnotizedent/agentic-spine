@@ -41,7 +41,7 @@ Authoritative contracts, manifests, and SSOT:
 
 1. **Spine-Rooted**
    - All paths use SPINE_* environment variables:
-     - `$SPINE_REPO` → `/Users/ronnyworks/Code/agentic-spine`
+     - `$SPINE_REPO` → `/Users/ronnyworks/code/agentic-spine`
      - `$SPINE_INBOX` → `$SPINE_REPO/mailroom/inbox`
      - `$SPINE_OUTBOX` → `$SPINE_REPO/mailroom/outbox`
      - `$SPINE_STATE` → `$SPINE_REPO/mailroom/state`
