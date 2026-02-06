@@ -271,8 +271,8 @@ yq eval '.zones[].hostnames[] | select(.stack == "TBD") | .hostname' \
 
 | Document | Purpose |
 |----------|---------|
-| [Governance Index](./README.md) | Entry point for all governance docs |
+| [Governance Index](GOVERNANCE_INDEX.md) | Entry point for all governance docs |
 | [DOMAIN_ROUTING_REGISTRY.yaml](./DOMAIN_ROUTING_REGISTRY.yaml) | Hostname → routing layer SSOT |
 | [STACK_REGISTRY.yaml](./STACK_REGISTRY.yaml) | Stack locations SSOT |
-| [SERVICE_REGISTRY.md](../../infrastructure/SERVICE_REGISTRY.md) | What runs where |
+| [SERVICE_REGISTRY.yaml](SERVICE_REGISTRY.yaml) | What runs where |
 | [CI_RUNNER_REQUIREMENTS.md](./CI_RUNNER_REQUIREMENTS.md) | Deploy runner contract |

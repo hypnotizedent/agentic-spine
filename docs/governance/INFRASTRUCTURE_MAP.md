@@ -96,7 +96,7 @@ sources: []
 | API | `docker-host:mint-os-dashboard-api` | `curl https://mintprints-api.ronny.works/health` |
 | Admin UI | Cloudflare Pages | `https://admin.mintprints.co` |
 
-> ⚠️ **Note:** MinIO is now standalone infrastructure in `infrastructure/storage/`. Container name changed from `mint-os-minio` to `minio`. See `infrastructure/SERVICE_REGISTRY.md` for current state.
+> ⚠️ **Note:** MinIO is now standalone infrastructure in `infrastructure/storage/`. Container name changed from `mint-os-minio` to `minio`. For current service topology, see `docs/governance/SERVICE_REGISTRY.yaml`.
 
 ---
 
