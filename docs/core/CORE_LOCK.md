@@ -2,7 +2,7 @@
 
 **Locked:** 2026-02-01
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v1.7
+**Gate Version:** drift-gate.sh v1.8
 
 ---
 
@@ -79,6 +79,8 @@ All must PASS for core to be healthy:
 | D25 | Secrets CLI hash parity (canonical vs vendored tools) |
 | D26 | Agent startup read-surface and host/service route lock |
 | D27 | Fact duplication lock for startup/governance read docs |
+| D28 | Archive runway lock (active legacy absolute paths + extraction queue contract) |
+| D29 | Active entrypoint lock (launchd/cron in /Code cannot execute from ronny-ops) |
 
 ## Rules
 

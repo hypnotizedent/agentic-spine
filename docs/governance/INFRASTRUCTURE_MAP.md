@@ -168,12 +168,12 @@ cd mint-os/apps/artwork && pnpm build && npx wrangler pages deploy dist/ --proje
 ```bash
 # Sync job-estimator code to docker-host
 rsync -avz --exclude 'node_modules' --exclude 'build' \
-  /Users/ronnyworks/ronny-ops/mint-os/apps/job-estimator/ \
+  /Users/ronnyworks/Code/workbench/mint-os/apps/job-estimator/ \
   docker-host:~/stacks/mint-os/job-estimator/
 
 # Sync supplier scripts to docker-host
 rsync -avz --delete \
-  /Users/ronnyworks/ronny-ops/mint-os/scripts/suppliers/ \
+  /Users/ronnyworks/Code/workbench/mint-os/scripts/suppliers/ \
   docker-host:~/stacks/mint-os/scripts/suppliers/
 
 # Rebuild after sync

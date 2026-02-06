@@ -1,7 +1,7 @@
 # Spine State
 
 > **Status:** authoritative
-> **Last verified:** 2026-02-04
+> **Last verified:** 2026-02-06
 
 ---
 
@@ -18,7 +18,7 @@ The spine's authority chain and contract surface:
 
 | Asset | Path |
 |-------|------|
-| Invariant lock + drift gates (D1–D27) | [CORE_LOCK.md](CORE_LOCK.md) |
+| Invariant lock + drift gates (D1–D29) | [CORE_LOCK.md](CORE_LOCK.md) |
 | Governance entry point | [GOVERNANCE_INDEX.md](../governance/GOVERNANCE_INDEX.md) |
 | Machine-readable SSOT registry | [SSOT_REGISTRY.yaml](../governance/SSOT_REGISTRY.yaml) |
 | Agent contract | [AGENT_CONTRACT.md](AGENT_CONTRACT.md) |
@@ -57,6 +57,8 @@ or any hard-coded absolute path outside `$SPINE_REPO`.
 This is enforced by:
 - **D5** (SPINE_REPO rooting) — all paths use `$SPINE_REPO` variables
 - **D16** (legacy isolation) — `docs/legacy/` is quarantined, never referenced by runtime code
+- **D28** (archive runway lock) — blocks active legacy absolute-path coupling to `ronny-ops` outside quarantine zones
+- **D29** (active entrypoint lock) — blocks loaded launchd/cron entrypoints sourced from `/Code` that still execute from `ronny-ops`
 - **docs-lint CHECK 6** — forbidden pattern scan outside quarantine zones
 
 Documentation references to `ronny-ops` are permitted in constraint declarations,
@@ -67,7 +69,7 @@ verification gates, historical audits, and extraction tracking contexts.
 ## Verification
 
 ```bash
-# Drift gates (D1–D27)
+# Drift gates (D1–D29)
 ./bin/ops cap run spine.verify
 
 # Doc hierarchy, metadata, README registration, SSOT paths

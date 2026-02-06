@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v1.7)
+# drift-gate.sh - Constitutional drift detector (v1.8)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -19,7 +19,7 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v1.7) ==="
+echo "=== DRIFT GATE (v1.8) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -355,6 +355,30 @@ if [[ -x "$SP/surfaces/verify/d27-fact-duplication-lock.sh" ]]; then
   fi
 else
   warn "fact duplication drift gate not present"
+fi
+
+# D28: Archive runway lock (active legacy absolute paths + extraction queue contract)
+echo -n "D28 archive runway lock... "
+if [[ -x "$SP/surfaces/verify/d28-legacy-path-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d28-legacy-path-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d28-legacy-path-lock.sh failed"
+  fi
+else
+  warn "archive runway lock gate not present"
+fi
+
+# D29: Active entrypoint lock (launchd/cron in /Code must not execute from ronny-ops)
+echo -n "D29 active entrypoint lock... "
+if [[ -x "$SP/surfaces/verify/d29-active-entrypoint-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d29-active-entrypoint-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d29-active-entrypoint-lock.sh failed"
+  fi
+else
+  warn "active entrypoint lock gate not present"
 fi
 
 echo
