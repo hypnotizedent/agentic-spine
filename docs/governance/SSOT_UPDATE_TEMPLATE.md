@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-05
+last_verified: 2026-02-06
 verification_method: manual
 scope: ssot-update-workflow
 github_issue: "#625"
@@ -22,9 +22,9 @@ github_issue: "#625"
 Before making any SSOT update:
 
 ```bash
-# 1. Check for open loops (no work if loops are open)
+# 1. Check for open loops
 ./bin/ops loops list --open
-# Expected: 0 open loops (or acknowledged exceptions)
+# Expected: only acknowledged baseline/seed loops (or 0)
 
 # 2. Verify docs are currently healthy
 ./bin/ops cap run docs.lint
@@ -79,7 +79,7 @@ minio
 | New service | `SERVICE_REGISTRY.yaml` | services |
 | Service port change | `SERVICE_REGISTRY.yaml` | services |
 | New backup target | `BACKUP_GOVERNANCE.md` | Backup Targets |
-| Hardware spec | `DEVICE_IDENTITY_SSOT.md` | Per-Host Detail Cards |
+| Hardware spec | `MACBOOK_SSOT.md` / `MINILAB_SSOT.md` / `SHOP_SERVER_SSOT.md` | Hardware Specifications |
 
 ---
 
@@ -97,17 +97,17 @@ minio
 | {Device Name} | `{tailscale-hostname}` | {tailscale-ip} | {Role} | {Location} | `{verification-command}` |
 ```
 
-**Template for Per-Host Detail Card entry:**
+**Template for a Host SSOT entry:**
 ```markdown
-### {hostname}
+## {Host/Location}
 
 | Property | Value |
 |----------|-------|
 | OS | {os-name} {version} |
 | CPU | {cpu-spec} |
 | RAM | {ram-spec} |
-| Tailscale IP | {ip} |
-| Local IP | {local-ip} |
+| Tailscale IP | {tailscale-ip} |
+| Local IP | {lan-ip (if applicable)} |
 | Role | {role-description} |
 
 **Services/Containers:**
@@ -255,6 +255,7 @@ When two documents conflict, lower priority wins:
 - Edit based on memory or assumptions (always verify first)
 - Leave timestamps stale after updates
 - Create new SSOT files without registry entry
+ - Copy credentials, tokens, SSIDs, or RTSP URLs from legacy docs into spine (store in Infisical)
 
 **Do:**
 - Run capability first, capture receipt
