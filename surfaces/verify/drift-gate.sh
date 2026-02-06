@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v1.6)
+# drift-gate.sh - Constitutional drift detector (v1.7)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -19,7 +19,7 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v1.6) ==="
+echo "=== DRIFT GATE (v1.7) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -343,6 +343,18 @@ if [[ -x "$SP/surfaces/verify/d26-agent-read-surface.sh" ]]; then
   fi
 else
   warn "agent read surface drift gate not present"
+fi
+
+# D27: Fact duplication lock for startup/governance read surfaces
+echo -n "D27 fact duplication lock... "
+if [[ -x "$SP/surfaces/verify/d27-fact-duplication-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d27-fact-duplication-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d27-fact-duplication-lock.sh failed"
+  fi
+else
+  warn "fact duplication drift gate not present"
 fi
 
 echo

@@ -186,9 +186,9 @@ If still unclear, create an issue and tag @ronny.
 
 ## Conflict Resolution Example
 
-**Scenario:** Agent finds conflicting port numbers:
-- `SERVICE_REGISTRY.yaml` says MinIO is on port 9000
-- Some old doc says MinIO is on port 9005
+**Scenario:** Agent finds conflicting service endpoint values:
+- `SERVICE_REGISTRY.yaml` has one endpoint value
+- Some old doc shows a different endpoint value
 
 **Resolution:**
 
@@ -200,7 +200,7 @@ If still unclear, create an issue and tag @ronny.
 
 2. SERVICE_REGISTRY has priority 1 and scope includes "Where services run"
 
-3. **Decision:** Port 9000 is correct. The old doc is wrong.
+3. **Decision:** `SERVICE_REGISTRY.yaml` is correct. The old doc is wrong.
 
 4. **Action:** Fix or archive the old doc.
 

@@ -43,7 +43,7 @@ one-off automation that predates the spine capability model.
 
 | Category | Count | Spine Status |
 |----------|-------|-------------|
-| Audit/verify scripts | ~10 | Replaced by drift gates (D1–D26) |
+| Audit/verify scripts | ~10 | Replaced by drift gates (D1–D27) |
 | Docker management | ~5 | Replaced by `docker.compose.status` capability |
 | RAG/indexing | ~4 | Not applicable to spine (workbench-specific) |
 | Secrets management | ~3 | Replaced by `secrets.*` capabilities |
