@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# loops-ledger-reduce - Canonical deduplication for append-only loop ledger
+#
+# Reads open_loops.jsonl and outputs deduplicated records (latest by loop_id).
+# This is the single source of truth for loop counts.
+#
+# Usage:
+#   loops-ledger-reduce              # Output deduped JSONL to stdout
+#   loops-ledger-reduce --counts     # Output JSON with status counts
+#   loops-ledger-reduce --open       # Output only open loops (deduped)
+#   loops-ledger-reduce --closed     # Output only closed loops (deduped)
+#
+# Contract:
+#   - Input: append-only JSONL with multiple records per loop_id (state transitions)
+#   - Output: one record per loop_id (latest wins)
+#   - Deterministic: same input always produces same output
+
+SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+LOOPS_FILE="$SPINE_REPO/mailroom/state/open_loops.jsonl"
+
+usage() {
+    cat <<'EOF'
+loops-ledger-reduce - Canonical loop ledger deduplication
+
+Usage:
+  loops-ledger-reduce              Output all deduped records as JSONL
+  loops-ledger-reduce --counts     Output status counts as JSON
+  loops-ledger-reduce --open       Output only open loops (deduped)
+  loops-ledger-reduce --closed     Output only closed loops (deduped)
+  loops-ledger-reduce --summary    Output human-readable summary
+
+Exit codes:
+  0  Success
+  1  Error (file missing, parse failure)
+EOF
+}
+
+# Check for empty/missing file
+if [[ ! -s "$LOOPS_FILE" ]]; then
+    case "${1:-}" in
+        --counts)
+            echo '{"open":0,"closed":0,"total":0}'
+            ;;
+        --summary)
+            echo "Open: 0"
+            echo "Closed: 0"
+            echo "Total: 0"
+            ;;
+        *)
+            # Empty output for empty ledger
+            ;;
+    esac
+    exit 0
+fi
+
+# Python reducer - canonical dedup logic
+python3 - "$LOOPS_FILE" "${1:-}" <<'PY'
+import json
+import sys
+from collections import Counter
+
+path = sys.argv[1]
+mode = sys.argv[2] if len(sys.argv) > 2 else ""
+
+rows = []
+with open(path, "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+# Deduplicate by loop_id (keep latest record - last one wins)
+latest = {}
+for row in rows:
+    loop_id = row.get("loop_id")
+    if loop_id:
+        latest[loop_id] = row
+
+deduped = list(latest.values())
+open_loops = [r for r in deduped if r.get("status") == "open"]
+closed_loops = [r for r in deduped if r.get("status") == "closed"]
+
+if mode == "--counts":
+    print(json.dumps({
+        "open": len(open_loops),
+        "closed": len(closed_loops),
+        "total": len(deduped)
+    }))
+elif mode == "--summary":
+    severity_counts = Counter(r.get("severity", "unknown") for r in open_loops)
+    owner_counts = Counter(r.get("owner", "unassigned") for r in open_loops)
+
+    print(f"Open: {len(open_loops)}")
+    print(f"Closed: {len(closed_loops)}")
+    print(f"Total: {len(deduped)}")
+    print("")
+    print("By Severity (open only):")
+    print(f"  High:   {severity_counts.get('high', 0)}")
+    print(f"  Medium: {severity_counts.get('medium', 0)}")
+    print(f"  Low:    {severity_counts.get('low', 0)}")
+    print("")
+    print("By Owner (open only):")
+    if not owner_counts:
+        print("  (none)")
+    else:
+        for owner in sorted(owner_counts):
+            print(f"  {owner}: {owner_counts[owner]}")
+elif mode == "--open":
+    for r in open_loops:
+        print(json.dumps(r))
+elif mode == "--closed":
+    for r in closed_loops:
+        print(json.dumps(r))
+else:
+    # Default: output all deduped records
+    for r in deduped:
+        print(json.dumps(r))
+PY

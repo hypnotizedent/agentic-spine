@@ -274,31 +274,20 @@ show_loop() {
     echo "$record" | jq .
 }
 
-# Summary
+# Summary - uses canonical reducer for deduped counts
 summary() {
     echo "=== LOOP SUMMARY ==="
     echo ""
 
-    if [[ ! -s "$LOOPS_FILE" ]]; then
-        echo "No loops recorded."
-        return 0
+    # Use canonical reducer for deterministic deduped counts
+    local reducer="$SPINE_REPO/ops/plugins/loops/bin/loops-ledger-reduce"
+
+    if [[ ! -x "$reducer" ]]; then
+        echo "ERROR: loops-ledger-reduce not found or not executable" >&2
+        exit 1
     fi
 
-    echo "By Status:"
-    echo "  Open:   $(grep -c '"status":"open"' "$LOOPS_FILE" 2>/dev/null || echo 0)"
-    echo "  Closed: $(grep -c '"status":"closed"' "$LOOPS_FILE" 2>/dev/null || echo 0)"
-    echo ""
-
-    echo "By Severity (open only):"
-    echo "  High:   $(grep '"status":"open"' "$LOOPS_FILE" 2>/dev/null | grep -c '"severity":"high"' || echo 0)"
-    echo "  Medium: $(grep '"status":"open"' "$LOOPS_FILE" 2>/dev/null | grep -c '"severity":"medium"' || echo 0)"
-    echo "  Low:    $(grep '"status":"open"' "$LOOPS_FILE" 2>/dev/null | grep -c '"severity":"low"' || echo 0)"
-    echo ""
-
-    echo "By Owner (open only):"
-    grep '"status":"open"' "$LOOPS_FILE" 2>/dev/null | jq -r '.owner' | sort | uniq -c | while read -r count owner; do
-        printf "  %-15s %s\n" "$owner:" "$count"
-    done
+    "$reducer" --summary
 }
 
 # Main
