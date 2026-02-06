@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v1.8)
+# drift-gate.sh - Constitutional drift detector (v1.9)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -19,7 +19,7 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v1.8) ==="
+echo "=== DRIFT GATE (v1.9) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -379,6 +379,54 @@ if [[ -x "$SP/surfaces/verify/d29-active-entrypoint-lock.sh" ]]; then
   fi
 else
   warn "active entrypoint lock gate not present"
+fi
+
+# D30: Active config lock (legacy refs + plaintext token patterns)
+echo -n "D30 active config lock... "
+if [[ -x "$SP/surfaces/verify/d30-active-config-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d30-active-config-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d30-active-config-lock.sh failed"
+  fi
+else
+  warn "active config lock gate not present"
+fi
+
+# D31: Home output sink lock (home-root logs/out/err not allowlisted)
+echo -n "D31 home output sink lock... "
+if [[ -x "$SP/surfaces/verify/d31-home-output-sink-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d31-home-output-sink-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d31-home-output-sink-lock.sh failed"
+  fi
+else
+  warn "home output sink lock gate not present"
+fi
+
+# D32: Codex instruction source lock (must resolve to spine AGENTS)
+echo -n "D32 codex instruction source lock... "
+if [[ -x "$SP/surfaces/verify/d32-codex-instruction-source-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d32-codex-instruction-source-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d32-codex-instruction-source-lock.sh failed"
+  fi
+else
+  warn "codex instruction source lock gate not present"
+fi
+
+# D33: Extraction pause lock (must stay paused during stabilization)
+echo -n "D33 extraction pause lock... "
+if [[ -x "$SP/surfaces/verify/d33-extraction-pause-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d33-extraction-pause-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d33-extraction-pause-lock.sh failed"
+  fi
+else
+  warn "extraction pause lock gate not present"
 fi
 
 echo

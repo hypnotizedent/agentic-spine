@@ -7,7 +7,7 @@ scope: verify-scripts
 
 # Verify Surface Index
 
-> **Purpose:** Enumerate all scripts in `surfaces/verify/` with their purpose,
+> **Purpose:** Enumerate all 39 scripts in `surfaces/verify/` with their purpose,
 > caller, read-only status, and disposition. Agents use this to understand
 > what verification is available and which scripts are active vs orphaned.
 
@@ -37,7 +37,7 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D29) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D33) | Yes |
 | `foundation-gate.sh` | Foundation file existence checks | Yes |
 | `contracts-gate.sh` | Contract compliance gate | Yes |
 | `no-drift-roots-gate.sh` | Verify no unauthorized root files | Yes |
@@ -52,7 +52,11 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 | `d26-agent-read-surface.sh` | Agent startup read-surface + route lock | Yes |
 | `d27-fact-duplication-lock.sh` | Fact duplication lock (startup/governance surfaces) | Yes |
 | `d28-legacy-path-lock.sh` | Archive runway lock (active legacy absolute path + extraction queue contract) | Yes |
-| `d29-active-entrypoint-lock.sh` | Active launchd/cron entrypoint lock for ronny-ops execution paths | Yes |
+| `d29-active-entrypoint-lock.sh` | Active launchd/cron entrypoint lock with allowlist expiry controls | Yes |
+| `d30-active-config-lock.sh` | Active host-config lock (legacy refs + plaintext secret patterns) | Yes |
+| `d31-home-output-sink-lock.sh` | Home-root output sink lock for logs/out/err | Yes |
+| `d32-codex-instruction-source-lock.sh` | Codex instruction source lock to spine AGENTS | Yes |
+| `d33-extraction-pause-lock.sh` | Extraction pause lock during stabilization window | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -83,10 +87,10 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by verify.sh | 11 |
-| Called by drift-gate.sh | 19 |
+| Called by drift-gate.sh | 23 |
 | Called by capabilities/CLI | 2 |
 | Orphaned (manual only) | 3 |
-| **Total** | **35** |
+| **Total** | **39** |
 
 ---
 
@@ -95,5 +99,5 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Document | Relationship |
 |----------|-------------|
 | [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) | Canonical scripts index |
-| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D29) |
+| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D33) |
 | [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) | Backup verification governance |

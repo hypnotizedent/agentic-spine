@@ -118,6 +118,8 @@ while IFS= read -r term; do
       --glob '!**/.git/**' \
       --glob '!**/.archive/**' \
       --glob "!**/${legacy_a}/${legacy_b}/**" \
+      --glob '!**/runtime/**' \
+      --glob '!**/infra/data/**' \
       --glob '!**/receipts/**' \
       --glob '!**/mailroom/**' \
       --glob '!**/node_modules/**' 2>/dev/null || true

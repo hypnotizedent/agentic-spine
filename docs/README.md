@@ -18,7 +18,7 @@ The invariants. If a drift gate fails, one of these was violated.
 | [AGENT_CONTRACT.md](core/AGENT_CONTRACT.md) | Allowable agent behavior — the rules every agent follows |
 | [AGENT_OUTPUT_CONTRACT.md](core/AGENT_OUTPUT_CONTRACT.md) | Required output block structure |
 | [RECEIPTS_CONTRACT.md](core/RECEIPTS_CONTRACT.md) | Receipt format, proof rules, ledger entries |
-| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1–D24) |
+| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D33) |
 | [SPINE.md](core/SPINE.md) | Spine architecture and design principles |
 | [SPINE_SESSION_HEADER.md](core/SPINE_SESSION_HEADER.md) | Session header format for agent context |
 | [SPINE_STATE.md](core/SPINE_STATE.md) | Canonical spine state — what lives here, no legacy deps |
@@ -70,6 +70,7 @@ The authority chain. When in doubt, these are the source of truth.
 | [RAG_INDEXING_RULES.md](governance/RAG_INDEXING_RULES.md) | What gets indexed to RAG knowledge base |
 | [SEARCH_EXCLUSIONS.md](governance/SEARCH_EXCLUSIONS.md) | What directories/files are excluded from search |
 | [SECRETS_POLICY.md](governance/SECRETS_POLICY.md) | Governance-grade secrets management rules |
+| [HOST_DRIFT_POLICY.md](governance/HOST_DRIFT_POLICY.md) | Host-level drift policy for home/config/runtime stabilization |
 | [SSOT_UPDATE_TEMPLATE.md](governance/SSOT_UPDATE_TEMPLATE.md) | Receipt-driven SSOT update workflow |
 | [BACKUP_GOVERNANCE.md](governance/BACKUP_GOVERNANCE.md) | Backup strategy, verification, freshness rules |
 | [REBOOT_HEALTH_GATE.md](governance/REBOOT_HEALTH_GATE.md) | Safe reboot procedures and health gates |
@@ -100,7 +101,7 @@ Gap scans, runtime audits, and triage reports.
 
 | Doc | What It Covers |
 |-----|---------------|
-| [VERIFY_SURFACE_INDEX.md](governance/VERIFY_SURFACE_INDEX.md) | Catalog of all 31 scripts in `surfaces/verify/` |
+| [VERIFY_SURFACE_INDEX.md](governance/VERIFY_SURFACE_INDEX.md) | Catalog of all 39 scripts in `surfaces/verify/` |
 
 ---
 
@@ -164,7 +165,7 @@ After editing any doc in this tree:
 # Lint: folder placement, metadata headers, README registration, legacy isolation
 ./bin/ops cap run docs.lint
 
-# Verify drift gates still pass (D1–D24)
+# Verify drift gates still pass (D1-D33)
 ./bin/ops cap run spine.verify
 
 # Verify workbench infrastructure docs intact (120 files, 19 dirs)

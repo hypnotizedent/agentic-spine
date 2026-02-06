@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+BINDING="$ROOT/ops/bindings/host.audit.allowlist.yaml"
+SINK_BINDING="$ROOT/ops/bindings/home.output.sinks.yaml"
+EXCEPTIONS="$ROOT/ops/bindings/legacy.entrypoint.exceptions.yaml"
+
+fail() { echo "host.drift.audit ERROR: $*" >&2; exit 1; }
+
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 || fail "required tool missing: $1"
+}
+
+require_tool jq
+require_tool yq
+require_tool rg
+require_tool awk
+
+[[ -f "$BINDING" ]] || fail "binding missing: $BINDING"
+[[ -f "$SINK_BINDING" ]] || fail "sink binding missing: $SINK_BINDING"
+[[ -f "$EXCEPTIONS" ]] || fail "exceptions binding missing: $EXCEPTIONS"
+yq e '.' "$BINDING" >/dev/null 2>&1 || fail "invalid YAML: $BINDING"
+yq e '.' "$SINK_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SINK_BINDING"
+yq e '.' "$EXCEPTIONS" >/dev/null 2>&1 || fail "invalid YAML: $EXCEPTIONS"
+
+TMP_FINDINGS="$(mktemp)"
+trap 'rm -f "$TMP_FINDINGS"' EXIT
+
+add_finding() {
+  local severity="$1"
+  local code="$2"
+  local message="$3"
+  local detail="$4"
+  jq -n \
+    --arg severity "$severity" \
+    --arg code "$code" \
+    --arg message "$message" \
+    --arg detail "$detail" \
+    '{severity:$severity, code:$code, message:$message, detail:$detail}' >>"$TMP_FINDINGS"
+}
+
+LEGACY_RE='(/Users/ronnyworks/ronny-ops|~/ronny-ops|\$HOME/ronny-ops|/ronny-ops/)'
+
+parse_epoch() {
+  local ts="$1"
+  local epoch=""
+  epoch="$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$ts" "+%s" 2>/dev/null || true)"
+  if [[ -z "$epoch" ]]; then
+    epoch="$(date -u -d "$ts" "+%s" 2>/dev/null || true)"
+  fi
+  [[ -n "$epoch" ]] || return 1
+  printf '%s\n' "$epoch"
+}
+
+exception_valid_for_label() {
+  local label="$1"
+  local payload="$2"
+
+  local expires
+  expires="$(yq e ".exceptions[] | select(.label == \"$label\") | .expires_at" "$EXCEPTIONS" | head -n 1)"
+  [[ -n "${expires:-}" && "${expires:-}" != "null" ]] || return 1
+
+  local exp_epoch now_epoch
+  exp_epoch="$(parse_epoch "$expires" 2>/dev/null || true)"
+  [[ -n "${exp_epoch:-}" ]] || return 1
+  now_epoch="$(date -u "+%s")"
+  if (( exp_epoch <= now_epoch )); then
+    return 1
+  fi
+
+  mapfile -t allowed_paths < <(yq e ".exceptions[] | select(.label == \"$label\") | .allowed_paths[]" "$EXCEPTIONS" 2>/dev/null || true)
+  (( ${#allowed_paths[@]} > 0 )) || return 1
+
+  local p
+  for p in "${allowed_paths[@]}"; do
+    [[ -n "${p:-}" && "${p:-}" != "null" ]] || continue
+    if printf '%s' "$payload" | rg -q --fixed-strings "$p"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# 1) Codex instruction source.
+CODEX_AGENTS="$HOME/.codex/AGENTS.md"
+SPINE_AGENTS="$ROOT/AGENTS.md"
+if [[ ! -e "$CODEX_AGENTS" ]]; then
+  add_finding "high" "codex_agents_missing" "Codex AGENTS source is missing." "$CODEX_AGENTS"
+else
+  target="$CODEX_AGENTS"
+  if [[ -L "$CODEX_AGENTS" ]]; then
+    target="$(readlink "$CODEX_AGENTS")"
+    if [[ "$target" != /* ]]; then
+      target="$(cd "$(dirname "$CODEX_AGENTS")" && cd "$(dirname "$target")" && pwd)/$(basename "$target")"
+    fi
+  fi
+  if [[ "$target" != "$SPINE_AGENTS" ]]; then
+    add_finding "critical" "codex_agents_legacy_source" "Codex AGENTS source is not spine-native." "$target"
+  fi
+fi
+
+# 2) Active config drift scan.
+while IFS= read -r file; do
+  [[ -n "${file:-}" && "${file:-}" != "null" ]] || continue
+  [[ -f "$file" ]] || continue
+  LEGACY_HITS="$(rg -n --pcre2 "$LEGACY_RE" "$file" 2>/dev/null || true)"
+  if [[ -n "${LEGACY_HITS:-}" ]]; then
+    local_hit=0
+    while IFS= read -r hit; do
+      [[ -n "${hit:-}" ]] || continue
+      # Contract exception: LEGACY_ROOT is a declared host variable, not a runtime entrypoint.
+      if [[ "$file" == "$HOME/.zshrc" ]] && [[ "$hit" == *"export LEGACY_ROOT="* ]]; then
+        continue
+      fi
+      local_hit=1
+    done <<< "$LEGACY_HITS"
+
+    if [[ "$local_hit" -eq 1 ]]; then
+      add_finding "high" "active_config_legacy_ref" "Active config references legacy runtime path." "$file"
+    fi
+  fi
+done < <(yq e '.active_config_files[]' "$BINDING")
+
+# 3) Active launchd legacy runtime scan.
+if command -v launchctl >/dev/null 2>&1; then
+  uid="$(id -u)"
+  mapfile -t LABELS < <(
+    launchctl print "gui/$uid" 2>/dev/null \
+      | awk 'match($0, /(com\.ronny[A-Za-z0-9._-]*|works\.ronny[A-Za-z0-9._-]*)/) {print substr($0, RSTART, RLENGTH)}' \
+      | sort -u
+  )
+  for label in "${LABELS[@]:-}"; do
+    [[ -n "${label:-}" ]] || continue
+    dump="$(launchctl print "gui/$uid/$label" 2>/dev/null || true)"
+    [[ -n "$dump" ]] || continue
+    if echo "$dump" | rg -q --pcre2 "$LEGACY_RE"; then
+      if exception_valid_for_label "$label" "$dump"; then
+        continue
+      fi
+      add_finding "medium" "launchd_legacy_runtime" "Active launchd job executes from legacy path." "$label"
+    fi
+  done
+fi
+
+# 4) Home-root sink scan.
+HOST_ROOT="$(yq e '.host_root' "$SINK_BINDING")"
+if [[ -d "$HOST_ROOT" ]]; then
+  while IFS= read -r f; do
+    [[ -n "${f:-}" ]] || continue
+    add_finding "medium" "home_root_sink" "Home-root log artifact detected." "$f"
+  done < <(
+    find "$HOST_ROOT" -maxdepth 1 -type f \
+      \( -name "*.log" -o -name "*.out" -o -name "*.err" \
+         -o -name ".*.log" -o -name ".*.out" -o -name ".*.err" \) \
+      2>/dev/null
+  )
+fi
+
+if [[ -s "$TMP_FINDINGS" ]]; then
+  FINDINGS_JSON="$(jq -s '.' "$TMP_FINDINGS")"
+else
+  FINDINGS_JSON='[]'
+fi
+
+TOTAL="$(echo "$FINDINGS_JSON" | jq 'length')"
+CRITICAL="$(echo "$FINDINGS_JSON" | jq '[.[] | select(.severity=="critical")] | length')"
+HIGH="$(echo "$FINDINGS_JSON" | jq '[.[] | select(.severity=="high")] | length')"
+MEDIUM="$(echo "$FINDINGS_JSON" | jq '[.[] | select(.severity=="medium")] | length')"
+LOW="$(echo "$FINDINGS_JSON" | jq '[.[] | select(.severity=="low")] | length')"
+
+STATUS="PASS"
+if [[ "$TOTAL" -gt 0 ]]; then
+  STATUS="FAIL"
+fi
+
+echo "# Host Drift Audit"
+echo
+echo "- Status: $STATUS"
+echo "- Findings: $TOTAL (critical=$CRITICAL high=$HIGH medium=$MEDIUM low=$LOW)"
+echo "- Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+echo
+if [[ "$TOTAL" -gt 0 ]]; then
+  echo "## Findings"
+  echo "$FINDINGS_JSON" | jq -r '.[] | "- [" + .severity + "] " + .code + " :: " + .message + " (" + .detail + ")"'
+else
+  echo "## Findings"
+  echo "- none"
+fi
+
+echo
+echo '```json'
+printf '{\n  "generated_at": "%s",\n  "status": "%s",\n  "finding_count": %s,\n  "findings": %s\n}\n' \
+  "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+  "$STATUS" \
+  "$TOTAL" \
+  "$FINDINGS_JSON"
+echo '```'
+
+[[ "$STATUS" == "PASS" ]] || exit 1

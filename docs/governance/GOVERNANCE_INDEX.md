@@ -93,6 +93,7 @@ Pillar entrypoints (per stack)
 | `AGENT_BOUNDARIES.md` | What agents can/cannot do |
 | `SUPERVISOR_CHECKLIST.md` | Verify work before shipping |
 | `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |
+| `HOST_DRIFT_POLICY.md` | Host drift contract for `/Users/ronnyworks` stabilization |
 
 ### Single Sources of Truth (by Domain)
 

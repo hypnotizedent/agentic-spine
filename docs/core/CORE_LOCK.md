@@ -2,7 +2,7 @@
 
 **Locked:** 2026-02-01
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v1.8
+**Gate Version:** drift-gate.sh v1.9
 
 ---
 
@@ -54,7 +54,7 @@ All must PASS for core to be healthy:
 
 | Gate | Enforces |
 |------|----------|
-| D1 | Top-level dirs bounded (8 only) |
+| D1 | Top-level dirs bounded (allowlist enforced) |
 | D2 | No `runs/` directory |
 | D3 | Entrypoint smoke (`bin/ops preflight`) |
 | D4 | Watcher running (warn only) |
@@ -80,7 +80,11 @@ All must PASS for core to be healthy:
 | D26 | Agent startup read-surface and host/service route lock |
 | D27 | Fact duplication lock for startup/governance read docs |
 | D28 | Archive runway lock (active legacy absolute paths + extraction queue contract) |
-| D29 | Active entrypoint lock (launchd/cron in /Code cannot execute from ronny-ops) |
+| D29 | Active entrypoint lock (launchd/cron ronny namespace cannot execute from ronny-ops without valid exception) |
+| D30 | Active config lock (legacy refs + plaintext secret patterns) |
+| D31 | Home output sink lock (home-root logs/out/err not allowlisted) |
+| D32 | Codex instruction source lock (`~/.codex/AGENTS.md` must resolve to spine AGENTS) |
+| D33 | Extraction pause lock (`ops/bindings/extraction.mode.yaml` must remain `mode: paused`) |
 
 ## Rules
 
