@@ -19,7 +19,8 @@ require_tool rg
 [[ -f "$SPINE_AGENTS" ]] || fail "missing spine AGENTS: $SPINE_AGENTS"
 [[ -e "$CODEX_AGENTS" ]] || fail "missing codex AGENTS source: $CODEX_AGENTS"
 
-resolve_path() {
+resolve_canonical() {
+  # Resolve to canonical path (handles symlinks and case differences on macOS)
   local p="$1"
   if [[ -L "$p" ]]; then
     local t
@@ -27,14 +28,24 @@ resolve_path() {
     if [[ "$t" != /* ]]; then
       t="$(cd "$(dirname "$p")" && cd "$(dirname "$t")" && pwd)/$(basename "$t")"
     fi
-    echo "$t"
+    # Use realpath for canonical form (handles case)
+    realpath "$t" 2>/dev/null || echo "$t"
   else
-    echo "$p"
+    realpath "$p" 2>/dev/null || echo "$p"
   fi
 }
 
-SOURCE_PATH="$(resolve_path "$CODEX_AGENTS")"
-[[ "$SOURCE_PATH" == "$SPINE_AGENTS" ]] || fail "codex AGENTS source is not spine-native: $SOURCE_PATH"
+# Compare using inode to handle macOS case-insensitive filesystem
+SOURCE_PATH="$(resolve_canonical "$CODEX_AGENTS")"
+CANONICAL_SPINE="$(resolve_canonical "$SPINE_AGENTS")"
+
+# Primary check: inode comparison (filesystem identity)
+SOURCE_INODE="$(stat -f %i "$SOURCE_PATH" 2>/dev/null || stat -c %i "$SOURCE_PATH" 2>/dev/null || echo "0")"
+SPINE_INODE="$(stat -f %i "$SPINE_AGENTS" 2>/dev/null || stat -c %i "$SPINE_AGENTS" 2>/dev/null || echo "1")"
+
+if [[ "$SOURCE_INODE" != "$SPINE_INODE" ]] && [[ "$SOURCE_PATH" != "$CANONICAL_SPINE" ]]; then
+  fail "codex AGENTS source is not spine-native: $SOURCE_PATH (expected: $CANONICAL_SPINE)"
+fi
 
 if rg -n --pcre2 "(ronny-ops|00_CLAUDE\.md|NO GITHUB ISSUE = NO WORK)" "$SOURCE_PATH" >/dev/null 2>&1; then
   fail "spine AGENTS still contains legacy directives"

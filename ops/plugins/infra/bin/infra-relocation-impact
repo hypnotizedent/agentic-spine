@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-relocation-impact
+# Read-only: print required docs/bindings/gates delta matrix for current relocation
+#
+# Shows what needs to change when services move.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+MANIFEST="$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+command -v yq >/dev/null 2>&1 || fail "yq required"
+
+[[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+
+echo "=== INFRA RELOCATION IMPACT MATRIX ==="
+echo ""
+
+CHANGE_ID=$(yq e '.active_relocation.change_id' "$MANIFEST")
+echo "Change ID: $CHANGE_ID"
+echo ""
+
+# List services and their impact
+echo "Service Impact Analysis:"
+echo ""
+
+# Get service count and iterate by index
+SERVICE_COUNT=$(yq e '.services | length' "$MANIFEST")
+
+for ((i=0; i<SERVICE_COUNT; i++)); do
+    service=$(yq e ".services[$i].service" "$MANIFEST")
+    from=$(yq e ".services[$i].from_host // \"new\"" "$MANIFEST")
+    to=$(yq e ".services[$i].to_host" "$MANIFEST")
+    phase=$(yq e ".services[$i].phase" "$MANIFEST")
+    health_url=$(yq e ".services[$i].health_url // \"none\"" "$MANIFEST")
+    backup=$(yq e ".services[$i].backup_target // \"none\"" "$MANIFEST")
+
+    echo "─── $service (Phase $phase) ───"
+    echo "  Move: $from -> $to"
+    echo "  Health URL: $health_url"
+    echo "  Backup Target: $backup"
+    echo "  Required Updates:"
+    echo "    - SERVICE_REGISTRY.yaml: update host for $service"
+    [[ "$health_url" != "none" ]] && [[ "$health_url" != "null" ]] && echo "    - services.health.yaml: update endpoint for $service"
+    [[ "$backup" != "none" ]] && [[ "$backup" != "null" ]] && echo "    - backup.inventory.yaml: update paths for $service"
+    echo "    - DEVICE_IDENTITY_SSOT.md: document new VM if needed"
+    echo "    - ssh.targets.yaml: add SSH access to $to"
+    echo ""
+done
+
+echo "─── Summary ───"
+echo "Files to update before cutover:"
+yq e '.required_updates[]' "$MANIFEST" 2>/dev/null | while read -r f; do
+    echo "  - $f"
+done

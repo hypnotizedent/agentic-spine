@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-relocation-preflight
+# Read-only check: host reachability + current health + baseline receipt pack
+#
+# Reports on all hosts and services in the relocation manifest without mutations.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+MANIFEST="$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml"
+SSH_TARGETS="$SPINE_REPO/ops/bindings/ssh.targets.yaml"
+HEALTH_BINDING="$SPINE_REPO/ops/bindings/services.health.yaml"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+command -v yq >/dev/null 2>&1 || fail "yq required"
+
+[[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+
+echo "=== INFRA RELOCATION PREFLIGHT ==="
+echo ""
+
+# Manifest overview
+CHANGE_ID=$(yq e '.active_relocation.change_id' "$MANIFEST")
+STATE=$(yq e '.active_relocation.state' "$MANIFEST")
+OWNER=$(yq e '.active_relocation.owner' "$MANIFEST")
+
+echo "Change ID: $CHANGE_ID"
+echo "State:     $STATE"
+echo "Owner:     $OWNER"
+echo ""
+
+# VM targets
+echo "VM Targets:"
+yq e '.vm_targets[] | "  " + .vm_id + " " + .hostname + " (" + .status + ")"' "$MANIFEST"
+echo ""
+
+# Service summary
+echo "Services to Relocate:"
+yq e '.services[] | "  " + .service + ": " + (.from_host // "new") + " -> " + .to_host + " (phase " + (.phase | tostring) + ", " + .status + ")"' "$MANIFEST"
+echo ""
+
+# Host reachability check (read-only, no known_hosts writes)
+echo "Host Reachability (from ssh.targets.yaml):"
+if [[ -f "$SSH_TARGETS" ]]; then
+    while IFS= read -r host; do
+        [[ -z "$host" ]] && continue
+        ip=$(yq e ".ssh.targets.\"$host\".host" "$SSH_TARGETS" 2>/dev/null || echo "")
+        if [[ -n "$ip" ]] && [[ "$ip" != "null" ]]; then
+            if ping -c 1 -W 2 "$ip" >/dev/null 2>&1; then
+                echo "  $host ($ip): REACHABLE"
+            else
+                echo "  $host ($ip): UNREACHABLE"
+            fi
+        else
+            echo "  $host: NOT IN SSH TARGETS"
+        fi
+    done < <(yq e '.vm_targets[].hostname' "$MANIFEST" 2>/dev/null; yq e '.services[].from_host // empty' "$MANIFEST" 2>/dev/null | sort -u)
+else
+    echo "  (ssh.targets.yaml not found)"
+fi
+echo ""
+
+# Required SSOT files
+echo "Required SSOT Updates:"
+while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    if [[ -f "$SPINE_REPO/$file" ]]; then
+        echo "  [OK] $file"
+    else
+        echo "  [MISSING] $file"
+    fi
+done < <(yq e '.required_updates[]' "$MANIFEST" 2>/dev/null)
+echo ""
+
+echo "Preflight complete."

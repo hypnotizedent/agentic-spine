@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-relocation-parity
+# Read-only: verify cross-SSOT parity for services in relocation manifest
+#
+# Checks that all registries agree on service locations.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+MANIFEST="$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+command -v yq >/dev/null 2>&1 || fail "yq required"
+
+[[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+
+echo "=== INFRA RELOCATION PARITY CHECK ==="
+echo ""
+
+STATE=$(yq e '.active_relocation.state' "$MANIFEST")
+echo "Relocation state: $STATE"
+echo ""
+
+# Run the D35 gate directly for parity check
+D35_GATE="$SPINE_REPO/surfaces/verify/d35-infra-relocation-parity-lock.sh"
+
+if [[ -x "$D35_GATE" ]]; then
+    "$D35_GATE"
+else
+    echo "D35 gate not found - manual parity check:"
+    echo ""
+
+    # List required updates and their status
+    echo "Required SSOT files:"
+    while IFS= read -r file; do
+        [[ -z "$file" ]] && continue
+        if [[ -f "$SPINE_REPO/$file" ]]; then
+            MOD=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$SPINE_REPO/$file" 2>/dev/null || echo "unknown")
+            echo "  [OK] $file (modified: $MOD)"
+        else
+            echo "  [MISSING] $file"
+        fi
+    done < <(yq e '.required_updates[]' "$MANIFEST" 2>/dev/null)
+fi

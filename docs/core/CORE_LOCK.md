@@ -85,6 +85,9 @@ All must PASS for core to be healthy:
 | D31 | Home output sink lock (home-root logs/out/err not allowlisted) |
 | D32 | Codex instruction source lock (`~/.codex/AGENTS.md` must resolve to spine AGENTS) |
 | D33 | Extraction pause lock (`ops/bindings/extraction.mode.yaml` must remain `mode: paused`) |
+| D34 | Loop ledger integrity lock (summary counts must match deduped reducer output) |
+| D35 | Infra relocation parity lock (cross-SSOT consistency for service moves during cutover/cleanup) |
+| D36 | Legacy exception hygiene lock (stale/near-expiry exception enforcement) |
 
 ## Rules
 

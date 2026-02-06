@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-relocation-rollback
+# Read-only: deterministic rollback checklist and commands for current relocation
+#
+# Generates the exact steps needed to rollback each service.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+MANIFEST="$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+command -v yq >/dev/null 2>&1 || fail "yq required"
+
+[[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+
+echo "=== INFRA RELOCATION ROLLBACK PLAN ==="
+echo ""
+
+CHANGE_ID=$(yq e '.active_relocation.change_id' "$MANIFEST")
+STATE=$(yq e '.active_relocation.state' "$MANIFEST")
+MAX_WINDOW=$(yq e '.rollback.max_rollback_window_hours' "$MANIFEST")
+REQUIRES_BACKUP=$(yq e '.rollback.requires_backup_verification' "$MANIFEST")
+
+echo "Change ID: $CHANGE_ID"
+echo "Current State: $STATE"
+echo "Max Rollback Window: ${MAX_WINDOW}h"
+echo "Requires Backup Verification: $REQUIRES_BACKUP"
+echo ""
+
+# Generate rollback steps per service
+echo "─── Rollback Steps by Service ───"
+echo ""
+
+# Get service count and iterate by index
+SERVICE_COUNT=$(yq e '.services | length' "$MANIFEST")
+
+for ((i=0; i<SERVICE_COUNT; i++)); do
+    service=$(yq e ".services[$i].service" "$MANIFEST")
+    from=$(yq e ".services[$i].from_host // \"N/A\"" "$MANIFEST")
+    to=$(yq e ".services[$i].to_host" "$MANIFEST")
+    rollback_to=$(yq e ".services[$i].rollback_to // \"N/A\"" "$MANIFEST")
+    backup=$(yq e ".services[$i].backup_target // \"none\"" "$MANIFEST")
+    status=$(yq e ".services[$i].status" "$MANIFEST")
+
+    # Skip services without rollback target
+    [[ "$rollback_to" == "N/A" ]] || [[ "$rollback_to" == "null" ]] && continue
+
+    echo "[$service]"
+    echo "  Current Location: $to"
+    echo "  Rollback To: $rollback_to"
+    echo "  Status: $status"
+    echo ""
+    echo "  Rollback Commands:"
+    echo "    1. Stop service on $to:"
+    echo "       ssh $to 'docker compose -f /path/to/$service/docker-compose.yml down'"
+    echo ""
+    if [[ "$backup" != "none" ]] && [[ "$backup" != "null" ]]; then
+        echo "    2. Restore data from backup:"
+        echo "       rsync -av $backup/ $rollback_to:/path/to/$service/data/"
+        echo ""
+    fi
+    echo "    3. Start service on $rollback_to:"
+    echo "       ssh $rollback_to 'docker compose -f /path/to/$service/docker-compose.yml up -d'"
+    echo ""
+    echo "    4. Update DNS/routing to point to $rollback_to"
+    echo ""
+    echo "    5. Update SSOTs:"
+    echo "       - SERVICE_REGISTRY.yaml: revert host to $rollback_to"
+    echo "       - services.health.yaml: revert endpoint"
+    echo ""
+    echo "  Verification:"
+    echo "    - Health check passes on $rollback_to"
+    echo "    - ops cap run spine.verify passes"
+    echo "    - ops cap run infra.relocation.parity passes"
+    echo ""
+done
+
+echo "─── Post-Rollback Checklist ───"
+echo "[ ] All services healthy on original hosts"
+echo "[ ] DNS/routing updated"
+echo "[ ] SSOTs reverted and committed"
+echo "[ ] D35 parity gate passes"
+echo "[ ] Incident documented in INCIDENTS_LOG.md"

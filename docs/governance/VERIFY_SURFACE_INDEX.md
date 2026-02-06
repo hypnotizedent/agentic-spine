@@ -37,7 +37,7 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D33) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D36) | Yes |
 | `foundation-gate.sh` | Foundation file existence checks | Yes |
 | `contracts-gate.sh` | Contract compliance gate | Yes |
 | `no-drift-roots-gate.sh` | Verify no unauthorized root files | Yes |
@@ -57,6 +57,9 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 | `d31-home-output-sink-lock.sh` | Home-root output sink lock for logs/out/err | Yes |
 | `d32-codex-instruction-source-lock.sh` | Codex instruction source lock to spine AGENTS | Yes |
 | `d33-extraction-pause-lock.sh` | Extraction pause lock during stabilization window | Yes |
+| `d34-loop-ledger-integrity-lock.sh` | Loop ledger integrity lock (summary/dedup parity) | Yes |
+| `d35-infra-relocation-parity-lock.sh` | Infra relocation parity lock (cross-SSOT consistency) | Yes |
+| `d36-legacy-exception-hygiene-lock.sh` | Legacy exception hygiene lock (stale/near-expiry) | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -87,10 +90,10 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by verify.sh | 11 |
-| Called by drift-gate.sh | 23 |
+| Called by drift-gate.sh | 26 |
 | Called by capabilities/CLI | 2 |
 | Orphaned (manual only) | 3 |
-| **Total** | **39** |
+| **Total** | **42** |
 
 ---
 
@@ -99,5 +102,5 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Document | Relationship |
 |----------|-------------|
 | [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) | Canonical scripts index |
-| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D33) |
+| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D36) |
 | [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) | Backup verification governance |

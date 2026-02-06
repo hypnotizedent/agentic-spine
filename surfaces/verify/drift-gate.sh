@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v1.9)
+# drift-gate.sh - Constitutional drift detector (v2.0)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -19,7 +19,7 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v1.9) ==="
+echo "=== DRIFT GATE (v2.0) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -427,6 +427,42 @@ if [[ -x "$SP/surfaces/verify/d33-extraction-pause-lock.sh" ]]; then
   fi
 else
   warn "extraction pause lock gate not present"
+fi
+
+# D34: Loop ledger integrity lock (summary must match deduped counts)
+echo -n "D34 loop ledger integrity lock... "
+if [[ -x "$SP/surfaces/verify/d34-loop-ledger-integrity-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d34-loop-ledger-integrity-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d34-loop-ledger-integrity-lock.sh failed"
+  fi
+else
+  warn "loop ledger integrity lock gate not present"
+fi
+
+# D35: Infra relocation parity lock (cross-SSOT consistency for service moves)
+echo -n "D35 infra relocation parity lock... "
+if [[ -x "$SP/surfaces/verify/d35-infra-relocation-parity-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d35-infra-relocation-parity-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d35-infra-relocation-parity-lock.sh failed"
+  fi
+else
+  warn "infra relocation parity lock gate not present"
+fi
+
+# D36: Legacy exception hygiene lock (stale/near-expiry exceptions)
+echo -n "D36 legacy exception hygiene lock... "
+if [[ -x "$SP/surfaces/verify/d36-legacy-exception-hygiene-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d36-legacy-exception-hygiene-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d36-legacy-exception-hygiene-lock.sh failed"
+  fi
+else
+  warn "legacy exception hygiene lock gate not present"
 fi
 
 echo
