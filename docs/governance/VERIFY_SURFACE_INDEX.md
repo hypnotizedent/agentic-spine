@@ -37,7 +37,7 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D24) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D26) | Yes |
 | `foundation-gate.sh` | Foundation file existence checks | Yes |
 | `contracts-gate.sh` | Contract compliance gate | Yes |
 | `no-drift-roots-gate.sh` | Verify no unauthorized root files | Yes |
@@ -49,6 +49,7 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 | `d22-nodes-drift.sh` | Node/VM drift detection | Yes |
 | `d23-health-drift.sh` | Health endpoint drift detection | Yes |
 | `d24-github-labels-drift.sh` | GitHub labels drift detection | Yes |
+| `d26-agent-read-surface.sh` | Agent startup read-surface + route lock | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -79,10 +80,10 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by verify.sh | 11 |
-| Called by drift-gate.sh | 15 |
+| Called by drift-gate.sh | 16 |
 | Called by capabilities/CLI | 2 |
 | Orphaned (manual only) | 3 |
-| **Total** | **31** |
+| **Total** | **32** |
 
 ---
 
@@ -91,5 +92,5 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Document | Relationship |
 |----------|-------------|
 | [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) | Canonical scripts index |
-| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D24) |
+| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D26) |
 | [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) | Backup verification governance |

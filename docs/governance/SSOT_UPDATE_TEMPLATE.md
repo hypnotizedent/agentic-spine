@@ -81,6 +81,11 @@ minio
 | New backup target | `BACKUP_GOVERNANCE.md` | Backup Targets |
 | Hardware spec | `MACBOOK_SSOT.md` / `MINILAB_SSOT.md` / `SHOP_SERVER_SSOT.md` | Hardware Specifications |
 
+**Host/Service update contract (strict):**
+- Update `MACBOOK_SSOT.md`, `MINILAB_SSOT.md`, or `SHOP_SERVER_SSOT.md` for hardware, storage, cron, capacity, and topology detail.
+- Update `DEVICE_IDENTITY_SSOT.md` only when hostname, role/tier identity, or IP mapping changes.
+- Update `SERVICE_REGISTRY.yaml` only when service name, host binding, port, health route, or compose ownership changes.
+
 ---
 
 ## Edit Workflow
@@ -236,7 +241,7 @@ See: `docs/governance/DEVICE_IDENTITY_SSOT.md#evidence--receipts` (2026-02-05)
 
 ### SSOT Priority Reference
 
-When two documents conflict, lower priority wins:
+When two documents conflict, lower priority number wins:
 
 | Priority | Documents |
 |----------|-----------|
@@ -255,7 +260,7 @@ When two documents conflict, lower priority wins:
 - Edit based on memory or assumptions (always verify first)
 - Leave timestamps stale after updates
 - Create new SSOT files without registry entry
- - Copy credentials, tokens, SSIDs, or RTSP URLs from legacy docs into spine (store in Infisical)
+- Copy credentials, tokens, SSIDs, or RTSP URLs from legacy docs into spine (store in Infisical)
 
 **Do:**
 - Run capability first, capture receipt

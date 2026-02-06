@@ -20,7 +20,7 @@
 | Workbench authority index | `docs/governance/GOVERNANCE_INDEX.md` | EXTRACTED (surgical — spine-scoped subset) |
 | Workbench agent context pack | `docs/core/CORE_LOCK.md` + `CAPABILITIES_OVERVIEW.md` | EXTRACTED |
 | Workbench labels registry | `.github/labels.yml` | EXTRACTED |
-| Workbench hardware registry | `docs/core/DEVICE_IDENTITY_SSOT.md` | EXTRACTED (identity only, not full hardware) |
+| Workbench hardware registry | `docs/governance/DEVICE_IDENTITY_SSOT.md` | EXTRACTED (identity only, not full hardware) |
 | Workbench SSOT registry | Not extracted | NOT EXTRACTED |
 | Workbench repo structure authority | Not extracted | NOT EXTRACTED |
 | Workbench compose authority | `docs/governance/STACK_REGISTRY.yaml` (partial) | PARTIAL |
@@ -43,7 +43,7 @@ one-off automation that predates the spine capability model.
 
 | Category | Count | Spine Status |
 |----------|-------|-------------|
-| Audit/verify scripts | ~10 | Replaced by drift gates (D1–D24) |
+| Audit/verify scripts | ~10 | Replaced by drift gates (D1–D26) |
 | Docker management | ~5 | Replaced by `docker.compose.status` capability |
 | RAG/indexing | ~4 | Not applicable to spine (workbench-specific) |
 | Secrets management | ~3 | Replaced by `secrets.*` capabilities |

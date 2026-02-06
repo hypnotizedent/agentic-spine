@@ -2,7 +2,7 @@
 
 **Locked:** 2026-02-01
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v1.5
+**Gate Version:** drift-gate.sh v1.6
 
 ---
 
@@ -76,6 +76,8 @@ All must PASS for core to be healthy:
 | D22 | Nodes surface drift (read-only SSH, no credentials) |
 | D23 | Services health surface drift (no verbose curl) |
 | D24 | GitHub labels surface drift (read-only, no mutations) |
+| D25 | Secrets CLI hash parity (canonical vs vendored tools) |
+| D26 | Agent startup read-surface and host/service route lock |
 
 ## Rules
 

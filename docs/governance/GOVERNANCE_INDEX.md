@@ -113,6 +113,16 @@ Pillar entrypoints (per stack)
 
 For the complete list: `cat docs/governance/SSOT_REGISTRY.yaml`
 
+### Host Infrastructure Update Contract
+
+When updating infrastructure facts, route changes through the smallest canonical surface:
+
+- Host/location detail (hardware, storage, cron, capacity, topology): `MACBOOK_SSOT.md`, `MINILAB_SSOT.md`, `SHOP_SERVER_SSOT.md`
+- Identity map (hostnames, tiers, Tailscale/LAN IPs): `DEVICE_IDENTITY_SSOT.md` only when identity facts change
+- Service map (service name, host binding, port, health route): `SERVICE_REGISTRY.yaml` only when service facts change
+
+Workflow reference: `SSOT_UPDATE_TEMPLATE.md`
+
 ---
 
 ## Legacy References (External — Read-Only)

@@ -262,7 +262,22 @@ nfs: synology-backups
 
 ### NAS Backups
 
-> **OPEN LOOP:** `OL_HOME_BASELINE_FINISH` — Finish baseline inventory (NAS + backups + cron + SSH access)
+**Backup Targets on NAS:**
+
+| Target | Path | Consumers | Retention |
+|--------|------|-----------|-----------|
+| Proxmox vzdump | `/volume1/backups/proxmox_backups` | proxmox-home vzdump | 7 days |
+| Mint-OS PostgreSQL | `/volume1/backups/mint-os/postgres/` | docker-host | daily |
+| Mint-OS configs | `/volume1/backups/mint-os/configs/` | docker-host | as-needed |
+| Home Assistant | `/volume1/backups/homeassistant_backups/` | VM 100 | manual |
+
+**Storage Summary (NAS_INVENTORY.md):**
+
+| Volume | Total | Used | Purpose |
+|--------|-------|------|---------|
+| volume1 | 20TB | ~8.7TB (43%) | Primary storage |
+
+**Source:** NAS_INVENTORY.md, HOME_INFRASTRUCTURE_AUDIT.md
 
 ---
 
@@ -321,12 +336,28 @@ curl -s http://vault:8080/
 
 ## Cronjobs / Scheduled Tasks
 
-> **OPEN LOOP:** `OL_HOME_BASELINE_FINISH` — Finish baseline inventory (NAS + backups + cron + SSH access)
+### proxmox-home (root)
 
-**Known schedules:**
-- Proxmox vzdump: Daily (to synology-backups)
-- NAS scrub: Weekly (Synology managed)
-- Pi-hole gravity update: Weekly
+> **Note:** As of 2026-01-21, `crontab -l` returns `no crontab for root`. Backup and transfer jobs need to be re-created.
+
+**Planned (not yet enabled):**
+
+| Schedule | Script | Purpose | Status |
+|----------|--------|---------|--------|
+| `30 3 * * *` | `backup-ha.sh` | Home Assistant backup | PENDING |
+| `0 3 * * *` | `backup-immich-db.sh` | Immich DB backup | PENDING |
+| `0 5 * * 0` | `backup-immich-library.sh` | Immich library (weekly) | PENDING |
+| `*/5 * * * *` | `transfer-to-remote.sh` | Rsync staging to remote | PENDING |
+
+### System-Managed Schedules
+
+| System | Schedule | Task | Status |
+|--------|----------|------|--------|
+| Proxmox vzdump | Daily | VM/LXC backup to synology-backups | ACTIVE (via GUI) |
+| Synology DSM | Weekly | RAID scrub | ACTIVE |
+| Pi-hole | Weekly | Gravity update | ACTIVE |
+
+**Source:** External schedule inventory (workbench tooling via `WORKBENCH_TOOLING_INDEX.md`).
 
 ---
 
@@ -344,7 +375,13 @@ curl -s http://vault:8080/
 
 | Loop ID | Description | Priority |
 |---------|-------------|----------|
-| `OL_HOME_BASELINE_FINISH` | Finish baseline inventory (NAS + backups + cron + SSH access) | MEDIUM |
+| `OL_HOME_BASELINE_FINISH` | Finish baseline: enable proxmox-home crons, fix download-home SSH | MEDIUM |
+
+**UNVERIFIED (requires live action):**
+- proxmox-home crontab: Currently empty, crons need to be re-created
+- download-home SSH: Permission denied, needs key setup
+- NAS SSH access: Requires key configuration or Tailscale SSH
+- Proxmox backup job status: GUI says disabled but backups exist
 
 ---
 

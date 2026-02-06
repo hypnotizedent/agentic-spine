@@ -8,7 +8,8 @@ scope: session-entry
 # Session Protocol (Spine-native)
 
 > **Purpose:** Entry point for every agent working inside `/Users/ronnyworks/Code/agentic-spine`.
-> **Why:** The old `00_CLAUDE.md` live in the workbench archive and no longer represents the spine's runway.
+> **Why:** Legacy workbench-era session docs are archived and no longer
+> represent the spine runtime entry path.
 
 ## Before you run anything
 

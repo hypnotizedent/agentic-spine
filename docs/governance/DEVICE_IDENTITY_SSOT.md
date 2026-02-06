@@ -12,10 +12,11 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 
 > **This is the SINGLE SOURCE OF TRUTH for device naming, identity, and verification.**
 >
-> Before referencing ANY host, IP, or service → CHECK THIS DOCUMENT.
+> Before referencing hostnames, device roles, or Tailscale/LAN IPs → CHECK THIS DOCUMENT.
+> For service endpoints/ports/health routes → CHECK `docs/governance/SERVICE_REGISTRY.yaml`.
 > Before creating ANY new device/VM/service → FOLLOW THESE RULES.
 >
-> Last Verified: February 5, 2026
+> Last Verified: February 6, 2026
 
 ---
 

@@ -127,13 +127,22 @@ github_issue: "#625"
 
 ### Hotkeys / Shortcuts
 
-> **OPEN LOOP:** `OL_MACBOOK_BASELINE_FINISH` — Finish baseline inventory (hotkeys + scheduled tasks)
+| Tool | Hotkey / Script | Action | Source |
+|------|-----------------|--------|--------|
+| **Hammerspoon** | `Ctrl+Shift+S` | Start routine + launch Claude | `~/.hammerspoon/` |
+| **Hammerspoon** | `Ctrl+Shift+E` | Closeout prompt → clipboard | `~/.hammerspoon/` |
+| **Raycast** | `Spine Start Routine` | Start routine (receipted) | `~/.raycast-scripts` |
+| **Raycast** | `Claude Code` | Launch Claude Code | `~/.raycast-scripts` |
+| **Raycast** | `OpenCode` | Launch OpenCode | `~/.raycast-scripts` |
+| **Raycast** | `Codex Full Auto` | Launch Codex | `~/.raycast-scripts` |
+| **Espanso** | `;sup`, `;ctx`, `;issue`, `;ask` | Text expansion snippets | `~/.config/espanso/match/` |
+| **Maccy** | `Cmd+Shift+V` | Clipboard history | macOS app settings |
+| **Stream Deck** | (physical) | Home Assistant + infrastructure buttons | physical audit required |
 
-| Tool | Purpose |
-|------|---------|
-| Hammerspoon | Window management, custom hotkeys |
-| Raycast | Launcher, clipboard history |
-| Stream Deck | Home Assistant + infrastructure buttons |
+**Config Locations:**
+- Hammerspoon: `~/.hammerspoon/`
+- Raycast scripts: `dotfiles/raycast/` → `~/.raycast-scripts`
+- Espanso: `~/.config/espanso/match/claude.yml`
 
 ---
 
@@ -188,14 +197,25 @@ df -h /
 
 ---
 
-## Local Cronjobs
+## Scheduled Tasks (launchd)
 
-> **OPEN LOOP:** `OL_MACBOOK_BASELINE_FINISH` — Finish baseline inventory (hotkeys + scheduled tasks)
+**LaunchAgents** (`~/Library/LaunchAgents/`):
 
-**Known schedules:**
-- Ollama: Auto-start via launchd (`~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`)
+| Plist | Schedule | Script | Purpose | Status |
+|-------|----------|--------|---------|--------|
+| `homebrew.mxcl.ollama.plist` | On login | — | Ollama auto-start | ACTIVE |
+| `com.ronny.vzdump-tier1-offsite.plist` | Sun 03:30 | `sync-vzdump-tier1-offsite.sh` | Tier 1 VM offsite sync | ACTIVE |
+| `com.ronny.macos-sync-critical.plist` | Sun 04:00 | `macos-sync-critical.sh` | MacBook critical folders | ACTIVE |
+| `com.ronny.ha-offsite-sync.plist` | Sun 04:30 | `sync-ha-offsite.sh` | Home Assistant offsite | ACTIVE |
+| `com.ronny.secrets-verify.plist` | Daily 08:00 | `secrets_verify.sh` | Validate secrets inventory | ACTIVE |
+| `com.ronny.monitoring-verify.plist` | Every 15m | `monitoring_verify.sh` | Validate monitoring | ACTIVE |
+| `com.ronnyworks.minio-mount.plist` | On login | `mount-minio.sh` | Mount MinIO via rclone | ACTIVE |
+
+**Other auto-start:**
 - Docker Desktop: Auto-start on login
 - Time Machine: Hourly (system managed)
+
+**Source:** External schedule inventory (workbench tooling via `WORKBENCH_TOOLING_INDEX.md`), verified 2026-02-05.
 
 ---
 
@@ -213,7 +233,11 @@ df -h /
 
 | Loop ID | Description | Priority |
 |---------|-------------|----------|
-| `OL_MACBOOK_BASELINE_FINISH` | Finish baseline inventory (hotkeys + scheduled tasks) | LOW |
+| `OL_MACBOOK_BASELINE_FINISH` | Verify Stream Deck buttons (physical audit) | LOW |
+
+**UNVERIFIED (requires live inspection):**
+- Stream Deck button assignments (Home Assistant, infrastructure)
+- Hammerspoon window management hotkeys beyond `Ctrl+Shift+S/E`
 
 ---
 

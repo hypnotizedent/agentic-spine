@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v1.3)
+# drift-gate.sh - Constitutional drift detector (v1.6)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -19,7 +19,7 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v1.5) ==="
+echo "=== DRIFT GATE (v1.6) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -331,6 +331,18 @@ else
   else
     fail "hash mismatch (cloudflare-agent: canonical vs vendored)"
   fi
+fi
+
+# D26: Agent startup read-surface + host/service route lock
+echo -n "D26 agent read surface drift... "
+if [[ -x "$SP/surfaces/verify/d26-agent-read-surface.sh" ]]; then
+  if "$SP/surfaces/verify/d26-agent-read-surface.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d26-agent-read-surface.sh failed"
+  fi
+else
+  warn "agent read surface drift gate not present"
 fi
 
 echo

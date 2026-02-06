@@ -104,6 +104,6 @@ the `stack_id` in STACK_REGISTRY.yaml is the durable key.
 |----------|--------------|
 | `docs/governance/STACK_REGISTRY.yaml` | Canonical machine-readable stack list |
 | `ops/capabilities.yaml` (`docker.compose.status`) | Runtime compose health per stack |
-| `docs/core/DEVICE_IDENTITY_SSOT.md` | Device/VM identity (where stacks run) |
+| `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device/VM identity (where stacks run) |
 | `docs/core/AGENTIC_GAP_MAP.md` | Extraction coverage tracking (23 asset groups) |
 | `docs/governance/WORKBENCH_TOOLING_INDEX.md` | External tooling references (read-only) |

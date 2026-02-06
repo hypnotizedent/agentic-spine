@@ -72,7 +72,8 @@ workbench/
 └── .archive/                    # Archived content (out of scope)
 ```
 
-> **Spine session entry:** [`docs/governance/SESSION_PROTOCOL.md`](SESSION_PROTOCOL.md). The old `workbench/00_CLAUDE.md` is archived and should not be used at runtime.
+> **Spine session entry:** [`docs/governance/SESSION_PROTOCOL.md`](SESSION_PROTOCOL.md).
+> Legacy workbench session docs are archived and should not be used at runtime.
 
 ---
 

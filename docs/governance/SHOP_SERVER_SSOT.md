@@ -51,9 +51,33 @@ Notes:
 | NVR | Hikvision (model TBD) | Camera recorder | partial |
 | WiFi AP | TP-Link EAP225 | Shop WiFi | partial |
 
-### Hardware Compatibility Notes (High Level)
+### R730XD Hardware Specifications
 
-- **R730XD:** verify whether bays are 2.5" or 3.5" and which controller/HBA is installed before purchasing drives.
+| Component | Value | Verified |
+|-----------|-------|----------|
+| **Model** | Dell PowerEdge R730XD | 2026-01-21 |
+| **CPU** | 2x Intel Xeon E5-2640 v3 (32 threads total) | 2026-01-21 |
+| **RAM** | 188GB | 2026-01-21 |
+| **Proxmox Version** | 9.0.3 | 2026-01-21 |
+| **Kernel** | 6.14.8-2-pve | 2026-01-21 |
+| **Drive Bays** | TBD (2.5" or 3.5" - requires physical audit) | - |
+| **Controller/HBA** | TBD (verify before purchasing drives) | - |
+
+### ZFS Storage Pools
+
+| Pool | Size | Allocated | Free | Capacity | Health | Verified |
+|------|------|-----------|------|----------|--------|----------|
+| **media** | 29.1T | 13.1T | 16.0T | 45% | ONLINE | 2026-01-21 |
+| **tank** | 29.1T | 6.14T | 23.0T | 21% | ONLINE | 2026-01-21 |
+
+**tank datasets:**
+- `tank/docker`: 379GB
+- `tank/backups`: 92GB
+- `tank/immich/photos`: 1.2TB
+
+### Hardware Compatibility Notes
+
+- **R730XD:** Verify bay type (2.5" or 3.5") before purchasing drives.
 - **MD1400:** 12-bay 3.5" shelf (verify actual population + drive models).
 
 ---
@@ -97,6 +121,17 @@ If you need to make a placement decision ("where should this run?"):
 
 ---
 
+## Scheduled Tasks (pve)
+
+| Schedule | Command | Purpose | Status |
+|----------|---------|---------|--------|
+| `0 2 * * *` | `/usr/local/bin/zfs-snapshot.sh` | Daily ZFS snapshot of root datasets | ACTIVE |
+| `0 3 * * 0` | `zpool scrub tank` | Weekly scrub of tank pool | ACTIVE |
+
+**Source:** External schedule inventory (workbench tooling via `WORKBENCH_TOOLING_INDEX.md`).
+
+---
+
 ## Verification Commands (Safe)
 
 Run from the MacBook (over Tailscale):
@@ -121,7 +156,14 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 | Loop ID | Meaning |
 |--------|---------|
-| `OL_SHOP_BASELINE_FINISH` | Finish remaining on-site inventory: MD1400 drive list, camera location map, AP settings, cron/backup schedules. |
+| `OL_SHOP_BASELINE_FINISH` | Finish remaining on-site inventory: MD1400 drive list, R730XD bay type, camera location map, AP settings. |
+
+**UNVERIFIED (requires physical audit):**
+- MD1400 DAS: Drive models, population, health
+- R730XD: Bay type (2.5" vs 3.5"), controller/HBA model
+- Camera network: Camera count, locations, RTSP endpoints (secrets in Infisical)
+- WiFi AP (EAP225): Configuration, SSID → `infrastructure/prod:/spine/shop/wifi/*`
+- UPS: Model confirmation, capacity, runtime
 
 ---
 
