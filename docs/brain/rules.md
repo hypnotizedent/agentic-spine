@@ -18,6 +18,7 @@
 ./bin/ops cap run <name>     # Run governed capability
 mint ask "question"          # Query RAG
 mint health                  # Check RAG status
+cat ops/bindings/cli.tools.inventory.yaml  # What CLI tools are installed
 ```
 
 ## Approval Required
@@ -31,3 +32,4 @@ Code changes, git commits, database writes, deploys, docker restarts.
 | Data/files | docs/governance/INFRASTRUCTURE_MAP.md |
 | Code | docs/governance/AGENTS_GOVERNANCE.md |
 | Services | docs/governance/SERVICE_REGISTRY.yaml |
+| CLI tools | ops/bindings/cli.tools.inventory.yaml |
