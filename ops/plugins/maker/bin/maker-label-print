@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BINDING_FILE="${BINDING_FILE:-ops/bindings/maker.tools.inventory.yaml}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+
+_need yq
+
+if [[ ! -f "$BINDING_FILE" ]]; then
+  echo "STOP: missing binding file: $BINDING_FILE" >&2
+  exit 2
+fi
+
+# Check if brother-ql is enabled in binding
+BQ_ENABLED="$(yq -r '.tools[] | select(.id == "brother-ql") | .enabled // false' "$BINDING_FILE")"
+
+if [[ "$BQ_ENABLED" != "true" ]]; then
+  echo "STOP: brother-ql is not enabled in $BINDING_FILE"
+  echo "Hardware required: Brother QL-series printer connected via USB"
+  echo "To enable: set enabled: true for brother-ql in the binding after connecting hardware"
+  exit 2
+fi
+
+# Check if brother_ql CLI is installed
+if ! command -v brother_ql >/dev/null 2>&1; then
+  echo "STOP: brother_ql command not found"
+  echo "Install: pip install brother-ql"
+  exit 2
+fi
+
+# Stub — actual printing logic goes here when hardware is available
+LABEL_FILE="${1:-}"
+if [[ -z "$LABEL_FILE" ]]; then
+  echo "Usage: maker-label-print <image-file>"
+  echo
+  echo "Prints a label image to the connected Brother QL printer."
+  echo "Status: STUB — waiting for hardware"
+  exit 2
+fi
+
+echo "STOP: label printing not yet implemented (hardware not connected)"
+exit 2

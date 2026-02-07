@@ -18,7 +18,7 @@ The invariants. If a drift gate fails, one of these was violated.
 | [AGENT_CONTRACT.md](core/AGENT_CONTRACT.md) | Allowable agent behavior — the rules every agent follows |
 | [AGENT_OUTPUT_CONTRACT.md](core/AGENT_OUTPUT_CONTRACT.md) | Required output block structure |
 | [RECEIPTS_CONTRACT.md](core/RECEIPTS_CONTRACT.md) | Receipt format, proof rules, ledger entries |
-| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D37) |
+| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D40) |
 | [SPINE.md](core/SPINE.md) | Spine architecture and design principles |
 | [SPINE_SESSION_HEADER.md](core/SPINE_SESSION_HEADER.md) | Session header format for agent context |
 | [SPINE_STATE.md](core/SPINE_STATE.md) | Canonical spine state — what lives here, no legacy deps |
@@ -82,6 +82,7 @@ The authority chain. When in doubt, these are the source of truth.
 | [SCRIPTS_REGISTRY.md](governance/SCRIPTS_REGISTRY.md) | Script inventory and locations |
 | [SPINE_INDEX.md](governance/SPINE_INDEX.md) | Spine documentation index |
 | [STACK_AUTHORITY.md](governance/STACK_AUTHORITY.md) | Stack authority rules |
+| [MAKER_TOOLS_GOVERNANCE.md](governance/MAKER_TOOLS_GOVERNANCE.md) | Maker tools plugin governance (digital-to-physical toolkit) |
 
 ---
 
@@ -103,7 +104,7 @@ Gap scans, runtime audits, and triage reports.
 
 | Doc | What It Covers |
 |-----|---------------|
-| [VERIFY_SURFACE_INDEX.md](governance/VERIFY_SURFACE_INDEX.md) | Catalog of all 39 scripts in `surfaces/verify/` |
+| [VERIFY_SURFACE_INDEX.md](governance/VERIFY_SURFACE_INDEX.md) | Catalog of all 46 scripts in `surfaces/verify/` |
 
 ---
 
@@ -167,7 +168,7 @@ After editing any doc in this tree:
 # Lint: folder placement, metadata headers, README registration, legacy isolation
 ./bin/ops cap run docs.lint
 
-# Verify drift gates still pass (D1-D37)
+# Verify drift gates still pass (D1-D40)
 ./bin/ops cap run spine.verify
 
 # Verify workbench infrastructure docs intact (120 files, 19 dirs)

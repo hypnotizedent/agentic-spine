@@ -91,6 +91,7 @@ All must PASS for core to be healthy:
 | D37 | Infra placement policy lock (canonical site/hypervisor/vmid/service target enforcement) |
 | D38 | Extraction hygiene lock (EXTRACTION_PROTOCOL enforcement) |
 | D39 | Infra hypervisor identity lock (active relocation states must pass identity invariants) |
+| D40 | Maker tools drift lock (binding validity, script hygiene, no debug/secret/tmp leaks) |
 
 ## Rules
 

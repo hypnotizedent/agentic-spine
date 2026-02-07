@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BINDING_FILE="${BINDING_FILE:-ops/bindings/maker.tools.inventory.yaml}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+
+_need yq
+
+if [[ ! -f "$BINDING_FILE" ]]; then
+  echo "STOP: missing binding file: $BINDING_FILE" >&2
+  exit 2
+fi
+
+echo "=== MAKER TOOLS STATUS ==="
+echo
+
+TOTAL=0
+INSTALLED=0
+MISSING=0
+DISABLED=0
+HW_BLOCKED=0
+
+# Read all tools from binding
+TOOL_LINES="$(
+  yq -r '
+    .tools[]
+    | [
+        .id,
+        .category,
+        (.enabled // false | tostring),
+        (.hardware_required // false | tostring),
+        .probe,
+        (.hardware_note // "-")
+      ] | @tsv
+  ' "$BINDING_FILE"
+)"
+
+if [[ -z "${TOOL_LINES//[[:space:]]/}" ]]; then
+  echo "STOP: no tools defined in $BINDING_FILE"
+  exit 2
+fi
+
+printf "%-14s %-10s %-8s %-10s %s\n" "TOOL" "CATEGORY" "ENABLED" "STATUS" "NOTE"
+printf "%-14s %-10s %-8s %-10s %s\n" "──────────────" "──────────" "────────" "──────────" "────"
+
+while IFS=$'\t' read -r id category enabled hw_required probe hw_note; do
+  TOTAL=$((TOTAL + 1))
+
+  if [[ "$enabled" != "true" ]]; then
+    if [[ "$hw_required" == "true" ]]; then
+      status="hw_wait"
+      note="$hw_note"
+      HW_BLOCKED=$((HW_BLOCKED + 1))
+    else
+      status="disabled"
+      note="-"
+      DISABLED=$((DISABLED + 1))
+    fi
+  else
+    # Probe for installation
+    if eval "$probe" >/dev/null 2>&1; then
+      status="installed"
+      note="$(eval "$probe" 2>/dev/null || echo "?")"
+      INSTALLED=$((INSTALLED + 1))
+    else
+      status="MISSING"
+      note="run: $(yq -r ".tools[] | select(.id == \"$id\") | .install_command" "$BINDING_FILE")"
+      MISSING=$((MISSING + 1))
+    fi
+  fi
+
+  printf "%-14s %-10s %-8s %-10s %s\n" "$id" "$category" "$enabled" "$status" "$note"
+done <<< "$TOOL_LINES"
+
+echo
+echo "Total: $TOTAL | Installed: $INSTALLED | Missing: $MISSING | HW Wait: $HW_BLOCKED | Disabled: $DISABLED"
+
+if [[ "$MISSING" -gt 0 ]]; then
+  echo
+  echo "WARN: $MISSING enabled tool(s) not installed"
+  exit 1
+fi
+
+echo
+echo "maker.tools.status: OK"
+exit 0

@@ -7,7 +7,7 @@ scope: verify-scripts
 
 # Verify Surface Index
 
-> **Purpose:** Enumerate all 43 scripts in `surfaces/verify/` with their purpose,
+> **Purpose:** Enumerate all 46 scripts in `surfaces/verify/` with their purpose,
 > caller, read-only status, and disposition. Agents use this to understand
 > what verification is available and which scripts are active vs orphaned.
 
@@ -37,7 +37,7 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D39) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D40) | Yes |
 | `foundation-gate.sh` | Foundation file existence checks | Yes |
 | `contracts-gate.sh` | Contract compliance gate | Yes |
 | `no-drift-roots-gate.sh` | Verify no unauthorized root files | Yes |
@@ -61,7 +61,9 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 | `d35-infra-relocation-parity-lock.sh` | Infra relocation parity lock (cross-SSOT consistency) | Yes |
 | `d36-legacy-exception-hygiene-lock.sh` | Legacy exception hygiene lock (stale/near-expiry) | Yes |
 | `d37-infra-placement-policy-lock.sh` | Infra placement policy lock (canonical target enforcement) | Yes |
+| `d38-extraction-hygiene-lock.sh` | Extraction protocol hygiene lock | Yes |
 | `d39-infra-hypervisor-identity-lock.sh` | Hypervisor identity lock during active relocation states | Yes |
+| `d40-maker-tools-drift.sh` | Maker tools drift lock (binding validity, script hygiene) | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -92,10 +94,10 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by verify.sh | 11 |
-| Called by drift-gate.sh | 28 |
+| Called by drift-gate.sh | 30 |
 | Called by capabilities/CLI | 2 |
 | Orphaned (manual only) | 3 |
-| **Total** | **44** |
+| **Total** | **46** |
 
 ---
 
@@ -104,5 +106,5 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Document | Relationship |
 |----------|-------------|
 | [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) | Canonical scripts index |
-| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D39) |
+| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D40) |
 | [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) | Backup verification governance |

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BINDING_FILE="${BINDING_FILE:-ops/bindings/maker.tools.inventory.yaml}"
+SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+
+_need yq
+_need qrencode
+
+# ─── Args ───────────────────────────────────────────────────────────────
+DATA="${1:-}"
+FORMAT="${2:-png}"         # png | svg | terminal
+SIZE="${3:-6}"             # module size (pixels per module for PNG)
+
+if [[ -z "$DATA" ]]; then
+  echo "Usage: maker-qr-generate <data> [format: png|svg|terminal] [size: 1-10]"
+  echo
+  echo "Examples:"
+  echo "  maker-qr-generate 'https://mintprints.co'"
+  echo "  maker-qr-generate 'SKU-001' svg"
+  echo "  maker-qr-generate 'hello' terminal"
+  exit 2
+fi
+
+# ─── Output dir from binding ────────────────────────────────────────────
+OUTPUT_DIR="$SP/$(yq -r '.output_dir // "mailroom/outbox/maker"' "$BINDING_FILE")"
+mkdir -p "$OUTPUT_DIR"
+
+# ─── Generate ────────────────────────────────────────────────────────────
+TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+SAFE_DATA="$(echo "$DATA" | tr -cd '[:alnum:]._-' | head -c 40)"
+BASENAME="qr_${SAFE_DATA}_${TIMESTAMP}"
+
+case "$FORMAT" in
+  png)
+    OUTFILE="$OUTPUT_DIR/${BASENAME}.png"
+    qrencode -o "$OUTFILE" -s "$SIZE" -t PNG "$DATA"
+    echo "Generated: $OUTFILE"
+    echo "Format: PNG (${SIZE}px/module)"
+    ;;
+  svg)
+    OUTFILE="$OUTPUT_DIR/${BASENAME}.svg"
+    qrencode -o "$OUTFILE" -t SVG "$DATA"
+    echo "Generated: $OUTFILE"
+    echo "Format: SVG"
+    ;;
+  terminal)
+    echo "=== QR CODE (terminal) ==="
+    qrencode -t UTF8 "$DATA"
+    echo "=== END ==="
+    echo "(No file written — terminal output only)"
+    exit 0
+    ;;
+  *)
+    echo "STOP: unknown format '$FORMAT' (use: png, svg, terminal)" >&2
+    exit 2
+    ;;
+esac
+
+echo "Data: $DATA"
+echo "Size: $(wc -c < "$OUTFILE" | tr -d ' ') bytes"
+echo
+echo "maker.qr.generate: OK"
+exit 0
