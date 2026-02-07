@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-05
+last_verified: 2026-02-07
 verification_method: live-system-inspection
 scope: workstation-infrastructure
 github_issue: "#625"
@@ -14,7 +14,7 @@ github_issue: "#625"
 > Covers: Hardware specs, local services, RAG stack, developer tooling, and verification.
 > For device identity and Tailscale config, see [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md).
 >
-> **Last Verified:** February 5, 2026
+> **Last Verified:** February 7, 2026
 
 ---
 
@@ -209,11 +209,17 @@ df -h /
 | `com.ronny.ha-offsite-sync.plist` | Sun 04:30 | `sync-ha-offsite.sh` | Home Assistant offsite | ACTIVE |
 | `com.ronny.secrets-verify.plist` | Daily 08:00 | `secrets_verify.sh` | Validate secrets inventory | ACTIVE |
 | `com.ronny.monitoring-verify.plist` | Every 15m | `monitoring_verify.sh` | Validate monitoring | ACTIVE |
-| `com.ronnyworks.minio-mount.plist` | On login | `mount-minio.sh` | Mount MinIO via rclone | ACTIVE |
+| `com.ronnyworks.minio-mount.plist` | On login | rclone nfsmount | Mount MinIO via rclone | ACTIVE |
+| `com.ronny.agent-inbox.plist` | On login | `hot-folder-watcher.sh` | Spine mailroom watcher (fswatch) | ACTIVE |
+| `com.ronny.docker-tunnel.plist` | On login | SSH -L 2375 | Docker tunnel to docker-host | ACTIVE |
+| `com.ronny.streamdeck.ha.plist` | On login | `streamdeck_ha_controller.py` | Stream Deck HA button controller | ACTIVE |
+| `works.ronny.smb-paperless.plist` | On login | osascript SMB mount | Paperless SMB share on docker-host | ACTIVE |
 
 **Other auto-start:**
 - Docker Desktop: Auto-start on login
 - Time Machine: Hourly (system managed)
+
+**Crontab:** None (no crontab for ronnyworks). All scheduling via launchd.
 
 **Source:** External schedule inventory (workbench tooling via `WORKBENCH_TOOLING_INDEX.md`), verified 2026-02-05.
 
@@ -231,13 +237,11 @@ df -h /
 
 ## Open Loops
 
-| Loop ID | Description | Priority |
-|---------|-------------|----------|
-| `OL_MACBOOK_BASELINE_FINISH` | Verify Stream Deck buttons (physical audit) | LOW |
+No open baseline loops. `OL_MACBOOK_BASELINE_FINISH` closed 2026-02-07.
 
-**UNVERIFIED (requires live inspection):**
-- Stream Deck button assignments (Home Assistant, infrastructure)
-- Hammerspoon window management hotkeys beyond `Ctrl+Shift+S/E`
+**Previously unverified items — resolved 2026-02-07:**
+- Hammerspoon: Confirmed only 2 hotkeys (`Ctrl+Shift+S`, `Ctrl+Shift+E`) in `~/.hammerspoon/init.lua`. No additional window management bindings.
+- Stream Deck: HA controller runs via `com.ronny.streamdeck.ha.plist` (Python script using Infisical for `HA_API_TOKEN`). Physical button layout is managed in Stream Deck app — not scriptable/auditable from CLI.
 
 ---
 
@@ -249,6 +253,14 @@ df -h /
 |------|-------|
 | Method | `system_profiler SPHardwareDataType`, `docker ps`, `brew services list` |
 | Result | Hardware specs verified, 7 containers (5 running, 2 stopped) |
+
+### 2026-02-07 Baseline Completion Audit
+
+| Item | Value |
+|------|-------|
+| Method | `launchctl list`, `plutil -p`, `crontab -l`, `cat ~/.hammerspoon/init.lua` |
+| Result | 11 custom LaunchAgents verified (4 newly documented), no crontab, Hammerspoon 2 hotkeys only |
+| Loop closed | `OL_MACBOOK_BASELINE_FINISH` |
 
 ### Related Capability Receipts
 
