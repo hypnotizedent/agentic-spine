@@ -16,6 +16,8 @@ fi
 INFISICAL_API_URL="${INFISICAL_API_URL:-https://secrets.ronny.works}"
 INFISICAL_CLIENT_ID="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-40b44e76-db5a-4309-afa2-43bd93dddfc1}"
 INFISICAL_CLIENT_SECRET="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}"
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SECRETS_NAMESPACE_POLICY="${SPINE_REPO}/ops/bindings/secrets.namespace.policy.yaml"
 
 # Cache configuration
 CACHE_DIR="${HOME}/.cache/infisical"
@@ -56,7 +58,42 @@ get_cache_path() {
   local project="$1"
   local env="$2"
   local key="$3"
-  echo "${CACHE_DIR}/${project}/${env}/${key}"
+  local secret_path="${4:-/}"
+  local path_segment="${secret_path#/}"
+  [[ -n "$path_segment" ]] || path_segment="root"
+  path_segment="${path_segment//\//__}"
+  echo "${CACHE_DIR}/${project}/${env}/${path_segment}/${key}"
+}
+
+# Resolve canonical path for key operations.
+# Falls back to "/" when no namespace policy applies.
+resolve_secret_path() {
+  local project="${1:-}"
+  local env="${2:-}"
+  local key="${3:-}"
+
+  # Namespace cutovers are currently scoped to infrastructure/prod only.
+  if [[ "$project" != "infrastructure" || "$env" != "prod" ]]; then
+    echo "/"
+    return 0
+  fi
+
+  if [[ ! -f "$SECRETS_NAMESPACE_POLICY" ]] || ! command -v yq >/dev/null 2>&1; then
+    echo "/"
+    return 0
+  fi
+
+  local resolved
+  resolved="$(yq e -r ".rules.key_path_overrides.${key} // \"\"" "$SECRETS_NAMESPACE_POLICY" 2>/dev/null || true)"
+  if [[ -n "$resolved" && "$resolved" != "null" ]]; then
+    echo "$resolved"
+  else
+    echo "/"
+  fi
+}
+
+urlencode() {
+  jq -rn --arg v "${1:-}" '$v|@uri'
 }
 
 # Check if cache is valid (exists and not expired)
@@ -105,7 +142,9 @@ clear_cache() {
 
   if [[ -n "$key" && -n "$env" && -n "$project" ]]; then
     local cache_file
-    cache_file=$(get_cache_path "$project" "$env" "$key")
+    local secret_path
+    secret_path=$(resolve_secret_path "$project" "$env" "$key")
+    cache_file=$(get_cache_path "$project" "$env" "$key" "$secret_path")
     rm -f "$cache_file"
     log_success "Cleared cache: $project/$env/$key"
   elif [[ -n "$project" ]]; then
@@ -186,11 +225,15 @@ infisical_list_secrets() {
 
   local project_id
   project_id=$(get_project_id "$project")
+  local secret_path
+  secret_path=$(resolve_secret_path "$project" "$env" "")
+  local encoded_path
+  encoded_path=$(urlencode "$secret_path")
 
   local token
   token=$(infisical_auth)
 
-  curl -s -X GET "${INFISICAL_API_URL}/api/v3/secrets/raw?workspaceId=${project_id}&environment=${env}" \
+  curl -s -X GET "${INFISICAL_API_URL}/api/v3/secrets/raw?workspaceId=${project_id}&environment=${env}&secretPath=${encoded_path}" \
     -H "Authorization: Bearer $token" | jq -r '.secrets[] | "\(.secretKey)=\(.secretValue)"'
 }
 
@@ -207,12 +250,16 @@ infisical_get_secret() {
 
   local project_id
   project_id=$(get_project_id "$project")
+  local secret_path
+  secret_path=$(resolve_secret_path "$project" "$env" "$key")
+  local encoded_path
+  encoded_path=$(urlencode "$secret_path")
 
   local token
   token=$(infisical_auth)
 
   local response
-  response=$(curl -s -X GET "${INFISICAL_API_URL}/api/v3/secrets/raw/${key}?workspaceId=${project_id}&environment=${env}" \
+  response=$(curl -s -X GET "${INFISICAL_API_URL}/api/v3/secrets/raw/${key}?workspaceId=${project_id}&environment=${env}&secretPath=${encoded_path}" \
     -H "Authorization: Bearer $token")
 
   echo "$response" | jq -r '.secret.secretValue // empty'
@@ -232,7 +279,9 @@ infisical_get_secret_cached() {
   fi
 
   local cache_file
-  cache_file=$(get_cache_path "$project" "$env" "$key")
+  local secret_path
+  secret_path=$(resolve_secret_path "$project" "$env" "$key")
+  cache_file=$(get_cache_path "$project" "$env" "$key" "$secret_path")
 
   # Check if we should use cache
   if [[ "$force_refresh" != "--no-cache" ]] && is_cache_valid "$cache_file"; then
@@ -267,9 +316,14 @@ infisical_cache_info() {
   local count=0
   while IFS= read -r -d '' file; do
     local rel_path="${file#$CACHE_DIR/}"
-    local project=$(echo "$rel_path" | cut -d'/' -f1)
-    local env=$(echo "$rel_path" | cut -d'/' -f2)
-    local key=$(echo "$rel_path" | cut -d'/' -f3)
+    local project="${rel_path%%/*}"
+    local after_project="${rel_path#*/}"
+    local env="${after_project%%/*}"
+    local tail="${after_project#*/}"
+    local key="${tail##*/}"
+    local path_segment="${tail%/*}"
+    local display_path="/${path_segment//__/\/}"
+    [[ "$path_segment" == "$key" ]] && display_path="/"
 
     local file_age
     if [[ "$(uname)" == "Darwin" ]]; then
@@ -285,7 +339,7 @@ infisical_cache_info() {
       remaining=0
     fi
 
-    printf "  %-20s %-6s %-30s [%s, %dm remaining]\n" "$project" "$env" "$key" "$status" "$(( remaining / 60 ))"
+    printf "  %-20s %-6s %-24s %-24s [%s, %dm remaining]\n" "$project" "$env" "$key" "$display_path" "$status" "$(( remaining / 60 ))"
     count=$((count + 1))
   done < <(find "$CACHE_DIR" -type f -print0 2>/dev/null)
 
@@ -310,6 +364,8 @@ infisical_set_secret() {
 
   local project_id
   project_id=$(get_project_id "$project")
+  local secret_path
+  secret_path=$(resolve_secret_path "$project" "$env" "$key")
 
   local token
   token=$(infisical_auth)
@@ -319,7 +375,7 @@ infisical_set_secret() {
   response=$(curl -s -X PATCH "${INFISICAL_API_URL}/api/v3/secrets/raw/${key}" \
     -H "Authorization: Bearer $token" \
     -H "Content-Type: application/json" \
-    -d "{\"workspaceId\": \"${project_id}\", \"environment\": \"${env}\", \"secretValue\": \"${value}\"}")
+    -d "{\"workspaceId\": \"${project_id}\", \"environment\": \"${env}\", \"secretValue\": \"${value}\", \"secretPath\": \"${secret_path}\"}")
 
   if echo "$response" | jq -e '.secret' >/dev/null 2>&1; then
     log_success "Updated secret: $key"
@@ -330,7 +386,7 @@ infisical_set_secret() {
   response=$(curl -s -X POST "${INFISICAL_API_URL}/api/v3/secrets/raw/${key}" \
     -H "Authorization: Bearer $token" \
     -H "Content-Type: application/json" \
-    -d "{\"workspaceId\": \"${project_id}\", \"environment\": \"${env}\", \"secretValue\": \"${value}\", \"type\": \"shared\"}")
+    -d "{\"workspaceId\": \"${project_id}\", \"environment\": \"${env}\", \"secretValue\": \"${value}\", \"secretPath\": \"${secret_path}\", \"type\": \"shared\"}")
 
   if echo "$response" | jq -e '.secret' >/dev/null 2>&1; then
     log_success "Created secret: $key"
@@ -355,6 +411,8 @@ infisical_delete_secret() {
 
   local project_id
   project_id=$(get_project_id "$project")
+  local secret_path
+  secret_path=$(resolve_secret_path "$project" "$env" "$key")
 
   local token
   token=$(infisical_auth)
@@ -363,7 +421,7 @@ infisical_delete_secret() {
   response=$(curl -s -X DELETE "${INFISICAL_API_URL}/api/v3/secrets/raw/${key}" \
     -H "Authorization: Bearer $token" \
     -H "Content-Type: application/json" \
-    -d "{\"workspaceId\": \"${project_id}\", \"environment\": \"${env}\"}")
+    -d "{\"workspaceId\": \"${project_id}\", \"environment\": \"${env}\", \"secretPath\": \"${secret_path}\"}")
 
   if echo "$response" | jq -e '.secret' >/dev/null 2>&1; then
     log_success "Deleted secret: $key"
@@ -494,6 +552,8 @@ Caching:
   - First call fetches from API and caches; subsequent calls read from cache
   - Use --no-cache flag to force refresh: get-cached proj env key --no-cache
   - Use cache-clear to manually invalidate cache
+  - For infrastructure/prod, key paths may be auto-resolved via
+    ops/bindings/secrets.namespace.policy.yaml
 
 Examples:
   infisical-agent.sh auth
