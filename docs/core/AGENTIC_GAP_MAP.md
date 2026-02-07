@@ -95,7 +95,7 @@ pattern with governed, receipt-producing capabilities.
 ## Infrastructure Pillar: ronny-ops → Workbench
 
 > **Purpose:** Track extraction of infrastructure assets from `~/ronny-ops/infrastructure/`
-> into `~/Code/workbench/` so agents work entirely from `/Code`.
+> into `~/code/workbench/` so agents work entirely from `/Code`.
 >
 > **Capability:** `ops cap run infra.extraction.status` (receipt-producing, 23 asset groups)
 > **Docs check:** `ops cap run docs.status` (verifies file counts per directory)

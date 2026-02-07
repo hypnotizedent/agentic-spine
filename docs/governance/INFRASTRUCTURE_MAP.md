@@ -17,7 +17,7 @@ sources: []
 >
 > **Do not execute commands or act on paths in this document from a spine session.**
 > Query the workbench or Mint OS directly for authoritative answers:
-> `cd ~/Code/workbench && mint ask "question"`
+> `cd ~/code/workbench && mint ask "question"`
 >
 > **Current authority:** See [GOVERNANCE_INDEX.md](GOVERNANCE_INDEX.md) for spine-native
 > SSOTs. See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for external reference policy.

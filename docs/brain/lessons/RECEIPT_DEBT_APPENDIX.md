@@ -1,3 +1,10 @@
+---
+status: reference
+owner: "@ronny"
+last_verified: 2026-02-07
+scope: historical-receipt-debt
+---
+
 # Historical Receipt Debt Appendix
 
 > **Generated:** 2026-02-07

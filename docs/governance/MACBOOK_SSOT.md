@@ -110,9 +110,9 @@ github_issue: "#625"
 
 | Repository | Path | Purpose |
 |------------|------|---------|
-| agentic-spine | `~/Code/agentic-spine/` | Spine runtime (this repo) |
-| workbench | `~/Code/workbench/` | Workbench monolith |
-| mint-modules | `~/Code/mint-modules/` | Mint OS modules |
+| agentic-spine | `~/code/agentic-spine/` | Spine runtime (this repo) |
+| workbench | `~/code/workbench/` | Workbench monolith |
+| mint-modules | `~/code/mint-modules/` | Mint OS modules |
 
 ### SSH Configuration
 
@@ -123,7 +123,7 @@ github_issue: "#625"
 | proxmox-home | root | ~/.ssh/id_ed25519 | Proxmox home |
 | automation-stack | automation | ~/.ssh/id_ed25519 | VM 202 |
 
-**Config location:** `~/.ssh/config` + `~/Code/workbench/dotfiles/ssh/config.d/`
+**Config location:** `~/.ssh/config` + `~/code/workbench/dotfiles/ssh/config.d/`
 
 ### Hotkeys / Shortcuts
 

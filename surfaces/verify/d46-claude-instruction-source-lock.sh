@@ -8,6 +8,7 @@ set -euo pipefail
 # 2. Required references to AGENTS.md and SESSION_PROTOCOL.md
 # 3. No forbidden governance headings in CLAUDE.md
 # 4. No uppercase code-directory path variant in governed Claude files
+# 5. No legacy runtime path references in governed Claude files
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CLAUDE_HOME="$HOME/.claude"
@@ -15,6 +16,8 @@ CLAUDE_MD="$CLAUDE_HOME/CLAUDE.md"
 
 # Build forbidden pattern dynamically to avoid D42 self-detection
 FORBIDDEN_PATH="/Users/ronnyworks/C""ode/"
+LEGACY_ROOT_SEGMENT='ronny-ops'
+LEGACY_PATH_RE="(/Users/ronnyworks/${LEGACY_ROOT_SEGMENT}|~/${LEGACY_ROOT_SEGMENT}|\\\$HOME/${LEGACY_ROOT_SEGMENT})"
 
 FAIL=0
 
@@ -47,12 +50,16 @@ for heading in "${FORBIDDEN[@]}"; do
   fi
 done
 
-# Check 4: No uppercase code-directory path in governed Claude files
-for file in "$CLAUDE_MD" "$CLAUDE_HOME/commands/ctx.md" "$CLAUDE_HOME/settings.json" "$CLAUDE_HOME/settings.local.json"; do
+# Check 4 + 5: Path hygiene in governed Claude files
+for file in "$CLAUDE_MD" "$CLAUDE_HOME"/commands/*.md "$CLAUDE_HOME/settings.json" "$CLAUDE_HOME/settings.local.json"; do
   [[ -f "$file" ]] || continue
   HITS=$(grep -cF "$FORBIDDEN_PATH" "$file" 2>/dev/null || true)
   if (( HITS > 0 )); then
     echo "D46 FAIL: $(basename "$file") has $HITS uppercase path reference(s)" >&2
+    FAIL=1
+  fi
+  if grep -nE "$LEGACY_PATH_RE" "$file" >/dev/null 2>&1; then
+    echo "D46 FAIL: $(basename "$file") references legacy runtime path(s)" >&2
     FAIL=1
   fi
 done

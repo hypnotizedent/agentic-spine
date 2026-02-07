@@ -1,6 +1,6 @@
 # VM Infrastructure Lessons
 
-> **Status:** authoritative
+> **Status:** reference
 > **Provenance:** spine-native
 > **Source Loop:** LOOP-INFRA-VM-RESTRUCTURE-20260206
 > **Last verified:** 2026-02-07

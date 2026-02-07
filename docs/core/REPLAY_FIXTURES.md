@@ -29,7 +29,7 @@ scope: replay-fixtures
 
    - Enqueues every fixture under `fixtures/events/v1` except the nondeterministic `__unknown_event__` file.
    - Waits for `mailroom/outbox/${run_key}__RESULT.md` and writes a normalized hash into `fixtures/baseline/${run_key}.hash`.
-   - Run the script from the spine repo root; it already knows `SPINE_ROOT=$HOME/Code/agentic-spine`.
+   - Run the script from the spine repo root; it already knows `SPINE_ROOT=$HOME/code/agentic-spine`.
 
 2. **Verify against the baseline (the capability `spine.replay` does this)**
 

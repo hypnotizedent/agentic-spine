@@ -19,7 +19,7 @@ scope: repository-structure
 
 ## PURPOSE
 
-This document is the ONLY authority for where folders and files belong in the workbench monolith (`~/Code/workbench`, formerly `ronny-ops`). Any agent, script, or documentation referencing file placement MUST match these rules. Conflicts mean the other source is WRONG.
+This document is the ONLY authority for where folders and files belong in the workbench monolith (`~/code/workbench`, formerly `ronny-ops`). Any agent, script, or documentation referencing file placement MUST match these rules. Conflicts mean the other source is WRONG.
 
 > **⚠️ Workbench-Scoped Document**
 >
@@ -146,7 +146,7 @@ Run this to verify no unexpected root entries exist:
 
 ```bash
 TS="$(date +%F_%H%M)"
-R="$HOME/Code/workbench"
+R="$HOME/code/workbench"
 OUT="$R/docs/receipts/repo_root_drift_${TS}.log"
 mkdir -p "$R/docs/receipts"
 

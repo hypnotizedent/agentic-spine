@@ -12,7 +12,7 @@ Purpose: record proof of critical ops path hardening (no ronny-ops fallback).
 ## MUSTFIX patches (confirmed working)
 - ai.sh: removed `$HOME/ronny-ops` fallback; requires git context or explicit `REPO_ROOT`
 - clerk-watcher.sh: service registry path now spine-native
-- README.md: installation paths updated to `~/Code/agentic-spine` and `~/.local/bin`
+- README.md: installation paths updated to `~/code/agentic-spine` and `~/.local/bin`
 
 ## Proof (receipts)
 - receipts/sessions/ADHOC_20260201_031118_OPS_HARDCODED_MUSTFIX/
@@ -57,7 +57,7 @@ Proof:
 
 Changes:
 - SSH-audited 9 hosts: 3 servers still have `~/ronny-ops` (docker-host, automation-stack, media-stack); Proxmox/HA/NAS/vault have no repos
-- Established canonical paths: Mac `~/Code/workbench`, servers `~/workbench`
+- Established canonical paths: Mac `~/code/workbench`, servers `~/workbench`
 - Strict de-ronny-ops across 63 workbench files: dotfiles (aliases, compat, Hammerspoon, Raycast, SSH), scripts (load-secrets, governance.sh, ai.sh, bootstrap, finance, system-status), infra (env.sh.template, n8n backup), 10+ runbooks
 - Rewrote Hammerspoon init.lua: all hotkeys invoke spine capabilities
 - Added canonical host path table to `docs/LEGACY_TIES.md`

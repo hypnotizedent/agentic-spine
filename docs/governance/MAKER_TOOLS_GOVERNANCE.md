@@ -104,6 +104,6 @@ No outputs to `/tmp/`, home directory, or other ad-hoc locations.
 # QR generation
 ./bin/ops cap run maker.qr.generate "https://mintprints.co"
 
-# Drift gates (D1-D40)
+# Drift gates (D1-D47)
 ./bin/ops cap run spine.verify
 ```

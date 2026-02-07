@@ -6,7 +6,7 @@ if ! REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
   REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 fi
 
-REGISTRY_FILE="$REPO_ROOT/infrastructure/SERVICE_REGISTRY.yaml"
+REGISTRY_FILE="$REPO_ROOT/docs/governance/SERVICE_REGISTRY.yaml"
 
 require_yq() {
   if ! command -v yq >/dev/null 2>&1; then
@@ -27,7 +27,7 @@ resolve_service_field() {
   local field="$2"
   require_yq || return 1
   require_registry_file || return 1
-  yq -r ".services[\"$service\"].$field // empty" "$REGISTRY_FILE"
+  yq -r ".services[\"$service\"].$field // \"\"" "$REGISTRY_FILE"
 }
 
 resolve_host_ip() {
@@ -35,7 +35,7 @@ resolve_host_ip() {
   require_yq || return 1
   require_registry_file || return 1
   local ip
-  ip=$(yq -r ".hosts[\"$host\"].tailscale_ip // empty" "$REGISTRY_FILE")
+  ip=$(yq -r ".hosts[\"$host\"].tailscale_ip // \"\"" "$REGISTRY_FILE")
   if [[ -n "$ip" ]]; then
     echo "$ip"
   else

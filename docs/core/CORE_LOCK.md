@@ -76,7 +76,7 @@ All must PASS for core to be healthy:
 | D22 | Nodes surface drift (read-only SSH, no credentials) |
 | D23 | Services health surface drift (no verbose curl) |
 | D24 | GitHub labels surface drift (read-only, no mutations) |
-| D25 | Secrets CLI hash parity (canonical vs vendored tools) |
+| D25 | Secrets CLI canonical lock (spine tooling required; external parity advisory) |
 | D26 | Agent startup read-surface and host/service route lock |
 | D27 | Fact duplication lock for startup/governance read docs |
 | D28 | Archive runway lock (active legacy absolute paths + extraction queue contract) |

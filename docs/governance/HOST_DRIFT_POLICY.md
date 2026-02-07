@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-06
+last_verified: 2026-02-07
 scope: host-drift-governance
 ---
 
@@ -59,6 +59,10 @@ All dot-entries under `$HOME` must be classified in `ops/bindings/host.audit.all
 D41 uses two-tier scanning:
 - **Tier 1:** Top-level hidden entries (depth=1 under `$HOME`)
 - **Tier 2:** Recursive forbidden pattern scan (targeted globs under known parents)
+
+Legacy Claude project/worktree residues tied to `ronny-ops` are explicitly
+forbidden and must be archived under `~/.archive/` rather than left active
+under `~/.claude/projects/` or `~/.claude-worktrees/`.
 
 D30 additionally checks `forbidden_config_files` for belt-and-suspenders secret file coverage.
 

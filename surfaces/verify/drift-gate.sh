@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v2.2)
+# drift-gate.sh - Constitutional drift detector (v2.3)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -19,7 +19,7 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v2.2) ==="
+echo "=== DRIFT GATE (v2.3) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -295,42 +295,38 @@ else
   warn "github labels drift gate not present"
 fi
 
-# D25: Secrets CLI hash parity (canonical vs vendored infisical-agent.sh + cloudflare-agent.sh)
-echo -n "D25 secrets cli hash... "
+# D25: Secrets CLI canonical lock (canonical tooling required; external parity advisory)
+echo -n "D25 secrets cli canonical lock... "
 WB="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 
 # Check infisical-agent.sh
 CANONICAL_INFISICAL="$SP/ops/tools/infisical-agent.sh"
 VENDORED_INFISICAL="$WB/scripts/agents/infisical-agent.sh"
-if [[ ! -f "$CANONICAL_INFISICAL" ]]; then
-  fail "canonical infisical-agent.sh missing"
+if [[ ! -x "$CANONICAL_INFISICAL" ]]; then
+  fail "canonical infisical-agent.sh missing or not executable"
 elif [[ ! -f "$VENDORED_INFISICAL" ]]; then
-  warn "(workbench copy missing — spine-only mode)"
+  pass
+  warn "(workbench infisical-agent missing — spine canonical remains source of truth)"
 else
   IC_HASH=$(shasum -a 256 "$CANONICAL_INFISICAL" | awk '{print $1}')
   IV_HASH=$(shasum -a 256 "$VENDORED_INFISICAL" | awk '{print $1}')
-  if [[ "$IC_HASH" == "$IV_HASH" ]]; then
-    pass
-  else
-    fail "hash mismatch (infisical-agent: canonical vs vendored)"
-  fi
+  pass
+  [[ "$IC_HASH" == "$IV_HASH" ]] || warn "(infisical-agent hash drift in workbench; sync advisory)"
 fi
 
 # Check cloudflare-agent.sh
 CANONICAL_CF="$SP/ops/tools/cloudflare-agent.sh"
 VENDORED_CF="$WB/scripts/agents/cloudflare-agent.sh"
-if [[ ! -f "$CANONICAL_CF" ]]; then
-  fail "canonical cloudflare-agent.sh missing"
+if [[ ! -x "$CANONICAL_CF" ]]; then
+  fail "canonical cloudflare-agent.sh missing or not executable"
 elif [[ ! -f "$VENDORED_CF" ]]; then
-  warn "(workbench copy missing — spine-only mode)"
+  pass
+  warn "(workbench cloudflare-agent missing — spine canonical remains source of truth)"
 else
   CF_HASH=$(shasum -a 256 "$CANONICAL_CF" | awk '{print $1}')
   CV_HASH=$(shasum -a 256 "$VENDORED_CF" | awk '{print $1}')
-  if [[ "$CF_HASH" == "$CV_HASH" ]]; then
-    pass
-  else
-    fail "hash mismatch (cloudflare-agent: canonical vs vendored)"
-  fi
+  pass
+  [[ "$CF_HASH" == "$CV_HASH" ]] || warn "(cloudflare-agent hash drift in workbench; sync advisory)"
 fi
 
 # D26: Agent startup read-surface + host/service route lock

@@ -9,26 +9,26 @@ Quick reference for spine operations and governance tasks.
 
 ### Start work on an issue
 ```bash
-cd ~/Code/agentic-spine
-ops start ISSUE_NUMBER
+cd ~/code/agentic-spine
+./bin/ops start ISSUE_NUMBER
 ```
 
 ### Verify infrastructure
 ```bash
-ops verify
+./bin/ops cap run spine.verify
 ```
 
 ### Run capabilities
 ```bash
-ops cap list                          # List all capabilities
-ops cap run <capability_name>          # Run a specific capability
-ops cap show <capability_name>          # Show capability details
+./bin/ops cap list                     # List all capabilities
+./bin/ops cap run <capability_name>    # Run a specific capability
+./bin/ops cap show <capability_name>   # Show capability details
 ```
 
 ### Stage and create PR
 ```bash
-ops pr create                          # Stage, commit, push, and create PR
-ops pr close ISSUE_NUMBER               # Verify, confirm merge, close issue
+./bin/ops pr create                    # Stage, commit, push, and create PR
+./bin/ops pr close ISSUE_NUMBER        # Verify, confirm merge, close issue
 ```
 
 ## Ready check (before any API work)

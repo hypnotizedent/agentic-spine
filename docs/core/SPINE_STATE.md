@@ -7,8 +7,8 @@
 
 ## Purpose
 
-Canonical summary of what lives in `/Code/agentic-spine` and how it relates to
-the workbench monolith (`~/Code/workbench`, formerly `ronny-ops`).
+Canonical summary of what lives in `/code/agentic-spine` and how it relates to
+the workbench monolith (`~/code/workbench`, formerly `ronny-ops`).
 
 ---
 
@@ -18,7 +18,7 @@ The spine's authority chain and contract surface:
 
 | Asset | Path |
 |-------|------|
-| Invariant lock + drift gates (D1–D29) | [CORE_LOCK.md](CORE_LOCK.md) |
+| Invariant lock + drift gates (D1–D47) | [CORE_LOCK.md](CORE_LOCK.md) |
 | Governance entry point | [GOVERNANCE_INDEX.md](../governance/GOVERNANCE_INDEX.md) |
 | Machine-readable SSOT registry | [SSOT_REGISTRY.yaml](../governance/SSOT_REGISTRY.yaml) |
 | Agent contract | [AGENT_CONTRACT.md](AGENT_CONTRACT.md) |
@@ -40,7 +40,7 @@ Every capability invocation produces a receipt under `receipts/sessions/`.
 
 ## Workbench + Products
 
-The workbench monolith (`~/Code/workbench`) owns product stacks (Mint OS,
+The workbench monolith (`~/code/workbench`) owns product stacks (Mint OS,
 media-stack, finance, etc.) and infrastructure configs. The spine owns
 **governance and runtime only** — it does not duplicate workbench assets.
 
@@ -69,7 +69,7 @@ verification gates, historical audits, and extraction tracking contexts.
 ## Verification
 
 ```bash
-# Drift gates (D1–D29)
+# Drift gates (D1–D47)
 ./bin/ops cap run spine.verify
 
 # Doc hierarchy, metadata, README registration, SSOT paths

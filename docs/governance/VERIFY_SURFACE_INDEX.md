@@ -7,7 +7,7 @@ scope: verify-scripts
 
 # Verify Surface Index
 
-> **Purpose:** Enumerate all 52 scripts in `surfaces/verify/` with their purpose,
+> **Purpose:** Enumerate all 53 scripts in `surfaces/verify/` with their purpose,
 > caller, read-only status, and disposition. Agents use this to understand
 > what verification is available and which scripts are active vs orphaned.
 
@@ -79,7 +79,7 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 | Script | Caller | Purpose | Read-Only |
 |--------|--------|---------|-----------|
 | `replay-test.sh` | `spine.replay` capability | Deterministic replay test | Yes |
-| `receipt-grade-verify.sh` | `bin/cli/bin/spine` | Receipt grading verification | Yes |
+| `receipt-grade-verify.sh` | Manual only | Legacy receipt grading helper | No (writes under `runs/`) |
 
 ---
 
@@ -92,6 +92,7 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | `cap-ledger-smoke.sh` | Smoke test: verify `ops cap` creates state dir | Yes | Keep as manual smoke test |
 | `loops-smoke.sh` | Smoke test: verify `ops loops` creates state dir | Yes | Keep as manual smoke test |
 | `backup_audit.sh` | Generate JSON backup inventory (`backup_inventory.json`) | No (writes file) | Keep as data generator |
+| `verify.sh` | Legacy wrapper verify script | Yes | Keep as manual compatibility helper |
 
 ---
 
@@ -102,8 +103,8 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Called by verify.sh | 10 |
 | Called by drift-gate.sh | 37 |
 | Called by capabilities/CLI | 2 |
-| Orphaned (manual only) | 3 |
-| **Total** | **52** |
+| Orphaned (manual only) | 4 |
+| **Total** | **53** |
 
 ---
 

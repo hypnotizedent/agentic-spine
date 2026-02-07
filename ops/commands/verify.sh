@@ -13,15 +13,22 @@ echo "SPINE_ROOT=$SPINE_ROOT"
 echo "VERIFY_SURFACE=$V"
 echo
 
-# Tier 0: Foundation gate (must pass before any verify work)
-echo "Tier 0: Foundation gate"
-if ! bash "$V/foundation-gate.sh"; then
-  echo "Foundation gate failed - aborting verify"
+# Tier 0: Canonical drift lock
+echo "Tier 0: Canonical spine.verify"
+if ! "$SPINE_ROOT/bin/ops" cap run spine.verify; then
+  echo "spine.verify failed - aborting extended verify"
   exit 1
 fi
 echo
 
-# Run verify surface scripts in a stable order.
+# Optional short path for callers that want canonical verification only.
+if [[ "${1:-}" == "--core-only" ]]; then
+  echo "Core-only verify complete"
+  exit 0
+fi
+
+# Tier 1: Extended diagnostics
+echo "Tier 1: Extended diagnostics"
 scripts=(
   "verify-identity.sh"
   "secrets_verify.sh"
@@ -33,7 +40,6 @@ scripts=(
   "updates_verify.sh"
   "stack-health.sh"
   "health-check.sh"
-  "verify.sh"
   )
 
 for s in "${scripts[@]}"; do

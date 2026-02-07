@@ -21,10 +21,10 @@ echo "=== SPINE FOUNDATION GATE ==="
 # T0: Entrypoints
 echo "T0: Entrypoints"
 test -x ./bin/ops && echo "OK: bin/ops" || fail "bin/ops missing/not executable"
-if test -x ./cli/bin/spine; then 
-  echo "OK: cli/bin/spine"
+if test -x ./bin/cli/bin/spine; then
+  echo "OK: bin/cli/bin/spine (deprecated shim)"
 else
-  warn "cli/bin/spine missing"
+  warn "bin/cli/bin/spine missing"
 fi
 
 # T1: Dispatch
@@ -45,10 +45,10 @@ fi
 
 # T3: No executable legacy ~/agent coupling in runnable areas
 echo "T3: No legacy ~/agent coupling in runnable code"
-if rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces cli \
+if rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces \
   | rg -v '^[[:space:]]*#' | rg -v 'foundation-gate.sh' >/dev/null; then
   echo "Executable legacy coupling found:"
-  rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces cli | rg -v '^[[:space:]]*#' | rg -v 'foundation-gate.sh'
+  rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces | rg -v '^[[:space:]]*#' | rg -v 'foundation-gate.sh'
   exit 1
 else
   echo "OK: no executable legacy coupling"

@@ -7,7 +7,7 @@ scope: legacy-handling
 
 # Legacy Deprecation Policy
 
-> **Purpose:** Rules for handling references to legacy repositories (`ronny-ops`, `~/Code/workbench`) within the spine.
+> **Purpose:** Rules for handling references to legacy repositories (`ronny-ops`, `~/code/workbench`) within the spine.
 >
 > **Invariant:** The spine must be self-contained at runtime. Legacy references are permitted only for historical context, extraction tracking, and read-only reference.
 
@@ -25,7 +25,7 @@ scope: legacy-handling
 |---------|------------|--------|
 | `/ronnyworks/ronny-ops` | Deprecated repo name | **Legacy** |
 | `~/ronny-ops` | Deprecated home path | **Legacy** |
-| `~/Code/workbench` | Current workbench monolith | **External** (not spine-native) |
+| `~/code/workbench` | Current workbench monolith | **External** (not spine-native) |
 | Workbench documentation tree (docs/) | Workbench infra docs | **External reference only** |
 
 ---
@@ -39,14 +39,14 @@ scope: legacy-handling
 | Historical audit | "In 2026-01, the watcher lived at `/ronny-ops/scripts/agents/`" | Documents past state |
 | Extraction tracking | "Legacy path: `ronny-ops/modules/files-api`" | Tracks migration |
 | Constraint declarations | "D16: legacy isolation from `ronny-ops`" | Defines boundary |
-| Source attribution | "Seeded from: `~/Code/workbench/infra/data/*.json`" | Credits original |
+| Source attribution | "Seeded from: `~/code/workbench/infra/data/*.json`" | Credits original |
 | Workbench tooling references | "See WORKBENCH_TOOLING_INDEX.md for approved tooling paths" | Centralized external pointer |
 
 ### Forbidden (Runtime Dependency)
 
 | Action | Why Forbidden |
 |--------|---------------|
-| `cd ~/Code/workbench && ./script.sh` | Runtime dependency on external repo |
+| `cd ~/code/workbench && ./script.sh` | Runtime dependency on external repo |
 | Hardcoding `ronny-ops` paths in capabilities | Breaks spine portability |
 | Claiming authority over workbench content | Spine governs spine only |
 | Promoting workbench doc to spine SSOT without migration | Creates phantom authority |
@@ -77,7 +77,7 @@ grep -r "ronny-ops/path/to/DOC.md" docs/
   owner: "@ronny"
   last_verified: YYYY-MM-DD
   scope: your-scope
-  migrated_from: ~/Code/workbench/original/path.md
+  migrated_from: ~/code/workbench/original/path.md
   ---
   ```
 
@@ -123,7 +123,7 @@ Use a callout:
 ```markdown
 > **Legacy Reference (Read-Only)**
 >
-> The paths below reference `~/Code/workbench/`. These are external SSOTs
+> The paths below reference `~/code/workbench/`. These are external SSOTs
 > maintained in the workbench monolith. The spine does not govern this content.
 > Query workbench directly for authoritative answers.
 ```

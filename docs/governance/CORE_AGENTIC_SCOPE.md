@@ -33,7 +33,7 @@ Authoritative contracts, manifests, and SSOT:
 - Service SSOT (docs/governance/SERVICE_REGISTRY.yaml)
 - Governance manifest (docs/governance/manifest.yaml)
 - Agent contracts (agents/contracts/)
-- Regression gate tests (bin/ops verify)
+- Regression gate tests (`./bin/ops cap run spine.verify`)
 
 ---
 
@@ -251,27 +251,27 @@ Run this whenever you import anything, even docs:
 
 ### A) Gate Stays Green
 ```bash
-cd ~/Code/agentic-spine && ./surfaces/verify/foundation-gate.sh
+cd ~/code/agentic-spine && ./surfaces/verify/foundation-gate.sh
 ```
 **Criteria:** All checks pass (no failures or warnings)
 
 ### B) Confirm Imports Are Non-Executable
 ```bash
-cd ~/Code/agentic-spine
+cd ~/code/agentic-spine
 find _imports docs -path "*/_imported/*" -type f -name "*.sh" -print
 ```
 **Criteria:** Should be empty OR explicitly understood as reference-only docs/scripts
 
 ### C) Coupling Scan for Imported Payload
 ```bash
-cd ~/Code/agentic-spine
+cd ~/code/agentic-spine
 rg -n "(~/agent|\\$HOME/agent|ronny-ops|\\$HOME/ronny-ops)" docs/governance/_imported _imports agents/contracts/_imported || true
 ```
 **Criteria:** Zero runtime dependencies (documentation mentions OK)
 
 ### D) Authority Boundary Check
 ```bash
-cd ~/Code/agentic-spine
+cd ~/code/agentic-spine
 ls -la docs/governance/_imported/
 ls -la _imports/
 ```

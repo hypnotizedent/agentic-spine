@@ -9,7 +9,7 @@
 set -eo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo "<<NO_FALLBACK>>")}"
-MANIFEST_FILE="$REPO_ROOT/infrastructure/GOVERNANCE_MANIFEST.yaml"
+MANIFEST_FILE="$REPO_ROOT/docs/governance/SSOT_REGISTRY.yaml"
 
 # SHA256 helper
 if command -v sha256sum >/dev/null 2>&1; then
@@ -48,8 +48,12 @@ check_secrets_cache() {
 
 count_governance_docs() {
   if [[ -f "$MANIFEST_FILE" ]]; then
-    # Count lines that start with "  - " (YAML array items)
-    grep -c '^  - ' "$MANIFEST_FILE" 2>/dev/null || echo "0"
+    if command -v yq >/dev/null 2>&1; then
+      yq -r '.ssots | length' "$MANIFEST_FILE" 2>/dev/null || echo "0"
+    else
+      # Fallback: count ids in registry if yq is unavailable.
+      grep -c '^  - id:' "$MANIFEST_FILE" 2>/dev/null || echo "0"
+    fi
   else
     echo "0"
   fi

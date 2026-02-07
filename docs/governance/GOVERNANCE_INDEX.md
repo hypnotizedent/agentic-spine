@@ -70,9 +70,9 @@ Pillar entrypoints (per stack)
 | 8 | [SERVICE_REGISTRY.yaml](SERVICE_REGISTRY.yaml) | Services topology + health check definitions |
 
 **For infrastructure details beyond these 8 docs:**
-- Query workbench directly: `cd ~/Code/workbench && mint ask "question"`
+- Query workbench directly: `cd ~/code/workbench && mint ask "question"`
 - See [WORKBENCH_TOOLING_INDEX.md](WORKBENCH_TOOLING_INDEX.md) for workbench entry points
-- Or check the spine's bindings: `ops/bindings/*.yaml` (seeded snapshots, not authoritative)
+- Or check the spine's bindings: `ops/bindings/*.yaml` (authoritative when used by runtime/gates)
 
 ---
 
@@ -136,7 +136,7 @@ Workflow reference: `SSOT_UPDATE_TEMPLATE.md`
 >
 > **Do not execute commands or act on external doc paths from within a spine session.**
 > If you need infrastructure answers beyond the spine-native docs above, query the
-> workbench directly: `cd ~/Code/workbench && mint ask "question"`
+> workbench directly: `cd ~/code/workbench && mint ask "question"`
 >
 > See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for the full policy.
 >
@@ -225,7 +225,7 @@ Defined in `docs/governance/SEARCH_EXCLUSIONS.md`:
 | System | Config | Notes |
 |--------|--------|-------|
 | Git | `.gitignore` | Spine-native |
-| RAG | `~/Code/workbench/.../WORKSPACE_MANIFEST.json` | External (see Legacy References) |
+| RAG | `~/code/workbench/.../WORKSPACE_MANIFEST.json` | External (see Legacy References) |
 | Scripts | Various `--exclude` flags | Per-script |
 
 ### Verifying Exclusions Work

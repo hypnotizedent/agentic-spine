@@ -68,7 +68,7 @@ Before marking any extraction complete, run the trace gate:
 
 1. **Path scan** — verify no conflicting path references:
    ```bash
-   rg -n "(ronny-ops|~/Code/workbench|workbench|infrastructure/docs)" docs ops surfaces bin \
+   rg -n "(ronny-ops|~/code/workbench|workbench|infrastructure/docs)" docs ops surfaces bin \
      -g'!receipts/**' -g'!mailroom/outbox/**'
    ```
    - **Allowed:** WORKBENCH_TOOLING_INDEX.md

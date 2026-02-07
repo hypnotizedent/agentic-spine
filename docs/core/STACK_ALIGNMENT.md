@@ -65,7 +65,7 @@ MinIO object storage. Used by Mint OS for artwork files, uploads, and backups.
 - `uploads` — customer uploads
 - `backups` — scheduled backup targets
 
-Bucket definitions are managed in the workbench monolith (`~/Code/workbench`), not in the spine.
+Bucket definitions are managed in the workbench monolith (`~/code/workbench`), not in the spine.
 The spine only monitors storage health via `docker.compose.status`.
 
 ---
@@ -94,7 +94,7 @@ the `stack_id` in STACK_REGISTRY.yaml is the durable key.
 >
 > → **[WORKBENCH_TOOLING_INDEX.md](../governance/WORKBENCH_TOOLING_INDEX.md)**
 >
-> Or query directly: `cd ~/Code/workbench && mint ask "question"`
+> Or query directly: `cd ~/code/workbench && mint ask "question"`
 
 ---
 

@@ -32,10 +32,10 @@ Every agent run must produce a compliant result block.
 ```yaml
 STATUS: ok
 ARTIFACTS:
-  - docs/AGENT_OUTPUT_CONTRACT.md
+  - docs/core/AGENT_OUTPUT_CONTRACT.md
   - surfaces/verify/contracts-gate.sh
 OPEN_LOOPS: []
-NEXT: Run ops verify to confirm contracts gate passes
+NEXT: Run ./bin/ops cap run spine.verify to confirm contracts gate passes
 ```
 
 ## Validation

@@ -33,7 +33,7 @@ For spine-native scripts, see [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) and the
 
 | Script | Purpose | Status |
 |--------|---------|--------|
-| `~/Code/workbench/scripts/mint` | RAG CLI (ask, health, index) | external (allowed) |
+| `~/code/workbench/scripts/mint` | RAG CLI (ask, health, index) | external (allowed) |
 
 ### ❌ DO NOT put scripts in:
 - Root of any repo
@@ -51,7 +51,7 @@ For spine-native scripts, see [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) and the
 
 | Script | Location | Purpose |
 |--------|----------|---------|
-| `mint` | `~/Code/workbench/scripts/mint` | RAG CLI (ask, health, index) |
+| `mint` | `~/code/workbench/scripts/mint` | RAG CLI (ask, health, index) |
 | `infisical-agent.sh` | Canonical: `ops/tools/infisical-agent.sh` | Secrets management with caching |
 
 ### Infisical Agent Commands (Updated 2026-01-22):
@@ -162,10 +162,10 @@ screen -X -S <name> quit      # Kill session
 Run this to find potential duplicates:
 ```bash
 # Find duplicate script names
-find ~/Code/workbench -type f -name "*.sh" | xargs -n1 basename | sort | uniq -d
+find ~/code/workbench -type f -name "*.sh" | xargs -n1 basename | sort | uniq -d
 
 # Find scripts with same purpose (grep for similar functions)
-grep -l "function_name" ~/Code/workbench/**/*.sh
+grep -l "function_name" ~/code/workbench/**/*.sh
 ```
 
 ---

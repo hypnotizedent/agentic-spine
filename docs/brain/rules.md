@@ -1,7 +1,7 @@
 # The Rules
 
-> **Status:** authoritative
-> **Last verified:** 2026-02-04
+> **Status:** reference
+> **Last verified:** 2026-02-07
 
 ```
 1. NO OPEN LOOPS = NO WORK  → ./bin/ops loops list --open

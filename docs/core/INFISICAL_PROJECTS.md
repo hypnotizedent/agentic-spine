@@ -38,7 +38,7 @@
 
 ## Project Catalog (SSOT)
 
-> **Source Attribution:** Seeded from `~/Code/workbench/infra/data/secrets_inventory.json`.
+> **Source Attribution:** Seeded from `~/code/workbench/infra/data/secrets_inventory.json`.
 > The workbench inventory is the external SSOT for secret key counts and project lifecycle.
 > This table is a snapshot for spine context.
 

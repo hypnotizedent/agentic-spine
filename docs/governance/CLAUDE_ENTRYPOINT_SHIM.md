@@ -16,7 +16,7 @@ scope: claude-entrypoint-governance
 
 1. Point agents to `AGENTS.md` and `docs/governance/SESSION_PROTOCOL.md` for all policy
 2. Contain **no standalone governance headings** (Authority Order, Immutable Invariants, Operating Loop, Safety Defaults, What You Must Not Do)
-3. Use only **lowercase canonical paths** (`/Users/ronnyworks/code/`, not `/Users/ronnyworks/Code/`)
+3. Use only **lowercase canonical paths** (`/Users/ronnyworks/code/`, not `/Users/ronnyworks/code/`)
 
 ## Governed Claude Files
 

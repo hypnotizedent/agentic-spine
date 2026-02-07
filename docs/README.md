@@ -5,7 +5,7 @@
 > doc in two hops, never leave `/Code`.
 >
 > **Status:** authoritative
-> **Last verified:** 2026-02-06
+> **Last verified:** 2026-02-07
 
 ---
 
@@ -18,7 +18,7 @@ The invariants. If a drift gate fails, one of these was violated.
 | [AGENT_CONTRACT.md](core/AGENT_CONTRACT.md) | Allowable agent behavior — the rules every agent follows |
 | [AGENT_OUTPUT_CONTRACT.md](core/AGENT_OUTPUT_CONTRACT.md) | Required output block structure |
 | [RECEIPTS_CONTRACT.md](core/RECEIPTS_CONTRACT.md) | Receipt format, proof rules, ledger entries |
-| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D40) |
+| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D47) |
 | [SPINE.md](core/SPINE.md) | Spine architecture and design principles |
 | [SPINE_SESSION_HEADER.md](core/SPINE_SESSION_HEADER.md) | Session header format for agent context |
 | [SPINE_STATE.md](core/SPINE_STATE.md) | Canonical spine state — what lives here, no legacy deps |
@@ -60,6 +60,7 @@ The authority chain. When in doubt, these are the source of truth.
 | [DOMAIN_ROUTING_REGISTRY.yaml](governance/DOMAIN_ROUTING_REGISTRY.yaml) | Domain routing rules |
 | [AGENT_BOUNDARIES.md](governance/AGENT_BOUNDARIES.md) | Agent boundary constraints |
 | [AGENTS_GOVERNANCE.md](governance/AGENTS_GOVERNANCE.md) | Agent lifecycle and verification contract |
+| [CLAUDE_ENTRYPOINT_SHIM.md](governance/CLAUDE_ENTRYPOINT_SHIM.md) | Claude home instruction shim contract |
 | [AGENTS_LOCATION.md](governance/AGENTS_LOCATION.md) | Where agent scripts live |
 | [AUDIT_VERIFICATION.md](governance/AUDIT_VERIFICATION.md) | Legacy import verification audit |
 | [CANONICAL.md](governance/CANONICAL.md) | Canonical doc definitions |
@@ -104,7 +105,7 @@ Gap scans, runtime audits, and triage reports.
 
 | Doc | What It Covers |
 |-----|---------------|
-| [VERIFY_SURFACE_INDEX.md](governance/VERIFY_SURFACE_INDEX.md) | Catalog of all 46 scripts in `surfaces/verify/` |
+| [VERIFY_SURFACE_INDEX.md](governance/VERIFY_SURFACE_INDEX.md) | Catalog of all 53 scripts in `surfaces/verify/` |
 
 ---
 
@@ -168,7 +169,7 @@ After editing any doc in this tree:
 # Lint: folder placement, metadata headers, README registration, legacy isolation
 ./bin/ops cap run docs.lint
 
-# Verify drift gates still pass (D1-D40)
+# Verify drift gates still pass (D1-D47)
 ./bin/ops cap run spine.verify
 
 # Verify workbench infrastructure docs intact (120 files, 19 dirs)

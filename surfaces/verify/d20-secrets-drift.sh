@@ -20,16 +20,29 @@ set -euo pipefail
 
 fail() { echo "D20 FAIL: $*" >&2; exit 1; }
 
-# Scope: only secrets surface + bindings
+# Scope: read-only secrets surface + bindings.
+# Guarded migration/cleanup tools are governed by D43 and excluded here.
 FILES=(
   ops/plugins/secrets/bin/secrets-*
   ops/bindings/secrets*.yaml
+)
+EXCLUDED_FILES=(
+  ops/plugins/secrets/bin/secrets-p1-root-cleanup
 )
 
 # Expand globs safely
 expanded=()
 for f in "${FILES[@]}"; do
-  while IFS= read -r path; do expanded+=("$path"); done < <(ls -1 $f 2>/dev/null || true)
+  while IFS= read -r path; do
+    skip=0
+    for excluded in "${EXCLUDED_FILES[@]}"; do
+      if [[ "$path" == "$excluded" ]]; then
+        skip=1
+        break
+      fi
+    done
+    (( skip == 0 )) && expanded+=("$path")
+  done < <(ls -1 $f 2>/dev/null || true)
 done
 
 ((${#expanded[@]})) || fail "no secrets surface files found to check"

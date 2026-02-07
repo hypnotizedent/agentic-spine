@@ -33,7 +33,7 @@ scope: session-entry
    - When you need policy or structure, follow the entry chain in `docs/governance/GOVERNANCE_INDEX.md`; trust the highest-priority SSOT in `docs/governance/SSOT_REGISTRY.yaml`.
 4. **Operate through the spine**
    - Every command that mutates must be run through `./bin/ops cap run <capability>` or `./bin/ops run ...` so receipts land in `receipts/sessions/`.
-   - Never shell into `~/Code/workbench` or `~/ronny-ops` at runtime; the spine is self-contained.
+   - Never shell into `~/code/workbench` or `~/ronny-ops` at runtime; the spine is self-contained.
 
 ## After the session
 
