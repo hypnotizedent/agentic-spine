@@ -48,7 +48,7 @@ Proposed split:
 
 ## Next Actions
 
-1. **Recover media-stack** — console access via Proxmox or wait for restart cycle
+1. **Recover media-stack** — console access via `pve` (shop Proxmox, `100.96.211.33`) or wait for restart cycle
 2. **Apply quick-wins** — stop Tdarr + Huntarr, confirm stability
 3. **Add ssh.targets.yaml binding** — `media-stack` missing from governed SSH targets
 4. **Create arch loop** — scope the database migration + boot ordering work
