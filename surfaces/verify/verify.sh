@@ -21,7 +21,6 @@ scripts=(
   "updates_verify.sh"
   "stack-health.sh"
   "health-check.sh"
-  "verify.sh"
 )
 
 echo "SPINE_ROOT=$SPINE_ROOT"

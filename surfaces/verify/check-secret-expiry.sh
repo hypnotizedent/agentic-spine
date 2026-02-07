@@ -5,6 +5,14 @@
 
 set -eo pipefail
 
+# Load canonical credential file first so rotated values are picked up even when
+# the current shell has stale exported vars.
+CREDENTIALS_FILE="${HOME}/.config/infisical/credentials"
+if [[ -f "$CREDENTIALS_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$CREDENTIALS_FILE"
+fi
+
 INFISICAL_API_URL="${INFISICAL_API_URL:-https://secrets.ronny.works}"
 INFISICAL_CLIENT_ID="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-40b44e76-db5a-4309-afa2-43bd93dddfc1}"
 INFISICAL_CLIENT_SECRET="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}"
@@ -58,14 +66,14 @@ MONITORED_SECRETS=(
 
 log_info() { echo -e "${CYAN}→${NC} $1"; }
 log_warn() { echo -e "${YELLOW}⚠${NC} $1"; }
-log_error() { echo -e "${RED}✗${NC} $1"; }
+log_error() { echo -e "${RED}✗${NC} $1" >&2; }
 log_success() { echo -e "${GREEN}✓${NC} $1"; }
 
 # Authenticate and get access token
 infisical_auth() {
   if [[ -z "$INFISICAL_CLIENT_SECRET" ]]; then
     log_error "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET not set"
-    exit 1
+    return 1
   fi
 
   local response http_code body
@@ -78,7 +86,7 @@ infisical_auth() {
 
   if [[ "$http_code" != "200" ]]; then
     log_error "Auth failed: HTTP $http_code"
-    exit 1
+    return 1
   fi
 
   local token
@@ -86,7 +94,7 @@ infisical_auth() {
 
   if [[ -z "$token" ]]; then
     log_error "Auth failed: no access token in response"
-    exit 1
+    return 1
   fi
 
   echo "$token"
@@ -152,7 +160,9 @@ is_monitored() {
 # Main check function
 check_all_secrets() {
   local token
-  token=$(infisical_auth)
+  if ! token="$(infisical_auth)"; then
+    return 1
+  fi
 
   local warnings=()
   local criticals=()
@@ -289,7 +299,9 @@ EOF
 # Generate JSON report
 generate_json_report() {
   local token
-  token=$(infisical_auth)
+  if ! token="$(infisical_auth)"; then
+    return 1
+  fi
 
   echo "{"
   echo "  \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\","

@@ -1,170 +1,105 @@
-#!/bin/bash
-# =============================================================================
-# Stack Health Check - Audit all stacks for health and credential alignment
-# Created: January 6, 2026 (Issue #188)
-# =============================================================================
+#!/usr/bin/env bash
+# Spine-native stack health check.
+# Uses governed bindings and service registry (no hardcoded pre-relocation hosts).
 
-set -eo pipefail
+set -euo pipefail
 
-# Colors
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SERVICE_REGISTRY="$SPINE_ROOT/docs/governance/SERVICE_REGISTRY.yaml"
+SERVICES_HEALTH="$SPINE_ROOT/ops/plugins/services/bin/services-health-status"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fail_count=0
 
-echo -e "${CYAN}=== Stack Health Check ===${NC}"
-echo -e "Date: $(date)"
-echo ""
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "FAIL: missing dependency: $1" >&2
+    exit 2
+  }
+}
 
-# Track issues
-ISSUES_FOUND=0
+need yq
+need curl
 
-# =============================================================================
-# MINT OS STACK
-# =============================================================================
-echo -e "${YELLOW}[1/6] Mint OS Stack${NC}"
+[[ -f "$SERVICE_REGISTRY" ]] || {
+  echo "FAIL: missing service registry: $SERVICE_REGISTRY" >&2
+  exit 2
+}
+[[ -x "$SERVICES_HEALTH" ]] || {
+  echo "FAIL: missing services health tool: $SERVICES_HEALTH" >&2
+  exit 2
+}
 
-# Check containers
-MINT_CONTAINERS=$(ssh docker-host "docker ps --filter 'name=mint-os' --format '{{.Names}}: {{.Status}}'" 2>/dev/null || echo "ERROR")
-if [[ "$MINT_CONTAINERS" == "ERROR" ]]; then
-    echo -e "${RED}  ✗ Cannot connect to docker-host${NC}"
-    ((ISSUES_FOUND++))
+echo -e "${CYAN}=== Stack Health Check (Spine) ===${NC}"
+echo "Date: $(date)"
+echo
+
+echo -e "${YELLOW}[1/3] Baseline service health binding${NC}"
+if "$SERVICES_HEALTH"; then
+  echo -e "${GREEN}  ✓ services.health binding checks passed${NC}"
 else
-    # Check critical containers
-    if echo "$MINT_CONTAINERS" | grep -q "mint-os-postgres.*healthy"; then
-        echo -e "${GREEN}  ✓ Postgres: healthy${NC}"
-    else
-        echo -e "${RED}  ✗ Postgres: not healthy${NC}"
-        ((ISSUES_FOUND++))
-    fi
-    
-    if echo "$MINT_CONTAINERS" | grep -q "mint-os-dashboard-api"; then
-        # Check API health endpoint
-        API_HEALTH=$(ssh docker-host "curl -s http://localhost:3335/api/health" 2>/dev/null || echo "{}")
-        if echo "$API_HEALTH" | grep -q '"status":"healthy"'; then
-            ORDERS=$(echo "$API_HEALTH" | grep -o '"orders":[0-9]*' | cut -d':' -f2 || echo "?")
-            echo -e "${GREEN}  ✓ API: healthy ($ORDERS orders)${NC}"
-        else
-            echo -e "${RED}  ✗ API: not responding correctly${NC}"
-            ((ISSUES_FOUND++))
-        fi
-    else
-        echo -e "${RED}  ✗ API container not found${NC}"
-        ((ISSUES_FOUND++))
-    fi
-    
-    if echo "$MINT_CONTAINERS" | grep -q "mint-os-redis.*healthy"; then
-        echo -e "${GREEN}  ✓ Redis: healthy${NC}"
-    else
-        echo -e "${YELLOW}  ⚠ Redis: status unknown${NC}"
-    fi
+  echo -e "${RED}  ✗ services.health binding checks failed${NC}"
+  fail_count=$((fail_count + 1))
 fi
+echo
 
-# Check credential alignment
-echo -e "  ${CYAN}Credential check:${NC}"
-VAULT_DB_HOST=$(ssh docker-host "grep '^VAULT_DB_HOST=' ~/stacks/mint-os/.env 2>/dev/null | cut -d'=' -f2" || echo "")
-VAULT_DB_USER=$(ssh docker-host "grep '^VAULT_DB_USER=' ~/stacks/mint-os/.env 2>/dev/null | cut -d'=' -f2" || echo "")
+check_registry_service() {
+  local service="$1"
+  local host port health ip url code
 
-if [[ "$VAULT_DB_HOST" == "mint-os-postgres" ]]; then
-    echo -e "${GREEN}    ✓ VAULT_DB_HOST correct${NC}"
-else
-    echo -e "${RED}    ✗ VAULT_DB_HOST: $VAULT_DB_HOST (expected: mint-os-postgres)${NC}"
-    ((ISSUES_FOUND++))
-fi
+  host="$(yq e ".services.\"$service\".host // \"\"" "$SERVICE_REGISTRY")"
+  port="$(yq e ".services.\"$service\".port // \"\"" "$SERVICE_REGISTRY")"
+  health="$(yq e ".services.\"$service\".health // \"\"" "$SERVICE_REGISTRY")"
 
-if [[ "$VAULT_DB_USER" == "mint_os_admin" ]]; then
-    echo -e "${GREEN}    ✓ VAULT_DB_USER correct${NC}"
-else
-    echo -e "${RED}    ✗ VAULT_DB_USER: $VAULT_DB_USER (expected: mint_os_admin)${NC}"
-    ((ISSUES_FOUND++))
-fi
+  if [[ -z "$host" || "$host" == "null" || -z "$port" || "$port" == "null" || -z "$health" || "$health" == "null" ]]; then
+    echo -e "${RED}  ✗ $service: incomplete registry entry (host/port/health required)${NC}"
+    fail_count=$((fail_count + 1))
+    return
+  fi
 
-echo ""
+  ip="$(yq e ".hosts.\"$host\".tailscale_ip // \"\"" "$SERVICE_REGISTRY")"
+  if [[ -z "$ip" || "$ip" == "null" ]]; then
+    echo -e "${RED}  ✗ $service: host '$host' has no tailscale_ip in registry${NC}"
+    fail_count=$((fail_count + 1))
+    return
+  fi
 
-# =============================================================================
-# MCPJUNGLE
-# =============================================================================
-echo -e "${YELLOW}[2/6] MCPJungle${NC}"
-MCP_STATUS=$(ssh docker-host "docker ps --filter 'name=mcpjungle' --format '{{.Status}}'" 2>/dev/null || echo "ERROR")
-if [[ "$MCP_STATUS" == *"healthy"* ]] || [[ "$MCP_STATUS" == *"Up"* ]]; then
-    echo -e "${GREEN}  ✓ MCPJungle: running${NC}"
-else
-    echo -e "${YELLOW}  ⚠ MCPJungle: $MCP_STATUS${NC}"
-fi
-echo ""
+  url="http://${ip}:${port}${health}"
+  code="$(curl -fsS -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$url" 2>/dev/null || echo "000")"
+  if [[ "$code" == "200" ]]; then
+    echo -e "${GREEN}  ✓ $service: HTTP 200 (${url})${NC}"
+  else
+    echo -e "${RED}  ✗ $service: HTTP ${code} (${url})${NC}"
+    fail_count=$((fail_count + 1))
+  fi
+}
 
-# =============================================================================
-# FINANCE STACK
-# =============================================================================
-echo -e "${YELLOW}[3/6] Finance Stack${NC}"
-FIREFLY_STATUS=$(ssh docker-host "docker ps --filter 'name=firefly' --format '{{.Names}}: {{.Status}}'" 2>/dev/null || echo "")
-if [[ -n "$FIREFLY_STATUS" ]]; then
-    echo -e "${GREEN}  ✓ Firefly III: running${NC}"
-else
-    echo -e "${YELLOW}  ⚠ Firefly III: not found${NC}"
-fi
+echo -e "${YELLOW}[2/3] Relocated core services (infra-core)${NC}"
+check_registry_service "infisical"
+check_registry_service "vaultwarden"
+echo
 
-GHOSTFOLIO_STATUS=$(ssh docker-host "docker ps --filter 'name=ghostfolio' --format '{{.Status}}'" 2>/dev/null || echo "")
-if [[ -n "$GHOSTFOLIO_STATUS" ]]; then
-    echo -e "${GREEN}  ✓ Ghostfolio: running${NC}"
-else
-    echo -e "${YELLOW}  ⚠ Ghostfolio: not found${NC}"
-fi
-echo ""
+echo -e "${YELLOW}[3/3] Registry sanity${NC}"
+for s in mint-os-api infisical vaultwarden; do
+  if [[ "$(yq e ".services.\"$s\".host // \"missing\"" "$SERVICE_REGISTRY")" == "missing" ]]; then
+    echo -e "${RED}  ✗ missing service in registry: $s${NC}"
+    fail_count=$((fail_count + 1))
+  else
+    echo -e "${GREEN}  ✓ registry contains: $s${NC}"
+  fi
+done
+echo
 
-# =============================================================================
-# INFISICAL
-# =============================================================================
-echo -e "${YELLOW}[4/6] Infisical${NC}"
-INFISICAL_STATUS=$(ssh docker-host "docker ps --filter 'name=infisical' --format '{{.Names}}'" 2>/dev/null | wc -l || echo "0")
-if [[ "$INFISICAL_STATUS" -ge 1 ]]; then
-    echo -e "${GREEN}  ✓ Infisical: $INFISICAL_STATUS containers running${NC}"
-else
-    echo -e "${RED}  ✗ Infisical: not running${NC}"
-    ((ISSUES_FOUND++))
-fi
-echo ""
-
-# =============================================================================
-# PAPERLESS
-# =============================================================================
-echo -e "${YELLOW}[5/6] Paperless${NC}"
-PAPERLESS_STATUS=$(ssh docker-host "docker ps --filter 'name=paperless' --format '{{.Status}}'" 2>/dev/null || echo "")
-if [[ -n "$PAPERLESS_STATUS" ]]; then
-    echo -e "${GREEN}  ✓ Paperless: running${NC}"
-else
-    echo -e "${YELLOW}  ⚠ Paperless: not found${NC}"
-fi
-echo ""
-
-# =============================================================================
-# IMMICH (on immich-1 VM)
-# =============================================================================
-echo -e "${YELLOW}[6/6] Immich (R730XD)${NC}"
-IMMICH_STATUS=$(ssh immich-1 "docker ps --filter 'name=immich' --format '{{.Names}}: {{.Status}}'" 2>/dev/null || echo "ERROR")
-if [[ "$IMMICH_STATUS" == "ERROR" ]]; then
-    echo -e "${YELLOW}  ⚠ Cannot connect to immich-1${NC}"
-else
-    IMMICH_COUNT=$(echo "$IMMICH_STATUS" | wc -l)
-    if [[ "$IMMICH_COUNT" -ge 3 ]]; then
-        echo -e "${GREEN}  ✓ Immich: $IMMICH_COUNT containers running${NC}"
-    else
-        echo -e "${YELLOW}  ⚠ Immich: only $IMMICH_COUNT containers${NC}"
-    fi
-fi
-echo ""
-
-# =============================================================================
-# SUMMARY
-# =============================================================================
 echo -e "${CYAN}=== Summary ===${NC}"
-if [[ "$ISSUES_FOUND" -eq 0 ]]; then
-    echo -e "${GREEN}All checks passed! No issues found.${NC}"
-else
-    echo -e "${RED}Found $ISSUES_FOUND issue(s) requiring attention.${NC}"
-    exit 1
+if (( fail_count == 0 )); then
+  echo -e "${GREEN}All stack checks passed.${NC}"
+  exit 0
 fi
+
+echo -e "${RED}Found ${fail_count} stack health issue(s).${NC}"
+exit 1

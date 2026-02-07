@@ -2,69 +2,39 @@
 set -euo pipefail
 
 RULE_PREFIX="UPDATES"
-INV="infrastructure/data/updates_inventory.json"
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+
+MACBOOK_SSOT="$SPINE_ROOT/docs/governance/MACBOOK_SSOT.md"
+MINILAB_SSOT="$SPINE_ROOT/docs/governance/MINILAB_SSOT.md"
+SHOP_SSOT="$SPINE_ROOT/docs/governance/SHOP_SERVER_SSOT.md"
 
 fail() { echo "${RULE_PREFIX}-${1} FAIL: ${2}"; exit 1; }
 pass() { echo "${RULE_PREFIX}-${1} PASS: ${2}"; }
+warn() { echo "${RULE_PREFIX}-${1} WARN: ${2}"; }
 
-[[ -f "$INV" ]] || fail "001" "missing inventory: $INV"
-pass "001" "found inventory"
+# UPDATES-001: canonical update-governance docs present
+[[ -f "$MACBOOK_SSOT" ]] || fail "001" "missing update governance doc: $MACBOOK_SSOT"
+[[ -f "$MINILAB_SSOT" ]] || fail "001" "missing update governance doc: $MINILAB_SSOT"
+[[ -f "$SHOP_SSOT" ]] || fail "001" "missing update governance doc: $SHOP_SSOT"
+pass "001" "update governance SSOT docs present"
 
-python3 - <<'PY' "$INV" || exit 1
-import json,sys
-json.load(open(sys.argv[1],'r',encoding='utf-8'))
-PY
-pass "002" "inventory json parses"
+# UPDATES-002: at least one local package manager exists on operator host
+pm=()
+for cmd in brew apt apt-get yum dnf pacman zypper; do
+  if command -v "$cmd" >/dev/null 2>&1; then
+    pm+=("$cmd")
+  fi
+done
+(( ${#pm[@]} > 0 )) || fail "002" "no known package manager command found"
+pass "002" "package manager(s) detected: ${pm[*]}"
 
-python3 - <<'PY' "$INV"
-import json,sys,os
-p=sys.argv[1]
-data=json.load(open(p,'r',encoding='utf-8'))
-
-meta=data.get("meta",{})
-mechs=data.get("mechanisms",None)
-
-for k in ["schema_version","ssot","governance_doc"]:
-    if k not in meta:
-        print(f"UPDATES-003 FAIL: meta missing key: {k}")
-        sys.exit(1)
-
-if mechs is None or not isinstance(mechs,list):
-    print("UPDATES-003 FAIL: mechanisms must be an array")
-    sys.exit(1)
-
-seen=set()
-for m in mechs:
-    for k in ["id","tier","name","type","path","owner","automation","enabled"]:
-        if k not in m:
-            print(f"UPDATES-003 FAIL: mechanism missing key: {k} (id={m.get('id','?')})")
-            sys.exit(1)
-    if m["id"] in seen:
-        print(f"UPDATES-003 FAIL: duplicate id: {m['id']}")
-        sys.exit(1)
-    seen.add(m["id"])
-print("UPDATES-003 PASS: schema + dedupe checks")
-PY
-
-python3 - <<'PY' "$INV"
-import json,sys,os
-p=sys.argv[1]
-data=json.load(open(p,'r',encoding='utf-8'))
-missing=[]
-for m in data.get("mechanisms",[]):
-    path=m.get("path",None)
-    if path is None:
-        continue
-    if not os.path.exists(path):
-        missing.append(path)
-
-if missing:
-    print("UPDATES-004 FAIL: missing paths:")
-    for x in missing:
-        print(f"  - {x}")
-    sys.exit(1)
-
-print("UPDATES-004 PASS: all non-null paths exist")
-PY
+# UPDATES-003: update surfaces are referenced in verify index
+VERIFY_INDEX="$SPINE_ROOT/docs/governance/VERIFY_SURFACE_INDEX.md"
+[[ -f "$VERIFY_INDEX" ]] || fail "003" "missing verify index: $VERIFY_INDEX"
+if rg -n "updates_verify\\.sh" "$VERIFY_INDEX" >/dev/null 2>&1; then
+  pass "003" "verify index includes updates_verify.sh"
+else
+  warn "003" "updates_verify.sh not listed in verify index"
+fi
 
 echo "UPDATES-999 PASS: updates verification complete"

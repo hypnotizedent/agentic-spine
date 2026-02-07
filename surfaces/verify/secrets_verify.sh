@@ -1,14 +1,15 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Secrets Inventory Verification Script
 # Governance: docs/governance/SECRETS_POLICY.md
-# Issue: #628
-# Purpose: Validate secrets inventory structure and check for committed secrets (read-only)
+# Purpose: Validate canonical secrets inventory binding and scan tracked files
+# for obvious secret leakage patterns (read-only).
 
 set -euo pipefail
 
-INVENTORY_PATH="${INVENTORY_PATH:-infrastructure/data/secrets_inventory.json}"
+INVENTORY_PATH="${INVENTORY_PATH:-ops/bindings/secrets.inventory.yaml}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+INVENTORY_FILE="$REPO_ROOT/$INVENTORY_PATH"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -24,26 +25,28 @@ echo "Inventory: $INVENTORY_PATH"
 echo "Repo root: $REPO_ROOT"
 echo ""
 
-# Check inventory exists
-if [[ ! -f "$REPO_ROOT/$INVENTORY_PATH" ]]; then
+command -v yq >/dev/null 2>&1 || {
+    echo -e "${RED}FAIL:${NC} missing dependency: yq"
+    exit 2
+}
+
+echo "--- Schema Validation ---"
+
+if [[ ! -f "$INVENTORY_FILE" ]]; then
     echo -e "${RED}FAIL:${NC} Inventory file not found: $INVENTORY_PATH"
     exit 2
 fi
 
-# Validate JSON structure
-echo "--- Schema Validation ---"
-
-if ! jq empty "$REPO_ROOT/$INVENTORY_PATH" 2>/dev/null; then
-    echo -e "${RED}FAIL:${NC} Invalid JSON syntax"
+if ! yq e '.' "$INVENTORY_FILE" >/dev/null 2>&1; then
+    echo -e "${RED}FAIL:${NC} Invalid YAML syntax"
     exit 2
 fi
-echo -e "${GREEN}PASS:${NC} Valid JSON"
+echo -e "${GREEN}PASS:${NC} Valid YAML"
 PASS=$((PASS + 1))
 
-# Check required top-level keys
-REQUIRED_KEYS=("meta" "summary" "infisical_projects")
+REQUIRED_KEYS=("version" "source" "infisical" "projects")
 for key in "${REQUIRED_KEYS[@]}"; do
-    if jq -e ".$key" "$REPO_ROOT/$INVENTORY_PATH" >/dev/null 2>&1; then
+    if [[ "$(yq e ".$key // \"missing\"" "$INVENTORY_FILE")" != "missing" ]]; then
         echo -e "${GREEN}PASS:${NC} Required key exists: $key"
         PASS=$((PASS + 1))
     else
@@ -52,64 +55,58 @@ for key in "${REQUIRED_KEYS[@]}"; do
     fi
 done
 
-# Check meta.schema_version
-SCHEMA_VERSION=$(jq -r '.meta.schema_version // "missing"' "$REPO_ROOT/$INVENTORY_PATH")
-if [[ "$SCHEMA_VERSION" == "missing" ]]; then
-    echo -e "${RED}FAIL:${NC} Missing meta.schema_version"
-    FAIL=$((FAIL + 1))
-else
-    echo -e "${GREEN}PASS:${NC} Schema version: $SCHEMA_VERSION"
+PROJECT_COUNT="$(yq e '.projects | length' "$INVENTORY_FILE" 2>/dev/null || echo "0")"
+if [[ "$PROJECT_COUNT" =~ ^[0-9]+$ ]] && (( PROJECT_COUNT > 0 )); then
+    echo -e "${GREEN}PASS:${NC} Projects catalogued: $PROJECT_COUNT"
     PASS=$((PASS + 1))
+else
+    echo -e "${RED}FAIL:${NC} projects[] is empty or invalid"
+    FAIL=$((FAIL + 1))
 fi
 
-# Count projects
-PROJECT_COUNT=$(jq '.infisical_projects | length' "$REPO_ROOT/$INVENTORY_PATH")
-echo -e "${GREEN}INFO:${NC} Infisical projects catalogued: $PROJECT_COUNT"
-
-# Validate each project has required fields
 echo ""
 echo "--- Project Validation ---"
-
-jq -r '.infisical_projects[].name' "$REPO_ROOT/$INVENTORY_PATH" 2>/dev/null | while read -r project; do
-    if [[ -z "$project" || "$project" == "null" ]]; then
-        echo -e "${YELLOW}SKIP:${NC} Project with missing name"
+while IFS= read -r project; do
+    [[ -n "$project" && "$project" != "null" ]] || {
+        echo -e "${YELLOW}SKIP:${NC} project with missing name"
+        SKIP=$((SKIP + 1))
         continue
-    fi
+    }
 
-    # Check project has id
-    HAS_ID=$(jq -r --arg name "$project" '.infisical_projects[] | select(.name == $name) | .id // "missing"' "$REPO_ROOT/$INVENTORY_PATH")
-    if [[ "$HAS_ID" == "missing" || "$HAS_ID" == "null" ]]; then
+    project_id="$(yq e ".projects[] | select(.name == \"$project\") | .id // \"missing\"" "$INVENTORY_FILE")"
+    if [[ "$project_id" == "missing" || "$project_id" == "null" || -z "$project_id" ]]; then
         echo -e "${YELLOW}WARN:${NC} $project - missing project ID"
     else
         echo -e "${GREEN}PASS:${NC} $project - has ID"
     fi
-done
+done < <(yq e '.projects[].name' "$INVENTORY_FILE" 2>/dev/null || true)
 
-# Secret scanning (DO NOT print matches)
 echo ""
 echo "--- Committed Secrets Scan ---"
 
 SECRET_PATTERNS=(
     "INFISICAL_CLIENT_SECRET"
+    "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET"
     "STRIPE_SECRET"
     "JWT_SECRET"
     "DATABASE_URL.*password"
     "API_KEY.*="
-    "Bearer [A-Za-z0-9_-]+"
+    "Bearer [A-Za-z0-9_-]{20,}"
 )
 
 SECRETS_FOUND=0
 cd "$REPO_ROOT"
 
 for pattern in "${SECRET_PATTERNS[@]}"; do
-    # Search staged and committed files, excluding inventory files
-    MATCHES=$(git grep -l -E "$pattern" -- '*.env' '*.json' '*.yaml' '*.yml' 2>/dev/null | grep -v "_inventory.json" | grep -v ".example" | head -5 || true)
-
-    if [[ -n "$MATCHES" ]]; then
+    matches="$(git grep -l -E "$pattern" -- '*.env' '*.json' '*.yaml' '*.yml' '*.sh' 2>/dev/null \
+        | grep -v "secrets.inventory.yaml" \
+        | grep -v ".example" \
+        | head -5 || true)"
+    if [[ -n "$matches" ]]; then
         echo -e "${YELLOW}WARN:${NC} Pattern '$pattern' found in files (review manually):"
-        echo "$MATCHES" | while read -r file; do
-            echo "       - $file"
-        done
+        while IFS= read -r file; do
+            [[ -n "$file" ]] && echo "       - $file"
+        done <<< "$matches"
         SECRETS_FOUND=$((SECRETS_FOUND + 1))
     fi
 done
@@ -121,7 +118,6 @@ else
     echo -e "${YELLOW}WARN:${NC} $SECRETS_FOUND pattern(s) need manual review"
 fi
 
-# Summary
 echo ""
 echo "=== Summary ==="
 echo -e "PASS: ${GREEN}$PASS${NC}"
@@ -132,7 +128,7 @@ echo ""
 if [[ $FAIL -gt 0 ]]; then
     echo -e "${RED}VERIFICATION FAILED${NC}"
     exit 1
-else
-    echo -e "${GREEN}VERIFICATION PASSED${NC}"
-    exit 0
 fi
+
+echo -e "${GREEN}VERIFICATION PASSED${NC}"
+exit 0
