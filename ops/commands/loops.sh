@@ -52,7 +52,7 @@ Examples:
   ops loops summary
 
 Environment:
-  LOOPS_LEDGER_FAILURE_WINDOW_HOURS  Failed-run reconciliation window (default: 6)
+  LOOPS_LEDGER_FAILURE_WINDOW_HOURS  Failed-run reconciliation window (default: 0, disabled)
 EOF
 }
 
@@ -195,7 +195,7 @@ ledger_file = Path(sys.argv[2])
 receipts_dir = Path(sys.argv[3])
 outbox_dir = Path(sys.argv[4])
 
-window_hours = int(os.environ.get("LOOPS_LEDGER_FAILURE_WINDOW_HOURS", "6"))
+window_hours = int(os.environ.get("LOOPS_LEDGER_FAILURE_WINDOW_HOURS", "0"))
 now_utc = datetime.now(timezone.utc)
 cutoff = now_utc - timedelta(hours=window_hours) if window_hours > 0 else None
 

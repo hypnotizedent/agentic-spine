@@ -34,6 +34,8 @@ if ! command -v yq >/dev/null 2>&1; then
 fi
 
 TARGET_FILTER=""
+TARGET_FILTER_FOUND=0
+pending=0
 
 # Argument parsing
 while [[ $# -gt 0 ]]; do
@@ -43,6 +45,14 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     --id)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "STOP (2): --id requires a target id"
+        exit 2
+      fi
+      if [[ -n "$TARGET_FILTER" ]]; then
+        echo "STOP (2): too many target selectors (use one target id)"
+        exit 2
+      fi
       TARGET_FILTER="${2:-}"
       shift 2
       ;;
@@ -61,11 +71,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ "$TARGET_FILTER" == "--list" ]]; then
-  yq -r '.ssh.targets[].id' "$BINDING_FILE"
-  exit 0
-fi
 
 # Read defaults
 DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$BINDING_FILE")"
@@ -102,10 +107,17 @@ for i in $(seq 0 $((COUNT-1))); do
   if [[ -n "$TARGET_FILTER" && "$id" != "$TARGET_FILTER" ]]; then
     continue
   fi
+  TARGET_FILTER_FOUND=1
 
-  if [[ "$id" == "null" || "$host" == "null" ]]; then
+  if [[ "$id" == "null" ]]; then
     echo "- id: (invalid) -> FAIL reason=binding_schema"
     fail=1
+    continue
+  fi
+
+  if [[ "$host" == "null" || -z "$host" ]]; then
+    echo "- id: $id host: null user: $user -> SKIP_PENDING reason=host_unassigned"
+    pending=$((pending + 1))
     continue
   fi
 
@@ -170,7 +182,7 @@ done
 
 echo
 
-if [[ "$checked" == "0" && -n "$TARGET_FILTER" ]]; then
+if [[ -n "$TARGET_FILTER" && "$TARGET_FILTER_FOUND" == "0" ]]; then
   echo "STOP (2): target '$TARGET_FILTER' not found in binding"
   exit 2
 fi
@@ -178,6 +190,11 @@ fi
 if [[ "$fail" == "1" ]]; then
   echo "status: FAIL (some targets unreachable)"
   exit 1
+fi
+
+if [[ "$pending" -gt 0 ]]; then
+  echo "status: OK (${pending} target(s) pending host assignment)"
+  exit 0
 fi
 
 echo "status: OK (all targets reachable)"
