@@ -301,6 +301,47 @@ gaps:
       scripts and SESSION_PROTOCOL.md, D46 + D47 drift gates added, agent.entrypoint.lock.yaml
       binding created, host-claude-entrypoint-lock plugin with status/enforce/execute modes.
 
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during PVE baseline SSH audit 2026-02-07
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-018
+    discovered_by: "OL_SHOP_BASELINE_FINISH"
+    discovered_at: "2026-02-07"
+    type: missing-entry
+    doc: "/etc/pve/jobs.cfg"
+    description: |
+      VM 204 (infra-core) is not included in the vzdump backup job on pve.
+      The job covers VMs 200-203 but was created before VM 204 existed.
+      infra-core runs cloudflared, pihole, infisical, vaultwarden, caddy,
+      and authentik — all critical services with no hypervisor-level backup.
+    severity: high
+    status: open
+    fixed_in: null
+    notes: |
+      Fix: add vmid 204 to vzdump job in /etc/pve/jobs.cfg. Requires a
+      mutating capability (none exists yet). Also consider adding VM 205
+      (observability) when provisioned.
+
+  - id: GAP-OP-019
+    discovered_by: "OL_SHOP_BASELINE_FINISH"
+    discovered_at: "2026-02-07"
+    type: missing-entry
+    doc: "pve crontab"
+    description: |
+      No ZFS scrub scheduled for the media pool on pve. Only the tank pool
+      has a weekly scrub (`0 3 * * 0 zpool scrub tank`). The media pool's
+      last scrub was CANCELED on 2026-01-11. Media pool is RAIDZ1 with 4x
+      Seagate ST8000AS0002 (SMR archive drives) — higher risk profile than
+      tank (RAIDZ2 enterprise SAS).
+    severity: medium
+    status: open
+    fixed_in: null
+    notes: |
+      Fix: add `0 4 * * 0 zpool scrub media` to pve crontab. Requires
+      mutating capability. SMR drives + RAIDZ1 + no scrub = elevated
+      silent corruption risk.
+
   - id: GAP-OP-016
     discovered_by: "OL_HOME_BASELINE_FINISH"
     discovered_at: "2026-02-07"
