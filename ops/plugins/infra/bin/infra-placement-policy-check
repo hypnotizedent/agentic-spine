@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-placement-policy-check
+# Read-only: enforce canonical placement policy for relocation targets/services.
+#
+# Modes:
+#   --check all       : validate relocation manifest against placement policy
+#   --check vm-target : validate one VM target/proxmox/vmid tuple
+#   --check service   : validate one service placement tuple
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
+POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
+SERVICE_REG="${INFRA_SERVICE_REGISTRY:-$SPINE_REPO/docs/governance/SERVICE_REGISTRY.yaml}"
+
+CHECK_MODE="all"
+TARGET=""
+VM_ID=""
+PROXMOX_HOST=""
+SERVICE=""
+TO_HOST=""
+ROLLBACK_HOST=""
+STATUS=""
+
+usage() {
+    cat <<'EOF'
+infra-placement-policy-check - Canonical placement guardrail
+
+Usage:
+  infra-placement-policy-check [--check all|vm-target|service]
+  infra-placement-policy-check --check vm-target --target <name> --vm-id <id> --proxmox-host <host>
+  infra-placement-policy-check --check service --service <name> --to-host <host> [--rollback-host <host>] [--status <state>]
+
+Options:
+  --manifest <path>          Override relocation manifest path
+  --policy <path>            Override placement policy path
+  --service-registry <path>  Override service registry path
+  --check <mode>             all (default), vm-target, service
+  --target <name>            VM target hostname (vm-target mode)
+  --vm-id <id>               VM ID (vm-target mode)
+  --proxmox-host <host>      Proxmox host id (vm-target mode)
+  --service <name>           Service id (service mode)
+  --to-host <host>           Service primary target host id (service mode)
+  --rollback-host <host>     Service rollback host id (service mode)
+  --status <state>           Optional status context (service mode)
+EOF
+}
+
+fail() { echo "PLACEMENT FAIL: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --manifest) MANIFEST="${2:-}"; shift 2 ;;
+        --policy) POLICY="${2:-}"; shift 2 ;;
+        --service-registry) SERVICE_REG="${2:-}"; shift 2 ;;
+        --check) CHECK_MODE="${2:-}"; shift 2 ;;
+        --target) TARGET="${2:-}"; shift 2 ;;
+        --vm-id) VM_ID="${2:-}"; shift 2 ;;
+        --proxmox-host) PROXMOX_HOST="${2:-}"; shift 2 ;;
+        --service) SERVICE="${2:-}"; shift 2 ;;
+        --to-host) TO_HOST="${2:-}"; shift 2 ;;
+        --rollback-host) ROLLBACK_HOST="${2:-}"; shift 2 ;;
+        --status) STATUS="${2:-}"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+need yq
+
+[[ -f "$POLICY" ]] || fail "placement policy not found: $POLICY"
+yq e '.' "$POLICY" >/dev/null 2>&1 || fail "placement policy YAML invalid: $POLICY"
+
+case "$CHECK_MODE" in
+    all|vm-target|service) ;;
+    *) fail "invalid --check: $CHECK_MODE (expected all|vm-target|service)" ;;
+esac
+
+FAIL_COUNT=0
+
+note_fail() {
+    echo "  FAIL: $*"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
+note_pass() {
+    echo "  PASS: $*"
+}
+
+policy_guard() {
+    local key="$1"
+    yq e ".guards.$key // false" "$POLICY"
+}
+
+host_site() {
+    local host="$1"
+    yq e ".hosts.\"$host\".site // \"\"" "$POLICY"
+}
+
+host_kind() {
+    local host="$1"
+    yq e ".hosts.\"$host\".kind // \"\"" "$POLICY"
+}
+
+check_vmid_range() {
+    local site="$1"
+    local vmid="$2"
+    local enforce
+    enforce="$(policy_guard enforce_vmid_ranges)"
+    [[ "$enforce" == "true" ]] || return 0
+
+    local min max
+    min="$(yq e ".sites.\"$site\".vmid_min // \"\"" "$POLICY")"
+    max="$(yq e ".sites.\"$site\".vmid_max // \"\"" "$POLICY")"
+
+    [[ "$min" =~ ^[0-9]+$ ]] || { note_fail "site '$site' missing numeric vmid_min"; return; }
+    [[ "$max" =~ ^[0-9]+$ ]] || { note_fail "site '$site' missing numeric vmid_max"; return; }
+    [[ "$vmid" =~ ^[0-9]+$ ]] || { note_fail "vm_id '$vmid' must be numeric"; return; }
+
+    if (( vmid < min || vmid > max )); then
+        note_fail "vm_id '$vmid' outside allowed range for site '$site' ($min-$max)"
+    else
+        note_pass "vm_id '$vmid' in allowed range for site '$site' ($min-$max)"
+    fi
+}
+
+check_vm_target() {
+    local target="$1"
+    local vmid="$2"
+    local proxmox="$3"
+
+    echo "VM target: $target (vm_id=$vmid, proxmox_host=$proxmox)"
+
+    local target_site proxmox_site proxmox_kind
+    target_site="$(host_site "$target")"
+    proxmox_site="$(host_site "$proxmox")"
+    proxmox_kind="$(host_kind "$proxmox")"
+
+    if [[ -z "$target_site" || "$target_site" == "null" ]]; then
+        note_fail "target '$target' missing hosts.<target>.site in placement policy"
+        return
+    fi
+    note_pass "target '$target' mapped to site '$target_site'"
+
+    if [[ -z "$proxmox_site" || "$proxmox_site" == "null" ]]; then
+        note_fail "proxmox host '$proxmox' missing hosts.<proxmox>.site in placement policy"
+        return
+    fi
+    note_pass "proxmox host '$proxmox' mapped to site '$proxmox_site'"
+
+    if [[ "$proxmox_kind" != "proxmox" ]]; then
+        note_fail "host '$proxmox' kind is '$proxmox_kind' (expected 'proxmox')"
+    else
+        note_pass "proxmox host '$proxmox' kind is proxmox"
+    fi
+
+    local proxmox_listed
+    proxmox_listed="$(yq e ".sites.\"$proxmox_site\".proxmox_hosts[]? | select(. == \"$proxmox\")" "$POLICY" 2>/dev/null || true)"
+    if [[ -z "$proxmox_listed" ]]; then
+        note_fail "proxmox host '$proxmox' not listed under sites.$proxmox_site.proxmox_hosts"
+    else
+        note_pass "proxmox host '$proxmox' listed under site '$proxmox_site'"
+    fi
+
+    local enforce_same_site
+    enforce_same_site="$(policy_guard enforce_vm_site_matches_hypervisor_site)"
+    if [[ "$enforce_same_site" == "true" ]]; then
+        if [[ "$target_site" != "$proxmox_site" ]]; then
+            note_fail "vm target '$target' site '$target_site' must match proxmox host site '$proxmox_site'"
+        else
+            note_pass "vm target site matches proxmox host site ('$target_site')"
+        fi
+    fi
+
+    local req_required
+    req_required="$(policy_guard require_explicit_vm_target_requirements)"
+    local req_type req_site req_proxmox
+    req_type="$(yq e ".vm_target_requirements.\"$target\" | type" "$POLICY" 2>/dev/null || echo "null")"
+    if [[ "$req_required" == "true" && "$req_type" != "!!map" ]]; then
+        note_fail "vm_target_requirements missing for '$target'"
+    fi
+    if [[ "$req_type" == "!!map" ]]; then
+        req_site="$(yq e ".vm_target_requirements.\"$target\".required_site // \"\"" "$POLICY")"
+        req_proxmox="$(yq e ".vm_target_requirements.\"$target\".required_proxmox_host // \"\"" "$POLICY")"
+        if [[ -n "$req_site" && "$req_site" != "null" ]]; then
+            if [[ "$target_site" != "$req_site" ]]; then
+                note_fail "vm target '$target' site '$target_site' != required_site '$req_site'"
+            else
+                note_pass "vm target '$target' satisfies required_site '$req_site'"
+            fi
+        fi
+        if [[ -n "$req_proxmox" && "$req_proxmox" != "null" ]]; then
+            if [[ "$proxmox" != "$req_proxmox" ]]; then
+                note_fail "vm target '$target' proxmox_host '$proxmox' != required_proxmox_host '$req_proxmox'"
+            else
+                note_pass "vm target '$target' satisfies required_proxmox_host '$req_proxmox'"
+            fi
+        fi
+    fi
+
+    check_vmid_range "$proxmox_site" "$vmid"
+}
+
+check_service_target() {
+    local service="$1"
+    local to_host="$2"
+    local rollback_host="$3"
+    local status="$4"
+
+    echo "Service: $service (status=${status:-unknown}, to_host=$to_host, rollback_to=${rollback_host:-none})"
+
+    local require_policy
+    require_policy="$(policy_guard require_service_policy_for_manifest_services)"
+
+    local policy_type to_site primary_site
+    policy_type="$(yq e ".service_placement.\"$service\" | type" "$POLICY" 2>/dev/null || echo "null")"
+    if [[ "$require_policy" == "true" && "$policy_type" != "!!map" ]]; then
+        note_fail "service '$service' missing policy entry at service_placement.$service"
+        return
+    fi
+
+    to_site="$(host_site "$to_host")"
+    if [[ -z "$to_site" || "$to_site" == "null" ]]; then
+        note_fail "to_host '$to_host' missing hosts mapping in placement policy"
+        return
+    fi
+    note_pass "to_host '$to_host' mapped to site '$to_site'"
+
+    if [[ "$policy_type" == "!!map" ]]; then
+        primary_site="$(yq e ".service_placement.\"$service\".primary_site // \"\"" "$POLICY")"
+        if [[ "$(policy_guard enforce_service_primary_site)" == "true" ]]; then
+            if [[ -z "$primary_site" || "$primary_site" == "null" ]]; then
+                note_fail "service '$service' missing primary_site in service_placement"
+            elif [[ "$to_site" != "$primary_site" ]]; then
+                note_fail "service '$service' to_host site '$to_site' != primary_site '$primary_site'"
+            else
+                note_pass "service '$service' targets primary site '$primary_site'"
+            fi
+        fi
+
+        if [[ -n "$rollback_host" && "$rollback_host" != "null" ]]; then
+            local rollback_site dr_match
+            rollback_site="$(host_site "$rollback_host")"
+            if [[ -z "$rollback_site" || "$rollback_site" == "null" ]]; then
+                note_fail "rollback host '$rollback_host' missing hosts mapping in placement policy"
+            else
+                note_pass "rollback host '$rollback_host' mapped to site '$rollback_site'"
+                dr_match="$(yq e ".service_placement.\"$service\".dr_sites[]? | select(. == \"$rollback_site\")" "$POLICY" 2>/dev/null || true)"
+                if [[ -z "$dr_match" ]]; then
+                    note_fail "service '$service' rollback site '$rollback_site' not allowed by service_placement.$service.dr_sites"
+                else
+                    note_pass "service '$service' rollback site '$rollback_site' is allowed"
+                fi
+            fi
+        elif [[ "$status" == "rolled-back" ]]; then
+            note_fail "service '$service' cannot transition to rolled-back without rollback_to host"
+        fi
+    fi
+}
+
+check_registry_host_for_service() {
+    local service="$1"
+    local status="$2"
+    local to_host="$3"
+    local rollback_host="$4"
+
+    [[ -f "$SERVICE_REG" ]] || { note_fail "service registry not found: $SERVICE_REG"; return; }
+
+    local reg_host expected
+    reg_host="$(yq e ".services.\"$service\".host // \"\"" "$SERVICE_REG" 2>/dev/null || echo "")"
+    if [[ -z "$reg_host" || "$reg_host" == "null" ]]; then
+        note_fail "service '$service' missing in service registry"
+        return
+    fi
+
+    expected="$to_host"
+    if [[ "$status" == "rolled-back" ]] && [[ -n "$rollback_host" && "$rollback_host" != "null" ]]; then
+        expected="$rollback_host"
+    fi
+
+    if [[ "$reg_host" != "$expected" ]]; then
+        note_fail "service '$service' registry host '$reg_host' != expected '$expected' for status '$status'"
+    else
+        note_pass "service '$service' registry host matches expected '$expected'"
+    fi
+}
+
+check_all() {
+    [[ -f "$MANIFEST" ]] || fail "relocation manifest not found: $MANIFEST"
+    yq e '.' "$MANIFEST" >/dev/null 2>&1 || fail "relocation manifest YAML invalid: $MANIFEST"
+
+    echo "=== INFRA PLACEMENT POLICY CHECK ==="
+    echo "Mode: all"
+    echo "Manifest: $MANIFEST"
+    echo "Policy:   $POLICY"
+    echo ""
+
+    local state
+    state="$(yq e '.active_relocation.state // "none"' "$MANIFEST")"
+    echo "Relocation state: $state"
+    echo ""
+
+    while IFS= read -r target; do
+        [[ -z "$target" || "$target" == "null" ]] && continue
+        vm_id="$(yq e ".vm_targets[] | select(.hostname == \"$target\") | .vm_id" "$MANIFEST")"
+        proxmox="$(yq e ".vm_targets[] | select(.hostname == \"$target\") | .proxmox_host // \"\"" "$MANIFEST")"
+        check_vm_target "$target" "$vm_id" "$proxmox"
+        echo ""
+    done < <(yq e '.vm_targets[].hostname' "$MANIFEST")
+
+    while IFS= read -r svc; do
+        [[ -z "$svc" || "$svc" == "null" ]] && continue
+        svc_status="$(yq e ".services[] | select(.service == \"$svc\") | .status // \"planned\"" "$MANIFEST")"
+        svc_to="$(yq e ".services[] | select(.service == \"$svc\") | .to_host // \"\"" "$MANIFEST")"
+        svc_rb="$(yq e ".services[] | select(.service == \"$svc\") | .rollback_to // \"\"" "$MANIFEST")"
+
+        check_service_target "$svc" "$svc_to" "$svc_rb" "$svc_status"
+        if [[ "$svc_status" != "planned" ]]; then
+            check_registry_host_for_service "$svc" "$svc_status" "$svc_to" "$svc_rb"
+        fi
+        echo ""
+    done < <(yq e '.services[].service' "$MANIFEST")
+}
+
+case "$CHECK_MODE" in
+    all)
+        check_all
+        ;;
+    vm-target)
+        [[ -n "$TARGET" ]] || fail "--target required for --check vm-target"
+        [[ -n "$VM_ID" ]] || fail "--vm-id required for --check vm-target"
+        [[ -n "$PROXMOX_HOST" ]] || fail "--proxmox-host required for --check vm-target"
+        echo "=== INFRA PLACEMENT POLICY CHECK ==="
+        echo "Mode: vm-target"
+        check_vm_target "$TARGET" "$VM_ID" "$PROXMOX_HOST"
+        ;;
+    service)
+        [[ -n "$SERVICE" ]] || fail "--service required for --check service"
+        [[ -n "$TO_HOST" ]] || fail "--to-host required for --check service"
+        echo "=== INFRA PLACEMENT POLICY CHECK ==="
+        echo "Mode: service"
+        check_service_target "$SERVICE" "$TO_HOST" "$ROLLBACK_HOST" "$STATUS"
+        ;;
+esac
+
+if (( FAIL_COUNT > 0 )); then
+    fail "placement policy violations detected (${FAIL_COUNT} issue(s))"
+fi
+
+echo "PLACEMENT PASS: policy is satisfied"

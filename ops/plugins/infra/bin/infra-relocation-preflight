@@ -6,16 +6,30 @@ set -euo pipefail
 #
 # Reports on all hosts and services in the relocation manifest without mutations.
 
-SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 MANIFEST="$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml"
 SSH_TARGETS="$SPINE_REPO/ops/bindings/ssh.targets.yaml"
 HEALTH_BINDING="$SPINE_REPO/ops/bindings/services.health.yaml"
+POLICY="$SPINE_REPO/ops/bindings/infra.placement.policy.yaml"
+PLACEMENT_CHECK="$SPINE_REPO/ops/plugins/infra/bin/infra-placement-policy-check"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
+note_fail() {
+    echo "  [FAIL] $*"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+note_warn() { echo "  [WARN] $*"; }
+note_ok() { echo "  [OK] $*"; }
 
 command -v yq >/dev/null 2>&1 || fail "yq required"
+command -v ssh >/dev/null 2>&1 || fail "ssh required"
 
 [[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+[[ -f "$POLICY" ]] || fail "placement policy binding not found: $POLICY"
+[[ -f "$SSH_TARGETS" ]] || fail "ssh targets binding not found: $SSH_TARGETS"
+[[ -x "$PLACEMENT_CHECK" ]] || fail "placement policy checker missing or not executable: $PLACEMENT_CHECK"
+
+FAIL_COUNT=0
 
 echo "=== INFRA RELOCATION PREFLIGHT ==="
 echo ""
@@ -41,23 +55,94 @@ yq e '.services[] | "  " + .service + ": " + (.from_host // "new") + " -> " + .t
 echo ""
 
 # Host reachability check (read-only, no known_hosts writes)
+# Required hosts are derived from active VM/service states.
+declare -A HOST_REQUIRED=()
+declare -A HOST_REASON=()
+register_host() {
+    local host="$1"
+    local required="$2"
+    local reason="$3"
+
+    [[ -z "$host" || "$host" == "null" || "$host" == "new" || "$host" == "none" ]] && return 0
+
+    if [[ -z "${HOST_REQUIRED[$host]+x}" ]]; then
+        HOST_REQUIRED["$host"]=0
+        HOST_REASON["$host"]="$reason"
+    else
+        HOST_REASON["$host"]+=",${reason}"
+    fi
+
+    if [[ "$required" -eq 1 ]]; then
+        HOST_REQUIRED["$host"]=1
+    fi
+}
+
+while IFS='|' read -r vm_host vm_status; do
+    [[ -z "$vm_host" || "$vm_host" == "null" ]] && continue
+    required=0
+    if [[ "$vm_status" != "planned" ]]; then
+        required=1
+    fi
+    register_host "$vm_host" "$required" "vm:${vm_status}"
+done < <(yq e '.vm_targets[] | (.hostname // "") + "|" + (.status // "planned")' "$MANIFEST" 2>/dev/null)
+
+while IFS='|' read -r service svc_status svc_from svc_to svc_rollback; do
+    [[ -z "$service" || "$service" == "null" ]] && continue
+    case "$svc_status" in
+        shadow|cutover)
+            register_host "$svc_from" 1 "service:${service}:from:${svc_status}"
+            register_host "$svc_to" 1 "service:${service}:to:${svc_status}"
+            register_host "$svc_rollback" 0 "service:${service}:rollback:${svc_status}"
+            ;;
+        migrated)
+            register_host "$svc_to" 1 "service:${service}:to:${svc_status}"
+            register_host "$svc_from" 0 "service:${service}:from:${svc_status}"
+            register_host "$svc_rollback" 0 "service:${service}:rollback:${svc_status}"
+            ;;
+        rolled-back)
+            register_host "$svc_rollback" 1 "service:${service}:rollback:${svc_status}"
+            register_host "$svc_from" 0 "service:${service}:from:${svc_status}"
+            register_host "$svc_to" 0 "service:${service}:to:${svc_status}"
+            ;;
+        *)
+            register_host "$svc_from" 0 "service:${service}:from:${svc_status}"
+            register_host "$svc_to" 0 "service:${service}:to:${svc_status}"
+            register_host "$svc_rollback" 0 "service:${service}:rollback:${svc_status}"
+            ;;
+    esac
+done < <(yq e '.services[] | (.service // "") + "|" + (.status // "planned") + "|" + (.from_host // "") + "|" + (.to_host // "") + "|" + (.rollback_to // "")' "$MANIFEST" 2>/dev/null)
+
 echo "Host Reachability (from ssh.targets.yaml):"
-if [[ -f "$SSH_TARGETS" ]]; then
-    while IFS= read -r host; do
-        [[ -z "$host" ]] && continue
-        ip=$(yq e ".ssh.targets.\"$host\".host" "$SSH_TARGETS" 2>/dev/null || echo "")
-        if [[ -n "$ip" ]] && [[ "$ip" != "null" ]]; then
-            if ping -c 1 -W 2 "$ip" >/dev/null 2>&1; then
-                echo "  $host ($ip): REACHABLE"
-            else
-                echo "  $host ($ip): UNREACHABLE"
-            fi
-        else
-            echo "  $host: NOT IN SSH TARGETS"
-        fi
-    done < <(yq e '.vm_targets[].hostname' "$MANIFEST" 2>/dev/null; yq e '.services[].from_host // empty' "$MANIFEST" 2>/dev/null | sort -u)
+mapfile -t HOSTS < <(printf '%s\n' "${!HOST_REQUIRED[@]}" | sed '/^$/d' | sort -u)
+if (( ${#HOSTS[@]} == 0 )); then
+    note_warn "no hosts discovered from manifest"
 else
-    echo "  (ssh.targets.yaml not found)"
+    ssh_opts=(-o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+    for host in "${HOSTS[@]}"; do
+        required="${HOST_REQUIRED[$host]}"
+        reasons="${HOST_REASON[$host]}"
+        ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$host\") | .host // \"\"" "$SSH_TARGETS" 2>/dev/null || echo "")"
+        ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$host\") | .user // .ssh.defaults.user // \"root\"" "$SSH_TARGETS" 2>/dev/null || echo "root")"
+
+        if [[ -z "$ssh_host" || "$ssh_host" == "null" ]]; then
+            if [[ "$required" -eq 1 ]]; then
+                note_fail "$host: missing ssh.targets entry (required by $reasons)"
+            else
+                note_warn "$host: missing ssh.targets entry (optional in current state; reasons=$reasons)"
+            fi
+            continue
+        fi
+
+        if ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" "echo __OK__" >/dev/null 2>&1; then
+            note_ok "$host ($ssh_user@$ssh_host): REACHABLE (required=$required, reasons=$reasons)"
+        else
+            if [[ "$required" -eq 1 ]]; then
+                note_fail "$host ($ssh_user@$ssh_host): UNREACHABLE (required by $reasons)"
+            else
+                note_warn "$host ($ssh_user@$ssh_host): UNREACHABLE (optional in current state; reasons=$reasons)"
+            fi
+        fi
+    done
 fi
 echo ""
 
@@ -66,11 +151,19 @@ echo "Required SSOT Updates:"
 while IFS= read -r file; do
     [[ -z "$file" ]] && continue
     if [[ -f "$SPINE_REPO/$file" ]]; then
-        echo "  [OK] $file"
+        note_ok "$file"
     else
-        echo "  [MISSING] $file"
+        note_fail "$file missing"
     fi
 done < <(yq e '.required_updates[]' "$MANIFEST" 2>/dev/null)
 echo ""
+
+echo "Canonical Placement Policy:"
+"$PLACEMENT_CHECK" --manifest "$MANIFEST" --policy "$POLICY" --check all
+echo ""
+
+if (( FAIL_COUNT > 0 )); then
+    fail "preflight failed (${FAIL_COUNT} issue(s)); resolve required host/SSOT problems"
+fi
 
 echo "Preflight complete."

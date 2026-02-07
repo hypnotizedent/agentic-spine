@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-hypervisor-hostname-set
+# Mutating: set canonical hostname on a Proxmox host by placement-policy ID.
+#
+# Default mode is dry-run. Pass --execute to mutate.
+#
+# Usage:
+#   infra-hypervisor-hostname-set --host-id proxmox-home --dry-run
+#   infra-hypervisor-hostname-set --host-id proxmox-home --hostname proxmox-home --execute
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
+SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
+
+HOST_ID=""
+TARGET_HOSTNAME=""
+EXECUTE=0
+
+usage() {
+    cat <<'EOF'
+infra-hypervisor-hostname-set - Set canonical hostname for proxmox host id
+
+Usage:
+  infra-hypervisor-hostname-set --host-id <policy host id> [--hostname <value>] [--dry-run|--execute]
+
+Options:
+  --host-id <id>        Host id from infra.placement.policy.yaml (required)
+  --hostname <name>     Hostname to set (default: host id)
+  --policy <path>       Override placement policy path
+  --ssh-binding <path>  Override ssh targets binding path
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --host-id) HOST_ID="${2:-}"; shift 2 ;;
+        --hostname) TARGET_HOSTNAME="${2:-}"; shift 2 ;;
+        --policy) POLICY="${2:-}"; shift 2 ;;
+        --ssh-binding) SSH_BINDING="${2:-}"; shift 2 ;;
+        --execute) EXECUTE=1; shift ;;
+        --dry-run) EXECUTE=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$HOST_ID" ]] || fail "--host-id is required"
+if [[ -z "$TARGET_HOSTNAME" ]]; then
+    TARGET_HOSTNAME="$HOST_ID"
+fi
+[[ "$TARGET_HOSTNAME" =~ ^[a-zA-Z0-9.-]+$ ]] || fail "--hostname contains invalid characters"
+
+need yq
+need ssh
+
+[[ -f "$POLICY" ]] || fail "placement policy not found: $POLICY"
+[[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
+
+yq e '.' "$POLICY" >/dev/null 2>&1 || fail "invalid YAML: $POLICY"
+yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SSH_BINDING"
+
+host_kind="$(yq e ".hosts.\"$HOST_ID\".kind // \"\"" "$POLICY")"
+[[ "$host_kind" == "proxmox" ]] || fail "host '$HOST_ID' is kind '$host_kind' (expected proxmox)"
+
+ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$HOST_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
+ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$HOST_ID\") | .user // .ssh.defaults.user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+[[ -n "$ssh_host" && "$ssh_host" != "null" ]] || fail "missing ssh target for host id '$HOST_ID'"
+
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+probe_remote() {
+    ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
+        'set -euo pipefail; hn="$(hostname 2>/dev/null || uname -n)"; fq="$(hostname -f 2>/dev/null || echo "$hn")"; mid="$(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null || echo unknown)"; echo "__HN__:$hn"; echo "__FQDN__:$fq"; echo "__MID__:$mid"'
+}
+
+echo "=== INFRA HYPERVISOR HOSTNAME SET ==="
+echo "Mode:            $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
+echo "Host ID:         $HOST_ID"
+echo "SSH Target:      ${ssh_user}@${ssh_host}"
+echo "Target hostname: $TARGET_HOSTNAME"
+echo
+
+set +e
+before_out="$(probe_remote 2>&1)"
+before_rc=$?
+set -e
+if [[ "$before_rc" -ne 0 ]]; then
+    fail "unable to reach remote host (${ssh_user}@${ssh_host}): $before_out"
+fi
+
+before_hn="$(echo "$before_out" | sed -n 's/^__HN__://p' | head -1)"
+before_fqdn="$(echo "$before_out" | sed -n 's/^__FQDN__://p' | head -1)"
+before_mid="$(echo "$before_out" | sed -n 's/^__MID__://p' | head -1)"
+
+echo "Current hostname: ${before_hn:-unknown}"
+echo "Current FQDN:     ${before_fqdn:-unknown}"
+echo "Machine ID:       ${before_mid:-unknown}"
+echo
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+    echo "Planned remote command:"
+    echo "  hostnamectl set-hostname $TARGET_HOSTNAME"
+    echo
+    echo "DRY-RUN: no changes applied."
+    exit 0
+fi
+
+remote_cmd="
+set -euo pipefail
+target=\"$TARGET_HOSTNAME\"
+if command -v hostnamectl >/dev/null 2>&1; then
+  hostnamectl set-hostname \"\$target\"
+else
+  echo \"\$target\" >/etc/hostname
+  hostname \"\$target\"
+fi
+hn=\"\$(hostname 2>/dev/null || uname -n)\"
+fq=\"\$(hostname -f 2>/dev/null || echo \"\$hn\")\"
+echo \"__HN__:\$hn\"
+echo \"__FQDN__:\$fq\"
+"
+
+set +e
+apply_out="$(ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" "$remote_cmd" 2>&1)"
+apply_rc=$?
+set -e
+if [[ "$apply_rc" -ne 0 ]]; then
+    fail "hostname update failed: $apply_out"
+fi
+
+after_hn="$(echo "$apply_out" | sed -n 's/^__HN__://p' | head -1)"
+after_fqdn="$(echo "$apply_out" | sed -n 's/^__FQDN__://p' | head -1)"
+
+echo "Updated hostname: ${after_hn:-unknown}"
+echo "Updated FQDN:     ${after_fqdn:-unknown}"
+
+[[ "$after_hn" == "$TARGET_HOSTNAME" ]] || fail "hostname verification failed (expected '$TARGET_HOSTNAME', got '$after_hn')"
+
+echo
+echo "Hostname update complete for '$HOST_ID'."

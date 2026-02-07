@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-vm-ready-status
+# Read-only readiness report for a relocation VM target.
+#
+# Checks include (profile-dependent):
+#   - VM running on Proxmox
+#   - ssh target binding present
+#   - ssh reachability
+#   - tailscale connected
+#   - qemu guest agent running
+#   - cron service running
+#   - backup inventory entry exists for vmid
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
+PROFILES="${INFRA_VM_PROFILES:-$SPINE_REPO/ops/bindings/infra.vm.profiles.yaml}"
+SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
+BACKUP_BINDING="${INFRA_BACKUP_BINDING:-$SPINE_REPO/ops/bindings/backup.inventory.yaml}"
+
+usage() {
+    cat <<'EOF'
+infra-vm-ready-status - Read-only readiness checks for relocation target
+
+Usage:
+  infra-vm-ready-status --target <host> [--profile <name>] [--vm-id <id>]
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+TARGET=""
+PROFILE="spine-ready-v1"
+VM_ID=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target) TARGET="${2:-}"; shift 2 ;;
+        --profile) PROFILE="${2:-}"; shift 2 ;;
+        --vm-id) VM_ID="${2:-}"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$TARGET" ]] || fail "--target is required"
+
+need yq
+need ssh
+
+[[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+[[ -f "$PROFILES" ]] || fail "profile binding not found: $PROFILES"
+[[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
+[[ -f "$BACKUP_BINDING" ]] || fail "backup binding not found: $BACKUP_BINDING"
+
+yq e '.' "$MANIFEST" >/dev/null 2>&1 || fail "manifest YAML invalid: $MANIFEST"
+yq e '.' "$PROFILES" >/dev/null 2>&1 || fail "profile YAML invalid: $PROFILES"
+yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "ssh binding YAML invalid: $SSH_BINDING"
+yq e '.' "$BACKUP_BINDING" >/dev/null 2>&1 || fail "backup binding YAML invalid: $BACKUP_BINDING"
+
+profile_exists="$(yq e ".profiles.\"$PROFILE\" | type" "$PROFILES" 2>/dev/null || echo "null")"
+[[ "$profile_exists" == "!!map" ]] || fail "profile '$PROFILE' not found in $PROFILES"
+
+target_exists="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .hostname" "$MANIFEST" 2>/dev/null || echo "null")"
+[[ "$target_exists" != "null" && -n "$target_exists" ]] || fail "target '$TARGET' not found in manifest vm_targets"
+
+manifest_vm_id="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .vm_id // \"\"" "$MANIFEST")"
+if [[ -n "$VM_ID" ]]; then
+    [[ "$VM_ID" =~ ^[0-9]+$ ]] || fail "--vm-id must be numeric"
+    if [[ -n "$manifest_vm_id" ]] && [[ "$manifest_vm_id" != "$VM_ID" ]]; then
+        fail "--vm-id ($VM_ID) does not match manifest vm_id ($manifest_vm_id)"
+    fi
+else
+    VM_ID="$manifest_vm_id"
+fi
+[[ -n "$VM_ID" ]] || fail "vm_id not set in manifest and --vm-id not provided"
+
+proxmox_host="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .proxmox_host // \"pve\"" "$MANIFEST")"
+proxmox_user="$(yq e '.defaults.proxmox_user // "root"' "$PROFILES")"
+
+ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$TARGET\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
+ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$TARGET\") | .user // .ssh.defaults.user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+
+require_running="$(yq e ".profiles.\"$PROFILE\".readiness.require_running // true" "$PROFILES")"
+require_ssh_target_binding="$(yq e ".profiles.\"$PROFILE\".readiness.require_ssh_target_binding // true" "$PROFILES")"
+require_ssh_reachability="$(yq e ".profiles.\"$PROFILE\".readiness.require_ssh_reachability // true" "$PROFILES")"
+require_tailscale="$(yq e ".profiles.\"$PROFILE\".readiness.require_tailscale_connected // true" "$PROFILES")"
+require_qemu="$(yq e ".profiles.\"$PROFILE\".readiness.require_qemu_agent_running // true" "$PROFILES")"
+require_cron="$(yq e ".profiles.\"$PROFILE\".readiness.require_cron_running // true" "$PROFILES")"
+require_backup="$(yq e ".profiles.\"$PROFILE\".readiness.require_backup_binding // true" "$PROFILES")"
+
+echo "infra.vm.ready.status"
+echo "target: $TARGET"
+echo "profile: $PROFILE"
+echo "vm_id: $VM_ID"
+echo "proxmox_host: $proxmox_host"
+echo
+printf "%-28s %-7s %s\n" "CHECK" "STATUS" "DETAIL"
+
+fail_count=0
+
+check_pass() {
+    printf "%-28s %-7s %s\n" "$1" "OK" "$2"
+}
+
+check_fail() {
+    printf "%-28s %-7s %s\n" "$1" "FAIL" "$2"
+    fail_count=$((fail_count + 1))
+}
+
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+if [[ "$require_running" == "true" ]]; then
+    set +e
+    vm_state="$(ssh "${ssh_opts[@]}" "${proxmox_user}@${proxmox_host}" "qm status $VM_ID 2>/dev/null | awk '{print \$2}'" 2>/dev/null)"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 && "$vm_state" == "running" ]]; then
+        check_pass "vm_running" "qm status=$vm_state"
+    else
+        check_fail "vm_running" "unable to confirm running vm on $proxmox_host"
+    fi
+fi
+
+if [[ "$require_ssh_target_binding" == "true" ]]; then
+    if [[ -n "$ssh_host" && "$ssh_host" != "null" ]]; then
+        check_pass "ssh_target_binding" "$TARGET -> $ssh_user@$ssh_host"
+    else
+        check_fail "ssh_target_binding" "$TARGET missing in ssh.targets.yaml"
+    fi
+fi
+
+if [[ "$require_ssh_reachability" == "true" ]]; then
+    if [[ -n "$ssh_host" && "$ssh_host" != "null" ]]; then
+        if ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" "echo READY" >/dev/null 2>&1; then
+            check_pass "ssh_reachability" "ssh command succeeded"
+        else
+            check_fail "ssh_reachability" "ssh command failed"
+        fi
+    else
+        check_fail "ssh_reachability" "skipped: no ssh target binding"
+    fi
+fi
+
+if [[ "$require_tailscale" == "true" ]]; then
+    if [[ -n "$ssh_host" && "$ssh_host" != "null" ]]; then
+        set +e
+        ts_ip="$(ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" "tailscale ip -4 2>/dev/null | head -n1" 2>/dev/null)"
+        rc=$?
+        set -e
+        if [[ "$rc" -eq 0 && -n "$ts_ip" ]]; then
+            check_pass "tailscale_connected" "tailscale_ip=$ts_ip"
+        else
+            check_fail "tailscale_connected" "tailscale not connected or binary missing"
+        fi
+    else
+        check_fail "tailscale_connected" "skipped: no ssh target binding"
+    fi
+fi
+
+if [[ "$require_qemu" == "true" ]]; then
+    if [[ -n "$ssh_host" && "$ssh_host" != "null" ]]; then
+        if ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" "systemctl is-active --quiet qemu-guest-agent" >/dev/null 2>&1; then
+            check_pass "qemu_agent_running" "service active"
+        else
+            check_fail "qemu_agent_running" "qemu-guest-agent service not active"
+        fi
+    else
+        check_fail "qemu_agent_running" "skipped: no ssh target binding"
+    fi
+fi
+
+if [[ "$require_cron" == "true" ]]; then
+    if [[ -n "$ssh_host" && "$ssh_host" != "null" ]]; then
+        if ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" "systemctl is-active --quiet cron || systemctl is-active --quiet crond" >/dev/null 2>&1; then
+            check_pass "cron_running" "cron/crond service active"
+        else
+            check_fail "cron_running" "cron/crond service not active"
+        fi
+    else
+        check_fail "cron_running" "skipped: no ssh target binding"
+    fi
+fi
+
+if [[ "$require_backup" == "true" ]]; then
+    backup_match="$(yq e ".targets[] | select(((.glob // \"\") | test(\"qemu-$VM_ID-\")) or ((.name // \"\") | test(\"vm-$VM_ID\"))) | .name" "$BACKUP_BINDING" 2>/dev/null | head -n1 || true)"
+    if [[ -n "$backup_match" && "$backup_match" != "null" ]]; then
+        check_pass "backup_binding" "matched target=$backup_match"
+    else
+        check_fail "backup_binding" "no backup target matching vm_id=$VM_ID"
+    fi
+fi
+
+echo
+if [[ "$fail_count" -eq 0 ]]; then
+    echo "status: OK (vm target is profile-ready)"
+    exit 0
+fi
+
+echo "status: FAIL ($fail_count readiness check(s) failed)"
+exit 1

@@ -1,8 +1,8 @@
 # CORE_LOCK v1.0
 
-**Locked:** 2026-02-01
+**Locked:** 2026-02-07
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v1.9
+**Gate Version:** drift-gate.sh v2.1
 
 ---
 
@@ -28,15 +28,15 @@ All work (terminal and daemon) flows through mailroom:
 
 ## Identity System
 
-**Single identity: run_key = queued filename stem**
+**Single identity: run_key**
 
-Format: `<session>__<slug>__R<id>`
-Example: `S20260201-173900__unified-test__R8888`
+Watcher format: `<session>__<slug>__R<id>`  
+Capability format: `CAP-<timestamp>__<capability>__R<id>`
 
 This key is used everywhere:
 - Outbox result: `<run_key>__RESULT.md`
 - Receipt folder: `receipts/sessions/R<run_key>/`
-- Ledger row: `run_id` column
+- Ledger row: `run_id` column (latest row per run_id is authoritative state)
 
 ## Entry Points
 
@@ -88,6 +88,9 @@ All must PASS for core to be healthy:
 | D34 | Loop ledger integrity lock (summary counts must match deduped reducer output) |
 | D35 | Infra relocation parity lock (cross-SSOT consistency for service moves during cutover/cleanup) |
 | D36 | Legacy exception hygiene lock (stale/near-expiry exception enforcement) |
+| D37 | Infra placement policy lock (canonical site/hypervisor/vmid/service target enforcement) |
+| D38 | Extraction hygiene lock (EXTRACTION_PROTOCOL enforcement) |
+| D39 | Infra hypervisor identity lock (active relocation states must pass identity invariants) |
 
 ## Rules
 

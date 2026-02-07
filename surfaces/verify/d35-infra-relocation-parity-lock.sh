@@ -6,19 +6,26 @@ set -euo pipefail
 #
 # Behavior by state:
 #   - planning/complete: PASS (parity check not required)
-#   - preflight/cutover/cleanup: validates required_updates files exist
-#     and SERVICE_REGISTRY.yaml host matches manifest for migrated services
+#   - preflight/cutover/cleanup: validates required_updates files exist and:
+#       * every non-planned service exists in SERVICE_REGISTRY.yaml
+#       * SERVICE_REGISTRY host matches manifest to_host
+#       * to_host exists in ssh.targets.yaml
 #
 # Fails on:
 #   - Missing files listed in required_updates (during active states)
-#   - Service host mismatch between manifest and registry (status=migrated/cutover)
+#   - Missing service entry for non-planned service in SERVICE_REGISTRY.yaml
+#   - Service host mismatch between manifest and SERVICE_REGISTRY.yaml
+#   - Missing to_host entry in ssh.targets.yaml for non-planned service
 #
-# Note: Full 6-surface parity (STACK_REGISTRY, DEVICE_IDENTITY, health, ssh,
-# backup) is advisory via infra.relocation.parity capability, not enforced
-# at gate level during planning phase.
+# Optional test overrides:
+#   D35_MANIFEST=/tmp/manifest.yaml
+#   D35_SERVICE_REGISTRY=/tmp/SERVICE_REGISTRY.yaml
+#   D35_SSH_TARGETS=/tmp/ssh.targets.yaml
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-MANIFEST="$ROOT/ops/bindings/infra.relocation.plan.yaml"
+MANIFEST="${D35_MANIFEST:-$ROOT/ops/bindings/infra.relocation.plan.yaml}"
+SERVICE_REG="${D35_SERVICE_REGISTRY:-$ROOT/docs/governance/SERVICE_REGISTRY.yaml}"
+SSH_BINDING="${D35_SSH_TARGETS:-$ROOT/ops/bindings/ssh.targets.yaml}"
 
 fail() { echo "D35 FAIL: $*" >&2; exit 1; }
 
@@ -51,7 +58,11 @@ FAIL_COUNT=0
 echo "Checking required SSOT files..."
 while IFS= read -r file; do
     [[ -z "$file" ]] && continue
-    if [[ ! -f "$ROOT/$file" ]]; then
+    local_path="$file"
+    if [[ "$file" != /* ]]; then
+        local_path="$ROOT/$file"
+    fi
+    if [[ ! -f "$local_path" ]]; then
         echo "  MISSING: $file"
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
@@ -59,9 +70,8 @@ done < <(yq e '.required_updates[]' "$MANIFEST" 2>/dev/null)
 
 # For active relocations (preflight, cutover, cleanup), verify parity
 if [[ "$STATE" == "preflight" ]] || [[ "$STATE" == "cutover" ]] || [[ "$STATE" == "cleanup" ]]; then
-    # Load registries
-    SERVICE_REG="$ROOT/docs/governance/SERVICE_REGISTRY.yaml"
-    HEALTH_BINDING="$ROOT/ops/bindings/services.health.yaml"
+    [[ -f "$SERVICE_REG" ]] || fail "service registry not found: $SERVICE_REG"
+    [[ -f "$SSH_BINDING" ]] || fail "ssh targets binding not found: $SSH_BINDING"
 
     echo "Checking service parity for state: $STATE..."
 
@@ -69,21 +79,38 @@ if [[ "$STATE" == "preflight" ]] || [[ "$STATE" == "cutover" ]] || [[ "$STATE" =
     while IFS= read -r service; do
         [[ -z "$service" ]] && continue
 
-        to_host=$(yq e ".services[] | select(.service == \"$service\") | .to_host" "$MANIFEST")
-        status=$(yq e ".services[] | select(.service == \"$service\") | .status" "$MANIFEST")
+        to_host="$(yq e ".services[] | select(.service == \"$service\") | .to_host" "$MANIFEST")"
+        status="$(yq e ".services[] | select(.service == \"$service\") | .status" "$MANIFEST")"
 
         # Skip planned services (not yet moved)
         [[ "$status" == "planned" ]] && continue
 
-        # For migrated services, verify registry has new host
-        if [[ "$status" == "migrated" ]] || [[ "$status" == "cutover" ]]; then
-            reg_host=$(yq e ".services.\"$service\".host" "$SERVICE_REG" 2>/dev/null || echo "not-found")
-            if [[ "$reg_host" != "$to_host" ]] && [[ "$reg_host" != "not-found" ]]; then
-                echo "  PARITY MISMATCH: $service - manifest says $to_host, registry says $reg_host"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            fi
+        if [[ -z "$to_host" ]] || [[ "$to_host" == "null" ]]; then
+            echo "  PARITY MISMATCH: $service - manifest to_host is empty for status=$status"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            continue
         fi
 
+        # Every non-planned service must exist in SERVICE_REGISTRY
+        reg_host="$(yq e ".services.\"$service\".host // \"null\"" "$SERVICE_REG" 2>/dev/null || echo "null")"
+        if [[ "$reg_host" == "null" ]] || [[ -z "$reg_host" ]]; then
+            echo "  PARITY MISMATCH: $service missing from SERVICE_REGISTRY.yaml"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            continue
+        fi
+
+        # Registry host must match manifest to_host
+        if [[ "$reg_host" != "$to_host" ]]; then
+            echo "  PARITY MISMATCH: $service - manifest says $to_host, registry says $reg_host"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
+
+        # Every non-planned service target host must be SSH-addressable
+        ssh_target="$(yq e ".ssh.targets[] | select(.id == \"$to_host\") | .id" "$SSH_BINDING" 2>/dev/null || echo "null")"
+        if [[ "$ssh_target" == "null" ]] || [[ -z "$ssh_target" ]]; then
+            echo "  PARITY MISMATCH: $service - to_host '$to_host' missing in ssh.targets.yaml"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
     done < <(yq e '.services[].service' "$MANIFEST" 2>/dev/null)
 fi
 

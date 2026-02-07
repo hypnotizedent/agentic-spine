@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-vm-provision
+# Mutating: Provision a VM on Proxmox from relocation target + profile.
+#
+# Default mode is dry-run. Pass --execute to mutate.
+#
+# Required inputs:
+#   --target <vm hostname in relocation manifest>
+#   --profile <profile in infra.vm.profiles.yaml>
+#   --vm-id <numeric vmid>
+#
+# Optional:
+#   --execute
+#   --dry-run
+#   --template-vmid <override template vmid>
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
+PROFILES="${INFRA_VM_PROFILES:-$SPINE_REPO/ops/bindings/infra.vm.profiles.yaml}"
+POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
+PLACEMENT_CHECK="$SPINE_REPO/ops/plugins/infra/bin/infra-placement-policy-check"
+
+usage() {
+    cat <<'EOF'
+infra-vm-provision - Provision Proxmox VM from relocation manifest/profile
+
+Usage:
+  infra-vm-provision --target <host> --profile <name> --vm-id <id> [--dry-run|--execute]
+
+Examples:
+  infra-vm-provision --target infra-core --profile spine-ready-v1 --vm-id 204 --dry-run
+  infra-vm-provision --target infra-core --profile spine-ready-v1 --vm-id 204 --execute
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+TARGET=""
+PROFILE=""
+VM_ID=""
+TEMPLATE_OVERRIDE=""
+EXECUTE=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target) TARGET="${2:-}"; shift 2 ;;
+        --profile) PROFILE="${2:-}"; shift 2 ;;
+        --vm-id) VM_ID="${2:-}"; shift 2 ;;
+        --template-vmid) TEMPLATE_OVERRIDE="${2:-}"; shift 2 ;;
+        --execute) EXECUTE=1; shift ;;
+        --dry-run) EXECUTE=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$TARGET" ]] || fail "--target is required"
+[[ -n "$PROFILE" ]] || fail "--profile is required"
+[[ -n "$VM_ID" ]] || fail "--vm-id is required"
+[[ "$VM_ID" =~ ^[0-9]+$ ]] || fail "--vm-id must be numeric"
+
+need yq
+need ssh
+
+[[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+[[ -f "$PROFILES" ]] || fail "profile binding not found: $PROFILES"
+[[ -f "$POLICY" ]] || fail "placement policy binding not found: $POLICY"
+[[ -x "$PLACEMENT_CHECK" ]] || fail "placement policy checker missing or not executable: $PLACEMENT_CHECK"
+
+yq e '.' "$MANIFEST" >/dev/null 2>&1 || fail "manifest YAML invalid: $MANIFEST"
+yq e '.' "$PROFILES" >/dev/null 2>&1 || fail "profile YAML invalid: $PROFILES"
+
+manifest_target="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .hostname" "$MANIFEST" 2>/dev/null || echo "null")"
+[[ "$manifest_target" != "null" && -n "$manifest_target" ]] || fail "target '$TARGET' not found in manifest vm_targets"
+
+manifest_vm_id="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .vm_id // \"\"" "$MANIFEST" 2>/dev/null || echo "")"
+if [[ -n "$manifest_vm_id" ]] && [[ "$manifest_vm_id" != "$VM_ID" ]]; then
+    fail "--vm-id ($VM_ID) does not match manifest vm_id ($manifest_vm_id) for target '$TARGET'"
+fi
+
+profile_exists="$(yq e ".profiles.\"$PROFILE\" | type" "$PROFILES" 2>/dev/null || echo "null")"
+[[ "$profile_exists" == "!!map" ]] || fail "profile '$PROFILE' not found in $PROFILES"
+
+proxmox_host="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .proxmox_host // .hostname" "$MANIFEST")"
+proxmox_user="$(yq e '.defaults.proxmox_user // "root"' "$PROFILES")"
+
+"$PLACEMENT_CHECK" --policy "$POLICY" --check vm-target \
+    --target "$TARGET" --vm-id "$VM_ID" --proxmox-host "$proxmox_host"
+
+template_vmid="$(yq e ".profiles.\"$PROFILE\".provisioning.template_vmid // \"\"" "$PROFILES")"
+if [[ -n "$TEMPLATE_OVERRIDE" ]]; then
+    template_vmid="$TEMPLATE_OVERRIDE"
+fi
+
+cpu_cores="$(yq e ".profiles.\"$PROFILE\".provisioning.cpu_cores // 2" "$PROFILES")"
+memory_mb="$(yq e ".profiles.\"$PROFILE\".provisioning.memory_mb // 4096" "$PROFILES")"
+disk_gb="$(yq e ".profiles.\"$PROFILE\".provisioning.disk_gb // 32" "$PROFILES")"
+bridge="$(yq e ".profiles.\"$PROFILE\".provisioning.bridge // .defaults.bridge // \"vmbr0\"" "$PROFILES")"
+storage="$(yq e ".profiles.\"$PROFILE\".provisioning.storage // .defaults.storage // \"local-lvm\"" "$PROFILES")"
+ci_user="$(yq e ".profiles.\"$PROFILE\".provisioning.ci_user // .defaults.ci_user // \"ubuntu\"" "$PROFILES")"
+ci_network_cidr="$(yq e ".profiles.\"$PROFILE\".provisioning.ci_network_cidr // .defaults.ci_network_cidr // \"dhcp\"" "$PROFILES")"
+nameserver="$(yq e ".profiles.\"$PROFILE\".provisioning.nameserver // .defaults.nameserver // \"\"" "$PROFILES")"
+search_domain="$(yq e ".profiles.\"$PROFILE\".provisioning.search_domain // .defaults.search_domain // \"\"" "$PROFILES")"
+qemu_agent="$(yq e ".profiles.\"$PROFILE\".provisioning.qemu_agent // true" "$PROFILES")"
+onboot="$(yq e ".profiles.\"$PROFILE\".provisioning.onboot // true" "$PROFILES")"
+
+[[ "$cpu_cores" =~ ^[0-9]+$ ]] || fail "profile cpu_cores must be numeric"
+[[ "$memory_mb" =~ ^[0-9]+$ ]] || fail "profile memory_mb must be numeric"
+[[ "$disk_gb" =~ ^[0-9]+$ ]] || fail "profile disk_gb must be numeric"
+
+template_missing=0
+if [[ -z "$template_vmid" || "$template_vmid" == "null" || "$template_vmid" == "__SET_ME__" ]]; then
+    template_missing=1
+fi
+if [[ "$template_missing" -eq 0 ]] && [[ ! "$template_vmid" =~ ^[0-9]+$ ]]; then
+    fail "template vmid must be numeric"
+fi
+if [[ "$EXECUTE" -eq 1 ]] && [[ "$template_missing" -eq 1 ]]; then
+    fail "profile '$PROFILE' provisioning.template_vmid is not set (or --template-vmid missing)"
+fi
+
+echo "=== INFRA VM PROVISION ==="
+echo "Mode:         $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
+echo "Target:       $TARGET"
+echo "Profile:      $PROFILE"
+echo "VM ID:        $VM_ID"
+echo "Proxmox Host: $proxmox_host"
+if [[ "$template_missing" -eq 1 ]]; then
+    echo "Template ID:  <unset>"
+else
+    echo "Template ID:  $template_vmid"
+fi
+echo "Resources:    cores=$cpu_cores memory_mb=$memory_mb disk_gb=$disk_gb bridge=$bridge storage=$storage"
+echo "Cloud-init:   user=$ci_user ip=$ci_network_cidr nameserver=${nameserver:-none} search_domain=${search_domain:-none}"
+echo
+
+echo "Planned Proxmox operations:"
+echo "  qm clone ${template_vmid:-<unset>} $VM_ID --name $TARGET --full --storage $storage"
+echo "  qm set $VM_ID --cores $cpu_cores --memory $memory_mb --net0 virtio,bridge=$bridge"
+echo "  qm set $VM_ID --agent $([[ "$qemu_agent" == "true" ]] && echo 1 || echo 0) --onboot $([[ "$onboot" == "true" ]] && echo 1 || echo 0)"
+echo "  qm resize $VM_ID scsi0 ${disk_gb}G (if scsi0 exists)"
+echo "  qm start $VM_ID"
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+    if [[ "$template_missing" -eq 1 ]]; then
+        echo
+        echo "NOTE: provisioning.template_vmid is unset; set it in $PROFILES (or pass --template-vmid) before --execute."
+    fi
+    echo
+    echo "DRY-RUN: no changes applied."
+    exit 0
+fi
+
+remote_cmd='
+set -euo pipefail
+TEMPLATE="$1"
+VMID="$2"
+VMNAME="$3"
+STORAGE="$4"
+BRIDGE="$5"
+CORES="$6"
+MEMORY="$7"
+DISK_GB="$8"
+CI_USER="$9"
+CI_NET="${10}"
+NAMESERVER="${11}"
+SEARCH_DOMAIN="${12}"
+QEMU_AGENT="${13}"
+ONBOOT="${14}"
+
+qm status "$TEMPLATE" >/dev/null 2>&1 || { echo "ERROR: template vmid $TEMPLATE not found"; exit 1; }
+if qm status "$VMID" >/dev/null 2>&1; then
+  echo "ERROR: vmid $VMID already exists"
+  exit 1
+fi
+
+qm clone "$TEMPLATE" "$VMID" --name "$VMNAME" --full --storage "$STORAGE"
+qm set "$VMID" --cores "$CORES" --memory "$MEMORY" --net0 "virtio,bridge=$BRIDGE"
+qm set "$VMID" --agent "$QEMU_AGENT" --onboot "$ONBOOT"
+
+if [[ -n "$CI_USER" && "$CI_USER" != "null" ]]; then
+  qm set "$VMID" --ciuser "$CI_USER"
+fi
+if [[ -n "$CI_NET" && "$CI_NET" != "null" ]]; then
+  qm set "$VMID" --ipconfig0 "ip=$CI_NET"
+fi
+if [[ -n "$NAMESERVER" && "$NAMESERVER" != "null" ]]; then
+  qm set "$VMID" --nameserver "$NAMESERVER"
+fi
+if [[ -n "$SEARCH_DOMAIN" && "$SEARCH_DOMAIN" != "null" ]]; then
+  qm set "$VMID" --searchdomain "$SEARCH_DOMAIN"
+fi
+if qm config "$VMID" | grep -q "^scsi0:"; then
+  qm resize "$VMID" scsi0 "${DISK_GB}G" || true
+fi
+
+qm start "$VMID"
+sleep 2
+qm status "$VMID"
+'
+
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+ssh "${ssh_opts[@]}" "${proxmox_user}@${proxmox_host}" \
+    "bash -lc $(printf "%q" "$remote_cmd") -- $(printf "%q" "$template_vmid") $(printf "%q" "$VM_ID") $(printf "%q" "$TARGET") $(printf "%q" "$storage") $(printf "%q" "$bridge") $(printf "%q" "$cpu_cores") $(printf "%q" "$memory_mb") $(printf "%q" "$disk_gb") $(printf "%q" "$ci_user") $(printf "%q" "$ci_network_cidr") $(printf "%q" "$nameserver") $(printf "%q" "$search_domain") $(printf "%q" "$([[ "$qemu_agent" == "true" ]] && echo 1 || echo 0)") $(printf "%q" "$([[ "$onboot" == "true" ]] && echo 1 || echo 0)")"
+
+echo
+echo "Provisioning complete: $TARGET (vmid=$VM_ID)"

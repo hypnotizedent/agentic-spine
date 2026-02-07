@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-relocation-service-transition
+# Mutating: controlled service status update within the relocation manifest.
+#
+# Default mode is dry-run. Pass --execute to mutate.
+#
+# Required inputs:
+#   --service <service name in manifest>
+#   --status <planned|shadow|cutover|migrated|rolled-back>
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
+POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
+PLACEMENT_CHECK="$SPINE_REPO/ops/plugins/infra/bin/infra-placement-policy-check"
+
+usage() {
+    cat <<'EOF'
+infra-relocation-service-transition - Controlled service status update
+
+Usage:
+  infra-relocation-service-transition \
+    --service <name> \
+    --status <planned|shadow|cutover|migrated|rolled-back> \
+    [--dry-run|--execute]
+
+Status flow:
+  planned -> shadow -> cutover -> migrated
+  (any)   -> rolled-back  (rollback allowed from any state)
+
+Examples:
+  infra-relocation-service-transition --service cloudflared --status shadow --dry-run
+  infra-relocation-service-transition --service cloudflared --status cutover --execute
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+SERVICE=""
+STATUS=""
+EXECUTE=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --service) SERVICE="${2:-}"; shift 2 ;;
+        --status) STATUS="${2:-}"; shift 2 ;;
+        --execute) EXECUTE=1; shift ;;
+        --dry-run) EXECUTE=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$SERVICE" ]] || fail "--service is required"
+[[ -n "$STATUS" ]] || fail "--status is required"
+
+case "$STATUS" in
+    planned|shadow|cutover|migrated|rolled-back) ;;
+    *) fail "invalid --status: $STATUS (expected: planned|shadow|cutover|migrated|rolled-back)" ;;
+esac
+
+need yq
+[[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+[[ -f "$POLICY" ]] || fail "placement policy binding not found: $POLICY"
+[[ -x "$PLACEMENT_CHECK" ]] || fail "placement policy checker missing or not executable: $PLACEMENT_CHECK"
+yq e '.' "$MANIFEST" >/dev/null 2>&1 || fail "manifest YAML invalid: $MANIFEST"
+
+# Validate service exists
+svc_exists="$(yq e ".services[] | select(.service == \"$SERVICE\") | .service" "$MANIFEST" 2>/dev/null || echo "")"
+[[ -n "$svc_exists" && "$svc_exists" != "null" ]] || fail "service '$SERVICE' not found in manifest"
+
+current_status="$(yq e ".services[] | select(.service == \"$SERVICE\") | .status // \"unknown\"" "$MANIFEST")"
+from_host="$(yq e ".services[] | select(.service == \"$SERVICE\") | .from_host // \"new\"" "$MANIFEST")"
+to_host="$(yq e ".services[] | select(.service == \"$SERVICE\") | .to_host" "$MANIFEST")"
+phase="$(yq e ".services[] | select(.service == \"$SERVICE\") | .phase" "$MANIFEST")"
+relocation_state="$(yq e '.active_relocation.state // "none"' "$MANIFEST")"
+approved_by="$(yq e '.active_relocation.approved_by // ""' "$MANIFEST")"
+now_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# Enforce valid status transitions
+transition_ok=0
+case "$current_status:$STATUS" in
+    planned:shadow|shadow:cutover|cutover:migrated) transition_ok=1 ;;
+    # Allow rollback from any active state
+    shadow:rolled-back|cutover:rolled-back|migrated:rolled-back) transition_ok=1 ;;
+    # Allow idempotent re-application
+    "$STATUS:$STATUS") transition_ok=1 ;;
+esac
+
+if (( transition_ok == 0 )); then
+    fail "invalid service status transition: $current_status -> $STATUS"
+fi
+
+# Enforce relocation-state alignment for service decisions.
+if [[ "$STATUS" == "shadow" ]]; then
+    case "$relocation_state" in
+        preflight|cutover|cleanup|complete) ;;
+        *) fail "relocation state '$relocation_state' must be preflight/cutover/cleanup/complete before transitioning service to 'shadow'" ;;
+    esac
+fi
+
+if [[ "$STATUS" == "cutover" || "$STATUS" == "migrated" || "$STATUS" == "rolled-back" ]]; then
+    case "$relocation_state" in
+        cutover|cleanup|complete) ;;
+        *) fail "relocation state '$relocation_state' must be cutover/cleanup/complete before transitioning service to '$STATUS'" ;;
+    esac
+    [[ -n "$approved_by" && "$approved_by" != "null" ]] || fail "active_relocation.approved_by is required before transitioning service to '$STATUS'"
+fi
+
+rollback_to="$(yq e ".services[] | select(.service == \"$SERVICE\") | .rollback_to // \"\"" "$MANIFEST")"
+if [[ "$STATUS" == "rolled-back" ]]; then
+    [[ -n "$rollback_to" && "$rollback_to" != "null" ]] || fail "service '$SERVICE' has no rollback_to host configured"
+fi
+
+"$PLACEMENT_CHECK" --policy "$POLICY" --check service \
+    --service "$SERVICE" --to-host "$to_host" --rollback-host "$rollback_to" --status "$STATUS"
+
+echo "=== INFRA RELOCATION SERVICE TRANSITION ==="
+echo "Mode:              $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
+echo "Manifest:          $MANIFEST"
+echo "Service:           $SERVICE"
+echo "Phase:             $phase"
+echo "From:              $from_host"
+echo "To:                $to_host"
+echo "Status:            $current_status -> $STATUS"
+echo "Relocation state:  $relocation_state"
+echo "approved_by:       ${approved_by:-none}"
+echo "updated_at:        $now_utc"
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+    echo
+    echo "DRY-RUN: no changes applied."
+    exit 0
+fi
+
+yq e -i "(.services[] | select(.service == \"$SERVICE\")).status = \"$STATUS\"" "$MANIFEST"
+yq e -i ".active_relocation.updated_at = \"$now_utc\"" "$MANIFEST"
+
+echo
+echo "Service transition complete: $SERVICE ($current_status -> $STATUS)"

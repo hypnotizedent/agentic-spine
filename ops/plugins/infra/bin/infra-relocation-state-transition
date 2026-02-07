@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-relocation-state-transition
+# Mutating: controlled relocation state transition + vm target status/IP update.
+#
+# Default mode is dry-run. Pass --execute to mutate.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
+POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
+PLACEMENT_CHECK="$SPINE_REPO/ops/plugins/infra/bin/infra-placement-policy-check"
+READY_CHECK="$SPINE_REPO/ops/plugins/infra/bin/infra-vm-ready-status"
+
+usage() {
+    cat <<'EOF'
+infra-relocation-state-transition - Controlled relocation manifest update
+
+Usage:
+  infra-relocation-state-transition \
+    --state <planning|preflight|cutover|cleanup|complete> \
+    --target <vm hostname> \
+    --status <planned|provisioned|ready|cutover|complete> \
+    [--tailscale-ip <100.x.x.x>] [--approved-by <identity>] [--dry-run|--execute]
+
+Examples:
+  infra-relocation-state-transition --state preflight --target infra-core --status provisioned --dry-run
+  infra-relocation-state-transition --state preflight --target infra-core --status provisioned --tailscale-ip 100.1.2.3 --execute
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+TARGET=""
+STATE=""
+STATUS=""
+TAILSCALE_IP=""
+APPROVED_BY_ARG=""
+EXECUTE=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target) TARGET="${2:-}"; shift 2 ;;
+        --state) STATE="${2:-}"; shift 2 ;;
+        --status) STATUS="${2:-}"; shift 2 ;;
+        --tailscale-ip) TAILSCALE_IP="${2:-}"; shift 2 ;;
+        --approved-by) APPROVED_BY_ARG="${2:-}"; shift 2 ;;
+        --execute) EXECUTE=1; shift ;;
+        --dry-run) EXECUTE=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$TARGET" ]] || fail "--target is required"
+[[ -n "$STATE" ]] || fail "--state is required"
+[[ -n "$STATUS" ]] || fail "--status is required"
+
+case "$STATE" in
+    planning|preflight|cutover|cleanup|complete) ;;
+    *) fail "invalid --state: $STATE" ;;
+esac
+
+case "$STATUS" in
+    planned|provisioned|ready|cutover|complete) ;;
+    *) fail "invalid --status: $STATUS (expected planned|provisioned|ready|cutover|complete)" ;;
+esac
+
+need yq
+[[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+[[ -f "$POLICY" ]] || fail "placement policy binding not found: $POLICY"
+[[ -x "$PLACEMENT_CHECK" ]] || fail "placement policy checker missing or not executable: $PLACEMENT_CHECK"
+yq e '.' "$MANIFEST" >/dev/null 2>&1 || fail "manifest YAML invalid: $MANIFEST"
+
+target_exists="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .hostname" "$MANIFEST" 2>/dev/null || echo "null")"
+[[ "$target_exists" != "null" && -n "$target_exists" ]] || fail "target '$TARGET' not found in vm_targets"
+
+if [[ -n "$TAILSCALE_IP" ]]; then
+    [[ "$TAILSCALE_IP" =~ ^100\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "--tailscale-ip must be a tailscale IPv4 (100.x.x.x)"
+fi
+
+current_state="$(yq e '.active_relocation.state // "none"' "$MANIFEST")"
+current_vm_status="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .status // \"unknown\"" "$MANIFEST")"
+current_vm_ip="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .tailscale_ip // \"\"" "$MANIFEST")"
+current_vm_id="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .vm_id // \"\"" "$MANIFEST")"
+current_proxmox_host="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .proxmox_host // \"\"" "$MANIFEST")"
+approved_by="$(yq e '.active_relocation.approved_by // ""' "$MANIFEST")"
+effective_approved_by="$approved_by"
+if [[ -n "$APPROVED_BY_ARG" ]]; then
+    effective_approved_by="$APPROVED_BY_ARG"
+fi
+now_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+effective_vm_ip="$current_vm_ip"
+if [[ -n "$TAILSCALE_IP" ]]; then
+    effective_vm_ip="$TAILSCALE_IP"
+fi
+
+transition_ok=0
+case "$current_state:$STATE" in
+    planning:planning|planning:preflight|preflight:preflight|preflight:cutover|cutover:cutover|cutover:cleanup|cleanup:cleanup|cleanup:complete|complete:complete)
+        transition_ok=1
+        ;;
+esac
+
+(( transition_ok == 1 )) || fail "invalid state transition: $current_state -> $STATE"
+[[ -n "$current_vm_id" && "$current_vm_id" != "null" ]] || fail "target '$TARGET' missing vm_id in manifest"
+[[ -n "$current_proxmox_host" && "$current_proxmox_host" != "null" ]] || fail "target '$TARGET' missing proxmox_host in manifest"
+
+if [[ "$STATE" == "preflight" ]]; then
+    case "$STATUS" in
+        provisioned|ready|cutover|complete) ;;
+        *) fail "state '$STATE' requires VM status provisioned|ready|cutover|complete (got '$STATUS')" ;;
+    esac
+fi
+
+if [[ "$STATE" == "cutover" ]]; then
+    case "$STATUS" in
+        ready|cutover|complete) ;;
+        *) fail "state '$STATE' requires VM status ready|cutover|complete (got '$STATUS')" ;;
+    esac
+    [[ -n "$effective_approved_by" && "$effective_approved_by" != "null" ]] || fail "active_relocation.approved_by is required before transitioning relocation state to cutover"
+fi
+
+if [[ "$STATE" == "cleanup" || "$STATE" == "complete" ]]; then
+    case "$STATUS" in
+        cutover|complete) ;;
+        *) fail "state '$STATE' requires VM status cutover|complete (got '$STATUS')" ;;
+    esac
+fi
+
+if [[ "$STATUS" == "ready" || "$STATUS" == "cutover" || "$STATUS" == "complete" ]]; then
+    [[ -n "$effective_vm_ip" && "$effective_vm_ip" != "null" ]] || fail "vm status '$STATUS' requires tailscale IP (set --tailscale-ip or manifest vm_target.tailscale_ip)"
+fi
+
+"$PLACEMENT_CHECK" --policy "$POLICY" --check vm-target \
+    --target "$TARGET" --vm-id "$current_vm_id" --proxmox-host "$current_proxmox_host"
+
+echo "=== INFRA RELOCATION STATE TRANSITION ==="
+echo "Mode:              $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
+echo "Manifest:          $MANIFEST"
+echo "Current state:     $current_state"
+echo "Requested state:   $STATE"
+echo "Target:            $TARGET"
+echo "VM status:         $current_vm_status -> $STATUS"
+echo "VM tailscale_ip:   ${current_vm_ip:-none} -> ${TAILSCALE_IP:-unchanged}"
+echo "approved_by:       ${approved_by:-none} -> ${effective_approved_by:-unchanged}"
+echo "updated_at:        $now_utc"
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+    echo
+    echo "DRY-RUN: no changes applied."
+    exit 0
+fi
+
+if [[ "$STATE" == "cutover" ]]; then
+    [[ -x "$READY_CHECK" ]] || fail "vm readiness checker missing or not executable: $READY_CHECK"
+    echo
+    echo "Readiness gate: infra-vm-ready-status --target $TARGET"
+    "$READY_CHECK" --target "$TARGET" || fail "vm readiness gate failed for '$TARGET'"
+fi
+
+yq e -i ".active_relocation.state = \"$STATE\"" "$MANIFEST"
+yq e -i ".active_relocation.updated_at = \"$now_utc\"" "$MANIFEST"
+yq e -i "(.vm_targets[] | select(.hostname == \"$TARGET\")).status = \"$STATUS\"" "$MANIFEST"
+if [[ -n "$TAILSCALE_IP" ]]; then
+    yq e -i "(.vm_targets[] | select(.hostname == \"$TARGET\")).tailscale_ip = \"$TAILSCALE_IP\"" "$MANIFEST"
+fi
+if [[ -n "$APPROVED_BY_ARG" ]]; then
+    yq e -i ".active_relocation.approved_by = \"$APPROVED_BY_ARG\"" "$MANIFEST"
+fi
+
+echo
+echo "Transition complete."

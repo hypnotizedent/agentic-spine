@@ -1,0 +1,156 @@
+# Operational Gaps - Runtime SSOT Discoveries
+#
+# These are NOT extraction gaps (see docs/core/AGENTIC_GAP_MAP.md)
+# These are issues agents discover DURING work that are out of scope to fix immediately
+#
+# Review periodically, create cleanup loops for open gaps
+#
+# Status: authoritative
+# Last verified: 2026-02-07
+
+version: 1
+updated: "2026-02-07"
+
+gaps:
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during LOOP-INFRA-VM-RESTRUCTURE-20260206
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-001
+    discovered_by: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
+    discovered_at: "2026-02-07"
+    type: stale-ssot
+    doc: "ops/bindings/docker.compose.targets.yaml"
+    description: |
+      Still lists cloudflared, pihole, infisical (secrets) under docker-host
+      after Phase 1 migration to infra-core. Services are now on VM 204.
+    severity: low
+    status: fixed
+    fixed_in: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
+    notes: "Moved cloudflared/pihole/secrets to infra-core target, added vaultwarden"
+
+  - id: GAP-OP-002
+    discovered_by: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
+    discovered_at: "2026-02-07"
+    type: missing-entry
+    doc: "docs/governance/SERVICE_REGISTRY.yaml"
+    description: |
+      No infisical entry existed before migration. Agent had to discover
+      the stack by inspecting Docker containers on docker-host.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
+    notes: "Entry added during migration work"
+
+  - id: GAP-OP-003
+    discovered_by: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
+    discovered_at: "2026-02-07"
+    type: agent-behavior
+    doc: null
+    description: |
+      Agent guessed path ~/stacks/infisical/ instead of consulting
+      docker.compose.targets.yaml binding first. SSOT had the correct
+      path (~/stacks/secrets). This is a pattern issue, not a data issue.
+    severity: low
+    status: open
+    fixed_in: null
+    notes: "Document 'consult bindings first' pattern in agent guidance"
+
+  - id: GAP-OP-004
+    discovered_by: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
+    discovered_at: "2026-02-07"
+    type: duplicate-truth
+    doc: "ops/bindings/infra.placement.policy.yaml"
+    description: |
+      Canonical infra-core/observability services were intended for shop Proxmox
+      (pve) but relocation commands relied on manifest values without a
+      canonical site/hypervisor placement lock. This allowed wrong-instance
+      execution risk when target metadata drifted.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
+    notes: "Added infra placement policy SSOT + D37 lock + command-time enforcement in relocation/provision scripts"
+
+  - id: GAP-OP-005
+    discovered_by: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
+    discovered_at: "2026-02-07"
+    type: stale-ssot
+    doc: "ops/bindings/ssh.targets.yaml"
+    description: |
+      Hypervisor SSH target IDs are distinct (`pve`, `proxmox-home`) but runtime
+      host identity is ambiguous: `proxmox-home` currently reports hostname `pve`.
+      This creates decision-risk during relocation/provisioning because agents and
+      operators can confuse shop/home hypervisors.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-GOV-SPINE-SEAL-20260207"
+    notes: |
+      Guardrail added: infra.hypervisor.identity capability + mutating infra
+      preconditions now fail on hostname/machine-id ambiguity. Host-level fix
+      applied: proxmox-home canonical hostname updated from `pve` to
+      `proxmox-home` via capability `infra.hypervisor.hostname.set`
+      (receipt: RCAP-20260207-113039__infra.hypervisor.hostname.set__Rxrbe80548).
+
+  - id: GAP-OP-006
+    discovered_by: "LOOP-GOV-SPINE-SEAL-20260207"
+    discovered_at: "2026-02-07"
+    type: runtime-bug
+    doc: "ops/plugins/infra/bin/infra-relocation-preflight"
+    description: |
+      Preflight host scan silently skipped service source hosts because it used
+      an invalid yq expression (`.services[].from_host // empty`) and suppressed
+      parser errors. The command also reported missing SSH targets/unreachable
+      hosts as informational output instead of a failing gate, allowing
+      decision flow to continue without required host evidence.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-GOV-SPINE-SEAL-20260207"
+    notes: |
+      Fixed by correcting host extraction, deriving required hosts from active
+      VM/service states, and enforcing hard failure on required host/SSOT
+      mismatches.
+
+  - id: GAP-OP-007
+    discovered_by: "LOOP-GOV-SPINE-SEAL-20260207"
+    discovered_at: "2026-02-07"
+    type: runtime-bug
+    doc: "ops/plugins/infra/bin/infra-relocation-service-transition"
+    description: |
+      Service and relocation state transitions allowed out-of-order decision
+      updates (cutover/migrated) with warning-only behavior. This permitted
+      metadata progression even when relocation state had not reached cutover.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-GOV-SPINE-SEAL-20260207"
+    notes: |
+      Transition scripts now hard-fail when relocation state and service/vm
+      status are misaligned, and cutover state transition includes an execute-time
+      vm readiness gate.
+
+  - id: GAP-OP-008
+    discovered_by: "LOOP-GOV-SPINE-SEAL-20260207"
+    discovered_at: "2026-02-07"
+    type: runtime-bug
+    doc: "surfaces/verify/drift-gate.sh"
+    description: |
+      Top-level `spine.verify` can pass while `infra.hypervisor.identity` fails.
+      During active relocation this produces a green global health signal even
+      when hypervisor identity ambiguity remains unresolved.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-GOV-SPINE-SEAL-20260207"
+    notes: |
+      Added D39 gate (`surfaces/verify/d39-infra-hypervisor-identity-lock.sh`)
+      and wired it into `drift-gate.sh`. During active relocation states,
+      `spine.verify` now fails if hypervisor identity invariants are violated.
+
+# ─────────────────────────────────────────────────────────────
+# Gap Types
+# ─────────────────────────────────────────────────────────────
+#
+# stale-ssot      - Doc has outdated information
+# missing-entry   - Expected entry doesn't exist
+# agent-behavior  - Agent pattern that caused friction (not a doc issue)
+# unclear-doc     - Doc exists but is ambiguous or incomplete
+# duplicate-truth - Multiple docs claim authority for same thing
+# runtime-bug     - Runtime implementation behavior violates governance intent

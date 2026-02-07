@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-hypervisor-identity-status
+# Read-only: verify canonical hypervisor identity for placement policy hosts.
+#
+# Purpose:
+#   - Prevent wrong-host execution caused by ambiguous host identity.
+#   - Ensure each proxmox host id maps to a unique remote hostname + machine-id.
+#
+# Exit:
+#   0 = PASS
+#   1 = FAIL (identity mismatch/duplication/reachability)
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
+SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
+
+ALLOW_HOSTNAME_ALIAS=0
+
+usage() {
+    cat <<'EOF'
+infra-hypervisor-identity-status - Verify hypervisor identity uniqueness
+
+Usage:
+  infra-hypervisor-identity-status
+  infra-hypervisor-identity-status --allow-hostname-alias
+
+Options:
+  --policy <path>         Override infra placement policy path
+  --ssh-binding <path>    Override ssh targets binding path
+  --allow-hostname-alias  Do not fail when remote hostname != host id
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --policy) POLICY="${2:-}"; shift 2 ;;
+        --ssh-binding) SSH_BINDING="${2:-}"; shift 2 ;;
+        --allow-hostname-alias) ALLOW_HOSTNAME_ALIAS=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+need yq
+need ssh
+
+[[ -f "$POLICY" ]] || fail "placement policy not found: $POLICY"
+[[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
+
+yq e '.' "$POLICY" >/dev/null 2>&1 || fail "invalid YAML: $POLICY"
+yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SSH_BINDING"
+
+mapfile -t PROXMOX_IDS < <(yq e '.hosts | to_entries[] | select(.value.kind == "proxmox") | .key' "$POLICY")
+[[ "${#PROXMOX_IDS[@]}" -gt 0 ]] || fail "no proxmox hosts defined in policy"
+
+declare -A HOSTNAME_OWNER=()
+declare -A MACHINE_ID_OWNER=()
+
+FAIL_COUNT=0
+
+echo "=== HYPERVISOR IDENTITY STATUS ==="
+echo "Policy:      $POLICY"
+echo "SSH binding: $SSH_BINDING"
+echo "Proxmox ids: ${#PROXMOX_IDS[@]}"
+echo
+
+for host_id in "${PROXMOX_IDS[@]}"; do
+    [[ -n "$host_id" ]] || continue
+
+    ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$host_id\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
+    ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$host_id\") | .user // .ssh.defaults.user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+    policy_site="$(yq e ".hosts.\"$host_id\".site // \"\"" "$POLICY" 2>/dev/null || echo "")"
+
+    echo "Host ID: $host_id (site=${policy_site:-unknown})"
+
+    if [[ -z "$ssh_host" || "$ssh_host" == "null" ]]; then
+        echo "  FAIL: missing ssh.targets entry for id '$host_id'"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo
+        continue
+    fi
+
+    ssh_opts=(-o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+    remote_cmd='set -euo pipefail; hn="$(hostname 2>/dev/null || uname -n)"; fq="$(hostname -f 2>/dev/null || echo "$hn")"; mid="$(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null || echo unknown)"; echo "__HN__:$hn"; echo "__FQDN__:$fq"; echo "__MID__:$mid"'
+
+    set +e
+    remote_out="$(ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" "$remote_cmd" 2>&1)"
+    ssh_rc=$?
+    set -e
+
+    if [[ "$ssh_rc" -ne 0 ]]; then
+        echo "  FAIL: ssh connect failed (${ssh_user}@${ssh_host})"
+        echo "  Detail: $remote_out"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo
+        continue
+    fi
+
+    remote_hn="$(echo "$remote_out" | sed -n 's/^__HN__://p' | head -1)"
+    remote_fqdn="$(echo "$remote_out" | sed -n 's/^__FQDN__://p' | head -1)"
+    machine_id="$(echo "$remote_out" | sed -n 's/^__MID__://p' | head -1)"
+
+    echo "  SSH: ${ssh_user}@${ssh_host}"
+    echo "  Remote hostname: ${remote_hn:-unknown}"
+    echo "  Remote FQDN:     ${remote_fqdn:-unknown}"
+    echo "  Machine ID:      ${machine_id:-unknown}"
+
+    if [[ "$ALLOW_HOSTNAME_ALIAS" -ne 1 ]]; then
+        if [[ "$remote_hn" != "$host_id" ]]; then
+            echo "  FAIL: hostname mismatch (expected '$host_id', got '$remote_hn')"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        else
+            echo "  PASS: hostname matches host id"
+        fi
+    else
+        if [[ "$remote_hn" != "$host_id" ]]; then
+            echo "  WARN: hostname mismatch allowed (expected '$host_id', got '$remote_hn')"
+        fi
+    fi
+
+    if [[ -n "${HOSTNAME_OWNER[$remote_hn]:-}" && "${HOSTNAME_OWNER[$remote_hn]}" != "$host_id" ]]; then
+        echo "  FAIL: duplicate remote hostname '$remote_hn' already owned by '${HOSTNAME_OWNER[$remote_hn]}'"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    else
+        HOSTNAME_OWNER["$remote_hn"]="$host_id"
+    fi
+
+    if [[ -n "$machine_id" && "$machine_id" != "unknown" ]]; then
+        if [[ -n "${MACHINE_ID_OWNER[$machine_id]:-}" && "${MACHINE_ID_OWNER[$machine_id]}" != "$host_id" ]]; then
+            echo "  FAIL: duplicate machine-id '$machine_id' already owned by '${MACHINE_ID_OWNER[$machine_id]}'"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        else
+            MACHINE_ID_OWNER["$machine_id"]="$host_id"
+        fi
+    fi
+
+    echo
+done
+
+if [[ "$FAIL_COUNT" -gt 0 ]]; then
+    echo "IDENTITY FAIL: $FAIL_COUNT issue(s) detected"
+    exit 1
+fi
+
+echo "IDENTITY PASS: hypervisor host identities are unique and policy-aligned"

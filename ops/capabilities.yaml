@@ -13,7 +13,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 
 version: "1.0"
-updated: "2026-02-01"
+updated: "2026-02-07"
 
 capabilities:
 
@@ -436,6 +436,32 @@ capabilities:
   # INFRA RELOCATION (read-only VM/service move governance)
   # ─────────────────────────────────────────────────────────────────────────
 
+  infra.placement.policy:
+    description: "Canonical placement policy check (site/hypervisor/vmid/service target enforcement)."
+    command: "./ops/plugins/infra/bin/infra-placement-policy-check --check all"
+    cwd: "$SPINE_REPO"
+    safety: read-only
+    approval: auto
+    outputs: ["stdout"]
+
+  infra.hypervisor.identity:
+    description: "Verify proxmox host identity uniqueness (id/hostname/machine-id) to prevent wrong-host execution."
+    command: "./ops/plugins/infra/bin/infra-hypervisor-identity-status"
+    cwd: "$SPINE_REPO"
+    safety: read-only
+    approval: auto
+    outputs: ["stdout"]
+
+  infra.hypervisor.hostname.set:
+    description: "Set canonical hostname for a proxmox host-id (dry-run by default, --execute to mutate)."
+    command: "./ops/plugins/infra/bin/infra-hypervisor-hostname-set"
+    cwd: "$SPINE_REPO"
+    safety: mutating
+    approval: manual
+    requires:
+      - infra.placement.policy
+    outputs: ["stdout"]
+
   infra.relocation.preflight:
     description: "Pre-flight check: host reachability + health baseline for relocation manifest."
     command: "./ops/plugins/infra/bin/infra-relocation-preflight"
@@ -445,7 +471,7 @@ capabilities:
     outputs: ["stdout"]
 
   infra.relocation.parity:
-    description: "Verify cross-SSOT parity for services in relocation manifest."
+    description: "Verify cross-SSOT parity + canonical placement policy for relocation manifest."
     command: "./ops/plugins/infra/bin/infra-relocation-parity"
     cwd: "$SPINE_REPO"
     safety: read-only
@@ -463,6 +489,75 @@ capabilities:
   infra.relocation.rollback.plan:
     description: "Generate deterministic rollback checklist and commands for current relocation."
     command: "./ops/plugins/infra/bin/infra-relocation-rollback"
+    cwd: "$SPINE_REPO"
+    safety: read-only
+    approval: auto
+    outputs: ["stdout"]
+
+  infra.vm.provision:
+    description: "Provision Proxmox VM from relocation target/profile (dry-run by default, --execute to mutate)."
+    command: "./ops/plugins/infra/bin/infra-vm-provision"
+    cwd: "$SPINE_REPO"
+    safety: mutating
+    approval: manual
+    requires:
+      - infra.placement.policy
+      - infra.hypervisor.identity
+      - infra.relocation.preflight
+      - infra.relocation.parity
+    outputs: ["stdout"]
+
+  infra.vm.bootstrap:
+    description: "Bootstrap a provisioned VM to spine-ready profile baseline (dry-run by default, --execute to mutate)."
+    command: "./ops/plugins/infra/bin/infra-vm-bootstrap"
+    cwd: "$SPINE_REPO"
+    safety: mutating
+    approval: manual
+    requires:
+      - infra.placement.policy
+      - infra.hypervisor.identity
+      - infra.relocation.preflight
+    outputs: ["stdout"]
+
+  infra.relocation.state.transition:
+    description: "Controlled relocation state transition + vm_targets status/IP update (dry-run by default, --execute to mutate)."
+    command: "./ops/plugins/infra/bin/infra-relocation-state-transition"
+    cwd: "$SPINE_REPO"
+    safety: mutating
+    approval: manual
+    requires:
+      - infra.placement.policy
+      - infra.hypervisor.identity
+      - infra.relocation.parity
+    outputs: ["stdout"]
+
+  infra.relocation.service.transition:
+    description: "Controlled service status update within relocation manifest (dry-run by default, --execute to mutate)."
+    command: "./ops/plugins/infra/bin/infra-relocation-service-transition"
+    cwd: "$SPINE_REPO"
+    safety: mutating
+    approval: manual
+    requires:
+      - infra.placement.policy
+      - infra.hypervisor.identity
+      - infra.relocation.parity
+    outputs: ["stdout"]
+
+  infra.relocation.promote:
+    description: "Promotion gate runner: validates soak health checks, then promotes service from cutover to migrated with full gate verification (dry-run by default, --execute to mutate)."
+    command: "./ops/plugins/infra/bin/infra-relocation-promote"
+    cwd: "$SPINE_REPO"
+    safety: mutating
+    approval: manual
+    requires:
+      - infra.placement.policy
+      - infra.hypervisor.identity
+      - infra.relocation.parity
+    outputs: ["stdout"]
+
+  infra.vm.ready.status:
+    description: "Read-only readiness report for relocation VM target (running + ssh + tailscale + profile checks)."
+    command: "./ops/plugins/infra/bin/infra-vm-ready-status"
     cwd: "$SPINE_REPO"
     safety: read-only
     approval: auto

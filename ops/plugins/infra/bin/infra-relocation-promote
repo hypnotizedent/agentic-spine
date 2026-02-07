@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-relocation-promote
+# Promotion gate runner: validates soak health checks, then promotes a service
+# from cutover -> migrated with full gate verification.
+#
+# Default mode is dry-run. Pass --execute to mutate.
+#
+# Required inputs:
+#   --service <service name in manifest>
+#
+# Gate checks (all must pass before promotion):
+#   1. Tunnel endpoint returns HTTP 200
+#   2. Direct health endpoint returns HTTP 200
+#   3. Rollback target is reachable (TCP)
+#   4. Soak period has elapsed
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
+OPS="$SPINE_REPO/bin/ops"
+POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
+PLACEMENT_CHECK="$SPINE_REPO/ops/plugins/infra/bin/infra-placement-policy-check"
+
+usage() {
+    cat <<'EOF'
+infra-relocation-promote - Promotion gate runner for service migration
+
+Usage:
+  infra-relocation-promote \
+    --service <name> \
+    --tunnel-url <https://...> \
+    --health-url <http://host:port/path> \
+    --rollback-host <ip> \
+    --rollback-port <port> \
+    --soak-until <ISO-8601 UTC timestamp> \
+    [--dry-run|--execute]
+
+Gate checks (all must pass):
+  1. Tunnel URL returns HTTP 200
+  2. Health URL returns HTTP 200
+  3. Rollback host:port is reachable (TCP)
+  4. Current time >= soak-until
+
+On success (--execute): transitions service to migrated, then runs
+preflight, parity, and spine.verify gates.
+
+Examples:
+  infra-relocation-promote \
+    --service vaultwarden \
+    --tunnel-url https://vault.ronny.works \
+    --health-url http://100.92.91.128:8081/alive \
+    --rollback-host 100.93.142.63 \
+    --rollback-port 8080 \
+    --soak-until 2026-02-08T04:41:00Z \
+    --dry-run
+EOF
+}
+
+fail() { echo "GATE FAIL: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+SERVICE=""
+TUNNEL_URL=""
+HEALTH_URL=""
+ROLLBACK_HOST=""
+ROLLBACK_PORT=""
+SOAK_UNTIL=""
+EXECUTE=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --service) SERVICE="${2:-}"; shift 2 ;;
+        --tunnel-url) TUNNEL_URL="${2:-}"; shift 2 ;;
+        --health-url) HEALTH_URL="${2:-}"; shift 2 ;;
+        --rollback-host) ROLLBACK_HOST="${2:-}"; shift 2 ;;
+        --rollback-port) ROLLBACK_PORT="${2:-}"; shift 2 ;;
+        --soak-until) SOAK_UNTIL="${2:-}"; shift 2 ;;
+        --execute) EXECUTE=1; shift ;;
+        --dry-run) EXECUTE=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$SERVICE" ]] || fail "--service is required"
+[[ -n "$TUNNEL_URL" ]] || fail "--tunnel-url is required"
+[[ -n "$HEALTH_URL" ]] || fail "--health-url is required"
+[[ -n "$ROLLBACK_HOST" ]] || fail "--rollback-host is required"
+[[ -n "$ROLLBACK_PORT" ]] || fail "--rollback-port is required"
+[[ -n "$SOAK_UNTIL" ]] || fail "--soak-until is required"
+
+need yq
+need curl
+need nc
+[[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+[[ -f "$POLICY" ]] || fail "placement policy binding not found: $POLICY"
+[[ -x "$PLACEMENT_CHECK" ]] || fail "placement policy checker missing or not executable: $PLACEMENT_CHECK"
+
+# Validate service is at cutover
+current_status="$(yq e ".services[] | select(.service == \"$SERVICE\") | .status // \"unknown\"" "$MANIFEST")"
+[[ "$current_status" == "cutover" ]] || fail "service '$SERVICE' is at '$current_status', expected 'cutover'"
+to_host="$(yq e ".services[] | select(.service == \"$SERVICE\") | .to_host // \"\"" "$MANIFEST")"
+rollback_to="$(yq e ".services[] | select(.service == \"$SERVICE\") | .rollback_to // \"\"" "$MANIFEST")"
+
+"$PLACEMENT_CHECK" --policy "$POLICY" --check service \
+    --service "$SERVICE" --to-host "$to_host" --rollback-host "$rollback_to" --status migrated
+
+echo "=== INFRA RELOCATION PROMOTION GATE ==="
+echo "Mode:              $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
+echo "Service:           $SERVICE"
+echo "Current status:    $current_status"
+echo "Soak until:        $SOAK_UNTIL"
+echo ""
+
+GATE_PASS=0
+GATE_TOTAL=4
+GATE_RESULTS=()
+
+# Gate 1: Soak period elapsed
+echo "--- Gate 1/4: Soak period ---"
+now_epoch="$(date -u +%s)"
+# Parse soak timestamp as UTC on both BSD (macOS) and GNU date.
+if date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$SOAK_UNTIL" "+%s" >/dev/null 2>&1; then
+    soak_epoch="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$SOAK_UNTIL" "+%s")"
+elif date -u -d "$SOAK_UNTIL" "+%s" >/dev/null 2>&1; then
+    soak_epoch="$(date -u -d "$SOAK_UNTIL" "+%s")"
+else
+    fail "cannot parse --soak-until: $SOAK_UNTIL"
+fi
+
+if (( now_epoch >= soak_epoch )); then
+    echo "  PASS: soak period elapsed (now=$(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    GATE_RESULTS+=("soak=PASS")
+    GATE_PASS=$((GATE_PASS + 1))
+else
+    remaining=$(( soak_epoch - now_epoch ))
+    hours=$(( remaining / 3600 ))
+    mins=$(( (remaining % 3600) / 60 ))
+    echo "  FAIL: soak period not elapsed (${hours}h ${mins}m remaining)"
+    GATE_RESULTS+=("soak=FAIL")
+fi
+
+# Gate 2: Tunnel endpoint
+echo "--- Gate 2/4: Tunnel endpoint ($TUNNEL_URL) ---"
+tunnel_code="$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 10 "$TUNNEL_URL" 2>/dev/null || echo "000")"
+if [[ "$tunnel_code" == "200" ]]; then
+    echo "  PASS: HTTP $tunnel_code"
+    GATE_RESULTS+=("tunnel=PASS")
+    GATE_PASS=$((GATE_PASS + 1))
+else
+    echo "  FAIL: HTTP $tunnel_code (expected 200)"
+    GATE_RESULTS+=("tunnel=FAIL")
+fi
+
+# Gate 3: Direct health endpoint
+echo "--- Gate 3/4: Direct health ($HEALTH_URL) ---"
+health_code="$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 10 "$HEALTH_URL" 2>/dev/null || echo "000")"
+if [[ "$health_code" == "200" ]]; then
+    echo "  PASS: HTTP $health_code"
+    GATE_RESULTS+=("health=PASS")
+    GATE_PASS=$((GATE_PASS + 1))
+else
+    echo "  FAIL: HTTP $health_code (expected 200)"
+    GATE_RESULTS+=("health=FAIL")
+fi
+
+# Gate 4: Rollback target reachable
+echo "--- Gate 4/4: Rollback reachable ($ROLLBACK_HOST:$ROLLBACK_PORT) ---"
+if nc -zw5 "$ROLLBACK_HOST" "$ROLLBACK_PORT" 2>/dev/null; then
+    echo "  PASS: port reachable"
+    GATE_RESULTS+=("rollback=PASS")
+    GATE_PASS=$((GATE_PASS + 1))
+else
+    echo "  FAIL: port unreachable"
+    GATE_RESULTS+=("rollback=FAIL")
+fi
+
+echo ""
+echo "--- Gate Summary ---"
+printf "  %s\n" "${GATE_RESULTS[@]}"
+echo "  Result: $GATE_PASS/$GATE_TOTAL passed"
+echo ""
+
+if (( GATE_PASS < GATE_TOTAL )); then
+    echo "PROMOTION BLOCKED: $((GATE_TOTAL - GATE_PASS)) gate(s) failed."
+    echo "Service '$SERVICE' remains at '$current_status'."
+    echo "Re-run after resolving failures."
+    exit 1
+fi
+
+echo "ALL GATES PASSED."
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+    echo ""
+    echo "DRY-RUN: promotion checks passed but no changes applied."
+    echo "Re-run with --execute to promote '$SERVICE' to migrated."
+    exit 0
+fi
+
+echo ""
+echo "=== PROMOTING $SERVICE: cutover -> migrated ==="
+echo ""
+
+# Run service transition (auto-approve via echo yes)
+echo "--- Step 1/4: Service transition ---"
+echo "yes" | "$OPS" cap run infra.relocation.service.transition --service "$SERVICE" --status migrated --execute 2>&1
+echo ""
+
+# Run preflight
+echo "--- Step 2/4: Preflight ---"
+"$OPS" cap run infra.relocation.preflight 2>&1
+echo ""
+
+# Run parity
+echo "--- Step 3/4: Parity ---"
+"$OPS" cap run infra.relocation.parity 2>&1
+echo ""
+
+# Run spine.verify
+echo "--- Step 4/4: Spine verify ---"
+"$OPS" cap run spine.verify 2>&1
+echo ""
+
+echo "=== PROMOTION COMPLETE ==="
+echo "Service '$SERVICE' promoted to migrated."
+echo "Rollback target $ROLLBACK_HOST:$ROLLBACK_PORT was reachable at gate time."
+echo "Keep rollback target running for the rollback window."

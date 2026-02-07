@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-vm-bootstrap
+# Mutating: Bootstrap a relocation target VM to spine-ready baseline.
+#
+# Default mode is dry-run. Pass --execute to mutate.
+#
+# Required inputs:
+#   --target <vm hostname>
+#   --profile <profile name>
+#   --vm-id <numeric vmid>
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
+PROFILES="${INFRA_VM_PROFILES:-$SPINE_REPO/ops/bindings/infra.vm.profiles.yaml}"
+SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
+
+usage() {
+    cat <<'EOF'
+infra-vm-bootstrap - Bootstrap VM to profile baseline
+
+Usage:
+  infra-vm-bootstrap --target <host> --profile <name> --vm-id <id> [--dry-run|--execute]
+
+Examples:
+  infra-vm-bootstrap --target infra-core --profile spine-ready-v1 --vm-id 204 --dry-run
+  infra-vm-bootstrap --target infra-core --profile spine-ready-v1 --vm-id 204 --execute
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+TARGET=""
+PROFILE=""
+VM_ID=""
+EXECUTE=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target) TARGET="${2:-}"; shift 2 ;;
+        --profile) PROFILE="${2:-}"; shift 2 ;;
+        --vm-id) VM_ID="${2:-}"; shift 2 ;;
+        --execute) EXECUTE=1; shift ;;
+        --dry-run) EXECUTE=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$TARGET" ]] || fail "--target is required"
+[[ -n "$PROFILE" ]] || fail "--profile is required"
+[[ -n "$VM_ID" ]] || fail "--vm-id is required"
+[[ "$VM_ID" =~ ^[0-9]+$ ]] || fail "--vm-id must be numeric"
+
+need yq
+need ssh
+
+[[ -f "$MANIFEST" ]] || fail "manifest not found: $MANIFEST"
+[[ -f "$PROFILES" ]] || fail "profile binding not found: $PROFILES"
+[[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
+
+yq e '.' "$MANIFEST" >/dev/null 2>&1 || fail "manifest YAML invalid: $MANIFEST"
+yq e '.' "$PROFILES" >/dev/null 2>&1 || fail "profile YAML invalid: $PROFILES"
+yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "ssh binding YAML invalid: $SSH_BINDING"
+
+manifest_target="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .hostname" "$MANIFEST" 2>/dev/null || echo "null")"
+[[ "$manifest_target" != "null" && -n "$manifest_target" ]] || fail "target '$TARGET' not found in manifest vm_targets"
+
+manifest_vm_id="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .vm_id // \"\"" "$MANIFEST" 2>/dev/null || echo "")"
+if [[ -n "$manifest_vm_id" ]] && [[ "$manifest_vm_id" != "$VM_ID" ]]; then
+    fail "--vm-id ($VM_ID) does not match manifest vm_id ($manifest_vm_id) for target '$TARGET'"
+fi
+
+profile_exists="$(yq e ".profiles.\"$PROFILE\" | type" "$PROFILES" 2>/dev/null || echo "null")"
+[[ "$profile_exists" == "!!map" ]] || fail "profile '$PROFILE' not found in $PROFILES"
+
+ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$TARGET\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
+ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$TARGET\") | .user // .ssh.defaults.user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+ssh_target_missing=0
+if [[ -z "$ssh_host" || "$ssh_host" == "null" ]]; then
+    ssh_target_missing=1
+    ssh_host="<missing>"
+fi
+if [[ "$EXECUTE" -eq 1 && "$ssh_target_missing" -eq 1 ]]; then
+    fail "target '$TARGET' is missing in ssh.targets.yaml"
+fi
+
+pkg_mgr="$(yq e ".profiles.\"$PROFILE\".bootstrap.package_manager // \"apt\"" "$PROFILES")"
+[[ "$pkg_mgr" == "apt" ]] || fail "only package_manager=apt is currently supported"
+
+packages="$(yq e ".profiles.\"$PROFILE\".bootstrap.packages[]?" "$PROFILES" 2>/dev/null | paste -sd' ' -)"
+services="$(yq e ".profiles.\"$PROFILE\".bootstrap.services_enable[]?" "$PROFILES" 2>/dev/null | paste -sd' ' -)"
+require_tailscale="$(yq e ".profiles.\"$PROFILE\".bootstrap.require_tailscale_connected // true" "$PROFILES")"
+require_qemu="$(yq e ".profiles.\"$PROFILE\".bootstrap.require_qemu_agent_running // true" "$PROFILES")"
+require_docker="$(yq e ".profiles.\"$PROFILE\".bootstrap.require_docker_running // true" "$PROFILES")"
+require_cron="$(yq e ".profiles.\"$PROFILE\".bootstrap.require_cron_running // true" "$PROFILES")"
+
+echo "=== INFRA VM BOOTSTRAP ==="
+echo "Mode:       $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
+echo "Target:     $TARGET ($ssh_user@$ssh_host)"
+echo "Profile:    $PROFILE"
+echo "VM ID:      $VM_ID"
+echo "Packages:   ${packages:-none}"
+echo "Services:   ${services:-none}"
+echo "Checks:     tailscale=$require_tailscale qemu-agent=$require_qemu docker=$require_docker cron=$require_cron"
+echo
+
+echo "Planned bootstrap operations:"
+echo "  - install apt packages"
+echo "  - enable/start required services"
+echo "  - verify profile-required runtime checks"
+echo "  - enforce required cron hooks (if profile marks hooks as required)"
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+    if [[ "$ssh_target_missing" -eq 1 ]]; then
+        echo "NOTE: target '$TARGET' is missing in ssh.targets.yaml; add it before --execute."
+    fi
+    echo
+    echo "DRY-RUN: no changes applied."
+    exit 0
+fi
+
+remote_bootstrap='
+set -euo pipefail
+PACKAGES="$1"
+SERVICES="$2"
+REQ_TAILSCALE="$3"
+REQ_QEMU="$4"
+REQ_DOCKER="$5"
+REQ_CRON="$6"
+
+as_root() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    echo "ERROR: command requires root and sudo is unavailable: $*"
+    exit 1
+  fi
+}
+
+if ! command -v apt-get >/dev/null 2>&1; then
+  echo "ERROR: apt-get not found on target"
+  exit 1
+fi
+
+if [[ -n "$PACKAGES" ]]; then
+  as_root apt-get update
+  as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y $PACKAGES
+fi
+
+for svc in $SERVICES; do
+  as_root systemctl enable --now "$svc"
+done
+
+if [[ "$REQ_QEMU" == "true" ]]; then
+  systemctl is-active --quiet qemu-guest-agent || { echo "ERROR: qemu-guest-agent not running"; exit 1; }
+fi
+
+if [[ "$REQ_DOCKER" == "true" ]]; then
+  systemctl is-active --quiet docker || { echo "ERROR: docker service not running"; exit 1; }
+fi
+
+if [[ "$REQ_CRON" == "true" ]]; then
+  if systemctl is-active --quiet cron 2>/dev/null; then
+    true
+  elif systemctl is-active --quiet crond 2>/dev/null; then
+    true
+  else
+    echo "ERROR: neither cron nor crond service is running"; exit 1
+  fi
+fi
+
+if [[ "$REQ_TAILSCALE" == "true" ]]; then
+  command -v tailscale >/dev/null 2>&1 || { echo "ERROR: tailscale binary missing"; exit 1; }
+  TS_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+  [[ -n "$TS_IP" ]] || { echo "ERROR: tailscale not connected (run tailscale up)"; exit 1; }
+fi
+
+echo "BOOTSTRAP_OK"
+'
+
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
+    "bash -lc $(printf "%q" "$remote_bootstrap") -- $(printf "%q" "$packages") $(printf "%q" "$services") $(printf "%q" "$require_tailscale") $(printf "%q" "$require_qemu") $(printf "%q" "$require_docker") $(printf "%q" "$require_cron")"
+
+required_hook_count="$(yq e ".profiles.\"$PROFILE\".bootstrap.cron_hooks[]? | select(.required == true) | .name" "$PROFILES" 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "$required_hook_count" != "0" ]]; then
+    while IFS= read -r hook_name; do
+        [[ -z "$hook_name" ]] && continue
+        schedule="$(yq e ".profiles.\"$PROFILE\".bootstrap.cron_hooks[] | select(.name == \"$hook_name\") | .schedule" "$PROFILES")"
+        command="$(yq e ".profiles.\"$PROFILE\".bootstrap.cron_hooks[] | select(.name == \"$hook_name\") | .command" "$PROFILES")"
+        [[ -n "$schedule" && "$schedule" != "null" ]] || fail "required hook '$hook_name' missing schedule"
+        [[ -n "$command" && "$command" != "null" ]] || fail "required hook '$hook_name' missing command"
+
+        hook_line="$schedule $command # spine-profile:$PROFILE/$hook_name"
+        ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
+            "bash -lc 'set -euo pipefail; cur=\$(crontab -l 2>/dev/null || true); if echo \"\$cur\" | grep -Fq $(printf "%q" "$command"); then exit 0; fi; { echo \"\$cur\"; echo $(printf "%q" "$hook_line"); } | sed \"/^$/d\" | crontab -'"
+        echo "Installed required cron hook: $hook_name"
+    done < <(yq e ".profiles.\"$PROFILE\".bootstrap.cron_hooks[]? | select(.required == true) | .name" "$PROFILES")
+fi
+
+echo
+echo "Bootstrap complete: $TARGET (vmid=$VM_ID)"

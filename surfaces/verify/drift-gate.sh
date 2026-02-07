@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v2.0)
+# drift-gate.sh - Constitutional drift detector (v2.1)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -19,7 +19,7 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v2.0) ==="
+echo "=== DRIFT GATE (v2.1) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -463,6 +463,42 @@ if [[ -x "$SP/surfaces/verify/d36-legacy-exception-hygiene-lock.sh" ]]; then
   fi
 else
   warn "legacy exception hygiene lock gate not present"
+fi
+
+# D37: Infra placement policy lock (canonical target-site enforcement)
+echo -n "D37 infra placement policy lock... "
+if [[ -x "$SP/surfaces/verify/d37-infra-placement-policy-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d37-infra-placement-policy-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d37-infra-placement-policy-lock.sh failed"
+  fi
+else
+  warn "infra placement policy lock gate not present"
+fi
+
+# D38: Service extraction hygiene lock (EXTRACTION_PROTOCOL.md enforcement)
+echo -n "D38 extraction hygiene lock... "
+if [[ -x "$SP/surfaces/verify/d38-extraction-hygiene-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d38-extraction-hygiene-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d38-extraction-hygiene-lock.sh failed"
+  fi
+else
+  warn "extraction hygiene lock gate not present"
+fi
+
+# D39: Hypervisor identity lock (required during active relocation states)
+echo -n "D39 infra hypervisor identity lock... "
+if [[ -x "$SP/surfaces/verify/d39-infra-hypervisor-identity-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d39-infra-hypervisor-identity-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d39-infra-hypervisor-identity-lock.sh failed"
+  fi
+else
+  warn "infra hypervisor identity lock gate not present"
 fi
 
 echo
