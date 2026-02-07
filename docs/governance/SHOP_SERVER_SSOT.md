@@ -1,8 +1,8 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-06
-verification_method: receipt + on-site audit
+last_verified: 2026-02-07
+verification_method: receipt + on-site audit + live-ssh-inspection
 scope: shop-infrastructure
 parent_receipts:
   - "DELL_N2024P_FACTORY_RESET_20260205_122838"
@@ -58,8 +58,9 @@ Notes:
 | **Model** | Dell PowerEdge R730XD | 2026-01-21 |
 | **CPU** | 2x Intel Xeon E5-2640 v3 (32 threads total) | 2026-01-21 |
 | **RAM** | 188GB | 2026-01-21 |
-| **Proxmox Version** | 9.0.3 | 2026-01-21 |
-| **Kernel** | 6.14.8-2-pve | 2026-01-21 |
+| **Proxmox Version** | 9.1.4 | 2026-02-07 |
+| **Kernel** | 6.14.8-2-pve | 2026-02-07 |
+| **Boot Drives** | 2x Seagate ST9500620SS 500GB SAS 2.5" | 2026-02-07 |
 | **Drive Bays** | TBD (2.5" or 3.5" - requires physical audit) | - |
 | **Controller/HBA** | TBD (verify before purchasing drives) | - |
 
@@ -67,13 +68,50 @@ Notes:
 
 | Pool | Size | Allocated | Free | Capacity | Health | Verified |
 |------|------|-----------|------|----------|--------|----------|
-| **media** | 29.1T | 13.1T | 16.0T | 45% | ONLINE | 2026-01-21 |
-| **tank** | 29.1T | 6.14T | 23.0T | 21% | ONLINE | 2026-01-21 |
+| **media** | 29.1T | 16.7T | 12.4T | 57% | ONLINE | 2026-02-07 |
+| **tank** | 29.1T | 7.35T | 21.8T | 25% | ONLINE | 2026-02-07 |
 
-**tank datasets:**
-- `tank/docker`: 379GB
-- `tank/backups`: 92GB
+**media pool:** RAIDZ1, 4x Seagate ST8000AS0002 8TB (Archive/SMR drives)
+- Serials: Z840A33Q, Z840A22Z, Z840A33F, Z840AAFE
+- **WARNING:** SMR drives are suboptimal for ZFS. Monitor for performance degradation.
+- Last scrub: CANCELED on 2026-01-11 (should be investigated)
+
+**tank pool:** RAIDZ2, 8x Seagate ST4000NM0063 4TB (Constellation ES.3, enterprise SAS)
+- Last scrub: 2026-02-01, 0 errors
+
+**tank datasets (2026-02-07):**
+- `tank/docker`: 567GB (was 379GB on 2026-01-21)
+- `tank/docker/media-stack`: 24.1GB
+- `tank/docker/databases`: 208K
+- `tank/backups`: 3.5TB (was 92GB — vzdump growing)
 - `tank/immich/photos`: 1.2TB
+- `tank/vms`: 256K
+
+### VM Inventory (2026-02-07)
+
+| VMID | Name | Status | RAM | Boot Disk | Notes |
+|------|------|--------|-----|-----------|-------|
+| 200 | docker-host | running | 96GB | 300GB | Mint OS production |
+| 201 | media-stack | running | 16GB | 80GB | Jellyfin + *arr |
+| 202 | automation-stack | running | 16GB | 100GB | n8n + Ollama |
+| 203 | immich | running | 16GB | 50GB | Shop photos (Tailscale: immich-1) |
+| 204 | infra-core | running | 8GB | 50GB | Core infra |
+| 9000 | template | stopped | 2GB | 3.5GB | Ubuntu 24.04 cloud-init |
+
+**NOTE:** VM 204 (infra-core) is NOT in the vzdump backup job. Add it.
+
+### NFS Exports from PVE
+
+| Export | Client | Purpose |
+|--------|--------|---------|
+| `/tank/docker` | docker-host (100.92.156.118) | Docker volumes |
+| `/tank/backups` | docker-host (100.92.156.118) | Backup target |
+| `/tank/vms` | docker-host (100.92.156.118) | VM storage |
+| `/tank/docker/media-stack` | media-stack (100.117.1.53) | Container config/volumes |
+| `/media` | media-stack (100.117.1.53) | Media files |
+| `/mnt/easystore/backups` | docker-host (100.92.156.118) | Easystore backup mount |
+
+All exports use `rw,sync,no_root_squash` over Tailscale IPs.
 
 ### Hardware Compatibility Notes
 
@@ -127,8 +165,14 @@ If you need to make a placement decision ("where should this run?"):
 |----------|---------|---------|--------|
 | `0 2 * * *` | `/usr/local/bin/zfs-snapshot.sh` | Daily ZFS snapshot of root datasets | ACTIVE |
 | `0 3 * * 0` | `zpool scrub tank` | Weekly scrub of tank pool | ACTIVE |
+| `02:00 daily` | vzdump VMs 200-203 | Snapshot backup to tank-backups (zstd, max 2) | ACTIVE |
 
-**Source:** External schedule inventory (workbench tooling via `WORKBENCH_TOOLING_INDEX.md`).
+**Source:** crontab (`crontab -l`) and `/etc/pve/jobs.cfg`.
+
+**Known issues:**
+- VM 204 (infra-core) is NOT included in the vzdump backup job.
+- Media pool scrub was CANCELED on 2026-01-11 — no cron job for media scrub.
+- No `zpool scrub media` in cron — only `tank` is scrubbed.
 
 ---
 
