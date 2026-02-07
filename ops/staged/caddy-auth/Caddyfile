@@ -1,19 +1,25 @@
 {
-    email {$ACME_EMAIL}
+    # HTTP only — Cloudflare tunnel handles public TLS.
+    # Add ACME/TLS when direct Tailscale HTTPS is needed.
+    auto_https off
 }
 
 # Authentik UI/API
-{$AUTHENTIK_HOSTNAME} {
+http://{$AUTHENTIK_HOSTNAME} {
     reverse_proxy 127.0.0.1:9000
 }
 
-# Grafana protected with Authentik forward auth.
-# Requires an Authentik proxy provider/outpost configured for this hostname.
-{$GRAFANA_HOSTNAME} {
-    forward_auth 127.0.0.1:9000 {
-        uri /outpost.goauthentik.io/auth/caddy
-        copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email
-        trusted_proxies private_ranges
-    }
-    reverse_proxy {$GRAFANA_UPSTREAM}
+# Pi-hole admin (moved to 8053 to free port 80 for Caddy)
+http://{$PIHOLE_HOSTNAME} {
+    reverse_proxy 127.0.0.1:8053
 }
+
+# Grafana — uncomment when observability VM (205) is provisioned.
+# http://{$GRAFANA_HOSTNAME} {
+#     forward_auth 127.0.0.1:9000 {
+#         uri /outpost.goauthentik.io/auth/caddy
+#         copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email
+#         trusted_proxies private_ranges
+#     }
+#     reverse_proxy {$GRAFANA_UPSTREAM}
+# }
