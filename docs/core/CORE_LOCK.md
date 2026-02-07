@@ -2,7 +2,7 @@
 
 **Locked:** 2026-02-07
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v2.1
+**Gate Version:** drift-gate.sh v2.2
 
 ---
 
@@ -94,6 +94,7 @@ All must PASS for core to be healthy:
 | D40 | Maker tools drift lock (binding validity, script hygiene, no debug/secret/tmp leaks) |
 | D41 | Hidden-root governance lock (home-root inventory + forbidden pattern enforcement) |
 | D42 | Code path case lock (runtime scripts must use `$HOME/code` not `$HOME/Code`) |
+| D43 | Secrets namespace policy lock (freeze legacy root-path debt + enforce /spine namespace wiring) |
 
 ## Rules
 

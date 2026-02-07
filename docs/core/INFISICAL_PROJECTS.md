@@ -31,6 +31,8 @@
   - required keys: `AUTHENTIK_SECRET_KEY`, `AUTHENTIK_DB_PASSWORD`
 - Enforcement capability:
   - `./bin/ops cap run secrets.namespace.status`
+- Policy source:
+  - `ops/bindings/secrets.namespace.policy.yaml`
 
 ---
 

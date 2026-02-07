@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v2.1)
+# drift-gate.sh - Constitutional drift detector (v2.2)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -19,7 +19,7 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v2.1) ==="
+echo "=== DRIFT GATE (v2.2) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -535,6 +535,18 @@ if [[ -x "$SP/surfaces/verify/d42-code-path-case-lock.sh" ]]; then
   fi
 else
   warn "code path case lock gate not present"
+fi
+
+# D43: Secrets namespace policy lock (policy + capability wiring)
+echo -n "D43 secrets namespace lock... "
+if [[ -x "$SP/surfaces/verify/d43-secrets-namespace-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d43-secrets-namespace-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d43-secrets-namespace-lock.sh failed"
+  fi
+else
+  warn "secrets namespace lock gate not present"
 fi
 
 echo

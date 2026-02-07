@@ -23,6 +23,7 @@ This file contains ONLY non-secret metadata:
 Namespace rule:
 - `base_path` is canonical (`/spine` in current binding).
 - New infra secrets must live under `${base_path}/*` in Infisical.
+- Root-path legacy keys are frozen by `ops/bindings/secrets.namespace.policy.yaml`.
 - Use `./bin/ops cap run secrets.namespace.status` to verify placement for
   critical VM-infra keys.
 

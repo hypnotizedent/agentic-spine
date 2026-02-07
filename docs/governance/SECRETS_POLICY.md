@@ -21,6 +21,8 @@ github_issue: "#541"
    but never secret values. See `docs/core/SECRETS_BINDING.md`.
 4. **Namespace under `/spine/*`.** New infrastructure secrets must be created under
    `/spine/*` secret paths (not root `/`) to avoid legacy collision.
+5. **Freeze root-path debt.** Root-path (`/`) legacy keys are frozen by policy;
+   adding new root keys is a regression until migration completes.
 
 ---
 
@@ -84,4 +86,6 @@ surfaces/verify/check-secret-expiry.sh
 |----------|-------------|
 | [SECRETS_BINDING.md](../core/SECRETS_BINDING.md) | Non-secret binding metadata |
 | [INFISICAL_PROJECTS.md](../core/INFISICAL_PROJECTS.md) | Project inventory |
+| `ops/bindings/secrets.namespace.policy.yaml` | Namespace policy + root freeze snapshot |
+| `ops/staged/SECRETS_NAMESPACE_MIGRATION_MAP.md` | Phased migration plan for GAP-OP-013 |
 | [GOVERNANCE_INDEX.md](GOVERNANCE_INDEX.md) | Governance entry point |
