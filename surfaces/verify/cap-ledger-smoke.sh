@@ -8,7 +8,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
 STATE="$SPINE/mailroom/state"
 LEDGER="$STATE/ledger.csv"
 BACKUP_DIR="/tmp/cap-ledger-smoke-backup-$$"

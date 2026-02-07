@@ -11,7 +11,7 @@
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SP="${SPINE_ROOT:-$HOME/Code/agentic-spine}"
+SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 cd "$SP"
 FAIL=0
 
@@ -297,7 +297,7 @@ fi
 
 # D25: Secrets CLI hash parity (canonical vs vendored infisical-agent.sh + cloudflare-agent.sh)
 echo -n "D25 secrets cli hash... "
-WB="${WORKBENCH_ROOT:-$HOME/Code/workbench}"
+WB="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 
 # Check infisical-agent.sh
 CANONICAL_INFISICAL="$SP/ops/tools/infisical-agent.sh"
@@ -511,6 +511,30 @@ if [[ -x "$SP/surfaces/verify/d40-maker-tools-drift.sh" ]]; then
   fi
 else
   warn "maker tools drift gate not present"
+fi
+
+# D41: Hidden-root governance lock (home-root inventory + forbidden pattern enforcement)
+echo -n "D41 hidden-root governance lock... "
+if [[ -x "$SP/surfaces/verify/d41-hidden-root-governance-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d41-hidden-root-governance-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d41-hidden-root-governance-lock.sh failed"
+  fi
+else
+  warn "hidden-root governance lock gate not present"
+fi
+
+# D42: Code path case lock (runtime scripts must use lowercase code path)
+echo -n "D42 code path case lock... "
+if [[ -x "$SP/surfaces/verify/d42-code-path-case-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d42-code-path-case-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d42-code-path-case-lock.sh failed"
+  fi
+else
+  warn "code path case lock gate not present"
 fi
 
 echo

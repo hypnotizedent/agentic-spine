@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-hidden-root-inventory — Two-tier hidden-root scanner
+#
+# Tier 1: Top-level dot entries under $HOME (depth=1)
+# Tier 2: Recursive forbidden pattern scan (targeted depth)
+#
+# Usage:
+#   host-hidden-root-inventory             # report only
+#   host-hidden-root-inventory --enforce   # fail on forbidden or unmanaged
+
+ENFORCE=false
+[[ "${1:-}" == "--enforce" ]] && ENFORCE=true
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+BINDING="$ROOT/ops/bindings/host.audit.allowlist.yaml"
+
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 || { echo "FAIL: required tool missing: $1" >&2; exit 1; }
+}
+require_tool yq
+
+[[ -f "$BINDING" ]] || { echo "FAIL: binding missing: $BINDING" >&2; exit 1; }
+yq e '.' "$BINDING" >/dev/null 2>&1 || { echo "FAIL: binding invalid YAML" >&2; exit 1; }
+
+HOST_ROOT="$(yq e '.host_root' "$BINDING")"
+[[ -d "$HOST_ROOT" ]] || { echo "FAIL: host_root not a directory: $HOST_ROOT" >&2; exit 1; }
+
+# Load lists from binding
+mapfile -t MANAGED < <(yq e '.managed_hidden_roots[]' "$BINDING" 2>/dev/null || true)
+mapfile -t EXCLUSIONS < <(yq e '.scan_exclusions[]' "$BINDING" 2>/dev/null || true)
+mapfile -t FORBIDDEN_PATTERNS < <(yq e '.forbidden_hidden_patterns[]' "$BINDING" 2>/dev/null || true)
+mapfile -t VOLATILE_PATTERNS < <(yq e '.volatile_hidden_patterns[]' "$BINDING" 2>/dev/null || true)
+
+# Build lookup sets
+declare -A MANAGED_SET EXCLUSION_SET
+for m in "${MANAGED[@]}"; do
+  [[ -n "$m" && "$m" != "null" ]] && MANAGED_SET["$m"]=1
+done
+for e in "${EXCLUSIONS[@]}"; do
+  [[ -n "$e" && "$e" != "null" ]] && EXCLUSION_SET["$e"]=1
+done
+
+# Helper: check if a basename matches any glob pattern in an array
+matches_pattern() {
+  local name="$1"
+  shift
+  for pat in "$@"; do
+    [[ -z "$pat" || "$pat" == "null" ]] && continue
+    # Use bash glob matching
+    # shellcheck disable=SC2254
+    case "$name" in
+      $pat) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+MANAGED_LIST=()
+VOLATILE_LIST=()
+EXCLUDED_LIST=()
+UNMANAGED_LIST=()
+FORBIDDEN_LIST=()
+
+# ═══════════════════════════════════════════════════════════════
+# Tier 1: Top-level hidden entries
+# ═══════════════════════════════════════════════════════════════
+while IFS= read -r entry; do
+  [[ -z "$entry" ]] && continue
+  full="$HOST_ROOT/$entry"
+  base="$entry"
+
+  # Check exclusions (full path match)
+  if [[ -n "${EXCLUSION_SET[$full]+x}" ]]; then
+    EXCLUDED_LIST+=("$base")
+    continue
+  fi
+
+  # Check managed (full path match)
+  if [[ -n "${MANAGED_SET[$full]+x}" ]]; then
+    MANAGED_LIST+=("$base")
+    continue
+  fi
+
+  # Check forbidden patterns (basename match for top-level entries)
+  if matches_pattern "$base" "${FORBIDDEN_PATTERNS[@]}"; then
+    FORBIDDEN_LIST+=("$base")
+    continue
+  fi
+
+  # Check volatile patterns (basename match)
+  if matches_pattern "$base" "${VOLATILE_PATTERNS[@]}"; then
+    VOLATILE_LIST+=("$base")
+    continue
+  fi
+
+  # Not in any list → unmanaged
+  UNMANAGED_LIST+=("$base")
+done < <(ls -1A "$HOST_ROOT" 2>/dev/null | grep '^\.' | sort)
+
+# ═══════════════════════════════════════════════════════════════
+# Tier 2: Forbidden pattern scan (recursive, targeted)
+# ═══════════════════════════════════════════════════════════════
+# Build set of already-found forbidden from Tier 1
+declare -A FORBIDDEN_SEEN
+for f in "${FORBIDDEN_LIST[@]}"; do
+  FORBIDDEN_SEEN["$f"]=1
+done
+
+for pat in "${FORBIDDEN_PATTERNS[@]}"; do
+  [[ -z "$pat" || "$pat" == "null" ]] && continue
+  # Resolve pattern relative to HOST_ROOT
+  target="$HOST_ROOT/$pat"
+  # Use bash glob expansion
+  shopt -s nullglob
+  matches=( $target )
+  shopt -u nullglob
+  for match in "${matches[@]}"; do
+    rel="${match#$HOST_ROOT/}"
+    # Deduplicate against Tier 1 findings
+    [[ -n "${FORBIDDEN_SEEN[$rel]+x}" ]] && continue
+    FORBIDDEN_LIST+=("$rel")
+    FORBIDDEN_SEEN["$rel"]=1
+  done
+done
+
+# ═══════════════════════════════════════════════════════════════
+# Output
+# ═══════════════════════════════════════════════════════════════
+echo "=== Hidden Root Inventory ==="
+echo "Host: $HOST_ROOT"
+echo ""
+
+echo "Managed (${#MANAGED_LIST[@]}):"
+for i in "${MANAGED_LIST[@]}"; do echo "  $i"; done
+
+echo ""
+echo "Volatile (${#VOLATILE_LIST[@]}):"
+for i in "${VOLATILE_LIST[@]}"; do echo "  $i"; done
+
+echo ""
+echo "Excluded (${#EXCLUDED_LIST[@]}):"
+for i in "${EXCLUDED_LIST[@]}"; do echo "  $i"; done
+
+echo ""
+echo "Forbidden (${#FORBIDDEN_LIST[@]}):"
+for i in "${FORBIDDEN_LIST[@]}"; do echo "  FORBIDDEN: $i"; done
+
+echo ""
+echo "Unmanaged (${#UNMANAGED_LIST[@]}):"
+for i in "${UNMANAGED_LIST[@]}"; do echo "  UNMANAGED: $i"; done
+
+# JSON summary block
+echo ""
+echo '```json'
+printf '{"managed":%d,"volatile":%d,"excluded":%d,"forbidden":%d,"unmanaged":%d}\n' \
+  "${#MANAGED_LIST[@]}" "${#VOLATILE_LIST[@]}" "${#EXCLUDED_LIST[@]}" \
+  "${#FORBIDDEN_LIST[@]}" "${#UNMANAGED_LIST[@]}"
+echo '```'
+
+# ═══════════════════════════════════════════════════════════════
+# Enforcement
+# ═══════════════════════════════════════════════════════════════
+VIOLATIONS=0
+if (( ${#FORBIDDEN_LIST[@]} > 0 )); then
+  echo ""
+  echo "FAIL: ${#FORBIDDEN_LIST[@]} forbidden item(s) found"
+  VIOLATIONS=$((VIOLATIONS + ${#FORBIDDEN_LIST[@]}))
+fi
+if (( ${#UNMANAGED_LIST[@]} > 0 )); then
+  echo ""
+  echo "FAIL: ${#UNMANAGED_LIST[@]} unmanaged item(s) found"
+  VIOLATIONS=$((VIOLATIONS + ${#UNMANAGED_LIST[@]}))
+fi
+
+if $ENFORCE && (( VIOLATIONS > 0 )); then
+  echo ""
+  echo "ENFORCE: $VIOLATIONS violation(s) — gate FAIL"
+  exit 1
+fi
+
+if (( VIOLATIONS == 0 )); then
+  echo ""
+  echo "PASS: all hidden roots classified"
+fi
+
+exit 0

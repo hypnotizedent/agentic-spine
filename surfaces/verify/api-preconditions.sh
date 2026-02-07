@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 CAP_FILE="$REPO/ops/capabilities.yaml"
 
 # Requires yq (already a core dep of ops cap)

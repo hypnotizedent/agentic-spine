@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-SP="${SPINE_ROOT:-$HOME/Code/agentic-spine}"
+SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 cd "$SP"
 
 # Allowed root directories (plus hidden dirs and standard files)

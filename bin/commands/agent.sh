@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
 A="$SPINE/ops/runtime/inbox"
 
 sub="${1:-help}"

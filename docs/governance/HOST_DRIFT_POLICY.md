@@ -39,6 +39,26 @@ LEGACY_ROOT=/Users/ronnyworks/ronny-ops
 | `d31-home-output-sink-lock.sh` | Home-root sink lock for logs/out/err |
 | `d32-codex-instruction-source-lock.sh` | Codex instruction source lock to spine AGENTS |
 | `d33-extraction-pause-lock.sh` | Stabilization extraction pause lock |
+| `d41-hidden-root-governance-lock.sh` | Hidden-root inventory enforcement (managed/volatile/forbidden/unmanaged) |
+| `d42-code-path-case-lock.sh` | Code path case lock (`$HOME/code` not `$HOME/Code`) |
+
+## Hidden-Root Governance Contract
+
+All dot-entries under `$HOME` must be classified in `ops/bindings/host.audit.allowlist.yaml`:
+
+| Classification | Meaning | Gate Behavior |
+|---------------|---------|---------------|
+| `managed_hidden_roots` | Allowed-if-present (not must-exist) | OK |
+| `volatile_hidden_patterns` | Transient OS/tool artifacts | Tolerated, non-failing |
+| `scan_exclusions` | Skipped entirely | Not scanned |
+| `forbidden_hidden_patterns` | Must NOT exist | **FAIL** |
+| Unclassified | On disk but not in any list | **FAIL** under `--enforce` |
+
+D41 uses two-tier scanning:
+- **Tier 1:** Top-level hidden entries (depth=1 under `$HOME`)
+- **Tier 2:** Recursive forbidden pattern scan (targeted globs under known parents)
+
+D30 additionally checks `forbidden_config_files` for belt-and-suspenders secret file coverage.
 
 ## Exception Policy
 

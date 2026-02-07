@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Canonical locations
-SPINE_DIR="$HOME/Code/agentic-spine"
+SPINE_DIR="$HOME/code/agentic-spine"
 EVID_BASE="$SPINE_DIR/runs"
 RUN_ID="${1:-R$(date +%Y%m%d-%H%M%S)}"
 

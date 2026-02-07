@@ -92,6 +92,8 @@ All must PASS for core to be healthy:
 | D38 | Extraction hygiene lock (EXTRACTION_PROTOCOL enforcement) |
 | D39 | Infra hypervisor identity lock (active relocation states must pass identity invariants) |
 | D40 | Maker tools drift lock (binding validity, script hygiene, no debug/secret/tmp leaks) |
+| D41 | Hidden-root governance lock (home-root inventory + forbidden pattern enforcement) |
+| D42 | Code path case lock (runtime scripts must use `$HOME/code` not `$HOME/Code`) |
 
 ## Rules
 
