@@ -4,52 +4,102 @@
 |-------|-------|
 | Loop | `LOOP-MEDIA-STACK-RCA-20260205` |
 | Generated | `2026-02-07T20:57Z` |
+| Updated | `2026-02-07T19:28Z` |
 | Severity | high |
 
 ## Current State
 
-**Media-stack is DOWN.** SSH probe to `100.117.1.53:22` timed out at 2026-02-07 ~20:57Z (live observation, not receipt-backed). This is consistent with the daily crash pattern described in the loop. Note: `host.drift.audit` (RCAP-20260207-130245) does not capture this timeout — it runs against governed SSH targets only, and `media-stack` is missing from `ssh.targets.yaml` (see GAP-OP-010).
+**Media-stack is UP and stable (post-recovery).** VM 201 recovered via `qm stop 201 && qm start 201` on pve at ~2026-02-07T18:57Z. Quick-wins applied immediately after restart.
 
-## Root Causes (from loop evidence)
+| Metric | Pre-Recovery | Post-Recovery (T+32m) |
+|--------|-------------|----------------------|
+| Load | 1882.02 | 2.76 |
+| iowait | 43% | 48% |
+| Memory | 6.4GB/15GB | 3.6GB/15GB |
+| Containers (running) | 32 (zombied) | 27 (healthy) |
+| Containers (stopped) | 0 | 5 (quick-win) |
+| SSH | unreachable | reachable |
+| NFS mounts | deadlocked | functional |
 
-| # | Cause | Severity | Quick-Win? |
-|---|-------|----------|-----------|
-| 1 | SQLite on NFS causing database locks | HIGH | No — architectural (move DBs to local SSD) |
-| 2 | Tailscale → NFS → Docker boot dependency race | HIGH | Partial — add `systemd` ordering |
-| 3 | 32 containers on 16GB VM resource exhaustion | MEDIUM | Yes — disable Tdarr/Huntarr |
-| 4 | Tdarr/downloads saturating NFS I/O | MEDIUM | Yes — reduce concurrency or disable |
+**Note:** iowait remains high (~48%) even post-recovery. This is the NFS architectural problem, not load-related. Quick-wins reduced load but did not address the I/O bottleneck.
+
+## Root Causes (from loop evidence + live diagnosis)
+
+| # | Cause | Severity | Quick-Win? | Status |
+|---|-------|----------|-----------|--------|
+| 1 | SQLite on NFS causing database locks | HIGH | No — architectural (move DBs to local SSD) | OPEN — deferred to arch loop |
+| 2 | Tailscale → NFS → Docker boot dependency race | HIGH | Partial — add `systemd` ordering | OPEN — deferred to arch loop |
+| 3 | 32 containers on 16GB VM resource exhaustion | MEDIUM | Yes — disable Tdarr/Huntarr + downloads | DONE |
+| 4 | Tdarr/downloads saturating NFS I/O | MEDIUM | Yes — reduce concurrency or disable | DONE |
 
 ## Quick-Win Assessment
 
-**Quick wins are sufficient for stabilization.** Disabling Tdarr and Huntarr reduces container count and NFS I/O saturation — the two most immediate crash triggers. However, the SQLite-on-NFS issue remains a ticking time bomb and requires the architectural fix.
+**Quick wins applied and holding.** Five containers disabled:
+
+| Container | Purpose | Restart Policy |
+|-----------|---------|---------------|
+| tdarr | Media transcoding (heavy NFS I/O) | `no` |
+| huntarr | Missing media hunter | `no` |
+| sabnzbd | Usenet downloader (NFS write target) | `no` |
+| qbittorrent | Torrent client (NFS write target) | `no` |
+| slskd | Soulseek client | `no` |
+
+Stopping download clients (sabnzbd, qbittorrent, slskd) in addition to tdarr/huntarr further reduces NFS write pressure. This was a tactical decision beyond the original recommendation.
 
 ## Decision: Quick-Win First, Then Split
 
-**Recommended approach (2-phase):**
+**Executed.** Quick-wins applied. Architecture loop created as `LOOP-MEDIA-STACK-ARCH-20260208`.
 
-1. **Immediate (when media-stack recoverable):** Disable Tdarr + Huntarr containers (`docker stop tdarr huntarr && docker update --restart=no tdarr huntarr`). This buys stability.
+## Split-Loop Status
 
-2. **Architecture loop (new):** Create `LOOP-MEDIA-STACK-ARCH-20260208` to plan and execute SQLite → local SSD migration + boot dependency ordering. This is too large for the current RCA loop scope.
+| Loop | Scope | Status |
+|------|-------|--------|
+| `LOOP-MEDIA-STACK-RCA-20260205` | Diagnosis + quick-wins | Closing gate: 24h stability from T+0 (~2026-02-08T19:00Z) |
+| `LOOP-MEDIA-STACK-ARCH-20260208` | SQLite migration, boot ordering, VM right-sizing | Created, pending |
 
-## Split-Loop Recommendation
+## Blockers (Resolved)
 
-**YES — create split loop.** The RCA loop's scope is diagnosis + quick-wins. The architectural remediation (move databases to local SSD, restructure boot dependencies, right-size the VM) is a separate body of work with its own phases.
-
-Proposed split:
-- **LOOP-MEDIA-STACK-RCA-20260205** — close after quick-wins applied and stability confirmed over 24h
-- **LOOP-MEDIA-STACK-ARCH-20260208** (new) — SQLite migration, boot ordering, VM right-sizing
-
-## Blockers
-
-| Blocker | Status | Mitigation |
+| Blocker | Status | Resolution |
 |---------|--------|-----------|
-| Media-stack unreachable | ACTIVE | Need physical/console recovery or wait for VM auto-restart |
-| No SSH target in ssh.targets.yaml | GAP | Binding missing — needs to be added for governed access |
+| Media-stack unreachable | RESOLVED | VM 201 restarted via `qm stop/start` on pve |
+| No SSH target in ssh.targets.yaml | RESOLVED | GAP-OP-010 fixed — media-stack added (100.117.1.53, root, shop/pve) |
 
-## Next Actions
+## Completed Actions
 
-1. **Recover media-stack** — console access via `pve` (shop Proxmox, `100.96.211.33`) or wait for restart cycle
-2. **Apply quick-wins** — stop Tdarr + Huntarr, confirm stability
-3. **Add ssh.targets.yaml binding** — `media-stack` missing from governed SSH targets
-4. **Create arch loop** — scope the database migration + boot ordering work
-5. **Close RCA loop** — after quick-wins confirmed stable for 24h
+1. **Recover media-stack** — DONE. `qm stop 201 && qm start 201` via pve
+2. **Apply quick-wins** — DONE. 5 containers stopped with restart=no
+3. **Add ssh.targets.yaml binding** — DONE. GAP-OP-010 fixed
+4. **Create arch loop** — DONE. `LOOP-MEDIA-STACK-ARCH-20260208`
+
+## NFS Topology (P0 Evidence for Arch Loop)
+
+**Compose project:** `/home/media/stacks/media-stack`
+
+**NFS mounts (fstab):**
+
+| NFS Source (pve) | Local Mount | Purpose |
+|-----------------|-------------|---------|
+| `/tank/docker/media-stack` | `/mnt/docker` | Container config/volumes |
+| `/media` | `/mnt/media` | Media files (movies/tv/music/downloads) |
+
+Both use `x-systemd.requires=tailscaled.service` (Tailscale must be up before mount).
+
+**SQLite databases — ALL on NFS via `/config` bind mounts:**
+
+| Container | Config Path (NFS) | Database |
+|-----------|-------------------|----------|
+| radarr | `/mnt/docker/volumes/radarr/config/` | radarr.db (+ WAL) |
+| sonarr | `/mnt/docker/volumes/sonarr/config/` | sonarr.db |
+| prowlarr | `/mnt/docker/volumes/prowlarr/config/` | prowlarr.db |
+| jellyfin | `/mnt/docker/volumes/jellyfin/config/` | jellyfin.db |
+| lidarr | `/mnt/docker/volumes/lidarr/config/` | lidarr.db |
+| trailarr | `/mnt/docker/volumes/trailarr/config/` | trailarr.db (active WAL confirmed via lsof) |
+
+**Note:** `/opt/appdata/*.db` files exist on local disk but are **stale copies**, not actively used. All containers bind-mount config from NFS.
+
+**Boot dependency gap:** Docker systemd unit depends on `network-online.target` but has **no dependency on NFS mounts**. If Docker starts before NFS automounts complete, containers fail to bind-mount their config dirs. This is root cause #2.
+
+## Remaining
+
+5. **Close RCA loop** — gate: 24h stability confirmed (~2026-02-08T19:00Z)
+   - Check: SSH reachable, load < 10, no zombie containers, all 27 containers healthy
