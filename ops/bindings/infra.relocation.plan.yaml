@@ -1,7 +1,6 @@
 version: 1
 updated: "2026-02-06"
 owner: "@ronny"
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Infra Relocation Plan - Transactional VM/Service Move Governance
 # ═══════════════════════════════════════════════════════════════════════════
@@ -21,27 +20,24 @@ owner: "@ronny"
 # Current active relocation (one at a time)
 active_relocation:
   change_id: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
-  state: "planning"  # planning | preflight | cutover | cleanup | complete
+  state: "cutover" # planning | preflight | cutover | cleanup | complete
   owner: "@ronny"
-  approved_by: null
-  updated_at: "2026-02-06T00:00:00Z"
-
+  approved_by: '@ronny'
+  updated_at: "2026-02-07T16:50:09Z"
 # VM targets for this relocation
 vm_targets:
   - vm_id: "204"
     hostname: "infra-core"
     role: "Core infrastructure services (Cloudflared, Pi-hole, Infisical)"
-    tailscale_ip: null  # Assigned after provisioning
+    tailscale_ip: 100.92.91.128 # Assigned after provisioning
     proxmox_host: "pve"
-    status: "planned"
-
+    status: "ready"
   - vm_id: "205"
     hostname: "observability"
     role: "Monitoring stack (Prometheus, Grafana, Loki, Uptime Kuma)"
     tailscale_ip: null
     proxmox_host: "pve"
     status: "planned"
-
 # Services to relocate in this plan
 services:
   # Phase 1: infra-core VM
@@ -49,11 +45,10 @@ services:
     from_host: "docker-host"
     to_host: "infra-core"
     phase: 1
-    health_url: null  # No HTTP health, use tunnel status
+    health_url: null # No HTTP health, use tunnel status
     rollback_to: "docker-host"
     backup_target: null
-    status: "planned"
-
+    status: "migrated"
   - service: "pihole"
     from_host: "docker-host"
     to_host: "infra-core"
@@ -61,8 +56,7 @@ services:
     health_url: "http://infra-core:80/admin"
     rollback_to: "docker-host"
     backup_target: "nas:/volume1/backups/infra/pihole"
-    status: "planned"
-
+    status: "migrated"
   - service: "infisical"
     from_host: "docker-host"
     to_host: "infra-core"
@@ -70,8 +64,7 @@ services:
     health_url: "http://infra-core:8080/api/status"
     rollback_to: "docker-host"
     backup_target: "nas:/volume1/backups/infra/infisical"
-    status: "planned"
-
+    status: "migrated"
   # Phase 2: vaultwarden migration
   - service: "vaultwarden"
     from_host: "proxmox-home"
@@ -80,18 +73,16 @@ services:
     health_url: "http://infra-core:8081/alive"
     rollback_to: "proxmox-home"
     backup_target: "nas:/volume1/backups/infra/vaultwarden"
-    status: "planned"
-
+    status: "cutover"
   # Phase 4-5: observability VM
   - service: "prometheus"
-    from_host: null  # New deployment
+    from_host: null # New deployment
     to_host: "observability"
     phase: 4
     health_url: "http://observability:9090/-/healthy"
     rollback_to: null
     backup_target: null
     status: "planned"
-
   - service: "grafana"
     from_host: null
     to_host: "observability"
@@ -100,7 +91,6 @@ services:
     rollback_to: null
     backup_target: null
     status: "planned"
-
   - service: "loki"
     from_host: null
     to_host: "observability"
@@ -109,7 +99,6 @@ services:
     rollback_to: null
     backup_target: null
     status: "planned"
-
   - service: "uptime-kuma"
     from_host: null
     to_host: "observability"
@@ -118,7 +107,6 @@ services:
     rollback_to: null
     backup_target: null
     status: "planned"
-
 # SSOT files that MUST be updated when services move
 required_updates:
   - "docs/governance/SERVICE_REGISTRY.yaml"
@@ -127,13 +115,11 @@ required_updates:
   - "ops/bindings/services.health.yaml"
   - "ops/bindings/ssh.targets.yaml"
   - "ops/bindings/backup.inventory.yaml"
-
 # Temporary exceptions during migration
 exceptions:
   - label: "split-dns-during-migration"
     reason: "DNS may resolve to old host during cutover window"
     expires_at: "2026-02-15T23:59:59Z"
-
 # Rollback requirements
 rollback:
   max_rollback_window_hours: 24

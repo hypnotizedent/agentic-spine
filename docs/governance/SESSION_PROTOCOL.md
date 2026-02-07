@@ -38,7 +38,7 @@ scope: session-entry
 
 - Store any learnings in `.brain/memory.md` if that system is enabled.
 - Close open loops with `./bin/ops loops collect` before wrapping up.
-- Always produce receipts for the commands you executed. Receipts live under `receipts/sessions/R*.md` and prove what you did.
+- Always produce receipts for the commands you executed. Receipts live under `receipts/sessions/R*/receipt.md` and prove what you did.
 
 > **Quick checklist**
 >

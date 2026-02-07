@@ -66,7 +66,7 @@ queued/ ──▶ running/ ──▶ done/
 | `queued/` → `running/` | Watcher picks up file | ledger.csv (status=running) |
 | `running/` → `done/` | API returns successfully | ledger.csv (status=done) |
 | `running/` → `failed/` | API error or timeout | ledger.csv (status=failed) |
-| `running/` → `parked/` | Secrets detected (quarantine) | ledger.csv (status=parked) |
+| `running/` → `parked/` | Secrets detected (manual review) | ledger.csv (status=parked) |
 
 ---
 
@@ -76,7 +76,7 @@ queued/ ──▶ running/ ──▶ done/
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `run_id` | string | Unique run identifier (from filename) |
+| `run_id` | string | Run identity (`run_key` for watcher runs, `CAP-*` for capability runs) |
 | `created_at` | ISO8601 | When the row was created |
 | `started_at` | ISO8601 | When processing started (running) |
 | `finished_at` | ISO8601 | When processing ended (done/failed/parked) |
@@ -103,8 +103,16 @@ tail -10 mailroom/state/ledger.csv
 # Failed runs only
 grep ',failed,' mailroom/state/ledger.csv
 
-# In-flight runs (status=running, no finished_at)
-grep ',running,' mailroom/state/ledger.csv | grep ',,running,'
+# In-flight runs (latest status per run_id == running)
+python3 - <<'PY'
+import csv
+latest = {}
+with open("mailroom/state/ledger.csv", newline="", encoding="utf-8") as f:
+    for row in csv.DictReader(f):
+        latest[row["run_id"]] = row
+for row in sorted((r for r in latest.values() if r["status"] == "running"), key=lambda r: r["created_at"]):
+    print(f'{row["run_id"]}\t{row["prompt_file"]}\t{row["created_at"]}')
+PY
 
 # Count by status
 awk -F',' '{print $5}' mailroom/state/ledger.csv | sort | uniq -c
@@ -302,14 +310,48 @@ Every `done` ledger entry should have:
 ### Verify Consistency
 
 ```bash
-# Get all done run_ids from ledger
-grep ',done,' mailroom/state/ledger.csv | cut -d',' -f1 | sort -u > /tmp/ledger-done.txt
+# Reconcile latest done rows against outbox + receipt with run_key-aware logic.
+python3 - <<'PY'
+import csv
+from pathlib import Path
 
-# Get all receipt folders
-ls receipts/sessions/ | sed 's/^R//' | sort -u > /tmp/receipts.txt
+ledger = Path("mailroom/state/ledger.csv")
+receipts = Path("receipts/sessions")
+outbox = Path("mailroom/outbox")
 
-# Find ledger entries without receipts
-comm -23 /tmp/ledger-done.txt /tmp/receipts.txt
+latest = {}
+with ledger.open(newline="", encoding="utf-8") as f:
+    for row in csv.DictReader(f):
+        latest[row["run_id"]] = row
+
+missing_receipts = []
+missing_outbox = []
+
+for row in latest.values():
+    if row["status"] != "done":
+        continue
+
+    run_id = row["run_id"]
+    prompt_file = row["prompt_file"]
+    run_key = Path(prompt_file).stem if prompt_file.endswith((".md", ".txt")) else run_id
+
+    receipt_file = receipts / f"R{run_key}" / "receipt.md"
+    if not receipt_file.exists():
+        missing_receipts.append(run_key)
+
+    result_file = row.get("result_file", "")
+    if result_file and result_file != "receipt.md":
+        if not (outbox / result_file).exists():
+            missing_outbox.append(run_key)
+
+print(f"missing_receipts={len(missing_receipts)}")
+for key in sorted(missing_receipts):
+    print(f"  receipt_missing: {key}")
+
+print(f"missing_outbox={len(missing_outbox)}")
+for key in sorted(missing_outbox):
+    print(f"  outbox_missing: {key}")
+PY
 ```
 
 ---

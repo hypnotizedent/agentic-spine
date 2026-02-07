@@ -5,7 +5,7 @@
 > doc in two hops, never leave `/Code`.
 >
 > **Status:** authoritative
-> **Last verified:** 2026-02-05
+> **Last verified:** 2026-02-06
 
 ---
 
@@ -18,7 +18,7 @@ The invariants. If a drift gate fails, one of these was violated.
 | [AGENT_CONTRACT.md](core/AGENT_CONTRACT.md) | Allowable agent behavior — the rules every agent follows |
 | [AGENT_OUTPUT_CONTRACT.md](core/AGENT_OUTPUT_CONTRACT.md) | Required output block structure |
 | [RECEIPTS_CONTRACT.md](core/RECEIPTS_CONTRACT.md) | Receipt format, proof rules, ledger entries |
-| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D33) |
+| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D37) |
 | [SPINE.md](core/SPINE.md) | Spine architecture and design principles |
 | [SPINE_SESSION_HEADER.md](core/SPINE_SESSION_HEADER.md) | Session header format for agent context |
 | [SPINE_STATE.md](core/SPINE_STATE.md) | Canonical spine state — what lives here, no legacy deps |
@@ -75,6 +75,8 @@ The authority chain. When in doubt, these are the source of truth.
 | [BACKUP_GOVERNANCE.md](governance/BACKUP_GOVERNANCE.md) | Backup strategy, verification, freshness rules |
 | [REBOOT_HEALTH_GATE.md](governance/REBOOT_HEALTH_GATE.md) | Safe reboot procedures and health gates |
 | [INFRASTRUCTURE_AUTHORITY.md](governance/INFRASTRUCTURE_AUTHORITY.md) | Infrastructure authority rules |
+| [INFRA_RELOCATION_PROTOCOL.md](governance/INFRA_RELOCATION_PROTOCOL.md) | Transactional VM/service relocation workflow + D35/D37 guardrail contracts |
+| [PHASE4_OBSERVABILITY_RUNBOOK.md](governance/PHASE4_OBSERVABILITY_RUNBOOK.md) | Strict execution runbook for observability VM rollout (phase-gated) |
 | [INGRESS_AUTHORITY.md](governance/INGRESS_AUTHORITY.md) | Ingress/routing authority |
 | [OPS_PATCH_HISTORY.md](governance/OPS_PATCH_HISTORY.md) | Critical ops path hardening log |
 | [SCRIPTS_REGISTRY.md](governance/SCRIPTS_REGISTRY.md) | Script inventory and locations |
@@ -165,7 +167,7 @@ After editing any doc in this tree:
 # Lint: folder placement, metadata headers, README registration, legacy isolation
 ./bin/ops cap run docs.lint
 
-# Verify drift gates still pass (D1-D33)
+# Verify drift gates still pass (D1-D37)
 ./bin/ops cap run spine.verify
 
 # Verify workbench infrastructure docs intact (120 files, 19 dirs)

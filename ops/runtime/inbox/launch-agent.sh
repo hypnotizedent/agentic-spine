@@ -15,7 +15,7 @@
 
 set -eo pipefail
 
-REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 BRAIN="$REPO/.brain"
 AGENT="${1:-claude}"
 

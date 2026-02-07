@@ -173,6 +173,12 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 ---
 
+## Open Network Tasks (shop)
+
+- [ ] T-Mobile GAR4 at 192.168.12.1 still pointing DHCP DNS to 192.168.12.191 (docker-host); update it to 192.168.12.204 (infra-core) before hauling more services off docker-host.
+
+---
+
 ## Related Documents
 
 - [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md)

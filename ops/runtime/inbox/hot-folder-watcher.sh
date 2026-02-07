@@ -32,7 +32,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 # SPINE paths (canonical)
-SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
 INBOX="${SPINE_INBOX:-$SPINE/mailroom/inbox}"
 OUTBOX="${SPINE_OUTBOX:-$SPINE/mailroom/outbox}"
 STATE_DIR="${SPINE_STATE:-$SPINE/mailroom/state}"
@@ -45,11 +45,8 @@ DONE="${INBOX}/done"
 FAILED="${INBOX}/failed"
 PARKED="${INBOX}/parked"
 
-# Quarantine for secrets
-QUARANTINE="${HOME}/Desktop/spine-quarantine"
-
 # Repo paths
-REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 BRAIN_RULES="${REPO}/.brain/rules.md"
 
 # Model config
@@ -164,22 +161,11 @@ setup_folders() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Run ID Generation (collision-proof)
+# Run Key Identity
 # ─────────────────────────────────────────────────────────────────────────────
-extract_or_generate_run_id() {
+derive_run_key() {
     local basename="$1"
-
-    # If filename contains __R followed by alphanumeric, extract it
-    if [[ "$basename" =~ __R([a-zA-Z0-9_-]+) ]]; then
-        echo "${BASH_REMATCH[1]}"
-    else
-        # Generate collision-proof ID: YYYYMMDD-HHMMSS-<6 random chars>
-        local date_part
-        date_part="$(date +%Y%m%d-%H%M%S)"
-        local random_suffix
-        random_suffix="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6 || echo "$$")"
-        echo "${date_part}-${random_suffix}"
-    fi
+    echo "${basename%.*}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,15 +285,11 @@ quarantine_file() {
     local run_id="$2"
     local basename
     basename="$(basename "$file")"
-    local date_dir
-    date_dir="$(date +%Y-%m-%d)"
+    mv "$file" "${PARKED}/${basename}"
 
-    mkdir -p "${QUARANTINE}/${date_dir}"
-    mv "$file" "${QUARANTINE}/${date_dir}/${basename}"
-
-    ledger_append "$run_id" "failed" "$basename" "" "quarantined:secrets_detected" "none"
-    log "QUARANTINED: $basename (potential secrets detected)"
-    notify "⚠️ File quarantined: $basename"
+    ledger_append "$run_id" "parked" "$basename" "" "parked:secrets_detected" "none"
+    log "PARKED: $basename (potential secrets detected)"
+    notify "⚠️ File parked: $basename"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -466,13 +448,15 @@ process_file() {
     local file="$1"
     local basename
     basename="$(basename "$file")"
+    local run_key
+    run_key="$(derive_run_key "$basename")"
 
     # Reset RAG sources (prevents leak from previous run if early return)
     RAG_SOURCES_YAML=""
 
-    # Generate run ID
+    # Runtime identity: run_id == run_key for ledger/receipt/outbox consistency.
     local run_id
-    run_id="$(extract_or_generate_run_id "$basename")"
+    run_id="$run_key"
 
     log "Processing: $basename (run_id: $run_id)"
 
@@ -515,7 +499,6 @@ process_file() {
 
     # Dispatch
     local response
-    local run_key="${basename%.md}"
     local outfile="${OUTBOX}/${run_key}__RESULT.md"
     local packet_text
     packet_text="$(printf '%b' "$SUPERVISOR_PACKET")"
@@ -593,6 +576,31 @@ process_file() {
     fi
 }
 
+count_lane_files() {
+    local lane_dir="$1"
+    find "$lane_dir" -maxdepth 1 -type f \
+        ! -name '.keep' \
+        ! -name '.DS_Store' \
+        ! -name '.*.swp' \
+        2>/dev/null | wc -l | tr -d ' '
+}
+
+drain_existing_queue() {
+    local drained=0
+    local queued_file=""
+
+    while IFS= read -r queued_file; do
+        [[ -n "$queued_file" ]] || continue
+        process_file "$queued_file"
+        drained=$((drained + 1))
+    done < <(find "$QUEUED" -maxdepth 1 -type f \
+        ! -name '.*' \
+        \( -name '*.md' -o -name '*.txt' \) \
+        | sort)
+
+    log "Startup drain complete: ${drained} file(s) processed"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Watch loop (only watches queued/)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -607,6 +615,8 @@ watch_inbox() {
     echo "   Press Ctrl+C to stop"
     echo "   Lock: $LOCK_DIR"
     echo "   Ledger: $LEDGER"
+
+    drain_existing_queue
 
     fswatch -0 --event Created --event Updated "$QUEUED" | while IFS= read -r -d '' file; do
         # Skip directories and hidden files
@@ -628,11 +638,11 @@ show_status() {
 
     # Counts
     local queued_count running_count done_count failed_count parked_count
-    queued_count="$(find "$QUEUED" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
-    running_count="$(find "$RUNNING" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
-    done_count="$(find "$DONE" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
-    failed_count="$(find "$FAILED" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
-    parked_count="$(find "$PARKED" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+    queued_count="$(count_lane_files "$QUEUED")"
+    running_count="$(count_lane_files "$RUNNING")"
+    done_count="$(count_lane_files "$DONE")"
+    failed_count="$(count_lane_files "$FAILED")"
+    parked_count="$(count_lane_files "$PARKED")"
 
     echo "  Queued:   $queued_count"
     echo "  Running:  $running_count"

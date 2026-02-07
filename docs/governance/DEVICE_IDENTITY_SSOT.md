@@ -108,7 +108,7 @@ ping -c1 nas pihole-home ha vault
 | Switch mgmt IP | 192.168.12.1 (Dell N2024P) |
 | iDRAC | `idrac-shop` — 192.168.12.250 (LAN-only) |
 | Proxmox Host | `pve` (Dell R730XD) |
-| Production VMs | docker-host, automation-stack (core); media-stack, immich-1 (deferred) |
+| Production VMs | docker-host, infra-core, automation-stack (core); media-stack, immich-1 (deferred) |
 | NVR | `nvr-shop` — 192.168.12.216 (LAN-only) |
 | WiFi AP | `ap-shop` — 192.168.12.249 (LAN-only) |
 
@@ -144,6 +144,7 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | macbook | 100.85.186.7 | Mobile | Workstation + Spine CLI (RAG deferred) |
 | pve | 100.96.211.33 | Shop | Proxmox VE (shop hypervisor) |
 | docker-host | 100.92.156.118 | Shop | Production docker (Mint OS) |
+| infra-core | 100.92.91.128 | Shop | Core infra (Cloudflared, Pi-hole, Infisical) |
 | automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
 | proxmox-home | 100.103.99.62 | Home | Proxmox VE (home host) |
 | nas | 100.102.199.111 | Home | Synology NAS |
@@ -210,6 +211,7 @@ curl -s http://automation-stack:5678/healthz
 | MacBook Pro M4 | `macbook` | 100.85.186.7 | Workstation + Spine CLI (RAG deferred) | Mobile | `ping macbook` |
 | Dell R730XD | `pve` | 100.96.211.33 | Proxmox Host (Shop) | Shop | `ssh pve uptime` |
 | docker-host VM | `docker-host` | 100.92.156.118 | Mint OS + Production | Shop | `ssh docker-host docker ps` |
+| infra-core VM | `infra-core` | 100.92.91.128 | Core Infra (VM 204) | Shop | `ssh infra-core docker ps` |
 | Beelink Mini | `proxmox-home` | 100.103.99.62 | Proxmox Host (Home) | Home | `ssh proxmox-home uptime` |
 
 ### Tier 2: Production Services (Core)
@@ -438,6 +440,7 @@ These are intentionally tracked as **few consolidated loops** (to prevent loop s
 CRITICAL HOSTS (Tier 1):
   macbook      100.85.186.7    Workstation + RAG
   docker-host  100.92.156.118  Mint OS production
+  infra-core   100.92.91.128   Core infra (VM 204)
   pve          100.96.211.33   Proxmox (shop)
   proxmox-home 100.103.99.62   Proxmox (home)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/Code/agentic-spine}"
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 V="$SPINE_ROOT/surfaces/verify"
 
 if [[ ! -d "$V" ]]; then

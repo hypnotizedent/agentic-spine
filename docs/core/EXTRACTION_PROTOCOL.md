@@ -91,3 +91,140 @@ After extraction, consider adding a drift gate (D18, D19, etc.) if the capabilit
 - Touches an external surface (API, remote host)
 - Could leak secrets or paths
 - Has legacy markers that could creep back
+
+---
+
+# Service Extraction (Infrastructure)
+
+The above sections cover **capability extraction** (code/scripts). This section covers **service extraction** (containers, stacks, infrastructure).
+
+## Classification
+
+Before extracting any service, classify it:
+
+| Type | Criteria | Examples |
+|------|----------|----------|
+| **Utility** | 1-2 containers, no dedicated docs, just runs | Vaultwarden, Pi-hole, Immich, HomeAssistant |
+| **Stack** | 3-10 containers, needs lessons/runbook, has dependencies | Media-stack, Observability, Automation |
+| **Pillar** | 10+ containers OR business domain OR separate lifecycle | mint-os, Finance |
+
+## Decision Tree
+
+```
+Q1: How many services/containers?
+    1-2     → UTILITY
+    3-10    → STACK
+    10+     → PILLAR
+
+Q2: Does it have its own release lifecycle?
+    No      → UTILITY or STACK
+    Yes     → PILLAR (consider separate repo)
+
+Q3: How much documentation needed?
+    Just config         → UTILITY
+    Lessons + runbook   → STACK
+    Architecture docs   → PILLAR
+```
+
+## Requirements by Type
+
+### Utility (Simple Service)
+
+**Creates:**
+- Entry in `docs/governance/SERVICE_REGISTRY.yaml`
+- Entry in `docs/governance/STACK_REGISTRY.yaml` (compose location)
+- Entry in `ops/bindings/services.health.yaml` (health check)
+- Entry in `ops/bindings/backup.inventory.yaml` (if stateful)
+
+**Does NOT create:**
+- Dedicated folder under `docs/`
+- Dedicated binding file
+- Separate documentation
+
+**Rationale:** Simple services don't need sprawl. Registry entries are sufficient.
+
+### Stack (Multi-Service)
+
+**Creates:**
+- All utility requirements (registry entries)
+- `ops/bindings/<stack>.binding.yaml` — stack-specific config
+- `docs/brain/lessons/<STACK>_LESSONS.md` — hard-won knowledge
+- Loop in `mailroom/state/loop-scopes/` — extraction tracking
+
+**Does NOT create:**
+- Dedicated folder under `docs/governance/`
+- Multiple binding files for same stack
+
+**Rationale:** Stacks need some documentation but shouldn't sprawl into dedicated folders.
+
+### Pillar (Business Domain)
+
+**Creates:**
+- All stack requirements
+- `docs/pillars/<pillar>/README.md` — overview
+- `docs/pillars/<pillar>/ARCHITECTURE.md` — technical design
+- `docs/pillars/<pillar>/EXTRACTION_STATUS.md` — progress tracking
+- Multiple loops for phased extraction
+
+**Consider:**
+- Separate repo if >50 files or independent release cycle
+
+**Rationale:** Pillars are complex enough to warrant dedicated structure.
+
+## Admission Checklists
+
+### Utility Checklist
+
+Before marking extraction complete:
+
+- [ ] Entry in SERVICE_REGISTRY.yaml
+- [ ] Entry in STACK_REGISTRY.yaml (compose location)
+- [ ] Health check defined
+- [ ] Backup target defined (if stateful)
+- [ ] No dedicated folder created
+- [ ] `./bin/ops cap run spine.verify` passes
+
+### Stack Checklist
+
+Before marking extraction complete:
+
+- [ ] All services in SERVICE_REGISTRY.yaml
+- [ ] Compose files in STACK_REGISTRY.yaml
+- [ ] Binding file: `ops/bindings/<stack>.binding.yaml`
+- [ ] Lessons file: `docs/brain/lessons/<STACK>_LESSONS.md`
+- [ ] Loop scope in `mailroom/state/loop-scopes/`
+- [ ] No `docs/<stack>/` folder (use brain/lessons)
+- [ ] `./bin/ops cap run spine.verify` passes
+
+### Pillar Checklist
+
+Before marking extraction complete:
+
+- [ ] Dedicated folder: `docs/pillars/<pillar>/`
+- [ ] README.md with overview
+- [ ] ARCHITECTURE.md with technical design
+- [ ] EXTRACTION_STATUS.md tracking progress
+- [ ] All services in registries
+- [ ] All binding files created
+- [ ] All loops documented
+- [ ] Consider: separate repo needed?
+- [ ] `./bin/ops cap run spine.verify` passes
+
+## Anti-Patterns
+
+| Don't | Why | Instead |
+|-------|-----|---------|
+| Create `docs/<service>/` for utilities | Sprawl | Use registries only |
+| Create multiple binding files per stack | Fragmentation | One `<stack>.binding.yaml` |
+| Skip registry entries | Invisible to agents | Always update registries first |
+| Extract without classification | No pattern | Ask: utility, stack, or pillar? |
+| Create folder before classifying | Premature structure | Classify first, structure second |
+
+## Cross-References
+
+| Document | Purpose |
+|----------|---------|
+| `docs/core/AGENTIC_GAP_MAP.md` | Tracks extraction coverage |
+| `docs/governance/SERVICE_REGISTRY.yaml` | Service locations |
+| `docs/governance/STACK_REGISTRY.yaml` | Compose file authority |
+| `mailroom/state/INFRA_MASTER_PLAN.md` | VM architecture roadmap |

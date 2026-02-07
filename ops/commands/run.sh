@@ -58,7 +58,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Resolve SPINE_REPO
-SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 
 INBOX="${SPINE_INBOX:-$SPINE_REPO/mailroom/inbox}"
 OUTBOX="${SPINE_OUTBOX:-$SPINE_REPO/mailroom/outbox}"

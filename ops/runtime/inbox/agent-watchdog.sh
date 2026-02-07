@@ -18,7 +18,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 # SPINE paths (canonical)
-SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
 OUTBOX="${SPINE_OUTBOX:-$SPINE/mailroom/outbox}"
 LOG="${SPINE_LOGS:-$SPINE/mailroom/logs}/watchdog.out"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

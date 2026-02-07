@@ -25,7 +25,7 @@ set -eo pipefail
 REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
 if [[ -z "${REPO_ROOT:-}" ]]; then
   echo "ERROR: REPO_ROOT not set and not in a git repo." >&2
-  echo "Run from inside agentic-spine or set REPO_ROOT=$HOME/Code/agentic-spine" >&2
+  echo "Run from inside agentic-spine or set REPO_ROOT=$HOME/code/agentic-spine" >&2
   exit 1
 fi
 MANIFEST="$REPO_ROOT/infrastructure/GOVERNANCE_MANIFEST.yaml"

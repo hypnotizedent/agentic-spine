@@ -22,7 +22,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
-SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
 QUEUED="${SPINE_INBOX:-$SPINE/mailroom/inbox}/queued"
 SESSION="${SESSION_ID:-S$(date +%Y%m%d-%H%M%S)}"
 SLUG="${1:-task}"

@@ -31,7 +31,7 @@ fi
 
 set -eo pipefail
 
-REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 RECEIPTS_DIR="$REPO/receipts/sessions"
 MEMORY_FILE="$REPO/.brain/memory.md"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)

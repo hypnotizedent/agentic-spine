@@ -17,7 +17,7 @@ fi
 
 LABEL="com.ronny.agent-inbox"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
-SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
 STATE_DIR="${SPINE_STATE:-$SPINE/mailroom/state}"
 PID_FILE="${STATE_DIR}/agent-inbox.pid"
 LOCK_DIR="${STATE_DIR}/locks/agent-inbox.lock"

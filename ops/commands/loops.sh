@@ -13,7 +13,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 STATE_DIR="$SPINE_REPO/mailroom/state"
 LOOPS_FILE="$STATE_DIR/open_loops.jsonl"
 RECEIPTS_DIR="$SPINE_REPO/receipts/sessions"
@@ -50,6 +50,9 @@ Examples:
   ops loops collect
   ops loops close OL_20260201_183012_vendor
   ops loops summary
+
+Environment:
+  LOOPS_LEDGER_FAILURE_WINDOW_HOURS  Failed-run reconciliation window (default: 6)
 EOF
 }
 
@@ -177,22 +180,180 @@ EOF
     fi
 }
 
-# Collect loops from recent receipts
+collect_failed_from_ledger() {
+    python3 - "$LOOPS_FILE" "$LEDGER" "$RECEIPTS_DIR" "$OUTBOX_DIR" <<'PY'
+import csv
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+loops_file = Path(sys.argv[1])
+ledger_file = Path(sys.argv[2])
+receipts_dir = Path(sys.argv[3])
+outbox_dir = Path(sys.argv[4])
+
+window_hours = int(os.environ.get("LOOPS_LEDGER_FAILURE_WINDOW_HOURS", "6"))
+now_utc = datetime.now(timezone.utc)
+cutoff = now_utc - timedelta(hours=window_hours) if window_hours > 0 else None
+
+existing_run_keys = set()
+existing_loop_ids = set()
+
+if loops_file.exists():
+    with loops_file.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            run_key = row.get("run_key")
+            loop_id = row.get("loop_id")
+            if run_key:
+                existing_run_keys.add(run_key)
+            if loop_id:
+                existing_loop_ids.add(loop_id)
+
+latest_by_run_id = {}
+if ledger_file.exists():
+    with ledger_file.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            run_id = row.get("run_id", "")
+            if run_id:
+                latest_by_run_id[run_id] = row
+
+def parse_iso(ts: str):
+    ts = (ts or "").strip()
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+def new_loop_id(run_key: str) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    suffix = re.sub(r"[^A-Za-z0-9]+", "_", run_key).strip("_")[:10] or "failed"
+    base = f"OL_{ts}_{suffix}"
+    if base not in existing_loop_ids:
+        existing_loop_ids.add(base)
+        return base
+
+    i = 2
+    while True:
+        candidate = f"{base}{i}"
+        if candidate not in existing_loop_ids:
+            existing_loop_ids.add(candidate)
+            return candidate
+        i += 1
+
+new_rows = []
+for run_id, row in latest_by_run_id.items():
+    status = (row.get("status") or "").strip().lower()
+    if status != "failed":
+        continue
+
+    created_at_row = parse_iso(row.get("created_at"))
+    if cutoff is not None:
+        if created_at_row is None or created_at_row < cutoff:
+            continue
+
+    prompt_file = (row.get("prompt_file") or "").strip()
+    if prompt_file.endswith(".md") or prompt_file.endswith(".txt"):
+        run_key = Path(prompt_file).stem
+    else:
+        run_key = run_id
+
+    if not run_key or run_key in existing_run_keys:
+        continue
+
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    loop_id = new_loop_id(run_key)
+
+    evidence = [str(ledger_file)]
+
+    receipt_candidates = [
+        receipts_dir / f"R{run_key}" / "receipt.md",
+        receipts_dir / f"R{run_id}" / "receipt.md",
+    ]
+    for cand in receipt_candidates:
+        if cand.exists():
+            evidence.append(str(cand))
+            break
+
+    result_file = (row.get("result_file") or "").strip()
+    if result_file and result_file != "receipt.md":
+        outbox_file = outbox_dir / result_file
+        if outbox_file.exists():
+            evidence.append(str(outbox_file))
+
+    new_row = {
+        "loop_id": loop_id,
+        "run_key": run_key,
+        "created_at": created_at,
+        "status": "open",
+        "severity": "high",
+        "owner": "unassigned",
+        "title": f"Run failed: {run_key}",
+        "next_action": "Investigate failure and retry or escalate",
+        "evidence": evidence,
+    }
+    new_rows.append(new_row)
+    existing_run_keys.add(run_key)
+
+if not new_rows:
+    if cutoff is not None:
+        print(f"  LEDGER: no new failed-run loops in last {window_hours}h")
+    else:
+        print("  LEDGER: no new failed-run loops")
+    sys.exit(0)
+
+loops_file.parent.mkdir(parents=True, exist_ok=True)
+with loops_file.open("a", encoding="utf-8") as f:
+    for row in new_rows:
+        f.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+print(f"  LEDGER: created {len(new_rows)} failed-run loop(s)")
+for row in new_rows:
+    print(f"  CREATED: {row['loop_id']} (high) - {row['title']}")
+PY
+}
+
+# Collect loops from receipts and ledger latest-state failures.
 collect_loops() {
     echo "=== COLLECTING OPEN LOOPS ==="
     echo ""
 
-    local count=0
+    local scanned=0
+    local before_receipt_lines=0
+    local after_receipt_lines=0
+    local before_ledger_lines=0
+    local after_ledger_lines=0
 
-    # Scan recent receipt directories (last 50)
-    for receipt_dir in $(ls -1td "$RECEIPTS_DIR"/* 2>/dev/null | head -50); do
+    before_receipt_lines="$(wc -l < "$LOOPS_FILE" 2>/dev/null || echo 0)"
+
+    while IFS= read -r receipt_dir; do
         [[ -d "$receipt_dir" ]] || continue
         extract_loops_from_receipt "$receipt_dir"
-        count=$((count + 1))
-    done
+        scanned=$((scanned + 1))
+    done < <(find "$RECEIPTS_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
+
+    after_receipt_lines="$(wc -l < "$LOOPS_FILE" 2>/dev/null || echo 0)"
+
+    before_ledger_lines="$after_receipt_lines"
+    collect_failed_from_ledger
+    after_ledger_lines="$(wc -l < "$LOOPS_FILE" 2>/dev/null || echo 0)"
 
     echo ""
-    echo "Scanned $count receipts"
+    echo "Scanned receipts: $scanned"
+    echo "Created from receipts: $((after_receipt_lines - before_receipt_lines))"
+    echo "Created from ledger failures: $((after_ledger_lines - before_ledger_lines))"
     echo "Loops file: $LOOPS_FILE"
 }
 

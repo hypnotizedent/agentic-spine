@@ -21,7 +21,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 LABEL="com.ronny.agent-inbox"
-SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
 STATE_DIR="${SPINE_STATE:-$SPINE/mailroom/state}"
 INBOX="${SPINE_INBOX:-$SPINE/mailroom/inbox}"
 OUTBOX="${SPINE_OUTBOX:-$SPINE/mailroom/outbox}"
@@ -89,7 +89,11 @@ fi
 echo
 echo "== QUEUE =="
 for lane in queued running done failed parked; do
-  count="$(find "$INBOX/$lane" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+  count="$(find "$INBOX/$lane" -maxdepth 1 -type f \
+    ! -name '.keep' \
+    ! -name '.DS_Store' \
+    ! -name '.*.swp' \
+    2>/dev/null | wc -l | tr -d ' ')"
   printf "%-10s %s\n" "$lane:" "$count"
 done
 

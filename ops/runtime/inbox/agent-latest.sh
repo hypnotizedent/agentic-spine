@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
 OUTBOX="${SPINE_OUTBOX:-$SPINE/mailroom/outbox}"
 LINES="${AGENT_LATEST_LINES:-80}"
 

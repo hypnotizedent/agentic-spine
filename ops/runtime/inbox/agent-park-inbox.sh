@@ -20,7 +20,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 # SPINE paths (canonical)
-SPINE="${SPINE_REPO:-$HOME/Code/agentic-spine}"
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
 INBOX="${SPINE_INBOX:-$SPINE/mailroom/inbox}"
 PARK_BASE="${SPINE_STATE:-$SPINE/mailroom/state}/backups/inbox-parked"
 TS="$(date +%Y%m%d-%H%M%S)"
