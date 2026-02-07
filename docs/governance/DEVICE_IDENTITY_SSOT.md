@@ -90,7 +90,7 @@ This document establishes:
 | LXCs | pihole-home, download-home |
 | NAS | Synology 918+ (`nas`) |
 | Home Assistant | `ha` (VM on proxmox-home) |
-| Vaultwarden | `vault` (LXC on proxmox-home) |
+| Vaultwarden | `vault` (VM on proxmox-home, VMID 102) |
 
 **Verification:**
 ```bash
@@ -378,7 +378,7 @@ These are intentionally tracked as **few consolidated loops** (to prevent loop s
 
 | Device | Former IP | Decommissioned | Reason |
 |--------|-----------|----------------|--------|
-| immich (home) | 100.83.160.109 | Pending | Migrating to shop immich-1 |
+| `immich` (home) | 100.83.160.109 | Pending | Migrating to shop `immich-1` |
 
 ---
 

@@ -549,6 +549,30 @@ else
   warn "secrets namespace lock gate not present"
 fi
 
+# D44: CLI tools discovery lock (inventory + cross-refs + probes)
+echo -n "D44 cli tools discovery lock... "
+if [[ -x "$SP/surfaces/verify/d44-cli-tools-discovery-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d44-cli-tools-discovery-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d44-cli-tools-discovery-lock.sh failed"
+  fi
+else
+  warn "cli tools discovery lock gate not present"
+fi
+
+# D45: Naming consistency lock (cross-file identity surface verification)
+echo -n "D45 naming consistency lock... "
+if [[ -x "$SP/surfaces/verify/d45-naming-consistency-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d45-naming-consistency-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d45-naming-consistency-lock.sh failed"
+  fi
+else
+  warn "naming consistency lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

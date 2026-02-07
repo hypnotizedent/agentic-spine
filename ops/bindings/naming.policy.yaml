@@ -1,0 +1,266 @@
+# Naming Policy SSOT
+# Canonical identity surface governance for all infrastructure hosts.
+#
+# References: GAP-OP-016, LOOP-NAMING-GOVERNANCE-20260207 (P1)
+# Audit basis: ops/staged/identity-surface-audit.yaml (P0)
+#
+# RULES:
+#   - Each host has ONE canonical name. All governed surfaces must match it.
+#   - Exceptions must be listed in allowed_exceptions with justification.
+#   - This file is the authority for what names SHOULD be.
+#   - infra.placement.policy.yaml is the authority for site/kind.
+#   - Drift gate D45 enforces cross-file consistency.
+
+version: 1
+updated: "2026-02-07"
+owner: "@ronny"
+
+# Identity surfaces checked, in authority order.
+# Top = most authoritative. Bottom = derived / informational.
+surface_authority_order:
+  - tailscale_name        # MagicDNS registration — primary identity
+  - ssh_target_id         # ops/bindings/ssh.targets.yaml
+  - device_identity       # docs/governance/DEVICE_IDENTITY_SSOT.md
+  - placement_host        # ops/bindings/infra.placement.policy.yaml
+  - compose_target        # ops/bindings/docker.compose.targets.yaml
+  - system_hostname       # `hostname` on the machine (may differ — see exceptions)
+  - pve_node              # /etc/pve/nodes/<name>/ (hypervisors only)
+
+naming_convention:
+  rules:
+    - "Lowercase only, hyphens for separators"
+    - "Max 20 characters (Tailscale limit)"
+    - "No underscores (breaks some DNS resolvers)"
+    - "Functional names (what it does), not arbitrary names"
+  patterns:
+    single_purpose: "{function}"
+    multi_location: "{function}-{location}"
+    stack_role: "{stack}-{role}"
+
+# ─── Canonical Hosts ───────────────────────────────────────────────
+#
+# surfaces: which binding files MUST contain this host's canonical_name.
+#   ssh_target      → ssh.targets.yaml must have matching id
+#   placement       → infra.placement.policy.yaml must have matching hosts key
+#   compose_target  → docker.compose.targets.yaml must have matching target key
+#   device_identity → DEVICE_IDENTITY_SSOT.md must mention `canonical_name`
+#
+# verification_state:
+#   reachable   — SSH verified during P0 audit
+#   unreachable — SSH denied or broken (cannot verify system_hostname)
+#   offline     — host powered off (cannot verify anything)
+#   no_ssh      — no SSH target configured (workstation, or not yet onboarded)
+
+hosts:
+  - canonical_name: pve
+    kind: proxmox
+    site: shop
+    surfaces:
+      ssh_target: true
+      placement: true
+      compose_target: false
+      device_identity: true
+    verification_state: reachable
+
+  - canonical_name: proxmox-home
+    kind: proxmox
+    site: home
+    surfaces:
+      ssh_target: true
+      placement: true
+      compose_target: false
+      device_identity: true
+    verification_state: reachable
+    notes: "PVE node still under /etc/pve/nodes/pve/ — GAP-OP-015 open"
+
+  - canonical_name: docker-host
+    kind: vm
+    site: shop
+    surfaces:
+      ssh_target: true
+      placement: true
+      compose_target: true
+      device_identity: true
+    verification_state: reachable
+
+  - canonical_name: infra-core
+    kind: vm
+    site: shop
+    surfaces:
+      ssh_target: true
+      placement: true
+      compose_target: true
+      device_identity: true
+    verification_state: reachable
+
+  - canonical_name: nas
+    kind: storage
+    site: home
+    surfaces:
+      ssh_target: true
+      placement: true
+      compose_target: false
+      device_identity: true
+    verification_state: reachable
+
+  - canonical_name: vault
+    kind: vm
+    site: home
+    surfaces:
+      ssh_target: true
+      placement: true
+      compose_target: false
+      device_identity: true
+    verification_state: reachable
+    notes: "VMID 102 on proxmox-home. Was misclassified as LXC — fixed in P1."
+
+  - canonical_name: automation-stack
+    kind: vm
+    site: shop
+    surfaces:
+      ssh_target: true
+      placement: true
+      compose_target: true
+      device_identity: true
+    verification_state: reachable
+
+  - canonical_name: ha
+    kind: vm
+    site: home
+    surfaces:
+      ssh_target: true
+      placement: false
+      compose_target: false
+      device_identity: true
+    verification_state: reachable
+
+  - canonical_name: pihole-home
+    kind: lxc
+    site: home
+    surfaces:
+      ssh_target: true
+      placement: false
+      compose_target: false
+      device_identity: true
+    verification_state: reachable
+
+  - canonical_name: media-stack
+    kind: vm
+    site: shop
+    surfaces:
+      ssh_target: true
+      placement: true
+      compose_target: true
+      device_identity: true
+    verification_state: reachable
+
+  - canonical_name: download-home
+    kind: lxc
+    site: home
+    surfaces:
+      ssh_target: true
+      placement: false
+      compose_target: false
+      device_identity: true
+    verification_state: unreachable
+    notes: "SSH permission denied. pct exec broken (GAP-OP-015)."
+
+  - canonical_name: macbook
+    kind: workstation
+    site: mobile
+    surfaces:
+      ssh_target: false
+      placement: true
+      compose_target: false
+      device_identity: true
+    verification_state: reachable
+
+  - canonical_name: immich
+    kind: vm
+    site: home
+    surfaces:
+      ssh_target: false
+      placement: false
+      compose_target: false
+      device_identity: true
+    verification_state: offline
+    notes: "VM 101 on proxmox-home. Stopped. Cannot start (GAP-OP-015)."
+
+  - canonical_name: immich-1
+    kind: vm
+    site: shop
+    surfaces:
+      ssh_target: false
+      placement: false
+      compose_target: false
+      device_identity: true
+    verification_state: no_ssh
+    notes: "Shop Immich instance. No SSH target onboarded."
+
+  - canonical_name: observability
+    kind: vm
+    site: shop
+    surfaces:
+      ssh_target: true
+      placement: true
+      compose_target: false
+      device_identity: false
+    verification_state: no_ssh
+    notes: "VM 205. Not yet provisioned. SSH target has host: null."
+
+# ─── Allowed Exceptions ───────────────────────────────────────────
+# These are known, accepted deviations from canonical naming.
+# D45 gate will NOT fail on these.
+
+allowed_exceptions:
+  - host: nas
+    surface: system_hostname
+    actual: synology918
+    reason: "Synology DSM sets hostname to model name by default. No runtime breakage."
+    severity: low
+
+  - host: ha
+    surface: system_hostname
+    actual: a0d7b954-ssh
+    reason: "Home Assistant OS manages its own hostname. Cannot change without reinstall."
+    severity: low
+
+  - host: proxmox-home
+    surface: pve_node
+    actual: pve
+    reason: "PVE node migration pending (GAP-OP-015). Requires VM shutdown + config move."
+    severity: critical
+    gap: GAP-OP-015
+
+# ─── Rename Procedure ─────────────────────────────────────────────
+# When renaming a host, update surfaces in THIS ORDER (top to bottom).
+# Failure at any step → stop, do not proceed to next surface.
+
+rename_procedure:
+  - step: 1
+    surface: "naming.policy.yaml"
+    action: "Update canonical_name in this file"
+  - step: 2
+    surface: "infra.placement.policy.yaml"
+    action: "Update hosts key"
+  - step: 3
+    surface: "ssh.targets.yaml"
+    action: "Update target id"
+  - step: 4
+    surface: "docker.compose.targets.yaml"
+    action: "Update target key and ssh_target (if applicable)"
+  - step: 5
+    surface: "DEVICE_IDENTITY_SSOT.md"
+    action: "Update all references to old name"
+  - step: 6
+    surface: "system_hostname"
+    action: "SSH to host and set hostname"
+  - step: 7
+    surface: "pve_node"
+    action: "Migrate PVE node configs (hypervisors only — HIGH RISK)"
+  - step: 8
+    surface: "tailscale_name"
+    action: "Usually auto-follows system_hostname"
+  - step: 9
+    surface: "D45 gate"
+    action: "Run drift-gate.sh and confirm D45 passes"
