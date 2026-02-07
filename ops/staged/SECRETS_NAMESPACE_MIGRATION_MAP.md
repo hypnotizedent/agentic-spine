@@ -2,10 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Generated | `2026-02-07T22:45:16Z` |
+| Generated | `2026-02-07T23:08:22Z` |
 | Scope | `infrastructure/prod` (project `01ddd93a-e0f8-4c7c-ad9f-903d76ef94d9`) |
 | Legacy root baseline | `49` keys originally at root path `/` |
-| Current root keys | `4` keys still at root path `/` |
+| Current root keys | `0` keys still at root path `/` |
 | New namespace baseline | `/spine/*` |
 | Guardrail | `./bin/ops cap run secrets.namespace.status` |
 
@@ -24,10 +24,11 @@ Migrate legacy root-path keys (`/`) into canonical `/spine/*` namespaces without
 - P3 `/spine/storage/nas`: complete (6 keys copied + root copies deleted).
 - P4 `/spine/integrations/commerce-mail`: complete (9 keys copied + root copies deleted).
 - P5 `/spine/services/*`: complete (11 keys copied + root copies deleted).
-- Namespace status: `OK_WITH_LEGACY_DEBT`
+- P6 `/spine/ai/providers`: complete (4 keys copied + root copies deleted).
+- Namespace status: `OK`
   - Baseline root keys: `49`
-  - Current root keys: `4`
-  - Removed from root: `45`
+  - Current root keys: `0`
+  - Removed from root: `49`
 
 ## Migration Rules
 
@@ -113,8 +114,10 @@ Keys:
 - `PAPERLESS_API_TOKEN`
 - `MCPJUNGLE_ADMIN_TOKEN`
 
-### P6: AI Keys (Preferred Project Split)
-Preferred target: move to `ai-services` project first, then path `/spine/ai/providers`.
+### P6: AI Keys
+Target path: `/spine/ai/providers`
+
+Note: a future follow-up can split these into the `ai-services` Infisical project, but this cohort keeps them in `infrastructure/prod` while eliminating all root-path keys.
 
 Keys:
 - `ANTHROPIC_API_KEY`

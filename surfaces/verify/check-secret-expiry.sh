@@ -107,7 +107,7 @@ get_secrets_with_metadata() {
   local token="$3"
 
   local response
-  response=$(curl -s -X GET "${INFISICAL_API_URL}/api/v3/secrets/raw?workspaceId=${project_id}&environment=${env}" \
+  response=$(curl -s -X GET "${INFISICAL_API_URL}/api/v3/secrets/raw?workspaceId=${project_id}&environment=${env}&recursive=true" \
     -H "Authorization: Bearer $token")
 
   # Validate response is parseable JSON with a secrets array

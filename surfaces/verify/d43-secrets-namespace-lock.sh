@@ -124,4 +124,13 @@ rg -n '^\s*secrets\.p5\.mcpjungle\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&
 rg -n '^\s*secrets\.p5\.mcpjungle\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
   || fail "capability missing: secrets.p5.mcpjungle.root_cleanup.execute"
 
+rg -n '^\s*secrets\.p6\.ai\.copy_first\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p6.ai.copy_first.status"
+rg -n '^\s*secrets\.p6\.ai\.copy_first\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p6.ai.copy_first.execute"
+rg -n '^\s*secrets\.p6\.ai\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p6.ai.root_cleanup.status"
+rg -n '^\s*secrets\.p6\.ai\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p6.ai.root_cleanup.execute"
+
 echo "D43 PASS: secrets namespace policy lock enforced"
