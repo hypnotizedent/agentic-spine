@@ -1,0 +1,291 @@
+# Identity Surface Audit — P0 deliverable for LOOP-NAMING-GOVERNANCE-20260207
+# Generated: 2026-02-07T21:00Z
+# Method: SSH hostname collection + cross-reference of all binding files
+#
+# Surfaces checked per host:
+#   1. system_hostname   — `hostname` command via SSH
+#   2. tailscale_name    — `tailscale status` from macbook
+#   3. pve_node          — /etc/pve/nodes/<name>/ (hypervisors only)
+#   4. ssh_target_id     — ops/bindings/ssh.targets.yaml
+#   5. device_identity   — docs/governance/DEVICE_IDENTITY_SSOT.md
+#   6. compose_target    — ops/bindings/docker.compose.targets.yaml (if applicable)
+#   7. placement_host    — ops/bindings/infra.placement.policy.yaml (if applicable)
+
+version: 1
+audit_date: "2026-02-07"
+
+hosts:
+
+  # ─── Shop Hypervisor ───────────────────────────────────────
+  - canonical_name: pve
+    site: shop
+    kind: proxmox
+    surfaces:
+      system_hostname: pve
+      tailscale_name: pve
+      pve_node: pve
+      ssh_target_id: pve
+      device_identity: pve
+      compose_target: null
+      placement_host: pve
+    consistent: true
+    notes: null
+
+  # ─── Home Hypervisor ───────────────────────────────────────
+  - canonical_name: proxmox-home
+    site: home
+    kind: proxmox
+    surfaces:
+      system_hostname: proxmox-home
+      tailscale_name: proxmox-home
+      pve_node: pve  # MISMATCH — configs under /etc/pve/nodes/pve/
+      ssh_target_id: proxmox-home
+      device_identity: proxmox-home
+      compose_target: null
+      placement_host: proxmox-home
+    consistent: false
+    mismatches:
+      - surface: pve_node
+        expected: proxmox-home
+        actual: pve
+        severity: critical
+        gap: GAP-OP-015
+        impact: "qm/pct/vzdump all broken — VMs unmanageable"
+
+  # ─── Shop Docker Host ──────────────────────────────────────
+  - canonical_name: docker-host
+    site: shop
+    kind: vm
+    surfaces:
+      system_hostname: docker-host
+      tailscale_name: docker-host
+      pve_node: null
+      ssh_target_id: docker-host
+      device_identity: docker-host
+      compose_target: docker-host
+      placement_host: docker-host
+    consistent: true
+    notes: null
+
+  # ─── Infra Core ────────────────────────────────────────────
+  - canonical_name: infra-core
+    site: shop
+    kind: vm
+    surfaces:
+      system_hostname: infra-core
+      tailscale_name: infra-core
+      pve_node: null
+      ssh_target_id: infra-core
+      device_identity: infra-core
+      compose_target: infra-core
+      placement_host: infra-core
+    consistent: true
+    notes: "SSH requires user=ubuntu (not root)"
+
+  # ─── NAS ───────────────────────────────────────────────────
+  - canonical_name: nas
+    site: home
+    kind: storage
+    surfaces:
+      system_hostname: synology918  # MISMATCH
+      tailscale_name: nas
+      pve_node: null
+      ssh_target_id: nas
+      device_identity: nas
+      compose_target: null
+      placement_host: nas
+    consistent: false
+    mismatches:
+      - surface: system_hostname
+        expected: nas
+        actual: synology918
+        severity: low
+        gap: null
+        impact: "Cosmetic — Synology DSM sets hostname to model name by default. No runtime breakage."
+
+  # ─── Vault (Vaultwarden) ───────────────────────────────────
+  - canonical_name: vault
+    site: home
+    kind: vm  # DEVICE_IDENTITY_SSOT incorrectly says LXC
+    surfaces:
+      system_hostname: vault
+      tailscale_name: vault
+      pve_node: null
+      ssh_target_id: vault
+      device_identity: vault
+      compose_target: null
+      placement_host: vault
+    consistent: true
+    data_errors:
+      - doc: "docs/governance/DEVICE_IDENTITY_SSOT.md"
+        field: "Home Minilab / Vaultwarden"
+        expected_kind: vm
+        actual_kind: "Listed as LXC but is actually VM (VMID 102, running as /usr/bin/kvm)"
+      - doc: "ops/bindings/infra.placement.policy.yaml"
+        field: "hosts.vault.kind"
+        expected_kind: vm
+        actual_kind: "lxc"
+    notes: "Naming is consistent but kind is misclassified in two SSOTs"
+
+  # ─── Automation Stack ──────────────────────────────────────
+  - canonical_name: automation-stack
+    site: shop
+    kind: vm
+    surfaces:
+      system_hostname: automation-stack
+      tailscale_name: automation-stack
+      pve_node: null
+      ssh_target_id: automation-stack
+      device_identity: automation-stack
+      compose_target: automation-stack
+      placement_host: automation-stack
+    consistent: true
+    notes: null
+
+  # ─── Home Assistant ────────────────────────────────────────
+  - canonical_name: ha
+    site: home
+    kind: vm
+    surfaces:
+      system_hostname: a0d7b954-ssh  # MISMATCH — HA OS uses random ID
+      tailscale_name: ha
+      pve_node: null
+      ssh_target_id: ha
+      device_identity: ha
+      compose_target: null
+      placement_host: null
+    consistent: false
+    mismatches:
+      - surface: system_hostname
+        expected: ha
+        actual: a0d7b954-ssh
+        severity: low
+        gap: null
+        impact: "Cosmetic — Home Assistant OS manages its own hostname. Cannot be changed without HA reinstall."
+
+  # ─── Pi-hole (Home) ────────────────────────────────────────
+  - canonical_name: pihole-home
+    site: home
+    kind: lxc
+    surfaces:
+      system_hostname: pihole-home
+      tailscale_name: pihole-home
+      pve_node: null
+      ssh_target_id: pihole-home
+      device_identity: pihole-home
+      compose_target: null
+      placement_host: null
+    consistent: true
+    notes: "Requires Tailscale SSH auth (web login prompt)"
+
+  # ─── Media Stack ───────────────────────────────────────────
+  - canonical_name: media-stack
+    site: shop
+    kind: vm
+    surfaces:
+      system_hostname: media-stack
+      tailscale_name: media-stack
+      pve_node: null
+      ssh_target_id: media-stack
+      device_identity: media-stack
+      compose_target: media-stack
+      placement_host: media-stack
+    consistent: true
+    notes: null
+
+  # ─── Download Home ─────────────────────────────────────────
+  - canonical_name: download-home
+    site: home
+    kind: lxc
+    surfaces:
+      system_hostname: null  # SSH permission denied — cannot verify
+      tailscale_name: download-home
+      pve_node: null
+      ssh_target_id: download-home
+      device_identity: download-home
+      compose_target: null
+      placement_host: null
+    consistent: null  # Cannot verify — SSH broken
+    notes: "SSH access denied (publickey). pct enter also broken (PVE node mismatch)."
+
+  # ─── MacBook ───────────────────────────────────────────────
+  - canonical_name: macbook
+    site: mobile
+    kind: workstation
+    surfaces:
+      system_hostname: macbook  # local
+      tailscale_name: macbook
+      pve_node: null
+      ssh_target_id: null  # no SSH target for macbook
+      device_identity: macbook
+      compose_target: null
+      placement_host: macbook
+    consistent: true
+    notes: null
+
+  # ─── Immich (Home) — OFFLINE ───────────────────────────────
+  - canonical_name: immich
+    site: home
+    kind: vm
+    surfaces:
+      system_hostname: null  # VM 101 stopped, cannot SSH
+      tailscale_name: immich  # offline 16d
+      pve_node: null
+      ssh_target_id: null  # no SSH target
+      device_identity: "immich (home instance, 100.83.160.109)"
+      compose_target: null
+      placement_host: null
+    consistent: null  # Cannot verify — VM stopped
+    notes: "VM 101 on proxmox-home. Stopped. Cannot start due to PVE node mismatch."
+
+  # ─── Immich-1 (Shop) ──────────────────────────────────────
+  - canonical_name: immich-1
+    site: shop
+    kind: vm
+    surfaces:
+      system_hostname: null  # no SSH target configured
+      tailscale_name: immich-1
+      pve_node: null
+      ssh_target_id: null  # not in ssh.targets.yaml
+      device_identity: "immich-1 (shop instance, 100.114.101.50)"
+      compose_target: null
+      placement_host: null
+    consistent: null  # Cannot verify — no SSH target
+    notes: "Shop Immich instance. No SSH target in ssh.targets.yaml."
+
+# ─── Summary ─────────────────────────────────────────────────
+
+summary:
+  total_hosts: 14
+  consistent: 8
+  inconsistent: 3
+  unverifiable: 3
+
+  mismatches:
+    - host: proxmox-home
+      surface: pve_node
+      severity: critical
+      gap: GAP-OP-015
+
+    - host: nas
+      surface: system_hostname
+      severity: low
+      impact: "Synology default hostname (synology918). No runtime breakage."
+
+    - host: ha
+      surface: system_hostname
+      severity: low
+      impact: "HA OS random ID (a0d7b954-ssh). Cannot change without reinstall."
+
+  data_errors:
+    - host: vault
+      docs: ["DEVICE_IDENTITY_SSOT.md", "infra.placement.policy.yaml"]
+      error: "Listed as LXC but is VM (VMID 102, /usr/bin/kvm process)"
+
+  unverifiable:
+    - host: download-home
+      reason: "SSH permission denied"
+    - host: immich
+      reason: "VM 101 stopped (PVE node mismatch blocks restart)"
+    - host: immich-1
+      reason: "No SSH target configured"
