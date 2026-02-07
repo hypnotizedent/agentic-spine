@@ -21,10 +21,11 @@ Migrate legacy root-path keys (`/`) into canonical `/spine/*` namespaces without
 - P1 `/spine/platform/security`: complete (9 keys copied + root copies deleted).
 - P2 `/spine/network/edge`: complete (10 keys copied + root copies deleted).
 - P3 `/spine/storage/nas`: complete (6 keys copied + root copies deleted).
+- P4 `/spine/integrations/commerce-mail`: complete (9 keys copied + root copies deleted).
 - Namespace status: `OK_WITH_LEGACY_DEBT`
   - Baseline root keys: `49`
-  - Current root keys: `24`
-  - Removed from root: `25`
+  - Current root keys: `15`
+  - Removed from root: `34`
 
 ## Migration Rules
 

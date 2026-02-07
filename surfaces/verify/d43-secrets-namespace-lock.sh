@@ -70,4 +70,13 @@ rg -n '^\s*secrets\.p3\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
 rg -n '^\s*secrets\.p3\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
   || fail "capability missing: secrets.p3.root_cleanup.execute"
 
+rg -n '^\s*secrets\.p4\.copy_first\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p4.copy_first.status"
+rg -n '^\s*secrets\.p4\.copy_first\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p4.copy_first.execute"
+rg -n '^\s*secrets\.p4\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p4.root_cleanup.status"
+rg -n '^\s*secrets\.p4\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p4.root_cleanup.execute"
+
 echo "D43 PASS: secrets namespace policy lock enforced"
