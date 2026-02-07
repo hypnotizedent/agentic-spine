@@ -2,9 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Generated | `2026-02-07T20:37:21Z` |
+| Generated | `2026-02-07T22:45:16Z` |
 | Scope | `infrastructure/prod` (project `01ddd93a-e0f8-4c7c-ad9f-903d76ef94d9`) |
-| Legacy debt | `49` keys still at root path `/` |
+| Legacy root baseline | `49` keys originally at root path `/` |
+| Current root keys | `4` keys still at root path `/` |
 | New namespace baseline | `/spine/*` |
 | Guardrail | `./bin/ops cap run secrets.namespace.status` |
 
@@ -22,10 +23,11 @@ Migrate legacy root-path keys (`/`) into canonical `/spine/*` namespaces without
 - P2 `/spine/network/edge`: complete (10 keys copied + root copies deleted).
 - P3 `/spine/storage/nas`: complete (6 keys copied + root copies deleted).
 - P4 `/spine/integrations/commerce-mail`: complete (9 keys copied + root copies deleted).
+- P5 `/spine/services/*`: complete (11 keys copied + root copies deleted).
 - Namespace status: `OK_WITH_LEGACY_DEBT`
   - Baseline root keys: `49`
-  - Current root keys: `15`
-  - Removed from root: `34`
+  - Current root keys: `4`
+  - Removed from root: `45`
 
 ## Migration Rules
 

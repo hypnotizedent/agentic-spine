@@ -79,4 +79,49 @@ rg -n '^\s*secrets\.p4\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
 rg -n '^\s*secrets\.p4\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
   || fail "capability missing: secrets.p4.root_cleanup.execute"
 
+rg -n '^\s*secrets\.p5\.immich\.copy_first\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.immich.copy_first.status"
+rg -n '^\s*secrets\.p5\.immich\.copy_first\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.immich.copy_first.execute"
+rg -n '^\s*secrets\.p5\.immich\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.immich.root_cleanup.status"
+rg -n '^\s*secrets\.p5\.immich\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.immich.root_cleanup.execute"
+
+rg -n '^\s*secrets\.p5\.mail_archiver\.copy_first\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.mail_archiver.copy_first.status"
+rg -n '^\s*secrets\.p5\.mail_archiver\.copy_first\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.mail_archiver.copy_first.execute"
+rg -n '^\s*secrets\.p5\.mail_archiver\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.mail_archiver.root_cleanup.status"
+rg -n '^\s*secrets\.p5\.mail_archiver\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.mail_archiver.root_cleanup.execute"
+
+rg -n '^\s*secrets\.p5\.finance\.copy_first\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.finance.copy_first.status"
+rg -n '^\s*secrets\.p5\.finance\.copy_first\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.finance.copy_first.execute"
+rg -n '^\s*secrets\.p5\.finance\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.finance.root_cleanup.status"
+rg -n '^\s*secrets\.p5\.finance\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.finance.root_cleanup.execute"
+
+rg -n '^\s*secrets\.p5\.paperless\.copy_first\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.paperless.copy_first.status"
+rg -n '^\s*secrets\.p5\.paperless\.copy_first\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.paperless.copy_first.execute"
+rg -n '^\s*secrets\.p5\.paperless\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.paperless.root_cleanup.status"
+rg -n '^\s*secrets\.p5\.paperless\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.paperless.root_cleanup.execute"
+
+rg -n '^\s*secrets\.p5\.mcpjungle\.copy_first\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.mcpjungle.copy_first.status"
+rg -n '^\s*secrets\.p5\.mcpjungle\.copy_first\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.mcpjungle.copy_first.execute"
+rg -n '^\s*secrets\.p5\.mcpjungle\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.mcpjungle.root_cleanup.status"
+rg -n '^\s*secrets\.p5\.mcpjungle\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p5.mcpjungle.root_cleanup.execute"
+
 echo "D43 PASS: secrets namespace policy lock enforced"
