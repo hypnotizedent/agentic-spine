@@ -129,3 +129,8 @@ it down during the soak window removes the rollback path. After promotion to
 `migrated`, VM 102 rollback is no longer critical.
 
 P0 and P1 can proceed immediately (read-only).
+
+## Pre-Staged Artifact
+
+- `ops/staged/NAMING_GOVERNANCE_P2_EXECUTION_PLAYBOOK_20260207.md`
+  - Step-by-step mutation playbook + rollback for P2 execution once soak gate clears.

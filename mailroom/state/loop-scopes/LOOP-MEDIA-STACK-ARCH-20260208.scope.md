@@ -132,6 +132,11 @@ mounts, restart. Downtime: 10-30 min.
    consumption.
 4. **Phase C can be done at any time** (systemd changes take effect on reboot).
 
+## Pre-Staged Artifact
+
+- `ops/staged/MEDIA_STACK_ARCH_PHASE_A_PLAYBOOK_20260207.md`
+  - Step-by-step Phase A mutation playbook + rollback (ready after RCA closure gate).
+
 ## PVE Context (from Shop Baseline 2026-02-07)
 
 | Resource | Value |

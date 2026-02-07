@@ -28,6 +28,7 @@ FILES=(
 )
 EXCLUDED_FILES=(
   ops/plugins/secrets/bin/secrets-p1-root-cleanup
+  ops/plugins/secrets/bin/secrets-cohort-copy-first
 )
 
 # Expand globs safely

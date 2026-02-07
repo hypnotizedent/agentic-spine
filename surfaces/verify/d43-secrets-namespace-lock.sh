@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 POLICY="$ROOT/ops/bindings/secrets.namespace.policy.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
 PLUGIN="$ROOT/ops/plugins/secrets/bin/secrets-namespace-status"
+COPY_PLUGIN="$ROOT/ops/plugins/secrets/bin/secrets-cohort-copy-first"
 
 fail() { echo "D43 FAIL: $*" >&2; exit 1; }
 
@@ -37,6 +38,7 @@ forbid_count="$(yq e '.rules.forbidden_root_keys | length' "$POLICY" 2>/dev/null
 (( forbid_count >= 1 )) || fail "policy forbidden_root_keys is empty"
 
 [[ -x "$PLUGIN" ]] || fail "missing executable plugin: ops/plugins/secrets/bin/secrets-namespace-status"
+[[ -x "$COPY_PLUGIN" ]] || fail "missing executable plugin: ops/plugins/secrets/bin/secrets-cohort-copy-first"
 
 rg -n '^\s*secrets\.namespace\.status:' "$CAPS" >/dev/null 2>&1 \
   || fail "capability missing: secrets.namespace.status"
@@ -48,5 +50,15 @@ rg -n '^\s*secrets\.p1\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
   || fail "capability missing: secrets.p1.root_cleanup.execute"
 rg -n 'secrets-p1-root-cleanup' "$CAPS" >/dev/null 2>&1 \
   || fail "capability command missing: secrets-p1-root-cleanup"
+rg -n '^\s*secrets\.p2\.copy_first\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p2.copy_first.status"
+rg -n '^\s*secrets\.p2\.copy_first\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p2.copy_first.execute"
+rg -n '^\s*secrets\.p2\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p2.root_cleanup.status"
+rg -n '^\s*secrets\.p2\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.p2.root_cleanup.execute"
+rg -n 'secrets-cohort-copy-first' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability command missing: secrets-cohort-copy-first"
 
 echo "D43 PASS: secrets namespace policy lock enforced"

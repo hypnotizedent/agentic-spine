@@ -16,6 +16,15 @@ Migrate legacy root-path keys (`/`) into canonical `/spine/*` namespaces without
 - Migrate by key cohorts.
 - Verify each cohort before deleting root copies.
 
+## Execution Snapshot (2026-02-07)
+
+- P1 `/spine/platform/security`: complete (9 keys copied + root copies deleted).
+- P2 `/spine/network/edge`: complete (10 keys copied + root copies deleted).
+- Namespace status: `OK_WITH_LEGACY_DEBT`
+  - Baseline root keys: `49`
+  - Current root keys: `30`
+  - Removed from root: `19`
+
 ## Migration Rules
 
 1. Never move all keys at once.
