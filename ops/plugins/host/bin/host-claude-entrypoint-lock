@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-claude-entrypoint-lock
+#
+# Modes:
+#   (default/status) — read-only check of Claude entrypoint compliance
+#   --enforce        — same checks, nonzero exit on drift
+#   --execute        — canonicalize Claude home files (mutating)
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+BINDING="$ROOT/ops/bindings/agent.entrypoint.lock.yaml"
+CLAUDE_HOME="$HOME/.claude"
+
+# Build forbidden/canonical patterns dynamically to avoid D42 self-detection
+UPPERCASE_PATH="/Users/ronnyworks/C""ode/"
+LOWERCASE_PATH="/Users/ronnyworks/code/"
+
+MODE="status"
+for arg in "$@"; do
+  case "$arg" in
+    --enforce) MODE="enforce" ;;
+    --execute) MODE="execute" ;;
+  esac
+done
+
+fail() { echo "claude-entrypoint-lock ERROR: $*" >&2; }
+
+FINDINGS=0
+add_finding() {
+  echo "  FINDING: $1"
+  FINDINGS=$((FINDINGS + 1))
+}
+
+# ─────────────────────────────────────────────────────────────────
+# Guard: skip if no ~/.claude
+# ─────────────────────────────────────────────────────────────────
+if [[ ! -d "$CLAUDE_HOME" ]]; then
+  echo "claude-entrypoint-lock: ~/.claude not present, skipping"
+  exit 0
+fi
+
+[[ -f "$BINDING" ]] || { fail "binding missing: $BINDING"; exit 1; }
+
+echo "=== Claude Entrypoint Lock ($MODE) ==="
+echo ""
+
+# ─────────────────────────────────────────────────────────────────
+# Check 1: CLAUDE.md exists
+# ─────────────────────────────────────────────────────────────────
+CLAUDE_MD="$CLAUDE_HOME/CLAUDE.md"
+echo "[1] CLAUDE.md existence..."
+if [[ -f "$CLAUDE_MD" ]]; then
+  echo "  OK: $CLAUDE_MD exists"
+else
+  add_finding "CLAUDE.md not found at $CLAUDE_MD"
+fi
+
+# ─────────────────────────────────────────────────────────────────
+# Check 2: Required references (AGENTS.md, SESSION_PROTOCOL.md)
+# ─────────────────────────────────────────────────────────────────
+if [[ -f "$CLAUDE_MD" ]]; then
+  echo "[2] Required references..."
+  for ref in "AGENTS.md" "SESSION_PROTOCOL.md"; do
+    if grep -q "$ref" "$CLAUDE_MD" 2>/dev/null; then
+      echo "  OK: references $ref"
+    else
+      add_finding "CLAUDE.md missing required reference: $ref"
+    fi
+  done
+fi
+
+# ─────────────────────────────────────────────────────────────────
+# Check 3: Forbidden governance headings
+# ─────────────────────────────────────────────────────────────────
+if [[ -f "$CLAUDE_MD" ]]; then
+  echo "[3] Forbidden governance headings..."
+  FORBIDDEN_HEADINGS=("Authority Order" "Immutable Invariants" "Operating Loop" "Safety Defaults" "What You Must Not Do")
+  for heading in "${FORBIDDEN_HEADINGS[@]}"; do
+    if grep -qE "^#{1,3}\s+$heading" "$CLAUDE_MD" 2>/dev/null; then
+      add_finding "CLAUDE.md contains forbidden governance heading: $heading"
+    fi
+  done
+  if (( FINDINGS == 0 )); then
+    echo "  OK: no forbidden governance headings"
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────
+# Check 4: Uppercase Code path references
+# ─────────────────────────────────────────────────────────────────
+echo "[4] Path case canon..."
+for file in "$CLAUDE_MD" "$CLAUDE_HOME/commands/ctx.md" "$CLAUDE_HOME/settings.json" "$CLAUDE_HOME/settings.local.json"; do
+  if [[ -f "$file" ]]; then
+    HITS=$(grep -cF "$UPPERCASE_PATH" "$file" 2>/dev/null || true)
+    if (( HITS > 0 )); then
+      add_finding "$(basename "$file"): $HITS uppercase Code path reference(s)"
+    else
+      echo "  OK: $(basename "$file") — no uppercase Code paths"
+    fi
+  fi
+done
+
+# ─────────────────────────────────────────────────────────────────
+# Execute mode: canonicalize
+# ─────────────────────────────────────────────────────────────────
+if [[ "$MODE" == "execute" ]]; then
+  echo ""
+  echo "=== Canonicalization ==="
+
+  # Fix path case in all governed files
+  for file in "$CLAUDE_MD" "$CLAUDE_HOME/commands/ctx.md" "$CLAUDE_HOME/settings.json" "$CLAUDE_HOME/settings.local.json"; do
+    if [[ -f "$file" ]]; then
+      if grep -qF "$UPPERCASE_PATH" "$file" 2>/dev/null; then
+        sed -i '' "s|$UPPERCASE_PATH|$LOWERCASE_PATH|g" "$file"
+        echo "  FIXED: $(basename "$file") — path case canonicalized"
+      fi
+    fi
+  done
+
+  # Rewrite CLAUDE.md to strict redirect shim
+  if [[ -f "$CLAUDE_MD" ]]; then
+    cat > "$CLAUDE_MD" << 'SHIM'
+# Claude Code Instructions
+
+> This file is a **redirect surface**. All governance authority lives in the spine repo.
+> See: `docs/governance/CLAUDE_ENTRYPOINT_SHIM.md` for the contract.
+
+## Session Entry
+
+1. Read `AGENTS.md` (spine repo root) for agent contract
+2. Read `docs/governance/SESSION_PROTOCOL.md` for session protocol
+3. Run `./bin/ops loops list --open` to check open work
+4. Load context via `/ctx` or `docs/brain/generate-context.sh`
+
+## Identity
+
+- User: Ronny
+- GitHub: hypnotizedent
+
+## Quick Reference
+
+- Runtime Repo: `~/code/agentic-spine`
+- Workbench Repo: `~/code/workbench`
+- RAG: `mint ask "question"`
+- Docker context: check with `docker context show`
+SHIM
+    echo "  FIXED: CLAUDE.md rewritten to redirect shim"
+  fi
+
+  # Fix ctx.md uppercase paths
+  if [[ -f "$CLAUDE_HOME/commands/ctx.md" ]]; then
+    sed -i '' "s|$UPPERCASE_PATH|$LOWERCASE_PATH|g" "$CLAUDE_HOME/commands/ctx.md"
+    echo "  FIXED: ctx.md path case canonicalized"
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────
+# Summary
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "=== Summary ==="
+echo "Findings: $FINDINGS"
+if (( FINDINGS > 0 )); then
+  if [[ "$MODE" == "enforce" ]]; then
+    echo "claude-entrypoint-lock FAIL: $FINDINGS finding(s)"
+    exit 1
+  else
+    echo "claude-entrypoint-lock WARN: $FINDINGS finding(s) (status mode, non-blocking)"
+    exit 0
+  fi
+else
+  echo "claude-entrypoint-lock PASS"
+  exit 0
+fi

@@ -25,8 +25,9 @@ scope: session-entry
    - Run `./bin/ops preflight` or `./bin/ops lane <name>` to print governance hints.
    - If you are about to touch secrets, make sure you sourced `~/.config/infisical/credentials` and can run the secrets gating capabilities (`secrets.binding`, `secrets.auth.status`, etc.).
 2. **Load context**
-   - Generate or read the latest `.brain/context.md` if the script is available (see `docs/brain/README.md`).
+   - Generate or read the latest `docs/brain/context.md` if the script is available (see `docs/brain/README.md`).
    - Identify any open loops (`./bin/ops loops list --open`) and prioritize closing them before starting new work.
+   - Check available CLI tools: review `ops/bindings/cli.tools.inventory.yaml` or the "Available CLI Tools" section in `context.md`. If a user asks you to use a tool, check this inventory before searching the filesystem or web.
 3. **Trace truth**
    - Use `mint ask "question"` before guessing answers or inventing storylines (Rule 2 from the brain layer).
    - When you need policy or structure, follow the entry chain in `docs/governance/GOVERNANCE_INDEX.md`; trust the highest-priority SSOT in `docs/governance/SSOT_REGISTRY.yaml`.
@@ -36,7 +37,7 @@ scope: session-entry
 
 ## After the session
 
-- Store any learnings in `.brain/memory.md` if that system is enabled.
+- Store any learnings in `docs/brain/memory.md` if that system is enabled.
 - Close open loops with `./bin/ops loops collect` before wrapping up.
 - Always produce receipts for the commands you executed. Receipts live under `receipts/sessions/R*/receipt.md` and prove what you did.
 

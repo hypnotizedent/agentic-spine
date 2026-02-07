@@ -47,7 +47,7 @@ PARKED="${INBOX}/parked"
 
 # Repo paths
 REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-BRAIN_RULES="${REPO}/.brain/rules.md"
+BRAIN_RULES="${REPO}/docs/brain/rules.md"
 
 # Model config
 MODEL="${CLAUDE_MODEL:-claude-sonnet-4-20250514}"

@@ -7,7 +7,7 @@ scope: verify-scripts
 
 # Verify Surface Index
 
-> **Purpose:** Enumerate all 48 scripts in `surfaces/verify/` with their purpose,
+> **Purpose:** Enumerate all 52 scripts in `surfaces/verify/` with their purpose,
 > caller, read-only status, and disposition. Agents use this to understand
 > what verification is available and which scripts are active vs orphaned.
 
@@ -36,7 +36,7 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D43) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D47) | Yes |
 | `foundation-gate.sh` | Foundation file existence checks | Yes |
 | `contracts-gate.sh` | Contract compliance gate | Yes |
 | `no-drift-roots-gate.sh` | Verify no unauthorized root files | Yes |
@@ -66,6 +66,10 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 | `d41-hidden-root-governance-lock.sh` | Hidden-root governance lock (inventory + forbidden patterns) | Yes |
 | `d42-code-path-case-lock.sh` | Runtime path case lock (`$HOME/code` canonical) | Yes |
 | `d43-secrets-namespace-lock.sh` | Secrets namespace policy lock (freeze + capability wiring) | Yes |
+| `d44-cli-tools-discovery-lock.sh` | CLI tools discovery lock (inventory + cross-refs + probes) | Yes |
+| `d45-naming-consistency-lock.sh` | Naming consistency lock (cross-file identity surface verification) | Yes |
+| `d46-claude-instruction-source-lock.sh` | Claude instruction source lock (shim + path case) | Yes |
+| `d47-brain-surface-path-lock.sh` | Brain surface path lock (no `.brain/` in runtime) | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -96,10 +100,10 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by verify.sh | 10 |
-| Called by drift-gate.sh | 33 |
+| Called by drift-gate.sh | 37 |
 | Called by capabilities/CLI | 2 |
 | Orphaned (manual only) | 3 |
-| **Total** | **48** |
+| **Total** | **52** |
 
 ---
 
@@ -108,5 +112,5 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 | Document | Relationship |
 |----------|-------------|
 | [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) | Canonical scripts index |
-| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D43) |
+| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D47) |
 | [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) | Backup verification governance |

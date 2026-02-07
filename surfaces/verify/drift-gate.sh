@@ -573,6 +573,30 @@ else
   warn "naming consistency lock gate not present"
 fi
 
+# D46: Claude instruction source lock (shim compliance + path case)
+echo -n "D46 claude instruction source lock... "
+if [[ -x "$SP/surfaces/verify/d46-claude-instruction-source-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d46-claude-instruction-source-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d46-claude-instruction-source-lock.sh failed"
+  fi
+else
+  warn "claude instruction source lock gate not present"
+fi
+
+# D47: Brain surface path lock (no .brain/ in runtime scripts)
+echo -n "D47 brain surface path lock... "
+if [[ -x "$SP/surfaces/verify/d47-brain-surface-path-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d47-brain-surface-path-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d47-brain-surface-path-lock.sh failed"
+  fi
+else
+  warn "brain surface path lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

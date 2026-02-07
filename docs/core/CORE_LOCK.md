@@ -2,7 +2,7 @@
 
 **Locked:** 2026-02-07
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v2.2
+**Gate Version:** drift-gate.sh v2.3
 
 ---
 
@@ -95,6 +95,10 @@ All must PASS for core to be healthy:
 | D41 | Hidden-root governance lock (home-root inventory + forbidden pattern enforcement) |
 | D42 | Code path case lock (runtime scripts must use `$HOME/code` not `$HOME/Code`) |
 | D43 | Secrets namespace policy lock (freeze legacy root-path debt + enforce /spine namespace wiring) |
+| D44 | CLI tools discovery lock (inventory + cross-refs + probes) |
+| D45 | Naming consistency lock (cross-file identity surface verification) |
+| D46 | Claude instruction source lock (shim compliance + path case enforcement) |
+| D47 | Brain surface path lock (no `.brain/` references in runtime scripts) |
 
 ## Rules
 

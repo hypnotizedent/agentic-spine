@@ -41,6 +41,8 @@ LEGACY_ROOT=/Users/ronnyworks/ronny-ops
 | `d33-extraction-pause-lock.sh` | Stabilization extraction pause lock |
 | `d41-hidden-root-governance-lock.sh` | Hidden-root inventory enforcement (managed/volatile/forbidden/unmanaged) |
 | `d42-code-path-case-lock.sh` | Code path case lock (`$HOME/code` not `$HOME/Code`) |
+| `d46-claude-instruction-source-lock.sh` | Claude instruction source lock (shim + path case) |
+| `d47-brain-surface-path-lock.sh` | Brain surface path lock (no `.brain/` in runtime) |
 
 ## Hidden-Root Governance Contract
 
