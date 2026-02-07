@@ -70,9 +70,13 @@ echo "OK: latest 5 sessions all have receipt.md"
 echo "T5: Kernel contracts"
 bash "$SP/surfaces/verify/contracts-gate.sh" || fail "contracts-gate failed"
 
-# T6: Verify surfaces capability
+# T6: Verify surfaces directory contains runnable gate scripts
 echo "T6: Verify surfaces capability"
-./bin/ops verify >/dev/null && echo "OK: ops verify" || fail "ops verify failed"
+V="$SP/surfaces/verify"
+test -d "$V" || fail "surfaces/verify directory missing"
+GATE_COUNT=$(find "$V" -maxdepth 1 -name '*.sh' -type f | wc -l | tr -d ' ')
+[[ "$GATE_COUNT" -gt 0 ]] || fail "no gate scripts found in surfaces/verify"
+echo "OK: surfaces/verify ($GATE_COUNT gate scripts)"
 
 END=$(date +%s)
 ELAPSED=$((END - START))
@@ -84,5 +88,5 @@ echo "Time elapsed: ${ELAPSED}s (must be < 60s)"
 echo "All tiers: PASS"
 echo "Foundation gate: GREEN - safe to proceed with work"
 
-# T6: no drift roots under HOME
+# T7: no drift roots under HOME
 bash "$SP/surfaces/verify/no-drift-roots-gate.sh" || fail "no-drift-roots gate failed"

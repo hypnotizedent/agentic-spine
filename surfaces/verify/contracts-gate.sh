@@ -14,9 +14,9 @@ echo "=== CONTRACTS GATE ==="
 
 # Required contracts
 CONTRACTS=(
-  "docs/RECEIPTS_CONTRACT.md"
-  "docs/AGENT_OUTPUT_CONTRACT.md"
-  "docs/PLAN_SCHEMA.md"
+  "docs/core/RECEIPTS_CONTRACT.md"
+  "docs/core/AGENT_OUTPUT_CONTRACT.md"
+  "docs/core/PLAN_SCHEMA.md"
 )
 
 for c in "${CONTRACTS[@]}"; do

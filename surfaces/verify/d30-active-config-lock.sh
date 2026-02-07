@@ -60,5 +60,14 @@ while IFS= read -r file; do
   fi
 done < <(yq e '.active_config_files[]' "$BINDING")
 
+# Check forbidden config files (must NOT exist)
+while IFS= read -r file; do
+  [[ -n "${file:-}" && "${file:-}" != "null" ]] || continue
+  if [[ -e "$file" ]]; then
+    echo "D30 HIT: forbidden pre-spine config still exists: $file" >&2
+    HITS=$((HITS + 1))
+  fi
+done < <(yq e '.forbidden_config_files[]' "$BINDING" 2>/dev/null || true)
+
 (( HITS == 0 )) || fail "active config lock violated (${HITS} hit(s))"
 echo "D30 PASS: active config lock enforced"
