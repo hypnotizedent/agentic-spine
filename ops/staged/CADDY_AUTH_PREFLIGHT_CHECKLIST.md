@@ -22,13 +22,13 @@ ops/staged/caddy-auth/
 |------|--------|-------|
 | Caddy/Auth stack draft staged | PASS | Compose + Caddyfile ready |
 | Uses canonical staging location | PASS | `ops/staged/caddy-auth/` |
-| Authentik secret key in Infisical | FAIL | `AUTHENTIK_SECRET_KEY` missing |
-| Authentik DB password in Infisical | FAIL | `AUTHENTIK_DB_PASSWORD` missing |
+| Authentik secret key in Infisical | PASS | present at `/spine/vm-infra/caddy-auth` |
+| Authentik DB password in Infisical | PASS | present at `/spine/vm-infra/caddy-auth` |
 
 ## Required Secret Actions (Before Execute)
 
-1. Create `AUTHENTIK_SECRET_KEY` in Infisical (`infrastructure`, `prod`).
-2. Create `AUTHENTIK_DB_PASSWORD` in Infisical (`infrastructure`, `prod`).
+1. Keep `AUTHENTIK_SECRET_KEY` in `/spine/vm-infra/caddy-auth` (do not duplicate at root `/`).
+2. Keep `AUTHENTIK_DB_PASSWORD` in `/spine/vm-infra/caddy-auth` (do not duplicate at root `/`).
 3. Render `.env` from Infisical at deploy time on infra-core.
 
 ## Deploy Sequence (Post-Promotion)

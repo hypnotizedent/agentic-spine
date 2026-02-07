@@ -22,6 +22,16 @@
 
 **Status:** ACTIVE (bound for capability work)
 
+### Namespace Contract (Infrastructure/prod)
+
+- Legacy keys currently exist at root path: `/` (historical debt).
+- All new VM infra keys must be written under `/spine/*`.
+- Caddy/Auth bootstrap namespace is fixed to:
+  - `/spine/vm-infra/caddy-auth`
+  - required keys: `AUTHENTIK_SECRET_KEY`, `AUTHENTIK_DB_PASSWORD`
+- Enforcement capability:
+  - `./bin/ops cap run secrets.namespace.status`
+
 ---
 
 ## Project Catalog (SSOT)

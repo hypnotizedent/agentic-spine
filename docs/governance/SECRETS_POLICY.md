@@ -19,6 +19,8 @@ github_issue: "#541"
 2. **Infisical is SSOT.** All secrets are stored in Infisical and injected at runtime.
 3. **Bindings, not values.** The spine stores binding metadata (project names, key names)
    but never secret values. See `docs/core/SECRETS_BINDING.md`.
+4. **Namespace under `/spine/*`.** New infrastructure secrets must be created under
+   `/spine/*` secret paths (not root `/`) to avoid legacy collision.
 
 ---
 
@@ -66,6 +68,9 @@ Secrets are injected via the `secrets.exec` capability:
 
 # Compare SSOT inventory vs live Infisical projects
 ./bin/ops cap run secrets.projects.status
+
+# Verify namespace hygiene for infrastructure/prod
+./bin/ops cap run secrets.namespace.status
 
 # Check secret age/expiry
 surfaces/verify/check-secret-expiry.sh

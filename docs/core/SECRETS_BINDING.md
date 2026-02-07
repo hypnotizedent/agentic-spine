@@ -20,6 +20,12 @@ This file contains ONLY non-secret metadata:
 - base_path
 - mapping (project -> path)
 
+Namespace rule:
+- `base_path` is canonical (`/spine` in current binding).
+- New infra secrets must live under `${base_path}/*` in Infisical.
+- Use `./bin/ops cap run secrets.namespace.status` to verify placement for
+  critical VM-infra keys.
+
 Auth (tokens / client secrets) is operator-provided via environment and must never be committed.
 
 ## Operational expectations
