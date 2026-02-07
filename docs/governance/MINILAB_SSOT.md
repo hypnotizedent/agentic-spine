@@ -1,8 +1,8 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-05
-verification_method: receipt-consolidation
+last_verified: 2026-02-07
+verification_method: live-system-inspection
 scope: home-infrastructure
 github_issue: "#625"
 parent_receipts:
@@ -16,7 +16,7 @@ parent_receipts:
 > Covers: Beelink (proxmox-home), Synology NAS, VMs/LXCs, and home network.
 > For device identity and Tailscale config, see [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md).
 >
-> **Last Verified:** February 5, 2026 (partial - based on 2026-01-21 discovery)
+> **Last Verified:** February 7, 2026
 
 ---
 
@@ -54,13 +54,22 @@ parent_receipts:
 | Local | 10.0.0.50 | Home LAN |
 | Gateway | 10.0.0.1 | Ubiquiti UDR |
 
-### Resource Usage (2026-01-21)
+### Known Issue: PVE Node-Name Mismatch
+
+> **CRITICAL:** Hostname was changed from `pve` to `proxmox-home` but the PVE node name
+> was not migrated. All VM/LXC configs live under `/etc/pve/nodes/pve/` while PVE tools
+> look under `/etc/pve/nodes/proxmox-home/`. This breaks `qm list`, `pct list`, `pct exec`,
+> and vzdump backup jobs. VMs/LXCs started before the rename continue running but cannot
+> be managed. See GAP-OP-014.
+
+### Resource Usage (2026-02-07)
 
 | Metric | Value |
 |--------|-------|
-| Load Average | 0.22, 0.30, 0.28 |
-| RAM Free | ~447MB |
-| Root FS | 11GB used / 94GB total (13%) |
+| Uptime | 42 days |
+| Load Average | 0.22, 0.19, 0.14 |
+| RAM | 8.8GB / 27GB used (14GB free) |
+| Root FS | 11GB / 94GB (13%) |
 
 ---
 
@@ -73,8 +82,31 @@ parent_receipts:
 | **Model** | Synology DS918+ |
 | **CPU** | Intel Celeron J3455 (4 cores) |
 | **RAM** | 4GB (expandable to 8GB) |
-| **Drive Bays** | 4x 3.5" SATA |
+| **Drive Bays** | 4x 3.5" SATA + 2x M.2 NVMe |
 | **Network** | 2x 1GbE (link aggregation capable) |
+
+### Drive Inventory (verified 2026-02-07)
+
+| Bay | Model | Capacity | Type |
+|-----|-------|----------|------|
+| sda (Bay 1) | Seagate IronWolf Pro ST16000NE000 | 16TB | HDD |
+| sdb (Bay 2) | WD Red WD30EFRX | 3TB | HDD |
+| sdc (Bay 3) | WD Red WD30EFRX | 3TB | HDD |
+| sdd (Bay 4) | Seagate IronWolf Pro ST16000NE000 | 16TB | HDD |
+| nvme0 (M.2 Slot 1) | Crucial P1 CT1000P1SSD8 | 1TB | NVMe SSD |
+| nvme1 (M.2 Slot 2) | Crucial P1 CT1000P1SSD8 | 1TB | NVMe SSD |
+
+### RAID Configuration (SHR)
+
+| Array | Level | Disks | Size | Purpose |
+|-------|-------|-------|------|---------|
+| md0 | RAID1 | sda1/sdb1/sdc1/sdd1 | 8GB | System partition |
+| md1 | RAID1 | sda2/sdb2/sdc2/sdd2 | 2GB | Swap |
+| md2 | RAID5 | sda5/sdb5/sdc5/sdd5 | 8.7TB | Data (all 4 drives) |
+| md3 | RAID1 | sda6/sdd6 | 12.7TB | Data (16TB pair only) |
+| md4 | RAID1 | nvme0n1p1/nvme1n1p1 | 976GB | SSD read/write cache |
+
+**Note:** md2 + md3 combine as SHR to form the ~20TB `volume1`. The NVMe RAID1 pair serves as SSD cache.
 
 ### Network Configuration
 
@@ -86,11 +118,9 @@ parent_receipts:
 
 ### Storage Volumes
 
-> **OPEN LOOP:** `OL_HOME_BASELINE_FINISH` — Finish baseline inventory (NAS + backups + cron + SSH access)
-
 | Volume | Capacity | Used | Purpose |
 |--------|----------|------|---------|
-| volume1 | ~20TB | 7.1TB (37%) | Primary storage |
+| volume1 | 20TB | 7.1TB (37%) | Primary storage |
 
 ### NFS Exports
 
@@ -110,11 +140,13 @@ parent_receipts:
 
 ### Virtual Machines
 
+> **Note:** PVE node-name mismatch means `qm list` returns empty. Status verified via `ps` (2026-02-07).
+
 | VMID | Hostname | Tailscale IP | RAM | Disk | Status |
 |------|----------|--------------|-----|------|--------|
 | 100 | homeassistant | 100.67.120.1 | 4GB | 32GB | Running |
-| 101 | immich | 100.83.160.109 | 16GB | 80GB | Running |
-| 102 | vaultwarden | 100.93.142.63 | 2GB | 16GB | Running |
+| 101 | immich | 100.83.160.109 | 16GB | 80GB | **Stopped** (has migration snapshot from 2025-10-19) |
+| 102 | vaultwarden | 100.93.142.63 | 2GB | 16GB | Running (rollback source for infra-core migration) |
 
 ### LXC Containers
 
@@ -202,7 +234,7 @@ parent_receipts:
 | Subnet | 10.0.0.0/24 |
 | Gateway | 10.0.0.1 (UDR) |
 | DHCP Range | 10.0.0.200 - 10.0.0.254 |
-| DNS | 1.1.1.1, 8.8.8.8 (or pihole-home) |
+| DHCP DNS | 10.0.0.1 (UDR itself, NOT pihole-home) |
 | WiFi SSID | pogodobby |
 
 ### Radio Coordinators
@@ -255,29 +287,31 @@ nfs: synology-backups
 
 ### Proxmox vzdump
 
-| Target | Schedule | Retention | Destination |
-|--------|----------|-----------|-------------|
-| VMs 100-102 | Daily | 7 days | synology-backups NFS |
-| LXCs 103, 105 | Daily | 7 days | synology-backups NFS |
+> **ALL 3 BACKUP JOBS ARE DISABLED** (`enabled 0`). No automated backups running.
 
-### NAS Backups
+| Job | Target | Schedule | Retention | Storage | Enabled |
+|-----|--------|----------|-----------|---------|---------|
+| backup-c1ff91b4 | All VMs | Sun 01:00 | keep-last=3 | synology-nas-storage (MISSING) | **No** |
+| backup-ac2c2f6b | VMs 100,101 | Sun 01:00 | keep-last=3 | synology-backups | **No** |
+| backup-5edb64f1 | VM 102 | Daily 03:00 | keep-last=14 | synology-backups | **No** |
 
-**Backup Targets on NAS:**
+**Issues:**
+- Job 1 references `synology-nas-storage` which does not exist in `pvesm status`
+- All jobs disabled — likely broken by PVE node-name mismatch (GAP-OP-014)
+- Jobs also cannot function until node-name mismatch is resolved
 
-| Target | Path | Consumers | Retention |
-|--------|------|-----------|-----------|
-| Proxmox vzdump | `/volume1/backups/proxmox_backups` | proxmox-home vzdump | 7 days |
-| Mint-OS PostgreSQL | `/volume1/backups/mint-os/postgres/` | docker-host | daily |
-| Mint-OS configs | `/volume1/backups/mint-os/configs/` | docker-host | as-needed |
-| Home Assistant | `/volume1/backups/homeassistant_backups/` | VM 100 | manual |
+### NAS Backups (Hyper Backup)
 
-**Storage Summary (NAS_INVENTORY.md):**
+**No Hyper Backup tasks configured.** Package is installed and enabled but the task database is empty. No NAS-level backup destinations exist.
 
-| Volume | Total | Used | Purpose |
-|--------|-------|------|---------|
-| volume1 | 20TB | ~8.7TB (43%) | Primary storage |
+### NAS Backup Targets (vzdump destinations)
 
-**Source:** NAS_INVENTORY.md, HOME_INFRASTRUCTURE_AUDIT.md
+| Target | Path | Consumers | Status |
+|--------|------|-----------|--------|
+| Proxmox vzdump | `/volume1/backups/proxmox_backups` | proxmox-home vzdump | Present but jobs disabled |
+| Mint-OS PostgreSQL | `/volume1/backups/mint-os/postgres/` | docker-host | Unverified |
+| Mint-OS configs | `/volume1/backups/mint-os/configs/` | docker-host | Unverified |
+| Home Assistant | `/volume1/backups/homeassistant_backups/` | VM 100 | Unverified |
 
 ---
 
@@ -363,29 +397,56 @@ curl -s http://vault:8080/
 
 ## Known Issues
 
-| Issue | Status | Notes |
-|-------|--------|-------|
-| download-home SSH | OPEN | Permission denied - needs key setup |
-| Immich home vs shop | INFO | Two instances - may consolidate |
-| RAM pressure | INFO | 27GB shared across 5 VMs/LXCs |
+| Issue | Status | Severity | Notes |
+|-------|--------|----------|-------|
+| PVE node-name mismatch | OPEN | **CRITICAL** | Hostname `proxmox-home` but PVE node configs under `pve`. Breaks all management tools. See GAP-OP-014 |
+| All vzdump jobs disabled | OPEN | **HIGH** | No automated VM/LXC backups running. Blocked by node-name mismatch |
+| No Hyper Backup tasks | OPEN | **HIGH** | NAS has no backup destinations configured |
+| VM 101 (immich) stopped | OPEN | MEDIUM | Not running, has migration snapshot. Cannot restart until node-name fix |
+| download-home SSH | OPEN | MEDIUM | Permission denied (publickey) — needs key setup |
+| Immich home vs shop | INFO | LOW | Two instances — may consolidate |
+| UDR DNS not using pihole | INFO | LOW | DHCP hands out 10.0.0.1 (UDR), not pihole-home |
 
 ---
 
 ## Open Loops
 
-| Loop ID | Description | Priority |
-|---------|-------------|----------|
-| `OL_HOME_BASELINE_FINISH` | Finish baseline: enable proxmox-home crons, fix download-home SSH | MEDIUM |
+No open baseline loops. `OL_HOME_BASELINE_FINISH` closed 2026-02-07.
 
-**UNVERIFIED (requires live action):**
-- proxmox-home crontab: Currently empty, crons need to be re-created
-- download-home SSH: Permission denied, needs key setup
-- NAS SSH access: Requires key configuration or Tailscale SSH
-- Proxmox backup job status: GUI says disabled but backups exist
+**Resolved 2026-02-07:**
+- NAS SSH access: works as `ronadmin` via Tailscale (100.102.199.111)
+- NAS drive inventory: 4 SATA (2x16TB IronWolf Pro + 2x3TB WD Red) + 2x1TB NVMe cache
+- NAS RAID: SHR with NVMe RAID1 cache — verified via `/proc/mdstat`
+- proxmox-home crontab: confirmed empty (no root crontab)
+- vzdump backup jobs: 3 exist, all disabled
+- Hyper Backup: installed, no tasks configured
+- UDR DHCP DNS: 10.0.0.1 (UDR itself)
+
+**New issues discovered (require separate loops):**
+- GAP-OP-014: PVE node-name mismatch (blocks VM management + backups)
+- GAP-OP-015: No naming governance policy (root cause of GAP-OP-014)
 
 ---
 
 ## Evidence / Receipts
+
+### 2026-02-07 Home Baseline Completion Audit
+
+| Item | Value |
+|------|-------|
+| Method | SSH to proxmox-home + NAS (live system inspection) |
+| Hosts Verified | proxmox-home (100.103.99.62), NAS (100.102.199.111) |
+| On-site confirmation | UDR DNS, Hyper Backup, device inventory (Ronny, 2026-02-07) |
+| Loop closed | `OL_HOME_BASELINE_FINISH` |
+
+**Key findings:**
+- PVE 8.4.1 confirmed, hostname `proxmox-home` but node configs under `/etc/pve/nodes/pve/`
+- NAS drives: 2x Seagate 16TB + 2x WD 3TB + 2x Crucial 1TB NVMe (SHR + cache)
+- All 3 vzdump backup jobs disabled
+- No Hyper Backup tasks configured
+- VM 101 (immich) stopped
+- NAS SSH works as `ronadmin`
+- download-home SSH still needs key setup
 
 ### 2026-01-21 Infrastructure Discovery
 
