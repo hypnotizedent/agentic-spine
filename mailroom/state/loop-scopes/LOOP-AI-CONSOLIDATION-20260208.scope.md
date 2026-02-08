@@ -1,7 +1,6 @@
 # LOOP-AI-CONSOLIDATION-20260208
 
-> **Status:** open
-> **Blocked By:** —
+> **Status:** ACTIVE
 > **Owner:** @ronny
 > **Created:** 2026-02-08
 > **Severity:** medium
@@ -55,15 +54,23 @@ Consolidate scattered AI services onto a dedicated VM 207 on pve (shop R730XD). 
 
 ## Phases
 
-| Phase | Scope | Dependency |
-|-------|-------|------------|
-| P0 | Evaluate RAM/GPU requirements for Qdrant + AnythingLLM | — |
-| P1 | Provision VM 207 with spine-ready-v1 (8+ CPU, 16-32GB RAM) | P0 |
-| P2 | Migrate Qdrant from MacBook → VM 207 | P1 |
-| P3 | Migrate AnythingLLM from MacBook → VM 207 | P2 |
-| P4 | Evaluate Open WebUI placement (move to 207 or keep on 202) | P3 |
-| P5 | Split ai-services Infisical project (separate secrets for 202 vs 207) | P4 |
-| P6 | Verify + closeout | P5 |
+| Phase | Scope | Dependency | Status |
+|-------|-------|------------|--------|
+| P0 | Evaluate RAM/GPU requirements for Qdrant + AnythingLLM | — | **COMPLETE** |
+| P1 | Provision + bootstrap VM 207 to profile-ready (8 vCPU, 32GB RAM) | P0 | **COMPLETE** |
+| P2 | Deploy Qdrant on VM 207 | P1 | **READY** |
+| P3 | Deploy AnythingLLM on VM 207 | P2 | **READY** |
+| P4 | Evaluate Open WebUI placement (move to 207 or keep on 202) | P3 | **COMPLETE** (Keep on VM 202) |
+| P5 | Split Infisical projects (separate secrets for 202 vs 207) | P4 | **READY** |
+| P6 | Verify + closeout | P5 | **READY** |
+
+## Unblocked (2026-02-08)
+
+VM 207 was not actually reachable at `192.168.12.207` (VMID is not an IP). Proxmox DHCP assigned `192.168.12.114` initially; after bootstrap, Tailscale is connected and the canonical SSH target is now `ubuntu@100.71.17.29`.
+
+Evidence (receipts):
+- `infra.vm.bootstrap`: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260208-115107__infra.vm.bootstrap__Rl0f28410/receipt.md`
+- `infra.vm.ready.status`: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260208-115316__infra.vm.ready.status__R4cy810329/receipt.md`
 
 ---
 
