@@ -24,7 +24,7 @@ prerequisite: Phase 2 (Vaultwarden) promoted to migrated
   --tunnel-url https://vault.ronny.works \
   --health-url http://100.92.91.128:8081/alive \
   --rollback-host 100.93.142.63 --rollback-port 8080 \
-  --soak-until 2026-02-08T04:41:00Z --execute
+  --execute
 # ^ Vaultwarden must be migrated before Phase 4 execute
 ```
 

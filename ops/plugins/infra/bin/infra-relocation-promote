@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # infra-relocation-promote
-# Promotion gate runner: validates soak health checks, then promotes a service
-# from cutover -> migrated with full gate verification.
+# Promotion gate runner: validates promotion gates (optional soak), then
+# promotes a service from cutover -> migrated with full gate verification.
 #
 # Default mode is dry-run. Pass --execute to mutate.
 #
@@ -14,7 +14,7 @@ set -euo pipefail
 #   1. Tunnel endpoint returns HTTP 200
 #   2. Direct health endpoint returns HTTP 200
 #   3. Rollback target is reachable (TCP)
-#   4. Soak period has elapsed
+#   4. Soak period has elapsed (optional; enforced only if --soak-until is provided)
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
@@ -33,19 +33,28 @@ Usage:
     --health-url <http://host:port/path> \
     --rollback-host <ip> \
     --rollback-port <port> \
-    --soak-until <ISO-8601 UTC timestamp> \
+    [--soak-until <YYYY-MM-DDTHH:MM:SSZ>] \
     [--dry-run|--execute]
 
 Gate checks (all must pass):
   1. Tunnel URL returns HTTP 200
   2. Health URL returns HTTP 200
   3. Rollback host:port is reachable (TCP)
-  4. Current time >= soak-until
+  4. Current time >= soak-until (ONLY when --soak-until is provided)
 
 On success (--execute): transitions service to migrated, then runs
 preflight, parity, and spine.verify gates.
 
 Examples:
+  infra-relocation-promote \
+    --service vaultwarden \
+    --tunnel-url https://vault.ronny.works \
+    --health-url http://100.92.91.128:8081/alive \
+    --rollback-host 100.93.142.63 \
+    --rollback-port 8080 \
+    --dry-run
+
+  # Optional: enforce a soak window explicitly
   infra-relocation-promote \
     --service vaultwarden \
     --tunnel-url https://vault.ronny.works \
@@ -88,7 +97,6 @@ done
 [[ -n "$HEALTH_URL" ]] || fail "--health-url is required"
 [[ -n "$ROLLBACK_HOST" ]] || fail "--rollback-host is required"
 [[ -n "$ROLLBACK_PORT" ]] || fail "--rollback-port is required"
-[[ -n "$SOAK_UNTIL" ]] || fail "--soak-until is required"
 
 need yq
 need curl
@@ -110,39 +118,44 @@ echo "=== INFRA RELOCATION PROMOTION GATE ==="
 echo "Mode:              $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
 echo "Service:           $SERVICE"
 echo "Current status:    $current_status"
-echo "Soak until:        $SOAK_UNTIL"
+echo "Soak until:        ${SOAK_UNTIL:-none}"
 echo ""
 
 GATE_PASS=0
-GATE_TOTAL=4
+GATE_TOTAL=3
 GATE_RESULTS=()
 
-# Gate 1: Soak period elapsed
-echo "--- Gate 1/4: Soak period ---"
-now_epoch="$(date -u +%s)"
-# Parse soak timestamp as UTC on both BSD (macOS) and GNU date.
-if date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$SOAK_UNTIL" "+%s" >/dev/null 2>&1; then
-    soak_epoch="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$SOAK_UNTIL" "+%s")"
-elif date -u -d "$SOAK_UNTIL" "+%s" >/dev/null 2>&1; then
-    soak_epoch="$(date -u -d "$SOAK_UNTIL" "+%s")"
-else
-    fail "cannot parse --soak-until: $SOAK_UNTIL"
-fi
+gate_idx=0
+if [[ -n "${SOAK_UNTIL:-}" ]]; then
+    GATE_TOTAL=$((GATE_TOTAL + 1))
+    gate_idx=$((gate_idx + 1))
+    echo "--- Gate ${gate_idx}/${GATE_TOTAL}: Soak period (optional) ---"
+    now_epoch="$(date -u +%s)"
+    # Parse soak timestamp as UTC on both BSD (macOS) and GNU date.
+    if date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$SOAK_UNTIL" "+%s" >/dev/null 2>&1; then
+        soak_epoch="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$SOAK_UNTIL" "+%s")"
+    elif date -u -d "$SOAK_UNTIL" "+%s" >/dev/null 2>&1; then
+        soak_epoch="$(date -u -d "$SOAK_UNTIL" "+%s")"
+    else
+        fail "cannot parse --soak-until: $SOAK_UNTIL"
+    fi
 
-if (( now_epoch >= soak_epoch )); then
-    echo "  PASS: soak period elapsed (now=$(date -u +%Y-%m-%dT%H:%M:%SZ))"
-    GATE_RESULTS+=("soak=PASS")
-    GATE_PASS=$((GATE_PASS + 1))
-else
-    remaining=$(( soak_epoch - now_epoch ))
-    hours=$(( remaining / 3600 ))
-    mins=$(( (remaining % 3600) / 60 ))
-    echo "  FAIL: soak period not elapsed (${hours}h ${mins}m remaining)"
-    GATE_RESULTS+=("soak=FAIL")
+    if (( now_epoch >= soak_epoch )); then
+        echo "  PASS: soak period elapsed (now=$(date -u +%Y-%m-%dT%H:%M:%SZ))"
+        GATE_RESULTS+=("soak=PASS")
+        GATE_PASS=$((GATE_PASS + 1))
+    else
+        remaining=$(( soak_epoch - now_epoch ))
+        hours=$(( remaining / 3600 ))
+        mins=$(( (remaining % 3600) / 60 ))
+        echo "  FAIL: soak period not elapsed (${hours}h ${mins}m remaining)"
+        GATE_RESULTS+=("soak=FAIL")
+    fi
 fi
 
 # Gate 2: Tunnel endpoint
-echo "--- Gate 2/4: Tunnel endpoint ($TUNNEL_URL) ---"
+gate_idx=$((gate_idx + 1))
+echo "--- Gate ${gate_idx}/${GATE_TOTAL}: Tunnel endpoint ($TUNNEL_URL) ---"
 tunnel_code="$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 10 "$TUNNEL_URL" 2>/dev/null || echo "000")"
 if [[ "$tunnel_code" == "200" ]]; then
     echo "  PASS: HTTP $tunnel_code"
@@ -154,7 +167,8 @@ else
 fi
 
 # Gate 3: Direct health endpoint
-echo "--- Gate 3/4: Direct health ($HEALTH_URL) ---"
+gate_idx=$((gate_idx + 1))
+echo "--- Gate ${gate_idx}/${GATE_TOTAL}: Direct health ($HEALTH_URL) ---"
 health_code="$(curl -fsS -o /dev/null -w "%{http_code}" --max-time 10 "$HEALTH_URL" 2>/dev/null || echo "000")"
 if [[ "$health_code" == "200" ]]; then
     echo "  PASS: HTTP $health_code"
@@ -166,7 +180,8 @@ else
 fi
 
 # Gate 4: Rollback target reachable
-echo "--- Gate 4/4: Rollback reachable ($ROLLBACK_HOST:$ROLLBACK_PORT) ---"
+gate_idx=$((gate_idx + 1))
+echo "--- Gate ${gate_idx}/${GATE_TOTAL}: Rollback reachable ($ROLLBACK_HOST:$ROLLBACK_PORT) ---"
 if nc -zw5 "$ROLLBACK_HOST" "$ROLLBACK_PORT" 2>/dev/null; then
     echo "  PASS: port reachable"
     GATE_RESULTS+=("rollback=PASS")

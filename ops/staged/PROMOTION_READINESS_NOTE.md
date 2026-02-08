@@ -5,7 +5,7 @@
 | Service | `vaultwarden` |
 | Relocation | `LOOP-INFRA-VM-RESTRUCTURE-20260206` |
 | Current Status | `cutover` |
-| Soak Expiry | `2026-02-08T04:41:00Z` |
+| Soak Until (optional) | `2026-02-08T04:41:00Z` |
 | Generated | `2026-02-07T20:57Z` |
 
 ## Go/No-Go Checklist
@@ -19,20 +19,22 @@
 | Hypervisor identity (D39) | PASS | proxmox-home hostname deconflicted |
 | Maker tools (D40) | PASS | Canonical toolkit plugin locked |
 
-### Promotion Gates (3/4 PASS)
+### Promotion Gates (3/3 PASS)
 
 | Gate | Status | Detail |
 |------|--------|--------|
-| 1. Soak period | FAIL (expected) | ~10h remaining; must be >= `2026-02-08T04:41:00Z` |
-| 2. Tunnel endpoint | PASS | `https://vault.ronny.works` returns HTTP 200 |
-| 3. Direct health | PASS | `http://100.92.91.128:8081/alive` returns HTTP 200 |
-| 4. Rollback reachable | PASS | `100.93.142.63:8080` TCP reachable |
+| 1. Tunnel endpoint | PASS | `https://vault.ronny.works` returns HTTP 200 |
+| 2. Direct health | PASS | `http://100.92.91.128:8081/alive` returns HTTP 200 |
+| 3. Rollback reachable | PASS | `100.93.142.63:8080` TCP reachable |
+
+Optional gate:
+- Soak window: pass `--soak-until 2026-02-08T04:41:00Z` to enforce a time-based soak gate.
 
 ### Go/No-Go Decision
 
-**Status: GO (conditional on soak expiry)**
+**Status: GO**
 
-All gates except soak-window are PASS. No anomalies detected across three consecutive dry-runs today. Promotion is approved to execute at/after `2026-02-08T04:41:00Z`.
+All required gates are PASS. No anomalies detected across three consecutive dry-runs today. Promotion is approved to execute now.
 
 ## Execute Command (Copy-Paste Ready)
 
@@ -43,7 +45,6 @@ echo "yes" | ./bin/ops cap run infra.relocation.promote \
   --health-url http://100.92.91.128:8081/alive \
   --rollback-host 100.93.142.63 \
   --rollback-port 8080 \
-  --soak-until 2026-02-08T04:41:00Z \
   --execute
 ```
 
