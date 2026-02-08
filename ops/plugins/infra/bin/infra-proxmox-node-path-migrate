@@ -12,6 +12,7 @@ set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
+POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
 
 HOST_ID=""
 FROM_NODE="pve"
@@ -77,6 +78,19 @@ echo "From node:  $FROM_NODE"
 echo "To node:    $TO_NODE"
 echo "Mode:       $([[ "$EXECUTE" -eq 1 ]] && echo execute || echo dry-run)"
 echo ""
+
+# Pre-execution machine-id assertion: verify we are talking to the correct hypervisor
+if [[ -f "$POLICY" ]]; then
+    expected_mid="$(yq e ".hosts.\"$HOST_ID\".machine_id // \"\"" "$POLICY" 2>/dev/null || echo "")"
+    if [[ -n "$expected_mid" && "$expected_mid" != "null" ]]; then
+        actual_mid="$(ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" 'cat /etc/machine-id 2>/dev/null' 2>/dev/null || echo "")"
+        if [[ "$actual_mid" != "$expected_mid" ]]; then
+            fail "MACHINE-ID MISMATCH on $HOST_ID: expected $expected_mid, got ${actual_mid:-unreachable}. Refusing to migrate on wrong host."
+        fi
+        echo "Machine-ID verified: $HOST_ID ($actual_mid)"
+        echo ""
+    fi
+fi
 
 remote_script="$(cat <<'REMOTE'
 set -euo pipefail
