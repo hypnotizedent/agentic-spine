@@ -114,6 +114,32 @@ ssh media-stack "uptime && docker ps --filter status=dead -q | wc -l && docker p
 
 ---
 
+## Boot Ordering (Phase C)
+
+### The Problem
+Docker's systemd unit depends on `network-online.target` but has NO
+dependency on NFS mounts. If Docker starts before NFS automounts complete,
+containers bind-mount empty directories and crash.
+
+### The Fix
+Systemd drop-in at `/etc/systemd/system/docker.service.d/nfs-dependency.conf`:
+```ini
+[Unit]
+After=mnt-docker.mount mnt-media.mount
+Requires=mnt-docker.mount mnt-media.mount
+```
+
+### Why `Requires=` Not Just `After=`
+- `After=` only controls ordering — if the mount fails, Docker still starts
+- `Requires=` ensures Docker won't start if either NFS mount fails
+- Combined: Docker starts after NFS AND only if NFS is healthy
+
+### fstab Already Handles Tailscale
+The NFS entries use `x-systemd.requires=tailscaled.service`, so the
+full boot chain is: `tailscaled → NFS mounts → Docker → containers`.
+
+---
+
 ## Decision Record
 
 ### Why Phase A Before 24h Gate

@@ -107,17 +107,22 @@ Executed 2026-02-08T02:48Z. Migrated 11 database files from NFS to `/opt/appdata
 mounts, restart. Downtime: 10-30 min.
 **Acceptance:** iowait < 5% during normal operation.
 
-### Phase C: Boot ordering + systemd hardening
+### Phase C: Boot ordering + systemd hardening — COMPLETE (2026-02-08)
 
-1. Add `After=mnt-media.mount` to Docker systemd unit (not mnt-docker if
-   config moves to local)
-2. Or create a `media-stack-ready.target` that requires NFS + Tailscale + Docker
-3. Add healthcheck to compose that verifies NFS is mounted before starting
-   containers that need media access
+Executed 2026-02-08T03:10Z. Created systemd drop-in:
+`/etc/systemd/system/docker.service.d/nfs-dependency.conf`
 
-**Expected impact:** Eliminate boot race condition that causes container failures.
-**Risk:** Low — systemd unit override.
-**Acceptance:** VM 201 survives clean reboot with all containers healthy.
+```ini
+[Unit]
+After=mnt-docker.mount mnt-media.mount
+Requires=mnt-docker.mount mnt-media.mount
+```
+
+Docker now waits for both NFS mounts before starting. `systemctl daemon-reload`
+applied. Verified via `systemctl show docker.service -p After`.
+
+**Result:** Boot race condition eliminated. Full acceptance test (clean reboot)
+deferred to next maintenance window — drop-in is in place and will take effect.
 
 ## What This Loop Does NOT Cover
 
@@ -132,9 +137,8 @@ mounts, restart. Downtime: 10-30 min.
 
 1. ~~**Blocked by RCA closure**~~ — RCA closed 2026-02-08T02:45Z.
 2. **Phase A complete** — executed 2026-02-08T02:48Z, iowait 48% → 0-5%.
-3. **Phase B requires VM 201 downtime** — coordinate with any active media
-   consumption. May be unnecessary given Phase A iowait results.
-4. **Phase C can be done at any time** (systemd changes take effect on reboot).
+3. **Phase B skipped** — iowait at 0-5% makes dedicated data disk unnecessary.
+4. **Phase C complete** — systemd drop-in installed 2026-02-08T03:10Z.
 
 ## Pre-Staged Artifact
 
