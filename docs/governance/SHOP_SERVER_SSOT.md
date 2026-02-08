@@ -244,27 +244,9 @@ Cameras are on the NVR's internal PoE network (`192.168.254.0/24`), fed by a Net
 | **Camera VLAN** | 192.168.254.0/24 (NVR internal) |
 | **NVR IP (Shop LAN)** | 192.168.12.216 (`nvr-shop`) |
 | **Camera Switch** | Netgear PoE switch (uplink to NVR PoE ports) |
-| **Total Channels** | 16 (12 configured, 8 online, 3 offline, 1 IP conflict) |
-| **Storage** | 1x 4TB SATA HDD (status=ok, full, overwrite/quota mode) |
+| **Total Channels** | 16 (12 configured, 8 online, 4 offline) |
 
-**Camera Channel Map (live ISAPI query, 2026-02-08):**
-
-| Channel | Internal IP | Online | Detect Result |
-|---------|-------------|--------|---------------|
-| 1 | 192.168.254.9 | Yes | connect |
-| 2 | 192.168.254.3 | No | notExist (powered off or disconnected) |
-| 3 | 192.168.254.4 | No | notExist (powered off or disconnected) |
-| 4 | 192.168.254.7 | No | notExist (powered off or disconnected) |
-| 5 | 192.168.254.7 | No | ipAddrConflict (same IP as ch4) |
-| 6 | 192.168.254.16 | Yes | connect |
-| 7 | 192.168.254.12 | Yes | connect |
-| 8 | 192.168.254.10 | Yes | connect |
-| 9 | 192.168.254.6 | Yes | connect |
-| 10 | 192.168.254.17 | Yes | connect |
-| 11 | 192.168.254.13 | Yes | connect |
-| 12 | 192.168.254.8 | Yes | connect |
-
-**Secrets:** RTSP URLs, NVR admin credentials, and camera passwords are stored in Infisical at `infrastructure/prod:/spine/shop/nvr/*`. This repo never contains secret values.
+See [CAMERA_SSOT.md](CAMERA_SSOT.md) for the full channel registry, Frigate readiness config, storage details, and verification commands.
 
 ---
 
@@ -343,9 +325,8 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 - R730XD NICs: 4x 1GbE, only eno1 active
 - Tank drive serials: Z1Z86298, Z1Z85V4W, Z1Z84YNR, Z1Z85V47, Z1Z862H5, Z1Z8629N, Z1Z85TFE, Z1Z861ZN
 - PM8072 second SAS controller present but no driver/no drives visible
-- NVR: Hikvision ERI-K216-P16, 16 channels, 9 online / 3 offline (from receipt 2026-02-05)
+- NVR: Hikvision ERI-K216-P16 on Gi1/0/4 (see [CAMERA_SSOT.md](CAMERA_SSOT.md) for channel details)
 - Switch: Dell N2024P at 192.168.12.2 (corrected from .1 — .1 is T-Mobile gateway)
-- Camera channel map: 12 channels configured on NVR internal 192.168.254.0/24 via Netgear PoE switch
 - Tailscale subnet routing: pve now advertises 192.168.12.0/24 (ip_forward persisted)
 
 **BLOCKED (requires cold boot — LOOP-MD1400-SAS-RECOVERY-20260208):**
@@ -353,7 +334,8 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 **UNVERIFIED (requires credentials or physical visit):**
 - WiFi AP (EAP225): Web UI at .249 reachable, but default creds (`admin`/`admin`) rejected — password was changed. Need owner to provide or reset. Config/SSID unknown.
-- Camera physical locations: NVR channels mapped but no physical location labels for channels 6-12 (deferred — priority is getting offline cameras working)
+
+**Camera system details:** Now tracked in [CAMERA_SSOT.md](CAMERA_SSOT.md) and LOOP-CAMERA-BASELINE-20260208 (offline cameras, IP conflict, physical location audit).
 
 ---
 
@@ -372,6 +354,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 ## Related Documents
 
+- [CAMERA_SSOT.md](CAMERA_SSOT.md)
 - [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md)
 - [MINILAB_SSOT.md](MINILAB_SSOT.md)
 - [MACBOOK_SSOT.md](MACBOOK_SSOT.md)
