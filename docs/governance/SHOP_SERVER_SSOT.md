@@ -144,14 +144,16 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 | 202 | automation-stack | running | 16GB | 100GB | n8n + Ollama |
 | 203 | immich | running | 16GB | 50GB | Shop photos (Tailscale: immich-1) |
 | 204 | infra-core | running | 8GB | 50GB | Core infra (cloudflared, pihole, infisical, vaultwarden, caddy-auth) |
-| 205 | observability | running | 8GB | 50GB | Prometheus, Grafana, Loki, Uptime-Kuma |
+| 205 | observability | running | 8GB | 50GB | Prometheus, Grafana, Loki, Uptime Kuma |
 | 206 | dev-tools | running | 8GB | 50GB | Gitea, Gitea Actions runner, PostgreSQL |
-| 207 | ai-consolidation | running | 32GB | 200GB | AI workloads (DHCP, onboot=1) |
+| 207 | ai-consolidation | running | 32GB | 200GB | Qdrant + AnythingLLM (DHCP, onboot=1) |
 | 209 | download-stack | running | 8GB | 50GB | radarr, sonarr, lidarr, prowlarr, sabnzbd, tdarr, trailarr |
 | 210 | streaming-stack | running | 8GB | 50GB | jellyfin, navidrome, jellyseerr, bazarr, homarr |
 | 9000 | template | stopped | 2GB | 3.5GB | Ubuntu 24.04 cloud-init template |
 
 **Total RAM allocated:** 232GB across 10 running VMs (host has 192GB — overcommitted by 40GB, acceptable with balloon/KSM)
+
+**NOTE:** Backup coverage is incomplete for shop VMs. Track and fix via `LOOP-BACKUP-STABILIZATION-20260208` and verify with `./bin/ops cap run backup.status`.
 
 **NOTE:** vzdump backup job covers VMs 200-204 only. VMs 205, 206, 207, 209, 210 are NOT backed up. Add them to the job.
 

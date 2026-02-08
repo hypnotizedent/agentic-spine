@@ -39,8 +39,8 @@ Consolidate scattered AI services onto a dedicated VM 207 on pve (shop R730XD). 
 
 | Service | Port | Purpose | Current Location | Status |
 |---------|------|---------|-----------------|--------|
-| Qdrant | 6333 (HTTP), 6334 (gRPC) | Vector database | MacBook | This loop |
-| AnythingLLM | 3002 | RAG + chat interface | MacBook | This loop |
+| Qdrant | 6333 (HTTP), 6334 (gRPC) | Vector database | VM 207 (`ai-consolidation`) | **COMPLETE** |
+| AnythingLLM | 3002 | RAG + chat interface | VM 207 (`ai-consolidation`) | **COMPLETE** |
 | Open WebUI | 3000 | LLM chat frontend | VM 202 | Evaluate in P4 |
 
 ### What Stays on VM 202 (ai-services)
@@ -58,8 +58,8 @@ Consolidate scattered AI services onto a dedicated VM 207 on pve (shop R730XD). 
 |-------|-------|------------|--------|
 | P0 | Evaluate RAM/GPU requirements for Qdrant + AnythingLLM | — | **COMPLETE** |
 | P1 | Provision + bootstrap VM 207 to profile-ready (8 vCPU, 32GB RAM) | P0 | **COMPLETE** |
-| P2 | Deploy Qdrant on VM 207 | P1 | **READY** |
-| P3 | Deploy AnythingLLM on VM 207 | P2 | **READY** |
+| P2 | Deploy Qdrant on VM 207 | P1 | **COMPLETE** |
+| P3 | Deploy AnythingLLM on VM 207 | P2 | **COMPLETE** |
 | P4 | Evaluate Open WebUI placement (move to 207 or keep on 202) | P3 | **COMPLETE** (Keep on VM 202) |
 | P5 | Split Infisical projects (separate secrets for 202 vs 207) | P4 | **READY** |
 | P6 | Verify + closeout | P5 | **READY** |
@@ -72,30 +72,41 @@ Evidence (receipts):
 - `infra.vm.bootstrap`: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260208-115107__infra.vm.bootstrap__Rl0f28410/receipt.md`
 - `infra.vm.ready.status`: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260208-115316__infra.vm.ready.status__R4cy810329/receipt.md`
 
+
+## Deployment Evidence (2026-02-08)
+
+- `docker.compose.status` (ai-consolidation stack): `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260208-123955__docker.compose.status__R04it45692/receipt.md`
+- `services.health.status` (qdrant + anythingllm): `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260208-124056__services.health.status__Rfaoq46891/receipt.md`
+
 ---
 
 ## Migration Notes
 
 ### Qdrant (P2)
 
-- Current: Docker on MacBook, data in local volume
-- Migration: Export snapshots via Qdrant API, restore on VM 207
-- Collections to migrate: inventory of collections TBD during P0
-- **Risk:** Large vector collections may take significant transfer time
+- Deployed: VM 207 (`ai-consolidation`) via `/opt/stacks/ai-consolidation`
+- Data: fresh instance (collections were empty); no restore required
+- Health: `http://100.71.17.29:6333/healthz` -> pass
 
 ### AnythingLLM (P3)
 
-- Current: Docker on MacBook
-- Migration: Export workspace configs + document store
-- Qdrant connection string must update to `localhost:6333` (co-located on 207)
-- Ollama connection must update to `http://<vm202-tailscale-ip>:11434`
+- Deployed: VM 207 (`ai-consolidation`) via `/opt/stacks/ai-consolidation`
+- Storage: migrated from workbench runtime (`workbench/runtime/rag/anythingllm_storage`)
+- Qdrant: `http://qdrant:6333` (co-located in compose)
+- Ollama: remote on VM 202 (`automation-stack`) at `http://100.98.70.70:11434`
+- Health: `http://100.71.17.29:3002/api/ping` -> `{"online":true}`
 
 ### Open WebUI (P4 — Evaluation)
 
 - Currently on VM 202 alongside Ollama
 - **Move if:** Open WebUI does not heavily depend on Ollama localhost latency
 - **Keep if:** Latency-sensitive model switching benefits from co-location
-- Decision deferred to P4 evaluation
+- Decision: keep on VM 202 (negligible latency impact; tighter Ollama coupling)
+
+### MacBook Shutdown (P6 partial)
+
+- Stopped local Docker Desktop containers: `anythingllm`, `qdrant`
+- Verified VM 207 endpoints remain healthy after shutdown
 
 ---
 
