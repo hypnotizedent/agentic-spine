@@ -31,6 +31,7 @@ scope: session-entry
 3. **Trace truth**
    - Use `mint ask "question"` before guessing answers or inventing storylines (Rule 2 from the brain layer).
    - When you need policy or structure, follow the entry chain in `docs/governance/GOVERNANCE_INDEX.md`; trust the highest-priority SSOT in `docs/governance/SSOT_REGISTRY.yaml`.
+   - Before guessing remote paths, consult `ops/bindings/docker.compose.targets.yaml` and `ops/bindings/ssh.targets.yaml` first. Never assume stack paths -- bindings are the SSOT for remote host paths.
 4. **Operate through the spine**
    - Every command that mutates must be run through `./bin/ops cap run <capability>` or `./bin/ops run ...` so receipts land in `receipts/sessions/`.
    - Never shell into `~/code/workbench` or `~/ronny-ops` at runtime; the spine is self-contained.

@@ -32,4 +32,5 @@ Code changes, git commits, database writes, deploys, docker restarts.
 | Data/files | docs/governance/INFRASTRUCTURE_MAP.md |
 | Code | docs/governance/AGENTS_GOVERNANCE.md |
 | Services | docs/governance/SERVICE_REGISTRY.yaml |
+| Remote paths | ops/bindings/docker.compose.targets.yaml, ops/bindings/ssh.targets.yaml |
 | CLI tools | ops/bindings/cli.tools.inventory.yaml |

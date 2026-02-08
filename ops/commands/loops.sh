@@ -369,27 +369,34 @@ list_loops() {
         return 0
     fi
 
+    # Canonical jq reducer:
+    # 1. Normalize close records: {id, action:close} → {loop_id, status:closed}
+    # 2. Deduplicate by loop_id (last entry per loop_id wins)
+    # 3. Apply close records to filter out closed loops
+    local jq_reduce
+    jq_reduce='[.[] | if .action == "close" then {loop_id: .id, status: "closed", closed_at: .closed_at, close_reason: .reason} else . end | select(.loop_id != null)] | reduce .[] as $i ({}; .[$i.loop_id] = ((.[$i.loop_id] // {}) * $i)) | [.[]]'
+
     case "$filter" in
         --open)
             while IFS=$'\t' read -r loop_id severity owner title; do
                 printf "  [%s] %-12s %-15s %s\n" "$severity" "$owner" "$loop_id" "$title"
-            done < <(jq -s -r 'reduce .[] as $i ({}; .[$i.loop_id]=$i) | .[] | select(.status=="open") | "\(.loop_id)\t\(.severity)\t\(.owner)\t\(.title)"' "$LOOPS_FILE")
+            done < <(jq -s -r "$jq_reduce | .[] | select(.status==\"open\") | \"\(.loop_id)\t\(.severity)\t\(.owner)\t\(.title)\"" "$LOOPS_FILE")
             ;;
         --closed)
             while IFS=$'\t' read -r loop_id severity owner title; do
                 printf "  [%s] %-12s %-15s %s\n" "$severity" "$owner" "$loop_id" "$title"
-            done < <(jq -s -r 'reduce .[] as $i ({}; .[$i.loop_id]=$i) | .[] | select(.status=="closed") | "\(.loop_id)\t\(.severity)\t\(.owner)\t\(.title)"' "$LOOPS_FILE")
+            done < <(jq -s -r "$jq_reduce | .[] | select(.status==\"closed\") | \"\(.loop_id)\t\(.severity)\t\(.owner)\t\(.title)\"" "$LOOPS_FILE")
             ;;
         --all)
             while IFS=$'\t' read -r loop_id status severity owner title; do
                 printf "  [%s] %-6s %-12s %-15s %s\n" "$severity" "$status" "$owner" "$loop_id" "$title"
-            done < <(jq -s -r 'reduce .[] as $i ({}; .[$i.loop_id]=$i) | .[] | "\(.loop_id)\t\(.status)\t\(.severity)\t\(.owner)\t\(.title)"' "$LOOPS_FILE")
+            done < <(jq -s -r "$jq_reduce | .[] | \"\(.loop_id)\t\(.status)\t\(.severity)\t\(.owner)\t\(.title)\"" "$LOOPS_FILE")
             ;;
     esac
 
     echo ""
     local open_count
-    open_count="$(jq -s -r 'reduce .[] as $i ({}; .[$i.loop_id]=$i) | [.[] | select(.status=="open")] | length' "$LOOPS_FILE")"
+    open_count="$(jq -s -r "$jq_reduce | [.[] | select(.status==\"open\")] | length" "$LOOPS_FILE")"
     echo "Open loops: $open_count"
 }
 
