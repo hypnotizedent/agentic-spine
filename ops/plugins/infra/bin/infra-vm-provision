@@ -106,6 +106,11 @@ nameserver="$(yq e ".profiles.\"$PROFILE\".provisioning.nameserver // .defaults.
 search_domain="$(yq e ".profiles.\"$PROFILE\".provisioning.search_domain // .defaults.search_domain // \"\"" "$PROFILES")"
 qemu_agent="$(yq e ".profiles.\"$PROFILE\".provisioning.qemu_agent // true" "$PROFILES")"
 onboot="$(yq e ".profiles.\"$PROFILE\".provisioning.onboot // true" "$PROFILES")"
+sshkey_file="$(yq e ".profiles.\"$PROFILE\".provisioning.sshkey_file // .defaults.sshkey_file // \"\"" "$PROFILES")"
+# Expand ~ in sshkey_file
+if [[ -n "$sshkey_file" && "$sshkey_file" != "null" ]]; then
+    sshkey_file="${sshkey_file/#\~/$HOME}"
+fi
 
 [[ "$cpu_cores" =~ ^[0-9]+$ ]] || fail "profile cpu_cores must be numeric"
 [[ "$memory_mb" =~ ^[0-9]+$ ]] || fail "profile memory_mb must be numeric"
@@ -134,7 +139,7 @@ else
     echo "Template ID:  $template_vmid"
 fi
 echo "Resources:    cores=$cpu_cores memory_mb=$memory_mb disk_gb=$disk_gb bridge=$bridge storage=$storage"
-echo "Cloud-init:   user=$ci_user ip=$ci_network_cidr nameserver=${nameserver:-none} search_domain=${search_domain:-none}"
+echo "Cloud-init:   user=$ci_user ip=$ci_network_cidr nameserver=${nameserver:-none} search_domain=${search_domain:-none} sshkey=${sshkey_file:-none}"
 echo
 
 echo "Planned Proxmox operations:"
@@ -170,6 +175,7 @@ NAMESERVER="${11}"
 SEARCH_DOMAIN="${12}"
 QEMU_AGENT="${13}"
 ONBOOT="${14}"
+SSHKEY_CONTENT="${15}"
 
 qm status "$TEMPLATE" >/dev/null 2>&1 || { echo "ERROR: template vmid $TEMPLATE not found"; exit 1; }
 if qm status "$VMID" >/dev/null 2>&1; then
@@ -193,6 +199,12 @@ fi
 if [[ -n "$SEARCH_DOMAIN" && "$SEARCH_DOMAIN" != "null" ]]; then
   qm set "$VMID" --searchdomain "$SEARCH_DOMAIN"
 fi
+if [[ -n "$SSHKEY_CONTENT" && "$SSHKEY_CONTENT" != "null" && "$SSHKEY_CONTENT" != "__NONE__" ]]; then
+  tmpkey="/tmp/sshkey_${VMID}.pub"
+  echo "$SSHKEY_CONTENT" > "$tmpkey"
+  qm set "$VMID" --sshkeys "$tmpkey"
+  rm -f "$tmpkey"
+fi
 if qm config "$VMID" | grep -q "^scsi0:"; then
   qm resize "$VMID" scsi0 "${DISK_GB}G" || true
 fi
@@ -214,8 +226,14 @@ if [[ -n "$expected_mid" && "$expected_mid" != "null" ]]; then
     echo "Machine-ID verified: $proxmox_host ($actual_mid)"
 fi
 
+# Read SSH key content if file exists
+sshkey_content="__NONE__"
+if [[ -n "$sshkey_file" && "$sshkey_file" != "null" && -f "$sshkey_file" ]]; then
+    sshkey_content="$(cat "$sshkey_file")"
+fi
+
 ssh "${ssh_opts[@]}" "${proxmox_user}@${proxmox_host}" \
-    "bash -lc $(printf "%q" "$remote_cmd") -- $(printf "%q" "$template_vmid") $(printf "%q" "$VM_ID") $(printf "%q" "$TARGET") $(printf "%q" "$storage") $(printf "%q" "$bridge") $(printf "%q" "$cpu_cores") $(printf "%q" "$memory_mb") $(printf "%q" "$disk_gb") $(printf "%q" "$ci_user") $(printf "%q" "$ci_network_cidr") $(printf "%q" "$nameserver") $(printf "%q" "$search_domain") $(printf "%q" "$([[ "$qemu_agent" == "true" ]] && echo 1 || echo 0)") $(printf "%q" "$([[ "$onboot" == "true" ]] && echo 1 || echo 0)")"
+    "bash -lc $(printf "%q" "$remote_cmd") -- $(printf "%q" "$template_vmid") $(printf "%q" "$VM_ID") $(printf "%q" "$TARGET") $(printf "%q" "$storage") $(printf "%q" "$bridge") $(printf "%q" "$cpu_cores") $(printf "%q" "$memory_mb") $(printf "%q" "$disk_gb") $(printf "%q" "$ci_user") $(printf "%q" "$ci_network_cidr") $(printf "%q" "$nameserver") $(printf "%q" "$search_domain") $(printf "%q" "$([[ "$qemu_agent" == "true" ]] && echo 1 || echo 0)") $(printf "%q" "$([[ "$onboot" == "true" ]] && echo 1 || echo 0)") $(printf "%q" "$sshkey_content")"
 
 echo
 echo "Provisioning complete: $TARGET (vmid=$VM_ID)"
