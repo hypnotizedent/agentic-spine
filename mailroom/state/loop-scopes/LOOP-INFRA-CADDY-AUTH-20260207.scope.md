@@ -1,7 +1,7 @@
 # LOOP-INFRA-CADDY-AUTH-20260207
 
-> **Status:** open
-> **Blocked By:** LOOP-INFRA-VM-RESTRUCTURE-20260206
+> **Status:** closed
+> **Blocked By:** LOOP-INFRA-VM-RESTRUCTURE-20260206 (resolved)
 > **Owner:** @ronny
 > **Created:** 2026-02-07
 > **Severity:** medium

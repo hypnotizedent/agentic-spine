@@ -203,6 +203,17 @@ qm status "$VMID"
 '
 
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+# Pre-execution machine-id assertion: verify we are talking to the correct hypervisor
+expected_mid="$(yq e ".hosts.\"$proxmox_host\".machine_id // \"\"" "$POLICY" 2>/dev/null || echo "")"
+if [[ -n "$expected_mid" && "$expected_mid" != "null" ]]; then
+    actual_mid="$(ssh "${ssh_opts[@]}" "${proxmox_user}@${proxmox_host}" 'cat /etc/machine-id 2>/dev/null' 2>/dev/null || echo "")"
+    if [[ "$actual_mid" != "$expected_mid" ]]; then
+        fail "MACHINE-ID MISMATCH on $proxmox_host: expected $expected_mid, got ${actual_mid:-unreachable}. Refusing to provision on wrong host."
+    fi
+    echo "Machine-ID verified: $proxmox_host ($actual_mid)"
+fi
+
 ssh "${ssh_opts[@]}" "${proxmox_user}@${proxmox_host}" \
     "bash -lc $(printf "%q" "$remote_cmd") -- $(printf "%q" "$template_vmid") $(printf "%q" "$VM_ID") $(printf "%q" "$TARGET") $(printf "%q" "$storage") $(printf "%q" "$bridge") $(printf "%q" "$cpu_cores") $(printf "%q" "$memory_mb") $(printf "%q" "$disk_gb") $(printf "%q" "$ci_user") $(printf "%q" "$ci_network_cidr") $(printf "%q" "$nameserver") $(printf "%q" "$search_domain") $(printf "%q" "$([[ "$qemu_agent" == "true" ]] && echo 1 || echo 0)") $(printf "%q" "$([[ "$onboot" == "true" ]] && echo 1 || echo 0)")"
 

@@ -100,6 +100,15 @@ before_mid="$(echo "$before_out" | sed -n 's/^__MID__://p' | head -1)"
 echo "Current hostname: ${before_hn:-unknown}"
 echo "Current FQDN:     ${before_fqdn:-unknown}"
 echo "Machine ID:       ${before_mid:-unknown}"
+
+# Pre-execution machine-id assertion: verify we are talking to the correct hypervisor
+expected_mid="$(yq e ".hosts.\"$HOST_ID\".machine_id // \"\"" "$POLICY" 2>/dev/null || echo "")"
+if [[ -n "$expected_mid" && "$expected_mid" != "null" ]]; then
+    if [[ "$before_mid" != "$expected_mid" ]]; then
+        fail "MACHINE-ID MISMATCH on $HOST_ID: expected $expected_mid, got ${before_mid:-unknown}. Refusing to mutate wrong host."
+    fi
+    echo "Machine-ID verified: $HOST_ID ($before_mid)"
+fi
 echo
 
 if [[ "$EXECUTE" -ne 1 ]]; then
