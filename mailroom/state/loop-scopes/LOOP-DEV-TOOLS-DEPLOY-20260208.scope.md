@@ -1,6 +1,6 @@
 # LOOP-DEV-TOOLS-DEPLOY-20260208
 
-> **Status:** open (P0 complete)
+> **Status:** open (P1 complete)
 > **Blocked By:** none (unblocked 2026-02-08)
 > **Owner:** @ronny
 > **Created:** 2026-02-08
@@ -40,7 +40,7 @@ Provision VM 206 on pve (shop R730XD) and deploy a self-hosted development toolc
 
 | Service | Port | Purpose | Status |
 |---------|------|---------|--------|
-| Gitea | 3000 (HTTP), 22 (SSH) | Git forge + web UI | This loop |
+| Gitea | 3000 (HTTP), 2222 (SSH) | Git forge + web UI | This loop |
 | Gitea Actions Runner | — | CI/CD runner (Docker-in-Docker) | This loop |
 | PostgreSQL | 5432 | Gitea database | This loop |
 | Container Registry | 5000 | OCI image registry (optional) | This loop |
@@ -76,7 +76,7 @@ Provision VM 206 on pve (shop R730XD) and deploy a self-hosted development toolc
 VM 206 host SSH runs on port 22. Gitea SSH must use a different approach:
 - Option A: Gitea SSH on port 2222, NAT/alias for convenience
 - Option B: Passthrough mode (Gitea uses host SSH authorized_keys)
-- **Decision:** TBD during P1
+- **Decision:** Option A — Gitea container SSH on port 2222 (host SSH keeps 22)
 
 ### Authentik Integration (P3)
 
