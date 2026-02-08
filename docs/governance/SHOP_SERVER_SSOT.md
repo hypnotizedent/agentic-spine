@@ -352,7 +352,6 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 **UNVERIFIED (requires credentials or physical visit):**
 - WiFi AP (EAP225): Web UI at .249 reachable, but default creds (`admin`/`admin`) rejected — password was changed. Need owner to provide or reset. Config/SSID unknown.
-- N2024P: Service tag (check chassis label — not exposed via web UI or CLI)
 - Camera physical locations: NVR channels mapped but no physical location labels for channels 6-12 (deferred — priority is getting offline cameras working)
 
 ---
