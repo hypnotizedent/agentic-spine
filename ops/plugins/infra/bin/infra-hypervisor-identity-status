@@ -15,6 +15,7 @@ set -euo pipefail
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 POLICY="${INFRA_PLACEMENT_POLICY:-$SPINE_REPO/ops/bindings/infra.placement.policy.yaml}"
 SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
+NAMING_POLICY="${NAMING_POLICY:-$SPINE_REPO/ops/bindings/naming.policy.yaml}"
 
 ALLOW_HOSTNAME_ALIAS=0
 
@@ -57,6 +58,14 @@ yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SSH_BINDING"
 
 mapfile -t PROXMOX_IDS < <(yq e '.hosts | to_entries[] | select(.value.kind == "proxmox") | .key' "$POLICY")
 [[ "${#PROXMOX_IDS[@]}" -gt 0 ]] || fail "no proxmox hosts defined in policy"
+
+# Load hostname exceptions from naming policy
+declare -A HOSTNAME_EXCEPTION=()
+if [[ -f "$NAMING_POLICY" ]]; then
+    while IFS='|' read -r ehost eactual; do
+        [[ -n "$ehost" && -n "$eactual" ]] && HOSTNAME_EXCEPTION["$ehost"]="$eactual"
+    done < <(yq e '.allowed_exceptions[] | select(.surface == "system_hostname") | .host + "|" + .actual' "$NAMING_POLICY" 2>/dev/null || true)
+fi
 
 declare -A HOSTNAME_OWNER=()
 declare -A MACHINE_ID_OWNER=()
@@ -110,22 +119,37 @@ for host_id in "${PROXMOX_IDS[@]}"; do
     echo "  Remote FQDN:     ${remote_fqdn:-unknown}"
     echo "  Machine ID:      ${machine_id:-unknown}"
 
+    expected_hn="$host_id"
+    has_exception=0
+    if [[ -n "${HOSTNAME_EXCEPTION[$host_id]:-}" ]]; then
+        expected_hn="${HOSTNAME_EXCEPTION[$host_id]}"
+        has_exception=1
+    fi
+
     if [[ "$ALLOW_HOSTNAME_ALIAS" -ne 1 ]]; then
-        if [[ "$remote_hn" != "$host_id" ]]; then
-            echo "  FAIL: hostname mismatch (expected '$host_id', got '$remote_hn')"
+        if [[ "$remote_hn" != "$expected_hn" ]]; then
+            echo "  FAIL: hostname mismatch (expected '$expected_hn', got '$remote_hn')"
             FAIL_COUNT=$((FAIL_COUNT + 1))
+        elif [[ "$has_exception" -eq 1 ]]; then
+            echo "  PASS: hostname matches naming policy exception ('$remote_hn')"
         else
             echo "  PASS: hostname matches host id"
         fi
     else
-        if [[ "$remote_hn" != "$host_id" ]]; then
-            echo "  WARN: hostname mismatch allowed (expected '$host_id', got '$remote_hn')"
+        if [[ "$remote_hn" != "$expected_hn" ]]; then
+            echo "  WARN: hostname mismatch allowed (expected '$expected_hn', got '$remote_hn')"
         fi
     fi
 
+    # Duplicate hostname check — skip when current host has a documented naming exception
     if [[ -n "${HOSTNAME_OWNER[$remote_hn]:-}" && "${HOSTNAME_OWNER[$remote_hn]}" != "$host_id" ]]; then
-        echo "  FAIL: duplicate remote hostname '$remote_hn' already owned by '${HOSTNAME_OWNER[$remote_hn]}'"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        prev_owner="${HOSTNAME_OWNER[$remote_hn]}"
+        if [[ "$has_exception" -eq 1 ]]; then
+            echo "  WARN: duplicate hostname '$remote_hn' allowed by naming policy exception"
+        else
+            echo "  FAIL: duplicate remote hostname '$remote_hn' already owned by '$prev_owner'"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
     else
         HOSTNAME_OWNER["$remote_hn"]="$host_id"
     fi
