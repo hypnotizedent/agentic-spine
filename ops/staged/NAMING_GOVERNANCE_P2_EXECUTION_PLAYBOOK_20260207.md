@@ -10,7 +10,7 @@
 
 ## Blocker Gate (Must Be Cleared First)
 
-1. Promotion executed at/after `2026-02-08T04:41:00Z`:
+1. Promotion executed (vaultwarden migrated):
    `infra.relocation.promote --service vaultwarden --execute`
 2. Service state confirmed migrated in relocation manifest.
 3. Rollback posture accepted for VM 102.
@@ -30,35 +30,18 @@ ssh proxmox-home 'cat /etc/pve/jobs.cfg'
 ## Execution Steps (On proxmox-home)
 
 ```bash
-# 1) Stop guest workloads cleanly
-ssh proxmox-home 'for id in 100 101 102; do qm stop "$id" || true; done'
-ssh proxmox-home 'for id in 103 105; do pct stop "$id" || true; done'
+# Dry-run first (prints what will migrate and which guests are running)
+echo "yes" | ./bin/ops cap run infra.proxmox.node_path.migrate \
+  --host-id proxmox-home --from-node pve --to-node proxmox-home --dry-run
 
-# 2) Backup current cluster node config
-ssh proxmox-home 'ts=$(date +%Y%m%d-%H%M%S); cp -a /etc/pve/nodes/pve "/root/pve-node-backup-$ts" && echo "backup=/root/pve-node-backup-$ts"'
-
-# 3) Copy configs into canonical node path
-ssh proxmox-home 'mkdir -p /etc/pve/nodes/proxmox-home/qemu-server /etc/pve/nodes/proxmox-home/lxc'
-ssh proxmox-home 'cp -a /etc/pve/nodes/pve/qemu-server/*.conf /etc/pve/nodes/proxmox-home/qemu-server/'
-ssh proxmox-home 'cp -a /etc/pve/nodes/pve/lxc/*.conf /etc/pve/nodes/proxmox-home/lxc/'
-
-# 4) Verify copied configs before deleting old node path
-ssh proxmox-home 'ls -1 /etc/pve/nodes/proxmox-home/qemu-server'
-ssh proxmox-home 'ls -1 /etc/pve/nodes/proxmox-home/lxc'
-
-# 5) Remove stale node path and restart PVE services
-ssh proxmox-home 'rm -rf /etc/pve/nodes/pve'
-ssh proxmox-home 'systemctl restart pvedaemon pveproxy'
-
-# 6) Verify control plane recovery
-ssh proxmox-home 'qm list; pct list'
-
-# 7) Start guests
-ssh proxmox-home 'for id in 100 101 102; do qm start "$id" || true; done'
-ssh proxmox-home 'for id in 103 105; do pct start "$id" || true; done'
-
-# 8) Re-enable/validate backup jobs
-ssh proxmox-home 'grep -n "^vzdump:" /etc/pve/jobs.cfg'
+# Execute (receipt-backed)
+# - backs up /etc/pve/nodes/pve to /root/pve-node-backup-<ts>
+# - copies qemu-server/* + lxc/* into /etc/pve/nodes/proxmox-home/
+# - retires the stale node dir to /etc/pve/nodes/pve.stale.<ts>
+# - restarts pvedaemon + pveproxy
+# - stops and restarts only guests that were running at start time
+echo "yes" | ./bin/ops cap run infra.proxmox.node_path.migrate \
+  --host-id proxmox-home --from-node pve --to-node proxmox-home --execute
 ```
 
 ## Post-Execution Verification

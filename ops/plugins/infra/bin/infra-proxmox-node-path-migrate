@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-proxmox-node-path-migrate
+# Fix a Proxmox node-name mismatch by migrating configs from one /etc/pve/nodes/<name>
+# directory to another, then retiring the stale node directory.
+#
+# This exists to close GAP-OP-015 (proxmox-home PVE node mismatch) in a receipt-backed,
+# spine-native way (run via ./bin/ops cap run ...).
+#
+# Default mode is dry-run. Pass --execute to mutate.
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
+
+HOST_ID=""
+FROM_NODE="pve"
+TO_NODE=""
+EXECUTE=0
+
+usage() {
+    cat <<'EOF'
+infra-proxmox-node-path-migrate - Migrate /etc/pve/nodes/<from> -> <to>
+
+Usage:
+  infra-proxmox-node-path-migrate \
+    --host-id <ssh.targets.yaml id> \
+    [--from-node pve] \
+    [--to-node <node name, default: host-id>] \
+    [--dry-run|--execute]
+
+Behavior:
+  - Copies qemu-server/* and lxc/* from /etc/pve/nodes/<from>/ into <to>/
+  - Renames /etc/pve/nodes/<from> to /etc/pve/nodes/<from>.stale.<timestamp>
+  - Restarts pvedaemon + pveproxy
+  - Stops and restarts only the guests that were running at start time
+
+This is HIGH RISK. Ensure you have console access if ssh breaks mid-flight.
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --host-id) HOST_ID="${2:-}"; shift 2 ;;
+        --from-node) FROM_NODE="${2:-}"; shift 2 ;;
+        --to-node) TO_NODE="${2:-}"; shift 2 ;;
+        --execute) EXECUTE=1; shift ;;
+        --dry-run) EXECUTE=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$HOST_ID" ]] || fail "--host-id is required"
+[[ -n "$FROM_NODE" ]] || fail "--from-node is required"
+TO_NODE="${TO_NODE:-$HOST_ID}"
+
+need yq
+need ssh
+
+[[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
+yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SSH_BINDING"
+
+ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$HOST_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
+ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$HOST_ID\") | .user // .ssh.defaults.user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+
+[[ -n "$ssh_host" && "$ssh_host" != "null" ]] || fail "missing ssh.targets host for id '$HOST_ID'"
+
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+echo "=== PROXMOX NODE PATH MIGRATION ==="
+echo "Host ID:    $HOST_ID (${ssh_user}@${ssh_host})"
+echo "From node:  $FROM_NODE"
+echo "To node:    $TO_NODE"
+echo "Mode:       $([[ "$EXECUTE" -eq 1 ]] && echo execute || echo dry-run)"
+echo ""
+
+remote_script="$(cat <<'REMOTE'
+set -euo pipefail
+
+HOST_ID="${HOST_ID:?}"
+FROM_NODE="${FROM_NODE:?}"
+TO_NODE="${TO_NODE:?}"
+EXECUTE="${EXECUTE:?}"
+
+ts="$(date +%Y%m%d-%H%M%S)"
+
+src_base="/etc/pve/nodes/$FROM_NODE"
+dst_base="/etc/pve/nodes/$TO_NODE"
+
+qemu_src="$src_base/qemu-server"
+lxc_src="$src_base/lxc"
+qemu_dst="$dst_base/qemu-server"
+lxc_dst="$dst_base/lxc"
+
+echo "Remote hostname: $(hostname 2>/dev/null || uname -n)"
+echo "Timestamp:       $ts"
+echo "src_base:        $src_base"
+echo "dst_base:        $dst_base"
+echo
+
+if [[ ! -d "$src_base" ]]; then
+  echo "FAIL: missing src_base: $src_base"
+  exit 1
+fi
+
+if [[ ! -d "$dst_base" ]]; then
+  echo "FAIL: missing dst_base: $dst_base (expected node dir for hostname)"
+  exit 1
+fi
+
+shopt -s nullglob
+qemu_files=()
+lxc_files=()
+
+if [[ -d "$qemu_src" ]]; then
+  for f in "$qemu_src"/*; do
+    [[ -f "$f" ]] && qemu_files+=("$f")
+  done
+fi
+
+if [[ -d "$lxc_src" ]]; then
+  for f in "$lxc_src"/*; do
+    [[ -f "$f" ]] && lxc_files+=("$f")
+  done
+fi
+
+echo "Found qemu config files: ${#qemu_files[@]}"
+for f in "${qemu_files[@]}"; do echo "  - $(basename "$f")"; done
+echo "Found lxc config files:  ${#lxc_files[@]}"
+for f in "${lxc_files[@]}"; do echo "  - $(basename "$f")"; done
+echo
+
+if [[ "${#qemu_files[@]}" -eq 0 && "${#lxc_files[@]}" -eq 0 ]]; then
+  echo "FAIL: no qemu or lxc configs found under $src_base (nothing to migrate)"
+  exit 1
+fi
+
+# Determine which guests are running right now, using processes (works even when qm/pct are broken).
+running_vms=()
+running_cts=()
+
+for f in "${qemu_files[@]}"; do
+  id="$(basename "$f")"
+  id="${id%%.*}"
+  if pgrep -af "/usr/bin/kvm -id ${id}\\b" >/dev/null 2>&1; then
+    running_vms+=("$id")
+  fi
+done
+
+for f in "${lxc_files[@]}"; do
+  id="$(basename "$f")"
+  id="${id%%.*}"
+  if pgrep -af "/usr/bin/lxc-start.* -n ${id}\\b" >/dev/null 2>&1; then
+    running_cts+=("$id")
+  fi
+done
+
+echo "Running VMs (process-based):  ${#running_vms[@]} ${running_vms[*]:-}"
+echo "Running LXCs (process-based): ${#running_cts[@]} ${running_cts[*]:-}"
+echo
+
+if [[ "$EXECUTE" != "1" ]]; then
+  echo "DRY-RUN: would:"
+  echo "  1) backup: cp -a $src_base /root/pve-node-backup-$ts"
+  echo "  2) copy:   qemu-server/* + lxc/* into $dst_base"
+  echo "  3) retire: mv $src_base $src_base.stale.$ts"
+  echo "  4) restart pvedaemon + pveproxy"
+  echo "  5) stop + restart only guests that are currently running"
+  exit 0
+fi
+
+echo "=== STEP 1/6: Backup src node directory ==="
+backup_dir="/root/pve-node-backup-$ts"
+cp -a "$src_base" "$backup_dir"
+echo "backup_dir=$backup_dir"
+echo
+
+echo "=== STEP 2/6: Copy configs into destination node dir ==="
+mkdir -p "$qemu_dst" "$lxc_dst"
+
+if [[ -d "$qemu_src" ]]; then
+  cp -a "$qemu_src"/* "$qemu_dst"/ 2>/dev/null || true
+fi
+if [[ -d "$lxc_src" ]]; then
+  cp -a "$lxc_src"/* "$lxc_dst"/ 2>/dev/null || true
+fi
+
+echo "dest qemu-server files:"
+ls -1 "$qemu_dst" 2>/dev/null || true
+echo "dest lxc files:"
+ls -1 "$lxc_dst" 2>/dev/null || true
+echo
+
+echo "=== STEP 3/6: Retire stale node directory (removes duplicate VMID ownership) ==="
+stale_dir="${src_base}.stale.${ts}"
+mv "$src_base" "$stale_dir"
+echo "stale_dir=$stale_dir"
+echo
+
+echo "=== STEP 4/6: Restart PVE control plane services ==="
+systemctl restart pvedaemon pveproxy
+echo "services: pvedaemon=$(systemctl is-active pvedaemon || true) pveproxy=$(systemctl is-active pveproxy || true)"
+echo
+
+echo "=== STEP 5/6: Verify qm/pct visibility ==="
+echo "--- qm list ---"
+qm list || true
+echo "--- pct list ---"
+pct list || true
+echo
+
+echo "=== STEP 6/6: Stop and restart running guests (stabilize after migration) ==="
+for id in "${running_vms[@]}"; do
+  echo "Stopping VM $id..."
+  qm shutdown "$id" --timeout 60 >/dev/null 2>&1 || qm stop "$id" >/dev/null 2>&1 || true
+done
+for id in "${running_cts[@]}"; do
+  echo "Stopping CT $id..."
+  pct shutdown "$id" --timeout 60 >/dev/null 2>&1 || pct stop "$id" >/dev/null 2>&1 || true
+done
+
+for id in "${running_vms[@]}"; do
+  echo "Starting VM $id..."
+  qm start "$id" >/dev/null 2>&1 || true
+done
+for id in "${running_cts[@]}"; do
+  echo "Starting CT $id..."
+  pct start "$id" >/dev/null 2>&1 || true
+done
+
+echo "DONE"
+REMOTE
+)"
+
+ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
+    HOST_ID="$HOST_ID" FROM_NODE="$FROM_NODE" TO_NODE="$TO_NODE" EXECUTE="$EXECUTE" \
+    'bash -s' <<<"$remote_script"
+
