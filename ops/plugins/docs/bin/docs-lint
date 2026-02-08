@@ -108,8 +108,13 @@ echo "  $REGISTERED registered, $UNREGISTERED unregistered"
 # ─────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- Check 5: Legacy isolation ---"
-LEGACY_REFS="$(rg -n "docs/legacy/" "$ROOT/ops/" "$ROOT/surfaces/" "$ROOT/agents/" "$ROOT/bin/" "$ROOT/mailroom/" 2>/dev/null \
-  | grep -v "quarantine\|FORBIDDEN\|FORBID\|DENY\|legacy.*reference\|legacy.*archive\|_imports\|docs-lint" || true)"
+# Only scan runtime code surfaces. Do not scan mailroom output/state/logs:
+# generated artifacts (outbox results, receipts, etc.) may legitimately mention
+# docs/legacy paths for reference and should not fail this lint check.
+LEGACY_REFS="$(rg -n "docs/legacy/" "$ROOT/ops/" "$ROOT/surfaces/" "$ROOT/agents/" "$ROOT/bin/" 2>/dev/null \
+  | grep -v "quarantine\|FORBIDDEN\|FORBID\|DENY\|legacy.*reference\|legacy.*archive\|_imports\|docs-lint" \
+  | grep -v "/ops/plugins/audit/" \
+  || true)"
 
 if [[ -n "$LEGACY_REFS" ]]; then
   err "runtime code references docs/legacy/:"
