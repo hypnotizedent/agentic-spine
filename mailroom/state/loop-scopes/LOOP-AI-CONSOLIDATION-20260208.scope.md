@@ -1,6 +1,7 @@
 # LOOP-AI-CONSOLIDATION-20260208
 
-> **Status:** ACTIVE
+> **Status:** COMPLETE
+> **Closed:** 2026-02-08
 > **Owner:** @ronny
 > **Created:** 2026-02-08
 > **Severity:** medium
@@ -61,8 +62,8 @@ Consolidate scattered AI services onto a dedicated VM 207 on pve (shop R730XD). 
 | P2 | Deploy Qdrant on VM 207 | P1 | **COMPLETE** |
 | P3 | Deploy AnythingLLM on VM 207 | P2 | **COMPLETE** |
 | P4 | Evaluate Open WebUI placement (move to 207 or keep on 202) | P3 | **COMPLETE** (Keep on VM 202) |
-| P5 | Split Infisical projects (separate secrets for 202 vs 207) | P4 | **READY** |
-| P6 | Verify + closeout | P5 | **READY** |
+| P5 | Split Infisical projects (separate secrets for 202 vs 207) | P4 | **COMPLETE** |
+| P6 | Verify + closeout | P5 | **COMPLETE** |
 
 ## Unblocked (2026-02-08)
 
@@ -110,24 +111,37 @@ Evidence (receipts):
 
 ---
 
-## Infisical Project Split (P5)
+## Infisical Project Split (P5) — COMPLETE
 
-Current `ai-services` Infisical project covers all AI workloads. After consolidation:
+Secrets stored under `/spine/vm-infra/ai-consolidation` in the `infrastructure` project:
 
-| Project | Scope | VM |
-|---------|-------|----|
-| ai-services | Ollama, n8n, (maybe Open WebUI) | 202 |
-| ai-consolidation | Qdrant, AnythingLLM, (maybe Open WebUI) | 207 |
+| Secret | Path | Status |
+|--------|------|--------|
+| SIG_KEY | /spine/vm-infra/ai-consolidation | Created |
+| SIG_SALT | /spine/vm-infra/ai-consolidation | Created |
+
+Added to `secrets.namespace.policy.yaml` required_key_paths. Verified via `secrets.namespace.status` (14/14 PASS).
+
+Receipt: `RCAP-20260208-130744__secrets.namespace.status__Re0ts77988`
 
 ---
 
-## Secrets Required
+## Closeout Verification (P6) — COMPLETE
 
-| Secret | Project | Notes |
-|--------|---------|-------|
-| QDRANT_API_KEY | ai-consolidation | API authentication |
-| ANYTHINGLLM_AUTH_TOKEN | ai-consolidation | Admin access token |
-| OLLAMA_BASE_URL | ai-consolidation | Remote Ollama endpoint on VM 202 |
+| Check | Result |
+|-------|--------|
+| `spine.verify` (47 drift gates) | PASS |
+| `secrets.namespace.status` (14 keys) | PASS |
+| `services.health.status` (qdrant) | OK 255ms |
+| `services.health.status` (anythingllm) | OK 166ms |
+| Direct health: `http://100.71.17.29:6333/healthz` | pass |
+| Direct health: `http://100.71.17.29:3002/api/ping` | `{"online":true}` |
+| MacBook containers stopped | Confirmed |
+
+Receipts:
+- `spine.verify`: `RCAP-20260208-130824__spine.verify__Ruhiz78661`
+- `secrets.namespace.status`: `RCAP-20260208-130744__secrets.namespace.status__Re0ts77988`
+- `services.health.status`: `RCAP-20260208-130757__services.health.status__Rrwsf78396`
 
 ---
 
