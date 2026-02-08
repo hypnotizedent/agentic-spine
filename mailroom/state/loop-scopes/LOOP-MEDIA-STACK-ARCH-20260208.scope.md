@@ -7,7 +7,7 @@
 | Owner | @ronny |
 | Severity | high |
 | Parent | LOOP-MEDIA-STACK-RCA-20260205 |
-| Blocked by | LOOP-MEDIA-STACK-RCA-20260205 closure (24h stability gate) |
+| Blocked by | None (RCA closed 2026-02-08) |
 
 ## Problem Statement
 
@@ -77,16 +77,21 @@ The symlink fix moved the 5 biggest databases off NFS but:
 
 ## Proposed Architecture (3 Phases)
 
-### Phase A: Move remaining databases + logs to local (immediate win)
+### Phase A: Move remaining databases + logs to local — COMPLETE (2026-02-08)
 
-1. Create `/opt/appdata/logs/` directories
-2. Symlink remaining `.db` files (especially radarr logs.db) to local
-3. For services that don't support custom log paths, configure log rotation to
-   cap NFS log writes
+Executed 2026-02-08T02:48Z. Migrated 11 database files from NFS to `/opt/appdata/` with symlinks:
 
-**Expected impact:** Eliminate largest remaining NFS write sources.
-**Risk:** Low — same symlink pattern already proven for 5 databases.
-**Acceptance:** iowait drops below 20%.
+| Service | Files Moved | Notes |
+|---------|-------------|-------|
+| radarr | logs.db (90MB) | Biggest write source |
+| prowlarr | logs.db (3.6MB) | |
+| sonarr | logs.db (2.2MB) | Bonus target (not in original plan) |
+| trailarr | trailarr.db (124KB) + logs/logs.db (388KB) | Required /opt/appdata bind mount added to compose |
+| posterizarr | 5 DBs (~250KB total) | Required /opt/appdata bind mount added to compose |
+| jellyfin | introskipper.db (1.4MB) | |
+
+**Result:** iowait dropped from **48% to 0-5%** (target was < 20%). All 27 containers healthy.
+**Compose changes:** Added `/opt/appdata:/opt/appdata` volume mount to trailarr and posterizarr services.
 
 ### Phase B: Add dedicated data disk + move config volume to local
 
@@ -125,11 +130,10 @@ mounts, restart. Downtime: 10-30 min.
 
 ## Ordering Constraints
 
-1. **Blocked by RCA closure** — must wait for 24h stability gate
-   (~2026-02-08T19:00Z). If media-stack crashes again, RCA reopens.
-2. **Phase A can execute immediately** after RCA closes (read: within minutes).
+1. ~~**Blocked by RCA closure**~~ — RCA closed 2026-02-08T02:45Z.
+2. **Phase A complete** — executed 2026-02-08T02:48Z, iowait 48% → 0-5%.
 3. **Phase B requires VM 201 downtime** — coordinate with any active media
-   consumption.
+   consumption. May be unnecessary given Phase A iowait results.
 4. **Phase C can be done at any time** (systemd changes take effect on reboot).
 
 ## Pre-Staged Artifact

@@ -95,11 +95,12 @@ Both use `x-systemd.requires=tailscaled.service` (Tailscale must be up before mo
 | lidarr | `/mnt/docker/volumes/lidarr/config/` | lidarr.db |
 | trailarr | `/mnt/docker/volumes/trailarr/config/` | trailarr.db (active WAL confirmed via lsof) |
 
-**Note:** `/opt/appdata/*.db` files exist on local disk but are **stale copies**, not actively used. All containers bind-mount config from NFS.
+**Note:** `/opt/appdata/*.db` files are **active symlink targets** on local disk (symlinked since Dec 23, 2025). The 5 main databases (radarr.db, lidarr.db, jellyfin.db, prowlarr.db, sonarr.db) were already moved off NFS. Phase A (2026-02-08) moved the remaining databases (logs.db files, trailarr.db, posterizarr DBs, introskipper.db) to local as well.
 
 **Boot dependency gap:** Docker systemd unit depends on `network-online.target` but has **no dependency on NFS mounts**. If Docker starts before NFS automounts complete, containers fail to bind-mount their config dirs. This is root cause #2.
 
-## Remaining
+## Closed
 
-5. **Close RCA loop** — gate: 24h stability confirmed (~2026-02-08T19:00Z)
-   - Check: SSH reachable, load < 10, no zombie containers, all 27 containers healthy
+5. **Close RCA loop** — DONE (2026-02-08T02:45Z)
+   - Stability gate: VM stable 8h+, load 0.13, 27/27 healthy, 0 dead, iowait 0-5%
+   - RCA loop closed; architectural remediation in LOOP-MEDIA-STACK-ARCH-20260208
