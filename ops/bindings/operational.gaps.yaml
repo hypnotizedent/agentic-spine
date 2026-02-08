@@ -9,7 +9,7 @@
 # Last verified: 2026-02-07
 
 version: 1
-updated: "2026-02-08T03:15Z"
+updated: "2026-02-08T18:30Z"
 
 gaps:
   # ─────────────────────────────────────────────────────────────
@@ -550,6 +550,52 @@ gaps:
       Fixed: loops.sh jq filter now normalizes close records, deduplicates by loop_id,
       and applies close status. open_loops.jsonl compacted from 121 to 61 lines.
       6 completed loops closed. 9 open loops remain.
+
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during OL_SHOP_BASELINE_FINISH remote audit 2026-02-08
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-029
+    discovered_by: "OL_SHOP_BASELINE_FINISH"
+    discovered_at: "2026-02-08"
+    type: runtime-bug
+    doc: "docs/governance/SHOP_SERVER_SSOT.md"
+    description: |
+      Dell MD1400 DAS shelf is physically cabled to R730XD (pve) via SAS cable
+      (Dell 0GYK61) but zero drives are visible to the OS. Two root causes:
+      (1) PM8072 SAS controller PCI vendor ID is 0x11f8 (Microchip, post-acquisition)
+      but the Linux pm80xx driver only recognizes 0x117C (PMC-Sierra, pre-acquisition) —
+      driver does not auto-bind. (2) Hot-loading the driver via new_id fails because
+      the PM8072 firmware requires cold-boot initialization — MPI handshake times out
+      with "FW is not ready" (chip_init failed, ret=-16/EBUSY).
+      Result: entire MD1400 shelf storage is inaccessible. Unknown drive count and
+      capacity sitting completely dark.
+    severity: critical
+    status: open
+    fixed_in: null
+    notes: |
+      Fix requires: (1) persistent modprobe config with install hook to inject PCI ID
+      (echo "11f8 8072" > /sys/bus/pci/drivers/pm80xx/new_id), (2) cold boot of pve
+      (power off/on, not reboot) for PM8072 firmware initialization. Maintenance window
+      needed — all 10 VMs go down. Loop: LOOP-MD1400-SAS-RECOVERY-20260208.
+      Upstream: PCI ID gap in Linux pm80xx driver (kernel 6.14.8-2-pve).
+
+  - id: GAP-OP-030
+    discovered_by: "OL_SHOP_BASELINE_FINISH"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "/etc/pve/jobs.cfg"
+    description: |
+      vzdump backup job on pve covers VMs 200-204 only. VMs 205 (observability),
+      206 (dev-tools), 207 (ai-consolidation), 209 (download-stack), and
+      210 (streaming-stack) are running with no hypervisor-level backup.
+      5 VMs provisioned since the backup job was last updated.
+    severity: high
+    status: open
+    fixed_in: null
+    notes: |
+      Fix: update /etc/pve/jobs.cfg vmid line to include 200-207,209,210.
+      Can be done live, no restart required.
 
 # ─────────────────────────────────────────────────────────────
 # Gap Types

@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-07
+last_verified: 2026-02-08
 verification_method: receipt + on-site audit + live-ssh-inspection
 scope: shop-infrastructure
 parent_receipts:
@@ -44,8 +44,8 @@ Notes:
 
 | Component | Model | Role | Verified |
 |----------|-------|------|----------|
-| Server | Dell PowerEdge R730XD | Shop hypervisor (`pve`) | partial |
-| DAS | Dell MD1400 | Bulk storage shelf | unverified |
+| Server | Dell PowerEdge R730XD (12-bay LFF) | Shop hypervisor (`pve`) | 2026-02-08 |
+| DAS | Dell MD1400 | Bulk storage shelf | unverified (cable/driver check needed) |
 | Switch | Dell N2024P | Shop LAN switching / gateway | verified |
 | UPS | APC (model TBD) | Power protection | unverified |
 | NVR | Hikvision (model TBD) | Camera recorder | partial |
@@ -57,66 +57,101 @@ Notes:
 |-----------|-------|----------|
 | **Model** | Dell PowerEdge R730XD | 2026-01-21 |
 | **CPU** | 2x Intel Xeon E5-2640 v3 (32 threads total) | 2026-01-21 |
-| **RAM** | 188GB | 2026-01-21 |
-| **Proxmox Version** | 9.1.4 | 2026-02-07 |
-| **Kernel** | 6.14.8-2-pve | 2026-02-07 |
-| **Boot Drives** | 2x Seagate ST9500620SS 500GB SAS 2.5" | 2026-02-07 |
-| **Drive Bays** | TBD (2.5" or 3.5" - requires physical audit) | - |
-| **Controller/HBA** | TBD (verify before purchasing drives) | - |
+| **RAM** | 192GB (12x 16GB DIMMs, 12/24 slots populated) | 2026-02-08 |
+| **Proxmox Version** | 9.1.4 (PVE 9.1.0) | 2026-02-08 |
+| **Kernel** | 6.14.8-2-pve | 2026-02-08 |
+| **Boot Drives** | 2x Seagate ST9500620SS 500GB SAS 2.5" (rear flex bays) | 2026-02-08 |
+| **Drive Bays** | 12x 3.5" LFF (front) + 2x 2.5" SFF (rear flex) | 2026-02-08 |
+| **Controller/HBA** | Dell HBA330 Mini (Broadcom LSI SAS3008, IT mode, FW 16.00.11.00) | 2026-02-08 |
+| **Second SAS** | Microchip PM8072 SPCv 12G 16-port (PCIe, no driver loaded — unused) | 2026-02-08 |
+| **NICs** | 4x 1GbE (eno1-4), only eno1 active (bridged to vmbr0) | 2026-02-08 |
+
+**Drive bay population (12 front 3.5" LFF):**
+- Slots 0-7: 8x Seagate ST4000NM0063 4TB SAS (Constellation ES.3) → `tank` pool
+- Slots 8-11: 4x Seagate ST8000AS0002 8TB SATA (Archive/SMR) → `media` pool
+- All 12 front bays occupied. No free drive slots.
+
+**Second SAS controller note (GAP-OP-029 / LOOP-MD1400-SAS-RECOVERY-20260208):**
+The PM8072 (PCIe slot 82:00.0) connects to the MD1400 DAS via Dell SAS cable (DP/N 0GYK61).
+The cable is connected and the MD1400 is powered on (owner-verified 2026-02-08), but the
+`pm80xx` kernel driver cannot bind due to a PCI vendor ID mismatch:
+- **Actual device:** `11f8:8072` (Microchip Technology, post-acquisition)
+- **Driver expects:** `117C:8072` (PMC-Sierra, pre-acquisition)
+
+Hot-loading the driver with `new_id` fails — the PM8072 firmware requires cold-boot
+initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
+**Fix:** Persist module config + cold boot pve. See loop scope for full plan.
 
 ### ZFS Storage Pools
 
 | Pool | Size | Allocated | Free | Capacity | Health | Verified |
 |------|------|-----------|------|----------|--------|----------|
-| **media** | 29.1T | 16.7T | 12.4T | 57% | ONLINE | 2026-02-07 |
-| **tank** | 29.1T | 7.35T | 21.8T | 25% | ONLINE | 2026-02-07 |
+| **media** | 29.1T | 16.7T | 12.4T | 57% | ONLINE | 2026-02-08 |
+| **tank** | 29.1T | 7.39T | 21.7T | 25% | ONLINE | 2026-02-08 |
 
 **media pool:** RAIDZ1, 4x Seagate ST8000AS0002 8TB (Archive/SMR drives)
 - Serials: Z840A33Q, Z840A22Z, Z840A33F, Z840AAFE
 - **WARNING:** SMR drives are suboptimal for ZFS. Monitor for performance degradation.
-- Last scrub: CANCELED on 2026-01-11 (should be investigated)
+- Last scrub: in progress (started 2026-02-08 00:24), 0 errors so far
+- Weekly scrub cron: `0 4 * * 0` (added since last audit)
 
 **tank pool:** RAIDZ2, 8x Seagate ST4000NM0063 4TB (Constellation ES.3, enterprise SAS)
-- Last scrub: 2026-02-01, 0 errors
+- Serials: Z1Z86298, Z1Z85V4W, Z1Z84YNR, Z1Z85V47, Z1Z862H5, Z1Z8629N, Z1Z85TFE, Z1Z861ZN
+- Last scrub: 2026-02-08, 0 errors (completed in 4h18m)
 
-**tank datasets (2026-02-07):**
-- `tank/docker`: 567GB (was 379GB on 2026-01-21)
+**tank datasets (2026-02-08):**
+- `tank/docker`: 610GB (was 567GB on 2026-02-07)
 - `tank/docker/media-stack`: 24.1GB
-- `tank/docker/databases`: 208K
-- `tank/backups`: 3.5TB (was 92GB — vzdump growing)
-- `tank/immich/photos`: 1.2TB
-- `tank/vms`: 256K
+- `tank/docker/download-stack`: 12.3GB (new — media stack split)
+- `tank/docker/streaming-stack`: 6.70GB (new — media stack split)
+- `tank/docker/databases`: 205K
+- `tank/backups`: 3.49TB
+- `tank/immich/photos`: 1.15TB
+- `tank/immich/db`: 205K
+- `tank/vms`: 108GB (was 256K — VM disk images growing)
 
-### VM Inventory (2026-02-07)
+### VM Inventory (2026-02-08)
 
 | VMID | Name | Status | RAM | Boot Disk | Notes |
 |------|------|--------|-----|-----------|-------|
 | 200 | docker-host | running | 96GB | 300GB | Mint OS production |
-| 201 | media-stack | running | 16GB | 80GB | Jellyfin + *arr |
+| 201 | media-stack | running | 16GB | 80GB | Legacy — being replaced by VMs 209/210 |
 | 202 | automation-stack | running | 16GB | 100GB | n8n + Ollama |
 | 203 | immich | running | 16GB | 50GB | Shop photos (Tailscale: immich-1) |
-| 204 | infra-core | running | 8GB | 50GB | Core infra |
-| 9000 | template | stopped | 2GB | 3.5GB | Ubuntu 24.04 cloud-init |
+| 204 | infra-core | running | 8GB | 50GB | Core infra (cloudflared, pihole, infisical, vaultwarden, caddy-auth) |
+| 205 | observability | running | 8GB | 50GB | Prometheus, Grafana, Loki, Uptime-Kuma |
+| 206 | dev-tools | running | 8GB | 50GB | Gitea, Gitea Actions runner, PostgreSQL |
+| 207 | ai-consolidation | running | 32GB | 200GB | AI workloads (DHCP, onboot=1) |
+| 209 | download-stack | running | 8GB | 50GB | radarr, sonarr, lidarr, prowlarr, sabnzbd, tdarr, trailarr |
+| 210 | streaming-stack | running | 8GB | 50GB | jellyfin, navidrome, jellyseerr, bazarr, homarr |
+| 9000 | template | stopped | 2GB | 3.5GB | Ubuntu 24.04 cloud-init template |
 
-**NOTE:** VM 204 (infra-core) is NOT in the vzdump backup job. Add it.
+**Total RAM allocated:** 232GB across 10 running VMs (host has 192GB — overcommitted by 40GB, acceptable with balloon/KSM)
 
-### NFS Exports from PVE
+**NOTE:** vzdump backup job covers VMs 200-204 only. VMs 205, 206, 207, 209, 210 are NOT backed up. Add them to the job.
 
-| Export | Client | Purpose |
-|--------|--------|---------|
-| `/tank/docker` | docker-host (100.92.156.118) | Docker volumes |
-| `/tank/backups` | docker-host (100.92.156.118) | Backup target |
-| `/tank/vms` | docker-host (100.92.156.118) | VM storage |
-| `/tank/docker/media-stack` | media-stack (100.117.1.53) | Container config/volumes |
-| `/media` | media-stack (100.117.1.53) | Media files |
-| `/mnt/easystore/backups` | docker-host (100.92.156.118) | Easystore backup mount |
+### NFS Exports from PVE (2026-02-08)
 
-All exports use `rw,sync,no_root_squash` over Tailscale IPs.
+| Export | Client | Purpose | Mode |
+|--------|--------|---------|------|
+| `/tank/docker` | docker-host (100.92.156.118) | Docker volumes | rw |
+| `/tank/backups` | docker-host (100.92.156.118) | Backup target | rw |
+| `/tank/vms` | docker-host (100.92.156.118) | VM storage | rw |
+| `/tank/docker/media-stack` | media-stack (100.117.1.53) | Container config/volumes | rw |
+| `/media` | media-stack (100.117.1.53) | Media files | rw |
+| `/mnt/easystore/backups` | docker-host (100.92.156.118) | Easystore backup mount | rw |
+| `/tank/docker/download-stack` | download-stack (100.107.36.76) | Download app configs | rw |
+| `/media` | download-stack (100.107.36.76) | Media files | rw |
+| `/tank/docker/streaming-stack` | streaming-stack (100.123.207.64) | Streaming app configs | rw |
+| `/media` | streaming-stack (100.123.207.64) | Media files | **ro** |
+
+All exports use `sync,no_subtree_check,no_root_squash` over Tailscale IPs. streaming-stack has read-only `/media` access (consumers only, no writes).
 
 ### Hardware Compatibility Notes
 
-- **R730XD:** Verify bay type (2.5" or 3.5") before purchasing drives.
-- **MD1400:** 12-bay 3.5" shelf (verify actual population + drive models).
+- **R730XD:** 12x 3.5" LFF front bays (all occupied), 2x 2.5" SFF rear flex bays (boot drives). No free drive slots.
+- **R730XD HBA330 Mini:** IT-mode SAS3008, direct JBOD passthrough to ZFS. No RAID controller — drives are passed through directly.
+- **MD1400:** 12-bay 3.5" shelf. Physically cabled (Dell 0GYK61 SAS cable, owner-verified). **PM8072 driver cannot bind** — PCI vendor ID mismatch (0x11f8 Microchip vs 0x117C PMC-Sierra in kernel driver) + firmware requires cold boot init. Zero drives visible. See GAP-OP-029 / LOOP-MD1400-SAS-RECOVERY-20260208.
 
 ---
 
@@ -147,10 +182,16 @@ This is the Shop hypervisor. Core VM inventory (foundational scope):
 
 | VM | Purpose | Foundational Scope |
 |----|---------|--------------------|
-| `docker-host` | Production docker workloads | yes |
-| `automation-stack` | Automation / n8n / misc | yes |
-| `media-stack` | Media stack | deferred |
-| `immich-1` | Photos | deferred |
+| `docker-host` | Production docker workloads (Mint OS) | yes |
+| `infra-core` | Core infra (cloudflared, pihole, infisical, vaultwarden, caddy-auth) | yes |
+| `observability` | Monitoring (prometheus, grafana, loki, uptime-kuma) | yes |
+| `dev-tools` | Git forge + CI (gitea, actions runner) | yes |
+| `automation-stack` | Automation / n8n / Ollama | yes |
+| `download-stack` | Download automation (*arr stack, sabnzbd, tdarr) | yes |
+| `streaming-stack` | Media streaming (jellyfin, navidrome, jellyseerr) | yes |
+| `ai-consolidation` | AI workloads | deferred |
+| `media-stack` | Legacy — being replaced by download/streaming VMs | deprecated |
+| `immich` | Photos | deferred |
 
 If you need to make a placement decision ("where should this run?"):
 1. Read [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md) for the Tier table.
@@ -159,20 +200,21 @@ If you need to make a placement decision ("where should this run?"):
 
 ---
 
-## Scheduled Tasks (pve)
+## Scheduled Tasks (pve) — verified 2026-02-08
 
 | Schedule | Command | Purpose | Status |
 |----------|---------|---------|--------|
 | `0 2 * * *` | `/usr/local/bin/zfs-snapshot.sh` | Daily ZFS snapshot of root datasets | ACTIVE |
 | `0 3 * * 0` | `zpool scrub tank` | Weekly scrub of tank pool | ACTIVE |
-| `02:00 daily` | vzdump VMs 200-203 | Snapshot backup to tank-backups (zstd, max 2) | ACTIVE |
+| `0 4 * * 0` | `zpool scrub media` | Weekly scrub of media pool | ACTIVE (new) |
+| `02:00 daily` | vzdump VMs 200-204 | Snapshot backup to tank-backups (zstd, max 2) | ACTIVE |
 
 **Source:** crontab (`crontab -l`) and `/etc/pve/jobs.cfg`.
 
 **Known issues:**
-- VM 204 (infra-core) is NOT included in the vzdump backup job.
-- Media pool scrub was CANCELED on 2026-01-11 — no cron job for media scrub.
-- No `zpool scrub media` in cron — only `tank` is scrubbed.
+- vzdump covers VMs 200-204 only. VMs 205, 206, 207, 209, 210 are **NOT** backed up.
+- ~~Media pool scrub was CANCELED on 2026-01-11~~ **FIXED**: Weekly media scrub cron added.
+- ~~No `zpool scrub media` in cron~~ **FIXED**: `0 4 * * 0` now schedules media scrub.
 
 ---
 
@@ -200,11 +242,20 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 | Loop ID | Meaning |
 |--------|---------|
-| `OL_SHOP_BASELINE_FINISH` | Finish remaining on-site inventory: MD1400 drive list, R730XD bay type, camera location map, AP settings. |
+| `OL_SHOP_BASELINE_FINISH` | Finish remaining on-site inventory: MD1400 cable/drive check, camera location map, AP settings, UPS audit. |
+
+**VERIFIED REMOTELY (2026-02-08):**
+- R730XD: 12x 3.5" LFF front + 2x 2.5" rear flex (from dmesg enclosure slots 0-11)
+- R730XD HBA: Dell HBA330 Mini (LSI SAS3008, IT mode, FW 16.00.11.00)
+- R730XD RAM: 12x 16GB DIMMs (192GB), 12/24 slots populated
+- R730XD NICs: 4x 1GbE, only eno1 active
+- Tank drive serials: Z1Z86298, Z1Z85V4W, Z1Z84YNR, Z1Z85V47, Z1Z862H5, Z1Z8629N, Z1Z85TFE, Z1Z861ZN
+- PM8072 second SAS controller present but no driver/no drives visible
+
+**BLOCKED (requires cold boot — LOOP-MD1400-SAS-RECOVERY-20260208):**
+- MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-029). Drives invisible until cold boot with persistent module config.
 
 **UNVERIFIED (requires physical audit):**
-- MD1400 DAS: Drive models, population, health
-- R730XD: Bay type (2.5" vs 3.5"), controller/HBA model
 - Camera network: Camera count, locations, RTSP endpoints (secrets in Infisical)
 - WiFi AP (EAP225): Configuration, SSID → `infrastructure/prod:/spine/shop/wifi/*`
 - UPS: Model confirmation, capacity, runtime
@@ -219,7 +270,8 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 ## Open Network Tasks (shop)
 
-- [ ] T-Mobile GAR4 at 192.168.12.1 still pointing DHCP DNS to 192.168.12.191 (docker-host); update it to 192.168.12.204 (infra-core) before hauling more services off docker-host.
+- [ ] **DHCP DNS cutover — BLOCKED on UDR installation**: T-Mobile gateway (GAR4) is fully locked down (no DHCP control). Plan: insert UDR (Ubiquiti Dream Router, on-hand) between T-Mobile and switch, re-IP shop LAN to new subnet (e.g. 10.12.1.0/24), UDR owns DHCP with DNS→Pi-hole (infra-core). Requires re-IP of pve (.184), iDRAC (.250), all VMs, and all bindings. Pre-stage config changes before cutover. Currently only 2 DHCP clients (docker-host VM 200, media-stack VM 201) — all other devices use static IPs.
+- [ ] **vzdump backup gap**: Add VMs 205, 206, 207, 209, 210 to the vzdump backup job (`/etc/pve/jobs.cfg`).
 
 ---
 
