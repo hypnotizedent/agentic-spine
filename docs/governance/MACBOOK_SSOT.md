@@ -60,17 +60,17 @@ github_issue: "#625"
 
 | Container | Image | Status | Port | Purpose |
 |-----------|-------|--------|------|---------|
-| anythingllm | mintplexlabs/anythingllm | Up (healthy) | 3002 | RAG interface |
-| qdrant | qdrant/qdrant | Up | 6333-6334 | Vector database |
+| anythingllm | mintplexlabs/anythingllm | Stopped (migrated to `ai-consolidation`) | 3002 | RAG interface |
+| qdrant | qdrant/qdrant | Stopped (migrated to `ai-consolidation`) | 6333-6334 | Vector database |
 | files-api | files-api-files-api | Up (unhealthy) | 3500 | Local dev API |
 | files-api-postgres | postgres:15-alpine | Up (healthy) | 5432 | Local dev DB |
 | minio | minio/minio:latest | Created (stopped) | - | Object storage (dev) |
 | github-mcp-server | ghcr.io/github/github-mcp-server | Up | - | MCP GitHub tool |
 
 **Health Summary:**
-- Healthy: 2 (anythingllm, files-api-postgres)
+- Healthy: 1 (files-api-postgres)
 - Unhealthy: 1 (files-api - needs investigation)
-- Stopped: 1 (minio)
+- Stopped: 3 (anythingllm, qdrant, minio)
 
 ### Native Services (Homebrew)
 
@@ -86,12 +86,12 @@ github_issue: "#625"
 | Component | Type | Port | Health Check |
 |-----------|------|------|--------------|
 | Ollama | Native (Homebrew) | 11434 | `curl http://localhost:11434/api/tags` |
-| AnythingLLM | Docker | 3002 | `curl http://localhost:3002/api/ping` |
-| Qdrant | Docker | 6333 | `curl http://localhost:6333/collections` |
+| AnythingLLM | Remote (VM 207) | 3002 | `curl http://100.71.17.29:3002/api/ping` |
+| Qdrant | Remote (VM 207) | 6333 | `curl http://100.71.17.29:6333/healthz` |
 
 **Storage Paths:**
-- AnythingLLM: `~/anythingllm_storage/`
-- Qdrant: `~/qdrant_storage/`
+- AnythingLLM (VM 207): `/opt/stacks/ai-consolidation/anythingllm_storage/`
+- Qdrant (VM 207): `/opt/stacks/ai-consolidation/qdrant_storage/`
 
 ---
 

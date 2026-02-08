@@ -108,7 +108,7 @@ ping -c1 nas pihole-home ha vault
 | Switch mgmt IP | 192.168.12.1 (Dell N2024P) |
 | iDRAC | `idrac-shop` — 192.168.12.250 (LAN-only) |
 | Proxmox Host | `pve` (Dell R730XD) |
-| Production VMs | docker-host, infra-core, observability, dev-tools, automation-stack (core); download-stack, streaming-stack (media split); media-stack (decommissioning), immich-1 (deferred) |
+| Production VMs | docker-host, infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); download-stack, streaming-stack (media split); media-stack (decommissioning), immich-1 (deferred) |
 | NVR | `nvr-shop` — 192.168.12.216 (LAN-only) |
 | WiFi AP | `ap-shop` — 192.168.12.249 (LAN-only) |
 
@@ -147,6 +147,7 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | infra-core | 100.92.91.128 | Shop | Core infra (Cloudflared, Pi-hole, Infisical, Vaultwarden, Authentik) |
 | observability | 100.120.163.70 | Shop | Observability (Prometheus, Grafana, Loki) |
 | dev-tools | 100.90.167.39 | Shop | Dev tools (Gitea, runner, postgres) |
+| ai-consolidation | 100.71.17.29 | Shop | AI services (Qdrant, AnythingLLM) (VM 207) |
 | automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
 | download-stack | 100.107.36.76 | Shop | Downloads + *arr (split from media-stack) |
 | streaming-stack | 100.123.207.64 | Shop | Streaming (Jellyfin, Navidrome) (split from media-stack) |
@@ -225,6 +226,7 @@ curl -s http://automation-stack:5678/healthz
 |--------|-------------------|--------------|------|----------|--------------|
 | automation-stack VM | `automation-stack` | 100.98.70.70 | n8n + Ollama | Shop | `curl -s http://automation-stack:5678/healthz` |
 | dev-tools VM | `dev-tools` | 100.90.167.39 | Gitea + runner | Shop | `curl -s http://100.90.167.39:3000/api/healthz` |
+| ai-consolidation VM | `ai-consolidation` | 100.71.17.29 | Qdrant + AnythingLLM (VM 207) | Shop | `curl -s http://100.71.17.29:3002/api/ping` |
 
 ### Tier 2: Production Services (Media)
 

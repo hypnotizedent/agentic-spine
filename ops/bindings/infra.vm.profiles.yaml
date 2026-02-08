@@ -72,3 +72,57 @@ profiles:
       require_qemu_agent_running: true
       require_cron_running: true
       require_backup_binding: true
+
+  ai-services-v1:
+    description: "AI services VM profile (Qdrant + AnythingLLM)."
+
+    provisioning:
+      template_vmid: "9000"
+      cpu_cores: 8
+      memory_mb: 32768
+      disk_gb: 200
+      bridge: "vmbr0"
+      storage: "local-lvm"
+      image_storage: "local-lvm"
+      ci_network_cidr: "dhcp"
+      ci_user: "ubuntu"
+      nameserver: "1.1.1.1"
+      search_domain: "tailnet"
+      qemu_agent: true
+      onboot: true
+
+    bootstrap:
+      package_manager: "apt"
+      tailscale_auth_secret_path: "/spine/vm-infra/provisioning"
+      tailscale_auth_secret_key: "TAILSCALE_AUTH_KEY"
+      packages:
+        - qemu-guest-agent
+        - tailscale
+        - docker-ce
+        - docker-ce-cli
+        - containerd.io
+        - docker-compose-plugin
+        - cron
+      services_enable:
+        - qemu-guest-agent
+        - tailscaled
+        - docker
+        - cron
+      require_tailscale_connected: true
+      require_qemu_agent_running: true
+      require_docker_running: true
+      require_cron_running: true
+      cron_hooks:
+        - name: "spine-health-hourly"
+          schedule: "0 * * * *"
+          command: "/usr/local/bin/spine-health-check.sh"
+          required: false
+
+    readiness:
+      require_running: true
+      require_ssh_target_binding: true
+      require_ssh_reachability: true
+      require_tailscale_connected: true
+      require_qemu_agent_running: true
+      require_cron_running: true
+      require_backup_binding: true

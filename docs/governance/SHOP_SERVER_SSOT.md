@@ -87,7 +87,7 @@ Notes:
 - `tank/immich/photos`: 1.2TB
 - `tank/vms`: 256K
 
-### VM Inventory (2026-02-07)
+### VM Inventory (2026-02-08)
 
 | VMID | Name | Status | RAM | Boot Disk | Notes |
 |------|------|--------|-----|-----------|-------|
@@ -95,10 +95,15 @@ Notes:
 | 201 | media-stack | running | 16GB | 80GB | Jellyfin + *arr |
 | 202 | automation-stack | running | 16GB | 100GB | n8n + Ollama |
 | 203 | immich | running | 16GB | 50GB | Shop photos (Tailscale: immich-1) |
-| 204 | infra-core | running | 8GB | 50GB | Core infra |
+| 204 | infra-core | running | 8GB | 50GB | Core infra (cloudflared, pihole, infisical, vaultwarden, authentik) |
+| 205 | observability | running | 8GB | 50GB | Prometheus, Grafana, Loki, Uptime Kuma |
+| 206 | dev-tools | running | 8GB | 50GB | Gitea + runner + postgres |
+| 207 | ai-consolidation | running | 32GB | 200GB | Qdrant + AnythingLLM |
+| 209 | download-stack | running | 8GB | 50GB | Download services (*arr, SABnzbd, etc) |
+| 210 | streaming-stack | running | 8GB | 50GB | Streaming services (Jellyfin, Navidrome, etc) |
 | 9000 | template | stopped | 2GB | 3.5GB | Ubuntu 24.04 cloud-init |
 
-**NOTE:** VM 204 (infra-core) is NOT in the vzdump backup job. Add it.
+**NOTE:** Backup coverage is incomplete for shop VMs. Track and fix via `LOOP-BACKUP-STABILIZATION-20260208` and verify with `./bin/ops cap run backup.status`.
 
 ### NFS Exports from PVE
 
