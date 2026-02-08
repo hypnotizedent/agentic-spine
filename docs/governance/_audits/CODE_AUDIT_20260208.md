@@ -41,6 +41,21 @@ Receipts live under `agentic-spine/receipts/sessions/`.
 - `docker.compose.status` DONE (status reported): `RCAP-20260208-111131__docker.compose.status__Rtksx49674`
 - `services.health.status` DONE (status reported): `RCAP-20260208-111259__services.health.status__Rmnwb55011`
 
+## Changes Shipped (Commit Index)
+
+### agentic-spine (`codex/code-audit-20260208`)
+
+- `724139e` ops: worktree-safe cap execution + harden drift/lint/status surfaces
+- `a117088` cloudflare: add tunnel ingress export + domain routing diff
+- `7378d8e` ops/staged: add infra-core stacks (cloudflared, pihole, secrets, vaultwarden)
+- `ebfffdd` bindings: align ssh/compose/health + inventory pointers
+- `c8c439a` governance: align ingress/compose authority + domain routing SSOT
+- `4ad277f` audit: log CODE_AUDIT_20260208 gaps + report
+
+### workbench (`codex/code-audit-20260208`)
+
+- `09470a6` docs: convert workbench infra core to pointer-only authority surfaces
+
 ## Static Drift Scans (Repo-Only)
 
 Scans were executed from `/Users/ronnyworks/code` (excluding `.git/`, `.worktrees/`, and `node_modules/`).
