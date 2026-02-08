@@ -1,0 +1,917 @@
+#!/usr/bin/env python3
+"""
+audit-export — Governed filesystem audit export for agentic-spine + workbench.
+
+Produces a redacted, reproducible export of directory trees and significant
+governance/IaC file contents into the spine mailroom outbox.
+
+Safety: read-only (reads repos, writes only to mailroom/outbox/)
+"""
+
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+SPINE_REPO = Path(os.environ.get("SPINE_REPO", Path.home() / "code" / "agentic-spine"))
+WORKBENCH_REPO = Path(os.environ.get("WORKBENCH_REPO", Path.home() / "code" / "workbench"))
+
+MAX_CONTENT_SIZE = 128 * 1024  # 128 KiB
+TRUNCATE_LINES = 200
+
+# Extensions whose contents are NEVER exported (metadata only)
+SENSITIVE_EXTENSIONS = {".pem", ".key", ".p12", ".pfx", ".age"}
+SOPS_PATTERN = re.compile(r"\.sops\.")
+
+# Extensions that are summarized, not exported
+SUMMARY_ONLY_EXTENSIONS = {".log", ".csv", ".jsonl"}
+
+# Binary extensions (metadata only)
+BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg",
+    ".pdf", ".zip", ".gz", ".tar", ".bz2", ".xz", ".7z",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".pyc", ".pyo", ".dylib", ".so", ".exe", ".dll",
+    ".sqlite", ".db", ".sqlite3",
+    ".mp3", ".mp4", ".avi", ".mkv", ".wav", ".flac",
+}
+
+# Secret key hints (case-insensitive) for inline redaction
+SECRET_HINTS = [
+    "token", "api_key", "apikey", "secret", "password",
+    "client_secret", "authorization", "bearer", "private_key",
+]
+SECRET_HINT_PATTERN = re.compile(
+    r"(?i)(" + "|".join(re.escape(h) for h in SECRET_HINTS) + r")"
+)
+
+# High-entropy token pattern (conservative: 32+ hex or base64-ish chars)
+HIGH_ENTROPY_PATTERN = re.compile(
+    r"(?<![a-zA-Z0-9/+=_-])[A-Za-z0-9/+=_-]{40,}(?![a-zA-Z0-9/+=_-])"
+)
+
+# PEM block pattern
+PEM_BEGIN = re.compile(r"-----BEGIN\s+.*?PRIVATE\s+KEY-----")
+PEM_END = re.compile(r"-----END\s+.*?PRIVATE\s+KEY-----")
+
+# Verification forbidden patterns
+VERIFICATION_FORBIDDEN = [
+    re.compile(r"BEGIN\s+(RSA\s+)?PRIVATE\s+KEY"),
+    re.compile(r"INFISICAL_TOKEN\s*=\s*(?!<REDACTED>)\S+"),
+    re.compile(r"ZAI_API_KEY\s*=\s*(?!<REDACTED>)\S+"),
+    re.compile(r"Authorization:\s*Bearer\s+(?!<REDACTED>)\S+"),
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workbench tree scope (allowed subtrees)
+# ─────────────────────────────────────────────────────────────────────────────
+
+WORKBENCH_TREE_PREFIXES = [
+    "infra/",
+    "docs/governance/",
+    "docs/infrastructure/",
+    "docs/receipts/",
+    "dotfiles/ssh/",
+    "scripts/agents/",
+    "scripts/root/backup/",
+    "scripts/root/infra/",
+]
+
+WORKBENCH_TREE_GLOBS = [
+    "cf-*.sh",
+    "pihole-*.sh",
+]
+
+WORKBENCH_TREE_PATTERNS_IN_SCRIPTS_ROOT = [
+    re.compile(r".*tailscale.*", re.IGNORECASE),
+]
+
+# Workbench excludes (always)
+WORKBENCH_EXCLUDES = {
+    ".git",
+    "runtime",
+    "__pycache__",
+}
+WORKBENCH_EXCLUDE_EXTENSIONS = {".pyc", ".dylib", ".so", ".exe"}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Spine significant file scope
+# ─────────────────────────────────────────────────────────────────────────────
+
+SPINE_SIGNIFICANT_TOP_LEVEL = {
+    "README.md", "AGENTS.md", "SPINE_SCAFFOLD.md", ".gitignore",
+}
+
+SPINE_SIGNIFICANT_PREFIXES = [
+    ".github/",
+    "bin/",
+    "docs/brain/",
+    "docs/core/",
+    "docs/governance/",
+    "ops/capabilities.yaml",
+    "ops/bindings/",
+    "ops/plugins/",
+    "ops/runtime/",
+    "ops/staged/",
+    "surfaces/",
+]
+
+# Spine paths that are tree-listed but content-summarized only
+SPINE_SUMMARY_ONLY_PREFIXES = [
+    "receipts/",
+    "mailroom/",
+    "docs/legacy/",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workbench significant file scope
+# ─────────────────────────────────────────────────────────────────────────────
+
+WORKBENCH_SIGNIFICANT_TOP_LEVEL = {
+    "README.md", "WORKBENCH_CONTRACT.md", "AGENT_ENTRY.md", ".gitignore",
+}
+
+WORKBENCH_SIGNIFICANT_PREFIXES = [
+    "infra/compose/",
+    "infra/cloudflare/",
+    "infra/data/",
+    "infra/networking/",
+    "infra/templates/",
+    "docs/governance/",
+    "docs/infrastructure/",
+    "docs/receipts/",
+    "dotfiles/ssh/",
+    "scripts/agents/",
+    "scripts/root/backup/",
+    "scripts/root/infra/",
+]
+
+WORKBENCH_SIGNIFICANT_SCRIPT_PATTERNS = [
+    re.compile(r"^scripts/root/cf-.*\.sh$"),
+    re.compile(r"^scripts/root/pihole-.*\.sh$"),
+    re.compile(r"^scripts/root/.*tailscale.*", re.IGNORECASE),
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except (OSError, PermissionError):
+        return "ERROR"
+
+
+def file_kind(path: Path) -> str:
+    if path.is_symlink():
+        return "symlink"
+    if path.is_dir():
+        return "directory"
+    ext = path.suffix.lower()
+    if ext in BINARY_EXTENSIONS:
+        return "binary"
+    if ext in SENSITIVE_EXTENSIONS or SOPS_PATTERN.search(path.name):
+        return "sensitive"
+    try:
+        with open(path, "rb") as f:
+            sample = f.read(8192)
+        if b"\x00" in sample:
+            return "binary"
+        return "text"
+    except (OSError, PermissionError):
+        return "unreadable"
+
+
+def is_text_file(path: Path) -> bool:
+    return file_kind(path) == "text"
+
+
+def is_env_file(name: str) -> bool:
+    return name.startswith(".env") or name.endswith(".env") or ".env." in name
+
+
+def redact_env_line(line: str) -> str:
+    """Redact .env file lines: keep var names, replace values."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return line
+    match = re.match(r'^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*)(.*)', line)
+    if match:
+        prefix = match.group(1)
+        value = match.group(2).strip()
+        if value:
+            # Preserve quoting style
+            if value.startswith('"') or value.startswith("'"):
+                return prefix + value[0] + "<REDACTED>" + value[0] + "\n"
+            return prefix + "<REDACTED>\n"
+    return line
+
+
+def redact_inline(line: str) -> str:
+    """Redact lines containing secret key hints."""
+    if SECRET_HINT_PATTERN.search(line):
+        # Redact after = or : (value portion)
+        redacted = re.sub(
+            r'((?:' + '|'.join(re.escape(h) for h in SECRET_HINTS) +
+            r')["\']?\s*[:=]\s*)((?:"[^"]*"|\'[^\']*\'|\S+))',
+            lambda m: m.group(1) + "<REDACTED>",
+            line,
+            flags=re.IGNORECASE,
+        )
+        return redacted
+    return line
+
+
+def redact_pem_blocks(lines: list[str]) -> list[str]:
+    """Replace PEM private key blocks with a placeholder."""
+    result = []
+    in_pem = False
+    for line in lines:
+        if PEM_BEGIN.search(line):
+            in_pem = True
+            result.append("<REDACTED: PEM PRIVATE KEY BLOCK>\n")
+            continue
+        if in_pem:
+            if PEM_END.search(line):
+                in_pem = False
+            continue
+        result.append(line)
+    return result
+
+
+def redact_content(path: Path, lines: list[str]) -> list[str]:
+    """Apply all redaction rules to file content."""
+    name = path.name
+
+    # PEM block redaction first
+    lines = redact_pem_blocks(lines)
+
+    result = []
+    for line in lines:
+        if is_env_file(name):
+            line = redact_env_line(line)
+        line = redact_inline(line)
+        result.append(line)
+    return result
+
+
+def walk_tree(root: Path, exclude_git_internals: bool = True) -> list[str]:
+    """Walk a directory tree, returning sorted relative paths."""
+    paths = []
+    root_str = str(root)
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        rel_dir = os.path.relpath(dirpath, root_str)
+        if rel_dir == ".":
+            rel_dir = ""
+
+        # Filter .git internals
+        if exclude_git_internals and ".git" in dirnames:
+            dirnames.remove(".git")
+            paths.append(".git/")
+
+        # Remove __pycache__ dirs
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+
+        for d in sorted(dirnames):
+            rel = os.path.join(rel_dir, d) if rel_dir else d
+            paths.append(rel + "/")
+
+        for f in sorted(filenames):
+            if f.endswith(".pyc"):
+                continue
+            rel = os.path.join(rel_dir, f) if rel_dir else f
+            paths.append(rel)
+
+    return sorted(paths)
+
+
+def walk_workbench_scoped(root: Path) -> list[str]:
+    """Walk workbench with restricted subtrees only."""
+    paths = []
+    root_str = str(root)
+
+    # Collect top-level files that match globs
+    for entry in sorted(root.iterdir()):
+        if entry.is_file():
+            name = entry.name
+            for glob_pat in WORKBENCH_TREE_GLOBS:
+                import fnmatch
+                if fnmatch.fnmatch(name, glob_pat):
+                    paths.append(name)
+
+    # Walk allowed subtrees
+    for prefix in WORKBENCH_TREE_PREFIXES:
+        subtree_path = root / prefix.rstrip("/")
+        if not subtree_path.exists():
+            continue
+        for dirpath, dirnames, filenames in os.walk(subtree_path, followlinks=False):
+            rel_dir = os.path.relpath(dirpath, root_str)
+
+            # Apply excludes
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in WORKBENCH_EXCLUDES and d != "__pycache__"
+            ]
+
+            if ".git" in dirnames:
+                dirnames.remove(".git")
+
+            for d in sorted(dirnames):
+                paths.append(os.path.join(rel_dir, d) + "/")
+
+            for f in sorted(filenames):
+                ext = os.path.splitext(f)[1].lower()
+                if ext in WORKBENCH_EXCLUDE_EXTENSIONS or f.endswith(".pyc"):
+                    continue
+                paths.append(os.path.join(rel_dir, f))
+
+    # Also walk scripts/root for tailscale-related scripts
+    scripts_root = root / "scripts" / "root"
+    if scripts_root.exists():
+        for entry in sorted(scripts_root.iterdir()):
+            if entry.is_file():
+                name = entry.name
+                for pat in WORKBENCH_TREE_PATTERNS_IN_SCRIPTS_ROOT:
+                    if pat.match(name):
+                        paths.append(f"scripts/root/{name}")
+                # Also match cf-*.sh and pihole-*.sh directly in scripts/root
+                import fnmatch
+                if fnmatch.fnmatch(name, "cf-*.sh") or fnmatch.fnmatch(name, "pihole-*.sh"):
+                    paths.append(f"scripts/root/{name}")
+
+    # Top-level significant files
+    for fname in sorted(WORKBENCH_SIGNIFICANT_TOP_LEVEL):
+        fpath = root / fname
+        if fpath.exists():
+            paths.append(fname)
+
+    return sorted(set(paths))
+
+
+def is_spine_significant(relpath: str) -> bool:
+    """Check if a spine-repo relative path is in significant scope."""
+    basename = os.path.basename(relpath)
+
+    # Top-level files
+    if "/" not in relpath and basename in SPINE_SIGNIFICANT_TOP_LEVEL:
+        return True
+
+    # Prefix match
+    for prefix in SPINE_SIGNIFICANT_PREFIXES:
+        if prefix.endswith("/"):
+            if relpath.startswith(prefix) or relpath == prefix.rstrip("/"):
+                return True
+        else:
+            if relpath == prefix:
+                return True
+
+    return False
+
+
+def is_spine_summary_only(relpath: str) -> bool:
+    """Check if path is in summary-only scope."""
+    for prefix in SPINE_SUMMARY_ONLY_PREFIXES:
+        if relpath.startswith(prefix):
+            return True
+    ext = os.path.splitext(relpath)[1].lower()
+    if ext in SUMMARY_ONLY_EXTENSIONS:
+        return True
+    return False
+
+
+def is_workbench_significant(relpath: str) -> bool:
+    """Check if a workbench-repo relative path is in significant scope."""
+    basename = os.path.basename(relpath)
+
+    # Top-level files
+    if "/" not in relpath and basename in WORKBENCH_SIGNIFICANT_TOP_LEVEL:
+        return True
+
+    for prefix in WORKBENCH_SIGNIFICANT_PREFIXES:
+        if relpath.startswith(prefix):
+            return True
+
+    for pat in WORKBENCH_SIGNIFICANT_SCRIPT_PATTERNS:
+        if pat.match(relpath):
+            return True
+
+    return False
+
+
+def classify_category(relpath: str, repo: str) -> str:
+    """Classify a file into a category for the manifest."""
+    rl = relpath.lower()
+    if any(k in rl for k in ["governance", "contract", "policy", "authority"]):
+        return "governance"
+    if any(k in rl for k in ["compose", "docker", "caddy", "prometheus", "loki", "grafana"]):
+        return "iac"
+    if any(k in rl for k in ["backup", "restore", "disaster"]):
+        return "backup"
+    if any(k in rl for k in ["monitor", "alert", "uptime", "node-exporter"]):
+        return "monitoring"
+    if any(k in rl for k in ["network", "tailscale", "ssh", "tunnel", "cloudflare", "dns", "pihole"]):
+        return "network"
+    if any(k in rl for k in ["inventory", "registry", "ssot"]):
+        return "inventory"
+    if any(k in rl for k in ["secret", "infisical", "vault", ".env"]):
+        return "secrets"
+    if any(k in rl for k in ["drift", "verify", "gate", "lock", "surface"]):
+        return "verification"
+    if any(k in rl for k in ["brain", "agent", "session", "protocol"]):
+        return "agent"
+    if any(k in rl for k in ["plugin", "cap", "binding"]):
+        return "ops"
+    return "general"
+
+
+def summarize_directory(root: Path, prefix: str, label: str) -> str:
+    """Create a summary of a directory (count + newest items)."""
+    target = root / prefix
+    if not target.exists():
+        return f"**{label}** (`{prefix}`): not found\n"
+
+    all_items = []
+    for dirpath, dirnames, filenames in os.walk(target):
+        for f in filenames:
+            fp = Path(dirpath) / f
+            try:
+                mtime = fp.stat().st_mtime
+            except OSError:
+                mtime = 0
+            all_items.append((os.path.relpath(fp, root), mtime))
+
+    all_items.sort(key=lambda x: -x[1])
+    lines = [f"**{label}** (`{prefix}`): {len(all_items)} files\n"]
+
+    if prefix.startswith("receipts"):
+        # Show newest 10 receipt directories
+        receipt_dirs = set()
+        for relpath, _ in all_items:
+            parts = relpath.split("/")
+            if len(parts) >= 2:
+                receipt_dirs.add(parts[1] if parts[0] == "receipts" else parts[0])
+        newest_dirs = sorted(receipt_dirs)[-10:]
+        lines.append(f"Newest receipt dirs: {', '.join(newest_dirs)}\n")
+    elif prefix.startswith("mailroom"):
+        # Show bucket counts + filenames in queued/outbox
+        buckets = defaultdict(int)
+        for relpath, _ in all_items:
+            parts = relpath.split("/")
+            if len(parts) >= 2:
+                bucket = parts[1]
+                buckets[bucket] += 1
+        for bucket, count in sorted(buckets.items()):
+            lines.append(f"  {bucket}/: {count} files\n")
+    else:
+        # Just count + readme mention
+        lines.append(f"Newest 5: {', '.join(p for p, _ in all_items[:5])}\n")
+
+    return "\n".join(lines)
+
+
+def verify_redaction(report_path: Path) -> tuple[bool, list[str]]:
+    """Verify no secrets leaked into the report."""
+    violations = []
+    try:
+        with open(report_path, "r", errors="replace") as f:
+            for lineno, line in enumerate(f, 1):
+                for pat in VERIFICATION_FORBIDDEN:
+                    if pat.search(line):
+                        violations.append(
+                            f"FORBIDDEN PATTERN at line {lineno}: {pat.pattern}"
+                        )
+                # High-entropy token check (skip markdown headers, code fences, paths)
+                stripped = line.strip()
+                if (
+                    stripped
+                    and not stripped.startswith("#")
+                    and not stripped.startswith("```")
+                    and not stripped.startswith("|")
+                    and "sha256" not in stripped.lower()
+                    and "<REDACTED>" not in stripped
+                ):
+                    for m in HIGH_ENTROPY_PATTERN.finditer(stripped):
+                        token = m.group(0)
+                        # Skip paths, SHA256 hashes, and common false positives
+                        if (
+                            "/" in token
+                            or "=" in token  # key=value assignments
+                            or token.startswith("sha256")
+                            or len(set(token)) < 10  # low entropy
+                            or re.match(r"^[a-f0-9]{40}$", token)  # git commit hash
+                            or re.match(r"^[a-f0-9]{64}$", token)  # SHA256 hash
+                            or re.match(r"^[A-Za-z_]+$", token)  # all letters/underscores
+                            or re.match(r"^[A-Z0-9_-]+$", token)  # uppercase identifiers (receipt/loop IDs)
+                            or re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", token)  # variable names
+                            or "${" in token  # shell variable references
+                            or token.startswith("YYYYMMDD")
+                            or "LOOP-" in token
+                            or re.match(r"^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+$", token)  # email-like
+                        ):
+                            continue
+                        violations.append(
+                            f"POSSIBLE SECRET at line {lineno}: high-entropy token ({len(token)} chars) in {report_path.name}"
+                        )
+    except OSError as e:
+        violations.append(f"Cannot read report: {e}")
+
+    return len(violations) == 0, violations
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main export logic
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    outdir = SPINE_REPO / "mailroom" / "outbox" / "audit-export" / f"FS_EXPORT_{ts}"
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # ── Phase 1: Walk trees ──────────────────────────────────────────────
+
+    spine_paths = walk_tree(SPINE_REPO)
+    workbench_paths = walk_workbench_scoped(WORKBENCH_REPO)
+
+    # Write TREE files
+    with open(outdir / "TREE.agentic-spine.paths.txt", "w") as f:
+        for p in spine_paths:
+            f.write(p + "\n")
+
+    with open(outdir / "TREE.workbench.paths.txt", "w") as f:
+        for p in workbench_paths:
+            f.write(p + "\n")
+
+    # ── Phase 2: Build manifests ─────────────────────────────────────────
+
+    all_manifest = []    # (repo, relpath, bytes, file_kind)
+    sig_manifest = []    # (repo, relpath, bytes, sha256, category, redaction_mode)
+    stats = {
+        "spine_files_scanned": 0,
+        "spine_significant_exported": 0,
+        "workbench_files_scanned": 0,
+        "workbench_significant_exported": 0,
+        "by_extension": defaultdict(int),
+        "exclusions_applied": [],
+        "largest_files": [],
+    }
+
+    # Collect significant file contents
+    significant_contents = []  # (repo_label, relpath, content_lines_or_None, redaction_mode)
+    redaction_log = []  # (relpath, reason)
+
+    # --- Spine files ---
+    for relpath in spine_paths:
+        if relpath.endswith("/"):
+            continue
+        full = SPINE_REPO / relpath
+        if not full.exists() or not full.is_file():
+            continue
+
+        stats["spine_files_scanned"] += 1
+        ext = os.path.splitext(relpath)[1].lower()
+        stats["by_extension"][ext if ext else "(none)"] += 1
+        try:
+            size = full.stat().st_size
+        except OSError:
+            size = 0
+        kind = file_kind(full)
+        all_manifest.append(("agentic-spine", relpath, size, kind))
+        stats["largest_files"].append((size, "agentic-spine", relpath))
+
+        # Check if significant
+        if not is_spine_significant(relpath):
+            continue
+        if is_spine_summary_only(relpath):
+            continue
+
+        category = classify_category(relpath, "agentic-spine")
+        sha = sha256_file(full)
+
+        # Determine redaction mode
+        if ext in SENSITIVE_EXTENSIONS or SOPS_PATTERN.search(full.name):
+            redaction_mode = "omitted-sensitive"
+            sig_manifest.append(("agentic-spine", relpath, size, sha, category, redaction_mode))
+            redaction_log.append((relpath, f"Sensitive extension ({ext}), contents omitted"))
+            significant_contents.append(("agentic-spine", relpath, None, redaction_mode))
+            stats["spine_significant_exported"] += 1
+            continue
+
+        if kind == "binary":
+            redaction_mode = "omitted-binary"
+            sig_manifest.append(("agentic-spine", relpath, size, sha, category, redaction_mode))
+            significant_contents.append(("agentic-spine", relpath, None, redaction_mode))
+            stats["spine_significant_exported"] += 1
+            continue
+
+        # Read and redact text content
+        try:
+            with open(full, "r", errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError:
+            sig_manifest.append(("agentic-spine", relpath, size, sha, category, "unreadable"))
+            stats["spine_significant_exported"] += 1
+            continue
+
+        redacted_lines = redact_content(full, lines)
+        redaction_mode = "redacted" if is_env_file(full.name) else "inline-redacted"
+
+        # Truncate large files
+        if size > MAX_CONTENT_SIZE:
+            head = redacted_lines[:TRUNCATE_LINES]
+            tail = redacted_lines[-TRUNCATE_LINES:]
+            total = len(redacted_lines)
+            redacted_lines = (
+                head +
+                [f"\n...TRUNCATED ({total - 2 * TRUNCATE_LINES} lines omitted)...\n\n"] +
+                tail
+            )
+            redaction_mode += "+truncated"
+
+        sig_manifest.append(("agentic-spine", relpath, size, sha, category, redaction_mode))
+        significant_contents.append(("agentic-spine", relpath, redacted_lines, redaction_mode))
+        stats["spine_significant_exported"] += 1
+
+    # --- Workbench files ---
+    for relpath in workbench_paths:
+        if relpath.endswith("/"):
+            continue
+        full = WORKBENCH_REPO / relpath
+        if not full.exists() or not full.is_file():
+            continue
+
+        stats["workbench_files_scanned"] += 1
+        ext = os.path.splitext(relpath)[1].lower()
+        stats["by_extension"][ext if ext else "(none)"] += 1
+        try:
+            size = full.stat().st_size
+        except OSError:
+            size = 0
+        kind = file_kind(full)
+        all_manifest.append(("workbench", relpath, size, kind))
+        stats["largest_files"].append((size, "workbench", relpath))
+
+        if not is_workbench_significant(relpath):
+            continue
+
+        category = classify_category(relpath, "workbench")
+        sha = sha256_file(full)
+
+        if ext in SENSITIVE_EXTENSIONS or SOPS_PATTERN.search(full.name):
+            redaction_mode = "omitted-sensitive"
+            sig_manifest.append(("workbench", relpath, size, sha, category, redaction_mode))
+            redaction_log.append((relpath, f"Sensitive extension ({ext}), contents omitted"))
+            significant_contents.append(("workbench", relpath, None, redaction_mode))
+            stats["workbench_significant_exported"] += 1
+            continue
+
+        if kind == "binary":
+            redaction_mode = "omitted-binary"
+            sig_manifest.append(("workbench", relpath, size, sha, category, redaction_mode))
+            significant_contents.append(("workbench", relpath, None, redaction_mode))
+            stats["workbench_significant_exported"] += 1
+            continue
+
+        try:
+            with open(full, "r", errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError:
+            sig_manifest.append(("workbench", relpath, size, sha, category, "unreadable"))
+            stats["workbench_significant_exported"] += 1
+            continue
+
+        redacted_lines = redact_content(full, lines)
+        redaction_mode = "redacted" if is_env_file(full.name) else "inline-redacted"
+
+        if size > MAX_CONTENT_SIZE:
+            head = redacted_lines[:TRUNCATE_LINES]
+            tail = redacted_lines[-TRUNCATE_LINES:]
+            total = len(redacted_lines)
+            redacted_lines = (
+                head +
+                [f"\n...TRUNCATED ({total - 2 * TRUNCATE_LINES} lines omitted)...\n\n"] +
+                tail
+            )
+            redaction_mode += "+truncated"
+
+        sig_manifest.append(("workbench", relpath, size, sha, category, redaction_mode))
+        significant_contents.append(("workbench", relpath, redacted_lines, redaction_mode))
+        stats["workbench_significant_exported"] += 1
+
+    # ── Phase 3: Build indices ───────────────────────────────────────────
+
+    indices = {
+        "iac": [],
+        "governance": [],
+        "monitoring_backup_security": [],
+        "network": [],
+        "inventory": [],
+    }
+    for repo, relpath, size, sha, category, _ in sig_manifest:
+        entry = f"{repo}:{relpath}"
+        if category == "iac":
+            indices["iac"].append(entry)
+        elif category == "governance":
+            indices["governance"].append(entry)
+        elif category in ("monitoring", "backup"):
+            indices["monitoring_backup_security"].append(entry)
+        elif category == "network":
+            indices["network"].append(entry)
+        elif category == "inventory":
+            indices["inventory"].append(entry)
+        elif category == "secrets":
+            indices["monitoring_backup_security"].append(entry)
+        elif category == "verification":
+            indices["governance"].append(entry)
+
+    # ── Phase 4: Write REPORT.md ─────────────────────────────────────────
+
+    report_lines = []
+    report_lines.append("# Filesystem Export Report\n\n")
+    report_lines.append(f"**Generated:** {ts} UTC\n")
+    report_lines.append(f"**Spine repo:** {SPINE_REPO}\n")
+    report_lines.append(f"**Workbench repo:** {WORKBENCH_REPO}\n\n")
+
+    # Section 1: Directory Trees
+    report_lines.append("---\n\n## Directory Trees\n\n")
+
+    report_lines.append("### agentic-spine\n\n")
+    report_lines.append(f"Total paths: {len(spine_paths)}\n\n")
+    report_lines.append("See `TREE.agentic-spine.paths.txt` for the full listing.\n\n")
+    # Show top-level nodes
+    top_level = sorted(set(
+        p.split("/")[0] + ("/" if p.endswith("/") or "/" in p else "")
+        for p in spine_paths if p
+    ))
+    report_lines.append("**Top-level nodes:**\n")
+    for tl in sorted(set(t.rstrip("/") + "/" if not t.endswith("/") and "/" not in t.rstrip("/") else t for t in top_level)):
+        if "/" in tl:
+            node = tl.split("/")[0]
+            report_lines.append(f"- `{node}/`\n")
+    # Deduplicate
+    seen = set()
+    clean_top = []
+    for tl in top_level:
+        node = tl.split("/")[0]
+        if node not in seen:
+            seen.add(node)
+            clean_top.append(node)
+    report_lines.append("Top-level: " + ", ".join(f"`{n}`" for n in sorted(clean_top)) + "\n\n")
+
+    report_lines.append("### workbench (governance + IaC surfaces)\n\n")
+    report_lines.append(f"Total paths: {len(workbench_paths)}\n\n")
+    report_lines.append("See `TREE.workbench.paths.txt` for the full listing.\n\n")
+
+    # Section 2: Significant File Contents
+    report_lines.append("---\n\n## Significant File Contents (Redacted)\n\n")
+
+    for repo_label, relpath, content_lines, redaction_mode in significant_contents:
+        report_lines.append(f"### {repo_label}: {relpath}\n\n")
+        if content_lines is None:
+            report_lines.append(f"*Contents omitted ({redaction_mode})*\n\n")
+            continue
+
+        ext = os.path.splitext(relpath)[1].lstrip(".")
+        lang = ext if ext else ""
+        report_lines.append(f"```{lang}\n")
+        for line in content_lines:
+            report_lines.append(line if line.endswith("\n") else line + "\n")
+        report_lines.append("```\n\n")
+
+    # Summaries for excluded content areas
+    report_lines.append("---\n\n### Content Summaries (not fully exported)\n\n")
+    report_lines.append(summarize_directory(SPINE_REPO, "receipts", "Receipts") + "\n")
+    report_lines.append(summarize_directory(SPINE_REPO, "mailroom", "Mailroom") + "\n")
+    report_lines.append(summarize_directory(SPINE_REPO, "docs/legacy", "Legacy Docs") + "\n")
+
+    # Section 3: Indices
+    report_lines.append("---\n\n## Indices\n\n")
+    for idx_name, entries in indices.items():
+        report_lines.append(f"### {idx_name.replace('_', ' ').title()}\n\n")
+        if entries:
+            for e in sorted(entries):
+                report_lines.append(f"- `{e}`\n")
+        else:
+            report_lines.append("*(none)*\n")
+        report_lines.append("\n")
+
+    # Exclusions
+    report_lines.append("---\n\n## Exclusions Applied\n\n")
+    report_lines.append("- `.git/**` internals (shown as `.git/` node only)\n")
+    report_lines.append("- `__pycache__/**`, `*.pyc`, `*.dylib`, `*.so`, `*.exe`\n")
+    report_lines.append("- workbench `runtime/**` (AnythingLLM, vector cache, virtualenv)\n")
+    report_lines.append("- workbench `dotfiles/iterm2/SavedState/**`\n")
+    report_lines.append("- Sensitive file contents (`.pem`, `.key`, `.p12`, `.pfx`, `.age`, `.sops.*`)\n")
+    report_lines.append("- `receipts/**`, `mailroom/**`, `docs/legacy/**` (summarized only)\n")
+    report_lines.append("- `.log`, `.csv`, `.jsonl` files (summarized only)\n\n")
+
+    # Redaction report section
+    report_lines.append("---\n\n## Redaction Report\n\n")
+    if redaction_log:
+        report_lines.append("| Path | Reason |\n")
+        report_lines.append("|------|--------|\n")
+        for path, reason in redaction_log:
+            report_lines.append(f"| `{path}` | {reason} |\n")
+    else:
+        report_lines.append("No files required full omission for sensitive extensions.\n")
+    report_lines.append("\n")
+    report_lines.append("All `.env*` files had values replaced with `<REDACTED>`.\n")
+    report_lines.append("All lines matching secret key hints had values redacted inline.\n")
+    report_lines.append("All PEM private key blocks were replaced with placeholder lines.\n\n")
+
+    # Write REPORT.md
+    report_path = outdir / "REPORT.md"
+    with open(report_path, "w") as f:
+        f.writelines(report_lines)
+
+    # ── Phase 5: Write manifests and stats ───────────────────────────────
+
+    # MANIFEST.all.tsv
+    with open(outdir / "MANIFEST.all.tsv", "w") as f:
+        f.write("repo\trelpath\tbytes\tfile_kind\n")
+        for repo, relpath, size, kind in sorted(all_manifest):
+            f.write(f"{repo}\t{relpath}\t{size}\t{kind}\n")
+
+    # MANIFEST.significant.tsv
+    with open(outdir / "MANIFEST.significant.tsv", "w") as f:
+        f.write("repo\trelpath\tbytes\tsha256\tcategory\tredaction_mode\n")
+        for repo, relpath, size, sha, cat, mode in sorted(sig_manifest):
+            f.write(f"{repo}\t{relpath}\t{size}\t{sha}\t{cat}\t{mode}\n")
+
+    # STATS.json
+    stats["largest_files"].sort(reverse=True)
+    stats["largest_files"] = [
+        {"bytes": s, "repo": r, "path": p}
+        for s, r, p in stats["largest_files"][:20]
+    ]
+    stats["by_extension"] = dict(sorted(stats["by_extension"].items(), key=lambda x: -x[1]))
+    with open(outdir / "STATS.json", "w") as f:
+        json.dump(stats, f, indent=2)
+
+    # REDACTION_REPORT.md (standalone)
+    with open(outdir / "REDACTION_REPORT.md", "w") as f:
+        f.write("# Redaction Report\n\n")
+        f.write(f"Generated: {ts} UTC\n\n")
+        f.write("## Files with contents omitted\n\n")
+        if redaction_log:
+            for path, reason in redaction_log:
+                f.write(f"- `{path}`: {reason}\n")
+        else:
+            f.write("No files required full omission.\n")
+        f.write("\n## Inline redaction applied\n\n")
+        f.write("- All `.env*` files: variable values replaced with `<REDACTED>`\n")
+        f.write("- Lines matching secret hints (`token`, `api_key`, `secret`, `password`, etc.): values redacted\n")
+        f.write("- PEM private key blocks: replaced with `<REDACTED: PEM PRIVATE KEY BLOCK>`\n")
+
+    # ── Phase 6: Verification ────────────────────────────────────────────
+
+    passed, violations = verify_redaction(report_path)
+
+    # Also verify manifests (they shouldn't contain secrets but double-check)
+    for manifest_file in ["MANIFEST.all.tsv", "MANIFEST.significant.tsv"]:
+        mp = outdir / manifest_file
+        p2, v2 = verify_redaction(mp)
+        if not p2:
+            passed = False
+            violations.extend(v2)
+
+    if not passed:
+        # Write violations to redaction report
+        with open(outdir / "REDACTION_REPORT.md", "a") as f:
+            f.write("\n## VERIFICATION FAILURES\n\n")
+            for v in violations:
+                f.write(f"- {v}\n")
+
+    # ── Output ───────────────────────────────────────────────────────────
+
+    print(f"OUTBOX_EXPORT_DIR={outdir}")
+    print(f"SPINE_FILES_SCANNED={stats['spine_files_scanned']} SIGNIFICANT_EXPORTED={stats['spine_significant_exported']}")
+    print(f"WORKBENCH_FILES_SCANNED={stats['workbench_files_scanned']} SIGNIFICANT_EXPORTED={stats['workbench_significant_exported']}")
+    print(f"REDACTION_VERIFIED={'pass' if passed else 'fail'}")
+
+    if not passed:
+        print("\nVERIFICATION FAILURES:")
+        for v in violations:
+            print(f"  {v}")
+        sys.exit(1)
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
