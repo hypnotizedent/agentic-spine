@@ -645,6 +645,97 @@ gaps:
       netUnreachable (camera physically disconnected, not IP conflict).
       Previous name "SCREEN PRINT" auto-reset to "IPCamera 05" by NVR.
 
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during LOOP-BACKUP-STABILIZATION-20260208
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-033
+    discovered_by: "LOOP-CAMERA-BASELINE-20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "Infisical project: infrastructure (prod)"
+    description: |
+      Shop infrastructure credentials (NVR, iDRAC, Dell switch) were referenced
+      in SHOP_SERVER_SSOT.md and CAMERA_SSOT.md at Infisical paths
+      /spine/shop/nvr/*, /spine/shop/idrac/*, /spine/shop/switch/* but all three
+      paths were empty. Agent could not diagnose camera IP conflict without
+      asking the user for credentials interactively. SSOT docs implied secrets
+      existed when they did not.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-CAMERA-BASELINE-20260208"
+    notes: |
+      Fixed: all three credential sets stored in Infisical (6 keys total):
+      /spine/shop/nvr (NVR_ADMIN_USER, NVR_ADMIN_PASSWORD),
+      /spine/shop/idrac (IDRAC_ADMIN_USER, IDRAC_ADMIN_PASSWORD),
+      /spine/shop/switch (SWITCH_ADMIN_USER, SWITCH_ADMIN_PASSWORD).
+
+  - id: GAP-OP-034
+    discovered_by: "LOOP-BACKUP-STABILIZATION-20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "ops/bindings/backup.inventory.yaml"
+    description: |
+      No SSH key authentication existed from pve or infra-core to the NAS
+      (Synology 918+ at house, Tailscale). Blocked all offsite backup sync.
+      The backup binding had an enabled offsite target (vm-200-docker-host-offsite)
+      and NAS directories existed, but no sync mechanism or SSH trust was ever
+      established. backup.status reported no_matches — a false signal that
+      appeared like a path problem when the real issue was no connectivity.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-BACKUP-STABILIZATION-20260208"
+    notes: |
+      Fixed: pve RSA key and infra-core ed25519 key added to
+      ronadmin@nas authorized_keys. Verified bidirectional SSH from both hosts.
+      Offsite rsync script and app backup scripts both use this trust path.
+
+  - id: GAP-OP-035
+    discovered_by: "LOOP-BACKUP-STABILIZATION-20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "ops/bindings/backup.inventory.yaml"
+    description: |
+      Vaultwarden backup stopped when the service migrated from proxmox-home
+      (LXC 102) to infra-core (VM 204) on 2026-02-05. No backup cron was
+      re-established on the new host. Last NAS backup was 2026-02-05 02:45,
+      creating a 3-day gap (Feb 5-8) where vaultwarden had zero backups.
+      The migration playbook had no post-migration backup verification step.
+      Additionally, the old host had no backup cron — the mechanism was unknown.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-BACKUP-STABILIZATION-20260208"
+    notes: |
+      Fixed: /usr/local/bin/vaultwarden-backup.sh on infra-core creates daily
+      tar.gz of vw-data dir, rsyncs to NAS. Cron at 02:45 daily. First backup
+      verified (1.5MB, synced to NAS successfully). Lesson: service migration
+      playbooks MUST include a backup continuity step — verify backup mechanism
+      is re-established on the new host before closing the migration.
+
+  - id: GAP-OP-036
+    discovered_by: "LOOP-BACKUP-STABILIZATION-20260208"
+    discovered_at: "2026-02-08"
+    type: duplicate-truth
+    doc: "ops/bindings/backup.inventory.yaml"
+    description: |
+      The backup binding had vm-200-docker-host-offsite enabled=true with a NAS
+      path that existed but was always empty. backup.status reported this as
+      no_matches, which appeared to be a path misconfiguration. In reality, no
+      sync mechanism (rsync, scp, Hyper Backup pull) was ever wired between pve
+      and NAS. The enabled=true flag + existing NAS directory created a false
+      impression that offsite backup was configured but broken, when it had never
+      been set up at all.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-BACKUP-STABILIZATION-20260208"
+    notes: |
+      Fixed: vm-200-docker-host-offsite disabled (186GB exceeds shop upload
+      bandwidth). New vm-offsite-critical target covers VMs 204-210 via
+      /usr/local/bin/vzdump-offsite-sync.sh on pve (cron 09:00, rsync with
+      1500 KB/s bwlimit over Tailscale). Lesson: never enable a backup target
+      in the binding without a corresponding sync mechanism. enabled=true must
+      mean "this is actively running and verifiable."
+
 # ─────────────────────────────────────────────────────────────
 # Gap Types
 # ─────────────────────────────────────────────────────────────
