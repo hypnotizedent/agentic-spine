@@ -40,31 +40,56 @@ Notes:
 
 ## Physical Infrastructure
 
-### Rack Inventory (Minimum Baseline)
+### Rack: Rittal VRIS38S (42U)
+
+| Property | Value |
+|----------|-------|
+| Model | Rittal VRIS38S |
+| Height | 42U |
+| Serial | 164115 |
+| Build Date | 2000-04-11 |
+| Location | Shop floor |
+| Patch Panels | 2x Vertical Cable Cat6 24-port (top unlabeled, bottom labeled) |
+
+### Service Tags & Serial Numbers
+
+| Equipment | Service Tag / Serial | Rack Position | Notes |
+|-----------|---------------------|---------------|-------|
+| Dell PowerEdge R730XD | HSZZD42 | U17-18 | Main production server |
+| Dell MD1400 DAS | HRW2F42 | U14-16 | Direct Attached Storage |
+| Dell Networking N2024P | TBD | U39 | 24-port PoE+ switch |
+| APC Back-UPS Pro 900 | BVN900M1 | Floor | 900VA UPS |
+| Hikvision NVR | TBD | Upstairs 9U rack (separate) | Camera recorder |
+| TP-Link EAP225 | TBD | — | WiFi AP |
+
+### Rack Inventory
 
 | Component | Model | Role | Verified |
 |----------|-------|------|----------|
 | Server | Dell PowerEdge R730XD (12-bay LFF) | Shop hypervisor (`pve`) | 2026-02-08 |
-| DAS | Dell MD1400 | Bulk storage shelf | unverified (cable/driver check needed) |
-| Switch | Dell N2024P | Shop LAN switching / gateway | verified |
-| UPS | APC (model TBD) | Power protection | unverified |
-| NVR | Hikvision (model TBD) | Camera recorder | partial |
+| DAS | Dell MD1400 | Bulk storage shelf (cabled, driver blocked — GAP-OP-029) | 2026-02-08 |
+| Switch | Dell N2024P | Shop LAN switching / PoE (24-port, 190W PoE budget) | verified |
+| UPS | APC Back-UPS Pro 900 | 900VA / 540W, ~10-15 min runtime at full load | legacy doc |
+| NVR | Hikvision (model TBD) | Camera recorder (upstairs 9U rack, separate from main) | legacy doc |
 | WiFi AP | TP-Link EAP225 | Shop WiFi | partial |
 
 ### R730XD Hardware Specifications
 
 | Component | Value | Verified |
 |-----------|-------|----------|
-| **Model** | Dell PowerEdge R730XD | 2026-01-21 |
-| **CPU** | 2x Intel Xeon E5-2640 v3 (32 threads total) | 2026-01-21 |
-| **RAM** | 192GB (12x 16GB DIMMs, 12/24 slots populated) | 2026-02-08 |
+| **Service Tag** | HSZZD42 | legacy doc |
+| **Model** | Dell PowerEdge R730XD (2U) | 2026-01-21 |
+| **Rails** | DP/N 0FYK4G (installed) | legacy doc |
+| **CPU** | 2x Intel Xeon E5-2640 v3 (16 cores / 32 threads, 2.6GHz) | 2026-01-21 |
+| **RAM** | 192GB DDR4 ECC (12x 16GB DIMMs, 12/24 slots populated) | 2026-02-08 |
+| **Power** | 2x 750W Platinum PSU (redundant) | legacy doc |
 | **Proxmox Version** | 9.1.4 (PVE 9.1.0) | 2026-02-08 |
 | **Kernel** | 6.14.8-2-pve | 2026-02-08 |
 | **Boot Drives** | 2x Seagate ST9500620SS 500GB SAS 2.5" (rear flex bays) | 2026-02-08 |
 | **Drive Bays** | 12x 3.5" LFF (front) + 2x 2.5" SFF (rear flex) | 2026-02-08 |
 | **Controller/HBA** | Dell HBA330 Mini (Broadcom LSI SAS3008, IT mode, FW 16.00.11.00) | 2026-02-08 |
-| **Second SAS** | Microchip PM8072 SPCv 12G 16-port (PCIe, no driver loaded — unused) | 2026-02-08 |
-| **NICs** | 4x 1GbE (eno1-4), only eno1 active (bridged to vmbr0) | 2026-02-08 |
+| **Second SAS** | Microchip PM8072 SPCv 12G 16-port (PCIe, driver blocked — GAP-OP-029) | 2026-02-08 |
+| **NICs** | 4x 1GbE (eno1-4) + iDRAC, only eno1 active (bridged to vmbr0) | 2026-02-08 |
 
 **Drive bay population (12 front 3.5" LFF):**
 - Slots 0-7: 8x Seagate ST4000NM0063 4TB SAS (Constellation ES.3) → `tank` pool
@@ -147,6 +172,40 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 
 All exports use `sync,no_subtree_check,no_root_squash` over Tailscale IPs. streaming-stack has read-only `/media` access (consumers only, no writes).
 
+### MD1400 DAS Specifications
+
+| Component | Value | Verified |
+|-----------|-------|----------|
+| **Service Tag** | HRW2F42 | legacy doc |
+| **Rails** | DP/N 0JRJ9P (installed) | legacy doc |
+| **Enclosure** | 12-bay 3.5" SATA/SAS | legacy doc |
+| **SAS Cable** | Dell DP/N 0GYK61 (Mini-SAS HD SFF-8644, connected) | 2026-02-08 |
+| **Connection** | PM8072 HBA → MD1400 | 2026-02-08 |
+| **Drives** | Unknown — invisible to OS (GAP-OP-029) | 2026-02-08 |
+| **Status** | Powered + cabled, but driver cannot bind. See LOOP-MD1400-SAS-RECOVERY-20260208 | 2026-02-08 |
+
+**Note:** Legacy doc incorrectly listed "8x 4TB + 4x 8TB" as MD1400 drives. Those are actually the R730XD internal bay drives (tank + media pools). The MD1400's actual drive population is unknown until GAP-OP-029 is resolved.
+
+### UPS Specifications
+
+| Component | Value | Verified |
+|-----------|-------|----------|
+| **Model** | APC Back-UPS Pro 900 | legacy doc |
+| **Serial** | BVN900M1 | legacy doc |
+| **Capacity** | 900VA / 540W | legacy doc |
+| **Runtime** | ~10-15 min at full load | legacy doc |
+| **Outlets** | 8 total (4 battery + surge, 4 surge only) | legacy doc |
+| **Connectivity** | USB port for monitoring (not currently connected to any host) | legacy doc |
+| **Connected Equipment** | R730XD, MD1400, N2024P | legacy doc |
+
+### Accessories & Cables
+
+| Item | Part Number | Use | Status |
+|------|-------------|-----|--------|
+| R730XD Rails | 0FYK4G | Server rack mount | Installed |
+| MD1400 Rails | 0JRJ9P | DAS rack mount | Installed |
+| SAS Cable | 0GYK61 | PM8072 HBA → MD1400 | Connected |
+
 ### Hardware Compatibility Notes
 
 - **R730XD:** 12x 3.5" LFF front bays (all occupied), 2x 2.5" SFF rear flex bays (boot drives). No free drive slots.
@@ -166,11 +225,27 @@ All exports use `sync,no_subtree_check,no_root_squash` over Tailscale IPs. strea
 
 ### Camera Network
 
-Cameras are intentionally isolated.
+Cameras are on an isolated VLAN (`192.168.254.0/24`), separate from the shop LAN.
 
-Baseline truth:
-- NVR is reachable on Shop LAN (`nvr-shop`).
-- Camera endpoints/RTSP URLs are treated as secrets and must be stored in Infisical.
+| Component | Value | Source |
+|-----------|-------|--------|
+| **NVR Location** | Upstairs 9U rack (separate from main rack) | legacy doc |
+| **Camera VLAN** | 192.168.254.0/24 | legacy doc |
+| **NVR IP (VLAN)** | 192.168.254.1 (verify) | legacy doc |
+| **NVR IP (Shop LAN)** | 192.168.12.216 (`nvr-shop`) | Quick Reference above |
+| **Total Cameras** | 12 (4 active, 8 pending power restoration) | legacy doc |
+
+**Camera Inventory (from legacy doc):**
+
+| Camera ID | Location | VLAN IP | Status |
+|-----------|----------|---------|--------|
+| D1 | Bay 8 Back | 192.168.254.2 | Active |
+| D2 | Alley Way | 192.168.254.3 | Active |
+| D3 | Office | 192.168.254.4 | Active |
+| D4 | Front Drive | 192.168.254.5 | Active |
+| D5-D12 | Various | 192.168.254.6-15 | Pending power restoration |
+
+**Secrets:** RTSP URLs, NVR admin credentials, and camera passwords are stored in Infisical at `infrastructure/prod:/spine/shop/nvr/*`. This repo never contains secret values.
 
 ---
 
@@ -242,7 +317,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 | Loop ID | Meaning |
 |--------|---------|
-| `OL_SHOP_BASELINE_FINISH` | Finish remaining on-site inventory: MD1400 cable/drive check, camera location map, AP settings, UPS audit. |
+| `OL_SHOP_BASELINE_FINISH` | Remaining: MD1400 drive inventory (blocked on cold boot), camera physical verification, AP config, N2024P service tag. |
 
 **VERIFIED REMOTELY (2026-02-08):**
 - R730XD: 12x 3.5" LFF front + 2x 2.5" rear flex (from dmesg enclosure slots 0-11)
@@ -255,10 +330,19 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 **BLOCKED (requires cold boot — LOOP-MD1400-SAS-RECOVERY-20260208):**
 - MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-029). Drives invisible until cold boot with persistent module config.
 
-**UNVERIFIED (requires physical audit):**
-- Camera network: Camera count, locations, RTSP endpoints (secrets in Infisical)
+**FILLED FROM LEGACY DOC (2026-02-08):**
+- R730XD: Service tag (HSZZD42), rails (0FYK4G), 2x 750W PSU
+- MD1400: Service tag (HRW2F42), rails (0JRJ9P)
+- UPS: APC Back-UPS Pro 900 (BVN900M1), 900VA/540W, 8 outlets
+- NVR: Upstairs 9U rack, camera VLAN 192.168.254.0/24, 12 cameras (4 active)
+- Rack: Rittal VRIS38S 42U (serial 164115), 2x Cat6 patch panels
+
+**UNVERIFIED (requires physical visit):**
 - WiFi AP (EAP225): Configuration, SSID → `infrastructure/prod:/spine/shop/wifi/*`
-- UPS: Model confirmation, capacity, runtime
+- N2024P: Service tag (check web UI or chassis label)
+- Camera D5-D12: Physical locations, power status
+- NVR model: Exact Hikvision model number
+- UPS USB monitoring: Not connected to any host — consider connecting to pve for `apcupsd`
 
 ---
 
