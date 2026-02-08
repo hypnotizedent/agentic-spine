@@ -1,5 +1,5 @@
 version: 1
-updated: "2026-02-06"
+updated: "2026-02-08"
 owner: "@ronny"
 # ═══════════════════════════════════════════════════════════════════════════
 # Infra Relocation Plan - Transactional VM/Service Move Governance
@@ -19,17 +19,25 @@ owner: "@ronny"
 
 # Current active relocation (one at a time)
 active_relocation:
-  change_id: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
-  state: "complete" # planning | preflight | cutover | cleanup | complete
+  change_id: "LOOP-MEDIA-STACK-SPLIT-20260208"
+  state: "planning" # planning | preflight | cutover | cleanup | complete
   owner: "@ronny"
   approved_by: '@ronny'
-  updated_at: "2026-02-08T00:25:08Z"
+  updated_at: "2026-02-08"
+
+# Previous completed relocation (archived for reference)
+completed_relocations:
+  - change_id: "LOOP-INFRA-VM-RESTRUCTURE-20260206"
+    state: "complete"
+    completed_at: "2026-02-08T00:25:08Z"
+
 # VM targets for this relocation
 vm_targets:
+  # --- Existing VMs (from prior relocation, status=ready) ---
   - vm_id: "204"
     hostname: "infra-core"
     role: "Core infrastructure services (Cloudflared, Pi-hole, Infisical)"
-    tailscale_ip: 100.92.91.128 # Assigned after provisioning
+    tailscale_ip: 100.92.91.128
     proxmox_host: "pve"
     status: "ready"
   - vm_id: "205"
@@ -45,75 +53,259 @@ vm_targets:
     proxmox_host: "pve"
     ci_network_cidr: "192.168.12.206/24,gw=192.168.12.1"
     status: "ready"
+  # --- New VMs for media stack split ---
+  - vm_id: "209"
+    hostname: "download-stack"
+    role: "Download services (SABnzbd, *arr, Tdarr, Recyclarr, CrowdSec)"
+    tailscale_ip: null # Assigned after provisioning
+    proxmox_host: "pve"
+    ci_network_cidr: "192.168.12.209/24,gw=192.168.12.1"
+    status: "planned"
+  - vm_id: "210"
+    hostname: "streaming-stack"
+    role: "Streaming services (Jellyfin, Navidrome, Jellyseerr, Bazarr)"
+    tailscale_ip: null # Assigned after provisioning
+    proxmox_host: "pve"
+    ci_network_cidr: "192.168.12.210/24,gw=192.168.12.1"
+    status: "planned"
+
 # Services to relocate in this plan
 services:
-  # Phase 1: infra-core VM
-  - service: "cloudflared"
-    from_host: "docker-host"
-    to_host: "infra-core"
-    phase: 1
-    health_url: null # No HTTP health, use tunnel status
-    rollback_to: "docker-host"
+  # --- Phase 3: download stack → VM 209 ---
+  - service: "prowlarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: "http://download-stack:9696"
+    rollback_to: "media-stack"
     backup_target: null
-    status: "migrated"
-  - service: "pihole"
-    from_host: "docker-host"
-    to_host: "infra-core"
-    phase: 1
-    health_url: "http://infra-core:80/admin"
-    rollback_to: "docker-host"
-    backup_target: "nas:/volume1/backups/infra/pihole"
-    status: "migrated"
-  - service: "infisical"
-    from_host: "docker-host"
-    to_host: "infra-core"
-    phase: 1
-    health_url: "http://infra-core:8080/api/status"
-    rollback_to: "docker-host"
-    backup_target: "nas:/volume1/backups/infra/infisical"
-    status: "migrated"
-  # Phase 2: vaultwarden migration
-  - service: "vaultwarden"
-    from_host: "proxmox-home"
-    to_host: "infra-core"
-    phase: 2
-    health_url: "http://infra-core:8081/alive"
-    rollback_to: "proxmox-home"
-    backup_target: "nas:/volume1/backups/infra/vaultwarden"
-    status: "migrated"
-  # Phase 4-5: observability VM
-  - service: "prometheus"
-    from_host: null # New deployment
-    to_host: "observability"
+    status: "planned"
+  - service: "flaresolverr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "recyclarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "sabnzbd"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: "http://download-stack:8080"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "qbittorrent"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: "http://download-stack:8081"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "unpackerr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "radarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: "http://download-stack:7878"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "sonarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: "http://download-stack:8989"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "lidarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: "http://download-stack:8686"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "soularr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "swaparr-radarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "swaparr-sonarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "swaparr-lidarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "trailarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: "http://download-stack:7667"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "posterizarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "decypharr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "huntarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "tdarr"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: "http://download-stack:8265"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "autopulse"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "crosswatch"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "crowdsec"
+    from_host: "media-stack"
+    to_host: "download-stack"
+    phase: 3
+    health_url: null
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  # --- Phase 4: streaming stack → VM 210 ---
+  - service: "bazarr"
+    from_host: "media-stack"
+    to_host: "streaming-stack"
     phase: 4
-    health_url: "http://observability:9090/-/healthy"
-    rollback_to: null
+    health_url: "http://streaming-stack:6767"
+    rollback_to: "media-stack"
     backup_target: null
-    status: "migrated"
-  - service: "grafana"
-    from_host: null
-    to_host: "observability"
+    status: "planned"
+  - service: "wizarr"
+    from_host: "media-stack"
+    to_host: "streaming-stack"
     phase: 4
-    health_url: "http://observability:3000/api/health"
-    rollback_to: null
+    health_url: null
+    rollback_to: "media-stack"
     backup_target: null
-    status: "migrated"
-  - service: "loki"
-    from_host: null
-    to_host: "observability"
+    status: "planned"
+  - service: "spotisub"
+    from_host: "media-stack"
+    to_host: "streaming-stack"
     phase: 4
-    health_url: "http://observability:3100/ready"
-    rollback_to: null
+    health_url: null
+    rollback_to: "media-stack"
     backup_target: null
-    status: "migrated"
-  - service: "uptime-kuma"
-    from_host: null
-    to_host: "observability"
-    phase: 5
-    health_url: "http://observability:3001/api/status-page/heartbeat"
-    rollback_to: null
+    status: "planned"
+  - service: "subgen"
+    from_host: "media-stack"
+    to_host: "streaming-stack"
+    phase: 4
+    health_url: null
+    rollback_to: "media-stack"
     backup_target: null
-    status: "migrated"
+    status: "planned"
+  - service: "navidrome"
+    from_host: "media-stack"
+    to_host: "streaming-stack"
+    phase: 4
+    health_url: "http://streaming-stack:4533"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "jellyseerr"
+    from_host: "media-stack"
+    to_host: "streaming-stack"
+    phase: 4
+    health_url: "http://streaming-stack:5055"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "jellyfin"
+    from_host: "media-stack"
+    to_host: "streaming-stack"
+    phase: 4
+    health_url: "http://streaming-stack:8096"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+  - service: "homarr"
+    from_host: "media-stack"
+    to_host: "streaming-stack"
+    phase: 4
+    health_url: "http://streaming-stack:7575"
+    rollback_to: "media-stack"
+    backup_target: null
+    status: "planned"
+
 # SSOT files that MUST be updated when services move
 required_updates:
   - "docs/governance/SERVICE_REGISTRY.yaml"
@@ -122,11 +314,17 @@ required_updates:
   - "ops/bindings/services.health.yaml"
   - "ops/bindings/ssh.targets.yaml"
   - "ops/bindings/backup.inventory.yaml"
+  - "ops/bindings/docker.compose.targets.yaml"
+
 # Temporary exceptions during migration
 exceptions:
-  - label: "split-dns-during-migration"
-    reason: "DNS may resolve to old host during cutover window"
-    expires_at: "2026-02-15T23:59:59Z"
+  - label: "media-stack-vm201-alive-during-split"
+    reason: "VM 201 stays running with containers stopped until soak passes"
+    expires_at: "2026-03-15T23:59:59Z"
+  - label: "cf-tunnel-routes-during-migration"
+    reason: "CF tunnel routes may point to old VM during cutover window"
+    expires_at: "2026-03-01T23:59:59Z"
+
 # Rollback requirements
 rollback:
   max_rollback_window_hours: 24

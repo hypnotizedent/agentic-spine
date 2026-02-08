@@ -1,0 +1,360 @@
+# Download Stack — VM 209 (download-stack)
+# LOOP-MEDIA-STACK-SPLIT-20260208
+#
+# Write-heavy, bursty I/O workloads: downloaders, *arr, transcoding.
+# NFS mounts: /mnt/docker (rw, container configs), /mnt/media (rw, media library)
+# Local DB path: /opt/appdata (ext4, symlinked from NFS config dirs)
+#
+# Secret injection: infisical run --path /spine/vm-infra/media-stack/download -- docker compose up -d
+
+services:
+  # ─── Core Downloaders ────────────────────────────────────────────────
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: sabnzbd
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/sabnzbd/config:/config
+      - /mnt/media/downloads:/downloads
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+      - "6881:6881"
+      - "6881:6881/udp"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+      - WEBUI_PORT=8081
+    volumes:
+      - /mnt/docker/volumes/qbittorrent/config:/config
+      - /mnt/media/downloads:/downloads
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8081"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  unpackerr:
+    image: golift/unpackerr:latest
+    container_name: unpackerr
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/unpackerr/config:/config
+      - /mnt/media/downloads:/downloads
+
+  # ─── Arr Stack ───────────────────────────────────────────────────────
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    restart: unless-stopped
+    ports:
+      - "9696:9696"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/prowlarr/config:/config
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9696/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    restart: unless-stopped
+    ports:
+      - "7878:7878"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/radarr/config:/config
+      - /mnt/media:/media
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:7878/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    restart: unless-stopped
+    ports:
+      - "8989:8989"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/sonarr/config:/config
+      - /mnt/media:/media
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8989/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    restart: unless-stopped
+    ports:
+      - "8686:8686"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/lidarr/config:/config
+      - /mnt/media:/media
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8686/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  recyclarr:
+    image: ghcr.io/recyclarr/recyclarr:latest
+    container_name: recyclarr
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/recyclarr/config:/config
+
+  # ─── Arr Support ─────────────────────────────────────────────────────
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    ports:
+      - "8191:8191"
+    environment:
+      - TZ=America/New_York
+
+  soularr:
+    image: mrusse/soularr:latest
+    container_name: soularr
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/soularr/config:/config
+
+  swaparr-radarr:
+    image: ghcr.io/thijmengthn/swaparr:latest
+    container_name: swaparr-radarr
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+      - BASEURL=http://radarr:7878
+      - APIKEY=${RADARR_API_KEY}
+      - PLATFORM=radarr
+    volumes:
+      - /mnt/docker/volumes/swaparr-radarr/config:/config
+
+  swaparr-sonarr:
+    image: ghcr.io/thijmengthn/swaparr:latest
+    container_name: swaparr-sonarr
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+      - BASEURL=http://sonarr:8989
+      - APIKEY=${SONARR_API_KEY}
+      - PLATFORM=sonarr
+    volumes:
+      - /mnt/docker/volumes/swaparr-sonarr/config:/config
+
+  swaparr-lidarr:
+    image: ghcr.io/thijmengthn/swaparr:latest
+    container_name: swaparr-lidarr
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+      - BASEURL=http://lidarr:8686
+      - APIKEY=${LIDARR_API_KEY}
+      - PLATFORM=lidarr
+    volumes:
+      - /mnt/docker/volumes/swaparr-lidarr/config:/config
+
+  # ─── Media Support ──────────────────────────────────────────────────
+  trailarr:
+    image: nandyalu/trailarr:latest
+    container_name: trailarr
+    restart: unless-stopped
+    ports:
+      - "7667:7667"
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/trailarr/config:/config
+      - /mnt/media:/media
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:7667"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  posterizarr:
+    image: ghcr.io/mtlott/posterizarr:latest
+    container_name: posterizarr
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/posterizarr/config:/config
+      - /mnt/media:/media
+      - /opt/appdata:/opt/appdata
+
+  decypharr:
+    image: ghcr.io/sirk123au/decypharr:latest
+    container_name: decypharr
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+      - REAL_DEBRID_API_KEY=${REAL_DEBRID_API_KEY}
+    volumes:
+      - /mnt/docker/volumes/decypharr/config:/config
+      - /mnt/media/downloads:/downloads
+
+  huntarr:
+    image: ghcr.io/plexusweb/huntarr:latest
+    container_name: huntarr
+    restart: "no"  # Evaluate during soak — may keep stopped
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/huntarr/config:/config
+
+  tdarr:
+    image: ghcr.io/haveagitgat/tdarr:latest
+    container_name: tdarr
+    restart: "no"  # Evaluate during soak — may keep stopped
+    ports:
+      - "8265:8265"
+      - "8266:8266"
+    environment:
+      - TZ=America/New_York
+      - PUID=1000
+      - PGID=1000
+      - serverIP=0.0.0.0
+      - serverPort=8266
+      - webUIPort=8265
+      - internalNode=true
+    volumes:
+      - /mnt/docker/volumes/tdarr/server:/app/server
+      - /mnt/docker/volumes/tdarr/configs:/app/configs
+      - /mnt/docker/volumes/tdarr/logs:/app/logs
+      - /mnt/media:/media
+      - /tmp/tdarr_transcode:/temp
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8265"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ─── Cross-VM Services ──────────────────────────────────────────────
+  # autopulse + crosswatch call Jellyfin API on VM 210 via Tailscale IP.
+  # Update JELLYFIN_URL after VM 210 gets its Tailscale IP assigned.
+  autopulse:
+    image: ghcr.io/autopulse/autopulse:latest
+    container_name: autopulse
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+      - AUTOPULSE_PASSWORD=${AUTOPULSE_PASSWORD}
+    volumes:
+      - /mnt/docker/volumes/autopulse/config:/config
+
+  crosswatch:
+    image: ghcr.io/crosswatch-app/crosswatch:latest
+    container_name: crosswatch
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/crosswatch/config:/config
+
+  # ─── Security ───────────────────────────────────────────────────────
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/crowdsec/config:/etc/crowdsec
+      - /mnt/docker/volumes/crowdsec/data:/var/lib/crowdsec/data
+      - /var/log:/var/log:ro
+
+  # ─── Infrastructure ─────────────────────────────────────────────────
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_SCHEDULE=0 0 4 * * *
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

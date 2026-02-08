@@ -1,0 +1,180 @@
+# Streaming Stack — VM 210 (streaming-stack)
+# LOOP-MEDIA-STACK-SPLIT-20260208
+#
+# Read-heavy, latency-sensitive workloads: video/music streaming, subtitles.
+# NFS mounts: /mnt/docker (rw, container configs), /mnt/media (ro, media library)
+# Local DB path: /opt/appdata (ext4, symlinked from NFS config dirs)
+#
+# Secret injection: infisical run --path /spine/vm-infra/media-stack/streaming -- docker compose up -d
+
+services:
+  # ─── Core Streaming ─────────────────────────────────────────────────
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    restart: unless-stopped
+    ports:
+      - "8096:8096"
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/jellyfin/config:/config
+      - /mnt/docker/volumes/jellyfin/cache:/cache
+      - /mnt/media:/media:ro
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8096/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    environment:
+      - TZ=America/New_York
+      - ND_SCANSCHEDULE=1h
+      - ND_LOGLEVEL=info
+      - ND_BASEURL=
+    volumes:
+      - /mnt/docker/volumes/navidrome/data:/data
+      - /mnt/media/music:/music:ro
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:4533/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    restart: unless-stopped
+    ports:
+      - "5055:5055"
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/jellyseerr/config:/app/config
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:5055"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ─── Support Services ───────────────────────────────────────────────
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    restart: unless-stopped
+    ports:
+      - "6767:6767"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/bazarr/config:/config
+      - /mnt/media:/media:ro
+      - /opt/appdata:/opt/appdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:6767/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  wizarr:
+    image: ghcr.io/wizarrrr/wizarr:latest
+    container_name: wizarr
+    restart: unless-stopped
+    ports:
+      - "5690:5690"
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/wizarr/data:/data/database
+
+  spotisub:
+    image: blastbeng/spotisub:latest
+    container_name: spotisub
+    restart: unless-stopped
+    ports:
+      - "8766:8766"
+    environment:
+      - TZ=America/New_York
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - LASTFM_API_KEY=${LASTFM_API_KEY}
+      - LASTFM_SECRET=${LASTFM_SECRET}
+    volumes:
+      - /mnt/docker/volumes/spotisub/config:/config
+
+  subgen:
+    image: mccloud/subgen:latest
+    container_name: subgen
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/subgen/config:/config
+      - /mnt/media:/media:ro
+
+  homarr:
+    image: ghcr.io/homarr-labs/homarr:latest
+    container_name: homarr
+    restart: unless-stopped
+    ports:
+      - "7575:7575"
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/docker/volumes/homarr/config:/app/data/configs
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:7575"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ─── Infrastructure ─────────────────────────────────────────────────
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_SCHEDULE=0 0 4 * * *
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
