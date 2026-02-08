@@ -28,7 +28,7 @@ parent_receipts:
 |----------|-----------------|--------|--------------------------|
 | Proxmox host | `pve` | `ssh pve` or `https://pve:8006` | `infrastructure/prod:/spine/shop/pve/*` |
 | iDRAC | `idrac-shop` | `https://192.168.12.250` | `infrastructure/prod:/spine/shop/idrac/*` |
-| Switch | `switch-shop` (Dell N2024P) | `http://192.168.12.1` | `infrastructure/prod:/spine/shop/switch/*` |
+| Switch | `switch-shop` (Dell N2024P) | `http://192.168.12.2` or `ssh admin@192.168.12.2` | `infrastructure/prod:/spine/shop/switch/*` |
 | NVR | `nvr-shop` | `http://192.168.12.216` | `infrastructure/prod:/spine/shop/nvr/*` |
 | WiFi AP | `ap-shop` (EAP225) | `http://192.168.12.249` | `infrastructure/prod:/spine/shop/wifi/*` |
 
@@ -57,9 +57,9 @@ Notes:
 |-----------|---------------------|---------------|-------|
 | Dell PowerEdge R730XD | HSZZD42 | U17-18 | Main production server |
 | Dell MD1400 DAS | HRW2F42 | U14-16 | Direct Attached Storage |
-| Dell Networking N2024P | TBD | U39 | 24-port PoE+ switch |
+| Dell Networking N2024P | — (MAC: F8:B1:56:73:A0:D0) | U39 | 24-port PoE+ switch |
 | APC Back-UPS Pro 900 | BVN900M1 | Floor | 900VA UPS |
-| Hikvision NVR | TBD | Upstairs 9U rack (separate) | Camera recorder |
+| Hikvision ERI-K216-P16 | ERI-K216-P161620220307CCRRJ54340404WCVU | Upstairs 9U rack (separate) | 16-channel PoE NVR |
 | TP-Link EAP225 | TBD | — | WiFi AP |
 
 ### Rack Inventory
@@ -68,9 +68,9 @@ Notes:
 |----------|-------|------|----------|
 | Server | Dell PowerEdge R730XD (12-bay LFF) | Shop hypervisor (`pve`) | 2026-02-08 |
 | DAS | Dell MD1400 | Bulk storage shelf (cabled, driver blocked — GAP-OP-029) | 2026-02-08 |
-| Switch | Dell N2024P | Shop LAN switching / PoE (24-port, 190W PoE budget) | verified |
+| Switch | Dell N2024P | Shop LAN switching / PoE (24-port, 190W PoE budget) | 2026-02-05 |
 | UPS | APC Back-UPS Pro 900 | 900VA / 540W, ~10-15 min runtime at full load | 2026-02-08 |
-| NVR | Hikvision (model TBD) | Camera recorder (upstairs 9U rack, separate from main) | partial |
+| NVR | Hikvision ERI-K216-P16 | 16-channel PoE NVR (upstairs 9U rack, separate from main) | 2026-02-05 |
 | WiFi AP | TP-Link EAP225 | Shop WiFi | partial |
 
 ### R730XD Hardware Specifications
@@ -219,29 +219,50 @@ All exports use `sync,no_subtree_check,no_root_squash` over Tailscale IPs. strea
 | Item | Value |
 |------|-------|
 | Subnet | `192.168.12.0/24` |
-| Gateway | `192.168.12.1` (`switch-shop` / Dell N2024P) |
+| Gateway | `192.168.12.1` (T-Mobile gateway) |
+| Switch | `192.168.12.2` (Dell N2024P, VLAN 1 management) |
+
+### Switch Port Assignments (Dell N2024P)
+
+| Port | Device | MAC | IP | Status |
+|------|--------|-----|-----|--------|
+| Gi1/0/1 | T-Mobile Router (uplink) | — | 192.168.12.1 | UP @ 1Gbps |
+| Gi1/0/2 | R730XD (PVE, vmbr0) | 44:A8:42:22:2C:A6 | 192.168.12.184 | UP @ 1Gbps |
+| Gi1/0/3 | R730XD (iDRAC) | 44:A8:42:26:C3:11 | 192.168.12.250 | UP @ 1Gbps |
+| Gi1/0/4 | NVR (Hikvision ERI-K216-P16) | 24:0F:9B:30:F1:E7 | 192.168.12.216 | UP @ 1Gbps |
+| Gi1/0/5-23 | Available | — | — | Down |
+| Gi1/0/24 | TP-Link EAP225 (WiFi AP) | 54:AF:97:2F:C6:6E | 192.168.12.249 | UP @ 1Gbps |
+| Te1/0/1-2 | 10G SFP+ (unused) | — | — | Down |
 
 ### Camera Network
 
-Cameras are on an isolated VLAN (`192.168.254.0/24`), separate from the shop LAN.
+Cameras are on the NVR's internal PoE network (`192.168.254.0/24`), fed by a Netgear PoE switch connected to the NVR's PoE ports. Separate from the shop LAN.
 
 | Component | Value |
 |-----------|-------|
+| **NVR** | Hikvision ERI-K216-P16 (16-channel, FW V4.30.216) |
 | **NVR Location** | Upstairs 9U rack (separate from main rack) |
-| **Camera VLAN** | 192.168.254.0/24 |
-| **NVR IP (VLAN)** | 192.168.254.1 (verify) |
+| **Camera VLAN** | 192.168.254.0/24 (NVR internal) |
 | **NVR IP (Shop LAN)** | 192.168.12.216 (`nvr-shop`) |
-| **Total Cameras** | 12 (4 active, 8 pending power restoration) |
+| **Camera Switch** | Netgear PoE switch (uplink to NVR PoE ports) |
+| **Total Channels** | 16 (12 configured, 9 online, 3 offline) |
 
-**Camera Inventory:**
+**Camera Channel Map (from NVR, verified 2026-02-05):**
 
-| Camera ID | Location | VLAN IP | Status |
-|-----------|----------|---------|--------|
-| D1 | Bay 8 Back | 192.168.254.2 | Active |
-| D2 | Alley Way | 192.168.254.3 | Active |
-| D3 | Office | 192.168.254.4 | Active |
-| D4 | Front Drive | 192.168.254.5 | Active |
-| D5-D12 | Various | 192.168.254.6-15 | Pending power restoration |
+| Channel | Internal IP | Status |
+|---------|-------------|--------|
+| 1 | 192.168.254.9 | Online |
+| 2 | 192.168.254.3 | Offline |
+| 3 | 192.168.254.4 | Offline |
+| 4 | 192.168.254.7 | Offline |
+| 5 | 192.168.254.7 | Offline |
+| 6 | 192.168.254.16 | Online |
+| 7 | 192.168.254.12 | Online |
+| 8 | 192.168.254.10 | Online |
+| 9 | 192.168.254.6 | Online |
+| 10 | 192.168.254.17 | Online |
+| 11 | 192.168.254.13 | Online |
+| 12 | 192.168.254.8 | Online |
 
 **Secrets:** RTSP URLs, NVR admin credentials, and camera passwords are stored in Infisical at `infrastructure/prod:/spine/shop/nvr/*`. This repo never contains secret values.
 
@@ -313,7 +334,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 | Loop ID | Meaning |
 |--------|---------|
-| `OL_SHOP_BASELINE_FINISH` | Remaining: MD1400 drive inventory (blocked on cold boot), camera physical verification, AP config, N2024P service tag. |
+| `OL_SHOP_BASELINE_FINISH` | Remaining: MD1400 drive inventory (blocked on cold boot), AP WiFi config, N2024P service tag. |
 
 **VERIFIED REMOTELY (2026-02-08):**
 - R730XD: 12x 3.5" LFF front + 2x 2.5" rear flex (from dmesg enclosure slots 0-11)
@@ -322,15 +343,18 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 - R730XD NICs: 4x 1GbE, only eno1 active
 - Tank drive serials: Z1Z86298, Z1Z85V4W, Z1Z84YNR, Z1Z85V47, Z1Z862H5, Z1Z8629N, Z1Z85TFE, Z1Z861ZN
 - PM8072 second SAS controller present but no driver/no drives visible
+- NVR: Hikvision ERI-K216-P16, 16 channels, 9 online / 3 offline (from receipt 2026-02-05)
+- Switch: Dell N2024P at 192.168.12.2 (corrected from .1 — .1 is T-Mobile gateway)
+- Camera channel map: 12 channels configured on NVR internal 192.168.254.0/24 via Netgear PoE switch
+- Tailscale subnet routing: pve now advertises 192.168.12.0/24 (ip_forward persisted)
 
 **BLOCKED (requires cold boot — LOOP-MD1400-SAS-RECOVERY-20260208):**
 - MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-029). Drives invisible until cold boot with persistent module config.
 
-**UNVERIFIED (requires physical visit):**
-- WiFi AP (EAP225): Configuration, SSID → `infrastructure/prod:/spine/shop/wifi/*`
-- N2024P: Service tag (check web UI or chassis label)
-- Camera D5-D12: Physical locations, power status
-- NVR model: Exact Hikvision model number
+**UNVERIFIED (requires physical visit or remote login):**
+- WiFi AP (EAP225): Configuration, SSID → `infrastructure/prod:/spine/shop/wifi/*` (web UI at .249 now reachable — needs creds)
+- N2024P: Service tag (check chassis label — not exposed via web UI or CLI)
+- Camera physical locations: NVR channels mapped but no physical location labels for channels 6-12
 - UPS USB monitoring: Not connected to any host — consider connecting to pve for `apcupsd`
 
 ---
@@ -343,7 +367,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 ## Open Network Tasks (shop)
 
-- [ ] **DHCP DNS cutover — BLOCKED on UDR installation**: T-Mobile gateway (GAR4) is fully locked down (no DHCP control). Plan: insert UDR (Ubiquiti Dream Router, on-hand) between T-Mobile and switch, re-IP shop LAN to new subnet (e.g. 10.12.1.0/24), UDR owns DHCP with DNS→Pi-hole (infra-core). Requires re-IP of pve (.184), iDRAC (.250), all VMs, and all bindings. Pre-stage config changes before cutover. Currently only 2 DHCP clients (docker-host VM 200, media-stack VM 201) — all other devices use static IPs.
+- [ ] **DHCP DNS cutover — BLOCKED on UDR installation**: T-Mobile gateway at 192.168.12.1 is fully locked down (no DHCP control). Plan: insert UDR (Ubiquiti Dream Router, on-hand) between T-Mobile and switch, re-IP shop LAN to new subnet (e.g. 10.12.1.0/24), UDR owns DHCP with DNS→Pi-hole (infra-core). Requires re-IP of pve (.184), iDRAC (.250), switch (.2), all VMs, and all bindings. Pre-stage config changes before cutover. Currently only 2 DHCP clients (docker-host VM 200, media-stack VM 201) — all other devices use static IPs.
 - [ ] **vzdump backup gap**: Add VMs 205, 206, 207, 209, 210 to the vzdump backup job (`/etc/pve/jobs.cfg`).
 
 ---
