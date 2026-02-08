@@ -101,7 +101,11 @@ disk_gb="$(yq e ".profiles.\"$PROFILE\".provisioning.disk_gb // 32" "$PROFILES")
 bridge="$(yq e ".profiles.\"$PROFILE\".provisioning.bridge // .defaults.bridge // \"vmbr0\"" "$PROFILES")"
 storage="$(yq e ".profiles.\"$PROFILE\".provisioning.storage // .defaults.storage // \"local-lvm\"" "$PROFILES")"
 ci_user="$(yq e ".profiles.\"$PROFILE\".provisioning.ci_user // .defaults.ci_user // \"ubuntu\"" "$PROFILES")"
-ci_network_cidr="$(yq e ".profiles.\"$PROFILE\".provisioning.ci_network_cidr // .defaults.ci_network_cidr // \"dhcp\"" "$PROFILES")"
+# Prefer per-target ci_network_cidr from manifest, fall back to profile/defaults
+ci_network_cidr="$(yq e ".vm_targets[] | select(.hostname == \"$TARGET\") | .ci_network_cidr // \"\"" "$MANIFEST" 2>/dev/null || echo "")"
+if [[ -z "$ci_network_cidr" || "$ci_network_cidr" == "null" ]]; then
+    ci_network_cidr="$(yq e ".profiles.\"$PROFILE\".provisioning.ci_network_cidr // .defaults.ci_network_cidr // \"dhcp\"" "$PROFILES")"
+fi
 nameserver="$(yq e ".profiles.\"$PROFILE\".provisioning.nameserver // .defaults.nameserver // \"\"" "$PROFILES")"
 search_domain="$(yq e ".profiles.\"$PROFILE\".provisioning.search_domain // .defaults.search_domain // \"\"" "$PROFILES")"
 qemu_agent="$(yq e ".profiles.\"$PROFILE\".provisioning.qemu_agent // true" "$PROFILES")"

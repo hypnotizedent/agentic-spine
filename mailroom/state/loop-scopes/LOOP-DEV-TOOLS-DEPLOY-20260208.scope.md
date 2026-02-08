@@ -1,7 +1,7 @@
 # LOOP-DEV-TOOLS-DEPLOY-20260208
 
-> **Status:** open
-> **Blocked By:** LOOP-OBSERVABILITY-DEPLOY-20260208
+> **Status:** open (P0 complete)
+> **Blocked By:** none (unblocked 2026-02-08)
 > **Owner:** @ronny
 > **Created:** 2026-02-08
 > **Severity:** medium
