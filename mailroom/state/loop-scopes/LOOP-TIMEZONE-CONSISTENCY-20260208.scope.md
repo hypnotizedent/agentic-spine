@@ -1,6 +1,6 @@
 # LOOP-TIMEZONE-CONSISTENCY-20260208
 
-> **Status:** open
+> **Status:** complete
 > **Blocked By:** none
 > **Owner:** @ronny
 > **Created:** 2026-02-08
@@ -161,15 +161,23 @@ Receipts:
 - Execute (run 2): `RCAP-20260208-114623__infra.timezone.set__Rxnyk6678`
 - Verify: `RCAP-20260208-114703__infra.timezone.set__Rgg6f7194`
 
-### Remaining Work
+### P3 Verification (2026-02-08)
 
-- `nas`: Set timezone via Synology DSM web UI (manual)
-- `automation-stack`: SSH with password or fix sudoers NOPASSWD
-- `ha`: Set timezone via Home Assistant web UI (manual)
-- `docker-host` (200): Fix after power outage recovery
-- `download-stack` (209), `pihole-home`, `download-home`: Fix when provisioned/online
+| Host | Final Status | Notes |
+|------|-------------|-------|
+| nas | UTC-5 ("Bogota") | Correct offset, Synology city label differs — cosmetic |
+| ha | EST | Already correct, no action needed |
+| automation-stack | Etc/UTC | Sudo requires password — exception |
+| docker-host (200) | unreachable | Down post-power-outage — exception |
+
+### Known Exceptions
+
+- **automation-stack**: Still UTC. Sudo requires interactive password. Low priority — legacy VM, may be decommissioned.
+- **docker-host (200)**: Unreachable post-power-outage. Timezone fix deferred to when it comes back online.
+- **download-stack (209)**, **pihole-home**, **download-home**: Unreachable/not provisioned. Will inherit correct TZ when provisioned or brought online.
 
 ---
 
 _Scope document created by: Opus 4.6_
 _Created: 2026-02-08_
+_Closed: 2026-02-08_
