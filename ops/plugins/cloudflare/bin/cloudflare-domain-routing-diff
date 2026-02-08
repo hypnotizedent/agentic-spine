@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.domain_routing.diff — diff Cloudflare tunnel ingress hostnames vs DOMAIN_ROUTING_REGISTRY
+# Read-only. Exits non-zero on diff (audit/gate friendly).
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+REGISTRY_FILE="$ROOT/docs/governance/DOMAIN_ROUTING_REGISTRY.yaml"
+
+TUNNEL_NAME_DEFAULT="homelab-tunnel"
+TUNNEL_NAME="${TUNNEL_NAME_DEFAULT}"
+
+usage() {
+  cat <<'EOF'
+cloudflare-domain-routing-diff
+
+Usage:
+  cloudflare-domain-routing-diff              # default tunnel (homelab-tunnel)
+  cloudflare-domain-routing-diff --tunnel NAME
+
+Behavior:
+  - Fetch tunnel ingress hostnames from Cloudflare API
+  - Extract registry hostnames where routing_layer == cloudflare_tunnel
+  - Print missing/extra hostnames
+  - Exit 1 if any diffs exist
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tunnel)
+      [[ $# -ge 2 ]] || { echo "STOP: --tunnel requires NAME" >&2; exit 2; }
+      TUNNEL_NAME="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "STOP: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$REGISTRY_FILE" ]] || { echo "STOP: missing registry: $REGISTRY_FILE" >&2; exit 2; }
+command -v yq >/dev/null 2>&1 || { echo "STOP: missing dependency: yq" >&2; exit 2; }
+
+# Re-exec ourselves under secrets injection (single capability receipt; no nested caps)
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+
+[[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || { echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2; exit 2; }
+[[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || { echo "STOP: CLOUDFLARE_ACCOUNT_ID missing" >&2; exit 2; }
+
+TUNNEL_ID="${CLOUDFLARE_TUNNEL_ID:-}"
+if [[ -z "${TUNNEL_ID:-}" ]]; then
+  [[ -f "$BINDING_FILE" ]] || { echo "STOP: binding missing: $BINDING_FILE" >&2; exit 2; }
+  TUNNEL_ID="$(python3 - "$BINDING_FILE" "$TUNNEL_NAME" <<'PY'
+import json, sys
+path = sys.argv[1]
+name = sys.argv[2]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+tunnels = data.get("tunnels", []) or []
+for t in tunnels:
+    if (t.get("name") or "").strip() == name:
+        tid = (t.get("id") or "").strip()
+        if tid:
+            print(tid)
+            sys.exit(0)
+print("")
+sys.exit(0)
+PY
+)"
+fi
+
+[[ -n "${TUNNEL_ID:-}" ]] || { echo "STOP: tunnel id not found (env CLOUDFLARE_TUNNEL_ID unset; binding missing name '$TUNNEL_NAME')" >&2; exit 2; }
+
+URL="${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations"
+TMP_CF="$(mktemp)"
+TMP_REG="$(mktemp)"
+trap 'rm -f "$TMP_CF" "$TMP_REG" 2>/dev/null || true' EXIT
+
+curl -fsS \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "$URL" \
+  | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+if not data.get("success", False):
+    sys.exit(2)
+result = data.get("result") or {}
+cfg = result.get("config") or result.get("configuration") or result
+ingress = cfg.get("ingress") or []
+
+hostnames = set()
+for rule in ingress:
+    if not isinstance(rule, dict):
+        continue
+    hn = rule.get("hostname")
+    hns = rule.get("hostnames")
+    if isinstance(hn, str) and hn.strip():
+        hostnames.add(hn.strip())
+    elif isinstance(hns, list):
+        for h in hns:
+            if isinstance(h, str) and h.strip():
+                hostnames.add(h.strip())
+for h in sorted(hostnames):
+    print(h)
+' >"$TMP_CF"
+
+yq -r '.zones[].hostnames[] | select(.routing_layer == "cloudflare_tunnel") | .hostname' "$REGISTRY_FILE" \
+  | sort -u >"$TMP_REG"
+sort -u -o "$TMP_CF" "$TMP_CF"
+
+missing_in_tunnel="$(comm -23 "$TMP_REG" "$TMP_CF" || true)"
+extra_in_tunnel="$(comm -13 "$TMP_REG" "$TMP_CF" || true)"
+
+echo "cloudflare.domain_routing.diff"
+echo "tunnel: $TUNNEL_NAME"
+echo "registry: $REGISTRY_FILE"
+echo "registry_hostnames: $(wc -l <"$TMP_REG" | tr -d ' ')"
+echo "tunnel_hostnames: $(wc -l <"$TMP_CF" | tr -d ' ')"
+echo
+
+status=0
+if [[ -n "${missing_in_tunnel:-}" ]]; then
+  echo "MISSING_IN_TUNNEL:"
+  echo "$missing_in_tunnel" | awk '{print "- "$0}'
+  echo
+  status=1
+fi
+
+if [[ -n "${extra_in_tunnel:-}" ]]; then
+  echo "EXTRA_IN_TUNNEL:"
+  echo "$extra_in_tunnel" | awk '{print "- "$0}'
+  echo
+  status=1
+fi
+
+if [[ "$status" -eq 0 ]]; then
+  echo "status: OK (no diffs)"
+  exit 0
+fi
+
+echo "status: FAIL (diffs detected)"
+exit 1
