@@ -142,6 +142,7 @@ DNSStubListener=no
 | `ops/bindings/infra.vm.profiles.yaml` | VM provisioning profiles |
 | `ops/bindings/operational.gaps.yaml` | Gaps discovered during this work |
 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | VM identity and IPs |
+| `docs/brain/lessons/MEDIA_STACK_LESSONS.md` | NFS + SQLite anti-pattern, symlink migration |
 
 ---
 

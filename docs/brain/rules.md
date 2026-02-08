@@ -34,3 +34,4 @@ Code changes, git commits, database writes, deploys, docker restarts.
 | Services | docs/governance/SERVICE_REGISTRY.yaml |
 | Remote paths | ops/bindings/docker.compose.targets.yaml, ops/bindings/ssh.targets.yaml |
 | CLI tools | ops/bindings/cli.tools.inventory.yaml |
+| Media stack / NFS | docs/brain/lessons/MEDIA_STACK_LESSONS.md |

@@ -9,7 +9,7 @@
 # Last verified: 2026-02-07
 
 version: 1
-updated: "2026-02-08T00:16Z"
+updated: "2026-02-08T03:00Z"
 
 gaps:
   # ─────────────────────────────────────────────────────────────
@@ -348,6 +348,92 @@ gaps:
     notes: |
       Fixed: added `0 4 * * 0 zpool scrub media` to pve crontab via SSH.
       Runs Sundays at 4am, offset from tank scrub (3am).
+
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during LOOP-MEDIA-STACK-RCA-20260205 / ARCH-20260208
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-021
+    discovered_by: "LOOP-MEDIA-STACK-RCA-20260205"
+    discovered_at: "2026-02-07"
+    type: agent-behavior
+    doc: "ops/staged/MEDIA_RCA_DECISION_NOTE.md"
+    description: |
+      RCA decision note stated /opt/appdata/*.db files were "stale copies, not
+      actively used." In reality these were active symlink targets created Dec 23,
+      serving all 5 main databases. An agent following the decision note would have
+      assumed the entire database layer was on NFS and may have attempted redundant
+      or harmful migrations. The inaccuracy persisted for 2 days before correction.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-MEDIA-STACK-ARCH-20260208"
+    notes: |
+      Root cause: initial RCA SSH session saw files at /opt/appdata/ and assumed
+      copies without checking symlink state (ls -la vs ls -l). Fixed: decision note
+      corrected. Lesson: always use `ls -la` or `file` command to distinguish
+      symlinks from regular files during NFS topology discovery.
+
+  - id: GAP-OP-022
+    discovered_by: "LOOP-MEDIA-STACK-ARCH-20260208"
+    discovered_at: "2026-02-08"
+    type: agent-behavior
+    doc: null
+    description: |
+      Phase A symlink migration broke trailarr and posterizarr because their
+      compose services lacked the /opt/appdata:/opt/appdata bind mount that
+      radarr/sonarr/lidarr/prowlarr/jellyfin already had (Dec 23 setup).
+      The playbook did not include a pre-check for container mount visibility.
+      Failure mode: sqlite3.OperationalError with no mention of symlinks,
+      making diagnosis non-obvious.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-MEDIA-STACK-ARCH-20260208"
+    notes: |
+      Fixed: added /opt/appdata:/opt/appdata volume to trailarr and posterizarr
+      in docker-compose.yml on media-stack, containers recreated via compose up -d.
+      Lesson codified in docs/brain/lessons/MEDIA_STACK_LESSONS.md.
+      Future mitigation: any symlink migration playbook MUST include a
+      pre-flight step: `docker inspect <service> --format '{{range .Mounts}}...'`
+      to verify the symlink target path is visible inside the container.
+
+  - id: GAP-OP-023
+    discovered_by: "LOOP-MEDIA-STACK-ARCH-20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "ops/staged/MEDIA_STACK_ARCH_PHASE_A_PLAYBOOK_20260207.md"
+    description: |
+      Phase A playbook listed 5 target services but missed sonarr logs.db (2.2MB,
+      constant writes) which was also on NFS. The playbook was written from the
+      ARCH scope doc which only listed "databases STILL on NFS" but omitted logs.db
+      files for services whose main .db was already symlinked. Discovery chain:
+      scope doc partial → playbook incomplete → extra target found during execution.
+    severity: low
+    status: fixed
+    fixed_in: "LOOP-MEDIA-STACK-ARCH-20260208"
+    notes: |
+      sonarr logs.db migrated during Phase A execution. Lesson: when scoping
+      NFS-to-local migrations, enumerate ALL .db files per service (not just the
+      main database). Use: find /mnt/docker/volumes/<service> -name '*.db' -type f
+
+  - id: GAP-OP-024
+    discovered_by: "LOOP-MEDIA-STACK-ARCH-20260208"
+    discovered_at: "2026-02-08"
+    type: agent-behavior
+    doc: "ops/staged/MEDIA_STACK_ARCH_PHASE_A_PLAYBOOK_20260207.md"
+    description: |
+      Phase A playbook listed introskipper.db path as
+      /mnt/docker/volumes/jellyfin/config/data/introskipper.db but actual path was
+      /mnt/docker/volumes/jellyfin/config/data/introskipper/introskipper.db (extra
+      directory level). Path was assumed from scope doc without SSH verification.
+      Similarly, trailarr had a logs/logs.db not mentioned in the playbook.
+    severity: low
+    status: fixed
+    fixed_in: "LOOP-MEDIA-STACK-ARCH-20260208"
+    notes: |
+      Correct paths discovered via `find` during execution. Lesson: playbooks for
+      remote file operations MUST include a preflight `find` or `ls -la` step to
+      confirm actual paths before mutation. Never trust doc-assumed paths for
+      file-level operations.
 
   - id: GAP-OP-016
     discovered_by: "OL_HOME_BASELINE_FINISH"
