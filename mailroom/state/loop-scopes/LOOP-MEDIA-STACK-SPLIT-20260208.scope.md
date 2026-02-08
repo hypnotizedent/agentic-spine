@@ -98,15 +98,15 @@ Compose uses `infisical run -- docker compose up -d` or generates `.env` via sys
 
 ## Phases
 
-| Phase | Scope | Dependency |
-|-------|-------|------------|
-| P0 | Governance + secrets setup (placement, relocation, compose, SSOT) | None |
-| P1 | Provision VM 209 + VM 210 | P0 |
-| P2 | Prepare NFS + local storage | P1 |
-| P3 | Migrate download stack to VM 209 | P2 |
-| P4 | Migrate streaming stack to VM 210 | P3 |
-| P5 | Update routing + SSOT (CF tunnel, bindings) | P4 |
-| P6 | Soak (72h) + decommission VM 201 | P5 |
+| Phase | Scope | Dependency | Status |
+|-------|-------|------------|--------|
+| P0 | Governance + secrets setup (placement, relocation, compose, SSOT) | None | DONE |
+| P1 | Provision VM 209 + VM 210 | P0 | DONE |
+| P2 | Prepare NFS + local storage | P1 | DONE |
+| P3 | Migrate download stack to VM 209 | P2 | DONE — 24/24 healthy |
+| P4 | Migrate streaming stack to VM 210 | P3 | DONE — 10/10 containers, spotisub reachable via CF tunnel (OAuth re-auth pending) |
+| P5 | Update routing + SSOT (CF tunnel, bindings) | P4 | DONE — CF tunnel v82, all SSOT updated |
+| P6 | Soak (72h) + decommission VM 201 | P5 | IN PROGRESS — soak started 2026-02-08 |
 
 ---
 
@@ -139,6 +139,7 @@ Stop on 201 → verify data on 210 → compose up → healthcheck → test playb
 | jellyfin.ronny.works | VM 201:8096 | VM 210:8096 |
 | requests.ronny.works | VM 201:5055 | VM 210:5055 |
 | music.ronny.works | VM 201:4533 | VM 210:4533 |
+| spotisub.ronny.works | _(none — new)_ | VM 210:8766 |
 
 ---
 
@@ -178,14 +179,57 @@ Stop on 201 → verify data on 210 → compose up → healthcheck → test playb
 
 ---
 
+## Related Loops
+
+| Loop | Relationship | Status |
+|------|-------------|--------|
+| LOOP-MEDIA-STACK-ARCH-20260208 | Prerequisite — SQLite off NFS, boot ordering | Closed |
+| LOOP-MEDIA-STACK-RCA-20260205 | Root cause analysis — daily crashes | Closed |
+| **LOOP-MEDIA-AGENT-WORKBENCH-20260208** | **Follow-on — media domain agent for application-layer governance** | **Open (P0 done)** |
+
+The media agent loop was spawned from this split work. During P6 soak, "The Beach House" was found in Jellyfin with non-English audio — exposing that no agent governs language profiles, quality settings, or media service configuration. The split gave us the infrastructure (2 VMs, clean deployment); the media agent gives us application-layer control.
+
+Agent discovery governance (D49 drift gate, `agents.registry.yaml`, `generate-context.sh` injection) was built as a prerequisite. The media-agent is the first domain agent registered in the spine. See `ops/agents/media-agent.contract.md` for the ownership boundary.
+
 ## Evidence
 
 - LOOP-MEDIA-STACK-ARCH-20260208 (prerequisite — closed)
 - LOOP-MEDIA-STACK-RCA-20260205 (root cause analysis — closed)
+- LOOP-MEDIA-AGENT-WORKBENCH-20260208 (follow-on — open)
 - docs/brain/lessons/MEDIA_STACK_LESSONS.md (operational lessons)
+- ops/agents/media-agent.contract.md (agent ownership contract)
+- ops/bindings/agents.registry.yaml (agent discovery registry)
+
+---
+
+## Phase Completion Notes
+
+### P3 — Download Stack (2026-02-08)
+- 24 containers running on VM 209, all healthy
+- NFS fstab corrected: Tailscale IP → LAN IP (192.168.12.184) after D-state deadlock incident
+- watchtower fix: `DOCKER_API_VERSION=1.45` (Docker CE 29.x)
+- trailarr fix: internal port 7889 (not 7667), healthcheck accepts 401 as healthy
+- VM 201 download services STOPPED
+
+### P4 — Streaming Stack (2026-02-08)
+- 9/10 containers running on VM 210, all healthy except spotisub
+- spotisub: initially crash-looping (Spotify OAuth expired). CF tunnel ingress + DNS CNAME added 2026-02-08 for `spotisub.ronny.works`. Spotify OAuth re-auth now available at `https://spotisub.ronny.works/`
+- homarr: uses `ghcr.io/ajnart/homarr:latest` (v1, not v2 — config format incompatible)
+- navidrome/jellyseerr/homarr: healthchecks use wget (no curl in containers)
+- jellyseerr: needs web UI reconfiguration for radarr/sonarr/jellyfin API URLs (old VM 201 refs)
+- VM 201 streaming services STOPPED — zero running containers on VM 201
+
+### P5 — Routing + SSOT (2026-02-08)
+- CF tunnel v82: jellyfin/requests/music .ronny.works → VM 210 (100.123.207.64)
+- External URL verification: jellyfin 200, requests 307 (login redirect), music 200
+- STACK_REGISTRY: download-stack + streaming-stack status → `active`
+- SERVICE_REGISTRY: verified date → 2026-02-08
+- SSH targets: download-stack restored to Tailscale IP (100.107.36.76)
+- services.health: jellyseerr expect → 307
+- **spotisub.ronny.works (added 2026-02-08):** CF tunnel ingress rule (`PUT /configurations`) + DNS CNAME (`ae7d4462...cfargotunnel.com`, proxied) created via API. Verified: HTTP 302 → `/login` through tunnel. `domain_routing.diff` OK (39/39). DOMAIN_ROUTING_REGISTRY note updated to "Active".
 
 ---
 
 _Scope document created by: Opus 4.6_
 _Created: 2026-02-08_
-_Updated: 2026-02-08 (plan alignment — unblocked, refined container lists)_
+_Updated: 2026-02-08 (P3-P5 complete, soak period started, spotisub tunnel+DNS added)_
