@@ -244,24 +244,25 @@ Cameras are on the NVR's internal PoE network (`192.168.254.0/24`), fed by a Net
 | **Camera VLAN** | 192.168.254.0/24 (NVR internal) |
 | **NVR IP (Shop LAN)** | 192.168.12.216 (`nvr-shop`) |
 | **Camera Switch** | Netgear PoE switch (uplink to NVR PoE ports) |
-| **Total Channels** | 16 (12 configured, 9 online, 3 offline) |
+| **Total Channels** | 16 (12 configured, 8 online, 3 offline, 1 IP conflict) |
+| **Storage** | 1x 4TB SATA HDD (status=ok, full, overwrite/quota mode) |
 
-**Camera Channel Map (from NVR, verified 2026-02-05):**
+**Camera Channel Map (live ISAPI query, 2026-02-08):**
 
-| Channel | Internal IP | Status |
-|---------|-------------|--------|
-| 1 | 192.168.254.9 | Online |
-| 2 | 192.168.254.3 | Offline |
-| 3 | 192.168.254.4 | Offline |
-| 4 | 192.168.254.7 | Offline |
-| 5 | 192.168.254.7 | Offline |
-| 6 | 192.168.254.16 | Online |
-| 7 | 192.168.254.12 | Online |
-| 8 | 192.168.254.10 | Online |
-| 9 | 192.168.254.6 | Online |
-| 10 | 192.168.254.17 | Online |
-| 11 | 192.168.254.13 | Online |
-| 12 | 192.168.254.8 | Online |
+| Channel | Internal IP | Online | Detect Result |
+|---------|-------------|--------|---------------|
+| 1 | 192.168.254.9 | Yes | connect |
+| 2 | 192.168.254.3 | No | notExist (powered off or disconnected) |
+| 3 | 192.168.254.4 | No | notExist (powered off or disconnected) |
+| 4 | 192.168.254.7 | No | notExist (powered off or disconnected) |
+| 5 | 192.168.254.7 | No | ipAddrConflict (same IP as ch4) |
+| 6 | 192.168.254.16 | Yes | connect |
+| 7 | 192.168.254.12 | Yes | connect |
+| 8 | 192.168.254.10 | Yes | connect |
+| 9 | 192.168.254.6 | Yes | connect |
+| 10 | 192.168.254.17 | Yes | connect |
+| 11 | 192.168.254.13 | Yes | connect |
+| 12 | 192.168.254.8 | Yes | connect |
 
 **Secrets:** RTSP URLs, NVR admin credentials, and camera passwords are stored in Infisical at `infrastructure/prod:/spine/shop/nvr/*`. This repo never contains secret values.
 
