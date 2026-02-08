@@ -193,7 +193,6 @@ All exports use `sync,no_subtree_check,no_root_squash` over Tailscale IPs. strea
 | **Capacity** | 900VA / 540W | 2026-02-08 |
 | **Runtime** | ~10-15 min at full load | 2026-02-08 |
 | **Outlets** | 8 total (4 battery + surge, 4 surge only) | 2026-02-08 |
-| **Connectivity** | USB port for monitoring (not currently connected to any host) | 2026-02-08 |
 | **Connected Equipment** | R730XD, MD1400, N2024P | 2026-02-08 |
 
 ### Accessories & Cables
@@ -351,11 +350,10 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 **BLOCKED (requires cold boot — LOOP-MD1400-SAS-RECOVERY-20260208):**
 - MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-029). Drives invisible until cold boot with persistent module config.
 
-**UNVERIFIED (requires physical visit or remote login):**
-- WiFi AP (EAP225): Configuration, SSID → `infrastructure/prod:/spine/shop/wifi/*` (web UI at .249 now reachable — needs creds)
+**UNVERIFIED (requires credentials or physical visit):**
+- WiFi AP (EAP225): Web UI at .249 reachable, but default creds (`admin`/`admin`) rejected — password was changed. Need owner to provide or reset. Config/SSID unknown.
 - N2024P: Service tag (check chassis label — not exposed via web UI or CLI)
-- Camera physical locations: NVR channels mapped but no physical location labels for channels 6-12
-- UPS USB monitoring: Not connected to any host — consider connecting to pve for `apcupsd`
+- Camera physical locations: NVR channels mapped but no physical location labels for channels 6-12 (deferred — priority is getting offline cameras working)
 
 ---
 
