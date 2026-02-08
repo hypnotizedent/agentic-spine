@@ -109,6 +109,66 @@ Also check cloud-init template 9000 — if it bakes in the wrong timezone, futur
 - P0 audit from LOOP-BACKUP-STABILIZATION-20260208: `timedatectl` on pve shows `America/Adak`
 - `backup.inventory.yaml` declares `timezone: "America/New_York"` — contradicts actual host config
 
+### P0 Audit Results (2026-02-08)
+
+| Host | VM | Before | NTP | Status |
+|------|-----|--------|-----|--------|
+| pve | — | `America/Adak` (HST) | yes | WRONG |
+| proxmox-home | — | `America/Nome` (AKST) | yes | WRONG |
+| infra-core | 204 | `Etc/UTC` | yes | cloud-init default |
+| observability | 205 | `Etc/UTC` | yes | cloud-init default |
+| dev-tools | 206 | `Etc/UTC` | yes | cloud-init default |
+| ai-consolidation | 207 | `Etc/UTC` | yes | cloud-init default |
+| media-stack | 201 | `Etc/UTC` | yes | cloud-init default |
+| streaming-stack | 210 | `Etc/UTC` | yes | cloud-init default |
+| vault | — | `Etc/UTC` | yes | cloud-init default |
+| docker-host | 200 | unreachable | — | down post-outage |
+| download-stack | 209 | unreachable | — | not provisioned |
+| nas | — | unknown | unknown | Synology DSM (no timedatectl) |
+| automation-stack | — | `Etc/UTC` | yes | sudo password required |
+| ha | — | unknown | unknown | HAOS (no timedatectl) |
+
+**Finding:** VMs did NOT inherit hypervisor timezone — cloud-init template 9000 defaults to UTC.
+
+### P1+P2 Execution Results (2026-02-08)
+
+Capability: `infra.timezone.set --timezone America/New_York --execute`
+
+| Host | Result |
+|------|--------|
+| pve | FIXED (`America/Adak` -> `America/New_York`) |
+| proxmox-home | FIXED (`America/Nome` -> `America/New_York`) |
+| vault | FIXED (`Etc/UTC` -> `America/New_York`) |
+| infra-core (204) | FIXED (`Etc/UTC` -> `America/New_York`) |
+| observability (205) | FIXED (`Etc/UTC` -> `America/New_York`) |
+| dev-tools (206) | FIXED (`Etc/UTC` -> `America/New_York`) |
+| media-stack (201) | FIXED (`Etc/UTC` -> `America/New_York`) |
+| streaming-stack (210) | FIXED (`Etc/UTC` -> `America/New_York`) |
+| ai-consolidation (207) | FIXED (`Etc/UTC` -> `America/New_York`) |
+| nas | FAILED — no `timedatectl` (Synology DSM, fix via web UI) |
+| automation-stack | FAILED — sudo requires password |
+| ha | FAILED — no `timedatectl` (HAOS appliance) |
+| docker-host (200) | UNREACHABLE |
+| pihole-home | UNREACHABLE |
+| download-stack (209) | UNREACHABLE |
+| download-home | UNREACHABLE |
+
+**Result:** 9/16 fixed, 3 appliance/password failures, 4 unreachable.
+
+Receipts:
+- Dry-run: `RCAP-20260208-114500__infra.timezone.set__R36up5845`
+- Execute (run 1): `RCAP-20260208-114535__infra.timezone.set__Rxfff6150`
+- Execute (run 2): `RCAP-20260208-114623__infra.timezone.set__Rxnyk6678`
+- Verify: `RCAP-20260208-114703__infra.timezone.set__Rgg6f7194`
+
+### Remaining Work
+
+- `nas`: Set timezone via Synology DSM web UI (manual)
+- `automation-stack`: SSH with password or fix sudoers NOPASSWD
+- `ha`: Set timezone via Home Assistant web UI (manual)
+- `docker-host` (200): Fix after power outage recovery
+- `download-stack` (209), `pihole-home`, `download-home`: Fix when provisioned/online
+
 ---
 
 _Scope document created by: Opus 4.6_
