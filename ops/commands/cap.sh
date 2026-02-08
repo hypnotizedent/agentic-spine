@@ -11,9 +11,14 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# Runtime root (mailroom/, receipts/, state/) is fixed by contract.
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+
+# Code root is derived from where this command is executed from (worktree-safe).
+SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
 STATE_DIR="$SPINE_REPO/mailroom/state"
-CAP_FILE="$SPINE_REPO/ops/capabilities.yaml"
+CAP_FILE="$SPINE_CODE/ops/capabilities.yaml"
 RECEIPTS="$SPINE_REPO/receipts/sessions"
 LEDGER="$STATE_DIR/ledger.csv"
 
@@ -142,7 +147,17 @@ run_cap() {
         fi
     fi
 
+    # ── Prepare capture (receipt should exist even if preconditions fail) ──
+    local start_time
+    start_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local output_file="/tmp/cap_${run_key}_output.txt"
+    _cap_tmp="$output_file"
+    local exit_code=0
+
     # ── Execute preconditions (dependency chain, cycle guard) ──
+    local precond_failed=0
+    local precond_rc=0
+    local precond_name=""
     if (( ${#requires_list[@]} > 0 )); then
         local stack="${OPS_CAP_STACK:-}"
         stack=",$stack,$name,"
@@ -150,37 +165,50 @@ run_cap() {
         for req in "${requires_list[@]}"; do
             if [[ "${stack}" == *",${req},"* ]]; then
                 echo "ERROR: requires cycle detected: ${name} -> ${req}"
-                exit 1
+                precond_failed=1
+                precond_rc=1
+                precond_name="$req"
+                break
             fi
             echo ""
             echo "== PRECONDITION: ${req} =="
-            "$SPINE_REPO/bin/ops" cap run "${req}"
+            set +e
+            SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" "$SPINE_CODE/bin/ops" cap run "${req}"
+            rc=$?
+            set -e
+            if [[ "$rc" -ne 0 ]]; then
+                precond_failed=1
+                precond_rc="$rc"
+                precond_name="$req"
+                break
+            fi
         done
-        echo ""
-        echo "== PRECONDITIONS OK =="
-        echo ""
+        if [[ "$precond_failed" -eq 0 ]]; then
+            echo ""
+            echo "== PRECONDITIONS OK =="
+            echo ""
+        fi
     fi
 
-    echo "Executing..."
-    echo "────────────────────────────────────────"
-
-    # ── Execute capability command, capture output ──
-    local start_time
-    start_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    local output_file="/tmp/cap_${run_key}_output.txt"
-    _cap_tmp="$output_file"
-    local exit_code=0
-
-    if (cd "$cwd" && $cmd "${args[@]}" 2>&1 | tee "$output_file"); then
-        exit_code=0
+    if [[ "$precond_failed" -eq 1 ]]; then
+        echo "STOP: precondition failed: ${precond_name} (exit=$precond_rc)" | tee "$output_file" >/dev/null
+        exit_code="$precond_rc"
     else
-        exit_code=$?
+        echo "Executing..."
+        echo "────────────────────────────────────────"
+
+        # ── Execute capability command, capture output ──
+        # Force code root for scripts that rely on SPINE_ROOT, while keeping runtime root stable.
+        if (cd "$cwd" && SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" $cmd "${args[@]}" 2>&1 | tee "$output_file"); then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
+        echo "────────────────────────────────────────"
     fi
 
     local end_time
     end_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-    echo "────────────────────────────────────────"
 
     # ── Write receipt (markdown + SHA256) ──
     local receipt_dir="$RECEIPTS/R${run_key}"
