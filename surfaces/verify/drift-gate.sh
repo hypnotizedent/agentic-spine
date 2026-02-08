@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v2.3)
+# drift-gate.sh - Constitutional drift detector (v2.4)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -20,7 +20,7 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v2.3) ==="
+echo "=== DRIFT GATE (v2.4) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -592,6 +592,30 @@ if [[ -x "$SP/surfaces/verify/d47-brain-surface-path-lock.sh" ]]; then
   fi
 else
   warn "brain surface path lock gate not present"
+fi
+
+# D48: Codex worktree hygiene (codex/.worktrees)
+echo -n "D48 codex worktree hygiene... "
+if [[ -x "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh" ]]; then
+  if "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d48-codex-worktree-hygiene.sh failed"
+  fi
+else
+  warn "codex worktree hygiene gate not present"
+fi
+
+# D49: Agent discovery lock (agents.registry.yaml + contracts)
+echo -n "D49 agent discovery lock... "
+if [[ -x "$SP/surfaces/verify/d49-agent-discovery-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d49-agent-discovery-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d49-agent-discovery-lock.sh failed"
+  fi
+else
+  warn "agent discovery lock gate not present"
 fi
 
 echo

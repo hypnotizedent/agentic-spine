@@ -55,7 +55,31 @@ OUT="$SP/docs/brain/context.md"
   fi
   echo ""
 
-  # ── Section 4: Last Handoff ──
+  # ── Section 4: Available Agents ──
+  echo "## Available Agents"
+  echo ""
+  echo "Domain-specific agents handle application-layer problems."
+  echo "Full registry: \`ops/bindings/agents.registry.yaml\`"
+  echo ""
+
+  AGENTS_FILE="$SP/ops/bindings/agents.registry.yaml"
+  if [[ -f "$AGENTS_FILE" ]] && command -v yq >/dev/null 2>&1; then
+    while IFS='|' read -r aid adomain adesc astatus; do
+      [[ -z "$aid" ]] && continue
+      if [[ "$astatus" == "pending" ]]; then
+        echo "- **${aid}** [${adomain}] (implementation pending) — ${adesc}"
+      else
+        echo "- **${aid}** [${adomain}] — ${adesc}"
+      fi
+    done < <(yq e '.agents[] | .id + "|" + .domain + "|" + .description + "|" + .implementation_status' "$AGENTS_FILE" 2>/dev/null)
+    echo ""
+    echo "Routing: when a problem matches an agent domain, consult that agent first."
+  else
+    echo "(agents.registry.yaml not found or yq not installed)"
+  fi
+  echo ""
+
+  # ── Section 5: Last Handoff ──
   if [[ -f "$SP/docs/brain/memory.md" ]]; then
     echo "## Last Handoff"
     echo ""
