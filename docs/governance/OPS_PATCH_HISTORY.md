@@ -11,7 +11,7 @@ Purpose: record proof of critical ops path hardening (no ronny-ops fallback).
 
 ## MUSTFIX patches (confirmed working)
 - ai.sh: removed `$HOME/ronny-ops` fallback; requires git context or explicit `REPO_ROOT`
-- clerk-watcher.sh: service registry path now spine-native
+- clerk-watcher.sh: quarantined under `ops/legacy/` (legacy; no longer runtime)
 - README.md: installation paths updated to `~/code/agentic-spine` and `~/.local/bin`
 
 ## Proof (receipts)
