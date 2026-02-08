@@ -78,6 +78,18 @@ migrations since it avoids doubling disk usage).
 
 ## Diagnostic Patterns
 
+### SSH Identity Rule (media-stack)
+
+- Do not assume `root` SSH works on `media-stack`. Use the SSOT binding in `ops/bindings/ssh.targets.yaml`.
+- If the SSH user is non-root, rely on passwordless sudo for root-required operations (`sudo -n ...`).
+- Governance trace: `GAP-OP-025` in `ops/bindings/operational.gaps.yaml`.
+
+Verification (non-mutating):
+```bash
+ssh -G media-stack | rg '^(user|hostname|port) '
+ssh media-stack 'whoami; hostname; sudo -n true && echo SUDO_OK'
+```
+
 ### Key Metric: iowait
 - `vmstat 1 5` — look at the `wa` column
 - Baseline (all DBs on NFS): **48%**

@@ -33,5 +33,7 @@ Code changes, git commits, database writes, deploys, docker restarts.
 | Code | docs/governance/AGENTS_GOVERNANCE.md |
 | Services | docs/governance/SERVICE_REGISTRY.yaml |
 | Remote paths | ops/bindings/docker.compose.targets.yaml, ops/bindings/ssh.targets.yaml |
+| Issues discovered mid-work (SSOT/script drift) | ops/bindings/operational.gaps.yaml |
 | CLI tools | ops/bindings/cli.tools.inventory.yaml |
+| VM provisioning / bootstrap | docs/brain/lessons/VM_INFRA_LESSONS.md |
 | Media stack / NFS | docs/brain/lessons/MEDIA_STACK_LESSONS.md |

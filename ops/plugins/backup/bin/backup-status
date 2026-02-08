@@ -49,6 +49,13 @@ fi
 # Get list of known SSH target IDs
 KNOWN_TARGETS="$(yq -r '.ssh.targets[].id' "$SSH_TARGETS_FILE" 2>/dev/null || true)"
 
+# SSH defaults (avoid HOME drift: no known_hosts writes)
+DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_TARGETS_FILE")"
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_TARGETS_FILE")"
+DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_TARGETS_FILE")"
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_TARGETS_FILE")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_TARGETS_FILE")"
+
 _now_epoch() {
   date -u +%s
 }
@@ -96,6 +103,20 @@ while IFS=$'\t' read -r NAME HOST BASE_PATH GLOB STALE_HOURS SSH_TIMEOUT; do
     continue
   fi
 
+  # Resolve SSH target into concrete host/user/port (no alias dependency)
+  SSH_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .host // \"\"" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
+  SSH_USER="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .user // \"\"" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
+  SSH_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .port // ${DEF_PORT}" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
+
+  if [[ -z "$SSH_HOST" || "$SSH_HOST" == "null" ]]; then
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "ERROR" "host_unassigned"
+    DEGRADED=$((DEGRADED+1))
+    continue
+  fi
+  [[ -n "$SSH_USER" && "$SSH_USER" != "null" ]] || SSH_USER="$DEF_USER"
+  [[ -n "$SSH_PORT" && "$SSH_PORT" != "null" ]] || SSH_PORT="$DEF_PORT"
+
   # Remote probe script (read-only: test -d, ls, stat only)
   REMOTE_SCRIPT='
 set -euo pipefail
@@ -113,11 +134,20 @@ echo "MTIME=$MTIME"
   STDERR_FILE="/tmp/backup_status_${NAME}_stderr.$$"
   set +e
   OUT="$(
-    ssh -n \
-      -o BatchMode=yes \
-      -o ConnectTimeout="$SSH_TIMEOUT" \
-      -o StrictHostKeyChecking=accept-new \
-      "$HOST" "bash -c '$REMOTE_SCRIPT' -- $(printf "%q" "$BASE_PATH") $(printf "%q" "$GLOB")" \
+    ssh_opts=(
+      -n
+      -o "ConnectTimeout=$SSH_TIMEOUT"
+      -o "StrictHostKeyChecking=$DEF_STRICT"
+      -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+      -o "NumberOfPasswordPrompts=0"
+      -o "LogLevel=ERROR"
+      -p "$SSH_PORT"
+    )
+    if [[ "$DEF_BATCH" == "true" ]]; then
+      ssh_opts+=(-o "BatchMode=yes")
+    fi
+    ssh "${ssh_opts[@]}" \
+      "${SSH_USER}@${SSH_HOST}" "bash -lc $(printf "%q" "$REMOTE_SCRIPT") -- $(printf "%q" "$BASE_PATH") $(printf "%q" "$GLOB")" \
       2>"$STDERR_FILE"
   )"
   RC=$?

@@ -9,7 +9,7 @@
 # Last verified: 2026-02-07
 
 version: 1
-updated: "2026-02-08T03:00Z"
+updated: "2026-02-08T03:15Z"
 
 gaps:
   # ─────────────────────────────────────────────────────────────
@@ -434,6 +434,77 @@ gaps:
       remote file operations MUST include a preflight `find` or `ls -la` step to
       confirm actual paths before mutation. Never trust doc-assumed paths for
       file-level operations.
+
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during pre-vm-creation reliability hardening 2026-02-08
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-025
+    discovered_by: "pre-vm-creation-reliability-hardening-20260208"
+    discovered_at: "2026-02-08"
+    type: stale-ssot
+    doc: "ops/bindings/ssh.targets.yaml"
+    description: |
+      media-stack SSH target had the wrong user (root vs actual), causing
+      ssh.target.status to fail with auth denied and misleading downstream
+      tooling that relies on governed SSH.
+    severity: medium
+    status: open
+    fixed_in: null
+    notes: |
+      Fix: update media-stack entry to the correct SSH user, rely on sudo -n for
+      root-required operations, and verify with ssh.target.status.
+
+  - id: GAP-OP-026
+    discovered_by: "pre-vm-creation-reliability-hardening-20260208"
+    discovered_at: "2026-02-08"
+    type: runtime-bug
+    doc: "ops/plugins/docker/bin/docker-compose-status"
+    description: |
+      docker.compose.status assumed `ssh <id>` works via ~/.ssh/config aliases
+      and did not resolve ssh_target via ops/bindings/ssh.targets.yaml. This
+      produced false UNREACHABLE signals even when the governed SSH binding was
+      correct (infra-core, observability).
+    severity: high
+    status: open
+    fixed_in: null
+    notes: |
+      Fix: resolve ssh_target via ssh.targets.yaml (host/user/port + defaults),
+      classify unreachable reasons (timeout vs auth), and avoid known_hosts writes.
+
+  - id: GAP-OP-027
+    discovered_by: "pre-vm-creation-reliability-hardening-20260208"
+    discovered_at: "2026-02-08"
+    type: runtime-bug
+    doc: "ops/plugins/backup/bin/backup-status"
+    description: |
+      backup.status validated host IDs exist in ssh.targets.yaml but then used
+      `ssh \"$HOST\"` (alias) and StrictHostKeyChecking=accept-new (known_hosts
+      writes), violating HOME drift constraints and breaking when aliases are not
+      present.
+    severity: high
+    status: open
+    fixed_in: null
+    notes: |
+      Fix: resolve host/user/port via ssh.targets.yaml and enforce
+      UserKnownHostsFile=/dev/null + binding default StrictHostKeyChecking.
+
+  - id: GAP-OP-028
+    discovered_by: "pre-vm-creation-reliability-hardening-20260208"
+    discovered_at: "2026-02-08"
+    type: runtime-bug
+    doc: "ops/bindings/secrets.binding.yaml + ops/plugins/secrets/bin/*"
+    description: |
+      Secrets capabilities failed when Infisical API URL was behind forward-auth
+      (HTTP 302/HTML), causing jq parse errors and broken automation. A binding-
+      supported internal API endpoint is required, and scripts must prefer it and
+      fail with actionable errors on redirects/non-JSON responses.
+    severity: high
+    status: open
+    fixed_in: null
+    notes: |
+      Fix: add infisical.internal_api_url binding and prefer it in secrets
+      scripts; detect 3xx/non-JSON responses and report STOP reason=api_redirected.
 
   - id: GAP-OP-016
     discovered_by: "OL_HOME_BASELINE_FINISH"
