@@ -1,0 +1,37 @@
+# Service: pihole
+# Host: infra-core (100.92.91.128 / 192.168.12.204)
+# Deploy: docker compose up -d
+# Purpose: Network-wide DNS ad-blocking (relocated from docker-host)
+
+services:
+  pihole:
+    image: pihole/pihole:latest
+    container_name: pihole
+    hostname: pihole
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - TZ=America/Los_Angeles
+      - WEBPASSWORD=${PIHOLE_PASSWORD}
+      - FTLCONF_LOCAL_IPV4=192.168.12.204
+      - DNSMASQ_LISTENING=all
+      - PIHOLE_DNS_=1.1.1.1;1.0.0.1
+      - DNSSEC=true
+      - QUERY_LOGGING=true
+    volumes:
+      - pihole_config:/etc/pihole
+      - pihole_dnsmasq:/etc/dnsmasq.d
+    cap_add:
+      - NET_ADMIN
+    healthcheck:
+      test: ["CMD", "dig", "+short", "@127.0.0.1", "google.com"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pihole_config:
+    driver: local
+  pihole_dnsmasq:
+    driver: local

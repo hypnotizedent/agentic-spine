@@ -47,7 +47,7 @@ All 39 hits are INTENTIONAL - no actual code coupling:
 | Governance checks | surfaces/verify/doc-drift-check.sh | 6 | ALLOWED_DIRS lists, governance validations |
 | Database scripts | surfaces/quarantine/restore-postgres.sh | 6 | Mint OS database restore (operational script) |
 | AI bundles | ops/commands/ai.sh | 5 | Bundle categories (mint_os) |
-| Service registry | ops/commands/preflight.sh, ops/agents/clerk-watcher.sh | 4 | Service health URL mapping |
+| Service registry | ops/commands/preflight.sh, ops/plugins/services/bin/services-health-status | 4 | Service health URL mapping |
 | Command docs | claude/commands/*.md | 3 | Command documentation |
 | Verify scripts | surfaces/verify/*.sh | 2 | Service identity mapping |
 | Scripts | scripts/receipt-grade-verify.sh | 1 | Log monitoring |

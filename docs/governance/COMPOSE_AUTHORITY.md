@@ -1,114 +1,62 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-05
+last_verified: 2026-02-08
 scope: compose-locations
-source_repo: workbench
 ---
 
 # Compose Authority Map
 
-> **⚠️ External Reference (Workbench-Owned)**
->
-> The compose file paths in this document point to the workbench monolith
-> (`~/code/workbench`). The spine does not own these files—it only maps
-> where they live. For actual compose operations, work in the workbench repo.
->
-> See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for external reference policy.
+Purpose: prevent "compose guessing" by defining where authoritative compose lives, and where the *live* compose directories are on each host.
 
-**Date:** 2026-01-24
-**Scope:** Documentation only (no runtime changes)
-**Policy:** Archived compose files under `.archive/` are **non-authoritative** per `docs/governance/ARCHIVE_POLICY.md`.
+## Rules (Non-Negotiables)
 
-This map exists to prevent "compose guessing." If you need to run or modify a stack, start here and follow the authoritative compose location.
+- **Never guess live paths** like `/opt/stacks` vs `~/stacks`.
+  - Live paths are declared in `ops/bindings/docker.compose.targets.yaml` (SSOT).
+- **VM-infra compose SSOT (sanitized)** lives in this repo under `ops/staged/**`.
+- **Workbench compose** (`/Users/ronnyworks/code/workbench/infra/compose/**`) is a *supporting/reference surface* for non-VM-infra stacks.
 
-## Mint OS (production stack)
+## VM-Infra Stacks (Spine-Owned, Canonical)
 
-**Authoritative compose location (split by intent):**
-- `infrastructure/docker-host/mint-os/docker-compose.yml`
-  Owns: core deps + primary Mint OS apps/services (postgres, redis, minio, and app services)
-- `infrastructure/docker-host/mint-os/docker-compose.frontends.yml`
-  Owns: UI/frontends + related app web surfaces
-- `infrastructure/docker-host/mint-os/docker-compose.monitoring.yml`
-  Owns: monitoring stack (prometheus, grafana, exporters, alerting)
-- `infrastructure/docker-host/mint-os/docker-compose.minio.yml`
-  Owns: Mint OS MinIO (when split/isolated)
+| Stack | Canonical Compose (Spine) |
+|------|----------------------------|
+| cloudflared | `ops/staged/cloudflared/docker-compose.yml` |
+| caddy-auth (Caddy + Authentik) | `ops/staged/caddy-auth/docker-compose.yml` |
+| pihole | `ops/staged/pihole/docker-compose.yml` |
+| vaultwarden | `ops/staged/vaultwarden/docker-compose.yml` |
+| secrets (Infisical) | `ops/staged/secrets/docker-compose.yml` |
+| dev-tools (gitea) | `ops/staged/dev-tools/gitea/docker-compose.yml` |
+| observability (prometheus) | `ops/staged/observability/prometheus/docker-compose.yml` |
+| observability (grafana) | `ops/staged/observability/grafana/docker-compose.yml` |
+| observability (loki) | `ops/staged/observability/loki/docker-compose.yml` |
+| observability (uptime-kuma) | `ops/staged/observability/uptime-kuma/docker-compose.yml` |
+| observability (node-exporter) | `ops/staged/observability/node-exporter/docker-compose.yml` |
+| download-stack | `ops/staged/download-stack/docker-compose.yml` |
+| streaming-stack | `ops/staged/streaming-stack/docker-compose.yml` |
 
-**Non-authoritative legacy duplicates (archived):**
-- `mint-os/docs/.archive/legacy-2025/mint-os-app-stack-v2/*`
+## Workbench Compose (Supporting / Reference)
 
-## Media Stack
+Workbench repo path: `/Users/ronnyworks/code/workbench/infra/compose/**`
 
-**Authoritative:**
-- `media-stack/docker-compose.yml`
-  Owns: Jellyfin + ARR stack and related media tooling
+Examples:
 
-**Archived legacy:**
-- `mint-os/docs/.archive/legacy-2025/Historical_Docs/Reference_Plans/old_media_stack_compose.yml`
+| Stack | Workbench Path |
+|------|-----------------|
+| mint-os | `/Users/ronnyworks/code/workbench/infra/compose/mint-os/` |
+| n8n | `/Users/ronnyworks/code/workbench/infra/compose/n8n/docker-compose.yml` |
+| dashy | `/Users/ronnyworks/code/workbench/infra/compose/dashy/docker-compose.yml` |
+| mcpjungle | `/Users/ronnyworks/code/workbench/infra/compose/mcpjungle/docker-compose.yml` |
+| storage (legacy) | `/Users/ronnyworks/code/workbench/infra/compose/storage/docker-compose.yml` |
 
-## Finance
+## Live Runtime Directories (Operations)
 
-**Authoritative:**
-- `finance/docker-compose.yml`
-  Owns: finance stack (Firefly III + dependencies + related apps)
-- `finance/mail-archiver/docker-compose.yml`
-  Owns: mail archiver sub-stack
+To check what is deployed and where it lives on each host:
 
-## Pi-hole
+```bash
+./bin/ops cap run docker.compose.status
+```
 
-**Authoritative:**
-- `infrastructure/pihole/docker-compose.yml`
+Binding SSOT for live paths:
 
-**Archived planned reference (non-authoritative):**
-- `mint-os/docs/.archive/legacy-2025/Planned_Service_Configs/pihole-docker-compose.yml`
+- `ops/bindings/docker.compose.targets.yaml`
 
-## Infisical (secrets)
-
-**Authoritative:**
-- `infrastructure/secrets/docker-compose.yml`
-  Owns: Infisical + dependencies
-
-## n8n
-
-**Authoritative:**
-- `infrastructure/n8n/docker-compose.yml`
-  Owns: n8n stack (and any co-located deps explicitly defined there)
-
-## Cloudflare Tunnel
-
-**Authoritative:**
-- `infrastructure/cloudflare/tunnel/docker-compose.yml`
-
-## Dashy
-
-**Authoritative:**
-- `infrastructure/dashy/docker-compose.yml`
-
-## MCP Jungle
-
-**Authoritative:**
-- `infrastructure/mcpjungle/docker-compose.yml`
-
-## Files API (module extraction)
-
-**Authoritative:**
-- `modules/files-api/docker-compose.yml`
-
-## Storage (standalone)
-
-**Authoritative:**
-- `infrastructure/storage/docker-compose.yml`
-  Owns: storage-oriented stack components defined there (may include a standalone MinIO)
-
-### Known overlap: MinIO (Mint OS vs Storage)
-MinIO appears in:
-- Mint OS context: `infrastructure/docker-host/mint-os/docker-compose.minio.yml`
-- Storage context: `infrastructure/storage/docker-compose.yml`
-
-**Guardrail:** Treat these as **different stacks** unless explicitly documented otherwise in an SSOT/registry.
-If an operator needs "MinIO," first confirm which stack they are operating on (Mint OS vs Storage) and follow the authority chain in `docs/DOC_MAP.md`.
-
-## Templates
-
-**Not a running stack:**
-- `infrastructure/templates/docker-compose.template.yml`

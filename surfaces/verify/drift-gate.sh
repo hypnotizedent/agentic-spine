@@ -12,6 +12,7 @@
 set -euo pipefail
 
 SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+RT="${SPINE_REPO:-$SP}"
 cd "$SP"
 FAIL=0
 
@@ -79,8 +80,8 @@ COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces/veri
 echo -n "D6 receipts exist... "
 MISSING=0
 COUNT=0
-for s in $(ls -1t receipts/sessions 2>/dev/null); do
-  [[ -f "receipts/sessions/$s/receipt.md" ]] || MISSING=$((MISSING+1))
+for s in $(ls -1t "$RT/receipts/sessions" 2>/dev/null); do
+  [[ -f "$RT/receipts/sessions/$s/receipt.md" ]] || MISSING=$((MISSING+1))
   COUNT=$((COUNT+1))
   [[ "$COUNT" -ge 5 ]] && break
 done
@@ -90,7 +91,7 @@ done
 echo -n "D7 executables bounded... "
 BAD="$(find . -type f -name "*.sh" \
   | rg -v '^\./(bin/|ops/|surfaces/verify/)' \
-  | rg -v '^\./(_imports/|docs/|receipts/|mailroom/|\.git/|\.spine/|\.archive/)' || true)"
+  | rg -v '^\./(_imports/|docs/|receipts/|mailroom/|\.git/|\.spine/|\.archive/|\.worktrees/)' || true)"
 [[ -z "$BAD" ]] && pass || fail "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"
 
 # D8: No backup clutter
@@ -131,12 +132,12 @@ echo -n "D12 core lock exists... "
 # Receipts created after core-v1.0 must have: Run ID, Generated, Status, Model, Inputs, Outputs
 echo -n "D9 receipt stamps... "
 LATEST=""
-for s in $(ls -1t receipts/sessions 2>/dev/null); do
+for s in $(ls -1t "$RT/receipts/sessions" 2>/dev/null); do
   LATEST="$s"
   break
 done
-if [[ -n "$LATEST" ]] && [[ -f "receipts/sessions/$LATEST/receipt.md" ]]; then
-  STAMP_FILE="receipts/sessions/$LATEST/receipt.md"
+if [[ -n "$LATEST" ]] && [[ -f "$RT/receipts/sessions/$LATEST/receipt.md" ]]; then
+  STAMP_FILE="$RT/receipts/sessions/$LATEST/receipt.md"
 
   # Check for required fields (core-v1.0 contract)
   HAS_RUN_ID=$(rg -q "Run ID" "$STAMP_FILE" 2>/dev/null && echo 1 || echo 0)

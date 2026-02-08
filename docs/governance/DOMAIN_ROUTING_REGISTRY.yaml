@@ -1,6 +1,6 @@
 # DOMAIN_ROUTING_REGISTRY.yaml
 # Status: authoritative
-# Last verified: 2026-02-04
+# Last verified: 2026-02-08
 #
 # Purpose:
 #   Machine-readable SSOT mapping for: hostname -> routing layer -> authority.
@@ -10,10 +10,13 @@
 #   - Secrets rotation and git history rewrite are explicitly deferred.
 #
 # Update procedure (docs-only):
-#   1) Export DNS records (Cloudflare) into infrastructure/cloudflare/exports/.
-#   2) Diff export vs DOMAIN_REGISTRY.md (human doc) and this YAML (SSOT).
-#   3) Add new hostnames here with routing_layer/authority_source set to "unknown" if uncertain.
-#   4) Fill in stack/service as it becomes clear (no guessing required).
+#   1) Export live tunnel ingress (hostname -> service):
+#        ./bin/ops cap run cloudflare.tunnel.ingress.status
+#   2) Update this registry with any new/changed hostnames (set routing_layer accordingly).
+#   3) Gate the drift:
+#        ./bin/ops cap run cloudflare.domain_routing.diff
+#   4) DNS exports live in workbench for reference:
+#        /Users/ronnyworks/code/workbench/infra/cloudflare/exports/*
 #
 # Field notes:
 #   - routing_layer: one of [cloudflare_tunnel, direct, unknown]
@@ -26,8 +29,8 @@ version: 1
 zones:
   - zone: ronny.works
     source:
-      dns_export_file: infrastructure/cloudflare/exports/dns-records-2025-12-24.json
-      human_registry_file: infrastructure/domains/DOMAIN_REGISTRY.md
+      dns_export_file: "workbench:infra/cloudflare/exports/dns-records-2025-12-24.json"
+      note: "DNS export lives in workbench; this file is the spine SSOT for documented routing."
     hostnames:
       - hostname: ronny.works
         service: TBD
@@ -37,7 +40,7 @@ zones:
         target_hint: ""
         note: "Apex domain; no service deployed yet"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/cloudflare/exports/dns-records-2025-12-24.json
 
       - hostname: www.ronny.works
         service: TBD
@@ -47,201 +50,228 @@ zones:
         target_hint: ""
         note: "Apex www redirect; no service deployed yet"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/cloudflare/exports/dns-records-2025-12-24.json
 
       - hostname: secrets.ronny.works
         service: secrets
-        stack: infrastructure/secrets
+        stack: ops/staged/secrets
         routing_layer: cloudflare_tunnel
-        authority_source: unknown
-        target_hint: ""
+        authority_source: cloudflare_dashboard
+        target_hint: "http://127.0.0.1:80 (Caddy on infra-core -> Infisical :8088)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - infrastructure/cloudflare/tunnel/docker-compose.yml
+          - ops/staged/secrets/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
+          - ops/staged/caddy-auth/docker-compose.yml
 
       - hostname: files.ronny.works
-        service: files
-        stack: github:hypnotizedent/artwork-module
+        service: minio
+        stack: workbench:infra/compose/mint-os
         routing_layer: cloudflare_tunnel
-        authority_source: unknown
-        target_hint: ""
+        authority_source: cloudflare_dashboard
+        target_hint: "http://minio:9000 (docker-host 100.92.156.118)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - github:hypnotizedent/artwork-module/docker-compose.yml
-          - infrastructure/cloudflare/tunnel/docker-compose.yml
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: mintprints-api.ronny.works
         service: mintprints-api
-        stack: infrastructure/docker-host/mint-os
+        stack: workbench:infra/compose/mint-os
         routing_layer: cloudflare_tunnel
-        authority_source: unknown
-        target_hint: ""
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-dashboard-api:3335 (docker-host 100.92.156.118)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - infrastructure/docker-host/mint-os/docker-compose.yml
-          - infrastructure/cloudflare/tunnel/docker-compose.yml
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       # Newly added for completeness from DNS export (routing/ownership may be TBD)
       - hostname: chat.ronny.works
         service: TBD
         stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Domain registered but service not deployed"
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.98.70.70:3000 (automation-stack)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: dash.ronny.works
         service: dashy
-        stack: infrastructure/dashy
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
+        stack: workbench:infra/compose/dashy
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.92.156.118:4000 (docker-host)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - infrastructure/dashy/docker-compose.yml
+          - workbench:infra/compose/dashy/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: docs.ronny.works
-        service: TBD
+        service: paperless-ngx
         stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Domain registered but service not deployed"
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://paperless-ngx:8000 (docker-host via cloudflared extra_hosts)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: finances.ronny.works
-        service: finance
+        service: firefly-iii
         stack: finance
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://firefly-iii:8080 (docker-host via cloudflared extra_hosts)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - finance/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
+
+      - hostname: firefly.ronny.works
+        service: firefly-iii
+        stack: finance
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://firefly-iii:8080 (docker-host via cloudflared extra_hosts)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
+        references:
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: grafana.ronny.works
         service: grafana
-        stack: infrastructure/docker-host/mint-os
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
+        stack: ops/staged/observability/grafana
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://grafana:3000 (resolved by cloudflared connector)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - infrastructure/docker-host/mint-os/docker-compose.monitoring.yml
+          - ops/staged/cloudflared/docker-compose.yml
+          - ops/staged/observability/grafana/docker-compose.yml
 
       - hostname: ha.ronny.works
         service: home-assistant
         stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Service planned, routing TBD until compose stack created"
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.67.120.1:8123 (ha)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: investments.ronny.works
-        service: TBD
+        service: ghostfolio
         stack: finance
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Service planned, routing TBD until compose stack created"
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://ghostfolio:3333 (docker-host via cloudflared extra_hosts)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - finance/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: jellyfin.ronny.works
         service: jellyfin
         stack: media-stack
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.117.1.53:8096 (media-stack legacy VM)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - media-stack/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
+
+      - hostname: kanban.ronny.works
+        service: kanban
+        stack: workbench:infra/compose/mint-os
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.92.156.118:3337 (docker-host)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
+        references:
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
+
+      - hostname: mail-archive.ronny.works
+        service: mail-archiver
+        stack: TBD
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.92.156.118:5100 (docker-host)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
+        references:
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: minio.ronny.works
         service: minio
-        stack: infrastructure/storage
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
+        stack: workbench:infra/compose/mint-os
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://minio:9001 (docker-host 100.92.156.118)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - infrastructure/storage/docker-compose.yml
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: mintprints-app.ronny.works
         service: mintprints-app
-        stack: infrastructure/docker-host/mint-os
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
+        stack: workbench:infra/compose/mint-os
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-customer:3334 (docker-host 100.92.156.118)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - infrastructure/docker-host/mint-os/docker-compose.frontends.yml
+          - workbench:infra/compose/mint-os/docker-compose.frontends.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: mintprints-v3.ronny.works
         service: mintprints-v3
         stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Service planned, routing TBD until compose stack created"
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "https://print-shop-os--hypnotizedent.github.app"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: music.ronny.works
         service: navidrome
-        stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Service planned, routing TBD until compose stack created"
+        stack: media-stack
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.117.1.53:4533 (media-stack legacy VM)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: n8n.ronny.works
         service: n8n
-        stack: infrastructure/n8n
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
+        stack: workbench:infra/compose/n8n
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.98.70.70:5678 (automation-stack)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - infrastructure/n8n/docker-compose.yml
+          - workbench:infra/compose/n8n/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: photos.ronny.works
         service: immich
         stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Service planned, routing TBD until compose stack created"
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.83.160.109:2283 (immich)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: production.ronny.works
         service: production
         stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Service planned, routing TBD until compose stack created"
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-production:3336 (docker-host 100.92.156.118)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: requests.ronny.works
         service: requests
         stack: media-stack
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.117.1.53:5055 (media-stack legacy VM)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - media-stack/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: git.ronny.works
         service: gitea
@@ -281,8 +311,8 @@ zones:
 
   - zone: mintprints.co
     source:
-      dns_export_file: infrastructure/cloudflare/exports/dns-records-mintprints-co-2026-01-23.json
-      human_registry_file: infrastructure/domains/DOMAIN_REGISTRY.md
+      dns_export_file: "workbench:infra/cloudflare/exports/dns-records-mintprints-co-2026-01-23.json"
+      note: "DNS export lives in workbench; this file is the spine SSOT for documented routing."
     hostnames:
       - hostname: mintprints.co
         service: TBD
@@ -292,7 +322,7 @@ zones:
         target_hint: ""
         note: "Apex domain; no service deployed yet"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/cloudflare/exports/dns-records-mintprints-co-2026-01-23.json
 
       - hostname: www.mintprints.co
         service: TBD
@@ -302,57 +332,61 @@ zones:
         target_hint: ""
         note: "Apex www redirect; no service deployed yet"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/cloudflare/exports/dns-records-mintprints-co-2026-01-23.json
 
       - hostname: admin.mintprints.co
         service: admin
-        stack: TBD
+        stack: workbench:infra/compose/mint-os
         routing_layer: cloudflare_tunnel
-        authority_source: unknown
-        target_hint: ""
-        note: "Service planned, routing TBD until compose stack created"
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-admin:3333 (docker-host 100.92.156.118)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: api.mintprints.co
         service: api
-        stack: TBD
+        stack: workbench:infra/compose/mint-os
         routing_layer: cloudflare_tunnel
-        authority_source: unknown
-        target_hint: ""
-        note: "Service planned, routing TBD until compose stack created"
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-dashboard-api:3335 (docker-host 100.92.156.118)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: customer.mintprints.co
         service: customer
-        stack: TBD
+        stack: workbench:infra/compose/mint-os
         routing_layer: cloudflare_tunnel
-        authority_source: unknown
-        target_hint: ""
-        note: "Service planned, routing TBD until compose stack created"
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-customer:3334 (docker-host 100.92.156.118)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: production.mintprints.co
         service: production
-        stack: TBD
+        stack: workbench:infra/compose/mint-os
         routing_layer: cloudflare_tunnel
-        authority_source: unknown
-        target_hint: ""
-        note: "Service planned, routing TBD until compose stack created"
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-production:3336 (docker-host 100.92.156.118)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: files.mintprints.co
-        service: files
-        stack: github:hypnotizedent/artwork-module
+        service: minio
+        stack: workbench:infra/compose/mint-os
         routing_layer: cloudflare_tunnel
-        authority_source: unknown
-        target_hint: ""
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-minio:9000 (docker-host 100.92.156.118)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - github:hypnotizedent/artwork-module/docker-compose.yml
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: artwork.mintprints.co
         service: artwork
@@ -366,14 +400,14 @@ zones:
 
       - hostname: shipping.mintprints.co
         service: shipping
-        stack: mint-os/apps/shipping
-        routing_layer: cloudflare_pages
-        authority_source: unknown
-        target_hint: "Live Cloudflare Pages deploy (see shipping docs for wrangler/deploy commands)"
+        stack: workbench:infra/compose/mint-os
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-dashboard-api:3335 (docker-host 100.92.156.118)"
+        note: "Was previously documented as Pages; tunnel ingress verified 2026-02-08"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - mint-os/docs/modules/shipping/INDEX.md
-          - mint-os/docs/modules/shipping/SPEC.md
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: suppliers.mintprints.co
         service: suppliers
@@ -388,55 +422,57 @@ zones:
 
       - hostname: estimator.mintprints.co
         service: estimator
-        stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Domain registered but service not deployed"
+        stack: workbench:infra/compose/mint-os
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-job-estimator:3001 (docker-host 100.92.156.118)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: kanban.mintprints.co
         service: kanban
-        stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Domain registered but service not deployed"
+        stack: workbench:infra/compose/mint-os
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-kanban:3337 (docker-host 100.92.156.118)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: mcp.mintprints.co
         service: mcp
-        stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Domain registered but service not deployed"
+        stack: workbench:infra/compose/mcpjungle
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mcpjungle:8080 (docker-host via cloudflared extra_hosts)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - workbench:infra/compose/mcpjungle/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: minio.mintprints.co
         service: minio
-        stack: infrastructure/storage
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
+        stack: workbench:infra/compose/mint-os
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://mint-os-minio:9001 (docker-host 100.92.156.118)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - infrastructure/storage/docker-compose.yml
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: pricing.mintprints.co
         service: pricing
-        stack: mint-os/apps/job-estimator
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: "Job Estimator is bypassed in production (see pricing docs)"
+        stack: workbench:infra/compose/mint-os
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.92.156.118:3001 (docker-host)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
-          - mint-os/docs/modules/pricing/INDEX.md
-          - mint-os/docs/modules/pricing/SPEC.md
-          - mint-os/docs/modules/pricing/AUDIT_RESULTS.md
+          - workbench:infra/compose/mint-os/docker-compose.yml
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: send.mintprints.co
         service: send
@@ -451,12 +487,12 @@ zones:
       - hostname: stock-dst.mintprints.co
         service: stock-dst
         stack: TBD
-        routing_layer: unknown
-        authority_source: unknown
-        target_hint: ""
-        note: "Domain registered but service not deployed"
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://100.92.156.118:8765 (docker-host)"
+        note: "Active (tunnel ingress verified 2026-02-08)"
         references:
-          - infrastructure/domains/DOMAIN_REGISTRY.md
+          - ops/staged/cloudflared/docker-compose.yml
 
       - hostname: _dmarc.mintprints.co
         service: dmarc

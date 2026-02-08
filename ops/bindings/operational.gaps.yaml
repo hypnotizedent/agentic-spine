@@ -558,11 +558,114 @@ gaps:
       and applies close status. open_loops.jsonl compacted from 121 to 61 lines.
       6 completed loops closed. 9 open loops remain.
 
+  # Discovered during CODE_AUDIT_20260208
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-029
+    discovered_by: "CODE_AUDIT_20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "ops/bindings/secrets.namespace.policy.yaml"
+    description: |
+      secrets.namespace.status failed because the required Gitea secrets were
+      missing from Infisical at /spine/vm-infra/gitea. This blocks governed
+      automation and leaves the dev-tools deployment partially undocumented.
+    severity: high
+    status: fixed
+    fixed_in: "CODE_AUDIT_20260208"
+    notes: |
+      Fixed by writing the required keys to Infisical under /spine/vm-infra/gitea:
+      GITEA_ADMIN_PASSWORD, GITEA_API_TOKEN, GITEA_RUNNER_TOKEN,
+      GITEA_OAUTH_CLIENT_ID, GITEA_OAUTH_CLIENT_SECRET. Verified via
+      secrets.namespace.status (receipt RCAP-20260208-105831__secrets.namespace.status__Rwaub7817).
+
+  - id: GAP-OP-030
+    discovered_by: "CODE_AUDIT_20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "ops/plugins/cloudflare/bin/cloudflare-tunnel-ingress-status"
+    description: |
+      There was no spine-native way to export Cloudflare tunnel ingress rules.
+      This forced manual dashboard checks and allowed docs-vs-dashboard drift.
+    severity: medium
+    status: fixed
+    fixed_in: "CODE_AUDIT_20260208"
+    notes: |
+      Added cloudflare.tunnel.ingress.status (API export) and
+      cloudflare.domain_routing.diff (diff vs DOMAIN_ROUTING_REGISTRY.yaml).
+
+  - id: GAP-OP-031
+    discovered_by: "CODE_AUDIT_20260208"
+    discovered_at: "2026-02-08"
+    type: stale-ssot
+    doc: "docs/governance/DOMAIN_ROUTING_REGISTRY.yaml"
+    description: |
+      DOMAIN_ROUTING_REGISTRY.yaml drifted from the Cloudflare tunnel ingress
+      configuration, creating extra/missing hostname entries and agent confusion
+      (docs indicated services/paths that did not exist).
+    severity: medium
+    status: fixed
+    fixed_in: "CODE_AUDIT_20260208"
+    notes: |
+      Registry updated and verified against live ingress export:
+      cloudflare.domain_routing.diff status OK (receipt RCAP-20260208-110109__cloudflare.domain_routing.diff__Rwa0y18221).
+
+  - id: GAP-OP-032
+    discovered_by: "CODE_AUDIT_20260208"
+    discovered_at: "2026-02-08"
+    type: stale-ssot
+    doc: "ops/bindings/docker.compose.targets.yaml"
+    description: |
+      docker.compose.targets.yaml referenced a docker-host storage stack path
+      that does not exist, producing false negatives in docker.compose.status
+      and confusing agents about the MinIO deployment source.
+    severity: medium
+    status: fixed
+    fixed_in: "CODE_AUDIT_20260208"
+    notes: |
+      Removed the invalid compose target and aligned compose authority docs to the
+      current SSOT model (VM-infra under ops/staged/**; live stack locations via
+      docker.compose.targets.yaml).
+
+  - id: GAP-OP-033
+    discovered_by: "CODE_AUDIT_20260208"
+    discovered_at: "2026-02-08"
+    type: runtime-bug
+    doc: "ops/commands/cap.sh + surfaces/verify/drift-gate.sh"
+    description: |
+      ops capability execution was not worktree-safe: receipts and drift gates
+      assumed the canonical repo CWD and scanned worktree-only paths, causing
+      incorrect failures when operating from isolated worktrees.
+    severity: high
+    status: fixed
+    fixed_in: "CODE_AUDIT_20260208"
+    notes: |
+      Introduced SPINE_CODE (current code root) distinct from SPINE_REPO
+      (canonical receipts/runtime root). Updated capability CWDs to SPINE_CODE and
+      hardened drift-gate scripts to ignore .worktrees and to compare canonical
+      instruction sources.
+
+  - id: GAP-OP-034
+    discovered_by: "CODE_AUDIT_20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "docs/governance/BACKUP_GOVERNANCE.md"
+    description: |
+      Backup governance defines a requirement for app-level dumps per stack, but
+      there is no documented, tested app-level backup/restore procedure for
+      Authentik or Gitea (even if VM-level vzdump exists).
+    severity: medium
+    status: open
+    fixed_in: null
+    notes: |
+      Follow-up: add stack READMEs or runbooks covering export, restore, and a
+      periodic restore test for both Authentik and Gitea.
+
   # ─────────────────────────────────────────────────────────────
   # Discovered during OL_SHOP_BASELINE_FINISH remote audit 2026-02-08
   # ─────────────────────────────────────────────────────────────
 
-  - id: GAP-OP-029
+  - id: GAP-OP-037
     discovered_by: "OL_SHOP_BASELINE_FINISH"
     discovered_at: "2026-02-08"
     type: runtime-bug
@@ -587,7 +690,7 @@ gaps:
       needed — all 10 VMs go down. Loop: LOOP-MD1400-SAS-RECOVERY-20260208.
       Upstream: PCI ID gap in Linux pm80xx driver (kernel 6.14.8-2-pve).
 
-  - id: GAP-OP-030
+  - id: GAP-OP-038
     discovered_by: "OL_SHOP_BASELINE_FINISH"
     discovered_at: "2026-02-08"
     type: missing-entry
@@ -610,7 +713,7 @@ gaps:
   # Discovered during LOOP-CAMERA-BASELINE-20260208
   # ─────────────────────────────────────────────────────────────
 
-  - id: GAP-OP-031
+  - id: GAP-OP-039
     discovered_by: "LOOP-CAMERA-BASELINE-20260208"
     discovered_at: "2026-02-08"
     type: runtime-bug
@@ -627,7 +730,7 @@ gaps:
       Tracked in LOOP-CAMERA-BASELINE-20260208 Phase P2. Cannot be fixed remotely —
       requires on-site inspection of Netgear PoE switch and camera power/cabling.
 
-  - id: GAP-OP-032
+  - id: GAP-OP-040
     discovered_by: "LOOP-CAMERA-BASELINE-20260208"
     discovered_at: "2026-02-08"
     type: runtime-bug
@@ -645,11 +748,7 @@ gaps:
       netUnreachable (camera physically disconnected, not IP conflict).
       Previous name "SCREEN PRINT" auto-reset to "IPCamera 05" by NVR.
 
-  # ─────────────────────────────────────────────────────────────
-  # Discovered during LOOP-BACKUP-STABILIZATION-20260208
-  # ─────────────────────────────────────────────────────────────
-
-  - id: GAP-OP-033
+  - id: GAP-OP-041
     discovered_by: "LOOP-CAMERA-BASELINE-20260208"
     discovered_at: "2026-02-08"
     type: missing-entry
@@ -670,7 +769,11 @@ gaps:
       /spine/shop/idrac (IDRAC_ADMIN_USER, IDRAC_ADMIN_PASSWORD),
       /spine/shop/switch (SWITCH_ADMIN_USER, SWITCH_ADMIN_PASSWORD).
 
-  - id: GAP-OP-034
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during LOOP-BACKUP-STABILIZATION-20260208
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-042
     discovered_by: "LOOP-BACKUP-STABILIZATION-20260208"
     discovered_at: "2026-02-08"
     type: missing-entry
@@ -690,7 +793,7 @@ gaps:
       ronadmin@nas authorized_keys. Verified bidirectional SSH from both hosts.
       Offsite rsync script and app backup scripts both use this trust path.
 
-  - id: GAP-OP-035
+  - id: GAP-OP-043
     discovered_by: "LOOP-BACKUP-STABILIZATION-20260208"
     discovered_at: "2026-02-08"
     type: missing-entry
@@ -712,7 +815,7 @@ gaps:
       playbooks MUST include a backup continuity step — verify backup mechanism
       is re-established on the new host before closing the migration.
 
-  - id: GAP-OP-036
+  - id: GAP-OP-044
     discovered_by: "LOOP-BACKUP-STABILIZATION-20260208"
     discovered_at: "2026-02-08"
     type: duplicate-truth

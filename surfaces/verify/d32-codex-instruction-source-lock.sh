@@ -6,7 +6,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CODEX_AGENTS="$HOME/.codex/AGENTS.md"
-SPINE_AGENTS="$ROOT/AGENTS.md"
+# Canonical spine runtime is fixed by contract; the D32 check must be worktree-safe.
+CANONICAL_SPINE_ROOT="${SPINE_CANONICAL_ROOT:-$HOME/code/agentic-spine}"
+SPINE_AGENTS="$CANONICAL_SPINE_ROOT/AGENTS.md"
 
 fail() { echo "D32 FAIL: $*" >&2; exit 1; }
 
