@@ -50,14 +50,14 @@ This loop closes the backup coverage gap across all running VMs, wires app-level
 
 ## Phases
 
-| Phase | Scope | Dependency |
-|-------|-------|------------|
-| P0 | Audit current vzdump job (read-only) | None |
-| P1 | Add running VMs 205, 206 to vzdump job | P0 |
-| P2 | Enable future VMs as they stabilize (207, 209, 210) | Per-VM deployment loops |
-| P3 | App-level backup gaps (infisical pg_dump, mint-postgres eval) | P1 |
-| P4 | Offsite sync repair (NAS rsync/Hyper Backup) | P1 |
-| P5 | Verify + closeout | P3 + P4 |
+| Phase | Scope | Dependency | Status |
+|-------|-------|------------|--------|
+| P0 | Audit current vzdump job (read-only) | None | **done** |
+| P1 | Add running VMs 205, 206 to vzdump job | P0 | **done** (prior session) |
+| P2 | Add VMs 207, 209, 210 to vzdump job | Per-VM deployment | **done** |
+| P3 | App-level backups (infisical pg_dump, vaultwarden tar) | P1 | **done** |
+| P4 | Offsite sync (pve → NAS over Tailscale) | P1 | **done** |
+| P5 | Verify + closeout | P3 + P4 | pending (wait 24h for first run) |
 
 ---
 

@@ -288,7 +288,7 @@ If you need to make a placement decision ("where should this run?"):
 **Source:** crontab (`crontab -l`) and `/etc/pve/jobs.cfg`.
 
 **Known issues:**
-- vzdump covers VMs 200-204 only. VMs 205, 206, 207, 209, 210 are **NOT** backed up (GAP-OP-030).
+- ~~vzdump covers VMs 200-204 only~~ — **Fixed:** vzdump now covers all 10 VMs: `204,205,206,207,209,210,201,202,203,200` (critical-first order). GAP-OP-030 closed.
 
 ---
 
@@ -348,7 +348,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 ## Open Network Tasks (shop)
 
 - [ ] **DHCP DNS cutover — BLOCKED on UDR installation**: T-Mobile gateway at 192.168.12.1 is fully locked down (no DHCP control). Plan: insert UDR (Ubiquiti Dream Router, on-hand) between T-Mobile and switch, re-IP shop LAN to new subnet (e.g. 10.12.1.0/24), UDR owns DHCP with DNS→Pi-hole (infra-core). Requires re-IP of pve (.184), iDRAC (.250), switch (.2), all VMs, and all bindings. Pre-stage config changes before cutover. Currently only 2 DHCP clients (docker-host VM 200, media-stack VM 201) — all other devices use static IPs.
-- [ ] **vzdump backup gap**: Add VMs 205, 206, 207, 209, 210 to the vzdump backup job (`/etc/pve/jobs.cfg`).
+- [x] **vzdump backup gap**: All 10 VMs in vzdump job. Offsite sync (pve → NAS over Tailscale) wired for VMs 204-210.
 
 ---
 

@@ -67,7 +67,7 @@ targets:
     classification: important
 
   - name: vm-209-download-stack-primary
-    enabled: false  # Enable after provisioning
+    enabled: true
     kind: file_glob
     host: pve
     base_path: "/tank/backups/vzdump/dump"
@@ -76,7 +76,7 @@ targets:
     classification: important
 
   - name: vm-210-streaming-stack-primary
-    enabled: false  # Enable after provisioning
+    enabled: true
     kind: file_glob
     host: pve
     base_path: "/tank/backups/vzdump/dump"
@@ -94,19 +94,44 @@ targets:
     classification: critical
 
   # =============================================================================
-  # VM BACKUPS - OFFSITE (NAS) - weekly sync, 192h threshold
-  # NOTE: Expected to show MISSING/no_matches until sync job is fixed.
+  # VM BACKUPS - OFFSITE (NAS at house, Tailscale) - daily rsync after vzdump
+  # Shop upload ~10-20 Mbps — only critical small VMs synced (not VM 200 @ 186GB)
+  # Sync script: /usr/local/bin/vzdump-offsite-sync.sh on pve (cron 09:00)
   # =============================================================================
-  - name: vm-200-docker-host-offsite
+  - name: vm-offsite-critical
     enabled: true
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/proxmox/vzdump/critical"
+    glob: "vzdump-qemu-*.vma.zst"
+    stale_after_hours: 48
+    classification: important
+    notes: "Covers VMs 204-210. VM 200 excluded (186GB, bandwidth prohibitive)."
+
+  # NOTE: VM 200 offsite disabled — 186GB backup exceeds shop upload capacity (~10-20 Mbps)
+  - name: vm-200-docker-host-offsite
+    enabled: false
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/proxmox/vzdump"
     glob: "vzdump-qemu-200-*.vma.zst"
     stale_after_hours: 192
     classification: critical
+    notes: "Disabled: 186GB backup cannot fit in nightly offsite window at 10-20 Mbps."
 
-  # NOTE: path doesn't exist yet on NAS
+  # =============================================================================
+  # APP-LEVEL BACKUPS (NAS at house, Tailscale)
+  # =============================================================================
+  - name: app-infisical
+    enabled: true
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/apps/infisical"
+    glob: "*.sql.gz"
+    stale_after_hours: 26
+    classification: critical
+    notes: "pg_dump from infra-core (cron 02:50 daily), rsync to NAS."
+
   - name: app-mint-postgres
     enabled: false
     kind: file_glob
@@ -115,16 +140,7 @@ targets:
     glob: "*.sql.gz"
     stale_after_hours: 26
     classification: critical
-
-  # NOTE: path doesn't exist yet on NAS
-  - name: app-infisical
-    enabled: false
-    kind: file_glob
-    host: nas
-    base_path: "/volume1/backups/apps/infisical"
-    glob: "*.sql.gz"
-    stale_after_hours: 26
-    classification: critical
+    notes: "Legacy — evaluate if VM 200 still runs postgres worth backing up."
 
   - name: app-vaultwarden
     enabled: true
