@@ -168,7 +168,7 @@ The existing `infra/compose/mcpjungle/servers/media-stack/` becomes a **downstre
 | Phase | Scope | Dependency | Status |
 |-------|-------|------------|--------|
 | P0 | Design: agent contract, tool inventory, config schema | — | **DONE** (this audit) |
-| P1 | Pull current Recyclarr config from VM 209; audit language/quality profiles in Radarr/Sonarr | P0 | PENDING |
+| P1 | Pull current Recyclarr config from VM 209; audit language/quality profiles in Radarr/Sonarr | P0 | **DONE** — config pulled, profiles audited, Beach House RCA complete |
 | P2 | Fork MCPJungle media-stack server → `workbench/agents/media/tools/`; update all IPs to 209/210 split | P1 | PENDING |
 | P3 | Add new tools: profile management (list/update language profiles), recyclarr config sync | P2 | PENDING |
 | P4 | Build troubleshooting playbooks + Recyclarr config governance | P3 | PENDING |
@@ -241,6 +241,32 @@ The split loop (parent) gave us clean infrastructure: 2 dedicated VMs with isola
 
 ---
 
+## Phase Completion Notes
+
+### P1 — Profile Audit (2026-02-08)
+
+**Recyclarr config:** Pulled from VM 209 container → `workbench/agents/media/config/recyclarr.yml`. Last updated 2025-12-15. Uses TRaSH Guides templates for Sonarr (web-1080p) and Radarr (hd-bluray-web). Single custom override: BR-DISK -10000.
+
+**Radarr profiles:** 7 quality profiles. Profile 7 ("HD Bluray + WEB") is Recyclarr-managed with 22 scored custom formats. Profile 4 ("HD-1080p") has only 4 negative scores. **Zero language custom formats** across all 34 formats.
+
+**Sonarr profiles:** 7 quality profiles. Profile 7 ("WEB-1080p") is Recyclarr-managed.
+
+**Bazarr:** Single language profile (English), 3 subtitle providers (opensubtitlescom, podnapisi, subf2m). Cross-VM connections to Radarr/Sonarr on 100.107.36.76 working.
+
+**"The Beach House" RCA:**
+- File: `A.Casa.na.Praia.2018.1080p.AMZN.WEB-DL.DDP2.0.H.264-SiGLA.mkv`
+- Radarr tagged as English at grab, imported as Portuguese+English dual audio
+- Root cause: no language custom formats → no penalty for non-English primary audio
+- Movie uses profile 4 (minimal scoring) instead of profile 7 (Recyclarr-managed)
+- Fix path: add language CFs to Recyclarr config (P3), re-search movie (P6)
+
+**Artifacts:**
+- `workbench/agents/media/config/recyclarr.yml` — tracked SSOT
+- `workbench/agents/media/docs/P1-profile-audit.md` — full findings
+- `workbench/agents/media/AGENT.md` — agent identity doc
+
+---
+
 _Scope document created by: Opus 4.6_
 _Created: 2026-02-08_
-_Updated: 2026-02-08 (legacy audit, tool inventory, endpoint mapping, P0 DONE)_
+_Updated: 2026-02-08 (P1 DONE — recyclarr pulled, profiles audited, Beach House RCA)_

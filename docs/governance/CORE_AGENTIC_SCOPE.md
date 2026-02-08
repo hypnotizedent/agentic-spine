@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-05
+last_verified: 2026-02-08
 scope: core-boundaries
 ---
 
@@ -32,7 +32,7 @@ Authoritative contracts, manifests, and SSOT:
 - Authority definitions (docs/governance/AUTHORITY_INDEX.md)
 - Service SSOT (docs/governance/SERVICE_REGISTRY.yaml)
 - Governance manifest (docs/governance/manifest.yaml)
-- Agent contracts (agents/contracts/)
+- Agent contracts (ops/agents/)
 - Regression gate tests (`./bin/ops cap run spine.verify`)
 
 ---
@@ -72,8 +72,9 @@ These directories contain CORE assets that strengthen invariants:
 - `receipts/` - Trace per run (canonical audit trail)
 
 ### Agent Core
-- `agents/active/` - Active agent implementations
-- `agents/contracts/` - Agent contracts (CONTRACT.md, SKILL.md)
+- `ops/agents/` - Agent contracts (`<id>.contract.md`)
+- `ops/bindings/agents.registry.yaml` - Agent catalog with routing rules
+- Implementations live in workbench (`agents/<domain>/`) per AGENTS_LOCATION.md
 
 ### Verification Core
 - `surfaces/verify/` - Verification surfaces (health checks, drift detection)
@@ -94,11 +95,11 @@ These directories contain CORE assets that strengthen invariants:
 Only these locations can be authoritative:
 - `docs/governance/`
 - `docs/brain/`
-- `agents/contracts/`
+- `ops/agents/`
 - `surfaces/verify/`
 - `bin/`
 - `ops/`
-- `agents/active/`
+- `ops/agents/`
 - `receipts/`
 
 Everything under `docs/**/_imported/` and `_imports/` is **never authoritative** (reference-only).
@@ -116,7 +117,7 @@ These directories contain reference materials that are NOT CORE yet:
 - `_imports/` - Reference code from ronny-ops, etc.
   - Example: `_imports/ronny-ops-infrastructure/scripts/`
   - These are read-only reference, not executable
-  - May be promoted to `ops/` or `agents/active/` if they pass promotion tests
+  - May be promoted to `ops/` or `ops/agents/` if they pass promotion tests
   - **No scripts run from `_imports/`**
   - **No PATH references to `_imports/`**
   - **No source calls from `_imports/`**
@@ -131,7 +132,7 @@ These directories contain reference materials that are NOT CORE yet:
 - No scripts run from there
 - No PATH references
 - No source calls
-- Anything executable must live in `bin/`, `ops/`, `agents/active/`, `surfaces/verify/`, or `cli/bin/`
+- Anything executable must live in `bin/`, `ops/`, `ops/agents/`, `surfaces/verify/`, or `cli/bin/`
 
 ### 2. `docs/**/_imported/` is docs-only
 - Never referenced by runtime scripts except explicit doc pointers (like brain table)
@@ -142,7 +143,7 @@ These directories contain reference materials that are NOT CORE yet:
 Anything outside these paths is not runnable:
 - `bin/` - Runtime commands
 - `ops/` - Operations library
-- `agents/active/` - Active agents
+- `ops/agents/` - Active agents
 - `surfaces/verify/` - Verification surfaces
 - `cli/bin/` - CLI commands
 
@@ -265,7 +266,7 @@ find _imports docs -path "*/_imported/*" -type f -name "*.sh" -print
 ### C) Coupling Scan for Imported Payload
 ```bash
 cd ~/code/agentic-spine
-rg -n "(~/agent|\\$HOME/agent|ronny-ops|\\$HOME/ronny-ops)" docs/governance/_imported _imports agents/contracts/_imported || true
+rg -n "(~/agent|\\$HOME/agent|ronny-ops|\\$HOME/ronny-ops)" docs/governance/_imported _imports ops/agents/ || true
 ```
 **Criteria:** Zero runtime dependencies (documentation mentions OK)
 
@@ -354,3 +355,4 @@ or update scope references to `agentic-spine`.
 | 1.0 | 2026-02-01 | Initial version - defines CORE invariants and promotion rules |
 | 1.1 | 2026-02-01 | Added authority rule, import enforcement, core-readiness checklist, invariant statement |
 | 1.2 | 2026-02-04 | Added reference audit table for ronny-ops/workbench mentions |
+| 1.3 | 2026-02-08 | GAP-OP-046: agents/active/ → ops/agents/, agents/contracts/ → ops/agents/. Implementations in workbench per AGENTS_LOCATION.md |

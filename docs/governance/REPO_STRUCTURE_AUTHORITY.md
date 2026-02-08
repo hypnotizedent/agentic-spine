@@ -1,14 +1,14 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-01-26
+last_verified: 2026-02-08
 scope: repository-structure
 ---
 
 # REPO STRUCTURE AUTHORITY
 
 > **SINGLE SOURCE OF TRUTH** for repository folder hierarchy.
-> Last Updated: 2026-01-26
+> Last Updated: 2026-02-08
 > Owner: Ronny
 >
 > **Registered in:** `docs/governance/SSOT_REGISTRY.yaml` (id: repo-structure)
@@ -52,6 +52,8 @@ Every doc is reachable from an index in 2 clicks
 workbench/
 ├── README.md                    # Repo overview
 ├── WORKBENCH_CONTRACT.md        # Canonical rules for this repo
+├── agents/                      # Domain agent implementations
+│   └── <domain>/                # Per-domain: tools, configs, playbooks, docs
 ├── bin/                         # Entry points (ops/mint/work helpers)
 ├── bootstrap/                   # Mac setup helpers
 ├── docs/                        # Documentation (core + legacy)
@@ -138,6 +140,7 @@ If any of these folders appear in workbench, it is drift:
 | `docs/` | dir | Core index + legacy reference |
 | `dotfiles/` | dir | Shell/editor configs |
 | `infra/` | dir | Canonical infra configs + inventories |
+| `agents/` | dir | Domain agent implementations (tools, configs, playbooks) |
 | `scripts/` | dir | Operational scripts |
 
 ### Drift Check Command
@@ -153,7 +156,7 @@ mkdir -p "$R/docs/receipts"
 cd "$R" || exit 1
 
 # Allowlist regex (update ONLY via PR to this doc)
-ALLOW='^(\.git|\.archive|\.DS_Store|\.gitignore|README\.md|WORKBENCH_CONTRACT\.md|bin|bootstrap|docs|dotfiles|infra|scripts)$'
+ALLOW='^(\.git|\.archive|\.DS_Store|\.gitignore|README\.md|WORKBENCH_CONTRACT\.md|agents|bin|bootstrap|docs|dotfiles|infra|scripts)$'
 
 {
   echo "=== REPO ROOT DRIFT CHECK @ $TS ==="
