@@ -1,0 +1,126 @@
+# Cross-Repo Authority Contract
+#
+# Defines which repo owns which data to prevent dual-truth drift.
+# Agents MUST consult this before creating or modifying infrastructure data.
+#
+# Status: authoritative
+# Last verified: 2026-02-08
+# Created by: LOOP-INFRA-SSOT-ALIGNMENT-20260208 P2
+
+version: 1
+updated: "2026-02-08"
+
+repos:
+  agentic-spine:
+    path: "~/code/agentic-spine"
+    role: "Governance authority — canonical bindings, drift gates, loop state"
+  workbench:
+    path: "~/code/workbench"
+    role: "Supporting surface — runtime configs, reference data, dotfiles"
+
+# ─────────────────────────────────────────────────────────────
+# Authority Map
+# ─────────────────────────────────────────────────────────────
+#
+# authoritative = single source of truth; all other copies mirror it
+# supporting    = may exist for operational convenience but is NOT authoritative
+# sync_policy   = how supporting copies stay aligned
+
+domains:
+
+  device_identity:
+    authoritative:
+      repo: agentic-spine
+      file: "docs/governance/DEVICE_IDENTITY_SSOT.md"
+    supporting:
+      - repo: workbench
+        file: "infra/data/CONTAINER_INVENTORY.yaml"
+        note: "Observed runtime state; mirrors spine identity data"
+    sync_policy: "workbench mirrors spine; spine never reads workbench for identity"
+
+  service_registry:
+    authoritative:
+      repo: agentic-spine
+      file: "docs/governance/SERVICE_REGISTRY.yaml"
+    supporting:
+      - repo: workbench
+        file: "infra/data/SERVICE_REGISTRY.yaml"
+        note: "Legacy snapshot from pre-spine era; kept for reference"
+    sync_policy: "workbench file is stale reference; spine is truth"
+
+  ssh_targets:
+    authoritative:
+      repo: agentic-spine
+      file: "ops/bindings/ssh.targets.yaml"
+      note: "Governance-level SSH target definitions (host, user, tags)"
+    related:
+      - repo: workbench
+        file: "dotfiles/ssh/config.d/tailscale.conf"
+        note: "Runtime SSH config installed on MacBook; both maintained independently"
+    sync_policy: "Both are maintained. ssh.targets.yaml is governance; tailscale.conf is runtime config. New hosts must appear in both."
+
+  docker_compose_targets:
+    authoritative:
+      repo: agentic-spine
+      file: "ops/bindings/docker.compose.targets.yaml"
+    supporting:
+      - repo: workbench
+        file: "infra/compose/*/docker-compose.yml"
+        note: "Legacy compose files from pre-migration docker-host; kept as reference"
+    sync_policy: "Live compose truth is on target host (/opt/stacks/). Workbench compose is legacy reference only."
+
+  backup_inventory:
+    authoritative:
+      repo: agentic-spine
+      file: "ops/bindings/backup.inventory.yaml"
+    supporting:
+      - repo: workbench
+        file: "infra/data/backup_inventory.json"
+        note: "Detailed backup schedules, restore tests, classifications"
+    sync_policy: "Spine binding is governance (what SHOULD be backed up). Workbench JSON has operational detail (schedules, scripts, restore tests). Both maintained."
+
+  monitoring:
+    authoritative:
+      repo: agentic-spine
+      file: "ops/bindings/services.health.yaml"
+      note: "Will become authoritative when observability VM deployed"
+    supporting:
+      - repo: workbench
+        file: "infra/data/monitoring_inventory.json"
+        note: "Health endpoints, alert rules, notification channels"
+    sync_policy: "Workbench has richer detail (alert rules, dashboards). Spine has governed health checks. Both maintained; endpoints must match."
+
+  secrets_inventory:
+    authoritative:
+      repo: agentic-spine
+      file: "ops/bindings/secrets.inventory.yaml"
+    supporting:
+      - repo: workbench
+        file: "infra/data/secrets_inventory.json"
+        note: "Detailed project structure, rotation policy, known issues"
+    sync_policy: "Spine binding is governance (project IDs, lifecycle). Workbench JSON has operational detail. Both maintained."
+
+  placement_policy:
+    authoritative:
+      repo: agentic-spine
+      file: "ops/bindings/infra.placement.policy.yaml"
+    supporting: []
+    sync_policy: "Spine only. No workbench equivalent."
+
+  naming_policy:
+    authoritative:
+      repo: agentic-spine
+      file: "ops/bindings/naming.policy.yaml"
+    supporting: []
+    sync_policy: "Spine only. No workbench equivalent."
+
+# ─────────────────────────────────────────────────────────────
+# Agent Rules
+# ─────────────────────────────────────────────────────────────
+
+agent_rules:
+  - "When adding a new host/VM: update BOTH ssh.targets.yaml (spine) AND tailscale.conf (workbench)"
+  - "When migrating a service: update spine bindings FIRST, then sync workbench data files"
+  - "When workbench and spine disagree: spine wins (except for SSH runtime config)"
+  - "Never create new governance bindings in workbench — governance lives in spine"
+  - "Workbench compose files are reference/legacy — live truth is on the target host"
