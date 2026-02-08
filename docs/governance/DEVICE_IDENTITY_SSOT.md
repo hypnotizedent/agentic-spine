@@ -90,7 +90,7 @@ This document establishes:
 | LXCs | pihole-home, download-home |
 | NAS | Synology 918+ (`nas`) |
 | Home Assistant | `ha` (VM on proxmox-home) |
-| Vaultwarden | `vault` (VM on proxmox-home, VMID 102) |
+| Vaultwarden (rollback) | `vault` (VM on proxmox-home, VMID 102) — rollback source only (primary runs on `infra-core`) |
 
 **Verification:**
 ```bash
@@ -108,7 +108,7 @@ ping -c1 nas pihole-home ha vault
 | Switch mgmt IP | 192.168.12.1 (Dell N2024P) |
 | iDRAC | `idrac-shop` — 192.168.12.250 (LAN-only) |
 | Proxmox Host | `pve` (Dell R730XD) |
-| Production VMs | docker-host, infra-core, observability, automation-stack (core); download-stack, streaming-stack (media split); media-stack (decommissioning), immich-1 (deferred) |
+| Production VMs | docker-host, infra-core, observability, dev-tools, automation-stack (core); download-stack, streaming-stack (media split); media-stack (decommissioning), immich-1 (deferred) |
 | NVR | `nvr-shop` — 192.168.12.216 (LAN-only) |
 | WiFi AP | `ap-shop` — 192.168.12.249 (LAN-only) |
 
@@ -144,14 +144,15 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | macbook | 100.85.186.7 | Mobile | Workstation + Spine CLI (RAG deferred) |
 | pve | 100.96.211.33 | Shop | Proxmox VE (shop hypervisor) |
 | docker-host | 100.92.156.118 | Shop | Production docker (Mint OS) |
-| infra-core | 100.92.91.128 | Shop | Core infra (Cloudflared, Pi-hole, Infisical) |
+| infra-core | 100.92.91.128 | Shop | Core infra (Cloudflared, Pi-hole, Infisical, Vaultwarden, Authentik) |
 | observability | 100.120.163.70 | Shop | Observability (Prometheus, Grafana, Loki) |
+| dev-tools | 100.90.167.39 | Shop | Dev tools (Gitea, runner, postgres) |
 | automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
 | download-stack | 100.107.36.76 | Shop | Downloads + *arr (split from media-stack) |
 | streaming-stack | 100.123.207.64 | Shop | Streaming (Jellyfin, Navidrome) (split from media-stack) |
 | proxmox-home | 100.103.99.62 | Home | Proxmox VE (home host) |
 | nas | 100.102.199.111 | Home | Synology NAS |
-| vault | 100.93.142.63 | Home | Vaultwarden (password manager) |
+| vault | 100.93.142.63 | Home | Vaultwarden rollback source (VM 102) |
 | ha | 100.67.120.1 | Home | Home Assistant |
 | pihole-home | 100.105.148.96 | Home | Pi-hole |
 | download-home | 100.125.138.110 | Home | Downloads (*arr) (deferred) |
@@ -223,6 +224,7 @@ curl -s http://automation-stack:5678/healthz
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
 | automation-stack VM | `automation-stack` | 100.98.70.70 | n8n + Ollama | Shop | `curl -s http://automation-stack:5678/healthz` |
+| dev-tools VM | `dev-tools` | 100.90.167.39 | Gitea + runner | Shop | `curl -s http://100.90.167.39:3000/api/healthz` |
 
 ### Tier 2: Production Services (Media)
 
@@ -243,7 +245,7 @@ curl -s http://automation-stack:5678/healthz
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
 | Home Assistant | `ha` | 100.67.120.1 | Home Automation | Home | `curl -s http://ha:8123/api/` |
-| Vaultwarden | `vault` | 100.93.142.63 | Passwords | Home | `curl -s http://vault:8080/` |
+| Vaultwarden (rollback) | `vault` | 100.93.142.63 | Passwords | Home | `curl -s http://vault:8080/` |
 | Synology NAS | `nas` | 100.102.199.111 | Storage | Home | `ping nas` |
 | download-home LXC | `download-home` | 100.125.138.110 | *arr (home) | Home | `ssh download-home uptime` |
 | pihole-home LXC | `pihole-home` | 100.105.148.96 | DNS | Home | `ping pihole-home` |

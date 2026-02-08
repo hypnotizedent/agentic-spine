@@ -28,8 +28,8 @@ fi
 PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
 PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
 
-# Run clerk watcher to refresh CURRENT_STATE.md
-"$SCRIPT_DIR/../agents/clerk-watcher.sh" --issue "$ISSUE"
+# Legacy: clerk-watcher.sh wrote to deprecated infrastructure paths and is quarantined under ops/legacy/.
+# Spine-era closures use loops + receipts, not CURRENT_STATE.md.
 
 # Close the GitHub issue
 gh issue close "$ISSUE" --comment "Closed via ops close after PR #${PR_NUMBER}: ${PR_TITLE}"

@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.tunnel.ingress.status — export Cloudflare tunnel ingress rules (hostname -> service)
+# Read-only. No secret values printed.
+#
+# API: GET /accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations
+# Requires: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID (injected via secrets.exec)
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+TUNNEL_NAME_DEFAULT="homelab-tunnel"
+TUNNEL_NAME="${TUNNEL_NAME_DEFAULT}"
+
+usage() {
+  cat <<'EOF'
+cloudflare-tunnel-ingress-status
+
+Usage:
+  cloudflare-tunnel-ingress-status              # default tunnel (homelab-tunnel)
+  cloudflare-tunnel-ingress-status --tunnel NAME
+
+Output:
+  Stable, sorted list of "hostname -> service" rules (no secrets).
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tunnel)
+      [[ $# -ge 2 ]] || { echo "STOP: --tunnel requires NAME" >&2; exit 2; }
+      TUNNEL_NAME="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "STOP: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+# Re-exec ourselves under secrets injection (single capability receipt; no nested caps)
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+
+[[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || { echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2; exit 2; }
+[[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || { echo "STOP: CLOUDFLARE_ACCOUNT_ID missing" >&2; exit 2; }
+
+TUNNEL_ID="${CLOUDFLARE_TUNNEL_ID:-}"
+if [[ -z "${TUNNEL_ID:-}" ]]; then
+  [[ -f "$BINDING_FILE" ]] || { echo "STOP: binding missing: $BINDING_FILE" >&2; exit 2; }
+  TUNNEL_ID="$(python3 - "$BINDING_FILE" "$TUNNEL_NAME" <<'PY'
+import json, sys
+path = sys.argv[1]
+name = sys.argv[2]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+tunnels = data.get("tunnels", []) or []
+for t in tunnels:
+    if (t.get("name") or "").strip() == name:
+        tid = (t.get("id") or "").strip()
+        if tid:
+            print(tid)
+            sys.exit(0)
+print("")
+sys.exit(0)
+PY
+)"
+fi
+
+[[ -n "${TUNNEL_ID:-}" ]] || { echo "STOP: tunnel id not found (env CLOUDFLARE_TUNNEL_ID unset; binding missing name '$TUNNEL_NAME')" >&2; exit 2; }
+
+URL="${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations"
+curl -fsS \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "$URL" \
+  | python3 -c '
+import json, sys
+
+data = json.load(sys.stdin)
+print("cloudflare.tunnel.ingress.status")
+
+if not data.get("success", False):
+    print("STOP: Cloudflare API returned success=false", file=sys.stderr)
+    sys.exit(2)
+
+result = data.get("result") or {}
+cfg = result.get("config") or result.get("configuration") or result
+ingress = cfg.get("ingress") or []
+
+pairs = []
+catch_all = []
+for rule in ingress:
+    if not isinstance(rule, dict):
+        continue
+    svc = (rule.get("service") or "").strip()
+    hostname = rule.get("hostname")
+    hostnames = rule.get("hostnames")
+
+    if isinstance(hostname, str) and hostname.strip():
+        pairs.append((hostname.strip(), svc))
+        continue
+    if isinstance(hostnames, list):
+        for h in hostnames:
+            if isinstance(h, str) and h.strip():
+                pairs.append((h.strip(), svc))
+        continue
+    # No hostname means catch-all fallback rule.
+    if svc:
+        catch_all.append(svc)
+
+pairs = sorted(set(pairs), key=lambda x: x[0])
+print(f"rules: {len(pairs)}")
+print("")
+for h, s in pairs:
+    print(f"- {h} -> {s}")
+if catch_all:
+    # Show catch-all rules last (useful in audits, still non-secret)
+    for s in catch_all:
+        print(f"- (catch-all) -> {s}")
+'

@@ -24,6 +24,8 @@ from pathlib import Path
 # ─────────────────────────────────────────────────────────────────────────────
 
 SPINE_REPO = Path(os.environ.get("SPINE_REPO", Path.home() / "code" / "agentic-spine"))
+# Code root can differ from runtime root when using git worktrees.
+SPINE_CODE = Path(os.environ.get("SPINE_CODE") or os.environ.get("SPINE_ROOT") or str(SPINE_REPO))
 WORKBENCH_REPO = Path(os.environ.get("WORKBENCH_REPO", Path.home() / "code" / "workbench"))
 
 MAX_CONTENT_SIZE = 128 * 1024  # 128 KiB
@@ -518,6 +520,7 @@ def verify_redaction(report_path: Path) -> tuple[bool, list[str]]:
                             or re.match(r"^[a-f0-9]{64}$", token)  # SHA256 hash
                             or re.match(r"^[A-Za-z_]+$", token)  # all letters/underscores
                             or re.match(r"^[A-Z0-9_-]+$", token)  # uppercase identifiers (receipt/loop IDs)
+                            or re.match(r"^[a-z][a-z0-9-]{10,}-[0-9]{8}$", token)  # kebab-case + YYYYMMDD identifiers
                             or re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", token)  # variable names
                             or "${" in token  # shell variable references
                             or token.startswith("YYYYMMDD")
@@ -545,7 +548,7 @@ def main():
 
     # ── Phase 1: Walk trees ──────────────────────────────────────────────
 
-    spine_paths = walk_tree(SPINE_REPO)
+    spine_paths = walk_tree(SPINE_CODE)
     workbench_paths = walk_workbench_scoped(WORKBENCH_REPO)
 
     # Write TREE files
@@ -579,7 +582,7 @@ def main():
     for relpath in spine_paths:
         if relpath.endswith("/"):
             continue
-        full = SPINE_REPO / relpath
+        full = SPINE_CODE / relpath
         if not full.exists() or not full.is_file():
             continue
 
@@ -744,7 +747,8 @@ def main():
     report_lines = []
     report_lines.append("# Filesystem Export Report\n\n")
     report_lines.append(f"**Generated:** {ts} UTC\n")
-    report_lines.append(f"**Spine repo:** {SPINE_REPO}\n")
+    report_lines.append(f"**Spine code:** {SPINE_CODE}\n")
+    report_lines.append(f"**Spine runtime:** {SPINE_REPO}\n")
     report_lines.append(f"**Workbench repo:** {WORKBENCH_REPO}\n\n")
 
     # Section 1: Directory Trees
@@ -797,7 +801,7 @@ def main():
     report_lines.append("---\n\n### Content Summaries (not fully exported)\n\n")
     report_lines.append(summarize_directory(SPINE_REPO, "receipts", "Receipts") + "\n")
     report_lines.append(summarize_directory(SPINE_REPO, "mailroom", "Mailroom") + "\n")
-    report_lines.append(summarize_directory(SPINE_REPO, "docs/legacy", "Legacy Docs") + "\n")
+    report_lines.append(summarize_directory(SPINE_CODE, "docs/legacy", "Legacy Docs") + "\n")
 
     # Section 3: Indices
     report_lines.append("---\n\n## Indices\n\n")
