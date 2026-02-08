@@ -96,6 +96,8 @@ require_tailscale="$(yq e ".profiles.\"$PROFILE\".bootstrap.require_tailscale_co
 require_qemu="$(yq e ".profiles.\"$PROFILE\".bootstrap.require_qemu_agent_running // true" "$PROFILES")"
 require_docker="$(yq e ".profiles.\"$PROFILE\".bootstrap.require_docker_running // true" "$PROFILES")"
 require_cron="$(yq e ".profiles.\"$PROFILE\".bootstrap.require_cron_running // true" "$PROFILES")"
+ts_auth_secret_path="$(yq e ".profiles.\"$PROFILE\".bootstrap.tailscale_auth_secret_path // \"\"" "$PROFILES")"
+ts_auth_secret_key="$(yq e ".profiles.\"$PROFILE\".bootstrap.tailscale_auth_secret_key // \"\"" "$PROFILES")"
 
 echo "=== INFRA VM BOOTSTRAP ==="
 echo "Mode:       $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
@@ -109,7 +111,16 @@ echo
 
 echo "Planned bootstrap operations:"
 echo "  - install apt packages"
+if echo "$packages" | grep -q 'docker-ce'; then
+    echo "  - add Docker official apt repo (docker-ce detected in packages)"
+fi
+if echo "$packages" | grep -q 'tailscale'; then
+    echo "  - add Tailscale apt repo (tailscale detected in packages)"
+fi
 echo "  - enable/start required services"
+if [[ -n "$ts_auth_secret_path" && -n "$ts_auth_secret_key" ]]; then
+    echo "  - tailscale auth key: $ts_auth_secret_key from Infisical path $ts_auth_secret_path"
+fi
 echo "  - verify profile-required runtime checks"
 echo "  - enforce required cron hooks (if profile marks hooks as required)"
 
@@ -130,6 +141,8 @@ REQ_TAILSCALE="$3"
 REQ_QEMU="$4"
 REQ_DOCKER="$5"
 REQ_CRON="$6"
+TS_AUTH_KEY="${7:-}"
+TARGET_HOSTNAME="${8:-}"
 
 as_root() {
   if [[ "$(id -u)" -eq 0 ]]; then
@@ -148,6 +161,21 @@ if ! command -v apt-get >/dev/null 2>&1; then
 fi
 
 if [[ -n "$PACKAGES" ]]; then
+  # Add Docker official apt repo if docker-ce is in the package list
+  if echo "$PACKAGES" | grep -q "docker-ce"; then
+    as_root apt-get install -y -qq ca-certificates curl
+    as_root install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | as_root tee /etc/apt/keyrings/docker.asc >/dev/null
+    as_root chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | as_root tee /etc/apt/sources.list.d/docker.list >/dev/null
+  fi
+
+  # Add Tailscale apt repo if tailscale is in the package list
+  if echo "$PACKAGES" | grep -q "tailscale"; then
+    curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/$(. /etc/os-release && echo $VERSION_CODENAME).noarmor.gpg | as_root tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+    curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/$(. /etc/os-release && echo $VERSION_CODENAME).tailscale-keyring.list | as_root tee /etc/apt/sources.list.d/tailscale.list >/dev/null
+  fi
+
   as_root apt-get update
   as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y $PACKAGES
 fi
@@ -177,15 +205,42 @@ fi
 if [[ "$REQ_TAILSCALE" == "true" ]]; then
   command -v tailscale >/dev/null 2>&1 || { echo "ERROR: tailscale binary missing"; exit 1; }
   TS_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
-  [[ -n "$TS_IP" ]] || { echo "ERROR: tailscale not connected (run tailscale up)"; exit 1; }
+  if [[ -z "$TS_IP" ]]; then
+    if [[ -n "$TS_AUTH_KEY" ]]; then
+      ts_args=(--authkey "$TS_AUTH_KEY")
+      [[ -n "$TARGET_HOSTNAME" ]] && ts_args+=(--hostname "$TARGET_HOSTNAME")
+      as_root tailscale up "${ts_args[@]}"
+      TS_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
+      [[ -n "$TS_IP" ]] || { echo "ERROR: tailscale up with authkey failed"; exit 1; }
+    else
+      echo "ERROR: tailscale not connected and no auth key provided (run tailscale up manually)"
+      exit 1
+    fi
+  fi
 fi
 
 echo "BOOTSTRAP_OK"
 '
 
+# Fetch Tailscale auth key from Infisical (local side, never printed)
+ts_auth_key=""
+if [[ -n "$ts_auth_secret_path" && -n "$ts_auth_secret_key" ]]; then
+    need infisical
+    POLICY_FILE="$SPINE_REPO/ops/bindings/secrets.namespace.policy.yaml"
+    inf_project="$(yq e '.infisical.project_id' "$POLICY_FILE")"
+    inf_env="$(yq e '.infisical.environment' "$POLICY_FILE")"
+    ts_auth_key="$(infisical secrets get "$ts_auth_secret_key" \
+        --projectId "$inf_project" --env "$inf_env" \
+        --path "$ts_auth_secret_path" --plain --silent 2>/dev/null || true)"
+    if [[ -z "$ts_auth_key" ]]; then
+        echo "WARNING: could not fetch $ts_auth_secret_key from Infisical path $ts_auth_secret_path"
+        echo "         tailscale up will require manual browser auth on the target"
+    fi
+fi
+
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
-    "bash -lc $(printf "%q" "$remote_bootstrap") -- $(printf "%q" "$packages") $(printf "%q" "$services") $(printf "%q" "$require_tailscale") $(printf "%q" "$require_qemu") $(printf "%q" "$require_docker") $(printf "%q" "$require_cron")"
+    "bash -lc $(printf "%q" "$remote_bootstrap") -- $(printf "%q" "$packages") $(printf "%q" "$services") $(printf "%q" "$require_tailscale") $(printf "%q" "$require_qemu") $(printf "%q" "$require_docker") $(printf "%q" "$require_cron") $(printf "%q" "$ts_auth_key") $(printf "%q" "$TARGET")"
 
 required_hook_count="$(yq e ".profiles.\"$PROFILE\".bootstrap.cron_hooks[]? | select(.required == true) | .name" "$PROFILES" 2>/dev/null | wc -l | tr -d ' ')"
 if [[ "$required_hook_count" != "0" ]]; then
