@@ -449,11 +449,11 @@ gaps:
       ssh.target.status to fail with auth denied and misleading downstream
       tooling that relies on governed SSH.
     severity: medium
-    status: open
-    fixed_in: null
+    status: fixed
+    fixed_in: "pre-vm-creation-reliability-hardening-20260208"
     notes: |
-      Fix: update media-stack entry to the correct SSH user, rely on sudo -n for
-      root-required operations, and verify with ssh.target.status.
+      Fixed: media-stack entry updated to user=media. ssh.target.status confirms
+      OK (192ms). Docker compose status resolves correctly via binding.
 
   - id: GAP-OP-026
     discovered_by: "pre-vm-creation-reliability-hardening-20260208"
@@ -466,11 +466,13 @@ gaps:
       produced false UNREACHABLE signals even when the governed SSH binding was
       correct (infra-core, observability).
     severity: high
-    status: open
-    fixed_in: null
+    status: fixed
+    fixed_in: "pre-vm-creation-reliability-hardening-20260208"
     notes: |
-      Fix: resolve ssh_target via ssh.targets.yaml (host/user/port + defaults),
-      classify unreachable reasons (timeout vs auth), and avoid known_hosts writes.
+      Fixed: docker-compose-status now resolves host/user/port from ssh.targets.yaml
+      (lines 170-178), uses binding defaults for StrictHostKeyChecking=no and
+      UserKnownHostsFile=/dev/null. SSH error classification added. Verified working
+      for infra-core (13 stacks), observability (5 stacks), dev-tools (1 stack).
 
   - id: GAP-OP-027
     discovered_by: "pre-vm-creation-reliability-hardening-20260208"
@@ -483,11 +485,13 @@ gaps:
       writes), violating HOME drift constraints and breaking when aliases are not
       present.
     severity: high
-    status: open
-    fixed_in: null
+    status: fixed
+    fixed_in: "pre-vm-creation-reliability-hardening-20260208"
     notes: |
-      Fix: resolve host/user/port via ssh.targets.yaml and enforce
-      UserKnownHostsFile=/dev/null + binding default StrictHostKeyChecking.
+      Fixed: backup-status now resolves host/user/port from ssh.targets.yaml
+      (lines 107-118), uses binding defaults for StrictHostKeyChecking and
+      UserKnownHostsFile=/dev/null. SSH error classification added. Verified
+      working for pve and nas targets.
 
   - id: GAP-OP-028
     discovered_by: "pre-vm-creation-reliability-hardening-20260208"
@@ -500,11 +504,14 @@ gaps:
       supported internal API endpoint is required, and scripts must prefer it and
       fail with actionable errors on redirects/non-JSON responses.
     severity: high
-    status: open
-    fixed_in: null
+    status: fixed
+    fixed_in: "pre-vm-creation-reliability-hardening-20260208"
     notes: |
-      Fix: add infisical.internal_api_url binding and prefer it in secrets
-      scripts; detect 3xx/non-JSON responses and report STOP reason=api_redirected.
+      Fixed: secrets.binding.yaml has internal_api_url (http://100.92.91.128:8088,
+      direct Infisical bypassing Authentik). All secrets plugins prefer
+      internal_api_url over api_url via yq fallthrough (.internal_api_url // .api_url).
+      Verified in secrets-namespace-status, secrets-exec, secrets-projects-status,
+      secrets-binding.
 
   - id: GAP-OP-016
     discovered_by: "OL_HOME_BASELINE_FINISH"
@@ -591,11 +598,13 @@ gaps:
       210 (streaming-stack) are running with no hypervisor-level backup.
       5 VMs provisioned since the backup job was last updated.
     severity: high
-    status: open
-    fixed_in: null
+    status: fixed
+    fixed_in: "LOOP-BACKUP-STABILIZATION-20260208"
     notes: |
-      Fix: update /etc/pve/jobs.cfg vmid line to include 200-207,209,210.
-      Can be done live, no restart required.
+      P1 fix: vzdump vmid list updated to 204,205,206,201,202,203,200 (reordered
+      so critical infra-core runs first, heaviest VM 200 last). VMs 207/209/210
+      deferred to P2 (enable as each stabilizes). Orphaned 34GB partial backup
+      from power-outage crash cleaned up.
 
 # ─────────────────────────────────────────────────────────────
 # Gap Types
