@@ -104,7 +104,7 @@ Compose uses `infisical run -- docker compose up -d` or generates `.env` via sys
 | P1 | Provision VM 209 + VM 210 | P0 | DONE |
 | P2 | Prepare NFS + local storage | P1 | DONE |
 | P3 | Migrate download stack to VM 209 | P2 | DONE — 24/24 healthy |
-| P4 | Migrate streaming stack to VM 210 | P3 | DONE — 10/10 containers, spotisub reachable via CF tunnel (OAuth re-auth pending) |
+| P4 | Migrate streaming stack to VM 210 | P3 | DONE — 10/10 containers healthy, spotisub OAuth complete |
 | P5 | Update routing + SSOT (CF tunnel, bindings) | P4 | DONE — CF tunnel v82, all SSOT updated |
 | P6 | Soak (72h) + decommission VM 201 | P5 | IN PROGRESS — soak started 2026-02-08 |
 
@@ -155,7 +155,7 @@ Stop on 201 → verify data on 210 → compose up → healthcheck → test playb
 | Secrets in Infisical | No plaintext .env on new VMs |
 | VM 201 decommissioned | Powered off after 72h soak |
 | No cross-VM I/O contention | Streaming smooth during active downloads |
-| Drift gates pass | 47/47 PASS on `ops verify` |
+| Drift gates pass | 49/49 PASS on `ops verify` |
 
 ---
 
@@ -212,8 +212,8 @@ Agent discovery governance (D49 drift gate, `agents.registry.yaml`, `generate-co
 - VM 201 download services STOPPED
 
 ### P4 — Streaming Stack (2026-02-08)
-- 9/10 containers running on VM 210, all healthy except spotisub
-- spotisub: initially crash-looping (Spotify OAuth expired). CF tunnel ingress + DNS CNAME added 2026-02-08 for `spotisub.ronny.works`. Spotify OAuth re-auth now available at `https://spotisub.ronny.works/`
+- 10/10 containers running on VM 210, all healthy
+- spotisub: initially crash-looping (Spotify OAuth expired). CF tunnel ingress + DNS CNAME added 2026-02-08 for `spotisub.ronny.works`. Spotify OAuth re-auth completed 2026-02-08 at `https://spotisub.ronny.works/` — DONE
 - homarr: uses `ghcr.io/ajnart/homarr:latest` (v1, not v2 — config format incompatible)
 - navidrome/jellyseerr/homarr: healthchecks use wget (no curl in containers)
 - jellyseerr: needs web UI reconfiguration for radarr/sonarr/jellyfin API URLs (old VM 201 refs)
@@ -232,4 +232,4 @@ Agent discovery governance (D49 drift gate, `agents.registry.yaml`, `generate-co
 
 _Scope document created by: Opus 4.6_
 _Created: 2026-02-08_
-_Updated: 2026-02-08 (P3-P5 complete, soak period started, spotisub tunnel+DNS added)_
+_Updated: 2026-02-08 (P3-P5 complete, soak period started, spotisub OAuth done, 49/49 drift gates)_
