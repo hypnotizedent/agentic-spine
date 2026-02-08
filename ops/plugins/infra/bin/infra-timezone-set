@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# infra-timezone-set
+# Mutating: set timezone + enable NTP on infrastructure hosts via SSH.
+#
+# Default mode is dry-run. Pass --execute to mutate.
+# Iterates all reachable SSH targets and sets timezone.
+#
+# Usage:
+#   infra-timezone-set --timezone America/New_York --dry-run
+#   infra-timezone-set --timezone America/New_York --execute
+#   infra-timezone-set --timezone America/New_York --host-id pve --execute
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
+
+TIMEZONE=""
+HOST_ID=""
+EXECUTE=0
+
+usage() {
+    cat <<'EOF'
+infra-timezone-set - Set timezone + enable NTP on infrastructure hosts
+
+Usage:
+  infra-timezone-set --timezone <tz> [--host-id <id>] [--dry-run|--execute]
+
+Options:
+  --timezone <tz>       IANA timezone (e.g. America/New_York) (required)
+  --host-id <id>        Target a single host (default: all reachable SSH targets)
+  --execute             Apply changes (default: dry-run)
+  --dry-run             Preview only (default)
+EOF
+}
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --timezone) TIMEZONE="${2:-}"; shift 2 ;;
+        --host-id) HOST_ID="${2:-}"; shift 2 ;;
+        --execute) EXECUTE=1; shift ;;
+        --dry-run) EXECUTE=0; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+
+[[ -n "$TIMEZONE" ]] || fail "--timezone is required"
+need yq
+need ssh
+[[ -f "$SSH_BINDING" ]] || fail "ssh binding not found: $SSH_BINDING"
+yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SSH_BINDING"
+
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+# ── Build target list ──
+if [[ -n "$HOST_ID" ]]; then
+    TARGET_IDS=("$HOST_ID")
+else
+    mapfile -t TARGET_IDS < <(yq e '.ssh.targets[].id' "$SSH_BINDING")
+fi
+
+echo "=== INFRA TIMEZONE SET ==="
+echo "Timezone:   $TIMEZONE"
+echo "Mode:       $([[ "$EXECUTE" -eq 1 ]] && echo "EXECUTE" || echo "DRY-RUN")"
+echo "Targets:    ${#TARGET_IDS[@]} host(s)"
+echo ""
+
+# ── Results tracking ──
+total=0
+changed=0
+skipped=0
+failed=0
+unreachable=0
+
+printf "%-25s %-12s %-30s %-5s %-10s\n" "HOST" "USER" "CURRENT_TZ" "NTP" "ACTION"
+printf "%-25s %-12s %-30s %-5s %-10s\n" "----" "----" "----------" "---" "------"
+
+for target_id in "${TARGET_IDS[@]}"; do
+    total=$((total + 1))
+
+    ssh_host="$(yq e ".ssh.targets[] | select(.id == \"$target_id\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || echo "")"
+    ssh_user="$(yq e ".ssh.targets[] | select(.id == \"$target_id\") | .user // \"root\"" "$SSH_BINDING" 2>/dev/null || echo "root")"
+
+    if [[ -z "$ssh_host" || "$ssh_host" == "null" ]]; then
+        printf "%-25s %-12s %-30s %-5s %-10s\n" "$target_id" "-" "-" "-" "NO_TARGET"
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    # Probe current timezone + NTP
+    set +e
+    probe_out="$(ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
+        'tz="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo unknown)"; ntp="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)"; echo "${tz}|${ntp}"' 2>&1)"
+    probe_rc=$?
+    set -e
+
+    if [[ "$probe_rc" -ne 0 ]]; then
+        printf "%-25s %-12s %-30s %-5s %-10s\n" "$target_id" "$ssh_user" "UNREACHABLE" "-" "SKIP"
+        unreachable=$((unreachable + 1))
+        continue
+    fi
+
+    current_tz="$(echo "$probe_out" | tail -1 | cut -d'|' -f1)"
+    current_ntp="$(echo "$probe_out" | tail -1 | cut -d'|' -f2)"
+
+    if [[ "$current_tz" == "$TIMEZONE" && "$current_ntp" == "yes" ]]; then
+        printf "%-25s %-12s %-30s %-5s %-10s\n" "$target_id" "$ssh_user" "$current_tz" "$current_ntp" "OK"
+        skipped=$((skipped + 1))
+        continue
+    fi
+
+    if [[ "$EXECUTE" -ne 1 ]]; then
+        printf "%-25s %-12s %-30s %-5s %-10s\n" "$target_id" "$ssh_user" "$current_tz" "$current_ntp" "WOULD_FIX"
+        changed=$((changed + 1))
+        continue
+    fi
+
+    # Execute: set timezone + enable NTP (sudo for non-root users)
+    local_sudo=""
+    [[ "$ssh_user" != "root" ]] && local_sudo="sudo"
+    set +e
+    exec_out="$(ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
+        "set -euo pipefail; $local_sudo timedatectl set-timezone '$TIMEZONE' 2>&1; $local_sudo timedatectl set-ntp true 2>&1; echo OK" 2>&1)"
+    exec_rc=$?
+    set -e
+
+    if [[ "$exec_rc" -ne 0 || "$(echo "$exec_out" | tail -1)" != "OK" ]]; then
+        printf "%-25s %-12s %-30s %-5s %-10s\n" "$target_id" "$ssh_user" "$current_tz" "$current_ntp" "FAILED"
+        echo "  error: $exec_out"
+        failed=$((failed + 1))
+        continue
+    fi
+
+    # Verify
+    set +e
+    verify_out="$(ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
+        'tz="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo unknown)"; ntp="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)"; echo "${tz}|${ntp}"' 2>&1)"
+    set -e
+
+    new_tz="$(echo "$verify_out" | tail -1 | cut -d'|' -f1)"
+    new_ntp="$(echo "$verify_out" | tail -1 | cut -d'|' -f2)"
+
+    if [[ "$new_tz" == "$TIMEZONE" ]]; then
+        printf "%-25s %-12s %-30s %-5s %-10s\n" "$target_id" "$ssh_user" "$current_tz -> $new_tz" "$new_ntp" "FIXED"
+        changed=$((changed + 1))
+    else
+        printf "%-25s %-12s %-30s %-5s %-10s\n" "$target_id" "$ssh_user" "$current_tz -> $new_tz" "$new_ntp" "VERIFY_FAIL"
+        failed=$((failed + 1))
+    fi
+done
+
+echo ""
+echo "summary: $total hosts | $changed changed | $skipped ok/skipped | $unreachable unreachable | $failed failed"
+
+if [[ "$EXECUTE" -ne 1 && "$changed" -gt 0 ]]; then
+    echo ""
+    echo "Re-run with --execute to apply changes."
+fi
+
+[[ "$failed" -eq 0 ]] || exit 1

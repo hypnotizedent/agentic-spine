@@ -9,7 +9,7 @@
 # Last verified: 2026-02-07
 
 version: 1
-updated: "2026-02-08T16:03Z"
+updated: "2026-02-08T18:30Z"
 
 gaps:
   # ─────────────────────────────────────────────────────────────
@@ -449,11 +449,11 @@ gaps:
       ssh.target.status to fail with auth denied and misleading downstream
       tooling that relies on governed SSH.
     severity: medium
-    status: open
-    fixed_in: null
+    status: fixed
+    fixed_in: "pre-vm-creation-reliability-hardening-20260208"
     notes: |
-      Fix: update media-stack entry to the correct SSH user, rely on sudo -n for
-      root-required operations, and verify with ssh.target.status.
+      Fixed: media-stack entry updated to user=media. ssh.target.status confirms
+      OK (192ms). Docker compose status resolves correctly via binding.
 
   - id: GAP-OP-026
     discovered_by: "pre-vm-creation-reliability-hardening-20260208"
@@ -466,11 +466,13 @@ gaps:
       produced false UNREACHABLE signals even when the governed SSH binding was
       correct (infra-core, observability).
     severity: high
-    status: open
-    fixed_in: null
+    status: fixed
+    fixed_in: "pre-vm-creation-reliability-hardening-20260208"
     notes: |
-      Fix: resolve ssh_target via ssh.targets.yaml (host/user/port + defaults),
-      classify unreachable reasons (timeout vs auth), and avoid known_hosts writes.
+      Fixed: docker-compose-status now resolves host/user/port from ssh.targets.yaml
+      (lines 170-178), uses binding defaults for StrictHostKeyChecking=no and
+      UserKnownHostsFile=/dev/null. SSH error classification added. Verified working
+      for infra-core (13 stacks), observability (5 stacks), dev-tools (1 stack).
 
   - id: GAP-OP-027
     discovered_by: "pre-vm-creation-reliability-hardening-20260208"
@@ -483,11 +485,13 @@ gaps:
       writes), violating HOME drift constraints and breaking when aliases are not
       present.
     severity: high
-    status: open
-    fixed_in: null
+    status: fixed
+    fixed_in: "pre-vm-creation-reliability-hardening-20260208"
     notes: |
-      Fix: resolve host/user/port via ssh.targets.yaml and enforce
-      UserKnownHostsFile=/dev/null + binding default StrictHostKeyChecking.
+      Fixed: backup-status now resolves host/user/port from ssh.targets.yaml
+      (lines 107-118), uses binding defaults for StrictHostKeyChecking and
+      UserKnownHostsFile=/dev/null. SSH error classification added. Verified
+      working for pve and nas targets.
 
   - id: GAP-OP-028
     discovered_by: "pre-vm-creation-reliability-hardening-20260208"
@@ -500,11 +504,14 @@ gaps:
       supported internal API endpoint is required, and scripts must prefer it and
       fail with actionable errors on redirects/non-JSON responses.
     severity: high
-    status: open
-    fixed_in: null
+    status: fixed
+    fixed_in: "pre-vm-creation-reliability-hardening-20260208"
     notes: |
-      Fix: add infisical.internal_api_url binding and prefer it in secrets
-      scripts; detect 3xx/non-JSON responses and report STOP reason=api_redirected.
+      Fixed: secrets.binding.yaml has internal_api_url (http://100.92.91.128:8088,
+      direct Infisical bypassing Authentik). All secrets plugins prefer
+      internal_api_url over api_url via yq fallthrough (.internal_api_url // .api_url).
+      Verified in secrets-namespace-status, secrets-exec, secrets-projects-status,
+      secrets-binding.
 
   - id: GAP-OP-016
     discovered_by: "OL_HOME_BASELINE_FINISH"
@@ -551,7 +558,6 @@ gaps:
       and applies close status. open_loops.jsonl compacted from 121 to 61 lines.
       6 completed loops closed. 9 open loops remain.
 
-  # ─────────────────────────────────────────────────────────────
   # Discovered during CODE_AUDIT_20260208
   # ─────────────────────────────────────────────────────────────
 
@@ -654,6 +660,184 @@ gaps:
     notes: |
       Follow-up: add stack READMEs or runbooks covering export, restore, and a
       periodic restore test for both Authentik and Gitea.
+
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during OL_SHOP_BASELINE_FINISH remote audit 2026-02-08
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-037
+    discovered_by: "OL_SHOP_BASELINE_FINISH"
+    discovered_at: "2026-02-08"
+    type: runtime-bug
+    doc: "docs/governance/SHOP_SERVER_SSOT.md"
+    description: |
+      Dell MD1400 DAS shelf is physically cabled to R730XD (pve) via SAS cable
+      (Dell 0GYK61) but zero drives are visible to the OS. Two root causes:
+      (1) PM8072 SAS controller PCI vendor ID is 0x11f8 (Microchip, post-acquisition)
+      but the Linux pm80xx driver only recognizes 0x117C (PMC-Sierra, pre-acquisition) —
+      driver does not auto-bind. (2) Hot-loading the driver via new_id fails because
+      the PM8072 firmware requires cold-boot initialization — MPI handshake times out
+      with "FW is not ready" (chip_init failed, ret=-16/EBUSY).
+      Result: entire MD1400 shelf storage is inaccessible. Unknown drive count and
+      capacity sitting completely dark.
+    severity: critical
+    status: open
+    fixed_in: null
+    notes: |
+      Fix requires: (1) persistent modprobe config with install hook to inject PCI ID
+      (echo "11f8 8072" > /sys/bus/pci/drivers/pm80xx/new_id), (2) cold boot of pve
+      (power off/on, not reboot) for PM8072 firmware initialization. Maintenance window
+      needed — all 10 VMs go down. Loop: LOOP-MD1400-SAS-RECOVERY-20260208.
+      Upstream: PCI ID gap in Linux pm80xx driver (kernel 6.14.8-2-pve).
+
+  - id: GAP-OP-038
+    discovered_by: "OL_SHOP_BASELINE_FINISH"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "/etc/pve/jobs.cfg"
+    description: |
+      vzdump backup job on pve covers VMs 200-204 only. VMs 205 (observability),
+      206 (dev-tools), 207 (ai-consolidation), 209 (download-stack), and
+      210 (streaming-stack) are running with no hypervisor-level backup.
+      5 VMs provisioned since the backup job was last updated.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-BACKUP-STABILIZATION-20260208"
+    notes: |
+      P1 fix: vzdump vmid list updated to 204,205,206,201,202,203,200 (reordered
+      so critical infra-core runs first, heaviest VM 200 last). VMs 207/209/210
+      deferred to P2 (enable as each stabilizes). Orphaned 34GB partial backup
+      from power-outage crash cleaned up.
+
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during LOOP-CAMERA-BASELINE-20260208
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-039
+    discovered_by: "LOOP-CAMERA-BASELINE-20260208"
+    discovered_at: "2026-02-08"
+    type: runtime-bug
+    doc: "docs/governance/CAMERA_SSOT.md"
+    description: |
+      NVR channels 2, 3, 4 report chanDetectResult=notExist via ISAPI. Cameras
+      are powered off or disconnected from the Netgear PoE switch that feeds the
+      NVR's internal 192.168.254.0/24 network. Requires physical visit to the
+      upstairs 9U rack to inspect PoE switch ports and camera cabling.
+    severity: medium
+    status: open
+    fixed_in: null
+    notes: |
+      Tracked in LOOP-CAMERA-BASELINE-20260208 Phase P2. Cannot be fixed remotely —
+      requires on-site inspection of Netgear PoE switch and camera power/cabling.
+
+  - id: GAP-OP-040
+    discovered_by: "LOOP-CAMERA-BASELINE-20260208"
+    discovered_at: "2026-02-08"
+    type: runtime-bug
+    doc: "docs/governance/CAMERA_SSOT.md"
+    description: |
+      NVR channel 5 has IP address 192.168.254.7 which conflicts with channel 4
+      (same IP). ISAPI reports chanDetectResult=ipAddrConflict for ch5. This is
+      a configuration error in the NVR channel assignment, not a physical issue.
+    severity: low
+    status: fixed
+    fixed_in: "LOOP-CAMERA-BASELINE-20260208"
+    notes: |
+      Fixed: ch5 IP reassigned from 192.168.254.7 to 192.168.254.5 via ISAPI PUT
+      (2026-02-08). NVR accepted change (statusCode=1/OK). Ch5 now shows
+      netUnreachable (camera physically disconnected, not IP conflict).
+      Previous name "SCREEN PRINT" auto-reset to "IPCamera 05" by NVR.
+
+  - id: GAP-OP-041
+    discovered_by: "LOOP-CAMERA-BASELINE-20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "Infisical project: infrastructure (prod)"
+    description: |
+      Shop infrastructure credentials (NVR, iDRAC, Dell switch) were referenced
+      in SHOP_SERVER_SSOT.md and CAMERA_SSOT.md at Infisical paths
+      /spine/shop/nvr/*, /spine/shop/idrac/*, /spine/shop/switch/* but all three
+      paths were empty. Agent could not diagnose camera IP conflict without
+      asking the user for credentials interactively. SSOT docs implied secrets
+      existed when they did not.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-CAMERA-BASELINE-20260208"
+    notes: |
+      Fixed: all three credential sets stored in Infisical (6 keys total):
+      /spine/shop/nvr (NVR_ADMIN_USER, NVR_ADMIN_PASSWORD),
+      /spine/shop/idrac (IDRAC_ADMIN_USER, IDRAC_ADMIN_PASSWORD),
+      /spine/shop/switch (SWITCH_ADMIN_USER, SWITCH_ADMIN_PASSWORD).
+
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during LOOP-BACKUP-STABILIZATION-20260208
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-042
+    discovered_by: "LOOP-BACKUP-STABILIZATION-20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "ops/bindings/backup.inventory.yaml"
+    description: |
+      No SSH key authentication existed from pve or infra-core to the NAS
+      (Synology 918+ at house, Tailscale). Blocked all offsite backup sync.
+      The backup binding had an enabled offsite target (vm-200-docker-host-offsite)
+      and NAS directories existed, but no sync mechanism or SSH trust was ever
+      established. backup.status reported no_matches — a false signal that
+      appeared like a path problem when the real issue was no connectivity.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-BACKUP-STABILIZATION-20260208"
+    notes: |
+      Fixed: pve RSA key and infra-core ed25519 key added to
+      ronadmin@nas authorized_keys. Verified bidirectional SSH from both hosts.
+      Offsite rsync script and app backup scripts both use this trust path.
+
+  - id: GAP-OP-043
+    discovered_by: "LOOP-BACKUP-STABILIZATION-20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "ops/bindings/backup.inventory.yaml"
+    description: |
+      Vaultwarden backup stopped when the service migrated from proxmox-home
+      (LXC 102) to infra-core (VM 204) on 2026-02-05. No backup cron was
+      re-established on the new host. Last NAS backup was 2026-02-05 02:45,
+      creating a 3-day gap (Feb 5-8) where vaultwarden had zero backups.
+      The migration playbook had no post-migration backup verification step.
+      Additionally, the old host had no backup cron — the mechanism was unknown.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-BACKUP-STABILIZATION-20260208"
+    notes: |
+      Fixed: /usr/local/bin/vaultwarden-backup.sh on infra-core creates daily
+      tar.gz of vw-data dir, rsyncs to NAS. Cron at 02:45 daily. First backup
+      verified (1.5MB, synced to NAS successfully). Lesson: service migration
+      playbooks MUST include a backup continuity step — verify backup mechanism
+      is re-established on the new host before closing the migration.
+
+  - id: GAP-OP-044
+    discovered_by: "LOOP-BACKUP-STABILIZATION-20260208"
+    discovered_at: "2026-02-08"
+    type: duplicate-truth
+    doc: "ops/bindings/backup.inventory.yaml"
+    description: |
+      The backup binding had vm-200-docker-host-offsite enabled=true with a NAS
+      path that existed but was always empty. backup.status reported this as
+      no_matches, which appeared to be a path misconfiguration. In reality, no
+      sync mechanism (rsync, scp, Hyper Backup pull) was ever wired between pve
+      and NAS. The enabled=true flag + existing NAS directory created a false
+      impression that offsite backup was configured but broken, when it had never
+      been set up at all.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-BACKUP-STABILIZATION-20260208"
+    notes: |
+      Fixed: vm-200-docker-host-offsite disabled (186GB exceeds shop upload
+      bandwidth). New vm-offsite-critical target covers VMs 204-210 via
+      /usr/local/bin/vzdump-offsite-sync.sh on pve (cron 09:00, rsync with
+      1500 KB/s bwlimit over Tailscale). Lesson: never enable a backup target
+      in the binding without a corresponding sync mechanism. enabled=true must
+      mean "this is actively running and verifiable."
 
 # ─────────────────────────────────────────────────────────────
 # Gap Types
