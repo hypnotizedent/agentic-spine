@@ -103,6 +103,10 @@ Cloudflare Dashboard → Zero Trust → Networks → Tunnels → homelab-tunnel 
 | `secrets.ronny.works` | secrets | — | `infrastructure/secrets/` |
 | `files.ronny.works` | files-api | 3500 | `modules/files-api/` |
 | `mintprints-api.ronny.works` | dashboard-api | 3335 | `infrastructure/docker-host/mint-os/` |
+| `git.ronny.works` | gitea | 3000 | `ops/staged/dev-tools/gitea/` |
+| `auth.ronny.works` | authentik | 80 | `ops/staged/caddy-auth/` |
+| `pihole.ronny.works` | pihole | 80 | `ops/staged/pihole/` |
+| `vault.ronny.works` | vaultwarden | 80 | `ops/staged/vaultwarden/` |
 
 ### Hostnames with Unknown Routing
 

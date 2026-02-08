@@ -26,6 +26,7 @@ services:
       - GITEA__service__DISABLE_REGISTRATION=true
       - GITEA__service__REQUIRE_SIGNIN_VIEW=true
       - GITEA__install__INSTALL_LOCK=true
+      - GITEA__actions__ENABLED=true
     depends_on:
       gitea-postgres:
         condition: service_healthy
@@ -35,6 +36,21 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  gitea-runner:
+    image: gitea/act_runner:latest
+    container_name: gitea-runner
+    restart: unless-stopped
+    depends_on:
+      gitea:
+        condition: service_healthy
+    environment:
+      - GITEA_INSTANCE_URL=http://gitea:3000
+      - GITEA_RUNNER_REGISTRATION_TOKEN=${GITEA_RUNNER_TOKEN}
+      - GITEA_RUNNER_NAME=dev-tools-runner
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - gitea_runner_data:/data
 
   gitea-postgres:
     image: postgres:16-alpine
@@ -56,4 +72,6 @@ volumes:
   gitea_data:
     driver: local
   gitea_postgres:
+    driver: local
+  gitea_runner_data:
     driver: local

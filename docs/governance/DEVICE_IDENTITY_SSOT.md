@@ -147,8 +147,8 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | infra-core | 100.92.91.128 | Shop | Core infra (Cloudflared, Pi-hole, Infisical) |
 | observability | 100.120.163.70 | Shop | Observability (Prometheus, Grafana, Loki) |
 | automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
-| download-stack | TBD (VM 209) | Shop | Downloads + *arr (split from media-stack) |
-| streaming-stack | TBD (VM 210) | Shop | Streaming (Jellyfin, Navidrome) (split from media-stack) |
+| download-stack | 100.107.36.76 | Shop | Downloads + *arr (split from media-stack) |
+| streaming-stack | 100.123.207.64 | Shop | Streaming (Jellyfin, Navidrome) (split from media-stack) |
 | proxmox-home | 100.103.99.62 | Home | Proxmox VE (home host) |
 | nas | 100.102.199.111 | Home | Synology NAS |
 | vault | 100.93.142.63 | Home | Vaultwarden (password manager) |
@@ -228,8 +228,8 @@ curl -s http://automation-stack:5678/healthz
 
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
-| download-stack VM | `download-stack` | TBD (VM 209) | Downloads + *arr | Shop | `ssh download-stack docker ps` |
-| streaming-stack VM | `streaming-stack` | TBD (VM 210) | Jellyfin + Navidrome | Shop | `ssh streaming-stack docker ps` |
+| download-stack VM | `download-stack` | 100.107.36.76 | Downloads + *arr (VM 209) | Shop | `ssh download-stack docker ps` |
+| streaming-stack VM | `streaming-stack` | 100.123.207.64 | Jellyfin + Navidrome (VM 210) | Shop | `ssh streaming-stack docker ps` |
 
 ### Deferred (Out of Scope for Foundational Core)
 
