@@ -894,6 +894,69 @@ gaps:
       added agents/ to allowed root entries. (5) WORKBENCH_CONTRACT.md: added agent
       placement rule.
 
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during macbook alignment hardening 2026-02-09
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-047
+    discovered_by: "macbook-alignment-20260209"
+    discovered_at: "2026-02-09"
+    type: unclear-doc
+    doc: "docs/governance/CLAUDE_ENTRYPOINT_SHIM.md + host.claude.entrypoint.*"
+    description: |
+      Claude Code home state (~/.claude) contains a mix of governed entrypoint
+      surfaces (CLAUDE.md, commands/ctx.md, settings.json, settings.local.json)
+      and volatile user-local runtime state (history, cache, transcripts, etc.).
+      Without a single "apply + verify" command, agents and operators can drift
+      these entrypoint surfaces over time, causing inconsistent governance
+      injection across sessions.
+    severity: high
+    status: fixed
+    fixed_in: "macbook-alignment-20260209"
+    notes: |
+      Fixed by adding:
+      - host.macbook.managed_configs.apply (enforces managed symlinks and runs
+        host-claude-entrypoint-lock --execute)
+      - host.macbook.drift.check (enforced read-only drift check)
+      Receipts:
+      - RCAP-20260208-202527__host.macbook.managed_configs.apply__R2d9081898
+      - RCAP-20260208-202527__host.macbook.drift.check__R4yty81893
+
+  - id: GAP-OP-048
+    discovered_by: "macbook-alignment-20260209"
+    discovered_at: "2026-02-09"
+    type: missing-entry
+    doc: "ops/plugins/host/"
+    description: |
+      No read-only macbook drift gate existed to enforce host invariants beyond
+      the start routine. Drift could accumulate silently (managed symlinks,
+      CLAUDE entrypoint shim) until an agent session failed.
+    severity: medium
+    status: fixed
+    fixed_in: "macbook-alignment-20260209"
+    notes: |
+      Fixed: host.macbook.drift.check capability added (receipt:
+      RCAP-20260208-202527__host.macbook.drift.check__R4yty81893).
+
+  - id: GAP-OP-049
+    discovered_by: "macbook-alignment-20260209"
+    discovered_at: "2026-02-09"
+    type: missing-entry
+    doc: "workbench/dotfiles/macbook/README.md"
+    description: |
+      Managed tool configs existed in home (~/.codex/config.toml,
+      ~/.config/opencode/opencode.json) but were not governed as reproducible
+      dotfiles, so new machines (or drifted machines) would revert to ad-hoc
+      defaults and surprise other agents.
+    severity: low
+    status: fixed
+    fixed_in: "macbook-alignment-20260209"
+    notes: |
+      Fixed by storing these configs in workbench dotfiles and enforcing
+      symlinks via host.macbook.managed_configs.apply. Verified by:
+      - workbench verifier scripts/root/verify_laptop_hotkeys.sh
+      - host.macbook.drift.check capability
+
 # ─────────────────────────────────────────────────────────────
 # Gap Types
 # ─────────────────────────────────────────────────────────────

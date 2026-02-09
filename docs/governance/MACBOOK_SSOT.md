@@ -204,6 +204,10 @@ github_issue: "#625"
 ## Verification Commands
 
 ```bash
+# MacBook drift invariants (host + workbench alignment)
+cd ~/code/agentic-spine
+./bin/ops cap run host.macbook.drift.check
+
 # Identity check
 tailscale ip -4
 # Expected: 100.85.186.7

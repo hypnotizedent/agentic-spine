@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-macbook-managed-configs-apply
+#
+# Mutating: enforce managed symlinks + canonicalize Claude entrypoint surfaces.
+# Idempotent and creates timestamped backups for any replaced files.
+
+TS="$(date +%Y%m%d-%H%M%S)"
+
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
+WORKBENCH="${WORKBENCH_REPO:-$HOME/code/workbench}"
+
+want_link() {
+  local dst="$1"
+  local src="$2"
+
+  mkdir -p "$(dirname "$dst")"
+
+  if [[ -L "$dst" ]]; then
+    local cur
+    cur="$(readlink "$dst" 2>/dev/null || true)"
+    if [[ "$cur" == "$src" ]]; then
+      echo "OK  $dst -> $src"
+      return 0
+    fi
+    echo "FIX $dst (wrong-target: $cur)"
+    ln -sf "$src" "$dst"
+    return 0
+  fi
+
+  if [[ -e "$dst" ]]; then
+    echo "BAK $dst -> $dst.bak.$TS"
+    cp -a "$dst" "$dst.bak.$TS" 2>/dev/null || true
+    rm -rf "$dst"
+  fi
+
+  echo "SET $dst -> $src"
+  ln -sf "$src" "$dst"
+}
+
+echo "=== host.macbook.managed_configs.apply ==="
+echo "spine:     $SPINE"
+echo "workbench: $WORKBENCH"
+echo ""
+
+echo "[1] Enforce managed symlinks..."
+want_link "$HOME/.hammerspoon" "$WORKBENCH/dotfiles/hammerspoon/.hammerspoon"
+want_link "$HOME/.raycast-scripts" "$WORKBENCH/dotfiles/raycast"
+want_link "$HOME/.codex/config.toml" "$WORKBENCH/dotfiles/codex/config.toml"
+want_link "$HOME/.config/opencode/opencode.json" "$WORKBENCH/dotfiles/opencode/opencode.json"
+echo ""
+
+echo "[2] Canonicalize Claude entrypoint surfaces..."
+"$SPINE/ops/plugins/host/bin/host-claude-entrypoint-lock" --execute
+echo ""
+
+echo "[3] Reload Hammerspoon (best-effort)..."
+if command -v hs >/dev/null 2>&1; then
+  nohup hs -c "hs.reload()" >/dev/null 2>&1 &
+  echo "OK  hs.reload dispatched"
+else
+  echo "SKIP hs (not installed)"
+fi
+echo ""
+
+echo "[4] Regenerate AUTO docs blocks (best-effort)..."
+if [[ -x "$WORKBENCH/scripts/root/sync_laptop_hotkeys_docs.sh" ]]; then
+  bash "$WORKBENCH/scripts/root/sync_laptop_hotkeys_docs.sh" --quiet || true
+  echo "OK  docs sync complete"
+else
+  echo "SKIP sync script missing"
+fi
+echo ""
+
+echo "[5] Verify invariants..."
+cd "$WORKBENCH"
+bash scripts/root/verify_laptop_hotkeys.sh
+echo ""
+
+echo "DONE: macbook managed configs applied"
+
