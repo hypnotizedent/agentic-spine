@@ -16,8 +16,13 @@ sources: []
 > Mint OS container configs.
 >
 > **Do not execute commands or act on paths in this document from a spine session.**
-> Query the workbench or Mint OS directly for authoritative answers:
-> `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
+> If you need current Mint OS answers, treat workbench as **read-only reference**
+> and search by path (no RAG) without changing CWD:
+>
+> `rg -n "<question>" ~/code/workbench/docs ~/code/workbench/infra ~/code/workbench/scripts`
+>
+> If the result influences spine work, record a receipt:
+> `./bin/ops run --inline "External reference consulted: <what> (paths + findings)"`.
 >
 > **Current authority:** See [GOVERNANCE_INDEX.md](GOVERNANCE_INDEX.md) for spine-native
 > SSOTs. See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for external reference policy.

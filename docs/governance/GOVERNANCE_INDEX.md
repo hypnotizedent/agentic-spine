@@ -70,7 +70,8 @@ Pillar entrypoints (per stack)
 | 8 | [SERVICE_REGISTRY.yaml](SERVICE_REGISTRY.yaml) | Services topology + health check definitions |
 
 **For infrastructure details beyond these 8 docs:**
-- Query workbench directly via code search (no RAG): `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
+- Treat workbench as read-only reference and use path-scoped code search (no RAG):
+  `rg -n "<question>" ~/code/workbench/docs ~/code/workbench/infra ~/code/workbench/scripts`
 - See [WORKBENCH_TOOLING_INDEX.md](WORKBENCH_TOOLING_INDEX.md) for workbench entry points
 - Or check the spine's bindings: `ops/bindings/*.yaml` (authoritative when used by runtime/gates)
 
@@ -160,8 +161,13 @@ Workflow reference: `SSOT_UPDATE_TEMPLATE.md`
 > governed by the spine.**
 >
 > **Do not execute commands or act on external doc paths from within a spine session.**
-> If you need infrastructure answers beyond the spine-native docs above, query the
-> workbench directly via code search (no RAG): `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
+> If you need infrastructure answers beyond the spine-native docs above, treat workbench
+> as **read-only reference** and use **path-scoped search** (no RAG) without changing CWD:
+>
+> `rg -n "<question>" ~/code/workbench/docs ~/code/workbench/infra ~/code/workbench/scripts`
+>
+> If the result influences work, capture it as a receipt first:
+> `./bin/ops run --inline "External reference consulted: <what> (paths + findings)"`.
 >
 > See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for the full policy.
 >

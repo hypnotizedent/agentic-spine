@@ -12,7 +12,12 @@ scope: external-tooling
 > This is the only approved place to reference workbench tooling from the spine.
 > Workbench documentation is quarantined and not authoritative.
 >
-> **Query first (no RAG):** `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
+> **Query first (no RAG):**
+>
+> `rg -n "<question>" ~/code/workbench/docs ~/code/workbench/infra ~/code/workbench/scripts`
+>
+> If the result influences spine work, record a receipt:
+> `./bin/ops run --inline "External reference consulted: <what> (paths + findings)"`.
 
 ---
 
