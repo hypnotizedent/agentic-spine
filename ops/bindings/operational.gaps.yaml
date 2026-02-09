@@ -1116,18 +1116,18 @@ gaps:
     doc: "ops/staged/observability/loki/docker-compose.yml"
     description: |
       Loki Docker health check reports container as unhealthy despite the service
-      responding 200 on /ready from the host. Root cause: Loki's compactor waits
-      10 minutes for ring stability before /ready returns 200. The original
-      start_period=30s plus 3 retries at 30s intervals exhausted at ~2.5 minutes,
-      well before the compactor finished. Docker marked the container unhealthy
-      even though the service was initializing normally.
+      responding 200 on /ready from the host. Two compounding root causes:
+      (1) grafana/loki:latest is a distroless image with no shell, wget, or nc —
+      the wget-based health check can never succeed regardless of timing.
+      (2) Loki's compactor waits 10 minutes for ring stability before /ready
+      returns 200, so even a working health check would need >10min start_period.
     severity: low
     status: fixed
     fixed_in: "LOOP-OBSERVABILITY-HYGIENE-20260208"
     notes: |
-      Fixed: increased start_period from 30s to 720s (12 minutes) and retries
-      from 3 to 5 in loki docker-compose.yml (staged + live). Covers the full
-      10-minute compactor ring stability wait plus buffer.
+      Fixed: disabled in-container health check (test: ["NONE"]) since distroless
+      image has no health check tools. Health monitored externally via
+      services.health.yaml (GET /ready on 100.120.163.70:3100).
 
   - id: GAP-OP-059
     discovered_by: "LOOP-OBSERVABILITY-HYGIENE-20260208"
