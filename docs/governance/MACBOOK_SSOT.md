@@ -25,7 +25,7 @@ github_issue: "#625"
 | Tailscale IP | 100.85.186.7 |
 | Hostname | macbook |
 | Model | MacBook Pro M4 Max (Mac16,6) |
-| RAG API | http://localhost:3002 |
+| RAG API | http://100.71.17.29:3002 (remote: ai-consolidation VM 207) |
 | Ollama | http://localhost:11434 |
 
 ---
@@ -127,14 +127,33 @@ github_issue: "#625"
 
 ### Hotkeys / Shortcuts
 
+#### Hammerspoon
+
+<!-- BEGIN AUTO HOTKEYS -->
+| Hotkey | Action | Source |
+|--------|--------|--------|
+| **Ctrl+Shift+S** | Start routine (receipted) + launch Claude | `~/.hammerspoon/` |
+| **Ctrl+Shift+T** | Enqueue a mailroom task (optional prompt) + show watcher status | `~/.hammerspoon/` |
+| **Ctrl+Shift+C** | Launch Codex (bypass approvals + sandbox) in spine workdir | `~/.hammerspoon/` |
+| **Ctrl+Shift+O** | Launch OpenCode in spine workdir (force GLM 4.7) | `~/.hammerspoon/` |
+| **Ctrl+Shift+E** | Closeout prompt → clipboard | `~/.hammerspoon/` |
+<!-- END AUTO HOTKEYS -->
+
+#### Raycast
+
+<!-- BEGIN AUTO RAYCAST -->
+| Tool | Script | Command |
+|------|--------|---------|
+| **Raycast** | `Claude Code` | `cd ~/code/agentic-spine && claude --dangerously-skip-permissions --add-dir ~/code/workbench` |
+| **Raycast** | `Codex Full Auto` | `codex -C ~/code/agentic-spine --add-dir ~/code/workbench --dangerously-bypass-approvals-and-sandbox` |
+| **Raycast** | `OpenCode` | `cd ~/code/agentic-spine && opencode -m zai-coding-plan/glm-4.7 .` |
+| **Raycast** | `Spine Start Routine` | `cd ~/code/agentic-spine && ./bin/ops cap run spine.watcher.status && ./bin/ops cap run loops.status && ./bin/ops cap run spine.verify` |
+<!-- END AUTO RAYCAST -->
+
+#### Other
+
 | Tool | Hotkey / Script | Action | Source |
 |------|-----------------|--------|--------|
-| **Hammerspoon** | `Ctrl+Shift+S` | Start routine + launch Claude | `~/.hammerspoon/` |
-| **Hammerspoon** | `Ctrl+Shift+E` | Closeout prompt → clipboard | `~/.hammerspoon/` |
-| **Raycast** | `Spine Start Routine` | Start routine (receipted) | `~/.raycast-scripts` |
-| **Raycast** | `Claude Code` | Launch Claude Code | `~/.raycast-scripts` |
-| **Raycast** | `OpenCode` | Launch OpenCode | `~/.raycast-scripts` |
-| **Raycast** | `Codex Full Auto` | Launch Codex | `~/.raycast-scripts` |
 | **Espanso** | `;sup`, `;ctx`, `;issue`, `;ask` | Text expansion snippets | `~/.config/espanso/match/` |
 | **Maccy** | `Cmd+Shift+V` | Clipboard history | macOS app settings |
 | **Stream Deck** | (physical) | Home Assistant + infrastructure buttons | physical audit required |
@@ -167,8 +186,7 @@ github_issue: "#625"
 |------|----------|---------------|
 | `~/.claude/` | Claude Code config | Manual / git |
 | `~/.ssh/` | SSH keys | Manual |
-| `~/anythingllm_storage/` | RAG data | Manual |
-| `~/qdrant_storage/` | Vector DB | Manual |
+| (none) | RAG data is remote on VM 207 (`/opt/stacks/ai-consolidation/*`) | See VM backup policy |
 
 ---
 
@@ -182,11 +200,10 @@ tailscale ip -4
 # Docker health
 docker ps --format '{{.Names}}: {{.Status}}'
 
-# Optional: local RAG stack (currently paused for foundational-core work)
-# Only verify when explicitly enabled.
-# curl -s http://localhost:3002/api/ping
+# RAG API (remote)
+# curl -s http://100.71.17.29:3002/api/ping
 # curl -s http://localhost:11434/api/tags | jq '.models | length'
-# curl -s http://localhost:6333/collections | jq '.result.collections | length'
+# curl -s http://100.71.17.29:6333/healthz
 
 # Homebrew services
 brew services list
@@ -240,7 +257,7 @@ df -h /
 No open baseline loops. `OL_MACBOOK_BASELINE_FINISH` closed 2026-02-07.
 
 **Previously unverified items — resolved 2026-02-07:**
-- Hammerspoon: Confirmed only 2 hotkeys (`Ctrl+Shift+S`, `Ctrl+Shift+E`) in `~/.hammerspoon/init.lua`. No additional window management bindings.
+- Hammerspoon: Hotkey bindings are centralized in workbench and auto-synced into this SSOT (see AUTO blocks above).
 - Stream Deck: HA controller runs via `com.ronny.streamdeck.ha.plist` (Python script using Infisical for `HA_API_TOKEN`). Physical button layout is managed in Stream Deck app — not scriptable/auditable from CLI.
 
 ---
@@ -259,7 +276,7 @@ No open baseline loops. `OL_MACBOOK_BASELINE_FINISH` closed 2026-02-07.
 | Item | Value |
 |------|-------|
 | Method | `launchctl list`, `plutil -p`, `crontab -l`, `cat ~/.hammerspoon/init.lua` |
-| Result | 11 custom LaunchAgents verified (4 newly documented), no crontab, Hammerspoon 2 hotkeys only |
+| Result | 11 custom LaunchAgents verified (4 newly documented), no crontab, Hammerspoon hotkeys verified and SSOT auto-sync wired |
 | Loop closed | `OL_MACBOOK_BASELINE_FINISH` |
 
 ### Related Capability Receipts
