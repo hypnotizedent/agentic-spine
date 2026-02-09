@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# n8n-workflows — spine wrapper for workbench n8n workflow CLI
+#
+# Goals:
+# - Keep n8n workflow governance actions receipted via spine capabilities.
+# - Avoid hardcoded secrets providers/IDs in the execution path (use secrets.exec to inject N8N_API_KEY).
+# - Prevent accidental fallback to legacy/incorrect secret fetching paths inside workbench scripts.
+#
+# Expected usage (via capability):
+#   ./bin/ops cap run n8n.workflows.list
+#   ./bin/ops cap run n8n.workflows.get <workflow_id>
+#   ./bin/ops cap run n8n.workflows.export <workflow_id> <output.json>
+#
+
+WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
+WORKFLOWS_CLI="${WORKBENCH_ROOT}/infra/compose/n8n/n8n-workflows.sh"
+
+usage() {
+  cat <<'EOF'
+n8n-workflows (spine wrapper)
+
+Usage:
+  n8n-workflows <command> [args]
+
+Commands:
+  list
+  get <id>
+  export <id> [file]
+  import <file.json>
+  activate <id>
+  deactivate <id>
+  update <id> <file.json>
+  delete <id>
+
+Environment:
+  N8N_API_KEY   Required. Prefer running via spine capability which injects this via secrets.exec.
+  N8N_API_URL   Optional. Defaults to https://n8n.ronny.works (workbench script appends /api/v1).
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+  usage >&2
+  exit 2
+fi
+
+cmd="$1"
+shift || true
+
+if [[ ! -x "$WORKFLOWS_CLI" ]]; then
+  echo "STOP: missing or not executable: $WORKFLOWS_CLI" >&2
+  echo "hint: expected workbench at: $WORKBENCH_ROOT" >&2
+  exit 2
+fi
+
+# Hard requirement: force callers to supply the API key via env injection
+# (so we don't silently fall back to any embedded Infisical logic in workbench scripts).
+if [[ -z "${N8N_API_KEY:-}" ]]; then
+  echo "STOP: N8N_API_KEY is not set." >&2
+  echo "hint: run via spine capability (it injects secrets) or export N8N_API_KEY in your environment." >&2
+  exit 2
+fi
+
+exec "$WORKFLOWS_CLI" "$cmd" "$@"
+
