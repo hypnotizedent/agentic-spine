@@ -115,13 +115,13 @@ Services are self-healing (Docker restart policies, systemd).
 
 ```
 MacBook (control plane)
-  └── SSH → all VMs (via Tailscale)
+  ├── SSH → all VMs (via Tailscale)
   └── Infisical CLI → infra-core:8088
 
 infra-core (VM 204) — MOST CRITICAL
   ├── cloudflared → CF tunnel → all *.ronny.works
   ├── pihole → DNS for shop network
-  ├── infisical → secrets for ALL services
+  ├── infisical → secrets for ALL services (SPOF)
   ├── vaultwarden → human credential access
   ├── authentik → SSO for pihole, vault, secrets, gitea
   └── caddy → reverse proxy for above
@@ -130,11 +130,30 @@ observability (VM 205)
   └── prometheus/grafana/loki/uptime-kuma (monitoring only, no runtime deps)
 
 dev-tools (VM 206)
-  └── gitea (code hosting, CI runners)
+  └── gitea + runner + postgres (code hosting, CI)
+
+ai-consolidation (VM 207)
+  └── qdrant + anythingllm (no inbound deps from other VMs)
 
 download-stack (VM 209) ←→ streaming-stack (VM 210)
-  └── autopulse on 209 triggers jellyfin refresh on 210
-  └── jellyseerr on 210 calls radarr/sonarr on 209
+  ├── autopulse on 209 triggers jellyfin refresh on 210
+  ├── jellyseerr on 210 calls radarr/sonarr on 209
+  ├── bazarr on 210 calls radarr/sonarr on 209
+  └── both depend on NFS from pve (/media, /tank/docker/*)
+
+automation-stack (VM 202)
+  ├── n8n (workflow automation, postgres-backed)
+  ├── ollama + open-webui (local LLM)
+  └── no inbound deps from other VMs
+
+docker-host (VM 200) — legacy
+  └── mint-os-api + minio (low priority, rebuildable)
+
+immich-1 (VM 203)
+  └── photo library (media on NFS, metadata in local DB)
+
+proxmox-home (home site)
+  └── home-assistant (VM 100) — home automation
 
 NAS (home site)
   └── offsite backup target (vzdump copies, app-level dumps)

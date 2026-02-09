@@ -44,21 +44,24 @@ ls -lh "$out"
 '
 ```
 
-2. Move the artifact to the NAS backup area:
+2. Copy the artifact to the NAS backup area via rsync (NAS is not locally mounted on infra-core):
 
 ```bash
 ssh infra-core '
 set -euo pipefail
 src="$(ls -1t /tmp/infisical-db-*.sql.gz | head -n 1)"
-dst_dir="/volume1/backups/apps/infisical"
-sudo mkdir -p "$dst_dir"
-sudo mv "$src" "$dst_dir/"
-sudo ls -lt "$dst_dir" | head
+rsync -avz "$src" nas:/volume1/backups/apps/infisical/
 '
 ```
 
+If `nas` is unreachable from infra-core, pull the dump to the MacBook first:
+```bash
+scp infra-core:/tmp/infisical-db-*.sql.gz /tmp/
+scp /tmp/infisical-db-*.sql.gz nas:/volume1/backups/apps/infisical/
+```
+
 Notes:
-- If `/volume1/...` is not mounted on `infra-core`, copy the file to `nas` via `scp`/`rsync` instead.
+- The automated cron (02:50 daily) handles this rsync automatically.
 - Secrets of record live in Infisical itself; the `.env` on-host contains DB credentials only.
 
 ## Restore (Disaster Recovery)

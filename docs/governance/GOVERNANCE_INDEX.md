@@ -40,7 +40,7 @@ Pillar entrypoints (per stack)
 
 **The 5 Rules:**
 1. NO OPEN LOOPS = NO WORK → `./bin/ops loops list --open`
-2. NO GUESSING = RAG FIRST → `mint ask "question"`
+2. NO GUESSING = SSOT FIRST → read SSOT docs + use repo search (`rg`)
 3. NO INVENTING → match existing patterns
 4. FIX ONE THING → verify before next
 5. WORK GENERATES RECEIPTS → `./bin/ops cap run <name>`
@@ -70,7 +70,7 @@ Pillar entrypoints (per stack)
 | 8 | [SERVICE_REGISTRY.yaml](SERVICE_REGISTRY.yaml) | Services topology + health check definitions |
 
 **For infrastructure details beyond these 8 docs:**
-- Query workbench directly: `cd ~/code/workbench && mint ask "question"`
+- Query workbench directly via code search (no RAG): `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
 - See [WORKBENCH_TOOLING_INDEX.md](WORKBENCH_TOOLING_INDEX.md) for workbench entry points
 - Or check the spine's bindings: `ops/bindings/*.yaml` (authoritative when used by runtime/gates)
 
@@ -94,6 +94,25 @@ Pillar entrypoints (per stack)
 | `SUPERVISOR_CHECKLIST.md` | Verify work before shipping |
 | `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |
 | `HOST_DRIFT_POLICY.md` | Host drift contract for `/Users/ronnyworks` stabilization |
+
+### Backup & Recovery
+
+| Document | Purpose | Status |
+|----------|---------|--------|
+| `BACKUP_GOVERNANCE.md` | Backup freshness rules and retention | authoritative |
+| `AUTHENTIK_BACKUP_RESTORE.md` | Authentik app-level backup/restore procedure | authoritative |
+| `GITEA_BACKUP_RESTORE.md` | Gitea app-level backup/restore procedure | authoritative |
+| `INFISICAL_BACKUP_RESTORE.md` | Infisical app-level backup/restore procedure | authoritative |
+| `DR_RUNBOOK.md` | Per-site failure scenarios, dependency map, recovery priority | authoritative |
+| `RTO_RPO.md` | Recovery time/point objectives per service tier | authoritative |
+
+### Policy Skeletons (Draft)
+
+| Document | Covers | Status |
+|----------|--------|--------|
+| `SECURITY_POLICIES.md` | SSH hardening, firewall, NFS, access control, Tailscale audit, secrets rotation | draft |
+| `NETWORK_POLICIES.md` | Tailscale ACLs, subnet registry, DNS strategy, WAN, segmentation | draft |
+| `PATCH_CADENCE.md` | OS/container/firmware update schedules, version tracking | draft |
 
 ### Single Sources of Truth (by Domain)
 
@@ -136,7 +155,7 @@ Workflow reference: `SSOT_UPDATE_TEMPLATE.md`
 >
 > **Do not execute commands or act on external doc paths from within a spine session.**
 > If you need infrastructure answers beyond the spine-native docs above, query the
-> workbench directly: `cd ~/code/workbench && mint ask "question"`
+> workbench directly via code search (no RAG): `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
 >
 > See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for the full policy.
 >
@@ -249,9 +268,9 @@ START: Agent has a question about "truth"
     │       NO → Record work via `./bin/ops loops collect`
     │      YES ↓
     │
-    ├─▶ Does RAG have an answer?
-    │       → `mint ask "your question"`
-    │       YES → Follow RAG answer (check sources)
+    ├─▶ Can you answer via SSOT/docs/search?
+    │       → Check SSOTs, then `rg -n "<query>" docs ops`
+    │       YES → SSOT wins (verify with receipts/capabilities when relevant)
     │       NO ↓
     │
     ├─▶ Is there an SSOT for this domain?
