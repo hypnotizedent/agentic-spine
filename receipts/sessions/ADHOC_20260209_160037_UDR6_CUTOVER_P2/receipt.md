@@ -191,3 +191,22 @@ curl --digest -u admin:<pass> -X PUT \
 | NVR | 192.168.12.216 | 192.168.1.216 | DEFERRED (not responding) |
 | Switch | 192.168.12.2 | 192.168.1.2 | DEFERRED (console cable needed) |
 
+
+### Step 8: iDRAC Re-IP (via local IPMI)
+
+Fixed PVE DNS (`/etc/resolv.conf` → `1.1.1.1` temp, installed ipmitool, restored Tailscale DNS).
+
+```
+ipmitool lan set 1 ipaddr 192.168.1.250
+ipmitool lan set 1 netmask 255.255.255.0
+ipmitool lan set 1 defgw ipaddr 192.168.1.1
+```
+
+| Field | Old | New | Verified |
+|-------|-----|-----|----------|
+| IP | 192.168.12.250 | 192.168.1.250 | ping OK, Redfish v1.4.0 OK |
+| Netmask | 255.255.255.0 | 255.255.255.0 | — |
+| Gateway | 192.168.12.0 (malformed) | 192.168.1.1 | — |
+
+**NVR + Switch**: still unreachable on old IPs (192.168.12.216, 192.168.12.2). May need physical power cycle. Deferred.
+
