@@ -14,11 +14,15 @@ Password vault (Vaultwarden) for human-managed secrets and bootstrap credentials
 
 ## Secrets
 
-This stack uses a host-local `.env` file (do not commit). Keys required are listed in `.env.example`.
+Sensitive secrets are stored in Infisical at `/spine/vm-infra/vaultwarden/`:
+- `VAULTWARDEN_ADMIN_TOKEN` — admin panel access token
 
-Common keys:
-- `ADMIN_TOKEN`
-- `DOMAIN`
+Non-secret configuration lives in the host-local `.env` file (do not commit).
+Keys required are listed in `.env.example` (DOMAIN, LOG_LEVEL, TZ, etc.).
+
+## Backup + Restore
+
+See [`docs/governance/VAULTWARDEN_BACKUP_RESTORE.md`](../../../docs/governance/VAULTWARDEN_BACKUP_RESTORE.md).
 
 ## Verification
 
