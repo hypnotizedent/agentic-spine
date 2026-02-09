@@ -42,7 +42,7 @@ Current allocations:
 
 | Site | Subnet | Gateway | DHCP | DNS |
 |------|--------|---------|------|-----|
-| Shop | 192.168.1.0/24 | 192.168.1.1 (UDR6) | UDR6 (.100-.199) | Pi-hole (192.168.1.128) |
+| Shop | 192.168.1.0/24 | 192.168.1.1 (UDR6) | UDR6 (.100-.199) | Pi-hole (192.168.1.204) |
 | Home | 10.0.0.0/24 | 10.0.0.1 (UDR7) | UDR7 | Router default |
 | Camera | 192.168.254.0/24 | NVR internal | NVR | N/A |
 
@@ -55,7 +55,7 @@ Rules for new sites:
 ## DNS Strategy (NET-03) — IMPLEMENTED (shop)
 
 Current state:
-- **Shop: IMPLEMENTED.** UDR6 DHCP DNS → Pi-hole on infra-core (192.168.1.128:53). All DHCP clients use Pi-hole. Static VMs configured with `nameservers: [192.168.1.128]` in netplan.
+- **Shop: IMPLEMENTED.** UDR6 DHCP DNS → Pi-hole on infra-core (192.168.1.204:53). All DHCP clients use Pi-hole. Static VMs configured with `nameservers: [192.168.1.204]` in netplan.
 - Home: Pi-hole-home exists but DHCP DNS points to router, not pihole.
 
 Active:

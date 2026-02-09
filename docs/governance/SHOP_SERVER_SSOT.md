@@ -166,10 +166,10 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 | `/tank/docker` | 192.168.1.0/24 | Docker volumes | rw |
 | `/tank/backups` | docker-host (192.168.1.x) | Backup target | rw |
 | `/tank/vms` | docker-host (192.168.1.x) | VM storage | rw |
-| `/tank/docker/download-stack` | download-stack (192.168.1.76) | Download app configs | rw |
-| `/media` | download-stack (192.168.1.76) | Media files | rw |
-| `/tank/docker/streaming-stack` | streaming-stack (192.168.1.64) | Streaming app configs | rw |
-| `/media` | streaming-stack (192.168.1.64) | Media files | **ro** |
+| `/tank/docker/download-stack` | download-stack (192.168.1.209) | Download app configs | rw |
+| `/media` | download-stack (192.168.1.209) | Media files | rw |
+| `/tank/docker/streaming-stack` | streaming-stack (192.168.1.210) | Streaming app configs | rw |
+| `/media` | streaming-stack (192.168.1.210) | Media files | **ro** |
 
 All exports use `sync,no_subtree_check,no_root_squash` over **LAN IPs** (not Tailscale — avoids D-state deadlock). streaming-stack has read-only `/media` access (consumers only, no writes).
 
@@ -235,7 +235,7 @@ Internet → T-Mobile 5G GW (CGNAT, locked — double NAT)
 | Gateway | `192.168.1.1` (UniFi UDR6) |
 | Switch | `192.168.1.2` (Dell N2024P, VLAN 1 management) |
 | DHCP range | `192.168.1.100–192.168.1.199` (UDR6) |
-| DHCP DNS | `192.168.1.128` (Pi-hole on infra-core) |
+| DHCP DNS | `192.168.1.204` (Pi-hole on infra-core) |
 | WAN | T-Mobile 5G Home Internet (~865/309 Mbps, CGNAT) |
 
 ### Switch Port Assignments (Dell N2024P)
@@ -364,7 +364,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 ## Open Network Tasks (shop)
 
-- [x] **DHCP DNS cutover**: UDR6 deployed as shop gateway (192.168.1.1). Shop LAN re-IPed to 192.168.1.0/24. DHCP→UDR6, DNS→Pi-hole (192.168.1.128). Loop: LOOP-UDR6-SHOP-CUTOVER-20260209. Gate: D52.
+- [x] **DHCP DNS cutover**: UDR6 deployed as shop gateway (192.168.1.1). Shop LAN re-IPed to 192.168.1.0/24. DHCP→UDR6, DNS→Pi-hole (192.168.1.204). Loop: LOOP-UDR6-SHOP-CUTOVER-20260209. Gate: D52.
 - [x] **vzdump backup gap**: All 10 VMs in vzdump job. Offsite sync (pve → NAS over Tailscale) wired for VMs 204-210.
 
 ---

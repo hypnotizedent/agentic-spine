@@ -176,17 +176,17 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | VM | Canonical Name | LAN IP | VMID | Notes |
 |----|----------------|--------|------|-------|
 | pve (hypervisor) | `pve` | 192.168.1.184 | — | Proxmox host; NFS server |
-| infra-core | `infra-core` | 192.168.1.128 | 204 | Static IP; Pi-hole DNS |
-| observability | `observability` | 192.168.1.70 | 205 | Static IP |
-| dev-tools | `dev-tools` | 192.168.1.39 | 206 | Static IP |
-| download-stack | `download-stack` | 192.168.1.76 | 209 | NFS mounts use this IP |
-| streaming-stack | `streaming-stack` | 192.168.1.64 | 210 | NFS mounts use this IP |
+| infra-core | `infra-core` | 192.168.1.204 | 204 | Static IP; Pi-hole DNS |
+| observability | `observability` | 192.168.1.205 | 205 | Static IP |
+| dev-tools | `dev-tools` | 192.168.1.206 | 206 | Static IP |
+| download-stack | `download-stack` | 192.168.1.209 | 209 | NFS mounts use this IP |
+| streaming-stack | `streaming-stack` | 192.168.1.210 | 210 | NFS mounts use this IP |
 
 ### Subnet Table
 
 | Subnet | Location | Gateway | DHCP Range | Notes |
 |--------|----------|---------|------------|-------|
-| 192.168.1.0/24 | Shop | 192.168.1.1 (UDR6) | .100-.199 | Production infrastructure; DNS → Pi-hole (.128) |
+| 192.168.1.0/24 | Shop | 192.168.1.1 (UDR6) | .100-.199 | Production infrastructure; DNS → Pi-hole (.204) |
 | 10.0.0.0/24 | Home | 10.0.0.1 (UDR7) | .100-.199 | Home lab |
 | 100.x.x.x/32 | Tailscale | MagicDNS | N/A | Mesh overlay network |
 

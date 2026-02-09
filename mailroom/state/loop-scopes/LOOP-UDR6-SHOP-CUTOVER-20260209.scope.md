@@ -25,6 +25,7 @@ Double-NAT topology is acceptable since all public access uses Cloudflare tunnel
 |-------|-------------|--------|
 | P0 | Audit (topology, devices, IPs, gaps) | **DONE** |
 | P1 | Pre-stage: SSOT docs, governance, runbook | **DONE** |
+| P1.5 | SSH pre-staging: netplan, PVE interfaces, PM8072 | **IN PROGRESS** |
 | P2 | Physical cutover: cable swap, re-IP, cold boot | PENDING (on-site) |
 | P3 | Verification: connectivity, NFS, services, DNS | PENDING |
 | P4 | Post-cutover: finalize docs, close gaps | PENDING |
@@ -45,7 +46,7 @@ Double-NAT topology is acceptable since all public access uses Cloudflare tunnel
 | NETWORK_RUNBOOK.md | Created: reusable network change procedures | **DONE** |
 | Loop registered | open_loops.jsonl entry | **DONE** |
 | Memory files updated | MEMORY.md, infrastructure-details.md, governance-details.md | **DONE** |
-| pihole staged config | Updated FTLCONF_LOCAL_IPV4 to 192.168.1.128 | **DONE** |
+| pihole staged config | Updated FTLCONF_LOCAL_IPV4 to 192.168.1.204 | **DONE** |
 | DR_RUNBOOK.md | Updated iDRAC IP | **DONE** |
 | SHOP_VM_ARCHITECTURE.md | Updated NFS LAN IPs | **DONE** |
 
@@ -54,7 +55,7 @@ Double-NAT topology is acceptable since all public access uses Cloudflare tunnel
 ## P2: Physical Cutover (PENDING)
 
 ### Pre-Cutover (remote, via Tailscale)
-1. Factory reset UDR6, adopt in UniFi app, configure: LAN 192.168.1.0/24, DHCP .100-.199, DNS→192.168.1.128
+1. Factory reset UDR6, adopt in UniFi app, configure: LAN 192.168.1.0/24, DHCP .100-.199, DNS→192.168.1.204
 2. Unmount NFS on all VMs (`umount -l`)
 3. Apply VM netplan changes (SSH via Tailscale)
 4. Apply PVE `/etc/network/interfaces` change
@@ -112,11 +113,11 @@ See NETWORK_RUNBOOK.md and full plan for detailed verification matrix covering:
 |--------|--------|--------|
 | UDR6 (new) | — | 192.168.1.1 |
 | pve (vmbr0) | 192.168.12.184 | 192.168.1.184 |
-| infra-core | 192.168.12.128 | 192.168.1.128 |
-| observability | 192.168.12.70 | 192.168.1.70 |
-| dev-tools | 192.168.12.39 | 192.168.1.39 |
-| download-stack | 192.168.12.76 | 192.168.1.76 |
-| streaming-stack | 192.168.12.64 | 192.168.1.64 |
+| infra-core | 192.168.12.128 | 192.168.1.204 |
+| observability | 192.168.12.70 | 192.168.1.205 |
+| dev-tools | 192.168.12.39 | 192.168.1.206 |
+| download-stack | 192.168.12.76 | 192.168.1.209 |
+| streaming-stack | 192.168.12.64 | 192.168.1.210 |
 | switch | 192.168.12.2 | 192.168.1.2 |
 | iDRAC | 192.168.12.250 | 192.168.1.250 |
 | NVR | 192.168.12.216 | 192.168.1.216 |

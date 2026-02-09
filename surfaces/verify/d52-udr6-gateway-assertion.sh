@@ -63,4 +63,23 @@ else
   ERRORS=$((ERRORS + 1))
 fi
 
+# Check that DEVICE_IDENTITY_SSOT.md uses VMID-based LAN IPs (not Tailscale-derived)
+if [[ -f "$DI" ]]; then
+  # infra-core must be .204 (VMID), not .128 (Tailscale-derived)
+  if grep -q '192\.168\.1\.128.*204' "$DI" 2>/dev/null; then
+    echo "FAIL: DEVICE_IDENTITY_SSOT.md has Tailscale-derived IP .128 for infra-core (should be .204)" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+  # download-stack must be .209 (VMID), not .76 (Tailscale-derived)
+  if grep -q '192\.168\.1\.76.*209' "$DI" 2>/dev/null; then
+    echo "FAIL: DEVICE_IDENTITY_SSOT.md has Tailscale-derived IP .76 for download-stack (should be .209)" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+  # streaming-stack must be .210 (VMID), not .64 (Tailscale-derived)
+  if grep -q '192\.168\.1\.64.*210' "$DI" 2>/dev/null; then
+    echo "FAIL: DEVICE_IDENTITY_SSOT.md has Tailscale-derived IP .64 for streaming-stack (should be .210)" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+fi
+
 [[ "$ERRORS" -eq 0 ]] && exit 0 || exit 1
