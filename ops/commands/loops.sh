@@ -19,6 +19,9 @@ LOOPS_FILE="$STATE_DIR/open_loops.jsonl"
 RECEIPTS_DIR="$SPINE_REPO/receipts/sessions"
 OUTBOX_DIR="$SPINE_REPO/mailroom/outbox"
 LEDGER="$STATE_DIR/ledger.csv"
+# Local-only cursor used to avoid "historical receipt backfill" loop storms.
+# This file is intentionally NOT committed (mailroom/state/* is gitignored unless explicitly tracked).
+CURSOR_FILE="$STATE_DIR/loops_collect.cursor"
 
 # Dependency check - jq required for JSONL parsing
 check_deps() {
@@ -53,7 +56,18 @@ Examples:
 
 Environment:
   LOOPS_LEDGER_FAILURE_WINDOW_HOURS  Failed-run reconciliation window (default: 0, disabled)
+  LOOPS_RECEIPT_BACKFILL             If set to 1, scan *all* receipts (ignores cursor). Default: 0
 EOF
+}
+
+# Cross-platform mtime lookup (macOS/BSD vs GNU)
+mtime_epoch() {
+    local path="$1"
+    if stat -f %m "$path" >/dev/null 2>&1; then
+        stat -f %m "$path"
+    else
+        stat -c %Y "$path"
+    fi
 }
 
 # Generate loop ID
@@ -197,7 +211,11 @@ outbox_dir = Path(sys.argv[4])
 
 window_hours = int(os.environ.get("LOOPS_LEDGER_FAILURE_WINDOW_HOURS", "0"))
 now_utc = datetime.now(timezone.utc)
-cutoff = now_utc - timedelta(hours=window_hours) if window_hours > 0 else None
+if window_hours <= 0:
+    print("  LEDGER: disabled (set LOOPS_LEDGER_FAILURE_WINDOW_HOURS>0 to enable)")
+    sys.exit(0)
+
+cutoff = now_utc - timedelta(hours=window_hours)
 
 existing_run_keys = set()
 existing_loop_ids = set()
@@ -336,10 +354,49 @@ collect_loops() {
     local before_ledger_lines=0
     local after_ledger_lines=0
 
+    # Default behavior: only scan receipts created since last collect.
+    # This prevents loop storms when the receipts directory contains long history.
+    local backfill="${LOOPS_RECEIPT_BACKFILL:-0}"
+    local cursor_epoch=""
+    local now_epoch=""
+    now_epoch="$(date +%s)"
+
+    if [[ "$backfill" != "1" ]]; then
+        if [[ -f "$CURSOR_FILE" ]]; then
+            cursor_epoch="$(cat "$CURSOR_FILE" 2>/dev/null | tr -dc '0-9')"
+        fi
+        if [[ -z "$cursor_epoch" ]]; then
+            cursor_epoch="$now_epoch"
+            echo "$cursor_epoch" > "$CURSOR_FILE"
+            echo "  CURSOR_INIT: $CURSOR_FILE (epoch=$cursor_epoch) - skipping historical receipts"
+            echo ""
+        fi
+    else
+        cursor_epoch="0"
+        echo "  BACKFILL: enabled (LOOPS_RECEIPT_BACKFILL=1) - scanning all receipts"
+        echo ""
+    fi
+
     before_receipt_lines="$(wc -l < "$LOOPS_FILE" 2>/dev/null || echo 0)"
 
     while IFS= read -r receipt_dir; do
         [[ -d "$receipt_dir" ]] || continue
+
+        # Only scan canonical receipts dirs. Legacy/non-standard directories cause noise.
+        local base
+        base="$(basename "$receipt_dir")"
+        [[ "$base" == R* ]] || continue
+
+        # Apply cursor filter unless backfill is enabled.
+        if [[ "$cursor_epoch" != "0" ]]; then
+            local receipt_file="$receipt_dir/receipt.md"
+            local mtime_path="$receipt_dir"
+            [[ -f "$receipt_file" ]] && mtime_path="$receipt_file"
+            local mtime
+            mtime="$(mtime_epoch "$mtime_path" 2>/dev/null || echo 0)"
+            [[ "$mtime" -ge "$cursor_epoch" ]] || continue
+        fi
+
         extract_loops_from_receipt "$receipt_dir"
         scanned=$((scanned + 1))
     done < <(find "$RECEIPTS_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
@@ -349,6 +406,12 @@ collect_loops() {
     before_ledger_lines="$after_receipt_lines"
     collect_failed_from_ledger
     after_ledger_lines="$(wc -l < "$LOOPS_FILE" 2>/dev/null || echo 0)"
+
+    # Advance cursor at end (local-only). We intentionally use "now" to avoid
+    # re-scanning older receipts repeatedly even if their mtimes shift.
+    if [[ "$backfill" != "1" ]]; then
+        echo "$now_epoch" > "$CURSOR_FILE" 2>/dev/null || true
+    fi
 
     echo ""
     echo "Scanned receipts: $scanned"
