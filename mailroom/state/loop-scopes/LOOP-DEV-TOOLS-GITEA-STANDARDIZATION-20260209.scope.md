@@ -30,7 +30,7 @@ Standardize Gitea as canonical origin for agentic-spine and workbench repos. Git
 | P0 | Gap registration + loop scope + JSONL | None | **COMPLETE** |
 | P1 | Backup script + inventory entry | SSH to dev-tools | **COMPLETE** |
 | P2 | CI workflow + D50 drift gate | None | **COMPLETE** |
-| P3 | GitHub PAT replacement (manual) | Browser for PAT generation | Deferred |
+| P3 | GitHub PAT replacement (manual) | Browser for PAT generation | **DONE** |
 | P4 | Remote cutover: swap origin on MacBook (both repos) | P3 done | **DONE** |
 | P5 | Deploy backup cron on dev-tools + NAS rsync validation | SSH to dev-tools + NAS reachable | **DONE** |
 | P6 | Authentik SSO browser test + closeout | Browser | Deferred |
@@ -85,12 +85,14 @@ Backup runbook note added to `GITEA_BACKUP_RESTORE.md`.
 
 ---
 
-## P3: GitHub PAT Replacement (Deferred)
+## P3: GitHub PAT Replacement — DONE
 
-- Generate classic PAT (repo scope) at github.com/settings/tokens
-- Store in Infisical at `/spine/vm-infra/gitea/GITHUB_PUSH_MIRROR_TOKEN`
-- Update Gitea push mirror config via API
-- Add to `secrets.namespace.policy.yaml`
+- Classic PAT provided by user (`ghp_...`, 40 chars) — **DONE**
+- Stored in Infisical at `/spine/vm-infra/gitea/GITHUB_PUSH_MIRROR_TOKEN` via internal API — **DONE**
+- Added `GITHUB_PUSH_MIRROR_TOKEN` to `secrets.namespace.policy.yaml` required_key_paths — **DONE**
+- Deleted old OAuth push mirrors, created new PAT-authenticated mirrors for both repos — **DONE**
+- Triggered sync, verified `last_error: ""` on both mirrors — **VERIFIED**
+- Note: temp Gitea token `spine-temp-check` created during API work; deletion via API blocked by SSO-only auth. Low risk (Tailscale-only). Manual cleanup: Gitea admin → ronny → Applications → delete.
 
 ---
 
