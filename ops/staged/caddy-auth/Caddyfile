@@ -1,25 +1,82 @@
 {
-    # HTTP only — Cloudflare tunnel handles public TLS.
-    # Add ACME/TLS when direct Tailscale HTTPS is needed.
-    auto_https off
+	# HTTP only — Cloudflare tunnel handles public TLS.
+	# All traffic arrives via CF tunnel (HTTPS→HTTP), so we inject
+	# X-Forwarded-Proto https on every Authentik upstream to ensure
+	# OAuth redirect URIs and OIDC discovery use https:// scheme.
+	auto_https off
 }
 
-# Authentik UI/API
+# ─── Authentik UI/API (no auth — chicken-and-egg) ───
 http://{$AUTHENTIK_HOSTNAME} {
-    reverse_proxy 127.0.0.1:9000
+	reverse_proxy 127.0.0.1:9000 {
+		header_up X-Forwarded-Proto https
+	}
 }
 
-# Pi-hole admin (moved to 8053 to free port 80 for Caddy)
+# ─── Pi-hole admin (Authentik forward auth) ───
 http://{$PIHOLE_HOSTNAME} {
-    reverse_proxy 127.0.0.1:8053
+	handle /outpost.goauthentik.io/* {
+		reverse_proxy 127.0.0.1:9000 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+	handle {
+		forward_auth 127.0.0.1:9000 {
+			uri /outpost.goauthentik.io/auth/caddy
+			copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Uid
+			trusted_proxies private_ranges
+		}
+		reverse_proxy 127.0.0.1:8053
+	}
 }
 
-# Grafana — uncomment when observability VM (205) is provisioned.
+# ─── Vaultwarden (Authentik forward auth) ───
+http://{$VAULT_HOSTNAME} {
+	handle /outpost.goauthentik.io/* {
+		reverse_proxy 127.0.0.1:9000 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+	handle {
+		forward_auth 127.0.0.1:9000 {
+			uri /outpost.goauthentik.io/auth/caddy
+			copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Uid
+			trusted_proxies private_ranges
+		}
+		reverse_proxy 127.0.0.1:8081
+	}
+}
+
+# ─── Infisical (Authentik forward auth) ───
+http://{$SECRETS_HOSTNAME} {
+	handle /outpost.goauthentik.io/* {
+		reverse_proxy 127.0.0.1:9000 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+	handle {
+		forward_auth 127.0.0.1:9000 {
+			uri /outpost.goauthentik.io/auth/caddy
+			copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Uid
+			trusted_proxies private_ranges
+		}
+		reverse_proxy 127.0.0.1:8088
+	}
+}
+
+# ─── Grafana (uncomment when VM 205 provisioned) ───
 # http://{$GRAFANA_HOSTNAME} {
-#     forward_auth 127.0.0.1:9000 {
-#         uri /outpost.goauthentik.io/auth/caddy
-#         copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email
-#         trusted_proxies private_ranges
-#     }
-#     reverse_proxy {$GRAFANA_UPSTREAM}
+# 	handle /outpost.goauthentik.io/* {
+# 		reverse_proxy 127.0.0.1:9000 {
+# 			header_up X-Forwarded-Proto https
+# 		}
+# 	}
+# 	handle {
+# 		forward_auth 127.0.0.1:9000 {
+# 			uri /outpost.goauthentik.io/auth/caddy
+# 			copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Uid
+# 			trusted_proxies private_ranges
+# 		}
+# 		reverse_proxy {$GRAFANA_UPSTREAM}
+# 	}
 # }
