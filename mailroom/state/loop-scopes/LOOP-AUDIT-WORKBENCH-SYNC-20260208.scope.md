@@ -12,7 +12,21 @@
 
 A four-subagent parallel audit of the agentic-spine and workbench identified 23 disconnects concentrated in workbench documentation that has not been updated following recent VM restructuring (LOOP-INFRA-VM-RESTRUCTURE-20260206), AI consolidation (LOOP-AI-CONSOLIDATION-20260208), and observability deployment (LOOP-OBSERVABILITY-DEPLOY-20260208).
 
-Spine governance is correct and authoritative. All drift is workbench-side: stale snapshots, legacy compose files, localhost references in RAG scripts, and missing SERVICE_REGISTRY entries for automation-stack companion services.
+Spine governance is correct and authoritative. Most drift was workbench-side: stale snapshots, legacy compose files, localhost references in RAG scripts, and duplicated authority claims.
+
+### Status Update (2026-02-09)
+
+Workbench-side P0/P1 remediation is complete in two commits:
+- `92a9af9` (workbench): doc authority redirect + deprecations (stop parallel SSOT claims)
+- `6ff7e16` (workbench): P0/P1 mechanical fixes (archive legacy compose, RAG defaults, doc deprecations)
+
+Spine-side service registration for automation-stack companion services (MT-4) is already in place:
+- `docs/governance/SERVICE_REGISTRY.yaml`: `open-webui`, `ollama`, `automation-postgres`, `automation-redis`
+- `ops/bindings/services.health.yaml`: health probes for `n8n`, `open-webui`, `ollama`
+
+Remaining spine-side tasks to finish this loop:
+- MT-6: update `docs/governance/INFRASTRUCTURE_MAP.md` RAG section
+- MT-9: add Prometheus multi-host scrape targets on observability (VM 205)
 
 ---
 
@@ -23,7 +37,7 @@ Spine governance is correct and authoritative. All drift is workbench-side: stal
 | infra-core (204) | Service parity, compose authority | Workbench pihole compose has wrong IP; legacy docs reference docker-host |
 | observability (205) | Monitoring stack coherence | **CRITICAL:** Legacy docker-compose.monitoring.yml could create duplicate Prometheus/Grafana |
 | ai-consolidation (207) | Migration completeness | 8 stale artifacts still point to localhost:3002/MacBook paths |
-| automation-stack (202) | Registry coverage | 4 of 5 running services not in SERVICE_REGISTRY; no health probes |
+| automation-stack (202) | Registry coverage | Service registry + health probes were missing at audit time; now addressed in spine SSOT/bindings |
 
 ---
 
@@ -31,10 +45,10 @@ Spine governance is correct and authoritative. All drift is workbench-side: stal
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| P0 | **Critical fixes** — archive monitoring compose, refresh CONTAINER_INVENTORY, fix RAG script defaults, register automation services | OPEN |
-| P1 | **Governance sync** — deprecate RAG legacy docs, update INFRASTRUCTURE_MAP, archive stale workbench compose/configs, fix SECRET_ROTATION SSH target | OPEN |
-| P2 | **Completeness** — Prometheus multi-host scraping, monitoring_inventory.json, node-exporter registry, automation staged compose, CRON_REGISTRY clarification | OPEN |
-| P3 | **Verify + closeout** — spine.verify, services.health.status, workbench parity check | BLOCKED by P0-P2 |
+| P0 | **Critical fixes** — archive monitoring compose, refresh CONTAINER_INVENTORY, fix RAG script defaults, register automation services | DONE (workbench commits + spine MT-4 already present) |
+| P1 | **Governance sync** — deprecate RAG legacy docs, update INFRASTRUCTURE_MAP, archive stale workbench compose/configs, fix SECRET_ROTATION SSH target | PARTIAL (MT-6 remains in spine) |
+| P2 | **Completeness** — Prometheus multi-host scraping, monitoring_inventory.json, node-exporter registry, automation staged compose, CRON_REGISTRY clarification | OPEN (MT-9 is spine/host-side) |
+| P3 | **Verify + closeout** — spine.verify, services.health.status, workbench parity check | READY once MT-6 + MT-9 complete |
 
 ---
 
