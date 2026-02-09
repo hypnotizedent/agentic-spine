@@ -210,3 +210,26 @@ ipmitool lan set 1 defgw ipaddr 192.168.1.1
 
 **NVR + Switch**: still unreachable on old IPs (192.168.12.216, 192.168.12.2). May need physical power cycle. Deferred.
 
+
+### Step 9: Switch Recovery + Re-IP
+
+Switch (Dell N2024P) froze at DDR init/shmoo calibration on power cycle.
+Recovery: unplugged all cables, cold boot with only console attached, switch
+booted to `console>` prompt. Re-IP was already applied (192.168.1.2) from
+pre-reboot config write.
+
+Reconnected: UDR6 LAN → Gi1/0/1, PVE → Gi1/0/2. All connectivity restored.
+
+| Device | IP | Status |
+|--------|-----|--------|
+| Switch (N2024P) | 192.168.1.2 | **LIVE** (re-IPed, `write memory` saved) |
+| PVE | 192.168.1.184 | **LIVE** |
+| All VMs | .204/.205/.206/.209/.210 | **LIVE** |
+| CF tunnel | via 204 | **LIVE** (Gitea healthz pass) |
+| iDRAC | 192.168.1.250 (configured) | UNPLUGGED (deferred) |
+| NVR | 192.168.12.216 (old IP) | UNPLUGGED (deferred) |
+
+**Note**: N2024P DDR init freeze occurred on power cycle with cables attached.
+Boots fine with cables disconnected. May indicate STP/port negotiation issue
+during POST, or intermittent flash read failure. Monitor on future reboots.
+
