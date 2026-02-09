@@ -132,11 +132,27 @@ Pillar entrypoints (per stack)
 | Workstation | `docs/governance/MACBOOK_SSOT.md` | MacBook baseline (hardware + local services) |
 | Home Minilab | `docs/governance/MINILAB_SSOT.md` | Home baseline (Beelink + NAS + home VMs/LXCs) |
 | Shop Rack | `docs/governance/SHOP_SERVER_SSOT.md` | Shop baseline (R730XD + switch + NVR + UPS) |
+| Shop Network (Target) | `docs/governance/SHOP_NETWORK_NORMALIZATION.md` | Normalized IP structure + anti-drift rules |
 | Secrets Policy | `docs/governance/SECRETS_POLICY.md` | Secrets management |
 | Agent Boundaries | `docs/governance/AGENT_BOUNDARIES.md` | What agents can/cannot do |
 | Scripts Registry | `docs/governance/SCRIPTS_REGISTRY.md` | Canonical scripts index |
 
 For the complete list: `cat docs/governance/SSOT_REGISTRY.yaml`
+
+### Shop Network Anti-Drift Entry Point
+
+Before performing any shop network change, run:
+
+```bash
+./bin/ops cap run network.shop.audit.status
+```
+
+This enforces parity between:
+- `ops/bindings/ssh.targets.yaml`
+- `docs/governance/DEVICE_IDENTITY_SSOT.md`
+- `docs/governance/SHOP_SERVER_SSOT.md`
+
+It is also enforced during `spine.verify` by drift gate D54.
 
 ### Host Infrastructure Update Contract
 

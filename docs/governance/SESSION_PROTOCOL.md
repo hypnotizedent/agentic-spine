@@ -32,6 +32,7 @@ scope: session-entry
    - Use SSOT docs + repo search (`rg`) before guessing answers or inventing storylines (Rule 2 from the brain layer). `mint ask` is deprecated.
    - When you need policy or structure, follow the entry chain in `docs/governance/GOVERNANCE_INDEX.md`; trust the highest-priority SSOT in `docs/governance/SSOT_REGISTRY.yaml`.
    - Before guessing remote paths, consult `ops/bindings/docker.compose.targets.yaml` and `ops/bindings/ssh.targets.yaml` first. Never assume stack paths -- bindings are the SSOT for remote host paths.
+   - **Before any shop network change:** run `./bin/ops cap run network.shop.audit.status` and do not proceed if it fails (D54 enforces SSOT/binding parity).
 4. **Operate through the spine**
    - Every command that mutates must be run through `./bin/ops cap run <capability>` or `./bin/ops run ...` so receipts land in `receipts/sessions/`.
    - Never shell into `~/code/workbench` or `~/ronny-ops` at runtime; the spine is self-contained.
