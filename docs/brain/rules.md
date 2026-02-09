@@ -5,7 +5,7 @@
 
 ```
 1. NO OPEN LOOPS = NO WORK  → ./bin/ops loops list --open
-2. NO GUESSING = RAG FIRST  → mint ask "question"
+2. NO GUESSING = SSOT FIRST → read SSOT docs + use repo search (rg)
 3. NO INVENTING             → match existing patterns
 4. FIX ONE THING            → verify before next
 5. WORK GENERATES RECEIPTS  → ./bin/ops cap run <name>
@@ -16,8 +16,6 @@
 ```bash
 ./bin/ops loops list --open  # See open work
 ./bin/ops cap run <name>     # Run governed capability
-mint ask "question"          # Query RAG
-mint health                  # Check RAG status
 cat ops/bindings/cli.tools.inventory.yaml  # What CLI tools are installed
 ```
 

@@ -4,12 +4,12 @@ argument-hint: <question>
 allowed-tools: Bash(mint:*)
 ---
 
-Query the RAG knowledge base with: `mint ask "$ARGUMENTS"`
+Deprecated: `mint ask` is no longer a supported query path.
 
-The RAG has ~9,300 vectors indexed from:
-- mint-os/ (187 docs)
-- infrastructure/ (122 docs)
-- Governance docs, runbooks, schemas
+Use SSOT docs and repo search instead:
+- `docs/governance/GOVERNANCE_INDEX.md`
+- `docs/governance/SSOT_REGISTRY.yaml`
+- `rg -n "<query>" docs ops`
 
 Use this BEFORE guessing about:
 - How features work

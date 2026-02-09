@@ -24,7 +24,7 @@
 1. No runtime commands from the legacy workspace.
 2. No alternate queue, receipt, or watcher runtime outside spine mailroom.
 3. No ungoverned home-root output sinks (`/Users/ronnyworks/*.log`, `*.out`, `*.err`).
-4. Query before guessing: `mint ask "question"` (tooling lives in workbench).
+4. Query before guessing: read the SSOT docs and use repo search (`rg`) before inventing answers. `mint ask` is deprecated.
 5. Close loops with receipts as proof.
 
 ## Canonical Commands
