@@ -1,3 +1,30 @@
+# Receipt: ADHOC_20260209_160037_UDR6_CUTOVER_P2
+
+| Field | Value |
+|-------|-------|
+| Run ID | `ADHOC_20260209_160037_UDR6_CUTOVER_P2` |
+| Capability | `adhoc.receipt` |
+| Status | done |
+| Exit Code | 0 |
+| Generated | 2026-02-09T16:00:50Z |
+| Model | manual (adhoc receipt) |
+| Context | mutating |
+
+## Inputs
+
+| Field | Value |
+|-------|-------|
+| Command | `qm guest exec (multi-VM staged config apply)` |
+| Repo | `/Users/ronnyworks/code/agentic-spine` |
+
+## Outputs
+
+| File | Hash |
+|------|------|
+| output.txt | (empty) |
+
+---
+
 # Receipt — UDR6 Shop Cutover P2 — Remote Config Apply
 
 | Stamp | Value |
@@ -98,3 +125,31 @@ All remote P2 operations completed successfully. The VMs and PVE host are now co
 
 ---
 _Receipt written by claude-opus (LOOP-UDR6-SHOP-CUTOVER-20260209)_
+
+### Step 6: Cold Boot PVE + P3 Verification
+
+**PVE cold boot** (manual power cycle by operator): came up at 192.168.1.184, gateway 192.168.1.1 (UDR6).
+
+**VM Status (all 10 running):**
+
+| VM | LAN IP | Docker | NFS | Status |
+|----|--------|--------|-----|--------|
+| 204 (infra-core) | 192.168.1.204 | 11/11 up | n/a | OK |
+| 205 (observability) | 192.168.1.205 | up | n/a | OK |
+| 206 (dev-tools) | 192.168.1.206 | up | n/a | OK |
+| 209 (download-stack) | 192.168.1.209 | 19+ up | mounted (192.168.1.184) | OK |
+| 210 (streaming-stack) | 192.168.1.210 | 10/10 up | mounted (192.168.1.184, ro) | OK |
+
+**Service Verification:**
+- CF tunnel: 4 connections (mia02/mia05), registered OK
+- Pi-hole DNS: resolving via 192.168.1.204
+- Gitea (git.ronny.works): pass (cache + db healthy)
+- Internet: 8.8.8.8 reachable from PVE (71ms via UDR6→T-Mobile)
+
+**PM8072 note:** `pm80xx: unknown parameter 'new_id' ignored` — wrong modprobe syntax, non-blocking (MD1400 is separate loop)
+
+**Remaining P2 tasks (LAN-only devices, manual):**
+- [ ] Re-IP switch: 192.168.1.2
+- [ ] Re-IP iDRAC: 192.168.1.250
+- [ ] Re-IP NVR: 192.168.1.216
+
