@@ -9,7 +9,7 @@
 # Last verified: 2026-02-07
 
 version: 1
-updated: "2026-02-08T18:30Z"
+updated: "2026-02-09T03:00Z"
 
 gaps:
   # ─────────────────────────────────────────────────────────────
@@ -957,6 +957,117 @@ gaps:
       symlinks via host.macbook.managed_configs.apply. Verified by:
       - workbench verifier scripts/root/verify_laptop_hotkeys.sh
       - host.macbook.drift.check capability
+
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-050
+    discovered_by: "LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209"
+    discovered_at: "2026-02-09"
+    type: missing-entry
+    doc: "ops/staged/dev-tools/"
+    description: |
+      No automated backup cron exists for Gitea app-level dumps (gitea dump +
+      pg_dump). Only VM-level vzdump protects data. A Gitea-specific corruption
+      or misconfiguration would require full VM restore instead of targeted
+      app-level recovery. Vaultwarden and Infisical both have automated
+      app-level backups; Gitea does not.
+    severity: high
+    status: open
+    fixed_in: null
+    notes: |
+      Backup script staged at ops/staged/dev-tools/gitea-backup.sh.
+      Deployment blocked until P5 (SSH to dev-tools + NAS reachable).
+
+  - id: GAP-OP-051
+    discovered_by: "LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209"
+    discovered_at: "2026-02-09"
+    type: missing-entry
+    doc: "ops/bindings/backup.inventory.yaml"
+    description: |
+      No app-gitea entry existed in backup.inventory.yaml. backup.status
+      has no visibility into Gitea app-level backup freshness. Other app
+      backups (app-infisical, app-vaultwarden) are tracked; Gitea is not.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209"
+    notes: |
+      Fixed: app-gitea entry added to backup.inventory.yaml with
+      stale_after_hours=26, classification=critical, NAS path
+      /volume1/backups/apps/gitea. Will show STALE until P5 deploys cron.
+
+  - id: GAP-OP-052
+    discovered_by: "LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209"
+    discovered_at: "2026-02-09"
+    type: runtime-bug
+    doc: "Gitea push mirror configuration"
+    description: |
+      Push mirror from Gitea to GitHub uses an OAuth token (gho_*) that
+      has an expiration date. When it expires, mirror sync will silently
+      fail. No monitoring or alerting exists for mirror sync failures.
+      A classic PAT (non-expiring or long-lived) is more durable.
+    severity: medium
+    status: open
+    fixed_in: null
+    notes: |
+      Fix in P3: generate classic PAT, store in Infisical at
+      /spine/vm-infra/gitea/GITHUB_PUSH_MIRROR_TOKEN, update Gitea
+      mirror config via API. Requires browser access.
+
+  - id: GAP-OP-053
+    discovered_by: "LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209"
+    discovered_at: "2026-02-09"
+    type: missing-entry
+    doc: ".gitea/workflows/"
+    description: |
+      Gitea Actions runner is deployed on VM 206 but no CI workflow
+      exists. Runner is idle. No push-triggered verification of spine
+      drift gates. GitHub Actions still runs but will become secondary
+      once Gitea is canonical origin.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209"
+    notes: |
+      Fixed: .gitea/workflows/verify.yml created. Triggers on push to
+      main and pull_request. Runs surfaces/verify/drift-gate.sh on
+      ubuntu-latest runner. D50 drift gate validates workflow exists.
+
+  - id: GAP-OP-054
+    discovered_by: "LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209"
+    discovered_at: "2026-02-09"
+    type: missing-entry
+    doc: null
+    description: |
+      No documented browser test exists for the Authentik SSO flow
+      protecting Gitea (git.ronny.works). The SSO integration was
+      configured during LOOP-DEV-TOOLS-DEPLOY-20260208 but the login
+      flow has not been manually verified end-to-end via browser.
+    severity: low
+    status: open
+    fixed_in: null
+    notes: |
+      Fix in P6: manual browser test of git.ronny.works -> Authentik
+      login -> Gitea. Document result in loop scope closeout.
+
+  - id: GAP-OP-055
+    discovered_by: "LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209"
+    discovered_at: "2026-02-09"
+    type: missing-entry
+    doc: "docs/governance/SERVICE_REGISTRY.yaml"
+    description: |
+      Gitea monitoring is limited to HTTP health probe (services.health.yaml).
+      No Prometheus metrics endpoint, no Grafana dashboard, no alerts for
+      runner offline, mirror sync stale, disk usage, or API latency.
+      Other critical services (Prometheus itself, Loki) have deeper
+      observability. Gitea will become the canonical code forge.
+    severity: low
+    status: open
+    fixed_in: null
+    notes: |
+      Fix deferred to future LOOP-GITEA-OBSERVABILITY. Requires
+      enabling Gitea [metrics] in app.ini, adding Prometheus scrape
+      target on VM 205, building Grafana dashboard.
 
 # ─────────────────────────────────────────────────────────────
 # Gap Types

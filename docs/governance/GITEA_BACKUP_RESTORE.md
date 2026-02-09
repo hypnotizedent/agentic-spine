@@ -15,7 +15,16 @@ Host + stack:
 - Compose: `/opt/stacks/gitea/docker-compose.yml`
 - Containers (expected): `gitea`, `gitea-postgres`, `gitea-runner`
 
-## Backup
+## Automated Backup
+
+An automated backup script is staged at `ops/staged/dev-tools/gitea-backup.sh`.
+Once deployed to `/usr/local/bin/gitea-backup.sh` on dev-tools with cron `55 2 * * *`,
+it runs daily producing both a gitea dump (zip) and pg_dump (sql.gz), then rsyncs to
+the NAS at `/volume1/backups/apps/gitea/` with 7-day retention.
+
+Tracked in `backup.inventory.yaml` as `app-gitea`. Loop: LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209.
+
+## Manual Backup
 
 Backup artifacts:
 1. Gitea application dump (`gitea dump` zip) covering repos + attachments + config snapshot.

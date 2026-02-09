@@ -618,6 +618,18 @@ else
   warn "agent discovery lock gate not present"
 fi
 
+# D50: Gitea CI workflow lock (workflow file + drift-gate reference)
+echo -n "D50 gitea ci workflow lock... "
+if [[ -x "$SP/surfaces/verify/d50-gitea-ci-workflow-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d50-gitea-ci-workflow-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d50-gitea-ci-workflow-lock.sh failed"
+  fi
+else
+  warn "gitea ci workflow lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
