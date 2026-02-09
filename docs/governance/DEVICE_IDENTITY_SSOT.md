@@ -168,6 +168,17 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | Shop | `nvr-shop` | 192.168.12.216 | Camera recorder (NVR) |
 | Shop | `ap-shop` | 192.168.12.249 | WiFi access point |
 
+### Shop VM LAN IPs (Static — used for NFS mounts and local routing)
+
+| VM | Canonical Name | LAN IP | VMID | Notes |
+|----|----------------|--------|------|-------|
+| pve (hypervisor) | `pve` | 192.168.12.184 | — | Proxmox host; NFS server |
+| infra-core | `infra-core` | 192.168.12.128 | 204 | Cloud-init static IP |
+| observability | `observability` | 192.168.12.70 | 205 | Cloud-init static IP |
+| dev-tools | `dev-tools` | 192.168.12.39 | 206 | Cloud-init static IP |
+| download-stack | `download-stack` | 192.168.12.76 | 209 | NFS mounts use this IP |
+| streaming-stack | `streaming-stack` | 192.168.12.64 | 210 | NFS mounts use this IP |
+
 ### Subnet Table
 
 | Subnet | Location | Gateway | DHCP Range | Notes |
