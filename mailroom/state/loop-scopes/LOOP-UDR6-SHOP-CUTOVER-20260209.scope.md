@@ -3,7 +3,7 @@
 > **Status:** OPEN (pre-staging complete, physical cutover pending)
 > **Owner:** @ronny
 > **Created:** 2026-02-09
-> **Severity:** high
+> **Severity:** medium
 > **Origin:** GAP-OP-064 (no shop gateway, T-Mobile locked)
 > **Gate:** D52 (UDR6 gateway assertion)
 
