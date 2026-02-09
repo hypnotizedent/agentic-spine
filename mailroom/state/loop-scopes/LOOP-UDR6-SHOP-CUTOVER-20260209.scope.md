@@ -1,6 +1,6 @@
 # LOOP-UDR6-SHOP-CUTOVER-20260209
 
-> **Status:** OPEN (pre-staging complete, physical cutover pending)
+> **Status:** CLOSING (cutover complete, device re-IP deferred)
 > **Owner:** @ronny
 > **Created:** 2026-02-09
 > **Severity:** medium

@@ -153,3 +153,41 @@ _Receipt written by claude-opus (LOOP-UDR6-SHOP-CUTOVER-20260209)_
 - [ ] Re-IP iDRAC: 192.168.1.250
 - [ ] Re-IP NVR: 192.168.1.216
 
+
+### Step 7: Device Re-IP (iDRAC, NVR, Switch)
+
+Added temporary 192.168.12.184/24 to PVE vmbr0 to reach old-subnet devices.
+
+**iDRAC (192.168.12.250):**
+- Pings OK but all TCP ports closed — BMC still initializing after cold boot (normal, 10-15 min)
+- Temporary IP removed from PVE
+
+**Deferred commands** (run when iDRAC web server is ready):
+
+```bash
+# iDRAC — via Redfish API from PVE
+curl -sk -u root:calvin -X PATCH \
+  'https://192.168.12.250/redfish/v1/Managers/iDRAC.Embedded.1/EthernetInterfaces/NIC.1' \
+  -H 'Content-Type: application/json' \
+  -d '{"IPv4Addresses":[{"Address":"192.168.1.250","SubnetMask":"255.255.255.0","Gateway":"192.168.1.1"}]}'
+
+# Or via ipmitool (install first: apt install ipmitool)
+ipmitool -I lanplus -H 192.168.12.250 -U root -P <pass> lan set 1 ipaddr 192.168.1.250
+ipmitool -I lanplus -H 192.168.12.250 -U root -P <pass> lan set 1 netmask 255.255.255.0
+ipmitool -I lanplus -H 192.168.12.250 -U root -P <pass> lan set 1 defgw ipaddr 192.168.1.1
+
+# NVR — via ISAPI from PVE (add temp IP first: ip addr add 192.168.12.184/24 dev vmbr0)
+curl --digest -u admin:<pass> -X PUT \
+  'http://192.168.12.216/ISAPI/System/Network/interfaces/1/ipAddress' \
+  -d '<IPAddress><ipVersion>v4</ipVersion><addressingType>static</addressingType><ipAddress>192.168.1.216</ipAddress><subnetMask>255.255.255.0</subnetMask><DefaultGateway><ipAddress>192.168.1.1</ipAddress></DefaultGateway></IPAddress>'
+
+# Switch (Dell N2024P) — via console cable or web UI at 192.168.12.2
+# Management IP: 192.168.1.2/24, gateway 192.168.1.1
+```
+
+| Device | Old IP | Target IP | Status |
+|--------|--------|-----------|--------|
+| iDRAC | 192.168.12.250 | 192.168.1.250 | DEFERRED (BMC initializing) |
+| NVR | 192.168.12.216 | 192.168.1.216 | DEFERRED (not responding) |
+| Switch | 192.168.12.2 | 192.168.1.2 | DEFERRED (console cable needed) |
+
