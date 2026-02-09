@@ -31,6 +31,9 @@ Before any network change, document:
 | **Downtime estimate** | (e.g., "30-60 min maintenance window") |
 | **Rollback plan** | (e.g., "Revert configs, reconnect original cable") |
 
+Recommended artifact:
+- Create a per-change "Change Pack" using `docs/governance/CHANGE_PACK_TEMPLATE.md` (see Section 9).
+
 ---
 
 ## 2. Impact Assessment
@@ -270,6 +273,49 @@ ssh <vm> "sudo mount -a"
 3. **Unmount before IP change** — `umount -l` (lazy) prevents D-state
 4. **fstab must use** `x-systemd.requires=network-online.target`
 5. **Test write after mount** — `touch /media/.test && rm /media/.test`
+
+---
+
+## 9. Change Pack Process
+
+Every network cutover loop MUST have a companion **change pack** — a filled copy of
+`docs/governance/CHANGE_PACK_TEMPLATE.md` placed alongside the loop scope file.
+
+### How to create a change pack
+
+1. Copy `docs/governance/CHANGE_PACK_TEMPLATE.md` to
+   `mailroom/state/loop-scopes/<LOOP-ID>.changepack.md`
+2. Fill every section (IP map, rollback map, preflight matrix, execution steps, etc.)
+3. Execution steps MUST follow the ordering in `ops/bindings/cutover.sequencing.yaml`
+4. Run `./bin/ops cap run network.cutover.preflight` — must emit GO before P2
+
+### Sequencing rules
+
+Cutover phases execute in mandatory order (from `cutover.sequencing.yaml`):
+
+1. **Remote management** — Tailscale overlay stable
+2. **Hypervisor** — PVE reachable on new subnet
+3. **Switch** — management IP re-IPed
+4. **LAN-only devices** — iDRAC, NVR, AP re-IPed
+5. **Workloads** — NFS remount, Docker restart, service health
+
+Devices may be deferred ONLY if they don't block workloads and deferral is documented
+in the change pack's Deferred Items section with a follow-up loop reference.
+
+### LAN-only devices
+
+Devices with `access_method: lan_only` in `ssh.targets.yaml` cannot be reached via
+Tailscale. Their status is checked by `network.lan.device.status` (ping via
+`probe_via` host, not SSH). See NETWORK_RUNBOOK.md device-specific procedures for
+re-IP commands.
+
+### Enforcement
+
+D53 (change-pack-integrity-lock) validates:
+- `CHANGE_PACK_TEMPLATE.md` exists
+- `cutover.sequencing.yaml` exists
+- Every open cutover loop has a companion `.changepack.md`
+- Companion files contain required sections
 
 ---
 

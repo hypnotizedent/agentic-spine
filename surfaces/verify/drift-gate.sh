@@ -654,6 +654,18 @@ else
   warn "udr6 gateway assertion gate not present"
 fi
 
+# D53: Change pack integrity lock (template + sequencing + companion files)
+echo -n "D53 change pack integrity lock... "
+if [[ -x "$SP/surfaces/verify/d53-change-pack-integrity-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d53-change-pack-integrity-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d53-change-pack-integrity-lock.sh failed"
+  fi
+else
+  warn "change pack integrity lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

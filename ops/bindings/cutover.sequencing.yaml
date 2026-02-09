@@ -1,0 +1,81 @@
+# Cutover Sequencing Rules
+#
+# Mandatory ordering for network cutover execution.
+# Referenced by CHANGE_PACK_TEMPLATE.md and network.cutover.preflight capability.
+#
+# Origin: GAP-OP-065 (UDR6 cutover exposed missing preflight and sequencing)
+# Gate: D53 (change-pack-integrity-lock)
+#
+# Status: authoritative
+# Last verified: 2026-02-09
+
+version: 1
+updated: "2026-02-09"
+
+# Cutover phases must execute in this order.
+# Skipping a phase requires documented justification in the change pack.
+phases:
+  - order: 1
+    id: remote_management
+    name: "Enable remote management path"
+    description: "Verify Tailscale overlay is stable to all in-scope targets"
+    verify: "ssh.target.status PASS for all in-scope targets"
+    rationale: "Tailscale is the fallback SSH path during LAN re-IP; must be stable first"
+
+  - order: 2
+    id: hypervisor
+    name: "Ensure PVE reachable on new subnet"
+    description: "Apply PVE /etc/network/interfaces, reboot, verify vmbr0 on new IP"
+    verify: "ssh pve via Tailscale, ip addr show vmbr0 has new IP"
+    rationale: "PVE hosts all VMs; if PVE is unreachable, nothing else matters"
+
+  - order: 3
+    id: switch
+    name: "Re-IP switch management"
+    description: "Update switch management VLAN IP via web UI or console cable"
+    verify: "ping new switch IP from pve"
+    rationale: "Switch must be on new subnet before LAN-only device re-IP (same L2 domain)"
+
+  - order: 4
+    id: lan_only_devices
+    name: "Re-IP iDRAC, NVR, AP"
+    description: "Re-IP LAN-only devices via their respective methods (IPMI, ISAPI, web UI)"
+    verify: "ping each new IP from pve"
+    rationale: "These devices have no overlay path; must use LAN directly"
+
+  - order: 5
+    id: workloads
+    name: "Touch dependent workloads"
+    description: "NFS remount, Docker restart, service health verification"
+    verify: "docker.compose.status + services.health.status PASS"
+    rationale: "Workloads depend on all upstream network changes being stable"
+
+# Deferred device rules: LAN-only devices may be deferred if:
+# 1. They are not blocking any workload
+# 2. They function without management IP (e.g., switch works as L2 without mgmt)
+# 3. Deferral is documented in the change pack Deferred Items section
+deferred_device_rules:
+  allowed_deferral_reasons:
+    - "Device works without management IP (unmanaged mode)"
+    - "Re-IP requires physical access not available during this window"
+    - "BMC/firmware needs cold reset before accepting new IP"
+  required_documentation:
+    - "Deferred Items section in change pack must list each deferred device"
+    - "Follow-up loop must be referenced"
+
+# Preflight requirements: must be met before phase 1 begins
+preflight:
+  required_capabilities:
+    - capability: spine.verify
+      expected: PASS
+    - capability: ssh.target.status
+      expected: PASS (or documented exceptions)
+    - capability: docker.compose.status
+      expected: PASS (or documented exceptions)
+    - capability: services.health.status
+      expected: PASS (or documented exceptions)
+  required_artifacts:
+    - description: "Change pack companion file exists for the cutover loop"
+      path_pattern: "mailroom/state/loop-scopes/LOOP-*-CUTOVER-*.changepack.md"
+    - description: "Backups verified fresh (vzdump within 24h)"
+      check: "backup.vzdump.status"

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# network-lan-device-status - Read-only ping check for LAN-only devices
+#
+# Reads ssh.targets.yaml, filters targets with access_method: lan_only,
+# SSHes to the probe_via host, and pings each LAN-only target.
+#
+# No credentials needed (v1: ping only).
+#
+# Usage:
+#   network-lan-device-status            # check all LAN-only devices
+#   network-lan-device-status <id>       # check specific device
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING_FILE="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+# Preconditions
+if [[ ! -f "$BINDING_FILE" ]]; then
+  echo "STOP (2): missing binding file: $BINDING_FILE"
+  exit 2
+fi
+
+if ! command -v yq >/dev/null 2>&1; then
+  echo "STOP (2): yq is required but not found"
+  exit 2
+fi
+
+TARGET_FILTER="${1:-}"
+
+# Read SSH defaults for probe_via connections
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$BINDING_FILE")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$BINDING_FILE")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$BINDING_FILE")"
+
+COUNT="$(yq -r '.ssh.targets | length' "$BINDING_FILE")"
+fail=0
+checked=0
+found=0
+
+echo "network.lan.device.status"
+echo "binding: $BINDING_FILE"
+echo
+
+for i in $(seq 0 $((COUNT-1))); do
+  access_method="$(yq -r ".ssh.targets[$i].access_method // \"ssh\"" "$BINDING_FILE")"
+  [[ "$access_method" == "lan_only" ]] || continue
+
+  id="$(yq -r ".ssh.targets[$i].id" "$BINDING_FILE")"
+  host="$(yq -r ".ssh.targets[$i].host" "$BINDING_FILE")"
+  probe_via="$(yq -r ".ssh.targets[$i].probe_via // \"\"" "$BINDING_FILE")"
+
+  # Filter if specific target requested
+  if [[ -n "$TARGET_FILTER" && "$id" != "$TARGET_FILTER" ]]; then
+    continue
+  fi
+  found=1
+
+  if [[ -z "$probe_via" ]]; then
+    echo "- id: $id host: $host -> FAIL reason=no_probe_via"
+    fail=1
+    continue
+  fi
+
+  # Resolve probe_via host from ssh.targets.yaml
+  probe_host="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .host" "$BINDING_FILE")"
+  probe_user="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .user // \"root\"" "$BINDING_FILE")"
+
+  if [[ -z "$probe_host" || "$probe_host" == "null" ]]; then
+    echo "- id: $id host: $host -> FAIL reason=probe_via_not_found ($probe_via)"
+    fail=1
+    continue
+  fi
+
+  checked=$((checked + 1))
+
+  # SSH to probe_via host and ping the LAN-only target
+  ssh_opts=(
+    -o "ConnectTimeout=${DEF_TO}"
+    -o "StrictHostKeyChecking=${DEF_STRICT}"
+    -o "UserKnownHostsFile=${DEF_KNOWN_HOSTS}"
+    -o "BatchMode=yes"
+    -o "LogLevel=ERROR"
+  )
+
+  set +e
+  result="$(ssh "${ssh_opts[@]}" "${probe_user}@${probe_host}" \
+    "ping -c1 -W2 $host >/dev/null 2>&1 && echo REACHABLE || echo UNREACHABLE" 2>&1)"
+  ssh_exit=$?
+  set -e
+
+  if [[ $ssh_exit -ne 0 ]]; then
+    echo "- id: $id host: $host probe_via: $probe_via -> FAIL reason=probe_ssh_failed"
+    fail=1
+  elif echo "$result" | grep -q "REACHABLE"; then
+    echo "- id: $id host: $host probe_via: $probe_via -> OK (ping reachable)"
+  else
+    echo "- id: $id host: $host probe_via: $probe_via -> FAIL reason=ping_unreachable"
+    fail=1
+  fi
+done
+
+echo
+
+if [[ -n "$TARGET_FILTER" && "$found" -eq 0 ]]; then
+  echo "STOP (2): target '$TARGET_FILTER' not found or not lan_only"
+  exit 2
+fi
+
+if [[ "$checked" -eq 0 && -z "$TARGET_FILTER" ]]; then
+  echo "status: OK (no lan_only targets configured)"
+  exit 0
+fi
+
+if [[ "$fail" -eq 1 ]]; then
+  echo "status: FAIL (some LAN-only devices unreachable)"
+  exit 1
+fi
+
+echo "status: OK (all LAN-only devices reachable)"
+exit 0
