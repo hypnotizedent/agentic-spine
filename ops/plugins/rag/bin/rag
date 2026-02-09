@@ -1,0 +1,524 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# Script: rag
+# Purpose: Spine-native RAG CLI (AnythingLLM + Qdrant on ai-consolidation VM 207)
+# Authority: docs/governance/RAG_INDEXING_RULES.md, docs/governance/SEARCH_EXCLUSIONS.md,
+#            ops/bindings/services.health.yaml, ops/bindings/secrets.binding.yaml
+# Location: ops/plugins/rag/bin/rag
+# Last Updated: 2026-02-09
+# ═══════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+# Prefer the runtime-reported spine path. This avoids hardcoding $HOME paths and
+# keeps worktrees/copies working, while still allowing an override.
+SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
+
+SERVICES_BINDING="${SPINE_REPO}/ops/bindings/services.health.yaml"
+SECRETS_BINDING="${SPINE_REPO}/ops/bindings/secrets.binding.yaml"
+
+WORKSPACE_SLUG="${RAG_WORKSPACE_SLUG:-agentic-spine}"
+ANYTHINGLLM_URL="${ANYTHINGLLM_URL:-${ANYTHINGLLM_BASE_URL:-}}"
+
+log() { echo "→ $*"; }
+log_ok() { echo "OK: $*"; }
+log_err() { echo "ERROR: $*" >&2; }
+
+usage() {
+  cat <<'EOF'
+Spine-native RAG (AnythingLLM on ai-consolidation)
+
+Usage:
+  rag health
+  rag status [--workspace <slug>]
+  rag ask "<question>" [--workspace <slug>]
+  rag sync [--workspace <slug>] [--dry-run]
+
+Env:
+  RAG_WORKSPACE_SLUG (default: agentic-spine)
+  ANYTHINGLLM_URL / ANYTHINGLLM_BASE_URL (optional; auto-derived from services.health.yaml)
+EOF
+}
+
+require_tool() {
+  local t="$1"
+  command -v "$t" >/dev/null 2>&1 || { log_err "Missing required tool: $t"; exit 1; }
+}
+
+derive_anythingllm_url() {
+  # Derive base URL from ops/bindings/services.health.yaml (SSOT).
+  if [[ -n "${ANYTHINGLLM_URL:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$SERVICES_BINDING" ]] || ! command -v yq >/dev/null 2>&1; then
+    ANYTHINGLLM_URL="http://100.71.17.29:3002"
+    return 0
+  fi
+
+  local ping_url
+  ping_url="$(yq -r '.services[] | select(.id=="anythingllm") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
+  if [[ -z "$ping_url" || "$ping_url" == "null" ]]; then
+    ANYTHINGLLM_URL="http://100.71.17.29:3002"
+    return 0
+  fi
+  # Strip a known suffix to get the base URL.
+  ANYTHINGLLM_URL="${ping_url%/api/ping}"
+}
+
+load_api_key() {
+  # Prefer env var (e.g. when invoked via secrets.exec). Otherwise fetch via Infisical agent.
+  if [[ -n "${ANYTHINGLLM_API_KEY:-}" ]]; then
+    return 0
+  fi
+
+  # Spine contract: secrets are in Infisical (binding: ops/bindings/secrets.binding.yaml, base_path=/spine).
+  # We intentionally avoid printing secret values to stdout (receipts).
+  require_tool yq
+  require_tool jq
+  require_tool curl
+  require_tool infisical
+
+  if [[ ! -f "$SECRETS_BINDING" ]]; then
+    log_err "Missing secrets binding: $SECRETS_BINDING"
+    exit 2
+  fi
+
+  local inf_api inf_internal project env base_path
+  inf_api="$(yq -r '.infisical.api_url // ""' "$SECRETS_BINDING")"
+  inf_internal="$(yq -r '.infisical.internal_api_url // ""' "$SECRETS_BINDING")"
+  project="$(yq -r '.infisical.project // ""' "$SECRETS_BINDING")"
+  env="$(yq -r '.infisical.environment // ""' "$SECRETS_BINDING")"
+  base_path="$(yq -r '.infisical.base_path // "/spine"' "$SECRETS_BINDING")"
+  [[ -n "$base_path" && "$base_path" != "null" ]] || base_path="/spine"
+
+  # Ensure CLI auth token (non-interactive). Try internal API first, then external.
+  if [[ -z "${INFISICAL_TOKEN:-}" ]]; then
+    local ua_id ua_secret domain auth_resp auth_code auth_body token
+    ua_id="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-}"
+    ua_secret="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}"
+    if [[ -z "$ua_id" || -z "$ua_secret" ]]; then
+      log_err "Missing Infisical universal auth env vars"
+      exit 2
+    fi
+
+    domain="$inf_internal"
+    [[ -n "$domain" && "$domain" != "null" ]] || domain="$inf_api"
+
+    auth_resp="$(curl -sS --max-time 15 -w '\n%{http_code}' -X POST "${domain}/api/v1/auth/universal-auth/login" \
+      -H 'Content-Type: application/json' \
+      -d "{\"clientId\":\"$ua_id\",\"clientSecret\":\"$ua_secret\"}" || true)"
+    auth_code="$(echo "$auth_resp" | tail -n1)"
+    auth_body="$(echo "$auth_resp" | sed '$d')"
+    if [[ "$auth_code" != "200" ]]; then
+      # fallback to external domain if internal failed
+      if [[ "$domain" != "$inf_api" && -n "$inf_api" && "$inf_api" != "null" ]]; then
+        domain="$inf_api"
+        auth_resp="$(curl -sS --max-time 15 -w '\n%{http_code}' -X POST "${domain}/api/v1/auth/universal-auth/login" \
+          -H 'Content-Type: application/json' \
+          -d "{\"clientId\":\"$ua_id\",\"clientSecret\":\"$ua_secret\"}" || true)"
+        auth_code="$(echo "$auth_resp" | tail -n1)"
+        auth_body="$(echo "$auth_resp" | sed '$d')"
+      fi
+    fi
+
+    if [[ "$auth_code" != "200" ]]; then
+      log_err "Infisical auth failed (HTTP ${auth_code:-unknown})"
+      exit 2
+    fi
+    token="$(echo "$auth_body" | jq -r '.accessToken // empty' 2>/dev/null || true)"
+    if [[ -z "$token" ]]; then
+      log_err "Infisical auth token parse failed"
+      exit 2
+    fi
+    export INFISICAL_TOKEN="$token"
+    export INFISICAL_API_URL="${domain}"
+  fi
+
+  # Run a subprocess with /spine secrets injected and capture the key without printing it.
+  # NOTE: Using `--recursive` + base_path ensures namespaced keys like /spine/ai/providers/ANYTHINGLLM_API_KEY are injected.
+  ANYTHINGLLM_API_KEY="$(
+    infisical run --projectId "$project" --env "$env" --path "$base_path" --recursive --domain "${INFISICAL_API_URL:-$inf_api}" -- \
+      bash -lc 'printf "%s" "${ANYTHINGLLM_API_KEY:-}"'
+  )"
+
+  if [[ -z "${ANYTHINGLLM_API_KEY:-}" ]]; then
+    log_err "ANYTHINGLLM_API_KEY not available after Infisical injection"
+    exit 2
+  fi
+}
+
+http_get() {
+  local url="$1"
+  local tmp code
+  tmp="$(mktemp)"
+  code="$(curl -sS --max-time 30 -o "$tmp" -w "%{http_code}" -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" "$url" || true)"
+  if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
+    log_err "GET failed (HTTP ${code:-unknown}): $url"
+    cat "$tmp" >&2 || true
+    rm -f "$tmp"
+    return 1
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+http_post_json() {
+  local url="$1"
+  local json="$2"
+  local tmp code
+  tmp="$(mktemp)"
+  code="$(curl -sS --max-time 120 -o "$tmp" -w "%{http_code}" \
+    -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "$json" \
+    "$url" || true)"
+  if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
+    log_err "POST failed (HTTP ${code:-unknown}): $url"
+    cat "$tmp" >&2 || true
+    rm -f "$tmp"
+    return 1
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+contains_secret_material() {
+  # Conservative denylist; returns 0 if secrets are likely present.
+  local file="$1"
+  python3 - "$file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+p = Path(sys.argv[1])
+try:
+  text = p.read_text(errors="ignore")
+except Exception:
+  print("0")
+  raise SystemExit(0)
+
+lines = text.splitlines()
+joined = "\n".join(lines)
+
+deny = [
+  r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+  r"\bAKIA[0-9A-Z]{16}\b",
+  r"\bASIA[0-9A-Z]{16}\b",
+  r"\bghp_[A-Za-z0-9]{20,}\b",
+  r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+  r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+  r"\bsk-[A-Za-z0-9]{20,}\b",  # common OpenAI-style token prefix
+]
+for pat in deny:
+  if re.search(pat, joined):
+    print("1")
+    raise SystemExit(0)
+
+# env-style assignments that look like real secret values
+for line in lines:
+  if "=" not in line:
+    continue
+  k, v = line.split("=", 1)
+  k = k.strip()
+  v = v.strip()
+  if not k or not v:
+    continue
+  if not re.search(r"(KEY|TOKEN|SECRET|PASS|PASSWORD)", k, re.IGNORECASE):
+    continue
+  if v.lower() in ("", "changeme", "change-me", "redacted", "example", "xxx", "xxxxx"):
+    continue
+  if v.startswith("<") and v.endswith(">"):
+    continue
+  if len(v) >= 12:
+    print("1")
+    raise SystemExit(0)
+
+print("0")
+PY
+}
+
+build_manifest() {
+  # Emit eligible markdown file paths, relative to SPINE_CODE, one per line.
+  python3 - <<'PY' "$SPINE_CODE"
+import os
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+allowed_roots = [root / "docs", root / "ops", root / "surfaces"]
+
+excluded_prefixes = [
+  "docs/" + "legacy/",
+  "receipts/",
+  "mailroom/state/",
+  "fixtures/",
+  ".git/",
+  "node_modules/",
+]
+
+def is_excluded(rel: str) -> bool:
+  if "/.archive/" in rel or rel.startswith(".archive/") or rel.endswith("/.archive"):
+    return True
+  for p in excluded_prefixes:
+    if rel.startswith(p):
+      return True
+  return False
+
+def has_required_frontmatter(path: Path) -> bool:
+  try:
+    lines = path.read_text(errors="ignore").splitlines()
+  except Exception:
+    return False
+  if not lines or lines[0].strip() != "---":
+    return False
+  # Find end of front matter quickly.
+  end = None
+  for i in range(1, min(len(lines), 80)):
+    if lines[i].strip() == "---":
+      end = i
+      break
+  if end is None:
+    return False
+  front = "\n".join(lines[:end+1])
+  required = ["status:", "owner:", "last_verified:"]
+  return all(r in front for r in required)
+
+out = []
+for base in allowed_roots:
+  if not base.exists():
+    continue
+  for p in base.rglob("*.md"):
+    rel = p.relative_to(root).as_posix()
+    if is_excluded(rel):
+      continue
+    if not has_required_frontmatter(p):
+      continue
+    out.append(rel)
+
+for rel in sorted(set(out)):
+  sys.stdout.write(rel + "\n")
+PY
+}
+
+prepare_file_for_upload() {
+  local abs_file="$1"
+  local tmp
+  tmp="$(mktemp)"
+  python3 - "$abs_file" "$tmp" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+text = src.read_text(errors="ignore")
+lines = text.splitlines()
+
+title = None
+for line in lines:
+  m = re.match(r'^\s*#\s+(.+)', line)
+  if m:
+    title = m.group(1).strip()
+    break
+if not title:
+  title = src.name
+
+header = f"DOCUMENT: {title}\nSOURCE: {src.as_posix()}\n\n"
+
+out = []
+in_code = False
+for line in lines:
+  stripped = line.strip()
+  if stripped.startswith("```"):
+    in_code = not in_code
+    out.append(line)
+    continue
+  if not in_code and re.match(r'^\s*#{1,6}\s+', line):
+    if out and out[-1].strip() != "":
+      out.append("")
+    out.append(f"DOCUMENT: {title}")
+    out.append("")
+    out.append(line)
+    continue
+  out.append(line)
+
+dst.write_text(header + "\n".join(out))
+PY
+  echo "$tmp"
+}
+
+upload_file() {
+  local rel="$1"
+  local abs="${SPINE_CODE}/${rel}"
+  if [[ ! -f "$abs" ]]; then
+    log_err "Missing file: $rel"
+    return 1
+  fi
+  if [[ "$(contains_secret_material "$abs" | tr -d '\n')" == "1" ]]; then
+    log "SKIP(secrets): $rel"
+    return 0
+  fi
+
+  local prepared tmp code
+  prepared="$(prepare_file_for_upload "$abs")"
+  tmp="$(mktemp)"
+  code="$(curl -sS --max-time 180 -o "$tmp" -w "%{http_code}" \
+    -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" \
+    -F "file=@${prepared};filename=$(basename "$abs")" \
+    "${ANYTHINGLLM_URL}/api/workspace/${WORKSPACE_SLUG}/upload-and-embed" || true)"
+  rm -f "$prepared" 2>/dev/null || true
+
+  if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
+    log_err "Upload failed (HTTP ${code:-unknown}): $rel"
+    cat "$tmp" >&2 || true
+    rm -f "$tmp"
+    return 1
+  fi
+  if grep -qi "<!DOCTYPE html" "$tmp" 2>/dev/null; then
+    log_err "Upload returned HTML (wrong endpoint/auth?): $rel"
+    cat "$tmp" >&2 || true
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+  log_ok "Uploaded: $rel"
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  health)
+    derive_anythingllm_url
+    echo "=== RAG Health ==="
+    echo "anythingllm: ${ANYTHINGLLM_URL}"
+    if curl -sSf --max-time 10 "${ANYTHINGLLM_URL}/api/ping" >/dev/null; then
+      echo "anythingllm_ping: OK"
+    else
+      echo "anythingllm_ping: FAIL"
+      exit 1
+    fi
+    if curl -sSf --max-time 10 "http://100.71.17.29:6333/healthz" >/dev/null; then
+      echo "qdrant_healthz: OK"
+    else
+      echo "qdrant_healthz: FAIL"
+      exit 1
+    fi
+    ;;
+
+  status)
+    while [[ "${1:-}" == "--workspace" ]]; do
+      WORKSPACE_SLUG="${2:-}"; shift 2 || true
+    done
+    derive_anythingllm_url
+    load_api_key
+    require_tool curl
+    local_json="$(http_get "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}")"
+    if command -v jq >/dev/null 2>&1; then
+      doc_count="$(echo "$local_json" | jq -r '
+        if .workspace and (.workspace|type=="array") then .workspace[0].documents|length
+        elif .workspace and (.workspace|type=="object") then .workspace.documents|length
+        else 0 end
+      ')"
+    else
+      doc_count="(jq-missing)"
+    fi
+    echo "workspace: ${WORKSPACE_SLUG}"
+    echo "docs_indexed: ${doc_count}"
+    ;;
+
+  ask)
+    question="${1:-}"
+    shift || true
+    while [[ "${1:-}" == "--workspace" ]]; do
+      WORKSPACE_SLUG="${2:-}"; shift 2 || true
+    done
+    if [[ -z "${question:-}" ]]; then
+      usage
+      exit 1
+    fi
+    derive_anythingllm_url
+    load_api_key
+    require_tool curl
+    require_tool python3
+
+    payload="$(python3 - <<'PY' "$question"
+import json,sys
+print(json.dumps({"message": sys.argv[1], "mode": "query"}))
+PY
+)"
+    resp="$(http_post_json "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}/chat" "$payload")"
+    if command -v jq >/dev/null 2>&1; then
+      answer="$(echo "$resp" | jq -r '.textResponse // .response // .message // .text // empty')"
+      [[ -n "$answer" ]] || { log_err "Could not parse answer"; exit 1; }
+      echo "$answer"
+      sources="$(echo "$resp" | jq -r '.sources // [] | if length==0 then "" else (map("- \((.doc // .title // .source // .file // .name // "Unknown")) (\((.score // .confidence // .relevance // 0) | tostring))") | join("\n")) end')"
+      if [[ -n "$sources" ]]; then
+        echo ""
+        echo "Sources:"
+        echo "$sources"
+      fi
+    else
+      echo "$resp"
+    fi
+    ;;
+
+  sync)
+    dry_run=0
+    while [[ "$#" -gt 0 ]]; do
+      case "${1:-}" in
+        --workspace) WORKSPACE_SLUG="${2:-}"; shift 2 ;;
+        --dry-run) dry_run=1; shift ;;
+        *) log_err "Unknown arg: $1"; usage; exit 1 ;;
+      esac
+    done
+
+    derive_anythingllm_url
+    load_api_key
+    require_tool curl
+    require_tool python3
+
+    manifest="$(build_manifest)"
+    total="$(echo "$manifest" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+    echo "workspace: ${WORKSPACE_SLUG}"
+    echo "anythingllm: ${ANYTHINGLLM_URL}"
+    echo "eligible_docs: ${total}"
+
+    if [[ "$dry_run" == "1" ]]; then
+      echo ""
+      echo "$manifest"
+      exit 0
+    fi
+
+    uploaded=0
+    failed=0
+    skipped=0
+    while IFS= read -r rel; do
+      [[ -z "$rel" ]] && continue
+      if upload_file "$rel"; then
+        uploaded=$((uploaded + 1))
+      else
+        failed=$((failed + 1))
+      fi
+    done <<<"$manifest"
+
+    echo ""
+    echo "uploaded: $uploaded"
+    echo "failed: $failed"
+    if [[ "$failed" -gt 0 ]]; then
+      exit 1
+    fi
+    ;;
+
+  -h|--help|"")
+    usage
+    ;;
+
+  *)
+    log_err "Unknown command: $cmd"
+    usage
+    exit 1
+    ;;
+esac
