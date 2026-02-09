@@ -350,7 +350,9 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 - MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-029). Drives invisible until cold boot with persistent module config.
 
 **UNVERIFIED (requires credentials or physical visit):**
-- WiFi AP (EAP225): Web UI at .185 reachable (was previously documented as .249, now stale). Default creds (`admin`/`admin`) rejected — password was changed. Need owner to provide or reset. Config/SSID unknown.
+- WiFi AP (EAP225): Web UI at .185 reachable (was previously documented as .249, now stale).
+  - 2026-02-09: AP was factory reset to regain admin access. After reset, re-adopt via UDR6 DHCP client list, set DHCP reservation to `.185`, and store the new admin password in Infisical (`infrastructure/prod:/spine/shop/wifi/*`).
+  - Config/SSID should be captured after re-provisioning (see normalization + audit rules).
 
 **Camera system details:** Now tracked in [CAMERA_SSOT.md](CAMERA_SSOT.md) and LOOP-CAMERA-BASELINE-20260208 (offline cameras, IP conflict, physical location audit).
 
