@@ -40,15 +40,32 @@ with open(path, "r", encoding="utf-8") as f:
         except json.JSONDecodeError:
             continue
 
-# Deduplicate by loop_id (keep latest record)
-latest = {}
-for row in rows:
-    loop_id = row.get("loop_id")
-    if loop_id:
-        latest[loop_id] = row
+def loop_key(row):
+    return row.get("loop_id") or row.get("id")
 
-open_rows = [r for r in latest.values() if r.get("status") == "open"]
-closed_rows = [r for r in latest.values() if r.get("status") == "closed"]
+# Reduce append-only records to latest state per loop_id (see loops-ledger-reduce).
+state = {}
+for row in rows:
+    lid = loop_key(row)
+    if not lid:
+        continue
+
+    cur = state.get(lid, {"loop_id": lid})
+
+    action = row.get("action")
+    if action == "close":
+        cur["status"] = "closed"
+
+    for k, v in row.items():
+        if k in ("id", "action"):
+            continue
+        cur[k] = v
+
+    cur["loop_id"] = lid
+    state[lid] = cur
+
+open_rows = [r for r in state.values() if r.get("status") == "open"]
+closed_rows = [r for r in state.values() if r.get("status") == "closed"]
 
 severity_counts = Counter(r.get("severity", "unknown") for r in open_rows)
 owner_counts = Counter(r.get("owner", "unassigned") for r in open_rows)

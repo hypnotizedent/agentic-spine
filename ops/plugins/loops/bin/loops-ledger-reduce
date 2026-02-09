@@ -56,6 +56,12 @@ if [[ ! -s "$LOOPS_FILE" ]]; then
 fi
 
 # Python reducer - canonical dedup logic
+#
+# NOTE: open_loops.jsonl is append-only and contains two record shapes:
+# - State records: {"loop_id": "...", "status": "open|closed", ...}
+# - Event records: {"id": "...", "action": "update|close", ...}
+#
+# Reducer must merge both shapes into a single per-loop state.
 python3 - "$LOOPS_FILE" "${1:-}" <<'PY'
 import json
 import sys
@@ -75,14 +81,35 @@ with open(path, "r", encoding="utf-8") as f:
         except json.JSONDecodeError:
             continue
 
-# Deduplicate by loop_id (keep latest record - last one wins)
-latest = {}
-for row in rows:
-    loop_id = row.get("loop_id")
-    if loop_id:
-        latest[loop_id] = row
+def loop_key(row):
+    return row.get("loop_id") or row.get("id")
 
-deduped = list(latest.values())
+# Reduce append-only records to latest state per loop_id.
+state = {}
+for row in rows:
+    lid = loop_key(row)
+    if not lid:
+        continue
+
+    cur = state.get(lid, {"loop_id": lid})
+
+    action = row.get("action")
+    if action == "close":
+        # Event-only close records historically used {"id": "...", "action": "close"}.
+        # Treat as authoritative: mark loop closed even if the event record doesn't
+        # include a full copy of the loop state.
+        cur["status"] = "closed"
+
+    # Overlay fields (event records use "id" not "loop_id"; don't persist "action").
+    for k, v in row.items():
+        if k in ("id", "action"):
+            continue
+        cur[k] = v
+
+    cur["loop_id"] = lid
+    state[lid] = cur
+
+deduped = list(state.values())
 open_loops = [r for r in deduped if r.get("status") == "open"]
 closed_loops = [r for r in deduped if r.get("status") == "closed"]
 
