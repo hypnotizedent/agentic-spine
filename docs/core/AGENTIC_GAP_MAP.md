@@ -85,7 +85,7 @@ pattern with governed, receipt-producing capabilities.
 |---|-------------|-------------------|-------------------|-----------|--------|
 | 1 | runbooks | `docs/runbooks/` | workbench infra runbooks (docs tree, quarantined) | 30 | EXTRACTED |
 | 2 | reference | `docs/reference/` | workbench infra references (docs tree, quarantined) | 16 | EXTRACTED |
-| 3 | locations | `docs/locations/` | workbench infra locations (docs tree, quarantined) | 3 | EXTRACTED |
+| 3 | locations | `docs/locations/` | workbench infra locations (docs tree, quarantined) | 2 | EXTRACTED |
 | 4 | hardware | `docs/hardware/` | workbench infra hardware (docs tree, quarantined) | 2 | EXTRACTED |
 | 5 | architecture | `docs/architecture/` | workbench infra architecture (docs tree, quarantined) | 4 | EXTRACTED |
 | 6 | audits | `audits/` + `docs/audits/` | workbench infra audits (docs tree, quarantined) | 5 | EXTRACTED |
