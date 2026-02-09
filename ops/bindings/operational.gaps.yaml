@@ -1069,6 +1069,85 @@ gaps:
       enabling Gitea [metrics] in app.ini, adding Prometheus scrape
       target on VM 205, building Grafana dashboard.
 
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during LOOP-OBSERVABILITY-HYGIENE-20260208
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-056
+    discovered_by: "LOOP-OBSERVABILITY-HYGIENE-20260208"
+    discovered_at: "2026-02-08"
+    type: runtime-bug
+    doc: "ops/staged/observability/prometheus/prometheus.yml"
+    description: |
+      Prometheus scrape targets for loki (localhost:3100) and node-observability
+      (localhost:9100) resolve to [::1] (IPv6 loopback) inside the Prometheus
+      Docker container. Both services bind to the host network only. Result:
+      2 of 7 scrape targets permanently DOWN. Prometheus API shows
+      "dial tcp [::1]:3100: connection refused" for both.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-OBSERVABILITY-HYGIENE-20260208"
+    notes: |
+      Fixed: replaced localhost with 100.120.163.70 (observability Tailscale IP)
+      for both targets in prometheus.yml (staged + live). All targets now UP.
+
+  - id: GAP-OP-057
+    discovered_by: "LOOP-OBSERVABILITY-HYGIENE-20260208"
+    discovered_at: "2026-02-08"
+    type: stale-ssot
+    doc: "ops/staged/observability/prometheus/prometheus.yml"
+    description: |
+      Prometheus scrape config includes infra-core-cadvisor (100.92.91.128:8080)
+      and docker-host-cadvisor (100.92.156.118:8080) targets. cAdvisor is not
+      deployed on either host. Both targets permanently DOWN with "connection
+      refused". These were aspirational targets from the initial config, never
+      backed by actual deployments.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-OBSERVABILITY-HYGIENE-20260208"
+    notes: |
+      Fixed: removed both cAdvisor job entries from prometheus.yml (staged + live).
+      Can be re-added when/if cAdvisor is deployed in a future loop.
+
+  - id: GAP-OP-058
+    discovered_by: "LOOP-OBSERVABILITY-HYGIENE-20260208"
+    discovered_at: "2026-02-08"
+    type: runtime-bug
+    doc: "ops/staged/observability/loki/docker-compose.yml"
+    description: |
+      Loki Docker health check reports container as unhealthy despite the service
+      responding 200 on /ready from the host. Root cause: Loki's compactor waits
+      10 minutes for ring stability before /ready returns 200. The original
+      start_period=30s plus 3 retries at 30s intervals exhausted at ~2.5 minutes,
+      well before the compactor finished. Docker marked the container unhealthy
+      even though the service was initializing normally.
+    severity: low
+    status: fixed
+    fixed_in: "LOOP-OBSERVABILITY-HYGIENE-20260208"
+    notes: |
+      Fixed: increased start_period from 30s to 720s (12 minutes) and retries
+      from 3 to 5 in loki docker-compose.yml (staged + live). Covers the full
+      10-minute compactor ring stability wait plus buffer.
+
+  - id: GAP-OP-059
+    discovered_by: "LOOP-OBSERVABILITY-HYGIENE-20260208"
+    discovered_at: "2026-02-08"
+    type: missing-entry
+    doc: "ops/bindings/secrets.binding.yaml"
+    description: |
+      Grafana admin password secret path is undocumented. Other infra services
+      (caddy-auth, gitea, vaultwarden) have documented Infisical paths under
+      /spine/vm-infra/<service>/. Grafana follows the same pattern but is not
+      explicitly documented in any binding or runbook.
+    severity: low
+    status: open
+    fixed_in: null
+    notes: |
+      Expected path: /spine/vm-infra/grafana/GRAFANA_ADMIN_PASSWORD.
+      Deferred: requires creating the Infisical folder + secret. Non-blocking
+      since Grafana is currently using the default admin password set during
+      initial deployment.
+
 # ─────────────────────────────────────────────────────────────
 # Gap Types
 # ─────────────────────────────────────────────────────────────
