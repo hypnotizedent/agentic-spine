@@ -127,6 +127,17 @@ github_issue: "#625"
 
 ### Hotkeys / Shortcuts
 
+### Managed Configs
+
+<!-- BEGIN AUTO CONFIGS -->
+| Config | Path | Desired Source | Status |
+|--------|------|----------------|--------|
+| `hammerspoon` | `/Users/ronnyworks/.hammerspoon` | `/Users/ronnyworks/code/workbench/dotfiles/hammerspoon/.hammerspoon` | `ok` |
+| `raycast-scripts` | `/Users/ronnyworks/.raycast-scripts` | `/Users/ronnyworks/code/workbench/dotfiles/raycast` | `ok` |
+| `codex-config` | `/Users/ronnyworks/.codex/config.toml` | `/Users/ronnyworks/code/workbench/dotfiles/codex/config.toml` | `ok` |
+| `opencode-config` | `/Users/ronnyworks/.config/opencode/opencode.json` | `/Users/ronnyworks/code/workbench/dotfiles/opencode/opencode.json` | `ok` |
+<!-- END AUTO CONFIGS -->
+
 #### Hammerspoon
 
 <!-- BEGIN AUTO HOTKEYS -->
