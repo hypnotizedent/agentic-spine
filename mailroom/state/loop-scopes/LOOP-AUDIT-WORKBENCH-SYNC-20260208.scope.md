@@ -1,8 +1,9 @@
 # LOOP-AUDIT-WORKBENCH-SYNC-20260208
 
-> **Status:** OPEN
+> **Status:** CLOSED
 > **Owner:** @ronny
 > **Created:** 2026-02-08
+> **Closed:** 2026-02-08
 > **Severity:** high
 > **Origin:** Deep cross-VM audit (Cowork session, Opus 4.6 subagents)
 
@@ -46,10 +47,10 @@ Remaining spine-side tasks to finish this loop:
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| P0 | **Critical fixes** — archive monitoring compose, refresh CONTAINER_INVENTORY, fix RAG script defaults, register automation services | DONE (workbench commits + spine MT-4 already present) |
+| P0 | **Critical fixes** — archive monitoring compose, refresh CONTAINER_INVENTORY, fix RAG script defaults, register automation services | DONE |
 | P1 | **Governance sync** — deprecate RAG legacy docs, update INFRASTRUCTURE_MAP, archive stale workbench compose/configs, fix SECRET_ROTATION SSH target | DONE |
-| P2 | **Completeness** — Prometheus multi-host scraping, monitoring_inventory.json, node-exporter registry, automation staged compose, CRON_REGISTRY clarification | OPEN (MT-9 is spine/host-side) |
-| P3 | **Verify + closeout** — spine.verify, services.health.status, workbench parity check | READY once MT-9 complete |
+| P2 | **Completeness** — Prometheus multi-host scraping, monitoring_inventory.json, node-exporter registry, automation staged compose, CRON_REGISTRY clarification | DONE (MT-9 applied; MT-11–18 deferred as non-blocking) |
+| P3 | **Verify + closeout** — spine.verify, services.health.status, workbench parity check | DONE |
 
 ---
 
@@ -157,5 +158,26 @@ Remaining spine-side tasks to finish this loop:
 
 ---
 
+## Closeout Summary
+
+**Closed: 2026-02-08**
+
+All P0/P1 tasks complete. P2 mechanical items (MT-11 through MT-18) deferred as non-blocking — they are low-priority legacy cleanup that does not affect governance correctness or operational safety.
+
+### Verification
+- `spine.verify`: 49/49 PASS (receipt: `RCAP-20260208-210129`)
+- `services.health.status`: all OK (receipt: `RCAP-20260208-205353`)
+
+### Workbench Commits
+- `92a9af9`: doc authority redirect — deprecated SERVICE_REGISTRY.md, SSOT.md; downgraded CONTAINER_INVENTORY to reference; archived pihole compose
+- `6ff7e16`: P0/P1 mechanical fixes — archived monitoring compose, refreshed inventory YAML, fixed all RAG script defaults, deprecated legacy RAG docs, fixed SECRET_ROTATION SSH target
+
+### Spine Actions
+- MT-4: automation-stack companion services already registered in SERVICE_REGISTRY.yaml + services.health.yaml
+- MT-9: Prometheus multi-host scrape config applied to VM 205 (download-stack + streaming-stack node-exporter targets)
+
+---
+
 _Scope document created by: Opus 4.6 (Cowork subagent audit)_
 _Created: 2026-02-08_
+_Closed: 2026-02-08_
