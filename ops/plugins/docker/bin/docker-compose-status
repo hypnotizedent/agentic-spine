@@ -164,6 +164,16 @@ for key in $TARGET_KEYS; do
     continue
   fi
 
+  # NOTE: yq `//` coalesces on null OR false, so don't use it for booleans.
+  enabled="$(yq -r ".targets.\"$key\".enabled" "$BINDING" 2>/dev/null || echo "null")"
+  [[ -z "$enabled" || "$enabled" == "null" ]] && enabled="true"
+  if [[ "$enabled" != "true" ]]; then
+    echo
+    echo "host: $key (disabled=true)"
+    echo "STATUS: SKIP reason=disabled"
+    continue
+  fi
+
   ssh_target_id="$(yq -r ".targets.\"$key\".ssh_target // \"\"" "$BINDING")"
   [[ -n "$ssh_target_id" && "$ssh_target_id" != "null" ]] || stop "binding target '$key' missing ssh_target"
 

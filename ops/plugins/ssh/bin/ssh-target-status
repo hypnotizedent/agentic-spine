@@ -36,6 +36,7 @@ fi
 TARGET_FILTER=""
 TARGET_FILTER_FOUND=0
 pending=0
+optional_fail=0
 
 # Argument parsing
 while [[ $# -gt 0 ]]; do
@@ -102,6 +103,7 @@ for i in $(seq 0 $((COUNT-1))); do
   port="$(yq -r ".ssh.targets[$i].port // ${DEF_PORT}" "$BINDING_FILE")"
   # Per-target timeout override
   timeout="$(yq -r ".ssh.targets[$i].connect_timeout_sec // ${DEF_TO}" "$BINDING_FILE")"
+  optional="$(yq -r ".ssh.targets[$i].optional // false" "$BINDING_FILE")"
 
   # Filter if specific target requested
   if [[ -n "$TARGET_FILTER" && "$id" != "$TARGET_FILTER" ]]; then
@@ -182,8 +184,13 @@ for i in $(seq 0 $((COUNT-1))); do
       reason="unknown"
     fi
 
-    echo "- id: $id host: $host user: $user -> FAIL (${dur_ms}ms) reason=${reason}"
-    fail=1
+    if [[ "$optional" == "true" ]]; then
+      echo "- id: $id host: $host user: $user -> WARN (${dur_ms}ms) reason=${reason} optional=true"
+      optional_fail=$((optional_fail + 1))
+    else
+      echo "- id: $id host: $host user: $user -> FAIL (${dur_ms}ms) reason=${reason}"
+      fail=1
+    fi
   fi
 done
 
@@ -197,6 +204,11 @@ fi
 if [[ "$fail" == "1" ]]; then
   echo "status: FAIL (some targets unreachable)"
   exit 1
+fi
+
+if [[ "$optional_fail" -gt 0 ]]; then
+  echo "status: OK (${optional_fail} optional target(s) unreachable)"
+  exit 0
 fi
 
 if [[ "$pending" -gt 0 ]]; then

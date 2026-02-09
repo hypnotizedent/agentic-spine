@@ -114,7 +114,7 @@ See NETWORK_RUNBOOK.md and full plan for detailed verification matrix covering:
 |--------|--------|--------|
 | UDR6 (new) | — | 192.168.1.1 |
 | pve (vmbr0) | 192.168.12.184 | 192.168.1.184 |
-| docker-host | 192.168.12.190 | 192.168.1.190 |
+| docker-host | 192.168.12.190 | 192.168.1.200 |
 | infra-core | 192.168.12.204 | 192.168.1.204 |
 | observability | 192.168.12.205 | 192.168.1.205 |
 | dev-tools | 192.168.12.206 | 192.168.1.206 |
@@ -123,4 +123,32 @@ See NETWORK_RUNBOOK.md and full plan for detailed verification matrix covering:
 | switch | 192.168.12.2 | 192.168.1.2 |
 | iDRAC | 192.168.12.250 | 192.168.1.250 |
 | NVR | 192.168.12.216 | 192.168.1.216 |
-| AP | 192.168.12.249 | 192.168.1.249 |
+| AP | 192.168.12.249 | 192.168.1.185 |
+
+---
+
+## P3: Verification (DONE — 2026-02-09)
+
+Scorecard (post-cutover, shop core):
+- `ssh.target.status`: OK for all shop targets; home-only `pihole-home` + `download-home` allowed offline (optional)
+- `docker.compose.status`: OK (legacy `media-stack` checks disabled during decommissioning)
+- `services.health.status`: OK (`tdarr` health probe disabled until service is re-enabled; `spotisub` expects 302 redirect)
+- `network.lan.device.status`: OK (switch/iDRAC/NVR responding on new subnet)
+- Cloudflare public endpoints: `n8n.ronny.works` 200, `grafana.ronny.works` 200, `mintprints-api.ronny.works` 200
+
+Receipt anchors (spine-governed):
+- `spine.verify`: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-143419__spine.verify__R1fna76834/receipt.md`
+- `ssh.target.status`: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-143419__ssh.target.status__Rnbcq76833/receipt.md`
+- `docker.compose.status`: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-143404__docker.compose.status__Rfjav75741/receipt.md`
+- `services.health.status`: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-143404__services.health.status__R4zst75734/receipt.md`
+- `network.lan.device.status`: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-143218__network.lan.device.status__Rp8c773204/receipt.md`
+- `network.pve.post_cutover.harden`: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-143138__network.pve.post_cutover.harden__Rpmgg72425/receipt.md`
+
+Summary of fixes applied (P2/P3):
+1. infra-core DNS: disable Tailscale DNS acceptance (`tailscale set --accept-dns=false`) and restore local resolver behavior (Pi-hole authoritative for LAN clients).
+2. docker-host re-IP: netplan static `192.168.1.200/24`, gw `192.168.1.1`, DNS pointed at Pi-hole.
+3. Cloudflare tunnel (grafana): corrected tunnel routing/`extra_hosts` mapping from `docker-host` to `observability`.
+4. pve hardening: disable accepting foreign subnet routes, update Tailscale DNS upstream snapshot, and prune stale NFS exports.
+
+LAN-only endpoints:
+- `switch-shop` / `idrac-shop` / `nvr-shop` respond to ping on the new subnet (see `network.lan.device.status` receipt above).

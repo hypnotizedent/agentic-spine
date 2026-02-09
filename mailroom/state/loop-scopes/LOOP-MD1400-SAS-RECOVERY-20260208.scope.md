@@ -1,7 +1,7 @@
 # LOOP-MD1400-SAS-RECOVERY-20260208
 
 > **Status:** open (Phase 1 complete — module config persisted)
-> **Blocked By:** physical presence required (cold boot — no remote iDRAC path while pve is down). Natural to combine with UDR install in same maintenance window.
+> **Blocked By:** cold boot required + **OOB guard not satisfied** (today `pve` is the sole Tailscale subnet router advertising `192.168.1.0/24`, so powering off `pve` strands remote iDRAC unless on-site or a second subnet router is added).
 > **Owner:** @ronny
 > **Created:** 2026-02-08
 > **Severity:** critical
@@ -85,6 +85,19 @@ pm80xx
 install pm80xx /sbin/modprobe --ignore-install pm80xx; echo "11f8 8072" > /sys/bus/pci/drivers/pm80xx/new_id 2>/dev/null; true
 ```
 
+**2026-02-09 correction (no downtime):** `/etc/modprobe.d/pm80xx.conf` was found to be incorrectly set to
+`options pm80xx new_id=0x11f8,0x8072` (unsupported; ignored by the driver). It was replaced with the
+install-hook form above via the governed capability `network.md1400.pm8072.stage`.
+
+Evidence:
+- `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-151027__network.md1400.pm8072.stage__Rf84u3431/receipt.md` (dry-run)
+- `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-151114__network.md1400.pm8072.stage__R7rtq4016/receipt.md` (execute)
+
+**2026-02-09 hot-bind test (expected fail):** Manual bind attempt confirmed the PM8072 firmware cannot init without a cold power-on reset.
+
+Evidence:
+- `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-152358__network.md1400.bind_test__Rbind5001/receipt.md`
+
 ### Phase 2: Cold boot (requires physical presence)
 
 1. Notify: all 10 running VMs will go down
@@ -95,6 +108,17 @@ install pm80xx /sbin/modprobe --ignore-install pm80xx; echo "11f8 8072" > /sys/b
 6. Verify new drives appear in `lsblk`
 7. Assess MD1400 drive inventory (models, serials, health)
 8. Decide: create new ZFS pool, add to existing pool, or leave unmanaged
+
+**2026-02-09 Phase 2 execution (FAIL):** Full shutdown + cold boot with AC drain was performed on-site. The controller still fails the same MPI handshake
+(`FW is not ready`, `chip_init failed [ret: -16]`) and **no new block devices** appear.
+
+Evidence:
+- `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-153006__infra.proxmox.maintenance.shutdown__R061o19880/receipt.md` (VM shutdown + poweroff)
+- `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-152948__infra.proxmox.maintenance.precheck__Rnqr119796/receipt.md` (pre-cold-boot baseline + pm80xx probe failure)
+- `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-154702__infra.proxmox.maintenance.precheck__R2eyv21104/receipt.md` (post-cold-boot state)
+- `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260209-152358__network.md1400.bind_test__Rbind5001/receipt.md` (bind test evidence)
+
+**Implication:** treat PM8072 as hardware/firmware defective (reflash/replace); proceed to “replace controller with known-good external SAS HBA” path.
 
 ### Phase 3: Post-boot validation
 

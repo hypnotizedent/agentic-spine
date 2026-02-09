@@ -111,7 +111,7 @@ ping -c1 nas pihole-home ha vault
 | Proxmox Host | `pve` (Dell R730XD) |
 | Production VMs | docker-host, infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); download-stack, streaming-stack (media split); media-stack (decommissioning), immich-1 (deferred) |
 | NVR | `nvr-shop` — 192.168.1.216 (LAN-only) |
-| WiFi AP | `ap-shop` — 192.168.1.249 (LAN-only) |
+| WiFi AP | `ap-shop` — 192.168.1.185 (LAN-only) |
 
 **Verification:**
 ```bash
@@ -124,7 +124,7 @@ ssh pve "qm list"
 - `switch-shop` — 192.168.1.2
 - `idrac-shop` — 192.168.1.250
 - `nvr-shop` — 192.168.1.216
-- `ap-shop` — 192.168.1.249
+- `ap-shop` — 192.168.1.185
 
 ---
 
@@ -169,14 +169,18 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | Shop | `switch-shop` | 192.168.1.2 | L2 switch (Dell N2024P) |
 | Shop | `idrac-shop` | 192.168.1.250 | Out-of-band management (iDRAC) |
 | Shop | `nvr-shop` | 192.168.1.216 | Camera recorder (NVR) |
-| Shop | `ap-shop` | 192.168.1.249 | WiFi access point |
+| Shop | `ap-shop` | 192.168.1.185 | WiFi access point |
+
+Notes (Shop LAN-only endpoints):
+- Reachability (ping) was verified from inside the shop LAN via `pve` on 2026-02-09 (`network.lan.device.status`: `RCAP-20260209-143218__network.lan.device.status__Rp8c773204`).
+- If any LAN-only endpoint becomes unreachable, assume physical/VLAN/DHCP drift first (not Tailscale); fall back to console access where applicable.
 
 ### Shop VM LAN IPs (Static — used for NFS mounts and local routing)
 
 | VM | Canonical Name | LAN IP | VMID | Notes |
 |----|----------------|--------|------|-------|
 | pve (hypervisor) | `pve` | 192.168.1.184 | — | Proxmox host; NFS server |
-| docker-host (Mint OS) | `docker-host` | 192.168.1.190 | 200 | DHCP reservation (UDR). Legacy production workloads only. |
+| docker-host (Mint OS) | `docker-host` | 192.168.1.200 | 200 | Static IP (netplan). Mint OS production workloads. |
 | infra-core | `infra-core` | 192.168.1.204 | 204 | Static IP; Pi-hole DNS |
 | observability | `observability` | 192.168.1.205 | 205 | Static IP |
 | dev-tools | `dev-tools` | 192.168.1.206 | 206 | Static IP |

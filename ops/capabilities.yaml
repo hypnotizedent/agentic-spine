@@ -957,6 +957,22 @@ capabilities:
     approval: auto
     outputs: ["stdout"]
 
+  network.lan.host.identify:
+    description: "Read-only: identify LAN host(s) via probe_via (ping + neigh + best-effort TCP/HTTP banner)."
+    command: "./ops/plugins/network/bin/network-lan-host-identify"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    outputs: ["stdout"]
+
+  network.oob.guard.status:
+    description: "Read-only guard: verify shop LAN (iDRAC/switch/NVR) is reachable without relying on pve (subnet router safety gate)."
+    command: "./ops/plugins/network/bin/network-oob-guard-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    outputs: ["stdout"]
+
   network.cutover.preflight:
     description: "Composite pre-cutover verification (template, sequencing, companion changepack checks)."
     command: "./ops/plugins/network/bin/network-cutover-preflight"
@@ -966,6 +982,64 @@ capabilities:
     requires:
       - spine.verify
       - ssh.target.status
+    outputs: ["stdout"]
+
+  network.pve.post_cutover.harden:
+    description: "Mutating: post-cutover hardening on pve (tailscale accept-routes off, DNS upstream fix, prune stale NFS exports)."
+    command: "./ops/plugins/network/bin/network-pve-post-cutover-harden"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    requires:
+      - ssh.target.status
+    outputs: ["stdout"]
+
+  network.md1400.pm8072.stage:
+    description: "Mutating: stage persistent pm80xx binding for PM8072 (MD1400 path) on pve (fixes incorrect options pm80xx new_id=...)."
+    command: "./ops/plugins/network/bin/network-md1400-pm8072-stage"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    requires:
+      - ssh.target.status
+    outputs: ["stdout"]
+
+  network.md1400.bind_test:
+    description: "Mutating: hot-bind PM8072 via sysfs new_id on pve with before/after evidence capture (lspci/dmesg/lsblk)."
+    command: "./ops/plugins/network/bin/network-md1400-bind-test"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    requires:
+      - ssh.target.status
+    outputs: ["stdout"]
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # PROXMOX MAINTENANCE (receipt-backed; guarded)
+  # ─────────────────────────────────────────────────────────────────────────
+
+  infra.proxmox.maintenance.precheck:
+    description: "Read-only: capture guest state + MD1400/PM8072 evidence on a Proxmox host."
+    command: "./ops/plugins/infra/bin/infra-proxmox-maintenance"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    outputs: ["stdout"]
+
+  infra.proxmox.maintenance.shutdown:
+    description: "Mutating: guarded shutdown of all running guests on a Proxmox host (optional host poweroff)."
+    command: "./ops/plugins/infra/bin/infra-proxmox-maintenance"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    outputs: ["stdout"]
+
+  infra.proxmox.maintenance.startup:
+    description: "Mutating: start key guests on a Proxmox host, then print postcheck commands."
+    command: "./ops/plugins/infra/bin/infra-proxmox-maintenance"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
     outputs: ["stdout"]
 
   # ─────────────────────────────────────────────────────────────────────────

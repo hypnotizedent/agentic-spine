@@ -31,7 +31,7 @@
 | switch | 192.168.12.2 | 192.168.1.2 | switch CLI | console cable (deferred) |
 | iDRAC | 192.168.12.250 | 192.168.1.250 | ipmitool | IPMI from pve (deferred) |
 | NVR | 192.168.12.216 | 192.168.1.216 | ISAPI | curl from pve (deferred) |
-| AP | 192.168.12.249 | 192.168.1.249 | web UI | DHCP reservation (deferred) |
+| AP | 192.168.12.249 | 192.168.1.185 | web UI | DHCP reservation (deferred) |
 
 ## Rollback Map
 
@@ -96,9 +96,9 @@ Actual execution order (matched retrospectively to cutover.sequencing.yaml):
 
 | Device | On-site required? | Re-IP procedure | Result |
 |--------|-------------------|-----------------|--------|
-| switch | yes (console cable) | CLI: `ip address 192.168.1.2 255.255.255.0` | DEFERRED — works as L2 unmanaged |
-| iDRAC | no (IPMI from pve) | `ipmitool lan set 1 ipaddr 192.168.1.250` | PARTIAL — BMC needs cold reset |
-| NVR | no (ISAPI from pve) | `curl --digest -X PUT .../ISAPI/System/Network/...` | DEFERRED — needs on-site |
+| switch | yes (console cable) | CLI: `ip address 192.168.1.2 255.255.255.0` | DONE — ping reachable on `192.168.1.2` (receipt: `RCAP-20260209-143218__network.lan.device.status__Rp8c773204`) |
+| iDRAC | no (IPMI from pve) | `ipmitool lan set 1 ipaddr 192.168.1.250` | DONE — ping reachable on `192.168.1.250` (receipt: `RCAP-20260209-143218__network.lan.device.status__Rp8c773204`) |
+| NVR | no (ISAPI from pve) | `curl --digest -X PUT .../ISAPI/System/Network/...` | DONE — ping reachable on `192.168.1.216` (receipt: `RCAP-20260209-143218__network.lan.device.status__Rp8c773204`) |
 
 ## Post-Cutover Verification Matrix
 
@@ -111,17 +111,14 @@ Actual execution order (matched retrospectively to cutover.sequencing.yaml):
 | CF endpoints | `curl -I https://n8n.ronny.works` | 200 | [x] |
 | CF endpoints | `curl -I https://grafana.ronny.works` | 200 | [x] (after tunnel fix) |
 | Pi-hole DNS | `dig @192.168.1.204 example.com A` | NOERROR | [x] |
-| LAN-only: switch | `ping -c1 192.168.1.2` from pve | OK | [ ] DEFERRED |
-| LAN-only: iDRAC | `ping -c1 192.168.1.250` from pve | OK | [ ] DEFERRED (ARP failed) |
-| LAN-only: NVR | `ping -c1 192.168.1.216` from pve | OK | [ ] DEFERRED |
+| LAN-only: switch | `ping -c1 192.168.1.2` from pve | OK | [x] (receipt: `RCAP-20260209-143218__network.lan.device.status__Rp8c773204`) |
+| LAN-only: iDRAC | `ping -c1 192.168.1.250` from pve | OK | [x] (receipt: `RCAP-20260209-143218__network.lan.device.status__Rp8c773204`) |
+| LAN-only: NVR | `ping -c1 192.168.1.216` from pve | OK | [x] (receipt: `RCAP-20260209-143218__network.lan.device.status__Rp8c773204`) |
 
 ## Deferred Items
 
 | Item | Why Deferred | Follow-up Loop |
 |------|-------------|----------------|
-| switch re-IP to .2 | Needs console cable on-site, works as L2 unmanaged | on-site visit |
-| iDRAC re-IP to .250 | IPMI accepted but ARP failed, needs BMC cold reset | on-site visit |
-| NVR re-IP to .216 | Needs on-site ISAPI or web UI access | on-site visit |
 | AP re-IP to .249 | May auto-accept via DHCP reservation | on-site visit |
 
 ## Documentation Sweep
@@ -142,4 +139,6 @@ Actual execution order (matched retrospectively to cutover.sequencing.yaml):
 | P2 cutover complete | 2026-02-09 ~16:00 | ADHOC_20260209_160037_UDR6_CUTOVER_P2 |
 | P3 verification PASS | 2026-02-09 ~17:00 | RCAP-20260209-140518__ssh.target.status__Rfcpr59072 |
 | Docs sweep complete | 2026-02-09 | commit c330608 |
+| LAN-only endpoints reachable | 2026-02-09 ~14:32 | RCAP-20260209-143218__network.lan.device.status__Rp8c773204 |
+| PVE post-cutover hardening | 2026-02-09 ~14:31 | RCAP-20260209-143138__network.pve.post_cutover.harden__Rpmgg72425 |
 | Loop closed | pending | P4 pending |

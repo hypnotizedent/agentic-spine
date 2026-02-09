@@ -42,12 +42,20 @@ for i in $(seq 0 $((COUNT-1))); do
   host="$(yq -r ".endpoints[$i].host" "$BINDING")"
   url="$(yq -r ".endpoints[$i].url" "$BINDING")"
   expect="$(yq -r ".endpoints[$i].expect // 200" "$BINDING")"
+  # NOTE: yq `//` coalesces on null OR false, so don't use it for booleans.
+  enabled="$(yq -r ".endpoints[$i].enabled" "$BINDING")"
+  [[ -z "$enabled" || "$enabled" == "null" ]] && enabled="true"
 
   if [[ -n "$FILTER" && "$id" != "$FILTER" ]]; then
     continue
   fi
 
   checked=$((checked + 1))
+
+  if [[ "$enabled" != "true" ]]; then
+    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "SKIP" "-" "disabled"
+    continue
+  fi
 
   # Time the request (ms)
   start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"

@@ -31,7 +31,7 @@ parent_receipts:
 | iDRAC | `idrac-shop` | `https://192.168.1.250` | `infrastructure/prod:/spine/shop/idrac/*` |
 | Switch | `switch-shop` (Dell N2024P) | `http://192.168.1.2` or `ssh admin@192.168.1.2` | `infrastructure/prod:/spine/shop/switch/*` |
 | NVR | `nvr-shop` | `http://192.168.1.216` | `infrastructure/prod:/spine/shop/nvr/*` |
-| WiFi AP | `ap-shop` (EAP225) | `http://192.168.1.249` | `infrastructure/prod:/spine/shop/wifi/*` |
+| WiFi AP | `ap-shop` (EAP225) | `http://192.168.1.185` | `infrastructure/prod:/spine/shop/wifi/*` |
 
 Notes:
 - If an IP above ever conflicts with [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md), treat this table as stale and update it.
@@ -164,8 +164,8 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 | Export | Client | Purpose | Mode |
 |--------|--------|---------|------|
 | `/tank/docker` | 192.168.1.0/24 | Docker volumes | rw |
-| `/tank/backups` | docker-host (192.168.1.190) | Backup target | rw |
-| `/tank/vms` | docker-host (192.168.1.190) | VM storage | rw |
+| `/tank/backups` | docker-host (192.168.1.200) | Backup target | rw |
+| `/tank/vms` | docker-host (192.168.1.200) | VM storage | rw |
 | `/tank/docker/download-stack` | download-stack (192.168.1.209) | Download app configs | rw |
 | `/media` | download-stack (192.168.1.209) | Media files | rw |
 | `/tank/docker/streaming-stack` | streaming-stack (192.168.1.210) | Streaming app configs | rw |
@@ -247,7 +247,7 @@ Internet → T-Mobile 5G GW (CGNAT, locked — double NAT)
 | Gi1/0/3 | R730XD (iDRAC) | 44:A8:42:26:C3:11 | 192.168.1.250 | UP @ 1Gbps |
 | Gi1/0/4 | NVR (Hikvision ERI-K216-P16) | 24:0F:9B:30:F1:E7 | 192.168.1.216 | UP @ 1Gbps |
 | Gi1/0/5-23 | Available | — | — | Down |
-| Gi1/0/24 | TP-Link EAP225 (WiFi AP) | 54:AF:97:2F:C6:6E | 192.168.1.249 | UP @ 1Gbps |
+| Gi1/0/24 | TP-Link EAP225 (WiFi AP) | 54:AF:97:2F:C6:6E | 192.168.1.185 | UP @ 1Gbps |
 | Te1/0/1-2 | 10G SFP+ (unused) | — | — | Down |
 
 ### Camera Network
@@ -350,7 +350,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 - MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-029). Drives invisible until cold boot with persistent module config.
 
 **UNVERIFIED (requires credentials or physical visit):**
-- WiFi AP (EAP225): Web UI at .249 reachable, but default creds (`admin`/`admin`) rejected — password was changed. Need owner to provide or reset. Config/SSID unknown.
+- WiFi AP (EAP225): Web UI at .185 reachable (was previously documented as .249, now stale). Default creds (`admin`/`admin`) rejected — password was changed. Need owner to provide or reset. Config/SSID unknown.
 
 **Camera system details:** Now tracked in [CAMERA_SSOT.md](CAMERA_SSOT.md) and LOOP-CAMERA-BASELINE-20260208 (offline cameras, IP conflict, physical location audit).
 
