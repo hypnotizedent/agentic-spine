@@ -35,6 +35,35 @@ The shop hypervisor (`pve`, R730XD) runs multiple VMs with clear responsibilitie
 - Media split: `download-stack` (VM 209) + `streaming-stack` (VM 210)
 - Legacy: `docker-host` (VM 200) retains **Mint OS business workloads only**
 
+## Placement Table (Service Class -> VM)
+
+This is pointer-first (no IPs/ports). Exact truth lives in the registries.
+
+| Service Class | Primary VM | Notes / Pointers |
+|--------------|------------|------------------|
+| Ingress connector | `infra-core` (204) | Cloudflare tunnel connector. See `docs/governance/INGRESS_AUTHORITY.md`. |
+| Reverse proxy + SSO | `infra-core` (204) | Caddy + Authentik are the platform edge. |
+| DNS + network control plane | `infra-core` (204) | Pi-hole is the shop DNS anchor (UDR DHCP cutover may be pending). |
+| Secrets | `infra-core` (204) | Infisical is a SPOF today; treat as Tier-1. |
+| Human credential vault | `infra-core` (204) | Vaultwarden. |
+| Monitoring + logging + uptime | `observability` (205) | Prometheus/Grafana/Loki/Uptime Kuma + node-exporter. |
+| Git forge + CI | `dev-tools` (206) | Gitea + runner + DB. |
+| AI / RAG services | `ai-consolidation` (207) | AnythingLLM + Qdrant (migrated off MacBook). |
+| Workflow automation + local LLM | `automation-stack` (202) | n8n + ollama + open-webui. |
+| Media: download/arr/transcode | `download-stack` (209) | IO-heavy services. |
+| Media: streaming/request/subtitles | `streaming-stack` (210) | Latency-sensitive services. |
+| Mint OS business workloads | `docker-host` (200) | Legacy VM; should not receive new infrastructure services. |
+
+## Rules Of Thumb
+
+1. If it is “internet-facing” or gates access, it belongs on `infra-core`.
+2. If it is “visibility” (metrics/logs/uptime), it belongs on `observability`.
+3. If it is “delivery” (git/CI), it belongs on `dev-tools`.
+4. If it is “compute-heavy AI/RAG”, it belongs on `ai-consolidation`.
+5. If it is “automation glue”, it belongs on `automation-stack`.
+6. If it is “media”, it belongs on `download-stack` or `streaming-stack`.
+7. `docker-host` is shrinking: only Mint OS and legacy stacks remain.
+
 ## Topology (Mental Model)
 
 ```
@@ -136,4 +165,3 @@ Use this checklist whenever you move something off `docker-host` or between VMs.
 - Stack inventory: `docs/governance/STACK_REGISTRY.yaml`
 - Placement policy: `ops/bindings/infra.placement.policy.yaml`
 - Current relocations: `ops/bindings/infra.relocation.plan.yaml`
-
