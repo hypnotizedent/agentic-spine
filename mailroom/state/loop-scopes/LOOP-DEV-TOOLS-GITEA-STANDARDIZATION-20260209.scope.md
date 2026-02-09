@@ -1,8 +1,9 @@
 # LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209
 
-> **Status:** open
+> **Status:** CLOSED
 > **Owner:** @ronny
 > **Created:** 2026-02-09
+> **Closed:** 2026-02-09
 > **Severity:** medium
 
 ---
@@ -33,7 +34,7 @@ Standardize Gitea as canonical origin for agentic-spine and workbench repos. Git
 | P3 | GitHub PAT replacement (manual) | Browser for PAT generation | **DONE** |
 | P4 | Remote cutover: swap origin on MacBook (both repos) | P3 done | **DONE** |
 | P5 | Deploy backup cron on dev-tools + NAS rsync validation | SSH to dev-tools + NAS reachable | **DONE** |
-| P6 | Authentik SSO browser test + closeout | Browser | Deferred |
+| P6 | Authentik SSO browser test + closeout | Browser | **DONE** |
 
 ---
 
@@ -123,13 +124,12 @@ is independent — existing OAuth mirror works, and the rename is local + revers
 
 ---
 
-## P6: Closeout (Deferred)
+## P6: Closeout — DONE
 
-- Authentik SSO browser test
-- Verify `backup.status` shows app-gitea OK
-- Verify push mirror works with new PAT
-- Close all 6 gaps
-- Close loop
+- Authentik SSO browser test — **DONE** (required Caddy proto fix + Gitea restart; see LOOP-CADDY-PROTO-FIX-20260209)
+- Verify push mirror works with new PAT — **DONE** (both remotes at 2408d64, mirror syncing)
+- Close all 6 gaps — **DONE** (GAP-OP-050 through GAP-OP-055)
+- Close loop — **DONE**
 
 ---
 

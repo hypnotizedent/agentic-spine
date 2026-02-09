@@ -630,6 +630,18 @@ else
   warn "gitea ci workflow lock gate not present"
 fi
 
+# D51: Caddy proto lock (X-Forwarded-Proto on all Authentik upstreams)
+echo -n "D51 caddy proto lock... "
+if [[ -x "$SP/surfaces/verify/d51-caddy-proto-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d51-caddy-proto-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d51-caddy-proto-lock.sh failed"
+  fi
+else
+  warn "caddy proto lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
