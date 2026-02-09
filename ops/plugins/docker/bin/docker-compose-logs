@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# docker-compose-logs - Read-only docker compose logs for a declared stack
+#
+# WARNING: logs may contain secrets. This command is receipt-producing; use minimal tail.
+#
+# Usage:
+#   docker-compose-logs <target> <stack> [--tail N] [--follow] [--since DUR] [--] [service...]
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING="$SPINE_ROOT/ops/bindings/docker.compose.targets.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+
+[[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+
+usage() {
+  cat <<'EOF'
+docker-compose-logs - Read-only docker compose logs for a declared stack
+
+Usage:
+  docker-compose-logs <target> <stack> [--tail N] [--follow] [--since DUR] [--] [service...]
+
+Examples:
+  docker-compose-logs automation-stack mcpjungle --tail 200
+  docker-compose-logs docker-host mint-os --tail 200 dashboard-api
+  docker-compose-logs download-stack download-stack --follow --tail 50 prowlarr
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+[[ $# -ge 2 ]] || { usage >&2; exit 2; }
+
+TARGET="$1"
+STACK="$2"
+shift 2
+
+TAIL="200"
+FOLLOW="0"
+SINCE=""
+SERVICES=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tail)
+      shift
+      [[ $# -gt 0 ]] || stop "--tail requires a value"
+      TAIL="$1"
+      shift
+      ;;
+    --follow|-f)
+      FOLLOW="1"
+      shift
+      ;;
+    --since)
+      shift
+      [[ $# -gt 0 ]] || stop "--since requires a value"
+      SINCE="$1"
+      shift
+      ;;
+    --)
+      shift
+      SERVICES+=("$@")
+      break
+      ;;
+    *)
+      SERVICES+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if ! [[ "$TAIL" =~ ^[0-9]+$ ]]; then
+  stop "--tail must be an integer"
+fi
+
+ssh_target_id="$(yq -r ".targets.\"$TARGET\".ssh_target // \"\"" "$BINDING")"
+[[ -n "$ssh_target_id" && "$ssh_target_id" != "null" ]] || stop "unknown target (or missing ssh_target): $TARGET"
+
+stack_path="$(yq -r ".targets.\"$TARGET\".stacks[] | select(.name == \"$STACK\") | .path" "$BINDING" 2>/dev/null | head -n1 || true)"
+[[ -n "${stack_path:-}" && "${stack_path:-}" != "null" ]] || stop "unknown stack '$STACK' for target '$TARGET' (see $BINDING)"
+
+# Resolve ssh target via binding (no ~/.ssh/config dependency)
+DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_BINDING")"
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
+
+ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .user // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+ssh_port="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .port // ${DEF_PORT}" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+ssh_to="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .connect_timeout_sec // ${DEF_TO}" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+
+[[ -n "$ssh_host" && "$ssh_host" != "null" ]] || stop "ssh target '$ssh_target_id' missing in $SSH_BINDING (or host unset)"
+[[ -n "$ssh_user" && "$ssh_user" != "null" ]] || ssh_user="$DEF_USER"
+[[ -n "$ssh_port" && "$ssh_port" != "null" ]] || ssh_port="$DEF_PORT"
+[[ -n "$ssh_to" && "$ssh_to" != "null" ]] || ssh_to="$DEF_TO"
+
+timeout_sec="$(yq -r ".targets.\"$TARGET\".connect_timeout_sec // \"\"" "$BINDING" 2>/dev/null || echo "")"
+if [[ -z "$timeout_sec" || "$timeout_sec" == "null" ]]; then
+  timeout_sec="$ssh_to"
+fi
+
+ssh_opts=(
+  -o "ConnectTimeout=$timeout_sec"
+  -o "StrictHostKeyChecking=$DEF_STRICT"
+  -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+  -o "NumberOfPasswordPrompts=0"
+  -o "LogLevel=ERROR"
+)
+if [[ "$DEF_BATCH" == "true" ]]; then
+  ssh_opts+=(-o "BatchMode=yes")
+fi
+
+echo "docker.compose.logs"
+echo "target:  $TARGET (ssh_target=$ssh_target_id ${ssh_user}@${ssh_host}:${ssh_port})"
+echo "stack:   $STACK"
+echo "path:    $stack_path"
+echo "tail:    $TAIL"
+echo "follow:  $([ "$FOLLOW" == "1" ] && echo "true" || echo "false")"
+[[ -n "$SINCE" ]] && echo "since:   $SINCE"
+[[ ${#SERVICES[@]} -gt 0 ]] && echo "services:${SERVICES[*]}"
+echo
+
+REMOTE_SCRIPT="$(cat <<'EOS'
+set -euo pipefail
+PATHX="$1"; shift
+TAIL="$1"; shift
+FOLLOW="$1"; shift
+SINCE="$1"; shift
+SERVICES=("$@")
+
+case "$PATHX" in
+  "~/"*) PATHX="$HOME/${PATHX:2}" ;;
+  "~") PATHX="$HOME" ;;
+esac
+
+if [[ ! -d "$PATHX" ]]; then
+  echo "FAIL: stack dir missing: $PATHX" >&2
+  exit 2
+fi
+cd "$PATHX"
+
+FILE=""
+if [[ -f docker-compose.yml ]]; then FILE="docker-compose.yml"; fi
+if [[ -z "$FILE" && -f compose.yml ]]; then FILE="compose.yml"; fi
+if [[ -z "$FILE" ]]; then
+  echo "FAIL: compose file missing (docker-compose.yml/compose.yml) in $PATHX" >&2
+  exit 2
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "FAIL: docker command missing on host" >&2
+  exit 1
+fi
+
+DOCKER_CMD=(docker)
+if ! docker info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    DOCKER_CMD=(sudo -n docker)
+  else
+    echo "FAIL: docker daemon unreachable (no docker group + no sudo -n)" >&2
+    exit 1
+  fi
+fi
+
+args=(logs --no-color --tail "$TAIL")
+if [[ "$FOLLOW" == "1" ]]; then args+=(--follow); fi
+if [[ -n "$SINCE" ]]; then args+=(--since "$SINCE"); fi
+args+=("${SERVICES[@]}")
+
+"${DOCKER_CMD[@]}" compose -f "$FILE" "${args[@]}"
+EOS
+)"
+
+service_args=""
+for s in "${SERVICES[@]}"; do
+  service_args+=" $(printf "%q" "$s")"
+done
+
+# shellcheck disable=SC2086
+ssh "${ssh_opts[@]}" -p "$ssh_port" "${ssh_user}@${ssh_host}" \
+  "bash -lc $(printf "%q" "$REMOTE_SCRIPT") -- $(printf "%q" "$stack_path") $(printf "%q" "$TAIL") $(printf "%q" "$FOLLOW") $(printf "%q" "$SINCE")${service_args}"
+
