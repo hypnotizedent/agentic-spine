@@ -25,7 +25,8 @@ Double-NAT topology is acceptable since all public access uses Cloudflare tunnel
 |-------|-------------|--------|
 | P0 | Audit (topology, devices, IPs, gaps) | **DONE** |
 | P1 | Pre-stage: SSOT docs, governance, runbook | **DONE** |
-| P1.5 | SSH pre-staging: netplan, PVE interfaces, PM8072 | **IN PROGRESS** |
+| P1.5 | SSH pre-staging: netplan, PVE interfaces, PM8072 | **DONE** |
+| P1.6 | Remote config apply: netplan, exports, fstab, TS route | **DONE** |
 | P2 | Physical cutover: cable swap, re-IP, cold boot | PENDING (on-site) |
 | P3 | Verification: connectivity, NFS, services, DNS | PENDING |
 | P4 | Post-cutover: finalize docs, close gaps | PENDING |
