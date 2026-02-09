@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-08
+last_verified: 2026-02-09
 verification_method: live-isapi-query + receipt
 scope: camera-infrastructure
 parent_receipts:
@@ -27,7 +27,7 @@ parent_receipts:
 
 | Item | Value |
 |------|-------|
-| NVR IP (Shop LAN) | `192.168.12.216` (`nvr-shop`) |
+| NVR IP (Shop LAN) | `192.168.1.216` (`nvr-shop`) |
 | NVR Model | Hikvision ERI-K216-P16 |
 | Total Channels | 16 (12 configured, 8 online, 4 offline) |
 | Camera VLAN | `192.168.254.0/24` (NVR internal PoE network) |
@@ -46,9 +46,9 @@ parent_receipts:
 | **MAC** | 24:0F:9B:30:F1:E7 | 2026-02-08 |
 | **Channels** | 16 PoE (internal switch) | 2026-02-08 |
 | **Location** | Upstairs 9U rack (separate from main rack) | 2026-02-05 |
-| **Shop LAN IP** | 192.168.12.216 | 2026-02-08 |
+| **Shop LAN IP** | 192.168.1.216 | 2026-02-08 |
 | **Switch Port** | Gi1/0/4 (Dell N2024P) | 2026-02-05 |
-| **ISAPI Base** | `http://192.168.12.216/ISAPI/` | 2026-02-08 |
+| **ISAPI Base** | `http://192.168.1.216/ISAPI/` | 2026-02-08 |
 | **SDK Port** | 8000 | 2026-02-08 |
 | **RTSP Port** | 554 | 2026-02-08 |
 | **HTTP Port** | 80 | 2026-02-08 |
@@ -58,9 +58,9 @@ parent_receipts:
 ## Network Topology
 
 ```
-Shop LAN (192.168.12.0/24)
+Shop LAN (192.168.1.0/24)
     |
-    +-- Dell N2024P Switch (Gi1/0/4) ---> NVR (192.168.12.216)
+    +-- Dell N2024P Switch (Gi1/0/4) ---> NVR (192.168.1.216)
                                              |
                                              +-- NVR Internal PoE Network (192.168.254.0/24)
                                              |       |
@@ -84,7 +84,7 @@ Shop LAN (192.168.12.0/24)
 
 - Cameras are on the NVR's internal PoE network (`192.168.254.0/24`), isolated from the shop LAN
 - A Netgear PoE switch provides power and connectivity, uplinked to the NVR's PoE ports
-- NVR management interface is accessible from the shop LAN at `192.168.12.216`
+- NVR management interface is accessible from the shop LAN at `192.168.1.216`
 - RTSP streams are accessible from the shop LAN via the NVR (not directly from cameras)
 
 ---
@@ -122,8 +122,8 @@ Everything an agent needs to generate a Frigate configuration for this NVR:
 
 | Property | Value |
 |----------|-------|
-| **RTSP URL Pattern (main)** | RTSP scheme + `{user}:{pass}@192.168.12.216:554/Streaming/Channels/{ch}01` |
-| **RTSP URL Pattern (sub)** | RTSP scheme + `{user}:{pass}@192.168.12.216:554/Streaming/Channels/{ch}02` |
+| **RTSP URL Pattern (main)** | RTSP scheme + `{user}:{pass}@192.168.1.216:554/Streaming/Channels/{ch}01` |
+| **RTSP URL Pattern (sub)** | RTSP scheme + `{user}:{pass}@192.168.1.216:554/Streaming/Channels/{ch}02` |
 | **Stream Types** | Main stream (01) + Sub stream (02) per channel |
 | **Video Codec** | H.265+ (main), H.264 (sub) — typical Hikvision defaults |
 | **Protocols** | Hikvision native (ISAPI/SDK) + ONVIF |
@@ -179,27 +179,27 @@ All commands use digest authentication. **No credentials in this document** — 
 ```bash
 # System info (NVR model, serial, firmware)
 curl -s --digest -u "{user}:{pass}" \
-  "http://192.168.12.216/ISAPI/System/deviceInfo" | xmllint --format -
+  "http://192.168.1.216/ISAPI/System/deviceInfo" | xmllint --format -
 
 # Channel status (all channels)
 curl -s --digest -u "{user}:{pass}" \
-  "http://192.168.12.216/ISAPI/ContentMgmt/InputProxy/channels" | xmllint --format -
+  "http://192.168.1.216/ISAPI/ContentMgmt/InputProxy/channels" | xmllint --format -
 
 # Single channel status
 curl -s --digest -u "{user}:{pass}" \
-  "http://192.168.12.216/ISAPI/ContentMgmt/InputProxy/channels/{ch}/status" | xmllint --format -
+  "http://192.168.1.216/ISAPI/ContentMgmt/InputProxy/channels/{ch}/status" | xmllint --format -
 
 # HDD status
 curl -s --digest -u "{user}:{pass}" \
-  "http://192.168.12.216/ISAPI/ContentMgmt/Storage" | xmllint --format -
+  "http://192.168.1.216/ISAPI/ContentMgmt/Storage" | xmllint --format -
 
 # Camera detect (online/offline/conflict)
 curl -s --digest -u "{user}:{pass}" \
-  "http://192.168.12.216/ISAPI/ContentMgmt/InputProxy/channels/{ch}/detect" | xmllint --format -
+  "http://192.168.1.216/ISAPI/ContentMgmt/InputProxy/channels/{ch}/detect" | xmllint --format -
 
 # Streaming capabilities (codec info per channel)
 curl -s --digest -u "{user}:{pass}" \
-  "http://192.168.12.216/ISAPI/Streaming/channels/{ch}01/capabilities" | xmllint --format -
+  "http://192.168.1.216/ISAPI/Streaming/channels/{ch}01/capabilities" | xmllint --format -
 ```
 
 ---
@@ -209,7 +209,7 @@ curl -s --digest -u "{user}:{pass}" \
 | Date | Source | Summary |
 |------|--------|---------|
 | 2026-02-08 | Live ISAPI query (SSH from pve) | 12 channels enumerated, 8 online, 3 offline, 1 IP conflict. NVR firmware V4.30.216. 1x 4TB HDD status ok/full. |
-| 2026-02-05 | Dell N2024P factory reset receipt | NVR confirmed on Gi1/0/4, MAC 24:0F:9B:30:F1:E7, IP 192.168.12.216 |
+| 2026-02-05 | Dell N2024P factory reset receipt | NVR confirmed on Gi1/0/4, MAC 24:0F:9B:30:F1:E7, IP 192.168.1.216 |
 
 ---
 

@@ -642,6 +642,18 @@ else
   warn "caddy proto lock gate not present"
 fi
 
+# D52: UDR6 gateway assertion (shop SSOT docs reference 192.168.1.0/24)
+echo -n "D52 udr6 gateway assertion... "
+if [[ -x "$SP/surfaces/verify/d52-udr6-gateway-assertion.sh" ]]; then
+  if "$SP/surfaces/verify/d52-udr6-gateway-assertion.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d52-udr6-gateway-assertion.sh failed"
+  fi
+else
+  warn "udr6 gateway assertion gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-08
+last_verified: 2026-02-09
 verification_method: receipt + on-site audit + live-ssh-inspection
 scope: shop-infrastructure
 parent_receipts:
@@ -26,11 +26,12 @@ parent_receipts:
 
 | Component | Canonical Name | Access | Credentials (Infisical) |
 |----------|-----------------|--------|--------------------------|
+| Gateway | `udr-shop` (UniFi UDR6) | `https://192.168.1.1` or UniFi app | N/A (adopted via UniFi app) |
 | Proxmox host | `pve` | `ssh pve` or `https://pve:8006` | `infrastructure/prod:/spine/shop/pve/*` |
-| iDRAC | `idrac-shop` | `https://192.168.12.250` | `infrastructure/prod:/spine/shop/idrac/*` |
-| Switch | `switch-shop` (Dell N2024P) | `http://192.168.12.2` or `ssh admin@192.168.12.2` | `infrastructure/prod:/spine/shop/switch/*` |
-| NVR | `nvr-shop` | `http://192.168.12.216` | `infrastructure/prod:/spine/shop/nvr/*` |
-| WiFi AP | `ap-shop` (EAP225) | `http://192.168.12.249` | `infrastructure/prod:/spine/shop/wifi/*` |
+| iDRAC | `idrac-shop` | `https://192.168.1.250` | `infrastructure/prod:/spine/shop/idrac/*` |
+| Switch | `switch-shop` (Dell N2024P) | `http://192.168.1.2` or `ssh admin@192.168.1.2` | `infrastructure/prod:/spine/shop/switch/*` |
+| NVR | `nvr-shop` | `http://192.168.1.216` | `infrastructure/prod:/spine/shop/nvr/*` |
+| WiFi AP | `ap-shop` (EAP225) | `http://192.168.1.249` | `infrastructure/prod:/spine/shop/wifi/*` |
 
 Notes:
 - If an IP above ever conflicts with [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md), treat this table as stale and update it.
@@ -66,6 +67,7 @@ Notes:
 
 | Component | Model | Role | Verified |
 |----------|-------|------|----------|
+| Router | UniFi Dream Router 6 (UDR6) | Shop gateway, DHCP, DNS relay (192.168.1.1) | 2026-02-09 |
 | Server | Dell PowerEdge R730XD (12-bay LFF) | Shop hypervisor (`pve`) | 2026-02-08 |
 | DAS | Dell MD1400 | Bulk storage shelf (cabled, driver blocked — GAP-OP-029) | 2026-02-08 |
 | Switch | Dell N2024P | Shop LAN switching / PoE (24-port, 190W PoE budget) | 2026-02-05 |
@@ -157,22 +159,19 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 
 **NOTE:** vzdump backup job covers VMs 200-204 only. VMs 205, 206, 207, 209, 210 are NOT backed up. Add them to the job.
 
-### NFS Exports from PVE (2026-02-08)
+### NFS Exports from PVE (2026-02-09)
 
 | Export | Client | Purpose | Mode |
 |--------|--------|---------|------|
-| `/tank/docker` | docker-host (100.92.156.118) | Docker volumes | rw |
-| `/tank/backups` | docker-host (100.92.156.118) | Backup target | rw |
-| `/tank/vms` | docker-host (100.92.156.118) | VM storage | rw |
-| `/tank/docker/media-stack` | media-stack (100.117.1.53) | Container config/volumes | rw |
-| `/media` | media-stack (100.117.1.53) | Media files | rw |
-| `/mnt/easystore/backups` | docker-host (100.92.156.118) | Easystore backup mount | rw |
-| `/tank/docker/download-stack` | download-stack (100.107.36.76) | Download app configs | rw |
-| `/media` | download-stack (100.107.36.76) | Media files | rw |
-| `/tank/docker/streaming-stack` | streaming-stack (100.123.207.64) | Streaming app configs | rw |
-| `/media` | streaming-stack (100.123.207.64) | Media files | **ro** |
+| `/tank/docker` | 192.168.1.0/24 | Docker volumes | rw |
+| `/tank/backups` | docker-host (192.168.1.x) | Backup target | rw |
+| `/tank/vms` | docker-host (192.168.1.x) | VM storage | rw |
+| `/tank/docker/download-stack` | download-stack (192.168.1.76) | Download app configs | rw |
+| `/media` | download-stack (192.168.1.76) | Media files | rw |
+| `/tank/docker/streaming-stack` | streaming-stack (192.168.1.64) | Streaming app configs | rw |
+| `/media` | streaming-stack (192.168.1.64) | Media files | **ro** |
 
-All exports use `sync,no_subtree_check,no_root_squash` over Tailscale IPs. streaming-stack has read-only `/media` access (consumers only, no writes).
+All exports use `sync,no_subtree_check,no_root_squash` over **LAN IPs** (not Tailscale — avoids D-state deadlock). streaming-stack has read-only `/media` access (consumers only, no writes).
 
 ### MD1400 DAS Specifications
 
@@ -215,24 +214,40 @@ All exports use `sync,no_subtree_check,no_root_squash` over Tailscale IPs. strea
 
 ## Network (Shop)
 
+### Topology
+
+```
+Internet → T-Mobile 5G GW (CGNAT, locked — double NAT)
+              → UDR6 WAN (DHCP from T-Mobile) — 192.168.1.1
+                  → Dell N2024P Switch (192.168.1.2, Gi1/0/1)
+                      ├─ Gi1/0/2: R730XD vmbr0 (pve, 192.168.1.184)
+                      ├─ Gi1/0/3: R730XD iDRAC (192.168.1.250)
+                      ├─ Gi1/0/4: NVR (192.168.1.216)
+                      ├─ Gi1/0/5-23: Available
+                      └─ Gi1/0/24: WiFi AP EAP225 (192.168.1.249)
+```
+
 ### Subnet
 
 | Item | Value |
 |------|-------|
-| Subnet | `192.168.12.0/24` |
-| Gateway | `192.168.12.1` (T-Mobile gateway) |
-| Switch | `192.168.12.2` (Dell N2024P, VLAN 1 management) |
+| Subnet | `192.168.1.0/24` |
+| Gateway | `192.168.1.1` (UniFi UDR6) |
+| Switch | `192.168.1.2` (Dell N2024P, VLAN 1 management) |
+| DHCP range | `192.168.1.100–192.168.1.199` (UDR6) |
+| DHCP DNS | `192.168.1.128` (Pi-hole on infra-core) |
+| WAN | T-Mobile 5G Home Internet (~865/309 Mbps, CGNAT) |
 
 ### Switch Port Assignments (Dell N2024P)
 
 | Port | Device | MAC | IP | Status |
 |------|--------|-----|-----|--------|
-| Gi1/0/1 | T-Mobile Router (uplink) | — | 192.168.12.1 | UP @ 1Gbps |
-| Gi1/0/2 | R730XD (PVE, vmbr0) | 44:A8:42:22:2C:A6 | 192.168.12.184 | UP @ 1Gbps |
-| Gi1/0/3 | R730XD (iDRAC) | 44:A8:42:26:C3:11 | 192.168.12.250 | UP @ 1Gbps |
-| Gi1/0/4 | NVR (Hikvision ERI-K216-P16) | 24:0F:9B:30:F1:E7 | 192.168.12.216 | UP @ 1Gbps |
+| Gi1/0/1 | UDR6 LAN (uplink) | — | 192.168.1.1 | UP @ 1Gbps |
+| Gi1/0/2 | R730XD (PVE, vmbr0) | 44:A8:42:22:2C:A6 | 192.168.1.184 | UP @ 1Gbps |
+| Gi1/0/3 | R730XD (iDRAC) | 44:A8:42:26:C3:11 | 192.168.1.250 | UP @ 1Gbps |
+| Gi1/0/4 | NVR (Hikvision ERI-K216-P16) | 24:0F:9B:30:F1:E7 | 192.168.1.216 | UP @ 1Gbps |
 | Gi1/0/5-23 | Available | — | — | Down |
-| Gi1/0/24 | TP-Link EAP225 (WiFi AP) | 54:AF:97:2F:C6:6E | 192.168.12.249 | UP @ 1Gbps |
+| Gi1/0/24 | TP-Link EAP225 (WiFi AP) | 54:AF:97:2F:C6:6E | 192.168.1.249 | UP @ 1Gbps |
 | Te1/0/1-2 | 10G SFP+ (unused) | — | — | Down |
 
 ### Camera Network
@@ -244,7 +259,7 @@ Cameras are on the NVR's internal PoE network (`192.168.254.0/24`), fed by a Net
 | **NVR** | Hikvision ERI-K216-P16 (16-channel, FW V4.30.216) |
 | **NVR Location** | Upstairs 9U rack (separate from main rack) |
 | **Camera VLAN** | 192.168.254.0/24 (NVR internal) |
-| **NVR IP (Shop LAN)** | 192.168.12.216 (`nvr-shop`) |
+| **NVR IP (Shop LAN)** | 192.168.1.216 (`nvr-shop`) |
 | **Camera Switch** | Netgear PoE switch (uplink to NVR PoE ports) |
 | **Total Channels** | 16 (12 configured, 8 online, 4 offline) |
 
@@ -328,8 +343,8 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 - Tank drive serials: Z1Z86298, Z1Z85V4W, Z1Z84YNR, Z1Z85V47, Z1Z862H5, Z1Z8629N, Z1Z85TFE, Z1Z861ZN
 - PM8072 second SAS controller present but no driver/no drives visible
 - NVR: Hikvision ERI-K216-P16 on Gi1/0/4 (see [CAMERA_SSOT.md](CAMERA_SSOT.md) for channel details)
-- Switch: Dell N2024P at 192.168.12.2 (corrected from .1 — .1 is T-Mobile gateway)
-- Tailscale subnet routing: pve now advertises 192.168.12.0/24 (ip_forward persisted)
+- Switch: Dell N2024P at 192.168.1.2 (L2 only, UDR6 is gateway at .1)
+- Tailscale subnet routing: pve advertises 192.168.1.0/24 (ip_forward persisted)
 
 **BLOCKED (requires cold boot — LOOP-MD1400-SAS-RECOVERY-20260208):**
 - MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-029). Drives invisible until cold boot with persistent module config.
@@ -349,7 +364,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 ## Open Network Tasks (shop)
 
-- [ ] **DHCP DNS cutover — BLOCKED on UDR installation**: T-Mobile gateway at 192.168.12.1 is fully locked down (no DHCP control). Plan: insert UDR (Ubiquiti Dream Router, on-hand) between T-Mobile and switch, re-IP shop LAN to new subnet (e.g. 10.12.1.0/24), UDR owns DHCP with DNS→Pi-hole (infra-core). Requires re-IP of pve (.184), iDRAC (.250), switch (.2), all VMs, and all bindings. Pre-stage config changes before cutover. Currently only 2 DHCP clients (docker-host VM 200, media-stack VM 201) — all other devices use static IPs.
+- [x] **DHCP DNS cutover**: UDR6 deployed as shop gateway (192.168.1.1). Shop LAN re-IPed to 192.168.1.0/24. DHCP→UDR6, DNS→Pi-hole (192.168.1.128). Loop: LOOP-UDR6-SHOP-CUTOVER-20260209. Gate: D52.
 - [x] **vzdump backup gap**: All 10 VMs in vzdump job. Offsite sync (pve → NAS over Tailscale) wired for VMs 204-210.
 
 ---
@@ -360,5 +375,6 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 - [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md)
 - [MINILAB_SSOT.md](MINILAB_SSOT.md)
 - [MACBOOK_SSOT.md](MACBOOK_SSOT.md)
+- [NETWORK_RUNBOOK.md](NETWORK_RUNBOOK.md)
 - [SECRETS_POLICY.md](SECRETS_POLICY.md)
 - [SSOT_UPDATE_TEMPLATE.md](SSOT_UPDATE_TEMPLATE.md)

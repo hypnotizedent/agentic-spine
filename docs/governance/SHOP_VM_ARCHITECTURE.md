@@ -134,7 +134,7 @@ Role: IO-heavy download, indexing, and transcode services.
 - Support: `flaresolverr`, `recyclarr`, `autobrr`, `decluttarr`
 - Infra: `watchtower`, `node-exporter`, `promtail`, `unpackerr`
 
-24 containers total. NFS mounts from pve (LAN IP 192.168.12.184).
+24 containers total. NFS mounts from pve (LAN IP 192.168.1.184).
 
 ### streaming-stack (VM 210)
 Role: latency-sensitive streaming, request management, and media presentation.
@@ -145,7 +145,7 @@ Role: latency-sensitive streaming, request management, and media presentation.
 - Media: `trailarr`, `caddy` (internal proxy)
 - Infra: `watchtower`, `node-exporter`
 
-10 containers total. NFS mounts from pve (LAN IP 192.168.12.184, media read-only).
+10 containers total. NFS mounts from pve (LAN IP 192.168.1.184, media read-only).
 
 Note: Legacy monolith `media-stack` (VM 201) is being decommissioned.
 See `mailroom/state/loop-scopes/LOOP-MEDIA-STACK-SPLIT-20260208.scope.md`.

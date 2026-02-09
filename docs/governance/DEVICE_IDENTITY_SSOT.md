@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-08
+last_verified: 2026-02-09
 verification_method: spine-capabilities
 scope: all-infrastructure
 github_issue: "#615"
@@ -16,7 +16,7 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 > For service endpoints/ports/health routes → CHECK `docs/governance/SERVICE_REGISTRY.yaml`.
 > Before creating ANY new device/VM/service → FOLLOW THESE RULES.
 >
-> Last Verified: February 8, 2026
+> Last Verified: February 9, 2026
 
 ---
 
@@ -98,19 +98,20 @@ ssh proxmox-home "qm list && pct list"
 ping -c1 nas pihole-home ha vault
 ```
 
-### Shop Rack (R730XD + N2024P)
+### Shop Rack (R730XD + N2024P + UDR6)
 
 | Property | Value |
 |----------|-------|
 | Location | Shop building |
-| Subnet | 192.168.12.0/24 |
-| Gateway | 192.168.12.1 (Dell N2024P) |
-| Switch mgmt IP | 192.168.12.1 (Dell N2024P) |
-| iDRAC | `idrac-shop` — 192.168.12.250 (LAN-only) |
+| Subnet | 192.168.1.0/24 |
+| Gateway | 192.168.1.1 (UniFi UDR6) |
+| Router | `udr-shop` — 192.168.1.1 (UniFi Dream Router 6) |
+| Switch mgmt IP | 192.168.1.2 (Dell N2024P) |
+| iDRAC | `idrac-shop` — 192.168.1.250 (LAN-only) |
 | Proxmox Host | `pve` (Dell R730XD) |
 | Production VMs | docker-host, infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); download-stack, streaming-stack (media split); media-stack (decommissioning), immich-1 (deferred) |
-| NVR | `nvr-shop` — 192.168.12.216 (LAN-only) |
-| WiFi AP | `ap-shop` — 192.168.12.249 (LAN-only) |
+| NVR | `nvr-shop` — 192.168.1.216 (LAN-only) |
+| WiFi AP | `ap-shop` — 192.168.1.249 (LAN-only) |
 
 **Verification:**
 ```bash
@@ -119,10 +120,11 @@ ssh pve "qm list"
 ```
 
 **LAN-only endpoints (Shop):**
-- `switch-shop` — 192.168.12.1
-- `idrac-shop` — 192.168.12.250
-- `nvr-shop` — 192.168.12.216
-- `ap-shop` — 192.168.12.249
+- `udr-shop` — 192.168.1.1
+- `switch-shop` — 192.168.1.2
+- `idrac-shop` — 192.168.1.250
+- `nvr-shop` — 192.168.1.216
+- `ap-shop` — 192.168.1.249
 
 ---
 
@@ -163,28 +165,29 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | Location | Canonical Name | LAN IP | Purpose |
 |----------|----------------|--------|---------|
 | Home | `udr-home` | 10.0.0.1 | Gateway / UniFi controller |
-| Shop | `switch-shop` | 192.168.12.1 | Switch + gateway (Dell N2024P) |
-| Shop | `idrac-shop` | 192.168.12.250 | Out-of-band management (iDRAC) |
-| Shop | `nvr-shop` | 192.168.12.216 | Camera recorder (NVR) |
-| Shop | `ap-shop` | 192.168.12.249 | WiFi access point |
+| Shop | `udr-shop` | 192.168.1.1 | Gateway / UniFi controller (UDR6) |
+| Shop | `switch-shop` | 192.168.1.2 | L2 switch (Dell N2024P) |
+| Shop | `idrac-shop` | 192.168.1.250 | Out-of-band management (iDRAC) |
+| Shop | `nvr-shop` | 192.168.1.216 | Camera recorder (NVR) |
+| Shop | `ap-shop` | 192.168.1.249 | WiFi access point |
 
 ### Shop VM LAN IPs (Static — used for NFS mounts and local routing)
 
 | VM | Canonical Name | LAN IP | VMID | Notes |
 |----|----------------|--------|------|-------|
-| pve (hypervisor) | `pve` | 192.168.12.184 | — | Proxmox host; NFS server |
-| infra-core | `infra-core` | 192.168.12.128 | 204 | Cloud-init static IP |
-| observability | `observability` | 192.168.12.70 | 205 | Cloud-init static IP |
-| dev-tools | `dev-tools` | 192.168.12.39 | 206 | Cloud-init static IP |
-| download-stack | `download-stack` | 192.168.12.76 | 209 | NFS mounts use this IP |
-| streaming-stack | `streaming-stack` | 192.168.12.64 | 210 | NFS mounts use this IP |
+| pve (hypervisor) | `pve` | 192.168.1.184 | — | Proxmox host; NFS server |
+| infra-core | `infra-core` | 192.168.1.128 | 204 | Static IP; Pi-hole DNS |
+| observability | `observability` | 192.168.1.70 | 205 | Static IP |
+| dev-tools | `dev-tools` | 192.168.1.39 | 206 | Static IP |
+| download-stack | `download-stack` | 192.168.1.76 | 209 | NFS mounts use this IP |
+| streaming-stack | `streaming-stack` | 192.168.1.64 | 210 | NFS mounts use this IP |
 
 ### Subnet Table
 
 | Subnet | Location | Gateway | DHCP Range | Notes |
 |--------|----------|---------|------------|-------|
-| 192.168.12.0/24 | Shop | 192.168.12.1 (N2024P) | .100-.199 | Production infrastructure |
-| 10.0.0.0/24 | Home | 10.0.0.1 (UDR) | .100-.199 | Home lab |
+| 192.168.1.0/24 | Shop | 192.168.1.1 (UDR6) | .100-.199 | Production infrastructure; DNS → Pi-hole (.128) |
+| 10.0.0.0/24 | Home | 10.0.0.1 (UDR7) | .100-.199 | Home lab |
 | 100.x.x.x/32 | Tailscale | MagicDNS | N/A | Mesh overlay network |
 
 ### Quick Checks
@@ -426,6 +429,7 @@ These are intentionally tracked as **few consolidated loops** (to prevent loop s
 |---------|---------|--------|
 | `docs/governance/REBOOT_HEALTH_GATE.md` | Pre/post reboot validation | `scripts/infra/reboot_gate.sh` |
 | `docs/governance/BACKUP_GOVERNANCE.md` | Backup what/where/how/verify | `scripts/infra/backup_verify.sh` |
+| `docs/governance/NETWORK_RUNBOOK.md` | Network change procedures | - |
 | External recovery runbook | Cold start recovery (workbench tooling; see WORKBENCH_TOOLING_INDEX.md) | - |
 
 ### Latest Audit
@@ -471,8 +475,8 @@ CRITICAL HOSTS (Tier 1):
   proxmox-home 100.103.99.62   Proxmox (home)
 
 SUBNETS:
-  192.168.12.0/24  Shop (R730XD, VMs)
-  10.0.0.0/24      Home (Beelink, NAS)
+  192.168.1.0/24   Shop (UDR6, R730XD, VMs)
+  10.0.0.0/24      Home (UDR7, Beelink, NAS)
   100.x.x.x        Tailscale mesh
 
 QUICK CHECKS:

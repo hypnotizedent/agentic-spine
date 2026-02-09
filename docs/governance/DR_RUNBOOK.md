@@ -38,7 +38,7 @@ expected recovery times. Reference: `infra.placement.policy.yaml` for service pl
 
 ### Recovery Sequence
 
-1. **Assess** — Check iDRAC (192.168.12.250) remotely if WAN is up. Check UPS status (APC 900VA, ~10-15 min runtime).
+1. **Assess** — Check iDRAC (192.168.1.250) remotely if WAN is up. Check UPS status (APC 900VA, ~10-15 min runtime).
 2. **If power outage**: Wait for power restoration. All VMs have `onboot=1`, pve auto-starts them.
 3. **If hardware failure (single disk)**: ZFS pools are RAIDZ1 (tank) or mirror (boot). Replace failed disk, `zpool replace`. No data loss.
 4. **If hardware failure (motherboard/total loss)**:
