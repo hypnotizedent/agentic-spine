@@ -29,10 +29,10 @@ parent_receipts:
 |------|-------|
 | NVR IP (Shop LAN) | `192.168.1.216` (`nvr-shop`) |
 | NVR Model | Hikvision ERI-K216-P16 |
-| Total Channels | 16 (12 configured, 8 online, 4 offline) |
+| Total Channels | 16 (12 configured, **0 showing video** as of 2026-02-09) |
 | Camera VLAN | `192.168.254.0/24` (NVR internal PoE network) |
-| Credentials (Infisical) | `infrastructure/prod:/spine/shop/nvr/*` |
-| Loop | LOOP-CAMERA-BASELINE-20260208 |
+| Credentials (Infisical) | `infrastructure/prod:/spine/shop/nvr/*` (**not yet stored — blocker**) |
+| Loops | LOOP-CAMERA-BASELINE-20260208, **LOOP-CAMERA-OUTAGE-20260209** |
 
 ---
 
@@ -91,27 +91,30 @@ Shop LAN (192.168.1.0/24)
 
 ## Channel Registry
 
-Live ISAPI query, 2026-02-08:
+Last ISAPI query: 2026-02-08. Web UI observation: 2026-02-09 (0 feeds rendering after NVR power cycle).
 
-| Channel | Internal IP | Online | Detect Result | Physical Location | Model |
-|---------|-------------|--------|---------------|-------------------|-------|
-| 1 | 192.168.254.9 | Yes | connect | TBD | TBD |
-| 2 | 192.168.254.3 | **No** | notExist | TBD | TBD |
-| 3 | 192.168.254.4 | **No** | notExist | TBD | TBD |
-| 4 | 192.168.254.7 | **No** | notExist | TBD | TBD |
-| 5 | 192.168.254.5 | **No** | netUnreachable | TBD | TBD |
-| 6 | 192.168.254.16 | Yes | connect | TBD | TBD |
-| 7 | 192.168.254.12 | Yes | connect | TBD | TBD |
-| 8 | 192.168.254.10 | Yes | connect | TBD | TBD |
-| 9 | 192.168.254.6 | Yes | connect | TBD | TBD |
-| 10 | 192.168.254.17 | Yes | connect | TBD | TBD |
-| 11 | 192.168.254.13 | Yes | connect | TBD | TBD |
-| 12 | 192.168.254.8 | Yes | connect | TBD | TBD |
+| Channel | NVR Name | Internal IP | Online (2026-02-08) | Detect Result | Physical Location | Model |
+|---------|----------|-------------|---------------------|---------------|-------------------|-------|
+| 1 | FRONT DRIVE | 192.168.254.9 | Yes | connect | TBD | TBD |
+| 2 | ALLY WAY | 192.168.254.3 | **No** | notExist | TBD | TBD |
+| 3 | OFFICE | 192.168.254.4 | **No** | notExist | TBD | TBD |
+| 4 | IPCamera 04 | 192.168.254.7 | **No** | notExist | TBD | TBD |
+| 5 | IPCamera 05 | 192.168.254.5 | **No** | netUnreachable | TBD | TBD |
+| 6 | BAY 5 BACK | 192.168.254.16 | Yes | connect | TBD | TBD |
+| 7 | FRONT EXIT | 192.168.254.12 | Yes | connect | TBD | TBD |
+| 8 | STICKER | 192.168.254.10 | Yes | connect | TBD | TBD |
+| 9 | EMB | 192.168.254.6 | Yes | connect | TBD | TBD |
+| 10 | DTG | 192.168.254.17 | Yes | connect | TBD | TBD |
+| 11 | SCREEN ROOM | 192.168.254.13 | Yes | connect | TBD | TBD |
+| 12 | DARK ROOM | 192.168.254.8 | Yes | connect | TBD | TBD |
+
+> **2026-02-09 outage:** All 12 channels show no live video in web UI after NVR power cycle + DHCP reservation fix. See **LOOP-CAMERA-OUTAGE-20260209** for triage. ISAPI re-query needed once NVR creds are stored in Infisical.
 
 **Notes:**
 - Channels 13-16 are not configured (no cameras assigned)
 - Channel 5 reassigned from `192.168.254.7` to `.5` (2026-02-08, GAP-OP-032 fixed). Now `netUnreachable` — camera physically disconnected or needs IP update on hardware
 - Channels 2-4 report `notExist` — powered off or disconnected from PoE switch (GAP-OP-031)
+- Channel names captured from NVR web UI (2026-02-09 screenshot)
 - Physical locations and camera models require on-site audit (LOOP-CAMERA-BASELINE-20260208, P3-P4)
 
 ---
@@ -210,6 +213,8 @@ curl -s --digest -u "{user}:{pass}" \
 |------|--------|---------|
 | 2026-02-08 | Live ISAPI query (SSH from pve) | 12 channels enumerated, 8 online, 3 offline, 1 IP conflict. NVR firmware V4.30.216. 1x 4TB HDD status ok/full. |
 | 2026-02-05 | Dell N2024P factory reset receipt | NVR confirmed on Gi1/0/4, MAC 24:0F:9B:30:F1:E7, IP 192.168.1.216 |
+| 2026-02-09 | NVR IP drift fixed | NVR had reverted to DHCP .104; UDR6 reservation created for MAC→.216; power cycled; HTTP 200 confirmed |
+| 2026-02-09 | Web UI screenshot | 12 channels listed with names, 0 live video feeds. LOOP-CAMERA-OUTAGE-20260209 opened |
 
 ---
 
@@ -218,6 +223,8 @@ curl -s --digest -u "{user}:{pass}" \
 - [SHOP_SERVER_SSOT.md](SHOP_SERVER_SSOT.md) — rack inventory, switch port assignments, shop LAN
 - [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md) — device naming and identity
 - [SECRETS_POLICY.md](SECRETS_POLICY.md) — credential storage rules
+- [LOOP-CAMERA-OUTAGE-20260209](../../mailroom/state/loop-scopes/LOOP-CAMERA-OUTAGE-20260209.scope.md) — active: 0/12 channels showing video
+- [LOOP-CAMERA-BASELINE-20260208](../../mailroom/state/loop-scopes/LOOP-CAMERA-BASELINE-20260208.scope.md) — camera inventory + Frigate planning
 
 ---
 
