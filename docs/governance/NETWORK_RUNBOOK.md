@@ -224,6 +224,8 @@ ssh pve "curl --digest -u '<user>:<pass>' -X PUT \
 
 **Normalization:** Follow `docs/governance/SHOP_NETWORK_NORMALIZATION.md` for the target IP structure and the rule that changes must be receipt-backed + SSOT-updated.
 
+**Onboarding:** For new APs (or post-factory-reset), follow `docs/governance/SHOP_NETWORK_DEVICE_ONBOARDING.md` so identity/IP/credentials/doc updates happen consistently and are enforced by `network.shop.audit.status` + drift gate D54.
+
 ### Tailscale Subnet Route
 
 ```bash
