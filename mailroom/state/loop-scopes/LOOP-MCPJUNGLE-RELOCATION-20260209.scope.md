@@ -46,6 +46,5 @@ Out of scope (explicitly deferred):
 ## Success Criteria
 
 - `docker.compose.status` shows `mcpjungle` running under `automation-stack`
-- `services.health.status` probe `mcpjungle` returns `200` from `http://100.98.70.70:8085/health`
+- `services.health.status` probe `mcpjungle` returns `200` from `http://100.98.70.70:8080/health`
 - No MCPJungle stack remains running on `docker-host`
-
