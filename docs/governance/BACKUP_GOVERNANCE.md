@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-04
+last_verified: 2026-02-09
 scope: backup-strategy
 github_issue: "#622"
 ---
@@ -73,6 +73,23 @@ surfaces/verify/backup_audit.sh
 | Target | Path | Type |
 |--------|------|------|
 | tank-backups | `/tank/backups/vzdump/dump` | ZFS on Proxmox |
+
+## Retention
+
+Retention is enforced at the **storage layer** on `pve`, not only via `maxfiles`
+on the job. Canonical setting:
+
+- `pve:/etc/pve/storage.cfg` `dir: tank-backups` includes:
+  - `prune-backups keep-last=2`
+
+If pruning ever falls behind (e.g. backlog from before retention was enabled),
+run a receipt-backed prune:
+
+```bash
+./bin/ops cap run backup.vzdump.prune
+# Dry-run by default; use --execute to delete.
+./bin/ops cap run backup.vzdump.prune -- --execute
+```
 
 ---
 
