@@ -29,7 +29,7 @@ scope: session-entry
    - Identify any open loops (`./bin/ops loops list --open`) and prioritize closing them before starting new work.
    - Check available CLI tools: review `ops/bindings/cli.tools.inventory.yaml` or the "Available CLI Tools" section in `context.md`. If a user asks you to use a tool, check this inventory before searching the filesystem or web.
 3. **Trace truth**
-   - Use `mint ask "question"` before guessing answers or inventing storylines (Rule 2 from the brain layer).
+   - Use SSOT docs + repo search (`rg`) before guessing answers or inventing storylines (Rule 2 from the brain layer). `mint ask` is deprecated.
    - When you need policy or structure, follow the entry chain in `docs/governance/GOVERNANCE_INDEX.md`; trust the highest-priority SSOT in `docs/governance/SSOT_REGISTRY.yaml`.
    - Before guessing remote paths, consult `ops/bindings/docker.compose.targets.yaml` and `ops/bindings/ssh.targets.yaml` first. Never assume stack paths -- bindings are the SSOT for remote host paths.
 4. **Operate through the spine**
@@ -42,10 +42,20 @@ scope: session-entry
 - Close open loops with `./bin/ops loops collect` before wrapping up.
 - Always produce receipts for the commands you executed. Receipts live under `receipts/sessions/R*/receipt.md` and prove what you did.
 
+### Codex Worktree Hygiene
+
+When using codex worktrees (`.worktrees/codex-*`):
+
+1. **Create** — branch from `origin/main` (fetch first): `git worktree add .worktrees/<name> -b codex/<name> origin/main`
+2. **Base** — never stack codex branches without an explicit `--base` in the PR; rebase before opening PRs.
+3. **Proof** — `git status` must be clean inside the worktree; D48 fails `spine.verify` on dirty worktrees.
+4. **Retire** — after merge, remove immediately: `git worktree remove .worktrees/<name>`; D48 flags merged branches and enforces a max of 2 active codex worktrees.
+
 > **Quick checklist**
 >
 > - [ ] In spine repo
 > - [ ] Secrets gating verified
 > - [ ] Session bundle reviewed (`SESSION_PROTOCOL`, `brain/README`, `GOVERNANCE_INDEX`)
+> - [ ] Codex worktrees pruned (D48)
 > - [ ] Open loops recorded
 > - [ ] Receipts generated for work
