@@ -12,7 +12,7 @@ scope: external-tooling
 > This is the only approved place to reference workbench tooling from the spine.
 > Workbench documentation is quarantined and not authoritative.
 >
-> **Query first (when RAG is enabled):** `cd ~/code/workbench && ./scripts/root/mint ask "question"`
+> **Query first (no RAG):** `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
 
 ---
 
@@ -40,7 +40,7 @@ scope: external-tooling
 
 | Path | Purpose | Notes |
 |------|---------|-------|
-| `~/code/workbench/scripts/root/mint` | RAG CLI (`mint ask`, `mint index`) | RAG paused; future home TBD |
+| `~/code/workbench/scripts/root/rag/index.sh` | AnythingLLM index/sync utilities | Runs against AnythingLLM on `ai-consolidation` (VM 207) |
 
 ---
 
