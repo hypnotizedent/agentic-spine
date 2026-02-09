@@ -222,6 +222,8 @@ ssh pve "curl --digest -u '<user>:<pass>' -X PUT \
 
 **Note:** AP may also accept DHCP — if UDR6 has a DHCP reservation, AP could auto-accept the new IP on reboot.
 
+**Normalization:** Follow `docs/governance/SHOP_NETWORK_NORMALIZATION.md` for the target IP structure and the rule that changes must be receipt-backed + SSOT-updated.
+
 ### Tailscale Subnet Route
 
 ```bash

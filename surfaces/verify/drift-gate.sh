@@ -666,6 +666,18 @@ else
   warn "change pack integrity lock gate not present"
 fi
 
+# D54: SSOT IP parity lock (device identity ↔ shop server ↔ bindings)
+echo -n "D54 ssot ip parity lock... "
+if [[ -x "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" ]]; then
+  if "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" >/dev/null 2>&1; then
+    pass
+  else
+    fail "d54-ssot-ip-parity-lock.sh failed"
+  fi
+else
+  warn "ssot ip parity lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
