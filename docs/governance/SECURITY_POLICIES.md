@@ -47,17 +47,28 @@ Target policy:
 
 ## Access Control (SEC-05)
 
-Current state: Authentik deployed on infra-core. Forward auth active for pihole, vaultwarden,
-infisical web UIs. Gitea SSO via OAuth2.
+Current state: Authentik deployed on infra-core. Forward_domain proxy provider active for
+`*.ronny.works` — single SSO cookie covers all protected subdomains. Gitea SSO via OAuth2.
 
 Deployed:
-- [x] Authentik SSO (forward_single proxy providers)
-- [x] Caddy reverse proxy with forward auth headers
-- [x] Gitea OAuth2 integration
+- [x] Authentik SSO (forward_domain proxy provider, cookie domain: `ronny.works`)
+- [x] Caddy reverse proxy with forward auth headers (D51 enforced)
+- [x] Gitea OAuth2/OIDC integration
+
+Protected services (Authentik forward_domain via Caddy):
+- [x] pihole.ronny.works (Pi-hole admin)
+- [x] vault.ronny.works (Vaultwarden)
+- [x] secrets.ronny.works (Infisical)
+- [x] finances.ronny.works (Firefly III)
+- [x] investments.ronny.works (Ghostfolio)
+- [x] docs.ronny.works (Paperless-ngx)
+- [x] mail-archive.ronny.works (Mail Archiver)
+- [x] minio.ronny.works (MinIO Console)
+- [x] n8n.ronny.works (n8n)
+- [x] chat.ronny.works (Open WebUI)
+- [x] grafana.ronny.works (Grafana)
 
 Remaining:
-- [ ] Grafana OAuth2 integration with Authentik
-- [ ] Uptime Kuma authentication
 - [ ] Audit sudo access across all VMs (who has passwordless sudo)
 - [ ] SSH session logging (consider `auditd` or `pam_exec`)
 
