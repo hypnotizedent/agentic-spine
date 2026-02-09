@@ -18,6 +18,7 @@ SSH_BINDING="${INFRA_SSH_BINDING:-$SPINE_REPO/ops/bindings/ssh.targets.yaml}"
 NAMING_POLICY="${NAMING_POLICY:-$SPINE_REPO/ops/bindings/naming.policy.yaml}"
 
 ALLOW_HOSTNAME_ALIAS=0
+HOST_FILTER_CSV=""
 
 usage() {
     cat <<'EOF'
@@ -26,10 +27,12 @@ infra-hypervisor-identity-status - Verify hypervisor identity uniqueness
 Usage:
   infra-hypervisor-identity-status
   infra-hypervisor-identity-status --allow-hostname-alias
+  infra-hypervisor-identity-status --hosts <id1,id2,...>
 
 Options:
   --policy <path>         Override infra placement policy path
   --ssh-binding <path>    Override ssh targets binding path
+  --hosts <csv>           Only check these proxmox host ids (comma-separated)
   --allow-hostname-alias  Do not fail when remote hostname != host id
 EOF
 }
@@ -41,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --policy) POLICY="${2:-}"; shift 2 ;;
         --ssh-binding) SSH_BINDING="${2:-}"; shift 2 ;;
+        --hosts) HOST_FILTER_CSV="${2:-}"; shift 2 ;;
         --allow-hostname-alias) ALLOW_HOSTNAME_ALIAS=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) fail "unknown argument: $1" ;;
@@ -59,6 +63,27 @@ yq e '.' "$SSH_BINDING" >/dev/null 2>&1 || fail "invalid YAML: $SSH_BINDING"
 mapfile -t PROXMOX_IDS < <(yq e '.hosts | to_entries[] | select(.value.kind == "proxmox") | .key' "$POLICY")
 [[ "${#PROXMOX_IDS[@]}" -gt 0 ]] || fail "no proxmox hosts defined in policy"
 
+# Optional filter: restrict checks to a subset of proxmox host ids.
+if [[ -n "$HOST_FILTER_CSV" ]]; then
+    IFS=',' read -r -a _FILTER_IDS <<<"$HOST_FILTER_CSV"
+    declare -A _IS_PROXMOX=()
+    for hid in "${PROXMOX_IDS[@]}"; do
+        _IS_PROXMOX["$hid"]=1
+    done
+
+    FILTERED=()
+    for hid in "${_FILTER_IDS[@]}"; do
+        hid="${hid//[[:space:]]/}"
+        [[ -n "$hid" ]] || continue
+        if [[ -z "${_IS_PROXMOX[$hid]:-}" ]]; then
+            fail "requested host id is not a proxmox host in policy: $hid"
+        fi
+        FILTERED+=("$hid")
+    done
+    [[ "${#FILTERED[@]}" -gt 0 ]] || fail "--hosts provided but empty after parsing"
+    PROXMOX_IDS=("${FILTERED[@]}")
+fi
+
 # Load hostname exceptions from naming policy
 declare -A HOSTNAME_EXCEPTION=()
 if [[ -f "$NAMING_POLICY" ]]; then
@@ -76,6 +101,9 @@ echo "=== HYPERVISOR IDENTITY STATUS ==="
 echo "Policy:      $POLICY"
 echo "SSH binding: $SSH_BINDING"
 echo "Proxmox ids: ${#PROXMOX_IDS[@]}"
+if [[ -n "$HOST_FILTER_CSV" ]]; then
+    echo "Filter:      $HOST_FILTER_CSV"
+fi
 echo
 
 for host_id in "${PROXMOX_IDS[@]}"; do
@@ -94,7 +122,8 @@ for host_id in "${PROXMOX_IDS[@]}"; do
         continue
     fi
 
-    ssh_opts=(-o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+    # Avoid ControlMaster/ControlPath mux sockets from ~/.ssh/config (can fail under sandboxed runners).
+    ssh_opts=(-o BatchMode=yes -o ConnectTimeout=6 -o ControlMaster=no -o ControlPersist=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
     remote_cmd='set -euo pipefail; hn="$(hostname 2>/dev/null || uname -n)"; fq="$(hostname -f 2>/dev/null || echo "$hn")"; mid="$(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null || echo unknown)"; echo "__HN__:$hn"; echo "__FQDN__:$fq"; echo "__MID__:$mid"'
 
     set +e

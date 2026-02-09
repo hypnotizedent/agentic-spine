@@ -30,7 +30,21 @@ state="$(yq e '.active_relocation.state // "none"' "$MANIFEST")"
 
 case "$state" in
     preflight|cutover|cleanup)
-        "$CHECKER" >/dev/null
+        # During a relocation, enforce identity only for the hypervisors referenced by
+        # the relocation manifest. This keeps the gate actionable when unrelated sites
+        # are temporarily unreachable (e.g. WAN outage affecting home lab).
+        hosts_csv="$(
+            # yq does not support jq's `empty`; use select() to drop nulls.
+            yq e -r '.vm_targets[].proxmox_host | select(. != null)' "$MANIFEST" 2>/dev/null \
+              | awk 'NF' \
+              | sort -u \
+              | paste -sd, -
+        )"
+        if [[ -n "${hosts_csv:-}" ]]; then
+            "$CHECKER" --hosts "$hosts_csv" >/dev/null
+        else
+            "$CHECKER" >/dev/null
+        fi
         echo "D39 PASS: hypervisor identity enforced for active relocation state '$state'"
         ;;
     *)

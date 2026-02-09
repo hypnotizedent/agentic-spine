@@ -216,7 +216,7 @@ Agent discovery governance (D49 drift gate, `agents.registry.yaml`, `generate-co
 - spotisub: initially crash-looping (Spotify OAuth expired). CF tunnel ingress + DNS CNAME added 2026-02-08 for `spotisub.ronny.works`. Spotify OAuth re-auth completed 2026-02-08 at `https://spotisub.ronny.works/` — DONE
 - homarr: uses `ghcr.io/ajnart/homarr:latest` (v1, not v2 — config format incompatible)
 - navidrome/jellyseerr/homarr: healthchecks use wget (no curl in containers)
-- jellyseerr: needs web UI reconfiguration for radarr/sonarr/jellyfin API URLs (old VM 201 refs)
+- jellyseerr: radarr/sonarr URLs updated to 100.107.36.76, jellyfin updated to docker name `jellyfin` — DONE
 - VM 201 streaming services STOPPED — zero running containers on VM 201
 
 ### P5 — Routing + SSOT (2026-02-08)
@@ -228,8 +228,43 @@ Agent discovery governance (D49 drift gate, `agents.registry.yaml`, `generate-co
 - services.health: jellyseerr expect → 307
 - **spotisub.ronny.works (added 2026-02-08):** CF tunnel ingress rule (`PUT /configurations`) + DNS CNAME (`ae7d4462...cfargotunnel.com`, proxied) created via API. Verified: HTTP 302 → `/login` through tunnel. `domain_routing.diff` OK (39/39). DOMAIN_ROUTING_REGISTRY note updated to "Active".
 
+### Post-Migration Connectivity Audit (2026-02-08)
+
+Deep audit of all 34 containers across VM 209 + VM 210 for stale IPs, broken cross-VM references, and misconfigured backends. Root cause: splitting monolithic VM 201 created cross-VM network boundaries that didn't exist before.
+
+**P0 fixes applied:**
+
+| Service | VM | Issue | Stale Value | Fixed To |
+|---------|-----|-------|-------------|----------|
+| Jellyfin libraries | 210 | Media paths `/data/media/` didn't exist in container | `/data/media/movies`, `/data/media/tv` | `/media/movies`, `/media/tv` |
+| Jellyseerr → Jellyfin | 210 | `127.0.0.1` unreachable cross-container | `127.0.0.1:8096` | `jellyfin:8096` (docker DNS) |
+| Jellyseerr → Jellyfin | 210 | `IsStartupWizardCompleted=false` in system.xml | `false` | `true` |
+| Prowlarr → Radarr | 209 | App sync pointed to decommissioned VM 201 | `100.117.1.53:7878` + stale API key | `http://radarr:7878` + current key |
+| Posterizarr → Jellyfin | 209 | Docker container name unresolvable cross-VM | `http://jellyfin:8096` | `http://100.123.207.64:8096` |
+| Jellyfin plugin (HomeScreenSections) | 210 | Sonarr+Radarr URLs pointed to VM 201 | `100.117.1.53` | `100.107.36.76` |
+
+**P2 fix applied:**
+
+| Service | VM | Issue | Fixed To |
+|---------|-----|-------|----------|
+| Recyclarr → Radarr | 209 | Docker bridge IP instead of container name | `http://radarr:7878` |
+
+**P3 deferred to media-agent (LOOP-MEDIA-AGENT-WORKBENCH-20260208):**
+
+| Service | VM | Status | Notes |
+|---------|-----|--------|-------|
+| Unpackerr | 209 | All arr integrations commented out | Running idle — enable if extraction needed |
+| Trailarr | 209 | Zero arr connections | Running idle — configure via web UI :7667 |
+| Crosswatch | 209 | Empty config | Running idle — configure via web UI :8787 |
+| Wizarr | 210 | Setup wizard never completed | Configure via :5690 when ready |
+| Homarr | 210 | Default template only | Cosmetic — configure dashboard links |
+
+**Stale IP `100.117.1.53` (VM 201 media-stack):** Found in Prowlarr DB + Jellyfin plugin config. Fully remediated. No other references to old VM 201 or docker-host (100.92.156.118) found.
+
+**Verified clean:** jellyseerr, bazarr, navidrome, spotisub, subgen, autopulse, huntarr, soularr, all swaparr instances, radarr, sonarr, lidarr, sabnzbd, qbittorrent, decypharr, tdarr, crowdsec, flaresolverr, watchtower (x2), node-exporter (x2).
+
 ---
 
 _Scope document created by: Opus 4.6_
 _Created: 2026-02-08_
-_Updated: 2026-02-08 (P3-P5 complete, soak period started, spotisub OAuth done, 49/49 drift gates)_
+_Updated: 2026-02-08 (P3-P5 complete, soak started, post-migration connectivity audit complete)_
