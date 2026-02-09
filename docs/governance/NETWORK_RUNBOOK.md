@@ -142,7 +142,7 @@ network:
         - to: default
           via: 192.168.1.1
       nameservers:
-        addresses: [192.168.1.128]
+        addresses: [192.168.1.204]
 ```
 
 **Apply:**

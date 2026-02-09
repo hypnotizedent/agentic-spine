@@ -164,8 +164,8 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 | Export | Client | Purpose | Mode |
 |--------|--------|---------|------|
 | `/tank/docker` | 192.168.1.0/24 | Docker volumes | rw |
-| `/tank/backups` | docker-host (192.168.1.x) | Backup target | rw |
-| `/tank/vms` | docker-host (192.168.1.x) | VM storage | rw |
+| `/tank/backups` | docker-host (192.168.1.190) | Backup target | rw |
+| `/tank/vms` | docker-host (192.168.1.190) | VM storage | rw |
 | `/tank/docker/download-stack` | download-stack (192.168.1.209) | Download app configs | rw |
 | `/media` | download-stack (192.168.1.209) | Media files | rw |
 | `/tank/docker/streaming-stack` | streaming-stack (192.168.1.210) | Streaming app configs | rw |

@@ -176,6 +176,7 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | VM | Canonical Name | LAN IP | VMID | Notes |
 |----|----------------|--------|------|-------|
 | pve (hypervisor) | `pve` | 192.168.1.184 | — | Proxmox host; NFS server |
+| docker-host (Mint OS) | `docker-host` | 192.168.1.190 | 200 | DHCP reservation (UDR). Legacy production workloads only. |
 | infra-core | `infra-core` | 192.168.1.204 | 204 | Static IP; Pi-hole DNS |
 | observability | `observability` | 192.168.1.205 | 205 | Static IP |
 | dev-tools | `dev-tools` | 192.168.1.206 | 206 | Static IP |

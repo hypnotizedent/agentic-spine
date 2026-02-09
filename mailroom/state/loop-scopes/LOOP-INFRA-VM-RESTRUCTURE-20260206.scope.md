@@ -82,9 +82,13 @@ All VMs created from template 9000 (`ubuntu-2404-cloudinit-template`) using `spi
 
 | VM ID | Hostname | Tailscale IP | LAN IP | Resources | Purpose |
 |-------|----------|-------------|--------|-----------|---------|
-| 204 | infra-core | 100.92.91.128 | 192.168.12.128 | 8GB RAM, 50GB disk, 4 cores | Core infra services |
-| 205 | observability | 100.120.163.70 | 192.168.12.70 | 8GB RAM, 50GB disk, 4 cores | Monitoring + logging |
+| 204 | infra-core | 100.92.91.128 | 192.168.12.204 | 8GB RAM, 50GB disk, 4 cores | Core infra services |
+| 205 | observability | 100.120.163.70 | 192.168.12.205 | 8GB RAM, 50GB disk, 4 cores | Monitoring + logging |
 | 206 | dev-tools | 100.90.167.39 | 192.168.12.206 | 8GB RAM, 50GB disk, 4 cores | Git forge + CI |
+
+Note (2026-02-09): shop VM LAN IPs follow the VMID convention (`192.168.12.<vmid>`).
+Earlier drafts referenced the Tailscale last octet (e.g., `.128`, `.70`), which was
+not the deployed LAN IP scheme.
 
 ---
 
