@@ -25,7 +25,6 @@ Spine-side service registration for automation-stack companion services (MT-4) i
 - `ops/bindings/services.health.yaml`: health probes for `n8n`, `open-webui`, `ollama`
 
 Remaining spine-side tasks to finish this loop:
-- MT-6: update `docs/governance/INFRASTRUCTURE_MAP.md` RAG section
 - MT-9: add Prometheus multi-host scrape targets on observability (VM 205)
 
 ---
@@ -46,9 +45,9 @@ Remaining spine-side tasks to finish this loop:
 | Phase | Scope | Status |
 |-------|-------|--------|
 | P0 | **Critical fixes** — archive monitoring compose, refresh CONTAINER_INVENTORY, fix RAG script defaults, register automation services | DONE (workbench commits + spine MT-4 already present) |
-| P1 | **Governance sync** — deprecate RAG legacy docs, update INFRASTRUCTURE_MAP, archive stale workbench compose/configs, fix SECRET_ROTATION SSH target | PARTIAL (MT-6 remains in spine) |
+| P1 | **Governance sync** — deprecate RAG legacy docs, update INFRASTRUCTURE_MAP, archive stale workbench compose/configs, fix SECRET_ROTATION SSH target | DONE |
 | P2 | **Completeness** — Prometheus multi-host scraping, monitoring_inventory.json, node-exporter registry, automation staged compose, CRON_REGISTRY clarification | OPEN (MT-9 is spine/host-side) |
-| P3 | **Verify + closeout** — spine.verify, services.health.status, workbench parity check | READY once MT-6 + MT-9 complete |
+| P3 | **Verify + closeout** — spine.verify, services.health.status, workbench parity check | READY once MT-9 complete |
 
 ---
 
