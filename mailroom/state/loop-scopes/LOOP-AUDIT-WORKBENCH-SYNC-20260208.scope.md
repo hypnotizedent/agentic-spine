@@ -25,7 +25,9 @@ Spine-side service registration for automation-stack companion services (MT-4) i
 - `ops/bindings/services.health.yaml`: health probes for `n8n`, `open-webui`, `ollama`
 
 Remaining spine-side tasks to finish this loop:
-- MT-9: add Prometheus multi-host scrape targets on observability (VM 205)
+- MT-9: apply Prometheus multi-host scrape targets on observability (VM 205)
+  - Staged config updated in spine: `ops/staged/observability/prometheus/prometheus.yml`
+  - Still requires on-host apply + Prometheus reload/restart
 
 ---
 
