@@ -94,7 +94,7 @@ the `stack_id` in STACK_REGISTRY.yaml is the durable key.
 >
 > → **[WORKBENCH_TOOLING_INDEX.md](../governance/WORKBENCH_TOOLING_INDEX.md)**
 >
-> Or query directly: `cd ~/code/workbench && mint ask "question"`
+> Or query directly (no RAG): `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
 
 ---
 

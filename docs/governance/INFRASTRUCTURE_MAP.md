@@ -17,7 +17,7 @@ sources: []
 >
 > **Do not execute commands or act on paths in this document from a spine session.**
 > Query the workbench or Mint OS directly for authoritative answers:
-> `cd ~/code/workbench && mint ask "question"`
+> `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
 >
 > **Current authority:** See [GOVERNANCE_INDEX.md](GOVERNANCE_INDEX.md) for spine-native
 > SSOTs. See [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) for external reference policy.
@@ -384,11 +384,11 @@ ssh docker-host "docker ps --format 'table {{.Names}}\t{{.Status}}' | grep mint-
 
 | Item | Details |
 |------|---------|
-| API URL | `http://localhost:3002` (container listens on `:3001`; host maps `3002:3001`). |
-| Workspace | `ronny-ops` (supervisor workspace; documents live in `/app/server/storage`). |
-| Scripts | `scripts/rag/index.sh`, `scripts/rag/cleanup-duplicates.sh`, `scripts/rag/health-check.sh`, `scripts/rag/full-resync.sh`. |
-| Storage | Host bind `/Users/ronnyworks/anythingllm_storage` ↔ `/app/server/storage`, containing `anythingllm.db` and blob storage (`storage/`). |
-| Health | `curl -s http://localhost:3002/api/ping` (returns `{"online":true}`) and `scripts/rag/health-check.sh` (container + workspace health + doc count). |
+| API URL | `http://100.71.17.29:3002` (AnythingLLM on `ai-consolidation` VM 207). |
+| Workspace | `workbench` |
+| Scripts | `~/code/workbench/scripts/root/rag/index.sh`, `~/code/workbench/scripts/root/rag/cleanup-duplicates.sh`, `~/code/workbench/scripts/root/rag/health-check.sh`, `~/code/workbench/scripts/root/rag/full-resync.sh`. |
+| Storage | VM 207: `/opt/stacks/ai-consolidation/anythingllm_storage/` (plus Qdrant at `/opt/stacks/ai-consolidation/qdrant_storage/`). |
+| Health | `curl -s http://100.71.17.29:3002/api/ping` (returns `{"online":true}`). |
 
 ### Admin/System
 
