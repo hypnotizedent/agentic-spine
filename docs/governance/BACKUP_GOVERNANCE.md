@@ -19,7 +19,15 @@ github_issue: "#622"
 |------|-------|--------|--------|
 | VM/CT | Proxmox VMs and containers | vzdump | tank-backups (ZFS) |
 | Config | Compose files, env templates | Git | agentic-spine repo |
-| Data | Application databases | App-level dumps | Per-stack (see stack docs) |
+| Data | Application databases | App-level dumps | Per-stack procedures (see below) |
+
+## App-Level Procedures (Required)
+
+VM-level backups are not enough for critical stateful services. The following
+procedures are the minimum app-level backup/restore contract:
+
+- [Authentik Backup + Restore (App-Level)](AUTHENTIK_BACKUP_RESTORE.md)
+- [Gitea Backup + Restore (App-Level)](GITEA_BACKUP_RESTORE.md)
 
 ---
 
