@@ -1,7 +1,7 @@
 # AGENTIC_GAP_MAP
 
 > **Status:** authoritative
-> **Last verified:** 2026-02-04
+> **Last verified:** 2026-02-09
 
 > **Purpose:** Track what has been extracted from the workbench monolith into the spine,
 > what hasn't, and what's left to do. Agents use this to understand
@@ -16,18 +16,18 @@
 
 | Workbench SSOT (external) | Spine Equivalent | Status |
 |---------------------------|------------------|--------|
-| Workbench service registry | `docs/governance/STACK_REGISTRY.yaml` | EXTRACTED (partial — stack inventory only) |
+| Workbench service registry | `docs/governance/SERVICE_REGISTRY.yaml` | EXTRACTED |
 | Workbench authority index | `docs/governance/GOVERNANCE_INDEX.md` | EXTRACTED (surgical — spine-scoped subset) |
 | Workbench agent context pack | `docs/core/CORE_LOCK.md` + `CAPABILITIES_OVERVIEW.md` | EXTRACTED |
 | Workbench labels registry | `.github/labels.yml` | EXTRACTED |
 | Workbench hardware registry | `docs/governance/DEVICE_IDENTITY_SSOT.md` | EXTRACTED (identity only, not full hardware) |
-| Workbench SSOT registry | Not extracted | NOT EXTRACTED |
-| Workbench repo structure authority | Not extracted | NOT EXTRACTED |
-| Workbench compose authority | `docs/governance/STACK_REGISTRY.yaml` (partial) | PARTIAL |
-| Workbench portability assumptions | Not extracted | NOT EXTRACTED |
+| Workbench SSOT registry | `docs/governance/SSOT_REGISTRY.yaml` | EXTRACTED |
+| Workbench repo structure authority | `docs/governance/REPO_STRUCTURE_AUTHORITY.md` | EXTRACTED |
+| Workbench compose authority | `docs/governance/COMPOSE_AUTHORITY.md` | EXTRACTED |
+| Workbench portability assumptions | `docs/governance/PORTABILITY_ASSUMPTIONS.md` | EXTRACTED |
 | Workbench agent boundaries | `docs/core/CAPABILITIES_OVERVIEW.md` (partial) | PARTIAL |
-| Workbench issue closure SOP | Not extracted | NOT EXTRACTED |
-| Workbench infrastructure map (schema/DB) | Not extracted (schema/DB details) | NOT EXTRACTED |
+| Workbench issue closure SOP | `docs/governance/ISSUE_CLOSURE_SOP.md` | EXTRACTED |
+| Workbench infrastructure map (schema/DB) | `docs/governance/INFRASTRUCTURE_MAP.md` (historical capture) | EXTRACTED (historical) |
 | Workbench incidents log | Not extracted | NOT EXTRACTED |
 | Workbench agents inventory (data) | Not extracted | NOT EXTRACTED (see below) |
 | Workbench updates inventory (data) | Not extracted | NOT EXTRACTED |
@@ -59,36 +59,17 @@ pattern with governed, receipt-producing capabilities.
 
 ## What's Left to Extract
 
-### High Priority (blocks spine self-containment)
-
-1. **SSOT_REGISTRY.yaml** — The spine needs its own SSOT registry rather than
-   pointing back to the workbench. Currently, governance docs reference workbench
-   registry patterns.
-
-2. **COMPOSE_AUTHORITY completion** — STACK_REGISTRY.yaml has compose paths
-   but doesn't carry the authority rules from COMPOSE_AUTHORITY.md.
-
 ### Medium Priority (useful but not blocking)
 
-3. **PORTABILITY_ASSUMPTIONS** — Environment coupling documentation. The spine
-   currently assumes paths without documenting them.
-
-4. **INCIDENTS_LOG** — Historical incident context. Could be a spine-scoped
+1. **INCIDENTS_LOG** — Historical incident context. Could be a spine-scoped
    subset for infrastructure incidents that affect spine operations.
 
-5. **AGENT_BOUNDARIES completion** — CAPABILITIES_OVERVIEW covers what agents
+2. **AGENT_BOUNDARIES completion** — CAPABILITIES_OVERVIEW covers what agents
    can do but doesn't fully replicate the boundary constraints from the workbench.
 
-### Low Priority (defer or skip)
-
-6. **ISSUE_CLOSURE_SOP** — Process doc. The spine follows GitHub issue workflow
-   naturally; a separate SOP may not be needed.
-
-7. **Schema/DB details** (INFRASTRUCTURE_MAP) — Spine doesn't manage databases
-   directly. Only relevant if spine capabilities need schema awareness.
-
-8. **GOVERNANCE_INDEX.md full rewrite** — Currently contains deep workbench
-   references. Surgical edits done; full spine-native rewrite tracked here.
+3. **Agents inventory + updates inventory (data)** — Optional machine-readable
+   inventories for domain agents and routine updates. Only extract if it reduces
+   operational ambiguity (avoid duplication for its own sake).
 
 ---
 

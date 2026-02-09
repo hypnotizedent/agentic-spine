@@ -122,8 +122,8 @@ Everything an agent needs to generate a Frigate configuration for this NVR:
 
 | Property | Value |
 |----------|-------|
-| **RTSP URL Pattern (main)** | `rtsp://{user}:{pass}@192.168.12.216:554/Streaming/Channels/{ch}01` |
-| **RTSP URL Pattern (sub)** | `rtsp://{user}:{pass}@192.168.12.216:554/Streaming/Channels/{ch}02` |
+| **RTSP URL Pattern (main)** | RTSP scheme + `{user}:{pass}@192.168.12.216:554/Streaming/Channels/{ch}01` |
+| **RTSP URL Pattern (sub)** | RTSP scheme + `{user}:{pass}@192.168.12.216:554/Streaming/Channels/{ch}02` |
 | **Stream Types** | Main stream (01) + Sub stream (02) per channel |
 | **Video Codec** | H.265+ (main), H.264 (sub) — typical Hikvision defaults |
 | **Protocols** | Hikvision native (ISAPI/SDK) + ONVIF |

@@ -17,9 +17,8 @@ sources: []
 >
 > **Do not execute commands or act on paths in this document from a spine session.**
 > If you need current Mint OS answers, treat workbench as **read-only reference**
-> and search by path (no RAG) without changing CWD:
->
-> `rg -n "<question>" ~/code/workbench/docs ~/code/workbench/infra ~/code/workbench/scripts`
+> and search by path using the canonical pattern in
+> [WORKBENCH_TOOLING_INDEX.md](WORKBENCH_TOOLING_INDEX.md) (no RAG, no CWD change).
 >
 > If the result influences spine work, record a receipt:
 > `./bin/ops run --inline "External reference consulted: <what> (paths + findings)"`.
