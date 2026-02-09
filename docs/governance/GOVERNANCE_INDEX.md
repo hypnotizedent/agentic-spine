@@ -114,6 +114,12 @@ Pillar entrypoints (per stack)
 | `NETWORK_POLICIES.md` | Tailscale ACLs, subnet registry, DNS strategy, WAN, segmentation | draft |
 | `PATCH_CADENCE.md` | OS/container/firmware update schedules, version tracking | draft |
 
+### Architecture (Derived)
+
+| Document | Purpose | Status |
+|----------|---------|--------|
+| `SHOP_VM_ARCHITECTURE.md` | Single doc overview of post-`docker-host` decomposition (roles of infra-core/observability/dev-tools/AI/automation/media split) | authoritative (derived) |
+
 ### Single Sources of Truth (by Domain)
 
 > **Spine-native SSOTs:** For the canonical registry of spine-governed SSOTs, see [SSOT_REGISTRY.yaml](SSOT_REGISTRY.yaml).
