@@ -1,6 +1,7 @@
 # LOOP-INFRA-CORE-AUDIT-20260209
 
-> **Status:** OPEN
+> **Status:** CLOSED
+> **Closed:** 2026-02-09
 > **Owner:** @ronny
 > **Created:** 2026-02-09
 > **Severity:** medium
@@ -21,9 +22,15 @@ A four-subagent audit of VM 204 (infra-core) across SSOTs, bindings, staged conf
 
 | Task | File | Action | Status |
 |------|------|--------|--------|
-| T1 | `docs/governance/STACK_REGISTRY.yaml` | Add caddy-auth + vaultwarden stack entries | OPEN |
-| T2 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Add shop VM LAN IPs subsection | OPEN |
-| T3 | spine.verify | Confirm 49/49 gates pass | OPEN |
+| T1 | `docs/governance/STACK_REGISTRY.yaml` | Add caddy-auth + vaultwarden stack entries | DONE |
+| T2 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Add shop VM LAN IPs subsection | DONE |
+| T3 | spine.verify | Confirm 50/50 gates pass | DONE |
+
+## Closeout
+
+- Commit: `e323265` (fix: add missing infra-core stacks + shop VM LAN IPs)
+- spine.verify: 50/50 PASS (receipt: `RCAP-20260208-215424`)
+- Low-severity findings (no swap, no caddy health check, accept-routes, Grafana Caddy block) documented but deferred as separate scope
 
 ## Non-Goals
 
@@ -34,3 +41,4 @@ A four-subagent audit of VM 204 (infra-core) across SSOTs, bindings, staged conf
 ---
 
 _Created: 2026-02-09_
+_Closed: 2026-02-09_
