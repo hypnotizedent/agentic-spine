@@ -19,6 +19,7 @@ set -euo pipefail
 
 STACK_DIR="/opt/stacks/gitea"
 BACKUP_DIR="/tmp/gitea-backup"
+NAS_USER="ronadmin"
 NAS_HOST="nas"
 NAS_PATH="/volume1/backups/apps/gitea"
 RETENTION_DAYS=7
@@ -42,9 +43,9 @@ mkdir -p "$BACKUP_DIR"
 # ─────────────────────────────────────────────────────────────
 DUMP_FILE="$BACKUP_DIR/gitea-dump-${TIMESTAMP}.zip"
 log "Starting gitea dump..."
-docker exec gitea gitea dump --type zip --file "/tmp/gitea-dump-${TIMESTAMP}.zip" 2>&1 | logger -t "$LOG_TAG"
+docker exec -u git gitea gitea dump --type zip --file "/tmp/gitea-dump-${TIMESTAMP}.zip" 2>&1 | logger -t "$LOG_TAG"
 docker cp "gitea:/tmp/gitea-dump-${TIMESTAMP}.zip" "$DUMP_FILE"
-docker exec gitea rm -f "/tmp/gitea-dump-${TIMESTAMP}.zip"
+docker exec -u git gitea rm -f "/tmp/gitea-dump-${TIMESTAMP}.zip"
 log "Gitea dump complete: $(du -h "$DUMP_FILE" | cut -f1)"
 
 # ─────────────────────────────────────────────────────────────
@@ -67,15 +68,15 @@ log "pg_dump complete: $(du -h "$DB_FILE" | cut -f1)"
 # 4. Rsync to NAS
 # ─────────────────────────────────────────────────────────────
 log "Syncing to NAS ($NAS_HOST:$NAS_PATH)..."
-ssh "$NAS_HOST" "mkdir -p '$NAS_PATH'" 2>/dev/null || true
-rsync -az --timeout=60 "$BACKUP_DIR/" "$NAS_HOST:$NAS_PATH/"
+ssh "$NAS_USER@$NAS_HOST" "mkdir -p '$NAS_PATH'" 2>/dev/null || true
+rsync -az --timeout=60 "$BACKUP_DIR/" "$NAS_USER@$NAS_HOST:$NAS_PATH/"
 log "NAS sync complete"
 
 # ─────────────────────────────────────────────────────────────
 # 5. Retention: prune old backups on NAS (keep last N days)
 # ─────────────────────────────────────────────────────────────
 log "Pruning backups older than ${RETENTION_DAYS} days on NAS..."
-ssh "$NAS_HOST" "find '$NAS_PATH' -name 'gitea-*' -mtime +${RETENTION_DAYS} -delete" 2>/dev/null || true
+ssh "$NAS_USER@$NAS_HOST" "find '$NAS_PATH' -name 'gitea-*' -mtime +${RETENTION_DAYS} -delete" 2>/dev/null || true
 log "Retention prune complete"
 
 log "Gitea backup finished successfully"

@@ -126,10 +126,29 @@ Role: **Mint OS business workloads only**.
 Rule: No new infrastructure services on `docker-host`. New infra goes to a
 purpose-built VM or a new VM.
 
-### Media
-Legacy monolith (`media-stack`, VM 201) is being decommissioned in favor of:
-- `download-stack` (VM 209): IO-heavy download + arr tooling
-- `streaming-stack` (VM 210): latency-sensitive streaming services
+### download-stack (VM 209)
+Role: IO-heavy download, indexing, and transcode services.
+- Arr suite: `radarr`, `sonarr`, `lidarr`, `prowlarr`, `readarr`, `whisparr`
+- Download: `sabnzbd`, `gluetun` (VPN gateway)
+- Transcode: `tdarr` + `tdarr-node`
+- Support: `flaresolverr`, `recyclarr`, `autobrr`, `decluttarr`
+- Infra: `watchtower`, `node-exporter`, `promtail`, `unpackerr`
+
+24 containers total. NFS mounts from pve (LAN IP 192.168.12.184).
+
+### streaming-stack (VM 210)
+Role: latency-sensitive streaming, request management, and media presentation.
+- Streaming: `jellyfin`, `navidrome`
+- Request/subtitle: `jellyseerr`, `bazarr`
+- Dashboard: `homarr`
+- Sync: `spotisub` (Spotify→Subsonic)
+- Media: `trailarr`, `caddy` (internal proxy)
+- Infra: `watchtower`, `node-exporter`
+
+10 containers total. NFS mounts from pve (LAN IP 192.168.12.184, media read-only).
+
+Note: Legacy monolith `media-stack` (VM 201) is being decommissioned.
+See `mailroom/state/loop-scopes/LOOP-MEDIA-STACK-SPLIT-20260208.scope.md`.
 
 ## “docker-host Is Being Chopped Up” (What That Means Operationally)
 

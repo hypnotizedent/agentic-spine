@@ -150,7 +150,7 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | ai-consolidation | 100.71.17.29 | Shop | AI services (Qdrant, AnythingLLM) (VM 207) |
 | automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
 | download-stack | 100.107.36.76 | Shop | Downloads + *arr (split from media-stack) |
-| streaming-stack | 100.123.207.64 | Shop | Streaming (Jellyfin, Navidrome) (split from media-stack) |
+| streaming-stack | 100.123.207.64 | Shop | Streaming (Jellyfin, Navidrome, Jellyseerr, Bazarr, Homarr, Spotisub) (split from media-stack) |
 | proxmox-home | 100.103.99.62 | Home | Proxmox VE (home host) |
 | nas | 100.102.199.111 | Home | Synology NAS |
 | vault | 100.93.142.63 | Home | Vaultwarden rollback source (VM 102) |

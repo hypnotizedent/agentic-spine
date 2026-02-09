@@ -31,8 +31,8 @@ Standardize Gitea as canonical origin for agentic-spine and workbench repos. Git
 | P1 | Backup script + inventory entry | SSH to dev-tools | **COMPLETE** |
 | P2 | CI workflow + D50 drift gate | None | **COMPLETE** |
 | P3 | GitHub PAT replacement (manual) | Browser for PAT generation | Deferred |
-| P4 | Remote cutover: swap origin on MacBook (both repos) | P3 done | Deferred |
-| P5 | Deploy backup cron on dev-tools + NAS rsync validation | SSH to dev-tools + NAS reachable | Deferred |
+| P4 | Remote cutover: swap origin on MacBook (both repos) | P3 done | **DONE** |
+| P5 | Deploy backup cron on dev-tools + NAS rsync validation | SSH to dev-tools + NAS reachable | **DONE** |
 | P6 | Authentik SSO browser test + closeout | Browser | Deferred |
 
 ---
@@ -94,7 +94,7 @@ Backup runbook note added to `GITEA_BACKUP_RESTORE.md`.
 
 ---
 
-## P4: Remote Cutover (Deferred)
+## P4: Remote Cutover — DONE
 
 On MacBook (both repos):
 ```
@@ -103,16 +103,21 @@ git remote rename gitea origin
 git branch --set-upstream-to=origin/main main
 ```
 
-Update `docs/governance/REPO_STRUCTURE_AUTHORITY.md`: origin = Gitea, github = mirror.
+Both agentic-spine and workbench now have `origin`=Gitea, `github`=GitHub.
+`git push` defaults to Gitea; `git push github main` for explicit GitHub push.
+
+Note: P3 (PAT replacement) still needed for durable mirror token, but the cutover
+is independent — existing OAuth mirror works, and the rename is local + reversible.
 
 ---
 
-## P5: Deploy Backup Cron (Deferred)
+## P5: Deploy Backup Cron — DONE
 
-- SCP `gitea-backup.sh` to dev-tools `/usr/local/bin/`
-- Install cron: `55 2 * * * /usr/local/bin/gitea-backup.sh`
-- Verify NAS rsync works
-- Run first backup manually
+- SCP `gitea-backup.sh` to dev-tools `/usr/local/bin/` — **DONE**
+- Install cron: `55 2 * * * /usr/local/bin/gitea-backup.sh` — **DONE**
+- Generated SSH key (`gitea-backup@dev-tools`) on VM 206, added to NAS `ronadmin` authorized_keys — **DONE**
+- Fixed script: `-u git` for gitea dump (root rejected by Gitea), `NAS_USER="ronadmin"` — **DONE**
+- Manual test: gitea dump (3.8M) + pg_dump (80K) → NAS `/volume1/backups/apps/gitea/` — **VERIFIED**
 
 ---
 
