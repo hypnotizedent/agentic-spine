@@ -38,6 +38,7 @@ Usage:
 Env:
   RAG_WORKSPACE_SLUG (default: agentic-spine)
   ANYTHINGLLM_URL / ANYTHINGLLM_BASE_URL (optional; auto-derived from services.health.yaml)
+  ANYTHINGLLM_API_KEY (required for status/ask/sync; injected via spine secrets.exec)
 EOF
 }
 
@@ -57,7 +58,7 @@ derive_anythingllm_url() {
   fi
 
   local ping_url
-  ping_url="$(yq -r '.services[] | select(.id=="anythingllm") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
+  ping_url="$(yq -r '.endpoints[] | select(.id=="anythingllm") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
   if [[ -z "$ping_url" || "$ping_url" == "null" ]]; then
     ANYTHINGLLM_URL="http://100.71.17.29:3002"
     return 0
@@ -67,85 +68,16 @@ derive_anythingllm_url() {
 }
 
 load_api_key() {
-  # Prefer env var (e.g. when invoked via secrets.exec). Otherwise fetch via Infisical agent.
+  # Secrets policy: secret-bearing commands must be run under spine-governed injection
+  # (`./bin/ops cap run secrets.exec -- <cmd...>`). This CLI refuses to fetch secrets
+  # on its own to keep receipts clean and avoid duplicate secret-provider logic.
   if [[ -n "${ANYTHINGLLM_API_KEY:-}" ]]; then
     return 0
   fi
-
-  # Spine contract: secrets are in Infisical (binding: ops/bindings/secrets.binding.yaml, base_path=/spine).
-  # We intentionally avoid printing secret values to stdout (receipts).
-  require_tool yq
-  require_tool jq
-  require_tool curl
-  require_tool infisical
-
-  if [[ ! -f "$SECRETS_BINDING" ]]; then
-    log_err "Missing secrets binding: $SECRETS_BINDING"
-    exit 2
-  fi
-
-  local inf_api inf_internal project env base_path
-  inf_api="$(yq -r '.infisical.api_url // ""' "$SECRETS_BINDING")"
-  inf_internal="$(yq -r '.infisical.internal_api_url // ""' "$SECRETS_BINDING")"
-  project="$(yq -r '.infisical.project // ""' "$SECRETS_BINDING")"
-  env="$(yq -r '.infisical.environment // ""' "$SECRETS_BINDING")"
-  base_path="$(yq -r '.infisical.base_path // "/spine"' "$SECRETS_BINDING")"
-  [[ -n "$base_path" && "$base_path" != "null" ]] || base_path="/spine"
-
-  # Ensure CLI auth token (non-interactive). Try internal API first, then external.
-  if [[ -z "${INFISICAL_TOKEN:-}" ]]; then
-    local ua_id ua_secret domain auth_resp auth_code auth_body token
-    ua_id="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-}"
-    ua_secret="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}"
-    if [[ -z "$ua_id" || -z "$ua_secret" ]]; then
-      log_err "Missing Infisical universal auth env vars"
-      exit 2
-    fi
-
-    domain="$inf_internal"
-    [[ -n "$domain" && "$domain" != "null" ]] || domain="$inf_api"
-
-    auth_resp="$(curl -sS --max-time 15 -w '\n%{http_code}' -X POST "${domain}/api/v1/auth/universal-auth/login" \
-      -H 'Content-Type: application/json' \
-      -d "{\"clientId\":\"$ua_id\",\"clientSecret\":\"$ua_secret\"}" || true)"
-    auth_code="$(echo "$auth_resp" | tail -n1)"
-    auth_body="$(echo "$auth_resp" | sed '$d')"
-    if [[ "$auth_code" != "200" ]]; then
-      # fallback to external domain if internal failed
-      if [[ "$domain" != "$inf_api" && -n "$inf_api" && "$inf_api" != "null" ]]; then
-        domain="$inf_api"
-        auth_resp="$(curl -sS --max-time 15 -w '\n%{http_code}' -X POST "${domain}/api/v1/auth/universal-auth/login" \
-          -H 'Content-Type: application/json' \
-          -d "{\"clientId\":\"$ua_id\",\"clientSecret\":\"$ua_secret\"}" || true)"
-        auth_code="$(echo "$auth_resp" | tail -n1)"
-        auth_body="$(echo "$auth_resp" | sed '$d')"
-      fi
-    fi
-
-    if [[ "$auth_code" != "200" ]]; then
-      log_err "Infisical auth failed (HTTP ${auth_code:-unknown})"
-      exit 2
-    fi
-    token="$(echo "$auth_body" | jq -r '.accessToken // empty' 2>/dev/null || true)"
-    if [[ -z "$token" ]]; then
-      log_err "Infisical auth token parse failed"
-      exit 2
-    fi
-    export INFISICAL_TOKEN="$token"
-    export INFISICAL_API_URL="${domain}"
-  fi
-
-  # Run a subprocess with /spine secrets injected and capture the key without printing it.
-  # NOTE: Using `--recursive` + base_path ensures namespaced keys like /spine/ai/providers/ANYTHINGLLM_API_KEY are injected.
-  ANYTHINGLLM_API_KEY="$(
-    infisical run --projectId "$project" --env "$env" --path "$base_path" --recursive --domain "${INFISICAL_API_URL:-$inf_api}" -- \
-      bash -lc 'printf "%s" "${ANYTHINGLLM_API_KEY:-}"'
-  )"
-
-  if [[ -z "${ANYTHINGLLM_API_KEY:-}" ]]; then
-    log_err "ANYTHINGLLM_API_KEY not available after Infisical injection"
-    exit 2
-  fi
+  log_err "STOP: ANYTHINGLLM_API_KEY is not set."
+  log_err "hint: run via spine secrets injection:"
+  log_err "  ./bin/ops cap run secrets.exec -- ./ops/plugins/rag/bin/rag <cmd>"
+  exit 2
 }
 
 http_get() {
