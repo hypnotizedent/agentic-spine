@@ -1,26 +1,3 @@
-# AGENTS.md - Agentic Spine Runtime Contract
-
-> Auto-loaded by local coding tools (Claude Code, Claude Desktop, Codex, etc.).
-> Canonical runtime: `/Users/ronnyworks/code/agentic-spine`
-> Governance brief source: `docs/governance/AGENT_GOVERNANCE_BRIEF.md`
-
-## Session Entry
-
-1. Start in `/Users/ronnyworks/code/agentic-spine`.
-2. Read `docs/governance/SESSION_PROTOCOL.md`.
-3. Run `./bin/ops loops list --open` to check open work.
-4. Run `./bin/ops cap list` to discover available governed capabilities.
-5. Execute work via `./bin/ops cap run <capability>`.
-
-## Source-Of-Truth Contract
-
-- Canonical governance/runtime: `/Users/ronnyworks/code/agentic-spine`
-- Tooling workspace: `/Users/ronnyworks/code/workbench` (read/write tools only)
-- Legacy workspace: `$LEGACY_ROOT` (read-only reference only)
-- All governed receipts: `/Users/ronnyworks/code/agentic-spine/receipts/sessions`
-- All runtime queues/logs/state: `/Users/ronnyworks/code/agentic-spine/mailroom/*`
-
-<!-- GOVERNANCE_BRIEF -->
 # Agent Governance Brief
 
 > Canonical source for all agent governance constraints.
@@ -32,7 +9,7 @@
 - **Main branch is commit-locked.** A pre-commit hook rejects all commits on `main` except ledger-only changes (`mailroom/state/ledger.csv`).
 - **Mutating capabilities blocked on main.** `./bin/ops cap run` refuses `safety: mutating` caps on the `main` branch.
 - **Worktree flow is mandatory.** Use `./bin/ops start loop <LOOP_ID>` to create a worktree branch. Work inside it. Merge with fast-forward back to main.
-- **Max 2 active worktrees** (D48). After merging, immediately `git worktree remove .worktrees/codex-<slug>/`. Stale/merged/orphaned worktrees fail `spine.verify`.
+- **Clean up after merging** (D48). Use `ops close loop <LOOP_ID>` to tear down worktree + branch + stashes. No count limit. Stale/merged/orphaned worktrees fail `spine.verify`.
 - **Gitea is canonical** (origin). GitHub is a mirror. D62 enforces.
 
 ## Capability Gotchas
@@ -63,16 +40,3 @@
 - `./bin/ops start loop <LOOP_ID>` — start worktree for a loop
 - `./bin/ops cap run spine.verify` — full drift check
 - `/ctx` — load full governance context
-<!-- /GOVERNANCE_BRIEF -->
-
-## Canonical Commands
-
-```bash
-cd /Users/ronnyworks/code/agentic-spine
-./bin/ops cap list                        # discover capabilities
-./bin/ops loops list --open               # check open work
-./bin/ops start loop <LOOP_ID>            # start worktree for a loop
-./bin/ops cap run spine.verify            # full drift check (50+ gates)
-./bin/ops cap run spine.status            # quick status
-./bin/ops cap run agent.session.closeout  # session closeout (D61)
-```

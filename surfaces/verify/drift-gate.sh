@@ -610,6 +610,14 @@ else
   warn "git remote authority warn gate not present"
 fi
 
+# D65: Agent briefing sync lock (AGENTS.md + CLAUDE.md match canonical brief)
+echo -n "D65 agent briefing sync lock... "
+if [[ -x "$SP/surfaces/verify/d65-agent-briefing-sync-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d65-agent-briefing-sync-lock.sh"
+else
+  warn "agent briefing sync lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

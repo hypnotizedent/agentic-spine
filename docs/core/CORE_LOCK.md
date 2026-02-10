@@ -109,6 +109,7 @@ All must PASS for core to be healthy.
 | D62 | Git remote parity lock (origin/main must equal github/main) |
 | D63 | Capabilities metadata lock (registry completeness + dependency typos + executable checks) |
 | D64 | Git remote authority WARN (GitHub merges/PRs) |
+| D65 | Agent briefing sync lock (AGENTS.md + CLAUDE.md match canonical governance brief) |
 
 ### Verbose Mode (Subchecks)
 
