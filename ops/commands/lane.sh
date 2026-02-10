@@ -3,7 +3,6 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$SCRIPT_DIR/commands/preflight.sh"
 
 LANE="${1:-}"
 
@@ -23,6 +22,9 @@ fi
 
 case "$LANE" in
   builder|1)
+    # Builder lane must be "safe to start": remote parity + worktree hygiene checks.
+    # We source preflight so it can export GOV_* context into the current process.
+    source "$SCRIPT_DIR/commands/preflight.sh"
     cat <<BUILDER
 ═══════════════════════════════════════════════════════════
   LANE 1: BUILDER
