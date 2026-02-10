@@ -27,5 +27,20 @@ SSH or repo spelunking.
 - P3: Closeout + SSOT updates
 
 ## Evidence (Receipts)
-- (link receipts here)
-
+- Capabilities (receipted):
+  - `mailroom.bridge.status` (PID + /health)
+  - `mailroom.bridge.start` (daemon start)
+  - `mailroom.bridge.stop` (daemon stop)
+  - Proof runs:
+    - `receipts/sessions/RCAP-20260210-100458__mailroom.bridge.start__Ryjn618007/receipt.md`
+    - `receipts/sessions/RCAP-20260210-100458__mailroom.bridge.status__Rf2w518066/receipt.md` (running)
+    - `receipts/sessions/RCAP-20260210-100458__mailroom.bridge.stop__Ry36418109/receipt.md`
+    - `receipts/sessions/RCAP-20260210-100458__mailroom.bridge.status__R7u1317994/receipt.md` (stopped)
+- Code:
+  - `ops/bindings/mailroom.bridge.yaml`
+  - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve`
+  - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-start`
+  - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-stop`
+  - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-status`
+- Docs:
+  - `docs/governance/MAILROOM_BRIDGE.md`

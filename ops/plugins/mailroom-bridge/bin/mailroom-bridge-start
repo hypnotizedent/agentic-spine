@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_CODE="${SPINE_CODE:-$SPINE_REPO}"
+
+STATE_DIR="${SPINE_STATE:-$SPINE_REPO/mailroom/state}"
+LOG_DIR="${SPINE_LOGS:-$SPINE_REPO/mailroom/logs}"
+
+PID_FILE="${STATE_DIR}/mailroom-bridge.pid"
+LOCK_DIR="${STATE_DIR}/locks/mailroom-bridge.lock"
+
+OUT_LOG="${LOG_DIR}/mailroom-bridge.out"
+ERR_LOG="${LOG_DIR}/mailroom-bridge.err"
+
+SERVE="${SPINE_CODE}/ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve"
+BINDING="${SPINE_REPO}/ops/bindings/mailroom.bridge.yaml"
+
+mkdir -p "$STATE_DIR" "$LOG_DIR" "$(dirname "$LOCK_DIR")"
+
+pid=""
+if [[ -f "$PID_FILE" ]]; then
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    echo "ALREADY_RUNNING: pid=${pid}"
+    echo "PID_FILE: ${PID_FILE}"
+    exit 0
+  fi
+fi
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [[ -n "$old_pid" ]] && ! kill -0 "$old_pid" 2>/dev/null; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    mkdir "$LOCK_DIR"
+  else
+    echo "ERROR: Another instance is running (lock: $LOCK_DIR)"
+    exit 1
+  fi
+fi
+
+cleanup_fail() {
+  rm -rf "$LOCK_DIR" 2>/dev/null || true
+  rm -f "$PID_FILE" 2>/dev/null || true
+}
+trap cleanup_fail EXIT INT TERM
+
+if [[ ! -x "$SERVE" ]]; then
+  echo "ERROR: serve script not executable: $SERVE"
+  exit 1
+fi
+if [[ ! -f "$BINDING" ]]; then
+  echo "ERROR: missing binding: $BINDING"
+  exit 1
+fi
+
+host="127.0.0.1"
+port="8799"
+if command -v yq >/dev/null 2>&1; then
+  host="$(yq -r '.listen.host // "127.0.0.1"' "$BINDING" 2>/dev/null || echo "127.0.0.1")"
+  port="$(yq -r '.listen.port // 8799' "$BINDING" 2>/dev/null || echo "8799")"
+fi
+
+echo "STARTING: ${host}:${port}"
+echo "LOGS:"
+echo "  stdout: ${OUT_LOG}"
+echo "  stderr: ${ERR_LOG}"
+
+PYTHONUNBUFFERED=1 SPINE_REPO="$SPINE_REPO" nohup "$SERVE" >>"$OUT_LOG" 2>>"$ERR_LOG" &
+pid="$!"
+echo "$pid" > "$PID_FILE"
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "STARTED: pid=${pid} (curl not found; skipping /health probe)"
+  trap - EXIT INT TERM
+  exit 0
+fi
+
+health_url="http://${host}:${port}/health"
+for _ in {1..50}; do
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "ERROR: process exited early (pid=${pid})"
+    tail -n 60 "$ERR_LOG" 2>/dev/null || true
+    exit 1
+  fi
+  if curl -fsS "$health_url" >/dev/null 2>&1; then
+    echo "STARTED: pid=${pid}"
+    echo "HEALTH: ${health_url}"
+    trap - EXIT INT TERM
+    exit 0
+  fi
+  sleep 0.1
+done
+
+echo "ERROR: /health probe failed: ${health_url}"
+tail -n 60 "$ERR_LOG" 2>/dev/null || true
+exit 1
+

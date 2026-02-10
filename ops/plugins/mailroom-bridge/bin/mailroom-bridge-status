@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+
+STATE_DIR="${SPINE_STATE:-$SPINE_REPO/mailroom/state}"
+LOG_DIR="${SPINE_LOGS:-$SPINE_REPO/mailroom/logs}"
+
+PID_FILE="${STATE_DIR}/mailroom-bridge.pid"
+BINDING="${SPINE_REPO}/ops/bindings/mailroom.bridge.yaml"
+
+host="127.0.0.1"
+port="8799"
+if [[ -f "$BINDING" ]] && command -v yq >/dev/null 2>&1; then
+  host="$(yq -r '.listen.host // "127.0.0.1"' "$BINDING" 2>/dev/null || echo "127.0.0.1")"
+  port="$(yq -r '.listen.port // 8799' "$BINDING" 2>/dev/null || echo "8799")"
+fi
+
+echo "MAILROOM_BRIDGE"
+echo "  binding: ${BINDING}"
+echo "  listen:  ${host}:${port}"
+echo "  pidfile: ${PID_FILE}"
+echo "  logs:"
+echo "    out: ${LOG_DIR}/mailroom-bridge.out"
+echo "    err: ${LOG_DIR}/mailroom-bridge.err"
+
+pid=""
+if [[ -f "$PID_FILE" ]]; then
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+fi
+
+if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+  echo "  status: running (pid=${pid})"
+else
+  if [[ -n "$pid" ]]; then
+    echo "  status: not running (stale pid=${pid})"
+  else
+    echo "  status: not running"
+  fi
+  exit 0
+fi
+
+if command -v curl >/dev/null 2>&1; then
+  health_url="http://${host}:${port}/health"
+  echo "  health: ${health_url}"
+  set +e
+  curl -fsS "$health_url"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    echo ""
+    echo "  health_status: FAIL (exit=${rc})"
+    exit 2
+  fi
+  echo ""
+  echo "  health_status: OK"
+else
+  echo "  health: SKIP (curl not found)"
+fi

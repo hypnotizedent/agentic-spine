@@ -13,7 +13,8 @@ scope: mailroom-operations
 > and produces receipts. No other folder hosts runtime commands.
 >
 > **Related:** [CORE_LOCK.md](../core/CORE_LOCK.md) defines the invariants;
-> [REPLAY_FIXTURES.md](../core/REPLAY_FIXTURES.md) explains deterministic verification.
+> [REPLAY_FIXTURES.md](../core/REPLAY_FIXTURES.md) explains deterministic verification;
+> [MAILROOM_BRIDGE.md](MAILROOM_BRIDGE.md) documents the governed remote API bridge.
 
 ---
 

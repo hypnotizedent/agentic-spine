@@ -92,6 +92,7 @@ Pillar entrypoints (per stack)
 | `AGENT_BOUNDARIES.md` | What agents can/cannot do |
 | `SUPERVISOR_CHECKLIST.md` | Verify work before shipping |
 | `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |
+| `MAILROOM_BRIDGE.md` | Governed remote API bridge (read outbox/receipts, enqueue prompts) |
 | `HOST_DRIFT_POLICY.md` | Host drift contract for `/Users/ronnyworks` stabilization |
 
 ### Backup & Recovery

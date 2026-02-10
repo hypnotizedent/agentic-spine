@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""
+mailroom.bridge.serve - minimal HTTP bridge to the spine mailroom.
+
+Contract:
+- Reads from canonical runtime root (SPINE_REPO).
+- Writes prompts via ops/runtime/inbox/agent-enqueue.sh (mailroom/inbox/queued).
+- Optional token auth: if MAILROOM_BRIDGE_TOKEN (or binding auth.token_env) is set, require it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+
+def _now_iso() -> str:
+    # Use local time string only for diagnostics; do not treat as SSOT.
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _stop(msg: str, code: int = 2) -> None:
+    print(f"STOP: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def _sh(*args: str) -> str:
+    p = subprocess.run(list(args), capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr.strip() or p.stdout.strip() or f"command failed: {' '.join(args)}")
+    return p.stdout.strip()
+
+
+def _yq(binding: Path, expr: str, default: str) -> str:
+    try:
+        out = _sh("yq", "-r", expr, str(binding))
+    except Exception:
+        return default
+    if out in ("", "null"):
+        return default
+    return out
+
+
+def _safe_child(root: Path, rel: str) -> Path:
+    # Prevent path traversal.
+    rel = rel.lstrip("/")
+    p = (root / rel).resolve()
+    root_r = root.resolve()
+    if p == root_r:
+        return p
+    if root_r not in p.parents:
+        raise ValueError("path escapes root")
+    return p
+
+
+def _read_limited(path: Path, max_bytes: int) -> bytes:
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise ValueError(f"file too large ({size} bytes > max {max_bytes})")
+    return path.read_bytes()
+
+
+def _reduce_open_loops(open_loops_jsonl: Path) -> list[dict[str, Any]]:
+    # Match loops-ledger-reduce logic: append-only JSONL, latest wins per loop_id.
+    state: dict[str, dict[str, Any]] = {}
+    if not open_loops_jsonl.exists():
+        return []
+    for line in open_loops_jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        lid = row.get("loop_id") or row.get("id")
+        if not lid:
+            continue
+
+        cur = state.get(lid, {"loop_id": lid})
+        if row.get("action") == "close":
+            cur["status"] = "closed"
+
+        for k, v in row.items():
+            if k in ("id", "action"):
+                continue
+            cur[k] = v
+
+        cur["loop_id"] = lid
+        state[lid] = cur
+
+    deduped = list(state.values())
+    return [r for r in deduped if r.get("status") == "open"]
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "spine-mailroom-bridge/0.1"
+
+    # Set on server startup.
+    config: dict[str, Any] = {}
+
+    def _json(self, status: int, obj: Any) -> None:
+        body = json.dumps(obj, indent=2, sort_keys=True).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _text(self, status: int, body: str, content_type: str = "text/plain; charset=utf-8") -> None:
+        b = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def _auth_ok(self) -> bool:
+        token = self.config.get("token") or ""
+        if not token:
+            # Tailnet-only deployments can run without a token (explicitly documented).
+            return True
+
+        hdr = self.headers.get("Authorization", "")
+        if hdr.startswith("Bearer "):
+            return hdr.removeprefix("Bearer ").strip() == token
+
+        # Allow lightweight header for n8n/webhooks.
+        return (self.headers.get("X-Spine-Token", "") or "").strip() == token
+
+    def _require_auth(self) -> bool:
+        if self._auth_ok():
+            return True
+        self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return False
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        qs = parse_qs(parsed.query or "")
+
+        if path == "/health":
+            token_required = bool(self.config.get("token"))
+            return self._json(
+                HTTPStatus.OK,
+                {
+                    "status": "ok",
+                    "now": _now_iso(),
+                    "listen": {"host": self.config.get("host"), "port": self.config.get("port")},
+                    "auth": {"token_required": token_required, "token_env": self.config.get("token_env")},
+                },
+            )
+
+        if not self._require_auth():
+            return
+
+        spine_repo = Path(self.config["spine_repo"])
+        outbox_root = spine_repo / "mailroom/outbox"
+        receipts_root = spine_repo / "receipts/sessions"
+        loops_file = spine_repo / "mailroom/state/open_loops.jsonl"
+        max_read = int(self.config.get("max_read_bytes") or 262144)
+
+        if path == "/loops/open":
+            loops = _reduce_open_loops(loops_file)
+            # Stable ordering for clients.
+            severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+            loops.sort(
+                key=lambda r: (
+                    severity_rank.get((r.get("severity") or "medium").lower(), 9),
+                    r.get("owner", ""),
+                    r.get("loop_id", ""),
+                )
+            )
+            return self._json(HTTPStatus.OK, {"open_loops": loops, "count": len(loops)})
+
+        if path == "/outbox/list":
+            rel = (qs.get("path") or [""])[0]
+            try:
+                base = _safe_child(outbox_root, rel)
+            except ValueError:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid path"})
+            if not base.exists():
+                return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            if not base.is_dir():
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "path is not a directory"})
+            items = []
+            for child in sorted(base.iterdir()):
+                try:
+                    st = child.stat()
+                except FileNotFoundError:
+                    continue
+                items.append(
+                    {
+                        "path": str(child.relative_to(outbox_root)),
+                        "type": "dir" if child.is_dir() else "file",
+                        "size": st.st_size,
+                        "mtime": int(st.st_mtime),
+                    }
+                )
+            return self._json(HTTPStatus.OK, {"root": str(base.relative_to(outbox_root)), "items": items})
+
+        if path == "/outbox/read":
+            rel = (qs.get("path") or [""])[0]
+            try:
+                p = _safe_child(outbox_root, rel)
+            except ValueError:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid path"})
+            if not p.exists() or not p.is_file():
+                return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            try:
+                data = _read_limited(p, max_read)
+            except ValueError as e:
+                return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": str(e)})
+            # Best-effort text, fallback to bytes via latin-1.
+            try:
+                text = data.decode("utf-8")
+                return self._text(HTTPStatus.OK, text, content_type="text/plain; charset=utf-8")
+            except UnicodeDecodeError:
+                return self._text(HTTPStatus.OK, data.decode("latin-1"), content_type="application/octet-stream")
+
+        if path == "/receipts/read":
+            rel = (qs.get("path") or [""])[0]
+            # Allow e.g. "RCAP-.../receipt.md" or "RCAP-.../output.txt"
+            try:
+                p = _safe_child(receipts_root, rel)
+            except ValueError:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid path"})
+            if not p.exists() or not p.is_file():
+                return self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            try:
+                data = _read_limited(p, max_read)
+            except ValueError as e:
+                return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": str(e)})
+            return self._text(HTTPStatus.OK, data.decode("utf-8", errors="replace"))
+
+        return self._json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
+        if path == "/health":
+            return self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "use GET"})
+
+        if not self._require_auth():
+            return
+
+        if path != "/inbox/enqueue":
+            return self._json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
+
+        clen = int(self.headers.get("Content-Length", "0") or "0")
+        if clen <= 0 or clen > 1024 * 1024:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid content length"})
+
+        try:
+            payload = json.loads(self.rfile.read(clen).decode("utf-8"))
+        except Exception:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON body"})
+
+        prompt = (payload.get("prompt") or "").strip()
+        if not prompt:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "prompt is required"})
+
+        slug = (payload.get("slug") or "task").strip()
+        run_id = (payload.get("run_id") or "").strip()
+        session_id = (payload.get("session_id") or "").strip()
+
+        spine_repo = Path(self.config["spine_repo"])
+        enqueue = spine_repo / "ops/runtime/inbox/agent-enqueue.sh"
+        if not enqueue.exists():
+            return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "enqueue script missing"})
+
+        args = [str(enqueue), slug]
+        if run_id:
+            args.append(run_id)
+
+        env = os.environ.copy()
+        env["SPINE_REPO"] = str(spine_repo)
+        if session_id:
+            env["SESSION_ID"] = session_id
+
+        p = subprocess.run(args, input=prompt.encode("utf-8"), capture_output=True, env=env)
+        if p.returncode != 0:
+            return self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "enqueue failed", "stderr": p.stderr.decode("utf-8", errors="replace")},
+            )
+
+        out = p.stdout.decode("utf-8", errors="replace")
+        enq_path = ""
+        for line in out.splitlines():
+            if line.startswith("ENQUEUED:"):
+                enq_path = line.split("ENQUEUED:", 1)[1].strip()
+                break
+
+        return self._json(HTTPStatus.OK, {"status": "enqueued", "path": enq_path or None})
+
+    def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D401
+        # Route request logs to stderr (captured by mailroom-bridge.log when started via capability).
+        sys.stderr.write("%s - - [%s] %s\n" % (self.address_string(), _now_iso(), fmt % args))
+
+
+def main() -> None:
+    spine_repo = Path(os.environ.get("SPINE_REPO") or os.path.expanduser("~/code/agentic-spine")).resolve()
+    binding = spine_repo / "ops/bindings/mailroom.bridge.yaml"
+    if not binding.exists():
+        _stop(f"missing binding: {binding}")
+
+    try:
+        _sh("yq", "-r", ".", str(binding))
+    except Exception:
+        _stop(f"invalid YAML: {binding}")
+
+    host = _yq(binding, ".listen.host // \"127.0.0.1\"", "127.0.0.1")
+    port = int(_yq(binding, ".listen.port // 8799", "8799"))
+    token_env = _yq(binding, ".auth.token_env // \"MAILROOM_BRIDGE_TOKEN\"", "MAILROOM_BRIDGE_TOKEN")
+    require_token = _yq(binding, ".auth.require_token // false", "false").lower() == "true"
+    max_read = int(_yq(binding, ".limits.max_read_bytes // 262144", "262144"))
+
+    token = os.environ.get(token_env, "") or ""
+    if require_token and not token:
+        _stop(f"token required by binding, but env var not set: {token_env}")
+
+    Handler.config = {
+        "spine_repo": str(spine_repo),
+        "host": host,
+        "port": port,
+        "token_env": token_env,
+        "token": token,
+        "max_read_bytes": max_read,
+    }
+
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    print("mailroom.bridge.serve")
+    print(f"spine_repo: {spine_repo}")
+    print(f"listen: {host}:{port}")
+    print(f"token_required: {bool(token)}")
+    print(f"token_env: {token_env}")
+    print(f"max_read_bytes: {max_read}")
+    sys.stdout.flush()
+    httpd.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
