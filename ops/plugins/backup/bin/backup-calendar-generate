@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# backup.calendar.generate — Generate ICS calendar from backup schedule binding
+#
+# Contract:
+# - Read-only (generates ICS to stdout or mailroom/outbox/).
+# - Uses SSOT binding: ops/bindings/backup.calendar.yaml
+# - Deterministic: same binding → same ICS (stable UID, DTSTAMP).
+#
+# Exit codes:
+#   0 OK
+#   1 FAIL
+#   2 STOP (missing bindings/deps)
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+BINDING="$SPINE_ROOT/ops/bindings/backup.calendar.yaml"
+OUTBOX="$SPINE_ROOT/mailroom/outbox"
+
+stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+for dep in yq date; do
+  command -v "$dep" >/dev/null 2>&1 || stop "missing dependency: $dep"
+done
+
+[[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+yq e '.' "$BINDING" >/dev/null 2>&1 || stop "invalid YAML: $BINDING"
+
+# Parse top-level config
+TZ_NAME="$(yq -r '.timezone // "America/New_York"' "$BINDING")"
+DTSTART_DATE="$(yq -r '.dtstart_date // "2026-02-10"' "$BINDING")"
+CAL_NAME="$(yq -r '.calendar_name // "Spine Backups"' "$BINDING")"
+DTSTAMP="$(echo "${DTSTART_DATE}" | tr -d '-')T000000Z"
+
+EVENT_COUNT="$(yq -r '.events | length' "$BINDING")"
+[[ "$EVENT_COUNT" =~ ^[0-9]+$ && "$EVENT_COUNT" -gt 0 ]] || stop "no events in binding"
+
+# Build ICS
+ics=""
+ics+="BEGIN:VCALENDAR\r\n"
+ics+="VERSION:2.0\r\n"
+ics+="PRODID:-//agentic-spine//backup-calendar//EN\r\n"
+ics+="CALSCALE:GREGORIAN\r\n"
+ics+="METHOD:PUBLISH\r\n"
+ics+="X-WR-CALNAME:${CAL_NAME}\r\n"
+ics+="X-WR-TIMEZONE:${TZ_NAME}\r\n"
+
+# VTIMEZONE block for US Eastern
+ics+="BEGIN:VTIMEZONE\r\n"
+ics+="TZID:${TZ_NAME}\r\n"
+ics+="BEGIN:DAYLIGHT\r\n"
+ics+="TZOFFSETFROM:-0500\r\n"
+ics+="TZOFFSETTO:-0400\r\n"
+ics+="TZNAME:EDT\r\n"
+ics+="DTSTART:19700308T020000\r\n"
+ics+="RRULE:FREQ=YEARLY;BYDAY=2SU;BYMONTH=3\r\n"
+ics+="END:DAYLIGHT\r\n"
+ics+="BEGIN:STANDARD\r\n"
+ics+="TZOFFSETFROM:-0400\r\n"
+ics+="TZOFFSETTO:-0500\r\n"
+ics+="TZNAME:EST\r\n"
+ics+="DTSTART:19701101T020000\r\n"
+ics+="RRULE:FREQ=YEARLY;BYDAY=1SU;BYMONTH=11\r\n"
+ics+="END:STANDARD\r\n"
+ics+="END:VTIMEZONE\r\n"
+
+DTSTART_CLEAN="$(echo "${DTSTART_DATE}" | tr -d '-')"
+
+for i in $(seq 0 $((EVENT_COUNT - 1))); do
+  eid="$(yq -r ".events[$i].id // \"event-$i\"" "$BINDING")"
+  summary="$(yq -r ".events[$i].summary // \"Backup $i\"" "$BINDING")"
+  freq="$(yq -r ".events[$i].freq // \"DAILY\"" "$BINDING")"
+  byhour="$(yq -r ".events[$i].byhour // 0" "$BINDING")"
+  byminute="$(yq -r ".events[$i].byminute // 0" "$BINDING")"
+  dur="$(yq -r ".events[$i].duration_minutes // 60" "$BINDING")"
+  desc="$(yq -r ".events[$i].description // \"\"" "$BINDING")"
+
+  # Format times
+  printf -v hh "%02d" "$byhour"
+  printf -v mm "%02d" "$byminute"
+  dtstart="${DTSTART_CLEAN}T${hh}${mm}00"
+
+  # Calculate end time
+  end_total=$(( byhour * 60 + byminute + dur ))
+  end_h=$(( end_total / 60 ))
+  end_m=$(( end_total % 60 ))
+  printf -v ehh "%02d" "$end_h"
+  printf -v emm "%02d" "$end_m"
+  dtend="${DTSTART_CLEAN}T${ehh}${emm}00"
+
+  # Stable UID from event id
+  uid="spine-backup-${eid}@agentic-spine"
+
+  # Fold long description lines (ICS spec: max 75 octets per line)
+  folded_desc=""
+  if [[ -n "$desc" && "$desc" != "null" ]]; then
+    folded_desc="DESCRIPTION:$(echo "$desc" | fold -w 60 | sed '2,$s/^/ /')\r\n"
+  fi
+
+  ics+="BEGIN:VEVENT\r\n"
+  ics+="UID:${uid}\r\n"
+  ics+="DTSTAMP:${DTSTAMP}\r\n"
+  ics+="DTSTART;TZID=${TZ_NAME}:${dtstart}\r\n"
+  ics+="DTEND;TZID=${TZ_NAME}:${dtend}\r\n"
+  ics+="RRULE:FREQ=${freq}\r\n"
+  ics+="SUMMARY:${summary}\r\n"
+  if [[ -n "$folded_desc" ]]; then
+    ics+="${folded_desc}"
+  fi
+  ics+="STATUS:CONFIRMED\r\n"
+  ics+="BEGIN:VALARM\r\n"
+  ics+="TRIGGER:-PT15M\r\n"
+  ics+="ACTION:DISPLAY\r\n"
+  ics+="DESCRIPTION:${summary} starting in 15 min\r\n"
+  ics+="END:VALARM\r\n"
+  ics+="END:VEVENT\r\n"
+done
+
+ics+="END:VCALENDAR\r\n"
+
+# Write to outbox
+mkdir -p "$OUTBOX"
+OUT_FILE="$OUTBOX/spine-backups.ics"
+printf '%b' "$ics" > "$OUT_FILE"
+
+echo "backup.calendar.generate"
+echo "binding: $BINDING"
+echo "timezone: $TZ_NAME"
+echo "events: $EVENT_COUNT"
+echo "output: $OUT_FILE"
+echo
+echo "status: OK"

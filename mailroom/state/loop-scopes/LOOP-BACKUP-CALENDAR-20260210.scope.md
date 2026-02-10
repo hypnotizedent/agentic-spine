@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -19,11 +19,26 @@ so the schedule is visible from iPhone and auditable from the spine.
 - Hosting/subscription plan is documented (Tailscale, reverse proxy, or file share).
 
 ## Phases
-- P0: Extract backup schedules from SSOT/bindings into a single structured source
-- P1: Generate ICS (backup events + reminders)
-- P2: Publish/subscription path for iPhone (documented)
-- P3: Closeout with receipts + SSOT updates
+- P0: Extract backup schedules from SSOT/bindings into a single structured source — DONE
+  (`ops/bindings/backup.calendar.yaml` — 5 events: vzdump daily, vaultwarden, infisical,
+  gitea, offsite sync)
+- P1: Generate ICS (backup events + reminders) — DONE
+  (`ops/plugins/backup/bin/backup-calendar-generate`, capability `backup.calendar.generate`)
+- P2: Publish/subscription path for iPhone — DEFERRED
+  (ICS file at `mailroom/outbox/spine-backups.ics`; manual AirDrop/share for now.
+  Future: serve via Caddy on infra-core for webcal:// subscription.)
+- P3: Closeout with receipts + SSOT updates — DONE
 
 ## Evidence (Receipts)
-- (link receipts here)
+- `RCAP-20260210-093643__backup.calendar.generate__Rpwtp71956` — first ICS generation
 
+## Closure Note (2026-02-10)
+
+P0-P1 complete: binding defines 5 daily backup events, capability generates valid
+ICS with VTIMEZONE, RRULE DAILY, and VALARM 15-min reminders. Output is deterministic
+(same binding = same ICS). P2 deferred — file can be manually shared now; webcal://
+subscription via Caddy is a future enhancement.
+
+## Deferred / Follow-ups
+- Publish ICS via Caddy on infra-core for iPhone webcal:// subscription
+- Add home-location backup events when home infra is in scope
