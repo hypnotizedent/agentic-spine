@@ -1,107 +1,150 @@
 #!/usr/bin/env bash
 # D48: Codex worktree hygiene — detect stale/dirty/orphaned worktrees and orphaned stashes.
-# No count limit; concurrent worktrees are expected.
+#
+# NOTE: This must run on macOS default bash (3.2). Do not use bash4 features
+# like associative arrays. Use python3 for parsing and checks.
 set -euo pipefail
 
 SPINE_CODE=${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
-SPINE_REPO=${SPINE_REPO:-$(git -C "$SPINE_CODE" rev-parse --show-toplevel)}
+SPINE_REPO=${SPINE_REPO:-$(git -C "$SPINE_CODE" rev-parse --show-toplevel 2>/dev/null || echo "$SPINE_CODE")}
 
-worktree_list=()
-declare -A worktree_branch
-current_path=""
+python3 - "$SPINE_REPO" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-while IFS= read -r line; do
-  key=${line%% *}
-  value=${line#* }
-  if [[ $key == "worktree" ]]; then
-    current_path=$value
-    worktree_list+=("$value")
-  elif [[ $key == "branch" && -n $current_path ]]; then
-    worktree_branch["$current_path"]="$value"
-  fi
-done < <(git -C "$SPINE_REPO" worktree list --porcelain)
+spine_repo = Path(sys.argv[1]).resolve()
 
-codex_paths=()
-for path in "${worktree_list[@]}"; do
-  [[ $path == "$SPINE_REPO" ]] && continue
-  basename=$(basename "$path")
-  [[ $basename == codex-* ]] || continue
-  codex_paths+=("$path")
-done
+def sh(*args: str, cwd: Path | None = None, check: bool = True) -> str:
+    p = subprocess.run(list(args), cwd=str(cwd) if cwd else None, text=True, capture_output=True)
+    if check and p.returncode != 0:
+        raise SystemExit(p.stderr.strip() or p.stdout.strip() or f"command failed: {' '.join(args)}")
+    return p.stdout
 
-failures=()
-codex_count=${#codex_paths[@]}
+# ── Worktree inventory ────────────────────────────────────────────────────
+porcelain = sh("git", "-C", str(spine_repo), "worktree", "list", "--porcelain")
+entries: list[dict[str, str]] = []
+cur: dict[str, str] = {}
+for raw in porcelain.splitlines():
+    line = raw.strip()
+    if not line:
+        if cur:
+            entries.append(cur)
+            cur = {}
+        continue
+    if " " not in line:
+        continue
+    k, v = line.split(" ", 1)
+    cur[k] = v.strip()
+if cur:
+    entries.append(cur)
 
-for path in "${codex_paths[@]}"; do
-  branch=${worktree_branch["$path"]}
-  # Porcelain gives refs/heads/...; strip to short name for git branch --list / rev-parse
-  branch="${branch#refs/heads/}"
-  if [[ -z $branch ]]; then
-    branch=$(git -C "$path" symbolic-ref --short HEAD 2>/dev/null || echo "<detached>")
-  fi
+worktrees: list[tuple[Path, str]] = []
+for e in entries:
+    p = e.get("worktree", "")
+    if not p:
+        continue
+    wt = Path(p).resolve()
+    branch = e.get("branch", "").strip()  # may be absent for detached HEAD
+    worktrees.append((wt, branch))
 
-  status_msgs=()
-  if [[ $branch != "<detached>" ]]; then
-    if git -C "$SPINE_REPO" branch --merged main --list "$branch" 2>/dev/null | grep -q .; then
-      status_msgs+=("stale (merged into main)")
-    fi
-    # rev-parse prints the resolved SHA to stdout; silence it since this is a gate script.
-    if ! git -C "$SPINE_REPO" rev-parse --verify --quiet "origin/$branch" >/dev/null 2>&1; then
-      status_msgs+=("orphaned (no remote origin/$branch)")
-    fi
-  else
-    status_msgs+=("detached HEAD")
-  fi
+codex_paths: list[tuple[Path, str]] = []
+for wt, branch in worktrees:
+    if wt == spine_repo:
+        continue
+    if wt.name.startswith("codex-"):
+        codex_paths.append((wt, branch))
 
-  if [[ -n $(git -C "$path" status --porcelain) ]]; then
-    status_msgs+=("dirty (uncommitted changes)")
-  fi
+failures: list[str] = []
 
-  if [[ ${#status_msgs[@]} -gt 0 ]]; then
-    failures+=("$(basename "$path"): ${branch:-unknown} -> ${status_msgs[*]}")
-  fi
-done
+def merged_into_main(branch: str) -> bool:
+    out = sh("git", "-C", str(spine_repo), "branch", "--merged", "main", "--list", branch, check=False)
+    return bool(out.strip())
 
-if (( ${#failures[@]} > 0 )); then
-  echo "Detected codex worktree issues:"
-  for entry in "${failures[@]}"; do
-    echo "  - $entry"
-  done
-  exit 1
-fi
+def has_origin_branch(branch: str) -> bool:
+    p = subprocess.run(
+        ["git", "-C", str(spine_repo), "rev-parse", "--verify", "--quiet", f"origin/{branch}"],
+        text=True,
+        capture_output=True,
+    )
+    return p.returncode == 0
+
+for wt, raw_branch in codex_paths:
+    branch = (raw_branch or "").strip()
+    if branch.startswith("refs/heads/"):
+        branch = branch.removeprefix("refs/heads/")
+
+    if not branch:
+        # Best-effort; if the worktree is detached this will fail.
+        p = subprocess.run(["git", "-C", str(wt), "symbolic-ref", "--short", "HEAD"], text=True, capture_output=True)
+        branch = p.stdout.strip() if p.returncode == 0 else "<detached>"
+
+    status_msgs: list[str] = []
+    if branch != "<detached>":
+        if merged_into_main(branch):
+            status_msgs.append("stale (merged into main)")
+        if not has_origin_branch(branch):
+            status_msgs.append(f"orphaned (no remote origin/{branch})")
+    else:
+        status_msgs.append("detached HEAD")
+
+    dirty = sh("git", "-C", str(wt), "status", "--porcelain", check=False).strip()
+    if dirty:
+        status_msgs.append("dirty (uncommitted changes)")
+
+    if status_msgs:
+        failures.append(f"{wt.name}: {branch or 'unknown'} -> {' '.join(status_msgs)}")
+
+if failures:
+    print("Detected codex worktree issues:")
+    for f in failures:
+        print(f"  - {f}")
+    raise SystemExit(1)
 
 # ── Stash audit ───────────────────────────────────────────────────────────
-# Flag stashes whose parent branch is merged into main or no longer exists.
-stash_count=0
-orphaned_stashes=()
-while IFS= read -r stash_line; do
-  [[ -z "$stash_line" ]] && continue
-  stash_count=$((stash_count + 1))
-  # Extract branch name from "stash@{N}: On <branch>: <message>" or "stash@{N}: WIP on <branch>: <sha> <msg>"
-  stash_ref="${stash_line%%:*}"
-  branch_part="${stash_line#*On }"
-  stash_branch="${branch_part%%:*}"
-  [[ -z "$stash_branch" ]] && continue
+stash_lines = sh("git", "-C", str(spine_repo), "stash", "list", check=False).splitlines()
+stash_count = 0
+orphaned: list[str] = []
+for line in stash_lines:
+    line = line.strip()
+    if not line:
+        continue
+    stash_count += 1
+    # "stash@{N}: On <branch>: <msg>" or "stash@{N}: WIP on <branch>: <sha> <msg>"
+    stash_ref = line.split(":", 1)[0].strip()
+    if " On " in line:
+        branch_part = line.split(" On ", 1)[1]
+    elif " on " in line:
+        branch_part = line.split(" on ", 1)[1]
+    else:
+        continue
+    stash_branch = branch_part.split(":", 1)[0].strip()
+    if not stash_branch:
+        continue
 
-  reason=""
-  if ! git -C "$SPINE_REPO" rev-parse --verify --quiet "refs/heads/$stash_branch" >/dev/null 2>&1; then
-    reason="branch gone"
-  elif git -C "$SPINE_REPO" branch --merged main --list "$stash_branch" 2>/dev/null | grep -q .; then
-    reason="branch merged"
-  fi
+    # Branch existence
+    exists = subprocess.run(
+        ["git", "-C", str(spine_repo), "rev-parse", "--verify", "--quiet", f"refs/heads/{stash_branch}"],
+        text=True,
+        capture_output=True,
+    ).returncode == 0
+    reason = ""
+    if stash_branch in ("main", "master"):
+        pass  # stashes on the default branch are not orphaned
+    elif not exists:
+        reason = "branch gone"
+    elif merged_into_main(stash_branch):
+        reason = "branch merged"
+    if reason:
+        orphaned.append(f"{stash_ref} ({stash_branch}): {reason}")
 
-  if [[ -n "$reason" ]]; then
-    orphaned_stashes+=("$stash_ref ($stash_branch): $reason")
-  fi
-done < <(git -C "$SPINE_REPO" stash list 2>/dev/null)
+if orphaned:
+    print(f"Orphaned stashes detected ({len(orphaned)} of {stash_count}):")
+    for o in orphaned:
+        print(f"  - {o}")
+    print("Fix: git stash drop <ref> for each orphaned entry")
+    raise SystemExit(1)
 
-if (( ${#orphaned_stashes[@]} > 0 )); then
-  echo "Orphaned stashes detected (${#orphaned_stashes[@]} of $stash_count):"
-  for entry in "${orphaned_stashes[@]}"; do
-    echo "  - $entry"
-  done
-  echo "Fix: git stash drop <ref> for each orphaned entry"
-  exit 1
-fi
-
-echo "Codex worktrees clean (count=$codex_count). Stashes: $stash_count (0 orphaned)."
+print(f"Codex worktrees clean (count={len(codex_paths)}). Stashes: {stash_count} (0 orphaned).")
+PY
