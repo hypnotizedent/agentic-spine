@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -11,16 +11,19 @@ severity: critical
 
 ## Goal
 
-Fix PVE node name mismatch on proxmox-home. Hostname is `proxmox-home` but node configs live under `/etc/pve/nodes/pve/`, breaking all VM/LXC management tools (`qm list`, `pct list`, `pct exec`, vzdump).
+Resolve PVE node name mismatch on `proxmox-home` (home hypervisor) so `qm`/`pct` tooling and backups are functional.
 
 ## Problem / Current State (2026-02-09)
 
-- PVE node name `pve` but hostname `proxmox-home` — config path mismatch
-- Cannot list VMs (`qm list`) or LXCs (`pct list`)
-- Cannot execute commands in containers (`pct exec`)
-- All 3 vzdump backup jobs disabled and cannot run
-- VM 101 (Immich) stopped since 2025-10-19, cannot restart
-- GAP-OP-014 tracks this issue
+This scope was created under the assumption that proxmox-home's hostname and
+PVE node path were mismatched (e.g. hostname `proxmox-home` while configs lived
+under `/etc/pve/nodes/pve/`), which would break `qm list`, `pct list`, `pct exec`,
+and vzdump.
+
+As of 2026-02-10, governed evidence shows proxmox-home is currently reachable and
+Proxmox tooling is functional (hostname `pve` by exception policy; VM inventory
+and container inventory readable). This loop is therefore closed as already
+resolved / non-actionable.
 
 ## Success Criteria
 
@@ -65,8 +68,10 @@ Fix PVE node name mismatch on proxmox-home. Hostname is `proxmox-home` but node 
 
 ## Blocking
 
-- **Blocks:** LOOP-HOME-BACKUP-INFRASTRUCTURE-ENABLE-20260209
+None (this loop is closed).
 
 ## Receipts
 
-- (awaiting execution)
+- Receipt (`infra.hypervisor.identity` PASS): `receipts/sessions/RCAP-20260210-162034__infra.hypervisor.identity__Rchhq6986/receipt.md`
+- Receipt (`infra.proxmox.maintenance.precheck` OK): `receipts/sessions/RCAP-20260210-162130__infra.proxmox.maintenance.precheck__Rsx5r7734/receipt.md`
+- Receipt (node-path migrate DRY-RUN only, not executed): `receipts/sessions/RCAP-20260210-162055__infra.proxmox.node_path.migrate__Rgxsc7365/receipt.md`
