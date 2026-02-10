@@ -1,0 +1,55 @@
+#!/bin/bash
+set -euo pipefail
+
+# proposals-submit: Create a new change proposal in mailroom/outbox/proposals/
+
+DESCRIPTION="${1:?Usage: proposals-submit \"description\"}"
+SPINE_CODE="${SPINE_CODE:-.}"
+
+PROPOSALS_DIR="$SPINE_CODE/mailroom/outbox/proposals"
+AGENT_ID="${SPINE_AGENT_ID:-${USER:-unknown}@$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)}"
+LOOP_ID="${SPINE_LOOP_ID:-null}"
+
+# Create timestamp in format YYYYMMDD-HHMMSS
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+
+# Sanitize description: lowercase, replace spaces with hyphens
+SANITIZED_DESC=$(echo "$DESCRIPTION" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/-+/-/g')
+
+# Create proposal directory
+PROPOSAL_NAME="CP-${TIMESTAMP}__${SANITIZED_DESC}"
+PROPOSAL_DIR="$PROPOSALS_DIR/$PROPOSAL_NAME"
+
+mkdir -p "$PROPOSAL_DIR/files"
+
+# Create empty manifest.yaml template
+cat > "$PROPOSAL_DIR/manifest.yaml" << MANIFEST
+proposal: $PROPOSAL_NAME
+agent: "$AGENT_ID"
+created: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+loop_id: $LOOP_ID
+changes: []
+MANIFEST
+
+# Create empty receipt.md template
+cat > "$PROPOSAL_DIR/receipt.md" << RECEIPT
+# Proposal Receipt: $PROPOSAL_NAME
+
+## What was done
+(describe the changes here)
+
+## Why
+(explain the motivation)
+
+## Constraints
+(any limitations or dependencies)
+
+## Expected outcomes
+(what should happen when applied)
+RECEIPT
+
+echo "Proposal created: $PROPOSAL_DIR"
+echo "Next steps:"
+echo "  1. Edit manifest.yaml to list your changes"
+echo "  2. Add files to files/ directory (preserving path structure)"
+echo "  3. Update receipt.md with details"

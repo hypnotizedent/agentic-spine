@@ -1,0 +1,230 @@
+#!/bin/bash
+set -euo pipefail
+
+# proposals-apply: Apply a change proposal to the repo (non-interactive).
+#
+# Notes:
+# - `ops cap run proposals.apply` already enforces `approval: manual` ("Type 'yes' to proceed").
+# - This script must not prompt for additional input, or piping `yes` into ops will deadlock.
+#
+# Usage:
+#   proposals-apply [--dry-run] CP-<name>
+
+usage() {
+  cat <<'EOF'
+Usage:
+  proposals-apply [--dry-run] CP-<name>
+
+Applies the proposal from:
+  mailroom/outbox/proposals/<CP-...>/
+
+Requires:
+  - clean git working tree (abort otherwise)
+  - manifest.yaml contains changes with action/path/reason
+  - for create/modify: proposal/files/<path> exists
+EOF
+}
+
+DRY_RUN=0
+if [[ "${1:-}" == "--dry-run" ]]; then
+  DRY_RUN=1
+  shift
+fi
+
+PROPOSAL_NAME="${1:-}"
+if [[ -z "$PROPOSAL_NAME" ]]; then
+  usage
+  exit 2
+fi
+
+SPINE_CODE="${SPINE_CODE:-.}"
+PROPOSALS_DIR="$SPINE_CODE/mailroom/outbox/proposals"
+PROPOSAL_DIR="$PROPOSALS_DIR/$PROPOSAL_NAME"
+
+if [[ ! -d "$PROPOSAL_DIR" ]]; then
+  echo "ERROR: Proposal not found: $PROPOSAL_DIR" >&2
+  exit 1
+fi
+
+manifest="$PROPOSAL_DIR/manifest.yaml"
+files_dir="$PROPOSAL_DIR/files"
+
+if [[ ! -f "$manifest" ]]; then
+  echo "ERROR: Manifest not found: $manifest" >&2
+  exit 1
+fi
+
+if [[ -f "$PROPOSAL_DIR/.applied" ]]; then
+  echo "ERROR: Proposal already applied: $PROPOSAL_NAME" >&2
+  exit 1
+fi
+
+cd "$SPINE_CODE"
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "ERROR: Working tree is not clean. Commit/stash before applying proposals." >&2
+  git status --porcelain | sed -n '1,60p' >&2
+  exit 1
+fi
+
+agent=$(awk -F': *' '/^agent:/{print $2; exit}' "$manifest" | tr -d '"')
+created=$(awk -F': *' '/^created:/{print $2; exit}' "$manifest" | tr -d '"')
+loop_id=$(awk -F': *' '/^loop_id:/{print $2; exit}' "$manifest" | tr -d '"')
+[[ "${loop_id:-}" == "null" ]] && loop_id=""
+
+echo "Applying proposal: $PROPOSAL_NAME"
+[[ -n "${loop_id:-}" ]] && echo "Loop: $loop_id"
+[[ -n "${agent:-}" ]] && echo "Agent: $agent"
+[[ -n "${created:-}" ]] && echo "Created: $created"
+echo ""
+
+changes_tmp="$(mktemp "/tmp/spine-proposal-changes.XXXXXX")"
+trap 'rm -f "$changes_tmp" 2>/dev/null || true' EXIT INT TERM
+
+awk '
+  function trim(s) {
+    gsub(/^[ \t]+/, "", s)
+    gsub(/[ \t]+$/, "", s)
+    gsub(/^"+|"+$/, "", s)
+    return s
+  }
+  BEGIN { action=""; path=""; reason="" }
+  /^[ \t]*-[ \t]*action:[ \t]*/ {
+    if (action != "") { print action "\t" path "\t" reason }
+    action = trim($0)
+    sub(/^[ \t]*-[ \t]*action:[ \t]*/, "", action)
+    path=""; reason=""
+    next
+  }
+  /^[ \t]*path:[ \t]*/ {
+    path = trim($0)
+    sub(/^[ \t]*path:[ \t]*/, "", path)
+    next
+  }
+  /^[ \t]*reason:[ \t]*/ {
+    reason = trim($0)
+    sub(/^[ \t]*reason:[ \t]*/, "", reason)
+    next
+  }
+  END {
+    if (action != "") { print action "\t" path "\t" reason }
+  }
+' "$manifest" > "$changes_tmp"
+
+if [[ ! -s "$changes_tmp" ]]; then
+  echo "ERROR: No changes found in manifest: $manifest" >&2
+  exit 1
+fi
+
+first_reason=""
+had_error=0
+
+validate_path() {
+  local p="$1"
+  if [[ -z "$p" ]]; then return 1; fi
+  if [[ "$p" == /* ]]; then return 1; fi
+  if [[ "$p" == *".."* ]]; then return 1; fi
+  if [[ "$p" == *"~"* ]]; then return 1; fi
+  if [[ "$p" == *$'\n'* ]]; then return 1; fi
+  return 0
+}
+
+while IFS=$'\t' read -r action path reason; do
+
+  if [[ -z "${first_reason}" && -n "${reason:-}" ]]; then
+    first_reason="$reason"
+  fi
+
+  case "$action" in
+    create|modify|delete) ;;
+    *)
+      echo "ERROR: Invalid action '$action' in $manifest" >&2
+      had_error=1
+      continue
+      ;;
+  esac
+
+  if ! validate_path "$path"; then
+    echo "ERROR: Unsafe/invalid path '$path' in $manifest" >&2
+    had_error=1
+    continue
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf "DRY RUN: %-6s %s\n" "$action" "$path"
+    continue
+  fi
+
+  case "$action" in
+    create|modify)
+      src="$files_dir/$path"
+      dst="$SPINE_CODE/$path"
+      if [[ ! -f "$src" ]]; then
+        echo "ERROR: Missing proposal file for $action: $src" >&2
+        had_error=1
+        continue
+      fi
+      if [[ -L "$src" ]]; then
+        echo "ERROR: Proposal file must not be a symlink: $src" >&2
+        had_error=1
+        continue
+      fi
+      mkdir -p "$(dirname "$dst")"
+      cp -p "$src" "$dst"
+      git add -- "$path"
+      if [[ "$action" == "create" ]]; then
+        echo "✓ Create: $path"
+      else
+        echo "✓ Modify: $path"
+      fi
+      ;;
+    delete)
+      if [[ -e "$SPINE_CODE/$path" ]]; then
+        git rm -f -- "$path" >/dev/null
+        echo "✓ Delete: $path"
+      else
+        echo "WARN: Delete requested but file missing: $path"
+      fi
+      ;;
+  esac
+done < "$changes_tmp"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo ""
+  echo "DRY RUN: no files changed, nothing committed."
+  exit 0
+fi
+
+if [[ "$had_error" -ne 0 ]]; then
+  echo "ERROR: One or more changes could not be applied. Aborting." >&2
+  exit 1
+fi
+
+if git diff --cached --quiet; then
+  echo "ERROR: No staged changes after applying proposal. Refusing to commit." >&2
+  exit 1
+fi
+
+subject=""
+if [[ -n "${loop_id:-}" ]]; then
+  subject="fix(${loop_id}): apply ${PROPOSAL_NAME}"
+else
+  subject="gov(${PROPOSAL_NAME}): ${first_reason:-apply proposal}"
+fi
+
+git commit -m "$subject" \
+  -m "Proposal: ${PROPOSAL_NAME}" \
+  -m "Agent: ${agent:-unknown}" \
+  -m "Created: ${created:-unknown}" \
+  -m "First reason: ${first_reason:-unknown}"
+
+commit_sha="$(git rev-parse HEAD)"
+
+{
+  echo "Applied: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "Commit: ${commit_sha}"
+} > "$PROPOSAL_DIR/.applied"
+
+echo ""
+echo "Proposal applied successfully."
+echo "Commit: $commit_sha"

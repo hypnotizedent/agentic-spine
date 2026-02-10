@@ -34,13 +34,19 @@ BRANCH=$(git -C "$SPINE_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "u
 # Active worktree count (max allowed: 2)
 WT_COUNT=$(git -C "$SPINE_ROOT" worktree list --porcelain 2>/dev/null | grep -c '^worktree' || echo 0)
 
-# Branch status for the message
-BRANCH_WARNING=""
-if [[ "$BRANCH" == "main" ]]; then
-  BRANCH_WARNING="
-> **YOU ARE ON \`main\`.** Direct commits and mutating capabilities are BLOCKED.
-> To do work: \`./bin/ops start loop <LOOP_ID>\` → creates a worktree branch.
-> Only ledger-only commits (\`mailroom/state/ledger.csv\`) are allowed on main."
+# Dirty working tree warning (multi-terminal safety)
+DIRTY_STATUS="$(git -C "$SPINE_ROOT" status --porcelain 2>/dev/null || true)"
+DIRTY_COUNT="$(printf '%s\n' "$DIRTY_STATUS" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+DIRTY_WARNING=""
+if [[ "${DIRTY_COUNT:-0}" != "0" ]]; then
+  DIRTY_WARNING="
+> **WORKTREE IS DIRTY (${DIRTY_COUNT} change(s)).**
+> If you didn't make these changes, STOP. Another agent/terminal is in-flight.
+> Default policy for multi-agent work: treat repo as read-only and submit a change proposal instead.
+>
+> Quick fix (operator only): commit/stash/clean before running verify or applying proposals.
+"
 fi
 
 # Read canonical governance brief (static rules from single source)
@@ -52,7 +58,12 @@ MSG="## SESSION ENTRY PROTOCOL (governance hook)
 
 You are working inside the agentic-spine repo (\`$SPINE_ROOT\`).
 **Branch:** \`${BRANCH}\` | **Active worktrees:** ${WT_COUNT}/2
-${BRANCH_WARNING}
+${DIRTY_WARNING}
+
+### Multi-Agent Write Policy (Default)
+- Agents: read-only on repo; write proposals to \`mailroom/outbox/proposals/\`
+- Operator: apply via \`./bin/ops cap run proposals.apply <CP-...>\` (creates a commit)
+- If you need isolation: \`./bin/ops start loop <LOOP_ID>\` (worktrees optional)
 
 ### Spine Status
 \`\`\`

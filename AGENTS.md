@@ -41,6 +41,13 @@ scope: agent-governance-brief
 - **If using worktrees, clean up after merging** (D48). Use `ops close loop <LOOP_ID>` to tear down worktree + branch + stashes. Stale/merged/orphaned worktrees fail `spine.verify`.
 - **Gitea is canonical** (origin). GitHub is a mirror. D62 enforces.
 
+## Multi-Agent Write Policy (Mailroom-Gated Writes)
+
+- **Default rule:** if multiple terminals/agents may be active, treat the repo as **read-only**.
+- **Submit changes as proposals:** `./bin/ops cap run proposals.submit "desc"` writes to `mailroom/outbox/proposals/` (gitignored runtime).
+- **Operator applies proposals:** `./bin/ops cap run proposals.apply CP-...` creates the commit boundary and prevents “agent B reverted agent A”.
+- If you see a dirty worktree you did not create, **STOP** (don’t run cleanup/verify) and coordinate first.
+
 ## Capability Gotchas
 
 - **`approval: manual`** caps prompt for stdin `yes`. In scripts: `echo "yes" | ./bin/ops cap run <cap>`. No `--` separator for args.

@@ -29,8 +29,8 @@ Two full loops of work were destroyed by this pattern on 2026-02-10.
 
 ## Phases
 - P0: Register loop + scope [DONE]
-- P1: Build proposal infrastructure (format + submit + list + apply)
-- P2: Update AGENTS.md + governance brief with read-only agent rule
+- P1: Build proposal infrastructure (format + submit + list + apply) [DONE]
+- P2: Update AGENTS.md + governance brief with read-only agent rule [DONE]
 - P3: Re-apply destroyed work as first proposals
 - P4: Verify + closeout
 
@@ -41,4 +41,4 @@ Two full loops of work were destroyed by this pattern on 2026-02-10.
 - The apply command commits automatically after applying
 
 ## Evidence (Receipts)
-- (to be populated on closeout)
+- RCAP-20260210-175330__spine.verify__Ruyd250384 (spine.verify PASS)

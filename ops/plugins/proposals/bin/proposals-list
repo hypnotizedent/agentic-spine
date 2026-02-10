@@ -1,0 +1,60 @@
+#!/bin/bash
+set -euo pipefail
+
+# proposals-list: List all pending and applied change proposals
+
+SPINE_CODE="${SPINE_CODE:-.}"
+PROPOSALS_DIR="$SPINE_CODE/mailroom/outbox/proposals"
+
+if [ ! -d "$PROPOSALS_DIR" ]; then
+  echo "No proposals directory found at $PROPOSALS_DIR"
+  exit 0
+fi
+
+echo "═══════════════════════════════════════════════════════════════════════════"
+echo "Change Proposals"
+echo "═══════════════════════════════════════════════════════════════════════════"
+echo ""
+
+# Counter
+count=0
+
+# Iterate through proposals
+for proposal_dir in "$PROPOSALS_DIR"/CP-*; do
+  [ -d "$proposal_dir" ] || continue
+  
+  proposal_name=$(basename "$proposal_dir")
+  manifest="$proposal_dir/manifest.yaml"
+  
+  if [ ! -f "$manifest" ]; then
+    continue
+  fi
+  
+  count=$((count + 1))
+  
+  # Extract info from manifest
+  agent=$(grep "^agent:" "$manifest" | head -1 | awk '{print $2}' | tr -d '"')
+  created=$(grep "^created:" "$manifest" | head -1 | awk '{print $2}' | tr -d '"')
+  
+  # Count changes
+  change_count=$(grep "action:" "$manifest" | wc -l)
+  
+  # Check if applied
+  status="pending"
+  if [ -f "$proposal_dir/.applied" ]; then
+    status="applied"
+  fi
+  
+  echo "[$count] $proposal_name"
+  echo "    Agent:   $agent"
+  echo "    Created: $created"
+  echo "    Changes: $change_count"
+  echo "    Status:  $status"
+  echo ""
+done
+
+if [ "$count" -eq 0 ]; then
+  echo "No proposals found."
+fi
+
+echo "═══════════════════════════════════════════════════════════════════════════"
