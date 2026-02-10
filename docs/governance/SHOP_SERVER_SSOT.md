@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-09
+last_verified: 2026-02-10
 verification_method: receipt + on-site audit + live-ssh-inspection
 scope: shop-infrastructure
 parent_receipts:
@@ -155,9 +155,7 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 
 **Total RAM allocated:** 232GB across 10 running VMs (host has 192GB — overcommitted by 40GB, acceptable with balloon/KSM)
 
-**NOTE:** Backup coverage is incomplete for shop VMs. Track and fix via `LOOP-BACKUP-STABILIZATION-20260208` and verify with `./bin/ops cap run backup.status`.
-
-**NOTE:** vzdump backup job covers VMs 200-204 only. VMs 205, 206, 207, 209, 210 are NOT backed up. Add them to the job.
+**NOTE:** vzdump backup job covers all 10 running shop VMs: `200,201,202,203,204,205,206,207,209,210`. Verify with `./bin/ops cap run backup.status`.
 
 ### NFS Exports from PVE (2026-02-09)
 
@@ -300,12 +298,12 @@ If you need to make a placement decision ("where should this run?"):
 | `0 2 * * *` | `/usr/local/bin/zfs-snapshot.sh` | Daily ZFS snapshot of root datasets | ACTIVE |
 | `0 3 * * 0` | `zpool scrub tank` | Weekly scrub of tank pool | ACTIVE |
 | `0 4 * * 0` | `zpool scrub media` | Weekly scrub of media pool | ACTIVE (new) |
-| `02:00 daily` | vzdump VMs 200-204 | Snapshot backup to tank-backups (zstd, max 2) | ACTIVE |
+| `02:00 daily` | vzdump VMs `200,201,202,203,204,205,206,207,209,210` | Snapshot backup to tank-backups (zstd, keep-last=2) | ACTIVE |
 
 **Source:** crontab (`crontab -l`) and `/etc/pve/jobs.cfg`.
 
-**Known issues:**
-- ~~vzdump covers VMs 200-204 only~~ — **Fixed:** vzdump now covers all 10 VMs: `204,205,206,207,209,210,201,202,203,200` (critical-first order). GAP-OP-030 closed.
+**Notes:**
+- vzdump covers all 10 running shop VMs (GAP-OP-030 closed).
 
 ---
 

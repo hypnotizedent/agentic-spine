@@ -2,10 +2,10 @@
 
 > **Purpose:** Single landing page for every agent. Points to canonical contracts,
 > governance SSOTs, extraction guides, and the gap map. Start here, reach any
-> doc in two hops, never leave `/Code`.
+> doc in two hops, never leave `/code`.
 >
 > **Status:** authoritative
-> **Last verified:** 2026-02-07
+> **Last verified:** 2026-02-10
 
 ---
 
@@ -18,10 +18,11 @@ The invariants. If a drift gate fails, one of these was violated.
 | [AGENT_CONTRACT.md](core/AGENT_CONTRACT.md) | Allowable agent behavior — the rules every agent follows |
 | [AGENT_OUTPUT_CONTRACT.md](core/AGENT_OUTPUT_CONTRACT.md) | Required output block structure |
 | [RECEIPTS_CONTRACT.md](core/RECEIPTS_CONTRACT.md) | Receipt format, proof rules, ledger entries |
-| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D47) |
+| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D57) |
 | [SPINE.md](core/SPINE.md) | Spine architecture and design principles |
 | [SPINE_SESSION_HEADER.md](core/SPINE_SESSION_HEADER.md) | Session header format for agent context |
 | [SPINE_STATE.md](core/SPINE_STATE.md) | Canonical spine state — what lives here, no legacy deps |
+| [STACK_LIFECYCLE.md](core/STACK_LIFECYCLE.md) | Stack discovery + lifecycle operations (no compose guessing) |
 | [SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) | Spine-native session protocol (entry point) |
 
 ---
@@ -87,6 +88,30 @@ The authority chain. When in doubt, these are the source of truth.
 
 ---
 
+## Policies, Runbooks, Templates
+
+| Doc | Scope |
+|-----|-------|
+| [PATCH_CADENCE.md](governance/PATCH_CADENCE.md) | Patch cadence and maintenance expectations |
+| [PORTABILITY_ASSUMPTIONS.md](governance/PORTABILITY_ASSUMPTIONS.md) | What this system assumes about hosts and portability |
+| [RTO_RPO.md](governance/RTO_RPO.md) | Recovery objectives (RTO/RPO) for critical services |
+| [SECURITY_POLICIES.md](governance/SECURITY_POLICIES.md) | Security posture, minimum requirements, and prohibitions |
+| [NETWORK_POLICIES.md](governance/NETWORK_POLICIES.md) | Network policy set (routing, DHCP/DNS expectations, drift rules) |
+| [NETWORK_RUNBOOK.md](governance/NETWORK_RUNBOOK.md) | Network operations runbook (audit, change, rollback) |
+| [DR_RUNBOOK.md](governance/DR_RUNBOOK.md) | Disaster recovery runbook |
+| [SHOP_VM_ARCHITECTURE.md](governance/SHOP_VM_ARCHITECTURE.md) | Shop VM layout and lifecycle rules |
+| [SHOP_NETWORK_NORMALIZATION.md](governance/SHOP_NETWORK_NORMALIZATION.md) | Shop network normalization checklist and rules |
+| [SHOP_NETWORK_DEVICE_ONBOARDING.md](governance/SHOP_NETWORK_DEVICE_ONBOARDING.md) | Shop network onboarding procedure |
+| [SHOP_NETWORK_AUDIT_RUNBOOK.md](governance/SHOP_NETWORK_AUDIT_RUNBOOK.md) | Shop network audit procedures and expected outputs |
+| [CHANGE_PACK_TEMPLATE.md](governance/CHANGE_PACK_TEMPLATE.md) | Change pack template for governed infrastructure work |
+| [CAMERA_SSOT.md](governance/CAMERA_SSOT.md) | Camera inventory SSOT (IDs, channels, expected coverage) |
+| [AUTHENTIK_BACKUP_RESTORE.md](governance/AUTHENTIK_BACKUP_RESTORE.md) | Authentik backup/restore runbook |
+| [GITEA_BACKUP_RESTORE.md](governance/GITEA_BACKUP_RESTORE.md) | Gitea backup/restore runbook |
+| [INFISICAL_BACKUP_RESTORE.md](governance/INFISICAL_BACKUP_RESTORE.md) | Infisical backup/restore runbook |
+| [VAULTWARDEN_BACKUP_RESTORE.md](governance/VAULTWARDEN_BACKUP_RESTORE.md) | Vaultwarden backup/restore runbook |
+
+---
+
 ## Audits
 
 Gap scans, runtime audits, and triage reports.
@@ -96,6 +121,8 @@ Gap scans, runtime audits, and triage reports.
 | [AGENT_DISPATCH_PIPELINE_GAP_SCAN.md](governance/_audits/AGENT_DISPATCH_PIPELINE_GAP_SCAN.md) | Agent dispatch pipeline gap analysis |
 | [AGENT_RUNTIME_AUDIT.md](governance/_audits/AGENT_RUNTIME_AUDIT.md) | Agent runtime behavior audit |
 | [AUTHORITY_CLAIMS_TRIAGE.md](governance/_audits/AUTHORITY_CLAIMS_TRIAGE.md) | Authority claims triage and resolution |
+| [CODE_AUDIT_20260208.md](governance/_audits/CODE_AUDIT_20260208.md) | Spine + workbench code audit (bindings, secrets, ingress, alignment) |
+| [GLM47_DEEP_AUDIT_VERIFICATION_20260209.md](governance/_audits/GLM47_DEEP_AUDIT_VERIFICATION_20260209.md) | Verify external deep audit claims against live spine/workbench state |
 | [RAG_INTEGRATION_RATIONALE.md](governance/_audits/RAG_INTEGRATION_RATIONALE.md) | RAG integration design rationale |
 | [STATE_OF_THE_UNION_SUMMARY.md](governance/_audits/STATE_OF_THE_UNION_SUMMARY.md) | Overall spine state summary |
 
@@ -105,7 +132,7 @@ Gap scans, runtime audits, and triage reports.
 
 | Doc | What It Covers |
 |-----|---------------|
-| [VERIFY_SURFACE_INDEX.md](governance/VERIFY_SURFACE_INDEX.md) | Catalog of all 53 scripts in `surfaces/verify/` |
+| [VERIFY_SURFACE_INDEX.md](governance/VERIFY_SURFACE_INDEX.md) | Catalog of all verify scripts in `surfaces/verify/` (including composite drift gates) |
 
 ---
 
@@ -149,6 +176,7 @@ How assets move from the workbench monolith into the spine.
 | `docs/core/` | Spine invariants — contracts, locks, bindings, gap map |
 | `docs/governance/` | SSOTs, authority pages, audits, canonical indexes |
 | `docs/brain/` | Agent memory system + imported context |
+| `docs/sessions/` | Ephemeral session logs (loop/issue scoped), non-canonical |
 | `docs/legacy/` | Archived legacy imports (quarantined by D16/D17, reference only) |
 
 ---
@@ -169,7 +197,7 @@ After editing any doc in this tree:
 # Lint: folder placement, metadata headers, README registration, legacy isolation
 ./bin/ops cap run docs.lint
 
-# Verify drift gates still pass (D1-D47)
+# Verify drift gates still pass (D1-D57)
 ./bin/ops cap run spine.verify
 
 # Verify workbench infrastructure docs intact (120 files, 19 dirs)

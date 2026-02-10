@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-01-22
+last_verified: 2026-02-10
 scope: all-agents
 ---
 
@@ -30,7 +30,7 @@ Define clear boundaries for AI agent actions to prevent incidents like the 1,948
 | **Push to main/master branch** | Must use feature branches + PR |
 | **Merge PRs** | Ronny reviews and merges |
 | **Modify secrets/credentials** | Security boundary |
-| **Change infrastructure ports/endpoints** | Must update INFRASTRUCTURE_AUTHORITY.md first |
+| **Change infrastructure ports/endpoints** | Must update `docs/governance/SERVICE_REGISTRY.yaml` first (and ingress authority docs if routing changes) |
 | **Bulk operations (>50 items)** | Must get approval for scope |
 
 ---

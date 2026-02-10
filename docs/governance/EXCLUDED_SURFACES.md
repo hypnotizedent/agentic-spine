@@ -1,13 +1,13 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-05
+last_verified: 2026-02-10
 scope: exclusion-rules
 ---
 
 # Explicitly Excluded Surfaces
 
-The following config surfaces are **out of scope** for /Code admission:
+The following config surfaces are **out of scope** for spine governance and drift gates:
 
 - mint-os/**  (application-level configs, dependency artifacts)
 - node_modules/**

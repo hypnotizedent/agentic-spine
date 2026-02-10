@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-10
+scope: stack-lifecycle
+---
+
 # Stack Lifecycle (Spine-Governed)
 
 Purpose: define how stacks are discovered, operated, and verified without "compose guessing" or ad-hoc SSH.

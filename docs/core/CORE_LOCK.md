@@ -1,8 +1,8 @@
-# CORE_LOCK v1.0
+# CORE_LOCK v1.1
 
-**Locked:** 2026-02-07
+**Locked:** 2026-02-10
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v2.3
+**Gate Version:** drift-gate.sh v2.5
 
 ---
 
@@ -50,7 +50,7 @@ This key is used everywhere:
 
 ## Drift Gates
 
-All must PASS for core to be healthy:
+All must PASS for core to be healthy.
 
 | Gate | Enforces |
 |------|----------|
@@ -72,33 +72,46 @@ All must PASS for core to be healthy:
 | D17 | Root allowlist (no drift magnets at root) |
 | D18 | Docker compose surface drift (read-only) |
 | D19 | Backup surface drift (read-only, no secret printing) |
-| D20 | Secrets surface drift (non-leaky, read-only) |
 | D22 | Nodes surface drift (read-only SSH, no credentials) |
 | D23 | Services health surface drift (no verbose curl) |
 | D24 | GitHub labels surface drift (read-only, no mutations) |
-| D25 | Secrets CLI canonical lock (spine tooling required; external parity advisory) |
-| D26 | Agent startup read-surface and host/service route lock |
 | D27 | Fact duplication lock for startup/governance read docs |
 | D28 | Archive runway lock (active legacy absolute paths + extraction queue contract) |
 | D29 | Active entrypoint lock (launchd/cron ronny namespace cannot execute from ronny-ops without valid exception) |
 | D30 | Active config lock (legacy refs + plaintext secret patterns) |
 | D31 | Home output sink lock (home-root logs/out/err not allowlisted) |
-| D32 | Codex instruction source lock (`~/.codex/AGENTS.md` must resolve to spine AGENTS) |
 | D33 | Extraction pause lock (`ops/bindings/extraction.mode.yaml` must remain `mode: paused`) |
 | D34 | Loop ledger integrity lock (summary counts must match deduped reducer output) |
 | D35 | Infra relocation parity lock (cross-SSOT consistency for service moves during cutover/cleanup) |
 | D36 | Legacy exception hygiene lock (stale/near-expiry exception enforcement) |
-| D37 | Infra placement policy lock (canonical site/hypervisor/vmid/service target enforcement) |
 | D38 | Extraction hygiene lock (EXTRACTION_PROTOCOL enforcement) |
-| D39 | Infra hypervisor identity lock (active relocation states must pass identity invariants) |
 | D40 | Maker tools drift lock (binding validity, script hygiene, no debug/secret/tmp leaks) |
 | D41 | Hidden-root governance lock (home-root inventory + forbidden pattern enforcement) |
 | D42 | Code path case lock (runtime scripts must use `$HOME/code` not `$HOME/Code`) |
 | D43 | Secrets namespace policy lock (freeze legacy root-path debt + enforce /spine namespace wiring) |
 | D44 | CLI tools discovery lock (inventory + cross-refs + probes) |
 | D45 | Naming consistency lock (cross-file identity surface verification) |
-| D46 | Claude instruction source lock (shim compliance + path case enforcement) |
 | D47 | Brain surface path lock (no `.brain/` references in runtime scripts) |
+| D48 | Codex worktree hygiene (stale/dirty/orphaned worktrees) |
+| D49 | Agent discovery lock (agents registry + contract coverage) |
+| D50 | Gitea CI workflow lock (workflow + drift-gate reference) |
+| D51 | Caddy proto lock (X-Forwarded-Proto on Authentik upstreams) |
+| D52 | UDR6 gateway assertion (shop docs reference 192.168.1.0/24) |
+| D53 | Change pack integrity lock (template + sequencing + companion files) |
+| D54 | SSOT IP parity lock (device identity ↔ shop server ↔ bindings) |
+| D55 | Secrets runtime readiness lock (composite: D20 + D25) |
+| D56 | Agent entry surface lock (composite: D26 + D32 + D46) |
+| D57 | Infra identity cohesion lock (composite: D37 + D39) |
+
+### Verbose Mode (Subchecks)
+
+To run the original subchecks individually (more verbose STOP output):
+
+```bash
+DRIFT_VERBOSE=1 ./bin/ops cap run spine.verify
+```
+
+Verbose mode runs: D20, D25, D26, D32, D37, D39, D46 instead of D55, D56, D57.
 
 ## Rules
 

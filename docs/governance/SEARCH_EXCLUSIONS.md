@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-04
+last_verified: 2026-02-10
 scope: search-indexing
 github_issue: "#541"
 ---
@@ -21,6 +21,7 @@ github_issue: "#541"
 | `receipts/sessions/` | High-volume session receipts; searchable via `ops` commands |
 | `mailroom/state/` | Runtime state (ledger, loops); not documentation |
 | `fixtures/` | Test fixtures; synthetic data only |
+| `.worktrees/` | Worktree clones (high-volume duplicate trees; drift magnet) |
 | `.git/` | Git internals |
 | `node_modules/` | Third-party dependencies |
 

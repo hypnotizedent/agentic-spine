@@ -123,18 +123,55 @@ fi
 mkdir -p "$SESSION_DIR"
 if (( is_issue == 1 )); then
   cat <<SESSION > "$SESSION_DIR/SESSION_LOG.md"
+---
+status: ephemeral
+owner: "@ronny"
+last_verified: $(date +%Y-%m-%d)
+scope: session-log
+issue: ${ISSUE}
+started_utc: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+worktree: ${WORKTREE_DIR}
+branch: ${BRANCH_NAME}
+---
+
 # Session Log - Issue #${ISSUE}
 
-**Started:** $(date -u)
-**Issue:** ${ISSUE}
+## Intent
+
+## Work Log
+
+## Receipts (proof)
+
+## Notes / Follow-ups
 SESSION
 else
   cat <<SESSION > "$SESSION_DIR/SESSION_LOG.md"
+---
+status: ephemeral
+owner: "@ronny"
+last_verified: $(date +%Y-%m-%d)
+scope: session-log
+loop_id: ${LOOP_ID}
+started_utc: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+worktree: ${WORKTREE_DIR}
+branch: ${BRANCH_NAME}
+scope_doc: mailroom/state/loop-scopes/${LOOP_ID}.scope.md
+---
+
 # Session Log - Loop ${LOOP_ID}
 
-**Started:** $(date -u)
-**Loop:** ${LOOP_ID}
-**Scope Doc:** mailroom/state/loop-scopes/${LOOP_ID}.scope.md
+## Scope
+- Scope doc: mailroom/state/loop-scopes/${LOOP_ID}.scope.md
+
+## Intent
+
+## Work Log
+
+## Receipts (proof)
+
+## Decisions
+
+## Notes / Follow-ups
 SESSION
 fi
 

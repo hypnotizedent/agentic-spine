@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v2.4)
+# drift-gate.sh - Constitutional drift detector (v2.5)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -20,7 +20,34 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; }
 
-echo "=== DRIFT GATE (v2.4) ==="
+DRIFT_VERBOSE="${DRIFT_VERBOSE:-0}"
+
+gate_script() {
+  local script="$1"
+  local tmp rc
+  tmp="$(mktemp)"
+  set +e
+  bash "$script" >"$tmp" 2>&1
+  rc=$?
+  set -e
+
+  if [[ "$rc" -eq 0 ]]; then
+    pass
+    # Preserve advisory WARN lines (if any), but drop PASS noise from scripts.
+    if grep -q '^WARN' "$tmp" 2>/dev/null; then
+      grep '^WARN' "$tmp" 2>/dev/null || true
+    fi
+  else
+    fail "$script failed (rc=$rc)"
+    echo "  --- output (first 80 lines): $script ---"
+    sed -n '1,80p' "$tmp" | sed 's/^/  /' || true
+    echo "  --- end output ---"
+  fi
+
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+echo "=== DRIFT GATE (v2.5) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -167,11 +194,7 @@ fi
 # D13: API capability secrets preconditions (locked rule)
 echo -n "D13 api capability preconditions... "
 if [[ -x "$SP/surfaces/verify/api-preconditions.sh" ]]; then
-  if "$SP/surfaces/verify/api-preconditions.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "api-preconditions.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/api-preconditions.sh"
 else
   warn "api-preconditions verifier not present"
 fi
@@ -179,11 +202,7 @@ fi
 # D14: Cloudflare surface drift gate (no legacy smells, read-only)
 echo -n "D14 cloudflare drift gate... "
 if [[ -x "$SP/surfaces/verify/cloudflare-drift-gate.sh" ]]; then
-  if "$SP/surfaces/verify/cloudflare-drift-gate.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "cloudflare-drift-gate.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/cloudflare-drift-gate.sh"
 else
   warn "cloudflare drift gate not present"
 fi
@@ -191,11 +210,7 @@ fi
 # D15: GitHub Actions surface drift gate (no legacy smells, read-only, no leak fields)
 echo -n "D15 github actions drift gate... "
 if [[ -x "$SP/surfaces/verify/github-actions-gate.sh" ]]; then
-  if "$SP/surfaces/verify/github-actions-gate.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "github-actions-gate.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/github-actions-gate.sh"
 else
   warn "github actions drift gate not present"
 fi
@@ -203,11 +218,7 @@ fi
 # D16: Canonical docs quarantine (no competing truths)
 echo -n "D16 docs quarantine... "
 if [[ -x "$SP/surfaces/verify/d16-docs-quarantine.sh" ]]; then
-  if "$SP/surfaces/verify/d16-docs-quarantine.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d16-docs-quarantine.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d16-docs-quarantine.sh"
 else
   warn "docs quarantine gate not present"
 fi
@@ -215,11 +226,7 @@ fi
 # D17: Root allowlist (no agents/, _imports/, or other drift magnets at root)
 echo -n "D17 root allowlist... "
 if [[ -x "$SP/surfaces/verify/d17-root-allowlist.sh" ]]; then
-  if "$SP/surfaces/verify/d17-root-allowlist.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d17-root-allowlist.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d17-root-allowlist.sh"
 else
   warn "root allowlist gate not present"
 fi
@@ -227,11 +234,7 @@ fi
 # D18: Docker compose surface drift gate (read-only, no legacy smells)
 echo -n "D18 docker compose drift gate... "
 if [[ -x "$SP/surfaces/verify/d18-docker-compose-drift.sh" ]]; then
-  if "$SP/surfaces/verify/d18-docker-compose-drift.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d18-docker-compose-drift.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d18-docker-compose-drift.sh"
 else
   warn "docker compose drift gate not present"
 fi
@@ -239,35 +242,32 @@ fi
 # D19: Backup surface drift gate (read-only inventory, no legacy smells, no secret printing)
 echo -n "D19 backup drift gate... "
 if [[ -x "$SP/surfaces/verify/d19-backup-drift.sh" ]]; then
-  if "$SP/surfaces/verify/d19-backup-drift.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d19-backup-drift.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d19-backup-drift.sh"
 else
   warn "backup drift gate not present"
 fi
 
-# D20: Secrets surface drift gate (non-leaky, non-mutating, read-only status only)
-echo -n "D20 secrets drift gate... "
-if [[ -x "$SP/surfaces/verify/d20-secrets-drift.sh" ]]; then
-  if "$SP/surfaces/verify/d20-secrets-drift.sh" >/dev/null 2>&1; then
-    pass
+# D20 / D55: Secrets readiness (verbose runs subchecks; default runs composite)
+if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
+  echo -n "D20 secrets drift gate... "
+  if [[ -x "$SP/surfaces/verify/d20-secrets-drift.sh" ]]; then
+    gate_script "$SP/surfaces/verify/d20-secrets-drift.sh"
   else
-    fail "d20-secrets-drift.sh failed"
+    warn "secrets drift gate not present"
   fi
 else
-  warn "secrets drift gate not present"
+  echo -n "D55 secrets runtime readiness lock... "
+  if [[ -x "$SP/surfaces/verify/d55-secrets-runtime-readiness-lock.sh" ]]; then
+    gate_script "$SP/surfaces/verify/d55-secrets-runtime-readiness-lock.sh"
+  else
+    warn "secrets runtime readiness lock gate not present"
+  fi
 fi
 
 # D22: Nodes surface drift gate (read-only SSH, no credentials, no mutations)
 echo -n "D22 nodes drift gate... "
 if [[ -x "$SP/surfaces/verify/d22-nodes-drift.sh" ]]; then
-  if "$SP/surfaces/verify/d22-nodes-drift.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d22-nodes-drift.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d22-nodes-drift.sh"
 else
   warn "nodes drift gate not present"
 fi
@@ -275,11 +275,7 @@ fi
 # D23: Services health surface drift gate (no verbose curl, no auth printing)
 echo -n "D23 health drift gate... "
 if [[ -x "$SP/surfaces/verify/d23-health-drift.sh" ]]; then
-  if "$SP/surfaces/verify/d23-health-drift.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d23-health-drift.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d23-health-drift.sh"
 else
   warn "health drift gate not present"
 fi
@@ -287,69 +283,42 @@ fi
 # D24: GitHub labels drift gate
 echo -n "D24 github labels drift gate... "
 if [[ -x "$SP/surfaces/verify/d24-github-labels-drift.sh" ]]; then
-  if "$SP/surfaces/verify/d24-github-labels-drift.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d24-github-labels-drift.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d24-github-labels-drift.sh"
 else
   warn "github labels drift gate not present"
 fi
 
-# D25: Secrets CLI canonical lock (canonical tooling required; external parity advisory)
-echo -n "D25 secrets cli canonical lock... "
-WB="${WORKBENCH_ROOT:-$HOME/code/workbench}"
-
-# Check infisical-agent.sh
-CANONICAL_INFISICAL="$SP/ops/tools/infisical-agent.sh"
-VENDORED_INFISICAL="$WB/scripts/agents/infisical-agent.sh"
-if [[ ! -x "$CANONICAL_INFISICAL" ]]; then
-  fail "canonical infisical-agent.sh missing or not executable"
-elif [[ ! -f "$VENDORED_INFISICAL" ]]; then
-  pass
-  warn "(workbench infisical-agent missing — spine canonical remains source of truth)"
-else
-  IC_HASH=$(shasum -a 256 "$CANONICAL_INFISICAL" | awk '{print $1}')
-  IV_HASH=$(shasum -a 256 "$VENDORED_INFISICAL" | awk '{print $1}')
-  pass
-  [[ "$IC_HASH" == "$IV_HASH" ]] || warn "(infisical-agent hash drift in workbench; sync advisory)"
-fi
-
-# Check cloudflare-agent.sh
-CANONICAL_CF="$SP/ops/tools/cloudflare-agent.sh"
-VENDORED_CF="$WB/scripts/agents/cloudflare-agent.sh"
-if [[ ! -x "$CANONICAL_CF" ]]; then
-  fail "canonical cloudflare-agent.sh missing or not executable"
-elif [[ ! -f "$VENDORED_CF" ]]; then
-  pass
-  warn "(workbench cloudflare-agent missing — spine canonical remains source of truth)"
-else
-  CF_HASH=$(shasum -a 256 "$CANONICAL_CF" | awk '{print $1}')
-  CV_HASH=$(shasum -a 256 "$VENDORED_CF" | awk '{print $1}')
-  pass
-  [[ "$CF_HASH" == "$CV_HASH" ]] || warn "(cloudflare-agent hash drift in workbench; sync advisory)"
-fi
-
-# D26: Agent startup read-surface + host/service route lock
-echo -n "D26 agent read surface drift... "
-if [[ -x "$SP/surfaces/verify/d26-agent-read-surface.sh" ]]; then
-  if "$SP/surfaces/verify/d26-agent-read-surface.sh" >/dev/null 2>&1; then
-    pass
+# D25: Secrets CLI canonical lock (verbose only; default runs via D55 composite)
+if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
+  echo -n "D25 secrets cli canonical lock... "
+  if [[ -x "$SP/surfaces/verify/d25-secrets-cli-canonical-lock.sh" ]]; then
+    gate_script "$SP/surfaces/verify/d25-secrets-cli-canonical-lock.sh"
   else
-    fail "d26-agent-read-surface.sh failed"
+    warn "secrets cli canonical lock gate not present"
+  fi
+fi
+
+# D26 / D56: Agent entry surfaces (verbose runs subchecks; default runs composite)
+if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
+  echo -n "D26 agent read surface drift... "
+  if [[ -x "$SP/surfaces/verify/d26-agent-read-surface.sh" ]]; then
+    gate_script "$SP/surfaces/verify/d26-agent-read-surface.sh"
+  else
+    warn "agent read surface drift gate not present"
   fi
 else
-  warn "agent read surface drift gate not present"
+  echo -n "D56 agent entry surface lock... "
+  if [[ -x "$SP/surfaces/verify/d56-agent-entry-surface-lock.sh" ]]; then
+    gate_script "$SP/surfaces/verify/d56-agent-entry-surface-lock.sh"
+  else
+    warn "agent entry surface lock gate not present"
+  fi
 fi
 
 # D27: Fact duplication lock for startup/governance read surfaces
 echo -n "D27 fact duplication lock... "
 if [[ -x "$SP/surfaces/verify/d27-fact-duplication-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d27-fact-duplication-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d27-fact-duplication-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d27-fact-duplication-lock.sh"
 else
   warn "fact duplication drift gate not present"
 fi
@@ -357,11 +326,7 @@ fi
 # D28: Archive runway lock (active legacy absolute paths + extraction queue contract)
 echo -n "D28 archive runway lock... "
 if [[ -x "$SP/surfaces/verify/d28-legacy-path-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d28-legacy-path-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d28-legacy-path-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d28-legacy-path-lock.sh"
 else
   warn "archive runway lock gate not present"
 fi
@@ -369,11 +334,7 @@ fi
 # D29: Active entrypoint lock (launchd/cron in /Code must not execute from ronny-ops)
 echo -n "D29 active entrypoint lock... "
 if [[ -x "$SP/surfaces/verify/d29-active-entrypoint-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d29-active-entrypoint-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d29-active-entrypoint-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d29-active-entrypoint-lock.sh"
 else
   warn "active entrypoint lock gate not present"
 fi
@@ -381,11 +342,7 @@ fi
 # D30: Active config lock (legacy refs + plaintext token patterns)
 echo -n "D30 active config lock... "
 if [[ -x "$SP/surfaces/verify/d30-active-config-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d30-active-config-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d30-active-config-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d30-active-config-lock.sh"
 else
   warn "active config lock gate not present"
 fi
@@ -393,35 +350,25 @@ fi
 # D31: Home output sink lock (home-root logs/out/err not allowlisted)
 echo -n "D31 home output sink lock... "
 if [[ -x "$SP/surfaces/verify/d31-home-output-sink-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d31-home-output-sink-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d31-home-output-sink-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d31-home-output-sink-lock.sh"
 else
   warn "home output sink lock gate not present"
 fi
 
-# D32: Codex instruction source lock (must resolve to spine AGENTS)
-echo -n "D32 codex instruction source lock... "
-if [[ -x "$SP/surfaces/verify/d32-codex-instruction-source-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d32-codex-instruction-source-lock.sh" >/dev/null 2>&1; then
-    pass
+# D32: Codex instruction source lock (verbose only; default runs via D56 composite)
+if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
+  echo -n "D32 codex instruction source lock... "
+  if [[ -x "$SP/surfaces/verify/d32-codex-instruction-source-lock.sh" ]]; then
+    gate_script "$SP/surfaces/verify/d32-codex-instruction-source-lock.sh"
   else
-    fail "d32-codex-instruction-source-lock.sh failed"
+    warn "codex instruction source lock gate not present"
   fi
-else
-  warn "codex instruction source lock gate not present"
 fi
 
 # D33: Extraction pause lock (must stay paused during stabilization)
 echo -n "D33 extraction pause lock... "
 if [[ -x "$SP/surfaces/verify/d33-extraction-pause-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d33-extraction-pause-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d33-extraction-pause-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d33-extraction-pause-lock.sh"
 else
   warn "extraction pause lock gate not present"
 fi
@@ -429,11 +376,7 @@ fi
 # D34: Loop ledger integrity lock (summary must match deduped counts)
 echo -n "D34 loop ledger integrity lock... "
 if [[ -x "$SP/surfaces/verify/d34-loop-ledger-integrity-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d34-loop-ledger-integrity-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d34-loop-ledger-integrity-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d34-loop-ledger-integrity-lock.sh"
 else
   warn "loop ledger integrity lock gate not present"
 fi
@@ -441,11 +384,7 @@ fi
 # D35: Infra relocation parity lock (cross-SSOT consistency for service moves)
 echo -n "D35 infra relocation parity lock... "
 if [[ -x "$SP/surfaces/verify/d35-infra-relocation-parity-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d35-infra-relocation-parity-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d35-infra-relocation-parity-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d35-infra-relocation-parity-lock.sh"
 else
   warn "infra relocation parity lock gate not present"
 fi
@@ -453,59 +392,50 @@ fi
 # D36: Legacy exception hygiene lock (stale/near-expiry exceptions)
 echo -n "D36 legacy exception hygiene lock... "
 if [[ -x "$SP/surfaces/verify/d36-legacy-exception-hygiene-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d36-legacy-exception-hygiene-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d36-legacy-exception-hygiene-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d36-legacy-exception-hygiene-lock.sh"
 else
   warn "legacy exception hygiene lock gate not present"
 fi
 
-# D37: Infra placement policy lock (canonical target-site enforcement)
-echo -n "D37 infra placement policy lock... "
-if [[ -x "$SP/surfaces/verify/d37-infra-placement-policy-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d37-infra-placement-policy-lock.sh" >/dev/null 2>&1; then
-    pass
+# D37 / D57: Infra identity cohesion (verbose runs subchecks; default runs composite)
+if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
+  echo -n "D37 infra placement policy lock... "
+  if [[ -x "$SP/surfaces/verify/d37-infra-placement-policy-lock.sh" ]]; then
+    gate_script "$SP/surfaces/verify/d37-infra-placement-policy-lock.sh"
   else
-    fail "d37-infra-placement-policy-lock.sh failed"
+    warn "infra placement policy lock gate not present"
   fi
 else
-  warn "infra placement policy lock gate not present"
+  echo -n "D57 infra identity cohesion lock... "
+  if [[ -x "$SP/surfaces/verify/d57-infra-identity-cohesion-lock.sh" ]]; then
+    gate_script "$SP/surfaces/verify/d57-infra-identity-cohesion-lock.sh"
+  else
+    warn "infra identity cohesion lock gate not present"
+  fi
 fi
 
 # D38: Service extraction hygiene lock (EXTRACTION_PROTOCOL.md enforcement)
 echo -n "D38 extraction hygiene lock... "
 if [[ -x "$SP/surfaces/verify/d38-extraction-hygiene-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d38-extraction-hygiene-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d38-extraction-hygiene-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d38-extraction-hygiene-lock.sh"
 else
   warn "extraction hygiene lock gate not present"
 fi
 
-# D39: Hypervisor identity lock (required during active relocation states)
-echo -n "D39 infra hypervisor identity lock... "
-if [[ -x "$SP/surfaces/verify/d39-infra-hypervisor-identity-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d39-infra-hypervisor-identity-lock.sh" >/dev/null 2>&1; then
-    pass
+# D39: Hypervisor identity lock (verbose only; default runs via D57 composite)
+if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
+  echo -n "D39 infra hypervisor identity lock... "
+  if [[ -x "$SP/surfaces/verify/d39-infra-hypervisor-identity-lock.sh" ]]; then
+    gate_script "$SP/surfaces/verify/d39-infra-hypervisor-identity-lock.sh"
   else
-    fail "d39-infra-hypervisor-identity-lock.sh failed"
+    warn "infra hypervisor identity lock gate not present"
   fi
-else
-  warn "infra hypervisor identity lock gate not present"
 fi
 
 # D40: Maker tools drift gate (binding validity, script hygiene)
 echo -n "D40 maker tools drift gate... "
 if [[ -x "$SP/surfaces/verify/d40-maker-tools-drift.sh" ]]; then
-  if "$SP/surfaces/verify/d40-maker-tools-drift.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d40-maker-tools-drift.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d40-maker-tools-drift.sh"
 else
   warn "maker tools drift gate not present"
 fi
@@ -513,11 +443,7 @@ fi
 # D41: Hidden-root governance lock (home-root inventory + forbidden pattern enforcement)
 echo -n "D41 hidden-root governance lock... "
 if [[ -x "$SP/surfaces/verify/d41-hidden-root-governance-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d41-hidden-root-governance-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d41-hidden-root-governance-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d41-hidden-root-governance-lock.sh"
 else
   warn "hidden-root governance lock gate not present"
 fi
@@ -525,11 +451,7 @@ fi
 # D42: Code path case lock (runtime scripts must use lowercase code path)
 echo -n "D42 code path case lock... "
 if [[ -x "$SP/surfaces/verify/d42-code-path-case-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d42-code-path-case-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d42-code-path-case-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d42-code-path-case-lock.sh"
 else
   warn "code path case lock gate not present"
 fi
@@ -537,11 +459,7 @@ fi
 # D43: Secrets namespace policy lock (policy + capability wiring)
 echo -n "D43 secrets namespace lock... "
 if [[ -x "$SP/surfaces/verify/d43-secrets-namespace-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d43-secrets-namespace-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d43-secrets-namespace-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d43-secrets-namespace-lock.sh"
 else
   warn "secrets namespace lock gate not present"
 fi
@@ -549,11 +467,7 @@ fi
 # D44: CLI tools discovery lock (inventory + cross-refs + probes)
 echo -n "D44 cli tools discovery lock... "
 if [[ -x "$SP/surfaces/verify/d44-cli-tools-discovery-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d44-cli-tools-discovery-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d44-cli-tools-discovery-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d44-cli-tools-discovery-lock.sh"
 else
   warn "cli tools discovery lock gate not present"
 fi
@@ -561,35 +475,25 @@ fi
 # D45: Naming consistency lock (cross-file identity surface verification)
 echo -n "D45 naming consistency lock... "
 if [[ -x "$SP/surfaces/verify/d45-naming-consistency-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d45-naming-consistency-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d45-naming-consistency-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d45-naming-consistency-lock.sh"
 else
   warn "naming consistency lock gate not present"
 fi
 
-# D46: Claude instruction source lock (shim compliance + path case)
-echo -n "D46 claude instruction source lock... "
-if [[ -x "$SP/surfaces/verify/d46-claude-instruction-source-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d46-claude-instruction-source-lock.sh" >/dev/null 2>&1; then
-    pass
+# D46: Claude instruction source lock (verbose only; default runs via D56 composite)
+if [[ "${DRIFT_VERBOSE}" == "1" ]]; then
+  echo -n "D46 claude instruction source lock... "
+  if [[ -x "$SP/surfaces/verify/d46-claude-instruction-source-lock.sh" ]]; then
+    gate_script "$SP/surfaces/verify/d46-claude-instruction-source-lock.sh"
   else
-    fail "d46-claude-instruction-source-lock.sh failed"
+    warn "claude instruction source lock gate not present"
   fi
-else
-  warn "claude instruction source lock gate not present"
 fi
 
 # D47: Brain surface path lock (no .brain/ in runtime scripts)
 echo -n "D47 brain surface path lock... "
 if [[ -x "$SP/surfaces/verify/d47-brain-surface-path-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d47-brain-surface-path-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d47-brain-surface-path-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d47-brain-surface-path-lock.sh"
 else
   warn "brain surface path lock gate not present"
 fi
@@ -597,11 +501,7 @@ fi
 # D48: Codex worktree hygiene (codex/.worktrees)
 echo -n "D48 codex worktree hygiene... "
 if [[ -x "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh" ]]; then
-  if "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d48-codex-worktree-hygiene.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d48-codex-worktree-hygiene.sh"
 else
   warn "codex worktree hygiene gate not present"
 fi
@@ -609,11 +509,7 @@ fi
 # D49: Agent discovery lock (agents.registry.yaml + contracts)
 echo -n "D49 agent discovery lock... "
 if [[ -x "$SP/surfaces/verify/d49-agent-discovery-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d49-agent-discovery-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d49-agent-discovery-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d49-agent-discovery-lock.sh"
 else
   warn "agent discovery lock gate not present"
 fi
@@ -621,11 +517,7 @@ fi
 # D50: Gitea CI workflow lock (workflow file + drift-gate reference)
 echo -n "D50 gitea ci workflow lock... "
 if [[ -x "$SP/surfaces/verify/d50-gitea-ci-workflow-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d50-gitea-ci-workflow-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d50-gitea-ci-workflow-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d50-gitea-ci-workflow-lock.sh"
 else
   warn "gitea ci workflow lock gate not present"
 fi
@@ -633,11 +525,7 @@ fi
 # D51: Caddy proto lock (X-Forwarded-Proto on all Authentik upstreams)
 echo -n "D51 caddy proto lock... "
 if [[ -x "$SP/surfaces/verify/d51-caddy-proto-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d51-caddy-proto-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d51-caddy-proto-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d51-caddy-proto-lock.sh"
 else
   warn "caddy proto lock gate not present"
 fi
@@ -645,11 +533,7 @@ fi
 # D52: UDR6 gateway assertion (shop SSOT docs reference 192.168.1.0/24)
 echo -n "D52 udr6 gateway assertion... "
 if [[ -x "$SP/surfaces/verify/d52-udr6-gateway-assertion.sh" ]]; then
-  if "$SP/surfaces/verify/d52-udr6-gateway-assertion.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d52-udr6-gateway-assertion.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d52-udr6-gateway-assertion.sh"
 else
   warn "udr6 gateway assertion gate not present"
 fi
@@ -657,11 +541,7 @@ fi
 # D53: Change pack integrity lock (template + sequencing + companion files)
 echo -n "D53 change pack integrity lock... "
 if [[ -x "$SP/surfaces/verify/d53-change-pack-integrity-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d53-change-pack-integrity-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d53-change-pack-integrity-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d53-change-pack-integrity-lock.sh"
 else
   warn "change pack integrity lock gate not present"
 fi
@@ -669,11 +549,7 @@ fi
 # D54: SSOT IP parity lock (device identity ↔ shop server ↔ bindings)
 echo -n "D54 ssot ip parity lock... "
 if [[ -x "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" ]]; then
-  if "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" >/dev/null 2>&1; then
-    pass
-  else
-    fail "d54-ssot-ip-parity-lock.sh failed"
-  fi
+  gate_script "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh"
 else
   warn "ssot ip parity lock gate not present"
 fi

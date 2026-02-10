@@ -18,7 +18,7 @@ The spine's authority chain and contract surface:
 
 | Asset | Path |
 |-------|------|
-| Invariant lock + drift gates (D1–D47) | [CORE_LOCK.md](CORE_LOCK.md) |
+| Invariant lock + drift gates (D1–D57) | [CORE_LOCK.md](CORE_LOCK.md) |
 | Governance entry point | [GOVERNANCE_INDEX.md](../governance/GOVERNANCE_INDEX.md) |
 | Machine-readable SSOT registry | [SSOT_REGISTRY.yaml](../governance/SSOT_REGISTRY.yaml) |
 | Agent contract | [AGENT_CONTRACT.md](AGENT_CONTRACT.md) |
@@ -69,7 +69,7 @@ verification gates, historical audits, and extraction tracking contexts.
 ## Verification
 
 ```bash
-# Drift gates (D1–D47)
+# Drift gates (D1–D57)
 ./bin/ops cap run spine.verify
 
 # Doc hierarchy, metadata, README registration, SSOT paths

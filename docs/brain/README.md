@@ -21,7 +21,9 @@ Reference surface for session context generation and operating rules.
 | File | Purpose |
 |------|---------|
 | `rules.md` | Session rule summary used by context loaders |
+| `memory.md` | Session handoff notes (append-only; optional) |
 | `generate-context.sh` | Builds `context.md` from current spine state |
+| `context.md` | Generated session context (runtime output; uncommitted) |
 | `lessons/` | Historical lesson captures (reference only) |
 | `_imported/` | Imported command context (reference only) |
 

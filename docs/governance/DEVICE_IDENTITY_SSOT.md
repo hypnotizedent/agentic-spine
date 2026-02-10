@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-09
+last_verified: 2026-02-10
 verification_method: spine-capabilities
 scope: all-infrastructure
 github_issue: "#615"
@@ -175,15 +175,19 @@ Notes (Shop LAN-only endpoints):
 - Reachability (ping) was verified from inside the shop LAN via `pve` on 2026-02-09 (`network.lan.device.status`: `RCAP-20260209-143218__network.lan.device.status__Rp8c773204`).
 - If any LAN-only endpoint becomes unreachable, assume physical/VLAN/DHCP drift first (not Tailscale); fall back to console access where applicable.
 
-### Shop VM LAN IPs (Static — used for NFS mounts and local routing)
+### Shop VM LAN IPs (Static or reserved — used for local routing; NFS uses LAN IPs)
 
 | VM | Canonical Name | LAN IP | VMID | Notes |
 |----|----------------|--------|------|-------|
 | pve (hypervisor) | `pve` | 192.168.1.184 | — | Proxmox host; NFS server |
 | docker-host (Mint OS) | `docker-host` | 192.168.1.200 | 200 | Static IP (netplan). Mint OS production workloads. |
+| media-stack | `media-stack` | 192.168.1.201 | 201 | Legacy VM (decommissioning; split to 209/210). |
+| automation-stack | `automation-stack` | 192.168.1.202 | 202 | Automation (n8n, Ollama, Open WebUI). |
+| immich (shop) | `immich` | 192.168.1.203 | 203 | Shop photos (Tailscale: `immich-1`). |
 | infra-core | `infra-core` | 192.168.1.204 | 204 | Static IP; Pi-hole DNS |
 | observability | `observability` | 192.168.1.205 | 205 | Static IP |
 | dev-tools | `dev-tools` | 192.168.1.206 | 206 | Static IP |
+| ai-consolidation | `ai-consolidation` | 192.168.1.207 | 207 | DHCP noted in SHOP_SERVER_SSOT; confirm reservation on UDR. |
 | download-stack | `download-stack` | 192.168.1.209 | 209 | NFS mounts use this IP |
 | streaming-stack | `streaming-stack` | 192.168.1.210 | 210 | NFS mounts use this IP |
 
@@ -373,13 +377,11 @@ Stream Deck is configured for Home Assistant control only (see the Home Assistan
 
 ## Known Unknowns
 
-These are intentionally tracked as **few consolidated loops** (to prevent loop sprawl):
+This SSOT does **not** track loop status (it drifts too easily).
 
-| Loop | What is unfinished | Priority |
-|------|--------------------|----------|
-| `OL_SHOP_BASELINE_FINISH` | MD1400 drive inventory, camera channel map, AP settings, cron/backup schedules | P2 |
-| `OL_HOME_BASELINE_FINISH` | NAS drive models/RAID, NAS backup strategy, home cron schedules, download-home SSH access | P2 |
-| `OL_MACBOOK_BASELINE_FINISH` | Hotkeys/shortcuts inventory, scheduled tasks inventory | P3 |
+Use the loop ledger instead:
+- `./bin/ops loops list --open`
+- `mailroom/state/open_loops.jsonl`
 
 ---
 

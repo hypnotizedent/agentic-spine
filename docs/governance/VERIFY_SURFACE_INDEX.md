@@ -1,23 +1,23 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-07
+last_verified: 2026-02-10
 scope: verify-scripts
 ---
 
 # Verify Surface Index
 
-> **Purpose:** Enumerate all 53 scripts in `surfaces/verify/` with their purpose,
-> caller, read-only status, and disposition. Agents use this to understand
-> what verification is available and which scripts are active vs orphaned.
+> **Purpose:** Map the scripts under `surfaces/verify/` to their callers and intent.
+> This directory includes both enforcement (drift gates) and diagnostics (`ops verify`).
+>
+> **Tip:** For a fast drift-gate inventory, run:
+> `./bin/ops cap run verify.drift_gates.certify`
 
 ---
 
 ## Active Scripts
 
-Called by `ops/commands/verify.sh`, drift gates, or capabilities.
-
-### Called by `ops/commands/verify.sh` (line 13–25)
+### Called by `ops/commands/verify.sh` (`./bin/ops verify`)
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
@@ -32,67 +32,83 @@ Called by `ops/commands/verify.sh`, drift gates, or capabilities.
 | `stack-health.sh` | Verify Docker stack health | Yes |
 | `health-check.sh` | HTTP health probes for services | Yes |
 
-### Called by `drift-gate.sh` (spine.verify capability)
+### Called by `spine.verify` (`./bin/ops cap run spine.verify`)
+
+Notes:
+- Default mode runs composite gates: D55 (secrets), D56 (agent entry), D57 (infra identity).
+- Verbose mode runs subchecks individually:
+  `DRIFT_VERBOSE=1 ./bin/ops cap run spine.verify`
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D47) | Yes |
-| `foundation-gate.sh` | Foundation file existence checks | Yes |
-| `contracts-gate.sh` | Contract compliance gate | Yes |
-| `no-drift-roots-gate.sh` | Verify no unauthorized root files | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D57) | Yes |
 | `d16-docs-quarantine.sh` | Legacy docs quarantine enforcement | Yes |
 | `d17-root-allowlist.sh` | Root file allowlist enforcement | Yes |
 | `d18-docker-compose-drift.sh` | Docker compose drift detection | Yes |
 | `d19-backup-drift.sh` | Backup configuration drift detection | Yes |
-| `d20-secrets-drift.sh` | Secrets binding drift detection | Yes |
+| `d20-secrets-drift.sh` | Secrets binding drift detection (verbose subcheck of D55) | Yes |
 | `d22-nodes-drift.sh` | Node/VM drift detection | Yes |
 | `d23-health-drift.sh` | Health endpoint drift detection | Yes |
 | `d24-github-labels-drift.sh` | GitHub labels drift detection | Yes |
-| `d26-agent-read-surface.sh` | Agent startup read-surface + route lock | Yes |
+| `d25-secrets-cli-canonical-lock.sh` | Secrets CLI canonical lock (verbose subcheck of D55) | Yes |
+| `d26-agent-read-surface.sh` | Agent startup read-surface + route lock (verbose subcheck of D56) | Yes |
 | `d27-fact-duplication-lock.sh` | Fact duplication lock (startup/governance surfaces) | Yes |
 | `d28-legacy-path-lock.sh` | Archive runway lock (active legacy absolute path + extraction queue contract) | Yes |
 | `d29-active-entrypoint-lock.sh` | Active launchd/cron entrypoint lock with allowlist expiry controls | Yes |
 | `d30-active-config-lock.sh` | Active host-config lock (legacy refs + plaintext secret patterns) | Yes |
 | `d31-home-output-sink-lock.sh` | Home-root output sink lock for logs/out/err | Yes |
-| `d32-codex-instruction-source-lock.sh` | Codex instruction source lock to spine AGENTS | Yes |
+| `d32-codex-instruction-source-lock.sh` | Codex instruction source lock to spine AGENTS (verbose subcheck of D56) | Yes |
 | `d33-extraction-pause-lock.sh` | Extraction pause lock during stabilization window | Yes |
 | `d34-loop-ledger-integrity-lock.sh` | Loop ledger integrity lock (summary/dedup parity) | Yes |
 | `d35-infra-relocation-parity-lock.sh` | Infra relocation parity lock (cross-SSOT consistency) | Yes |
 | `d36-legacy-exception-hygiene-lock.sh` | Legacy exception hygiene lock (stale/near-expiry) | Yes |
-| `d37-infra-placement-policy-lock.sh` | Infra placement policy lock (canonical target enforcement) | Yes |
+| `d37-infra-placement-policy-lock.sh` | Infra placement policy lock (verbose subcheck of D57) | Yes |
 | `d38-extraction-hygiene-lock.sh` | Extraction protocol hygiene lock | Yes |
-| `d39-infra-hypervisor-identity-lock.sh` | Hypervisor identity lock during active relocation states | Yes |
+| `d39-infra-hypervisor-identity-lock.sh` | Hypervisor identity lock (verbose subcheck of D57) | Yes |
 | `d40-maker-tools-drift.sh` | Maker tools drift lock (binding validity, script hygiene) | Yes |
 | `d41-hidden-root-governance-lock.sh` | Hidden-root governance lock (inventory + forbidden patterns) | Yes |
 | `d42-code-path-case-lock.sh` | Runtime path case lock (`$HOME/code` canonical) | Yes |
 | `d43-secrets-namespace-lock.sh` | Secrets namespace policy lock (freeze + capability wiring) | Yes |
 | `d44-cli-tools-discovery-lock.sh` | CLI tools discovery lock (inventory + cross-refs + probes) | Yes |
 | `d45-naming-consistency-lock.sh` | Naming consistency lock (cross-file identity surface verification) | Yes |
-| `d46-claude-instruction-source-lock.sh` | Claude instruction source lock (shim + path case) | Yes |
+| `d46-claude-instruction-source-lock.sh` | Claude instruction source lock (verbose subcheck of D56) | Yes |
 | `d47-brain-surface-path-lock.sh` | Brain surface path lock (no `.brain/` in runtime) | Yes |
+| `d48-codex-worktree-hygiene.sh` | Codex worktree hygiene | Yes |
+| `d49-agent-discovery-lock.sh` | Agent discovery lock (registry + contracts) | Yes |
+| `d50-gitea-ci-workflow-lock.sh` | Gitea CI workflow lock | Yes |
+| `d51-caddy-proto-lock.sh` | Caddy proto lock | Yes |
+| `d52-udr6-gateway-assertion.sh` | UDR6 gateway assertion | Yes |
+| `d53-change-pack-integrity-lock.sh` | Change pack integrity lock | Yes |
+| `d54-ssot-ip-parity-lock.sh` | SSOT IP parity lock | Yes |
+| `d55-secrets-runtime-readiness-lock.sh` | Composite secrets runtime readiness lock (default) | Yes |
+| `d56-agent-entry-surface-lock.sh` | Composite agent entry surface lock (default) | Yes |
+| `d57-infra-identity-cohesion-lock.sh` | Composite infra identity cohesion lock (default) | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
 
-### Called by capabilities or CLI
+### Called by capabilities
 
 | Script | Caller | Purpose | Read-Only |
 |--------|--------|---------|-----------|
 | `replay-test.sh` | `spine.replay` capability | Deterministic replay test | Yes |
-| `receipt-grade-verify.sh` | Manual only | Legacy receipt grading helper | No (writes under `runs/`) |
 
 ---
 
-## Orphaned Scripts
+## Manual / Legacy Scripts
 
-Not called by any gate or capability. Run manually for ad-hoc diagnostics.
+Not called by default verification flows. Run manually for ad-hoc diagnostics.
 
 | Script | Purpose | Read-Only | Disposition |
 |--------|---------|-----------|-------------|
+| `foundation-gate.sh` | Foundation regression gate (legacy) | Yes | Keep as manual smoke test |
+| `contracts-gate.sh` | Kernel contracts existence gate (legacy) | Yes | Keep as manual helper |
+| `no-drift-roots-gate.sh` | No unauthorized root files (legacy) | Yes | Keep as manual helper |
 | `cap-ledger-smoke.sh` | Smoke test: verify `ops cap` creates state dir | Yes | Keep as manual smoke test |
 | `loops-smoke.sh` | Smoke test: verify `ops loops` creates state dir | Yes | Keep as manual smoke test |
 | `backup_audit.sh` | Generate JSON backup inventory (`backup_inventory.json`) | No (writes file) | Keep as data generator |
-| `verify.sh` | Legacy wrapper verify script | Yes | Keep as manual compatibility helper |
+| `receipt-grade-verify.sh` | Legacy receipt grading helper | No (writes under `runs/`) | Deprecated (do not run; creates forbidden `runs/`) |
+| `verify.sh` | Wrapper for Tier 1 diagnostics only | Yes | Keep as manual helper |
 
 ---
 
@@ -100,18 +116,18 @@ Not called by any gate or capability. Run manually for ad-hoc diagnostics.
 
 | Category | Count |
 |----------|-------|
-| Called by verify.sh | 10 |
-| Called by drift-gate.sh | 37 |
-| Called by capabilities/CLI | 2 |
-| Orphaned (manual only) | 4 |
-| **Total** | **53** |
+| Called by `ops verify` | 10 |
+| Called by `spine.verify` (drift-gate suite) | 44 |
+| Called by capabilities | 1 |
+| Manual / legacy | 9 |
+| **Total** | **64** |
 
 ---
 
 ## Related Documents
 
 | Document | Relationship |
-|----------|-------------|
+|----------|--------------|
 | [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) | Canonical scripts index |
-| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D47) |
+| [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D57) |
 | [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) | Backup verification governance |

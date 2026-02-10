@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-07
+last_verified: 2026-02-10
 verification_method: live-system-inspection
 scope: home-infrastructure
 github_issue: "#625"
@@ -38,7 +38,7 @@ parent_receipts:
 
 | Component | Specification | Verified |
 |-----------|---------------|----------|
-| **Model** | Beelink Mini S12 Pro | - |
+| **Model** | Beelink SER7 | 2026-02-10 |
 | **CPU** | AMD Ryzen 7 7840HS | 2026-01-21 |
 | **Cores/Threads** | 8 cores / 16 threads | 2026-01-21 |
 | **RAM** | 27GB (reported) | 2026-01-21 |
@@ -387,7 +387,7 @@ curl -s http://vault:8080/
 
 | System | Schedule | Task | Status |
 |--------|----------|------|--------|
-| Proxmox vzdump | Daily | VM/LXC backup to synology-backups | ACTIVE (via GUI) |
+| Proxmox vzdump | Daily | VM/LXC backup to synology-backups | DISABLED (3 jobs exist; blocked by node-name mismatch) |
 | Synology DSM | Weekly | RAID scrub | ACTIVE |
 | Pi-hole | Weekly | Gravity update | ACTIVE |
 

@@ -1,3 +1,10 @@
+---
+status: brain-memory
+owner: "@ronny"
+last_verified: 2026-02-10
+scope: agent-memory
+---
+
 # Session Memory — 2026-02-09 (EST)
 
 > UDR swap caused home site unreachable. Nothing blocked remotely tonight that doesn't create churn.
