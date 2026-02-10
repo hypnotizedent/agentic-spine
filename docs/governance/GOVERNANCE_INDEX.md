@@ -133,6 +133,7 @@ Pillar entrypoints (per stack)
 | Home Minilab | `docs/governance/MINILAB_SSOT.md` | Home baseline (Beelink + NAS + home VMs/LXCs) |
 | Shop Rack | `docs/governance/SHOP_SERVER_SSOT.md` | Shop baseline (R730XD + switch + NVR + UPS) |
 | Shop Network (Target) | `docs/governance/SHOP_NETWORK_NORMALIZATION.md` | Normalized IP structure + anti-drift rules |
+| Shop Network Audit | `docs/governance/SHOP_NETWORK_AUDIT_RUNBOOK.md` | Canonical audit + fix workflow (live truth + doc trace) |
 | Secrets Policy | `docs/governance/SECRETS_POLICY.md` | Secrets management |
 | Agent Boundaries | `docs/governance/AGENT_BOUNDARIES.md` | What agents can/cannot do |
 | Scripts Registry | `docs/governance/SCRIPTS_REGISTRY.md` | Canonical scripts index |

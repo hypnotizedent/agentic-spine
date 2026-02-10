@@ -224,7 +224,7 @@ Internet → T-Mobile 5G GW (CGNAT, locked — double NAT)
                       ├─ Gi1/0/3: R730XD iDRAC (192.168.1.250)
                       ├─ Gi1/0/4: NVR (192.168.1.216)
                       ├─ Gi1/0/5-23: Available
-                      └─ Gi1/0/24: WiFi AP EAP225 (192.168.1.249)
+                      └─ Gi1/0/24: WiFi AP EAP225 (192.168.1.185)
 ```
 
 ### Subnet

@@ -16,6 +16,7 @@ scope: network-operations
 > - Device naming/identity: [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md)
 > - Shop hardware/topology: [SHOP_SERVER_SSOT.md](SHOP_SERVER_SSOT.md)
 > - Network policies: [NETWORK_POLICIES.md](NETWORK_POLICIES.md)
+> - Shop audit + fix workflow: [SHOP_NETWORK_AUDIT_RUNBOOK.md](SHOP_NETWORK_AUDIT_RUNBOOK.md)
 
 ---
 
@@ -26,7 +27,7 @@ Before any network change, document:
 | Field | Value |
 |-------|-------|
 | **Change ID** | LOOP-{description}-{date} |
-| **What** | (e.g., "Re-IP shop LAN from 192.168.12.0/24 to 192.168.1.0/24") |
+| **What** | (e.g., "Re-IP shop LAN from <old-subnet>/24 to 192.168.1.0/24") |
 | **Why** | (e.g., "T-Mobile gateway locked, need DHCP/DNS control") |
 | **Downtime estimate** | (e.g., "30-60 min maintenance window") |
 | **Rollback plan** | (e.g., "Revert configs, reconnect original cable") |
@@ -327,4 +328,4 @@ D53 (change-pack-integrity-lock) validates:
 
 | Date | Change | Loop |
 |------|--------|------|
-| 2026-02-09 | Shop LAN re-IP: 192.168.12.0/24 → 192.168.1.0/24 (UDR6 deployment) | LOOP-UDR6-SHOP-CUTOVER-20260209 |
+| 2026-02-09 | Shop LAN re-IP: legacy subnet → 192.168.1.0/24 (UDR6 deployment) | LOOP-UDR6-SHOP-CUTOVER-20260209 |
