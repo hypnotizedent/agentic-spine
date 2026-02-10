@@ -8,6 +8,8 @@ LOG_DIR="${SPINE_LOGS:-$SPINE_REPO/mailroom/logs}"
 
 PID_FILE="${STATE_DIR}/mailroom-bridge.pid"
 BINDING="${SPINE_REPO}/ops/bindings/mailroom.bridge.yaml"
+LABEL="com.ronny.mailroom-bridge"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 host="127.0.0.1"
 port="8799"
@@ -17,26 +19,28 @@ if [[ -f "$BINDING" ]] && command -v yq >/dev/null 2>&1; then
 fi
 
 echo "MAILROOM_BRIDGE"
-echo "  binding: ${BINDING}"
-echo "  listen:  ${host}:${port}"
-echo "  pidfile: ${PID_FILE}"
+  echo "  binding: ${BINDING}"
+  echo "  listen:  ${host}:${port}"
+echo "  launchd:"
+echo "    label: ${LABEL}"
+echo "    plist: ${PLIST}"
+echo "  pidfile: ${PID_FILE} (cache)"
 echo "  logs:"
 echo "    out: ${LOG_DIR}/mailroom-bridge.out"
 echo "    err: ${LOG_DIR}/mailroom-bridge.err"
 
-pid=""
-if [[ -f "$PID_FILE" ]]; then
-  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-fi
-
-if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-  echo "  status: running (pid=${pid})"
+svc="$(launchctl list "$LABEL" 2>/dev/null || true)"
+svc_pid="$(printf '%s\n' "$svc" | awk -F' = ' '/"PID"/ {gsub(/[^0-9]/,"",$2); print $2; exit}')"
+if [[ -n "$svc_pid" ]]; then
+  echo "  status: running (pid=${svc_pid})"
+  echo "$svc_pid" >"$PID_FILE" 2>/dev/null || true
 else
-  if [[ -n "$pid" ]]; then
-    echo "  status: not running (stale pid=${pid})"
+  if [[ -n "$svc" ]]; then
+    echo "  status: loaded but not running"
   else
-    echo "  status: not running"
+    echo "  status: not loaded"
   fi
+  # Keep pidfile as-is (it is a cache).
   exit 0
 fi
 

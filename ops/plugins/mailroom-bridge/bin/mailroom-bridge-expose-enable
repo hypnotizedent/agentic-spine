@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+BINDING="${SPINE_REPO}/ops/bindings/mailroom.bridge.yaml"
+
+host="127.0.0.1"
+port="8799"
+if [[ -f "$BINDING" ]] && command -v yq >/dev/null 2>&1; then
+  host="$(yq -r '.listen.host // "127.0.0.1"' "$BINDING" 2>/dev/null || echo "127.0.0.1")"
+  port="$(yq -r '.listen.port // 8799' "$BINDING" 2>/dev/null || echo "8799")"
+fi
+
+if ! command -v tailscale >/dev/null 2>&1; then
+  echo "STOP (2): tailscale CLI required (install + connect first)"
+  exit 2
+fi
+if ! command -v curl >/dev/null 2>&1; then
+  echo "STOP (2): curl required"
+  exit 2
+fi
+
+# Bridge must be healthy locally before we expose it.
+if ! curl -fsS "http://${host}:${port}/health" >/dev/null 2>&1; then
+  echo "STOP: bridge is not healthy at http://${host}:${port}/health"
+  echo "hint: start it via: OPS_ALLOW_MAIN_MUTATION=1 ./bin/ops cap run mailroom.bridge.start"
+  exit 1
+fi
+
+# Refuse to clobber an existing serve config unless it's already pointing at this port.
+serve_json="$(tailscale serve status --json 2>/dev/null || echo '{}')"
+if echo "$serve_json" | python3 -c "import json,sys; j=json.load(sys.stdin); import sys as _s; _s.exit(0 if j=={} else 1)" >/dev/null 2>&1; then
+  :
+else
+  if echo "$serve_json" | rg -q "127\\.0\\.0\\.1:${port}\\b"; then
+    echo "ALREADY_ENABLED: tailscale serve references 127.0.0.1:${port}"
+  else
+    echo "STOP: tailscale serve already configured for this node; refusing to overwrite."
+    echo "hint: inspect with: tailscale serve status --json"
+    exit 1
+  fi
+fi
+
+serve_port="80"
+scheme="http"
+
+echo "ENABLING: tailscale serve (${scheme}:${serve_port}) -> 127.0.0.1:${port}"
+tailscale serve --bg --yes --http="${serve_port}" "${port}"
+
+dns_name="$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; j=json.load(sys.stdin); print((j.get("Self",{}).get("DNSName") or "").rstrip("."))' 2>/dev/null || true)"
+dns_name="${dns_name:-unknown}"
+
+echo ""
+echo "TAILSCALE_SERVE_STATUS"
+tailscale serve status 2>/dev/null || true
+
+if [[ "$dns_name" != "unknown" ]]; then
+  echo ""
+  echo "TAILNET_URL: ${scheme}://${dns_name}"
+  if curl -fsS --max-time 8 "${scheme}://${dns_name}/health" >/dev/null 2>&1; then
+    echo "TAILNET_HEALTH: OK"
+  else
+    echo "WARN: tailnet health check failed: ${scheme}://${dns_name}/health"
+  fi
+fi

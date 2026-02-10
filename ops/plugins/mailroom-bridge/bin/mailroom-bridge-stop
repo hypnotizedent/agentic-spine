@@ -5,45 +5,31 @@ SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 STATE_DIR="${SPINE_STATE:-$SPINE_REPO/mailroom/state}"
 
 PID_FILE="${STATE_DIR}/mailroom-bridge.pid"
-LOCK_DIR="${STATE_DIR}/locks/mailroom-bridge.lock"
+LABEL="com.ronny.mailroom-bridge"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
-mkdir -p "$STATE_DIR" "$(dirname "$LOCK_DIR")"
+mkdir -p "$STATE_DIR"
 
-if [[ ! -f "$PID_FILE" ]]; then
-  echo "NOT_RUNNING: pidfile missing"
-  rm -rf "$LOCK_DIR" 2>/dev/null || true
-  exit 0
+if ! command -v launchctl >/dev/null 2>&1; then
+  echo "STOP (2): launchctl required (macOS launchd)"
+  exit 2
 fi
 
-pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-if [[ -z "$pid" ]]; then
-  echo "NOT_RUNNING: empty pidfile"
+svc="$(launchctl list "$LABEL" 2>/dev/null || true)"
+if [[ -z "$svc" ]]; then
+  echo "NOT_RUNNING: not loaded (${LABEL})"
   rm -f "$PID_FILE" 2>/dev/null || true
-  rm -rf "$LOCK_DIR" 2>/dev/null || true
   exit 0
 fi
 
-if kill -0 "$pid" 2>/dev/null; then
-  echo "STOPPING: pid=${pid}"
-  kill "$pid" 2>/dev/null || true
-
-  for _ in {1..50}; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      break
-    fi
-    sleep 0.1
-  done
-
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "FORCE_KILL: pid=${pid}"
-    kill -9 "$pid" 2>/dev/null || true
-  fi
-else
-  echo "STALE_PID: ${pid} (not running)"
+if [[ ! -f "$PLIST" ]]; then
+  echo "STOP: plist not found at $PLIST"
+  exit 2
 fi
+
+echo "STOPPING: ${LABEL}"
+launchctl bootout "gui/$(id -u)" "$PLIST" 2>&1 || true
 
 rm -f "$PID_FILE" 2>/dev/null || true
-rm -rf "$LOCK_DIR" 2>/dev/null || true
 
 echo "STOPPED"
-

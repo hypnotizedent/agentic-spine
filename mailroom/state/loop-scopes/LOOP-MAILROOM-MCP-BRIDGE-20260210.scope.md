@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -31,16 +31,25 @@ SSH or repo spelunking.
   - `mailroom.bridge.status` (PID + /health)
   - `mailroom.bridge.start` (daemon start)
   - `mailroom.bridge.stop` (daemon stop)
+  - `mailroom.bridge.expose.enable` (tailnet-only exposure via Tailscale Serve)
+  - `mailroom.bridge.expose.status` (tailnet URL + health)
+  - `spine.status` (watcher + queue status)
   - Proof runs:
-    - `receipts/sessions/RCAP-20260210-100458__mailroom.bridge.start__Ryjn618007/receipt.md`
-    - `receipts/sessions/RCAP-20260210-100458__mailroom.bridge.status__Rf2w518066/receipt.md` (running)
-    - `receipts/sessions/RCAP-20260210-100458__mailroom.bridge.stop__Ry36418109/receipt.md`
-    - `receipts/sessions/RCAP-20260210-100458__mailroom.bridge.status__R7u1317994/receipt.md` (stopped)
+    - `receipts/sessions/RCAP-20260210-122349__mailroom.bridge.start__Rf2yb17960/receipt.md` (launchd start + /health)
+    - `receipts/sessions/RCAP-20260210-122340__mailroom.bridge.stop__R5ogk17619/receipt.md` (launchd stop)
+    - `receipts/sessions/RCAP-20260210-121309__mailroom.bridge.status__R8sbo3067/receipt.md` (running + /health)
+    - `receipts/sessions/RCAP-20260210-122252__mailroom.bridge.expose.status__Ryi3f16795/receipt.md` (tailnet_url + health OK)
+    - `receipts/sessions/RCAP-20260210-122247__mailroom.bridge.expose.enable__R6sxk16635/receipt.md` (HTTP:80 enable)
+    - `receipts/sessions/RCAP-20260210-122925__spine.status__R3tu021395/receipt.md` (watcher running)
 - Code:
   - `ops/bindings/mailroom.bridge.yaml`
   - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve`
   - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-start`
   - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-stop`
   - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-status`
+  - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-expose-enable`
+  - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-expose-disable`
+  - `ops/plugins/mailroom-bridge/bin/mailroom-bridge-expose-status`
+  - `fixtures/n8n/Spine_-_Mailroom_Enqueue.json`
 - Docs:
   - `docs/governance/MAILROOM_BRIDGE.md`

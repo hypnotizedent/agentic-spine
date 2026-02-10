@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+BINDING="${SPINE_REPO}/ops/bindings/mailroom.bridge.yaml"
+
+host="127.0.0.1"
+port="8799"
+if [[ -f "$BINDING" ]] && command -v yq >/dev/null 2>&1; then
+  host="$(yq -r '.listen.host // "127.0.0.1"' "$BINDING" 2>/dev/null || echo "127.0.0.1")"
+  port="$(yq -r '.listen.port // 8799' "$BINDING" 2>/dev/null || echo "8799")"
+fi
+
+if ! command -v tailscale >/dev/null 2>&1; then
+  echo "STOP (2): tailscale CLI required"
+  exit 2
+fi
+
+serve_json="$(tailscale serve status --json 2>/dev/null || echo '{}')"
+if echo "$serve_json" | python3 -c "import json,sys; j=json.load(sys.stdin); import sys as _s; _s.exit(0 if j=={} else 1)" >/dev/null 2>&1; then
+  echo "NOT_ENABLED: no tailscale serve config"
+  exit 0
+fi
+
+if ! echo "$serve_json" | rg -q "127\\.0\\.0\\.1:${port}\\b"; then
+  echo "STOP: tailscale serve is configured, but does not reference 127.0.0.1:${port}."
+  echo "Refusing to reset global serve config."
+  echo "hint: inspect with: tailscale serve status --json"
+  exit 1
+fi
+
+# Only reset if the config appears to be exclusively for this bridge.
+other_refs="$(echo "$serve_json" | rg -v "127\\.0\\.0\\.1:${port}\\b" | rg -n \"127\\.0\\.0\\.1:[0-9]+\" || true)"
+if [[ -n "$other_refs" ]]; then
+  echo "STOP: serve config contains other handlers besides 127.0.0.1:${port}; refusing to reset."
+  echo "$other_refs" | sed 's/^/  /'
+  exit 1
+fi
+
+echo "DISABLING: tailscale serve (reset) for mailroom bridge"
+tailscale serve reset
+echo "DISABLED"
+

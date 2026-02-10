@@ -64,6 +64,9 @@ Capabilities:
 - `./bin/ops cap run mailroom.bridge.status`
 - `printf 'yes\n' | ./bin/ops cap run mailroom.bridge.start`
 - `printf 'yes\n' | ./bin/ops cap run mailroom.bridge.stop`
+- `./bin/ops cap run mailroom.bridge.expose.status`
+- `printf 'yes\n' | ./bin/ops cap run mailroom.bridge.expose.enable`
+- `printf 'yes\n' | ./bin/ops cap run mailroom.bridge.expose.disable`
 
 Runtime artifacts:
 - PID: `mailroom/state/mailroom-bridge.pid`
@@ -118,7 +121,7 @@ Effect:
 
 Use an n8n “HTTP Request” node:
 - Method: `POST`
-- URL: `http://127.0.0.1:8799/inbox/enqueue` (if n8n runs on same host)
+- URL: `http://<tailnet_url>/inbox/enqueue` (recommended; tailnet-only) or `http://127.0.0.1:8799/inbox/enqueue` (if n8n runs on same host)
 - Headers:
   - `X-Spine-Token: <token>` (if token auth is enabled)
 - JSON body: the payload above
@@ -126,6 +129,46 @@ Use an n8n “HTTP Request” node:
 To read results:
 - `GET /outbox/list?path=`
 - `GET /outbox/read?path=<file>`
+
+Template workflow export (import into n8n):
+- `fixtures/n8n/Spine_-_Mailroom_Enqueue.json`
+
+Recommended n8n env vars:
+- `SPINE_MAILROOM_BRIDGE_URL` (example: `http://macbook.taile9480.ts.net`)
+- `MAILROOM_BRIDGE_TOKEN` (only if you enable token auth on the bridge)
+
+---
+
+## Tailnet Exposure (Canonical iPhone + n8n Path)
+
+The supported remote path is **tailnet-only** exposure via Tailscale Serve.
+
+This keeps the bridge bound to localhost while still giving iPhone + n8n a stable URL.
+
+1. Start the bridge (governed):
+
+```bash
+OPS_ALLOW_MAIN_MUTATION=1 ./bin/ops cap run mailroom.bridge.start
+```
+
+2. Expose it to the tailnet (governed):
+
+```bash
+OPS_ALLOW_MAIN_MUTATION=1 ./bin/ops cap run mailroom.bridge.expose.enable
+```
+
+3. Confirm the URL + health:
+
+```bash
+./bin/ops cap run mailroom.bridge.expose.status
+```
+
+Notes:
+- `mailroom.bridge.expose.enable` refuses to overwrite an existing `tailscale serve` config.
+- `mailroom.bridge.expose.enable` currently configures **tailnet-only HTTP** (port 80) for compatibility.
+- If you expose beyond localhost, strongly consider setting a token:
+  - set `auth.require_token: true` in `ops/bindings/mailroom.bridge.yaml`
+  - set `MAILROOM_BRIDGE_TOKEN` in the runtime environment
 
 ---
 
@@ -135,4 +178,3 @@ To read results:
 2. **SSH tunnel:** use a mobile SSH client capable of local port forwarding (still requires a token if enabled).
 
 Do not expose this service directly to the public internet.
-

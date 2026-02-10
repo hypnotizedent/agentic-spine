@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+BINDING="${SPINE_REPO}/ops/bindings/mailroom.bridge.yaml"
+
+host="127.0.0.1"
+port="8799"
+if [[ -f "$BINDING" ]] && command -v yq >/dev/null 2>&1; then
+  host="$(yq -r '.listen.host // "127.0.0.1"' "$BINDING" 2>/dev/null || echo "127.0.0.1")"
+  port="$(yq -r '.listen.port // 8799' "$BINDING" 2>/dev/null || echo "8799")"
+fi
+
+echo "MAILROOM_BRIDGE_EXPOSE"
+echo "  binding: ${BINDING}"
+echo "  local:   http://${host}:${port}"
+
+if command -v curl >/dev/null 2>&1; then
+  if curl -fsS "http://${host}:${port}/health" >/dev/null 2>&1; then
+    echo "  local_health: OK"
+  else
+    echo "  local_health: FAIL (bridge not running or not reachable)"
+  fi
+else
+  echo "  local_health: SKIP (curl missing)"
+fi
+
+if ! command -v tailscale >/dev/null 2>&1; then
+  echo "STOP (2): tailscale CLI required for exposure status"
+  exit 2
+fi
+
+dns_name="$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; j=json.load(sys.stdin); print((j.get("Self",{}).get("DNSName") or "").rstrip("."))' 2>/dev/null || true)"
+dns_name="${dns_name:-unknown}"
+
+echo "  tailscale_dns: ${dns_name}"
+echo ""
+echo "TAILSCALE_SERVE_STATUS"
+tailscale serve status 2>/dev/null || true
+
+if [[ "$dns_name" != "unknown" ]]; then
+  serve_json="$(tailscale serve status --json 2>/dev/null || echo '{}')"
+  scheme="$(echo "$serve_json" | python3 -c 'import json,sys; j=json.load(sys.stdin); web=j.get("Web") or {}; ports=set([k.rsplit(":",1)[1] for k in web.keys() if ":" in k]); print("https" if "443" in ports else ("http" if "80" in ports else ""))' 2>/dev/null || true)"
+
+  echo ""
+  if [[ -z "$scheme" ]]; then
+    echo "  tailnet_url: (serve not enabled)"
+  else
+    echo "  tailnet_url: ${scheme}://${dns_name}"
+    if command -v curl >/dev/null 2>&1; then
+      if curl -fsS --max-time 8 "${scheme}://${dns_name}/health" >/dev/null 2>&1; then
+        echo "  tailnet_health: OK"
+      else
+        echo "  tailnet_health: FAIL (serve enabled but not reachable)"
+      fi
+    else
+      echo "  tailnet_health: SKIP (curl missing)"
+    fi
+  fi
+fi

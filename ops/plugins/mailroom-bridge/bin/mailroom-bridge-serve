@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import time
+import shutil
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -314,10 +315,12 @@ def main() -> None:
     if not binding.exists():
         _stop(f"missing binding: {binding}")
 
-    try:
-        _sh("yq", "-r", ".", str(binding))
-    except Exception:
-        _stop(f"invalid YAML: {binding}")
+    # Validate YAML only if yq exists in PATH. (launchd PATH is often minimal)
+    if shutil.which("yq"):
+        try:
+            _sh("yq", "-r", ".", str(binding))
+        except Exception:
+            _stop(f"invalid YAML: {binding}")
 
     host = _yq(binding, ".listen.host // \"127.0.0.1\"", "127.0.0.1")
     port = int(_yq(binding, ".listen.port // 8799", "8799"))
