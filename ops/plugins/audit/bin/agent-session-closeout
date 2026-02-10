@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# agent-session-closeout - Cross-ref recent sessions against open loops
+#
+# Purpose:
+#   Reads recent ledger entries and open_loops.jsonl, cross-references
+#   session activity against open loops, and classifies each loop as:
+#     ACTIONABLE — recent session work matches this loop; could be advanced/closed
+#     STALE      — open >7 days with no matching session activity
+#     BLOCKED    — has blocked_by that is still open
+#     CURRENT    — has recent activity but work is ongoing
+#
+# Output:
+#   Markdown report to stdout.
+#
+# Safety: read-only (reads files, writes nothing)
+#
+set -euo pipefail
+
+SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SPINE_REPO="${SPINE_REPO:-$SP}"
+
+LEDGER="$SPINE_REPO/mailroom/state/ledger.csv"
+LOOPS_FILE="$SPINE_REPO/mailroom/state/open_loops.jsonl"
+DEPTH="${SESSION_CLOSEOUT_DEPTH:-50}"
+
+# ── Preflight ────────────────────────────────────────────────────────────────
+
+if [[ ! -f "$LEDGER" ]]; then
+  echo "ERROR: ledger not found: $LEDGER" >&2
+  exit 1
+fi
+
+if [[ ! -f "$LOOPS_FILE" ]]; then
+  echo "ERROR: open_loops.jsonl not found: $LOOPS_FILE" >&2
+  exit 1
+fi
+
+# ── Main (delegated to Python for structured parsing) ────────────────────────
+
+exec python3 - "$LEDGER" "$LOOPS_FILE" "$DEPTH" "$SPINE_REPO" <<'PYTHON'
+import csv
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone, timedelta
+
+ledger_file = sys.argv[1]
+loops_file = sys.argv[2]
+depth = int(sys.argv[3])
+spine_repo = sys.argv[4]
+
+# ── Parse ledger (last N entries) ──────────────────────────────────────────
+
+class LedgerEntry:
+    __slots__ = ("run_id", "created_at", "finished_at", "status",
+                 "prompt_file", "result_file", "context_used")
+    def __init__(self, run_id, created_at, finished_at, status,
+                 prompt_file, result_file, context_used):
+        self.run_id = run_id
+        self.created_at = created_at
+        self.finished_at = finished_at
+        self.status = status
+        self.prompt_file = prompt_file
+        self.result_file = result_file
+        self.context_used = context_used
+
+entries = []
+with open(ledger_file, "r") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        entries.append(LedgerEntry(
+            row.get("run_id", ""),
+            row.get("created_at", ""),
+            row.get("finished_at", ""),
+            row.get("status", ""),
+            row.get("prompt_file", ""),
+            row.get("result_file", ""),
+            row.get("context_used", ""),
+        ))
+
+# Take last N entries (done status only for cross-ref)
+recent = [e for e in entries[-depth * 2:] if e.status == "done"][-depth:]
+
+# ── Parse open loops (deduplicate by loop_id, latest entry wins) ──────────
+
+class Loop:
+    __slots__ = ("loop_id", "status", "title", "description", "next_action",
+                 "blocked_by", "evidence", "phases", "created_at")
+    def __init__(self, lid, status, title, desc, next_action,
+                 blocked_by, evidence, phases, created_at):
+        self.loop_id = lid
+        self.status = status
+        self.title = title
+        self.description = desc
+        self.next_action = next_action
+        self.blocked_by = blocked_by
+        self.evidence = evidence
+        self.phases = phases
+        self.created_at = created_at
+
+loop_map = {}  # loop_id -> Loop (latest entry wins)
+with open(loops_file, "r") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        lid = obj.get("loop_id", "")
+        loop_map[lid] = Loop(
+            lid,
+            obj.get("status", "unknown"),
+            obj.get("title", ""),
+            obj.get("description", ""),
+            obj.get("next_action", ""),
+            obj.get("blocked_by", None),
+            obj.get("evidence", []),
+            obj.get("phases", {}),
+            obj.get("created_at", ""),
+        )
+
+# Filter to open loops only
+open_loops = [l for l in loop_map.values() if l.status == "open"]
+# Track which loop_ids are open (for blocked_by resolution)
+open_ids = {l.loop_id for l in open_loops}
+
+# ── Extract keywords ──────────────────────────────────────────────────────
+
+STOP_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "in", "on", "at",
+    "for", "to", "of", "and", "or", "not", "no", "has", "have",
+    "with", "from", "vs", "but", "its", "this", "that", "then",
+    "when", "wait", "done", "complete", "phase", "blocked", "open",
+}
+
+def extract_keywords(text):
+    """Extract meaningful keywords from text."""
+    words = re.sub(r'[^a-z0-9\s-]', '', text.lower()).split()
+    return [w for w in words if len(w) > 2 and w not in STOP_WORDS]
+
+def extract_loop_topic_tokens(loop):
+    """Extract topic tokens from a loop's title, description, next_action, phases."""
+    parts = [loop.title, loop.description, loop.next_action]
+    for phase_desc in loop.phases.values():
+        if isinstance(phase_desc, str):
+            parts.append(phase_desc)
+    combined = " ".join(parts)
+    return set(extract_keywords(combined))
+
+def extract_session_tokens(entry):
+    """Extract topic tokens from a ledger entry's run_id and prompt_file."""
+    parts = [entry.run_id, entry.prompt_file]
+    combined = " ".join(parts)
+    # Also extract dotted capability names as tokens
+    tokens = set(extract_keywords(combined))
+    # Add capability name segments (e.g., "spine.verify" -> ["spine", "verify"])
+    for part in combined.split():
+        tokens.update(s for s in part.split(".") if len(s) > 2)
+        tokens.update(s for s in part.split("_") if len(s) > 2)
+        tokens.update(s.lower() for s in part.split("-") if len(s) > 2)
+    return tokens
+
+# ── Cross-reference ──────────────────────────────────────────────────────
+
+def parse_iso(ts):
+    """Parse ISO timestamp to datetime."""
+    if not ts:
+        return None
+    try:
+        ts = ts.replace("Z", "+00:00")
+        return datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+
+now = datetime.now(timezone.utc)
+STALE_DAYS = 7
+
+class LoopReport:
+    __slots__ = ("loop", "classification", "matching_sessions", "reason")
+    def __init__(self, loop, classification, matching_sessions, reason):
+        self.loop = loop
+        self.classification = classification
+        self.matching_sessions = matching_sessions
+        self.reason = reason
+
+reports = []
+
+for loop in open_loops:
+    loop_tokens = extract_loop_topic_tokens(loop)
+
+    # Find matching sessions via keyword overlap
+    matching = []
+    for entry in recent:
+        session_tokens = extract_session_tokens(entry)
+        overlap = loop_tokens & session_tokens
+        if len(overlap) >= 2:
+            matching.append((entry, overlap))
+
+    # Check if loop has direct LOOP-ID references in recent session run_ids
+    for entry in recent:
+        if loop.loop_id in entry.run_id or loop.loop_id in entry.prompt_file:
+            if entry not in [m[0] for m in matching]:
+                matching.append((entry, {loop.loop_id}))
+
+    # Check blocked_by
+    is_blocked = (
+        loop.blocked_by
+        and loop.blocked_by in open_ids
+    )
+
+    # Check staleness
+    loop_created = parse_iso(loop.created_at)
+    age_days = (now - loop_created).days if loop_created else 0
+
+    # Classify
+    if is_blocked:
+        blocker = loop.blocked_by
+        reports.append(LoopReport(
+            loop, "BLOCKED", matching,
+            f"blocked_by {blocker} (still open)"
+        ))
+    elif matching:
+        # Has recent activity — is it actionable or just current?
+        # Actionable if loop has evidence of completion keywords
+        next_lower = loop.next_action.lower()
+        completion_signals = ["complete", "done", "finished", "passed",
+                              "verified", "closed", "promoted"]
+        has_completion_signal = any(s in next_lower for s in completion_signals)
+
+        if has_completion_signal:
+            reports.append(LoopReport(
+                loop, "ACTIONABLE", matching,
+                "next_action suggests completion; recent session matches found"
+            ))
+        else:
+            reports.append(LoopReport(
+                loop, "CURRENT", matching,
+                f"{len(matching)} recent session(s) match"
+            ))
+    elif age_days > STALE_DAYS:
+        reports.append(LoopReport(
+            loop, "STALE", [],
+            f"open {age_days}d, no matching sessions in last {depth} entries"
+        ))
+    else:
+        reports.append(LoopReport(
+            loop, "CURRENT", [],
+            f"open {age_days}d, within freshness window"
+        ))
+
+# ── Output report ────────────────────────────────────────────────────────
+
+print("=== SESSION-LOOP CLOSEOUT REPORT ===")
+print()
+print(f"Ledger entries scanned: {len(recent)}")
+print(f"Open loops:             {len(open_loops)}")
+print()
+
+# Counts by classification
+by_class = {}
+for r in reports:
+    by_class.setdefault(r.classification, []).append(r)
+
+for cls in ["ACTIONABLE", "STALE", "BLOCKED", "CURRENT"]:
+    items = by_class.get(cls, [])
+    print(f"  {cls}: {len(items)}")
+
+print()
+print("---")
+print()
+
+# ── ACTIONABLE ───────────────────────────────────────────────────────────
+
+actionable = by_class.get("ACTIONABLE", [])
+if actionable:
+    print("## ACTIONABLE — May Be Ready to Advance/Close")
+    print()
+    for r in sorted(actionable, key=lambda x: x.loop.loop_id):
+        print(f"- **{r.loop.loop_id}**: {r.loop.title}")
+        print(f"  next_action: {r.loop.next_action[:120]}")
+        print(f"  reason: {r.reason}")
+        if r.matching_sessions:
+            top = r.matching_sessions[:3]
+            for entry, overlap in top:
+                print(f"    session: {entry.run_id} ({entry.prompt_file}) "
+                      f"[overlap: {', '.join(sorted(overlap)[:5])}]")
+        print()
+    print("---")
+    print()
+
+# ── STALE ────────────────────────────────────────────────────────────────
+
+stale = by_class.get("STALE", [])
+if stale:
+    print("## STALE — No Recent Session Activity")
+    print()
+    for r in sorted(stale, key=lambda x: x.loop.loop_id):
+        print(f"- **{r.loop.loop_id}**: {r.loop.title}")
+        print(f"  reason: {r.reason}")
+        print(f"  next_action: {r.loop.next_action[:120]}")
+        print()
+    print("---")
+    print()
+
+# ── BLOCKED ──────────────────────────────────────────────────────────────
+
+blocked = by_class.get("BLOCKED", [])
+if blocked:
+    print("## BLOCKED — Waiting on Dependencies")
+    print()
+    for r in sorted(blocked, key=lambda x: x.loop.loop_id):
+        print(f"- **{r.loop.loop_id}**: {r.loop.title}")
+        print(f"  reason: {r.reason}")
+        print()
+    print("---")
+    print()
+
+# ── CURRENT ──────────────────────────────────────────────────────────────
+
+current = by_class.get("CURRENT", [])
+if current:
+    print("## CURRENT — Active or Recently Created")
+    print()
+    for r in sorted(current, key=lambda x: x.loop.loop_id):
+        print(f"- **{r.loop.loop_id}**: {r.loop.title}")
+        print(f"  reason: {r.reason}")
+        if r.matching_sessions:
+            top = r.matching_sessions[:2]
+            for entry, overlap in top:
+                print(f"    session: {entry.run_id} "
+                      f"[overlap: {', '.join(sorted(overlap)[:5])}]")
+        print()
+
+print("=== END CLOSEOUT ===")
+PYTHON
