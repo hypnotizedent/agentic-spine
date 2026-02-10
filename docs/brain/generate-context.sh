@@ -62,10 +62,10 @@ OUT="$SP/docs/brain/context.md"
   echo ""
   echo "Discovery:"
   echo ""
-  echo "```bash"
+  printf '%s\n' '```bash'
   echo "./bin/ops cap list"
   echo "./bin/ops cap show <capability>"
-  echo "```"
+  printf '%s\n' '```'
   echo ""
 
   CAPS_FILE="$SP/ops/capabilities.yaml"
