@@ -118,12 +118,24 @@ github_issue: "#625"
 
 | Host | User | Key | Notes |
 |------|------|-----|-------|
-| pve | root | ~/.ssh/id_ed25519 | Proxmox shop |
 | docker-host | docker-host | ~/.ssh/id_ed25519 | VM 200 |
-| proxmox-home | root | ~/.ssh/id_ed25519 | Proxmox home |
+| proxmox-home | root | ~/.ssh/id_ed25519 | Proxmox home (Beelink) |
+| pve | root | ~/.ssh/id_ed25519 | Proxmox shop |
+| nas | ronadmin | ~/.ssh/id_ed25519 | Synology NAS 918+ |
 | automation-stack | automation | ~/.ssh/id_ed25519 | VM 202 |
+| infra-core | ubuntu | ~/.ssh/id_ed25519 | VM 204 |
+| observability | ubuntu | ~/.ssh/id_ed25519 | VM 205 |
+| dev-tools | ubuntu | ~/.ssh/id_ed25519 | VM 206 |
+| ai-consolidation | ubuntu | ~/.ssh/id_ed25519 | VM 207 |
+| download-stack | ubuntu | ~/.ssh/id_ed25519 | VM 209 |
+| streaming-stack | ubuntu | ~/.ssh/id_ed25519 | VM 210 |
+| vault | root | ~/.ssh/id_ed25519 | Vaultwarden (home VM 102) |
+| ha | hassio | ~/.ssh/id_ed25519 | Home Assistant |
+| pihole-home | root | ~/.ssh/id_ed25519 | Pi-hole DNS (home) |
+| immich | root | ~/.ssh/id_ed25519 | Photo server (home) |
+| download-home | root | ~/.ssh/id_ed25519 | *arr apps (home) |
 
-**Config location:** `~/.ssh/config` + `~/code/workbench/dotfiles/ssh/config.d/`
+**Config location:** `~/.ssh/config` + `~/ronny-ops/infrastructure/dotfiles/ssh/config.d/` (symlinked to `~/.ssh/config.d/`)
 
 ### Hotkeys / Shortcuts
 
