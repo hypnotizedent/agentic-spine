@@ -104,6 +104,7 @@ All must PASS for core to be healthy.
 | D57 | Infra identity cohesion lock (composite: D37 + D39) |
 | D58 | SSOT freshness lock (last_reviewed dates within threshold) |
 | D59 | Cross-registry completeness lock (bidirectional host coverage) |
+| D60 | Deprecation sweeper (known deprecated terms blocked from governance docs) |
 
 ### Verbose Mode (Subchecks)
 

@@ -554,6 +554,7 @@ else
   warn "ssot ip parity lock gate not present"
 fi
 
+<<<<<<< HEAD
 # D58: SSOT freshness lock (last_reviewed date enforcement)
 echo -n "D58 ssot freshness lock... "
 if [[ -x "$SP/surfaces/verify/d58-ssot-freshness-lock.sh" ]]; then
@@ -568,6 +569,14 @@ if [[ -x "$SP/surfaces/verify/d59-cross-registry-completeness-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d59-cross-registry-completeness-lock.sh"
 else
   warn "cross-registry completeness lock gate not present"
+fi
+
+# D60: Deprecation sweeper (known deprecated terms in governance docs)
+echo -n "D60 deprecation sweeper... "
+if [[ -x "$SP/surfaces/verify/d60-deprecation-sweeper.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d60-deprecation-sweeper.sh"
+else
+  warn "deprecation sweeper gate not present"
 fi
 
 echo
