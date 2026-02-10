@@ -554,6 +554,14 @@ else
   warn "ssot ip parity lock gate not present"
 fi
 
+# D59: Cross-registry completeness lock (bidirectional host coverage)
+echo -n "D59 cross-registry completeness lock... "
+if [[ -x "$SP/surfaces/verify/d59-cross-registry-completeness-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d59-cross-registry-completeness-lock.sh"
+else
+  warn "cross-registry completeness lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
