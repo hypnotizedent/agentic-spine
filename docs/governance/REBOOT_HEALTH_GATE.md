@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-04
+last_verified: 2026-02-10
 scope: reboot-validation
 github_issue: "#610"
 ---
@@ -29,8 +29,11 @@ Before rebooting any Tier 1 or Tier 2 node:
 After the node is back online:
 
 ```bash
-# Verify SSH connectivity
-./bin/ops cap run ssh.target.status
+# Quick check: what needs recovery?
+./bin/ops cap run infra.post_power.recovery.status
+
+# Orchestrated recovery: bring all stacks up in dependency order
+./bin/ops cap run infra.post_power.recovery
 
 # Verify Docker stacks recovered
 ./bin/ops cap run docker.compose.status
@@ -41,6 +44,17 @@ After the node is back online:
 # Run full drift gates
 ./bin/ops cap run spine.verify
 ```
+
+**Recovery sequencing** is declared in `ops/bindings/startup.sequencing.yaml`:
+1. Core infra (secrets, caddy, pihole, vaultwarden, cloudflared)
+2. Observability + dev tools (prometheus, grafana, gitea)
+3. Application workloads (n8n, download-stack, streaming-stack)
+4. Legacy production (docker-host: mint-os, finance, mail-archiver)
+
+The recovery capability handles the common post-power-cycle failure mode where
+containers exit with code 128 (SIGKILL) and Docker doesn't auto-restart them.
+It runs `compose down --remove-orphans` to clean up stale containers before
+`compose up -d`.
 
 ---
 

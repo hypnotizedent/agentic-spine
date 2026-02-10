@@ -1,0 +1,84 @@
+# Startup Sequencing Binding (SSOT)
+# Non-secret. Spine-native.
+#
+# Declares the correct startup order for hosts and stacks after a power cycle.
+# Used by infra.post_power.recovery capability.
+#
+# Rules:
+#   - Hosts start in phase order (lower = earlier)
+#   - Within a host, stacks start in declared order
+#   - Health probes run after each phase to confirm readiness
+#   - docker-host is last because its services depend on infra-core (tunnel, DNS)
+
+version: 1
+updated: "2026-02-10"
+
+# Phase 1: Core infrastructure (everything else depends on these)
+# Phase 2: Observability + dev tools (important but not blocking)
+# Phase 3: Application workloads (depend on phase 1 services)
+# Phase 4: Legacy / non-critical
+
+phases:
+  - phase: 1
+    label: "Core infrastructure"
+    hosts:
+      - target: infra-core
+        stacks:
+          - secrets
+          - caddy-auth
+          - pihole
+          - vaultwarden
+          - cloudflared
+        wait_after_sec: 15
+        health_probes:
+          - "http://127.0.0.1:8088/api/status"       # infisical
+          - "http://127.0.0.1:9000/if/flow/initial-setup/"  # authentik
+          - "http://127.0.0.1:53"                     # pihole DNS
+
+  - phase: 2
+    label: "Observability and dev tools"
+    hosts:
+      - target: observability
+        stacks:
+          - prometheus
+          - grafana
+          - node-exporter
+          - uptime-kuma
+          - loki
+        wait_after_sec: 10
+      - target: dev-tools
+        stacks:
+          - gitea
+        wait_after_sec: 5
+      - target: ai-consolidation
+        stacks:
+          - ai-consolidation
+        wait_after_sec: 5
+
+  - phase: 3
+    label: "Application workloads"
+    hosts:
+      - target: automation-stack
+        stacks:
+          - automation
+          - mcpjungle
+        wait_after_sec: 10
+      - target: download-stack
+        stacks:
+          - download-stack
+        wait_after_sec: 10
+      - target: streaming-stack
+        stacks:
+          - streaming-stack
+        wait_after_sec: 10
+
+  - phase: 4
+    label: "Legacy production (docker-host)"
+    hosts:
+      - target: docker-host
+        stacks:
+          - mint-os
+          - finance
+          - mail-archiver
+        wait_after_sec: 15
+        notes: "Depends on cloudflared (phase 1) for tunnel routing. Container names must not conflict with stopped containers — run compose down before up if exit code 128 detected."
