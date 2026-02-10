@@ -105,6 +105,7 @@ All must PASS for core to be healthy.
 | D58 | SSOT freshness lock (last_reviewed dates within threshold) |
 | D59 | Cross-registry completeness lock (bidirectional host coverage) |
 | D60 | Deprecation sweeper (known deprecated terms blocked from governance docs) |
+| D62 | Git remote parity lock (origin/main must equal github/main) |
 
 ### Verbose Mode (Subchecks)
 

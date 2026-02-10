@@ -586,6 +586,14 @@ else
   warn "session-loop traceability lock gate not present"
 fi
 
+# D62: Git remote parity lock (origin/main == github/main)
+echo -n "D62 git remote parity lock... "
+if [[ -x "$SP/surfaces/verify/d62-git-remote-parity-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d62-git-remote-parity-lock.sh"
+else
+  warn "git remote parity lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
