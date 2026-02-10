@@ -107,7 +107,7 @@ Compose uses `infisical run -- docker compose up -d` or generates `.env` via sys
 | P4 | Migrate streaming stack to VM 210 | P3 | DONE — 10/10 containers healthy, spotisub OAuth complete |
 | P5 | Update routing + SSOT (CF tunnel, bindings) | P4 | DONE — CF tunnel v82, all SSOT updated |
 | P6 | Soak (72h) + decommission VM 201 | P5 | VERIFIED — soak passed 2026-02-10, ready for decom |
-| P7 | Decommission VM 201 | P6 | DONE — destroyed 2026-02-12, ZFS removed, SSOT cleaned |
+| P7 | Decommission VM 201 | P6 | DONE — destroyed 2026-02-10, ZFS removed, SSOT cleaned |
 | P8 | Media stack metrics + observability | P6 | OPEN — rolled in from LOOP-MEDIA-STACK-METRICS |
 
 ---
@@ -302,16 +302,18 @@ Deep audit of all 34 containers across VM 209 + VM 210 for stale IPs, broken cro
 
 **Soak Verdict: PASS** — all production workloads stable on VMs 209/210 for 48+ hours with zero container restarts. VM 201 is idle with no Docker activity. Ready for decommission.
 
-### P7 — Decommission VM 201 (DONE — 2026-02-12)
+### P7 — Decommission VM 201 (DONE — 2026-02-10)
 
 Decommission sequence:
 1. `ssh root@pve 'qm set 201 --onboot 0'` — **DONE** (2026-02-10T14:38Z)
 2. `ssh root@pve 'qm stop 201'` — **DONE** (2026-02-10T14:38Z, status: stopped)
-3. Wait 48 hours — **DONE** (hold expired 2026-02-12T14:38Z)
-4. `ssh root@pve 'qm destroy 201 --purge'` — **DONE** (LV vm-201-disk-0 removed)
-5. Clean up SSOT — **DONE**: removed from ssh.targets.yaml, docker.compose.targets.yaml,
+3. `ssh root@pve 'qm destroy 201 --purge'` — **DONE** (2026-02-10T14:48Z; LV vm-201-disk-0 removed)
+4. Clean up SSOT — **DONE**: removed from ssh.targets.yaml, docker.compose.targets.yaml,
    STACK_REGISTRY (→decommissioned), SHOP_VM_ARCHITECTURE, backup.calendar.yaml vmid list
-6. `zfs destroy -r tank/docker/media-stack` — **DONE** (24.1G reclaimed)
+5. `zfs destroy -r tank/docker/media-stack` — **DONE** (24.1G reclaimed)
+
+Verified:
+- `qm list` no longer includes VM 201 (receipt: `receipts/sessions/RCAP-20260210-101412__infra.proxmox.maintenance.precheck__R36av38147/receipt.md`)
 
 ### P8 — Media Stack Metrics + Observability (rolled-in)
 
@@ -323,7 +325,7 @@ Rolled in from LOOP-MEDIA-STACK-METRICS. Now that the split is stable:
 
 ---
 
-## Closure Note (2026-02-12)
+## Closure Note (2026-02-10)
 
 P0 through P7 complete. The monolithic media-stack (VM 201) has been fully
 split into download-stack (VM 209, 24 containers) and streaming-stack
@@ -335,4 +337,4 @@ deferred as future enhancement work — not blocking closure.
 
 _Scope document created by: Opus 4.6_
 _Created: 2026-02-08_
-_Updated: 2026-02-12 (P7 decom complete, loop closed)_
+_Updated: 2026-02-10 (P7 decom complete, loop closed)_

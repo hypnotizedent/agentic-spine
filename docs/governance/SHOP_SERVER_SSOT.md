@@ -126,7 +126,7 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 - Serials: Z1Z86298, Z1Z85V4W, Z1Z84YNR, Z1Z85V47, Z1Z862H5, Z1Z8629N, Z1Z85TFE, Z1Z861ZN
 - Last scrub: 2026-02-08, 0 errors (completed in 4h18m)
 
-**tank datasets (2026-02-08):**
+**tank datasets (2026-02-10):**
 - `tank/docker`: 610GB (was 567GB on 2026-02-07)
 - `tank/docker/download-stack`: 12.3GB (new — media stack split)
 - `tank/docker/streaming-stack`: 6.70GB (new — media stack split)
@@ -136,12 +136,12 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 - `tank/immich/db`: 205K
 - `tank/vms`: 108GB (was 256K — VM disk images growing)
 
-### VM Inventory (2026-02-08)
+### VM Inventory (2026-02-10)
 
 | VMID | Name | Status | RAM | Boot Disk | Notes |
 |------|------|--------|-----|-----------|-------|
 | 200 | docker-host | running | 96GB | 300GB | Mint OS production |
-| 201 | media-stack | **destroyed** | — | — | Decommissioned 2026-02-12 (split to 209/210, VM destroyed) |
+| 201 | media-stack | **destroyed** | — | — | Decommissioned 2026-02-10 (split to 209/210, VM destroyed) |
 | 202 | automation-stack | running | 16GB | 100GB | n8n + Ollama |
 | 203 | immich | running | 16GB | 50GB | Shop photos (Tailscale: immich-1) |
 | 204 | infra-core | running | 8GB | 50GB | Core infra (cloudflared, pihole, infisical, vaultwarden, caddy-auth) |
@@ -280,7 +280,7 @@ This is the Shop hypervisor. Core VM inventory (foundational scope):
 | `download-stack` | Download automation (*arr stack, sabnzbd, tdarr) | yes |
 | `streaming-stack` | Media streaming (jellyfin, navidrome, jellyseerr) | yes |
 | `ai-consolidation` | AI workloads | deferred |
-| `media-stack` | Decommissioned 2026-02-12 (VM 201 destroyed; split to 209/210) | decommissioned |
+| `media-stack` | Decommissioned 2026-02-10 (VM 201 destroyed; split to 209/210) | decommissioned |
 | `immich` | Photos | deferred |
 
 If you need to make a placement decision ("where should this run?"):
@@ -290,7 +290,7 @@ If you need to make a placement decision ("where should this run?"):
 
 ---
 
-## Scheduled Tasks (pve) — verified 2026-02-08
+## Scheduled Tasks (pve) — verified 2026-02-10
 
 | Schedule | Command | Purpose | Status |
 |----------|---------|---------|--------|
@@ -302,7 +302,7 @@ If you need to make a placement decision ("where should this run?"):
 **Source:** crontab (`crontab -l`) and `/etc/pve/jobs.cfg`.
 
 **Notes:**
-- vzdump covers all 9 running shop VMs (VM 201 decommissioned 2026-02-12; GAP-OP-030 closed).
+- vzdump covers all 9 running shop VMs (VM 201 decommissioned 2026-02-10; GAP-OP-030 closed).
 
 ---
 

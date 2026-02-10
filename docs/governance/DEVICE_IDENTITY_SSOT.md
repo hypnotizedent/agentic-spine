@@ -181,7 +181,7 @@ Notes (Shop LAN-only endpoints):
 |----|----------------|--------|------|-------|
 | pve (hypervisor) | `pve` | 192.168.1.184 | — | Proxmox host; NFS server |
 | docker-host (Mint OS) | `docker-host` | 192.168.1.200 | 200 | Static IP (netplan). Mint OS production workloads. |
-| media-stack | `media-stack` | 192.168.1.201 | 201 | **Decommissioned** 2026-02-12 (VM destroyed; split to 209/210). |
+| media-stack | `media-stack` | 192.168.1.201 | 201 | **Decommissioned** 2026-02-10 (VM destroyed; split to 209/210). |
 | automation-stack | `automation-stack` | 192.168.1.202 | 202 | Automation (n8n, Ollama, Open WebUI). |
 | immich (shop) | `immich` | 192.168.1.203 | 203 | Shop photos (Tailscale: `immich-1`). |
 | infra-core | `infra-core` | 192.168.1.204 | 204 | Static IP; Pi-hole DNS |
@@ -414,7 +414,7 @@ Use the loop ledger instead:
 | Device | Former IP | Decommissioned | Reason |
 |--------|-----------|----------------|--------|
 | `immich` (home) | 100.83.160.109 | Pending | Migrating to shop `immich-1` |
-| `media-stack` | 100.117.1.53 | 2026-02-12 | VM 201 destroyed; split to download-stack (209) + streaming-stack (210) |
+| `media-stack` | 100.117.1.53 | 2026-02-10 | VM 201 destroyed; split to download-stack (209) + streaming-stack (210) |
 
 ---
 
