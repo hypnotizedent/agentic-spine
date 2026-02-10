@@ -1,6 +1,6 @@
 # LOOP-UDR6-SHOP-CUTOVER-20260209
 
-> **Status:** CLOSING (cutover complete, device re-IP deferred)
+> **Status:** CLOSED (cutover complete, device re-IP deferred to OL_SHOP_BASELINE_FINISH)
 > **Owner:** @ronny
 > **Created:** 2026-02-09
 > **Severity:** medium
@@ -29,7 +29,7 @@ Double-NAT topology is acceptable since all public access uses Cloudflare tunnel
 | P1.6 | Remote config apply: netplan, exports, fstab, TS route | **DONE** |
 | P2 | Physical cutover: cable swap, cold boot | **DONE** (device re-IP pending) |
 | P3 | Verification: connectivity, NFS, services, DNS | **DONE** (core verified) |
-| P4 | Post-cutover: finalize docs, close gaps | PENDING |
+| P4 | Post-cutover: finalize docs, close gaps | **DONE** (2026-02-10) |
 
 ---
 
@@ -152,3 +152,21 @@ Summary of fixes applied (P2/P3):
 
 LAN-only endpoints:
 - `switch-shop` / `idrac-shop` / `nvr-shop` respond to ping on the new subnet (see `network.lan.device.status` receipt above).
+
+---
+
+## P4: Post-Cutover Finalization (DONE — 2026-02-10)
+
+All SSOTs updated during P1 pre-staging. Core verification passed in P3. No outstanding doc gaps.
+
+**Deferred items (non-blocking, tracked in OL_SHOP_BASELINE_FINISH):**
+- Switch re-IP: 192.168.12.2 → 192.168.1.2 (works as L2 without mgmt IP)
+- iDRAC re-IP: 192.168.12.250 → 192.168.1.250 (needs BMC cold reset or channel check)
+- NVR re-IP: 192.168.12.216 → 192.168.1.216 (requires on-site ISAPI or web UI)
+
+These are physical/on-site tasks deferred to `OL_SHOP_BASELINE_FINISH`.
+
+Closeout note recorded during certification review:
+- `mailroom/outbox/audit-export/2026-02-10-full-certification.md`
+
+Loop closure is tracked in `mailroom/state/open_loops.jsonl` (status=closed).

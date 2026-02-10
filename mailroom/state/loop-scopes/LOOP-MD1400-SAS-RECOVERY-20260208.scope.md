@@ -182,3 +182,10 @@ maintenance window. Order of operations:
 
 _Scope document created by: Opus 4.6_
 _Created: 2026-02-08_
+
+---
+
+## Audit Findings (2026-02-10 certification)
+
+- Source: `mailroom/outbox/audit-export/2026-02-10-full-certification.md`
+- Certification noted this loop is still open and remains a prerequisite for a complete shop storage baseline.

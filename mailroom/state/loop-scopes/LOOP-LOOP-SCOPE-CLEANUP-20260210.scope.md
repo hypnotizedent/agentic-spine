@@ -1,0 +1,29 @@
+# LOOP-LOOP-SCOPE-CLEANUP-20260210
+
+> **Status:** OPEN
+> **Owner:** @ronny
+> **Created:** 2026-02-10
+> **Severity:** high
+
+## Problem
+
+Several loop scope docs were corrupted by an unquoted heredoc (zsh command substitution on backticks), causing injected command output and broken markdown. This makes loop execution/error handling unreliable.
+
+## Scope
+
+- Rewrite the corrupted 2026-02-10 loop scopes to clean, consistent markdown.
+- Restore corrupted existing scopes to their canonical content, then append a single correct "Audit Findings" section:
+  - `mailroom/state/loop-scopes/LOOP-CAMERA-OUTAGE-20260209.scope.md`
+  - `mailroom/state/loop-scopes/LOOP-MD1400-SAS-RECOVERY-20260208.scope.md`
+- Ensure `mailroom/state/open_loops.jsonl` remains valid JSONL and `./bin/ops loops list --open` works.
+
+## Acceptance
+
+- No injected command output remains in the repaired scope docs.
+- `jq -s . mailroom/state/open_loops.jsonl` succeeds.
+- Receipt path recorded here for a passing `spine.verify` after repairs (or the best-available verification if other gates fail for unrelated reasons).
+
+## Evidence
+
+- Receipt: (pending)
+

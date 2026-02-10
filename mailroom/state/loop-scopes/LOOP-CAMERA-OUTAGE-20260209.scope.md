@@ -76,3 +76,10 @@ NVR creds (`NVR_ADMIN_USER`, `NVR_ADMIN_PASSWORD`) are referenced across CAMERA_
 | 2026-02-09 | NVR found at DHCP .104, SSOT said .216 — DHCP reservation created |
 | 2026-02-09 | NVR power cycled, confirmed at .216 (HTTP 200, ARP confirmed) |
 | 2026-02-09 | Web UI shows 12 channels, 0 video feeds — this loop opened |
+
+---
+
+## Audit Findings (2026-02-10 certification)
+
+- Source: `mailroom/outbox/audit-export/2026-02-10-full-certification.md`
+- Certification noted this loop is still open and requires on-site triage + credentials to complete.
