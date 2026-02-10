@@ -2,38 +2,45 @@
 set -euo pipefail
 
 # D34: Loop Ledger Integrity Lock
-# Purpose: Ensure loop summary counts match deduped reducer output.
-#          Prevents regression to raw append-only counting behavior.
+# Purpose: Ensure loop summary counts are derived from scope files (the SSOT)
+#          and not from the deprecated open_loops.jsonl or raw grep.
 #
 # Fails on:
-#   - Mismatch between reducer --counts open and loops summary Open
-#   - loops.sh summary regressing to grep-based raw counts
+#   - loops.sh summary() still using raw grep -c for counting
+#   - loops.sh referencing open_loops.jsonl as primary source for summary
+#   - Scope-file direct count mismatching ops loops summary output
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-REDUCER="$ROOT/ops/plugins/loops/bin/loops-ledger-reduce"
 LOOPS_SH="$ROOT/ops/commands/loops.sh"
+SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 
 fail() { echo "D34 FAIL: $*" >&2; exit 1; }
 
-# Require reducer exists
-[[ -x "$REDUCER" ]] || fail "loops-ledger-reduce not found or not executable"
-
-# Get canonical counts from reducer
-REDUCER_JSON="$("$REDUCER" --counts 2>/dev/null)" || fail "reducer --counts failed"
-REDUCER_OPEN="$(echo "$REDUCER_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['open'])")"
-
-# Get summary output from loops.sh
-SUMMARY_OUTPUT="$("$ROOT/bin/ops" loops summary 2>/dev/null)" || fail "ops loops summary failed"
-SUMMARY_OPEN="$(echo "$SUMMARY_OUTPUT" | grep -E "^Open:" | awk '{print $2}')"
-
-# Compare counts
-if [[ "$REDUCER_OPEN" != "$SUMMARY_OPEN" ]]; then
-    fail "open count mismatch: reducer=$REDUCER_OPEN summary=$SUMMARY_OPEN (summary may be using raw grep counts)"
-fi
-
-# Verify loops.sh uses reducer (not raw grep -c)
+# 1. Verify loops.sh summary does NOT use raw grep -c for counting
 if grep -q 'grep -c.*status.*open' "$LOOPS_SH" 2>/dev/null; then
-    fail "loops.sh summary() still uses raw grep -c (must use reducer)"
+    fail "loops.sh summary() still uses raw grep -c (must use scope-file parser)"
 fi
 
-echo "D34 PASS: loop ledger integrity enforced (open=$REDUCER_OPEN)"
+# 2. Count open loops directly from scope files (independent check)
+SCOPE_OPEN=0
+if [[ -d "$SCOPES_DIR" ]]; then
+    for f in "$SCOPES_DIR"/*.scope.md; do
+        [[ -f "$f" ]] || continue
+        # Parse front-matter status
+        status="$(awk '/^---$/{n++; next} n==1 && /^status:/{print $2; exit}' "$f")"
+        case "$status" in
+            active|draft|open) SCOPE_OPEN=$((SCOPE_OPEN + 1)) ;;
+        esac
+    done
+fi
+
+# 3. Get ops loops summary open count
+SUMMARY_OUTPUT="$("$ROOT/bin/ops" loops summary 2>/dev/null)" || fail "ops loops summary failed"
+SUMMARY_OPEN="$(echo "$SUMMARY_OUTPUT" | grep -E '^\s*Open:' | awk '{print $2}')"
+
+# 4. Compare scope-file count with summary output
+if [[ "$SCOPE_OPEN" != "$SUMMARY_OPEN" ]]; then
+    fail "open count mismatch: scope_files=$SCOPE_OPEN summary=$SUMMARY_OPEN"
+fi
+
+echo "D34 PASS: loop ledger integrity enforced (open=$SCOPE_OPEN, source=scope-files)"
