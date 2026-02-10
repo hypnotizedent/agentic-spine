@@ -554,6 +554,14 @@ else
   warn "ssot ip parity lock gate not present"
 fi
 
+# D58: SSOT freshness lock (last_reviewed date enforcement)
+echo -n "D58 ssot freshness lock... "
+if [[ -x "$SP/surfaces/verify/d58-ssot-freshness-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d58-ssot-freshness-lock.sh"
+else
+  warn "ssot freshness lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
