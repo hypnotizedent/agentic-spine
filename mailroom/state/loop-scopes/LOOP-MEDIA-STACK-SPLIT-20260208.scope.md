@@ -107,7 +107,7 @@ Compose uses `infisical run -- docker compose up -d` or generates `.env` via sys
 | P4 | Migrate streaming stack to VM 210 | P3 | DONE — 10/10 containers healthy, spotisub OAuth complete |
 | P5 | Update routing + SSOT (CF tunnel, bindings) | P4 | DONE — CF tunnel v82, all SSOT updated |
 | P6 | Soak (72h) + decommission VM 201 | P5 | VERIFIED — soak passed 2026-02-10, ready for decom |
-| P7 | Decommission VM 201 | P6 | READY — stop VM, 48h hold, destroy |
+| P7 | Decommission VM 201 | P6 | IN PROGRESS — stopped 2026-02-10, 48h hold until 2026-02-12 |
 | P8 | Media stack metrics + observability | P6 | OPEN — rolled in from LOOP-MEDIA-STACK-METRICS |
 
 ---
@@ -302,13 +302,13 @@ Deep audit of all 34 containers across VM 209 + VM 210 for stale IPs, broken cro
 
 **Soak Verdict: PASS** — all production workloads stable on VMs 209/210 for 48+ hours with zero container restarts. VM 201 is idle with no Docker activity. Ready for decommission.
 
-### P7 — Decommission VM 201 (next action)
+### P7 — Decommission VM 201 (IN PROGRESS)
 
 Decommission sequence:
-1. `ssh root@pve 'qm set 201 --onboot 0'` — prevent accidental restart
-2. `ssh root@pve 'qm stop 201'` — graceful shutdown
-3. Wait 48 hours — final hold period for any rollback needs
-4. `ssh root@pve 'qm destroy 201 --purge'` — destroy VM and disk images
+1. `ssh root@pve 'qm set 201 --onboot 0'` — **DONE** (2026-02-10T14:38Z)
+2. `ssh root@pve 'qm stop 201'` — **DONE** (2026-02-10T14:38Z, status: stopped)
+3. Wait 48 hours — **HOLD UNTIL 2026-02-12T14:38Z** (rollback window)
+4. `ssh root@pve 'qm destroy 201 --purge'` — PENDING (after hold)
 5. Clean up SSOT: remove VM 201 references from ssh.targets.yaml, docker.compose.targets.yaml, STACK_REGISTRY, SERVICE_REGISTRY
 6. Remove `tank/docker/media-stack` ZFS dataset on pve (rollback data no longer needed)
 
