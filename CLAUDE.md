@@ -7,7 +7,7 @@
 ## Session Entry
 
 1. Read `AGENTS.md` for the full runtime contract.
-2. Run `./bin/ops loops list --open` to check open work.
+2. Run `./bin/ops status` to check all open work (loops, gaps, inbox).
 3. Run `./bin/ops cap list` to discover capabilities.
 4. Load full context via `/ctx` or `docs/brain/generate-context.sh`.
 
@@ -44,6 +44,14 @@
 - **D31:** No log/output files in home root (`~/*.log`, `~/*.out`). Use project paths.
 - **D54/D59:** SSOT bindings must match live infrastructure. Adding VMs/hosts requires updates in multiple SSOTs simultaneously.
 - **D58:** SSOTs with stale `last_reviewed` dates (>2 weeks) fail verify.
+
+## Work Discovery Rule
+
+- **Never fix inline.** Found a bug, drift, or missing feature? Register it first, then fix through the registration.
+- **Gaps:** Add an entry to `ops/bindings/operational.gaps.yaml` with `parent_loop` if one exists.
+- **Loops:** Create a scope file in `mailroom/state/loop-scopes/LOOP-<NAME>-<DATE>.scope.md` for any multi-step or cross-file work.
+- **Commits reference the loop/gap.** Prefix: `fix(LOOP-X):` or `gov(GAP-OP-NNN):`.
+- **Do not ask "want me to fix this?"** — follow the spine: register, fix, receipt.
 
 ## Verify & Receipts
 
