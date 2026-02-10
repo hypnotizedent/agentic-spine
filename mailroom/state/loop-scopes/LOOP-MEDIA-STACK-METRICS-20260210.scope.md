@@ -38,3 +38,4 @@ digging.
 ## Evidence (Receipts)
 - Failed run (missing `RADARR_API_KEY`): `receipts/sessions/RCAP-20260210-090929__media.metrics.today__R4y5m31176/receipt.md`
 - Successful run (P1 complete): `receipts/sessions/RCAP-20260210-145753__media.metrics.today__Ri31639244/receipt.md`
+- Re-run `media.metrics.today` after secrets gating (API key present at `/spine/vm-infra/media-stack/download`): `receipts/sessions/RCAP-20260210-151159__media.metrics.today__Rldqh44773/receipt.md` (count=0, sample empty, secrets.binding/auth/project receipts captured as preconditions).
