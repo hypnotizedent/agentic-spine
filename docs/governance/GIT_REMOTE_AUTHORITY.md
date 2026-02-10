@@ -22,6 +22,8 @@ scope: git-authority
 
 - Push feature branches to **origin** only.
 - Let the Gitea mirror populate GitHub.
+- GitHub is mirror-only and must not be required for canonical work.
+- If the GitHub mirror is down or diverged, fix it later; do not block the spine.
 
 ## Split-Brain Recovery (Origin vs GitHub)
 
@@ -62,4 +64,3 @@ git rev-parse github/main
 - **Loops are canonical work tracking** (mailroom loops + receipts).
 - Issues are optional. If you create issues, prefer **Gitea issues**.
 - Do not duplicate the same issue on both GitHub and Gitea.
-

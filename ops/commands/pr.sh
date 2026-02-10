@@ -75,7 +75,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "DRY RUN: git commit -m '${COMMIT_MSG}'"
   if [[ "$FORGE" == "github" ]]; then
     echo "DRY RUN: git push -u origin HEAD"
-    echo "DRY RUN: git push -u github HEAD"
+    echo "DRY RUN: git push -u github HEAD (if remote exists)"
     echo "DRY RUN: gh pr create --title '${PR_TITLE}' --body '${PR_BODY}'"
   else
     echo "DRY RUN: git push -u origin HEAD"
@@ -97,15 +97,15 @@ if ! git remote get-url origin >/dev/null 2>&1; then
   echo "STOP: missing remote 'origin' (required)" >&2
   exit 1
 fi
-if ! git remote get-url github >/dev/null 2>&1; then
-  echo "STOP: missing remote 'github' (required)" >&2
-  exit 1
-fi
 
 if [[ "$FORGE" == "github" ]]; then
   echo "WARN: github forge selected; this bypasses Gitea CI"
   git push -u origin HEAD
-  git push -u github HEAD
+  if git remote get-url github >/dev/null 2>&1; then
+    git push -u github HEAD
+  else
+    echo "WARN: github remote not configured; skipping mirror push"
+  fi
 
   PR_URL=$(gh pr create --title "$PR_TITLE" --body "$PR_BODY" --json url | jq -r '.url')
   if [[ -n "$PR_URL" ]]; then
