@@ -176,33 +176,13 @@ run_cap() {
     local exit_code=0
     local blocked_reason=""
 
-    # ── Governance guard: mutating work must not run on main (unless explicitly overridden) ──
-    # Why: prevents "quick edits on main" drift. Work should happen in a codex/ work branch + receipts,
-    # then merged to main.
-    if [[ "$safety" == "mutating" && "${OPS_ALLOW_MAIN_MUTATION:-0}" != "1" ]]; then
-        if command -v git >/dev/null 2>&1 && git -C "$SPINE_CODE" rev-parse --git-dir >/dev/null 2>&1; then
-            current_branch="$(git -C "$SPINE_CODE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-            if [[ "$current_branch" == "main" ]]; then
-                blocked_reason="STOP: mutating capability '$name' blocked on branch 'main'."
-            fi
-        fi
-    fi
+    # Mutating caps on main are allowed. Worktrees are optional.
+    # Drift gates (spine.verify) catch problems after the fact.
 
     # ── Execute preconditions (dependency chain, cycle guard) ──
     local precond_failed=0
     local precond_rc=0
     local precond_name=""
-    if [[ -n "$blocked_reason" ]]; then
-        echo "$blocked_reason" | tee "$output_file" >/dev/null
-        echo "hint: create a work branch first (example):" | tee -a "$output_file" >/dev/null
-        echo "  ./bin/ops start loop <LOOP_ID>" | tee -a "$output_file" >/dev/null
-        echo "  # then run the capability from inside the codex-* worktree" | tee -a "$output_file" >/dev/null
-        echo "" | tee -a "$output_file" >/dev/null
-        echo "override: set OPS_ALLOW_MAIN_MUTATION=1 (discouraged)" | tee -a "$output_file" >/dev/null
-        precond_failed=1
-        precond_rc=2
-        precond_name="governance.main_branch_mutation_lock"
-    fi
     if (( ${#requires_list[@]} > 0 )); then
         local stack="${OPS_CAP_STACK:-}"
         stack=",$stack,$name,"

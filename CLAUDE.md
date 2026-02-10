@@ -25,10 +25,9 @@
 
 ## Commit & Branch Rules
 
-- **Main branch is commit-locked.** A pre-commit hook rejects all commits on `main` except ledger-only changes (`mailroom/state/ledger.csv`).
-- **Mutating capabilities blocked on main.** `./bin/ops cap run` refuses `safety: mutating` caps on the `main` branch.
-- **Worktree flow is mandatory.** Use `./bin/ops start loop <LOOP_ID>` to create a worktree branch. Work inside it. Merge with fast-forward back to main.
-- **Clean up after merging** (D48). Use `ops close loop <LOOP_ID>` to tear down worktree + branch + stashes. No count limit. Stale/merged/orphaned worktrees fail `spine.verify`.
+- **Commit directly to main.** No ceremony required. Edit, commit, push.
+- **Worktrees are optional.** `./bin/ops start loop <LOOP_ID>` creates an isolated worktree if you want one. Not mandatory.
+- **If using worktrees, clean up after merging** (D48). Use `ops close loop <LOOP_ID>` to tear down worktree + branch + stashes. Stale/merged/orphaned worktrees fail `spine.verify`.
 - **Gitea is canonical** (origin). GitHub is a mirror. D62 enforces.
 
 ## Capability Gotchas
