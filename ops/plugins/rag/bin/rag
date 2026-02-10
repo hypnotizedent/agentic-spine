@@ -309,7 +309,9 @@ upload_file() {
   local prepared tmp code
   prepared="$(prepare_file_for_upload "$abs")"
   tmp="$(mktemp)"
-  code="$(curl -sS --max-time 180 -o "$tmp" -w "%{http_code}" \
+  # AnythingLLM's upload-and-embed can take several minutes per document depending
+  # on model/backlog. Be generous on timeouts and retry transient failures.
+  code="$(curl -sS --max-time 900 --retry 3 --retry-delay 5 -o "$tmp" -w "%{http_code}" \
     -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" \
     -F "file=@${prepared};filename=$(basename "$abs")" \
     "${ANYTHINGLLM_URL}/api/workspace/${WORKSPACE_SLUG}/upload-and-embed" || true)"
