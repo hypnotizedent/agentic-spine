@@ -1,5 +1,5 @@
 ---
-status: draft
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope

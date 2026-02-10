@@ -22,10 +22,10 @@ SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # --- Dynamic context gathering ---
 
-# Open loops
+# Spine status (loops + gaps + inbox)
 LOOPS="(none)"
 if [[ -x "$SPINE_ROOT/bin/ops" ]]; then
-  LOOPS=$(timeout 10 "$SPINE_ROOT/bin/ops" loops list --open 2>/dev/null || echo "(unavailable)")
+  LOOPS=$(timeout 10 "$SPINE_ROOT/bin/ops" status --brief 2>/dev/null || echo "(unavailable)")
 fi
 
 # Current branch
@@ -54,7 +54,7 @@ You are working inside the agentic-spine repo (\`$SPINE_ROOT\`).
 **Branch:** \`${BRANCH}\` | **Active worktrees:** ${WT_COUNT}/2
 ${BRANCH_WARNING}
 
-### Open Loops
+### Spine Status
 \`\`\`
 ${LOOPS}
 \`\`\`

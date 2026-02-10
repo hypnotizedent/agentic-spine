@@ -27,7 +27,7 @@ scope: session-entry
    - If you are about to touch secrets, make sure you sourced `~/.config/infisical/credentials` and can run the secrets gating capabilities (`secrets.binding`, `secrets.auth.status`, etc.).
 2. **Load context**
    - Generate or read the latest `docs/brain/context.md` if the script is available (see `docs/brain/README.md`).
-   - Identify any open loops (`./bin/ops loops list --open`) and prioritize closing them before starting new work.
+   - Run `./bin/ops status` to see all open work (loops, gaps, inbox, anomalies). Prioritize closing existing work before starting new work.
    - Check available capabilities: `./bin/ops cap list` (SSOT: `ops/capabilities.yaml`). Do not invent commands.
    - Check available CLI tools: review `ops/bindings/cli.tools.inventory.yaml` or the "Available CLI Tools" section in `context.md`. If a user asks you to use a tool, check this inventory before searching the filesystem or web.
 3. **Trace truth**

@@ -73,7 +73,7 @@ else
   SESSION_DIR="$WORKTREE_DIR/docs/sessions/$(date +%Y-%m-%d)-${LOOP_ID}"
 
   # Ensure a loop scope file exists for agents to anchor receipts/decisions.
-  # This is a lightweight scaffold; the authoritative loop engine is mailroom/state/open_loops.jsonl.
+  # Scope files are the canonical work tracker (see LOOP-MAILROOM-CONSOLIDATION-20260210).
   LOOP_SCOPE_DIR="$REPO_ROOT/mailroom/state/loop-scopes"
   LOOP_SCOPE_FILE="$LOOP_SCOPE_DIR/${LOOP_ID}.scope.md"
   mkdir -p "$LOOP_SCOPE_DIR"

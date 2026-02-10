@@ -2,89 +2,10 @@
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-LOOPS_FILE="$SPINE_REPO/mailroom/state/open_loops.jsonl"
+SCOPES_DIR="$SPINE_REPO/mailroom/state/loop-scopes"
 
 echo "=== LOOP SUMMARY ==="
 echo ""
 
-if [[ ! -s "$LOOPS_FILE" ]]; then
-  python3 - <<'PY'
-print("By Status:")
-print("  Open:   0")
-print("  Closed: 0")
-print("")
-print("By Severity (open only):")
-print("  High:   0")
-print("  Medium: 0")
-print("  Low:    0")
-print("")
-print("By Owner (open only):")
-print("  (none)")
-PY
-  exit 0
-fi
-
-python3 - "$LOOPS_FILE" <<'PY'
-import json, sys
-from collections import Counter
-
-path = sys.argv[1]
-rows = []
-with open(path, "r", encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-def loop_key(row):
-    return row.get("loop_id") or row.get("id")
-
-# Reduce append-only records to latest state per loop_id (see loops-ledger-reduce).
-state = {}
-for row in rows:
-    lid = loop_key(row)
-    if not lid:
-        continue
-
-    cur = state.get(lid, {"loop_id": lid})
-
-    action = row.get("action")
-    if action == "close":
-        cur["status"] = "closed"
-
-    for k, v in row.items():
-        if k in ("id", "action"):
-            continue
-        cur[k] = v
-
-    cur["loop_id"] = lid
-    state[lid] = cur
-
-open_rows = [r for r in state.values() if r.get("status") == "open"]
-closed_rows = [r for r in state.values() if r.get("status") == "closed"]
-
-severity_counts = Counter(r.get("severity", "unknown") for r in open_rows)
-owner_counts = Counter(r.get("owner", "unassigned") for r in open_rows)
-
-print("By Status:")
-print(f"  Open:   {len(open_rows)}")
-print(f"  Closed: {len(closed_rows)}")
-print("")
-
-print("By Severity (open only):")
-print(f"  High:   {severity_counts.get('high', 0)}")
-print(f"  Medium: {severity_counts.get('medium', 0)}")
-print(f"  Low:    {severity_counts.get('low', 0)}")
-print("")
-
-print("By Owner (open only):")
-if not owner_counts:
-    print("  (none)")
-else:
-    for owner in sorted(owner_counts):
-        print(f"  {owner}: {owner_counts[owner]}")
-PY
+# Delegate to loops.sh summary which reads scope files
+exec "$SPINE_REPO/ops/commands/loops.sh" summary

@@ -1,7 +1,16 @@
+---
+status: active
+owner: "@ronny"
+last_verified: 2026-02-10
+scope: loop-scope
+loop_id: LOOP-MD1400-SAS-RECOVERY-20260208
+severity: critical
+---
+
 # LOOP-MD1400-SAS-RECOVERY-20260208
 
-> **Status:** open (Phase 1 complete — module config persisted)
-> **Blocked By:** cold boot required + **OOB guard not satisfied** (today `pve` is the sole Tailscale subnet router advertising `192.168.1.0/24`, so powering off `pve` strands remote iDRAC unless on-site or a second subnet router is added).
+> **Status:** open (Phase 2 failed — hardware/firmware defective, needs controller replacement)
+> **Blocked By:** PM8072 firmware unresponsive after cold boot — replace controller with known-good external SAS HBA
 > **Owner:** @ronny
 > **Created:** 2026-02-08
 > **Severity:** critical

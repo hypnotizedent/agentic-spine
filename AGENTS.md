@@ -8,7 +8,7 @@
 
 1. Start in `/Users/ronnyworks/code/agentic-spine`.
 2. Read `docs/governance/SESSION_PROTOCOL.md`.
-3. Run `./bin/ops loops list --open` to check open work.
+3. Run `./bin/ops status` to check all open work (loops, gaps, inbox, anomalies).
 4. Run `./bin/ops cap list` to discover available governed capabilities.
 5. Execute work via `./bin/ops cap run <capability>`.
 
@@ -58,7 +58,8 @@
 ## Quick Commands
 
 - `./bin/ops cap list` — discover capabilities
-- `./bin/ops loops list --open` — check open work
+- `./bin/ops status` — check all open work (loops, gaps, inbox)
+- `./bin/ops loops list --open` — list open loops only
 - `./bin/ops start loop <LOOP_ID>` — start worktree for a loop
 - `./bin/ops cap run spine.verify` — full drift check
 - `/ctx` — load full governance context
@@ -69,7 +70,8 @@
 ```bash
 cd /Users/ronnyworks/code/agentic-spine
 ./bin/ops cap list                        # discover capabilities
-./bin/ops loops list --open               # check open work
+./bin/ops status                          # unified work status (loops + gaps + inbox)
+./bin/ops loops list --open               # list open loops only
 ./bin/ops start loop <LOOP_ID>            # start worktree for a loop
 ./bin/ops cap run spine.verify            # full drift check (50+ gates)
 ./bin/ops cap run spine.status            # quick status

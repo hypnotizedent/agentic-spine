@@ -35,7 +35,8 @@
 ## Quick Commands
 
 - `./bin/ops cap list` — discover capabilities
-- `./bin/ops loops list --open` — check open work
+- `./bin/ops status` — unified work status (loops + gaps + inbox)
+- `./bin/ops loops list --open` — list open loops only
 - `./bin/ops start loop <LOOP_ID>` — start worktree for a loop
 - `./bin/ops cap run spine.verify` — full drift check
 - `/ctx` — load full governance context

@@ -1,8 +1,9 @@
 ---
-status: open
+status: closed
 owner: "@ronny"
-last_verified: 2026-02-09
-scope: homelab-connectivity-outage
+last_verified: 2026-02-10
+scope: loop-scope
+loop_id: LOOP-HOMELAB-CONNECTIVITY-20260209
 ---
 
 # LOOP-HOMELAB-CONNECTIVITY-20260209

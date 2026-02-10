@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -95,4 +95,7 @@ The mailroom has fragmented into parallel systems that don't cross-reference:
 
 ## Receipts
 
-- (add run keys here)
+- P0: Triage complete — 3 inbox items promoted to scope files, parked/done archived, parent_loop added to 7 open gaps
+- P1: `list_loops()` rewritten to read scope frontmatter; `show_loop()`/`close_loop()`/`summary()` updated; `collect` deprecated with warning; `loops-status` plugin delegated to loops.sh
+- P2: `ops status` command created (status.sh); wired in bin/ops dispatcher; reads scopes + gaps + inbox + parked + anomalies
+- P3: AGENTS.md step 3 updated to `ops status`; AGENT_GOVERNANCE_BRIEF.md updated; session-entry-hook.sh uses `ops status --brief`; start.sh JSONL comment fixed

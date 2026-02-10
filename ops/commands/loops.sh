@@ -1,361 +1,305 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# ops loops - Open Loop Engine (receipts → actionable tasks)
+# ops loops - Open Loop Engine (scope-file backed)
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # Usage:
-#   ops loops list [--open|--closed|--all]   List open loops
-#   ops loops collect                         Scan receipts, create new loops
-#   ops loops close <loop_id>                 Mark loop as closed
-#   ops loops show <loop_id>                  Show loop details
+#   ops loops list [--open|--closed|--all]   List loops from scope files
+#   ops loops close <loop_id>                 Mark loop as closed (updates scope)
+#   ops loops show <loop_id>                  Show loop scope file
+#   ops loops summary                         Show loop counts by status/severity
+#   ops loops collect                         (deprecated) Legacy receipt scanner
 #
-# Rule: Every non-OK run must yield an open loop.
+# Canonical: loop-scopes/*.scope.md are the SSOT for open work.
+# See: LOOP-MAILROOM-CONSOLIDATION-20260210 for the migration rationale.
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 STATE_DIR="$SPINE_REPO/mailroom/state"
+SCOPES_DIR="$STATE_DIR/loop-scopes"
+
+# Legacy paths (kept for collect backward compat)
 LOOPS_FILE="$STATE_DIR/open_loops.jsonl"
 RECEIPTS_DIR="$SPINE_REPO/receipts/sessions"
 OUTBOX_DIR="$SPINE_REPO/mailroom/outbox"
 LEDGER="$STATE_DIR/ledger.csv"
-# Local-only cursor used to avoid "historical receipt backfill" loop storms.
-# This file is intentionally NOT committed (mailroom/state/* is gitignored unless explicitly tracked).
 CURSOR_FILE="$STATE_DIR/loops_collect.cursor"
-
-# Dependency check - jq required for JSONL parsing
-check_deps() {
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "ERROR: jq is required for ops loops JSONL parsing." >&2
-        echo "Install: brew install jq" >&2
-        exit 2
-    fi
-}
-
-# Ensure state directory exists before any writes
-ensure_state_dir() {
-    mkdir -p "$STATE_DIR"
-}
 
 usage() {
     cat <<'EOF'
-ops loops - Open Loop Engine
+ops loops - Open Loop Engine (scope-file backed)
 
 Usage:
   ops loops list [--open|--closed|--all]   List loops (default: open only)
-  ops loops collect                         Scan recent receipts, create loops
   ops loops close <loop_id>                 Mark loop as closed
-  ops loops show <loop_id>                  Show loop details
-  ops loops summary                         Show loop counts by status/owner
+  ops loops show <loop_id>                  Show loop scope file
+  ops loops summary                         Show loop counts by status/severity
 
-Examples:
-  ops loops list
-  ops loops collect
-  ops loops close OL_20260201_183012_vendor
-  ops loops summary
+Deprecated:
+  ops loops collect                         Legacy receipt scanner (writes JSONL)
 
-Environment:
-  LOOPS_LEDGER_FAILURE_WINDOW_HOURS  Failed-run reconciliation window (default: 0, disabled)
-  LOOPS_RECEIPT_BACKFILL             If set to 1, scan *all* receipts (ignores cursor). Default: 0
+Canonical source: mailroom/state/loop-scopes/*.scope.md
 EOF
 }
 
-# Cross-platform mtime lookup (macOS/BSD vs GNU)
-mtime_epoch() {
-    local path="$1"
-    if stat -f %m "$path" >/dev/null 2>&1; then
-        stat -f %m "$path"
-    else
-        stat -c %Y "$path"
-    fi
+# ── Frontmatter helpers ───────────────────────────────────────────────────
+# Extract a single YAML frontmatter field from a scope file.
+# Uses awk to isolate the frontmatter block, then grep+sed to pull the value.
+_fm_field() {
+    local file="$1" field="$2"
+    awk '/^---$/{n++; next} n==1{print} n>=2{exit}' "$file" \
+        | { grep "^${field}:" || true; } \
+        | sed "s/^${field}: *//" \
+        | tr -d '"' \
+        | head -1
 }
 
-# Generate loop ID
-gen_loop_id() {
-    local run_key="$1"
-    local suffix="$2"
-    local ts
-    ts="$(date +%Y%m%d_%H%M%S)"
-    echo "OL_${ts}_${suffix}"
+# Extract the title from the first markdown heading after frontmatter.
+_scope_title() {
+    local file="$1"
+    local title
+    title="$(awk '/^---$/{n++; next} n>=2{print}' "$file" \
+        | grep -m1 '^#' \
+        | sed 's/^#* *//' \
+        | sed 's/^Loop Scope: //')"
+    echo "${title:-$(basename "$file" .scope.md)}"
 }
 
-# Check if loop already exists for a run_key
-loop_exists_for_run() {
-    local run_key="$1"
-    grep -q "\"run_key\":\"$run_key\"" "$LOOPS_FILE" 2>/dev/null
+# Is this status considered "open"?
+_is_open_status() {
+    case "$1" in
+        active|draft|open) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
-# Extract open loops from a receipt (file-based rule engine).
-#
-# Scans a receipt directory and applies three rules to decide whether
-# the run produces an open loop requiring human or agent follow-up.
-#
-# Rule 1: Non-OK status         → open loop (high severity)
-# Rule 2: Outbox markers        → open loop (WARNING/NEEDS_INPUT/BLOCKED = action required)
-# Rule 3: Dry-run outputs       → open loop (low severity, requires explicit approval)
-#
-# If a loop is created it is appended to the JSONL ledger (append-only).
-extract_loops_from_receipt() {
-    local receipt_dir="$1"
-    local receipt_file="$receipt_dir/receipt.md"
+# ── List loops ────────────────────────────────────────────────────────────
+list_loops() {
+    local filter="${1:---open}"
+    local label="OPEN LOOPS"
+    [[ "$filter" == "--closed" ]] && label="CLOSED LOOPS"
+    [[ "$filter" == "--all" ]] && label="ALL LOOPS"
 
-    [[ -f "$receipt_file" ]] || return 0
+    echo "=== $label ==="
+    echo ""
 
-    # Extract run_key from receipt
-    local run_key
-    run_key="$(grep -m1 "Run Key" "$receipt_file" 2>/dev/null | sed 's/.*`\([^`]*\)`.*/\1/' || echo "")"
-    [[ -z "$run_key" ]] && run_key="$(basename "$receipt_dir" | sed 's/^R//')"
-
-    # Skip if loop already exists for this run
-    if loop_exists_for_run "$run_key"; then
+    if [[ ! -d "$SCOPES_DIR" ]]; then
+        echo "(no loops — $SCOPES_DIR not found)"
         return 0
     fi
 
-    # Extract status
-    local status
-    status="$(grep -m1 "| Status |" "$receipt_file" 2>/dev/null | sed 's/.*| Status | *//' | sed 's/ *|.*//' || echo "unknown")"
-
-    # Find corresponding outbox file
-    local outbox_file=""
-    for f in "$OUTBOX_DIR/${run_key}"*RESULT.md "$OUTBOX_DIR/${run_key}"*__RESULT.md; do
-        [[ -f "$f" ]] && outbox_file="$f" && break
+    local has_scopes=false
+    for f in "$SCOPES_DIR"/*.scope.md; do
+        [[ -f "$f" ]] && has_scopes=true && break
     done
-
-    # Determine if this needs an open loop
-    local needs_loop=false
-    local severity="low"
-    local title=""
-    local next_action=""
-    local owner="unassigned"
-
-    # ── Rule 1: Non-OK status → open loop ──
-    case "$status" in
-        done|DONE|ok|OK|pass|PASS|success|SUCCESS)
-            ;;
-        failed|FAILED|error|ERROR)
-            needs_loop=true
-            severity="high"
-            title="Run failed: $run_key"
-            next_action="Investigate failure and retry or escalate"
-            ;;
-        *)
-            needs_loop=true
-            severity="medium"
-            title="Unknown status for: $run_key"
-            next_action="Review and classify"
-            ;;
-    esac
-
-    # ── Rule 2: Outbox markers (WARNING/NEEDS_INPUT/BLOCKED) → action required ──
-    if [[ -f "$outbox_file" ]]; then
-        if grep -qiE "WARNING:|NEEDS_INPUT:|BLOCKED|MANUAL|APPROVAL" "$outbox_file" 2>/dev/null; then
-            needs_loop=true
-            severity="medium"
-            title="Action required: $run_key"
-            next_action="Review outbox and take required action"
-        fi
-
-        # ── Rule 3: Dry-run outputs → require explicit approval ──
-        if grep -qiE "dry.run|DRY_RUN|--dry" "$outbox_file" 2>/dev/null; then
-            needs_loop=true
-            severity="low"
-            title="Dry-run needs approval: $run_key"
-            next_action="Review dry-run output and execute if approved"
-        fi
-
-        # Try to extract owner from outbox content
-        if grep -qiE "finance|invoice|receipt|payment" "$outbox_file" 2>/dev/null; then
-            owner="finance"
-        elif grep -qiE "customer|order|quote" "$outbox_file" 2>/dev/null; then
-            owner="customer-service"
-        elif grep -qiE "file|upload|asset|artwork" "$outbox_file" 2>/dev/null; then
-            owner="files"
-        fi
+    if [[ "$has_scopes" == "false" ]]; then
+        echo "(no loops)"
+        return 0
     fi
 
-    # ── Write section: JSONL append-only ledger ──
-    if [[ "$needs_loop" == "true" ]]; then
-        local loop_id
-        loop_id="$(gen_loop_id "$run_key" "$(echo "$run_key" | cut -d'_' -f3 | head -c10)")"
-        local created_at
-        created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local count=0
+    for scope_file in "$SCOPES_DIR"/*.scope.md; do
+        [[ -f "$scope_file" ]] || continue
 
-        # Build evidence array
-        local evidence="[\"$receipt_file\""
-        [[ -n "$outbox_file" ]] && evidence+=",\"$outbox_file\""
-        evidence+="]"
+        local loop_id status severity owner title
+        loop_id="$(_fm_field "$scope_file" "loop_id")"
+        [[ -z "$loop_id" ]] && continue
 
-        # Append JSONL record (append-only, never overwrite)
-        cat >> "$LOOPS_FILE" <<EOF
-{"loop_id":"$loop_id","run_key":"$run_key","created_at":"$created_at","status":"open","severity":"$severity","owner":"$owner","title":"$title","next_action":"$next_action","evidence":$evidence}
-EOF
+        status="$(_fm_field "$scope_file" "status")"
+        severity="$(_fm_field "$scope_file" "severity")"
+        owner="$(_fm_field "$scope_file" "owner")"
+        title="$(_scope_title "$scope_file")"
 
-        echo "  CREATED: $loop_id ($severity) - $title"
+        # Normalize missing fields
+        [[ -z "$status" ]] && status="unknown"
+        [[ -z "$severity" ]] && severity="-"
+        [[ -z "$owner" ]] && owner="unassigned"
+
+        # Skip non-loop scope files (e.g. status: authoritative)
+        case "$status" in
+            active|draft|open|closed) ;;
+            *) continue ;;
+        esac
+
+        # Only show title if it differs from loop_id
+        local display_title=""
+        [[ "$title" != "$loop_id" ]] && display_title="$title"
+
+        case "$filter" in
+            --open)
+                _is_open_status "$status" || continue
+                printf "  [%-8s] %-15s %s" "$severity" "$owner" "$loop_id"
+                [[ -n "$display_title" ]] && printf "  %s" "$display_title"
+                printf "\n"
+                ;;
+            --closed)
+                _is_open_status "$status" && continue
+                printf "  [%-8s] %-15s %s" "$severity" "$owner" "$loop_id"
+                [[ -n "$display_title" ]] && printf "  %s" "$display_title"
+                printf "\n"
+                ;;
+            --all)
+                printf "  [%-8s] %-8s %-15s %s" "$severity" "$status" "$owner" "$loop_id"
+                [[ -n "$display_title" ]] && printf "  %s" "$display_title"
+                printf "\n"
+                ;;
+        esac
+        count=$((count + 1))
+    done
+
+    echo ""
+    if [[ "$filter" == "--open" ]]; then
+        echo "Open loops: $count"
+    else
+        echo "Loops shown: $count"
     fi
 }
 
-collect_failed_from_ledger() {
-    python3 - "$LOOPS_FILE" "$LEDGER" "$RECEIPTS_DIR" "$OUTBOX_DIR" <<'PY'
-import csv
-import json
+# ── Show loop ─────────────────────────────────────────────────────────────
+show_loop() {
+    local loop_id="$1"
+    local scope_file="$SCOPES_DIR/${loop_id}.scope.md"
+
+    if [[ ! -f "$scope_file" ]]; then
+        echo "ERROR: Scope file not found: $scope_file" >&2
+        exit 1
+    fi
+
+    echo "=== LOOP: $loop_id ==="
+    echo "File: $scope_file"
+    echo ""
+    cat "$scope_file"
+}
+
+# ── Close loop ────────────────────────────────────────────────────────────
+close_loop() {
+    local loop_id="$1"
+    local scope_file="$SCOPES_DIR/${loop_id}.scope.md"
+
+    if [[ ! -f "$scope_file" ]]; then
+        echo "ERROR: Scope file not found: $scope_file" >&2
+        exit 1
+    fi
+
+    local current_status
+    current_status="$(_fm_field "$scope_file" "status")"
+    if [[ "$current_status" == "closed" ]]; then
+        echo "ALREADY CLOSED: $loop_id"
+        return 0
+    fi
+
+    # Cross-platform sed -i
+    if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' 's/^status: .*/status: closed/' "$scope_file"
+    else
+        sed -i 's/^status: .*/status: closed/' "$scope_file"
+    fi
+
+    echo "CLOSED: $loop_id (updated $scope_file)"
+}
+
+# ── Summary ───────────────────────────────────────────────────────────────
+summary() {
+    echo "=== LOOP SUMMARY ==="
+    echo ""
+
+    if [[ ! -d "$SCOPES_DIR" ]]; then
+        echo "Open: 0"
+        echo "Closed: 0"
+        echo "Total: 0"
+        return 0
+    fi
+
+    # Python for reliable counting (associative arrays need bash 4+, macOS ships bash 3)
+    python3 - "$SCOPES_DIR" <<'PY'
 import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from collections import Counter
 from pathlib import Path
 
-loops_file = Path(sys.argv[1])
-ledger_file = Path(sys.argv[2])
-receipts_dir = Path(sys.argv[3])
-outbox_dir = Path(sys.argv[4])
-
-window_hours = int(os.environ.get("LOOPS_LEDGER_FAILURE_WINDOW_HOURS", "0"))
-now_utc = datetime.now(timezone.utc)
-if window_hours <= 0:
-    print("  LEDGER: disabled (set LOOPS_LEDGER_FAILURE_WINDOW_HOURS>0 to enable)")
+scopes_dir = Path(sys.argv[1])
+if not scopes_dir.is_dir():
+    print("Open: 0\nClosed: 0\nTotal: 0")
     sys.exit(0)
 
-cutoff = now_utc - timedelta(hours=window_hours)
+open_count = 0
+closed_count = 0
+total = 0
+severity_counts = Counter()
+owner_counts = Counter()
 
-existing_run_keys = set()
-existing_loop_ids = set()
+FM_RE = re.compile(r'^---\s*$')
 
-if loops_file.exists():
-    with loops_file.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            run_key = row.get("run_key")
-            loop_id = row.get("loop_id")
-            if run_key:
-                existing_run_keys.add(run_key)
-            if loop_id:
-                existing_loop_ids.add(loop_id)
-
-latest_by_run_id = {}
-if ledger_file.exists():
-    with ledger_file.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            run_id = row.get("run_id", "")
-            if run_id:
-                latest_by_run_id[run_id] = row
-
-def parse_iso(ts: str):
-    ts = (ts or "").strip()
-    if not ts:
-        return None
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-def new_loop_id(run_key: str) -> str:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    suffix = re.sub(r"[^A-Za-z0-9]+", "_", run_key).strip("_")[:10] or "failed"
-    base = f"OL_{ts}_{suffix}"
-    if base not in existing_loop_ids:
-        existing_loop_ids.add(base)
-        return base
-
-    i = 2
-    while True:
-        candidate = f"{base}{i}"
-        if candidate not in existing_loop_ids:
-            existing_loop_ids.add(candidate)
-            return candidate
-        i += 1
-
-new_rows = []
-for run_id, row in latest_by_run_id.items():
-    status = (row.get("status") or "").strip().lower()
-    if status != "failed":
-        continue
-
-    created_at_row = parse_iso(row.get("created_at"))
-    if cutoff is not None:
-        if created_at_row is None or created_at_row < cutoff:
+for f in sorted(scopes_dir.glob("*.scope.md")):
+    lines = f.read_text().splitlines()
+    in_fm = False
+    fm = {}
+    for line in lines:
+        if FM_RE.match(line):
+            if in_fm:
+                break
+            in_fm = True
             continue
+        if in_fm and ':' in line:
+            key, _, val = line.partition(':')
+            fm[key.strip()] = val.strip().strip('"')
 
-    prompt_file = (row.get("prompt_file") or "").strip()
-    if prompt_file.endswith(".md") or prompt_file.endswith(".txt"):
-        run_key = Path(prompt_file).stem
-    else:
-        run_key = run_id
-
-    if not run_key or run_key in existing_run_keys:
+    status = fm.get("status", "")
+    if status not in ("active", "draft", "open", "closed"):
         continue
 
-    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    loop_id = new_loop_id(run_key)
+    total += 1
+    severity = fm.get("severity", "unknown")
+    owner = fm.get("owner", "unassigned")
 
-    evidence = [str(ledger_file)]
+    if status in ("active", "draft", "open"):
+        open_count += 1
+        severity_counts[severity] += 1
+        owner_counts[owner] += 1
+    elif status == "closed":
+        closed_count += 1
 
-    receipt_candidates = [
-        receipts_dir / f"R{run_key}" / "receipt.md",
-        receipts_dir / f"R{run_id}" / "receipt.md",
-    ]
-    for cand in receipt_candidates:
-        if cand.exists():
-            evidence.append(str(cand))
-            break
+print("By Status:")
+print(f"  Open:   {open_count}")
+print(f"  Closed: {closed_count}")
+print(f"  Total:  {total}")
+print()
 
-    result_file = (row.get("result_file") or "").strip()
-    if result_file and result_file != "receipt.md":
-        outbox_file = outbox_dir / result_file
-        if outbox_file.exists():
-            evidence.append(str(outbox_file))
+print("By Severity (open only):")
+for sev in ("critical", "high", "medium", "low", "unknown"):
+    c = severity_counts.get(sev, 0)
+    if c > 0 or sev in ("critical", "high", "medium", "low"):
+        print(f"  {sev.capitalize():10s} {c}")
+print()
 
-    new_row = {
-        "loop_id": loop_id,
-        "run_key": run_key,
-        "created_at": created_at,
-        "status": "open",
-        "severity": "high",
-        "owner": "unassigned",
-        "title": f"Run failed: {run_key}",
-        "next_action": "Investigate failure and retry or escalate",
-        "evidence": evidence,
-    }
-    new_rows.append(new_row)
-    existing_run_keys.add(run_key)
-
-if not new_rows:
-    if cutoff is not None:
-        print(f"  LEDGER: no new failed-run loops in last {window_hours}h")
-    else:
-        print("  LEDGER: no new failed-run loops")
-    sys.exit(0)
-
-loops_file.parent.mkdir(parents=True, exist_ok=True)
-with loops_file.open("a", encoding="utf-8") as f:
-    for row in new_rows:
-        f.write(json.dumps(row, separators=(",", ":")) + "\n")
-
-print(f"  LEDGER: created {len(new_rows)} failed-run loop(s)")
-for row in new_rows:
-    print(f"  CREATED: {row['loop_id']} (high) - {row['title']}")
+print("By Owner (open only):")
+if not owner_counts:
+    print("  (none)")
+else:
+    for owner in sorted(owner_counts):
+        print(f"  {owner}: {owner_counts[owner]}")
 PY
 }
 
-# Collect loops from receipts and ledger latest-state failures.
+# ── Collect (deprecated — kept for backward compat) ───────────────────────
 collect_loops() {
-    echo "=== COLLECTING OPEN LOOPS ==="
+    echo "=== COLLECTING OPEN LOOPS (DEPRECATED) ==="
+    echo ""
+    echo "WARNING: 'ops loops collect' writes to open_loops.jsonl which is deprecated."
+    echo "Canonical work tracking now uses loop-scopes/*.scope.md files."
+    echo "Machine-generated OL_* loops will continue to work but are not shown by 'ops loops list'."
+    echo "To create a new loop: create a scope file in $SCOPES_DIR/"
     echo ""
 
-    local scanned=0
-    local before_receipt_lines=0
-    local after_receipt_lines=0
-    local before_ledger_lines=0
-    local after_ledger_lines=0
+    # Keep legacy collect functioning for receipt scanning
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "ERROR: jq is required for legacy collect." >&2
+        exit 2
+    fi
 
-    # Default behavior: only scan receipts created since last collect.
-    # This prevents loop storms when the receipts directory contains long history.
+    local scanned=0
     local backfill="${LOOPS_RECEIPT_BACKFILL:-0}"
     local cursor_epoch=""
     local now_epoch=""
@@ -368,26 +312,31 @@ collect_loops() {
         if [[ -z "$cursor_epoch" ]]; then
             cursor_epoch="$now_epoch"
             echo "$cursor_epoch" > "$CURSOR_FILE"
-            echo "  CURSOR_INIT: $CURSOR_FILE (epoch=$cursor_epoch) - skipping historical receipts"
+            echo "  CURSOR_INIT: skipping historical receipts"
             echo ""
         fi
     else
         cursor_epoch="0"
-        echo "  BACKFILL: enabled (LOOPS_RECEIPT_BACKFILL=1) - scanning all receipts"
+        echo "  BACKFILL: scanning all receipts"
         echo ""
     fi
 
-    before_receipt_lines="$(wc -l < "$LOOPS_FILE" 2>/dev/null || echo 0)"
+    # Cross-platform mtime
+    mtime_epoch() {
+        local path="$1"
+        if stat -f %m "$path" >/dev/null 2>&1; then
+            stat -f %m "$path"
+        else
+            stat -c %Y "$path"
+        fi
+    }
 
     while IFS= read -r receipt_dir; do
         [[ -d "$receipt_dir" ]] || continue
-
-        # Only scan canonical receipts dirs. Legacy/non-standard directories cause noise.
         local base
         base="$(basename "$receipt_dir")"
         [[ "$base" == R* ]] || continue
 
-        # Apply cursor filter unless backfill is enabled.
         if [[ "$cursor_epoch" != "0" ]]; then
             local receipt_file="$receipt_dir/receipt.md"
             local mtime_path="$receipt_dir"
@@ -397,156 +346,73 @@ collect_loops() {
             [[ "$mtime" -ge "$cursor_epoch" ]] || continue
         fi
 
-        extract_loops_from_receipt "$receipt_dir"
+        # Legacy: append to JSONL (not scope files)
+        _extract_loops_from_receipt "$receipt_dir"
         scanned=$((scanned + 1))
-    done < <(find "$RECEIPTS_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
+    done < <(find "$RECEIPTS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
 
-    after_receipt_lines="$(wc -l < "$LOOPS_FILE" 2>/dev/null || echo 0)"
-
-    before_ledger_lines="$after_receipt_lines"
-    collect_failed_from_ledger
-    after_ledger_lines="$(wc -l < "$LOOPS_FILE" 2>/dev/null || echo 0)"
-
-    # Advance cursor at end (local-only). We intentionally use "now" to avoid
-    # re-scanning older receipts repeatedly even if their mtimes shift.
     if [[ "$backfill" != "1" ]]; then
         echo "$now_epoch" > "$CURSOR_FILE" 2>/dev/null || true
     fi
 
     echo ""
     echo "Scanned receipts: $scanned"
-    echo "Created from receipts: $((after_receipt_lines - before_receipt_lines))"
-    echo "Created from ledger failures: $((after_ledger_lines - before_ledger_lines))"
-    echo "Loops file: $LOOPS_FILE"
+    echo "Note: results written to deprecated JSONL. Use scope files for canonical tracking."
 }
 
-# List loops
-list_loops() {
-    local filter="${1:---open}"
+# Legacy receipt extraction (writes JSONL, not scope files)
+_extract_loops_from_receipt() {
+    local receipt_dir="$1"
+    local receipt_file="$receipt_dir/receipt.md"
 
-    echo "=== OPEN LOOPS ==="
-    echo ""
+    [[ -f "$receipt_file" ]] || return 0
 
-    if [[ ! -s "$LOOPS_FILE" ]]; then
-        echo "(no loops)"
+    local run_key
+    run_key="$(grep -m1 "Run Key" "$receipt_file" 2>/dev/null | sed 's/.*`\([^`]*\)`.*/\1/' || echo "")"
+    [[ -z "$run_key" ]] && run_key="$(basename "$receipt_dir" | sed 's/^R//')"
+
+    if grep -q "\"run_key\":\"$run_key\"" "$LOOPS_FILE" 2>/dev/null; then
         return 0
     fi
 
-    # Canonical jq reducer:
-    # 1. Normalize close records: {id, action:close} → {loop_id, status:closed}
-    # 2. Deduplicate by loop_id (last entry per loop_id wins)
-    # 3. Apply close records to filter out closed loops
-    local jq_reduce
-    jq_reduce='[.[] | if .action == "close" then {loop_id: .id, status: "closed", closed_at: .closed_at, close_reason: .reason} else . end | select(.loop_id != null)] | reduce .[] as $i ({}; .[$i.loop_id] = ((.[$i.loop_id] // {}) * $i)) | [.[]]'
+    local status
+    status="$(grep -m1 "| Status |" "$receipt_file" 2>/dev/null | sed 's/.*| Status | *//' | sed 's/ *|.*//' || echo "unknown")"
 
-    case "$filter" in
-        --open)
-            while IFS=$'\t' read -r loop_id severity owner title; do
-                printf "  [%s] %-12s %-15s %s\n" "$severity" "$owner" "$loop_id" "$title"
-            done < <(jq -s -r "$jq_reduce | .[] | select(.status==\"open\") | \"\(.loop_id)\t\(.severity)\t\(.owner)\t\(.title)\"" "$LOOPS_FILE")
-            ;;
-        --closed)
-            while IFS=$'\t' read -r loop_id severity owner title; do
-                printf "  [%s] %-12s %-15s %s\n" "$severity" "$owner" "$loop_id" "$title"
-            done < <(jq -s -r "$jq_reduce | .[] | select(.status==\"closed\") | \"\(.loop_id)\t\(.severity)\t\(.owner)\t\(.title)\"" "$LOOPS_FILE")
-            ;;
-        --all)
-            while IFS=$'\t' read -r loop_id status severity owner title; do
-                printf "  [%s] %-6s %-12s %-15s %s\n" "$severity" "$status" "$owner" "$loop_id" "$title"
-            done < <(jq -s -r "$jq_reduce | .[] | \"\(.loop_id)\t\(.status)\t\(.severity)\t\(.owner)\t\(.title)\"" "$LOOPS_FILE")
-            ;;
+    case "$status" in
+        done|DONE|ok|OK|pass|PASS|success|SUCCESS) return 0 ;;
     esac
 
-    echo ""
-    local open_count
-    open_count="$(jq -s -r "$jq_reduce | [.[] | select(.status==\"open\")] | length" "$LOOPS_FILE")"
-    echo "Open loops: $open_count"
+    local ts loop_id
+    ts="$(date +%Y%m%d_%H%M%S)"
+    loop_id="OL_${ts}_$(echo "$run_key" | cut -d'_' -f3 | head -c10)"
+    local created_at
+    created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    cat >> "$LOOPS_FILE" <<EOF
+{"loop_id":"$loop_id","run_key":"$run_key","created_at":"$created_at","status":"open","severity":"high","owner":"unassigned","title":"Run failed: $run_key","next_action":"Investigate failure and retry or escalate","evidence":["$receipt_file"]}
+EOF
+
+    echo "  CREATED (JSONL): $loop_id - Run failed: $run_key"
 }
 
-# Close a loop
-close_loop() {
-    local loop_id="$1"
-
-    if ! grep -q "\"loop_id\":\"$loop_id\"" "$LOOPS_FILE" 2>/dev/null; then
-        echo "ERROR: Loop not found: $loop_id"
-        exit 1
-    fi
-
-    # Update status to closed (append new record with closed status)
-    local closed_at
-    closed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-    # Get the original record and update it
-    local original
-    original="$(grep "\"loop_id\":\"$loop_id\"" "$LOOPS_FILE" | tail -1)"
-
-    local updated
-    updated="$(echo "$original" | jq -c ". + {\"status\":\"closed\",\"closed_at\":\"$closed_at\"}")"
-
-    echo "$updated" >> "$LOOPS_FILE"
-
-    echo "CLOSED: $loop_id at $closed_at"
-}
-
-# Show loop details
-show_loop() {
-    local loop_id="$1"
-
-    local record
-    record="$(grep "\"loop_id\":\"$loop_id\"" "$LOOPS_FILE" 2>/dev/null | tail -1)"
-
-    if [[ -z "$record" ]]; then
-        echo "ERROR: Loop not found: $loop_id"
-        exit 1
-    fi
-
-    echo "=== LOOP: $loop_id ==="
-    echo ""
-    echo "$record" | jq .
-}
-
-# Summary - uses canonical reducer for deduped counts
-summary() {
-    echo "=== LOOP SUMMARY ==="
-    echo ""
-
-    # Use canonical reducer for deterministic deduped counts
-    local reducer="$SPINE_REPO/ops/plugins/loops/bin/loops-ledger-reduce"
-
-    if [[ ! -x "$reducer" ]]; then
-        echo "ERROR: loops-ledger-reduce not found or not executable" >&2
-        exit 1
-    fi
-
-    "$reducer" --summary
-}
-
-# Main
+# ── Main ──────────────────────────────────────────────────────────────────
 case "${1:-}" in
     list)
-        check_deps
-        ensure_state_dir
         list_loops "${2:---open}"
         ;;
     collect)
-        ensure_state_dir
+        mkdir -p "$STATE_DIR"
         collect_loops
         ;;
     close)
         [[ -z "${2:-}" ]] && { echo "Usage: ops loops close <loop_id>"; exit 1; }
-        check_deps
-        ensure_state_dir
         close_loop "$2"
         ;;
     show)
         [[ -z "${2:-}" ]] && { echo "Usage: ops loops show <loop_id>"; exit 1; }
-        check_deps
-        ensure_state_dir
         show_loop "$2"
         ;;
     summary)
-        check_deps
-        ensure_state_dir
         summary
         ;;
     -h|--help|"")
