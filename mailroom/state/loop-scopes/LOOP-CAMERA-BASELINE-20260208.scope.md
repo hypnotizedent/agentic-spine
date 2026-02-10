@@ -1,6 +1,6 @@
 # LOOP-CAMERA-BASELINE-20260208
 
-> **Status:** open
+> **Status:** rolled-into-parent
 > **Blocked By:** none
 > **Owner:** @ronny
 > **Created:** 2026-02-08
@@ -139,6 +139,15 @@ Depends on P2-P4 completion. Scope:
 - Live ISAPI query from pve (2026-02-08) — channel status, detect results, HDD status
 - Dell N2024P factory reset receipt (2026-02-05) — NVR on Gi1/0/4
 - `docs/governance/CAMERA_SSOT.md` — canonical camera doc
+
+---
+
+## Rolled Into: OL_SHOP_BASELINE_FINISH
+
+Camera baseline tasks (P2-P5) are now tracked as phases of the shop baseline loop
+(OL_SHOP_BASELINE_FINISH). The remaining physical-visit work (restore offline cameras,
+model/firmware inventory, location audit, Frigate planning) all require the same
+on-site trip that the shop baseline covers. Consolidating avoids duplicate tracking.
 
 ---
 

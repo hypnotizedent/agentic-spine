@@ -1,5 +1,5 @@
 ---
-status: active
+status: rolled-into-parent
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -24,6 +24,15 @@ digging.
 - P1: Implement `media.metrics.today` (radarr first) + docs
 - P2: Optional: add `sonarr` episode metrics
 - P3: Optional: n8n workflow to post daily summary to inbox/outbox
+
+## Rolled Into: LOOP-MEDIA-STACK-SPLIT-20260208
+
+Media stack metrics work becomes a post-decommission phase of the media stack split
+loop (LOOP-MEDIA-STACK-SPLIT-20260208). Metrics collection depends on the split
+being fully soaked and VM 201 decommissioned, so it naturally belongs as a follow-on
+phase rather than a standalone loop.
+
+---
 
 ## Evidence (Receipts)
 - (link receipts here)
