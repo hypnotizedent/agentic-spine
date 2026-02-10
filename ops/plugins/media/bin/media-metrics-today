@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# media.metrics.today — "movies pulled today" from Radarr history (read-only)
+#
+# Usage (via spine):
+#   ./bin/ops cap run media.metrics.today
+#   ./bin/ops cap run media.metrics.today --date 2026-02-10
+#   ./bin/ops cap run media.metrics.today --tz utc
+#   ./bin/ops cap run media.metrics.today --sample 10
+#
+# Contract:
+# - Reads Radarr endpoint from ops/bindings/services.health.yaml (id=radarr)
+# - Requires RADARR_API_KEY injected via secrets-exec (do NOT print it)
+# - Counts Radarr history eventType=downloadFolderImported within the selected day
+# - Outputs a bounded sample of titles (best-effort)
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+SERVICES_BINDING="$ROOT/ops/bindings/services.health.yaml"
+
+# Re-exec under secrets injection (single capability receipt; no nested caps).
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+usage() {
+  cat <<'USAGE'
+media.metrics.today
+
+Args:
+  --date YYYY-MM-DD   (default: today, based on --tz)
+  --tz   local|utc    (default: local)
+  --sample N          (default: 5)
+
+Example:
+  ./bin/ops cap run media.metrics.today --tz utc --date 2026-02-10 --sample 10
+USAGE
+}
+
+DATE_STR=""
+TZ_MODE="local"
+SAMPLE_SIZE="5"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --date)
+      DATE_STR="${2:-}"; shift 2 ;;
+    --tz)
+      TZ_MODE="${2:-}"; shift 2 ;;
+    --sample)
+      SAMPLE_SIZE="${2:-}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      echo "FAIL: unknown arg: $1" >&2
+      usage >&2
+      exit 1 ;;
+  esac
+done
+
+if [[ "$TZ_MODE" != "local" && "$TZ_MODE" != "utc" ]]; then
+  echo "FAIL: --tz must be 'local' or 'utc' (got: $TZ_MODE)" >&2
+  exit 1
+fi
+
+if ! [[ "$SAMPLE_SIZE" =~ ^[0-9]+$ ]]; then
+  echo "FAIL: --sample must be an integer (got: $SAMPLE_SIZE)" >&2
+  exit 1
+fi
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "MISSING_DEP: curl" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "MISSING_DEP: python3" >&2; exit 1; }
+
+if [[ -z "${RADARR_API_KEY:-}" ]]; then
+  echo "STOP: RADARR_API_KEY not present in injected environment." >&2
+  echo "hint: set RADARR_API_KEY in Infisical under /spine/vm-infra/media-stack/download" >&2
+  exit 2
+fi
+
+RADARR_PING_URL="$(yq -r '.endpoints[] | select(.id=="radarr") | .url // ""' "$SERVICES_BINDING")"
+if [[ -z "${RADARR_PING_URL:-}" || "${RADARR_PING_URL:-}" == "null" ]]; then
+  echo "STOP: radarr endpoint missing in binding: $SERVICES_BINDING" >&2
+  exit 2
+fi
+
+RADARR_BASE="${RADARR_PING_URL%/ping}"
+RADARR_BASE="${RADARR_BASE%/}"
+
+if [[ -z "${DATE_STR:-}" ]]; then
+  if [[ "$TZ_MODE" == "utc" ]]; then
+    DATE_STR="$(date -u +%Y-%m-%d)"
+  else
+    DATE_STR="$(date +%Y-%m-%d)"
+  fi
+fi
+
+# Quick reachability check (no auth).
+curl -fsS --max-time 5 "${RADARR_BASE}/ping" >/dev/null 2>&1 || {
+  echo "STOP: radarr ping failed: ${RADARR_BASE}/ping" >&2
+  exit 2
+}
+
+python3 - "$RADARR_BASE" "$DATE_STR" "$TZ_MODE" "$SAMPLE_SIZE" <<'PY'
+import datetime as _dt
+import json as _json
+import os as _os
+import sys as _sys
+import urllib.error as _ue
+import urllib.request as _ur
+
+base = _sys.argv[1].rstrip("/")
+date_str = _sys.argv[2]
+tz_mode = _sys.argv[3]
+sample_size = int(_sys.argv[4])
+api_key = _os.environ.get("RADARR_API_KEY", "")
+
+def _fail_stop(msg: str) -> None:
+    print(f"STOP: {msg}", file=_sys.stderr)
+    raise SystemExit(2)
+
+def _iso_to_dt(s: str) -> _dt.datetime | None:
+    if not s:
+        return None
+    # Radarr often returns RFC3339 with Z.
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return _dt.datetime.fromisoformat(s)
+    except ValueError:
+        # Best-effort: strip fractional seconds if present.
+        if "." in s:
+            head, rest = s.split(".", 1)
+            tz = ""
+            if "+" in rest:
+                tz = "+" + rest.split("+", 1)[1]
+            elif "-" in rest:
+                # rest may include timezone "-05:00" after fractional seconds.
+                tz = "-" + rest.split("-", 1)[1]
+            try:
+                return _dt.datetime.fromisoformat(head + tz)
+            except ValueError:
+                return None
+        return None
+
+def _req_json(url: str) -> dict:
+    req = _ur.Request(url, headers={"X-Api-Key": api_key})
+    with _ur.urlopen(req, timeout=20) as resp:
+        body = resp.read().decode("utf-8")
+        return _json.loads(body)
+
+try:
+    d = _dt.date.fromisoformat(date_str)
+except ValueError:
+    _fail_stop(f"invalid --date (expected YYYY-MM-DD): {date_str}")
+
+if tz_mode == "utc":
+    tz = _dt.timezone.utc
+else:
+    tz = _dt.datetime.now().astimezone().tzinfo
+
+start = _dt.datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz)
+end = start + _dt.timedelta(days=1)
+
+matches: list[dict] = []
+
+page = 1
+page_size = 200
+max_pages = 20
+
+try:
+    while page <= max_pages:
+        url = f"{base}/api/v3/history?page={page}&pageSize={page_size}&sortKey=date&sortDirection=descending"
+        data = _req_json(url)
+        records = data.get("records") or []
+        if not records:
+            break
+
+        stop = False
+        for r in records:
+            dt = _iso_to_dt(r.get("date", ""))
+            if dt is None:
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_dt.timezone.utc)
+
+            dt_tz = dt.astimezone(tz)
+            if dt_tz < start:
+                stop = True
+                break
+            if dt_tz >= end:
+                continue
+            if r.get("eventType") != "downloadFolderImported":
+                continue
+            matches.append(r)
+
+        if stop:
+            break
+        page += 1
+except _ue.HTTPError as e:
+    if e.code in (401, 403):
+        _fail_stop("radarr API auth failed (check RADARR_API_KEY)")
+    _fail_stop(f"radarr API HTTP error: {e.code}")
+except _ue.URLError:
+    _fail_stop("radarr API unreachable (network/DNS)")
+except Exception:
+    _fail_stop("radarr API parse failed (unexpected response)")
+
+count = len(matches)
+
+movie_ids: list[int] = []
+for r in matches:
+    mid = r.get("movieId")
+    if isinstance(mid, int) and mid not in movie_ids:
+        movie_ids.append(mid)
+    if len(movie_ids) >= sample_size:
+        break
+
+def _movie_title(mid: int) -> str:
+    try:
+        m = _req_json(f"{base}/api/v3/movie/{mid}")
+        title = m.get("title") or str(mid)
+        year = m.get("year")
+        return f"{title} ({year})" if year else title
+    except Exception:
+        return str(mid)
+
+samples = [_movie_title(mid) for mid in movie_ids] if sample_size > 0 else []
+
+print("media.metrics.today")
+print("service: radarr")
+print(f"base_url: {base}")
+print(f"tz: {tz_mode}")
+print(f"date: {date_str}")
+print(f"window_start: {start.isoformat()}")
+print(f"window_end: {end.isoformat()}")
+print("event_type: downloadFolderImported")
+print(f"count: {count}")
+print("sample_titles:")
+if samples:
+    for s in samples:
+        print(f"- {s}")
+else:
+    print("- (none)")
+PY
+
