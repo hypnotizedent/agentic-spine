@@ -330,7 +330,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 | Loop ID | Meaning |
 |--------|---------|
-| `OL_SHOP_BASELINE_FINISH` | Remaining: MD1400 drive inventory (blocked on cold boot), AP WiFi config, N2024P service tag. |
+| `OL_SHOP_BASELINE_FINISH` | Remaining: MD1400 drive inventory (blocked — replacement SAS HBA on order), AP WiFi config capture. |
 
 **VERIFIED REMOTELY (2026-02-08):**
 - R730XD: 12x 3.5" LFF front + 2x 2.5" rear flex (from dmesg enclosure slots 0-11)
@@ -343,15 +343,18 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 - Switch: Dell N2024P at 192.168.1.2 (L2 only, UDR6 is gateway at .1)
 - Tailscale subnet routing: pve advertises 192.168.1.0/24 (ip_forward persisted)
 
-**BLOCKED (requires cold boot — LOOP-MD1400-SAS-RECOVERY-20260208):**
+**BLOCKED (LOOP-MD1400-SAS-DRIVER-RESOLVE — PARKED):**
 - MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-037). Drives invisible until cold boot with persistent module config.
+- **2026-02-10: Replacement SAS HBA ordered.** Loop parked pending hardware delivery + cold boot install. Original PM8072 has PCI vendor ID mismatch (0x11f8 Microchip vs 0x117C PMC-Sierra).
 
-**UNVERIFIED (requires credentials or physical visit):**
-- WiFi AP (EAP225): Web UI at .185 reachable (was previously documented as .249, now stale).
-  - 2026-02-09: AP was factory reset to regain admin access. After reset, re-adopt via UDR6 DHCP client list, set DHCP reservation to `.185`, and store the new admin password in Infisical (`infrastructure/prod:/spine/shop/wifi/*`).
-  - Config/SSID should be captured after re-provisioning (see normalization + audit rules).
+**UNVERIFIED (requires config capture):**
+- WiFi AP (EAP225): IP .185, MAC 54:AF:97:2F:C6:6E, on Gi1/0/24. Creds in Infisical `/spine/shop/wifi/`.
+  - 2026-02-09: AP factory reset, DHCP reservation set to `.185`, new admin password stored.
+  - SSID/channel/power config capture pending — use `./bin/ops cap run network.ap.facts.capture`.
 
-**Camera system details:** Now tracked in [CAMERA_SSOT.md](CAMERA_SSOT.md) and LOOP-CAMERA-BASELINE-20260208 (offline cameras, IP conflict, physical location audit).
+**VERIFIED (2026-02-09):**
+- N2024P switch: MAC F8:B1:56:73:A0:D0 (network switches have no Dell service tag). Port assignments fully documented above.
+- Camera system: Fully documented in [CAMERA_SSOT.md](CAMERA_SSOT.md) (12 channels, ISAPI-verified 2026-02-09). Offline camera triage tracked in LOOP-CAMERA-OUTAGE-20260209.
 
 ---
 
