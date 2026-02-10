@@ -14,23 +14,36 @@ LOOP_TTL_HIGH_HOURS="${LOOP_TTL_HIGH_HOURS:-48}"
 
 FAIL=0
 err() { echo "  FAIL: $1" >&2; FAIL=1; }
+warn() { echo "  WARN: $1" >&2; }
 
-[[ -f "$LEDGER" ]] || { err "ledger.csv not found"; exit 1; }
+# ledger.csv is runtime state. In CI or fresh clones it may be absent; treat as
+# "unavailable" and skip the closeout freshness check (loop TTL can still run).
+SKIP_CLOSEOUT_CHECK=0
+if [[ "${CI:-}" == "true" || "${CI:-}" == "1" || -n "${GITHUB_ACTIONS:-}" ]]; then
+  warn "CI environment detected (skipping closeout freshness check)"
+  SKIP_CLOSEOUT_CHECK=1
+fi
+if [[ ! -f "$LEDGER" ]]; then
+  warn "ledger.csv not found (skipping closeout freshness check)"
+  SKIP_CLOSEOUT_CHECK=1
+fi
 
 # Find the most recent agent.session.closeout entry with status=done
 # Ledger columns: run_id,created_at,started_at,finished_at,status,prompt_file,result_file,error,context_used
 # Capability entries use prompt_file=agent.session.closeout
 
 LAST_TS=""
-while IFS=, read -r run_id created_at started_at finished_at status prompt_file _rest; do
-  if [[ "$prompt_file" == "agent.session.closeout" && "$status" == "done" && -n "$finished_at" ]]; then
-    LAST_TS="$finished_at"
-  fi
-done < <(tail -n +2 "$LEDGER")
+if [[ "$SKIP_CLOSEOUT_CHECK" == "0" ]]; then
+  while IFS=, read -r run_id created_at started_at finished_at status prompt_file _rest; do
+    if [[ "$prompt_file" == "agent.session.closeout" && "$status" == "done" && -n "$finished_at" ]]; then
+      LAST_TS="$finished_at"
+    fi
+  done < <(tail -n +2 "$LEDGER" 2>/dev/null || true)
 
-if [[ -z "$LAST_TS" ]]; then
-  err "agent.session.closeout has never been run (0 done entries in ledger)"
-  exit "$FAIL"
+  if [[ -z "$LAST_TS" ]]; then
+    err "agent.session.closeout has never been run (0 done entries in ledger)"
+    exit "$FAIL"
+  fi
 fi
 
 # Parse timestamp to epoch

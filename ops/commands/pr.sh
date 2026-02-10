@@ -71,6 +71,7 @@ PR_BODY="Closes #${ISSUE}"
 
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "DRY RUN: git add -A"
+  echo "DRY RUN: git restore --staged mailroom/state/ledger.csv  # runtime noise"
   echo "DRY RUN: git commit -m '${COMMIT_MSG}'"
   if [[ "$FORGE" == "github" ]]; then
     echo "DRY RUN: git push -u origin HEAD"
@@ -84,6 +85,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
 fi
 
 git add -A
+git restore --staged mailroom/state/ledger.csv >/dev/null 2>&1 || true
 if git diff --cached --quiet; then
   echo "No staged changes to commit" >&2
   exit 1

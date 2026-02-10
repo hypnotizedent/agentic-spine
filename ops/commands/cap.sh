@@ -21,10 +21,28 @@ STATE_DIR="$SPINE_REPO/mailroom/state"
 CAP_FILE="$SPINE_CODE/ops/capabilities.yaml"
 RECEIPTS="$SPINE_REPO/receipts/sessions"
 LEDGER="$STATE_DIR/ledger.csv"
+LEDGER_HEADER="run_id,created_at,started_at,finished_at,status,prompt_file,result_file,error,context_used"
 
 # Ensure state directory exists before any writes
 ensure_state_dir() {
     mkdir -p "$STATE_DIR"
+
+    # Initialize ledger header for fresh clones / new worktrees.
+    # ledger.csv is append-only runtime state; it must be parseable by loops tooling.
+    if [[ ! -f "$LEDGER" || ! -s "$LEDGER" ]]; then
+        echo "$LEDGER_HEADER" > "$LEDGER"
+        return
+    fi
+
+    if ! head -n 1 "$LEDGER" | grep -q '^run_id,'; then
+        local tmp
+        tmp="$(mktemp "/tmp/spine-ledger.XXXXXX")"
+        {
+            echo "$LEDGER_HEADER"
+            cat "$LEDGER"
+        } > "$tmp"
+        mv "$tmp" "$LEDGER"
+    fi
 }
 
 usage() {
@@ -87,6 +105,9 @@ run_cap() {
     _cap_tmp=""
     cleanup_cap() { [[ -n "$_cap_tmp" ]] && rm -f "$_cap_tmp" 2>/dev/null || true; }
     trap cleanup_cap EXIT INT TERM
+
+    # Ensure runtime state is bootstrapped before executing anything.
+    ensure_state_dir
 
     # ── Config extraction & validation ──
     if ! yq e ".capabilities.\"$name\"" "$CAP_FILE" | grep -q "description"; then
