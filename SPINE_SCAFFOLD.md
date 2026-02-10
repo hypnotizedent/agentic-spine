@@ -4,7 +4,7 @@
 # ════════════════════════════════════════════════════════════════
 # SPINE SCAFFOLD — AGENTIC-SPINE (SSOT)
 # Paste this into any new model session (Claude Code / ChatGPT / etc).
-# Last updated: 2026-02-04  HEAD: c8755f1
+# Last updated: 2026-02-10
 # ════════════════════════════════════════════════════════════════
 #
 # GOAL (ONE SENTENCE):
@@ -23,11 +23,11 @@
 # ────────────────────────────────────────────────────────────────
 # 1) COORDINATES (LOCKED)
 # ────────────────────────────────────────────────────────────────
-# SPINE_REPO="$HOME/Code/agentic-spine"
-# WORKBENCH_REPO="$HOME/Code/workbench"   # infrastructure docs + scripts
+# SPINE_REPO="$HOME/code/agentic-spine"
+# WORKBENCH_REPO="$HOME/code/workbench"   # infrastructure docs + scripts
 # LEGACY_REPO="$HOME/ronny-ops"           # LEGACY ONLY — NEVER RUNTIME
 #
-# Latest tag:     v0.1.23-estate-green-proof
+# Latest tag:     v0.1.24-spine-canon
 # GitHub:         hypnotizedent/agentic-spine
 #
 # Canonical entrypoint:
@@ -59,20 +59,20 @@
 #
 # FIRST ACTIONS (must pass or STOP):
 #   cd "$SPINE_REPO"
-#   ./bin/ops cap run spine.verify     # 25 drift gates (D1-D25)
+#   ./bin/ops cap run spine.verify     # 50 drift gates (D1-D57)
 #   ./bin/ops cap run spine.replay     # 5 fixture determinism checks
 #   ./bin/ops cap run spine.status     # watcher + queue state
 #
 # If ANY fail: STOP. Fix spine core before doing any other work.
 #
 # ────────────────────────────────────────────────────────────────
-# 4) CAPABILITY SURFACE (36 governed capabilities)
+# 4) CAPABILITY SURFACE (145 governed capabilities)
 # ────────────────────────────────────────────────────────────────
 # All privileged actions via: ./bin/ops cap run <name>
 # Full list:                  ./bin/ops cap list
 #
 # SPINE HEALTH (5)
-#   spine.verify             Drift gates (25 checks)
+#   spine.verify             Drift gates (50 checks, D1-D57)
 #   spine.replay             Replay determinism (5 fixtures)
 #   spine.status             Watcher + queue status
 #   spine.watcher.status     Canonical watcher status (launchd + PID + lock)
@@ -124,51 +124,58 @@
 # INFRASTRUCTURE / MONOLITH (5) — read-only exploration
 #   infra.docker_ps          Running containers
 #   infra.gh_issue           GitHub issue details
-#   monolith.tree            Directory listing of ~/Code
-#   monolith.search          Ripgrep across ~/Code
+#   monolith.tree            Directory listing of ~/code
+#   monolith.search          Ripgrep across ~/code
 #   monolith.git_status      Git status of a repo
 #
 # BUDGET (1)
 #   budget.check             Token budget vs receipt diagnostic
 #
 # ────────────────────────────────────────────────────────────────
-# 5) DRIFT GATES (25 checks: D1-D25)
+# 5) DRIFT GATES (50 active checks: D1-D57, with gaps)
 # ────────────────────────────────────────────────────────────────
-# D1  Top-level directory policy (7 allowed dirs)
-# D2  No runs/ trace
-# D3  Entrypoint smoke (bin/ops preflight)
-# D4  Watcher launchd check (warn-only)
-# D5  No legacy ~/agent coupling
-# D6  Receipts exist (latest 5 have receipt.md)
-# D7  Executables bounded to allowed zones
-# D8  No backup clutter (.bak files)
-# D9  Receipt stamps (Run ID, Generated, Status, Model, Inputs, Outputs)
-# D10 Logs under mailroom/ only
-# D11 ~/agent symlink validation
-# D12 CORE_LOCK.md exists
-# D13 API capability secrets preconditions
-# D14 Cloudflare surface drift
-# D15 GitHub Actions surface drift
-# D16 Canonical docs quarantine
-# D17 Root allowlist (no agents/, _imports/)
-# D18 Docker compose surface drift
-# D19 Backup surface drift
-# D20 Secrets surface drift
-# D22 Nodes surface drift (read-only SSH)
-# D23 Services health surface drift
-# D24 GitHub labels drift
-# D25 Secrets CLI hash parity (infisical-agent + cloudflare-agent)
+# D1  Top-level directory policy     D2  No runs/ trace
+# D3  Entrypoint smoke               D4  Watcher launchd check
+# D5  No legacy ~/agent coupling     D6  Receipts exist
+# D7  Executables bounded             D8  No backup clutter
+# D9  Receipt stamps                  D10 Logs under mailroom/
+# D11 ~/agent symlink validation      D12 CORE_LOCK.md exists
+# D13 API capability preconditions    D14 Cloudflare surface drift
+# D15 GitHub Actions surface drift    D16 Docs quarantine
+# D17 Root allowlist                  D18 Docker compose drift
+# D19 Backup drift                    D22 Nodes drift
+# D23 Health drift                    D24 GitHub labels drift
+# D27 Fact duplication lock           D28 Archive runway lock
+# D29 Active entrypoint lock          D30 Active config lock
+# D31 Home output sink lock           D33 Extraction pause lock
+# D34 Loop ledger integrity           D35 Infra relocation parity
+# D36 Legacy exception hygiene        D38 Extraction hygiene
+# D40 Maker tools drift               D41 Hidden-root governance
+# D42 Code path case lock             D43 Secrets namespace lock
+# D44 CLI tools discovery             D45 Naming consistency
+# D47 Brain surface path lock         D48 Codex worktree hygiene
+# D49 Agent discovery lock            D50 Gitea CI workflow lock
+# D51 Caddy proto lock                D52 UDR6 gateway assertion
+# D53 Change pack integrity           D54 SSOT IP parity lock
+# D55 Secrets runtime readiness       D56 Agent entry surface lock
+# D57 Infra identity cohesion lock
 #
 # ────────────────────────────────────────────────────────────────
 # 6) BINDINGS (ops/bindings/)
 # ────────────────────────────────────────────────────────────────
-# secrets.binding.yaml         Infisical connection (api_url, project, env)
-# secrets.inventory.yaml       8 Infisical projects catalog
-# cloudflare.inventory.yaml    2 zones, 1 tunnel
-# docker.compose.targets.yaml  3 hosts, 10 stacks
-# ssh.targets.yaml             11 SSH targets
-# services.health.yaml         5+ HTTP health endpoints
-# backup.inventory.yaml        VM backup targets + freshness thresholds
+# 28 YAML binding files including:
+# secrets.binding.yaml         Infisical connection
+# secrets.inventory.yaml       Infisical projects catalog
+# cloudflare.inventory.yaml    Zones + tunnel
+# docker.compose.targets.yaml  Hosts + stacks
+# ssh.targets.yaml             SSH targets (shop + home)
+# services.health.yaml         HTTP health endpoints
+# backup.inventory.yaml        VM backup targets
+# extraction.mode.yaml         Extraction pause/active state
+# operational.gaps.yaml        Tracked operational gaps
+# cross-repo.authority.yaml    Spine vs workbench ownership
+# agents.registry.yaml         Domain agent registry
+# (see ops/bindings/ for full list)
 #
 # ────────────────────────────────────────────────────────────────
 # 7) OPS CLI SURFACE (./bin/ops)
@@ -192,20 +199,20 @@
 # ├── bin/              Entrypoint (ops dispatcher)
 # ├── docs/             Governance (core/, governance/, legacy/)
 # │   ├── core/         CAPABILITIES_OVERVIEW, CORE_LOCK, STACK_ALIGNMENT
-# │   └── governance/   SSOT_REGISTRY.yaml (58 entries), STACK_REGISTRY
+# │   └── governance/   SSOT_REGISTRY.yaml (32 entries), SSOTs, policies
 # ├── fixtures/         Replay determinism (5 event fixtures + baselines)
 # ├── mailroom/         Runtime (inbox/, outbox/, logs/, state/)
 # │   └── state/        ledger.csv, open_loops.jsonl, locks/
 # ├── ops/              Commands, plugins, bindings, runtime, tools
-# │   ├── bindings/     7 YAML binding files
-# │   ├── capabilities.yaml  Capability registry (36 entries)
+# │   ├── bindings/     28 YAML binding files
+# │   ├── capabilities.yaml  Capability registry (145 entries)
 # │   ├── commands/     CLI subcommands
 # │   ├── plugins/      Surface plugins (cloudflare, github, secrets, ...)
 # │   ├── runtime/      Inbox processor, watcher
 # │   └── tools/        Canonical agent scripts
 # ├── receipts/         Audit trail (sessions/, audits/, contract)
 # └── surfaces/         Drift gates + verification scripts
-#     └── verify/       drift-gate.sh + per-surface gates (D14-D25)
+#     └── verify/       drift-gate.sh v2.5 + per-surface gates (D1-D57)
 #
 # ────────────────────────────────────────────────────────────────
 # 9) WHAT THE MODEL IS ALLOWED TO DO
