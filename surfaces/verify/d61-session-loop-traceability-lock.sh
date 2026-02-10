@@ -122,15 +122,19 @@ for scope_file in sorted(Path(scopes_dir).glob("*.scope.md")):
     status = fm.get("status", "")
     if status not in ("active", "draft", "open"):
         continue
-    severity = (fm.get("severity") or "").lower()
-    if severity not in ("critical", "high"):
-        continue
-    created = parse_ts(fm.get("created", fm.get("created_at", "")))
-    if not created:
-        continue
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    age_h = int((now - created).total_seconds() // 3600)
+	    severity = (fm.get("severity") or "").lower()
+	    if severity not in ("critical", "high"):
+	        continue
+	    created = parse_ts(fm.get("created", fm.get("created_at", "")))
+	    if not created:
+	        continue
+	    blocked_by = (fm.get("blocked_by") or "").strip()
+	    if blocked_by and blocked_by.lower() not in ("null", "none", "n/a"):
+	        # Blocked loops are allowed to exceed the high-loop TTL; they are not actionable.
+	        continue
+	    if created.tzinfo is None:
+	        created = created.replace(tzinfo=timezone.utc)
+	    age_h = int((now - created).total_seconds() // 3600)
     if age_h > threshold_hours:
         owner = fm.get("owner", "unassigned")
         loop_id = fm.get("loop_id", scope_file.stem)
