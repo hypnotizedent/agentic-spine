@@ -578,6 +578,14 @@ else
   warn "deprecation sweeper gate not present"
 fi
 
+# D61: Session-loop traceability lock (closeout freshness)
+echo -n "D61 session-loop traceability lock... "
+if [[ -x "$SP/surfaces/verify/d61-session-loop-traceability-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d61-session-loop-traceability-lock.sh"
+else
+  warn "session-loop traceability lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
