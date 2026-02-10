@@ -687,10 +687,10 @@ gaps:
     status: open
     fixed_in: null
     notes: |
-      Fix requires: (1) persistent modprobe config with install hook to inject PCI ID
-      (echo "11f8 8072" > /sys/bus/pci/drivers/pm80xx/new_id), (2) cold boot of pve
-      (power off/on, not reboot) for PM8072 firmware initialization. Maintenance window
-      needed — all 10 VMs go down. Loop: LOOP-MD1400-SAS-RECOVERY-20260208.
+      Phase 1 (module config) complete; on-site full shutdown + cold boot with AC drain was performed 2026-02-09 and still failed
+      (`FW is not ready`, `chip_init failed [ret: -16]`) with no new block devices appearing.
+      Implication: treat PM8072 as hardware/firmware defective; proceed with controller replace/reflash path.
+      Loop scope: mailroom/state/loop-scopes/LOOP-MD1400-SAS-RECOVERY-20260208.scope.md
       Upstream: PCI ID gap in Linux pm80xx driver (kernel 6.14.8-2-pve).
 
   - id: GAP-OP-038
@@ -765,13 +765,13 @@ gaps:
       asking the user for credentials interactively. SSOT docs implied secrets
       existed when they did not.
     severity: medium
-    status: fixed
-    fixed_in: "LOOP-CAMERA-BASELINE-20260208"
+    status: open
+    fixed_in: null
     notes: |
-      Fixed: all three credential sets stored in Infisical (6 keys total):
-      /spine/shop/nvr (NVR_ADMIN_USER, NVR_ADMIN_PASSWORD),
-      /spine/shop/idrac (IDRAC_ADMIN_USER, IDRAC_ADMIN_PASSWORD),
-      /spine/shop/switch (SWITCH_ADMIN_USER, SWITCH_ADMIN_PASSWORD).
+      Historical: fixed during LOOP-CAMERA-BASELINE-20260208 by seeding NVR/iDRAC/switch creds.
+      Regression (2026-02-10): Infisical currently contains only /spine/shop/wifi; /spine/shop/{nvr,idrac,switch,unifi} folders are missing.
+      Next: re-seed those credential sets via secrets.set.interactive, then rerun dependent capabilities.
+      Tracked: LOOP-SHOP-EDGE-CREDS-AND-INVENTORY-20260210.
 
   # ─────────────────────────────────────────────────────────────
   # Discovered during LOOP-BACKUP-STABILIZATION-20260208
@@ -1422,6 +1422,92 @@ gaps:
     notes: |
       Fix: agent.session.closeout capability cross-refs recent session receipts
       against open loops. D61 drift gate enforces closeout freshness (48h default).
+
+  # ── MinIO volume path divergence (LOOP-MINIO-VOLUME-PATH-DIVERGENCE-20260210) ──
+
+  - id: GAP-OP-073
+    discovered_by: "live-incident-20260210"
+    discovered_at: "2026-02-10"
+    type: duplicate-truth
+    doc: "ops/bindings/docker.compose.targets.yaml"
+    description: |
+      Live compose on docker-host maps MinIO volume to /mnt/data/mint-os/minio
+      (local disk, empty). Workbench compose at infra/compose/storage/docker-compose.yml
+      maps to /mnt/docker/storage/minio (NFS via symlink, 86k+ objects). The Jan 23
+      extraction updated workbench but never deployed to docker-host. No receipt exists.
+    severity: high
+    status: fixed
+    fixed_in: "LOOP-MINIO-VOLUME-PATH-DIVERGENCE-20260210"
+    loop: "LOOP-MINIO-VOLUME-PATH-DIVERGENCE-20260210"
+    notes: |
+      Fixed: live compose volume updated to /mnt/docker/mint-os-data/minio,
+      storage-network added. All 8 buckets restored. Backup at docker-compose.yml.bak.20260210-pre-p0.
+
+  - id: GAP-OP-074
+    discovered_by: "live-incident-20260210"
+    discovered_at: "2026-02-10"
+    type: stale-ssot
+    doc: "docs/governance/STACK_REGISTRY.yaml"
+    description: |
+      STACK_REGISTRY.yaml references paths that do not exist in workbench:
+      - infrastructure/docker-host/mint-os/docker-compose.minio.yml (phantom)
+      - infrastructure/storage/docker-compose.yml (phantom)
+      Actual file: infra/compose/storage/docker-compose.yml
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-MINIO-VOLUME-PATH-DIVERGENCE-20260210"
+    loop: "LOOP-MINIO-VOLUME-PATH-DIVERGENCE-20260210"
+    notes: |
+      Fixed: mint-os compose_files → docker-host:~/stacks/mint-os/docker-compose.yml.
+      Storage stack path → infra/compose/storage/, status → reference-only.
+
+  - id: GAP-OP-075
+    discovered_by: "live-incident-20260210"
+    discovered_at: "2026-02-10"
+    type: missing-entry
+    doc: "docs/infrastructure/storage/MINIO_STANDALONE_SSOT.md"
+    description: |
+      MINIO_STANDALONE_SSOT.md listed as "authoritative" in the Feb 5
+      canonicalization commit (6e0fbf3) but the file does not exist.
+    severity: medium
+    status: fixed
+    fixed_in: "LOOP-MINIO-VOLUME-PATH-DIVERGENCE-20260210"
+    loop: "LOOP-MINIO-VOLUME-PATH-DIVERGENCE-20260210"
+    notes: |
+      Fixed: authority.json updated to point to SERVICE_REGISTRY.yaml (minio entry)
+      as the canonical MinIO SSOT instead of the phantom file.
+
+  - id: GAP-OP-076
+    discovered_by: "live-incident-20260210"
+    discovered_at: "2026-02-10"
+    type: runtime-bug
+    doc: null
+    description: |
+      docker-host ~/stacks/mint-os/ has no .git directory. Compose file mutations
+      are unversioned and untraceable. The Jan 30 compose rewrite (container rename,
+      password hardening) left no audit trail.
+    severity: high
+    status: open
+    loop: "LOOP-MINIO-VOLUME-PATH-DIVERGENCE-20260210"
+    notes: |
+      Without VCS, there is no way to trace who changed what or roll back.
+
+  - id: GAP-OP-077
+    discovered_by: "live-incident-20260210"
+    discovered_at: "2026-02-10"
+    type: runtime-bug
+    doc: null
+    description: |
+      Watchdog script (~/scripts/mint-os-watchdog.sh) references
+      docker-compose.frontends.yml which does not exist. Produces failed
+      recovery loops every 2 minutes. health-check.sh cron also missing.
+    severity: low
+    status: fixed
+    fixed_in: "LOOP-MINIO-VOLUME-PATH-DIVERGENCE-20260210"
+    loop: "LOOP-MINIO-VOLUME-PATH-DIVERGENCE-20260210"
+    notes: |
+      Fixed: watchdog updated to docker-compose.yml. health-check.sh cron disabled
+      (script does not exist). simplefin-sync cron.d ownership fixed (root:root).
 
 # ─────────────────────────────────────────────────────────────
 # Gap Types
