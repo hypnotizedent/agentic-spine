@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v2.5)
+# drift-gate.sh - Constitutional drift detector (v2.6)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -47,7 +47,7 @@ gate_script() {
   rm -f "$tmp" 2>/dev/null || true
 }
 
-echo "=== DRIFT GATE (v2.5) ==="
+echo "=== DRIFT GATE (v2.6) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -592,6 +592,22 @@ if [[ -x "$SP/surfaces/verify/d62-git-remote-parity-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d62-git-remote-parity-lock.sh"
 else
   warn "git remote parity lock gate not present"
+fi
+
+# D63: Capabilities metadata lock (registry integrity)
+echo -n "D63 capabilities metadata lock... "
+if [[ -x "$SP/surfaces/verify/d63-capabilities-metadata-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d63-capabilities-metadata-lock.sh"
+else
+  warn "capabilities metadata lock gate not present"
+fi
+
+# D64: Git remote authority warn (GitHub merges/PRs)
+echo -n "D64 git remote authority warn... "
+if [[ -x "$SP/surfaces/verify/d64-git-remote-authority-warn.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d64-git-remote-authority-warn.sh"
+else
+  warn "git remote authority warn gate not present"
 fi
 
 echo

@@ -1,7 +1,7 @@
 # The Rules
 
 > **Status:** reference
-> **Last verified:** 2026-02-07
+> **Last verified:** 2026-02-10
 
 ```
 1. NO OPEN LOOPS = NO WORK  → ./bin/ops loops list --open
@@ -15,9 +15,13 @@
 
 ```bash
 ./bin/ops loops list --open  # See open work
+./bin/ops cap list           # Discover available capabilities
 ./bin/ops cap run <name>     # Run governed capability
+./bin/ops cap show <name>    # Show capability details
 cat ops/bindings/cli.tools.inventory.yaml  # What CLI tools are installed
 ```
+
+Capability SSOT: `ops/capabilities.yaml`.
 
 ## Approval Required
 

@@ -109,6 +109,20 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/d
     if [[ -n "${worktree_detail:-}" ]]; then
       echo "    ${worktree_detail}" | sed 's/^/    /'
     fi
+
+    hooks_path="$(git -C "$REPO_ROOT" config --get core.hooksPath 2>/dev/null || true)"
+    hook_file="$REPO_ROOT/.githooks/pre-commit"
+    if [[ "${hooks_path:-}" != ".githooks" ]]; then
+      echo "  hooks: WARN (core.hooksPath is not .githooks)"
+      echo "    fix: ./bin/ops hooks install"
+    else
+      if [[ -x "$hook_file" ]]; then
+        echo "  hooks: OK (.githooks/pre-commit installed)"
+      else
+        echo "  hooks: WARN (.githooks/pre-commit missing or not executable)"
+        echo "    fix: ./bin/ops hooks install"
+      fi
+    fi
     echo
   fi
 fi

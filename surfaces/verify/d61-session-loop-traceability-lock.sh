@@ -9,6 +9,8 @@ set -euo pipefail
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LEDGER="$SP/mailroom/state/ledger.csv"
 THRESHOLD_HOURS="${SESSION_CLOSEOUT_FRESHNESS_HOURS:-48}"
+LOOPS_LEDGER="$SP/mailroom/state/open_loops.jsonl"
+LOOP_TTL_HIGH_HOURS="${LOOP_TTL_HIGH_HOURS:-48}"
 
 FAIL=0
 err() { echo "  FAIL: $1" >&2; FAIL=1; }
@@ -52,6 +54,93 @@ DELTA_HOURS=$(( (NOW - LAST_EPOCH) / 3600 ))
 
 if [[ "$DELTA_HOURS" -gt "$THRESHOLD_HOURS" ]]; then
   err "agent.session.closeout last run ${DELTA_HOURS}h ago (threshold: ${THRESHOLD_HOURS}h)"
+fi
+
+# Loop TTL/SLA: fail if any open high-severity loop has no ledger activity within threshold.
+#
+# Activity model (locked):
+# - open_loops.jsonl is append-only
+# - reduce to latest record per loop_id (latest wins by file order)
+# - use latest record created_at as "last activity"
+if [[ -f "$LOOPS_LEDGER" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    if ! python3 - "$LOOPS_LEDGER" "$LOOP_TTL_HIGH_HOURS" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+path = sys.argv[1]
+threshold_hours = int(sys.argv[2])
+
+def loop_key(row):
+    return row.get("loop_id") or row.get("id")
+
+def parse_ts(ts):
+    if not ts:
+        return None
+    ts = ts.strip()
+    if ts.endswith("Z"):
+        ts = ts[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(ts)
+    except Exception:
+        return None
+
+rows = []
+with open(path, "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+state = {}
+for row in rows:
+    lid = loop_key(row)
+    if not lid:
+        continue
+    cur = state.get(lid, {"loop_id": lid})
+    if row.get("action") == "close":
+        cur["status"] = "closed"
+    for k, v in row.items():
+        if k in ("id", "action"):
+            continue
+        cur[k] = v
+    cur["loop_id"] = lid
+    state[lid] = cur
+
+now = datetime.now(timezone.utc)
+stale = []
+for loop in state.values():
+    if loop.get("status") != "open":
+        continue
+    if (loop.get("severity") or "").lower() != "high":
+        continue
+    created_at = parse_ts(loop.get("created_at"))
+    if not created_at:
+        continue
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    age_h = int((now - created_at).total_seconds() // 3600)
+    if age_h > threshold_hours:
+        stale.append((age_h, loop.get("loop_id"), loop.get("owner") or "unassigned", loop.get("created_at")))
+
+stale.sort(reverse=True)
+if stale:
+    for age_h, loop_id, owner, created_at in stale:
+        print(f"  FAIL: high loop stale >{threshold_hours}h: {loop_id} owner={owner} age={age_h}h created_at={created_at}", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+    then
+      FAIL=1
+    fi
+  else
+    err "python3 missing (cannot enforce loop TTL)"
+  fi
 fi
 
 exit "$FAIL"

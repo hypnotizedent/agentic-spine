@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-05
+last_verified: 2026-02-10
 scope: governance-guide
 github_issue: "#541"
 ---
@@ -89,6 +89,7 @@ Pillar entrypoints (per stack)
 | `SEARCH_EXCLUSIONS.md` | What's excluded from search/RAG |
 | `RAG_INDEXING_RULES.md` | What gets indexed to RAG |
 | `ISSUE_CLOSURE_SOP.md` | How to close issues properly |
+| `GIT_REMOTE_AUTHORITY.md` | Canonical git authority (Gitea primary, GitHub mirror-only) |
 | `AGENT_BOUNDARIES.md` | What agents can/cannot do |
 | `SUPERVISOR_CHECKLIST.md` | Verify work before shipping |
 | `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |

@@ -2,14 +2,15 @@
 
 > Auto-loaded by local coding tools.
 > Canonical runtime: `/Users/ronnyworks/code/agentic-spine`
-> Last verified: 2026-02-06
+> Last verified: 2026-02-10
 
 ## Session Entry
 
 1. Start in `/Users/ronnyworks/code/agentic-spine`.
 2. Read `docs/governance/SESSION_PROTOCOL.md`.
 3. Run `./bin/ops loops list --open`.
-4. Execute work via `./bin/ops cap run <capability>` or `./bin/ops run ...`.
+4. Run `./bin/ops cap list` to discover available governed capabilities.
+5. Execute work via `./bin/ops cap run <capability>` or `./bin/ops run ...`.
 
 ## Source-Of-Truth Contract
 
@@ -34,4 +35,5 @@ cd /Users/ronnyworks/code/agentic-spine
 ./bin/ops cap run spine.status
 ./bin/ops cap run spine.verify
 ./bin/ops loops list --open
+./bin/ops cap list
 ```

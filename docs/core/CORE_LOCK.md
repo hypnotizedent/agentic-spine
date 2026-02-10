@@ -2,7 +2,7 @@
 
 **Locked:** 2026-02-10
 **Status:** ACTIVE
-**Gate Version:** drift-gate.sh v2.5
+**Gate Version:** drift-gate.sh v2.6
 
 ---
 
@@ -105,7 +105,10 @@ All must PASS for core to be healthy.
 | D58 | SSOT freshness lock (last_reviewed dates within threshold) |
 | D59 | Cross-registry completeness lock (bidirectional host coverage) |
 | D60 | Deprecation sweeper (known deprecated terms blocked from governance docs) |
+| D61 | Session-loop traceability lock (agent.session.closeout freshness + loop TTL) |
 | D62 | Git remote parity lock (origin/main must equal github/main) |
+| D63 | Capabilities metadata lock (registry completeness + dependency typos + executable checks) |
+| D64 | Git remote authority WARN (GitHub merges/PRs) |
 
 ### Verbose Mode (Subchecks)
 

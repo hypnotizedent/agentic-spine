@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-05
+last_verified: 2026-02-10
 scope: session-entry
 ---
 
@@ -23,10 +23,12 @@ scope: session-entry
 
 1. **Greet the spine**
    - Run `./bin/ops preflight` or `./bin/ops lane <name>` to print governance hints.
+   - Install governance hooks once per clone: `./bin/ops hooks install` (warns in preflight if missing).
    - If you are about to touch secrets, make sure you sourced `~/.config/infisical/credentials` and can run the secrets gating capabilities (`secrets.binding`, `secrets.auth.status`, etc.).
 2. **Load context**
    - Generate or read the latest `docs/brain/context.md` if the script is available (see `docs/brain/README.md`).
    - Identify any open loops (`./bin/ops loops list --open`) and prioritize closing them before starting new work.
+   - Check available capabilities: `./bin/ops cap list` (SSOT: `ops/capabilities.yaml`). Do not invent commands.
    - Check available CLI tools: review `ops/bindings/cli.tools.inventory.yaml` or the "Available CLI Tools" section in `context.md`. If a user asks you to use a tool, check this inventory before searching the filesystem or web.
 3. **Trace truth**
    - Use SSOT docs + repo search (`rg`) before guessing answers or inventing storylines (Rule 2 from the brain layer). `mint ask` is deprecated.
@@ -39,6 +41,7 @@ scope: session-entry
    - **Branch hygiene (anti-drift):** mutating capabilities are blocked on `main` by default.
      - Start work with a loop-scoped worktree: `./bin/ops start loop <LOOP_ID>`
      - Override only for emergencies: `OPS_ALLOW_MAIN_MUTATION=1 ./bin/ops cap run <mutating.capability>`
+   - **Git authority:** Gitea (`origin`) is canonical; GitHub is mirror-only. See `docs/governance/GIT_REMOTE_AUTHORITY.md`.
 
 ## After the session
 

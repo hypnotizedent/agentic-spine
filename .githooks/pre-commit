@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Spine pre-commit hook (versioned)
+#
+# Goal: prevention (not detection). If ops/capabilities.yaml is staged, validate
+# registry metadata before allowing the commit.
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "${ROOT:-}" ]]; then
+  exit 0
+fi
+
+cd "$ROOT"
+
+if ! command -v git >/dev/null 2>&1; then
+  exit 0
+fi
+
+staged="$(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null || true)"
+
+if ! echo "$staged" | grep -qx 'ops/capabilities.yaml'; then
+  exit 0
+fi
+
+validator="surfaces/verify/d63-capabilities-metadata-lock.sh"
+if [[ ! -f "$validator" ]]; then
+  echo "STOP: missing validator: $validator" >&2
+  exit 1
+fi
+
+tmp="$(mktemp)"
+cleanup() { rm -f "$tmp" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+git show :ops/capabilities.yaml >"$tmp" 2>/dev/null || {
+  echo "STOP: could not read staged ops/capabilities.yaml" >&2
+  exit 1
+}
+
+bash "$validator" --file "$tmp"
