@@ -58,6 +58,18 @@ surfaces/verify/backup_audit.sh
 
 ---
 
+## Backup Calendar
+
+Generate an iPhone-subscribeable `.ics` calendar from SSOT/bindings:
+
+```bash
+./bin/ops cap run backup.calendar.generate
+```
+
+See: [Backup Calendar (.ics)](BACKUP_CALENDAR.md)
+
+---
+
 ## Freshness Rules
 
 | Threshold | Status |

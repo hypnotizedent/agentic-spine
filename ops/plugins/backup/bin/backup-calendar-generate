@@ -14,10 +14,18 @@ set -euo pipefail
 #   2 STOP (missing bindings/deps)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 
-BINDING="$SPINE_ROOT/ops/bindings/backup.calendar.yaml"
-OUTBOX="$SPINE_ROOT/mailroom/outbox"
+# Code root and runtime root are intentionally different:
+# - Code root (bindings/scripts) should follow the active checkout (worktree-safe).
+# - Runtime root (mailroom/outbox) must follow the canonical spine repo (SPINE_REPO contract).
+CODE_ROOT="${SPINE_CODE:-${SPINE_ROOT:-}}"
+if [[ -z "${CODE_ROOT:-}" ]]; then
+  CODE_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+fi
+RUNTIME_ROOT="${SPINE_REPO:-$CODE_ROOT}"
+
+BINDING="$CODE_ROOT/ops/bindings/backup.calendar.yaml"
+OUT_DIR="$RUNTIME_ROOT/mailroom/outbox/backup-calendar"
 
 stop() { echo "STOP (2): $*" >&2; exit 2; }
 
@@ -32,7 +40,9 @@ yq e '.' "$BINDING" >/dev/null 2>&1 || stop "invalid YAML: $BINDING"
 TZ_NAME="$(yq -r '.timezone // "America/New_York"' "$BINDING")"
 DTSTART_DATE="$(yq -r '.dtstart_date // "2026-02-10"' "$BINDING")"
 CAL_NAME="$(yq -r '.calendar_name // "Spine Backups"' "$BINDING")"
-DTSTAMP="$(echo "${DTSTART_DATE}" | tr -d '-')T000000Z"
+UPDATED_DATE="$(yq -r '.updated // ""' "$BINDING")"
+[[ -n "${UPDATED_DATE:-}" && "${UPDATED_DATE:-}" != "null" ]] || UPDATED_DATE="$DTSTART_DATE"
+DTSTAMP="$(echo "${UPDATED_DATE}" | tr -d '-')T000000Z"
 
 EVENT_COUNT="$(yq -r '.events | length' "$BINDING")"
 [[ "$EVENT_COUNT" =~ ^[0-9]+$ && "$EVENT_COUNT" -gt 0 ]] || stop "no events in binding"
@@ -47,24 +57,27 @@ ics+="METHOD:PUBLISH\r\n"
 ics+="X-WR-CALNAME:${CAL_NAME}\r\n"
 ics+="X-WR-TIMEZONE:${TZ_NAME}\r\n"
 
-# VTIMEZONE block for US Eastern
-ics+="BEGIN:VTIMEZONE\r\n"
-ics+="TZID:${TZ_NAME}\r\n"
-ics+="BEGIN:DAYLIGHT\r\n"
-ics+="TZOFFSETFROM:-0500\r\n"
-ics+="TZOFFSETTO:-0400\r\n"
-ics+="TZNAME:EDT\r\n"
-ics+="DTSTART:19700308T020000\r\n"
-ics+="RRULE:FREQ=YEARLY;BYDAY=2SU;BYMONTH=3\r\n"
-ics+="END:DAYLIGHT\r\n"
-ics+="BEGIN:STANDARD\r\n"
-ics+="TZOFFSETFROM:-0400\r\n"
-ics+="TZOFFSETTO:-0500\r\n"
-ics+="TZNAME:EST\r\n"
-ics+="DTSTART:19701101T020000\r\n"
-ics+="RRULE:FREQ=YEARLY;BYDAY=1SU;BYMONTH=11\r\n"
-ics+="END:STANDARD\r\n"
-ics+="END:VTIMEZONE\r\n"
+# VTIMEZONE block (only for America/New_York for now).
+# If timezone changes, omit VTIMEZONE and rely on TZID handling in clients.
+if [[ "$TZ_NAME" == "America/New_York" ]]; then
+  ics+="BEGIN:VTIMEZONE\r\n"
+  ics+="TZID:${TZ_NAME}\r\n"
+  ics+="BEGIN:DAYLIGHT\r\n"
+  ics+="TZOFFSETFROM:-0500\r\n"
+  ics+="TZOFFSETTO:-0400\r\n"
+  ics+="TZNAME:EDT\r\n"
+  ics+="DTSTART:19700308T020000\r\n"
+  ics+="RRULE:FREQ=YEARLY;BYDAY=2SU;BYMONTH=3\r\n"
+  ics+="END:DAYLIGHT\r\n"
+  ics+="BEGIN:STANDARD\r\n"
+  ics+="TZOFFSETFROM:-0400\r\n"
+  ics+="TZOFFSETTO:-0500\r\n"
+  ics+="TZNAME:EST\r\n"
+  ics+="DTSTART:19701101T020000\r\n"
+  ics+="RRULE:FREQ=YEARLY;BYDAY=1SU;BYMONTH=11\r\n"
+  ics+="END:STANDARD\r\n"
+  ics+="END:VTIMEZONE\r\n"
+fi
 
 DTSTART_CLEAN="$(echo "${DTSTART_DATE}" | tr -d '-')"
 
@@ -120,9 +133,9 @@ done
 
 ics+="END:VCALENDAR\r\n"
 
-# Write to outbox
-mkdir -p "$OUTBOX"
-OUT_FILE="$OUTBOX/spine-backups.ics"
+# Write to canonical outbox
+mkdir -p "$OUT_DIR"
+OUT_FILE="$OUT_DIR/backup-calendar.ics"
 printf '%b' "$ics" > "$OUT_FILE"
 
 echo "backup.calendar.generate"
