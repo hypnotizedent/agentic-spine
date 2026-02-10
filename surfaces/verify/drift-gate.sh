@@ -554,6 +554,14 @@ else
   warn "ssot ip parity lock gate not present"
 fi
 
+# D60: Deprecation sweeper (known deprecated terms in governance docs)
+echo -n "D60 deprecation sweeper... "
+if [[ -x "$SP/surfaces/verify/d60-deprecation-sweeper.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d60-deprecation-sweeper.sh"
+else
+  warn "deprecation sweeper gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

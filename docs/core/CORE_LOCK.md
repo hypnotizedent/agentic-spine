@@ -102,6 +102,7 @@ All must PASS for core to be healthy.
 | D55 | Secrets runtime readiness lock (composite: D20 + D25) |
 | D56 | Agent entry surface lock (composite: D26 + D32 + D46) |
 | D57 | Infra identity cohesion lock (composite: D37 + D39) |
+| D60 | Deprecation sweeper (known deprecated terms blocked from governance docs) |
 
 ### Verbose Mode (Subchecks)
 
