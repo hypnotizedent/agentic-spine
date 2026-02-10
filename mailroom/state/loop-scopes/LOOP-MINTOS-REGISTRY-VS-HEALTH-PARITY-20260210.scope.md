@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -8,25 +8,24 @@ loop_id: LOOP-MINTOS-REGISTRY-VS-HEALTH-PARITY-20260210
 
 # Loop Scope: LOOP-MINTOS-REGISTRY-VS-HEALTH-PARITY-20260210
 
+> **Status:** CLOSED
+
 ## Source
 - Certification report: mailroom/outbox/audit-export/2026-02-10-full-certification.md
 
 ## Goal
 Resolve discrepancy between SERVICE_REGISTRY.yaml and services.health expectations for mint-os-api and minio on docker-host.
 
-## Success Criteria
-- Scope doc is clean (no injected command output).
-- Next actions are clear and bounded.
-- Closeout uses receipts when changes land.
+## Resolution
 
-## Phases
-- P0: Triage + decision + inventory
-- P1: Implement updates (SSOT/bindings/docs)
-- P2: Verify (gates + targeted checks)
-- P3: Closeout (receipts + loop closure)
+**Status:** mint-os-api, mint-os-postgres, and minio are all DEPRECATED.
 
-## Next Action
-Determine intended state (running or retired) for mint-os-api and minio, then update SSOT and bindings accordingly and verify health checks.
+- `services.health.yaml` already had `enabled: false` with deprecation notes
+- `SERVICE_REGISTRY.yaml` was missing the deprecation markers — added `status: deprecated` and notes to all three entries
+- Parity achieved: both registry and health binding agree these are deprecated
+
+Full decommission of docker-host legacy stacks is a separate future task.
 
 ## Evidence (Receipts)
-- mailroom/outbox/audit-export/2026-02-10-full-certification.md
+- docs/governance/SERVICE_REGISTRY.yaml (status: deprecated added)
+- ops/bindings/services.health.yaml (enabled: false, already correct)
