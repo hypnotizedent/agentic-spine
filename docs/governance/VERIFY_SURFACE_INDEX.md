@@ -83,6 +83,11 @@ Notes:
 | `d55-secrets-runtime-readiness-lock.sh` | Composite secrets runtime readiness lock (default) | Yes |
 | `d56-agent-entry-surface-lock.sh` | Composite agent entry surface lock (default) | Yes |
 | `d57-infra-identity-cohesion-lock.sh` | Composite infra identity cohesion lock (default) | Yes |
+| `d58-ssot-freshness-lock.sh` | SSOT freshness lock | Yes |
+| `d59-cross-registry-completeness-lock.sh` | Cross-registry completeness lock | Yes |
+| `d60-deprecation-sweeper.sh` | Deprecation sweeper (known deprecated terms blocked from governance docs) | Yes |
+| `d61-session-loop-traceability-lock.sh` | Session-loop traceability lock | Yes |
+| `d62-git-remote-parity-lock.sh` | Git remote parity lock (origin/main must equal github/main) | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |

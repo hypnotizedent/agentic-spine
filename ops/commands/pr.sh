@@ -3,6 +3,8 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$SCRIPT_DIR/lib/git-lock.sh"
+
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$REPO_ROOT" ]]; then
   REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -49,6 +51,9 @@ if [[ -z "$ISSUE" ]]; then
   exit 1
 fi
 
+# Prevent concurrent sessions from mutating git state (branches, commits, pushes).
+acquire_git_lock || exit 1
+
 DESCRIPTION="${DESCRIPTION:-ops update}"
 COMMIT_MSG="feat(ops): ${DESCRIPTION} (#${ISSUE})"
 PR_TITLE="${PR_TITLE:-Issue #${ISSUE}: ${DESCRIPTION}}"
@@ -69,7 +74,20 @@ if git diff --cached --quiet; then
 fi
 
 git commit -m "$COMMIT_MSG"
+
+# Canonical: push to BOTH remotes to prevent origin/github divergence.
+if ! git remote get-url origin >/dev/null 2>&1; then
+  echo "STOP: missing remote 'origin' (required)" >&2
+  exit 1
+fi
+if ! git remote get-url github >/dev/null 2>&1; then
+  echo "STOP: missing remote 'github' (required)" >&2
+  exit 1
+fi
+
 git push -u origin HEAD
+git push -u github HEAD
+
 PR_URL=$(gh pr create --title "$PR_TITLE" --body "$PR_BODY" --json url | jq -r '.url')
 
 if [[ -n "$PR_URL" ]]; then

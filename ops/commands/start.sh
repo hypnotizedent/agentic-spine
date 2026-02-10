@@ -3,10 +3,15 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$SCRIPT_DIR/lib/git-lock.sh"
+
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$REPO_ROOT" ]]; then
   REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 fi
+
+# Prevent concurrent sessions from mutating git state (branches/worktrees).
+acquire_git_lock || exit 1
 
 scope_kind="${1:-}"
 scope_id="${2:-}"
@@ -103,7 +108,22 @@ if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}"; then
 else
   DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')"
   DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
-  git fetch origin "$DEFAULT_BRANCH" >/dev/null 2>&1 || true
+  # Canonical: fetch both remotes before branching (prevents split-brain base).
+  git fetch --prune origin "$DEFAULT_BRANCH" >/dev/null 2>&1 || true
+  git fetch --prune github "$DEFAULT_BRANCH" >/dev/null 2>&1 || true
+
+  # Hard stop if remotes diverge, unless explicitly overridden.
+  if [[ "${OPS_ALLOW_REMOTE_DRIFT:-0}" != "1" ]]; then
+    o_sha="$(git rev-parse --verify --quiet "origin/${DEFAULT_BRANCH}" 2>/dev/null || true)"
+    g_sha="$(git rev-parse --verify --quiet "github/${DEFAULT_BRANCH}" 2>/dev/null || true)"
+    if [[ -n "$o_sha" && -n "$g_sha" && "$o_sha" != "$g_sha" ]]; then
+      echo "STOP: remote split brain detected (origin/${DEFAULT_BRANCH} != github/${DEFAULT_BRANCH})." >&2
+      echo "  origin/${DEFAULT_BRANCH}=$o_sha" >&2
+      echo "  github/${DEFAULT_BRANCH}=$g_sha" >&2
+      echo "Fix: reconcile and push both remotes; override: OPS_ALLOW_REMOTE_DRIFT=1" >&2
+      exit 1
+    fi
+  fi
 
   if git show-ref --verify --quiet "refs/remotes/origin/${DEFAULT_BRANCH}"; then
     git branch "$BRANCH_NAME" "origin/${DEFAULT_BRANCH}"
