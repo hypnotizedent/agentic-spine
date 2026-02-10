@@ -1,24 +1,26 @@
 # Spine Session Header (Canonical)
 
 > **Status:** authoritative
-> **Last verified:** 2026-02-04
+> **Last verified:** 2026-02-10
 
 Copy this block into any new session working on agentic-spine.
 
 ```
 BEGIN SPINE
 Authority: agentic-spine only. No ronny-ops runtime. No HOME drift roots.
-Baseline: main @ 7a3b22a / tag v0.1.10-d17-root-allowlist.
+Baseline: main / tag v0.1.24-spine-canon.
 Front door: ./bin/ops (capabilities + mailroom + receipts).
 Admissible proof: RCAP receipts under agentic-spine/receipts/sessions/.
-Drift gates: D1–D17 ALL PASS (root allowlist locked; docs/core canonical).
+Drift gates: D1–D57 (50 active) ALL PASS (surfaces/verify/drift-gate.sh v2.5).
 
 Root Structure (D17 locked):
   bin/           → Front door (./bin/ops)
-  ops/           → Capabilities, plugins, runtime
-  surfaces/      → Verify gates (D1–D17)
+  ops/           → Capabilities, plugins, bindings, runtime
+  surfaces/      → Verify gates (D1–D57)
   docs/core/     → Canonical docs (D16)
-  mailroom/      → Runtime lanes
+  docs/brain/    → Agent context + lessons
+  docs/governance/ → SSOTs, policies, runbooks
+  mailroom/      → Runtime lanes (inbox/outbox/state)
   receipts/      → RCAP audit trail
   fixtures/      → Replay baseline
   FORBIDDEN: agents/, _imports/, runs/
