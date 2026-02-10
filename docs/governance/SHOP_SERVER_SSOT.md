@@ -346,7 +346,7 @@ That umbrella loop is now **closed (2026-02-10)** and remaining work is tracked 
 - Tailscale subnet routing: pve advertises 192.168.1.0/24 (ip_forward persisted)
 
 **BLOCKED (requires hardware fix — LOOP-MD1400-SAS-RECOVERY-20260208):**
-- MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 init still fails even after on-site cold boot (GAP-OP-037). Proceed with controller replace/reflash path.
+- MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 init still fails even after on-site cold boot (GAP-OP-037). External SAS HBA ordered 2026-02-10; awaiting install + validation.
 
 **VERIFIED REMOTELY (2026-02-10) — WiFi AP (EAP225):**
 - SSH connected via `pve` jump host, `network.ap.facts.capture` capability PASS.

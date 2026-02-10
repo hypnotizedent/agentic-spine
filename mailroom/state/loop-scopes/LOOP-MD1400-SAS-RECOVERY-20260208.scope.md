@@ -5,12 +5,14 @@ last_verified: 2026-02-10
 scope: loop-scope
 loop_id: LOOP-MD1400-SAS-RECOVERY-20260208
 severity: critical
+created: 2026-02-08
+blocked_by: "hardware: external SAS HBA ordered (awaiting delivery + install)"
 ---
 
 # LOOP-MD1400-SAS-RECOVERY-20260208
 
-> **Status:** open (Phase 2 failed — hardware/firmware defective, needs controller replacement)
-> **Blocked By:** PM8072 firmware unresponsive after cold boot — replace controller with known-good external SAS HBA
+> **Status:** open (hardware-blocked: external SAS HBA ordered 2026-02-10; awaiting install + validation)
+> **Blocked By:** external SAS HBA delivery + install (PM8072 treated defective after cold boot fail)
 > **Owner:** @ronny
 > **Created:** 2026-02-08
 > **Severity:** critical
@@ -23,7 +25,7 @@ The Dell MD1400 DAS shelf is physically cabled to the R730XD (`pve`) via a Dell 
 
 Two root causes identified:
 
-1. **PCI vendor ID mismatch (GAP-OP-029):** The PM8072 SAS controller reports vendor ID `11f8` (Microchip Technology, post-acquisition) but the Linux `pm80xx` kernel module only recognizes vendor `117C` (PMC-Sierra, pre-acquisition). The driver does not auto-bind at boot.
+1. **PCI vendor ID mismatch (GAP-OP-037):** The PM8072 SAS controller reports vendor ID `11f8` (Microchip Technology, post-acquisition) but the Linux `pm80xx` kernel module only recognizes vendor `117C` (PMC-Sierra, pre-acquisition). The driver does not auto-bind at boot.
 
 2. **Firmware initialization failure on hot-load:** When the driver is manually bound via `new_id`, the PM8072 chip firmware does not respond to the MPI handshake. The chip has been sitting uninitialized since power-on because no driver claimed it. A cold boot with the driver loaded at boot time is required for proper firmware init.
 
@@ -129,14 +131,43 @@ Evidence:
 
 **Implication:** treat PM8072 as hardware/firmware defective (reflash/replace); proceed to “replace controller with known-good external SAS HBA” path.
 
+### Phase 2b: External SAS HBA replacement (ordered; awaiting install)
+
+**Goal:** Make the MD1400 drives visible by bypassing the defective PM8072 controller.
+
+**Preconditions:**
+- External SAS HBA is physically on hand (ordered 2026-02-10; fill in exact model/ports once received).
+- Confirm the HBA provides external Mini-SAS HD ports compatible with the shelf cabling (SFF-8644).
+- Schedule an on-site maintenance window (this requires physical install + likely a full power cycle).
+
+**Install steps (on-site):**
+1. Confirm you have a recovery path if `pve` is powered off (shop LAN / iDRAC access plan).
+2. Shut down workloads and power off `pve` cleanly.
+3. Install the external SAS HBA in an available PCIe slot.
+4. Move the MD1400 SAS cable (Dell DP/N 0GYK61, SFF-8644) from the PM8072 port to the new HBA port.
+5. Ensure MD1400 is powered on; then power on `pve`.
+
+**Post-boot validation (record outputs):**
+- `lspci | rg -i '(sas|scsi|lsi|broadcom|microchip)'`
+- `dmesg | rg -i '(mpt3sas|sas|scsi|expander|enclosu|md1400|pm80xx)'`
+- `lsblk -o NAME,SIZE,MODEL,SERIAL,HCTL | sed -n '1,200p'`
+- `lsscsi -g` (if installed)
+- `smartctl -a /dev/sdX` for newly visible drives (health + serial inventory)
+
+**Acceptance criteria:**
+- New MD1400 drives appear as block devices (beyond the existing internal bays).
+- Drive model/serial inventory captured and propagated to shop SSOTs.
+- The loop can proceed to Phase 3 (ZFS integration decision + monitoring).
+
 ### Phase 3: Post-boot validation
 
-- [ ] `lspci -k -s 82:00.0` → `Kernel driver in use: pm80xx`
-- [ ] `dmesg | grep pm80xx` → no errors, PHYs and expander enumerated
-- [ ] `lsblk` → new drives visible (sdX devices beyond current 14)
-- [ ] `smartctl -a /dev/sdX` on each new drive → health assessment
-- [ ] All 10 VMs come back online (onboot=1)
-- [ ] `spine.verify` → all drift gates pass
+- [ ] New external SAS HBA present in `lspci` and bound to expected driver (e.g., `mpt3sas`)
+- [ ] `dmesg` shows SAS expander + enclosure and the full drive population enumerated
+- [ ] `lsblk` shows new drives visible (sdX devices beyond the internal bays)
+- [ ] `smartctl -a /dev/sdX` run on each new drive to capture model/serial/health
+- [ ] Drive inventory written back into shop SSOTs (models + serials + count)
+- [ ] All VMs come back online (onboot=1)
+- [ ] `spine.verify` passes after documentation updates
 
 ---
 
@@ -181,8 +212,7 @@ maintenance window. Order of operations:
 
 ## Related
 
-- **GAP-OP-029**: PM8072 PCI vendor ID mismatch (this loop)
-- **GAP-OP-030**: vzdump backup gap (5 VMs not backed up — fix during same window)
+- **GAP-OP-037**: MD1400 DAS shelf storage inaccessible (this loop)
 - **OL_SHOP_BASELINE_FINISH**: Parent audit that discovered the gap
 - **SHOP_SERVER_SSOT.md**: Hardware documentation updated with findings
 - **DHCP DNS cutover**: UDR install is a shared dependency
