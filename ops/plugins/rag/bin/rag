@@ -10,7 +10,20 @@
 
 set -euo pipefail
 
-SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+# Resolve the code root robustly.
+# Why: `infisical run -- <cmd>` may drop non-secret env vars (like SPINE_CODE),
+# and deriving the root from `../../..` off this script can incorrectly land at
+# `<repo>/ops` instead of the repo root.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+default_code_root=""
+if [[ -n "${git_root:-}" && "${git_root:-}" != "null" ]]; then
+  default_code_root="$git_root"
+else
+  default_code_root="$(cd "$script_dir/../../.." && pwd)"
+fi
+
+SPINE_CODE="${SPINE_CODE:-$default_code_root}"
 # Prefer the runtime-reported spine path. This avoids hardcoding $HOME paths and
 # keeps worktrees/copies working, while still allowing an override.
 SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
@@ -416,6 +429,7 @@ PY
     total="$(echo "$manifest" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
     echo "workspace: ${WORKSPACE_SLUG}"
     echo "anythingllm: ${ANYTHINGLLM_URL}"
+    echo "code_root: ${SPINE_CODE}"
     echo "eligible_docs: ${total}"
 
     if [[ "$dry_run" == "1" ]]; then
