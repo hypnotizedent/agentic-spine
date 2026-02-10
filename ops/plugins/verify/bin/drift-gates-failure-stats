@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# drift-gates-failure-stats - analyze historical spine.verify receipts
+#
+# Purpose:
+#   Quantify which drift gates fail, how often, and which gates co-fail.
+#   This is meant to drive consolidation decisions with data (not vibes).
+#
+# Output:
+#   Plain text report to stdout (captured by receipts).
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_CODE="${SPINE_CODE:-$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)}"
+if [[ -z "${SPINE_CODE:-}" ]]; then
+  SPINE_CODE="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+fi
+SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
+
+RECEIPTS_ROOT="${SPINE_REPO}/receipts/sessions"
+if [[ ! -d "$RECEIPTS_ROOT" ]]; then
+  echo "ERROR: missing receipts root: $RECEIPTS_ROOT" >&2
+  exit 2
+fi
+
+python3 - "$RECEIPTS_ROOT" <<'PY'
+import re
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+
+verify_dirs = []
+for d in root.iterdir():
+  if not d.is_dir():
+    continue
+  r = d / "receipt.md"
+  if not r.exists():
+    continue
+  txt = r.read_text(errors="ignore")
+  if "| Capability |" in txt and "`spine.verify`" in txt:
+    verify_dirs.append(d)
+
+pat = re.compile(r"^(D\d+)\s+.*?\b(FAIL|PASS|WARN)\b", re.IGNORECASE)
+
+fail_counts = Counter()
+warn_counts = Counter()
+pass_counts = Counter()
+
+fail_sets = []  # per-run failing gate set
+run_keys = []
+
+for d in sorted(verify_dirs):
+  out = d / "output.txt"
+  if not out.exists():
+    continue
+  # best-effort run key: directory basename is "RCAP-..." where the receipt itself has the run id
+  rk = d.name
+  run_keys.append(rk)
+
+  seen_fail = set()
+  for line in out.read_text(errors="ignore").splitlines():
+    m = pat.match(line.strip())
+    if not m:
+      continue
+    gate = m.group(1).upper()
+    status = m.group(2).upper()
+    if status == "FAIL":
+      fail_counts[gate] += 1
+      seen_fail.add(gate)
+    elif status == "WARN":
+      warn_counts[gate] += 1
+    elif status == "PASS":
+      pass_counts[gate] += 1
+  fail_sets.append(seen_fail)
+
+runs = len(fail_sets)
+runs_with_fail = sum(1 for s in fail_sets if s)
+
+print("drift_gates.failure_stats")
+print(f"receipts_root: {root}")
+print(f"spine.verify runs scanned: {runs}")
+print(f"runs with any FAIL: {runs_with_fail}")
+print(f"unique gates PASS seen: {len(pass_counts)}")
+print(f"unique gates FAIL seen: {len(fail_counts)}")
+print("")
+
+print("top FAIL gates (count, fail_rate):")
+for gate, c in fail_counts.most_common(20):
+  rate = (c / runs) if runs else 0.0
+  print(f"  {gate}: {c} ({rate:.2%})")
+print("")
+
+print("top WARN gates (count):")
+for gate, c in warn_counts.most_common(10):
+  print(f"  {gate}: {c}")
+print("")
+
+print("FAIL co-occurrence (top pairs):")
+pair_counts = Counter()
+for s in fail_sets:
+  ss = sorted(s)
+  for i in range(len(ss)):
+    for j in range(i + 1, len(ss)):
+      pair_counts[(ss[i], ss[j])] += 1
+for (a, b), c in pair_counts.most_common(25):
+  print(f"  {a} + {b}: {c}")
+print("")
+
+print("FAIL set size distribution:")
+dist = Counter(len(s) for s in fail_sets)
+for k in sorted(dist.keys()):
+  print(f"  {k}: {dist[k]}")
+PY
