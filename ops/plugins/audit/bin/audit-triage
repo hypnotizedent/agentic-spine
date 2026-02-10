@@ -1,0 +1,436 @@
+#!/usr/bin/env bash
+# audit-triage - Triage certification audit findings against tracked gaps and loops
+#
+# Purpose:
+#   Reads *RESULT.md files from mailroom/outbox/, extracts findings by severity
+#   (Critical/Moderate/Minor), and cross-references each finding against
+#   operational.gaps.yaml and open_loops.jsonl to classify them as:
+#     TRACKED   — already has a matching gap or loop
+#     UNTRACKED — needs gap/loop creation
+#     STALE     — referenced gap is already fixed
+#
+# Output:
+#   Markdown triage report to stdout.
+#
+# Safety: read-only (reads files, writes nothing)
+#
+set -euo pipefail
+
+SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SPINE_REPO="${SPINE_REPO:-$SP}"
+
+OUTBOX="$SPINE_REPO/mailroom/outbox"
+GAPS_FILE="$SPINE_REPO/ops/bindings/operational.gaps.yaml"
+LOOPS_FILE="$SPINE_REPO/mailroom/state/open_loops.jsonl"
+
+# ── Preflight ────────────────────────────────────────────────────────────────
+
+if [[ ! -d "$OUTBOX" ]]; then
+  echo "ERROR: outbox directory not found: $OUTBOX" >&2
+  exit 1
+fi
+
+if [[ ! -f "$GAPS_FILE" ]]; then
+  echo "ERROR: operational gaps file not found: $GAPS_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$LOOPS_FILE" ]]; then
+  echo "WARN: open_loops.jsonl not found: $LOOPS_FILE (loop cross-ref disabled)" >&2
+  LOOPS_FILE=""
+fi
+
+# ── Find RESULT.md files ─────────────────────────────────────────────────────
+
+mapfile -t RESULT_FILES < <(find "$OUTBOX" -maxdepth 1 -name '*RESULT.md' -type f 2>/dev/null | sort)
+
+if [[ ${#RESULT_FILES[@]} -eq 0 ]]; then
+  echo "=== AUDIT TRIAGE ==="
+  echo ""
+  echo "No *RESULT.md files found in $OUTBOX"
+  echo "Nothing to triage."
+  exit 0
+fi
+
+# ── Main triage (delegated to Python for structured parsing) ─────────────────
+
+exec python3 - "$GAPS_FILE" "$LOOPS_FILE" "${RESULT_FILES[@]}" <<'PYTHON'
+import re
+import sys
+import os
+
+gaps_file = sys.argv[1]
+loops_file = sys.argv[2] if sys.argv[2] else None
+result_files = sys.argv[3:]
+
+# ── Parse operational.gaps.yaml ──────────────────────────────────────────────
+# Lightweight YAML parsing (no pyyaml dependency) — extract gap records
+
+class Gap:
+    __slots__ = ("id", "status", "description", "severity", "fixed_in")
+    def __init__(self, gid, status, desc, severity, fixed_in):
+        self.id = gid
+        self.status = status
+        self.description = desc.lower()
+        self.severity = severity
+        self.fixed_in = fixed_in
+
+gaps = []
+current_id = None
+current_status = None
+current_desc_lines = []
+current_severity = None
+current_fixed_in = None
+in_desc = False
+
+with open(gaps_file, "r") as f:
+    for line in f:
+        stripped = line.strip()
+
+        # Detect new gap entry
+        id_match = re.match(r'^-\s*id:\s*(GAP-OP-\d+)', stripped)
+        if id_match:
+            # Save previous
+            if current_id:
+                gaps.append(Gap(
+                    current_id, current_status or "unknown",
+                    " ".join(current_desc_lines),
+                    current_severity or "unknown",
+                    current_fixed_in,
+                ))
+            current_id = id_match.group(1)
+            current_status = None
+            current_desc_lines = []
+            current_severity = None
+            current_fixed_in = None
+            in_desc = False
+            continue
+
+        if current_id:
+            status_m = re.match(r'^status:\s*(\S+)', stripped)
+            if status_m:
+                current_status = status_m.group(1)
+                in_desc = False
+                continue
+
+            sev_m = re.match(r'^severity:\s*(\S+)', stripped)
+            if sev_m:
+                current_severity = sev_m.group(1)
+                in_desc = False
+                continue
+
+            fix_m = re.match(r'^fixed_in:\s*"?([^"]+)"?', stripped)
+            if fix_m and fix_m.group(1).strip() != "null":
+                current_fixed_in = fix_m.group(1).strip()
+                in_desc = False
+                continue
+
+            if stripped.startswith("description:"):
+                in_desc = True
+                # Inline description after the colon
+                inline = stripped.split("description:", 1)[1].strip()
+                if inline and inline != "|":
+                    current_desc_lines.append(inline)
+                continue
+
+            if in_desc:
+                if stripped and not stripped.startswith("-") and ":" not in stripped[:20]:
+                    current_desc_lines.append(stripped)
+                else:
+                    in_desc = False
+
+    # Save last
+    if current_id:
+        gaps.append(Gap(
+            current_id, current_status or "unknown",
+            " ".join(current_desc_lines),
+            current_severity or "unknown",
+            current_fixed_in,
+        ))
+
+# Build searchable index: gap-id -> Gap, and keyword fragments
+gap_by_id = {g.id: g for g in gaps}
+
+# ── Parse open_loops.jsonl ───────────────────────────────────────────────────
+
+import json
+
+class Loop:
+    __slots__ = ("loop_id", "status", "title", "description")
+    def __init__(self, lid, status, title, desc):
+        self.loop_id = lid
+        self.status = status
+        self.title = title.lower()
+        self.description = desc.lower()
+
+loops = []
+if loops_file:
+    with open(loops_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            loops.append(Loop(
+                obj.get("loop_id", ""),
+                obj.get("status", "unknown"),
+                obj.get("title", ""),
+                obj.get("description", ""),
+            ))
+
+# ── Extract findings from RESULT.md files ────────────────────────────────────
+
+class Finding:
+    __slots__ = ("code", "severity", "title", "body", "source_file")
+    def __init__(self, code, severity, title, body, source_file):
+        self.code = code
+        self.severity = severity
+        self.title = title
+        self.body = body
+        self.source_file = source_file
+
+# Pattern: ### C1. Title  or  ### M1. Title  or  ### N1. Title
+# Also match: ### Critical, ### Moderate, ### Minor section headers
+FINDING_HEADER = re.compile(
+    r'^###\s+([CMN])(\d+)\.\s+(.*)', re.MULTILINE
+)
+# Section headers that tell us current severity
+SECTION_HEADER = re.compile(
+    r'^##\s+(Critical|Moderate|Minor)\s+Findings', re.MULTILINE | re.IGNORECASE
+)
+
+severity_map = {
+    "C": "critical",
+    "M": "moderate",
+    "N": "minor",
+}
+
+all_findings = []
+
+for rf in result_files:
+    with open(rf, "r") as f:
+        content = f.read()
+
+    # Find all findings with their headers
+    lines = content.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = FINDING_HEADER.match(line)
+        if m:
+            code = m.group(1) + m.group(2)
+            severity = severity_map.get(m.group(1), "unknown")
+            title = m.group(3).strip()
+
+            # Collect body until next ### or ## or end
+            body_lines = []
+            i += 1
+            while i < len(lines):
+                if lines[i].startswith("## ") or lines[i].startswith("### "):
+                    break
+                body_lines.append(lines[i])
+                i += 1
+
+            body = "\n".join(body_lines).strip()
+            all_findings.append(Finding(
+                code, severity, title, body, os.path.basename(rf)
+            ))
+        else:
+            i += 1
+
+# ── Cross-reference findings ─────────────────────────────────────────────────
+
+def normalize(text):
+    """Lowercase, strip punctuation for fuzzy matching."""
+    return re.sub(r'[^a-z0-9\s-]', '', text.lower())
+
+def extract_gap_refs(text):
+    """Find GAP-OP-NNN references in text."""
+    return set(re.findall(r'GAP-OP-\d+', text))
+
+def extract_loop_refs(text):
+    """Find LOOP-*-YYYYMMDD references in text."""
+    return set(re.findall(r'LOOP-[A-Z0-9-]+-\d{8}', text))
+
+def extract_keywords(title):
+    """Extract meaningful keywords from a finding title."""
+    # Remove the finding code prefix, common words
+    stop_words = {
+        "the", "a", "an", "is", "are", "was", "were", "in", "on", "at",
+        "for", "to", "of", "and", "or", "not", "no", "has", "have",
+        "with", "from", "vs", "but", "its",
+    }
+    words = normalize(title).split()
+    return [w for w in words if len(w) > 2 and w not in stop_words]
+
+class TriageResult:
+    __slots__ = ("finding", "status", "matched_gaps", "matched_loops", "reason")
+    def __init__(self, finding, status, matched_gaps, matched_loops, reason):
+        self.finding = finding
+        self.status = status
+        self.matched_gaps = matched_gaps
+        self.matched_loops = matched_loops
+        self.reason = reason
+
+results = []
+
+for finding in all_findings:
+    combined_text = finding.title + " " + finding.body
+    gap_refs = extract_gap_refs(combined_text)
+    loop_refs = extract_loop_refs(combined_text)
+
+    matched_gaps = []
+    matched_loops = []
+
+    # Direct GAP-OP references in finding text
+    for gref in gap_refs:
+        if gref in gap_by_id:
+            matched_gaps.append(gap_by_id[gref])
+
+    # Direct LOOP references in finding text
+    for lref in loop_refs:
+        for loop in loops:
+            if loop.loop_id == lref:
+                matched_loops.append(loop)
+                break
+
+    # Keyword-based fuzzy matching against gap descriptions
+    if not matched_gaps:
+        keywords = extract_keywords(finding.title)
+        for gap in gaps:
+            # Match if 2+ keywords appear in gap description
+            matches = sum(1 for kw in keywords if kw in gap.description)
+            if matches >= 2:
+                matched_gaps.append(gap)
+
+    # Keyword-based fuzzy matching against loop titles/descriptions
+    if not matched_loops:
+        keywords = extract_keywords(finding.title)
+        for loop in loops:
+            combined_loop = loop.title + " " + loop.description
+            matches = sum(1 for kw in keywords if kw in combined_loop)
+            if matches >= 2:
+                matched_loops.append(loop)
+
+    # Classify
+    if matched_gaps or matched_loops:
+        # Check if all matched gaps are fixed -> STALE
+        all_fixed = (
+            matched_gaps
+            and all(g.status == "fixed" for g in matched_gaps)
+            and not matched_loops
+        )
+        if all_fixed:
+            gap_ids = ", ".join(g.id for g in matched_gaps)
+            results.append(TriageResult(
+                finding, "STALE", matched_gaps, matched_loops,
+                f"All matched gaps already fixed: {gap_ids}"
+            ))
+        else:
+            gap_ids = ", ".join(g.id for g in matched_gaps) if matched_gaps else "(none)"
+            loop_ids = ", ".join(l.loop_id for l in matched_loops) if matched_loops else "(none)"
+            results.append(TriageResult(
+                finding, "TRACKED", matched_gaps, matched_loops,
+                f"gaps={gap_ids}  loops={loop_ids}"
+            ))
+    else:
+        results.append(TriageResult(
+            finding, "UNTRACKED", [], [],
+            "No matching gap or loop found"
+        ))
+
+# ── Output report ────────────────────────────────────────────────────────────
+
+print("=== AUDIT TRIAGE REPORT ===")
+print()
+print(f"Result files scanned: {len(result_files)}")
+print(f"Findings extracted:   {len(all_findings)}")
+print(f"Gaps loaded:          {len(gaps)}")
+print(f"Loops loaded:         {len(loops)}")
+print()
+
+# Counts
+tracked = [r for r in results if r.status == "TRACKED"]
+untracked = [r for r in results if r.status == "UNTRACKED"]
+stale = [r for r in results if r.status == "STALE"]
+
+print(f"  TRACKED:   {len(tracked)}")
+print(f"  UNTRACKED: {len(untracked)}")
+print(f"  STALE:     {len(stale)}")
+print()
+
+# Severity breakdown
+for sev in ["critical", "moderate", "minor"]:
+    sev_findings = [r for r in results if r.finding.severity == sev]
+    if not sev_findings:
+        continue
+    sev_tracked = sum(1 for r in sev_findings if r.status == "TRACKED")
+    sev_untracked = sum(1 for r in sev_findings if r.status == "UNTRACKED")
+    sev_stale = sum(1 for r in sev_findings if r.status == "STALE")
+    print(f"  {sev.upper()}: {len(sev_findings)} total  "
+          f"(tracked={sev_tracked}, untracked={sev_untracked}, stale={sev_stale})")
+
+print()
+print("---")
+print()
+
+# ── UNTRACKED (action needed) ────────────────────────────────────────────────
+
+if untracked:
+    print("## UNTRACKED — Need Gap/Loop Creation")
+    print()
+    for r in sorted(untracked, key=lambda x: (
+        {"critical": 0, "moderate": 1, "minor": 2}.get(x.finding.severity, 3),
+        x.finding.code
+    )):
+        f = r.finding
+        sev_tag = f.severity.upper()
+        print(f"- **[{f.code}]** ({sev_tag}) {f.title}")
+        print(f"  Source: {f.source_file}")
+        # Show first 2 lines of body for context
+        body_preview = f.body.split("\n")[:2]
+        for bl in body_preview:
+            bl = bl.strip()
+            if bl:
+                print(f"  > {bl}")
+        print()
+
+    print("---")
+    print()
+
+# ── TRACKED (already covered) ────────────────────────────────────────────────
+
+if tracked:
+    print("## TRACKED — Already Have Gap/Loop")
+    print()
+    for r in sorted(tracked, key=lambda x: x.finding.code):
+        f = r.finding
+        gap_ids = ", ".join(g.id for g in r.matched_gaps) if r.matched_gaps else "-"
+        loop_ids = ", ".join(l.loop_id for l in r.matched_loops) if r.matched_loops else "-"
+        print(f"- **[{f.code}]** {f.title}")
+        print(f"  Gaps: {gap_ids}  |  Loops: {loop_ids}")
+        print()
+
+    print("---")
+    print()
+
+# ── STALE (gap fixed but finding still present) ──────────────────────────────
+
+if stale:
+    print("## STALE — Referenced Gap Already Fixed")
+    print()
+    for r in sorted(stale, key=lambda x: x.finding.code):
+        f = r.finding
+        gap_info = ", ".join(
+            f"{g.id} (fixed in: {g.fixed_in or 'unknown'})"
+            for g in r.matched_gaps
+        )
+        print(f"- **[{f.code}]** {f.title}")
+        print(f"  Fixed gaps: {gap_info}")
+        print()
+
+print("=== END TRIAGE ===")
+PYTHON
