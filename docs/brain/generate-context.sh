@@ -64,7 +64,7 @@ OUT="$SP/docs/brain/context.md"
   echo ""
   printf '%s\n' '```bash'
   echo "./bin/ops cap list"
-  echo "./bin/ops cap show <capability>"
+  echo "./bin/ops cap show CAPABILITY_NAME"
   printf '%s\n' '```'
   echo ""
 

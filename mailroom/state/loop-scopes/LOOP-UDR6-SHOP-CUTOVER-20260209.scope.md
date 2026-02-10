@@ -1,6 +1,6 @@
 # LOOP-UDR6-SHOP-CUTOVER-20260209
 
-> **Status:** CLOSED (cutover complete, device re-IP deferred to OL_SHOP_BASELINE_FINISH)
+> **Status:** CLOSED (cutover complete, device re-IP deferred to LOOP-SHOP-EDGE-CREDS-AND-INVENTORY-20260210)
 > **Owner:** @ronny
 > **Created:** 2026-02-09
 > **Severity:** medium
@@ -159,12 +159,12 @@ LAN-only endpoints:
 
 All SSOTs updated during P1 pre-staging. Core verification passed in P3. No outstanding doc gaps.
 
-**Deferred items (non-blocking, tracked in OL_SHOP_BASELINE_FINISH):**
+**Deferred items (non-blocking, tracked in LOOP-SHOP-EDGE-CREDS-AND-INVENTORY-20260210):**
 - Switch re-IP: 192.168.12.2 → 192.168.1.2 (works as L2 without mgmt IP)
 - iDRAC re-IP: 192.168.12.250 → 192.168.1.250 (needs BMC cold reset or channel check)
 - NVR re-IP: 192.168.12.216 → 192.168.1.216 (requires on-site ISAPI or web UI)
 
-These are physical/on-site tasks deferred to `OL_SHOP_BASELINE_FINISH`.
+These are physical/on-site tasks deferred to `LOOP-SHOP-EDGE-CREDS-AND-INVENTORY-20260210`.
 
 Closeout note recorded during certification review:
 - `mailroom/outbox/audit-export/2026-02-10-full-certification.md`

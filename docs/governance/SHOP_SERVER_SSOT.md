@@ -61,7 +61,7 @@ Notes:
 | Dell Networking N2024P | — (MAC: F8:B1:56:73:A0:D0) | U39 | 24-port PoE+ switch |
 | APC Back-UPS Pro 900 | BVN900M1 | Floor | 900VA UPS |
 | Hikvision ERI-K216-P16 | ERI-K216-P161620220307CCRRJ54340404WCVU | Upstairs 9U rack (separate) | 16-channel PoE NVR |
-| TP-Link EAP225 | TBD | — | WiFi AP |
+| TP-Link EAP225 | — (MAC: 54:AF:97:2F:C6:6E, mgmt: 192.168.1.185) | — | WiFi AP (serial pending) |
 
 ### Rack Inventory
 
@@ -107,7 +107,7 @@ The cable is connected and the MD1400 is powered on (owner-verified 2026-02-08),
 
 Hot-loading the driver with `new_id` fails — the PM8072 firmware requires cold-boot
 initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
-**Fix:** Persist module config + cold boot pve. See loop scope for full plan.
+On-site cold boot with AC drain was performed (2026-02-09) and still failed; treat the PM8072 as hardware/firmware defective and follow the replace/reflash path in the loop scope.
 
 ### ZFS Storage Pools
 
@@ -326,11 +326,13 @@ ssh pve 'pvesm status'
 
 ## Open Loop
 
-This SSOT intentionally keeps **one** loop for unfinished physical audits to prevent loop sprawl.
+This SSOT previously used a single umbrella loop (`OL_SHOP_BASELINE_FINISH`) for unfinished physical audits.
+That umbrella loop is now **closed (2026-02-10)** and remaining work is tracked as explicit loops to prevent drift.
 
 | Loop ID | Meaning |
 |--------|---------|
-| `OL_SHOP_BASELINE_FINISH` | Remaining: MD1400 drive inventory (blocked on cold boot), AP WiFi config, N2024P service tag. |
+| `LOOP-MD1400-SAS-RECOVERY-20260208` | MD1400 storage still dark; PM8072 init fails even after cold boot (replacement/reflash path). |
+| `LOOP-SHOP-EDGE-CREDS-AND-INVENTORY-20260210` | Seed missing shop device creds in Infisical + capture service tags/serials (N2024P, iDRAC, NVR, UniFi/UDR). |
 
 **VERIFIED REMOTELY (2026-02-08):**
 - R730XD: 12x 3.5" LFF front + 2x 2.5" rear flex (from dmesg enclosure slots 0-11)
@@ -343,13 +345,13 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 - Switch: Dell N2024P at 192.168.1.2 (L2 only, UDR6 is gateway at .1)
 - Tailscale subnet routing: pve advertises 192.168.1.0/24 (ip_forward persisted)
 
-**BLOCKED (requires cold boot — LOOP-MD1400-SAS-RECOVERY-20260208):**
-- MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-037). Drives invisible until cold boot with persistent module config.
+**BLOCKED (requires hardware fix — LOOP-MD1400-SAS-RECOVERY-20260208):**
+- MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 init still fails even after on-site cold boot (GAP-OP-037). Proceed with controller replace/reflash path.
 
 **UNVERIFIED (requires credentials or physical visit):**
 - WiFi AP (EAP225): Web UI at .185 reachable (was previously documented as .249, now stale).
   - 2026-02-09: AP was factory reset to regain admin access. After reset, re-adopt via UDR6 DHCP client list, set DHCP reservation to `.185`, and store the new admin password in Infisical (`infrastructure/prod:/spine/shop/wifi/*`).
-  - Config/SSID should be captured after re-provisioning (see normalization + audit rules).
+  - SSH auth currently fails using `AP_SSH_PASSWORD` from Infisical (permission denied) even though tcp/22 is open; update the secret, then rerun `network.ap.facts.capture` to record config.
 
 **Camera system details:** Now tracked in [CAMERA_SSOT.md](CAMERA_SSOT.md) and LOOP-CAMERA-BASELINE-20260208 (offline cameras, IP conflict, physical location audit).
 
