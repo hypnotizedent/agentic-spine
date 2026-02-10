@@ -99,7 +99,10 @@ class Loop:
         self.phases = phases
         self.created_at = created_at
 
-loop_map = {}  # loop_id -> Loop (latest entry wins)
+# Mirror canonical jq reducer from ops/commands/loops.sh:
+# 1. Normalize close records: {id, action:close} -> {loop_id, status:closed}
+# 2. Merge by loop_id (last entry per loop_id wins, fields overlay)
+raw_map = {}  # loop_id -> dict (merged fields, last entry wins)
 with open(loops_file, "r") as f:
     for line in f:
         line = line.strip()
@@ -109,18 +112,32 @@ with open(loops_file, "r") as f:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
+        # Normalize close records (action=="close" uses "id" not "loop_id")
+        if obj.get("action") == "close":
+            obj["loop_id"] = obj.get("id", obj.get("loop_id", ""))
+            obj["status"] = "closed"
         lid = obj.get("loop_id", "")
-        loop_map[lid] = Loop(
-            lid,
-            obj.get("status", "unknown"),
-            obj.get("title", ""),
-            obj.get("description", ""),
-            obj.get("next_action", ""),
-            obj.get("blocked_by", None),
-            obj.get("evidence", []),
-            obj.get("phases", {}),
-            obj.get("created_at", ""),
-        )
+        if not lid:
+            continue
+        # Merge: start from existing, overlay new fields
+        existing = raw_map.get(lid, {})
+        existing.update(obj)
+        raw_map[lid] = existing
+
+# Build Loop objects from merged records
+loop_map = {}
+for lid, obj in raw_map.items():
+    loop_map[lid] = Loop(
+        lid,
+        obj.get("status", "unknown"),
+        obj.get("title", ""),
+        obj.get("description", ""),
+        obj.get("next_action", ""),
+        obj.get("blocked_by", None),
+        obj.get("evidence", []),
+        obj.get("phases", {}),
+        obj.get("created_at", ""),
+    )
 
 # Filter to open loops only
 open_loops = [l for l in loop_map.values() if l.status == "open"]
