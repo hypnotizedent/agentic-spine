@@ -46,6 +46,27 @@ scope: session-entry
 - Close open loops with `./bin/ops loops collect` before wrapping up.
 - Always produce receipts for the commands you executed. Receipts live under `receipts/sessions/R*/receipt.md` and prove what you did.
 
+## What Keeps This Predictable (Gates + Governance)
+
+- **Entry governance:** `AGENTS.md` + this `SESSION_PROTOCOL.md` define the canonical workflow: start in the spine repo, list open loops, do work via `./bin/ops cap run ...` / `./bin/ops run ...`, and close loops with receipts.
+- **Loop engine:** `./bin/ops loops ...` + `mailroom/state/open_loops.jsonl` + `mailroom/state/loop-scopes/*.scope.md` are the shared coordination surface other agents can see.
+- **Receipts + ledger:** `receipts/sessions/**/receipt.md` and `mailroom/state/ledger.csv` are the auditable proof trail.
+- **Drift gates (enforced by `spine.verify`):**
+  - D42 code-path case lock (keeps `~/code/...` canonical, blocks drift like `~/Code/...`).
+  - D48 codex worktree hygiene (prevents orphaned/stale codex worktrees/branches).
+  - D34 loop ledger integrity (catches loop state inconsistencies).
+  - D10/D31 logs/output sink locks (keeps output under mailroom, prevents home-root sinks).
+  - D61 session-loop traceability freshness (forces periodic closeout discipline via `agent.session.closeout`).
+  - D62 git remote parity (prevents origin/github “split brain” histories).
+
+## Common Causes Of “Non-Uniform Workflow”
+
+- Work started outside the loop workflow (not using `./bin/ops start loop <id>`). This is how you get “floating WIP”: no loop scope anchor, no session log, no branch/worktree association.
+- Multiple terminals mutating git concurrently (branches/worktrees/merges in parallel). This creates stale worktrees, branch confusion, and occasional unexpected commits. The coarse git lock in ops commands helps, but ad-hoc git in multiple terminals can still bypass it.
+- Remote split brain (origin vs github not aligned). Agents base branches off different tips, so “truth” diverges and merges become messy. D62 is specifically to stop that.
+- Loop closeout not consistently done. Without updating the loop scope with receipts and closing it, the next agent can’t tell what’s already proven and repeats work. D61 + `agent.session.closeout` is the mechanism meant to prevent this.
+- Two repos, two contracts (`agentic-spine` vs `workbench`). If workbench changes aren’t tied back to a spine loop (or vice versa), you get coordination gaps even when each repo is individually clean.
+
 ### Codex Worktree Hygiene
 
 When using codex worktrees (`.worktrees/codex-*`):

@@ -23,6 +23,51 @@ MAP_HASH="$(compute_map_hash)"
 SEC_STATUS="$(check_secrets_cache)"
 DOC_COUNT="$(count_governance_docs)"
 
+REPO_GIT_OK=0
+if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  REPO_GIT_OK=1
+fi
+
+preflight_fail=0
+parity_status="unknown"
+parity_detail=""
+worktree_status="unknown"
+worktree_detail=""
+
+if [[ "$REPO_GIT_OK" -eq 1 ]]; then
+  # Remote parity (origin/main == github/main). This is the primary anti split-brain stop signal.
+  D62="$REPO_ROOT/surfaces/verify/d62-git-remote-parity-lock.sh"
+  if [[ -x "$D62" ]]; then
+    if out="$("$D62" 2>&1)"; then
+      parity_status="OK"
+      parity_detail="$out"
+    else
+      parity_status="DRIFT"
+      parity_detail="$out"
+      preflight_fail=1
+    fi
+  else
+    parity_status="WARN"
+    parity_detail="WARN: D62 not present/executable"
+  fi
+
+  # Worktree hygiene (stale/dirty/orphaned codex worktrees).
+  D48="$REPO_ROOT/surfaces/verify/d48-codex-worktree-hygiene.sh"
+  if [[ -x "$D48" ]]; then
+    if out="$("$D48" 2>&1)"; then
+      worktree_status="OK"
+      worktree_detail="$out"
+    else
+      worktree_status="DIRTY"
+      worktree_detail="$out"
+      preflight_fail=1
+    fi
+  else
+    worktree_status="WARN"
+    worktree_detail="WARN: D48 not present/executable"
+  fi
+fi
+
 echo
 cat <<BANNER
 ╔═══════════════════════════════════════════════════════════╗
@@ -56,6 +101,31 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/d
     if [[ "$current_branch" == "main" ]]; then
       echo "  note: mutating capabilities are blocked on main (set OPS_ALLOW_MAIN_MUTATION=1 to override)."
     fi
+    echo "  remote parity (D62): $parity_status"
+    if [[ -n "${parity_detail:-}" ]]; then
+      echo "    ${parity_detail}" | sed 's/^/    /'
+    fi
+    echo "  worktrees (D48): $worktree_status"
+    if [[ -n "${worktree_detail:-}" ]]; then
+      echo "    ${worktree_detail}" | sed 's/^/    /'
+    fi
     echo
+  fi
+fi
+
+if [[ "$preflight_fail" -eq 1 ]]; then
+  cat <<'STOP'
+╔═══════════════════════════════════════════════════════════╗
+║ STOP: SPLIT-BRAIN RISK DETECTED                           ║
+║                                                           ║
+║ Resolve before starting new work:                          ║
+║ - Remote parity (origin/main == github/main)               ║
+║ - Codex worktree hygiene (no stale/dirty codex worktrees)  ║
+║                                                           ║
+║ Override (not recommended): OPS_PREFLIGHT_ALLOW_DEGRADED=1 ║
+╚═══════════════════════════════════════════════════════════╝
+STOP
+  if [[ "${OPS_PREFLIGHT_ALLOW_DEGRADED:-0}" != "1" ]]; then
+    exit 1
   fi
 fi
