@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+# D48: Codex worktree hygiene — detect stale/dirty/orphaned worktrees and orphaned stashes.
+# No count limit; concurrent worktrees are expected.
 set -euo pipefail
 
-CODEX_WORKTREE_MAX=${CODEX_WORKTREE_MAX:-2}
 SPINE_CODE=${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 SPINE_REPO=${SPINE_REPO:-$(git -C "$SPINE_CODE" rev-parse --show-toplevel)}
 
@@ -61,12 +62,8 @@ for path in "${codex_paths[@]}"; do
   fi
 done
 
-if (( codex_count > CODEX_WORKTREE_MAX )); then
-  failures+=("threshold breach: $codex_count codex worktrees (max $CODEX_WORKTREE_MAX)")
-fi
-
 if (( ${#failures[@]} > 0 )); then
-  echo "Detected codex worktree issues (max=$CODEX_WORKTREE_MAX):"
+  echo "Detected codex worktree issues:"
   for entry in "${failures[@]}"; do
     echo "  - $entry"
   done
@@ -107,4 +104,4 @@ if (( ${#orphaned_stashes[@]} > 0 )); then
   exit 1
 fi
 
-echo "Codex worktrees clean (count=$codex_count, max=$CODEX_WORKTREE_MAX). Stashes: $stash_count (0 orphaned)."
+echo "Codex worktrees clean (count=$codex_count). Stashes: $stash_count (0 orphaned)."

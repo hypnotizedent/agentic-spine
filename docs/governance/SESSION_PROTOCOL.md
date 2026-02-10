@@ -77,7 +77,7 @@ When using codex worktrees (`.worktrees/codex-*`):
 1. **Create** — branch from `origin/main` (fetch first): `git worktree add .worktrees/<name> -b codex/<name> origin/main`
 2. **Base** — never stack codex branches without an explicit `--base` in the PR; rebase before opening PRs.
 3. **Proof** — `git status` must be clean inside the worktree; D48 fails `spine.verify` on dirty worktrees.
-4. **Retire** — after merge, remove immediately: `git worktree remove .worktrees/<name>`; D48 flags merged branches and enforces a max of 2 active codex worktrees.
+4. **Retire** — after merge, remove immediately: `ops close loop <LOOP_ID>` or `git worktree remove .worktrees/<name>`; D48 flags merged/dirty/orphaned worktrees and orphaned stashes.
 
 > **Quick checklist**
 >
