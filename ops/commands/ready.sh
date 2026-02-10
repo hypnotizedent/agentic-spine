@@ -18,6 +18,16 @@ echo "========================================"
 echo "SPINE READY CHECK (operator convenience)"
 echo "========================================"
 
+# Preflight is the fastest split-brain detector (remote parity + worktree hygiene).
+echo
+echo "────────────────────────────────────────"
+echo "READY CHECK: ops preflight"
+echo "────────────────────────────────────────"
+./bin/ops preflight
+
+# Session closeout keeps loop/receipt truth coherent (D61 freshness).
+run_cap agent.session.closeout
+
 run_cap spine.verify
 run_cap spine.replay
 run_cap spine.status
