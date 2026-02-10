@@ -73,4 +73,38 @@ if (( ${#failures[@]} > 0 )); then
   exit 1
 fi
 
-echo "Codex worktrees clean (count=$codex_count, max=$CODEX_WORKTREE_MAX)."
+# ── Stash audit ───────────────────────────────────────────────────────────
+# Flag stashes whose parent branch is merged into main or no longer exists.
+stash_count=0
+orphaned_stashes=()
+while IFS= read -r stash_line; do
+  [[ -z "$stash_line" ]] && continue
+  stash_count=$((stash_count + 1))
+  # Extract branch name from "stash@{N}: On <branch>: <message>" or "stash@{N}: WIP on <branch>: <sha> <msg>"
+  stash_ref="${stash_line%%:*}"
+  branch_part="${stash_line#*On }"
+  stash_branch="${branch_part%%:*}"
+  [[ -z "$stash_branch" ]] && continue
+
+  reason=""
+  if ! git -C "$SPINE_REPO" rev-parse --verify --quiet "refs/heads/$stash_branch" >/dev/null 2>&1; then
+    reason="branch gone"
+  elif git -C "$SPINE_REPO" branch --merged main --list "$stash_branch" 2>/dev/null | grep -q .; then
+    reason="branch merged"
+  fi
+
+  if [[ -n "$reason" ]]; then
+    orphaned_stashes+=("$stash_ref ($stash_branch): $reason")
+  fi
+done < <(git -C "$SPINE_REPO" stash list 2>/dev/null)
+
+if (( ${#orphaned_stashes[@]} > 0 )); then
+  echo "Orphaned stashes detected (${#orphaned_stashes[@]} of $stash_count):"
+  for entry in "${orphaned_stashes[@]}"; do
+    echo "  - $entry"
+  done
+  echo "Fix: git stash drop <ref> for each orphaned entry"
+  exit 1
+fi
+
+echo "Codex worktrees clean (count=$codex_count, max=$CODEX_WORKTREE_MAX). Stashes: $stash_count (0 orphaned)."
