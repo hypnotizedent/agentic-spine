@@ -33,6 +33,8 @@ SECRETS_BINDING="${SPINE_REPO}/ops/bindings/secrets.binding.yaml"
 
 WORKSPACE_SLUG="${RAG_WORKSPACE_SLUG:-agentic-spine}"
 ANYTHINGLLM_URL="${ANYTHINGLLM_URL:-${ANYTHINGLLM_BASE_URL:-}}"
+QDRANT_URL="${QDRANT_URL:-${QDRANT_BASE_URL:-}}"
+OLLAMA_URL="${OLLAMA_URL:-${OLLAMA_BASE_URL:-}}"
 
 log() { echo "→ $*"; }
 log_ok() { echo "OK: $*"; }
@@ -46,12 +48,18 @@ Usage:
   rag health
   rag status [--workspace <slug>]
   rag ask "<question>" [--workspace <slug>]
+  rag retrieve "<query>" [--workspace <slug>] [--limit N]
   rag sync [--workspace <slug>] [--dry-run]
 
 Env:
   RAG_WORKSPACE_SLUG (default: agentic-spine)
   ANYTHINGLLM_URL / ANYTHINGLLM_BASE_URL (optional; auto-derived from services.health.yaml)
   ANYTHINGLLM_API_KEY (required for status/ask/sync; injected via spine secrets.exec)
+  QDRANT_URL / QDRANT_BASE_URL (optional; auto-derived from services.health.yaml)
+  OLLAMA_URL / OLLAMA_BASE_URL (optional; auto-derived from services.health.yaml)
+  RAG_QDRANT_COLLECTION (default: workspace slug)
+  RAG_EMBED_MODEL (default: mxbai-embed-large:latest)
+  RAG_CHAT_TIMEOUT_SEC (default: 45) - AnythingLLM chat attempt timeout before retrieval fallback
 EOF
 }
 
@@ -78,6 +86,42 @@ derive_anythingllm_url() {
   fi
   # Strip a known suffix to get the base URL.
   ANYTHINGLLM_URL="${ping_url%/api/ping}"
+}
+
+derive_qdrant_url() {
+  if [[ -n "${QDRANT_URL:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$SERVICES_BINDING" ]] || ! command -v yq >/dev/null 2>&1; then
+    QDRANT_URL="http://100.71.17.29:6333"
+    return 0
+  fi
+
+  local health_url
+  health_url="$(yq -r '.endpoints[] | select(.id=="qdrant") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
+  if [[ -z "$health_url" || "$health_url" == "null" ]]; then
+    QDRANT_URL="http://100.71.17.29:6333"
+    return 0
+  fi
+  QDRANT_URL="${health_url%/healthz}"
+}
+
+derive_ollama_url() {
+  if [[ -n "${OLLAMA_URL:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$SERVICES_BINDING" ]] || ! command -v yq >/dev/null 2>&1; then
+    OLLAMA_URL="http://100.98.70.70:11434"
+    return 0
+  fi
+
+  local tags_url
+  tags_url="$(yq -r '.endpoints[] | select(.id=="ollama") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
+  if [[ -z "$tags_url" || "$tags_url" == "null" ]]; then
+    OLLAMA_URL="http://100.98.70.70:11434"
+    return 0
+  fi
+  OLLAMA_URL="${tags_url%/api/tags}"
 }
 
 load_api_key() {
@@ -127,6 +171,52 @@ http_post_json() {
   fi
   cat "$tmp"
   rm -f "$tmp"
+}
+
+http_post_json_chat_try() {
+  # Best-effort: return 0 and print body on success; return 1 on failure.
+  # This intentionally uses a shorter timeout so we can fall back to retrieval quickly.
+  local url="$1"
+  local json="$2"
+  local max_time="${RAG_CHAT_TIMEOUT_SEC:-45}"
+  local tmp code
+  tmp="$(mktemp)"
+  code="$(curl -sS --max-time "$max_time" -o "$tmp" -w "%{http_code}" \
+    -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "$json" \
+    "$url" || true)"
+  if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+ollama_embed() {
+  local prompt="$1"
+  local model="${RAG_EMBED_MODEL:-mxbai-embed-large:latest}"
+  require_tool curl
+  require_tool jq
+  local resp
+  resp="$(curl -sS --max-time 30 -H "Content-Type: application/json" \
+    -d "$(jq -cn --arg model "$model" --arg prompt "$prompt" '{model:$model,prompt:$prompt}')" \
+    "${OLLAMA_URL}/api/embeddings")"
+  echo "$resp" | jq -c '.embedding'
+}
+
+qdrant_search() {
+  local vector_json="$1"
+  local collection="${RAG_QDRANT_COLLECTION:-$WORKSPACE_SLUG}"
+  local limit="${RAG_RETRIEVE_LIMIT:-5}"
+  require_tool curl
+  require_tool jq
+  curl -sS --max-time 30 -H "Content-Type: application/json" \
+    -d "$(jq -cn --argjson v "$vector_json" --argjson l "$limit" '
+      {vector:$v,limit:$l,with_payload:true,with_vectors:false}
+    ')" \
+    "${QDRANT_URL}/collections/${collection}/points/search"
 }
 
 contains_secret_material() {
@@ -340,6 +430,8 @@ shift || true
 case "$cmd" in
   health)
     derive_anythingllm_url
+    derive_qdrant_url
+    derive_ollama_url
     echo "=== RAG Health ==="
     echo "anythingllm: ${ANYTHINGLLM_URL}"
     if curl -sSf --max-time 10 "${ANYTHINGLLM_URL}/api/ping" >/dev/null; then
@@ -348,10 +440,18 @@ case "$cmd" in
       echo "anythingllm_ping: FAIL"
       exit 1
     fi
-    if curl -sSf --max-time 10 "http://100.71.17.29:6333/healthz" >/dev/null; then
+    echo "qdrant: ${QDRANT_URL}"
+    if curl -sSf --max-time 10 "${QDRANT_URL}/healthz" >/dev/null; then
       echo "qdrant_healthz: OK"
     else
       echo "qdrant_healthz: FAIL"
+      exit 1
+    fi
+    echo "ollama: ${OLLAMA_URL}"
+    if curl -sSf --max-time 10 "${OLLAMA_URL}/api/tags" >/dev/null; then
+      echo "ollama_tags: OK"
+    else
+      echo "ollama_tags: FAIL"
       exit 1
     fi
     ;;
@@ -388,6 +488,8 @@ case "$cmd" in
       exit 1
     fi
     derive_anythingllm_url
+    derive_qdrant_url
+    derive_ollama_url
     load_api_key
     require_tool curl
     require_tool python3
@@ -397,20 +499,86 @@ import json,sys
 print(json.dumps({"message": sys.argv[1], "mode": "query"}))
 PY
 )"
-    resp="$(http_post_json "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}/chat" "$payload")"
-    if command -v jq >/dev/null 2>&1; then
-      answer="$(echo "$resp" | jq -r '.textResponse // .response // .message // .text // empty')"
-      [[ -n "$answer" ]] || { log_err "Could not parse answer"; exit 1; }
-      echo "$answer"
-      sources="$(echo "$resp" | jq -r '.sources // [] | if length==0 then "" else (map("- \((.doc // .title // .source // .file // .name // "Unknown")) (\((.score // .confidence // .relevance // 0) | tostring))") | join("\n")) end')"
-      if [[ -n "$sources" ]]; then
-        echo ""
-        echo "Sources:"
-        echo "$sources"
-      fi
-    else
-      echo "$resp"
+    chat_ok=0
+    resp=""
+    if resp="$(http_post_json_chat_try "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}/chat" "$payload")"; then
+      chat_ok=1
     fi
+
+    if (( chat_ok == 1 )) && command -v jq >/dev/null 2>&1; then
+      answer="$(echo "$resp" | jq -r '.textResponse // .response // .message // .text // empty')"
+      if [[ -n "$answer" ]]; then
+        echo "$answer"
+        sources="$(echo "$resp" | jq -r '.sources // [] | if length==0 then "" else (map("- \((.doc // .title // .source // .file // .name // "Unknown")) (\((.score // .confidence // .relevance // 0) | tostring))") | join("\n")) end')"
+        if [[ -n "$sources" ]]; then
+          echo ""
+          echo "Sources:"
+          echo "$sources"
+        fi
+        exit 0
+      fi
+    fi
+
+    log_err "AnythingLLM chat unavailable/slow; falling back to retrieval-only search."
+    "$0" retrieve "$question" --workspace "$WORKSPACE_SLUG"
+    ;;
+
+  retrieve)
+    query="${1:-}"
+    shift || true
+    limit="${RAG_RETRIEVE_LIMIT:-5}"
+    while [[ "$#" -gt 0 ]]; do
+      case "${1:-}" in
+        --workspace) WORKSPACE_SLUG="${2:-}"; shift 2 ;;
+        --limit) limit="${2:-}"; shift 2 ;;
+        *) log_err "Unknown arg: $1"; usage; exit 1 ;;
+      esac
+    done
+    if [[ -z "${query:-}" ]]; then
+      usage
+      exit 1
+    fi
+    if ! [[ "$limit" =~ ^[0-9]+$ ]] || [[ "$limit" -lt 1 ]] || [[ "$limit" -gt 20 ]]; then
+      log_err "--limit must be an integer 1-20"
+      exit 1
+    fi
+
+    export RAG_RETRIEVE_LIMIT="$limit"
+    derive_qdrant_url
+    derive_ollama_url
+    require_tool jq
+
+    collection="${RAG_QDRANT_COLLECTION:-$WORKSPACE_SLUG}"
+    echo "fallback: retrieve"
+    echo "collection: ${collection}"
+
+    vector="$(ollama_embed "$query")"
+    resp="$(qdrant_search "$vector")"
+
+    if echo "$resp" | jq -e '.result and (.result|type=="array")' >/dev/null 2>&1; then
+      count="$(echo "$resp" | jq -r '.result|length')"
+      if [[ "$count" -eq 0 ]]; then
+        echo ""
+        echo "No results."
+        exit 0
+      fi
+      echo ""
+      echo "$resp" | jq -r '
+        .result[]
+        | . as $r
+        | ($r.payload // {}) as $p
+        | ($p.url // $p.source // $p.file // $p.path // ($p.metadata.source? // $p.metadata.file? // $p.metadata.path?) // ($p.doc.source? // $p.doc.title? // $p.doc.name?) // "Unknown") as $src
+        | ($p.title // ($p.metadata.title? // $p.doc.title?) // "Untitled") as $title
+        | ($p.text // $p.content // $p.page_content // $p.pageContent // ($p.chunk // "") ) as $text
+        | ($text | tostring | gsub("\\s+";" ") | .[0:280]) as $snippet
+        | "- score=\($r.score|tostring)\n  title=\($title)\n  source=\($src)\n  snippet=\($snippet)\n"
+      '
+      exit 0
+    fi
+
+    log_err "Unexpected Qdrant response:"
+    echo "$resp" | jq -C '.' >&2 || echo "$resp" >&2
+    exit 1
     ;;
 
   sync)
