@@ -554,7 +554,6 @@ else
   warn "ssot ip parity lock gate not present"
 fi
 
-<<<<<<< HEAD
 # D58: SSOT freshness lock (last_reviewed date enforcement)
 echo -n "D58 ssot freshness lock... "
 if [[ -x "$SP/surfaces/verify/d58-ssot-freshness-lock.sh" ]]; then
