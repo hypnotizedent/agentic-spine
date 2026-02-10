@@ -330,7 +330,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 
 | Loop ID | Meaning |
 |--------|---------|
-| `OL_SHOP_BASELINE_FINISH` | Remaining: MD1400 drive inventory (blocked — replacement SAS HBA on order), AP WiFi config capture. |
+| `OL_SHOP_BASELINE_FINISH` | Remaining: MD1400 drive inventory (blocked on PM8072 driver + cold boot), AP WiFi config capture. |
 
 **VERIFIED REMOTELY (2026-02-08):**
 - R730XD: 12x 3.5" LFF front + 2x 2.5" rear flex (from dmesg enclosure slots 0-11)
@@ -343,9 +343,9 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 - Switch: Dell N2024P at 192.168.1.2 (L2 only, UDR6 is gateway at .1)
 - Tailscale subnet routing: pve advertises 192.168.1.0/24 (ip_forward persisted)
 
-**BLOCKED (LOOP-MD1400-SAS-DRIVER-RESOLVE — PARKED):**
+**BLOCKED (requires cold boot — LOOP-MD1400-SAS-RECOVERY-20260208):**
 - MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-037). Drives invisible until cold boot with persistent module config.
-- **2026-02-10: Replacement SAS HBA ordered.** Loop parked pending hardware delivery + cold boot install. Original PM8072 has PCI vendor ID mismatch (0x11f8 Microchip vs 0x117C PMC-Sierra).
+- Mitigation (if cold boot + persistent module config still fails): consider replacement SAS HBA (requires receipt-backed purchase + install plan).
 
 **UNVERIFIED (requires config capture):**
 - WiFi AP (EAP225): IP .185, MAC 54:AF:97:2F:C6:6E, on Gi1/0/24. Creds in Infisical `/spine/shop/wifi/`.
