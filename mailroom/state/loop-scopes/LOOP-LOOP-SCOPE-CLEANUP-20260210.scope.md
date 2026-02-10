@@ -1,6 +1,6 @@
 # LOOP-LOOP-SCOPE-CLEANUP-20260210
 
-> **Status:** OPEN
+> **Status:** CLOSED
 > **Owner:** @ronny
 > **Created:** 2026-02-10
 > **Severity:** high
@@ -25,5 +25,4 @@ Several loop scope docs were corrupted by an unquoted heredoc (zsh command subst
 
 ## Evidence
 
-- Receipt: (pending)
-
+- Receipt (`spine.verify` PASS after cleanup): `receipts/sessions/RCAP-20260210-084747__spine.verify__Rf3so75832/receipt.md`
