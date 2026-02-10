@@ -30,3 +30,12 @@ Inventory workbench non-legacy docs with uppercase path claims; patch to match s
 
 ## Evidence (Receipts)
 - mailroom/outbox/audit-export/2026-02-10-full-certification.md
+-
+## Work Completed
+
+- Workbench branch: `codex/LOOP-WORKBENCH-PATH-CANON-ALIGN-20260210`
+- Workbench commit: `5bfdab5` (updates `WORKBENCH_CONTRACT.md`, `docs/infrastructure/MCP_AUTHORITY.md`)
+
+## Verification
+
+- `spine.verify` PASS receipt: `receipts/sessions/RCAP-20260210-085629__spine.verify__Rg29z9299/receipt.md`
