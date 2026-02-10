@@ -36,6 +36,9 @@ scope: session-entry
 4. **Operate through the spine**
    - Every command that mutates must be run through `./bin/ops cap run <capability>` or `./bin/ops run ...` so receipts land in `receipts/sessions/`.
    - Never shell into `~/code/workbench` or `~/ronny-ops` at runtime; the spine is self-contained.
+   - **Branch hygiene (anti-drift):** mutating capabilities are blocked on `main` by default.
+     - Start work with a loop-scoped worktree: `./bin/ops start loop <LOOP_ID>`
+     - Override only for emergencies: `OPS_ALLOW_MAIN_MUTATION=1 ./bin/ops cap run <mutating.capability>`
 
 ## After the session
 

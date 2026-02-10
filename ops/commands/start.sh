@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ops start <issue> - create a per-issue worktree and session folder
+# ops start <issue> | ops start loop <loop_id> - create a per-scope worktree + session folder
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,15 +8,95 @@ if [[ -z "$REPO_ROOT" ]]; then
   REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 fi
 
-ISSUE="${1:-}"
-if [[ -z "$ISSUE" ]]; then
-  echo "Usage: ops start <issue-number>"
+scope_kind="${1:-}"
+scope_id="${2:-}"
+if [[ -z "$scope_kind" ]]; then
+  echo "Usage:"
+  echo "  ops start <issue-number>"
+  echo "  ops start loop <loop_id>"
+  exit 1
+fi
+
+is_issue=0
+is_loop=0
+ISSUE=""
+LOOP_ID=""
+
+if [[ "$scope_kind" =~ ^[0-9]+$ ]]; then
+  is_issue=1
+  ISSUE="$scope_kind"
+elif [[ "$scope_kind" == "loop" ]]; then
+  is_loop=1
+  LOOP_ID="$scope_id"
+else
+  echo "Usage:"
+  echo "  ops start <issue-number>"
+  echo "  ops start loop <loop_id>"
+  exit 1
+fi
+
+if (( is_loop == 1 )) && [[ -z "$LOOP_ID" ]]; then
+  echo "Usage: ops start loop <loop_id>"
   exit 1
 fi
 
 WORKTREE_BASE="$REPO_ROOT/.worktrees"
-WORKTREE_DIR="$WORKTREE_BASE/issue-${ISSUE}"
-BRANCH_NAME="issue-${ISSUE}"
+
+sanitize_loop_slug() {
+  # Turn a loop id into a stable, short-ish worktree basename.
+  # Example: LOOP-UDR6-SHOP-CUTOVER-20260209 -> udr6-shop-cutover-20260209
+  local s="$1"
+  s="${s#LOOP-}"
+  s="${s#OL_}"
+  s="$(echo "$s" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
+  s="${s%-}"
+  echo "$s"
+}
+
+WORKTREE_DIR=""
+BRANCH_NAME=""
+SESSION_DIR=""
+
+if (( is_issue == 1 )); then
+  WORKTREE_DIR="$WORKTREE_BASE/issue-${ISSUE}"
+  BRANCH_NAME="issue-${ISSUE}"
+  SESSION_DIR="$WORKTREE_DIR/docs/sessions/$(date +%Y-%m-%d)-#${ISSUE}"
+else
+  loop_slug="$(sanitize_loop_slug "$LOOP_ID")"
+  WORKTREE_DIR="$WORKTREE_BASE/codex-${loop_slug}"
+  BRANCH_NAME="codex/${LOOP_ID}"
+  SESSION_DIR="$WORKTREE_DIR/docs/sessions/$(date +%Y-%m-%d)-${LOOP_ID}"
+
+  # Ensure a loop scope file exists for agents to anchor receipts/decisions.
+  # This is a lightweight scaffold; the authoritative loop engine is mailroom/state/open_loops.jsonl.
+  LOOP_SCOPE_DIR="$REPO_ROOT/mailroom/state/loop-scopes"
+  LOOP_SCOPE_FILE="$LOOP_SCOPE_DIR/${LOOP_ID}.scope.md"
+  mkdir -p "$LOOP_SCOPE_DIR"
+  if [[ ! -f "$LOOP_SCOPE_FILE" ]]; then
+    cat > "$LOOP_SCOPE_FILE" <<EOF
+---
+status: draft
+owner: "@ronny"
+last_verified: $(date +%Y-%m-%d)
+scope: loop-scope
+loop_id: ${LOOP_ID}
+---
+
+# Loop Scope: ${LOOP_ID}
+
+## Goal
+
+## Success Criteria
+
+## Phases
+
+## Receipts
+- (link receipts here)
+
+## Deferred / Follow-ups
+EOF
+  fi
+fi
 
 if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}"; then
   echo "Branch ${BRANCH_NAME} already exists"
@@ -40,30 +120,41 @@ else
   echo "Worktree already exists: $WORKTREE_DIR"
 fi
 
-SESSION_DIR="$WORKTREE_DIR/docs/sessions/$(date +%Y-%m-%d)-#${ISSUE}"
 mkdir -p "$SESSION_DIR"
-cat <<SESSION > "$SESSION_DIR/SESSION_LOG.md"
+if (( is_issue == 1 )); then
+  cat <<SESSION > "$SESSION_DIR/SESSION_LOG.md"
 # Session Log - Issue #${ISSUE}
 
 **Started:** $(date -u)
 **Issue:** ${ISSUE}
 SESSION
+else
+  cat <<SESSION > "$SESSION_DIR/SESSION_LOG.md"
+# Session Log - Loop ${LOOP_ID}
 
-ISSUE_TITLE="Unknown issue"
-if command -v gh >/dev/null 2>&1; then
-  ISSUE_TITLE="$(gh issue view "$ISSUE" --json title -q '.title' 2>/dev/null || true)"
-  ISSUE_TITLE="${ISSUE_TITLE:-Unknown issue}"
+**Started:** $(date -u)
+**Loop:** ${LOOP_ID}
+**Scope Doc:** mailroom/state/loop-scopes/${LOOP_ID}.scope.md
+SESSION
 fi
 
-cat <<ISSUE > "$SESSION_DIR/ISSUE.md"
+if (( is_issue == 1 )); then
+  ISSUE_TITLE="Unknown issue"
+  if command -v gh >/dev/null 2>&1; then
+    ISSUE_TITLE="$(gh issue view "$ISSUE" --json title -q '.title' 2>/dev/null || true)"
+    ISSUE_TITLE="${ISSUE_TITLE:-Unknown issue}"
+  fi
+
+  cat <<ISSUE > "$SESSION_DIR/ISSUE.md"
 # Issue #${ISSUE}
 ${ISSUE_TITLE}
 ISSUE
+fi
 
 cat <<BOX
 
 ╔═══════════════════════════════════════════════════════════╗
-║ Workspace ready for Issue #${ISSUE}                        ║
+║ Workspace ready                                    ║
 ║ Worktree: ${WORKTREE_DIR}                                  ║
 ║ Session:  ${SESSION_DIR}                                   ║
 ╚═══════════════════════════════════════════════════════════╝

@@ -40,3 +40,16 @@ echo
 export GOV_LOADED=1
 export GOV_HASH
 export MAP_HASH
+
+# Branch hygiene hint (prevents silent drift on main).
+if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  current_branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ -n "${current_branch:-}" ]]; then
+    echo "Git:"
+    echo "  branch: $current_branch"
+    if [[ "$current_branch" == "main" ]]; then
+      echo "  note: mutating capabilities are blocked on main (set OPS_ALLOW_MAIN_MUTATION=1 to override)."
+    fi
+    echo
+  fi
+fi
