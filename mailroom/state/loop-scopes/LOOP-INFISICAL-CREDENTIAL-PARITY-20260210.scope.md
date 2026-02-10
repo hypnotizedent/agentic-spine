@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -30,6 +30,17 @@ values.
 - `receipts/sessions/RCAP-20260210-083304__docs.lint__Rdxw226400/receipt.md`
 - `receipts/sessions/RCAP-20260210-083359__spine.verify__Rfibn31673/receipt.md`
 - `receipts/sessions/RCAP-20260210-084044__secrets.credentials.parity__Rcnb746346/receipt.md`
+
+## Closure Note (2026-02-10)
+
+All required binding targets now pass:
+- **local**: OK (perm=600, all 3 exports present)
+- **automation-stack**: OK (perm=600, all 3 exports present) — fixed in this session:
+  created `ubuntu` user, injected SSH key, installed qemu-guest-agent,
+  added `INFISICAL_API_URL` to credentials file + `/etc/environment`
+- **ai-consolidation**: optional, deferred (no creds file — expected)
+
+Receipt: `RCAP-20260210-093235__secrets.credentials.parity__R7cae61738`
 
 ## Deferred / Follow-ups
 - Consider adding a weekly audit ritual (capability + schedule) once stable.
@@ -88,11 +99,15 @@ Cross-VM SSH audit of Infisical credential parity. Checked all shop VMs for
 
 ### Remediation Needed
 
-1. **automation-stack (VM 202)**: Fix SSH access (re-inject ed25519 key or
-   enable QEMU guest agent), then verify and fix `INFISICAL_API_URL` as noted
-   in prior findings.
-2. **docker-host (VM 200)**: If Infisical env vars are needed for legacy
-   stacks, add exports to `~/.bashrc` or equivalent. Otherwise, document as
-   intentionally partial.
-3. **Binding expansion**: If any of the 5 bare VMs will run Infisical-dependent
-   workloads, add them to `secrets.credentials.parity.yaml` targets.
+1. ~~**automation-stack (VM 202)**: Fix SSH access~~ **FIXED (2026-02-10)**:
+   - Created `ubuntu` user (UID 1001) with NOPASSWD sudo + docker group
+   - Injected ed25519 key (`info@mintprints.com`)
+   - Copied Infisical credentials from `automation` user
+   - Set `INFISICAL_API_URL=https://secrets.ronny.works` in both `ubuntu` and
+     `automation` user `.bashrc`
+   - Installed + enabled `qemu-guest-agent` (was missing entirely)
+   - Updated `ssh.targets.yaml`: user `automation` → `ubuntu`
+2. **docker-host (VM 200)**: Has creds file but no env vars — intentionally
+   partial (legacy VM, deprecated stacks).
+3. **Binding expansion**: The 5 bare VMs (204, 205, 206, 209, 210) have no
+   Infisical setup. Expected — not in binding.
