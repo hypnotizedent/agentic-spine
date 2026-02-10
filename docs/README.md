@@ -60,6 +60,7 @@ The authority chain. When in doubt, these are the source of truth.
 | [CORE_AGENTIC_SCOPE.md](governance/CORE_AGENTIC_SCOPE.md) | What's in-scope for the spine vs external |
 | [DOMAIN_ROUTING_REGISTRY.yaml](governance/DOMAIN_ROUTING_REGISTRY.yaml) | Domain routing rules |
 | [AGENT_BOUNDARIES.md](governance/AGENT_BOUNDARIES.md) | Agent boundary constraints |
+| [AGENT_GOVERNANCE_BRIEF.md](governance/AGENT_GOVERNANCE_BRIEF.md) | Canonical governance brief mirrored into agent entry surfaces |
 | [AGENTS_GOVERNANCE.md](governance/AGENTS_GOVERNANCE.md) | Agent lifecycle and verification contract |
 | [CLAUDE_ENTRYPOINT_SHIM.md](governance/CLAUDE_ENTRYPOINT_SHIM.md) | Claude home instruction shim contract |
 | [AGENTS_LOCATION.md](governance/AGENTS_LOCATION.md) | Where agent scripts live |
@@ -69,10 +70,12 @@ The authority chain. When in doubt, these are the source of truth.
 | [ISSUE_CLOSURE_SOP.md](governance/ISSUE_CLOSURE_SOP.md) | When and how to close GitHub issues |
 | [LEGACY_DEPRECATION.md](governance/LEGACY_DEPRECATION.md) | Rules for legacy/external repository references |
 | [MAILROOM_RUNBOOK.md](governance/MAILROOM_RUNBOOK.md) | Mailroom queue operations, ledger, logs, health checks |
+| [MAILROOM_BRIDGE.md](governance/MAILROOM_BRIDGE.md) | Governed remote bridge for mailroom processing |
 | [RAG_INDEXING_RULES.md](governance/RAG_INDEXING_RULES.md) | What gets indexed to RAG knowledge base |
 | [SEARCH_EXCLUSIONS.md](governance/SEARCH_EXCLUSIONS.md) | What directories/files are excluded from search |
 | [SECRETS_POLICY.md](governance/SECRETS_POLICY.md) | Governance-grade secrets management rules |
 | [HOST_DRIFT_POLICY.md](governance/HOST_DRIFT_POLICY.md) | Host-level drift policy for home/config/runtime stabilization |
+| [GIT_REMOTE_AUTHORITY.md](governance/GIT_REMOTE_AUTHORITY.md) | Canonical rule: Gitea as source of truth for remotes/merges |
 | [SSOT_UPDATE_TEMPLATE.md](governance/SSOT_UPDATE_TEMPLATE.md) | Receipt-driven SSOT update workflow |
 | [BACKUP_GOVERNANCE.md](governance/BACKUP_GOVERNANCE.md) | Backup strategy, verification, freshness rules |
 | [REBOOT_HEALTH_GATE.md](governance/REBOOT_HEALTH_GATE.md) | Safe reboot procedures and health gates |
@@ -102,6 +105,7 @@ The authority chain. When in doubt, these are the source of truth.
 | [SHOP_VM_ARCHITECTURE.md](governance/SHOP_VM_ARCHITECTURE.md) | Shop VM layout and lifecycle rules |
 | [SHOP_NETWORK_NORMALIZATION.md](governance/SHOP_NETWORK_NORMALIZATION.md) | Shop network normalization checklist and rules |
 | [SHOP_NETWORK_DEVICE_ONBOARDING.md](governance/SHOP_NETWORK_DEVICE_ONBOARDING.md) | Shop network onboarding procedure |
+| [BACKUP_CALENDAR.md](governance/BACKUP_CALENDAR.md) | Calendar of governed backup schedules and rotations |
 | [SHOP_NETWORK_AUDIT_RUNBOOK.md](governance/SHOP_NETWORK_AUDIT_RUNBOOK.md) | Shop network audit procedures and expected outputs |
 | [CHANGE_PACK_TEMPLATE.md](governance/CHANGE_PACK_TEMPLATE.md) | Change pack template for governed infrastructure work |
 | [CAMERA_SSOT.md](governance/CAMERA_SSOT.md) | Camera inventory SSOT (IDs, channels, expected coverage) |
@@ -109,6 +113,7 @@ The authority chain. When in doubt, these are the source of truth.
 | [GITEA_BACKUP_RESTORE.md](governance/GITEA_BACKUP_RESTORE.md) | Gitea backup/restore runbook |
 | [INFISICAL_BACKUP_RESTORE.md](governance/INFISICAL_BACKUP_RESTORE.md) | Infisical backup/restore runbook |
 | [VAULTWARDEN_BACKUP_RESTORE.md](governance/VAULTWARDEN_BACKUP_RESTORE.md) | Vaultwarden backup/restore runbook |
+| [RELEASE_PROTOCOL.md](governance/RELEASE_PROTOCOL.md) | Release/ship protocol for governed changes |
 
 ---
 

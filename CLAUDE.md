@@ -17,6 +17,13 @@
 - GitHub: hypnotizedent
 
 <!-- GOVERNANCE_BRIEF -->
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-10
+scope: agent-governance-brief
+---
+
 # Agent Governance Brief
 
 > Canonical source for all agent governance constraints.
