@@ -147,7 +147,8 @@ Role: latency-sensitive streaming, request management, and media presentation.
 
 10 containers total. NFS mounts from pve (LAN IP 192.168.1.184, media read-only).
 
-Note: Legacy monolith `media-stack` (VM 201) is being decommissioned.
+Note: Legacy monolith `media-stack` (VM 201) was **decommissioned 2026-02-12**
+(VM destroyed, ZFS dataset removed, 24.1G reclaimed).
 See `mailroom/state/loop-scopes/LOOP-MEDIA-STACK-SPLIT-20260208.scope.md`.
 
 ## “docker-host Is Being Chopped Up” (What That Means Operationally)
