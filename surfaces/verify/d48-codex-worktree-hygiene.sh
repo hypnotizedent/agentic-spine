@@ -44,7 +44,8 @@ for path in "${codex_paths[@]}"; do
     if git -C "$SPINE_REPO" branch --merged main --list "$branch" 2>/dev/null | grep -q .; then
       status_msgs+=("stale (merged into main)")
     fi
-    if ! git -C "$SPINE_REPO" rev-parse --verify --quiet "origin/$branch" 2>/dev/null; then
+    # rev-parse prints the resolved SHA to stdout; silence it since this is a gate script.
+    if ! git -C "$SPINE_REPO" rev-parse --verify --quiet "origin/$branch" >/dev/null 2>&1; then
       status_msgs+=("orphaned (no remote origin/$branch)")
     fi
   else
