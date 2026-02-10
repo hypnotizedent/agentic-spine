@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-05
+last_verified: 2026-02-10
 scope: mailroom-operations
 ---
 
@@ -31,7 +31,7 @@ mailroom/
 ├── outbox/        ← Results: <run_key>__RESULT.md files
 ├── state/
 │   ├── ledger.csv     ← Run history (all transitions)
-│   ├── open_loops.jsonl ← Action items not yet closed
+│   ├── loop-scopes/    ← Open Loop Engine SSOT (`*.scope.md`)
 │   └── locks/         ← PID locks for concurrency control
 └── logs/
     ├── hot-folder-watcher.log  ← Watcher activity
@@ -123,40 +123,20 @@ awk -F',' '{print $5}' mailroom/state/ledger.csv | sort | uniq -c
 
 ## Open Loops
 
-**Location:** `mailroom/state/open_loops.jsonl`
+**SSOT:** `mailroom/state/loop-scopes/*.scope.md`
 
-Each line is a JSON object tracking work that requires follow-up.
-
-### Schema
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `loop_id` | string | Unique loop identifier |
-| `run_key` | string | Associated run key |
-| `created_at` | ISO8601 | When the loop was opened |
-| `status` | enum | `open`, `closed` |
-| `closed_at` | ISO8601 | When closed (if closed) |
-| `close_reason` | string | Why it was closed |
-| `severity` | enum | `low`, `medium`, `high`, `critical` |
-| `owner` | string | Assigned owner |
-| `title` | string | Human-readable summary |
-| `next_action` | string | What needs to happen |
-| `evidence` | array | Paths to related files |
+Loop status is carried in the scope file YAML frontmatter:
+- `status: active|draft|open` = open work
+- `status: closed` = closed work
 
 ### Querying Open Loops
 
 ```bash
-# All open loops
-jq 'select(.status == "open")' mailroom/state/open_loops.jsonl
-
-# Count open vs closed
-jq -r '.status' mailroom/state/open_loops.jsonl | sort | uniq -c
-
-# High-severity open loops
-jq 'select(.status == "open" and .severity == "high")' mailroom/state/open_loops.jsonl
-
-# Via ops CLI
+# Via ops CLI (preferred)
 ./bin/ops loops list --open
+
+# Summary counts
+./bin/ops loops summary
 ```
 
 ---

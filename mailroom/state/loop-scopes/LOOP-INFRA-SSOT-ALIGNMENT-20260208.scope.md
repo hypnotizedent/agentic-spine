@@ -74,7 +74,7 @@ The INFRA_MASTER_PLAN.md was drafted from conversation notes during the initial 
 | E3 | LOOP-AI-CONSOLIDATION | 207 | Qdrant, AnythingLLM, Open WebUI | Not created |
 | E4 | LOOP-MEDIA-STACK-SPLIT | 209/210 | Download + streaming separation | Not created |
 
-### Category F: Stale Loop Entries in open_loops.jsonl (1)
+### Category F: Stale Loop Entries in open_loops.jsonl (legacy, 1)
 
 | # | Issue | Severity |
 |---|-------|----------|
@@ -166,9 +166,11 @@ The INFRA_MASTER_PLAN.md was drafted from conversation notes during the initial 
 
 ---
 
-### P3: Close Stale Loop Entries (immediate, no blockers)
+### P3: Close Stale Loop Entries (legacy, no longer applicable)
 
-**Scope:** Clean up `open_loops.jsonl` -- close legacy "Run failed" entries that are superseded.
+**Scope:** Historical note: this phase originally targeted `open_loops.jsonl` (now archived).
+Current loop state is scope-file backed; closeouts happen by updating `status: closed`
+in `mailroom/state/loop-scopes/*.scope.md`.
 
 **Actions:**
 1. Close these stale open entries (all are old cap-run failures from 2026-02-06 that have been superseded by passing runs):
@@ -178,7 +180,7 @@ The INFRA_MASTER_PLAN.md was drafted from conversation notes during the initial 
    - `OL_20260206_113405_spine.veri` (line 79 -- already closed at line 80)
 2. Append close records with reason: "Superseded by passing runs. All 47 drift gates pass as of 2026-02-08."
 
-**Acceptance:** `ops loops list --open` shows only active work loops, not stale cap-run failures.
+**Acceptance:** `ops loops list --open` shows only active work loops, not stale legacy entries.
 
 ---
 
@@ -209,24 +211,24 @@ The INFRA_MASTER_PLAN.md was drafted from conversation notes during the initial 
 1. **LOOP-OBSERVABILITY-DEPLOY-20260208** (VM 205):
    - Blocked by: LOOP-INFRA-CADDY-AUTH-20260207
    - Phases: Provision VM 205 -> bootstrap spine-ready-v1 -> deploy Prometheus/Grafana/Loki/Alertmanager -> deploy Uptime Kuma + node-exporter -> wire to infra-core Caddy -> verify
-   - Register in open_loops.jsonl
+   - Register as a scope file in `mailroom/state/loop-scopes/` (frontmatter `status: active`)
 
 2. **LOOP-DEV-TOOLS-DEPLOY** (VM 206):
    - Blocked by: LOOP-OBSERVABILITY-DEPLOY (need monitoring before adding more VMs)
    - Phases: Provision VM 206 -> bootstrap -> deploy Gitea + PostgreSQL -> configure Actions runner -> integrate with Authentik SSO -> verify
-   - Register in open_loops.jsonl
+   - Register as a scope file in `mailroom/state/loop-scopes/` (frontmatter `status: active`)
 
 3. **LOOP-AI-CONSOLIDATION** (VM 207):
    - Blocked by: none (independent track, but practical dependency on dev-tools for CI)
    - Phases: Evaluate RAM/GPU requirements -> provision VM 207 -> migrate Qdrant from MacBook -> migrate AnythingLLM -> evaluate Open WebUI placement (keep on 202 or move) -> split ai-services Infisical project -> verify
-   - Register in open_loops.jsonl
+   - Register as a scope file in `mailroom/state/loop-scopes/` (frontmatter `status: active`)
 
 4. **LOOP-MEDIA-STACK-SPLIT** (VM 209/210):
    - Blocked by: LOOP-MEDIA-STACK-ARCH-20260208 (stability first)
    - Phases: Design container split -> provision VM 209 + 210 -> migrate download containers -> migrate streaming containers -> update NFS mounts -> verify
-   - Register in open_loops.jsonl
+   - Register as a scope file in `mailroom/state/loop-scopes/` (frontmatter `status: active`)
 
-**Acceptance:** All 4 loop scopes exist in `mailroom/state/loop-scopes/`. All registered in `open_loops.jsonl`. Master plan loop status table updated.
+**Acceptance:** All 4 loop scopes exist in `mailroom/state/loop-scopes/`. Master plan loop status table updated.
 
 ---
 
@@ -239,7 +241,7 @@ The INFRA_MASTER_PLAN.md was drafted from conversation notes during the initial 
 2. Verify INFRA_MASTER_PLAN.md has no `proxmox-home` in VM 200+ context
 3. Verify workbench data files reference correct hosts
 4. Verify cross-repo authority binding exists
-5. Verify open_loops.jsonl has no stale cap-run entries
+5. Verify `./bin/ops loops list --open` has no stale legacy entries
 6. Update INFRA_MASTER_PLAN.md loop status table (all 4 new loops listed)
 7. Close this loop
 

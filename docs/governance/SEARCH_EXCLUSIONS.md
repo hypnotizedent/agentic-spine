@@ -31,7 +31,7 @@ github_issue: "#541"
 
 | Pattern | Reason |
 |---------|--------|
-| `*.jsonl` | Append-only logs (open_loops.jsonl, ledger data) |
+| `*.jsonl` | Append-only logs (archived `open_loops.jsonl.*`, Codex session logs, etc.) |
 | `*.csv` | Ledger files; machine-readable, not prose |
 | `output.txt` | Receipt output captures |
 

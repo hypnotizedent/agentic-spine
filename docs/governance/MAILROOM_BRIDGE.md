@@ -86,7 +86,8 @@ Returns server status + bind info.
 
 ### `GET /loops/open` (auth if token set)
 
-Returns reduced open loops from `mailroom/state/open_loops.jsonl` (stable ordering).
+Returns reduced open loops from scope files in `mailroom/state/loop-scopes/*.scope.md`
+(stable ordering, derived from frontmatter fields like `loop_id`, `status`, `severity`, `owner`).
 
 ### `GET /outbox/list?path=<rel>` (auth if token set)
 

@@ -15,12 +15,12 @@ Several loop scope docs were corrupted by an unquoted heredoc (zsh command subst
 - Restore corrupted existing scopes to their canonical content, then append a single correct "Audit Findings" section:
   - `mailroom/state/loop-scopes/LOOP-CAMERA-OUTAGE-20260209.scope.md`
   - `mailroom/state/loop-scopes/LOOP-MD1400-SAS-RECOVERY-20260208.scope.md`
-- Ensure `mailroom/state/open_loops.jsonl` remains valid JSONL and `./bin/ops loops list --open` works.
+- Ensure `./bin/ops loops list --open` works (scope-file backed loop engine).
 
 ## Acceptance
 
 - No injected command output remains in the repaired scope docs.
-- `jq -s . mailroom/state/open_loops.jsonl` succeeds.
+- `./bin/ops loops list --open` succeeds.
 - Receipt path recorded here for a passing `spine.verify` after repairs (or the best-available verification if other gates fail for unrelated reasons).
 
 ## Evidence

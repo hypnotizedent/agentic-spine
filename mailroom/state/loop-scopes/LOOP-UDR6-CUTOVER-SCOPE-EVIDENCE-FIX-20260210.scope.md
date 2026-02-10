@@ -17,7 +17,7 @@
 ## Acceptance
 
 - UDR6 scope doc references canonical artifacts only.
-- Loop remains closed in `open_loops.jsonl`.
+- Loop remains closed in scope file frontmatter (`status: closed`).
 - Receipt path recorded here (spine.verify) showing spine is healthy after edits.
 
 ## Evidence

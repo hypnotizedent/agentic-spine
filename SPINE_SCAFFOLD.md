@@ -202,7 +202,7 @@
 # │   └── governance/   SSOT_REGISTRY.yaml (32 entries), SSOTs, policies
 # ├── fixtures/         Replay determinism (5 event fixtures + baselines)
 # ├── mailroom/         Runtime (inbox/, outbox/, logs/, state/)
-# │   └── state/        ledger.csv, open_loops.jsonl, locks/
+# │   └── state/        ledger.csv, loop-scopes/, locks/
 # ├── ops/              Commands, plugins, bindings, runtime, tools
 # │   ├── bindings/     28 YAML binding files
 # │   ├── capabilities.yaml  Capability registry (145 entries)

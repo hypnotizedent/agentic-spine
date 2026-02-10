@@ -45,7 +45,7 @@ Double-NAT topology is acceptable since all public access uses Cloudflare tunnel
 | operational.gaps.yaml | Added: GAP-OP-064 | **DONE** |
 | D52 drift gate | Created: d52-udr6-gateway-assertion.sh | **DONE** |
 | NETWORK_RUNBOOK.md | Created: reusable network change procedures | **DONE** |
-| Loop registered | open_loops.jsonl entry | **DONE** |
+| Loop registered | scope file frontmatter (`status: active`) | **DONE** |
 | Memory files updated | MEMORY.md, infrastructure-details.md, governance-details.md | **DONE** |
 | pihole staged config | Updated FTLCONF_LOCAL_IPV4 to 192.168.1.204 | **DONE** |
 | DR_RUNBOOK.md | Updated iDRAC IP | **DONE** |
@@ -169,4 +169,4 @@ These are physical/on-site tasks deferred to `LOOP-SHOP-EDGE-CREDS-AND-INVENTORY
 Closeout note recorded during certification review:
 - `mailroom/outbox/audit-export/2026-02-10-full-certification.md`
 
-Loop closure is tracked in `mailroom/state/open_loops.jsonl` (status=closed).
+Loop closure is tracked in the scope file frontmatter (`status: closed`).

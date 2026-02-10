@@ -69,37 +69,101 @@ def _read_limited(path: Path, max_bytes: int) -> bytes:
     return path.read_bytes()
 
 
-def _reduce_open_loops(open_loops_jsonl: Path) -> list[dict[str, Any]]:
-    # Match loops-ledger-reduce logic: append-only JSONL, latest wins per loop_id.
-    state: dict[str, dict[str, Any]] = {}
-    if not open_loops_jsonl.exists():
+def _parse_scope_frontmatter(md: str) -> tuple[dict[str, str], int]:
+    """
+    Parse a small YAML frontmatter block from a loop scope markdown file.
+
+    We intentionally avoid PyYAML here; loop scope frontmatter is simple
+    key: value pairs and that's all we need for the bridge.
+    """
+
+    lines = md.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, 0
+
+    fm: dict[str, str] = {}
+    i = 1
+    while i < len(lines):
+        line = lines[i].rstrip("\n")
+        if line.strip() == "---":
+            return fm, i + 1
+        s = line.strip()
+        if not s or s.startswith("#") or ":" not in s:
+            i += 1
+            continue
+        k, v = s.split(":", 1)
+        fm[k.strip()] = v.strip().strip('"')
+        i += 1
+    return {}, 0
+
+
+def _scope_title(md: str, body_start_line: int) -> str:
+    lines = md.splitlines()
+    for raw in lines[body_start_line:]:
+        s = raw.strip()
+        if not s.startswith("#"):
+            continue
+        # First markdown heading after frontmatter wins.
+        title = s.lstrip("#").strip()
+        if title.lower().startswith("loop scope:"):
+            title = title[len("loop scope:") :].strip()
+        return title
+    return ""
+
+
+def _is_open_status(status: str) -> bool:
+    return (status or "").strip().lower() in {"active", "draft", "open"}
+
+
+def _reduce_open_loops_from_scopes(scopes_dir: Path) -> list[dict[str, Any]]:
+    """
+    Reduce open loops from scope files (mailroom/state/loop-scopes/*.scope.md).
+
+    This matches ops/commands/loops.sh semantics:
+    - status in {active,draft,open} = open
+    - status == closed = closed
+    - skip non-loop scope files (e.g. status: authoritative)
+    """
+
+    if not scopes_dir.exists() or not scopes_dir.is_dir():
         return []
-    for line in open_loops_jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+
+    loops: list[dict[str, Any]] = []
+    for scope_file in sorted(scopes_dir.glob("*.scope.md")):
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        lid = row.get("loop_id") or row.get("id")
-        if not lid:
+            md = scope_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
             continue
 
-        cur = state.get(lid, {"loop_id": lid})
-        if row.get("action") == "close":
-            cur["status"] = "closed"
+        fm, body_start = _parse_scope_frontmatter(md)
+        loop_id = (fm.get("loop_id") or "").strip()
+        if not loop_id:
+            continue
 
-        for k, v in row.items():
-            if k in ("id", "action"):
-                continue
-            cur[k] = v
+        status = (fm.get("status") or "").strip().lower() or "unknown"
+        severity = (fm.get("severity") or "").strip() or "-"
+        owner = (fm.get("owner") or "").strip() or "unassigned"
 
-        cur["loop_id"] = lid
-        state[lid] = cur
+        # Skip non-loop scope files (e.g. status: authoritative).
+        if status not in {"active", "draft", "open", "closed"}:
+            continue
+        if not _is_open_status(status):
+            continue
 
-    deduped = list(state.values())
-    return [r for r in deduped if r.get("status") == "open"]
+        title = _scope_title(md, body_start) or loop_id
+        display_title = title if title != loop_id else ""
+
+        loops.append(
+            {
+                "loop_id": loop_id,
+                "status": status,
+                "severity": severity,
+                "owner": owner,
+                "title": display_title,
+            }
+        )
+
+    return loops
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -166,11 +230,11 @@ class Handler(BaseHTTPRequestHandler):
         spine_repo = Path(self.config["spine_repo"])
         outbox_root = spine_repo / "mailroom/outbox"
         receipts_root = spine_repo / "receipts/sessions"
-        loops_file = spine_repo / "mailroom/state/open_loops.jsonl"
+        scopes_dir = spine_repo / "mailroom/state/loop-scopes"
         max_read = int(self.config.get("max_read_bytes") or 262144)
 
         if path == "/loops/open":
-            loops = _reduce_open_loops(loops_file)
+            loops = _reduce_open_loops_from_scopes(scopes_dir)
             # Stable ordering for clients.
             severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
             loops.sort(
