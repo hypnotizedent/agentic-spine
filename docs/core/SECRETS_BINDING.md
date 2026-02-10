@@ -46,6 +46,10 @@ This repo ships a spine-native secrets surface. It is NOT dependent on ronny-ops
 - `~/.config/infisical/credentials` (perm 600)
 - Use `./bin/ops cap run secrets.auth.load` to validate and print the `source ...` one-liner.
 - Use `./bin/ops cap run secrets.auth.status` to confirm auth vars are present (no values printed).
+- Use `./bin/ops cap run secrets.credentials.parity` to audit credential file setup across declared nodes (no values printed).
+
+**Parity binding (non-secret):**
+- `ops/bindings/secrets.credentials.parity.yaml` (declares which nodes must have credentials configured)
 
 **Exec (inject without printing):**
 - `./bin/ops cap run secrets.exec -- <cmd>`

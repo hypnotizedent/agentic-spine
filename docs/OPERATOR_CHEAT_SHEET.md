@@ -1,7 +1,7 @@
 # Operator Cheat Sheet
 
 > **Status:** authoritative
-> **Last verified:** 2026-02-04
+> **Last verified:** 2026-02-10
 
 Quick reference for spine operations and governance tasks.
 
@@ -64,6 +64,7 @@ Shell environments cannot be reliably mutated by subprocess capabilities. The `o
 - `secrets.binding` - Print binding (SSOT)
 - `secrets.auth.load` - Load auth guidance
 - `secrets.auth.status` - Check auth presence
+- `secrets.credentials.parity` - Audit creds file setup across declared nodes
 - `secrets.projects.status` - Verify bound project is ACTIVE
 
 ### GitHub Integration
