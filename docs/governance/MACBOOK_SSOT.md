@@ -135,7 +135,7 @@ github_issue: "#625"
 | immich | root | ~/.ssh/id_ed25519 | Photo server (home) |
 | download-home | root | ~/.ssh/id_ed25519 | *arr apps (home) |
 
-**Config location:** `~/.ssh/config` + `~/ronny-ops/infrastructure/dotfiles/ssh/config.d/` (symlinked to `~/.ssh/config.d/`)
+**Config location:** `~/.ssh/config` + `~/code/workbench/dotfiles/ssh/config.d/`
 
 ### Hotkeys / Shortcuts
 
