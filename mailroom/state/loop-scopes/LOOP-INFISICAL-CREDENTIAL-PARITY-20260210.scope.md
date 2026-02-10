@@ -27,8 +27,14 @@ values.
 - P3: Closeout with receipts + SSOT updates (if any)
 
 ## Evidence (Receipts)
-- (link receipts here)
+- `receipts/sessions/RCAP-20260210-083304__docs.lint__Rdxw226400/receipt.md`
+- `receipts/sessions/RCAP-20260210-083359__spine.verify__Rfibn31673/receipt.md`
+- `receipts/sessions/RCAP-20260210-084044__secrets.credentials.parity__Rcnb746346/receipt.md`
 
 ## Deferred / Follow-ups
 - Consider adding a weekly audit ritual (capability + schedule) once stable.
 
+## Current Findings
+- `automation-stack` has `~/.config/infisical/credentials` but is missing `INFISICAL_API_URL`.
+  - Fix hint (non-secret): `export INFISICAL_API_URL="https://secrets.ronny.works"`
+- `ai-consolidation` is optional in parity binding and currently has no creds file (expected until bridge finalizes).
