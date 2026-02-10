@@ -18,7 +18,7 @@ Make shop edge operations repeatable by ensuring **Infisical has the canonical s
 - Infisical shop folders missing:
   - Present: `/spine/shop/wifi` (AP_SSH_USER, AP_SSH_PASSWORD)
   - Missing: `/spine/shop/{unifi,nvr,idrac,switch}` (folders not found)
-- AP SSH auth fails using the stored secret (`network.ap.facts.capture` FAIL) even though tcp/22 is open.
+- ~~AP SSH auth fails using the stored secret~~ → **FIXED**: Infisical had username in password field; also needed `HostKeyAlgorithms=+ssh-rsa` for dropbear + case-sensitive username `Production`.
 - N2024P service tag is still missing from `SHOP_SERVER_SSOT.md` (only MAC recorded).
 
 ## Success Criteria
@@ -46,5 +46,8 @@ Make shop edge operations repeatable by ensuring **Infisical has the canonical s
 
 ## Receipts
 
-- (add run keys here)
+- `CAP-20260210-150242__network.ap.facts.capture__Rxy4z41187` — AP facts captured (PASS)
+- Infisical `AP_SSH_PASSWORD` corrected (was username, now password)
+- `ssh.targets.yaml` user casing fixed (`Production`), `ssh_extra_opts` added for dropbear
+- Script hardened: `HostKeyAlgorithms=+ssh-rsa`, no remote `/dev/null` redirects, `grep || true` for pipefail safety
 

@@ -61,7 +61,7 @@ Notes:
 | Dell Networking N2024P | — (MAC: F8:B1:56:73:A0:D0) | U39 | 24-port PoE+ switch |
 | APC Back-UPS Pro 900 | BVN900M1 | Floor | 900VA UPS |
 | Hikvision ERI-K216-P16 | ERI-K216-P161620220307CCRRJ54340404WCVU | Upstairs 9U rack (separate) | 16-channel PoE NVR |
-| TP-Link EAP225 | — (MAC: 54:AF:97:2F:C6:6E, mgmt: 192.168.1.185) | — | WiFi AP (serial pending) |
+| TP-Link EAP225 | — (MAC: 54:AF:97:2F:C6:6E, mgmt: 192.168.1.185) | — | WiFi AP — kernel 3.3.8, dropbear SSH (ssh-rsa only) |
 
 ### Rack Inventory
 
@@ -73,7 +73,7 @@ Notes:
 | Switch | Dell N2024P | Shop LAN switching / PoE (24-port, 190W PoE budget) | 2026-02-05 |
 | UPS | APC Back-UPS Pro 900 | 900VA / 540W, ~10-15 min runtime at full load | 2026-02-08 |
 | NVR | Hikvision ERI-K216-P16 | 16-channel PoE NVR (upstairs 9U rack, separate from main) | 2026-02-05 |
-| WiFi AP | TP-Link EAP225 | Shop WiFi | partial |
+| WiFi AP | TP-Link EAP225 | Shop WiFi (SSIDs: "Production" 5GHz, "Production 2.5" 2.4GHz) | 2026-02-10 |
 
 ### R730XD Hardware Specifications
 
@@ -348,10 +348,11 @@ That umbrella loop is now **closed (2026-02-10)** and remaining work is tracked 
 **BLOCKED (requires hardware fix — LOOP-MD1400-SAS-RECOVERY-20260208):**
 - MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 init still fails even after on-site cold boot (GAP-OP-037). Proceed with controller replace/reflash path.
 
-**UNVERIFIED (requires credentials or physical visit):**
-- WiFi AP (EAP225): Web UI at .185 reachable (was previously documented as .249, now stale).
-  - 2026-02-09: AP was factory reset to regain admin access. After reset, re-adopt via UDR6 DHCP client list, set DHCP reservation to `.185`, and store the new admin password in Infisical (`infrastructure/prod:/spine/shop/wifi/*`).
-  - SSH auth currently fails using `AP_SSH_PASSWORD` from Infisical (permission denied) even though tcp/22 is open; update the secret, then rerun `network.ap.facts.capture` to record config.
+**VERIFIED REMOTELY (2026-02-10) — WiFi AP (EAP225):**
+- SSH connected via `pve` jump host, `network.ap.facts.capture` capability PASS.
+- Receipt: `CAP-20260210-150242__network.ap.facts.capture__Rxy4z41187`
+- Fixes applied: Infisical `AP_SSH_PASSWORD` corrected (was username "Production", now correct password); `ssh.targets.yaml` username case fixed (`Production`); SSH host key algo (`ssh-rsa`) added for dropbear compat; script hardened for restricted busybox shell (no `/dev/null` writes).
+- Facts: kernel 3.3.8, MAC 54:af:97:2f:c6:6e, IP 192.168.1.185, SSIDs: "Production" (5GHz/ath10), "Production 2.5" (2.4GHz/ath0), mesh backhaul (bkhap1).
 
 **Camera system details:** Now tracked in [CAMERA_SSOT.md](CAMERA_SSOT.md) and LOOP-CAMERA-BASELINE-20260208 (offline cameras, IP conflict, physical location audit).
 
@@ -360,6 +361,7 @@ That umbrella loop is now **closed (2026-02-10)** and remaining work is tracked 
 ## Evidence / Receipts
 
 - `receipts/sessions/DELL_N2024P_FACTORY_RESET_20260205_122838/receipt.md`
+- `receipts/sessions/RCAP-20260210-150242__network.ap.facts.capture__Rxy4z41187/receipt.md`
 
 ---
 

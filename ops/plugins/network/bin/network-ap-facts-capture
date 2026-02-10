@@ -95,61 +95,66 @@ echo
 
 # ── Gather facts ───────────────────────────────────────────────────────────
 # Each fact is best-effort; missing commands produce empty strings.
+# NOTE: The EAP225 runs a restricted busybox shell where /dev/null is not
+# writable.  All remote commands avoid stderr redirects; instead we strip
+# stderr locally inside ssh_cmd (2>/dev/null on the outer ssh call).
 
 echo "--- AP Facts (doc-ready) ---"
 echo
 
 # Model
-model="$(ssh_cmd "cat /tmp/sysinfo/model 2>/dev/null || cat /tmp/sysinfo/board_name 2>/dev/null || echo unknown" | tr -d '\r' | head -1)"
+model="$(ssh_cmd "cat /tmp/sysinfo/model || cat /tmp/sysinfo/board_name || echo unknown" | tr -d '\r' | head -1)"
 echo "model: ${model:-unknown}"
 
 # Firmware / OS release
-firmware="$(ssh_cmd "cat /etc/openwrt_release 2>/dev/null || cat /etc/os-release 2>/dev/null || echo unknown" | tr -d '\r')"
-fw_version="$(echo "$firmware" | grep -i 'DISTRIB_RELEASE\|VERSION_ID' | head -1 | cut -d= -f2 | tr -d "'" | tr -d '"')"
-fw_description="$(echo "$firmware" | grep -i 'DISTRIB_DESCRIPTION\|PRETTY_NAME' | head -1 | cut -d= -f2 | tr -d "'" | tr -d '"')"
+firmware="$(ssh_cmd "cat /etc/openwrt_release || cat /etc/os-release || echo unknown" | tr -d '\r')"
+fw_version="$(echo "$firmware" | { grep -i 'DISTRIB_RELEASE\|VERSION_ID' || true; } | head -1 | cut -d= -f2 | tr -d "'" | tr -d '"')"
+fw_description="$(echo "$firmware" | { grep -i 'DISTRIB_DESCRIPTION\|PRETTY_NAME' || true; } | head -1 | cut -d= -f2 | tr -d "'" | tr -d '"')"
 echo "firmware_version: ${fw_version:-unknown}"
 echo "firmware_description: ${fw_description:-unknown}"
 
 # Kernel
-kernel="$(ssh_cmd "uname -r 2>/dev/null || echo unknown" | tr -d '\r' | head -1)"
+kernel="$(ssh_cmd "uname -r || echo unknown" | tr -d '\r' | head -1)"
 echo "kernel: ${kernel:-unknown}"
 
 # Uptime
-uptime_str="$(ssh_cmd "uptime 2>/dev/null || echo unknown" | tr -d '\r' | head -1)"
+uptime_str="$(ssh_cmd "uptime || echo unknown" | tr -d '\r' | head -1)"
 echo "uptime: ${uptime_str:-unknown}"
 
 # MAC address (management interface)
-mac="$(ssh_cmd "cat /sys/class/net/br0/address 2>/dev/null || cat /sys/class/net/eth0/address 2>/dev/null || echo unknown" | tr -d '\r' | head -1)"
+mac="$(ssh_cmd "cat /sys/class/net/br0/address || cat /sys/class/net/eth0/address || echo unknown" | tr -d '\r' | head -1)"
 echo "mac_address: ${mac:-unknown}"
 
 # IP config
-ip_addr="$(ssh_cmd "ip -4 addr show br0 2>/dev/null || ip -4 addr show eth0 2>/dev/null || echo unknown" | tr -d '\r')"
-mgmt_ip="$(echo "$ip_addr" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -1)"
+ip_addr="$(ssh_cmd "ip -4 addr show br0 || ip -4 addr show eth0 || echo unknown" | tr -d '\r')"
+mgmt_ip="$(echo "$ip_addr" | { grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' || true; } | head -1)"
 echo "management_ip: ${mgmt_ip:-${AP_HOST}/unknown}"
 
 # Wireless interfaces & SSIDs
 echo "wireless:"
-wifi_info="$(ssh_cmd "iwinfo 2>/dev/null || iwconfig 2>/dev/null || echo none" | tr -d '\r')"
+wifi_info="$(ssh_cmd "iwinfo || iwconfig || echo none" | tr -d '\r')"
 if [[ "$wifi_info" != "none" && -n "$wifi_info" ]]; then
   # Parse iwinfo output for ESSID and channel
   echo "$wifi_info" | while IFS= read -r line; do
     if echo "$line" | grep -qiE 'ESSID|essid'; then
       iface="$(echo "$line" | awk '{print $1}')"
-      essid="$(echo "$line" | grep -oP 'ESSID: "\K[^"]+' 2>/dev/null || echo "$line" | grep -oE 'ESSID:"[^"]+"' | cut -d'"' -f2)"
+      essid="$(echo "$line" | sed -n 's/.*ESSID: "\([^"]*\)".*/\1/p' | head -1)"
+      [[ -z "$essid" ]] && essid="$(echo "$line" | { grep -oE 'ESSID:"[^"]+"' || true; } | cut -d'"' -f2)"
       echo "  - interface: ${iface:-unknown}"
       echo "    ssid: \"${essid:-unknown}\""
     fi
     if echo "$line" | grep -qiE 'Channel:'; then
-      channel="$(echo "$line" | grep -oP 'Channel: \K\S+' 2>/dev/null || echo "$line" | grep -oE 'Channel:[0-9]+' | cut -d: -f2)"
+      channel="$(echo "$line" | sed -n 's/.*Channel: *\([^ ]*\).*/\1/p' | head -1)"
+      [[ -z "$channel" ]] && channel="$(echo "$line" | { grep -oE 'Channel:[0-9]+' || true; } | cut -d: -f2)"
       echo "    channel: ${channel:-unknown}"
     fi
   done
 else
   # Fallback: try UCI wireless config
-  uci_wifi="$(ssh_cmd "uci show wireless 2>/dev/null || cat /etc/config/wireless 2>/dev/null || echo none" | tr -d '\r')"
+  uci_wifi="$(ssh_cmd "uci show wireless || cat /etc/config/wireless || echo none" | tr -d '\r')"
   if [[ "$uci_wifi" != "none" && -n "$uci_wifi" ]]; then
     echo "  # raw wireless config (parse manually):"
-    echo "$uci_wifi" | grep -iE 'ssid|channel|mode|band|hwmode' | sed 's/^/  # /'
+    echo "$uci_wifi" | { grep -iE 'ssid|channel|mode|band|hwmode' || true; } | sed 's/^/  # /'
   else
     echo "  - unknown (no iwinfo/iwconfig/uci available)"
   fi
