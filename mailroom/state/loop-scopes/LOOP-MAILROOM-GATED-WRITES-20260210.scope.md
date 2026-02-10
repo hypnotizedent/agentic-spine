@@ -1,5 +1,5 @@
 ---
-status: open
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -31,8 +31,8 @@ Two full loops of work were destroyed by this pattern on 2026-02-10.
 - P0: Register loop + scope [DONE]
 - P1: Build proposal infrastructure (format + submit + list + apply) [DONE]
 - P2: Update AGENTS.md + governance brief with read-only agent rule [DONE]
-- P3: Re-apply destroyed work as first proposals
-- P4: Verify + closeout
+- P3: Re-apply destroyed work as first proposals [DONE]
+- P4: Verify + closeout [DONE]
 
 ## Constraints
 - No renaming core dirs
@@ -41,4 +41,6 @@ Two full loops of work were destroyed by this pattern on 2026-02-10.
 - The apply command commits automatically after applying
 
 ## Evidence (Receipts)
-- RCAP-20260210-175330__spine.verify__Ruyd250384 (spine.verify PASS)
+- RCAP-20260210-175812__proposals.submit__Rp1o272906 (create first proposal)
+- RCAP-20260210-180132__proposals.apply__Ra02c77545 (apply first proposal + commit)
+- RCAP-20260210-180200__spine.verify__Rks5n80984 (post-apply spine.verify PASS)
