@@ -22,7 +22,7 @@
 
 - **D30:** No `ronny-ops` references. `~/code/` is the only source tree.
 - **D42:** No uppercase `Code` in paths — lowercase `code` only.
-- **D48:** Max 2 active worktrees. Clean up after merging.
+- **D48:** Clean up worktrees after merging (`ops close loop <ID>`). No count limit.
 - **D54/D59:** SSOT bindings must match live infrastructure.
 - **D61:** Session closeout required every 48h: `./bin/ops cap run agent.session.closeout`.
 - Run `./bin/ops cap run spine.verify` before committing — 50+ gates check everything.
