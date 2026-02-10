@@ -19,13 +19,18 @@ signals while preserving irreversible safety guarantees.
 
 ## Phases
 - P0: Data snapshot (failure stats + gate inventory) [DONE]
-- P1: Consolidation proposal (what merges, what stays, what moves to preflight) [TODO]
-- P2: Implement composites + keep/retire plan (optional, separate change pack) [TODO]
-- P3: Verify + closeout (receipts) [TODO]
+- P1: Consolidation proposal (what merges, what stays, what moves to preflight) [DONE]
+- P2: Implement composites + keep/retire plan (optional, separate change pack) [DONE]
+- P3: Verify + closeout (receipts) [DONE]
 
 ## Evidence (Receipts)
 - `receipts/sessions/RCAP-20260209-202244__verify.drift_gates.certify__Rkxk068237/receipt.md`
 - `receipts/sessions/RCAP-20260209-202834__verify.drift_gates.failure_stats__Rce7d70480/receipt.md`
+- `receipts/sessions/RCAP-20260209-214759__docs.lint__Rc3p115916/receipt.md`
+- `receipts/sessions/RCAP-20260209-215438__spine.verify__Rnfrg28010/receipt.md`
+- `receipts/sessions/RCAP-20260209-215457__verify.drift_gates.certify__Rlbi531897/receipt.md`
+- `receipts/sessions/RCAP-20260209-215520__spine.verify__Rbxzk32284/receipt.md` (DRIFT_VERBOSE=1)
 
 ## Deferred / Follow-ups
-- Decide whether to keep individual gates as "verbose mode" behind an env flag.
+- DRIFT_VERBOSE implemented: default runs composites (D55-D57); verbose runs the underlying gates individually.
+- Consider whether D48 should treat "no remote branch yet" as WARN (grace window) vs FAIL.
