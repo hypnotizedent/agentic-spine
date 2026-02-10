@@ -50,7 +50,7 @@ scope: session-entry
 ## What Keeps This Predictable (Gates + Governance)
 
 - **Entry governance:** `AGENTS.md` + this `SESSION_PROTOCOL.md` define the canonical workflow: start in the spine repo, list open loops, do work via `./bin/ops cap run ...` / `./bin/ops run ...`, and close loops with receipts.
-- **Loop engine:** `./bin/ops loops ...` + `mailroom/state/open_loops.jsonl` + `mailroom/state/loop-scopes/*.scope.md` are the shared coordination surface other agents can see.
+- **Loop engine:** `./bin/ops loops ...` + `mailroom/state/loop-scopes/*.scope.md` are the shared coordination surface other agents can see.
 - **Receipts + ledger:** `receipts/sessions/**/receipt.md` and `mailroom/state/ledger.csv` are the auditable proof trail.
 - **Drift gates (enforced by `spine.verify`):**
   - D42 code-path case lock (keeps `~/code/...` canonical, blocks drift like `~/Code/...`).

@@ -3,13 +3,13 @@
 # Fails when agent.session.closeout has not been run within
 # SESSION_CLOSEOUT_FRESHNESS_HOURS (default: 48).
 #
-# Reads: mailroom/state/ledger.csv
+# Reads: mailroom/state/ledger.csv, mailroom/state/loop-scopes/*.scope.md
 set -euo pipefail
 
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LEDGER="$SP/mailroom/state/ledger.csv"
 THRESHOLD_HOURS="${SESSION_CLOSEOUT_FRESHNESS_HOURS:-48}"
-LOOPS_LEDGER="$SP/mailroom/state/open_loops.jsonl"
+SCOPES_DIR="$SP/mailroom/state/loop-scopes"
 LOOP_TTL_HIGH_HOURS="${LOOP_TTL_HIGH_HOURS:-48}"
 
 FAIL=0
@@ -69,29 +69,44 @@ if [[ "$DELTA_HOURS" -gt "$THRESHOLD_HOURS" ]]; then
   err "agent.session.closeout last run ${DELTA_HOURS}h ago (threshold: ${THRESHOLD_HOURS}h)"
 fi
 
-# Loop TTL/SLA: fail if any open high-severity loop has no ledger activity within threshold.
-#
-# Activity model (locked):
-# - open_loops.jsonl is append-only
-# - reduce to latest record per loop_id (latest wins by file order)
-# - use latest record created_at as "last activity"
-if [[ -f "$LOOPS_LEDGER" ]]; then
+# Loop TTL/SLA: fail if any open high-severity loop exceeds age threshold.
+# Reads scope file frontmatter (status, severity, created date).
+if [[ -d "$SCOPES_DIR" ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    if ! python3 - "$LOOPS_LEDGER" "$LOOP_TTL_HIGH_HOURS" <<'PY'
-import json
+    if ! python3 - "$SCOPES_DIR" "$LOOP_TTL_HIGH_HOURS" <<'PY'
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
-path = sys.argv[1]
+scopes_dir = sys.argv[1]
 threshold_hours = int(sys.argv[2])
 
-def loop_key(row):
-    return row.get("loop_id") or row.get("id")
+def parse_frontmatter(path):
+    fm = {}
+    in_fm = False
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped == "---":
+                if in_fm:
+                    break
+                in_fm = True
+                continue
+            if in_fm and ":" in stripped:
+                key, _, val = stripped.partition(":")
+                fm[key.strip()] = val.strip().strip('"').strip("'")
+    return fm
 
 def parse_ts(ts):
     if not ts:
         return None
     ts = ts.strip()
+    # Handle date-only (YYYY-MM-DD)
+    if len(ts) == 10:
+        try:
+            return datetime.fromisoformat(ts + "T00:00:00+00:00")
+        except Exception:
+            return None
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
     try:
@@ -99,52 +114,32 @@ def parse_ts(ts):
     except Exception:
         return None
 
-rows = []
-with open(path, "r", encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-state = {}
-for row in rows:
-    lid = loop_key(row)
-    if not lid:
-        continue
-    cur = state.get(lid, {"loop_id": lid})
-    if row.get("action") == "close":
-        cur["status"] = "closed"
-    for k, v in row.items():
-        if k in ("id", "action"):
-            continue
-        cur[k] = v
-    cur["loop_id"] = lid
-    state[lid] = cur
-
 now = datetime.now(timezone.utc)
 stale = []
-for loop in state.values():
-    if loop.get("status") != "open":
+
+for scope_file in sorted(Path(scopes_dir).glob("*.scope.md")):
+    fm = parse_frontmatter(scope_file)
+    status = fm.get("status", "")
+    if status not in ("active", "draft", "open"):
         continue
-    if (loop.get("severity") or "").lower() != "high":
+    severity = (fm.get("severity") or "").lower()
+    if severity not in ("critical", "high"):
         continue
-    created_at = parse_ts(loop.get("created_at"))
-    if not created_at:
+    created = parse_ts(fm.get("created", fm.get("created_at", "")))
+    if not created:
         continue
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
-    age_h = int((now - created_at).total_seconds() // 3600)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age_h = int((now - created).total_seconds() // 3600)
     if age_h > threshold_hours:
-        stale.append((age_h, loop.get("loop_id"), loop.get("owner") or "unassigned", loop.get("created_at")))
+        owner = fm.get("owner", "unassigned")
+        loop_id = fm.get("loop_id", scope_file.stem)
+        stale.append((age_h, loop_id, owner, fm.get("created", "")))
 
 stale.sort(reverse=True)
 if stale:
     for age_h, loop_id, owner, created_at in stale:
-        print(f"  FAIL: high loop stale >{threshold_hours}h: {loop_id} owner={owner} age={age_h}h created_at={created_at}", file=sys.stderr)
+        print(f"  FAIL: high loop stale >{threshold_hours}h: {loop_id} owner={owner} age={age_h}h created={created_at}", file=sys.stderr)
     sys.exit(1)
 sys.exit(0)
 PY

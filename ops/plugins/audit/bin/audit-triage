@@ -4,7 +4,7 @@
 # Purpose:
 #   Reads *RESULT.md files from mailroom/outbox/, extracts findings by severity
 #   (Critical/Moderate/Minor), and cross-references each finding against
-#   operational.gaps.yaml and open_loops.jsonl to classify them as:
+#   operational.gaps.yaml and loop scope files to classify them as:
 #     TRACKED   — already has a matching gap or loop
 #     UNTRACKED — needs gap/loop creation
 #     STALE     — referenced gap is already fixed
@@ -21,7 +21,7 @@ SPINE_REPO="${SPINE_REPO:-$SP}"
 
 OUTBOX="$SPINE_REPO/mailroom/outbox"
 GAPS_FILE="$SPINE_REPO/ops/bindings/operational.gaps.yaml"
-LOOPS_FILE="$SPINE_REPO/mailroom/state/open_loops.jsonl"
+SCOPES_DIR="$SPINE_REPO/mailroom/state/loop-scopes"
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 
@@ -35,9 +35,9 @@ if [[ ! -f "$GAPS_FILE" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$LOOPS_FILE" ]]; then
-  echo "WARN: open_loops.jsonl not found: $LOOPS_FILE (loop cross-ref disabled)" >&2
-  LOOPS_FILE=""
+if [[ ! -d "$SCOPES_DIR" ]]; then
+  echo "WARN: loop-scopes directory not found: $SCOPES_DIR (loop cross-ref disabled)" >&2
+  SCOPES_DIR=""
 fi
 
 # ── Find RESULT.md files ─────────────────────────────────────────────────────
@@ -54,13 +54,13 @@ fi
 
 # ── Main triage (delegated to Python for structured parsing) ─────────────────
 
-exec python3 - "$GAPS_FILE" "$LOOPS_FILE" "${RESULT_FILES[@]}" <<'PYTHON'
+exec python3 - "$GAPS_FILE" "$SCOPES_DIR" "${RESULT_FILES[@]}" <<'PYTHON'
 import re
 import sys
 import os
 
 gaps_file = sys.argv[1]
-loops_file = sys.argv[2] if sys.argv[2] else None
+scopes_dir = sys.argv[2] if sys.argv[2] else None
 result_files = sys.argv[3:]
 
 # ── Parse operational.gaps.yaml ──────────────────────────────────────────────
@@ -151,35 +151,55 @@ with open(gaps_file, "r") as f:
 # Build searchable index: gap-id -> Gap, and keyword fragments
 gap_by_id = {g.id: g for g in gaps}
 
-# ── Parse open_loops.jsonl ───────────────────────────────────────────────────
+# ── Parse loop scope files ───────────────────────────────────────────────────
 
-import json
+from pathlib import Path
 
 class Loop:
-    __slots__ = ("loop_id", "status", "title", "description")
-    def __init__(self, lid, status, title, desc):
+    __slots__ = ("loop_id", "status", "title")
+    def __init__(self, lid, status, title):
         self.loop_id = lid
         self.status = status
         self.title = title.lower()
-        self.description = desc.lower()
+
+def parse_scope_fm(path):
+    fm = {}
+    in_fm = False
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s == "---":
+                if in_fm: break
+                in_fm = True
+                continue
+            if in_fm and ":" in s:
+                k, _, v = s.partition(":")
+                fm[k.strip()] = v.strip().strip('"').strip("'")
+    return fm
+
+def scope_title_text(path):
+    past_fm = False
+    fm_count = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip() == "---":
+                fm_count += 1
+                if fm_count >= 2: past_fm = True
+                continue
+            if past_fm and line.startswith("#"):
+                return re.sub(r'^#+\s*', '', line.strip())
+    return Path(path).stem
 
 loops = []
-if loops_file:
-    with open(loops_file, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            loops.append(Loop(
-                obj.get("loop_id", ""),
-                obj.get("status", "unknown"),
-                obj.get("title", ""),
-                obj.get("description", ""),
-            ))
+if scopes_dir:
+    for sf in sorted(Path(scopes_dir).glob("*.scope.md")):
+        fm = parse_scope_fm(sf)
+        lid = fm.get("loop_id", "")
+        if not lid:
+            continue
+        status = fm.get("status", "unknown")
+        title = scope_title_text(sf)
+        loops.append(Loop(lid, status, title))
 
 # ── Extract findings from RESULT.md files ────────────────────────────────────
 

@@ -19,12 +19,8 @@ SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 STATE_DIR="$SPINE_REPO/mailroom/state"
 SCOPES_DIR="$STATE_DIR/loop-scopes"
 
-# Legacy paths (kept for collect backward compat)
-LOOPS_FILE="$STATE_DIR/open_loops.jsonl"
 RECEIPTS_DIR="$SPINE_REPO/receipts/sessions"
-OUTBOX_DIR="$SPINE_REPO/mailroom/outbox"
 LEDGER="$STATE_DIR/ledger.csv"
-CURSOR_FILE="$STATE_DIR/loops_collect.cursor"
 
 usage() {
     cat <<'EOF'
@@ -283,116 +279,16 @@ else:
 PY
 }
 
-# ── Collect (deprecated — kept for backward compat) ───────────────────────
+# ── Collect (deprecated — no-op) ──────────────────────────────────────────
 collect_loops() {
-    echo "=== COLLECTING OPEN LOOPS (DEPRECATED) ==="
+    echo "=== ops loops collect — DEPRECATED ==="
     echo ""
-    echo "WARNING: 'ops loops collect' writes to open_loops.jsonl which is deprecated."
-    echo "Canonical work tracking now uses loop-scopes/*.scope.md files."
-    echo "Machine-generated OL_* loops will continue to work but are not shown by 'ops loops list'."
-    echo "To create a new loop: create a scope file in $SCOPES_DIR/"
+    echo "Loop state moved from open_loops.jsonl to scope files."
+    echo "Canonical tracking: mailroom/state/loop-scopes/*.scope.md"
     echo ""
-
-    # Keep legacy collect functioning for receipt scanning
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "ERROR: jq is required for legacy collect." >&2
-        exit 2
-    fi
-
-    local scanned=0
-    local backfill="${LOOPS_RECEIPT_BACKFILL:-0}"
-    local cursor_epoch=""
-    local now_epoch=""
-    now_epoch="$(date +%s)"
-
-    if [[ "$backfill" != "1" ]]; then
-        if [[ -f "$CURSOR_FILE" ]]; then
-            cursor_epoch="$(cat "$CURSOR_FILE" 2>/dev/null | tr -dc '0-9')"
-        fi
-        if [[ -z "$cursor_epoch" ]]; then
-            cursor_epoch="$now_epoch"
-            echo "$cursor_epoch" > "$CURSOR_FILE"
-            echo "  CURSOR_INIT: skipping historical receipts"
-            echo ""
-        fi
-    else
-        cursor_epoch="0"
-        echo "  BACKFILL: scanning all receipts"
-        echo ""
-    fi
-
-    # Cross-platform mtime
-    mtime_epoch() {
-        local path="$1"
-        if stat -f %m "$path" >/dev/null 2>&1; then
-            stat -f %m "$path"
-        else
-            stat -c %Y "$path"
-        fi
-    }
-
-    while IFS= read -r receipt_dir; do
-        [[ -d "$receipt_dir" ]] || continue
-        local base
-        base="$(basename "$receipt_dir")"
-        [[ "$base" == R* ]] || continue
-
-        if [[ "$cursor_epoch" != "0" ]]; then
-            local receipt_file="$receipt_dir/receipt.md"
-            local mtime_path="$receipt_dir"
-            [[ -f "$receipt_file" ]] && mtime_path="$receipt_file"
-            local mtime
-            mtime="$(mtime_epoch "$mtime_path" 2>/dev/null || echo 0)"
-            [[ "$mtime" -ge "$cursor_epoch" ]] || continue
-        fi
-
-        # Legacy: append to JSONL (not scope files)
-        _extract_loops_from_receipt "$receipt_dir"
-        scanned=$((scanned + 1))
-    done < <(find "$RECEIPTS_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
-
-    if [[ "$backfill" != "1" ]]; then
-        echo "$now_epoch" > "$CURSOR_FILE" 2>/dev/null || true
-    fi
-
-    echo ""
-    echo "Scanned receipts: $scanned"
-    echo "Note: results written to deprecated JSONL. Use scope files for canonical tracking."
-}
-
-# Legacy receipt extraction (writes JSONL, not scope files)
-_extract_loops_from_receipt() {
-    local receipt_dir="$1"
-    local receipt_file="$receipt_dir/receipt.md"
-
-    [[ -f "$receipt_file" ]] || return 0
-
-    local run_key
-    run_key="$(grep -m1 "Run Key" "$receipt_file" 2>/dev/null | sed 's/.*`\([^`]*\)`.*/\1/' || echo "")"
-    [[ -z "$run_key" ]] && run_key="$(basename "$receipt_dir" | sed 's/^R//')"
-
-    if grep -q "\"run_key\":\"$run_key\"" "$LOOPS_FILE" 2>/dev/null; then
-        return 0
-    fi
-
-    local status
-    status="$(grep -m1 "| Status |" "$receipt_file" 2>/dev/null | sed 's/.*| Status | *//' | sed 's/ *|.*//' || echo "unknown")"
-
-    case "$status" in
-        done|DONE|ok|OK|pass|PASS|success|SUCCESS) return 0 ;;
-    esac
-
-    local ts loop_id
-    ts="$(date +%Y%m%d_%H%M%S)"
-    loop_id="OL_${ts}_$(echo "$run_key" | cut -d'_' -f3 | head -c10)"
-    local created_at
-    created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-    cat >> "$LOOPS_FILE" <<EOF
-{"loop_id":"$loop_id","run_key":"$run_key","created_at":"$created_at","status":"open","severity":"high","owner":"unassigned","title":"Run failed: $run_key","next_action":"Investigate failure and retry or escalate","evidence":["$receipt_file"]}
-EOF
-
-    echo "  CREATED (JSONL): $loop_id - Run failed: $run_key"
+    echo "To see open work:  ops status"
+    echo "To list loops:     ops loops list --open"
+    echo "To create a loop:  create a scope file in $SCOPES_DIR/"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────
