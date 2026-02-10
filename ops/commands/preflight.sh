@@ -123,17 +123,6 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/d
 	        echo "    fix: ./bin/ops hooks install"
 	      fi
 	    fi
-
-	    # Runtime state hygiene: ledger churn should not block branch/worktree usage.
-	    if git -C "$REPO_ROOT" ls-files --error-unmatch "mailroom/state/ledger.csv" >/dev/null 2>&1; then
-	      flag="$(git -C "$REPO_ROOT" ls-files -v "mailroom/state/ledger.csv" 2>/dev/null | awk '{print substr($0,1,1)}')"
-	      if [[ "${flag:-}" != "S" ]]; then
-	        echo "  runtime: WARN (mailroom/state/ledger.csv not skip-worktree; branch switches may fail)"
-	        echo "    fix: ./bin/ops hooks install"
-	      else
-	        echo "  runtime: OK (mailroom/state/ledger.csv skip-worktree)"
-	      fi
-	    fi
 	    echo
 	  fi
 	fi
@@ -144,7 +133,7 @@ if [[ "$preflight_fail" -eq 1 ]]; then
 ║ STOP: SPLIT-BRAIN RISK DETECTED                           ║
 ║                                                           ║
 ║ Resolve before starting new work:                          ║
-║ - Remote parity (origin/main == github/main)               ║
+║ - Remote authority (origin reachable; mirror drift warns)   ║
 ║ - Codex worktree hygiene (no stale/dirty codex worktrees)  ║
 ║                                                           ║
 ║ Override (not recommended): OPS_PREFLIGHT_ALLOW_DEGRADED=1 ║

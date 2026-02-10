@@ -28,19 +28,6 @@ EOF
 
 hooks_path="$(git -C "$REPO_ROOT" config --get core.hooksPath 2>/dev/null || true)"
 hook_file="$REPO_ROOT/.githooks/pre-commit"
-runtime_paths=(
-  "mailroom/state/ledger.csv"
-)
-
-runtime_flag() {
-  local p="$1"
-  if ! git -C "$REPO_ROOT" ls-files --error-unmatch "$p" >/dev/null 2>&1; then
-    echo "<untracked>"
-    return 0
-  fi
-  # git ls-files -v prefixes "S" for skip-worktree.
-  git -C "$REPO_ROOT" ls-files -v "$p" 2>/dev/null | awk '{print substr($0,1,1)}'
-}
 
 case "$cmd" in
   status)
@@ -55,16 +42,6 @@ case "$cmd" in
     else
       echo "pre-commit: WARN ($hook_file missing or not executable)"
     fi
-
-    for p in "${runtime_paths[@]}"; do
-      flag="$(runtime_flag "$p")"
-      if [[ "$flag" == "S" || "$flag" == "<untracked>" ]]; then
-        echo "runtime: OK ($p skip-worktree)"
-      else
-        echo "runtime: WARN ($p is tracked and not skip-worktree)"
-        echo "  fix: ./bin/ops hooks install"
-      fi
-    done
     ;;
   install)
     mkdir -p "$REPO_ROOT/.githooks"
@@ -79,15 +56,6 @@ case "$cmd" in
       echo "pre-commit: WARN (missing or not executable): $hook_file"
       exit 1
     fi
-
-    # Mark runtime state files as skip-worktree so multi-terminal workflows
-    # don't get stuck on local-only churn.
-    for p in "${runtime_paths[@]}"; do
-      if git -C "$REPO_ROOT" ls-files --error-unmatch "$p" >/dev/null 2>&1; then
-        git -C "$REPO_ROOT" update-index --skip-worktree "$p" >/dev/null 2>&1 || true
-        echo "runtime: set skip-worktree ($p)"
-      fi
-    done
     ;;
   -h|--help|"")
     usage
