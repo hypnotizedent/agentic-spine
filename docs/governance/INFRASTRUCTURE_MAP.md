@@ -200,14 +200,15 @@ ssh docker-host "docker ps --format 'table {{.Names}}\t{{.Status}}' | grep mint-
 
 ## ARCHITECTURE DEEP DIVES
 
-> Detailed system maps in `docs/architecture/`
+> These architecture docs are workbench-scoped (mint-os application layer).
+> They do not exist in agentic-spine. See workbench repo if needed.
 
 | Doc | Purpose | Related Issues |
 |-----|---------|----------------|
-| [MONEY_FLOWS.md](./docs/architecture/MONEY_FLOWS.md) | Pricing, finance, supplier costs | #416, #417, #418 |
-| [PRICING_DATA_LAYER.md](./docs/architecture/PRICING_DATA_LAYER.md) | Schema & data flow | #417 |
-| [PRICING_UI_INTEGRATION.md](./docs/architecture/PRICING_UI_INTEGRATION.md) | UI touchpoints | #417 |
-| [DATABASE_SCHEMA.md](./docs/architecture/DATABASE_SCHEMA.md) | Full schema reference | All |
+| MONEY_FLOWS.md | Pricing, finance, supplier costs (workbench) | #416, #417, #418 |
+| PRICING_DATA_LAYER.md | Schema & data flow (workbench) | #417 |
+| PRICING_UI_INTEGRATION.md | UI touchpoints (workbench) | #417 |
+| DATABASE_SCHEMA.md | Full schema reference (workbench) | All |
 
 ---
 

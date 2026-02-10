@@ -378,9 +378,7 @@ Before adding `status: authoritative` or claiming SSOT:
 
 | Document | Purpose |
 |----------|---------|
-| [docs/DOC_MAP.md](../DOC_MAP.md) | Navigation SSOT (start here) |
 | [SSOT_REGISTRY.yaml](SSOT_REGISTRY.yaml) | Machine-readable SSOT list |
-| [ARCHIVE_POLICY.md](ARCHIVE_POLICY.md) | What archived means |
 | [LEGACY_DEPRECATION.md](LEGACY_DEPRECATION.md) | Legacy/external reference policy |
 
 ---
@@ -451,7 +449,6 @@ Before adding `status: authoritative` or claiming SSOT:
 > The sections above remain the curated authority narrative; this list is an index only.
 
 - `AGENT_BOUNDARIES.md`
-- `ARCHIVE_POLICY.md`
 - `CI_PORTABILITY.md`
 - `CI_RUNNER_REQUIREMENTS.md`
 - `COMPOSE_AUTHORITY.md`

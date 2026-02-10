@@ -131,4 +131,4 @@ Agents must protect their context window:
 
 ## Related Documents
 
-- [Governance Index](./README.md) — Entry point for all governance docs
+- [Governance Index](GOVERNANCE_INDEX.md) — Entry point for all governance docs
