@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# spine-release-zip
+#
+# Purpose:
+#   Build a sharable, deterministic zip artifact of the spine repo at HEAD.
+#   This is the "sharable spine" deliverable: a single file you can send/store.
+#
+# Output:
+#   - Writes zip to mailroom/outbox/spine-<tag-or-sha>-<utc>.zip
+#   - Prints the output path + sha256
+#
+set -euo pipefail
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+OUTBOX="${SPINE_REPO}/mailroom/outbox"
+
+cd "$SPINE_REPO"
+mkdir -p "$OUTBOX"
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "STOP: git not installed" >&2
+  exit 2
+fi
+if ! command -v zip >/dev/null 2>&1; then
+  echo "STOP: zip not installed (macOS: brew install zip)" >&2
+  exit 2
+fi
+
+sha="$(git rev-parse --short=12 HEAD)"
+tag="$(git describe --tags --exact-match 2>/dev/null || true)"
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+label="${tag:-${sha}}"
+
+out="${OUTBOX}/spine-${label}-${stamp}.zip"
+
+if [[ -n "$(git status --porcelain=v1)" ]]; then
+  echo "STOP: working tree dirty; commit first to produce a sharable artifact" >&2
+  exit 1
+fi
+
+tmpdir="$(mktemp -d)"
+cleanup() { rm -rf "$tmpdir" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+prefix="agentic-spine-${label}/"
+
+# Export a clean tree snapshot (no .git/).
+git archive --format=tar HEAD | tar -xf - -C "$tmpdir"
+
+# Remove local-only runtime outputs that should not be shipped.
+rm -rf "$tmpdir/receipts/sessions" 2>/dev/null || true
+rm -rf "$tmpdir/mailroom/outbox" "$tmpdir/mailroom/logs" 2>/dev/null || true
+
+(
+  cd "$tmpdir"
+  # Zip with a stable prefix folder so it unpacks cleanly.
+  mkdir -p "$prefix"
+  shopt -s dotglob
+  mv ./* "$prefix" 2>/dev/null || true
+  zip -qr "$out" "$prefix"
+)
+
+if command -v shasum >/dev/null 2>&1; then
+  sum="$(shasum -a 256 "$out" | awk '{print $1}')"
+elif command -v sha256sum >/dev/null 2>&1; then
+  sum="$(sha256sum "$out" | awk '{print $1}')"
+else
+  sum="unknown"
+fi
+
+echo "artifact: $out"
+echo "head:     $(git rev-parse HEAD)"
+echo "sha256:   $sum"
+
