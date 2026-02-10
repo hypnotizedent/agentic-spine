@@ -115,7 +115,7 @@ sources: []
 | **API** | `apps/api/` | `mint-os-dashboard-api` | GitHub Actions → rsync → docker | `https://mintprints-api.ronny.works` |
 | **Job Estimator** | `apps/job-estimator/` | `mint-os-job-estimator` | GitHub Actions → rsync → docker | Internal :3001 |
 | **Admin UI** | `apps/admin/` | `mint-os-admin` | GitHub Actions → build → rsync → docker | `https://admin.mintprints.co` |
-| **Customer Portal** | `apps/web/` | `mint-os-customer` | GitHub Actions → build → rsync → docker | `https://customer.mintprints.co` |
+| **Customer Portal** | `mint-modules/quote-page` | `quote-page` | Manual compose (docker-host) | `https://customer.mintprints.co` |
 | **Production Portal** | `apps/production/` | `mint-os-production` | GitHub Actions → build → rsync → docker | `https://production.mintprints.co` |
 | **Supplier Sync** | `scripts/suppliers/` | - | Manual rsync | Cron (disabled) |
 
@@ -145,15 +145,15 @@ https://files.ronny.works/invoice-pdfs/           ← Generated invoices
 https://files.ronny.works/suppliers/              ← Product images
 ```
 
-> **⚠️ UPLOAD GAP:** MinIO URLs provide READ-ONLY public bucket listing. For uploads:
-> - **CLI (recommended):** `mc cp` — see `docs/ARTWORK_WORKFLOW.md` "TODAY" section
-> - **Future:** files-api with presigned uploads (#539)
+> **Uploads:** files-api (mint-modules/artwork) provides presigned upload URLs via
+> `POST /api/v1/upload/presigned`. Direct browser uploads to MinIO. See SERVICE_REGISTRY.yaml.
 
-### Planned but NOT BUILT
+### Extracted Modules (mint-modules)
 
-| App | Repo Path | URL | Status |
-|-----|-----------|-----|--------|
-| **files-api** | `apps/files-api/` | `files.mintprints.co` | ❌ DOES NOT EXIST (#539) |
+| App | Source | Container | URL | Status |
+|-----|--------|-----------|-----|--------|
+| **files-api** | `mint-modules/artwork` | `files-api` | `docker-host:3500` | ✅ ACTIVE |
+| **quote-page** | `mint-modules/quote-page` | `quote-page` | `https://customer.mintprints.co` | ✅ ACTIVE |
 
 **Deploy Cloudflare Pages Apps:**
 
