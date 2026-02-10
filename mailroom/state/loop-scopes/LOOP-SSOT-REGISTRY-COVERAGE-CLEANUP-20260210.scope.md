@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -8,25 +8,26 @@ loop_id: LOOP-SSOT-REGISTRY-COVERAGE-CLEANUP-20260210
 
 # Loop Scope: LOOP-SSOT-REGISTRY-COVERAGE-CLEANUP-20260210
 
+> **Status:** CLOSED
+
 ## Source
 - Certification report: mailroom/outbox/audit-export/2026-02-10-full-certification.md
 
 ## Goal
 Inventory governance docs that claim SSOT status but are not registered, then register them or remove SSOT claims.
 
-## Success Criteria
-- Scope doc is clean (no injected command output).
-- Next actions are clear and bounded.
-- Closeout uses receipts when changes land.
+## Resolution
 
-## Phases
-- P0: Triage + decision + inventory
-- P1: Implement updates (SSOT/bindings/docs)
-- P2: Verify (gates + targeted checks)
-- P3: Closeout (receipts + loop closure)
+**Inventory:** 50 files claim `status: authoritative`; 28 were in SSOT registry.
 
-## Next Action
-List unregistered SSOT claims under docs/governance and reconcile with docs/governance/SSOT_REGISTRY.yaml.
+**Root cause:** The registry conflates "SSOT" (domain-level truth source) with `status: authoritative` (canonical version of a doc). Operational docs (runbooks, backup procedures, policies, authority declarations) correctly claim authoritative status without needing SSOT registry entries.
+
+**Actions taken:**
+1. Added clarifying note to SSOT_REGISTRY.yaml validation rules distinguishing `status: authoritative` from SSOT registration
+2. Registered 3 missing domain-level SSOTs: NETWORK_POLICIES, DR_RUNBOOK, INFRA_RELOCATION_PROTOCOL
+3. Remaining 19 unregistered files are operational docs that are correctly authoritative without SSOT registration
+
+**Final count:** 31 SSOT entries (was 28).
 
 ## Evidence (Receipts)
-- mailroom/outbox/audit-export/2026-02-10-full-certification.md
+- docs/governance/SSOT_REGISTRY.yaml (updated validation rules + 3 new entries)
