@@ -69,7 +69,7 @@ Notes:
 |----------|-------|------|----------|
 | Router | UniFi Dream Router 6 (UDR6) | Shop gateway, DHCP, DNS relay (192.168.1.1) | 2026-02-09 |
 | Server | Dell PowerEdge R730XD (12-bay LFF) | Shop hypervisor (`pve`) | 2026-02-08 |
-| DAS | Dell MD1400 | Bulk storage shelf (cabled, driver blocked — GAP-OP-029) | 2026-02-08 |
+| DAS | Dell MD1400 | Bulk storage shelf (cabled, driver blocked — GAP-OP-037) | 2026-02-08 |
 | Switch | Dell N2024P | Shop LAN switching / PoE (24-port, 190W PoE budget) | 2026-02-05 |
 | UPS | APC Back-UPS Pro 900 | 900VA / 540W, ~10-15 min runtime at full load | 2026-02-08 |
 | NVR | Hikvision ERI-K216-P16 | 16-channel PoE NVR (upstairs 9U rack, separate from main) | 2026-02-05 |
@@ -90,7 +90,7 @@ Notes:
 | **Boot Drives** | 2x Seagate ST9500620SS 500GB SAS 2.5" (rear flex bays) | 2026-02-08 |
 | **Drive Bays** | 12x 3.5" LFF (front) + 2x 2.5" SFF (rear flex) | 2026-02-08 |
 | **Controller/HBA** | Dell HBA330 Mini (Broadcom LSI SAS3008, IT mode, FW 16.00.11.00) | 2026-02-08 |
-| **Second SAS** | Microchip PM8072 SPCv 12G 16-port (PCIe, driver blocked — GAP-OP-029) | 2026-02-08 |
+| **Second SAS** | Microchip PM8072 SPCv 12G 16-port (PCIe, driver blocked — GAP-OP-037) | 2026-02-08 |
 | **NICs** | 4x 1GbE (eno1-4) + iDRAC, only eno1 active (bridged to vmbr0) | 2026-02-08 |
 
 **Drive bay population (12 front 3.5" LFF):**
@@ -98,7 +98,7 @@ Notes:
 - Slots 8-11: 4x Seagate ST8000AS0002 8TB SATA (Archive/SMR) → `media` pool
 - All 12 front bays occupied. No free drive slots.
 
-**Second SAS controller note (GAP-OP-029 / LOOP-MD1400-SAS-RECOVERY-20260208):**
+**Second SAS controller note (GAP-OP-037 / LOOP-MD1400-SAS-RECOVERY-20260208):**
 The PM8072 (PCIe slot 82:00.0) connects to the MD1400 DAS via Dell SAS cable (DP/N 0GYK61).
 The cable is connected and the MD1400 is powered on (owner-verified 2026-02-08), but the
 `pm80xx` kernel driver cannot bind due to a PCI vendor ID mismatch:
@@ -128,7 +128,6 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 
 **tank datasets (2026-02-08):**
 - `tank/docker`: 610GB (was 567GB on 2026-02-07)
-- `tank/docker/media-stack`: 24.1GB
 - `tank/docker/download-stack`: 12.3GB (new — media stack split)
 - `tank/docker/streaming-stack`: 6.70GB (new — media stack split)
 - `tank/docker/databases`: 205K
@@ -142,7 +141,7 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 | VMID | Name | Status | RAM | Boot Disk | Notes |
 |------|------|--------|-----|-----------|-------|
 | 200 | docker-host | running | 96GB | 300GB | Mint OS production |
-| 201 | media-stack | running | 16GB | 80GB | Legacy — being replaced by VMs 209/210 |
+| 201 | media-stack | **destroyed** | — | — | Decommissioned 2026-02-12 (split to 209/210, VM destroyed) |
 | 202 | automation-stack | running | 16GB | 100GB | n8n + Ollama |
 | 203 | immich | running | 16GB | 50GB | Shop photos (Tailscale: immich-1) |
 | 204 | infra-core | running | 8GB | 50GB | Core infra (cloudflared, pihole, infisical, vaultwarden, caddy-auth) |
@@ -153,9 +152,9 @@ initialization (MPI handshake timeout, `chip_init failed [ret: -16]`).
 | 210 | streaming-stack | running | 8GB | 50GB | jellyfin, navidrome, jellyseerr, bazarr, homarr |
 | 9000 | template | stopped | 2GB | 3.5GB | Ubuntu 24.04 cloud-init template |
 
-**Total RAM allocated:** 232GB across 10 running VMs (host has 192GB — overcommitted by 40GB, acceptable with balloon/KSM)
+**Total RAM allocated:** 216GB across 9 running VMs (host has 192GB — overcommitted by 24GB, acceptable with balloon/KSM)
 
-**NOTE:** vzdump backup job covers all 10 running shop VMs: `200,201,202,203,204,205,206,207,209,210`. Verify with `./bin/ops cap run backup.status`.
+**NOTE:** vzdump backup job covers all 9 running shop VMs: `200,202,203,204,205,206,207,209,210`. Verify with `./bin/ops cap run backup.status`.
 
 ### NFS Exports from PVE (2026-02-09)
 
@@ -180,7 +179,7 @@ All exports use `sync,no_subtree_check,no_root_squash` over **LAN IPs** (not Tai
 | **Enclosure** | 12-bay 3.5" SATA/SAS | 2026-02-08 |
 | **SAS Cable** | Dell DP/N 0GYK61 (Mini-SAS HD SFF-8644, connected) | 2026-02-08 |
 | **Connection** | PM8072 HBA → MD1400 | 2026-02-08 |
-| **Drives** | Unknown — invisible to OS (GAP-OP-029) | 2026-02-08 |
+| **Drives** | Unknown — invisible to OS (GAP-OP-037) | 2026-02-08 |
 | **Status** | Powered + cabled, but driver cannot bind. See LOOP-MD1400-SAS-RECOVERY-20260208 | 2026-02-08 |
 
 ### UPS Specifications
@@ -206,7 +205,7 @@ All exports use `sync,no_subtree_check,no_root_squash` over **LAN IPs** (not Tai
 
 - **R730XD:** 12x 3.5" LFF front bays (all occupied), 2x 2.5" SFF rear flex bays (boot drives). No free drive slots.
 - **R730XD HBA330 Mini:** IT-mode SAS3008, direct JBOD passthrough to ZFS. No RAID controller — drives are passed through directly.
-- **MD1400:** 12-bay 3.5" shelf. Physically cabled (Dell 0GYK61 SAS cable, owner-verified). **PM8072 driver cannot bind** — PCI vendor ID mismatch (0x11f8 Microchip vs 0x117C PMC-Sierra in kernel driver) + firmware requires cold boot init. Zero drives visible. See GAP-OP-029 / LOOP-MD1400-SAS-RECOVERY-20260208.
+- **MD1400:** 12-bay 3.5" shelf. Physically cabled (Dell 0GYK61 SAS cable, owner-verified). **PM8072 driver cannot bind** — PCI vendor ID mismatch (0x11f8 Microchip vs 0x117C PMC-Sierra in kernel driver) + firmware requires cold boot init. Zero drives visible. See GAP-OP-037 / LOOP-MD1400-SAS-RECOVERY-20260208.
 
 ---
 
@@ -281,7 +280,7 @@ This is the Shop hypervisor. Core VM inventory (foundational scope):
 | `download-stack` | Download automation (*arr stack, sabnzbd, tdarr) | yes |
 | `streaming-stack` | Media streaming (jellyfin, navidrome, jellyseerr) | yes |
 | `ai-consolidation` | AI workloads | deferred |
-| `media-stack` | Legacy — being replaced by download/streaming VMs | deprecated |
+| `media-stack` | Decommissioned 2026-02-12 (VM 201 destroyed; split to 209/210) | decommissioned |
 | `immich` | Photos | deferred |
 
 If you need to make a placement decision ("where should this run?"):
@@ -298,12 +297,12 @@ If you need to make a placement decision ("where should this run?"):
 | `0 2 * * *` | `/usr/local/bin/zfs-snapshot.sh` | Daily ZFS snapshot of root datasets | ACTIVE |
 | `0 3 * * 0` | `zpool scrub tank` | Weekly scrub of tank pool | ACTIVE |
 | `0 4 * * 0` | `zpool scrub media` | Weekly scrub of media pool | ACTIVE (new) |
-| `02:00 daily` | vzdump VMs `200,201,202,203,204,205,206,207,209,210` | Snapshot backup to tank-backups (zstd, keep-last=2) | ACTIVE |
+| `02:00 daily` | vzdump VMs `200,202,203,204,205,206,207,209,210` | Snapshot backup to tank-backups (zstd, keep-last=2) | ACTIVE |
 
 **Source:** crontab (`crontab -l`) and `/etc/pve/jobs.cfg`.
 
 **Notes:**
-- vzdump covers all 10 running shop VMs (GAP-OP-030 closed).
+- vzdump covers all 9 running shop VMs (VM 201 decommissioned 2026-02-12; GAP-OP-030 closed).
 
 ---
 
@@ -345,7 +344,7 @@ This SSOT intentionally keeps **one** loop for unfinished physical audits to pre
 - Tailscale subnet routing: pve advertises 192.168.1.0/24 (ip_forward persisted)
 
 **BLOCKED (requires cold boot — LOOP-MD1400-SAS-RECOVERY-20260208):**
-- MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-029). Drives invisible until cold boot with persistent module config.
+- MD1400 DAS: Drive population, models, serials, health — cable connected, shelf powered, but PM8072 driver can't bind (GAP-OP-037). Drives invisible until cold boot with persistent module config.
 
 **UNVERIFIED (requires credentials or physical visit):**
 - WiFi AP (EAP225): Web UI at .185 reachable (was previously documented as .249, now stale).

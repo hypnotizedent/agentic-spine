@@ -109,7 +109,7 @@ ping -c1 nas pihole-home ha vault
 | Switch mgmt IP | 192.168.1.2 (Dell N2024P) |
 | iDRAC | `idrac-shop` — 192.168.1.250 (LAN-only) |
 | Proxmox Host | `pve` (Dell R730XD) |
-| Production VMs | docker-host, infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); download-stack, streaming-stack (media split); media-stack (decommissioning), immich-1 (deferred) |
+| Production VMs | docker-host, infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); download-stack, streaming-stack (media split); immich-1 (deferred) |
 | NVR | `nvr-shop` — 192.168.1.216 (LAN-only) |
 | WiFi AP | `ap-shop` — 192.168.1.185 (LAN-only) |
 
@@ -181,7 +181,7 @@ Notes (Shop LAN-only endpoints):
 |----|----------------|--------|------|-------|
 | pve (hypervisor) | `pve` | 192.168.1.184 | — | Proxmox host; NFS server |
 | docker-host (Mint OS) | `docker-host` | 192.168.1.200 | 200 | Static IP (netplan). Mint OS production workloads. |
-| media-stack | `media-stack` | 192.168.1.201 | 201 | Legacy VM (decommissioning; split to 209/210). |
+| media-stack | `media-stack` | 192.168.1.201 | 201 | **Decommissioned** 2026-02-12 (VM destroyed; split to 209/210). |
 | automation-stack | `automation-stack` | 192.168.1.202 | 202 | Automation (n8n, Ollama, Open WebUI). |
 | immich (shop) | `immich` | 192.168.1.203 | 203 | Shop photos (Tailscale: `immich-1`). |
 | infra-core | `infra-core` | 192.168.1.204 | 204 | Static IP; Pi-hole DNS |
@@ -262,7 +262,6 @@ curl -s http://automation-stack:5678/healthz
 
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
-| media-stack VM | `media-stack` | 100.117.1.53 | Legacy media (decommissioning) | Shop | `ssh media-stack docker ps \| head -5` |
 | immich-1 VM | `immich-1` | 100.114.101.50 | Photos (Shop) | Shop | `curl -s http://immich-1:2283/api/server-info/ping` |
 
 ### Tier 3: Home Services
@@ -333,7 +332,7 @@ curl -s http://automation-stack:5678/healthz
 ```bash
 # Shop VMs
 ssh pve "qm list"
-# Expected: VMs 200-203 running
+# Expected: VMs 200, 202-210 running (201 decommissioned)
 
 # Home VMs
 ssh proxmox-home "qm list"
@@ -415,6 +414,7 @@ Use the loop ledger instead:
 | Device | Former IP | Decommissioned | Reason |
 |--------|-----------|----------------|--------|
 | `immich` (home) | 100.83.160.109 | Pending | Migrating to shop `immich-1` |
+| `media-stack` | 100.117.1.53 | 2026-02-12 | VM 201 destroyed; split to download-stack (209) + streaming-stack (210) |
 
 ---
 

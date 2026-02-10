@@ -80,7 +80,7 @@ All must PASS for core to be healthy.
 | D29 | Active entrypoint lock (launchd/cron ronny namespace cannot execute from ronny-ops without valid exception) |
 | D30 | Active config lock (legacy refs + plaintext secret patterns) |
 | D31 | Home output sink lock (home-root logs/out/err not allowlisted) |
-| D33 | Extraction pause lock (`ops/bindings/extraction.mode.yaml` must remain `mode: paused`) |
+| D33 | Extraction pause lock (`ops/bindings/extraction.mode.yaml` mode must be `paused` or `active`) |
 | D34 | Loop ledger integrity lock (summary counts must match deduped reducer output) |
 | D35 | Infra relocation parity lock (cross-SSOT consistency for service moves during cutover/cleanup) |
 | D36 | Legacy exception hygiene lock (stale/near-expiry exception enforcement) |
