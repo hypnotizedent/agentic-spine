@@ -14,6 +14,21 @@ fi
 
 source "$SCRIPT_DIR/lib/git-lock.sh" 2>/dev/null || true
 
+usage() {
+  cat <<'EOF'
+ops close - verify, clean up worktree/branch/stashes, optionally close an issue
+
+Usage:
+  ops close loop <LOOP_ID>
+  ops close <issue-number> --forge github
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 0
+fi
+
 FORGE="none"
 ISSUE_ARG=""
 LOOP_ID=""
@@ -103,7 +118,7 @@ fi
 ISSUE="${CURRENT_ISSUE:-$ISSUE_ARG}"
 
 # Run health checks first
-"$SCRIPT_DIR/verify.sh"
+"$REPO_ROOT/bin/ops" cap run spine.verify
 
 if [[ "$FORGE" == "github" ]]; then
   if [[ -z "${ISSUE:-}" ]]; then
