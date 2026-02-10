@@ -1,5 +1,5 @@
 ---
-status: draft
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -16,5 +16,12 @@ loop_id: LOOP-RAG-FIRST-SYNC-20260210
 
 ## Receipts
 - (link receipts here)
+
+## Closure Note
+
+Closed -- empty stub with no scope. Reopen as a fresh loop when RAG sync work is
+actually scoped.
+
+---
 
 ## Deferred / Follow-ups
