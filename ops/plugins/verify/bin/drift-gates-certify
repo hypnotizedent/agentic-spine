@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+# drift-gates-certify - inventory/certification report for surfaces/verify drift gates
+#
+# Purpose:
+#   Give agents a single, fast, scan-first view of what each drift gate checks,
+#   which scripts back it, and what SSOT files it depends on, without running
+#   the full gate suite.
+#
+# Output:
+#   Markdown report to stdout (captured by receipts).
+#
+# Optional:
+#   --profile : execute gate scripts (where possible) and include timings.
+#
+set -euo pipefail
+
+SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
+
+PROFILE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile) PROFILE=1; shift ;;
+    -h|--help)
+      cat <<'EOF'
+drift-gates-certify
+
+Usage:
+  drift-gates-certify [--profile]
+
+Notes:
+  - Default mode is scan-only (fast).
+  - --profile runs executable gate scripts directly to measure time + pass/fail.
+EOF
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+DG="$SPINE_CODE/surfaces/verify/drift-gate.sh"
+if [[ ! -f "$DG" ]]; then
+  echo "ERROR: missing: $DG" >&2
+  exit 2
+fi
+
+python3 - "$DG" "$SPINE_CODE" "$PROFILE" <<'PY'
+import os
+import re
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+dg_path = Path(sys.argv[1]).resolve()
+spine_code = Path(sys.argv[2]).resolve()
+profile = sys.argv[3] == "1"
+
+dg_text = dg_path.read_text(errors="ignore").splitlines()
+
+@dataclass
+class Gate:
+  id: str
+  label: str
+  scripts: list[str]
+  kind: str
+  deps: list[str]
+  profile_ms: int | None = None
+  profile_rc: int | None = None
+
+def extract_deps(text: str) -> list[str]:
+  deps = set()
+  # Capture explicit SSOT/binding references.
+  for m in re.finditer(r"\b(docs/governance/[A-Za-z0-9_./-]+\.(?:md|yaml|yml))\b", text):
+    deps.add(m.group(1))
+  for m in re.finditer(r"\b(ops/bindings/[A-Za-z0-9_./-]+\.(?:yaml|yml))\b", text):
+    deps.add(m.group(1))
+  for m in re.finditer(r"\b(ops/capabilities\.yaml)\b", text):
+    deps.add(m.group(1))
+  for m in re.finditer(r"\b(surfaces/verify/[A-Za-z0-9_./-]+\.sh)\b", text):
+    deps.add(m.group(1))
+  return sorted(deps)
+
+def classify_kind(text: str) -> str:
+  # Heuristic: "network" if it likely touches remote network; else "local".
+  # This is intentionally conservative.
+  net_markers = [
+    r"\bssh\b",
+    r"\bcurl\b",
+    r"\bncat\b",
+    r"\bnc\b",
+    r"\bping\b",
+    r"\btailscale\b",
+    r"\bdig\b",
+    r"\bnslookup\b",
+    r"\bhttp[s]?://",
+  ]
+  for pat in net_markers:
+    if re.search(pat, text):
+      return "network"
+  return "local"
+
+gates: list[Gate] = []
+
+echo_re = re.compile(r'^echo -n "D(\d+)\s+([^"]+)"')
+for i, line in enumerate(dg_text):
+  m = echo_re.match(line.strip())
+  if not m:
+    continue
+  num = m.group(1)
+  label = m.group(2).strip()
+  gate_id = f"D{int(num)}"
+
+  # Determine the block for this gate: from this echo line until the next gate echo.
+  j = i + 1
+  while j < len(dg_text):
+    if echo_re.match(dg_text[j].strip()):
+      break
+    j += 1
+  block_lines = dg_text[i:j]
+  block = "\n".join(block_lines)
+
+  # Discover backing scripts mentioned in the block.
+  scripts = []
+  for sm in re.finditer(r"(surfaces/verify/[A-Za-z0-9_.-]+\.sh)", block):
+    p = sm.group(1)
+    if p.endswith("drift-gate.sh"):
+      continue
+    scripts.append(p)
+  scripts = sorted(dict.fromkeys(scripts))
+
+  # Prefer a dedicated dNN-* script when present.
+  preferred = None
+  dnn = f"d{int(num):02d}-"
+  for s in scripts:
+    if f"/{dnn}" in s:
+      preferred = s
+      break
+  if preferred:
+    scripts = [preferred] + [s for s in scripts if s != preferred]
+
+  # Combine deps/kind across scripts if present; otherwise infer from inline block.
+  deps_set = set()
+  kind = "local"
+  if scripts:
+    kinds = set()
+    for s in scripts:
+      sabs = spine_code / s
+      stext = sabs.read_text(errors="ignore") if sabs.exists() else ""
+      for d in extract_deps(stext):
+        deps_set.add(d)
+      kinds.add(classify_kind(stext))
+    kind = "network" if "network" in kinds else "local"
+  else:
+    kind = classify_kind(block)
+    for d in extract_deps(block):
+      deps_set.add(d)
+
+  gates.append(Gate(id=gate_id, label=label, scripts=scripts, kind=kind, deps=sorted(deps_set)))
+
+# Optional profiling (script-backed gates only)
+if profile:
+  for g in gates:
+    if not g.scripts:
+      continue
+    # Profile the preferred script only (first in list).
+    script_abs = spine_code / g.scripts[0]
+    if not script_abs.exists():
+      g.profile_rc = 127
+      g.profile_ms = 0
+      continue
+    t0 = time.perf_counter()
+    try:
+      p = subprocess.run(
+        ["/usr/bin/env", "bash", str(script_abs)],
+        cwd=str(spine_code),
+        env={**os.environ, "SPINE_CODE": str(spine_code), "SPINE_REPO": str(spine_code)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+      )
+      rc = p.returncode
+    except Exception:
+      rc = 127
+    t1 = time.perf_counter()
+    g.profile_rc = rc
+    g.profile_ms = int((t1 - t0) * 1000)
+
+now = time.strftime("%Y-%m-%d")
+branch = ""
+try:
+  branch = subprocess.check_output(["git", "-C", str(spine_code), "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
+except Exception:
+  branch = "unknown"
+
+print("# Drift Gates Certification Report")
+print(f"- Date: {now}")
+print(f"- Drift suite: `{dg_path}`")
+print(f"- Branch: `{branch}`")
+print(f"- Mode: {'scan+profile' if profile else 'scan-only'}")
+print("")
+
+print("## Summary")
+total = len(gates)
+local_n = sum(1 for g in gates if g.kind == "local")
+net_n = sum(1 for g in gates if g.kind == "network")
+script_n = sum(1 for g in gates if g.scripts)
+inline_n = total - script_n
+print(f"- Gates discovered: {total}")
+print(f"- Script-backed: {script_n}")
+print(f"- Inline-only: {inline_n}")
+print(f"- Classified local: {local_n}")
+print(f"- Classified network: {net_n}")
+print("")
+
+if profile:
+  prof = [g for g in gates if g.profile_ms is not None]
+  prof.sort(key=lambda g: g.profile_ms or 0, reverse=True)
+  print("## Slowest Script Gates (Profile)")
+  for g in prof[:10]:
+    status = "PASS" if g.profile_rc == 0 else f"FAIL(rc={g.profile_rc})"
+    print(f"- {g.id} {g.label} `{g.script}`: {g.profile_ms}ms {status}")
+  print("")
+
+print("## Gate Inventory")
+print("| Gate | Kind | Backing | Dependencies |")
+print("|------|------|---------|--------------|")
+for g in gates:
+  if g.scripts:
+    backing = f"`{g.scripts[0]}`"
+    if len(g.scripts) > 1:
+      backing = backing + f" (+{len(g.scripts)-1})"
+  else:
+    backing = "`<inline>`"
+  deps = ", ".join(f"`{d}`" for d in g.deps[:5])
+  if len(g.deps) > 5:
+    deps = deps + f", … (+{len(g.deps) - 5})"
+  print(f"| {g.id} {g.label} | {g.kind} | {backing} | {deps or ''} |")
+
+print("")
+print("## Notes")
+print("- This report is heuristic. It is designed to route agents to the right script/SSOT quickly.")
+print("- For full enforcement, run `./bin/ops cap run spine.verify` (receipted).")
+PY
