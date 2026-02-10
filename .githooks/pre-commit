@@ -17,11 +17,21 @@ if ! command -v git >/dev/null 2>&1; then
   exit 0
 fi
 
+staged="$(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null || true)"
+
 # Hard rule: do not commit directly to main.
 # Use `./bin/ops start loop <LOOP_ID>` to create an isolated worktree/branch,
 # commit there, then fast-forward merge to main.
 branch="$(git symbolic-ref --short -q HEAD 2>/dev/null || true)"
 if [[ "${branch:-}" == "main" && "${OPS_ALLOW_MAIN_COMMIT:-0}" != "1" ]]; then
+  # Exception: allow ledger-only commits on main (pure audit trail, no code drift).
+  if [[ -n "${staged:-}" ]] && echo "$staged" | grep -q .; then
+    if echo "$staged" | grep -vx 'mailroom/state/ledger.csv' >/dev/null 2>&1; then
+      : # non-ledger file staged => block
+    else
+      exit 0
+    fi
+  fi
   cat <<'STOP' >&2
 STOP: direct commits to 'main' are blocked (split-brain prevention).
 
@@ -35,8 +45,6 @@ Override (discouraged):
 STOP
   exit 1
 fi
-
-staged="$(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null || true)"
 
 if ! echo "$staged" | grep -qx 'ops/capabilities.yaml'; then
   exit 0
