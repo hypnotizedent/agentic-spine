@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# session-start — Initialize a governed spine terminal session
+#
+# Usage: session-start <lane>
+#   Lanes: scan | apply | coordinator
+#
+# Creates:
+#   - SPINE_SESSION_ID env var
+#   - Session state dir: mailroom/state/sessions/<id>/
+#   - Session manifest: <id>/session.yaml
+#   - Bootstrap log: <id>/bootstrap.log
+#   - Commands log hook (preexec)
+#
+# The 'apply' lane acquires apply-owner.lock — only one terminal can apply.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SESSIONS_DIR="$ROOT/mailroom/state/sessions"
+LOCK_FILE="$ROOT/mailroom/state/apply-owner.lock"
+
+usage() {
+  echo "Usage: session-start <lane>"
+  echo "  Lanes: scan | apply | coordinator"
+  exit 1
+}
+
+[[ $# -ge 1 ]] || usage
+LANE="$1"
+
+case "$LANE" in
+  scan|apply|coordinator) ;;
+  *) echo "ERROR: unknown lane '$LANE'. Use: scan | apply | coordinator"; exit 1 ;;
+esac
+
+# Generate session ID
+DATE_PART=$(date +%Y%m%d-%H%M%S)
+HASH_PART=$(head -c 4 /dev/urandom | xxd -p | head -c 6)
+SESSION_ID="SES-${DATE_PART}-${LANE}-${HASH_PART}"
+SESSION_DIR="$SESSIONS_DIR/$SESSION_ID"
+
+mkdir -p "$SESSION_DIR"
+
+# Write session manifest
+cat > "$SESSION_DIR/session.yaml" <<YAML
+session_id: "$SESSION_ID"
+lane: "$LANE"
+created: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+terminal: "${TERM_PROGRAM:-unknown}"
+user: "$(whoami)"
+hostname: "$(hostname -s)"
+pid: $$
+YAML
+
+# Apply-owner lock (P4)
+if [[ "$LANE" == "apply" ]]; then
+  if [[ -f "$LOCK_FILE" ]]; then
+    existing=$(cat "$LOCK_FILE")
+    echo "WARNING: apply-owner.lock already held by: $existing"
+    echo "Only one terminal can hold apply rights."
+    echo "To force: rm $LOCK_FILE"
+    exit 1
+  fi
+  echo "$SESSION_ID" > "$LOCK_FILE"
+  echo "Apply-owner lock acquired: $SESSION_ID"
+fi
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "  SPINE SESSION: $SESSION_ID"
+echo "  Lane: $LANE"
+echo "  State: $SESSION_DIR/"
+echo "═══════════════════════════════════════════════════════════════"
+
+# Bootstrap (P2) — capture all outputs
+BOOTSTRAP_LOG="$SESSION_DIR/bootstrap.log"
+{
+  echo "=== ops status ==="
+  "$ROOT/bin/ops" status 2>&1 || true
+  echo ""
+  echo "=== gaps.status ==="
+  bash "$ROOT/ops/plugins/loops/bin/gaps-status" 2>&1 || true
+  echo ""
+} > "$BOOTSTRAP_LOG" 2>&1
+
+# MCP/tooling awareness (P6) — print agent routing summary
+echo ""
+echo "──────────────────────────────────────────────────────────────"
+echo "  Agent Routing"
+echo "──────────────────────────────────────────────────────────────"
+if command -v yq >/dev/null 2>&1 && [[ -f "$ROOT/ops/bindings/agents.registry.yaml" ]]; then
+  while IFS='|' read -r agent_id domain mcp_type; do
+    printf "  %-24s  domain=%-16s  mcp=%s\n" "$agent_id" "$domain" "$mcp_type"
+  done < <(yq e '.agents[] | .id + "|" + .domain + "|" + (.mcp_type // "n/a")' "$ROOT/ops/bindings/agents.registry.yaml" 2>/dev/null)
+fi
+
+echo ""
+echo "──────────────────────────────────────────────────────────────"
+echo "  Capabilities: $(yq e '.capabilities | length' "$ROOT/ops/bindings/capability_map.yaml" 2>/dev/null || echo '?') mapped"
+echo "  Drift Gates: D1-D68 ($(ls "$ROOT/surfaces/verify/"d[0-9]*.sh 2>/dev/null | wc -l | tr -d ' ') scripts)"
+echo "──────────────────────────────────────────────────────────────"
+
+# Emit env vars for caller to source
+ENV_FILE="$SESSION_DIR/env.sh"
+cat > "$ENV_FILE" <<SH
+export SPINE_SESSION_ID="$SESSION_ID"
+export SPINE_LANE="$LANE"
+export SPINE_SESSION_DIR="$SESSION_DIR"
+SH
+
+echo ""
+echo "To activate in your shell:"
+echo "  source $ENV_FILE"
+echo ""
+
+# Preexec hook snippet (P3)
+PREEXEC_FILE="$SESSION_DIR/preexec-hook.zsh"
+cat > "$PREEXEC_FILE" <<'ZSH'
+# Spine session command telemetry — source this in your zsh session
+# Usage: source <session-dir>/preexec-hook.zsh
+_spine_preexec() {
+  local cmd="$1"
+  local log="${SPINE_SESSION_DIR}/commands.log"
+  [[ -n "${SPINE_SESSION_DIR:-}" ]] || return
+  printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(pwd)" "$cmd" >> "$log"
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook preexec _spine_preexec
+ZSH
+
+echo "For command telemetry:"
+echo "  source $PREEXEC_FILE"

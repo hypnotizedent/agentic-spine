@@ -634,6 +634,14 @@ else
   warn "capability map lock not present"
 fi
 
+# D68: RAG canonical-only gate (manifest excludes _audits/, _archived/, _imported/, legacy/)
+echo -n "D68 RAG canonical-only gate... "
+if [[ -x "$SP/surfaces/verify/d68-rag-canonical-only-gate.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d68-rag-canonical-only-gate.sh"
+else
+  warn "RAG canonical-only gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
