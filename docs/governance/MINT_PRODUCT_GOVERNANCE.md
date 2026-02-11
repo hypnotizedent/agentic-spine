@@ -1,5 +1,5 @@
 ---
-status: draft
+status: authoritative
 owner: "@ronny"
 last_verified: 2026-02-11
 scope: mint-product-governance
@@ -132,3 +132,20 @@ Before any module deployment to production:
 - One-off migration scripts
 - Vault configurations (use Infisical)
 - Diagnostic/audit reports (superseded)
+
+## 8. Governance Gaps
+
+| Gap | Description | Status |
+|-----|-------------|--------|
+| GAP-OP-105 | Mint-os secrets namespace overloaded (55 keys in monolith project) | open |
+| GAP-OP-106 | No product-level module ownership model prior to this document | fixed |
+| GAP-OP-107 | No API contract versioning governance prior to this document | fixed |
+
+## 9. Enforcement
+
+- **D43** (secrets namespace lock): Enforces `/spine/services/<module>/` namespace structure.
+- **D18** (docker compose drift gate): Validates compose file references match SERVICE_REGISTRY.
+- **Release gates** (section 6): Checked manually until a dedicated drift gate is added.
+- **Proposal flow**: All agent-authored module changes go through `proposals.apply`.
+- **This document** is the single source of truth for product-level governance.
+  Infra-level governance remains under `AGENTS.md` and `AGENT_GOVERNANCE_BRIEF.md`.
