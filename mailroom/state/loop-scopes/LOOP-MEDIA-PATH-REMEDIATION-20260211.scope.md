@@ -89,8 +89,7 @@ Fix the broken media import pipeline caused by the media stack split (VM 201 →
 | Commit | Description |
 |--------|-------------|
 | c5a05f1 | gov: register GAP-OP-109 + loop scope |
-| (pending) | fix: update SSOT docs with corrected path mappings |
-| (pending) | gov: close loop + mark GAP-OP-109 fixed |
+| e14e964 | fix: restore *arr root folders, autopulse rewrites, SSOT docs, close GAP-OP-109 |
 
 ## Receipts
 
