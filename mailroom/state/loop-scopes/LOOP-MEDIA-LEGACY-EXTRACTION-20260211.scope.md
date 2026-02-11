@@ -52,24 +52,24 @@ Source root: `ronny-ops/media-stack/`
 - `config/janitorr/application.yml`
 - `config/recyclarr/recyclarr.yml` (already covered in workbench)
 
-## Extraction Matrix (P1)
+## Extraction Matrix (Final)
 
-| Legacy artifact | Proposed disposition | Target surface | Notes |
+| Legacy artifact | Disposition | Target surface | Notes |
 |---|---|---|---|
-| `REF_CRITICAL_RULES.md` | extract | spine-native governance/runbook doc | High-signal safety rules; rewrite only |
-| `REF_DOWNLOAD_ARCHITECTURE.md` | extract | spine-native architecture section | Shop/home download model needs canonical summary |
-| `REF_MEDIA_PIPELINE.md` | extract | spine-native pipeline overview | Large doc; extract only operational core flows |
-| `REF_HOME_DOWNLOADER.md` | defer | backup/home docs after validation | Depends on current home LXC reality |
-| `REF_SECRETS.md` | extract (sanitized) | namespace/key-path reference only | No secret values; key-path mapping only |
-| `REF_QUALITY_PROFILES.md` | defer | workbench media agent docs | Recyclarr already authoritative in config |
-| `RUNBOOK_RECOVER.md` | extract | governed DR/media recovery runbook | Needs adaptation to VM 209/210 split |
-| `RUNBOOK_TDARR.md` | defer | media troubleshooting docs | Only if Tdarr remains active in current stack |
-| `RUNBOOK_JELLYFIN_BUFFERING.md` | defer | media troubleshooting docs | Only if recurring incident class is current |
-| `RUNBOOK_INTRO_SKIPPER.md` | defer | media feature runbook | Optional capability, not control-plane critical |
-| `scripts/trickplay-guard.sh` | defer (Move B candidate) | capability wrapper only | Promote only if still needed operationally |
-| `config/kometa/*` | defer/reject pending service check | media config authority | Promote only if Kometa active now |
-| `config/janitorr/application.yml` | defer/reject pending service check | media config authority | Promote only if Janitorr active now |
-| `config/recyclarr/recyclarr.yml` | superseded | none | Already covered: `workbench/agents/media/config/recyclarr.yml` |
+| `REF_CRITICAL_RULES.md` | **extracted** | `docs/brain/lessons/MEDIA_CRITICAL_RULES.md` | P2: rewritten spine-native |
+| `REF_DOWNLOAD_ARCHITECTURE.md` | **extracted** | `docs/brain/lessons/MEDIA_DOWNLOAD_ARCHITECTURE.md` | P2: rewritten spine-native |
+| `REF_MEDIA_PIPELINE.md` | **extracted** | `docs/brain/lessons/MEDIA_PIPELINE_ARCHITECTURE.md` | P2: rewritten spine-native |
+| `RUNBOOK_RECOVER.md` | **extracted** | `docs/brain/lessons/MEDIA_RECOVERY_RUNBOOK.md` | P2: adapted to VM 209/210 split |
+| `REF_SECRETS.md` | **superseded** | `ops/bindings/secrets.namespace.policy.yaml` | Key-path mappings already governed (lines 35-48) |
+| `REF_QUALITY_PROFILES.md` | **superseded** | `workbench/agents/media/config/recyclarr.yml` | Recyclarr config is authoritative |
+| `config/recyclarr/recyclarr.yml` | **superseded** | `workbench/agents/media/config/recyclarr.yml` | Already covered |
+| `config/kometa/*` | **reject/deprecated** | none | Kometa not present on any VM (2026-02-11 service check) |
+| `config/janitorr/application.yml` | **reject/deprecated** | none | Janitorr not present on any VM (2026-02-11 service check) |
+| `RUNBOOK_TDARR.md` | **reject** | none | Tdarr deliberately stopped (RCA quick-win); no restart planned |
+| `scripts/trickplay-guard.sh` | **reject** | none | No trickplay activity on VM 210; NFS I/O root cause resolved by VM split |
+| `RUNBOOK_JELLYFIN_BUFFERING.md` | **reject** | none | Root cause (SQLite on NFS) resolved; `MEDIA_STACK_LESSONS.md` covers fix |
+| `REF_HOME_DOWNLOADER.md` | **defer** | future home media docs | Depends on home LXC reality; `download-home` is optional target |
+| `RUNBOOK_INTRO_SKIPPER.md` | **defer** | future troubleshooting doc | Intro-skipper plugin active (DB exists) but runbook is low-priority |
 
 ## Success Criteria
 
@@ -82,13 +82,29 @@ Source root: `ronny-ops/media-stack/`
 ## Phases
 
 - P0: COMPLETE -- Register loop + gap and verify source commit/path inventory.
-- P1: IN PROGRESS -- Build extraction matrix and assign dispositions for each candidate item.
-- P2: PENDING -- Promote high-priority docs (critical rules, download architecture, media pipeline, recovery) as rewritten spine-native docs.
-- P3: PENDING -- Decide/implement script-level promotions (`trickplay-guard`, Kometa/Janitorr) only if services are active.
-- P4: PENDING -- Validate (`spine.verify`) and close with receipt-linked summary.
+- P1: COMPLETE -- Build extraction matrix and assign dispositions for each candidate item.
+- P2: COMPLETE -- Promote high-priority docs: 4 spine-native rewrites in `docs/brain/lessons/MEDIA_*.md` (commit 0774811; D60 wording fix in a6503cb).
+- P3: COMPLETE -- Service checks resolved all pending dispositions: 5 rejected (Tdarr/Kometa/Janitorr/trickplay/buffering), 3 superseded, 2 remain deferred (home downloader, intro-skipper — non-blocking for close).
+- P4: IN PROGRESS -- Validate (`spine.verify`) and close with receipt-linked summary.
+
+## P3 Service Check Evidence (2026-02-11)
+
+Receipt: `RCAP-20260211-100942__docker.compose.status__Roakh40137`
+
+Live container inventory captured via `sudo docker ps` on VM 209/210:
+
+**VM 209 (download-stack) — 19 running, 5 stopped:**
+- Running: autopulse, crosswatch, crowdsec, decypharr, flaresolverr, lidarr, node-exporter, posterizarr, prowlarr, qbittorrent, radarr, recyclarr, sabnzbd, sonarr, soularr, swaparr-radarr, trailarr, unpackerr, watchtower
+- Stopped: huntarr, slskd, swaparr-lidarr, swaparr-sonarr, **tdarr** (deliberately stopped per RCA quick-win)
+- **Not present:** Kometa, Janitorr
+
+**VM 210 (streaming-stack) — 10 running, 0 stopped:**
+- Running: bazarr, homarr, jellyfin, jellyseerr, navidrome, node-exporter, spotisub, subgen, watchtower, wizarr
+- Intro-skipper: Jellyfin plugin active (DB at `/opt/appdata/jellyfin/introskipper/introskipper.db`)
+- Trickplay: no directories or config found
+- **Not present:** Kometa, Janitorr
 
 ## Notes
 
-- `RUNBOOK_INTRO_SKIPPER.md`, `RUNBOOK_TDARR.md`, `RUNBOOK_JELLYFIN_BUFFERING.md`, Kometa, and Janitorr are conditional on active service ownership in current topology (VM 209/210).
-- `REF_SECRETS.md` must not be promoted as values; only key-path governance can be promoted.
 - This loop is the canonical anti-sprawl intake for media legacy content; no parallel ad-hoc migration outside this scope.
+- 2 items remain deferred: `REF_HOME_DOWNLOADER.md` (home LXC dependent) and `RUNBOOK_INTRO_SKIPPER.md` (active but low-priority). These can be picked up in future loops if needed.
