@@ -9,7 +9,7 @@ legacy_commit: 1ea9dfa91f4cf5afbd56a1a946f0a733d3bd785c
 
 # Home Assistant Legacy Extraction Matrix
 
-> Audit of legacy `ronny-ops/home-assistant/` content vs spine coverage.
+> Audit of legacy Home Assistant source content vs spine coverage.
 > Purpose: quantify what is lost if legacy source disappears, and decide what to extract.
 > Evidence for LOOP-HASS-SSOT-AUTOGRADE-20260210 Phase P0.
 
