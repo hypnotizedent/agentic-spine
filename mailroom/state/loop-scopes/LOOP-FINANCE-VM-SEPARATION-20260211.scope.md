@@ -51,7 +51,7 @@ Finance stack runs on docker-host (VM 200) — a legacy host with no cloud-init,
 | P0 | Register gap + loop | **DONE** |
 | P1 | Control-plane bindings (proposal) | **DONE** |
 | P2 | Provision VM + shadow deploy | **DONE** |
-| P3 | Data migration + validation | PENDING |
+| P3 | Data migration + validation | **DONE** |
 | P4 | Traffic cutover (Caddy upstream switch) | PENDING |
 | P5 | Legacy cleanup (disable finance on docker-host) | PENDING |
 | P6 | Verify + close | PENDING |
@@ -92,6 +92,59 @@ Finance stack runs on docker-host (VM 200) — a legacy host with no cloud-init,
 |----------|--------|-------|
 | CP-20260211-190056 (P1 control-plane) | 122cb4c | 6 bindings with placeholders |
 | CP-20260211-194123 (P2 IP + enable) | aed01a1 | Replace PENDING_TAILSCALE_IP, enable compose |
+
+## P3 Evidence
+
+### Source Baselines (docker-host VM 200)
+
+| Service | Metric | Count |
+|---------|--------|-------|
+| Firefly III | transaction_journals | 894 |
+| Firefly III | accounts | 62 |
+| Firefly III | transactions | 1788 |
+| Ghostfolio | orders | 0 |
+| Ghostfolio | accounts | 2 |
+| Ghostfolio | symbol_profiles | 0 |
+| Paperless-ngx | documents | 45 |
+| Paperless-ngx | tags | 13 |
+| Paperless-ngx | correspondents | 24 |
+| Mail-archiver | tables | 0 (empty/fresh) |
+| File data | total | ~88MB (Paperless media) |
+
+### Migration Method
+
+- **Databases**: `pg_dump` via SSH pipe from docker-host → `psql` restore on VM 211 (firefly, ghostfolio, paperless)
+- **File data**: `tar | ssh` pipe from docker-host `/mnt/data/finance/` → VM 211 `/opt/stacks/finance/data/`
+- **Mail-archiver**: Fresh deploy on VM 211 with isolated Postgres 17 DB (mail-archiver-db container, separate from finance postgres). Data-protection-keys transferred from docker-host.
+
+### Post-Migration Counts (VM 211) — ALL MATCH
+
+| Service | Metric | Source | Target | Match |
+|---------|--------|--------|--------|-------|
+| Firefly III | transaction_journals | 894 | 894 | YES |
+| Firefly III | accounts | 62 | 62 | YES |
+| Firefly III | transactions | 1788 | 1788 | YES |
+| Ghostfolio | orders | 0 | 0 | YES |
+| Ghostfolio | accounts | 2 | 2 | YES |
+| Ghostfolio | symbol_profiles | 0 | 0 | YES |
+| Paperless-ngx | documents | 45 | 45 | YES |
+| Paperless-ngx | tags | 13 | 13 | YES |
+| Paperless-ngx | correspondents | 24 | 24 | YES |
+| Mail-archiver | EF migrations table | present | present | YES |
+
+### VM 211 Final State (9/9 containers)
+
+| Container | Status | Port | Smoke Test |
+|-----------|--------|------|------------|
+| firefly-postgres | healthy | 127.0.0.1:5434 | 3 DBs migrated |
+| firefly-redis | healthy | 127.0.0.1:6381 | PONG |
+| firefly-iii | healthy | 0.0.0.0:8080 | HTTP 302 |
+| firefly-importer | healthy | 0.0.0.0:8091 | HTTP 200 |
+| firefly-cron | running | — | cron scheduled |
+| ghostfolio | running | 0.0.0.0:3333 | HTTP 301 |
+| paperless-ngx | healthy | 0.0.0.0:8000 | HTTP 302 |
+| mail-archiver | running | 0.0.0.0:5100 | HTTP 302 |
+| mail-archiver-db | healthy | (internal) | MailArchiver DB ready |
 
 ## Rollback Criteria
 
