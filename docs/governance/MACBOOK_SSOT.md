@@ -155,10 +155,10 @@ github_issue: "#625"
 <!-- BEGIN AUTO HOTKEYS -->
 | Hotkey | Action | Source |
 |--------|--------|--------|
-| **Ctrl+Shift+S** | Start routine (receipted) + launch Claude | `~/.hammerspoon/` |
+| **Ctrl+Shift+S** | session-start scan  + launch Claude | `~/.hammerspoon/` |
 | **Ctrl+Shift+T** | Enqueue a mailroom task (optional prompt) + show watcher status | `~/.hammerspoon/` |
-| **Ctrl+Shift+C** | Launch Codex (bypass approvals + sandbox) in spine workdir | `~/.hammerspoon/` |
-| **Ctrl+Shift+O** | Launch OpenCode in spine workdir (force GLM 4.7) | `~/.hammerspoon/` |
+| **Ctrl+Shift+C** | session-start scan  + launch Codex (bypass approvals + sandbox) | `~/.hammerspoon/` |
+| **Ctrl+Shift+O** | session-start scan  + launch OpenCode (force GLM 4.7) | `~/.hammerspoon/` |
 | **Ctrl+Shift+E** | Closeout prompt → clipboard | `~/.hammerspoon/` |
 <!-- END AUTO HOTKEYS -->
 
@@ -167,10 +167,10 @@ github_issue: "#625"
 <!-- BEGIN AUTO RAYCAST -->
 | Tool | Script | Command |
 |------|--------|---------|
-| **Raycast** | `Claude Code` | `cd ~/code/agentic-spine && claude --dangerously-skip-permissions --add-dir ~/code/workbench` |
-| **Raycast** | `Codex Full Auto` | `codex -C ~/code/agentic-spine --add-dir ~/code/workbench --dangerously-bypass-approvals-and-sandbox` |
-| **Raycast** | `OpenCode` | `cd ~/code/agentic-spine && opencode -m zai-coding-plan/glm-4.7 .` |
-| **Raycast** | `Spine Start Routine` | `cd ~/code/agentic-spine && ./bin/ops cap run spine.watcher.status && ./bin/ops cap run loops.status && ./bin/ops cap run spine.verify` |
+| **Raycast** | `Claude Code` | `cd ~/code/agentic-spine && source <(./ops/plugins/session/bin/session-start scan 2>&1 | tee /dev/stderr; echo '') && claude --dangerously-skip-permissions --add-dir ~/code/workbench` |
+| **Raycast** | `Codex Full Auto` | `cd ~/code/agentic-spine && source <(./ops/plugins/session/bin/session-start scan 2>&1 | tee /dev/stderr; echo '') && codex -C ~/code/agentic-spine --add-dir ~/code/workbench --dangerously-bypass-approvals-and-sandbox` |
+| **Raycast** | `OpenCode` | `cd ~/code/agentic-spine && source <(./ops/plugins/session/bin/session-start scan 2>&1 | tee /dev/stderr; echo '') && opencode -m zai-coding-plan/glm-4.7 .` |
+| **Raycast** | `Spine Start Routine` | `cd ~/code/agentic-spine && source <(./ops/plugins/session/bin/session-start scan 2>&1 | tee /dev/stderr; echo '') && ./bin/ops cap run spine.verify` |
 <!-- END AUTO RAYCAST -->
 
 #### Other
