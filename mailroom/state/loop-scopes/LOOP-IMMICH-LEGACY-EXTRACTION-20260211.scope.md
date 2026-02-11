@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-11
 scope: loop-scope
@@ -58,7 +58,35 @@ Justification: 4 containers, 3TB data, custom backup topology (pg_dump + library
 - P1: BLOCKED (GAP-OP-094) -- Cron path verification blocked by VM 203 network isolation. VM running per Proxmox but unreachable on all paths (LAN, Tailscale, guest agent). Registered GAP-OP-094. P1 resumes after VM network is restored via VNC console. P2 docs can proceed independently (legacy source is sufficient for spine-native rewrite).
 - P2: COMPLETE -- Spine-native docs created: `IMMICH_BACKUP_RESTORE.md` + `IMMICH_OPERATIONS_LESSONS.md` (commit 3c06216).
 - P3: COMPLETE -- Registry entries added: SERVICE_REGISTRY (4 services + host), STACK_REGISTRY (stack entry), services.health (probe, disabled until GAP-OP-094 fixed). Classification upgraded Utility->Stack in EXTRACTION_PROTOCOL.md.
-- P4: PENDING -- Validate (`spine.verify`) and close with receipt-linked summary.
+- P4: COMPLETE -- `spine.verify` PASS (55/55 drift gates). Loop closed with receipt-linked summary.
+
+## P4 Closeout Evidence (2026-02-11)
+
+- spine.verify PASS: `RCAP-20260211-105418__spine.verify__Rtgzy84148`
+- P0 proposal apply: `234544e` (extraction matrix + loop scope)
+- P1+P2 proposal apply: `3c06216` (GAP-OP-094 + spine-native docs)
+- P3 proposal apply: `8d23639` (registry entries + classification upgrade)
+
+### Promoted Outputs
+
+| Spine path | Content | Source |
+|---|---|---|
+| `docs/governance/IMMICH_LEGACY_EXTRACTION_MATRIX.md` | Full extraction matrix, coverage analysis, loss report | P0 audit |
+| `docs/brain/lessons/IMMICH_BACKUP_RESTORE.md` | Backup topology, restore procedures, storage paths | Move A from `ronny-ops/immich/BACKUP.md` |
+| `docs/brain/lessons/IMMICH_OPERATIONS_LESSONS.md` | THE RULE, infrastructure, users, rebuild guide, workflow | Move A from `IMMICH_CONTEXT.md` + 3 others |
+| `docs/governance/SERVICE_REGISTRY.yaml` | 4 service entries + host | P3 |
+| `docs/governance/STACK_REGISTRY.yaml` | Stack entry (VM 203) | P3 |
+| `ops/bindings/services.health.yaml` | Health probe (disabled) | P3 |
+| `docs/core/EXTRACTION_PROTOCOL.md` | Classification: Utility -> Stack | P3 |
+| `ops/bindings/operational.gaps.yaml` | GAP-OP-094 (VM network isolation) | P1 |
+
+### Open Items (not blocking close)
+
+- **P1 blocked** by GAP-OP-094: cron path verification deferred until VM 203 network is restored
+- **Health probe disabled**: enable after GAP-OP-094 fix
+- **MCP server spec**: deferred to future loop
+- **Deduplication scripts**: deferred to future tooling loop
+- **2 deferred extraction items**: home downloader + intro skipper runbook
 
 ## P1 Evidence (2026-02-11)
 
