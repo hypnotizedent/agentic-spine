@@ -194,7 +194,7 @@ rollback targets.
 | `mailroom/state/loop-scopes/LOOP-MEDIA-STACK-ARCH-20260208.scope.md` | Architecture scope (Phase B/C pending) |
 | `mailroom/state/loop-scopes/LOOP-MEDIA-STACK-SPLIT-20260208.scope.md` | Future VM split (blocked by ARCH) |
 | `ops/bindings/docker.compose.targets.yaml` | Media stack compose path |
-| `ops/bindings/ssh.targets.yaml` | Media stack SSH target (100.117.1.53) |
+| `ops/bindings/ssh.targets.yaml` | Download-stack (100.107.36.76) + streaming-stack (100.123.207.64) SSH targets |
 | `ops/bindings/operational.gaps.yaml` | GAP-OP-021 through GAP-OP-024 |
 
 ---
