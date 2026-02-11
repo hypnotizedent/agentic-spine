@@ -3,6 +3,12 @@
 #
 # Source SSOT: docs/governance/SERVICE_REGISTRY.yaml
 # Each endpoint is a known service health URL (no auth required).
+#
+# Coverage policy:
+#   Services with HTTP endpoints get probes here. Internal-only containers
+#   (no published ports), portless sidecars, and TCP-only services (postgres,
+#   redis) rely on Docker HEALTHCHECK + vzdump VM-level coverage. These are
+#   not accidental omissions — they are policy exclusions.
 
 version: 1
 
@@ -44,27 +50,22 @@ endpoints:
     enabled: true
     notes: "Dashy homelab dashboard (visual runtime map of spine services)"
 
-  # ─── Finance Stack (docker-host VM 200 — legacy, migrating to VM 211) ───
-  - id: firefly-iii
-    host: docker-host
-    url: "http://100.92.156.118:8090/api/v1/about"
-    expect: 200
-    enabled: false
-    notes: "Localhost-bound by design (127.0.0.1:8090); Docker health is authoritative signal. Disable external probe until probe_via:ssh feature exists."
+  # Finance probes on docker-host REMOVED — services migrated to finance-stack VM 211.
+  # Live probes are firefly-iii-vm211, paperless-ngx-vm211, ghostfolio-vm211, mail-archiver-vm211 (below).
 
-  - id: paperless-ngx
-    host: docker-host
-    url: "http://100.92.156.118:8092/api/"
+  - id: caddy
+    host: infra-core
+    url: "http://100.92.91.128:80/"
     expect: 200
-    enabled: false
-    notes: "Localhost-bound by design (127.0.0.1:8092); Docker health is authoritative signal. Disable external probe until probe_via:ssh feature exists."
+    enabled: true
+    notes: "Caddy reverse proxy. SPOF for all infra-core traffic. Returns 200 when healthy."
 
-  - id: ghostfolio
-    host: docker-host
-    url: "http://100.92.156.118:3340/"
+  - id: cloudflared
+    host: infra-core
+    url: "http://100.92.91.128:60123/metrics"
     expect: 200
-    enabled: false
-    notes: "Ghostfolio investment tracking (unconfigured — disable probe until setup complete)"
+    enabled: true
+    notes: "Cloudflared tunnel metrics endpoint. Requires --metrics=0.0.0.0:60123 in compose. SPOF for *.ronny.works public routing."
 
   - id: infisical
     host: infra-core
