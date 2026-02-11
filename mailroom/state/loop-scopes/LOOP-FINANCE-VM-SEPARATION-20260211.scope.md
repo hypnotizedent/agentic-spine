@@ -52,7 +52,7 @@ Finance stack runs on docker-host (VM 200) — a legacy host with no cloud-init,
 | P1 | Control-plane bindings (proposal) | **DONE** |
 | P2 | Provision VM + shadow deploy | **DONE** |
 | P3 | Data migration + validation | **DONE** |
-| P4 | Traffic cutover (Caddy upstream switch) | PENDING |
+| P4 | Traffic cutover (cloudflared upstream switch) | **DONE** |
 | P5 | Legacy cleanup (disable finance on docker-host) | PENDING |
 | P6 | Verify + close | PENDING |
 
@@ -145,6 +145,35 @@ Finance stack runs on docker-host (VM 200) — a legacy host with no cloud-init,
 | paperless-ngx | healthy | 0.0.0.0:8000 | HTTP 302 |
 | mail-archiver | running | 0.0.0.0:5100 | HTTP 302 |
 | mail-archiver-db | healthy | (internal) | MailArchiver DB ready |
+
+## P4 Evidence
+
+### Cutover Method
+
+Updated cloudflared `extra_hosts` on infra-core (VM 204) to point finance service hostnames from docker-host (100.92.156.118) to finance-stack VM 211 (100.76.153.100):
+
+| extra_host | Old IP | New IP |
+|-----------|--------|--------|
+| firefly-iii | 100.92.156.118 | 100.76.153.100 |
+| ghostfolio | 100.92.156.118 | 100.76.153.100 |
+| paperless-ngx | 100.92.156.118 | 100.76.153.100 |
+| mail-archiver | 100.92.156.118 | 100.76.153.100 |
+
+Backup saved: `/opt/stacks/cloudflared/docker-compose.yml.bak-pre-p4`
+
+### Public URL Verification
+
+| URL | HTTP Code | Status |
+|-----|-----------|--------|
+| https://finances.ronny.works/ | 302 | OK (login redirect) |
+| https://docs.ronny.works/ | 302 | OK (login redirect) |
+| https://investments.ronny.works/ | 301 | OK (HTTPS redirect) |
+| https://mail-archive.ronny.works/ | 302 | OK (login redirect) |
+
+### Health Probe Changes
+
+- **Enabled**: firefly-iii-vm211, paperless-ngx-vm211, ghostfolio-vm211, mail-archiver-vm211
+- **Legacy docker-host probes**: remain disabled (were already disabled due to localhost-binding)
 
 ## Rollback Criteria
 
