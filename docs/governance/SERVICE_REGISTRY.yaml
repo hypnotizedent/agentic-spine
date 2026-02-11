@@ -18,6 +18,18 @@
 #   Canonical registry lives in spine; config files live in workbench.
 #   This registry defines WHAT services exist and WHERE they run.
 #   Compose files and deployment configs are workbench-owned.
+#
+# Internal dependency policy:
+#   Internal-only containers (no published ports, no user traffic) are implicitly
+#   covered by their parent stack entry. Examples: authentik-worker, authentik-postgres,
+#   authentik-redis (part of caddy-auth stack), infisical-db, infisical-redis (part of
+#   secrets stack). These do NOT need individual SERVICE_REGISTRY entries.
+#
+# Status values:
+#   active      — running, serving traffic
+#   deprecated  — marked for decommission, may still be running with dependents
+#   parked      — intentionally stopped (operator decision, not a failure)
+#   stopped     — crashed or exited unexpectedly, no health monitoring
 
 source_repo: workbench
 source_root: "~/code/workbench"
@@ -27,10 +39,11 @@ services:
     host: docker-host
     port: 3335
     health: /health
+    container: mint-os-dashboard-api
     compose: ~/stacks/mint-os/docker-compose.yml
     secrets_project: mint-os-api
     status: deprecated
-    notes: "DEPRECATED — health probe disabled, pending full decommission from docker-host."
+    notes: "DEPRECATED — container name is mint-os-dashboard-api. Health probe disabled. Still running (serves traffic on :3335) but pending decommission."
 
   mint-os-postgres:
     host: docker-host
@@ -38,7 +51,56 @@ services:
     container: mint-os-postgres
     compose: ~/stacks/mint-os/docker-compose.yml
     status: deprecated
-    notes: "DEPRECATED — backend for mint-os-api, pending decommission."
+    notes: "DEPRECATED — still running with active dependents (files-api, quote-page, MCPJungle postgres MCP). Decommission blocked until dependents migrate."
+
+  # ─── Mint OS Frontends (docker-host) — active, running ──────────────
+  mint-os-admin:
+    host: docker-host
+    port: 3333
+    container: mint-os-admin
+    compose: ~/stacks/mint-os/docker-compose.frontends.yml
+    status: active
+    notes: "Mint OS admin frontend."
+
+  mint-os-customer:
+    host: docker-host
+    port: 3334
+    container: mint-os-customer
+    compose: ~/stacks/mint-os/docker-compose.frontends.yml
+    status: active
+    notes: "Mint OS customer frontend."
+
+  mint-os-production:
+    host: docker-host
+    port: 3336
+    container: mint-os-production
+    compose: ~/stacks/mint-os/docker-compose.frontends.yml
+    status: active
+    notes: "Mint OS production frontend."
+
+  mint-os-kanban:
+    host: docker-host
+    port: 3337
+    container: mint-os-kanban
+    compose: ~/stacks/mint-os/docker-compose.frontends.yml
+    status: active
+    notes: "Mint OS kanban board."
+
+  mint-os-job-estimator:
+    host: docker-host
+    port: 3001
+    container: mint-os-job-estimator
+    compose: ~/stacks/mint-os/docker-compose.frontends.yml
+    status: active
+    notes: "Mint OS job estimator service."
+
+  mint-os-redis:
+    host: docker-host
+    port: 16379
+    container: mint-os-redis
+    compose: ~/stacks/mint-os/docker-compose.yml
+    status: active
+    notes: "Redis for mint-os apps."
 
   minio:
     host: docker-host
@@ -294,7 +356,8 @@ services:
     health: /
     compose: /opt/stacks/download-stack/docker-compose.yml
     container: tdarr
-    notes: "Transcode automation (migrated from media-stack)"
+    status: parked
+    notes: "Transcode automation. Intentionally stopped during soak period. Health probe disabled."
 
   trailarr:
     host: download-stack
@@ -337,7 +400,8 @@ services:
     health: /metrics
     compose: /opt/stacks/download-stack/docker-compose.yml
     container: slskd
-    notes: "Soulseek client (soularr dependency; migrated from media-stack)"
+    status: parked
+    notes: "Soulseek client (soularr dependency). Localhost-bound; intentionally stopped. Health probe disabled."
 
   soularr:
     host: download-stack
@@ -355,13 +419,15 @@ services:
     host: download-stack
     compose: /opt/stacks/download-stack/docker-compose.yml
     container: swaparr-sonarr
-    notes: "Stalled download swapper for sonarr (migrated from media-stack)"
+    status: stopped
+    notes: "Stalled download swapper for sonarr. Exited (255) — crashed, no health monitoring."
 
   swaparr-lidarr:
     host: download-stack
     compose: /opt/stacks/download-stack/docker-compose.yml
     container: swaparr-lidarr
-    notes: "Stalled download swapper for lidarr (migrated from media-stack)"
+    status: stopped
+    notes: "Stalled download swapper for lidarr. Exited (255) — crashed, no health monitoring."
 
   posterizarr:
     host: download-stack
@@ -379,7 +445,8 @@ services:
     host: download-stack
     compose: /opt/stacks/download-stack/docker-compose.yml
     container: huntarr
-    notes: "Missing media hunter (migrated from media-stack)"
+    status: stopped
+    notes: "Missing media hunter. Exited (255) — crashed, no health monitoring."
 
   autopulse:
     host: download-stack
@@ -398,6 +465,22 @@ services:
     compose: /opt/stacks/download-stack/docker-compose.yml
     container: crowdsec
     notes: "Security monitoring (migrated from media-stack)"
+
+  watchtower-download:
+    host: download-stack
+    container: watchtower
+    compose: /opt/stacks/download-stack/docker-compose.yml
+    status: active
+    notes: "Auto-update utility. Requires DOCKER_API_VERSION=1.45 on Docker CE 29.x. No health probe (infrastructure sidecar)."
+
+  download-node-exporter:
+    host: download-stack
+    port: 9100
+    health: /metrics
+    container: node-exporter
+    compose: /opt/stacks/download-stack/docker-compose.yml
+    status: active
+    notes: "Host metrics exporter for Prometheus on download-stack."
 
   # ─── Streaming Stack (VM 210) ───────────────────────────────────────
   jellyfin:
@@ -458,6 +541,22 @@ services:
     compose: /opt/stacks/streaming-stack/docker-compose.yml
     container: subgen
     notes: "AI subtitle generation for Jellyfin (migrated from media-stack)"
+
+  watchtower-streaming:
+    host: streaming-stack
+    container: watchtower
+    compose: /opt/stacks/streaming-stack/docker-compose.yml
+    status: active
+    notes: "Auto-update utility. Requires DOCKER_API_VERSION=1.45 on Docker CE 29.x. No health probe (infrastructure sidecar)."
+
+  streaming-node-exporter:
+    host: streaming-stack
+    port: 9100
+    health: /metrics
+    container: node-exporter
+    compose: /opt/stacks/streaming-stack/docker-compose.yml
+    status: active
+    notes: "Host metrics exporter for Prometheus on streaming-stack."
 
   # ─── Immich (VM 203) ────────────────────────────────────────────────
   immich-server:
@@ -622,12 +721,12 @@ hosts:
 
   immich:
     tailscale_ip: 100.114.101.50
-    ssh: immich-1
+    ssh: immich
     ssh_user: ronny
     os: ubuntu-24.04
     vmid: 203
     proxmox_host: pve
-    notes: "Photo management VM. SSH user is 'ronny' (non-standard). GAP-OP-094: currently network-isolated."
+    notes: "Photo management VM. SSH user is 'ronny' (non-standard). GAP-OP-094 network fixed."
 
   ai-consolidation:
     tailscale_ip: 100.71.17.29
