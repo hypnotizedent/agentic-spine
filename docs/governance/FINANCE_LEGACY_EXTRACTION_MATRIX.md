@@ -225,7 +225,7 @@ ops/bindings/secrets.namespace.policy.yaml  — add missing finance keys
 
 - **Repository:** https://github.com/hypnotizedent/ronny-ops.git
 - **Commit:** `1ea9dfa9` ("docs(spine): distinguish agent receipts vs runtime receipts")
-- **Local read-only path:** `/Users/ronnyworks/ronny-ops` (legacy; D30 — do not execute from here)
+- **Local read-only path:** legacy clone (D30 — do not execute from here)
 - **Finance root:** `ronny-ops/finance/` (150+ artifacts)
 - **Audit date:** 2026-02-11
 - **Auditor:** Terminal E (governed session)
