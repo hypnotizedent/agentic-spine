@@ -1,7 +1,8 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-11
+closed_at: 2026-02-11
 scope: loop-scope
 loop_id: LOOP-FINANCE-LEGACY-EXTRACTION-20260211
 severity: high
@@ -42,7 +43,7 @@ Extract finance-stack operational knowledge from legacy source into spine-native
   - F-10: `docs/brain/lessons/FINANCE_TROUBLESHOOTING.md` (HIGH — debug)
 - **P2:** Binding updates — **COMPLETE** (CP-20260211-105256: health checks, backup enable, secrets namespace)
 - **P3:** Pillar structure — **COMPLETE** (CP-20260211-105256: `docs/pillars/finance/{README,ARCHITECTURE,EXTRACTION_STATUS}.md`)
-- **P4:** Validate via `spine.verify` + close — **IN PROGRESS**
+- **P4:** Validate via `spine.verify` + close — **COMPLETE** (RCAP-20260211-105717__spine.verify__Rzi6011258 — PASS)
 
 ## Deferred (Future Loops)
 
@@ -53,3 +54,6 @@ Extract finance-stack operational knowledge from legacy source into spine-native
 ## Receipts
 
 - RCAP-20260211-103916__spine.verify__Rgbvk46789 (baseline — PASS after P0)
+- RCAP-20260211-105213__proposals.apply__Rsth982892 (P1 applied — 8 spine-native docs)
+- RCAP-20260211-105626__proposals.apply__Rfstv2128 (P2+P3 applied — bindings + pillar)
+- RCAP-20260211-105717__spine.verify__Rzi6011258 (P4 — PASS, all gates green)
