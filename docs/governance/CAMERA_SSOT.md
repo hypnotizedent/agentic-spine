@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-09
+last_verified: 2026-02-11
 verification_method: live-isapi-query + receipt
 scope: camera-infrastructure
 parent_receipts:
@@ -31,7 +31,7 @@ parent_receipts:
 | NVR Model | Hikvision ERI-K216-P16 |
 | Total Channels | 16 (12 configured, **0 showing video** as of 2026-02-09) |
 | Camera VLAN | `192.168.254.0/24` (NVR internal PoE network) |
-| Credentials (Infisical) | `infrastructure/prod:/spine/shop/nvr/*` (**not yet stored — blocker**) |
+| Credentials (Infisical) | `infrastructure/prod:/spine/shop/nvr/*` (stored; verified 2026-02-11) |
 | Loops | LOOP-CAMERA-BASELINE-20260208, **LOOP-CAMERA-OUTAGE-20260209** |
 
 ---

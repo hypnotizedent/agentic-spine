@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-11
 verification_method: receipt + on-site audit + live-ssh-inspection
 scope: shop-infrastructure
 parent_receipts:
@@ -58,7 +58,7 @@ Notes:
 |-----------|---------------------|---------------|-------|
 | Dell PowerEdge R730XD | HSZZD42 | U17-18 | Main production server |
 | Dell MD1400 DAS | HRW2F42 | U14-16 | Direct Attached Storage |
-| Dell Networking N2024P | — (MAC: F8:B1:56:73:A0:D0) | U39 | 24-port PoE+ switch |
+| Dell Networking N2024P | 1TQR0Z1 (MAC: F8:B1:56:73:A0:D0) | U39 | 24-port PoE+ switch (owner-provided tag photo, 2026-02-11) |
 | APC Back-UPS Pro 900 | BVN900M1 | Floor | 900VA UPS |
 | Hikvision ERI-K216-P16 | ERI-K216-P161620220307CCRRJ54340404WCVU | Upstairs 9U rack (separate) | 16-channel PoE NVR |
 | TP-Link EAP225 | — (MAC: 54:AF:97:2F:C6:6E, mgmt: 192.168.1.185) | — | WiFi AP — kernel 3.3.8, dropbear SSH (ssh-rsa only) |
