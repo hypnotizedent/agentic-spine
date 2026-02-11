@@ -60,7 +60,16 @@ scope: session-entry
   - D61 session-loop traceability freshness (forces periodic closeout discipline via `agent.session.closeout`).
   - D62 git remote parity (prevents origin/github “split brain” histories).
 
-## Common Causes Of “Non-Uniform Workflow”
+## Anti-Stash Policy (Gap Lifecycle)
+
+Every open gap in `operational.gaps.yaml` must be linked to an active loop (`parent_loop`).
+
+- **No standalone gaps older than 7 days.** If a gap cannot be loop-linked within 7 days, it must be either: (a) linked to a new or existing loop, or (b) explicitly marked `status: accepted` with owner and acceptance date.
+- **"Accepted" gaps** are policy exceptions — the owner acknowledges the gap exists and deliberately defers remediation. They still require periodic review (D58 freshness).
+- **`gaps.status` flags orphans and standalone gaps.** Zero orphans and zero unlinked standalone gaps is the target state.
+- **Report-and-execute, not report-and-park.** Discovering a gap means registering it AND creating the loop to fix it. Gaps without execution plans are stashed findings.
+
+## Common Causes Of "Non-Uniform Workflow"
 
 - Work started without any loop anchor. Worktrees are optional (committing directly to main is fine), but every non-trivial change should have a loop scope for traceability. Without one you get "floating WIP": no scope anchor and no session log.
 - Multiple terminals mutating git concurrently (branches/worktrees/merges in parallel). This creates stale worktrees, branch confusion, and occasional unexpected commits. The coarse git lock in ops commands helps, but ad-hoc git in multiple terminals can still bypass it. **Default rule:** if multiple terminals/agents may be active, treat the repo as read-only and use mailroom-gated writes (change proposals).
