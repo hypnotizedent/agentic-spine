@@ -20,7 +20,7 @@ MCPJungle and workbench MCP tool servers bypass the spine mailroom by making dir
 |-------|-------|------------|--------|
 | P0 | Gap registration + loop scope | None | **DONE** |
 | P1 | Remove hardcoded SABnzbd API key from MCPJungle media-stack source | None | **DONE** |
-| P2 | Block/route mutating MCP tools to spine-governed capability path only | P1 | OPEN |
+| P2 | Block/route mutating MCP tools to spine-governed capability path only | P1 | **DONE** |
 | P3 | Register all MCPJungle servers in agents.registry.yaml with contracts | P2 | OPEN |
 | P4 | Add drift gate for local vs MCPJungle MCP server code parity | P3 | OPEN |
 | P5 | Add spine capabilities (or explicit deny policy) for HA/Mint/Firefly/Paperless/Immich/MS Graph | P3 | OPEN |
@@ -52,11 +52,24 @@ Mutating MCP tools (POST/PUT/DELETE to external APIs) in workbench must either:
 - Route through `./bin/ops cap run <capability>` (receipted, gated), or
 - Be removed from the MCP tool surface and replaced with a read-only stub that emits guidance to use spine
 
-Affected tools:
-- media-agent: request_movie, request_show, request_artist, update_movie_profile, update_show_profile, trigger_collection_search, approve_request, manage_queue
-- n8n-agent: create_workflow, import_workflow, activate_workflow, deactivate_workflow, delete_workflow, run_workflow
+**Implementation:** Inserted a `GOVERNED_TOOLS` lookup gate at the top of each file's `CallToolRequestSchema` handler. Governed tools return a structured JSON response (`blocked: true`, tool name, loop/gap refs, and spine guidance). Read-only tools pass through unchanged. Existing handler code is preserved but unreachable for governed tools.
+
+**Files modified (6):**
+1. `infra/compose/mcpjungle/servers/media-stack/src/index.ts` — 8 tools blocked
+2. `infra/compose/mcpjungle/servers/n8n/src/index.ts` — 6 tools blocked
+3. `infra/compose/mcpjungle/servers/home-assistant/src/index.ts` — 1 tool blocked
+4. `infra/compose/mcpjungle/servers/mint-os/src/index.ts` — 5 tools blocked
+5. `agents/media/tools/src/index.ts` — 8 tools blocked (local copy, mirrors MCPJungle)
+6. `agents/n8n/tools/src/index.ts` — 6 tools blocked (local copy, mirrors MCPJungle)
+
+**Governed tools (actual, code-verified):**
+- media-agent (MCPJungle): request_movie, request_show, request_artist, trigger_collection_search, approve_request, manage_queue, manage_queue_home, toggle_huntarr
+- media-agent (local only): update_movie_profile, search_movie_by_id, update_show_profile
+- n8n-agent: create_workflow, import_workflow, activate_workflow, deactivate_workflow, delete_workflow, execute_workflow
 - home-assistant: ha_call_service
-- mint-os: send_order_email, post_production_update, place_ss_order
+- mint-os: send_order_email, post_production_update, update_order_customer, ss_place_order, sanmar_place_order
+
+**Note:** n8n tools with existing spine capabilities (create/import/activate/deactivate/delete) include the capability name in guidance. All others reference P5 for pending capability registration.
 
 ---
 
