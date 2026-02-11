@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-11
 scope: loop-scope
@@ -85,7 +85,7 @@ Source root: `ronny-ops/media-stack/`
 - P1: COMPLETE -- Build extraction matrix and assign dispositions for each candidate item.
 - P2: COMPLETE -- Promote high-priority docs: 4 spine-native rewrites in `docs/brain/lessons/MEDIA_*.md` (commit 0774811; D60 wording fix in a6503cb).
 - P3: COMPLETE -- Service checks resolved all pending dispositions: 5 rejected (Tdarr/Kometa/Janitorr/trickplay/buffering), 3 superseded, 2 remain deferred (home downloader, intro-skipper — non-blocking for close).
-- P4: IN PROGRESS -- Validate (`spine.verify`) and close with receipt-linked summary.
+- P4: COMPLETE -- Validate (`spine.verify`) and close with receipt-linked summary.
 
 ## P3 Service Check Evidence (2026-02-11)
 
@@ -97,6 +97,13 @@ Live container inventory captured via `sudo docker ps` on VM 209/210:
 - Running: autopulse, crosswatch, crowdsec, decypharr, flaresolverr, lidarr, node-exporter, posterizarr, prowlarr, qbittorrent, radarr, recyclarr, sabnzbd, sonarr, soularr, swaparr-radarr, trailarr, unpackerr, watchtower
 - Stopped: huntarr, slskd, swaparr-lidarr, swaparr-sonarr, **tdarr** (deliberately stopped per RCA quick-win)
 - **Not present:** Kometa, Janitorr
+
+## P4 Closeout Evidence (2026-02-11)
+
+- Proposal apply (P3 finalization): `RCAP-20260211-102103__proposals.apply__Rlmx673033`
+- Spine verify PASS: `RCAP-20260211-102109__spine.verify__R47cv73167`
+- P2 extraction apply commit: `0774811`
+- P3 matrix finalization apply commit: `b686365`
 
 **VM 210 (streaming-stack) — 10 running, 0 stopped:**
 - Running: bazarr, homarr, jellyfin, jellyseerr, navidrome, node-exporter, spotisub, subgen, watchtower, wizarr
