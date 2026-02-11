@@ -1,7 +1,8 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 created: 2026-02-11
+closed: 2026-02-11
 scope: loop-scope
 loop_id: LOOP-FINANCE-VM-SEPARATION-20260211
 severity: high
@@ -54,7 +55,7 @@ Finance stack runs on docker-host (VM 200) — a legacy host with no cloud-init,
 | P3 | Data migration + validation | **DONE** |
 | P4 | Traffic cutover (cloudflared upstream switch) | **DONE** |
 | P5 | Legacy cleanup (disable finance on docker-host) | **DONE** |
-| P6 | Verify + close | PENDING |
+| P6 | Verify + close | **DONE** |
 
 ## P2 Evidence
 
@@ -193,6 +194,28 @@ Backup saved: `/opt/stacks/cloudflared/docker-compose.yml.bak-pre-p4`
 - **P4 rollback trigger**: Any finance endpoint returns non-200 after cutover, OR data integrity check fails (transaction count mismatch, document count mismatch).
 - **P4 rollback action**: Revert Caddy upstream to docker-host IPs. Finance on docker-host remains live until P5.
 - **P5 guard**: Do NOT disable legacy finance until ≥1 hour soak with zero errors on new VM.
+
+## P6 Evidence
+
+### Validation Receipts
+
+| Capability | Result | Receipt |
+|-----------|--------|---------|
+| docker.compose.status | **21/21 OK** (finance 9/9) | RCAP-20260211-150854__docker.compose.status__R66zf21979 |
+| services.health.status | Finance 4/4 OK (streaming-node-exporter transient timeout — unrelated) | RCAP-20260211-150910__services.health.status__Rk01x22713 |
+| backup.status | **15/15 OK** | RCAP-20260211-150943__backup.status__Rshjf23200 |
+| spine.verify | **ALL PASS (D1-D68)** | RCAP-20260211-150949__spine.verify__Rt5iw23793 |
+| gaps.status | GAP-OP-100 closed | RCAP-20260211-151022__gaps.status__Rj98z31227 |
+
+### All Proposals Applied
+
+| Proposal | Commit | Phase | Scope |
+|----------|--------|-------|-------|
+| CP-20260211-190056 | 122cb4c | P1 | 6 control-plane bindings with placeholders |
+| CP-20260211-194123 | aed01a1 | P2 | Replace PENDING_TAILSCALE_IP, enable compose |
+| CP-20260211-145931 | 92200cd | P3 | Data migration evidence, mail-archiver probe + registry |
+| CP-20260211-150403 | 0211507 | P4 | Enable VM 211 probes, update domain routing |
+| CP-20260211-150651 | b7bca7d | P5 | Decommission docker-host finance, activate VM 211 entries |
 
 ## Constraints
 
