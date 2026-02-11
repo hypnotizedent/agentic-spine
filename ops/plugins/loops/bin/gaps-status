@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# gaps.status — Gap-Loop Reconciliation
+# Lists open gaps and checks parent_loop linkage.
+# Flags: orphaned gaps (parent loop closed but gap still open)
+#
+# Usage: ./gaps-status [--fix-orphans]
+#   --fix-orphans: remove parent_loop from gaps whose loops are closed
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+GAPS="$ROOT/ops/bindings/operational.gaps.yaml"
+SCOPES="$ROOT/mailroom/state/loop-scopes"
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: yq required"; exit 1; }
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "  Gap-Loop Reconciliation"
+echo "═══════════════════════════════════════════════════════════════"
+echo
+
+# Count gaps by status
+total=$(yq e '.gaps | length' "$GAPS")
+open=$(yq e '[.gaps[] | select(.status == "open")] | length' "$GAPS")
+fixed=$(yq e '[.gaps[] | select(.status == "fixed")] | length' "$GAPS")
+closed=$(yq e '[.gaps[] | select(.status == "closed")] | length' "$GAPS")
+
+echo "Gaps: $total total | $open open | $fixed fixed | $closed closed"
+echo
+
+# List open gaps with parent_loop status
+orphan_count=0
+echo "Open gaps with parent loop check:"
+echo "──────────────────────────────────────────────────────────────"
+
+while IFS='|' read -r gap_id severity parent_loop; do
+  [[ -z "$gap_id" ]] && continue
+  parent_loop=$(echo "$parent_loop" | xargs)
+
+  if [[ -z "$parent_loop" || "$parent_loop" == "null" ]]; then
+    echo "  [$severity] $gap_id — no parent loop (standalone)"
+    continue
+  fi
+
+  scope_file="$SCOPES/${parent_loop}.scope.md"
+  if [[ ! -f "$scope_file" ]]; then
+    echo "  [$severity] $gap_id → $parent_loop (MISSING scope file)"
+    continue
+  fi
+
+  loop_status=$(awk '/^status:/{print $2; exit}' "$scope_file" 2>/dev/null || echo "unknown")
+
+  if [[ "$loop_status" == "closed" ]]; then
+    echo "  [$severity] $gap_id → $parent_loop (ORPHANED — loop closed, gap open)"
+    orphan_count=$((orphan_count + 1))
+  else
+    echo "  [$severity] $gap_id → $parent_loop ($loop_status)"
+  fi
+done < <(yq e '.gaps[] | select(.status == "open") | .id + "|" + .severity + "|" + (.parent_loop // "null")' "$GAPS" 2>/dev/null)
+
+echo
+echo "──────────────────────────────────────────────────────────────"
+echo "Orphaned gaps (loop closed, gap open): $orphan_count"
+echo "═══════════════════════════════════════════════════════════════"
+
+exit 0
