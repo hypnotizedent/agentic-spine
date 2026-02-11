@@ -13,11 +13,21 @@ if [[ -z "${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}" && -f "$CREDENTIALS_FILE"
   source "$CREDENTIALS_FILE"
 fi
 
-INFISICAL_API_URL="${INFISICAL_API_URL:-https://secrets.ronny.works}"
 INFISICAL_CLIENT_ID="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-40b44e76-db5a-4309-afa2-43bd93dddfc1}"
 INFISICAL_CLIENT_SECRET="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}"
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SECRETS_BINDING="${SPINE_REPO}/ops/bindings/secrets.binding.yaml"
 SECRETS_NAMESPACE_POLICY="${SPINE_REPO}/ops/bindings/secrets.namespace.policy.yaml"
+
+# Prefer internal_api_url from binding (bypasses Authentik forward auth),
+# fall back to env var, then public URL.
+if [[ -f "$SECRETS_BINDING" ]] && command -v yq >/dev/null 2>&1; then
+  _binding_url="$(yq -r '.infisical.internal_api_url // .infisical.api_url // ""' "$SECRETS_BINDING" 2>/dev/null || true)"
+  INFISICAL_API_URL="${_binding_url:-${INFISICAL_API_URL:-https://secrets.ronny.works}}"
+  unset _binding_url
+else
+  INFISICAL_API_URL="${INFISICAL_API_URL:-https://secrets.ronny.works}"
+fi
 
 # Cache configuration
 CACHE_DIR="${HOME}/.cache/infisical"

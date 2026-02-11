@@ -89,14 +89,20 @@ cmd_auth() {
   echo "unifi-agent: auth"
   echo "host: $UDR_HOST (via pve $PVE_HOST)"
 
+  # base64-encode creds locally to avoid shell-escaping issues through the heredoc
+  local udr_b64 user_b64 pass_b64
+  udr_b64="$(printf '%s' "$UDR_HOST" | base64)"
+  user_b64="$(printf '%s' "$UNIFI_SHOP_USER" | base64)"
+  pass_b64="$(printf '%s' "$UNIFI_SHOP_PASSWORD" | base64)"
+
   local auth_result
   auth_result="$(
     pve_run <<EOF
 set -euo pipefail
 
-udr=$(printf '%q' "$UDR_HOST")
-user=$(printf '%q' "$UNIFI_SHOP_USER")
-pass=$(printf '%q' "$UNIFI_SHOP_PASSWORD")
+udr="\$(echo '$udr_b64' | base64 -d)"
+user="\$(echo '$user_b64' | base64 -d)"
+pass="\$(echo '$pass_b64' | base64 -d)"
 
 payload="\$(UNIFI_USER="\$user" UNIFI_PASS="\$pass" python3 - <<'PY'
 import json, os
@@ -141,15 +147,22 @@ cmd_clients() {
     exit 1
   fi
 
+  # base64-encode creds locally to avoid shell-escaping issues through the heredoc
+  local udr_b64 site_b64 user_b64 pass_b64
+  udr_b64="$(printf '%s' "$UDR_HOST" | base64)"
+  site_b64="$(printf '%s' "$site" | base64)"
+  user_b64="$(printf '%s' "$UNIFI_SHOP_USER" | base64)"
+  pass_b64="$(printf '%s' "$UNIFI_SHOP_PASSWORD" | base64)"
+
   local raw
   raw="$(
     pve_run <<EOF
 set -euo pipefail
 
-udr=$(printf '%q' "$UDR_HOST")
-site=$(printf '%q' "$site")
-user=$(printf '%q' "$UNIFI_SHOP_USER")
-pass=$(printf '%q' "$UNIFI_SHOP_PASSWORD")
+udr="\$(echo '$udr_b64' | base64 -d)"
+site="\$(echo '$site_b64' | base64 -d)"
+user="\$(echo '$user_b64' | base64 -d)"
+pass="\$(echo '$pass_b64' | base64 -d)"
 
 payload="\$(UNIFI_USER="\$user" UNIFI_PASS="\$pass" python3 - <<'PY'
 import json, os
@@ -184,9 +197,9 @@ EOF
     echo "unifi-agent: clients (site=$site)"
     echo "host: $UDR_HOST (via pve $PVE_HOST)"
     echo
-    echo "$raw" | jq -r '.data[] | "\(.mac)\t\(.ip // "n/a")\t\(.hostname // .name // "unknown")\t\(if .is_wired then "wired" else "wireless" end)"' 2>/dev/null \
-      | sort -t$'\t' -k2,2V \
-      | column -t -s$'\t' -N "MAC,IP,NAME,TYPE" 2>/dev/null \
+    { printf 'MAC\tIP\tNAME\tTYPE\n'; echo "$raw" | jq -r '.data[] | "\(.mac)\t\(.ip // "n/a")\t\(.hostname // .name // "unknown")\t\(if .is_wired then "wired" else "wireless" end)"' 2>/dev/null \
+      | sort -t$'\t' -k2,2V; } \
+      | column -t -s$'\t' 2>/dev/null \
       || {
         echo "FAIL: could not parse UniFi response" >&2
         echo "$raw" >&2
