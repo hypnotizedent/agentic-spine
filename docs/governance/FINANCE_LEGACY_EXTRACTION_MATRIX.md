@@ -5,7 +5,8 @@ last_verified: 2026-02-11
 scope: extraction-audit
 migrated_from: "audit of https://github.com/hypnotizedent/ronny-ops.git @ 1ea9dfa9"
 parent_loop: LOOP-SPINE-CONSOLIDATION-20260210
-recommended_loop: LOOP-FINANCE-LEGACY-EXTRACTION-YYYYMMDD
+active_loop: LOOP-FINANCE-LEGACY-EXTRACTION-20260211
+extraction_complete: true
 ---
 
 # Finance Legacy Extraction Matrix

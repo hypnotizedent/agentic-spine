@@ -31,7 +31,7 @@ Extract finance-stack operational knowledge from legacy source into spine-native
 ## Phases
 
 - **P0:** Register loop + extraction matrix audit — **COMPLETE** (CP-20260211-102929, commits bbe30a3..0bde025)
-- **P1:** Extract all 8 extract_now items — Move A doc-only snapshots
+- **P1:** Extract all 8 extract_now items — **COMPLETE** (CP-20260211-104745, commit c768e63)
   - F-01: `docs/brain/lessons/FINANCE_SIMPLEFIN_PIPELINE.md` (CRITICAL — bank sync)
   - F-02: `docs/brain/lessons/FINANCE_N8N_WORKFLOWS.md` (CRITICAL — webhook sync)
   - F-03: `docs/brain/lessons/FINANCE_BACKUP_RESTORE.md` (CRITICAL — backup/restore)
@@ -40,9 +40,9 @@ Extract finance-stack operational knowledge from legacy source into spine-native
   - F-06: `docs/brain/lessons/FINANCE_DEPLOY_RUNBOOK.md` (HIGH — deployment)
   - F-09: `docs/brain/lessons/FINANCE_RECONCILIATION.md` (HIGH — reconciliation)
   - F-10: `docs/brain/lessons/FINANCE_TROUBLESHOOTING.md` (HIGH — debug)
-- **P2:** Binding updates — health checks, backup enable, secrets namespace
-- **P3:** Pillar structure — `docs/pillars/finance/{README,ARCHITECTURE,EXTRACTION_STATUS}.md`
-- **P4:** Validate via `spine.verify` + close with receipt-linked summary
+- **P2:** Binding updates — **COMPLETE** (CP-20260211-105256: health checks, backup enable, secrets namespace)
+- **P3:** Pillar structure — **COMPLETE** (CP-20260211-105256: `docs/pillars/finance/{README,ARCHITECTURE,EXTRACTION_STATUS}.md`)
+- **P4:** Validate via `spine.verify` + close — **IN PROGRESS**
 
 ## Deferred (Future Loops)
 
