@@ -262,7 +262,7 @@ curl -s http://automation-stack:5678/healthz
 
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
-| immich-1 VM | `immich-1` | 100.114.101.50 | Photos (Shop) | Shop | `curl -s http://immich-1:2283/api/server-info/ping` |
+| immich-1 VM | `immich-1` | 100.114.101.50 | Photos (Shop) | Shop | `curl -s http://immich-1:2283/api/server/ping` |
 
 ### Tier 3: Home Services
 

@@ -93,7 +93,7 @@ curl -s -H "x-api-key: $IMMICH_API_KEY" \
   "http://immich-1:2283/api/jobs" | jq
 
 # Server ping (health check)
-curl -sf http://immich-1:2283/api/server-info/ping
+curl -sf http://immich-1:2283/api/server/ping
 ```
 
 ---
