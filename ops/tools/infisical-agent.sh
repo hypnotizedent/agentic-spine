@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.0.0 — canonical source: agentic-spine/ops/tools/
+# Version: 1.1.0 — canonical source: agentic-spine/ops/tools/
 # Infisical Secrets Management Agent
 # Direct API calls - no CLI dependency
 # Fixed: removed declare -A to avoid set -u issues
@@ -33,6 +33,15 @@ fi
 CACHE_DIR="${HOME}/.cache/infisical"
 CACHE_TTL="${INFISICAL_CACHE_TTL:-14400}"  # Default: 4 hours (14400 seconds)
 
+# Deprecated project detection (lifecycle != active/clean)
+# These projects must not be targeted by new agent write operations.
+is_deprecated_project() {
+  case "$1" in
+    finance-stack|mint-os-portal|mint-os-vault) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Project ID lookup function (case statement avoids associative array issues)
 get_project_id_from_name() {
   case "$1" in
@@ -47,6 +56,25 @@ get_project_id_from_name() {
     home-assistant) echo "5df75515-7259-4c14-98b8-5adda379aade" ;;
     *)              echo "" ;;
   esac
+}
+
+# Guard: block mutating operations on deprecated projects
+guard_deprecated_write() {
+  local project="$1"
+  local cmd="$2"
+  if is_deprecated_project "$project"; then
+    log_error "STOP: '$cmd' blocked — project '$project' is deprecated."
+    log_info "Governed writes target 'infrastructure' project only. See secrets.inventory.yaml lifecycle field."
+    exit 1
+  fi
+}
+
+# Guard: warn on read operations targeting deprecated projects
+guard_deprecated_read() {
+  local project="$1"
+  if is_deprecated_project "$project"; then
+    echo "WARN: reading from deprecated project '$project'. Migrate to 'infrastructure' project." >&2
+  fi
 }
 
 # Colors
@@ -182,7 +210,8 @@ get_project_id() {
       echo "$id"
     else
       log_error "Unknown project: $project"
-      log_info "Available: mint-os-api mint-os-vault mint-os-portal infrastructure n8n finance-stack media-stack immich home-assistant"
+      log_info "Active: infrastructure mint-os-api n8n media-stack immich home-assistant"
+      log_info "Deprecated (read-only): finance-stack mint-os-vault mint-os-portal"
       exit 1
     fi
   fi
@@ -233,6 +262,8 @@ infisical_list_secrets() {
     exit 1
   fi
 
+  guard_deprecated_read "$project"
+
   local project_id
   project_id=$(get_project_id "$project")
   local secret_path
@@ -257,6 +288,8 @@ infisical_get_secret() {
     log_error "Usage: get <project> <env> <key>"
     exit 1
   fi
+
+  guard_deprecated_read "$project"
 
   local project_id
   project_id=$(get_project_id "$project")
@@ -372,6 +405,8 @@ infisical_set_secret() {
     exit 1
   fi
 
+  guard_deprecated_write "$project" "set"
+
   local project_id
   project_id=$(get_project_id "$project")
   local secret_path
@@ -418,6 +453,8 @@ infisical_delete_secret() {
     log_error "Usage: delete <project> <env> <key>"
     exit 1
   fi
+
+  guard_deprecated_write "$project" "delete"
 
   local project_id
   project_id=$(get_project_id "$project")
@@ -484,6 +521,8 @@ infisical_sync_from_env() {
     exit 1
   fi
 
+  guard_deprecated_write "$project" "import"
+
   if [[ ! -f "$input_file" ]]; then
     log_error "File not found: $input_file"
     exit 1
@@ -539,16 +578,18 @@ Commands:
   cache-info                        Show cache status and TTL
   cache-clear [project] [env] [key] Clear cached secrets
 
-Projects:
-  mint-os-api
-  mint-os-vault
-  mint-os-portal
-  infrastructure
-  n8n
-  finance-stack
-  media-stack
-  immich
-  home-assistant
+Active Projects:
+  infrastructure    (spine-bound, governed writes)
+  mint-os-api       (legacy product)
+  n8n               (automation)
+  media-stack       (media management)
+  immich            (photo management)
+  home-assistant    (smart home)
+
+Deprecated Projects (read-only, writes blocked):
+  finance-stack     (use infrastructure /spine/services/finance)
+  mint-os-vault     (consolidation candidate)
+  mint-os-portal    (empty, delete candidate)
 
 Environment Variables:
   INFISICAL_UNIVERSAL_AUTH_CLIENT_ID      Client ID (default: 40b44e76-...)
