@@ -37,3 +37,20 @@ loop_id: LOOP-SPINE-CONSOLIDATION-20260210
 - SPINE_SCAFFOLD generator so it stays in sync with AGENTS.md.
 - Capability tagging/index + plugin manifest for discovery.
 - Resolve D3/D48 by finishing this worktree (commit/push or close) so preflight sees no dirty codex worktrees.
+
+### Finance Legacy Extraction (Audit Complete -- Needs Dedicated Loop)
+
+- **Audit date:** 2026-02-11
+- **Classification:** PILLAR (per EXTRACTION_PROTOCOL.md)
+- **Matrix:** `docs/governance/FINANCE_LEGACY_EXTRACTION_MATRIX.md`
+- **Legacy source:** `ronny-ops/finance/` @ commit `1ea9dfa9` (150+ artifacts)
+- **Findings:** 4 CRITICAL, 6 HIGH, 4 MEDIUM, 3 LOW
+- **Coverage:** 1 covered, 4 partial, 13 missing operational needs
+- **Disposition:** 8 extract_now, 3 defer, 4 reject, 2 superseded
+- **Recommendation:** Create `LOOP-FINANCE-LEGACY-EXTRACTION-YYYYMMDD` (HIGH severity)
+  - P0: Register loop + extraction matrix
+  - P1: Critical doc extraction (SimpleFIN pipeline, n8n workflows, backup, account topology)
+  - P2: High doc extraction (architecture, deploy, reconciliation, troubleshooting)
+  - P3: Pillar structure + binding updates (health checks, backup enable, secrets)
+  - P4: Validate + close
+- **Gap registered:** GAP-OP-093 (finance stack operational coverage)
