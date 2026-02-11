@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-11
 scope: loop-scope
@@ -34,10 +34,13 @@ Make shop edge operations repeatable by ensuring **Infisical has the canonical s
   - `/spine/shop/wifi`: `AP_SSH_USER`, `AP_SSH_PASSWORD` (validated working)
 - Capabilities pass with receipts:
   - `network.ap.facts.capture` -> PASS
-  - (follow-on) `network.switch.facts.capture` (if/when implemented) -> PASS
+  - `network.unifi.clients.snapshot` -> PASS
 - `docs/governance/SHOP_SERVER_SSOT.md` updated with:
   - Dell N2024P service tag/serial
   - AP serial (or "serial unknown" with evidence)
+- Service tag provenance is explicit and final for this loop:
+  - N2024P tag `1TQR0Z1` is accepted from owner-provided photo evidence and persisted in SSOT.
+  - Do not reopen this loop for the same service tag unless conflicting evidence appears.
 - Loop closed with scope + SSOT links.
 
 ## Phases
@@ -46,12 +49,12 @@ Make shop edge operations repeatable by ensuring **Infisical has the canonical s
 - P1: COMPLETE -- Seed secrets via `secrets.set.interactive` (no values printed)
 - P2: COMPLETE -- Capture device facts with governed capabilities (receipts)
 - P3: COMPLETE -- Update SSOT + close GAP-OP-041
+- P4: COMPLETE -- Tooling reliability fixes + loop closeout
 
-## Remaining Work (loop stays open)
+## Deferred (Non-blocking)
 
-- **N2024P service tag remote capture**: Tag `1TQR0Z1` is recorded from owner-provided photo but cannot be captured via SSH/API (switch CLI does not expose it in a parseable way). Consider implementing `network.switch.facts.capture` when SSH automation for Dell N2024P CLI is feasible.
-- **UniFi clients snapshot**: `network.unifi.clients.snapshot` returns 401 Unauthorized. Root cause: UDR6 credentials are Ubiquiti cloud SSO (email/password), but the local API requires a local-only account. Needs either: (a) create a local API account on UDR6, or (b) update the capability script to use cloud auth flow.
-- **Shop audit drift**: 4 VMs unreachable on LAN (ai-consolidation, automation-stack, docker-host, immich) + destroyed media-stack still in bindings. These are not edge-creds issues but show up in `network.shop.audit.canonical`.
+- Optional follow-on: implement `network.switch.facts.capture` for full remote parsing of Dell N2024P service tag/serial.
+- This is a future capability enhancement and is not a blocker for this loop's completion.
 
 ## Receipts
 
@@ -73,6 +76,7 @@ Make shop edge operations repeatable by ensuring **Infisical has the canonical s
 - `RCAP-20260211-091502__network.lan.device.status__Rsofv35423` -- OK (all 5 LAN-only devices reachable)
 - `RCAP-20260211-091511__network.ap.facts.capture__Ry1hh35598` -- OK (MAC, SSIDs confirmed)
 - `RCAP-20260211-091539__network.unifi.clients.snapshot__Rtjlv35958` -- FAIL (401 Unauthorized, auth type mismatch)
+- `RCAP-20260211-094628__network.unifi.clients.snapshot__R87kz92999` -- OK (authenticated, clients snapshot returned)
 - `RCAP-20260211-091550__network.lan.host.identify__Rokj536068` -- OK (switch MAC f8:b1:56:73:a0:d0, iDRAC MAC 44:a8:42:26:c3:11, NVR MAC 24:0f:9b:30:f1:e7)
 - `RCAP-20260211-091643__network.shop.audit.canonical__Rlzao36313` -- FAIL (5 drift: 4 VMs unreachable on LAN + destroyed media-stack)
 
@@ -80,3 +84,6 @@ Make shop edge operations repeatable by ensuring **Infisical has the canonical s
 - `SHOP_SERVER_SSOT.md`: UDR6 MAC added to switch port table, P2 evidence receipts added
 - `CAMERA_SSOT.md`: NVR credential verification evidence added
 - `GAP-OP-041`: already status=fixed with evidence (secret-path regression resolved)
+
+### P4 (tooling + closeout)
+- `07c130b`: internal Infisical API preference + UniFi credential transport hardening + parity hint alignment.
