@@ -20,6 +20,7 @@ API, propose a diff, and update the SSOT doc with a proof trail.
 
 ## Phases
 - **P0: Identify canonical HA SSOT doc scope + required facts** -- COMPLETE
+- **P0.5: Extract critical legacy knowledge to spine** -- COMPLETE
 - P1: Implement `ha.ssot.propose` (read-only)
 - P2: Implement `ha.ssot.apply` (mutating, governed)
 - P3: Closeout + docs
@@ -55,10 +56,16 @@ The P1 capability must fetch these from the HA API:
 - **3 irreplaceable items**: automation entity mappings + fix history, Zigbee recovery procedure, CalDAV credential procedure
 - **4 artifacts already superseded** by spine SSOTs
 
+### P0.5 Extraction Complete (2026-02-11)
+- Created `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` (10 sections, 7 legacy sources consolidated)
+- Sections: quick ref, integration inventory, automation inventory, helper inventory, HACS inventory, radio coordinator detail, backup/restore procedure, recovery runbooks, known fixes, API field mapping
+- All 7 extract_now artifacts from the extraction matrix are now in spine
+
 ### Next Steps (P1)
-1. Apply extraction matrix (create HASS_OPERATIONAL_RUNBOOK.md from 7 legacy sources)
-2. Define `ha.ssot.propose` capability spec (API endpoints, output format, diff algorithm)
-3. Implement capability with receipt generation
+1. Define `ha.ssot.propose` capability spec (API endpoints, output format, diff algorithm)
+2. Implement capability with receipt generation
+3. Target: HASS_OPERATIONAL_RUNBOOK.md sections 2-4 as the diff surface
 
 ## Evidence (Receipts)
-- P0 audit: `CP-20260211-110000__hass-legacy-extraction-audit-and-loop-trace` (proposal)
+- P0 audit: `CP-20260211-110000__hass-legacy-extraction-audit-and-loop-trace` (applied commit 6b7d3b0)
+- P0.5 extraction: HASS_OPERATIONAL_RUNBOOK.md created from 7 legacy sources
