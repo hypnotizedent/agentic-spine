@@ -239,7 +239,7 @@ Internet → T-Mobile 5G GW (CGNAT, locked — double NAT)
 
 | Port | Device | MAC | IP | Status |
 |------|--------|-----|-----|--------|
-| Gi1/0/1 | UDR6 LAN (uplink) | — | 192.168.1.1 | UP @ 1Gbps |
+| Gi1/0/1 | UDR6 LAN (uplink) | 9C:05:D6:BE:5B:4C | 192.168.1.1 | UP @ 1Gbps |
 | Gi1/0/2 | R730XD (PVE, vmbr0) | 44:A8:42:22:2C:A6 | 192.168.1.184 | UP @ 1Gbps |
 | Gi1/0/3 | R730XD (iDRAC) | 44:A8:42:26:C3:11 | 192.168.1.250 | UP @ 1Gbps |
 | Gi1/0/4 | NVR (Hikvision ERI-K216-P16) | 24:0F:9B:30:F1:E7 | 192.168.1.216 | UP @ 1Gbps |
@@ -362,6 +362,11 @@ That umbrella loop is now **closed (2026-02-10)** and remaining work is tracked 
 
 - `receipts/sessions/DELL_N2024P_FACTORY_RESET_20260205_122838/receipt.md`
 - `receipts/sessions/RCAP-20260210-150242__network.ap.facts.capture__Rxy4z41187/receipt.md`
+- `receipts/sessions/RCAP-20260211-091452__secrets.namespace.status__Rcmoo34933/receipt.md` — all shop credential namespaces verified (77 keys, 5 shop folders)
+- `receipts/sessions/RCAP-20260211-091502__network.lan.device.status__Rsofv35423/receipt.md` — all 5 LAN-only devices reachable (switch, iDRAC, NVR, AP, UDR)
+- `receipts/sessions/RCAP-20260211-091511__network.ap.facts.capture__Ry1hh35598/receipt.md` — AP facts re-captured (MAC, SSIDs confirmed)
+- `receipts/sessions/RCAP-20260211-091550__network.lan.host.identify__Rokj536068/receipt.md` — switch/iDRAC/NVR MACs and open ports identified
+- `receipts/sessions/RCAP-20260211-091643__network.shop.audit.canonical__Rlzao36313/receipt.md` — canonical audit (PASS parity, 5 drift: 4 VMs unreachable on LAN + destroyed media-stack)
 
 ---
 

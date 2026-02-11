@@ -215,6 +215,7 @@ curl -s --digest -u "{user}:{pass}" \
 | 2026-02-05 | Dell N2024P factory reset receipt | NVR confirmed on Gi1/0/4, MAC 24:0F:9B:30:F1:E7, IP 192.168.1.216 |
 | 2026-02-09 | NVR IP drift fixed | NVR had reverted to DHCP .104; UDR6 reservation created for MAC→.216; power cycled; HTTP 200 confirmed |
 | 2026-02-09 | Web UI screenshot | 12 channels listed with names, 0 live video feeds. LOOP-CAMERA-OUTAGE-20260209 opened |
+| 2026-02-11 | secrets.namespace.status receipt | NVR credentials confirmed stored at `/spine/shop/nvr/*` (2 keys: NVR_ADMIN_USER, NVR_ADMIN_PASSWORD). Receipt: RCAP-20260211-091452 |
 
 ---
 
