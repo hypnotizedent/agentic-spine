@@ -127,7 +127,7 @@ Authoritative governance documentation organized by category. All docs in `docs/
 | HASS_LEGACY_EXTRACTION_MATRIX.md | Completed extraction evidence |
 | IMMICH_LEGACY_EXTRACTION_MATRIX.md | Completed extraction evidence |
 | `_audits/*.md` (11 files) | Historical audit snapshots |
-| `_imported/ronny-ops-infrastructure/` | Quarantined legacy captures |
+| `_imported/` subdirectories | Quarantined legacy captures |
 
 ---
 
