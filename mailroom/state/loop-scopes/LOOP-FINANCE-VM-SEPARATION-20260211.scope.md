@@ -53,7 +53,7 @@ Finance stack runs on docker-host (VM 200) — a legacy host with no cloud-init,
 | P2 | Provision VM + shadow deploy | **DONE** |
 | P3 | Data migration + validation | **DONE** |
 | P4 | Traffic cutover (cloudflared upstream switch) | **DONE** |
-| P5 | Legacy cleanup (disable finance on docker-host) | PENDING |
+| P5 | Legacy cleanup (disable finance on docker-host) | **DONE** |
 | P6 | Verify + close | PENDING |
 
 ## P2 Evidence
@@ -174,6 +174,19 @@ Backup saved: `/opt/stacks/cloudflared/docker-compose.yml.bak-pre-p4`
 
 - **Enabled**: firefly-iii-vm211, paperless-ngx-vm211, ghostfolio-vm211, mail-archiver-vm211
 - **Legacy docker-host probes**: remain disabled (were already disabled due to localhost-binding)
+
+## P5 Evidence
+
+### Legacy Workloads Stopped
+
+- `docker compose stop` on docker-host `~/stacks/finance/` (7 containers stopped)
+- `docker compose stop` on docker-host `~/stacks/mail-archiver/` (2 containers stopped)
+
+### Binding Updates
+
+- **docker.compose.targets.yaml**: Removed `finance` and `mail-archiver` stacks from docker-host target
+- **SERVICE_REGISTRY.yaml**: All 9 finance-stack VM 211 entries changed from `status: pending` to `status: active`
+- **STACK_REGISTRY.yaml**: Finance stack changed from `status: migrating` to `status: active`
 
 ## Rollback Criteria
 
