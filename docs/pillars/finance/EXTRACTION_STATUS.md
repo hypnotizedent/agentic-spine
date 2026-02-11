@@ -15,7 +15,7 @@ loop_id: LOOP-FINANCE-LEGACY-EXTRACTION-20260211
 | Classification | PILLAR |
 | Loop | LOOP-FINANCE-LEGACY-EXTRACTION-20260211 |
 | Gap | GAP-OP-093 |
-| Legacy source | `ronny-ops` @ `1ea9dfa9` |
+| Legacy source | GitHub legacy repo @ `1ea9dfa9` |
 | Total artifacts audited | 150+ |
 | Extract now | 8 (all EXTRACTED) |
 | Deferred | 3 |
