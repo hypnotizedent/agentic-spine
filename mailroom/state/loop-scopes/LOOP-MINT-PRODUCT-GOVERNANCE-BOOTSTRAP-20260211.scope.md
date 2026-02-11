@@ -1,7 +1,8 @@
 ---
-status: open
+status: closed
 owner: "@ronny"
 created: 2026-02-11
+closed: 2026-02-11
 scope: loop-scope
 loop_id: LOOP-MINT-PRODUCT-GOVERNANCE-BOOTSTRAP-20260211
 severity: medium
@@ -36,10 +37,11 @@ blackhole drift.
 | Phase | Scope | Status | Commit/Proposal |
 |-------|-------|--------|-----------------|
 | P0 | Intake + baseline + apply existing proposal | DONE | CP-20260211T213000Z / 5b19d4d |
-| P1 | Establish 3 mandatory governance gates | DONE | CP-20260211-164800 / (this commit) |
+| P1 | Establish 3 mandatory governance gates | DONE | CP-20260211-164800 / 9efbed5 |
+| P1.1 | D60 deprecation fix | DONE | aff52c3 |
 | P2 | Register governance checks + acceptance criteria | DONE | (merged with P1) |
-| P3 | Validation | PENDING | |
-| P4 | Closeout | PENDING | |
+| P3 | Validation | DONE | spine.verify PASS D1-D69 |
+| P4 | Closeout | DONE | (this commit) |
 
 ## Registered Gaps
 
@@ -47,11 +49,24 @@ blackhole drift.
 - GAP-OP-106: No product-level module ownership model — **fixed** (MINT_PRODUCT_GOVERNANCE.md section 2)
 - GAP-OP-107: No API contract versioning governance — **fixed** (MINT_PRODUCT_GOVERNANCE.md section 3)
 
+## P3 Validation Evidence
+
+**spine.verify**: PASS D1-D69
+**gaps.status**: 105 total, 2 open (GAP-OP-037 baseline + GAP-OP-105 intentional), 0 orphans
+**vm.governance.audit**: 10/10 VMs governed, 0 gaps
+**ops status**: 3 loops (2 baseline + this), 2 gaps (both parented)
+
+Receipt IDs:
+- CAP-20260211-165202__spine.verify__R6pw175594
+- CAP-20260211-165233__gaps.status__Rpim783586
+- CAP-20260211-165236__vm.governance.audit__Rycmm83656
+
 ## Receipts
 
 - CP-20260211T213000Z applied: 5b19d4d (P0)
-- CP-20260211-164800 applied: (P1, this commit)
+- CP-20260211-164800 applied: 9efbed5 (P1)
 - CAP-20260211-164538__spine.verify__Rv8b758762 (P0 baseline)
+- CAP-20260211-165202__spine.verify__R6pw175594 (P3 validation)
 
 ## Deferred / Follow-ups
 
