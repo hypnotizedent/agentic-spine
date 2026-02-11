@@ -1,7 +1,8 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 created: 2026-02-11
+closed: 2026-02-11
 scope: loop-scope
 loop_id: LOOP-SECRETS-LEGACY-INFLUENCE-CLOSEOUT-20260211
 severity: high
@@ -35,10 +36,12 @@ Eliminate deprecated Infisical project influence paths from new agent secret ope
 - [x] Wire D70 into drift-gate orchestrator
 - [x] Update VERIFY_SURFACE_INDEX.md (D65-D70 rows, counts)
 
-### P4: Validation
-- [ ] All secrets caps PASS
-- [ ] spine.verify D1-D70 PASS
-- [ ] Before/after proof table
+### P4: Validation — DONE
+- [x] secrets.cli.status PASS (hash b38361592cbb)
+- [x] secrets.projects.status OK (10/10)
+- [x] secrets.namespace.status OK (77 keys, 0 root)
+- [x] spine.verify D1-D70 PASS
+- [x] gaps.status: 1 open (GAP-OP-037, hardware-blocked), 0 orphans
 
 ## Acceptance Criteria
 
