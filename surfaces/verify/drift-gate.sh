@@ -626,6 +626,14 @@ else
   warn "MCP parity gate not present"
 fi
 
+# D67: Capability map lock (map covers all capabilities in registry)
+echo -n "D67 capability map lock... "
+if [[ -x "$SP/surfaces/verify/d67-capability-map-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d67-capability-map-lock.sh"
+else
+  warn "capability map lock not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

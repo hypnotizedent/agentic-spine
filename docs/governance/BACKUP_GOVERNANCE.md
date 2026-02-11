@@ -13,6 +13,47 @@ github_issue: "#622"
 
 ---
 
+## Backup Documentation Hierarchy
+
+This document is the **strategy layer** -- it defines what gets backed up, where,
+and how health is verified. Per-app documents are the **procedure layer** -- they
+contain step-by-step backup and restore instructions for individual services. The
+DR Runbook is the **recovery layer** -- it covers site-wide failure scenarios and
+cross-service restoration order.
+
+```
+Strategy (this doc)
+  ├── Site plans
+  │   └── HOME_BACKUP_STRATEGY.md          (home site)
+  ├── Per-app procedures (governance/)
+  │   ├── AUTHENTIK_BACKUP_RESTORE.md       (infra-core, VM 204)
+  │   ├── GITEA_BACKUP_RESTORE.md           (dev-tools, VM 206)
+  │   ├── INFISICAL_BACKUP_RESTORE.md       (infra-core, VM 204)
+  │   └── VAULTWARDEN_BACKUP_RESTORE.md     (infra-core, VM 204)
+  ├── Per-app procedures (brain/lessons/)
+  │   ├── IMMICH_BACKUP_RESTORE.md          (immich-1, VM 203)
+  │   └── FINANCE_BACKUP_RESTORE.md         (docker-host, VM 200)
+  ├── Operational tooling
+  │   └── BACKUP_CALENDAR.md                (schedule visibility)
+  └── Recovery
+      └── DR_RUNBOOK.md                     (site-wide disaster recovery)
+```
+
+| Document | Layer | Scope | Location |
+|----------|-------|-------|----------|
+| [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) (this file) | Strategy | Cross-site backup policy, storage targets, retention, verification | `docs/governance/` |
+| [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) | Strategy | Home site (proxmox-home + Synology NAS) backup plan | `docs/governance/` |
+| [AUTHENTIK_BACKUP_RESTORE.md](AUTHENTIK_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Authentik (VM 204) | `docs/governance/` |
+| [GITEA_BACKUP_RESTORE.md](GITEA_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Gitea (VM 206) | `docs/governance/` |
+| [INFISICAL_BACKUP_RESTORE.md](INFISICAL_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Infisical (VM 204) | `docs/governance/` |
+| [VAULTWARDEN_BACKUP_RESTORE.md](VAULTWARDEN_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Vaultwarden (VM 204) | `docs/governance/` |
+| [IMMICH_BACKUP_RESTORE.md](../brain/lessons/IMMICH_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Immich (VM 203) | `docs/brain/lessons/` |
+| [FINANCE_BACKUP_RESTORE.md](../brain/lessons/FINANCE_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Finance stack (VM 200) | `docs/brain/lessons/` |
+| [BACKUP_CALENDAR.md](BACKUP_CALENDAR.md) | Tooling | Subscribable .ics calendar for backup schedule visibility | `docs/governance/` |
+| [DR_RUNBOOK.md](DR_RUNBOOK.md) | Recovery | Site-wide failure scenarios, dependency map, recovery priority | `docs/governance/` |
+
+---
+
 ## Backup Strategy
 
 ### Shop Site (pve R730XD)
