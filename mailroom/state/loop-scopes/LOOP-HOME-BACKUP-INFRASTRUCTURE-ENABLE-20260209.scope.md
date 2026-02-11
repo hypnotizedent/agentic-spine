@@ -1,7 +1,7 @@
 ---
 status: active
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-11
 scope: loop-scope
 loop_id: LOOP-HOME-BACKUP-INFRASTRUCTURE-ENABLE-20260209
 severity: high
@@ -13,13 +13,17 @@ severity: high
 
 Enable automated backup protection for all home VMs/LXCs. Currently all 3 vzdump backup jobs on proxmox-home are disabled and NAS Hyper Backup has no tasks configured.
 
-## Problem / Current State (2026-02-09)
+## Problem / Current State (2026-02-11)
 
 - VMs 100 (Home Assistant), 101 (Immich), 102 (Vaultwarden) have NO backup
 - LXCs 103 (download-home), 105 (pihole-home) have NO backup
 - All 3 vzdump backup jobs disabled
 - Hyper Backup installed but no tasks configured
 - No disaster recovery capability for home site
+
+## Blocker Status
+
+**Unblocked as of 2026-02-11.** The prior dependency (`LOOP-PVE-NODE-NAME-FIX-HOME-20260209`) was closed on 2026-02-10 — proxmox-home tooling (`qm list`, `pct list`, `vzdump`) is functional with hostname `pve` by exception policy.
 
 ## Success Criteria
 
@@ -31,35 +35,36 @@ Enable automated backup protection for all home VMs/LXCs. Currently all 3 vzdump
 
 ## Phases
 
-### P0: Audit and Planning — IN PROGRESS
+### P0: Audit and Planning — COMPLETE
 - [x] Document backup state from certification audit
-- [ ] Create home backup strategy document
-- [ ] Plan backup schedule per VM/LXC tier
+- [x] Confirm blocker resolved (PVE node-name loop closed 2026-02-10)
+- [x] Create home backup strategy document (`HOME_BACKUP_STRATEGY.md`)
 
-### P1: Assess Hyper Backup
-- Verify Hyper Backup on Synology NAS
-- Document capabilities and current config
+### P1: Prerequisites — READY
+- [ ] Verify NFS connectivity from proxmox-home to NAS (10.0.0.150)
+- [ ] Verify/create vzdump storage target on proxmox-home pointing to NAS NFS mount
+- [ ] Assess `synology-nas-storage` reference in existing job 1 (missing storage target)
 
-### P2: Plan Backup Strategy
-- Define 3-tier strategy (P0: HA, P1: Vaultwarden, P2: Immich/pihole/download-home)
-- Define schedules and retention policies
+### P2: Enable vzdump Jobs
+- [ ] Fix or recreate 3 vzdump jobs with correct storage target
+- [ ] Configure tiered schedule: P0 daily 03:00, P1 daily 03:15, P2 weekly
+- [ ] Configure retention: keep-last=3
 
-### P3: Configure Hyper Backup Tasks
-- Create backup tasks for each tier
-- Configure destinations, schedules, encryption
+### P3: App-Level Backups
+- [ ] Configure Home Assistant backup add-on → NAS `/volume1/backups/homeassistant_backups/`
+- [ ] Verify existing HA app-level backup entry in `backup.inventory.yaml` (already enabled)
+- [ ] Assess Immich DB backup needs (VM 101 currently STOPPED)
 
-### P4: Enable vzdump as Fallback
-- Keep vzdump jobs but disable scheduled execution
-- Document when to use vzdump vs Hyper Backup
+### P4: Backup Inventory Registration
+- [ ] Add home vzdump entries to `ops/bindings/backup.inventory.yaml`
+- [ ] Generate updated backup calendar (`backup.calendar.generate`)
+- [ ] Run `backup.status` to confirm freshness tracking
 
 ### P5: Documentation Updates
-- Update MINILAB_SSOT.md with backup strategy
-- Update BACKUP_GOVERNANCE.md with home procedures
-
-## Blocked By
-
-- **LOOP-PVE-NODE-NAME-FIX-HOME-20260209** (node name must be fixed first)
+- [ ] Update MINILAB_SSOT.md with backup configuration
+- [ ] Update BACKUP_GOVERNANCE.md to reference home strategy
+- [ ] Close loop
 
 ## Receipts
 
-- (awaiting execution)
+- (awaiting execution — planning proposal submitted 2026-02-11)
