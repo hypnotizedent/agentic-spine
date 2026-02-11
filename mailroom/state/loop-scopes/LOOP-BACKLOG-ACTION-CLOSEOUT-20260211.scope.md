@@ -1,7 +1,8 @@
 ---
-status: open
+status: closed
 owner: "@ronny"
 created: 2026-02-11
+closed: 2026-02-11
 scope: loop-scope
 loop_id: LOOP-BACKLOG-ACTION-CLOSEOUT-20260211
 severity: medium
@@ -38,9 +39,18 @@ Every finding triaged as: fixed | open-gap | invalid(outdated) | deferred.
 | P1 | Data integrity fixes | DONE | (merged with P0 proposal) |
 | P2 | Canonical mailroom behavior | DONE | (merged with P0 proposal) |
 | P3 | Authority consistency | DONE | (merged with P0 proposal) |
-| P4 | Validate + close | PENDING | |
+| P4 | Validate + close | DONE | (this commit) |
+
+## P4 Validation Evidence
+
+**spine.verify**: PASS D1-D69
+**gaps.status**: 106 total, 3 open (GAP-OP-037 + GAP-OP-105 + GAP-OP-108), 0 orphans
+**ops status**: 3 loops (2 baseline + this), 3 gaps (all parented or standalone)
 
 ## Receipts
 
 - CAP-20260211-171442__gaps.status__R2ix596533 (P0 baseline)
 - CAP-20260211-171445__spine.verify__Rayy496612 (P0 baseline)
+- CAP-20260211-171943__proposals.apply__Rzb9u5601 (P0-P3 apply)
+- CAP-20260211-171950__spine.verify__Rd9ln5804 (P4 validation)
+- CAP-20260211-172019__gaps.status__R5qjw13733 (P4 validation)
