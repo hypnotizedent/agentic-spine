@@ -37,7 +37,7 @@ scope: session-entry
    - **Before any shop network change:** run `./bin/ops cap run network.shop.audit.status` and do not proceed if it fails (D54 enforces SSOT/binding parity).
 4. **Operate through the spine**
    - Every command that mutates must be run through `./bin/ops cap run <capability>` or `./bin/ops run ...` so receipts land in `receipts/sessions/`.
-   - Never shell into `~/code/workbench` or `~/ronny-ops` at runtime; the spine is self-contained.
+   - **Spine is the runtime environment.** All governed operations (capabilities, receipts, loops) execute here. Editing workbench files (compose configs, MCP configs, scripts) is allowed when a spine loop requires it, but never execute runtime operations from workbench.
    - **Worktrees are optional.** `./bin/ops start loop <LOOP_ID>` creates an isolated worktree if you want one. Committing directly to main is fine.
    - **Git authority:** Gitea (`origin`) is canonical; GitHub is mirror-only. See `docs/governance/GIT_REMOTE_AUTHORITY.md`.
 

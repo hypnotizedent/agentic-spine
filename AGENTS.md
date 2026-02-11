@@ -15,7 +15,7 @@
 ## Source-Of-Truth Contract
 
 - Canonical governance/runtime: `/Users/ronnyworks/code/agentic-spine`
-- Tooling workspace: `/Users/ronnyworks/code/workbench` (read/write tools only)
+- Tooling workspace: `/Users/ronnyworks/code/workbench` (compose, scripts, MCP configs — editable, not a runtime environment)
 - Legacy workspace: `$LEGACY_ROOT` (read-only reference only)
 - All governed receipts: `/Users/ronnyworks/code/agentic-spine/receipts/sessions`
 - All runtime queues/logs/state: `/Users/ronnyworks/code/agentic-spine/mailroom/*`
