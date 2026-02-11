@@ -1,7 +1,7 @@
 # Media Stack Critical Rules
 
 > **Status:** authoritative
-> **Provenance:** extracted from `ronny-ops/media-stack/docs/reference/REF_CRITICAL_RULES.md`
+> **Provenance:** extracted from legacy media source `media-stack/docs/reference/REF_CRITICAL_RULES.md` (commit `1ea9dfa`)
 > **Extraction loop:** LOOP-MEDIA-LEGACY-EXTRACTION-20260211
 > **Last verified:** 2026-02-11
 > **Topology:** VM 209 (download-stack), VM 210 (streaming-stack)

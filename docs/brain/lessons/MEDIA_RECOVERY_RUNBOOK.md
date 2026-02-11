@@ -1,7 +1,7 @@
 # Media Stack Recovery Runbook
 
 > **Status:** authoritative
-> **Provenance:** extracted from `ronny-ops/media-stack/docs/runbooks/RUNBOOK_RECOVER.md`
+> **Provenance:** extracted from legacy media source `media-stack/docs/runbooks/RUNBOOK_RECOVER.md` (commit `1ea9dfa`)
 > **Extraction loop:** LOOP-MEDIA-LEGACY-EXTRACTION-20260211
 > **Last verified:** 2026-02-11
 > **Topology:** VM 209 (download-stack), VM 210 (streaming-stack)
