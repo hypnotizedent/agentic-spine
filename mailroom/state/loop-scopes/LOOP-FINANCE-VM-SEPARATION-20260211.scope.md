@@ -48,8 +48,8 @@ Finance stack runs on docker-host (VM 200) — a legacy host with no cloud-init,
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| P0 | Register gap + loop | ACTIVE |
-| P1 | Control-plane bindings (proposal) | PENDING |
+| P0 | Register gap + loop | **DONE** |
+| P1 | Control-plane bindings (proposal) | **DONE** |
 | P2 | Provision VM + shadow deploy | PENDING |
 | P3 | Data migration + validation | PENDING |
 | P4 | Traffic cutover (Caddy upstream switch) | PENDING |
