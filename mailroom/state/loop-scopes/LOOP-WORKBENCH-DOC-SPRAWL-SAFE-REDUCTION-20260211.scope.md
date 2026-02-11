@@ -1,12 +1,13 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 created: 2026-02-11
+closed: 2026-02-11
 ---
 
 # LOOP-WORKBENCH-DOC-SPRAWL-SAFE-REDUCTION-20260211
 
-> **Status:** active
+> **Status:** closed
 > **Owner:** @ronny
 > **Created:** 2026-02-11
 
@@ -17,11 +18,11 @@ created: 2026-02-11
 | Phase | Scope | Status |
 |-------|-------|--------|
 | P0 | Loop registration | **DONE** |
-| P1 | Demote authority claims (MCP_AUTHORITY, AUTHORITY_INDEX) | OPEN |
-| P2 | Fix D42 path drift (~/Code -> ~/code) in zsh dotfiles | OPEN |
-| P3 | Fix stale VM 201 refs in CONTAINER_INVENTORY | OPEN |
-| P4 | Fence legacy tree (banners, non-authoritative markers) | OPEN |
-| P5 | Cross-repo write guard (sync script stops direct spine writes) | OPEN |
+| P1 | Demote authority claims (MCP_AUTHORITY, AUTHORITY_INDEX) | **DONE** |
+| P2 | Fix D42 path drift (~/Code -> ~/code) in zsh dotfiles | **DONE** |
+| P3 | Fix stale VM 201 refs in CONTAINER_INVENTORY | **DONE** |
+| P4 | Fence legacy tree (banners, non-authoritative markers) | **DONE** |
+| P5 | Cross-repo write guard (sync script stops direct spine writes) | **DONE** |
 
 ---
 
