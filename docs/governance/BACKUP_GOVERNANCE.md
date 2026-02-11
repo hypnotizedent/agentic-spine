@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-09
+last_verified: 2026-02-11
 scope: backup-strategy
 github_issue: "#622"
 ---
@@ -15,11 +15,22 @@ github_issue: "#622"
 
 ## Backup Strategy
 
+### Shop Site (pve R730XD)
+
 | Tier | Scope | Method | Target |
 |------|-------|--------|--------|
 | VM/CT | Proxmox VMs and containers | vzdump | tank-backups (ZFS) |
 | Config | Compose files, env templates | Git | agentic-spine repo |
 | Data | Application databases | App-level dumps | Per-stack procedures (see below) |
+
+### Home Site (proxmox-home Beelink)
+
+| Tier | Scope | Method | Target |
+|------|-------|--------|--------|
+| VM/CT | Proxmox VMs and containers | vzdump | synology-backups (NAS NFS) |
+| Data | Home Assistant | HA built-in backup | NAS `/volume1/backups/homeassistant_backups/` |
+
+See: [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) for full home backup plan.
 
 ## App-Level Procedures (Required)
 
@@ -82,17 +93,28 @@ See: [Backup Calendar (.ics)](BACKUP_CALENDAR.md)
 
 ## Storage Targets
 
-| Target | Path | Type |
-|--------|------|------|
-| tank-backups | `/tank/backups/vzdump/dump` | ZFS on Proxmox |
+| Site | Target | Path | Type |
+|------|--------|------|------|
+| Shop | tank-backups | `/tank/backups/vzdump/dump` | ZFS on pve |
+| Home | synology-backups | `/mnt/pve/synology-backups/dump` | NAS NFS on proxmox-home |
 
 ## Retention
+
+### Shop (pve)
 
 Retention is enforced at the **storage layer** on `pve`, not only via `maxfiles`
 on the job. Canonical setting:
 
 - `pve:/etc/pve/storage.cfg` `dir: tank-backups` includes:
   - `prune-backups keep-last=2`
+
+### Home (proxmox-home)
+
+Retention is enforced at the **storage layer** on proxmox-home:
+
+- `proxmox-home:/etc/pve/storage.cfg` `nfs: synology-backups` includes:
+  - `prune-backups keep-last=3`
+- Job-level overrides: P0/P1 `keep-last=3`, P2 `keep-last=2`
 
 If pruning ever falls behind (e.g. backlog from before retention was enabled),
 run a receipt-backed prune:
@@ -109,5 +131,6 @@ run a receipt-backed prune:
 
 | Document | Relationship |
 |----------|-------------|
+| [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) | Home site backup strategy |
 | [STACK_REGISTRY.yaml](STACK_REGISTRY.yaml) | Stack inventory |
 | [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md) | Device identity |

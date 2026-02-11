@@ -15,11 +15,8 @@ Enable automated backup protection for all home VMs/LXCs. Currently all 3 vzdump
 
 ## Problem / Current State (2026-02-11)
 
-- VMs 100 (Home Assistant), 101 (Immich), 102 (Vaultwarden) have NO backup
-- LXCs 103 (download-home), 105 (pihole-home) have NO backup
-- All 3 vzdump backup jobs disabled
-- Hyper Backup installed but no tasks configured
-- No disaster recovery capability for home site
+**vzdump backups now ENABLED.** 3 tiered jobs configured and validated on proxmox-home.
+Remaining: P5 documentation updates, then close.
 
 ## Blocker Status
 
@@ -27,11 +24,11 @@ Enable automated backup protection for all home VMs/LXCs. Currently all 3 vzdump
 
 ## Success Criteria
 
-1. Hyper Backup configured with backup tasks for all home VMs/LXCs
-2. 3-tier backup strategy implemented (P0=critical daily, P1=important daily, P2=weekly)
-3. vzdump kept as fallback (manual trigger only)
-4. Backup verification procedures documented
-5. MINILAB_SSOT.md and BACKUP_GOVERNANCE.md updated
+1. ~~Hyper Backup configured with backup tasks for all home VMs/LXCs~~ → **Deferred** (vzdump is primary; Hyper Backup for DR in future loop)
+2. 3-tier backup strategy implemented (P0=critical daily, P1=important daily, P2=weekly) → **DONE**
+3. ~~vzdump kept as fallback (manual trigger only)~~ → **Revised**: vzdump IS the primary method
+4. Backup verification procedures documented → **DONE** (HOME_BACKUP_STRATEGY.md)
+5. MINILAB_SSOT.md and BACKUP_GOVERNANCE.md updated → **DONE** (this proposal)
 
 ## Phases
 
@@ -40,31 +37,44 @@ Enable automated backup protection for all home VMs/LXCs. Currently all 3 vzdump
 - [x] Confirm blocker resolved (PVE node-name loop closed 2026-02-10)
 - [x] Create home backup strategy document (`HOME_BACKUP_STRATEGY.md`)
 
-### P1: Prerequisites — READY
-- [ ] Verify NFS connectivity from proxmox-home to NAS (10.0.0.150)
-- [ ] Verify/create vzdump storage target on proxmox-home pointing to NAS NFS mount
-- [ ] Assess `synology-nas-storage` reference in existing job 1 (missing storage target)
+### P1: Prerequisites — COMPLETE
+- [x] Verify NFS connectivity from proxmox-home to NAS (10.0.0.150) — ping 0.1ms, NFS active
+- [x] Verify vzdump storage target `synology-backups` on proxmox-home — active, 12TB available
+- [x] Assess `synology-nas-storage` reference — non-existent storage, job deleted
+- [x] Fix storage retention: `keep-all=1` → `keep-last=3`
 
-### P2: Enable vzdump Jobs
-- [ ] Fix or recreate 3 vzdump jobs with correct storage target
-- [ ] Configure tiered schedule: P0 daily 03:00, P1 daily 03:15, P2 weekly
-- [ ] Configure retention: keep-last=3
+### P2: Enable vzdump Jobs — COMPLETE
+- [x] Deleted broken job `backup-c1ff91b4-5175` (referenced non-existent `synology-nas-storage`)
+- [x] Created `backup-home-p0-daily`: VMs 100,102, daily 03:00, keep-last=3, email notify
+- [x] Created `backup-home-p1-daily`: LXC 103, daily 03:15, keep-last=3
+- [x] Created `backup-home-p2-weekly`: VM 101, LXC 105, weekly Sun 04:00, keep-last=2
+- [x] All 3 jobs enabled
+- [x] Validation: `vzdump 102` → 3.87GB artifact on NAS confirmed
 
-### P3: App-Level Backups
-- [ ] Configure Home Assistant backup add-on → NAS `/volume1/backups/homeassistant_backups/`
-- [ ] Verify existing HA app-level backup entry in `backup.inventory.yaml` (already enabled)
-- [ ] Assess Immich DB backup needs (VM 101 currently STOPPED)
+### P3: App-Level Backups — PARTIAL
+- [ ] Configure Home Assistant backup add-on → NAS (deferred to follow-up; vzdump covers VM-level)
+- [x] Verify existing HA app-level backup entry in `backup.inventory.yaml` (already enabled, 48h threshold)
+- [x] Assess Immich DB backup needs — VM 101 stopped, P2 weekly vzdump covers disk image
 
-### P4: Backup Inventory Registration
-- [ ] Add home vzdump entries to `ops/bindings/backup.inventory.yaml`
-- [ ] Generate updated backup calendar (`backup.calendar.generate`)
-- [ ] Run `backup.status` to confirm freshness tracking
+### P4: Backup Inventory Registration — COMPLETE
+- [x] Add 5 home vzdump entries to `ops/bindings/backup.inventory.yaml`
+- [x] Add 3 home schedule events to `ops/bindings/backup.calendar.yaml`
+- [ ] Run `backup.calendar.generate` to regenerate ICS (after proposal applied)
+- [ ] Run `backup.status` to confirm freshness tracking (after first scheduled run)
 
-### P5: Documentation Updates
-- [ ] Update MINILAB_SSOT.md with backup configuration
-- [ ] Update BACKUP_GOVERNANCE.md to reference home strategy
-- [ ] Close loop
+### P5: Documentation Updates — COMPLETE
+- [x] Update MINILAB_SSOT.md with backup configuration
+- [x] Update BACKUP_GOVERNANCE.md to reference home strategy
+- [ ] Close loop (after confirming first scheduled run succeeds)
 
 ## Receipts
 
-- (awaiting execution — planning proposal submitted 2026-02-11)
+- Planning proposal: `CP-20260211-083735__home-backup-planning-strategy` (applied)
+- Enablement proposal: `CP-20260211-085459__home-backup-enablement-infra-and-ssot` (pending apply)
+- Baseline receipts:
+  - `RCAP-20260211-085217__backup.vzdump.status__Rz73117601` (shop vzdump baseline)
+  - `RCAP-20260211-085220__backup.status__R18u817673` (full backup inventory baseline)
+- Infra evidence (proxmox-home, 2026-02-11):
+  - storage.cfg retention: `keep-all=1` → `keep-last=3`
+  - jobs.cfg: 3 stale disabled jobs → 3 tiered enabled jobs
+  - Validation artifact: `vzdump-qemu-102-2026_02_11-08_53_32.vma.zst` (3.87GB on NAS)

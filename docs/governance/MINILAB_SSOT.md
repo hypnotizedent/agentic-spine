@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-11
 verification_method: live-system-inspection
 scope: home-infrastructure
 github_issue: "#625"
@@ -16,7 +16,7 @@ parent_receipts:
 > Covers: Beelink (proxmox-home), Synology NAS, VMs/LXCs, and home network.
 > For device identity and Tailscale config, see [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md).
 >
-> **Last Verified:** February 7, 2026
+> **Last Verified:** February 11, 2026
 
 ---
 
@@ -54,13 +54,12 @@ parent_receipts:
 | Local | 10.0.0.50 | Home LAN |
 | Gateway | 10.0.0.1 | Ubiquiti UDR |
 
-### Known Issue: PVE Node-Name Mismatch
+### PVE Node-Name Status
 
-> **CRITICAL:** Hostname was changed from `pve` to `proxmox-home` but the PVE node name
-> was not migrated. All VM/LXC configs live under `/etc/pve/nodes/pve/` while PVE tools
-> look under `/etc/pve/nodes/proxmox-home/`. This breaks `qm list`, `pct list`, `pct exec`,
-> and vzdump backup jobs. VMs/LXCs started before the rename continue running but cannot
-> be managed. See GAP-OP-014.
+> **RESOLVED (2026-02-10):** Hostname is `pve` — PVE node configs live under `/etc/pve/nodes/pve/`
+> which matches the hostname. All tooling (`qm list`, `pct list`, `vzdump`) is functional.
+> The earlier plan to rename to `proxmox-home` was abandoned; hostname stays `pve` by exception policy.
+> See: `LOOP-PVE-NODE-NAME-FIX-HOME-20260209` (closed).
 
 ### Resource Usage (2026-02-07)
 
@@ -127,7 +126,7 @@ parent_receipts:
 | Export Path | Mount Point | Consumers |
 |-------------|-------------|-----------|
 | /volume1/homelab | /mnt/pve/synology918 | proxmox-home |
-| /volume1/backups/proxmox_backups | /mnt/pve/synology-backups | proxmox-home |
+| /volume1/backups/proxmox_backups | /mnt/pve/synology-backups | proxmox-home vzdump |
 | /volume1/im2ch | - | Immich photos |
 | /volume1/archives | - | Archive storage |
 | /volume1/photos | - | Photo library |
@@ -140,20 +139,18 @@ parent_receipts:
 
 ### Virtual Machines
 
-> **Note:** PVE node-name mismatch means `qm list` returns empty. Status verified via `ps` (2026-02-07).
-
 | VMID | Hostname | Tailscale IP | RAM | Disk | Status |
 |------|----------|--------------|-----|------|--------|
 | 100 | homeassistant | 100.67.120.1 | 4GB | 32GB | Running |
 | 101 | immich | 100.83.160.109 | 16GB | 80GB | **Stopped** (has migration snapshot from 2025-10-19) |
-| 102 | vaultwarden | 100.93.142.63 | 2GB | 16GB | Running (rollback source for infra-core migration) |
+| 102 | vaultwarden | 100.93.142.63 | 2GB | 16GB | Running |
 
 ### LXC Containers
 
 | VMID | Hostname | Tailscale IP | Status | Purpose |
 |------|----------|--------------|--------|---------|
-| 103 | download-home | 100.125.138.110 | Running | *arr stack (home) |
-| 105 | pihole-home | 100.105.148.96 | Running | DNS + ad-blocking |
+| 103 | download-home | 100.125.138.110 | **Stopped** | *arr stack (home) |
+| 105 | pihole-home | 100.105.148.96 | **Stopped** | DNS + ad-blocking |
 
 ### VM Details
 
@@ -207,7 +204,7 @@ parent_receipts:
 |-------|-------|
 | Tailscale IP | 100.105.148.96 |
 | Purpose | DNS server + ad-blocking |
-| Status | FTL listening on port 53 (verified) |
+| Status | **Stopped** (was FTL listening on port 53 when running) |
 
 ---
 
@@ -272,6 +269,7 @@ nfs: synology-backups
     path /mnt/pve/synology-backups
     server 10.0.0.150
     content backup
+    prune-backups keep-last=3
 ```
 
 ### Disk Usage
@@ -287,28 +285,28 @@ nfs: synology-backups
 
 ### Proxmox vzdump
 
-> **ALL 3 BACKUP JOBS ARE DISABLED** (`enabled 0`). No automated backups running.
+> **Backups ENABLED as of 2026-02-11.** 3 tiered jobs configured and validated.
+> See: [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) for full strategy.
 
-| Job | Target | Schedule | Retention | Storage | Enabled |
-|-----|--------|----------|-----------|---------|---------|
-| backup-c1ff91b4 | All VMs | Sun 01:00 | keep-last=3 | synology-nas-storage (MISSING) | **No** |
-| backup-ac2c2f6b | VMs 100,101 | Sun 01:00 | keep-last=3 | synology-backups | **No** |
-| backup-5edb64f1 | VM 102 | Daily 03:00 | keep-last=14 | synology-backups | **No** |
+| Job | Tier | Target | Schedule | Retention | Storage | Enabled |
+|-----|------|--------|----------|-----------|---------|---------|
+| backup-home-p0-daily | P0 (Critical) | VMs 100,102 | Daily 03:00 | keep-last=3 | synology-backups | **Yes** |
+| backup-home-p1-daily | P1 (Important) | LXC 103 | Daily 03:15 | keep-last=3 | synology-backups | **Yes** |
+| backup-home-p2-weekly | P2 (Deferrable) | VM 101, LXC 105 | Sun 04:00 | keep-last=2 | synology-backups | **Yes** |
 
-**Issues:**
-- Job 1 references `synology-nas-storage` which does not exist in `pvesm status`
-- All jobs disabled — likely broken by PVE node-name mismatch (GAP-OP-014)
-- Jobs also cannot function until node-name mismatch is resolved
+**Validation:** VM 102 vzdump completed 2026-02-11 — artifact `vzdump-qemu-102-2026_02_11-08_53_32.vma.zst` (3.87GB) confirmed on NAS.
+
+**Email notifications:** P0 job sends to ronny@hantash.com on all events.
 
 ### NAS Backups (Hyper Backup)
 
-**No Hyper Backup tasks configured.** Package is installed and enabled but the task database is empty. No NAS-level backup destinations exist.
+**No Hyper Backup tasks configured.** Package is installed and enabled but the task database is empty. NAS-to-offsite DR is deferred (see HOME_BACKUP_STRATEGY.md).
 
 ### NAS Backup Targets (vzdump destinations)
 
 | Target | Path | Consumers | Status |
 |--------|------|-----------|--------|
-| Proxmox vzdump | `/volume1/backups/proxmox_backups` | proxmox-home vzdump | Present but jobs disabled |
+| Proxmox vzdump | `/volume1/backups/proxmox_backups` | proxmox-home vzdump | **Active** (3 jobs enabled) |
 | Mint-OS PostgreSQL | `/volume1/backups/mint-os/postgres/` | docker-host | Unverified |
 | Mint-OS configs | `/volume1/backups/mint-os/configs/` | docker-host | Unverified |
 | Home Assistant | `/volume1/backups/homeassistant_backups/` | VM 100 | Unverified |
@@ -372,26 +370,26 @@ curl -s http://vault:8080/
 
 ### proxmox-home (root)
 
-> **Note:** As of 2026-01-21, `crontab -l` returns `no crontab for root`. Backup and transfer jobs need to be re-created.
+> **Note:** As of 2026-01-21, `crontab -l` returns `no crontab for root`. Backup jobs are managed via PVE vzdump scheduler (not cron).
 
 **Planned (not yet enabled):**
 
 | Schedule | Script | Purpose | Status |
 |----------|--------|---------|--------|
 | `30 3 * * *` | `backup-ha.sh` | Home Assistant backup | PENDING |
-| `0 3 * * *` | `backup-immich-db.sh` | Immich DB backup | PENDING |
-| `0 5 * * 0` | `backup-immich-library.sh` | Immich library (weekly) | PENDING |
+| `0 3 * * *` | `backup-immich-db.sh` | Immich DB backup | PENDING (VM stopped) |
+| `0 5 * * 0` | `backup-immich-library.sh` | Immich library (weekly) | PENDING (VM stopped) |
 | `*/5 * * * *` | `transfer-to-remote.sh` | Rsync staging to remote | PENDING |
 
 ### System-Managed Schedules
 
 | System | Schedule | Task | Status |
 |--------|----------|------|--------|
-| Proxmox vzdump | Daily | VM/LXC backup to synology-backups | DISABLED (3 jobs exist; blocked by node-name mismatch) |
+| Proxmox vzdump P0 | Daily 03:00 | VM 100,102 backup to synology-backups | **ENABLED** |
+| Proxmox vzdump P1 | Daily 03:15 | LXC 103 backup to synology-backups | **ENABLED** |
+| Proxmox vzdump P2 | Weekly Sun 04:00 | VM 101, LXC 105 backup to synology-backups | **ENABLED** |
 | Synology DSM | Weekly | RAID scrub | ACTIVE |
-| Pi-hole | Weekly | Gravity update | ACTIVE |
-
-**Source:** External schedule inventory (workbench tooling via `WORKBENCH_TOOLING_INDEX.md`).
+| Pi-hole | Weekly | Gravity update | ACTIVE (when LXC running) |
 
 ---
 
@@ -399,10 +397,12 @@ curl -s http://vault:8080/
 
 | Issue | Status | Severity | Notes |
 |-------|--------|----------|-------|
-| PVE node-name mismatch | OPEN | **CRITICAL** | Hostname `proxmox-home` but PVE node configs under `pve`. Breaks all management tools. See GAP-OP-014 |
-| All vzdump jobs disabled | OPEN | **HIGH** | No automated VM/LXC backups running. Blocked by node-name mismatch |
-| No Hyper Backup tasks | OPEN | **HIGH** | NAS has no backup destinations configured |
-| VM 101 (immich) stopped | OPEN | MEDIUM | Not running, has migration snapshot. Cannot restart until node-name fix |
+| PVE node-name mismatch | **RESOLVED** | ~~CRITICAL~~ | Hostname is `pve`, tooling works. Closed 2026-02-10. |
+| vzdump jobs disabled | **RESOLVED** | ~~HIGH~~ | 3 tiered jobs enabled 2026-02-11. See Backup Configuration. |
+| No Hyper Backup tasks | OPEN | MEDIUM | NAS has no backup destinations configured. Deferred. |
+| VM 101 (immich) stopped | OPEN | MEDIUM | Not running, has migration snapshot. |
+| LXC 103 (download-home) stopped | OPEN | MEDIUM | *arr stack not running. |
+| LXC 105 (pihole-home) stopped | OPEN | MEDIUM | DNS not serving. UDR handles DNS directly. |
 | download-home SSH | OPEN | MEDIUM | Permission denied (publickey) — needs key setup |
 | Immich home vs shop | INFO | LOW | Two instances — may consolidate |
 | UDR DNS not using pihole | INFO | LOW | DHCP hands out 10.0.0.1 (UDR), not pihole-home |
@@ -423,12 +423,21 @@ No open baseline loops. `OL_HOME_BASELINE_FINISH` closed 2026-02-07.
 - UDR DHCP DNS: 10.0.0.1 (UDR itself)
 
 **New issues discovered (require separate loops):**
-- GAP-OP-014: PVE node-name mismatch (blocks VM management + backups)
+- GAP-OP-014: PVE node-name mismatch — **RESOLVED** (hostname is `pve`, closed 2026-02-10)
 - GAP-OP-015: No naming governance policy (root cause of GAP-OP-014)
 
 ---
 
 ## Evidence / Receipts
+
+### 2026-02-11 Backup Enablement
+
+| Item | Value |
+|------|-------|
+| Method | SSH to proxmox-home (live config + validation vzdump) |
+| Changes | storage.cfg retention, jobs.cfg rewritten, vzdump 102 validated |
+| Artifact | `vzdump-qemu-102-2026_02_11-08_53_32.vma.zst` (3.87GB on NAS) |
+| Loop | `LOOP-HOME-BACKUP-INFRASTRUCTURE-ENABLE-20260209` |
 
 ### 2026-02-07 Home Baseline Completion Audit
 
@@ -440,9 +449,9 @@ No open baseline loops. `OL_HOME_BASELINE_FINISH` closed 2026-02-07.
 | Loop closed | `OL_HOME_BASELINE_FINISH` |
 
 **Key findings:**
-- PVE 8.4.1 confirmed, hostname `proxmox-home` but node configs under `/etc/pve/nodes/pve/`
+- PVE 8.4.1 confirmed, hostname `pve` (tooling functional)
 - NAS drives: 2x Seagate 16TB + 2x WD 3TB + 2x Crucial 1TB NVMe (SHR + cache)
-- All 3 vzdump backup jobs disabled
+- All 3 vzdump backup jobs disabled (now fixed)
 - No Hyper Backup tasks configured
 - VM 101 (immich) stopped
 - NAS SSH works as `ronadmin`
@@ -468,6 +477,8 @@ No open baseline loops. `OL_HOME_BASELINE_FINISH` closed 2026-02-07.
 
 | Document | Purpose |
 |----------|---------|
+| [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) | Home backup strategy |
+| [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) | Backup governance |
 | [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md) | Device naming, Tailscale IPs |
 | [SHOP_SERVER_SSOT.md](SHOP_SERVER_SSOT.md) | Shop infrastructure |
 | [MACBOOK_SSOT.md](MACBOOK_SSOT.md) | Workstation (connects to minilab) |
