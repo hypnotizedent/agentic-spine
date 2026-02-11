@@ -1,0 +1,427 @@
+# VM Lifecycle Binding (SSOT)
+# Non-secret. Spine-native. Tracks every Proxmox VM through its lifecycle.
+#
+# Contract: docs/core/VM_CREATION_CONTRACT.md
+# Authority: This binding is the per-VM state tracker. Hardware specs
+#            live in SHOP_SERVER_SSOT.md. Service mappings live in
+#            SERVICE_REGISTRY.yaml. This binding answers: "what VMs exist,
+#            what phase are they in, and what do they host?"
+#
+# Status values: planning | provisioned | registered | active | decommissioned | abandoned
+# Decommission policies: requires_migration_first | requires_final_backup | allow_immediate_destroy
+
+version: 1
+updated: "2026-02-11"
+owner: "@ronny"
+
+defaults:
+  proxmox_host: pve
+  profile: spine-ready-v1
+  owner: "@ronny"
+  decommission_policy: requires_migration_first
+
+# ─────────────────────────────────────────────────────────────
+# Shop Site VMs (pve — Dell R730XD)
+# ─────────────────────────────────────────────────────────────
+
+vms:
+  - vmid: 200
+    hostname: docker-host
+    proxmox_host: pve
+    role: legacy-production
+    owner: "@ronny"
+    status: active
+    created_at: "2024-01-01"  # pre-spine, approximate
+    profile: null  # pre-spine VM, no profile
+    lan_ip: 192.168.1.200
+    tailscale_ip: 100.92.156.118
+    ssh_target: docker-host
+    ssh_user: docker-host
+    os: linux-mint
+    resources:
+      cpu_cores: 16
+      memory_mb: 98304  # 96GB
+      boot_disk_gb: 300
+    stacks:
+      - mint-os
+      - artwork-module
+      - quote-page
+      - dashy
+    services:
+      - mint-os-admin
+      - mint-os-customer
+      - mint-os-production
+      - mint-os-kanban
+      - mint-os-job-estimator
+      - mint-os-dashboard-api
+      - mint-os-postgres
+      - mint-os-redis
+      - minio
+      - files-api
+      - quote-page
+      - dashy
+    backup_target: vm-200-docker-host-primary
+    health_probe_policy: selective  # some services deprecated, probes disabled
+    decommission_policy: requires_migration_first
+    notes: >
+      Legacy VM. Linux Mint (non-Ubuntu). Pre-dates spine governance.
+      Finance stack migrated to VM 211. Mint-os-api marked deprecated.
+      Cloud-init disabled. Non-standard SSH user.
+
+  - vmid: 202
+    hostname: automation-stack
+    proxmox_host: pve
+    role: automation
+    owner: "@ronny"
+    status: active
+    created_at: "2025-12-01"  # approximate
+    profile: spine-ready-v1
+    lan_ip: 192.168.1.110
+    tailscale_ip: 100.98.70.70
+    ssh_target: automation-stack
+    ssh_user: automation
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 4
+      memory_mb: 16384
+      boot_disk_gb: 100
+    stacks:
+      - automation
+      - mcpjungle
+    services:
+      - n8n
+      - open-webui
+      - ollama
+      - automation-postgres
+      - automation-redis
+      - mcpjungle
+    backup_target: vm-202-primary
+    health_probe_policy: full
+    decommission_policy: requires_migration_first
+    notes: "Workflow automation + MCP gateway. Non-standard SSH user (automation, not ubuntu)."
+
+  - vmid: 203
+    hostname: immich
+    proxmox_host: pve
+    role: photo-management
+    owner: "@ronny"
+    status: active
+    created_at: "2025-06-01"  # approximate
+    profile: null  # pre-spine
+    lan_ip: null  # network-isolated (GAP-OP-094)
+    tailscale_ip: 100.114.101.50
+    ssh_target: immich-1
+    ssh_user: ronny
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 4
+      memory_mb: 16384
+      boot_disk_gb: 50
+    stacks:
+      - immich
+    services:
+      - immich-server
+      - immich-ml
+      - immich-postgres
+      - immich-redis
+    backup_target: vm-203-primary
+    health_probe_policy: full
+    decommission_policy: requires_final_backup
+    notes: >
+      135K+ assets, 3TB library. Non-standard SSH user (ronny).
+      Cloud-init still shows old network (192.168.12.230). GAP-OP-094.
+      Not in docker.compose.targets.yaml (known gap).
+
+  - vmid: 204
+    hostname: infra-core
+    proxmox_host: pve
+    role: core-infrastructure
+    owner: "@ronny"
+    status: active
+    created_at: "2025-12-01"  # approximate
+    profile: spine-ready-v1
+    lan_ip: 192.168.1.204
+    tailscale_ip: 100.92.91.128
+    ssh_target: infra-core
+    ssh_user: ubuntu
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 4
+      memory_mb: 8192
+      boot_disk_gb: 50
+    stacks:
+      - cloudflared
+      - pihole
+      - secrets
+      - vaultwarden
+      - caddy-auth
+    services:
+      - cloudflared
+      - pihole
+      - infisical
+      - vaultwarden
+      - caddy
+      - authentik
+    backup_target: vm-204-infra-core-primary
+    health_probe_policy: full
+    decommission_policy: requires_migration_first
+    notes: "Core infrastructure VM. Hosts reverse proxy, SSO, DNS, secrets, tunnel. Critical path."
+
+  - vmid: 205
+    hostname: observability
+    proxmox_host: pve
+    role: monitoring
+    owner: "@ronny"
+    status: active
+    created_at: "2025-12-01"  # approximate
+    profile: spine-ready-v1
+    lan_ip: 192.168.1.205
+    tailscale_ip: 100.120.163.70
+    ssh_target: observability
+    ssh_user: ubuntu
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 4
+      memory_mb: 8192
+      boot_disk_gb: 50
+    stacks:
+      - prometheus
+      - grafana
+      - loki
+      - uptime-kuma
+      - node-exporter
+    services:
+      - prometheus
+      - grafana
+      - loki
+      - uptime-kuma
+      - node-exporter
+    backup_target: vm-205-observability-primary
+    health_probe_policy: full
+    decommission_policy: requires_migration_first
+    notes: "Observability stack. Loki compactor needs >=720s start_period."
+
+  - vmid: 206
+    hostname: dev-tools
+    proxmox_host: pve
+    role: development
+    owner: "@ronny"
+    status: active
+    created_at: "2025-12-01"  # approximate
+    profile: spine-ready-v1
+    lan_ip: 192.168.1.206
+    tailscale_ip: 100.90.167.39
+    ssh_target: dev-tools
+    ssh_user: ubuntu
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 4
+      memory_mb: 8192
+      boot_disk_gb: 50
+    stacks:
+      - gitea
+    services:
+      - gitea
+      - gitea-runner
+      - gitea-postgres
+    backup_target: vm-206-primary
+    health_probe_policy: full
+    decommission_policy: requires_migration_first
+    notes: "Git forge. Authentik SSO. CF tunnel for git.ronny.works."
+
+  - vmid: 207
+    hostname: ai-consolidation
+    proxmox_host: pve
+    role: ai-services
+    owner: "@ronny"
+    status: active
+    created_at: "2026-02-08"
+    profile: ai-services-v1
+    lan_ip: null  # DHCP
+    tailscale_ip: 100.71.17.29
+    ssh_target: ai-consolidation
+    ssh_user: ubuntu
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 8
+      memory_mb: 32768
+      boot_disk_gb: 200
+    stacks:
+      - ai-consolidation
+    services:
+      - qdrant
+      - anythingllm
+    backup_target: vm-207-primary
+    health_probe_policy: full
+    decommission_policy: requires_migration_first
+    notes: "AI workloads. DHCP (no static LAN IP). Migrated from MacBook."
+
+  - vmid: 209
+    hostname: download-stack
+    proxmox_host: pve
+    role: media-download
+    owner: "@ronny"
+    status: active
+    created_at: "2026-02-08"
+    profile: spine-ready-v1
+    lan_ip: 192.168.1.209
+    tailscale_ip: 100.107.36.76
+    ssh_target: download-stack
+    ssh_user: ubuntu
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 4
+      memory_mb: 8192
+      boot_disk_gb: 50
+    stacks:
+      - download-stack
+    services:
+      - radarr
+      - sonarr
+      - lidarr
+      - prowlarr
+      - sabnzbd
+      - tdarr
+      - trailarr
+      - qbittorrent
+      - unpackerr
+      - recyclarr
+      - flaresolverr
+      - slskd
+      - soularr
+      - swaparr-radarr
+      - swaparr-sonarr
+      - swaparr-lidarr
+      - posterizarr
+      - decypharr
+      - huntarr
+      - autopulse
+      - crosswatch
+      - crowdsec
+    backup_target: vm-209-primary
+    health_probe_policy: selective  # tdarr/slskd intentionally stopped
+    decommission_policy: requires_migration_first
+    notes: "Download services. Split from media-stack (VM 201). NFS mounts from pve."
+
+  - vmid: 210
+    hostname: streaming-stack
+    proxmox_host: pve
+    role: media-streaming
+    owner: "@ronny"
+    status: active
+    created_at: "2026-02-08"
+    profile: spine-ready-v1
+    lan_ip: 192.168.1.210
+    tailscale_ip: 100.123.207.64
+    ssh_target: streaming-stack
+    ssh_user: ubuntu
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 4
+      memory_mb: 8192
+      boot_disk_gb: 50
+    stacks:
+      - streaming-stack
+    services:
+      - jellyfin
+      - navidrome
+      - jellyseerr
+      - bazarr
+      - homarr
+      - wizarr
+      - spotisub
+      - subgen
+    backup_target: vm-210-primary
+    health_probe_policy: full
+    decommission_policy: requires_migration_first
+    notes: "Streaming services. Split from media-stack (VM 201). NFS mounts from pve."
+
+  - vmid: 211
+    hostname: finance-stack
+    proxmox_host: pve
+    role: finance
+    owner: "@ronny"
+    status: active
+    created_at: "2026-02-11"
+    profile: spine-ready-v1
+    lan_ip: 192.168.1.211
+    tailscale_ip: 100.76.153.100
+    ssh_target: finance-stack
+    ssh_user: ubuntu
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 4
+      memory_mb: 8192
+      boot_disk_gb: 50
+    stacks:
+      - finance
+    services:
+      - firefly-iii-vm211
+      - firefly-importer-vm211
+      - firefly-cron-vm211
+      - finance-postgres-vm211
+      - finance-redis-vm211
+      - paperless-ngx-vm211
+      - ghostfolio-vm211
+      - mail-archiver-vm211
+      - mail-archiver-db-vm211
+    backup_target: vm-211-primary
+    health_probe_policy: full
+    decommission_policy: requires_final_backup
+    notes: "Finance stack. Migrated from docker-host (LOOP-FINANCE-VM-SEPARATION-20260211)."
+
+# ─────────────────────────────────────────────────────────────
+# Decommissioned VMs
+# ─────────────────────────────────────────────────────────────
+
+  - vmid: 201
+    hostname: media-stack
+    proxmox_host: pve
+    role: media
+    owner: "@ronny"
+    status: decommissioned
+    created_at: "2025-06-01"  # approximate
+    decommissioned_at: "2026-02-12"
+    profile: null
+    lan_ip: null
+    tailscale_ip: null
+    ssh_target: null
+    ssh_user: null
+    os: ubuntu-24.04
+    resources: null
+    stacks: []
+    services: []
+    backup_target: null
+    health_probe_policy: none
+    decommission_policy: requires_migration_first
+    notes: >
+      Destroyed 2026-02-12 (qm destroy --purge + zfs destroy tank/docker/media-stack).
+      Services split to VM 209 (download) and VM 210 (streaming).
+
+# ─────────────────────────────────────────────────────────────
+# Template VMs (not lifecycle-governed)
+# ─────────────────────────────────────────────────────────────
+
+  - vmid: 9000
+    hostname: ubuntu-2404-cloudinit-template
+    proxmox_host: pve
+    role: template
+    owner: "@ronny"
+    status: template
+    created_at: "2025-12-01"  # approximate
+    profile: null
+    lan_ip: null
+    tailscale_ip: null
+    ssh_target: null
+    ssh_user: null
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 2
+      memory_mb: 2048
+      boot_disk_gb: 4
+    stacks: []
+    services: []
+    backup_target: null
+    health_probe_policy: none
+    decommission_policy: allow_immediate_destroy
+    notes: "Cloud-init template. Clone source for all new VMs. Never started directly."
