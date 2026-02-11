@@ -1,7 +1,7 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-11
 scope: loop-scope
 loop_id: LOOP-HOME-MEDIA-STACK-DOCUMENTATION-20260209
 severity: medium
@@ -13,45 +13,18 @@ severity: medium
 
 Document the home download-home LXC (LXC 103) media stack. Services (radarr, sonarr, lidarr, prowlarr, sabnzbd, tdarr) are NOT documented anywhere in spine. Need service discovery, storage documentation, and SERVICE_REGISTRY.yaml entries.
 
-## Problem / Current State (2026-02-09)
+## Resolution: CLOSED (superseded)
 
-- Home media stack completely undocumented in spine
-- Unknown storage paths for media files
-- No backup procedures for home media stack
-- No SERVICE_REGISTRY.yaml entries for home media services
-- Cannot verify home media stack health or integrate with shop media stack
+**Closed 2026-02-11.** This loop is superseded by two findings:
 
-## Success Criteria
+1. **Scope decision:** `LOOP-HOME-SERVICE-REGISTRY-SCOPE-DECISION-20260210` (2026-02-10) explicitly excluded home-site services from SERVICE_REGISTRY.yaml and STACK_REGISTRY.yaml. Home services are secondary/personal, Tailscale-only, no SLA — tracked in `ssh.targets.yaml` for connectivity checks only.
 
-1. All running services in download-home LXC documented
-2. Storage architecture documented (NAS + LXC)
-3. All services added to SERVICE_REGISTRY.yaml
-4. Backup strategy documented
-5. MINILAB_SSOT.md updated with media stack section
+2. **Empty LXC:** Inspection of LXC 103 rootfs via proxmox-home host (2026-02-11) found no Docker data, no compose files, no deployed services. The container is stopped with a bare rootfs (32GB, `/opt/` and `/home/` empty). Only notable config: `/dev/net/tun` bind mount (VPN) and `/mnt/host-staging` host bind mount.
 
-## Phases
+If LXC 103 is restarted and services are deployed in the future, a new loop should be opened.
 
-### P0: Service Discovery — IN PROGRESS
-- [x] Document service discovery goal from audit
-- [ ] SSH to download-home LXC, list all containers
-- [ ] Document each service (ports, volumes, configs)
+## Evidence
 
-### P1: Storage Documentation
-- Map NAS and LXC storage architecture
-- Document media directory structure
-
-### P2: Configuration Documentation
-- Document service configurations and env vars
-- Document service integrations
-
-### P3: Service Registry Update
-- Add home media stack to SERVICE_REGISTRY.yaml
-- Create drift gate for home media stack
-
-### P4: Backup and Monitoring Documentation
-- Document backup strategy for media stack
-- Document monitoring and recovery procedures
-
-## Receipts
-
-- (awaiting execution)
+- LXC config: `/etc/pve/lxc/103.conf` on proxmox-home (2 cores, 2GB RAM, rootfs local-lvm:vm-103-disk-0)
+- SERVICE_REGISTRY.yaml scope policy lines 11-15 (out-of-scope declaration)
+- Host rootfs inspection: `/var/lib/lxc/103/rootfs/` — empty `/opt/`, `/home/`, no Docker data
