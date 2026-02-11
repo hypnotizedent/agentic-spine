@@ -24,11 +24,11 @@ Close 4 governance drift findings discovered by post-finance audit (CP-20260211-
 
 ## Phases
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| P0 | Register loop + gap | PENDING |
-| P1 | Fix staged cloudflared IPs | PENDING |
-| P2 | Fix backup truth | PENDING |
-| P3 | Fix registry wording | PENDING |
-| P4 | Resolve Infisical project ambiguity | PENDING |
-| P5 | Validate + close | PENDING |
+| Phase | Scope | Status | Commit/Proposal |
+|-------|-------|--------|-----------------|
+| P0 | Register loop + gap | DONE | 17e8e52 |
+| P1 | Fix staged cloudflared IPs | DONE | CP-20260211-152206 / 799a0ec |
+| P2 | Fix backup truth | DONE | CP-20260211-152206 / 799a0ec |
+| P3 | Fix registry wording | DONE | CP-20260211-152206 / 799a0ec |
+| P4 | Resolve Infisical project ambiguity | DONE | CP pending |
+| P5 | Validate + close | PENDING | |
