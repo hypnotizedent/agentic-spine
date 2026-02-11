@@ -1,6 +1,6 @@
 # LOOP-MCP-RUNTIME-GOVERNANCE-20260211
 
-> **Status:** open
+> **Status:** closed
 > **Owner:** @ronny
 > **Created:** 2026-02-11
 > **Severity:** critical
@@ -21,9 +21,9 @@ MCPJungle and workbench MCP tool servers bypass the spine mailroom by making dir
 | P0 | Gap registration + loop scope | None | **DONE** |
 | P1 | Remove hardcoded SABnzbd API key from MCPJungle media-stack source | None | **DONE** |
 | P2 | Block/route mutating MCP tools to spine-governed capability path only | P1 | **DONE** |
-| P3 | Register all MCPJungle servers in agents.registry.yaml with contracts | P2 | OPEN |
-| P4 | Add drift gate for local vs MCPJungle MCP server code parity | P3 | OPEN |
-| P5 | Add spine capabilities (or explicit deny policy) for HA/Mint/Firefly/Paperless/Immich/MS Graph | P3 | OPEN |
+| P3 | Register all MCPJungle servers in agents.registry.yaml with contracts | P2 | **DONE** |
+| P4 | Add drift gate for local vs MCPJungle MCP server code parity | P3 | **DONE** |
+| P5 | Add spine capabilities (or explicit deny policy) for HA/Mint/Firefly/Paperless/Immich/MS Graph | P3 | **DONE** |
 
 ---
 

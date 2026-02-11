@@ -618,6 +618,14 @@ else
   warn "agent briefing sync lock gate not present"
 fi
 
+# D66: MCP server parity gate (local agents vs MCPJungle copies)
+echo -n "D66 MCP server parity gate... "
+if [[ -x "$SP/surfaces/verify/d66-mcp-parity-gate.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d66-mcp-parity-gate.sh"
+else
+  warn "MCP parity gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
