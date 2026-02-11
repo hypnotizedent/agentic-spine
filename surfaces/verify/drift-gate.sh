@@ -650,6 +650,14 @@ else
   warn "VM creation governance lock gate not present"
 fi
 
+# D70: Secrets deprecated-alias lock (deprecated project write protection)
+echo -n "D70 secrets deprecated alias lock... "
+if [[ -x "$SP/surfaces/verify/d70-secrets-deprecated-alias-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d70-secrets-deprecated-alias-lock.sh"
+else
+  warn "secrets deprecated alias lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

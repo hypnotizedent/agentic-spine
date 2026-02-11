@@ -19,20 +19,21 @@ Eliminate deprecated Infisical project influence paths from new agent secret ope
 - [x] secrets.projects.status, secrets.namespace.status, secrets.cli.status, spine.verify
 - [x] Captured 5 risks: hash mismatch, deprecated alias acceptance, set-interactive override, active workbench refs, D25 gate weakness
 
-### P1: Core runtime lock (spine)
-- [ ] Harden infisical-agent.sh: gate deprecated projects (STOP on mutate, WARN on read)
-- [ ] Lock secrets-set-interactive to binding project + active projects only
-- [ ] Add missing key_path_overrides for finance keys used by active scripts
+### P1: Core runtime lock (spine) — DONE (5341f37)
+- [x] Harden infisical-agent.sh v1.1.0: gate deprecated projects (STOP on mutate, WARN on read)
+- [x] Lock secrets-set-interactive to binding project + active projects only
+- [x] Add FIREFLY_ACCESS_TOKEN and FIREFLY_API_URL key_path_overrides
 
-### P2: Workbench parity + influence cleanup
-- [ ] Sync vendored infisical-agent.sh from canonical
-- [ ] Update scripts/finance/* and scripts/root/firefly/* to use infrastructure project
-- [ ] Remove deprecated entries from sync-secrets-to-env.sh project maps
+### P2: Workbench parity + influence cleanup — DONE (ac891f2 workbench)
+- [x] Sync vendored infisical-agent.sh from canonical (hash match)
+- [x] Update 4 finance scripts from finance-stack to infrastructure project
+- [x] Remove deprecated entries from sync-secrets-to-env.sh project maps
 
-### P3: Anti-regression drift gate
-- [ ] Upgrade D25 from WARN to FAIL on hash mismatch
-- [ ] Add deprecated-alias detection to drift gate
-- [ ] Wire into D55 composite
+### P3: Anti-regression drift gate — DONE (this proposal)
+- [x] Upgrade D25 from WARN to FAIL on infisical-agent hash mismatch
+- [x] Create D70 secrets-deprecated-alias-lock (deprecated project write protection)
+- [x] Wire D70 into drift-gate orchestrator
+- [x] Update VERIFY_SURFACE_INDEX.md (D65-D70 rows, counts)
 
 ### P4: Validation
 - [ ] All secrets caps PASS
@@ -45,3 +46,11 @@ Eliminate deprecated Infisical project influence paths from new agent secret ope
 2. No runtime path for new agents to mutate deprecated projects
 3. Drift gate prevents regression
 4. Loop closed with evidence
+
+## Commits
+
+| Phase | Hash | Repo | Description |
+|-------|------|------|-------------|
+| P1 | 5341f37 | spine | Runtime lock: agent v1.1.0 + set-interactive guard + namespace overrides |
+| P2 | ac891f2 | workbench | Vendored agent sync + finance script migration |
+| P3 | (this) | spine | D25 upgrade + D70 gate + index update |

@@ -25,13 +25,13 @@ VENDORED_CF="$WB/scripts/agents/cloudflare-agent.sh"
 [[ -x "$CANONICAL_INFISICAL" ]] || fail "canonical infisical-agent.sh missing or not executable ($CANONICAL_INFISICAL)"
 [[ -x "$CANONICAL_CF" ]] || fail "canonical cloudflare-agent.sh missing or not executable ($CANONICAL_CF)"
 
-# Workbench copies are advisory only: warn if missing or hash-drifted.
+# Workbench infisical-agent hash parity is now enforced (not advisory).
 if [[ ! -f "$VENDORED_INFISICAL" ]]; then
-  warn "(workbench infisical-agent missing — spine canonical remains source of truth)"
+  fail "workbench infisical-agent missing ($VENDORED_INFISICAL)"
 else
   ic_hash="$(shasum -a 256 "$CANONICAL_INFISICAL" | awk '{print $1}')"
   iv_hash="$(shasum -a 256 "$VENDORED_INFISICAL" | awk '{print $1}')"
-  [[ "$ic_hash" == "$iv_hash" ]] || warn "(infisical-agent hash drift in workbench; sync advisory)"
+  [[ "$ic_hash" == "$iv_hash" ]] || fail "infisical-agent hash mismatch: canonical=$ic_hash vendored=$iv_hash"
 fi
 
 if [[ ! -f "$VENDORED_CF" ]]; then

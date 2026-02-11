@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-11
 scope: verify-scripts
 ---
 
@@ -41,7 +41,7 @@ Notes:
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D64) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D70) | Yes |
 | `d16-docs-quarantine.sh` | Legacy docs quarantine enforcement | Yes |
 | `d17-root-allowlist.sh` | Root file allowlist enforcement | Yes |
 | `d18-docker-compose-drift.sh` | Docker compose drift detection | Yes |
@@ -90,6 +90,12 @@ Notes:
 | `d62-git-remote-parity-lock.sh` | Git remote parity lock (origin/main must equal github/main) | Yes |
 | `d63-capabilities-metadata-lock.sh` | Capabilities registry metadata lock | Yes |
 | `d64-git-remote-authority-warn.sh` | Git remote authority WARN (GitHub merges/PRs) | Yes |
+| `d65-agent-briefing-sync-lock.sh` | Agent briefing sync lock (AGENTS.md + CLAUDE.md match canonical brief) | Yes |
+| `d66-mcp-parity-gate.sh` | MCP server parity gate (local agents vs MCPJungle copies) | Yes |
+| `d67-capability-map-lock.sh` | Capability map lock (map covers all capabilities in registry) | Yes |
+| `d68-rag-canonical-only-gate.sh` | RAG canonical-only gate (manifest excludes legacy dirs) | Yes |
+| `d69-vm-creation-governance-lock.sh` | VM creation governance lock (lifecycle + ssh/svc/backup/health parity) | Yes |
+| `d70-secrets-deprecated-alias-lock.sh` | Secrets deprecated-alias lock (write protection for deprecated projects) | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -124,10 +130,10 @@ Not called by default verification flows. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by `ops verify` | 10 |
-| Called by `spine.verify` (drift-gate suite) | 46 |
+| Called by `spine.verify` (drift-gate suite) | 52 |
 | Called by capabilities | 1 |
 | Manual / legacy | 9 |
-| **Total** | **66** |
+| **Total** | **72** |
 
 ---
 
