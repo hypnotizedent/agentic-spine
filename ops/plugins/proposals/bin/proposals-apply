@@ -59,6 +59,22 @@ if [[ -f "$PROPOSAL_DIR/.applied" ]]; then
   exit 1
 fi
 
+# Detect superseded or read-only proposals before attempting apply
+manifest_status=$(awk -F': *' '/^status:/{print $2; exit}' "$manifest" | tr -d '"' || true)
+read_only=$(awk -F': *' '/^read_only:/{print $2; exit}' "$manifest" | tr -d '"' || true)
+
+if [[ "${manifest_status:-}" == "superseded" ]]; then
+  echo "ERROR: Proposal is superseded: $PROPOSAL_NAME" >&2
+  superseded_reason=$(awk -F': *' '/^superseded_reason:/{print $2; exit}' "$manifest" | tr -d '"' || true)
+  [[ -n "${superseded_reason:-}" ]] && echo "  Reason: $superseded_reason" >&2
+  exit 1
+fi
+
+if [[ "${read_only:-}" == "true" ]]; then
+  echo "ERROR: Proposal is read-only (no file changes): $PROPOSAL_NAME" >&2
+  exit 1
+fi
+
 cd "$SPINE_CODE"
 
 if [[ -n "$(git status --porcelain)" ]]; then
@@ -112,7 +128,7 @@ awk '
 ' "$manifest" > "$changes_tmp"
 
 if [[ ! -s "$changes_tmp" ]]; then
-  echo "ERROR: No changes found in manifest: $manifest" >&2
+  echo "ERROR: No actionable changes in manifest (changes may be empty or use nonstandard format): $manifest" >&2
   exit 1
 fi
 

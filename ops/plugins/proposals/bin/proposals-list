@@ -16,45 +16,64 @@ echo "Change Proposals"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo ""
 
-# Counter
+# Counters
 count=0
+warn_count=0
 
 # Iterate through proposals
 for proposal_dir in "$PROPOSALS_DIR"/CP-*; do
   [ -d "$proposal_dir" ] || continue
-  
+
   proposal_name=$(basename "$proposal_dir")
   manifest="$proposal_dir/manifest.yaml"
-  
+
   if [ ! -f "$manifest" ]; then
+    warn_count=$((warn_count + 1))
+    echo "WARN: $proposal_name — missing manifest.yaml, skipping"
+    echo ""
     continue
   fi
-  
+
   count=$((count + 1))
-  
-  # Extract info from manifest
-  agent=$(grep "^agent:" "$manifest" | head -1 | awk '{print $2}' | tr -d '"')
-  created=$(grep "^created:" "$manifest" | head -1 | awk '{print $2}' | tr -d '"')
-  
-  # Count changes
-  change_count=$(grep "action:" "$manifest" | wc -l)
-  
-  # Check if applied
+
+  # Extract info from manifest (tolerant of missing fields)
+  agent=$(grep "^agent:" "$manifest" | head -1 | awk '{print $2}' | tr -d '"' || true)
+  created=$(grep "^created:" "$manifest" | head -1 | awk '{print $2}' | tr -d '"' || true)
+
+  # Count changes robustly — grep returns 1 on no match, guard with || true
+  change_count=$(grep -c "action:" "$manifest" || true)
+
+  # Determine status with precedence: .applied file > manifest status > pending
   status="pending"
+  manifest_status=$(grep "^status:" "$manifest" | head -1 | awk '{print $2}' | tr -d '"' || true)
   if [ -f "$proposal_dir/.applied" ]; then
     status="applied"
+  elif [ "$manifest_status" = "superseded" ]; then
+    status="superseded"
+  elif [ -n "$manifest_status" ] && [ "$manifest_status" != "pending" ]; then
+    status="$manifest_status"
   fi
-  
-  echo "[$count] $proposal_name"
-  echo "    Agent:   $agent"
-  echo "    Created: $created"
-  echo "    Changes: $change_count"
-  echo "    Status:  $status"
+
+  # Warn on missing core fields but continue
+  if [ -z "$agent" ] || [ -z "$created" ]; then
+    warn_count=$((warn_count + 1))
+    echo "WARN: $proposal_name — missing agent or created field"
+  fi
+
+  printf "[%d] %s\n" "$count" "$proposal_name"
+  printf "    Agent:   %s\n" "${agent:-unknown}"
+  printf "    Created: %s\n" "${created:-unknown}"
+  printf "    Changes: %8d\n" "$change_count"
+  printf "    Status:  %s\n" "$status"
   echo ""
 done
 
 if [ "$count" -eq 0 ]; then
   echo "No proposals found."
+fi
+
+if [ "$warn_count" -gt 0 ]; then
+  echo "($warn_count warning(s) — see above)"
 fi
 
 echo "═══════════════════════════════════════════════════════════════════════════"
