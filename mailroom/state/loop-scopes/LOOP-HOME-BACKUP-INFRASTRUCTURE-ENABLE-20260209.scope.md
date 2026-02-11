@@ -67,6 +67,39 @@ Remaining: P5 documentation updates, then close.
 - [x] Update BACKUP_GOVERNANCE.md to reference home strategy
 - [ ] Close loop (after confirming first scheduled run succeeds)
 
+### P6: Artifact Validation — PARKED (time-gated)
+
+**Parked:** 2026-02-11 by LOOP-TRANSITION-STABILIZATION-CERT-20260211
+
+The P0 backup job was created after 03:00 EST on 2026-02-11. First scheduled run
+has NOT occurred yet. Current artifact state:
+
+| Target | Expected Schedule | First Run | Artifact | Status |
+|--------|-------------------|-----------|----------|--------|
+| VM 100 (HA) | daily 03:00 | 2026-02-12 03:00 EST | missing | **PENDING** |
+| VM 102 (Vaultwarden) | daily 03:00 | manual validation 2026-02-11 | `vzdump-qemu-102-2026_02_11-08_53_32.vma.zst` (3.87GB) | **CONFIRMED** |
+| LXC 103 (download) | daily 03:15 | 2026-02-12 03:15 EST | missing | **PENDING** (LXC stopped — vzdump backs up disk) |
+| VM 101 (immich) | weekly Sun 04:00 | 2026-02-15 04:00 EST | missing | **PENDING** (VM stopped — vzdump backs up disk) |
+| LXC 105 (pihole) | weekly Sun 04:00 | 2026-02-15 04:00 EST | missing | **PENDING** (LXC stopped — vzdump backs up disk) |
+
+**Next validation command:**
+```bash
+ssh root@proxmox-home 'ls -lh /mnt/pve/synology-backups/dump/'
+```
+
+**Next check windows:**
+- **2026-02-12 after 03:30 EST**: Check for VM 100 + VM 102 P0 artifacts. If present, flip `enabled: true` in `backup.inventory.yaml` for `home-vm-100-ha-primary`.
+- **2026-02-12 after 03:30 EST**: Check for LXC 103 P1 artifact. If present, flip `enabled: true` for `home-lxc-103-download-primary`.
+- **2026-02-16 after 04:30 EST**: Check for VM 101 + LXC 105 P2 artifacts. If present, flip enables and close loop.
+
+**Evidence file pattern that will close this loop:**
+```
+vzdump-qemu-100-2026_02_12-*.vma.zst  (P0 daily)
+vzdump-lxc-103-2026_02_12-*.tar.zst   (P1 daily)
+vzdump-qemu-101-2026_02_15-*.vma.zst  (P2 weekly)
+vzdump-lxc-105-2026_02_15-*.tar.zst   (P2 weekly)
+```
+
 ## Receipts
 
 - Planning proposal: `CP-20260211-083735__home-backup-planning-strategy` (applied)

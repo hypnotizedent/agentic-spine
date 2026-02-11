@@ -23,6 +23,18 @@ This doc exists so failures look like "assumption violated" instead of "mystery 
   - Workbench is **tooling/reference only** (see `docs/governance/WORKBENCH_TOOLING_INDEX.md`)
   - ronny-ops is **deprecated junkyard** (read-only harvesting only)
 
+### ronny-ops Quarantine Policy
+
+`~/ronny-ops/` is a local read-only reference clone (GitHub, 2026-02-11, ~15K files).
+It exists solely for historical knowledge extraction during legacy extraction loops.
+
+**Rules (enforced by D30, D16):**
+- **No runtime dependency.** No script, alias, or capability may reference `~/ronny-ops/` at runtime.
+- **No commits.** Never commit to or push from this clone.
+- **No path references in active docs.** D30 gates any `ronny-ops` path in non-legacy docs.
+- **Read-only extraction only.** Agents may read files during governed extraction loops (e.g., LOOP-FINANCE-LEGACY-EXTRACTION) to produce spine-native docs. The extraction output lives in `~/code/agentic-spine/`, never in ronny-ops.
+- **Deletion deferred.** The clone will be removed once all extraction loops are closed.
+
 ## Required Paths
 
 Expected layout under `$HOME/code/`:
