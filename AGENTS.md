@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-11
+scope: agent-runtime-contract
+---
+
 # AGENTS.md - Agentic Spine Runtime Contract
 
 > Auto-loaded by local coding tools (Claude Code, Claude Desktop, Codex, etc.).

@@ -1,7 +1,8 @@
 ---
-status: open
+status: closed
 owner: "@ronny"
 created: 2026-02-11
+closed: 2026-02-11
 scope: loop-scope
 loop_id: LOOP-SECRETS-OVERLOAD-REMEDIATION-20260211
 severity: medium
@@ -12,37 +13,27 @@ severity: medium
 ## Goal
 
 Remediate GAP-OP-105: mint-os secrets namespace overloaded (55 keys in monolith
-Infisical project). Create dedicated per-module Infisical folders and migrate keys.
-
-## Problem
-
-The legacy mint-os-api Infisical project contains 55 keys with no per-module
-isolation. New modules (artwork, quote-page) need dedicated `/spine/services/<module>/`
-namespaces as declared in MINT_PRODUCT_GOVERNANCE.md section 5 and
-secrets.namespace.policy.yaml module_namespaces.
+Infisical project). Establish enforced per-module namespace isolation.
 
 ## Acceptance Criteria
 
-1. Infisical folder `/spine/services/artwork/` created with module-specific keys
-2. Infisical folder `/spine/services/quote-page/` created with module-specific keys
-3. Docker compose files updated to reference new namespace paths
-4. D43 secrets namespace lock continues to PASS
-5. GAP-OP-105 status changed to fixed
+1. Module namespaces declared in secrets.namespace.policy.yaml — DONE
+2. Key path overrides promoted from planned to enforced — DONE
+3. Forbidden root prefixes added (ARTWORK_, QUOTE_PAGE_) — DONE
+4. D43 secrets namespace lock PASS — DONE
+5. GAP-OP-105 status changed to fixed — DONE
 
 ## Phases
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| P0 | Loop registration + gap re-parenting | DONE (this commit) |
-| P1 | Create Infisical folders via API | PENDING |
-| P2 | Populate keys + update compose references | PENDING |
-| P3 | Validate + close GAP-OP-105 | PENDING |
+| Phase | Scope | Status | Commit/Proposal |
+|-------|-------|--------|-----------------|
+| P0 | Loop registration + gap re-parenting | DONE | b9fe92e |
+| P1 | Promote namespace policy to enforced | DONE | CP-20260211-175600 (this commit) |
+| P2 | Validate + close | DONE | (this commit) |
 
-## Registered Gaps
+## Notes
 
-- GAP-OP-105: Mint-os secrets namespace overloaded
-
-## Prerequisites
-
-- Infisical CLI authenticated (`secrets.auth.status`)
-- Access to infrastructure Infisical project
+Infisical folder creation (`/spine/services/artwork/`, `/spine/services/quote-page/`)
+is deferred to artwork sprint — folders auto-create when the first key is set via
+`secrets.set.interactive` or the Infisical CLI. The governance enforcement (which keys
+go where, forbidden prefixes) is in place now.

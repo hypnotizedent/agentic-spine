@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-11
+scope: repo-readme
+---
+
 # agentic-spine
 
 Detachable spine: one CLI front door + receipts + boring lifecycle.
