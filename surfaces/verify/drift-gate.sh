@@ -642,6 +642,14 @@ else
   warn "RAG canonical-only gate not present"
 fi
 
+# D69: VM creation governance lock (lifecycle -> ssh/svc/backup/health parity)
+echo -n "D69 VM creation governance lock... "
+if [[ -x "$SP/surfaces/verify/d69-vm-creation-governance-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d69-vm-creation-governance-lock.sh"
+else
+  warn "VM creation governance lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
