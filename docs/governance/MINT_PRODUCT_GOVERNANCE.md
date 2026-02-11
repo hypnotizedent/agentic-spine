@@ -18,13 +18,13 @@ scope: mint-product-governance
 | Runtime governance | agentic-spine | `docs/governance/` |
 | Tooling & compose | workbench | `infra/compose/mint-os/` |
 | Module source code | mint-modules | `~/code/mint-modules/<module>/` |
-| Legacy reference | ronny-ops | `~/ronny-ops/` (READ-ONLY) |
+| Legacy reference | legacy repo (read-only) | Not a code authority — knowledge extraction only |
 
 **Rules:**
 - Spine governs where modules run, how they're monitored, and who owns them.
 - Workbench owns compose files and deploy scripts.
 - mint-modules owns source code, tests, and API contracts.
-- ronny-ops is dead reference. Never copy files from it. Extract knowledge only.
+- The legacy repo is a dead reference. Never copy files from it. Extract knowledge only.
 
 ## 2. Module Ownership
 
