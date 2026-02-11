@@ -9,7 +9,7 @@
 # Last verified: 2026-02-07
 
 version: 1
-updated: "2026-02-09T03:00Z"
+updated: "2026-02-11T18:15Z"
 
 gaps:
   # ─────────────────────────────────────────────────────────────
@@ -1873,6 +1873,73 @@ gaps:
       P4: D66 MCP parity gate created (local vs MCPJungle hash comparison).
       P5: explicit deny policy documented in capabilities.yaml for domains
       without spine capabilities. 0 shadow runtime paths remain.
+
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during LOOP-RUNTIME-RECONCILIATION-20260211
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-096
+    discovered_by: "LOOP-RUNTIME-RECONCILIATION-20260211"
+    discovered_at: "2026-02-11"
+    type: runtime-bug
+    doc: "ops/bindings/ssh.targets.yaml"
+    description: |
+      docker-host (VM 200) is running on pve but completely network-unreachable.
+      LAN ping 192.168.1.200 fails from hypervisor. Tailscale 100.92.156.118
+      unreachable. QEMU guest agent not running. No remote diagnostic path —
+      requires PVE VNC console or qm monitor intervention.
+      Affects: all docker-host compose stacks (mint-os, finance, mail-archiver),
+      all services.health.yaml endpoints on 100.92.156.118, VM 200 vzdump
+      (vzdump still runs at hypervisor level — not blocked).
+    severity: critical
+    status: open
+    parent_loop: "LOOP-RUNTIME-RECONCILIATION-20260211"
+    notes: |
+      VM balloon stats visible (balloon: 96GB, 84GB free) so VM is alive internally.
+      Network interface or Tailscale service likely down. Need VNC console access
+      to diagnose. Cloud-init disabled on this VM (legacy mint-os host).
+
+  - id: GAP-OP-097
+    discovered_by: "LOOP-RUNTIME-RECONCILIATION-20260211"
+    discovered_at: "2026-02-11"
+    type: stale-ssot
+    doc: "ops/bindings/docker.compose.targets.yaml"
+    description: |
+      automation-stack compose paths use ~/stacks/* but SSH user is ubuntu.
+      Actual stacks live at /home/automation/stacks/* (different user). Causes
+      false dir_missing in docker.compose.status. SSH target user may also need
+      updating if automation user owns docker.
+    severity: medium
+    status: fixed
+    fixed_at: "2026-02-11"
+    parent_loop: "LOOP-RUNTIME-RECONCILIATION-20260211"
+    notes: |
+      Fixed: automation-stack compose paths changed to absolute
+      /home/automation/stacks/* and SSH user updated to automation.
+      Validation: docker.compose.status now reports automation + mcpjungle
+      stacks as OK (5/5 + 1/1) instead of dir_missing.
+
+  - id: GAP-OP-098
+    discovered_by: "LOOP-RUNTIME-RECONCILIATION-20260211"
+    discovered_at: "2026-02-11"
+    type: stale-ssot
+    doc: "ops/bindings/backup.inventory.yaml"
+    description: |
+      App-level backup inventory drift: app-firefly target pointed to a missing
+      NAS path (/volume1/backups/apps/finance) and multiple app backups were stale.
+      Root cause was runtime scheduler/auth mismatch after UDR6 cutover.
+    severity: high
+    status: fixed
+    fixed_at: "2026-02-11"
+    parent_loop: "LOOP-RUNTIME-RECONCILIATION-20260211"
+    notes: |
+      Fixed:
+      - app-firefly disabled in backup.inventory.yaml (false positive target).
+      - infra-core backup scripts restored to fresh artifacts (infisical + vaultwarden).
+      - gitea backup script validated as ubuntu user (root key mismatch discovered);
+        /etc/cron.d/gitea-backup restored with ubuntu scheduler user.
+      - home-assistant fresh backup created (396c7bcc.tar) and copied to NAS.
+      Validation: backup.status now reports 15 targets | 15 ok | 0 degraded.
 
 # ─────────────────────────────────────────────────────────────
 # Gap Types
