@@ -54,9 +54,27 @@ All cross-VM communication uses Tailscale IPs:
 | Jellyseerr (210) | Sonarr (209) | 210→209 | http://100.107.36.76:8989 |
 | Bazarr (210) | Radarr (209) | 210→209 | http://100.107.36.76:7878 |
 | Bazarr (210) | Sonarr (209) | 210→209 | http://100.107.36.76:8989 |
+| Autopulse (209) | Jellyfin (210) | 209→210 | http://100.123.207.64:8096 |
 | Posterizarr (209) | Jellyfin (210) | 209→210 | http://100.123.207.64:8096 |
 
 Intra-VM services use Docker DNS (e.g., `radarr:7878` within VM 209 compose network).
+
+### Container Volume Mapping (VM 209)
+
+The *arr apps use individual mount points matching their root folder paths:
+
+| Service | Container Path | Host Path | Purpose |
+|---------|---------------|-----------|---------|
+| Radarr | `/movies` | `/mnt/media/movies` | Library root folder |
+| Radarr | `/downloads` | `/mnt/media/downloads` | Import source |
+| Sonarr | `/tv` | `/mnt/media/tv` | Library root folder |
+| Sonarr | `/downloads` | `/mnt/media/downloads` | Import source |
+| Lidarr | `/music` | `/mnt/media/music` | Library root folder |
+| Lidarr | `/downloads` | `/mnt/media/downloads` | Import source |
+| All *arr | `/media` | `/mnt/media` | Full media tree (browsing) |
+
+Autopulse path rewrites translate *arr container paths to Jellyfin container paths:
+- `/movies` → `/media/movies`, `/tv` → `/media/tv`, `/music` → `/media/music`
 
 ---
 
@@ -88,8 +106,8 @@ Intra-VM services use Docker DNS (e.g., `radarr:7878` within VM 209 compose netw
 | **huntarr** | — | Missing content search | **stopped** |
 | **tdarr** | — | Transcoding | **stopped** |
 | **slskd** | — | Soulseek client | **stopped** |
-| **swaparr-lidarr** | — | Stalled swap | **stopped** |
-| **swaparr-sonarr** | — | Stalled swap | **stopped** |
+| swaparr-lidarr | internal | Stalled swap (Lidarr) | no-hc |
+| swaparr-sonarr | internal | Stalled swap (Sonarr) | no-hc |
 
 ### VM 210 — streaming-stack (10 containers)
 

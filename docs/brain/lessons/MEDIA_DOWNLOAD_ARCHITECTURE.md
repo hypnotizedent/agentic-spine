@@ -80,9 +80,9 @@ pve (192.168.1.184) NFS exports:
 /media                              → Both VMs mount this
 ├── downloads/complete/             → SABnzbd landing zone (VM 209 rw)
 ├── downloads/incomplete/           → In-progress downloads
-├── movies/                         → Radarr library (1,272+ dirs)
+├── movies/                         → Radarr library (1,274 dirs)
 ├── tv/                             → Sonarr library
-├── music/                          → Lidarr library (218+ dirs)
+├── music/                          → Lidarr library (220 dirs)
 └── recycle/                        → *arr recycle bins
 
 /tank/docker/download-stack         → VM 209 only
@@ -91,6 +91,20 @@ pve (192.168.1.184) NFS exports:
 /tank/docker/streaming-stack        → VM 210 only
 └── volumes/{jellyfin,navidrome,...}/ → Container configs
 ```
+
+### Container Volume Mapping
+
+*arr containers on VM 209 use individual mounts that match their root folder paths:
+
+| Host Path | Container Mount | Consumers |
+|-----------|----------------|-----------|
+| `/mnt/media/movies` | `/movies` | Radarr |
+| `/mnt/media/tv` | `/tv` | Sonarr |
+| `/mnt/media/music` | `/music` | Lidarr, slskd |
+| `/mnt/media/downloads` | `/downloads` | Radarr, Sonarr, Lidarr, SABnzbd, qBittorrent |
+| `/mnt/media` | `/media` | All *arr (browsing), trailarr, posterizarr, tdarr |
+
+VM 210 containers mount `/mnt/media` at `/media` (read-only). Navidrome mounts `/mnt/media/music` at `/music`.
 
 ---
 
