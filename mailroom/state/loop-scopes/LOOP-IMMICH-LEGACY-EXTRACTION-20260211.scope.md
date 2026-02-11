@@ -56,8 +56,8 @@ Justification: 4 containers, 3TB data, custom backup topology (pg_dump + library
 
 - P0: COMPLETE -- Terminal D audit: inventory legacy artifacts, assess spine coverage, produce extraction matrix.
 - P1: BLOCKED (GAP-OP-094) -- Cron path verification blocked by VM 203 network isolation. VM running per Proxmox but unreachable on all paths (LAN, Tailscale, guest agent). Registered GAP-OP-094. P1 resumes after VM network is restored via VNC console. P2 docs can proceed independently (legacy source is sufficient for spine-native rewrite).
-- P2: IN PROGRESS -- Rewrite spine-native docs (Move A): `IMMICH_BACKUP_RESTORE.md` + `IMMICH_OPERATIONS_LESSONS.md`.
-- P3: PENDING -- Registry entries: SERVICE_REGISTRY + STACK_REGISTRY + services.health + classification upgrade.
+- P2: COMPLETE -- Spine-native docs created: `IMMICH_BACKUP_RESTORE.md` + `IMMICH_OPERATIONS_LESSONS.md` (commit 3c06216).
+- P3: COMPLETE -- Registry entries added: SERVICE_REGISTRY (4 services + host), STACK_REGISTRY (stack entry), services.health (probe, disabled until GAP-OP-094 fixed). Classification upgraded Utility->Stack in EXTRACTION_PROTOCOL.md.
 - P4: PENDING -- Validate (`spine.verify`) and close with receipt-linked summary.
 
 ## P1 Evidence (2026-02-11)

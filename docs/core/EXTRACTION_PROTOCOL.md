@@ -104,8 +104,8 @@ Before extracting any service, classify it:
 
 | Type | Criteria | Examples |
 |------|----------|----------|
-| **Utility** | 1-2 containers, no dedicated docs, just runs | Vaultwarden, Pi-hole, Immich, HomeAssistant |
-| **Stack** | 3-10 containers, needs lessons/runbook, has dependencies | Media-stack, Observability, Automation |
+| **Utility** | 1-2 containers, no dedicated docs, just runs | Vaultwarden, Pi-hole, HomeAssistant |
+| **Stack** | 3-10 containers, needs lessons/runbook, has dependencies | Media-stack, Observability, Automation, Immich |
 | **Pillar** | 10+ containers OR business domain OR separate lifecycle | mint-os, Finance |
 
 ## Decision Tree
