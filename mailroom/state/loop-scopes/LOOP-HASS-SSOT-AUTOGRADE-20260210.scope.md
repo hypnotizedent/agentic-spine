@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-11
 scope: loop-scope
@@ -21,9 +21,9 @@ API, propose a diff, and update the SSOT doc with a proof trail.
 ## Phases
 - **P0: Identify canonical HA SSOT doc scope + required facts** -- COMPLETE
 - **P0.5: Extract critical legacy knowledge to spine** -- COMPLETE
-- P1: Implement `ha.ssot.propose` (read-only)
-- P2: Implement `ha.ssot.apply` (mutating, governed)
-- P3: Closeout + docs
+- **P1: Implement `ha.ssot.propose` (read-only)** -- COMPLETE
+- **P2: Implement `ha.ssot.apply` (mutating, governed)** -- COMPLETE
+- **P3: Closeout + docs** -- COMPLETE
 
 ## P0 Findings (2026-02-11)
 
@@ -69,3 +69,6 @@ The P1 capability must fetch these from the HA API:
 ## Evidence (Receipts)
 - P0 audit: `CP-20260211-110000__hass-legacy-extraction-audit-and-loop-trace` (applied commit 6b7d3b0)
 - P0.5 extraction: HASS_OPERATIONAL_RUNBOOK.md created from 7 legacy sources
+- P1: `ops/plugins/ha/bin/ha-ssot-propose` — read-only HA API fact fetcher + runbook differ
+- P2: `ops/plugins/ha/bin/ha-ssot-apply` — mutating runbook section replacer
+- P3: capabilities registered (`ha.ssot.propose`, `ha.ssot.apply`), MANIFEST.yaml updated, loop closed
