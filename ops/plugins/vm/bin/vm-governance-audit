@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# vm-governance-audit - Audit VM lifecycle governance coverage
+#
+# Read-only report showing each VM's governance status across all SSOT files.
+# Produces a columnar report suitable for operator review.
+#
+# Usage:
+#   vm-governance-audit              # all active shop VMs
+#   vm-governance-audit --all        # include home/stopped/decommissioned
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SP="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+LIFECYCLE="$SP/ops/bindings/vm.lifecycle.yaml"
+SSH_TARGETS="$SP/ops/bindings/ssh.targets.yaml"
+SERVICE_REG="$SP/docs/governance/SERVICE_REGISTRY.yaml"
+BACKUP_INV="$SP/ops/bindings/backup.inventory.yaml"
+HEALTH_BIND="$SP/ops/bindings/services.health.yaml"
+STACK_REG="$SP/docs/governance/STACK_REGISTRY.yaml"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || _stop "missing dependency: yq"
+for f in "$LIFECYCLE" "$SSH_TARGETS" "$SERVICE_REG" "$BACKUP_INV" "$HEALTH_BIND" "$STACK_REG"; do
+  [[ -f "$f" ]] || _stop "missing binding: $f"
+done
+
+SHOW_ALL=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all) SHOW_ALL=1; shift ;;
+    -h|--help) sed -n '1,12p' "$0" | sed 's/^# //'; exit 0 ;;
+    *) _stop "unknown arg: $1" ;;
+  esac
+done
+
+echo "vm.governance.audit"
+echo "binding: $LIFECYCLE"
+echo
+
+vm_count=$(yq '.vms | length' "$LIFECYCLE")
+
+# Header
+printf "%-6s %-20s %-8s %-6s %-5s %-8s %-7s %-7s %-7s %s\n" \
+  "VMID" "HOSTNAME" "HYPER" "STATUS" "SITE" "SSH" "SVCR" "BACKUP" "HEALTH" "NOTES"
+
+total=0
+pass=0
+fail=0
+
+for ((i=0; i<vm_count; i++)); do
+  vmid=$(yq -r ".vms[$i].vmid" "$LIFECYCLE")
+  hostname=$(yq -r ".vms[$i].hostname" "$LIFECYCLE")
+  hypervisor=$(yq -r ".vms[$i].proxmox_host" "$LIFECYCLE")
+  status=$(yq -r ".vms[$i].status" "$LIFECYCLE")
+  site_scope=$(yq -r ".vms[$i].site_scope // \"shop\"" "$LIFECYCLE")
+  has_docker=$(yq -r ".vms[$i].has_docker // true" "$LIFECYCLE")
+
+  # Filter unless --all
+  if [[ "$SHOW_ALL" -eq 0 ]]; then
+    [[ "$status" == "active" ]] || continue
+    [[ "$site_scope" == "home" ]] && continue
+    [[ "$hypervisor" != "pve" ]] && continue
+  fi
+
+  total=$((total + 1))
+  notes=""
+  vm_ok=1
+
+  # SSH check
+  ssh_ok="--"
+  if [[ "$status" == "active" ]]; then
+    ssh_match=$(yq -r ".ssh.targets[] | select(.id == \"$hostname\") | .id" "$SSH_TARGETS")
+    if [[ -n "$ssh_match" && "$ssh_match" != "null" ]]; then
+      ssh_ok="OK"
+    else
+      ssh_ok="MISS"
+      vm_ok=0
+      notes="${notes}no-ssh "
+    fi
+  fi
+
+  # SERVICE_REGISTRY hosts check
+  svc_ok="--"
+  if [[ "$status" == "active" && "$site_scope" != "home" ]]; then
+    svc_match=$(yq -r ".hosts.\"$hostname\" // \"\"" "$SERVICE_REG")
+    if [[ -n "$svc_match" ]]; then
+      svc_ok="OK"
+    else
+      svc_ok="MISS"
+      vm_ok=0
+      notes="${notes}no-svcr "
+    fi
+  fi
+
+  # Backup check
+  bkp_ok="--"
+  if [[ "$status" == "active" || "$status" == "stopped" ]]; then
+    bkp_match=$(yq -r ".targets[] | select(.glob == \"vzdump-qemu-${vmid}-*.vma.zst\" or .glob == \"vzdump-lxc-${vmid}-*.tar.zst\") | .name" "$BACKUP_INV")
+    if [[ -n "$bkp_match" && "$bkp_match" != "null" ]]; then
+      bkp_ok="OK"
+    else
+      bkp_ok="MISS"
+      if [[ "$status" == "active" ]]; then
+        vm_ok=0
+        notes="${notes}no-backup "
+      fi
+    fi
+  fi
+
+  # Health check
+  hlth_ok="--"
+  if [[ "$status" == "active" && "$has_docker" == "true" && "$site_scope" != "home" ]]; then
+    hlth_count=$(yq -r "[.endpoints[] | select(.host == \"$hostname\")] | length" "$HEALTH_BIND")
+    if [[ "$hlth_count" -gt 0 && "$hlth_count" != "null" ]]; then
+      hlth_ok="OK($hlth_count)"
+    else
+      hlth_ok="MISS"
+      vm_ok=0
+      notes="${notes}no-health "
+    fi
+  fi
+
+  [[ "$vm_ok" -eq 1 ]] && pass=$((pass + 1)) || fail=$((fail + 1))
+
+  # Short site label
+  site_label="shop"
+  [[ "$site_scope" == "home" ]] && site_label="home"
+
+  printf "%-6s %-20s %-8s %-6s %-5s %-8s %-7s %-7s %-7s %s\n" \
+    "$vmid" "$hostname" "$hypervisor" "$status" "$site_label" "$ssh_ok" "$svc_ok" "$bkp_ok" "$hlth_ok" "$notes"
+done
+
+echo
+echo "summary: $total vms | $pass governed | $fail gaps"
+
+[[ "$fail" -eq 0 ]] && exit 0 || exit 1
