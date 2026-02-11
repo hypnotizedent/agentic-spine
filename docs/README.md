@@ -18,7 +18,7 @@ The invariants. If a drift gate fails, one of these was violated.
 | [AGENT_CONTRACT.md](core/AGENT_CONTRACT.md) | Allowable agent behavior — the rules every agent follows |
 | [AGENT_OUTPUT_CONTRACT.md](core/AGENT_OUTPUT_CONTRACT.md) | Required output block structure |
 | [RECEIPTS_CONTRACT.md](core/RECEIPTS_CONTRACT.md) | Receipt format, proof rules, ledger entries |
-| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D57) |
+| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D68) |
 | [SPINE.md](core/SPINE.md) | Spine architecture and design principles |
 | [SPINE_SESSION_HEADER.md](core/SPINE_SESSION_HEADER.md) | Session header format for agent context |
 | [SPINE_STATE.md](core/SPINE_STATE.md) | Canonical spine state — what lives here, no legacy deps |

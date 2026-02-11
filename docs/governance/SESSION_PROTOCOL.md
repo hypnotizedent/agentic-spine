@@ -62,8 +62,8 @@ scope: session-entry
 
 ## Common Causes Of “Non-Uniform Workflow”
 
-- Work started outside the loop workflow (not using `./bin/ops start loop <id>`). This is how you get “floating WIP”: no loop scope anchor, no session log, no branch/worktree association.
-- Multiple terminals mutating git concurrently (branches/worktrees/merges in parallel). This creates stale worktrees, branch confusion, and occasional unexpected commits. The coarse git lock in ops commands helps, but ad-hoc git in multiple terminals can still bypass it. If you need multi-agent parallelism: use mailroom-gated writes (change proposals) and keep the repo read-only by default.
+- Work started without any loop anchor. Worktrees are optional (committing directly to main is fine), but every non-trivial change should have a loop scope for traceability. Without one you get "floating WIP": no scope anchor and no session log.
+- Multiple terminals mutating git concurrently (branches/worktrees/merges in parallel). This creates stale worktrees, branch confusion, and occasional unexpected commits. The coarse git lock in ops commands helps, but ad-hoc git in multiple terminals can still bypass it. **Default rule:** if multiple terminals/agents may be active, treat the repo as read-only and use mailroom-gated writes (change proposals).
 - Remote split brain (origin vs github not aligned). Agents base branches off different tips, so “truth” diverges and merges become messy. D62 is specifically to stop that.
 - Loop closeout not consistently done. Without updating the loop scope with receipts and closing it, the next agent can’t tell what’s already proven and repeats work. D61 + `agent.session.closeout` is the mechanism meant to prevent this.
 - Two repos, two contracts (`agentic-spine` vs `workbench`). If workbench changes aren’t tied back to a spine loop (or vice versa), you get coordination gaps even when each repo is individually clean.

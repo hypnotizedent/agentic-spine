@@ -31,5 +31,31 @@ Expected invariants:
 ## Proof Rule
 If there is no receipt at the canonical location, the run is not admissible proof.
 
+## Discovery
+
+Receipts are discoverable by filesystem walk over the canonical path:
+
+```bash
+# List all receipts (most recent first)
+find receipts/sessions -name receipt.md -type f | sort -r | head -20
+
+# Count total receipts
+find receipts/sessions -name receipt.md -type f | wc -l
+
+# Find receipts for a specific capability
+find receipts/sessions -path '*__<capability>__*' -name receipt.md
+
+# Reconcile ledger done entries against receipts
+# (full script in docs/governance/MAILROOM_RUNBOOK.md § Reconciling Ledger with Receipts)
+```
+
+The ledger (`mailroom/state/ledger.csv`) maps `run_id` to status and timestamps, but is
+a transaction log — not a receipt index. To resolve a `run_id` to its receipt:
+`receipts/sessions/R<run_id>/receipt.md`.
+
+No materialized index file exists by design — receipts are immutable write-once artifacts
+and the canonical path structure is the index. The `verify.drift_gates.failure_stats`
+capability demonstrates programmatic receipt scanning for analysis.
+
 ## Historical Note
 Legacy historical folders may contain auxiliary artifacts without `receipt.md`. Those are historical debt and not part of current runtime compliance.

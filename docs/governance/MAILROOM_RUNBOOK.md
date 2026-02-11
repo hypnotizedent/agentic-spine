@@ -256,6 +256,62 @@ mv mailroom/inbox/failed/filename.md mailroom/inbox/queued/
 
 ---
 
+## Ledger Reaper Policy
+
+Ledger entries stuck in `running` state beyond a TTL threshold are stale — the watcher crashed
+or the process was killed before writing a terminal status. These entries pollute in-flight queries.
+
+| Rule | Value |
+|------|-------|
+| **Stale threshold** | 1 hour (running entry with no progress) |
+| **Detection** | Query ledger for latest-status-per-run_id == `running` older than threshold |
+| **Resolution** | Append a `failed` row with `error=stale-reaper` to the ledger |
+| **Frequency** | On watcher restart (automatic) or manual via cleanup script |
+
+### Manual Stale Entry Cleanup
+
+```bash
+# Find truly stale running entries (latest status per run_id still "running")
+python3 - <<'PY'
+import csv
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+ledger = Path("mailroom/state/ledger.csv")
+threshold = timedelta(hours=1)
+now = datetime.now(timezone.utc)
+
+latest = {}
+with ledger.open(newline="", encoding="utf-8") as f:
+    for row in csv.DictReader(f):
+        latest[row["run_id"]] = row
+
+for run_id, row in sorted(latest.items()):
+    if row["status"] != "running":
+        continue
+    created = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+    age = now - created
+    if age > threshold:
+        print(f"STALE: {run_id} (age={age}, created={row['created_at']})")
+PY
+```
+
+### Watcher/Bridge Component Distinction
+
+The mailroom has two runtime components with distinct roles:
+
+| Component | Role | Lifecycle |
+|-----------|------|-----------|
+| **Watcher** (`hot-folder-watcher.sh`) | Internal daemon that processes queued prompts through inbox lanes | Always-on via LaunchAgent; capabilities: `spine.watcher.*` |
+| **Bridge** (`mailroom-bridge`) | HTTP API for remote clients (iPhone, n8n, external agents) | Optional; started explicitly; capabilities: `mailroom.bridge.*` |
+
+The watcher moves files through `queued/ → running/ → done/` and calls the Claude API.
+The bridge provides read/write HTTP endpoints to mailroom state (results, receipts, loop status).
+Both operate on the same filesystem but serve different access patterns — the watcher is local-only,
+the bridge is remote-accessible via Tailscale.
+
+---
+
 ## Health Checks
 
 ### Healthy State
