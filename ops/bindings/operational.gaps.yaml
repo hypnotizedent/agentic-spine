@@ -1802,6 +1802,56 @@ gaps:
       Recommend creating dedicated LOOP-FINANCE-LEGACY-EXTRACTION loop.
       See FINANCE_LEGACY_EXTRACTION_MATRIX.md for full extraction decision matrix.
 
+  - id: GAP-OP-094
+    discovered_by: "terminal-d-immich-extraction-20260211"
+    discovered_at: "2026-02-11"
+    type: runtime-bug
+    doc: "mailroom/state/loop-scopes/LOOP-IMMICH-LEGACY-EXTRACTION-20260211.scope.md"
+    description: |
+      VM 203 (immich) is running per Proxmox (qm status: running, uptime ~1.8d) but
+      completely network-isolated. ARP for 192.168.1.203 FAILED on pve bridge. Tailscale
+      shows immich-1 offline (last seen 1d ago). QEMU guest agent unavailable. Cloud-init
+      config still shows old network (192.168.12.230/24, gw 192.168.12.1) — likely not
+      updated after UDR6 cutover. Bridge/tap is healthy on host side (tap203i0 in vmbr0,
+      state forwarding). Impact: Immich service down for all users, daily DB backup cannot
+      push offsite, mobile sync broken, no health check catching this (no services.health
+      entry exists). Cron path verification (P1 of LOOP-IMMICH-LEGACY-EXTRACTION) blocked
+      until VM network is restored.
+    severity: critical
+    status: open
+    parent_loop: "LOOP-IMMICH-LEGACY-EXTRACTION-20260211"
+    notes: |
+      Likely fix: access VM via Proxmox VNC console, reconfigure netplan from
+      192.168.12.230/24 to 192.168.1.203/24 with gw 192.168.1.1, then update
+      cloud-init ipconfig0 in Proxmox. Also install/start qemu-guest-agent.
+
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during Cowork audit 2026-02-11
+  # ─────────────────────────────────────────────────────────────
+
+  - id: GAP-OP-095
+    discovered_by: "cowork-audit-20260211"
+    discovered_at: "2026-02-11"
+    type: runtime-bug
+    doc: "ops/bindings/agents.registry.yaml"
+    description: |
+      Shadow runtime bypass: MCPJungle MCP servers in workbench expose direct
+      mutating API calls (POST/PUT/DELETE) to external services without routing
+      through spine mailroom or capability gates. Affected surfaces:
+      (a) media-agent + n8n-agent MCP tools duplicate spine capabilities but
+          skip receipts, safety levels, and approval gates;
+      (b) home-assistant, mint-os, firefly, paperless, immich, ms-graph MCP
+          servers have no spine contract, no registry entry, no routing rule;
+      (c) MCPJungle media-stack has hardcoded SABnzbd API key in source (P1);
+      (d) local vs MCPJungle MCP server copies have no parity drift gate.
+    severity: critical
+    status: open
+    parent_loop: "LOOP-MCP-RUNTIME-GOVERNANCE-20260211"
+    notes: |
+      P1: remove hardcoded SAB key. P2: block/route mutating MCP tools to spine.
+      P3: register all MCPJungle servers in agents.registry. P4: add parity gate.
+      P5: add spine capabilities or explicit deny for unregistered domains.
+
 # ─────────────────────────────────────────────────────────────
 # Gap Types
 # ─────────────────────────────────────────────────────────────

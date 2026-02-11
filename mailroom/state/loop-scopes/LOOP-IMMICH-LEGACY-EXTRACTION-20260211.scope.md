@@ -55,14 +55,33 @@ Justification: 4 containers, 3TB data, custom backup topology (pg_dump + library
 ## Phases
 
 - P0: COMPLETE -- Terminal D audit: inventory legacy artifacts, assess spine coverage, produce extraction matrix.
-- P1: PENDING -- Verify cron path on immich-1 VM; confirm daily DB backup is functional.
-- P2: PENDING -- Rewrite spine-native docs (Move A): `IMMICH_BACKUP_RESTORE.md` + `IMMICH_OPERATIONS_LESSONS.md`.
+- P1: BLOCKED (GAP-OP-094) -- Cron path verification blocked by VM 203 network isolation. VM running per Proxmox but unreachable on all paths (LAN, Tailscale, guest agent). Registered GAP-OP-094. P1 resumes after VM network is restored via VNC console. P2 docs can proceed independently (legacy source is sufficient for spine-native rewrite).
+- P2: IN PROGRESS -- Rewrite spine-native docs (Move A): `IMMICH_BACKUP_RESTORE.md` + `IMMICH_OPERATIONS_LESSONS.md`.
 - P3: PENDING -- Registry entries: SERVICE_REGISTRY + STACK_REGISTRY + services.health + classification upgrade.
 - P4: PENDING -- Validate (`spine.verify`) and close with receipt-linked summary.
+
+## P1 Evidence (2026-02-11)
+
+Cron verification attempted via 4 access paths, all failed:
+1. `ssh ronny@immich-1` — Tailscale hostname timeout
+2. `ssh ubuntu@192.168.1.203` — Network unreachable (not on shop LAN)
+3. `ssh -J root@pve ronny@192.168.1.203` — No route to host
+4. `qm guest exec 203` — QEMU guest agent not running
+
+Diagnostic findings from pve:
+- `qm status 203`: running, uptime ~154633s (~1.8 days), 16GB RAM (14GB free)
+- `tailscale status | grep immich`: immich-1 offline, last seen 1d ago
+- `ip neigh | grep 192.168.1.203`: FAILED (ARP never resolved)
+- `tap203i0`: UP, in vmbr0 bridge, state forwarding (host-side healthy)
+- Cloud-init `ipconfig0`: `ip=192.168.12.230/24,gw=192.168.12.1` (old network — not updated for UDR6 cutover)
+- VM SSH user per legacy docs: `ronny` (not `ubuntu` — deviation from standard)
+
+Root cause hypothesis: VM internal netplan still configured for 192.168.12.x network. After UDR6 cutover, old gateway 192.168.12.1 no longer routes. VM is network-isolated but OS/Docker still running.
 
 ## Notes
 
 - Immich is a separate service (VM 203) from media-stack (VM 209/210); gets its own extraction loop.
-- CRITICAL operational alert: verify cron on immich-1 before P2 — daily DB backup may be silently failing.
+- CRITICAL: VM 203 network-isolated (GAP-OP-094). Immich service down, daily backup cannot push offsite, mobile sync broken. Fix requires VNC console access.
+- P2 docs not blocked by P1 — legacy source has sufficient detail for spine-native rewrite.
 - MCP server spec (`infrastructure/mcpjungle/servers/immich-photos/SPEC.md`) deferred to future loop when implementation begins.
 - Deduplication scripts (`.archive/2026-01-05-full-reset/scripts/dedupe/`) deferred to future tooling loop.
