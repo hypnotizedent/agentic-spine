@@ -33,10 +33,10 @@ Software-only cutover — no IP changes, no container restarts.
 
 | Check | Method | Result |
 |-------|--------|--------|
-| spine.verify | `./bin/ops cap run spine.verify` | PENDING (D53 expected to fail until changepack created) |
+| spine.verify | `./bin/ops cap run spine.verify` | ALL 56 PASS (CAP-20260212-022556) |
 | ops status | `./bin/ops status` | 1 loop (this one), 0 gaps |
-| docker.compose.status | `./bin/ops cap run docker.compose.status` | PENDING |
-| services.health.status | `./bin/ops cap run services.health.status` | PENDING |
+| docker.compose.status | `./bin/ops cap run docker.compose.status` | 22 stacks, 19 ok (CAP-20260212-022517) |
+| services.health.status | `./bin/ops cap run services.health.status` | ALL 44 OK, minio 158ms (CAP-20260212-022532) |
 
 ## Cutover Sequence
 
@@ -56,16 +56,16 @@ No LAN-only device changes. All changes are repo-level SSOT fixes.
 
 ## Post-Cutover Verification Matrix
 
-| Check | Method | Expected |
-|-------|--------|----------|
-| spine.verify | `./bin/ops cap run spine.verify` | ALL PASS (D1-D71) |
-| docker.compose.status | `./bin/ops cap run docker.compose.status` | Same as baseline (no runtime changes) |
-| services.health.status | `./bin/ops cap run services.health.status` | minio OK |
+| Check | Method | Result |
+|-------|--------|--------|
+| spine.verify | `./bin/ops cap run spine.verify` | ALL 56 PASS (CAP-20260212-023114) |
+| docker.compose.status | `./bin/ops cap run docker.compose.status` | 23 stacks, 19 ok, storage down (expected) (CAP-20260212-023046) |
+| services.health.status | `./bin/ops cap run services.health.status` | ALL 44 OK, minio 267ms (CAP-20260212-023102) |
 | No stale deprecated refs | `rg "MinIO.*deprecated" ops/bindings/` | 0 matches |
-| Single canonical compose | SERVICE_REGISTRY minio.compose | Points to storage stack |
+| Single canonical compose | SERVICE_REGISTRY minio.compose | ~/stacks/storage/docker-compose.yml |
 
 ## Sign-Off
 
 | Role | Name | Date | Status |
 |------|------|------|--------|
-| Operator | @ronny (via Claude Opus 4.6) | 2026-02-12 | PENDING |
+| Operator | @ronny (via Claude Opus 4.6) | 2026-02-12 | Cutover successful |
