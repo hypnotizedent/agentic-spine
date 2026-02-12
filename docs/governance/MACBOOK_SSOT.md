@@ -155,10 +155,11 @@ github_issue: "#625"
 <!-- BEGIN AUTO HOTKEYS -->
 | Hotkey | Action | Source |
 |--------|--------|--------|
-| **Ctrl+Shift+S** | session-start scan  + launch Claude | `~/.hammerspoon/` |
+| **Ctrl+Shift+L** | Orchestrator C (Codex) — attach to LOOP_ID | `~/.hammerspoon/` |
+| **Ctrl+Shift+S** | Launch Claude (always solo) | `~/.hammerspoon/` |
 | **Ctrl+Shift+T** | Enqueue a mailroom task (optional prompt) + show watcher status | `~/.hammerspoon/` |
-| **Ctrl+Shift+C** | session-start scan  + launch Codex (bypass approvals + sandbox) | `~/.hammerspoon/` |
-| **Ctrl+Shift+O** | session-start scan  + launch OpenCode (force GLM 4.7) | `~/.hammerspoon/` |
+| **Ctrl+Shift+C** | Launch Codex (always solo) | `~/.hammerspoon/` |
+| **Ctrl+Shift+O** | Launch OpenCode (always solo) | `~/.hammerspoon/` |
 | **Ctrl+Shift+E** | Closeout prompt → clipboard | `~/.hammerspoon/` |
 <!-- END AUTO HOTKEYS -->
 
@@ -167,10 +168,10 @@ github_issue: "#625"
 <!-- BEGIN AUTO RAYCAST -->
 | Tool | Script | Command |
 |------|--------|---------|
-| **Raycast** | `Claude Code` | `cd ~/code/agentic-spine && source <(./ops/plugins/session/bin/session-start scan 2>&1 | tee /dev/stderr; echo '') && claude --dangerously-skip-permissions --add-dir ~/code/workbench` |
-| **Raycast** | `Codex Full Auto` | `cd ~/code/agentic-spine && source <(./ops/plugins/session/bin/session-start scan 2>&1 | tee /dev/stderr; echo '') && codex -C ~/code/agentic-spine --add-dir ~/code/workbench --dangerously-bypass-approvals-and-sandbox` |
-| **Raycast** | `OpenCode` | `cd ~/code/agentic-spine && source <(./ops/plugins/session/bin/session-start scan 2>&1 | tee /dev/stderr; echo '') && opencode -m zai-coding-plan/glm-4.7 .` |
-| **Raycast** | `Spine Start Routine` | `cd ~/code/agentic-spine && source <(./ops/plugins/session/bin/session-start scan 2>&1 | tee /dev/stderr; echo '') && ./bin/ops cap run spine.verify` |
+| **Raycast** | `Claude Code` | `SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 /Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool claude` |
+| **Raycast** | `Codex Full Auto` | `SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 /Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool codex` |
+| **Raycast** | `OpenCode` | `SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 /Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool opencode` |
+| **Raycast** | `Spine Start Routine` | `SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 /Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool verify` |
 <!-- END AUTO RAYCAST -->
 
 #### Other

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v2.6)
+# drift-gate.sh - Constitutional drift detector (v2.7)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -47,7 +47,7 @@ gate_script() {
   rm -f "$tmp" 2>/dev/null || true
 }
 
-echo "=== DRIFT GATE (v2.6) ==="
+echo "=== DRIFT GATE (v2.7) ==="
 
 # D1: Top-level directory policy (9 allowed)
 echo -n "D1 top-level dirs... "
@@ -664,6 +664,14 @@ if [[ -x "$SP/surfaces/verify/d71-deprecated-ref-allowlist-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d71-deprecated-ref-allowlist-lock.sh"
 else
   warn "deprecated ref allowlist lock gate not present"
+fi
+
+# D72: MacBook hotkey SSOT lock (workbench launcher surfaces ↔ spine MACBOOK_SSOT AUTO blocks)
+echo -n "D72 MacBook hotkey SSOT lock... "
+if [[ -x "$SP/surfaces/verify/d72-macbook-hotkey-ssot-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d72-macbook-hotkey-ssot-lock.sh"
+else
+  warn "MacBook hotkey SSOT lock gate not present"
 fi
 
 echo
