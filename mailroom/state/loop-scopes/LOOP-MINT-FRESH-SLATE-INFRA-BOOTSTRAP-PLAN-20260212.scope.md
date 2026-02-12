@@ -1,8 +1,9 @@
 ---
 loop_id: LOOP-MINT-FRESH-SLATE-INFRA-BOOTSTRAP-PLAN-20260212
-status: open
+status: closed
 owner: "@ronny"
 created: 2026-02-12
+closed: 2026-02-12
 terminal: C
 type: plan-only
 ---
@@ -30,8 +31,17 @@ Produce an executable infrastructure bootstrap plan for mint-modules on two new 
 - Mailroom proposals for tracked spine edits
 - Current system remains stable
 
-## Evidence Required
+## Evidence
 
-- spine.verify PASS before and after
-- gaps.status stable
-- Commit hashes
+### Baseline (P0)
+- spine.verify: RCAP-20260212-082435__spine.verify__R863082070 — ALL PASS
+- gaps.status: RCAP-20260212-082504__gaps.status__Rf2qi91669 — 2 open (GAP-OP-117/118, pre-existing home-infra)
+- authority.project.status: RCAP-20260212-082508__authority.project.status__Rm4zn91740 — GOVERNED
+
+### Recert (P3)
+- spine.verify: RCAP-20260212-083129__spine.verify__R5ed992627 — ALL PASS
+- gaps.status: RCAP-20260212-083200__gaps.status__R13kr2726 — 2 open (same pre-existing, unchanged)
+- authority.project.status: RCAP-20260212-083200__authority.project.status__Rfl7e2786 — GOVERNED
+
+### Commits
+- spine: 41d61c4 (proposal CP-20260212-083037__mint-fresh-slate-infra-bootstrap-plan)
