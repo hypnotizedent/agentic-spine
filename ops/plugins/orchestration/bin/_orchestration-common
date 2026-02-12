@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Shared helpers for orchestration capability scripts.
+
+orchestration_root() {
+  if [[ -n "${SPINE_ROOT:-}" ]]; then
+    printf '%s\n' "$SPINE_ROOT"
+  elif [[ -n "${SPINE_CODE:-}" ]]; then
+    printf '%s\n' "$SPINE_CODE"
+  else
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    printf '%s\n' "$(cd "$script_dir/../../../.." && pwd)"
+  fi
+}
+
+orchestration_fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+orchestration_need() {
+  command -v "$1" >/dev/null 2>&1 || orchestration_fail "missing dependency: $1"
+}
+
+orchestration_actor() {
+  local host
+  host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)"
+  if [[ -n "${SPINE_AGENT_ID:-}" ]]; then
+    printf '%s\n' "$SPINE_AGENT_ID"
+  else
+    printf '%s\n' "${USER:-unknown}@${host}"
+  fi
+}
+
+orchestration_assert_id() {
+  local value="$1"
+  local field="$2"
+  [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]] || orchestration_fail "$field must match [A-Za-z0-9._-]+"
+}
+
+orchestration_loop_dir() {
+  local root="$1"
+  local loop_id="$2"
+  printf '%s\n' "$root/mailroom/state/orchestration/$loop_id"
+}
+
+orchestration_manifest_path() {
+  local root="$1"
+  local loop_id="$2"
+  printf '%s\n' "$(orchestration_loop_dir "$root" "$loop_id")/manifest.yaml"
+}
+
+orchestration_ensure_manifest() {
+  local root="$1"
+  local loop_id="$2"
+  local manifest
+  manifest="$(orchestration_manifest_path "$root" "$loop_id")"
+  [[ -f "$manifest" ]] || orchestration_fail "manifest not found: $manifest"
+}

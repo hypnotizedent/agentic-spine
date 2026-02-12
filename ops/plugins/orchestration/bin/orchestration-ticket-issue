@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+
+usage() {
+  cat <<'USAGE'
+orchestration-ticket-issue - Assign a lane handoff ticket
+
+Usage:
+  orchestration-ticket-issue \
+    --loop-id <id> \
+    --lane <lane> \
+    --branch <worker-branch> \
+    [--worker <actor>] \
+    [--commit <sha>] \
+    [--note <text>]
+USAGE
+}
+
+ROOT="$(orchestration_root)"
+LOOP_ID=""
+LANE=""
+BRANCH=""
+WORKER=""
+COMMIT_SHA=""
+NOTE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --lane) LANE="${2:-}"; shift 2 ;;
+    --branch) BRANCH="${2:-}"; shift 2 ;;
+    --worker) WORKER="${2:-}"; shift 2 ;;
+    --commit) COMMIT_SHA="${2:-}"; shift 2 ;;
+    --note) NOTE="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) orchestration_fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || orchestration_fail "--loop-id is required"
+[[ -n "$LANE" ]] || orchestration_fail "--lane is required"
+[[ -n "$BRANCH" ]] || orchestration_fail "--branch is required"
+
+orchestration_assert_id "$LOOP_ID" "loop id"
+orchestration_assert_id "$LANE" "lane"
+
+orchestration_need yq
+orchestration_ensure_manifest "$ROOT" "$LOOP_ID"
+
+manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
+loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+ticket="$loop_dir/tickets/$LANE.yaml"
+worker="${WORKER:-$(orchestration_actor)}"
+
+if [[ -n "$COMMIT_SHA" ]]; then
+  git -C "$ROOT" cat-file -e "$COMMIT_SHA^{commit}" >/dev/null 2>&1 || orchestration_fail "commit not found: $COMMIT_SHA"
+fi
+
+cat > "$ticket" <<YAML
+loop_id: $LOOP_ID
+lane: $LANE
+branch: $BRANCH
+worker: $worker
+commit: ${COMMIT_SHA:-""}
+note: ${NOTE:-""}
+issued_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+issued_by: $(orchestration_actor)
+status: issued
+YAML
+
+yq e -i ".lanes.${LANE}.id = \"${LANE}\"" "$manifest"
+yq e -i ".lanes.${LANE}.branch = \"${BRANCH}\"" "$manifest"
+yq e -i ".lanes.${LANE}.worker = \"${worker}\"" "$manifest"
+yq e -i ".lanes.${LANE}.status = \"ticket-issued\"" "$manifest"
+yq e -i ".updated_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$manifest"
+
+echo "orchestration.ticket.issue"
+echo "loop_id: $LOOP_ID"
+echo "lane: $LANE"
+echo "ticket: $ticket"
+echo "status: ISSUED"

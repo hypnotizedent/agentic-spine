@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+
+usage() {
+  cat <<'USAGE'
+orchestration-status - Show orchestration loop status
+
+Usage:
+  orchestration-status [--loop-id <id>]
+USAGE
+}
+
+ROOT="$(orchestration_root)"
+LOOP_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) orchestration_fail "unknown argument: $1" ;;
+  esac
+done
+
+state_root="$ROOT/mailroom/state/orchestration"
+[[ -d "$state_root" ]] || {
+  echo "orchestration.status"
+  echo "loops: 0"
+  exit 0
+}
+
+print_one() {
+  local loop_dir="$1"
+  local manifest="$loop_dir/manifest.yaml"
+  [[ -f "$manifest" ]] || return 0
+  local id
+  id="$(yq e -r '.loop_id // "unknown"' "$manifest")"
+  local base_sha
+  base_sha="$(yq e -r '.base_sha // ""' "$manifest")"
+  local apply_owner
+  apply_owner="$(yq e -r '.apply_owner // ""' "$manifest")"
+  local seq_count
+  seq_count="$(yq e '.sequence | length' "$manifest")"
+  local ticket_count val_count int_count
+  ticket_count="$(find "$loop_dir/tickets" -maxdepth 1 -name '*.yaml' 2>/dev/null | wc -l | tr -d ' ')"
+  val_count="$(find "$loop_dir/validations" -maxdepth 1 -name '*.yaml' 2>/dev/null | wc -l | tr -d ' ')"
+  int_count="$(find "$loop_dir/integrations" -maxdepth 1 -name '*.yaml' 2>/dev/null | wc -l | tr -d ' ')"
+  echo "loop_id: $id"
+  echo "  base_sha: $base_sha"
+  echo "  apply_owner: $apply_owner"
+  echo "  sequence: $seq_count"
+  echo "  tickets: $ticket_count | validations: $val_count | integrations: $int_count"
+}
+
+echo "orchestration.status"
+
+if [[ -n "$LOOP_ID" ]]; then
+  orchestration_assert_id "$LOOP_ID" "loop id"
+  print_one "$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+  exit 0
+fi
+
+count=0
+for loop_dir in "$state_root"/*; do
+  [[ -d "$loop_dir" ]] || continue
+  print_one "$loop_dir"
+  count=$((count + 1))
+done
+
+echo "loops: $count"

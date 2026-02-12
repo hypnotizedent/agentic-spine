@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+
+usage() {
+  cat <<'USAGE'
+orchestration-loop-open - Create orchestration manifest for a loop
+
+Usage:
+  orchestration-loop-open \
+    --loop-id <id> \
+    --apply-owner <owner> \
+    [--repo <path>] \
+    [--base-sha <sha>] \
+    [--lanes <lane1,lane2,...>] \
+    [--sequence <lane1,lane2,...>] \
+    [--allow <lane:glob>]... \
+    [--forbid <glob>]... \
+    [--check <lane:command>]... \
+    [--force]
+USAGE
+}
+
+ROOT="$(orchestration_root)"
+LOOP_ID=""
+APPLY_OWNER=""
+REPO_PATH=""
+BASE_SHA=""
+LANES_CSV=""
+SEQUENCE_CSV=""
+FORCE=0
+
+allow_items=()
+forbid_items=()
+check_items=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --apply-owner) APPLY_OWNER="${2:-}"; shift 2 ;;
+    --repo) REPO_PATH="${2:-}"; shift 2 ;;
+    --base-sha) BASE_SHA="${2:-}"; shift 2 ;;
+    --lanes) LANES_CSV="${2:-}"; shift 2 ;;
+    --sequence) SEQUENCE_CSV="${2:-}"; shift 2 ;;
+    --allow) allow_items+=("${2:-}"); shift 2 ;;
+    --forbid) forbid_items+=("${2:-}"); shift 2 ;;
+    --check) check_items+=("${2:-}"); shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) orchestration_fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || orchestration_fail "--loop-id is required"
+[[ -n "$APPLY_OWNER" ]] || orchestration_fail "--apply-owner is required"
+
+orchestration_assert_id "$LOOP_ID" "loop id"
+[[ "$LOOP_ID" =~ ^LOOP- ]] || orchestration_fail "loop id must start with LOOP-"
+
+orchestration_need yq
+
+REPO_PATH="${REPO_PATH:-$ROOT}"
+BASE_SHA="${BASE_SHA:-$(git -C "$ROOT" rev-parse HEAD)}"
+
+loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
+
+if [[ -f "$manifest" && "$FORCE" -ne 1 ]]; then
+  orchestration_fail "manifest already exists (use --force): $manifest"
+fi
+
+mkdir -p "$loop_dir/tickets" "$loop_dir/validations" "$loop_dir/integrations" "$loop_dir/artifacts"
+
+cat > "$manifest" <<YAML
+loop_id: $LOOP_ID
+repo: $REPO_PATH
+base_sha: $BASE_SHA
+apply_owner: $APPLY_OWNER
+lanes: {}
+allow: {}
+forbid: []
+checks: {}
+sequence: []
+created_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+updated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+YAML
+
+IFS=',' read -r -a lanes <<< "$LANES_CSV"
+for lane in "${lanes[@]:-}"; do
+  lane="${lane// /}"
+  [[ -z "$lane" ]] && continue
+  orchestration_assert_id "$lane" "lane"
+  yq e -i ".lanes.${lane}.id = \"${lane}\"" "$manifest"
+  yq e -i ".lanes.${lane}.status = \"open\"" "$manifest"
+done
+
+if [[ -n "$SEQUENCE_CSV" ]]; then
+  IFS=',' read -r -a seq_lanes <<< "$SEQUENCE_CSV"
+  yq e -i '.sequence = []' "$manifest"
+  for lane in "${seq_lanes[@]}"; do
+    lane="${lane// /}"
+    [[ -z "$lane" ]] && continue
+    orchestration_assert_id "$lane" "sequence lane"
+    yq e -i ".sequence += [\"${lane}\"]" "$manifest"
+  done
+elif [[ -n "$LANES_CSV" ]]; then
+  yq e -i '.sequence = []' "$manifest"
+  for lane in "${lanes[@]:-}"; do
+    lane="${lane// /}"
+    [[ -z "$lane" ]] && continue
+    yq e -i ".sequence += [\"${lane}\"]" "$manifest"
+  done
+fi
+
+for item in "${allow_items[@]}"; do
+  lane="${item%%:*}"
+  pattern="${item#*:}"
+  [[ -n "$lane" && -n "$pattern" && "$lane" != "$pattern" ]] || orchestration_fail "--allow must be lane:glob"
+  orchestration_assert_id "$lane" "allow lane"
+  yq e -i ".allow.${lane} += [\"${pattern}\"]" "$manifest"
+done
+
+for pattern in "${forbid_items[@]}"; do
+  [[ -n "$pattern" ]] || orchestration_fail "--forbid requires a glob"
+  yq e -i ".forbid += [\"${pattern}\"]" "$manifest"
+done
+
+for item in "${check_items[@]}"; do
+  lane="${item%%:*}"
+  command="${item#*:}"
+  [[ -n "$lane" && -n "$command" && "$lane" != "$command" ]] || orchestration_fail "--check must be lane:command"
+  orchestration_assert_id "$lane" "check lane"
+  yq e -i ".checks.${lane} += [\"${command}\"]" "$manifest"
+done
+
+yq e -i ".updated_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$manifest"
+
+echo "orchestration.loop.open"
+echo "loop_id: $LOOP_ID"
+echo "manifest: $manifest"
+echo "status: OPEN"
