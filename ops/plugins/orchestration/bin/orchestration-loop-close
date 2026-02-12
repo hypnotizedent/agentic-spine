@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+
 usage() {
   cat <<'USAGE'
 orchestration-loop-close - Close an orchestration loop when lanes are integrated
@@ -10,12 +12,78 @@ Usage:
 USAGE
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-esac
+ROOT="$(orchestration_root)"
+LOOP_ID=""
+FORCE=0
 
-echo "ERROR: loop close logic not wired yet"
-exit 1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) orchestration_fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || orchestration_fail "--loop-id is required"
+orchestration_assert_id "$LOOP_ID" "loop id"
+
+orchestration_need yq
+orchestration_ensure_manifest "$ROOT" "$LOOP_ID"
+
+manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
+loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+mkdir -p "$loop_dir"
+
+mapfile -t sequence_lanes < <(yq e -r '.sequence[]?' "$manifest" | sed '/^$/d')
+if ((${#sequence_lanes[@]} == 0)) && [[ "$FORCE" -ne 1 ]]; then
+  orchestration_fail "cannot close loop with empty sequence (use --force to override)"
+fi
+
+missing=()
+for lane in "${sequence_lanes[@]:-}"; do
+  [[ -z "$lane" ]] && continue
+  if ! orchestration_lane_is_integrated "$loop_dir" "$lane"; then
+    missing+=("$lane")
+  fi
+done
+
+if ((${#missing[@]} > 0)) && [[ "$FORCE" -ne 1 ]]; then
+  orchestration_fail "cannot close loop; lanes not integrated: ${missing[*]}"
+fi
+
+closed_file="$loop_dir/closed.yaml"
+closed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+closed_by="$(orchestration_actor)"
+
+{
+  echo "loop_id: $LOOP_ID"
+  echo "status: closed"
+  echo "closed_at: $closed_at"
+  echo "closed_by: \"$closed_by\""
+  if [[ "$FORCE" -eq 1 ]]; then
+    echo "forced: true"
+  else
+    echo "forced: false"
+  fi
+  echo "missing_lanes:"
+  if ((${#missing[@]} > 0)); then
+    for lane in "${missing[@]}"; do
+      echo "  - \"$lane\""
+    done
+  else
+    echo "  - \"none\""
+  fi
+} > "$closed_file"
+
+yq e -i '.status = "closed"' "$manifest"
+yq e -i ".updated_at = \"$closed_at\"" "$manifest"
+
+echo "orchestration.loop.close"
+echo "loop_id: $LOOP_ID"
+echo "closed_file: $closed_file"
+if [[ "$FORCE" -eq 1 ]]; then
+  echo "status: CLOSED_FORCED"
+else
+  echo "status: CLOSED"
+fi

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+
 usage() {
   cat <<'USAGE'
 orchestration-handoff-validate - Validate a lane handoff commit
@@ -10,12 +12,161 @@ Usage:
 USAGE
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-esac
+ROOT="$(orchestration_root)"
+LOOP_ID=""
+LANE=""
+COMMIT_SHA=""
 
-echo "ERROR: handoff validation logic not wired yet"
-exit 1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --lane) LANE="${2:-}"; shift 2 ;;
+    --commit) COMMIT_SHA="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) orchestration_fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || orchestration_fail "--loop-id is required"
+[[ -n "$LANE" ]] || orchestration_fail "--lane is required"
+[[ -n "$COMMIT_SHA" ]] || orchestration_fail "--commit is required"
+
+orchestration_assert_id "$LOOP_ID" "loop id"
+orchestration_assert_id "$LANE" "lane"
+
+orchestration_need yq
+orchestration_need git
+orchestration_ensure_manifest "$ROOT" "$LOOP_ID"
+
+manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
+loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+mkdir -p "$loop_dir/tickets" "$loop_dir/validations" "$loop_dir/integrations" "$loop_dir/artifacts"
+
+repo="$(orchestration_manifest_repo "$manifest" "$ROOT")"
+orchestration_assert_git_repo "$repo"
+
+git -C "$repo" cat-file -e "$COMMIT_SHA^{commit}" >/dev/null 2>&1 || orchestration_fail "commit not found: $COMMIT_SHA"
+
+base_sha="$(yq e -r '.base_sha // ""' "$manifest")"
+[[ -n "$base_sha" ]] || orchestration_fail "manifest missing base_sha"
+git -C "$repo" cat-file -e "$base_sha^{commit}" >/dev/null 2>&1 || orchestration_fail "manifest base_sha not found: $base_sha"
+
+ticket_file="$loop_dir/tickets/$LANE.yaml"
+assigned_branch=""
+assigned_worker=""
+
+if [[ -f "$ticket_file" ]]; then
+  assigned_branch="$(yq e -r '.branch // ""' "$ticket_file")"
+  assigned_worker="$(yq e -r '.worker // ""' "$ticket_file")"
+fi
+if [[ -z "$assigned_branch" || "$assigned_branch" == "null" ]]; then
+  assigned_branch="$(yq e -r ".lanes.\"$LANE\".branch // \"\"" "$manifest")"
+fi
+if [[ -z "$assigned_worker" || "$assigned_worker" == "null" ]]; then
+  assigned_worker="$(yq e -r ".lanes.\"$LANE\".worker // \"\"" "$manifest")"
+fi
+[[ -n "$assigned_branch" ]] || orchestration_fail "assigned branch missing for lane: $LANE (issue a ticket first)"
+
+branch_ref="$(orchestration_resolve_branch_ref "$repo" "$assigned_branch" || true)"
+[[ -n "$branch_ref" ]] || orchestration_fail "assigned branch not found in repo: $assigned_branch"
+
+git -C "$repo" merge-base --is-ancestor "$COMMIT_SHA" "$branch_ref" \
+  || orchestration_fail "wrong branch: commit is not on assigned branch $assigned_branch"
+
+git -C "$repo" merge-base --is-ancestor "$base_sha" "$COMMIT_SHA" \
+  || orchestration_fail "base_sha mismatch: commit does not descend from $base_sha"
+
+mapfile -t changed_files < <(git -C "$repo" show --pretty=format: --name-only "$COMMIT_SHA" | sed '/^$/d')
+((${#changed_files[@]} > 0)) || orchestration_fail "commit has no changed files"
+
+mapfile -t allow_patterns < <(orchestration_collect_allow_patterns "$manifest" "$LANE" | sed '/^$/d' | sort -u)
+((${#allow_patterns[@]} > 0)) || orchestration_fail "allowlist missing for lane: $LANE"
+
+for file in "${changed_files[@]}"; do
+  matched=0
+  for pattern in "${allow_patterns[@]}"; do
+    if orchestration_path_matches_pattern "$file" "$pattern"; then
+      matched=1
+      break
+    fi
+  done
+  [[ "$matched" -eq 1 ]] || orchestration_fail "file outside lane allowlist: $file"
+done
+
+mapfile -t forbid_patterns < <(orchestration_collect_forbid_patterns "$manifest" "$LANE" | sed '/^$/d' | sort -u)
+for file in "${changed_files[@]}"; do
+  for pattern in "${forbid_patterns[@]:-}"; do
+    if orchestration_path_matches_pattern "$file" "$pattern"; then
+      orchestration_fail "forbidden file touched: $file"
+    fi
+  done
+done
+
+set +e
+mapfile -t prior_lanes < <(orchestration_sequence_before "$manifest" "$LANE")
+seq_rc=$?
+set -e
+if [[ "$seq_rc" -eq 2 ]]; then
+  orchestration_fail "lane not present in sequence: $LANE"
+fi
+for prior_lane in "${prior_lanes[@]:-}"; do
+  [[ -z "$prior_lane" ]] && continue
+  if ! orchestration_lane_is_validated_or_integrated "$loop_dir" "$prior_lane"; then
+    orchestration_fail "out-of-sequence: validate $prior_lane before $LANE"
+  fi
+done
+
+validation_file="$loop_dir/validations/$LANE.yaml"
+validated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+validated_by="$(orchestration_actor)"
+
+{
+  echo "loop_id: $LOOP_ID"
+  echo "lane: $LANE"
+  echo "commit: $COMMIT_SHA"
+  echo "branch: $assigned_branch"
+  echo "worker: \"${assigned_worker}\""
+  echo "validated_at: $validated_at"
+  echo "validated_by: \"$validated_by\""
+  echo "status: validated"
+  echo "checks:"
+  echo "  branch_assigned: pass"
+  echo "  base_sha: pass"
+  echo "  allowlist: pass"
+  echo "  forbidden: pass"
+  echo "  sequence: pass"
+  echo "changed_files:"
+  for file in "${changed_files[@]}"; do
+    echo "  - \"$file\""
+  done
+} > "$validation_file"
+
+yq e -i ".lanes.\"$LANE\".id = \"$LANE\"" "$manifest"
+yq e -i ".lanes.\"$LANE\".status = \"validated\"" "$manifest"
+yq e -i ".lanes.\"$LANE\".validated_commit = \"$COMMIT_SHA\"" "$manifest"
+yq e -i ".updated_at = \"$validated_at\"" "$manifest"
+
+artifact_file="$loop_dir/artifacts/validate-${LANE}-$(date -u +%Y%m%d-%H%M%S).md"
+{
+  echo "# Orchestration Validation"
+  echo
+  echo "- loop_id: $LOOP_ID"
+  echo "- lane: $LANE"
+  echo "- commit: $COMMIT_SHA"
+  echo "- branch: $assigned_branch"
+  echo "- validated_by: $validated_by"
+  echo "- validated_at: $validated_at"
+  echo
+  echo "## Changed Files"
+  for file in "${changed_files[@]}"; do
+    echo "- $file"
+  done
+} > "$artifact_file"
+
+echo "orchestration.handoff.validate"
+echo "loop_id: $LOOP_ID"
+echo "lane: $LANE"
+echo "commit: $COMMIT_SHA"
+echo "branch: $assigned_branch"
+echo "validation: $validation_file"
+echo "status: VALIDATED"

@@ -50,10 +50,190 @@ orchestration_manifest_path() {
   printf '%s\n' "$(orchestration_loop_dir "$root" "$loop_id")/manifest.yaml"
 }
 
+orchestration_assert_manifest_schema() {
+  local manifest="$1"
+  local missing=()
+  local key value
+
+  for key in loop_id repo base_sha apply_owner lanes allow forbid checks sequence; do
+    value="$(yq e -r ".${key} // \"__MISSING__\"" "$manifest" 2>/dev/null || echo "__MISSING__")"
+    if [[ "$value" == "__MISSING__" ]]; then
+      missing+=("$key")
+    fi
+  done
+
+  if ((${#missing[@]} > 0)); then
+    orchestration_fail "manifest schema missing keys: ${missing[*]}"
+  fi
+
+  local lanes_type allow_type forbid_type checks_type seq_type
+  lanes_type="$(yq e -r '.lanes | type' "$manifest" 2>/dev/null || echo '')"
+  allow_type="$(yq e -r '.allow | type' "$manifest" 2>/dev/null || echo '')"
+  forbid_type="$(yq e -r '.forbid | type' "$manifest" 2>/dev/null || echo '')"
+  checks_type="$(yq e -r '.checks | type' "$manifest" 2>/dev/null || echo '')"
+  seq_type="$(yq e -r '.sequence | type' "$manifest" 2>/dev/null || echo '')"
+
+  [[ "$lanes_type" == "!!map" ]] || orchestration_fail "manifest lanes must be a map"
+  [[ "$allow_type" == "!!map" || "$allow_type" == "!!seq" ]] || orchestration_fail "manifest allow must be a map or seq"
+  [[ "$forbid_type" == "!!map" || "$forbid_type" == "!!seq" ]] || orchestration_fail "manifest forbid must be a map or seq"
+  [[ "$checks_type" == "!!map" || "$checks_type" == "!!seq" ]] || orchestration_fail "manifest checks must be a map or seq"
+  [[ "$seq_type" == "!!seq" ]] || orchestration_fail "manifest sequence must be a seq"
+}
+
 orchestration_ensure_manifest() {
   local root="$1"
   local loop_id="$2"
   local manifest
   manifest="$(orchestration_manifest_path "$root" "$loop_id")"
   [[ -f "$manifest" ]] || orchestration_fail "manifest not found: $manifest"
+  orchestration_assert_manifest_schema "$manifest"
+}
+
+orchestration_manifest_repo() {
+  local manifest="$1"
+  local root="$2"
+  local repo
+  repo="$(yq e -r '.repo // ""' "$manifest")"
+  if [[ -z "$repo" || "$repo" == "null" ]]; then
+    repo="$root"
+  fi
+  if [[ "$repo" != /* ]]; then
+    repo="$root/$repo"
+  fi
+  printf '%s\n' "$repo"
+}
+
+orchestration_assert_git_repo() {
+  local repo="$1"
+  [[ -d "$repo/.git" ]] || orchestration_fail "repo is not a git checkout: $repo"
+}
+
+orchestration_resolve_branch_ref() {
+  local repo="$1"
+  local branch="$2"
+
+  if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+    printf '%s\n' "$branch"
+    return 0
+  fi
+  if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    printf '%s\n' "origin/$branch"
+    return 0
+  fi
+  if git -C "$repo" rev-parse -q --verify "$branch^{commit}" >/dev/null 2>&1; then
+    printf '%s\n' "$branch"
+    return 0
+  fi
+  return 1
+}
+
+orchestration_path_matches_pattern() {
+  local path="$1"
+  local pattern="$2"
+  [[ -n "$pattern" ]] || return 1
+  case "$path" in
+    $pattern) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+orchestration_sequence_before() {
+  local manifest="$1"
+  local lane="$2"
+  local seq_len
+  local found=0
+
+  seq_len="$(yq e '.sequence | length' "$manifest")"
+  [[ "$seq_len" =~ ^[0-9]+$ ]] || seq_len=0
+  if [[ "$seq_len" -eq 0 ]]; then
+    return 0
+  fi
+
+  while IFS= read -r seq_lane; do
+    [[ -z "$seq_lane" || "$seq_lane" == "null" ]] && continue
+    if [[ "$seq_lane" == "$lane" ]]; then
+      found=1
+      break
+    fi
+    printf '%s\n' "$seq_lane"
+  done < <(yq e -r '.sequence[]?' "$manifest")
+
+  if [[ "$found" -ne 1 ]]; then
+    return 2
+  fi
+  return 0
+}
+
+orchestration_lane_status_value() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    printf '%s\n' ""
+    return 0
+  fi
+  yq e -r '.status // ""' "$file"
+}
+
+orchestration_lane_is_validated_or_integrated() {
+  local loop_dir="$1"
+  local lane="$2"
+  local val_file="$loop_dir/validations/$lane.yaml"
+  local int_file="$loop_dir/integrations/$lane.yaml"
+  local val_status int_status
+
+  val_status="$(orchestration_lane_status_value "$val_file")"
+  int_status="$(orchestration_lane_status_value "$int_file")"
+
+  [[ "$val_status" == "validated" || "$int_status" == "applied" ]]
+}
+
+orchestration_lane_is_integrated() {
+  local loop_dir="$1"
+  local lane="$2"
+  local int_file="$loop_dir/integrations/$lane.yaml"
+  local int_status
+
+  int_status="$(orchestration_lane_status_value "$int_file")"
+  [[ "$int_status" == "applied" ]]
+}
+
+orchestration_collect_allow_patterns() {
+  local manifest="$1"
+  local lane="$2"
+  local allow_type
+
+  allow_type="$(yq e -r '.allow | type' "$manifest" 2>/dev/null || echo '!!null')"
+  if [[ "$allow_type" == "!!seq" ]]; then
+    yq e -r '.allow[]?' "$manifest"
+  elif [[ "$allow_type" == "!!map" ]]; then
+    yq e -r ".allow.\"$lane\"[]?" "$manifest"
+  fi
+  yq e -r ".lanes.\"$lane\".allow[]?" "$manifest"
+}
+
+orchestration_collect_forbid_patterns() {
+  local manifest="$1"
+  local lane="$2"
+  local forbid_type
+
+  forbid_type="$(yq e -r '.forbid | type' "$manifest" 2>/dev/null || echo '!!null')"
+  if [[ "$forbid_type" == "!!seq" ]]; then
+    yq e -r '.forbid[]?' "$manifest"
+  elif [[ "$forbid_type" == "!!map" ]]; then
+    yq e -r ".forbid.\"$lane\"[]?" "$manifest"
+  fi
+  yq e -r ".lanes.\"$lane\".forbid[]?" "$manifest"
+}
+
+orchestration_collect_checks() {
+  local manifest="$1"
+  local lane="$2"
+  local check_type
+
+  check_type="$(yq e -r '.checks | type' "$manifest" 2>/dev/null || echo '!!null')"
+  if [[ "$check_type" == "!!seq" ]]; then
+    yq e -r '.checks[]?' "$manifest"
+  elif [[ "$check_type" == "!!map" ]]; then
+    yq e -r ".checks.\"$lane\"[]?" "$manifest"
+  fi
+  yq e -r ".lanes.\"$lane\".checks[]?" "$manifest"
 }

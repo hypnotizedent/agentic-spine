@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+
 usage() {
   cat <<'USAGE'
 orchestration-integrate - Integrate a validated lane commit into main
@@ -10,12 +12,190 @@ Usage:
 USAGE
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-esac
+ROOT="$(orchestration_root)"
+LOOP_ID=""
+LANE=""
+COMMIT_SHA=""
+APPLY=0
 
-echo "ERROR: integrate logic not wired yet"
-exit 1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --lane) LANE="${2:-}"; shift 2 ;;
+    --commit) COMMIT_SHA="${2:-}"; shift 2 ;;
+    --apply) APPLY=1; shift ;;
+    --dry-run) APPLY=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) orchestration_fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || orchestration_fail "--loop-id is required"
+[[ -n "$LANE" ]] || orchestration_fail "--lane is required"
+
+orchestration_assert_id "$LOOP_ID" "loop id"
+orchestration_assert_id "$LANE" "lane"
+
+orchestration_need yq
+orchestration_need git
+orchestration_ensure_manifest "$ROOT" "$LOOP_ID"
+
+manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
+loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+mkdir -p "$loop_dir/integrations" "$loop_dir/artifacts"
+
+repo="$(orchestration_manifest_repo "$manifest" "$ROOT")"
+orchestration_assert_git_repo "$repo"
+
+expected_owner="$(yq e -r '.apply_owner // ""' "$manifest")"
+[[ -n "$expected_owner" ]] || orchestration_fail "manifest missing apply_owner"
+
+actor="$(orchestration_actor)"
+if [[ "$expected_owner" != "$actor" && "$expected_owner" != "${USER:-}" ]]; then
+  orchestration_fail "apply-owner only: expected '$expected_owner', got '$actor'"
+fi
+
+current_branch="$(git -C "$repo" branch --show-current)"
+[[ "$current_branch" == "main" ]] || orchestration_fail "must run from main (current: $current_branch)"
+
+git -C "$repo" diff --quiet || orchestration_fail "working tree not clean"
+git -C "$repo" diff --cached --quiet || orchestration_fail "index not clean"
+
+validation_file="$loop_dir/validations/$LANE.yaml"
+[[ -f "$validation_file" ]] || orchestration_fail "lane not validated: $LANE"
+validation_status="$(yq e -r '.status // ""' "$validation_file")"
+[[ "$validation_status" == "validated" ]] || orchestration_fail "lane validation status is not validated: $validation_status"
+
+validated_commit="$(yq e -r '.commit // ""' "$validation_file")"
+[[ -n "$validated_commit" ]] || orchestration_fail "validation record missing commit for lane: $LANE"
+
+if [[ -n "$COMMIT_SHA" && "$COMMIT_SHA" != "$validated_commit" ]]; then
+  orchestration_fail "only validated commit can integrate (validated=$validated_commit requested=$COMMIT_SHA)"
+fi
+COMMIT_SHA="${COMMIT_SHA:-$validated_commit}"
+
+git -C "$repo" cat-file -e "$COMMIT_SHA^{commit}" >/dev/null 2>&1 || orchestration_fail "commit not found: $COMMIT_SHA"
+
+set +e
+mapfile -t prior_lanes < <(orchestration_sequence_before "$manifest" "$LANE")
+seq_rc=$?
+set -e
+if [[ "$seq_rc" -eq 2 ]]; then
+  orchestration_fail "lane not present in sequence: $LANE"
+fi
+for prior_lane in "${prior_lanes[@]:-}"; do
+  [[ -z "$prior_lane" ]] && continue
+  if ! orchestration_lane_is_integrated "$loop_dir" "$prior_lane"; then
+    orchestration_fail "out-of-sequence: integrate $prior_lane before $LANE"
+  fi
+done
+
+integration_file="$loop_dir/integrations/$LANE.yaml"
+if [[ -f "$integration_file" ]]; then
+  existing_status="$(yq e -r '.status // ""' "$integration_file")"
+  if [[ "$existing_status" == "applied" ]]; then
+    existing_commit="$(yq e -r '.commit // ""' "$integration_file")"
+    if [[ "$existing_commit" == "$COMMIT_SHA" ]]; then
+      orchestration_fail "lane already integrated for commit: $COMMIT_SHA"
+    fi
+  fi
+fi
+
+mapfile -t lane_checks < <(orchestration_collect_checks "$manifest" "$LANE" | sed '/^$/d')
+
+start_sha="$(git -C "$repo" rev-parse HEAD)"
+mode="dry-run"
+[[ "$APPLY" -eq 1 ]] && mode="apply"
+
+echo "orchestration.integrate"
+echo "mode: $mode"
+echo "loop_id: $LOOP_ID"
+echo "lane: $LANE"
+echo "repo: $repo"
+echo "commit: $COMMIT_SHA"
+echo "apply_owner: $expected_owner"
+echo ""
+echo "Planned git operations:"
+echo "  git -C \"$repo\" checkout main"
+echo "  git -C \"$repo\" cherry-pick -x --no-commit $COMMIT_SHA"
+if ((${#lane_checks[@]} > 0)); then
+  for check_cmd in "${lane_checks[@]}"; do
+    echo "  (cd \"$repo\" && bash -lc \"$check_cmd\")"
+  done
+else
+  echo "  # no lane checks configured"
+fi
+echo "  git -C \"$repo\" commit --no-edit"
+
+if [[ "$APPLY" -ne 1 ]]; then
+  echo ""
+  echo "DRY-RUN: no git changes applied"
+  exit 0
+fi
+
+if ! git -C "$repo" cherry-pick -x --no-commit "$COMMIT_SHA"; then
+  git -C "$repo" cherry-pick --abort >/dev/null 2>&1 || true
+  orchestration_fail "cherry-pick failed; resolve conflicts first"
+fi
+
+for check_cmd in "${lane_checks[@]:-}"; do
+  [[ -z "$check_cmd" ]] && continue
+  if ! (cd "$repo" && bash -lc "$check_cmd"); then
+    git -C "$repo" cherry-pick --abort >/dev/null 2>&1 || true
+    orchestration_fail "lane check failed: $check_cmd"
+  fi
+done
+
+git -C "$repo" commit --no-edit >/dev/null
+main_after="$(git -C "$repo" rev-parse HEAD)"
+applied_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+{
+  echo "loop_id: $LOOP_ID"
+  echo "lane: $LANE"
+  echo "commit: $COMMIT_SHA"
+  echo "status: applied"
+  echo "mode: apply"
+  echo "applied_by: \"$actor\""
+  echo "applied_at: $applied_at"
+  echo "main_before: $start_sha"
+  echo "main_after: $main_after"
+  echo "checks:"
+  if ((${#lane_checks[@]} > 0)); then
+    for check_cmd in "${lane_checks[@]}"; do
+      echo "  - \"$check_cmd\""
+    done
+  else
+    echo "  - \"none\""
+  fi
+} > "$integration_file"
+
+yq e -i ".lanes.\"$LANE\".status = \"integrated\"" "$manifest"
+yq e -i ".lanes.\"$LANE\".integrated_commit = \"$main_after\"" "$manifest"
+yq e -i ".updated_at = \"$applied_at\"" "$manifest"
+
+artifact_file="$loop_dir/artifacts/integrate-${LANE}-$(date -u +%Y%m%d-%H%M%S).md"
+{
+  echo "# Orchestration Integration"
+  echo
+  echo "- loop_id: $LOOP_ID"
+  echo "- lane: $LANE"
+  echo "- source_commit: $COMMIT_SHA"
+  echo "- main_before: $start_sha"
+  echo "- main_after: $main_after"
+  echo "- applied_by: $actor"
+  echo "- applied_at: $applied_at"
+  echo
+  echo "## Checks"
+  if ((${#lane_checks[@]} > 0)); then
+    for check_cmd in "${lane_checks[@]}"; do
+      echo "- PASS: $check_cmd"
+    done
+  else
+    echo "- none"
+  fi
+} > "$artifact_file"
+
+echo ""
+echo "integration: $integration_file"
+echo "status: APPLIED"

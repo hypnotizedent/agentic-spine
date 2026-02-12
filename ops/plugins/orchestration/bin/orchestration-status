@@ -23,6 +23,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+orchestration_need yq
 state_root="$ROOT/mailroom/state/orchestration"
 [[ -d "$state_root" ]] || {
   echo "orchestration.status"
@@ -30,27 +31,47 @@ state_root="$ROOT/mailroom/state/orchestration"
   exit 0
 }
 
+lane_status() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    yq e -r '.status // "present"' "$file"
+  else
+    echo "missing"
+  fi
+}
+
 print_one() {
   local loop_dir="$1"
   local manifest="$loop_dir/manifest.yaml"
   [[ -f "$manifest" ]] || return 0
-  local id
+
+  local id base_sha apply_owner loop_status seq_count
   id="$(yq e -r '.loop_id // "unknown"' "$manifest")"
-  local base_sha
   base_sha="$(yq e -r '.base_sha // ""' "$manifest")"
-  local apply_owner
   apply_owner="$(yq e -r '.apply_owner // ""' "$manifest")"
-  local seq_count
+  loop_status="$(yq e -r '.status // "open"' "$manifest")"
   seq_count="$(yq e '.sequence | length' "$manifest")"
-  local ticket_count val_count int_count
-  ticket_count="$(find "$loop_dir/tickets" -maxdepth 1 -name '*.yaml' 2>/dev/null | wc -l | tr -d ' ')"
-  val_count="$(find "$loop_dir/validations" -maxdepth 1 -name '*.yaml' 2>/dev/null | wc -l | tr -d ' ')"
-  int_count="$(find "$loop_dir/integrations" -maxdepth 1 -name '*.yaml' 2>/dev/null | wc -l | tr -d ' ')"
+
   echo "loop_id: $id"
+  echo "  status: $loop_status"
   echo "  base_sha: $base_sha"
   echo "  apply_owner: $apply_owner"
   echo "  sequence: $seq_count"
-  echo "  tickets: $ticket_count | validations: $val_count | integrations: $int_count"
+
+  while IFS= read -r lane; do
+    [[ -z "$lane" || "$lane" == "null" ]] && continue
+    ticket_state="$(lane_status "$loop_dir/tickets/$lane.yaml")"
+    validation_state="$(lane_status "$loop_dir/validations/$lane.yaml")"
+    integration_state="$(lane_status "$loop_dir/integrations/$lane.yaml")"
+    echo "  lane[$lane]: ticket=$ticket_state validate=$validation_state integrate=$integration_state"
+  done < <(yq e -r '.sequence[]?' "$manifest")
+
+  if [[ -f "$loop_dir/closed.yaml" ]]; then
+    close_state="$(yq e -r '.status // ""' "$loop_dir/closed.yaml")"
+    close_at="$(yq e -r '.closed_at // ""' "$loop_dir/closed.yaml")"
+    close_by="$(yq e -r '.closed_by // ""' "$loop_dir/closed.yaml")"
+    echo "  close: $close_state at $close_at by $close_by"
+  fi
 }
 
 echo "orchestration.status"

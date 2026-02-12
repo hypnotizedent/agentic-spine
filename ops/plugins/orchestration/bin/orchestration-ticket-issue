@@ -47,34 +47,42 @@ orchestration_assert_id "$LOOP_ID" "loop id"
 orchestration_assert_id "$LANE" "lane"
 
 orchestration_need yq
+orchestration_need git
 orchestration_ensure_manifest "$ROOT" "$LOOP_ID"
 
 manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
+repo="$(orchestration_manifest_repo "$manifest" "$ROOT")"
+orchestration_assert_git_repo "$repo"
+
 loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+mkdir -p "$loop_dir/tickets"
+
 ticket="$loop_dir/tickets/$LANE.yaml"
 worker="${WORKER:-$(orchestration_actor)}"
+issued_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+issued_by="$(orchestration_actor)"
 
 if [[ -n "$COMMIT_SHA" ]]; then
-  git -C "$ROOT" cat-file -e "$COMMIT_SHA^{commit}" >/dev/null 2>&1 || orchestration_fail "commit not found: $COMMIT_SHA"
+  git -C "$repo" cat-file -e "$COMMIT_SHA^{commit}" >/dev/null 2>&1 || orchestration_fail "commit not found: $COMMIT_SHA"
 fi
 
-cat > "$ticket" <<YAML
-loop_id: $LOOP_ID
-lane: $LANE
-branch: $BRANCH
-worker: $worker
-commit: ${COMMIT_SHA:-""}
-note: ${NOTE:-""}
-issued_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-issued_by: $(orchestration_actor)
-status: issued
-YAML
+{
+  echo "loop_id: $LOOP_ID"
+  echo "lane: $LANE"
+  echo "branch: \"$BRANCH\""
+  echo "worker: \"$worker\""
+  echo "commit: \"$COMMIT_SHA\""
+  echo "note: \"$NOTE\""
+  echo "issued_at: $issued_at"
+  echo "issued_by: \"$issued_by\""
+  echo "status: issued"
+} > "$ticket"
 
-yq e -i ".lanes.${LANE}.id = \"${LANE}\"" "$manifest"
-yq e -i ".lanes.${LANE}.branch = \"${BRANCH}\"" "$manifest"
-yq e -i ".lanes.${LANE}.worker = \"${worker}\"" "$manifest"
-yq e -i ".lanes.${LANE}.status = \"ticket-issued\"" "$manifest"
-yq e -i ".updated_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$manifest"
+yq e -i ".lanes.\"$LANE\".id = \"$LANE\"" "$manifest"
+yq e -i ".lanes.\"$LANE\".branch = \"$BRANCH\"" "$manifest"
+yq e -i ".lanes.\"$LANE\".worker = \"$worker\"" "$manifest"
+yq e -i ".lanes.\"$LANE\".status = \"ticket-issued\"" "$manifest"
+yq e -i ".updated_at = \"$issued_at\"" "$manifest"
 
 echo "orchestration.ticket.issue"
 echo "loop_id: $LOOP_ID"

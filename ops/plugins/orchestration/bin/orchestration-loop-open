@@ -59,9 +59,16 @@ orchestration_assert_id "$LOOP_ID" "loop id"
 [[ "$LOOP_ID" =~ ^LOOP- ]] || orchestration_fail "loop id must start with LOOP-"
 
 orchestration_need yq
+orchestration_need git
 
 REPO_PATH="${REPO_PATH:-$ROOT}"
-BASE_SHA="${BASE_SHA:-$(git -C "$ROOT" rev-parse HEAD)}"
+if [[ "$REPO_PATH" != /* ]]; then
+  REPO_PATH="$ROOT/$REPO_PATH"
+fi
+orchestration_assert_git_repo "$REPO_PATH"
+
+BASE_SHA="${BASE_SHA:-$(git -C "$REPO_PATH" rev-parse HEAD)}"
+git -C "$REPO_PATH" cat-file -e "$BASE_SHA^{commit}" >/dev/null 2>&1 || orchestration_fail "base sha not found: $BASE_SHA"
 
 loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
 manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
@@ -72,18 +79,21 @@ fi
 
 mkdir -p "$loop_dir/tickets" "$loop_dir/validations" "$loop_dir/integrations" "$loop_dir/artifacts"
 
+created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 cat > "$manifest" <<YAML
 loop_id: $LOOP_ID
-repo: $REPO_PATH
+repo: "$REPO_PATH"
 base_sha: $BASE_SHA
-apply_owner: $APPLY_OWNER
+apply_owner: "$APPLY_OWNER"
+status: open
 lanes: {}
 allow: {}
 forbid: []
 checks: {}
 sequence: []
-created_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-updated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+created_at: $created_at
+updated_at: $created_at
 YAML
 
 IFS=',' read -r -a lanes <<< "$LANES_CSV"
@@ -91,8 +101,8 @@ for lane in "${lanes[@]:-}"; do
   lane="${lane// /}"
   [[ -z "$lane" ]] && continue
   orchestration_assert_id "$lane" "lane"
-  yq e -i ".lanes.${lane}.id = \"${lane}\"" "$manifest"
-  yq e -i ".lanes.${lane}.status = \"open\"" "$manifest"
+  yq e -i ".lanes.\"$lane\".id = \"$lane\"" "$manifest"
+  yq e -i ".lanes.\"$lane\".status = \"open\"" "$manifest"
 done
 
 if [[ -n "$SEQUENCE_CSV" ]]; then
@@ -102,14 +112,14 @@ if [[ -n "$SEQUENCE_CSV" ]]; then
     lane="${lane// /}"
     [[ -z "$lane" ]] && continue
     orchestration_assert_id "$lane" "sequence lane"
-    yq e -i ".sequence += [\"${lane}\"]" "$manifest"
+    yq e -i ".sequence += [\"$lane\"]" "$manifest"
   done
 elif [[ -n "$LANES_CSV" ]]; then
   yq e -i '.sequence = []' "$manifest"
   for lane in "${lanes[@]:-}"; do
     lane="${lane// /}"
     [[ -z "$lane" ]] && continue
-    yq e -i ".sequence += [\"${lane}\"]" "$manifest"
+    yq e -i ".sequence += [\"$lane\"]" "$manifest"
   done
 fi
 
@@ -118,12 +128,12 @@ for item in "${allow_items[@]}"; do
   pattern="${item#*:}"
   [[ -n "$lane" && -n "$pattern" && "$lane" != "$pattern" ]] || orchestration_fail "--allow must be lane:glob"
   orchestration_assert_id "$lane" "allow lane"
-  yq e -i ".allow.${lane} += [\"${pattern}\"]" "$manifest"
+  yq e -i ".allow.\"$lane\" += [\"$pattern\"]" "$manifest"
 done
 
 for pattern in "${forbid_items[@]}"; do
   [[ -n "$pattern" ]] || orchestration_fail "--forbid requires a glob"
-  yq e -i ".forbid += [\"${pattern}\"]" "$manifest"
+  yq e -i ".forbid += [\"$pattern\"]" "$manifest"
 done
 
 for item in "${check_items[@]}"; do
@@ -131,7 +141,7 @@ for item in "${check_items[@]}"; do
   command="${item#*:}"
   [[ -n "$lane" && -n "$command" && "$lane" != "$command" ]] || orchestration_fail "--check must be lane:command"
   orchestration_assert_id "$lane" "check lane"
-  yq e -i ".checks.${lane} += [\"${command}\"]" "$manifest"
+  yq e -i ".checks.\"$lane\" += [\"$command\"]" "$manifest"
 done
 
 yq e -i ".updated_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$manifest"
