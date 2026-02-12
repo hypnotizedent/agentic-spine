@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+#
+# n8n-snapshot-cron — daily workflow snapshot for automation-stack (VM 202)
+#
+# Deployed to: /home/automation/scripts/n8n-snapshot-cron.sh
+# Cron: 0 3 * * * /home/automation/scripts/n8n-snapshot-cron.sh >> /home/automation/logs/n8n-snapshot.log 2>&1
+#
+# Uses docker exec to export workflows directly from n8n container.
+# No API key needed — direct database export via n8n CLI.
+# No secrets in plaintext.
+#
+# Retention: 7 days (configurable via RETENTION_DAYS).
+#
+
+BACKUP_DIR="${N8N_SNAPSHOT_DIR:-/home/automation/backups/n8n-workflows}"
+RETENTION_DAYS="${N8N_SNAPSHOT_RETENTION_DAYS:-7}"
+CONTAINER_NAME="${N8N_CONTAINER_NAME:-n8n}"
+DATE="$(date +%Y%m%d-%H%M%S)"
+SNAPSHOT_DIR="${BACKUP_DIR}/${DATE}"
+CONTAINER_TMP="/tmp/n8n-workflow-export-${DATE}"
+
+log() { echo "[$(date -Iseconds)] $*"; }
+
+log "=== n8n workflow snapshot start ==="
+
+# Verify container is running
+if ! docker inspect --format='{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null | grep -q true; then
+  log "FAIL: container '$CONTAINER_NAME' is not running"
+  exit 1
+fi
+
+mkdir -p "$SNAPSHOT_DIR"
+
+# Export all workflows via n8n CLI inside container (--backup = --all --pretty --separate)
+log "exporting workflows via n8n CLI..."
+docker exec "$CONTAINER_NAME" mkdir -p "$CONTAINER_TMP"
+docker exec "$CONTAINER_NAME" n8n export:workflow --backup --output="$CONTAINER_TMP"
+
+# Copy exports out of container
+docker cp "${CONTAINER_NAME}:${CONTAINER_TMP}/." "$SNAPSHOT_DIR/"
+
+# Clean up container temp dir
+docker exec "$CONTAINER_NAME" rm -rf "$CONTAINER_TMP"
+
+# Count exported files
+file_count=$(find "$SNAPSHOT_DIR" -name '*.json' -type f | wc -l)
+log "exported $file_count workflow(s) to $SNAPSHOT_DIR"
+
+if [[ "$file_count" -eq 0 ]]; then
+  log "WARN: zero workflows exported — snapshot directory will be pruned"
+  rmdir "$SNAPSHOT_DIR" 2>/dev/null || true
+  exit 1
+fi
+
+# Write manifest
+cat > "${SNAPSHOT_DIR}/manifest.txt" <<EOF
+snapshot_date: ${DATE}
+workflow_count: ${file_count}
+container: ${CONTAINER_NAME}
+method: n8n_cli_export
+retention_days: ${RETENTION_DAYS}
+EOF
+
+# Prune old snapshots
+pruned=0
+if [[ -d "$BACKUP_DIR" ]]; then
+  while IFS= read -r old_dir; do
+    rm -rf "$old_dir"
+    pruned=$((pruned + 1))
+  done < <(find "$BACKUP_DIR" -maxdepth 1 -mindepth 1 -type d -mtime +"$RETENTION_DAYS")
+fi
+log "pruned $pruned old snapshot(s) (retention: ${RETENTION_DAYS} days)"
+
+log "=== n8n workflow snapshot complete ==="

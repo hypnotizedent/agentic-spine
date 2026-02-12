@@ -141,8 +141,8 @@ download-stack (VM 209) ←→ streaming-stack (VM 210)
   ├── bazarr on 210 calls radarr/sonarr on 209
   └── both depend on NFS from pve (/media, /tank/docker/*)
 
-automation-stack (VM 202)
-  ├── n8n (workflow automation, postgres-backed)
+automation-stack (VM 202) — see N8N_RECOVERY_RUNBOOK.md
+  ├── n8n (workflow automation, postgres-backed, daily JSON snapshots at 03:00)
   ├── ollama + open-webui (local LLM)
   └── no inbound deps from other VMs
 
