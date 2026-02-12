@@ -58,6 +58,21 @@ BRAIN_RULES="${REPO}/docs/brain/rules.md"
 
 # Model/provider config
 WATCHER_PROVIDER="${SPINE_WATCHER_PROVIDER:-zai}"  # zai | anthropic
+WATCHER_ALLOW_ANTHROPIC="${SPINE_WATCHER_ALLOW_ANTHROPIC:-0}"
+
+case "$WATCHER_PROVIDER" in
+    zai|anthropic) ;;
+    *)
+        echo "ERROR: SPINE_WATCHER_PROVIDER must be 'zai' or 'anthropic' (got: $WATCHER_PROVIDER)"
+        exit 1
+        ;;
+esac
+
+if [[ "$WATCHER_PROVIDER" == "anthropic" && "$WATCHER_ALLOW_ANTHROPIC" != "1" ]]; then
+    echo "ERROR: provider=anthropic is blocked by default. Set SPINE_WATCHER_ALLOW_ANTHROPIC=1 to override."
+    exit 1
+fi
+
 if [[ "$WATCHER_PROVIDER" == "anthropic" ]]; then
     MODEL="${CLAUDE_MODEL:-claude-sonnet-4-20250514}"
     MAX_TOKENS="${CLAUDE_MAX_TOKENS:-4096}"
@@ -141,14 +156,8 @@ check_dependencies() {
 
     if [[ "$WATCHER_PROVIDER" == "anthropic" ]]; then
         if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-            if command -v security >/dev/null 2>&1; then
-                ANTHROPIC_API_KEY="$(security find-generic-password -a "$USER" -s "anthropic-api-key" -w 2>/dev/null)" || true
-                export ANTHROPIC_API_KEY
-            fi
-            if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-                echo "ERROR: ANTHROPIC_API_KEY not set (provider=anthropic)"
-                exit 1
-            fi
+            echo "ERROR: ANTHROPIC_API_KEY not set (provider=anthropic)"
+            exit 1
         fi
         return
     fi

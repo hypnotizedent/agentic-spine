@@ -682,6 +682,14 @@ else
   warn "OpenCode governed entry lock gate not present"
 fi
 
+# D74: Billing/provider lane lock (background defaults + launchd template invariants)
+echo -n "D74 billing/provider lane lock... "
+if [[ -x "$SP/surfaces/verify/d74-billing-provider-lane-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d74-billing-provider-lane-lock.sh"
+else
+  warn "Billing/provider lane lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

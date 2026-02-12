@@ -57,7 +57,7 @@ No API keys are stored in this repo. The credentials file exports values such as
 `ZAI_API_KEY` / `Z_AI_API_KEY`, `INFISICAL_TOKEN`, and other provider tokens as env vars; utility
 scripts read them via `secrets.exec`, never via a checked-in file. Set
 `SPINE_ENGINE_PROVIDER=zai` (or another provider) in the same shell before you
-invoke `./bin/ops run`.
+invoke `./bin/ops run`. Default provider is `zai`.
 
 ## z.ai Provider
 
