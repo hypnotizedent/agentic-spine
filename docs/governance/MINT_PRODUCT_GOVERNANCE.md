@@ -1,15 +1,16 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-11
+last_verified: 2026-02-12
 scope: mint-product-governance
 ---
 
 # Mint Product Governance
 
-> Canonical governance framework for mint-os module extraction and operation.
+> Canonical governance framework for mint-modules operation.
 > Consumed by: all agents working on mint-modules.
 > Authority: agentic-spine (this file). Code authority: mint-modules repo.
+> Fresh-slate plan: mint-modules repo `docs/DECISIONS/ADR-001..003` + `docs/PLANNING/MINT_FRESH_SLATE_MASTER_PLAN.md`.
 
 ## 1. Authority Model
 
@@ -30,11 +31,14 @@ scope: mint-product-governance
 
 Each module must declare ownership in its SERVICE_REGISTRY entry:
 
-| Module | Owner | Services | Deploy Target | Secrets Namespace |
-|--------|-------|----------|---------------|-------------------|
-| artwork | @ronny | files-api | docker-host:~/artwork-module/ | /spine/services/artwork/ |
-| quote-page | @ronny | quote-page | docker-host:~/quote-page/ | /spine/services/quote-page/ |
-| order-intake | @ronny | TBD | TBD | /spine/services/order-intake/ |
+| Module | Owner | Services | Current Deploy Target | Fresh-Slate Target | Secrets Namespace |
+|--------|-------|----------|----------------------|-------------------|-------------------|
+| artwork | @ronny | files-api | docker-host:~/artwork-module/ (interim) | mint-apps VM (ADR-001) | /spine/services/artwork/ |
+| quote-page | @ronny | quote-page | docker-host:~/quote-page/ (interim) | mint-apps VM (ADR-001) | /spine/services/quote-page/ |
+| order-intake | @ronny | TBD | TBD | mint-apps VM (ADR-001) | /spine/services/order-intake/ |
+
+> **Fresh-slate target state:** Modules migrate to `mint-apps` VM, data services to `mint-data` VM.
+> Current docker-host deployment is interim. See ADR-001 in mint-modules for hard rules.
 
 **Deploy permission:** Only the module owner may deploy to production.
 Agents may propose changes but must use the mailroom proposal flow.
@@ -59,6 +63,9 @@ Each module with an HTTP API must maintain an `API.md` file in its module root:
 - Additive changes (new endpoints, new optional fields) are minor bumps (no prefix change).
 
 ## 4. Data Ownership Boundaries
+
+> **Fresh-slate note:** V1 fresh-slate starts with an empty `mint_modules` database on `mint-data` VM (ADR-002).
+> Legacy tables below document current shared `mint_os` DB on docker-host. They are NOT part of v1 fresh-slate runtime.
 
 | Table | Owner Module | Read Access | Write Access |
 |-------|-------------|-------------|--------------|
