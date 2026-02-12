@@ -658,6 +658,14 @@ else
   warn "secrets deprecated alias lock gate not present"
 fi
 
+# D71: Deprecated reference allowlist lock (workbench scripts vs allowlist)
+echo -n "D71 deprecated ref allowlist lock... "
+if [[ -x "$SP/surfaces/verify/d71-deprecated-ref-allowlist-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d71-deprecated-ref-allowlist-lock.sh"
+else
+  warn "deprecated ref allowlist lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
