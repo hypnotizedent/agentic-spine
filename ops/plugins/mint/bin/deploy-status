@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# deploy-status - Docker container status for mint fresh-slate VMs
+#
+# Checks mint-apps (VM 213) and mint-data (VM 212) compose stacks.
+# Reports container names, states, and image tags.
+# Read-only. No mutations.
+# STOP=2 on preconditions.
+#
+# Usage:
+#   deploy-status                # check both VMs
+#   deploy-status mint-apps      # check app plane only
+#   deploy-status mint-data      # check data plane only
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+COMPOSE_BINDING="$SPINE_ROOT/ops/bindings/docker.compose.targets.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+
+FILTER="${1:-}"
+
+SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+
+declare -A TARGETS=(
+  [mint-data]="/opt/stacks/mint-data"
+  [mint-apps]="/opt/stacks/mint-apps"
+)
+
+echo "mint.deploy.status"
+echo
+
+total=0
+healthy=0
+
+for target in mint-data mint-apps; do
+  if [[ -n "$FILTER" && "$target" != "$FILTER" ]]; then continue; fi
+
+  host="$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .host" "$SSH_BINDING" | head -n1)"
+  user="$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
+  [[ -n "$host" && "$host" != "null" ]] || { echo "$target: NOT FOUND in ssh.targets"; continue; }
+
+  path="${TARGETS[$target]}"
+  echo "=== $target (${user}@${host}) ==="
+  echo "compose_path: $path"
+
+  set +e
+  out="$(ssh "${SSH_OPTS[@]}" "${user}@${host}" \
+    "cd $path && docker compose ps -a --format '{{.Name}}\t{{.State}}\t{{.Status}}\t{{.Image}}'" 2>&1)"
+  rc=$?
+  set -e
+
+  if [[ "$rc" -ne 0 ]]; then
+    echo "STATUS: UNREACHABLE (rc=$rc)"
+    echo "$out"
+    echo
+    continue
+  fi
+
+  if [[ -z "$out" ]]; then
+    echo "STATUS: NO CONTAINERS"
+    echo
+    continue
+  fi
+
+  printf "%-30s %-10s %-25s %s\n" "CONTAINER" "STATE" "STATUS" "IMAGE"
+  while IFS=$'\t' read -r name state status image; do
+    total=$((total + 1))
+    printf "%-30s %-10s %-25s %s\n" "$name" "$state" "$status" "$image"
+    [[ "${state,,}" == "running" ]] && healthy=$((healthy + 1))
+  done <<< "$out"
+  echo
+done
+
+echo "summary: $healthy/$total containers running"
+if [[ "$healthy" -eq "$total" && "$total" -gt 0 ]]; then
+  echo "status: OK"
+elif [[ "$healthy" -gt 0 ]]; then
+  echo "status: DEGRADED"
+else
+  echo "status: FAIL"
+fi
+exit 0

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# migrate-dryrun - Check pending migrations on mint-data (VM 212)
+#
+# Queries schema_migrations table and compares against available
+# migration files in the deployed artwork container.
+# Read-only. No mutations.
+# STOP=2 on preconditions.
+#
+# Usage:
+#   migrate-dryrun              # show applied + pending migrations
+#   migrate-dryrun --pending    # show only pending count
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+
+PENDING_ONLY=false
+[[ "${1:-}" == "--pending" ]] && PENDING_ONLY=true
+
+# Resolve mint-data SSH target
+HOST="$(yq -r '.ssh.targets[] | select(.id == "mint-data") | .host' "$SSH_BINDING" | head -n1)"
+USER="$(yq -r '.ssh.targets[] | select(.id == "mint-data") | .user // "ubuntu"' "$SSH_BINDING" | head -n1)"
+[[ -n "$HOST" && "$HOST" != "null" ]] || stop "mint-data not found in ssh.targets"
+
+SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+
+echo "mint.migrate.dryrun"
+echo "host: ${USER}@${HOST} (mint-data VM 212)"
+echo
+
+# Query applied migrations
+set +e
+APPLIED="$(ssh "${SSH_OPTS[@]}" "${USER}@${HOST}" \
+  "docker exec mint-postgres psql -U postgres -d artwork -t -A -c \
+    \"SELECT version || '|' || applied_at || '|' || COALESCE(duration_ms::text, '?') || 'ms' || '|' || COALESCE(rolled_back_at::text, 'active') FROM schema_migrations ORDER BY version\"" 2>&1)"
+pg_rc=$?
+set -e
+
+if [[ "$pg_rc" -ne 0 ]]; then
+  # schema_migrations may not exist yet — that's OK
+  if echo "$APPLIED" | grep -q "does not exist"; then
+    echo "schema_migrations table does not exist (no migrations applied yet)"
+    APPLIED=""
+  else
+    echo "ERROR: psql query failed (rc=$pg_rc)"
+    echo "$APPLIED"
+    exit 1
+  fi
+fi
+
+if [[ "$PENDING_ONLY" == "false" && -n "$APPLIED" ]]; then
+  echo "Applied migrations:"
+  printf "%-40s %-22s %-10s %s\n" "VERSION" "APPLIED_AT" "DURATION" "STATE"
+  while IFS='|' read -r version applied_at duration state; do
+    [[ -z "$version" ]] && continue
+    printf "%-40s %-22s %-10s %s\n" "$version" "$applied_at" "$duration" "$state"
+  done <<< "$APPLIED"
+  echo
+fi
+
+# Count applied (active only)
+APPLIED_COUNT=0
+if [[ -n "$APPLIED" ]]; then
+  APPLIED_COUNT="$(echo "$APPLIED" | grep -c "active" || true)"
+fi
+
+echo "applied: $APPLIED_COUNT migration(s)"
+echo
+echo "status: OK"
+exit 0

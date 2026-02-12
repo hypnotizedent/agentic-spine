@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# modules-health - HTTP health probe for mint module endpoints (fresh-slate)
+#
+# Checks: files-api, order-intake, quote-page on mint-apps (VM 213)
+#         MinIO, PostgreSQL, Redis on mint-data (VM 212)
+#
+# Read-only. No mutations.
+# STOP=2 on preconditions.
+#
+# Usage:
+#   modules-health              # check all mint endpoints
+#   modules-health <component>  # check specific (files-api|order-intake|quote-page|minio|postgres|redis)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+
+FILTER="${1:-}"
+
+# Resolve SSH targets from binding
+MINT_APPS_HOST="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .host' "$SSH_BINDING" | head -n1)"
+MINT_DATA_HOST="$(yq -r '.ssh.targets[] | select(.id == "mint-data") | .host' "$SSH_BINDING" | head -n1)"
+MINT_APPS_USER="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .user // "ubuntu"' "$SSH_BINDING" | head -n1)"
+MINT_DATA_USER="$(yq -r '.ssh.targets[] | select(.id == "mint-data") | .user // "ubuntu"' "$SSH_BINDING" | head -n1)"
+
+[[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "mint-apps not found in ssh.targets"
+[[ -n "$MINT_DATA_HOST" && "$MINT_DATA_HOST" != "null" ]] || stop "mint-data not found in ssh.targets"
+
+echo "mint.modules.health"
+echo "mint-apps: ${MINT_APPS_USER}@${MINT_APPS_HOST} (VM 213)"
+echo "mint-data: ${MINT_DATA_USER}@${MINT_DATA_HOST} (VM 212)"
+echo
+
+# HTTP endpoints to check
+declare -A ENDPOINTS=(
+  [files-api]="http://${MINT_APPS_HOST}:3500/health"
+  [order-intake]="http://${MINT_APPS_HOST}:3400/health"
+  [quote-page]="http://${MINT_APPS_HOST}:3341/health"
+  [minio]="http://${MINT_DATA_HOST}:9000/minio/health/live"
+)
+
+SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+
+printf "%-16s %-10s %-10s %s\n" "COMPONENT" "STATUS" "TIME" "NOTE"
+
+fail=0
+checked=0
+
+check_http() {
+  local name="$1" url="$2"
+  if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then return; fi
+  checked=$((checked + 1))
+  local start_ms end_ms dur_ms http_code curl_exit
+  start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  set +e
+  http_code="$(curl -fsS -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$url" 2>/dev/null)"
+  curl_exit=$?
+  set -e
+  end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  dur_ms=$((end_ms - start_ms))
+  if [[ "$curl_exit" -eq 0 && "$http_code" == "200" ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "OK" "${dur_ms}ms" ""
+  elif [[ "$curl_exit" -eq 0 ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "DEGRADED" "${dur_ms}ms" "http=$http_code"
+    fail=1
+  elif [[ "$curl_exit" -eq 28 ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "TIMEOUT" "${dur_ms}ms" ""
+    fail=1
+  elif [[ "$curl_exit" -eq 7 ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "REFUSED" "${dur_ms}ms" ""
+    fail=1
+  else
+    printf "%-16s %-10s %-10s %s\n" "$name" "FAIL" "${dur_ms}ms" "curl=$curl_exit"
+    fail=1
+  fi
+}
+
+check_ssh_service() {
+  local name="$1" host="$2" user="$3" cmd="$4"
+  if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then return; fi
+  checked=$((checked + 1))
+  local start_ms end_ms dur_ms
+  start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  set +e
+  local out
+  out="$(ssh "${SSH_OPTS[@]}" "${user}@${host}" "$cmd" 2>&1)"
+  local rc=$?
+  set -e
+  end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  dur_ms=$((end_ms - start_ms))
+  if [[ "$rc" -eq 0 ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "OK" "${dur_ms}ms" ""
+  else
+    printf "%-16s %-10s %-10s %s\n" "$name" "FAIL" "${dur_ms}ms" "rc=$rc"
+    fail=1
+  fi
+}
+
+# HTTP checks
+for name in files-api order-intake quote-page minio; do
+  check_http "$name" "${ENDPOINTS[$name]}"
+done
+
+# PostgreSQL check via SSH + docker exec
+check_ssh_service "postgres" "$MINT_DATA_HOST" "$MINT_DATA_USER" \
+  "docker exec mint-postgres pg_isready -U postgres -q"
+
+# Redis check via SSH + docker exec
+check_ssh_service "redis" "$MINT_DATA_HOST" "$MINT_DATA_USER" \
+  "docker exec mint-redis redis-cli ping | grep -q PONG"
+
+echo
+
+if [[ "$checked" -eq 0 && -n "$FILTER" ]]; then
+  echo "STOP (2): component '$FILTER' not found"
+  exit 2
+fi
+
+if [[ "$fail" -eq 1 ]]; then
+  echo "status: FAIL (some components unhealthy)"
+else
+  echo "status: OK (all components healthy)"
+fi
+exit 0
