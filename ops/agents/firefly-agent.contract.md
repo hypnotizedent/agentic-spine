@@ -1,6 +1,7 @@
 # firefly-agent Contract
 
-> **Status:** registered
+> **Status:** superseded
+> **Superseded-By:** finance-agent
 > **Domain:** finance
 > **Owner:** @ronny
 > **Created:** 2026-02-11

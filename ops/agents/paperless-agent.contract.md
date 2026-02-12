@@ -1,6 +1,7 @@
 # paperless-agent Contract
 
-> **Status:** registered
+> **Status:** superseded
+> **Superseded-By:** finance-agent
 > **Domain:** documents
 > **Owner:** @ronny
 > **Created:** 2026-02-11
