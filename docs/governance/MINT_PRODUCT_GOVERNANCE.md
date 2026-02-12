@@ -156,3 +156,8 @@ Before any module deployment to production:
 - **Proposal flow**: All agent-authored module changes go through `proposals.apply`.
 - **This document** is the single source of truth for product-level governance.
   Infra-level governance remains under `AGENTS.md` and `AGENT_GOVERNANCE_BRIEF.md`.
+
+## 10. Related Architecture Docs
+
+- [Pricing API Boundary](../ARCHITECTURE/PRICING_API_BOUNDARY.md) — ownership, schema, error contract, idempotency, integration touchpoints
+- [Pricing Health Spec](../ARCHITECTURE/PRICING_HEALTH_SPEC.md) — `/health` contract, metrics, degradation criteria, timeout budget
