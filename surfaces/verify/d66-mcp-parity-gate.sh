@@ -13,9 +13,9 @@ set -euo pipefail
 
 WORKBENCH="${HOME}/code/workbench"
 
-# D66 is advisory (WARN) until workbench parity is enforced.
-# Known drift: media-agent local vs MCPJungle copies diverged during P2 governance.
-fail() { echo "D66 WARN: $*" >&2; }
+# D66 promoted to enforcing (LOOP-MCP-RUNTIME-EXECUTION-20260212).
+# Parity restored: media-agent local→MCPJungle sync completed 2026-02-12.
+fail() { echo "D66 FAIL: $*" >&2; }
 warn() { echo "D66 WARN: $*" >&2; }
 
 # Define parity pairs: local_path|mcpjungle_path
@@ -54,8 +54,8 @@ for pair in "${PAIRS[@]}"; do
 done
 
 if [[ $errors -gt 0 ]]; then
-  echo "D66 WARN: $errors parity issue(s) detected (advisory, non-blocking)"
-  exit 0
+  echo "D66 FAIL: $errors parity issue(s) detected"
+  exit 1
 fi
 
 echo "D66 PASS: MCP server parity intact (${#PAIRS[@]} pairs checked)"
