@@ -2714,108 +2714,127 @@ gaps:
   - id: GAP-OP-135
     discovered_by: "workbench-confusion-audit-20260212"
     discovered_at: "2026-02-12"
-    type: missing-process
-    doc: "workbench/scripts/"
+    type: runtime-bug
+    doc: "workbench/bin/"
     description: |
-      Workbench script plane is broad (160 scripts) and mostly outside capability
-      governance boundaries, which creates agent confusion about which scripts
-      are authoritative/governed versus helper-only utilities.
-    severity: medium
+      `workbench/bin/` has symlink rot with D42 path violations (`/Code/`).
+      Four command symlinks (`infra`, `mono`, `update`, `work`) point to
+      non-existent targets. Additional links (`mint`, `ops`, `verify`) still
+      use uppercase `/Code/` and rely on compatibility aliasing.
+    severity: critical
     status: open
     notes: |
-      Resolve by introducing script governance tiers and a discoverable
-      allowlist/registry for executable authority classes.
+      Resolve by repointing all bin symlinks to lowercase canonical paths and
+      adding drift enforcement for bin link integrity.
 
   - id: GAP-OP-136
     discovered_by: "workbench-confusion-audit-20260212"
     discovered_at: "2026-02-12"
-    type: duplicate-truth
-    doc: "workbench/scripts/root/verify_artwork.sh + workbench/scripts/root/verify_minio_rclone.sh + workbench/scripts/root/n8n/*.sh"
+    type: runtime-bug
+    doc: "workbench/scripts/root/system-status.sh + workbench/scripts/root/docker-safe.sh + workbench/scripts/root/sneakernet.sh + workbench/scripts/root/infra/verify-identity.sh"
     description: |
-      Some workbench scripts produce local workbench/receipts/* artifacts,
-      creating a parallel evidence plane outside spine session receipts and
-      weakening traceability expectations for agents/operators.
-    severity: medium
+      Multiple active scripts still target destroyed or reshaped infrastructure:
+      `system-status.sh` assumes docker-host monolith containers, `docker-safe.sh`
+      maps to stacks no longer present, `sneakernet.sh` targets removed media-stack
+      endpoint, and `verify-identity.sh` pins VM 201-era media-stack IP.
+    severity: critical
     status: open
     notes: |
-      Resolve by migrating these checks to spine capabilities or explicitly
-      codifying local receipts as non-governance evidence.
+      Resolve by deprecating or rewriting these scripts against current VM layout
+      and routing high-risk operations through governed capabilities.
 
   - id: GAP-OP-137
     discovered_by: "workbench-confusion-audit-20260212"
     discovered_at: "2026-02-12"
-    type: stale-ssot
-    doc: "workbench/docs/legacy/"
+    type: runtime-bug
+    doc: "workbench/scripts/root/* + workbench/bin/*"
     description: |
-      Legacy docs are clearly marked reference but remain highly discoverable
-      and contain stale docker-host assumptions and path/case drift examples.
-      This still causes agent/operator confusion during grep-first exploration.
-    severity: medium
+      Active scripts and symlinks still contain D42 path case violations
+      (`~/Code`, `/Users/ronnyworks/Code`). This causes inconsistent execution
+      behavior and conflict with canonical lowercase path governance.
+    severity: high
     status: open
     notes: |
-      Resolve with stronger quarantine discoverability controls or hardened
-      legacy doc headers that prevent accidental operational use.
+      Resolve by normalizing paths to `/Users/ronnyworks/code` across active
+      scripts/symlinks and enforcing via drift checks.
 
   - id: GAP-OP-138
     discovered_by: "workbench-confusion-audit-20260212"
     discovered_at: "2026-02-12"
-    type: duplicate-truth
-    doc: "workbench/docs/legacy/infrastructure/reference/top-level/GOVERNANCE_MANIFEST.yaml"
+    type: stale-ssot
+    doc: "workbench/docs/legacy/ + workbench/docs/infrastructure/SERVICE_REGISTRY.md + workbench/docs/infrastructure/SSOT.md + workbench/infra/data/SERVICE_REGISTRY.yaml"
     description: |
-      Legacy GOVERNANCE_MANIFEST contains strongly authoritative phrasing and
-      stale include lists (including deprecated registries), despite a
-      non-authoritative warning header.
-    severity: high
+      Workbench doc surface still exposes large legacy/deprecated inventories
+      with stale commands/topology while remaining searchable. This includes
+      legacy runbooks and deprecated registry tombstones that still look like
+      actionable documentation to agents.
+    severity: medium
     status: open
     notes: |
-      Resolve by archiving/removing this manifest or reducing it to a strict
-      tombstone with no actionable governance include lists.
+      Resolve by tightening legacy quarantine, reducing deprecated duplicates,
+      and reinforcing canonical pointer-first docs.
 
   - id: GAP-OP-139
-    discovered_by: "workbench-confusion-audit-20260212"
-    discovered_at: "2026-02-12"
-    type: duplicate-truth
-    doc: "workbench/docs/infrastructure/SERVICE_REGISTRY.md + workbench/docs/infrastructure/SSOT.md + workbench/infra/data/SERVICE_REGISTRY.yaml"
-    description: |
-      Deprecated service-registry/SSOT artifacts remain on disk and searchable.
-      They are marked deprecated, but still add source-of-truth ambiguity for
-      agents/users traversing workbench docs and data surfaces.
-    severity: low
-    status: open
-    notes: |
-      Resolve by consolidating deprecated pointers into one tombstone surface
-      or archiving redundant deprecated artifacts.
-
-  - id: GAP-OP-140
     discovered_by: "workbench-confusion-audit-20260212"
     discovered_at: "2026-02-12"
     type: stale-ssot
     doc: "workbench/infra/cloudflare/tunnel/docker-compose.yml"
     description: |
-      Workbench cloudflare tunnel compose still maps finance-related hostnames
-      (firefly-iii, ghostfolio, mail-archiver) to legacy docker-host
-      100.92.156.118, creating a bad-cutover risk if this file is treated as
-      deployable runtime config.
+      Workbench cloudflare tunnel compose maps finance service hostnames to
+      legacy docker-host IP `100.92.156.118` instead of finance VM 211 target.
+      Applying this file would route traffic to the wrong host.
     severity: high
     status: open
     notes: |
-      Resolve by aligning mappings to current VM 211 finance runtime or
-      marking this compose explicitly non-deployable.
+      Resolve by updating finance host mappings to canonical runtime or marking
+      this file as non-deployable reference until aligned.
+
+  - id: GAP-OP-140
+    discovered_by: "workbench-confusion-audit-20260212"
+    discovered_at: "2026-02-12"
+    type: duplicate-truth
+    doc: "workbench/docs/legacy/infrastructure/reference/top-level/GOVERNANCE_MANIFEST.yaml"
+    description: |
+      Legacy `GOVERNANCE_MANIFEST.yaml` uses authoritative phrasing and
+      actionable include lists while being non-functional. Agents can mistake
+      it for a live governance loader and follow stale references.
+    severity: medium
+    status: open
+    notes: |
+      Resolve by archiving/removing manifest or reducing it to a strict
+      tombstone with no executable include sections.
 
   - id: GAP-OP-141
     discovered_by: "workbench-confusion-audit-20260212"
     discovered_at: "2026-02-12"
     type: duplicate-truth
+    doc: "workbench/runtime/ + agentic-spine/ops/bindings/home.output.sinks.yaml + workbench/WORKBENCH_CONTRACT.md"
+    description: |
+      `workbench/runtime/` exists as active log/state sink while
+      `WORKBENCH_CONTRACT.md` forbids runtime-like roots (`logs/`, `state/`,
+      `receipts/`, `runs/`). `home.output.sinks.yaml` still explicitly allows
+      `/Users/ronnyworks/code/workbench/runtime/logs/`, creating contract-level
+      authority conflict and runtime bleed into workbench.
+    severity: medium
+    status: open
+    notes: |
+      Resolve by removing workbench runtime sink allowance and relocating
+      runtime outputs to spine-owned surfaces.
+
+  - id: GAP-OP-142
+    discovered_by: "workbench-confusion-audit-20260212"
+    discovered_at: "2026-02-12"
+    type: duplicate-truth
     doc: "workbench/scripts/agents/infisical-agent.sh + agentic-spine/ops/tools/infisical-agent.sh"
     description: |
-      infisical-agent script exists in both workbench and spine surfaces with
-      duplicated implementation, increasing drift/confusion risk around which
-      executable path is canonical authority.
+      `infisical-agent.sh` exists in both workbench and spine surfaces with
+      duplicated implementation, increasing drift risk and ambiguity about
+      canonical executable authority.
     severity: medium
     status: open
     notes: |
       Resolve by enforcing one canonical executable and converting the other
-      to a strict shim/symlink with drift enforcement.
+      surface to a strict shim/symlink backed by drift checks.
 
 # ─────────────────────────────────────────────────────────────
 # Gap Types
