@@ -93,6 +93,11 @@ Run per lane in sequence order:
 
 If validation fails for any lane, stop integration, return lane to worker, and re-validate.
 
+### Multi-Repo Loops
+If the loop declares `related_repos`, integrate validates all related repos are clean before
+each apply. Terminal C must integrate each repo separately in declared order. If any apply
+fails, stop and resolve before continuing to the next repo.
+
 ## Gate 4: Close Loop
 ```bash
 ./bin/ops cap run spine.verify

@@ -64,9 +64,32 @@ Exports:
 - Launch tools from `SPINE_WORKTREE` returned by capability.
 - Allow fallback mode only when explicit env gate is enabled and `--force` is provided.
 
+## Multi-Repo Integration Policy
+
+Loops may declare `related_repos` in their manifest. The integration contract:
+
+1. **Preflight validation**: `orchestration.integrate` validates all related repos are clean
+   (no uncommitted or staged changes) before any apply proceeds.
+2. **Single-repo-per-apply**: each `orchestration.integrate --apply` operates on the primary `repo`
+   only. Terminal C must run separate integrate commands per related repo if they have changes.
+3. **Ordered sequence**: Terminal C integrates repos in a declared order. If any repo apply fails,
+   remaining repos do not apply — Terminal C resolves manually.
+4. **No atomic cross-repo**: git cannot provide atomicity across separate repos. The preflight
+   + ordered apply + Terminal C coordination is the safety model.
+
+Related repos are declared at loop open:
+```bash
+./bin/ops cap run orchestration.loop.open \
+  --loop-id "$LOOP_ID" \
+  --repo /Users/ronnyworks/code/agentic-spine \
+  --related-repo /Users/ronnyworks/code/workbench \
+  ...
+```
+
 ## Expected Safety Properties
 
 - Parallel workers in the same loop resolve to different lane worktrees.
 - Wrong lane/branch attaches are blocked before tool launch.
 - Worker terminals do not run from `main` by accident.
 - Main integration still flows through `validate -> integrate` and sequence checks.
+- Related repos are validated clean before any integration apply proceeds.

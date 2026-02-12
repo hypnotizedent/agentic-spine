@@ -355,6 +355,80 @@ case_happy_path_validate_integrate() {
   pass_case "happy path validate + integrate"
 }
 
+case_related_repo_dirty_blocks_integrate() {
+  local repo related base commit_a
+  repo="$(make_repo)"
+  related="$(make_repo)"
+  base="$(git -C "$repo" rev-parse HEAD)"
+
+  # Create loop with related_repo
+  run_cap "$repo" "$BIN_DIR/orchestration-loop-open" \
+    --loop-id LOOP-T-RELATED-DIRTY \
+    --apply-owner "$USER" \
+    --repo "$repo" \
+    --related-repo "$related" \
+    --base-sha "$base" \
+    --lanes lane-a \
+    --sequence lane-a \
+    --allow "lane-a:src/a/**" >/dev/null
+
+  commit_a="$(make_commit "$repo" "worker/lane-a" "src/a/ok.txt" "ok" "lane a commit")"
+
+  run_cap "$repo" "$BIN_DIR/orchestration-ticket-issue" \
+    --loop-id LOOP-T-RELATED-DIRTY \
+    --lane lane-a \
+    --branch worker/lane-a >/dev/null
+
+  expect_pass "related-repo validate passes" \
+    run_cap "$repo" "$BIN_DIR/orchestration-handoff-validate" \
+      --loop-id LOOP-T-RELATED-DIRTY --lane lane-a --commit "$commit_a" || return 1
+
+  git -C "$repo" checkout -q main
+
+  # Dirty the related repo
+  echo "dirty" > "$related/dirty.txt"
+  git -C "$related" add dirty.txt
+
+  expect_fail_contains "related repo dirty blocks integrate" "related repo has staged changes" \
+    run_cap "$repo" "$BIN_DIR/orchestration-integrate" \
+      --loop-id LOOP-T-RELATED-DIRTY --lane lane-a --apply
+}
+
+case_related_repo_clean_integrate_passes() {
+  local repo related base commit_a
+  repo="$(make_repo)"
+  related="$(make_repo)"
+  base="$(git -C "$repo" rev-parse HEAD)"
+
+  run_cap "$repo" "$BIN_DIR/orchestration-loop-open" \
+    --loop-id LOOP-T-RELATED-CLEAN \
+    --apply-owner "$USER" \
+    --repo "$repo" \
+    --related-repo "$related" \
+    --base-sha "$base" \
+    --lanes lane-a \
+    --sequence lane-a \
+    --allow "lane-a:src/a/**" \
+    --check "lane-a:true" >/dev/null
+
+  commit_a="$(make_commit "$repo" "worker/lane-a" "src/a/ok.txt" "ok" "lane a commit")"
+
+  run_cap "$repo" "$BIN_DIR/orchestration-ticket-issue" \
+    --loop-id LOOP-T-RELATED-CLEAN \
+    --lane lane-a \
+    --branch worker/lane-a >/dev/null
+
+  expect_pass "related-repo validate passes (clean)" \
+    run_cap "$repo" "$BIN_DIR/orchestration-handoff-validate" \
+      --loop-id LOOP-T-RELATED-CLEAN --lane lane-a --commit "$commit_a" || return 1
+
+  git -C "$repo" checkout -q main
+
+  expect_pass "related repo clean allows integrate" \
+    run_cap "$repo" "$BIN_DIR/orchestration-integrate" \
+      --loop-id LOOP-T-RELATED-CLEAN --lane lane-a --apply
+}
+
 case_wrong_branch_rejected
 case_base_sha_mismatch_rejected
 case_forbidden_file_rejected
@@ -362,6 +436,8 @@ case_out_of_sequence_rejected
 case_terminal_entry_isolated_worktrees
 case_terminal_entry_lane_branch_mismatch_rejected
 case_happy_path_validate_integrate
+case_related_repo_dirty_blocks_integrate
+case_related_repo_clean_integrate_passes
 
 echo ""
 echo "tests_passed: $pass_count"

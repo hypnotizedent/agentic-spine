@@ -68,4 +68,23 @@ if jq -e '.provider.anthropic' "$OPENCODE_CFG" >/dev/null 2>&1; then
   fail "opencode.json must not define anthropic provider for governed z.ai-only lane"
 fi
 
+# Governance contract surface: OPENCODE.md must exist and contain worker contract sections
+OPENCODE_MD="$WORKBENCH_ROOT/dotfiles/opencode/OPENCODE.md"
+need_file "$OPENCODE_MD"
+
+rg -q 'Worker Lane Contract' "$OPENCODE_MD" \
+  || fail "OPENCODE.md must contain 'Worker Lane Contract' section"
+
+rg -q 'BLOCK-ENTRY' "$OPENCODE_MD" \
+  || fail "OPENCODE.md must document BLOCK-ENTRY stop behavior"
+
+rg -q 'BLOCK-SCOPE-DRIFT' "$OPENCODE_MD" \
+  || fail "OPENCODE.md must document BLOCK-SCOPE-DRIFT stop behavior"
+
+rg -q 'Handoff Format' "$OPENCODE_MD" \
+  || fail "OPENCODE.md must document handoff format"
+
+rg -q 'Solo Mode Contract' "$OPENCODE_MD" \
+  || fail "OPENCODE.md must document solo mode contract"
+
 echo "D73 PASS: OpenCode governed entry lock enforced"

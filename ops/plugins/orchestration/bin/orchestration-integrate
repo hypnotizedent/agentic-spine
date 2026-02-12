@@ -47,6 +47,28 @@ mkdir -p "$loop_dir/integrations" "$loop_dir/artifacts"
 repo="$(orchestration_manifest_repo "$manifest" "$ROOT")"
 orchestration_assert_git_repo "$repo"
 
+# Multi-repo preflight: if related_repos declared, validate all are clean before apply.
+mapfile -t related_repos < <(yq e -r '.related_repos[]?' "$manifest" 2>/dev/null | sed '/^$/d')
+if ((${#related_repos[@]} > 0)); then
+  echo "multi-repo preflight: ${#related_repos[@]} related repo(s) declared"
+  for rr in "${related_repos[@]}"; do
+    [[ -d "$rr" ]] || orchestration_fail "related repo not found: $rr"
+    if [[ -d "$rr/.git" ]] || [[ -f "$rr/.git" ]]; then
+      if ! git -C "$rr" diff --quiet 2>/dev/null; then
+        orchestration_fail "related repo has uncommitted changes: $rr"
+      fi
+      if ! git -C "$rr" diff --cached --quiet 2>/dev/null; then
+        orchestration_fail "related repo has staged changes: $rr"
+      fi
+      rr_branch="$(git -C "$rr" branch --show-current 2>/dev/null || true)"
+      echo "  related repo OK: $rr (branch=$rr_branch)"
+    else
+      orchestration_fail "related repo is not a git checkout: $rr"
+    fi
+  done
+  echo "multi-repo preflight: PASS"
+fi
+
 expected_owner="$(yq e -r '.apply_owner // ""' "$manifest")"
 [[ -n "$expected_owner" ]] || orchestration_fail "manifest missing apply_owner"
 
