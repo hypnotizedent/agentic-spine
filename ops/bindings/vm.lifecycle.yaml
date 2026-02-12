@@ -398,6 +398,152 @@ vms:
       Services split to VM 209 (download) and VM 210 (streaming).
 
 # ─────────────────────────────────────────────────────────────
+# Home Site VMs/LXCs (proxmox-home — Beelink SER7)
+# ─────────────────────────────────────────────────────────────
+
+  - vmid: 100
+    hostname: homeassistant
+    proxmox_host: proxmox-home
+    role: home-automation
+    owner: "@ronny"
+    status: active
+    created_at: "2024-01-01"  # pre-spine, approximate
+    profile: null  # HA OS, not spine-provisioned
+    lan_ip: 10.0.0.102
+    tailscale_ip: 100.67.120.1
+    ssh_target: ha
+    ssh_user: hassio
+    os: haos  # Home Assistant OS (not standard Ubuntu)
+    resources:
+      cpu_cores: 2
+      memory_mb: 4096
+      boot_disk_gb: 32
+    stacks: []  # HA OS uses its own supervisor, not docker-compose
+    services:
+      - home-assistant
+    backup_target: home-vm-100-ha-primary
+    health_probe_policy: full
+    decommission_policy: requires_final_backup
+    notes: >
+      Home Assistant OS VM. Supervisor manages add-ons (Zigbee, Z-Wave, UniFi).
+      No docker-compose — HA OS uses its own orchestration. Pre-dates spine.
+
+  - vmid: 101
+    hostname: immich
+    proxmox_host: proxmox-home
+    role: photo-management
+    owner: "@ronny"
+    status: stopped
+    created_at: "2024-01-01"  # pre-spine, approximate
+    profile: null  # pre-spine
+    lan_ip: null  # stopped, no LAN IP assigned
+    tailscale_ip: 100.83.160.109
+    ssh_target: null  # stopped, no SSH target
+    ssh_user: null
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 12
+      memory_mb: 16384
+      boot_disk_gb: 80
+    stacks:
+      - immich
+    services:
+      - immich-server
+      - immich-ml
+      - immich-postgres
+      - immich-redis
+      - immich-node-exporter
+    backup_target: home-vm-101-immich-primary
+    health_probe_policy: none  # stopped
+    decommission_policy: requires_final_backup
+    notes: >
+      Home Immich instance. Stopped (has migration snapshot from 2025-10-19).
+      May consolidate with shop Immich (VM 203). 12 cores allocated.
+
+  - vmid: 102
+    hostname: vaultwarden
+    proxmox_host: proxmox-home
+    role: security
+    owner: "@ronny"
+    status: active
+    created_at: "2024-01-01"  # pre-spine, approximate
+    profile: null  # pre-spine
+    lan_ip: null  # DHCP or Tailscale-only
+    tailscale_ip: 100.93.142.63
+    ssh_target: vault
+    ssh_user: root
+    os: ubuntu-24.04
+    resources:
+      cpu_cores: 2
+      memory_mb: 2048
+      boot_disk_gb: 16
+    stacks:
+      - vaultwarden
+    services:
+      - vaultwarden
+    backup_target: home-vm-102-vaultwarden-primary
+    health_probe_policy: full
+    decommission_policy: requires_final_backup
+    notes: >
+      Vaultwarden password manager (home). Compose at /home/ron/vaultwarden/.
+      Non-standard compose path. Running healthy.
+
+  - vmid: 103
+    hostname: download-home
+    proxmox_host: proxmox-home
+    role: media-download
+    owner: "@ronny"
+    status: stopped
+    created_at: "2024-01-01"  # pre-spine, approximate
+    vm_type: lxc
+    profile: null  # pre-spine LXC
+    lan_ip: 10.0.0.103
+    tailscale_ip: 100.125.138.110
+    ssh_target: download-home
+    ssh_user: root
+    os: ubuntu  # LXC
+    resources:
+      cpu_cores: 2
+      memory_mb: 2048
+      boot_disk_gb: 32
+    stacks: []  # stopped, stack unknown
+    services: []
+    backup_target: home-lxc-103-download-primary
+    health_probe_policy: none  # stopped
+    decommission_policy: allow_immediate_destroy
+    notes: >
+      LXC container. *arr stack (home). Stopped. SSH publickey needs setup.
+      Vzdump backup FAILING (NFS permission denied on lxc-usernsexec).
+      Has bind mount /mnt/staging (excluded from backup).
+
+  - vmid: 105
+    hostname: pihole-home
+    proxmox_host: proxmox-home
+    role: dns
+    owner: "@ronny"
+    status: stopped
+    created_at: "2024-01-01"  # pre-spine, approximate
+    vm_type: lxc
+    profile: null  # pre-spine LXC
+    lan_ip: 10.0.0.53
+    tailscale_ip: 100.105.148.96
+    ssh_target: pihole-home
+    ssh_user: root
+    os: ubuntu  # LXC
+    resources:
+      cpu_cores: 1
+      memory_mb: 512
+      boot_disk_gb: 4
+    stacks: []  # stopped
+    services: []
+    backup_target: home-lxc-105-pihole-primary
+    health_probe_policy: none  # stopped
+    decommission_policy: allow_immediate_destroy
+    notes: >
+      LXC container. Pi-hole DNS. Stopped — UDR handles DNS directly.
+      Rebuildable from config. Weekly P2 backup (not yet validated).
+
+# ─────────────────────────────────────────────────────────────
 # Template VMs (not lifecycle-governed)
 # ─────────────────────────────────────────────────────────────
 
