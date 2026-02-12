@@ -1,7 +1,8 @@
 ---
-status: open
+status: closed
 owner: "@ronny"
 created: 2026-02-12
+closed: 2026-02-12
 scope: loop-scope
 loop_id: LOOP-MINT-RUNTIME-PACKAGING-ARTWORK-QUOTE-20260212
 severity: medium
@@ -34,15 +35,43 @@ and add the packaging smoke runbook.
 - [x] authority.project.status: GOVERNED (7/7 pass)
 
 ### P1: Worker D — Artwork runtime hardening
-- [ ] Pending worker handoff
+- [x] docker-compose.yml: added deploy.resources (1 CPU/512M limits, 0.25 CPU/128M reservations)
+- [x] README.md: added Runtime / Docker section (build, run, container details, env vars)
+- [x] Dockerfile, .env.example, .dockerignore already conformant
 
 ### P2: Worker E — Quote-page runtime hardening
-- [ ] Pending worker handoff
+- [x] Dockerfile: npm ci fallback, non-root user reordered before file copy, chown -R
+- [x] docker-compose.yml: added deploy.resources (0.50 CPU/256M limits)
+- [x] .env.example: reorganized with section headers and Docker/local hints
+- [x] .dockerignore: fixed *.md -> *.log exclusion
+- [x] README.md: added Runtime / Docker section with dependency wiring table
 
 ### P3: Worker F — Runtime packaging smoke runbook
-- [ ] Pending worker handoff
+- [x] docs/READINESS/MINT_RUNTIME_PACKAGING_SMOKE.md created
+- [x] Step-by-step verification for all 3 modules (build, start, health, teardown)
+- [x] All-in-one bash smoke script
+- [x] Failure triage section
 
 ### P4: Terminal C — Recert + Closeout
-- [ ] typecheck + build + test pass (artwork, quote-page, order-intake)
-- [ ] Both remotes in sync
-- [ ] Loop closed with evidence
+- [x] typecheck + build + test pass (artwork 95/95, quote-page 51/51, order-intake 113/113)
+- [x] Both remotes in sync (origin + github at `1dbb44f`)
+- [x] Loop closed with evidence
+
+## Evidence
+
+| Check | Result |
+|-------|--------|
+| `npm run typecheck` (artwork) | PASS |
+| `npm run build` (artwork) | PASS |
+| `npm test` (artwork) | 95/95 PASS |
+| `npm run typecheck` (quote-page) | PASS |
+| `npm run build` (quote-page) | PASS |
+| `npm test` (quote-page) | 51/51 PASS |
+| `npm run typecheck` (order-intake) | PASS |
+| `npm run build` (order-intake) | PASS |
+| `npm test` (order-intake) | 113/113 PASS |
+| mint-modules origin push | `1dbb44f` |
+| mint-modules github push | `1dbb44f` |
+
+### Commits (mint-modules)
+- `1dbb44f` — artwork + quote-page runtime hardening + packaging smoke runbook (Workers D/E/F)
