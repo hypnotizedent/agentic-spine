@@ -1,13 +1,24 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-11
 scope: loop-scope
 loop_id: LOOP-HOME-BACKUP-INFRASTRUCTURE-ENABLE-20260209
 severity: high
+closed: 2026-02-12
 ---
 
 # Loop Scope: LOOP-HOME-BACKUP-INFRASTRUCTURE-ENABLE-20260209
+
+## Operator Closure (2026-02-12)
+
+Closed by operator decision to prioritize MCP/RAG execution work over
+time-gated backup evidence bookkeeping.
+
+Current state at closure:
+- Runtime protection is already green (`backup.status` 16/16 OK at closeout time).
+- Remaining checks were schedule-window confirmations, not structural blockers.
+- Any future tuning can be done as a new focused backup hygiene loop.
 
 ## Goal
 

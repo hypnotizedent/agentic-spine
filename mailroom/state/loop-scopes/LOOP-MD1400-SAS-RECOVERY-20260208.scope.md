@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 last_verified: 2026-02-10
 scope: loop-scope
@@ -7,11 +7,12 @@ loop_id: LOOP-MD1400-SAS-RECOVERY-20260208
 severity: critical
 created: 2026-02-08
 blocked_by: "hardware: external SAS HBA ordered (awaiting delivery + install)"
+closed: 2026-02-12
 ---
 
 # LOOP-MD1400-SAS-RECOVERY-20260208
 
-> **Status:** open (hardware-blocked: external SAS HBA ordered 2026-02-10; awaiting install + validation)
+> **Status:** closed (operator-deferred: hardware replacement work paused)
 > **Blocked By:** external SAS HBA delivery + install (PM8072 treated defective after cold boot fail)
 > **Owner:** @ronny
 > **Created:** 2026-02-08
@@ -22,6 +23,16 @@ blocked_by: "hardware: external SAS HBA ordered (awaiting delivery + install)"
 ## Problem Statement
 
 The Dell MD1400 DAS shelf is physically cabled to the R730XD (`pve`) via a Dell SAS cable (DP/N 0GYK61, Mini-SAS HD SFF-8644) but **no drives from the MD1400 are visible to the OS**. The entire shelf's storage is inaccessible.
+
+## Operator Closure (2026-02-12)
+
+Closed by operator decision to stop hardware-gated work and shift focus to
+MCP/RAG runtime execution.
+
+Disposition:
+- No further actions will be executed in this loop.
+- The unresolved hardware risk remains documented in gap tracking as accepted.
+- Resume only via a brand new hardware execution loop when/if re-prioritized.
 
 Two root causes identified:
 
