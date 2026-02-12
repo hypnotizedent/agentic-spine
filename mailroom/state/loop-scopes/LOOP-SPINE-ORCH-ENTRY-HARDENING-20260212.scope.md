@@ -1,12 +1,13 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 created: 2026-02-12
+closed: 2026-02-12
 ---
 
 # LOOP-SPINE-ORCH-ENTRY-HARDENING-20260212
 
-> **Status:** active
+> **Status:** closed
 > **Owner:** @ronny
 > **Created:** 2026-02-12
 > **Severity:** high
