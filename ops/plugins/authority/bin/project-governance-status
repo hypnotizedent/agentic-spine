@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# project-governance-status
+# Read-only: verify a product repo is aligned to spine governance bootstrap rules.
+
+usage() {
+  cat <<'EOF'
+authority.project.status - Check governance bootstrap alignment for a product repo
+
+Usage:
+  project-governance-status --repo-path <path> [options]
+
+Options:
+  --repo-name <name>        Repo slug (default: basename of --repo-path)
+  --gitea-host <host>       Gitea host (default: 100.90.167.39)
+  --gitea-port <port>       Gitea SSH port (default: 2222)
+  --gitea-owner <owner>     Gitea owner/org (default: ronny)
+  --github-org <org>        Expected GitHub org for mirror remote (optional)
+  --origin-remote <name>    Canonical remote name (default: origin)
+  --github-remote <name>    Mirror remote name (default: github)
+  -h, --help                Show this help
+EOF
+}
+
+stop() { echo "STOP: $*" >&2; exit 2; }
+
+REPO_PATH=""
+REPO_NAME=""
+GITEA_HOST="${SPINE_GITEA_HOST:-100.90.167.39}"
+GITEA_PORT="${SPINE_GITEA_PORT:-2222}"
+GITEA_OWNER="${SPINE_GITEA_OWNER:-ronny}"
+GITHUB_ORG="${SPINE_GITHUB_ORG:-}"
+ORIGIN_REMOTE="origin"
+GITHUB_REMOTE="github"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo-path) REPO_PATH="${2:-}"; shift 2 ;;
+    --repo-name) REPO_NAME="${2:-}"; shift 2 ;;
+    --gitea-host) GITEA_HOST="${2:-}"; shift 2 ;;
+    --gitea-port) GITEA_PORT="${2:-}"; shift 2 ;;
+    --gitea-owner) GITEA_OWNER="${2:-}"; shift 2 ;;
+    --github-org) GITHUB_ORG="${2:-}"; shift 2 ;;
+    --origin-remote) ORIGIN_REMOTE="${2:-}"; shift 2 ;;
+    --github-remote) GITHUB_REMOTE="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$REPO_PATH" ]] || stop "--repo-path is required"
+command -v git >/dev/null 2>&1 || stop "missing dependency: git"
+
+REPO_PATH="$(cd "$REPO_PATH" 2>/dev/null && pwd)" || stop "repo path not found: $REPO_PATH"
+git -C "$REPO_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || stop "not a git repo: $REPO_PATH"
+
+if [[ -z "$REPO_NAME" ]]; then
+  REPO_NAME="$(basename "$REPO_PATH")"
+fi
+
+EXPECTED_ORIGIN="ssh://git@${GITEA_HOST}:${GITEA_PORT}/${GITEA_OWNER}/${REPO_NAME}.git"
+EXPECTED_GITHUB=""
+if [[ -n "$GITHUB_ORG" ]]; then
+  EXPECTED_GITHUB="git@github.com:${GITHUB_ORG}/${REPO_NAME}.git"
+fi
+
+ORIGIN_URL="$(git -C "$REPO_PATH" remote get-url "$ORIGIN_REMOTE" 2>/dev/null || true)"
+GITHUB_URL="$(git -C "$REPO_PATH" remote get-url "$GITHUB_REMOTE" 2>/dev/null || true)"
+CURRENT_BRANCH="$(git -C "$REPO_PATH" branch --show-current 2>/dev/null || true)"
+UPSTREAM_REF="$(git -C "$REPO_PATH" rev-parse --abbrev-ref --symbolic-full-name @{upstream} 2>/dev/null || true)"
+
+BOUNDARY_DOC="$REPO_PATH/docs/PRODUCT_BOUNDARY.md"
+GOV_DOC="$REPO_PATH/docs/PRODUCT_GOVERNANCE.md"
+PROJECT_FILE="$REPO_PATH/.spine-project.yaml"
+
+fail_count=0
+warn_count=0
+pass_count=0
+
+pass() { printf "PASS  %s\n" "$*"; pass_count=$((pass_count + 1)); }
+warn() { printf "WARN  %s\n" "$*"; warn_count=$((warn_count + 1)); }
+fail() { printf "FAIL  %s\n" "$*"; fail_count=$((fail_count + 1)); }
+
+echo "authority.project.status"
+echo "repo: $REPO_PATH"
+echo "repo_name: $REPO_NAME"
+echo "expected_origin: $EXPECTED_ORIGIN"
+[[ -n "$EXPECTED_GITHUB" ]] && echo "expected_github: $EXPECTED_GITHUB"
+echo
+
+if [[ -z "$ORIGIN_URL" ]]; then
+  fail "missing canonical remote '$ORIGIN_REMOTE'"
+elif [[ "$ORIGIN_URL" != "$EXPECTED_ORIGIN" ]]; then
+  fail "origin mismatch: got '$ORIGIN_URL'"
+else
+  pass "origin matches canonical Gitea remote"
+fi
+
+if [[ -n "$EXPECTED_GITHUB" ]]; then
+  if [[ -z "$GITHUB_URL" ]]; then
+    fail "missing mirror remote '$GITHUB_REMOTE'"
+  elif [[ "$GITHUB_URL" != "$EXPECTED_GITHUB" ]]; then
+    fail "github mismatch: got '$GITHUB_URL'"
+  else
+    pass "github mirror remote aligned"
+  fi
+else
+  if [[ -n "$GITHUB_URL" ]]; then
+    warn "github remote exists but --github-org was not specified"
+  else
+    pass "github mirror not required for this check"
+  fi
+fi
+
+if [[ -z "$CURRENT_BRANCH" ]]; then
+  warn "unable to detect current branch"
+elif [[ -z "$UPSTREAM_REF" ]]; then
+  warn "no upstream configured for branch '$CURRENT_BRANCH'"
+else
+  UPSTREAM_REMOTE="${UPSTREAM_REF%%/*}"
+  if [[ "$UPSTREAM_REMOTE" != "$ORIGIN_REMOTE" ]]; then
+    fail "branch '$CURRENT_BRANCH' upstream is '$UPSTREAM_REF' (must track '${ORIGIN_REMOTE}/${CURRENT_BRANCH}')"
+  else
+    pass "branch '$CURRENT_BRANCH' tracks canonical upstream '$UPSTREAM_REF'"
+  fi
+fi
+
+[[ -f "$BOUNDARY_DOC" ]] && pass "docs/PRODUCT_BOUNDARY.md exists" || fail "missing docs/PRODUCT_BOUNDARY.md"
+[[ -f "$GOV_DOC" ]] && pass "docs/PRODUCT_GOVERNANCE.md exists" || fail "missing docs/PRODUCT_GOVERNANCE.md"
+[[ -f "$PROJECT_FILE" ]] && pass ".spine-project.yaml exists" || fail "missing .spine-project.yaml"
+
+if [[ -f "$BOUNDARY_DOC" ]]; then
+  if rg -qi "spine owns governance" "$BOUNDARY_DOC"; then
+    pass "PRODUCT_BOUNDARY includes spine authority statement"
+  else
+    warn "PRODUCT_BOUNDARY missing explicit 'spine owns governance' statement"
+  fi
+fi
+
+if [[ -f "$PROJECT_FILE" ]]; then
+  if rg -q "name: \"$REPO_NAME\"|name: $REPO_NAME" "$PROJECT_FILE"; then
+    pass ".spine-project.yaml name matches repo"
+  else
+    warn ".spine-project.yaml name does not match repo name"
+  fi
+fi
+
+echo
+echo "summary: pass=$pass_count warn=$warn_count fail=$fail_count"
+if [[ "$fail_count" -eq 0 ]]; then
+  echo "status: GOVERNED"
+  exit 0
+fi
+
+echo "status: DRIFT"
+exit 1

@@ -1,0 +1,360 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# project-governance-bootstrap
+# Mutating (manual): seed/align governance scaffolding for a new product repo.
+# Default mode is dry-run. Use --execute to mutate.
+
+usage() {
+  cat <<'EOF'
+authority.project.bootstrap - Bootstrap a product repo to spine governance baseline
+
+Usage:
+  project-governance-bootstrap --repo-path <path> [options] [--execute]
+
+Options:
+  --repo-name <name>         Repo slug (default: basename of --repo-path)
+  --product-name <name>      Product display name for docs (default: repo name)
+  --gitea-host <host>        Gitea host (default: 100.90.167.39)
+  --gitea-port <port>        Gitea SSH port (default: 2222)
+  --gitea-api-url <url>      Gitea API base URL (default: http://<host>:3000)
+  --gitea-owner <owner>      Gitea owner/org (default: ronny)
+  --github-org <org>         GitHub org for mirror remote (optional)
+  --ensure-gitea-repo        Ensure canonical Gitea repo exists (API token required)
+  --origin-remote <name>     Canonical remote name (default: origin)
+  --github-remote <name>     Mirror remote name (default: github)
+  --execute                  Apply mutations (default is dry-run)
+  -h, --help                 Show help
+
+Examples:
+  project-governance-bootstrap \
+    --repo-path ~/code/mint-modules \
+    --repo-name mint-modules \
+    --product-name "Mint Modules" \
+    --github-org mint-prints
+
+  project-governance-bootstrap \
+    --repo-path ~/code/new-product \
+    --gitea-owner ronny \
+    --github-org mint-prints \
+    --execute
+EOF
+}
+
+stop() { echo "STOP: $*" >&2; exit 2; }
+
+REPO_PATH=""
+REPO_NAME=""
+PRODUCT_NAME=""
+GITEA_HOST="${SPINE_GITEA_HOST:-100.90.167.39}"
+GITEA_PORT="${SPINE_GITEA_PORT:-2222}"
+GITEA_API_URL="${SPINE_GITEA_API_URL:-}"
+GITEA_OWNER="${SPINE_GITEA_OWNER:-ronny}"
+GITHUB_ORG="${SPINE_GITHUB_ORG:-}"
+ORIGIN_REMOTE="origin"
+GITHUB_REMOTE="github"
+ENSURE_GITEA_REPO=0
+EXECUTE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo-path) REPO_PATH="${2:-}"; shift 2 ;;
+    --repo-name) REPO_NAME="${2:-}"; shift 2 ;;
+    --product-name) PRODUCT_NAME="${2:-}"; shift 2 ;;
+    --gitea-host) GITEA_HOST="${2:-}"; shift 2 ;;
+    --gitea-port) GITEA_PORT="${2:-}"; shift 2 ;;
+    --gitea-api-url) GITEA_API_URL="${2:-}"; shift 2 ;;
+    --gitea-owner) GITEA_OWNER="${2:-}"; shift 2 ;;
+    --github-org) GITHUB_ORG="${2:-}"; shift 2 ;;
+    --ensure-gitea-repo) ENSURE_GITEA_REPO=1; shift ;;
+    --origin-remote) ORIGIN_REMOTE="${2:-}"; shift 2 ;;
+    --github-remote) GITHUB_REMOTE="${2:-}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$REPO_PATH" ]] || stop "--repo-path is required"
+command -v git >/dev/null 2>&1 || stop "missing dependency: git"
+command -v rg >/dev/null 2>&1 || stop "missing dependency: rg"
+
+REPO_PATH="$(cd "$REPO_PATH" 2>/dev/null && pwd)" || stop "repo path not found: $REPO_PATH"
+git -C "$REPO_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || stop "not a git repo: $REPO_PATH"
+
+if [[ -z "$REPO_NAME" ]]; then
+  REPO_NAME="$(basename "$REPO_PATH")"
+fi
+if [[ -z "$PRODUCT_NAME" ]]; then
+  PRODUCT_NAME="$REPO_NAME"
+fi
+if [[ -z "$GITEA_API_URL" ]]; then
+  GITEA_API_URL="http://${GITEA_HOST}:3000"
+fi
+
+EXPECTED_ORIGIN="ssh://git@${GITEA_HOST}:${GITEA_PORT}/${GITEA_OWNER}/${REPO_NAME}.git"
+EXPECTED_GITHUB=""
+if [[ -n "$GITHUB_ORG" ]]; then
+  EXPECTED_GITHUB="git@github.com:${GITHUB_ORG}/${REPO_NAME}.git"
+fi
+
+ORIGIN_URL="$(git -C "$REPO_PATH" remote get-url "$ORIGIN_REMOTE" 2>/dev/null || true)"
+GITHUB_URL="$(git -C "$REPO_PATH" remote get-url "$GITHUB_REMOTE" 2>/dev/null || true)"
+CURRENT_BRANCH="$(git -C "$REPO_PATH" branch --show-current 2>/dev/null || true)"
+
+today="$(date +%Y-%m-%d)"
+BOUNDARY_DOC="$REPO_PATH/docs/PRODUCT_BOUNDARY.md"
+GOV_DOC="$REPO_PATH/docs/PRODUCT_GOVERNANCE.md"
+PROJECT_FILE="$REPO_PATH/.spine-project.yaml"
+
+echo "authority.project.bootstrap"
+echo "mode: $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
+echo "repo: $REPO_PATH"
+echo "repo_name: $REPO_NAME"
+echo "product_name: $PRODUCT_NAME"
+echo "expected_origin: $EXPECTED_ORIGIN"
+echo "ensure_gitea_repo: $ENSURE_GITEA_REPO"
+[[ -n "$EXPECTED_GITHUB" ]] && echo "expected_github: $EXPECTED_GITHUB"
+echo
+
+run() {
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    "$@"
+  else
+    printf "DRY-RUN: "
+    printf "%q " "$@"
+    echo
+  fi
+}
+
+repo_exists_on_gitea() {
+  git ls-remote "$EXPECTED_ORIGIN" HEAD >/dev/null 2>&1
+}
+
+ensure_gitea_repo() {
+  local token="${GITEA_API_TOKEN:-${GITEA_TOKEN:-}}"
+  [[ -n "$token" ]] || stop "GITEA_API_TOKEN/GITEA_TOKEN is required for --ensure-gitea-repo. Use Infisical-backed execution (no basic auth fallback)."
+  command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+
+  local get_code
+  get_code="$(curl -sS -o /dev/null -w "%{http_code}" \
+    -H "Authorization: token ${token}" \
+    "${GITEA_API_URL}/api/v1/repos/${GITEA_OWNER}/${REPO_NAME}" || true)"
+
+  if [[ "$get_code" == "200" ]]; then
+    echo "- canonical Gitea repo already exists"
+    return
+  fi
+
+  echo "- canonical Gitea repo missing; creating via API"
+
+  local payload
+  payload="$(cat <<EOF
+{"name":"${REPO_NAME}","private":true,"default_branch":"main","auto_init":false}
+EOF
+)"
+
+  local create_code
+  create_code="$(curl -sS -o /tmp/gitea_create_repo_resp.json -w "%{http_code}" \
+    -X POST \
+    -H "Authorization: token ${token}" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    "${GITEA_API_URL}/api/v1/user/repos" || true)"
+
+  if [[ "$create_code" == "201" || "$create_code" == "409" ]]; then
+    echo "- Gitea repo create call returned ${create_code} (OK)"
+    return
+  fi
+
+  # Fallback: owner might be an org, try org endpoint.
+  create_code="$(curl -sS -o /tmp/gitea_create_repo_resp.json -w "%{http_code}" \
+    -X POST \
+    -H "Authorization: token ${token}" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    "${GITEA_API_URL}/api/v1/orgs/${GITEA_OWNER}/repos" || true)"
+
+  if [[ "$create_code" != "201" && "$create_code" != "409" ]]; then
+    local body
+    body="$(tr -d '\n' < /tmp/gitea_create_repo_resp.json 2>/dev/null || true)"
+    rm -f /tmp/gitea_create_repo_resp.json
+    stop "unable to create Gitea repo (HTTP ${create_code}). API-only flow enforced; check GITEA_API_TOKEN scope and owner '${GITEA_OWNER}'. Response: ${body}"
+  fi
+
+  echo "- Gitea org repo create call returned ${create_code} (OK)"
+  rm -f /tmp/gitea_create_repo_resp.json
+}
+
+if repo_exists_on_gitea; then
+  echo "repo preflight: canonical repo exists"
+elif [[ "$ENSURE_GITEA_REPO" -eq 1 ]]; then
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    ensure_gitea_repo
+  else
+    echo "DRY-RUN: would create missing canonical repo via Gitea API token"
+  fi
+else
+  stop "canonical Gitea repo missing: ${EXPECTED_ORIGIN}. Re-run with --ensure-gitea-repo --execute and GITEA_API_TOKEN. Basic auth / push-to-create are intentionally unsupported."
+fi
+
+echo
+echo "Remote alignment plan:"
+if [[ -z "$ORIGIN_URL" ]]; then
+  echo "- add canonical origin remote"
+  run git -C "$REPO_PATH" remote add "$ORIGIN_REMOTE" "$EXPECTED_ORIGIN"
+else
+  if [[ "$ORIGIN_URL" == *"github.com"* && -z "$GITHUB_URL" ]]; then
+    echo "- rename existing github-style origin to '$GITHUB_REMOTE'"
+    run git -C "$REPO_PATH" remote rename "$ORIGIN_REMOTE" "$GITHUB_REMOTE"
+    ORIGIN_URL=""
+    GITHUB_URL="$(git -C "$REPO_PATH" remote get-url "$GITHUB_REMOTE" 2>/dev/null || true)"
+  fi
+
+  current_origin="$(git -C "$REPO_PATH" remote get-url "$ORIGIN_REMOTE" 2>/dev/null || true)"
+  if [[ -z "$current_origin" ]]; then
+    echo "- add canonical origin remote"
+    run git -C "$REPO_PATH" remote add "$ORIGIN_REMOTE" "$EXPECTED_ORIGIN"
+  elif [[ "$current_origin" != "$EXPECTED_ORIGIN" ]]; then
+    echo "- set origin remote to canonical Gitea URL"
+    run git -C "$REPO_PATH" remote set-url "$ORIGIN_REMOTE" "$EXPECTED_ORIGIN"
+  else
+    echo "- origin already canonical"
+  fi
+fi
+
+if [[ -n "$EXPECTED_GITHUB" ]]; then
+  if [[ -z "$GITHUB_URL" ]]; then
+    echo "- add github mirror remote"
+    run git -C "$REPO_PATH" remote add "$GITHUB_REMOTE" "$EXPECTED_GITHUB"
+  elif [[ "$GITHUB_URL" != "$EXPECTED_GITHUB" ]]; then
+    echo "- set github mirror URL"
+    run git -C "$REPO_PATH" remote set-url "$GITHUB_REMOTE" "$EXPECTED_GITHUB"
+  else
+    echo "- github mirror already aligned"
+  fi
+fi
+
+echo
+echo "Branch upstream plan:"
+if [[ -n "$CURRENT_BRANCH" ]]; then
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    git -C "$REPO_PATH" fetch "$ORIGIN_REMOTE" "$CURRENT_BRANCH" >/dev/null 2>&1 || true
+    if git -C "$REPO_PATH" show-ref --verify --quiet "refs/remotes/${ORIGIN_REMOTE}/${CURRENT_BRANCH}"; then
+      run git -C "$REPO_PATH" branch --set-upstream-to "${ORIGIN_REMOTE}/${CURRENT_BRANCH}" "$CURRENT_BRANCH"
+    else
+      echo "- WARN remote branch '${ORIGIN_REMOTE}/${CURRENT_BRANCH}' not found; push with:"
+      echo "       git -C \"$REPO_PATH\" push -u ${ORIGIN_REMOTE} ${CURRENT_BRANCH}"
+    fi
+  else
+    echo "- DRY-RUN: would set upstream to ${ORIGIN_REMOTE}/${CURRENT_BRANCH} if remote branch exists"
+  fi
+else
+  echo "- WARN unable to detect current branch; skipping upstream alignment"
+fi
+
+echo
+echo "Doc/bootstrap plan:"
+run mkdir -p "$REPO_PATH/docs"
+
+if [[ ! -f "$BOUNDARY_DOC" ]]; then
+  echo "- create docs/PRODUCT_BOUNDARY.md"
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    cat > "$BOUNDARY_DOC" <<EOF
+# ${PRODUCT_NAME} Product Boundary
+
+Status: authoritative
+Last verified: ${today}
+
+## Authority
+- Code authority: this repository (\`${REPO_NAME}\`)
+- Governance authority: \`~/code/agentic-spine\`
+- Spine owns governance bindings (service registry, routing, health, backup, secrets policy)
+
+## When To Touch Spine
+- New service, port, or host mapping
+- New domain/route or auth policy
+- New health probe or backup target
+- New secrets namespace/policy requirement
+- VM/infra dependency changes
+
+## Working Rule
+- Build product code/specs/tests in this repo.
+- Use spine for control-plane and receipts.
+- Do not duplicate runtime governance docs here.
+EOF
+  fi
+else
+  echo "- keep existing docs/PRODUCT_BOUNDARY.md"
+fi
+
+if [[ ! -f "$GOV_DOC" ]]; then
+  echo "- create docs/PRODUCT_GOVERNANCE.md"
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    cat > "$GOV_DOC" <<EOF
+# ${PRODUCT_NAME} Product Governance
+
+Status: authoritative
+Last verified: ${today}
+
+## Release Gates
+1. Typecheck passes
+2. Build passes
+3. Tests pass (or explicit no-tests note)
+4. Service contract documented
+5. Spine bindings updated when runtime surface changes
+
+## API Rules
+- Versioned API paths (\`/api/v1/\` etc.)
+- Breaking changes require version bump and migration note
+- Auth and error contract documented per endpoint group
+
+## Ownership
+- Product code, schema, tests: this repo
+- Runtime governance and drift gates: spine
+EOF
+  fi
+else
+  echo "- keep existing docs/PRODUCT_GOVERNANCE.md"
+fi
+
+echo "- create/update .spine-project.yaml"
+if [[ "$EXECUTE" -eq 1 ]]; then
+  cat > "$PROJECT_FILE" <<EOF
+version: 1
+project:
+  name: "${REPO_NAME}"
+  product_name: "${PRODUCT_NAME}"
+  mode: "product"
+  code_authority:
+    repo_path: "${REPO_PATH}"
+    branch: "main"
+  governance_authority:
+    repo_path: "~/code/agentic-spine"
+    contract: "docs/core/PROJECT_GOVERNANCE_CONTRACT.md"
+  remotes:
+    origin: "${EXPECTED_ORIGIN}"
+    github: "${EXPECTED_GITHUB}"
+  required_docs:
+    - "docs/PRODUCT_BOUNDARY.md"
+    - "docs/PRODUCT_GOVERNANCE.md"
+  last_bootstrapped: "${today}"
+EOF
+else
+  printf "DRY-RUN: write %s\n" "$PROJECT_FILE"
+fi
+
+echo
+echo "post-check:"
+STATUS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-governance-status"
+STATUS_ARGS=(--repo-path "$REPO_PATH" --repo-name "$REPO_NAME" --gitea-host "$GITEA_HOST" --gitea-port "$GITEA_PORT" --gitea-owner "$GITEA_OWNER" --origin-remote "$ORIGIN_REMOTE" --github-remote "$GITHUB_REMOTE")
+if [[ -n "$GITHUB_ORG" ]]; then
+  STATUS_ARGS+=(--github-org "$GITHUB_ORG")
+fi
+
+if [[ "$EXECUTE" -eq 1 ]]; then
+  "$STATUS_SCRIPT" "${STATUS_ARGS[@]}"
+else
+  printf "DRY-RUN: %q " "$STATUS_SCRIPT" "${STATUS_ARGS[@]}"
+  echo
+fi

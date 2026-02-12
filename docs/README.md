@@ -23,6 +23,7 @@ The invariants. If a drift gate fails, one of these was violated.
 | [SPINE_SESSION_HEADER.md](core/SPINE_SESSION_HEADER.md) | Session header format for agent context |
 | [SPINE_STATE.md](core/SPINE_STATE.md) | Canonical spine state — what lives here, no legacy deps |
 | [STACK_LIFECYCLE.md](core/STACK_LIFECYCLE.md) | Stack discovery + lifecycle operations (no compose guessing) |
+| [PROJECT_GOVERNANCE_CONTRACT.md](core/PROJECT_GOVERNANCE_CONTRACT.md) | Mandatory baseline for all new product repositories under `~/code` |
 | [SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) | Spine-native session protocol (entry point) |
 
 ---
