@@ -1,6 +1,7 @@
 ---
 loop_id: LOOP-MINT-FINANCE-INTEGRATION-CONTRACT-20260212
-status: open
+status: closed
+closed: 2026-02-12
 owner: "@ronny"
 apply_owner: claude
 opened: 2026-02-12
