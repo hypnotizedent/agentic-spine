@@ -1,6 +1,6 @@
 ---
 loop_id: LOOP-FINANCE-AGENT-V1-SCOPE-ALIGN-20260212
-status: open
+status: closed
 owner: "@ronny"
 apply_owner: claude
 opened: 2026-02-12
@@ -37,3 +37,9 @@ CP-20260212-123234__finance-agent-v1-registration--unified-contract---registry-e
 
 - spine.verify: CAP-20260212-133642__spine.verify__Rvplo23900
 - gaps.status: CAP-20260212-133712__gaps.status__R1fno33884
+
+## Closeout Receipts
+
+- spine.verify: CAP-20260212-134345__spine.verify__Rw0yq47978
+- gaps.status: CAP-20260212-134417__gaps.status__R2n7f58466
+- commit: 9356deb
