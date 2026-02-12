@@ -7,7 +7,7 @@ closed: 2026-02-12
 
 # LOOP-RAG-INDEX-PARITY-20260211
 
-> **Status:** closed (deferred — baseline captured, no phases executed)
+> **Status:** closed (all phases executed)
 > **Owner:** @ronny
 > **Created:** 2026-02-11
 > **Closed:** 2026-02-12
@@ -17,9 +17,9 @@ closed: 2026-02-12
 
 ## Executive Summary
 
-Eliminate RAG index drift between eligible canonical docs (82) and actually indexed
-docs in AnythingLLM (34). Patch `rag status` to surface parity as a first-class
-metric so future drift is immediately visible. Produce attestation with receipts.
+Eliminated RAG index drift between eligible canonical docs and actually indexed
+docs in AnythingLLM. Patched `rag status` to surface parity as a first-class
+metric. Attestation produced with receipts.
 
 ---
 
@@ -27,10 +27,10 @@ metric so future drift is immediately visible. Produce attestation with receipts
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Run `rag.anythingllm.sync` to upload all eligible docs | deferred |
-| 2 | Patch `rag status` to show eligible + parity line | deferred |
-| 3 | Create attestation doc with before/after evidence | deferred |
-| 4 | Final verify (rag.health + rag.status + spine.verify) | deferred |
+| 1 | Run `rag.anythingllm.sync` to upload all eligible docs | done |
+| 2 | Patch `rag status` to show eligible + parity line | done |
+| 3 | Create attestation doc with before/after evidence | done |
+| 4 | Final verify (rag.health + rag.status + spine.verify) | done |
 
 ---
 
@@ -42,19 +42,18 @@ metric so future drift is immediately visible. Produce attestation with receipts
 - `spine.verify`: PASS (D1-D71)
 - Delta: **48 docs not indexed**
 
----
+## Result (after)
 
-## Closure Note
-
-Closed without execution to normalize loop count. All phases remain deferred.
-Baseline is valid — re-open as a new loop when RAG parity becomes a priority.
-The 48-doc delta is non-blocking (RAG is advisory, not enforcement).
+- `rag.health`: OK
+- `rag.anythingllm.status`: docs_indexed=97, docs_eligible=85, parity=OK
+- `spine.verify`: PASS
+- Attestation: `docs/governance/_audits/RAG_RUNTIME_ATTESTATION_20260212.md`
 
 ---
 
 ## Done Criteria
 
-- `rag.health` all OK
-- `rag.anythingllm.status` shows canonical parity (or enforced threshold)
-- `spine.verify` PASS
-- Attestation doc committed
+- [x] `rag.health` all OK
+- [x] `rag.anythingllm.status` shows canonical parity (97 >= 85)
+- [x] `spine.verify` PASS
+- [x] Attestation doc written
