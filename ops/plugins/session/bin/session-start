@@ -26,6 +26,47 @@ LOCK_FILE="$ROOT/mailroom/state/apply-owner.lock"
 ARCHIVE_DIR="$SESSIONS_DIR/.archive"
 SESSION_TTL=${SPINE_SESSION_TTL:-14400}  # 4 hours default
 
+parse_epoch_utc() {
+  local ts="${1:-}"
+  [[ -n "$ts" ]] || { echo 0; return; }
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$ts" <<'PY'
+import sys
+from datetime import datetime, timezone
+
+ts = (sys.argv[1] or "").strip()
+if not ts:
+    print(0)
+    raise SystemExit(0)
+
+if ts.endswith("Z"):
+    ts = ts[:-1] + "+00:00"
+
+try:
+    dt = datetime.fromisoformat(ts)
+except Exception:
+    print(0)
+    raise SystemExit(0)
+
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+
+print(int(dt.timestamp()))
+PY
+    return
+  fi
+
+  if date --version >/dev/null 2>&1; then
+    date -d "$ts" "+%s" 2>/dev/null || echo 0
+    return
+  fi
+
+  local clean_ts="${ts%%Z*}"
+  clean_ts="${clean_ts%%+*}"
+  date -j -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" "+%s" 2>/dev/null || echo 0
+}
+
 usage() {
   echo "Usage: session-start <lane>"
   echo "  Lanes: scan | apply | coordinator"
@@ -41,7 +82,7 @@ case "$LANE" in
 esac
 
 # ─── Session pruning + liveness ─────────────────────────────
-# Archive stale sessions: PID dead AND older than TTL.
+# Archive stale sessions: PID dead (immediate); also archive TTL-expired sessions.
 # Returns active session count via stdout when called as subshell.
 
 prune_and_count_sessions() {
@@ -63,7 +104,7 @@ prune_and_count_sessions() {
     # Calculate age
     local epoch=0
     if [[ -n "$created" ]]; then
-      epoch=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$created" "+%s" 2>/dev/null || echo 0)
+      epoch=$(parse_epoch_utc "$created")
     fi
     local age=$((now - epoch))
 
@@ -75,8 +116,8 @@ prune_and_count_sessions() {
       fi
     fi
 
-    # Archive if: PID dead AND older than TTL
-    if [[ "$pid_alive" == "false" && "$age" -gt "$SESSION_TTL" ]]; then
+    # Archive if PID dead (stale session) or far past TTL.
+    if [[ "$pid_alive" == "false" ]] || [[ "$age" -gt "$SESSION_TTL" ]]; then
       mv "$session_dir" "$ARCHIVE_DIR/" 2>/dev/null || true
       continue
     fi
@@ -150,9 +191,8 @@ if [[ "$MULTI_AGENT" == "true" ]]; then
 fi
 
 # Pruning summary
-ARCHIVED=$((30 - ACTIVE_BEFORE))  # approximate — informational only
 if [[ -d "$ARCHIVE_DIR" ]]; then
-  ARCHIVED_COUNT=$(ls -d "$ARCHIVE_DIR"/SES-*/ 2>/dev/null | wc -l | tr -d ' ')
+  ARCHIVED_COUNT=$(find "$ARCHIVE_DIR" -maxdepth 1 -type d -name 'SES-*' 2>/dev/null | wc -l | tr -d ' ')
   echo ""
   echo "  Sessions: $ACTIVE_COUNT active, $ARCHIVED_COUNT archived"
 fi

@@ -25,6 +25,28 @@ emit_export() {
   printf 'export %s=%q\n' "$key" "$value"
 }
 
+lock_pid() {
+  local file="$1"
+  sed -n 's/^pid:[[:space:]]*//p' "$file" | head -1
+}
+
+lock_is_stale() {
+  local file="$1"
+  local pid
+  pid="$(lock_pid "$file")"
+  [[ -n "$pid" ]] || return 0
+  kill -0 "$pid" 2>/dev/null && return 1
+  return 0
+}
+
+clear_stale_lock() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  if lock_is_stale "$file"; then
+    rm -f "$file"
+  fi
+}
+
 assert_branch_name() {
   local branch="$1"
   [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || orchestration_fail "branch must match [A-Za-z0-9._/-]+"
@@ -120,6 +142,7 @@ orchestration_ensure_manifest "$ROOT" "$LOOP_ID"
 
 manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
 loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+locks_dir="$loop_dir/locks"
 repo="$(orchestration_manifest_repo "$manifest" "$ROOT")"
 orchestration_assert_git_repo "$repo"
 repo="$(cd "$repo" && pwd)"
@@ -181,6 +204,33 @@ fi
 wt_branch="$(git -C "$target_worktree" rev-parse --abbrev-ref HEAD)"
 [[ "$wt_branch" == "$target_branch" ]] \
   || orchestration_fail "resolved worktree branch mismatch: expected '$target_branch' got '$wt_branch'"
+
+# Unified lock contract: capability mode uses the same lock files as fallback mode.
+mkdir -p "$locks_dir"
+lock_file="$locks_dir/C.lock"
+if [[ "$ROLE" == "worker" ]]; then
+  lock_file="$locks_dir/$LANE.lock"
+fi
+clear_stale_lock "$lock_file"
+if [[ -f "$lock_file" && "$FORCE" -ne 1 ]]; then
+  owner="$(sed -n 's/^owner:[[:space:]]*//p' "$lock_file" | head -1)"
+  pid="$(lock_pid "$lock_file")"
+  orchestration_fail "lock already held: $lock_file owner=${owner:-unknown} pid=${pid:-unknown}"
+fi
+
+{
+  echo "loop_id: $LOOP_ID"
+  echo "role: $ROLE"
+  echo "lane: $LANE"
+  echo "owner: ${USER:-unknown}"
+  echo "pid: $$"
+  echo "session_id: ${SESSION_ID:-unknown}"
+  echo "worktree: $target_worktree"
+  echo "branch: $target_branch"
+  echo "mode: capability"
+  echo "status: active"
+  echo "created_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$lock_file"
 
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 yq e -i ".updated_at = \"$now\"" "$manifest"

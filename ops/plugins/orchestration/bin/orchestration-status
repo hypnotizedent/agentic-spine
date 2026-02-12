@@ -45,18 +45,26 @@ print_one() {
   local manifest="$loop_dir/manifest.yaml"
   [[ -f "$manifest" ]] || return 0
 
-  local id base_sha apply_owner loop_status seq_count
+  local id base_sha apply_owner loop_status seq_count related_count
   id="$(yq e -r '.loop_id // "unknown"' "$manifest")"
   base_sha="$(yq e -r '.base_sha // ""' "$manifest")"
   apply_owner="$(yq e -r '.apply_owner // ""' "$manifest")"
   loop_status="$(yq e -r '.status // "open"' "$manifest")"
   seq_count="$(yq e '.sequence | length' "$manifest")"
+  related_count="$(yq e '.related_repos | length' "$manifest" 2>/dev/null || echo 0)"
 
   echo "loop_id: $id"
   echo "  status: $loop_status"
   echo "  base_sha: $base_sha"
   echo "  apply_owner: $apply_owner"
   echo "  sequence: $seq_count"
+  if [[ "$related_count" -gt 0 ]]; then
+    echo "  related_repos: $related_count"
+    while IFS= read -r rr; do
+      [[ -z "$rr" || "$rr" == "null" ]] && continue
+      echo "    - $rr"
+    done < <(yq e -r '.related_repos[]?' "$manifest")
+  fi
 
   while IFS= read -r lane; do
     [[ -z "$lane" || "$lane" == "null" ]] && continue

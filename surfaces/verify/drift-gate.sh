@@ -674,6 +674,14 @@ else
   warn "MacBook hotkey SSOT lock gate not present"
 fi
 
+# D73: OpenCode governed entry lock (launcher path + model/provider contract)
+echo -n "D73 OpenCode governed entry lock... "
+if [[ -x "$SP/surfaces/verify/d73-opencode-governed-entry-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d73-opencode-governed-entry-lock.sh"
+else
+  warn "OpenCode governed entry lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"

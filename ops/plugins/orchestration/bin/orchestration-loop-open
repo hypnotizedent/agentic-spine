@@ -12,6 +12,7 @@ Usage:
     --loop-id <id> \
     --apply-owner <owner> \
     [--repo <path>] \
+    [--related-repo <path>]... \
     [--base-sha <sha>] \
     [--lanes <lane1,lane2,...>] \
     [--sequence <lane1,lane2,...>] \
@@ -34,12 +35,14 @@ FORCE=0
 allow_items=()
 forbid_items=()
 check_items=()
+related_repos=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
     --apply-owner) APPLY_OWNER="${2:-}"; shift 2 ;;
     --repo) REPO_PATH="${2:-}"; shift 2 ;;
+    --related-repo) related_repos+=("${2:-}"); shift 2 ;;
     --base-sha) BASE_SHA="${2:-}"; shift 2 ;;
     --lanes) LANES_CSV="${2:-}"; shift 2 ;;
     --sequence) SEQUENCE_CSV="${2:-}"; shift 2 ;;
@@ -84,6 +87,7 @@ created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$manifest" <<YAML
 loop_id: $LOOP_ID
 repo: "$REPO_PATH"
+related_repos: []
 base_sha: $BASE_SHA
 apply_owner: "$APPLY_OWNER"
 status: open
@@ -95,6 +99,15 @@ sequence: []
 created_at: $created_at
 updated_at: $created_at
 YAML
+
+for rp in "${related_repos[@]:-}"; do
+  [[ -n "$rp" ]] || orchestration_fail "--related-repo requires a path"
+  if [[ "$rp" != /* ]]; then
+    rp="$ROOT/$rp"
+  fi
+  orchestration_assert_git_repo "$rp"
+  yq e -i ".related_repos += [\"$rp\"]" "$manifest"
+done
 
 IFS=',' read -r -a lanes <<< "$LANES_CSV"
 for lane in "${lanes[@]:-}"; do

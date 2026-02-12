@@ -24,6 +24,47 @@ require_tool() {
 
 require_tool yq
 
+parse_epoch_utc() {
+    local ts="${1:-}"
+    [[ -n "$ts" ]] || { echo 0; return; }
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$ts" <<'PY'
+import sys
+from datetime import datetime, timezone
+
+ts = (sys.argv[1] or "").strip()
+if not ts:
+    print(0)
+    raise SystemExit(0)
+
+if ts.endswith("Z"):
+    ts = ts[:-1] + "+00:00"
+
+try:
+    dt = datetime.fromisoformat(ts)
+except Exception:
+    print(0)
+    raise SystemExit(0)
+
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+
+print(int(dt.timestamp()))
+PY
+        return
+    fi
+
+    if date --version >/dev/null 2>&1; then
+        date -d "$ts" +%s 2>/dev/null || echo 0
+        return
+    fi
+
+    local clean_ts="${ts%%Z*}"
+    clean_ts="${clean_ts%%+*}"
+    date -j -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" +%s 2>/dev/null || echo 0
+}
+
 # Validate binding exists and is valid YAML
 [[ -f "$BINDING" ]] || fail "exception binding not found: $BINDING"
 yq e '.' "$BINDING" >/dev/null 2>&1 || fail "exception binding is not valid YAML"
@@ -58,8 +99,7 @@ while IFS= read -r label; do
 
     # Parse expires_at to epoch
     # Handle ISO format: 2026-02-09T23:59:59Z
-    expires_epoch=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$expires_at" +%s 2>/dev/null || \
-                   date -d "$expires_at" +%s 2>/dev/null || echo "0")
+    expires_epoch=$(parse_epoch_utc "$expires_at")
 
     if [[ "$expires_epoch" == "0" ]]; then
         echo "  WARN: cannot parse expires_at for $label: $expires_at"

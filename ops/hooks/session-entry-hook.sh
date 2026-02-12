@@ -20,6 +20,47 @@ touch "$MARKER"
 # Resolve spine root (relative to this script)
 SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+parse_epoch_utc() {
+  local ts="${1:-}"
+  [[ -n "$ts" ]] || { echo 0; return; }
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$ts" <<'PY'
+import sys
+from datetime import datetime, timezone
+
+ts = (sys.argv[1] or "").strip()
+if not ts:
+    print(0)
+    raise SystemExit(0)
+
+if ts.endswith("Z"):
+    ts = ts[:-1] + "+00:00"
+
+try:
+    dt = datetime.fromisoformat(ts)
+except Exception:
+    print(0)
+    raise SystemExit(0)
+
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+
+print(int(dt.timestamp()))
+PY
+    return
+  fi
+
+  if date --version >/dev/null 2>&1; then
+    date -d "$ts" "+%s" 2>/dev/null || echo 0
+    return
+  fi
+
+  local clean_ts="${ts%%Z*}"
+  clean_ts="${clean_ts%%+*}"
+  date -j -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" "+%s" 2>/dev/null || echo 0
+}
+
 # --- Dynamic context gathering ---
 
 # Spine status (loops + gaps + inbox)
@@ -62,12 +103,19 @@ if [[ -d "$SESSIONS_DIR" ]]; then
     [[ -f "$manifest" ]] || continue
 
     created=$(grep '^created:' "$manifest" 2>/dev/null | sed 's/^created: *//' | tr -d '"' || echo "")
-    if [[ -n "$created" ]]; then
-      epoch=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$created" "+%s" 2>/dev/null || echo 0)
-      age=$((NOW - epoch))
-      if [[ $age -lt $SESSION_TTL ]]; then
-        ACTIVE_SESSIONS=$((ACTIVE_SESSIONS + 1))
+    pid=$(grep '^pid:' "$manifest" 2>/dev/null | sed 's/^pid: *//' | tr -d '"' || echo "")
+
+    pid_alive=false
+    if [[ -n "$pid" && "$pid" != "null" ]]; then
+      if kill -0 "$pid" 2>/dev/null; then
+        pid_alive=true
       fi
+    fi
+
+    epoch=$(parse_epoch_utc "$created")
+    age=$((NOW - epoch))
+    if [[ "$pid_alive" == "true" && $age -lt $SESSION_TTL ]]; then
+      ACTIVE_SESSIONS=$((ACTIVE_SESSIONS + 1))
     fi
   done
 fi

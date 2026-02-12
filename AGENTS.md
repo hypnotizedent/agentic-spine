@@ -43,7 +43,8 @@ scope: agent-governance-brief
 
 ## Commit & Branch Rules
 
-- **Commit directly to main.** No ceremony required. Edit, commit, push.
+- **Single-agent sessions:** commit directly to `main` is allowed.
+- **Multi-agent sessions:** direct commit is disallowed by default; use proposal flow + apply-owner.
 - **Worktrees are optional.** `./bin/ops start loop <LOOP_ID>` creates an isolated worktree if you want one. Not mandatory.
 - **If using worktrees, clean up after merging** (D48). Use `ops close loop <LOOP_ID>` to tear down worktree + branch + stashes. Stale/merged/orphaned worktrees fail `spine.verify`.
 - **Gitea is canonical** (origin). GitHub is a mirror. D62 enforces.

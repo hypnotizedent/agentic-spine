@@ -16,6 +16,47 @@ FAIL=0
 err() { echo "  FAIL: $1" >&2; FAIL=1; }
 warn() { echo "  WARN: $1" >&2; }
 
+parse_epoch_utc() {
+  local ts="${1:-}"
+  [[ -n "$ts" ]] || { echo 0; return; }
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$ts" <<'PY'
+import sys
+from datetime import datetime, timezone
+
+ts = (sys.argv[1] or "").strip()
+if not ts:
+    print(0)
+    raise SystemExit(0)
+
+if ts.endswith("Z"):
+    ts = ts[:-1] + "+00:00"
+
+try:
+    dt = datetime.fromisoformat(ts)
+except Exception:
+    print(0)
+    raise SystemExit(0)
+
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+
+print(int(dt.timestamp()))
+PY
+    return
+  fi
+
+  if date --version >/dev/null 2>&1; then
+    date -d "$ts" +%s 2>/dev/null || echo 0
+    return
+  fi
+
+  local clean_ts="${ts%%Z*}"
+  clean_ts="${clean_ts%%+*}"
+  date -j -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" +%s 2>/dev/null || echo 0
+}
+
 # ledger.csv is runtime state. In CI or fresh clones it may be absent; treat as
 # "unavailable" and skip the closeout freshness check (loop TTL can still run).
 SKIP_CLOSEOUT_CHECK=0
@@ -46,27 +87,19 @@ if [[ "$SKIP_CLOSEOUT_CHECK" == "0" ]]; then
   fi
 fi
 
-# Parse timestamp to epoch
 NOW=$(date +%s)
-if date --version >/dev/null 2>&1; then
-  # GNU date
-  LAST_EPOCH=$(date -d "$LAST_TS" +%s 2>/dev/null || echo 0)
-else
-  # macOS date — handle ISO 8601 with T separator
-  CLEAN_TS="${LAST_TS%%Z*}"
-  CLEAN_TS="${CLEAN_TS%%+*}"
-  LAST_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$CLEAN_TS" +%s 2>/dev/null || echo 0)
-fi
+if [[ "$SKIP_CLOSEOUT_CHECK" == "0" ]]; then
+  LAST_EPOCH=$(parse_epoch_utc "$LAST_TS")
+  if [[ "$LAST_EPOCH" -eq 0 ]]; then
+    err "could not parse timestamp: $LAST_TS"
+    exit 1
+  fi
 
-if [[ "$LAST_EPOCH" -eq 0 ]]; then
-  err "could not parse timestamp: $LAST_TS"
-  exit 1
-fi
+  DELTA_HOURS=$(( (NOW - LAST_EPOCH) / 3600 ))
 
-DELTA_HOURS=$(( (NOW - LAST_EPOCH) / 3600 ))
-
-if [[ "$DELTA_HOURS" -gt "$THRESHOLD_HOURS" ]]; then
-  err "agent.session.closeout last run ${DELTA_HOURS}h ago (threshold: ${THRESHOLD_HOURS}h)"
+  if [[ "$DELTA_HOURS" -gt "$THRESHOLD_HOURS" ]]; then
+    err "agent.session.closeout last run ${DELTA_HOURS}h ago (threshold: ${THRESHOLD_HOURS}h)"
+  fi
 fi
 
 # Loop TTL/SLA: fail if any open high-severity loop exceeds age threshold.

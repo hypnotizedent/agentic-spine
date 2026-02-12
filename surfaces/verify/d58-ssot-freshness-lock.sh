@@ -13,6 +13,38 @@ THRESHOLD="${SSOT_FRESHNESS_DAYS:-21}"
 FAIL=0
 err() { echo "  FAIL: $1" >&2; FAIL=1; }
 
+parse_epoch_date() {
+  local ds="${1:-}"
+  [[ -n "$ds" ]] || { echo 0; return; }
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$ds" <<'PY'
+import sys
+from datetime import datetime, timezone
+
+ds = (sys.argv[1] or "").strip()
+try:
+    dt = datetime.fromisoformat(ds)
+except Exception:
+    print(0)
+    raise SystemExit(0)
+
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+
+print(int(dt.timestamp()))
+PY
+    return
+  fi
+
+  if date --version >/dev/null 2>&1; then
+    date -d "$ds" +%s 2>/dev/null || echo 0
+    return
+  fi
+
+  date -j -f "%Y-%m-%d" "$ds" +%s 2>/dev/null || echo 0
+}
+
 [[ -f "$REGISTRY" ]] || { err "SSOT_REGISTRY.yaml not found"; exit 1; }
 command -v yq >/dev/null 2>&1 || { err "yq not found"; exit 1; }
 
@@ -28,14 +60,7 @@ for ((i=0; i<ssot_count; i++)); do
 
   [[ "$reviewed" == "null" || -z "$reviewed" ]] && continue
 
-  # Parse date to epoch (macOS compatible)
-  if date --version >/dev/null 2>&1; then
-    # GNU date
-    reviewed_epoch=$(date -d "$reviewed" +%s 2>/dev/null || echo 0)
-  else
-    # macOS date
-    reviewed_epoch=$(date -j -f "%Y-%m-%d" "$reviewed" +%s 2>/dev/null || echo 0)
-  fi
+  reviewed_epoch=$(parse_epoch_date "$reviewed")
 
   [[ "$reviewed_epoch" -eq 0 ]] && continue
 
