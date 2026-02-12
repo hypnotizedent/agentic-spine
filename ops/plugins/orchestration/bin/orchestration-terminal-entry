@@ -165,13 +165,15 @@ if [[ -n "$occupied_wt" && "$occupied_wt" != "$target_worktree" ]]; then
   fi
 fi
 
-if [[ -d "$target_worktree/.git" ]]; then
+if git -C "$target_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   wt_branch="$(git -C "$target_worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   [[ "$wt_branch" == "$target_branch" ]] \
     || orchestration_fail "existing deterministic worktree branch mismatch: expected '$target_branch' got '$wt_branch'"
 else
-  if [[ -e "$target_worktree" && ! -d "$target_worktree/.git" ]]; then
-    orchestration_fail "deterministic worktree path exists but is not a git checkout: $target_worktree"
+  if [[ -e "$target_worktree" ]]; then
+    if [[ -n "$(find "$target_worktree" -mindepth 1 -maxdepth 1 2>/dev/null | head -1)" ]]; then
+      orchestration_fail "deterministic worktree path exists but is not a git checkout: $target_worktree"
+    fi
   fi
   git -C "$repo" worktree add "$target_worktree" "$target_branch" >/dev/null
 fi
