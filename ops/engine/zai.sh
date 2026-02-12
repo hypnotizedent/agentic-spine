@@ -8,8 +8,11 @@ usage() {
   cat <<'EOF'
 Usage: zai.sh <RUN_ID>
 
-Calls z.ai via either the official z.ai endpoint (when ZAI_API_KEY is set)
-or any OpenAI-compatible host when only OPENAI_API_KEY/base variables are present.
+Calls z.ai chat completions with a configurable model.
+Env overrides:
+  - ZAI_API_KEY or Z_AI_API_KEY
+  - ZAI_MODEL (default: glm-5)
+  - ZAI_MAX_TOKENS (default: 200)
 EOF
   exit 1
 }
@@ -24,21 +27,30 @@ response_file="${run_dir}/zai_response.json"
 
 [[ -f "${request_file}" ]] || { echo "FAIL: missing request file: ${request_file}" >&2; exit 1; }
 
-key="${ZAI_API_KEY:-}"
-[[ -n "${key}" ]] || { echo "FAIL: ZAI_API_KEY is required for the z.ai provider" >&2; exit 1; }
+key="${ZAI_API_KEY:-${Z_AI_API_KEY:-}}"
+[[ -n "${key}" ]] || { echo "FAIL: ZAI_API_KEY/Z_AI_API_KEY is required for the z.ai provider" >&2; exit 1; }
 endpoint="https://api.z.ai/api/paas/v4/chat/completions"
+model="${ZAI_MODEL:-glm-5}"
+max_tokens="${ZAI_MAX_TOKENS:-200}"
 
-payload="$(python3 - "${request_file}" <<'PY'
+payload="$(ZAI_MODEL="$model" ZAI_MAX_TOKENS="$max_tokens" python3 - "${request_file}" <<'PY'
 import json, sys
+import os
 
 path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as fh:
     request = fh.read().strip()
 
+model = os.environ.get("ZAI_MODEL", "glm-5")
+try:
+    max_tokens = int(os.environ.get("ZAI_MAX_TOKENS", "200"))
+except ValueError:
+    max_tokens = 200
+
 data = {
-    "model": "zai-coding-plan/glm-4.7",
+    "model": model,
     "temperature": 0,
-    "max_tokens": 200,
+    "max_tokens": max_tokens,
     "messages": [
         {"role": "system", "content": "You are a concise, deterministic assistant."},
         {"role": "user", "content": request}

@@ -19,14 +19,21 @@
 # Dependencies:
 #   - fswatch (brew install fswatch)
 #   - jq (brew install jq)
-#   - ANTHROPIC_API_KEY in environment
+#   - z.ai key via ZAI_API_KEY or Z_AI_API_KEY (default provider)
 #
 # ═══════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
 
-# Ensure Homebrew tools are available (needed for rg when run from launchd)
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+# LaunchAgents may not export HOME; derive it from SPINE_REPO/PWD for secrets/cache paths.
+if [[ -z "${HOME:-}" ]]; then
+    _home_probe="${SPINE_REPO:-$PWD}"
+    export HOME="$(dirname "$(dirname "$_home_probe")")"
+    unset _home_probe
+fi
+
+# Ensure user-local and Homebrew tools are available when run from launchd.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
@@ -49,9 +56,15 @@ PARKED="${INBOX}/parked"
 REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 BRAIN_RULES="${REPO}/docs/brain/rules.md"
 
-# Model config
-MODEL="${CLAUDE_MODEL:-claude-sonnet-4-20250514}"
-MAX_TOKENS="${CLAUDE_MAX_TOKENS:-4096}"
+# Model/provider config
+WATCHER_PROVIDER="${SPINE_WATCHER_PROVIDER:-zai}"  # zai | anthropic
+if [[ "$WATCHER_PROVIDER" == "anthropic" ]]; then
+    MODEL="${CLAUDE_MODEL:-claude-sonnet-4-20250514}"
+    MAX_TOKENS="${CLAUDE_MAX_TOKENS:-4096}"
+else
+    MODEL="${ZAI_MODEL:-glm-5}"
+    MAX_TOKENS="${ZAI_MAX_TOKENS:-4096}"
+fi
 
 # State files
 LOG_FILE="${LOG_DIR}/hot-folder-watcher.log"
@@ -126,15 +139,51 @@ check_dependencies() {
         exit 1
     fi
 
-    if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-        if command -v security >/dev/null 2>&1; then
-            ANTHROPIC_API_KEY="$(security find-generic-password -a "$USER" -s "anthropic-api-key" -w 2>/dev/null)" || true
-            export ANTHROPIC_API_KEY
-        fi
+    if [[ "$WATCHER_PROVIDER" == "anthropic" ]]; then
         if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-            echo "ERROR: ANTHROPIC_API_KEY not set"
-            exit 1
+            if command -v security >/dev/null 2>&1; then
+                ANTHROPIC_API_KEY="$(security find-generic-password -a "$USER" -s "anthropic-api-key" -w 2>/dev/null)" || true
+                export ANTHROPIC_API_KEY
+            fi
+            if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+                echo "ERROR: ANTHROPIC_API_KEY not set (provider=anthropic)"
+                exit 1
+            fi
         fi
+        return
+    fi
+
+    # provider=zai (default)
+    if [[ -z "${ZAI_API_KEY:-}" && -n "${Z_AI_API_KEY:-}" ]]; then
+        export ZAI_API_KEY="$Z_AI_API_KEY"
+    fi
+
+    if [[ -z "${ZAI_API_KEY:-}" ]]; then
+        local creds="${HOME}/.config/infisical/credentials"
+        if [[ -f "$creds" ]]; then
+            # shellcheck disable=SC1090
+            source "$creds" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if [[ -z "${ZAI_API_KEY:-}" && -n "${Z_AI_API_KEY:-}" ]]; then
+        export ZAI_API_KEY="$Z_AI_API_KEY"
+    fi
+
+    if [[ -z "${ZAI_API_KEY:-}" ]]; then
+        local inf_agent="${SPINE}/ops/tools/infisical-agent.sh"
+        if [[ -x "$inf_agent" ]]; then
+            ZAI_API_KEY="$("$inf_agent" get-cached infrastructure prod Z_AI_API_KEY 2>/dev/null || true)"
+            if [[ -z "${ZAI_API_KEY:-}" ]]; then
+                ZAI_API_KEY="$("$inf_agent" get-cached infrastructure prod ZAI_API_KEY 2>/dev/null || true)"
+            fi
+            [[ -n "${ZAI_API_KEY:-}" ]] && export ZAI_API_KEY
+        fi
+    fi
+
+    if [[ -z "${ZAI_API_KEY:-}" ]]; then
+        echo "ERROR: ZAI_API_KEY not set (provider=zai). Expected ZAI_API_KEY or Z_AI_API_KEY via Infisical."
+        exit 1
     fi
 }
 
@@ -410,7 +459,7 @@ build_packet() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Dispatch to Claude API
+# Dispatch to model provider
 # ─────────────────────────────────────────────────────────────────────────────
 dispatch_to_claude() {
     local packet="$1"
@@ -438,6 +487,44 @@ dispatch_to_claude() {
         echo "ERROR: API call failed"
         echo "$response" | jq -r '.error.message // .' 2>/dev/null || echo "$response"
         return 1
+    fi
+}
+
+dispatch_to_zai() {
+    local packet="$1"
+    local response
+
+    local escaped_packet
+    escaped_packet="$(echo "$packet" | jq -Rs .)"
+
+    response=$(curl -sS "https://api.z.ai/api/paas/v4/chat/completions" \
+        -H "Authorization: Bearer ${ZAI_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"model\": \"${MODEL}\",
+            \"max_tokens\": ${MAX_TOKENS},
+            \"temperature\": 0,
+            \"messages\": [{
+                \"role\": \"user\",
+                \"content\": ${escaped_packet}
+            }]
+        }" 2>&1)
+
+    if echo "$response" | jq -e '.choices[0].message.content' >/dev/null 2>&1; then
+        echo "$response" | jq -r '.choices[0].message.content'
+    else
+        echo "ERROR: z.ai API call failed"
+        echo "$response" | jq -r '.error.message // .' 2>/dev/null || echo "$response"
+        return 1
+    fi
+}
+
+dispatch_to_model() {
+    local packet="$1"
+    if [[ "$WATCHER_PROVIDER" == "anthropic" ]]; then
+        dispatch_to_claude "$packet"
+    else
+        dispatch_to_zai "$packet"
     fi
 }
 
@@ -503,7 +590,7 @@ process_file() {
     local packet_text
     packet_text="$(printf '%b' "$SUPERVISOR_PACKET")"
 
-    if response="$(dispatch_to_claude "$packet_text")"; then
+    if response="$(dispatch_to_model "$packet_text")"; then
         # Write success result
         {
             echo "# Result: ${run_id}"
@@ -773,11 +860,13 @@ main() {
             echo "Lanes: queued/ → running/ → done/ | failed/ | parked/"
             echo ""
             echo "Environment:"
-            echo "  ANTHROPIC_API_KEY  Required for API calls"
+            echo "  SPINE_WATCHER_PROVIDER  Model provider: zai (default) or anthropic"
+            echo "  ZAI_API_KEY / Z_AI_API_KEY  Required when provider=zai"
+            echo "  ZAI_MODEL          Override z.ai model (default: glm-5)"
             echo "  SPINE_INBOX        Override inbox path (default: $SPINE/mailroom/inbox)"
             echo "  SPINE_OUTBOX       Override outbox path (default: $SPINE/mailroom/outbox)"
             echo "  SPINE_STATE        Override state path (default: $SPINE/mailroom/state)"
-            echo "  CLAUDE_MODEL       Override model (default: claude-sonnet-4-20250514)"
+            echo "  CLAUDE_MODEL       Override model when provider=anthropic"
             echo ""
             echo "RAG-lite:"
             echo "  Add 'RAG:ON' to prompt to enable retrieval"
