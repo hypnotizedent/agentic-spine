@@ -37,7 +37,7 @@ CACHE_TTL="${INFISICAL_CACHE_TTL:-14400}"  # Default: 4 hours (14400 seconds)
 # These projects must not be targeted by new agent write operations.
 is_deprecated_project() {
   case "$1" in
-    finance-stack|mint-os-portal|mint-os-vault) return 0 ;;
+    finance-stack|mint-os-vault) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -47,7 +47,6 @@ get_project_id_from_name() {
   case "$1" in
     mint-os-api)    echo "6c67b03e-ed17-4154-9a94-59837738e432" ;;
     mint-os-vault)  echo "66d149d6-f610-4ec3-a400-3ff42ea1aa75" ;;
-    mint-os-portal) echo "758e5db3-8d00-4ccf-8d91-aeaad0d6ed37" ;;
     infrastructure) echo "01ddd93a-e0f8-4c7c-ad9f-903d76ef94d9" ;;
     n8n)            echo "4b9dfc6d-13e8-43c8-bd84-9beb64eb8e16" ;;
     finance-stack)  echo "4c34714d-6d85-4aa6-b8df-5a9505f3bcef" ;;
@@ -211,7 +210,7 @@ get_project_id() {
     else
       log_error "Unknown project: $project"
       log_info "Active: infrastructure mint-os-api n8n media-stack immich home-assistant"
-      log_info "Deprecated (read-only): finance-stack mint-os-vault mint-os-portal"
+      log_info "Deprecated (read-only): finance-stack mint-os-vault"
       exit 1
     fi
   fi
@@ -589,7 +588,6 @@ Active Projects:
 Deprecated Projects (read-only, writes blocked):
   finance-stack     (use infrastructure /spine/services/finance)
   mint-os-vault     (consolidation candidate)
-  mint-os-portal    (empty, delete candidate)
 
 Environment Variables:
   INFISICAL_UNIVERSAL_AUTH_CLIENT_ID      Client ID (default: 40b44e76-...)
