@@ -32,14 +32,11 @@ Storage: `/mnt/staging/` (download staging, bind mount), `/mnt/media/` (NAS NFS 
 
 ## Known Issues
 
-### GAP-OP-118: Backup Failing
-Vzdump backup FAILS with NFS permission denied:
-```
-tar: /mnt/pve/synology-backups/dump/vzdump-lxc-103-*.tmp: Cannot open: Permission denied
-```
-Root cause: `lxc-usernsexec` UID remapping (u:0:100000:65536) incompatible with Synology NFS export permissions. VM backups on same NFS work fine.
+### ~~GAP-OP-118: Backup Failing~~ — FIXED
 
-**Workaround:** Exclude `/mnt/staging` from vzdump, or switch to `mode: stop`.
+**Was:** Vzdump backup failed with NFS permission denied — `lxc-usernsexec` UID remapping (u:0:100000:65536) ran tar as host UID 100000 which couldn't write to Synology NFS `.tmp` staging dir.
+
+**Fix (2026-02-12):** Added `tmpdir /var/tmp` to vzdump jobs `backup-home-p1-daily` and `backup-home-p2-weekly` in `/etc/pve/jobs.cfg`. This stages `pct.conf` on local disk (accessible to mapped UID) while the final `.tar.zst` archive writes to NFS outside the user namespace (as root). Validated: LXC 103 = 484MB, LXC 105 = 345MB.
 
 ### SSH Access Broken
 `ssh root@download-home` returns `Permission denied (publickey)`. Needs authorized key added via `pct enter 103`.
@@ -49,7 +46,7 @@ Root cause: `lxc-usernsexec` UID remapping (u:0:100000:65536) incompatible with 
 
 ## Backup Strategy
 
-- **VM-level:** vzdump P1 daily 03:15 (**FAILING** — GAP-OP-118)
+- **VM-level:** vzdump P1 daily 03:15 (GAP-OP-118 FIXED — tmpdir /var/tmp)
 - **App-level:** Not configured (LXC is stopped)
 
 ## Relationship to Shop

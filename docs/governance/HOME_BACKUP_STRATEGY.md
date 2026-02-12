@@ -61,6 +61,10 @@ scope: home-backup-strategy
 
 **Decision:** vzdump is primary (matches shop model). Hyper Backup is a future P5 addition for NAS-to-offsite DR — not in scope for this loop.
 
+### Unprivileged LXC Workaround (GAP-OP-118 Fix)
+
+Unprivileged LXC containers (103, 105) use `lxc-usernsexec` during vzdump which remaps UID 0→100000. This mapped UID cannot write to Synology NFS. **Fix:** add `tmpdir /var/tmp` to vzdump jobs containing LXC guests. This stages `pct.conf` on local disk (accessible to mapped UID) while the final archive is written to NFS outside the user namespace (as root). Applied to `backup-home-p1-daily` and `backup-home-p2-weekly` in `/etc/pve/jobs.cfg`.
+
 ### Storage Target
 
 - **NAS NFS export:** `/volume1/backups/proxmox_backups` (already exists, verified in MINILAB_SSOT.md)
