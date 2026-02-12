@@ -1,5 +1,5 @@
 ---
-status: open
+status: closed
 owner: "@ronny"
 created: 2026-02-12
 scope: loop-scope
@@ -27,15 +27,21 @@ Workers only edit mint-modules. Spine edits = scope + receipts + closeout only.
 - [x] gaps.status: 0 open, 0 orphaned
 
 ### P1: Worker D
-- [ ] Pending worker handoff
+- [x] Docs contract/runbook delivered (`6bfafa8`)
 
 ### P2: Worker E
-- [ ] Pending worker handoff
+- [x] Runtime hardening delivered (`1a32836`)
 
 ### P3: Worker F
-- [ ] Pending worker handoff
+- [x] Test hardening delivered (`594bae1`)
 
 ### P4: Terminal C — Recert + Closeout
-- [ ] typecheck + build + test pass (artwork)
-- [ ] Both remotes in sync
-- [ ] Loop closed with evidence
+- [x] typecheck + build + test pass (artwork: 95/95)
+- [x] Both remotes in sync (`HEAD=origin/main=github/main=594bae1`)
+- [x] Loop closed with evidence
+
+## Evidence
+
+- `CAP-20260212-004923__authority.project.status__R2mes4611`
+- `CAP-20260212-004924__spine.verify__Rl1gf4678`
+- `CAP-20260212-004957__gaps.status__Ru6lj13706`
