@@ -133,6 +133,7 @@ Pillar entrypoints (per stack)
 | Stacks | `docs/governance/STACK_REGISTRY.yaml` | Stack inventory |
 | Device Identity | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device naming/IPs |
 | Workstation | `docs/governance/MACBOOK_SSOT.md` | MacBook baseline (hardware + local services) |
+| Workstation Bootstrap | `docs/governance/MACBOOK_BOOTSTRAP_CONTRACT.md` | Fresh-Mac bootstrap requirements + ownership |
 | Home Minilab | `docs/governance/MINILAB_SSOT.md` | Home baseline (Beelink + NAS + home VMs/LXCs) |
 | Shop Rack | `docs/governance/SHOP_SERVER_SSOT.md` | Shop baseline (R730XD + switch + NVR + UPS) |
 | Shop Network (Target) | `docs/governance/SHOP_NETWORK_NORMALIZATION.md` | Normalized IP structure + anti-drift rules |
@@ -485,6 +486,7 @@ Before adding `status: authoritative` or claiming SSOT:
 - `INGRESS_AUTHORITY.md`
 - `ISSUE_CLOSURE_SOP.md`
 - `LEGACY_DEPRECATION.md`
+- `MACBOOK_BOOTSTRAP_CONTRACT.md`
 - `MACBOOK_SSOT.md`
 - `MAILROOM_BRIDGE.md`
 - `MAILROOM_RUNBOOK.md`

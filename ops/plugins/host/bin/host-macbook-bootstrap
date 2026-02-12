@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# host-macbook-bootstrap
+#
+# Governed bootstrap capability for fresh Mac setup.
+# Mutating, manual approval, idempotent.
+#
+# Workbench helper scripts (dotfiles/install.sh, scripts/root/setup-mac-tools.sh)
+# are internal implementation details. This capability is the governed entrypoint.
+
+usage() {
+  cat <<'USAGE'
+host-macbook-bootstrap - Bootstrap a fresh Mac to spine-ready state
+
+Usage:
+  host-macbook-bootstrap [--phase <1-5|all>] [--dry-run|--execute]
+
+Phases:
+  1  Core CLI tools (git, jq, gh, yq, ripgrep)
+  2  Shell & git configuration
+  3  Managed config symlinks (delegates to host.macbook.managed_configs.apply)
+  4  Productivity tools (SuperWhisper, Espanso, Maccy)
+  5  Claude entrypoint surfaces
+
+Options:
+  --phase <N|all>  Run specific phase or all (default: all)
+  --dry-run        Show what would change without applying (default)
+  --execute        Apply changes
+USAGE
+}
+
+SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
+WORKBENCH="${WORKBENCH_REPO:-$HOME/code/workbench}"
+PHASE="all"
+EXECUTE=0
+ERRORS=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --phase) PHASE="${2:-all}"; shift 2 ;;
+    --dry-run) EXECUTE=0; shift ;;
+    --execute) EXECUTE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+MODE="dry-run"
+[[ "$EXECUTE" -eq 1 ]] && MODE="execute"
+
+echo "=== host.macbook.bootstrap ==="
+echo "mode:      $MODE"
+echo "phase:     $PHASE"
+echo "spine:     $SPINE"
+echo "workbench: $WORKBENCH"
+echo ""
+
+should_run() {
+  [[ "$PHASE" == "all" || "$PHASE" == "$1" ]]
+}
+
+check_tool() {
+  local name="$1"
+  if command -v "$name" >/dev/null 2>&1; then
+    echo "  OK   $name ($(command -v "$name"))"
+    return 0
+  else
+    echo "  MISS $name"
+    return 1
+  fi
+}
+
+install_brew_formula() {
+  local name="$1"
+  if command -v "$name" >/dev/null 2>&1; then
+    echo "  SKIP $name (already installed)"
+    return 0
+  fi
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    echo "  INST $name"
+    brew install "$name" 2>/dev/null || { echo "  FAIL $name"; return 1; }
+  else
+    echo "  NEED $name (would install)"
+  fi
+}
+
+install_brew_cask() {
+  local name="$1"
+  if brew list --cask "$name" &>/dev/null 2>&1; then
+    echo "  SKIP $name (already installed)"
+    return 0
+  fi
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    echo "  INST $name (cask)"
+    brew install --cask "$name" 2>/dev/null || { echo "  FAIL $name"; return 1; }
+  else
+    echo "  NEED $name (would install cask)"
+  fi
+}
+
+# Prerequisite: Homebrew
+if ! command -v brew >/dev/null 2>&1; then
+  echo "BLOCK: Homebrew not installed. Install from https://brew.sh first."
+  exit 1
+fi
+echo "OK: Homebrew found"
+echo ""
+
+# ── Phase 1: Core CLI Tools ──
+if should_run 1; then
+  echo "[Phase 1] Core CLI Tools"
+  for tool in git jq gh yq rg; do
+    if ! check_tool "$tool"; then
+      case "$tool" in
+        rg) install_brew_formula ripgrep || ((ERRORS++)) ;;
+        *)  install_brew_formula "$tool" || ((ERRORS++)) ;;
+      esac
+    fi
+  done
+  echo ""
+fi
+
+# ── Phase 2: Shell & Git Configuration ──
+if should_run 2; then
+  echo "[Phase 2] Shell & Git Configuration"
+
+  # gitconfig
+  if [[ -f "$HOME/.gitconfig" ]]; then
+    echo "  OK   ~/.gitconfig exists"
+  elif [[ "$EXECUTE" -eq 1 ]]; then
+    if [[ -f "$WORKBENCH/dotfiles/git/gitconfig.template" ]]; then
+      echo "  SET  ~/.gitconfig (from template — needs manual name/email edit)"
+      cp "$WORKBENCH/dotfiles/git/gitconfig.template" "$HOME/.gitconfig"
+    else
+      echo "  MISS gitconfig template not found"
+      ((ERRORS++))
+    fi
+  else
+    echo "  NEED ~/.gitconfig (would create from template)"
+  fi
+
+  # gitignore_global
+  if [[ -f "$HOME/.gitignore_global" ]]; then
+    echo "  OK   ~/.gitignore_global exists"
+  elif [[ "$EXECUTE" -eq 1 ]]; then
+    if [[ -f "$WORKBENCH/dotfiles/git/gitignore_global" ]]; then
+      echo "  SET  ~/.gitignore_global"
+      cp "$WORKBENCH/dotfiles/git/gitignore_global" "$HOME/.gitignore_global"
+    else
+      echo "  MISS gitignore_global source not found"
+      ((ERRORS++))
+    fi
+  else
+    echo "  NEED ~/.gitignore_global (would copy)"
+  fi
+
+  # shell aliases in .zshrc
+  if [[ -f "$HOME/.zshrc" ]] && grep -q "workbench" "$HOME/.zshrc" 2>/dev/null; then
+    echo "  OK   ~/.zshrc has workbench aliases"
+  elif [[ "$EXECUTE" -eq 1 ]]; then
+    ALIAS_SOURCE="source $WORKBENCH/dotfiles/zsh/legacy-aliases.sh"
+    COMPAT_SOURCE="source $WORKBENCH/dotfiles/zsh/ronny-ops-compat.sh"
+    echo -e "\n# Workbench\n$COMPAT_SOURCE\n$ALIAS_SOURCE" >> "$HOME/.zshrc"
+    echo "  SET  ~/.zshrc (added workbench aliases)"
+  else
+    echo "  NEED ~/.zshrc workbench aliases (would append)"
+  fi
+  echo ""
+fi
+
+# ── Phase 3: Managed Config Symlinks ──
+if should_run 3; then
+  echo "[Phase 3] Managed Config Symlinks"
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    "$SPINE/ops/plugins/host/bin/host-macbook-managed-configs-apply"
+  else
+    echo "  Would delegate to host.macbook.managed_configs.apply"
+    echo "  Targets: ~/.hammerspoon, ~/.raycast-scripts, ~/.codex/config.toml, ~/.config/opencode/opencode.json"
+  fi
+  echo ""
+fi
+
+# ── Phase 4: Productivity Tools ──
+if should_run 4; then
+  echo "[Phase 4] Productivity Tools"
+  install_brew_cask superwhisper || ((ERRORS++))
+
+  if command -v espanso >/dev/null 2>&1; then
+    echo "  SKIP espanso (already installed)"
+  elif [[ "$EXECUTE" -eq 1 ]]; then
+    echo "  INST espanso"
+    brew install espanso 2>/dev/null || { echo "  FAIL espanso"; ((ERRORS++)); }
+    espanso service register 2>/dev/null || true
+  else
+    echo "  NEED espanso (would install)"
+  fi
+
+  install_brew_cask maccy || ((ERRORS++))
+
+  # Sync Espanso config if installed and executing
+  if [[ "$EXECUTE" -eq 1 ]] && command -v espanso >/dev/null 2>&1; then
+    ESPANSO_ROOT="$HOME/.config/espanso"
+    if [[ -d "$WORKBENCH/dotfiles/espanso/.config_espanso" ]]; then
+      mkdir -p "$ESPANSO_ROOT"
+      rsync -a "$WORKBENCH/dotfiles/espanso/.config_espanso/" "$ESPANSO_ROOT/"
+      echo "  SYNC espanso config from workbench dotfiles"
+    fi
+  fi
+  echo ""
+fi
+
+# ── Phase 5: Claude Entrypoint Surfaces ──
+if should_run 5; then
+  echo "[Phase 5] Claude Entrypoint Surfaces"
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    # This is handled by managed_configs.apply + claude-entrypoint-lock
+    "$SPINE/ops/plugins/host/bin/host-claude-entrypoint-lock" --execute
+  else
+    echo "  Would delegate to host-claude-entrypoint-lock --execute"
+    echo "  Targets: ~/.claude/CLAUDE.md, ~/.config/opencode/OPENCODE.md"
+  fi
+  echo ""
+fi
+
+# ── Summary ──
+echo "=== Summary ==="
+echo "mode:   $MODE"
+echo "errors: $ERRORS"
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "status: PARTIAL (some items failed)"
+  exit 1
+fi
+echo "status: OK"
