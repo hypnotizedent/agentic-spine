@@ -61,7 +61,7 @@ No LAN-only device changes. Cutover is cloudflared DNS-level only (Tailscale IPs
 | order-intake-v2 health | services.health.status | OK (304ms) |
 | mint-data stack | docker.compose.status | 3/3 |
 | mint-apps stack | docker.compose.status | 3/3 |
-| spine.verify | `./bin/ops cap run spine.verify` | Pending (D53 required this changepack) |
+| spine.verify | `./bin/ops cap run spine.verify` | PASS (`CAP-20260212-100859__spine.verify__Rz6u743849`) |
 | Old MinIO unchanged | `docker inspect minio` | Same ID=c29f2b8312b9, same start=2026-02-11T18:18:20Z |
 
 ## Sign-Off

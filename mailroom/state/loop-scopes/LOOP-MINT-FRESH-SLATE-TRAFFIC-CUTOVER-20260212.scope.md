@@ -33,7 +33,7 @@ No Caddy changes — mint services bypass Caddy (direct cloudflared → backend)
 ## Phases
 
 - P0: Baseline ✅ (spine.verify PASS, mint-apps 3/3, mint-data 3/3)
-- P1: Pre-cutover gate ✅ (fresh-slate all healthy)
+- P1: Pre-cutover gate ✅ (mint services healthy)
 - P2: Cutover (cloudflared IP swap + restart) ✅
 - P3: Post-cutover validation ✅
 - P4: Closeout ✅
@@ -46,7 +46,7 @@ No Caddy changes — mint services bypass Caddy (direct cloudflared → backend)
 - `CAP-20260212-100615__services.health.status__Rliio23292` (P3 post-cutover)
 - `CAP-20260212-100637__docker.compose.status__Rqjyo23792` (P3 post-cutover)
 - `CAP-20260212-100759__spine.verify__Rmpla34267` (P3 post-cutover, D53 pre-changepack)
-- `CAP-20260212-100xxx__spine.verify__*` (P4 final — PASS)
+- `CAP-20260212-100859__spine.verify__Rz6u743849` (P4 final — PASS)
 
 ## Rollback
 
