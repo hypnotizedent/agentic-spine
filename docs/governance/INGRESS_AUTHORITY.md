@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-08
+last_verified: 2026-02-12
 scope: ingress-routing
 ---
 
@@ -31,17 +31,24 @@ Cloudflare (DNS + Tunnel Public Hostnames)  [dashboard-managed]
         Tunnel: homelab-tunnel
                  |
                  v
-   infra-core (VM 204) runs cloudflared connector
+   infra-core (VM 204) runs cloudflared connector (network_mode: host + extra_hosts)
                  |
-                 +--> routes some hostnames to Caddy on infra-core (127.0.0.1:80)
+                 +--> Caddy-proxied (127.0.0.1:80) — Authentik forward auth:
                  |      - auth.ronny.works   -> Authentik (:9000)
                  |      - pihole.ronny.works -> Pi-hole (:8053)
                  |      - secrets.ronny.works-> Infisical (:8088)
                  |      - vault.ronny.works  -> Vaultwarden (:8081)
                  |
-                 +--> routes other hostnames directly to services on other hosts
-                        (by Tailscale IP, or by docker DNS names mapped via extra_hosts)
+                 +--> Direct routes (via Tailscale IP or extra_hosts DNS names):
+                        - Finance: firefly-iii, ghostfolio, paperless-ngx, mail-archiver → VM 211
+                        - Mint OS: admin, api, production, kanban, estimator, etc. → VM 200
+                        - Media: jellyfin, music, requests, spotisub → VM 210
+                        - Native-auth: chat (Open WebUI), grafana, n8n → VMs 202/205
+                        - Other: photos (Immich VM 203), minio, git, ha, etc.
 ```
+
+**Note:** 8 dead Caddy blocks removed 2026-02-12 (finance + native-auth services).
+Only 4 services route through Caddy+Authentik. All others route direct.
 
 ## Exporting Truth (No Dashboard Guessing)
 
