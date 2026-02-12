@@ -13,11 +13,18 @@ set -euo pipefail
 #   - Bootstrap log: <id>/bootstrap.log
 #   - Commands log hook (preexec)
 #
+# Multi-agent awareness:
+#   - Prunes stale sessions (dead PID + age > TTL)
+#   - Counts active peer sessions
+#   - Exports SPINE_ACTIVE_SESSION_COUNT and SPINE_MULTI_AGENT
+#
 # The 'apply' lane acquires apply-owner.lock — only one terminal can apply.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SESSIONS_DIR="$ROOT/mailroom/state/sessions"
 LOCK_FILE="$ROOT/mailroom/state/apply-owner.lock"
+ARCHIVE_DIR="$SESSIONS_DIR/.archive"
+SESSION_TTL=${SPINE_SESSION_TTL:-14400}  # 4 hours default
 
 usage() {
   echo "Usage: session-start <lane>"
@@ -33,7 +40,58 @@ case "$LANE" in
   *) echo "ERROR: unknown lane '$LANE'. Use: scan | apply | coordinator"; exit 1 ;;
 esac
 
-# Generate session ID
+# ─── Session pruning + liveness ─────────────────────────────
+# Archive stale sessions: PID dead AND older than TTL.
+# Returns active session count via stdout when called as subshell.
+
+prune_and_count_sessions() {
+  mkdir -p "$ARCHIVE_DIR"
+  local now
+  now=$(date +%s)
+  local active=0
+
+  for session_dir in "$SESSIONS_DIR"/SES-*/; do
+    [[ -d "$session_dir" ]] || continue
+    local manifest="$session_dir/session.yaml"
+    [[ -f "$manifest" ]] || continue
+
+    # Extract fields with grep (portable, no yq dependency in hooks)
+    local pid created
+    pid=$(grep '^pid:' "$manifest" | sed 's/^pid: *//' | tr -d '"' || echo "")
+    created=$(grep '^created:' "$manifest" | sed 's/^created: *//' | tr -d '"' || echo "")
+
+    # Calculate age
+    local epoch=0
+    if [[ -n "$created" ]]; then
+      epoch=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$created" "+%s" 2>/dev/null || echo 0)
+    fi
+    local age=$((now - epoch))
+
+    # Check PID liveness
+    local pid_alive=false
+    if [[ -n "$pid" && "$pid" != "null" && "$pid" != "" ]]; then
+      if kill -0 "$pid" 2>/dev/null; then
+        pid_alive=true
+      fi
+    fi
+
+    # Archive if: PID dead AND older than TTL
+    if [[ "$pid_alive" == "false" && "$age" -gt "$SESSION_TTL" ]]; then
+      mv "$session_dir" "$ARCHIVE_DIR/" 2>/dev/null || true
+      continue
+    fi
+
+    active=$((active + 1))
+  done
+
+  echo "$active"
+}
+
+# Prune stale sessions and count active peers
+ACTIVE_BEFORE=$(prune_and_count_sessions)
+
+# ─── Generate session ───────────────────────────────────────
+
 DATE_PART=$(date +%Y%m%d-%H%M%S)
 HASH_PART=$(head -c 4 /dev/urandom | xxd -p | head -c 6)
 SESSION_ID="SES-${DATE_PART}-${LANE}-${HASH_PART}"
@@ -65,11 +123,39 @@ if [[ "$LANE" == "apply" ]]; then
   echo "Apply-owner lock acquired: $SESSION_ID"
 fi
 
+# ─── Multi-agent awareness ──────────────────────────────────
+
+# Count includes the session we just created
+ACTIVE_COUNT=$((ACTIVE_BEFORE + 1))
+MULTI_AGENT=false
+if [[ "$ACTIVE_COUNT" -gt 1 ]]; then
+  MULTI_AGENT=true
+fi
+
 echo "═══════════════════════════════════════════════════════════════"
 echo "  SPINE SESSION: $SESSION_ID"
 echo "  Lane: $LANE"
 echo "  State: $SESSION_DIR/"
 echo "═══════════════════════════════════════════════════════════════"
+
+# Multi-agent banner
+if [[ "$MULTI_AGENT" == "true" ]]; then
+  echo ""
+  echo "╔═══════════════════════════════════════════════════════════╗"
+  echo "║  MULTI-AGENT MODE ACTIVE ($ACTIVE_COUNT sessions)                  ║"
+  echo "║  Proposal flow required; avoid direct commit.            ║"
+  echo "║  Use: proposals.submit / proposals.apply                 ║"
+  echo "║  Or take apply-owner lock: session-start apply           ║"
+  echo "╚═══════════════════════════════════════════════════════════╝"
+fi
+
+# Pruning summary
+ARCHIVED=$((30 - ACTIVE_BEFORE))  # approximate — informational only
+if [[ -d "$ARCHIVE_DIR" ]]; then
+  ARCHIVED_COUNT=$(ls -d "$ARCHIVE_DIR"/SES-*/ 2>/dev/null | wc -l | tr -d ' ')
+  echo ""
+  echo "  Sessions: $ACTIVE_COUNT active, $ARCHIVED_COUNT archived"
+fi
 
 # Bootstrap (P2) — capture all outputs
 BOOTSTRAP_LOG="$SESSION_DIR/bootstrap.log"
@@ -105,6 +191,8 @@ cat > "$ENV_FILE" <<SH
 export SPINE_SESSION_ID="$SESSION_ID"
 export SPINE_LANE="$LANE"
 export SPINE_SESSION_DIR="$SESSION_DIR"
+export SPINE_ACTIVE_SESSION_COUNT=$ACTIVE_COUNT
+export SPINE_MULTI_AGENT=$MULTI_AGENT
 SH
 
 echo ""

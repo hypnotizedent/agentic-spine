@@ -3,8 +3,9 @@ set -euo pipefail
 
 # Spine pre-commit hook (versioned)
 #
-# Goal: prevention (not detection). If ops/capabilities.yaml is staged, validate
-# registry metadata before allowing the commit.
+# Guards:
+# 1. Capability metadata validation (ops/capabilities.yaml staged)
+# 2. Multi-agent commit guard (blocks direct commits when multiple sessions active)
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "${ROOT:-}" ]]; then
@@ -19,6 +20,50 @@ fi
 
 staged="$(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null || true)"
 
+# ─── Guard 1: Multi-agent commit guard ─────────────────────
+# If multiple sessions are active within TTL, block direct commits
+# unless the apply-owner lock is held.
+
+SESSIONS_DIR="$ROOT/mailroom/state/sessions"
+LOCK_FILE="$ROOT/mailroom/state/apply-owner.lock"
+SESSION_TTL=${SPINE_SESSION_TTL:-14400}  # 4 hours
+
+if [[ -d "$SESSIONS_DIR" ]]; then
+  NOW=$(date +%s)
+  ACTIVE=0
+
+  for sdir in "$SESSIONS_DIR"/SES-*/; do
+    [[ -d "$sdir" ]] || continue
+    manifest="$sdir/session.yaml"
+    [[ -f "$manifest" ]] || continue
+
+    created=$(grep '^created:' "$manifest" 2>/dev/null | sed 's/^created: *//' | tr -d '"' || echo "")
+    if [[ -n "$created" ]]; then
+      epoch=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$created" "+%s" 2>/dev/null || echo 0)
+      age=$((NOW - epoch))
+      if [[ $age -lt $SESSION_TTL ]]; then
+        ACTIVE=$((ACTIVE + 1))
+      fi
+    fi
+  done
+
+  if [[ "$ACTIVE" -gt 1 ]]; then
+    # Multi-agent mode — require apply-owner authorization
+    if [[ ! -f "$LOCK_FILE" ]]; then
+      echo "BLOCKED: Multi-agent mode detected ($ACTIVE active sessions)." >&2
+      echo "No apply-owner lock held — direct commits are not allowed." >&2
+      echo "" >&2
+      echo "Remediation:" >&2
+      echo "  1. Use proposals: ./bin/ops cap run proposals.submit \"description\"" >&2
+      echo "  2. Or take apply-owner lock: ./bin/ops cap run session.start apply" >&2
+      echo "" >&2
+      exit 1
+    fi
+    # apply-owner.lock exists — commit is authorized
+  fi
+fi
+
+# ─── Guard 2: Capability metadata validation ───────────────
 # Main-branch commits are allowed. Worktrees are optional, not mandatory.
 # Drift gates (spine.verify) catch problems; the pre-commit hook stays lean.
 

@@ -49,6 +49,40 @@ if [[ "${DIRTY_COUNT:-0}" != "0" ]]; then
 "
 fi
 
+# ─── Multi-agent session detection ──────────────────────────
+SESSIONS_DIR="$SPINE_ROOT/mailroom/state/sessions"
+SESSION_TTL=${SPINE_SESSION_TTL:-14400}  # 4 hours
+ACTIVE_SESSIONS=0
+NOW=$(date +%s)
+
+if [[ -d "$SESSIONS_DIR" ]]; then
+  for sdir in "$SESSIONS_DIR"/SES-*/; do
+    [[ -d "$sdir" ]] || continue
+    manifest="$sdir/session.yaml"
+    [[ -f "$manifest" ]] || continue
+
+    created=$(grep '^created:' "$manifest" 2>/dev/null | sed 's/^created: *//' | tr -d '"' || echo "")
+    if [[ -n "$created" ]]; then
+      epoch=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$created" "+%s" 2>/dev/null || echo 0)
+      age=$((NOW - epoch))
+      if [[ $age -lt $SESSION_TTL ]]; then
+        ACTIVE_SESSIONS=$((ACTIVE_SESSIONS + 1))
+      fi
+    fi
+  done
+fi
+
+MULTI_AGENT_WARNING=""
+if [[ "$ACTIVE_SESSIONS" -gt 1 ]]; then
+  MULTI_AGENT_WARNING="
+> **MULTI-AGENT MODE ACTIVE ($ACTIVE_SESSIONS sessions detected).**
+> Proposal flow required — avoid direct commit.
+> Use: \`./bin/ops cap run proposals.submit \"desc\"\` to submit changes.
+> Apply-owner applies: \`./bin/ops cap run proposals.apply CP-...\`
+> Direct commits are blocked by pre-commit hook unless apply-owner lock is held.
+"
+fi
+
 # Read canonical governance brief (static rules from single source)
 BRIEF_FILE="$SPINE_ROOT/docs/governance/AGENT_GOVERNANCE_BRIEF.md"
 BRIEF=$(cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable — expected at $BRIEF_FILE)")
@@ -57,8 +91,8 @@ BRIEF=$(cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable —
 MSG="## SESSION ENTRY PROTOCOL (governance hook)
 
 You are working inside the agentic-spine repo (\`$SPINE_ROOT\`).
-**Branch:** \`${BRANCH}\` | **Active worktrees:** ${WT_COUNT}/2
-${DIRTY_WARNING}
+**Branch:** \`${BRANCH}\` | **Active worktrees:** ${WT_COUNT}/2 | **Active sessions:** ${ACTIVE_SESSIONS}
+${DIRTY_WARNING}${MULTI_AGENT_WARNING}
 
 ### Multi-Agent Write Policy (Default)
 - Agents: read-only on repo; write proposals to \`mailroom/outbox/proposals/\`

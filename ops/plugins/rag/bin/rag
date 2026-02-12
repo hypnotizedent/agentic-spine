@@ -466,6 +466,7 @@ case "$cmd" in
     derive_anythingllm_url
     load_api_key
     require_tool curl
+    require_tool python3
     local_json="$(http_get "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}")"
     if command -v jq >/dev/null 2>&1; then
       doc_count="$(echo "$local_json" | jq -r '
@@ -476,8 +477,20 @@ case "$cmd" in
     else
       doc_count="(jq-missing)"
     fi
+    eligible_count="$(build_manifest | sed '/^\s*$/d' | wc -l | tr -d ' ')"
     echo "workspace: ${WORKSPACE_SLUG}"
     echo "docs_indexed: ${doc_count}"
+    echo "docs_eligible: ${eligible_count}"
+    if [[ "$doc_count" =~ ^[0-9]+$ && "$eligible_count" =~ ^[0-9]+$ ]]; then
+      if [[ "$doc_count" -ge "$eligible_count" ]]; then
+        echo "parity: OK"
+      else
+        delta=$((eligible_count - doc_count))
+        echo "parity: DRIFT (${delta} docs behind)"
+      fi
+    else
+      echo "parity: UNKNOWN"
+    fi
     ;;
 
   ask)
