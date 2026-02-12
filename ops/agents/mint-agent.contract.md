@@ -24,6 +24,7 @@
 | Job lifecycle queries | files-api (artwork) | VM 213 (mint-apps) |
 | Contract validation | order-intake | VM 213 (mint-apps) |
 | Module health monitoring | files-api, order-intake, quote-page | VM 213 (mint-apps) |
+| Finance event mapping | finance-adapter | VM 213 (mint-apps) |
 | Data plane health | PostgreSQL, MinIO, Redis | VM 212 (mint-data) |
 
 ## Defers to Spine (Infrastructure Layer)
