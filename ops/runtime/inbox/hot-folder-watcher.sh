@@ -77,7 +77,7 @@ if [[ "$WATCHER_PROVIDER" == "anthropic" ]]; then
     MODEL="${CLAUDE_MODEL:-claude-sonnet-4-20250514}"
     MAX_TOKENS="${CLAUDE_MAX_TOKENS:-4096}"
 else
-    MODEL="${ZAI_MODEL:-glm-5}"
+    MODEL="${ZAI_MODEL:-glm-4.7-flash}"
     MAX_TOKENS="${ZAI_MAX_TOKENS:-4096}"
 fi
 
@@ -502,30 +502,44 @@ dispatch_to_claude() {
 dispatch_to_zai() {
     local packet="$1"
     local response
+    local attempt
+    local max_attempts=3
+    local backoff=2
 
     local escaped_packet
     escaped_packet="$(echo "$packet" | jq -Rs .)"
 
-    response=$(curl -sS "https://api.z.ai/api/paas/v4/chat/completions" \
-        -H "Authorization: Bearer ${ZAI_API_KEY}" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"model\": \"${MODEL}\",
-            \"max_tokens\": ${MAX_TOKENS},
-            \"temperature\": 0,
-            \"messages\": [{
-                \"role\": \"user\",
-                \"content\": ${escaped_packet}
-            }]
-        }" 2>&1)
+    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+        response=$(curl -sS "https://api.z.ai/api/paas/v4/chat/completions" \
+            -H "Authorization: Bearer ${ZAI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"model\": \"${MODEL}\",
+                \"max_tokens\": ${MAX_TOKENS},
+                \"temperature\": 0,
+                \"messages\": [{
+                    \"role\": \"user\",
+                    \"content\": ${escaped_packet}
+                }]
+            }" 2>&1)
 
-    if echo "$response" | jq -e '.choices[0].message.content' >/dev/null 2>&1; then
-        echo "$response" | jq -r '.choices[0].message.content'
-    else
+        if echo "$response" | jq -e '.choices[0].message' >/dev/null 2>&1; then
+            echo "$response" | jq -r '(.choices[0].message.content // empty) as $c | if ($c|type=="string" and ($c|length)>0) then $c else (.choices[0].message.reasoning_content // "") end'
+            return 0
+        fi
+
+        local err_msg
+        err_msg="$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null || true)"
+        if [[ "$attempt" -lt "$max_attempts" ]] && [[ "$err_msg" == *"Rate limit"* ]]; then
+            sleep "$backoff"
+            backoff=$((backoff * 2))
+            continue
+        fi
+
         echo "ERROR: z.ai API call failed"
         echo "$response" | jq -r '.error.message // .' 2>/dev/null || echo "$response"
         return 1
-    fi
+    done
 }
 
 dispatch_to_model() {
@@ -871,7 +885,7 @@ main() {
             echo "Environment:"
             echo "  SPINE_WATCHER_PROVIDER  Model provider: zai (default) or anthropic"
             echo "  ZAI_API_KEY / Z_AI_API_KEY  Required when provider=zai"
-            echo "  ZAI_MODEL          Override z.ai model (default: glm-5)"
+            echo "  ZAI_MODEL          Override z.ai model (default: glm-4.7-flash)"
             echo "  SPINE_INBOX        Override inbox path (default: $SPINE/mailroom/inbox)"
             echo "  SPINE_OUTBOX       Override outbox path (default: $SPINE/mailroom/outbox)"
             echo "  SPINE_STATE        Override state path (default: $SPINE/mailroom/state)"

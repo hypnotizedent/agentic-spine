@@ -60,4 +60,12 @@ cfg_base="$(jq -r '.provider.openai.options.baseURL // empty' "$OPENCODE_CFG" 2>
 [[ "$cfg_base" == "https://api.z.ai/api/paas/v4" ]] \
   || fail "opencode.json provider.openai.options.baseURL must be z.ai endpoint"
 
+cfg_api_key_ref="$(jq -r '.provider.openai.options.apiKey // empty' "$OPENCODE_CFG" 2>/dev/null || true)"
+[[ "$cfg_api_key_ref" == "{env:ZAI_API_KEY}" ]] \
+  || fail "opencode.json provider.openai.options.apiKey must be {env:ZAI_API_KEY}"
+
+if jq -e '.provider.anthropic' "$OPENCODE_CFG" >/dev/null 2>&1; then
+  fail "opencode.json must not define anthropic provider for governed z.ai-only lane"
+fi
+
 echo "D73 PASS: OpenCode governed entry lock enforced"

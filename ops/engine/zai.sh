@@ -11,7 +11,7 @@ Usage: zai.sh <RUN_ID>
 Calls z.ai chat completions with a configurable model.
 Env overrides:
   - ZAI_API_KEY or Z_AI_API_KEY
-  - ZAI_MODEL (default: glm-5)
+  - ZAI_MODEL (default: glm-4.7-flash)
   - ZAI_MAX_TOKENS (default: 200)
 EOF
   exit 1
@@ -30,7 +30,7 @@ response_file="${run_dir}/zai_response.json"
 key="${ZAI_API_KEY:-${Z_AI_API_KEY:-}}"
 [[ -n "${key}" ]] || { echo "FAIL: ZAI_API_KEY/Z_AI_API_KEY is required for the z.ai provider" >&2; exit 1; }
 endpoint="https://api.z.ai/api/paas/v4/chat/completions"
-model="${ZAI_MODEL:-glm-5}"
+model="${ZAI_MODEL:-glm-4.7-flash}"
 max_tokens="${ZAI_MAX_TOKENS:-200}"
 
 payload="$(ZAI_MODEL="$model" ZAI_MAX_TOKENS="$max_tokens" python3 - "${request_file}" <<'PY'
@@ -41,7 +41,7 @@ path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as fh:
     request = fh.read().strip()
 
-model = os.environ.get("ZAI_MODEL", "glm-5")
+model = os.environ.get("ZAI_MODEL", "glm-4.7-flash")
 try:
     max_tokens = int(os.environ.get("ZAI_MAX_TOKENS", "200"))
 except ValueError:
