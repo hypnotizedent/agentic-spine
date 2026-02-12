@@ -150,11 +150,14 @@ On-site cold boot with AC drain was performed (2026-02-09) and still failed; tre
 | 207 | ai-consolidation | running | 32GB | 200GB | Qdrant + AnythingLLM (DHCP, onboot=1) |
 | 209 | download-stack | running | 8GB | 50GB | radarr, sonarr, lidarr, prowlarr, sabnzbd, tdarr, trailarr |
 | 210 | streaming-stack | running | 8GB | 50GB | jellyfin, navidrome, jellyseerr, bazarr, homarr |
+| 211 | finance-stack | running | 8GB | 50GB | Firefly III, Paperless-ngx, Ghostfolio, Mail Archiver |
+| 212 | mint-data | running | 8GB | 50GB | Fresh-slate data plane (PostgreSQL 16 + MinIO + Redis) |
+| 213 | mint-apps | running | 8GB | 50GB | Fresh-slate app plane (artwork, quote-page, order-intake) |
 | 9000 | template | stopped | 2GB | 3.5GB | Ubuntu 24.04 cloud-init template |
 
-**Total RAM allocated:** 216GB across 9 running VMs (host has 192GB — overcommitted by 24GB, acceptable with balloon/KSM)
+**Total RAM allocated:** 248GB across 12 running VMs (host has 192GB — overcommitted by 56GB, acceptable with balloon/KSM; docker-host can be downsized post-cutover)
 
-**NOTE:** vzdump backup job covers all 9 running shop VMs: `200,202,203,204,205,206,207,209,210`. Verify with `./bin/ops cap run backup.status`.
+**NOTE:** vzdump backup job covers all 12 running shop VMs: `200,202,203,204,205,206,207,209,210,211,212,213`. Verify with `./bin/ops cap run backup.status`.
 
 ### NFS Exports from PVE (2026-02-09)
 

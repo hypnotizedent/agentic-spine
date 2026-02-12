@@ -190,6 +190,9 @@ Notes (Shop LAN-only endpoints):
 | ai-consolidation | `ai-consolidation` | 192.168.1.207 | 207 | DHCP noted in SHOP_SERVER_SSOT; confirm reservation on UDR. |
 | download-stack | `download-stack` | 192.168.1.209 | 209 | NFS mounts use this IP |
 | streaming-stack | `streaming-stack` | 192.168.1.210 | 210 | NFS mounts use this IP |
+| finance-stack | `finance-stack` | 192.168.1.211 | 211 | Finance (Firefly III, Paperless, Ghostfolio) |
+| mint-data | `mint-data` | 192.168.1.212 | 212 | Fresh-slate data plane (PostgreSQL + MinIO + Redis) |
+| mint-apps | `mint-apps` | 192.168.1.213 | 213 | Fresh-slate app plane (artwork, quote-page, order-intake) |
 
 ### Subnet Table
 
