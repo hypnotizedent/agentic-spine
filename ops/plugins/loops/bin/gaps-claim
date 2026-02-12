@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# gaps.claim — Claim a gap for exclusive work
+#
+# Usage: gaps-claim <GAP_ID> [--action "description"]
+#
+# Creates a claim file in mailroom/state/gaps/ with PID ownership.
+# Rejects if gap is already claimed by a live process.
+# Recovers stale claims (dead PID) automatically.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: gaps-claim <GAP_ID> [--action \"description\"]"
+  exit 0
+fi
+
+GAP_ID="${1:?Usage: gaps-claim <GAP_ID> [--action \"description\"]}"
+shift
+
+ACTION="unspecified"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --action) ACTION="${2:?--action requires a value}"; shift 2 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+# Validate gap exists and is open
+gap_exists "$GAP_ID" || { echo "FAIL: $GAP_ID does not exist in gap registry" >&2; exit 1; }
+gap_is_open "$GAP_ID" || { echo "FAIL: $GAP_ID is not open (cannot claim a resolved gap)" >&2; exit 1; }
+
+# Claim it
+claim_gap "$GAP_ID" "$ACTION" || exit 1
+
+echo "CLAIMED: $GAP_ID by PID $$ — action: $ACTION"

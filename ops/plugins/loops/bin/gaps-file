@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# gaps.file — Create a new gap entry (atomic, git-locked)
+#
+# Usage: gaps-file --id GAP-OP-NNN --type <type> --severity <sev> \
+#                  --description "desc" --discovered-by "source" \
+#                  [--doc "path"] [--parent-loop "LOOP-ID"]
+#
+# Acquires git-lock, appends to operational.gaps.yaml, commits, releases lock.
+# Validates all required fields and rejects duplicates.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
+
+# Parse arguments
+GAP_ID="" TYPE="" SEVERITY="" DESCRIPTION="" DISCOVERED_BY="" PARENT_LOOP="" DOC=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id)            GAP_ID="${2:?--id requires a value}"; shift 2 ;;
+    --type)          TYPE="${2:?--type requires a value}"; shift 2 ;;
+    --severity)      SEVERITY="${2:?--severity requires a value}"; shift 2 ;;
+    --description)   DESCRIPTION="${2:?--description requires a value}"; shift 2 ;;
+    --discovered-by) DISCOVERED_BY="${2:?--discovered-by requires a value}"; shift 2 ;;
+    --parent-loop)   PARENT_LOOP="${2:?--parent-loop requires a value}"; shift 2 ;;
+    --doc)           DOC="${2:?--doc requires a value}"; shift 2 ;;
+    -h|--help)
+      echo "Usage: gaps-file --id GAP-OP-NNN --type <type> --severity <sev> \\"
+      echo "                 --description \"desc\" --discovered-by \"source\" \\"
+      echo "                 [--doc \"path\"] [--parent-loop \"LOOP-ID\"]"
+      echo ""
+      echo "Types: stale-ssot | missing-entry | agent-behavior | unclear-doc | duplicate-truth | runtime-bug"
+      echo "Severities: low | medium | high | critical"
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+# Validate required fields
+[[ -n "$GAP_ID" ]]        || { echo "FAIL: --id required" >&2; exit 2; }
+[[ -n "$TYPE" ]]          || { echo "FAIL: --type required" >&2; exit 2; }
+[[ -n "$SEVERITY" ]]      || { echo "FAIL: --severity required" >&2; exit 2; }
+[[ -n "$DESCRIPTION" ]]   || { echo "FAIL: --description required" >&2; exit 2; }
+[[ -n "$DISCOVERED_BY" ]] || { echo "FAIL: --discovered-by required" >&2; exit 2; }
+
+# Validate type
+case "$TYPE" in
+  stale-ssot|missing-entry|agent-behavior|unclear-doc|duplicate-truth|runtime-bug) ;;
+  *) echo "FAIL: invalid --type '$TYPE' (valid: stale-ssot, missing-entry, agent-behavior, unclear-doc, duplicate-truth, runtime-bug)" >&2; exit 2 ;;
+esac
+
+# Validate severity
+case "$SEVERITY" in
+  low|medium|high|critical) ;;
+  *) echo "FAIL: invalid --severity '$SEVERITY' (valid: low, medium, high, critical)" >&2; exit 2 ;;
+esac
+
+# Check for duplicates before acquiring lock
+gap_exists "$GAP_ID" && { echo "FAIL: $GAP_ID already exists in gap registry" >&2; exit 1; }
+
+# Acquire git lock
+acquire_git_lock || exit 1
+
+# Temp file for the new entry
+TMPFILE=$(mktemp)
+trap 'rm -f "$TMPFILE"; release_git_lock' EXIT INT TERM
+
+TODAY=$(date -u +%Y-%m-%d)
+TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# Build YAML entry
+cat > "$TMPFILE" <<YAMLEOF
+id: "$GAP_ID"
+discovered_by: "$DISCOVERED_BY"
+discovered_at: "$TODAY"
+type: $TYPE
+doc: "${DOC:-null}"
+description: |
+  $DESCRIPTION
+severity: $SEVERITY
+status: open
+notes: "Filed via gaps.file at $TIMESTAMP"
+YAMLEOF
+
+# Add optional parent_loop
+if [[ -n "$PARENT_LOOP" ]]; then
+  echo "parent_loop: \"$PARENT_LOOP\"" >> "$TMPFILE"
+fi
+
+# Append to gaps array
+yq e -i ".gaps += [load(\"$TMPFILE\")]" "$GAPS_FILE" || {
+  echo "FAIL: yq append failed" >&2
+  exit 1
+}
+
+# Update timestamp
+yq e -i ".updated = \"$TIMESTAMP\"" "$GAPS_FILE"
+
+# Commit
+git -C "$ROOT" add "$GAPS_FILE"
+git -C "$ROOT" commit -m "$(cat <<EOF
+gov($GAP_ID): register gap via gaps.file
+
+Type: $TYPE | Severity: $SEVERITY
+Filed via atomic gaps.file capability.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+EOF
+)"
+
+echo "FILED: $GAP_ID (type=$TYPE, severity=$SEVERITY)"
