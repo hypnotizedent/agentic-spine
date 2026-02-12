@@ -18,6 +18,8 @@ if ! command -v git >/dev/null 2>&1; then
   exit 0
 fi
 
+current_branch="$(git branch --show-current 2>/dev/null || echo detached)"
+
 staged="$(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null || true)"
 
 # ─── Guard 1: Multi-agent commit guard ─────────────────────
@@ -50,14 +52,18 @@ if [[ -d "$SESSIONS_DIR" ]]; then
   if [[ "$ACTIVE" -gt 1 ]]; then
     # Multi-agent mode — require apply-owner authorization
     if [[ ! -f "$LOCK_FILE" ]]; then
-      echo "BLOCKED: Multi-agent mode detected ($ACTIVE active sessions)." >&2
-      echo "No apply-owner lock held — direct commits are not allowed." >&2
-      echo "" >&2
-      echo "Remediation:" >&2
-      echo "  1. Use proposals: ./bin/ops cap run proposals.submit \"description\"" >&2
-      echo "  2. Or take apply-owner lock: ./bin/ops cap run session.start apply" >&2
-      echo "" >&2
-      exit 1
+      if [[ "$current_branch" =~ ^worker/ ]]; then
+        echo "NOTICE: multi-agent mode detected ($ACTIVE active sessions); worker branch commit allowed: $current_branch" >&2
+      else
+        echo "BLOCKED: main blocked, worker branches allowed." >&2
+        echo "Multi-agent mode detected ($ACTIVE active sessions) and no apply-owner lock is held." >&2
+        echo "" >&2
+        echo "Remediation:" >&2
+        echo "  1. Use proposals: ./bin/ops cap run proposals.submit \"description\"" >&2
+        echo "  2. Or take apply-owner lock: ./bin/ops cap run session.start apply" >&2
+        echo "" >&2
+        exit 1
+      fi
     fi
     # apply-owner.lock exists — commit is authorized
   fi

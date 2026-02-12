@@ -224,6 +224,95 @@ case_out_of_sequence_rejected() {
       --loop-id LOOP-T-SEQUENCE --lane lane-b --commit "$commit_b"
 }
 
+case_terminal_entry_isolated_worktrees() {
+  local repo base commit_d commit_e out_d out_e wt_d wt_e
+  repo="$(make_repo)"
+  base="$(git -C "$repo" rev-parse HEAD)"
+
+  run_cap "$repo" "$BIN_DIR/orchestration-loop-open" \
+    --loop-id LOOP-T-ENTRY-ISOLATION \
+    --apply-owner "$USER" \
+    --repo "$repo" \
+    --base-sha "$base" \
+    --lanes D,E \
+    --sequence D,E \
+    --allow "D:src/d/**" \
+    --allow "E:src/e/**" >/dev/null
+
+  commit_d="$(make_commit "$repo" "worker/lane-d" "src/d/file.txt" "lane d" "lane d commit")"
+  commit_e="$(make_commit "$repo" "worker/lane-e" "src/e/file.txt" "lane e" "lane e commit")"
+  [[ -n "$commit_d" && -n "$commit_e" ]] || { fail_case "entry isolation setup" "missing lane commits"; return 1; }
+  git -C "$repo" checkout -q main
+
+  run_cap "$repo" "$BIN_DIR/orchestration-ticket-issue" \
+    --loop-id LOOP-T-ENTRY-ISOLATION \
+    --lane D \
+    --branch worker/lane-d >/dev/null
+  run_cap "$repo" "$BIN_DIR/orchestration-ticket-issue" \
+    --loop-id LOOP-T-ENTRY-ISOLATION \
+    --lane E \
+    --branch worker/lane-e >/dev/null
+
+  out_d="$(run_cap "$repo" "$BIN_DIR/orchestration-terminal-entry" \
+    --loop-id LOOP-T-ENTRY-ISOLATION \
+    --role worker \
+    --lane D \
+    --session-id TEST-D \
+    --worktree "$repo" \
+    --branch worker/lane-d 2>&1)"
+  out_e="$(run_cap "$repo" "$BIN_DIR/orchestration-terminal-entry" \
+    --loop-id LOOP-T-ENTRY-ISOLATION \
+    --role worker \
+    --lane E \
+    --session-id TEST-E \
+    --worktree "$repo" \
+    --branch worker/lane-e 2>&1)"
+
+  wt_d="$(printf '%s\n' "$out_d" | sed -n 's/^export SPINE_WORKTREE=//p' | tail -1)"
+  wt_e="$(printf '%s\n' "$out_e" | sed -n 's/^export SPINE_WORKTREE=//p' | tail -1)"
+  wt_d="${wt_d%\"}"
+  wt_d="${wt_d#\"}"
+  wt_e="${wt_e%\"}"
+  wt_e="${wt_e#\"}"
+
+  [[ -n "$wt_d" && -n "$wt_e" ]] || { fail_case "entry isolation" "missing SPINE_WORKTREE export"; return 1; }
+  [[ "$wt_d" != "$wt_e" ]] || { fail_case "entry isolation" "D and E resolved same worktree: $wt_d"; return 1; }
+  [[ -d "$wt_d" && -d "$wt_e" ]] || { fail_case "entry isolation" "resolved worktree path missing"; return 1; }
+
+  pass_case "terminal entry resolves distinct per-lane worktrees"
+}
+
+case_terminal_entry_lane_branch_mismatch_rejected() {
+  local repo base
+  repo="$(make_repo)"
+  base="$(git -C "$repo" rev-parse HEAD)"
+
+  run_cap "$repo" "$BIN_DIR/orchestration-loop-open" \
+    --loop-id LOOP-T-ENTRY-MISMATCH \
+    --apply-owner "$USER" \
+    --repo "$repo" \
+    --base-sha "$base" \
+    --lanes D \
+    --sequence D \
+    --allow "D:src/d/**" >/dev/null
+
+  make_commit "$repo" "worker/lane-d" "src/d/file.txt" "lane d" "lane d commit" >/dev/null
+  git -C "$repo" checkout -q main
+  run_cap "$repo" "$BIN_DIR/orchestration-ticket-issue" \
+    --loop-id LOOP-T-ENTRY-MISMATCH \
+    --lane D \
+    --branch worker/lane-d >/dev/null
+
+  expect_fail_contains "terminal entry wrong lane/branch rejected" "lane branch mismatch" \
+    run_cap "$repo" "$BIN_DIR/orchestration-terminal-entry" \
+      --loop-id LOOP-T-ENTRY-MISMATCH \
+      --role worker \
+      --lane D \
+      --session-id TEST-MISMATCH \
+      --worktree "$repo" \
+      --branch worker/not-lane-d
+}
+
 case_happy_path_validate_integrate() {
   local repo base commit_a integration_file status
   repo="$(make_repo)"
@@ -270,6 +359,8 @@ case_wrong_branch_rejected
 case_base_sha_mismatch_rejected
 case_forbidden_file_rejected
 case_out_of_sequence_rejected
+case_terminal_entry_isolated_worktrees
+case_terminal_entry_lane_branch_mismatch_rejected
 case_happy_path_validate_integrate
 
 echo ""

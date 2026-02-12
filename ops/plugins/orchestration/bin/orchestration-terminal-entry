@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
+
+usage() {
+  cat <<'USAGE'
+orchestration-terminal-entry - Resolve strict per-lane orchestration worktree context
+
+Usage:
+  orchestration-terminal-entry \
+    --loop-id <id> \
+    --role <C|worker> \
+    --session-id <session-id> \
+    --worktree <caller-worktree> \
+    --branch <branch> \
+    [--lane <lane>] \
+    [--force]
+USAGE
+}
+
+emit_export() {
+  local key="$1"
+  local value="$2"
+  printf 'export %s=%q\n' "$key" "$value"
+}
+
+assert_branch_name() {
+  local branch="$1"
+  [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || orchestration_fail "branch must match [A-Za-z0-9._/-]+"
+}
+
+ensure_local_branch() {
+  local repo="$1"
+  local branch="$2"
+  if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+    return 0
+  fi
+  if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    git -C "$repo" branch --track "$branch" "origin/$branch" >/dev/null 2>&1 || true
+  fi
+  git -C "$repo" show-ref --verify --quiet "refs/heads/$branch" \
+    || orchestration_fail "branch not found in repo: $branch"
+}
+
+find_branch_worktree() {
+  local repo="$1"
+  local branch="$2"
+  local current_wt=""
+  local current_branch=""
+
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        current_wt="${line#worktree }"
+        ;;
+      branch\ refs/heads/*)
+        current_branch="${line#branch refs/heads/}"
+        if [[ "$current_branch" == "$branch" ]]; then
+          printf '%s\n' "$current_wt"
+          return 0
+        fi
+        ;;
+    esac
+  done < <(git -C "$repo" worktree list --porcelain)
+  return 1
+}
+
+ROOT="$(orchestration_root)"
+LOOP_ID=""
+ROLE=""
+LANE=""
+SESSION_ID=""
+CALLER_WORKTREE=""
+CLAIMED_BRANCH=""
+FORCE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --role) ROLE="${2:-}"; shift 2 ;;
+    --lane) LANE="${2:-}"; shift 2 ;;
+    --session-id) SESSION_ID="${2:-}"; shift 2 ;;
+    --worktree) CALLER_WORKTREE="${2:-}"; shift 2 ;;
+    --branch) CLAIMED_BRANCH="${2:-}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) orchestration_fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || orchestration_fail "--loop-id is required"
+[[ -n "$ROLE" ]] || orchestration_fail "--role is required"
+[[ -n "$SESSION_ID" ]] || orchestration_fail "--session-id is required"
+[[ -n "$CALLER_WORKTREE" ]] || orchestration_fail "--worktree is required"
+[[ -n "$CLAIMED_BRANCH" ]] || orchestration_fail "--branch is required"
+
+case "$ROLE" in
+  C|worker) ;;
+  *) orchestration_fail "--role must be C or worker" ;;
+esac
+
+orchestration_assert_id "$LOOP_ID" "loop id"
+assert_branch_name "$CLAIMED_BRANCH"
+
+if [[ "$ROLE" == "worker" ]]; then
+  LANE="$(printf '%s' "$LANE" | tr '[:lower:]' '[:upper:]')"
+  [[ -n "$LANE" ]] || orchestration_fail "--lane is required for role=worker"
+  orchestration_assert_id "$LANE" "lane"
+else
+  [[ -z "$LANE" ]] || orchestration_fail "--lane is only valid for role=worker"
+  LANE="C"
+fi
+
+[[ -d "$CALLER_WORKTREE" ]] || orchestration_fail "caller worktree does not exist: $CALLER_WORKTREE"
+
+orchestration_need yq
+orchestration_need git
+orchestration_ensure_manifest "$ROOT" "$LOOP_ID"
+
+manifest="$(orchestration_manifest_path "$ROOT" "$LOOP_ID")"
+loop_dir="$(orchestration_loop_dir "$ROOT" "$LOOP_ID")"
+repo="$(orchestration_manifest_repo "$manifest" "$ROOT")"
+orchestration_assert_git_repo "$repo"
+repo="$(cd "$repo" && pwd)"
+
+target_branch=""
+assigned_worker=""
+if [[ "$ROLE" == "worker" ]]; then
+  ticket_file="$loop_dir/tickets/$LANE.yaml"
+  if [[ -f "$ticket_file" ]]; then
+    target_branch="$(yq e -r '.branch // ""' "$ticket_file")"
+    assigned_worker="$(yq e -r '.worker // ""' "$ticket_file")"
+  fi
+  if [[ -z "$target_branch" || "$target_branch" == "null" ]]; then
+    target_branch="$(yq e -r ".lanes.\"$LANE\".branch // \"\"" "$manifest")"
+  fi
+  [[ -n "$target_branch" ]] || orchestration_fail "assigned lane branch missing for lane: $LANE"
+  assert_branch_name "$target_branch"
+  [[ "$CLAIMED_BRANCH" == "$target_branch" ]] \
+    || orchestration_fail "lane branch mismatch: lane '$LANE' requires '$target_branch' got '$CLAIMED_BRANCH'"
+else
+  target_branch="$CLAIMED_BRANCH"
+  if [[ "$target_branch" != "main" && "$FORCE" -ne 1 ]]; then
+    orchestration_fail "role C must launch from branch 'main' (use --force to override)"
+  fi
+fi
+
+ensure_local_branch "$repo" "$target_branch"
+
+worktree_base="$repo/.worktrees/orchestration/$LOOP_ID"
+target_worktree="$worktree_base/$LANE"
+mkdir -p "$worktree_base"
+
+# Remove stale registry entries before checking occupancy.
+git -C "$repo" worktree prune >/dev/null 2>&1 || true
+
+occupied_wt="$(find_branch_worktree "$repo" "$target_branch" || true)"
+if [[ -n "$occupied_wt" && "$occupied_wt" != "$target_worktree" ]]; then
+  if [[ "$FORCE" -eq 1 ]]; then
+    echo "WARN: forcing legacy worktree reuse for branch '$target_branch' at '$occupied_wt'" >&2
+    target_worktree="$occupied_wt"
+  else
+    orchestration_fail "branch '$target_branch' already checked out at '$occupied_wt' (expected '$target_worktree')"
+  fi
+fi
+
+if [[ -d "$target_worktree/.git" ]]; then
+  wt_branch="$(git -C "$target_worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  [[ "$wt_branch" == "$target_branch" ]] \
+    || orchestration_fail "existing deterministic worktree branch mismatch: expected '$target_branch' got '$wt_branch'"
+else
+  if [[ -e "$target_worktree" && ! -d "$target_worktree/.git" ]]; then
+    orchestration_fail "deterministic worktree path exists but is not a git checkout: $target_worktree"
+  fi
+  git -C "$repo" worktree add "$target_worktree" "$target_branch" >/dev/null
+fi
+
+wt_branch="$(git -C "$target_worktree" rev-parse --abbrev-ref HEAD)"
+[[ "$wt_branch" == "$target_branch" ]] \
+  || orchestration_fail "resolved worktree branch mismatch: expected '$target_branch' got '$wt_branch'"
+
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+yq e -i ".updated_at = \"$now\"" "$manifest"
+yq e -i ".lanes.\"$LANE\".entry_worktree = \"$target_worktree\"" "$manifest"
+yq e -i ".lanes.\"$LANE\".status = \"entry-ready\"" "$manifest"
+if [[ "$ROLE" == "worker" ]]; then
+  yq e -i ".lanes.\"$LANE\".worker = \"${assigned_worker}\"" "$manifest"
+fi
+
+echo "orchestration.terminal.entry"
+echo "loop_id: $LOOP_ID"
+echo "role: $ROLE"
+echo "lane: $LANE"
+echo "repo: $repo"
+echo "worktree: $target_worktree"
+echo "branch: $target_branch"
+echo "status: READY"
+
+emit_export "SPINE_ORCH_LOOP_ID" "$LOOP_ID"
+emit_export "SPINE_ORCH_ROLE" "$ROLE"
+emit_export "SPINE_ORCH_LANE" "$LANE"
+emit_export "SPINE_ORCH_SESSION_ID" "$SESSION_ID"
+emit_export "SPINE_ORCH_MANIFEST" "$manifest"
+emit_export "SPINE_ORCH_CALLER_WORKTREE" "$CALLER_WORKTREE"
+emit_export "SPINE_ORCH_TARGET_BRANCH" "$target_branch"
+emit_export "SPINE_ORCH_CLAIMED_BRANCH" "$CLAIMED_BRANCH"
+emit_export "SPINE_TARGET_REPO" "$repo"
+emit_export "SPINE_WORKTREE" "$target_worktree"

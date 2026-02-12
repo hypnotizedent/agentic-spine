@@ -50,6 +50,7 @@ The authority chain. When in doubt, these are the source of truth.
 |-----|-------|
 | [GOVERNANCE_INDEX.md](governance/GOVERNANCE_INDEX.md) | Entry point — rules, authority chain, general governance |
 | [SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) | Entry point for every agent inside the spine |
+| [ORCHESTRATION_CAPABILITY.md](governance/ORCHESTRATION_CAPABILITY.md) | Strict orchestration terminal entry and lane isolation contract |
 | [STACK_REGISTRY.yaml](governance/STACK_REGISTRY.yaml) | What stacks exist, where they run |
 | [SERVICE_REGISTRY.yaml](governance/SERVICE_REGISTRY.yaml) | Service-level inventory (ports, health URLs) |
 | [SSOT_REGISTRY.yaml](governance/SSOT_REGISTRY.yaml) | Priority list of truth sources agents follow |

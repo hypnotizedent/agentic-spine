@@ -94,6 +94,7 @@ Pillar entrypoints (per stack)
 | `SUPERVISOR_CHECKLIST.md` | Verify work before shipping |
 | `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |
 | `MAILROOM_BRIDGE.md` | Governed remote API bridge (read outbox/receipts, enqueue prompts) |
+| `ORCHESTRATION_CAPABILITY.md` | Machine-enforced orchestration contract and strict terminal entry behavior |
 | `HOST_DRIFT_POLICY.md` | Host drift contract for `/Users/ronnyworks` stabilization |
 
 ### Backup & Recovery
