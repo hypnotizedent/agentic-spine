@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-07
+last_verified: 2026-02-13
 verification_method: live-system-inspection
 scope: workstation-infrastructure
 github_issue: "#625"
@@ -14,7 +14,7 @@ github_issue: "#625"
 > Covers: Hardware specs, local services, RAG stack, developer tooling, and verification.
 > For device identity and Tailscale config, see [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md).
 >
-> **Last Verified:** February 7, 2026
+> **Last Verified:** February 13, 2026
 
 ---
 
@@ -173,6 +173,17 @@ github_issue: "#625"
 | **Raycast** | `OpenCode` | `SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 /Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool opencode` |
 | **Raycast** | `Spine Start Routine` | `SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 /Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool verify` |
 <!-- END AUTO RAYCAST -->
+
+#### OpenCode Runtime Contract (GAP-OP-161)
+
+- `Ctrl+Shift+O` is the governed OpenCode hotkey and must route through:
+  `/Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool opencode`
+- OpenCode model lane: `openai/glm-5`
+- Provider lane: `https://api.z.ai/api/paas/v4` with `ZAI_API_KEY`
+- Config SSOT: `/Users/ronnyworks/code/workbench/dotfiles/opencode/opencode.json`
+- Instruction surface SSOT: `/Users/ronnyworks/code/workbench/dotfiles/opencode/OPENCODE.md`
+- Plugin/MCP baseline: `oh-my-opencode`, `playwright` MCP enabled
+- Related governance contract: `docs/governance/OPENCODE_GOVERNED_ENTRY.md`
 
 #### Other
 

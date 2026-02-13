@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-12
+last_verified: 2026-02-13
 scope: opencode-entry-contract
 ---
 
@@ -33,6 +33,14 @@ Direct launch/bypass from Hammerspoon or Raycast is forbidden.
 - API key source: `ZAI_API_KEY` (alias `Z_AI_API_KEY` allowed)
 - Key injection source of truth: Infisical (via spine helper flow)
 
+## Required Plugin/MCP Baseline
+
+- Plugin baseline: `oh-my-opencode`
+- MCP baseline:
+  - `playwright` enabled (local command: `npx -y @playwright/mcp`)
+- Governance-first default: `Ctrl+Shift+O` launches OpenCode only through
+  terminal-entry and therefore inherits the same model/provider contract each run.
+
 ## Required Surfaces
 
 - Hammerspoon hotkey `Ctrl+Shift+O` -> `launchSolo("opencode")`
@@ -58,4 +66,3 @@ Deploy: copy `workbench/dotfiles/opencode/OPENCODE.md` to `~/.config/opencode/OP
 
 - D72 (`d72-macbook-hotkey-ssot-lock.sh`): launcher/doc/root drift lock
 - D73 (`d73-opencode-governed-entry-lock.sh`): OpenCode model/entry lock + governance contract surface
-
