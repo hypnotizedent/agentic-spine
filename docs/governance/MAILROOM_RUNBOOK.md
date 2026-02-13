@@ -256,6 +256,37 @@ mv mailroom/inbox/failed/filename.md mailroom/inbox/queued/
 
 ---
 
+## Failed Lane SOP
+
+Items land in `mailroom/inbox/failed/` when the hot-folder-watcher encounters a processing error.
+
+### Triage Rules
+
+| Category | Action | Timeline |
+|----------|--------|----------|
+| Test/smoke artifacts (`test-*`, `smoke-*`) | Archive immediately | Same session |
+| Real sessions (`S20XXXXXX` pattern) | Investigate root cause | Within 24h |
+| Stale failures (>48h) | Archive with note | Next daily gate |
+
+### Handling Steps
+
+1. **Identify**: `ls mailroom/inbox/failed/` — check file naming patterns
+2. **Test artifacts**: Move to `mailroom/inbox/archived/` (these are watcher integration tests)
+3. **Real failures**: Read the `.md` file for error context, check watcher logs (`mailroom/logs/`)
+4. **Archive**: `mv mailroom/inbox/failed/<file> mailroom/inbox/archived/`
+5. **Verify**: `./bin/ops status --brief` should show reduced failed count
+
+### Archive vs Reprocess Decision
+
+| Signal | Action |
+|--------|--------|
+| File is a test artifact (`test-*`, `smoke-*`) | Archive — no reprocessing needed |
+| Error was transient (API timeout, rate limit) | Reprocess: move back to `queued/` |
+| Error was permanent (bad prompt, missing secrets) | Archive after investigation |
+| File is >48h old with no open investigation | Archive to clear baseline |
+
+---
+
 ## Ledger Reaper Policy
 
 Ledger entries stuck in `running` state beyond a TTL threshold are stale — the watcher crashed
@@ -422,3 +453,4 @@ PY
 | Date | Change | Issue |
 |------|--------|-------|
 | 2026-02-05 | Created runbook | — |
+| 2026-02-13 | Added Failed Lane SOP section | GAP-OP-273 |
