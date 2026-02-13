@@ -12,20 +12,15 @@ List drift gates, filter by category, and show fix hints.
 Run `./bin/ops cap run spine.verify` and report all gate IDs with status.
 
 ### Filter by category:
-If a category is specified, list only gates in that category:
-
-| Category | Gates |
-|----------|-------|
-| path-hygiene | D30, D31, D42, D46, D47 |
-| git-hygiene | D48, D62, D64 |
-| ssot-hygiene | D54, D58, D59 |
-| secrets-hygiene | D20, D25, D43, D55, D63, D70 |
-| doc-hygiene | D16, D17, D27, D68, D84 |
-| loop-gap-hygiene | D34, D61, D75, D83 |
-| workbench-hygiene | D72, D73, D74, D77, D78, D79, D80 |
-| infra-hygiene | D22, D23, D24, D35, D50, D51, D52, D69 |
-| agent-surface-hygiene | D26, D32, D49, D56, D65, D66 |
-| process-hygiene | D29, D33, D38, D53, D60, D67, D71, D81, D82 |
+If a category is specified, list only gates in that category.
+**Always read from registry at runtime** (do not use hardcoded lists):
+```
+yq -r '.categories[] | select(.id != "retired") | .id + ": " + .description' ops/bindings/gate.registry.yaml
+```
+To list gates in a specific category:
+```
+yq -r '[.gates[] | select(.category == "CATEGORY" and .retired != true) | .id] | join(", ")' ops/bindings/gate.registry.yaml
+```
 
 ### Show gate details:
 If a gate ID is specified (e.g. D42):

@@ -44,7 +44,7 @@ Create workflow slash commands with repo-governed source and sync-to-home execut
 
 **Source model:**
 - Canonical source: repo path (e.g. `surfaces/commands/*.md`) — version-controlled, reviewable
-- Sync target: `~/.claude/commands/` (Claude Code), with parity surfaces for Codex and OpenCode
+- Sync target: `~/.claude/commands/` (Claude Code only; Codex/OpenCode parity deferred to future loop)
 - Sync mechanism: governed script (e.g. `ops/hooks/sync-slash-commands.sh`) — not manual copy
 - Existing commands (/verify, /ctx, /gaps) migrated to repo source as part of P1
 
@@ -61,7 +61,7 @@ Create workflow slash commands with repo-governed source and sync-to-home execut
 **Dependency:** None (can start immediately)
 **DoD:**
 - All 7 commands exist in repo source directory
-- Sync script copies to `~/.claude/commands/` and parity surfaces
+- Sync script copies to `~/.claude/commands/` (Codex/OpenCode parity deferred)
 - Existing /verify, /ctx, /gaps migrated to repo source
 - Each command is invocable and produces correct workflow guidance
 **Evidence commands:**
@@ -152,7 +152,7 @@ Create self-updating gate awareness infrastructure:
 - Define categories: path-hygiene, git-hygiene, ssot-hygiene, secrets-hygiene, doc-hygiene, loop-gap-hygiene, workbench-hygiene, infra-hygiene, agent-surface-hygiene, process-hygiene
 - Each gate entry includes: id, name, category, description, check_script, fix_hint, severity
 - Add D85 meta-gate to enforce registry ↔ script parity (fails if registry drifts from actual gate scripts)
-- `/gates` and `/check` commands (P1) read from registry at runtime (always fresh)
+- `/gates` and `/check` commands (P1) instruct agents to query registry at runtime (always fresh)
 - Gate template includes metadata block for new gates
 
 **Dependency:** P3 (builds on triage header work)
@@ -202,8 +202,9 @@ Create self-updating gate awareness infrastructure:
 
 ## Notes
 - RAG VM status: unreachable as of 2026-02-13 (port 3002 timeout)
-- Slash commands: 10 repo-governed in surfaces/commands/, synced to ~/.claude/commands/
+- Slash commands: 10 repo-governed in surfaces/commands/, synced to ~/.claude/commands/ only (Codex/OpenCode parity deferred — see GAP-OP-291)
 - Gate count: D1-D85 surface (D21 retired/reserved), 84 active, 1 retired
 - Gate registry: ops/bindings/gate.registry.yaml (85 gates, 11 categories)
 - D85 meta-gate enforces: registry ↔ script parity, active/retired count parity, TRIAGE header completeness
 - D85 test coverage: surfaces/verify/tests/d85-test.sh (4 assertions)
+- GAP-OP-286 reconciliation: description said "active->closed" but P2 was blocked at close time; gap was closed as fixed with loop remaining active (not closed). Loop closure deferred until P2 resolves.

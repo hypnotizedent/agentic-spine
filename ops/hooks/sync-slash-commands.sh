@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# sync-slash-commands.sh — Sync repo-governed slash commands to execution surfaces.
+# sync-slash-commands.sh — Sync repo-governed slash commands to Claude Code.
 #
 # Source: surfaces/commands/*.md (canonical, version-controlled)
 # Target: ~/.claude/commands/*.md (Claude Code execution surface)
+# Note: Codex/OpenCode parity deferred to future loop.
 #
 # Usage:
 #   ops/hooks/sync-slash-commands.sh [--dry-run]

@@ -15,7 +15,7 @@ Step-by-step gap lifecycle: file, claim, fix, verify, close.
    ```
    ./bin/ops cap run gaps.file --id GAP-OP-<N> --type <type> --severity <severity> --description "<desc>" --discovered-by "<source>" --doc "<doc>"
    ```
-   Valid types: missing-doc, stale-doc, missing-entry, stale-entry, unclear-doc, duplicate-truth, runtime-bug, agent-behavior
+   Valid types: stale-ssot, missing-entry, agent-behavior, unclear-doc, duplicate-truth, runtime-bug
    Valid severities: low, medium, high, critical
 4. Claim the gap:
    ```

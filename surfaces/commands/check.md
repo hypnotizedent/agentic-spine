@@ -9,23 +9,27 @@ Check if planned changes will violate any drift gates before making them.
 ## Actions
 
 1. Parse the planned change description.
-2. Identify which gates are relevant based on the change type:
-
-| Change Type | Relevant Gates |
-|-------------|----------------|
-| New file/directory | D1 (top-level dirs), D7 (executable bounds), D17 (root allowlist) |
-| Path references | D30 (active config), D42 (case lock), D47 (brain path), D78 (workbench path) |
-| Governance docs | D27 (fact duplication), D58 (freshness), D60 (deprecation), D65 (briefing sync), D84 (index) |
-| Capabilities | D63 (metadata), D67 (capability map) |
-| Git operations | D48 (worktree), D62 (remote parity), D64 (authority), D75 (gap mutation) |
-| Secrets/API | D20/D55 (readiness), D25 (CLI canonical), D43 (namespace), D63 (preconditions), D70 (deprecated alias) |
-| Workbench | D72-D74, D77-D80 (workbench gates) |
-| Agent surfaces | D26/D56 (entry surfaces), D49 (discovery), D65 (briefing sync), D66 (MCP parity) |
-| Infrastructure | D35 (relocation), D54 (IP parity), D59 (completeness), D69 (VM creation) |
-| Proposals | D83 (queue health) |
-| RAG/docs | D68 (canonical-only) |
-
-3. For each relevant gate, read its `# TRIAGE:` header from the script file.
+2. Identify which gates are relevant by querying the registry:
+   ```
+   yq -r '.gates[] | select(.category == "CATEGORY") | .id + " " + .name + " — " + .description' ops/bindings/gate.registry.yaml
+   ```
+   Map the change type to a category:
+   - New file/directory → `path-hygiene`
+   - Path references → `path-hygiene`
+   - Governance docs → `doc-hygiene`, `process-hygiene`
+   - Capabilities → `process-hygiene`
+   - Git operations → `git-hygiene`
+   - Secrets/API → `secrets-hygiene`
+   - Workbench → `workbench-hygiene`
+   - Agent surfaces → `agent-surface-hygiene`
+   - Infrastructure → `infra-hygiene`, `ssot-hygiene`
+   - Proposals → `process-hygiene` (D83)
+   - Loops/gaps → `loop-gap-hygiene`
+3. For each relevant gate, read its fix_hint from registry:
+   ```
+   yq -r '.gates[] | select(.id == "DNN") | .fix_hint' ops/bindings/gate.registry.yaml
+   ```
+   Or read the `# TRIAGE:` header directly from the script file.
 4. Warn about potential violations with preventive guidance.
 5. Optionally run `./bin/ops cap run spine.verify` to confirm current baseline.
 
