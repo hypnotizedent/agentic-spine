@@ -1,6 +1,6 @@
 # finance-agent Contract
 
-> **Status:** registered
+> **Status:** active
 > **Domain:** finance-ops
 > **Owner:** @ronny
 > **Created:** 2026-02-12
@@ -12,7 +12,7 @@
 
 - **Agent ID:** finance-agent
 - **Domain:** finance-ops (unified personal finance + document management)
-- **Implementation:** `~/code/workbench/agents/finance/` (pending — V1 registration only)
+- **Implementation:** `~/code/workbench/agents/finance/` (V2 active — TypeScript MCP server)
 - **Registry:** `ops/bindings/agents.registry.yaml`
 
 ## Owns (Application Layer)
@@ -46,9 +46,17 @@ If a finance-agent finding requires an infrastructure change, file it to the spi
 
 ## Governed Tools
 
-No custom tools in V1 (registration only). V2 will implement a TypeScript MCP server following the media-agent pattern.
+V2 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with read-only tools:
 
-Existing config-only MCP servers (`firefly.json`, `paperless.json`) remain active in MCPJungle until V2 consolidation.
+| Tool | Description |
+|------|-------------|
+| `finance_status` | Health-check all finance services on VM 211 |
+| `list_accounts` | List Firefly III accounts with balances |
+| `get_account_detail` | Get detailed account info by ID |
+| `search_documents` | Search Paperless-ngx documents |
+| `get_document` | Get document metadata by ID |
+
+Superseded config-only MCP servers (`firefly.json`, `paperless.json`) are deactivated (enabled: false) in MCPJungle.
 
 ## Endpoints
 
