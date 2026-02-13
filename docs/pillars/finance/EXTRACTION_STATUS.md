@@ -26,16 +26,16 @@ loop_id: LOOP-FINANCE-LEGACY-EXTRACTION-20260211
 
 | ID | Artifact | Disposition | Target | Status |
 |----|----------|-------------|--------|--------|
-| F-01 | SimpleFIN sync pipeline | **EXTRACTED** | `docs/brain/lessons/FINANCE_SIMPLEFIN_PIPELINE.md` | P1 complete (c768e63) |
-| F-02 | n8n workflows + category mapping | **EXTRACTED** | `docs/brain/lessons/FINANCE_N8N_WORKFLOWS.md` | P1 complete (c768e63) |
-| F-03 | Backup/restore procedures | **EXTRACTED** | `docs/brain/lessons/FINANCE_BACKUP_RESTORE.md` | P1 complete (c768e63) |
-| F-04 | Account registry | **EXTRACTED** | `docs/brain/lessons/FINANCE_ACCOUNT_TOPOLOGY.md` | P1 complete (c768e63) |
-| F-05 | Docker compose topology | **EXTRACTED** | `docs/brain/lessons/FINANCE_STACK_ARCHITECTURE.md` | P1 complete (c768e63) |
-| F-06 | Deployment runbook | **EXTRACTED** | `docs/brain/lessons/FINANCE_DEPLOY_RUNBOOK.md` | P1 complete (c768e63) |
+| F-01 | SimpleFIN sync pipeline | **EXTRACTED** | `docs/legacy/brain-lessons/FINANCE_SIMPLEFIN_PIPELINE.md` | P1 complete (c768e63) |
+| F-02 | n8n workflows + category mapping | **EXTRACTED** | `docs/legacy/brain-lessons/FINANCE_N8N_WORKFLOWS.md` | P1 complete (c768e63) |
+| F-03 | Backup/restore procedures | **EXTRACTED** | `docs/legacy/brain-lessons/FINANCE_BACKUP_RESTORE.md` | P1 complete (c768e63) |
+| F-04 | Account registry | **EXTRACTED** | `docs/legacy/brain-lessons/FINANCE_ACCOUNT_TOPOLOGY.md` | P1 complete (c768e63) |
+| F-05 | Docker compose topology | **EXTRACTED** | `docs/legacy/brain-lessons/FINANCE_STACK_ARCHITECTURE.md` | P1 complete (c768e63) |
+| F-06 | Deployment runbook | **EXTRACTED** | `docs/legacy/brain-lessons/FINANCE_DEPLOY_RUNBOOK.md` | P1 complete (c768e63) |
 | F-07 | SimpleFIN setup + credentials | **EXTRACTED** | Folded into FINANCE_SIMPLEFIN_PIPELINE.md | P1 complete (c768e63) |
 | F-08 | Receipt scanning workflow | **DEFERRED** | Future loop | Paperless running; low urgency |
-| F-09 | Reconciliation scripts | **EXTRACTED** | `docs/brain/lessons/FINANCE_RECONCILIATION.md` | P1 complete (c768e63) |
-| F-10 | Troubleshooting guide | **EXTRACTED** | `docs/brain/lessons/FINANCE_TROUBLESHOOTING.md` | P1 complete (c768e63) |
+| F-09 | Reconciliation scripts | **EXTRACTED** | `docs/legacy/brain-lessons/FINANCE_RECONCILIATION.md` | P1 complete (c768e63) |
+| F-10 | Troubleshooting guide | **EXTRACTED** | `docs/legacy/brain-lessons/FINANCE_TROUBLESHOOTING.md` | P1 complete (c768e63) |
 | F-11 | Mail-archiver | **DEFERRED** | Future loop | Separate lifecycle |
 | F-12 | MCP server configs | **DEFERRED** | Future capability | Rebuildable |
 | F-13 | Phase project tracking | **REJECTED** | — | Historical only |

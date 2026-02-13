@@ -148,7 +148,7 @@ Q3: How much documentation needed?
 **Creates:**
 - All utility requirements (registry entries)
 - `ops/bindings/<stack>.binding.yaml` — stack-specific config
-- `docs/brain/lessons/<STACK>_LESSONS.md` — hard-won knowledge
+- `docs/legacy/brain-lessons/<STACK>_LESSONS.md` — hard-won knowledge
 - Loop in `mailroom/state/loop-scopes/` — extraction tracking
 
 **Does NOT create:**
@@ -191,7 +191,7 @@ Before marking extraction complete:
 - [ ] All services in SERVICE_REGISTRY.yaml
 - [ ] Compose files in STACK_REGISTRY.yaml
 - [ ] Binding file: `ops/bindings/<stack>.binding.yaml`
-- [ ] Lessons file: `docs/brain/lessons/<STACK>_LESSONS.md`
+- [ ] Lessons file: `docs/legacy/brain-lessons/<STACK>_LESSONS.md`
 - [ ] Loop scope in `mailroom/state/loop-scopes/`
 - [ ] No `docs/<stack>/` folder (use brain/lessons)
 - [ ] `./bin/ops cap run spine.verify` passes

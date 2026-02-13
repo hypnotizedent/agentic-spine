@@ -125,16 +125,16 @@ extraction_complete: true
 
 | ID | Legacy Artifact | Disposition | Spine Target Path | Reason |
 |----|----------------|-------------|-------------------|--------|
-| F-01 | SimpleFIN sync scripts + account mapping | **extract_now** | `docs/brain/lessons/FINANCE_SIMPLEFIN_PIPELINE.md` | Move A — doc-only snapshot; scripts are tangled with env vars |
-| F-02 | Firefly-Mint OS n8n workflows (JSON) | **extract_now** | `docs/brain/lessons/FINANCE_N8N_WORKFLOWS.md` | Move A — document workflow logic, webhook config, category mapping |
-| F-03 | Backup/restore procedures | **extract_now** | `docs/brain/lessons/FINANCE_BACKUP_RESTORE.md` | Move A — document procedures + enable backup in backup.inventory.yaml |
-| F-04 | Account registry | **extract_now** | `docs/brain/lessons/FINANCE_ACCOUNT_TOPOLOGY.md` | Move A — doc-only; no values, just structure and business context |
-| F-05 | Docker compose topology | **extract_now** | `docs/brain/lessons/FINANCE_STACK_ARCHITECTURE.md` | Move A — service graph, dependencies, volume layout |
-| F-06 | Deployment runbook | **extract_now** | `docs/brain/lessons/FINANCE_DEPLOY_RUNBOOK.md` | Move A — rewrite for spine-native patterns |
+| F-01 | SimpleFIN sync scripts + account mapping | **extract_now** | `docs/legacy/brain-lessons/FINANCE_SIMPLEFIN_PIPELINE.md` | Move A — doc-only snapshot; scripts are tangled with env vars |
+| F-02 | Firefly-Mint OS n8n workflows (JSON) | **extract_now** | `docs/legacy/brain-lessons/FINANCE_N8N_WORKFLOWS.md` | Move A — document workflow logic, webhook config, category mapping |
+| F-03 | Backup/restore procedures | **extract_now** | `docs/legacy/brain-lessons/FINANCE_BACKUP_RESTORE.md` | Move A — document procedures + enable backup in backup.inventory.yaml |
+| F-04 | Account registry | **extract_now** | `docs/legacy/brain-lessons/FINANCE_ACCOUNT_TOPOLOGY.md` | Move A — doc-only; no values, just structure and business context |
+| F-05 | Docker compose topology | **extract_now** | `docs/legacy/brain-lessons/FINANCE_STACK_ARCHITECTURE.md` | Move A — service graph, dependencies, volume layout |
+| F-06 | Deployment runbook | **extract_now** | `docs/legacy/brain-lessons/FINANCE_DEPLOY_RUNBOOK.md` | Move A — rewrite for spine-native patterns |
 | F-07 | SimpleFIN setup + credentials | **extract_now** | Fold into FINANCE_SIMPLEFIN_PIPELINE.md | Move A — credential paths only (Infisical refs) |
 | F-08 | Receipt scanning workflow | **defer** | future loop | Low operational urgency; Paperless is running |
-| F-09 | Reconciliation scripts | **extract_now** | `docs/brain/lessons/FINANCE_RECONCILIATION.md` | Move A — document logic; actual scripts are Move B candidates later |
-| F-10 | Troubleshooting guide | **extract_now** | `docs/brain/lessons/FINANCE_TROUBLESHOOTING.md` | Move A — rewrite from TRB_FINANCE_STACK.md |
+| F-09 | Reconciliation scripts | **extract_now** | `docs/legacy/brain-lessons/FINANCE_RECONCILIATION.md` | Move A — document logic; actual scripts are Move B candidates later |
+| F-10 | Troubleshooting guide | **extract_now** | `docs/legacy/brain-lessons/FINANCE_TROUBLESHOOTING.md` | Move A — rewrite from TRB_FINANCE_STACK.md |
 | F-11 | Mail-archiver | **defer** | future loop | Not core finance; separate lifecycle |
 | F-12 | MCP server configs | **defer** | future capability | Rebuildable; not urgent |
 | F-13 | Phase project tracking | **reject** | — | Historical; no operational value |
@@ -160,14 +160,14 @@ docs/pillars/finance/EXTRACTION_STATUS.md   — progress tracking
 ### Lessons (operational knowledge)
 
 ```
-docs/brain/lessons/FINANCE_STACK_ARCHITECTURE.md    — service topology, compose, volumes
-docs/brain/lessons/FINANCE_SIMPLEFIN_PIPELINE.md    — bank sync, account mapping, cron
-docs/brain/lessons/FINANCE_N8N_WORKFLOWS.md         — webhook sync, category mapping
-docs/brain/lessons/FINANCE_BACKUP_RESTORE.md        — DB backup/restore procedures
-docs/brain/lessons/FINANCE_ACCOUNT_TOPOLOGY.md      — account registry, business context
-docs/brain/lessons/FINANCE_DEPLOY_RUNBOOK.md        — deploy + config SOP
-docs/brain/lessons/FINANCE_RECONCILIATION.md        — reconciliation logic + scripts
-docs/brain/lessons/FINANCE_TROUBLESHOOTING.md       — debug procedures
+docs/legacy/brain-lessons/FINANCE_STACK_ARCHITECTURE.md    — service topology, compose, volumes
+docs/legacy/brain-lessons/FINANCE_SIMPLEFIN_PIPELINE.md    — bank sync, account mapping, cron
+docs/legacy/brain-lessons/FINANCE_N8N_WORKFLOWS.md         — webhook sync, category mapping
+docs/legacy/brain-lessons/FINANCE_BACKUP_RESTORE.md        — DB backup/restore procedures
+docs/legacy/brain-lessons/FINANCE_ACCOUNT_TOPOLOGY.md      — account registry, business context
+docs/legacy/brain-lessons/FINANCE_DEPLOY_RUNBOOK.md        — deploy + config SOP
+docs/legacy/brain-lessons/FINANCE_RECONCILIATION.md        — reconciliation logic + scripts
+docs/legacy/brain-lessons/FINANCE_TROUBLESHOOTING.md       — debug procedures
 ```
 
 ### Governance (extraction tracking)

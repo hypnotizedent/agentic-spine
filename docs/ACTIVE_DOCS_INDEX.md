@@ -50,8 +50,7 @@ Authoritative governance documentation organized by category. All docs in `docs/
 | Document | SSOT Priority | Purpose |
 |----------|--------------|---------|
 | DR_RUNBOOK.md | P2 | Disaster recovery procedures and priority order |
-| BACKUP_GOVERNANCE.md | P2 | Vzdump strategy, retention rules |
-| HOME_BACKUP_STRATEGY.md | -- | Home site backup tiers |
+| BACKUP_GOVERNANCE.md | P2 | Vzdump strategy, retention rules (includes home site details) |
 | AUTHENTIK_BACKUP_RESTORE.md | -- | Authentik backup/restore procedure |
 | GITEA_BACKUP_RESTORE.md | -- | Gitea backup/restore procedure |
 | INFISICAL_BACKUP_RESTORE.md | -- | Infisical backup/restore + break-glass |
@@ -128,14 +127,22 @@ Authoritative governance documentation organized by category. All docs in `docs/
 | LEGACY_DEPRECATION.md | Legacy reference migration rules |
 | MAKER_TOOLS_GOVERNANCE.md | Maker tool governance |
 
-## 9. Pillars & Planning
+## 9. Brain (Agent Context)
+
+| Document | Purpose |
+|----------|---------|
+| brain/context.md | Auto-generated agent context injection |
+| brain/memory.md | Agent session memory reference |
+| brain/README.md | Brain rules, hotkeys, context helpers |
+
+## 10. Pillars & Planning
 
 | Directory | Purpose |
 |-----------|---------|
 | `docs/pillars/` | Domain pillar documentation (finance, etc.) |
 | `docs/planning/` | Planning and roadmap surfaces |
 
-## 10. Historical / Evidence Only (NOT Authoritative)
+## 11. Historical / Evidence Only (NOT Authoritative)
 
 | Document | Context |
 |----------|---------|

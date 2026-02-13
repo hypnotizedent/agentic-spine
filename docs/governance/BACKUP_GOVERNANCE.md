@@ -22,15 +22,13 @@ DR Runbook is the **recovery layer** -- it covers site-wide failure scenarios an
 cross-service restoration order.
 
 ```
-Strategy (this doc)
-  ├── Site plans
-  │   └── HOME_BACKUP_STRATEGY.md          (home site)
+Strategy (this doc — includes home site details inline)
   ├── Per-app procedures (governance/)
   │   ├── AUTHENTIK_BACKUP_RESTORE.md       (infra-core, VM 204)
   │   ├── GITEA_BACKUP_RESTORE.md           (dev-tools, VM 206)
   │   ├── INFISICAL_BACKUP_RESTORE.md       (infra-core, VM 204)
   │   └── VAULTWARDEN_BACKUP_RESTORE.md     (infra-core, VM 204)
-  ├── Per-app procedures (brain/lessons/)
+  ├── Per-app procedures (legacy/brain-lessons/)
   │   ├── IMMICH_BACKUP_RESTORE.md          (immich-1, VM 203)
   │   └── FINANCE_BACKUP_RESTORE.md         (docker-host, VM 200)
   ├── Operational tooling
@@ -42,13 +40,12 @@ Strategy (this doc)
 | Document | Layer | Scope | Location |
 |----------|-------|-------|----------|
 | [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) (this file) | Strategy | Cross-site backup policy, storage targets, retention, verification | `docs/governance/` |
-| [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) | Strategy | Home site (proxmox-home + Synology NAS) backup plan | `docs/governance/` |
 | [AUTHENTIK_BACKUP_RESTORE.md](AUTHENTIK_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Authentik (VM 204) | `docs/governance/` |
 | [GITEA_BACKUP_RESTORE.md](GITEA_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Gitea (VM 206) | `docs/governance/` |
 | [INFISICAL_BACKUP_RESTORE.md](INFISICAL_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Infisical (VM 204) | `docs/governance/` |
 | [VAULTWARDEN_BACKUP_RESTORE.md](VAULTWARDEN_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Vaultwarden (VM 204) | `docs/governance/` |
-| [IMMICH_BACKUP_RESTORE.md](../brain/lessons/IMMICH_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Immich (VM 203) | `docs/brain/lessons/` |
-| [FINANCE_BACKUP_RESTORE.md](../brain/lessons/FINANCE_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Finance stack (VM 200) | `docs/brain/lessons/` |
+| [IMMICH_BACKUP_RESTORE.md](../legacy/brain-lessons/IMMICH_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Immich (VM 203) | `docs/legacy/brain-lessons/` |
+| [FINANCE_BACKUP_RESTORE.md](../legacy/brain-lessons/FINANCE_BACKUP_RESTORE.md) | Procedure | App-level backup/restore for Finance stack (VM 200) | `docs/legacy/brain-lessons/` |
 | [BACKUP_CALENDAR.md](BACKUP_CALENDAR.md) | Tooling | Subscribable .ics calendar for backup schedule visibility | `docs/governance/` |
 | [DR_RUNBOOK.md](DR_RUNBOOK.md) | Recovery | Site-wide failure scenarios, dependency map, recovery priority | `docs/governance/` |
 
@@ -71,7 +68,18 @@ Strategy (this doc)
 | VM/CT | Proxmox VMs and containers | vzdump | synology-backups (NAS NFS) |
 | Data | Home Assistant | HA built-in backup | NAS `/volume1/backups/homeassistant_backups/` |
 
-See: [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) for full home backup plan.
+#### Home Backup Tiers
+
+| Tier | Guests | Schedule | Retention |
+|------|--------|----------|-----------|
+| P0 (Critical) | VM 100 (HA), VM 102 (Vaultwarden) | Daily 03:00 | keep-last=3 |
+| P1 (Important) | LXC 103 (download-home) | Daily 03:15 | keep-last=3 |
+| P2 (Deferrable) | VM 101 (Immich), LXC 105 (pihole-home) | Weekly Sun 04:00 | keep-last=2 |
+
+**Method:** vzdump to NAS NFS (`10.0.0.150:/volume1/backups/proxmox_backups`).
+Unprivileged LXC containers (103, 105) require `tmpdir /var/tmp` in vzdump jobs (user namespace NFS workaround).
+
+**App-level:** HA uses built-in backup to NAS `/volume1/backups/homeassistant_backups/`. Immich deferred (VM stopped). Vaultwarden assessed per vzdump sufficiency.
 
 ## App-Level Procedures (Required)
 
@@ -172,6 +180,5 @@ run a receipt-backed prune:
 
 | Document | Relationship |
 |----------|-------------|
-| [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) | Home site backup strategy |
 | [STACK_REGISTRY.yaml](STACK_REGISTRY.yaml) | Stack inventory |
 | [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md) | Device identity |

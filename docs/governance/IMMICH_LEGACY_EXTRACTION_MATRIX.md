@@ -126,13 +126,13 @@ legacy_commit: 1ea9dfa91f4cf5afbd56a1a946f0a733d3bd785c
 
 | Legacy artifact | Disposition | Target spine path | Reason |
 |---|---|---|---|
-| `immich/BACKUP.md` | **extract_now** | `docs/brain/lessons/IMMICH_BACKUP_RESTORE.md` | CRITICAL: Only source of app-level restore procedures. Rewrite spine-native (no legacy paths). |
-| THE RULE (from README, CONTEXT, SPEC) | **extract_now** | `docs/brain/lessons/IMMICH_OPERATIONS_LESSONS.md` | CRITICAL: Deduplication governance must survive legacy deletion. |
-| `immich/IMMICH_CONTEXT.md` | **extract_now** | `docs/brain/lessons/IMMICH_OPERATIONS_LESSONS.md` | HIGH: Infrastructure context, user accounts, camera anomalies. Consolidate with THE RULE into one lessons file. |
-| `immich/scripts/backup-immich-db.sh` | **extract_now** | `docs/brain/lessons/IMMICH_BACKUP_RESTORE.md` (as reference) | CRITICAL: Active cron dependency. Document script logic in backup runbook; verify VM-local copy exists. |
-| `immich/docs/guides/INSTALL_IMMICH_R730XD.md` | **extract_now** | `docs/brain/lessons/IMMICH_OPERATIONS_LESSONS.md` | HIGH: Site-specific rebuild guide. Consolidate into operations lessons (rebuild section). |
-| `immich/docs/plans/TOOLING_PLAN.md` | **extract_now** | `docs/brain/lessons/IMMICH_OPERATIONS_LESSONS.md` | HIGH: Photo management workflow governance. Consolidate into operations lessons (tooling section). |
-| `infrastructure/mcpjungle/.../SPEC.md` | **defer** | future: `docs/brain/lessons/IMMICH_MCP_SPEC.md` | HIGH but planned-not-implemented. Extract when MCP server work begins. |
+| `immich/BACKUP.md` | **extract_now** | `docs/legacy/brain-lessons/IMMICH_BACKUP_RESTORE.md` | CRITICAL: Only source of app-level restore procedures. Rewrite spine-native (no legacy paths). |
+| THE RULE (from README, CONTEXT, SPEC) | **extract_now** | `docs/legacy/brain-lessons/IMMICH_OPERATIONS_LESSONS.md` | CRITICAL: Deduplication governance must survive legacy deletion. |
+| `immich/IMMICH_CONTEXT.md` | **extract_now** | `docs/legacy/brain-lessons/IMMICH_OPERATIONS_LESSONS.md` | HIGH: Infrastructure context, user accounts, camera anomalies. Consolidate with THE RULE into one lessons file. |
+| `immich/scripts/backup-immich-db.sh` | **extract_now** | `docs/legacy/brain-lessons/IMMICH_BACKUP_RESTORE.md` (as reference) | CRITICAL: Active cron dependency. Document script logic in backup runbook; verify VM-local copy exists. |
+| `immich/docs/guides/INSTALL_IMMICH_R730XD.md` | **extract_now** | `docs/legacy/brain-lessons/IMMICH_OPERATIONS_LESSONS.md` | HIGH: Site-specific rebuild guide. Consolidate into operations lessons (rebuild section). |
+| `immich/docs/plans/TOOLING_PLAN.md` | **extract_now** | `docs/legacy/brain-lessons/IMMICH_OPERATIONS_LESSONS.md` | HIGH: Photo management workflow governance. Consolidate into operations lessons (tooling section). |
+| `infrastructure/mcpjungle/.../SPEC.md` | **defer** | future: `docs/legacy/brain-lessons/IMMICH_MCP_SPEC.md` | HIGH but planned-not-implemented. Extract when MCP server work begins. |
 | `immich/.archive/2026-01-05-full-reset/configs/docker-compose.yml` | **superseded** | N/A | Immich upstream releases canonical compose. Running VM has current version. |
 | `.archive/.../scripts/dedupe/*.py` | **defer** | future capability or MCP tool | MEDIUM: Reference implementations. Extract if/when tooling plan executes. |
 | `immich/.archive/sessions/*` (60+ files) | **reject** | N/A | LOW: Historical only. No operational value. |
@@ -147,12 +147,12 @@ legacy_commit: 1ea9dfa91f4cf5afbd56a1a946f0a733d3bd785c
 
 ### extract_now (2 files)
 
-1. **`docs/brain/lessons/IMMICH_BACKUP_RESTORE.md`**
+1. **`docs/legacy/brain-lessons/IMMICH_BACKUP_RESTORE.md`**
    - Source: `BACKUP.md` + `backup-immich-db.sh` (rewritten spine-native)
    - Contents: pg_dump methodology, library rsync, verification commands, restore procedures, cron schedule, offsite destinations, what to backup vs. skip
    - Front-matter: `status: authoritative`, `migrated_from: ronny-ops/immich/BACKUP.md`
 
-2. **`docs/brain/lessons/IMMICH_OPERATIONS_LESSONS.md`**
+2. **`docs/legacy/brain-lessons/IMMICH_OPERATIONS_LESSONS.md`**
    - Source: `IMMICH_CONTEXT.md` + `README.md` + `INSTALL_IMMICH_R730XD.md` + `TOOLING_PLAN.md` (consolidated rewrite)
    - Contents: THE RULE, infrastructure context (updated to current spine IPs), user accounts + API key management, camera anomalies, rebuild guide (spine-native paths), photo management workflow governance
    - Front-matter: `status: authoritative`, `migrated_from: ronny-ops/immich/IMMICH_CONTEXT.md`
