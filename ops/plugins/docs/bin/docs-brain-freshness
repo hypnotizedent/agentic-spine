@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# docs.brain.freshness — Audit freshness of docs/brain session context files
+# Safety: read-only (scans files, no modifications)
+# Exit: always 0 (diagnostic capability, not enforcement)
+
+ROOT="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+BRAIN="$ROOT/docs/brain"
+
+if [[ ! -d "$BRAIN" ]]; then
+  echo "STOP: docs/brain/ not found at $BRAIN" >&2
+  exit 2
+fi
+
+echo "docs.brain.freshness"
+echo "root: $ROOT"
+echo
+
+TODAY_EPOCH=$(date +%s)
+FRESH=0
+WARN_COUNT=0
+STALE_COUNT=0
+MISSING_COUNT=0
+
+echo "── docs/brain ──"
+
+while IFS= read -r f; do
+  rel="${f#$ROOT/}"
+
+  # Extract last_verified or last_reviewed (YAML frontmatter or markdown bold)
+  date_str=""
+  date_str="$(head -15 "$f" | grep -oE '[*]{0,2}(last_verified|last_reviewed|Last verified|Last reviewed)[*]{0,2}:[*]{0,2}[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1 | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || true)"
+
+  if [[ -z "$date_str" ]]; then
+    echo "MISSING  $rel"
+    MISSING_COUNT=$((MISSING_COUNT+1))
+    continue
+  fi
+
+  if date_epoch=$(date -j -f "%Y-%m-%d" "$date_str" +%s 2>/dev/null || date -d "$date_str" +%s 2>/dev/null); then
+    age_days=$(( (TODAY_EPOCH - date_epoch) / 86400 ))
+  else
+    echo "MISSING  $rel (unparseable date: $date_str)"
+    MISSING_COUNT=$((MISSING_COUNT+1))
+    continue
+  fi
+
+  if [[ "$age_days" -gt 21 ]]; then
+    echo "STALE    ${age_days}d  $rel  (last: $date_str)"
+    STALE_COUNT=$((STALE_COUNT+1))
+  elif [[ "$age_days" -gt 14 ]]; then
+    echo "WARN     ${age_days}d  $rel  (last: $date_str)"
+    WARN_COUNT=$((WARN_COUNT+1))
+  else
+    echo "FRESH    ${age_days}d  $rel  (last: $date_str)"
+    FRESH=$((FRESH+1))
+  fi
+done < <(find "$BRAIN" -maxdepth 1 -name "*.md" 2>/dev/null | sort)
+
+echo
+echo "fresh: $FRESH"
+echo "warn: $WARN_COUNT"
+echo "stale: $STALE_COUNT"
+echo "missing: $MISSING_COUNT"
+echo "status: OK (diagnostic)"

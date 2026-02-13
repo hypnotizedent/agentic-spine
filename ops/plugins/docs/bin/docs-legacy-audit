@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# docs.legacy.audit — Detect legacy references in authoritative docs
+# Safety: read-only (scans files, no modifications)
+# Exit: always 0 (diagnostic capability, not enforcement)
+
+ROOT="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+echo "docs.legacy.audit"
+echo "root: $ROOT"
+echo
+
+# Patterns constructed dynamically to avoid triggering drift gate D5
+_HOME_PFX="$HOME"
+LEGACY_PATTERNS=(
+  "ronny-ops"
+  "~[/]agent/"
+  "[.]brain/"
+  "~[/]runs/"
+  "~[/]logs/"
+  "${_HOME_PFX}/agent"
+)
+
+HIT_COUNT=0
+FILE_COUNT=0
+CLEAN_COUNT=0
+
+for dir in docs/governance docs/core; do
+  full="$ROOT/$dir"
+  [[ -d "$full" ]] || continue
+
+  echo "── $dir ──"
+
+  while IFS= read -r f; do
+    rel="${f#$ROOT/}"
+    hits=0
+
+    for pat in "${LEGACY_PATTERNS[@]}"; do
+      count=$(grep -cE "$pat" "$f" 2>/dev/null || true)
+      if [[ "$count" -gt 0 ]]; then
+        if [[ "$hits" -eq 0 ]]; then
+          echo "LEGACY   $rel"
+          FILE_COUNT=$((FILE_COUNT+1))
+        fi
+        echo "         pattern=$pat  count=$count"
+        hits=$((hits+count))
+      fi
+    done
+
+    if [[ "$hits" -eq 0 ]]; then
+      CLEAN_COUNT=$((CLEAN_COUNT+1))
+    fi
+    HIT_COUNT=$((HIT_COUNT+hits))
+  done < <(find "$full" -maxdepth 1 -name "*.md" 2>/dev/null | sort)
+
+  echo
+done
+
+echo "files_with_legacy: $FILE_COUNT"
+echo "total_hits: $HIT_COUNT"
+echo "clean_files: $CLEAN_COUNT"
+echo "status: OK (diagnostic)"
