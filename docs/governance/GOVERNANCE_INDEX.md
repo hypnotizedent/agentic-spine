@@ -95,6 +95,9 @@ Pillar entrypoints (per stack)
 | `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |
 | `MAILROOM_BRIDGE.md` | Governed remote API bridge (read outbox/receipts, enqueue prompts) |
 | `ORCHESTRATION_CAPABILITY.md` | Machine-enforced orchestration contract and strict terminal entry behavior |
+| `TERMINAL_C_DAILY_RUNBOOK.md` | Control-plane orchestration runbook for multi-lane fan-out/fan-in |
+| `WORKER_LANE_TEMPLATE_PACK.md` | Canonical worker lane prompt templates and handoff contract |
+| `OPENCODE_GOVERNED_ENTRY.md` | Governed OpenCode launch/model/provider contract for entry consistency |
 | `HOST_DRIFT_POLICY.md` | Host drift contract for `/Users/ronnyworks` stabilization |
 | `POST_GAP_OPERATING_MODEL.md` | Canonical stabilization contract, lifecycle templates, ownership model, and 30/60/90 roadmap |
 | `BUILD_MODE_CHECKLIST.md` | Operator stop-gated checklist for predictable build-mode execution |
@@ -132,6 +135,7 @@ Pillar entrypoints (per stack)
 | `AUTHENTIK_BACKUP_RESTORE.md` | Authentik app-level backup/restore procedure | authoritative |
 | `GITEA_BACKUP_RESTORE.md` | Gitea app-level backup/restore procedure | authoritative |
 | `INFISICAL_BACKUP_RESTORE.md` | Infisical app-level backup/restore procedure | authoritative |
+| `INFISICAL_RESTORE_DRILL.md` | Quarterly restore drill to validate backup/restore runbook accuracy | authoritative |
 | `DR_RUNBOOK.md` | Per-site failure scenarios, dependency map, recovery priority | authoritative |
 | `RTO_RPO.md` | Recovery time/point objectives per service tier | authoritative |
 

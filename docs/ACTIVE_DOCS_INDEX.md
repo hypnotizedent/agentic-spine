@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-11
+last_verified: 2026-02-13
 scope: governance-documentation-index
 ---
 
@@ -59,12 +59,14 @@ Authoritative governance documentation organized by category. All docs in `docs/
 | REBOOT_HEALTH_GATE.md | P2 | Pre/post-reboot validation |
 | MAILROOM_RUNBOOK.md | P2 | Mailroom queue operations |
 | MAILROOM_BRIDGE.md | -- | Remote API bridge |
+| TERMINAL_C_DAILY_RUNBOOK.md | -- | Control-plane orchestration runbook for parallel lane execution |
 | HASS_OPERATIONAL_RUNBOOK.md | -- | Home Assistant operations |
 | PHASE4_OBSERVABILITY_RUNBOOK.md | -- | Observability stack procedures |
 | NETWORK_RUNBOOK.md | -- | Network troubleshooting |
 | SHOP_NETWORK_DEVICE_ONBOARDING.md | P2 | Device onboarding workflow |
 | SHOP_NETWORK_AUDIT_RUNBOOK.md | P2 | Shop network audit workflow |
 | INFRA_RELOCATION_PROTOCOL.md | P2 | Service relocation procedures |
+| INFISICAL_RESTORE_DRILL.md | -- | Quarterly Infisical restore drill validation procedure |
 | SSOT_UPDATE_TEMPLATE.md | P3 | Receipt-driven SSOT update workflow |
 | ISSUE_CLOSURE_SOP.md | P3 | Issue closure checklist |
 
@@ -100,6 +102,8 @@ Authoritative governance documentation organized by category. All docs in `docs/
 | WORKBENCH_TOOLING_INDEX.md | -- | Approved external workbench entry points |
 | INGRESS_AUTHORITY.md | P2 | DNS vs tunnel vs stacks boundary |
 | CLAUDE_ENTRYPOINT_SHIM.md | -- | Agent entry point redirect |
+| OPENCODE_GOVERNED_ENTRY.md | -- | Governed OpenCode entry/model/provider contract |
+| WORKER_LANE_TEMPLATE_PACK.md | -- | Canonical worker-lane prompt and handoff templates |
 | EXCLUDED_SURFACES.md | -- | Explicitly excluded surfaces |
 
 ## 7. Search & RAG
@@ -150,4 +154,4 @@ Authoritative governance documentation organized by category. All docs in `docs/
 
 ---
 
-_66 governance docs + 11 audit docs indexed. Last updated: 2026-02-11._
+_70 governance docs + 11 audit docs indexed. Last updated: 2026-02-13._

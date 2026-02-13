@@ -5,7 +5,7 @@
 > doc in two hops, never leave `/code`.
 >
 > **Status:** authoritative
-> **Last verified:** 2026-02-10
+> **Last verified:** 2026-02-13
 
 ---
 
@@ -51,6 +51,8 @@ The authority chain. When in doubt, these are the source of truth.
 | [GOVERNANCE_INDEX.md](governance/GOVERNANCE_INDEX.md) | Entry point — rules, authority chain, general governance |
 | [SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) | Entry point for every agent inside the spine |
 | [ORCHESTRATION_CAPABILITY.md](governance/ORCHESTRATION_CAPABILITY.md) | Strict orchestration terminal entry and lane isolation contract |
+| [OPENCODE_GOVERNED_ENTRY.md](governance/OPENCODE_GOVERNED_ENTRY.md) | Governed OpenCode entry/model/provider contract |
+| [WORKER_LANE_TEMPLATE_PACK.md](governance/WORKER_LANE_TEMPLATE_PACK.md) | Canonical worker-lane prompt and handoff templates |
 | [STACK_REGISTRY.yaml](governance/STACK_REGISTRY.yaml) | What stacks exist, where they run |
 | [SERVICE_REGISTRY.yaml](governance/SERVICE_REGISTRY.yaml) | Service-level inventory (ports, health URLs) |
 | [SSOT_REGISTRY.yaml](governance/SSOT_REGISTRY.yaml) | Priority list of truth sources agents follow |
@@ -109,11 +111,13 @@ The authority chain. When in doubt, these are the source of truth.
 | [SHOP_NETWORK_DEVICE_ONBOARDING.md](governance/SHOP_NETWORK_DEVICE_ONBOARDING.md) | Shop network onboarding procedure |
 | [BACKUP_CALENDAR.md](governance/BACKUP_CALENDAR.md) | Calendar of governed backup schedules and rotations |
 | [SHOP_NETWORK_AUDIT_RUNBOOK.md](governance/SHOP_NETWORK_AUDIT_RUNBOOK.md) | Shop network audit procedures and expected outputs |
+| [TERMINAL_C_DAILY_RUNBOOK.md](governance/TERMINAL_C_DAILY_RUNBOOK.md) | Control-plane orchestration runbook for lane fan-out/fan-in |
 | [CHANGE_PACK_TEMPLATE.md](governance/CHANGE_PACK_TEMPLATE.md) | Change pack template for governed infrastructure work |
 | [CAMERA_SSOT.md](governance/CAMERA_SSOT.md) | Camera inventory SSOT (IDs, channels, expected coverage) |
 | [AUTHENTIK_BACKUP_RESTORE.md](governance/AUTHENTIK_BACKUP_RESTORE.md) | Authentik backup/restore runbook |
 | [GITEA_BACKUP_RESTORE.md](governance/GITEA_BACKUP_RESTORE.md) | Gitea backup/restore runbook |
 | [INFISICAL_BACKUP_RESTORE.md](governance/INFISICAL_BACKUP_RESTORE.md) | Infisical backup/restore runbook |
+| [INFISICAL_RESTORE_DRILL.md](governance/INFISICAL_RESTORE_DRILL.md) | Quarterly Infisical restore drill execution procedure |
 | [VAULTWARDEN_BACKUP_RESTORE.md](governance/VAULTWARDEN_BACKUP_RESTORE.md) | Vaultwarden backup/restore runbook |
 | [RELEASE_PROTOCOL.md](governance/RELEASE_PROTOCOL.md) | Release/ship protocol for governed changes |
 
