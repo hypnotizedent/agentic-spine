@@ -87,6 +87,7 @@ Pillar entrypoints (per stack)
 | `PORTABILITY_ASSUMPTIONS.md` | Environment coupling + mount/IP assumptions |
 | `SEARCH_EXCLUSIONS.md` | What's excluded from search/RAG |
 | `RAG_INDEXING_RULES.md` | What gets indexed to RAG |
+| `RAG_REINDEX_RUNBOOK.md` | Governed RAG reindex checklist and acceptance criteria |
 | `ISSUE_CLOSURE_SOP.md` | How to close issues properly |
 | `GIT_REMOTE_AUTHORITY.md` | Canonical git authority (Gitea primary, GitHub mirror-only) |
 | `AGENT_GOVERNANCE_BRIEF.md` | Agent operational session rules (commits, capabilities, drift gates) |
@@ -547,6 +548,7 @@ Before adding `status: authoritative` or claiming SSOT:
 - `PORTABILITY_ASSUMPTIONS.md`
 - `POST_GAP_OPERATING_MODEL.md`
 - `RAG_INDEXING_RULES.md`
+- `RAG_REINDEX_RUNBOOK.md`
 - `REBOOT_HEALTH_GATE.md`
 - `RELEASE_PROTOCOL.md`
 - `REPO_STRUCTURE_AUTHORITY.md`

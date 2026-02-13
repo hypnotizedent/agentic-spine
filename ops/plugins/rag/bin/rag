@@ -49,7 +49,7 @@ Usage:
   rag status [--workspace <slug>]
   rag ask "<question>" [--workspace <slug>]
   rag retrieve "<query>" [--workspace <slug>] [--limit N]
-  rag sync [--workspace <slug>] [--dry-run]
+  rag sync [--workspace <slug>] [--dry-run] [--resume]
 
 Env:
   RAG_WORKSPACE_SLUG (default: agentic-spine)
@@ -192,6 +192,35 @@ http_post_json_chat_try() {
   fi
   cat "$tmp"
   rm -f "$tmp"
+}
+
+check_workspace_exists() {
+  # Preflight: verify workspace slug exists on AnythingLLM.
+  # Returns 0 if workspace exists, 1 if not.
+  local slug="${1:-$WORKSPACE_SLUG}"
+  local resp
+  resp="$(http_get "${ANYTHINGLLM_URL}/api/v1/workspace/${slug}" 2>/dev/null)" || {
+    log_err "STOP: workspace '${slug}' does not exist on AnythingLLM (${ANYTHINGLLM_URL})."
+    log_err "hint: create it via AnythingLLM UI at ${ANYTHINGLLM_URL} or API:"
+    log_err "  curl -X POST -H 'Authorization: Bearer \$KEY' -H 'Content-Type: application/json' \\"
+    log_err "    -d '{\"name\": \"${slug}\"}' ${ANYTHINGLLM_URL}/api/v1/workspace/new"
+    return 1
+  }
+  # Additional check: API may return 200 with null workspace
+  if command -v jq >/dev/null 2>&1; then
+    local ws_name
+    ws_name="$(echo "$resp" | jq -r '
+      if .workspace and (.workspace|type=="array") then .workspace[0].name // empty
+      elif .workspace and (.workspace|type=="object") then .workspace.name // empty
+      else empty end
+    ' 2>/dev/null || true)"
+    if [[ -z "$ws_name" ]]; then
+      log_err "STOP: workspace '${slug}' not found (API returned empty workspace object)."
+      log_err "hint: create it via AnythingLLM UI at ${ANYTHINGLLM_URL}"
+      return 1
+    fi
+  fi
+  return 0
 }
 
 ollama_embed() {
@@ -468,6 +497,7 @@ case "$cmd" in
     load_api_key
     require_tool curl
     require_tool python3
+    check_workspace_exists "$WORKSPACE_SLUG" || exit 1
     local_json="$(http_get "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}")"
     if command -v jq >/dev/null 2>&1; then
       doc_count="$(echo "$local_json" | jq -r '
@@ -600,10 +630,12 @@ PY
 
   sync)
     dry_run=0
+    resume=0
     while [[ "$#" -gt 0 ]]; do
       case "${1:-}" in
         --workspace) WORKSPACE_SLUG="${2:-}"; shift 2 ;;
         --dry-run) dry_run=1; shift ;;
+        --resume) resume=1; shift ;;
         *) log_err "Unknown arg: $1"; usage; exit 1 ;;
       esac
     done
@@ -612,6 +644,12 @@ PY
     load_api_key
     require_tool curl
     require_tool python3
+
+    # Preflight: verify workspace exists before building manifest
+    check_workspace_exists "$WORKSPACE_SLUG" || exit 1
+
+    CHECKPOINT_DIR="${SPINE_CODE}/mailroom/state/rag-sync"
+    CHECKPOINT_FILE="${CHECKPOINT_DIR}/checkpoint.txt"
 
     manifest="$(build_manifest)"
     total="$(echo "$manifest" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
@@ -626,13 +664,33 @@ PY
       exit 0
     fi
 
+    # Checkpoint support: load previous progress if resuming
+    mkdir -p "$CHECKPOINT_DIR"
+    completed_files=""
+    resumed_count=0
+    if [[ "$resume" == "1" && -f "$CHECKPOINT_FILE" ]]; then
+      completed_files="$(cat "$CHECKPOINT_FILE")"
+      resumed_count="$(echo "$completed_files" | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+      echo "resuming: ${resumed_count} files already uploaded (from checkpoint)"
+    else
+      # Fresh run: clear any stale checkpoint
+      rm -f "$CHECKPOINT_FILE"
+    fi
+
     uploaded=0
     failed=0
     skipped=0
     while IFS= read -r rel; do
       [[ -z "$rel" ]] && continue
+      # Skip files already in checkpoint
+      if [[ -n "$completed_files" ]] && echo "$completed_files" | grep -qxF "$rel"; then
+        skipped=$((skipped + 1))
+        continue
+      fi
       if upload_file "$rel"; then
         uploaded=$((uploaded + 1))
+        # Append to checkpoint on success
+        echo "$rel" >> "$CHECKPOINT_FILE"
       else
         failed=$((failed + 1))
       fi
@@ -640,10 +698,14 @@ PY
 
     echo ""
     echo "uploaded: $uploaded"
+    echo "skipped_checkpoint: $skipped"
     echo "failed: $failed"
     if [[ "$failed" -gt 0 ]]; then
+      echo "checkpoint: ${CHECKPOINT_FILE} (use --resume to continue)"
       exit 1
     fi
+    # Clean run: remove checkpoint
+    rm -f "$CHECKPOINT_FILE"
     ;;
 
   -h|--help|"")

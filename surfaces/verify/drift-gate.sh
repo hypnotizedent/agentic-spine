@@ -816,6 +816,14 @@ else
   warn "VM operating profile parity lock gate not present"
 fi
 
+# D87: RAG workspace contract lock
+echo -n "D87 RAG workspace contract lock... "
+if [[ -x "$SP/surfaces/verify/d87-rag-workspace-contract-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d87-rag-workspace-contract-lock.sh"
+else
+  warn "RAG workspace contract lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1
