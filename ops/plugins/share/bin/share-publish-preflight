@@ -3,9 +3,10 @@
 #
 # Validates:
 # 1. Git tree is clean
-# 2. spine.verify passes (or was recently run)
+# 2. spine.verify passes (runs drift-gate.sh and fails on non-zero)
 # 3. Share governance bindings exist (allowlist, denylist, remote, protocol)
 # 4. Share remote is configured in git
+# 5. Capabilities registered
 set -euo pipefail
 
 SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -25,7 +26,20 @@ else
   err "git tree is dirty — commit or stash changes first"
 fi
 
-# 2. Required bindings exist
+# 2. Spine verify (actual enforcement — runs drift-gate.sh)
+echo "--- Spine verify ---"
+GATE="$SP/surfaces/verify/drift-gate.sh"
+if [[ -x "$GATE" ]]; then
+  if bash "$GATE" >/dev/null 2>&1; then
+    ok "spine.verify passes (all drift gates green)"
+  else
+    err "spine.verify FAILED — fix drift gate failures before publishing"
+  fi
+else
+  err "drift-gate.sh not found or not executable"
+fi
+
+# 3. Required bindings exist
 echo "--- Governance bindings ---"
 for f in \
   "ops/bindings/share.publish.allowlist.yaml" \
@@ -39,16 +53,21 @@ for f in \
   fi
 done
 
-# 3. Share remote configured
+# 4. Share remote configured (read remote name from binding)
 echo "--- Remote configuration ---"
-if git remote get-url share >/dev/null 2>&1; then
-  SHARE_URL="$(git remote get-url share)"
-  ok "share remote configured: $SHARE_URL"
+REMOTE_BINDING="$SP/ops/bindings/share.publish.remote.yaml"
+REMOTE_NAME="share"
+if [[ -f "$REMOTE_BINDING" ]] && command -v yq >/dev/null 2>&1; then
+  REMOTE_NAME=$(yq -r '.remote.name' "$REMOTE_BINDING" 2>/dev/null || echo "share")
+fi
+if git remote get-url "$REMOTE_NAME" >/dev/null 2>&1; then
+  SHARE_URL="$(git remote get-url "$REMOTE_NAME")"
+  ok "remote '$REMOTE_NAME' configured: $SHARE_URL"
 else
-  err "git remote 'share' not configured (run: git remote add share <url>)"
+  err "git remote '$REMOTE_NAME' not configured (run: git remote add $REMOTE_NAME <url>)"
 fi
 
-# 4. Capabilities registered
+# 5. Capabilities registered
 echo "--- Capability registration ---"
 CAP_FILE="$SP/ops/capabilities.yaml"
 for cap in share.publish.preflight share.publish.preview share.publish.apply; do

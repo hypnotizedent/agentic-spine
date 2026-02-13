@@ -21,7 +21,6 @@ echo "--- Test 2: missing binding detection ---"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# Copy just enough structure for the gate to find things
 mkdir -p "$TMP/docs/governance" "$TMP/ops/bindings" "$TMP/ops/plugins/share/bin"
 cp "$SP/docs/governance/WORKBENCH_SHARE_PROTOCOL.md" "$TMP/docs/governance/"
 cp "$SP/ops/bindings/share.publish.allowlist.yaml" "$TMP/ops/bindings/"
@@ -49,6 +48,41 @@ if [[ -x "$GATE" \
   pass "D82 gate executable and all share bindings exist"
 else
   fail "D82 gate or share bindings missing"
+fi
+
+# Test 4: Semantic parity — preflight invokes drift-gate.sh
+echo "--- Test 4: semantic - preflight verify enforcement ---"
+if grep -q 'drift-gate\.sh' "$SP/ops/plugins/share/bin/share-publish-preflight" 2>/dev/null; then
+  pass "preflight invokes drift-gate.sh"
+else
+  fail "preflight does not invoke drift-gate.sh"
+fi
+
+# Test 5: Semantic parity — preview scans all 5 denylist sections
+echo "--- Test 5: semantic - preview denylist coverage ---"
+PREVIEW="$SP/ops/plugins/share/bin/share-publish-preview"
+all_found=1
+for section in secret_patterns credential_patterns identity_patterns infrastructure_patterns runtime_patterns; do
+  if ! grep -q "$section" "$PREVIEW" 2>/dev/null; then
+    all_found=0
+    break
+  fi
+done
+if [[ "$all_found" -eq 1 ]]; then
+  pass "preview scans all 5 denylist sections"
+else
+  fail "preview missing denylist section coverage"
+fi
+
+# Test 6: Semantic parity — apply uses binding, not hardcoded push
+echo "--- Test 6: semantic - apply binding-driven ---"
+APPLY="$SP/ops/plugins/share/bin/share-publish-apply"
+if grep -q 'share\.publish\.remote\.yaml' "$APPLY" 2>/dev/null \
+  && ! grep -q 'git push share HEAD:main' "$APPLY" 2>/dev/null \
+  && grep -q 'curated' "$APPLY" 2>/dev/null; then
+  pass "apply reads from binding and builds curated payload"
+else
+  fail "apply has hardcoded remote or pushes full HEAD"
 fi
 
 echo

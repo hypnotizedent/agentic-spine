@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# share-publish-apply: Push curated content to share channel
+# share-publish-apply: Push CURATED content to share channel
 #
 # Default: dry-run (shows what would be pushed)
 # Use --execute to actually push
+#
+# Reads remote/branch/flow config from ops/bindings/share.publish.remote.yaml
+# Publishes only files from the preview manifest (curated payload, not full HEAD)
 #
 # Safety: destructive / manual approval
 set -euo pipefail
@@ -17,16 +20,32 @@ for arg in "$@"; do
   esac
 done
 
+REMOTE_BINDING="$SP/ops/bindings/share.publish.remote.yaml"
+PUBLISH_MANIFEST="$SP/mailroom/outbox/share-publish-manifest.txt"
+
+command -v yq >/dev/null 2>&1 || { echo "FAIL: yq not found" >&2; exit 1; }
+[[ -f "$REMOTE_BINDING" ]] || { echo "FAIL: remote binding not found" >&2; exit 1; }
+
+# Read remote config from binding (not hardcoded)
+REMOTE_NAME=$(yq -r '.remote.name' "$REMOTE_BINDING" 2>/dev/null || echo "share")
+TARGET_BRANCH=$(yq -r '.remote.target_branch' "$REMOTE_BINDING" 2>/dev/null || echo "main")
+FLOW_MODE=$(yq -r '.flow.mode' "$REMOTE_BINDING" 2>/dev/null || echo "one-way")
+PUSH_POLICY=$(yq -r '.flow.push_policy' "$REMOTE_BINDING" 2>/dev/null || echo "manual")
+
 echo "=== Share Publish Apply ==="
+echo "  Remote: $REMOTE_NAME (from binding)"
+echo "  Branch: $TARGET_BRANCH (from binding)"
+echo "  Mode: $FLOW_MODE | Policy: $PUSH_POLICY"
 
 # Gate 1: Pre-flight must pass
+echo
 echo "--- Running pre-flight ---"
 if ! bash "$SP/ops/plugins/share/bin/share-publish-preflight" 2>&1; then
   echo "FAIL: pre-flight check failed. Aborting." >&2
   exit 1
 fi
 
-# Gate 2: Preview must pass (no denylist hits)
+# Gate 2: Preview must pass (produces publish manifest)
 echo
 echo "--- Running preview ---"
 if ! bash "$SP/ops/plugins/share/bin/share-publish-preview" 2>&1; then
@@ -34,36 +53,71 @@ if ! bash "$SP/ops/plugins/share/bin/share-publish-preview" 2>&1; then
   exit 1
 fi
 
-# Gate 3: Share remote must exist
-if ! git remote get-url share >/dev/null 2>&1; then
-  echo "FAIL: share remote not configured" >&2
+# Gate 3: Publish manifest must exist and be non-empty
+if [[ ! -f "$PUBLISH_MANIFEST" ]] || [[ ! -s "$PUBLISH_MANIFEST" ]]; then
+  echo "FAIL: publish manifest missing or empty (run preview first)" >&2
   exit 1
 fi
 
+FILE_COUNT=$(wc -l < "$PUBLISH_MANIFEST" | tr -d ' ')
+
+# Gate 4: Remote must be configured
+if ! git remote get-url "$REMOTE_NAME" >/dev/null 2>&1; then
+  echo "FAIL: git remote '$REMOTE_NAME' not configured" >&2
+  exit 1
+fi
+SHARE_URL="$(git remote get-url "$REMOTE_NAME")"
+
 echo
 if [[ "$EXECUTE" -eq 0 ]]; then
-  echo "DRY-RUN: Would push current HEAD to share remote."
-  echo "  Current HEAD: $(git rev-parse --short HEAD)"
-  echo "  Share remote: $(git remote get-url share)"
-  echo "  Target branch: main"
+  echo "DRY-RUN: Would publish $FILE_COUNT curated files to share channel."
+  echo "  Remote: $REMOTE_NAME ($SHARE_URL)"
+  echo "  Branch: $TARGET_BRANCH"
+  echo "  Source HEAD: $(git rev-parse --short HEAD)"
+  echo
+  echo "  Files in curated payload:"
+  head -20 "$PUBLISH_MANIFEST" | sed 's/^/    /'
+  [[ "$FILE_COUNT" -gt 20 ]] && echo "    ... ($((FILE_COUNT - 20)) more)"
   echo
   echo "To execute: ./bin/ops cap run share.publish.apply --execute"
   exit 0
 fi
 
-# Execute: push to share remote
-echo "--- Pushing to share channel ---"
-SHARE_URL="$(git remote get-url share)"
-echo "  Pushing HEAD to: $SHARE_URL (branch: main)"
+# Execute: build curated workspace and push
+echo "--- Building curated publish workspace ---"
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
 
-git push share HEAD:main 2>&1
+# Copy only allowed files into workspace
+while IFS= read -r file; do
+  [[ -z "$file" ]] && continue
+  [[ -f "$SP/$file" ]] || continue
+  mkdir -p "$WORK_DIR/$(dirname "$file")"
+  cp "$SP/$file" "$WORK_DIR/$file"
+done < "$PUBLISH_MANIFEST"
+
+echo "  Copied $FILE_COUNT files to workspace"
+
+# Initialize workspace as a git repo and create curated commit
+cd "$WORK_DIR"
+git init -q
+git add -A
+git commit -q -m "share: curated publish from $(cd "$SP" && git rev-parse --short HEAD) ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+
+# Push curated commit to share remote
+echo "--- Pushing curated payload to $REMOTE_NAME/$TARGET_BRANCH ---"
+git push --force "$SHARE_URL" "HEAD:refs/heads/$TARGET_BRANCH" 2>&1
 RC=$?
+
+cd "$SP"
 
 if [[ "$RC" -eq 0 ]]; then
   echo
   echo "PUBLISH: SUCCESS"
-  echo "  Pushed: $(git rev-parse --short HEAD)"
-  echo "  Remote: $SHARE_URL"
+  echo "  Published: $FILE_COUNT curated files"
+  echo "  Source HEAD: $(git rev-parse --short HEAD)"
+  echo "  Remote: $REMOTE_NAME ($SHARE_URL)"
+  echo "  Branch: $TARGET_BRANCH"
 else
   echo
   echo "PUBLISH: FAIL (git push returned $RC)" >&2

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # share-publish-preview: Read-only preview of what would be published
 #
-# Builds candidate file list from allowlist, checks against denylist,
+# Builds candidate file list from allowlist, checks against ALL denylist
+# sections (secret, credential, identity, infrastructure, runtime patterns),
 # reports blocked hits. Does NOT push anything.
+#
+# Outputs the publishable file list to stdout for apply to consume.
 set -euo pipefail
 
 SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -12,6 +15,7 @@ ALLOWLIST="$SP/ops/bindings/share.publish.allowlist.yaml"
 DENYLIST="$SP/ops/bindings/share.publish.denylist.yaml"
 
 command -v yq >/dev/null 2>&1 || { echo "FAIL: yq not found" >&2; exit 1; }
+command -v rg >/dev/null 2>&1 || { echo "FAIL: rg (ripgrep) not found" >&2; exit 1; }
 [[ -f "$ALLOWLIST" ]] || { echo "FAIL: allowlist not found" >&2; exit 1; }
 [[ -f "$DENYLIST" ]] || { echo "FAIL: denylist not found" >&2; exit 1; }
 
@@ -29,72 +33,79 @@ for ((i=0; i<pattern_count; i++)); do
   git ls-files -- "$pat" 2>/dev/null >> "$CANDIDATES" || true
 done
 
-TOTAL=$(sort -u "$CANDIDATES" | wc -l | tr -d ' ')
+# Deduplicate
+sort -u "$CANDIDATES" -o "$CANDIDATES"
+TOTAL=$(wc -l < "$CANDIDATES" | tr -d ' ')
 echo "  Candidate files from allowlist: $TOTAL"
 
-# Step 2: Filter out explicitly excluded paths
+# Step 2: Filter out explicitly excluded paths from allowlist
 echo "--- Exclusion filter ---"
 FILTERED=$(mktemp)
 trap 'rm -f "$CANDIDATES" "$FILTERED"' EXIT
+cp "$CANDIDATES" "$FILTERED"
 
 excl_count=$(yq '.excluded | length' "$ALLOWLIST" 2>/dev/null || echo 0)
-cp "$CANDIDATES" "$FILTERED"
 for ((i=0; i<excl_count; i++)); do
   excl_pat=$(yq -r ".excluded[$i].pattern" "$ALLOWLIST")
-  # Remove matching lines
-  grep -v "^${excl_pat}$" "$FILTERED" > "$FILTERED.tmp" 2>/dev/null || true
+  rg -v --fixed-strings "$excl_pat" "$FILTERED" > "$FILTERED.tmp" 2>/dev/null || true
   mv "$FILTERED.tmp" "$FILTERED"
 done
 
-# Also filter excluded directories
+# Filter excluded directories from denylist
 excl_dir_count=$(yq '.excluded_directories | length' "$DENYLIST" 2>/dev/null || echo 0)
 for ((i=0; i<excl_dir_count; i++)); do
   excl_dir=$(yq -r ".excluded_directories[$i].path" "$DENYLIST")
-  grep -v "^${excl_dir}" "$FILTERED" > "$FILTERED.tmp" 2>/dev/null || true
+  rg -v "^${excl_dir}" "$FILTERED" > "$FILTERED.tmp" 2>/dev/null || true
   mv "$FILTERED.tmp" "$FILTERED"
 done
 
-# Also filter excluded extensions
+# Filter excluded extensions from denylist
 excl_ext_count=$(yq '.excluded_extensions | length' "$DENYLIST" 2>/dev/null || echo 0)
 for ((i=0; i<excl_ext_count; i++)); do
   excl_ext=$(yq -r ".excluded_extensions[$i].extension" "$DENYLIST")
-  grep -v "\\${excl_ext}$" "$FILTERED" > "$FILTERED.tmp" 2>/dev/null || true
+  rg -v "\\${excl_ext}\$" "$FILTERED" > "$FILTERED.tmp" 2>/dev/null || true
   mv "$FILTERED.tmp" "$FILTERED"
 done
 
-AFTER_EXCL=$(sort -u "$FILTERED" | wc -l | tr -d ' ')
+AFTER_EXCL=$(wc -l < "$FILTERED" | tr -d ' ')
 EXCLUDED=$((TOTAL - AFTER_EXCL))
 echo "  Excluded by path/dir/ext filters: $EXCLUDED"
 echo "  Remaining candidates: $AFTER_EXCL"
 
-# Step 3: Scan remaining files against denylist secret patterns
-echo "--- Denylist content scan ---"
+# Step 3: Scan remaining files against ALL denylist content pattern sections
+echo "--- Denylist content scan (all sections) ---"
 BLOCKED=0
 BLOCKED_FILES=""
 
-# Collect all secret + credential patterns
+# Collect patterns from ALL denylist sections
 all_patterns=$(mktemp)
-for section in secret_patterns credential_patterns; do
+trap 'rm -f "$CANDIDATES" "$FILTERED" "$all_patterns"' EXIT
+
+for section in secret_patterns credential_patterns identity_patterns infrastructure_patterns runtime_patterns; do
   cnt=$(yq ".$section | length" "$DENYLIST" 2>/dev/null || echo 0)
+  [[ "$cnt" == "null" ]] && cnt=0
   for ((i=0; i<cnt; i++)); do
-    yq -r ".$section[$i].pattern" "$DENYLIST" >> "$all_patterns"
+    pat=$(yq -r ".$section[$i].pattern" "$DENYLIST" 2>/dev/null || true)
+    sev=$(yq -r ".$section[$i].severity" "$DENYLIST" 2>/dev/null || echo "unknown")
+    [[ -n "$pat" && "$pat" != "null" ]] && echo "$section|$sev|$pat" >> "$all_patterns"
   done
 done
+
+PAT_COUNT=$(wc -l < "$all_patterns" | tr -d ' ')
+echo "  Loaded $PAT_COUNT patterns across 5 denylist sections"
 
 while IFS= read -r candidate; do
   [[ -z "$candidate" ]] && continue
   [[ -f "$SP/$candidate" ]] || continue
-  while IFS= read -r pat; do
+  while IFS='|' read -r section severity pat; do
     [[ -z "$pat" ]] && continue
-    if grep -qP "$pat" "$SP/$candidate" 2>/dev/null; then
+    if rg -q "$pat" "$SP/$candidate" 2>/dev/null; then
       BLOCKED=$((BLOCKED + 1))
-      BLOCKED_FILES="${BLOCKED_FILES}\n  BLOCKED: $candidate (pattern: $pat)"
+      BLOCKED_FILES="${BLOCKED_FILES}\n  BLOCKED [$severity]: $candidate ($section: $pat)"
       break
     fi
   done < "$all_patterns"
-done < <(sort -u "$FILTERED")
-
-rm -f "$all_patterns"
+done < "$FILTERED"
 
 if [[ "$BLOCKED" -gt 0 ]]; then
   echo "  Blocked by denylist patterns: $BLOCKED"
@@ -103,14 +114,39 @@ else
   echo "  Blocked by denylist patterns: 0"
 fi
 
-# Step 4: Summary
-PUBLISHABLE=$((AFTER_EXCL - BLOCKED))
+# Step 4: Build final publishable list
+PUBLISHABLE_LIST=$(mktemp)
+trap 'rm -f "$CANDIDATES" "$FILTERED" "$all_patterns" "$PUBLISHABLE_LIST"' EXIT
+
+# Re-scan to produce clean publishable list (exclude blocked files)
+while IFS= read -r candidate; do
+  [[ -z "$candidate" ]] && continue
+  [[ -f "$SP/$candidate" ]] || continue
+  is_blocked=0
+  while IFS='|' read -r section severity pat; do
+    [[ -z "$pat" ]] && continue
+    if rg -q "$pat" "$SP/$candidate" 2>/dev/null; then
+      is_blocked=1
+      break
+    fi
+  done < "$all_patterns"
+  [[ "$is_blocked" -eq 0 ]] && echo "$candidate" >> "$PUBLISHABLE_LIST"
+done < "$FILTERED"
+
+PUBLISHABLE=$(wc -l < "$PUBLISHABLE_LIST" | tr -d ' ')
+
+# Write publishable list to a known location for apply to use
+PUBLISH_MANIFEST="$SP/mailroom/outbox/share-publish-manifest.txt"
+mkdir -p "$(dirname "$PUBLISH_MANIFEST")"
+cp "$PUBLISHABLE_LIST" "$PUBLISH_MANIFEST"
+
 echo
 echo "--- Summary ---"
 echo "  Allowlist candidates: $TOTAL"
 echo "  Excluded (path/dir/ext): $EXCLUDED"
 echo "  Blocked (content scan): $BLOCKED"
 echo "  Publishable files: $PUBLISHABLE"
+echo "  Manifest written to: $PUBLISH_MANIFEST"
 
 if [[ "$BLOCKED" -gt 0 ]]; then
   echo
