@@ -1,8 +1,8 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-08
-scope: agent-lifecycle
+last_verified: 2026-02-13
+scope: agent-infrastructure-governance
 github_issue: "#634"
 ---
 
@@ -11,7 +11,12 @@ github_issue: "#634"
 Tracks: #634
 
 ## Purpose
-Define the lifecycle, discovery, and verification contract for domain-specific agents in the agentic-spine.
+
+Define the infrastructure contract for domain-specific agents in the agentic-spine: registry, lifecycle, discovery, and verification.
+
+> **Scope note:** This document covers agent **infrastructure** (registry, contracts, discovery, verification).
+> For **operational session rules** (commits, capabilities, drift gates), see [AGENT_GOVERNANCE_BRIEF.md](AGENT_GOVERNANCE_BRIEF.md).
+> For **action boundary constraints** (what agents can/cannot do), see [AGENT_BOUNDARIES.md](AGENT_BOUNDARIES.md).
 
 ## Sources of Truth
 

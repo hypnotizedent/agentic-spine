@@ -132,3 +132,5 @@ Agents must protect their context window:
 ## Related Documents
 
 - [Governance Index](GOVERNANCE_INDEX.md) — Entry point for all governance docs
+- [AGENT_GOVERNANCE_BRIEF.md](AGENT_GOVERNANCE_BRIEF.md) — Operational session rules (commits, capabilities, drift gates)
+- [AGENTS_GOVERNANCE.md](AGENTS_GOVERNANCE.md) — Agent infrastructure governance (registry, contracts, discovery)

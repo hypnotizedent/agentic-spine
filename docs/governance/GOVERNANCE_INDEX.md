@@ -89,7 +89,9 @@ Pillar entrypoints (per stack)
 | `RAG_INDEXING_RULES.md` | What gets indexed to RAG |
 | `ISSUE_CLOSURE_SOP.md` | How to close issues properly |
 | `GIT_REMOTE_AUTHORITY.md` | Canonical git authority (Gitea primary, GitHub mirror-only) |
-| `AGENT_BOUNDARIES.md` | What agents can/cannot do |
+| `AGENT_GOVERNANCE_BRIEF.md` | Agent operational session rules (commits, capabilities, drift gates) |
+| `AGENTS_GOVERNANCE.md` | Agent infrastructure governance (registry, contracts, discovery, verification) |
+| `AGENT_BOUNDARIES.md` | Agent action boundary constraints (what agents can/cannot do) |
 | `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |
 | `MAILROOM_BRIDGE.md` | Governed remote API bridge (read outbox/receipts, enqueue prompts) |
 | `ORCHESTRATION_CAPABILITY.md` | Machine-enforced orchestration contract and strict terminal entry behavior |
@@ -461,7 +463,7 @@ Before adding `status: authoritative` or claiming SSOT:
 | Document | Relationship |
 |----------|--------------|
 | `SSOT_REGISTRY.yaml` | Machine-readable version of SSOT list |
-| `ACTIVE_DOCS_INDEX.md` | Lightweight doc presence index |
+| `ACTIVE_DOCS_INDEX.md` | Merged into `_index.yaml` (tombstoned 2026-02-13) |
 | `REPO_STRUCTURE_AUTHORITY.md` | Where files belong |
 | `SEARCH_EXCLUSIONS.md` | What's excluded from search |
 | `docs/governance/SESSION_PROTOCOL.md` | Session entry point |
