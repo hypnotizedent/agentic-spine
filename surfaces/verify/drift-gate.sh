@@ -808,6 +808,14 @@ else
   warn "gate registry parity lock gate not present"
 fi
 
+# D86: VM operating profile parity lock
+echo -n "D86 VM operating profile parity lock... "
+if [[ -x "$SP/surfaces/verify/d86-vm-operating-profile-parity-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d86-vm-operating-profile-parity-lock.sh"
+else
+  warn "VM operating profile parity lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

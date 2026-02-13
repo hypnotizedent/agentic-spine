@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# vm-profile-audit - Audit VM operating profile parity
+#
+# Read-only report: checks that every active VM in vm.lifecycle.yaml has a
+# matching entry in vm.operating.profile.yaml with all required fields populated.
+#
+# Usage:
+#   vm-profile-audit              # active VMs only
+#   vm-profile-audit --all        # include home/stopped
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SP="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+LIFECYCLE="$SP/ops/bindings/vm.lifecycle.yaml"
+PROFILE="$SP/ops/bindings/vm.operating.profile.yaml"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || _stop "missing dependency: yq"
+[[ -f "$LIFECYCLE" ]] || _stop "missing binding: $LIFECYCLE"
+[[ -f "$PROFILE" ]] || _stop "missing binding: $PROFILE"
+
+SHOW_ALL=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all) SHOW_ALL=1; shift ;;
+    -h|--help) sed -n '1,12p' "$0" | sed 's/^# //'; exit 0 ;;
+    *) _stop "unknown arg: $1" ;;
+  esac
+done
+
+echo "vm.profile.audit"
+echo "lifecycle: $LIFECYCLE"
+echo "profile:   $PROFILE"
+echo
+
+REQUIRED_FIELDS="ssh_mode runtime_inspection_mode health_probe_policy startup_policy diagnostic_user_policy backup_policy"
+
+# Valid enum values
+VALID_SSH_MODES="standard non-standard haos lxc-root none"
+VALID_INSPECTION_MODES="docker-group docker-sudo docker-none haos-supervisor none"
+VALID_PROBE_POLICIES="full selective none"
+VALID_STARTUP_POLICIES="auto manual template"
+VALID_DIAG_POLICIES="docker-group-member sudo-only no-docker-access not-applicable"
+VALID_BACKUP_POLICIES="vzdump-scheduled vzdump-manual none"
+
+vm_count=$(yq '.vms | length' "$LIFECYCLE")
+profile_count=$(yq '.profiles | length' "$PROFILE")
+
+# Build lookup of profile vmids
+profile_vmids=""
+for ((i=0; i<profile_count; i++)); do
+  pvmid=$(yq -r ".profiles[$i].vmid" "$PROFILE")
+  profile_vmids="$profile_vmids $pvmid"
+done
+
+# Header
+printf "%-6s %-20s %-8s %-14s %-14s %-10s %-10s %-22s %-18s %s\n" \
+  "VMID" "HOSTNAME" "STATUS" "SSH_MODE" "INSPECTION" "PROBES" "STARTUP" "DIAG_USER" "BACKUP" "RESULT"
+
+total=0
+pass_count=0
+fail_count=0
+skip_count=0
+
+for ((i=0; i<vm_count; i++)); do
+  vmid=$(yq -r ".vms[$i].vmid" "$LIFECYCLE")
+  hostname=$(yq -r ".vms[$i].hostname" "$LIFECYCLE")
+  status=$(yq -r ".vms[$i].status" "$LIFECYCLE")
+
+  # Skip non-active unless --all
+  if [[ "$SHOW_ALL" -eq 0 ]]; then
+    case "$status" in
+      active) ;;
+      *) continue ;;
+    esac
+  fi
+
+  total=$((total + 1))
+
+  # Stopped/decommissioned/template VMs don't need profiles
+  case "$status" in
+    stopped|decommissioned|template|abandoned)
+      printf "%-6s %-20s %-8s %-14s %-14s %-10s %-10s %-22s %-18s %s\n" \
+        "$vmid" "$hostname" "$status" "-" "-" "-" "-" "-" "-" "SKIP"
+      skip_count=$((skip_count + 1))
+      continue
+      ;;
+  esac
+
+  # Find matching profile entry
+  pidx=-1
+  for ((j=0; j<profile_count; j++)); do
+    pvmid=$(yq -r ".profiles[$j].vmid" "$PROFILE")
+    if [[ "$pvmid" == "$vmid" ]]; then
+      pidx=$j
+      break
+    fi
+  done
+
+  if [[ "$pidx" -eq -1 ]]; then
+    printf "%-6s %-20s %-8s %-14s %-14s %-10s %-10s %-22s %-18s %s\n" \
+      "$vmid" "$hostname" "$status" "MISSING" "MISSING" "MISSING" "MISSING" "MISSING" "MISSING" "FAIL"
+    fail_count=$((fail_count + 1))
+    continue
+  fi
+
+  ssh_mode=$(yq -r ".profiles[$pidx].ssh_mode" "$PROFILE")
+  inspection=$(yq -r ".profiles[$pidx].runtime_inspection_mode" "$PROFILE")
+  probes=$(yq -r ".profiles[$pidx].health_probe_policy" "$PROFILE")
+  startup=$(yq -r ".profiles[$pidx].startup_policy" "$PROFILE")
+  diag=$(yq -r ".profiles[$pidx].diagnostic_user_policy" "$PROFILE")
+  backup=$(yq -r ".profiles[$pidx].backup_policy" "$PROFILE")
+
+  errors=""
+
+  # Check required fields are non-null
+  for field in ssh_mode inspection probes startup diag backup; do
+    val="${!field}"
+    if [[ -z "$val" || "$val" == "null" ]]; then
+      errors="${errors}${field}=null "
+    fi
+  done
+
+  # Validate enum values
+  validate_enum() {
+    local field_name="$1" field_val="$2" valid_values="$3"
+    if [[ "$field_val" != "null" && -n "$field_val" ]]; then
+      local found=false
+      for v in $valid_values; do
+        [[ "$field_val" == "$v" ]] && found=true && break
+      done
+      if [[ "$found" != "true" ]]; then
+        errors="${errors}${field_name}=invalid($field_val) "
+      fi
+    fi
+  }
+
+  validate_enum "ssh_mode" "$ssh_mode" "$VALID_SSH_MODES"
+  validate_enum "inspection" "$inspection" "$VALID_INSPECTION_MODES"
+  validate_enum "probes" "$probes" "$VALID_PROBE_POLICIES"
+  validate_enum "startup" "$startup" "$VALID_STARTUP_POLICIES"
+  validate_enum "diag" "$diag" "$VALID_DIAG_POLICIES"
+  validate_enum "backup" "$backup" "$VALID_BACKUP_POLICIES"
+
+  if [[ -n "$errors" ]]; then
+    result="FAIL: $errors"
+    fail_count=$((fail_count + 1))
+  else
+    result="PASS"
+    pass_count=$((pass_count + 1))
+  fi
+
+  printf "%-6s %-20s %-8s %-14s %-14s %-10s %-10s %-22s %-18s %s\n" \
+    "$vmid" "$hostname" "$status" "$ssh_mode" "$inspection" "$probes" "$startup" "$diag" "$backup" "$result"
+done
+
+echo
+echo "total=$total pass=$pass_count fail=$fail_count skip=$skip_count"
+
+if [[ "$fail_count" -gt 0 ]]; then
+  echo "RESULT: FAIL ($fail_count VM(s) have profile drift)"
+  exit 1
+fi
+
+echo "RESULT: PASS (all active VMs have valid operating profiles)"
