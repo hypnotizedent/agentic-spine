@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-13
+scope: slash-command
+---
+
 # /gates - Gate Reference
 
 List drift gates, filter by category, and show fix hints.

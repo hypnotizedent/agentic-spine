@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-13
+scope: slash-command
+---
+
 # /verify - Canonical Verify
 
 Run canonical spine verification and summarize failures with evidence.

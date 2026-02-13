@@ -41,6 +41,10 @@ See also: [SEARCH_EXCLUSIONS.md](SEARCH_EXCLUSIONS.md) for the full exclusion li
 
 ---
 
+## Slash-Command Docs
+
+Slash-command documentation in `surfaces/commands/*.md` is RAG-eligible when it includes the required frontmatter (`status`, `owner`, `last_verified`). These docs are small, high-signal references for agent workflows and are indexed under the `surfaces/` eligible root.
+
 ## Naming Conventions
 
 Indexed docs should follow these naming rules:

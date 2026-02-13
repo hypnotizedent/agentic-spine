@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-13
+scope: slash-command
+---
+
 # /check - Proactive Gate Check
 
 Check if planned changes will violate any drift gates before making them.

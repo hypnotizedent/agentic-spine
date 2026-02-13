@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-13
+scope: slash-command
+---
+
 # /gaps - Spine Gap Sweep
 
 List actionable governance/runtime gaps from canonical spine sources.

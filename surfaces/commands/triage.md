@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-13
+scope: slash-command
+---
+
 # /triage - Drift Gate Failure Triage
 
 Diagnose and resolve a drift gate failure.
