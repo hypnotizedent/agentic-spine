@@ -22,12 +22,15 @@ echo
 # ─────────────────────────────────────────────────────────────────────────
 echo "--- Document counts by directory ---"
 
-count_core=$(find "$DOCS/core" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
-count_governance=$(find "$DOCS/governance" -maxdepth 1 -type f \( -name "*.md" -o -name "*.yaml" \) 2>/dev/null | wc -l | tr -d ' ')
-count_governance_audits=$(find "$DOCS/governance/_audits" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
-count_brain=$(find "$DOCS/brain" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
-count_legacy=$(find "$DOCS/legacy" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
-count_sessions=$(find "$DOCS/sessions" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+count_dir() { [[ -d "$1" ]] && find "$1" ${2:+"$2" "$3"} -type f -name "*.md" | wc -l | tr -d ' ' || echo 0; }
+count_dir_all() { [[ -d "$1" ]] && find "$1" ${2:+"$2" "$3"} -type f \( -name "*.md" -o -name "*.yaml" \) | wc -l | tr -d ' ' || echo 0; }
+
+count_core=$(count_dir "$DOCS/core")
+count_governance=$(count_dir_all "$DOCS/governance" -maxdepth 1)
+count_governance_audits=$(count_dir "$DOCS/governance/_audits")
+count_brain=$(count_dir "$DOCS/brain")
+count_legacy=$(count_dir "$DOCS/legacy")
+count_sessions=$(count_dir "$DOCS/sessions")
 
 echo "  core:              $count_core"
 echo "  governance:        $count_governance"
@@ -46,16 +49,12 @@ echo "  total:             $total"
 echo ""
 echo "--- Governance docs by status ---"
 
-declare -A status_counts
-for status in authoritative reference deprecated merged archived generated unknown; do
-  status_counts[$status]=0
-done
+# POSIX-compatible status counting (no associative arrays for macOS bash 3.2)
+c_authoritative=0; c_reference=0; c_deprecated=0; c_merged=0
+c_archived=0; c_generated=0; c_draft=0; c_other=0
 
 while IFS= read -r f; do
-  # Extract status from frontmatter or inline header
   status_value=""
-
-  # Try YAML frontmatter
   in_fm=false
   line_num=0
   while IFS= read -r line; do
@@ -63,8 +62,7 @@ while IFS= read -r f; do
     [[ "$line_num" -gt 15 ]] && break
     if [[ "$line" == "---" ]]; then
       if [[ "$in_fm" == "true" ]]; then break; fi
-      in_fm=true
-      continue
+      in_fm=true; continue
     fi
     if [[ "$in_fm" == "true" && "$line" =~ ^status:[[:space:]]*(.*) ]]; then
       status_value="${BASH_REMATCH[1]}"
@@ -75,26 +73,29 @@ while IFS= read -r f; do
     fi
   done < "$f"
 
-  # Try inline header if no frontmatter status
   if [[ -z "$status_value" ]]; then
-    status_value="$(head -10 "$f" | grep -oiE '(Status:[[:space:]]*)(authoritative|reference|deprecated|merged|archived|generated)' | head -1 | grep -oiE '(authoritative|reference|deprecated|merged|archived|generated)' || true)"
-    status_value="$(echo "$status_value" | tr '[:upper:]' '[:lower:]')"
+    status_value="$(head -10 "$f" | grep -oiE 'authoritative|reference|deprecated|merged|archived|generated|draft' | head -1 | tr '[:upper:]' '[:lower:]' || true)"
   fi
 
-  if [[ -z "$status_value" ]]; then
-    status_value="unknown"
-  fi
-
-  if [[ -v "status_counts[$status_value]" ]]; then
-    status_counts[$status_value]=$((status_counts[$status_value]+1))
-  else
-    status_counts[unknown]=$((status_counts[unknown]+1))
-  fi
+  case "${status_value:-other}" in
+    authoritative) c_authoritative=$((c_authoritative+1)) ;;
+    reference)     c_reference=$((c_reference+1)) ;;
+    deprecated)    c_deprecated=$((c_deprecated+1)) ;;
+    merged)        c_merged=$((c_merged+1)) ;;
+    archived)      c_archived=$((c_archived+1)) ;;
+    generated)     c_generated=$((c_generated+1)) ;;
+    draft)         c_draft=$((c_draft+1)) ;;
+    *)             c_other=$((c_other+1)) ;;
+  esac
 done < <(find "$DOCS/governance" -maxdepth 1 -name "*.md" 2>/dev/null | sort)
 
-for status in authoritative reference deprecated merged archived generated unknown; do
-  echo "  $status: ${status_counts[$status]}"
-done
+echo "  authoritative: $c_authoritative"
+echo "  reference:     $c_reference"
+echo "  deprecated:    $c_deprecated"
+echo "  merged:        $c_merged"
+echo "  archived:      $c_archived"
+echo "  draft:         $c_draft"
+echo "  other:         $c_other"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Sprawl warnings
