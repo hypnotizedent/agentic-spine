@@ -91,11 +91,14 @@ Pillar entrypoints (per stack)
 | `ISSUE_CLOSURE_SOP.md` | How to close issues properly |
 | `GIT_REMOTE_AUTHORITY.md` | Canonical git authority (Gitea primary, GitHub mirror-only) |
 | `AGENT_BOUNDARIES.md` | What agents can/cannot do |
-| `SUPERVISOR_CHECKLIST.md` | (superseded — verification steps folded into spine.verify) |
+| `SUPERVISOR_CHECKLIST.md` | Verify work before shipping |
 | `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |
 | `MAILROOM_BRIDGE.md` | Governed remote API bridge (read outbox/receipts, enqueue prompts) |
 | `ORCHESTRATION_CAPABILITY.md` | Machine-enforced orchestration contract and strict terminal entry behavior |
 | `HOST_DRIFT_POLICY.md` | Host drift contract for `/Users/ronnyworks` stabilization |
+| `POST_GAP_OPERATING_MODEL.md` | Canonical stabilization contract, lifecycle templates, ownership model, and 30/60/90 roadmap |
+| `BUILD_MODE_CHECKLIST.md` | Operator stop-gated checklist for predictable build-mode execution |
+| `ONBOARDING_PLAYBOOK.md` | Standard onboarding workflow for VM/agent/capability/tool/surface changes |
 | `GAP_LIFECYCLE.md` | Gap registry lifecycle, mutation capabilities, claim semantics, D75 lock |
 | `HOST_DRIFT_GATES.md` | D76+: home-surface hygiene, workbench contract/path/script/authority-trace locks |
 | `WORKBENCH_SHARE_PROTOCOL.md` | Governance for publishing curated workbench content to GitHub share channel |
@@ -109,6 +112,17 @@ Pillar entrypoints (per stack)
 | `WORKBENCH_SHARE_PROTOCOL.md` | One-way publish flow, security boundaries, roles for GitHub share channel |
 | `ops/bindings/share.publish.allowlist.yaml` | Paths safe to publish to share channel |
 | `ops/bindings/share.publish.denylist.yaml` | Patterns blocked from share channel (secrets, identity, infra) |
+
+### Post-Gap Stabilization Governance
+
+| Document | Purpose |
+|----------|---------|
+| `POST_GAP_OPERATING_MODEL.md` | Defines hardening pass/fail contract, ownership boundaries, lifecycle standards, and 30/60/90 execution plan |
+| `BUILD_MODE_CHECKLIST.md` | Fast operator checklist with stop gates and definition-of-done by change shape |
+| `ONBOARDING_PLAYBOOK.md` | Canonical onboarding flow and required evidence for VM/agent/capability/tool/surface additions |
+| `ops/bindings/lifecycle.standards.yaml` | Enforceable lifecycle schema/defaults for onboarding work types |
+| `ops/bindings/change.intake.policy.yaml` | Deterministic intake policy for `cap run` vs `run --inline` vs proposal flow |
+| `ops/bindings/audit.suppressions.policy.yaml` | Time-bounded suppression policy for noise control without masking risk |
 
 ### Backup & Recovery
 
@@ -155,6 +169,7 @@ Pillar entrypoints (per stack)
 | Agent Boundaries | `docs/governance/AGENT_BOUNDARIES.md` | What agents can/cannot do |
 | Scripts Registry | `docs/governance/SCRIPTS_REGISTRY.md` | Canonical scripts index |
 | Workbench Share | `docs/governance/WORKBENCH_SHARE_PROTOCOL.md` | GitHub share channel governance |
+| Post-Gap Stabilization | `docs/governance/POST_GAP_OPERATING_MODEL.md` | Hardened operating contract after gap closure |
 
 For the complete list: `cat docs/governance/SSOT_REGISTRY.yaml`
 
@@ -323,7 +338,7 @@ START: Agent has a question about "truth"
     │       NO ↓
     │
     ├─▶ Is there an authoritative doc?
-    │       → Check GOVERNANCE_INDEX.md (supersedes AUTHORITY_INDEX.md)
+    │       → Check AUTHORITY_INDEX.md
     │       YES → Use that doc
     │       NO ↓
     │
@@ -359,7 +374,7 @@ An SSOT (Single Source of Truth) claim means a document asserts:
 | Session handoff | `docs/sessions/2026-01-24.md` | Ephemeral, not canonical |
 | Archive content | `*/.archive/*` | Historical, explicitly non-authoritative |
 | README files | `module/README.md` | Entrypoint, not truth source |
-| Index/pointer docs | `GOVERNANCE_INDEX.md` | Points to SSOTs, is not itself one |
+| Index/pointer docs | `AUTHORITY_INDEX.md` | Points to SSOTs, is not itself one |
 
 ### Hard Rule: Register or Remove
 
@@ -444,10 +459,13 @@ Before adding `status: authoritative` or claiming SSOT:
 | Document | Relationship |
 |----------|--------------|
 | `SSOT_REGISTRY.yaml` | Machine-readable version of SSOT list |
-| `AUTHORITY_INDEX.md` | (superseded — replaced by this document, GOVERNANCE_INDEX.md) |
+| `AUTHORITY_INDEX.md` | Older doc registry (being superseded) |
 | `REPO_STRUCTURE_AUTHORITY.md` | Where files belong |
 | `SEARCH_EXCLUSIONS.md` | What's excluded from search |
 | `docs/governance/SESSION_PROTOCOL.md` | Session entry point |
+| `docs/governance/POST_GAP_OPERATING_MODEL.md` | Post-gap stability contract and lifecycle governance |
+| `docs/governance/BUILD_MODE_CHECKLIST.md` | Build-mode execution checklist with stop-gates |
+| `docs/governance/ONBOARDING_PLAYBOOK.md` | Onboarding commands and completion criteria |
 
 ---
 
@@ -455,6 +473,7 @@ Before adding `status: authoritative` or claiming SSOT:
 
 | Date | Change | Issue |
 |------|--------|-------|
+| 2026-02-13 | Added post-gap operating model, build-mode checklist, onboarding playbook, and stabilization bindings | — |
 | 2026-02-13 | Added Share Channel Governance section + WORKBENCH_SHARE_PROTOCOL.md | — |
 | 2026-02-05 | Added Legacy References section; spine-native SSOTs table | — |
 | 2026-01-24 | Added SSOT Claims Guardrail section | #541 |
@@ -466,7 +485,7 @@ Before adding `status: authoritative` or claiming SSOT:
 
 > This appendix is generated to ensure every governance doc is discoverable from the authority chain.
 > The sections above remain the curated authority narrative; this list is an index only.
-> Last regenerated: 2026-02-13 (70 docs).
+> Last regenerated: 2026-02-13 (73 docs).
 
 - `AGENT_BOUNDARIES.md`
 - `AGENT_GOVERNANCE_BRIEF.md`
@@ -478,6 +497,7 @@ Before adding `status: authoritative` or claiming SSOT:
 - `AUTHENTIK_BACKUP_RESTORE.md`
 - `BACKUP_CALENDAR.md`
 - `BACKUP_GOVERNANCE.md`
+- `BUILD_MODE_CHECKLIST.md`
 - `CAMERA_SSOT.md`
 - `CANONICAL.md`
 - `CHANGE_PACK_TEMPLATE.md`
@@ -513,10 +533,12 @@ Before adding `status: authoritative` or claiming SSOT:
 - `MINT_PRODUCT_GOVERNANCE.md`
 - `NETWORK_POLICIES.md`
 - `NETWORK_RUNBOOK.md`
+- `ONBOARDING_PLAYBOOK.md`
 - `OPS_PATCH_HISTORY.md`
 - `PATCH_CADENCE.md`
 - `PHASE4_OBSERVABILITY_RUNBOOK.md`
 - `PORTABILITY_ASSUMPTIONS.md`
+- `POST_GAP_OPERATING_MODEL.md`
 - `RAG_INDEXING_RULES.md`
 - `REBOOT_HEALTH_GATE.md`
 - `RELEASE_PROTOCOL.md`

@@ -1,0 +1,123 @@
+# Change Intake Policy Binding
+# Status: authoritative
+# Last verified: 2026-02-13
+# Purpose: deterministic intake classification and execution-path selection.
+
+version: 1
+updated: "2026-02-13"
+owner: "@ronny"
+scope: post-gap-change-intake
+
+schema:
+  required_top_level:
+    - version
+    - updated
+    - owner
+    - scope
+    - defaults
+    - change_classes
+    - decision_rules
+    - stop_conditions
+    - sla_targets
+  required_change_class_fields:
+    - id
+    - description
+    - execution_path
+    - preflight_gates
+    - postflight_gates
+
+defaults:
+  default_execution_path: proposal
+  require_preflight_status: true
+  require_preflight_verify: true
+  require_postflight_verify: true
+  require_receipt_for_all_actions: true
+  require_terminal_c_approval_for:
+    - destructive changes
+    - severity critical
+    - cross_repo changes
+    - new runtime surface
+
+change_classes:
+  - id: read_only
+    description: "No file mutation, no remote mutation"
+    execution_path: cap_run_read_only_or_inline_note
+    preflight_gates:
+      - ./bin/ops status
+    postflight_gates: []
+
+  - id: single_mutation_low_risk
+    description: "Single governed capability mutation in one surface"
+    execution_path: cap_run_mutating
+    preflight_gates:
+      - ./bin/ops status
+      - ./bin/ops cap run spine.verify
+    postflight_gates:
+      - ./bin/ops cap run spine.verify
+
+  - id: coordinated_multi_step
+    description: "Multi-file, multi-step, or multi-terminal change"
+    execution_path: proposal_flow
+    preflight_gates:
+      - ./bin/ops status
+      - ./bin/ops cap run spine.verify
+      - ./bin/ops cap run gaps.status
+    postflight_gates:
+      - ./bin/ops cap run spine.verify
+      - ./bin/ops cap run agent.session.closeout
+
+  - id: high_risk_change
+    description: "Destructive/security/authority changes"
+    execution_path: proposal_flow_terminal_c_apply_only
+    preflight_gates:
+      - ./bin/ops status
+      - ./bin/ops cap run spine.verify
+      - ./bin/ops cap run gaps.status
+      - ./bin/ops cap run verify.drift_gates.certify
+    postflight_gates:
+      - ./bin/ops cap run spine.verify
+      - ./bin/ops cap run agent.session.closeout
+
+decision_rules:
+  proposal_required_if:
+    any_true:
+      - changed_file_count >= 3
+      - changed_surface_count >= 2
+      - involves_cross_repo == true
+      - involves_multi_agent == true
+      - introduces_new_binding_or_ssot == true
+      - risk_severity in [high, critical]
+  inline_allowed_if:
+    all_true:
+      - read_only == true
+      - mutates_files == false
+      - mutates_remote_state == false
+  cap_run_allowed_if:
+    all_true:
+      - capability_exists == true
+      - action_within_capability_scope == true
+      - proposal_required_if is false
+
+stop_conditions:
+  - id: stop_on_verify_fail
+    condition: "spine.verify exit code != 0"
+    action: "abort mutation and open remediation proposal"
+  - id: stop_on_unlinked_gap
+    condition: "targeted work has no parent loop/gap registration"
+    action: "register first, then continue"
+  - id: stop_on_collision_risk
+    condition: "another terminal is mutating same surface"
+    action: "switch to proposal boundary and coordinate via Terminal C"
+
+sla_targets:
+  intake_ack:
+    critical_hours: 4
+    high_hours: 24
+    medium_hours: 72
+    low_hours: 120
+  plan_ready:
+    critical_hours: 24
+    high_hours: 72
+    medium_hours: 168
+    low_hours: 336
+  proposal_apply_p50_hours: 24

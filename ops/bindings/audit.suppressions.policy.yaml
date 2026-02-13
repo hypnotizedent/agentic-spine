@@ -1,0 +1,91 @@
+# Audit Suppressions Policy Binding
+# Status: authoritative
+# Last verified: 2026-02-13
+# Purpose: noise suppression without masking real risk.
+
+version: 1
+updated: "2026-02-13"
+owner: "@ronny"
+scope: post-gap-audit-suppressions
+
+schema:
+  required_top_level:
+    - version
+    - updated
+    - owner
+    - scope
+    - defaults
+    - suppression_record_schema
+    - policies
+    - active_suppressions
+  suppression_record_schema:
+    required_fields:
+      - id
+      - surface_type
+      - surface_id
+      - gate_id
+      - rule_id
+      - severity
+      - owner
+      - reason
+      - evidence_receipt
+      - created_at
+      - expires_at
+      - review_every_days
+      - status
+      - terminal_c_approved
+    allowed_surface_types:
+      - drift_gate
+      - capability_check
+      - inventory_check
+      - policy_check
+    allowed_status:
+      - active
+      - expired
+      - revoked
+      - promoted_to_fix
+    allowed_severity:
+      - low
+      - medium
+      - high
+      - critical
+
+defaults:
+  auto_expire: true
+  allow_permanent_suppression: false
+  review_every_days: 7
+  terminal_c_approval_required: true
+  require_receipt_reference: true
+  require_issue_or_gap_reference: true
+  max_duration_days:
+    low: 30
+    medium: 21
+    high: 7
+    critical: 2
+
+policies:
+  - id: no_hidden_critical_risk
+    rule: "critical suppressions must include immediate mitigation and expire within 48h"
+    enforce: true
+  - id: no_repeat_without_fix_plan
+    rule: "same gate_id + rule_id cannot be suppressed more than 2 consecutive cycles without promoted_to_fix status"
+    enforce: true
+  - id: suppression_requires_trace
+    rule: "every active suppression must reference both receipt and gap/loop identifier"
+    enforce: true
+  - id: expiry_is_hard_stop
+    rule: "expired suppressions are treated as failures until renewed by Terminal C with new evidence"
+    enforce: true
+  - id: default_to_fix
+    rule: "if suppression survives two reviews, convert to tracked remediation work"
+    enforce: true
+
+review_cadence:
+  daily:
+    - "check for suppressions expiring in <= 24h"
+  weekly:
+    - "review all active suppressions and renew/revoke/promote"
+  monthly:
+    - "report suppression count, age distribution, and top recurring rules"
+
+active_suppressions: []

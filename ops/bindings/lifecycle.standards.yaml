@@ -1,0 +1,187 @@
+# Lifecycle Standards Binding
+# Status: authoritative
+# Last verified: 2026-02-13
+# Purpose: enforce one lifecycle contract for VM, agent, capability,
+# tooling/plugin, and folder/surface onboarding.
+
+version: 1
+updated: "2026-02-13"
+owner: "@ronny"
+scope: post-gap-lifecycle-standards
+
+schema:
+  required_top_level:
+    - version
+    - updated
+    - owner
+    - scope
+    - schema
+    - defaults
+    - lifecycle_types
+    - lifecycle_standards
+  lifecycle_types:
+    - vm
+    - agent
+    - capability
+    - tooling_plugin
+    - folder_surface
+  required_lifecycle_fields:
+    - owner_role
+    - execution_mode_default
+    - required_artifacts
+    - required_gates
+    - required_receipts
+    - definition_of_done
+
+defaults:
+  execution_mode_default: proposal
+  require_loop_scope: true
+  require_parent_gap_for_gap_work: true
+  require_preflight_verify: true
+  require_postflight_verify: true
+  receipt_root: receipts/sessions
+  closeout_capability: agent.session.closeout
+  max_standalone_work_days: 7
+  terminal_c_approval_required_when:
+    - severity in [critical, high]
+    - onboarding touches multiple repos
+    - onboarding introduces new runtime surface
+
+lifecycle_types:
+  vm:
+    description: "Proxmox VM lifecycle from plan to decommission"
+  agent:
+    description: "Agent governance registration + implementation wiring"
+  capability:
+    description: "New or changed spine capability"
+  tooling_plugin:
+    description: "Tool inventory/plugin onboarding"
+  folder_surface:
+    description: "New path/surface introduction"
+
+lifecycle_standards:
+  vm:
+    owner_role: terminal-c
+    execution_mode_default: proposal
+    required_artifacts:
+      ssot_docs:
+        - docs/core/VM_CREATION_CONTRACT.md
+        - docs/governance/DEVICE_IDENTITY_SSOT.md
+        - docs/governance/SERVICE_REGISTRY.yaml
+      bindings:
+        - ops/bindings/vm.lifecycle.yaml
+        - ops/bindings/ssh.targets.yaml
+        - ops/bindings/services.health.yaml
+        - ops/bindings/backup.inventory.yaml
+      capabilities:
+        - infra.vm.provision
+        - infra.vm.bootstrap
+        - vm.governance.audit
+      closeout:
+        - receipts/sessions/RCAP-*
+        - mailroom/state/loop-scopes/LOOP-*.scope.md
+    required_gates:
+      - spine.verify
+      - vm.governance.audit
+    required_receipts:
+      min_receipt_count: 3
+      must_include:
+        - provision
+        - validate
+        - closeout
+    definition_of_done:
+      - vm appears as governed in vm.governance.audit
+      - all required bindings present
+      - postflight spine.verify passes
+
+  agent:
+    owner_role: terminal-c
+    execution_mode_default: proposal
+    required_artifacts:
+      ssot_docs:
+        - docs/governance/AGENTS_GOVERNANCE.md
+        - docs/governance/AGENTS_LOCATION.md
+      bindings:
+        - ops/bindings/agents.registry.yaml
+      contracts:
+        - ops/agents/<agent-id>.contract.md
+      closeout:
+        - receipts/sessions/RCAP-*
+    required_gates:
+      - spine.verify
+    required_receipts:
+      min_receipt_count: 1
+      must_include:
+        - agent-registry-update
+    definition_of_done:
+      - agent contract exists
+      - registry and routing rule exist
+      - D49 passes via spine.verify
+
+  capability:
+    owner_role: terminal-c
+    execution_mode_default: proposal
+    required_artifacts:
+      registry:
+        - ops/capabilities.yaml
+        - ops/plugins/MANIFEST.yaml
+        - ops/bindings/capability_map.yaml
+      tests_or_exemption:
+        - ops/plugins/<plugin>/tests/*.sh
+        - ops/bindings/plugin-test-exemptions.yaml
+      closeout:
+        - receipts/sessions/RCAP-*
+    required_gates:
+      - spine.verify
+    required_receipts:
+      min_receipt_count: 1
+      must_include:
+        - capability-registration
+    definition_of_done:
+      - capability listed in ops cap list
+      - D63 and D67 pass
+      - D81 pass or approved exemption exists
+
+  tooling_plugin:
+    owner_role: terminal-c
+    execution_mode_default: proposal
+    required_artifacts:
+      inventory_or_manifest:
+        - ops/bindings/cli.tools.inventory.yaml
+        - ops/plugins/MANIFEST.yaml
+      policy_refs:
+        - docs/governance/WORKBENCH_TOOLING_INDEX.md
+      closeout:
+        - receipts/sessions/RCAP-*
+    required_gates:
+      - spine.verify
+    required_receipts:
+      min_receipt_count: 1
+      must_include:
+        - inventory-or-plugin-proof
+    definition_of_done:
+      - tool/plugin discoverable in governed inventory
+      - secrets preconditions documented if touches_api
+      - no gate regression
+
+  folder_surface:
+    owner_role: terminal-c
+    execution_mode_default: proposal
+    required_artifacts:
+      governance_docs:
+        - docs/governance/GOVERNANCE_INDEX.md
+        - docs/governance/_index.yaml
+      bindings:
+        - ops/bindings/home-surface.allowlist.yaml
+      closeout:
+        - receipts/sessions/RCAP-*
+    required_gates:
+      - spine.verify
+    required_receipts:
+      min_receipt_count: 1
+      must_include:
+        - surface-classification-proof
+    definition_of_done:
+      - new surface is classified (canonical/supporting/runtime/archive)
+      - no D17/D42/D76-D80 regression
+      - indexing and authority references updated
