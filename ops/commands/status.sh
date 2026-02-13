@@ -32,8 +32,6 @@ mode = sys.argv[2] if len(sys.argv) > 2 else ""
 scopes_dir = spine / "mailroom" / "state" / "loop-scopes"
 gaps_file = spine / "ops" / "bindings" / "operational.gaps.yaml"
 inbox_dir = spine / "mailroom" / "inbox"
-parked_dir = spine / "mailroom" / "inbox" / "parked"
-done_dir = spine / "mailroom" / "inbox" / "done"
 
 FM_RE = re.compile(r"^---\s*$")
 
@@ -138,21 +136,22 @@ if gaps_file.exists():
             else:
                 unlinked_gaps.append(gap)
 
-# ── Parse inbox/parked/done ───────────────────────────────────────────────
+# ── Parse inbox lanes ─────────────────────────────────────────────────────
 
-def list_md_files(directory):
-    """List .md files in a directory (excluding archived/)."""
-    result = []
-    if directory.is_dir():
-        for f in sorted(directory.glob("*.md")):
-            if f.parent.name == "archived":
-                continue
-            result.append({"name": f.stem, "file": str(f.relative_to(spine))})
-    return result
+def count_lane_files(base_dir):
+    """Count .md files per lane subdirectory, excluding .keep files."""
+    lanes = {}
+    if base_dir.is_dir():
+        for lane_dir in sorted(base_dir.iterdir()):
+            if lane_dir.is_dir() and not lane_dir.name.startswith('.'):
+                files = [f for f in lane_dir.glob("*.md") if f.name != ".keep"]
+                if files:
+                    lanes[lane_dir.name] = len(files)
+    return lanes
 
-inbox_items = list_md_files(inbox_dir)
-parked_items = list_md_files(parked_dir)
-done_items = list_md_files(done_dir)
+inbox_lanes = count_lane_files(inbox_dir)
+inbox_active = inbox_lanes.get("queued", 0) + inbox_lanes.get("running", 0)
+inbox_total = sum(inbox_lanes.values())
 
 # ── Parse proposals queue ─────────────────────────────────────────────────
 
@@ -189,22 +188,17 @@ proposal_total = sum(proposal_counts.values())
 
 anomalies = []
 
-# Check for done items that say OPEN
-for item in done_items:
-    full_path = spine / item["file"]
-    if full_path.exists():
-        text = full_path.read_text()
-        if "Status:** OPEN" in text or "status: open" in text.lower()[:200]:
-            anomalies.append(f"MISLABELED: {item['name']} is in done/ but says OPEN")
-
 # Check for unlinked gaps
 for gap in unlinked_gaps:
     anomalies.append(f"UNLINKED GAP: {gap['id']} ({gap['severity']}) has no parent_loop")
 
-# Check for stale inbox (items that have been sitting > 48h would need mtime check)
-# For now, just flag if inbox is non-empty
-if inbox_items:
-    anomalies.append(f"INBOX: {len(inbox_items)} unprocessed item(s) — promote to scope or archive")
+# Check for active inbox items (queued or running)
+if inbox_active > 0:
+    anomalies.append(f"INBOX: {inbox_active} active item(s) in queue — {inbox_lanes.get('queued', 0)} queued, {inbox_lanes.get('running', 0)} running")
+
+failed_count = inbox_lanes.get("failed", 0)
+if failed_count > 0:
+    anomalies.append(f"INBOX: {failed_count} failed item(s) — investigate or archive")
 
 # ── Output ────────────────────────────────────────────────────────────────
 
@@ -213,8 +207,9 @@ if mode == "--json":
         "open_loops": open_loops,
         "planned_loops": planned_loops,
         "open_gaps": open_gaps,
-        "inbox": inbox_items,
-        "parked": parked_items,
+        "inbox_lanes": inbox_lanes,
+        "inbox_active": inbox_active,
+        "inbox_total": inbox_total,
         "proposals": dict(proposal_counts),
         "anomalies": anomalies,
         "counts": {
@@ -224,8 +219,8 @@ if mode == "--json":
             "open_gaps": len(open_gaps),
             "linked_gaps": len(linked_gaps),
             "unlinked_gaps": len(unlinked_gaps),
-            "inbox": len(inbox_items),
-            "parked": len(parked_items),
+            "inbox_active": inbox_active,
+            "inbox_total": inbox_total,
             "proposals_total": proposal_total,
             "anomalies": len(anomalies),
         }
@@ -238,7 +233,7 @@ if mode == "--brief":
         parts[0] += f" + {len(planned_loops)} planned"
     parts.append(f"Gaps: {len(open_gaps)} open ({len(unlinked_gaps)} unlinked)")
     parts.append(f"Proposals: {proposal_counts.get('pending', 0)} pending / {proposal_counts.get('draft_hold', 0)} held")
-    parts.append(f"Inbox: {len(inbox_items)}")
+    parts.append(f"Inbox: {inbox_active} active / {inbox_total} total")
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(0 if len(anomalies) == 0 else 1)
@@ -286,20 +281,15 @@ else:
         print(f"  [{gap['severity']:8s}] {gap['id']:12s}{parent}")
 print()
 
-# ── Inbox ──
-if inbox_items:
-    print(f"INBOX ({len(inbox_items)}) — needs triage")
+# ── Inbox Lanes ──
+if inbox_total > 0:
+    print(f"INBOX LANES ({inbox_total} total)")
     print("-" * 72)
-    for item in inbox_items:
-        print(f"  {item['name']}")
-    print()
-
-# ── Parked ──
-if parked_items:
-    print(f"PARKED ({len(parked_items)})")
-    print("-" * 72)
-    for item in parked_items:
-        print(f"  {item['name']}")
+    for lane_name in ["queued", "running", "failed", "parked", "done", "archived"]:
+        count = inbox_lanes.get(lane_name, 0)
+        if count > 0:
+            marker = " !" if lane_name in ("queued", "running", "failed") else ""
+            print(f"  {lane_name:12s} {count}{marker}")
     print()
 
 # ── Proposals Queue ──
@@ -330,8 +320,8 @@ if open_gaps:
 pending_count = proposal_counts.get("pending", 0)
 if pending_count:
     parts.append(f"{pending_count} pending proposals")
-if inbox_items:
-    parts.append(f"{len(inbox_items)} inbox")
+if inbox_active:
+    parts.append(f"{inbox_active} inbox active")
 if anomalies:
     parts.append(f"{len(anomalies)} anomalies")
 print(f"  {' | '.join(parts)}")
