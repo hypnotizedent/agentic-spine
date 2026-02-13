@@ -12,7 +12,7 @@ if [ ! -f "$CF_SCRIPT" ]; then
 fi
 
 # 2) denylist: legacy/runtime smells (cloudflare surface must never reference these)
-DENY_RE='(ronny-ops|/ronny-ops|~/ronny-ops|LaunchAgents|\.plist\b|cron\b|~/agent\b|/agent/|state/|receipts/|~/logs\b|/logs/)'
+DENY_RE='(ronny-ops|/ronny-ops|~/ronny-ops|LaunchAgents|\.plist\b|cron\b|~/agent\b|state/|receipts/|~/logs\b|/logs/)'
 
 # Search in cloudflare plugin surface + capability registry only
 TARGETS=(

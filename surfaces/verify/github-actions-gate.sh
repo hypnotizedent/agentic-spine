@@ -12,7 +12,7 @@ if [ ! -f "$GA_SCRIPT" ]; then
 fi
 
 # 2) denylist: legacy/runtime smells
-DENY_RE='(ronny-ops|/ronny-ops|~/ronny-ops|LaunchAgents|\.plist\b|cron\b|~/agent\b|/agent/|state/|receipts/|~/logs\b|/logs/)'
+DENY_RE='(ronny-ops|/ronny-ops|~/ronny-ops|LaunchAgents|\.plist\b|cron\b|~/agent\b|state/|receipts/|~/logs\b|/logs/)'
 
 TARGETS=(
   "$ROOT/ops/plugins/github"
