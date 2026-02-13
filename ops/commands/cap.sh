@@ -224,7 +224,7 @@ run_cap() {
 
         # ── Execute capability command, capture output ──
         # Force code root for scripts that rely on SPINE_ROOT, while keeping runtime root stable.
-        if (cd "$cwd" && SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" $cmd "${args[@]}" 2>&1 | tee "$output_file"); then
+        if (cd "$cwd" && SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" SPINE_CAP_RUN_KEY="$run_key" $cmd "${args[@]}" 2>&1 | tee "$output_file"); then
             exit_code=0
         else
             exit_code=$?

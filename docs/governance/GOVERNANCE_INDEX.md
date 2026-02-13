@@ -96,6 +96,7 @@ Pillar entrypoints (per stack)
 | `MAILROOM_BRIDGE.md` | Governed remote API bridge (read outbox/receipts, enqueue prompts) |
 | `ORCHESTRATION_CAPABILITY.md` | Machine-enforced orchestration contract and strict terminal entry behavior |
 | `HOST_DRIFT_POLICY.md` | Host drift contract for `/Users/ronnyworks` stabilization |
+| `GAP_LIFECYCLE.md` | Gap registry lifecycle, mutation capabilities, claim semantics, D75 lock |
 
 ### Backup & Recovery
 
@@ -471,6 +472,7 @@ Before adding `status: authoritative` or claiming SSOT:
 - `DR_RUNBOOK.md`
 - `EXCLUDED_SURFACES.md`
 - `FINANCE_LEGACY_EXTRACTION_MATRIX.md`
+- `GAP_LIFECYCLE.md`
 - `GIT_REMOTE_AUTHORITY.md`
 - `GITEA_BACKUP_RESTORE.md`
 - `GOVERNANCE_INDEX.md`

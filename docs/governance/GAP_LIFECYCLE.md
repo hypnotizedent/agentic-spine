@@ -121,6 +121,25 @@ Terminal C (the orchestrator) may close gaps **without a claim** by calling `gap
 
 Workers should always claim before working, and their close operations go through Terminal C's integration protocol.
 
+## D75: Gap Registry Mutation Lock
+
+Drift gate D75 (`surfaces/verify/d75-gap-registry-mutation-lock.sh`) enforces
+capability-only mutation evidence for the gap registry. It runs as part of
+`spine.verify` and checks:
+
+1. **No uncommitted changes** to `operational.gaps.yaml` (staged or unstaged).
+2. **Required trailers** in all post-enforcement commits touching the file:
+   - `Gap-Mutation: capability`
+   - `Gap-Capability: gaps.file|gaps.close`
+   - `Gap-Run-Key: CAP-...` (receipt run key from ops framework)
+
+Policy is defined in `ops/bindings/d75-gap-mutation-policy.yaml` (configurable
+window size, enforcement boundary SHA, required trailer list).
+
+**Limitation:** D75 enforces governance evidence, not cryptographic
+tamper-proofing. A determined actor with direct git access can forge trailers.
+D75 prevents accidental manual edits, not intentional circumvention.
+
 ## SSOT File
 
 Gap registry: `ops/bindings/operational.gaps.yaml`

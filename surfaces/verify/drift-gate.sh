@@ -690,6 +690,14 @@ else
   warn "Billing/provider lane lock gate not present"
 fi
 
+# D75: Gap registry mutation lock (capability-only evidence for operational.gaps.yaml)
+echo -n "D75 gap registry mutation lock... "
+if [[ -x "$SP/surfaces/verify/d75-gap-registry-mutation-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d75-gap-registry-mutation-lock.sh"
+else
+  warn "Gap registry mutation lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
