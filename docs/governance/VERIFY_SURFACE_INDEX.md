@@ -113,7 +113,7 @@ Notes:
 | `d84-docs-index-registration-lock.sh` | Docs index registration lock (governance doc coverage) | Yes |
 | `d85-gate-registry-parity-lock.sh` | Gate registry parity lock (registry ↔ script sync, count parity, TRIAGE header completeness). Test: `surfaces/verify/tests/d85-test.sh` | Yes |
 | `d86-vm-operating-profile-parity-lock.sh` | VM operating profile parity lock (lifecycle ↔ profile alignment) | Yes |
-| `d87-rag-workspace-contract-lock.sh` | RAG workspace contract lock (binding ↔ CLI parity) | Yes |
+| `d87-rag-workspace-contract-lock.sh` | RAG workspace contract lock (binding ↔ CLI parity). Test: `surfaces/verify/tests/d87-test.sh` | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
