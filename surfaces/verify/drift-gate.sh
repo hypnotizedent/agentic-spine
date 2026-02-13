@@ -15,10 +15,11 @@ SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 RT="${SPINE_REPO:-$SP}"
 cd "$SP"
 FAIL=0
+WARN_COUNT=0
 
 pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
-warn(){ echo "WARN $*"; }
+warn(){ echo "WARN $*"; WARN_COUNT=$((WARN_COUNT + 1)); }
 
 DRIFT_VERBOSE="${DRIFT_VERBOSE:-0}"
 
@@ -739,5 +740,13 @@ else
 fi
 
 echo
-[[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
+if [[ "$FAIL" -eq 0 ]]; then
+  if [[ "$WARN_COUNT" -gt 0 ]]; then
+    echo "DRIFT GATE: PASS ($WARN_COUNT warning(s) — review WARN lines above)"
+  else
+    echo "DRIFT GATE: PASS"
+  fi
+else
+  echo "DRIFT GATE: FAIL"
+fi
 exit "$FAIL"
