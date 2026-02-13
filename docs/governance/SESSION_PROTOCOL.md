@@ -40,6 +40,7 @@ scope: session-entry
    - **Spine is the runtime environment.** All governed operations (capabilities, receipts, loops) execute here. Editing workbench files (compose configs, MCP configs, scripts) is allowed when a spine loop requires it, but never execute runtime operations from workbench.
    - **Worktrees are optional.** `./bin/ops start loop <LOOP_ID>` creates an isolated worktree if you want one. Committing directly to main is fine.
    - **Git authority:** Gitea (`origin`) is canonical; GitHub is mirror-only. See `docs/governance/GIT_REMOTE_AUTHORITY.md`.
+   - **Share publish flow:** To publish curated content to the share channel, run the three-step capability flow: `share.publish.preflight` → `share.publish.preview` → `share.publish.apply --execute`. See `docs/governance/WORKBENCH_SHARE_PROTOCOL.md`.
 
 ## After the session
 

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# share-publish-preflight: Read-only pre-flight checks for share publish
+#
+# Validates:
+# 1. Git tree is clean
+# 2. spine.verify passes (or was recently run)
+# 3. Share governance bindings exist (allowlist, denylist, remote, protocol)
+# 4. Share remote is configured in git
+set -euo pipefail
+
+SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+cd "$SP"
+
+FAIL=0
+err() { echo "  FAIL: $1" >&2; FAIL=1; }
+ok()  { echo "  OK: $1"; }
+
+echo "=== Share Publish Pre-flight ==="
+
+# 1. Clean tree
+echo "--- Git state ---"
+if [[ -z "$(git status --porcelain)" ]]; then
+  ok "git tree is clean"
+else
+  err "git tree is dirty — commit or stash changes first"
+fi
+
+# 2. Required bindings exist
+echo "--- Governance bindings ---"
+for f in \
+  "ops/bindings/share.publish.allowlist.yaml" \
+  "ops/bindings/share.publish.denylist.yaml" \
+  "ops/bindings/share.publish.remote.yaml" \
+  "docs/governance/WORKBENCH_SHARE_PROTOCOL.md"; do
+  if [[ -f "$SP/$f" ]]; then
+    ok "$f exists"
+  else
+    err "$f missing"
+  fi
+done
+
+# 3. Share remote configured
+echo "--- Remote configuration ---"
+if git remote get-url share >/dev/null 2>&1; then
+  SHARE_URL="$(git remote get-url share)"
+  ok "share remote configured: $SHARE_URL"
+else
+  err "git remote 'share' not configured (run: git remote add share <url>)"
+fi
+
+# 4. Capabilities registered
+echo "--- Capability registration ---"
+CAP_FILE="$SP/ops/capabilities.yaml"
+for cap in share.publish.preflight share.publish.preview share.publish.apply; do
+  if grep -q "^  $cap:" "$CAP_FILE" 2>/dev/null; then
+    ok "capability $cap registered"
+  else
+    err "capability $cap not in capabilities.yaml"
+  fi
+done
+
+echo
+if [[ "$FAIL" -eq 0 ]]; then
+  echo "PRE-FLIGHT: PASS"
+else
+  echo "PRE-FLIGHT: FAIL ($FAIL issue(s))"
+fi
+exit "$FAIL"

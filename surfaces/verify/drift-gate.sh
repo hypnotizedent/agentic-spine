@@ -749,6 +749,14 @@ else
   warn "plugin test regression lock gate not present"
 fi
 
+# D82: Share publish governance lock (allowlist+denylist+capability wiring)
+echo -n "D82 share publish governance lock... "
+if [[ -x "$SP/surfaces/verify/d82-share-publish-governance-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d82-share-publish-governance-lock.sh"
+else
+  warn "share publish governance lock gate not present"
+fi
+
 echo
 if [[ "$FAIL" -eq 0 ]]; then
   if [[ "$WARN_COUNT" -gt 0 ]]; then

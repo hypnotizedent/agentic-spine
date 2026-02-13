@@ -41,7 +41,7 @@ Notes:
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D81) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D82) | Yes |
 | `d16-docs-quarantine.sh` | Legacy docs quarantine enforcement | Yes |
 | `d17-root-allowlist.sh` | Root file allowlist enforcement | Yes |
 | `d18-docker-compose-drift.sh` | Docker compose drift detection | Yes |
@@ -108,6 +108,7 @@ Notes:
 | `d79-workbench-script-allowlist-lock.sh` | Workbench script allowlist lock (governed script surface) | Yes |
 | `d80-workbench-authority-trace-lock.sh` | Workbench authority-trace lock (legacy naming violations) | Yes |
 | `d81-plugin-test-regression-lock.sh` | Plugin test regression lock (new plugins must have tests or exemption) | Yes |
+| `d82-share-publish-governance-lock.sh` | Share publish governance lock (protocol+bindings+capability wiring) | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -142,10 +143,10 @@ Not called by default verification flows. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by `ops verify` | 10 |
-| Called by `spine.verify` (drift-gate suite) | 53 |
+| Called by `spine.verify` (drift-gate suite) | 54 |
 | Called by capabilities | 1 |
 | Manual / legacy | 9 |
-| **Total** | **73** |
+| **Total** | **74** |
 
 ---
 

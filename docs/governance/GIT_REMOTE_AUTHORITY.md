@@ -59,6 +59,14 @@ git rev-parse github/main
 ./bin/ops cap run spine.verify
 ```
 
+## Share Channel Rule
+
+- A **share** remote may exist for curated one-way publishing to a private GitHub repository.
+- The share channel is NOT canonical — Gitea (`origin`) remains the single source of truth.
+- Share publishes are governed by `docs/governance/WORKBENCH_SHARE_PROTOCOL.md` and enforced by D82.
+- The share remote is manual-push only (no automation, dry-run default).
+- Do not pull from or merge into the share remote.
+
 ## Issue Policy
 
 - **Loops are canonical work tracking** (mailroom loops + receipts).

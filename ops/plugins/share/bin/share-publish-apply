@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# share-publish-apply: Push curated content to share channel
+#
+# Default: dry-run (shows what would be pushed)
+# Use --execute to actually push
+#
+# Safety: destructive / manual approval
+set -euo pipefail
+
+SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+cd "$SP"
+
+EXECUTE=0
+for arg in "$@"; do
+  case "$arg" in
+    --execute) EXECUTE=1 ;;
+  esac
+done
+
+echo "=== Share Publish Apply ==="
+
+# Gate 1: Pre-flight must pass
+echo "--- Running pre-flight ---"
+if ! bash "$SP/ops/plugins/share/bin/share-publish-preflight" 2>&1; then
+  echo "FAIL: pre-flight check failed. Aborting." >&2
+  exit 1
+fi
+
+# Gate 2: Preview must pass (no denylist hits)
+echo
+echo "--- Running preview ---"
+if ! bash "$SP/ops/plugins/share/bin/share-publish-preview" 2>&1; then
+  echo "FAIL: preview found denylist violations. Aborting." >&2
+  exit 1
+fi
+
+# Gate 3: Share remote must exist
+if ! git remote get-url share >/dev/null 2>&1; then
+  echo "FAIL: share remote not configured" >&2
+  exit 1
+fi
+
+echo
+if [[ "$EXECUTE" -eq 0 ]]; then
+  echo "DRY-RUN: Would push current HEAD to share remote."
+  echo "  Current HEAD: $(git rev-parse --short HEAD)"
+  echo "  Share remote: $(git remote get-url share)"
+  echo "  Target branch: main"
+  echo
+  echo "To execute: ./bin/ops cap run share.publish.apply --execute"
+  exit 0
+fi
+
+# Execute: push to share remote
+echo "--- Pushing to share channel ---"
+SHARE_URL="$(git remote get-url share)"
+echo "  Pushing HEAD to: $SHARE_URL (branch: main)"
+
+git push share HEAD:main 2>&1
+RC=$?
+
+if [[ "$RC" -eq 0 ]]; then
+  echo
+  echo "PUBLISH: SUCCESS"
+  echo "  Pushed: $(git rev-parse --short HEAD)"
+  echo "  Remote: $SHARE_URL"
+else
+  echo
+  echo "PUBLISH: FAIL (git push returned $RC)" >&2
+  exit 1
+fi
