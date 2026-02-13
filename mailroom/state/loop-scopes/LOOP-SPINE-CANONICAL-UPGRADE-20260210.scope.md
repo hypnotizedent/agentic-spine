@@ -1,5 +1,5 @@
 ---
-status: planned
+status: active
 owner: "@ronny"
 last_verified: 2026-02-13
 scope: loop-scope
@@ -23,23 +23,30 @@ The RAG VM (ai-consolidation, 207) is operational but disconnected — no MCP wi
 Gates are reactive (explain after failure) not proactive (warn before violation).
 
 ## Success Criteria
-- [ ] 5 workflow slash commands: /fix, /triage, /propose, /loop, /howto
-- [ ] 2 proactive awareness commands: /check, /gates
+- [ ] 7 slash commands (/fix, /triage, /propose, /loop, /howto, /check, /gates) repo-governed and synced
 - [ ] RAG VM wired via MCP adapter for natural agent queries
-- [ ] Gate registry (ops/bindings/gate.registry.yaml) with all 84 gates
+- [ ] Gate registry (ops/bindings/gate.registry.yaml) covering D1-D84 surface (D21 retired/reserved)
 - [ ] Drift gates include inline triage hints on failure
-- [ ] Session entry includes capability precondition hints
+- [ ] Session entry includes capability precondition hints and gate reference card
+- [ ] P5 domain agent bridge explicitly deferred with contract
 
 ## Phases
 
-### P0: Scope Capture (current)
+### P0: Scope Capture
 - Map all agent knowledge surfaces (slash commands, RAG, gates, context)
 - Identify friction points and gap analysis
 - Define tier priorities and dependencies
-- **Status:** in progress (parallel terminals)
+- **Status:** complete
+- **Evidence:** CP-20260213-141014 applied (commit ab89ef1)
 
 ### P1: Layer 1 Slash Commands
-Create workflow slash commands in `~/.claude/commands/`:
+Create workflow slash commands with repo-governed source and sync-to-home execution surfaces.
+
+**Source model:**
+- Canonical source: repo path (e.g. `surfaces/commands/*.md`) — version-controlled, reviewable
+- Sync target: `~/.claude/commands/` (Claude Code), with parity surfaces for Codex and OpenCode
+- Sync mechanism: governed script (e.g. `ops/hooks/sync-slash-commands.sh`) — not manual copy
+- Existing commands (/verify, /ctx, /gaps) migrated to repo source as part of P1
 
 | Command | Purpose |
 |---------|---------|
@@ -52,72 +59,131 @@ Create workflow slash commands in `~/.claude/commands/`:
 | `/gates` | Gate reference: list all gates, filter by category, show fix hints |
 
 **Dependency:** None (can start immediately)
-**Files affected:** `~/.claude/commands/*.md`
+**DoD:**
+- All 7 commands exist in repo source directory
+- Sync script copies to `~/.claude/commands/` and parity surfaces
+- Existing /verify, /ctx, /gaps migrated to repo source
+- Each command is invocable and produces correct workflow guidance
+**Evidence commands:**
+- `ls surfaces/commands/*.md` — all 10 files present (7 new + 3 migrated)
+- `./bin/ops cap run spine.verify` — PASS
+**Risk:** Commands reference cap syntax that changes; mitigate by reading from capabilities.yaml at invocation time.
+**Rollback:** Delete repo source files, restore `~/.claude/commands/` from git history.
 
 ### P2: RAG Integration
 Wire the idle RAG VM into agent workflows:
 
 - Create MCP server adapter wrapping `rag.anythingllm.ask`
-- Wire adapter in Claude Code `.mcp.json` settings
+- Wire adapter in Claude Code MCP settings
 - Index P1 workflow recipes into AnythingLLM workspace
 - Document agent query patterns in governance
 
 **Dependency:** P1 (recipes must exist to index them)
 **VM:** ai-consolidation (207), AnythingLLM :3002, Qdrant :6333
+**DoD:**
+- MCP adapter exists and is registered in capability map
+- Claude Code can query RAG via MCP tool call
+- P1 recipes indexed and returning relevant results
+- Agent query patterns documented in governance
+**Evidence commands:**
+- `./bin/ops cap run rag.anythingllm.ask "how do I file a gap?"` — returns actionable answer
+- `./bin/ops cap run spine.verify` — PASS
+**Risk:** RAG VM may be unreachable or AnythingLLM workspace stale; mitigate by health-checking VM first.
+**Rollback:** Remove MCP adapter config; RAG VM continues running independently.
 
 ### P3: Self-Documenting Gates
 Make drift gates explain themselves on failure:
 
-- Add `# TRIAGE:` header to all 84 gate scripts in `surfaces/verify/`
-- Update `drift-gate.sh` to extract hints on failure
-- Inline fix suggestions appear in `spine.verify` output
+- Add `# TRIAGE:` header to all active gate scripts in `surfaces/verify/` (D1-D84 surface, D21 retired/reserved)
+- Update `drift-gate.sh` to extract and display triage hints on failure
+- Inline fix suggestions appear in `spine.verify` output only when a gate fails
 
 **Dependency:** None (parallel with P1)
-**Files affected:** `surfaces/verify/*.sh`
+**Files affected:** `surfaces/verify/*.sh`, `surfaces/verify/drift-gate.sh`
+**DoD:**
+- All active D-numbered gate scripts contain `# TRIAGE:` header with fix hint
+- `drift-gate.sh` extracts `TRIAGE:` line from script on failure and prints it
+- `spine.verify` output contract unchanged for passing gates (no visual noise)
+- Failing gates show triage hint inline after failure message
+**Evidence commands:**
+- `grep -c '# TRIAGE:' surfaces/verify/d*.sh` — matches active gate count
+- `./bin/ops cap run spine.verify` — PASS (existing gates unaffected)
+**Risk:** Triage header parsing changes drift-gate.sh output contract; mitigate by only showing hints on failure.
+**Rollback:** Remove `# TRIAGE:` headers (no functional impact); revert drift-gate.sh extraction logic.
 
 ### P4: Enhanced Session Context
 Improve what agents see at session start:
 
-- Auto-inject capability precondition hints in governance brief
-- Compact D1-D84 gate reference card (one-liners, generated from registry)
+- Auto-inject capability precondition hints in governance brief or context
+- Compact gate reference card (one-liners, generated from P6 registry)
 - Surface bootstrap log output (avoid agents re-running ops status)
 
 **Dependency:** P6 (gate reference generated from registry)
+**DoD:**
+- `generate-context.sh` includes gate reference card section from registry
+- Precondition hints for common workflows visible at session entry
+- Context is registry-driven (not hardcoded lists)
+**Evidence commands:**
+- `./docs/brain/generate-context.sh && grep -c 'D[0-9]' docs/brain/context.md` — gate lines present
+- `./bin/ops cap run spine.verify` — PASS
+**Risk:** Context bloat slows session entry; mitigate by keeping gate card compact (one-liners only).
+**Rollback:** Revert generate-context.sh; session entry returns to current behavior.
 
-### P5: Domain Agent Bridge (future)
+### P5: Domain Agent Bridge (deferred)
 Longer-term vision for domain expertise:
 
 - Wire domain agents (media, n8n, finance) as MCP servers
 - Enable `agent.route --query` to consult domain experts
 - Eliminates "fighting for information" endgame
 
+**Status:** explicitly deferred
 **Dependency:** P2 (MCP patterns established from RAG wiring)
+**Deferral contract:**
+- P5 is NOT in scope for this loop execution
+- No implementation work, no partial progress, no ambiguous "in progress"
+- Will be picked up in a future loop after P2 MCP patterns are validated
+- Gap filed as deferred with clear re-entry criteria
+**Re-entry criteria:** P2 complete, MCP adapter pattern validated, domain agent registry entries exist in agents.registry.yaml
 
 ### P6: Gate Registry (self-updating meta-layer)
 Create self-updating gate awareness infrastructure:
 
-- Create `ops/bindings/gate.registry.yaml` with structured metadata for all 84 gates
-- Define categories: path-hygiene, git-hygiene, ssot-hygiene, secrets-hygiene, doc-hygiene, loop-gap-hygiene, workbench-hygiene
-- Each gate entry includes: id, name, category, description, check, fix_hint, affected_paths, severity
-- Add D85 meta-gate to enforce registry ↔ script parity (fails if registry drifts)
-- `/gates` and `/check` commands read from registry at runtime (always fresh)
+- Create `ops/bindings/gate.registry.yaml` with structured metadata for all active gates (D1-D84 surface, D21 retired/reserved)
+- Define categories: path-hygiene, git-hygiene, ssot-hygiene, secrets-hygiene, doc-hygiene, loop-gap-hygiene, workbench-hygiene, infra-hygiene, agent-surface-hygiene, process-hygiene
+- Each gate entry includes: id, name, category, description, check_script, fix_hint, severity
+- Add D85 meta-gate to enforce registry ↔ script parity (fails if registry drifts from actual gate scripts)
+- `/gates` and `/check` commands (P1) read from registry at runtime (always fresh)
 - Gate template includes metadata block for new gates
 
 **Dependency:** P3 (builds on triage header work)
 **Files created:** `ops/bindings/gate.registry.yaml`, `surfaces/verify/d85-gate-registry-parity-lock.sh`
-**Ensures:** System self-updates when new gates are added — impossible to add a gate without updating registry
+**DoD:**
+- Registry YAML exists with entry for every active gate in drift-gate.sh
+- D85 gate script exists and passes (registry ↔ script parity)
+- `spine.verify` includes D85 in its run
+- Capability map updated for any new capabilities
+**Evidence commands:**
+- `yq '.gates | length' ops/bindings/gate.registry.yaml` — matches active gate count
+- `./bin/ops cap run spine.verify` — PASS (includes D85)
+**Risk:** Registry drifts from gate scripts immediately after creation; D85 meta-gate prevents this.
+**Rollback:** Remove registry YAML and D85 script; revert drift-gate.sh D85 invocation line.
 
 ## Gate Categories (for P6)
 
 | Category | Description | Gates |
 |----------|-------------|-------|
-| path-hygiene | Path and filesystem constraints | D30, D31, D42, D46, D47, D78 |
-| git-hygiene | Git worktree, branch, and remote constraints | D48, D61, D62, D64 |
+| path-hygiene | Path and filesystem constraints | D30, D31, D42, D46, D47 |
+| git-hygiene | Git worktree, branch, and remote constraints | D48, D62, D64 |
 | ssot-hygiene | SSOT and binding consistency | D54, D58, D59 |
 | secrets-hygiene | Secrets and API constraints | D20, D25, D43, D55, D63, D70 |
-| doc-hygiene | Documentation and indexing constraints | D16, D17, D68, D84 |
+| doc-hygiene | Documentation and indexing constraints | D16, D17, D27, D68, D84 |
 | loop-gap-hygiene | Work registration and traceability | D34, D61, D75, D83 |
-| workbench-hygiene | Workbench-specific constraints | D77, D78, D79, D80 |
+| workbench-hygiene | Workbench-specific constraints | D72, D73, D74, D77, D78, D79, D80 |
+| infra-hygiene | Infrastructure and service binding checks | D22, D23, D24, D35, D50, D51, D52, D69 |
+| agent-surface-hygiene | Agent entry and discovery surfaces | D26, D32, D49, D56, D65, D66 |
+| process-hygiene | Operational processes and metadata | D29, D33, D38, D53, D60, D67, D71, D81, D82 |
+
+**Notes:** D21 retired/reserved (merged into D56). D1-D15 are inline checks in drift-gate.sh. D78 listed under workbench-hygiene (primary owner). Full category assignment finalized during P6 implementation from actual gate script inspection.
 
 ## Original Scope (deferred to separate loops)
 - CLAUDE.md duplication resolution (D46/D65) → separate loop
@@ -125,17 +191,11 @@ Create self-updating gate awareness infrastructure:
 - Capability tag/index for discovery → separate loop
 
 ## Receipts
-- (link receipts when executed)
-
-## Parallel Work Tracking
-| Terminal | Loop | Current Work |
-|----------|------|--------------|
-| Terminal A | LOOP-SPINE-CANONICAL-UPGRADE | Scope capture, RAG analysis |
-| Terminal B | LOOP-SPINE-CANONICAL-UPGRADE | Planning, loop scope update |
-| Terminal C | LOOP-LOW-SEVERITY-CLOSEOUT-20260213 | ✓ Complete — gap closeout |
+- P0: CP-20260213-141014 applied (commit ab89ef1) — CAP-20260213-145838__proposals.apply__Rny9m35317
+- (link phase receipts as executed)
 
 ## Notes
 - RAG VM status: 97 docs indexed, 85 eligible, parity OK, D68 enforced
-- Existing slash commands: /verify, /ctx, /gaps (diagnostic only)
-- Gate count: 84 drift gates, zero have triage headers, no registry exists
+- Existing slash commands: /verify, /ctx, /gaps (diagnostic only, home-only, untracked)
+- Gate count: D1-D84 surface (D21 retired/reserved), zero have triage headers, no registry exists
 - Gate metadata currently scattered: inline in drift-gate.sh comments + separate scripts
