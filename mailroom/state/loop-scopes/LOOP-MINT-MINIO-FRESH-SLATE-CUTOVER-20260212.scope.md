@@ -1,6 +1,6 @@
 ---
 loop_id: LOOP-MINT-MINIO-FRESH-SLATE-CUTOVER-20260212
-status: CLOSED
+status: closed
 opened: 2026-02-12
 closed: 2026-02-12
 owner: "@ronny"
