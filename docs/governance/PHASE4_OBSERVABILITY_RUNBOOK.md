@@ -2,6 +2,7 @@
 status: authoritative
 owner: "@ronny"
 created: 2026-02-07
+last_verified: 2026-02-13
 scope: infra-relocation-phase4
 prerequisite: Phase 2 (Vaultwarden) promoted to migrated
 ---

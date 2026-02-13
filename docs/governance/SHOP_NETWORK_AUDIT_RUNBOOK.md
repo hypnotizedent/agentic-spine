@@ -2,6 +2,7 @@
 status: authoritative
 owner: "@ronny"
 created: 2026-02-09
+last_verified: 2026-02-13
 scope: shop-network-audit
 ---
 
