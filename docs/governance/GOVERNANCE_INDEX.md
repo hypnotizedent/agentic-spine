@@ -97,6 +97,7 @@ Pillar entrypoints (per stack)
 | `ORCHESTRATION_CAPABILITY.md` | Machine-enforced orchestration contract and strict terminal entry behavior |
 | `HOST_DRIFT_POLICY.md` | Host drift contract for `/Users/ronnyworks` stabilization |
 | `GAP_LIFECYCLE.md` | Gap registry lifecycle, mutation capabilities, claim semantics, D75 lock |
+| `HOST_DRIFT_GATES.md` | D76-D80: home-surface hygiene, workbench contract/path/script/authority-trace locks |
 
 ### Backup & Recovery
 

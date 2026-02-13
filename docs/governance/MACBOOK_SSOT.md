@@ -225,6 +225,21 @@ github_issue: "#625"
 
 ---
 
+## Drift Gates (MacBook Scope)
+
+The following spine drift gates enforce MacBook + workbench invariants:
+
+| Gate | Name | Scope |
+|------|------|-------|
+| D72 | MacBook hotkey SSOT lock | Raycast/Hammerspoon launchers match MACBOOK_SSOT |
+| D73 | OpenCode governed entry lock | OpenCode config + launcher path + model contract |
+| D74 | Billing/provider lane lock | z.ai default, LaunchAgent template invariants |
+| D76 | Home-surface hygiene lock | Plaintext secrets, forbidden roots, uppercase paths at ~/ |
+| D77 | Workbench contract lock | Plist allowlist, runtime-dir ban, bare tool-exec detection |
+| D78 | Workbench path lock | Uppercase code-dir + ronny-ops drift in active surfaces |
+| D79 | Workbench script allowlist lock | Governed script surface vs spine binding |
+| D80 | Workbench authority-trace lock | Legacy naming violations via authority-trace --strict |
+
 ## Verification Commands
 
 ```bash
