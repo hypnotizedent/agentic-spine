@@ -1,6 +1,6 @@
 ---
 loop_id: LOOP-BASELINE-HARDENING-FINAL-20260213
-status: active
+status: closed
 severity: medium
 owner: "@ronny"
 created: 2026-02-13
