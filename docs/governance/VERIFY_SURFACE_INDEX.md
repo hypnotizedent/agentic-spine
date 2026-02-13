@@ -41,7 +41,7 @@ Notes:
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D71) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D81) | Yes |
 | `d16-docs-quarantine.sh` | Legacy docs quarantine enforcement | Yes |
 | `d17-root-allowlist.sh` | Root file allowlist enforcement | Yes |
 | `d18-docker-compose-drift.sh` | Docker compose drift detection | Yes |
@@ -98,6 +98,16 @@ Notes:
 | `d69-vm-creation-governance-lock.sh` | VM creation governance lock (lifecycle + ssh/svc/backup/health parity) | Yes |
 | `d70-secrets-deprecated-alias-lock.sh` | Secrets deprecated-alias lock (write protection for deprecated projects) | Yes |
 | `d71-deprecated-ref-allowlist-lock.sh` | Deprecated reference allowlist lock (workbench scripts vs allowlist) | Yes |
+| `d72-macbook-hotkey-ssot-lock.sh` | MacBook hotkey SSOT lock (launcher surfaces match spine MACBOOK_SSOT) | Yes |
+| `d73-opencode-governed-entry-lock.sh` | OpenCode governed entry lock (launcher path + model/provider contract) | Yes |
+| `d74-billing-provider-lane-lock.sh` | Billing/provider lane lock (background defaults + launchd template) | Yes |
+| `d75-gap-registry-mutation-lock.sh` | Gap registry mutation lock (capability-only evidence) | Yes |
+| `d76-home-surface-hygiene-lock.sh` | Home-surface hygiene lock (home directory drift prevention) | Yes |
+| `d77-workbench-contract-lock.sh` | Workbench contract lock (plist/runtime/bare-exec enforcement) | Yes |
+| `d78-workbench-path-lock.sh` | Workbench path lock (uppercase /Code/ + deprecated ref drift) | Yes |
+| `d79-workbench-script-allowlist-lock.sh` | Workbench script allowlist lock (governed script surface) | Yes |
+| `d80-workbench-authority-trace-lock.sh` | Workbench authority-trace lock (legacy naming violations) | Yes |
+| `d81-plugin-test-regression-lock.sh` | Plugin test regression lock (new plugins must have tests or exemption) | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |

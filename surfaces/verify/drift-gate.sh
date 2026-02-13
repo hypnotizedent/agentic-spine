@@ -741,6 +741,14 @@ else
   warn "workbench authority-trace lock gate not present"
 fi
 
+# D81: Plugin test regression lock (new plugins must have tests or exemption)
+echo -n "D81 plugin test regression lock... "
+if [[ -x "$SP/surfaces/verify/d81-plugin-test-regression-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d81-plugin-test-regression-lock.sh"
+else
+  warn "plugin test regression lock gate not present"
+fi
+
 echo
 if [[ "$FAIL" -eq 0 ]]; then
   if [[ "$WARN_COUNT" -gt 0 ]]; then
