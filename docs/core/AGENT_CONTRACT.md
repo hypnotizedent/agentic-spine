@@ -1,7 +1,7 @@
 # Agent Contract (Portable Invariants)
 
 > **Status:** authoritative
-> **Last verified:** 2026-02-04
+> **Last verified:** 2026-02-13
 
 This document contains ONLY spine-era invariants that any agent/model must follow.
 No legacy paths. No ronny-ops runtime references. No "how we used to do it."

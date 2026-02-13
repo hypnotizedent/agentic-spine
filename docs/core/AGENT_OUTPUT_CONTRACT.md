@@ -1,7 +1,7 @@
 # Agent Output Contract (Authoritative)
 
 > **Status:** authoritative
-> **Last verified:** 2026-02-04
+> **Last verified:** 2026-02-13
 
 Every agent run must produce a compliant result block.
 
