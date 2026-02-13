@@ -1,12 +1,13 @@
 ---
-status: open
+status: closed
 owner: "@ronny"
 created: 2026-02-13
+closed: 2026-02-13
 ---
 
 # LOOP-D75-GAPS-REGISTRY-MUTATION-GATE-20260213
 
-> **Status:** open
+> **Status:** closed
 > **Owner:** @ronny
 > **Created:** 2026-02-13
 > **Severity:** medium
