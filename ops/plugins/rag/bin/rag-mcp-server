@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""
+Spine RAG MCP Server — wraps rag.anythingllm.ask for Claude Code tool calls.
+
+MCP stdio transport: JSON-RPC 2.0 over stdin/stdout.
+No external dependencies (stdlib only). Secrets injected via secrets-exec at runtime.
+
+Authority: docs/governance/RAG_QUERY_PATTERNS.md
+Location: ops/plugins/rag/bin/rag-mcp-server
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+SPINE_ROOT = os.environ.get(
+    "SPINE_ROOT",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))
+    ))))
+)
+
+SECRETS_EXEC = os.path.join(SPINE_ROOT, "ops/plugins/secrets/bin/secrets-exec")
+RAG_CLI = os.path.join(SPINE_ROOT, "ops/plugins/rag/bin/rag")
+
+TOOLS = [
+    {
+        "name": "rag_query",
+        "description": (
+            "Query the spine governance RAG system (AnythingLLM + Qdrant). "
+            "Returns an answer with source citations from indexed governance docs, "
+            "operational bindings, and workflow recipes. Use for questions about "
+            "spine workflows, gap lifecycle, capability usage, drift gates, and "
+            "operational procedures."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question to ask the RAG system"
+                }
+            },
+            "required": ["question"]
+        }
+    },
+    {
+        "name": "rag_retrieve",
+        "description": (
+            "Retrieve relevant document chunks from the spine RAG system without "
+            "generating an answer. Returns raw source text for manual analysis. "
+            "Use when you need exact document content rather than a synthesized answer."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results (default 5)",
+                    "default": 5
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "rag_health",
+        "description": (
+            "Check health of the RAG infrastructure: AnythingLLM ping, "
+            "Qdrant healthz, Ollama tags. Use before querying to verify availability."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
+    }
+]
+
+
+def read_message():
+    """Read a JSON-RPC message from stdin (NDJSON: one JSON object per line)."""
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    line = line.strip()
+    if not line:
+        return read_message()
+    return json.loads(line)
+
+
+def write_message(msg):
+    """Write a JSON-RPC message to stdout."""
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def run_rag(subcommand, *args):
+    """Run the RAG CLI via secrets-exec and return stdout."""
+    cmd = [SECRETS_EXEC, "--", RAG_CLI, subcommand, *args]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=SPINE_ROOT
+    )
+    # Filter out Infisical noise from stderr
+    output = result.stdout
+    if result.returncode != 0:
+        err = result.stderr
+        # Strip infisical version nag
+        err_lines = [
+            l for l in err.splitlines()
+            if "new release of infisical" not in l.lower()
+            and "brew update" not in l.lower()
+            and "INF" not in l
+        ]
+        err_clean = "\n".join(err_lines).strip()
+        raise RuntimeError(
+            f"rag {subcommand} failed (rc={result.returncode}): {err_clean}"
+        )
+    # Strip infisical injection noise from stdout
+    lines = output.splitlines()
+    filtered = [
+        l for l in lines
+        if "Injecting" not in l
+        and "new release of infisical" not in l.lower()
+        and "brew update" not in l.lower()
+    ]
+    return "\n".join(filtered).strip()
+
+
+def handle_initialize(msg):
+    return {
+        "jsonrpc": "2.0",
+        "id": msg["id"],
+        "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {
+                "name": "spine-rag",
+                "version": "1.0.0"
+            }
+        }
+    }
+
+
+def handle_tools_list(msg):
+    return {
+        "jsonrpc": "2.0",
+        "id": msg["id"],
+        "result": {"tools": TOOLS}
+    }
+
+
+def handle_tools_call(msg):
+    name = msg["params"]["name"]
+    args = msg["params"].get("arguments", {})
+
+    try:
+        if name == "rag_query":
+            text = run_rag("ask", args["question"])
+        elif name == "rag_retrieve":
+            cmd_args = [args["query"]]
+            if args.get("limit"):
+                cmd_args.extend(["--limit", str(args["limit"])])
+            text = run_rag("retrieve", *cmd_args)
+        elif name == "rag_health":
+            text = run_rag("health")
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "id": msg["id"],
+                "error": {"code": -32601, "message": f"Unknown tool: {name}"}
+            }
+
+        return {
+            "jsonrpc": "2.0",
+            "id": msg["id"],
+            "result": {
+                "content": [{"type": "text", "text": text}]
+            }
+        }
+    except Exception as e:
+        return {
+            "jsonrpc": "2.0",
+            "id": msg["id"],
+            "result": {
+                "content": [{"type": "text", "text": f"Error: {e}"}],
+                "isError": True
+            }
+        }
+
+
+def main():
+    while True:
+        try:
+            msg = read_message()
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if msg is None:
+            break
+
+        method = msg.get("method", "")
+        msg_id = msg.get("id")
+
+        if method == "initialize":
+            write_message(handle_initialize(msg))
+        elif method == "notifications/initialized":
+            pass  # notification, no response
+        elif method == "tools/list":
+            write_message(handle_tools_list(msg))
+        elif method == "tools/call":
+            write_message(handle_tools_call(msg))
+        elif method == "ping":
+            write_message({"jsonrpc": "2.0", "id": msg_id, "result": {}})
+        elif msg_id is not None:
+            write_message({
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32601, "message": f"Method not found: {method}"}
+            })
+
+
+if __name__ == "__main__":
+    main()
