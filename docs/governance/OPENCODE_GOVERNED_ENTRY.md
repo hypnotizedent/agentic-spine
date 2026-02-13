@@ -33,6 +33,17 @@ Direct launch/bypass from Hammerspoon or Raycast is forbidden.
 - API key source: `ZAI_API_KEY` (alias `Z_AI_API_KEY` allowed)
 - Key injection source of truth: Infisical (via spine helper flow)
 
+## Required Plugin Baseline
+
+- `oh-my-opencode`
+- `@f97/opencode-morph-fast-apply`
+- `opencode-wakatime`
+- `opencode-pty`
+
+Popup-noise suppression contract:
+- `context7` + `grep_app` remain disabled in `oh-my-opencode.json` for OpenCode 1.1.x
+  to avoid unsupported `prompts/list` popup errors.
+
 ## Required Surfaces
 
 - Hammerspoon hotkey `Ctrl+Shift+O` -> `launchSolo("opencode")`

@@ -76,9 +76,11 @@ jq -e '(.plugin // []) | map(strings) | any(test("opencode-wakatime"))' "$OPENCO
 jq -e '(.plugin // []) | map(strings) | any(. == "opencode-pty")' "$OPENCODE_CFG" >/dev/null 2>&1 \
   || fail "opencode.json plugin baseline must include opencode-pty"
 
-if jq -e '(.plugin // []) | map(strings) | any(test("oh-my-opencode|opencode-morph-fast-apply"))' "$OPENCODE_CFG" >/dev/null 2>&1; then
-  fail "opencode.json plugin baseline must not include unstable OmO/morph runtime plugins"
-fi
+jq -e '(.plugin // []) | map(strings) | any(test("oh-my-opencode"))' "$OPENCODE_CFG" >/dev/null 2>&1 \
+  || fail "opencode.json plugin baseline must include oh-my-opencode"
+
+jq -e '(.plugin // []) | map(strings) | any(test("opencode-morph-fast-apply"))' "$OPENCODE_CFG" >/dev/null 2>&1 \
+  || fail "opencode.json plugin baseline must include opencode-morph-fast-apply"
 
 # Governance contract surface: OPENCODE.md must exist and contain worker contract sections
 OPENCODE_MD="$WORKBENCH_ROOT/dotfiles/opencode/OPENCODE.md"

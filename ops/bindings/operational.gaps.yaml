@@ -3077,6 +3077,111 @@ gaps:
     status: fixed
     notes: "Filed via gaps.file at 2026-02-13T04:38:02Z"
     fixed_in: workbench@6a8dcc1 + home-surface plist updated and reloaded
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during home-directory-deep-audit-20260213
+  # ─────────────────────────────────────────────────────────────
+  - id: GAP-OP-177
+    discovered_by: "home-directory-deep-audit-20260213"
+    discovered_at: "2026-02-13"
+    type: missing-entry
+    doc: "ops/bindings/home-surface.allowlist.yaml + surfaces/verify/d76-*"
+    description: |
+      No automated enforcement prevents home directory drift. After a full
+      audit of ~/ronnyworks (gaps 135-176), all issues were fixed — but nothing
+      prevents regression. Need three layers:
+
+      1. D76 drift gate (home-surface hygiene) added to spine.verify:
+         - No stray git repos at ~/ outside /code/
+         - No plaintext secrets in Claude Desktop config (ghp_, postgresql://)
+         - Claude Desktop filesystem MCP only points to /code/ or ~/Desktop
+         - SSH config.d has no entries for destroyed VMs
+         - No $HOME/Code/ uppercase violations in workbench scripts
+         - ~/bin/ symlinks all resolve and use lowercase /code/
+
+      2. Session closeout extension (D61):
+         - Count unexpected files at ~/
+         - Flag new directories since last closeout
+         - Check ~/.archive/ size threshold
+         - Verify Claude Desktop config hash against known-good baseline
+
+      3. home-surface.allowlist.yaml binding:
+         - Declares canonical, standard_macos, tool_runtime, quarantined dirs
+         - Declares forbidden_patterns (~//Code/, ~/ops/, ~/stacks/, *.log)
+         - D76 reads this allowlist to validate home surface state
+    severity: medium
+  # ─────────────────────────────────────────────────────────────
+  # Discovered during workbench-enforcement-analysis-20260213
+  # ─────────────────────────────────────────────────────────────
+  - id: GAP-OP-178
+    discovered_by: "workbench-enforcement-analysis-20260213"
+    discovered_at: "2026-02-13"
+    type: missing-entry
+    doc: "surfaces/verify/d76-workbench-contract-enforcement-lock.sh"
+    description: |
+      D76 — Workbench Contract Enforcement Lock. The workbench has no
+      mechanical enforcement of WORKBENCH_CONTRACT.md rules. When a terminal
+      drops a plist, adds a script that bypasses spine, or creates runtime
+      dirs — nothing catches it until manual audit. This gate would check:
+
+      - No *.plist files outside .archive/ in workbench (catches H7-type violations)
+      - No mailroom/, inbox/, outbox/, state/, logs/, runs/ directories in
+        workbench (catches runtime creep)
+      - No scripts containing bare `claude --`, `codex --`, or `opencode --`
+        exec calls outside of spine_terminal_entry.sh (catches H4/H5/H6 bypasses)
+      - Every script in scripts/root/ that launches a tool must contain
+        spine_terminal_entry.sh in its call chain
+
+      Single highest-value gate. Would have caught most HIGH findings from
+      the workbench audit before they accumulated. Follows the D72/D73/D74
+      pattern of spine gates that reach into workbench.
+    severity: high
+
+  - id: GAP-OP-179
+    discovered_by: "workbench-enforcement-analysis-20260213"
+    discovered_at: "2026-02-13"
+    type: missing-entry
+    doc: "surfaces/verify/d77-workbench-hardcoded-path-lock.sh"
+    description: |
+      D77 — Workbench Hardcoded Path Lock. Scans executable files in
+      workbench (.sh, Raycast scripts, symlinks) for hardcoded
+      /Users/ronnyworks/ that aren't in .archive/ or documentation. Catches
+      M16-type drift (uppercase /Code/, absolute paths that should use
+      $WORKBENCH_ROOT or $SPINE_REPO). Could enforce variable usage or
+      maintain an allowlist of known hardcoded paths so new ones can't
+      sneak in without being acknowledged. Prevents the D42/D72 violation
+      class that recurred across 16+ scripts in the workbench audit.
+    severity: medium
+
+  - id: GAP-OP-180
+    discovered_by: "workbench-enforcement-analysis-20260213"
+    discovered_at: "2026-02-13"
+    type: missing-entry
+    doc: "surfaces/verify/d78-workbench-script-allowlist-lock.sh"
+    description: |
+      D78 — Workbench Script Allowlist Lock. Similar to how
+      d17-root-allowlist.sh works for the spine root — maintain an allowlist
+      of known scripts in workbench. Any new script that appears without
+      being registered gets flagged. Prevents sprawl the same way the spine
+      prevents it: if it's not in the list, it doesn't belong. The allowlist
+      lives in the spine (since spine is authority) and the gate compares it
+      against what's actually on disk in workbench. Catches the 293+ archived
+      scripts and random new scripts appearing without governance.
+    severity: medium
+
+  - id: GAP-OP-181
+    discovered_by: "workbench-enforcement-analysis-20260213"
+    discovered_at: "2026-02-13"
+    type: missing-entry
+    doc: "surfaces/verify/drift-gate.sh"
+    description: |
+      Wire authority-trace.sh into drift-gate.sh. The workbench already has
+      authority-trace.sh --strict which checks legacy naming violations
+      (legacy doc refs, old path prefixes, ronny-ops naming). It just needs
+      one line added to drift-gate.sh to run it as part of spine.verify.
+      Right now it's orphaned — exists but nobody calls it automatically.
+      Every time anyone runs verification, the workbench authority trace
+      should run too. Minimal effort, immediate value.
+    severity: low
 # ─────────────────────────────────────────────────────────────
 # Gap Types
 # ─────────────────────────────────────────────────────────────
