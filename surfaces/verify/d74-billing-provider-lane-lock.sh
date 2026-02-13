@@ -83,7 +83,7 @@ req("SPINE_INBOX", "/Users/ronnyworks/code/agentic-spine/mailroom/inbox")
 req("SPINE_OUTBOX", "/Users/ronnyworks/code/agentic-spine/mailroom/outbox")
 req("SPINE_STATE", "/Users/ronnyworks/code/agentic-spine/mailroom/state")
 req("SPINE_LOGS", "/Users/ronnyworks/code/agentic-spine/mailroom/logs")
-req("ZAI_MODEL", "glm-4.7-flash")
+req("ZAI_MODEL", "glm-5")
 PY
 
 echo "D74 PASS: billing/provider lanes locked (z.ai default background path)"

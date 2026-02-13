@@ -73,7 +73,7 @@ echo ""
 # ─────────────────────────────────────────────────────────────────
 case "$AGENT" in
   claude)
-    claude --dangerously-skip-permissions
+    claude
     ;;
   opencode)
     opencode

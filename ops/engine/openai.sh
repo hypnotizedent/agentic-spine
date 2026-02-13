@@ -8,7 +8,7 @@ usage() {
   cat <<EOF
 Usage: openai.sh <RUN_ID>
 
-Calls the OpenAI chat completions API with model zai-coding-plan/glm-4.7,
+Calls the OpenAI chat completions API with model from SPINE_ENGINE_MODEL env var,
 temperature 0, and max_tokens 200. The request text comes from
 runs/<RUN_ID>/request.txt. It prints RESULT=<path> plus optional USAGE_*
 lines to let the caller track token usage.
@@ -40,7 +40,7 @@ with open(path, "r", encoding="utf-8") as fh:
     request = fh.read().strip()
 
 data = {
-    "model": "gpt-4o-mini",
+    "model": os.environ.get("SPINE_ENGINE_MODEL", "glm-4.7-flash"),
     "temperature": 0,
     "max_tokens": 200,
     "messages": [
