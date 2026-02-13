@@ -14,7 +14,7 @@ scope: agent-memory
 | Loop | Next Action | Gate |
 |------|-------------|------|
 | **LOOP-BACKUP-STABILIZATION-20260208** (high) | P3: wait for first full vzdump run with `prune-backups keep-last=2` active, then verify auto-prune | Tomorrow ~07:00 EST |
-| **LOOP-MEDIA-STACK-SPLIT-20260208** (medium) | P6 soak: `qm stop 201`, wait 48h, `qm destroy 201 --purge`, close loop | ~2026-02-11 |
+| **LOOP-MEDIA-STACK-SPLIT-20260208** (medium) | COMPLETE — VM 201 destroyed, media split to VMs 209/210, loop closed | 2026-02-11 |
 | **LOOP-CAMERA-BASELINE-20260208** (medium) | P2: restore ch2-4 cameras (physical visit to 9U rack) | On-site visit |
 | **OL_SHOP_BASELINE_FINISH** (medium) | Physical audit (drives, cameras, AP, cron) | On-site visit |
 

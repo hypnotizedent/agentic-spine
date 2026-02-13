@@ -11,12 +11,12 @@ Authority: agentic-spine only. No ronny-ops runtime. No HOME drift roots.
 Baseline: main / tag v0.1.24-spine-canon.
 Front door: ./bin/ops (capabilities + mailroom + receipts).
 Admissible proof: RCAP receipts under agentic-spine/receipts/sessions/.
-Drift gates: D1–D57 (50 active) ALL PASS (surfaces/verify/drift-gate.sh v2.5).
+Drift gates: D1–D82 (82 active) ALL PASS (surfaces/verify/drift-gate.sh v2.7).
 
 Root Structure (D17 locked):
   bin/           → Front door (./bin/ops)
   ops/           → Capabilities, plugins, bindings, runtime
-  surfaces/      → Verify gates (D1–D57)
+  surfaces/      → Verify gates (D1–D82)
   docs/core/     → Canonical docs (D16)
   docs/brain/    → Agent context + lessons
   docs/governance/ → SSOTs, policies, runbooks

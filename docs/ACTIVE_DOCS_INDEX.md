@@ -119,7 +119,14 @@ Authoritative governance documentation organized by category. All docs in `docs/
 | LEGACY_DEPRECATION.md | Legacy reference migration rules |
 | MAKER_TOOLS_GOVERNANCE.md | Maker tool governance |
 
-## 9. Historical / Evidence Only (NOT Authoritative)
+## 9. Pillars & Planning
+
+| Directory | Purpose |
+|-----------|---------|
+| `docs/pillars/` | Domain pillar documentation (finance, etc.) |
+| `docs/planning/` | Planning and roadmap surfaces |
+
+## 10. Historical / Evidence Only (NOT Authoritative)
 
 | Document | Context |
 |----------|---------|
