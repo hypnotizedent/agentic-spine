@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# host-streamdeck-status — Check Stream Deck HA controller LaunchAgent status
+# Capability: host.streamdeck.status (read-only)
+set -euo pipefail
+
+LABEL="com.ronny.streamdeck.ha"
+UID_VAL=$(id -u)
+
+echo "Stream Deck HA Controller Status"
+echo "================================"
+echo ""
+
+# Check if service is loaded
+if launchctl print "gui/${UID_VAL}/${LABEL}" >/dev/null 2>&1; then
+  STATE=$(launchctl print "gui/${UID_VAL}/${LABEL}" 2>/dev/null)
+  PID=$(echo "$STATE" | grep -o 'pid = [0-9]*' | head -1 || echo "pid = none")
+  LAST_EXIT=$(echo "$STATE" | grep -o 'last exit code = [0-9]*' | head -1 || echo "")
+  echo "Service: LOADED"
+  echo "  $PID"
+  [ -n "$LAST_EXIT" ] && echo "  $LAST_EXIT"
+else
+  echo "Service: NOT LOADED"
+  echo ""
+  echo "Load with: launchctl bootstrap gui/${UID_VAL} ~/Library/LaunchAgents/${LABEL}.plist"
+  exit 1
+fi
+
+echo ""
+echo "Log paths:"
+STDOUT=$(launchctl print "gui/${UID_VAL}/${LABEL}" 2>/dev/null | grep 'stdout path' | sed 's/.*= //' || echo "unknown")
+STDERR=$(launchctl print "gui/${UID_VAL}/${LABEL}" 2>/dev/null | grep 'stderr path' | sed 's/.*= //' || echo "unknown")
+echo "  stdout: $STDOUT"
+echo "  stderr: $STDERR"
+
+echo ""
+echo "Runtime:"
+RUNTIME_DIR="/Users/ronnyworks/code/workbench/runtime/streamdeck"
+if [ -d "$RUNTIME_DIR" ]; then
+  echo "  controller: ${RUNTIME_DIR}/streamdeck_ha_controller.py"
+  echo "  config: ${RUNTIME_DIR}/config.json"
+  echo "  venv: ${RUNTIME_DIR}/.venv/"
+else
+  echo "  runtime dir missing: $RUNTIME_DIR"
+fi

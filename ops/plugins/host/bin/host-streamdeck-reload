@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# host-streamdeck-reload — Reload Stream Deck HA controller LaunchAgent
+# Capability: host.streamdeck.reload (mutating, manual approval)
+set -euo pipefail
+
+LABEL="com.ronny.streamdeck.ha"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+UID_VAL=$(id -u)
+
+if [ ! -f "$PLIST" ]; then
+  echo "ERROR: Plist not found: $PLIST" >&2
+  exit 1
+fi
+
+echo "Reloading Stream Deck HA Controller..."
+
+# Unload if currently loaded
+if launchctl print "gui/${UID_VAL}/${LABEL}" >/dev/null 2>&1; then
+  echo "  Unloading ${LABEL}..."
+  launchctl bootout "gui/${UID_VAL}/${LABEL}" 2>/dev/null || true
+  sleep 1
+fi
+
+# Load
+echo "  Loading ${LABEL}..."
+launchctl bootstrap "gui/${UID_VAL}" "$PLIST"
+
+# Verify
+sleep 2
+if launchctl print "gui/${UID_VAL}/${LABEL}" >/dev/null 2>&1; then
+  PID=$(launchctl print "gui/${UID_VAL}/${LABEL}" 2>/dev/null | grep -o 'pid = [0-9]*' | head -1 || echo "pid = none")
+  echo "  OK: service loaded ($PID)"
+else
+  echo "  FAIL: service did not load" >&2
+  exit 1
+fi
