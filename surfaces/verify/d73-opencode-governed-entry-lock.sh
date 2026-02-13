@@ -33,12 +33,14 @@ ENTRY_SH="$WORKBENCH_ROOT/scripts/root/spine_terminal_entry.sh"
 HS_INIT="$WORKBENCH_ROOT/dotfiles/hammerspoon/.hammerspoon/init.lua"
 RAYCAST_OC="$WORKBENCH_ROOT/dotfiles/raycast/opencode.sh"
 OPENCODE_CFG="$WORKBENCH_ROOT/dotfiles/opencode/opencode.json"
+OPENCODE_CMD_DIR="$WORKBENCH_ROOT/dotfiles/opencode/commands"
 
 need_file "$CONTRACT_DOC"
 need_file "$ENTRY_SH"
 need_file "$HS_INIT"
 need_file "$RAYCAST_OC"
 need_file "$OPENCODE_CFG"
+[[ -d "$OPENCODE_CMD_DIR" ]] || fail "missing opencode command dir: $OPENCODE_CMD_DIR"
 
 rg -q 'exec opencode -m openai/glm-5 \.' "$ENTRY_SH" \
   || fail "spine_terminal_entry opencode launch must use 'openai/glm-5'"
@@ -68,6 +70,16 @@ if jq -e '.provider.anthropic' "$OPENCODE_CFG" >/dev/null 2>&1; then
   fail "opencode.json must not define anthropic provider for governed z.ai-only lane"
 fi
 
+jq -e '(.plugin // []) | map(strings) | any(test("opencode-wakatime"))' "$OPENCODE_CFG" >/dev/null 2>&1 \
+  || fail "opencode.json plugin baseline must include opencode-wakatime"
+
+jq -e '(.plugin // []) | map(strings) | any(. == "opencode-pty")' "$OPENCODE_CFG" >/dev/null 2>&1 \
+  || fail "opencode.json plugin baseline must include opencode-pty"
+
+if jq -e '(.plugin // []) | map(strings) | any(test("oh-my-opencode|opencode-morph-fast-apply"))' "$OPENCODE_CFG" >/dev/null 2>&1; then
+  fail "opencode.json plugin baseline must not include unstable OmO/morph runtime plugins"
+fi
+
 # Governance contract surface: OPENCODE.md must exist and contain worker contract sections
 OPENCODE_MD="$WORKBENCH_ROOT/dotfiles/opencode/OPENCODE.md"
 need_file "$OPENCODE_MD"
@@ -86,5 +98,10 @@ rg -q 'Handoff Format' "$OPENCODE_MD" \
 
 rg -q 'Solo Mode Contract' "$OPENCODE_MD" \
   || fail "OPENCODE.md must document solo mode contract"
+
+# Required command compatibility shims
+need_file "$OPENCODE_CMD_DIR/ralph-loop.md"
+need_file "$OPENCODE_CMD_DIR/ralphloop.md"
+need_file "$OPENCODE_CMD_DIR/ulw.md"
 
 echo "D73 PASS: OpenCode governed entry lock enforced"

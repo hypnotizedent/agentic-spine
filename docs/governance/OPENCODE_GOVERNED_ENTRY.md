@@ -39,6 +39,8 @@ Direct launch/bypass from Hammerspoon or Raycast is forbidden.
 - Raycast `opencode.sh` -> `spine_terminal_entry.sh --tool opencode`
 - OpenCode config symlink target:
   `/Users/ronnyworks/code/workbench/dotfiles/opencode/opencode.json`
+- OpenCode command symlink target:
+  `/Users/ronnyworks/code/workbench/dotfiles/opencode/commands`
 
 ## Internal Governance Surface
 
@@ -52,10 +54,21 @@ Required sections (enforced by D73):
 - **Solo Mode Contract**: commit policy, verify-before-commit, gap registration
 - **BLOCK-ENTRY / BLOCK-SCOPE-DRIFT**: explicit stop behaviors for governance violations
 
+## Command Compatibility Surface
+
+To preserve operator workflow consistency, the following commands are governed
+and required in `workbench/dotfiles/opencode/commands/`:
+
+- `ralph-loop`
+- `ralphloop`
+- `ulw`
+
+These commands are the canonical compatibility surface for autonomous loop
+operation on the OpenCode lane.
+
 Deploy: copy `workbench/dotfiles/opencode/OPENCODE.md` to `~/.config/opencode/OPENCODE.md`.
 
 ## Drift Enforcement
 
 - D72 (`d72-macbook-hotkey-ssot-lock.sh`): launcher/doc/root drift lock
 - D73 (`d73-opencode-governed-entry-lock.sh`): OpenCode model/entry lock + governance contract surface
-
