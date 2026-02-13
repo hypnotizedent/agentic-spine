@@ -82,7 +82,8 @@ else
 fi
 
 # State files
-LOG_FILE="${LOG_DIR}/hot-folder-watcher.log"
+DIAG_LOG="${LOG_DIR}/hot-folder-watcher.log"
+LOG_FILE="$DIAG_LOG"
 LEDGER="${STATE_DIR}/ledger.csv"
 LOCK_DIR="${STATE_DIR}/locks/agent-inbox.lock"
 PID_FILE="${STATE_DIR}/agent-inbox.pid"
@@ -171,7 +172,7 @@ check_dependencies() {
         local creds="${HOME}/.config/infisical/credentials"
         if [[ -f "$creds" ]]; then
             # shellcheck disable=SC1090
-            source "$creds" >/dev/null 2>&1 || true
+            source "$creds" >>"$DIAG_LOG" 2>&1 || true
         fi
     fi
 
@@ -182,9 +183,9 @@ check_dependencies() {
     if [[ -z "${ZAI_API_KEY:-}" ]]; then
         local inf_agent="${SPINE}/ops/tools/infisical-agent.sh"
         if [[ -x "$inf_agent" ]]; then
-            ZAI_API_KEY="$("$inf_agent" get-cached infrastructure prod Z_AI_API_KEY 2>/dev/null || true)"
+            ZAI_API_KEY="$("$inf_agent" get-cached infrastructure prod Z_AI_API_KEY 2>>"$DIAG_LOG" || true)"
             if [[ -z "${ZAI_API_KEY:-}" ]]; then
-                ZAI_API_KEY="$("$inf_agent" get-cached infrastructure prod ZAI_API_KEY 2>/dev/null || true)"
+                ZAI_API_KEY="$("$inf_agent" get-cached infrastructure prod ZAI_API_KEY 2>>"$DIAG_LOG" || true)"
             fi
             [[ -n "${ZAI_API_KEY:-}" ]] && export ZAI_API_KEY
         fi
@@ -494,7 +495,7 @@ dispatch_to_claude() {
         echo "$response" | jq -r '.content[0].text'
     else
         echo "ERROR: API call failed"
-        echo "$response" | jq -r '.error.message // .' 2>/dev/null || echo "$response"
+        echo "$response" | jq -r '.error.message // .' 2>>"$DIAG_LOG" || echo "$response"
         return 1
     fi
 }
@@ -529,7 +530,7 @@ dispatch_to_zai() {
         fi
 
         local err_msg
-        err_msg="$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null || true)"
+        err_msg="$(echo "$response" | jq -r '.error.message // empty' 2>>"$DIAG_LOG" || true)"
         if [[ "$attempt" -lt "$max_attempts" ]] && [[ "$err_msg" == *"Rate limit"* ]]; then
             sleep "$backoff"
             backoff=$((backoff * 2))
@@ -537,7 +538,7 @@ dispatch_to_zai() {
         fi
 
         echo "ERROR: z.ai API call failed"
-        echo "$response" | jq -r '.error.message // .' 2>/dev/null || echo "$response"
+        echo "$response" | jq -r '.error.message // .' 2>>"$DIAG_LOG" || echo "$response"
         return 1
     done
 }

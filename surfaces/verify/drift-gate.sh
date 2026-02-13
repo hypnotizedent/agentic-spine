@@ -40,8 +40,8 @@ gate_script() {
     fi
   else
     fail "$script failed (rc=$rc)"
-    echo "  --- output (first 80 lines): $script ---"
-    sed -n '1,80p' "$tmp" | sed 's/^/  /' || true
+    echo "  --- output (first 200 lines): $script ---"
+    sed -n '1,200p' "$tmp" | sed 's/^/  /' || true
     echo "  --- end output ---"
   fi
 
@@ -766,5 +766,8 @@ if [[ "$FAIL" -eq 0 ]]; then
   fi
 else
   echo "DRIFT GATE: FAIL"
+fi
+if [[ "$WARN_COUNT" -gt 0 ]]; then
+  echo "  WARNINGS: $WARN_COUNT gate(s) reported warnings"
 fi
 exit "$FAIL"

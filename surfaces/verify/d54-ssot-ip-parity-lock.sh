@@ -15,6 +15,12 @@ if [[ ! -x "$AUDIT" ]]; then
   exit 1
 fi
 
-"$AUDIT" >/dev/null 2>&1
-exit $?
+echo "D54: checking shop network IP/SSOT parity via $AUDIT"
+echo "  SSOTs: ops/bindings/shop-servers.yaml, docs/ssot/SHOP_SERVER_SSOT.md"
+
+if ! "$AUDIT" 2>&1; then
+  echo "D54 FAIL: IP parity mismatch detected"
+  echo "  Hint: check ops/bindings/shop-servers.yaml and docs/ssot/SHOP_SERVER_SSOT.md for stale IPs"
+  exit 1
+fi
 

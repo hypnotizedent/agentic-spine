@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE="${SPINE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 A="$SPINE/ops/runtime/inbox"
 
 sub="${1:-help}"
