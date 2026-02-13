@@ -17,6 +17,25 @@ Detachable spine: one CLI front door + receipts + boring lifecycle.
 ./bin/ops cap run spine.status
 ```
 
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `ops cap <cmd>` | Execute governed capabilities (`list`, `run`, `show`) |
+| `ops run [opts]` | Enqueue work into mailroom (`--file`, `--fixture`, `--inline`) |
+| `ops status` | Unified work status (loops + gaps + inbox + anomalies) |
+| `ops loops <cmd>` | Open Loop Engine (`list`, `collect`, `close`, `summary`) |
+| `ops start <issue>` | Create per-issue worktree + session docs |
+| `ops verify` | Health-check services declared in SERVICE_REGISTRY.yaml |
+| `ops ready` | Run spine gates + secrets checks (API work preflight) |
+| `ops preflight` | Print governance banner + service registry hints |
+| `ops lane <name>` | Show lane header (`builder` / `runner` / `clerk`) |
+| `ops pr [...args]` | Stage/commit/push changes and open a PR |
+| `ops close [issue]` | Run verify, confirm PR merged, update state, close issue |
+| `ops ai [--bundle]` | Bundle governance docs for AI agents |
+| `ops agent` | Agent session management |
+| `ops hooks <cmd>` | Git hooks helper (`status`, `install`) |
+
 ## Capabilities
 
 ```bash
@@ -59,9 +78,15 @@ scripts read them via `secrets.exec`, never via a checked-in file. Set
 `SPINE_ENGINE_PROVIDER=zai` (or another provider) in the same shell before you
 invoke `./bin/ops run`. Default provider is `zai`.
 
-## z.ai Provider
+## Engine Providers
 
-The z.ai provider (`engine/zai.sh`) makes a single completion call with
-`model=glm-5` by default (`ZAI_MODEL` override), `max_tokens=200`, `temperature=0`.
-Receipts include API usage for token
-spend monitoring.
+Set `SPINE_ENGINE_PROVIDER` to select the AI engine for `ops run`:
+
+| Provider | File | Model | Notes |
+|----------|------|-------|-------|
+| `zai` (default) | `engine/zai.sh` | `glm-5` (`ZAI_MODEL` override) | z.ai completion, `max_tokens=200`, `temperature=0` |
+| `claude` | `engine/claude.sh` | Anthropic Claude | Requires `ANTHROPIC_API_KEY` via secrets surface |
+| `openai` | `engine/openai.sh` | OpenAI | Requires `OPENAI_API_KEY` via secrets surface |
+| `local_echo` | `engine/local_echo.sh` | — | Echo-back stub for testing (no API call) |
+
+Receipts include API usage for token spend monitoring.

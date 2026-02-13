@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# share-publish-status: Single-command readiness report for share publish
+#
+# Aggregates: preflight checks + preview summary into one report.
+set -euo pipefail
+
+SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+cd "$SP"
+
+FAIL=0
+err() { echo "  FAIL: $1" >&2; FAIL=1; }
+ok()  { echo "  OK: $1"; }
+
+echo "=== Share Publish Status ==="
+echo
+
+# ── Preflight ──
+echo "--- Preflight ---"
+PREFLIGHT="$SP/ops/plugins/share/bin/share-publish-preflight"
+if [[ -x "$PREFLIGHT" ]]; then
+  if bash "$PREFLIGHT" 2>&1 | tail -1 | grep -q "PASS"; then
+    ok "preflight passes"
+  else
+    err "preflight failed (run share.publish.preflight for details)"
+  fi
+else
+  err "share-publish-preflight not found"
+fi
+
+# ── Preview ──
+echo "--- Preview ---"
+PREVIEW="$SP/ops/plugins/share/bin/share-publish-preview"
+if [[ -x "$PREVIEW" ]]; then
+  PREVIEW_OUT=$(bash "$PREVIEW" 2>&1 || true)
+  PUBLISHABLE=$(echo "$PREVIEW_OUT" | grep -c "PUBLISHABLE:" || echo "0")
+  BLOCKED=$(echo "$PREVIEW_OUT" | grep -c "BLOCKED:" || echo "0")
+  echo "  Publishable: $PUBLISHABLE files"
+  echo "  Blocked: $BLOCKED files"
+  if [[ "$BLOCKED" -gt 0 ]]; then
+    err "$BLOCKED files blocked by denylist (run share.publish.preview for details)"
+  else
+    ok "no files blocked"
+  fi
+else
+  err "share-publish-preview not found"
+fi
+
+echo
+if [[ "$FAIL" -eq 0 ]]; then
+  echo "SHARE STATUS: READY"
+else
+  echo "SHARE STATUS: NOT READY ($FAIL issue(s))"
+fi
+exit "$FAIL"
