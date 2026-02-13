@@ -116,7 +116,8 @@ COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces/veri
   | rg -v 'd20-secrets-drift.sh' \
   | rg -v 'd22-nodes-drift.sh' \
   | rg -v 'd23-health-drift.sh' \
-  | rg -v 'd24-github-labels-drift.sh' || true)"
+  | rg -v 'd24-github-labels-drift.sh' \
+  | rg -v 'gate.registry.yaml' || true)"
 if [[ -z "$COUPLE" ]]; then pass; else fail "legacy coupling found"; echo "  TRIAGE: Replace ~/agent or \$HOME/agent refs with mailroom/ paths."; fi
 
 # D6: Receipts exist (latest 5 have receipt.md)
@@ -797,6 +798,14 @@ if [[ -x "$SP/surfaces/verify/d84-docs-index-registration-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d84-docs-index-registration-lock.sh"
 else
   warn "docs index registration lock gate not present"
+fi
+
+# D85: Gate registry parity lock (registry ↔ gate script parity)
+echo -n "D85 gate registry parity lock... "
+if [[ -x "$SP/surfaces/verify/d85-gate-registry-parity-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d85-gate-registry-parity-lock.sh"
+else
+  warn "gate registry parity lock gate not present"
 fi
 
 echo
