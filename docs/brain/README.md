@@ -27,6 +27,23 @@ Reference surface for session context generation and operating rules.
 | `lessons/` | Historical lesson captures (reference only) |
 | `_imported/` | Imported command context (reference only) |
 
+## Lessons Lifecycle Policy
+
+Brain lessons follow a governed lifecycle:
+
+| Stage | Location | Freshness SLA | Action |
+|-------|----------|---------------|--------|
+| Active lesson | `docs/brain/lessons/` | 30 days | Review and update or graduate |
+| Graduated | `docs/governance/` or `docs/core/` | Per D58 (21 days) | Promoted to authoritative doc |
+| Archived | `docs/brain/lessons/.archive/` | None | Read-only reference |
+
+### Rules
+
+- **Freshness SLA:** Active lessons must be reviewed within 30 days of last update
+- **Graduation triggers:** Lesson referenced by 3+ governance docs, or lesson content stabilized for 2+ weeks
+- **Archive triggers:** Lesson superseded by authoritative doc, or stale >60 days without review
+- **Mutation policy:** Any agent may add lessons; graduation requires operator approval
+
 ## Common Use
 
 ```bash

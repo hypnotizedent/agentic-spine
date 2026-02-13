@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# docs.sprawl.detect — Report governance doc sprawl metrics
+# Safety: read-only (scans files, no modifications)
+# Exit: always 0 (diagnostic capability)
+
+ROOT="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+DOCS="$ROOT/docs"
+
+if [[ ! -d "$DOCS" ]]; then
+  echo "STOP: docs/ not found at $DOCS" >&2
+  exit 2
+fi
+
+echo "docs.sprawl.detect"
+echo "root: $ROOT"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────
+# Count docs by directory
+# ─────────────────────────────────────────────────────────────────────────
+echo "--- Document counts by directory ---"
+
+count_core=$(find "$DOCS/core" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+count_governance=$(find "$DOCS/governance" -maxdepth 1 -type f \( -name "*.md" -o -name "*.yaml" \) 2>/dev/null | wc -l | tr -d ' ')
+count_governance_audits=$(find "$DOCS/governance/_audits" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+count_brain=$(find "$DOCS/brain" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+count_legacy=$(find "$DOCS/legacy" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+count_sessions=$(find "$DOCS/sessions" -type f -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+
+echo "  core:              $count_core"
+echo "  governance:        $count_governance"
+echo "  governance/_audits: $count_governance_audits"
+echo "  brain:             $count_brain"
+echo "  legacy:            $count_legacy"
+echo "  sessions:          $count_sessions"
+
+total=$((count_core + count_governance + count_governance_audits + count_brain + count_legacy + count_sessions))
+echo ""
+echo "  total:             $total"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Count governance docs by status (frontmatter)
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Governance docs by status ---"
+
+declare -A status_counts
+for status in authoritative reference deprecated merged archived generated unknown; do
+  status_counts[$status]=0
+done
+
+while IFS= read -r f; do
+  # Extract status from frontmatter or inline header
+  status_value=""
+
+  # Try YAML frontmatter
+  in_fm=false
+  line_num=0
+  while IFS= read -r line; do
+    line_num=$((line_num+1))
+    [[ "$line_num" -gt 15 ]] && break
+    if [[ "$line" == "---" ]]; then
+      if [[ "$in_fm" == "true" ]]; then break; fi
+      in_fm=true
+      continue
+    fi
+    if [[ "$in_fm" == "true" && "$line" =~ ^status:[[:space:]]*(.*) ]]; then
+      status_value="${BASH_REMATCH[1]}"
+      status_value="${status_value//\"/}"
+      status_value="${status_value//\'/}"
+      status_value="$(echo "$status_value" | xargs)"
+      break
+    fi
+  done < "$f"
+
+  # Try inline header if no frontmatter status
+  if [[ -z "$status_value" ]]; then
+    status_value="$(head -10 "$f" | grep -oiE '(Status:[[:space:]]*)(authoritative|reference|deprecated|merged|archived|generated)' | head -1 | grep -oiE '(authoritative|reference|deprecated|merged|archived|generated)' || true)"
+    status_value="$(echo "$status_value" | tr '[:upper:]' '[:lower:]')"
+  fi
+
+  if [[ -z "$status_value" ]]; then
+    status_value="unknown"
+  fi
+
+  if [[ -v "status_counts[$status_value]" ]]; then
+    status_counts[$status_value]=$((status_counts[$status_value]+1))
+  else
+    status_counts[unknown]=$((status_counts[unknown]+1))
+  fi
+done < <(find "$DOCS/governance" -maxdepth 1 -name "*.md" 2>/dev/null | sort)
+
+for status in authoritative reference deprecated merged archived generated unknown; do
+  echo "  $status: ${status_counts[$status]}"
+done
+
+# ─────────────────────────────────────────────────────────────────────────
+# Sprawl warnings
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Sprawl assessment ---"
+if [[ "$count_governance" -gt 100 ]]; then
+  echo "WARN: governance/ exceeds 100 docs ($count_governance) — consider consolidation"
+else
+  echo "  governance/ doc count ($count_governance) within threshold (100 max)"
+fi
+
+if [[ "$count_legacy" -gt 0 ]]; then
+  echo "  legacy/ contains $count_legacy docs (review for archival or deletion)"
+fi
+
+echo ""
+echo "total_surface: $total"
+echo "status: OK (diagnostic)"

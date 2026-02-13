@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# docs.frontmatter.lint — Validate YAML frontmatter structure in governance docs
+# Safety: read-only (scans files, no modifications)
+
+ROOT="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+GOV="$ROOT/docs/governance"
+
+if [[ ! -d "$GOV" ]]; then
+  echo "STOP: docs/governance/ not found at $GOV" >&2
+  exit 2
+fi
+
+echo "docs.frontmatter.lint"
+echo "root: $ROOT"
+echo
+
+ERRORS=0
+WARNINGS=0
+VALID=0
+
+err()  { echo "ERROR: $*"; ERRORS=$((ERRORS+1)); }
+warn() { echo "WARN:  $*"; WARNINGS=$((WARNINGS+1)); }
+
+VALID_STATUSES="authoritative reference deprecated merged archived generated"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Scan governance docs for YAML frontmatter
+# ─────────────────────────────────────────────────────────────────────────
+while IFS= read -r f; do
+  rel="${f#$ROOT/}"
+  name="$(basename "$f")"
+
+  # Extract frontmatter (between --- delimiters in first 20 lines)
+  in_frontmatter=false
+  has_frontmatter=false
+  has_status=false
+  has_owner=false
+  has_freshness=false
+  has_scope=false
+  status_value=""
+
+  line_num=0
+  while IFS= read -r line; do
+    line_num=$((line_num+1))
+    [[ "$line_num" -gt 20 ]] && break
+
+    if [[ "$line" == "---" ]]; then
+      if [[ "$in_frontmatter" == "true" ]]; then
+        break  # end of frontmatter
+      else
+        in_frontmatter=true
+        has_frontmatter=true
+        continue
+      fi
+    fi
+
+    if [[ "$in_frontmatter" == "true" ]]; then
+      # Check for status field
+      if [[ "$line" =~ ^status:[[:space:]]*(.*) ]]; then
+        has_status=true
+        status_value="${BASH_REMATCH[1]}"
+        # Strip quotes
+        status_value="${status_value//\"/}"
+        status_value="${status_value//\'/}"
+        status_value="$(echo "$status_value" | xargs)"  # trim whitespace
+      fi
+
+      # Check for owner field
+      if [[ "$line" =~ ^owner: ]]; then
+        has_owner=true
+      fi
+
+      # Check for last_verified or last_reviewed
+      if [[ "$line" =~ ^(last_verified|last_reviewed): ]]; then
+        has_freshness=true
+      fi
+
+      # Check for scope
+      if [[ "$line" =~ ^scope: ]]; then
+        has_scope=true
+      fi
+    fi
+  done < "$f"
+
+  # Also check for inline status headers (> **Status:** pattern)
+  if [[ "$has_frontmatter" == "false" ]]; then
+    if head -10 "$f" | grep -qiE '(^status:|> \*\*Status)'; then
+      # Has inline header but no YAML frontmatter — acceptable but warn
+      warn "no YAML frontmatter (has inline header): $rel"
+      WARNINGS=$((WARNINGS+1))
+      continue
+    fi
+  fi
+
+  if [[ "$has_frontmatter" == "false" ]]; then
+    err "no frontmatter: $rel"
+    continue
+  fi
+
+  # Validate status
+  doc_ok=true
+  if [[ "$has_status" == "false" ]]; then
+    err "missing status field: $rel"
+    doc_ok=false
+  elif ! echo "$VALID_STATUSES" | grep -qw "$status_value"; then
+    err "invalid status '$status_value': $rel (expected: $VALID_STATUSES)"
+    doc_ok=false
+  fi
+
+  # Warn on missing optional fields
+  if [[ "$has_owner" == "false" ]]; then
+    warn "missing owner field: $rel"
+  fi
+
+  if [[ "$has_freshness" == "false" ]]; then
+    warn "missing last_verified/last_reviewed: $rel"
+  fi
+
+  if [[ "$has_scope" == "false" ]]; then
+    warn "missing scope field: $rel"
+  fi
+
+  if [[ "$doc_ok" == "true" ]]; then
+    VALID=$((VALID+1))
+  fi
+done < <(find "$GOV" -maxdepth 1 -name "*.md" \
+  -not -path "*/_audits/*" \
+  | sort)
+
+# ─────────────────────────────────────────────────────────────────────────
+# SUMMARY
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "valid: $VALID"
+echo "errors: $ERRORS"
+echo "warnings: $WARNINGS"
+
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "status: FAIL"
+  exit 1
+else
+  echo "status: OK"
+fi

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# docs.orphan.detect — Detect .md files unreachable from docs/README.md
+# Safety: read-only (scans files, no modifications)
+# Exit: always 0 (diagnostic capability)
+
+ROOT="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+DOCS="$ROOT/docs"
+README="$DOCS/README.md"
+
+if [[ ! -f "$README" ]]; then
+  echo "STOP: docs/README.md not found at $README" >&2
+  exit 2
+fi
+
+echo "docs.orphan.detect"
+echo "root: $ROOT"
+echo
+
+ORPHAN_COUNT=0
+LINKED_COUNT=0
+
+# ─────────────────────────────────────────────────────────────────────────
+# Extract all linked .md filenames from README.md
+# ─────────────────────────────────────────────────────────────────────────
+LINKED_FILES=()
+while IFS= read -r link; do
+  # Normalize: strip path prefix, keep just the filename
+  basename_link="$(basename "$link")"
+  LINKED_FILES+=("$basename_link")
+done < <(grep -oE '\([^)]*\.md\)' "$README" | tr -d '()' | sort -u)
+
+# Also extract .yaml links
+while IFS= read -r link; do
+  basename_link="$(basename "$link")"
+  LINKED_FILES+=("$basename_link")
+done < <(grep -oE '\([^)]*\.yaml\)' "$README" | tr -d '()' | sort -u)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Collect docs in core/ (recursive) and governance/ (non-recursive)
+# ─────────────────────────────────────────────────────────────────────────
+echo "--- Orphan scan: docs/governance/ ---"
+while IFS= read -r f; do
+  name="$(basename "$f")"
+  rel="${f#$ROOT/}"
+
+  # Skip known non-linked files
+  [[ "$name" == "_index.yaml" ]] && continue
+
+  found=false
+  for linked in "${LINKED_FILES[@]}"; do
+    if [[ "$name" == "$linked" ]]; then
+      found=true
+      break
+    fi
+  done
+
+  if [[ "$found" == "true" ]]; then
+    LINKED_COUNT=$((LINKED_COUNT+1))
+  else
+    echo "ORPHAN  $rel"
+    ORPHAN_COUNT=$((ORPHAN_COUNT+1))
+  fi
+done < <(find "$DOCS/governance" -maxdepth 1 -type f \( -name "*.md" -o -name "*.yaml" \) \
+  -not -name "_index.yaml" \
+  -not -path "*/_audits/*" \
+  | sort)
+
+echo ""
+echo "--- Orphan scan: docs/core/ ---"
+while IFS= read -r f; do
+  name="$(basename "$f")"
+  rel="${f#$ROOT/}"
+
+  found=false
+  for linked in "${LINKED_FILES[@]}"; do
+    if [[ "$name" == "$linked" ]]; then
+      found=true
+      break
+    fi
+  done
+
+  if [[ "$found" == "true" ]]; then
+    LINKED_COUNT=$((LINKED_COUNT+1))
+  else
+    echo "ORPHAN  $rel"
+    ORPHAN_COUNT=$((ORPHAN_COUNT+1))
+  fi
+done < <(find "$DOCS/core" -type f \( -name "*.md" -o -name "*.yaml" \) 2>/dev/null | sort)
+
+# ─────────────────────────────────────────────────────────────────────────
+# SUMMARY
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "linked: $LINKED_COUNT"
+echo "orphans: $ORPHAN_COUNT"
+echo "status: OK (diagnostic)"

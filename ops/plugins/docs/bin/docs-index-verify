@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# docs.index.verify — Verify bidirectional parity between governance docs and _index.yaml
+# Safety: read-only (scans files, no modifications)
+
+ROOT="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+GOV="$ROOT/docs/governance"
+INDEX="$GOV/_index.yaml"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+_need yq
+
+if [[ ! -d "$GOV" ]]; then
+  echo "STOP: docs/governance/ not found at $GOV" >&2
+  exit 2
+fi
+
+if [[ ! -f "$INDEX" ]]; then
+  echo "STOP: _index.yaml not found at $INDEX" >&2
+  exit 2
+fi
+
+echo "docs.index.verify"
+echo "root: $ROOT"
+echo
+
+ERRORS=0
+
+err()  { echo "ERROR: $*"; ERRORS=$((ERRORS+1)); }
+
+# ─────────────────────────────────────────────────────────────────────────
+# Collect files on disk (exclude _audits/, _index.yaml itself, subdirs)
+# ─────────────────────────────────────────────────────────────────────────
+DISK_FILES=()
+while IFS= read -r f; do
+  name="$(basename "$f")"
+  DISK_FILES+=("$name")
+done < <(find "$GOV" -maxdepth 1 -type f \( -name "*.md" -o -name "*.yaml" \) \
+  -not -name "_index.yaml" \
+  | sort)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Collect entries from _index.yaml
+# ─────────────────────────────────────────────────────────────────────────
+INDEX_FILES=()
+while IFS= read -r entry; do
+  [[ -z "$entry" || "$entry" == "null" ]] && continue
+  INDEX_FILES+=("$entry")
+done < <(yq eval '.documents[].file' "$INDEX" 2>/dev/null)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Check: files on disk but NOT in index
+# ─────────────────────────────────────────────────────────────────────────
+echo "--- Files on disk not in _index.yaml ---"
+MISSING_FROM_INDEX=0
+for disk_f in "${DISK_FILES[@]}"; do
+  found=false
+  for idx_f in "${INDEX_FILES[@]}"; do
+    if [[ "$disk_f" == "$idx_f" ]]; then
+      found=true
+      break
+    fi
+  done
+  if [[ "$found" == "false" ]]; then
+    err "on disk but not in index: $disk_f"
+    MISSING_FROM_INDEX=$((MISSING_FROM_INDEX+1))
+  fi
+done
+echo "  $MISSING_FROM_INDEX files on disk missing from index"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Check: index entries but NOT on disk
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Index entries not on disk ---"
+MISSING_FROM_DISK=0
+for idx_f in "${INDEX_FILES[@]}"; do
+  if [[ ! -f "$GOV/$idx_f" ]]; then
+    err "in index but not on disk: $idx_f"
+    MISSING_FROM_DISK=$((MISSING_FROM_DISK+1))
+  fi
+done
+echo "  $MISSING_FROM_DISK index entries missing from disk"
+
+# ─────────────────────────────────────────────────────────────────────────
+# SUMMARY
+# ─────────────────────────────────────────────────────────────────────────
+echo ""
+echo "disk_files: ${#DISK_FILES[@]}"
+echo "index_entries: ${#INDEX_FILES[@]}"
+echo "errors: $ERRORS"
+
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "status: FAIL"
+  exit 1
+else
+  echo "status: OK"
+fi
