@@ -43,6 +43,21 @@ Every new Claude Code session receives agent discovery info via `generate-contex
 - **Change**: update contract + registry entry, run `spine.verify`
 - **Retire**: remove contract + registry entry, document rationale in session handoff
 
+## MCP Bridge Scope
+
+The domain-agent MCP bridge provides tool-call access to domain agents from Claude Code sessions via `.mcp.json`.
+
+**Currently implemented:**
+- `spine-rag`: RAG query/retrieve/health via `ops/plugins/rag/bin/rag-mcp-server` (registered in `.mcp.json`)
+
+**Planned (not yet implemented):**
+- Domain-agent MCP bridges for finance, media, n8n agents (requires per-agent MCP server adapters in workbench)
+- Unified `agent.route` capability provides routing lookup but does not yet bridge MCP tool calls
+
+**Routing capability:** `./bin/ops cap run agent.route <domain-or-keyword>` resolves to the correct agent using `ops/bindings/agents.registry.yaml` routing rules.
+
+> **Important:** Do not claim full domain MCP parity in documentation. Only spine-rag is currently bridged. Domain agents are accessible via their own MCP servers (registered in MCPJungle), not yet via a unified spine MCP bridge.
+
 ## Safety Rules
 - No secrets in contracts or registry (names/paths only; never values)
 - Verification output must not print secret content

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-route — Route a domain keyword to the correct agent
+# Consults agents.registry.yaml routing_rules for deterministic lookup.
+# Usage: agent-route <domain-or-keyword>
+#        agent-route --list
+
+SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
+REGISTRY="$SPINE_CODE/ops/bindings/agents.registry.yaml"
+
+if [[ ! -f "$REGISTRY" ]]; then
+  echo "ERROR: agents.registry.yaml not found at $REGISTRY" >&2
+  exit 1
+fi
+
+if ! command -v yq &>/dev/null; then
+  echo "ERROR: yq is required but not found in PATH" >&2
+  exit 1
+fi
+
+usage() {
+  echo "Usage: agent-route <domain-or-keyword>"
+  echo "       agent-route --list"
+  echo ""
+  echo "Route a domain or keyword to the correct agent via agents.registry.yaml."
+  echo ""
+  echo "Options:"
+  echo "  --list    Print all registered agents"
+  echo "  --help    Show this help"
+}
+
+# --list: print all registered agents
+list_agents() {
+  local count
+  count=$(yq '.agents | length' "$REGISTRY")
+  for ((i=0; i<count; i++)); do
+    local id domain status contract
+    id=$(yq ".agents[$i].id" "$REGISTRY")
+    domain=$(yq ".agents[$i].domain" "$REGISTRY")
+    status=$(yq ".agents[$i].implementation_status" "$REGISTRY")
+    contract=$(yq ".agents[$i].contract" "$REGISTRY")
+    echo "agent: $id"
+    echo "domain: $domain"
+    echo "status: $status"
+    echo "contract: $contract"
+    echo "---"
+  done
+}
+
+# Route lookup: check routing_rules[].domains[] and routing_rules[].keywords[]
+route_lookup() {
+  local input="$1"
+  local rule_count
+  rule_count=$(yq '.routing_rules | length' "$REGISTRY")
+
+  for ((i=0; i<rule_count; i++)); do
+    # Check domains
+    local domain_match
+    domain_match=$(yq ".routing_rules[$i].domains[] | select(. == \"$input\")" "$REGISTRY" 2>/dev/null || true)
+    if [[ -n "$domain_match" ]]; then
+      print_agent "$(yq ".routing_rules[$i].agent" "$REGISTRY")"
+      return 0
+    fi
+
+    # Check keywords
+    local keyword_match
+    keyword_match=$(yq ".routing_rules[$i].keywords[] | select(. == \"$input\")" "$REGISTRY" 2>/dev/null || true)
+    if [[ -n "$keyword_match" ]]; then
+      print_agent "$(yq ".routing_rules[$i].agent" "$REGISTRY")"
+      return 0
+    fi
+  done
+
+  echo "ERROR: no agent found for input: $input" >&2
+  return 1
+}
+
+# Print agent details from the agents[] array given an agent ID
+print_agent() {
+  local agent_id="$1"
+  local agent_count
+  agent_count=$(yq '.agents | length' "$REGISTRY")
+
+  for ((i=0; i<agent_count; i++)); do
+    local id
+    id=$(yq ".agents[$i].id" "$REGISTRY")
+    if [[ "$id" == "$agent_id" ]]; then
+      local domain status contract
+      domain=$(yq ".agents[$i].domain" "$REGISTRY")
+      status=$(yq ".agents[$i].implementation_status" "$REGISTRY")
+      contract=$(yq ".agents[$i].contract" "$REGISTRY")
+      echo "agent: $id"
+      echo "domain: $domain"
+      echo "status: $status"
+      echo "contract: $contract"
+      return 0
+    fi
+  done
+
+  echo "ERROR: agent $agent_id referenced in routing_rules but not found in agents[]" >&2
+  return 1
+}
+
+# ── Main ──
+
+if [[ $# -eq 0 ]]; then
+  usage >&2
+  exit 1
+fi
+
+case "$1" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  --list)
+    list_agents
+    exit 0
+    ;;
+  *)
+    route_lookup "$1"
+    ;;
+esac
