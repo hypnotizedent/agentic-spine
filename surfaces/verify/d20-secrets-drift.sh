@@ -57,6 +57,7 @@ done
 if rg -n -e 'echo\s+.*\$(INFISICAL_TOKEN|INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET|CLIENT_SECRET|ACCESS_TOKEN)' \
         -e 'echo\s+.*\$\{(INFISICAL_TOKEN|INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET|CLIENT_SECRET|ACCESS_TOKEN)' \
         -e 'printf.*\$(INFISICAL_TOKEN|INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET|CLIENT_SECRET|ACCESS_TOKEN)' \
+        -e 'printf.*\$\{(INFISICAL_TOKEN|INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET|CLIENT_SECRET|ACCESS_TOKEN)' \
         "${expanded[@]}" 2>/dev/null; then
   fail "printing of secret variables detected"
 fi
@@ -84,7 +85,7 @@ done
 # 3) Forbid verbose curl (dumps headers including Authorization)
 # ─────────────────────────────────────────────────────────────────────────────
 
-if rg -n -e 'curl\s+.*(-v|--verbose)' "${expanded[@]}" 2>/dev/null; then
+if rg -n -e 'curl\s+.*(-v\b|--verbose|--trace)' "${expanded[@]}" 2>/dev/null; then
   fail "verbose curl detected (would dump Authorization headers)"
 fi
 
@@ -132,6 +133,8 @@ fi
 
 if rg -n -e 'echo.*client_secret' -e 'echo.*access_token' -e 'echo.*refresh_token' \
         -e 'printf.*client_secret' -e 'printf.*access_token' -e 'printf.*refresh_token' \
+        -e 'echo.*api_key' -e 'echo.*api_secret' \
+        -e 'printf.*api_key' -e 'printf.*api_secret' \
         "${expanded[@]}" 2>/dev/null; then
   fail "literal secret pattern in output command detected"
 fi

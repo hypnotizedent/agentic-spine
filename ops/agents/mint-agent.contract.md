@@ -48,7 +48,7 @@ On-demand via Claude Code/Desktop MCP. No watchers, no cron.
 | 213 (mint-apps) | 100.79.183.14 | App plane: files-api (:3500), order-intake (:3400), quote-page (:3341) |
 | 212 (mint-data) | 100.106.72.25 | Data plane: PostgreSQL (:5432), MinIO (:9000), Redis (:6379) |
 
-## V1 Tools (Read-Only)
+## Governed Tools
 
 | Tool | Safety | Description |
 |------|--------|-------------|
@@ -58,9 +58,4 @@ On-demand via Claude Code/Desktop MCP. No watchers, no cron.
 | `validate_intake` | read-only | Validate customer contract payload (no creation) |
 | `check_module_health` | read-only | Health probe for all endpoints |
 
-## Mutation Policy
-
-No mutation tools in V1. Future mutations require:
-1. API key auth via Infisical injection
-2. Spine capability registration
-3. D66 MCP parity gate compliance
+> **Mutation policy:** No mutation tools in V1. Future mutations require API key auth via Infisical injection, spine capability registration, and D66 MCP parity gate compliance.

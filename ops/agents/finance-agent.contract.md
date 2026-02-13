@@ -58,6 +58,12 @@ V2 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with r
 
 Superseded config-only MCP servers (`firefly.json`, `paperless.json`) are deactivated (enabled: false) in MCPJungle.
 
+## Invocation
+
+On-demand via Claude Code session. No watchers, no cron (WORKBENCH_CONTRACT compliance).
+
+V2 roadmap includes scheduled mailroom prompts for health digest and tax calendar.
+
 ## Endpoints
 
 | Service | Host | Port | Notes |
@@ -79,9 +85,3 @@ Superseded config-only MCP servers (`firefly.json`, `paperless.json`) are deacti
 | finance-adapter | Mint billable event bridge (mint-modules repo) |
 | SimpleFIN | Daily bank sync (cron on VM 211) |
 | n8n (VM 202) | Firefly-to-Mint OS expense webhook |
-
-## Invocation
-
-On-demand via Claude Code session. No watchers, no cron (WORKBENCH_CONTRACT compliance).
-
-V2 roadmap includes scheduled mailroom prompts for health digest and tax calendar.

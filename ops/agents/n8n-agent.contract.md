@@ -24,7 +24,7 @@
 | Execution triage + failure review | n8n |
 | Safe manual execution policy | n8n |
 
-## Defers To Spine (Infrastructure Layer)
+## Defers to Spine (Infrastructure Layer)
 
 | Concern | Spine Artifact |
 |---------|---------------|
@@ -38,7 +38,7 @@
 
 On-demand via Claude Code session. No watchers, no cron, no schedulers (WORKBENCH_CONTRACT compliance).
 
-## Endpoint
+## Endpoints
 
 | Service | Host | URL |
 |---------|------|-----|

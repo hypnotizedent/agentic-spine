@@ -150,6 +150,7 @@ D75 prevents accidental manual edits, not intentional circumvention.
 ## SSOT File
 
 Gap registry: `ops/bindings/operational.gaps.yaml`
+Schema definition: `ops/bindings/gap.schema.yaml`
 
 Schema per entry:
 ```yaml

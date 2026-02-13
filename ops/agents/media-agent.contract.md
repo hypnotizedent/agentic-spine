@@ -36,6 +36,10 @@
 | NFS mounts | Spine-governed fstab on VMs |
 | SSH targets | `ops/bindings/ssh.targets.yaml` |
 
+## Governed Tools
+
+_No governed tools registered. Media operations are read-only via API._
+
 ## Invocation
 
 On-demand via Claude Code session. No watchers, no cron, no schedulers (WORKBENCH_CONTRACT compliance). Spine may invoke via mailroom prompt if needed.

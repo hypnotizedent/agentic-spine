@@ -228,8 +228,23 @@ This protocol explicitly does NOT address:
 
 ---
 
+## 9. Workbench Path Governance
+
+The canonical workbench path is defined in the binding layer:
+
+    ops/bindings/host.audit.allowlist.yaml → workbench_root
+
+All governance documents, capability definitions, and automation scripts should reference the workbench through this binding rather than hardcoding paths directly. This prevents path drift when infrastructure moves.
+
+**Current binding:** `workbench_root: "/Users/ronnyworks/code/workbench"`
+
+> **Note:** 137 existing docs reference ~/code/workbench directly. These are grandfathered. New docs and updates should use the binding reference or relative paths.
+
+---
+
 ## Changelog
 
 | Date | Change |
 |------|--------|
+| 2026-02-13 | Add workbench path governance section |
 | 2026-02-13 | Initial creation of share protocol |
