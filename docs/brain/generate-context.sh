@@ -168,10 +168,9 @@ PY
     echo ""
     echo "| Category | Gates | Focus |"
     echo "|----------|-------|-------|"
-    yq -r '.categories[] | select(.id != "retired") | "| " + .id + " | " + .description + " |"' "$GATE_REGISTRY" 2>/dev/null | while IFS= read -r line; do
-      cat_id="$(echo "$line" | sed 's/^| //' | sed 's/ |.*//')"
+    yq -r '.categories[] | select(.id != "retired") | .id + "\t" + .description' "$GATE_REGISTRY" 2>/dev/null | while IFS=$'\t' read -r cat_id desc; do
+      [[ -z "$cat_id" ]] && continue
       gates="$(yq -r "[.gates[] | select(.category == \"$cat_id\" and .retired != true) | .id] | join(\", \")" "$GATE_REGISTRY" 2>/dev/null || echo "?")"
-      desc="$(echo "$line" | sed 's/^[^|]*| //' | sed 's/ |$//')"
       echo "| $cat_id | $gates | $desc |"
     done
     echo ""
