@@ -158,7 +158,43 @@ PY
   fi
   echo ""
 
-  # ── Section 6: Last Handoff ──
+  # ── Section 6: Gate Reference Card ──
+  echo "## Gate Reference Card"
+  echo ""
+  GATE_REGISTRY="$SP/ops/bindings/gate.registry.yaml"
+  if [[ -f "$GATE_REGISTRY" ]] && command -v yq >/dev/null 2>&1; then
+    gate_count="$(yq -r '.gates | length' "$GATE_REGISTRY" 2>/dev/null || echo "?")"
+    echo "D1-D85 drift surface ($gate_count gates). Run \`/verify\` to check, \`/gates\` to browse, \`/triage\` on failure."
+    echo ""
+    echo "| Category | Gates | Focus |"
+    echo "|----------|-------|-------|"
+    yq -r '.categories[] | select(.id != "retired") | "| " + .id + " | " + .description + " |"' "$GATE_REGISTRY" 2>/dev/null | while IFS= read -r line; do
+      cat_id="$(echo "$line" | sed 's/^| //' | sed 's/ |.*//')"
+      gates="$(yq -r "[.gates[] | select(.category == \"$cat_id\" and .retired != true) | .id] | join(\", \")" "$GATE_REGISTRY" 2>/dev/null || echo "?")"
+      desc="$(echo "$line" | sed 's/^[^|]*| //' | sed 's/ |$//')"
+      echo "| $cat_id | $gates | $desc |"
+    done
+    echo ""
+    echo "Critical gates: $(yq -r '[.gates[] | select(.severity == "critical") | .id] | join(", ")' "$GATE_REGISTRY" 2>/dev/null || echo "?")"
+  else
+    echo "(gate.registry.yaml not found or yq not installed)"
+  fi
+  echo ""
+
+  # ── Section 7: Capability Precondition Hints ──
+  echo "## Capability Precondition Hints"
+  echo ""
+  echo "Before API work: \`./bin/ops cap run secrets.binding\` then \`./bin/ops cap run secrets.auth.status\`"
+  echo ""
+  echo "Common workflows:"
+  echo "- Fix a bug: \`/fix\` (file gap -> claim -> fix -> verify -> close)"
+  echo "- Triage gate failure: \`/triage\` (read gate script, extract TRIAGE hint)"
+  echo "- Multi-agent writes: \`/propose\` (submit proposal, operator applies)"
+  echo "- Multi-step work: \`/loop\` (create scope -> file gaps per phase -> execute)"
+  echo "- Before changes: \`/check\` (proactive gate validation)"
+  echo ""
+
+  # ── Section 8: Last Handoff ──
   if [[ -f "$SP/docs/brain/memory.md" ]]; then
     echo "## Last Handoff"
     echo ""
