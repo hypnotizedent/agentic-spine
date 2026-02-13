@@ -91,7 +91,7 @@ Pillar entrypoints (per stack)
 | `ISSUE_CLOSURE_SOP.md` | How to close issues properly |
 | `GIT_REMOTE_AUTHORITY.md` | Canonical git authority (Gitea primary, GitHub mirror-only) |
 | `AGENT_BOUNDARIES.md` | What agents can/cannot do |
-| `SUPERVISOR_CHECKLIST.md` | Verify work before shipping |
+| `SUPERVISOR_CHECKLIST.md` | (superseded — verification steps folded into spine.verify) |
 | `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |
 | `MAILROOM_BRIDGE.md` | Governed remote API bridge (read outbox/receipts, enqueue prompts) |
 | `ORCHESTRATION_CAPABILITY.md` | Machine-enforced orchestration contract and strict terminal entry behavior |
@@ -323,7 +323,7 @@ START: Agent has a question about "truth"
     │       NO ↓
     │
     ├─▶ Is there an authoritative doc?
-    │       → Check AUTHORITY_INDEX.md
+    │       → Check GOVERNANCE_INDEX.md (supersedes AUTHORITY_INDEX.md)
     │       YES → Use that doc
     │       NO ↓
     │
@@ -359,7 +359,7 @@ An SSOT (Single Source of Truth) claim means a document asserts:
 | Session handoff | `docs/sessions/2026-01-24.md` | Ephemeral, not canonical |
 | Archive content | `*/.archive/*` | Historical, explicitly non-authoritative |
 | README files | `module/README.md` | Entrypoint, not truth source |
-| Index/pointer docs | `AUTHORITY_INDEX.md` | Points to SSOTs, is not itself one |
+| Index/pointer docs | `GOVERNANCE_INDEX.md` | Points to SSOTs, is not itself one |
 
 ### Hard Rule: Register or Remove
 
@@ -444,7 +444,7 @@ Before adding `status: authoritative` or claiming SSOT:
 | Document | Relationship |
 |----------|--------------|
 | `SSOT_REGISTRY.yaml` | Machine-readable version of SSOT list |
-| `AUTHORITY_INDEX.md` | Older doc registry (being superseded) |
+| `AUTHORITY_INDEX.md` | (superseded — replaced by this document, GOVERNANCE_INDEX.md) |
 | `REPO_STRUCTURE_AUTHORITY.md` | Where files belong |
 | `SEARCH_EXCLUSIONS.md` | What's excluded from search |
 | `docs/governance/SESSION_PROTOCOL.md` | Session entry point |

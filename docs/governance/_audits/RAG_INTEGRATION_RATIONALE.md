@@ -34,7 +34,7 @@ The hot-folder-watcher currently injects:
 | Source | Lines | Purpose |
 |--------|-------|---------|
 | `.brain/rules.md` | 182-187 | 5 operating rules, RAG query reminder |
-| Governance reference | 177-179 | Pointer to SUPERVISOR_CHECKLIST.md |
+| Governance reference | 177-179 | Pointer to governance checklist (SUPERVISOR_CHECKLIST.md superseded) |
 | User prompt | 328-329 | Raw content from inbox file |
 | **RAG-lite context** | 320-325 | **Opt-in retrieval if `RAG:ON` + `QUERY:` present** |
 

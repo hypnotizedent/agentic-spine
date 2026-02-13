@@ -318,7 +318,7 @@ ssh docker-host "docker ps --format 'table {{.Names}}\t{{.Status}}' | grep mint-
 |-------|------|---------|
 | `shipping_labels` | 0 | Outbound shipping labels via EasyPost (#465) |
 
-**Schema:** See `docs/modules/shipping/README.md` for full column list.
+**Schema:** (legacy reference — original module docs archived with mint-os)
 
 **Key Columns:**
 - `order_id` - FK to orders (nullable for standalone shipments)
@@ -335,7 +335,7 @@ ssh docker-host "docker ps --format 'table {{.Names}}\t{{.Status}}' | grep mint-
 | `job_photos` | 0 | Finished job photos for reorder reference (#538) |
 | `pending_jobs` | 0 | Pre-quote job IDs (JIRA model) (#539) |
 
-**Schema:** See `docs/modules/files/SPEC.md` for full column list.
+**Schema:** (legacy reference — original module docs archived with mint-os)
 
 **job_photos:**
 - `order_id` - FK to orders (required)
@@ -409,7 +409,7 @@ ssh docker-host "docker ps --format 'table {{.Names}}\t{{.Status}}' | grep mint-
 
 ## FILE STORAGE GOVERNANCE
 
-> **MinIO Infrastructure:** See `infrastructure/storage/` for compose and `mint-os/docs/modules/files/SPEC.md` for file operations.
+> **MinIO Infrastructure:** See `infrastructure/storage/` for compose. (File operations spec was in mint-os module docs, now archived.)
 > ⚠️ **MinIO extracted (2026-01-23):** Container renamed `mint-os-minio` → `minio`. Location: `infrastructure/storage/`.
 > **Note:** `artwork-module/` contains historical extraction notes only, not current state.
 
@@ -1357,7 +1357,7 @@ Send `checkout_url` to customer.
 
 ## FILE ARCHITECTURE (Current State)
 
-> **Files Module:** See `mint-os/docs/modules/files/SPEC.md` for bucket inventory and file operations.
+> **Files Module:** (Bucket inventory and file operations spec was in mint-os module docs, now archived. See `modules/files-api/` for active implementation.)
 > **Updated:** 2026-01-26
 > ⚠️ **MinIO extracted:** Now standalone in `infrastructure/storage/`. See `modules/files-api/` for active implementation.
 
@@ -1397,7 +1397,7 @@ files.ronny.works/
 | `suppliers` | ~4K | N/A | N/A | N/A |
 | ~~`artwork/`~~ | — | — | — | ✅ **DELETED** |
 
-**See:** `mint-os/docs/modules/files/SPEC.md` for detailed rename status and scripts
+**See:** (legacy reference — rename status and scripts were in mint-os module docs, now archived)
 
 ### ❌ DEPRECATED: `jobs/` bucket structure
 

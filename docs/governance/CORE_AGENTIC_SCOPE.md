@@ -29,7 +29,7 @@ Canonical audit trail per operation:
 
 ### 3. Governance
 Authoritative contracts, manifests, and SSOT:
-- Authority definitions (docs/governance/AUTHORITY_INDEX.md)
+- Authority definitions (docs/governance/GOVERNANCE_INDEX.md)
 - Service SSOT (docs/governance/SERVICE_REGISTRY.yaml)
 - Governance manifest (docs/governance/manifest.yaml)
 - Agent contracts (ops/agents/)
@@ -291,7 +291,7 @@ This is spine's "immune system."
 ## Examples
 
 ### Example 1: Governance Doc (CORE NOW)
-**Asset:** `docs/governance/AUTHORITY_INDEX.md`
+**Asset:** `docs/governance/GOVERNANCE_INDEX.md` (supersedes AUTHORITY_INDEX.md)
 **Why CORE:** Strengthens Governance invariant
 **Checklist:**
 - ✅ Spine-rooted (uses SPINE_INBOX/OUTBOX/STATE)
