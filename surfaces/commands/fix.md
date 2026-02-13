@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-13
+scope: slash-command
+---
+
 # /fix - Guided Gap Workflow
 
 Step-by-step gap lifecycle: file, claim, fix, verify, close.
@@ -17,6 +24,9 @@ Step-by-step gap lifecycle: file, claim, fix, verify, close.
    ```
    Valid types: stale-ssot, missing-entry, agent-behavior, unclear-doc, duplicate-truth, runtime-bug
    Valid severities: low, medium, high, critical
+
+   **Loop linkage:** When filing a gap inside an active loop, set `--discovered-by` to the loop ID (e.g., `LOOP-<NAME>-<DATE>`). This links the gap to the loop for reconciliation tracking. To add explicit `parent_loop` linkage (for deferred gaps), manually edit the gap entry after filing.
+
 4. Claim the gap:
    ```
    ./bin/ops cap run gaps.claim GAP-OP-<N> --action "<what you will do>"

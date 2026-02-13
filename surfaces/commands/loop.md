@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-13
+scope: slash-command
+---
+
 # /loop - Loop Lifecycle
 
 Manage multi-step work through the Open Loop Engine.
@@ -32,6 +39,19 @@ Manage multi-step work through the Open Loop Engine.
 3. Define: Goal, Success Criteria, Phases, DoD per phase
 4. Commit: `gov(LOOP-<NAME>-<DATE>): create loop scope`
 5. File gaps for each phase: use `/fix` workflow
+
+### Start a governed worktree (optional):
+If the loop benefits from isolation (e.g., multi-agent coordination):
+```
+./bin/ops start loop LOOP-<NAME>-<DATE>
+```
+This creates:
+- A git worktree at `worktrees/LOOP-<NAME>-<DATE>/`
+- A dedicated branch
+- Clean separation from main
+
+**When to use:** Multi-agent loops, risky refactors, or when you want to keep main clean during work.
+**When to skip:** Single-agent sessions where direct-to-main commits are allowed.
 
 ### Work within a loop:
 1. Claim relevant gaps before starting work.
