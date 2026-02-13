@@ -63,3 +63,12 @@ scope: agent-governance-brief
 - `./bin/ops start loop <LOOP_ID>` — start worktree for a loop
 - `./bin/ops cap run spine.verify` — full drift check
 - `/ctx` — load full governance context
+
+## Embed Architecture (D65)
+
+This governance brief is **fully embedded** (not pointer-shimmed) in both AGENTS.md and CLAUDE.md.
+This is intentional under D65 (agent-briefing-sync-lock): agents must receive the complete
+governance brief at session entry without needing to follow references. To update, edit this
+file and run `ops/hooks/sync-agent-surfaces.sh` to propagate. Do not convert AGENTS.md or
+CLAUDE.md governance blocks to pointer shims — D65 enforces full embed until a future D65-v2
+refactor introduces a different delivery mechanism.

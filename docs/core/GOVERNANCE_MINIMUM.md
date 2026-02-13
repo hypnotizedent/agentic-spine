@@ -1,9 +1,16 @@
 # Governance Minimum (Portable Invariants)
 
 > **Status:** authoritative
-> **Last verified:** 2026-02-04
+> **Last verified:** 2026-02-13
 
 This is the smallest governance set required for the spine to remain regression-proof.
+
+## Disposition
+
+**Standalone by design.** This document is intentionally separate from CORE_LOCK.md.
+CORE_LOCK defines the runtime model, entry points, and drift gates. GOVERNANCE_MINIMUM
+defines the portable invariants that hold even without the full spine runtime (e.g., during
+bootstrap or disaster recovery). Do not merge these two documents.
 
 ## Core invariants
 - No work outside governed runtime
