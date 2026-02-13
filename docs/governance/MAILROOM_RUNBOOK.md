@@ -310,6 +310,19 @@ The bridge provides read/write HTTP endpoints to mailroom state (results, receip
 Both operate on the same filesystem but serve different access patterns — the watcher is local-only,
 the bridge is remote-accessible via Tailscale.
 
+### Mailroom / n8n Non-Coupling Boundary
+
+The mailroom (spine) and n8n (workbench) are **architecturally decoupled**:
+
+- n8n workflows and compose live in `workbench/infra/compose/n8n/` — they are workbench-owned
+- n8n interacts with the mailroom **only** through the bridge HTTP API (optional)
+- n8n does NOT directly invoke spine capabilities, read spine state, or write to mailroom queues
+- The bridge is the sole coupling point: n8n calls bridge endpoints to enqueue prompts or read results
+- If the bridge is stopped, n8n and the mailroom operate independently with zero interaction
+- Cron-like scheduling in n8n replaces traditional crontab entries (see `CRON_REGISTRY.md` in workbench legacy docs)
+
+This boundary is intentional: the spine must not depend on n8n, and n8n must not bypass governed entry.
+
 ---
 
 ## Health Checks
