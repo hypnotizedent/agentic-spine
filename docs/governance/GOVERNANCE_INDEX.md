@@ -104,6 +104,7 @@ Pillar entrypoints (per stack)
 | `BUILD_MODE_CHECKLIST.md` | Operator stop-gated checklist for predictable build-mode execution |
 | `ONBOARDING_PLAYBOOK.md` | Standard onboarding workflow for VM/agent/capability/tool/surface changes |
 | `GAP_LIFECYCLE.md` | Gap registry lifecycle, mutation capabilities, claim semantics, D75 lock |
+| `RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md` | Cross-repo operating contract for stable parallel execution across spine/workbench/mint-modules |
 | `WORKBENCH_SHARE_PROTOCOL.md` | Governance for publishing curated workbench content to GitHub share channel |
 | `ARCHIVE_POLICY.md` | Archive directory governance: retention, cleanup cadence, reader expectations |
 | `AGENT_TERMINOLOGY_GLOSSARY.md` | Canonical definitions for overloaded "agent" terms in the spine |
@@ -471,6 +472,7 @@ Before adding `status: authoritative` or claiming SSOT:
 | `docs/governance/POST_GAP_OPERATING_MODEL.md` | Post-gap stability contract and lifecycle governance |
 | `docs/governance/BUILD_MODE_CHECKLIST.md` | Build-mode execution checklist with stop-gates |
 | `docs/governance/ONBOARDING_PLAYBOOK.md` | Onboarding commands and completion criteria |
+| `docs/governance/RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md` | Parallel execution contract across runway/tooling/product surfaces |
 
 ---
 
@@ -478,6 +480,7 @@ Before adding `status: authoritative` or claiming SSOT:
 
 | Date | Change | Issue |
 |------|--------|-------|
+| 2026-02-13 | Added Runway/Tooling/Product Operating Contract v1 and wired it into governance indexes | — |
 | 2026-02-13 | Added post-gap operating model, build-mode checklist, onboarding playbook, and stabilization bindings | — |
 | 2026-02-13 | Added Share Channel Governance section + WORKBENCH_SHARE_PROTOCOL.md | — |
 | 2026-02-05 | Added Legacy References section; spine-native SSOTs table | — |
@@ -490,7 +493,7 @@ Before adding `status: authoritative` or claiming SSOT:
 
 > This appendix is generated to ensure every governance doc is discoverable from the authority chain.
 > The sections above remain the curated authority narrative; this list is an index only.
-> Last regenerated: 2026-02-13 (76 docs).
+> Last regenerated: 2026-02-13 (77 docs).
 
 - `AGENT_BOUNDARIES.md`
 - `AGENT_GOVERNANCE_BRIEF.md`
@@ -552,6 +555,7 @@ Before adding `status: authoritative` or claiming SSOT:
 - `REBOOT_HEALTH_GATE.md`
 - `RELEASE_PROTOCOL.md`
 - `REPO_STRUCTURE_AUTHORITY.md`
+- `RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md`
 - `RTO_RPO.md`
 - `SCRIPTS_AUTHORITY.md`
 - `SCRIPTS_REGISTRY.md`

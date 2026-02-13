@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-13
 scope: session-entry
 ---
 
@@ -18,6 +18,7 @@ scope: session-entry
 3. Open `docs/brain/README.md` to see the hotkeys, memory rules, and context injection process.
 4. Browse `docs/governance/GOVERNANCE_INDEX.md` to learn how governance knowledge is structured and where single sources of truth live.
 5. If you operate agents, refer to `docs/governance/AGENTS_GOVERNANCE.md` and `docs/governance/CORE_AGENTIC_SCOPE.md` to understand the lifecycle and trusted directories.
+6. For cross-repo parallel work, read `docs/governance/RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md` before opening additional write terminals.
 
 ## Session steps
 
@@ -117,7 +118,7 @@ Every open gap in `operational.gaps.yaml` must be linked to an active loop (`par
 - Multiple terminals mutating git concurrently (branches/worktrees/merges in parallel). This creates stale worktrees, branch confusion, and occasional unexpected commits. The coarse git lock in ops commands helps, but ad-hoc git in multiple terminals can still bypass it. **Default rule:** if multiple terminals/agents may be active, treat the repo as read-only and use mailroom-gated writes (change proposals).
 - Remote split brain (origin vs github not aligned). Agents base branches off different tips, so “truth” diverges and merges become messy. D62 is specifically to stop that.
 - Loop closeout not consistently done. Without updating the loop scope with receipts and closing it, the next agent can’t tell what’s already proven and repeats work. D61 + `agent.session.closeout` is the mechanism meant to prevent this.
-- Two repos, two contracts (`agentic-spine` vs `workbench`). If workbench changes aren’t tied back to a spine loop (or vice versa), you get coordination gaps even when each repo is individually clean.
+- Two repos, two contracts (`agentic-spine` vs `workbench`). If workbench changes aren’t tied back to a spine loop (or vice versa), you get coordination gaps even when each repo is individually clean. Use `RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md` to declare write ownership and repo sequence up front.
 
 ### Codex Worktree Hygiene
 

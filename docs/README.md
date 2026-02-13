@@ -67,6 +67,7 @@ The authority chain. When in doubt, these are the source of truth.
 | [AGENT_GOVERNANCE_BRIEF.md](governance/AGENT_GOVERNANCE_BRIEF.md) | Canonical governance brief mirrored into agent entry surfaces |
 | [AGENTS_GOVERNANCE.md](governance/AGENTS_GOVERNANCE.md) | Agent lifecycle and verification contract |
 | [GAP_LIFECYCLE.md](governance/GAP_LIFECYCLE.md) | Gap registry lifecycle, claim semantics, D75 lock |
+| [RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md](governance/RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md) | Cross-repo contract for stable parallel execution across runway/tooling/product |
 | [MINT_PRODUCT_GOVERNANCE.md](governance/MINT_PRODUCT_GOVERNANCE.md) | Product governance for Mint project |
 | [CLAUDE_ENTRYPOINT_SHIM.md](governance/CLAUDE_ENTRYPOINT_SHIM.md) | Claude home instruction shim contract |
 | [AGENTS_LOCATION.md](governance/AGENTS_LOCATION.md) | Where agent scripts live |

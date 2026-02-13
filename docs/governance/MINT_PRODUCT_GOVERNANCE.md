@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-12
+last_verified: 2026-02-13
 scope: mint-product-governance
 ---
 
@@ -25,6 +25,7 @@ scope: mint-product-governance
 - Spine governs where modules run, how they're monitored, and who owns them.
 - Workbench owns compose files and deploy scripts.
 - mint-modules owns source code, tests, and API contracts.
+- Cross-repo execution sequencing and write ownership follow `RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md`.
 - The legacy repo is a dead reference. Never copy files from it. Extract knowledge only.
 
 ## 2. Module Ownership
@@ -153,7 +154,7 @@ Before any module deployment to production:
 - **D43** (secrets namespace lock): Enforces `/spine/services/<module>/` namespace structure.
 - **D18** (docker compose drift gate): Validates compose file references match SERVICE_REGISTRY.
 - **Release gates** (section 6): Checked manually until a dedicated drift gate is added.
-- **Proposal flow**: All agent-authored module changes go through `proposals.apply`.
+- **Multi-agent write policy**: Agent-authored module changes must follow the active governed path (proposal flow and apply-owner, or orchestration lane integration where declared).
 - **This document** is the single source of truth for product-level governance.
   Infra-level governance remains under `AGENTS.md` and `AGENT_GOVERNANCE_BRIEF.md`.
 
