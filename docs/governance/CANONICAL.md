@@ -1,19 +1,16 @@
 ---
-status: authoritative
+status: merged
+merged_into: docs/core/CANONICAL_DOCS.md
+merged_date: 2026-02-13
 owner: "@ronny"
-last_verified: 2026-02-05
 scope: canonical-definitions
 ---
 
-# Canonical Governance Index
+# Canonical Governance Index (MERGED)
 
-The files in this directory are the **authoritative sources** for agent governance
-within agentic-spine.
+This document has been merged into [CANONICAL_DOCS.md](../core/CANONICAL_DOCS.md).
 
-Rules:
-- These files define policy, authority, and boundaries.
-- Any similarly named or overlapping documents outside this directory are
-  **historical reference only**.
-- Canonical docs are not merged or rewritten without explicit approval.
+Canonical documentation surface rules, conflict resolution, and agent behavior
+constraints are maintained in the consolidated core contract.
 
-Status: Canon declared.
+See: **docs/core/CANONICAL_DOCS.md**

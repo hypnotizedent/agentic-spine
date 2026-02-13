@@ -1,18 +1,14 @@
 ---
-description: Check incident history - what failed before?
-allowed-tools: Read, Bash(mint:*)
+status: archived
+archived_date: 2026-02-13
+replaced_by: "workbench incident history + rg search"
+owner: "@ronny"
+scope: deprecated-claude-command
 ---
 
-Incident history lives in the workbench (external, read-only). Use RAG first:
+# incidents (ARCHIVED)
 
-Deprecated: `mint ask` is no longer a supported query path. Use SSOT docs + `rg` instead.
+This command has been archived. The `mint ask` incident lookup path is deprecated.
 
-If you need to browse manually, use [WORKBENCH_TOOLING_INDEX.md](../../governance/WORKBENCH_TOOLING_INDEX.md).
-Do not treat external docs as spine authority.
-
-Common patterns to check:
-- Tailscale DNS issues → `tailscale up --accept-dns=false --reset`
-- Docker host issues → Check DOCKER_HOST env var
-- RAG not working → Check SERVICE_REGISTRY.yaml RAG Operations section
-
-Present any relevant past incidents and their fixes before proceeding.
+**Replacement:** Use workbench incident history or `rg` search for incident data.
+See: `docs/governance/GOVERNANCE_INDEX.md` for navigation.
