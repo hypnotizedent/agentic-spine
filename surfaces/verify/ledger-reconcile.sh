@@ -99,6 +99,29 @@ if [[ $receipt_count -eq 0 ]]; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════
+# Check 5: Receipt-to-ledger parity
+# ═════════════════════════════════════════════════════════════════════════
+# Every RCAP receipt directory should have a corresponding CAP row in the
+# ledger. Known exception: 55 pilot-phase receipts (2026-02-01/02) predate
+# the ledger integration and are permanently unmatched.
+
+KNOWN_PRE_LEDGER=55
+
+# Count RCAP directories (committed receipts)
+rcap_count=$(find "$RECEIPTS_DIR" -maxdepth 1 -type d -name "RCAP-*" 2>/dev/null | wc -l | tr -d ' ')
+
+# Count CAP rows in ledger (skip header, match CAP- prefix)
+cap_rows=$(awk -F',' 'NR>1 && $1 ~ /^CAP-/ {c++} END {print c+0}' "$LEDGER_FILE")
+
+parity_delta=$(( rcap_count - cap_rows ))
+
+if [[ $parity_delta -gt $KNOWN_PRE_LEDGER ]]; then
+    new_missing=$(( parity_delta - KNOWN_PRE_LEDGER ))
+    ISSUES+=("ledger_parity: $new_missing new receipts without ledger rows (total delta=$parity_delta, known_pre_ledger=$KNOWN_PRE_LEDGER)")
+    EXIT_CODE=1
+fi
+
+# ═════════════════════════════════════════════════════════════════════════
 # Output Results
 # ═════════════════════════════════════════════════════════════════════════
 

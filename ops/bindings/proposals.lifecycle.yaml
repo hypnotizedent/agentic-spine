@@ -80,6 +80,67 @@ required_fields:
     - hold_reason
 
 # ─────────────────────────────────────────────────────────────────────────
+# Artifact Requirements Per Status
+# ─────────────────────────────────────────────────────────────────────────
+# Every proposal directory must contain manifest.yaml.
+# Additional artifact requirements depend on status and proposal type.
+#
+# receipt.md:
+#   - Required for pending and applied
+#   - Recommended for draft, draft_hold, read-only
+#   - Not required for invalid
+#
+# files/ directory:
+#   - Required if changes array is non-empty
+#   - May be absent for planning-only proposals (changes: [], no_runtime_change: true)
+#   - May contain audit/discovery outputs for read-only proposals
+#
+# .applied marker:
+#   - Written by proposals-apply on successful commit
+#   - Required artifact for applied status (not agent-created)
+#
+# Decision: GAP-OP-279
+
+artifact_requirements:
+  all:
+    - manifest.yaml   # Always required — schema validated by proposals-apply
+
+  pending:
+    required:
+      - receipt.md    # Documents agent intent and rationale
+      - files/        # Required when changes array is non-empty
+
+  applied:
+    required:
+      - receipt.md
+      - files/        # Was validated during apply
+      - .applied      # Marker written by proposals-apply (timestamp + commit SHA)
+
+  draft:
+    recommended:
+      - receipt.md
+    conditional:
+      - files/        # Required if changes array is non-empty
+
+  draft_hold:
+    recommended:
+      - receipt.md    # Optional for planning-only proposals
+    conditional:
+      - files/        # Required if changes array is non-empty; absent for planning-only
+
+  read-only:
+    recommended:
+      - receipt.md
+    optional:
+      - files/        # May contain audit/discovery outputs
+
+  superseded:
+    inherited: true   # Artifacts inherited from pre-supersede state
+
+  invalid:
+    required: []      # Manifest is malformed; no artifact expectations
+
+# ─────────────────────────────────────────────────────────────────────────
 # SLA / TTL Thresholds
 # ─────────────────────────────────────────────────────────────────────────
 
