@@ -42,6 +42,31 @@ scope: session-entry
    - **Git authority:** Gitea (`origin`) is canonical; GitHub is mirror-only. See `docs/governance/GIT_REMOTE_AUTHORITY.md`.
    - **Share publish flow:** To publish curated content to the share channel, run the three-step capability flow: `share.publish.preflight` → `share.publish.preview` → `share.publish.apply --execute`. See `docs/governance/WORKBENCH_SHARE_PROTOCOL.md`.
 
+## Execution Mode Decision Tree
+
+| Scenario | Execution Mode |
+|----------|---------------|
+| Single read-only query | `ops cap run` (auto-approval) |
+| Single mutating action | `ops cap run` (manual approval) |
+| Multi-step coordinated work | Open a loop, use proposal flow |
+| Quick verify/status check | `ops cap run spine.verify` or `ops status` |
+
+---
+
+## Loop Scope Lifecycle
+
+Valid loop scope status values (all lowercase):
+
+| Status | Meaning |
+|--------|---------|
+| `planned` | Loop scope defined but work has not started |
+| `active` | Work is in progress under this loop |
+| `closed` | All work complete, receipts generated, loop finalized |
+
+All loop scope files in `mailroom/state/loop-scopes/` MUST use one of these three values in their status field.
+
+---
+
 ## After the session
 
 - Store any learnings in `docs/brain/memory.md` if that system is enabled.

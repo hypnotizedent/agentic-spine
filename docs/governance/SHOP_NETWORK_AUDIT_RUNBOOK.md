@@ -19,6 +19,15 @@ scope: shop-network-audit
 
 ---
 
+## Spine Execution Protocol
+
+All operations in this runbook MUST be executed via capability system:
+- Execute: `./bin/ops cap run <capability>`
+- Receipts: auto-generated per execution
+- Direct execution of scripts is prohibited
+
+---
+
 ## What Is "Canonical" vs "Live Truth"?
 
 | Term | Meaning | Source |

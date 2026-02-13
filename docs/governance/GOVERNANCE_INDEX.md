@@ -99,6 +99,8 @@ Pillar entrypoints (per stack)
 | `GAP_LIFECYCLE.md` | Gap registry lifecycle, mutation capabilities, claim semantics, D75 lock |
 | `HOST_DRIFT_GATES.md` | D76+: home-surface hygiene, workbench contract/path/script/authority-trace locks |
 | `WORKBENCH_SHARE_PROTOCOL.md` | Governance for publishing curated workbench content to GitHub share channel |
+| `ARCHIVE_POLICY.md` | Archive directory governance: retention, cleanup cadence, reader expectations |
+| `AGENT_TERMINOLOGY_GLOSSARY.md` | Canonical definitions for overloaded "agent" terms in the spine |
 
 ### Share Channel Governance
 
@@ -464,12 +466,14 @@ Before adding `status: authoritative` or claiming SSOT:
 
 > This appendix is generated to ensure every governance doc is discoverable from the authority chain.
 > The sections above remain the curated authority narrative; this list is an index only.
-> Last regenerated: 2026-02-13 (68 docs).
+> Last regenerated: 2026-02-13 (70 docs).
 
 - `AGENT_BOUNDARIES.md`
 - `AGENT_GOVERNANCE_BRIEF.md`
+- `AGENT_TERMINOLOGY_GLOSSARY.md`
 - `AGENTS_GOVERNANCE.md`
 - `AGENTS_LOCATION.md`
+- `ARCHIVE_POLICY.md`
 - `AUDIT_VERIFICATION.md`
 - `AUTHENTIK_BACKUP_RESTORE.md`
 - `BACKUP_CALENDAR.md`

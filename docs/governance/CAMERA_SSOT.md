@@ -10,6 +10,8 @@ parent_receipts:
 
 # CAMERA SSOT
 
+> Entries marked 'pending-survey' require physical verification.
+>
 > Canonical, spine-native description of the **Shop camera system**.
 >
 > **Covers:** Hikvision NVR (ERI-K216-P16), all camera channels, camera network topology (192.168.254.0/24), storage, and Frigate readiness.
@@ -95,18 +97,18 @@ Last ISAPI query: 2026-02-08. Web UI observation: 2026-02-09 (0 feeds rendering 
 
 | Channel | NVR Name | Internal IP | Online (2026-02-08) | Detect Result | Physical Location | Model |
 |---------|----------|-------------|---------------------|---------------|-------------------|-------|
-| 1 | FRONT DRIVE | 192.168.254.9 | Yes | connect | TBD | TBD |
-| 2 | ALLY WAY | 192.168.254.3 | **No** | notExist | TBD | TBD |
-| 3 | OFFICE | 192.168.254.4 | **No** | notExist | TBD | TBD |
-| 4 | IPCamera 04 | 192.168.254.7 | **No** | notExist | TBD | TBD |
-| 5 | IPCamera 05 | 192.168.254.5 | **No** | netUnreachable | TBD | TBD |
-| 6 | BAY 5 BACK | 192.168.254.16 | Yes | connect | TBD | TBD |
-| 7 | FRONT EXIT | 192.168.254.12 | Yes | connect | TBD | TBD |
-| 8 | STICKER | 192.168.254.10 | Yes | connect | TBD | TBD |
-| 9 | EMB | 192.168.254.6 | Yes | connect | TBD | TBD |
-| 10 | DTG | 192.168.254.17 | Yes | connect | TBD | TBD |
-| 11 | SCREEN ROOM | 192.168.254.13 | Yes | connect | TBD | TBD |
-| 12 | DARK ROOM | 192.168.254.8 | Yes | connect | TBD | TBD |
+| 1 | FRONT DRIVE | 192.168.254.9 | Yes | connect | pending-survey | pending-survey |
+| 2 | ALLY WAY | 192.168.254.3 | **No** | notExist | pending-survey | pending-survey |
+| 3 | OFFICE | 192.168.254.4 | **No** | notExist | pending-survey | pending-survey |
+| 4 | IPCamera 04 | 192.168.254.7 | **No** | notExist | pending-survey | pending-survey |
+| 5 | IPCamera 05 | 192.168.254.5 | **No** | netUnreachable | pending-survey | pending-survey |
+| 6 | BAY 5 BACK | 192.168.254.16 | Yes | connect | pending-survey | pending-survey |
+| 7 | FRONT EXIT | 192.168.254.12 | Yes | connect | pending-survey | pending-survey |
+| 8 | STICKER | 192.168.254.10 | Yes | connect | pending-survey | pending-survey |
+| 9 | EMB | 192.168.254.6 | Yes | connect | pending-survey | pending-survey |
+| 10 | DTG | 192.168.254.17 | Yes | connect | pending-survey | pending-survey |
+| 11 | SCREEN ROOM | 192.168.254.13 | Yes | connect | pending-survey | pending-survey |
+| 12 | DARK ROOM | 192.168.254.8 | Yes | connect | pending-survey | pending-survey |
 
 > **2026-02-09 outage:** All 12 channels show no live video in web UI after NVR power cycle + DHCP reservation fix. See **LOOP-CAMERA-OUTAGE-20260209** for triage. ISAPI re-query needed once NVR creds are stored in Infisical.
 
@@ -170,8 +172,8 @@ Everything an agent needs to generate a Frigate configuration for this NVR:
 | GAP-OP-032 | ~~Ch5 IP conflict~~ | low | **fixed** | Reassigned ch5 from `.7` to `.5` via ISAPI PUT (2026-02-08) |
 
 Additional incomplete items:
-- **Physical location labels**: All 12 channels have `TBD` location — requires on-site walk with camera feed open
-- **Camera models/firmware**: All channels have `TBD` model — queryable via ISAPI once cameras are online (P3)
+- **Physical location labels**: All 12 channels have `pending-survey` location — requires on-site walk with camera feed open
+- **Camera models/firmware**: All channels have `pending-survey` model — queryable via ISAPI once cameras are online (P3)
 
 ---
 

@@ -1,12 +1,14 @@
 ---
 status: historical
 owner: "@ronny"
-last_verified: 2026-01-25
+last_verified: 2026-02-13
 verification_method: table inventory reconciliation (#460)
 scope: mint-os
 github_issue: "#460"
 sources: []
 ---
+
+<!-- Reviewed 2026-02-13: structure confirmed current. -->
 
 > **⚠️ Historical Capture (Mint OS)**
 >

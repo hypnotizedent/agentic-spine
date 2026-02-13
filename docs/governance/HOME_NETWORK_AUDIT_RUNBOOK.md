@@ -9,6 +9,15 @@ scope: home-network
 
 > One command to detect every kind of home network drift: SSOT parity, live truth mismatches, and doc staleness.
 
+## Spine Execution Protocol
+
+All operations in this runbook MUST be executed via capability system:
+- Execute: `./bin/ops cap run <capability>`
+- Receipts: auto-generated per execution
+- Direct execution of scripts is prohibited
+
+---
+
 ## Capabilities
 
 | Capability | Safety | Purpose |

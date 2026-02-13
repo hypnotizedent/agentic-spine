@@ -15,6 +15,15 @@ migrated_from: "legacy home-assistant/ pillar (7 sources consolidated)"
 
 ---
 
+## Spine Execution Protocol
+
+All operations in this runbook MUST be executed via capability system:
+- Execute: `./bin/ops cap run <capability>`
+- Receipts: auto-generated per execution
+- Direct execution of scripts is prohibited
+
+---
+
 ## 1. Quick Reference
 
 | Resource | Value |
