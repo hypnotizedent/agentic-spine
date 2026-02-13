@@ -73,7 +73,7 @@ while IFS= read -r sha; do
     short="$(git -C "$ROOT" log -1 --format="%h %s" "$sha")"
     VIOLATIONS+=("$short (missing: ${missing[*]})")
   fi
-done < <(git -C "$ROOT" log "${ENFORCEMENT_SHA}..HEAD" --format="%H" -- "$GAPS_FILE_REL" 2>/dev/null)
+done < <(git -C "$ROOT" log --max-count="$WINDOW" "${ENFORCEMENT_SHA}..HEAD" --format="%H" -- "$GAPS_FILE_REL" 2>/dev/null)
 
 if [[ ${#VIOLATIONS[@]} -gt 0 ]]; then
   fail "commits touching $GAPS_FILE_REL lack required trailers:
