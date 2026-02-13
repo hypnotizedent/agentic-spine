@@ -23,12 +23,12 @@ The RAG VM (ai-consolidation, 207) is operational but disconnected — no MCP wi
 Gates are reactive (explain after failure) not proactive (warn before violation).
 
 ## Success Criteria
-- [ ] 7 slash commands (/fix, /triage, /propose, /loop, /howto, /check, /gates) repo-governed and synced
-- [ ] RAG VM wired via MCP adapter for natural agent queries
-- [ ] Gate registry (ops/bindings/gate.registry.yaml) covering D1-D84 surface (D21 retired/reserved)
-- [ ] Drift gates include inline triage hints on failure
-- [ ] Session entry includes capability precondition hints and gate reference card
-- [ ] P5 domain agent bridge explicitly deferred with contract
+- [x] 7 slash commands (/fix, /triage, /propose, /loop, /howto, /check, /gates) repo-governed and synced
+- [ ] RAG VM wired via MCP adapter for natural agent queries (BLOCKED: VM unreachable)
+- [x] Gate registry (ops/bindings/gate.registry.yaml) covering D1-D85 surface (D21 retired/reserved)
+- [x] Drift gates include inline triage hints on failure
+- [x] Session entry includes capability precondition hints and gate reference card
+- [x] P5 domain agent bridge explicitly deferred with contract
 
 ## Phases
 
@@ -192,10 +192,16 @@ Create self-updating gate awareness infrastructure:
 
 ## Receipts
 - P0: CP-20260213-141014 applied (commit ab89ef1) — CAP-20260213-145838__proposals.apply__Rny9m35317
-- (link phase receipts as executed)
+- P1: 10 slash commands committed (commit 389be58) — GAP-OP-280 closed
+- P3: 71 gate scripts + drift-gate.sh v2.8 (commit b78b787) — GAP-OP-282 closed
+- P6: gate.registry.yaml + D85 parity gate (commit 1167031) — GAP-OP-285 closed
+- P4: generate-context.sh gate card + hints (commit 0b855d8) — GAP-OP-283 closed
+- P2: BLOCKED — RAG VM (207) unreachable (port 3002 timeout) — GAP-OP-281 closed as blocked
+- P5: DEFERRED — deferral contract in scope, no implementation — GAP-OP-284 closed as deferred
 
 ## Notes
-- RAG VM status: 97 docs indexed, 85 eligible, parity OK, D68 enforced
-- Existing slash commands: /verify, /ctx, /gaps (diagnostic only, home-only, untracked)
-- Gate count: D1-D84 surface (D21 retired/reserved), zero have triage headers, no registry exists
-- Gate metadata currently scattered: inline in drift-gate.sh comments + separate scripts
+- RAG VM status: unreachable as of 2026-02-13 (port 3002 timeout)
+- Slash commands: 10 repo-governed in surfaces/commands/, synced to ~/.claude/commands/
+- Gate count: D1-D85 surface (D21 retired/reserved), all active gates have TRIAGE headers
+- Gate registry: ops/bindings/gate.registry.yaml (85 gates, 11 categories, 81 fix hints)
+- D85 meta-gate enforces registry ↔ script parity
