@@ -148,6 +148,9 @@ github_issue: "#625"
 | `raycast-scripts` | `/Users/ronnyworks/.raycast-scripts` | `/Users/ronnyworks/code/workbench/dotfiles/raycast` | `ok` |
 | `codex-config` | `/Users/ronnyworks/.codex/config.toml` | `/Users/ronnyworks/code/workbench/dotfiles/codex/config.toml` | `ok` |
 | `opencode-config` | `/Users/ronnyworks/.config/opencode/opencode.json` | `/Users/ronnyworks/code/workbench/dotfiles/opencode/opencode.json` | `ok` |
+| `opencode-instructions` | `/Users/ronnyworks/.config/opencode/OPENCODE.md` | `/Users/ronnyworks/code/workbench/dotfiles/opencode/OPENCODE.md` | `ok` |
+| `opencode-omo-config` | `/Users/ronnyworks/.config/opencode/oh-my-opencode.json` | `/Users/ronnyworks/code/workbench/dotfiles/opencode/oh-my-opencode.json` | `ok` |
+| `opencode-commands` | `/Users/ronnyworks/.config/opencode/commands` | `/Users/ronnyworks/code/workbench/dotfiles/opencode/commands` | `ok` |
 <!-- END AUTO CONFIGS -->
 
 #### Hammerspoon
