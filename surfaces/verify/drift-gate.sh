@@ -698,6 +698,46 @@ else
   warn "Gap registry mutation lock gate not present"
 fi
 
+# D76: Home-surface hygiene lock (home directory drift prevention)
+echo -n "D76 home-surface hygiene lock... "
+if [[ -x "$SP/surfaces/verify/d76-home-surface-hygiene-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d76-home-surface-hygiene-lock.sh"
+else
+  warn "home-surface hygiene lock gate not present"
+fi
+
+# D77: Workbench contract lock (plist/runtime/bare-exec enforcement)
+echo -n "D77 workbench contract lock... "
+if [[ -x "$SP/surfaces/verify/d77-workbench-contract-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d77-workbench-contract-lock.sh"
+else
+  warn "workbench contract lock gate not present"
+fi
+
+# D78: Workbench path lock (uppercase /Code/ + ronny-ops drift)
+echo -n "D78 workbench path lock... "
+if [[ -x "$SP/surfaces/verify/d78-workbench-path-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d78-workbench-path-lock.sh"
+else
+  warn "workbench path lock gate not present"
+fi
+
+# D79: Workbench script allowlist lock (governed script surface)
+echo -n "D79 workbench script allowlist lock... "
+if [[ -x "$SP/surfaces/verify/d79-workbench-script-allowlist-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d79-workbench-script-allowlist-lock.sh"
+else
+  warn "workbench script allowlist lock gate not present"
+fi
+
+# D80: Workbench authority-trace lock (legacy naming violations)
+echo -n "D80 workbench authority-trace lock... "
+if [[ -x "$SP/surfaces/verify/d80-workbench-authority-trace-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d80-workbench-authority-trace-lock.sh"
+else
+  warn "workbench authority-trace lock gate not present"
+fi
+
 echo
 [[ "$FAIL" -eq 0 ]] && echo "DRIFT GATE: PASS" || echo "DRIFT GATE: FAIL"
 exit "$FAIL"
