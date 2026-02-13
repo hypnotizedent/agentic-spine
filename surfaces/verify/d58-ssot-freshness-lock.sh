@@ -112,4 +112,51 @@ if [[ -d "$GOV_DIR" ]]; then
   fi
 fi
 
+# Third pass: binding files with updated: field (non-exempt only)
+BINDINGS_DIR="$SP/ops/bindings"
+EXEMPTIONS_FILE="$BINDINGS_DIR/binding.freshness.exemptions.yaml"
+STALE_BIND=0
+
+if [[ -d "$BINDINGS_DIR" && -f "$EXEMPTIONS_FILE" ]]; then
+  # Build exempt file list
+  exempt_files=""
+  if command -v yq >/dev/null 2>&1; then
+    exempt_count=$(yq '.exempt | length' "$EXEMPTIONS_FILE")
+    for ((j=0; j<exempt_count; j++)); do
+      ef=$(yq -r ".exempt[$j].file" "$EXEMPTIONS_FILE")
+      exempt_files="$exempt_files|$ef"
+    done
+  fi
+
+  for binding in "$BINDINGS_DIR"/*.yaml; do
+    [[ -f "$binding" ]] || continue
+    bname=$(basename "$binding")
+
+    # Skip the exemptions file itself
+    [[ "$bname" == "binding.freshness.exemptions.yaml" ]] && continue
+
+    # Skip exempt files
+    if echo "$exempt_files" | grep -qF "|$bname"; then
+      continue
+    fi
+
+    # Extract updated: from first 20 lines (top-level field)
+    bind_updated=$(head -20 "$binding" | grep -E '^updated:\s' | head -1 | sed 's/^updated:\s*//' | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
+    [[ -z "$bind_updated" || "$bind_updated" == "null" ]] && continue
+
+    bind_epoch=$(parse_epoch_date "$bind_updated")
+    [[ "$bind_epoch" -eq 0 ]] && continue
+
+    bind_age=$(( (NOW - bind_epoch) / 86400 ))
+    if [[ "$bind_age" -gt "$THRESHOLD" ]]; then
+      err "$bname: updated=$bind_updated (${bind_age}d ago, threshold=${THRESHOLD}d)"
+      STALE_BIND=$((STALE_BIND + 1))
+    fi
+  done
+
+  if [[ "$STALE_BIND" -gt 0 ]]; then
+    echo "  $STALE_BIND normative bindings exceed freshness threshold" >&2
+  fi
+fi
+
 exit "$FAIL"

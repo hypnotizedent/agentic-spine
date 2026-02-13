@@ -4,29 +4,25 @@
 
 The canonical source for **currently open loops** is:
 
-    mailroom/state/open_loops.jsonl
-
-This file is maintained by `ops loops` commands. If it has 0 entries, there are no active loops.
-
-## Scope Files (Historical)
-
     mailroom/state/loop-scopes/LOOP-*.scope.md
 
-Scope files are **created when a loop opens** and **updated when it closes** (status field changes to `closed`). They persist as historical records after loop completion. A scope file existing does NOT mean the loop is open — check the status field inside the scope file.
+Scope files are maintained by `ops loops` commands. The `status` field in each scope file's YAML frontmatter determines whether a loop is open (`active`, `draft`, `open`) or `closed`. A scope file existing does NOT mean the loop is open — check the status field.
+
+If `open_loops.jsonl` is absent, treat as empty set (0 open loops). This file is deprecated and no longer written to. Its absence is normal and expected.
 
 ## Archived State
 
-- `open_loops.jsonl.pre-consolidation` — snapshot before a bulk consolidation event
+- `open_loops.jsonl.pre-consolidation` — snapshot before the scope-file migration
 - `open_loops.jsonl.archived` — older archived state
 
-These are not actively used. They exist for audit trail purposes.
+These are not actively used. They exist for audit trail purposes only.
 
 ## How Agents Should Check
 
 ```bash
-# Check open loops:
+# Check open loops (canonical):
 ./bin/ops loops list --open
 
-# Or directly:
-cat mailroom/state/open_loops.jsonl
+# Full status including gaps and inbox:
+./bin/ops status
 ```
