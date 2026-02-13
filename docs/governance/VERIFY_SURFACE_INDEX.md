@@ -47,6 +47,7 @@ Notes:
 | `d18-docker-compose-drift.sh` | Docker compose drift detection | Yes |
 | `d19-backup-drift.sh` | Backup configuration drift detection | Yes |
 | `d20-secrets-drift.sh` | Secrets binding drift detection (verbose subcheck of D55) | Yes |
+| *(D21 retired)* | Was agent-entry-surface-lock, merged into D56 | — |
 | `d22-nodes-drift.sh` | Node/VM drift detection | Yes |
 | `d23-health-drift.sh` | Health endpoint drift detection | Yes |
 | `d24-github-labels-drift.sh` | GitHub labels drift detection | Yes |

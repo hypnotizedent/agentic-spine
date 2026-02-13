@@ -265,6 +265,8 @@ else
   fi
 fi
 
+# D21: Reserved (retired — was agent-entry-surface-lock, merged into D56)
+
 # D22: Nodes surface drift gate (read-only SSH, no credentials, no mutations)
 echo -n "D22 nodes drift gate... "
 if [[ -x "$SP/surfaces/verify/d22-nodes-drift.sh" ]]; then
