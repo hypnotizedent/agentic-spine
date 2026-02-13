@@ -8,6 +8,10 @@
 #
 # Exit: 0 = PASS, 1 = FAIL
 #
+# Warning severity contract:
+#   WARN_POLICY=advisory (default) — warnings reported, exit 0
+#   WARN_POLICY=strict             — warnings escalate to FAIL (exit 1)
+#
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -22,6 +26,7 @@ fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; WARN_COUNT=$((WARN_COUNT + 1)); }
 
 DRIFT_VERBOSE="${DRIFT_VERBOSE:-0}"
+WARN_POLICY="${WARN_POLICY:-advisory}"
 
 gate_script() {
   local script="$1"
@@ -758,6 +763,9 @@ else
 fi
 
 echo
+if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
+  FAIL=1
+fi
 if [[ "$FAIL" -eq 0 ]]; then
   if [[ "$WARN_COUNT" -gt 0 ]]; then
     echo "DRIFT GATE: PASS ($WARN_COUNT warning(s) — review WARN lines above)"
@@ -768,6 +776,6 @@ else
   echo "DRIFT GATE: FAIL"
 fi
 if [[ "$WARN_COUNT" -gt 0 ]]; then
-  echo "  WARNINGS: $WARN_COUNT gate(s) reported warnings"
+  echo "  WARNINGS: $WARN_COUNT gate(s) reported warnings (policy=$WARN_POLICY)"
 fi
 exit "$FAIL"

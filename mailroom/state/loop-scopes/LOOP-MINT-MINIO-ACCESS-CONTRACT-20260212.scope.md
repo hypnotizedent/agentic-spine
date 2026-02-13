@@ -1,6 +1,6 @@
 # LOOP-MINT-MINIO-ACCESS-CONTRACT-20260212
 
-> **Status:** CLOSED
+> **Status:** closed
 > **Opened:** 2026-02-12
 > **Closed:** 2026-02-12
 > **Owner:** Terminal C (apply-owner)

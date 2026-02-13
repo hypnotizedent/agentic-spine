@@ -281,9 +281,9 @@ write_receipt() {
     # Compute hashes if files exist
     local prompt_hash=""
     local result_hash=""
-    [[ -f "${DONE}/${prompt_file}" ]] && prompt_hash="$(shasum -a 256 "${DONE}/${prompt_file}" 2>/dev/null | cut -d' ' -f1)"
-    [[ -f "${FAILED}/${prompt_file}" ]] && prompt_hash="$(shasum -a 256 "${FAILED}/${prompt_file}" 2>/dev/null | cut -d' ' -f1)"
-    [[ -f "${OUTBOX}/${result_file}" ]] && result_hash="$(shasum -a 256 "${OUTBOX}/${result_file}" 2>/dev/null | cut -d' ' -f1)"
+    [[ -f "${DONE}/${prompt_file}" ]] && prompt_hash="$(shasum -a 256 "${DONE}/${prompt_file}" 2>>"$DIAG_LOG" | cut -d' ' -f1)"
+    [[ -f "${FAILED}/${prompt_file}" ]] && prompt_hash="$(shasum -a 256 "${FAILED}/${prompt_file}" 2>>"$DIAG_LOG" | cut -d' ' -f1)"
+    [[ -f "${OUTBOX}/${result_file}" ]] && result_hash="$(shasum -a 256 "${OUTBOX}/${result_file}" 2>>"$DIAG_LOG" | cut -d' ' -f1)"
 
     cat > "${receipt_dir}/receipt.md" <<EOF
 # Receipt: ${run_key}
@@ -330,10 +330,10 @@ EOF
 # ─────────────────────────────────────────────────────────────────────────────
 contains_secrets() {
     local file="$1"
-    if grep -qiE '(api[_-]?key|secret|password|token|bearer|auth)[[:space:]]*[=:][[:space:]]*[^$]' "$file" 2>/dev/null; then
+    if grep -qiE '(api[_-]?key|secret|password|token|bearer|auth)[[:space:]]*[=:][[:space:]]*[^$]' "$file" 2>>"$DIAG_LOG"; then
         return 0
     fi
-    if grep -qE 'sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|xoxb-[0-9]+-[a-zA-Z0-9]+' "$file" 2>/dev/null; then
+    if grep -qE 'sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|xoxb-[0-9]+-[a-zA-Z0-9]+' "$file" 2>>"$DIAG_LOG"; then
         return 0
     fi
     return 1
@@ -384,7 +384,7 @@ retrieve_context() {
     [[ -d "$REPO/modules" ]] && search_dirs+=("$REPO/modules")
 
     local matches
-    matches="$(rg -l -i "$query" "${search_dirs[@]}" --type md 2>/dev/null | head -3)" || true
+    matches="$(rg -l -i "$query" "${search_dirs[@]}" --type md 2>>"$DIAG_LOG" | head -3)" || true
 
     if [[ -n "$matches" ]]; then
         log "RAG matched $(echo "$matches" | wc -l | tr -d ' ') files"
@@ -417,7 +417,7 @@ retrieve_context() {
             if [[ $line_count -lt 200 ]]; then
                 RAG_CONTEXT+="--- ${match_file} ---\n"
                 local file_content
-                file_content="$(head -50 "$match_file" 2>/dev/null)" || true
+                file_content="$(head -50 "$match_file" 2>>"$DIAG_LOG")" || true
                 RAG_CONTEXT+="$file_content\n"
                 line_count=$((line_count + 50))
             fi
@@ -693,7 +693,7 @@ count_lane_files() {
         ! -name '.keep' \
         ! -name '.DS_Store' \
         ! -name '.*.swp' \
-        2>/dev/null | wc -l | tr -d ' '
+        2>>"$DIAG_LOG" | wc -l | tr -d ' '
 }
 
 drain_existing_queue() {
