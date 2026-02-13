@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# proposals-archive: Move applied/superseded proposals to .archived/
+# Usage: proposals-archive [--applied-days N] [--superseded-days N] [--dry-run]
+set -euo pipefail
+
+SP="${SPINE_CODE:-.}"
+PROPOSALS_DIR="$SP/mailroom/outbox/proposals"
+ARCHIVE_DIR="$PROPOSALS_DIR/.archived"
+LIFECYCLE="$SP/ops/bindings/proposals.lifecycle.yaml"
+
+NOW=$(date +%s)
+
+# Read defaults from lifecycle binding
+if command -v yq >/dev/null 2>&1 && [[ -f "$LIFECYCLE" ]]; then
+  APPLIED_DAYS=$(yq '.sla.archive_applied_after_days // 3' "$LIFECYCLE")
+  SUPERSEDED_DAYS=$(yq '.sla.archive_superseded_after_days // 3' "$LIFECYCLE")
+else
+  APPLIED_DAYS=3
+  SUPERSEDED_DAYS=3
+fi
+
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --applied-days) APPLIED_DAYS="$2"; shift 2 ;;
+    --superseded-days) SUPERSEDED_DAYS="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    *) echo "Unknown option: $1"; exit 1 ;;
+  esac
+done
+
+mkdir -p "$ARCHIVE_DIR"
+
+parse_epoch() {
+  local ds="${1:-}"
+  [[ -n "$ds" ]] || { echo 0; return; }
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "
+import sys
+from datetime import datetime, timezone
+ds = sys.argv[1].strip()
+try:
+    dt = datetime.fromisoformat(ds)
+    if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+    print(int(dt.timestamp()))
+except: print(0)
+" "$ds"
+    return
+  fi
+  date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ds" +%s 2>/dev/null || echo 0
+}
+
+archived=0
+skipped=0
+
+echo "═══════════════════════════════════════════════════════════════════════════"
+echo "Proposal Archive"
+echo "═══════════════════════════════════════════════════════════════════════════"
+echo ""
+echo "Thresholds: applied > ${APPLIED_DAYS}d, superseded > ${SUPERSEDED_DAYS}d"
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "MODE: dry-run (no moves)"
+fi
+echo ""
+
+for dir in "$PROPOSALS_DIR"/CP-*; do
+  [[ -d "$dir" ]] || continue
+  bname=$(basename "$dir")
+  manifest="$dir/manifest.yaml"
+
+  status=""
+  age_days=0
+  detail=""
+
+  if [[ -f "$dir/.applied" ]]; then
+    status="applied"
+    # Get applied timestamp
+    applied_ts=$(grep '^Applied:' "$dir/.applied" 2>/dev/null | sed 's/^Applied: *//' || echo "")
+    commit_short=$(grep '^Commit:' "$dir/.applied" 2>/dev/null | head -1 | awk '{print substr($2,1,7)}')
+    if [[ -n "$applied_ts" ]]; then
+      epoch=$(parse_epoch "$applied_ts")
+      [[ "$epoch" -gt 0 ]] && age_days=$(( (NOW - epoch) / 86400 ))
+    fi
+    detail="$commit_short"
+    threshold=$APPLIED_DAYS
+  elif [[ -f "$manifest" ]] && grep -q '^status: superseded' "$manifest"; then
+    status="superseded"
+    superseded_at=$(grep -m1 '^superseded_at:' "$manifest" 2>/dev/null | sed 's/^superseded_at: *//' | tr -d '"' || echo "")
+    if [[ -n "$superseded_at" ]]; then
+      epoch=$(parse_epoch "${superseded_at}T00:00:00Z")
+      [[ "$epoch" -gt 0 ]] && age_days=$(( (NOW - epoch) / 86400 ))
+    fi
+    threshold=$SUPERSEDED_DAYS
+  else
+    continue
+  fi
+
+  if [[ "$age_days" -lt "$threshold" ]]; then
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  # Build archive name
+  status_upper=$(echo "$status" | tr '[:lower:]' '[:upper:]')
+  if [[ -n "$detail" ]]; then
+    archive_name="${status_upper}__${bname}__${detail}"
+  else
+    archive_name="${status_upper}__${bname}"
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "  WOULD ARCHIVE: $bname (${age_days}d old)"
+  else
+    mv "$dir" "$ARCHIVE_DIR/$archive_name"
+    echo "  ARCHIVED: $bname (${age_days}d old)"
+  fi
+  archived=$((archived + 1))
+done
+
+echo ""
+echo "Results: $archived archived, $skipped below threshold"

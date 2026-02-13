@@ -86,6 +86,22 @@ All loop scope files in `mailroom/state/loop-scopes/` MUST use one of these thre
   - D61 session-loop traceability freshness (forces periodic closeout discipline via `agent.session.closeout`).
   - D62 git remote parity (prevents origin/github “split brain” histories).
 
+## Proposal Queue Hygiene
+
+Change proposals (`mailroom/outbox/proposals/CP-*`) follow a governed lifecycle defined in `ops/bindings/proposals.lifecycle.yaml`.
+
+**When to submit a proposal:** Any multi-file or cross-surface change. Single read-only or single-file mutations can use `cap run` directly.
+
+**When to supersede:** Run `proposals.supersede <CP> --reason "why"` when a proposal's changes are obsolete, already applied via another path, or replaced by later work.
+
+**When to archive:** Run `proposals.archive` periodically (D83 tracks queue health). Applied proposals are archived after 3 days, superseded after 3 days.
+
+**Queue ownership:** Terminal C control plane owns queue hygiene. `proposals.status` shows health + SLA breaches.
+
+**Valid statuses:** `draft` → `pending` → `applied` | `superseded` | `draft_hold` | `read-only` | `invalid`
+
+**Draft hold:** Intentionally deferred proposals must have `owner`, `review_date`, and `hold_reason`. These are excluded from pending counts but tracked for review.
+
 ## Anti-Stash Policy (Gap Lifecycle)
 
 Every open gap in `operational.gaps.yaml` must be linked to an active loop (`parent_loop`).

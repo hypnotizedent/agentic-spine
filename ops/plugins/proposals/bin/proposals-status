@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# proposals-status: Summary of proposal queue health + SLA breaches
+set -euo pipefail
+
+SP="${SPINE_CODE:-.}"
+PROPOSALS_DIR="$SP/mailroom/outbox/proposals"
+LIFECYCLE="$SP/ops/bindings/proposals.lifecycle.yaml"
+
+NOW=$(date +%s)
+
+# Read SLA thresholds from lifecycle binding
+if command -v yq >/dev/null 2>&1 && [[ -f "$LIFECYCLE" ]]; then
+  PENDING_MAX=$(yq '.sla.pending_max_age_days // 7' "$LIFECYCLE")
+  DRAFT_MAX=$(yq '.sla.draft_max_age_days // 14' "$LIFECYCLE")
+  HOLD_REVIEW_MAX=$(yq '.sla.draft_hold_review_max_days // 30' "$LIFECYCLE")
+else
+  PENDING_MAX=7
+  DRAFT_MAX=14
+  HOLD_REVIEW_MAX=30
+fi
+
+# Counters
+total=0
+pending=0; applied=0; superseded=0; draft_hold=0; draft=0; readonly=0; invalid=0; other=0
+sla_breaches=0
+malformed=0
+
+parse_epoch() {
+  local ds="${1:-}"
+  [[ -n "$ds" ]] || { echo 0; return; }
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "
+import sys
+from datetime import datetime, timezone
+ds = sys.argv[1].strip()
+try:
+    dt = datetime.fromisoformat(ds)
+    if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+    print(int(dt.timestamp()))
+except: print(0)
+" "$ds"
+    return
+  fi
+  date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ds" +%s 2>/dev/null || echo 0
+}
+
+echo "═══════════════════════════════════════════════════════════════════════════"
+echo "Proposal Queue Health"
+echo "═══════════════════════════════════════════════════════════════════════════"
+echo ""
+
+SLA_LINES=""
+
+for dir in "$PROPOSALS_DIR"/CP-*; do
+  [[ -d "$dir" ]] || continue
+  bname=$(basename "$dir")
+  manifest="$dir/manifest.yaml"
+  total=$((total + 1))
+
+  # Determine status
+  if [[ -f "$dir/.applied" ]]; then
+    status="applied"
+    applied=$((applied + 1))
+  elif [[ ! -f "$manifest" ]]; then
+    status="invalid"
+    invalid=$((invalid + 1))
+    malformed=$((malformed + 1))
+    continue
+  else
+    status=$(grep -m1 '^status:' "$manifest" 2>/dev/null | sed 's/^status: *//' | tr -d '"' | tr -d "'" || echo "pending")
+    [[ -z "$status" ]] && status="pending"
+  fi
+
+  case "$status" in
+    pending) pending=$((pending + 1)) ;;
+    superseded) superseded=$((superseded + 1)) ;;
+    draft_hold) draft_hold=$((draft_hold + 1)) ;;
+    draft) draft=$((draft + 1)) ;;
+    read-only|readonly) readonly=$((readonly + 1)) ;;
+    invalid) invalid=$((invalid + 1)) ;;
+    applied) ;; # already counted
+    *) other=$((other + 1)) ;;
+  esac
+
+  # SLA check for pending
+  if [[ "$status" == "pending" ]]; then
+    created=$(grep -m1 '^created:' "$manifest" 2>/dev/null | sed 's/^created: *//' | tr -d '"' | tr -d "'" || echo "")
+    if [[ -n "$created" ]]; then
+      epoch=$(parse_epoch "$created")
+      if [[ "$epoch" -gt 0 ]]; then
+        age_days=$(( (NOW - epoch) / 86400 ))
+        if [[ "$age_days" -gt "$PENDING_MAX" ]]; then
+          SLA_LINES="${SLA_LINES}  SLA BREACH: $bname (pending ${age_days}d, max ${PENDING_MAX}d)\n"
+          sla_breaches=$((sla_breaches + 1))
+        fi
+      fi
+    fi
+  fi
+
+  # SLA check for draft_hold review dates
+  if [[ "$status" == "draft_hold" ]]; then
+    review_date=$(grep -m1 '^review_date:' "$manifest" 2>/dev/null | sed 's/^review_date: *//' | tr -d '"' | tr -d "'" || echo "")
+    if [[ -n "$review_date" ]]; then
+      review_epoch=$(parse_epoch "${review_date}T00:00:00Z")
+      if [[ "$review_epoch" -gt 0 ]]; then
+        days_until=$(( (review_epoch - NOW) / 86400 ))
+        if [[ "$days_until" -lt 0 ]]; then
+          SLA_LINES="${SLA_LINES}  SLA BREACH: $bname (review overdue by $(( -days_until ))d)\n"
+          sla_breaches=$((sla_breaches + 1))
+        fi
+      fi
+    fi
+  fi
+
+  # Check for missing required fields
+  if [[ -f "$manifest" ]]; then
+    if ! grep -q '^proposal:' "$manifest" && ! grep -q '^proposal_id:' "$manifest"; then
+      malformed=$((malformed + 1))
+    fi
+    if ! grep -q '^agent:' "$manifest" && ! grep -q '^author:' "$manifest"; then
+      malformed=$((malformed + 1))
+    fi
+  fi
+done
+
+echo "Summary:"
+echo "  Total:       $total"
+echo "  Pending:     $pending"
+echo "  Applied:     $applied"
+echo "  Superseded:  $superseded"
+echo "  Draft Hold:  $draft_hold"
+echo "  Draft:       $draft"
+echo "  Read-only:   $readonly"
+echo "  Invalid:     $invalid"
+if [[ "$other" -gt 0 ]]; then
+  echo "  Other:       $other"
+fi
+echo ""
+echo "Health:"
+echo "  SLA breaches:    $sla_breaches"
+echo "  Malformed:       $malformed"
+
+if [[ -n "$SLA_LINES" ]]; then
+  echo ""
+  echo "SLA Details:"
+  printf "$SLA_LINES"
+fi
+
+echo ""
+echo "Thresholds (from proposals.lifecycle.yaml):"
+echo "  Pending max age:       ${PENDING_MAX}d"
+echo "  Draft max age:         ${DRAFT_MAX}d"
+echo "  Draft hold review max: ${HOLD_REVIEW_MAX}d"
+
+# Exit non-zero if there are SLA breaches or malformed proposals
+if [[ "$sla_breaches" -gt 0 || "$malformed" -gt 0 ]]; then
+  echo ""
+  echo "WARN: $sla_breaches SLA breaches, $malformed malformed"
+fi
+
+exit 0

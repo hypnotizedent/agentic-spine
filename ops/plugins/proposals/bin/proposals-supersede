@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# proposals-supersede: Mark a proposal as superseded
+# Usage: proposals-supersede <CP_NAME> --reason "why"
+set -euo pipefail
+
+SP="${SPINE_CODE:-.}"
+PROPOSALS_DIR="$SP/mailroom/outbox/proposals"
+
+usage() {
+  echo "Usage: proposals-supersede <CP_NAME> --reason \"why this is superseded\""
+  echo ""
+  echo "Marks a proposal as superseded. Cannot supersede already-applied proposals."
+  exit 1
+}
+
+[[ $# -ge 1 ]] || usage
+
+CP_NAME="$1"
+shift
+
+REASON=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reason) REASON="$2"; shift 2 ;;
+    *) echo "Unknown option: $1"; usage ;;
+  esac
+done
+
+[[ -n "$REASON" ]] || { echo "ERROR: --reason is required"; usage; }
+
+# Find proposal directory
+CP_DIR=""
+for dir in "$PROPOSALS_DIR"/"$CP_NAME" "$PROPOSALS_DIR"/${CP_NAME}__*; do
+  if [[ -d "$dir" ]]; then
+    CP_DIR="$dir"
+    break
+  fi
+done
+
+[[ -n "$CP_DIR" && -d "$CP_DIR" ]] || { echo "ERROR: Proposal not found: $CP_NAME"; exit 1; }
+
+MANIFEST="$CP_DIR/manifest.yaml"
+[[ -f "$MANIFEST" ]] || { echo "ERROR: No manifest.yaml in $CP_DIR"; exit 1; }
+
+# Check if already applied
+if [[ -f "$CP_DIR/.applied" ]]; then
+  echo "ERROR: Cannot supersede an already-applied proposal"
+  exit 1
+fi
+
+# Check if already superseded
+if grep -q '^status: superseded' "$MANIFEST"; then
+  echo "Already superseded: $(basename "$CP_DIR")"
+  exit 0
+fi
+
+# Remove existing status/superseded fields
+sed -i "" '/^status:/d' "$MANIFEST"
+sed -i "" '/^superseded_at:/d' "$MANIFEST"
+sed -i "" '/^superseded_reason:/d' "$MANIFEST"
+
+# Add superseded fields
+DATE=$(date -u +%Y-%m-%d)
+printf '\nstatus: superseded\nsuperseded_at: "%s"\nsuperseded_reason: "%s"\n' "$DATE" "$REASON" >> "$MANIFEST"
+
+echo "Superseded: $(basename "$CP_DIR")"
+echo "  Reason: $REASON"

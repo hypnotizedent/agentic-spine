@@ -762,6 +762,14 @@ else
   warn "share publish governance lock gate not present"
 fi
 
+# D83: Proposal queue health lock (manifest+fields+SLA+parity)
+echo -n "D83 proposal queue health lock... "
+if [[ -x "$SP/surfaces/verify/d83-proposal-queue-health-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d83-proposal-queue-health-lock.sh"
+else
+  warn "proposal queue health lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

@@ -126,6 +126,7 @@ Pillar entrypoints (per stack)
 | `ops/bindings/lifecycle.standards.yaml` | Enforceable lifecycle schema/defaults for onboarding work types |
 | `ops/bindings/change.intake.policy.yaml` | Deterministic intake policy for `cap run` vs `run --inline` vs proposal flow |
 | `ops/bindings/audit.suppressions.policy.yaml` | Time-bounded suppression policy for noise control without masking risk |
+| `ops/bindings/proposals.lifecycle.yaml` | Proposal state machine, required fields per status, SLA thresholds, and archive rules |
 
 ### Backup & Recovery
 

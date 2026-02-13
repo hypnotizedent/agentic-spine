@@ -118,8 +118,21 @@ Definition: if any column is missing, lifecycle is incomplete.
 | Evidence/narrative note, no file mutation | `./bin/ops run --inline "..."` | Lightweight receipt for discovery context |
 | Multi-file, cross-surface, or multi-terminal change | Proposal flow (`proposals.submit` -> payload -> `proposals.apply`) | Prevents collision and preserves commit boundary |
 | Any ambiguous write path | Proposal flow by default | Predictability over speed |
+| Obsolete/replaced proposal | `proposals.supersede <CP> --reason "..."` | Marks proposal non-applicable with audit trail |
+| Deferred product/infrastructure work | Set `status: draft_hold` + `owner` + `review_date` in manifest | Excluded from pending counts, tracked for review |
 
 Escalation rule: when uncertain, treat as proposal work.
+
+### Proposal Queue Lifecycle
+
+Proposals follow a governed lifecycle defined in `ops/bindings/proposals.lifecycle.yaml`:
+
+- **State machine:** `draft` → `pending` → `applied` | `superseded` | `draft_hold`
+- **SLA thresholds:** pending max 7d, draft max 14d, draft_hold review max 30d
+- **Archive cadence:** applied/superseded proposals archived after 3d via `proposals.archive`
+- **D83 drift gate:** enforces manifest presence, required fields per status, and stale pending limits
+- **Queue health:** `proposals.status` shows summary + SLA breaches; `proposals.reconcile` validates schema compliance
+- **Ownership:** Terminal C control plane owns queue hygiene
 
 ---
 

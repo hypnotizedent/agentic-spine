@@ -1,0 +1,101 @@
+# Proposal Lifecycle Contract
+#
+# Defines the state machine, required fields, and SLA thresholds
+# for change proposals (CPs) in the mailroom/outbox/proposals/ queue.
+#
+# Decision: LOOP-PROPOSAL-LIFECYCLE-HARDENING-20260213
+
+version: "1.0"
+updated: "2026-02-13"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Status State Machine
+# ─────────────────────────────────────────────────────────────────────────
+#
+#   draft ──► pending ──► applied
+#                │            │
+#                ▼            ▼
+#           superseded    (archived)
+#                │
+#                ▼
+#           (archived)
+#
+#   draft_hold: intentionally deferred, not in active flow
+#   read-only: audit/discovery only, never applied
+#   invalid: malformed, cannot be applied
+
+statuses:
+  - id: draft
+    description: "Work in progress, not ready for review"
+    terminal: false
+
+  - id: pending
+    description: "Ready for operator review and apply"
+    terminal: false
+
+  - id: applied
+    description: "Changes committed to repo via proposals.apply"
+    terminal: true
+
+  - id: superseded
+    description: "Obsolete or replaced by later work"
+    terminal: true
+
+  - id: draft_hold
+    description: "Intentionally deferred with owner and review date"
+    terminal: false
+
+  - id: read-only
+    description: "Audit/discovery output, not intended for apply"
+    terminal: true
+
+  - id: invalid
+    description: "Malformed manifest, cannot be processed"
+    terminal: true
+
+# ─────────────────────────────────────────────────────────────────────────
+# Required Fields Per Status
+# ─────────────────────────────────────────────────────────────────────────
+
+required_fields:
+  all:
+    - proposal    # CP identifier
+    - agent       # Creator identifier (unknown is explicit)
+    - created     # ISO 8601 timestamp
+
+  pending:
+    - changes     # Array of action/path/reason entries
+
+  applied:
+    - changes
+    # .applied marker file also required (written by proposals-apply)
+
+  superseded:
+    - superseded_at
+    - superseded_reason
+
+  draft_hold:
+    - owner
+    - review_date
+    - hold_reason
+
+# ─────────────────────────────────────────────────────────────────────────
+# SLA / TTL Thresholds
+# ─────────────────────────────────────────────────────────────────────────
+
+sla:
+  pending_max_age_days: 7
+  draft_max_age_days: 14
+  draft_hold_review_max_days: 30
+  archive_applied_after_days: 3
+  archive_superseded_after_days: 3
+
+# ─────────────────────────────────────────────────────────────────────────
+# Archive Rules
+# ─────────────────────────────────────────────────────────────────────────
+
+archive:
+  target: ".archived/"
+  naming_pattern: "{STATUS}__{CP_NAME}__{DETAIL}"
+  index_required: true
+  non_destructive: true

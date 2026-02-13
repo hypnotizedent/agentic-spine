@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# proposals-reconcile: Metadata/schema normalization report
+# Checks all active proposals against lifecycle contract
+set -euo pipefail
+
+SP="${SPINE_CODE:-.}"
+PROPOSALS_DIR="$SP/mailroom/outbox/proposals"
+LIFECYCLE="$SP/ops/bindings/proposals.lifecycle.yaml"
+
+echo "═══════════════════════════════════════════════════════════════════════════"
+echo "Proposal Reconciliation Report"
+echo "═══════════════════════════════════════════════════════════════════════════"
+echo ""
+
+issues=0
+checked=0
+
+check_field() {
+  local manifest="$1"
+  local field="$2"
+  local alt_field="${3:-}"
+
+  if grep -q "^${field}:" "$manifest"; then
+    return 0
+  fi
+  if [[ -n "$alt_field" ]] && grep -q "^${alt_field}:" "$manifest"; then
+    return 0
+  fi
+  return 1
+}
+
+for dir in "$PROPOSALS_DIR"/CP-*; do
+  [[ -d "$dir" ]] || continue
+  bname=$(basename "$dir")
+  manifest="$dir/manifest.yaml"
+  checked=$((checked + 1))
+
+  dir_issues=""
+
+  # Check manifest exists
+  if [[ ! -f "$manifest" ]]; then
+    dir_issues="${dir_issues}  - MISSING: manifest.yaml\n"
+    issues=$((issues + 1))
+    echo "[$bname]"
+    printf "$dir_issues"
+    continue
+  fi
+
+  # Determine status
+  status="pending"
+  if [[ -f "$dir/.applied" ]]; then
+    status="applied"
+  elif grep -q '^status:' "$manifest"; then
+    status=$(grep -m1 '^status:' "$manifest" | sed 's/^status: *//' | tr -d '"' | tr -d "'")
+  fi
+
+  # Check universal required fields
+  if ! check_field "$manifest" "proposal" "proposal_id"; then
+    dir_issues="${dir_issues}  - MISSING: proposal (identifier)\n"
+    issues=$((issues + 1))
+  fi
+  if ! check_field "$manifest" "agent" "author"; then
+    dir_issues="${dir_issues}  - MISSING: agent\n"
+    issues=$((issues + 1))
+  fi
+  if ! check_field "$manifest" "created"; then
+    dir_issues="${dir_issues}  - MISSING: created\n"
+    issues=$((issues + 1))
+  fi
+
+  # Check status-specific fields
+  case "$status" in
+    pending)
+      if ! check_field "$manifest" "changes"; then
+        dir_issues="${dir_issues}  - MISSING: changes (required for pending)\n"
+        issues=$((issues + 1))
+      fi
+      ;;
+    superseded)
+      if ! check_field "$manifest" "superseded_at"; then
+        dir_issues="${dir_issues}  - MISSING: superseded_at\n"
+        issues=$((issues + 1))
+      fi
+      if ! check_field "$manifest" "superseded_reason"; then
+        dir_issues="${dir_issues}  - MISSING: superseded_reason\n"
+        issues=$((issues + 1))
+      fi
+      ;;
+    draft_hold)
+      if ! check_field "$manifest" "owner"; then
+        dir_issues="${dir_issues}  - MISSING: owner (required for draft_hold)\n"
+        issues=$((issues + 1))
+      fi
+      if ! check_field "$manifest" "review_date"; then
+        dir_issues="${dir_issues}  - MISSING: review_date (required for draft_hold)\n"
+        issues=$((issues + 1))
+      fi
+      ;;
+    applied)
+      if [[ ! -f "$dir/.applied" ]]; then
+        dir_issues="${dir_issues}  - MISSING: .applied marker file\n"
+        issues=$((issues + 1))
+      fi
+      ;;
+  esac
+
+  # Report issues for this proposal
+  if [[ -n "$dir_issues" ]]; then
+    echo "[$bname] (status: $status)"
+    printf "$dir_issues"
+    echo ""
+  fi
+done
+
+echo "───────────────────────────────────────────────────────────────────────────"
+echo "Checked: $checked proposals"
+echo "Issues:  $issues"
+
+if [[ "$issues" -eq 0 ]]; then
+  echo "All proposals conform to lifecycle contract."
+fi
