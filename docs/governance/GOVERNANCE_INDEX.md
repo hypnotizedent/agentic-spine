@@ -85,13 +85,11 @@ Pillar entrypoints (per stack)
 | `REPO_STRUCTURE_AUTHORITY.md` | Where folders/files belong |
 | `COMPOSE_AUTHORITY.md` | Authoritative compose file per stack |
 | `PORTABILITY_ASSUMPTIONS.md` | Environment coupling + mount/IP assumptions |
-| `MD_SURFACE_AUDIT.md` | Markdown sprawl audit + cleanup candidates |
 | `SEARCH_EXCLUSIONS.md` | What's excluded from search/RAG |
 | `RAG_INDEXING_RULES.md` | What gets indexed to RAG |
 | `ISSUE_CLOSURE_SOP.md` | How to close issues properly |
 | `GIT_REMOTE_AUTHORITY.md` | Canonical git authority (Gitea primary, GitHub mirror-only) |
 | `AGENT_BOUNDARIES.md` | What agents can/cannot do |
-| `SUPERVISOR_CHECKLIST.md` | Verify work before shipping |
 | `MAILROOM_RUNBOOK.md` | Queue operations, ledger, logs, health checks |
 | `MAILROOM_BRIDGE.md` | Governed remote API bridge (read outbox/receipts, enqueue prompts) |
 | `ORCHESTRATION_CAPABILITY.md` | Machine-enforced orchestration contract and strict terminal entry behavior |
@@ -103,7 +101,6 @@ Pillar entrypoints (per stack)
 | `BUILD_MODE_CHECKLIST.md` | Operator stop-gated checklist for predictable build-mode execution |
 | `ONBOARDING_PLAYBOOK.md` | Standard onboarding workflow for VM/agent/capability/tool/surface changes |
 | `GAP_LIFECYCLE.md` | Gap registry lifecycle, mutation capabilities, claim semantics, D75 lock |
-| `HOST_DRIFT_GATES.md` | D76+: home-surface hygiene, workbench contract/path/script/authority-trace locks |
 | `WORKBENCH_SHARE_PROTOCOL.md` | Governance for publishing curated workbench content to GitHub share channel |
 | `ARCHIVE_POLICY.md` | Archive directory governance: retention, cleanup cadence, reader expectations |
 | `AGENT_TERMINOLOGY_GLOSSARY.md` | Canonical definitions for overloaded "agent" terms in the spine |
