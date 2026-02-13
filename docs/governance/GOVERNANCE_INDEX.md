@@ -340,7 +340,7 @@ START: Agent has a question about "truth"
     │       NO ↓
     │
     ├─▶ Is there an authoritative doc?
-    │       → Check AUTHORITY_INDEX.md
+    │       → Check this GOVERNANCE_INDEX
     │       YES → Use that doc
     │       NO ↓
     │
@@ -376,7 +376,7 @@ An SSOT (Single Source of Truth) claim means a document asserts:
 | Session handoff | `docs/sessions/2026-01-24.md` | Ephemeral, not canonical |
 | Archive content | `*/.archive/*` | Historical, explicitly non-authoritative |
 | README files | `module/README.md` | Entrypoint, not truth source |
-| Index/pointer docs | `AUTHORITY_INDEX.md` | Points to SSOTs, is not itself one |
+| Index/pointer docs | `GOVERNANCE_INDEX.md` | Points to SSOTs, is not itself one |
 
 ### Hard Rule: Register or Remove
 
@@ -461,7 +461,7 @@ Before adding `status: authoritative` or claiming SSOT:
 | Document | Relationship |
 |----------|--------------|
 | `SSOT_REGISTRY.yaml` | Machine-readable version of SSOT list |
-| `AUTHORITY_INDEX.md` | Older doc registry (being superseded) |
+| `ACTIVE_DOCS_INDEX.md` | Lightweight doc presence index |
 | `REPO_STRUCTURE_AUTHORITY.md` | Where files belong |
 | `SEARCH_EXCLUSIONS.md` | What's excluded from search |
 | `docs/governance/SESSION_PROTOCOL.md` | Session entry point |
