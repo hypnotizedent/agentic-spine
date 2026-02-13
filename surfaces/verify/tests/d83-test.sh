@@ -161,6 +161,29 @@ else
   fail "D83 should pass for well-formed proposal (rc=$rc)"
 fi
 
+# Test 9: read_only proposal without status field detected correctly
+echo "--- Test 9: read_only proposal detection ---"
+TEST_CP9="$PROPOSALS_DIR/CP-20260213-999992__d83-test-read-only"
+trap 'rm -rf "$TEST_CP9"' EXIT
+mkdir -p "$TEST_CP9"
+cat > "$TEST_CP9/manifest.yaml" << 'YAML'
+proposal: CP-20260213-999992__d83-test-read-only
+agent: "test-agent"
+created: 2026-02-13T00:00:00Z
+read_only: true
+mode: read-only
+changes: []
+YAML
+
+output=$(bash "$GATE" 2>&1) && rc=$? || rc=$?
+rm -rf "$TEST_CP9"
+
+if [[ "$rc" -eq 0 ]]; then
+  pass "D83 passes for read_only proposal without status field (rc=$rc)"
+else
+  fail "D83 should pass for read_only proposal (rc=$rc, output: $output)"
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL_COUNT failed"
 exit "$FAIL_COUNT"

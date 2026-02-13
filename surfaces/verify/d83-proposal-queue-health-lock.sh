@@ -73,6 +73,12 @@ for dir in "$PROPOSALS_DIR"/CP-*; do
   elif grep -q '^status:' "$manifest"; then
     status=$(grep -m1 '^status:' "$manifest" | sed 's/^status: *//' | tr -d '"' | tr -d "'")
   fi
+  # Detect read_only proposals without explicit status field
+  if [[ "$status" == "pending" ]]; then
+    if grep -q '^read_only: *true' "$manifest" || grep -q '^mode: *read-only' "$manifest"; then
+      status="read-only"
+    fi
+  fi
 
   # Check 2: required fields for all statuses
   has_proposal=false
@@ -120,6 +126,9 @@ for dir in "$PROPOSALS_DIR"/CP-*; do
         err "$bname: draft_hold without review_date"
         missing_fields=$((missing_fields + 1))
       fi
+      ;;
+    read-only|readonly)
+      # Read-only proposals are diagnostic — no artifact enforcement needed
       ;;
   esac
 
