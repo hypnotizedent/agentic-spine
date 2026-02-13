@@ -74,12 +74,78 @@ else
   fail "D83 should fail for draft_hold without owner (rc=$rc)"
 fi
 
-# Test 5: Well-formed proposals pass
-echo "--- Test 5: well-formed proposal passes ---"
-TEST_CP4="$PROPOSALS_DIR/CP-20260213-999996__d83-test-good"
-trap 'rm -rf "$TEST_CP4"' EXIT
-mkdir -p "$TEST_CP4"
-cat > "$TEST_CP4/manifest.yaml" << 'YAML'
+# Test 5: Missing created field fails (not just warns)
+echo "--- Test 5: missing created field ---"
+TEST_CP5="$PROPOSALS_DIR/CP-20260213-999995__d83-test-no-created"
+trap 'rm -rf "$TEST_CP5"' EXIT
+mkdir -p "$TEST_CP5"
+cat > "$TEST_CP5/manifest.yaml" << 'YAML'
+proposal: CP-20260213-999995__d83-test-no-created
+agent: "test-agent"
+changes: []
+YAML
+
+output=$(bash "$GATE" 2>&1) && rc=$? || rc=$?
+rm -rf "$TEST_CP5"
+
+if [[ "$rc" -ne 0 ]]; then
+  pass "D83 correctly fails on missing created field (rc=$rc)"
+else
+  fail "D83 should fail for missing created field (rc=$rc)"
+fi
+
+# Test 6: Superseded without superseded_at fails
+echo "--- Test 6: superseded without superseded_at ---"
+TEST_CP6="$PROPOSALS_DIR/CP-20260213-999994__d83-test-bad-superseded"
+trap 'rm -rf "$TEST_CP6"' EXIT
+mkdir -p "$TEST_CP6"
+cat > "$TEST_CP6/manifest.yaml" << 'YAML'
+proposal: CP-20260213-999994__d83-test-bad-superseded
+agent: "test-agent"
+created: "2026-02-13T00:00:00Z"
+status: superseded
+superseded_reason: "test only reason, no at field"
+changes: []
+YAML
+
+output=$(bash "$GATE" 2>&1) && rc=$? || rc=$?
+rm -rf "$TEST_CP6"
+
+if [[ "$rc" -ne 0 ]]; then
+  pass "D83 correctly fails on superseded without superseded_at (rc=$rc)"
+else
+  fail "D83 should fail for superseded without superseded_at (rc=$rc)"
+fi
+
+# Test 7: Superseded without superseded_reason fails
+echo "--- Test 7: superseded without superseded_reason ---"
+TEST_CP7="$PROPOSALS_DIR/CP-20260213-999993__d83-test-bad-superseded-2"
+trap 'rm -rf "$TEST_CP7"' EXIT
+mkdir -p "$TEST_CP7"
+cat > "$TEST_CP7/manifest.yaml" << 'YAML'
+proposal: CP-20260213-999993__d83-test-bad-superseded-2
+agent: "test-agent"
+created: "2026-02-13T00:00:00Z"
+status: superseded
+superseded_at: "2026-02-13T00:00:00Z"
+changes: []
+YAML
+
+output=$(bash "$GATE" 2>&1) && rc=$? || rc=$?
+rm -rf "$TEST_CP7"
+
+if [[ "$rc" -ne 0 ]]; then
+  pass "D83 correctly fails on superseded without superseded_reason (rc=$rc)"
+else
+  fail "D83 should fail for superseded without superseded_reason (rc=$rc)"
+fi
+
+# Test 8: Well-formed proposals pass
+echo "--- Test 8: well-formed proposal passes ---"
+TEST_CP8="$PROPOSALS_DIR/CP-20260213-999996__d83-test-good"
+trap 'rm -rf "$TEST_CP8"' EXIT
+mkdir -p "$TEST_CP8"
+cat > "$TEST_CP8/manifest.yaml" << 'YAML'
 proposal: CP-20260213-999996__d83-test-good
 agent: "test-agent"
 created: 2026-02-13T00:00:00Z
@@ -87,7 +153,7 @@ changes: []
 YAML
 
 output=$(bash "$GATE" 2>&1) && rc=$? || rc=$?
-rm -rf "$TEST_CP4"
+rm -rf "$TEST_CP8"
 
 if [[ "$rc" -eq 0 ]]; then
   pass "D83 passes for well-formed proposal (rc=$rc)"

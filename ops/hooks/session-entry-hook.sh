@@ -63,10 +63,33 @@ PY
 
 # --- Dynamic context gathering ---
 
-# Spine status (loops + gaps + inbox)
+# Spine status (loops + gaps + inbox + proposals)
 LOOPS="(none)"
 if [[ -x "$SPINE_ROOT/bin/ops" ]]; then
   LOOPS=$(timeout 10 "$SPINE_ROOT/bin/ops" status --brief 2>/dev/null || echo "(unavailable)")
+fi
+
+# Proposal queue health (lightweight: count pending proposals)
+PROPOSALS_HEALTH=""
+PROPOSALS_DIR="$SPINE_ROOT/mailroom/outbox/proposals"
+if [[ -d "$PROPOSALS_DIR" ]]; then
+  pending=0
+  held=0
+  for cpdir in "$PROPOSALS_DIR"/CP-*/; do
+    [[ -d "$cpdir" ]] || continue
+    [[ -f "$cpdir/.applied" ]] && continue
+    manifest="$cpdir/manifest.yaml"
+    [[ -f "$manifest" ]] || continue
+    st=$(grep -m1 '^status:' "$manifest" 2>/dev/null | sed 's/^status: *//' | tr -d '"' || echo "pending")
+    case "$st" in
+      draft_hold) held=$((held + 1)) ;;
+      pending|draft|"") pending=$((pending + 1)) ;;
+    esac
+  done
+  if [[ "$pending" -gt 5 ]]; then
+    PROPOSALS_HEALTH="
+> **Proposal queue: ${pending} pending** (threshold: 5). Run \`proposals.status\` and triage."
+  fi
 fi
 
 # Current branch
@@ -140,7 +163,7 @@ MSG="## SESSION ENTRY PROTOCOL (governance hook)
 
 You are working inside the agentic-spine repo (\`$SPINE_ROOT\`).
 **Branch:** \`${BRANCH}\` | **Active worktrees:** ${WT_COUNT}/2 | **Active sessions:** ${ACTIVE_SESSIONS}
-${DIRTY_WARNING}${MULTI_AGENT_WARNING}
+${DIRTY_WARNING}${MULTI_AGENT_WARNING}${PROPOSALS_HEALTH}
 
 ### Multi-Agent Write Policy (Default)
 - Agents: read-only on repo; write proposals to \`mailroom/outbox/proposals/\`

@@ -95,14 +95,20 @@ for dir in "$PROPOSALS_DIR"/CP-*; do
     missing_fields=$((missing_fields + 1))
   fi
   if [[ "$has_created" == "false" ]]; then
-    warn "$bname: missing created field"
+    err "$bname: missing created field"
+    missing_fields=$((missing_fields + 1))
   fi
 
   # Check 3: status-specific required fields
   case "$status" in
     superseded)
-      if ! grep -q '^superseded_at:' "$manifest" && ! grep -q '^superseded_reason:' "$manifest"; then
-        warn "$bname: superseded without superseded_at/superseded_reason"
+      if ! grep -q '^superseded_at:' "$manifest"; then
+        err "$bname: superseded without superseded_at"
+        missing_fields=$((missing_fields + 1))
+      fi
+      if ! grep -q '^superseded_reason:' "$manifest"; then
+        err "$bname: superseded without superseded_reason"
+        missing_fields=$((missing_fields + 1))
       fi
       ;;
     draft_hold)

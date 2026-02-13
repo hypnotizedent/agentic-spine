@@ -74,13 +74,14 @@ def parse_scope(path):
 
 open_loops = []
 closed_loops = []
+planned_loops = []
 all_scopes = []
 
 if scopes_dir.is_dir():
     for f in sorted(scopes_dir.glob("*.scope.md")):
         fm = parse_scope(f)
         status = fm.get("status", "")
-        if status not in ("active", "draft", "open", "closed"):
+        if status not in ("active", "draft", "open", "closed", "planned"):
             continue
 
         entry = {
@@ -92,7 +93,9 @@ if scopes_dir.is_dir():
             "file": str(f.relative_to(spine)),
         }
         all_scopes.append(entry)
-        if status in ("active", "draft", "open"):
+        if status == "planned":
+            planned_loops.append(entry)
+        elif status in ("active", "draft", "open"):
             open_loops.append(entry)
         else:
             closed_loops.append(entry)
@@ -151,6 +154,37 @@ inbox_items = list_md_files(inbox_dir)
 parked_items = list_md_files(parked_dir)
 done_items = list_md_files(done_dir)
 
+# ── Parse proposals queue ─────────────────────────────────────────────────
+
+proposals_dir = spine / "mailroom" / "outbox" / "proposals"
+proposal_counts = Counter()
+
+if proposals_dir.is_dir():
+    for cp_dir in sorted(proposals_dir.iterdir()):
+        if not cp_dir.is_dir() or not cp_dir.name.startswith("CP-"):
+            continue
+        manifest = cp_dir / "manifest.yaml"
+        applied_marker = cp_dir / ".applied"
+
+        if applied_marker.exists():
+            proposal_counts["applied"] += 1
+            continue
+
+        if not manifest.exists():
+            proposal_counts["malformed"] += 1
+            continue
+
+        status = "pending"
+        text = manifest.read_text()
+        for line in text.splitlines():
+            if line.startswith("status:"):
+                status = line.split(":", 1)[1].strip().strip('"').strip("'")
+                break
+
+        proposal_counts[status] += 1
+
+proposal_total = sum(proposal_counts.values())
+
 # ── Anomaly detection ─────────────────────────────────────────────────────
 
 anomalies = []
@@ -177,25 +211,36 @@ if inbox_items:
 if mode == "--json":
     print(json.dumps({
         "open_loops": open_loops,
+        "planned_loops": planned_loops,
         "open_gaps": open_gaps,
         "inbox": inbox_items,
         "parked": parked_items,
+        "proposals": dict(proposal_counts),
         "anomalies": anomalies,
         "counts": {
             "open_loops": len(open_loops),
+            "planned_loops": len(planned_loops),
             "closed_loops": len(closed_loops),
             "open_gaps": len(open_gaps),
             "linked_gaps": len(linked_gaps),
             "unlinked_gaps": len(unlinked_gaps),
             "inbox": len(inbox_items),
             "parked": len(parked_items),
+            "proposals_total": proposal_total,
             "anomalies": len(anomalies),
         }
     }, indent=2))
     sys.exit(0)
 
 if mode == "--brief":
-    print(f"Loops: {len(open_loops)} open | Gaps: {len(open_gaps)} open ({len(unlinked_gaps)} unlinked) | Inbox: {len(inbox_items)} | Anomalies: {len(anomalies)}")
+    parts = [f"Loops: {len(open_loops)} open"]
+    if planned_loops:
+        parts[0] += f" + {len(planned_loops)} planned"
+    parts.append(f"Gaps: {len(open_gaps)} open ({len(unlinked_gaps)} unlinked)")
+    parts.append(f"Proposals: {proposal_counts.get('pending', 0)} pending / {proposal_counts.get('draft_hold', 0)} held")
+    parts.append(f"Inbox: {len(inbox_items)}")
+    parts.append(f"Anomalies: {len(anomalies)}")
+    print(" | ".join(parts))
     sys.exit(0 if len(anomalies) == 0 else 1)
 
 # Full output
@@ -218,6 +263,16 @@ else:
         if loop["title"] != loop["loop_id"]:
             print(f"  {'':8s}  {'':15s} {loop['title']}")
 print()
+
+# ── Planned Loops ──
+if planned_loops:
+    print(f"PLANNED LOOPS ({len(planned_loops)})")
+    print("-" * 72)
+    for loop in planned_loops:
+        print(f"  [{loop['severity']:8s}] {loop['owner']:15s} {loop['loop_id']}")
+        if loop["title"] != loop["loop_id"]:
+            print(f"  {'':8s}  {'':15s} {loop['title']}")
+    print()
 
 # ── Open Gaps ──
 print(f"OPEN GAPS ({len(open_gaps)})")
@@ -247,6 +302,16 @@ if parked_items:
         print(f"  {item['name']}")
     print()
 
+# ── Proposals Queue ──
+if proposal_total > 0:
+    print(f"PROPOSALS ({proposal_total})")
+    print("-" * 72)
+    for status_name in ["pending", "draft_hold", "applied", "superseded", "draft", "read-only", "invalid", "malformed"]:
+        count = proposal_counts.get(status_name, 0)
+        if count > 0:
+            print(f"  {status_name:15s} {count}")
+    print()
+
 # ── Anomalies ──
 if anomalies:
     print(f"ANOMALIES ({len(anomalies)})")
@@ -258,8 +323,13 @@ if anomalies:
 # ── Summary line ──
 print("=" * 72)
 parts = [f"{len(open_loops)} loops"]
+if planned_loops:
+    parts.append(f"{len(planned_loops)} planned")
 if open_gaps:
     parts.append(f"{len(open_gaps)} gaps")
+pending_count = proposal_counts.get("pending", 0)
+if pending_count:
+    parts.append(f"{pending_count} pending proposals")
 if inbox_items:
     parts.append(f"{len(inbox_items)} inbox")
 if anomalies:

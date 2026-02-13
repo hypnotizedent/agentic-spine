@@ -29,6 +29,7 @@ Run from `~/code/agentic-spine`:
 cd ~/code/agentic-spine
 ./bin/ops cap run spine.verify
 ./bin/ops cap run gaps.status
+./bin/ops cap run proposals.status
 ./bin/ops cap run orchestration.status
 ```
 
