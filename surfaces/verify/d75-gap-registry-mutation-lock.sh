@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Use gaps.file/gaps.close capabilities only. No direct edits to operational.gaps.yaml.
 # D75: Gap registry mutation lock
 # Enforces capability-only mutation evidence for operational.gaps.yaml.
 #

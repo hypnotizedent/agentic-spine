@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check home directory for drift. Remove ungoverned files per home-surface policy.
 # D76: Home-surface hygiene lock
 # Prevents home directory drift by checking:
 #   1. No plaintext secrets in Claude Desktop config (if present)

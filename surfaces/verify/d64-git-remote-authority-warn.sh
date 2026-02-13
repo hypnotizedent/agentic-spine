@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Gitea is canonical remote. Do not merge PRs on GitHub directly.
 set -euo pipefail
 
 # D64: Git remote authority WARN (no-fail)

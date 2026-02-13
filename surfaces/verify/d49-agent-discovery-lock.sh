@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Update ops/bindings/agents.registry.yaml. All domain agents must be registered.
 set -euo pipefail
 
 # D49: Agent Discovery Lock

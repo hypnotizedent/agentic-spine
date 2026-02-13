@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Verify hypervisor identity entries match live infrastructure.
 set -euo pipefail
 
 # D39: Infra Hypervisor Identity Lock

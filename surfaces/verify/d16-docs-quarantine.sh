@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Remove competing truth documents. Only one canonical doc per topic in docs/governance/.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

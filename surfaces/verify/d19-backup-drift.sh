@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check backup SSOT for stale entries. No secret printing in backup scripts.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

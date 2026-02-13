@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check infra placement against governance policy. Verify VM/host assignments.
 set -euo pipefail
 
 # D37: Infra Placement Policy Lock

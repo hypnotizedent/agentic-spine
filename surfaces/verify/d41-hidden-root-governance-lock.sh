@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Review ~/. entries against home-root inventory. Remove ungoverned hidden dirs.
 set -euo pipefail
 
 # D41: Hidden-root governance lock

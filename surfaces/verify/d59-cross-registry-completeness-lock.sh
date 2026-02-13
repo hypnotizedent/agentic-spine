@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure bidirectional host coverage between registries.
 # D59: Cross-registry completeness lock
 # Verifies bidirectional host coverage between ssh.targets.yaml,
 # SERVICE_REGISTRY.yaml, and naming.policy.yaml.

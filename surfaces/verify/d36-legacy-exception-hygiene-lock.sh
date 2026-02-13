@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Review stale or near-expiry legacy exceptions. Remove expired ones.
 set -euo pipefail
 
 # D36: Legacy Exception Hygiene Lock

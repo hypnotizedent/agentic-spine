@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Run secrets.binding then secrets.auth.status before API work.
 set -euo pipefail
 
 # D55: Secrets Runtime Readiness Lock (composite)

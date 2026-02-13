@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Update docker compose references to match SSOT. Remove legacy service names.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

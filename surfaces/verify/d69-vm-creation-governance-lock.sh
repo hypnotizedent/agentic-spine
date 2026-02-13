@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: New VMs need entries in SSH config, SERVICE_REGISTRY, backup, and health checks.
 # D69: VM creation governance lock
 # Enforces cross-file parity for every active VM in vm.lifecycle.yaml.
 # Each active shop VM must have matching entries in ssh.targets.yaml,

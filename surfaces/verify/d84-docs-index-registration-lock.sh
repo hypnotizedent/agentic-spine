@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Register new governance .md files in docs/governance/_index.yaml.
 # D84: Docs index registration lock
 #
 # Fails if:

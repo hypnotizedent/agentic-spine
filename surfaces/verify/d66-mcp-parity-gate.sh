@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Sync MCP server copies between local agents and MCPJungle.
 set -euo pipefail
 
 # D66: MCP Server Parity Gate

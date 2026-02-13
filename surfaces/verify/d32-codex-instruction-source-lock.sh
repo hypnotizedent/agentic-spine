@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure AGENTS.md points to spine governance, not external sources.
 set -euo pipefail
 
 # D32: Codex Instruction Source Lock

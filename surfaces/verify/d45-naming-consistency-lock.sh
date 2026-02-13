@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Fix cross-file naming inconsistencies. Check identity surfaces for drift.
 # D45: Naming consistency lock
 # Verifies cross-file consistency of host identity surfaces.
 # File-only checks — does NOT SSH to hosts or test reachability.

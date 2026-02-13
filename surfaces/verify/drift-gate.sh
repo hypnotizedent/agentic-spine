@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v2.7)
+# drift-gate.sh - Constitutional drift detector (v2.8)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -48,25 +48,34 @@ gate_script() {
     echo "  --- output (first 200 lines): $script ---"
     sed -n '1,200p' "$tmp" | sed 's/^/  /' || true
     echo "  --- end output ---"
+    # Extract triage hint from gate script (P3: self-documenting gates)
+    local triage
+    triage="$(grep '^# TRIAGE:' "$script" 2>/dev/null | head -1 | sed 's/^# TRIAGE: *//' || true)"
+    if [[ -n "$triage" ]]; then
+      echo "  TRIAGE: $triage"
+    fi
   fi
 
   rm -f "$tmp" 2>/dev/null || true
 }
 
-echo "=== DRIFT GATE (v2.7) ==="
+echo "=== DRIFT GATE (v2.8) ==="
 
 # D1: Top-level directory policy (9 allowed)
+# TRIAGE: Only bin/ docs/ fixtures/ mailroom/ ops/ receipts/ surfaces/ allowed at top level. Remove or move extra directories.
 echo -n "D1 top-level dirs... "
 EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(bin|docs|fixtures|mailroom|ops|receipts|surfaces)/$' || true)"
-[[ -z "$EXTRA" ]] && pass || fail "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"
+if [[ -z "$EXTRA" ]]; then pass; else fail "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"; echo "  TRIAGE: Only bin/ docs/ fixtures/ mailroom/ ops/ receipts/ surfaces/ allowed at top level."; fi
 
 # D2: No runs/ trace
+# TRIAGE: Remove runs/ directory. Execution traces belong in receipts/sessions/.
 echo -n "D2 one trace (no runs/)... "
-[[ ! -d runs ]] && pass || fail "runs/ exists"
+if [[ ! -d runs ]]; then pass; else fail "runs/ exists"; echo "  TRIAGE: Remove runs/ directory. Traces belong in receipts/sessions/."; fi
 
 # D3: Entrypoint smoke
+# TRIAGE: bin/ops preflight must succeed. Check bin/ops exists and is executable.
 echo -n "D3 entrypoint smoke... "
-./bin/ops preflight >/dev/null 2>&1 && pass || fail "bin/ops preflight failed"
+if ./bin/ops preflight >/dev/null 2>&1; then pass; else fail "bin/ops preflight failed"; echo "  TRIAGE: Check bin/ops exists and is executable. Run: chmod +x bin/ops"; fi
 
 # D4: Watcher (launchd canonical; warn only, no fail)
 echo -n "D4 watcher... "
@@ -94,6 +103,7 @@ else
 fi
 
 # D5: No executable ~/agent coupling
+# TRIAGE: Replace ~/agent or $HOME/agent references with mailroom/ paths. Legacy coupling is forbidden.
 echo -n "D5 no legacy coupling... "
 COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces/verify 2>/dev/null \
   | rg -v '^[[:space:]]*#' \
@@ -107,9 +117,10 @@ COUPLE="$(rg -n '(\$HOME/agent|~/agent)' bin ops ops/runtime/inbox surfaces/veri
   | rg -v 'd22-nodes-drift.sh' \
   | rg -v 'd23-health-drift.sh' \
   | rg -v 'd24-github-labels-drift.sh' || true)"
-[[ -z "$COUPLE" ]] && pass || fail "legacy coupling found"
+if [[ -z "$COUPLE" ]]; then pass; else fail "legacy coupling found"; echo "  TRIAGE: Replace ~/agent or \$HOME/agent refs with mailroom/ paths."; fi
 
 # D6: Receipts exist (latest 5 have receipt.md)
+# TRIAGE: Ensure receipt.md exists in latest receipt dirs. Capabilities auto-generate receipts.
 echo -n "D6 receipts exist... "
 MISSING=0
 COUNT=0
@@ -118,29 +129,34 @@ for s in $(ls -1t "$RT/receipts/sessions" 2>/dev/null); do
   COUNT=$((COUNT+1))
   [[ "$COUNT" -ge 5 ]] && break
 done
-[[ "$MISSING" -eq 0 ]] && pass || fail "$MISSING missing receipt.md"
+if [[ "$MISSING" -eq 0 ]]; then pass; else fail "$MISSING missing receipt.md"; echo "  TRIAGE: Check receipts/sessions/ for dirs missing receipt.md. Re-run capability to regenerate."; fi
 
 # D7: Executables only in four zones
+# TRIAGE: Shell scripts only allowed in bin/, ops/, surfaces/verify/. Move or remove out-of-bounds .sh files.
 echo -n "D7 executables bounded... "
 BAD="$(find . -type f -name "*.sh" \
   | rg -v '^\./(bin/|ops/|surfaces/verify/)' \
   | rg -v '^\./(_imports/|docs/|receipts/|mailroom/|\.git/|\.spine/|\.archive/|\.worktrees/)' || true)"
-[[ -z "$BAD" ]] && pass || fail "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"
+if [[ -z "$BAD" ]]; then pass; else fail "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"; echo "  TRIAGE: .sh files only in bin/, ops/, surfaces/verify/. Move out-of-bounds scripts."; fi
 
 # D8: No backup clutter
+# TRIAGE: Remove .bak and fix_bak files from bin/ and ops/. These are accidental leftovers.
 echo -n "D8 no backup clutter... "
 BK="$(find bin ops -maxdepth 1 -type f 2>/dev/null | rg '\.bak|fix_bak' || true)"
-[[ -z "$BK" ]] && pass || fail "backup files"
+if [[ -z "$BK" ]]; then pass; else fail "backup files"; echo "  TRIAGE: Delete .bak/fix_bak files from bin/ and ops/."; fi
 
 # D10: No spurious top-level logs (must be under mailroom/)
+# TRIAGE: Move or remove $SPINE/logs. Logs belong under mailroom/logs/.
 echo -n "D10 logs under mailroom... "
 if [[ -d "$SP/logs" ]]; then
   fail "spurious \$SPINE/logs exists (should be mailroom/logs)"
+  echo "  TRIAGE: Move logs/ to mailroom/logs/ or remove it."
 else
   pass
 fi
 
 # D11: ~/agent must be symlink to mailroom (if exists)
+# TRIAGE: If ~/agent exists it must be a symlink to agentic-spine/mailroom. Fix: ln -sf ~/code/agentic-spine/mailroom ~/agent
 echo -n "D11 home surface... "
 if [[ -e "$HOME/agent" ]]; then
   if [[ -L "$HOME/agent" ]]; then
@@ -149,20 +165,24 @@ if [[ -e "$HOME/agent" ]]; then
       pass
     else
       fail "~/agent symlink points to wrong target: $TARGET"
+      echo "  TRIAGE: Fix symlink: ln -sf ~/code/agentic-spine/mailroom ~/agent"
     fi
   else
     fail "~/agent is a directory (should be symlink to mailroom)"
+    echo "  TRIAGE: Remove ~/agent dir and create symlink: ln -sf ~/code/agentic-spine/mailroom ~/agent"
   fi
 else
   pass  # doesn't exist, that's fine
 fi
 
 # D12: CORE_LOCK.md must exist (repo validity marker)
+# TRIAGE: docs/core/CORE_LOCK.md is the repo validity marker. Restore it if deleted.
 echo -n "D12 core lock exists... "
-[[ -f "$SP/docs/core/CORE_LOCK.md" ]] && pass || fail "docs/core/CORE_LOCK.md missing"
+if [[ -f "$SP/docs/core/CORE_LOCK.md" ]]; then pass; else fail "docs/core/CORE_LOCK.md missing"; echo "  TRIAGE: Restore docs/core/CORE_LOCK.md — this is the repo validity marker."; fi
 
 # D9: Receipt stamps (STRICT - required fields for all new receipts)
 # Receipts created after core-v1.0 must have: Run ID, Generated, Status, Model, Inputs, Outputs
+# TRIAGE: Latest receipt missing required fields. Check ops/cap.sh receipt template for correct format.
 echo -n "D9 receipt stamps... "
 LATEST=""
 for s in $(ls -1t "$RT/receipts/sessions" 2>/dev/null); do
@@ -192,6 +212,7 @@ if [[ -n "$LATEST" ]] && [[ -f "$RT/receipts/sessions/$LATEST/receipt.md" ]]; th
     pass
   else
     fail "latest receipt missing: $MISSING"
+    echo "  TRIAGE: Latest receipt missing fields: $MISSING. Check ops/cap.sh receipt template."
   fi
 else
   warn "no receipts to check"

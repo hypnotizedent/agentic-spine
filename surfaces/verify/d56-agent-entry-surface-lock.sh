@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Run ops/hooks/sync-agent-surfaces.sh to sync agent entry surfaces.
 set -euo pipefail
 
 # D56: Agent Entry Surface Lock (composite)

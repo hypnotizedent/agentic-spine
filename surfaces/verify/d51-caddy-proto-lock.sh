@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Add X-Forwarded-Proto header to all Authentik upstreams in Caddy config.
 # D51: Caddy proto lock
 # Validates that the staged Caddyfile has X-Forwarded-Proto https
 # on ALL reverse_proxy blocks targeting Authentik (port 9000).

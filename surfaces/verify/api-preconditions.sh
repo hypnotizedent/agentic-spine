@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Run secrets.binding and secrets.auth.status before API-touching capabilities.
 set -euo pipefail
 
 REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"

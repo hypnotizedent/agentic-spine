@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure opencode.json uses model openai/glm-5 and launcher path is correct.
 # D73: OpenCode governed entry lock
 # Enforces that OpenCode launch surfaces route through spine_terminal_entry and
 # target the canonical model/provider contract.

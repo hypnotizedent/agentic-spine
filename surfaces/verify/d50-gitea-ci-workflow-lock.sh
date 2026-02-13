@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure .gitea/workflows/ CI config references drift-gate.sh correctly.
 set -euo pipefail
 
 # D50: Gitea CI Workflow Lock

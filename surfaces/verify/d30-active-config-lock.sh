@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Remove legacy config references and plaintext tokens from active configs.
 set -euo pipefail
 
 # D30: Active Config Lock

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure ~/.claude/CLAUDE.md is a redirect shim only. Governance lives in spine.
 set -euo pipefail
 
 # D46: Claude instruction source lock

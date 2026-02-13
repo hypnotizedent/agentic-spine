@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Extraction must stay paused during stabilization. Do not resume without operator approval.
 set -euo pipefail
 
 # D33: Extraction Pause Lock

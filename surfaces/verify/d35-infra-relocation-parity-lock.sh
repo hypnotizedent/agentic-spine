@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Update all SSOTs when relocating services: DEVICE_IDENTITY, SERVICE_REGISTRY, SSH config.
 set -euo pipefail
 
 # D35: Infra Relocation Parity Lock

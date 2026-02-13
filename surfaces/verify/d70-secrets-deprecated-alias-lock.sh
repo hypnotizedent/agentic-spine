@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Do not write to deprecated secret projects. Use current namespace.
 set -euo pipefail
 
 # D70: Secrets Deprecated-Alias Lock

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure IPs match across DEVICE_IDENTITY, shop server SSOT, and bindings.
 # D54 - SSOT IP parity lock (shop network)
 #
 # Pure local-file parity gate. No SSH, no ping.

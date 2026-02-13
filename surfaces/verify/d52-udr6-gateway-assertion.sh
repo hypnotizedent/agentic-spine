@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure shop SSOT docs reference correct gateway for UDR6 network.
 # D52: UDR6 gateway assertion
 # Validates that SSOT docs reference 192.168.1.1 as the shop gateway (UDR6),
 # not the old T-Mobile direct (192.168.12.1) or Dell N2024P gateway.

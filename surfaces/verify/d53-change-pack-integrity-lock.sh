@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check change pack template, sequencing, and companion files. Fix missing items.
 # D53: Change pack integrity lock
 #
 # Validates:

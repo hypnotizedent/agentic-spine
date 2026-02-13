@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Review secrets configuration. Ensure Infisical CLI is installed and configured.
 set -euo pipefail
 
 # D20: Secrets Surface Lock

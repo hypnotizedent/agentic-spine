@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Replace legacy absolute paths with ~/code/ relative paths. Check archive queue.
 set -euo pipefail
 
 # D28: Archive Runway Lock

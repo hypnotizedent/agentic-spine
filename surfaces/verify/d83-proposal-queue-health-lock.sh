@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Fix malformed proposal manifests. Check status, required fields, SLA compliance.
 # D83: Proposal queue health lock
 #
 # Fails if:

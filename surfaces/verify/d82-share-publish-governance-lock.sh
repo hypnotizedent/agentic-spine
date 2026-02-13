@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check share publish allowlist/denylist. Ensure capability wiring is correct.
 # D82: Share publish governance lock
 #
 # Enforces share channel governance parity:

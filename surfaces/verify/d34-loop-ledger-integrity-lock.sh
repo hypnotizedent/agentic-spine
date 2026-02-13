@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check loop scope files match deduped counts. Run loops.reconcile if stale.
 set -euo pipefail
 
 # D34: Loop Ledger Integrity Lock

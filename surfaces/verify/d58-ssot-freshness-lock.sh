@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Update last_reviewed/last_verified dates on stale SSOTs (max 21 days).
 # D58: SSOT freshness lock
 # Fails when any SSOT in the registry has a last_reviewed date
 # older than SSOT_FRESHNESS_DAYS (default: 21).

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Fix workbench plist/runtime/bare-exec contract violations.
 # D77: Workbench contract lock
 # Enforces WORKBENCH_CONTRACT.md mechanical rules:
 #   1. No *.plist files outside allowlist in workbench

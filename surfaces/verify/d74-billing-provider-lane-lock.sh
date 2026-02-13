@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check ZAI_MODEL=glm-5 in launchd template and background defaults.
 # D74: Billing/provider lane lock
 # Guardrails:
 # - Background engine defaults to z.ai (no OpenAI default).

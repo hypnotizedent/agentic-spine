@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Remove unexpected files/dirs from repo root. Only allowlisted entries permitted.
 # d17-root-allowlist.sh - Enforce strict root directory allowlist
 #
 # Prevents drift by forbidding unexpected directories at repo root.

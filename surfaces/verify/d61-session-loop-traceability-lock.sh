@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Run agent.session.closeout. Sessions require closeout every 48h.
 # D61: Session-loop traceability lock
 # Fails when agent.session.closeout has not been run within
 # SESSION_CLOSEOUT_FRESHNESS_HOURS (default: 48).

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Update cli.tools.inventory.yaml to match installed tools. Run tool probes.
 set -euo pipefail
 
 # D44: CLI Tools Discovery Lock

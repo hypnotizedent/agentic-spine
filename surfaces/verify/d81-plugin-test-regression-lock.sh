@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: New plugins must have tests/ dir with test scripts, or an explicit exemption.
 # D81: Plugin test regression lock
 # Prevents new plugins from being added to MANIFEST.yaml without
 # either test files in ops/plugins/<name>/tests/ or an explicit

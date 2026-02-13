@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure launchd/cron entries use ~/code/agentic-spine paths, not legacy locations.
 set -euo pipefail
 
 # D29: Active Entrypoint Lock

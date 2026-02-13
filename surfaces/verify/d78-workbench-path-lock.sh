@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Use lowercase ~/code/ in workbench scripts. Remove legacy repo name references.
 # D78: Workbench path lock
 # Prevents uppercase code-dir and ronny-ops path drift in workbench executable surfaces.
 # Checks forbidden case variants and legacy naming in active scripts.

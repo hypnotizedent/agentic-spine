@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check EXTRACTION_PROTOCOL.md compliance. Extraction queue must be clean.
 set -euo pipefail
 
 # D38: Service Extraction Hygiene Lock

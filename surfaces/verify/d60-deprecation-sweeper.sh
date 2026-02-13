@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Replace deprecated terms in governance docs. Check ops/bindings/deprecated.terms.yaml.
 # D60: Deprecation sweeper
 # Greps governance docs for known deprecated terms.
 # Fails if any deprecated term is found outside exclusions.

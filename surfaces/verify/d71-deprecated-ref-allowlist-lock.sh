@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Add legitimate legacy refs to allowlist, or replace with current names.
 set -euo pipefail
 
 # D71: Deprecated Reference Allowlist Lock

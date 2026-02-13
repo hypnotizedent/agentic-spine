@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check .github/workflows/ for legacy patterns. No leaked secrets in workflow files.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

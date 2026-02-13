@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Run ops/hooks/sync-agent-surfaces.sh after editing AGENT_GOVERNANCE_BRIEF.md.
 # D65: Agent briefing sync lock
 #
 # Ensures AGENTS.md and CLAUDE.md contain the canonical governance brief

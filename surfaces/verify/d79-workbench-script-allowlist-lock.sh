@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Add new workbench scripts to allowlist or remove ungoverned ones.
 # D79: Workbench script allowlist lock
 # Ensures every .sh script in active workbench surfaces is registered in the
 # spine's workbench.script.allowlist.yaml. Unregistered scripts are flagged.

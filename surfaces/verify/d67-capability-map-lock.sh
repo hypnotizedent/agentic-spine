@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Update ops/bindings/capability_map.yaml to cover all entries in capabilities.yaml.
 set -euo pipefail
 
 # D67: Capability Map Lock

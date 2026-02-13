@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Use lowercase ~/code/ in all paths. Check bin/, ops/, surfaces/verify/*.sh and capabilities.yaml.
 set -euo pipefail
 
 # D42: Code path case lock

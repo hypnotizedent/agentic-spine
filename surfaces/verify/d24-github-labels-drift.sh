@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Sync GitHub labels with label governance. Run via gh CLI.
 set -euo pipefail
 
 # D24: GitHub Labels Surface Lock

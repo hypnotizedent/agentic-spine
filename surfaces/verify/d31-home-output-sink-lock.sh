@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Move log/out/err files from ~/ to project paths. No home-root output sinks.
 set -euo pipefail
 
 # D31: Home Output Sink Lock

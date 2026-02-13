@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Clean up stale/orphaned worktrees. Run: ops close loop <LOOP_ID> for merged branches.
 # D48: Codex worktree hygiene — detect stale/dirty/orphaned worktrees and orphaned stashes.
 #
 # NOTE: This must run on macOS default bash (3.2). Do not use bash4 features

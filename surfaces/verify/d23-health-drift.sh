@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check service health endpoints match SERVICE_REGISTRY.yaml. No auth credentials in health checks.
 set -euo pipefail
 
 # D23: Services Health Surface Lock

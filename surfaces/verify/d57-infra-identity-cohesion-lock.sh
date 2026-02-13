@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure infra identity is consistent across all SSOTs and bindings.
 set -euo pipefail
 
 # D57: Infra Identity Cohesion Lock (composite)

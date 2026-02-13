@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Use infisical CLI only (no legacy vault patterns). Check capabilities.yaml for correct paths.
 set -euo pipefail
 
 # D25: Secrets CLI Canonical Lock

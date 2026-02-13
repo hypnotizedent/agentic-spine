@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check agent read surfaces (AGENTS.md, CLAUDE.md) for stale references.
 set -euo pipefail
 
 # D26: Agent Read Surface Lock

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Fix capabilities.yaml metadata. API caps need touches_api + requires fields.
 set -euo pipefail
 
 # D63: Capabilities metadata lock

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Update SSH node references to match DEVICE_IDENTITY_SSOT.yaml current IPs.
 set -euo pipefail
 
 # D22: Nodes Surface Lock

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Remove non-canonical paths from RAG manifest. Exclude _audits/, _archived/, legacy/.
 # D68: RAG Canonical-Only Gate
 #
 # Verifies that the RAG build_manifest() only returns docs that are

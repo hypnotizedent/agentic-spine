@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Check Cloudflare SSOT docs for legacy references. Update or remove stale entries.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

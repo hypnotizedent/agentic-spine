@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Use docs/brain/ not .brain/ in runtime scripts. D47 enforces path governance.
 set -euo pipefail
 
 # D47: Brain surface path lock

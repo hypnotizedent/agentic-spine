@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Fix legacy naming violations in workbench. Use current repo/project names.
 # D80: Workbench authority-trace lock
 # Wrapper gate that runs workbench authority-trace.sh --strict
 # as part of spine.verify. Catches legacy naming violations

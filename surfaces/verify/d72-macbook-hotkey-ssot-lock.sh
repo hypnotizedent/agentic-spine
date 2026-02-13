@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Sync workbench launcher surfaces with spine MACBOOK_SSOT AUTO blocks.
 # D72: MacBook Hotkey SSOT lock
 # Ensures spine MACBOOK_SSOT auto-blocks stay in sync with workbench hotkey/raycast configs,
 # and enforces canonical /Users/ronnyworks/code launch root (no ~/code or $HOME/code).

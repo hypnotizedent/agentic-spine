@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Remove raw IPs/ports from no-fact docs. Reference SSOT docs instead of duplicating facts.
 set -euo pipefail
 
 # D27: Fact Duplication Lock
