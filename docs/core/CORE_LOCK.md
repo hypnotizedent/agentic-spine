@@ -110,6 +110,25 @@ All must PASS for core to be healthy.
 | D63 | Capabilities metadata lock (registry completeness + dependency typos + executable checks) |
 | D64 | Git remote authority WARN (GitHub merges/PRs) |
 | D65 | Agent briefing sync lock (AGENTS.md + CLAUDE.md match canonical governance brief) |
+| D66 | MCP server parity gate |
+| D67 | Capability map lock (capability_map covers capabilities.yaml) |
+| D68 | RAG canonical-only gate |
+| D69 | VM creation governance lock |
+| D70 | Secrets deprecated alias lock |
+| D71 | Deprecated ref allowlist lock |
+| D72 | MacBook hotkey SSOT lock |
+| D73 | OpenCode governed entry lock |
+| D74 | Billing/provider lane lock |
+| D75 | Gap registry mutation lock |
+| D76 | Home-surface hygiene lock |
+| D77 | Workbench contract lock |
+| D78 | Workbench path lock |
+| D79 | Workbench script allowlist lock |
+| D80 | Workbench authority-trace lock |
+| D81 | Plugin test regression lock |
+| D82 | Share publish governance lock |
+| D83 | Proposal queue health lock |
+| D84 | Docs index registration lock (every governance .md must be in _index.yaml) |
 
 ### Verbose Mode (Subchecks)
 

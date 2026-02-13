@@ -770,6 +770,14 @@ else
   warn "proposal queue health lock gate not present"
 fi
 
+# D84: Docs index registration lock (every governance .md must be in _index.yaml)
+echo -n "D84 docs index registration lock... "
+if [[ -x "$SP/surfaces/verify/d84-docs-index-registration-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d84-docs-index-registration-lock.sh"
+else
+  warn "docs index registration lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1
