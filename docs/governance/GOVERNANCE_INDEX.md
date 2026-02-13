@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-13
 scope: governance-guide
 github_issue: "#541"
 ---
@@ -98,6 +98,15 @@ Pillar entrypoints (per stack)
 | `HOST_DRIFT_POLICY.md` | Host drift contract for `/Users/ronnyworks` stabilization |
 | `GAP_LIFECYCLE.md` | Gap registry lifecycle, mutation capabilities, claim semantics, D75 lock |
 | `HOST_DRIFT_GATES.md` | D76+: home-surface hygiene, workbench contract/path/script/authority-trace locks |
+| `WORKBENCH_SHARE_PROTOCOL.md` | Governance for publishing curated workbench content to GitHub share channel |
+
+### Share Channel Governance
+
+| Document | Purpose |
+|----------|---------|
+| `WORKBENCH_SHARE_PROTOCOL.md` | One-way publish flow, security boundaries, roles for GitHub share channel |
+| `ops/bindings/share.publish.allowlist.yaml` | Paths safe to publish to share channel |
+| `ops/bindings/share.publish.denylist.yaml` | Patterns blocked from share channel (secrets, identity, infra) |
 
 ### Backup & Recovery
 
@@ -143,6 +152,7 @@ Pillar entrypoints (per stack)
 | Secrets Policy | `docs/governance/SECRETS_POLICY.md` | Secrets management |
 | Agent Boundaries | `docs/governance/AGENT_BOUNDARIES.md` | What agents can/cannot do |
 | Scripts Registry | `docs/governance/SCRIPTS_REGISTRY.md` | Canonical scripts index |
+| Workbench Share | `docs/governance/WORKBENCH_SHARE_PROTOCOL.md` | GitHub share channel governance |
 
 For the complete list: `cat docs/governance/SSOT_REGISTRY.yaml`
 
@@ -443,6 +453,7 @@ Before adding `status: authoritative` or claiming SSOT:
 
 | Date | Change | Issue |
 |------|--------|-------|
+| 2026-02-13 | Added Share Channel Governance section + WORKBENCH_SHARE_PROTOCOL.md | — |
 | 2026-02-05 | Added Legacy References section; spine-native SSOTs table | — |
 | 2026-01-24 | Added SSOT Claims Guardrail section | #541 |
 | 2026-01-23 | Created as part of Agent Clarity epic | #541 |
@@ -453,7 +464,7 @@ Before adding `status: authoritative` or claiming SSOT:
 
 > This appendix is generated to ensure every governance doc is discoverable from the authority chain.
 > The sections above remain the curated authority narrative; this list is an index only.
-> Last regenerated: 2026-02-11 (67 docs).
+> Last regenerated: 2026-02-13 (68 docs).
 
 - `AGENT_BOUNDARIES.md`
 - `AGENT_GOVERNANCE_BRIEF.md`
@@ -523,6 +534,7 @@ Before adding `status: authoritative` or claiming SSOT:
 - `STACK_AUTHORITY.md`
 - `VAULTWARDEN_BACKUP_RESTORE.md`
 - `VERIFY_SURFACE_INDEX.md`
+- `WORKBENCH_SHARE_PROTOCOL.md`
 - `WORKBENCH_TOOLING_INDEX.md`
 
 <!-- AUTO: GOVERNANCE_DOC_INDEX_END -->

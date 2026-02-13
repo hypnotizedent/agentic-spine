@@ -1,0 +1,231 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-13
+scope: workbench-share-governance
+---
+
+# Workbench Share Protocol
+
+> **Purpose:** Define the governance model for publishing curated workbench content
+> to a private GitHub share channel while maintaining Gitea as the canonical source.
+>
+> **Authority:** This document establishes the one-way publish flow and security
+> boundaries for the workbench share channel.
+
+---
+
+## 1. Authority Model
+
+### Canonical Source
+
+| Attribute | Value |
+|-----------|-------|
+| **Canonical Repository** | Gitea (`~/code/agentic-spine`) |
+| **Canonical Remote** | Gitea (origin) |
+| **Share Channel** | GitHub private repository (mirror-only, curated) |
+
+### Key Principle
+
+**Gitea is the single source of truth.** The GitHub share channel is a downstream,
+curated copy for selective sharing. It is NOT:
+- A development environment
+- A backup mechanism
+- A bidirectional sync target
+- A replacement for Gitea authority
+
+---
+
+## 2. One-Way Publish Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     GITEA CANONICAL                              │
+│                  ~/code/agentic-spine                           │
+│                         │                                        │
+│                    ┌────▼────┐                                   │
+│                    │ PUBLISH │  ◄── share.publish capability     │
+│                    │  GATE   │      (allowlist + denylist scan)  │
+│                    └────┬────┘                                   │
+│                         │                                        │
+│                         ▼                                        │
+│              ┌─────────────────────┐                             │
+│              │  CURATED PAYLOAD    │                             │
+│              │ (filtered, safe)    │                             │
+│              └──────────┬──────────┘                             │
+│                         │                                        │
+└─────────────────────────┼───────────────────────────────────────┘
+                          │
+                          ▼ (push)
+┌─────────────────────────────────────────────────────────────────┐
+│                     GITHUB SHARE                                 │
+│              (private repository)                                │
+│                                                                  │
+│   • Read-only for external collaborators                        │
+│   • No direct commits accepted                                  │
+│   • Changes flow through spine proposals only                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Publish Flow Steps
+
+1. **Pre-flight Check**
+   - Verify clean git state in spine
+   - Run `spine.verify` to ensure no drift
+   - Confirm all changes committed to Gitea
+
+2. **Content Filtering**
+   - Apply allowlist: only approved paths may be published
+   - Apply denylist: exclude secrets, identity, private infra
+   - Run secret scanner (D81 gate equivalent)
+
+3. **Publish Execution**
+   - Create filtered export of allowed paths
+   - Push to GitHub share remote
+   - Generate receipt documenting what was published
+
+4. **Post-publish Verification**
+   - Confirm GitHub reflects expected state
+   - Record receipt in spine ledger
+
+---
+
+## 3. Security Boundaries
+
+### What Can Be Shared
+
+Content suitable for the share channel includes:
+
+| Category | Examples |
+|----------|----------|
+| **Public patterns** | Reusable scripts, compose templates, configurations |
+| **Documentation** | Runbooks, policies, architecture diagrams (sanitized) |
+| **Tooling** | Helper scripts, utility functions, makefiles |
+| **Templates** | Project scaffolds, boilerplate configurations |
+
+### What Must NEVER Be Shared
+
+| Category | Excluded Content | Reason |
+|----------|-----------------|--------|
+| **Secrets** | API keys, tokens, passwords, private keys | Security critical |
+| **Machine Identity** | Hostnames, local usernames, machine-specific paths | Privacy/OPSEC |
+| **Private Infrastructure** | Internal IPs, VLAN configs, private host inventory | Security critical |
+| **Local Runtime** | launchd configs, local overlays, user-specific settings | Machine-specific |
+| **Credentials** | Database URLs with embedded auth, service tokens | Security critical |
+
+### Deny Patterns (Enforced)
+
+The denylist scanner checks for these patterns:
+
+```yaml
+deny_patterns:
+  - "ghp_[a-zA-Z0-9]+"           # GitHub personal access tokens
+  - "gho_[a-zA-Z0-9]+"           # GitHub OAuth tokens
+  - "ghu_[a-zA-Z0-9]+"           # GitHub user tokens
+  - "ghs_[a-zA-Z0-9]+"           # GitHub server tokens
+  - "ghr_[a-zA-Z0-9]+"           # GitHub refresh tokens
+  - "github_pat_[a-zA-Z0-9_-]+"  # GitHub fine-grained tokens
+  - "BEGIN.*PRIVATE KEY"         # Private key markers
+  - "api[_-]?key\\s*[=:]"        # API key assignments
+  - "postgres://.*:.*@"          # PostgreSQL URLs with credentials
+  - "mysql://.*:.*@"             # MySQL URLs with credentials
+  - "mongodb\\+srv://.*:.*@"     # MongoDB URLs with credentials
+  - "password\\s*[=:]"           # Password assignments
+  - "secret\\s*[=:]"             # Secret assignments
+  - "token\\s*[=:]"              # Token assignments
+```
+
+---
+
+## 4. Roles and Responsibilities
+
+### Terminal C (Owner)
+
+| Responsibility | Description |
+|----------------|-------------|
+| **Maintain allowlist** | Define which paths are safe to share |
+| **Maintain denylist** | Define patterns that must never be published |
+| **Review publish receipts** | Verify published content matches expectations |
+| **Handle escalations** | Respond to security or content concerns |
+
+### Reviewer (External Collaborator)
+
+| Responsibility | Description |
+|----------------|-------------|
+| **Read-only access** | View shared content, no direct edits |
+| **Feedback channel** | Suggest changes via issues/PRs to spine |
+| **No merge authority** | All changes flow through spine proposals |
+
+### Approver (Owner Only)
+
+| Responsibility | Description |
+|----------------|-------------|
+| **Publish approval** | Authorize publish operations |
+| **Emergency rollback** | Revert share channel to last known good |
+| **Access management** | Grant/revoke collaborator access |
+
+---
+
+## 5. Publish Checklist
+
+Before each publish operation:
+
+- [ ] Spine repo is clean (`git status` shows no uncommitted changes)
+- [ ] `spine.verify` passes (all drift gates green)
+- [ ] All changes committed to Gitea canonical
+- [ ] Allowlist reviewed (no new risky paths added)
+- [ ] Denylist scan passes (no blocked patterns found)
+- [ ] Receipt generated and reviewed
+- [ ] GitHub share remote accessible
+
+After publish:
+
+- [ ] Confirm GitHub reflects expected state
+- [ ] Receipt recorded in ledger
+- [ ] Verify no sensitive content leaked
+
+---
+
+## 6. Rollback Procedure
+
+If sensitive content is accidentally published:
+
+1. **Immediate**: Rotate any exposed credentials
+2. **GitHub**: Force push previous known-good commit
+3. **Spine**: Audit what was exposed, update denylist
+4. **Receipt**: Document incident in ledger
+5. **Review**: Update this protocol with lessons learned
+
+---
+
+## 7. Non-Goals
+
+This protocol explicitly does NOT address:
+
+| Non-Goal | Reason |
+|----------|--------|
+| **Bidirectional sync** | Gitea is canonical; GitHub is downstream only |
+| **Real-time mirroring** | Publish is manual/intentional, not automatic |
+| **Full repository mirror** | Share channel is curated, not complete |
+| **CI/CD integration** | Publish is governed operation, not automated |
+| **Secret management** | Secrets belong in Infisical, not share channel |
+
+---
+
+## 8. Related Documents
+
+| Document | Relationship |
+|----------|--------------|
+| `share.publish.allowlist.yaml` | Paths allowed for publishing |
+| `share.publish.denylist.yaml` | Patterns blocked from publishing |
+| `GIT_REMOTE_AUTHORITY.md` | Gitea canonical authority model |
+| `SECRETS_POLICY.md` | Secrets management governance |
+| `LEGACY_DEPRECATION.md` | External repository reference rules |
+
+---
+
+## Changelog
+
+| Date | Change |
+|------|--------|
+| 2026-02-13 | Initial creation of share protocol |
