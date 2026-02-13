@@ -9,21 +9,21 @@ extraction: Move A (doc-only snapshot)
 
 # Finance: Stack Architecture
 
-> Service topology, compose structure, and data layout for the finance stack running on docker-host (VM 200).
+> Service topology, compose structure, and data layout for the finance stack running on finance-stack (VM 211).
 
 ## Service Graph
 
 ```
                     ┌──────────────────────────────────┐
                     │  Cloudflare Tunnel (infra-core)   │
-                    │  firefly.ronny.works → :8090      │
-                    │  docs.ronny.works → :8092         │
-                    │  finances.ronny.works → :3340     │
+                    │  firefly.ronny.works → :8080      │
+                    │  docs.ronny.works → :8000         │
+                    │  finances.ronny.works → :3333     │
                     └──────────┬───────────────────────┘
                                │
                     ┌──────────▼───────────────────────┐
-                    │     docker-host (VM 200)          │
-                    │     192.168.1.200 / TS: 100.92.  │
+                    │     finance-stack (VM 211)        │
+                    │     192.168.1.211 / TS: 100.76.  │
                     ├──────────────────────────────────┤
                     │                                   │
    ┌────────┐      │  ┌──────────┐   ┌─────────────┐  │
@@ -33,7 +33,7 @@ extraction: Move A (doc-only snapshot)
    └────────┘      │  └────┬─────┘   └──────┬──────┘  │
                    │       │                 │         │
                    │  ┌────▼─────────────────▼──────┐  │
-                   │  │     Firefly III :8090        │  │
+                   │  │     Firefly III :8080        │  │
                    │  │     (PHP/Laravel)            │  │
                    │  └────────────┬────────────────┘  │
                    │               │ webhook            │
@@ -51,7 +51,7 @@ extraction: Move A (doc-only snapshot)
                    │                                   │
                    │  ┌──────────────┐  ┌───────────┐  │
                    │  │ Paperless-ngx│  │ Ghostfolio│  │
-                   │  │ :8092        │  │ :3340     │  │
+                   │  │ :8000        │  │ :3333     │  │
                    │  └──────────────┘  └───────────┘  │
                    └──────────────────────────────────┘
 ```
@@ -62,11 +62,11 @@ extraction: Move A (doc-only snapshot)
 |---------|-------|------|-----------|---------|
 | `postgres` | postgres:16 | 5432 (internal) | — | unless-stopped |
 | `redis` | redis:7 | 6379 (internal) | — | unless-stopped |
-| `firefly-iii` | fireflyiii/core:latest | 8090 | postgres, redis | unless-stopped |
+| `firefly-iii` | fireflyiii/core:latest | 8080 | postgres, redis | unless-stopped |
 | `data-importer` | fireflyiii/data-importer:latest | 8091 | firefly-iii | unless-stopped |
 | `cron` | alpine + curl | — | firefly-iii | unless-stopped |
-| `ghostfolio` | ghostfolio/ghostfolio:latest | 3340 | postgres | unless-stopped |
-| `paperless-ngx` | ghcr.io/paperless-ngx/paperless-ngx:latest | 8092 | — | unless-stopped |
+| `ghostfolio` | ghostfolio/ghostfolio:latest | 3333 | postgres | unless-stopped |
+| `paperless-ngx` | ghcr.io/paperless-ngx/paperless-ngx:latest | 8000 | — | unless-stopped |
 
 **Total:** 7 containers
 
@@ -79,18 +79,18 @@ extraction: Move A (doc-only snapshot)
 
 ## Data Paths (Volumes)
 
-All persistent data is stored under `/mnt/data/finance/` on docker-host:
+All persistent data is stored under `/opt/stacks/finance/data/` on finance-stack:
 
 | Path | Service | Content |
 |------|---------|---------|
-| `/mnt/data/finance/postgres/` | PostgreSQL | Firefly + Ghostfolio databases |
-| `/mnt/data/finance/redis/` | Redis | Cache data (ephemeral) |
-| `/mnt/data/finance/firefly-iii/upload/` | Firefly III | User-uploaded attachments |
-| `/mnt/data/finance/importer/` | Data Importer | Import configuration storage |
-| `/mnt/data/finance/paperless/data/` | Paperless-ngx | Document storage + SQLite DB |
-| `/mnt/data/finance/paperless/media/` | Paperless-ngx | OCR'd document files |
-| `/mnt/data/finance/paperless/export/` | Paperless-ngx | Document exporter output |
-| `/mnt/data/finance/ghostfolio/` | Ghostfolio | Application data |
+| `/opt/stacks/finance/data/postgres/` | PostgreSQL | Firefly + Ghostfolio databases |
+| `/opt/stacks/finance/data/redis/` | Redis | Cache data (ephemeral) |
+| `/opt/stacks/finance/data/firefly-iii/upload/` | Firefly III | User-uploaded attachments |
+| `/opt/stacks/finance/data/importer/` | Data Importer | Import configuration storage |
+| `/opt/stacks/finance/data/paperless/data/` | Paperless-ngx | Document storage + SQLite DB |
+| `/opt/stacks/finance/data/paperless/media/` | Paperless-ngx | OCR'd document files |
+| `/opt/stacks/finance/data/paperless/export/` | Paperless-ngx | Document exporter output |
+| `/opt/stacks/finance/data/ghostfolio/` | Ghostfolio | Application data |
 
 ## Environment Variables (Key Configuration)
 
@@ -131,33 +131,32 @@ All persistent data is stored under `/mnt/data/finance/` on docker-host:
 
 ## Compose File Location
 
-- **On docker-host:** `~/stacks/finance/docker-compose.yml`
-- **Spine binding:** `docker.compose.targets.yaml` → `~/stacks/finance` (registered as stub)
+- **On finance-stack:** `/opt/stacks/finance/docker-compose.yml`
+- **Spine binding:** `docker.compose.targets.yaml` → `/opt/stacks/finance` (registered as stub)
 
 ## Port Summary
 
 | Port | Service | Exposure |
 |------|---------|----------|
-| 8090 | Firefly III | Cloudflare tunnel → `firefly.ronny.works` |
+| 8080 | Firefly III | Cloudflare tunnel → `firefly.ronny.works` |
 | 8091 | Data Importer | Local only (manual import UI) |
-| 8092 | Paperless-ngx | Cloudflare tunnel → `docs.ronny.works` |
-| 3340 | Ghostfolio | Cloudflare tunnel → `finances.ronny.works` |
+| 8000 | Paperless-ngx | Cloudflare tunnel → `docs.ronny.works` |
+| 3333 | Ghostfolio | Cloudflare tunnel → `finances.ronny.works` |
 | 5432 | PostgreSQL | Internal only (finance-internal network) |
 | 6379 | Redis | Internal only (finance-internal network) |
 
-## Co-Located Stacks (docker-host VM 200)
+## Dedicated VM (finance-stack VM 211)
 
-Finance shares docker-host with:
-- **Mint OS** (business application — separate compose)
-- **Mail-Archiver** (email archive — separate compose under `finance/mail-archiver/`)
+Finance runs on its own dedicated VM (VM 211). It was migrated from the legacy docker-host (VM 200) around 2026-02-11.
 
-> docker-host is a legacy VM running the original workloads. Unlike media (split to VMs 209/210), finance has not been migrated to a dedicated VM.
+- **Mint OS** remains on docker-host (VM 200) — separate VM, separate lifecycle.
+- **Mail-Archiver** also remains on docker-host (VM 200).
 
 ## Known Architectural Debt
 
 | Issue | Impact | Notes |
 |-------|--------|-------|
-| Shared VM with Mint OS | Resource contention possible | No dedicated VM for finance |
+| ~~Shared VM with Mint OS~~ | Resolved | Finance migrated to dedicated VM 211 |
 | PostgreSQL shared across services | Single DB failure affects Firefly + Ghostfolio | Consider separate instances |
 | No health check probes in compose | Docker can't auto-restart unhealthy services | Add `healthcheck:` to compose |
 | Ghostfolio unconfigured | No investment data loaded | P3 priority |

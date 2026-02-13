@@ -9,7 +9,7 @@ extraction: Move A (doc-only snapshot)
 
 # Finance: Troubleshooting Guide
 
-> Quick diagnostics and resolution procedures for finance stack issues on docker-host (VM 200).
+> Quick diagnostics and resolution procedures for finance stack issues on finance-stack (VM 211).
 
 ## Quick Diagnostics
 
@@ -17,13 +17,13 @@ Run these first to assess overall health:
 
 ```bash
 # Check all containers
-docker compose -f ~/stacks/finance/docker-compose.yml ps
+docker compose -f /opt/stacks/finance/docker-compose.yml ps
 
 # Check logs (last 50 lines)
-docker compose -f ~/stacks/finance/docker-compose.yml logs --tail=50
+docker compose -f /opt/stacks/finance/docker-compose.yml logs --tail=50
 
 # Check disk usage
-df -h /mnt/data/finance/
+df -h /opt/stacks/finance/data/
 
 # Check Firefly API
 curl -s -o /dev/null -w "%{http_code}" \
@@ -59,7 +59,7 @@ docker exec finance-redis redis-cli ping
 - **403 from SimpleFIN:** Access URL expired. Re-claim token (see FINANCE_SIMPLEFIN_PIPELINE.md → Token Lifecycle)
 - **Connection timeout:** SimpleFIN service may be down. Check status at simplefin.org. Retry in 1 hour.
 - **No new transactions:** Normal if all transactions in lookback period already imported (dedup by `external_id`)
-- **Cron not firing:** `systemctl status cron` on docker-host; verify cron daemon is active
+- **Cron not firing:** `systemctl status cron` on finance-stack; verify cron daemon is active
 
 ### 2. Paperless OCR Quality
 
@@ -118,28 +118,28 @@ docker exec finance-redis redis-cli ping
 
 **Fixes:**
 - **401 Unauthorized:** Firefly PAT expired or wrong. Update in `.env` from Infisical.
-- **Import mapping wrong:** Access Data Importer UI at `http://docker-host:8091` (local only); adjust column mapping
+- **Import mapping wrong:** Access Data Importer UI at `http://100.76.153.100:8091` (local only); adjust column mapping
 - **Duplicate imports:** Data Importer uses `error_if_duplicate_hash` — duplicates are rejected. Check Firefly logs for "duplicate" messages.
 
 ## Service Restart Commands
 
 ```bash
 # Restart single service
-docker compose -f ~/stacks/finance/docker-compose.yml restart <service-name>
+docker compose -f /opt/stacks/finance/docker-compose.yml restart <service-name>
 
 # Restart all services (graceful)
-docker compose -f ~/stacks/finance/docker-compose.yml restart
+docker compose -f /opt/stacks/finance/docker-compose.yml restart
 
 # Full stop and start (if restart doesn't fix)
-docker compose -f ~/stacks/finance/docker-compose.yml down
-docker compose -f ~/stacks/finance/docker-compose.yml up -d
+docker compose -f /opt/stacks/finance/docker-compose.yml down
+docker compose -f /opt/stacks/finance/docker-compose.yml up -d
 
 # Nuclear option: recreate containers from scratch
-docker compose -f ~/stacks/finance/docker-compose.yml down
-docker compose -f ~/stacks/finance/docker-compose.yml up -d --force-recreate
+docker compose -f /opt/stacks/finance/docker-compose.yml down
+docker compose -f /opt/stacks/finance/docker-compose.yml up -d --force-recreate
 ```
 
-> **Warning:** `down` stops containers but preserves volumes. Data in `/mnt/data/finance/` is safe. Only `down -v` would remove volumes (NEVER use `-v` in production).
+> **Warning:** `down` stops containers but preserves volumes. Data in `/opt/stacks/finance/data/` is safe. Only `down -v` would remove volumes (NEVER use `-v` in production).
 
 ## API Quick Reference
 
@@ -170,8 +170,8 @@ Base URL: `https://docs.ronny.works`
 
 If the above steps don't resolve the issue:
 
-1. Check Grafana for docker-host metrics (if observability is configured)
-2. SSH to docker-host and check system resources: `htop`, `df -h`, `free -h`
+1. Check Grafana for finance-stack metrics (if observability is configured)
+2. SSH to finance-stack and check system resources: `htop`, `df -h`, `free -h`
 3. Check Docker daemon: `systemctl status docker`
 4. Review recent changes: was compose file modified? Was a container updated?
 5. Last resort: restore from backup (see FINANCE_BACKUP_RESTORE.md)

@@ -25,7 +25,7 @@ Two n8n workflows automate finance data flow. They run on the automation-stack (
 ### Dataflow
 
 ```
-Firefly III (docker-host)
+Firefly III (finance-stack)
   ↓ webhook POST on STORE_TRANSACTION
 n8n webhook trigger (VM 202)
   ↓ parse + filter (24 business categories only)
@@ -114,14 +114,14 @@ These Firefly III categories sync to Mint OS. All others are skipped.
 ### Dataflow (Intended)
 
 ```
-Paperless-ngx (docker-host)
+Paperless-ngx (finance-stack)
   ↓ schedule trigger (every 5 min)
 n8n (VM 202) polls Paperless API for unprocessed receipts
   ↓ fetch document details + OCR content
   ↓ Claude API extracts structured data (vendor, amount, date, category)
   ↓ parse response + confidence check
   ↓ route: auto-create OR needs-manual-review
-Firefly III (docker-host)
+Firefly III (finance-stack)
   ↓ create transaction via API
 Paperless-ngx: tag as "linked" or "needs-review"
 ```

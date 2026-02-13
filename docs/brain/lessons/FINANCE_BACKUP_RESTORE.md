@@ -9,7 +9,7 @@ extraction: Move A (doc-only snapshot)
 
 # Finance: Backup & Restore Procedures
 
-> Operational knowledge for finance stack database backup and restore on docker-host (VM 200).
+> Operational knowledge for finance stack database backup and restore on finance-stack (VM 211).
 
 ## What Gets Backed Up
 
@@ -29,7 +29,7 @@ extraction: Move A (doc-only snapshot)
 
 ## Backup Script
 
-The backup script (`backup-finance-stack.sh`, ~209 lines) runs on docker-host and performs:
+The backup script (`backup-finance-stack.sh`, ~209 lines) runs on finance-stack and performs:
 
 1. **Firefly PostgreSQL dump:**
    ```
@@ -39,13 +39,13 @@ The backup script (`backup-finance-stack.sh`, ~209 lines) runs on docker-host an
 
 2. **Ghostfolio data archive:**
    ```
-   tar -czf ghostfolio_YYYYMMDD.tar.gz /mnt/data/finance/ghostfolio/
+   tar -czf ghostfolio_YYYYMMDD.tar.gz /opt/stacks/finance/data/ghostfolio/
    ```
 
 3. **Paperless export:**
    ```
    docker exec paperless document_exporter /export
-   sqlite3 /mnt/data/finance/paperless/db.sqlite3 .dump > paperless_db_YYYYMMDD.sql
+   sqlite3 /opt/stacks/finance/data/paperless/db.sqlite3 .dump > paperless_db_YYYYMMDD.sql
    ```
 
 4. **Cleanup:** Remove files older than 30 days from backup directory
@@ -54,13 +54,13 @@ The backup script (`backup-finance-stack.sh`, ~209 lines) runs on docker-host an
 
 | Destination | Path | Notes |
 |-------------|------|-------|
-| Local staging | `/home/docker-host/backups/finance/` | On docker-host local disk |
+| Local staging | `/opt/stacks/finance/backups/` | On finance-stack local disk |
 | NFS (Synology) | `/mnt/backups/finance/` | NFS mount to Synology NAS |
 
 ### Cron Schedule
 
 ```
-0 2 * * * /home/docker-host/stacks/finance/backup-finance-stack.sh >> /var/log/finance-backup.log 2>&1
+0 2 * * * /opt/stacks/finance/backup-finance-stack.sh >> /var/log/finance-backup.log 2>&1
 ```
 
 > **Spine binding status:** `backup.inventory.yaml` has `app-firefly` registered but **disabled** (`enabled: false`). This needs to be enabled as part of the extraction follow-up (P2).
@@ -71,7 +71,7 @@ The backup script (`backup-finance-stack.sh`, ~209 lines) runs on docker-host an
 
 ```bash
 # 1. Stop Firefly (keep Postgres running)
-docker compose -f ~/stacks/finance/docker-compose.yml stop firefly-iii data-importer cron
+docker compose -f /opt/stacks/finance/docker-compose.yml stop firefly-iii data-importer cron
 
 # 2. Drop and recreate database
 docker exec -i finance-postgres psql -U firefly -c "DROP DATABASE IF EXISTS firefly;"
@@ -82,7 +82,7 @@ gunzip -c /mnt/backups/finance/firefly_YYYYMMDD.sql.gz | \
   docker exec -i finance-postgres psql -U firefly -d firefly
 
 # 4. Restart services
-docker compose -f ~/stacks/finance/docker-compose.yml up -d
+docker compose -f /opt/stacks/finance/docker-compose.yml up -d
 
 # 5. Verify
 curl -s -H "Authorization: Bearer $FIREFLY_PAT" \
@@ -93,38 +93,38 @@ curl -s -H "Authorization: Bearer $FIREFLY_PAT" \
 
 ```bash
 # 1. Stop Ghostfolio
-docker compose -f ~/stacks/finance/docker-compose.yml stop ghostfolio
+docker compose -f /opt/stacks/finance/docker-compose.yml stop ghostfolio
 
 # 2. Restore data directory
-rm -rf /mnt/data/finance/ghostfolio/*
+rm -rf /opt/stacks/finance/data/ghostfolio/*
 tar -xzf /mnt/backups/finance/ghostfolio_YYYYMMDD.tar.gz -C /
 
 # 3. Restart
-docker compose -f ~/stacks/finance/docker-compose.yml up -d ghostfolio
+docker compose -f /opt/stacks/finance/docker-compose.yml up -d ghostfolio
 ```
 
 ### Restore Paperless
 
 ```bash
 # 1. Stop Paperless
-docker compose -f ~/stacks/finance/docker-compose.yml stop paperless-ngx
+docker compose -f /opt/stacks/finance/docker-compose.yml stop paperless-ngx
 
 # 2. Restore SQLite database
 cp /mnt/backups/finance/paperless_db_YYYYMMDD.sql /tmp/
-sqlite3 /mnt/data/finance/paperless/db.sqlite3 < /tmp/paperless_db_YYYYMMDD.sql
+sqlite3 /opt/stacks/finance/data/paperless/db.sqlite3 < /tmp/paperless_db_YYYYMMDD.sql
 
 # 3. Restore documents (if document_exporter backup exists)
-# Documents are stored at /mnt/data/finance/paperless/media/
+# Documents are stored at /opt/stacks/finance/data/paperless/media/
 
 # 4. Restart
-docker compose -f ~/stacks/finance/docker-compose.yml up -d paperless-ngx
+docker compose -f /opt/stacks/finance/docker-compose.yml up -d paperless-ngx
 ```
 
 ## Disaster Recovery Notes
 
 - **RPO:** 24 hours (daily backup at 02:00)
 - **RTO:** ~30 minutes (restore from NFS, restart containers)
-- **Single point of failure:** docker-host VM 200 disk. If the VM disk fails and NFS backups are intact, full restore is possible. If NFS is also down, data loss occurs.
+- **Single point of failure:** finance-stack VM 211 disk. If the VM disk fails and NFS backups are intact, full restore is possible. If NFS is also down, data loss occurs.
 - **Firefly transaction count:** 508+ as of 2026-01-13
 - **Paperless document count:** 32+ as of 2026-01-13
 

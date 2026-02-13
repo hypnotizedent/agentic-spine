@@ -13,7 +13,7 @@ extraction: Move A (doc-only snapshot)
 
 ## Overview
 
-Three reconciliation workflows exist, all running on docker-host (VM 200) as bash scripts that call the Firefly III and Mint OS APIs.
+Three reconciliation workflows exist, all running on finance-stack (VM 211) as bash scripts that call the Firefly III and Mint OS APIs.
 
 | Script | Purpose | Frequency |
 |--------|---------|-----------|

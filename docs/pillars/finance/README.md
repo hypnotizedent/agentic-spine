@@ -18,13 +18,13 @@ loop_id: LOOP-FINANCE-LEGACY-EXTRACTION-20260211
 
 | Service | Host | Port | Domain | Status |
 |---------|------|------|--------|--------|
-| Firefly III | docker-host (VM 200) | 8090 | firefly.ronny.works | ACTIVE |
-| Paperless-ngx | docker-host (VM 200) | 8092 | docs.ronny.works | ACTIVE |
-| Ghostfolio | docker-host (VM 200) | 3340 | finances.ronny.works | UNCONFIGURED |
-| PostgreSQL 16 | docker-host (VM 200) | 5432 | internal | ACTIVE |
-| Redis 7 | docker-host (VM 200) | 6379 | internal | ACTIVE |
-| Data Importer | docker-host (VM 200) | 8091 | local only | ACTIVE |
-| Cron (sync) | docker-host (VM 200) | — | — | ACTIVE |
+| Firefly III | finance-stack (VM 211) | 8080 | firefly.ronny.works | ACTIVE |
+| Paperless-ngx | finance-stack (VM 211) | 8000 | docs.ronny.works | ACTIVE |
+| Ghostfolio | finance-stack (VM 211) | 3333 | finances.ronny.works | UNCONFIGURED |
+| PostgreSQL 16 | finance-stack (VM 211) | 5432 | internal | ACTIVE |
+| Redis 7 | finance-stack (VM 211) | 6379 | internal | ACTIVE |
+| Data Importer | finance-stack (VM 211) | 8091 | local only | ACTIVE |
+| Cron (sync) | finance-stack (VM 211) | — | — | ACTIVE |
 
 ## Integration Points
 
@@ -57,5 +57,5 @@ loop_id: LOOP-FINANCE-LEGACY-EXTRACTION-20260211
 
 - Ghostfolio unconfigured (no investment data)
 - No Prometheus/Grafana observability
-- Shares docker-host (VM 200) with Mint OS — no dedicated VM
+- ~~Shared VM with Mint OS~~ — resolved: finance migrated to dedicated VM 211
 - Receipt→Firefly n8n workflow blocked (IF node routing bug)

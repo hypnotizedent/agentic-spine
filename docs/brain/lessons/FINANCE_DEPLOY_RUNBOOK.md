@@ -9,15 +9,15 @@ extraction: Move A (doc-only snapshot)
 
 # Finance: Deployment Runbook
 
-> Step-by-step deployment and configuration procedures for the finance stack on docker-host (VM 200).
+> Step-by-step deployment and configuration procedures for the finance stack on finance-stack (VM 211).
 
 ## Pre-Flight Checklist
 
 Before deploying or redeploying:
 
-- [ ] SSH access to docker-host confirmed (`ssh docker-host@192.168.1.200`)
+- [ ] SSH access to finance-stack confirmed (`ssh ubuntu@192.168.1.211`)
 - [ ] Docker and docker-compose-plugin installed
-- [ ] NFS mounts available (`/mnt/data/`, `/mnt/backups/`)
+- [ ] Data directories available under `/opt/stacks/finance/`
 - [ ] Infisical CLI installed and authenticated
 - [ ] Cloudflare tunnel running (via infra-core)
 - [ ] DNS records exist: `firefly.ronny.works`, `docs.ronny.works`, `finances.ronny.works`
@@ -26,13 +26,13 @@ Before deploying or redeploying:
 
 ```bash
 # Create stack directory
-mkdir -p ~/stacks/finance
+sudo mkdir -p /opt/stacks/finance
 
 # Create data directories
-sudo mkdir -p /mnt/data/finance/{postgres,redis,firefly-iii/upload,importer}
-sudo mkdir -p /mnt/data/finance/paperless/{data,media,export}
-sudo mkdir -p /mnt/data/finance/ghostfolio
-sudo chown -R 1000:1000 /mnt/data/finance/
+sudo mkdir -p /opt/stacks/finance/data/{postgres,redis,firefly-iii/upload,importer}
+sudo mkdir -p /opt/stacks/finance/data/paperless/{data,media,export}
+sudo mkdir -p /opt/stacks/finance/data/ghostfolio
+sudo chown -R 1000:1000 /opt/stacks/finance/data/
 
 # Create backup directory
 sudo mkdir -p /mnt/backups/finance
@@ -46,17 +46,17 @@ sudo mkdir -p /mnt/backups/finance
 
 # Inject secrets from Infisical
 infisical export --env=prod --projectId="<finance-stack-project-id>" \
-  --format=dotenv > ~/stacks/finance/.env
+  --format=dotenv > /opt/stacks/finance/.env
 
 # Verify critical variables are set
-grep -c "APP_KEY\|DB_PASSWORD\|FIREFLY_III_ACCESS_TOKEN" ~/stacks/finance/.env
+grep -c "APP_KEY\|DB_PASSWORD\|FIREFLY_III_ACCESS_TOKEN" /opt/stacks/finance/.env
 # Expected: 3+
 ```
 
 ## Phase 3: Deploy Containers
 
 ```bash
-cd ~/stacks/finance
+cd /opt/stacks/finance
 
 # Pull latest images
 docker compose pull
@@ -108,20 +108,20 @@ Cloudflare tunnel ingress rules (managed via infra-core):
 
 | Hostname | Service | Backend |
 |----------|---------|---------|
-| `firefly.ronny.works` | Firefly III | `http://127.0.0.1:8090` |
-| `docs.ronny.works` | Paperless-ngx | `http://127.0.0.1:8092` |
-| `finances.ronny.works` | Ghostfolio | `http://127.0.0.1:3340` |
+| `firefly.ronny.works` | Firefly III | `http://127.0.0.1:8080` |
+| `docs.ronny.works` | Paperless-ngx | `http://127.0.0.1:8000` |
+| `finances.ronny.works` | Ghostfolio | `http://127.0.0.1:3333` |
 
-> **Note:** Tunnel routes through infra-core Caddy with `extra_hosts` mapping to docker-host Tailscale IP (100.92.156.118). See INFRASTRUCTURE_MAP.md for the full routing chain.
+> **Note:** Tunnel routes through infra-core Caddy with `extra_hosts` mapping to finance-stack Tailscale IP (100.76.153.100). See INFRASTRUCTURE_MAP.md for the full routing chain.
 
 ## Phase 6: Configure Backup Cron
 
 ```bash
-# Add to docker-host crontab
+# Add to finance-stack crontab
 crontab -e
 
 # Add line:
-0 2 * * * /home/docker-host/stacks/finance/backup-finance-stack.sh >> /var/log/finance-backup.log 2>&1
+0 2 * * * /opt/stacks/finance/backup-finance-stack.sh >> /var/log/finance-backup.log 2>&1
 ```
 
 See FINANCE_BACKUP_RESTORE.md for backup script details and restore procedures.
@@ -129,11 +129,11 @@ See FINANCE_BACKUP_RESTORE.md for backup script details and restore procedures.
 ## Phase 7: Configure SimpleFIN Sync
 
 ```bash
-# Add to docker-host crontab
+# Add to finance-stack crontab
 crontab -e
 
 # Add line:
-0 6 * * * /home/docker-host/scripts/simplefin-daily-sync.sh >> /var/log/simplefin-sync.log 2>&1
+0 6 * * * /opt/stacks/finance/scripts/simplefin-daily-sync.sh >> /var/log/simplefin-sync.log 2>&1
 ```
 
 See FINANCE_SIMPLEFIN_PIPELINE.md for SimpleFIN setup and troubleshooting.
@@ -170,7 +170,7 @@ After deployment, verify each component:
 | Redis | `docker exec finance-redis redis-cli ping` | "PONG" |
 | Backup cron | `crontab -l \| grep finance` | Backup entry present |
 | SimpleFIN cron | `crontab -l \| grep simplefin` | Sync entry present |
-| Container health | `docker compose -f ~/stacks/finance/docker-compose.yml ps` | 7 services "Up" |
+| Container health | `docker compose -f /opt/stacks/finance/docker-compose.yml ps` | 7 services "Up" |
 
 ## Troubleshooting Quick Fixes
 
@@ -178,8 +178,8 @@ After deployment, verify each component:
 |-------|-----|
 | Firefly 500 error | Check `APP_KEY` is set and 32 chars; `docker compose logs firefly-iii` |
 | Database connection refused | `docker compose restart postgres`; wait 10s; retry |
-| Cloudflare 502 | Verify tunnel is running on infra-core; check docker-host port is reachable |
-| Paperless upload fails | Check `/mnt/data/finance/paperless/` permissions (1000:1000) |
+| Cloudflare 502 | Verify tunnel is running on infra-core; check finance-stack port is reachable |
+| Paperless upload fails | Check `/opt/stacks/finance/data/paperless/` permissions (1000:1000) |
 | Out of disk | Check `/mnt/data/` usage; clean old backups |
 
 ## Rollback

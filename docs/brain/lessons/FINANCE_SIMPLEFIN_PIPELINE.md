@@ -9,11 +9,11 @@ extraction: Move A (doc-only snapshot)
 
 # Finance: SimpleFIN Bank Sync Pipeline
 
-> Operational knowledge for the SimpleFIN-to-Firefly III bank transaction import pipeline running on docker-host (VM 200).
+> Operational knowledge for the SimpleFIN-to-Firefly III bank transaction import pipeline running on finance-stack (VM 211).
 
 ## Overview
 
-SimpleFIN Bridge provides read-only bank data access for 16 accounts across 5 institutions. A daily cron job on docker-host runs a Python importer that fetches transactions from SimpleFIN and creates them in Firefly III via its API.
+SimpleFIN Bridge provides read-only bank data access for 16 accounts across 5 institutions. A daily cron job on finance-stack runs a Python importer that fetches transactions from SimpleFIN and creates them in Firefly III via its API.
 
 **Cost:** $1.50/month per connected account (or $15/year flat).
 
@@ -22,16 +22,16 @@ SimpleFIN Bridge provides read-only bank data access for 16 accounts across 5 in
 ```
 SimpleFIN Bridge API (HTTPS)
     ↓ (Basic Auth, Access URL)
-simplefin-to-firefly.py (Python CLI on docker-host)
+simplefin-to-firefly.py (Python CLI on finance-stack)
     ↓ (REST API, PAT auth)
-Firefly III (port 8090 on docker-host)
+Firefly III (port 8080 on finance-stack)
     ↓ (webhook: STORE_TRANSACTION)
 n8n (VM 202) → Mint OS database
 ```
 
 ## Cron Schedule
 
-- **When:** Daily at 06:00 (docker-host local time)
+- **When:** Daily at 06:00 (finance-stack local time)
 - **Runner:** `simplefin-daily-sync.sh` wrapper script
 - **Lookback:** 7 days by default (configurable via `--days` flag)
 - **Notifications:** Microsoft Teams webhook on completion/failure
@@ -105,7 +105,7 @@ SimpleFIN uses a **one-time claim** flow:
 | 403 from SimpleFIN | Access URL expired/revoked | Re-claim token (see Token Lifecycle) |
 | Duplicate transactions | Lookback overlap with existing | Normal — Firefly deduplicates via `error_if_duplicate_hash` |
 | Missing transactions | Account not in mapping | Add to `ACCOUNT_MAP` in importer script |
-| Cron not running | docker-host cron service | `systemctl status cron` on docker-host |
+| Cron not running | finance-stack cron service | `systemctl status cron` on finance-stack |
 | Teams notification missing | Webhook URL expired | Update in Infisical |
 
 ## Known Limitations
