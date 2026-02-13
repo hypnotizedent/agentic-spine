@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-13
+scope: gap-lifecycle
+---
+
 # Gap Lifecycle & Mutation Contract
 
 > Canonical reference for gap registry operations.
