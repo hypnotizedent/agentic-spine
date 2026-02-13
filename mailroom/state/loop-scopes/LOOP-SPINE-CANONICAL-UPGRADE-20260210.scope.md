@@ -193,15 +193,17 @@ Create self-updating gate awareness infrastructure:
 ## Receipts
 - P0: CP-20260213-141014 applied (commit ab89ef1) — CAP-20260213-145838__proposals.apply__Rny9m35317
 - P1: 10 slash commands committed (commit 389be58) — GAP-OP-280 closed
-- P3: 71 gate scripts + drift-gate.sh v2.8 (commit b78b787) — GAP-OP-282 closed
+- P3: TRIAGE headers on all delegated gate scripts + drift-gate.sh v2.8 (commit b78b787) — GAP-OP-282 closed
 - P6: gate.registry.yaml + D85 parity gate (commit 1167031) — GAP-OP-285 closed
 - P4: generate-context.sh gate card + hints (commit 0b855d8) — GAP-OP-283 closed
 - P2: BLOCKED — RAG VM (207) unreachable (port 3002 timeout) — GAP-OP-281 closed as blocked
 - P5: DEFERRED — deferral contract in scope, no implementation — GAP-OP-284 closed as deferred
+- Tail hardening: context gate card 3-col fix + registry count parity + D85 semantic hardening (commit 23b5557) — GAP-OP-287,288,289
 
 ## Notes
 - RAG VM status: unreachable as of 2026-02-13 (port 3002 timeout)
 - Slash commands: 10 repo-governed in surfaces/commands/, synced to ~/.claude/commands/
-- Gate count: D1-D85 surface (D21 retired/reserved), all active gates have TRIAGE headers
-- Gate registry: ops/bindings/gate.registry.yaml (85 gates, 11 categories, 81 fix hints)
-- D85 meta-gate enforces registry ↔ script parity
+- Gate count: D1-D85 surface (D21 retired/reserved), 84 active, 1 retired
+- Gate registry: ops/bindings/gate.registry.yaml (85 gates, 11 categories)
+- D85 meta-gate enforces: registry ↔ script parity, active/retired count parity, TRIAGE header completeness
+- D85 test coverage: surfaces/verify/tests/d85-test.sh (4 assertions)

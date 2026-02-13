@@ -41,7 +41,7 @@ Notes:
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D84) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D85) | Yes |
 | `d16-docs-quarantine.sh` | Legacy docs quarantine enforcement | Yes |
 | `d17-root-allowlist.sh` | Root file allowlist enforcement | Yes |
 | `d18-docker-compose-drift.sh` | Docker compose drift detection | Yes |
@@ -109,6 +109,9 @@ Notes:
 | `d80-workbench-authority-trace-lock.sh` | Workbench authority-trace lock (legacy naming violations) | Yes |
 | `d81-plugin-test-regression-lock.sh` | Plugin test regression lock (new plugins must have tests or exemption) | Yes |
 | `d82-share-publish-governance-lock.sh` | Share publish governance lock (protocol+bindings+capability wiring) | Yes |
+| `d83-proposal-queue-health-lock.sh` | Proposal queue health lock (manifest schema, status lifecycle) | Yes |
+| `d84-docs-index-registration-lock.sh` | Docs index registration lock (governance doc coverage) | Yes |
+| `d85-gate-registry-parity-lock.sh` | Gate registry parity lock (registry ↔ script sync, count parity, TRIAGE header completeness). Test: `surfaces/verify/tests/d85-test.sh` | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -143,10 +146,10 @@ Not called by default verification flows. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by `ops verify` | 10 |
-| Called by `spine.verify` (drift-gate suite) | 54 |
+| Called by `spine.verify` (drift-gate suite) | 57 |
 | Called by capabilities | 1 |
 | Manual / legacy | 9 |
-| **Total** | **74** |
+| **Total** | **77** |
 
 ---
 
