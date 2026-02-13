@@ -66,6 +66,8 @@ The authority chain. When in doubt, these are the source of truth.
 | [AGENT_BOUNDARIES.md](governance/AGENT_BOUNDARIES.md) | Agent boundary constraints |
 | [AGENT_GOVERNANCE_BRIEF.md](governance/AGENT_GOVERNANCE_BRIEF.md) | Canonical governance brief mirrored into agent entry surfaces |
 | [AGENTS_GOVERNANCE.md](governance/AGENTS_GOVERNANCE.md) | Agent lifecycle and verification contract |
+| [GAP_LIFECYCLE.md](governance/GAP_LIFECYCLE.md) | Gap registry lifecycle, claim semantics, D75 lock |
+| [MINT_PRODUCT_GOVERNANCE.md](governance/MINT_PRODUCT_GOVERNANCE.md) | Product governance for Mint project |
 | [CLAUDE_ENTRYPOINT_SHIM.md](governance/CLAUDE_ENTRYPOINT_SHIM.md) | Claude home instruction shim contract |
 | [AGENTS_LOCATION.md](governance/AGENTS_LOCATION.md) | Where agent scripts live |
 | [AUDIT_VERIFICATION.md](governance/AUDIT_VERIFICATION.md) | Legacy import verification audit |
@@ -111,6 +113,9 @@ The authority chain. When in doubt, these are the source of truth.
 | [SHOP_NETWORK_DEVICE_ONBOARDING.md](governance/SHOP_NETWORK_DEVICE_ONBOARDING.md) | Shop network onboarding procedure |
 | [BACKUP_CALENDAR.md](governance/BACKUP_CALENDAR.md) | Calendar of governed backup schedules and rotations |
 | [SHOP_NETWORK_AUDIT_RUNBOOK.md](governance/SHOP_NETWORK_AUDIT_RUNBOOK.md) | Shop network audit procedures and expected outputs |
+| [HOME_NETWORK_AUDIT_RUNBOOK.md](governance/HOME_NETWORK_AUDIT_RUNBOOK.md) | Home site network audit procedure |
+| [HOME_NETWORK_DEVICE_ONBOARDING.md](governance/HOME_NETWORK_DEVICE_ONBOARDING.md) | Home site device onboarding |
+| [N8N_RECOVERY_RUNBOOK.md](governance/N8N_RECOVERY_RUNBOOK.md) | n8n recovery and restoration procedure |
 | [TERMINAL_C_DAILY_RUNBOOK.md](governance/TERMINAL_C_DAILY_RUNBOOK.md) | Control-plane orchestration runbook for lane fan-out/fan-in |
 | [CHANGE_PACK_TEMPLATE.md](governance/CHANGE_PACK_TEMPLATE.md) | Change pack template for governed infrastructure work |
 | [CAMERA_SSOT.md](governance/CAMERA_SSOT.md) | Camera inventory SSOT (IDs, channels, expected coverage) |

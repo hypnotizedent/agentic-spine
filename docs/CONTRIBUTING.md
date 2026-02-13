@@ -1,3 +1,10 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-13
+scope: docs-contributing-rules
+---
+
 # Docs Contributing Rules
 
 > Every doc must live in the right folder, carry a metadata header, and

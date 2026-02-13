@@ -27,6 +27,8 @@ Authoritative governance documentation organized by category. All docs in `docs/
 | AGENTS_GOVERNANCE.md | -- | Agent execution and session lifecycle rules |
 | AGENT_BOUNDARIES.md | P2 | Agent capability constraints |
 | CORE_AGENTIC_SCOPE.md | -- | Scope boundaries for agentic operations |
+| GAP_LIFECYCLE.md | -- | Gap registry lifecycle, claim semantics, D75 lock |
+| MINT_PRODUCT_GOVERNANCE.md | -- | Product governance for Mint project |
 | CANONICAL.md | -- | Canonical form rules |
 
 ## 2. Infrastructure SSOTs
@@ -66,6 +68,9 @@ Authoritative governance documentation organized by category. All docs in `docs/
 | SHOP_NETWORK_DEVICE_ONBOARDING.md | P2 | Device onboarding workflow |
 | SHOP_NETWORK_AUDIT_RUNBOOK.md | P2 | Shop network audit workflow |
 | INFRA_RELOCATION_PROTOCOL.md | P2 | Service relocation procedures |
+| N8N_RECOVERY_RUNBOOK.md | -- | n8n recovery and restoration procedure |
+| HOME_NETWORK_AUDIT_RUNBOOK.md | -- | Home site network audit procedure |
+| HOME_NETWORK_DEVICE_ONBOARDING.md | -- | Home site device onboarding |
 | INFISICAL_RESTORE_DRILL.md | -- | Quarterly Infisical restore drill validation procedure |
 | SSOT_UPDATE_TEMPLATE.md | P3 | Receipt-driven SSOT update workflow |
 | ISSUE_CLOSURE_SOP.md | P3 | Issue closure checklist |
@@ -154,4 +159,4 @@ Authoritative governance documentation organized by category. All docs in `docs/
 
 ---
 
-_70 governance docs + 11 audit docs indexed. Last updated: 2026-02-13._
+_75 governance docs + 11 audit docs indexed. Last updated: 2026-02-13._

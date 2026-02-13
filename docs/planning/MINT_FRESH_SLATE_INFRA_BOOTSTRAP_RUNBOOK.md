@@ -2,6 +2,7 @@
 status: authoritative
 owner: "@ronny"
 created: 2026-02-12
+last_verified: 2026-02-13
 scope: mint-fresh-slate-infra-bootstrap
 authority: LOOP-MINT-FRESH-SLATE-INFRA-BOOTSTRAP-PLAN-20260212
 adr_alignment:

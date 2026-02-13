@@ -490,7 +490,7 @@ Before adding `status: authoritative` or claiming SSOT:
 
 > This appendix is generated to ensure every governance doc is discoverable from the authority chain.
 > The sections above remain the curated authority narrative; this list is an index only.
-> Last regenerated: 2026-02-13 (73 docs).
+> Last regenerated: 2026-02-13 (76 docs).
 
 - `AGENT_BOUNDARIES.md`
 - `AGENT_GOVERNANCE_BRIEF.md`
@@ -520,6 +520,8 @@ Before adding `status: authoritative` or claiming SSOT:
 - `HASS_LEGACY_EXTRACTION_MATRIX.md`
 - `HASS_OPERATIONAL_RUNBOOK.md`
 - `HOME_BACKUP_STRATEGY.md`
+- `HOME_NETWORK_AUDIT_RUNBOOK.md`
+- `HOME_NETWORK_DEVICE_ONBOARDING.md`
 - `HOST_DRIFT_POLICY.md`
 - `IMMICH_LEGACY_EXTRACTION_MATRIX.md`
 - `INFISICAL_BACKUP_RESTORE.md`
@@ -536,6 +538,7 @@ Before adding `status: authoritative` or claiming SSOT:
 - `MAKER_TOOLS_GOVERNANCE.md`
 - `MINILAB_SSOT.md`
 - `MINT_PRODUCT_GOVERNANCE.md`
+- `N8N_RECOVERY_RUNBOOK.md`
 - `NETWORK_POLICIES.md`
 - `NETWORK_RUNBOOK.md`
 - `ONBOARDING_PLAYBOOK.md`
