@@ -32,8 +32,8 @@ mode = sys.argv[2] if len(sys.argv) > 2 else ""
 scopes_dir = spine / "mailroom" / "state" / "loop-scopes"
 gaps_file = spine / "ops" / "bindings" / "operational.gaps.yaml"
 inbox_dir = spine / "mailroom" / "inbox"
-parked_dir = spine / "mailroom" / "parked"
-done_dir = spine / "mailroom" / "done"
+parked_dir = spine / "mailroom" / "inbox" / "parked"
+done_dir = spine / "mailroom" / "inbox" / "done"
 
 FM_RE = re.compile(r"^---\s*$")
 
