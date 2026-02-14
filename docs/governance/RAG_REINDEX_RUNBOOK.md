@@ -31,6 +31,27 @@ scope: rag-reindex-runbook
 
 ## Reindex Steps
 
+### Step 0: Preferred Runtime (Server-Side Detached)
+
+Use governed remote controls so reindex continues even if your laptop sleeps:
+
+```
+./bin/ops cap run rag.reindex.remote.start
+./bin/ops cap run rag.reindex.remote.start --execute
+./bin/ops cap run rag.reindex.remote.status
+```
+
+Stop only if needed:
+
+```
+./bin/ops cap run rag.reindex.remote.stop
+./bin/ops cap run rag.reindex.remote.stop --execute
+```
+
+Remote execution is governed by:
+- `ops/bindings/rag.remote.runner.yaml`
+- `surfaces/verify/d88-rag-remote-reindex-governance-lock.sh`
+
 ### Step 1: Dry-Run Manifest
 
 Run a dry-run to capture the eligible document list:

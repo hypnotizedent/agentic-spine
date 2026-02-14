@@ -824,6 +824,14 @@ else
   warn "RAG workspace contract lock gate not present"
 fi
 
+# D88: RAG remote reindex governance lock
+echo -n "D88 RAG remote reindex governance lock... "
+if [[ -x "$SP/surfaces/verify/d88-rag-remote-reindex-governance-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d88-rag-remote-reindex-governance-lock.sh"
+else
+  warn "RAG remote reindex governance lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

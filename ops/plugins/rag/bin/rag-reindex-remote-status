@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Read-only status for detached/server-side RAG reindex runner.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${git_root:-}" && "${git_root:-}" != "null" ]]; then
+  SP="${SPINE_ROOT:-$git_root}"
+else
+  SP="${SPINE_ROOT:-$(cd "$script_dir/../../../.." && pwd)}"
+fi
+
+BINDING="$SP/ops/bindings/rag.remote.runner.yaml"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+for t in yq ssh; do
+  command -v "$t" >/dev/null 2>&1 || fail "missing required tool: $t"
+done
+[[ -f "$BINDING" ]] || fail "binding not found: $BINDING"
+
+read_binding() { yq -r "$1 // \"\"" "$BINDING"; }
+
+REMOTE_HOST="$(read_binding '.remote.host')"
+REMOTE_USER="$(read_binding '.remote.user')"
+REMOTE_PORT="$(read_binding '.remote.port')"
+REMOTE_REPO="$(read_binding '.remote.repo_path')"
+TMUX_SESSION="$(read_binding '.remote.tmux_session')"
+REMOTE_LOG="$(read_binding '.remote.log_path')"
+REMOTE_CHECKPOINT="$(read_binding '.remote.checkpoint_path')"
+WORKSPACE="$(read_binding '.sync.workspace_slug')"
+TAIL_LINES="$(read_binding '.runtime.status_tail_lines')"
+
+[[ -n "$REMOTE_HOST" ]] || fail ".remote.host missing in binding"
+[[ -n "$REMOTE_USER" ]] || fail ".remote.user missing in binding"
+[[ -n "$REMOTE_REPO" ]] || fail ".remote.repo_path missing in binding"
+[[ -n "$TMUX_SESSION" ]] || fail ".remote.tmux_session missing in binding"
+[[ -n "$REMOTE_LOG" ]] || fail ".remote.log_path missing in binding"
+[[ -n "$WORKSPACE" ]] || fail ".sync.workspace_slug missing in binding"
+
+if [[ -z "$REMOTE_PORT" || "$REMOTE_PORT" == "null" ]]; then
+  REMOTE_PORT="22"
+fi
+if ! [[ "$REMOTE_PORT" =~ ^[0-9]+$ ]]; then
+  fail ".remote.port must be an integer (got: $REMOTE_PORT)"
+fi
+if ! [[ "$TAIL_LINES" =~ ^[0-9]+$ ]]; then
+  TAIL_LINES="40"
+fi
+
+TARGET="${REMOTE_USER}@${REMOTE_HOST}"
+SSH_ARGS=(-o BatchMode=yes -o ConnectTimeout=10 -p "$REMOTE_PORT")
+
+if ! ssh "${SSH_ARGS[@]}" "$TARGET" "echo remote-ok >/dev/null"; then
+  fail "cannot reach remote target $TARGET via ssh"
+fi
+
+echo "=== RAG Remote Reindex Status ==="
+echo "target:       $TARGET"
+echo "remote_repo:  $REMOTE_REPO"
+echo "workspace:    $WORKSPACE"
+echo "tmux_session: $TMUX_SESSION"
+echo "log_path:     $REMOTE_LOG"
+echo "checkpoint:   $REMOTE_CHECKPOINT"
+echo
+
+if ssh "${SSH_ARGS[@]}" "$TARGET" "tmux has-session -t '$TMUX_SESSION' 2>/dev/null"; then
+  echo "session: RUNNING"
+else
+  echo "session: STOPPED"
+fi
+
+uploaded="$(ssh "${SSH_ARGS[@]}" "$TARGET" "awk '/OK: Uploaded/{c++} END{print c+0}' '$REMOTE_LOG' 2>/dev/null || echo 0")"
+failed="$(ssh "${SSH_ARGS[@]}" "$TARGET" "awk '/ERROR: Upload failed/{c++} END{print c+0}' '$REMOTE_LOG' 2>/dev/null || echo 0")"
+checkpoint_count="$(ssh "${SSH_ARGS[@]}" "$TARGET" "if [ -f '$REMOTE_CHECKPOINT' ]; then wc -l < '$REMOTE_CHECKPOINT'; else echo 0; fi")"
+
+effective_log="$REMOTE_LOG"
+if ! ssh "${SSH_ARGS[@]}" "$TARGET" "[ -f '$REMOTE_LOG' ]"; then
+  fallback_log="$(ssh "${SSH_ARGS[@]}" "$TARGET" "ls -1t '$REMOTE_REPO'/mailroom/logs/rag-sync-*.log 2>/dev/null | head -n 1")"
+  if [[ -n "$fallback_log" ]]; then
+    effective_log="$fallback_log"
+    uploaded="$(ssh "${SSH_ARGS[@]}" "$TARGET" "awk '/OK: Uploaded/{c++} END{print c+0}' '$effective_log' 2>/dev/null || echo 0")"
+    failed="$(ssh "${SSH_ARGS[@]}" "$TARGET" "awk '/ERROR: Upload failed/{c++} END{print c+0}' '$effective_log' 2>/dev/null || echo 0")"
+  fi
+fi
+
+echo "uploaded:     $uploaded"
+echo "failed:       $failed"
+echo "checkpoint:   $checkpoint_count"
+if [[ "$effective_log" != "$REMOTE_LOG" ]]; then
+  echo "log_resolved: $effective_log"
+fi
+echo
+echo "--- log tail ($TAIL_LINES lines) ---"
+ssh "${SSH_ARGS[@]}" "$TARGET" "tail -n '$TAIL_LINES' '$effective_log' 2>/dev/null || echo '(no log yet)'"

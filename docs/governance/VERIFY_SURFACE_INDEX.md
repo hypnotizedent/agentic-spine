@@ -41,7 +41,7 @@ Notes:
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D87) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D88) | Yes |
 | `d16-docs-quarantine.sh` | Legacy docs quarantine enforcement | Yes |
 | `d17-root-allowlist.sh` | Root file allowlist enforcement | Yes |
 | `d18-docker-compose-drift.sh` | Docker compose drift detection | Yes |
@@ -114,6 +114,7 @@ Notes:
 | `d85-gate-registry-parity-lock.sh` | Gate registry parity lock (registry ↔ script sync, count parity, TRIAGE header completeness). Test: `surfaces/verify/tests/d85-test.sh` | Yes |
 | `d86-vm-operating-profile-parity-lock.sh` | VM operating profile parity lock (lifecycle ↔ profile alignment) | Yes |
 | `d87-rag-workspace-contract-lock.sh` | RAG workspace contract lock (binding ↔ CLI parity). Test: `surfaces/verify/tests/d87-test.sh` | Yes |
+| `d88-rag-remote-reindex-governance-lock.sh` | RAG remote reindex governance lock (binding + runner capabilities + auth-token hygiene). Test: `surfaces/verify/tests/d88-test.sh` | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -148,10 +149,10 @@ Not called by default verification flows. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by `ops verify` | 10 |
-| Called by `spine.verify` (drift-gate suite) | 57 |
+| Called by `spine.verify` (drift-gate suite) | 58 |
 | Called by capabilities | 1 |
 | Manual / legacy | 9 |
-| **Total** | **77** |
+| **Total** | **78** |
 
 ---
 

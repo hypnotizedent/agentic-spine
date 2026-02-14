@@ -5,7 +5,7 @@
 # Authority: docs/governance/RAG_INDEXING_RULES.md, docs/governance/SEARCH_EXCLUSIONS.md,
 #            ops/bindings/services.health.yaml, ops/bindings/secrets.binding.yaml
 # Location: ops/plugins/rag/bin/rag
-# Last Updated: 2026-02-09
+# Last Updated: 2026-02-13
 # ═══════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -137,11 +137,22 @@ load_api_key() {
   exit 2
 }
 
+make_auth_header_file() {
+  # Keep bearer token out of process args (ps). Use curl header-file form.
+  local header_file
+  header_file="$(mktemp)"
+  chmod 600 "$header_file"
+  printf 'Authorization: Bearer %s\n' "$ANYTHINGLLM_API_KEY" > "$header_file"
+  echo "$header_file"
+}
+
 http_get() {
   local url="$1"
-  local tmp code
+  local tmp code header_file
   tmp="$(mktemp)"
-  code="$(curl -sS --max-time 30 -o "$tmp" -w "%{http_code}" -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" "$url" || true)"
+  header_file="$(make_auth_header_file)"
+  code="$(curl -sS --max-time 30 -o "$tmp" -w "%{http_code}" -H "@${header_file}" "$url" || true)"
+  rm -f "$header_file"
   if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
     log_err "GET failed (HTTP ${code:-unknown}): $url"
     cat "$tmp" >&2 || true
@@ -155,14 +166,16 @@ http_get() {
 http_post_json() {
   local url="$1"
   local json="$2"
-  local tmp code
+  local tmp code header_file
   tmp="$(mktemp)"
+  header_file="$(make_auth_header_file)"
   # Chat/query responses can be slow depending on model/backlog; be generous.
   code="$(curl -sS --max-time 600 --retry 3 --retry-delay 2 -o "$tmp" -w "%{http_code}" \
-    -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" \
+    -H "@${header_file}" \
     -H "Content-Type: application/json" \
     -d "$json" \
     "$url" || true)"
+  rm -f "$header_file"
   if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
     log_err "POST failed (HTTP ${code:-unknown}): $url"
     cat "$tmp" >&2 || true
@@ -179,13 +192,15 @@ http_post_json_chat_try() {
   local url="$1"
   local json="$2"
   local max_time="${RAG_CHAT_TIMEOUT_SEC:-45}"
-  local tmp code
+  local tmp code header_file
   tmp="$(mktemp)"
+  header_file="$(make_auth_header_file)"
   code="$(curl -sS --max-time "$max_time" -o "$tmp" -w "%{http_code}" \
-    -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" \
+    -H "@${header_file}" \
     -H "Content-Type: application/json" \
     -d "$json" \
     "$url" || true)"
+  rm -f "$header_file"
   if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
     rm -f "$tmp"
     return 1
@@ -429,16 +444,18 @@ upload_file() {
     return 0
   fi
 
-  local prepared tmp code
+  local prepared tmp code header_file
   prepared="$(prepare_file_for_upload "$abs")"
   tmp="$(mktemp)"
+  header_file="$(make_auth_header_file)"
   # AnythingLLM's upload-and-embed timeout: 180s per doc, 1 retry. Docs that
   # consistently hang (0 bytes received) will fail fast and be reported rather
   # than blocking the entire sync for 60+ minutes on retries.
   code="$(curl -sS --max-time 180 --retry 1 --retry-delay 5 -o "$tmp" -w "%{http_code}" \
-    -H "Authorization: Bearer ${ANYTHINGLLM_API_KEY}" \
+    -H "@${header_file}" \
     -F "file=@${prepared};filename=$(basename "$abs")" \
     "${ANYTHINGLLM_URL}/api/workspace/${WORKSPACE_SLUG}/upload-and-embed" || true)"
+  rm -f "$header_file"
   rm -f "$prepared" 2>/dev/null || true
 
   if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then

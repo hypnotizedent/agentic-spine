@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# Start detached/server-side RAG reindex on VM 207 from governed binding.
+# Default is dry-run. Use --execute to mutate.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${git_root:-}" && "${git_root:-}" != "null" ]]; then
+  SP="${SPINE_ROOT:-$git_root}"
+else
+  SP="${SPINE_ROOT:-$(cd "$script_dir/../../../.." && pwd)}"
+fi
+
+BINDING="$SP/ops/bindings/rag.remote.runner.yaml"
+
+log() { echo "→ $*"; }
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage:
+  rag-reindex-remote-start [--workspace <slug>] [--resume|--no-resume] [--execute]
+
+Behavior:
+  - Dry-run by default (no rsync, no remote mutation)
+  - --execute performs rsync to remote repo path and starts detached tmux sync
+EOF
+}
+
+EXECUTE=0
+WORKSPACE_OVERRIDE=""
+RESUME_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --workspace)
+      WORKSPACE_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --resume)
+      RESUME_OVERRIDE="true"
+      shift
+      ;;
+    --no-resume)
+      RESUME_OVERRIDE="false"
+      shift
+      ;;
+    --execute)
+      EXECUTE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      fail "Unknown arg: $1"
+      ;;
+  esac
+done
+
+for t in yq ssh rsync scp mktemp; do
+  command -v "$t" >/dev/null 2>&1 || fail "missing required tool: $t"
+done
+[[ -f "$BINDING" ]] || fail "binding not found: $BINDING"
+[[ -x "$SP/ops/plugins/rag/bin/rag" ]] || fail "rag CLI not executable"
+
+read_binding() { yq -r "$1 // \"\"" "$BINDING"; }
+
+REMOTE_HOST="$(read_binding '.remote.host')"
+REMOTE_USER="$(read_binding '.remote.user')"
+REMOTE_PORT="$(read_binding '.remote.port')"
+REMOTE_REPO="$(read_binding '.remote.repo_path')"
+TMUX_SESSION="$(read_binding '.remote.tmux_session')"
+REMOTE_LOG="$(read_binding '.remote.log_path')"
+REMOTE_CHECKPOINT="$(read_binding '.remote.checkpoint_path')"
+
+DEFAULT_WORKSPACE="$(read_binding '.sync.workspace_slug')"
+ANYTHINGLLM_URL="$(read_binding '.sync.anythingllm_url')"
+QDRANT_URL="$(read_binding '.sync.qdrant_url')"
+OLLAMA_URL="$(read_binding '.sync.ollama_url')"
+DEFAULT_RESUME="$(read_binding '.sync.resume_default')"
+
+CONTAINER_HINT="$(read_binding '.runtime.anythingllm_container_hint')"
+TAIL_LINES="$(read_binding '.runtime.status_tail_lines')"
+
+[[ -n "$REMOTE_HOST" ]] || fail ".remote.host missing in binding"
+[[ -n "$REMOTE_USER" ]] || fail ".remote.user missing in binding"
+[[ -n "$REMOTE_REPO" ]] || fail ".remote.repo_path missing in binding"
+[[ -n "$TMUX_SESSION" ]] || fail ".remote.tmux_session missing in binding"
+[[ -n "$REMOTE_LOG" ]] || fail ".remote.log_path missing in binding"
+[[ -n "$REMOTE_CHECKPOINT" ]] || fail ".remote.checkpoint_path missing in binding"
+[[ -n "$DEFAULT_WORKSPACE" ]] || fail ".sync.workspace_slug missing in binding"
+[[ -n "$ANYTHINGLLM_URL" ]] || fail ".sync.anythingllm_url missing in binding"
+[[ -n "$QDRANT_URL" ]] || fail ".sync.qdrant_url missing in binding"
+[[ -n "$OLLAMA_URL" ]] || fail ".sync.ollama_url missing in binding"
+[[ -n "$CONTAINER_HINT" ]] || fail ".runtime.anythingllm_container_hint missing in binding"
+
+if [[ -z "$REMOTE_PORT" || "$REMOTE_PORT" == "null" ]]; then
+  REMOTE_PORT="22"
+fi
+if ! [[ "$REMOTE_PORT" =~ ^[0-9]+$ ]]; then
+  fail ".remote.port must be an integer (got: $REMOTE_PORT)"
+fi
+if ! [[ "$TAIL_LINES" =~ ^[0-9]+$ ]]; then
+  fail ".runtime.status_tail_lines must be an integer (got: $TAIL_LINES)"
+fi
+if [[ "$DEFAULT_RESUME" != "true" && "$DEFAULT_RESUME" != "false" ]]; then
+  fail ".sync.resume_default must be true|false (got: $DEFAULT_RESUME)"
+fi
+
+WORKSPACE="${WORKSPACE_OVERRIDE:-$DEFAULT_WORKSPACE}"
+RESUME="${RESUME_OVERRIDE:-$DEFAULT_RESUME}"
+if [[ "$RESUME" != "true" && "$RESUME" != "false" ]]; then
+  fail "resume override must be true|false (got: $RESUME)"
+fi
+RESUME_ARG=""
+if [[ "$RESUME" == "true" ]]; then
+  RESUME_ARG="--resume"
+fi
+
+TARGET="${REMOTE_USER}@${REMOTE_HOST}"
+SSH_ARGS=(-o BatchMode=yes -o ConnectTimeout=10 -p "$REMOTE_PORT")
+RSYNC_SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 -p $REMOTE_PORT"
+
+mapfile -t EXCLUDES < <(yq -r '.transfer.excludes[]?' "$BINDING" 2>/dev/null || true)
+RSYNC_EXCLUDE_ARGS=()
+for e in "${EXCLUDES[@]:-}"; do
+  [[ -z "$e" || "$e" == "null" ]] && continue
+  RSYNC_EXCLUDE_ARGS+=(--exclude "$e")
+done
+
+log "Remote target: $TARGET:$REMOTE_REPO"
+if ! ssh "${SSH_ARGS[@]}" "$TARGET" "echo remote-ok >/dev/null"; then
+  fail "cannot reach remote target $TARGET via ssh"
+fi
+
+session_running=0
+if ssh "${SSH_ARGS[@]}" "$TARGET" "tmux has-session -t '$TMUX_SESSION' 2>/dev/null"; then
+  session_running=1
+fi
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+  echo "DRY-RUN: remote reindex start plan"
+  echo "  target:             $TARGET"
+  echo "  remote_repo:        $REMOTE_REPO"
+  echo "  tmux_session:       $TMUX_SESSION"
+  echo "  workspace:          $WORKSPACE"
+  echo "  resume:             $RESUME"
+  echo "  anythingllm_url:    $ANYTHINGLLM_URL"
+  echo "  qdrant_url:         $QDRANT_URL"
+  echo "  ollama_url:         $OLLAMA_URL"
+  echo "  log_path:           $REMOTE_LOG"
+  echo "  checkpoint_path:    $REMOTE_CHECKPOINT"
+  echo "  status_tail_lines:  $TAIL_LINES"
+  if [[ ${#RSYNC_EXCLUDE_ARGS[@]} -gt 0 ]]; then
+    echo "  rsync excludes:"
+    for e in "${EXCLUDES[@]}"; do
+      [[ -n "$e" && "$e" != "null" ]] && echo "    - $e"
+    done
+  fi
+  if [[ "$session_running" -eq 1 ]]; then
+    echo "  session_state:      RUNNING (execute would fail until stopped)"
+  else
+    echo "  session_state:      STOPPED"
+  fi
+  echo
+  echo "To execute:"
+  echo "  ./bin/ops cap run rag.reindex.remote.start --execute"
+  exit 0
+fi
+
+if [[ "$session_running" -eq 1 ]]; then
+  fail "tmux session '$TMUX_SESSION' is already running on remote host"
+fi
+
+log "Syncing repo snapshot to remote..."
+rsync -az "${RSYNC_EXCLUDE_ARGS[@]}" -e "$RSYNC_SSH" "$SP/" "$TARGET:$REMOTE_REPO/"
+
+RUNNER_LOCAL="$(mktemp)"
+cat > "$RUNNER_LOCAL" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd '$REMOTE_REPO'
+mkdir -p '$(dirname "$REMOTE_LOG")' '$(dirname "$REMOTE_CHECKPOINT")'
+
+container=\$(sudo docker ps --format '{{.Names}}' | grep -m1 -E '$CONTAINER_HINT' || true)
+if [[ -z "\$container" ]]; then
+  echo "FAIL: unable to locate AnythingLLM container (hint: $CONTAINER_HINT)"
+  exit 2
+fi
+
+api_key=\$(sudo docker exec "\$container" python3 -c "import sqlite3; c=sqlite3.connect('/app/server/storage/anythingllm.db').cursor(); c.execute('SELECT secret FROM api_keys LIMIT 1'); r=c.fetchone(); print(r[0] if r else '')")
+if [[ -z "\$api_key" ]]; then
+  echo "FAIL: unable to read AnythingLLM API key from container '\$container'"
+  exit 2
+fi
+
+export SPINE_CODE='$REMOTE_REPO'
+export SPINE_REPO='$REMOTE_REPO'
+export RAG_WORKSPACE_SLUG='$WORKSPACE'
+export ANYTHINGLLM_URL='$ANYTHINGLLM_URL'
+export QDRANT_URL='$QDRANT_URL'
+export OLLAMA_URL='$OLLAMA_URL'
+export ANYTHINGLLM_API_KEY="\$api_key"
+
+echo "[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] START rag sync workspace=$WORKSPACE resume=$RESUME"
+printf 'yes\n' | ./ops/plugins/rag/bin/rag sync --workspace '$WORKSPACE' $RESUME_ARG
+rc=\$?
+echo "[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] END rag sync rc=\$rc"
+exit "\$rc"
+EOF
+chmod 700 "$RUNNER_LOCAL"
+
+REMOTE_RUNNER="/tmp/rag-reindex-run-${TMUX_SESSION}.sh"
+scp -P "$REMOTE_PORT" "$RUNNER_LOCAL" "$TARGET:$REMOTE_RUNNER" >/dev/null
+rm -f "$RUNNER_LOCAL"
+
+START_CMD="chmod +x '$REMOTE_RUNNER' && tmux new-session -d -s '$TMUX_SESSION' \"bash '$REMOTE_RUNNER' >> '$REMOTE_LOG' 2>&1\""
+ssh "${SSH_ARGS[@]}" "$TARGET" "$START_CMD"
+
+echo "STARTED: detached remote RAG reindex session"
+echo "  target:       $TARGET"
+echo "  tmux_session: $TMUX_SESSION"
+echo "  workspace:    $WORKSPACE"
+echo "  log:          $REMOTE_LOG"
+echo "  checkpoint:   $REMOTE_CHECKPOINT"
+echo
+echo "Monitor:"
+echo "  ./bin/ops cap run rag.reindex.remote.status"
+echo "Stop:"
+echo "  ./bin/ops cap run rag.reindex.remote.stop --execute"
