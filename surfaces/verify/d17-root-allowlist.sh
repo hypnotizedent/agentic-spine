@@ -6,7 +6,7 @@
 # Part of D17: Root Allowlist gate.
 #
 # Allowlist (only these dirs allowed at root):
-#   .archive/ .git/ .spine/ bin/ docs/ fixtures/ mailroom/ ops/ receipts/ surfaces/
+#   .archive/ .git/ .spine/ bin/ docs/ fixtures/ infra/ mailroom/ ops/ receipts/ surfaces/
 #
 # Forbidden (must not exist):
 #   agents/ _imports/ runs/ scripts/ lib/ src/
@@ -19,7 +19,7 @@ SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 cd "$SP"
 
 # Allowed root directories (plus hidden dirs and standard files)
-ALLOWED_PATTERN='^(\.archive|\.git|\.spine|bin|docs|fixtures|mailroom|ops|receipts|surfaces)/$'
+ALLOWED_PATTERN='^(\.archive|\.git|\.spine|bin|docs|fixtures|infra|mailroom|ops|receipts|surfaces)/$'
 
 # Explicitly forbidden (legacy/drift magnets)
 FORBIDDEN="agents _imports runs scripts lib src"

@@ -27,6 +27,7 @@ VIOLATIONS=()
 # Allowed plist locations (not in .archive or .git)
 PLIST_ALLOWLIST=(
   "dotfiles/macbook/launchd/com.ronny.agent-inbox.plist"
+  "dotfiles/macbook/launchd/com.ronny.ha-baseline-refresh.plist"
 )
 
 while IFS= read -r plist; do

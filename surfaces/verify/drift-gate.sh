@@ -134,11 +134,11 @@ gate_script() {
 
 echo "=== DRIFT GATE (v2.9) ==="
 
-# D1: Top-level directory policy (9 allowed)
-# TRIAGE: Only bin/ docs/ fixtures/ mailroom/ ops/ receipts/ surfaces/ allowed at top level. Remove or move extra directories.
+# D1: Top-level directory policy (10 allowed)
+# TRIAGE: Only bin/ docs/ fixtures/ infra/ mailroom/ ops/ receipts/ surfaces/ allowed at top level. Remove or move extra directories.
 echo -n "D1 top-level dirs... "
-EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(bin|docs|fixtures|mailroom|ops|receipts|surfaces)/$' || true)"
-if [[ -z "$EXTRA" ]]; then pass; else scoped_fail D1 "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"; echo "  TRIAGE: Only bin/ docs/ fixtures/ mailroom/ ops/ receipts/ surfaces/ allowed at top level."; fi
+EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(bin|docs|fixtures|infra|mailroom|ops|receipts|surfaces)/$' || true)"
+if [[ -z "$EXTRA" ]]; then pass; else scoped_fail D1 "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"; echo "  TRIAGE: Only bin/ docs/ fixtures/ infra/ mailroom/ ops/ receipts/ surfaces/ allowed at top level."; fi
 
 # D2: No runs/ trace
 # TRIAGE: Remove runs/ directory. Execution traces belong in receipts/sessions/.
