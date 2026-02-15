@@ -97,7 +97,7 @@ else
   ok "Checkpoint check skipped"
 fi
 
-# Gate 3: Index inflation (optional - requires secrets on remote)
+# Gate 3: Index inflation (best-effort - authoritative check in rag.reindex.remote.verify)
 echo -n "  Checking index inflation... "
 WORKSPACE="$(yq -r '.sync.workspace_slug // "agentic-spine"' "$RUNNER_BINDING")"
 docs_indexed_json="$(ssh "${SSH_ARGS[@]}" "$TARGET" "cd /home/ubuntu/code/agentic-spine && source ~/.config/infisical/credentials 2>/dev/null && infisical run --env=prod -- ./ops/plugins/rag/bin/rag status --workspace '$WORKSPACE' 2>/dev/null" || echo "")"

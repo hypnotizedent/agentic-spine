@@ -98,22 +98,97 @@ fi
 
 # Gate 4: Index inflation ratio
 echo -n "Gate 4: Index inflation ratio... "
-# Get docs_indexed from AnythingLLM (requires secrets on remote)
-docs_indexed_json="$(ssh "${SSH_ARGS[@]}" "$TARGET" "cd '$REMOTE_REPO' && source ~/.config/infisical/credentials 2>/dev/null && infisical run --env=prod -- ./ops/plugins/rag/bin/rag status --workspace '$WORKSPACE' 2>/dev/null" || echo "")"
-docs_indexed="$(echo "$docs_indexed_json" | grep "^docs_indexed:" | awk '{print $2}' || echo "0")"
-docs_eligible="$(echo "$docs_indexed_json" | grep "^docs_eligible:" | awk '{print $2}' || echo "0")"
 
-if [[ "$docs_indexed" =~ ^[0-9]+$ && "$docs_eligible" =~ ^[0-9]+$ && "$docs_eligible" -gt 0 ]]; then
+# Get docs_indexed from AnythingLLM API.
+# Preferred: ANYTHINGLLM_API_KEY injected via secrets.exec (direct API query).
+# Fallback: SSH to remote + Infisical on remote (legacy, often unavailable).
+docs_indexed="0"
+docs_eligible="0"
+
+# Derive AnythingLLM URL from services binding (same as rag CLI)
+ALLM_URL="${ANYTHINGLLM_URL:-}"
+if [[ -z "$ALLM_URL" ]]; then
+  SERVICES_BINDING="$SP/ops/bindings/services.health.yaml"
+  if [[ -f "$SERVICES_BINDING" ]] && command -v yq >/dev/null 2>&1; then
+    ping_url="$(yq -r '.endpoints[] | select(.id=="anythingllm") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
+    ALLM_URL="${ping_url%/api/ping}"
+  fi
+  ALLM_URL="${ALLM_URL:-http://100.71.17.29:3002}"
+fi
+
+if [[ -n "${ANYTHINGLLM_API_KEY:-}" ]]; then
+  # Direct API query via tailnet (preferred path when secrets injected)
+  header_file="$(mktemp)"
+  chmod 600 "$header_file"
+  printf 'Authorization: Bearer %s\n' "$ANYTHINGLLM_API_KEY" > "$header_file"
+  ws_json="$(curl -sS --max-time 15 -H "@${header_file}" "${ALLM_URL}/api/v1/workspace/${WORKSPACE}" 2>/dev/null || echo "")"
+  rm -f "$header_file"
+
+  if command -v jq >/dev/null 2>&1 && [[ -n "$ws_json" ]]; then
+    docs_indexed="$(echo "$ws_json" | jq -r '
+      if .workspace and (.workspace|type=="array") then .workspace[0].documents|length
+      elif .workspace and (.workspace|type=="object") then .workspace.documents|length
+      else 0 end
+    ' 2>/dev/null || echo "0")"
+  fi
+else
+  # Legacy fallback: SSH to VM207 with Infisical
+  docs_indexed_json="$(ssh "${SSH_ARGS[@]}" "$TARGET" "cd '$REMOTE_REPO' && source ~/.config/infisical/credentials 2>/dev/null && infisical run --env=prod -- ./ops/plugins/rag/bin/rag status --workspace '$WORKSPACE' 2>/dev/null" || echo "")"
+  docs_indexed="$(echo "$docs_indexed_json" | grep "^docs_indexed:" | awk '{print $2}' || echo "0")"
+fi
+
+# Eligible count from local repo manifest (same logic as rag sync build_manifest)
+docs_eligible="$(python3 - "$SP" <<'PYEOF'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1]).resolve()
+allowed_roots = [root / "docs", root / "ops", root / "surfaces"]
+excluded_prefixes = [
+    "docs/legacy/", "docs/governance/_audits/", "docs/governance/_archived/",
+    "docs/governance/_imported/", "receipts/", "mailroom/state/", "fixtures/",
+    ".git/", "node_modules/",
+]
+count = 0
+for base in allowed_roots:
+    if not base.exists():
+        continue
+    for p in base.rglob("*.md"):
+        rel = p.relative_to(root).as_posix()
+        if any(rel.startswith(ex) for ex in excluded_prefixes):
+            continue
+        if "/.archive/" in rel or rel.startswith(".archive/"):
+            continue
+        try:
+            lines = p.read_text(errors="ignore").splitlines()
+        except Exception:
+            continue
+        if not lines or lines[0].strip() != "---":
+            continue
+        end = None
+        for i in range(1, min(len(lines), 80)):
+            if lines[i].strip() == "---":
+                end = i
+                break
+        if end is None:
+            continue
+        front = "\n".join(lines[:end+1])
+        if all(r in front for r in ["status:", "owner:", "last_verified:"]):
+            count += 1
+print(count)
+PYEOF
+)"
+
+if [[ "$docs_indexed" =~ ^[0-9]+$ && "$docs_eligible" =~ ^[0-9]+$ && "$docs_eligible" -gt 0 && "$docs_indexed" -gt 0 ]]; then
   inflation_ratio=$(echo "scale=2; $docs_indexed / $docs_eligible" | bc)
   parity_ratio=$(echo "scale=2; $docs_indexed / $docs_eligible" | bc)
-  
+
   # Check max inflation
   if (( $(echo "$inflation_ratio > $MAX_INFLATION" | bc -l) )); then
     err "Index inflation ratio ($inflation_ratio) exceeds max ($MAX_INFLATION) - indexed=$docs_indexed, eligible=$docs_eligible"
   else
     ok "Inflation ratio: $inflation_ratio (max: $MAX_INFLATION)"
   fi
-  
+
   # Check min parity
   if (( $(echo "$parity_ratio < $MIN_PARITY" | bc -l) )); then
     err "Parity ratio ($parity_ratio) below minimum ($MIN_PARITY) - indexed=$docs_indexed, eligible=$docs_eligible"
@@ -121,7 +196,7 @@ if [[ "$docs_indexed" =~ ^[0-9]+$ && "$docs_eligible" =~ ^[0-9]+$ && "$docs_elig
     ok "Parity ratio: $parity_ratio (min: $MIN_PARITY)"
   fi
 else
-  warn "Could not determine index counts (indexed=$docs_indexed, eligible=$docs_eligible)"
+  err "Could not determine index counts (indexed=$docs_indexed, eligible=$docs_eligible)"
 fi
 
 # Summary
