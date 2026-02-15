@@ -9,21 +9,28 @@
 
 ## Non-Negotiable Rules
 
-1. No unregistered work: discover → register → fix → receipt.
-2. No guessing: direct file read → RAG → grep fallback.
+1. No unregistered work: discover -> register -> fix -> receipt.
+2. No guessing: direct file read -> RAG -> grep fallback.
 3. No inline fixes without gap/loop registration.
 4. Verify before closeout.
 5. Use governed outputs (loop/gap/proposal/handoff contracts).
 
-## Environment Detection
+## Environment Detection (do this first)
 
-- **Desktop:** has filesystem + `./bin/ops`.
-- **Bridge-capable mobile/remote:** no filesystem, but can call mailroom bridge.
-- **Offline mobile:** no filesystem and no bridge.
+Never classify environment by tool names alone.
+Hosted runtimes can expose `bash_tool`/`view` names but still lack access to Ronny's Mac filesystem and tailnet.
 
-## Bootstrap Sequence
+Use this detection order:
 
-### Desktop
+1. Try to read `~/code/agentic-spine/docs/governance/SESSION_PROTOCOL.md`.
+2. If that read succeeds and shell commands work, you are **Desktop**.
+3. If that read fails but HTTP fetch tooling exists, you are **Bridge-capable mobile/remote**.
+4. If neither filesystem nor HTTP fetch works, you are **Offline mobile**.
+
+If unsure, assume Bridge-capable (not Desktop).
+Do not run `./bin/ops` unless step 1 succeeded.
+
+## Bootstrap: Desktop
 
 1. Read `docs/governance/SESSION_PROTOCOL.md`.
 2. Run `./bin/ops cap run spine.status`.
@@ -31,39 +38,50 @@
 4. For deep context, run `docs/brain/generate-context.sh`.
 5. Execute via capabilities; produce receipts.
 
-### Bridge-capable mobile/remote
+## Bootstrap: Bridge-capable mobile/remote
 
-1. Check bridge health: `GET /health`.
-2. Read open work: `GET /loops/open` (auth required).
-3. Ask governance questions: `POST /rag/ask` (auth required).
-4. Optionally run allowlisted caps: `POST /cap/run` (auth required).
-5. If mutation is needed, draft governed artifact blocks for desktop execution.
+Base URL (tailnet): `http://macbook.taile9480.ts.net`
 
-### Offline mobile
+1. Health check:
+   - `GET http://macbook.taile9480.ts.net/health`
+2. If health fails due DNS/network/timeout:
+   - Say: `Bridge unreachable from this runtime (likely tailnet DNS/egress limit). Spine may still be healthy.`
+   - Do **not** say "spine unavailable".
+   - Ask for one of these next actions:
+     - a public HTTPS bridge URL (recommended for seamless mobile cloud access), or
+     - pasted output from local trusted device request to `/loops/open`, or
+     - continue in offline artifact mode.
+3. If health succeeds, request token if missing:
+   - `X-Spine-Token: <token>` or `Authorization: Bearer <token>`
+4. Read open loops:
+   - `GET http://macbook.taile9480.ts.net/loops/open` (with auth header)
+5. Ask governance questions:
+   - `POST http://macbook.taile9480.ts.net/rag/ask`
+   - JSON body: `{"query":"<question>"}`
+6. Run allowlisted read-only caps:
+   - `POST http://macbook.taile9480.ts.net/cap/run`
+   - JSON body: `{"capability":"gaps.status"}`
+7. For mutations, draft governed artifacts and hand off to Desktop.
 
-1. State constraints clearly (no filesystem/CLI/bridge).
+Never hardcode tokens. Never silently skip auth.
+
+## Bootstrap: Offline mobile
+
+1. State constraints clearly: no filesystem, no CLI, no bridge reachability.
 2. Produce only governed YAML/markdown handoff artifacts.
-3. Do not claim fixes complete.
+3. Never claim fixes are complete without receipts from Desktop.
 
-## Bridge Contract
+## Mobile UX Modes
 
-- Base URL: `http://<tailnet-host>` (tailnet serve proxies port 80 → 8799)
-- Auth header: `X-Spine-Token: <token>` or `Authorization: Bearer <token>`
-- Endpoints:
-  - `GET /health` — liveness probe (no auth)
-  - `GET /loops/open` — open loops from scope files
-  - `GET /outbox/read?path=<rel>` — read outbox file contents
-  - `GET /receipts/read?path=<rel>` — read receipt file contents
-  - `POST /rag/ask` — governed RAG query (receipted)
-  - `POST /cap/run` — execute allowlisted read-only capability via RPC
-  - `POST /inbox/enqueue` — enqueue prompt for watcher processing
+- Tailnet-only bridge: works from trusted devices on tailnet, may fail in hosted cloud runtimes.
+- Public HTTPS bridge: required for seamless cloud-mobile use (Claude iOS/claude.ai) with strict auth.
 
 ## Output Contract Requirements
 
-- **Loop scope:** canonical frontmatter (`loop_id`, `status`, `severity`, `owner`) + required sections.
-- **Gap filing:** `gap.id` uses `GAP-OP-NNN` placeholder if unknown; type + severity + description required.
-- **Proposal manifest:** canonical fields only; submitted via `./bin/ops cap run proposals.submit`.
-- **Mobile handoff block:** artifacts + blockers + exact next desktop action.
+- Loop scope: canonical frontmatter (`loop_id`, `status`, `severity`, `owner`) + required sections.
+- Gap filing: `gap.id` uses `GAP-OP-NNN` placeholder if unknown; type + severity + description required.
+- Proposal manifest: canonical fields only.
+- Mobile handoff block: artifacts + blockers + exact next desktop action.
 
 ## Completion Rule
 
