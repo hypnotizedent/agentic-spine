@@ -263,7 +263,7 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 | Field | Value |
 |-------|-------|
 | Current | 2025.10.27.2 (`update.tubeszb_2026_zw_tubeszb_firmware_update`) |
-| Update method | HA CLI: `ssh hassio@ha "bash -l -c 'ha addons update local_tubeszb'"` or via ESPHome dashboard |
+| Update method | HA CLI: `ssh hassio@ha "bash -l -c 'ha apps update local_tubeszb'"` or via ESPHome dashboard |
 | Z-Wave module | Zooz ZAC93 (800 Series Long Range) |
 
 #### Zigbee2MQTT Version
@@ -297,19 +297,19 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 - TubesZB powered via PoE on UniFi switch
 - ESPHome firmware detected: `sensor.tubeszb_2026_zw_esp_ip_address` = `10.0.0.90`
 - Static IP 10.0.0.90 assigned in UDR7 DHCP reservations
-- Z-Wave JS UI add-on installed (v0.29.1, currently stopped)
-- Z-Wave serial connected: `binary_sensor.tubeszb_2026_zw_tubeszb_zw_serial_connected` (currently `off` — activates when Z-Wave JS UI connects)
+- Z-Wave JS UI add-on started (v0.29.1, slug: `core_zwave_js`, socket: `tcp://10.0.0.90:6638`)
+- Z-Wave serial connected: `binary_sensor.tubeszb_2026_zw_tubeszb_zw_serial_connected` = `on`
 
 #### Activation (CLI)
 
 1. **Start Z-Wave JS UI add-on:**
    ```
-   ssh hassio@ha "bash -l -c 'ha addons start a0d7b954_zwavejs2mqtt'"
+   ssh hassio@ha "bash -l -c 'ha apps start core_zwave_js'"
    ```
 
 2. **Verify add-on is running:**
    ```
-   ssh hassio@ha "bash -l -c 'ha addons info a0d7b954_zwavejs2mqtt'" | grep state
+   ssh hassio@ha "bash -l -c 'ha apps info core_zwave_js'" | grep state
    ```
    Expected: `state: started`
 
@@ -355,26 +355,33 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 | SLZB-06MU | Core v3.2.4, Radio 20241105 | Ethernet connected, reachable |
 | SLZB-06MU radio mode | Thread/RCP | `sensor.slzb_06mu_zigbee_type` = thread |
 | Matter Server add-on | v8.2.2 | Started |
-| OpenThread Border Router add-on | v2.16.3 | Present, not yet wired to SLZB-06MU |
-| HA Matter integration | Active | Not wired to SLZB-06MU |
-| HA Thread integration | Active | Not wired to SLZB-06MU |
+| OpenThread Border Router add-on | v2.16.3 | Started, wired to SLZB-06MU via `network_device: 10.0.0.52:6638` |
+| HA Matter integration | Active | Wired via OTBR Thread network |
+| HA Thread integration | Active | Wired via OTBR Thread network |
 
 #### Wiring Procedure (CLI)
 
-1. **Configure OpenThread Border Router add-on options:**
+1. **Configure OpenThread Border Router add-on via Supervisor API:**
    ```
-   ssh hassio@ha "bash -l -c 'ha addons options a0d7b954_openthread_border_router --options device=\"tcp://10.0.0.52:6638\" --options baudrate=460800 --options flow_control=true --options autoflash_firmware=false'"
+   ssh hassio@ha 'bash -l -c '"'"'curl -s -X POST \
+     -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d "{\"options\": {\"device\": \"/dev/ttyS0\", \"baudrate\": \"460800\", \"flow_control\": true, \"otbr_log_level\": \"notice\", \"firewall\": true, \"nat64\": false, \"beta\": false, \"network_device\": \"10.0.0.52:6638\"}}" \
+     http://supervisor/addons/core_openthread_border_router/options'"'"''
    ```
-   Note: `autoflash_firmware=false` — SLZB-06MU already has RCP firmware, do not overwrite.
+   Notes:
+   - `network_device` uses bare `host:port` format (not `tcp://` — socat adds the prefix internally)
+   - `device` must be set to a valid serial path (required by schema) but is ignored when `network_device` is present
+   - Full option set required — Supervisor API replaces all options, not merge
 
 2. **Start the OTBR add-on:**
    ```
-   ssh hassio@ha "bash -l -c 'ha addons start a0d7b954_openthread_border_router'"
+   ssh hassio@ha "bash -l -c 'ha apps start core_openthread_border_router'"
    ```
 
 3. **Verify OTBR is running:**
    ```
-   ssh hassio@ha "bash -l -c 'ha addons info a0d7b954_openthread_border_router'" | grep state
+   ssh hassio@ha "bash -l -c 'ha apps info core_openthread_border_router'" | grep state
    ```
    Expected: `state: started`
 
@@ -388,7 +395,7 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 
 5. **Verify Matter Server detects Thread:**
    ```
-   ssh hassio@ha "bash -l -c 'ha addons logs a0d7b954_matter_server'" | grep -i thread | tail -5
+   ssh hassio@ha "bash -l -c 'ha apps logs core_matter_server'" | grep -i thread | tail -5
    ```
    Expected: log lines showing Thread border router discovery.
 
@@ -407,7 +414,7 @@ Commissioning requires the HA companion app (iOS/Android) for QR code scanning �
 
 #### Recovery
 
-- **Thread network reset:** `ssh hassio@ha "bash -l -c 'ha addons restart a0d7b954_openthread_border_router'"` — OTBR will form a new network. Existing Thread devices must re-join.
+- **Thread network reset:** `ssh hassio@ha "bash -l -c 'ha apps restart core_openthread_border_router'"` — OTBR will form a new network. Existing Thread devices must re-join.
 - **Matter fabric removal via API:**
   ```
   curl -s -X POST -H "Authorization: Bearer $TOKEN" \
@@ -572,13 +579,13 @@ If HA cannot reach other Tailnet nodes (no `tailscale0` interface):
 
 **Root cause:** UI/YAML config for `userspace_networking` fails to persist.
 
-**Fix:** Force via Supervisor API:
+**Fix:** Force via Supervisor API (from SSH session with `bash -l` for `$SUPERVISOR_TOKEN`):
 ```bash
-docker exec hassio_cli curl -X POST \
+ssh hassio@ha 'bash -l -c '"'"'curl -s -X POST \
   -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"options": {"userspace_networking": false, "accept_routes": true, "accept_dns": true}}' \
-  http://supervisor/addons/a0d7b954_tailscale/options
+  -d "{\"options\": {\"userspace_networking\": false, \"accept_routes\": true, \"accept_dns\": true}}" \
+  http://supervisor/addons/core_tailscale/options'"'"''
 ```
 Then restart the Tailscale add-on. Verify: `ip link | grep tailscale0`.
 
