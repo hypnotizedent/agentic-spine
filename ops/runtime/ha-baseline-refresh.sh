@@ -73,6 +73,17 @@ else
   exit 1
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# RUNBOOK SYNC (non-critical — log and continue on failure)
+# ─────────────────────────────────────────────────────────────────────────────
+
+echo "$LOG_PREFIX Running: ha.ssot.apply (runbook drift sync)"
+if echo "yes" | "$CAP_RUNNER" cap run ha.ssot.apply 2>&1; then
+  echo "$LOG_PREFIX OK: runbook synced"
+else
+  echo "$LOG_PREFIX WARN: ha.ssot.apply failed (runbook may be stale)"
+fi
+
 echo
 echo "$LOG_PREFIX Finished at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo "$LOG_PREFIX Summary: $PASS/$((PASS + FAIL)) snapshots passed, baseline built"
