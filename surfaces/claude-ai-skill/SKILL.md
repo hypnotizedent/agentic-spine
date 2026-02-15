@@ -44,6 +44,10 @@ Remote URL strategy:
 - Primary: `https://spine.ronny.works` (hosted runtime compatible)
 - Secondary: `http://macbook.taile9480.ts.net` (tailnet)
 
+Hosted runtime egress allowlist:
+- If a request fails with headers like `x-deny-reason: host_not_allowed`, the runtime is blocking outbound traffic to the hostname.
+- Action: tell the operator to add `spine.ronny.works` to the runtime/network egress allowlist (do not assume allowing `ronny.works` includes subdomains).
+
 1. Health check order:
    - First try public: `GET https://spine.ronny.works/health` (if hostname is known).
    - Then try tailnet: `GET http://macbook.taile9480.ts.net/health`.
@@ -55,6 +59,8 @@ Remote URL strategy:
      - pasted output from a trusted-device request to `/loops/open`.
 3. If either health check succeeds, request token if missing:
    - `X-Spine-Token: <token>` or `Authorization: Bearer <token>`
+   - Operator can retrieve it from trusted device:
+     - `cat ~/code/agentic-spine/mailroom/state/mailroom-bridge.token`
 4. Use the healthy base URL for all calls in this session.
 5. Read open loops:
    - `GET <base>/loops/open` (with auth header)
