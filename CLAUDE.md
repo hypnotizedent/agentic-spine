@@ -68,6 +68,13 @@ scope: agent-governance-brief
 - **Commits reference the loop/gap.** Prefix: `fix(LOOP-X):` or `gov(GAP-OP-NNN):`.
 - **Do not ask "want me to fix this?"** — follow the spine: register, fix, receipt.
 
+## Query Hierarchy
+
+- **Tier 1: Direct read** — if you know the file, read it directly.
+- **Tier 2: RAG query** — for discovery questions ("where is X documented?", "how does the proposal flow work?"), use the `spine-rag` MCP tool (`rag_query`).
+- **Tier 3: `rg` search** — for exact string matching, or when RAG is unavailable.
+- **Fallback contract:** RAG down → `rg`. Never guess.
+
 ## Verify & Receipts
 
 - Run `./bin/ops cap run spine.verify` before committing — 50+ drift gates check everything.
@@ -97,5 +104,5 @@ refactor introduces a different delivery mechanism.
 
 - Runtime Repo: `~/code/agentic-spine`
 - Workbench Repo: `~/code/workbench`
-- Query first: SSOT docs + repo search (`rg`). `mint ask` is deprecated.
+- Query first: direct file read → `rag_query` (spine-rag MCP) → `rg` fallback. `mint ask` is deprecated.
 - Docker context: check with `docker context show`

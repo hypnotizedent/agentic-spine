@@ -17,7 +17,8 @@ Load canonical session context for the current run.
 4. Show current git branch and recent commits.
 5. Run `./bin/ops status` for unified work status.
 6. Run `./bin/ops loops list --open` to check open loops.
+7. Check RAG availability: call `rag_health` (spine-rag MCP). Report "RAG: available" or "RAG: unavailable".
 
 ## Output
 
-Summarize loaded context and active loop state.
+Summarize loaded context, active loop state, and RAG availability.
