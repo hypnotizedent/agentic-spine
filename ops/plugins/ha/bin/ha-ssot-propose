@@ -7,20 +7,8 @@ set -euo pipefail
 # Safety: read-only (no writes to any file)
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-BINDING="$SPINE_REPO/ops/bindings/secrets.binding.yaml"
 RUNBOOK="$SPINE_REPO/docs/governance/HASS_OPERATIONAL_RUNBOOK.md"
-
-# HA project is NOT the default infrastructure project — it has its own Infisical project
-HA_PROJECT_ID="5df75515-7259-4c14-98b8-5adda379aade"
-HA_SECRET_ENV="prod"
-HA_SECRET_PATH="/"
-HA_SECRET_KEY="HA_API_TOKEN"
-
-# Source credentials if available
-CREDENTIALS_FILE="${HOME}/.config/infisical/credentials"
-if [[ -f "$CREDENTIALS_FILE" ]]; then
-  source "$CREDENTIALS_FILE"
-fi
+INFISICAL_AGENT="${SPINE_REPO}/ops/tools/infisical-agent.sh"
 
 echo "ha.ssot.propose"
 echo
@@ -34,12 +22,7 @@ command -v jq >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_de
 command -v curl >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_curl"; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_python3"; exit 2; }
 
-if [[ ! -f "$BINDING" ]]; then
-  echo "status: STOP"
-  echo "reason: missing_binding"
-  echo "fix: ensure ops/bindings/secrets.binding.yaml exists"
-  exit 2
-fi
+[[ -x "$INFISICAL_AGENT" ]] || { echo "status: STOP"; echo "reason: infisical_agent_not_found"; exit 2; }
 
 if [[ ! -f "$RUNBOOK" ]]; then
   echo "status: STOP"
@@ -48,102 +31,16 @@ if [[ ! -f "$RUNBOOK" ]]; then
   exit 2
 fi
 
-# Auth check
-INFISICAL_API_URL="$(yq -r '.infisical.internal_api_url // .infisical.api_url // ""' "$BINDING")"
-CLIENT_ID="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-}"
-CLIENT_SECRET="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}"
-
-if [[ -z "$INFISICAL_API_URL" || "$INFISICAL_API_URL" == "null" ]]; then
-  echo "status: STOP"
-  echo "reason: binding_missing_api_url"
-  exit 2
-fi
-
-if [[ -z "$CLIENT_SECRET" ]]; then
-  echo "status: STOP"
-  echo "reason: auth_missing"
-  echo "fix: source ~/.config/infisical/credentials or run secrets.auth.load"
-  exit 2
-fi
-
 # ─────────────────────────────────────────────────────────────────────────────
-# AUTHENTICATE WITH INFISICAL
+# FETCH HA_API_TOKEN FROM INFISICAL
 # ─────────────────────────────────────────────────────────────────────────────
 
-set +e
-AUTH_RESPONSE="$(curl -s --max-time 10 -w '\n%{http_code}' -X POST "${INFISICAL_API_URL}/api/v1/auth/universal-auth/login" \
-  -H "Content-Type: application/json" \
-  -d "{\"clientId\": \"${CLIENT_ID}\", \"clientSecret\": \"${CLIENT_SECRET}\"}" 2>/dev/null)"
-curl_rc=$?
-set -e
+HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
 
-if [[ "$curl_rc" -ne 0 || -z "${AUTH_RESPONSE:-}" ]]; then
+if [[ -z "${HA_TOKEN:-}" ]]; then
   echo "status: STOP"
-  echo "reason: infisical_unreachable"
-  exit 2
-fi
-
-AUTH_CODE="$(echo "$AUTH_RESPONSE" | tail -n1)"
-AUTH_BODY="$(echo "$AUTH_RESPONSE" | sed '$d')"
-
-if [[ "$AUTH_CODE" =~ ^30[1278]$ ]]; then
-  echo "status: STOP"
-  echo "reason: infisical_redirected"
-  exit 2
-fi
-
-if [[ "$AUTH_CODE" != "200" ]]; then
-  echo "status: STOP"
-  echo "reason: infisical_auth_failed"
-  exit 2
-fi
-
-if ! echo "$AUTH_BODY" | jq -e . >/dev/null 2>&1; then
-  echo "status: STOP"
-  echo "reason: infisical_non_json"
-  exit 2
-fi
-
-ACCESS_TOKEN="$(echo "$AUTH_BODY" | jq -r '.accessToken // empty')"
-
-if [[ -z "$ACCESS_TOKEN" ]]; then
-  echo "status: STOP"
-  echo "reason: infisical_auth_failed"
-  exit 2
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FETCH HA_API_TOKEN FROM INFISICAL (home-assistant project)
-# ─────────────────────────────────────────────────────────────────────────────
-
-set +e
-SECRET_RESPONSE="$(curl -s --max-time 10 -w '\n%{http_code}' -X GET \
-  "${INFISICAL_API_URL}/api/v3/secrets/raw/${HA_SECRET_KEY}?workspaceId=${HA_PROJECT_ID}&environment=${HA_SECRET_ENV}&secretPath=${HA_SECRET_PATH}" \
-  -H "Authorization: Bearer $ACCESS_TOKEN" 2>/dev/null)"
-curl_rc=$?
-set -e
-
-if [[ "$curl_rc" -ne 0 || -z "${SECRET_RESPONSE:-}" ]]; then
-  echo "status: STOP"
-  echo "reason: infisical_secret_fetch_failed"
-  exit 2
-fi
-
-SECRET_CODE="$(echo "$SECRET_RESPONSE" | tail -n1)"
-SECRET_BODY="$(echo "$SECRET_RESPONSE" | sed '$d')"
-
-if [[ "$SECRET_CODE" != "200" ]]; then
-  echo "status: STOP"
-  echo "reason: infisical_secret_not_found"
-  echo "detail: HTTP $SECRET_CODE fetching $HA_SECRET_KEY from project $HA_PROJECT_ID"
-  exit 2
-fi
-
-HA_TOKEN="$(echo "$SECRET_BODY" | jq -r '.secret.secretValue // empty')"
-
-if [[ -z "$HA_TOKEN" ]]; then
-  echo "status: STOP"
-  echo "reason: ha_token_empty"
+  echo "reason: ha_token_unavailable"
+  echo "fix: check Infisical auth (secrets.auth.load) and HA_API_TOKEN at home-assistant/prod"
   exit 2
 fi
 

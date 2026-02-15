@@ -5,17 +5,8 @@
 
 set -eo pipefail
 
-# Load canonical credential file first so rotated values are picked up even when
-# the current shell has stale exported vars.
-CREDENTIALS_FILE="${HOME}/.config/infisical/credentials"
-if [[ -f "$CREDENTIALS_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$CREDENTIALS_FILE"
-fi
-
-INFISICAL_API_URL="${INFISICAL_API_URL:-https://secrets.ronny.works}"
-INFISICAL_CLIENT_ID="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-40b44e76-db5a-4309-afa2-43bd93dddfc1}"
-INFISICAL_CLIENT_SECRET="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}"
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+INFISICAL_AGENT="$SPINE_REPO/ops/tools/infisical-agent.sh"
 
 # Thresholds (days)
 WARNING_THRESHOLD="${WARNING_THRESHOLD:-60}"
@@ -69,50 +60,25 @@ log_warn() { echo -e "${YELLOW}⚠${NC} $1"; }
 log_error() { echo -e "${RED}✗${NC} $1" >&2; }
 log_success() { echo -e "${GREEN}✓${NC} $1"; }
 
-# Authenticate and get access token
+# Authenticate via canonical agent
 infisical_auth() {
-  if [[ -z "$INFISICAL_CLIENT_SECRET" ]]; then
-    log_error "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET not set"
-    return 1
-  fi
-
-  local response http_code body
-  response=$(curl -s -w "\n%{http_code}" -X POST "${INFISICAL_API_URL}/api/v1/auth/universal-auth/login" \
-    -H "Content-Type: application/json" \
-    -d "{\"clientId\": \"${INFISICAL_CLIENT_ID}\", \"clientSecret\": \"${INFISICAL_CLIENT_SECRET}\"}")
-
-  http_code=$(echo "$response" | tail -1)
-  body=$(echo "$response" | sed '$d')
-
-  if [[ "$http_code" != "200" ]]; then
-    log_error "Auth failed: HTTP $http_code"
-    return 1
-  fi
-
-  local token
-  token=$(echo "$body" | jq -r '.accessToken // empty')
-
-  if [[ -z "$token" ]]; then
-    log_error "Auth failed: no access token in response"
-    return 1
-  fi
-
-  echo "$token"
+  [[ -x "$INFISICAL_AGENT" ]] || { log_error "infisical-agent.sh not found"; return 1; }
+  "$INFISICAL_AGENT" auth-token 2>/dev/null
 }
 
-# Get secrets with full metadata
+# Get secrets with full metadata via canonical agent list-recursive
 get_secrets_with_metadata() {
-  local project_id="$1"
+  local project_name="$1"
   local env="${2:-prod}"
-  local token="$3"
+  local _token="$3"  # unused — kept for call-site compat
+
+  [[ -x "$INFISICAL_AGENT" ]] || { log_error "infisical-agent.sh not found"; echo '{"secrets":[]}'; return; }
 
   local response
-  response=$(curl -s -X GET "${INFISICAL_API_URL}/api/v3/secrets/raw?workspaceId=${project_id}&environment=${env}&recursive=true" \
-    -H "Authorization: Bearer $token")
+  response=$("$INFISICAL_AGENT" list-recursive "$project_name" "$env" 2>/dev/null) || true
 
-  # Validate response is parseable JSON with a secrets array
   if ! echo "$response" | jq -e '.secrets' >/dev/null 2>&1; then
-    log_error "Invalid response for project $project_id (env: $env)"
+    log_error "Invalid response for project $project_name (env: $env)"
     echo '{"secrets":[]}'
     return
   fi
@@ -178,12 +144,11 @@ check_all_secrets() {
 
   for project_entry in "${PROJECTS[@]}"; do
     local project_name="${project_entry%%:*}"
-    local project_id="${project_entry##*:}"
 
     log_info "Checking: $project_name"
 
     local secrets_json
-    secrets_json=$(get_secrets_with_metadata "$project_id" "prod" "$token")
+    secrets_json=$(get_secrets_with_metadata "$project_name" "prod" "$token")
 
     local count
     count=$(echo "$secrets_json" | jq '.secrets | length')
@@ -314,13 +279,12 @@ generate_json_report() {
   local first_project=true
   for project_entry in "${PROJECTS[@]}"; do
     local project_name="${project_entry%%:*}"
-    local project_id="${project_entry##*:}"
 
     [[ "$first_project" == "false" ]] && echo ","
     first_project=false
 
     local secrets_json
-    secrets_json=$(get_secrets_with_metadata "$project_id" "prod" "$token")
+    secrets_json=$(get_secrets_with_metadata "$project_name" "prod" "$token")
 
     echo "    {"
     echo "      \"name\": \"$project_name\","

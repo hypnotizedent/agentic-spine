@@ -227,36 +227,12 @@ echo "BOOTSTRAP_OK"
 # Fetch Tailscale auth key from Infisical (local side, never printed)
 ts_auth_key=""
 if [[ -n "$ts_auth_secret_path" && -n "$ts_auth_secret_key" ]]; then
-    need infisical
-    need curl
-    need jq
-    POLICY_FILE="$SPINE_REPO/ops/bindings/secrets.namespace.policy.yaml"
-    BINDING_FILE="$SPINE_REPO/ops/bindings/secrets.binding.yaml"
-    CREDENTIALS_FILE="${HOME}/.config/infisical/credentials"
-    inf_project="$(yq e '.infisical.project_id' "$POLICY_FILE")"
-    inf_env="$(yq e '.infisical.environment' "$POLICY_FILE")"
-    # Prefer internal_api_url (bypasses Authentik forward auth) for machine-to-machine access
-    inf_api_url="$(yq e '.infisical.internal_api_url // .infisical.api_url // ""' "$BINDING_FILE" 2>/dev/null || echo "")"
-    inf_domain_args=()
-    [[ -n "$inf_api_url" && "$inf_api_url" != "null" ]] && inf_domain_args=(--domain "$inf_api_url")
-    # Source credentials for universal auth
-    if [[ -f "$CREDENTIALS_FILE" ]]; then
-        # shellcheck disable=SC1090
-        source "$CREDENTIALS_FILE"
+    INFISICAL_AGENT="$SPINE_REPO/ops/tools/infisical-agent.sh"
+    if [[ -x "$INFISICAL_AGENT" ]]; then
+        ts_auth_key="$("$INFISICAL_AGENT" get infrastructure prod "$ts_auth_secret_key" 2>/dev/null || true)"
     fi
-    # Obtain token via universal auth if not already set
-    if [[ -z "${INFISICAL_TOKEN:-}" && -n "${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-}" && -n "${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}" && -n "$inf_api_url" ]]; then
-        auth_resp="$(curl -s -X POST "$inf_api_url/api/v1/auth/universal-auth/login" \
-            -H 'Content-Type: application/json' \
-            -d "{\"clientId\":\"$INFISICAL_UNIVERSAL_AUTH_CLIENT_ID\",\"clientSecret\":\"$INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET\"}" 2>/dev/null || echo "")"
-        token="$(echo "$auth_resp" | jq -r '.accessToken // empty' 2>/dev/null || echo "")"
-        [[ -n "$token" ]] && export INFISICAL_TOKEN="$token"
-    fi
-    ts_auth_key="$(infisical secrets get "$ts_auth_secret_key" \
-        --projectId "$inf_project" --env "$inf_env" \
-        --path "$ts_auth_secret_path" "${inf_domain_args[@]}" --plain --silent 2>/dev/null || true)"
     if [[ -z "$ts_auth_key" ]]; then
-        echo "WARNING: could not fetch $ts_auth_secret_key from Infisical path $ts_auth_secret_path"
+        echo "WARNING: could not fetch $ts_auth_secret_key from Infisical"
         echo "         tailscale up will require manual browser auth on the target"
     fi
 fi

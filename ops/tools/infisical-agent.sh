@@ -544,6 +544,54 @@ infisical_sync_from_env() {
   log_success "Imported $count secrets from $input_file"
 }
 
+# Emit raw JWT access token to stdout (no banners, no log_success)
+# Used by scripts that need INFISICAL_TOKEN for CLI or direct API calls
+infisical_auth_token() {
+  infisical_auth
+}
+
+# List all secrets recursively for a project/environment
+# Returns raw JSON from /api/v3/secrets/raw?recursive=true
+infisical_list_recursive() {
+  local project="${1:-}"
+  local env="${2:-}"
+
+  if [[ -z "$project" || -z "$env" ]]; then
+    log_error "Usage: list-recursive <project> <env>"
+    exit 1
+  fi
+
+  guard_deprecated_read "$project"
+
+  local project_id
+  project_id=$(get_project_id "$project")
+
+  local token
+  token=$(infisical_auth)
+
+  curl -s -X GET "${INFISICAL_API_URL}/api/v3/secrets/raw?workspaceId=${project_id}&environment=${env}&recursive=true" \
+    -H "Authorization: Bearer $token"
+}
+
+# Decode JWT payload (base64 middle segment)
+# If no token argument given, authenticates first
+infisical_jwt_decode() {
+  local token="${1:-}"
+
+  if [[ -z "$token" ]]; then
+    token=$(infisical_auth)
+  fi
+
+  local jwt_payload
+  jwt_payload="$(echo "$token" | cut -d. -f2)"
+  # Pad base64 to multiple of 4
+  case $((${#jwt_payload} % 4)) in
+    2) jwt_payload="${jwt_payload}==" ;;
+    3) jwt_payload="${jwt_payload}=" ;;
+  esac
+  echo "$jwt_payload" | base64 -d 2>/dev/null
+}
+
 # Verify auth works
 infisical_verify() {
   local token
@@ -566,8 +614,11 @@ Usage: infisical-agent.sh <command> [args]
 
 Commands:
   auth                              Verify authentication
+  auth-token                        Emit raw JWT to stdout (no banners)
+  jwt-decode [token]                Decode JWT payload (authenticates if no token given)
   projects                          List all projects
   list <project> [env]              List secrets (env defaults to 'dev')
+  list-recursive <project> <env>    List all secrets recursively (raw JSON)
   get <project> <env> <key>         Get a secret value (always fetches)
   get-cached <project> <env> <key>  Get secret with caching (fast, for shell startup)
   set <project> <env> <key> <value> Set/create a secret
@@ -606,6 +657,9 @@ Caching:
 
 Examples:
   infisical-agent.sh auth
+  infisical-agent.sh auth-token
+  infisical-agent.sh jwt-decode
+  infisical-agent.sh list-recursive infrastructure prod
   infisical-agent.sh list n8n dev
   infisical-agent.sh get mint-os-api prod JWT_SECRET
   infisical-agent.sh get-cached infrastructure prod CLOUDFLARE_API_TOKEN
@@ -627,11 +681,20 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       auth|verify)
         infisical_verify
         ;;
+      auth-token)
+        infisical_auth_token
+        ;;
+      jwt-decode)
+        infisical_jwt_decode "${1:-}"
+        ;;
       projects|list-projects)
         infisical_list_projects
         ;;
       list|ls)
         infisical_list_secrets "${1:-}" "${2:-dev}"
+        ;;
+      list-recursive)
+        infisical_list_recursive "${1:-}" "${2:-}"
         ;;
       get)
         infisical_get_secret "${1:-}" "${2:-}" "${3:-}"

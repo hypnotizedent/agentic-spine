@@ -2,7 +2,8 @@
 # TRIAGE: HA API token must return HTTP 200. If stale, rotate in Infisical home-assistant/prod/HA_API_TOKEN and restart dependents.
 set -euo pipefail
 
-INFISICAL_AGENT="${HOME}/code/workbench/scripts/agents/infisical-agent.sh"
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 HA_API="http://100.67.120.1:8123/api/"
 
 # Retrieve token from Infisical
