@@ -116,7 +116,7 @@ No filesystem. No CLI. You are a planning and drafting surface.
 
 - Analyze, plan, and produce structured artifacts using output contracts
 - Draft loop scopes, gap filings, and proposal manifests (see Output Contracts below)
-- Query mailroom bridge if exposed on tailnet: `GET https://<tailnet-host>:8799/loops/open`
+- Query mailroom bridge if exposed on tailnet: `GET http://<tailnet-host>/loops/open`
 - Produce handoff blocks for a desktop session to execute
 
 ### Blocked Actions
@@ -157,10 +157,12 @@ Network access via tailnet. No local filesystem.
 
 ### Allowed Actions
 
-- Query mailroom bridge: `GET/POST https://<tailnet-host>:8799/...`
+- Query mailroom bridge: `GET/POST http://<tailnet-host>/...`
   - `GET /loops/open` — list open loops
   - `GET /outbox/read` — read proposal queue
   - `POST /inbox/enqueue` — enqueue work items
+  - `POST /rag/ask` — query governed RAG over bridge
+  - `POST /cap/run` — execute allowlisted read-only capability over bridge
 - Query RAG if exposed via MCP or bridge
 - Draft artifacts using output contract formats
 
