@@ -23,7 +23,7 @@ Establish a canonical, regression-proof, single source of truth (SSOT) for the e
 
 ## Status
 - [x] Loop registered
-- [ ] Phase 1: Fill snapshot gaps (GAP-OP-475, 476)
-- [ ] Phase 2: Generate bindings + unified baseline (GAP-OP-477, 478, 479)
-- [ ] Phase 3: Gate + D108 fix (GAP-OP-480, 481)
-- [ ] Loop closed
+- [x] Phase 1: Fill snapshot gaps (GAP-OP-475, 476) — commit 00608fb
+- [x] Phase 2: Generate bindings + unified baseline (GAP-OP-477, 478, 479) — commit 3c621a3
+- [x] Phase 3: Gate + D108 fix (GAP-OP-480, 481) — commits 549c75b, 2985e48
+- [x] Loop closed — all 7 gaps fixed
