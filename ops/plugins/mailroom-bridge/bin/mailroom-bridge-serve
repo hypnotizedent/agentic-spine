@@ -308,6 +308,107 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
 
+    def _handle_rag_ask(self) -> None:
+        """POST /rag/ask — governed RAG query via rag.anythingllm.ask capability."""
+        clen = int(self.headers.get("Content-Length", "0") or "0")
+        if clen <= 0 or clen > 65536:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid content length"})
+
+        try:
+            payload = json.loads(self.rfile.read(clen).decode("utf-8"))
+        except Exception:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON body"})
+
+        question = (payload.get("question") or "").strip()
+        if not question:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "question is required"})
+
+        workspace = (payload.get("workspace") or "agentic-spine").strip()
+        max_chars = int(payload.get("context_max_chars") or 10000)
+
+        spine_repo = Path(self.config["spine_repo"])
+        ops_bin = spine_repo / "bin" / "ops"
+        if not ops_bin.exists():
+            return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "ops binary not found"})
+
+        # Call: ./bin/ops cap run rag.anythingllm.ask -- "<question>" --workspace <ws>
+        args = [
+            str(ops_bin), "cap", "run", "rag.anythingllm.ask",
+            "--", question, "--workspace", workspace,
+        ]
+
+        env = os.environ.copy()
+        env["SPINE_REPO"] = str(spine_repo)
+        env["SPINE_CODE"] = str(spine_repo)
+
+        try:
+            p = subprocess.run(
+                args,
+                capture_output=True,
+                timeout=120,
+                env=env,
+                cwd=str(spine_repo),
+            )
+        except subprocess.TimeoutExpired:
+            return self._json(HTTPStatus.GATEWAY_TIMEOUT, {"error": "RAG query timed out (120s)"})
+
+        stdout = p.stdout.decode("utf-8", errors="replace")
+        stderr = p.stderr.decode("utf-8", errors="replace")
+
+        if p.returncode != 0:
+            return self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "rag query failed", "stderr": stderr[:2000]},
+            )
+
+        # Parse output: the rag ask command prints the answer text, then optional "Sources:" block.
+        # Receipt path appears in stderr from the cap runner.
+        lines = stdout.strip().splitlines()
+        answer_lines: list[str] = []
+        sources: list[str] = []
+        in_sources = False
+
+        for line in lines:
+            if line.strip() == "Sources:":
+                in_sources = True
+                continue
+            if in_sources:
+                s = line.strip()
+                if s.startswith("- "):
+                    sources.append(s[2:])
+                elif s:
+                    sources.append(s)
+            else:
+                answer_lines.append(line)
+
+        answer = "\n".join(answer_lines).strip()
+
+        # Truncate answer to max_chars
+        if len(answer) > max_chars:
+            answer = answer[:max_chars] + "\n...(truncated)"
+
+        # Extract receipt path from stderr (cap runner prints it)
+        receipt = ""
+        for line in stderr.splitlines():
+            if "receipt" in line.lower() and ("RCAP-" in line or "receipts/sessions/" in line):
+                # Extract just the path fragment
+                for part in line.split():
+                    if "RCAP-" in part or "receipts/" in part:
+                        receipt = part.strip()
+                        break
+                if receipt:
+                    break
+
+        return self._json(
+            HTTPStatus.OK,
+            {
+                "answer": answer,
+                "sources": sources,
+                "receipt": receipt or None,
+                "workspace": workspace,
+            },
+        )
+
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -317,6 +418,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
+
+        if path == "/rag/ask":
+            return self._handle_rag_ask()
 
         if path != "/inbox/enqueue":
             return self._json(HTTPStatus.NOT_FOUND, {"error": "unknown endpoint"})
