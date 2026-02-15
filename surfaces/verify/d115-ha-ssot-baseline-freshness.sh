@@ -45,6 +45,7 @@ fi
 REQUIRED_BINDINGS=(
   "ha.addons.yaml"
   "ha.automations.yaml"
+  "ha.dashboards.yaml"
   "ha.helpers.yaml"
   "ha.integrations.yaml"
   "ha.scenes.yaml"

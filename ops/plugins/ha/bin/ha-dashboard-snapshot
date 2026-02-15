@@ -2,13 +2,14 @@
 set -euo pipefail
 
 # ha.dashboard.snapshot — Snapshot HA Lovelace dashboards to ops/bindings/ha.dashboards.yaml
-# Queries HA REST API for default + custom dashboard configs.
+# Method: SSH into HA, read /config/.storage/lovelace_dashboards + individual dashboard configs
+# Fallback: if SSH fails entirely, writes minimal binding with fallback: true
 # Output: ops/bindings/ha.dashboards.yaml
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 OUTPUT="$SPINE_ROOT/ops/bindings/ha.dashboards.yaml"
-INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
-HA_BASE="http://100.67.120.1:8123"
+SSH_TARGET="hassio@ha"
+SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
 
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
@@ -21,76 +22,90 @@ echo
 # ─────────────────────────────────────────────────────────────────────────────
 
 command -v python3 >/dev/null 2>&1 || { echo "STOP (2): python3 not found"; exit 2; }
-command -v curl >/dev/null 2>&1 || { echo "STOP (2): curl not found"; exit 2; }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RETRIEVE HA TOKEN
+# TRY SSH PATH: read .storage files
 # ─────────────────────────────────────────────────────────────────────────────
 
-if [[ ! -x "$INFISICAL_AGENT" ]]; then
-  echo "STOP (2): infisical-agent.sh not found"
-  exit 2
+DASH_METHOD="ssh"
+echo "Attempting SSH to read dashboard .storage files..."
+
+# 1. Read custom dashboards registry
+if ssh $SSH_OPTS "$SSH_TARGET" "test -f /config/.storage/lovelace_dashboards" 2>/dev/null; then
+  ssh $SSH_OPTS "$SSH_TARGET" "cat /config/.storage/lovelace_dashboards" \
+    > "$TMPDIR_WORK/lovelace_dashboards.json" 2>/dev/null || DASH_METHOD="fallback"
+  if [[ -s "$TMPDIR_WORK/lovelace_dashboards.json" ]]; then
+    python3 -c "import json; json.load(open('$TMPDIR_WORK/lovelace_dashboards.json'))" 2>/dev/null || DASH_METHOD="fallback"
+  else
+    DASH_METHOD="fallback"
+  fi
+else
+  echo "  lovelace_dashboards not found (no custom dashboards registered)"
+  echo '{"data":{"items":[]}}' > "$TMPDIR_WORK/lovelace_dashboards.json"
 fi
 
-HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
-
-if [[ -z "${HA_TOKEN:-}" ]]; then
-  echo "STOP (2): could not retrieve HA_API_TOKEN from Infisical"
-  exit 2
+# 2. Read default dashboard config (may not exist = auto-generated mode)
+if [[ "$DASH_METHOD" == "ssh" ]]; then
+  if ssh $SSH_OPTS "$SSH_TARGET" "test -f /config/.storage/lovelace" 2>/dev/null; then
+    echo "  Reading default dashboard config..."
+    ssh $SSH_OPTS "$SSH_TARGET" "cat /config/.storage/lovelace" \
+      > "$TMPDIR_WORK/lovelace_default.json" 2>/dev/null || true
+  else
+    echo "  No default dashboard config (auto-generated mode)"
+  fi
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# QUERY HA API — dashboard list + configs
-# ─────────────────────────────────────────────────────────────────────────────
-
-# 1. List custom dashboards
-echo "Fetching dashboard list..."
-HTTP_CODE=$(curl -s -o "$TMPDIR_WORK/dashboards.json" -w '%{http_code}' --connect-timeout 10 \
-  -H "Authorization: Bearer $HA_TOKEN" "${HA_BASE}/api/lovelace/dashboards" 2>/dev/null) || HTTP_CODE="000"
-
-if [[ "$HTTP_CODE" != "200" ]]; then
-  echo "STOP (2): /api/lovelace/dashboards returned HTTP $HTTP_CODE"
-  exit 2
-fi
-
-# 2. Fetch default dashboard config
-echo "Fetching default dashboard config..."
-HTTP_CODE=$(curl -s -o "$TMPDIR_WORK/default_config.json" -w '%{http_code}' --connect-timeout 10 \
-  -H "Authorization: Bearer $HA_TOKEN" "${HA_BASE}/api/lovelace/config" 2>/dev/null) || HTTP_CODE="000"
-
-if [[ "$HTTP_CODE" != "200" ]]; then
-  echo "WARN: default dashboard config returned HTTP $HTTP_CODE (may be storage mode)"
-  echo '{}' > "$TMPDIR_WORK/default_config.json"
-fi
-
-# 3. Fetch each custom dashboard config
-echo "Fetching custom dashboard configs..."
-DASHBOARD_IDS=$(python3 -c "
+# 3. Read each custom dashboard config
+if [[ "$DASH_METHOD" == "ssh" ]]; then
+  CUSTOM_IDS=$(python3 -c "
 import json, sys
-with open('$TMPDIR_WORK/dashboards.json') as f:
-    dashboards = json.load(f)
-for d in dashboards:
-    print(d.get('url_path', ''))
+with open('$TMPDIR_WORK/lovelace_dashboards.json') as f:
+    data = json.load(f)
+items = data.get('data', {}).get('items', [])
+for item in items:
+    url_path = item.get('url_path', '')
+    if url_path:
+        print(url_path)
 " 2>/dev/null || true)
 
-for url_path in $DASHBOARD_IDS; do
-  if [[ -n "$url_path" ]]; then
-    echo "  Fetching: $url_path"
-    curl -s -o "$TMPDIR_WORK/dashboard_${url_path}.json" --connect-timeout 10 \
-      -H "Authorization: Bearer $HA_TOKEN" \
-      "${HA_BASE}/api/lovelace/config/${url_path}" 2>/dev/null || echo '{}' > "$TMPDIR_WORK/dashboard_${url_path}.json"
+  for url_path in $CUSTOM_IDS; do
+    if [[ -n "$url_path" ]]; then
+      STORAGE_FILE="/config/.storage/lovelace.${url_path}"
+      if ssh $SSH_OPTS "$SSH_TARGET" "test -f $STORAGE_FILE" 2>/dev/null; then
+        echo "  Reading custom dashboard: $url_path"
+        ssh $SSH_OPTS "$SSH_TARGET" "cat $STORAGE_FILE" \
+          > "$TMPDIR_WORK/lovelace_custom_${url_path}.json" 2>/dev/null || true
+      else
+        echo "  Custom dashboard file not found: $url_path"
+      fi
+    fi
+  done
+fi
+
+# 4. Read lovelace resources (HACS cards)
+if [[ "$DASH_METHOD" == "ssh" ]]; then
+  if ssh $SSH_OPTS "$SSH_TARGET" "test -f /config/.storage/lovelace_resources" 2>/dev/null; then
+    echo "  Reading lovelace resources..."
+    ssh $SSH_OPTS "$SSH_TARGET" "cat /config/.storage/lovelace_resources" \
+      > "$TMPDIR_WORK/lovelace_resources.json" 2>/dev/null || true
+  else
+    echo "  No lovelace_resources file"
   fi
-done
+fi
+
+if [[ "$DASH_METHOD" == "fallback" ]]; then
+  echo "  SSH failed — writing fallback binding"
+fi
 
 echo
-echo "Building dashboard binding..."
+echo "Building dashboard binding (method=$DASH_METHOD)..."
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BUILD YAML BINDING (Python)
 # ─────────────────────────────────────────────────────────────────────────────
 
-python3 - "$TMPDIR_WORK" "$OUTPUT" << 'PYEOF'
-import json, sys, datetime, os, glob
+python3 - "$TMPDIR_WORK" "$OUTPUT" "$DASH_METHOD" << 'PYEOF'
+import json, sys, datetime, os
 
 try:
     import yaml
@@ -98,96 +113,169 @@ except ImportError:
     print("STOP (2): PyYAML not installed", file=sys.stderr)
     sys.exit(2)
 
-tmpdir, out_path = sys.argv[1], sys.argv[2]
+tmpdir, out_path, method = sys.argv[1], sys.argv[2], sys.argv[3]
 
-# ── Load dashboard list ──────────────────────────────────────────────────────
-with open(os.path.join(tmpdir, 'dashboards.json'), 'r') as f:
-    dashboard_list = json.load(f)
-
-# ── Load default dashboard config ────────────────────────────────────────────
-with open(os.path.join(tmpdir, 'default_config.json'), 'r') as f:
-    default_config = json.load(f)
-
-# ── Helper: count views and cards ────────────────────────────────────────────
-def count_views_cards(config):
+# ── Helper: count views and cards from .storage data structure ─────────────
+def count_views_cards(data):
+    """Extract views from .storage format: {data: {config: {views: [...]}}}"""
+    config = data
+    # .storage files wrap content in {"data": {"config": {...}}}
+    if 'data' in data and isinstance(data['data'], dict):
+        config = data['data'].get('config', data['data'])
     views = config.get('views', [])
     view_count = len(views)
     card_count = 0
     for view in views:
-        card_count += len(view.get('cards', []))
+        cards = view.get('cards', [])
+        # Some views use sections instead of cards
+        sections = view.get('sections', [])
+        card_count += len(cards)
+        for section in sections:
+            card_count += len(section.get('cards', []))
     return view_count, card_count
 
-# ── Build default dashboard entry ────────────────────────────────────────────
 dashboards = []
-if default_config:
-    dv, dc = count_views_cards(default_config)
-    dashboards.append({
-        'id': 'lovelace',
-        'title': default_config.get('title', 'Home'),
-        'url_path': 'lovelace',
-        'is_default': True,
-        'view_count': dv,
-        'card_count': dc,
-        'views': default_config.get('views', []),
-    })
+lovelace_resources = []
 
-# ── Build custom dashboard entries ───────────────────────────────────────────
-for dash in dashboard_list:
-    url_path = dash.get('url_path', '')
-    if not url_path:
-        continue
-
-    config_path = os.path.join(tmpdir, f'dashboard_{url_path}.json')
-    config = {}
-    if os.path.isfile(config_path):
-        with open(config_path, 'r') as f:
+if method == "ssh":
+    # ── Default dashboard ────────────────────────────────────────────────
+    default_path = os.path.join(tmpdir, 'lovelace_default.json')
+    if os.path.isfile(default_path) and os.path.getsize(default_path) > 0:
+        with open(default_path, 'r') as f:
             try:
-                config = json.load(f)
+                default_data = json.load(f)
+                dv, dc = count_views_cards(default_data)
+                config = default_data.get('data', {}).get('config', default_data.get('data', {}))
+                dashboards.append({
+                    'id': 'lovelace',
+                    'title': config.get('title', 'Home'),
+                    'url_path': 'lovelace',
+                    'is_default': True,
+                    'mode': 'storage',
+                    'view_count': dv,
+                    'card_count': dc,
+                })
             except json.JSONDecodeError:
-                config = {}
+                pass
+    else:
+        dashboards.append({
+            'id': 'lovelace',
+            'title': 'Home (auto-generated)',
+            'url_path': 'lovelace',
+            'is_default': True,
+            'mode': 'auto-generated',
+            'view_count': 0,
+            'card_count': 0,
+        })
 
-    dv, dc = count_views_cards(config)
-    dashboards.append({
-        'id': dash.get('id', url_path),
-        'title': dash.get('title', url_path),
-        'url_path': url_path,
-        'is_default': False,
-        'view_count': dv,
-        'card_count': dc,
-        'views': config.get('views', []),
-    })
+    # ── Custom dashboards ────────────────────────────────────────────────
+    dash_registry_path = os.path.join(tmpdir, 'lovelace_dashboards.json')
+    if os.path.isfile(dash_registry_path):
+        with open(dash_registry_path, 'r') as f:
+            try:
+                dash_registry = json.load(f)
+            except json.JSONDecodeError:
+                dash_registry = {'data': {'items': []}}
 
-# ── Totals ───────────────────────────────────────────────────────────────────
-total_views = sum(d['view_count'] for d in dashboards)
-total_cards = sum(d['card_count'] for d in dashboards)
+        for item in dash_registry.get('data', {}).get('items', []):
+            url_path = item.get('url_path', '')
+            if not url_path:
+                continue
 
-# ── Build output binding ─────────────────────────────────────────────────────
-binding = {
-    'schema_version': '1.0',
-    'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-    'source': 'ha.dashboard.snapshot',
-    'summary': {
-        'dashboard_count': len(dashboards),
-        'total_views': total_views,
-        'total_cards': total_cards,
-    },
-    'dashboards': dashboards,
-}
+            custom_path = os.path.join(tmpdir, f'lovelace_custom_{url_path}.json')
+            dv, dc = 0, 0
+            mode = item.get('mode', 'storage')
+            if os.path.isfile(custom_path) and os.path.getsize(custom_path) > 0:
+                with open(custom_path, 'r') as f:
+                    try:
+                        custom_data = json.load(f)
+                        dv, dc = count_views_cards(custom_data)
+                    except json.JSONDecodeError:
+                        pass
+
+            dashboards.append({
+                'id': item.get('id', url_path),
+                'title': item.get('title', url_path),
+                'url_path': url_path,
+                'is_default': False,
+                'mode': mode,
+                'icon': item.get('icon', ''),
+                'view_count': dv,
+                'card_count': dc,
+            })
+
+    # ── Lovelace resources (HACS cards) ──────────────────────────────────
+    resources_path = os.path.join(tmpdir, 'lovelace_resources.json')
+    if os.path.isfile(resources_path) and os.path.getsize(resources_path) > 0:
+        with open(resources_path, 'r') as f:
+            try:
+                res_data = json.load(f)
+                for item in res_data.get('data', {}).get('items', []):
+                    lovelace_resources.append({
+                        'url': item.get('url', ''),
+                        'type': item.get('type', 'module'),
+                    })
+            except json.JSONDecodeError:
+                pass
+
+    # ── Totals ───────────────────────────────────────────────────────────
+    total_views = sum(d['view_count'] for d in dashboards)
+    total_cards = sum(d['card_count'] for d in dashboards)
+
+    binding = {
+        'schema_version': '1.0',
+        'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'source': 'ha.dashboard.snapshot',
+        'method': 'ssh',
+        'fallback': False,
+        'summary': {
+            'dashboard_count': len(dashboards),
+            'custom_dashboard_count': sum(1 for d in dashboards if not d['is_default']),
+            'total_views': total_views,
+            'total_cards': total_cards,
+            'lovelace_resource_count': len(lovelace_resources),
+        },
+        'dashboards': dashboards,
+        'lovelace_resources': lovelace_resources,
+    }
+
+else:
+    # ── Fallback: minimal binding ────────────────────────────────────────
+    binding = {
+        'schema_version': '1.0',
+        'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'source': 'ha.dashboard.snapshot',
+        'method': 'fallback',
+        'fallback': True,
+        'summary': {
+            'dashboard_count': 0,
+            'custom_dashboard_count': 0,
+            'total_views': 0,
+            'total_cards': 0,
+            'lovelace_resource_count': 0,
+            'note': 'SSH read of .storage dashboard files failed; minimal fallback binding',
+        },
+        'dashboards': [],
+        'lovelace_resources': [],
+    }
 
 header = '# HA Dashboard Snapshot (SSOT)\n'
 header += '# Auto-generated by ha.dashboard.snapshot — do not hand-edit.\n'
-header += '# Lovelace dashboard configs extracted via HA REST API.\n'
+header += f'# Method: {method} | Lovelace .storage files via SSH.\n'
 header += '# Status: authoritative\n\n'
 
 with open(out_path, 'w') as f:
     f.write(header)
     yaml.dump(binding, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
 
-# ── Summary ──────────────────────────────────────────────────────────────────
+# ── Summary ──────────────────────────────────────────────────────────────
 print(f"Wrote {out_path}")
-print(f"  {len(dashboards)} dashboards")
-print(f"  {total_views} total views")
-print(f"  {total_cards} total cards")
+if method == "ssh":
+    print(f"  {len(dashboards)} dashboards ({sum(1 for d in dashboards if not d['is_default'])} custom)")
+    print(f"  {total_views} total views, {total_cards} total cards")
+    print(f"  {len(lovelace_resources)} lovelace resources (HACS cards)")
+else:
+    print(f"  Fallback mode — SSH read failed")
 PYEOF
 
 echo

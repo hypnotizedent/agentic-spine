@@ -68,17 +68,14 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 | hacs | HACS | Infrastructure |
 | hassio | Supervisor | Infrastructure |
 | islamic_prayer_times | Islamic Prayer Times | Utility |
-| jellyfin | Media server | Media Mgmt |
 | local_todo | shopping-list | Utility |
 | matter | Matter | Protocol |
 | met | Weather (Home) | Utility |
 | mobile_app | Ronny, Empress, Boca (x2), Marium | Companion |
 | mqtt | Mosquitto broker | Infrastructure |
-| radarr, lidarr | Media management | Media Mgmt |
 | radio_browser | Radio Browser | Media |
 | ring | Doorbell + cameras | Smart Home |
 | roborock | Vacuum | Smart Home |
-| sabnzbd | Download clients (x2) | Media Mgmt |
 | shopping_list | Shopping list | Utility |
 | smlight | SLZB-06MU | Protocol |
 | sonoff | eWeLink devices | Smart Home |
@@ -91,7 +88,12 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 | webrtc | WebRTC Camera | Infrastructure |
 | winix | Winix Purifier | Smart Home |
 
-**Total:** ~47 config entries across ~34 domains.
+**Total:** ~43 config entries across ~30 domains.
+
+> **Media services note:** jellyfin, radarr, lidarr, and sabnzbd were removed from HA config entries —
+> they now run on dedicated media VMs (download-stack, streaming-stack). Version monitoring is still
+> available via HACS update entities (`update.lidarr_update`, `update.sabnzbd_update`,
+> `update.sonarr_update`) and governed by the media stack (`media.services.yaml`, D108 health gate).
 
 ---
 
