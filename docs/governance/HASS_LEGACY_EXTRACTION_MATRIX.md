@@ -1,7 +1,7 @@
 ---
 status: proposed
 owner: "@ronny"
-last_verified: 2026-02-11
+last_verified: 2026-02-15
 scope: hass-legacy-extraction-matrix
 parent_loop: LOOP-HASS-SSOT-AUTOGRADE-20260210
 legacy_commit: 1ea9dfa91f4cf5afbd56a1a946f0a733d3bd785c
@@ -84,19 +84,19 @@ legacy_commit: 1ea9dfa91f4cf5afbd56a1a946f0a733d3bd785c
 | **VM Identity (IP, RAM, disk)** | MINILAB_SSOT (full) | HOME.md, HOME_INFRASTRUCTURE_AUDIT.md | None |
 | **Network topology** | MINILAB_SSOT + DEVICE_IDENTITY_SSOT | NETWORK_MAP.md, HOME.md | None |
 | **SSH connectivity** | ssh.targets.yaml (ha: hassio@100.67.120.1) | HOME_ASSISTANT_CONTEXT.md | None |
-| **Backup strategy** | HOME_BACKUP_STRATEGY.md + backup.inventory.yaml | BACKUP.md, backup-ha.sh, sync-ha-offsite.sh | **Scripts missing from spine** |
-| **Secrets project** | secrets.inventory.yaml (project registered) | HOME_ASSISTANT_CONTEXT.md (token paths) | **Namespace mapping missing** |
-| **Radio coordinators** | MINILAB_SSOT (IPs, models, protocols) | HOME_ASSISTANT_CONTEXT.md (firmware, MAC, modes) | **Firmware/MAC/mode detail missing** |
+| **Backup strategy** | HOME_BACKUP_STRATEGY.md + backup.inventory.yaml + `ha.backup.create` | BACKUP.md, backup-ha.sh, sync-ha-offsite.sh | Covered (Runbook S7 + capability) |
+| **Secrets project** | secrets.inventory.yaml (project registered) + Runbook S1 | HOME_ASSISTANT_CONTEXT.md (token paths) | Covered (Runbook has Infisical project/env/key paths) |
+| **Radio coordinators** | MINILAB_SSOT + Runbook S6 (firmware, MAC, modes) | HOME_ASSISTANT_CONTEXT.md (firmware, MAC, modes) | Covered (Runbook S6) |
 | **Integration inventory** | `ha.integrations.snapshot` → `ops/bindings/ha.integrations.yaml` | REF_INTEGRATIONS.md (60 entries) | Covered by capability |
 | **Automation inventory** | `ha.automations.snapshot` → `ops/bindings/ha.automations.yaml` | automations.yaml (14), REF_AUTOMATIONS.md | Covered by capability |
 | **Entity/helper inventory** | `ha.helpers.snapshot` → `ops/bindings/ha.helpers.yaml` | REF_HELPERS.md, entity_registry.json | Covered by capability |
 | **Dashboard config** | `ha.dashboard.snapshot` → `ops/bindings/ha.dashboards.yaml` | 11 YAML files + style guide | Covered by capability |
-| **Recovery runbooks** | DR_RUNBOOK.md (stub: "HA down if proxmox-home offline") | ZIGBEE_RECOVERY.md, RUNBOOK_CALDAV_APPLE.md, HA_RESYNC.md | **App-level recovery missing** |
-| **CLI/API tools** | None | ha-cli.sh, ha-entity-*.py, ha-health-check.sh | **Full gap** |
-| **MCP server** | None | mcpjungle/servers/home-assistant/ (TypeScript) | **Full gap** |
-| **HACS inventory** | None | HOME_ASSISTANT_CONTEXT.md (12+35 entries) | **Full gap** |
-| **Known fixes/gotchas** | None | HOME_ASSISTANT_CONTEXT.md (5 documented fixes) | **Full gap** |
-| **Offsite sync schedule** | None | launchd plist (Sunday 04:30) | **Full gap** |
+| **Recovery runbooks** | Runbook S8 (Zigbee, CalDAV, Tailscale procedures) | ZIGBEE_RECOVERY.md, RUNBOOK_CALDAV_APPLE.md, HA_RESYNC.md | Covered (Runbook S8) |
+| **CLI/API tools** | `ha.health.status` + `ha.entity.status` + `ha.service.call` | ha-cli.sh, ha-entity-*.py, ha-health-check.sh | Covered (capabilities replace legacy CLI) |
+| **MCP server** | `ha.mcp.status` + HASS_MCP_INTEGRATION.md | mcpjungle/servers/home-assistant/ (TypeScript) | Covered (policy doc + validation capability) |
+| **HACS inventory** | Runbook S5 + `ha.integrations.snapshot` | HOME_ASSISTANT_CONTEXT.md (12+35 entries) | Covered (Runbook S5 + config_entries snapshot) |
+| **Known fixes/gotchas** | Runbook S9 (6 documented fixes) | HOME_ASSISTANT_CONTEXT.md (5 documented fixes) | Covered (Runbook S9) |
+| **Offsite sync schedule** | Runbook S7 (Sunday 04:30 launchd documented) | launchd plist (Sunday 04:30) | Covered (Runbook S7) |
 | **Service registry** | OUT OF SCOPE (per LOOP-HOME-SERVICE-REGISTRY-SCOPE-DECISION) | N/A | By design |
 | **Health probes** | OUT OF SCOPE (per scope decision) | N/A | By design |
 
@@ -113,8 +113,8 @@ legacy_commit: 1ea9dfa91f4cf5afbd56a1a946f0a733d3bd785c
 | **RUNBOOK_CALDAV_APPLE.md** | **extract_now** | `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` (CalDAV recovery section) | Contains credential paths and app-specific password regeneration procedure. |
 | **backup-ha.sh** + **sync-ha-offsite.sh** | **extract_now** | `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` (backup/restore section) | Scripts document the actual backup procedure. Spine HOME_BACKUP_STRATEGY covers strategy but not mechanics. |
 | **launchd plist** | **extract_now** | `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` (schedule reference) | Documents the macOS cron-equivalent schedule for offsite sync. |
-| **MCP server source** | **defer** | N/A (stays in workbench or is rebuilt) | MCP server is a runtime tool, not governance. Will be rebuilt when MCP integration is formalized in spine. |
-| **ha-cli.sh** + utility scripts | **defer** | N/A | CLI tools are runtime utilities. May be ported to workbench later. Not governance-critical. |
+| **MCP server source** | **covered** | `ha.mcp.status` + `docs/governance/HASS_MCP_INTEGRATION.md` | Policy doc + validation capability. Source stays in workbench; spine governs via GOVERNED_TOOLS block enforcement. |
+| **ha-cli.sh** + utility scripts | **covered** | `ha.health.status`, `ha.entity.status`, `ha.service.call` | Legacy CLI replaced by scoped capabilities with API token management and domain allowlists. |
 | **Dashboard YAML files** | **extract_now** | `ops/bindings/ha.dashboards.yaml` | Version-controlled via `ha.dashboard.snapshot` capability (REST API extraction). |
 | **Session logs** (20+ files) | **reject** | N/A | Historical, no ongoing operational value. |
 | **Archive content** (.archive/) | **reject** | N/A | Already marked archived in legacy. Historical only. |
