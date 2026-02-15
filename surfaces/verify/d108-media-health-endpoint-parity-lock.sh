@@ -17,7 +17,7 @@ command -v curl >/dev/null 2>&1 || { err "curl not installed"; exit 1; }
 
 get_vm_ip() {
   local vm="$1"
-  yq -r ".vms[] | select(.hostname == \"$vm\") | .lan_ip // .tailscale_ip" "$VM_BINDING" 2>/dev/null || echo ""
+  yq -r ".vms[] | select(.hostname == \"$vm\") | .tailscale_ip // .lan_ip" "$VM_BINDING" 2>/dev/null || echo ""
 }
 
 while IFS=$'\t' read -r name vm port health status; do
