@@ -182,7 +182,7 @@ Notes (Shop LAN-only endpoints):
 | pve (hypervisor) | `pve` | 192.168.1.184 | — | Proxmox host; NFS server |
 | docker-host (Mint OS) | `docker-host` | 192.168.1.200 | 200 | Static IP (netplan). Mint OS production workloads. |
 | media-stack | `media-stack` | 192.168.1.201 | 201 | **Decommissioned** 2026-02-10 (VM destroyed; split to 209/210). |
-| automation-stack | `automation-stack` | 192.168.1.202 | 202 | Automation (n8n, Ollama, Open WebUI). |
+| automation-stack | `automation-stack` | 192.168.1.110 | 202 | Automation (n8n, Ollama, Open WebUI). IP does not follow VMID parity (DHCP lease at .110). |
 | immich (shop) | `immich` | 192.168.1.203 | 203 | Shop photos (Tailscale: `immich-1`). |
 | infra-core | `infra-core` | 192.168.1.204 | 204 | Static IP; Pi-hole DNS |
 | observability | `observability` | 192.168.1.205 | 205 | Static IP |
