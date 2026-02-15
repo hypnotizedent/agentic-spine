@@ -14,8 +14,9 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../../../.." && pwd")
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 SERVICE_BINDING="$ROOT/ops/bindings/media.services.yaml"
+VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 
 usage() {
   cat <<'USAGE'
@@ -56,9 +57,46 @@ command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
 
 MEDIA_VMS=("download-stack" "streaming-stack")
 
+get_vm_ssh_ref() {
+  local vm="$1"
+  local target user
+
+  target=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
+  user=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
+
+  if [[ -z "$target" || "$target" == "null" ]]; then
+    echo ""
+    return 1
+  fi
+
+  if [[ -n "$user" && "$user" != "null" ]]; then
+    echo "${user}@${target}"
+  else
+    echo "$target"
+  fi
+}
+
 get_vm_containers() {
   local vm="$1"
-  ssh -o ConnectTimeout=10 "$vm" "docker ps -a --format '{{.Names}}\t{{.Status}}'" 2>/dev/null || echo ""
+  local ssh_ref
+  local docker_cmd
+  local out
+  ssh_ref=$(get_vm_ssh_ref "$vm" 2>/dev/null || true)
+  [[ -z "$ssh_ref" ]] && return 0
+
+  docker_cmd="docker ps -a --format '{{.Names}}\t{{.Status}}'"
+  out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "$docker_cmd" 2>&1 || true)
+  if echo "$out" | grep -qi "permission denied while trying to connect to the docker api"; then
+    out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "sudo -n $docker_cmd" 2>&1 || true)
+  fi
+
+  # If sudo fallback also fails, return empty list and let caller report missing containers.
+  if echo "$out" | grep -qi "^sudo: "; then
+    echo ""
+    return 0
+  fi
+
+  printf '%s\n' "$out"
 }
 
 get_service_container() {
@@ -121,10 +159,21 @@ done
 
 # Output
 if $OUTPUT_JSON; then
+  if [[ -n "$VM_FILTER" ]]; then
+    json_vm_filter="\"$VM_FILTER\""
+  else
+    json_vm_filter="null"
+  fi
+  if [[ -n "$SERVICE_FILTER" ]]; then
+    json_service_filter="\"$SERVICE_FILTER\""
+  else
+    json_service_filter="null"
+  fi
+
   echo "{"
   echo "  \"capability\": \"media.service.status\","
-  echo "  \"vm_filter\": ${VM_FILTER:-null},"
-  echo "  \"service_filter\": ${SERVICE_FILTER:-null},"
+  echo "  \"vm_filter\": $json_vm_filter,"
+  echo "  \"service_filter\": $json_service_filter,"
   echo "  \"services\": {"
   first=true
   for service in "${!ALL_RESULTS[@]}"; do
