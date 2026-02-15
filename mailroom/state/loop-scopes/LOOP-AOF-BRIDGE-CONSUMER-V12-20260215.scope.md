@@ -1,6 +1,6 @@
 # LOOP-AOF-BRIDGE-CONSUMER-V12-20260215
 
-**Status:** open
+**Status:** closed
 **Opened:** 2026-02-15
 **Owner:** @ronny
 **Terminal:** claude-code
@@ -20,6 +20,11 @@ Claude.ai, monitoring dashboards).
 | GAP-OP-450 | missing-entry | medium | Add role-scoped RBAC entries (operator/monitor) for aof.* caps |
 | GAP-OP-451 | runtime-bug | high | Integration tests: /cap/run for each AOF cap returns JSON envelope + receipt |
 | GAP-OP-452 | stale-ssot | medium | Update MAILROOM_BRIDGE.md with AOF consumer examples and JSON contract |
+
+## Closure
+
+All 4 gaps closed. Implementation commit: b896961.
+spine.verify: all gates PASS.
 
 ## Constraints
 
