@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-AOF-V01-FOUNDATION-20260215
 created: 2026-02-15
-status: active
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Establish AOF v0.1 product foundation — 5 artifacts, 1 drift gate (D91), 2 tenant capabilities
@@ -49,3 +49,13 @@ Without these, AOF cannot be packaged, deployed, or supported as a product.
 
 - Do not touch GAP-OP-308 / LOOP-RAG-REINDEX-EXECUTION-20260215
 - Governed workflow only (gaps.file/claim/close, receipts, verify)
+
+## Closeout
+
+- **Closed:** 2026-02-15
+- **All child gaps fixed:** GAP-OP-324 through GAP-OP-328
+- **spine.verify:** PASS (91 gates, 90 active)
+- **D91 test:** 7/7 pass
+- **tenant.profile.validate:** PASS (0 errors, 0 warnings)
+- **tenant.provision.dry-run:** PASS (8 steps, 4 agent surfaces, 0 mutations)
+- **Commits:** c8c3707, de8c152, d33f3d5, da319e4 + gap close commits
