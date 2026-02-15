@@ -33,14 +33,14 @@ Every new device on the home network must follow the same spine-native workflow 
 | Device | IP | Tailscale | Role |
 |--------|----|-----------|------|
 | UDR7 gateway | 10.0.0.1 | — | Router, WiFi AP, DHCP |
-| Beelink (proxmox-home) | 10.0.0.50 | 100.103.99.62 | Hypervisor |
+| Beelink (proxmox-home) | 10.0.0.179 | 100.103.99.62 | Hypervisor |
 | SLZB-06 | 10.0.0.51 | — | Zigbee coordinator |
 | SLZB-06MU | 10.0.0.52 | — | Zigbee + Matter |
 | pihole-home (LXC 105) | 10.0.0.53 | 100.105.148.96 | DNS (stopped) |
 | download-home (LXC 103) | 10.0.0.101 | 100.125.138.110 | *arr stack (stopped) |
-| homeassistant (VM 100) | 10.0.0.102 | 100.67.120.1 | Home automation |
+| homeassistant (VM 100) | 10.0.0.100 | 100.67.120.1 | Home automation |
 | Synology NAS | 10.0.0.150 | 100.102.199.111 | Storage |
-| TubesZB | 10.0.0.217 | — | Z-Wave coordinator |
+| TubesZB | 10.0.0.90 | — | Z-Wave coordinator |
 
 ## Onboarding Checklist
 

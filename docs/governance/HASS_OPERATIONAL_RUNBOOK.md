@@ -29,7 +29,7 @@ All operations in this runbook MUST be executed via capability system:
 | Resource | Value |
 |----------|-------|
 | **VM** | 100 on proxmox-home (Beelink, HAOS) |
-| **LAN IP** | 10.0.0.102 |
+| **LAN IP** | 10.0.0.100 |
 | **Tailscale IP** | 100.67.120.1 |
 | **Web UI** | http://100.67.120.1:8123 or https://ha.ronny.works |
 | **SSH** | `ssh hassio@ha` (Advanced SSH & Web Terminal add-on) |

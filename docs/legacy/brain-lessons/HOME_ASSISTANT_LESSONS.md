@@ -18,7 +18,7 @@ scope: home-lessons
 |-------|-------|
 | VM ID | 100 on proxmox-home |
 | Tailscale IP | 100.67.120.1 |
-| Local IP | 10.0.0.102 |
+| Local IP | 10.0.0.100 |
 | Web UI | http://ha:8123 |
 | SSH | `ssh hassio@ha` |
 | Resources | 2c / 4GB RAM / 32GB disk |
@@ -30,7 +30,7 @@ scope: home-lessons
 |--------|-------|----|----------|--------|
 | SLZB-06 | SMLIGHT SLZB-06 | 10.0.0.51 | Zigbee (CC2652P) | Online |
 | SLZB-06MU | SMLIGHT SLZB-06MU | 10.0.0.52 | Zigbee + Matter | Online (reserved) |
-| TubesZB | TubesZB Z-Wave | 10.0.0.217 | Z-Wave 800 | On hand |
+| TubesZB | TubesZB Z-Wave | 10.0.0.90 | Z-Wave 800 | Online |
 
 **Rules:**
 1. Do NOT run two Zigbee coordinators simultaneously

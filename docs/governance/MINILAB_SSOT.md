@@ -51,7 +51,7 @@ parent_receipts:
 | Interface | IP | Notes |
 |-----------|-----|-------|
 | Tailscale | 100.103.99.62 | Primary access |
-| Local | 10.0.0.50 | Home LAN |
+| Local | 10.0.0.179 | Home LAN |
 | Gateway | 10.0.0.1 | Ubiquiti UDR |
 
 ### PVE Node-Name Status
@@ -159,7 +159,7 @@ parent_receipts:
 | Field | Value |
 |-------|-------|
 | Tailscale IP | 100.67.120.1 |
-| Local IP | 10.0.0.102 |
+| Local IP | 10.0.0.100 |
 | Web UI | http://ha:8123 |
 | Purpose | Home automation hub |
 | Integrations | Zigbee (SLZB-06), Z-Wave (TubesZB), UniFi |
@@ -216,12 +216,12 @@ parent_receipts:
 |--------|----------|--------------|------|
 | Ubiquiti UDR | 10.0.0.1 | - | Gateway, WiFi AP, DHCP |
 | Synology NAS | 10.0.0.150 | 100.102.199.111 | Storage |
-| proxmox-home | 10.0.0.50 | 100.103.99.62 | Hypervisor |
+| proxmox-home | 10.0.0.179 | 100.103.99.62 | Hypervisor |
 | SLZB-06 (Zigbee) | 10.0.0.51 | - | Zigbee coordinator |
 | SLZB-06MU (Matter) | 10.0.0.52 | - | Zigbee + Matter |
-| TubesZB (Z-Wave) | 10.0.0.217 | - | Z-Wave coordinator |
-| homeassistant | 10.0.0.102 | 100.67.120.1 | VM 100 |
-| pihole-home | 10.0.0.100 | 100.105.148.96 | LXC 105 |
+| TubesZB (Z-Wave) | 10.0.0.90 | - | Z-Wave coordinator |
+| homeassistant | 10.0.0.100 | 100.67.120.1 | VM 100 |
+| pihole-home | 10.0.0.53 | 100.105.148.96 | LXC 105 |
 | download-home | 10.0.0.101 | 100.125.138.110 | LXC 103 |
 
 ### Network Configuration
@@ -240,7 +240,7 @@ parent_receipts:
 |--------|-------|----|----------|--------|
 | SLZB-06 | SMLIGHT SLZB-06 | 10.0.0.51 | Zigbee (CC2652P) | Online |
 | SLZB-06MU | SMLIGHT SLZB-06MU | 10.0.0.52 | Zigbee + Matter | Online |
-| TubesZB | TubesZB Z-Wave | 10.0.0.217 | Z-Wave | Online |
+| TubesZB | TubesZB Z-Wave | 10.0.0.90 | Z-Wave | Online |
 
 ---
 

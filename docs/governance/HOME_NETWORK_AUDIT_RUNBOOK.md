@@ -64,7 +64,7 @@ ssh download-home uptime
 ```bash
 ssh root@proxmox-home "ping -c1 10.0.0.51"   # SLZB-06
 ssh root@proxmox-home "ping -c1 10.0.0.52"   # SLZB-06MU
-ssh root@proxmox-home "ping -c1 10.0.0.217"  # TubesZB
+ssh root@proxmox-home "ping -c1 10.0.0.90"   # TubesZB
 ```
 
 ## Backup Verification
