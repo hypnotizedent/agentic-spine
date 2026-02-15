@@ -965,6 +965,14 @@ else
   warn "Stream Deck config gate not present"
 fi
 
+# D104: Home DHCP audit freshness
+echo -n "D104 Home DHCP audit freshness... "
+if [[ -x "$SP/surfaces/verify/d104-home-dhcp-audit-freshness.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d104-home-dhcp-audit-freshness.sh"
+else
+  warn "DHCP audit freshness gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

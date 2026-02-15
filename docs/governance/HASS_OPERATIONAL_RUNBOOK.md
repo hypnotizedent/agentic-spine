@@ -245,9 +245,67 @@ ssh hassio@ha "bash -l -c 'ha backups new --name ha-backup-YYYYMMDD'"
 
 ### Restore Procedure
 
-1. **VM restore:** `qmrestore` from vzdump artifact on NAS
-2. **App restore:** HA Settings > System > Backups > select backup > Restore
-3. **Post-restore:** Verify Zigbee2MQTT reconnects, check automation states, validate calendar integration
+#### Option A: App-Level Restore (HA Backup)
+
+Use when HA config is corrupt but the VM itself is healthy.
+
+1. **Locate backup:** SSH to HA and list available backups:
+   ```
+   ssh hassio@ha "bash -l -c 'ha backups list'"
+   ```
+   Or check NAS: `nas:/volume1/backups/apps/home-assistant/`
+
+2. **Upload backup if needed:** If restoring from NAS, scp the `.tar` to HA:
+   ```
+   scp nas:/volume1/backups/apps/home-assistant/ha-backup-YYYYMMDD.tar hassio@ha:/backup/
+   ```
+
+3. **Restore via CLI:**
+   ```
+   ssh hassio@ha "bash -l -c 'ha backups restore <SLUG> --homeassistant --addons'"
+   ```
+   Or restore via UI: HA Settings > System > Backups > select backup > Restore.
+
+4. **Post-restore checklist:**
+   - [ ] HA web UI accessible at `http://100.67.120.1:8123`
+   - [ ] Zigbee2MQTT reconnects to SLZB-06 coordinator (check Z2M add-on logs)
+   - [ ] All 14 automations are enabled (`ha automations list` or Settings > Automations)
+   - [ ] Calendar integration (CalDAV) shows events
+   - [ ] HACS integrations load without errors (Settings > Integrations > HACS)
+   - [ ] SSH add-on is accessible (`ssh hassio@ha`)
+   - [ ] Run `ops cap run ha.device.map.build` to verify entity count matches pre-restore
+   - [ ] Run `ops cap run network.home.dhcp.audit` to verify DHCP state
+
+#### Option B: VM-Level Restore (Proxmox vzdump)
+
+Use when the entire VM 100 is lost or the disk is corrupt.
+
+1. **Identify backup:** Check NAS vzdump store for most recent VM 100 backup:
+   ```
+   ssh root@proxmox-home "ls -la /mnt/nfs-backups/dump/ | grep vzdump-qemu-100"
+   ```
+
+2. **Restore VM:**
+   ```
+   ssh root@proxmox-home "qmrestore /mnt/nfs-backups/dump/vzdump-qemu-100-YYYY_MM_DD-HH_MM_SS.vma.zst 100 --force"
+   ```
+
+3. **Start VM and verify:**
+   ```
+   ssh root@proxmox-home "qm start 100"
+   ```
+   Wait 2-3 minutes for HA to boot, then run the post-restore checklist above.
+
+4. **Network verification:** Confirm VM 100 has IP `100.67.120.1` (Tailscale) and `192.168.1.100` (LAN).
+
+#### Recovery Time Objectives
+
+| Scenario | RTO | Method |
+|----------|-----|--------|
+| Config corruption | ~10 min | App-level restore from local `/backup/` |
+| Add-on failure | ~15 min | App-level restore (includes add-ons) |
+| VM disk failure | ~30 min | vzdump restore + boot |
+| Full host failure | ~1 hour | vzdump restore on alternate Proxmox node |
 
 ---
 

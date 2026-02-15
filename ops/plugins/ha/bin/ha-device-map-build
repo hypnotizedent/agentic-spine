@@ -265,6 +265,24 @@ for did, dev in sorted(ha_devices.items(), key=lambda x: x[1]['name']):
 
     output_devices.append(entry)
 
+# ── Merge manual overrides ──────────────────────────────────────────────────
+overrides_path = os.path.join(os.environ.get('SPINE_ROOT', os.path.expanduser('~/code/agentic-spine')),
+                              'ops/bindings/ha.device.map.overrides.yaml')
+if os.path.isfile(overrides_path):
+    with open(overrides_path, 'r') as f:
+        overrides_data = yaml.safe_load(f) or {}
+    overrides_by_id = {o['ha_device_id']: o for o in overrides_data.get('overrides', [])}
+    enriched = 0
+    for dev_entry in output_devices:
+        ov = overrides_by_id.get(dev_entry['ha_device_id'])
+        if ov:
+            for k, v in ov.items():
+                if k != 'ha_device_id':
+                    dev_entry[k] = v
+            enriched += 1
+    if enriched:
+        print(f"  Merged {enriched} manual override(s) from overrides file")
+
 # ── Build output ────────────────────────────────────────────────────────────
 binding = {
     'schema_version': '1.0',

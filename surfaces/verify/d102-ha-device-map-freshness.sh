@@ -35,5 +35,15 @@ if [[ "$age_days" -gt 14 ]]; then
   exit 1
 fi
 
+# Validate overrides file if present
+OVERRIDES="$ROOT/ops/bindings/ha.device.map.overrides.yaml"
+if [[ -f "$OVERRIDES" ]]; then
+  ov_schema="$(yq -r '.schema_version // ""' "$OVERRIDES" 2>/dev/null)"
+  if [[ -z "$ov_schema" || "$ov_schema" == "null" ]]; then
+    echo "D102 FAIL: ha.device.map.overrides.yaml missing schema_version"
+    exit 1
+  fi
+fi
+
 echo "D102 PASS (${count} devices, ${age_days}d old)"
 exit 0
