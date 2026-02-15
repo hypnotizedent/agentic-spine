@@ -79,7 +79,9 @@ echo "Session '$TMUX_SESSION' is STOPPED — checking quality gates..."
 
 # Gate 1: Failed uploads
 echo -n "  Checking failed uploads... "
-failed_uploads="$(ssh "${SSH_ARGS[@]}" "$TARGET" "awk '/ERROR: Upload failed/{c++} END{print c+0}' '$REMOTE_LOG' 2>/dev/null || echo 0")"
+# Scope to latest run segment in persistent rag-sync.log.
+run_start_line="$(ssh "${SSH_ARGS[@]}" "$TARGET" "if [ -f '$REMOTE_LOG' ]; then awk '/START rag sync/{n=NR} END{print (n>0?n:1)}' '$REMOTE_LOG'; else echo 1; fi" 2>/dev/null || echo 1)"
+failed_uploads="$(ssh "${SSH_ARGS[@]}" "$TARGET" "awk -v s='$run_start_line' 'NR>=s && /ERROR: Upload failed/{c++} END{print c+0}' '$REMOTE_LOG' 2>/dev/null || echo 0")"
 if [[ "$failed_uploads" -gt "$MAX_FAILED_UPLOADS" ]]; then
   err "Failed uploads ($failed_uploads) exceeds max ($MAX_FAILED_UPLOADS)"
 else

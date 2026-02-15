@@ -83,9 +83,19 @@ if ! ssh "${SSH_ARGS[@]}" "$TARGET" "[ -f '$REMOTE_LOG' ]"; then
   fi
 fi
 
+# Scope counters to the latest run segment in persistent rag-sync.log.
+run_start_line="$(ssh "${SSH_ARGS[@]}" "$TARGET" "if [ -f '$effective_log' ]; then awk '/START rag sync/{n=NR} END{print (n>0?n:1)}' '$effective_log'; else echo 1; fi" 2>/dev/null || echo 1)"
+uploaded="$(ssh "${SSH_ARGS[@]}" "$TARGET" "awk -v s='$run_start_line' 'NR>=s && /OK: Uploaded/{c++} END{print c+0}' '$effective_log' 2>/dev/null || echo 0")"
+failed="$(ssh "${SSH_ARGS[@]}" "$TARGET" "awk -v s='$run_start_line' 'NR>=s && /ERROR: Upload failed/{c++} END{print c+0}' '$effective_log' 2>/dev/null || echo 0")"
+run_start_marker="$(ssh "${SSH_ARGS[@]}" "$TARGET" "awk -v s='$run_start_line' 'NR==s{print; exit}' '$effective_log' 2>/dev/null || true")"
+
 echo "uploaded:     $uploaded"
 echo "failed:       $failed"
 echo "checkpoint:   $checkpoint_count"
+echo "run_start_ln: $run_start_line"
+if [[ -n "$run_start_marker" ]]; then
+  echo "run_start:    $run_start_marker"
+fi
 if [[ "$effective_log" != "$REMOTE_LOG" ]]; then
   echo "log_resolved: $effective_log"
 fi
