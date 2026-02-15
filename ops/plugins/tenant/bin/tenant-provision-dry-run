@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# tenant-provision-dry-run — Print deterministic provisioning plan; no mutation
+# Usage: tenant-provision-dry-run --profile <path>
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+PRESETS="$ROOT/ops/bindings/policy.presets.yaml"
+
+usage() {
+  echo "Usage: tenant-provision-dry-run --profile <path>"
+  echo "  Generates a deterministic provisioning plan from a tenant profile."
+  echo "  Dry-run only — no mutations are performed."
+  exit 1
+}
+
+PROFILE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile) PROFILE="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+[[ -z "$PROFILE" ]] && usage
+
+# Check dependencies
+command -v yq >/dev/null 2>&1 || { echo "ERROR: yq is required but not found"; exit 1; }
+[[ -f "$PROFILE" ]] || { echo "ERROR: Profile not found: $PROFILE"; exit 1; }
+
+# Extract profile fields
+TENANT_ID="$(yq -r '.identity.tenant_id // "unknown"' "$PROFILE")"
+OWNER="$(yq -r '.identity.owner // "unknown"' "$PROFILE")"
+SECRETS_PROVIDER="$(yq -r '.secrets.provider // "none"' "$PROFILE")"
+SECRETS_ENV="$(yq -r '.secrets.environment // "dev"' "$PROFILE")"
+POLICY_PRESET="$(yq -r '.policy.preset // "balanced"' "$PROFILE")"
+SPINE_ROOT_PATH="$(yq -r '.runtime.spine_root // "/unknown"' "$PROFILE")"
+WORKBENCH_ROOT="$(yq -r '.runtime.workbench_root // ""' "$PROFILE")"
+PRIMARY_REMOTE="$(yq -r '.runtime.git_remote_primary // "origin"' "$PROFILE")"
+MIRROR_REMOTE="$(yq -r '.runtime.git_remote_mirror // ""' "$PROFILE")"
+RECEIPTS="$(yq -r '.evidence.receipts_enabled // "true"' "$PROFILE")"
+LEDGER="$(yq -r '.evidence.ledger_path // "receipts/ledger.yaml"' "$PROFILE")"
+CLOSEOUT_SLA="$(yq -r '.evidence.session_closeout_sla_hours // "48"' "$PROFILE")"
+SLASH_CMDS="$(yq -r '.surfaces.slash_commands // "true"' "$PROFILE")"
+
+# Resolve policy knobs
+if [[ -f "$PRESETS" ]]; then
+  DRIFT_MODE="$(yq -r ".presets.$POLICY_PRESET.knobs.drift_gate_mode // \"fail\"" "$PRESETS")"
+  APPROVAL="$(yq -r ".presets.$POLICY_PRESET.knobs.approval_default // \"auto\"" "$PRESETS")"
+  STALE_DAYS="$(yq -r ".presets.$POLICY_PRESET.knobs.stale_ssot_max_days // \"14\"" "$PRESETS")"
+  WARN_POLICY="$(yq -r ".presets.$POLICY_PRESET.knobs.warn_policy // \"advisory\"" "$PRESETS")"
+  MA_WRITES="$(yq -r ".presets.$POLICY_PRESET.knobs.multi_agent_writes // \"direct\"" "$PRESETS")"
+else
+  DRIFT_MODE="fail"
+  APPROVAL="auto"
+  STALE_DAYS="14"
+  WARN_POLICY="advisory"
+  MA_WRITES="direct"
+fi
+
+# Extract agent surfaces
+AGENTS="$(yq -r '.surfaces.agents[]' "$PROFILE" 2>/dev/null || echo "claude-code")"
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "AOF PROVISIONING PLAN (DRY RUN)"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+echo "Tenant:           $TENANT_ID"
+echo "Owner:            $OWNER"
+echo "Generated:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "Mode:             DRY RUN — no mutations"
+echo ""
+
+echo "─── 1. Repository Setup ───"
+echo "  Spine root:       $SPINE_ROOT_PATH"
+if [[ -n "$WORKBENCH_ROOT" ]]; then
+  echo "  Workbench root:   $WORKBENCH_ROOT"
+fi
+echo "  Primary remote:   $PRIMARY_REMOTE"
+if [[ -n "$MIRROR_REMOTE" ]]; then
+  echo "  Mirror remote:    $MIRROR_REMOTE"
+fi
+echo ""
+
+echo "─── 2. Secrets Configuration ───"
+echo "  Provider:         $SECRETS_PROVIDER"
+echo "  Environment:      $SECRETS_ENV"
+if [[ "$SECRETS_PROVIDER" != "none" ]]; then
+  echo "  Action:           Configure $SECRETS_PROVIDER binding in ops/bindings/secrets.binding.yaml"
+else
+  echo "  Action:           No secrets provider — skip binding"
+fi
+echo ""
+
+echo "─── 3. Policy Configuration ───"
+echo "  Preset:           $POLICY_PRESET"
+echo "  Drift gate mode:  $DRIFT_MODE"
+echo "  Approval default: $APPROVAL"
+echo "  Stale SSOT limit: ${STALE_DAYS} days"
+echo "  Warn policy:      $WARN_POLICY"
+echo "  Multi-agent:      $MA_WRITES"
+echo "  Action:           Apply preset knobs to runtime configuration"
+echo ""
+
+echo "─── 4. Agent Surfaces ───"
+while IFS= read -r agent; do
+  case "$agent" in
+    claude-code)
+      echo "  [$agent]  Sync CLAUDE.md + slash commands to ~/.claude/"
+      ;;
+    claude-desktop)
+      echo "  [$agent]  Sync CLAUDE.md to Claude Desktop config"
+      ;;
+    codex)
+      echo "  [$agent]  Sync AGENTS.md to repo root"
+      ;;
+    opencode)
+      echo "  [$agent]  Sync opencode.json to workbench dotfiles"
+      ;;
+    *)
+      echo "  [$agent]  Unknown agent surface — manual configuration required"
+      ;;
+  esac
+done <<< "$AGENTS"
+if [[ "$SLASH_CMDS" == "true" ]]; then
+  echo "  Slash commands:   Sync surfaces/commands/*.md to agent surfaces"
+fi
+echo ""
+
+echo "─── 5. Evidence & Receipts ───"
+echo "  Receipts:         $RECEIPTS"
+echo "  Ledger path:      $LEDGER"
+echo "  Closeout SLA:     ${CLOSEOUT_SLA}h (D61 enforcement)"
+echo ""
+
+echo "─── 6. Verification ───"
+echo "  Action:           Run spine.verify to validate all drift gates"
+echo "  Action:           Run tenant.profile.validate against deployed profile"
+echo "  Expected:         All gates pass (exit 0)"
+echo ""
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "PLAN SUMMARY"
+echo "═══════════════════════════════════════════════════════════════"
+STEP_COUNT=0
+[[ "$SECRETS_PROVIDER" != "none" ]] && STEP_COUNT=$((STEP_COUNT + 1))
+STEP_COUNT=$((STEP_COUNT + 1))  # policy
+AGENT_COUNT=0
+while IFS= read -r _; do AGENT_COUNT=$((AGENT_COUNT + 1)); done <<< "$AGENTS"
+STEP_COUNT=$((STEP_COUNT + AGENT_COUNT))  # surfaces
+STEP_COUNT=$((STEP_COUNT + 1))  # evidence
+STEP_COUNT=$((STEP_COUNT + 1))  # verify
+
+echo "  Total steps:      $STEP_COUNT"
+echo "  Agent surfaces:   $AGENT_COUNT"
+echo "  Mutations:        0 (dry run)"
+echo ""
+echo "To execute this plan, deploy the profile and run spine.verify."
+echo "═══════════════════════════════════════════════════════════════"

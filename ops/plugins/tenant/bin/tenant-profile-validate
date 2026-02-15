@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# tenant-profile-validate — Read-only validation of a tenant profile against schema
+# Usage: tenant-profile-validate --profile <path>
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+SCHEMA="$ROOT/ops/bindings/tenant.profile.schema.yaml"
+PRESETS="$ROOT/ops/bindings/policy.presets.yaml"
+
+usage() {
+  echo "Usage: tenant-profile-validate --profile <path>"
+  echo "  Validates a tenant profile YAML against the AOF tenant schema."
+  echo "  Read-only — no mutations."
+  exit 1
+}
+
+PROFILE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile) PROFILE="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+[[ -z "$PROFILE" ]] && usage
+
+# Check dependencies
+command -v yq >/dev/null 2>&1 || { echo "ERROR: yq is required but not found"; exit 1; }
+
+# Check files exist
+[[ -f "$PROFILE" ]] || { echo "ERROR: Profile not found: $PROFILE"; exit 1; }
+[[ -f "$SCHEMA" ]] || { echo "ERROR: Schema not found: $SCHEMA"; exit 1; }
+
+ERRORS=0
+WARNINGS=0
+err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
+warn() { echo "  WARN: $*" >&2; WARNINGS=$((WARNINGS + 1)); }
+ok() { echo "  OK: $*"; }
+
+echo "Validating tenant profile: $PROFILE"
+echo "Against schema: $SCHEMA"
+echo "────────────────────────────────────────"
+
+# ── Section: identity ──
+echo ""
+echo "Section: identity"
+if yq -e '.identity' "$PROFILE" >/dev/null 2>&1; then
+  # tenant_id
+  tid="$(yq -r '.identity.tenant_id // ""' "$PROFILE")"
+  if [[ -z "$tid" ]]; then
+    err "identity.tenant_id is required"
+  elif ! echo "$tid" | grep -qE '^[a-z][a-z0-9-]{2,63}$'; then
+    err "identity.tenant_id '$tid' does not match pattern ^[a-z][a-z0-9-]{2,63}$"
+  else
+    ok "identity.tenant_id: $tid"
+  fi
+
+  # owner
+  owner="$(yq -r '.identity.owner // ""' "$PROFILE")"
+  if [[ -z "$owner" ]]; then
+    err "identity.owner is required"
+  else
+    ok "identity.owner: $owner"
+  fi
+
+  # created_at
+  created="$(yq -r '.identity.created_at // ""' "$PROFILE")"
+  if [[ -z "$created" ]]; then
+    err "identity.created_at is required"
+  else
+    ok "identity.created_at: $created"
+  fi
+else
+  err "identity section is required"
+fi
+
+# ── Section: secrets ──
+echo ""
+echo "Section: secrets"
+if yq -e '.secrets' "$PROFILE" >/dev/null 2>&1; then
+  provider="$(yq -r '.secrets.provider // ""' "$PROFILE")"
+  if [[ -z "$provider" ]]; then
+    err "secrets.provider is required"
+  else
+    case "$provider" in
+      infisical|vault|env-file|none) ok "secrets.provider: $provider" ;;
+      *) err "secrets.provider '$provider' not in enum [infisical, vault, env-file, none]" ;;
+    esac
+    # If provider != none, api_url should be present
+    if [[ "$provider" != "none" ]]; then
+      api_url="$(yq -r '.secrets.api_url // ""' "$PROFILE")"
+      if [[ -z "$api_url" ]]; then
+        warn "secrets.api_url recommended when provider != none"
+      else
+        ok "secrets.api_url: $api_url"
+      fi
+    fi
+  fi
+
+  env="$(yq -r '.secrets.environment // ""' "$PROFILE")"
+  if [[ -z "$env" ]]; then
+    err "secrets.environment is required"
+  else
+    case "$env" in
+      prod|staging|dev) ok "secrets.environment: $env" ;;
+      *) err "secrets.environment '$env' not in enum [prod, staging, dev]" ;;
+    esac
+  fi
+else
+  err "secrets section is required"
+fi
+
+# ── Section: policy ──
+echo ""
+echo "Section: policy"
+if yq -e '.policy' "$PROFILE" >/dev/null 2>&1; then
+  preset="$(yq -r '.policy.preset // ""' "$PROFILE")"
+  if [[ -z "$preset" ]]; then
+    err "policy.preset is required"
+  else
+    case "$preset" in
+      strict|balanced|permissive) ok "policy.preset: $preset" ;;
+      *) err "policy.preset '$preset' not in enum [strict, balanced, permissive]" ;;
+    esac
+    # Cross-check against presets file
+    if [[ -f "$PRESETS" ]] && [[ -n "$preset" ]]; then
+      if yq -e ".presets.$preset" "$PRESETS" >/dev/null 2>&1; then
+        ok "policy.preset '$preset' exists in policy.presets.yaml"
+      else
+        err "policy.preset '$preset' not found in policy.presets.yaml"
+      fi
+    fi
+  fi
+else
+  err "policy section is required"
+fi
+
+# ── Section: runtime ──
+echo ""
+echo "Section: runtime"
+if yq -e '.runtime' "$PROFILE" >/dev/null 2>&1; then
+  spine_root="$(yq -r '.runtime.spine_root // ""' "$PROFILE")"
+  if [[ -z "$spine_root" ]]; then
+    err "runtime.spine_root is required"
+  elif [[ "$spine_root" != /* ]]; then
+    err "runtime.spine_root must be an absolute path (got: $spine_root)"
+  else
+    ok "runtime.spine_root: $spine_root"
+  fi
+
+  remote="$(yq -r '.runtime.git_remote_primary // ""' "$PROFILE")"
+  if [[ -z "$remote" ]]; then
+    err "runtime.git_remote_primary is required"
+  else
+    ok "runtime.git_remote_primary: $remote"
+  fi
+else
+  err "runtime section is required"
+fi
+
+# ── Section: surfaces ──
+echo ""
+echo "Section: surfaces"
+if yq -e '.surfaces' "$PROFILE" >/dev/null 2>&1; then
+  agent_count="$(yq -r '.surfaces.agents | length' "$PROFILE" 2>/dev/null || echo 0)"
+  if [[ "$agent_count" -eq 0 ]]; then
+    err "surfaces.agents must contain at least one entry"
+  else
+    ok "surfaces.agents: $agent_count agent(s) configured"
+  fi
+
+  slash="$(yq -r '.surfaces.slash_commands // ""' "$PROFILE")"
+  if [[ -z "$slash" ]]; then
+    err "surfaces.slash_commands is required (boolean)"
+  else
+    ok "surfaces.slash_commands: $slash"
+  fi
+else
+  err "surfaces section is required"
+fi
+
+# ── Section: evidence ──
+echo ""
+echo "Section: evidence"
+if yq -e '.evidence' "$PROFILE" >/dev/null 2>&1; then
+  receipts="$(yq -r '.evidence.receipts_enabled // ""' "$PROFILE")"
+  if [[ -z "$receipts" ]]; then
+    err "evidence.receipts_enabled is required"
+  else
+    ok "evidence.receipts_enabled: $receipts"
+    if [[ "$receipts" != "true" ]]; then
+      warn "evidence.receipts_enabled should be true for production"
+    fi
+  fi
+
+  ledger="$(yq -r '.evidence.ledger_path // ""' "$PROFILE")"
+  if [[ -z "$ledger" ]]; then
+    err "evidence.ledger_path is required"
+  else
+    ok "evidence.ledger_path: $ledger"
+  fi
+
+  sla="$(yq -r '.evidence.session_closeout_sla_hours // ""' "$PROFILE")"
+  if [[ -z "$sla" ]]; then
+    err "evidence.session_closeout_sla_hours is required"
+  else
+    ok "evidence.session_closeout_sla_hours: $sla"
+  fi
+else
+  err "evidence section is required"
+fi
+
+# ── Summary ──
+echo ""
+echo "════════════════════════════════════════"
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "VALIDATION FAILED: $ERRORS error(s), $WARNINGS warning(s)"
+  exit 1
+else
+  echo "VALIDATION PASSED: 0 errors, $WARNINGS warning(s)"
+  exit 0
+fi
