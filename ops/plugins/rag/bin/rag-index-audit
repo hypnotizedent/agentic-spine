@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# rag-index-audit — Compare indexed docs against eligible, identify stale entries.
+# Usage: ./bin/ops cap run secrets.exec -- ./ops/plugins/rag/bin/rag-index-audit
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_REPO:-$HOME/code/agentic-spine}"
+API_KEY="${ANYTHINGLLM_API_KEY:-}"
+API_URL="${ANYTHINGLLM_URL:-http://100.71.17.29:3002}"
+WORKSPACE="${RAG_WORKSPACE_SLUG:-agentic-spine}"
+
+if [[ -z "$API_KEY" ]]; then
+  echo "FATAL: ANYTHINGLLM_API_KEY not set. Run via secrets.exec." >&2
+  exit 2
+fi
+
+echo "=== RAG Index Audit ==="
+echo "api_url: $API_URL"
+echo "workspace: $WORKSPACE"
+echo ""
+
+# Get indexed document names from AnythingLLM
+indexed_json="$(curl -s \
+  -H "Authorization: Bearer $API_KEY" \
+  "${API_URL}/api/v1/workspace/${WORKSPACE}")"
+
+# Extract document titles/paths
+python3 - "$indexed_json" "$SPINE_ROOT" <<'PYEOF'
+import json, sys, os, subprocess
+
+raw = sys.argv[1]
+spine_root = sys.argv[2]
+
+data = json.loads(raw)
+ws = data.get("workspace", data)
+if isinstance(ws, list):
+    ws = ws[0]
+docs = ws.get("documents", [])
+
+# Build set of indexed document paths
+indexed = set()
+indexed_raw = []
+for d in docs:
+    # AnythingLLM stores docs with titles like "custom-documents/FILENAME.md-HASH.json"
+    title = d.get("title", d.get("name", ""))
+    docpath = d.get("docpath", "")
+    indexed_raw.append({"title": title, "docpath": docpath, "id": d.get("id", "")})
+    # Extract the original filename from the title
+    # Format: "custom-documents/FILENAME.md-HASH.json" -> "FILENAME.md"
+    name = title
+    if "/" in name:
+        name = name.split("/", 1)[1]
+    # Strip trailing hash+json: "FILENAME.md-abc123.json" -> "FILENAME.md"
+    if name.endswith(".json"):
+        name = name[:-5]  # strip .json
+        # Find the last dash followed by hex chars (the hash)
+        parts = name.rsplit("-", 1)
+        if len(parts) == 2 and len(parts[1]) >= 8:
+            name = parts[0]
+    indexed.add(name)
+
+# Build set of eligible docs (use the rag CLI's manifest logic — just list *.md)
+eligible = set()
+for root_dir in ["docs", "ops", "surfaces"]:
+    full_dir = os.path.join(spine_root, root_dir)
+    if not os.path.isdir(full_dir):
+        continue
+    for dirpath, dirnames, filenames in os.walk(full_dir):
+        # Skip excluded paths
+        rel_dir = os.path.relpath(dirpath, spine_root)
+        skip_prefixes = ["docs/legacy", "_audits", "_archived", "_imported",
+                         "receipts", "mailroom/state", "fixtures", ".git"]
+        skip = False
+        for p in skip_prefixes:
+            if rel_dir.startswith(p) or "/.archive" in rel_dir:
+                skip = True
+                break
+        if skip:
+            continue
+        for fn in filenames:
+            if fn.endswith(".md"):
+                rel_path = os.path.relpath(os.path.join(dirpath, fn), spine_root)
+                eligible.add(fn)
+
+# Compare
+stale_in_index = []
+for entry in indexed_raw:
+    title = entry["title"]
+    name = title
+    if "/" in name:
+        name = name.split("/", 1)[1]
+    if name.endswith(".json"):
+        name = name[:-5]
+        parts = name.rsplit("-", 1)
+        if len(parts) == 2 and len(parts[1]) >= 8:
+            name = parts[0]
+    if name not in eligible:
+        stale_in_index.append({"title": title, "name": name, "id": entry["id"]})
+
+# Count duplicates (same base name, multiple entries)
+from collections import Counter
+name_counts = Counter()
+for entry in indexed_raw:
+    title = entry["title"]
+    name = title
+    if "/" in name:
+        name = name.split("/", 1)[1]
+    if name.endswith(".json"):
+        name = name[:-5]
+        parts = name.rsplit("-", 1)
+        if len(parts) == 2 and len(parts[1]) >= 8:
+            name = parts[0]
+    name_counts[name] += 1
+
+duplicates = {k: v for k, v in name_counts.items() if v > 1}
+
+print(f"indexed_total: {len(docs)}")
+print(f"eligible_filenames: {len(eligible)}")
+print(f"stale_entries: {len(stale_in_index)}")
+print(f"duplicate_names: {len(duplicates)}")
+print()
+
+if stale_in_index:
+    print("=== Stale Entries (in index but not eligible) ===")
+    for s in sorted(stale_in_index, key=lambda x: x["name"]):
+        print(f"  {s['name']}  (title: {s['title']})")
+    print()
+
+if duplicates:
+    print("=== Duplicate Names (multiple index entries) ===")
+    for name, count in sorted(duplicates.items()):
+        print(f"  {name}: {count} entries")
+    print()
+
+total_excess = len(stale_in_index) + sum(v - 1 for v in duplicates.values())
+print(f"total_excess: {total_excess}")
+print(f"target_after_cleanup: {len(docs) - total_excess}")
+PYEOF

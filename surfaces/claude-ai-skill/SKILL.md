@@ -59,8 +59,8 @@ Hosted runtime egress allowlist:
      - pasted output from a trusted-device request to `/loops/open`.
 3. If either health check succeeds, request token if missing:
    - `X-Spine-Token: <token>` or `Authorization: Bearer <token>`
-   - Operator can retrieve it from trusted device:
-     - `cat ~/code/agentic-spine/mailroom/state/mailroom-bridge.token`
+   - Operator stores token in Vaultwarden; paste from password manager when prompted.
+   - Once provided, use it for all authenticated requests this session.
 4. Use the healthy base URL for all calls in this session.
 5. Read open loops:
    - `GET <base>/loops/open` (with auth header)
@@ -70,7 +70,12 @@ Hosted runtime egress allowlist:
 7. Run allowlisted read-only caps:
    - `POST <base>/cap/run`
    - JSON body: `{"capability":"gaps.status"}`
-8. For mutations, draft governed artifacts and hand off to Desktop.
+   - AOF status: `{"capability":"aof.status","args":["--json"]}`
+   - AOF verify: `{"capability":"aof.verify","args":["--json"]}`
+   - Response schema: `{"capability":"...","status":"done","exit_code":0,"output":"...","receipt":"...","run_key":"..."}`
+   - AOF `output` field is a JSON envelope: `{"capability":"...","schema_version":"...","status":"...","data":{...}}`
+8. RBAC: operator token gets all caps, monitor token gets status/version only.
+9. For mutations, draft governed artifacts and hand off to Desktop.
 
 Never hardcode tokens. Never silently skip auth.
 
