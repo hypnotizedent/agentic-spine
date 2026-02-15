@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-AOF-POLICY-KNOBS-PHASE-B-20260215
 created: 2026-02-15
-status: open
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Wire remaining 6 policy knobs from contract into runtime enforcement paths
@@ -51,3 +51,44 @@ in policy.presets.yaml and policy.runtime.contract.yaml but produce no runtime e
 - Governed flow only (gaps.file/claim/close, receipts, verify)
 - No destructive shortcuts
 - Keep working tree clean except intentional changes
+
+## Evidence
+
+All 6 child gaps closed. Acceptance criteria met:
+
+| Criterion | Result |
+|-----------|--------|
+| All 6 knobs wired in resolve-policy.sh | PASS (10/10 exported) |
+| policy.runtime.contract.yaml all wired=true | PASS (10/10) |
+| Tests for each knob enforcement | PASS (7 resolver + 9 enforcement = 16/16) |
+| policy.runtime.audit 100% coverage | PASS (10 wired, 0 unwired) |
+| spine.verify PASS | PASS (D1-D99 all pass) |
+| All 6 gaps closed | PASS |
+
+### Gap Transitions
+
+| Gap | Status | Fixed In |
+|-----|--------|----------|
+| GAP-OP-354 | fixed | 9f16ce4 |
+| GAP-OP-355 | fixed | 9f16ce4 |
+| GAP-OP-356 | fixed | 9f16ce4 |
+| GAP-OP-357 | fixed | 9f16ce4 |
+| GAP-OP-358 | fixed | 9f16ce4 |
+| GAP-OP-359 | fixed | 9f16ce4 |
+
+### Enforcement Table
+
+| Knob | Wired In | Validates Via |
+|------|----------|---------------|
+| stale_ssot_max_days | drift-gate.sh (D58) | SSOT_FRESHNESS_DAYS from RESOLVED_STALE_SSOT_MAX_DAYS |
+| gap_auto_claim | gaps-file | claim_gap() after filing when true |
+| proposal_required | cap.sh | Blocks mutating caps when true |
+| receipt_retention_days | evidence-export-plan | Overrides session_receipts retention |
+| commit_sign_required | .githooks/pre-commit | Blocks unsigned commits when true |
+| multi_agent_writes | cap.sh + .githooks/pre-commit | Blocks direct writes when proposal-only |
+
+### Completion
+
+- Loop closed: 2026-02-15
+- Implementation commit: 9f16ce4
+- Note: Implementation changes were swept into 9f16ce4 by concurrent gaps.file from another terminal (multi-agent collision)
