@@ -36,6 +36,7 @@ scope: mailroom-bridge
 ## Configuration (SSOT)
 
 - Binding: `ops/bindings/mailroom.bridge.yaml`
+- Endpoint policy binding: `ops/bindings/mailroom.bridge.endpoints.yaml`
 - Defaults:
   - host: `127.0.0.1`
   - port: `8799`
@@ -58,7 +59,7 @@ Supported headers:
 - `Authorization: Bearer <token>`
 - `X-Spine-Token: <token>` (useful for n8n/webhooks)
 
-**Requirement:** if this is exposed via tailnet/reverse proxy, token auth must be enforced.
+**Requirement:** if this is exposed via tailnet/reverse proxy/public tunnel, token auth must be enforced.
 
 ---
 
@@ -149,6 +150,64 @@ Response (example):
 }
 ```
 
+#### AOF Consumer Examples
+
+All AOF operator caps are read-only and allowlisted for bridge RPC.
+Pass `--json` in `args` to get structured JSON output.
+
+**aof.status** — health summary (contract state, gates, caps, policy):
+```json
+{
+  "capability": "aof.status",
+  "args": ["--json"]
+}
+```
+
+Response `output` is a JSON envelope:
+```json
+{
+  "capability": "aof.status",
+  "schema_version": "1.0",
+  "status": "ok",
+  "generated_at": "2026-02-15T...",
+  "data": {
+    "contract": { "read": true, "ack": true },
+    "policy": { "preset": "balanced", "knobs": 10 },
+    "counts": { "gates": 114, "capabilities": 260, "gaps_open": 0 },
+    "tenant": { "loaded": true }
+  }
+}
+```
+
+**aof.version** — version info (git, contract, schema, presets, gates, caps):
+```json
+{ "capability": "aof.version", "args": ["--json"] }
+```
+
+**aof.policy.show** — active policy preset and all 10 knob values:
+```json
+{ "capability": "aof.policy.show", "args": ["--json"] }
+```
+
+**aof.tenant.show** — tenant profile (identity, secrets, policy, runtime, surfaces):
+```json
+{ "capability": "aof.tenant.show", "args": ["--json"] }
+```
+
+**aof.verify** — run AOF product gates (D91-D97) and return pass/fail summary:
+```json
+{ "capability": "aof.verify", "args": ["--json"] }
+```
+
+RBAC scoping:
+- **operator** token: all 5 AOF caps
+- **monitor** token: `aof.status` and `aof.version` only
+
+JSON contract: all AOF caps return a stable envelope with keys
+`capability`, `schema_version`, `status`, `generated_at`, `data`.
+The `data` object varies per capability. See `aof-json-contract-test.sh`
+for the full schema validation.
+
 ### `POST /rag/ask` (auth required)
 
 Body (JSON):
@@ -207,16 +266,34 @@ Template workflow export (import into n8n):
 - `fixtures/n8n/Spine_-_Mailroom_Enqueue.json`
 
 Recommended n8n env vars:
-- `SPINE_MAILROOM_BRIDGE_URL` (example: `http://macbook.taile9480.ts.net`)
+- `SPINE_MAILROOM_BRIDGE_URL` (example: `https://<public-bridge-host>`; fallback: `http://macbook.taile9480.ts.net`)
 - `MAILROOM_BRIDGE_TOKEN`
 
 ---
 
-## Tailnet Exposure (Canonical iPhone + n8n Path)
+## Remote Exposure Modes
 
-The supported remote path is **tailnet-only** exposure via Tailscale Serve.
+Bridge runtime remains localhost-bound; exposure mode is selected at the network edge.
 
-This keeps the bridge bound to localhost while still giving iPhone + n8n a stable URL.
+### Mode A: Tailnet HTTP (Tailscale Serve)
+
+Canonical for trusted-device access:
+- `mailroom.bridge.expose.enable` configures tailnet HTTP forwarding.
+- URL pattern: `http://<tailscale-dns-name>`
+- Best for private device-to-device flows.
+
+### Mode B: Public HTTPS (Cloudflare Tunnel)
+
+Canonical for hosted runtimes (Claude iOS/claude.ai cloud execution):
+- Public hostname terminates TLS at Cloudflare and forwards to localhost bridge.
+- URL pattern: `https://<public-bridge-host>`
+- Must preserve bridge token auth for all non-health endpoints.
+- Recommended auth-in-depth: Cloudflare Access policy + bridge token header.
+
+Use `ops/bindings/mailroom.bridge.endpoints.yaml` to document:
+- public URL (if configured)
+- tailnet URL
+- preferred remote order (`public_https` then `tailnet_http`)
 
 1. Start the bridge (governed):
 
@@ -243,9 +320,10 @@ Notes:
 
 ---
 
-## iPhone Access (Two Safe Options)
+## iPhone Access (Three Safe Options)
 
-1. **Tailnet-only:** keep binding on `127.0.0.1` and expose it via a tailnet-only mechanism (preferred).
-2. **SSH tunnel:** use a mobile SSH client capable of local port forwarding (still requires a token if enabled).
+1. **Public HTTPS (recommended for hosted runtime compatibility):** Cloudflare Tunnel hostname with strict auth.
+2. **Tailnet-only:** keep binding on `127.0.0.1` and expose it via Tailscale Serve.
+3. **SSH tunnel:** use a mobile SSH client capable of local port forwarding (still requires a token if enabled).
 
-Do not expose this service directly to the public internet.
+Do not expose this service anonymously on the public internet.
