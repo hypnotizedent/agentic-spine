@@ -840,6 +840,14 @@ else
   warn "RAG reindex quality contract lock gate not present"
 fi
 
+# D90: RAG reindex runtime quality gate
+echo -n "D90 RAG reindex runtime quality gate... "
+if [[ -x "$SP/surfaces/verify/d90-rag-reindex-runtime-quality-gate.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d90-rag-reindex-runtime-quality-gate.sh"
+else
+  warn "RAG reindex runtime quality gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

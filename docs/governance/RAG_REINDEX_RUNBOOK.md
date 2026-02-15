@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-14
+last_verified: 2026-02-15
 scope: rag-reindex-runbook
 ---
 
@@ -59,6 +59,7 @@ Remote execution is governed by:
 - `ops/bindings/rag.reindex.quality.yaml`
 - `surfaces/verify/d88-rag-remote-reindex-governance-lock.sh`
 - `surfaces/verify/d89-rag-reindex-quality-contract-lock.sh`
+- `surfaces/verify/d90-rag-reindex-runtime-quality-gate.sh`
 
 ### Step 1: Dry-Run Manifest
 
@@ -155,6 +156,83 @@ After successful reindex, record metrics:
 | Timeout storms (HTTP 000) | Run `rag.remote.dependency.probe` to check VM207 dependencies; may be embedding/processing bottleneck |
 | Verify fails with failed uploads | Resume sync; if persistent, check AnythingLLM container logs |
 | Verify fails with session running | Wait for completion or stop session manually |
+
+## Operator Decision Tree
+
+When `spine.verify` fails on D90 or `rag.reindex.remote.verify` fails:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    D90 FAILS / VERIFY FAILS                      │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+               ┌──────────────────────────────┐
+               │ Is rag_sync session RUNNING? │
+               └──────────────────────────────┘
+                     │                │
+                    YES               NO
+                     │                │
+                     ▼                ▼
+        ┌──────────────────┐  ┌────────────────────────┐
+        │ PASS - Reindex   │  │ CHECK QUALITY GATES:   │
+        │ in progress      │  │ • Failed uploads > 0?  │
+        │ (not gated)      │  │ • Checkpoint present?  │
+        └──────────────────┘  │ • Inflation exceeded?  │
+                              └────────────────────────┘
+                                       │
+                           ┌───────────┴───────────┐
+                           │                       │
+                        ANY FAIL                 ALL PASS
+                           │                       │
+                           ▼                       ▼
+              ┌────────────────────────┐  ┌─────────────────┐
+              │ INTERVENTION REQUIRED: │  │ PASS - Clean    │
+              │                        │  │ completion      │
+              │ 1. Check dependency    │  └─────────────────┘
+              │    probe for bottlenecks│
+              │ 2. Review log for       │
+              │    timeout patterns     │
+              │ 3. Resume or restart    │
+              │    sync as needed       │
+              └────────────────────────┘
+```
+
+### Timeout Storm Response
+
+If `rag.reindex.remote.status` shows repeated HTTP 000 timeouts:
+
+1. **Run dependency probe:**
+   ```
+   ./bin/ops cap run rag.remote.dependency.probe
+   ```
+   Check if Ollama embedding endpoint is slow/unreachable.
+
+2. **Check Ollama on remote host (btrfs):**
+   ```
+   ssh ubuntu@100.98.70.70 "curl -s http://localhost:11434/api/ps"
+   ```
+   Verify embedding model is loaded.
+
+3. **Check AnythingLLM container logs:**
+   ```
+   ssh ubuntu@ai-consolidation "sudo docker logs ai-consolidation-anythingllm-1 --tail 50"
+   ```
+
+4. **Resume sync after bottleneck resolved:**
+   ```
+   ./bin/ops cap run rag.reindex.remote.start --execute --resume
+   ```
+
+### Incident Response Flow
+
+For repeated timeouts that persist after dependency checks:
+
+1. Stop the sync session
+2. Clear checkpoint file
+3. Investigate Ollama resource saturation (GPU/memory)
+4. Consider reducing batch size or adding delay between uploads
+5. Restart sync with `--resume` once root cause addressed
 
 ## Frequency
 
