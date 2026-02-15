@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# host.streamdeck.snapshot — Snapshot Stream Deck HA controller config for version control
+
+RUNTIME_DIR="$HOME/code/workbench/runtime/streamdeck"
+TRACKED_DIR="$HOME/code/workbench/infra/streamdeck"
+
+echo "host.streamdeck.snapshot"
+echo
+
+# Verify source exists
+if [[ ! -f "$RUNTIME_DIR/config.json" ]]; then
+  echo "STOP (2): no config.json at $RUNTIME_DIR"
+  exit 2
+fi
+
+# Validate JSON
+if ! python3 -m json.tool "$RUNTIME_DIR/config.json" >/dev/null 2>&1; then
+  echo "FAIL: config.json is not valid JSON"
+  exit 1
+fi
+
+# Create tracked directory
+mkdir -p "$TRACKED_DIR"
+
+# Copy files
+for f in config.json streamdeck_ha_controller.py requirements.txt run.sh; do
+  if [[ -f "$RUNTIME_DIR/$f" ]]; then
+    cp "$RUNTIME_DIR/$f" "$TRACKED_DIR/$f"
+    echo "  copied: $f"
+  fi
+done
+
+# Report
+BUTTONS=$(python3 -c "import json; d=json.load(open('$TRACKED_DIR/config.json')); print(len(d.get('buttons',[])))")
+echo
+echo "status: OK"
+echo "buttons: $BUTTONS"
+echo "tracked_dir: $TRACKED_DIR"

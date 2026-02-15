@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# home.health.alert — Run health probes and send HA persistent notification on failure
+# TRIAGE: Check HA_API_TOKEN in Infisical, verify Tailscale connectivity to 100.67.120.1
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+HA_URL="http://100.67.120.1:8123"
+
+echo "home.health.alert"
+echo ""
+
+# --- Load HA token from Infisical ---
+HA_TOKEN=""
+HA_TOKEN=$(infisical secrets get HA_API_TOKEN --path /home-assistant --env prod --plain 2>/dev/null || true)
+if [[ -z "$HA_TOKEN" ]]; then
+  echo "WARN: HA_API_TOKEN unavailable -- running probe-only (no alerting)"
+fi
+
+# --- Run health probes ---
+PROBE_OUTPUT=""
+PROBE_OUTPUT=$("$SPINE_ROOT/ops/plugins/home/bin/home-health-check" 2>&1 || true)
+echo "$PROBE_OUTPUT"
+echo ""
+
+# --- Check for failures ---
+FAILURES=""
+FAILURES=$(echo "$PROBE_OUTPUT" | grep "FAIL" || true)
+
+if [[ -z "$FAILURES" ]]; then
+  echo "status: OK (all probes passed)"
+  exit 0
+fi
+
+FAIL_COUNT=$(echo "$FAILURES" | wc -l | tr -d ' ')
+echo "status: ALERT ($FAIL_COUNT failure(s) detected)"
+echo ""
+
+# --- Send HA persistent notification if token available ---
+if [[ -n "$HA_TOKEN" ]]; then
+  # Build JSON-safe message (escape newlines and quotes)
+  TIMESTAMP=$(date '+%Y-%m-%d %H:%M')
+  NOTIFICATION_ID="spine_health_$(date +%Y%m%d%H%M)"
+
+  # Build message body line by line for JSON safety
+  ALERT_LINES=""
+  while IFS= read -r line; do
+    # Escape any double quotes in the line
+    escaped=$(printf '%s' "$line" | sed 's/"/\\"/g')
+    if [[ -n "$ALERT_LINES" ]]; then
+      ALERT_LINES="${ALERT_LINES}\\n${escaped}"
+    else
+      ALERT_LINES="${escaped}"
+    fi
+  done <<< "$FAILURES"
+
+  JSON_BODY=$(printf '{"title":"Spine Health Alert","message":"Spine Health Alert (%s):\\n\\n%s","notification_id":"%s"}' \
+    "$TIMESTAMP" "$ALERT_LINES" "$NOTIFICATION_ID")
+
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 10 \
+    -X POST "${HA_URL}/api/services/persistent_notification/create" \
+    -H "Authorization: Bearer $HA_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$JSON_BODY" 2>/dev/null || echo "000")
+
+  if [[ "$HTTP_CODE" == "200" ]]; then
+    echo "HA notification sent (persistent_notification.create)"
+  else
+    echo "WARN: HA notification failed (HTTP $HTTP_CODE)"
+  fi
+else
+  echo "SKIP: no HA token for notification delivery"
+fi
+
+exit 1

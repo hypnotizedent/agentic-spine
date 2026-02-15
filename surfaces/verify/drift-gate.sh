@@ -949,6 +949,22 @@ else
   warn "HA addon inventory gate not present"
 fi
 
+# D102: HA device map freshness
+echo -n "D102 HA device map freshness... "
+if [[ -x "$SP/surfaces/verify/d102-ha-device-map-freshness.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d102-ha-device-map-freshness.sh"
+else
+  warn "HA device map gate not present"
+fi
+
+# D103: Stream Deck config lock
+echo -n "D103 Stream Deck config lock... "
+if [[ -x "$SP/surfaces/verify/d103-streamdeck-config-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d103-streamdeck-config-lock.sh"
+else
+  warn "Stream Deck config gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

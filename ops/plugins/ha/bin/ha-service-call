@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.service.call — Scoped HA service call via REST API (Tailscale direct)
+# Requires: Infisical CLI with HA_API_TOKEN at /home-assistant
+# Safety: mutating (calls HA service endpoints)
+# Domain allowlist: light, scene, lock, script, switch, automation
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOMAIN ALLOWLIST
+# ─────────────────────────────────────────────────────────────────────────────
+
+ALLOWED_DOMAINS="light scene lock script switch automation"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ARGUMENT PARSING
+# ─────────────────────────────────────────────────────────────────────────────
+
+DOMAIN=""
+SERVICE=""
+ENTITY=""
+DATA="{}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --domain)  DOMAIN="$2";  shift 2 ;;
+    --service) SERVICE="$2"; shift 2 ;;
+    --entity)  ENTITY="$2";  shift 2 ;;
+    --data)    DATA="$2";    shift 2 ;;
+    *)
+      echo "ha.service.call: unknown arg: $1"
+      echo "usage: ha-service-call --domain <domain> --service <service> --entity <entity_id> [--data '{...}']"
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$DOMAIN" || -z "$SERVICE" ]]; then
+  echo "ha.service.call"
+  echo
+  echo "usage: ha-service-call --domain <domain> --service <service> --entity <entity_id> [--data '{...}']"
+  echo "allowed domains: $ALLOWED_DOMAINS"
+  exit 1
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DOMAIN ALLOWLIST CHECK
+# ─────────────────────────────────────────────────────────────────────────────
+
+DOMAIN_OK=false
+for d in $ALLOWED_DOMAINS; do
+  if [[ "$d" == "$DOMAIN" ]]; then
+    DOMAIN_OK=true
+    break
+  fi
+done
+
+if [[ "$DOMAIN_OK" != "true" ]]; then
+  echo "ha.service.call"
+  echo
+  echo "status: BLOCKED"
+  echo "reason: domain_not_allowed"
+  echo "domain: $DOMAIN"
+  echo "allowed: $ALLOWED_DOMAINS"
+  exit 1
+fi
+
+echo "ha.service.call"
+echo "  domain:  $DOMAIN"
+echo "  service: $SERVICE"
+echo "  entity:  ${ENTITY:-<none>}"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRECONDITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+command -v curl >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_curl"; exit 2; }
+command -v jq >/dev/null 2>&1  || { echo "status: STOP"; echo "reason: missing_dep_jq"; exit 2; }
+
+if ! command -v infisical >/dev/null 2>&1; then
+  echo "status: STOP"
+  echo "reason: missing_dep_infisical"
+  echo "fix: install Infisical CLI"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FETCH HA_API_TOKEN FROM INFISICAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+set +e
+HA_TOKEN="$(infisical secrets get HA_API_TOKEN --path /home-assistant --env prod --plain 2>/dev/null)"
+infisical_rc=$?
+set -e
+
+if [[ "$infisical_rc" -ne 0 || -z "${HA_TOKEN:-}" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_token_unavailable"
+  echo "fix: check Infisical auth (secrets.auth.load) and HA_API_TOKEN at /home-assistant"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUILD PAYLOAD
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ -n "$ENTITY" ]]; then
+  # Merge entity_id into the data payload
+  PAYLOAD="$(echo "$DATA" | jq -c --arg eid "$ENTITY" '. + {entity_id: $eid}')"
+else
+  PAYLOAD="$DATA"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CALL HA REST API
+# ─────────────────────────────────────────────────────────────────────────────
+
+HA_BASE="http://100.67.120.1:8123"
+URL="${HA_BASE}/api/services/${DOMAIN}/${SERVICE}"
+
+set +e
+RESPONSE="$(curl -s --max-time 15 -w '\n%{http_code}' -X POST "$URL" \
+  -H "Authorization: Bearer $HA_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$PAYLOAD" 2>/dev/null)"
+curl_rc=$?
+set -e
+
+if [[ "$curl_rc" -ne 0 || -z "${RESPONSE:-}" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_api_unreachable"
+  echo "fix: check Tailscale connectivity to HA (100.67.120.1)"
+  exit 1
+fi
+
+HTTP_CODE="$(echo "$RESPONSE" | tail -n1)"
+BODY="$(echo "$RESPONSE" | sed '$d')"
+
+if [[ "$HTTP_CODE" == "401" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_api_auth_failed"
+  echo "fix: HA_API_TOKEN in Infisical may be expired or invalid"
+  exit 1
+fi
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_api_error"
+  echo "http_code: $HTTP_CODE"
+  echo "response: $BODY"
+  exit 1
+fi
+
+echo "status: OK"
+echo "http_code: $HTTP_CODE"
+
+# Show response if non-empty array
+if [[ -n "$BODY" ]] && echo "$BODY" | jq -e 'length > 0' >/dev/null 2>&1; then
+  echo "affected_entities:"
+  echo "$BODY" | jq -r '.[] | .entity_id // empty' 2>/dev/null | while read -r eid; do
+    echo "  - $eid"
+  done
+fi

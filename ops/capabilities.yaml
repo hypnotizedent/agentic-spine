@@ -1444,6 +1444,80 @@ capabilities:
     requires: []
     outputs: ["stdout"]
 
+  ha.device.map.build:
+    description: "Read-only: cross-reference HA entities with home device registry and Z2M devices to ops/bindings/ha.device.map.yaml."
+    tags: [ha, devices, cross-reference]
+    command: "./ops/plugins/ha/bin/ha-device-map-build"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # HOME ASSISTANT (scoped service calls)
+  # ─────────────────────────────────────────────────────────────────────────
+
+  ha.service.call:
+    description: "Scoped HA service call via REST API — base for domain-specific wrappers"
+    tags: [ha, service-calls, api]
+    command: "./ops/plugins/ha/bin/ha-service-call"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+
+  ha.scene.activate:
+    description: "Activate a Home Assistant scene (idempotent preset)"
+    tags: [ha, service-calls, scene]
+    command: "./ops/plugins/ha/bin/ha-scene-activate"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+
+  ha.light.toggle:
+    description: "Toggle a Home Assistant light entity on/off"
+    tags: [ha, service-calls, light]
+    command: "./ops/plugins/ha/bin/ha-light-toggle"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+
+  ha.lock.control:
+    description: "Lock or unlock a Home Assistant lock entity (physical security — manual approval)"
+    tags: [ha, service-calls, lock, security]
+    command: "./ops/plugins/ha/bin/ha-lock-control"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+
   # ─────────────────────────────────────────────────────────────────────────
   # MEDIA (media stack governance)
   # ─────────────────────────────────────────────────────────────────────────
@@ -1519,10 +1593,10 @@ capabilities:
   # When ready, replace deny entry with real capabilities.
   # ─────────────────────────────────────────────────────────────────────────
 
-  # home-assistant: ha_call_service blocked in MCP P2
-  # Deny reason: arbitrary HA service calls need scoped capability design
-  #   (e.g., ha.light.toggle, ha.automation.trigger) rather than one
-  #   pass-through. Read-only: ha.ssot.propose/apply exist above.
+  # home-assistant: ha_call_service remains blocked in MCP P2
+  # Scoped capabilities now exist: ha.service.call, ha.scene.activate,
+  #   ha.light.toggle, ha.lock.control (GAP-OP-339). MCP pass-through
+  #   still blocked — agents must use scoped caps via ops cap run.
 
   # mint-os: 5 tools blocked (send_order_email, post_production_update,
   #   update_order_customer, ss_place_order, sanmar_place_order)
@@ -2238,6 +2312,16 @@ capabilities:
     lifecycle: ready
     outputs: ["stdout"]
 
+  host.streamdeck.snapshot:
+    description: "Snapshot Stream Deck HA controller config to tracked workbench location"
+    tags: [host, streamdeck, config]
+    command: "./ops/plugins/host/bin/host-streamdeck-snapshot"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+
   # ─────────────────────────────────────────────────────────────────────────
   # DOCS (workbench infrastructure extraction tracking)
   # ─────────────────────────────────────────────────────────────────────────
@@ -2660,6 +2744,20 @@ capabilities:
     safety: read-only
     approval: auto
     lifecycle: ready
+    outputs: ["stdout"]
+
+  home.health.alert:
+    description: "Run home health probes and send HA persistent notification on failure"
+    tags: [home, health, alerting]
+    command: "./ops/plugins/home/bin/home-health-alert"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
     outputs: ["stdout"]
 
   # ─────────────────────────────────────────────────────────────────────────
