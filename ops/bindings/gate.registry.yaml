@@ -1,9 +1,9 @@
 schema_version: '1.0'
 updated: '2026-02-15'
-description: Canonical gate registry for D1-D105 drift surface. Source of truth for gate metadata.
+description: Canonical gate registry for D1-D111 drift surface. Source of truth for gate metadata.
 gate_count:
-  total: 105
-  active: 104
+  total: 111
+  active: 110
   retired: 1
 categories:
 - id: path-hygiene
@@ -26,6 +26,8 @@ categories:
   description: Agent entry and discovery surfaces
 - id: process-hygiene
   description: Operational processes and metadata
+- id: media-hygiene
+  description: Media stack service and infrastructure checks
 - id: retired
   description: Retired/reserved gate slots
 gates:
@@ -811,3 +813,51 @@ gates:
   severity: low
   check_script: surfaces/verify/d105-ha-mcp-governance-lock.sh
   fix_hint: Run ha.mcp.status to diagnose. Check GOVERNED_TOOLS in MCP source and HASS_MCP_INTEGRATION.md.
+
+- id: D106
+  name: media-port-collision-lock
+  category: media-hygiene
+  description: No duplicate ports across media VMs (download-stack, streaming-stack)
+  severity: high
+  check_script: surfaces/verify/d106-media-port-collision-lock.sh
+  fix_hint: Review ops/bindings/media.services.yaml ports section. Ensure no duplicate ports within each VM.
+
+- id: D107
+  name: media-nfs-mount-lock
+  category: media-hygiene
+  description: Both media VMs can reach pve:/media with correct mount modes (RW/RO)
+  severity: high
+  check_script: surfaces/verify/d107-media-nfs-mount-lock.sh
+  fix_hint: Check NFS mount on VMs. download-stack needs RW, streaming-stack needs RO. Verify /etc/fstab entries.
+
+- id: D108
+  name: media-health-endpoint-parity-lock
+  category: media-hygiene
+  description: Every active media service with health endpoint responds HTTP 200
+  severity: medium
+  check_script: surfaces/verify/d108-media-health-endpoint-parity-lock.sh
+  fix_hint: Check service health endpoints. Run media.health.check for detailed diagnostics.
+
+- id: D109
+  name: media-compose-config-match-lock
+  category: media-hygiene
+  description: Live containers match services declared in media.services.yaml
+  severity: medium
+  check_script: surfaces/verify/d109-media-compose-config-match-lock.sh
+  fix_hint: Review ops/bindings/media.services.yaml status fields. Update parked/stopped services or start missing containers.
+
+- id: D110
+  name: media-ha-duplicate-audit-lock
+  category: media-hygiene
+  description: HA add-ons duplicating shop services are flagged for review
+  severity: low
+  check_script: surfaces/verify/d110-media-ha-duplicate-audit-lock.sh
+  fix_hint: Review ha_overlaps section in media.services.yaml. Decommission or justify HA add-ons duplicating shop services.
+
+- id: D111
+  name: rag-embedding-smoke-preflight
+  category: doc-hygiene
+  description: Recent successful smoke test required before full RAG reindex authorization
+  severity: high
+  check_script: surfaces/verify/d111-rag-embedding-smoke-preflight.sh
+  fix_hint: Run rag.reindex.smoke --execute to generate fresh smoke evidence. Gate validates uploaded>0, failed=0, and <24h freshness.

@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# media.stack.restart — Restart docker compose stacks on media VMs
+#
+# Usage:
+#   ./bin/ops cap run media.stack.restart
+#   ./bin/ops cap run media.stack.restart --vm download-stack
+#   ./bin/ops cap run media.stack.restart --vm streaming-stack
+#   ./bin/ops cap run media.stack.restart --dry-run
+#
+# Contract:
+# - Reads VM targets from ops/bindings/docker.compose.targets.yaml
+# - Executes: docker compose down && docker compose up -d
+# - Requires SSH access to target VMs
+# - Generates receipt with before/after container states
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+COMPOSE_BINDING="$ROOT/ops/bindings/docker.compose.targets.yaml"
+
+usage() {
+  cat <<'USAGE'
+media.stack.restart — Restart docker compose stacks on media VMs
+
+Args:
+  --vm HOST         Restart only this VM (download-stack|streaming-stack)
+  --dry-run         Show what would be done without executing
+  --timeout SEC     SSH connection timeout (default: 30)
+
+Examples:
+  ./bin/ops cap run media.stack.restart --vm download-stack
+  ./bin/ops cap run media.stack.restart --dry-run
+USAGE
+}
+
+VM_FILTER=""
+DRY_RUN=false
+TIMEOUT_SEC=30
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --vm)
+      VM_FILTER="${2:-}"; shift 2 ;;
+    --dry-run)
+      DRY_RUN=true; shift ;;
+    --timeout)
+      TIMEOUT_SEC="${2:-}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+# Media VMs only
+MEDIA_VMS=("download-stack" "streaming-stack")
+
+get_compose_path() {
+  local vm="$1"
+  yq -r ".targets[\"$vm\"].stacks[0].path // \"\"" "$COMPOSE_BINDING" 2>/dev/null || echo ""
+}
+
+restart_vm_stack() {
+  local vm="$1"
+  local compose_path
+
+  compose_path=$(get_compose_path "$vm")
+  if [[ -z "$compose_path" ]]; then
+    echo "FAIL: no compose path found for $vm"
+    return 1
+  fi
+
+  echo ""
+  echo "--- $vm ---"
+  echo "compose_path: $compose_path"
+
+  if $DRY_RUN; then
+    echo "DRY_RUN: would execute:"
+    echo "  ssh $vm 'cd $compose_path && docker compose down && docker compose up -d'"
+    return 0
+  fi
+
+  # Get before state
+  echo "BEFORE:"
+  ssh -o ConnectTimeout="$TIMEOUT_SEC" "$vm" "docker ps --format 'table {{.Names}}\t{{.Status}}'" 2>&1 || {
+    echo "FAIL: could not connect to $vm"
+    return 1
+  }
+
+  # Restart
+  echo ""
+  echo "RESTARTING..."
+  ssh -o ConnectTimeout="$TIMEOUT_SEC" "$vm" "cd $compose_path && docker compose down && docker compose up -d" 2>&1 || {
+    echo "FAIL: restart failed on $vm"
+    return 1
+  }
+
+  # Get after state
+  echo ""
+  echo "AFTER:"
+  ssh -o ConnectTimeout="$TIMEOUT_SEC" "$vm" "docker ps --format 'table {{.Names}}\t{{.Status}}'" 2>&1
+
+  return 0
+}
+
+echo "media.stack.restart"
+echo "==================="
+echo "vm_filter: ${VM_FILTER:-all}"
+echo "dry_run: $DRY_RUN"
+
+ERRORS=0
+
+for vm in "${MEDIA_VMS[@]}"; do
+  if [[ -n "$VM_FILTER" && "$vm" != "$VM_FILTER" ]]; then
+    continue
+  fi
+  restart_vm_stack "$vm" || ERRORS=$((ERRORS + 1))
+done
+
+if [[ $ERRORS -gt 0 ]]; then
+  echo ""
+  echo "FAIL: $ERRORS VM(s) had errors"
+  exit 1
+fi
+
+echo ""
+echo "OK: all requested VMs restarted"
+exit 0

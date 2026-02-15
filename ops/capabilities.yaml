@@ -744,6 +744,30 @@ capabilities:
     lifecycle: ready
     outputs: ["stdout"]
 
+  rag.embedding.probe:
+    description: "Probe embedding backend health — repeated embedding requests with dimension/latency/HTTP checks"
+    tags: [rag, embedding, health]
+    command: "./ops/plugins/rag/bin/rag-embedding-probe"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+
+  rag.reindex.smoke:
+    description: "Short-batch smoke test — upload N docs to validate embedding pipeline before full reindex"
+    tags: [rag, reindex, smoke]
+    command: "./ops/plugins/rag/bin/rag-reindex-smoke"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    touches_api: true
+    approval: manual
+    lifecycle: ready
+    outputs: ["stdout", "mailroom/state/rag-sync/smoke-evidence.json"]
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+
 
   secrets.status:
     description: "Check secrets configuration presence (no values, no network). Fails if not configured."
@@ -2292,6 +2316,56 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
       - secrets.projects.status
+    outputs: ["stdout"]
+
+  media.health.check:
+    description: "Aggregate health check across media-stack VMs (209/210) — probes health endpoints for all active services."
+    tags: [media, health]
+    command: "./ops/plugins/media/bin/media-health-check"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+
+  media.stack.restart:
+    description: "Restart docker compose stacks on media VMs (download-stack, streaming-stack). Dry-run by default."
+    tags: [media, docker]
+    command: "./ops/plugins/media/bin/media-stack-restart"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    outputs: ["stdout"]
+
+  media.backup.create:
+    description: "Create config volume snapshots for media services on both VMs. Retention: 7 days."
+    tags: [media, backup]
+    command: "./ops/plugins/media/bin/media-backup-create"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    outputs: ["stdout"]
+
+  media.service.status:
+    description: "Get container status for media services — maps container names to service status from binding."
+    tags: [media, docker, status]
+    command: "./ops/plugins/media/bin/media-service-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+
+  media.nfs.verify:
+    description: "Verify NFS mount health for media VMs — checks RW/RO modes and free space."
+    tags: [media, nfs, storage]
+    command: "./ops/plugins/media/bin/media-nfs-verify"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
     outputs: ["stdout"]
 
   backup.status:

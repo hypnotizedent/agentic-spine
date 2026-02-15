@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# media.health.check — Aggregate health check across media-stack VMs
+#
+# Usage:
+#   ./bin/ops cap run media.health.check
+#   ./bin/ops cap run media.health.check --vm download-stack
+#   ./bin/ops cap run media.health.check --vm streaming-stack
+#   ./bin/ops cap run media.health.check --json
+#
+# Contract:
+# - Reads services from ops/bindings/media.services.yaml
+# - Skips services with status: parked|stopped or health: null
+# - Returns aggregate status and per-service results
+# - Exit 0 if all healthy, exit 1 if any unhealthy, exit 2 on config error
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+BINDING="$ROOT/ops/bindings/media.services.yaml"
+
+usage() {
+  cat <<'USAGE'
+media.health.check — Aggregate health check across media-stack VMs
+
+Args:
+  --vm HOST         Check only this VM (download-stack|streaming-stack)
+  --json            Output JSON format
+  --timeout SEC     Per-service health timeout (default: 10)
+
+Examples:
+  ./bin/ops cap run media.health.check
+  ./bin/ops cap run media.health.check --vm download-stack --json
+USAGE
+}
+
+VM_FILTER=""
+OUTPUT_JSON=false
+TIMEOUT_SEC=10
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --vm)
+      VM_FILTER="${2:-}"; shift 2 ;;
+    --json)
+      OUTPUT_JSON=true; shift ;;
+    --timeout)
+      TIMEOUT_SEC="${2:-}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v curl >/dev/null 2>&1 || { echo "MISSING_DEP: curl" >&2; exit 2; }
+
+if [[ ! -f "$BINDING" ]]; then
+  echo "STOP: binding not found: $BINDING" >&2
+  exit 2
+fi
+
+# Load VM IPs from vm.lifecycle.yaml
+VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+
+get_vm_ip() {
+  local vm="$1"
+  yq -r ".vms[] | select(.hostname == \"$vm\") | .lan_ip // .tailscale_ip" "$VM_BINDING" 2>/dev/null || echo ""
+}
+
+# Health check for a single service
+check_service() {
+  local vm="$1"
+  local name="$2"
+  local port="$3"
+  local health_path="$4"
+  local status="$5"
+
+  # Skip parked/stopped services
+  if [[ "$status" == "parked" || "$status" == "stopped" ]]; then
+    echo "SKIP:$name:$vm:$status"
+    return 0
+  fi
+
+  # Skip services without health endpoint
+  if [[ "$health_path" == "null" || -z "$health_path" ]]; then
+    echo "NO_PROBE:$name:$vm:no-health-endpoint"
+    return 0
+  fi
+
+  local vm_ip
+  vm_ip=$(get_vm_ip "$vm")
+  if [[ -z "$vm_ip" ]]; then
+    echo "FAIL:$name:$vm:no-ip-found"
+    return 1
+  fi
+
+  local url="http://${vm_ip}:${port}${health_path}"
+
+  if curl -fsS --max-time "$TIMEOUT_SEC" "$url" >/dev/null 2>&1; then
+    echo "OK:$name:$vm:${port}${health_path}"
+    return 0
+  else
+    echo "FAIL:$name:$vm:${url}"
+    return 1
+  fi
+}
+
+# Collect services from binding
+collect_services() {
+  local filter='.services | to_entries[]'
+  if [[ -n "$VM_FILTER" ]]; then
+    filter=".services | to_entries[] | select(.value.vm == \"$VM_FILTER\")"
+  fi
+
+  yq -r "$filter | [.key, .value.vm, .value.port // \"null\", .value.health // \"null\", .value.status // \"active\"] | @tsv" "$BINDING" 2>/dev/null
+}
+
+# Main
+RESULTS=()
+HEALTHY=0
+UNHEALTHY=0
+SKIPPED=0
+NO_PROBE=0
+FAILED_SERVICES=()
+
+while IFS=$'\t' read -r name vm port health status; do
+  [[ -z "$name" ]] && continue
+
+  result=$(check_service "$vm" "$name" "$port" "$health" "$status")
+  RESULTS+=("$result")
+
+  code="${result%%:*}"
+  case "$code" in
+    OK)       HEALTHY=$((HEALTHY + 1)) ;;
+    FAIL)     UNHEALTHY=$((UNHEALTHY + 1)); FAILED_SERVICES+=("$result") ;;
+    SKIP)     SKIPPED=$((SKIPPED + 1)) ;;
+    NO_PROBE) NO_PROBE=$((NO_PROBE + 1)) ;;
+  esac
+done < <(collect_services)
+
+TOTAL=$((HEALTHY + UNHEALTHY + SKIPPED + NO_PROBE))
+
+if $OUTPUT_JSON; then
+  cat <<EOF
+{
+  "capability": "media.health.check",
+  "vm_filter": ${VM_FILTER:-null},
+  "summary": {
+    "total": $TOTAL,
+    "healthy": $HEALTHY,
+    "unhealthy": $UNHEALTHY,
+    "skipped": $SKIPPED,
+    "no_probe": $NO_PROBE
+  },
+  "failed": [$(printf '%s\n' "${FAILED_SERVICES[@]}" | sed 's/^/"/;s/$/"/' | tr '\n' ',' | sed 's/,$//')],
+  "results": [$(printf '%s\n' "${RESULTS[@]}" | sed 's/^/"/;s/$/"/' | tr '\n' ',' | sed 's/,$//')]
+}
+EOF
+else
+  echo "media.health.check"
+  echo "==================="
+  echo "total: $TOTAL | healthy: $HEALTHY | unhealthy: $UNHEALTHY | skipped: $SKIPPED | no_probe: $NO_PROBE"
+  echo ""
+  for r in "${RESULTS[@]}"; do
+    echo "  $r"
+  done
+
+  if [[ ${#FAILED_SERVICES[@]} -gt 0 ]]; then
+    echo ""
+    echo "FAILED SERVICES:"
+    for f in "${FAILED_SERVICES[@]}"; do
+      echo "  - $f"
+    done
+  fi
+fi
+
+# Exit code based on health
+if [[ $UNHEALTHY -gt 0 ]]; then
+  exit 1
+fi
+exit 0

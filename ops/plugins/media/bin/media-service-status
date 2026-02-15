@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# media.service.status — Get container status for media services
+#
+# Usage:
+#   ./bin/ops cap run media.service.status
+#   ./bin/ops cap run media.service.status --vm download-stack
+#   ./bin/ops cap run media.service.status --service radarr
+#   ./bin/ops cap run media.service.status --json
+#
+# Contract:
+# - Queries docker ps on media VMs
+# - Maps container names to service names from media.services.yaml
+# - Reports status: running|exited|missing
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd")
+SERVICE_BINDING="$ROOT/ops/bindings/media.services.yaml"
+
+usage() {
+  cat <<'USAGE'
+media.service.status — Get container status for media services
+
+Args:
+  --vm HOST         Check only this VM (download-stack|streaming-stack)
+  --service NAME    Check only this service
+  --json            Output JSON format
+
+Examples:
+  ./bin/ops cap run media.service.status --vm download-stack
+  ./bin/ops cap run media.service.status --service radarr --json
+USAGE
+}
+
+VM_FILTER=""
+SERVICE_FILTER=""
+OUTPUT_JSON=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --vm)
+      VM_FILTER="${2:-}"; shift 2 ;;
+    --service)
+      SERVICE_FILTER="${2:-}"; shift 2 ;;
+    --json)
+      OUTPUT_JSON=true; shift ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+MEDIA_VMS=("download-stack" "streaming-stack")
+
+get_vm_containers() {
+  local vm="$1"
+  ssh -o ConnectTimeout=10 "$vm" "docker ps -a --format '{{.Names}}\t{{.Status}}'" 2>/dev/null || echo ""
+}
+
+get_service_container() {
+  local service="$1"
+  yq -r ".services[\"$service\"].container // \"$service\"" "$SERVICE_BINDING" 2>/dev/null || echo "$service"
+}
+
+get_service_vm() {
+  local service="$1"
+  yq -r ".services[\"$service\"].vm // \"\"" "$SERVICE_BINDING" 2>/dev/null || echo ""
+}
+
+parse_status() {
+  local container_status="$1"
+  if [[ "$container_status" =~ ^Up ]]; then
+    echo "running"
+  elif [[ "$container_status" =~ ^Exited ]]; then
+    echo "exited"
+  elif [[ "$container_status" =~ ^Created ]]; then
+    echo "created"
+  else
+    echo "unknown"
+  fi
+}
+
+declare -A ALL_RESULTS
+
+for vm in "${MEDIA_VMS[@]}"; do
+  if [[ -n "$VM_FILTER" && "$vm" != "$VM_FILTER" ]]; then
+    continue
+  fi
+
+  # Get all containers on this VM
+  declare -A VM_CONTAINERS
+  while IFS=$'\t' read -r name status; do
+    [[ -z "$name" ]] && continue
+    VM_CONTAINERS["$name"]="$status"
+  done < <(get_vm_containers "$vm")
+
+  # Get services for this VM
+  services=$(yq -r ".services | to_entries[] | select(.value.vm == \"$vm\") | .key" "$SERVICE_BINDING" 2>/dev/null)
+
+  for service in $services; do
+    if [[ -n "$SERVICE_FILTER" && "$service" != "$SERVICE_FILTER" ]]; then
+      continue
+    fi
+
+    container=$(get_service_container "$service")
+
+    if [[ -n "${VM_CONTAINERS[$container]:-}" ]]; then
+      status=$(parse_status "${VM_CONTAINERS[$container]}")
+      ALL_RESULTS["$service"]="$vm:$status:${VM_CONTAINERS[$container]}"
+    else
+      ALL_RESULTS["$service"]="$vm:missing:container-not-found"
+    fi
+  done
+
+  unset VM_CONTAINERS
+done
+
+# Output
+if $OUTPUT_JSON; then
+  echo "{"
+  echo "  \"capability\": \"media.service.status\","
+  echo "  \"vm_filter\": ${VM_FILTER:-null},"
+  echo "  \"service_filter\": ${SERVICE_FILTER:-null},"
+  echo "  \"services\": {"
+  first=true
+  for service in "${!ALL_RESULTS[@]}"; do
+    if $first; then first=false; else echo ","; fi
+    IFS=':' read -r vm status detail <<< "${ALL_RESULTS[$service]}"
+    echo -n "    \"$service\": {\"vm\": \"$vm\", \"status\": \"$status\", \"detail\": \"$detail\"}"
+  done
+  echo ""
+  echo "  }"
+  echo "}"
+else
+  echo "media.service.status"
+  echo "===================="
+  printf "%-25s %-20s %-12s %s\n" "SERVICE" "VM" "STATUS" "DETAIL"
+  printf "%-25s %-20s %-12s %s\n" "-------" "--" "------" "------"
+
+  # Sort by VM then service
+  for vm in "${MEDIA_VMS[@]}"; do
+    for service in $(echo "${!ALL_RESULTS[@]}" | tr ' ' '\n' | sort); do
+      result="${ALL_RESULTS[$service]}"
+      if [[ "$result" == "$vm:"* ]]; then
+        IFS=':' read -r svm status detail <<< "$result"
+        printf "%-25s %-20s %-12s %s\n" "$service" "$svm" "$status" "$detail"
+      fi
+    done
+  done
+fi

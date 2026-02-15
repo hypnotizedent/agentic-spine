@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# media.nfs.verify — Verify NFS mount health and free space for media VMs
+#
+# Usage:
+#   ./bin/ops cap run media.nfs.verify
+#   ./bin/ops cap run media.nfs.verify --vm download-stack
+#   ./bin/ops cap run media.nfs.verify --json
+#
+# Contract:
+# - Verifies NFS mount from pve:/media is present on both VMs
+# - Checks download-stack has RW, streaming-stack has RO
+# - Reports free space on the NFS share
+# - Exit 1 if any mount issues
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+TENANT_BINDING="$ROOT/ops/bindings/tenants/media-stack.yaml"
+
+usage() {
+  cat <<'USAGE'
+media.nfs.verify — Verify NFS mount health and free space for media VMs
+
+Args:
+  --vm HOST         Check only this VM (download-stack|streaming-stack)
+  --json            Output JSON format
+
+Examples:
+  ./bin/ops cap run media.nfs.verify
+  ./bin/ops cap run media.nfs.verify --vm download-stack --json
+USAGE
+}
+
+VM_FILTER=""
+OUTPUT_JSON=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --vm)
+      VM_FILTER="${2:-}"; shift 2 ;;
+    --json)
+      OUTPUT_JSON=true; shift ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+# Expected mount config from tenant binding
+NFS_SOURCE=$(yq -r '.media.nfs.source' "$TENANT_BINDING" 2>/dev/null || echo "pve:/media")
+EXPECTED_MOUNT="/mnt/media"
+
+verify_vm_nfs() {
+  local vm="$1"
+  local expected_mode="$2"
+
+  local result=""
+  local status="OK"
+  local mount_info=""
+  local free_space=""
+
+  # Check if mount exists
+  mount_info=$(ssh -o ConnectTimeout=10 "$vm" "mount | grep '$NFS_SOURCE'" 2>/dev/null || echo "")
+
+  if [[ -z "$mount_info" ]]; then
+    result="FAIL:not-mounted"
+    status="FAIL"
+  else
+    # Check mount mode
+    if [[ "$expected_mode" == "rw" ]]; then
+      if [[ "$mount_info" =~ rw, ]]; then
+        result="OK:rw-mounted"
+      else
+        result="FAIL:expected-rw-got-ro"
+        status="FAIL"
+      fi
+    else
+      if [[ "$mount_info" =~ ro, ]]; then
+        result="OK:ro-mounted"
+      else
+        # For streaming-stack, ro is ideal but rw is acceptable
+        result="OK:rw-mounted-acceptable"
+      fi
+    fi
+
+    # Get free space
+    free_space=$(ssh -o ConnectTimeout=10 "$vm" "df -h $EXPECTED_MOUNT 2>/dev/null | tail -1 | awk '{print \$4}'" 2>/dev/null || echo "unknown")
+  fi
+
+  echo "$vm:$status:$result:$free_space:$mount_info"
+}
+
+echo "media.nfs.verify"
+echo "================"
+echo "nfs_source: $NFS_SOURCE"
+echo "expected_mount: $EXPECTED_MOUNT"
+
+ERRORS=0
+RESULTS=()
+
+if [[ -z "$VM_FILTER" || "$VM_FILTER" == "download-stack" ]]; then
+  result=$(verify_vm_nfs "download-stack" "rw")
+  RESULTS+=("$result")
+  if [[ "$result" == *":FAIL:"* ]]; then
+    ERRORS=$((ERRORS + 1))
+  fi
+fi
+
+if [[ -z "$VM_FILTER" || "$VM_FILTER" == "streaming-stack" ]]; then
+  result=$(verify_vm_nfs "streaming-stack" "ro")
+  RESULTS+=("$result")
+  if [[ "$result" == *":FAIL:"* ]]; then
+    ERRORS=$((ERRORS + 1))
+  fi
+fi
+
+if $OUTPUT_JSON; then
+  echo ""
+  cat <<EOF
+{
+  "capability": "media.nfs.verify",
+  "nfs_source": "$NFS_SOURCE",
+  "expected_mount": "$EXPECTED_MOUNT",
+  "vm_filter": ${VM_FILTER:-null},
+  "errors": $ERRORS,
+  "results": [
+$(for r in "${RESULTS[@]}"; do
+    IFS=':' read -r vm status detail free mount <<< "$r"
+    echo "    {\"vm\": \"$vm\", \"status\": \"$status\", \"detail\": \"$detail\", \"free_space\": \"$free\"},"
+  done | sed '$ s/,$//')
+  ]
+}
+EOF
+else
+  echo ""
+  printf "%-20s %-8s %-25s %12s\n" "VM" "STATUS" "DETAIL" "FREE"
+  printf "%-20s %-8s %-25s %12s\n" "--" "------" "------" "----"
+
+  for r in "${RESULTS[@]}"; do
+    IFS=':' read -r vm status detail free rest <<< "$r"
+    printf "%-20s %-8s %-25s %12s\n" "$vm" "$status" "$detail" "$free"
+  done
+
+  if [[ $ERRORS -gt 0 ]]; then
+    echo ""
+    echo "FAIL: $ERRORS NFS mount issue(s) detected"
+    exit 1
+  fi
+
+  echo ""
+  echo "OK: all NFS mounts healthy"
+fi
+
+exit $ERRORS

@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# media.backup.create — Create config volume snapshots for media services
+#
+# Usage:
+#   ./bin/ops cap run media.backup.create
+#   ./bin/ops cap run media.backup.create --vm download-stack
+#   ./bin/ops cap run media.backup.create --dry-run
+#
+# Contract:
+# - Creates tar.gz snapshots of config directories on media VMs
+# - Stores in /opt/backups/media-config/ on each VM
+# - Retention: 7 days (configurable)
+# - Does NOT backup media content (NFS from pve)
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+
+usage() {
+  cat <<'USAGE'
+media.backup.create — Create config volume snapshots for media services
+
+Args:
+  --vm HOST         Backup only this VM (download-stack|streaming-stack)
+  --dry-run         Show what would be done without executing
+  --retention DAYS  Keep backups for N days (default: 7)
+
+Examples:
+  ./bin/ops cap run media.backup.create --vm download-stack
+  ./bin/ops cap run media.backup.create --dry-run
+USAGE
+}
+
+VM_FILTER=""
+DRY_RUN=false
+RETENTION_DAYS=7
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --vm)
+      VM_FILTER="${2:-}"; shift 2 ;;
+    --dry-run)
+      DRY_RUN=true; shift ;;
+    --retention)
+      RETENTION_DAYS="${2:-}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+# Config directories to backup (relative to /opt/stacks/)
+DOWNLOAD_CONFIGS=(
+  "download-stack/radarr/config"
+  "download-stack/sonarr/config"
+  "download-stack/lidarr/config"
+  "download-stack/prowlarr/config"
+  "download-stack/sabnzbd/config"
+  "download-stack/qbittorrent/config"
+)
+
+STREAMING_CONFIGS=(
+  "streaming-stack/jellyfin/config"
+  "streaming-stack/navidrome/config"
+  "streaming-stack/jellyseerr/config"
+  "streaming-stack/bazarr/config"
+  "streaming-stack/homarr/config"
+)
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+
+backup_vm_configs() {
+  local vm="$1"
+  shift
+  local configs=("$@")
+
+  echo ""
+  echo "--- $vm ---"
+
+  if $DRY_RUN; then
+    echo "DRY_RUN: would backup:"
+    for cfg in "${configs[@]}"; do
+      echo "  - /opt/stacks/$cfg"
+    done
+    echo "to: /opt/backups/media-config/${vm}-${TIMESTAMP}.tar.gz"
+    return 0
+  fi
+
+  # Ensure backup directory exists
+  ssh "$vm" "mkdir -p /opt/backups/media-config" 2>&1 || {
+    echo "FAIL: could not create backup directory on $vm"
+    return 1
+  }
+
+  # Build tar include list
+  local include_args=()
+  for cfg in "${configs[@]}"; do
+    include_args+=(-C "/opt/stacks" "$cfg")
+  done
+
+  # Create backup
+  local backup_file="/opt/backups/media-config/${vm}-${TIMESTAMP}.tar.gz"
+  echo "creating: $backup_file"
+
+  # shellcheck disable=SC2029
+  ssh "$vm" "tar czf $backup_file ${include_args[*]}" 2>&1 || {
+    echo "FAIL: backup creation failed on $vm"
+    return 1
+  }
+
+  # Show result
+  ssh "$vm" "ls -lh $backup_file" 2>&1
+
+  # Prune old backups
+  echo "pruning backups older than $RETENTION_DAYS days..."
+  ssh "$vm" "find /opt/backups/media-config -name '${vm}-*.tar.gz' -mtime +$RETENTION_DAYS -delete" 2>&1 || true
+
+  return 0
+}
+
+echo "media.backup.create"
+echo "==================="
+echo "timestamp: $TIMESTAMP"
+echo "retention_days: $RETENTION_DAYS"
+echo "dry_run: $DRY_RUN"
+
+ERRORS=0
+
+if [[ -z "$VM_FILTER" || "$VM_FILTER" == "download-stack" ]]; then
+  backup_vm_configs "download-stack" "${DOWNLOAD_CONFIGS[@]}" || ERRORS=$((ERRORS + 1))
+fi
+
+if [[ -z "$VM_FILTER" || "$VM_FILTER" == "streaming-stack" ]]; then
+  backup_vm_configs "streaming-stack" "${STREAMING_CONFIGS[@]}" || ERRORS=$((ERRORS + 1))
+fi
+
+if [[ $ERRORS -gt 0 ]]; then
+  echo ""
+  echo "FAIL: $ERRORS VM(s) had backup errors"
+  exit 1
+fi
+
+echo ""
+echo "OK: config backups created"
+exit 0

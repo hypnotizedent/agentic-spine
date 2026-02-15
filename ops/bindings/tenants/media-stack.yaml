@@ -1,0 +1,105 @@
+# Tenant Profile: media-stack
+# Status: authoritative
+# Owner: "@ronny"
+# Last verified: 2026-02-15
+# Scope: media-stack-tenant
+#
+# Defines the media-stack tenant for AOF governance.
+# Services span VM 209 (download-stack) and VM 210 (streaming-stack).
+# Follows schema defined in ops/bindings/tenant.profile.schema.yaml.
+
+version: 1
+updated: "2026-02-15"
+owner: "@ronny"
+
+identity:
+  tenant_id: media-stack
+  owner: "@ronny"
+  display_name: "Media Stack"
+  created_at: "2026-02-15"
+
+secrets:
+  provider: infisical
+  project_id: infrastructure
+  environment: prod
+  namespace: /spine/services/media
+
+policy:
+  preset: balanced
+  overrides: {}
+
+runtime:
+  spine_root: "$HOME/code/agentic-spine"
+  git_remote_primary: origin
+  git_remote_mirror: github
+
+surfaces:
+  agents:
+    - claude-code
+    - opencode
+  slash_commands: true
+  mcp_servers: []
+
+evidence:
+  receipts_enabled: true
+  ledger_path: receipts/sessions
+  session_closeout_sla_hours: 48
+
+# Media-stack specific configuration
+media:
+  vms:
+    download:
+      vmid: 209
+      hostname: download-stack
+      lan_ip: 192.168.1.209
+      tailscale_ip: 100.107.36.76
+      role: download
+      compose_path: /opt/stacks/download-stack
+      nfs_mount: /mnt/media
+      nfs_mode: rw
+    streaming:
+      vmid: 210
+      hostname: streaming-stack
+      lan_ip: 192.168.1.210
+      tailscale_ip: 100.123.207.64
+      role: streaming
+      compose_path: /opt/stacks/streaming-stack
+      nfs_mount: /mnt/media
+      nfs_mode: ro
+
+  nfs:
+    source: pve:/media
+    pool: tank/media
+    size_tb: 29
+
+  parked_services:
+    - tdarr
+    - slskd
+    - soularr
+
+  # Home Assistant add-ons that duplicate shop services (investigate for decommission)
+  ha_overlaps:
+    - overseerr      # duplicates jellyseerr (VM 210)
+    - lidarr         # duplicates lidarr (VM 209)
+    - sonarr         # duplicates sonarr (VM 209)
+    - sabnzbd        # duplicates sabnzbd (VM 209)
+
+  dependency_chain:
+    # Prowlarr provides indexers to the *arr stack
+    prowlarr:
+      - radarr
+      - sonarr
+      - lidarr
+    # *arr services send downloads to download clients
+    radarr:
+      - sabnzbd
+      - qbittorrent
+    sonarr:
+      - sabnzbd
+      - qbittorrent
+    lidarr:
+      - sabnzbd
+      - slskd
+    # Cross-VM: streaming services consume media downloaded by download-stack
+    jellyfin:
+      depends_on_media_from: download-stack
