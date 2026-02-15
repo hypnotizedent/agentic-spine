@@ -117,7 +117,46 @@ if [[ -d "$SESSIONS_DIR" ]]; then
   fi
 fi
 
-# ─── Guard 2: Capability metadata validation ───────────────
+# ─── Guard 2: Commit signing enforcement (commit_sign_required knob) ───
+# Resolve policy to check if signing is required
+if [[ -f "$ROOT/ops/lib/resolve-policy.sh" ]]; then
+  source "$ROOT/ops/lib/resolve-policy.sh"
+  resolve_policy_knobs
+  if [[ "${RESOLVED_COMMIT_SIGN_REQUIRED:-false}" == "true" ]]; then
+    # Check if gpg signing is configured
+    sign_key="$(git config --get user.signingkey 2>/dev/null || true)"
+    gpg_sign="$(git config --get commit.gpgsign 2>/dev/null || true)"
+    if [[ -z "$sign_key" || "$gpg_sign" != "true" ]]; then
+      echo "BLOCKED: commit_sign_required=true (policy: ${RESOLVED_POLICY_PRESET:-unknown})" >&2
+      echo "Commit signing is required but not configured." >&2
+      echo "" >&2
+      echo "Remediation:" >&2
+      echo "  git config --global user.signingkey <YOUR_KEY_ID>" >&2
+      echo "  git config --global commit.gpgsign true" >&2
+      echo "" >&2
+      echo "Or override policy: SPINE_POLICY_PRESET=balanced" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# ─── Guard 3: Multi-agent write policy (multi_agent_writes knob) ───
+# When multi_agent_writes=proposal-only, block direct commits on main
+if [[ "${RESOLVED_MULTI_AGENT_WRITES:-direct}" == "proposal-only" ]]; then
+  if [[ "$current_branch" == "main" || "$current_branch" == "master" ]]; then
+    if [[ ! -f "$LOCK_FILE" ]]; then
+      echo "BLOCKED: multi_agent_writes=proposal-only (policy: ${RESOLVED_POLICY_PRESET:-unknown})" >&2
+      echo "Direct commits to $current_branch blocked by policy. Use proposal flow." >&2
+      echo "" >&2
+      echo "Remediation:" >&2
+      echo "  ./bin/ops cap run proposals.submit \"description\"" >&2
+      echo "Or override policy: SPINE_POLICY_PRESET=balanced" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# ─── Guard 4: Capability metadata validation ───────────────
 # Main-branch commits are allowed. Worktrees are optional, not mandatory.
 # Drift gates (spine.verify) catch problems; the pre-commit hook stays lean.
 

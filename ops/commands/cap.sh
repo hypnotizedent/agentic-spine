@@ -188,8 +188,28 @@ run_cap() {
     local exit_code=0
     local blocked_reason=""
 
-    # Mutating caps on main are allowed. Worktrees are optional.
-    # Drift gates (spine.verify) catch problems after the fact.
+    # ── Policy enforcement: proposal_required + multi_agent_writes ──
+    # Skip enforcement for precondition runs, read-only caps, and governance caps
+    if [[ -z "${OPS_CAP_STACK:-}" && "$safety" == "mutating" ]]; then
+      # proposal_required: strict preset forces proposal flow for mutating caps
+      if [[ "${RESOLVED_PROPOSAL_REQUIRED:-false}" == "true" ]]; then
+        echo "BLOCKED: proposal_required=true (policy: $RESOLVED_POLICY_PRESET)"
+        echo "Mutating capability '$name' requires proposal flow under current policy."
+        echo ""
+        echo "Remediation:"
+        echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
+        exit 1
+      fi
+      # multi_agent_writes: proposal-only blocks direct mutating caps
+      if [[ "${RESOLVED_MULTI_AGENT_WRITES:-direct}" == "proposal-only" ]]; then
+        echo "BLOCKED: multi_agent_writes=proposal-only (policy: $RESOLVED_POLICY_PRESET)"
+        echo "Direct mutating capability '$name' blocked. Use proposal flow."
+        echo ""
+        echo "Remediation:"
+        echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
+        exit 1
+      fi
+    fi
 
     # ── Execute preconditions (dependency chain, cycle guard) ──
     local precond_failed=0

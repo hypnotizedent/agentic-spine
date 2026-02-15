@@ -594,6 +594,8 @@ else
 fi
 
 # D58: SSOT freshness lock (last_reviewed date enforcement)
+# Wire stale_ssot_max_days from policy preset (env var override still takes precedence)
+export SSOT_FRESHNESS_DAYS="${SSOT_FRESHNESS_DAYS:-$RESOLVED_STALE_SSOT_MAX_DAYS}"
 echo -n "D58 ssot freshness lock... "
 if [[ -x "$SP/surfaces/verify/d58-ssot-freshness-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d58-ssot-freshness-lock.sh"
@@ -913,6 +915,22 @@ if [[ -x "$SP/surfaces/verify/d97-surface-readonly-contract-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d97-surface-readonly-contract-lock.sh"
 else
   warn "surface readonly contract lock gate not present"
+fi
+
+# D98: Z2M device parity
+echo -n "D98 Z2M device parity... "
+if [[ -x "$SP/surfaces/verify/d98-z2m-device-parity.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d98-z2m-device-parity.sh"
+else
+  warn "Z2M device parity gate not present"
+fi
+
+# D99: HA token freshness
+echo -n "D99 HA token freshness... "
+if [[ -x "$SP/surfaces/verify/d99-ha-token-freshness.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d99-ha-token-freshness.sh"
+else
+  warn "HA token freshness gate not present"
 fi
 
 echo

@@ -13,6 +13,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
+source "$ROOT/ops/lib/resolve-policy.sh"
+resolve_policy_knobs
 
 # Parse arguments
 GAP_ID="" TYPE="" SEVERITY="" DESCRIPTION="" DISCOVERED_BY="" PARENT_LOOP="" DOC=""
@@ -114,3 +116,10 @@ EOF
 )"
 
 echo "FILED: $GAP_ID (type=$TYPE, severity=$SEVERITY)"
+
+# Auto-claim if policy knob says so
+if [[ "${RESOLVED_GAP_AUTO_CLAIM:-false}" == "true" ]]; then
+  claim_gap "$GAP_ID" "auto-claimed by policy (gap_auto_claim=true)" && \
+    echo "AUTO-CLAIMED: $GAP_ID by PID $$" || \
+    echo "WARN: auto-claim failed for $GAP_ID (may already be claimed)" >&2
+fi

@@ -67,8 +67,21 @@ for knob in "${REQUIRED_KNOBS[@]}"; do
 done
 
 # ── Check 5: Wired knobs reference valid source files ──
+# Handle both string format (wired_in: "file") and list format (wired_in:\n  - "file")
+# Scope to knobs section only (before enforcement:) to avoid matching enforcement checks
+knobs_section="$(sed -n '/^knobs:/,/^enforcement:/p' "$CONTRACT")"
 while IFS= read -r line; do
-  file_ref="$(echo "$line" | sed 's/.*wired_in: *"//' | sed 's/".*//' | sed 's/ .*//')"
+  if echo "$line" | grep -q '^ *- '; then
+    # List entry: - "file"
+    file_ref="$(echo "$line" | sed 's/.*- *"//' | sed 's/".*//')"
+  elif echo "$line" | grep -q 'wired_in:.*"'; then
+    # Inline string: wired_in: "file" or wired_in: "file (note)"
+    file_ref="$(echo "$line" | sed 's/.*wired_in: *"//' | sed 's/".*//')"
+  else
+    continue
+  fi
+  # Strip any parenthetical suffix like " (D58 SSOT_FRESHNESS_DAYS)"
+  file_ref="$(echo "$file_ref" | sed 's/ (.*//')"
   if [[ -n "$file_ref" && "$file_ref" != "null" ]]; then
     if [[ -f "$ROOT/$file_ref" ]]; then
       ok "wired_in reference valid: $file_ref"
@@ -76,7 +89,7 @@ while IFS= read -r line; do
       err "wired_in reference invalid: $file_ref"
     fi
   fi
-done < <(grep 'wired_in:' "$CONTRACT" | grep -v 'null')
+done < <(echo "$knobs_section" | grep -E '(wired_in:.*"|^ *- ")' | grep -v 'null')
 
 # ── Check 6: Presets binding exists ──
 if [[ -f "$PRESETS" ]]; then

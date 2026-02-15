@@ -5,7 +5,13 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 POLICY="$ROOT/ops/bindings/evidence.retention.policy.yaml"
 
+# Resolve policy knobs for receipt_retention_days override
+source "$ROOT/ops/lib/resolve-policy.sh"
+resolve_policy_knobs
+POLICY_RETENTION="${RESOLVED_RECEIPT_RETENTION_DAYS:-30}"
+
 echo "=== Evidence Export Plan (Dry Run) ==="
+echo "Policy: $RESOLVED_POLICY_PRESET (receipt_retention_days=$POLICY_RETENTION)"
 echo ""
 
 if [[ ! -f "$POLICY" ]]; then
@@ -22,9 +28,19 @@ for cls in "${CLASSES[@]}"; do
   purge="$(echo "$block" | grep 'purge_eligible:' | head -1 | awk '{print $2}')"
   pattern="$(echo "$block" | grep 'path_pattern:' | head -1 | sed 's/.*: *"//' | sed 's/".*//')"
 
+  # Override session_receipts retention with policy knob
+  effective_retention="$retention"
+  if [[ "$cls" == "session_receipts" ]]; then
+    effective_retention="$POLICY_RETENTION"
+  fi
+
   echo "  $cls:"
   echo "    pattern: $pattern"
-  echo "    retention: ${retention}d"
+  if [[ "$cls" == "session_receipts" && "$retention" != "$effective_retention" ]]; then
+    echo "    retention: ${effective_retention}d (policy override, static: ${retention}d)"
+  else
+    echo "    retention: ${effective_retention}d"
+  fi
   echo "    purge_eligible: $purge"
 
   # Count matching files
