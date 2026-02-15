@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.dashboard.snapshot — Snapshot HA Lovelace dashboards to ops/bindings/ha.dashboards.yaml
+# Queries HA REST API for default + custom dashboard configs.
+# Output: ops/bindings/ha.dashboards.yaml
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+OUTPUT="$SPINE_ROOT/ops/bindings/ha.dashboards.yaml"
+INFISICAL_AGENT="${HOME}/code/workbench/scripts/agents/infisical-agent.sh"
+HA_BASE="http://100.67.120.1:8123"
+
+TMPDIR_WORK=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+
+echo "ha.dashboard.snapshot"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRECONDITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+command -v python3 >/dev/null 2>&1 || { echo "STOP (2): python3 not found"; exit 2; }
+command -v curl >/dev/null 2>&1 || { echo "STOP (2): curl not found"; exit 2; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RETRIEVE HA TOKEN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ ! -x "$INFISICAL_AGENT" ]]; then
+  echo "STOP (2): infisical-agent.sh not found"
+  exit 2
+fi
+
+HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+
+if [[ -z "${HA_TOKEN:-}" ]]; then
+  echo "STOP (2): could not retrieve HA_API_TOKEN from Infisical"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUERY HA API — dashboard list + configs
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 1. List custom dashboards
+echo "Fetching dashboard list..."
+HTTP_CODE=$(curl -s -o "$TMPDIR_WORK/dashboards.json" -w '%{http_code}' --connect-timeout 10 \
+  -H "Authorization: Bearer $HA_TOKEN" "${HA_BASE}/api/lovelace/dashboards" 2>/dev/null) || HTTP_CODE="000"
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "STOP (2): /api/lovelace/dashboards returned HTTP $HTTP_CODE"
+  exit 2
+fi
+
+# 2. Fetch default dashboard config
+echo "Fetching default dashboard config..."
+HTTP_CODE=$(curl -s -o "$TMPDIR_WORK/default_config.json" -w '%{http_code}' --connect-timeout 10 \
+  -H "Authorization: Bearer $HA_TOKEN" "${HA_BASE}/api/lovelace/config" 2>/dev/null) || HTTP_CODE="000"
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "WARN: default dashboard config returned HTTP $HTTP_CODE (may be storage mode)"
+  echo '{}' > "$TMPDIR_WORK/default_config.json"
+fi
+
+# 3. Fetch each custom dashboard config
+echo "Fetching custom dashboard configs..."
+DASHBOARD_IDS=$(python3 -c "
+import json, sys
+with open('$TMPDIR_WORK/dashboards.json') as f:
+    dashboards = json.load(f)
+for d in dashboards:
+    print(d.get('url_path', ''))
+" 2>/dev/null || true)
+
+for url_path in $DASHBOARD_IDS; do
+  if [[ -n "$url_path" ]]; then
+    echo "  Fetching: $url_path"
+    curl -s -o "$TMPDIR_WORK/dashboard_${url_path}.json" --connect-timeout 10 \
+      -H "Authorization: Bearer $HA_TOKEN" \
+      "${HA_BASE}/api/lovelace/config/${url_path}" 2>/dev/null || echo '{}' > "$TMPDIR_WORK/dashboard_${url_path}.json"
+  fi
+done
+
+echo
+echo "Building dashboard binding..."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUILD YAML BINDING (Python)
+# ─────────────────────────────────────────────────────────────────────────────
+
+python3 - "$TMPDIR_WORK" "$OUTPUT" << 'PYEOF'
+import json, sys, datetime, os, glob
+
+try:
+    import yaml
+except ImportError:
+    print("STOP (2): PyYAML not installed", file=sys.stderr)
+    sys.exit(2)
+
+tmpdir, out_path = sys.argv[1], sys.argv[2]
+
+# ── Load dashboard list ──────────────────────────────────────────────────────
+with open(os.path.join(tmpdir, 'dashboards.json'), 'r') as f:
+    dashboard_list = json.load(f)
+
+# ── Load default dashboard config ────────────────────────────────────────────
+with open(os.path.join(tmpdir, 'default_config.json'), 'r') as f:
+    default_config = json.load(f)
+
+# ── Helper: count views and cards ────────────────────────────────────────────
+def count_views_cards(config):
+    views = config.get('views', [])
+    view_count = len(views)
+    card_count = 0
+    for view in views:
+        card_count += len(view.get('cards', []))
+    return view_count, card_count
+
+# ── Build default dashboard entry ────────────────────────────────────────────
+dashboards = []
+if default_config:
+    dv, dc = count_views_cards(default_config)
+    dashboards.append({
+        'id': 'lovelace',
+        'title': default_config.get('title', 'Home'),
+        'url_path': 'lovelace',
+        'is_default': True,
+        'view_count': dv,
+        'card_count': dc,
+        'views': default_config.get('views', []),
+    })
+
+# ── Build custom dashboard entries ───────────────────────────────────────────
+for dash in dashboard_list:
+    url_path = dash.get('url_path', '')
+    if not url_path:
+        continue
+
+    config_path = os.path.join(tmpdir, f'dashboard_{url_path}.json')
+    config = {}
+    if os.path.isfile(config_path):
+        with open(config_path, 'r') as f:
+            try:
+                config = json.load(f)
+            except json.JSONDecodeError:
+                config = {}
+
+    dv, dc = count_views_cards(config)
+    dashboards.append({
+        'id': dash.get('id', url_path),
+        'title': dash.get('title', url_path),
+        'url_path': url_path,
+        'is_default': False,
+        'view_count': dv,
+        'card_count': dc,
+        'views': config.get('views', []),
+    })
+
+# ── Totals ───────────────────────────────────────────────────────────────────
+total_views = sum(d['view_count'] for d in dashboards)
+total_cards = sum(d['card_count'] for d in dashboards)
+
+# ── Build output binding ─────────────────────────────────────────────────────
+binding = {
+    'schema_version': '1.0',
+    'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'source': 'ha.dashboard.snapshot',
+    'summary': {
+        'dashboard_count': len(dashboards),
+        'total_views': total_views,
+        'total_cards': total_cards,
+    },
+    'dashboards': dashboards,
+}
+
+header = '# HA Dashboard Snapshot (SSOT)\n'
+header += '# Auto-generated by ha.dashboard.snapshot — do not hand-edit.\n'
+header += '# Lovelace dashboard configs extracted via HA REST API.\n'
+header += '# Status: authoritative\n\n'
+
+with open(out_path, 'w') as f:
+    f.write(header)
+    yaml.dump(binding, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+print(f"Wrote {out_path}")
+print(f"  {len(dashboards)} dashboards")
+print(f"  {total_views} total views")
+print(f"  {total_cards} total cards")
+PYEOF
+
+echo
+echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"

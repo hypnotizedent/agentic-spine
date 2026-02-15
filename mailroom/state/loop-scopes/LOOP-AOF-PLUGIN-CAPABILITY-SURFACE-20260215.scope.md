@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-AOF-PLUGIN-CAPABILITY-SURFACE-20260215
 created: 2026-02-15
-status: active
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Expose AOF kernel-level capabilities through a dedicated plugin and contract bindings.

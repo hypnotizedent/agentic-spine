@@ -90,7 +90,7 @@ legacy_commit: 1ea9dfa91f4cf5afbd56a1a946f0a733d3bd785c
 | **Integration inventory** | None | REF_INTEGRATIONS.md (60 entries) | **Full gap** |
 | **Automation inventory** | None | automations.yaml (14), REF_AUTOMATIONS.md | **Full gap** |
 | **Entity/helper inventory** | None | REF_HELPERS.md, entity_registry.json | **Full gap** |
-| **Dashboard config** | None | 11 YAML files + style guide | **Full gap** (app-level, not infra) |
+| **Dashboard config** | `ha.dashboard.snapshot` → `ops/bindings/ha.dashboards.yaml` | 11 YAML files + style guide | Covered by capability |
 | **Recovery runbooks** | DR_RUNBOOK.md (stub: "HA down if proxmox-home offline") | ZIGBEE_RECOVERY.md, RUNBOOK_CALDAV_APPLE.md, HA_RESYNC.md | **App-level recovery missing** |
 | **CLI/API tools** | None | ha-cli.sh, ha-entity-*.py, ha-health-check.sh | **Full gap** |
 | **MCP server** | None | mcpjungle/servers/home-assistant/ (TypeScript) | **Full gap** |
@@ -115,7 +115,7 @@ legacy_commit: 1ea9dfa91f4cf5afbd56a1a946f0a733d3bd785c
 | **launchd plist** | **extract_now** | `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` (schedule reference) | Documents the macOS cron-equivalent schedule for offsite sync. |
 | **MCP server source** | **defer** | N/A (stays in workbench or is rebuilt) | MCP server is a runtime tool, not governance. Will be rebuilt when MCP integration is formalized in spine. |
 | **ha-cli.sh** + utility scripts | **defer** | N/A | CLI tools are runtime utilities. May be ported to workbench later. Not governance-critical. |
-| **Dashboard YAML files** | **reject** | N/A | App-level UI config. Managed by HA directly. Spine should not track dashboard YAML. |
+| **Dashboard YAML files** | **extract_now** | `ops/bindings/ha.dashboards.yaml` | Version-controlled via `ha.dashboard.snapshot` capability (REST API extraction). |
 | **Session logs** (20+ files) | **reject** | N/A | Historical, no ongoing operational value. |
 | **Archive content** (.archive/) | **reject** | N/A | Already marked archived in legacy. Historical only. |
 | **Plans** (docs/plans/) | **reject** | N/A | Planning documents, not operational. |
