@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-15
 scope: mailroom-bridge
 ---
 
@@ -15,6 +15,7 @@ scope: mailroom-bridge
 > - list open loops
 > - enqueue prompts into `mailroom/inbox/queued/`
 > - run governed RAG queries via `rag.anythingllm.ask`
+> - execute allowlisted capabilities via `POST /cap/run` (Cap-RPC)
 
 ---
 
@@ -26,6 +27,7 @@ scope: mailroom-bridge
 - **Write-like surfaces (governed only):**
   - `POST /inbox/enqueue` delegates to `ops/runtime/inbox/agent-enqueue.sh`
   - `POST /rag/ask` delegates to `./bin/ops cap run rag.anythingllm.ask`
+  - `POST /cap/run` delegates to `./bin/ops cap run <capability>` (allowlisted read-only caps only)
 - **No filesystem traversal:** all `path=` params are relative and traversal is rejected.
 - **No direct “write file” endpoints.** All mutation-like actions must route through governed capabilities.
 
@@ -120,6 +122,33 @@ Body (JSON):
 Effect:
 - enqueues a prompt into `mailroom/inbox/queued/` via `ops/runtime/inbox/agent-enqueue.sh`
 
+### `POST /cap/run` (auth required)
+
+Body (JSON):
+```json
+{
+  "capability": "gaps.status",
+  "args": ["GAP-OP-123"]
+}
+```
+
+Effect:
+- executes an allowlisted capability via subprocess delegation
+- only capabilities in `cap_rpc.allowlist` (binding) are permitted
+
+Response (example):
+```json
+{
+  "capability": "gaps.status",
+  "status": "done",
+  "exit_code": 0,
+  "output": "...",
+  "stderr": "",
+  "receipt": "receipts/sessions/RCAP-.../receipt.md",
+  "run_key": "CAP-20260215-..."
+}
+```
+
 ### `POST /rag/ask` (auth required)
 
 Body (JSON):
@@ -127,23 +156,35 @@ Body (JSON):
 {
   "question": "your question text (required)",
   "workspace": "agentic-spine (optional, default)",
+  "mode": "auto (optional: auto|chat|retrieve, default: auto)",
   "context_max_chars": 10000
 }
 ```
 
 Effect:
-- queries AnythingLLM via `rag.anythingllm.ask`
-- returns answer, sources, receipt path, and workspace
+- queries AnythingLLM via `rag.anythingllm.ask` with the specified mode
+- `auto` (default): tries chat first for natural-language answers, falls back to retrieval
+- `chat`: LLM-generated answer only, fails if chat unavailable
+- `retrieve`: fast vector search, returns scored snippets
+
+Response contract:
+- `answer`: cleaned text (no `<document_metadata>` tags, no internal path artifacts)
+- `sources`: deduplicated list of source filenames (hotdir/storage prefixes stripped)
+- `mode`: actual mode used (`chat` or `retrieve`; may differ from requested if auto fell back)
+- `receipt`: capability receipt path or null
+- `workspace`: workspace slug used
 
 Response (example):
 ```json
 {
-  "answer": "To file a gap, run ./bin/ops cap run gaps.file ...",
+  "answer": "The session closeout SLA is 48 hours...",
   "sources": [
-    "docs/governance/OUTPUT_CONTRACTS.md"
+    "SESSION_PROTOCOL.md",
+    "AOF_SUPPORT_SLO.md"
   ],
   "receipt": "receipts/sessions/RCAP-20260215-XXXXXX__rag.anythingllm.ask__Rabc123/receipt.md",
-  "workspace": "agentic-spine"
+  "workspace": "agentic-spine",
+  "mode": "retrieve"
 }
 ```
 

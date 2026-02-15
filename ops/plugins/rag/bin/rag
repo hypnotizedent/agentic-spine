@@ -701,10 +701,11 @@ PY
         .result[]
         | . as $r
         | ($r.payload // {}) as $p
-        | ($p.url // $p.source // $p.file // $p.path // ($p.metadata.source? // $p.metadata.file? // $p.metadata.path?) // ($p.doc.source? // $p.doc.title? // $p.doc.name?) // "Unknown") as $src
+        | ($p.url // $p.source // $p.file // $p.path // ($p.metadata.source? // $p.metadata.file? // $p.metadata.path?) // ($p.doc.source? // $p.doc.title? // $p.doc.name?) // "Unknown") as $raw_src
+        | ($raw_src | gsub("^file:///app/collector/hotdir/";"") | gsub("^file:///app/server/storage/documents/[^/]*/[^/]*/";"")) as $src
         | ($p.title // ($p.metadata.title? // $p.doc.title?) // "Untitled") as $title
-        | ($p.text // $p.content // $p.page_content // $p.pageContent // ($p.chunk // "") ) as $text
-        | ($text | tostring | gsub("\\s+";" ") | .[0:280]) as $snippet
+        | ($p.text // $p.content // $p.page_content // $p.pageContent // ($p.chunk // "") ) as $raw_text
+        | ($raw_text | tostring | gsub("<document_metadata>[^<]*</document_metadata>";"") | gsub("\\s+";" ") | ltrimstr(" ") | .[0:280]) as $snippet
         | "- score=\($r.score|tostring)\n  title=\($title)\n  source=\($src)\n  snippet=\($snippet)\n"
       '
       exit 0

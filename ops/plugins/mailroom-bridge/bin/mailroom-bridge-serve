@@ -331,6 +331,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.BAD_REQUEST, {"error": "question is required"})
 
         workspace = (payload.get("workspace") or "agentic-spine").strip()
+        mode = (payload.get("mode") or "auto").strip()
+        if mode not in ("auto", "chat", "retrieve"):
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": f"invalid mode: {mode} (expected: auto, chat, retrieve)"})
         try:
             max_chars = int(payload.get("context_max_chars") or 10000)
         except (TypeError, ValueError):
@@ -345,10 +348,10 @@ class Handler(BaseHTTPRequestHandler):
         if not ops_bin.exists():
             return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "ops binary not found"})
 
-        # Call: ./bin/ops cap run rag.anythingllm.ask "<question>" --workspace <ws>
+        # Call: ./bin/ops cap run rag.anythingllm.ask "<question>" --mode <mode> --workspace <ws>
         args = [
             str(ops_bin), "cap", "run", "rag.anythingllm.ask",
-            question, "--workspace", workspace,
+            question, "--mode", mode, "--workspace", workspace,
         ]
 
         env = os.environ.copy()
@@ -458,9 +461,34 @@ class Handler(BaseHTTPRequestHandler):
                     seen.add(src)
                     sources.append(src)
 
+        # Normalize sources: strip AnythingLLM hotdir/storage path artifacts.
+        import re
+        _hotdir_re = re.compile(r"^file:///app/collector/hotdir/")
+        _storage_re = re.compile(r"^file:///app/server/storage/documents/[^/]*/[^/]*/")
+        normalized: list[str] = []
+        seen_norm: set[str] = set()
+        for src in sources:
+            s = _hotdir_re.sub("", src)
+            s = _storage_re.sub("", s)
+            if s and s not in seen_norm:
+                seen_norm.add(s)
+                normalized.append(s)
+        sources = normalized
+
+        # Strip document_metadata tags from answer text.
+        answer = re.sub(r"<document_metadata>[^<]*</document_metadata>", "", answer).strip()
+
         # Truncate answer to max_chars
         if len(answer) > max_chars:
             answer = answer[:max_chars] + "\n...(truncated)"
+
+        # Detect actual mode used from capability output.
+        actual_mode = mode
+        for raw in lines:
+            s = raw.strip()
+            if s.startswith("mode:"):
+                actual_mode = s.split(":", 1)[1].strip()
+                break
 
         return self._json(
             HTTPStatus.OK,
@@ -469,6 +497,7 @@ class Handler(BaseHTTPRequestHandler):
                 "sources": sources,
                 "receipt": receipt or None,
                 "workspace": workspace,
+                "mode": actual_mode,
             },
         )
 
