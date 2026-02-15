@@ -105,7 +105,7 @@ No filesystem. No CLI. You are a planning and drafting surface.
 
 - Do NOT attempt file reads, CLI commands, or git operations
 - Do NOT produce unstructured notes — use the output contract YAML blocks
-- Do NOT guess gap IDs — use `GAP-OP-NEXT` and let desktop resolve the actual ID
+- Do NOT guess gap IDs — use `GAP-OP-NNN` and let desktop resolve the actual ID
 - Do NOT declare work "fixed" — only desktop can run `gaps.close` and `spine.verify`
 
 ### Session Steps (Mobile)
@@ -198,7 +198,7 @@ Full schema: `docs/governance/OUTPUT_CONTRACTS.md` section 1.
 
 ```yaml
 gap:
-  id: GAP-OP-NEXT         # Desktop resolves actual ID
+  id: GAP-OP-NNN          # Desktop resolves actual ID
   type: missing-entry      # stale-ssot | missing-entry | agent-behavior | unclear-doc | duplicate-truth | runtime-bug
   severity: high           # critical | high | medium | low
   description: |
@@ -325,5 +325,5 @@ When using codex worktrees (`.worktrees/codex-*`):
 - [ ] Environment stated explicitly
 - [ ] Current state obtained (operator paste or bridge query)
 - [ ] All outputs use output contract YAML blocks
-- [ ] Gap IDs marked `GAP-OP-NEXT` where unknown
+- [ ] Gap IDs marked `GAP-OP-NNN` where unknown
 - [ ] Handoff block produced for desktop ingestion
