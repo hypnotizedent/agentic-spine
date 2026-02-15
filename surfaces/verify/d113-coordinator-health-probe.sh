@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Coordinator health — Z2M add-on must be started, SLZB-06MU ethernet must be on. If HA unreachable, gate SKIPs gracefully.
+# TRIAGE: Coordinator health — Z2M bridge must be connected, SLZB-06MU ethernet on, TubesZB ESPHome reachable. If HA unreachable, gate SKIPs gracefully.
 set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -71,7 +71,35 @@ else
   RESULTS+=("SLZB-06MU ethernet: SKIP (entity not found)")
 fi
 
-# ── Check 3: Firmware versions (informational) ──
+# ── Check 3: TubesZB ESPHome health ──
+tubeszb_resp=$(ha_state "sensor.tubeszb_2026_zw_esp_ip_address") || tubeszb_resp=""
+
+if [[ -n "$tubeszb_resp" ]]; then
+  tubeszb_ip=$(echo "$tubeszb_resp" | jq -r '.state // "unavailable"' 2>/dev/null) || tubeszb_ip="unavailable"
+
+  if [[ "$tubeszb_ip" == "10.0.0.90" ]]; then
+    RESULTS+=("TubesZB: online ($tubeszb_ip)")
+  elif [[ "$tubeszb_ip" == "unavailable" ]]; then
+    RESULTS+=("TubesZB: WARN (ESPHome unavailable)")
+  else
+    RESULTS+=("TubesZB: online ($tubeszb_ip)")
+  fi
+
+  # Check Z-Wave serial connected state
+  zw_serial_resp=$(ha_state "binary_sensor.tubeszb_2026_zw_tubeszb_zw_serial_connected") || zw_serial_resp=""
+  if [[ -n "$zw_serial_resp" ]]; then
+    zw_serial=$(echo "$zw_serial_resp" | jq -r '.state // "unknown"' 2>/dev/null) || zw_serial="unknown"
+    if [[ "$zw_serial" == "on" ]]; then
+      RESULTS+=("Z-Wave serial: connected")
+    else
+      RESULTS+=("Z-Wave serial: $zw_serial")
+    fi
+  fi
+else
+  RESULTS+=("TubesZB: SKIP (entity not found)")
+fi
+
+# ── Check 4: Firmware versions (informational) ──
 for entity in "update.slzb_06mu_core_firmware" "update.slzb_06mu_zigbee_firmware"; do
   fw_resp=$(ha_state "$entity") || fw_resp=""
   if [[ -n "$fw_resp" ]]; then

@@ -189,8 +189,8 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 | Web UI | http://10.0.0.51 |
 | Zigbee Socket | `tcp://10.0.0.51:6638` |
 | MAC | 20:43:A8:51:15:E3 |
-| Firmware (Core) | v3.1.6.dev |
-| Firmware (Radio) | 20240710 (CC2652P) |
+| Firmware (Core) | v3.1.6.dev (no smlight HA entity — check Web UI) |
+| Firmware (Radio) | 20240710 (CC2652P, no HA entity — check Web UI) |
 | HA Integration | Zigbee2MQTT (configure socket in Z2M add-on settings) |
 | Mode | Ethernet ON, USB OFF, Zigbee Coordinator ON |
 
@@ -201,23 +201,31 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 | Web UI | http://10.0.0.52 |
 | Zigbee Socket | `tcp://10.0.0.52:6638` (not used for Zigbee) |
 | MAC | 82:B5:4E:97:B0:28 |
-| Firmware | MultiPAN/RCP (flashed 2026-01-11) |
-| HA Integration | Planned: OpenThread Border Router |
+| Firmware (Core) | v3.2.4 (HA entity: `update.slzb_06mu_core_firmware`) |
+| Firmware (Radio) | 20241105 (HA entity: `update.slzb_06mu_zigbee_firmware`) |
+| Radio Mode | Thread/RCP (`sensor.slzb_06mu_zigbee_type` = thread) |
+| HA Integration | OpenThread Border Router (add-on v2.16.3, not yet wired) |
 
 ### TubesZB Z-Wave PoE
 
 | Field | Value |
 |-------|-------|
 | Module | Zooz ZAC93 (800 Series Long Range) |
-| Socket | `tcp://<IP>:6638` (IP TBD) |
-| HA Integration | Z-Wave JS UI Add-on |
-| Status | On hand, not installed |
+| IP | 10.0.0.90 (static DHCP reservation) |
+| MAC | 34:5F:45:37:07:A3 |
+| Socket | `tcp://10.0.0.90:6638` |
+| ESPHome Entity | `sensor.tubeszb_2026_zw_esp_ip_address` |
+| Serial Status | `binary_sensor.tubeszb_2026_zw_tubeszb_zw_serial_connected` |
+| ESPHome FW | 2025.10.27.2 (update entity: `update.tubeszb_2026_zw_tubeszb_firmware_update`) |
+| HA Integration | Z-Wave JS UI Add-on (v0.29.1, not yet started) |
+| Status | Connected via PoE to UniFi switch, ESPHome online |
 
 ### Configuration Rules
 
-- Both coordinators have **static IPs** (not DHCP)
+- All three coordinators have **static IPs** via DHCP reservation (not hardcoded)
 - Do NOT run two Zigbee coordinators simultaneously (creates separate networks)
-- Use SLZB-06 for Zigbee, SLZB-06MU for Matter/Thread
+- Use SLZB-06 for Zigbee, SLZB-06MU for Matter/Thread, TubesZB for Z-Wave
+- All coordinators are PoE-powered via UniFi switch
 
 ### 6.1 Firmware & Version Management
 
@@ -244,9 +252,19 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 
 | Field | Value |
 |-------|-------|
-| Current | MultiPAN/RCP (flashed 2026-01-11) |
+| Current (Core) | v3.2.4 (`update.slzb_06mu_core_firmware`) |
+| Current (Radio) | 20241105 (`update.slzb_06mu_zigbee_firmware`) |
+| Radio Mode | Thread/RCP (`sensor.slzb_06mu_zigbee_type` = thread) |
 | Update method | Web UI (http://10.0.0.52) > Settings > OTA update |
 | HA entities | `update.slzb_06mu_core_firmware`, `update.slzb_06mu_zigbee_firmware` (report available versions) |
+
+#### TubesZB ESPHome Firmware
+
+| Field | Value |
+|-------|-------|
+| Current | 2025.10.27.2 (`update.tubeszb_2026_zw_tubeszb_firmware_update`) |
+| Update method | HA CLI: `ssh hassio@ha "bash -l -c 'ha addons update local_tubeszb'"` or via ESPHome dashboard |
+| Z-Wave module | Zooz ZAC93 (800 Series Long Range) |
 
 #### Zigbee2MQTT Version
 
@@ -272,21 +290,37 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 
 ### 6.2 Z-Wave Integration (TubesZB)
 
-> TubesZB ZAC93 (Zooz 800 Series Long Range) is on hand but not installed. This section documents the installation procedure.
+> TubesZB ZAC93 (Zooz 800 Series Long Range) is connected via PoE to UniFi switch. ESPHome online at 10.0.0.90. Z-Wave JS UI add-on installed but not yet started.
 
-#### Prerequisites
+#### Prerequisites (Verified)
 
-- TubesZB powered via PoE (connect to UDR7 or PoE switch)
-- ESPHome firmware detected: HA entity `sensor.tubeszb_2026_zw_esp_ip_address` shows IP
-- Static IP 10.0.0.90 assigned in UDR7 DHCP reservations (already configured)
+- TubesZB powered via PoE on UniFi switch
+- ESPHome firmware detected: `sensor.tubeszb_2026_zw_esp_ip_address` = `10.0.0.90`
+- Static IP 10.0.0.90 assigned in UDR7 DHCP reservations
 - Z-Wave JS UI add-on installed (v0.29.1, currently stopped)
+- Z-Wave serial connected: `binary_sensor.tubeszb_2026_zw_tubeszb_zw_serial_connected` (currently `off` — activates when Z-Wave JS UI connects)
 
-#### Installation Steps
+#### Activation (CLI)
 
-1. **Physical placement:** Position TubesZB centrally, away from Zigbee coordinator (minimize 2.4GHz interference). Z-Wave uses 908MHz (US), so distance from WiFi AP is less critical.
-2. **PoE connection:** Connect to UDR7 PoE port or PoE injector. Verify power LED.
-3. **Verify ESPHome status:** HA > Settings > Devices > search `tubeszb`. Entity `sensor.tubeszb_2026_zw_esp_ip_address` should show `10.0.0.90`.
-4. **Start Z-Wave JS UI add-on:** HA > Settings > Add-ons > Z-Wave JS UI > Start.
+1. **Start Z-Wave JS UI add-on:**
+   ```
+   ssh hassio@ha "bash -l -c 'ha addons start a0d7b954_zwavejs2mqtt'"
+   ```
+
+2. **Verify add-on is running:**
+   ```
+   ssh hassio@ha "bash -l -c 'ha addons info a0d7b954_zwavejs2mqtt'" | grep state
+   ```
+   Expected: `state: started`
+
+3. **Verify Z-Wave serial connected:**
+   Query HA API for serial status:
+   ```
+   curl -s -H "Authorization: Bearer $TOKEN" \
+     http://100.67.120.1:8123/api/states/binary_sensor.tubeszb_2026_zw_tubeszb_zw_serial_connected \
+     | jq '.state'
+   ```
+   Expected: `"on"` (after Z-Wave JS UI connects to tcp://10.0.0.90:6638)
 
 #### Z-Wave JS UI Configuration
 
@@ -318,43 +352,70 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 
 | Component | Version | Status |
 |-----------|---------|--------|
-| SLZB-06MU | MultiPAN/RCP (flashed 2026-01-11) | Ethernet connected, reachable |
+| SLZB-06MU | Core v3.2.4, Radio 20241105 | Ethernet connected, reachable |
+| SLZB-06MU radio mode | Thread/RCP | `sensor.slzb_06mu_zigbee_type` = thread |
 | Matter Server add-on | v8.2.2 | Started |
-| OpenThread Border Router add-on | v2.16.3 | Present, state UNKNOWN |
+| OpenThread Border Router add-on | v2.16.3 | Present, not yet wired to SLZB-06MU |
 | HA Matter integration | Active | Not wired to SLZB-06MU |
 | HA Thread integration | Active | Not wired to SLZB-06MU |
 
-#### Wiring Procedure
+#### Wiring Procedure (CLI)
 
-1. **Configure OpenThread Border Router add-on:**
-   - Set serial port to SLZB-06MU RCP device: TCP socket `tcp://10.0.0.52:6638` or `/dev/serial/by-id/...` if USB-attached
-   - Set baudrate: 460800 (default for SLZB-06MU RCP mode)
-   - Enable border router functionality
-   - Start the add-on
+1. **Configure OpenThread Border Router add-on options:**
+   ```
+   ssh hassio@ha "bash -l -c 'ha addons options a0d7b954_openthread_border_router --options device=\"tcp://10.0.0.52:6638\" --options baudrate=460800 --options flow_control=true --options autoflash_firmware=false'"
+   ```
+   Note: `autoflash_firmware=false` — SLZB-06MU already has RCP firmware, do not overwrite.
 
-2. **Verify Thread network formation:**
-   - OpenThread Border Router dashboard shows "Leader" or "Router" state
-   - Thread integration in HA shows the network with a dataset
-   - Network credentials (commissioning dataset) visible in Thread integration
+2. **Start the OTBR add-on:**
+   ```
+   ssh hassio@ha "bash -l -c 'ha addons start a0d7b954_openthread_border_router'"
+   ```
 
-3. **Configure Matter Server:**
-   - Matter Server should auto-detect the Thread network via mDNS
-   - Verify in Matter Server logs: Thread border router discovered
-   - No manual configuration needed if both add-ons are on the same host
+3. **Verify OTBR is running:**
+   ```
+   ssh hassio@ha "bash -l -c 'ha addons info a0d7b954_openthread_border_router'" | grep state
+   ```
+   Expected: `state: started`
 
-#### Matter Device Commissioning
+4. **Verify Thread network formation via API:**
+   ```
+   curl -s -H "Authorization: Bearer $TOKEN" \
+     http://100.67.120.1:8123/api/states \
+     | jq '[.[] | select(.entity_id | test("thread")) | {entity_id, state}]'
+   ```
+   Look for Thread integration entities showing a formed network.
 
-1. Open HA companion app (iOS/Android)
-2. Settings > Devices & Services > Add Integration > Matter
-3. Scan device QR code (on device box or in device app)
-4. Choose Thread network (if device supports Thread) or WiFi
-5. Multi-admin: device can be shared with Apple Home via "Add to other ecosystem"
+5. **Verify Matter Server detects Thread:**
+   ```
+   ssh hassio@ha "bash -l -c 'ha addons logs a0d7b954_matter_server'" | grep -i thread | tail -5
+   ```
+   Expected: log lines showing Thread border router discovery.
+
+#### Matter Device Commissioning (CLI)
+
+Commissioning requires the HA companion app (iOS/Android) for QR code scanning — this is the one step that cannot be fully CLI-automated. However, verification is CLI:
+
+1. Commission device via HA companion app (scan QR code)
+2. **Verify device appeared via API:**
+   ```
+   curl -s -H "Authorization: Bearer $TOKEN" \
+     http://100.67.120.1:8123/api/states \
+     | jq '[.[] | select(.entity_id | test("matter")) | {entity_id, state}]'
+   ```
+3. Multi-admin sharing (Apple Home): use companion app "Add to other ecosystem"
 
 #### Recovery
 
-- **Thread network reset:** Delete Thread network in HA Thread integration. OpenThread Border Router will form a new network.
-- **Matter fabric removal:** HA > Settings > Integrations > Matter > device > Remove. Device must be factory-reset for re-commissioning.
-- **Re-commissioning:** Factory-reset device, re-scan QR code in HA companion app.
+- **Thread network reset:** `ssh hassio@ha "bash -l -c 'ha addons restart a0d7b954_openthread_border_router'"` — OTBR will form a new network. Existing Thread devices must re-join.
+- **Matter fabric removal via API:**
+  ```
+  curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"entity_id": "button.matter_server_remove_<device>"}' \
+    http://100.67.120.1:8123/api/services/button/press
+  ```
+  Device must be factory-reset for re-commissioning.
 - **SLZB-06MU reflash:** If RCP firmware is corrupt, reflash via Web UI (http://10.0.0.52) > Settings > Firmware.
 
 ---
