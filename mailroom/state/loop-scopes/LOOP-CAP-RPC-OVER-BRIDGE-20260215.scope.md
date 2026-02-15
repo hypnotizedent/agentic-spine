@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-CAP-RPC-OVER-BRIDGE-20260215
 created: 2026-02-15
-status: open
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Extend mailroom bridge to support arbitrary capability RPC execution
@@ -31,13 +31,13 @@ agents) to the hardcoded endpoints.
 
 ## Child Gaps
 
-| Gap ID | Severity | Description |
-|--------|----------|-------------|
-| GAP-OP-360 | high | POST /cap/run endpoint implementation |
-| GAP-OP-361 | high | Capability allowlist for RPC execution |
-| GAP-OP-362 | medium | Standardized cap-run response schema |
-| GAP-OP-363 | medium | Token-scoped capability permissions |
-| GAP-OP-364 | low | Bridge binding YAML update |
+| Gap ID | Severity | Description | Status |
+|--------|----------|-------------|--------|
+| GAP-OP-360 | high | POST /cap/run endpoint implementation | fixed (592bc6a) |
+| GAP-OP-361 | high | Capability allowlist for RPC execution | fixed (592bc6a) |
+| GAP-OP-362 | medium | Standardized cap-run response schema | fixed (592bc6a) |
+| GAP-OP-363 | medium | Token-scoped capability permissions | fixed (6717112) |
+| GAP-OP-364 | low | Bridge binding YAML update | fixed (592bc6a) |
 
 ## Acceptance Criteria
 
