@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # ha.entity.status — Single entity state lookup via HA REST API
-# Requires: Infisical CLI with HA_API_TOKEN at /home-assistant
+# Requires: infisical-agent.sh with HA_API_TOKEN at home-assistant/prod
 # Safety: read-only
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+INFISICAL_AGENT="${HOME}/code/workbench/scripts/agents/infisical-agent.sh"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ARGUMENT PARSING
@@ -32,10 +33,10 @@ echo
 command -v curl >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_curl"; exit 2; }
 command -v jq >/dev/null 2>&1  || { echo "status: STOP"; echo "reason: missing_dep_jq"; exit 2; }
 
-if ! command -v infisical >/dev/null 2>&1; then
+if [[ ! -x "$INFISICAL_AGENT" ]]; then
   echo "status: STOP"
-  echo "reason: missing_dep_infisical"
-  echo "fix: install Infisical CLI"
+  echo "reason: infisical_agent_not_found"
+  echo "fix: ensure infisical-agent.sh exists at $INFISICAL_AGENT"
   exit 2
 fi
 
@@ -43,15 +44,12 @@ fi
 # FETCH HA_API_TOKEN FROM INFISICAL
 # ─────────────────────────────────────────────────────────────────────────────
 
-set +e
-HA_TOKEN="$(infisical secrets get HA_API_TOKEN --path /home-assistant --env prod --plain 2>/dev/null)"
-infisical_rc=$?
-set -e
+HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
 
-if [[ "$infisical_rc" -ne 0 || -z "${HA_TOKEN:-}" ]]; then
+if [[ -z "${HA_TOKEN:-}" ]]; then
   echo "status: STOP"
   echo "reason: ha_token_unavailable"
-  echo "fix: check Infisical auth (secrets.auth.load) and HA_API_TOKEN at /home-assistant"
+  echo "fix: check Infisical auth and HA_API_TOKEN at home-assistant/prod"
   exit 2
 fi
 
