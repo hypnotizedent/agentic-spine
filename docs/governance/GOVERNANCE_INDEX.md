@@ -90,6 +90,7 @@ Pillar entrypoints (per stack)
 | `RAG_REINDEX_RUNBOOK.md` | Governed RAG reindex checklist and acceptance criteria |
 | `ISSUE_CLOSURE_SOP.md` | How to close issues properly |
 | `GIT_REMOTE_AUTHORITY.md` | Canonical git authority (Gitea primary, GitHub mirror-only) |
+| `OUTPUT_CONTRACTS.md` | Canonical schemas for loop scopes, gap filings, proposals, gate templates |
 | `AGENT_GOVERNANCE_BRIEF.md` | Agent operational session rules (commits, capabilities, drift gates) |
 | `AGENTS_GOVERNANCE.md` | Agent infrastructure governance (registry, contracts, discovery, verification) |
 | `AGENT_BOUNDARIES.md` | Agent action boundary constraints (what agents can/cannot do) |
@@ -493,7 +494,7 @@ Before adding `status: authoritative` or claiming SSOT:
 
 > This appendix is generated to ensure every governance doc is discoverable from the authority chain.
 > The sections above remain the curated authority narrative; this list is an index only.
-> Last regenerated: 2026-02-13 (77 docs).
+> Last regenerated: 2026-02-15 (78 docs).
 
 - `AGENT_BOUNDARIES.md`
 - `AGENT_GOVERNANCE_BRIEF.md`
@@ -546,6 +547,7 @@ Before adding `status: authoritative` or claiming SSOT:
 - `NETWORK_RUNBOOK.md`
 - `ONBOARDING_PLAYBOOK.md`
 - `OPS_PATCH_HISTORY.md`
+- `OUTPUT_CONTRACTS.md`
 - `PATCH_CADENCE.md`
 - `PHASE4_OBSERVABILITY_RUNBOOK.md`
 - `PORTABILITY_ASSUMPTIONS.md`
