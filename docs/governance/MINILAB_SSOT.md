@@ -221,6 +221,7 @@ parent_receipts:
 | SLZB-06MU (Matter) | 10.0.0.52 | - | Zigbee + Matter |
 | TubesZB (Z-Wave) | 10.0.0.90 | - | Z-Wave coordinator |
 | homeassistant | 10.0.0.100 | 100.67.120.1 | VM 100 |
+| vaultwarden | 10.0.0.102 | 100.93.142.63 | VM 102 |
 | pihole-home | 10.0.0.53 | 100.105.148.96 | LXC 105 |
 | download-home | 10.0.0.101 | 100.125.138.110 | LXC 103 |
 

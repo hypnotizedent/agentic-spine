@@ -39,6 +39,7 @@ Every new device on the home network must follow the same spine-native workflow 
 | pihole-home (LXC 105) | 10.0.0.53 | 100.105.148.96 | DNS (stopped) |
 | download-home (LXC 103) | 10.0.0.101 | 100.125.138.110 | *arr stack (stopped) |
 | homeassistant (VM 100) | 10.0.0.100 | 100.67.120.1 | Home automation |
+| vaultwarden (VM 102) | 10.0.0.102 | 100.93.142.63 | Password manager |
 | Synology NAS | 10.0.0.150 | 100.102.199.111 | Storage |
 | TubesZB | 10.0.0.90 | — | Z-Wave coordinator |
 
