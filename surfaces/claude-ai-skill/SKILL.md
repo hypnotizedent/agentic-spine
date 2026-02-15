@@ -49,8 +49,8 @@ Hosted runtime egress allowlist:
 - Action: tell the operator to add `spine.ronny.works` to the runtime/network egress allowlist (do not assume allowing `ronny.works` includes subdomains).
 
 1. Health check order:
-   - First try public: `GET https://spine.ronny.works/health` (if hostname is known).
-   - Then try tailnet: `GET http://macbook.taile9480.ts.net/health`.
+   - First try public: `GET https://spine.ronny.works/health` with CF Access headers (`CF-Access-Client-Id` + `CF-Access-Client-Secret` from step 3).
+   - Then try tailnet: `GET http://macbook.taile9480.ts.net/health` (no CF headers needed).
 2. If both health checks fail due DNS/network/timeout:
    - Say: `Bridge unreachable from this runtime (likely DNS/egress limit). Spine may still be healthy.`
    - Do **not** say "spine unavailable".
