@@ -94,21 +94,28 @@ if method == "ssh":
     with open(os.path.join(tmpdir, 'hacs_repos.json'), 'r') as f:
         data = json.load(f)
 
-    # HACS .storage format: {"data": {"repositories": [...]}} or {"data": {"repositories": {...}}}
+    # HACS .storage format: {"version": N, "data": {"<numeric_id>": {...}, ...}}
+    # Each repo entry has: full_name, category, installed (bool), repository_manifest, etc.
+    # Only repos with "installed": true are actually installed by the user.
     repo_data = data.get('data', {})
-    repositories = repo_data.get('repositories', repo_data if isinstance(repo_data, list) else [])
 
-    # Handle dict-keyed format (HACS v2+)
-    if isinstance(repositories, dict):
-        repositories = list(repositories.values())
+    # repo_data is a dict keyed by numeric repo IDs
+    all_repos = []
+    if isinstance(repo_data, dict):
+        all_repos = list(repo_data.values())
+    elif isinstance(repo_data, list):
+        all_repos = repo_data
 
-    for repo in sorted(repositories, key=lambda r: r.get('full_name', r.get('repository', ''))):
+    for repo in sorted(all_repos, key=lambda r: r.get('full_name', r.get('repository', ''))):
+        if not repo.get('installed'):
+            continue
+        manifest = repo.get('repository_manifest', {})
         repos.append({
             'repository': repo.get('full_name', repo.get('repository', '')),
             'category': repo.get('category', 'unknown'),
-            'installed_version': repo.get('installed_version', repo.get('version_installed', '')),
-            'available_version': repo.get('available_version', repo.get('last_version', '')),
-            'name': repo.get('name', repo.get('display_name', '')),
+            'installed_version': repo.get('installed_version', manifest.get('version', '')),
+            'available_version': repo.get('available_version', repo.get('last_version', manifest.get('version', ''))),
+            'name': manifest.get('name', repo.get('full_name', '').split('/')[-1] if repo.get('full_name') else ''),
         })
 
     binding = {
