@@ -137,10 +137,12 @@ else
   docs_indexed="$(echo "$docs_indexed_json" | grep "^docs_indexed:" | awk '{print $2}' || echo "0")"
 fi
 
-# Eligible count from local repo manifest (same logic as rag sync build_manifest)
+# Eligible count from local repo manifest (same logic as rag sync build_manifest + secrets filter)
+# Excludes docs containing secret material, matching what rag sync actually uploads.
 docs_eligible="$(python3 - "$SP" <<'PYEOF'
-import sys
+import re, sys
 from pathlib import Path
+
 root = Path(sys.argv[1]).resolve()
 allowed_roots = [root / "docs", root / "ops", root / "surfaces"]
 excluded_prefixes = [
@@ -148,6 +150,35 @@ excluded_prefixes = [
     "docs/governance/_imported/", "receipts/", "mailroom/state/", "fixtures/",
     ".git/", "node_modules/",
 ]
+# Same denylist as rag CLI contains_secret_material()
+secret_patterns = [
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    r"\bAKIA[0-9A-Z]{16}\b", r"\bASIA[0-9A-Z]{16}\b",
+    r"\bghp_[A-Za-z0-9]{20,}\b", r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+    r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b", r"\bsk-[A-Za-z0-9]{20,}\b",
+]
+
+def has_secrets(text, lines):
+    for pat in secret_patterns:
+        if re.search(pat, text):
+            return True
+    for line in lines:
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if not k or not v:
+            continue
+        if not re.search(r"(KEY|TOKEN|SECRET|PASS|PASSWORD)", k, re.IGNORECASE):
+            continue
+        if v.lower() in ("", "changeme", "change-me", "redacted", "example", "xxx", "xxxxx"):
+            continue
+        if v.startswith("<") and v.endswith(">"):
+            continue
+        if len(v) >= 12:
+            return True
+    return False
+
 count = 0
 for base in allowed_roots:
     if not base.exists():
@@ -159,7 +190,8 @@ for base in allowed_roots:
         if "/.archive/" in rel or rel.startswith(".archive/"):
             continue
         try:
-            lines = p.read_text(errors="ignore").splitlines()
+            text = p.read_text(errors="ignore")
+            lines = text.splitlines()
         except Exception:
             continue
         if not lines or lines[0].strip() != "---":
@@ -172,8 +204,11 @@ for base in allowed_roots:
         if end is None:
             continue
         front = "\n".join(lines[:end+1])
-        if all(r in front for r in ["status:", "owner:", "last_verified:"]):
-            count += 1
+        if not all(r in front for r in ["status:", "owner:", "last_verified:"]):
+            continue
+        if has_secrets(text, lines):
+            continue
+        count += 1
 print(count)
 PYEOF
 )"
