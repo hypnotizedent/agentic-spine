@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-13
+last_verified: 2026-02-15
 scope: onboarding-lifecycles
 ---
 
@@ -16,11 +16,13 @@ scope: onboarding-lifecycles
 ```bash
 cd /Users/ronnyworks/code/agentic-spine
 ./bin/ops status
+./bin/ops cap run verify.drift_gates.certify --domain "${OPS_GATE_DOMAIN:-core}" --brief
 ./bin/ops cap run spine.verify
 ```
 
 Stop if:
 - baseline verify is not green.
+- active gate domain pack is unknown for the onboarding surface.
 - onboarding scope is multi-step and not loop/proposal anchored.
 
 ---

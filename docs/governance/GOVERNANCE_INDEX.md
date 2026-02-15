@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-13
+last_verified: 2026-02-15
 scope: governance-guide
 github_issue: "#541"
 ---
@@ -44,6 +44,21 @@ Pillar entrypoints (per stack)
 3. NO INVENTING → match existing patterns
 4. FIX ONE THING → verify before next
 5. WORK GENERATES RECEIPTS → `./bin/ops cap run <name>`
+
+## Gate Domain Routing (Terminal-First)
+
+Use domain packs to discover which drift gates apply before mutation work.
+
+- Canonical map: `ops/bindings/gate.domain.profiles.yaml`
+- Domains: `core`, `secrets`, `aof`, `home`, `media`, `rag`, `workbench`, `infra`, `loop_gap`
+- Terminal default: `OPS_GATE_DOMAIN` unset → `core`
+
+Commands:
+
+```bash
+./bin/ops cap run verify.drift_gates.certify --list-domains
+./bin/ops cap run verify.drift_gates.certify --domain "${OPS_GATE_DOMAIN:-core}" --brief
+```
 
 ---
 

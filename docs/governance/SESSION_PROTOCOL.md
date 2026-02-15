@@ -54,6 +54,10 @@ Full spine access. Follow all sections below in order.
 
 1. **Greet the spine**
    - Run `./bin/ops preflight` or `./bin/ops lane <name>` to print governance hints.
+   - Confirm gate domain pack routing before mutation:
+     - `./bin/ops cap run verify.drift_gates.certify --list-domains`
+     - `./bin/ops cap run verify.drift_gates.certify --domain <name> --brief`
+   - Set `OPS_GATE_DOMAIN=<name>` (default is `core`) so preflight prints the active domain pack inline.
    - Install governance hooks once per clone: `./bin/ops hooks install` (warns in preflight if missing).
    - If you are about to touch secrets, make sure you sourced `~/.config/infisical/credentials` and can run the secrets gating capabilities (`secrets.binding`, `secrets.auth.status`, etc.).
 2. **Load context**
@@ -81,6 +85,20 @@ Full spine access. Follow all sections below in order.
 | Single mutating action | `ops cap run` (manual approval) |
 | Multi-step coordinated work | Open a loop, use proposal flow |
 | Quick verify/status check | `ops cap run spine.verify` or `ops status` |
+
+### Gate Domain Packs (Terminal Routing)
+
+Use domain packs to make gate applicability explicit before mutation work.
+
+- Canonical binding: `ops/bindings/gate.domain.profiles.yaml`
+- Domain list: `core`, `secrets`, `aof`, `home`, `media`, `rag`, `workbench`, `infra`, `loop_gap`
+- Terminal default: `OPS_GATE_DOMAIN` unset → `core`
+
+Recommended pre-mutation command:
+
+```bash
+./bin/ops cap run verify.drift_gates.certify --domain "${OPS_GATE_DOMAIN:-core}" --brief
+```
 
 ### After the session (Desktop)
 

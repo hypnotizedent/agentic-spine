@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-13
+last_verified: 2026-02-15
 scope: build-mode-execution
 ---
 
@@ -18,12 +18,14 @@ Run in order:
 ```bash
 cd /Users/ronnyworks/code/agentic-spine
 ./bin/ops status
+./bin/ops cap run verify.drift_gates.certify --domain "${OPS_GATE_DOMAIN:-core}" --brief
 ./bin/ops cap run spine.verify
 ./bin/ops cap run gaps.status
 ```
 
 Stop if:
 - `spine.verify` fails.
+- your active domain pack is unknown or not aligned to the work surface.
 - open work contains unlinked gaps you are about to bypass.
 - another terminal/agent is actively mutating same surface.
 
@@ -64,6 +66,7 @@ Recommended in-flight checks:
 
 ```bash
 ./bin/ops cap run verify.drift_gates.certify
+./bin/ops cap run verify.drift_gates.certify --domain "${OPS_GATE_DOMAIN:-core}" --brief
 ./bin/ops cap run host.drift.audit
 ```
 
