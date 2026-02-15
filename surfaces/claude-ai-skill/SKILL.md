@@ -40,28 +40,31 @@ Do not run `./bin/ops` unless step 1 succeeded.
 
 ## Bootstrap: Bridge-capable mobile/remote
 
-Base URL (tailnet): `http://macbook.taile9480.ts.net`
+Remote URL strategy:
+- Primary: `https://<public-bridge-host>` (hosted runtime compatible)
+- Secondary: `http://macbook.taile9480.ts.net` (tailnet)
 
-1. Health check:
-   - `GET http://macbook.taile9480.ts.net/health`
-2. If health fails due DNS/network/timeout:
-   - Say: `Bridge unreachable from this runtime (likely tailnet DNS/egress limit). Spine may still be healthy.`
+1. Health check order:
+   - First try public: `GET https://<public-bridge-host>/health` (if hostname is known).
+   - Then try tailnet: `GET http://macbook.taile9480.ts.net/health`.
+2. If both health checks fail due DNS/network/timeout:
+   - Say: `Bridge unreachable from this runtime (likely DNS/egress limit). Spine may still be healthy.`
    - Do **not** say "spine unavailable".
-   - Ask for one of these next actions:
-     - a public HTTPS bridge URL (recommended for seamless mobile cloud access), or
-     - pasted output from local trusted device request to `/loops/open`, or
-     - continue in offline artifact mode.
-3. If health succeeds, request token if missing:
+   - Continue with offline artifact mode, OR ask for:
+     - a valid public HTTPS bridge URL, or
+     - pasted output from a trusted-device request to `/loops/open`.
+3. If either health check succeeds, request token if missing:
    - `X-Spine-Token: <token>` or `Authorization: Bearer <token>`
-4. Read open loops:
-   - `GET http://macbook.taile9480.ts.net/loops/open` (with auth header)
-5. Ask governance questions:
-   - `POST http://macbook.taile9480.ts.net/rag/ask`
+4. Use the healthy base URL for all calls in this session.
+5. Read open loops:
+   - `GET <base>/loops/open` (with auth header)
+6. Ask governance questions:
+   - `POST <base>/rag/ask`
    - JSON body: `{"query":"<question>"}`
-6. Run allowlisted read-only caps:
-   - `POST http://macbook.taile9480.ts.net/cap/run`
+7. Run allowlisted read-only caps:
+   - `POST <base>/cap/run`
    - JSON body: `{"capability":"gaps.status"}`
-7. For mutations, draft governed artifacts and hand off to Desktop.
+8. For mutations, draft governed artifacts and hand off to Desktop.
 
 Never hardcode tokens. Never silently skip auth.
 

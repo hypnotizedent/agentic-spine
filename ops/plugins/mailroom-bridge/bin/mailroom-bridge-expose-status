@@ -3,6 +3,7 @@ set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 BINDING="${SPINE_REPO}/ops/bindings/mailroom.bridge.yaml"
+ENDPOINTS_BINDING="${SPINE_REPO}/ops/bindings/mailroom.bridge.endpoints.yaml"
 
 host="127.0.0.1"
 port="8799"
@@ -11,9 +12,25 @@ if [[ -f "$BINDING" ]] && command -v yq >/dev/null 2>&1; then
   port="$(yq -r '.listen.port // 8799' "$BINDING" 2>/dev/null || echo "8799")"
 fi
 
+public_url=""
+tailnet_url_cfg=""
+if [[ -f "$ENDPOINTS_BINDING" ]] && command -v yq >/dev/null 2>&1; then
+  public_url="$(yq -r '.endpoints.public_https.url // ""' "$ENDPOINTS_BINDING" 2>/dev/null || echo "")"
+  tailnet_url_cfg="$(yq -r '.endpoints.tailnet_http.url // ""' "$ENDPOINTS_BINDING" 2>/dev/null || echo "")"
+fi
+
 echo "MAILROOM_BRIDGE_EXPOSE"
 echo "  binding: ${BINDING}"
+echo "  endpoints_binding: ${ENDPOINTS_BINDING}"
 echo "  local:   http://${host}:${port}"
+if [[ -n "${tailnet_url_cfg:-}" ]]; then
+  echo "  tailnet_config_url: ${tailnet_url_cfg}"
+fi
+if [[ -n "${public_url:-}" ]]; then
+  echo "  public_config_url: ${public_url}"
+else
+  echo "  public_config_url: (not configured)"
+fi
 
 if command -v curl >/dev/null 2>&1; then
   if curl -fsS "http://${host}:${port}/health" >/dev/null 2>&1; then
@@ -23,6 +40,19 @@ if command -v curl >/dev/null 2>&1; then
   fi
 else
   echo "  local_health: SKIP (curl missing)"
+fi
+
+if [[ -n "${public_url:-}" ]]; then
+  if command -v curl >/dev/null 2>&1; then
+    pub_health="${public_url%/}/health"
+    if curl -fsS --max-time 8 "$pub_health" >/dev/null 2>&1; then
+      echo "  public_health: OK (${pub_health})"
+    else
+      echo "  public_health: FAIL (${pub_health})"
+    fi
+  else
+    echo "  public_health: SKIP (curl missing)"
+  fi
 fi
 
 if ! command -v tailscale >/dev/null 2>&1; then

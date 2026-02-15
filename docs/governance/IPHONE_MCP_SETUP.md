@@ -7,7 +7,7 @@ scope: iphone-mcp-setup
 
 # iPhone MCP Setup
 
-> **Purpose:** Step-by-step guide for accessing the spine mailroom bridge from iPhone via Tailscale.
+> **Purpose:** Step-by-step guide for accessing the spine mailroom bridge from iPhone (tailnet) and hosted runtimes (public HTTPS).
 
 ---
 
@@ -25,6 +25,14 @@ iPhone (Tailscale) ──tailnet HTTP──▶ macbook.taile9480.ts.net:80
                                         │
                                         ▼
                               spine capabilities + RAG
+
+Claude hosted runtime ──public HTTPS──▶ https://<public-bridge-host>
+                                           │
+                                           ▼
+                               Cloudflare Tunnel / reverse proxy
+                                           │
+                                           ▼
+                                 127.0.0.1:8799 (/health, /loops/open, /rag/ask, /cap/run)
 ```
 
 **What this gives you from iPhone:**
@@ -50,6 +58,7 @@ Mutation from phone is **enqueue-only**: submit prompts via `/inbox/enqueue`, th
 | Both devices on same tailnet | iPhone sees `macbook` in device list |
 | Bridge running on Mac | `./bin/ops cap run mailroom.bridge.status` |
 | Tailnet exposure enabled | `./bin/ops cap run mailroom.bridge.expose.status` |
+| Public HTTPS endpoint (optional, hosted-runtime path) | `curl -fsS https://<public-bridge-host>/health` |
 
 ---
 
@@ -104,8 +113,12 @@ You'll need this for the iPhone client configuration.
 ### Base URL
 
 ```
-http://macbook.taile9480.ts.net
+Tailnet: http://macbook.taile9480.ts.net
+Public:  https://<public-bridge-host>
 ```
+
+Use public HTTPS as primary for hosted runtimes (Claude iOS/claude.ai cloud execution).
+Use tailnet URL for trusted-device/private access.
 
 ### Authentication
 
@@ -187,6 +200,13 @@ The watcher on the Mac will pick this up and process it.
 3. **Verify tailnet exposure:** `./bin/ops cap run mailroom.bridge.expose.status` — look for `tailnet_health: OK`.
 4. **Test from Mac first:** `curl http://macbook.taile9480.ts.net/health` — if this fails, the issue is tailscale serve, not the iPhone.
 
+### Hosted runtime cannot resolve tailnet hostname
+
+- Symptom: Claude session has HTTP tools but `macbook.taile9480.ts.net` returns DNS/network error.
+- Cause: hosted runtime is not on your tailnet.
+- Fix: use public HTTPS bridge URL (`https://<public-bridge-host>`) for hosted runtime requests.
+- Keep token auth on all non-health endpoints.
+
 ### 401 Unauthorized
 
 - Token is required for all endpoints except `/health`.
@@ -215,10 +235,11 @@ The watcher on the Mac will pick this up and process it.
 ## Security Model
 
 - Bridge binds to `127.0.0.1` only — never exposed directly to the network.
-- Tailscale serve proxies tailnet traffic to localhost (tailnet-only, no public exposure).
+- Tailscale serve proxies tailnet traffic to localhost for private path.
+- Public HTTPS path is allowed only through managed tunnel/reverse proxy with strict auth.
 - Token auth is enforced for all non-health endpoints (`require_token: true`).
 - Token is generated with `openssl rand -hex 24` and stored with mode 0600.
-- Do not expose to the public internet. Tailnet-only access is the supported path.
+- Do not expose this service anonymously on the public internet.
 
 ---
 
