@@ -1,7 +1,8 @@
 ---
 id: LOOP-IOS-SPINE-ALIGNMENT-20260215
-status: active
+status: closed
 opened: 2026-02-15
+closed: 2026-02-15
 owner: "@ronny"
 gaps:
   - GAP-OP-444
