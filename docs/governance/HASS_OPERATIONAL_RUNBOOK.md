@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-11
+last_verified: 2026-02-15
 scope: hass-operational-runbook
 parent_loop: LOOP-HASS-SSOT-AUTOGRADE-20260210
 migrated_from: "legacy home-assistant/ pillar (7 sources consolidated)"
@@ -50,41 +50,48 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 
 ## 2. Integration Inventory
 
-> Source: HA API `/api/config/config_entries/entry` (last extracted 2026-01-20)
+> Source: HA API `/api/config/config_entries/entry` (last extracted 2026-02-15)
 > Policy: tracked via API extraction, not manual. `ha.ssot.propose` will automate.
 
 ### Active Integrations (Key Entries)
 
 | Domain | Name/Title | Category |
 |--------|-----------|----------|
-| mqtt | Mosquitto broker | Infrastructure |
-| hassio | Supervisor | Infrastructure |
-| hacs | HACS | Infrastructure |
-| backup | Backup | Infrastructure |
-| go2rtc | go2rtc | Infrastructure |
-| tplink | EMPRESS LAMP EP25, KING LAMP EP25 | Smart Home |
-| august | Yale Assure Lock | Smart Home |
-| ring | Doorbell + cameras | Smart Home |
-| winix | Winix Purifier | Smart Home |
-| sonoff | eWeLink devices | Smart Home |
-| tuya | Cloud Tuya (x2) | Smart Home |
-| roborock | Vacuum | Smart Home |
-| apple_tv | Living Room (x2) | Media |
-| webostv | LG Living Room, LG Guest Room | Media |
 | androidtv_remote | Sony Bedroom TV | Media |
-| braviatv | KD-65X80CK | Media |
-| cast | Google Cast | Media |
-| mobile_app | 4 devices (Ronny, Empress, Boca, Marium) | Companion |
-| islamic_prayer_times | Prayer Times (x2) | Utility |
-| met | Weather (Home) | Utility |
+| apple_tv | Living Room, Office | Media |
+| backup | Backup | Infrastructure |
 | caldav | iCloud calendars (ronny@hantash.com) | Utility |
-| matter | Matter | Protocol |
-| smlight | SLZB-06MU | Protocol |
-| radarr, sonarr, lidarr | Media management | Media Mgmt |
+| esphome | tubeszb-2026-zw | Protocol |
+| go2rtc | go2rtc | Infrastructure |
+| google_translate | Google Translate TTS | Utility |
+| group | all bulbs, all lamps, bedroom lamps | Infrastructure |
+| hacs | HACS | Infrastructure |
+| hassio | Supervisor | Infrastructure |
+| islamic_prayer_times | Islamic Prayer Times | Utility |
 | jellyfin | Media server | Media Mgmt |
+| local_todo | shopping-list | Utility |
+| matter | Matter | Protocol |
+| met | Weather (Home) | Utility |
+| mobile_app | Ronny, Empress, Boca (x2), Marium | Companion |
+| mqtt | Mosquitto broker | Infrastructure |
+| radarr, lidarr | Media management | Media Mgmt |
+| radio_browser | Radio Browser | Media |
+| ring | Doorbell + cameras | Smart Home |
+| roborock | Vacuum | Smart Home |
 | sabnzbd | Download clients (x2) | Media Mgmt |
+| shopping_list | Shopping list | Utility |
+| smlight | SLZB-06MU | Protocol |
+| sonoff | eWeLink devices | Smart Home |
+| sun | Sun | Utility |
+| synology_dsm | DS918 | Infrastructure |
+| thread | Thread | Protocol |
+| tplink | EMPRESS LAMP EP25, KING LAMP EP25 | Smart Home |
+| tuya | Cloud Tuya (x2) | Smart Home |
+| webostv | LG Living Room, LG Guest Room | Media |
+| webrtc | WebRTC Camera | Infrastructure |
+| winix | Winix Purifier | Smart Home |
 
-**Total:** ~60 config entries across ~30 domains.
+**Total:** ~47 config entries across ~34 domains.
 
 ---
 
@@ -94,17 +101,20 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 
 | Automation | Entity Trigger | Action | Notes |
 |-----------|---------------|--------|-------|
-| Bedroom: King Button | `event.0x00158d008b875d40_action` (single) | `switch.toggle` king lamp | Zigbee button |
-| Bedroom: Empress Button | `event.0xd44867fffe00c96f_action` (single) | `switch.toggle` empress lamp | Zigbee button |
-| Office: Button | `event.0xa4c138cdbd2d0012_action` (single) | `light.toggle` office desk bulb | Zigbee button |
-| Scene Switch: Btn 1-4 | `event.0xa4c138615058086b_action` (1-4_single) | Toggle empress/king/office/guest | 4-button scene switch |
-| Mailbox: Vibration | `binary_sensor.vibration_sensor_vibration` on | Notify Ronny iPhone | Contact sensor |
-| Zigbee: Low Battery | numeric_state < 20% on 6 sensors | Notify Ronny iPhone | Health monitoring |
-| Zigbee: Stale Device Alert | time 09:00 daily | Notify if button silent > 12h | Health monitoring |
-| System: Auto-Dismiss Login | event: persistent_notification from 127.0.0.1 | Dismiss notification | Noise suppression |
-| Chores: Weekly Laundry | time 09:00 Sunday | Notify overdue laundry items | Chore tracker |
-| Chores: Quarterly Maintenance | time 10:00 1st of month | Notify overdue HVAC/filter | Chore tracker |
-| Chores: Daily Streak | time 00:01 daily | Increment/reset streak counter | Gamification |
+| Bedroom: Empress Button → Plug | `event.0xd44867fffe00c96f_action` (single) | `switch.toggle` empress lamp | Zigbee button |
+| Bedroom: King Button → Plug | `event.0x00158d008b875d40_action` (single) | `switch.toggle` king lamp | Zigbee button |
+| Chores: Daily Streak Check | time 00:01 daily | Increment/reset streak counter | Gamification |
+| Chores: Quarterly Maintenance Reminder | time 10:00 1st of month | Notify overdue HVAC/filter | Chore tracker |
+| Chores: Weekly Laundry Reminder | time 09:00 Sunday | Notify overdue laundry items | Chore tracker |
+| Living Room: Scene Btn 1 → Empress Lamp | `event.0xa4c138615058086b_action` (1_single) | `switch.toggle` empress lamp | Scene switch |
+| Living Room: Scene Btn 2 → King Lamp | `event.0xa4c138615058086b_action` (2_single) | `switch.toggle` king lamp | Scene switch |
+| Living Room: Scene Btn 3 → Office Bulb | `event.0xa4c138615058086b_action` (3_single) | `light.toggle` office desk bulb | Scene switch |
+| Living Room: Scene Btn 4 → Guest Room Bulb | `event.0xa4c138615058086b_action` (4_single) | `light.toggle` guest room bulb | Scene switch |
+| Mailbox: Vibration → Notify | `binary_sensor.vibration_sensor_vibration` on | Notify Ronny iPhone | Contact sensor |
+| Office: Button → Desk Bulb | `event.0xa4c138cdbd2d0012_action` (single) | `light.toggle` office desk bulb | Zigbee button |
+| System: Auto-Dismiss Localhost Login Failures | event: persistent_notification from 127.0.0.1 | Dismiss notification | Noise suppression |
+| Zigbee: Low Battery Alert | numeric_state < 20% on 6 sensors | Notify Ronny iPhone | Health monitoring |
+| Zigbee: Stale Device Alert (Daily) | time 09:00 daily | Notify if button silent > 12h | Health monitoring |
 
 ### Critical Fix History
 
@@ -118,16 +128,16 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 
 | Entity ID | Type | Purpose |
 |-----------|------|---------|
+| `counter.chore_streak` | Counter | Consecutive days with a chore completed |
 | `input_boolean.sd_focus_mode` | Boolean | Stream Deck focus mode signal |
 | `input_boolean.sd_recording_mode` | Boolean | Stream Deck recording mode |
-| `input_select.house_mode` | Select | House mode (Home/Sleep/Party) |
-| `input_datetime.laundry_bathroom_towels` | Date | Last washed: bathroom towels |
-| `input_datetime.laundry_bed_sheets_master` | Date | Last washed: master sheets |
-| `input_datetime.laundry_bed_sheets_guest` | Date | Last washed: guest sheets |
-| `input_datetime.laundry_kitchen_towels` | Date | Last washed: kitchen towels |
 | `input_datetime.chore_hvac_filter` | Date | Last changed: HVAC filter |
 | `input_datetime.chore_purifier_filters` | Date | Last changed: purifier filters |
-| `counter.chore_streak` | Counter | Consecutive days with a chore completed |
+| `input_datetime.laundry_bathroom_towels` | Date | Last washed: bathroom towels |
+| `input_datetime.laundry_bed_sheets_guest` | Date | Last washed: guest sheets |
+| `input_datetime.laundry_bed_sheets_master` | Date | Last washed: master sheets |
+| `input_datetime.laundry_kitchen_towels` | Date | Last washed: kitchen towels |
+| `input_select.house_mode` | Select | House mode (Home/Sleep/Party) |
 
 ---
 
