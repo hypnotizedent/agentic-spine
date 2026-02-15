@@ -1,0 +1,61 @@
+# RAG Embedding Backend Selection Contract
+# Canonical binding for embedding model/provider selection.
+# Prevents split-brain between runner + runtime by establishing a single
+# source of truth for which embedding backend is active.
+#
+# Authority: docs/governance/RAG_REINDEX_RUNBOOK.md
+# Consumers:
+# - ops/plugins/rag/bin/rag (sync + retrieve + health)
+# - ops/plugins/rag/bin/rag-reindex-remote-start
+# - ops/plugins/rag/bin/rag-embedding-probe
+# - surfaces/verify/d111-rag-embedding-smoke-preflight.sh
+
+schema_version: "1.0"
+updated: "2026-02-15"
+owner: "@ronny"
+
+# Active backend — the one actually used for embedding
+active:
+  model: "mxbai-embed-large:latest"
+  provider: "ollama"
+  # Provider URL resolved from services.health.yaml or env override
+  # Runner host: OLLAMA_URL from rag.remote.runner.yaml
+  # Local: OLLAMA_URL env or services.health.yaml derivation
+  vector_store: "qdrant"
+
+# Fallback candidates — for future A/B or failover (not wired yet)
+fallback_candidates:
+  - model: "nomic-embed-text:latest"
+    provider: "ollama"
+    notes: "Lighter model, lower quality but faster"
+  - model: "all-minilm:latest"
+    provider: "ollama"
+    notes: "Smallest footprint, sentence-transformer compatible"
+
+# Probe settings for embedding health checks
+probe:
+  # Test prompt used for embedding validation
+  test_prompt: "What is the canonical session entry protocol?"
+  # Expected embedding dimensions for active model
+  expected_dimensions: 1024
+  # Maximum acceptable latency for a single embedding (ms)
+  max_latency_ms: 5000
+  # Number of consecutive successful probes required
+  min_consecutive_pass: 3
+  # Interval between probes (seconds)
+  probe_interval_sec: 2
+
+# Threshold for pass/fail determination
+threshold:
+  # All probes must return HTTP 200 with valid embedding vector
+  require_http_200: true
+  # Embedding vector length must match expected_dimensions
+  require_dimension_match: true
+  # Latency must be within max_latency_ms for all probes
+  require_latency_within_slo: true
+
+# Runtime override — env var to force a specific backend
+override:
+  env_var: "RAG_EMBED_BACKEND"
+  # Valid values: "active" (default), or a model name from fallback_candidates
+  default: "active"

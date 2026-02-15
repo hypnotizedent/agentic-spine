@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# RAG Reindex Short-Batch Smoke
+# Runs a small-N document sync on the remote runner to validate embedding
+# pipeline health before authorizing a full reindex.
+#
+# Default is dry-run. Use --execute to mutate.
+# Does NOT run a full reindex — only uploads N documents.
+#
+# Authority: docs/governance/RAG_REINDEX_RUNBOOK.md
+# Binding: ops/bindings/rag.embedding.backend.yaml (probe settings)
+#          ops/bindings/rag.remote.runner.yaml (remote host)
+#          ops/bindings/rag.workspace.contract.yaml (sync policy)
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${git_root:-}" && "${git_root:-}" != "null" ]]; then
+  SP="${SPINE_ROOT:-$git_root}"
+else
+  SP="${SPINE_ROOT:-$(cd "$script_dir/../../../.." && pwd)}"
+fi
+
+RUNNER_BINDING="$SP/ops/bindings/rag.remote.runner.yaml"
+BACKEND_BINDING="$SP/ops/bindings/rag.embedding.backend.yaml"
+WORKSPACE_BINDING="$SP/ops/bindings/rag.workspace.contract.yaml"
+EVIDENCE_DIR="$SP/mailroom/state/rag-sync"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+log() { echo "→ $*"; }
+
+for t in yq ssh rsync jq; do
+  command -v "$t" >/dev/null 2>&1 || fail "missing required tool: $t"
+done
+
+[[ -f "$RUNNER_BINDING" ]] || fail "runner binding not found: $RUNNER_BINDING"
+[[ -f "$BACKEND_BINDING" ]] || fail "backend binding not found: $BACKEND_BINDING"
+[[ -f "$WORKSPACE_BINDING" ]] || fail "workspace binding not found: $WORKSPACE_BINDING"
+
+# Defaults
+BATCH_SIZE="${RAG_SMOKE_BATCH_SIZE:-5}"
+EXECUTE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --batch-size|-n)
+      BATCH_SIZE="${2:-5}"
+      shift 2
+      ;;
+    --execute)
+      EXECUTE=1
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: rag-reindex-smoke [--batch-size N] [--execute]"
+      echo "  Smoke-test the embedding pipeline with N docs (default: 5)."
+      echo "  Dry-run by default. --execute actually uploads."
+      exit 0
+      ;;
+    *)
+      fail "Unknown arg: $1"
+      ;;
+  esac
+done
+
+# Read runner binding
+REMOTE_HOST="$(yq -r '.remote.host // ""' "$RUNNER_BINDING")"
+REMOTE_USER="$(yq -r '.remote.user // ""' "$RUNNER_BINDING")"
+REMOTE_PORT="$(yq -r '.remote.port // 22' "$RUNNER_BINDING")"
+REMOTE_REPO="$(yq -r '.remote.repo_path // ""' "$RUNNER_BINDING")"
+WORKSPACE="$(yq -r '.sync.workspace_slug // "agentic-spine"' "$RUNNER_BINDING")"
+ANYTHINGLLM_URL="$(yq -r '.sync.anythingllm_url // ""' "$RUNNER_BINDING")"
+CONTAINER_HINT="$(yq -r '.runtime.anythingllm_container_hint // "anythingllm"' "$RUNNER_BINDING")"
+
+[[ -n "$REMOTE_HOST" ]] || fail ".remote.host missing"
+[[ -n "$REMOTE_USER" ]] || fail ".remote.user missing"
+[[ -n "$REMOTE_REPO" ]] || fail ".remote.repo_path missing"
+[[ -n "$ANYTHINGLLM_URL" ]] || fail ".sync.anythingllm_url missing"
+
+# Read load-shaping from workspace binding
+LS_TIMEOUT="$(yq -r '.sync_policy.load_shaping.per_request_timeout_sec // 180' "$WORKSPACE_BINDING")"
+LS_PACE="$(yq -r '.sync_policy.load_shaping.inter_doc_pace_sec // 1' "$WORKSPACE_BINDING")"
+
+TARGET="${REMOTE_USER}@${REMOTE_HOST}"
+SSH_ARGS=(-o BatchMode=yes -o ConnectTimeout=10 -p "$REMOTE_PORT")
+
+echo "=== RAG Reindex Short-Batch Smoke ==="
+echo "target:       $TARGET"
+echo "workspace:    $WORKSPACE"
+echo "batch_size:   $BATCH_SIZE"
+echo "timeout_sec:  $LS_TIMEOUT"
+echo "pace_sec:     $LS_PACE"
+echo
+
+# Verify remote reachability
+if ! ssh "${SSH_ARGS[@]}" "$TARGET" "echo ok >/dev/null" 2>/dev/null; then
+  fail "cannot reach remote target $TARGET"
+fi
+
+# Check no existing session running
+if ssh "${SSH_ARGS[@]}" "$TARGET" "tmux has-session -t 'rag_sync' 2>/dev/null"; then
+  fail "existing rag_sync tmux session is RUNNING — stop it first"
+fi
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+  echo "DRY-RUN: would sync repo snapshot to remote and upload $BATCH_SIZE docs"
+  echo
+  echo "To execute:"
+  echo "  ./bin/ops cap run rag.reindex.smoke --execute"
+  echo "  ./bin/ops cap run rag.reindex.smoke --batch-size 10 --execute"
+  exit 0
+fi
+
+log "Syncing repo snapshot to remote..."
+RSYNC_SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 -p $REMOTE_PORT"
+mapfile -t EXCLUDES < <(yq -r '.transfer.excludes[]?' "$RUNNER_BINDING" 2>/dev/null || true)
+RSYNC_EXCLUDE_ARGS=()
+for e in "${EXCLUDES[@]:-}"; do
+  [[ -z "$e" || "$e" == "null" ]] && continue
+  RSYNC_EXCLUDE_ARGS+=(--exclude "$e")
+done
+rsync -az "${RSYNC_EXCLUDE_ARGS[@]}" -e "$RSYNC_SSH" "$SP/" "$TARGET:$REMOTE_REPO/"
+
+log "Building short-batch manifest on remote (first $BATCH_SIZE eligible docs)..."
+
+# Generate runner script for remote execution
+RUNNER_LOCAL="$(mktemp)"
+cat > "$RUNNER_LOCAL" <<RUNNER_EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd '$REMOTE_REPO'
+
+container=\$(sudo docker ps --format '{{.Names}}' | grep -m1 -E '$CONTAINER_HINT' || true)
+if [[ -z "\$container" ]]; then
+  echo '{"error":"container_not_found"}'
+  exit 2
+fi
+
+api_key=\$(sudo docker exec "\$container" python3 -c "import sqlite3; c=sqlite3.connect('/app/server/storage/anythingllm.db').cursor(); c.execute('SELECT secret FROM api_keys LIMIT 1'); r=c.fetchone(); print(r[0] if r else '')")
+if [[ -z "\$api_key" ]]; then
+  echo '{"error":"api_key_not_found"}'
+  exit 2
+fi
+
+export SPINE_CODE='$REMOTE_REPO'
+export SPINE_REPO='$REMOTE_REPO'
+export RAG_WORKSPACE_SLUG='$WORKSPACE'
+export ANYTHINGLLM_URL='$ANYTHINGLLM_URL'
+export ANYTHINGLLM_API_KEY="\$api_key"
+
+# Build manifest and take first N
+manifest=\$(./ops/plugins/rag/bin/rag sync --workspace '$WORKSPACE' --dry-run 2>/dev/null | tail -n +5 | head -n $BATCH_SIZE)
+total=\$(echo "\$manifest" | sed '/^\s*$/d' | wc -l | tr -d ' ')
+
+uploaded=0
+failed=0
+start_epoch=\$(date +%s)
+
+while IFS= read -r rel; do
+  [[ -z "\$rel" ]] && continue
+  abs="$REMOTE_REPO/\$rel"
+  [[ ! -f "\$abs" ]] && { failed=\$((failed + 1)); continue; }
+
+  # Prepare file
+  prepared=\$(mktemp)
+  title=\$(head -20 "\$abs" | grep -m1 '^#' | sed 's/^#\+ *//' || basename "\$abs")
+  echo "DOCUMENT: \$title" > "\$prepared"
+  echo "SOURCE: \$abs" >> "\$prepared"
+  echo "" >> "\$prepared"
+  cat "\$abs" >> "\$prepared"
+
+  header_file=\$(mktemp)
+  chmod 600 "\$header_file"
+  printf 'Authorization: Bearer %s\n' "\$api_key" > "\$header_file"
+
+  code=\$(curl -sS --max-time $LS_TIMEOUT -o /dev/null -w '%{http_code}' \
+    -H "@\${header_file}" \
+    -F "file=@\${prepared};filename=\$(basename "\$abs")" \
+    "$ANYTHINGLLM_URL/api/workspace/$WORKSPACE/upload-and-embed" || echo "000")
+  rm -f "\$header_file" "\$prepared" 2>/dev/null
+
+  if [[ "\$code" -ge 200 && "\$code" -lt 300 ]]; then
+    uploaded=\$((uploaded + 1))
+  else
+    failed=\$((failed + 1))
+  fi
+
+  sleep $LS_PACE
+done <<< "\$manifest"
+
+end_epoch=\$(date +%s)
+duration=\$((end_epoch - start_epoch))
+
+# Check checkpoint state
+checkpoint_state="clean"
+if [[ -f "$REMOTE_REPO/mailroom/state/rag-sync/checkpoint.txt" ]]; then
+  cp_lines=\$(wc -l < "$REMOTE_REPO/mailroom/state/rag-sync/checkpoint.txt")
+  if [[ "\$cp_lines" -gt 0 ]]; then
+    checkpoint_state="has_\${cp_lines}_lines"
+  fi
+fi
+
+echo "{\"batch_size\":$BATCH_SIZE,\"attempted\":\$total,\"uploaded\":\$uploaded,\"failed\":\$failed,\"duration_sec\":\$duration,\"checkpoint\":\"\$checkpoint_state\"}"
+RUNNER_EOF
+chmod 700 "$RUNNER_LOCAL"
+
+REMOTE_RUNNER="/tmp/rag-smoke-run.sh"
+scp -P "$REMOTE_PORT" "$RUNNER_LOCAL" "$TARGET:$REMOTE_RUNNER" >/dev/null
+rm -f "$RUNNER_LOCAL"
+
+log "Running short-batch smoke on remote ($BATCH_SIZE docs)..."
+result="$(ssh "${SSH_ARGS[@]}" "$TARGET" "chmod +x '$REMOTE_RUNNER' && bash '$REMOTE_RUNNER'" 2>/dev/null || echo '{"error":"remote_execution_failed"}')"
+
+echo
+echo "=== Smoke Results ==="
+echo "$result" | jq '.' 2>/dev/null || echo "$result"
+
+# Parse results
+uploaded="$(echo "$result" | jq -r '.uploaded // 0' 2>/dev/null || echo "0")"
+failed_count="$(echo "$result" | jq -r '.failed // 0' 2>/dev/null || echo "0")"
+checkpoint="$(echo "$result" | jq -r '.checkpoint // "unknown"' 2>/dev/null || echo "unknown")"
+duration="$(echo "$result" | jq -r '.duration_sec // 0' 2>/dev/null || echo "0")"
+error="$(echo "$result" | jq -r '.error // ""' 2>/dev/null || echo "")"
+
+# Write evidence file for gate consumption
+mkdir -p "$EVIDENCE_DIR"
+EVIDENCE_FILE="$EVIDENCE_DIR/smoke-evidence.json"
+echo "$result" | jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + {timestamp: $ts}' > "$EVIDENCE_FILE" 2>/dev/null || echo "$result" > "$EVIDENCE_FILE"
+
+echo
+echo "evidence: $EVIDENCE_FILE"
+
+if [[ -n "$error" ]]; then
+  fail "Smoke failed: $error"
+fi
+
+if [[ "$failed_count" -gt 0 ]]; then
+  fail "Smoke had $failed_count failures (uploaded=$uploaded, duration=${duration}s)"
+fi
+
+echo
+echo "PASS: Short-batch smoke completed — uploaded=$uploaded, failed=0, duration=${duration}s, checkpoint=$checkpoint"

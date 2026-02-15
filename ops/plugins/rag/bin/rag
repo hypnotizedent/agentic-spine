@@ -438,6 +438,55 @@ PY
   echo "$tmp"
 }
 
+# Load-shaping knob defaults (overridden by binding in sync path)
+LS_TIMEOUT="${RAG_UPLOAD_TIMEOUT:-180}"
+LS_MAX_RETRIES="${RAG_MAX_RETRIES:-2}"
+LS_BACKOFF_STRATEGY="${RAG_BACKOFF_STRATEGY:-exponential}"
+LS_RETRY_BASE_DELAY="${RAG_RETRY_BASE_DELAY:-5}"
+LS_RETRY_MAX_DELAY="${RAG_RETRY_MAX_DELAY:-60}"
+LS_INTER_DOC_PACE="${RAG_INTER_DOC_PACE:-1}"
+
+resolve_load_shaping() {
+  # Resolve load-shaping knobs from workspace contract binding
+  local ws_binding="${SPINE_REPO}/ops/bindings/rag.workspace.contract.yaml"
+  if [[ ! -f "$ws_binding" ]] || ! command -v yq >/dev/null 2>&1; then
+    return 0  # use defaults
+  fi
+  local val
+  val="$(yq -r '.sync_policy.load_shaping.per_request_timeout_sec // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_TIMEOUT="$val"
+  val="$(yq -r '.sync_policy.load_shaping.max_retries // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_MAX_RETRIES="$val"
+  val="$(yq -r '.sync_policy.load_shaping.backoff_strategy // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_BACKOFF_STRATEGY="$val"
+  val="$(yq -r '.sync_policy.load_shaping.retry_base_delay_sec // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_RETRY_BASE_DELAY="$val"
+  val="$(yq -r '.sync_policy.load_shaping.retry_max_delay_sec // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_RETRY_MAX_DELAY="$val"
+  val="$(yq -r '.sync_policy.load_shaping.inter_doc_pace_sec // ""' "$ws_binding")"
+  [[ -n "$val" && "$val" != "null" ]] && LS_INTER_DOC_PACE="$val"
+}
+
+compute_retry_delay() {
+  # Compute delay for retry attempt $1 (0-indexed)
+  local attempt="$1"
+  local delay="$LS_RETRY_BASE_DELAY"
+  if [[ "$LS_BACKOFF_STRATEGY" == "exponential" ]]; then
+    # delay * 2^attempt, capped at max
+    local multiplier=1
+    local i=0
+    while [[ "$i" -lt "$attempt" ]]; do
+      multiplier=$((multiplier * 2))
+      i=$((i + 1))
+    done
+    delay=$((LS_RETRY_BASE_DELAY * multiplier))
+  fi
+  if [[ "$delay" -gt "$LS_RETRY_MAX_DELAY" ]]; then
+    delay="$LS_RETRY_MAX_DELAY"
+  fi
+  echo "$delay"
+}
+
 upload_file() {
   local rel="$1"
   local abs="${SPINE_CODE}/${rel}"
@@ -450,34 +499,45 @@ upload_file() {
     return 0
   fi
 
-  local prepared tmp code header_file
+  local prepared
   prepared="$(prepare_file_for_upload "$abs")"
-  tmp="$(mktemp)"
-  header_file="$(make_auth_header_file)"
-  # AnythingLLM's upload-and-embed timeout: 180s per doc, 1 retry. Docs that
-  # consistently hang (0 bytes received) will fail fast and be reported rather
-  # than blocking the entire sync for 60+ minutes on retries.
-  code="$(curl -sS --max-time 180 --retry 1 --retry-delay 5 -o "$tmp" -w "%{http_code}" \
-    -H "@${header_file}" \
-    -F "file=@${prepared};filename=$(basename "$abs")" \
-    "${ANYTHINGLLM_URL}/api/workspace/${WORKSPACE_SLUG}/upload-and-embed" || true)"
-  rm -f "$header_file"
-  rm -f "$prepared" 2>/dev/null || true
 
-  if [[ -z "$code" || "$code" -lt 200 || "$code" -ge 300 ]]; then
-    log_err "Upload failed (HTTP ${code:-unknown}): $rel"
-    cat "$tmp" >&2 || true
+  local attempt=0
+  while [[ "$attempt" -le "$LS_MAX_RETRIES" ]]; do
+    local tmp code header_file
+    tmp="$(mktemp)"
+    header_file="$(make_auth_header_file)"
+    code="$(curl -sS --max-time "$LS_TIMEOUT" -o "$tmp" -w "%{http_code}" \
+      -H "@${header_file}" \
+      -F "file=@${prepared};filename=$(basename "$abs")" \
+      "${ANYTHINGLLM_URL}/api/workspace/${WORKSPACE_SLUG}/upload-and-embed" || true)"
+    rm -f "$header_file"
+
+    if [[ -n "$code" && "$code" -ge 200 && "$code" -lt 300 ]]; then
+      if ! grep -qi "<!DOCTYPE html" "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        rm -f "$prepared" 2>/dev/null || true
+        log_ok "Uploaded: $rel"
+        return 0
+      fi
+      log_err "Upload returned HTML (wrong endpoint/auth?): $rel"
+    else
+      log_err "Upload failed (HTTP ${code:-unknown}): $rel (attempt $((attempt + 1))/$((LS_MAX_RETRIES + 1)))"
+    fi
+    cat "$tmp" >&2 2>/dev/null || true
     rm -f "$tmp"
-    return 1
-  fi
-  if grep -qi "<!DOCTYPE html" "$tmp" 2>/dev/null; then
-    log_err "Upload returned HTML (wrong endpoint/auth?): $rel"
-    cat "$tmp" >&2 || true
-    rm -f "$tmp"
-    return 1
-  fi
-  rm -f "$tmp"
-  log_ok "Uploaded: $rel"
+
+    if [[ "$attempt" -lt "$LS_MAX_RETRIES" ]]; then
+      local delay
+      delay="$(compute_retry_delay "$attempt")"
+      log "Retrying in ${delay}s (backoff: $LS_BACKOFF_STRATEGY)..."
+      sleep "$delay"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  rm -f "$prepared" 2>/dev/null || true
+  return 1
 }
 
 cmd="${1:-}"
@@ -733,6 +793,9 @@ PY
     require_tool curl
     require_tool python3
 
+    # Resolve load-shaping knobs from binding
+    resolve_load_shaping
+
     # Preflight: verify workspace exists before building manifest
     check_workspace_exists "$WORKSPACE_SLUG" || exit 1
 
@@ -745,6 +808,7 @@ PY
     echo "anythingllm: ${ANYTHINGLLM_URL}"
     echo "code_root: ${SPINE_CODE}"
     echo "eligible_docs: ${total}"
+    echo "load_shaping: timeout=${LS_TIMEOUT}s retries=${LS_MAX_RETRIES} backoff=${LS_BACKOFF_STRATEGY} pace=${LS_INTER_DOC_PACE}s"
 
     if [[ "$dry_run" == "1" ]]; then
       echo ""
@@ -781,6 +845,10 @@ PY
         echo "$rel" >> "$CHECKPOINT_FILE"
       else
         failed=$((failed + 1))
+      fi
+      # Inter-document pacing to prevent embedding overload
+      if [[ "$LS_INTER_DOC_PACE" -gt 0 ]]; then
+        sleep "$LS_INTER_DOC_PACE"
       fi
     done <<<"$manifest"
 

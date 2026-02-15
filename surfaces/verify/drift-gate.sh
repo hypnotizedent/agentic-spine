@@ -1037,6 +1037,55 @@ else
   warn "DHCP audit freshness gate not present"
 fi
 
+echo -n "D105 HA MCP governance lock... "
+if [[ -x "$SP/surfaces/verify/d105-ha-mcp-governance-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d105-ha-mcp-governance-lock.sh"
+else
+  warn "HA MCP governance lock gate not present"
+fi
+
+echo -n "D106 Media port collision lock... "
+if [[ -x "$SP/surfaces/verify/d106-media-port-collision-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d106-media-port-collision-lock.sh"
+else
+  warn "Media port collision lock gate not present"
+fi
+
+echo -n "D107 Media NFS mount lock... "
+if [[ -x "$SP/surfaces/verify/d107-media-nfs-mount-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d107-media-nfs-mount-lock.sh"
+else
+  warn "Media NFS mount lock gate not present"
+fi
+
+echo -n "D108 Media health endpoint parity... "
+if [[ -x "$SP/surfaces/verify/d108-media-health-endpoint-parity-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d108-media-health-endpoint-parity-lock.sh"
+else
+  warn "Media health endpoint parity gate not present"
+fi
+
+echo -n "D109 Media compose config match... "
+if [[ -x "$SP/surfaces/verify/d109-media-compose-config-match-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d109-media-compose-config-match-lock.sh"
+else
+  warn "Media compose config match gate not present"
+fi
+
+echo -n "D110 Media HA duplicate audit... "
+if [[ -x "$SP/surfaces/verify/d110-media-ha-duplicate-audit-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d110-media-ha-duplicate-audit-lock.sh"
+else
+  warn "Media HA duplicate audit gate not present"
+fi
+
+echo -n "D111 RAG embedding smoke preflight... "
+if [[ -x "$SP/surfaces/verify/d111-rag-embedding-smoke-preflight.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d111-rag-embedding-smoke-preflight.sh" "D111"
+else
+  warn "RAG embedding smoke preflight gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

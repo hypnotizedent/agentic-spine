@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# RAG Embedding Probe
+# Validates embedding backend health by running repeated probes against
+# the active model and checking dimensions, latency, and HTTP status.
+#
+# Reads configuration from rag.embedding.backend.yaml binding.
+# Outputs deterministic pass/fail metrics for gate consumption.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${git_root:-}" && "${git_root:-}" != "null" ]]; then
+  SP="${SPINE_ROOT:-$git_root}"
+else
+  SP="${SPINE_ROOT:-$(cd "$script_dir/../../../.." && pwd)}"
+fi
+
+BACKEND_BINDING="$SP/ops/bindings/rag.embedding.backend.yaml"
+SERVICES_BINDING="$SP/ops/bindings/services.health.yaml"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+warn() { echo "WARN: $*"; }
+
+for t in yq curl jq; do
+  command -v "$t" >/dev/null 2>&1 || fail "missing required tool: $t"
+done
+
+[[ -f "$BACKEND_BINDING" ]] || fail "backend binding not found: $BACKEND_BINDING"
+
+# Read binding values
+MODEL="$(yq -r '.active.model // ""' "$BACKEND_BINDING")"
+PROVIDER="$(yq -r '.active.provider // ""' "$BACKEND_BINDING")"
+TEST_PROMPT="$(yq -r '.probe.test_prompt // "test"' "$BACKEND_BINDING")"
+EXPECTED_DIM="$(yq -r '.probe.expected_dimensions // 0' "$BACKEND_BINDING")"
+MAX_LATENCY="$(yq -r '.probe.max_latency_ms // 5000' "$BACKEND_BINDING")"
+MIN_CONSEC="$(yq -r '.probe.min_consecutive_pass // 3' "$BACKEND_BINDING")"
+PROBE_INTERVAL="$(yq -r '.probe.probe_interval_sec // 2' "$BACKEND_BINDING")"
+
+[[ -n "$MODEL" ]] || fail ".active.model missing in binding"
+[[ -n "$PROVIDER" ]] || fail ".active.provider missing in binding"
+
+# Runtime override support
+OVERRIDE="${RAG_EMBED_BACKEND:-active}"
+if [[ "$OVERRIDE" != "active" ]]; then
+  MODEL="$OVERRIDE"
+  echo "OVERRIDE: using model '$MODEL' (from RAG_EMBED_BACKEND)"
+fi
+
+# Resolve Ollama URL
+OLLAMA_URL="${OLLAMA_URL:-${OLLAMA_BASE_URL:-}}"
+if [[ -z "$OLLAMA_URL" ]]; then
+  if [[ -f "$SERVICES_BINDING" ]]; then
+    tags_url="$(yq -r '.endpoints[] | select(.id=="ollama") | .url' "$SERVICES_BINDING" 2>/dev/null || true)"
+    if [[ -n "$tags_url" && "$tags_url" != "null" ]]; then
+      OLLAMA_URL="${tags_url%/api/tags}"
+    fi
+  fi
+  OLLAMA_URL="${OLLAMA_URL:-http://100.98.70.70:11434}"
+fi
+
+echo "=== RAG Embedding Probe ==="
+echo "model:              $MODEL"
+echo "provider:           $PROVIDER"
+echo "ollama_url:         $OLLAMA_URL"
+echo "expected_dimensions: $EXPECTED_DIM"
+echo "max_latency_ms:     $MAX_LATENCY"
+echo "probes_required:    $MIN_CONSEC"
+echo "probe_interval_sec: $PROBE_INTERVAL"
+echo
+
+total_pass=0
+total_fail=0
+consecutive_pass=0
+latencies=""
+
+for i in $(seq 1 "$MIN_CONSEC"); do
+  echo -n "  Probe $i/$MIN_CONSEC... "
+
+  start_ms="$(date +%s%3N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))')"
+
+  resp=""
+  http_code=""
+  resp_file="$(mktemp)"
+  http_code="$(curl -sS --max-time "$((MAX_LATENCY / 1000 + 5))" \
+    -o "$resp_file" -w "%{http_code}" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -cn --arg model "$MODEL" --arg prompt "$TEST_PROMPT" '{model:$model,prompt:$prompt}')" \
+    "${OLLAMA_URL}/api/embeddings" 2>/dev/null || echo "000")"
+  resp="$(cat "$resp_file" 2>/dev/null || true)"
+  rm -f "$resp_file"
+
+  end_ms="$(date +%s%3N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))')"
+  elapsed=$((end_ms - start_ms))
+
+  # Check HTTP status
+  if [[ "$http_code" != "200" ]]; then
+    echo "FAIL (HTTP $http_code, ${elapsed}ms)"
+    total_fail=$((total_fail + 1))
+    consecutive_pass=0
+    if [[ "$i" -lt "$MIN_CONSEC" ]]; then
+      sleep "$PROBE_INTERVAL"
+    fi
+    continue
+  fi
+
+  # Check embedding dimensions
+  dim="$(echo "$resp" | jq -r '.embedding | length' 2>/dev/null || echo "0")"
+  if [[ "$EXPECTED_DIM" -gt 0 && "$dim" != "$EXPECTED_DIM" ]]; then
+    echo "FAIL (dimensions: $dim, expected: $EXPECTED_DIM, ${elapsed}ms)"
+    total_fail=$((total_fail + 1))
+    consecutive_pass=0
+    if [[ "$i" -lt "$MIN_CONSEC" ]]; then
+      sleep "$PROBE_INTERVAL"
+    fi
+    continue
+  fi
+
+  # Check latency
+  if [[ "$elapsed" -gt "$MAX_LATENCY" ]]; then
+    echo "FAIL (latency: ${elapsed}ms > ${MAX_LATENCY}ms SLO)"
+    total_fail=$((total_fail + 1))
+    consecutive_pass=0
+    if [[ "$i" -lt "$MIN_CONSEC" ]]; then
+      sleep "$PROBE_INTERVAL"
+    fi
+    continue
+  fi
+
+  echo "PASS (HTTP $http_code, dim=$dim, ${elapsed}ms)"
+  total_pass=$((total_pass + 1))
+  consecutive_pass=$((consecutive_pass + 1))
+  latencies="${latencies}${elapsed} "
+
+  if [[ "$i" -lt "$MIN_CONSEC" ]]; then
+    sleep "$PROBE_INTERVAL"
+  fi
+done
+
+echo
+echo "=== Probe Summary ==="
+echo "  total_pass: $total_pass"
+echo "  total_fail: $total_fail"
+echo "  consecutive_pass: $consecutive_pass"
+echo "  required_consecutive: $MIN_CONSEC"
+if [[ -n "$latencies" ]]; then
+  echo "  latencies_ms: $latencies"
+fi
+
+if [[ "$consecutive_pass" -ge "$MIN_CONSEC" ]]; then
+  echo
+  echo "PASS: All $MIN_CONSEC consecutive probes passed"
+  exit 0
+else
+  echo
+  fail "Only $consecutive_pass/$MIN_CONSEC consecutive probes passed"
+fi
