@@ -87,12 +87,54 @@ test_readcheck_ack_and_status() {
   rm -rf "$tmp"
 }
 
+test_cap_blocks_without_ack() {
+  local tmp
+  tmp="$(mktemp -d)"
+  make_contracts "$tmp"
+  # Simulate cap.sh contract check: source the enforcement logic inline
+  local env_contract="$tmp/.environment.yaml"
+  local ack_check ack_rc
+  set +e
+  ack_check="$(CONTRACT_FILE="$env_contract" bash "$READCHECK" 2>&1)"
+  ack_rc=$?
+  set -e
+  if [[ "$ack_rc" -eq 2 ]]; then
+    pass "cap blocks mutating without ack (exit 2)"
+  else
+    fail "cap should block mutating without ack (got rc=$ack_rc)"
+  fi
+  rm -rf "$tmp"
+}
+
+test_cap_passes_after_ack() {
+  local tmp
+  tmp="$(mktemp -d)"
+  make_contracts "$tmp"
+  # Acknowledge first
+  (cd "$tmp" && bash "$READCHECK" --ack >/dev/null 2>&1)
+  # Now check should pass
+  local env_contract="$tmp/.environment.yaml"
+  local ack_check ack_rc
+  set +e
+  ack_check="$(cd "$tmp" && CONTRACT_FILE="$env_contract" bash "$READCHECK" 2>&1)"
+  ack_rc=$?
+  set -e
+  if [[ "$ack_rc" -eq 0 ]]; then
+    pass "cap passes after ack"
+  else
+    fail "cap should pass after ack (got rc=$ack_rc)"
+  fi
+  rm -rf "$tmp"
+}
+
 echo "aof-contract-flow Tests"
 echo "════════════════════════════════════════"
 test_validate_passes
 test_validate_fails_bad_tier
 test_readcheck_requires_ack
 test_readcheck_ack_and_status
+test_cap_blocks_without_ack
+test_cap_passes_after_ack
 echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed (of $((PASS + FAIL)))"

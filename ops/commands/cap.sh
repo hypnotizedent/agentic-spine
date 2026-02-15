@@ -211,11 +211,37 @@ run_cap() {
       fi
     fi
 
+    # ── AOF contract acknowledgment (v0.2) ──
+    # When .environment.yaml exists, enforce daily contract read acknowledgment
+    # before allowing mutating/destructive capabilities.
+    if [[ "$safety" == "mutating" || "$safety" == "destructive" ]] && [[ "$name" != "aof.contract.acknowledge" ]]; then
+      local env_contract="${cwd}/.environment.yaml"
+      if [[ -f "$env_contract" ]]; then
+        local ack_check
+        set +e
+        ack_check="$(CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/aof/bin/contract-read-check.sh" 2>&1)"
+        local ack_rc=$?
+        set -e
+        if [[ "$ack_rc" -eq 2 ]]; then
+          echo "BLOCKED: AOF contract acknowledgment required"
+          echo "Environment contract exists at: $env_contract"
+          echo ""
+          echo "Remediation:"
+          echo "  ./bin/ops cap run aof.contract.status    # view current state"
+          echo "  ./bin/ops cap run aof.contract.acknowledge"
+          blocked_reason="aof_contract_ack_required"
+          exit_code=2
+        fi
+      fi
+    fi
+
     # ── Execute preconditions (dependency chain, cycle guard) ──
     local precond_failed=0
     local precond_rc=0
     local precond_name=""
-    if (( ${#requires_list[@]} > 0 )); then
+    if [[ -n "$blocked_reason" ]]; then
+        echo "$blocked_reason" > "$output_file"
+    elif (( ${#requires_list[@]} > 0 )); then
         local stack="${OPS_CAP_STACK:-}"
         stack=",$stack,$name,"
         export OPS_CAP_STACK="${stack}"
@@ -247,7 +273,9 @@ run_cap() {
         fi
     fi
 
-    if [[ "$precond_failed" -eq 1 ]]; then
+    if [[ -n "$blocked_reason" ]]; then
+        : # already blocked — skip execution
+    elif [[ "$precond_failed" -eq 1 ]]; then
         echo "STOP: precondition failed: ${precond_name} (exit=$precond_rc)" | tee "$output_file" >/dev/null
         exit_code="$precond_rc"
     else

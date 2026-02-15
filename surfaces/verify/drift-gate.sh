@@ -30,11 +30,66 @@ pass(){ echo "PASS"; }
 fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; WARN_COUNT=$((WARN_COUNT + 1)); }
 
+# ── AOF scoped gate enforcement (v0.2) ──
+# When .environment.yaml exists, read the tier and only enforce gate categories
+# declared for that tier in drift-gates.scoped.yaml. Out-of-scope gates downgrade to warn.
+SCOPED_GATES="$SP/ops/bindings/drift-gates.scoped.yaml"
+ENV_CONTRACT="$SP/.environment.yaml"
+AOF_TIER=""
+AOF_SCOPED=0
+AOF_OUT_OF_SCOPE_GATES=""
+
+if [[ -f "$ENV_CONTRACT" && -f "$SCOPED_GATES" ]]; then
+  AOF_TIER="$(yq -r '.environment.tier // ""' "$ENV_CONTRACT" 2>/dev/null || true)"
+  if [[ -n "$AOF_TIER" ]]; then
+    AOF_SCOPED=1
+    # Pre-compute enforced categories for this tier
+    _aof_enforced=""
+    while IFS= read -r cat; do
+      [[ -z "$cat" || "$cat" == "null" ]] && continue
+      _aof_enforced="${_aof_enforced} ${cat} "
+    done < <(yq -r ".environment_tiers.$AOF_TIER.enforce[]?" "$SCOPED_GATES" 2>/dev/null || true)
+    # Pre-compute out-of-scope D-gates: gates in categories NOT in enforce list
+    _all_cats="identity environment receipts services spine_core"
+    for _cat in $_all_cats; do
+      if [[ "$_aof_enforced" != *" $_cat "* ]]; then
+        # This category is NOT enforced — collect its D-gates
+        while IFS= read -r _gate; do
+          [[ -z "$_gate" || "$_gate" == "null" ]] && continue
+          AOF_OUT_OF_SCOPE_GATES="${AOF_OUT_OF_SCOPE_GATES} ${_gate} "
+        done < <(yq -r ".gate_to_legacy_mapping.$_cat[]?" "$SCOPED_GATES" 2>/dev/null || true)
+      fi
+    done
+  fi
+fi
+
+# Check if a D-gate is in scope for the current tier.
+# Returns 0 (in scope / enforce), 1 (out of scope / downgrade to warn).
+is_gate_in_scope() {
+  [[ "$AOF_SCOPED" -eq 0 ]] && return 0
+  local gate_id="$1"
+  if [[ "$AOF_OUT_OF_SCOPE_GATES" == *" $gate_id "* ]]; then
+    return 1
+  fi
+  return 0
+}
+
 DRIFT_VERBOSE="${DRIFT_VERBOSE:-0}"
 WARN_POLICY="${WARN_POLICY:-$RESOLVED_WARN_POLICY}"
 
+# Scope-aware fail: if gate is out-of-scope for current tier, downgrade to warn.
+scoped_fail() {
+  local gate_id="$1"; shift
+  if is_gate_in_scope "$gate_id"; then
+    fail "$@"
+  else
+    warn "$* [out-of-scope for tier=$AOF_TIER]"
+  fi
+}
+
 gate_script() {
   local script="$1"
+  local gate_id="${2:-}"
   local tmp rc
   tmp="$(mktemp)"
   set +e
@@ -51,6 +106,8 @@ gate_script() {
   else
     if [[ "${RESOLVED_DRIFT_GATE_MODE:-fail}" == "warn" ]]; then
       warn "$(basename "$script") failed (rc=$rc) [downgraded by drift_gate_mode=warn]"
+    elif [[ -n "$gate_id" ]] && ! is_gate_in_scope "$gate_id"; then
+      warn "$(basename "$script") failed (rc=$rc) [out-of-scope for tier=$AOF_TIER]"
     else
       fail "$script failed (rc=$rc)"
     fi
@@ -68,23 +125,23 @@ gate_script() {
   rm -f "$tmp" 2>/dev/null || true
 }
 
-echo "=== DRIFT GATE (v2.8) ==="
+echo "=== DRIFT GATE (v2.9) ==="
 
 # D1: Top-level directory policy (9 allowed)
 # TRIAGE: Only bin/ docs/ fixtures/ mailroom/ ops/ receipts/ surfaces/ allowed at top level. Remove or move extra directories.
 echo -n "D1 top-level dirs... "
 EXTRA="$(ls -1d */ 2>/dev/null | rg -v '^(bin|docs|fixtures|mailroom|ops|receipts|surfaces)/$' || true)"
-if [[ -z "$EXTRA" ]]; then pass; else fail "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"; echo "  TRIAGE: Only bin/ docs/ fixtures/ mailroom/ ops/ receipts/ surfaces/ allowed at top level."; fi
+if [[ -z "$EXTRA" ]]; then pass; else scoped_fail D1 "extra dirs: $(echo "$EXTRA" | tr '\n' ' ')"; echo "  TRIAGE: Only bin/ docs/ fixtures/ mailroom/ ops/ receipts/ surfaces/ allowed at top level."; fi
 
 # D2: No runs/ trace
 # TRIAGE: Remove runs/ directory. Execution traces belong in receipts/sessions/.
 echo -n "D2 one trace (no runs/)... "
-if [[ ! -d runs ]]; then pass; else fail "runs/ exists"; echo "  TRIAGE: Remove runs/ directory. Traces belong in receipts/sessions/."; fi
+if [[ ! -d runs ]]; then pass; else scoped_fail D2 "runs/ exists"; echo "  TRIAGE: Remove runs/ directory. Traces belong in receipts/sessions/."; fi
 
 # D3: Entrypoint smoke
 # TRIAGE: bin/ops preflight must succeed. Check bin/ops exists and is executable.
 echo -n "D3 entrypoint smoke... "
-if ./bin/ops preflight >/dev/null 2>&1; then pass; else fail "bin/ops preflight failed"; echo "  TRIAGE: Check bin/ops exists and is executable. Run: chmod +x bin/ops"; fi
+if ./bin/ops preflight >/dev/null 2>&1; then pass; else scoped_fail D3 "bin/ops preflight failed"; echo "  TRIAGE: Check bin/ops exists and is executable. Run: chmod +x bin/ops"; fi
 
 # D4: Watcher (launchd canonical; warn only, no fail)
 echo -n "D4 watcher... "
@@ -139,7 +196,7 @@ for s in $(ls -1t "$RT/receipts/sessions" 2>/dev/null); do
   COUNT=$((COUNT+1))
   [[ "$COUNT" -ge 5 ]] && break
 done
-if [[ "$MISSING" -eq 0 ]]; then pass; else fail "$MISSING missing receipt.md"; echo "  TRIAGE: Check receipts/sessions/ for dirs missing receipt.md. Re-run capability to regenerate."; fi
+if [[ "$MISSING" -eq 0 ]]; then pass; else scoped_fail D6 "$MISSING missing receipt.md"; echo "  TRIAGE: Check receipts/sessions/ for dirs missing receipt.md. Re-run capability to regenerate."; fi
 
 # D7: Executables only in four zones
 # TRIAGE: Shell scripts only allowed in bin/, ops/, surfaces/verify/. Move or remove out-of-bounds .sh files.
@@ -147,7 +204,7 @@ echo -n "D7 executables bounded... "
 BAD="$(find . -type f -name "*.sh" \
   | rg -v '^\./(bin/|ops/|surfaces/verify/)' \
   | rg -v '^\./(_imports/|docs/|receipts/|mailroom/|\.git/|\.spine/|\.archive/|\.worktrees/)' || true)"
-if [[ -z "$BAD" ]]; then pass; else fail "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"; echo "  TRIAGE: .sh files only in bin/, ops/, surfaces/verify/. Move out-of-bounds scripts."; fi
+if [[ -z "$BAD" ]]; then pass; else scoped_fail D7 "out-of-bounds: $(echo "$BAD" | wc -l | tr -d ' ')"; echo "  TRIAGE: .sh files only in bin/, ops/, surfaces/verify/. Move out-of-bounds scripts."; fi
 
 # D8: No backup clutter
 # TRIAGE: Remove .bak and fix_bak files from bin/ and ops/. These are accidental leftovers.
@@ -188,7 +245,7 @@ fi
 # D12: CORE_LOCK.md must exist (repo validity marker)
 # TRIAGE: docs/core/CORE_LOCK.md is the repo validity marker. Restore it if deleted.
 echo -n "D12 core lock exists... "
-if [[ -f "$SP/docs/core/CORE_LOCK.md" ]]; then pass; else fail "docs/core/CORE_LOCK.md missing"; echo "  TRIAGE: Restore docs/core/CORE_LOCK.md — this is the repo validity marker."; fi
+if [[ -f "$SP/docs/core/CORE_LOCK.md" ]]; then pass; else scoped_fail D12 "docs/core/CORE_LOCK.md missing"; echo "  TRIAGE: Restore docs/core/CORE_LOCK.md — this is the repo validity marker."; fi
 
 # D9: Receipt stamps (STRICT - required fields for all new receipts)
 # Receipts created after core-v1.0 must have: Run ID, Generated, Status, Model, Inputs, Outputs
@@ -314,7 +371,7 @@ fi
 # D23: Services health surface drift gate (no verbose curl, no auth printing)
 echo -n "D23 health drift gate... "
 if [[ -x "$SP/surfaces/verify/d23-health-drift.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d23-health-drift.sh"
+  gate_script "$SP/surfaces/verify/d23-health-drift.sh" "D23"
 else
   warn "health drift gate not present"
 fi
@@ -415,7 +472,7 @@ fi
 # D34: Loop ledger integrity lock (summary must match deduped counts)
 echo -n "D34 loop ledger integrity lock... "
 if [[ -x "$SP/surfaces/verify/d34-loop-ledger-integrity-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d34-loop-ledger-integrity-lock.sh"
+  gate_script "$SP/surfaces/verify/d34-loop-ledger-integrity-lock.sh" "D34"
 else
   warn "loop ledger integrity lock gate not present"
 fi
@@ -588,7 +645,7 @@ fi
 # D54: SSOT IP parity lock (device identity ↔ shop server ↔ bindings)
 echo -n "D54 ssot ip parity lock... "
 if [[ -x "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh"
+  gate_script "$SP/surfaces/verify/d54-ssot-ip-parity-lock.sh" "D54"
 else
   warn "ssot ip parity lock gate not present"
 fi
@@ -606,7 +663,7 @@ fi
 # D59: Cross-registry completeness lock (bidirectional host coverage)
 echo -n "D59 cross-registry completeness lock... "
 if [[ -x "$SP/surfaces/verify/d59-cross-registry-completeness-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d59-cross-registry-completeness-lock.sh"
+  gate_script "$SP/surfaces/verify/d59-cross-registry-completeness-lock.sh" "D59"
 else
   warn "cross-registry completeness lock gate not present"
 fi
@@ -624,7 +681,7 @@ fi
 export SESSION_CLOSEOUT_FRESHNESS_HOURS="${SESSION_CLOSEOUT_FRESHNESS_HOURS:-$RESOLVED_SESSION_CLOSEOUT_SLA_HOURS}"
 echo -n "D61 session-loop traceability lock... "
 if [[ -x "$SP/surfaces/verify/d61-session-loop-traceability-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d61-session-loop-traceability-lock.sh"
+  gate_script "$SP/surfaces/verify/d61-session-loop-traceability-lock.sh" "D61"
 else
   warn "session-loop traceability lock gate not present"
 fi
@@ -640,7 +697,7 @@ fi
 # D63: Capabilities metadata lock (registry integrity)
 echo -n "D63 capabilities metadata lock... "
 if [[ -x "$SP/surfaces/verify/d63-capabilities-metadata-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d63-capabilities-metadata-lock.sh"
+  gate_script "$SP/surfaces/verify/d63-capabilities-metadata-lock.sh" "D63"
 else
   warn "capabilities metadata lock gate not present"
 fi
@@ -656,7 +713,7 @@ fi
 # D65: Agent briefing sync lock (AGENTS.md + CLAUDE.md match canonical brief)
 echo -n "D65 agent briefing sync lock... "
 if [[ -x "$SP/surfaces/verify/d65-agent-briefing-sync-lock.sh" ]]; then
-  gate_script "$SP/surfaces/verify/d65-agent-briefing-sync-lock.sh"
+  gate_script "$SP/surfaces/verify/d65-agent-briefing-sync-lock.sh" "D65"
 else
   warn "agent briefing sync lock gate not present"
 fi
