@@ -87,9 +87,9 @@ legacy_commit: 1ea9dfa91f4cf5afbd56a1a946f0a733d3bd785c
 | **Backup strategy** | HOME_BACKUP_STRATEGY.md + backup.inventory.yaml | BACKUP.md, backup-ha.sh, sync-ha-offsite.sh | **Scripts missing from spine** |
 | **Secrets project** | secrets.inventory.yaml (project registered) | HOME_ASSISTANT_CONTEXT.md (token paths) | **Namespace mapping missing** |
 | **Radio coordinators** | MINILAB_SSOT (IPs, models, protocols) | HOME_ASSISTANT_CONTEXT.md (firmware, MAC, modes) | **Firmware/MAC/mode detail missing** |
-| **Integration inventory** | None | REF_INTEGRATIONS.md (60 entries) | **Full gap** |
-| **Automation inventory** | None | automations.yaml (14), REF_AUTOMATIONS.md | **Full gap** |
-| **Entity/helper inventory** | None | REF_HELPERS.md, entity_registry.json | **Full gap** |
+| **Integration inventory** | `ha.integrations.snapshot` → `ops/bindings/ha.integrations.yaml` | REF_INTEGRATIONS.md (60 entries) | Covered by capability |
+| **Automation inventory** | `ha.automations.snapshot` → `ops/bindings/ha.automations.yaml` | automations.yaml (14), REF_AUTOMATIONS.md | Covered by capability |
+| **Entity/helper inventory** | `ha.helpers.snapshot` → `ops/bindings/ha.helpers.yaml` | REF_HELPERS.md, entity_registry.json | Covered by capability |
 | **Dashboard config** | `ha.dashboard.snapshot` → `ops/bindings/ha.dashboards.yaml` | 11 YAML files + style guide | Covered by capability |
 | **Recovery runbooks** | DR_RUNBOOK.md (stub: "HA down if proxmox-home offline") | ZIGBEE_RECOVERY.md, RUNBOOK_CALDAV_APPLE.md, HA_RESYNC.md | **App-level recovery missing** |
 | **CLI/API tools** | None | ha-cli.sh, ha-entity-*.py, ha-health-check.sh | **Full gap** |
@@ -108,7 +108,7 @@ legacy_commit: 1ea9dfa91f4cf5afbd56a1a946f0a733d3bd785c
 |---|---|---|---|
 | **HOME_ASSISTANT_CONTEXT.md** (operational context) | **extract_now** | `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` | Core operational knowledge: CLI/API access, known fixes, HACS inventory, token management. Irreplaceable without live system audit. |
 | **automations.yaml** | **extract_now** | `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` (summary table) | Automation names, entity mappings, and critical `not_from` fix must be documented. Raw YAML stays in HA; spine gets the fact model. |
-| **REF_INTEGRATIONS.md** + **REF_HELPERS.md** + **REF_AUTOMATIONS.md** | **extract_now** | `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` (integration/helper/automation inventories) | These are the API field mappings needed for `ha.ssot.propose`. Defines what facts the capability must fetch. |
+| **REF_INTEGRATIONS.md** + **REF_HELPERS.md** + **REF_AUTOMATIONS.md** | **extract_now** | `ops/bindings/ha.integrations.yaml`, `ha.automations.yaml`, `ha.helpers.yaml` | Now covered by snapshot capabilities (`ha.integrations.snapshot`, `ha.automations.snapshot`, `ha.helpers.snapshot`). API field mappings documented in HASS_OPERATIONAL_RUNBOOK.md Section 10. |
 | **ZIGBEE_RECOVERY.md** | **extract_now** | `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` (Zigbee recovery section) | Only source of docker-injection recovery procedure. Not reconstructable without trial-and-error. |
 | **RUNBOOK_CALDAV_APPLE.md** | **extract_now** | `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` (CalDAV recovery section) | Contains credential paths and app-specific password regeneration procedure. |
 | **backup-ha.sh** + **sync-ha-offsite.sh** | **extract_now** | `docs/governance/HASS_OPERATIONAL_RUNBOOK.md` (backup/restore section) | Scripts document the actual backup procedure. Spine HOME_BACKUP_STRATEGY covers strategy but not mechanics. |
