@@ -73,12 +73,14 @@ done
 
 # 6. Sync policy timeout matches CLI upload_file timeout
 contract_timeout="$(yq -r '.sync_policy.upload_timeout_sec' "$CONTRACT")"
-if grep -q 'max-time 180' "$RAG_SCRIPT"; then
-  if [[ "$contract_timeout" != "180" ]]; then
-    err "Sync timeout mismatch: contract=${contract_timeout}s vs CLI=180s"
-  fi
-else
-  err "CLI upload timeout pattern 'max-time 180' not found in rag script"
+cli_default_timeout="$(sed -nE 's/^[[:space:]]*LS_TIMEOUT="\$\{RAG_UPLOAD_TIMEOUT:-([0-9]+)\}".*/\1/p' "$RAG_SCRIPT" | head -1 || true)"
+if [[ -z "${cli_default_timeout:-}" || ! "$cli_default_timeout" =~ ^[0-9]+$ ]]; then
+  err "Could not resolve CLI upload timeout default (LS_TIMEOUT/RAG_UPLOAD_TIMEOUT) from rag script"
+elif [[ "$contract_timeout" != "$cli_default_timeout" ]]; then
+  err "Sync timeout mismatch: contract=${contract_timeout}s vs CLI default=${cli_default_timeout}s"
+fi
+if ! grep -q 'max-time "\$LS_TIMEOUT"' "$RAG_SCRIPT"; then
+  err "CLI upload path does not use LS_TIMEOUT for curl max-time"
 fi
 
 # 7. Secrets filter enabled in contract matches CLI implementation

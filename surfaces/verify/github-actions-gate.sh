@@ -16,7 +16,6 @@ DENY_RE='(ronny-ops|/ronny-ops|~/ronny-ops|LaunchAgents|\.plist\b|cron\b|~/agent
 
 TARGETS=(
   "$ROOT/ops/plugins/github"
-  "$ROOT/ops/capabilities.yaml"
 )
 
 HITS="$(grep -RInE --binary-files=without-match "$DENY_RE" "${TARGETS[@]}" 2>/dev/null || true)"
@@ -24,6 +23,16 @@ if [ -n "$HITS" ]; then
   echo "FAIL: github actions surface contains legacy/runtime smells:"
   echo "$HITS"
   exit 1
+fi
+
+# Check only github.actions capability definitions (avoid unrelated capability noise).
+if command -v yq >/dev/null 2>&1; then
+  GH_CAPS="$(yq e -o=json '.capabilities | with_entries(select(.key | test("^github\\.actions\\.")))' "$ROOT/ops/capabilities.yaml" 2>/dev/null || true)"
+  if [[ -n "${GH_CAPS:-}" ]] && echo "$GH_CAPS" | grep -nE --binary-files=without-match "$DENY_RE" >/dev/null 2>&1; then
+    echo "FAIL: github.actions capability definitions contain legacy/runtime smells:"
+    echo "$GH_CAPS" | grep -nE --binary-files=without-match "$DENY_RE"
+    exit 1
+  fi
 fi
 
 # 3) enforce read-only: no mutating gh commands
