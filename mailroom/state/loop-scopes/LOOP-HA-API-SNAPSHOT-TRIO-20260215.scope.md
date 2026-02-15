@@ -1,6 +1,6 @@
 ---
 loop_id: LOOP-HA-API-SNAPSHOT-TRIO-20260215
-status: open
+status: closed
 owner: "@ronny"
 opened: 2026-02-15
 parent_loop: null
