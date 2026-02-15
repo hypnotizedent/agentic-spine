@@ -1,6 +1,6 @@
 ---
 id: LOOP-BRIDGE-PUBLIC-HTTPS-20260215
-status: active
+status: closed
 opened: 2026-02-15
 owner: "@ronny"
 gaps:
