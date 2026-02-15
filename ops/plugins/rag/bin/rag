@@ -531,10 +531,24 @@ case "$cmd" in
     else
       doc_count="(jq-missing)"
     fi
-    eligible_count="$(build_manifest | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+    total_eligible="$(build_manifest | sed '/^\s*$/d' | wc -l | tr -d ' ')"
+    # Subtract secrets-excluded docs to match what sync actually uploads
+    secrets_excluded=0
+    while IFS= read -r rel; do
+      [[ -z "$rel" ]] && continue
+      abs="${SPINE_CODE}/${rel}"
+      [[ -f "$abs" ]] || continue
+      if [[ "$(contains_secret_material "$abs" | tr -d '\n')" == "1" ]]; then
+        secrets_excluded=$((secrets_excluded + 1))
+      fi
+    done <<<"$(build_manifest)"
+    eligible_count=$((total_eligible - secrets_excluded))
     echo "workspace: ${WORKSPACE_SLUG}"
     echo "docs_indexed: ${doc_count}"
     echo "docs_eligible: ${eligible_count}"
+    if [[ "$secrets_excluded" -gt 0 ]]; then
+      echo "secrets_excluded: ${secrets_excluded}"
+    fi
     if [[ "$doc_count" =~ ^[0-9]+$ && "$eligible_count" =~ ^[0-9]+$ ]]; then
       if [[ "$doc_count" -ge "$eligible_count" ]]; then
         echo "parity: OK"
