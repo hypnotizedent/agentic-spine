@@ -472,6 +472,112 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    def _handle_cap_run(self) -> None:
+        """POST /cap/run — execute an allowlisted capability via RPC, return receipted result."""
+        clen = int(self.headers.get("Content-Length", "0") or "0")
+        if clen <= 0 or clen > 65536:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid content length"})
+
+        try:
+            payload = json.loads(self.rfile.read(clen).decode("utf-8"))
+        except Exception:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON body"})
+
+        capability = (payload.get("capability") or "").strip()
+        if not capability:
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "capability is required"})
+
+        cap_args = payload.get("args") or []
+        if not isinstance(cap_args, list):
+            return self._json(HTTPStatus.BAD_REQUEST, {"error": "args must be a list"})
+
+        # Enforce allowlist
+        allowlist = self.config.get("cap_rpc_allowlist") or []
+        if capability not in allowlist:
+            return self._json(
+                HTTPStatus.FORBIDDEN,
+                {"error": f"capability '{capability}' not in RPC allowlist", "allowed": allowlist},
+            )
+
+        spine_repo = Path(self.config["spine_repo"])
+        ops_bin = spine_repo / "bin" / "ops"
+        if not ops_bin.exists():
+            return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "ops binary not found"})
+
+        args = [str(ops_bin), "cap", "run", capability] + [str(a) for a in cap_args]
+
+        env = os.environ.copy()
+        env["SPINE_REPO"] = str(spine_repo)
+        env["SPINE_CODE"] = str(spine_repo)
+
+        timeout = int(self.config.get("cap_rpc_timeout") or 120)
+        try:
+            p = subprocess.run(
+                args,
+                capture_output=True,
+                timeout=timeout,
+                env=env,
+                cwd=str(spine_repo),
+            )
+        except subprocess.TimeoutExpired:
+            return self._json(
+                HTTPStatus.GATEWAY_TIMEOUT,
+                {"error": f"capability '{capability}' timed out ({timeout}s)"},
+            )
+
+        stdout = p.stdout.decode("utf-8", errors="replace")
+        stderr = p.stderr.decode("utf-8", errors="replace")
+
+        # Parse receipt path and run key from capability runner output
+        receipt = ""
+        run_key = ""
+        for raw in stdout.splitlines():
+            s = raw.strip()
+            if s.startswith("Receipt:"):
+                receipt = s.split("Receipt:", 1)[1].strip()
+            elif s.startswith("Run Key:") and not run_key:
+                run_key = s.split("Run Key:", 1)[1].strip()
+
+        # Extract capability output between delimiter lines
+        lines = stdout.splitlines()
+        start_idx = None
+        for i, raw in enumerate(lines):
+            if raw.strip().lower() == "executing...":
+                # Find the delimiter after "Executing..."
+                for j in range(i + 1, len(lines)):
+                    if _is_output_delim(lines[j]):
+                        start_idx = j + 1
+                        break
+                break
+
+        end_idx = len(lines)
+        if start_idx is not None:
+            for i in range(start_idx, len(lines)):
+                if _is_output_delim(lines[i]):
+                    end_idx = i
+                    break
+            output = "\n".join(lines[start_idx:end_idx]).strip()
+        else:
+            output = stdout.strip()
+
+        # Truncate output
+        max_output = int(self.config.get("max_read_bytes") or 262144)
+        if len(output) > max_output:
+            output = output[:max_output] + "\n...(truncated)"
+
+        return self._json(
+            HTTPStatus.OK if p.returncode == 0 else HTTPStatus.INTERNAL_SERVER_ERROR,
+            {
+                "capability": capability,
+                "status": "done" if p.returncode == 0 else "failed",
+                "exit_code": p.returncode,
+                "output": output,
+                "stderr": stderr[:2000] if p.returncode != 0 else "",
+                "receipt": receipt or None,
+                "run_key": run_key or None,
+            },
+        )
+
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -481,6 +587,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
+
+        if path == "/cap/run":
+            return self._handle_cap_run()
 
         if path == "/rag/ask":
             return self._handle_rag_ask()
@@ -563,6 +672,21 @@ def main() -> None:
     if require_token and not token:
         _stop(f"token required by binding, but env var not set: {token_env}")
 
+    # Load cap-RPC allowlist from binding
+    cap_rpc_allowlist: list[str] = []
+    cap_rpc_timeout = 120
+    if shutil.which("yq"):
+        try:
+            al_raw = _sh("yq", "-r", ".cap_rpc.allowlist[]?", str(binding))
+            cap_rpc_allowlist = [s.strip() for s in al_raw.splitlines() if s.strip()]
+        except Exception:
+            pass
+        try:
+            t = _yq(binding, ".cap_rpc.timeout // 120", "120")
+            cap_rpc_timeout = int(t)
+        except (TypeError, ValueError):
+            pass
+
     Handler.config = {
         "spine_repo": str(spine_repo),
         "host": host,
@@ -570,6 +694,8 @@ def main() -> None:
         "token_env": token_env,
         "token": token,
         "max_read_bytes": max_read,
+        "cap_rpc_allowlist": cap_rpc_allowlist,
+        "cap_rpc_timeout": cap_rpc_timeout,
     }
 
     httpd = ThreadingHTTPServer((host, port), Handler)
@@ -579,6 +705,8 @@ def main() -> None:
     print(f"token_required: {bool(token)}")
     print(f"token_env: {token_env}")
     print(f"max_read_bytes: {max_read}")
+    print(f"cap_rpc_allowlist: {cap_rpc_allowlist}")
+    print(f"cap_rpc_timeout: {cap_rpc_timeout}s")
     sys.stdout.flush()
     httpd.serve_forever()
 
