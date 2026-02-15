@@ -1,6 +1,7 @@
 ---
 loop_id: LOOP-HA-GOVERNANCE-PHASE2-20260215
-status: open
+status: closed
+closed: 2026-02-15
 opened: 2026-02-15
 owner: "@ronny"
 parent: null
