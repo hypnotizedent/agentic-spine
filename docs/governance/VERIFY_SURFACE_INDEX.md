@@ -117,6 +117,7 @@ Notes:
 | `d88-rag-remote-reindex-governance-lock.sh` | RAG remote reindex governance lock (binding + runner capabilities + auth-token hygiene). Test: `surfaces/verify/tests/d88-test.sh` | Yes |
 | `d89-rag-reindex-quality-contract-lock.sh` | RAG reindex quality contract lock (quality thresholds + verify/probe capabilities) | Yes |
 | `d90-rag-reindex-runtime-quality-gate.sh` | RAG reindex runtime quality gate (session stopped + completion quality). Test: `surfaces/verify/tests/d90-test.sh` | Yes |
+| `d91-aof-product-foundation-lock.sh` | AOF product foundation lock (product docs, bindings, tenant caps). Test: `surfaces/verify/tests/d91-test.sh` | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |

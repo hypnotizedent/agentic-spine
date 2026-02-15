@@ -5,7 +5,7 @@
 > doc in two hops, never leave `/code`.
 >
 > **Status:** authoritative
-> **Last verified:** 2026-02-13
+> **Last verified:** 2026-02-15
 
 ---
 
@@ -25,6 +25,19 @@ The invariants. If a drift gate fails, one of these was violated.
 | [STACK_LIFECYCLE.md](core/STACK_LIFECYCLE.md) | Stack discovery + lifecycle operations (no compose guessing) |
 | [PROJECT_GOVERNANCE_CONTRACT.md](core/PROJECT_GOVERNANCE_CONTRACT.md) | Mandatory baseline for all new product repositories under `~/code` |
 | [SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) | Spine-native session protocol (entry point) |
+
+---
+
+## Product (AOF v0.1)
+
+Productization artifacts for the Agentic Operations Framework.
+
+| Doc | What It Covers |
+|-----|---------------|
+| [AOF_PRODUCT_CONTRACT.md](product/AOF_PRODUCT_CONTRACT.md) | Product boundary, versioning, tenant/policy model |
+| [AOF_ACCEPTANCE_GATES.md](product/AOF_ACCEPTANCE_GATES.md) | Gate categories and minimum viable acceptance criteria |
+| [AOF_DEPLOYMENT_PLAYBOOK.md](product/AOF_DEPLOYMENT_PLAYBOOK.md) | Step-by-step deployment guide |
+| [AOF_SUPPORT_SLO.md](product/AOF_SUPPORT_SLO.md) | Severity-based response/resolution targets |
 
 ---
 

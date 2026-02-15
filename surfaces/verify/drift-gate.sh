@@ -848,6 +848,14 @@ else
   warn "RAG reindex runtime quality gate not present"
 fi
 
+# D91: AOF product foundation lock
+echo -n "D91 AOF product foundation lock... "
+if [[ -x "$SP/surfaces/verify/d91-aof-product-foundation-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d91-aof-product-foundation-lock.sh"
+else
+  warn "AOF product foundation lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

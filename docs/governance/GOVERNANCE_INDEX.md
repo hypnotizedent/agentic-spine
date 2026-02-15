@@ -474,6 +474,9 @@ Before adding `status: authoritative` or claiming SSOT:
 | `docs/governance/BUILD_MODE_CHECKLIST.md` | Build-mode execution checklist with stop-gates |
 | `docs/governance/ONBOARDING_PLAYBOOK.md` | Onboarding commands and completion criteria |
 | `docs/governance/RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md` | Parallel execution contract across runway/tooling/product surfaces |
+| `docs/product/AOF_PRODUCT_CONTRACT.md` | AOF product boundary, versioning, tenant model |
+| `docs/product/AOF_DEPLOYMENT_PLAYBOOK.md` | AOF deployment guide |
+| `docs/product/AOF_SUPPORT_SLO.md` | AOF support commitments |
 
 ---
 
