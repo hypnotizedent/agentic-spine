@@ -10,7 +10,10 @@
 #   Markdown report to stdout (captured by receipts).
 #
 # Optional:
-#   --profile : execute gate scripts (where possible) and include timings.
+#   --profile       : execute gate scripts (where possible) and include timings.
+#   --list-domains  : print configured gate domains from gate.domain.profiles.yaml.
+#   --domain <name> : filter report to a configured domain gate pack.
+#   --brief         : summary-only output (useful for preflight banners).
 #
 set -euo pipefail
 
@@ -22,19 +25,34 @@ fi
 SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
 
 PROFILE=0
+LIST_DOMAINS=0
+BRIEF=0
+DOMAIN=""
+DOMAIN_BINDING="$SPINE_CODE/ops/bindings/gate.domain.profiles.yaml"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --profile) PROFILE=1; shift ;;
+    --list-domains) LIST_DOMAINS=1; shift ;;
+    --brief) BRIEF=1; shift ;;
+    --domain)
+      [[ $# -ge 2 ]] || { echo "ERROR: --domain requires a value" >&2; exit 2; }
+      DOMAIN="$2"
+      shift 2
+      ;;
     -h|--help)
       cat <<'EOF'
 drift-gates-certify
 
 Usage:
-  drift-gates-certify [--profile]
+  drift-gates-certify [--profile] [--brief]
+  drift-gates-certify --list-domains
+  drift-gates-certify --domain <name> [--brief] [--profile]
 
 Notes:
   - Default mode is scan-only (fast).
   - --profile runs executable gate scripts directly to measure time + pass/fail.
+  - --list-domains and --domain use ops/bindings/gate.domain.profiles.yaml.
 EOF
       exit 0
       ;;
@@ -45,13 +63,44 @@ EOF
   esac
 done
 
+if [[ "$LIST_DOMAINS" -eq 1 || -n "$DOMAIN" ]]; then
+  if [[ ! -f "$DOMAIN_BINDING" ]]; then
+    echo "ERROR: missing gate domain binding: $DOMAIN_BINDING" >&2
+    echo "ACTION: create ops/bindings/gate.domain.profiles.yaml (GAP-OP-432)." >&2
+    exit 2
+  fi
+
+  if ! command -v yq >/dev/null 2>&1; then
+    echo "ERROR: yq is required for --list-domains/--domain modes." >&2
+    exit 2
+  fi
+fi
+
+if [[ "$LIST_DOMAINS" -eq 1 ]]; then
+  yq e '.domains | keys | .[]' "$DOMAIN_BINDING" 2>/dev/null
+  exit 0
+fi
+
+DOMAINS_JSON='{}'
+if [[ -n "$DOMAIN" ]]; then
+  valid_domains="$(yq e '.domains | keys | .[]' "$DOMAIN_BINDING" 2>/dev/null | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')"
+  domain_exists="$(yq e ".domains.\"$DOMAIN\" != null" "$DOMAIN_BINDING" 2>/dev/null || echo "false")"
+  if [[ "$domain_exists" != "true" ]]; then
+    echo "ERROR: unknown domain: $DOMAIN" >&2
+    echo "VALID: ${valid_domains:-<none>}" >&2
+    exit 2
+  fi
+  DOMAINS_JSON="$(yq -o=json e '.domains' "$DOMAIN_BINDING" 2>/dev/null || echo '{}')"
+fi
+
 DG="$SPINE_CODE/surfaces/verify/drift-gate.sh"
 if [[ ! -f "$DG" ]]; then
   echo "ERROR: missing: $DG" >&2
   exit 2
 fi
 
-python3 - "$DG" "$SPINE_CODE" "$PROFILE" <<'PY'
+DRIFT_GATE_DOMAINS_JSON="$DOMAINS_JSON" python3 - "$DG" "$SPINE_CODE" "$PROFILE" "$DOMAIN" "$BRIEF" <<'PY'
+import json
 import os
 import re
 import subprocess
@@ -63,6 +112,9 @@ from pathlib import Path
 dg_path = Path(sys.argv[1]).resolve()
 spine_code = Path(sys.argv[2]).resolve()
 profile = sys.argv[3] == "1"
+domain = (sys.argv[4] or "").strip()
+brief = sys.argv[5] == "1"
+domains = json.loads(os.environ.get("DRIFT_GATE_DOMAINS_JSON", "{}"))
 
 dg_text = dg_path.read_text(errors="ignore").splitlines()
 
@@ -166,6 +218,14 @@ for i, line in enumerate(dg_text):
 
   gates.append(Gate(id=gate_id, label=label, scripts=scripts, kind=kind, deps=sorted(deps_set)))
 
+domain_missing: list[str] = []
+if domain:
+  dom = domains.get(domain, {})
+  wanted = [str(x).strip() for x in dom.get("gate_ids", []) if str(x).strip()]
+  idx = {g.id: g for g in gates}
+  domain_missing = [gid for gid in wanted if gid not in idx]
+  gates = [idx[gid] for gid in wanted if gid in idx]
+
 # Optional profiling (script-backed gates only)
 if profile:
   for g in gates:
@@ -200,11 +260,46 @@ try:
 except Exception:
   branch = "unknown"
 
+if brief:
+  if domain:
+    dom = domains.get(domain, {})
+    desc = str(dom.get("description", "")).strip()
+    wanted = [str(x).strip() for x in dom.get("gate_ids", []) if str(x).strip()]
+    print("# Drift Gate Domain Brief")
+    print(f"- Domain: `{domain}`")
+    if desc:
+      print(f"- Description: {desc}")
+    print(f"- Gates configured: {len(wanted)}")
+    print(f"- Gates discovered: {len(gates)}")
+    if domain_missing:
+      missing_txt = ", ".join(f"`{g}`" for g in domain_missing)
+      print(f"- Missing from drift suite: {missing_txt}")
+    else:
+      print("- Missing from drift suite: none")
+    ids_txt = ", ".join(f"`{g.id}`" for g in gates) if gates else "(none)"
+    print(f"- Gate IDs: {ids_txt}")
+    sys.exit(0)
+
+  total = len(gates)
+  local_n = sum(1 for g in gates if g.kind == "local")
+  net_n = sum(1 for g in gates if g.kind == "network")
+  script_n = sum(1 for g in gates if g.scripts)
+  inline_n = total - script_n
+  print("# Drift Gates Brief")
+  print(f"- Gates discovered: {total}")
+  print(f"- Script-backed: {script_n}")
+  print(f"- Inline-only: {inline_n}")
+  print(f"- Classified local: {local_n}")
+  print(f"- Classified network: {net_n}")
+  sys.exit(0)
+
 print("# Drift Gates Certification Report")
 print(f"- Date: {now}")
 print(f"- Drift suite: `{dg_path}`")
 print(f"- Branch: `{branch}`")
 print(f"- Mode: {'scan+profile' if profile else 'scan-only'}")
+if domain:
+  print(f"- Domain filter: `{domain}`")
 print("")
 
 print("## Summary")
@@ -218,6 +313,13 @@ print(f"- Script-backed: {script_n}")
 print(f"- Inline-only: {inline_n}")
 print(f"- Classified local: {local_n}")
 print(f"- Classified network: {net_n}")
+if domain:
+  dom = domains.get(domain, {})
+  wanted = [str(x).strip() for x in dom.get("gate_ids", []) if str(x).strip()]
+  print(f"- Domain configured gates: {len(wanted)}")
+  print(f"- Domain discovered gates: {len(gates)}")
+  if domain_missing:
+    print(f"- Domain mapping missing IDs: {', '.join(domain_missing)}")
 print("")
 
 if profile:
