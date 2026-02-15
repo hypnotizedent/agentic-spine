@@ -856,6 +856,14 @@ else
   warn "AOF product foundation lock gate not present"
 fi
 
+# D92: HA config version control
+echo -n "D92 HA config version control... "
+if [[ -x "$SP/surfaces/verify/d92-ha-config-version-control.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d92-ha-config-version-control.sh"
+else
+  warn "HA config version control gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

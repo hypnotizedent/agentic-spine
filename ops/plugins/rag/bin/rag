@@ -47,9 +47,15 @@ Spine-native RAG (AnythingLLM on ai-consolidation)
 Usage:
   rag health
   rag status [--workspace <slug>]
-  rag ask "<question>" [--workspace <slug>]
+  rag ask "<question>" [--workspace <slug>] [--mode retrieve|auto|chat] [--retrieve-only]
   rag retrieve "<query>" [--workspace <slug>] [--limit N]
   rag sync [--workspace <slug>] [--dry-run] [--resume]
+
+Modes (rag ask):
+  retrieve     Embed query + Qdrant vector search. Fast, deterministic. (default)
+  auto         Try chat first (RAG_CHAT_TIMEOUT_SEC), fall back to retrieve on timeout.
+  chat         Chat only, fail if chat times out (no fallback).
+  --retrieve-only  Alias for --mode retrieve.
 
 Env:
   RAG_WORKSPACE_SLUG (default: agentic-spine)
@@ -59,7 +65,7 @@ Env:
   OLLAMA_URL / OLLAMA_BASE_URL (optional; auto-derived from services.health.yaml)
   RAG_QDRANT_COLLECTION (default: workspace slug)
   RAG_EMBED_MODEL (default: mxbai-embed-large:latest)
-  RAG_CHAT_TIMEOUT_SEC (default: 45) - AnythingLLM chat attempt timeout before retrieval fallback
+  RAG_CHAT_TIMEOUT_SEC (default: 45) - chat attempt timeout (--mode auto/chat only)
 EOF
 }
 
@@ -544,47 +550,97 @@ case "$cmd" in
   ask)
     question="${1:-}"
     shift || true
-    while [[ "${1:-}" == "--workspace" ]]; do
-      WORKSPACE_SLUG="${2:-}"; shift 2 || true
+    ask_mode="${RAG_ASK_MODE:-retrieve}"
+    while [[ "$#" -gt 0 ]]; do
+      case "${1:-}" in
+        --workspace) WORKSPACE_SLUG="${2:-}"; shift 2 ;;
+        --mode) ask_mode="${2:-retrieve}"; shift 2 ;;
+        --retrieve-only) ask_mode="retrieve"; shift ;;
+        *) log_err "Unknown arg: $1"; usage; exit 1 ;;
+      esac
     done
     if [[ -z "${question:-}" ]]; then
       usage
       exit 1
     fi
-    derive_anythingllm_url
-    derive_qdrant_url
-    derive_ollama_url
-    load_api_key
-    require_tool curl
-    require_tool python3
+    case "$ask_mode" in
+      retrieve)
+        # Default: embed query via Ollama, search Qdrant vectors.
+        # Fast, deterministic, no chat LLM dependency.
+        "$0" retrieve "$question" --workspace "$WORKSPACE_SLUG"
+        ;;
+      auto)
+        # Try chat first, fall back to retrieval on timeout/failure.
+        derive_anythingllm_url
+        derive_qdrant_url
+        derive_ollama_url
+        load_api_key
+        require_tool curl
+        require_tool python3
 
-    payload="$(python3 - <<'PY' "$question"
+        payload="$(python3 - <<'PY' "$question"
 import json,sys
 print(json.dumps({"message": sys.argv[1], "mode": "query"}))
 PY
 )"
-    chat_ok=0
-    resp=""
-    if resp="$(http_post_json_chat_try "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}/chat" "$payload")"; then
-      chat_ok=1
-    fi
-
-    if (( chat_ok == 1 )) && command -v jq >/dev/null 2>&1; then
-      answer="$(echo "$resp" | jq -r '.textResponse // .response // .message // .text // empty')"
-      if [[ -n "$answer" ]]; then
-        echo "$answer"
-        sources="$(echo "$resp" | jq -r '.sources // [] | if length==0 then "" else (map("- \((.doc // .title // .source // .file // .name // "Unknown")) (\((.score // .confidence // .relevance // 0) | tostring))") | join("\n")) end')"
-        if [[ -n "$sources" ]]; then
-          echo ""
-          echo "Sources:"
-          echo "$sources"
+        chat_ok=0
+        resp=""
+        if resp="$(http_post_json_chat_try "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}/chat" "$payload")"; then
+          chat_ok=1
         fi
-        exit 0
-      fi
-    fi
 
-    log_err "AnythingLLM chat unavailable/slow; falling back to retrieval-only search."
-    "$0" retrieve "$question" --workspace "$WORKSPACE_SLUG"
+        if (( chat_ok == 1 )) && command -v jq >/dev/null 2>&1; then
+          answer="$(echo "$resp" | jq -r '.textResponse // .response // .message // .text // empty')"
+          if [[ -n "$answer" ]]; then
+            echo "mode: chat"
+            echo "$answer"
+            sources="$(echo "$resp" | jq -r '.sources // [] | if length==0 then "" else (map("- \((.doc // .title // .source // .file // .name // "Unknown")) (\((.score // .confidence // .relevance // 0) | tostring))") | join("\n")) end')"
+            if [[ -n "$sources" ]]; then
+              echo ""
+              echo "Sources:"
+              echo "$sources"
+            fi
+            exit 0
+          fi
+        fi
+
+        log_err "AnythingLLM chat unavailable/slow; falling back to retrieval."
+        "$0" retrieve "$question" --workspace "$WORKSPACE_SLUG"
+        ;;
+      chat)
+        # Chat only, fail if unavailable.
+        derive_anythingllm_url
+        load_api_key
+        require_tool curl
+        require_tool python3
+
+        payload="$(python3 - <<'PY' "$question"
+import json,sys
+print(json.dumps({"message": sys.argv[1], "mode": "query"}))
+PY
+)"
+        resp=""
+        if ! resp="$(http_post_json_chat_try "${ANYTHINGLLM_URL}/api/v1/workspace/${WORKSPACE_SLUG}/chat" "$payload")"; then
+          log_err "Chat unavailable (timeout or error). Use --mode retrieve or --mode auto."
+          exit 1
+        fi
+
+        if command -v jq >/dev/null 2>&1; then
+          answer="$(echo "$resp" | jq -r '.textResponse // .response // .message // .text // empty')"
+          if [[ -n "$answer" ]]; then
+            echo "mode: chat"
+            echo "$answer"
+            exit 0
+          fi
+        fi
+        log_err "Chat returned empty response."
+        exit 1
+        ;;
+      *)
+        log_err "Unknown mode: $ask_mode (expected: retrieve, auto, chat)"
+        exit 1
+        ;;
+    esac
     ;;
 
   retrieve)
@@ -613,7 +669,7 @@ PY
     require_tool jq
 
     collection="${RAG_QDRANT_COLLECTION:-$WORKSPACE_SLUG}"
-    echo "fallback: retrieve"
+    echo "mode: retrieve"
     echo "collection: ${collection}"
 
     vector="$(ollama_embed "$query")"
