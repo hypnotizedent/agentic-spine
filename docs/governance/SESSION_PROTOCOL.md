@@ -62,7 +62,7 @@ Full spine access. Follow all sections below in order.
    - Check available capabilities: `./bin/ops cap list` (SSOT: `ops/capabilities.yaml`). Do not invent commands.
    - Check available CLI tools: review `ops/bindings/cli.tools.inventory.yaml` or the "Available CLI Tools" section in `context.md`. If a user asks you to use a tool, check this inventory before searching the filesystem or web.
 3. **Trace truth**
-   - Use SSOT docs + repo search (`rg`) before guessing answers or inventing storylines (Rule 2 from the brain layer). `mint ask` is deprecated.
+   - Use the query hierarchy before guessing answers or inventing storylines (Rule 2 from the brain layer): direct file read → `rag_query` (spine-rag MCP) → `rg` fallback. `mint ask` is deprecated.
    - When you need policy or structure, follow the entry chain in `docs/governance/GOVERNANCE_INDEX.md`; trust the highest-priority SSOT in `docs/governance/SSOT_REGISTRY.yaml`.
    - Before guessing remote paths, consult `ops/bindings/docker.compose.targets.yaml` and `ops/bindings/ssh.targets.yaml` first. Never assume stack paths -- bindings are the SSOT for remote host paths.
    - **Before any shop network change:** run `./bin/ops cap run network.shop.audit.status` and do not proceed if it fails (D54 enforces SSOT/binding parity).

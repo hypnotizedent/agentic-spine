@@ -40,7 +40,7 @@ Pillar entrypoints (per stack)
 
 **The 5 Rules:**
 1. NO OPEN LOOPS = NO WORK → `./bin/ops loops list --open`
-2. NO GUESSING = SSOT FIRST → read SSOT docs + use repo search (`rg`)
+2. NO GUESSING = SSOT FIRST → direct file read → `rag_query` (spine-rag MCP) → `rg` fallback
 3. NO INVENTING → match existing patterns
 4. FIX ONE THING → verify before next
 5. WORK GENERATES RECEIPTS → `./bin/ops cap run <name>`
@@ -334,8 +334,8 @@ START: Agent has a question about "truth"
     │       NO → Record work via `./bin/ops loops collect`
     │      YES ↓
     │
-    ├─▶ Can you answer via SSOT/docs/search?
-    │       → Check SSOTs, then `rg -n "<query>" docs ops`
+    ├─▶ Can you answer via SSOT/docs/RAG/search?
+    │       → Check SSOTs, then `rag_query`, then `rg -n "<query>" docs ops`
     │       YES → SSOT wins (verify with receipts/capabilities when relevant)
     │       NO ↓
     │
