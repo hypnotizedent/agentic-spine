@@ -195,24 +195,56 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _extract_request_token(self) -> str:
+        """Extract the bearer or X-Spine-Token from the request."""
+        hdr = self.headers.get("Authorization", "")
+        if hdr.startswith("Bearer "):
+            return hdr.removeprefix("Bearer ").strip()
+        return (self.headers.get("X-Spine-Token", "") or "").strip()
+
     def _auth_ok(self) -> bool:
-        token = self.config.get("token") or ""
-        if not token:
+        primary_token = self.config.get("token") or ""
+        if not primary_token:
             # Tailnet-only deployments can run without a token (explicitly documented).
             return True
 
-        hdr = self.headers.get("Authorization", "")
-        if hdr.startswith("Bearer "):
-            return hdr.removeprefix("Bearer ").strip() == token
+        req_token = self._extract_request_token()
+        if not req_token:
+            return False
 
-        # Allow lightweight header for n8n/webhooks.
-        return (self.headers.get("X-Spine-Token", "") or "").strip() == token
+        # Accept primary token
+        if req_token == primary_token:
+            return True
+
+        # Accept any RBAC role token
+        roles = self.config.get("cap_rpc_roles") or {}
+        return req_token in roles
 
     def _require_auth(self) -> bool:
         if self._auth_ok():
             return True
         self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
         return False
+
+    def _cap_rpc_role_allows(self, capability: str) -> bool:
+        """Check if the request token's RBAC role allows the given capability."""
+        roles = self.config.get("cap_rpc_roles") or {}
+        if not roles:
+            # No roles configured: any authenticated token gets full allowlist.
+            return True
+
+        req_token = self._extract_request_token()
+        if req_token not in roles:
+            # Token is the primary auth token but not in roles — full access.
+            primary_token = self.config.get("token") or ""
+            if req_token == primary_token:
+                return True
+            return False
+
+        allow = roles[req_token]
+        if allow == "*":
+            return True
+        return capability in allow
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -528,6 +560,13 @@ class Handler(BaseHTTPRequestHandler):
                 {"error": f"capability '{capability}' not in RPC allowlist", "allowed": allowlist},
             )
 
+        # Enforce RBAC: check if the request token's role allows this capability
+        if not self._cap_rpc_role_allows(capability):
+            return self._json(
+                HTTPStatus.FORBIDDEN,
+                {"error": f"capability '{capability}' not permitted for this token role"},
+            )
+
         spine_repo = Path(self.config["spine_repo"])
         ops_bin = spine_repo / "bin" / "ops"
         if not ops_bin.exists():
@@ -704,6 +743,9 @@ def main() -> None:
     # Load cap-RPC allowlist from binding
     cap_rpc_allowlist: list[str] = []
     cap_rpc_timeout = 120
+    # RBAC: token → allowed capabilities mapping
+    # Key = token value, Value = set of allowed caps (or "*" for full allowlist)
+    cap_rpc_roles: dict[str, str | list[str]] = {}
     if shutil.which("yq"):
         try:
             al_raw = _sh("yq", "-r", ".cap_rpc.allowlist[]?", str(binding))
@@ -715,6 +757,29 @@ def main() -> None:
             cap_rpc_timeout = int(t)
         except (TypeError, ValueError):
             pass
+        # Load RBAC roles: each role has token_env + allow (list or "*")
+        try:
+            role_names_raw = _sh("yq", "-r", ".cap_rpc.roles | keys | .[]?", str(binding))
+            for role_name in [r.strip() for r in role_names_raw.splitlines() if r.strip()]:
+                role_token_env = _yq(binding, f'.cap_rpc.roles.{role_name}.token_env // ""', "")
+                if not role_token_env:
+                    continue
+                role_token = os.environ.get(role_token_env, "") or ""
+                if not role_token:
+                    continue
+                allow_raw = _yq(binding, f'.cap_rpc.roles.{role_name}.allow', "")
+                if allow_raw == "*":
+                    cap_rpc_roles[role_token] = "*"
+                else:
+                    try:
+                        allow_list_raw = _sh("yq", "-r", f".cap_rpc.roles.{role_name}.allow[]?", str(binding))
+                        allow_list = [c.strip() for c in allow_list_raw.splitlines() if c.strip()]
+                        # Constrain to allowlist: roles cannot grant beyond it
+                        cap_rpc_roles[role_token] = [c for c in allow_list if c in cap_rpc_allowlist]
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     Handler.config = {
         "spine_repo": str(spine_repo),
@@ -725,8 +790,10 @@ def main() -> None:
         "max_read_bytes": max_read,
         "cap_rpc_allowlist": cap_rpc_allowlist,
         "cap_rpc_timeout": cap_rpc_timeout,
+        "cap_rpc_roles": cap_rpc_roles,
     }
 
+    roles_summary = {env: ("*" if v == "*" else len(v)) for env, v in cap_rpc_roles.items()}
     httpd = ThreadingHTTPServer((host, port), Handler)
     print("mailroom.bridge.serve")
     print(f"spine_repo: {spine_repo}")
@@ -736,6 +803,7 @@ def main() -> None:
     print(f"max_read_bytes: {max_read}")
     print(f"cap_rpc_allowlist: {cap_rpc_allowlist}")
     print(f"cap_rpc_timeout: {cap_rpc_timeout}s")
+    print(f"cap_rpc_roles: {len(cap_rpc_roles)} loaded")
     sys.stdout.flush()
     httpd.serve_forever()
 
