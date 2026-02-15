@@ -933,6 +933,14 @@ else
   warn "HA token freshness gate not present"
 fi
 
+# D100: VM IP parity lock
+echo -n "D100 VM IP parity lock... "
+if [[ -x "$SP/surfaces/verify/d100-vm-ip-parity-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d100-vm-ip-parity-lock.sh"
+else
+  warn "VM IP parity gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1
