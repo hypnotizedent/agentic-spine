@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-12
+last_verified: 2026-02-15
 scope: home-lessons
 ---
 
@@ -12,7 +12,7 @@ scope: home-lessons
 
 ## Architecture
 
-**Home Assistant OS is NOT a Docker Compose stack.** The Supervisor manages add-ons as containers. Use `ha addons` CLI, not docker-compose.
+**Home Assistant OS is NOT a Docker Compose stack.** The Supervisor manages add-ons as containers. Use `ha apps` CLI (formerly `ha addons`, now deprecated), not docker-compose.
 
 | Field | Value |
 |-------|-------|
@@ -29,7 +29,7 @@ scope: home-lessons
 | Device | Model | IP | Protocol | Status |
 |--------|-------|----|----------|--------|
 | SLZB-06 | SMLIGHT SLZB-06 | 10.0.0.51 | Zigbee (CC2652P) | Online |
-| SLZB-06MU | SMLIGHT SLZB-06MU | 10.0.0.52 | Zigbee + Matter | Online (reserved) |
+| SLZB-06MU | SMLIGHT SLZB-06MU | 10.0.0.52 | Thread/RCP (OTBR wired) | Online |
 | TubesZB | TubesZB Z-Wave | 10.0.0.90 | Z-Wave 800 | Online |
 
 **Rules:**
@@ -68,7 +68,7 @@ ALL button automation triggers MUST have `not_from: ["unavailable", "unknown"]`.
 Z2M add-on persists config in internal `options.json` that overrides `configuration.yaml`. Fix via docker cp injection — see HASS_OPERATIONAL_RUNBOOK.md section 8.
 
 ### Tailscale Userspace Networking
-UI config for `userspace_networking` fails to persist. Force via Supervisor API curl POST to `/addons/a0d7b954_tailscale/options`.
+UI config for `userspace_networking` fails to persist. Force via Supervisor API curl POST to `/addons/core_tailscale/options`.
 
 ## Resource Constraints
 
