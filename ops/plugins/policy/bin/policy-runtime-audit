@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# policy.runtime.audit — Verify policy knob enforcement wiring status
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+CONTRACT="$ROOT/ops/bindings/policy.runtime.contract.yaml"
+
+echo "=== Policy Runtime Audit ==="
+echo ""
+
+if [[ ! -f "$CONTRACT" ]]; then
+  echo "FAIL: policy.runtime.contract.yaml not found"
+  exit 1
+fi
+
+TOTAL=0
+WIRED=0
+UNWIRED=0
+
+KNOBS=(
+  drift_gate_mode
+  approval_default
+  session_closeout_sla_hours
+  warn_policy
+  stale_ssot_max_days
+  gap_auto_claim
+  proposal_required
+  receipt_retention_days
+  commit_sign_required
+  multi_agent_writes
+)
+
+echo "Knob enforcement status:"
+for knob in "${KNOBS[@]}"; do
+  TOTAL=$((TOTAL + 1))
+  block="$(sed -n "/^  ${knob}:/,/^  [a-z]/p" "$CONTRACT" | head -20)"
+  wired_val="$(echo "$block" | grep 'wired:' | head -1 | awk '{print $2}')"
+  point="$(echo "$block" | grep 'enforcement_point:' | head -1 | sed 's/.*: *//')"
+
+  if [[ "$wired_val" == "true" ]]; then
+    WIRED=$((WIRED + 1))
+    echo "  $knob: WIRED (at $point)"
+  else
+    UNWIRED=$((UNWIRED + 1))
+    echo "  $knob: NOT WIRED (at $point)"
+  fi
+done
+
+echo ""
+echo "Summary: $TOTAL knobs, $WIRED wired, $UNWIRED unwired"
+echo "Coverage: $(( (WIRED * 100) / TOTAL ))%"
+echo ""
+echo "AUDIT: PASS (contract valid, enforcement status reported)"
+exit 0

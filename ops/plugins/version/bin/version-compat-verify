@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# version.compat.verify — Verify version compatibility matrix consistency
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+MATRIX="$ROOT/ops/bindings/version.compat.matrix.yaml"
+
+echo "=== Version Compatibility Verify ==="
+echo ""
+
+if [[ ! -f "$MATRIX" ]]; then
+  echo "FAIL: version.compat.matrix.yaml not found"
+  exit 1
+fi
+
+ERRORS=0
+COMPONENTS=0
+
+# List all components
+echo "Component inventory:"
+while IFS= read -r line; do
+  comp="$(echo "$line" | sed 's/^ *//' | sed 's/:.*//')"
+  if [[ -n "$comp" ]]; then
+    COMPONENTS=$((COMPONENTS + 1))
+    version="$(sed -n "/^  ${comp}:/,/^  [a-z]/p" "$MATRIX" | grep '    version:' | head -1 | sed 's/.*: *"//' | sed 's/".*//')"
+    source="$(sed -n "/^  ${comp}:/,/^  [a-z]/p" "$MATRIX" | grep '    source:' | head -1 | sed 's/.*: *"//' | sed 's/".*//')"
+
+    if [[ -n "$source" && -f "$ROOT/$source" ]]; then
+      echo "  $comp v$version — source OK ($source)"
+    elif [[ -n "$source" ]]; then
+      echo "  $comp v$version — source MISSING ($source)"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "  $comp v$version — no source declared"
+    fi
+  fi
+done < <(grep -E '^  [a-z].*:$' "$MATRIX" | grep -v 'enforcement:' | grep -v 'components:')
+
+echo ""
+
+# Check dependency references
+echo "Dependency checks:"
+while IFS= read -r line; do
+  dep="$(echo "$line" | sed 's/.*component: *//' | tr -d ' ')"
+  if [[ -n "$dep" ]]; then
+    if grep -q "^  ${dep}:" "$MATRIX"; then
+      echo "  dependency $dep — FOUND"
+    else
+      echo "  dependency $dep — MISSING"
+      ERRORS=$((ERRORS + 1))
+    fi
+  fi
+done < <(grep '      - component:' "$MATRIX")
+
+echo ""
+echo "Summary: $COMPONENTS components, $ERRORS errors"
+
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "VERIFY: FAIL"
+  exit 1
+fi
+
+echo "VERIFY: PASS"
+exit 0

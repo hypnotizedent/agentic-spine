@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# surface.readonly.audit — Verify surface readonly contract compliance
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+CONTRACT="$ROOT/ops/bindings/surface.readonly.contract.yaml"
+CAPABILITIES="$ROOT/ops/capabilities.yaml"
+
+echo "=== Surface Readonly Audit ==="
+echo ""
+
+if [[ ! -f "$CONTRACT" ]]; then
+  echo "FAIL: surface.readonly.contract.yaml not found"
+  exit 1
+fi
+
+ERRORS=0
+TOTAL=0
+EXISTING=0
+PLANNED=0
+
+SURFACES=(spine_status gap_reconciliation loop_summary rag_status proposal_queue mobile_dashboard)
+
+echo "Surface status:"
+for surface in "${SURFACES[@]}"; do
+  TOTAL=$((TOTAL + 1))
+  block="$(sed -n "/^  ${surface}:/,/^  [a-z]/p" "$CONTRACT" | head -20)"
+  exists="$(echo "$block" | grep 'exists:' | head -1 | awk '{print $2}')"
+  cap="$(echo "$block" | grep 'capability:' | head -1 | sed 's/.*: *"//' | sed 's/".*//' | sed 's/null//')"
+  access="$(echo "$block" | grep 'access:' | head -1 | awk '{print $2}')"
+
+  if [[ "$exists" == "true" ]]; then
+    EXISTING=$((EXISTING + 1))
+    # Verify capability exists
+    if [[ -n "$cap" ]]; then
+      if grep -q "${cap}:" "$CAPABILITIES" 2>/dev/null; then
+        echo "  $surface: EXISTS (cap=$cap, access=$access)"
+      else
+        echo "  $surface: EXISTS but cap=$cap MISSING from capabilities.yaml"
+        ERRORS=$((ERRORS + 1))
+      fi
+    else
+      echo "  $surface: EXISTS (no capability ref)"
+    fi
+  else
+    PLANNED=$((PLANNED + 1))
+    echo "  $surface: PLANNED (not yet implemented)"
+  fi
+
+  # Check no mutating access
+  if echo "$access" | grep -qi "mutating\|write\|delete"; then
+    echo "    WARNING: mutating access declared!"
+    ERRORS=$((ERRORS + 1))
+  fi
+done
+
+echo ""
+echo "Summary: $TOTAL surfaces, $EXISTING existing, $PLANNED planned, $ERRORS errors"
+
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "AUDIT: FAIL"
+  exit 1
+fi
+
+echo "AUDIT: PASS"
+exit 0

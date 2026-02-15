@@ -1,0 +1,84 @@
+# Surface Readonly Contract
+# Status: authoritative
+# Last verified: 2026-02-15
+# Scope: aof-surface-readonly-endpoints
+#
+# Declares readonly surface endpoints for status visibility.
+# Referenced by: D97 gate, surface.readonly.audit capability
+# Referenced by: AOF_SURFACE_READONLY_CONTRACT.md
+
+version: 1
+updated: "2026-02-15"
+owner: "@ronny"
+
+# Surface contract model
+# Each surface declares what data it exposes, access level, and format.
+# All surfaces are read-only — no mutations allowed through surface endpoints.
+
+surfaces:
+  spine_status:
+    description: "Unified spine status (loops, gaps, proposals, gates)"
+    capability: "spine.status"
+    format: text
+    access: local
+    data_sources:
+      - "ops/bindings/operational.gaps.yaml"
+      - "mailroom/state/loop-scopes/"
+      - "surfaces/verify/drift-gate.sh"
+    exists: true
+    notes: "Implemented via ./bin/ops status"
+
+  gap_reconciliation:
+    description: "Gap-loop reconciliation with orphan detection"
+    capability: "gaps.status"
+    format: text
+    access: local
+    data_sources:
+      - "ops/bindings/operational.gaps.yaml"
+    exists: true
+
+  loop_summary:
+    description: "Open/closed loop counts"
+    capability: "loops.status"
+    format: text
+    access: local
+    data_sources:
+      - "mailroom/state/loop-scopes/"
+    exists: true
+
+  rag_status:
+    description: "RAG parity and index health"
+    capability: "rag.anythingllm.status"
+    format: text
+    access: local
+    data_sources:
+      - "ops/bindings/rag.reindex.quality.yaml"
+    exists: true
+
+  proposal_queue:
+    description: "Proposal queue health with SLA breach detection"
+    capability: "proposals.status"
+    format: text
+    access: local
+    data_sources:
+      - "mailroom/outbox/proposals/"
+    exists: true
+
+  mobile_dashboard:
+    description: "Mobile/customer read-only status summary"
+    capability: null
+    format: json
+    access: remote
+    data_sources:
+      - "Aggregation of spine_status + gap_reconciliation + loop_summary"
+    exists: false
+    gap: "Planned for Phase B — requires API endpoint implementation"
+
+enforcement:
+  gate: D97
+  capability: surface.readonly.audit
+  checks:
+    - "Contract binding exists with version field"
+    - "Each declared surface references a valid capability or gap"
+    - "Existing surfaces have corresponding capabilities in capabilities.yaml"
+    - "No surface declares mutating access"

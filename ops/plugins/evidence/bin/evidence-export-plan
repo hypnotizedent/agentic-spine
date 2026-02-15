@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# evidence.export.plan — Dry-run plan for evidence export/retention
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+POLICY="$ROOT/ops/bindings/evidence.retention.policy.yaml"
+
+echo "=== Evidence Export Plan (Dry Run) ==="
+echo ""
+
+if [[ ! -f "$POLICY" ]]; then
+  echo "FAIL: evidence.retention.policy.yaml not found"
+  exit 1
+fi
+
+CLASSES=(session_receipts ledger_entries loop_scopes gap_registry proposals)
+
+echo "Retention summary:"
+for cls in "${CLASSES[@]}"; do
+  block="$(sed -n "/^  ${cls}:/,/^  [a-z]/p" "$POLICY" | head -20)"
+  retention="$(echo "$block" | grep 'retention_days:' | head -1 | awk '{print $2}')"
+  purge="$(echo "$block" | grep 'purge_eligible:' | head -1 | awk '{print $2}')"
+  pattern="$(echo "$block" | grep 'path_pattern:' | head -1 | sed 's/.*: *"//' | sed 's/".*//')"
+
+  echo "  $cls:"
+  echo "    pattern: $pattern"
+  echo "    retention: ${retention}d"
+  echo "    purge_eligible: $purge"
+
+  # Count matching files
+  if [[ -n "$pattern" ]]; then
+    dir="$(dirname "$ROOT/$pattern")"
+    if [[ -d "$dir" ]]; then
+      count="$(find "$dir" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
+      echo "    current_files: $count"
+    else
+      echo "    current_files: 0 (dir not found)"
+    fi
+  fi
+  echo ""
+done
+
+# Export config
+format="$(grep '  default_format:' "$POLICY" | head -1 | awk '{print $2}')"
+echo "Export config:"
+echo "  format: $format"
+echo "  signing: planned (not yet implemented)"
+echo ""
+echo "PLAN: DRY RUN COMPLETE (no mutations performed)"
+exit 0

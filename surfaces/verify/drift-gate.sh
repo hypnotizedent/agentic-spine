@@ -875,6 +875,46 @@ else
   warn "HA config version control gate not present"
 fi
 
+# D93: Tenant storage boundary lock
+echo -n "D93 tenant storage boundary lock... "
+if [[ -x "$SP/surfaces/verify/d93-tenant-storage-boundary-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d93-tenant-storage-boundary-lock.sh"
+else
+  warn "tenant storage boundary lock gate not present"
+fi
+
+# D94: Policy runtime enforcement lock
+echo -n "D94 policy runtime enforcement lock... "
+if [[ -x "$SP/surfaces/verify/d94-policy-runtime-enforcement-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d94-policy-runtime-enforcement-lock.sh"
+else
+  warn "policy runtime enforcement lock gate not present"
+fi
+
+# D95: Version compat matrix lock
+echo -n "D95 version compat matrix lock... "
+if [[ -x "$SP/surfaces/verify/d95-version-compat-matrix-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d95-version-compat-matrix-lock.sh"
+else
+  warn "version compat matrix lock gate not present"
+fi
+
+# D96: Evidence retention policy lock
+echo -n "D96 evidence retention policy lock... "
+if [[ -x "$SP/surfaces/verify/d96-evidence-retention-policy-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d96-evidence-retention-policy-lock.sh"
+else
+  warn "evidence retention policy lock gate not present"
+fi
+
+# D97: Surface readonly contract lock
+echo -n "D97 surface readonly contract lock... "
+if [[ -x "$SP/surfaces/verify/d97-surface-readonly-contract-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d97-surface-readonly-contract-lock.sh"
+else
+  warn "surface readonly contract lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

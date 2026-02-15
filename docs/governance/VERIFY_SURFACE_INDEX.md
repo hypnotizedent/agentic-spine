@@ -118,6 +118,12 @@ Notes:
 | `d89-rag-reindex-quality-contract-lock.sh` | RAG reindex quality contract lock (quality thresholds + verify/probe capabilities) | Yes |
 | `d90-rag-reindex-runtime-quality-gate.sh` | RAG reindex runtime quality gate (session stopped + completion quality). Test: `surfaces/verify/tests/d90-test.sh` | Yes |
 | `d91-aof-product-foundation-lock.sh` | AOF product foundation lock (product docs, bindings, tenant caps). Test: `surfaces/verify/tests/d91-test.sh` | Yes |
+| `d92-ha-config-version-control.sh` | HA config version control lock | Yes |
+| `d93-tenant-storage-boundary-lock.sh` | Tenant storage contract lock (boundaries + isolation). Test: `surfaces/verify/tests/d93-test.sh` | Yes |
+| `d94-policy-runtime-enforcement-lock.sh` | Policy runtime enforcement lock (knob wiring + compliance). Test: `surfaces/verify/tests/d94-test.sh` | Yes |
+| `d95-version-compat-matrix-lock.sh` | Version compat matrix lock (dependency graph + sources). Test: `surfaces/verify/tests/d95-test.sh` | Yes |
+| `d96-evidence-retention-policy-lock.sh` | Evidence retention policy lock (retention classes + purge rules). Test: `surfaces/verify/tests/d96-test.sh` | Yes |
+| `d97-surface-readonly-contract-lock.sh` | Surface readonly contract lock (surfaces + access). Test: `surfaces/verify/tests/d97-test.sh` | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -152,10 +158,10 @@ Not called by default verification flows. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by `ops verify` | 10 |
-| Called by `spine.verify` (drift-gate suite) | 58 |
+| Called by `spine.verify` (drift-gate suite) | 64 |
 | Called by capabilities | 1 |
 | Manual / legacy | 9 |
-| **Total** | **78** |
+| **Total** | **84** |
 
 ---
 

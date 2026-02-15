@@ -477,6 +477,11 @@ Before adding `status: authoritative` or claiming SSOT:
 | `docs/product/AOF_PRODUCT_CONTRACT.md` | AOF product boundary, versioning, tenant model |
 | `docs/product/AOF_DEPLOYMENT_PLAYBOOK.md` | AOF deployment guide |
 | `docs/product/AOF_SUPPORT_SLO.md` | AOF support commitments |
+| `docs/product/AOF_TENANT_STORAGE_MODEL.md` | AOF tenant isolation and storage boundary contract |
+| `docs/product/AOF_POLICY_RUNTIME_ENFORCEMENT.md` | AOF policy knob enforcement at runtime |
+| `docs/product/AOF_VERSION_COMPATIBILITY.md` | AOF version compatibility matrix |
+| `docs/product/AOF_EVIDENCE_RETENTION_EXPORT.md` | AOF evidence retention and export contract |
+| `docs/product/AOF_SURFACE_READONLY_CONTRACT.md` | AOF read-only surface endpoint contract |
 
 ---
 

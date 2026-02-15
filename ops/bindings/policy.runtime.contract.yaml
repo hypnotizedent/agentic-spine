@@ -1,0 +1,113 @@
+# Policy Runtime Contract
+# Status: authoritative
+# Last verified: 2026-02-15
+# Scope: aof-policy-runtime-enforcement
+#
+# Declares which policy knobs must be enforced at runtime and how.
+# Referenced by: D94 gate, policy.runtime.audit capability
+# Referenced by: AOF_POLICY_RUNTIME_ENFORCEMENT.md, policy.presets.yaml
+
+version: 1
+updated: "2026-02-15"
+owner: "@ronny"
+
+# Runtime enforcement rules
+# Each knob from policy.presets.yaml must have an enforcement entry here.
+# enforcement_point: where the knob is checked (drift-gate, cap-runner, hook)
+# enforcement_mode: how violations are handled (fail, warn, log)
+
+knobs:
+  drift_gate_mode:
+    description: "Controls whether drift gate failures are hard (fail) or soft (warn)"
+    enforcement_point: drift-gate.sh
+    enforcement_mode: runtime
+    wired: true
+    wired_in: "surfaces/verify/drift-gate.sh"
+    validates_via: "DRIFT_GATE_MODE variable check"
+
+  approval_default:
+    description: "Default approval mode for capabilities (auto or manual)"
+    enforcement_point: cap.sh
+    enforcement_mode: runtime
+    wired: true
+    wired_in: "ops/commands/cap.sh"
+    validates_via: "APPROVAL_DEFAULT override in cap runner"
+
+  session_closeout_sla_hours:
+    description: "Maximum hours between session closeouts"
+    enforcement_point: drift-gate.sh
+    enforcement_mode: runtime
+    wired: true
+    wired_in: "surfaces/verify/drift-gate.sh (D61)"
+    validates_via: "SLA_HOURS variable in closeout check"
+
+  warn_policy:
+    description: "Warning escalation policy (strict=fail on warn, advisory=log only)"
+    enforcement_point: drift-gate.sh
+    enforcement_mode: runtime
+    wired: true
+    wired_in: "surfaces/verify/drift-gate.sh"
+    validates_via: "WARN_POLICY variable at gate summary"
+
+  stale_ssot_max_days:
+    description: "Maximum days before SSOT freshness check fails"
+    enforcement_point: drift-gate.sh
+    enforcement_mode: runtime
+    wired: false
+    wired_in: null
+    validates_via: null
+    gap: "Not yet wired to resolve-policy.sh output"
+
+  gap_auto_claim:
+    description: "Whether gaps are auto-claimed on file"
+    enforcement_point: gaps.sh
+    enforcement_mode: runtime
+    wired: false
+    wired_in: null
+    validates_via: null
+    gap: "Not yet wired"
+
+  proposal_required:
+    description: "Whether multi-agent writes require proposal flow"
+    enforcement_point: cap.sh
+    enforcement_mode: runtime
+    wired: false
+    wired_in: null
+    validates_via: null
+    gap: "Not yet wired"
+
+  receipt_retention_days:
+    description: "Days to retain receipt files before purge eligibility"
+    enforcement_point: evidence.export
+    enforcement_mode: runtime
+    wired: false
+    wired_in: null
+    validates_via: null
+    gap: "Not yet wired — see evidence.retention.policy.yaml"
+
+  commit_sign_required:
+    description: "Whether git commits require GPG signatures"
+    enforcement_point: pre-commit hook
+    enforcement_mode: runtime
+    wired: false
+    wired_in: null
+    validates_via: null
+    gap: "Not yet wired"
+
+  multi_agent_writes:
+    description: "Multi-agent write policy (proposal-only or direct)"
+    enforcement_point: cap.sh
+    enforcement_mode: runtime
+    wired: false
+    wired_in: null
+    validates_via: null
+    gap: "Not yet wired"
+
+enforcement:
+  gate: D94
+  capability: policy.runtime.audit
+  checks:
+    - "Contract binding exists with all 10 knobs declared"
+    - "Each knob declares enforcement_point and wired status"
+    - "Wired knobs reference valid source files"
+    - "Unwired knobs declare gap reason"

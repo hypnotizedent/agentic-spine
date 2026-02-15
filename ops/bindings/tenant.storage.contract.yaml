@@ -1,0 +1,64 @@
+# Tenant Storage Contract
+# Status: authoritative
+# Last verified: 2026-02-15
+# Scope: aof-tenant-storage-boundaries
+#
+# Defines tenant-scoped storage boundaries for runtime paths.
+# Referenced by: D93 gate, tenant.storage.audit capability
+# Referenced by: AOF_TENANT_STORAGE_MODEL.md
+
+version: 1
+updated: "2026-02-15"
+owner: "@ronny"
+
+# Storage boundary model
+# Each path_template uses {tenant_id} as the isolation token.
+# Current mode: logical (shared filesystem, tenant-prefixed paths)
+# Future mode: physical (separate volumes/namespaces per tenant)
+
+isolation_mode: logical
+
+boundaries:
+  receipts:
+    description: "Execution receipts and audit trail"
+    current_path: "receipts/sessions/"
+    tenant_path_template: "receipts/tenants/{tenant_id}/sessions/"
+    retention_policy: "evidence.retention.policy"
+    sensitivity: high
+
+  ledger:
+    description: "Append-only capability execution ledger"
+    current_path: "receipts/ledger/"
+    tenant_path_template: "receipts/tenants/{tenant_id}/ledger/"
+    retention_policy: "evidence.retention.policy"
+    sensitivity: high
+
+  mailroom_inbox:
+    description: "Agent inbox for task routing"
+    current_path: "mailroom/inbox/"
+    tenant_path_template: "mailroom/tenants/{tenant_id}/inbox/"
+    retention_policy: "operational"
+    sensitivity: medium
+
+  mailroom_outbox:
+    description: "Proposal and output staging"
+    current_path: "mailroom/outbox/"
+    tenant_path_template: "mailroom/tenants/{tenant_id}/outbox/"
+    retention_policy: "operational"
+    sensitivity: medium
+
+  loop_scopes:
+    description: "Active loop scope files"
+    current_path: "mailroom/state/loop-scopes/"
+    tenant_path_template: "mailroom/tenants/{tenant_id}/state/loop-scopes/"
+    retention_policy: "operational"
+    sensitivity: low
+
+enforcement:
+  gate: D93
+  capability: tenant.storage.audit
+  checks:
+    - "Contract binding exists and declares all boundaries"
+    - "Each boundary has current_path, tenant_path_template, and sensitivity"
+    - "No runtime path writes outside declared boundaries"
+    - "Isolation mode is declared (logical or physical)"

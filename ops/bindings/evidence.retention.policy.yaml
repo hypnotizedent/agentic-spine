@@ -1,0 +1,79 @@
+# Evidence Retention Policy
+# Status: authoritative
+# Last verified: 2026-02-15
+# Scope: aof-evidence-retention-export
+#
+# Declares retention periods, export formats, and purge eligibility for evidence.
+# Referenced by: D96 gate, evidence.export.plan capability
+# Referenced by: AOF_EVIDENCE_RETENTION_EXPORT.md
+
+version: 1
+updated: "2026-02-15"
+owner: "@ronny"
+
+# Retention classes
+# Each class defines retention_days, export_format, and purge rules.
+# Evidence is never deleted without explicit operator action.
+
+retention_classes:
+  session_receipts:
+    description: "Capability execution receipts"
+    path_pattern: "receipts/sessions/RCAP-*"
+    retention_days: 30
+    export_format: tar.gz
+    purge_eligible: true
+    purge_requires: manual_approval
+    sensitivity: standard
+
+  ledger_entries:
+    description: "Append-only execution ledger"
+    path_pattern: "receipts/ledger/*.yaml"
+    retention_days: 365
+    export_format: yaml
+    purge_eligible: false
+    purge_requires: null
+    sensitivity: high
+
+  loop_scopes:
+    description: "Loop scope files (active and closed)"
+    path_pattern: "mailroom/state/loop-scopes/*.scope.md"
+    retention_days: 90
+    export_format: tar.gz
+    purge_eligible: true
+    purge_requires: manual_approval
+    sensitivity: standard
+
+  gap_registry:
+    description: "Operational gap registry entries"
+    path_pattern: "ops/bindings/operational.gaps.yaml"
+    retention_days: 365
+    export_format: yaml
+    purge_eligible: false
+    purge_requires: null
+    sensitivity: high
+
+  proposals:
+    description: "Proposal files (applied and superseded)"
+    path_pattern: "mailroom/outbox/proposals/*"
+    retention_days: 30
+    export_format: tar.gz
+    purge_eligible: true
+    purge_requires: auto
+    sensitivity: standard
+
+export:
+  default_format: tar.gz
+  include_metadata: true
+  signing: planned
+  signing_method: null
+  attestation_format: null
+  notes: "Signed attestations planned for Phase B. Current export is unsigned tar.gz."
+
+enforcement:
+  gate: D96
+  capability: evidence.export.plan
+  checks:
+    - "Policy binding exists with version field"
+    - "Each retention class declares retention_days and purge rules"
+    - "Receipt paths exist and match declared patterns"
+    - "No retention class allows purge without approval"
