@@ -1086,6 +1086,12 @@ else
   warn "RAG embedding smoke preflight gate not present"
 fi
 
+echo -n "D113 Coordinator health probe... "
+gate_script "$SP/surfaces/verify/d113-coordinator-health-probe.sh" "D113"
+
+echo -n "D114 HA automation stability... "
+gate_script "$SP/surfaces/verify/d114-ha-automation-stability.sh" "D114"
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

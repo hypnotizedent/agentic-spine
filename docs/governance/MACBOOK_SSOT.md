@@ -277,7 +277,7 @@ df -h /
 | `homebrew.mxcl.ollama.plist` | On login | — | Ollama auto-start | ACTIVE |
 | `com.ronny.vzdump-tier1-offsite.plist` | Sun 03:30 | `sync-vzdump-tier1-offsite.sh` | Tier 1 VM offsite sync | ACTIVE |
 | `com.ronny.macos-sync-critical.plist` | Sun 04:00 | `macos-sync-critical.sh` | MacBook critical folders | ACTIVE |
-| `com.ronny.ha-offsite-sync.plist` | Sun 04:30 | `sync-ha-offsite.sh` | Home Assistant offsite | ACTIVE |
+| `com.ronny.ha-offsite-sync.plist` | Sun 04:30 | `sync-ha-offsite.sh` | Home Assistant offsite (vzdump replaced) | RETIRED |
 | `com.ronny.secrets-verify.plist` | Daily 08:00 | `secrets_verify.sh` | Validate secrets inventory | ACTIVE |
 | `com.ronny.monitoring-verify.plist` | Every 15m | `monitoring_verify.sh` | Validate monitoring | ACTIVE |
 | `com.ronnyworks.minio-mount.plist` | On login | rclone nfsmount | Mount MinIO via rclone | ACTIVE |

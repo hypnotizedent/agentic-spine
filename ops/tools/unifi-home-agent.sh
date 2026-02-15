@@ -202,14 +202,93 @@ EOF
   fi
 }
 
+# ── Reservations command ──
+cmd_reservations() {
+  local site="default"
+  local json_mode=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --site) site="${2:-default}"; shift 2 ;;
+      --json) json_mode=1; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  if ! resolve_creds; then
+    echo "FAIL: UniFi home credentials not available" >&2
+    exit 1
+  fi
+
+  local udr_b64 site_b64 user_b64 pass_b64
+  udr_b64="$(printf '%s' "$UDR_HOST" | base64)"
+  site_b64="$(printf '%s' "$site" | base64)"
+  user_b64="$(printf '%s' "$UNIFI_HOME_USER" | base64)"
+  pass_b64="$(printf '%s' "$UNIFI_HOME_PASSWORD" | base64)"
+
+  local raw
+  raw="$(
+    proxy_run <<EOF
+set -euo pipefail
+
+udr="\$(echo '$udr_b64' | base64 -d)"
+site="\$(echo '$site_b64' | base64 -d)"
+user="\$(echo '$user_b64' | base64 -d)"
+pass="\$(echo '$pass_b64' | base64 -d)"
+
+payload="\$(UNIFI_USER="\$user" UNIFI_PASS="\$pass" python3 - <<'PY'
+import json, os
+print(json.dumps({"username": os.environ["UNIFI_USER"], "password": os.environ["UNIFI_PASS"]}))
+PY
+)"
+
+# Auth (cookie)
+printf '%s' "\$payload" | curl -sk -X POST "https://\${udr}/api/auth/login" \
+  -H "Content-Type: application/json" \
+  --data-binary @- \
+  -c /tmp/unifi_home_cookies.txt \
+  -o /dev/null 2>/dev/null
+
+# Query users with fixed IPs (DHCP reservations)
+curl -sk "https://\${udr}/proxy/network/api/s/\${site}/rest/user" -b /tmp/unifi_home_cookies.txt 2>/dev/null
+
+rm -f /tmp/unifi_home_cookies.txt
+EOF
+  )" || {
+    echo "FAIL: could not query UniFi API via proxmox-home" >&2
+    exit 1
+  }
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    echo "$raw" | jq -r '[.data[] | select(.use_fixedip == true) | {mac, ip: .fixed_ip, name: (.name // .hostname // "unknown"), noted: (.noted // false)}]' 2>/dev/null || {
+      echo "FAIL: could not parse UniFi response" >&2
+      echo "$raw" >&2
+      exit 1
+    }
+  else
+    echo "unifi-home-agent: reservations (site=$site)"
+    echo "host: $UDR_HOST (via proxmox-home $PROXY_HOST)"
+    echo
+    { printf 'MAC\tIP\tNAME\n'; echo "$raw" | jq -r '.data[] | select(.use_fixedip == true) | "\(.mac)\t\(.fixed_ip)\t\(.name // .hostname // "unknown")"' 2>/dev/null \
+      | sort -t$'\t' -k2,2V; } \
+      | column -t -s$'\t' 2>/dev/null \
+      || {
+        echo "FAIL: could not parse UniFi response" >&2
+        echo "$raw" >&2
+        exit 1
+      }
+  fi
+}
+
 # ── Help ──
 show_help() {
   cat <<'EOF'
 unifi-home-agent.sh — CLI agent for home UniFi OS API
 
 Usage:
-  unifi-home-agent.sh auth                          Test authentication
-  unifi-home-agent.sh clients [--site S] [--json]   List connected clients
+  unifi-home-agent.sh auth                                Test authentication
+  unifi-home-agent.sh clients [--site S] [--json]         List connected clients
+  unifi-home-agent.sh reservations [--site S] [--json]    List DHCP reservations
 
 Options:
   --site S    UniFi site name (default: "default")
@@ -225,8 +304,9 @@ EOF
 
 # ── Main ──
 case "${1:-help}" in
-  auth)    cmd_auth ;;
-  clients) shift; cmd_clients "$@" ;;
+  auth)         cmd_auth ;;
+  clients)      shift; cmd_clients "$@" ;;
+  reservations) shift; cmd_reservations "$@" ;;
   help|--help|-h) show_help ;;
   *) echo "Unknown command: $1" >&2; show_help; exit 1 ;;
 esac

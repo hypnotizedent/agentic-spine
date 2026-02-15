@@ -219,6 +219,144 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 - Do NOT run two Zigbee coordinators simultaneously (creates separate networks)
 - Use SLZB-06 for Zigbee, SLZB-06MU for Matter/Thread
 
+### 6.1 Firmware & Version Management
+
+> Pre-update: always take an HA backup and note current Z2M device count before any firmware change.
+
+#### SLZB-06 Core Firmware
+
+| Field | Value |
+|-------|-------|
+| Current | v3.1.6.dev |
+| Update method | Web UI (http://10.0.0.51) > Settings > OTA update |
+| Fallback | Download `.bin` from SMLIGHT GitHub releases, flash via Web UI upload |
+
+#### SLZB-06 Radio Firmware (CC2652P)
+
+| Field | Value |
+|-------|-------|
+| Current | 20240710 |
+| Update method | Web UI > Settings > Zigbee flasher (OTA) |
+| Alternative | TI SmartRF Flash Programmer 2 (USB direct, requires physical access) |
+| Coordinator file | Koenkk Z2M coordinator firmware repository |
+
+#### SLZB-06MU Firmware
+
+| Field | Value |
+|-------|-------|
+| Current | MultiPAN/RCP (flashed 2026-01-11) |
+| Update method | Web UI (http://10.0.0.52) > Settings > OTA update |
+| HA entities | `update.slzb_06mu_core_firmware`, `update.slzb_06mu_zigbee_firmware` (report available versions) |
+
+#### Zigbee2MQTT Version
+
+| Field | Value |
+|-------|-------|
+| Current | v2.8.0-1 |
+| Update method | HA Settings > Add-ons > Zigbee2MQTT > Update |
+| Config persistence | Add-on stores config in internal `options.json` (see recovery runbook S8) |
+
+#### Pre-Update Checklist
+
+1. Take HA backup: `ssh hassio@ha "bash -l -c 'ha backups new --name pre-firmware-YYYYMMDD'"`
+2. Note current Z2M device count (run `ha.z2m.devices.snapshot` or check Z2M dashboard)
+3. Verify `ops/bindings/z2m.devices.yaml` is fresh (< 14 days)
+4. If updating radio firmware: note current radio version from Web UI
+
+#### Post-Update Validation
+
+1. Run `./bin/ops cap run ha.z2m.devices.snapshot` — compare device count to pre-update
+2. Check Z2M dashboard: all 6 devices reporting battery levels
+3. Verify automations still fire (trigger a button, check log)
+4. Run `./bin/ops cap run spine.verify` — confirm D98, D99, D101 PASS
+
+### 6.2 Z-Wave Integration (TubesZB)
+
+> TubesZB ZAC93 (Zooz 800 Series Long Range) is on hand but not installed. This section documents the installation procedure.
+
+#### Prerequisites
+
+- TubesZB powered via PoE (connect to UDR7 or PoE switch)
+- ESPHome firmware detected: HA entity `sensor.tubeszb_2026_zw_esp_ip_address` shows IP
+- Static IP 10.0.0.90 assigned in UDR7 DHCP reservations (already configured)
+- Z-Wave JS UI add-on installed (v0.29.1, currently stopped)
+
+#### Installation Steps
+
+1. **Physical placement:** Position TubesZB centrally, away from Zigbee coordinator (minimize 2.4GHz interference). Z-Wave uses 908MHz (US), so distance from WiFi AP is less critical.
+2. **PoE connection:** Connect to UDR7 PoE port or PoE injector. Verify power LED.
+3. **Verify ESPHome status:** HA > Settings > Devices > search `tubeszb`. Entity `sensor.tubeszb_2026_zw_esp_ip_address` should show `10.0.0.90`.
+4. **Start Z-Wave JS UI add-on:** HA > Settings > Add-ons > Z-Wave JS UI > Start.
+
+#### Z-Wave JS UI Configuration
+
+1. Serial port: `tcp://10.0.0.90:6638`
+2. Security keys: Generate via add-on settings (S0, S2 Unauthenticated, S2 Authenticated, S2 Access Control)
+3. Network configuration: Leave defaults (Home ID auto-generated on first start)
+4. Enable statistics: Optional (helps Z-Wave ecosystem)
+
+#### First Device Pairing
+
+1. Open Z-Wave JS UI dashboard (HA sidebar or `http://100.67.120.1:8123/api/hassio_ingress/<addon_slug>`)
+2. Click "Add Node" (inclusion mode)
+3. Put target device in pairing mode (device-specific — usually press button 3x)
+4. Wait for interview to complete (may take 1-5 minutes)
+5. Verify entities appear in HA > Settings > Devices
+
+#### Recovery
+
+- **Network heal:** Z-Wave JS UI > Actions > Heal Network (run after moving nodes)
+- **Network reset (last resort):** Z-Wave JS UI > Actions > Hard Reset. All devices must be re-included.
+- **Controller replacement:** Export NVM backup from Z-Wave JS UI before replacing hardware. Import on new controller.
+- **Backup/restore:** Z-Wave JS UI stores config in add-on data. HA backup includes this.
+
+### 6.3 Matter/Thread Integration (SLZB-06MU)
+
+> SLZB-06MU is installed (10.0.0.52) with MultiPAN/RCP firmware. Matter Server and OpenThread Border Router add-ons are present but not wired.
+
+#### Current State
+
+| Component | Version | Status |
+|-----------|---------|--------|
+| SLZB-06MU | MultiPAN/RCP (flashed 2026-01-11) | Ethernet connected, reachable |
+| Matter Server add-on | v8.2.2 | Started |
+| OpenThread Border Router add-on | v2.16.3 | Present, state UNKNOWN |
+| HA Matter integration | Active | Not wired to SLZB-06MU |
+| HA Thread integration | Active | Not wired to SLZB-06MU |
+
+#### Wiring Procedure
+
+1. **Configure OpenThread Border Router add-on:**
+   - Set serial port to SLZB-06MU RCP device: TCP socket `tcp://10.0.0.52:6638` or `/dev/serial/by-id/...` if USB-attached
+   - Set baudrate: 460800 (default for SLZB-06MU RCP mode)
+   - Enable border router functionality
+   - Start the add-on
+
+2. **Verify Thread network formation:**
+   - OpenThread Border Router dashboard shows "Leader" or "Router" state
+   - Thread integration in HA shows the network with a dataset
+   - Network credentials (commissioning dataset) visible in Thread integration
+
+3. **Configure Matter Server:**
+   - Matter Server should auto-detect the Thread network via mDNS
+   - Verify in Matter Server logs: Thread border router discovered
+   - No manual configuration needed if both add-ons are on the same host
+
+#### Matter Device Commissioning
+
+1. Open HA companion app (iOS/Android)
+2. Settings > Devices & Services > Add Integration > Matter
+3. Scan device QR code (on device box or in device app)
+4. Choose Thread network (if device supports Thread) or WiFi
+5. Multi-admin: device can be shared with Apple Home via "Add to other ecosystem"
+
+#### Recovery
+
+- **Thread network reset:** Delete Thread network in HA Thread integration. OpenThread Border Router will form a new network.
+- **Matter fabric removal:** HA > Settings > Integrations > Matter > device > Remove. Device must be factory-reset for re-commissioning.
+- **Re-commissioning:** Factory-reset device, re-scan QR code in HA companion app.
+- **SLZB-06MU reflash:** If RCP firmware is corrupt, reflash via Web UI (http://10.0.0.52) > Settings > Firmware.
+
 ---
 
 ## 7. Backup & Restore Procedure
@@ -235,18 +373,15 @@ ssh hassio@ha "bash -l -c 'ha backups new --name ha-backup-YYYYMMDD'"
 
 **Retention:** Keep last 3 on HA, 7 days locally, 4 syncs on NAS.
 
-### Offsite Sync
+### Offsite Sync (Retired)
 
-**Architecture:** HA (SSH add-on) -> MacBook (staging at `/tmp/ha-backup-staging`) -> Synology NAS.
+~~Previously: HA (SSH add-on) -> MacBook (staging at `/tmp/ha-backup-staging`) -> Synology NAS (weekly launchd job).~~
 
-**Schedule:** Weekly Sunday 04:30 via macOS launchd (`com.ronny.ha-offsite-sync`).
-
-**Steps:**
-1. SSH to HA, list `/backup/*.tar`
-2. rsync pull to local staging
-3. rsync push to `nas:/volume1/backups/apps/home-assistant/`
-4. Create sync receipt on NAS
-5. Prune old receipts (keep last 4)
+**Current path:** vzdump captures VM 100 daily at 03:00, writing directly to NAS via NFS
+(`proxmox-home:/mnt/pve/synology-backups` -> `nas:/volume1/backups/proxmox_backups`).
+App-level `/backup/*.tar` files are included in the VM snapshot. The MacBook intermediary
+(`com.ronny.ha-offsite-sync.plist`) is retired — vzdump provides better RPO (daily vs weekly)
+with zero hops.
 
 ### VM-Level Backup
 
