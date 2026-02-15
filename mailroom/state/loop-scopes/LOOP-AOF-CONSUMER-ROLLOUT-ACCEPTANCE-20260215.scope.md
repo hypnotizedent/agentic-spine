@@ -1,6 +1,6 @@
 # LOOP-AOF-CONSUMER-ROLLOUT-ACCEPTANCE-20260215
 
-**Status:** open
+**Status:** closed
 **Opened:** 2026-02-15
 **Owner:** @ronny
 **Terminal:** claude-code
@@ -25,6 +25,15 @@ evidence. This is the final acceptance gate before freezing AOF v1 baseline.
 - [ ] Monitor gets 200 only for aof.status + aof.version, and 403 for the other 3
 - [ ] Every bridge-invoked run produces a valid receipt on disk and ledger linkage
 - [ ] One acceptance summary receipt capturing all evidence
+
+## Closure
+
+All 3 gaps closed. 15/15 acceptance tests passing.
+Implementation commit: 37a1be9. spine.verify: all gates PASS.
+
+Bonus fix: mailroom-bridge-start now auto-injects RBAC role tokens into
+launchd plist from state files (monitor token was not being passed to bridge
+subprocess).
 
 ## Post-Loop
 
