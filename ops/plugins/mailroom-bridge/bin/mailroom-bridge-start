@@ -78,6 +78,32 @@ EOF
 )
 fi
 
+# Inject RBAC role tokens into plist EnvironmentVariables
+if command -v yq >/dev/null 2>&1; then
+  role_envs="$(yq -r '.cap_rpc.roles[].token_env' "$BINDING" 2>/dev/null || true)"
+  for role_env in $role_envs; do
+    # Skip the primary token (already handled above)
+    [[ "$role_env" == "$token_env" ]] && continue
+    role_val="${!role_env:-}"
+    # Try state file fallback (token file named after env var, lowercased with dashes)
+    if [[ -z "$role_val" ]]; then
+      role_file="${STATE_DIR}/mailroom-bridge-monitor.token"
+      if [[ -f "$role_file" ]]; then
+        role_val="$(tr -d '\r\n' < "$role_file" 2>/dev/null || true)"
+      fi
+    fi
+    if [[ -n "$role_val" ]]; then
+      extra_env+=$(cat <<EOF
+
+      <key>${role_env}</key>
+      <string>${role_val}</string>
+EOF
+)
+      echo "RBAC_TOKEN_LOADED: ${role_env}"
+    fi
+  done
+fi
+
 if ! command -v launchctl >/dev/null 2>&1; then
   echo "STOP (2): launchctl required (macOS launchd)"
   exit 2
