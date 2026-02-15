@@ -41,11 +41,11 @@ Do not run `./bin/ops` unless step 1 succeeded.
 ## Bootstrap: Bridge-capable mobile/remote
 
 Remote URL strategy:
-- Primary: `https://<public-bridge-host>` (hosted runtime compatible)
+- Primary: `https://spine.ronny.works` (hosted runtime compatible)
 - Secondary: `http://macbook.taile9480.ts.net` (tailnet)
 
 1. Health check order:
-   - First try public: `GET https://<public-bridge-host>/health` (if hostname is known).
+   - First try public: `GET https://spine.ronny.works/health` (if hostname is known).
    - Then try tailnet: `GET http://macbook.taile9480.ts.net/health`.
 2. If both health checks fail due DNS/network/timeout:
    - Say: `Bridge unreachable from this runtime (likely DNS/egress limit). Spine may still be healthy.`
