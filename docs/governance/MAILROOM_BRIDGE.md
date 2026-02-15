@@ -88,24 +88,24 @@ Base URL (default): `http://127.0.0.1:8799`
 
 Returns server status + bind info.
 
-### `GET /loops/open` (auth if token set)
+### `GET /loops/open` (auth required)
 
 Returns reduced open loops from scope files in `mailroom/state/loop-scopes/*.scope.md`
 (stable ordering, derived from frontmatter fields like `loop_id`, `status`, `severity`, `owner`).
 
-### `GET /outbox/list?path=<rel>` (auth if token set)
+### `GET /outbox/list?path=<rel>` (auth required)
 
 Lists files/dirs under `mailroom/outbox/<rel>`.
 
-### `GET /outbox/read?path=<rel>` (auth if token set)
+### `GET /outbox/read?path=<rel>` (auth required)
 
 Reads a file under `mailroom/outbox/<rel>` (size-limited).
 
-### `GET /receipts/read?path=<rel>` (auth if token set)
+### `GET /receipts/read?path=<rel>` (auth required)
 
 Reads a file under `receipts/sessions/<rel>` (size-limited).
 
-### `POST /inbox/enqueue` (auth if token set)
+### `POST /inbox/enqueue` (auth required)
 
 Body (JSON):
 ```json
@@ -120,7 +120,7 @@ Body (JSON):
 Effect:
 - enqueues a prompt into `mailroom/inbox/queued/` via `ops/runtime/inbox/agent-enqueue.sh`
 
-### `POST /rag/ask` (auth if token set)
+### `POST /rag/ask` (auth required)
 
 Body (JSON):
 ```json
@@ -155,7 +155,7 @@ Use an n8n “HTTP Request” node:
 - Method: `POST`
 - URL: `http://<tailnet_url>/inbox/enqueue` (recommended; tailnet-only) or `http://127.0.0.1:8799/inbox/enqueue` (if n8n runs on same host)
 - Headers:
-  - `X-Spine-Token: <token>` (if token auth is enabled)
+  - `X-Spine-Token: <token>`
 - JSON body: the payload above
 
 To read results:
@@ -167,7 +167,7 @@ Template workflow export (import into n8n):
 
 Recommended n8n env vars:
 - `SPINE_MAILROOM_BRIDGE_URL` (example: `http://macbook.taile9480.ts.net`)
-- `MAILROOM_BRIDGE_TOKEN` (only if you enable token auth on the bridge)
+- `MAILROOM_BRIDGE_TOKEN`
 
 ---
 
@@ -198,9 +198,7 @@ OPS_ALLOW_MAIN_MUTATION=1 ./bin/ops cap run mailroom.bridge.expose.enable
 Notes:
 - `mailroom.bridge.expose.enable` refuses to overwrite an existing `tailscale serve` config.
 - `mailroom.bridge.expose.enable` currently configures **tailnet-only HTTP** (port 80) for compatibility.
-- If you expose beyond localhost, strongly consider setting a token:
-  - set `auth.require_token: true` in `ops/bindings/mailroom.bridge.yaml`
-  - set `MAILROOM_BRIDGE_TOKEN` in the runtime environment
+- Token auth is enforced for all non-health endpoints (`require_token: true` in binding).
 
 ---
 
