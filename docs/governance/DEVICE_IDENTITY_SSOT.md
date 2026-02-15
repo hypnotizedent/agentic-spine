@@ -177,22 +177,22 @@ Notes (Shop LAN-only endpoints):
 
 ### Shop VM LAN IPs (Static or reserved — used for local routing; NFS uses LAN IPs)
 
-| VM | Canonical Name | LAN IP | VMID | Notes |
-|----|----------------|--------|------|-------|
-| pve (hypervisor) | `pve` | 192.168.1.184 | — | Proxmox host; NFS server |
-| docker-host (Mint OS) | `docker-host` | 192.168.1.200 | 200 | Static IP (netplan). Mint OS production workloads. |
-| media-stack | `media-stack` | 192.168.1.201 | 201 | **Decommissioned** 2026-02-10 (VM destroyed; split to 209/210). |
-| automation-stack | `automation-stack` | 192.168.1.110 | 202 | Automation (n8n, Ollama, Open WebUI). IP does not follow VMID parity (DHCP lease at .110). |
-| immich (shop) | `immich` | 192.168.1.203 | 203 | Shop photos (Tailscale: `immich-1`). |
-| infra-core | `infra-core` | 192.168.1.204 | 204 | Static IP; Pi-hole DNS |
-| observability | `observability` | 192.168.1.205 | 205 | Static IP |
-| dev-tools | `dev-tools` | 192.168.1.206 | 206 | Static IP |
-| ai-consolidation | `ai-consolidation` | 192.168.1.207 | 207 | DHCP noted in SHOP_SERVER_SSOT; confirm reservation on UDR. |
-| download-stack | `download-stack` | 192.168.1.209 | 209 | NFS mounts use this IP |
-| streaming-stack | `streaming-stack` | 192.168.1.210 | 210 | NFS mounts use this IP |
-| finance-stack | `finance-stack` | 192.168.1.211 | 211 | Finance (Firefly III, Paperless, Ghostfolio) |
-| mint-data | `mint-data` | 192.168.1.212 | 212 | Fresh-slate data plane (PostgreSQL + MinIO + Redis) |
-| mint-apps | `mint-apps` | 192.168.1.213 | 213 | Fresh-slate app plane (artwork, quote-page, order-intake) |
+| VM | Canonical Name | LAN IP | VMID | MAC | Notes |
+|----|----------------|--------|------|-----|-------|
+| pve (hypervisor) | `pve` | 192.168.1.184 | — | 44:a8:42:22:2c:a6 | Proxmox host; NFS server |
+| docker-host (Mint OS) | `docker-host` | 192.168.1.200 | 200 | bc:24:11:bb:d0:b6 | Static IP (netplan). Mint OS production workloads. |
+| media-stack | `media-stack` | 192.168.1.201 | 201 | — | **Decommissioned** 2026-02-10 (VM destroyed; split to 209/210). |
+| automation-stack | `automation-stack` | 192.168.1.110 | 202 | bc:24:11:31:bc:5a | Automation (n8n, Ollama, Open WebUI). DHCP lease at .110 (no VMID parity). |
+| immich (shop) | `immich` | 192.168.1.203 | 203 | bc:24:11:b8:e7:40 | Shop photos (Tailscale: `immich-1`). |
+| infra-core | `infra-core` | 192.168.1.204 | 204 | bc:24:11:19:84:3c | Static IP; Pi-hole DNS |
+| observability | `observability` | 192.168.1.205 | 205 | bc:24:11:5a:79:ed | Static IP |
+| dev-tools | `dev-tools` | 192.168.1.206 | 206 | bc:24:11:d9:d6:bc | Static IP |
+| ai-consolidation | `ai-consolidation` | 192.168.1.8 | 207 | bc:24:11:42:0e:b4 | DHCP lease at .8 (no VMID parity). AI workloads (Qdrant, AnythingLLM). |
+| download-stack | `download-stack` | 192.168.1.209 | 209 | bc:24:11:44:d0:7b | NFS mounts use this IP |
+| streaming-stack | `streaming-stack` | 192.168.1.210 | 210 | bc:24:11:09:5d:76 | NFS mounts use this IP |
+| finance-stack | `finance-stack` | 192.168.1.211 | 211 | bc:24:11:6f:74:82 | Finance (Firefly III, Paperless, Ghostfolio) |
+| mint-data | `mint-data` | 192.168.1.212 | 212 | bc:24:11:2b:85:2b | Fresh-slate data plane (PostgreSQL + MinIO + Redis) |
+| mint-apps | `mint-apps` | 192.168.1.213 | 213 | bc:24:11:39:7a:46 | Fresh-slate app plane (artwork, quote-page, order-intake) |
 
 ### Subnet Table
 
