@@ -109,6 +109,10 @@ run_cap() {
     # Ensure runtime state is bootstrapped before executing anything.
     ensure_state_dir
 
+    # ── Resolve active policy preset ──
+    source "$SPINE_CODE/ops/lib/resolve-policy.sh"
+    resolve_policy_knobs
+
     # ── Config extraction & validation ──
     if ! yq e ".capabilities.\"$name\"" "$CAP_FILE" | grep -q "description"; then
         echo "ERROR: Unknown capability: $name"
@@ -136,6 +140,13 @@ run_cap() {
     local desc
     desc="$(yq e ".capabilities.\"$name\".description" "$CAP_FILE")"
 
+    # ── Apply approval_default from policy preset ──
+    # Top-level cap runs: strict preset forces manual approval
+    # Precondition runs (OPS_CAP_STACK non-empty): per-capability setting respected
+    if [[ -z "${OPS_CAP_STACK:-}" ]] && [[ "$RESOLVED_APPROVAL_DEFAULT" == "manual" ]]; then
+      approval="manual"
+    fi
+
     # ── Expand environment variables ──
     cwd="$(eval echo "$cwd")"
 
@@ -154,6 +165,7 @@ run_cap() {
     echo "Safety:      $safety"
     echo "Approval:    $approval"
     echo "Run Key:     $run_key"
+    echo "Policy:      $RESOLVED_POLICY_PRESET (approval_default=$RESOLVED_APPROVAL_DEFAULT)"
     echo "Command:     $cmd ${args[*]:-}"
     echo "CWD:         $cwd"
     echo ""

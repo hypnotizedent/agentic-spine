@@ -18,6 +18,11 @@ set -euo pipefail
 SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 RT="${SPINE_REPO:-$SP}"
 cd "$SP"
+
+# Resolve active policy preset (balanced defaults if unset)
+source "$SP/ops/lib/resolve-policy.sh"
+resolve_policy_knobs
+
 FAIL=0
 WARN_COUNT=0
 
@@ -26,7 +31,7 @@ fail(){ echo "FAIL $*"; FAIL=1; }
 warn(){ echo "WARN $*"; WARN_COUNT=$((WARN_COUNT + 1)); }
 
 DRIFT_VERBOSE="${DRIFT_VERBOSE:-0}"
-WARN_POLICY="${WARN_POLICY:-advisory}"
+WARN_POLICY="${WARN_POLICY:-$RESOLVED_WARN_POLICY}"
 
 gate_script() {
   local script="$1"
@@ -44,7 +49,11 @@ gate_script() {
       grep '^WARN' "$tmp" 2>/dev/null || true
     fi
   else
-    fail "$script failed (rc=$rc)"
+    if [[ "${RESOLVED_DRIFT_GATE_MODE:-fail}" == "warn" ]]; then
+      warn "$(basename "$script") failed (rc=$rc) [downgraded by drift_gate_mode=warn]"
+    else
+      fail "$script failed (rc=$rc)"
+    fi
     echo "  --- output (first 200 lines): $script ---"
     sed -n '1,200p' "$tmp" | sed 's/^/  /' || true
     echo "  --- end output ---"
@@ -609,6 +618,8 @@ else
 fi
 
 # D61: Session-loop traceability lock (closeout freshness)
+# Wire session closeout SLA from policy preset (env var override still takes precedence)
+export SESSION_CLOSEOUT_FRESHNESS_HOURS="${SESSION_CLOSEOUT_FRESHNESS_HOURS:-$RESOLVED_SESSION_CLOSEOUT_SLA_HOURS}"
 echo -n "D61 session-loop traceability lock... "
 if [[ -x "$SP/surfaces/verify/d61-session-loop-traceability-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d61-session-loop-traceability-lock.sh"
