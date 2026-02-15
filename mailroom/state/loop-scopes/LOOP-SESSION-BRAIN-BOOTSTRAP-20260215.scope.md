@@ -1,7 +1,8 @@
 ---
 loop_id: LOOP-SESSION-BRAIN-BOOTSTRAP-20260215
 created: 2026-02-15
-status: active
+closed: 2026-02-15
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Uniform agent brain bootstrap across all surfaces (desktop, mobile, remote) with explicit output contracts
@@ -83,6 +84,25 @@ Rewrite ronny-session-protocol to include full brain bootstrap.
 
 ## Constraints
 
-- Session protocol skill is managed on claude.ai (not in this repo)
 - Output contracts must be defined in spine first (SSOT), then referenced by skill
 - Do not break existing desktop session entry (AGENTS.md, CLAUDE.md, generate-context.sh)
+
+## Scope Adjustment
+
+P2 was re-scoped from "upgrade claude.ai skill" to "spine-native UX/governance
+hardening." The deliverable became a device-adaptive SESSION_PROTOCOL.md with
+environment detection, output contract routing, and safe mode — not a legacy
+skill migration.
+
+P3 validation deferred to organic usage (next mobile session will be the smoke test).
+
+## Completion Receipt
+
+- **Closed:** 2026-02-15
+- **Final SHA:** 8e93955
+- **P1 (output contracts):** GAP-OP-321 fixed — docs/governance/OUTPUT_CONTRACTS.md (65bc6ed)
+- **P2 (session protocol):** GAP-OP-322 fixed — device-adaptive SESSION_PROTOCOL.md (5673b03)
+- **P2 (env detection):** GAP-OP-323 fixed — environment matrix + safe mode (5673b03)
+- **P3 (validation):** deferred to organic usage
+- **Gate total:** 90/90 PASS
+- **Run key:** CAP-20260215-082821__gaps.close__Rxx0t57010
