@@ -1,0 +1,43 @@
+# Status: authoritative
+# Owner: "@ronny"
+# Last verified: 2026-02-15
+
+schema_version: "1.0"
+updated: "2026-02-15"
+
+pipeline:
+  states:
+    - idle
+    - queued
+    - running
+    - verifying
+    - complete
+    - failed
+
+trigger:
+  source: eligible_doc_changes
+  debounce_seconds: 300
+  collapse_while_running: true
+  only_when_paths_match:
+    - docs/
+    - ops/
+    - surfaces/
+
+auto_closeout:
+  enabled: true
+  requires:
+    session_state: STOPPED
+    checkpoint_clean: true
+    receipt_required: true
+  parity:
+    source: ops/bindings/rag.reindex.quality.yaml
+    min_parity_ratio_key: index_health.min_parity_ratio
+    max_inflation_ratio_key: index_health.max_index_inflation_ratio
+  gap_link:
+    close_when_passed: true
+    reopen_on_regression: true
+
+status_surface:
+  canonical_capability: rag.pipeline.status
+  response_schema_binding: ops/bindings/rag.metrics.normalization.yaml
+  include_phase: true

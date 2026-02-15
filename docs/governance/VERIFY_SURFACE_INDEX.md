@@ -41,7 +41,7 @@ Notes:
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D90) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D103) | Yes |
 | `d16-docs-quarantine.sh` | Legacy docs quarantine enforcement | Yes |
 | `d17-root-allowlist.sh` | Root file allowlist enforcement | Yes |
 | `d18-docker-compose-drift.sh` | Docker compose drift detection | Yes |
@@ -116,7 +116,7 @@ Notes:
 | `d87-rag-workspace-contract-lock.sh` | RAG workspace contract lock (binding ↔ CLI parity). Test: `surfaces/verify/tests/d87-test.sh` | Yes |
 | `d88-rag-remote-reindex-governance-lock.sh` | RAG remote reindex governance lock (binding + runner capabilities + auth-token hygiene). Test: `surfaces/verify/tests/d88-test.sh` | Yes |
 | `d89-rag-reindex-quality-contract-lock.sh` | RAG reindex quality contract lock (quality thresholds + verify/probe capabilities) | Yes |
-| `d90-rag-reindex-runtime-quality-gate.sh` | RAG reindex runtime quality gate (session stopped + completion quality). Test: `surfaces/verify/tests/d90-test.sh` | Yes |
+| `d90-rag-reindex-runtime-quality-gate.sh` | RAG reindex runtime quality gate (session stopped + completion quality + min parity alignment with verifier). Test: `surfaces/verify/tests/d90-test.sh` | Yes |
 | `d91-aof-product-foundation-lock.sh` | AOF product foundation lock (product docs, bindings, tenant caps). Test: `surfaces/verify/tests/d91-test.sh` | Yes |
 | `d92-ha-config-version-control.sh` | HA config version control lock | Yes |
 | `d93-tenant-storage-boundary-lock.sh` | Tenant storage contract lock (boundaries + isolation). Test: `surfaces/verify/tests/d93-test.sh` | Yes |
@@ -172,3 +172,4 @@ Not called by default verification flows. Run manually for ad-hoc diagnostics.
 | [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) | Canonical scripts index |
 | [CORE_LOCK.md](../core/CORE_LOCK.md) | Drift gate definitions (D1-D57) |
 | [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) | Backup verification governance |
+| [RAG_PASSIVE_PIPELINE_PROTOCOL.md](RAG_PASSIVE_PIPELINE_PROTOCOL.md) | Passive RAG lifecycle and normalized metrics contract |

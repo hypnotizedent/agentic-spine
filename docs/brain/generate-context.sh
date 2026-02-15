@@ -164,7 +164,9 @@ PY
   GATE_REGISTRY="$SP/ops/bindings/gate.registry.yaml"
   if [[ -f "$GATE_REGISTRY" ]] && command -v yq >/dev/null 2>&1; then
     gate_count="$(yq -r '.gates | length' "$GATE_REGISTRY" 2>/dev/null || echo "?")"
-    echo "D1-D85 drift surface ($gate_count gates). Run \`/verify\` to check, \`/gates\` to browse, \`/triage\` on failure."
+    gate_min="$(yq -r '[.gates[].id | sub("^D"; "") | tonumber] | min' "$GATE_REGISTRY" 2>/dev/null || echo "1")"
+    gate_max="$(yq -r '[.gates[].id | sub("^D"; "") | tonumber] | max' "$GATE_REGISTRY" 2>/dev/null || echo "?")"
+    echo "D${gate_min}-D${gate_max} drift surface ($gate_count gates). Run \`/verify\` to check, \`/gates\` to browse, \`/triage\` on failure."
     echo ""
     echo "| Category | Gates | Focus |"
     echo "|----------|-------|-------|"

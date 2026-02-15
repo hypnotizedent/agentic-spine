@@ -88,6 +88,7 @@ Pillar entrypoints (per stack)
 | `SEARCH_EXCLUSIONS.md` | What's excluded from search/RAG |
 | `RAG_INDEXING_RULES.md` | What gets indexed to RAG |
 | `RAG_REINDEX_RUNBOOK.md` | Governed RAG reindex checklist and acceptance criteria |
+| `RAG_PASSIVE_PIPELINE_PROTOCOL.md` | Passive RAG lifecycle contract: normalized metrics, auto-trigger, auto-closeout |
 | `ISSUE_CLOSURE_SOP.md` | How to close issues properly |
 | `GIT_REMOTE_AUTHORITY.md` | Canonical git authority (Gitea primary, GitHub mirror-only) |
 | `OUTPUT_CONTRACTS.md` | Canonical schemas for loop scopes, gap filings, proposals, gate templates |
@@ -562,6 +563,7 @@ Before adding `status: authoritative` or claiming SSOT:
 - `POST_GAP_OPERATING_MODEL.md`
 - `RAG_INDEXING_RULES.md`
 - `RAG_REINDEX_RUNBOOK.md`
+- `RAG_PASSIVE_PIPELINE_PROTOCOL.md`
 - `REBOOT_HEALTH_GATE.md`
 - `RELEASE_PROTOCOL.md`
 - `REPO_STRUCTURE_AUTHORITY.md`

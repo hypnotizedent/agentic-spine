@@ -14,6 +14,7 @@
 #   - FAIL if failed_uploads > max_failed_uploads
 #   - FAIL if checkpoint not empty and session stopped
 #   - FAIL if index inflation ratio exceeded
+#   - FAIL if parity ratio falls below min_parity_ratio
 #
 # Authority: docs/governance/RAG_REINDEX_RUNBOOK.md
 # Related: D89 (contract lock), rag.reindex.remote.verify capability
@@ -51,6 +52,7 @@ REMOTE_CHECKPOINT="$(yq -r '.remote.checkpoint_path // ""' "$RUNNER_BINDING")"
 MAX_FAILED_UPLOADS="$(yq -r '.completion.max_failed_uploads // 0' "$QUALITY_BINDING")"
 CHECKPOINT_EMPTY="$(yq -r '.completion.checkpoint_must_be_empty // true' "$QUALITY_BINDING")"
 MAX_INFLATION="$(yq -r '.index_health.max_index_inflation_ratio // 1.5' "$QUALITY_BINDING")"
+MIN_PARITY="$(yq -r '.index_health.min_parity_ratio // 0.95' "$QUALITY_BINDING")"
 
 TARGET="${REMOTE_USER}@${REMOTE_HOST}"
 SSH_ARGS=(-o BatchMode=yes -o ConnectTimeout=10 -p "$REMOTE_PORT")
@@ -97,8 +99,8 @@ else
   ok "Checkpoint check skipped"
 fi
 
-# Gate 3: Index inflation (best-effort - authoritative check in rag.reindex.remote.verify)
-echo -n "  Checking index inflation... "
+# Gate 3: Index health (parity + inflation)
+echo -n "  Checking index health... "
 WORKSPACE="$(yq -r '.sync.workspace_slug // "agentic-spine"' "$RUNNER_BINDING")"
 docs_indexed_json="$(ssh "${SSH_ARGS[@]}" "$TARGET" "cd /home/ubuntu/code/agentic-spine && source ~/.config/infisical/credentials 2>/dev/null && infisical run --env=prod -- ./ops/plugins/rag/bin/rag status --workspace '$WORKSPACE' 2>/dev/null" || echo "")"
 docs_indexed="$(echo "$docs_indexed_json" | grep "^docs_indexed:" | awk '{print $2}' || echo "0")"
@@ -106,10 +108,16 @@ docs_eligible="$(echo "$docs_indexed_json" | grep "^docs_eligible:" | awk '{prin
 
 if [[ "$docs_indexed" =~ ^[0-9]+$ && "$docs_eligible" =~ ^[0-9]+$ && "$docs_eligible" -gt 0 ]]; then
   inflation_ratio=$(echo "scale=2; $docs_indexed / $docs_eligible" | bc)
+  parity_ratio=$(echo "scale=2; $docs_indexed / $docs_eligible" | bc)
   if (( $(echo "$inflation_ratio > $MAX_INFLATION" | bc -l) )); then
     err "Index inflation ratio ($inflation_ratio) exceeds max ($MAX_INFLATION) — indexed=$docs_indexed, eligible=$docs_eligible"
   else
     ok "Inflation ratio: $inflation_ratio (max: $MAX_INFLATION)"
+  fi
+  if (( $(echo "$parity_ratio < $MIN_PARITY" | bc -l) )); then
+    err "Parity ratio ($parity_ratio) below minimum ($MIN_PARITY) — indexed=$docs_indexed, eligible=$docs_eligible"
+  else
+    ok "Parity ratio: $parity_ratio (min: $MIN_PARITY)"
   fi
 else
   warn "Could not determine index counts (indexed=$docs_indexed, eligible=$docs_eligible) — skipping"

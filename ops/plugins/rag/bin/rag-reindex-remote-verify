@@ -64,8 +64,10 @@ ok() { echo "  OK: $*"; }
 
 # Gate 1: Session must be stopped
 echo -n "Gate 1: Session stopped... "
+SESSION_STATE="STOPPED"
 if [[ "$SESSION_MUST_STOP" == "true" ]]; then
   if ssh "${SSH_ARGS[@]}" "$TARGET" "tmux has-session -t '$TMUX_SESSION' 2>/dev/null"; then
+    SESSION_STATE="RUNNING"
     err "Session $TMUX_SESSION is still RUNNING (expected STOPPED)"
   else
     ok "Session is STOPPED"
@@ -137,9 +139,9 @@ else
   docs_indexed="$(echo "$docs_indexed_json" | grep "^docs_indexed:" | awk '{print $2}' || echo "0")"
 fi
 
-# Eligible count from local repo manifest (same logic as rag sync build_manifest + secrets filter)
-# Excludes docs containing secret material, matching what rag sync actually uploads.
-docs_eligible="$(python3 - "$SP" <<'PYEOF'
+# Eligible layer counts from local repo manifest (same logic as rag sync build_manifest + secrets filter)
+# Returns: repo_docs path_filtered frontmatter_eligible secrets_excluded rag_eligible
+metrics_tuple="$(python3 - "$SP" <<'PYEOF'
 import re, sys
 from pathlib import Path
 
@@ -179,16 +181,22 @@ def has_secrets(text, lines):
             return True
     return False
 
-count = 0
+repo_docs = 0
+path_filtered = 0
+frontmatter_eligible = 0
+secrets_excluded = 0
+
 for base in allowed_roots:
     if not base.exists():
         continue
     for p in base.rglob("*.md"):
+        repo_docs += 1
         rel = p.relative_to(root).as_posix()
         if any(rel.startswith(ex) for ex in excluded_prefixes):
             continue
         if "/.archive/" in rel or rel.startswith(".archive/"):
             continue
+        path_filtered += 1
         try:
             text = p.read_text(errors="ignore")
             lines = text.splitlines()
@@ -206,12 +214,15 @@ for base in allowed_roots:
         front = "\n".join(lines[:end+1])
         if not all(r in front for r in ["status:", "owner:", "last_verified:"]):
             continue
+        frontmatter_eligible += 1
         if has_secrets(text, lines):
+            secrets_excluded += 1
             continue
-        count += 1
-print(count)
+rag_eligible = frontmatter_eligible - secrets_excluded
+print(f"{repo_docs} {path_filtered} {frontmatter_eligible} {secrets_excluded} {rag_eligible}")
 PYEOF
 )"
+read -r repo_docs path_filtered frontmatter_eligible secrets_excluded docs_eligible <<<"${metrics_tuple:-0 0 0 0 0}"
 
 if [[ "$docs_indexed" =~ ^[0-9]+$ && "$docs_eligible" =~ ^[0-9]+$ && "$docs_eligible" -gt 0 && "$docs_indexed" -gt 0 ]]; then
   inflation_ratio=$(echo "scale=2; $docs_indexed / $docs_eligible" | bc)
@@ -233,6 +244,18 @@ if [[ "$docs_indexed" =~ ^[0-9]+$ && "$docs_eligible" =~ ^[0-9]+$ && "$docs_elig
 else
   err "Could not determine index counts (indexed=$docs_indexed, eligible=$docs_eligible)"
 fi
+
+echo
+echo "=== Normalized Metrics ==="
+echo "repo_docs: ${repo_docs:-0}"
+echo "path_filtered: ${path_filtered:-0}"
+echo "frontmatter_eligible: ${frontmatter_eligible:-0}"
+echo "secrets_excluded: ${secrets_excluded:-0}"
+echo "rag_eligible: ${docs_eligible:-0}"
+echo "rag_indexed: ${docs_indexed:-0}"
+echo "parity_ratio: ${parity_ratio:-0}"
+echo "inflation_ratio: ${inflation_ratio:-0}"
+echo "session_state: ${SESSION_STATE:-unknown}"
 
 # Summary
 echo
