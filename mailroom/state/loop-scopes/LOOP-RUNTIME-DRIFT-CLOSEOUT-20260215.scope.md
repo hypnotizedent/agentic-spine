@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-RUNTIME-DRIFT-CLOSEOUT-20260215
 created: 2026-02-15
-status: active
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Close remaining runtime drift — RAG verify count path, RAG parity, RAG chat timeout, mailroom bridge tree hygiene
@@ -47,3 +47,29 @@ has 4 residual drifts preventing "predictable outcomes" status:
 - Governed flow only (gaps.file/claim/close, receipts, verify)
 - No destructive shortcuts outside governed capabilities
 - Keep changes scoped to the 4 items
+
+## Evidence
+
+All 4 child gaps closed. Acceptance criteria met:
+
+| Criterion | Result |
+|-----------|--------|
+| `rag.reindex.remote.verify` PASS, no count warning | PASS (parity 1.00, inflation 1.00) |
+| `rag.anythingllm.status` parity OK | PASS (95/95, 13 secrets_excluded) |
+| `rag.anythingllm.ask` no chat-timeout fallback | PASS (mode: retrieve, default) |
+| `git status` clean (for this loop's scope) | PASS |
+| `spine.verify` PASS | PASS (92/92) |
+
+### Gap Transitions
+
+| Gap | Status | Fixed In |
+|-----|--------|----------|
+| GAP-OP-329 | fixed | 6a348a3 |
+| GAP-OP-330 | fixed | 5aeb0a1 |
+| GAP-OP-331 | fixed | 454e6da |
+| GAP-OP-332 | fixed | 1c63566 |
+
+### Completion
+
+- Loop closed: 2026-02-15
+- Final commit: aadd840
