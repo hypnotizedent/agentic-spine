@@ -48,9 +48,9 @@ test_readonly_cap_not_blocked() {
 
 test_mutating_cap_blocked_without_ack() {
   local output
-  # gaps.file is mutating + approval:auto — contract check fires before execution
-  # It will fail at argument validation, but BLOCKED should appear first
-  output="$("$OPS" cap run gaps.file --id NOOP --type runtime-bug --severity low --description "noop" --discovered-by "test" --doc "test" 2>&1 || true)"
+  # gaps.claim is mutating + approval:auto — contract check fires before execution
+  # Uses non-existent gap ID so claim fails harmlessly (no SSOT mutation)
+  output="$("$OPS" cap run gaps.claim NONEXISTENT-TEST-ID --action "test" 2>&1 || true)"
   if echo "$output" | grep -q "BLOCKED: AOF contract acknowledgment required"; then
     pass "mutating cap blocked without ack"
   else
@@ -74,8 +74,8 @@ test_ack_cap_exempt_from_check() {
 test_mutating_cap_passes_after_ack() {
   local output
   # After ack, mutating caps should not show BLOCKED
-  # gaps.file will fail at its own validation, but that's fine — we check for BLOCKED absence
-  output="$("$OPS" cap run gaps.file --id NOOP --type runtime-bug --severity low --description "noop" --discovered-by "test" --doc "test" 2>&1 || true)"
+  # gaps.claim with non-existent ID fails at lookup (no SSOT mutation) — we only check for BLOCKED absence
+  output="$("$OPS" cap run gaps.claim NONEXISTENT-TEST-ID --action "test" 2>&1 || true)"
   if echo "$output" | grep -q "BLOCKED: AOF contract acknowledgment required"; then
     fail "mutating cap should not be blocked after ack"
   else
