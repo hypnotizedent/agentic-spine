@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-11
+last_verified: 2026-02-14
 scope: verify-scripts
 ---
 
@@ -41,7 +41,7 @@ Notes:
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D88) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D89) | Yes |
 | `d16-docs-quarantine.sh` | Legacy docs quarantine enforcement | Yes |
 | `d17-root-allowlist.sh` | Root file allowlist enforcement | Yes |
 | `d18-docker-compose-drift.sh` | Docker compose drift detection | Yes |
@@ -115,6 +115,7 @@ Notes:
 | `d86-vm-operating-profile-parity-lock.sh` | VM operating profile parity lock (lifecycle ↔ profile alignment) | Yes |
 | `d87-rag-workspace-contract-lock.sh` | RAG workspace contract lock (binding ↔ CLI parity). Test: `surfaces/verify/tests/d87-test.sh` | Yes |
 | `d88-rag-remote-reindex-governance-lock.sh` | RAG remote reindex governance lock (binding + runner capabilities + auth-token hygiene). Test: `surfaces/verify/tests/d88-test.sh` | Yes |
+| `d89-rag-reindex-quality-contract-lock.sh` | RAG reindex quality contract lock (quality thresholds + verify/probe capabilities) | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |

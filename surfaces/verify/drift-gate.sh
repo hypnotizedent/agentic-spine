@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v2.8)
+# drift-gate.sh - Constitutional drift detector (v2.9)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -830,6 +830,14 @@ if [[ -x "$SP/surfaces/verify/d88-rag-remote-reindex-governance-lock.sh" ]]; the
   gate_script "$SP/surfaces/verify/d88-rag-remote-reindex-governance-lock.sh"
 else
   warn "RAG remote reindex governance lock gate not present"
+fi
+
+# D89: RAG reindex quality contract lock
+echo -n "D89 RAG reindex quality contract lock... "
+if [[ -x "$SP/surfaces/verify/d89-rag-reindex-quality-contract-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d89-rag-reindex-quality-contract-lock.sh"
+else
+  warn "RAG reindex quality contract lock gate not present"
 fi
 
 echo

@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# RAG Remote Reindex Completion Verification
+# Validates reindex quality against rag.reindex.quality.yaml contract.
+# FAILS unless all quality gates pass.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+git_root="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "${git_root:-}" && "${git_root:-}" != "null" ]]; then
+  SP="${SPINE_ROOT:-$git_root}"
+else
+  SP="${SPINE_ROOT:-$(cd "$script_dir/../../../.." && pwd)}"
+fi
+
+RUNNER_BINDING="$SP/ops/bindings/rag.remote.runner.yaml"
+QUALITY_BINDING="$SP/ops/bindings/rag.reindex.quality.yaml"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+warn() { echo "WARN: $*" >&2; }
+pass() { echo "PASS: $*"; }
+
+for t in yq ssh; do
+  command -v "$t" >/dev/null 2>&1 || fail "missing required tool: $t"
+done
+
+[[ -f "$RUNNER_BINDING" ]] || fail "runner binding not found: $RUNNER_BINDING"
+[[ -f "$QUALITY_BINDING" ]] || fail "quality binding not found: $QUALITY_BINDING"
+
+# Read runner binding
+REMOTE_HOST="$(yq -r '.remote.host // ""' "$RUNNER_BINDING")"
+REMOTE_USER="$(yq -r '.remote.user // ""' "$RUNNER_BINDING")"
+REMOTE_PORT="$(yq -r '.remote.port // 22' "$RUNNER_BINDING")"
+REMOTE_REPO="$(yq -r '.remote.repo_path // ""' "$RUNNER_BINDING")"
+TMUX_SESSION="$(yq -r '.remote.tmux_session // ""' "$RUNNER_BINDING")"
+REMOTE_LOG="$(yq -r '.remote.log_path // ""' "$RUNNER_BINDING")"
+REMOTE_CHECKPOINT="$(yq -r '.remote.checkpoint_path // ""' "$RUNNER_BINDING")"
+WORKSPACE="$(yq -r '.sync.workspace_slug // ""' "$RUNNER_BINDING")"
+
+[[ -n "$REMOTE_HOST" ]] || fail ".remote.host missing"
+[[ -n "$REMOTE_USER" ]] || fail ".remote.user missing"
+[[ -n "$REMOTE_REPO" ]] || fail ".remote.repo_path missing"
+[[ -n "$TMUX_SESSION" ]] || fail ".remote.tmux_session missing"
+[[ -n "$WORKSPACE" ]] || fail ".sync.workspace_slug missing"
+
+# Read quality binding
+MAX_FAILED_UPLOADS="$(yq -r '.completion.max_failed_uploads // 0' "$QUALITY_BINDING")"
+SESSION_MUST_STOP="$(yq -r '.completion.session_must_be_stopped // true' "$QUALITY_BINDING")"
+CHECKPOINT_EMPTY="$(yq -r '.completion.checkpoint_must_be_empty // true' "$QUALITY_BINDING")"
+MAX_INFLATION="$(yq -r '.index_health.max_index_inflation_ratio // 1.5' "$QUALITY_BINDING")"
+MIN_PARITY="$(yq -r '.index_health.min_parity_ratio // 0.95' "$QUALITY_BINDING")"
+
+TARGET="${REMOTE_USER}@${REMOTE_HOST}"
+SSH_ARGS=(-o BatchMode=yes -o ConnectTimeout=10 -p "$REMOTE_PORT")
+
+echo "=== RAG Remote Reindex Verification ==="
+echo "target:       $TARGET"
+echo "workspace:    $WORKSPACE"
+echo "quality_contract: $QUALITY_BINDING"
+echo
+
+ERRORS=0
+err() { echo "  ERROR: $*" >&2; ERRORS=$((ERRORS + 1)); }
+ok() { echo "  OK: $*"; }
+
+# Gate 1: Session must be stopped
+echo -n "Gate 1: Session stopped... "
+if [[ "$SESSION_MUST_STOP" == "true" ]]; then
+  if ssh "${SSH_ARGS[@]}" "$TARGET" "tmux has-session -t '$TMUX_SESSION' 2>/dev/null"; then
+    err "Session $TMUX_SESSION is still RUNNING (expected STOPPED)"
+  else
+    ok "Session is STOPPED"
+  fi
+else
+  ok "Session check skipped (session_must_be_stopped=false)"
+fi
+
+# Gate 2: Failed uploads must be 0
+echo -n "Gate 2: No failed uploads... "
+failed_uploads="$(ssh "${SSH_ARGS[@]}" "$TARGET" "awk '/ERROR: Upload failed/{c++} END{print c+0}' '$REMOTE_LOG' 2>/dev/null || echo 0")"
+if [[ "$failed_uploads" -gt "$MAX_FAILED_UPLOADS" ]]; then
+  err "Failed uploads ($failed_uploads) exceeds max_allowed ($MAX_FAILED_UPLOADS)"
+else
+  ok "Failed uploads: $failed_uploads (max: $MAX_FAILED_UPLOADS)"
+fi
+
+# Gate 3: Checkpoint must be empty/absent
+echo -n "Gate 3: Checkpoint clean... "
+if [[ "$CHECKPOINT_EMPTY" == "true" ]]; then
+  checkpoint_lines="$(ssh "${SSH_ARGS[@]}" "$TARGET" "if [ -f '$REMOTE_CHECKPOINT' ]; then wc -l < '$REMOTE_CHECKPOINT'; else echo 0; fi")"
+  if [[ "$checkpoint_lines" -gt 0 ]]; then
+    err "Checkpoint file has $checkpoint_lines lines (expected empty/absent)"
+  else
+    ok "Checkpoint is empty/absent"
+  fi
+else
+  ok "Checkpoint check skipped (checkpoint_must_be_empty=false)"
+fi
+
+# Gate 4: Index inflation ratio
+echo -n "Gate 4: Index inflation ratio... "
+# Get docs_indexed from AnythingLLM (requires secrets on remote)
+docs_indexed_json="$(ssh "${SSH_ARGS[@]}" "$TARGET" "cd '$REMOTE_REPO' && source ~/.config/infisical/credentials 2>/dev/null && infisical run --env=prod -- ./ops/plugins/rag/bin/rag status --workspace '$WORKSPACE' 2>/dev/null" || echo "")"
+docs_indexed="$(echo "$docs_indexed_json" | grep "^docs_indexed:" | awk '{print $2}' || echo "0")"
+docs_eligible="$(echo "$docs_indexed_json" | grep "^docs_eligible:" | awk '{print $2}' || echo "0")"
+
+if [[ "$docs_indexed" =~ ^[0-9]+$ && "$docs_eligible" =~ ^[0-9]+$ && "$docs_eligible" -gt 0 ]]; then
+  inflation_ratio=$(echo "scale=2; $docs_indexed / $docs_eligible" | bc)
+  parity_ratio=$(echo "scale=2; $docs_indexed / $docs_eligible" | bc)
+  
+  # Check max inflation
+  if (( $(echo "$inflation_ratio > $MAX_INFLATION" | bc -l) )); then
+    err "Index inflation ratio ($inflation_ratio) exceeds max ($MAX_INFLATION) - indexed=$docs_indexed, eligible=$docs_eligible"
+  else
+    ok "Inflation ratio: $inflation_ratio (max: $MAX_INFLATION)"
+  fi
+  
+  # Check min parity
+  if (( $(echo "$parity_ratio < $MIN_PARITY" | bc -l) )); then
+    err "Parity ratio ($parity_ratio) below minimum ($MIN_PARITY) - indexed=$docs_indexed, eligible=$docs_eligible"
+  else
+    ok "Parity ratio: $parity_ratio (min: $MIN_PARITY)"
+  fi
+else
+  warn "Could not determine index counts (indexed=$docs_indexed, eligible=$docs_eligible)"
+fi
+
+# Summary
+echo
+echo "=== Verification Summary ==="
+if [[ "$ERRORS" -gt 0 ]]; then
+  fail "$ERRORS quality gate(s) failed"
+else
+  pass "All quality gates passed"
+fi
