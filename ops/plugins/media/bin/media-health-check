@@ -17,6 +17,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 BINDING="$ROOT/ops/bindings/media.services.yaml"
+SCHEMA_VERSION="1.0.0"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 usage() {
   cat <<'USAGE'
@@ -54,6 +56,9 @@ done
 
 command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 command -v curl >/dev/null 2>&1 || { echo "MISSING_DEP: curl" >&2; exit 2; }
+if $OUTPUT_JSON; then
+  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+fi
 
 if [[ ! -f "$BINDING" ]]; then
   echo "STOP: binding not found: $BINDING" >&2
@@ -78,30 +83,30 @@ check_service() {
 
   # Skip parked/stopped services
   if [[ "$status" == "parked" || "$status" == "stopped" ]]; then
-    echo "SKIP:$name:$vm:$status"
+    printf 'SKIP\t%s\t%s\t%s\n' "$name" "$vm" "$status"
     return 0
   fi
 
   # Skip services without health endpoint
   if [[ "$health_path" == "null" || -z "$health_path" ]]; then
-    echo "NO_PROBE:$name:$vm:no-health-endpoint"
+    printf 'NO_PROBE\t%s\t%s\t%s\n' "$name" "$vm" "no-health-endpoint"
     return 0
   fi
 
   local vm_ip
   vm_ip=$(get_vm_ip "$vm")
   if [[ -z "$vm_ip" ]]; then
-    echo "FAIL:$name:$vm:no-ip-found"
+    printf 'FAIL\t%s\t%s\t%s\n' "$name" "$vm" "no-ip-found"
     return 1
   fi
 
   local url="http://${vm_ip}:${port}${health_path}"
 
   if curl -fsS --max-time "$TIMEOUT_SEC" "$url" >/dev/null 2>&1; then
-    echo "OK:$name:$vm:${port}${health_path}"
+    printf 'OK\t%s\t%s\t%s\n' "$name" "$vm" "${port}${health_path}"
     return 0
   else
-    echo "FAIL:$name:$vm:${url}"
+    printf 'FAIL\t%s\t%s\t%s\n' "$name" "$vm" "$url"
     return 1
   fi
 }
@@ -135,7 +140,7 @@ while IFS=$'\t' read -r name vm port health status; do
   fi
   RESULTS+=("$result")
 
-  code="${result%%:*}"
+  code="${result%%$'\t'*}"
   case "$code" in
     OK)       HEALTHY=$((HEALTHY + 1)) ;;
     FAIL)     UNHEALTHY=$((UNHEALTHY + 1)); FAILED_SERVICES+=("$result") ;;
@@ -147,35 +152,63 @@ done < <(collect_services)
 TOTAL=$((HEALTHY + UNHEALTHY + SKIPPED + NO_PROBE))
 
 if $OUTPUT_JSON; then
-  cat <<EOF
-{
-  "capability": "media.health.check",
-  "vm_filter": ${VM_FILTER:-null},
-  "summary": {
-    "total": $TOTAL,
-    "healthy": $HEALTHY,
-    "unhealthy": $UNHEALTHY,
-    "skipped": $SKIPPED,
-    "no_probe": $NO_PROBE
-  },
-  "failed": [$(printf '%s\n' "${FAILED_SERVICES[@]}" | sed 's/^/"/;s/$/"/' | tr '\n' ',' | sed 's/,$//')],
-  "results": [$(printf '%s\n' "${RESULTS[@]}" | sed 's/^/"/;s/$/"/' | tr '\n' ',' | sed 's/,$//')]
-}
-EOF
+  overall_status="ok"
+  if [[ $UNHEALTHY -gt 0 ]]; then
+    overall_status="fail"
+  fi
+
+  results_json="$(printf '%s\n' "${RESULTS[@]}" | jq -R -s '
+    split("\n")
+    | map(select(length > 0))
+    | map(split("\t") | {code: .[0], service: .[1], vm: .[2], detail: .[3]})
+  ')"
+
+  jq -n \
+    --arg capability "media.health.check" \
+    --arg schema_version "$SCHEMA_VERSION" \
+    --arg generated_at "$GENERATED_AT" \
+    --arg status "$overall_status" \
+    --arg vm_filter "$VM_FILTER" \
+    --argjson timeout_sec "$TIMEOUT_SEC" \
+    --argjson total "$TOTAL" \
+    --argjson healthy "$HEALTHY" \
+    --argjson unhealthy "$UNHEALTHY" \
+    --argjson skipped "$SKIPPED" \
+    --argjson no_probe "$NO_PROBE" \
+    --argjson results "$results_json" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      generated_at: $generated_at,
+      status: $status,
+      data: {
+        vm_filter: (if $vm_filter == "" then null else $vm_filter end),
+        timeout_sec: $timeout_sec,
+        summary: {
+          total: $total,
+          healthy: $healthy,
+          unhealthy: $unhealthy,
+          skipped: $skipped,
+          no_probe: $no_probe
+        },
+        failed: ($results | map(select(.code == "FAIL"))),
+        results: $results
+      }
+    }'
 else
   echo "media.health.check"
   echo "==================="
   echo "total: $TOTAL | healthy: $HEALTHY | unhealthy: $UNHEALTHY | skipped: $SKIPPED | no_probe: $NO_PROBE"
   echo ""
   for r in "${RESULTS[@]}"; do
-    echo "  $r"
+    echo "  ${r//$'\t'/:}"
   done
 
   if [[ ${#FAILED_SERVICES[@]} -gt 0 ]]; then
     echo ""
     echo "FAILED SERVICES:"
     for f in "${FAILED_SERVICES[@]}"; do
-      echo "  - $f"
+      echo "  - ${f//$'\t'/:}"
     done
   fi
 fi

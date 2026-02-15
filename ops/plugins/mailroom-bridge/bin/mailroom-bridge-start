@@ -85,11 +85,19 @@ if command -v yq >/dev/null 2>&1; then
     # Skip the primary token (already handled above)
     [[ "$role_env" == "$token_env" ]] && continue
     role_val="${!role_env:-}"
-    # Try state file fallback (token file named after env var, lowercased with dashes)
+    # Try state file fallback.
+    #
+    # Convention:
+    #   MAILROOM_BRIDGE_MONITOR_TOKEN -> mailroom-bridge-monitor.token
+    #   MAILROOM_BRIDGE_MEDIA_TOKEN   -> mailroom-bridge-media.token
     if [[ -z "$role_val" ]]; then
-      role_file="${STATE_DIR}/mailroom-bridge-monitor.token"
-      if [[ -f "$role_file" ]]; then
-        role_val="$(tr -d '\r\n' < "$role_file" 2>/dev/null || true)"
+      if [[ "$role_env" =~ ^MAILROOM_BRIDGE_(.+)_TOKEN$ ]]; then
+        role_slug="${BASH_REMATCH[1]}"
+        role_slug="$(printf '%s' "$role_slug" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
+        role_file="${STATE_DIR}/mailroom-bridge-${role_slug}.token"
+        if [[ -f "$role_file" ]]; then
+          role_val="$(tr -d '\r\n' < "$role_file" 2>/dev/null || true)"
+        fi
       fi
     fi
     if [[ -n "$role_val" ]]; then

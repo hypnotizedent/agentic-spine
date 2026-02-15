@@ -17,6 +17,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 TENANT_BINDING="$ROOT/ops/bindings/tenants/media-stack.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+SCHEMA_VERSION="1.0.0"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 usage() {
   cat <<'USAGE'
@@ -50,6 +52,9 @@ done
 
 command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+if $OUTPUT_JSON; then
+  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+fi
 
 # Expected mount config from tenant binding
 NFS_SOURCE=$(yq -r '.media.nfs.source' "$TENANT_BINDING" 2>/dev/null || echo "pve:/media")
@@ -89,7 +94,7 @@ verify_vm_nfs() {
 
   ssh_ref=$(get_vm_ssh_ref "$vm" 2>/dev/null || true)
   if [[ -z "$ssh_ref" ]]; then
-    echo "$vm:FAIL:no-ssh-target:unknown:"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$vm" "FAIL" "no-ssh-target" "unknown" ""
     return 0
   fi
 
@@ -105,7 +110,7 @@ verify_vm_nfs() {
     if [[ "$mount_source" != *":$EXPECTED_EXPORT_PATH" ]]; then
       result="FAIL:unexpected-source:$mount_source"
       status="FAIL"
-      echo "$vm:$status:$result:unknown:$mount_info"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$vm" "$status" "$result" "unknown" "$mount_info"
       return 0
     fi
 
@@ -130,13 +135,8 @@ verify_vm_nfs() {
     free_space=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "df -h $EXPECTED_MOUNT 2>/dev/null | tail -1 | awk '{print \$4}'" 2>/dev/null || echo "unknown")
   fi
 
-  echo "$vm:$status:$result:$free_space:$mount_info"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$vm" "$status" "$result" "$free_space" "$mount_info"
 }
-
-echo "media.nfs.verify"
-echo "================"
-echo "nfs_source: $NFS_SOURCE"
-echo "expected_mount: $EXPECTED_MOUNT"
 
 ERRORS=0
 RESULTS=()
@@ -144,7 +144,7 @@ RESULTS=()
 if [[ -z "$VM_FILTER" || "$VM_FILTER" == "download-stack" ]]; then
   result=$(verify_vm_nfs "download-stack" "rw")
   RESULTS+=("$result")
-  if [[ "$result" == *":FAIL:"* ]]; then
+  if [[ "$result" == *$'\tFAIL\t'* ]]; then
     ERRORS=$((ERRORS + 1))
   fi
 fi
@@ -152,35 +152,57 @@ fi
 if [[ -z "$VM_FILTER" || "$VM_FILTER" == "streaming-stack" ]]; then
   result=$(verify_vm_nfs "streaming-stack" "ro")
   RESULTS+=("$result")
-  if [[ "$result" == *":FAIL:"* ]]; then
+  if [[ "$result" == *$'\tFAIL\t'* ]]; then
     ERRORS=$((ERRORS + 1))
   fi
 fi
 
 if $OUTPUT_JSON; then
-  echo ""
-  cat <<EOF
-{
-  "capability": "media.nfs.verify",
-  "nfs_source": "$NFS_SOURCE",
-  "expected_mount": "$EXPECTED_MOUNT",
-  "vm_filter": ${VM_FILTER:-null},
-  "errors": $ERRORS,
-  "results": [
-$(for r in "${RESULTS[@]}"; do
-    IFS=':' read -r vm status detail free mount <<< "$r"
-    echo "    {\"vm\": \"$vm\", \"status\": \"$status\", \"detail\": \"$detail\", \"free_space\": \"$free\"},"
-  done | sed '$ s/,$//')
-  ]
-}
-EOF
+  overall_status="ok"
+  if [[ "$ERRORS" -gt 0 ]]; then
+    overall_status="fail"
+  fi
+
+  results_json="$(printf '%s\n' "${RESULTS[@]}" | jq -R -s '
+    split("\n")
+    | map(select(length > 0))
+    | map(split("\t") | {vm: .[0], status: .[1], detail: .[2], free_space: .[3], mount: .[4]})
+  ')"
+
+  jq -n \
+    --arg capability "media.nfs.verify" \
+    --arg schema_version "$SCHEMA_VERSION" \
+    --arg generated_at "$GENERATED_AT" \
+    --arg status "$overall_status" \
+    --arg nfs_source "$NFS_SOURCE" \
+    --arg expected_mount "$EXPECTED_MOUNT" \
+    --arg vm_filter "$VM_FILTER" \
+    --argjson errors "$ERRORS" \
+    --argjson results "$results_json" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      generated_at: $generated_at,
+      status: $status,
+      data: {
+        nfs_source: $nfs_source,
+        expected_mount: $expected_mount,
+        vm_filter: (if $vm_filter == "" then null else $vm_filter end),
+        errors: $errors,
+        results: $results
+      }
+    }'
 else
+  echo "media.nfs.verify"
+  echo "================"
+  echo "nfs_source: $NFS_SOURCE"
+  echo "expected_mount: $EXPECTED_MOUNT"
   echo ""
   printf "%-20s %-8s %-25s %12s\n" "VM" "STATUS" "DETAIL" "FREE"
   printf "%-20s %-8s %-25s %12s\n" "--" "------" "------" "----"
 
   for r in "${RESULTS[@]}"; do
-    IFS=':' read -r vm status detail free rest <<< "$r"
+    IFS=$'\t' read -r vm status detail free rest <<< "$r"
     printf "%-20s %-8s %-25s %12s\n" "$vm" "$status" "$detail" "$free"
   done
 

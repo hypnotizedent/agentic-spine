@@ -55,6 +55,16 @@ Token behavior is controlled by `ops/bindings/mailroom.bridge.yaml`:
   - environment variable from `auth.token_env` (default `MAILROOM_BRIDGE_TOKEN`)
   - persisted token file: `mailroom/state/mailroom-bridge.token` (created/maintained by `mailroom.bridge.start`)
 
+RBAC role tokens (optional):
+- Each role declares `cap_rpc.roles.<role>.token_env`.
+- When starting via `mailroom.bridge.start`, role tokens can be provided via:
+  - that environment variable, or
+  - a persisted role token file named `mailroom/state/mailroom-bridge-<role>.token`
+    (derived from `MAILROOM_BRIDGE_<ROLE>_TOKEN`, lowercased and dash-separated).
+  - Examples:
+    - `MAILROOM_BRIDGE_MONITOR_TOKEN` → `mailroom/state/mailroom-bridge-monitor.token`
+    - `MAILROOM_BRIDGE_MEDIA_TOKEN` → `mailroom/state/mailroom-bridge-media.token`
+
 Supported headers:
 - `Authorization: Bearer <token>`
 - `X-Spine-Token: <token>` (useful for n8n/webhooks)
@@ -207,6 +217,31 @@ JSON contract: all AOF caps return a stable envelope with keys
 `capability`, `schema_version`, `status`, `generated_at`, `data`.
 The `data` object varies per capability. See `aof-json-contract-test.sh`
 for the full schema validation.
+
+#### Media Consumer Examples
+
+Media read-only caps can be allowlisted for bridge RPC and consumed by
+dashboards/agents. Pass `--json` in `args` to get the same stable envelope
+contract as AOF.
+
+**media.health.check** — aggregate health probes across media-stack services:
+```json
+{ "capability": "media.health.check", "args": ["--json"] }
+```
+
+**media.service.status** — container status map for media services:
+```json
+{ "capability": "media.service.status", "args": ["--json"] }
+```
+
+**media.nfs.verify** — NFS mount health and free space:
+```json
+{ "capability": "media.nfs.verify", "args": ["--json"] }
+```
+
+RBAC scoping (when configured in `ops/bindings/mailroom.bridge.yaml`):
+- **operator** token: all allowlisted caps
+- **media-consumer** token: `media.health.check`, `media.service.status`, `media.nfs.verify` only
 
 ### `POST /rag/ask` (auth required)
 

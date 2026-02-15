@@ -17,6 +17,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 SERVICE_BINDING="$ROOT/ops/bindings/media.services.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+SCHEMA_VERSION="1.0.0"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 usage() {
   cat <<'USAGE'
@@ -54,6 +56,9 @@ done
 
 command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+if $OUTPUT_JSON; then
+  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+fi
 
 MEDIA_VMS=("download-stack" "streaming-stack")
 
@@ -159,31 +164,49 @@ done
 
 # Output
 if $OUTPUT_JSON; then
-  if [[ -n "$VM_FILTER" ]]; then
-    json_vm_filter="\"$VM_FILTER\""
-  else
-    json_vm_filter="null"
-  fi
-  if [[ -n "$SERVICE_FILTER" ]]; then
-    json_service_filter="\"$SERVICE_FILTER\""
-  else
-    json_service_filter="null"
+  services_json="$(
+    for service in $(printf '%s\n' "${!ALL_RESULTS[@]}" | sort); do
+      IFS=':' read -r vm status detail <<< "${ALL_RESULTS[$service]}"
+      printf '%s\t%s\t%s\t%s\n' "$service" "$vm" "$status" "$detail"
+    done | jq -R -s '
+      split("\n")
+      | map(select(length > 0))
+      | map(split("\t") | {service: .[0], vm: .[1], status: .[2], detail: .[3]})
+    '
+  )"
+
+  overall_status="ok"
+  if jq -e 'any(.[]; .status != "running")' >/dev/null 2>&1 <<<"$services_json"; then
+    overall_status="warn"
   fi
 
-  echo "{"
-  echo "  \"capability\": \"media.service.status\","
-  echo "  \"vm_filter\": $json_vm_filter,"
-  echo "  \"service_filter\": $json_service_filter,"
-  echo "  \"services\": {"
-  first=true
-  for service in "${!ALL_RESULTS[@]}"; do
-    if $first; then first=false; else echo ","; fi
-    IFS=':' read -r vm status detail <<< "${ALL_RESULTS[$service]}"
-    echo -n "    \"$service\": {\"vm\": \"$vm\", \"status\": \"$status\", \"detail\": \"$detail\"}"
-  done
-  echo ""
-  echo "  }"
-  echo "}"
+  jq -n \
+    --arg capability "media.service.status" \
+    --arg schema_version "$SCHEMA_VERSION" \
+    --arg generated_at "$GENERATED_AT" \
+    --arg status "$overall_status" \
+    --arg vm_filter "$VM_FILTER" \
+    --arg service_filter "$SERVICE_FILTER" \
+    --argjson services "$services_json" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      generated_at: $generated_at,
+      status: $status,
+      data: {
+        vm_filter: (if $vm_filter == "" then null else $vm_filter end),
+        service_filter: (if $service_filter == "" then null else $service_filter end),
+        counts: {
+          total: ($services | length),
+          running: ($services | map(select(.status == "running")) | length),
+          exited: ($services | map(select(.status == "exited")) | length),
+          missing: ($services | map(select(.status == "missing")) | length),
+          created: ($services | map(select(.status == "created")) | length),
+          unknown: ($services | map(select(.status == "unknown")) | length)
+        },
+        services: $services
+      }
+    }'
 else
   echo "media.service.status"
   echo "===================="
