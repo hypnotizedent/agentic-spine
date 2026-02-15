@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-AOF-PLUGIN-V1-20260215
 created: 2026-02-15
-status: open
+status: closed
 severity: medium
 owner: "@ronny"
 scope: agentic-spine
