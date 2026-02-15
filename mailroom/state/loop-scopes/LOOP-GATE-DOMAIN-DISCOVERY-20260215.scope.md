@@ -1,7 +1,8 @@
 ---
 id: LOOP-GATE-DOMAIN-DISCOVERY-20260215
-status: active
+status: closed
 opened: 2026-02-15
+closed: 2026-02-15
 owner: "@ronny"
 gaps:
   - GAP-OP-432
