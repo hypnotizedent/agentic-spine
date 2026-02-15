@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.addons.snapshot — Extract HA Supervisor add-on inventory to YAML binding
+# Queries Supervisor API via SSH + docker exec on homeassistant container.
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+OUTPUT="$SPINE_ROOT/ops/bindings/ha.addons.yaml"
+SSH_TARGET="hassio@ha"
+SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+TMPDIR_WORK=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+
+echo "ha.addons.snapshot"
+echo
+
+# Check SSH connectivity
+if ! ssh $SSH_OPTS "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
+  echo "STOP (2): cannot reach $SSH_TARGET via SSH"
+  exit 2
+fi
+
+# Query Supervisor API from inside homeassistant container
+ssh $SSH_OPTS "$SSH_TARGET" \
+  'sudo docker exec homeassistant bash -c "curl -s -H \"Authorization: Bearer \$SUPERVISOR_TOKEN\" http://supervisor/addons"' \
+  > "$TMPDIR_WORK/addons.json" 2>/dev/null
+
+if [[ ! -s "$TMPDIR_WORK/addons.json" ]]; then
+  echo "STOP (2): Supervisor API returned empty response"
+  exit 2
+fi
+
+# Parse JSON into YAML binding
+python3 - "$TMPDIR_WORK/addons.json" "$OUTPUT" << 'PYEOF'
+import json, sys, datetime
+
+try:
+    import yaml
+except ImportError:
+    print("STOP (2): PyYAML not installed", file=sys.stderr)
+    sys.exit(2)
+
+json_path, out_path = sys.argv[1], sys.argv[2]
+
+with open(json_path, 'r') as f:
+    data = json.load(f)
+
+if 'data' not in data or 'addons' not in data['data']:
+    print("FAIL: unexpected Supervisor API response format", file=sys.stderr)
+    sys.exit(1)
+
+addons = data['data']['addons']
+
+binding = {
+    'schema_version': '1.0',
+    'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'source': 'ha.addons.snapshot',
+    'addon_count': len(addons),
+    'addons': []
+}
+
+for a in sorted(addons, key=lambda x: x.get('name', '')):
+    entry = {
+        'name': a.get('name', 'unknown'),
+        'slug': a.get('slug', ''),
+        'version': a.get('version', 'unknown'),
+        'version_latest': a.get('version_latest', 'unknown'),
+        'update_available': a.get('update_available', False),
+        'state': a.get('state', 'unknown'),
+        'stage': a.get('stage', 'unknown'),
+        'repository': a.get('repository', ''),
+        'description': a.get('description', ''),
+    }
+    binding['addons'].append(entry)
+
+with open(out_path, 'w') as f:
+    yaml.dump(binding, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
+
+started = sum(1 for a in addons if a.get('state') == 'started')
+updates = sum(1 for a in addons if a.get('update_available'))
+errors = sum(1 for a in addons if a.get('state') == 'error')
+
+print(f"Wrote {out_path}")
+print(f"  {len(addons)} add-ons ({started} started, {errors} errors, {updates} updates available)")
+PYEOF

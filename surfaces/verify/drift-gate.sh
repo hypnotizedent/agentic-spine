@@ -941,6 +941,14 @@ else
   warn "VM IP parity gate not present"
 fi
 
+# D101: HA addon inventory parity
+echo -n "D101 HA addon inventory parity... "
+if [[ -x "$SP/surfaces/verify/d101-ha-addon-inventory-parity.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d101-ha-addon-inventory-parity.sh"
+else
+  warn "HA addon inventory gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-12
+last_verified: 2026-02-15
 scope: home-network
 ---
 
@@ -25,6 +25,47 @@ All operations in this runbook MUST be executed via capability system:
 | `home.vm.status` | read-only | Check VM/LXC running state on proxmox-home |
 | `home.health.check` | read-only | HTTP health probes for home services |
 | `home.backup.status` | read-only | Check backup artifact freshness |
+| `network.home.dhcp.audit` | read-only | Cross-reference UniFi DHCP reservations against device registry |
+| `network.home.unifi.clients.snapshot` | read-only | Snapshot connected UniFi clients (MAC/IP/name) |
+| `ha.z2m.devices.snapshot` | read-only | Extract Z2M device registry to `ops/bindings/z2m.devices.yaml` |
+| `ha.addons.snapshot` | read-only | Extract HA Supervisor add-on inventory to `ops/bindings/ha.addons.yaml` |
+| `ha.config.extract` | read-only | Extract HA config files to workbench |
+
+## DHCP Reservation Audit
+
+```bash
+./bin/ops cap run network.home.dhcp.audit
+```
+
+Queries UDR7 via API key, cross-references against `ops/bindings/home.device.registry.yaml`.
+Reports: OK (reserved + matches), FAIL (missing reservation for infra/IoT), INFO (personal/dynamic).
+
+**API method to create reservations** (requires `UNIFI_HOME_API_KEY` in Infisical):
+```bash
+curl -sk -X PUT "https://10.0.0.1/proxy/network/api/s/default/rest/user/{USER_ID}" \
+  -H "X-API-KEY: $UNIFI_HOME_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"use_fixedip": true, "fixed_ip": "10.0.0.X"}'
+```
+
+## Drift Gates
+
+| Gate | Name | What It Checks |
+|------|------|---------------|
+| D92 | ha-config-version-control | HA config files exist in workbench |
+| D98 | z2m-device-parity | Z2M device binding exists + fresh |
+| D99 | ha-token-freshness | HA API token returns HTTP 200 |
+| D100 | vm-ip-parity-lock | VM LAN IPs match across SSOTs |
+| D101 | ha-addon-inventory-parity | HA add-on binding exists + fresh |
+
+## Credentials
+
+| Key | Infisical Path | Purpose |
+|-----|---------------|---------|
+| UNIFI_HOME_USER | home-assistant/prod | UDR7 cookie auth (read-only) |
+| UNIFI_HOME_PASSWORD | home-assistant/prod | UDR7 cookie auth (read-only) |
+| UNIFI_HOME_API_KEY | home-assistant/prod | UDR7 API key (read/write, never expires) |
+| HA_API_TOKEN | home-assistant/prod | Home Assistant REST API |
 
 ## Connectivity Checks
 
