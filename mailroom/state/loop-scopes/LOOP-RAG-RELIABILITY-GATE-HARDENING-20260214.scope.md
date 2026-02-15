@@ -1,7 +1,8 @@
 ---
 loop_id: LOOP-RAG-RELIABILITY-GATE-HARDENING-20260214
 created: 2026-02-14
-status: active
+closed: 2026-02-15
+status: closed
 scope: agentic-spine
 objective: Fix false-green behavior where rag.health + parity can pass while reindex is timing out/failing
 ---
@@ -35,3 +36,13 @@ Current controls show "green" while reindex quality is failing:
 
 - Scope: agentic-spine only (no workbench edits)
 - Follow spine governance: register gaps before fixing
+
+## Completion Receipt
+
+- **Closed:** 2026-02-15
+- **Final SHA:** 919fb14
+- **Gates added:** D90 (rag-reindex-runtime-quality-gate)
+- **Gate total:** 90/90 PASS
+- **Gaps filed:** GAP-OP-316 through GAP-OP-320 (all fixed)
+- **Remaining:** GAP-OP-308 (RAG full reindex deferred, tracked under LOOP-SPINE-CANONICAL-UPGRADE-20260210)
+- **Run key:** CAP-20260215-074716__spine.verify__R5bnq4929
