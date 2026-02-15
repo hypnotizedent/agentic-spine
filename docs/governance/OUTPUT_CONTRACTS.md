@@ -289,6 +289,64 @@ NEXT: "Recommended next action or none"
 
 ---
 
+## 6. AOF Operator JSON Contracts
+
+AOF operator capabilities support `--json` for automation and bridge consumers:
+
+- `aof.status`
+- `aof.version`
+- `aof.policy.show`
+- `aof.tenant.show`
+- `aof.verify`
+
+### Common Envelope (Required)
+
+All 5 capabilities MUST emit exactly one JSON object to stdout in `--json` mode:
+
+```json
+{
+  "capability": "aof.status",
+  "schema_version": "1.1.0",
+  "generated_at": "2026-02-15T19:00:00Z",
+  "status": "ok",
+  "data": {}
+}
+```
+
+Required top-level keys:
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `capability` | string | Capability name |
+| `schema_version` | string | Contract schema version |
+| `generated_at` | string | UTC ISO-8601 timestamp |
+| `status` | string | `ok` / `failed` / `missing` |
+| `data` | object | Capability-specific payload |
+
+### Capability Data Contracts
+
+| Capability | Required `data` keys |
+|------------|----------------------|
+| `aof.status` | `contract`, `policy`, `counts`, `tenant` |
+| `aof.version` | `git`, `contract`, `schema`, `presets`, `gates`, `capabilities` |
+| `aof.policy.show` | `active_preset`, `knobs`, `discovery`, `available_presets` |
+| `aof.tenant.show` | `source`, `identity`, `secrets`, `policy`, `runtime`, `surfaces` |
+| `aof.verify` | `product_gate_range`, `passed`, `failed`, `skipped`, `total`, `failed_gates` |
+
+### Validation Commands
+
+```bash
+./bin/ops cap run aof.status --json | jq .
+./bin/ops cap run aof.version --json | jq .
+./bin/ops cap run aof.policy.show --json | jq .
+./bin/ops cap run aof.tenant.show --json | jq .
+./bin/ops cap run aof.verify --json | jq .
+```
+
+Regression coverage: `ops/plugins/aof/tests/aof-json-contract-test.sh`
+
+---
+
 ## Cross-Reference
 
 | Artifact | Schema Source | CLI Command |
@@ -298,3 +356,4 @@ NEXT: "Recommended next action or none"
 | Proposal | `ops/bindings/proposals.lifecycle.yaml` | `./bin/ops cap run proposals.submit` |
 | Gate script | This document (section 4) | `./bin/ops cap run spine.verify` |
 | Result block | `docs/core/AGENT_OUTPUT_CONTRACT.md` | (inline in cap output) |
+| AOF JSON outputs | This document (section 6) | `./bin/ops cap run aof.* --json` |
