@@ -283,6 +283,7 @@ df -h /
 | `com.ronnyworks.minio-mount.plist` | On login | rclone nfsmount | Mount MinIO via rclone | ACTIVE |
 | `com.ronny.agent-inbox.plist` | On login | `hot-folder-watcher.sh` | Spine mailroom watcher (fswatch) | ACTIVE |
 | `com.ronny.docker-tunnel.plist` | On login | SSH -L 2375 | Docker tunnel to docker-host | ACTIVE |
+| `com.ronny.ha-baseline-refresh.plist` | Sun 05:00 | `ha-baseline-refresh.sh` | Weekly HA SSOT baseline refresh | ACTIVE |
 | `com.ronny.streamdeck.ha.plist` | On login | `streamdeck_ha_controller.py` | Stream Deck HA button controller | ACTIVE |
 | `works.ronny.smb-paperless.plist` | On login | osascript SMB mount | Paperless SMB share on docker-host | ACTIVE |
 
