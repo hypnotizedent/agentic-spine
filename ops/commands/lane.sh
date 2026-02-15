@@ -30,6 +30,7 @@ case "$LANE" in
   LANE 1: BUILDER
   Issue: ${CURRENT_ISSUE:-none}
   Worktree: ${CURRENT_WORKTREE:-main}
+  Gate Domain: ${OPS_GATE_DOMAIN:-core}
 ═══════════════════════════════════════════════════════════
 BUILDER
     ;;

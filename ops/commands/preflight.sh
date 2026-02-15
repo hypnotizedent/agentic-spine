@@ -29,10 +29,17 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/d
 fi
 
 preflight_fail=0
+gate_domain_fail=0
 parity_status="unknown"
 parity_detail=""
 worktree_status="unknown"
 worktree_detail=""
+selected_gate_domain="${OPS_GATE_DOMAIN:-core}"
+domain_source="default(core)"
+if [[ -n "${OPS_GATE_DOMAIN:-}" ]]; then
+  domain_source="OPS_GATE_DOMAIN"
+fi
+DRIFT_CERTIFIER="$REPO_ROOT/ops/plugins/verify/bin/drift-gates-certify"
 
 if [[ "$REPO_GIT_OK" -eq 1 ]]; then
   # Remote parity (origin/main == github/main). This is the primary anti split-brain stop signal.
@@ -127,18 +134,53 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/d
 	  fi
 	fi
 
-if [[ "$preflight_fail" -eq 1 ]]; then
+echo "Gate Domains:"
+echo "  selected: ${selected_gate_domain} (${domain_source})"
+echo "  commands:"
+echo "    ./bin/ops cap run verify.drift_gates.certify --list-domains"
+echo "    ./bin/ops cap run verify.drift_gates.certify --domain <name> --brief"
+
+if [[ -x "$DRIFT_CERTIFIER" ]]; then
+  if domain_list_out="$("$DRIFT_CERTIFIER" --list-domains 2>&1)"; then
+    domain_list_csv="$(echo "$domain_list_out" | tr '\n' ',' | sed -E 's/,+$//' | sed -E 's/,/, /g')"
+    echo "  available: ${domain_list_csv:-<none>}"
+    if domain_brief_out="$("$DRIFT_CERTIFIER" --domain "$selected_gate_domain" --brief 2>&1)"; then
+      echo "  pack:"
+      echo "$domain_brief_out" | sed 's/^/    /'
+    else
+      echo "  pack: WARN (selected domain brief unavailable; non-blocking)"
+      echo "$domain_brief_out" | sed 's/^/    /'
+      if ! echo "$domain_brief_out" | grep -qi "unknown domain"; then
+        gate_domain_fail=1
+      fi
+    fi
+  else
+    echo "  available: WARN (could not load domain registry)"
+    echo "$domain_list_out" | sed 's/^/    /'
+    gate_domain_fail=1
+  fi
+else
+  echo "  available: WARN (missing certifier executable: $DRIFT_CERTIFIER)"
+  gate_domain_fail=1
+fi
+echo
+
+if [[ "$preflight_fail" -eq 1 || "$gate_domain_fail" -eq 1 ]]; then
   cat <<'STOP'
 ╔═══════════════════════════════════════════════════════════╗
-║ STOP: SPLIT-BRAIN RISK DETECTED                           ║
+║ STOP: PREFLIGHT BLOCKERS DETECTED                         ║
 ║                                                           ║
-║ Resolve before starting new work:                          ║
-║ - Remote authority (origin reachable; mirror drift warns)   ║
-║ - Codex worktree hygiene (no stale/dirty codex worktrees)  ║
-║                                                           ║
-║ Override (not recommended): OPS_PREFLIGHT_ALLOW_DEGRADED=1 ║
+║ Resolve before starting new work.                          ║
 ╚═══════════════════════════════════════════════════════════╝
 STOP
+  if [[ "$preflight_fail" -eq 1 ]]; then
+    echo "  - Remote authority (origin reachable; mirror drift warns)"
+    echo "  - Codex worktree hygiene (no stale/dirty codex worktrees)"
+  fi
+  if [[ "$gate_domain_fail" -eq 1 ]]; then
+    echo "  - Gate domain discoverability surface is broken"
+  fi
+  echo "  Override (not recommended): OPS_PREFLIGHT_ALLOW_DEGRADED=1"
   if [[ "${OPS_PREFLIGHT_ALLOW_DEGRADED:-0}" != "1" ]]; then
     exit 1
   fi
