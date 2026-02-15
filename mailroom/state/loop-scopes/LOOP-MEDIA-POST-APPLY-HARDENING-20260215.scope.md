@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MEDIA-POST-APPLY-HARDENING-20260215
 created: 2026-02-15
-status: active
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Stabilize media governance post-apply by fixing capability behavior and addressing failed media drift gates.
