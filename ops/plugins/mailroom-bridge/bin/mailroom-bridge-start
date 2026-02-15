@@ -30,9 +30,52 @@ fi
 
 host="127.0.0.1"
 port="8799"
+token_env="MAILROOM_BRIDGE_TOKEN"
+require_token="false"
 if command -v yq >/dev/null 2>&1; then
   host="$(yq -r '.listen.host // "127.0.0.1"' "$BINDING" 2>/dev/null || echo "127.0.0.1")"
   port="$(yq -r '.listen.port // 8799' "$BINDING" 2>/dev/null || echo "8799")"
+  token_env="$(yq -r '.auth.token_env // "MAILROOM_BRIDGE_TOKEN"' "$BINDING" 2>/dev/null || echo "MAILROOM_BRIDGE_TOKEN")"
+  require_token="$(yq -r '.auth.require_token // false' "$BINDING" 2>/dev/null || echo "false")"
+fi
+token_file="${STATE_DIR}/mailroom-bridge.token"
+token_value="${!token_env:-}"
+if [[ -z "$token_value" && -f "$token_file" ]]; then
+  token_value="$(tr -d '\r\n' < "$token_file" 2>/dev/null || true)"
+fi
+
+if [[ "$require_token" == "true" && -z "$token_value" ]]; then
+  if command -v openssl >/dev/null 2>&1; then
+    token_value="$(openssl rand -hex 24)"
+  elif command -v python3 >/dev/null 2>&1; then
+    token_value="$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(24))
+PY
+)"
+  fi
+  if [[ -n "$token_value" ]]; then
+    printf '%s\n' "$token_value" > "$token_file"
+    chmod 600 "$token_file" 2>/dev/null || true
+    echo "TOKEN_GENERATED: ${token_file}"
+  fi
+fi
+if [[ "$require_token" == "true" && -z "$token_value" ]]; then
+  echo "STOP (2): auth.require_token=true but no token is available (${token_env} or ${token_file})"
+  exit 2
+fi
+if [[ -n "$token_value" ]]; then
+  printf '%s\n' "$token_value" > "$token_file"
+  chmod 600 "$token_file" 2>/dev/null || true
+fi
+
+extra_env=""
+if [[ -n "$token_value" ]]; then
+  extra_env=$(cat <<EOF
+      <key>${token_env}</key>
+      <string>${token_value}</string>
+EOF
+)
 fi
 
 if ! command -v launchctl >/dev/null 2>&1; then
@@ -76,6 +119,7 @@ cat >"$PLIST" <<EOF
       <string>1</string>
       <key>PATH</key>
       <string>${HOME}/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+${extra_env}
     </dict>
 
     <key>StandardOutPath</key>

@@ -5,7 +5,7 @@ mailroom.bridge.serve - minimal HTTP bridge to the spine mailroom.
 Contract:
 - Reads from canonical runtime root (SPINE_REPO).
 - Writes prompts via ops/runtime/inbox/agent-enqueue.sh (mailroom/inbox/queued).
-- Optional token auth: if MAILROOM_BRIDGE_TOKEN (or binding auth.token_env) is set, require it.
+- Token auth enforced by binding (`auth.require_token` + `auth.token_env`).
 """
 
 from __future__ import annotations
@@ -113,6 +113,13 @@ def _scope_title(md: str, body_start_line: int) -> str:
 
 def _is_open_status(status: str) -> bool:
     return (status or "").strip().lower() in {"active", "draft", "open"}
+
+
+def _is_output_delim(line: str) -> bool:
+    s = (line or "").strip()
+    if len(s) < 8:
+        return False
+    return all(ch in {"─", "-"} for ch in s)
 
 
 def _reduce_open_loops_from_scopes(scopes_dir: Path) -> list[dict[str, Any]]:
@@ -324,17 +331,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.BAD_REQUEST, {"error": "question is required"})
 
         workspace = (payload.get("workspace") or "agentic-spine").strip()
-        max_chars = int(payload.get("context_max_chars") or 10000)
+        try:
+            max_chars = int(payload.get("context_max_chars") or 10000)
+        except (TypeError, ValueError):
+            max_chars = 10000
+        if max_chars < 100:
+            max_chars = 100
+        if max_chars > 100000:
+            max_chars = 100000
 
         spine_repo = Path(self.config["spine_repo"])
         ops_bin = spine_repo / "bin" / "ops"
         if not ops_bin.exists():
             return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "ops binary not found"})
 
-        # Call: ./bin/ops cap run rag.anythingllm.ask -- "<question>" --workspace <ws>
+        # Call: ./bin/ops cap run rag.anythingllm.ask "<question>" --workspace <ws>
         args = [
             str(ops_bin), "cap", "run", "rag.anythingllm.ask",
-            "--", question, "--workspace", workspace,
+            question, "--workspace", workspace,
         ]
 
         env = os.environ.copy()
@@ -358,17 +372,55 @@ class Handler(BaseHTTPRequestHandler):
         if p.returncode != 0:
             return self._json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"error": "rag query failed", "stderr": stderr[:2000]},
+                {"error": "rag query failed", "stderr": stderr[:2000], "stdout": stdout[:2000]},
             )
 
-        # Parse output: the rag ask command prints the answer text, then optional "Sources:" block.
-        # Receipt path appears in stderr from the cap runner.
-        lines = stdout.strip().splitlines()
+        # Parse capability-runner output:
+        # - receipt path is emitted in stdout as "Receipt: ..."
+        # - useful payload must come from the final capability execution block
+        #   after "== PRECONDITIONS OK ==" to avoid precondition output contamination.
+        lines = stdout.splitlines()
+        receipt = ""
+        for raw in lines:
+            s = raw.strip()
+            if s.startswith("Receipt:"):
+                receipt = s.split("Receipt:", 1)[1].strip()
+                continue
+
+        pre_ok_idx = -1
+        for i, raw in enumerate(lines):
+            if raw.strip() == "== PRECONDITIONS OK ==":
+                pre_ok_idx = i
+
+        executing_idx = -1
+        for i, raw in enumerate(lines):
+            if pre_ok_idx >= 0 and i <= pre_ok_idx:
+                continue
+            if raw.strip().lower() == "executing...":
+                executing_idx = i
+
+        start_idx = None
+        for i, raw in enumerate(lines):
+            if executing_idx >= 0 and i <= executing_idx:
+                continue
+            if _is_output_delim(raw):
+                start_idx = i + 1
+                break
+        if start_idx is None:
+            start_idx = executing_idx + 1 if executing_idx >= 0 else 0
+
+        end_idx = len(lines)
+        for i in range(start_idx, len(lines)):
+            if _is_output_delim(lines[i]):
+                end_idx = i
+                break
+
+        payload_lines = lines[start_idx:end_idx]
         answer_lines: list[str] = []
         sources: list[str] = []
         in_sources = False
 
-        for line in lines:
+        for line in payload_lines:
             if line.strip() == "Sources:":
                 in_sources = True
                 continue
@@ -382,22 +434,33 @@ class Handler(BaseHTTPRequestHandler):
                 answer_lines.append(line)
 
         answer = "\n".join(answer_lines).strip()
+        if not answer:
+            answer = stdout.strip()
+
+        # Prefer the capability payload starting at mode: (chat/retrieve) when preface noise exists.
+        if not answer.startswith("mode:"):
+            mode_pos = answer.find("mode:")
+            if mode_pos >= 0:
+                answer = answer[mode_pos:].strip()
+
+        if answer.startswith("mode:"):
+            answer = answer.split("\n", 1)[1].strip() if "\n" in answer else ""
+
+        # Retrieve mode has source= lines instead of a dedicated "Sources:" block.
+        if not sources:
+            seen: set[str] = set()
+            for raw in answer.splitlines():
+                s = raw.strip()
+                if not s.startswith("source="):
+                    continue
+                src = s.split("=", 1)[1].strip()
+                if src and src not in seen:
+                    seen.add(src)
+                    sources.append(src)
 
         # Truncate answer to max_chars
         if len(answer) > max_chars:
             answer = answer[:max_chars] + "\n...(truncated)"
-
-        # Extract receipt path from stderr (cap runner prints it)
-        receipt = ""
-        for line in stderr.splitlines():
-            if "receipt" in line.lower() and ("RCAP-" in line or "receipts/sessions/" in line):
-                # Extract just the path fragment
-                for part in line.split():
-                    if "RCAP-" in part or "receipts/" in part:
-                        receipt = part.strip()
-                        break
-                if receipt:
-                    break
 
         return self._json(
             HTTPStatus.OK,

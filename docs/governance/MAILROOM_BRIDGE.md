@@ -14,6 +14,7 @@ scope: mailroom-bridge
 > - read `receipts/sessions/` evidence
 > - list open loops
 > - enqueue prompts into `mailroom/inbox/queued/`
+> - run governed RAG queries via `rag.anythingllm.ask`
 
 ---
 
@@ -22,10 +23,11 @@ scope: mailroom-bridge
 - **Read roots (allowlist):**
   - `mailroom/outbox/`
   - `receipts/sessions/`
-- **Write surface (single path):**
+- **Write-like surfaces (governed only):**
   - `POST /inbox/enqueue` delegates to `ops/runtime/inbox/agent-enqueue.sh`
+  - `POST /rag/ask` delegates to `./bin/ops cap run rag.anythingllm.ask`
 - **No filesystem traversal:** all `path=` params are relative and traversal is rejected.
-- **No direct “write file” endpoints.** All work must enter as a prompt file in the inbox.
+- **No direct “write file” endpoints.** All mutation-like actions must route through governed capabilities.
 
 ---
 
@@ -42,17 +44,19 @@ scope: mailroom-bridge
 ## Security Model
 
 - `GET /health` is unauthenticated (safe diagnostic).
-- All other endpoints require auth **if** a token is configured.
+- All other endpoints require auth token.
 
 Token behavior is controlled by `ops/bindings/mailroom.bridge.yaml`:
-- If `MAILROOM_BRIDGE_TOKEN` (or `auth.token_env`) is set in the environment, requests must provide it.
-- If `auth.require_token: true`, the server refuses to start without the token set.
+- `auth.require_token: true` enforces token-gated access for all non-health endpoints.
+- Token source order:
+  - environment variable from `auth.token_env` (default `MAILROOM_BRIDGE_TOKEN`)
+  - persisted token file: `mailroom/state/mailroom-bridge.token` (created/maintained by `mailroom.bridge.start`)
 
 Supported headers:
 - `Authorization: Bearer <token>`
 - `X-Spine-Token: <token>` (useful for n8n/webhooks)
 
-**Recommendation:** if you expose this beyond localhost (Tailscale Serve, reverse proxy, etc.), set `auth.require_token: true`.
+**Requirement:** if this is exposed via tailnet/reverse proxy, token auth must be enforced.
 
 ---
 
@@ -115,6 +119,33 @@ Body (JSON):
 
 Effect:
 - enqueues a prompt into `mailroom/inbox/queued/` via `ops/runtime/inbox/agent-enqueue.sh`
+
+### `POST /rag/ask` (auth if token set)
+
+Body (JSON):
+```json
+{
+  "question": "your question text (required)",
+  "workspace": "agentic-spine (optional, default)",
+  "context_max_chars": 10000
+}
+```
+
+Effect:
+- queries AnythingLLM via `rag.anythingllm.ask`
+- returns answer, sources, receipt path, and workspace
+
+Response (example):
+```json
+{
+  "answer": "To file a gap, run ./bin/ops cap run gaps.file ...",
+  "sources": [
+    "docs/governance/OUTPUT_CONTRACTS.md"
+  ],
+  "receipt": "receipts/sessions/RCAP-20260215-XXXXXX__rag.anythingllm.ask__Rabc123/receipt.md",
+  "workspace": "agentic-spine"
+}
+```
 
 ---
 
