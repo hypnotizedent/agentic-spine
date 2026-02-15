@@ -57,10 +57,12 @@ Hosted runtime egress allowlist:
    - Continue with offline artifact mode, OR ask for:
      - a valid public HTTPS bridge URL, or
      - pasted output from a trusted-device request to `/loops/open`.
-3. If either health check succeeds, request token if missing:
-   - `X-Spine-Token: <token>` or `Authorization: Bearer <token>`
-   - Operator stores token in Vaultwarden; paste from password manager when prompted.
-   - Once provided, use it for all authenticated requests this session.
+3. If either health check succeeds, authenticate:
+   - **Preferred (public HTTPS):** include `CF-Access-Client-Id` + `CF-Access-Client-Secret` headers.
+     When these are present, no `MAILROOM_BRIDGE_TOKEN` is needed — Cloudflare validates at the edge.
+   - **Fallback (tailnet / no CF Access):** `X-Spine-Token: <token>` or `Authorization: Bearer <token>`.
+     Operator stores token in Vaultwarden; paste from password manager when prompted.
+   - Once authenticated, use the same auth for all requests this session.
 4. Use the healthy base URL for all calls in this session.
 5. Read open loops:
    - `GET <base>/loops/open` (with auth header)

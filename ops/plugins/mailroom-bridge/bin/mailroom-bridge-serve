@@ -202,7 +202,54 @@ class Handler(BaseHTTPRequestHandler):
             return hdr.removeprefix("Bearer ").strip()
         return (self.headers.get("X-Spine-Token", "") or "").strip()
 
+    def _cf_access_ok(self) -> bool:
+        """Check Cloudflare Access JWT auth (service-token flow).
+
+        CF Access validates at the edge and injects a signed JWT in the
+        configured header.  The bridge trusts the tunnel (no signature
+        check) and validates only the audience claim to prevent cross-app
+        reuse.
+        """
+        if not self.config.get("cf_access_enabled"):
+            return False
+
+        jwt_header = self.config.get("cf_access_jwt_header") or "Cf-Access-Jwt-Assertion"
+        jwt_raw = (self.headers.get(jwt_header) or "").strip()
+        if not jwt_raw:
+            return False
+
+        # Decode JWT payload (second segment, base64url-encoded).
+        parts = jwt_raw.split(".")
+        if len(parts) != 3:
+            return False
+
+        import base64
+        try:
+            payload_b64 = parts[1]
+            # base64url: pad to multiple of 4
+            padding = 4 - len(payload_b64) % 4
+            if padding != 4:
+                payload_b64 += "=" * padding
+            payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        except Exception:
+            return False
+
+        # Validate audience claim if configured.
+        cf_access_aud = self.config.get("cf_access_aud") or ""
+        if cf_access_aud:
+            token_aud = payload.get("aud") or []
+            if isinstance(token_aud, str):
+                token_aud = [token_aud]
+            if cf_access_aud not in token_aud:
+                return False
+
+        return True
+
     def _auth_ok(self) -> bool:
+        # CF Access auth (service-token via Cloudflare edge)
+        if self._cf_access_ok():
+            return True
+
         primary_token = self.config.get("token") or ""
         if not primary_token:
             # Tailnet-only deployments can run without a token (explicitly documented).
@@ -228,6 +275,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cap_rpc_role_allows(self, capability: str) -> bool:
         """Check if the request token's RBAC role allows the given capability."""
+        # CF Access auth gets operator-level (full allowlist) access.
+        if self._cf_access_ok():
+            return True
+
         roles = self.config.get("cap_rpc_roles") or {}
         if not roles:
             # No roles configured: any authenticated token gets full allowlist.
@@ -736,6 +787,11 @@ def main() -> None:
     require_token = _yq(binding, ".auth.require_token // false", "false").lower() == "true"
     max_read = int(_yq(binding, ".limits.max_read_bytes // 262144", "262144"))
 
+    # Cloudflare Access service-token auth config
+    cf_access_enabled = _yq(binding, ".auth.cf_access.enabled // false", "false").lower() == "true"
+    cf_access_aud = _yq(binding, '.auth.cf_access.aud // ""', "")
+    cf_access_jwt_header = _yq(binding, '.auth.cf_access.jwt_header // "Cf-Access-Jwt-Assertion"', "Cf-Access-Jwt-Assertion")
+
     token = os.environ.get(token_env, "") or ""
     if require_token and not token:
         _stop(f"token required by binding, but env var not set: {token_env}")
@@ -791,6 +847,9 @@ def main() -> None:
         "cap_rpc_allowlist": cap_rpc_allowlist,
         "cap_rpc_timeout": cap_rpc_timeout,
         "cap_rpc_roles": cap_rpc_roles,
+        "cf_access_enabled": cf_access_enabled,
+        "cf_access_aud": cf_access_aud,
+        "cf_access_jwt_header": cf_access_jwt_header,
     }
 
     roles_summary = {env: ("*" if v == "*" else len(v)) for env, v in cap_rpc_roles.items()}
@@ -804,6 +863,7 @@ def main() -> None:
     print(f"cap_rpc_allowlist: {cap_rpc_allowlist}")
     print(f"cap_rpc_timeout: {cap_rpc_timeout}s")
     print(f"cap_rpc_roles: {len(cap_rpc_roles)} loaded")
+    print(f"cf_access_enabled: {cf_access_enabled}")
     sys.stdout.flush()
     httpd.serve_forever()
 

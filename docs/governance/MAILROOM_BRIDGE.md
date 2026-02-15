@@ -71,6 +71,43 @@ Supported headers:
 
 **Requirement:** if this is exposed via tailnet/reverse proxy/public tunnel, token auth must be enforced.
 
+### Cloudflare Access Auth (Service-Token Flow)
+
+An alternative to bearer-token auth for hosted runtimes that cannot persist tokens.
+
+**How it works:**
+
+1. Hosted runtime sends `CF-Access-Client-Id` + `CF-Access-Client-Secret` headers with every request.
+2. Cloudflare Access validates the service token at the edge.
+3. Cloudflare injects a signed JWT in the `Cf-Access-Jwt-Assertion` header.
+4. Bridge reads the JWT, decodes the payload (base64url, no signature verification — tunnel guarantees authenticity), and checks the `aud` claim matches the configured audience tag.
+5. If valid, the request is authenticated with **operator-level** access (full allowlist).
+
+**Binding config** (`ops/bindings/mailroom.bridge.yaml`):
+
+```yaml
+auth:
+  cf_access:
+    enabled: true
+    aud: ""  # Set to your CF Access app audience tag
+    jwt_header: "Cf-Access-Jwt-Assertion"
+```
+
+**Operator setup:**
+
+1. In Cloudflare dashboard: Access > Applications > create self-hosted app for `spine.ronny.works`.
+2. Create a service token (Access > Service Auth > Create Service Token).
+3. Copy the audience tag from the app config into `auth.cf_access.aud` in the binding.
+4. Store `CF-Access-Client-Id` and `CF-Access-Client-Secret` in your runtime's project/skill config.
+5. Restart the bridge to pick up the new config.
+
+**Security notes:**
+
+- JWT is **not** signature-verified by the bridge. The Cloudflare Tunnel guarantees that only CF-validated requests reach the bridge.
+- The `aud` claim check prevents cross-app token reuse (a service token for a different CF Access app will be rejected).
+- Both auth paths coexist: CF Access auth and bearer-token auth are accepted independently.
+- CF-authenticated requests get operator-level RBAC (full cap-RPC allowlist).
+
 ---
 
 ## Lifecycle (Governed Capabilities)

@@ -122,6 +122,20 @@ Use tailnet URL for trusted-device/private access.
 
 ### Authentication
 
+**Option A: Cloudflare Access (recommended for hosted runtimes)**
+
+When calling `spine.ronny.works`, include CF Access service-token headers:
+
+```
+CF-Access-Client-Id: <service-token-id>
+CF-Access-Client-Secret: <service-token-secret>
+```
+
+Cloudflare validates at the edge and injects a JWT. No bridge token needed.
+Store the service-token credentials in your Claude project/skill config.
+
+**Option B: Bearer token (fallback / tailnet-direct access)**
+
 Every request (except `/health`) must include one of:
 
 ```
@@ -133,6 +147,8 @@ or:
 ```
 X-Spine-Token: <token>
 ```
+
+Get the token from `cat mailroom/state/mailroom-bridge.token` on the Mac.
 
 ### Available Endpoints
 
