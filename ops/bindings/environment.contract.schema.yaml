@@ -1,0 +1,173 @@
+version: "1.0"
+updated: "2026-02-15"
+scope: environment-contract-schema
+
+$schema: https://json-schema.org/draft/2020-12/schema
+type: object
+required:
+  - version
+  - environment
+  - contracts
+properties:
+  version:
+    type: string
+    const: "1.0"
+    description: "Contract schema version"
+    
+  environment:
+    type: object
+    required:
+      - name
+      - tier
+    properties:
+      name:
+        type: string
+        description: "Unique environment identifier"
+        pattern: "^[a-z0-9-]+$"
+      tier:
+        type: string
+        enum: [production, product, lab, minimal, ephemeral]
+        description: "Environment tier determines gate enforcement"
+      deployed_at:
+        type: string
+        format: date-time
+        description: "ISO 8601 timestamp of deployment"
+      description:
+        type: string
+        description: "Human-readable environment description"
+        
+  identity:
+    type: object
+    required:
+      - node_id
+      - org
+      - role
+    properties:
+      node_id:
+        type: string
+        description: "Unique node identifier (usually hostname)"
+      org:
+        type: string
+        description: "Organization identifier"
+      role:
+        type: string
+        enum: [brain, runner, edge, product]
+        description: "Node role in the fabric"
+      contact:
+        type: string
+        description: "Contact email or identifier"
+        
+  contracts:
+    type: object
+    required:
+      - preflight
+    properties:
+      preflight:
+        type: array
+        items:
+          type: string
+        default:
+          - read_environment_contract
+          - verify_identity
+          - check_drift_gates
+        description: "Required steps before any mutation"
+        
+      restricted:
+        type: array
+        items:
+          type: string
+        default: []
+        description: "Mutations requiring explicit approval"
+        
+      allowed:
+        type: array
+        items:
+          type: string
+        default:
+          - container_deploy
+          - runner_task
+          - receipt_write
+          - log_append
+        description: "Auto-approved mutations"
+        
+  declared_hosts:
+    type: array
+    items:
+      type: object
+      required:
+        - name
+        - role
+      properties:
+        name:
+          type: string
+          description: "Host identifier"
+        role:
+          type: string
+          enum: [orchestrator, compute, storage, edge]
+        ip:
+          type: string
+          description: "IP address (Tailscale or local)"
+        hostname:
+          type: string
+          description: "Full hostname"
+    description: "Hosts that exist in this environment"
+    
+  declared_services:
+    type: array
+    items:
+      type: object
+      required:
+        - name
+        - host
+        - port
+      properties:
+        name:
+          type: string
+          description: "Service name"
+        host:
+          type: string
+          description: "Host where service runs"
+        port:
+          type: integer
+          description: "Service port"
+        health_path:
+          type: string
+          default: "/health"
+          description: "Health check endpoint"
+    description: "Services that exist in this environment"
+    
+  declared_networks:
+    type: array
+    items:
+      type: object
+      required:
+        - name
+        - cidr
+      properties:
+        name:
+          type: string
+          description: "Network name"
+        cidr:
+          type: string
+          description: "Network CIDR"
+        type:
+          type: string
+          enum: [bridge, overlay, physical, tailscale]
+    description: "Networks that exist in this environment"
+    
+  drift_gates:
+    type: object
+    properties:
+      scope:
+        type: string
+        default: "environment"
+        description: "Gate scope (environment or global)"
+      categories:
+        type: array
+        items:
+          type: string
+        description: "Gate categories to enforce (override tier default)"
+      fail_action:
+        type: string
+        enum: [block, warn]
+        description: "Override tier default fail action"

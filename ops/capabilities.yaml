@@ -1518,46 +1518,6 @@ capabilities:
       - secrets.auth.status
     outputs: ["stdout"]
 
-  ha.automation.trigger:
-    description: "Trigger a Home Assistant automation"
-    tags: [ha, service-calls, automation]
-    command: "./ops/plugins/ha/bin/ha-automation-trigger"
-    cwd: "$SPINE_CODE"
-    safety: mutating
-    approval: auto
-    lifecycle: ready
-    touches_api: true
-    requires:
-      - secrets.binding
-      - secrets.auth.status
-    outputs: ["stdout"]
-
-  ha.script.run:
-    description: "Run a Home Assistant script"
-    tags: [ha, service-calls, script]
-    command: "./ops/plugins/ha/bin/ha-script-run"
-    cwd: "$SPINE_CODE"
-    safety: mutating
-    approval: auto
-    lifecycle: ready
-    touches_api: true
-    requires:
-      - secrets.binding
-      - secrets.auth.status
-    outputs: ["stdout"]
-
-  ha.backup.create:
-    description: "Create a Home Assistant backup via SSH + ha CLI (physical backup — manual approval)"
-    tags: [ha, backup, ssh]
-    command: "./ops/plugins/ha/bin/ha-backup-create"
-    cwd: "$SPINE_CODE"
-    safety: mutating
-    approval: manual
-    lifecycle: ready
-    touches_api: false
-    requires: []
-    outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # MEDIA (media stack governance)
   # ─────────────────────────────────────────────────────────────────────────
@@ -1635,10 +1595,8 @@ capabilities:
 
   # home-assistant: ha_call_service remains blocked in MCP P2
   # Scoped capabilities now exist: ha.service.call, ha.scene.activate,
-  #   ha.light.toggle, ha.lock.control, ha.automation.trigger, ha.script.run,
-  #   ha.backup.create (GAP-OP-339, GAP-OP-372–374). MCP pass-through
+  #   ha.light.toggle, ha.lock.control (GAP-OP-339). MCP pass-through
   #   still blocked — agents must use scoped caps via ops cap run.
-  # Policy doc: docs/governance/HASS_MCP_INTEGRATION.md (GAP-OP-376)
 
   # mint-os: 5 tools blocked (send_order_email, post_production_update,
   #   update_order_customer, ss_place_order, sanmar_place_order)
@@ -2884,6 +2842,40 @@ capabilities:
     description: "Route a domain keyword to the correct agent (deterministic lookup from agents.registry.yaml)"
     tags: [agent, routing]
     command: "./ops/plugins/agent/bin/agent-route"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # AOF KERNEL ABSTRACTION (environment contracts + bootstrap)
+  # ─────────────────────────────────────────────────────────────────────────
+
+  aof.bootstrap:
+    description: "Seed environment + identity contracts from AOF profile templates (mutating)"
+    tags: [aof, bootstrap, contracts]
+    command: "./ops/plugins/aof/bin/bootstrap-spine.sh"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    outputs: ["stdout"]
+
+  aof.validate:
+    description: "Validate .environment.yaml/.identity.yaml contract structure"
+    tags: [aof, validation, contracts]
+    command: "./ops/plugins/aof/bin/validate-environment.sh"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+
+  aof.contract.status:
+    description: "Show AOF contract acknowledgement status for current workspace"
+    tags: [aof, contracts, status]
+    command: "./ops/plugins/aof/bin/contract-read-check.sh --status"
     cwd: "$SPINE_CODE"
     safety: read-only
     approval: auto

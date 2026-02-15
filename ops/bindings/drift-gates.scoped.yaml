@@ -1,0 +1,145 @@
+version: "1.0"
+updated: "2026-02-15"
+scope: drift-gates-scoped
+
+gate_categories:
+  identity:
+    description: "Identity and ownership verification"
+    gates:
+      ID001:
+        name: identity_contract_exists
+        check: ".identity.yaml exists and is valid YAML"
+        fix: "Run aof.bootstrap or create .identity.yaml manually"
+      ID002:
+        name: node_id_matches_hostname
+        check: "identity.node_id matches $(hostname)"
+        fix: "Update identity.node_id to match hostname"
+      ID003:
+        name: spine_version_declared
+        check: "identity.spine_version is set"
+        fix: "Update identity.yaml with current spine version"
+        
+  environment:
+    description: "Environment contract verification"
+    gates:
+      ENV001:
+        name: environment_contract_exists
+        check: ".environment.yaml exists and is valid YAML"
+        fix: "Run aof.bootstrap or create .environment.yaml manually"
+      ENV002:
+        name: tier_is_valid
+        check: "environment.tier is one of: production, product, lab, minimal, ephemeral"
+        fix: "Set valid tier in environment.yaml"
+      ENV003:
+        name: declared_hosts_reachable
+        check: "All declared_hosts are pingable"
+        fix: "Remove unreachable hosts or fix network"
+        
+  receipts:
+    description: "Receipt and ledger integrity"
+    gates:
+      REC001:
+        name: receipts_directory_exists
+        check: "receipts/sessions/ directory exists"
+        fix: "Create receipts/sessions/ directory"
+      REC002:
+        name: recent_sessions_have_receipts
+        check: "Sessions in ledger have corresponding receipts"
+        fix: "Investigate missing receipts or clean ledger"
+      REC003:
+        name: ledger_is_append_only
+        check: "ledger.csv has no deleted rows (line count only grows)"
+        fix: "Audit ledger modifications"
+        
+  services:
+    description: "Service health verification"
+    gates:
+      SVC001:
+        name: declared_services_reachable
+        check: "All declared_services respond to health check"
+        fix: "Fix unreachable services or update declarations"
+      SVC002:
+        name: container_states_match
+        check: "Running containers match declared services"
+        fix: "Align containers with declarations"
+        
+  spine_core:
+    description: "Spine kernel integrity"
+    gates:
+      CORE001:
+        name: capabilities_yaml_valid
+        check: "ops/capabilities.yaml is valid YAML and all capabilities have required fields"
+        fix: "Fix capabilities.yaml syntax or missing fields"
+      CORE002:
+        name: mailroom_functional
+        check: "mailroom/inbox directories exist and are writable"
+        fix: "Create or fix permissions on mailroom directories"
+      CORE003:
+        name: watcher_running
+        check: "Watcher process is running (if brain role)"
+        fix: "Start watcher via ops cap run spine.watcher.restart"
+
+environment_tiers:
+  production:
+    description: "Full production environment with strict enforcement"
+    enforce:
+      - identity
+      - environment
+      - receipts
+      - services
+      - spine_core
+    fail_action: block
+    auto_remediate: false
+    
+  product:
+    description: "Product repository with spine governance"
+    enforce:
+      - identity
+      - receipts
+      - spine_core
+    fail_action: block
+    auto_remediate: false
+    
+  lab:
+    description: "Development/lab environment"
+    enforce:
+      - identity
+      - receipts
+      - spine_core
+    fail_action: warn
+    auto_remediate: true
+    
+  minimal:
+    description: "Minimal deployment (single server, no containers)"
+    enforce:
+      - identity
+    fail_action: warn
+    auto_remediate: true
+    
+  ephemeral:
+    description: "Temporary/throwaway environment"
+    enforce:
+      - identity
+    fail_action: warn
+    auto_remediate: true
+
+gate_to_legacy_mapping:
+  note: "Maps new scoped gates to legacy D-gates for migration tracking"
+  identity:
+    - D61
+    - D65
+  environment:
+    - D54
+    - D59
+  receipts:
+    - D6
+    - D34
+  services:
+    - D23
+    - D63
+  spine_core:
+    - D1
+    - D2
+    - D3
+    - D7
+    - D12
