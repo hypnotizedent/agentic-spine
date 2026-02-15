@@ -131,12 +131,61 @@ test_unmapped_gate_always_enforced() {
   fi
 }
 
+read_fail_action() {
+  local tier="$1"
+  yq -r ".environment_tiers.$tier.fail_action // \"block\"" "$SCOPED_GATES" 2>/dev/null || echo block
+}
+
+test_fail_action_production_is_block() {
+  local fa
+  fa="$(read_fail_action production)"
+  if [[ "$fa" == "block" ]]; then
+    pass "production fail_action=block"
+  else
+    fail "production fail_action expected block, got $fa"
+  fi
+}
+
+test_fail_action_lab_is_warn() {
+  local fa
+  fa="$(read_fail_action lab)"
+  if [[ "$fa" == "warn" ]]; then
+    pass "lab fail_action=warn"
+  else
+    fail "lab fail_action expected warn, got $fa"
+  fi
+}
+
+test_fail_action_minimal_is_warn() {
+  local fa
+  fa="$(read_fail_action minimal)"
+  if [[ "$fa" == "warn" ]]; then
+    pass "minimal fail_action=warn"
+  else
+    fail "minimal fail_action expected warn, got $fa"
+  fi
+}
+
+test_fail_action_product_is_block() {
+  local fa
+  fa="$(read_fail_action product)"
+  if [[ "$fa" == "block" ]]; then
+    pass "product fail_action=block"
+  else
+    fail "product fail_action expected block, got $fa"
+  fi
+}
+
 echo "aof-scoped-gates Tests"
 echo "════════════════════════════════════════"
 test_minimal_only_identity
 test_production_all_enforced
 test_product_tier
 test_unmapped_gate_always_enforced
+test_fail_action_production_is_block
+test_fail_action_lab_is_warn
+test_fail_action_minimal_is_warn
+test_fail_action_product_is_block
 echo ""
 echo "────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed (of $((PASS + FAIL)))"

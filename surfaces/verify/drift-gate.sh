@@ -38,11 +38,14 @@ ENV_CONTRACT="$SP/.environment.yaml"
 AOF_TIER=""
 AOF_SCOPED=0
 AOF_OUT_OF_SCOPE_GATES=""
+AOF_FAIL_ACTION="block"
 
 if [[ -f "$ENV_CONTRACT" && -f "$SCOPED_GATES" ]]; then
   AOF_TIER="$(yq -r '.environment.tier // ""' "$ENV_CONTRACT" 2>/dev/null || true)"
   if [[ -n "$AOF_TIER" ]]; then
     AOF_SCOPED=1
+    # Read fail_action for this tier (block or warn)
+    AOF_FAIL_ACTION="$(yq -r ".environment_tiers.$AOF_TIER.fail_action // \"block\"" "$SCOPED_GATES" 2>/dev/null || echo block)"
     # Pre-compute enforced categories for this tier
     _aof_enforced=""
     while IFS= read -r cat; do
@@ -77,10 +80,12 @@ is_gate_in_scope() {
 DRIFT_VERBOSE="${DRIFT_VERBOSE:-0}"
 WARN_POLICY="${WARN_POLICY:-$RESOLVED_WARN_POLICY}"
 
-# Scope-aware fail: if gate is out-of-scope for current tier, downgrade to warn.
+# Scope-aware fail: downgrade to warn when gate is out-of-scope or tier fail_action=warn.
 scoped_fail() {
   local gate_id="$1"; shift
-  if is_gate_in_scope "$gate_id"; then
+  if [[ "$AOF_FAIL_ACTION" == "warn" ]]; then
+    warn "$* [downgraded by fail_action=warn for tier=$AOF_TIER]"
+  elif is_gate_in_scope "$gate_id"; then
     fail "$@"
   else
     warn "$* [out-of-scope for tier=$AOF_TIER]"
@@ -106,6 +111,8 @@ gate_script() {
   else
     if [[ "${RESOLVED_DRIFT_GATE_MODE:-fail}" == "warn" ]]; then
       warn "$(basename "$script") failed (rc=$rc) [downgraded by drift_gate_mode=warn]"
+    elif [[ "$AOF_FAIL_ACTION" == "warn" ]]; then
+      warn "$(basename "$script") failed (rc=$rc) [downgraded by fail_action=warn for tier=$AOF_TIER]"
     elif [[ -n "$gate_id" ]] && ! is_gate_in_scope "$gate_id"; then
       warn "$(basename "$script") failed (rc=$rc) [out-of-scope for tier=$AOF_TIER]"
     else
