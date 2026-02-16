@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# uptime-kuma-monitors-sync - Sync Uptime Kuma monitors from services.health.yaml
+#
+# Creates HTTP(s) monitors in Uptime Kuma for all enabled endpoints in the
+# services health binding. Uses socket.io protocol (Uptime Kuma v1.x API).
+# Skips monitors that already exist (by name match).
+#
+# Requires: UPTIME_KUMA_PASSWORD from Infisical (home-assistant/prod)
+#
+# Usage:
+#   uptime-kuma-monitors-sync              # dry-run (default)
+#   uptime-kuma-monitors-sync --execute    # create monitors
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+[[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+[[ -f "$INFISICAL_AGENT" ]] || stop "missing infisical-agent: $INFISICAL_AGENT"
+
+EXECUTE=false
+[[ "${1:-}" == "--execute" ]] && EXECUTE=true
+
+# Resolve Uptime Kuma host from services.health.yaml
+UK_URL=$(yq -r '.endpoints[] | select(.id == "uptime-kuma") | .url' "$BINDING")
+if [[ -z "$UK_URL" || "$UK_URL" == "null" ]]; then
+  stop "uptime-kuma endpoint not found in $BINDING"
+fi
+# Extract host:port from URL
+UK_HOST=$(echo "$UK_URL" | sed 's|http://||' | sed 's|/.*||')
+
+# Get credentials from Infisical
+UK_USER=$("$INFISICAL_AGENT" get home-assistant prod UPTIME_KUMA_USER 2>/dev/null) || true
+UK_PASS=$("$INFISICAL_AGENT" get home-assistant prod UPTIME_KUMA_PASSWORD 2>/dev/null) || true
+if [[ -z "${UK_USER:-}" || -z "${UK_PASS:-}" ]]; then
+  stop "could not retrieve UPTIME_KUMA_USER/PASSWORD from Infisical"
+fi
+
+echo "uptime.kuma.monitors.sync"
+echo "uptime_kuma: $UK_HOST"
+echo "binding: $BINDING"
+echo "mode: $(if $EXECUTE; then echo EXECUTE; else echo DRY-RUN; fi)"
+echo
+
+# Build endpoint list from binding as JSON
+ENDPOINTS_JSON=$(yq -o=json '.endpoints' "$BINDING")
+
+# Export env vars for Python
+export UK_HOST UK_USER UK_PASS ENDPOINTS_JSON
+export EXECUTE=$($EXECUTE && echo true || echo false)
+
+# Run the sync via Python using websockets (socket.io EIO4 protocol)
+python3 << 'PYEOF'
+import asyncio, json, sys, os
+
+try:
+    import websockets
+except ImportError:
+    print("STOP (2): missing python3 dependency: websockets", file=sys.stderr)
+    sys.exit(2)
+
+UK_HOST = os.environ.get("UK_HOST", "")
+UK_USER = os.environ.get("UK_USER", "")
+UK_PASS = os.environ.get("UK_PASS", "")
+EXECUTE = os.environ.get("EXECUTE", "false") == "true"
+ENDPOINTS_JSON = os.environ.get("ENDPOINTS_JSON", "[]")
+
+endpoints = json.loads(ENDPOINTS_JSON)
+
+# Socket.IO EIO4 protocol helpers
+def sio_decode(raw):
+    """Decode a socket.io message. Returns (type, namespace, data)."""
+    if not raw:
+        return None, None, None
+    # EIO message types: 0=open, 2=ping, 3=pong, 4=message
+    eio_type = raw[0]
+    if eio_type == '0':  # open
+        return 'open', None, json.loads(raw[1:]) if len(raw) > 1 else None
+    if eio_type == '2':  # ping
+        return 'ping', None, None
+    if eio_type == '3':  # pong
+        return 'pong', None, None
+    if eio_type == '4':  # message
+        sio_part = raw[1:]
+        sio_type = sio_part[0] if sio_part else ''
+        if sio_type == '0':  # connect
+            return 'connect', '/', None
+        if sio_type == '2':  # event
+            rest = sio_part[1:]
+            # May have ack id at the end
+            data = json.loads(rest)
+            return 'event', '/', data
+        if sio_type == '3':  # ack
+            # Find where JSON starts
+            rest = sio_part[1:]
+            i = 0
+            while i < len(rest) and rest[i].isdigit():
+                i += 1
+            ack_id = rest[:i]
+            data = json.loads(rest[i:]) if i < len(rest) else None
+            return 'ack', ack_id, data
+    return 'unknown', None, raw
+
+async def main():
+    uri = f"ws://{UK_HOST}/socket.io/?EIO=4&transport=websocket"
+    created = 0
+    skipped = 0
+    disabled = 0
+    failed = 0
+
+    try:
+        async with websockets.connect(uri, max_size=50_000_000) as ws:
+            # EIO4 handshake
+            msg = await asyncio.wait_for(ws.recv(), timeout=5)
+            typ, _, _ = sio_decode(msg)
+            if typ != 'open':
+                print(f"  ERROR: unexpected handshake: {msg[:100]}")
+                sys.exit(1)
+
+            # Send SIO connect
+            await ws.send("40")
+            msg = await asyncio.wait_for(ws.recv(), timeout=5)
+
+            # Login
+            login_payload = json.dumps(["login", {"username": UK_USER, "password": UK_PASS, "token": ""}])
+            await ws.send(f"420{login_payload}")
+
+            # Read login response
+            msg = await asyncio.wait_for(ws.recv(), timeout=10)
+            typ, ack_id, data = sio_decode(msg)
+
+            # Drain any monitorList / other events that arrive after login
+            existing_names = set()
+            deadline = asyncio.get_event_loop().time() + 3
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                    typ, _, data = sio_decode(msg)
+                    if typ == 'ping':
+                        await ws.send("3")
+                        continue
+                    if typ == 'event' and data and data[0] == 'monitorList':
+                        monitors = data[1] if len(data) > 1 else {}
+                        for mid, mdata in monitors.items():
+                            existing_names.add(mdata.get('name', ''))
+                except asyncio.TimeoutError:
+                    break
+
+            if existing_names:
+                print(f"  existing monitors: {len(existing_names)}")
+                print()
+
+            # Process endpoints
+            ack_counter = 1
+            for ep in endpoints:
+                ep_id = ep.get('id', '')
+                ep_url = ep.get('url', '')
+                ep_host = ep.get('host', '')
+                ep_expect = str(ep.get('expect', 200))
+                ep_enabled = ep.get('enabled')
+                if ep_enabled is None:
+                    ep_enabled = True
+
+                monitor_name = f"spine: {ep_id} ({ep_host})"
+
+                if not ep_enabled:
+                    print(f"  {monitor_name:<45} SKIP (disabled)")
+                    disabled += 1
+                    continue
+
+                if monitor_name in existing_names:
+                    print(f"  {monitor_name:<45} EXISTS")
+                    skipped += 1
+                    continue
+
+                if not EXECUTE:
+                    print(f"  {monitor_name:<45} WOULD CREATE (expect HTTP {ep_expect})")
+                    created += 1
+                    continue
+
+                # Create monitor via socket.io
+                monitor_data = {
+                    "name": monitor_name,
+                    "type": "http",
+                    "url": ep_url,
+                    "interval": 60,
+                    "retryInterval": 60,
+                    "maxretries": 3,
+                    "accepted_statuscodes": [ep_expect],
+                    "notificationIDList": [],
+                    "method": "GET",
+                    "maxredirects": 10,
+                    "active": True,
+                }
+
+                add_payload = json.dumps(["add", monitor_data])
+                await ws.send(f"42{ack_counter}{add_payload}")
+                ack_counter += 1
+
+                # Wait for ack
+                try:
+                    ack_msg = await asyncio.wait_for(ws.recv(), timeout=5)
+                    # Drain any interim events
+                    while True:
+                        typ, _, ack_data = sio_decode(ack_msg)
+                        if typ == 'ping':
+                            await ws.send("3")
+                            ack_msg = await asyncio.wait_for(ws.recv(), timeout=5)
+                            continue
+                        if typ == 'ack':
+                            break
+                        # It's an event (heartbeat etc), read next
+                        try:
+                            ack_msg = await asyncio.wait_for(ws.recv(), timeout=3)
+                        except asyncio.TimeoutError:
+                            break
+
+                    if typ == 'ack' and ack_data and len(ack_data) > 0:
+                        result = ack_data[0] if isinstance(ack_data[0], dict) else {}
+                        if result.get('ok', False):
+                            print(f"  {monitor_name:<45} CREATED (id={result.get('monitorID', '?')})")
+                            created += 1
+                        else:
+                            reason = result.get('msg', 'unknown')
+                            print(f"  {monitor_name:<45} FAILED ({reason})")
+                            failed += 1
+                    else:
+                        print(f"  {monitor_name:<45} CREATED (no ack)")
+                        created += 1
+                except asyncio.TimeoutError:
+                    print(f"  {monitor_name:<45} TIMEOUT")
+                    failed += 1
+
+            print()
+            label = "created" if EXECUTE else "would-create"
+            print(f"summary: {created} {label}, {skipped} existing, {disabled} disabled, {failed} failed")
+            print("status: OK" if failed == 0 else "status: PARTIAL")
+
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+asyncio.run(main())
+PYEOF

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# prometheus-targets-status - Read-only scrape target health from Prometheus API
+#
+# Queries Prometheus /api/v1/targets and reports UP/DOWN status for each scrape job.
+#
+# Usage:
+#   prometheus-targets-status
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+[[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+
+# Resolve Prometheus URL from services.health.yaml
+PROM_URL=$(yq -r '.endpoints[] | select(.id == "prometheus") | .url' "$BINDING" | sed 's|/-/healthy||')
+
+if [[ -z "$PROM_URL" || "$PROM_URL" == "null" ]]; then
+  stop "prometheus endpoint not found in $BINDING"
+fi
+
+echo "prometheus.targets.status"
+echo "endpoint: ${PROM_URL}"
+echo
+
+# Fetch targets
+TARGETS_JSON=$(curl -s --connect-timeout 5 --max-time 10 "${PROM_URL}/api/v1/targets" 2>/dev/null) || {
+  echo "status: UNREACHABLE"
+  echo "reason: could not reach Prometheus API"
+  exit 1
+}
+
+# Parse and display
+python3 -c "
+import json, sys
+
+data = json.loads('''${TARGETS_JSON}''')
+if data.get('status') != 'success':
+    print('status: ERROR')
+    print(f'reason: {data}')
+    sys.exit(1)
+
+active = data['data'].get('activeTargets', [])
+up = 0
+down = 0
+
+print(f'{'JOB':<30} {'TARGET':<35} {'STATE':<8} {'LAST_SCRAPE':<12}')
+for t in sorted(active, key=lambda x: (x.get('labels', {}).get('job', ''), x.get('labels', {}).get('instance', ''))):
+    job = t.get('labels', {}).get('job', '?')
+    instance = t.get('labels', {}).get('instance', '?')
+    health = t.get('health', '?')
+    last = t.get('lastScrape', '?')
+    if len(last) > 19:
+        last = last[:19]
+
+    if health == 'up':
+        marker = '✓'
+        up += 1
+    else:
+        marker = '✗'
+        down += 1
+
+    print(f'  {job:<28} {instance:<35} {marker} {health:<6} {last}')
+
+print()
+print(f'summary: {up}/{up+down} targets UP, {down} DOWN')
+if down > 0:
+    print('status: DEGRADED')
+else:
+    print('status: OK')
+" 2>/dev/null || {
+  echo "status: PARSE_ERROR"
+  echo "reason: failed to parse Prometheus targets response"
+  exit 1
+}

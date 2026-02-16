@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# observability-stack-status - Unified health check for all observability services on VM 205
+#
+# Probes: Prometheus, Grafana, Loki, Uptime Kuma, Node Exporter
+# Source: services.health.yaml (host: observability)
+#
+# Usage:
+#   observability-stack-status
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+[[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+
+DEF_CONNECT="$(yq -r '.defaults.connect_timeout_sec // 5' "$BINDING")"
+DEF_MAX="$(yq -r '.defaults.max_time_sec // 10' "$BINDING")"
+
+COUNT="$(yq -r '.endpoints | length' "$BINDING" 2>/dev/null || echo 0)"
+
+echo "observability.stack.status"
+echo "host: observability (VM 205)"
+echo
+
+pass=0
+fail=0
+skip=0
+
+for i in $(seq 0 $((COUNT-1))); do
+  host="$(yq -r ".endpoints[$i].host" "$BINDING")"
+  [[ "$host" == "observability" ]] || continue
+
+  id="$(yq -r ".endpoints[$i].id" "$BINDING")"
+  url="$(yq -r ".endpoints[$i].url" "$BINDING")"
+  expect="$(yq -r ".endpoints[$i].expect // 200" "$BINDING")"
+  enabled="$(yq -r ".endpoints[$i].enabled" "$BINDING")"
+  [[ -z "$enabled" || "$enabled" == "null" ]] && enabled="true"
+
+  if [[ "$enabled" != "true" ]]; then
+    printf "  %-20s SKIP (disabled)\n" "$id"
+    skip=$((skip+1))
+    continue
+  fi
+
+  start_ms=$(($(date +%s%N 2>/dev/null || echo 0) / 1000000))
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    --connect-timeout "$DEF_CONNECT" --max-time "$DEF_MAX" "$url" 2>/dev/null) || http_code="000"
+  end_ms=$(($(date +%s%N 2>/dev/null || echo 0) / 1000000))
+  elapsed=$((end_ms - start_ms))
+
+  if [[ "$http_code" == "$expect" ]]; then
+    printf "  %-20s ✓ UP    (HTTP %s, %dms)\n" "$id" "$http_code" "$elapsed"
+    pass=$((pass+1))
+  else
+    printf "  %-20s ✗ DOWN  (HTTP %s, expected %s)\n" "$id" "$http_code" "$expect"
+    fail=$((fail+1))
+  fi
+done
+
+total=$((pass+fail+skip))
+echo
+echo "summary: ${pass}/${total} healthy, ${fail} failed, ${skip} skipped"
+
+if [[ $fail -gt 0 ]]; then
+  echo "status: DEGRADED"
+  exit 1
+else
+  echo "status: OK"
+fi
