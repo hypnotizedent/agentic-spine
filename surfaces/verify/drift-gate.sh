@@ -1111,6 +1111,9 @@ gate_script "$SP/surfaces/verify/d118-z2m-device-health.sh" "D118"
 echo -n "D119 Z2M naming parity... "
 gate_script "$SP/surfaces/verify/d119-z2m-naming-parity.sh" "D119"
 
+echo -n "D120 HA area parity... "
+gate_script "$SP/surfaces/verify/d120-ha-area-parity.sh" "D120"
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1
