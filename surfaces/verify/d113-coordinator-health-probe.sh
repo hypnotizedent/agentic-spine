@@ -12,9 +12,9 @@ if [[ ! -x "$INFISICAL_AGENT" ]]; then
   exit 0
 fi
 
-TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
 
-if [[ -z "$TOKEN" ]]; then
+if [[ -z "$HA_TOKEN" ]]; then
   echo "SKIP: could not retrieve HA_API_TOKEN from Infisical"
   exit 0
 fi
@@ -23,7 +23,7 @@ fi
 ha_state() {
   local entity="$1"
   curl -s --connect-timeout 5 \
-    -H "Authorization: Bearer $TOKEN" \
+    -H "Authorization: Bearer $HA_TOKEN" \
     "${HA_API}/states/${entity}" 2>/dev/null
 }
 
