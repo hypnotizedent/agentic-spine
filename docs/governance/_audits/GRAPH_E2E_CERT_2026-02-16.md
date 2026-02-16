@@ -3,7 +3,7 @@ status: authoritative
 scope: graph-e2e-certification
 date: 2026-02-16
 agent: core-operator
-result: PARTIAL PASS (mail PASS, calendar BLOCKED)
+result: PASS (mail PASS, calendar PASS)
 ---
 
 # Microsoft Graph E2E Certification — 2026-02-16
@@ -13,7 +13,7 @@ result: PARTIAL PASS (mail PASS, calendar BLOCKED)
 | Domain     | Result    | Detail                                    |
 |------------|-----------|-------------------------------------------|
 | Mail       | **PASS**  | search, send, get all confirmed           |
-| Calendar   | **BLOCKED** | 403 — missing Calendars.ReadWrite app perm |
+| Calendar   | **PASS**  | list, create, update, get all confirmed (GAP-OP-560 resolved) |
 
 ## Baseline Health
 
@@ -98,25 +98,55 @@ result: PARTIAL PASS (mail PASS, calendar BLOCKED)
 | Result   | **FAIL** — HTTP 403 ErrorAccessDenied |
 | Root Cause | Missing `Calendars.ReadWrite` application permission |
 
-## Gaps Filed
+## Gaps Filed (both resolved)
 
-| Gap ID     | Type          | Severity | Description |
-|------------|---------------|----------|-------------|
-| GAP-OP-559 | missing-entry | medium   | No `graph.auth.token` capability for automated token acquisition from Azure AD client credentials |
-| GAP-OP-560 | missing-entry | medium   | Azure AD app missing `Calendars.ReadWrite` application permission |
+| Gap ID     | Type          | Severity | Status | Resolution |
+|------------|---------------|----------|--------|------------|
+| GAP-OP-559 | missing-entry | medium   | **fixed** | graph-token-exec workaround + governed secrets.exec wrapper |
+| GAP-OP-560 | missing-entry | medium   | **fixed** | Calendars.ReadWrite app permission granted in Azure portal (9654e05) |
+
+## Calendar E2E Results (post GAP-OP-560 fix)
+
+### Test 7: graph.calendar.list
+
+| Field    | Value |
+|----------|-------|
+| Run Key  | CAP-20260216-152001__secrets.exec__R6ep076090 |
+| Result   | **PASS** — 200, 3 events returned |
+
+### Test 8: graph.calendar.create
+
+| Field    | Value |
+|----------|-------|
+| Run Key  | CAP-20260216-152025__secrets.exec__R0laa76419 |
+| Result   | **PASS** — 201, event created |
+| Event ID | `AAMkADhkM2UwZTFmLWI4MTYtNGQ3ZS1iZjg5LWNjNDQ3YmNkNDEzNgBGAAAAAAAunKJP_9FaQokxVhzJDB5MBwCFF7nu3pr7SZn9gFuaEvkhAAAAAAENAACFF7nu3pr7SZn9gFuaEvkhAAFRHkN6AAA=` |
+| Subject  | Spine Graph E2E Cert |
+
+### Test 9: graph.calendar.update
+
+| Field    | Value |
+|----------|-------|
+| Run Key  | CAP-20260216-152042__secrets.exec__Rbegg76754 |
+| Result   | **PASS** — 200, subject updated to "Spine Graph E2E Cert (Updated)" |
+
+### Test 10: graph.calendar.get (readback)
+
+| Field    | Value |
+|----------|-------|
+| Run Key  | CAP-20260216-152100__secrets.exec (inline) |
+| Result   | **PASS** — bodyPreview confirms "Calendar update mutation confirmed." |
 
 ## Workarounds Applied
 
 1. **Token acquisition**: Created `ops/plugins/ms-graph/bin/graph-token-exec` — acquires bearer token from Azure AD client credentials via `secrets.exec`
 2. **App-only /me rewrite**: Added `MS_GRAPH_USER` env var support to `ms_graph_tools.py` — rewrites `/me` to `/users/{upn}` for client_credentials tokens
-3. **Calendar**: No workaround available — requires Azure portal admin action
 
 ## Residual Risks
 
-1. **Calendar lane uncertified** — GAP-OP-560 must be resolved before calendar mutations are production-ready
-2. **Token lifecycle** — No refresh/cache mechanism; each capability run acquires a new token (acceptable for governed use, but adds ~1s latency per call)
-3. **App-only vs delegated** — Some Graph features (personal settings, shared mailboxes) may behave differently with app-only tokens. No issues observed in certification scope.
-4. **graph-token-exec hardcodes UPN default** — `Ronny@mintprints.com`. Multi-user support requires passing `MS_GRAPH_USER` explicitly.
+1. **Token lifecycle** — No refresh/cache mechanism; each capability run acquires a new token (acceptable for governed use, but adds ~1s latency per call)
+2. **App-only vs delegated** — Some Graph features (personal settings, shared mailboxes) may behave differently with app-only tokens. No issues observed in certification scope.
+3. **graph-token-exec hardcodes UPN default** — `Ronny@mintprints.com`. Multi-user support requires passing `MS_GRAPH_USER` explicitly.
 
 ## Created/Updated Object IDs
 
@@ -125,4 +155,5 @@ result: PARTIAL PASS (mail PASS, calendar BLOCKED)
 | Email (inbox)  | `AAMkADhkM2UwZTFmLWI4MTYtNGQ3ZS1iZjg5LWNjNDQ3YmNkNDEzNgBGAAAAAAAunKJP_9FaQokxVhzJDB5MBwCFF7nu3pr7SZn9gFuaEvkhAAAAAAEMAACFF7nu3pr7SZn9gFuaEvkhAAFRHXe0AAA=` |
 | Email (sent)   | `AAMkADhkM2UwZTFmLWI4MTYtNGQ3ZS1iZjg5LWNjNDQ3YmNkNDEzNgBGAAAAAAAunKJP_9FaQokxVhzJDB5MBwCFF7nu3pr7SZn9gFuaEvkhAAAAAAEJAACFF7nu3pr7SZn9gFuaEvkhAAFRHg5gAAA=` |
 | Conversation   | `AAQkADhkM2UwZTFmLWI4MTYtNGQ3ZS1iZjg5LWNjNDQ3YmNkNDEzNgAQAAW2mo8fuwNHskDCdW5-pKU=` |
-| Calendar event | N/A (blocked by GAP-OP-560) |
+| Calendar event | `AAMkADhkM2UwZTFmLWI4MTYtNGQ3ZS1iZjg5LWNjNDQ3YmNkNDEzNgBGAAAAAAAunKJP_9FaQokxVhzJDB5MBwCFF7nu3pr7SZn9gFuaEvkhAAAAAAENAACFF7nu3pr7SZn9gFuaEvkhAAFRHkN6AAA=` |
+| iCalUId        | `040000008200E00074C5B7101A82E008000000001A2DC4B2819FDC01000000000000000010000000DBB872716F49554B9A5F07E50CD0E5C5` |
