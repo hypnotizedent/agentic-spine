@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# home-vaultwarden-status - Read-only governance status for vaultwarden-home (VM 102)
+#
+# If vaultwarden-home is marked decommissioned in bindings, report that state and
+# return OK. If active, run health + SSH runtime probes.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+HEALTH_BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
+COMPOSE_BINDING="$SPINE_ROOT/ops/bindings/docker.compose.targets.yaml"
+
+TARGET_ID="vault"
+HEALTH_ID="vaultwarden-home"
+
+stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$HEALTH_BINDING" ]] || stop "missing binding: $HEALTH_BINDING"
+[[ -f "$COMPOSE_BINDING" ]] || stop "missing binding: $COMPOSE_BINDING"
+
+VW_URL="$(yq -r ".endpoints[] | select(.id == \"$HEALTH_ID\") | .url" "$HEALTH_BINDING")"
+VW_EXPECT="$(yq -r ".endpoints[] | select(.id == \"$HEALTH_ID\") | (.expect // 200)" "$HEALTH_BINDING")"
+VW_ENABLED="$(yq -r ".endpoints[] | select(.id == \"$HEALTH_ID\") | (.enabled // true)" "$HEALTH_BINDING")"
+VW_NOTES="$(yq -r ".endpoints[] | select(.id == \"$HEALTH_ID\") | (.notes // \"\")" "$HEALTH_BINDING")"
+VW_COMPOSE_ENABLED="$(yq -r '.targets."vaultwarden-home".enabled // false' "$COMPOSE_BINDING")"
+VW_COMPOSE_NOTES="$(yq -r '.targets."vaultwarden-home".notes // ""' "$COMPOSE_BINDING")"
+
+[[ -n "${VW_URL:-}" && "$VW_URL" != "null" ]] || stop "health endpoint '$HEALTH_ID' missing in $HEALTH_BINDING"
+
+echo "home.vaultwarden.status"
+echo "target: vaultwarden-home (vm=102)"
+echo "endpoint: $VW_URL"
+echo
+
+if [[ "$VW_ENABLED" != "true" && "$VW_COMPOSE_ENABLED" != "true" ]]; then
+  echo "state:      DECOMMISSIONED"
+  [[ -n "$VW_NOTES" ]] && echo "notes:      $VW_NOTES"
+  echo "status:     OK"
+  exit 0
+fi
+
+TARGET_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host" "$SSH_BINDING")"
+TARGET_USER="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | (.user // .ssh.defaults.user // \"root\")" "$SSH_BINDING")"
+if [[ -z "${TARGET_HOST:-}" || "$TARGET_HOST" == "null" ]]; then
+  if [[ "$VW_NOTES" == *"DECOMMISSIONED"* || "$VW_COMPOSE_NOTES" == *"DECOMMISSIONED"* ]]; then
+    echo "state:      DECOMMISSIONED"
+    echo "notes:      ${VW_NOTES:-$VW_COMPOSE_NOTES}"
+    echo "status:     OK"
+    exit 0
+  fi
+  stop "ssh target '$TARGET_ID' missing host in $SSH_BINDING"
+fi
+[[ -n "${TARGET_USER:-}" && "$TARGET_USER" != "null" ]] || TARGET_USER="root"
+
+overall_fail=0
+
+http_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$VW_URL" 2>/dev/null || echo "000")"
+if [[ "$http_code" == "$VW_EXPECT" ]]; then
+  echo "http:       OK (HTTP $http_code)"
+else
+  echo "http:       FAIL (HTTP $http_code, expected $VW_EXPECT)"
+  overall_fail=1
+fi
+
+echo
+
+ssh_opts=(
+  -o ConnectTimeout=6
+  -o BatchMode=yes
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o LogLevel=ERROR
+)
+
+set +e
+ssh_out="$(ssh "${ssh_opts[@]}" "${TARGET_USER}@${TARGET_HOST}" '
+  set -euo pipefail
+  hn="$(hostname 2>/dev/null || uname -n)"
+  up="$(uptime -p 2>/dev/null || uptime 2>/dev/null || echo unknown)"
+  dv="$(docker --version 2>/dev/null || echo docker-unavailable)"
+  vc="$(docker ps --format "{{.Names}}" 2>/dev/null | grep -c "vaultwarden" || true)"
+  echo "__HN__:$hn"
+  echo "__UP__:$up"
+  echo "__DV__:$dv"
+  echo "__VC__:$vc"
+' 2>&1)"
+ssh_rc=$?
+set -e
+
+if [[ "$ssh_rc" -ne 0 ]]; then
+  echo "ssh:        FAIL (${TARGET_USER}@${TARGET_HOST})"
+  echo "reason:     ${ssh_out}"
+  overall_fail=1
+else
+  host_name="$(echo "$ssh_out" | sed -n 's/^__HN__://p' | head -1)"
+  up_line="$(echo "$ssh_out" | sed -n 's/^__UP__://p' | head -1)"
+  docker_ver="$(echo "$ssh_out" | sed -n 's/^__DV__://p' | head -1)"
+  vw_count="$(echo "$ssh_out" | sed -n 's/^__VC__://p' | head -1)"
+  echo "ssh:        OK"
+  echo "hostname:   ${host_name:-unknown}"
+  echo "uptime:     ${up_line:-unknown}"
+  echo "docker:     ${docker_ver:-unknown}"
+  echo "vaultwarden containers: ${vw_count:-0}"
+fi
+
+echo
+if [[ "$overall_fail" -ne 0 ]]; then
+  echo "status: DEGRADED"
+  exit 1
+fi
+echo "status: OK"

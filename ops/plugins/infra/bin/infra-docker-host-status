@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# infra-docker-host-status - Read-only docker-host governance/status probe
+#
+# Reports:
+#   - SSH reachability + basic host/runtime facts
+#   - HTTP health probe parity for services.health.yaml entries scoped to docker-host
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+HEALTH_BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
+
+TARGET_ID="docker-host"
+
+stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$HEALTH_BINDING" ]] || stop "missing binding: $HEALTH_BINDING"
+
+TARGET_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host" "$SSH_BINDING")"
+TARGET_USER="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | (.user // .ssh.defaults.user // \"root\")" "$SSH_BINDING")"
+
+[[ -n "${TARGET_HOST:-}" && "$TARGET_HOST" != "null" ]] || stop "ssh target '$TARGET_ID' missing host in $SSH_BINDING"
+[[ -n "${TARGET_USER:-}" && "$TARGET_USER" != "null" ]] || TARGET_USER="root"
+
+echo "infra.docker_host.status"
+echo "target: $TARGET_ID (${TARGET_USER}@${TARGET_HOST})"
+echo
+
+overall_fail=0
+
+# ── SSH runtime probe ─────────────────────────────────────────────────────
+ssh_opts=(
+  -o ConnectTimeout=6
+  -o BatchMode=yes
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o LogLevel=ERROR
+)
+
+set +e
+ssh_out="$(ssh "${ssh_opts[@]}" "${TARGET_USER}@${TARGET_HOST}" '
+  set -euo pipefail
+  hn="$(hostname 2>/dev/null || uname -n)"
+  up="$(uptime -p 2>/dev/null || uptime 2>/dev/null || echo unknown)"
+  dv="$(docker --version 2>/dev/null || echo docker-unavailable)"
+  dc="$(docker ps -q 2>/dev/null | wc -l | tr -d " " || echo 0)"
+  echo "__HN__:$hn"
+  echo "__UP__:$up"
+  echo "__DV__:$dv"
+  echo "__DC__:$dc"
+' 2>&1)"
+ssh_rc=$?
+set -e
+
+if [[ "$ssh_rc" -ne 0 ]]; then
+  echo "ssh:        FAIL (${TARGET_USER}@${TARGET_HOST})"
+  echo "reason:     ${ssh_out}"
+  overall_fail=1
+else
+  host_name="$(echo "$ssh_out" | sed -n 's/^__HN__://p' | head -1)"
+  up_line="$(echo "$ssh_out" | sed -n 's/^__UP__://p' | head -1)"
+  docker_ver="$(echo "$ssh_out" | sed -n 's/^__DV__://p' | head -1)"
+  docker_cnt="$(echo "$ssh_out" | sed -n 's/^__DC__://p' | head -1)"
+  echo "ssh:        OK"
+  echo "hostname:   ${host_name:-unknown}"
+  echo "uptime:     ${up_line:-unknown}"
+  echo "docker:     ${docker_ver:-unknown}"
+  echo "containers: ${docker_cnt:-unknown} running"
+fi
+
+echo
+
+# ── Health binding probes for docker-host ────────────────────────────────
+count="$(yq -r '[.endpoints[] | select(.host == "docker-host" and (.enabled // true) == true)] | length' "$HEALTH_BINDING" 2>/dev/null || echo 0)"
+pass=0
+fail=0
+
+echo "health probes (services.health.yaml host=docker-host, enabled=true):"
+
+if [[ "$count" == "0" ]]; then
+  echo "  none"
+else
+  for i in $(seq 0 $((count - 1))); do
+    id="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and (.enabled // true) == true)][$i].id" "$HEALTH_BINDING")"
+    url="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and (.enabled // true) == true)][$i].url" "$HEALTH_BINDING")"
+    expect="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and (.enabled // true) == true)][$i].expect // 200" "$HEALTH_BINDING")"
+
+    code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$url" 2>/dev/null || echo "000")"
+    if [[ "$code" == "$expect" ]]; then
+      printf "  %-20s OK (HTTP %s)\n" "$id" "$code"
+      pass=$((pass + 1))
+    else
+      printf "  %-20s FAIL (HTTP %s, expected %s)\n" "$id" "$code" "$expect"
+      fail=$((fail + 1))
+    fi
+  done
+fi
+
+echo
+echo "summary: ${pass}/${count} probes healthy"
+if [[ "$overall_fail" -ne 0 || "$fail" -gt 0 ]]; then
+  echo "status: DEGRADED"
+  exit 1
+fi
+echo "status: OK"
