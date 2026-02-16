@@ -48,8 +48,8 @@ check_deps() {
 }
 
 check_websocket_deps() {
-  if ! command -v websocat >/dev/null 2>&1; then
-    die "Missing websocat for WebSocket connection. Install: brew install websocat"
+  if ! python3 -c "import websockets" 2>/dev/null; then
+    die "Missing python3 websockets module. Install: pip3 install websockets"
   fi
 }
 
@@ -193,14 +193,49 @@ connect_websocket() {
   local subscribe_state
   subscribe_state='{"id": 1, "type": "subscribe_events"}'
   
-  {
-    echo "$auth_msg"
-    sleep 1
-    echo "$subscribe_state"
-  } | websocat -t "$ws_url" 2>> "$LOG_FILE" | while read -r line; do
-    if echo "$line" | jq -e '.type == "event"' >/dev/null 2>&1; then
-      process_event "$(echo "$line" | jq '.event')"
+  # Read mapped event types from config
+  local mapped_events
+  mapped_events=$(yq e '.event_mappings | keys | .[]' "$CONFIG_FILE" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+
+  python3 -u - "$ha_token" "$ws_url" "$mapped_events" << 'PYEOF' 2>> "$LOG_FILE" | while read -r line; do
+import json, asyncio, websockets, sys
+
+token = sys.argv[1]
+ws_url = sys.argv[2]
+mapped = set(sys.argv[3].split(",")) if sys.argv[3] else set()
+
+async def listen():
+    async with websockets.connect(ws_url) as ws:
+        await ws.recv()  # auth_required
+        await ws.send(json.dumps({"type": "auth", "access_token": token}))
+        auth = json.loads(await ws.recv())
+        if auth["type"] != "auth_ok":
+            print("AUTH_FAILED", flush=True)
+            return
+        print("AUTH_OK", flush=True)
+        await ws.send(json.dumps({"id": 1, "type": "subscribe_events"}))
+        await ws.recv()  # result
+        print("SUBSCRIBED", flush=True)
+        while True:
+            msg = json.loads(await ws.recv())
+            if msg.get("type") == "event":
+                et = msg["event"].get("event_type", "")
+                if et in mapped:
+                    print(json.dumps({"event_type": et}), flush=True)
+
+asyncio.run(listen())
+PYEOF
+    if [[ "$line" == "AUTH_FAILED" ]]; then
+      log "ERROR: WebSocket auth failed"
+      return 1
+    elif [[ "$line" == "AUTH_OK" ]]; then
+      log "WebSocket authenticated"
+      continue
+    elif [[ "$line" == "SUBSCRIBED" ]]; then
+      log "Subscribed to all events"
+      continue
     fi
+    process_event "$line"
   done
 }
 
