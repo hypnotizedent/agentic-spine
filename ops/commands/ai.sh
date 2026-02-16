@@ -13,7 +13,7 @@
 #   ops ai --clipboard            Bundle and copy to clipboard
 #   ops ai --print                Bundle and print to stdout
 #
-# The manifest (infrastructure/GOVERNANCE_MANIFEST.yaml) defines:
+# The manifest (docs/governance/GOVERNANCE_MANIFEST.yaml) defines:
 #   - Categories: session, core, infrastructure, mint_os, etc.
 #   - Bundles: named combos like "builder" that include multiple categories
 #
@@ -28,7 +28,7 @@ if [[ -z "${REPO_ROOT:-}" ]]; then
   echo "Run from inside agentic-spine or set REPO_ROOT=$HOME/code/agentic-spine" >&2
   exit 1
 fi
-MANIFEST="$REPO_ROOT/infrastructure/GOVERNANCE_MANIFEST.yaml"
+MANIFEST="$REPO_ROOT/docs/governance/GOVERNANCE_MANIFEST.yaml"
 
 # Colors
 RED='\033[0;31m'
@@ -179,7 +179,7 @@ do_bundle() {
 cmd_list() {
   echo "╔═══════════════════════════════════════════════════════════════╗"
   echo "║ GOVERNANCE MANIFEST                                           ║"
-  echo "║ Source: infrastructure/GOVERNANCE_MANIFEST.yaml               ║"
+  echo "║ Source: docs/governance/GOVERNANCE_MANIFEST.yaml              ║"
   echo "╚═══════════════════════════════════════════════════════════════╝"
   echo ""
 
