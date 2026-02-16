@@ -30,6 +30,7 @@ spine = Path(sys.argv[1])
 mode = sys.argv[2] if len(sys.argv) > 2 else ""
 
 scopes_dir = spine / "mailroom" / "state" / "loop-scopes"
+orch_dir = spine / "mailroom" / "state" / "orchestration"
 gaps_file = spine / "ops" / "bindings" / "operational.gaps.yaml"
 inbox_dir = spine / "mailroom" / "inbox"
 
@@ -74,6 +75,7 @@ open_loops = []
 closed_loops = []
 planned_loops = []
 all_scopes = []
+anomalies = []
 
 if scopes_dir.is_dir():
     for f in sorted(scopes_dir.glob("*.scope.md")):
@@ -96,6 +98,52 @@ if scopes_dir.is_dir():
         elif status in ("active", "draft", "open"):
             open_loops.append(entry)
         else:
+            closed_loops.append(entry)
+
+# ── Parse orchestration manifests (bridge to scope-only view) ────────────
+# Orchestration loops may exist without a scope file in loop-scopes/.
+# Scan manifests and merge any open loops not already seen from scopes.
+
+scope_loop_ids = {e["loop_id"] for e in all_scopes}
+
+if orch_dir.is_dir():
+    for manifest_path in sorted(orch_dir.glob("*/manifest.yaml")):
+        try:
+            text = manifest_path.read_text()
+        except OSError:
+            continue
+        # Simple YAML parse for manifest fields
+        mf = {}
+        for line in text.splitlines():
+            if ":" in line and not line.startswith(" ") and not line.startswith("#"):
+                key, _, val = line.partition(":")
+                mf[key.strip()] = val.strip().strip('"').strip("'")
+
+        loop_id = mf.get("loop_id", "")
+        orch_status = mf.get("status", "")
+        if not loop_id:
+            continue
+
+        # Skip if already tracked via scope file
+        if loop_id in scope_loop_ids:
+            continue
+
+        entry = {
+            "loop_id": loop_id,
+            "status": orch_status,
+            "severity": "-",
+            "owner": mf.get("apply_owner", "unassigned"),
+            "title": loop_id,
+            "file": str(manifest_path.relative_to(spine)),
+            "source": "orchestration",
+        }
+
+        if orch_status in ("active", "open"):
+            open_loops.append(entry)
+            # Flag missing scope file as anomaly
+            anomaly_msg = f"ORCH-SCOPE MISMATCH: {loop_id} has orchestration manifest but no scope file in loop-scopes/"
+            anomalies.append(anomaly_msg)
+        elif orch_status == "closed":
             closed_loops.append(entry)
 
 # ── Parse gaps ────────────────────────────────────────────────────────────
@@ -185,8 +233,6 @@ if proposals_dir.is_dir():
 proposal_total = sum(proposal_counts.values())
 
 # ── Anomaly detection ─────────────────────────────────────────────────────
-
-anomalies = []
 
 # Check for unlinked gaps
 for gap in unlinked_gaps:

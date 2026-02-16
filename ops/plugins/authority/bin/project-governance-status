@@ -59,6 +59,25 @@ if [[ -z "$REPO_NAME" ]]; then
   REPO_NAME="$(basename "$REPO_PATH")"
 fi
 
+# ── Check exemption list ─────────────────────────────────────────────────
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+EXEMPT_FILE="$SPINE_ROOT/ops/bindings/authority.exemptions.yaml"
+
+if [[ -f "$EXEMPT_FILE" ]] && command -v yq >/dev/null 2>&1; then
+  EXEMPT_REASON=$(yq -r ".exemptions[] | select(.repo_path == \"$REPO_PATH\") | .reason" "$EXEMPT_FILE" 2>/dev/null)
+  if [[ -n "$EXEMPT_REASON" && "$EXEMPT_REASON" != "null" ]]; then
+    echo "authority.project.status"
+    echo "repo: $REPO_PATH"
+    echo "repo_name: $REPO_NAME"
+    echo
+    echo "EXEMPT  $REPO_NAME — $EXEMPT_REASON"
+    echo
+    echo "summary: exempt=true"
+    echo "status: EXEMPT"
+    exit 0
+  fi
+fi
+
 EXPECTED_ORIGIN="ssh://git@${GITEA_HOST}:${GITEA_PORT}/${GITEA_OWNER}/${REPO_NAME}.git"
 EXPECTED_GITHUB=""
 if [[ -n "$GITHUB_ORG" ]]; then
