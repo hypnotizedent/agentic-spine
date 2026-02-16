@@ -5,8 +5,11 @@
 # STOP=2 on preconditions (missing binding, yq, curl).
 #
 # Usage:
-#   services-health-status           # check all endpoints
-#   services-health-status <id>      # check specific endpoint
+#   services-health-status                 # check all endpoints
+#   services-health-status <id>            # check specific endpoint id
+#   services-health-status --id <id>       # check specific endpoint id
+#   services-health-status --host <host>   # check endpoints for one host
+#   services-health-status --id <id> --host <host>
 
 set -euo pipefail
 
@@ -20,7 +23,42 @@ command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
 [[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
 
-FILTER="${1:-}"
+FILTER_ID=""
+FILTER_HOST=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id)
+      [[ $# -ge 2 ]] || stop "--id requires a value"
+      FILTER_ID="$2"
+      shift 2
+      ;;
+    --host)
+      [[ $# -ge 2 ]] || stop "--host requires a value"
+      FILTER_HOST="$2"
+      shift 2
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  services-health-status
+  services-health-status <id>
+  services-health-status --id <id>
+  services-health-status --host <host>
+  services-health-status --id <id> --host <host>
+EOF
+      exit 0
+      ;;
+    *)
+      if [[ -z "$FILTER_ID" ]]; then
+        FILTER_ID="$1"
+      else
+        stop "unknown argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
 
 DEF_CONNECT="$(yq -r '.defaults.connect_timeout_sec // 5' "$BINDING")"
 DEF_MAX="$(yq -r '.defaults.max_time_sec // 10' "$BINDING")"
@@ -46,7 +84,10 @@ for i in $(seq 0 $((COUNT-1))); do
   enabled="$(yq -r ".endpoints[$i].enabled" "$BINDING")"
   [[ -z "$enabled" || "$enabled" == "null" ]] && enabled="true"
 
-  if [[ -n "$FILTER" && "$id" != "$FILTER" ]]; then
+  if [[ -n "$FILTER_ID" && "$id" != "$FILTER_ID" ]]; then
+    continue
+  fi
+  if [[ -n "$FILTER_HOST" && "$host" != "$FILTER_HOST" ]]; then
     continue
   fi
 
@@ -103,8 +144,8 @@ done
 
 echo
 
-if [[ "$checked" -eq 0 && -n "$FILTER" ]]; then
-  echo "STOP (2): endpoint '$FILTER' not found in binding"
+if [[ "$checked" -eq 0 && ( -n "$FILTER_ID" || -n "$FILTER_HOST" ) ]]; then
+  echo "STOP (2): no endpoints matched filter(s): id='${FILTER_ID:-*}' host='${FILTER_HOST:-*}'"
   exit 2
 fi
 

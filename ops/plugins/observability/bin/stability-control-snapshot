@@ -149,16 +149,31 @@ PROBE_RUN_KEY=""
 PROBE_DETAIL=""
 PROBE_DURATION_MS=0
 PROBE_OUTPUT=""
+PROBE_INVOCATION=""
 
 run_probe() {
-  local capability="$1"
+  local probe_spec="$1"
+  local -a cap_args=()
   local tmp_file
   tmp_file="$(mktemp)"
   local start_ms end_ms
 
+  read -r -a cap_args <<< "$probe_spec"
+  if [[ "${#cap_args[@]}" -eq 0 ]]; then
+    PROBE_RC=2
+    PROBE_RUN_KEY=""
+    PROBE_DETAIL="invalid_probe_spec(empty)"
+    PROBE_DURATION_MS=0
+    PROBE_OUTPUT=""
+    PROBE_INVOCATION="$probe_spec"
+    rm -f "$tmp_file"
+    return
+  fi
+  PROBE_INVOCATION="$probe_spec"
+
   start_ms="$(now_ms)"
   set +e
-  "$ROOT/bin/ops" cap run "$capability" >"$tmp_file" 2>&1
+  "$ROOT/bin/ops" cap run "${cap_args[@]}" >"$tmp_file" 2>&1
   PROBE_RC=$?
   set -e
   end_ms="$(now_ms)"
@@ -444,6 +459,8 @@ declare -a PROBE_ROWS
 for domain in "${DOMAINS[@]}"; do
   description="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .description // \"\"" "$CONTRACT" | head -n1)"
   vm_hostname="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .vm_hostname // \"\"" "$CONTRACT" | head -n1)"
+  domain_mode="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .operating_mode // \"normal\"" "$CONTRACT" | head -n1)"
+  [[ -n "$domain_mode" ]] || domain_mode="normal"
 
   vmid="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\" and .status != \"decommissioned\") | .vmid // \"\"" "$VM_LIFECYCLE" | head -n1)"
   proxmox_host="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\" and .status != \"decommissioned\") | .proxmox_host // \"\"" "$VM_LIFECYCLE" | head -n1)"
@@ -458,6 +475,8 @@ for domain in "${DOMAINS[@]}"; do
   mapfile -t probes < <(yq -r ".probe_capabilities.\"$domain\"[]?" "$CONTRACT")
   domain_severity="pass"
   domain_note=""
+  domain_probe_incidents=0
+  domain_vm_incident=0
 
   if [[ "${#probes[@]}" -eq 0 ]]; then
     domain_severity="incident"
@@ -475,7 +494,11 @@ for domain in "${DOMAINS[@]}"; do
     fi
 
     if [[ "$PROBE_DURATION_MS" -ge "$API_LAT_INCIDENT_MS" ]]; then
-      probe_status="incident"
+      # Latency alone should not create an outage incident when probe semantics pass.
+      # Reserve incident for semantic failures; keep high latency as warn signal.
+      if [[ "$probe_status" != "incident" ]]; then
+        probe_status="warn"
+      fi
       probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $API_LAT_INCIDENT_MS)"
     elif [[ "$PROBE_DURATION_MS" -ge "$API_LAT_WARN_MS" ]]; then
       if [[ "$probe_status" == "pass" ]]; then
@@ -508,12 +531,19 @@ for domain in "${DOMAINS[@]}"; do
       fi
     fi
 
+    if [[ "$probe_status" == "incident" ]]; then
+      domain_probe_incidents=$((domain_probe_incidents + 1))
+    fi
+
     domain_severity="$(promote_severity "$domain_severity" "$probe_status")"
     PROBE_ROWS+=("$domain"$'\t'"$cap"$'\t'"$probe_status"$'\t'"$PROBE_RUN_KEY"$'\t'"$(sanitize_detail "$probe_detail")")
   done
 
   run_vm_predictive_probe "$vm_hostname"
   domain_severity="$(promote_severity "$domain_severity" "$VM_PROBE_STATUS")"
+  if [[ "$VM_PROBE_STATUS" == "incident" ]]; then
+    domain_vm_incident=1
+  fi
   PROBE_ROWS+=("$domain"$'\t'"vm.predictive.headroom"$'\t'"$VM_PROBE_STATUS"$'\t'"-"$'\t'"$(sanitize_detail "$VM_PROBE_DETAIL")")
 
   domain_status="healthy"
@@ -522,13 +552,24 @@ for domain in "${DOMAINS[@]}"; do
   elif [[ "$domain_severity" == "warn" ]]; then
     domain_status="warn"
     # Every entry in critical_domains is treated as critical.
-    if [[ "$WARN_TREATMENT_CRITICAL" == "incident" ]]; then
+    if [[ "$WARN_TREATMENT_CRITICAL" == "incident" && "$domain_mode" != "maintenance" ]]; then
       domain_status="incident"
       if [[ -z "$domain_note" ]]; then
         domain_note="warn_promoted_to_incident(policy=critical_domains:$WARN_TREATMENT_CRITICAL)"
       else
         domain_note="$domain_note; warn_promoted_to_incident(policy=critical_domains:$WARN_TREATMENT_CRITICAL)"
       fi
+    fi
+  fi
+
+  # Maintenance-mode domains may be intentionally degraded during controlled work.
+  # Downgrade service-layer incidents to warn when VM predictive headroom is not incident.
+  if [[ "$domain_mode" == "maintenance" && "$domain_status" == "incident" && "$domain_probe_incidents" -gt 0 && "$domain_vm_incident" -eq 0 ]]; then
+    domain_status="warn"
+    if [[ -z "$domain_note" ]]; then
+      domain_note="incident_downgraded_for_maintenance_mode"
+    else
+      domain_note="$domain_note; incident_downgraded_for_maintenance_mode"
     fi
   fi
 
