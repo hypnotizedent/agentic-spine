@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
+REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+
+usage() {
+  cat <<'USAGE'
+gate-topology-assign
+
+Usage:
+  gate-topology-assign --gate-id <DNN> --primary-domain <domain_id> [--secondary-domains d1,d2] [--family <name>]
+USAGE
+}
+
+fail() {
+  echo "gate.topology.assign FAIL: $*" >&2
+  exit 1
+}
+
+need_file() {
+  [[ -f "$1" ]] || fail "missing file: $1"
+}
+
+need_file "$TOPOLOGY"
+need_file "$REGISTRY"
+command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
+command -v jq >/dev/null 2>&1 || fail "missing required tool: jq"
+
+GATE_ID=""
+PRIMARY_DOMAIN=""
+SECONDARY_DOMAINS=""
+FAMILY="manual"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --gate-id)
+      GATE_ID="${2:-}"
+      shift 2
+      ;;
+    --primary-domain)
+      PRIMARY_DOMAIN="${2:-}"
+      shift 2
+      ;;
+    --secondary-domains)
+      SECONDARY_DOMAINS="${2:-}"
+      shift 2
+      ;;
+    --family)
+      FAMILY="${2:-manual}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$GATE_ID" ]] || fail "--gate-id is required"
+[[ -n "$PRIMARY_DOMAIN" ]] || fail "--primary-domain is required"
+
+yq e -r ".gates[] | select(.id == \"$GATE_ID\") | .id" "$REGISTRY" | grep -q "$GATE_ID" || fail "gate id '$GATE_ID' not found in registry"
+yq e -r ".domain_metadata[] | select(.domain_id == \"$PRIMARY_DOMAIN\") | .domain_id" "$TOPOLOGY" | grep -q "$PRIMARY_DOMAIN" || fail "domain '$PRIMARY_DOMAIN' not found in topology"
+
+SECONDARY_JSON='[]'
+if [[ -n "$SECONDARY_DOMAINS" ]]; then
+  SECONDARY_JSON="$(printf '%s' "$SECONDARY_DOMAINS" | jq -R 'split(",") | map(gsub("^ +| +$";"")) | map(select(length>0)) | unique')"
+fi
+
+exists="$(yq e -r ".gate_assignments[] | select(.gate_id == \"$GATE_ID\") | .gate_id" "$TOPOLOGY" | head -n1 || true)"
+
+if [[ -n "$exists" ]]; then
+  SECONDARY_JSON="$SECONDARY_JSON" yq -i "
+    (.gate_assignments[] | select(.gate_id == \"$GATE_ID\")).primary_domain = \"$PRIMARY_DOMAIN\" |
+    (.gate_assignments[] | select(.gate_id == \"$GATE_ID\")).secondary_domains = (strenv(SECONDARY_JSON) | fromjson) |
+    (.gate_assignments[] | select(.gate_id == \"$GATE_ID\")).family = \"$FAMILY\"
+  " "$TOPOLOGY"
+else
+  SECONDARY_JSON="$SECONDARY_JSON" yq -i "
+    .gate_assignments += [{
+      \"gate_id\": \"$GATE_ID\",
+      \"primary_domain\": \"$PRIMARY_DOMAIN\",
+      \"secondary_domains\": (strenv(SECONDARY_JSON) | fromjson),
+      \"family\": \"$FAMILY\"
+    }]
+  " "$TOPOLOGY"
+fi
+
+"$ROOT/ops/plugins/verify/bin/gate-topology-validate" >/dev/null
+
+echo "gate.topology.assign PASS: $GATE_ID -> primary=$PRIMARY_DOMAIN secondary=${SECONDARY_DOMAINS:-none} family=$FAMILY"

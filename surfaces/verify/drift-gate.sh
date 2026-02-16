@@ -148,7 +148,11 @@ if [[ ! -d runs ]]; then pass; else scoped_fail D2 "runs/ exists"; echo "  TRIAG
 # D3: Entrypoint smoke
 # TRIAGE: bin/ops preflight must succeed. Check bin/ops exists and is executable.
 echo -n "D3 entrypoint smoke... "
-if ./bin/ops preflight >/dev/null 2>&1; then pass; else scoped_fail D3 "bin/ops preflight failed"; echo "  TRIAGE: Check bin/ops exists and is executable. Run: chmod +x bin/ops"; fi
+if [[ -x "$SP/surfaces/verify/d3-entrypoint-smoke.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d3-entrypoint-smoke.sh" "D3"
+else
+  scoped_fail D3 "d3-entrypoint-smoke script missing"
+fi
 
 # D4: Watcher (launchd canonical; warn only, no fail)
 echo -n "D4 watcher... "
@@ -1154,6 +1158,20 @@ if [[ -x "$SP/surfaces/verify/d126-workbench-implementation-path-lock.sh" ]]; th
   gate_script "$SP/surfaces/verify/d126-workbench-implementation-path-lock.sh" "D126"
 else
   warn "workbench implementation path lock gate not present"
+fi
+
+echo -n "D127 Domain assignment drift lock... "
+if [[ -x "$SP/surfaces/verify/d127-domain-assignment-drift-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d127-domain-assignment-drift-lock.sh" "D127"
+else
+  warn "domain assignment drift lock gate not present"
+fi
+
+echo -n "D128 Gate registration contract lock... "
+if [[ -x "$SP/surfaces/verify/d128-gate-registration-contract-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d128-gate-registration-contract-lock.sh" "D128"
+else
+  warn "gate registration contract lock gate not present"
 fi
 
 echo

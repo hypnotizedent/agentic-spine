@@ -93,7 +93,7 @@ Full spine access. Follow all sections below in order.
 | Single read-only query | `ops cap run` (auto-approval) |
 | Single mutating action | `ops cap run` (manual approval) |
 | Multi-step coordinated work | Open a loop, use proposal flow |
-| Quick verify/status check | `ops cap run verify.pack.run <agent_id|domain>` or `ops status` |
+| Quick verify/status check | `ops cap run stability.control.snapshot` + `ops cap run verify.core.run` + `ops cap run verify.domain.run <domain>` |
 | Release/nightly certification | `ops cap run spine.verify` |
 
 ### Gate Domain Packs (Terminal Routing)
@@ -101,13 +101,15 @@ Full spine access. Follow all sections below in order.
 Use domain packs to make gate applicability explicit before mutation work.
 
 - Canonical binding: `ops/bindings/gate.domain.profiles.yaml`
-- Domain list: `core`, `secrets`, `aof`, `home`, `media`, `n8n`, `rag`, `workbench`, `infra`, `loop_gap`
-- Terminal default: `OPS_GATE_DOMAIN` unset → `core`
+- Domain list: `core`, `aof`, `secrets`, `infra`, `workbench`, `loop_gap`, `home`, `media`, `immich`, `n8n`, `finance`, `ms-graph`, `rag`
+- Terminal default: `OPS_GATE_DOMAIN` unset -> `core`
 
 Recommended pre-mutation command:
 
 ```bash
-./bin/ops cap run verify.drift_gates.certify --domain "${OPS_GATE_DOMAIN:-core}" --brief
+./bin/ops cap run stability.control.snapshot
+./bin/ops cap run verify.core.run
+./bin/ops cap run verify.domain.run "${OPS_GATE_DOMAIN:-core}"
 ```
 
 ### After the session (Desktop)

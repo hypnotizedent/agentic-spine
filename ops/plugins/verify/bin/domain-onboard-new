@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
+DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
+DOCS_ROOT="$ROOT/docs/governance/domains"
+
+usage() {
+  cat <<'USAGE'
+domain-onboard-new
+
+Usage:
+  domain-onboard-new \
+    --domain-id <domain> \
+    --description <text> \
+    --criticality <critical|standard> \
+    --depends-on <d1,d2> \
+    --capability-prefixes <p1,p2> \
+    --path-triggers <path1,path2> \
+    --runtime-sentinel <true|false>
+USAGE
+}
+
+fail() {
+  echo "domain.onboard.new FAIL: $*" >&2
+  exit 1
+}
+
+need_file() {
+  [[ -f "$1" ]] || fail "missing file: $1"
+}
+
+need_file "$TOPOLOGY"
+need_file "$DOMAIN_PROFILES"
+command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
+command -v jq >/dev/null 2>&1 || fail "missing required tool: jq"
+
+DOMAIN_ID=""
+DESCRIPTION=""
+CRITICALITY=""
+DEPENDS_ON=""
+CAPABILITY_PREFIXES=""
+PATH_TRIGGERS=""
+RUNTIME_SENTINEL="false"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --domain-id) DOMAIN_ID="${2:-}"; shift 2 ;;
+    --description) DESCRIPTION="${2:-}"; shift 2 ;;
+    --criticality) CRITICALITY="${2:-}"; shift 2 ;;
+    --depends-on) DEPENDS_ON="${2:-}"; shift 2 ;;
+    --capability-prefixes) CAPABILITY_PREFIXES="${2:-}"; shift 2 ;;
+    --path-triggers) PATH_TRIGGERS="${2:-}"; shift 2 ;;
+    --runtime-sentinel) RUNTIME_SENTINEL="${2:-false}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$DOMAIN_ID" ]] || fail "--domain-id is required"
+[[ -n "$DESCRIPTION" ]] || fail "--description is required"
+[[ "$CRITICALITY" == "critical" || "$CRITICALITY" == "standard" ]] || fail "--criticality must be critical|standard"
+[[ -n "$CAPABILITY_PREFIXES" ]] || fail "--capability-prefixes is required"
+[[ "$RUNTIME_SENTINEL" == "true" || "$RUNTIME_SENTINEL" == "false" ]] || fail "--runtime-sentinel must be true|false"
+
+if yq e -r ".domain_metadata[] | select(.domain_id == \"$DOMAIN_ID\") | .domain_id" "$TOPOLOGY" | grep -q "$DOMAIN_ID"; then
+  fail "domain '$DOMAIN_ID' already exists in topology"
+fi
+
+if yq e -r ".domains.\"$DOMAIN_ID\"" "$DOMAIN_PROFILES" 2>/dev/null | grep -qv '^null$'; then
+  fail "domain '$DOMAIN_ID' already exists in domain profiles"
+fi
+
+DEPENDS_JSON="$(printf '%s' "$DEPENDS_ON" | jq -R 'split(",") | map(gsub("^ +| +$";"")) | map(select(length>0)) | unique')"
+PREFIX_JSON="$(printf '%s' "$CAPABILITY_PREFIXES" | jq -R 'split(",") | map(gsub("^ +| +$";"")) | map(select(length>0)) | unique')"
+TRIGGERS_JSON="$(printf '%s' "$PATH_TRIGGERS" | jq -R 'split(",") | map(gsub("^ +| +$";"")) | map(select(length>0)) | unique')"
+ADDED_DATE="$(date +%Y-%m-%d)"
+
+DOMAIN_ID="$DOMAIN_ID" DESCRIPTION="$DESCRIPTION" CRITICALITY="$CRITICALITY" DEPENDS_JSON="$DEPENDS_JSON" PREFIX_JSON="$PREFIX_JSON" TRIGGERS_JSON="$TRIGGERS_JSON" RUNTIME_SENTINEL="$RUNTIME_SENTINEL" ADDED_DATE="$ADDED_DATE" yq -i '
+  .domain_metadata += [{
+    "domain_id": strenv(DOMAIN_ID),
+    "description": strenv(DESCRIPTION),
+    "criticality": strenv(CRITICALITY),
+    "depends_on": (strenv(DEPENDS_JSON) | fromjson),
+    "capability_prefixes": (strenv(PREFIX_JSON) | fromjson),
+    "path_triggers": (strenv(TRIGGERS_JSON) | fromjson),
+    "requires_runtime_sentinel": (strenv(RUNTIME_SENTINEL) == "true"),
+    "added_date": strenv(ADDED_DATE)
+  }] |
+  .release_sequence += [strenv(DOMAIN_ID)]
+' "$TOPOLOGY"
+
+DOMAIN_ID="$DOMAIN_ID" DESCRIPTION="$DESCRIPTION" PREFIX_JSON="$PREFIX_JSON" TRIGGERS_JSON="$TRIGGERS_JSON" yq -i '
+  .domains[strenv(DOMAIN_ID)] = {
+    "description": strenv(DESCRIPTION),
+    "gate_ids": [],
+    "capability_prefixes": (strenv(PREFIX_JSON) | fromjson),
+    "path_triggers": (strenv(TRIGGERS_JSON) | fromjson)
+  }
+' "$DOMAIN_PROFILES"
+
+mkdir -p "$DOCS_ROOT/$DOMAIN_ID"
+if [[ ! -f "$DOCS_ROOT/$DOMAIN_ID/README.md" ]]; then
+  cat > "$DOCS_ROOT/$DOMAIN_ID/README.md" <<DOC
+# ${DOMAIN_ID} Domain
+
+- Owner: @ronny
+- Criticality: ${CRITICALITY}
+- Added: ${ADDED_DATE}
+
+## Scope
+${DESCRIPTION}
+
+## Verify Lane
+- Core preflight: \`./bin/ops cap run verify.core.run\`
+- Domain pack: \`./bin/ops cap run verify.domain.run ${DOMAIN_ID}\`
+- Release cert: \`./bin/ops cap run spine.verify\`
+DOC
+fi
+
+"$ROOT/ops/plugins/verify/bin/gate-topology-validate" >/dev/null
+
+echo "domain.onboard.new PASS: onboarded domain '$DOMAIN_ID'"
+echo "  topology: $TOPOLOGY"
+echo "  profiles: $DOMAIN_PROFILES"
+echo "  docs: $DOCS_ROOT/$DOMAIN_ID/README.md"

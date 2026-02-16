@@ -1,0 +1,64 @@
+---
+version: 1
+updated: "2026-02-16"
+owner: "@ronny"
+scope: proactive-mutation-guard
+
+enabled: true
+snapshot_capability: stability.control.snapshot
+snapshot_ttl_minutes: 15
+trigger_statuses:
+  - warn
+  - incident
+critical_domains_only: true
+block_scope: domain
+
+domain_to_critical_domain:
+  n8n: automation-stack
+  automation: automation-stack
+  finance: finance-stack
+  home: z2m-bridge
+  z2m: z2m-bridge
+  immich: immich-stack
+  ms-graph: automation-stack
+
+recovery_allowlist_by_domain:
+  automation-stack:
+    - stability.control.snapshot
+    - stability.control.reconcile
+    - infra.proxmox.maintenance.precheck
+    - infra.proxmox.maintenance.startup
+    - docker.compose.up
+    - n8n.infra.health
+  finance-stack:
+    - stability.control.snapshot
+    - stability.control.reconcile
+    - infra.proxmox.maintenance.precheck
+    - docker.compose.up
+    - finance.stack.status
+  z2m-bridge:
+    - stability.control.snapshot
+    - stability.control.reconcile
+    - ha.addons.snapshot
+    - ha.addon.restart
+    - ha.z2m.health
+  immich-stack:
+    - stability.control.snapshot
+    - stability.control.reconcile
+    - docker.compose.status
+    - docker.compose.up
+    - immich.status
+    - immich.ingest.watch
+
+domain_resolution_sources:
+  capabilities: ops/capabilities.yaml
+  topology: ops/bindings/gate.execution.topology.yaml
+
+required_reconcile_command_template: "./bin/ops cap run stability.control.reconcile --domain {{critical_domain}}"
+
+# Safety evidence required to unblock mutation attempts.
+evidence_requirements:
+  require_snapshot_run_key: true
+  require_snapshot_freshness: true
+  require_reconcile_run_key_on_incident: false
+  snapshot_output_must_include_domain_status: true

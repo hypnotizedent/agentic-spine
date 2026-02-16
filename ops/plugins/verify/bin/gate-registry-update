@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+
+usage() {
+  cat <<'USAGE'
+gate-registry-update
+
+Usage:
+  gate-registry-update --gate-id <DNN> --field <field_name> --value <value>
+
+Supported fields:
+  name, category, description, severity, check_script, fix_hint,
+  inline, retired, warn_only, verbose_only, composite_parent
+USAGE
+}
+
+fail() {
+  echo "gate.registry.update FAIL: $*" >&2
+  exit 1
+}
+
+[[ -f "$REGISTRY" ]] || fail "missing registry: $REGISTRY"
+command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
+
+GATE_ID=""
+FIELD=""
+VALUE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --gate-id) GATE_ID="${2:-}"; shift 2 ;;
+    --field) FIELD="${2:-}"; shift 2 ;;
+    --value) VALUE="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$GATE_ID" ]] || fail "--gate-id is required"
+[[ -n "$FIELD" ]] || fail "--field is required"
+
+exists="$(yq e -r ".gates[] | select(.id == \"$GATE_ID\") | .id" "$REGISTRY" | head -n1 || true)"
+[[ -n "$exists" ]] || fail "gate '$GATE_ID' not found"
+
+case "$FIELD" in
+  inline|retired|warn_only|verbose_only)
+    [[ "$VALUE" == "true" || "$VALUE" == "false" ]] || fail "field '$FIELD' requires boolean value true|false"
+    yq -i "(.gates[] | select(.id == \"$GATE_ID\")).$FIELD = $VALUE" "$REGISTRY"
+    ;;
+  name|category|description|severity|check_script|fix_hint|composite_parent)
+    yq -i "(.gates[] | select(.id == \"$GATE_ID\")).$FIELD = \"$VALUE\"" "$REGISTRY"
+    ;;
+  *)
+    fail "unsupported field: $FIELD"
+    ;;
+esac
+
+total="$(yq e '.gates | length' "$REGISTRY")"
+retired="$(yq e '[.gates[] | select((.retired // false) == true)] | length' "$REGISTRY")"
+active=$((total - retired))
+yq -i ".gate_count.total = $total | .gate_count.active = $active | .gate_count.retired = $retired" "$REGISTRY"
+
+echo "gate.registry.update PASS: $GATE_ID.$FIELD updated (total=$total active=$active retired=$retired)"

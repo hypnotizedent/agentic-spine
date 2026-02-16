@@ -59,8 +59,9 @@ scope: agent-governance-brief
 
 ## Verify & Receipts
 
-- Day-to-day: run `./bin/ops cap run verify.pack.run <agent_id|domain>`.
-- Certification: run `./bin/ops cap run spine.verify` for release/nightly and final cutover.
+- Day-to-day preflight: run `./bin/ops cap run stability.control.snapshot` then `./bin/ops cap run verify.core.run`.
+- Domain work: run `./bin/ops cap run verify.route.recommend` and then `./bin/ops cap run verify.domain.run <domain>`.
+- Certification: run `./bin/ops cap run verify.release.run` or `./bin/ops cap run spine.verify` for release/nightly and final cutover.
 - Every capability execution auto-generates a receipt. Ledger is append-only.
 - Domain updates are impact-scoped: update the domain runbook and add a receipt note via `./bin/ops cap run docs.impact.note <domain> <receipt_run_key>`.
 - D61 enforces session closeout every 48h: `./bin/ops cap run agent.session.closeout`.
@@ -71,6 +72,10 @@ scope: agent-governance-brief
 - `./bin/ops status` — unified work status (loops + gaps + inbox)
 - `./bin/ops loops list --open` — list open loops only
 - `./bin/ops start loop <LOOP_ID>` — start worktree for a loop
+- `./bin/ops cap run verify.core.run` — Core-8 day-to-day verify lane
+- `./bin/ops cap run verify.domain.run <domain>` — domain-scoped verify lane
+- `./bin/ops cap run verify.route.recommend` — suggest domain verify lane from current work
+- `./bin/ops cap run verify.release.run` — release/nightly full certification lane
 - `./bin/ops cap run verify.pack.list` — list verify packs
 - `./bin/ops cap run verify.pack.run <agent_id|domain>` — pack-first verify
 - `./bin/ops cap run stability.control.snapshot` — runtime reliability snapshot

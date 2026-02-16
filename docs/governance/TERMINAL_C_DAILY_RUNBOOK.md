@@ -40,7 +40,8 @@ Execute only the printed recovery commands manually (operator-controlled), then 
 Only after snapshot is healthy, continue day-to-day checks:
 
 ```bash
-./bin/ops cap run verify.pack.run core-operator
+./bin/ops cap run verify.core.run
+./bin/ops cap run verify.route.recommend
 ./bin/ops cap run workbench.impl.audit --strict
 ./bin/ops cap run gaps.status
 ./bin/ops cap run orchestration.status
@@ -120,7 +121,7 @@ fails, stop and resolve before continuing to the next repo.
 
 ## Gate 4: Close Loop
 ```bash
-./bin/ops cap run verify.pack.run core-operator
+./bin/ops cap run verify.core.run
 ./bin/ops cap run gaps.status
 ./bin/ops cap run orchestration.loop.close --loop-id "$LOOP_ID"
 ./bin/ops cap run agent.session.closeout
@@ -139,7 +140,7 @@ If this loop is a release/cutover loop, run full certification before closeout:
 4. Keep stash count at zero unless explicitly preserving WIP with owner note.
 
 ## Watcher Adoption Path
-1. Phase 1: Read-only watcher only (`verify.pack.run core-operator`, `stability.control.snapshot`, `gaps.status`, `orchestration.status`).
+1. Phase 1: Read-only watcher only (`verify.core.run`, `stability.control.snapshot`, `gaps.status`, `orchestration.status`).
 2. Phase 2: Proposal/ticket drafting only, no apply.
 3. Phase 3: Terminal C approves every apply action.
 4. Phase 4: Allow limited autonomous apply for low-risk lanes only.

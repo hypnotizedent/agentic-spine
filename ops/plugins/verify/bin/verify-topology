@@ -1,0 +1,586 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
+REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+AGENT_PROFILES="$ROOT/ops/bindings/gate.agent.profiles.yaml"
+DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
+
+fail() {
+  echo "verify.topology FAIL: $*" >&2
+  exit 1
+}
+
+need_file() {
+  [[ -f "$1" ]] || fail "missing file: $1"
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+need_file "$TOPOLOGY"
+need_file "$REGISTRY"
+need_file "$AGENT_PROFILES"
+need_file "$DOMAIN_PROFILES"
+need_cmd yq
+
+usage() {
+  cat <<'USAGE'
+verify-topology
+
+Usage:
+  verify-topology core [--json]
+  verify-topology domain <domain_id> [--json]
+  verify-topology release [--json]
+  verify-topology recommend [--path <path>]... [--capability <cap>]... [--json]
+  verify-topology pack-list
+  verify-topology pack-explain <agent_id|domain>
+  verify-topology pack-run [<agent_id|domain>] [--json]
+
+Notes:
+  - Core/day-to-day checks run through core_mode.core_gate_ids.
+  - Domain checks resolve from gate.execution.topology.yaml first, then domain profiles fallback.
+  - Release uses full drift-gate certification.
+USAGE
+}
+
+normalize_domain() {
+  local raw="${1:-}"
+  case "$raw" in
+    core) echo "core" ;;
+    loop-gap|loop_gap) echo "loop_gap" ;;
+    home-automation) echo "home" ;;
+    finance-ops) echo "finance" ;;
+    automation) echo "n8n" ;;
+    photos) echo "immich" ;;
+    identity|email|calendar|graph|ms_graph|msgraph) echo "ms-graph" ;;
+    *) echo "$raw" ;;
+  esac
+}
+
+mapfile -t TOPOLOGY_DOMAINS < <(yq e -r '.domain_metadata[].domain_id' "$TOPOLOGY")
+
+is_topology_domain() {
+  local domain="$1"
+  local d
+  for d in "${TOPOLOGY_DOMAINS[@]}"; do
+    [[ "$d" == "$domain" ]] && return 0
+  done
+  return 1
+}
+
+unique_lines() {
+  awk 'NF && !seen[$0]++'
+}
+
+collect_domain_gate_ids() {
+  local raw_domain="$1"
+  local domain
+  domain="$(normalize_domain "$raw_domain")"
+
+  declare -A seen=()
+  local gid
+
+  while IFS=$'\t' read -r gate_id primary secondary; do
+    [[ -n "$gate_id" ]] || continue
+    if [[ "$primary" == "$domain" ]]; then
+      seen["$gate_id"]=1
+      continue
+    fi
+    if [[ -n "$secondary" ]]; then
+      IFS=',' read -r -a sec_arr <<< "$secondary"
+      for sec in "${sec_arr[@]}"; do
+        if [[ "$sec" == "$domain" ]]; then
+          seen["$gate_id"]=1
+          break
+        fi
+      done
+    fi
+  done < <(yq e -r '.gate_assignments[] | [.gate_id, (.primary_domain // ""), ((.secondary_domains // []) | join(","))] | @tsv' "$TOPOLOGY")
+
+  # Transition fallback: domain profile gates if topology has no direct assignments.
+  if [[ "${#seen[@]}" -eq 0 ]]; then
+    while IFS= read -r gid; do
+      [[ -n "$gid" ]] && seen["$gid"]=1
+    done < <(yq e -r ".domains.\"$raw_domain\".gate_ids[]?" "$DOMAIN_PROFILES" 2>/dev/null || true)
+
+    if [[ "$domain" != "$raw_domain" ]]; then
+      while IFS= read -r gid; do
+        [[ -n "$gid" ]] && seen["$gid"]=1
+      done < <(yq e -r ".domains.\"$domain\".gate_ids[]?" "$DOMAIN_PROFILES" 2>/dev/null || true)
+    fi
+  fi
+
+  for gid in "${!seen[@]}"; do
+    printf '%s\n' "$gid"
+  done | sort -V
+}
+
+collect_core_gate_ids() {
+  yq e -r '.core_mode.core_gate_ids[]?' "$TOPOLOGY" | unique_lines
+}
+
+run_gate_ids() {
+  local json_mode="$1"
+  shift
+  local -a input_ids=("$@")
+
+  declare -A seen=()
+  local -a gate_ids=()
+  local gid
+  for gid in "${input_ids[@]}"; do
+    [[ -n "$gid" ]] || continue
+    if [[ -z "${seen[$gid]:-}" ]]; then
+      seen["$gid"]=1
+      gate_ids+=("$gid")
+    fi
+  done
+
+  ((${#gate_ids[@]} > 0)) || fail "no gates resolved for run"
+
+  local pass_count=0
+  local fail_count=0
+  local skipped_inline=0
+  local skipped_retired=0
+  local -a failing_ids=()
+
+  if [[ "$json_mode" == "0" ]]; then
+    echo "verify.run"
+    echo "gate_count: ${#gate_ids[@]}"
+    echo
+  fi
+
+  for gid in "${gate_ids[@]}"; do
+    local script_rel inline retired script_abs tmp rc
+
+    script_rel="$(yq e -r ".gates[] | select(.id == \"$gid\") | .check_script // \"\"" "$REGISTRY" 2>/dev/null || true)"
+    inline="$(yq e -r ".gates[] | select(.id == \"$gid\") | .inline // false" "$REGISTRY" 2>/dev/null || echo false)"
+    retired="$(yq e -r ".gates[] | select(.id == \"$gid\") | .retired // false" "$REGISTRY" 2>/dev/null || echo false)"
+
+    if [[ -z "$script_rel" || "$script_rel" == "null" ]]; then
+      fail_count=$((fail_count + 1))
+      failing_ids+=("$gid")
+      [[ "$json_mode" == "0" ]] && echo "$gid FAIL missing check_script"
+      continue
+    fi
+
+    if [[ "$retired" == "true" ]]; then
+      skipped_retired=$((skipped_retired + 1))
+      [[ "$json_mode" == "0" ]] && echo "$gid SKIP retired"
+      continue
+    fi
+
+    if [[ "$inline" == "true" ]]; then
+      skipped_inline=$((skipped_inline + 1))
+      [[ "$json_mode" == "0" ]] && echo "$gid SKIP inline-only"
+      continue
+    fi
+
+    script_abs="$ROOT/$script_rel"
+    if [[ ! -x "$script_abs" ]]; then
+      fail_count=$((fail_count + 1))
+      failing_ids+=("$gid")
+      [[ "$json_mode" == "0" ]] && echo "$gid FAIL missing/non-executable script: $script_rel"
+      continue
+    fi
+
+    tmp="$(mktemp)"
+    set +e
+    bash "$script_abs" >"$tmp" 2>&1
+    rc=$?
+    set -e
+
+    if [[ "$rc" -eq 0 ]]; then
+      pass_count=$((pass_count + 1))
+      [[ "$json_mode" == "0" ]] && echo "$gid PASS"
+    else
+      fail_count=$((fail_count + 1))
+      failing_ids+=("$gid")
+      if [[ "$json_mode" == "0" ]]; then
+        echo "$gid FAIL (rc=$rc)"
+        sed -n '1,60p' "$tmp" | sed 's/^/  /' || true
+      fi
+    fi
+
+    rm -f "$tmp" >/dev/null 2>&1 || true
+  done
+
+  if [[ "$json_mode" == "1" ]]; then
+    local failing_json="[]"
+    if [[ "${#failing_ids[@]}" -gt 0 ]]; then
+      failing_json="$(printf '%s\n' "${failing_ids[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+    fi
+    jq -n \
+      --argjson total "${#gate_ids[@]}" \
+      --argjson pass "$pass_count" \
+      --argjson fail "$fail_count" \
+      --argjson skipped_inline "$skipped_inline" \
+      --argjson skipped_retired "$skipped_retired" \
+      --argjson failing_ids "$failing_json" \
+      '{total:$total, pass:$pass, fail:$fail, skipped_inline:$skipped_inline, skipped_retired:$skipped_retired, failing_ids:$failing_ids}'
+  else
+    echo
+    echo "summary: pass=$pass_count fail=$fail_count skipped_inline=$skipped_inline skipped_retired=$skipped_retired"
+  fi
+
+  [[ "$fail_count" -eq 0 ]]
+}
+
+parse_json_flag() {
+  local json_mode=0
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "--json" ]]; then
+      json_mode=1
+      break
+    fi
+  done
+  echo "$json_mode"
+}
+
+resolve_target_kind() {
+  local target="$1"
+  local norm
+  norm="$(normalize_domain "$target")"
+
+  if yq e -r ".profiles[] | select(.agent_id == \"$target\") | .agent_id" "$AGENT_PROFILES" 2>/dev/null | grep -q .; then
+    echo "agent"
+    return 0
+  fi
+
+  if yq e -r ".domains.\"$target\"" "$DOMAIN_PROFILES" 2>/dev/null | grep -qv '^null$'; then
+    echo "domain"
+    return 0
+  fi
+
+  if is_topology_domain "$norm"; then
+    echo "domain"
+    return 0
+  fi
+
+  return 1
+}
+
+pack_list() {
+  local default_pack
+  default_pack="$(yq e -r '.defaults.default_pack // ""' "$AGENT_PROFILES")"
+  local core_limit core_started core_review
+  core_limit="$(yq e -r '.core_mode.core_count_limit // 0' "$TOPOLOGY")"
+  core_started="$(yq e -r '.core_mode.transition_started_at // ""' "$TOPOLOGY")"
+  core_review="$(yq e -r '.core_mode.transition_review_required_by // ""' "$TOPOLOGY")"
+
+  echo "verify.pack.list"
+  echo "default_pack: ${default_pack:-none}"
+  echo "core_mode_limit: $core_limit"
+  echo "transition_started_at: $core_started"
+  echo "transition_review_required_by: $core_review"
+  echo
+  echo "agent_profiles:"
+  while IFS=$'\t' read -r agent domains; do
+    [[ -z "$agent" ]] && continue
+    if [[ "$agent" == "$default_pack" ]]; then
+      echo "  - $agent (default) domains=[$domains]"
+    else
+      echo "  - $agent domains=[$domains]"
+    fi
+  done < <(yq e -r '.profiles[] | [.agent_id, ((.domains // []) | join(","))] | @tsv' "$AGENT_PROFILES" 2>/dev/null)
+
+  echo
+  echo "domain_profiles:"
+  while IFS= read -r dom; do
+    [[ -z "$dom" ]] && continue
+    echo "  - $dom"
+  done < <(yq e -r '.domains | keys | .[]' "$DOMAIN_PROFILES" 2>/dev/null)
+}
+
+pack_explain() {
+  local target="$1"
+  local kind
+  kind="$(resolve_target_kind "$target")" || fail "unknown target: $target"
+
+  local -a domains=()
+  local -a gate_ids=()
+  local domain
+
+  if [[ "$kind" == "agent" ]]; then
+    domains+=("core")
+    while IFS= read -r domain; do
+      [[ -z "$domain" ]] && continue
+      domain="$(normalize_domain "$domain")"
+      [[ "$domain" == "core" ]] && continue
+      domains+=("$domain")
+    done < <(yq e -r ".profiles[] | select(.agent_id == \"$target\") | .domains[]?" "$AGENT_PROFILES")
+  else
+    domain="$(normalize_domain "$target")"
+    domains+=("$domain")
+  fi
+
+  mapfile -t domains < <(printf '%s\n' "${domains[@]}" | unique_lines)
+
+  for domain in "${domains[@]}"; do
+    if [[ "$domain" == "core" ]]; then
+      while IFS= read -r gid; do gate_ids+=("$gid"); done < <(collect_core_gate_ids)
+    else
+      while IFS= read -r gid; do gate_ids+=("$gid"); done < <(collect_domain_gate_ids "$domain")
+    fi
+  done
+
+  mapfile -t gate_ids < <(printf '%s\n' "${gate_ids[@]}" | unique_lines)
+
+  echo "verify.pack.explain"
+  echo "target: $target"
+  echo "kind: $kind"
+  echo "domains: $(IFS=,; echo "${domains[*]}")"
+  echo "gate_count: ${#gate_ids[@]}"
+  echo
+
+  local gid script inline retired
+  for gid in "${gate_ids[@]}"; do
+    script="$(yq e -r ".gates[] | select(.id == \"$gid\") | .check_script // \"\"" "$REGISTRY" 2>/dev/null || true)"
+    inline="$(yq e -r ".gates[] | select(.id == \"$gid\") | .inline // false" "$REGISTRY" 2>/dev/null || echo false)"
+    retired="$(yq e -r ".gates[] | select(.id == \"$gid\") | .retired // false" "$REGISTRY" 2>/dev/null || echo false)"
+    echo "  - $gid script=${script:-<missing>} inline=$inline retired=$retired"
+  done
+}
+
+pack_run() {
+  local default_pack target json_mode
+  default_pack="$(yq e -r '.defaults.default_pack // "core-operator"' "$AGENT_PROFILES")"
+
+  target="${1:-$default_pack}"
+  shift || true
+  json_mode="$(parse_json_flag "$@")"
+
+  local kind
+  kind="$(resolve_target_kind "$target")" || fail "unknown target: $target"
+
+  local -a domains=()
+  local -a gate_ids=()
+  local domain
+
+  if [[ "$kind" == "agent" ]]; then
+    domains+=("core")
+    while IFS= read -r domain; do
+      [[ -z "$domain" ]] && continue
+      domain="$(normalize_domain "$domain")"
+      domains+=("$domain")
+    done < <(yq e -r ".profiles[] | select(.agent_id == \"$target\") | .domains[]?" "$AGENT_PROFILES")
+  else
+    domains+=("$(normalize_domain "$target")")
+  fi
+
+  mapfile -t domains < <(printf '%s\n' "${domains[@]}" | unique_lines)
+
+  for domain in "${domains[@]}"; do
+    if [[ "$domain" == "core" ]]; then
+      while IFS= read -r gid; do gate_ids+=("$gid"); done < <(collect_core_gate_ids)
+    else
+      while IFS= read -r gid; do gate_ids+=("$gid"); done < <(collect_domain_gate_ids "$domain")
+    fi
+  done
+
+  mapfile -t gate_ids < <(printf '%s\n' "${gate_ids[@]}" | unique_lines)
+
+  if [[ "$json_mode" == "0" ]]; then
+    echo "verify.pack.run"
+    echo "target: $target"
+    echo "kind: $kind"
+    echo "domains: $(IFS=,; echo "${domains[*]}")"
+    echo "gate_count: ${#gate_ids[@]}"
+    echo
+  fi
+
+  run_gate_ids "$json_mode" "${gate_ids[@]}"
+}
+
+run_core() {
+  local json_mode
+  json_mode="$(parse_json_flag "$@")"
+  mapfile -t core_ids < <(collect_core_gate_ids)
+  if [[ "$json_mode" == "0" ]]; then
+    echo "verify.core.run"
+    echo "core_gate_count: ${#core_ids[@]}"
+    echo
+  fi
+  run_gate_ids "$json_mode" "${core_ids[@]}"
+}
+
+run_domain() {
+  local raw_domain="$1"
+  shift || true
+  local json_mode
+  json_mode="$(parse_json_flag "$@")"
+  local domain
+  domain="$(normalize_domain "$raw_domain")"
+
+  mapfile -t domain_ids < <(collect_domain_gate_ids "$domain")
+  ((${#domain_ids[@]} > 0)) || fail "domain '$raw_domain' resolved to '$domain' with no gates"
+
+  if [[ "$json_mode" == "0" ]]; then
+    echo "verify.domain.run"
+    echo "domain: $domain"
+    echo "gate_count: ${#domain_ids[@]}"
+    echo
+  fi
+  run_gate_ids "$json_mode" "${domain_ids[@]}"
+}
+
+run_release() {
+  local json_mode
+  json_mode="$(parse_json_flag "$@")"
+  local tmp rc summary
+  tmp="$(mktemp)"
+  set +e
+  bash "$ROOT/surfaces/verify/drift-gate.sh" >"$tmp" 2>&1
+  rc=$?
+  set -e
+
+  if [[ "$json_mode" == "1" ]]; then
+    summary="$(grep -E '^DRIFT GATE:' "$tmp" | tail -n1 | xargs || true)"
+    jq -n \
+      --arg status "$([[ "$rc" -eq 0 ]] && echo pass || echo fail)" \
+      --arg summary "$summary" \
+      --arg mode "core+all-domains" \
+      '{status:$status, mode:$mode, summary:$summary}'
+  else
+    cat "$tmp"
+  fi
+
+  rm -f "$tmp" >/dev/null 2>&1 || true
+  [[ "$rc" -eq 0 ]]
+}
+
+recommend_route() {
+  local json_mode=0
+  local -a paths=()
+  local -a capabilities=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --path)
+        [[ $# -ge 2 ]] || fail "--path requires a value"
+        paths+=("$2")
+        shift 2
+        ;;
+      --capability)
+        [[ $# -ge 2 ]] || fail "--capability requires a value"
+        capabilities+=("$2")
+        shift 2
+        ;;
+      --json)
+        json_mode=1
+        shift
+        ;;
+      *)
+        fail "unknown argument for recommend: $1"
+        ;;
+    esac
+  done
+
+  if [[ "${#paths[@]}" -eq 0 && "${#capabilities[@]}" -eq 0 ]]; then
+    while IFS= read -r p; do
+      [[ -n "$p" ]] && paths+=("$p")
+    done < <(git -C "$ROOT" diff --name-only -- 2>/dev/null || true)
+  fi
+
+  declare -A hits=()
+  declare -A reasons=()
+
+  while IFS=$'\t' read -r domain trigger_csv prefix_csv; do
+    [[ -n "$domain" ]] || continue
+
+    IFS=',' read -r -a triggers <<< "${trigger_csv:-}"
+    IFS=',' read -r -a prefixes <<< "${prefix_csv:-}"
+
+    for p in "${paths[@]}"; do
+      for t in "${triggers[@]}"; do
+        [[ -z "$t" ]] && continue
+        if [[ "$p" == *"$t"* ]]; then
+          hits["$domain"]=1
+          reasons["$domain"]="${reasons[$domain]:-} path:$p"
+          break
+        fi
+      done
+    done
+
+    for cap in "${capabilities[@]}"; do
+      for pref in "${prefixes[@]}"; do
+        [[ -z "$pref" ]] && continue
+        if [[ "$cap" == "$pref"* ]]; then
+          hits["$domain"]=1
+          reasons["$domain"]="${reasons[$domain]:-} capability:$cap"
+          break
+        fi
+      done
+    done
+  done < <(yq e -r '.domain_metadata[] | [.domain_id, ((.path_triggers // []) | join(",")), ((.capability_prefixes // []) | join(","))] | @tsv' "$TOPOLOGY")
+
+  mapfile -t recommended_domains < <(printf '%s\n' "${!hits[@]}" | sort)
+  if [[ "${#recommended_domains[@]}" -eq 0 ]]; then
+    recommended_domains=("core")
+  fi
+
+  if [[ "$json_mode" == "1" ]]; then
+    jq -n \
+      --argjson domains "$(printf '%s\n' "${recommended_domains[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+      --argjson paths "$(printf '%s\n' "${paths[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+      --argjson capabilities "$(printf '%s\n' "${capabilities[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+      '{recommended_domains:$domains, input_paths:$paths, input_capabilities:$capabilities}'
+  else
+    echo "verify.route.recommend"
+    if [[ "${#paths[@]}" -gt 0 ]]; then
+      echo "paths:"; printf '  - %s\n' "${paths[@]}"
+    fi
+    if [[ "${#capabilities[@]}" -gt 0 ]]; then
+      echo "capabilities:"; printf '  - %s\n' "${capabilities[@]}"
+    fi
+    echo "recommended_domains: $(IFS=,; echo "${recommended_domains[*]}")"
+    for d in "${recommended_domains[@]}"; do
+      echo "  - run: ./bin/ops cap run verify.domain.run $d"
+    done
+  fi
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  core|core-run)
+    shift
+    run_core "$@"
+    ;;
+  domain|domain-run)
+    [[ $# -ge 2 ]] || fail "usage: verify-topology domain <domain_id> [--json]"
+    domain="$2"
+    shift 2
+    run_domain "$domain" "$@"
+    ;;
+  release|release-run)
+    shift
+    run_release "$@"
+    ;;
+  recommend|route-recommend)
+    shift
+    recommend_route "$@"
+    ;;
+  pack-list)
+    shift
+    pack_list "$@"
+    ;;
+  pack-explain)
+    [[ $# -ge 2 ]] || fail "usage: verify-topology pack-explain <agent_id|domain>"
+    target="$2"
+    shift 2
+    pack_explain "$target" "$@"
+    ;;
+  pack-run)
+    shift
+    pack_run "$@"
+    ;;
+  -h|--help|"")
+    usage
+    ;;
+  *)
+    fail "unknown command: $cmd"
+    ;;
+esac

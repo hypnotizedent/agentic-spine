@@ -19,7 +19,7 @@ scope: post-gap-stabilization
 
 | Control | Pass Criteria | Fail Criteria |
 |---|---|---|
-| Drift gates | `./bin/ops cap run spine.verify` exits 0 | Any failing gate |
+| Drift gates | `./bin/ops cap run verify.core.run` + required `verify.domain.run <domain>` lanes pass (day-to-day) and `spine.verify` passes on release/nightly | Any failing gate in active lane or release cert |
 | Open-work hygiene | `./bin/ops status` shows 0 unlinked gaps and no unmanaged anomalies | Any unlinked gap, orphan loop, or unresolved anomaly |
 | Authority chain | `SESSION_PROTOCOL` -> `GOVERNANCE_INDEX` -> `SSOT_REGISTRY` remains consistent | Any conflicting authority statement |
 | Runtime path contract | Active governed runtime only in `agentic-spine`; workbench remains tooling-only | Runtime state/processes/sinks appear in non-canonical surfaces |
@@ -62,9 +62,11 @@ Rules:
 
 Hard stop gates before mutating:
 1. `./bin/ops status`
-2. `./bin/ops cap run verify.pack.run core-operator`
-3. `./bin/ops cap run stability.control.snapshot`
-4. `./bin/ops cap run gaps.status`
+2. `./bin/ops cap run stability.control.snapshot`
+3. `./bin/ops cap run verify.core.run`
+4. `./bin/ops cap run verify.route.recommend`
+5. `./bin/ops cap run verify.domain.run <domain>`
+6. `./bin/ops cap run gaps.status`
 
 ---
 
@@ -127,7 +129,7 @@ Definition: if any column is missing, lifecycle is incomplete.
 | Change Shape | Use | Why |
 |---|---|---|
 | Single read-only status/query | `./bin/ops cap run <read-only>` | Governed command + receipt, lowest overhead |
-| Day-to-day stabilization checks | `verify.pack.run core-operator` + `stability.control.snapshot` | Pack-first verification with incident detection scoped to critical runtime domains |
+| Day-to-day stabilization checks | `stability.control.snapshot` + `verify.core.run` + `verify.domain.run <domain>` | Predictive-first, core-limited, domain-scoped verification with incident detection |
 | Single mutating action already implemented as capability | `./bin/ops cap run <mutating>` | Controlled execution path + policy preconditions |
 | Evidence/narrative note, no file mutation | `./bin/ops run --inline "..."` | Lightweight receipt for discovery context |
 | Multi-file, cross-surface, or multi-terminal change | Proposal flow (`proposals.submit` -> payload -> `proposals.apply`) | Prevents collision and preserves commit boundary |
@@ -180,11 +182,13 @@ Cleanup cadence:
 
 Daily (Terminal C):
 1. `./bin/ops status`
-2. `./bin/ops cap run verify.pack.run core-operator`
-3. `./bin/ops cap run stability.control.snapshot`
-4. `./bin/ops cap run stability.control.reconcile` (run when snapshot reports incidents)
-5. `./bin/ops cap run gaps.status`
-6. `./bin/ops cap run orchestration.status`
+2. `./bin/ops cap run stability.control.snapshot`
+3. `./bin/ops cap run verify.core.run`
+4. `./bin/ops cap run verify.route.recommend`
+5. `./bin/ops cap run verify.domain.run <domain>`
+6. `./bin/ops cap run stability.control.reconcile` (run when snapshot reports incidents)
+7. `./bin/ops cap run gaps.status`
+8. `./bin/ops cap run orchestration.status`
 
 Nightly / Release:
 1. `./bin/ops cap run spine.verify`

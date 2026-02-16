@@ -244,10 +244,158 @@ run_cap() {
       fi
     fi
 
+    # ── Proactive mutation guard (critical domains, snapshot-driven) ──
+    # Blocks mutating/destructive capabilities when the mapped critical domain
+    # is in warn/incident state in a fresh stability snapshot.
+    if [[ -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
+      local guard_policy="$SPINE_CODE/ops/bindings/proactive.guard.policy.yaml"
+      if [[ -f "$guard_policy" ]]; then
+        local guard_enabled
+        guard_enabled="$(yq e -r '.enabled // false' "$guard_policy" 2>/dev/null || echo false)"
+        if [[ "$guard_enabled" == "true" ]]; then
+          local cap_domain
+          cap_domain="$(yq e -r ".capabilities.\"$name\".domain // \"none\"" "$CAP_FILE" 2>/dev/null || echo none)"
+
+          # Fallback domain resolution from topology capability prefixes.
+          if [[ -z "$cap_domain" || "$cap_domain" == "none" || "$cap_domain" == "null" ]]; then
+            cap_domain="$(yq e -r "
+              .domain_metadata[]
+              | select((.capability_prefixes // []) | any(. as \$p | \"$name\" | startswith(\$p)))
+              | .domain_id
+            " "$SPINE_CODE/ops/bindings/gate.execution.topology.yaml" 2>/dev/null | head -n1 || true)"
+          fi
+
+          if [[ -n "${cap_domain:-}" && "$cap_domain" != "none" && "$cap_domain" != "null" ]]; then
+            local critical_domains_only critical_domain
+            critical_domains_only="$(yq e -r '.critical_domains_only // true' "$guard_policy" 2>/dev/null || echo true)"
+            critical_domain="$(yq e -r ".domain_to_critical_domain.\"$cap_domain\" // \"\"" "$guard_policy" 2>/dev/null || true)"
+
+            # If mapping missing and policy is not critical-only, use direct domain id.
+            if [[ -z "$critical_domain" && "$critical_domains_only" != "true" ]]; then
+              critical_domain="$cap_domain"
+            fi
+
+            if [[ -n "$critical_domain" ]]; then
+              local allowlisted=0
+              while IFS= read -r allowed_cap; do
+                [[ -z "$allowed_cap" || "$allowed_cap" == "null" ]] && continue
+                if [[ "$allowed_cap" == "$name" ]]; then
+                  allowlisted=1
+                  break
+                fi
+              done < <(yq e -r ".recovery_allowlist_by_domain.\"$critical_domain\"[]?" "$guard_policy" 2>/dev/null || true)
+
+              if [[ "$allowlisted" -eq 0 ]]; then
+                local snapshot_capability snapshot_ttl trigger_statuses
+                snapshot_capability="$(yq e -r '.snapshot_capability // "stability.control.snapshot"' "$guard_policy" 2>/dev/null || echo "stability.control.snapshot")"
+                snapshot_ttl="$(yq e -r '.snapshot_ttl_minutes // 15' "$guard_policy" 2>/dev/null || echo 15)"
+                trigger_statuses="$(yq e -r '.trigger_statuses[]?' "$guard_policy" 2>/dev/null | tr '\n' ' ' || true)"
+
+                local snapshot_dir="" snapshot_run_key="" snapshot_generated="" snapshot_age_min=999999
+                local candidate latest_mtime
+                latest_mtime=0
+                while IFS= read -r -d '' candidate; do
+                  [[ -f "$candidate/receipt.md" ]] || continue
+                  if ! grep -Fq "| Capability | \`$snapshot_capability\` |" "$candidate/receipt.md"; then
+                    continue
+                  fi
+                  local mtime
+                  mtime="$(stat -f '%m' "$candidate" 2>/dev/null || echo 0)"
+                  if [[ "$mtime" -gt "$latest_mtime" ]]; then
+                    latest_mtime="$mtime"
+                    snapshot_dir="$candidate"
+                  fi
+                done < <(find "$RECEIPTS" -maxdepth 1 -type d -name 'R*' -print0 2>/dev/null)
+
+                if [[ -n "$snapshot_dir" ]]; then
+                  snapshot_run_key="$(sed -nE 's/^[|] Run ID [|] `([^`]+)` [|]/\1/p' "$snapshot_dir/receipt.md" | head -n1 || true)"
+                  snapshot_generated="$(sed -nE 's/^[|] Generated [|] ([^|]+) [|]/\1/p' "$snapshot_dir/receipt.md" | head -n1 || true)"
+                  if [[ -n "$snapshot_generated" ]]; then
+                    snapshot_age_min="$(
+                      python3 - "$snapshot_generated" <<'PY'
+from datetime import datetime, timezone
+import sys
+raw = sys.argv[1].strip()
+try:
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+except Exception:
+    print(999999)
+    raise SystemExit(0)
+now = datetime.now(timezone.utc)
+delta = now - dt.astimezone(timezone.utc)
+print(max(0, int(delta.total_seconds() // 60)))
+PY
+                    )"
+                  fi
+                fi
+
+                local reconcile_tmpl reconcile_cmd
+                reconcile_tmpl="$(yq e -r '.required_reconcile_command_template // "./bin/ops cap run stability.control.reconcile --domain {{critical_domain}}"' "$guard_policy" 2>/dev/null || true)"
+                reconcile_cmd="${reconcile_tmpl//\{\{critical_domain\}\}/$critical_domain}"
+
+                if [[ -z "$snapshot_dir" || "$snapshot_age_min" -gt "$snapshot_ttl" ]]; then
+                  echo "BLOCKED: proactive mutation guard"
+                  echo "Capability: $name"
+                  echo "Blocking domain: $critical_domain (mapped from capability domain: $cap_domain)"
+                  if [[ -n "$snapshot_run_key" ]]; then
+                    echo "Latest snapshot run key: $snapshot_run_key (stale: ${snapshot_age_min}m > ttl ${snapshot_ttl}m)"
+                  else
+                    echo "Latest snapshot run key: none"
+                  fi
+                  echo "Required reconcile command: $reconcile_cmd"
+                  echo "Unblock criteria: run fresh snapshot and clear warn/incident for target domain."
+                  blocked_reason="proactive_guard_snapshot_missing_or_stale:$critical_domain"
+                  exit_code=3
+                else
+                  local snapshot_output domain_status
+                  snapshot_output="$snapshot_dir/output.txt"
+                  domain_status=""
+                  if [[ -f "$snapshot_output" ]]; then
+                    # Prefer JSON payload when available in output.
+                    local json_payload
+                    json_payload="$(sed -n '/^{/,$p' "$snapshot_output" 2>/dev/null || true)"
+                    if [[ -n "$json_payload" ]] && printf '%s\n' "$json_payload" | jq -e '.' >/dev/null 2>&1; then
+                      domain_status="$(printf '%s\n' "$json_payload" | jq -r --arg d "$critical_domain" '.domains[]? | select(.id == $d) | .status' | head -n1 || true)"
+                    fi
+                    if [[ -z "$domain_status" || "$domain_status" == "null" ]]; then
+                      domain_status="$(awk -v d="$critical_domain" '$1==d {print tolower($2); exit}' "$snapshot_output" 2>/dev/null || true)"
+                    fi
+                  fi
+
+                  domain_status="$(echo "${domain_status:-unknown}" | tr '[:upper:]' '[:lower:]' | xargs)"
+                  local should_block=0
+                  local t
+                  for t in $trigger_statuses; do
+                    t="$(echo "$t" | tr '[:upper:]' '[:lower:]')"
+                    if [[ "$domain_status" == "$t" ]]; then
+                      should_block=1
+                      break
+                    fi
+                  done
+
+                  if [[ "$should_block" -eq 1 ]]; then
+                    echo "BLOCKED: proactive mutation guard"
+                    echo "Capability: $name"
+                    echo "Blocking domain: $critical_domain (mapped from capability domain: $cap_domain)"
+                    echo "Triggering snapshot run key: ${snapshot_run_key:-unknown}"
+                    echo "Snapshot domain status: $domain_status"
+                    echo "Required reconcile command: $reconcile_cmd"
+                    echo "Unblock criteria: snapshot for target domain must be outside trigger statuses [$trigger_statuses]."
+                    blocked_reason="proactive_guard_domain_blocked:$critical_domain:$domain_status:${snapshot_run_key:-none}"
+                    exit_code=3
+                  fi
+                fi
+              fi
+            fi
+          fi
+        fi
+      fi
+    fi
+
     # ── AOF contract acknowledgment (v0.2) ──
     # When .environment.yaml exists, enforce daily contract read acknowledgment
     # before allowing mutating/destructive capabilities.
-    if [[ "$safety" == "mutating" || "$safety" == "destructive" ]] && [[ "$name" != "aof.contract.acknowledge" ]]; then
+    if [[ -z "$blocked_reason" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]] && [[ "$name" != "aof.contract.acknowledge" ]]; then
       local env_contract="${cwd}/.environment.yaml"
       if [[ -f "$env_contract" ]]; then
         local ack_check
