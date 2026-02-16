@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# graph-token-exec — workaround for GAP-OP-559
+# Acquires MS Graph bearer token from Azure AD client credentials
+# then runs the given command with MS_GRAPH_ACCESS_TOKEN in env.
+#
+# Usage (via secrets.exec injection):
+#   secrets.exec -- graph-token-exec <cmd...>
+#
+# Requires env: AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID
+set -euo pipefail
+
+if [[ -z "${AZURE_CLIENT_ID:-}" || -z "${AZURE_CLIENT_SECRET:-}" || -z "${AZURE_TENANT_ID:-}" ]]; then
+  echo "FAIL: AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and AZURE_TENANT_ID must be in env" >&2
+  exit 1
+fi
+
+if [[ "$#" -lt 1 ]]; then
+  echo "USAGE: graph-token-exec <command...>" >&2
+  exit 1
+fi
+
+TOKEN_URL="https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token"
+
+RESPONSE="$(curl -s -X POST "$TOKEN_URL" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=${AZURE_CLIENT_ID}" \
+  -d "client_secret=${AZURE_CLIENT_SECRET}" \
+  -d "scope=https%3A%2F%2Fgraph.microsoft.com%2F.default")"
+
+ACCESS_TOKEN="$(printf '%s' "$RESPONSE" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""))')"
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+  ERROR="$(printf '%s' "$RESPONSE" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("error_description", d.get("error","unknown")))' 2>/dev/null || echo "unknown")"
+  echo "FAIL: Azure AD token acquisition failed: $ERROR" >&2
+  exit 1
+fi
+
+export MS_GRAPH_ACCESS_TOKEN="$ACCESS_TOKEN"
+# App-only tokens cannot use /me — set user UPN for /users/{upn} rewrite
+export MS_GRAPH_USER="${MS_GRAPH_USER:-Ronny@mintprints.com}"
+exec "$@"

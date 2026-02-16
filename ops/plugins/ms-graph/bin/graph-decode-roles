@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Decode JWT roles from Azure AD app token (no secret output)
+set -euo pipefail
+
+if [[ -z "${AZURE_CLIENT_ID:-}" || -z "${AZURE_CLIENT_SECRET:-}" || -z "${AZURE_TENANT_ID:-}" ]]; then
+  echo "FAIL: AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, and AZURE_TENANT_ID must be in env" >&2
+  exit 1
+fi
+
+TOKEN_URL="https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token"
+
+RESPONSE="$(curl -s -X POST "$TOKEN_URL" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=${AZURE_CLIENT_ID}" \
+  -d "client_secret=${AZURE_CLIENT_SECRET}" \
+  -d "scope=https%3A%2F%2Fgraph.microsoft.com%2F.default")"
+
+python3 - "$RESPONSE" <<'PYEOF'
+import sys, base64, json
+resp = json.loads(sys.argv[1])
+token = resp.get("access_token", "")
+if not token:
+    print("FAIL: no access_token in response")
+    sys.exit(1)
+payload = token.split(".")[1]
+pad = 4 - len(payload) % 4
+if pad != 4:
+    payload += "=" * pad
+d = json.loads(base64.urlsafe_b64decode(payload))
+print("roles:", json.dumps(d.get("roles", []), indent=2))
+PYEOF
