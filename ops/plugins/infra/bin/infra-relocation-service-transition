@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Required inputs:
 #   --service <service name in manifest>
-#   --status <planned|shadow|cutover|migrated|rolled-back>
+#   --status <planned|shadow|cutover|migrated|applied|rolled-back>
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 MANIFEST="${INFRA_RELOCATION_MANIFEST:-$SPINE_REPO/ops/bindings/infra.relocation.plan.yaml}"
@@ -22,11 +22,11 @@ infra-relocation-service-transition - Controlled service status update
 Usage:
   infra-relocation-service-transition \
     --service <name> \
-    --status <planned|shadow|cutover|migrated|rolled-back> \
+    --status <planned|shadow|cutover|migrated|applied|rolled-back> \
     [--dry-run|--execute]
 
 Status flow:
-  planned -> shadow -> cutover -> migrated
+  planned -> shadow -> cutover -> applied (legacy alias: migrated)
   (any)   -> rolled-back  (rollback allowed from any state)
 
 Examples:
@@ -57,8 +57,8 @@ done
 [[ -n "$STATUS" ]] || fail "--status is required"
 
 case "$STATUS" in
-    planned|shadow|cutover|migrated|rolled-back) ;;
-    *) fail "invalid --status: $STATUS (expected: planned|shadow|cutover|migrated|rolled-back)" ;;
+    planned|shadow|cutover|migrated|applied|rolled-back) ;;
+    *) fail "invalid --status: $STATUS (expected: planned|shadow|cutover|migrated|applied|rolled-back)" ;;
 esac
 
 need yq
@@ -82,7 +82,7 @@ now_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # Enforce valid status transitions
 transition_ok=0
 case "$current_status:$STATUS" in
-    planned:shadow|shadow:cutover|cutover:migrated) transition_ok=1 ;;
+    planned:shadow|shadow:cutover|cutover:migrated|cutover:applied) transition_ok=1 ;;
     # Allow rollback from any active state
     shadow:rolled-back|cutover:rolled-back|migrated:rolled-back) transition_ok=1 ;;
     # Allow idempotent re-application

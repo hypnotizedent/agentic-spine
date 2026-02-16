@@ -42,7 +42,7 @@ Gate checks (all must pass):
   3. Rollback host:port is reachable (TCP)
   4. Current time >= soak-until (ONLY when --soak-until is provided)
 
-On success (--execute): transitions service to migrated, then runs
+On success (--execute): transitions service to applied, then runs
 preflight, parity, and spine.verify gates.
 
 Examples:
@@ -112,7 +112,7 @@ to_host="$(yq e ".services[] | select(.service == \"$SERVICE\") | .to_host // \"
 rollback_to="$(yq e ".services[] | select(.service == \"$SERVICE\") | .rollback_to // \"\"" "$MANIFEST")"
 
 "$PLACEMENT_CHECK" --policy "$POLICY" --check service \
-    --service "$SERVICE" --to-host "$to_host" --rollback-host "$rollback_to" --status migrated
+    --service "$SERVICE" --to-host "$to_host" --rollback-host "$rollback_to" --status applied
 
 echo "=== INFRA RELOCATION PROMOTION GATE ==="
 echo "Mode:              $([[ "$EXECUTE" -eq 1 ]] && echo "execute" || echo "dry-run")"
@@ -209,17 +209,17 @@ echo "ALL GATES PASSED."
 if [[ "$EXECUTE" -ne 1 ]]; then
     echo ""
     echo "DRY-RUN: promotion checks passed but no changes applied."
-    echo "Re-run with --execute to promote '$SERVICE' to migrated."
+    echo "Re-run with --execute to promote '$SERVICE' to applied."
     exit 0
 fi
 
 echo ""
-echo "=== PROMOTING $SERVICE: cutover -> migrated ==="
+echo "=== PROMOTING $SERVICE: cutover -> applied ==="
 echo ""
 
 # Run service transition (auto-approve via echo yes)
 echo "--- Step 1/4: Service transition ---"
-echo "yes" | "$OPS" cap run infra.relocation.service.transition --service "$SERVICE" --status migrated --execute 2>&1
+echo "yes" | "$OPS" cap run infra.relocation.service.transition --service "$SERVICE" --status applied --execute 2>&1
 echo ""
 
 # Run preflight
@@ -238,6 +238,6 @@ echo "--- Step 4/4: Spine verify ---"
 echo ""
 
 echo "=== PROMOTION COMPLETE ==="
-echo "Service '$SERVICE' promoted to migrated."
+echo "Service '$SERVICE' promoted to applied."
 echo "Rollback target $ROLLBACK_HOST:$ROLLBACK_PORT was reachable at gate time."
 echo "Keep rollback target running for the rollback window."
