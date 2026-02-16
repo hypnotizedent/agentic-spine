@@ -4,7 +4,9 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
-HA_API="http://100.67.120.1:8123/api"
+HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_PORT="${HA_PORT:-8123}"
+HA_API="http://${HA_HOST}:${HA_PORT}/api"
 
 # Retrieve token from Infisical
 if [[ ! -x "$INFISICAL_AGENT" ]]; then
