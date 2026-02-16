@@ -33,7 +33,10 @@ if [[ "$DEVICE_COUNT" -eq 0 ]]; then
   exit 0
 fi
 
-# ── Check 1: ha_entities match pattern {domain}.{snake_case(id)} ──
+# ── Check 1: For Tuya devices, ha_entities match {domain}.{snake_case(id)} ──
+# Non-Tuya devices (Matter/IKEA, Ring, etc.) have integration-assigned entity IDs
+# that we can't rename — their ha_entities are cross-references only.
+TUYA_HA_IDS="$(yq -r '.devices[] | select(has("ha_entities") and has("tuya_name")) | .id' "$REGISTRY" 2>/dev/null)"
 while IFS= read -r id; do
   [[ -z "$id" ]] && continue
   snake_id="$(kebab_to_snake "$id")"
@@ -46,7 +49,7 @@ while IFS= read -r id; do
       err "device '$id' ha_entity '$entity' does not match expected '${domain}.${snake_id}'"
     fi
   done < <(yq -r ".devices[] | select(.id == \"$id\") | .ha_entities[]" "$REGISTRY" 2>/dev/null)
-done <<< "$HA_DEVICE_IDS"
+done <<< "$TUYA_HA_IDS"
 
 # ── Check 2: tuya_name matches Title Case of id ──
 TUYA_DEVICE_IDS="$(yq -r '.devices[] | select(has("tuya_name")) | .id' "$REGISTRY" 2>/dev/null)"
