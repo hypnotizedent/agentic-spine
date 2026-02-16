@@ -28,7 +28,7 @@ Direct launch/bypass from Hammerspoon or Raycast is forbidden.
 
 ## Required Model/Provider
 
-- OpenCode model: `zai-coding-plan/glm-5`
+- OpenCode model: `openai/glm-5`
 - Provider base URL: `https://api.z.ai/api/paas/v4`
 - API key source: `ZAI_API_KEY` (alias `Z_AI_API_KEY` allowed)
 - Key injection source of truth: Infisical (via spine helper flow)

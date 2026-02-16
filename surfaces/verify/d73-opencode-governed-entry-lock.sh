@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Ensure opencode.json uses the canonical z.ai model lane and launcher path is correct.
+# TRIAGE: Ensure opencode.json uses model openai/glm-5 and launcher path is correct.
 # D73: OpenCode governed entry lock
 # Enforces that OpenCode launch surfaces route through spine_terminal_entry and
 # target the canonical model/provider contract.
@@ -43,8 +43,8 @@ need_file "$RAYCAST_OC"
 need_file "$OPENCODE_CFG"
 [[ -d "$OPENCODE_CMD_DIR" ]] || fail "missing opencode command dir: $OPENCODE_CMD_DIR"
 
-rg -q 'exec opencode -m zai-coding-plan/glm-5 \.' "$ENTRY_SH" \
-  || fail "spine_terminal_entry opencode launch must use 'zai-coding-plan/glm-5'"
+rg -q 'exec opencode -m openai/glm-5 \.' "$ENTRY_SH" \
+  || fail "spine_terminal_entry opencode launch must use 'openai/glm-5'"
 
 rg -q 'OPENAI_BASE_URL=.*https://api.z.ai/api/paas/v4' "$ENTRY_SH" \
   || fail "spine_terminal_entry must export OPENAI_BASE_URL to z.ai"
@@ -56,16 +56,16 @@ rg -q '/Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --r
   || fail "Raycast OpenCode must launch through canonical spine_terminal_entry path"
 
 cfg_model="$(jq -r '.agent.default.model // empty' "$OPENCODE_CFG" 2>/dev/null || true)"
-[[ "$cfg_model" == "zai-coding-plan/glm-5" ]] \
-  || fail "opencode.json agent.default.model must be zai-coding-plan/glm-5 (got: ${cfg_model:-empty})"
+[[ "$cfg_model" == "openai/glm-5" ]] \
+  || fail "opencode.json agent.default.model must be openai/glm-5 (got: ${cfg_model:-empty})"
 
-cfg_base="$(jq -r '.provider["zai-coding-plan"].options.baseURL // empty' "$OPENCODE_CFG" 2>/dev/null || true)"
+cfg_base="$(jq -r '.provider.openai.options.baseURL // empty' "$OPENCODE_CFG" 2>/dev/null || true)"
 [[ "$cfg_base" == "https://api.z.ai/api/paas/v4" ]] \
-  || fail "opencode.json provider.zai-coding-plan.options.baseURL must be z.ai endpoint"
+  || fail "opencode.json provider.openai.options.baseURL must be z.ai endpoint"
 
-cfg_api_key_ref="$(jq -r '.provider["zai-coding-plan"].options.apiKey // empty' "$OPENCODE_CFG" 2>/dev/null || true)"
+cfg_api_key_ref="$(jq -r '.provider.openai.options.apiKey // empty' "$OPENCODE_CFG" 2>/dev/null || true)"
 [[ "$cfg_api_key_ref" == "{env:ZAI_API_KEY}" ]] \
-  || fail "opencode.json provider.zai-coding-plan.options.apiKey must be {env:ZAI_API_KEY}"
+  || fail "opencode.json provider.openai.options.apiKey must be {env:ZAI_API_KEY}"
 
 if jq -e '.provider.anthropic' "$OPENCODE_CFG" >/dev/null 2>&1; then
   fail "opencode.json must not define anthropic provider for governed z.ai-only lane"
@@ -87,8 +87,8 @@ jq -e '(.plugin // []) | map(strings) | any(test("opencode-morph-fast-apply"))' 
 OMO_CFG="$WORKBENCH_ROOT/dotfiles/opencode/oh-my-opencode.json"
 need_file "$OMO_CFG"
 
-jq -e '(.agents // {}) | to_entries | all(.value.model == "zai-coding-plan/glm-5")' "$OMO_CFG" >/dev/null 2>&1 \
-  || fail "oh-my-opencode.json agents must all use zai-coding-plan/glm-5"
+jq -e '(.agents // {}) | to_entries | all(.value.model == "openai/glm-5")' "$OMO_CFG" >/dev/null 2>&1 \
+  || fail "oh-my-opencode.json agents must all use openai/glm-5"
 
 # Governance contract surface: OPENCODE.md must exist and contain worker contract sections
 OPENCODE_MD="$WORKBENCH_ROOT/dotfiles/opencode/OPENCODE.md"
