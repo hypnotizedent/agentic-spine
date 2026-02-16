@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
+# surface-boundary-audit
+#
+# STD-002: Runtime Path Resolution - validates runtime-only destinations resolve under contract runtime_root
+# STD-003: Boundary Audit Strictness - validates tracked_exceptions entries exist
+#
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 BINDING="$ROOT/ops/bindings/spine.boundary.baseline.yaml"
+MAILROOM_CONTRACT="$ROOT/ops/bindings/mailroom.runtime.contract.yaml"
 JSON_MODE=0
 NO_FAIL=0
 
@@ -24,6 +30,8 @@ command -v yq >/dev/null 2>&1 || fail "yq is required"
 shopt -s globstar nullglob
 
 declare -a VIOLATIONS=()
+declare -a STRICTNESS_WARNS=()
+declare -a STRICTNESS_FAILS=()
 
 scan_group() {
   local group="$1"
@@ -55,15 +63,74 @@ scan_group() {
   done
 }
 
+validate_tracked_exceptions() {
+  [[ -f "$MAILROOM_CONTRACT" ]] || return 0
+
+  local exceptions_len
+  exceptions_len="$(yq e '.tracked_exceptions | length' "$MAILROOM_CONTRACT" 2>/dev/null)"
+  [[ "$exceptions_len" =~ ^[0-9]+$ ]] || exceptions_len=0
+
+  local i
+  for ((i=0; i<exceptions_len; i++)); do
+    local exception
+    exception="$(yq e -r ".tracked_exceptions[$i]" "$MAILROOM_CONTRACT")"
+    [[ -n "$exception" && "$exception" != "null" ]] || continue
+
+    local full_path="$ROOT/$exception"
+
+    if [[ "$exception" == *"*"* ]]; then
+      local matches
+      matches="$(compgen -G "$full_path" 2>/dev/null | wc -l || echo 0)"
+      if [[ "$matches" -eq 0 ]]; then
+        STRICTNESS_WARNS+=("tracked_exceptions|$exception|no_matches|glob has no matching files")
+      fi
+    else
+      if [[ ! -e "$full_path" ]]; then
+        STRICTNESS_WARNS+=("tracked_exceptions|$exception|missing|file or directory does not exist")
+      fi
+    fi
+  done
+}
+
+validate_runtime_paths() {
+  [[ -f "$MAILROOM_CONTRACT" ]] || return 0
+
+  local contract_runtime_root
+  contract_runtime_root="$(yq e -r '.runtime_root // ""' "$MAILROOM_CONTRACT")"
+  [[ -n "$contract_runtime_root" ]] || return 0
+
+  local rules_len
+  rules_len="$(yq e '.rules.runtime_only | length' "$BINDING" 2>/dev/null)"
+  [[ "$rules_len" =~ ^[0-9]+$ ]] || rules_len=0
+
+  local i
+  for ((i=0; i<rules_len; i++)); do
+    local dest rule_id
+    dest="$(yq e -r ".rules.runtime_only[$i].destination // \"\"" "$BINDING")"
+    rule_id="$(yq e -r ".rules.runtime_only[$i].id" "$BINDING")"
+
+    [[ -n "$dest" ]] || continue
+
+    if [[ "$dest" != "$contract_runtime_root"* ]]; then
+      STRICTNESS_FAILS+=("runtime_path|$rule_id|$dest|destination not under contract runtime_root ($contract_runtime_root)")
+    fi
+  done
+}
+
 scan_group "move_workbench"
 scan_group "runtime_only"
 scan_group "archive_then_delete"
 
+validate_tracked_exceptions
+validate_runtime_paths
+
 if [[ "$JSON_MODE" -eq 1 ]]; then
   {
     echo "{"
-    echo "  \"status\": \"$([[ ${#VIOLATIONS[@]} -eq 0 ]] && echo pass || echo fail)\","
+    echo "  \"status\": \"$([[ ${#VIOLATIONS[@]} -eq 0 && ${#STRICTNESS_FAILS[@]} -eq 0 ]] && echo pass || echo fail)\","
     echo "  \"violation_count\": ${#VIOLATIONS[@]},"
+    echo "  \"strictness_warn_count\": ${#STRICTNESS_WARNS[@]},"
+    echo "  \"strictness_fail_count\": ${#STRICTNESS_FAILS[@]},"
     echo "  \"violations\": ["
     for idx in "${!VIOLATIONS[@]}"; do
       IFS='|' read -r grp rid path target <<<"${VIOLATIONS[$idx]}"
@@ -71,17 +138,37 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
       [[ "$idx" -eq $((${#VIOLATIONS[@]}-1)) ]] && comma=""
       printf '    {"group":"%s","rule_id":"%s","path":"%s","target":"%s"}%s\n' "$grp" "$rid" "$path" "$target" "$comma"
     done
+    echo "  ],"
+    echo "  \"strictness_warns\": ["
+    for idx in "${!STRICTNESS_WARNS[@]}"; do
+      IFS='|' read -r check path status detail <<<"${STRICTNESS_WARNS[$idx]}"
+      comma=","
+      [[ "$idx" -eq $((${#STRICTNESS_WARNS[@]}-1)) ]] && comma=""
+      printf '    {"check":"%s","path":"%s","status":"%s","detail":"%s"}%s\n' "$check" "$path" "$status" "$detail" "$comma"
+    done
+    echo "  ],"
+    echo "  \"strictness_fails\": ["
+    for idx in "${!STRICTNESS_FAILS[@]}"; do
+      IFS='|' read -r check rule_id path detail <<<"${STRICTNESS_FAILS[$idx]}"
+      comma=","
+      [[ "$idx" -eq $((${#STRICTNESS_FAILS[@]}-1)) ]] && comma=""
+      printf '    {"check":"%s","rule_id":"%s","path":"%s","detail":"%s"}%s\n' "$check" "$rule_id" "$path" "$detail" "$comma"
+    done
     echo "  ]"
     echo "}"
   }
 else
   echo "surface.boundary.audit"
-  if [[ ${#VIOLATIONS[@]} -eq 0 ]]; then
+  if [[ ${#VIOLATIONS[@]} -eq 0 && ${#STRICTNESS_FAILS[@]} -eq 0 ]]; then
     echo "status: PASS"
-    echo "violations: 0"
   else
     echo "status: FAIL"
-    echo "violations: ${#VIOLATIONS[@]}"
+  fi
+  echo "violations: ${#VIOLATIONS[@]}"
+  echo "strictness_warns: ${#STRICTNESS_WARNS[@]}"
+  echo "strictness_fails: ${#STRICTNESS_FAILS[@]}"
+
+  if [[ ${#VIOLATIONS[@]} -gt 0 ]]; then
     echo
     printf '%-20s %-36s %-70s %s\n' "GROUP" "RULE" "PATH" "TARGET"
     printf '%-20s %-36s %-70s %s\n' "-----" "----" "----" "------"
@@ -90,10 +177,36 @@ else
       printf '%-20s %-36s %-70s %s\n' "$grp" "$rid" "$path" "$target"
     done
   fi
+
+  if [[ ${#STRICTNESS_WARNS[@]} -gt 0 ]]; then
+    echo
+    echo "=== STRICTNESS WARNS (STD-003) ==="
+    printf '%-25s %-50s %-12s %s\n' "CHECK" "PATH" "STATUS" "DETAIL"
+    printf '%-25s %-50s %-12s %s\n' "-----" "----" "------" "------"
+    for row in "${STRICTNESS_WARNS[@]}"; do
+      IFS='|' read -r check path status detail <<<"$row"
+      printf '%-25s %-50s %-12s %s\n' "$check" "$path" "$status" "$detail"
+    done
+  fi
+
+  if [[ ${#STRICTNESS_FAILS[@]} -gt 0 ]]; then
+    echo
+    echo "=== STRICTNESS FAILS (STD-002) ==="
+    printf '%-15s %-30s %-50s %s\n' "CHECK" "RULE_ID" "PATH" "DETAIL"
+    printf '%-15s %-30s %-50s %s\n' "-----" "-------" "----" "------"
+    for row in "${STRICTNESS_FAILS[@]}"; do
+      IFS='|' read -r check rule_id path detail <<<"$row"
+      printf '%-15s %-30s %-50s %s\n' "$check" "$rule_id" "$path" "$detail"
+    done
+  fi
 fi
 
 if [[ ${#VIOLATIONS[@]} -gt 0 && "$NO_FAIL" -ne 1 ]]; then
   fail "boundary violations detected (${#VIOLATIONS[@]})"
+fi
+
+if [[ ${#STRICTNESS_FAILS[@]} -gt 0 && "$NO_FAIL" -ne 1 ]]; then
+  fail "strictness fails detected (${#STRICTNESS_FAILS[@]})"
 fi
 
 exit 0
