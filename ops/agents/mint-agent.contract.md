@@ -1,61 +1,71 @@
 # mint-agent Contract
 
-> **Status:** registered
-> **Domain:** mint-modules
+> **Status:** active
+> **Domain:** mint
 > **Owner:** @ronny
 > **Created:** 2026-02-12
-> **Loop:** CP-20260212T105000Z (mint-agent-mcp-tooling)
+> **Last Updated:** 2026-02-16
+> **Loop:** LOOP-MINT-AGENT-CANONICALIZATION-20260216
 
 ---
 
 ## Identity
 
 - **Agent ID:** mint-agent
-- **Domain:** mint-modules (artwork, quote-page, order-intake)
-- **Implementation:** `~/code/mint-modules/agents/mcp-server/`
+- **Domain:** mint-modules (artwork, quote-page, order-intake, pricing, shipping, suppliers, finance-adapter)
+- **Workbench Implementation (canonical):** `~/code/workbench/agents/mint-agent/`
+- **Module Tool Source (product repo):** `~/code/mint-modules/agents/mcp-server/`
 - **Registry:** `ops/bindings/agents.registry.yaml`
 
 ## Owns (Application Layer)
 
 | Concern | Services | VMs |
 |---------|----------|-----|
-| Seed intake queries | files-api (artwork) | VM 213 (mint-apps) |
-| Upload/asset tracking | files-api (artwork) | VM 213 (mint-apps) |
-| Job lifecycle queries | files-api (artwork) | VM 213 (mint-apps) |
-| Contract validation | order-intake | VM 213 (mint-apps) |
-| Module health monitoring | files-api, order-intake, quote-page | VM 213 (mint-apps) |
-| Finance event mapping | finance-adapter | VM 213 (mint-apps) |
-| Data plane health | PostgreSQL, MinIO, Redis | VM 212 (mint-data) |
+| Module endpoint health probes | files-api, order-intake, quote-page, pricing, suppliers, shipping, finance-adapter | VM 213 (mint-apps) |
+| Seed intake data query | files-api (artwork) | VM 213 (mint-apps) |
+| Intake contract validation | order-intake | VM 213 (mint-apps) |
+| Deploy/runtime status checks | mint-apps + mint-data stacks | VM 213 + VM 212 |
+| Migration preflight checks | mint-data postgres | VM 212 (mint-data) |
 
 ## Defers to Spine (Infrastructure Layer)
 
 | Concern | Spine Artifact |
 |---------|---------------|
-| Compose deployment | `ops/bindings/docker.compose.targets.yaml` (mint-apps, mint-data) |
-| Health probes (up/down) | `ops/bindings/services.health.yaml` |
+| Compose deployment and runtime paths | `ops/bindings/docker.compose.targets.yaml` |
+| Health registry and service parity | `ops/bindings/services.health.yaml` + D23 |
 | Secrets | Infisical `/spine/services/artwork/`, `/spine/services/quote-page/`, `/spine/services/order-intake/` |
 | SSH targets | `ops/bindings/ssh.targets.yaml` (mint-apps, mint-data) |
-| Spine capabilities | `ops/plugins/mint/` (5 capabilities) |
+| Backup and infrastructure lifecycle | `ops/bindings/backup.inventory.yaml`, `ops/bindings/vm.lifecycle.yaml` |
+| Governed execution path | `ops/plugins/mint/` capabilities (`mint.*`) |
 
 ## Invocation
 
-On-demand via Claude Code/Desktop MCP. No watchers, no cron.
+Primary path is spine capability execution with receipts:
+
+- `mint.modules.health`
+- `mint.seeds.query`
+- `mint.intake.validate`
+- `mint.deploy.status`
+- `mint.migrate.dryrun`
+
+Optional MCP surface (read-only tooling) is sourced from `mint-modules` for product-local iteration.
+No watchers or cron in workbench.
 
 ## Endpoints
 
 | VM | Tailscale IP | Role |
 |----|-------------|------|
-| 213 (mint-apps) | 100.79.183.14 | App plane: files-api (:3500), order-intake (:3400), quote-page (:3341) |
+| 213 (mint-apps) | 100.79.183.14 | App plane: files-api (:3500), order-intake (:3400), quote-page (:3341), pricing (:3700), suppliers (:3800), shipping (:3900), finance-adapter (:3600) |
 | 212 (mint-data) | 100.106.72.25 | Data plane: PostgreSQL (:5432), MinIO (:9000), Redis (:6379) |
 
-## Governed Tools
+## Read-Only Tool Surface
 
 | Tool | Safety | Description |
 |------|--------|-------------|
-| `query_seeds` | read-only | Query artwork seeds with status/needs_line_item filters |
-| `list_uploads` | read-only | List recent seeds with associated file assets |
-| `query_artwork_jobs` | read-only | Look up job by number or UUID |
-| `validate_intake` | read-only | Validate customer contract payload (no creation) |
-| `check_module_health` | read-only | Health probe for all endpoints |
+| `mint.modules.health` | read-only | Health probe for mint app/data endpoints |
+| `mint.seeds.query` | read-only | Query artwork seed records on mint-data |
+| `mint.intake.validate` | read-only | Validate intake payload against order-intake contract |
+| `mint.deploy.status` | read-only | Read container status on mint-apps + mint-data |
+| `mint.migrate.dryrun` | read-only | Check pending migrations without applying changes |
 
-> **Mutation policy:** No mutation tools in V1. Future mutations require API key auth via Infisical injection, spine capability registration, and D66 MCP parity gate compliance.
+> **Mutation policy:** No mutation tools are authorized for `mint-agent`. Any future mutation path must be added as explicit `mint.*` capabilities with manual approval policy and gate coverage.
