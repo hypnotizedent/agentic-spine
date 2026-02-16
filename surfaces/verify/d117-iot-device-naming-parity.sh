@@ -67,10 +67,16 @@ while IFS= read -r id; do
   [[ -z "$id" ]] && continue
   name="$(yq -r ".devices[] | select(.id == \"$id\") | .name" "$REGISTRY")"
 
-  # Skip manufacturer defaults that can't be changed in UniFi
+  # Skip manufacturer defaults and infrastructure devices that can't be renamed in UniFi
   case "$name" in
     C545|C610*|EP25|LC*|lwip0|"Network device"|"Office") continue ;;
   esac
+
+  # Skip infrastructure category devices — UniFi names set by controller
+  dev_category="$(yq -r ".devices[] | select(.id == \"$id\") | .category" "$REGISTRY" 2>/dev/null)"
+  if [[ "$dev_category" == "infrastructure" || "$dev_category" == "coordinator" ]]; then
+    continue
+  fi
 
   if [[ "$name" != "$id" ]]; then
     err "device '$id' UniFi name '$name' does not match canonical ID"
