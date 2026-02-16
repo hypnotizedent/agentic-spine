@@ -68,38 +68,53 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 | hacs | HACS | Infrastructure |
 | hassio | Supervisor | Infrastructure |
 | islamic_prayer_times | Islamic Prayer Times | Utility |
+| jellyfin | Jellyfin (VM 209) | Media |
+| lidarr | Lidarr (VM 209) | Media |
+| litterrobot | Litter-Robot | Smart Home |
 | local_todo | shopping-list | Utility |
 | matter | Matter | Protocol |
 | met | Weather (Home) | Utility |
 | mobile_app | Ronny, Empress, Boca (x2), Marium | Companion |
 | mqtt | Mosquitto broker | Infrastructure |
+| music_assistant | Music Assistant (add-on, 7 players) | Media |
+| otbr | OpenThread Border Router | Protocol |
+| pi_hole | Pi-hole (infra-core) | Infrastructure |
+| proxmoxve | Home Beelink (10.0.0.179) + Shop R730XD (192.168.1.184) | Infrastructure |
+| qbittorrent | qBittorrent (VM 209) | Media |
+| radarr | Radarr (VM 209) | Media |
 | radio_browser | Radio Browser | Media |
 | ring | Doorbell + cameras | Smart Home |
 | roborock | Vacuum | Smart Home |
+| sabnzbd | SABnzbd (VM 209) | Media |
 | shopping_list | Shopping list | Utility |
 | smlight | SLZB-06MU | Protocol |
+| sonarr | Sonarr (VM 209) | Media |
 | sonoff | eWeLink devices | Smart Home |
+| speedtestdotnet | Speedtest.net | Infrastructure |
 | sun | Sun | Utility |
 | synology_dsm | DS918 | Infrastructure |
 | thread | Thread | Protocol |
 | tplink | EMPRESS LAMP EP25, KING LAMP EP25 | Smart Home |
 | tuya | Cloud Tuya (x2) | Smart Home |
+| unifi | UniFi Network (UDR7) | Infrastructure |
+| uptime_kuma | Uptime Kuma (47 monitors) | Infrastructure |
+| utility_meter | Utility meters | Infrastructure |
 | webostv | LG Living Room, LG Guest Room | Media |
 | webrtc | WebRTC Camera | Infrastructure |
 | winix | Winix Purifier | Smart Home |
 
-**Total:** ~43 config entries across ~30 domains.
+**Total:** 59 config entries across 45 domains.
 
-> **Media services note:** jellyfin, radarr, lidarr, and sabnzbd were removed from HA config entries —
-> they now run on dedicated media VMs (download-stack, streaming-stack). Version monitoring is still
-> available via HACS update entities (`update.lidarr_update`, `update.sabnzbd_update`,
-> `update.sonarr_update`) and governed by the media stack (`media.services.yaml`, D108 health gate).
+> **Media services note:** jellyfin, radarr, lidarr, sonarr, sabnzbd, and qbittorrent run on dedicated
+> media VMs (download-stack VM 209, streaming-stack VM 209). HA integrations connect to these VMs
+> directly. Duplicate HA add-ons for these services were removed (Feb 2026) — only the native
+> integrations remain.
 
 ---
 
 ## 3. Automation Inventory
 
-> 21 automations active. Critical fix: all button triggers include `not_from: ["unavailable", "unknown"]`.
+> 27 automations active. Critical fix: all button triggers include `not_from: ["unavailable", "unknown"]`.
 
 | Automation | Entity Trigger | Action | Notes |
 |-----------|---------------|--------|-------|
@@ -122,6 +137,12 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 | House Mode: Morning Motion → Home | `binary_sensor.myggspray_wrlss_mtn_sensor_occupancy` on | Set house_mode to Home | 6am–10pm, while in Sleep |
 | House Mode: Away + Motion → Alert | occupancy or front_door_motion on | Critical notify to phone | While house_mode = Away |
 | System: Auto-Dismiss Localhost Login Failures | event: persistent_notification from 127.0.0.1 | Dismiss notification | Noise suppression |
+| Laundry: Washer Done → Notify | `sensor.washer_*` power drop | Notify Ronny iPhone | Smart plug power monitoring |
+| Office: Button Double → Guest Room Brightness Cycle | `event.0xa4c138cdbd2d0012_action` (double) | `light.turn_on` guest room bulb brightness cycle | Zigbee button |
+| Office: Button Hold → Guest Room Off | `event.0xa4c138cdbd2d0012_action` (hold) | `light.turn_off` guest room bulb | Zigbee button |
+| Scene Switch: Button 3 Double → Guest Room Brightness Cycle | `event.0xa4c138615058086b_action` (3_double) | `light.turn_on` guest room bulb brightness cycle | Scene switch |
+| Scene Switch: Button 4 Double → Office Desk Bulb Brightness Cycle | `event.0xa4c138615058086b_action` (4_double) | `light.turn_on` office desk bulb brightness cycle | Scene switch |
+| Scene Switch: Hold → All Off (Guest Room + Office) | `event.0xa4c138615058086b_action` (*_hold) | Turn off guest room + office bulbs | Scene switch |
 | Zigbee: Low Battery Alert | numeric_state < 20% on 6 sensors | Notify Ronny iPhone | Health monitoring |
 | Zigbee: Stale Device Alert (Daily) | time 09:00 daily | Notify if button silent > 12h | Health monitoring |
 
@@ -563,7 +584,7 @@ Use when HA config is corrupt but the VM itself is healthy.
 4. **Post-restore checklist:**
    - [ ] HA web UI accessible at `http://10.0.0.100:8123`
    - [ ] Zigbee2MQTT reconnects to SLZB-06 coordinator (check Z2M add-on logs)
-   - [ ] All 14 automations are enabled (`ha automations list` or Settings > Automations)
+   - [ ] All 27 automations are enabled (`ha automations list` or Settings > Automations)
    - [ ] Calendar integration (CalDAV) shows events
    - [ ] HACS integrations load without errors (Settings > Integrations > HACS)
    - [ ] SSH add-on is accessible (`ssh hassio@ha`)

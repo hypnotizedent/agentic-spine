@@ -38,12 +38,12 @@ parent_loop: LOOP-HA-GOVERNANCE-CONSOLIDATION-20260216
 |---|---|---|
 | `ha.ssot.baseline.yaml` | Unified index: entity/device/automation counts, health summary | `ha.ssot.baseline.build` |
 | `ha.automations.yaml` | All 27 automations with state, last triggered | `ha.automations.snapshot` |
-| `ha.device.map.yaml` | 58 devices cross-referenced with Z2M + network registry | `ha.device.map.build` |
-| `ha.entity.state.baseline.yaml` | 517 entities with expected-unavailable/unknown allowlists | `ha.entity.state.baseline` |
-| `ha.addons.yaml` | 20 Supervisor add-ons with status | `ha.addons.snapshot` |
-| `ha.integrations.yaml` | 40 integrations across 30 domains | `ha.integrations.snapshot` |
-| `ha.dashboards.yaml` | 10 Lovelace dashboards | `ha.dashboard.snapshot` |
-| `ha.hacs.yaml` | 46 HACS repositories | `ha.hacs.snapshot` |
+| `ha.device.map.yaml` | 174 devices cross-referenced with Z2M + network registry | `ha.device.map.build` |
+| `ha.entity.state.baseline.yaml` | 1153 entities with expected-unavailable/unknown allowlists | `ha.entity.state.baseline` |
+| `ha.addons.yaml` | 17 Supervisor add-ons with status | `ha.addons.snapshot` |
+| `ha.integrations.yaml` | 59 integrations across 45 domains | `ha.integrations.snapshot` |
+| `ha.dashboards.yaml` | 12 Lovelace dashboards | `ha.dashboard.snapshot` |
+| `ha.hacs.yaml` | 47 HACS repositories | `ha.hacs.snapshot` |
 | `ha.helpers.yaml` | 10 helper entities (input_boolean, input_select, etc.) | `ha.helpers.snapshot` |
 | `ha.scenes.yaml` | Scene entities | `ha.scenes.snapshot` |
 | `ha.scripts.yaml` | 19 script entities | `ha.scripts.snapshot` |
@@ -51,8 +51,8 @@ parent_loop: LOOP-HA-GOVERNANCE-CONSOLIDATION-20260216
 | `z2m.naming.yaml` | Canonical name to IEEE to entity ID mapping | Hand-maintained |
 | `ha.device.map.overrides.yaml` | Manual device name overrides | Hand-maintained |
 | `ha.sync.config.yaml` | Sync agent event-to-capability mappings | Hand-maintained |
-| `ha.entity.state.expected-unavailable.yaml` | 82 entities expected to be unavailable | Hand-maintained |
-| `ha.entity.state.expected-unknown.yaml` | 29 entities expected to have unknown state | Hand-maintained |
+| `ha.entity.state.expected-unavailable.yaml` | 65 entities expected to be unavailable | Hand-maintained |
+| `ha.entity.state.expected-unknown.yaml` | 28 entities expected to have unknown state | Hand-maintained |
 
 ## Drift Gates
 
