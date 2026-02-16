@@ -18,6 +18,14 @@ fail() { echo "D70 FAIL: $*" >&2; exit 1; }
 
 [[ -f "$AGENT" ]] || fail "canonical infisical-agent.sh missing"
 
+# Resolve shim: if the canonical file delegates to workbench, follow the delegation.
+if grep -q 'exec bash' "$AGENT" 2>/dev/null; then
+  WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
+  RESOLVED="$WORKBENCH_ROOT/scripts/agents/infisical-agent.sh"
+  [[ -f "$RESOLVED" ]] || fail "workbench infisical-agent.sh missing: $RESOLVED"
+  AGENT="$RESOLVED"
+fi
+
 # Verify the deprecated project guard functions exist in canonical agent.
 grep -q 'is_deprecated_project()' "$AGENT" || fail "missing is_deprecated_project() function"
 grep -q 'guard_deprecated_write()' "$AGENT" || fail "missing guard_deprecated_write() function"

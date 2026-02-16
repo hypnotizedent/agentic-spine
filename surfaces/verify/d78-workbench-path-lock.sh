@@ -74,7 +74,7 @@ fi
 # ── Check 3: ronny-ops path drift ──
 # Exclude governance/detection scripts that legitimately reference the term
 # (authority-trace, ci-runner-drift-check, install compat shims)
-RONNY_OPS_EXCLUDE_PATTERN='authority-trace\.sh|ci-runner-drift-check\.sh|install\.sh|ronny-ops-compat\.sh'
+RONNY_OPS_EXCLUDE_PATTERN='authority-trace\.sh|ci-runner-drift-check\.sh|install\.sh|ronny-ops-compat\.sh|legacy-freeze\.sh|legacy-thaw\.sh'
 
 RONNY_OPS_HITS="$(rg -l 'ronny-ops' "${SCAN_DIRS[@]}" \
   --glob '*.sh' --glob '*.lua' --glob '*.json' \
