@@ -1174,6 +1174,13 @@ else
   warn "gate registration contract lock gate not present"
 fi
 
+echo -n "D129 Spine schema conventions lock... "
+if [[ -x "$SP/surfaces/verify/d129-spine-schema-conventions-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d129-spine-schema-conventions-lock.sh" "D129"
+else
+  warn "spine schema conventions lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

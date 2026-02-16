@@ -65,6 +65,7 @@ Boundary:
 - `surface.boundary.audit`
 - `surface.boundary.reconcile.plan`
 - `catalog.domain.sync`
+- `schema.conventions.audit`
 
 ## CLI Commands (front door)
 

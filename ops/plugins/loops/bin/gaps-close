@@ -3,8 +3,9 @@ set -euo pipefail
 
 # gaps.close — Close or fix a gap (atomic, git-locked)
 #
-# Usage: gaps-close <GAP_ID> --status <fixed|closed> \
+# Usage: gaps-close --id <GAP_ID> --status <fixed|closed> \
 #                   [--fixed-in "reference"] [--notes "description"]
+# Compat: gaps-close <GAP_ID> --status <fixed|closed> ...
 #
 # Acquires git-lock, validates claim ownership (if claimed),
 # updates gap status in operational.gaps.yaml, commits, cleans up claim.
@@ -14,29 +15,43 @@ source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: gaps-close <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"]"
+  echo "Usage: gaps-close --id <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"]"
+  echo "Compat: gaps-close <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"]"
   exit 0
 fi
 
-GAP_ID="${1:?Usage: gaps-close <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"]}"
-shift
-
+GAP_ID=""
 STATUS="" FIXED_IN="" NOTES=""
+LEGACY_POSITIONAL=0
+
+# Backward-compat positional id (deprecated)
+if [[ "${1:-}" != "" && "${1:0:1}" != "-" ]]; then
+  GAP_ID="$1"
+  LEGACY_POSITIONAL=1
+  shift
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --id)       GAP_ID="${2:?--id requires a value}"; shift 2 ;;
     --status)   STATUS="${2:?--status requires a value}"; shift 2 ;;
     --fixed-in) FIXED_IN="${2:?--fixed-in requires a value}"; shift 2 ;;
     --notes)    NOTES="${2:?--notes requires a value}"; shift 2 ;;
     -h|--help)
-      echo "Usage: gaps-close <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"]"
+      echo "Usage: gaps-close --id <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"]"
+      echo "Compat: gaps-close <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"]"
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
 # Validate required fields
+[[ -n "$GAP_ID" ]] || { echo "FAIL: --id required" >&2; exit 2; }
 [[ -n "$STATUS" ]] || { echo "FAIL: --status required (fixed or closed)" >&2; exit 2; }
+
+if [[ "$LEGACY_POSITIONAL" -eq 1 ]]; then
+  echo "WARN: positional GAP_ID is deprecated; use --id <GAP_ID>" >&2
+fi
 
 case "$STATUS" in
   fixed|closed) ;;
