@@ -1,0 +1,261 @@
+{
+  "id": "3TPTDi1xzs0PXuqX",
+  "name": "Mint OS - Event Router",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mint-event",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Mint Events",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "mint-event-webhook"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ received: true, event: $json.event, timestamp: new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "condition-status-changed",
+              "leftValue": "={{ $json.event }}",
+              "rightValue": "order.status_changed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-status-changed",
+      "name": "Is Status Change?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        650,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "customer-email",
+              "name": "customer_email",
+              "type": "string",
+              "value": "={{ $json.data.customer.email }}"
+            },
+            {
+              "id": "customer-name",
+              "name": "customer_name",
+              "type": "string",
+              "value": "={{ $json.data.customer.first_name || $json.data.order_summary.customer_name }}"
+            },
+            {
+              "id": "order-id",
+              "name": "order_visual_id",
+              "type": "string",
+              "value": "={{ $json.data.visual_id }}"
+            },
+            {
+              "id": "new-status",
+              "name": "new_status",
+              "type": "string",
+              "value": "={{ $json.data.status.current }}"
+            },
+            {
+              "id": "prev-status",
+              "name": "previous_status",
+              "type": "string",
+              "value": "={{ $json.data.status.previous }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-status-vars",
+      "name": "Set Status Variables",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        850,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "condition-ready-pickup",
+              "leftValue": "={{ $json.new_status }}",
+              "rightValue": "READY FOR PICKUP",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-ready-pickup",
+      "name": "Is Ready For Pickup?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1050,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "condition-shipped",
+              "leftValue": "={{ $json.new_status }}",
+              "rightValue": "SHIPPED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-shipped",
+      "name": "Is Shipped?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1050,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "noop-ready",
+      "name": "Ready for Pickup (P08)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        100
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "noop-shipped",
+      "name": "Shipped (P10)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook - Mint Events": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is Status Change?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Status Change?": {
+      "main": [
+        [
+          {
+            "node": "Set Status Variables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Status Variables": {
+      "main": [
+        [
+          {
+            "node": "Is Ready For Pickup?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is Shipped?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Ready For Pickup?": {
+      "main": [
+        [
+          {
+            "node": "Ready for Pickup (P08)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Shipped?": {
+      "main": [
+        [
+          {
+            "node": "Shipped (P10)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}

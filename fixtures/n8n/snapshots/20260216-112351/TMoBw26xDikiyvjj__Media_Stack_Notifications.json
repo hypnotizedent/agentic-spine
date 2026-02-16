@@ -1,0 +1,188 @@
+{
+  "id": "TMoBw26xDikiyvjj",
+  "name": "Media Stack Notifications",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "radarr-webhook",
+        "options": {}
+      },
+      "id": "b837956f-70a9-4c55-9e98-53458916fa2e",
+      "name": "Radarr Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "radarr-media-notification"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sonarr-webhook",
+        "options": {}
+      },
+      "id": "99ae6746-9d3c-4e67-8d1f-c257cc4fdc74",
+      "name": "Sonarr Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        208
+      ],
+      "webhookId": "sonarr-media-notification"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "download-condition",
+              "leftValue": "={{ $json.eventType }}",
+              "rightValue": "Download",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "44b07120-ee8c-49a1-8475-8b3cb8657369",
+      "name": "Filter Downloads (Radarr)",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "download-condition",
+              "leftValue": "={{ $json.eventType }}",
+              "rightValue": "Download",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2560a3e1-5a7a-44c9-81d0-f8c6a364b05f",
+      "name": "Filter Downloads (Sonarr)",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        224,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"🎬 New Movie Added\",\n    \"description\": \"**{{ $json.movie.title }}** ({{ $json.movie.year }})\",\n    \"color\": 3066993,\n    \"fields\": [\n      {\n        \"name\": \"Quality\",\n        \"value\": \"{{ $json.movieFile.quality.quality.name }}\",\n        \"inline\": true\n      },\n      {\n        \"name\": \"Size\",\n        \"value\": \"{{ Math.round($json.movieFile.size / 1073741824 * 100) / 100 }} GB\",\n        \"inline\": true\n      }\n    ],\n    \"thumbnail\": {\n      \"url\": \"{{ $json.movie.images[0] ? $json.movie.images[0].remoteUrl : '' }}\"\n    },\n    \"footer\": {\n      \"text\": \"Radarr • Media Stack\"\n    },\n    \"timestamp\": \"{{ new Date().toISOString() }}\"\n  }]\n}",
+        "options": {}
+      },
+      "id": "9a70c336-707b-4011-8edd-6c2c5d3f0c2d",
+      "name": "Discord (Movie)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        448,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.DISCORD_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"📺 New Episode Added\",\n    \"description\": \"**{{ $json.series.title }}**\\nS{{ String($json.episodes[0].seasonNumber).padStart(2, '0') }}E{{ String($json.episodes[0].episodeNumber).padStart(2, '0') }} - {{ $json.episodes[0].title }}\",\n    \"color\": 15844367,\n    \"fields\": [\n      {\n        \"name\": \"Quality\",\n        \"value\": \"{{ $json.episodeFile.quality.quality.name }}\",\n        \"inline\": true\n      },\n      {\n        \"name\": \"Size\",\n        \"value\": \"{{ Math.round($json.episodeFile.size / 1073741824 * 100) / 100 }} GB\",\n        \"inline\": true\n      }\n    ],\n    \"thumbnail\": {\n      \"url\": \"{{ $json.series.images[0] ? $json.series.images[0].remoteUrl : '' }}\"\n    },\n    \"footer\": {\n      \"text\": \"Sonarr • Media Stack\"\n    },\n    \"timestamp\": \"{{ new Date().toISOString() }}\"\n  }]\n}",
+        "options": {}
+      },
+      "id": "6952e863-209f-41af-a3e5-50dd8053bdf0",
+      "name": "Discord (TV Show)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        448,
+        208
+      ]
+    }
+  ],
+  "connections": {
+    "Radarr Webhook": {
+      "main": [
+        [
+          {
+            "node": "Filter Downloads (Radarr)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sonarr Webhook": {
+      "main": [
+        [
+          {
+            "node": "Filter Downloads (Sonarr)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Downloads (Radarr)": {
+      "main": [
+        [
+          {
+            "node": "Discord (Movie)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Downloads (Sonarr)": {
+      "main": [
+        [
+          {
+            "node": "Discord (TV Show)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

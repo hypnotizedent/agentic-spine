@@ -1,0 +1,115 @@
+{
+  "id": "ch293DrB8DMWaty5",
+  "name": "Memory Sync - GitHub",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "memory-sync",
+        "options": {}
+      },
+      "id": "webhook-github",
+      "name": "GitHub Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        200
+      ],
+      "webhookId": "memory-sync-github"
+    },
+    {
+      "parameters": {
+        "jsCode": "const file = $input.first().json.body?.file || $input.first().json.file || 'unknown';\nconst content = $input.first().json.body?.content || $input.first().json.content || '';\n\nconst timestamp = new Date().toISOString();\nconst entities = [{\n  name: `SyncEvent_${timestamp}`,\n  entityType: 'SyncEvent',\n  observations: [`Synced ${file} at ${timestamp}`, content.substring(0, 500)]\n}];\n\nreturn [{ json: { success: true, file, entityCount: entities.length, entities, timestamp } }];"
+      },
+      "id": "parse-github",
+      "name": "Parse Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        450,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://mcp.mintprints.co/mcp",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', method: 'tools/call', id: Date.now(), params: { name: 'memory__create_entities', arguments: { entities: $json.entities } } }) }}"
+      },
+      "id": "mcp-store",
+      "name": "Store to Memory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        700,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        950,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "GitHub Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Payload": {
+      "main": [
+        [
+          {
+            "node": "Store to Memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store to Memory": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}

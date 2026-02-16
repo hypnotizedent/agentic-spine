@@ -1,0 +1,478 @@
+{
+  "id": "TKwzJBi0YmrwNeqf",
+  "name": "Artwork Email Ingestion",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        240
+      ],
+      "notes": "Runs every 15 minutes to check for new artwork emails"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "artwork-ingestion",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        440
+      ],
+      "notes": "Webhook for manual trigger: POST /webhook/artwork-ingestion with {\"quote_number\": \"Q-2026-0003\", \"sender_email\": \"marketing@covebrewery.com\"}"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://login.microsoftonline.com/{{ $env.AZURE_TENANT_ID }}/oauth2/v2.0/token",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "client_id",
+              "value": "={{ $env.AZURE_CLIENT_ID }}"
+            },
+            {
+              "name": "client_secret",
+              "value": "={{ $env.AZURE_CLIENT_SECRET }}"
+            },
+            {
+              "name": "scope",
+              "value": "https://graph.microsoft.com/.default"
+            },
+            {
+              "name": "grant_type",
+              "value": "client_credentials"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-graph-token",
+      "name": "Get Graph API Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        340
+      ],
+      "notes": "Gets OAuth2 token for Microsoft Graph API. Requires AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET env vars."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.microsoft.com/v1.0/users/{{ $env.OUTLOOK_USER_ID }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Get Graph API Token').item.json.access_token }}"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "$top",
+              "value": "50"
+            },
+            {
+              "name": "$orderby",
+              "value": "receivedDateTime desc"
+            },
+            {
+              "name": "$select",
+              "value": "id,subject,receivedDateTime,from,hasAttachments,bodyPreview"
+            },
+            {
+              "name": "$filter",
+              "value": "hasAttachments eq true and receivedDateTime ge {{ $now.minus(7, 'days').toISO() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-emails",
+      "name": "Get Emails with Attachments",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        340
+      ],
+      "notes": "Fetches emails from last 7 days with attachments. OUTLOOK_USER_ID should be the Info@mintprints.com user GUID."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter emails that look like artwork/mockup submissions\nconst artworkKeywords = [\n  'artwork',\n  'mockup',\n  'logo',\n  'design',\n  'merch',\n  'order',\n  'quote',\n  'reorder',\n  'attached',\n  'files',\n  'images'\n];\n\n// Known internal domains to exclude\nconst excludeDomains = [\n  'mintprints.com',\n  'microsoft.com',\n  'github.com',\n  'paypal.com',\n  'square.com',\n  'americanexpress.com',\n  'sanmar.com',\n  'ssactivewear.com'\n];\n\nconst results = [];\n\nfor (const item of $input.all()) {\n  const emails = item.json.value || [];\n  \n  for (const email of emails) {\n    const senderEmail = (email.from?.emailAddress?.address || '').toLowerCase();\n    const subject = (email.subject || '').toLowerCase();\n    const body = (email.bodyPreview || '').toLowerCase();\n    const fullText = subject + ' ' + body;\n    \n    // Skip internal/system emails\n    const isExcluded = excludeDomains.some(domain => \n      senderEmail.includes(domain)\n    );\n    \n    if (isExcluded) continue;\n    \n    // Check if artwork-related\n    const isArtworkRelated = artworkKeywords.some(keyword => \n      fullText.includes(keyword)\n    );\n    \n    // Also check if it has image attachments based on hasAttachments flag\n    if (!isArtworkRelated && !email.hasAttachments) continue;\n    \n    results.push({\n      json: {\n        email_id: email.id,\n        subject: email.subject,\n        received_at: email.receivedDateTime,\n        sender_email: email.from?.emailAddress?.address,\n        sender_name: email.from?.emailAddress?.name,\n        body_preview: email.bodyPreview,\n        has_attachments: email.hasAttachments\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "filter-artwork-emails",
+      "name": "Filter Artwork Emails",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        340
+      ],
+      "notes": "Filters emails to only artwork/mockup related submissions from customers"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://mintprints-api.ronny.works/api/v2/quotes/by-customer-email?email={{ encodeURIComponent($json.sender_email) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "lookup-quote",
+      "name": "Lookup Quote by Customer Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        340
+      ],
+      "notes": "Looks up open quotes for this customer. Returns most recent draft/pending quote."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-quote",
+              "leftValue": "={{ $json.quote_number }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-has-quote",
+      "name": "Has Matching Quote?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        340
+      ],
+      "notes": "Only proceed if we found a matching quote for this customer"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.microsoft.com/v1.0/users/{{ $env.OUTLOOK_USER_ID }}/messages/{{ $('Filter Artwork Emails').item.json.email_id }}/attachments",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Get Graph API Token').item.json.access_token }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-attachments",
+      "name": "Get Email Attachments",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        240
+      ],
+      "notes": "Fetches all attachments from the email including base64 content"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process attachments and prepare for MinIO upload\nconst attachments = $input.item.json.value || [];\nconst quoteNumber = $('Lookup Quote by Customer Email').item.json.quote_number;\nconst quoteId = $('Lookup Quote by Customer Email').item.json.id;\nconst senderEmail = $('Filter Artwork Emails').item.json.sender_email;\n\nconst imageTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp', 'application/pdf'];\n\nconst results = [];\n\nfor (const attachment of attachments) {\n  // Only process image files\n  if (!imageTypes.some(type => attachment.contentType?.includes(type))) {\n    continue;\n  }\n  \n  const fileName = attachment.name || `attachment_${Date.now()}`;\n  const fileExt = fileName.split('.').pop()?.toLowerCase() || 'png';\n  const sanitizedName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');\n  \n  results.push({\n    json: {\n      quote_number: quoteNumber,\n      quote_id: quoteId,\n      sender_email: senderEmail,\n      attachment_id: attachment.id,\n      file_name: sanitizedName,\n      content_type: attachment.contentType,\n      file_size: attachment.size,\n      content_bytes: attachment.contentBytes,\n      minio_path: `artwork/quotes/${quoteNumber}/originals/${sanitizedName}`,\n      location: 'originals'\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "process-attachments",
+      "name": "Process Attachments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        240
+      ],
+      "notes": "Prepares each attachment for upload to MinIO"
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "artwork",
+        "fileName": "={{ $json.minio_path.replace(\"artwork/\", \"\") }}",
+        "binaryPropertyName": "data",
+        "additionalFields": {}
+      },
+      "id": "upload-to-minio",
+      "name": "Upload to MinIO",
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        240
+      ],
+      "notes": "Uploads file to MinIO. Requires MinIO auth credential with write access to artwork bucket.",
+      "credentials": {
+        "aws": {
+          "id": "MinIOS3Storage01",
+          "name": "MinIO S3 Storage"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://mintprints-api.ronny.works/api/v2/quotes/{{ $json.quote_id }}/artwork",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"file_name\": \"{{ $json.file_name }}\",\n  \"file_path\": \"{{ $json.minio_path }}\",\n  \"file_size\": {{ $json.file_size }},\n  \"file_type\": \"{{ $json.content_type }}\",\n  \"location\": \"{{ $json.location }}\"\n}",
+        "options": {}
+      },
+      "id": "create-artwork-record",
+      "name": "Create Quote Artwork Record",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        240
+      ],
+      "notes": "Creates quote_artwork record in database via API"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "status",
+              "name": "status",
+              "value": "no_matching_quote",
+              "type": "string"
+            },
+            {
+              "id": "reason",
+              "name": "reason",
+              "value": "=No open quote found for customer: {{ $('Filter Artwork Emails').item.json.sender_email }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "no-quote-found",
+      "name": "No Quote Found",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1320,
+        440
+      ],
+      "notes": "Emails without matching quotes are logged for manual review"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://mintprints-api.ronny.works/api/v2/activity-log",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"type\": \"artwork_ingested\",\n  \"quote_id\": {{ $('Process Attachments').item.json.quote_id }},\n  \"quote_number\": \"{{ $('Process Attachments').item.json.quote_number }}\",\n  \"details\": {\n    \"file_count\": {{ $input.all().length }},\n    \"source\": \"email\",\n    \"sender\": \"{{ $('Filter Artwork Emails').item.json.sender_email }}\"\n  },\n  \"created_by\": \"n8n-artwork-ingestion\"\n}",
+        "options": {}
+      },
+      "id": "log-activity",
+      "name": "Log Activity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        240
+      ],
+      "notes": "Logs artwork ingestion to activity log for audit trail"
+    },
+    {
+      "parameters": {
+        "content": "## Artwork Email Ingestion Workflow\n\n**Purpose:** Automatically pull customer artwork from email attachments and link to quotes.\n\n**Flow:**\n1. Trigger: Every 15 min or manual webhook\n2. Get OAuth token for Microsoft Graph\n3. Fetch emails with attachments (last 7 days)\n4. Filter for artwork-related emails\n5. Lookup matching quote by customer email\n6. Download attachments from Graph API\n7. Upload to MinIO: `artwork/quotes/{quote_number}/originals/`\n8. Create quote_artwork records in database\n9. Log activity for audit trail\n\n**Required Credentials:**\n- Microsoft Graph (env vars: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET)\n- MinIO S3-compatible auth\n- Mint OS API Header Auth (admin JWT)\n\n**Env Vars:**\n- `AZURE_TENANT_ID`: MintPrints Azure tenant\n- `AZURE_CLIENT_ID`: App registration client ID\n- `AZURE_CLIENT_SECRET`: App registration secret\n- `OUTLOOK_USER_ID`: Info@mintprints.com user GUID (3390671e-16a6-4a84-814b-a99624fb632b)\n\n**Manual Trigger:**\n```\nPOST /webhook/artwork-ingestion\n{\"quote_number\": \"Q-2026-0003\", \"sender_email\": \"customer@example.com\"}\n```\n\n**Runbook:** `docs/Runbooks/ARTWORK_INGESTION.md`"
+      },
+      "id": "sticky-note",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Get Graph API Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Graph API Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Graph API Token": {
+      "main": [
+        [
+          {
+            "node": "Get Emails with Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Emails with Attachments": {
+      "main": [
+        [
+          {
+            "node": "Filter Artwork Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Artwork Emails": {
+      "main": [
+        [
+          {
+            "node": "Lookup Quote by Customer Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Quote by Customer Email": {
+      "main": [
+        [
+          {
+            "node": "Has Matching Quote?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Matching Quote?": {
+      "main": [
+        [
+          {
+            "node": "Get Email Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Quote Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Email Attachments": {
+      "main": [
+        [
+          {
+            "node": "Process Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Attachments": {
+      "main": [
+        [
+          {
+            "node": "Upload to MinIO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to MinIO": {
+      "main": [
+        [
+          {
+            "node": "Create Quote Artwork Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Quote Artwork Record": {
+      "main": [
+        [
+          {
+            "node": "Log Activity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}

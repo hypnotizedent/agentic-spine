@@ -1,0 +1,370 @@
+{
+  "id": "c0hkH7RjvqyeDosM",
+  "name": "Printavo Customer Enrichment",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, printavo_id, name, email FROM customers WHERE name LIKE 'Placeholder%' OR email LIKE 'placeholder-%' ORDER BY id LIMIT 50;",
+        "options": {}
+      },
+      "id": "get-placeholders",
+      "name": "Get Placeholder Customers",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        460,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "H91B62moXyyKhSgJ",
+          "name": "Mint OS Vault"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-results",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-has-placeholders",
+      "name": "Has Placeholders?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://www.printavo.com/api/v2",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "email",
+              "value": "ronny@mintprints.com"
+            },
+            {
+              "name": "token",
+              "value": "={{ $env.PRINTAVO_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"query\": \"query GetCustomer($id: ID!) { customer(id: $id) { id companyName internalNote primaryContact { firstName lastName email phone } shippingAddress { address1 address2 city state zipCode country } } }\", \"variables\": { \"id\": \"{{ $json.printavo_id }}\" }}",
+        "options": {}
+      },
+      "id": "fetch-customer",
+      "name": "Fetch Customer from Printavo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 0.5,
+        "unit": "seconds"
+      },
+      "id": "rate-limit-delay",
+      "name": "Rate Limit Delay",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1120,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst customer = input.data?.customer;\n\nif (!customer) {\n  const placeholder = $('Get Placeholder Customers').first().json;\n  return [{ json: { error: 'Customer not found in Printavo', printavo_id: placeholder.printavo_id } }];\n}\n\nconst contact = customer.primaryContact || {};\nconst addr = customer.shippingAddress || {};\n\nconst shippingAddress = {\n  address1: addr.address1 || '',\n  address2: addr.address2 || '',\n  city: addr.city || '',\n  state: addr.state || '',\n  zip: addr.zipCode || '',\n  country: addr.country || 'US',\n  country_iso: addr.countryIso || 'US',\n  state_iso: addr.stateIso || ''\n};\n\nreturn [{\n  json: {\n    printavo_id: customer.id,\n    name: ((contact.firstName || '') + ' ' + (contact.lastName || '')).trim() || customer.companyName || 'Unknown',\n    first_name: contact.firstName || '',\n    last_name: contact.lastName || '',\n    email: contact.email || '',\n    phone: contact.phone || '',\n    company: customer.companyName || '',\n    internal_notes: customer.internalNote || '',\n    shipping_address: shippingAddress\n  }\n}];"
+      },
+      "id": "transform-customer",
+      "name": "Transform Customer Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "no-error",
+              "leftValue": "={{ $json.error }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-valid-customer",
+      "name": "Valid Customer?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE customers SET name = '{{ $json.name.replace(/'/g, \"''\") }}', first_name = '{{ ($json.first_name || '').replace(/'/g, \"''\") }}', last_name = '{{ ($json.last_name || '').replace(/'/g, \"''\") }}', email = '{{ $json.email || '' }}', phone = '{{ $json.phone || '' }}', company = '{{ ($json.company || '').replace(/'/g, \"''\") }}', shipping_address = '{{ JSON.stringify($json.shipping_address) }}'::jsonb, updated_at = NOW() WHERE printavo_id = '{{ $json.printavo_id }}' RETURNING id, printavo_id, name, email;",
+        "options": {}
+      },
+      "id": "update-customer",
+      "name": "Update Customer in Vault",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1780,
+        100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "H91B62moXyyKhSgJ",
+          "name": "Mint OS Vault"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { status: 'error', ...$input.first().json } }];"
+      },
+      "id": "log-error",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { workflow: 'Printavo Customer Enrichment', status: 'no_placeholders_found' } }];"
+      },
+      "id": "no-placeholders",
+      "name": "No Placeholders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "aggregate-results",
+      "name": "Aggregate Results",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst enriched = items.filter(i => !i.json.error && !i.json.status).length;\nconst errors = items.filter(i => i.json.error).length;\nreturn [{ json: { workflow: 'Printavo Customer Enrichment', customersEnriched: enriched, errors: errors, status: 'completed' } }];"
+      },
+      "id": "summary",
+      "name": "Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Placeholder Customers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Placeholder Customers": {
+      "main": [
+        [
+          {
+            "node": "Has Placeholders?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Placeholders?": {
+      "main": [
+        [
+          {
+            "node": "Fetch Customer from Printavo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Placeholders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Customer from Printavo": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit Delay": {
+      "main": [
+        [
+          {
+            "node": "Transform Customer Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform Customer Data": {
+      "main": [
+        [
+          {
+            "node": "Valid Customer?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Customer?": {
+      "main": [
+        [
+          {
+            "node": "Update Customer in Vault",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Customer in Vault": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Error": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Results": {
+      "main": [
+        [
+          {
+            "node": "Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}

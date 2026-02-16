@@ -1,0 +1,229 @@
+{
+  "id": "4yavmkGBzbRYT16b",
+  "name": "Mint OS - End of Day Production Report",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 18 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "9a57f4d8-7f78-4ca3-ad44-18dfb27a8eac",
+      "name": "Daily 6pm CST (Mon-Fri)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        240
+      ],
+      "notes": "Triggers at 6:00 PM Monday-Friday. Adjust for weekends if needed."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH job_stats AS (\n  SELECT \n    status,\n    COUNT(*) as count,\n    COALESCE(SUM(quantity), 0) as total_quantity\n  FROM jobs\n  WHERE updated_at >= CURRENT_DATE\n  GROUP BY status\n),\ntoday_completed AS (\n  SELECT \n    COUNT(*) as completed_today,\n    COALESCE(SUM(quantity), 0) as units_produced\n  FROM jobs\n  WHERE status = 'completed'\n    AND completed_at >= CURRENT_DATE\n)\nSELECT \n  COALESCE((SELECT count FROM job_stats WHERE status = 'pending'), 0) as pending_jobs,\n  COALESCE((SELECT count FROM job_stats WHERE status = 'printing'), 0) as printing_jobs,\n  COALESCE((SELECT count FROM job_stats WHERE status = 'completed'), 0) as completed_jobs,\n  COALESCE((SELECT count FROM job_stats WHERE status = 'on_hold'), 0) as on_hold_jobs,\n  COALESCE((SELECT completed_today FROM today_completed), 0) as completed_today,\n  COALESCE((SELECT units_produced FROM today_completed), 0) as units_produced_today,\n  (SELECT COUNT(*) FROM jobs WHERE status IN ('pending', 'printing')) as backlog_total;",
+        "options": {}
+      },
+      "id": "dc8f979f-767c-4d8f-9d1b-a4abd8b39b0e",
+      "name": "Query Production Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        224,
+        240
+      ],
+      "notes": "Queries job statistics. Adjust column names to match your schema."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  j.id,\n  j.order_id,\n  j.description,\n  j.quantity,\n  j.status,\n  o.customer_name\nFROM jobs j\nLEFT JOIN orders o ON j.order_id = o.id\nWHERE j.status IN ('pending', 'printing')\nORDER BY \n  CASE j.status WHEN 'printing' THEN 1 WHEN 'pending' THEN 2 END,\n  j.created_at ASC\nLIMIT 10;",
+        "options": {}
+      },
+      "id": "f0b95f93-311c-4181-8d14-e390dbabdbc8",
+      "name": "Query Backlog Details",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        224,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "5b396586-e882-49f8-9bfd-73426a9761a7",
+      "name": "Merge Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        448,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "subject",
+              "name": "subject",
+              "value": "=Production Report - {{ $now.format('EEEE, MMMM d') }}",
+              "type": "string"
+            },
+            {
+              "id": "stats",
+              "name": "stats",
+              "value": "={{ $('Query Production Stats').item.json }}",
+              "type": "object"
+            },
+            {
+              "id": "backlog",
+              "name": "backlog",
+              "value": "={{ $('Query Backlog Details').all() }}",
+              "type": "object"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "29900835-4c25-49f0-a01e-b4e3721f6d84",
+      "name": "Prepare Report Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        672,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const stats = $input.item.json.stats;\nconst backlog = $input.item.json.backlog || [];\n\nlet backlogHtml = '';\nif (backlog.length > 0) {\n  backlogHtml = '<table border=\"1\" cellpadding=\"8\" cellspacing=\"0\" style=\"border-collapse: collapse;\">';\n  backlogHtml += '<tr style=\"background:#f0f0f0\"><th>Job</th><th>Customer</th><th>Description</th><th>Qty</th><th>Status</th></tr>';\n  \n  for (const job of backlog) {\n    const statusColor = job.json?.status === 'printing' ? '#4CAF50' : '#FF9800';\n    backlogHtml += `<tr>\n      <td>${job.json?.id || 'N/A'}</td>\n      <td>${job.json?.customer_name || 'N/A'}</td>\n      <td>${(job.json?.description || 'N/A').substring(0, 30)}...</td>\n      <td>${job.json?.quantity || 0}</td>\n      <td style=\"color:${statusColor}\">${job.json?.status || 'N/A'}</td>\n    </tr>`;\n  }\n  backlogHtml += '</table>';\n} else {\n  backlogHtml = '<p><em>No jobs in backlog</em></p>';\n}\n\nconst emailBody = `\n<h2>End of Day Production Report</h2>\n<p><strong>Date:</strong> ${new Date().toLocaleDateString('en-US', {weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'})}</p>\n<hr>\n\n<h3>Today's Production</h3>\n<ul>\n  <li><strong>Jobs Completed:</strong> ${stats.completed_today || 0}</li>\n  <li><strong>Units Produced:</strong> ${stats.units_produced_today || 0}</li>\n</ul>\n\n<h3>Current Status</h3>\n<table border=\"1\" cellpadding=\"8\" cellspacing=\"0\" style=\"border-collapse: collapse;\">\n  <tr style=\"background:#f0f0f0\"><th>Status</th><th>Count</th></tr>\n  <tr><td>Pending</td><td>${stats.pending_jobs || 0}</td></tr>\n  <tr><td>Printing</td><td>${stats.printing_jobs || 0}</td></tr>\n  <tr><td>On Hold</td><td>${stats.on_hold_jobs || 0}</td></tr>\n  <tr style=\"background:#e8f5e9\"><td><strong>Completed Today</strong></td><td><strong>${stats.completed_jobs || 0}</strong></td></tr>\n</table>\n\n<h3>Backlog (Top 10)</h3>\n${backlogHtml}\n\n<hr>\n<p style=\"color:#666\"><em>Total Backlog: ${stats.backlog_total || 0} jobs</em></p>\n<p style=\"color:#999\"><em>Generated by n8n automation at ${new Date().toLocaleTimeString()}</em></p>\n`;\n\nreturn {\n  subject: $input.item.json.subject,\n  body: emailBody\n};"
+      },
+      "id": "34f3492b-21d9-4955-8df8-3551afedc868",
+      "name": "Build Email HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "toRecipients": "ronny@mintprintshop.com",
+        "subject": "={{ $json.subject }}",
+        "bodyContent": "={{ $json.body }}",
+        "additionalFields": {}
+      },
+      "id": "0d3b504d-5a82-42cb-8cd2-9350b3219102",
+      "name": "Send Report Email",
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        352
+      ],
+      "webhookId": "778137e1-4987-4ddb-8441-bbed8487a07d",
+      "notes": "Update recipient email and credential ID."
+    },
+    {
+      "parameters": {
+        "content": "## End of Day Production Report\n\n**Purpose:** Daily summary of production status and backlog\n\n**Schedule:** 6:00 PM Monday-Friday (CST)\n\n**Setup Required:**\n1. Create Postgres credential for Mint OS database\n2. Create Microsoft Outlook OAuth2 credential\n3. Update recipient email address\n4. Adjust SQL queries to match your schema\n\n**Tables Used:**\n- `jobs` (id, order_id, description, quantity, status, completed_at)\n- `orders` (id, customer_name)"
+      },
+      "id": "faba3760-a002-434f-9962-822148ea2ba4",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Daily 6pm CST (Mon-Fri)": {
+      "main": [
+        [
+          {
+            "node": "Query Production Stats",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Query Backlog Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Production Stats": {
+      "main": [
+        [
+          {
+            "node": "Merge Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Backlog Details": {
+      "main": [
+        [
+          {
+            "node": "Merge Data",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Data": {
+      "main": [
+        [
+          {
+            "node": "Prepare Report Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Report Data": {
+      "main": [
+        [
+          {
+            "node": "Build Email HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email HTML": {
+      "main": [
+        [
+          {
+            "node": "Send Report Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

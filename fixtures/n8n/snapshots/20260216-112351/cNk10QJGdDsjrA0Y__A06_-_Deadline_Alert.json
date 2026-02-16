@@ -1,0 +1,198 @@
+{
+  "id": "cNk10QJGdDsjrA0Y",
+  "name": "A06 - Deadline Alert",
+  "active": false,
+  "nodes": [
+    {
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "position": [
+        250,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9,14 * * 1-5"
+            }
+          ]
+        }
+      },
+      "typeVersion": 1,
+      "id": "1d4c64d9-3697-470e-a895-781f924b8ba9"
+    },
+    {
+      "name": "Get At-Risk Orders",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        450,
+        300
+      ],
+      "parameters": {
+        "url": "https://mintprints-api.ronny.works/api/orders?status_not=COMPLETE,CANCELLED&due_date_lte=tomorrow",
+        "method": "GET",
+        "authentication": "none",
+        "responseFormat": "json"
+      },
+      "typeVersion": 3,
+      "id": "ed341418-42ed-44db-8afd-b569782e338c"
+    },
+    {
+      "name": "Check Orders Exist",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        650,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.orders?.length || 0}}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "typeVersion": 1,
+      "id": "49f39e48-1983-4643-b62b-f6be42085f10"
+    },
+    {
+      "name": "Process At-Risk",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        850,
+        200
+      ],
+      "parameters": {
+        "jsCode": "const orders = $input.first().json.orders || [];\n\nconst overdue = [];\nconst dueToday = [];\nconst dueTomorrow = [];\nconst today = new Date();\ntoday.setHours(0, 0, 0, 0);\nconst tomorrow = new Date(today);\ntomorrow.setDate(tomorrow.getDate() + 1);\n\norders.forEach(order => {\n  const dueDate = new Date(order.due_date);\n  dueDate.setHours(0, 0, 0, 0);\n  \n  if (dueDate < today) {\n    overdue.push(order);\n  } else if (dueDate.getTime() === today.getTime()) {\n    dueToday.push(order);\n  } else {\n    dueTomorrow.push(order);\n  }\n});\n\nconst formatOrders = (arr, emoji) => {\n  if (arr.length === 0) return '';\n  return arr.map(o => \n    `${emoji} #${o.visual_id} - ${o.customer_name} - $${o.total} - ${o.order_status}`\n  ).join('\\n');\n};\n\nconst overdueText = formatOrders(overdue, ':rotating_light:');\nconst todayText = formatOrders(dueToday, ':warning:');\nconst tomorrowText = formatOrders(dueTomorrow, ':clock3:');\n\nreturn {\n  hasAlerts: orders.length > 0,\n  overdueCount: overdue.length,\n  todayCount: dueToday.length,\n  tomorrowCount: dueTomorrow.length,\n  totalCount: orders.length,\n  overdueText: overdueText || 'None',\n  todayText: todayText || 'None',\n  tomorrowText: tomorrowText || 'None',\n  overdueValue: overdue.reduce((s, o) => s + parseFloat(o.total || 0), 0).toFixed(2),\n  todayValue: dueToday.reduce((s, o) => s + parseFloat(o.total || 0), 0).toFixed(2)\n};"
+      },
+      "typeVersion": 2,
+      "id": "f79649b6-5976-4161-9a7c-44f9c4de822b"
+    },
+    {
+      "name": "Send Urgent Slack",
+      "type": "n8n-nodes-base.slack",
+      "position": [
+        1050,
+        100
+      ],
+      "parameters": {
+        "channel": "#production",
+        "text": ":rotating_light: *DEADLINE ALERT* :rotating_light:\n\n*{{$json.totalCount}} orders at risk!*\n\n:no_entry: *OVERDUE* ({{$json.overdueCount}} orders, ${{$json.overdueValue}})\n{{$json.overdueText}}\n\n:warning: *DUE TODAY* ({{$json.todayCount}} orders, ${{$json.todayValue}})\n{{$json.todayText}}\n\n:clock3: *DUE TOMORROW* ({{$json.tomorrowCount}} orders)\n{{$json.tomorrowText}}\n\n<https://print-shop-os--hypnotizedent.github.app/orders?filter=at_risk|View At-Risk Orders>",
+        "otherOptions": {}
+      },
+      "typeVersion": 2,
+      "id": "12712ae8-bf11-47dd-8203-fdf0d3fc29d1"
+    },
+    {
+      "name": "Check Critical",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        1050,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.overdueCount}}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "typeVersion": 1,
+      "id": "07ad9775-52a5-42d5-b210-60819a049c1f"
+    },
+    {
+      "name": "Send Critical Email",
+      "type": "n8n-nodes-base.emailSend",
+      "position": [
+        1250,
+        200
+      ],
+      "parameters": {
+        "fromEmail": "alerts@mintprints.com",
+        "toEmail": "ronny@mintprints.com",
+        "subject": "[CRITICAL] {{$json.overdueCount}} OVERDUE Orders - Immediate Action Required",
+        "html": "<h2 style='color: red;'>OVERDUE ORDERS ALERT</h2><p><strong>{{$json.overdueCount}} orders</strong> are past their due date with a total value of <strong>${{$json.overdueValue}}</strong>.</p><h3>Overdue Orders:</h3><pre>{{$json.overdueText}}</pre><h3>Due Today:</h3><pre>{{$json.todayText}}</pre><p><a href='https://print-shop-os--hypnotizedent.github.app/orders?filter=at_risk' style='display: inline-block; padding: 12px 24px; background: #ef4444; color: white; text-decoration: none; border-radius: 6px;'>View At-Risk Orders</a></p>"
+      },
+      "typeVersion": 2,
+      "id": "63cd7d5e-baa6-4513-a4f7-c46337dc607e"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get At-Risk Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get At-Risk Orders": {
+      "main": [
+        [
+          {
+            "node": "Check Orders Exist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Orders Exist": {
+      "main": [
+        [
+          {
+            "node": "Process At-Risk",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Process At-Risk": {
+      "main": [
+        [
+          {
+            "node": "Send Urgent Slack",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Critical",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Critical": {
+      "main": [
+        [
+          {
+            "node": "Send Critical Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}

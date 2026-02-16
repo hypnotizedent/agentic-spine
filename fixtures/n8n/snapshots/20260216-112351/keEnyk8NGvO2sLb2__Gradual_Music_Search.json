@@ -1,0 +1,260 @@
+{
+  "id": "keEnyk8NGvO2sLb2",
+  "name": "Gradual Music Search",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 3
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Daily 3am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://100.117.1.53:8686/api/v1/wanted/missing?pageSize=100&sortKey=releaseDate&sortDirection=descending",
+        "options": {
+          "headers": {
+            "entries": [
+              {
+                "name": "X-Api-Key",
+                "value": "8228e0db897343f2812abb08bd0bd522"
+              }
+            ]
+          }
+        }
+      },
+      "id": "get-missing",
+      "name": "Get Missing Albums",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const albums = $input.first().json.records || [];\nconst count = 3;\n\nif (albums.length === 0) {\n  return [{ json: { noAlbums: true } }];\n}\n\nconst shuffled = albums.sort(() => Math.random() - 0.5);\nconst selected = shuffled.slice(0, Math.min(count, albums.length));\n\nreturn [{\n  json: {\n    totalMissing: albums.length,\n    selectedCount: selected.length,\n    albums: selected.map(a => ({\n      id: a.id,\n      title: a.title,\n      artist: a.artist?.artistName || 'Unknown'\n    }))\n  }\n}];"
+      },
+      "id": "select-random",
+      "name": "Select Random 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        650,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-no-albums",
+              "leftValue": "={{ $json.noAlbums }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "check-albums",
+      "name": "Has Albums?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        850,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const albums = $input.first().json.albums || [];\nreturn albums.map(a => ({ json: a }));"
+      },
+      "id": "split-albums",
+      "name": "Split to Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1050,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://100.117.1.53:8686/api/v1/command",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"name\": \"AlbumSearch\", \"albumIds\": [{{ $json.id }}]}",
+        "options": {
+          "headers": {
+            "entries": [
+              {
+                "name": "X-Api-Key",
+                "value": "8228e0db897343f2812abb08bd0bd522"
+              }
+            ]
+          }
+        }
+      },
+      "id": "search-album",
+      "name": "Trigger Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1250,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "wait-between",
+      "name": "Wait 5s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1450,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "end",
+      "name": "End",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1650,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "no-albums-end",
+      "name": "No Albums",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Daily 3am": {
+      "main": [
+        [
+          {
+            "node": "Get Missing Albums",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Missing Albums": {
+      "main": [
+        [
+          {
+            "node": "Select Random 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Random 3": {
+      "main": [
+        [
+          {
+            "node": "Has Albums?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Albums?": {
+      "main": [
+        [
+          {
+            "node": "No Albums",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Split to Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split to Items": {
+      "main": [
+        [
+          {
+            "node": "Trigger Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Search": {
+      "main": [
+        [
+          {
+            "node": "Wait 5s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 5s": {
+      "main": [
+        [
+          {
+            "node": "End",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}

@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+AUDITS_DIR="$ROOT/docs/governance/_audits"
+DATE="${1:-$(date +%Y-%m-%d)}"
+OUTPUT_FILE="$AUDITS_DIR/slo-evidence-${DATE}.md"
+
+mkdir -p "$AUDITS_DIR"
+
+echo "SLO Evidence Collection: $DATE"
+echo "================================"
+echo
+
+echo "Collecting verify.pack.run core-operator..."
+VERIFY_RESULT=$("$ROOT/ops/plugins/verify/bin/verify-pack" run core-operator --json 2>&1 || echo '{"total":0,"pass":0,"fail":0}')
+VERIFY_TOTAL=$(echo "$VERIFY_RESULT" | jq -r '.total // 0')
+VERIFY_PASS=$(echo "$VERIFY_RESULT" | jq -r '.pass // 0')
+VERIFY_FAIL=$(echo "$VERIFY_RESULT" | jq -r '.fail // 0')
+FAILING_IDS=$(echo "$VERIFY_RESULT" | jq -r '.failing_ids // [] | join(", ")')
+
+echo "Collecting stability.control.snapshot..."
+SNAPSHOT_STATUS="unknown"
+INCIDENT_COUNT=0
+WARN_COUNT=0
+DOMAIN_SUMMARY=""
+
+if timeout 90 "$ROOT/ops/plugins/observability/bin/stability-control-snapshot" --json > /tmp/slo-snap-$$ 2>&1; then
+  SNAPSHOT_STATUS=$(jq -r '.status // "unknown"' /tmp/slo-snap-$$ 2>/dev/null || echo "unknown")
+  INCIDENT_COUNT=$(jq -r '.incident_count // 0' /tmp/slo-snap-$$ 2>/dev/null || echo "0")
+  WARN_COUNT=$(jq -r '.warn_count // 0' /tmp/slo-snap-$$ 2>/dev/null || echo "0")
+  DOMAIN_SUMMARY=$(jq -r '.domains[] | "| \(.id) | \(.status) |"' /tmp/slo-snap-$$ 2>/dev/null || echo "")
+  rm -f /tmp/slo-snap-$$
+else
+  DOMAIN_SUMMARY="| (timeout) | (timeout) |"
+fi
+
+OPEN_LOOPS=$("$ROOT/bin/ops" loops list --open 2>/dev/null | grep -c "LOOP-" || echo "0")
+OPEN_GAPS=$("$ROOT/bin/ops" status 2>/dev/null | grep -E "gaps:.*open" | grep -oE '[0-9]+' | head -1 || echo "0")
+
+VERIFY_PCT=0
+[[ "$VERIFY_TOTAL" -gt 0 ]] && VERIFY_PCT=$((VERIFY_PASS * 100 / VERIFY_TOTAL))
+SLO_PASS="FAIL"
+[[ "$VERIFY_PCT" -ge 95 ]] && [[ "$VERIFY_FAIL" -eq 0 ]] && [[ "$INCIDENT_COUNT" -eq 0 ]] && SLO_PASS="PASS"
+
+cat > "$OUTPUT_FILE" << EOF
+---
+date: ${DATE}
+type: slo-evidence-daily
+snapshot_status: ${SNAPSHOT_STATUS}
+verify_pass: ${VERIFY_PCT}%
+slo_pass: ${SLO_PASS}
+---
+
+# SLO Evidence Daily Report
+
+**Date:** ${DATE}  
+**Snapshot Status:** ${SNAPSHOT_STATUS}  
+**SLO Result:** ${SLO_PASS}
+
+## SLO Metrics
+
+| Metric | Value | Target | Status |
+|--------|-------|--------|--------|
+| Verify Gates | ${VERIFY_PASS}/${VERIFY_TOTAL} (${VERIFY_PCT}%) | 100% | $([[ "$VERIFY_FAIL" -eq 0 ]] && echo "✅" || echo "❌") |
+| Incidents | ${INCIDENT_COUNT} | 0 | $([[ "$INCIDENT_COUNT" -eq 0 ]] && echo "✅" || echo "❌") |
+| Warnings | ${WARN_COUNT} | 0 | $([[ "$WARN_COUNT" -eq 0 ]] && echo "✅" || echo "⚠️") |
+| Open Loops | ${OPEN_LOOPS} | - | ℹ️ |
+| Open Gaps | ${OPEN_GAPS} | - | ℹ️ |
+
+## Domain Status
+
+| Domain | Status |
+|--------|--------|
+${DOMAIN_SUMMARY:-| (none) | (none) |}
+
+## Failing Verify Gates
+
+$(if [[ -n "$FAILING_IDS" && "$FAILING_IDS" != "" ]]; then echo "$FAILING_IDS"; else echo "None"; fi)
+
+## Evidence Trail
+
+- **Generated:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+- **Run Command:** \`./bin/ops cap run slo.evidence.daily\`
+
+---
+
+*Day 1 of 7-day SLO monitoring period*
+EOF
+
+echo
+echo "Evidence written to: $OUTPUT_FILE"
+echo
+echo "Summary:"
+echo "  Snapshot Status: $SNAPSHOT_STATUS"
+echo "  Verify Gates: ${VERIFY_PASS}/${VERIFY_TOTAL} pass (${VERIFY_PCT}%)"
+echo "  Incidents: $INCIDENT_COUNT | Warnings: $WARN_COUNT"
+echo "  Open Loops: $OPEN_LOOPS | Open Gaps: $OPEN_GAPS"
+echo
+echo "SLO Target: ≥95% verify pass rate, 0 incidents for 7 consecutive days"
+echo "Day 1 Status: $SLO_PASS"

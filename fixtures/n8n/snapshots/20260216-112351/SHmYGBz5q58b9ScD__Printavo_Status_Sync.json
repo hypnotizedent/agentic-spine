@@ -1,0 +1,176 @@
+{
+  "id": "SHmYGBz5q58b9ScD",
+  "name": "Printavo Status Sync",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://www.printavo.com/api/v2",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "email",
+              "value": "ronny@mintprints.com"
+            },
+            {
+              "name": "token",
+              "value": "={{ $env.PRINTAVO_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"query\": \"{ statuses { edges { node { id name color sortOrder statusType } } } }\"\n}",
+        "options": {}
+      },
+      "id": "fetch-statuses",
+      "name": "Fetch All Statuses",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract statuses from response\nconst response = $input.first().json;\nconst edges = response.data?.statuses?.edges || [];\n\nconst statuses = edges.map(edge => {\n  const node = edge.node;\n  return {\n    printavo_id: node.id,\n    name: node.name || '',\n    color: node.color || '',\n    sort_order: node.sortOrder || 0,\n    status_type: node.statusType || ''\n  };\n});\n\nconsole.log(`Found ${statuses.length} statuses`);\n\nreturn statuses.map(s => ({ json: s }));"
+      },
+      "id": "process-statuses",
+      "name": "Process Statuses",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Upsert status\nINSERT INTO printavo_statuses (printavo_id, name, color, sort_order, status_type, created_at, updated_at)\nVALUES (\n  '{{ $json.printavo_id }}',\n  '{{ ($json.name || '').replace(/'/g, \"''\") }}',\n  '{{ $json.color || '' }}',\n  {{ $json.sort_order || 0 }},\n  '{{ $json.status_type || '' }}',\n  NOW(),\n  NOW()\n)\nON CONFLICT (printavo_id) DO UPDATE SET\n  name = EXCLUDED.name,\n  color = EXCLUDED.color,\n  sort_order = EXCLUDED.sort_order,\n  status_type = EXCLUDED.status_type,\n  updated_at = NOW()\nRETURNING id, name;",
+        "options": {}
+      },
+      "id": "upsert-status",
+      "name": "Upsert Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        900,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "H91B62moXyyKhSgJ",
+          "name": "Mint OS Vault"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "aggregate-results",
+      "name": "Aggregate Results",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Summary\nconst items = $input.all();\nreturn [{\n  json: {\n    workflow: 'Printavo Status Sync',\n    timestamp: new Date().toISOString(),\n    statusesSynced: items.length,\n    status: 'completed'\n  }\n}];"
+      },
+      "id": "summary",
+      "name": "Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch All Statuses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch All Statuses": {
+      "main": [
+        [
+          {
+            "node": "Process Statuses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Statuses": {
+      "main": [
+        [
+          {
+            "node": "Upsert Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Status": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Results": {
+      "main": [
+        [
+          {
+            "node": "Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}

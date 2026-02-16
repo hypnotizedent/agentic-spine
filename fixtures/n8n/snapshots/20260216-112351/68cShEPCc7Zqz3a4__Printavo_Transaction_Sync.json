@@ -1,0 +1,362 @@
+{
+  "id": "68cShEPCc7Zqz3a4",
+  "name": "Printavo Transaction Sync",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 3 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Daily 3am Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Initialize pagination cursor\nreturn [{ json: { cursor: null, hasMore: true, allTransactions: [] } }];"
+      },
+      "id": "init-pagination",
+      "name": "Init Pagination",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-more",
+              "leftValue": "={{ $json.hasMore }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-more-pages",
+      "name": "Has More Pages?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        680,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://www.printavo.com/api/v2",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "email",
+              "value": "ronny@mintprints.com"
+            },
+            {
+              "name": "token",
+              "value": "={{ $env.PRINTAVO_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query\": \"query GetTransactions($after: String) { transactions(first: 50, after: $after) { pageInfo { hasNextPage endCursor } edges { node { ... on Payment { id amount transactionDate category source description transactedFor { ... on Invoice { id visualId } } timestamps { createdAt } } } } } }\",\n  \"variables\": { \"after\": {{ $json.cursor ? '\"' + $json.cursor + '\"' : 'null' }} }\n}",
+        "options": {}
+      },
+      "id": "fetch-transactions",
+      "name": "Fetch Transactions from Printavo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process transactions and prepare for next page\n// Printavo transactions use union type - we query ... on Payment {}\n// Payment.transactedFor.Invoice links to the order\nconst response = $input.first().json;\nconst pageInfo = response.data?.transactions?.pageInfo || {};\nconst edges = response.data?.transactions?.edges || [];\n\n// Get previous accumulated transactions\nconst prevData = $('Has More Pages?').first().json;\nconst allTransactions = prevData.allTransactions || [];\n\n// Add new transactions to accumulated list\n// Filter to only include payments with linked invoices (orders)\nconst newTransactions = edges\n  .filter(edge => edge.node && edge.node.id && edge.node.transactedFor?.id)\n  .map(edge => {\n    const payment = edge.node;\n    const invoice = payment.transactedFor || {};\n    const timestamps = payment.timestamps || {};\n    \n    return {\n      printavo_id: payment.id,\n      amount: parseFloat(payment.amount) || 0,\n      payment_date: payment.transactionDate,\n      payment_method: payment.source || payment.category || 'Unknown',\n      notes: payment.description || payment.category || '',\n      order_printavo_id: invoice.id,\n      order_visual_id: invoice.visualId,\n      created_at: timestamps.createdAt\n    };\n  });\n\nallTransactions.push(...newTransactions);\n\nreturn [{\n  json: {\n    cursor: pageInfo.endCursor || null,\n    hasMore: pageInfo.hasNextPage || false,\n    allTransactions: allTransactions,\n    pageCount: (prevData.pageCount || 0) + 1\n  }\n}];"
+      },
+      "id": "process-transactions",
+      "name": "Process Transactions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 0.5,
+        "unit": "seconds"
+      },
+      "id": "rate-limit-delay",
+      "name": "Rate Limit Delay",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1340,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Output all accumulated transactions for database upsert\nconst data = $input.first().json;\nconst transactions = data.allTransactions || [];\n\nconsole.log(`Total transactions fetched: ${transactions.length}`);\n\n// Return each transaction as a separate item\nreturn transactions.map(t => ({ json: t }));"
+      },
+      "id": "output-all-transactions",
+      "name": "Output All Transactions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Upsert payment\nINSERT INTO payments (\n  printavo_id,\n  amount,\n  payment_method,\n  payment_date,\n  notes,\n  created_at,\n  updated_at,\n  published_at\n)\nVALUES (\n  '{{ $json.printavo_id }}',\n  {{ $json.amount || 0 }},\n  '{{ ($json.payment_method || 'Unknown').replace(/'/g, \"''\") }}',\n  {{ $json.payment_date ? \"'\" + $json.payment_date + \"'\" : 'NULL' }},\n  '{{ ($json.notes || '').replace(/'/g, \"''\") }}',\n  {{ $json.created_at ? \"'\" + $json.created_at + \"'\" : 'NOW()' }},\n  NOW(),\n  NOW()\n)\nON CONFLICT (printavo_id) DO UPDATE SET\n  amount = EXCLUDED.amount,\n  payment_method = EXCLUDED.payment_method,\n  payment_date = EXCLUDED.payment_date,\n  notes = EXCLUDED.notes,\n  updated_at = NOW()\nRETURNING id, printavo_id;\n",
+        "options": {}
+      },
+      "id": "upsert-payment",
+      "name": "Upsert Payment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1120,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "H91B62moXyyKhSgJ",
+          "name": "Mint OS Vault"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=-- Link payment to order via payments_order_lnk\n-- Uses Printavo invoice ID to find the order\nINSERT INTO payments_order_lnk (payment_id, order_id, payment_ord)\nSELECT \n  p.id,\n  o.id,\n  1\nFROM payments p\nCROSS JOIN orders o\nWHERE p.printavo_id = '{{ $json.printavo_id }}'\n  AND o.printavo_id = '{{ $json.order_printavo_id }}'\n  AND NOT EXISTS (\n    SELECT 1 FROM payments_order_lnk pol WHERE pol.payment_id = p.id AND pol.order_id = o.id\n  );\n",
+        "options": {}
+      },
+      "id": "link-payment-order",
+      "name": "Link Payment to Order",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1340,
+        480
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "H91B62moXyyKhSgJ",
+          "name": "Mint OS Vault"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "aggregate-results",
+      "name": "Aggregate Results",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Summary of sync results\nconst items = $input.all();\nconst totalProcessed = items.length;\n\nreturn [{\n  json: {\n    workflow: 'Printavo Transaction Sync',\n    timestamp: new Date().toISOString(),\n    transactionsProcessed: totalProcessed,\n    status: 'completed'\n  }\n}];"
+      },
+      "id": "summary",
+      "name": "Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        480
+      ]
+    }
+  ],
+  "connections": {
+    "Daily 3am Trigger": {
+      "main": [
+        [
+          {
+            "node": "Init Pagination",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Init Pagination",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init Pagination": {
+      "main": [
+        [
+          {
+            "node": "Has More Pages?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has More Pages?": {
+      "main": [
+        [
+          {
+            "node": "Fetch Transactions from Printavo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Output All Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Transactions from Printavo": {
+      "main": [
+        [
+          {
+            "node": "Process Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Transactions": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit Delay": {
+      "main": [
+        [
+          {
+            "node": "Has More Pages?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Output All Transactions": {
+      "main": [
+        [
+          {
+            "node": "Upsert Payment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Payment": {
+      "main": [
+        [
+          {
+            "node": "Link Payment to Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Link Payment to Order": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Results": {
+      "main": [
+        [
+          {
+            "node": "Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}

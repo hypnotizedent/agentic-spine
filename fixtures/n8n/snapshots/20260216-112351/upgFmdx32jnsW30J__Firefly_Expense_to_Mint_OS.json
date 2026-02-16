@@ -1,0 +1,352 @@
+{
+  "id": "upgFmdx32jnsW30J",
+  "name": "Firefly Expense to Mint OS",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "firefly/expense",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Firefly Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "firefly-expense-sync",
+      "notes": "Receives STORE_TRANSACTION webhook from Firefly III"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Firefly webhook payload and filter for business categories\nconst SYNC_CATEGORIES = [\n  'Blank Apparel', 'Subcontracted Work', 'Embroidery Services', 'Screen Print Services',\n  'Heat Transfers', 'Screen Printing Supplies', 'Embroidery Supplies', 'Digital Printing Supplies',\n  'Other Production Supplies', 'Supplies & Materials', 'Shipping Out', 'Shipping',\n  'Rent', 'Software & Subscriptions', 'Dues & Subscriptions', 'Utilities', 'Phone & Internet',\n  'Marketing & Advertising', 'Office Supplies', 'Computer & Tech', 'Repairs & Maintenance',\n  'Website & Hosting', 'Professional Services', 'Payroll Expense', 'Production Labor'\n];\n\nconst CATEGORY_MAP = {\n  'Blank Apparel': 'Blanks/Garments',\n  'Subcontracted Work': 'Outsourced Work',\n  'Embroidery Services': 'Outsourced Work',\n  'Screen Print Services': 'Outsourced Work',\n  'Heat Transfers': 'Outsourced Work',\n  'Screen Printing Supplies': 'Screens/Film',\n  'Embroidery Supplies': 'Ink/Supplies',\n  'Digital Printing Supplies': 'Ink/Supplies',\n  'Other Production Supplies': 'Ink/Supplies',\n  'Supplies & Materials': 'Ink/Supplies',\n  'Shipping Out': 'Shipping Cost',\n  'Shipping': 'Shipping Cost',\n  'Rent': 'Rent/Lease',\n  'Software & Subscriptions': 'Software/Subscriptions',\n  'Dues & Subscriptions': 'Software/Subscriptions',\n  'Utilities': 'Utilities',\n  'Phone & Internet': 'Utilities',\n  'Marketing & Advertising': 'Misc Shop Expense',\n  'Office Supplies': 'Misc Shop Expense',\n  'Computer & Tech': 'Equipment',\n  'Repairs & Maintenance': 'Equipment',\n  'Website & Hosting': 'Software/Subscriptions',\n  'Professional Services': 'Misc Shop Expense',\n  'Payroll Expense': 'Payroll',\n  'Production Labor': 'Payroll'\n};\n\nconst VENDOR_MAP = {\n  'Embroidery Monkeys': 1,\n  'UPS Store': 2,\n  'UPS': 2,\n  'FedEx': 4,\n  'USPS': 5,\n  'Adobe Inc': 6,\n  'Adobe': 6,\n  'Shopify': 7,\n  'S&S Activewear': 8,\n  'SanMar': 9\n};\n\n// Parse webhook payload - n8n wraps POST body in 'body' property\nconst webhookData = $input.first().json;\nconst body = webhookData.body || webhookData;\n\n// Extract transaction data - handle multiple payload formats\nlet transaction;\nlet contentId;\n\n// Format 1: Firefly webhook (body.content.transactions)\nif (body.content?.transactions?.[0]) {\n  transaction = body.content.transactions[0];\n  contentId = body.content.id;\n}\n// Format 2: Direct transactions at root (manual test)\nelse if (body.transactions?.[0]) {\n  transaction = body.transactions[0];\n  contentId = body.id;\n}\n// Format 3: API response format\nelse if (body.data?.attributes?.transactions?.[0]) {\n  transaction = body.data.attributes.transactions[0];\n  contentId = body.data.id;\n}\nelse {\n  return [{ json: { skip: true, reason: 'No transaction data in webhook payload' } }];\n}\n\nconst fireflyTransactionId = String(contentId || transaction.transaction_journal_id);\nconst fireflyCategory = transaction.category_name || '';\nconst description = transaction.description || 'Unknown';\nconst amount = Math.abs(parseFloat(transaction.amount || 0));\nconst transactionDate = (transaction.date || new Date().toISOString()).split('T')[0];\n\n// Filter: only sync business expense categories\nif (!SYNC_CATEGORIES.includes(fireflyCategory)) {\n  return [{\n    json: {\n      skip: true,\n      reason: `Category '${fireflyCategory}' not in sync list`,\n      firefly_transaction_id: fireflyTransactionId\n    }\n  }];\n}\n\n// Map category\nconst mintCategory = CATEGORY_MAP[fireflyCategory];\nif (!mintCategory) {\n  return [{\n    json: {\n      skip: true,\n      reason: `No category mapping for '${fireflyCategory}'`,\n      firefly_transaction_id: fireflyTransactionId\n    }\n  }];\n}\n\n// Lookup vendor ID (from static map, DB lookup happens in next node)\nconst vendorId = VENDOR_MAP[description] || null;\n\nreturn [{\n  json: {\n    skip: false,\n    firefly_transaction_id: fireflyTransactionId,\n    firefly_category: fireflyCategory,\n    mint_category: mintCategory,\n    description: description,\n    amount: amount,\n    expense_date: transactionDate,\n    vendor_id_from_map: vendorId,\n    raw_webhook: webhookData\n  }\n}];"
+      },
+      "id": "parse-filter",
+      "name": "Parse & Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ],
+      "notes": "Extracts transaction data, filters for business categories, maps to Mint OS"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "not-skipped",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-should-sync",
+      "name": "Should Sync?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        700,
+        300
+      ],
+      "notes": "Skip if category not in sync list"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE((SELECT id FROM expenses WHERE firefly_transaction_id = '{{ $json.firefly_transaction_id }}' LIMIT 1), -1) as existing_id",
+        "options": {}
+      },
+      "id": "idempotency-check",
+      "name": "Check Already Synced",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        920,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ic8PwiZDlwp3ZXIi",
+          "name": "Mint OS Postgres"
+        }
+      },
+      "notes": "Idempotency check - skip if already synced"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "not-exists",
+              "leftValue": "={{ $json.existing_id }}",
+              "rightValue": -1,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-not-exists",
+      "name": "Not Yet Synced?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        200
+      ],
+      "notes": "Only proceed if no existing expense found"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT (SELECT id FROM vendors WHERE firefly_payee_name = '{{ $('Parse & Filter').item.json.description }}' AND active = true LIMIT 1) as id, (SELECT name FROM vendors WHERE firefly_payee_name = '{{ $('Parse & Filter').item.json.description }}' AND active = true LIMIT 1) as name",
+        "options": {}
+      },
+      "id": "vendor-lookup",
+      "name": "Lookup Vendor",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1360,
+        100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ic8PwiZDlwp3ZXIi",
+          "name": "Mint OS Postgres"
+        }
+      },
+      "notes": "Find vendor by Firefly payee name"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare INSERT data, handling vendor lookup result\nconst parsed = $('Parse & Filter').item.json;\nconst vendorLookup = $input.first().json;\n\n// Get vendor_id: prefer DB lookup, fallback to static map\nlet vendorId = null;\nlet vendorName = null;\n\nif (vendorLookup && vendorLookup.id) {\n  vendorId = vendorLookup.id;\n  vendorName = vendorLookup.name;\n} else if (parsed.vendor_id_from_map) {\n  vendorId = parsed.vendor_id_from_map;\n  vendorName = parsed.description;\n}\n\n// Escape single quotes for SQL\nconst safeDesc = parsed.description.replace(/'/g, \"''\");\n\nreturn [{\n  json: {\n    firefly_transaction_id: parsed.firefly_transaction_id,\n    category: parsed.mint_category,\n    vendor_id: vendorId,\n    vendor_name: vendorName,\n    amount: parsed.amount,\n    expense_date: parsed.expense_date,\n    description: safeDesc,\n    has_vendor: vendorId !== null\n  }\n}];"
+      },
+      "id": "prepare-insert",
+      "name": "Prepare Insert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        100
+      ],
+      "notes": "Combines vendor lookup result with parsed data"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.has_vendor ? `INSERT INTO expenses (category, vendor, vendor_id, amount, expense_date, description, name, firefly_transaction_id, status, recorded_by, created_at, updated_at) VALUES ('${$json.category}', '${$json.description}', ${$json.vendor_id}, ${$json.amount}, '${$json.expense_date}', '${$json.description}', '${$json.description}', '${$json.firefly_transaction_id}', 'paid', 'Firefly Sync', NOW(), NOW()) RETURNING id` : `INSERT INTO expenses (category, amount, expense_date, description, name, firefly_transaction_id, status, recorded_by, created_at, updated_at) VALUES ('${$json.category}', ${$json.amount}, '${$json.expense_date}', '${$json.description}', '${$json.description}', '${$json.firefly_transaction_id}', 'paid', 'Firefly Sync', NOW(), NOW()) RETURNING id` }}",
+        "options": {}
+      },
+      "id": "insert-expense",
+      "name": "Insert Expense",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1800,
+        100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ic8PwiZDlwp3ZXIi",
+          "name": "Mint OS Postgres"
+        }
+      },
+      "notes": "Creates expense record in Mint OS"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({success: true, expense_id: $json[0]?.id || $json.id, firefly_transaction_id: $('Parse & Filter').item.json.firefly_transaction_id, action: 'created', timestamp: new Date().toISOString()}) }}"
+      },
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2020,
+        100
+      ],
+      "notes": "Returns success with new expense ID"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({success: true, action: 'skipped', reason: $json.reason || 'Category not in sync list', firefly_transaction_id: $json.firefly_transaction_id, timestamp: new Date().toISOString()}) }}"
+      },
+      "id": "respond-skipped",
+      "name": "Respond Skipped",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        920,
+        400
+      ],
+      "notes": "Returns skip response for non-business categories"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({success: true, action: 'idempotent_skip', reason: 'Transaction already synced', firefly_transaction_id: $('Parse & Filter').item.json.firefly_transaction_id, existing_expense_id: $('Check Already Synced').item.json.existing_id, timestamp: new Date().toISOString()}) }}"
+      },
+      "id": "respond-already-exists",
+      "name": "Respond Already Synced",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1360,
+        300
+      ],
+      "notes": "Returns idempotent skip for already-synced transactions"
+    },
+    {
+      "parameters": {
+        "content": "## Firefly Expense to Mint OS (Phase 3)\n\n**Purpose:** Automatically sync business expenses from Firefly III to Mint OS when transactions are created.\n\n**Trigger:** Firefly webhook (STORE_TRANSACTION)\n\n**Flow:**\n1. Receive Firefly webhook payload\n2. Filter: only sync 25 business expense categories\n3. Idempotency check (skip if already synced)\n4. Map Firefly category -> Mint OS category\n5. Lookup vendor by payee name\n6. Insert expense record\n7. Respond with result\n\n**Credentials Required:**\n- `Mint OS Postgres` - PostgreSQL connection to mint_os database\n\n**Categories Synced:**\n- Blank Apparel, Subcontracted Work, Shipping, Rent, Utilities, etc.\n- Full list in Parse & Filter node\n\n**Related:**\n- Issue #375 (Phase 3: Automate Firefly Sync)\n- Issue #354 (Parent: Firefly Integration)\n- Script: scripts/finance/sync-firefly-transaction.sh"
+      },
+      "id": "sticky-note",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        60
+      ]
+    }
+  ],
+  "connections": {
+    "Firefly Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse & Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Filter": {
+      "main": [
+        [
+          {
+            "node": "Should Sync?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Sync?": {
+      "main": [
+        [
+          {
+            "node": "Check Already Synced",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Already Synced": {
+      "main": [
+        [
+          {
+            "node": "Not Yet Synced?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Not Yet Synced?": {
+      "main": [
+        [
+          {
+            "node": "Lookup Vendor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Already Synced",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Vendor": {
+      "main": [
+        [
+          {
+            "node": "Prepare Insert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Insert": {
+      "main": [
+        [
+          {
+            "node": "Insert Expense",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Expense": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}
