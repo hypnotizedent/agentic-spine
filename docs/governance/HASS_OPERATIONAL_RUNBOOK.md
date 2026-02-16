@@ -31,7 +31,7 @@ All operations in this runbook MUST be executed via capability system:
 | **VM** | 100 on proxmox-home (Beelink, HAOS) |
 | **LAN IP** | 10.0.0.100 |
 | **Tailscale IP** | 100.67.120.1 |
-| **Web UI** | http://100.67.120.1:8123 or https://ha.ronny.works |
+| **Web UI** | http://10.0.0.100:8123 (LAN) or https://ha.ronny.works |
 | **SSH** | `ssh hassio@ha` (Advanced SSH & Web Terminal add-on) |
 | **API Token** | Infisical: `home-assistant/prod/HA_API_TOKEN` (Long-Lived Access Token) |
 | **SSH Key** | Infisical: `home-assistant/prod/HA_SSH_KEY` |
@@ -99,7 +99,7 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 
 ## 3. Automation Inventory
 
-> 14 automations active. Critical fix: all button triggers include `not_from: ["unavailable", "unknown"]`.
+> 16 automations active. Critical fix: all button triggers include `not_from: ["unavailable", "unknown"]`.
 
 | Automation | Entity Trigger | Action | Notes |
 |-----------|---------------|--------|-------|
@@ -113,7 +113,9 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 | Living Room: Scene Btn 3 → Office Bulb | `event.0xa4c138615058086b_action` (3_single) | `light.toggle` office desk bulb | Scene switch |
 | Living Room: Scene Btn 4 → Guest Room Bulb | `event.0xa4c138615058086b_action` (4_single) | `light.toggle` guest room bulb | Scene switch |
 | Mailbox: Vibration → Notify | `binary_sensor.vibration_sensor_vibration` on | Notify Ronny iPhone | Contact sensor |
-| Office: Button → Desk Bulb | `event.0xa4c138cdbd2d0012_action` (single) | `light.toggle` office desk bulb | Zigbee button |
+| Office: Button → Desk Bulb | `event.0xa4c138cdbd2d0012_action` (single) | `light.toggle` office desk bulb | Zigbee button (living room) |
+| Office: BILRESA Button 1 → Toggle Desk Bulb | `event.bilresa_dual_button_button_1` (multi_press_1) | `light.toggle` office desk bulb | Matter/Thread button |
+| Office: BILRESA Button 2 → Desk Bulb Brightness | `event.bilresa_dual_button_button_2` (multi_press_1/2/long) | `light.turn_on` at 100%/50%/1% | Matter/Thread button |
 | System: Auto-Dismiss Localhost Login Failures | event: persistent_notification from 127.0.0.1 | Dismiss notification | Noise suppression |
 | Zigbee: Low Battery Alert | numeric_state < 20% on 6 sensors | Notify Ronny iPhone | Health monitoring |
 | Zigbee: Stale Device Alert (Daily) | time 09:00 daily | Notify if button silent > 12h | Health monitoring |
@@ -319,7 +321,7 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
    Query HA API for serial status:
    ```
    curl -s -H "Authorization: Bearer $TOKEN" \
-     http://100.67.120.1:8123/api/states/binary_sensor.tubeszb_2026_zw_tubeszb_zw_serial_connected \
+     http://10.0.0.100:8123/api/states/binary_sensor.tubeszb_2026_zw_tubeszb_zw_serial_connected \
      | jq '.state'
    ```
    Expected: `"on"` (after Z-Wave JS UI connects to tcp://10.0.0.90:6638)
@@ -333,7 +335,7 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 
 #### First Device Pairing
 
-1. Open Z-Wave JS UI dashboard (HA sidebar or `http://100.67.120.1:8123/api/hassio_ingress/<addon_slug>`)
+1. Open Z-Wave JS UI dashboard (HA sidebar or `http://10.0.0.100:8123/api/hassio_ingress/<addon_slug>`)
 2. Click "Add Node" (inclusion mode)
 3. Put target device in pairing mode (device-specific — usually press button 3x)
 4. Wait for interview to complete (may take 1-5 minutes)
@@ -390,7 +392,7 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
 4. **Verify Thread network formation via API:**
    ```
    curl -s -H "Authorization: Bearer $TOKEN" \
-     http://100.67.120.1:8123/api/states \
+     http://10.0.0.100:8123/api/states \
      | jq '[.[] | select(.entity_id | test("thread")) | {entity_id, state}]'
    ```
    Look for Thread integration entities showing a formed network.
@@ -401,28 +403,100 @@ The `not_from: ["unavailable", "unknown"]` guard on all button triggers was **ad
    ```
    Expected: log lines showing Thread border router discovery.
 
-#### Matter Device Commissioning (CLI)
+#### Thread Credential Sharing (Apple Home → HA)
 
-Commissioning requires the HA companion app (iOS/Android) for QR code scanning — this is the one step that cannot be fully CLI-automated. However, verification is CLI:
+Thread sleepy end devices (IKEA BILRESA, MYGGSPRAY) commission via Apple Home first,
+then HA joins the same Thread mesh using shared credentials. This is the critical step —
+without it, OTBR forms its own isolated Thread network and cannot reach Apple-commissioned devices.
 
-1. Commission device via HA companion app (scan QR code)
-2. **Verify device appeared via API:**
+1. **Share credentials from iPhone:**
+   Open HA Companion App on iPhone → Settings → Devices & Services → Thread → Configure.
+   This transfers the Apple Home Thread network credentials (network key, channel, PAN ID) to HA.
+
+2. **Verify dataset imported:**
+   ```bash
+   # Via HA WebSocket (python3):
+   # Send: {"type": "thread/list_datasets"}
+   # Look for dataset with source "iOS-app" and the Apple network name
    ```
+
+3. **Set as preferred dataset:**
+   ```bash
+   # Via HA WebSocket:
+   # Send: {"type": "thread/set_preferred_dataset", "dataset_id": "<ID>"}
+   ```
+
+4. **Get TLV hex for OTBR push:**
+   ```bash
+   # Via HA WebSocket:
+   # Send: {"type": "thread/get_dataset_tlv", "dataset_id": "<ID>"}
+   # Returns: {"tlv": "<hex string>"}
+   ```
+
+5. **Push TLV to OTBR and enable:**
+   ```bash
+   # Disable OTBR node first:
+   ssh hassio@ha 'bash -l -c "curl -s -X PUT http://core-openthread-border-router:8081/node/state -d disable"'
+
+   # Push Apple Thread dataset (TLV hex as text/plain, NOT JSON):
+   ssh hassio@ha 'bash -l -c "curl -s -X PUT http://core-openthread-border-router:8081/node/dataset/active \
+     -H \"Content-Type: text/plain\" -d \"<TLV_HEX>\""'
+
+   # Enable OTBR node:
+   ssh hassio@ha 'bash -l -c "curl -s -X PUT http://core-openthread-border-router:8081/node/state -d enable"'
+   ```
+
+6. **Verify OTBR joined Apple mesh:**
+   ```bash
+   ssh hassio@ha 'bash -l -c "curl -s http://core-openthread-border-router:8081/node/state"'
+   ```
+   Expected: `"router"` (joined existing mesh) — NOT `"leader"` (that means isolated network).
+
+7. **Restart Matter Server** to pick up the new Thread network:
+   ```bash
+   ssh hassio@ha "bash -l -c 'ha apps restart core_matter_server'"
+   ```
+
+**OTBR REST API reference** (available inside HA via SSH):
+- `GET /node/state` → `"disabled"` / `"detached"` / `"leader"` / `"router"`
+- `PUT /node/dataset/active` — body is raw TLV hex, `Content-Type: text/plain`
+- `PUT /node/state` — body is `enable` or `disable`
+- Base URL: `http://core-openthread-border-router:8081`
+
+#### Matter Device Commissioning
+
+Thread sleepy end devices (battery-powered) require **BLE for initial commissioning**.
+HA VM has no Bluetooth — use the iPhone Companion App as a BLE bridge.
+
+1. **Commission via iPhone Companion App:**
+   Open HA Companion App → Settings → Devices & Services → Matter → Add device → scan QR code.
+   The iPhone handles BLE discovery and passes the device to HA's Matter fabric.
+
+2. **Verify device appeared:**
+   ```bash
    curl -s -H "Authorization: Bearer $TOKEN" \
-     http://100.67.120.1:8123/api/states \
-     | jq '[.[] | select(.entity_id | test("matter")) | {entity_id, state}]'
+     http://10.0.0.100:8123/api/states \
+     | jq '[.[] | select(.entity_id | test("bilresa|myggspray|matter")) | {entity_id, state}]'
    ```
-3. Multi-admin sharing (Apple Home): use companion app "Add to other ecosystem"
+
+3. **Rename device** (D117 naming convention):
+   ```bash
+   ./bin/ops cap run ha.device.rename --device-id <DEVICE_ID> --name "Office Button"
+   ```
+
+4. **Multi-admin sharing (Apple Home):** Use companion app "Add to other ecosystem".
+
+**Cannot use `matter/commission_on_network`** for Thread sleepy end devices — mDNS discovery
+times out because these devices sleep and are only reachable via BLE during commissioning.
 
 #### Recovery
 
-- **Thread network reset:** `ssh hassio@ha "bash -l -c 'ha apps restart core_openthread_border_router'"` — OTBR will form a new network. Existing Thread devices must re-join.
-- **Matter fabric removal via API:**
-  ```
-  curl -s -X POST -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"entity_id": "button.matter_server_remove_<device>"}' \
-    http://100.67.120.1:8123/api/services/button/press
+- **Thread network reset:** `ssh hassio@ha "bash -l -c 'ha apps restart core_openthread_border_router'"` — OTBR will form a new network. Re-run Thread credential sharing procedure above to rejoin Apple mesh.
+- **Matter device removal:**
+  ```bash
+  # Via HA WebSocket:
+  # Send: {"type": "config/device_registry/remove_config_entry",
+  #        "device_id": "<DEVICE_ID>", "config_entry_id": "<MATTER_CONFIG_ENTRY>"}
   ```
   Device must be factory-reset for re-commissioning.
 - **SLZB-06MU reflash:** If RCP firmware is corrupt, reflash via Web UI (http://10.0.0.52) > Settings > Firmware.
@@ -482,7 +556,7 @@ Use when HA config is corrupt but the VM itself is healthy.
    Or restore via UI: HA Settings > System > Backups > select backup > Restore.
 
 4. **Post-restore checklist:**
-   - [ ] HA web UI accessible at `http://100.67.120.1:8123`
+   - [ ] HA web UI accessible at `http://10.0.0.100:8123`
    - [ ] Zigbee2MQTT reconnects to SLZB-06 coordinator (check Z2M add-on logs)
    - [ ] All 14 automations are enabled (`ha automations list` or Settings > Automations)
    - [ ] Calendar integration (CalDAV) shows events
@@ -511,7 +585,7 @@ Use when the entire VM 100 is lost or the disk is corrupt.
    ```
    Wait 2-3 minutes for HA to boot, then run the post-restore checklist above.
 
-4. **Network verification:** Confirm VM 100 has IP `100.67.120.1` (Tailscale) and `192.168.1.100` (LAN).
+4. **Network verification:** Confirm VM 100 has IP `10.0.0.100` (LAN). Tailscale IP `100.67.120.1` if Tailnet is active.
 
 #### Recovery Time Objectives
 
