@@ -36,19 +36,19 @@ VALID_DIAG_POLICIES="docker-group-member sudo-only no-docker-access not-applicab
 VALID_BACKUP_POLICIES="vzdump-scheduled vzdump-manual none"
 
 # Get active VM IDs from lifecycle
-active_vmids=$(yq -r '.vms[] | select(.status == "active") | .vmid' "$LIFECYCLE")
+active_vmids=$(yq -r '.vms[] | select(.status == "active") | (.id // .vmid)' "$LIFECYCLE")
 
 # Get profile VM IDs
-profile_vmids=$(yq -r '.profiles[].vmid' "$PROFILE")
+profile_vmids=$(yq -r '.profiles[] | (.id // .vmid)' "$PROFILE")
 
 # Check every active VM has a profile
 while IFS= read -r vmid; do
   [[ -z "$vmid" ]] && continue
-  hostname=$(yq -r ".vms[] | select(.vmid == $vmid) | .hostname" "$LIFECYCLE")
+  hostname=$(yq -r ".vms[] | select((.id // .vmid) == $vmid) | .hostname" "$LIFECYCLE")
 
   # Check canonical vm.lifecycle required fields from contract.
   for vm_field in "${REQUIRED_VM_FIELDS[@]:-}"; do
-    vm_val=$(yq -r ".vms[] | select(.vmid == $vmid) | .$vm_field" "$LIFECYCLE")
+    vm_val=$(yq -r ".vms[] | select((.id // .vmid) == $vmid) | .$vm_field" "$LIFECYCLE")
     if [[ -z "$vm_val" || "$vm_val" == "null" ]]; then
       err "Active VM $vmid ($hostname) missing required lifecycle field '$vm_field'"
     fi
@@ -61,7 +61,7 @@ while IFS= read -r vmid; do
 
   # Check all required fields are non-null
   for field in $REQUIRED_FIELDS; do
-    val=$(yq -r ".profiles[] | select(.vmid == $vmid) | .$field" "$PROFILE")
+    val=$(yq -r ".profiles[] | select((.id // .vmid) == $vmid) | .$field" "$PROFILE")
     if [[ -z "$val" || "$val" == "null" ]]; then
       err "VM $vmid ($hostname): $field is null/missing"
     fi
@@ -80,12 +80,12 @@ while IFS= read -r vmid; do
     fi
   }
 
-  ssh_mode=$(yq -r ".profiles[] | select(.vmid == $vmid) | .ssh_mode" "$PROFILE")
-  inspection=$(yq -r ".profiles[] | select(.vmid == $vmid) | .runtime_inspection_mode" "$PROFILE")
-  probes=$(yq -r ".profiles[] | select(.vmid == $vmid) | .health_probe_policy" "$PROFILE")
-  startup=$(yq -r ".profiles[] | select(.vmid == $vmid) | .startup_policy" "$PROFILE")
-  diag=$(yq -r ".profiles[] | select(.vmid == $vmid) | .diagnostic_user_policy" "$PROFILE")
-  backup=$(yq -r ".profiles[] | select(.vmid == $vmid) | .backup_policy" "$PROFILE")
+  ssh_mode=$(yq -r ".profiles[] | select((.id // .vmid) == $vmid) | .ssh_mode" "$PROFILE")
+  inspection=$(yq -r ".profiles[] | select((.id // .vmid) == $vmid) | .runtime_inspection_mode" "$PROFILE")
+  probes=$(yq -r ".profiles[] | select((.id // .vmid) == $vmid) | .health_probe_policy" "$PROFILE")
+  startup=$(yq -r ".profiles[] | select((.id // .vmid) == $vmid) | .startup_policy" "$PROFILE")
+  diag=$(yq -r ".profiles[] | select((.id // .vmid) == $vmid) | .diagnostic_user_policy" "$PROFILE")
+  backup=$(yq -r ".profiles[] | select((.id // .vmid) == $vmid) | .backup_policy" "$PROFILE")
 
   validate "ssh_mode" "$ssh_mode" "$VALID_SSH_MODES"
   validate "runtime_inspection_mode" "$inspection" "$VALID_INSPECTION_MODES"
@@ -99,7 +99,7 @@ done <<< "$active_vmids"
 # Check profile doesn't have orphaned entries (VMs not in lifecycle or not active)
 while IFS= read -r pvmid; do
   [[ -z "$pvmid" ]] && continue
-  lc_status=$(yq -r ".vms[] | select(.vmid == $pvmid) | .status" "$LIFECYCLE")
+  lc_status=$(yq -r ".vms[] | select((.id // .vmid) == $pvmid) | .status" "$LIFECYCLE")
   if [[ -z "$lc_status" || "$lc_status" == "null" ]]; then
     err "Profile entry for VM $pvmid has no matching lifecycle entry"
   elif [[ "$lc_status" != "active" ]]; then

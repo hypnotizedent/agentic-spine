@@ -38,7 +38,7 @@ for ((i=0; i<vm_count; i++)); do
   status=$(yq -r ".vms[$i].status" "$LIFECYCLE")
   hypervisor=$(yq -r ".vms[$i].proxmox_host" "$LIFECYCLE")
   site_scope=$(yq -r ".vms[$i].site_scope // \"shop\"" "$LIFECYCLE")
-  vmid=$(yq -r ".vms[$i].vmid" "$LIFECYCLE")
+  vmid=$(yq -r ".vms[$i] | (.id // .vmid)" "$LIFECYCLE")
   hostname=$(yq -r ".vms[$i].hostname" "$LIFECYCLE")
   ts_ip=$(yq -r ".vms[$i].tailscale_ip // \"\"" "$LIFECYCLE")
 
