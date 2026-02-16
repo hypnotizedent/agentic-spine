@@ -51,6 +51,8 @@ violations=()
 while IFS= read -r sha; do
   [[ -n "$sha" ]] || continue
   msg="$(git -C "$ROOT" log -1 --format="%B" "$sha")"
+  # Normalize escaped newlines from non-interactive commit wrappers.
+  msg="${msg//\\n/$'\n'}"
 
   missing=()
   grep -q '^Gate-Mutation:' <<<"$msg" || missing+=("Gate-Mutation")
