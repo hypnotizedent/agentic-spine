@@ -61,7 +61,7 @@ for i in $(seq 0 $((COUNT-1))); do
   start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
 
   set +e
-  http_code="$(curl -fsS -o /dev/null -w "%{http_code}" \
+  http_code="$(curl -sS -o /dev/null -w "%{http_code}" \
     --connect-timeout "$DEF_CONNECT" \
     --max-time "$DEF_MAX" \
     "$url" 2>/dev/null)"
@@ -71,7 +71,8 @@ for i in $(seq 0 $((COUNT-1))); do
   end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   dur_ms=$((end_ms - start_ms))
 
-  if [[ "$curl_exit" -eq 0 && "$http_code" == "$expect" ]]; then
+  # Check HTTP code first (even if curl reported non-zero exit for HTTP errors)
+  if [[ "$http_code" == "$expect" ]]; then
     printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "OK" "${dur_ms}ms" ""
   elif [[ "$curl_exit" -eq 0 ]]; then
     printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "DEGRADED" "${dur_ms}ms" "http=$http_code expected=$expect"
@@ -83,7 +84,7 @@ for i in $(seq 0 $((COUNT-1))); do
     printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "REFUSED" "${dur_ms}ms" "connection refused"
     fail=1
   else
-    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "FAIL" "${dur_ms}ms" "curl_exit=$curl_exit"
+    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "FAIL" "${dur_ms}ms" "http=$http_code curl_exit=$curl_exit"
     fail=1
   fi
 done
