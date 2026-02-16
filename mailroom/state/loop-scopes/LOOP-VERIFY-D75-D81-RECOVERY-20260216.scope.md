@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-VERIFY-D75-D81-RECOVERY-20260216
 created: 2026-02-16
-status: active
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Restore clean spine.verify baseline by remediating D75 gap-registry trailer boundary and D81 observability plugin test coverage, then validate NAS gap tracking state
@@ -43,5 +43,11 @@ Additionally, this session must confirm the state of high-priority NAS gap track
 
 ## Linked Gaps
 
-- GAP-OP-547 (to file): D75 enforcement boundary drift after non-trailer commit.
-- GAP-OP-548 (to file): D81 observability plugin test regression.
+- GAP-OP-547: fixed via `gaps.close` (commit `a2d904c`)
+- GAP-OP-548: fixed via `gaps.close` (commit `132d69d`)
+
+## Completion Evidence
+
+- D75+D81 remediated by commit `f459033`
+- Final verification pass: `CAP-20260216-003157__spine.verify__Rj9j619025`
+- GAP-OP-531 status confirmed as `fixed` in `ops/bindings/operational.gaps.yaml`
