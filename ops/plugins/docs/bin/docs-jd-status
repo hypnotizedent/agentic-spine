@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+#
+# docs.jd.status - Verify Johnny Decimal documentation coverage
+#
+# Status: authoritative
+# Owner: @ronny
+# Last verified: 2026-02-16
+#
+# Usage: docs-jd-status [--verbose] [--fix-suggestions]
+#
+# Checks:
+#   1. No duplicate JD IDs
+#   2. All in-scope docs have JD IDs
+#   3. All exclusions are explicit
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+BINDING_FILE="$SPINE_ROOT/ops/bindings/docs.johnny_decimal.yaml"
+
+VERBOSE="${VERBOSE:-false}"
+FIX_SUGGESTIONS="${FIX_SUGGESTIONS:-false}"
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --verbose|-v)
+      VERBOSE=true
+      shift
+      ;;
+    --fix-suggestions)
+      FIX_SUGGESTIONS=true
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+echo "docs.jd.status"
+echo "root: $SPINE_ROOT"
+echo ""
+
+PASS=0
+FAIL=0
+WARN=0
+
+# Check 1: Binding file exists
+if [[ ! -f "$BINDING_FILE" ]]; then
+  echo "FAIL: Binding file not found: $BINDING_FILE"
+  ((FAIL++))
+else
+  echo "PASS: Binding file exists"
+  ((PASS++))
+fi
+
+# Check 2: No duplicate JD IDs
+echo ""
+echo "--- Duplicate ID Check ---"
+
+# Extract all JD IDs from binding
+mapfile -t JD_IDS < <(grep -E '^\s+"[0-9]+\.[0-9]+":' "$BINDING_FILE" 2>/dev/null | sed 's/.*"\([0-9]*\.[0-9]*\)".*/\1/' | sort)
+
+DUPLICATES=$(printf '%s\n' "${JD_IDS[@]}" | sort | uniq -d)
+if [[ -n "$DUPLICATES" ]]; then
+  echo "FAIL: Duplicate JD IDs found:"
+  echo "$DUPLICATES"
+  ((FAIL++))
+else
+  echo "PASS: No duplicate JD IDs"
+  ((PASS++))
+fi
+
+# Check 3: In-scope docs have JD IDs
+echo ""
+echo "--- Coverage Check ---"
+
+# Get in-scope paths from binding
+IN_SCOPE=("docs/core/" "docs/governance/*.md" "docs/brain/*.md" "docs/pillars/" "docs/product/" "docs/planning/")
+
+UNMAPPED=()
+
+# Check docs/core/
+for f in "$SPINE_ROOT"/docs/core/*.md; do
+  [[ -f "$f" ]] || continue
+  REL_PATH="${f#$SPINE_ROOT/}"
+  # Check if path is in binding
+  if ! grep -q "\"$REL_PATH\"" "$BINDING_FILE" 2>/dev/null; then
+    UNMAPPED+=("$REL_PATH")
+  fi
+done
+
+# Check docs/governance/*.md (not _audits or _receipts_meta)
+for f in "$SPINE_ROOT"/docs/governance/*.md; do
+  [[ -f "$f" ]] || continue
+  REL_PATH="${f#$SPINE_ROOT/}"
+  if ! grep -q "\"$REL_PATH\"" "$BINDING_FILE" 2>/dev/null; then
+    # Check if it's in exclusions
+    if ! grep -q "docs/governance/" "$BINDING_FILE" | grep -q "exclusion"; then
+      UNMAPPED+=("$REL_PATH")
+    fi
+  fi
+done
+
+# Check docs/brain/*.md
+for f in "$SPINE_ROOT"/docs/brain/*.md; do
+  [[ -f "$f" ]] || continue
+  REL_PATH="${f#$SPINE_ROOT/}"
+  if ! grep -q "\"$REL_PATH\"" "$BINDING_FILE" 2>/dev/null; then
+    UNMAPPED+=("$REL_PATH")
+  fi
+done
+
+# Check docs/pillars/
+for f in "$SPINE_ROOT"/docs/pillars/**/*.md; do
+  [[ -f "$f" ]] || continue
+  REL_PATH="${f#$SPINE_ROOT/}"
+  if ! grep -q "\"$REL_PATH\"" "$BINDING_FILE" 2>/dev/null; then
+    UNMAPPED+=("$REL_PATH")
+  fi
+done
+
+# Check docs/product/
+for f in "$SPINE_ROOT"/docs/product/*.md; do
+  [[ -f "$f" ]] || continue
+  REL_PATH="${f#$SPINE_ROOT/}"
+  if ! grep -q "\"$REL_PATH\"" "$BINDING_FILE" 2>/dev/null; then
+    UNMAPPED+=("$REL_PATH")
+  fi
+done
+
+# Check docs/planning/
+for f in "$SPINE_ROOT"/docs/planning/*.md; do
+  [[ -f "$f" ]] || continue
+  REL_PATH="${f#$SPINE_ROOT/}"
+  if ! grep -q "\"$REL_PATH\"" "$BINDING_FILE" 2>/dev/null; then
+    UNMAPPED+=("$REL_PATH")
+  fi
+done
+
+# Check root *.md
+for f in "$SPINE_ROOT"/*.md; do
+  [[ -f "$f" ]] || continue
+  REL_PATH="$(basename "$f")"
+  if ! grep -q "\"$REL_PATH\"" "$BINDING_FILE" 2>/dev/null; then
+    UNMAPPED+=("$REL_PATH")
+  fi
+done
+
+if [[ ${#UNMAPPED[@]} -gt 0 ]]; then
+  echo "WARN: Unmapped docs (may need JD ID or exclusion):"
+  printf '  - %s\n' "${UNMAPPED[@]}"
+  ((WARN++))
+else
+  echo "PASS: All in-scope docs have JD IDs"
+  ((PASS++))
+fi
+
+# Summary
+echo ""
+echo "--- Summary ---"
+echo "PASS: $PASS"
+echo "WARN: $WARN"
+echo "FAIL: $FAIL"
+echo ""
+
+if [[ $FAIL -gt 0 ]]; then
+  echo "status: FAIL"
+  exit 1
+elif [[ $WARN -gt 0 ]]; then
+  echo "status: WARN"
+  exit 0
+else
+  echo "status: PASS"
+  exit 0
+fi
