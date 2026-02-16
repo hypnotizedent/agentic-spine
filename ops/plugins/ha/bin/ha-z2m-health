@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.z2m.health — Z2M device health report: battery, staleness, bridge status
+# Requires: infisical-agent.sh with HA_API_TOKEN at home-assistant/prod
+# Reads: z2m.devices.yaml, z2m.naming.yaml
+# Safety: read-only
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+DEVICES_BINDING="$SPINE_ROOT/ops/bindings/z2m.devices.yaml"
+NAMING_BINDING="$SPINE_ROOT/ops/bindings/z2m.naming.yaml"
+
+echo "ha.z2m.health"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRECONDITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+command -v curl >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_curl"; exit 2; }
+command -v jq >/dev/null 2>&1  || { echo "status: STOP"; echo "reason: missing_dep_jq"; exit 2; }
+command -v yq >/dev/null 2>&1  || { echo "status: STOP"; echo "reason: missing_dep_yq"; exit 2; }
+
+if [[ ! -x "$INFISICAL_AGENT" ]]; then
+  echo "status: STOP"
+  echo "reason: infisical_agent_not_found"
+  exit 2
+fi
+
+if [[ ! -f "$DEVICES_BINDING" ]]; then
+  echo "status: STOP"
+  echo "reason: z2m_devices_binding_missing"
+  echo "fix: run ha.z2m.devices.snapshot first"
+  exit 2
+fi
+
+if [[ ! -f "$NAMING_BINDING" ]]; then
+  echo "status: STOP"
+  echo "reason: z2m_naming_binding_missing"
+  echo "fix: create ops/bindings/z2m.naming.yaml"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FETCH HA_API_TOKEN FROM INFISICAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+
+if [[ -z "${HA_TOKEN:-}" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_token_unavailable"
+  echo "fix: check Infisical auth and HA_API_TOKEN at home-assistant/prod"
+  exit 2
+fi
+
+HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_PORT="${HA_PORT:-8123}"
+HA_BASE="http://${HA_HOST}:${HA_PORT}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER: query HA API state
+# ─────────────────────────────────────────────────────────────────────────────
+
+ha_state() {
+  local entity_id="$1"
+  curl -s --max-time 10 \
+    -H "Authorization: Bearer $HA_TOKEN" \
+    "${HA_BASE}/api/states/${entity_id}" 2>/dev/null
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BRIDGE STATUS
+# ─────────────────────────────────────────────────────────────────────────────
+
+BRIDGE_ENTITY="binary_sensor.zigbee2mqtt_bridge_connection_state"
+VERSION_ENTITY="sensor.zigbee2mqtt_bridge_version"
+
+BRIDGE_JSON=$(ha_state "$BRIDGE_ENTITY")
+BRIDGE_STATE=$(echo "$BRIDGE_JSON" | jq -r '.state // "unknown"' 2>/dev/null)
+if [[ "$BRIDGE_STATE" == "on" ]]; then
+  BRIDGE_STATUS="connected"
+else
+  BRIDGE_STATUS="$BRIDGE_STATE"
+fi
+
+VERSION_JSON=$(ha_state "$VERSION_ENTITY")
+BRIDGE_VERSION=$(echo "$VERSION_JSON" | jq -r '.state // "unknown"' 2>/dev/null)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEVICE HEALTH
+# ─────────────────────────────────────────────────────────────────────────────
+
+NOW_EPOCH=$(date +%s)
+DEVICE_COUNT=$(yq '.z2m_devices.device_count' "$DEVICES_BINDING")
+CRITICAL=0
+WARNINGS=0
+
+echo "  Device Health (${DEVICE_COUNT} devices):"
+echo "  ─────────────────────────────────────────────────────"
+
+# Iterate through devices from the naming binding (authoritative source for entity ID patterns)
+NAMING_COUNT=$(yq '.devices | length' "$NAMING_BINDING")
+i=0
+while [ "$i" -lt "$NAMING_COUNT" ]; do
+  CANONICAL=$(yq ".devices[$i].canonical_name" "$NAMING_BINDING")
+  IEEE=$(yq ".devices[$i].ieee" "$NAMING_BINDING")
+  PATTERN=$(yq ".devices[$i].entity_id_pattern" "$NAMING_BINDING")
+  PREFIX=$(yq ".devices[$i].entity_id_prefix" "$NAMING_BINDING")
+  STALE_EXEMPT=$(yq ".devices[$i].stale_exempt" "$NAMING_BINDING")
+
+  # Construct battery entity ID based on pattern
+  BATTERY_ENTITY="sensor.${PREFIX}_battery"
+
+  # Query live battery from HA
+  BATTERY_JSON=$(ha_state "$BATTERY_ENTITY")
+  BATTERY_VAL=$(echo "$BATTERY_JSON" | jq -r '.state // "unknown"' 2>/dev/null)
+
+  # Get last_seen from devices binding (by IEEE match)
+  LAST_SEEN=$(yq ".z2m_devices.devices[] | select(.ieee_address == \"$IEEE\") | .last_seen" "$DEVICES_BINDING")
+
+  # Calculate staleness
+  STALE_STR="unknown"
+  STALE_HOURS=0
+  if [[ -n "$LAST_SEEN" && "$LAST_SEEN" != "null" && "$LAST_SEEN" != "" ]]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+      SEEN_EPOCH=$(TZ=UTC date -jf '%Y-%m-%dT%H:%M:%SZ' "$LAST_SEEN" +%s 2>/dev/null) || SEEN_EPOCH=0
+    else
+      SEEN_EPOCH=$(date -d "$LAST_SEEN" +%s 2>/dev/null) || SEEN_EPOCH=0
+    fi
+    if [[ "$SEEN_EPOCH" -gt 0 ]]; then
+      DIFF_SEC=$((NOW_EPOCH - SEEN_EPOCH))
+      STALE_HOURS=$((DIFF_SEC / 3600))
+      DIFF_MIN=$((DIFF_SEC / 60))
+      if [[ "$DIFF_MIN" -lt 60 ]]; then
+        STALE_STR="${DIFF_MIN}m ago"
+      elif [[ "$STALE_HOURS" -lt 48 ]]; then
+        STALE_STR="${STALE_HOURS}h ago"
+      else
+        DAYS=$((STALE_HOURS / 24))
+        STALE_STR="${DAYS}d ago"
+      fi
+    fi
+  fi
+
+  # Determine status
+  STATUS="OK"
+  STATUS_DETAIL=""
+
+  # Battery check
+  if [[ "$BATTERY_VAL" != "unknown" && "$BATTERY_VAL" != "unavailable" ]]; then
+    BATTERY_INT=${BATTERY_VAL%%.*}
+    if [[ "$BATTERY_INT" -lt 20 ]]; then
+      STATUS="CRIT"
+      STATUS_DETAIL=" (battery <20%)"
+      CRITICAL=$((CRITICAL + 1))
+    elif [[ "$BATTERY_INT" -lt 50 ]]; then
+      STATUS="WARN"
+      STATUS_DETAIL=" (battery <50%)"
+      WARNINGS=$((WARNINGS + 1))
+    fi
+    BATTERY_DISPLAY="${BATTERY_VAL}%"
+  else
+    BATTERY_DISPLAY="n/a"
+  fi
+
+  # Staleness check (skip if stale_exempt)
+  if [[ "$STALE_EXEMPT" != "true" && "$STALE_HOURS" -ge 48 ]]; then
+    if [[ "$STATUS" == "OK" ]]; then
+      STATUS="WARN"
+      STATUS_DETAIL=" (stale >48h)"
+      WARNINGS=$((WARNINGS + 1))
+    fi
+  fi
+
+  if [[ "$STALE_EXEMPT" == "true" ]]; then
+    STATUS_DETAIL="${STATUS_DETAIL} (event-only)"
+  fi
+
+  # Format output line
+  printf "  %-25s battery: %4s  last: %-10s %s%s\n" \
+    "$CANONICAL" "$BATTERY_DISPLAY" "$STALE_STR" "$STATUS" "$STATUS_DETAIL"
+
+  i=$((i + 1))
+done
+
+echo
+echo "  Bridge: ${BRIDGE_STATUS} (v${BRIDGE_VERSION})"
+echo "  Coordinator: SLZB-06 @ 10.0.0.52"
+echo
+echo "  Summary: ${DEVICE_COUNT} devices, ${CRITICAL} critical, ${WARNINGS} warning"

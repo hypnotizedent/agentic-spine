@@ -10,6 +10,7 @@ SSH_TARGET="hassio@ha"
 Z2M_CONTAINER_DEFAULT="addon_45df7312_zigbee2mqtt"
 Z2M_DB_PATH="/config/zigbee2mqtt/database.db"
 Z2M_CFG_PATH="/config/zigbee2mqtt/configuration.yaml"
+Z2M_STATE_PATH="/config/zigbee2mqtt/state.json"
 SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
@@ -45,13 +46,18 @@ ssh $SSH_OPTS "$SSH_TARGET" \
   "sudo docker exec $Z2M_CONTAINER cat $Z2M_CFG_PATH 2>/dev/null" \
   > "$TMPDIR_WORK/config.yaml" 2>/dev/null
 
+# Extract state.json for link quality data (optional — graceful if unavailable)
+ssh $SSH_OPTS "$SSH_TARGET" \
+  "sudo docker exec $Z2M_CONTAINER cat $Z2M_STATE_PATH 2>/dev/null" \
+  > "$TMPDIR_WORK/state.json" 2>/dev/null || true
+
 if [[ ! -s "$TMPDIR_WORK/database.db" ]]; then
   echo "STOP (2): Z2M database.db is empty or inaccessible"
   exit 2
 fi
 
 # Parse JSONL database + config into YAML binding
-python3 - "$TMPDIR_WORK/database.db" "$TMPDIR_WORK/config.yaml" "$OUTPUT" << 'PYEOF'
+python3 - "$TMPDIR_WORK/database.db" "$TMPDIR_WORK/config.yaml" "$TMPDIR_WORK/state.json" "$OUTPUT" << 'PYEOF'
 import json, sys, datetime, os
 try:
     import yaml
@@ -59,7 +65,7 @@ except ImportError:
     print("STOP (2): PyYAML not installed", file=sys.stderr)
     sys.exit(2)
 
-db_path, cfg_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+db_path, cfg_path, state_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 # Parse JSONL database
 devices = []
@@ -122,6 +128,23 @@ try:
     for dev in devices:
         if dev['ieee_address'] in name_map:
             dev['friendly_name'] = name_map[dev['ieee_address']]
+except Exception:
+    pass
+
+# Parse state.json for link quality (LQI) per device
+try:
+    if os.path.isfile(state_path) and os.path.getsize(state_path) > 0:
+        with open(state_path, 'r') as f:
+            state_data = json.load(f)
+        # state.json keys are friendly names; build ieee→lqi map via config name_map
+        lqi_by_fname = {}
+        for fname, sdata in state_data.items():
+            if isinstance(sdata, dict) and 'linkquality' in sdata:
+                lqi_by_fname[fname] = sdata['linkquality']
+        for dev in devices:
+            fname = dev.get('friendly_name', '')
+            if fname in lqi_by_fname:
+                dev['link_quality'] = lqi_by_fname[fname]
 except Exception:
     pass
 
