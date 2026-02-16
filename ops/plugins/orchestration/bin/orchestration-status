@@ -40,6 +40,50 @@ lane_status() {
   fi
 }
 
+manifest_lane_status() {
+  local manifest="$1"
+  local lane="$2"
+  yq e -r ".lanes.$lane.status // \"\"" "$manifest" 2>/dev/null || echo ""
+}
+
+resolve_validation_state() {
+  local artifact_file="$1"
+  local manifest="$2"
+  local lane="$3"
+  local artifact_state
+  artifact_state="$(lane_status "$artifact_file")"
+  if [[ "$artifact_state" != "missing" ]]; then
+    echo "$artifact_state"
+    return
+  fi
+  local manifest_status
+  manifest_status="$(manifest_lane_status "$manifest" "$lane")"
+  if [[ "$manifest_status" == "validated" || "$manifest_status" == "integrated" ]]; then
+    echo "validated"
+  else
+    echo "missing"
+  fi
+}
+
+resolve_integration_state() {
+  local artifact_file="$1"
+  local manifest="$2"
+  local lane="$3"
+  local artifact_state
+  artifact_state="$(lane_status "$artifact_file")"
+  if [[ "$artifact_state" != "missing" ]]; then
+    echo "$artifact_state"
+    return
+  fi
+  local manifest_status
+  manifest_status="$(manifest_lane_status "$manifest" "$lane")"
+  if [[ "$manifest_status" == "integrated" ]]; then
+    echo "applied"
+  else
+    echo "missing"
+  fi
+}
+
 print_one() {
   local loop_dir="$1"
   local manifest="$loop_dir/manifest.yaml"
@@ -69,8 +113,8 @@ print_one() {
   while IFS= read -r lane; do
     [[ -z "$lane" || "$lane" == "null" ]] && continue
     ticket_state="$(lane_status "$loop_dir/tickets/$lane.yaml")"
-    validation_state="$(lane_status "$loop_dir/validations/$lane.yaml")"
-    integration_state="$(lane_status "$loop_dir/integrations/$lane.yaml")"
+    validation_state="$(resolve_validation_state "$loop_dir/validations/$lane.yaml" "$manifest" "$lane")"
+    integration_state="$(resolve_integration_state "$loop_dir/integrations/$lane.yaml" "$manifest" "$lane")"
     echo "  lane[$lane]: ticket=$ticket_state validate=$validation_state integrate=$integration_state"
   done < <(yq e -r '.sequence[]?' "$manifest")
 

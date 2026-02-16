@@ -429,6 +429,53 @@ case_related_repo_clean_integrate_passes() {
       --loop-id LOOP-T-RELATED-CLEAN --lane lane-a --apply
 }
 
+case_manifest_lane_status_fallback() {
+  local repo base manifest status_output
+  repo="$(make_repo)"
+  base="$(git -C "$repo" rev-parse HEAD)"
+
+  run_cap "$repo" "$BIN_DIR/orchestration-loop-open" \
+    --loop-id LOOP-T-MANIFEST-FALLBACK \
+    --apply-owner "$USER" \
+    --repo "$repo" \
+    --base-sha "$base" \
+    --lanes lane-a \
+    --sequence lane-a \
+    --allow "lane-a:src/a/**" >/dev/null
+
+  run_cap "$repo" "$BIN_DIR/orchestration-ticket-issue" \
+    --loop-id LOOP-T-MANIFEST-FALLBACK \
+    --lane lane-a \
+    --branch worker/lane-a >/dev/null
+
+  manifest="$repo/mailroom/state/orchestration/LOOP-T-MANIFEST-FALLBACK/manifest.yaml"
+
+  yq e -i '.lanes.lane-a.status = "integrated"' "$manifest"
+  yq e -i '.lanes.lane-a.commit = "abc1234"' "$manifest"
+
+  [[ ! -f "$repo/mailroom/state/orchestration/LOOP-T-MANIFEST-FALLBACK/validations/lane-a.yaml" ]] || {
+    fail_case "manifest fallback setup" "validation artifact should not exist"
+    return 1
+  }
+  [[ ! -f "$repo/mailroom/state/orchestration/LOOP-T-MANIFEST-FALLBACK/integrations/lane-a.yaml" ]] || {
+    fail_case "manifest fallback setup" "integration artifact should not exist"
+    return 1
+  }
+
+  status_output="$(run_cap "$repo" "$BIN_DIR/orchestration-status" --loop-id LOOP-T-MANIFEST-FALLBACK 2>&1)"
+
+  if ! printf '%s' "$status_output" | rg -q "validate=validated"; then
+    fail_case "manifest fallback validate" "expected validate=validated, got: $status_output"
+    return 1
+  fi
+  if ! printf '%s' "$status_output" | rg -q "integrate=applied"; then
+    fail_case "manifest fallback integrate" "expected integrate=applied, got: $status_output"
+    return 1
+  fi
+
+  pass_case "manifest lane status fallback (no artifacts)"
+}
+
 case_wrong_branch_rejected
 case_base_sha_mismatch_rejected
 case_forbidden_file_rejected
@@ -438,6 +485,7 @@ case_terminal_entry_lane_branch_mismatch_rejected
 case_happy_path_validate_integrate
 case_related_repo_dirty_blocks_integrate
 case_related_repo_clean_integrate_passes
+case_manifest_lane_status_fallback
 
 echo ""
 echo "tests_passed: $pass_count"
