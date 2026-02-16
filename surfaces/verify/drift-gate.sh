@@ -1181,6 +1181,20 @@ else
   warn "spine schema conventions lock gate not present"
 fi
 
+echo -n "D130 Boundary authority lock... "
+if [[ -x "$SP/surfaces/verify/d130-boundary-authority-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d130-boundary-authority-lock.sh" "D130"
+else
+  warn "boundary authority lock gate not present"
+fi
+
+echo -n "D135 Terminal scope lock... "
+if [[ -x "$SP/surfaces/verify/d135-terminal-scope-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d135-terminal-scope-lock.sh" "D135"
+else
+  warn "terminal scope lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

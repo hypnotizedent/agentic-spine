@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# terminal-scope-status — Detect overlapping active terminal write scopes.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+STATE_DIR="${SPINE_STATE:-$ROOT/mailroom/state}"
+HEARTBEAT_DIR="$STATE_DIR/terminal-heartbeats"
+json_mode=0
+
+usage() {
+  cat <<'EOF'
+Usage: terminal-scope-status [--json]
+EOF
+}
+
+iso_to_epoch() {
+  local raw="${1:-}"
+  python3 - "$raw" <<'PY'
+from datetime import datetime, timezone
+import sys
+
+raw = (sys.argv[1] or "").strip()
+if not raw:
+    print(0)
+    raise SystemExit(0)
+try:
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+except Exception:
+    print(0)
+    raise SystemExit(0)
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+print(int(dt.timestamp()))
+PY
+}
+
+normalize_tokens() {
+  local raw="${1:-}"
+  echo "$raw" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d'
+}
+
+scope_overlap_token() {
+  local left="${1:-}"
+  local right="${2:-}"
+  local a b
+  while IFS= read -r a; do
+    [[ -n "$a" ]] || continue
+    while IFS= read -r b; do
+      [[ -n "$b" ]] || continue
+      if [[ "$a" == "*" || "$b" == "*" ]]; then
+        echo "*"
+        return 0
+      fi
+      if [[ "$a" == "$b" ]]; then
+        echo "$a"
+        return 0
+      fi
+      if [[ "$a" == "$b"* || "$b" == "$a"* ]]; then
+        echo "$a|$b"
+        return 0
+      fi
+    done < <(normalize_tokens "$right")
+  done < <(normalize_tokens "$left")
+  return 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      json_mode=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || {
+  echo "FAIL: missing required tool: yq" >&2
+  exit 1
+}
+
+mkdir -p "$HEARTBEAT_DIR"
+now_epoch="$(date +%s)"
+
+declare -a ids roles scopes repos branches files
+stale_count=0
+total_count=0
+
+shopt -s nullglob
+for hb_file in "$HEARTBEAT_DIR"/*.yaml; do
+  [[ -f "$hb_file" ]] || continue
+  total_count=$((total_count + 1))
+
+  terminal_id="$(yq e -r '.terminal_id // ""' "$hb_file" 2>/dev/null || true)"
+  role="$(yq e -r '.role // ""' "$hb_file" 2>/dev/null || true)"
+  scope="$(yq e -r '.scope // ""' "$hb_file" 2>/dev/null || true)"
+  repo_root="$(yq e -r '.repo_root // ""' "$hb_file" 2>/dev/null || true)"
+  branch="$(yq e -r '.branch // ""' "$hb_file" 2>/dev/null || true)"
+  status="$(yq e -r '.status // "active"' "$hb_file" 2>/dev/null || echo active)"
+  expires_at="$(yq e -r '.expires_at // ""' "$hb_file" 2>/dev/null || true)"
+
+  expires_epoch="$(iso_to_epoch "$expires_at")"
+  if [[ "$status" != "active" || "$expires_epoch" -lt "$now_epoch" ]]; then
+    stale_count=$((stale_count + 1))
+    continue
+  fi
+
+  [[ -n "$terminal_id" ]] || terminal_id="$(basename "$hb_file" .yaml)"
+  [[ -n "$scope" ]] || scope="unspecified"
+  [[ -n "$repo_root" ]] || repo_root="unknown"
+
+  ids+=("$terminal_id")
+  roles+=("$role")
+  scopes+=("$scope")
+  repos+=("$repo_root")
+  branches+=("$branch")
+  files+=("$hb_file")
+done
+shopt -u nullglob
+
+active_count="${#ids[@]}"
+collision_count=0
+declare -a collisions
+
+for ((i=0; i<active_count; i++)); do
+  for ((j=i+1; j<active_count; j++)); do
+    if [[ "${ids[$i]}" == "${ids[$j]}" ]]; then
+      continue
+    fi
+    [[ "${repos[$i]}" == "${repos[$j]}" ]] || continue
+    token="$(scope_overlap_token "${scopes[$i]}" "${scopes[$j]}" || true)"
+    [[ -n "$token" ]] || continue
+
+    collision_count=$((collision_count + 1))
+    collisions+=("${ids[$i]} <-> ${ids[$j]} repo=${repos[$i]} overlap=${token}")
+  done
+done
+
+status_word="pass"
+if [[ "$collision_count" -gt 0 ]]; then
+  status_word="fail"
+fi
+
+if [[ "$json_mode" -eq 1 ]]; then
+  command -v jq >/dev/null 2>&1 || {
+    echo "FAIL: --json requires jq" >&2
+    exit 1
+  }
+
+  active_ids_json="$(printf '%s\n' "${ids[@]:-}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+  collisions_json="$(printf '%s\n' "${collisions[@]:-}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+  jq -n \
+    --arg status "$status_word" \
+    --arg heartbeat_dir "$HEARTBEAT_DIR" \
+    --argjson total_count "$total_count" \
+    --argjson active_count "$active_count" \
+    --argjson stale_count "$stale_count" \
+    --argjson collision_count "$collision_count" \
+    --argjson active_terminal_ids "$active_ids_json" \
+    --argjson collisions "$collisions_json" \
+    '{
+      status: $status,
+      heartbeat_dir: $heartbeat_dir,
+      total_count: $total_count,
+      active_count: $active_count,
+      stale_count: $stale_count,
+      collision_count: $collision_count,
+      active_terminal_ids: $active_terminal_ids,
+      collisions: $collisions
+    }'
+else
+  echo "terminal.scope.status"
+  echo "heartbeat_dir: $HEARTBEAT_DIR"
+  echo "total_heartbeats: $total_count"
+  echo "active_heartbeats: $active_count"
+  echo "stale_or_inactive: $stale_count"
+  echo "collision_count: $collision_count"
+  if [[ "$active_count" -gt 0 ]]; then
+    echo
+    echo "active_terminals:"
+    for ((i=0; i<active_count; i++)); do
+      echo "  - ${ids[$i]} role=${roles[$i]:-unknown} repo=${repos[$i]} scope=${scopes[$i]} branch=${branches[$i]:-unknown}"
+    done
+  fi
+  if [[ "$collision_count" -gt 0 ]]; then
+    echo
+    echo "collisions:"
+    for entry in "${collisions[@]}"; do
+      echo "  - $entry"
+    done
+  fi
+fi
+
+if [[ "$collision_count" -gt 0 ]]; then
+  exit 1
+fi
+exit 0

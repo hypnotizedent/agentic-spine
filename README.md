@@ -41,6 +41,7 @@ Those belong in `/Users/ronnyworks/code/workbench`.
 cd /Users/ronnyworks/code/agentic-spine
 ./bin/ops status
 ./bin/ops cap list
+./bin/ops cap run stabilization.mode.status
 ./bin/ops cap run stability.control.snapshot
 ./bin/ops cap run verify.core.run
 ./bin/ops cap run verify.route.recommend
@@ -60,6 +61,11 @@ Daily:
 
 Release/nightly:
 - `spine.verify` (full certification)
+
+Stabilization window (when `stabilization.mode.status` is active):
+- `verify.domain.run` and `verify.release.run` are bypassed by default.
+- Override only when needed: `verify.domain.run <domain> --force` or `verify.release.run --force`.
+- Keep mandatory preflight: `stability.control.snapshot`.
 
 Boundary:
 - `surface.boundary.audit`

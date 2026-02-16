@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# stabilization-mode-status — Report stabilization bypass mode and enforcement window.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/stabilization.mode.yaml"
+
+usage() {
+  cat <<'EOF'
+Usage: stabilization-mode-status [--json]
+EOF
+}
+
+iso_to_epoch() {
+  local raw="${1:-}"
+  python3 - "$raw" <<'PY'
+from datetime import datetime, timezone
+import sys
+
+raw = (sys.argv[1] or "").strip()
+if not raw:
+    print(0)
+    raise SystemExit(0)
+try:
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+except Exception:
+    print(0)
+    raise SystemExit(0)
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+print(int(dt.timestamp()))
+PY
+}
+
+json_mode=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      json_mode=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$CONTRACT" ]] || {
+  echo "FAIL: missing contract: $CONTRACT" >&2
+  exit 1
+}
+command -v yq >/dev/null 2>&1 || {
+  echo "FAIL: missing required tool: yq" >&2
+  exit 1
+}
+
+enabled="$(yq e -r '.enabled // false' "$CONTRACT")"
+window_start="$(yq e -r '.window_start // ""' "$CONTRACT")"
+window_end="$(yq e -r '.window_end // ""' "$CONTRACT")"
+preflight="$(yq e -r '.required_preflight_capability // "stability.control.snapshot"' "$CONTRACT")"
+naming_pattern="$(yq e -r '.terminal_contract.naming_pattern // ""' "$CONTRACT")"
+heartbeat_interval="$(yq e -r '.terminal_contract.heartbeat_interval_minutes // 30' "$CONTRACT")"
+heartbeat_ttl="$(yq e -r '.terminal_contract.heartbeat_ttl_minutes // 45' "$CONTRACT")"
+
+mapfile -t verify_bypass < <(yq e -r '.verify_bypass[]?' "$CONTRACT")
+bypass_csv="$(IFS=,; echo "${verify_bypass[*]:-}")"
+
+now_epoch="$(date +%s)"
+start_epoch=0
+end_epoch=0
+active=false
+remaining_minutes=0
+
+if [[ -n "$window_start" && "$window_start" != "null" ]]; then
+  start_epoch="$(iso_to_epoch "$window_start")"
+fi
+if [[ -n "$window_end" && "$window_end" != "null" ]]; then
+  end_epoch="$(iso_to_epoch "$window_end")"
+fi
+
+if [[ "$enabled" == "true" ]]; then
+  if [[ "$start_epoch" -eq 0 || "$end_epoch" -eq 0 ]]; then
+    active=true
+  elif [[ "$now_epoch" -ge "$start_epoch" && "$now_epoch" -le "$end_epoch" ]]; then
+    active=true
+    remaining_minutes=$(( (end_epoch - now_epoch) / 60 ))
+    (( remaining_minutes < 0 )) && remaining_minutes=0
+  fi
+fi
+
+if [[ "$json_mode" -eq 1 ]]; then
+  command -v jq >/dev/null 2>&1 || {
+    echo "FAIL: --json requires jq" >&2
+    exit 1
+  }
+  jq -n \
+    --arg contract "$CONTRACT" \
+    --arg enabled "$enabled" \
+    --arg active "$active" \
+    --arg window_start "$window_start" \
+    --arg window_end "$window_end" \
+    --arg verify_bypass "$bypass_csv" \
+    --arg preflight "$preflight" \
+    --arg naming_pattern "$naming_pattern" \
+    --argjson heartbeat_interval "$heartbeat_interval" \
+    --argjson heartbeat_ttl "$heartbeat_ttl" \
+    --argjson remaining_minutes "$remaining_minutes" \
+    '{
+      contract: $contract,
+      enabled: ($enabled == "true"),
+      active: ($active == "true"),
+      window_start: $window_start,
+      window_end: $window_end,
+      verify_bypass: (if ($verify_bypass|length) == 0 then [] else ($verify_bypass|split(",")) end),
+      required_preflight_capability: $preflight,
+      terminal_naming_pattern: $naming_pattern,
+      heartbeat_interval_minutes: $heartbeat_interval,
+      heartbeat_ttl_minutes: $heartbeat_ttl,
+      remaining_minutes: $remaining_minutes
+    }'
+  exit 0
+fi
+
+echo "stabilization.mode.status"
+echo "contract: $CONTRACT"
+echo "enabled: $enabled"
+echo "active: $active"
+echo "window_start: ${window_start:-unset}"
+echo "window_end: ${window_end:-unset}"
+echo "verify_bypass: ${bypass_csv:-none}"
+echo "required_preflight_capability: $preflight"
+echo "terminal_naming_pattern: ${naming_pattern:-unset}"
+echo "heartbeat_interval_minutes: $heartbeat_interval"
+echo "heartbeat_ttl_minutes: $heartbeat_ttl"
+if [[ "$active" == "true" ]]; then
+  echo "remaining_minutes: $remaining_minutes"
+fi

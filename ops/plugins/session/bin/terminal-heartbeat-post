@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# terminal-heartbeat-post — Write terminal ownership heartbeat for scope collision checks.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+STATE_DIR="${SPINE_STATE:-$ROOT/mailroom/state}"
+CONTRACT="$ROOT/ops/bindings/stabilization.mode.yaml"
+HEARTBEAT_DIR="$STATE_DIR/terminal-heartbeats"
+
+usage() {
+  cat <<'EOF'
+Usage: terminal-heartbeat-post [options]
+
+Options:
+  --terminal-id <id>     Canonical terminal id (e.g. SPINE-CONTROL-01)
+  --role <role>          Terminal role (default: unassigned)
+  --scope <scope_csv>    Comma-separated write scope labels/paths
+  --loop-id <loop_id>    Active loop/task id
+  --repo-root <path>     Repo root path (default: current git root or pwd)
+  --branch <name>        Branch name (default: current branch)
+  --status <value>       active|idle|blocked (default: active)
+  --ttl-minutes <n>      Heartbeat ttl (default from stabilization contract or 45)
+  --json                 Emit JSON
+EOF
+}
+
+iso_in_minutes() {
+  local minutes="${1:-45}"
+  python3 - "$minutes" <<'PY'
+from datetime import datetime, timedelta, timezone
+import sys
+
+mins = int(sys.argv[1])
+print((datetime.now(timezone.utc) + timedelta(minutes=mins)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+repo_root_default() {
+  git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || pwd
+}
+
+terminal_id="${SPINE_TERMINAL_ID:-}"
+role="${SPINE_TERMINAL_ROLE:-unassigned}"
+scope="${SPINE_TERMINAL_SCOPE:-unspecified}"
+loop_id="${SPINE_LOOP_ID:-}"
+repo_root="$(repo_root_default)"
+branch="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")"
+status="active"
+json_mode=0
+ttl_minutes=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --terminal-id) terminal_id="${2:-}"; shift 2 ;;
+    --role) role="${2:-}"; shift 2 ;;
+    --scope) scope="${2:-}"; shift 2 ;;
+    --loop-id) loop_id="${2:-}"; shift 2 ;;
+    --repo-root) repo_root="${2:-}"; shift 2 ;;
+    --branch) branch="${2:-}"; shift 2 ;;
+    --status) status="${2:-}"; shift 2 ;;
+    --ttl-minutes) ttl_minutes="${2:-}"; shift 2 ;;
+    --json) json_mode=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z "$ttl_minutes" ]]; then
+  ttl_minutes="$(yq e -r '.terminal_contract.heartbeat_ttl_minutes // 45' "$CONTRACT" 2>/dev/null || echo 45)"
+fi
+
+if [[ -z "$terminal_id" ]]; then
+  terminal_id="$(hostname -s | tr '[:lower:]' '[:upper:]')-LOCAL-01"
+fi
+
+mkdir -p "$HEARTBEAT_DIR"
+
+safe_terminal_id="$(printf '%s' "$terminal_id" | tr -cs 'A-Za-z0-9._-' '_')"
+heartbeat_file="$HEARTBEAT_DIR/${safe_terminal_id}.yaml"
+tmp_file="${heartbeat_file}.tmp.$$"
+
+# Keep a single active file per terminal_id even if historical filenames differ.
+shopt -s nullglob
+for existing in "$HEARTBEAT_DIR"/*.yaml; do
+  [[ "$existing" == "$heartbeat_file" ]] && continue
+  existing_terminal_id="$(yq e -r '.terminal_id // ""' "$existing" 2>/dev/null || true)"
+  if [[ "$existing_terminal_id" == "$terminal_id" ]]; then
+    rm -f "$existing"
+  fi
+done
+shopt -u nullglob
+
+heartbeat_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+expires_at="$(iso_in_minutes "$ttl_minutes")"
+host_name="$(hostname -s)"
+
+cat > "$tmp_file" <<EOF
+version: 1
+terminal_id: "$terminal_id"
+role: "$role"
+scope: "$scope"
+loop_id: "${loop_id}"
+repo_root: "$repo_root"
+branch: "$branch"
+status: "$status"
+pid: $$
+hostname: "$host_name"
+heartbeat_at: "$heartbeat_at"
+expires_at: "$expires_at"
+EOF
+
+mv "$tmp_file" "$heartbeat_file"
+
+if [[ "$json_mode" -eq 1 ]]; then
+  command -v jq >/dev/null 2>&1 || {
+    echo "FAIL: --json requires jq" >&2
+    exit 1
+  }
+  jq -n \
+    --arg terminal_id "$terminal_id" \
+    --arg role "$role" \
+    --arg scope "$scope" \
+    --arg loop_id "$loop_id" \
+    --arg repo_root "$repo_root" \
+    --arg branch "$branch" \
+    --arg status "$status" \
+    --arg heartbeat_at "$heartbeat_at" \
+    --arg expires_at "$expires_at" \
+    --arg heartbeat_file "$heartbeat_file" \
+    '{
+      terminal_id: $terminal_id,
+      role: $role,
+      scope: $scope,
+      loop_id: $loop_id,
+      repo_root: $repo_root,
+      branch: $branch,
+      status: $status,
+      heartbeat_at: $heartbeat_at,
+      expires_at: $expires_at,
+      heartbeat_file: $heartbeat_file
+    }'
+  exit 0
+fi
+
+echo "terminal.heartbeat.post"
+echo "terminal_id: $terminal_id"
+echo "role: $role"
+echo "scope: $scope"
+echo "loop_id: ${loop_id:-none}"
+echo "repo_root: $repo_root"
+echo "branch: $branch"
+echo "status: $status"
+echo "heartbeat_at: $heartbeat_at"
+echo "expires_at: $expires_at"
+echo "heartbeat_file: $heartbeat_file"

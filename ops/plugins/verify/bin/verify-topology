@@ -6,6 +6,7 @@ TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
 AGENT_PROFILES="$ROOT/ops/bindings/gate.agent.profiles.yaml"
 DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
+STABILIZATION_CONTRACT="$ROOT/ops/bindings/stabilization.mode.yaml"
 
 fail() {
   echo "verify.topology FAIL: $*" >&2
@@ -32,8 +33,8 @@ verify-topology
 
 Usage:
   verify-topology core [--json]
-  verify-topology domain <domain_id> [--json]
-  verify-topology release [--json]
+  verify-topology domain <domain_id> [--json] [--force]
+  verify-topology release [--json] [--force]
   verify-topology recommend [--path <path>]... [--capability <cap>]... [--json]
   verify-topology pack-list
   verify-topology pack-explain <agent_id|domain>
@@ -43,6 +44,7 @@ Notes:
   - Core/day-to-day checks run through core_mode.core_gate_ids.
   - Domain checks resolve from gate.execution.topology.yaml first, then domain profiles fallback.
   - Release uses full drift-gate certification.
+  - During active stabilization windows, domain/release can be bypassed unless --force is provided.
 USAGE
 }
 
@@ -240,6 +242,99 @@ parse_json_flag() {
   echo "$json_mode"
 }
 
+parse_force_flag() {
+  local force_mode=0
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "--force" ]]; then
+      force_mode=1
+      break
+    fi
+  done
+  echo "$force_mode"
+}
+
+iso_to_epoch() {
+  local raw="${1:-}"
+  python3 - "$raw" <<'PY'
+from datetime import datetime, timezone
+import sys
+
+raw = (sys.argv[1] or "").strip()
+if not raw:
+    print(0)
+    raise SystemExit(0)
+try:
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+except Exception:
+    print(0)
+    raise SystemExit(0)
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+print(int(dt.timestamp()))
+PY
+}
+
+stabilization_is_active() {
+  [[ -f "$STABILIZATION_CONTRACT" ]] || return 1
+  local enabled
+  enabled="$(yq e -r '.enabled // false' "$STABILIZATION_CONTRACT" 2>/dev/null || echo false)"
+  [[ "$enabled" == "true" ]] || return 1
+
+  local start_raw end_raw now_epoch start_epoch end_epoch
+  start_raw="$(yq e -r '.window_start // ""' "$STABILIZATION_CONTRACT" 2>/dev/null || true)"
+  end_raw="$(yq e -r '.window_end // ""' "$STABILIZATION_CONTRACT" 2>/dev/null || true)"
+  now_epoch="$(date +%s)"
+  start_epoch="$(iso_to_epoch "$start_raw")"
+  end_epoch="$(iso_to_epoch "$end_raw")"
+
+  if [[ "$start_epoch" -eq 0 || "$end_epoch" -eq 0 ]]; then
+    return 0
+  fi
+  [[ "$now_epoch" -ge "$start_epoch" && "$now_epoch" -le "$end_epoch" ]]
+}
+
+stabilization_bypass_enabled() {
+  local target="$1"
+  [[ -f "$STABILIZATION_CONTRACT" ]] || return 1
+  while IFS= read -r bypass_target; do
+    [[ -n "$bypass_target" ]] || continue
+    if [[ "$bypass_target" == "$target" ]]; then
+      return 0
+    fi
+  done < <(yq e -r '.verify_bypass[]?' "$STABILIZATION_CONTRACT" 2>/dev/null || true)
+  return 1
+}
+
+emit_stabilization_bypass() {
+  local target="$1"
+  local domain="${2:-}"
+  local json_mode="$3"
+  local preflight
+  preflight="$(yq e -r '.required_preflight_capability // "stability.control.snapshot"' "$STABILIZATION_CONTRACT" 2>/dev/null || echo "stability.control.snapshot")"
+
+  if [[ "$json_mode" == "1" ]]; then
+    jq -n \
+      --arg status "bypass" \
+      --arg target "$target" \
+      --arg domain "$domain" \
+      --arg preflight "$preflight" \
+      --arg contract "$STABILIZATION_CONTRACT" \
+      '{status:$status, target:$target, domain:$domain, required_preflight_capability:$preflight, contract:$contract}'
+    return
+  fi
+
+  echo "verify.$target.run"
+  if [[ -n "$domain" ]]; then
+    echo "domain: $domain"
+  fi
+  echo "status: bypass"
+  echo "reason: active stabilization mode"
+  echo "required_preflight_capability: $preflight"
+  echo "contract: $STABILIZATION_CONTRACT"
+  echo "override: rerun with --force"
+}
+
 resolve_target_kind() {
   local target="$1"
   local norm
@@ -410,10 +505,16 @@ run_core() {
 run_domain() {
   local raw_domain="$1"
   shift || true
-  local json_mode
+  local json_mode force_mode
   json_mode="$(parse_json_flag "$@")"
+  force_mode="$(parse_force_flag "$@")"
   local domain
   domain="$(normalize_domain "$raw_domain")"
+
+  if [[ "$force_mode" == "0" ]] && stabilization_is_active && stabilization_bypass_enabled "domain"; then
+    emit_stabilization_bypass "domain" "$domain" "$json_mode"
+    return 0
+  fi
 
   mapfile -t domain_ids < <(collect_domain_gate_ids "$domain")
   ((${#domain_ids[@]} > 0)) || fail "domain '$raw_domain' resolved to '$domain' with no gates"
@@ -428,8 +529,14 @@ run_domain() {
 }
 
 run_release() {
-  local json_mode
+  local json_mode force_mode
   json_mode="$(parse_json_flag "$@")"
+  force_mode="$(parse_force_flag "$@")"
+
+  if [[ "$force_mode" == "0" ]] && stabilization_is_active && stabilization_bypass_enabled "release"; then
+    emit_stabilization_bypass "release" "" "$json_mode"
+    return 0
+  fi
   local tmp rc summary
   tmp="$(mktemp)"
   set +e
