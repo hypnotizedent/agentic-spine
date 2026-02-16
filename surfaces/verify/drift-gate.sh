@@ -1102,6 +1102,9 @@ else
   warn "mailroom bridge consumers registry gate not present"
 fi
 
+echo -n "D117 IoT device naming parity... "
+gate_script "$SP/surfaces/verify/d117-iot-device-naming-parity.sh" "D117"
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1
