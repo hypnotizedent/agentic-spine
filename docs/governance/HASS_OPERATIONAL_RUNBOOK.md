@@ -99,7 +99,7 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 
 ## 3. Automation Inventory
 
-> 17 automations active. Critical fix: all button triggers include `not_from: ["unavailable", "unknown"]`.
+> 21 automations active. Critical fix: all button triggers include `not_from: ["unavailable", "unknown"]`.
 
 | Automation | Entity Trigger | Action | Notes |
 |-----------|---------------|--------|-------|
@@ -117,6 +117,10 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 | Office: BILRESA Button 1 → Toggle Desk Bulb | `event.bilresa_dual_button_button_1` (multi_press_1) | `light.toggle` office desk bulb | Matter/Thread button |
 | Office: BILRESA Button 2 → Desk Bulb Brightness | `event.bilresa_dual_button_button_2` (multi_press_1/2/long) | `light.turn_on` at 100%/50%/1% | Matter/Thread button |
 | Office: Motion Nightlight | `binary_sensor.myggspray_wrlss_mtn_sensor_occupancy` on | `light.turn_on` desk bulb at 1% | 10pm–6am only, bulb must be off |
+| House Mode: BILRESA Long Press → Sleep | `event.bilresa_dual_button_button_1` (long_press) | Set house_mode to Sleep | Bedtime trigger |
+| House Mode: Sleep → All Lights Off | `input_select.house_mode` → Sleep | Turn off all lamps + bulbs, notify | Whole-house shutoff |
+| House Mode: Morning Motion → Home | `binary_sensor.myggspray_wrlss_mtn_sensor_occupancy` on | Set house_mode to Home | 6am–10pm, while in Sleep |
+| House Mode: Away + Motion → Alert | occupancy or front_door_motion on | Critical notify to phone | While house_mode = Away |
 | System: Auto-Dismiss Localhost Login Failures | event: persistent_notification from 127.0.0.1 | Dismiss notification | Noise suppression |
 | Zigbee: Low Battery Alert | numeric_state < 20% on 6 sensors | Notify Ronny iPhone | Health monitoring |
 | Zigbee: Stale Device Alert (Daily) | time 09:00 daily | Notify if button silent > 12h | Health monitoring |
