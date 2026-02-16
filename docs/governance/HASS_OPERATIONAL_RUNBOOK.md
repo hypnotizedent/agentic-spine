@@ -700,3 +700,68 @@ The P1 capability must fetch these endpoints and produce a structured diff:
 **Output format:** YAML diff patch against this runbook's inventory sections.
 
 **Determinism rule:** Sort all lists by entity_id/domain alphabetically.
+
+---
+
+## 11. Maintenance Cadence
+
+### Daily (automated via spine.verify)
+
+Drift gates run automatically on every `spine.verify` invocation:
+
+| Gate | What it catches | Auto-fix |
+|---|---|---|
+| D99 | Expired HA API token | Rotate in Infisical |
+| D113 | Z2M bridge/coordinator down | Check addon, power cycle SLZB-06 |
+| D118 | Z2M battery < 20% or device stale > 48h | Replace battery, check device |
+| D114 | Automation count mismatch | Update expected count or investigate |
+
+No manual intervention needed unless a gate fails.
+
+### Weekly (manual, 5 minutes)
+
+Run the unified dashboard to spot-check health:
+
+```bash
+./bin/ops cap run ha.status
+```
+
+Look for:
+- Add-ons in error state (currently: Vaultwarden known error)
+- Unexpected unavailable entities (threshold: 0)
+- Binding freshness > 7 days (yellow = time to refresh)
+
+If bindings are stale, one command refreshes everything:
+
+```bash
+./bin/ops cap run ha.refresh
+```
+
+### On device change (as needed)
+
+When adding, removing, or renaming devices:
+
+| Action | Commands to run |
+|---|---|
+| **Add Zigbee device** | Pair in Z2M UI, then: `ha.z2m.devices.snapshot` + add to `z2m.naming.yaml` + `ha.device.map.build` |
+| **Add Matter device** | Commission via iPhone Companion App, then: `ha.device.map.build` |
+| **Add WiFi device** | DHCP reservation in UniFi, then: add to `home.device.registry.yaml` + `ha.device.map.build` |
+| **Rename device** | `ha.device.rename` (auto-rebuilds map), then: update `z2m.naming.yaml` if Zigbee |
+| **Add automation** | `ha.automation.create`, then: `ha.automations.snapshot` + update D114 expected count |
+| **Remove automation** | Delete in HA UI, then: `ha.automations.snapshot` + update D114 expected count |
+| **New orphan device** | Add to `ha.orphan.classification.yaml` with correct category |
+
+### Freshness thresholds
+
+| Binding | Max age | Gate |
+|---|---|---|
+| `ha.ssot.baseline.yaml` | 7 days | D115 |
+| `ha.addons.yaml` | 14 days | D101 |
+| `ha.device.map.yaml` | 14 days | D102 |
+| `z2m.devices.yaml` | 14 days | D98 |
+| `ha.entity.state.baseline.yaml` | 14 days | D115 |
+| HA config in workbench | 30 days | D92 |
+
+### Entry point
+
+For the full documentation map, see [HASS_INDEX.md](HASS_INDEX.md).

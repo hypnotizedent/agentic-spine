@@ -267,6 +267,36 @@ for did, dev in sorted(ha_devices.items(), key=lambda x: x[1]['name']):
 
     output_devices.append(entry)
 
+# ── Load orphan classifications ──────────────────────────────────────────
+classify_path = os.path.join(os.environ.get('SPINE_ROOT', os.path.expanduser('~/code/agentic-spine')),
+                             'ops/bindings/ha.orphan.classification.yaml')
+orphan_categories = {}  # category -> count
+if os.path.isfile(classify_path):
+    with open(classify_path, 'r') as f:
+        classify_data = yaml.safe_load(f) or {}
+    # Build name -> category lookup from all categories
+    name_to_category = {}
+    for cat_name, cat_info in classify_data.get('classifications', {}).items():
+        for dev in cat_info.get('devices', []):
+            dname = dev.get('name', '').lower().strip()
+            if dname:
+                name_to_category[dname] = cat_name
+    # Apply classifications to orphan devices
+    classified = 0
+    for dev_entry in output_devices:
+        if dev_entry.get('orphan'):
+            dname = dev_entry.get('ha_name', '').lower().strip()
+            cat = name_to_category.get(dname)
+            if cat:
+                dev_entry['orphan_category'] = cat
+                orphan_categories[cat] = orphan_categories.get(cat, 0) + 1
+                classified += 1
+            else:
+                dev_entry['orphan_category'] = 'needs-registry'
+                orphan_categories['needs-registry'] = orphan_categories.get('needs-registry', 0) + 1
+    if classified:
+        print(f"  Classified {classified}/{orphan_count} orphan(s) from classification file")
+
 # ── Merge manual overrides ──────────────────────────────────────────────────
 overrides_path = os.path.join(os.environ.get('SPINE_ROOT', os.path.expanduser('~/code/agentic-spine')),
                               'ops/bindings/ha.device.map.overrides.yaml')
@@ -296,6 +326,7 @@ binding = {
         'network_matched': matched_count,
         'z2m_matched': z2m_matched_count,
         'orphans': orphan_count,
+        'orphan_categories': orphan_categories if orphan_categories else None,
     },
     'devices': output_devices,
 }
@@ -316,6 +347,12 @@ print(f"  {sum(d['entity_count'] for d in output_devices)} entities across those
 print(f"  {matched_count} matched to network device registry (by MAC or name)")
 print(f"  {z2m_matched_count} matched to Z2M device registry (by IEEE address)")
 print(f"  {orphan_count} orphaned (no network or Z2M match)")
+if orphan_categories:
+    for cat, cnt in sorted(orphan_categories.items()):
+        print(f"    {cat}: {cnt}")
+    needs = orphan_categories.get('needs-registry', 0)
+    if needs == 0:
+        print(f"  All orphans classified — no action items")
 PYEOF
 
 echo
