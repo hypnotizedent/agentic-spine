@@ -3,27 +3,23 @@
 - Mode: full
 - Status: FAIL
 - Files checked: 116
-- Violations: 37
+- Violations: 30
 - Warnings: 109
 
 ## Violations
 - ops/bindings/backup.inventory.yaml :: disallowed key 'notes' found
 - ops/bindings/cli.tools.inventory.yaml :: disallowed key 'notes' found
 - ops/bindings/cloudflare.inventory.yaml :: disallowed key 'notes' found
-- ops/bindings/deploy.dependencies.yaml :: disallowed key 'notes' found
 - ops/bindings/docker.compose.targets.yaml :: disallowed key 'notes' found
-- ops/bindings/evidence.retention.policy.yaml :: disallowed key 'notes' found
 - ops/bindings/ha.areas.yaml :: disallowed key 'notes' found
 - ops/bindings/home.device.registry.yaml :: disallowed key 'vmid' found
 - ops/bindings/home.device.registry.yaml :: disallowed key 'notes' found
 - ops/bindings/infra.relocation.plan.yaml :: status value 'migrated' not allowed by conventions
 - ops/bindings/mailroom.bridge.endpoints.yaml :: disallowed key 'notes' found
 - ops/bindings/media.services.yaml :: status value 'stopped' not allowed by conventions
-- ops/bindings/naming.policy.yaml :: disallowed key 'notes' found
 - ops/bindings/network.home.baseline.yaml :: status value 'installed' not allowed by conventions
 - ops/bindings/network.home.baseline.yaml :: status value 'connected' not allowed by conventions
 - ops/bindings/operational.gaps.yaml :: status value 'accepted' not allowed by conventions
-- ops/bindings/rag.embedding.backend.yaml :: disallowed key 'notes' found
 - ops/bindings/secrets.credentials.parity.yaml :: disallowed key 'notes' found
 - ops/bindings/secrets.inventory.yaml :: disallowed key 'notes' found
 - ops/bindings/secrets.inventory.yaml :: lifecycle value 'active' not allowed by conventions
@@ -32,11 +28,8 @@
 - ops/bindings/secrets.inventory.yaml :: lifecycle value 'clean' not allowed by conventions
 - ops/bindings/secrets.inventory.yaml :: lifecycle value 'clean_but_duped' not allowed by conventions
 - ops/bindings/services.health.yaml :: disallowed key 'notes' found
-- ops/bindings/share.publish.allowlist.yaml :: disallowed key 'notes' found
 - ops/bindings/spine.verify.runtime.yaml :: disallowed key 'notes' found
 - ops/bindings/spine.verify.runtime.yaml :: status value 'temporary' not allowed by conventions
-- ops/bindings/startup.sequencing.yaml :: disallowed key 'notes' found
-- ops/bindings/surface.readonly.contract.yaml :: disallowed key 'notes' found
 - ops/bindings/tenants/media-stack.yaml :: disallowed key 'vmid' found
 - ops/bindings/vm.lifecycle.derived.yaml :: disallowed key 'vmid' found
 - ops/bindings/vm.lifecycle.yaml :: status value 'stopped' not allowed by conventions
