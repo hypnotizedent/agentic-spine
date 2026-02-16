@@ -73,17 +73,20 @@ while [ "$i" -lt "$NAMING_COUNT" ]; do
   PREFIX=$(yq ".devices[$i].entity_id_prefix" "$NAMING_BINDING")
   STALE_EXEMPT=$(yq ".devices[$i].stale_exempt" "$NAMING_BINDING")
 
-  BATTERY_ENTITY="sensor.${PREFIX}_battery"
-  BATTERY_JSON=$(curl -s --max-time 5 \
-    -H "Authorization: Bearer $HA_TOKEN" \
-    "${HA_BASE}/api/states/${BATTERY_ENTITY}" 2>/dev/null) || true
+  # Skip battery check for stale_exempt devices (event-only, battery reading unreliable)
+  if [[ "$STALE_EXEMPT" != "true" ]]; then
+    BATTERY_ENTITY="sensor.${PREFIX}_battery"
+    BATTERY_JSON=$(curl -s --max-time 5 \
+      -H "Authorization: Bearer $HA_TOKEN" \
+      "${HA_BASE}/api/states/${BATTERY_ENTITY}" 2>/dev/null) || true
 
-  if [[ -n "${BATTERY_JSON:-}" ]]; then
-    BATTERY_VAL=$(echo "$BATTERY_JSON" | jq -r '.state // "unknown"' 2>/dev/null)
-    if [[ "$BATTERY_VAL" != "unknown" && "$BATTERY_VAL" != "unavailable" ]]; then
-      BATTERY_INT=${BATTERY_VAL%%.*}
-      if [[ "$BATTERY_INT" -lt 20 ]]; then
-        err "$CANONICAL battery critical: ${BATTERY_VAL}% (<20%)"
+    if [[ -n "${BATTERY_JSON:-}" ]]; then
+      BATTERY_VAL=$(echo "$BATTERY_JSON" | jq -r '.state // "unknown"' 2>/dev/null)
+      if [[ "$BATTERY_VAL" != "unknown" && "$BATTERY_VAL" != "unavailable" ]]; then
+        BATTERY_INT=${BATTERY_VAL%%.*}
+        if [[ "$BATTERY_INT" -lt 20 ]]; then
+          err "$CANONICAL battery critical: ${BATTERY_VAL}% (<20%)"
+        fi
       fi
     fi
   fi
