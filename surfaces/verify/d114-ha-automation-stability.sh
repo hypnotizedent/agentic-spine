@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: HA automation count must match expected (19). If count differs, check HA UI for added/removed automations and update this gate.
+# TRIAGE: HA automation count must match expected (22). If count differs, check HA UI for added/removed automations and update this gate.
 set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -7,7 +7,7 @@ INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
 HA_API="http://${HA_HOST}:${HA_PORT}/api"
-EXPECTED_COUNT=19
+EXPECTED_COUNT=22
 
 # Retrieve token from Infisical
 if [[ ! -x "$INFISICAL_AGENT" ]]; then
