@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# nas-health-status - Health check for Synology DS918+ NAS
+#
+# Probes: RAID/mdstat, volume utilization, disk SMART, uptime, temperature, NFS exports
+# Source: ssh.targets.yaml (id: nas)
+#
+# Usage:
+#   nas-health-status
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+NAS_HOST="100.102.199.111"
+NAS_USER="ronadmin"
+SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+[[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+
+# --- SSH helper ---
+nas_ssh(){
+  # shellcheck disable=SC2086
+  ssh $SSH_OPTS "${NAS_USER}@${NAS_HOST}" "$@" 2>/dev/null
+}
+
+# --- Connectivity check ---
+nas_hostname="$(nas_ssh hostname 2>/dev/null)" || stop "SSH to ${NAS_USER}@${NAS_HOST} failed"
+
+echo "nas.health.status"
+echo "host: ${nas_hostname} (${NAS_HOST})"
+echo
+
+overall="OK"
+
+# --- RAID / mdstat ---
+mdstat="$(nas_ssh 'cat /proc/mdstat')" || { echo "RAID:     UNKNOWN (read failed)"; overall="DEGRADED"; }
+if [[ -n "${mdstat:-}" ]]; then
+  raid_degraded=0
+  raid_summary=""
+  current_md=""
+  while IFS= read -r line; do
+    # Match lines like: md2 : active raid5 ...
+    if [[ "$line" =~ ^(md[0-9]+)\ :\ active ]]; then
+      current_md="${BASH_REMATCH[1]}"
+    fi
+    # Match lines like:  ... [4/4] [UUUU]
+    if [[ -n "$current_md" && "$line" =~ \[([0-9]+)/([0-9]+)\]\ \[([U_]+)\] ]]; then
+      total="${BASH_REMATCH[1]}"
+      active="${BASH_REMATCH[2]}"
+      bitmap="${BASH_REMATCH[3]}"
+      if [[ "$bitmap" == *"_"* ]]; then
+        raid_summary="${raid_summary}${raid_summary:+, }${current_md} [${active}/${total}] DEGRADED"
+        raid_degraded=1
+      else
+        raid_summary="${raid_summary}${raid_summary:+, }${current_md} [${active}/${total}] OK"
+      fi
+      current_md=""
+    fi
+  done <<< "$mdstat"
+
+  if [[ $raid_degraded -gt 0 ]]; then
+    echo "RAID:     ${raid_summary}"
+    overall="DEGRADED"
+  else
+    echo "RAID:     ${raid_summary}"
+  fi
+fi
+
+# --- Volume utilization ---
+df_out="$(nas_ssh 'df -h /volume1')" || df_out=""
+if [[ -n "$df_out" ]]; then
+  vol_line="$(echo "$df_out" | tail -1)"
+  vol_size="$(echo "$vol_line" | awk '{print $2}')"
+  vol_used="$(echo "$vol_line" | awk '{print $3}')"
+  vol_pct="$(echo "$vol_line" | awk '{print $5}')"
+  echo "Volume:   /volume1  ${vol_used} used / ${vol_size} total (${vol_pct})"
+else
+  echo "Volume:   UNKNOWN (df failed)"
+fi
+
+# --- Disk SMART health ---
+# Use synodisk --smart_info_get per disk; check for NOK attributes
+disk_pass=0
+disk_fail=0
+disk_total=0
+disks=(sda sdb sdc sdd)
+
+for dev in "${disks[@]}"; do
+  # Check if disk device exists
+  if ! nas_ssh "test -b /dev/${dev}"; then
+    continue
+  fi
+  disk_total=$((disk_total+1))
+
+  # Get SMART attribute statuses via Synology utility
+  smart_out="$(nas_ssh "/usr/syno/bin/synodisk --smart_info_get /dev/${dev}" 2>/dev/null)" || smart_out=""
+  if [[ -n "$smart_out" ]]; then
+    # Count NOK statuses — grep -c returns 1 on zero matches, so capture safely
+    bad_count=0
+    bad_count="$(echo "$smart_out" | grep -c 'Status: NOK')" || bad_count=0
+    if [[ "$bad_count" -gt 0 ]]; then
+      disk_fail=$((disk_fail+1))
+    else
+      disk_pass=$((disk_pass+1))
+    fi
+  else
+    # Cannot read SMART — count as pass (no evidence of failure)
+    disk_pass=$((disk_pass+1))
+  fi
+done
+
+if [[ $disk_fail -gt 0 ]]; then
+  echo "Disks:    ${disk_pass}/${disk_total} PASSED (${disk_fail} FAILED)"
+  overall="DEGRADED"
+else
+  echo "Disks:    ${disk_pass}/${disk_total} PASSED"
+fi
+
+# --- Disk temperatures (from synodisk --enum) ---
+enum_out="$(nas_ssh '/usr/syno/bin/synodisk --enum -t local' 2>/dev/null)" || enum_out=""
+if [[ -n "$enum_out" ]]; then
+  disk_temp_list=""
+  while IFS= read -r line; do
+    if [[ "$line" =~ Tempeture:\ ([0-9]+) ]]; then
+      t="${BASH_REMATCH[1]}"
+      disk_temp_list="${disk_temp_list}${disk_temp_list:+, }${t}C"
+    fi
+  done <<< "$enum_out"
+  [[ -n "$disk_temp_list" ]] && echo "DiskTemp: ${disk_temp_list}"
+fi
+
+# --- CPU temperature ---
+cpu_temp_raw="$(nas_ssh 'cat /sys/class/hwmon/hwmon0/temp1_input' 2>/dev/null)" || cpu_temp_raw=""
+if [[ -n "$cpu_temp_raw" && "$cpu_temp_raw" =~ ^[0-9]+$ ]]; then
+  cpu_temp=$((cpu_temp_raw / 1000))
+  echo "CPUTemp:  ${cpu_temp}C"
+fi
+
+# --- Uptime ---
+uptime_out="$(nas_ssh uptime)" || uptime_out=""
+if [[ -n "$uptime_out" ]]; then
+  if [[ "$uptime_out" =~ up\ +([0-9]+\ days?,?\ *[0-9:]*) ]]; then
+    uptime_str="${BASH_REMATCH[1]}"
+    uptime_str="${uptime_str%%,}"
+    uptime_str="${uptime_str%% }"
+    echo "Uptime:   ${uptime_str}"
+  elif [[ "$uptime_out" =~ up\ +([0-9:]+) ]]; then
+    echo "Uptime:   ${BASH_REMATCH[1]}"
+  fi
+fi
+
+# --- NFS exports ---
+nfs_out="$(nas_ssh 'showmount -e localhost' 2>/dev/null)" || nfs_out=""
+if [[ -n "$nfs_out" ]]; then
+  nfs_count=0
+  nfs_count="$(echo "$nfs_out" | tail -n +2 | grep -c '/')" || nfs_count=0
+  echo "NFS:      ${nfs_count} exports active"
+else
+  echo "NFS:      unavailable"
+fi
+
+echo
+if [[ "$overall" != "OK" ]]; then
+  echo "status: ${overall}"
+  exit 1
+else
+  echo "status: OK"
+fi

@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# finance-stack-status - Health + API status for all finance services on VM 211
+#
+# Probes: Firefly III, Paperless-ngx, Ghostfolio, Mail Archiver
+# Host: finance-stack (VM 211, Tailscale 100.76.153.100)
+# Secrets: FIREFLY_ACCESS_TOKEN, PAPERLESS_API_TOKEN via infisical-agent.sh
+#
+# Usage:
+#   finance-stack-status
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+
+HOST_IP="100.76.153.100"
+CONNECT_TIMEOUT=5
+MAX_TIME=10
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v jq >/dev/null 2>&1  || stop "missing dependency: jq"
+
+# ── Fetch auth tokens (best-effort, non-fatal) ──────────────────────────
+FIREFLY_TOKEN=""
+PAPERLESS_TOKEN=""
+
+if [[ -x "$INFISICAL_AGENT" ]]; then
+  FIREFLY_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod FIREFLY_ACCESS_TOKEN 2>/dev/null) || FIREFLY_TOKEN=""
+  PAPERLESS_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod PAPERLESS_API_TOKEN 2>/dev/null) || PAPERLESS_TOKEN=""
+fi
+
+# ── Service definitions ─────────────────────────────────────────────────
+# name|port|health_path|expected_code
+SERVICES=(
+  "firefly-iii|8080|/api/v1/about|302"
+  "paperless-ngx|8000|/api/|302"
+  "ghostfolio|3333|/|301"
+  "mail-archiver|5100|/|302"
+)
+
+# ── Probe helper ────────────────────────────────────────────────────────
+probe_http() {
+  local url="$1"
+  local extra_header="${2:-}"
+  local args=(-s -o /dev/null -w "%{http_code}" --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" --max-redirs 0)
+  if [[ -n "$extra_header" ]]; then
+    args+=(-H "$extra_header")
+  fi
+  curl "${args[@]}" "$url" 2>/dev/null || echo "000"
+}
+
+# Fetch JSON body (for API detail calls)
+fetch_json() {
+  local url="$1"
+  local auth_header="$2"
+  curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+    -H "$auth_header" -H "Accept: application/json" "$url" 2>/dev/null || echo ""
+}
+
+# ── Main output ─────────────────────────────────────────────────────────
+echo "finance.stack.status"
+echo "host: finance-stack (VM 211, ${HOST_IP})"
+echo
+
+pass=0
+fail=0
+total=${#SERVICES[@]}
+
+for entry in "${SERVICES[@]}"; do
+  IFS='|' read -r name port path expect <<< "$entry"
+  url="http://${HOST_IP}:${port}${path}"
+  detail=""
+
+  # Health probe
+  http_code=$(probe_http "$url")
+
+  # Service-specific API enrichment
+  case "$name" in
+    firefly-iii)
+      if [[ "$http_code" != "$expect" && -n "$FIREFLY_TOKEN" ]]; then
+        # With auth, /api/v1/about returns 200 instead of 302
+        auth_code=$(probe_http "$url" "Authorization: Bearer ${FIREFLY_TOKEN}")
+        if [[ "$auth_code" == "200" ]]; then
+          http_code="200"
+        fi
+      fi
+      if [[ -n "$FIREFLY_TOKEN" ]]; then
+        about_json=$(fetch_json "http://${HOST_IP}:${port}/api/v1/about" "Authorization: Bearer ${FIREFLY_TOKEN}")
+        if [[ -n "$about_json" ]]; then
+          version=$(echo "$about_json" | jq -r '.data.version // empty' 2>/dev/null)
+          if [[ -n "$version" ]]; then
+            detail="version ${version}"
+          fi
+        fi
+        txn_list=$(fetch_json "http://${HOST_IP}:${port}/api/v1/transactions?limit=1" "Authorization: Bearer ${FIREFLY_TOKEN}")
+        if [[ -n "$txn_list" ]]; then
+          txn_total=$(echo "$txn_list" | jq -r '.meta.pagination.total // empty' 2>/dev/null)
+          if [[ -n "$txn_total" ]]; then
+            if [[ -n "$detail" ]]; then
+              detail="${detail}, ${txn_total} transactions"
+            else
+              detail="${txn_total} transactions"
+            fi
+          fi
+        fi
+      fi
+      ;;
+    paperless-ngx)
+      if [[ -n "$PAPERLESS_TOKEN" ]]; then
+        doc_json=$(fetch_json "http://${HOST_IP}:${port}/api/documents/?page_size=1" "Authorization: Token ${PAPERLESS_TOKEN}")
+        if [[ -n "$doc_json" ]]; then
+          doc_count=$(echo "$doc_json" | jq -r '.count // empty' 2>/dev/null)
+          if [[ -n "$doc_count" ]]; then
+            detail="${doc_count} documents"
+          fi
+        fi
+      fi
+      ;;
+  esac
+
+  # Determine health: expected code or 200 (authenticated upgrade)
+  is_healthy="false"
+  if [[ "$http_code" == "$expect" || "$http_code" == "200" ]]; then
+    is_healthy="true"
+  fi
+
+  status_parts="HTTP ${http_code}"
+  if [[ -n "$detail" ]]; then
+    status_parts="${status_parts}, ${detail}"
+  fi
+
+  if [[ "$is_healthy" == "true" ]]; then
+    printf "  %-20s ✓ UP   (%s)\n" "$name" "$status_parts"
+    pass=$((pass + 1))
+  else
+    printf "  %-20s ✗ DOWN (%s, expected %s)\n" "$name" "HTTP ${http_code}" "$expect"
+    fail=$((fail + 1))
+  fi
+done
+
+echo
+echo "summary: ${pass}/${total} healthy"
+
+if [[ $fail -gt 0 ]]; then
+  echo "status: DEGRADED"
+  exit 1
+else
+  echo "status: OK"
+fi

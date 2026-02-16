@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# switch-health-status - Read-only health probe for Dell N2024P managed switch (LAN-only via PVE jump host)
+#
+# Probes switch at 192.168.1.2 through PVE SSH tunnel.
+# Strategy: SSH "show version" first, ping fallback.
+# Credentials: Infisical (infrastructure/prod)
+#
+# Usage:
+#   switch-health-status
+#
+# Ref: GAP-OP-535
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+SWITCH_HOST="192.168.1.2"
+PVE_HOST="root@100.96.211.33"
+SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+# ── Dependencies ──────────────────────────────────────────────
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+[[ -x "$INFISICAL_AGENT" ]] || stop "missing dependency: $INFISICAL_AGENT"
+
+# ── Credentials ───────────────────────────────────────────────
+SWITCH_USER=$("$INFISICAL_AGENT" get infrastructure prod SWITCH_ADMIN_USER 2>/dev/null) || stop "failed to retrieve SWITCH_ADMIN_USER from Infisical"
+SWITCH_PASS=$("$INFISICAL_AGENT" get infrastructure prod SWITCH_ADMIN_PASSWORD 2>/dev/null) || stop "failed to retrieve SWITCH_ADMIN_PASSWORD from Infisical"
+
+[[ -n "$SWITCH_USER" ]] || stop "SWITCH_ADMIN_USER is empty"
+[[ -n "$SWITCH_PASS" ]] || stop "SWITCH_ADMIN_PASSWORD is empty"
+
+# ── Header ────────────────────────────────────────────────────
+echo "switch.health.status"
+echo "host: switch-shop (${SWITCH_HOST} via pve)"
+echo
+
+# ── SSH probe via PVE jump host ───────────────────────────────
+# Dell N2024P switches may use older SSH key exchange algorithms.
+# sshpass is needed for non-interactive password auth to the switch.
+SSH_OK=false
+VERSION_OUTPUT=""
+
+# Check if sshpass is available on PVE
+SSHPASS_AVAIL=false
+ssh $SSH_OPTS "$PVE_HOST" "command -v sshpass" >/dev/null 2>&1 && SSHPASS_AVAIL=true
+
+if $SSHPASS_AVAIL; then
+  # Try SSH with permissive algorithm settings for older Dell switches
+  VERSION_OUTPUT=$(ssh $SSH_OPTS "$PVE_HOST" \
+    "sshpass -p '${SWITCH_PASS}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+     -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 \
+     -o HostKeyAlgorithms=+ssh-rsa,ssh-dss \
+     -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+     '${SWITCH_USER}@${SWITCH_HOST}' 'show version'" 2>/dev/null) || true
+
+  if [[ -n "$VERSION_OUTPUT" ]]; then
+    SSH_OK=true
+  fi
+fi
+
+if $SSH_OK; then
+  # ── Parse "show version" output ─────────────────────────────
+  # Extract key fields from Dell N2024P show version output
+  MODEL=$(echo "$VERSION_OUTPUT" | grep -i "machine\|system\|model" | head -1 | sed 's/.*: *//' | xargs) || MODEL=""
+  FW_VER=$(echo "$VERSION_OUTPUT" | grep -i "firmware\|software\|image" | head -1 | sed 's/.*: *//' | xargs) || FW_VER=""
+  UPTIME=$(echo "$VERSION_OUTPUT" | grep -i "uptime\|up time" | head -1 | sed 's/.*: *//' | xargs) || UPTIME=""
+  SERIAL=$(echo "$VERSION_OUTPUT" | grep -i "serial" | head -1 | sed 's/.*: *//' | xargs) || SERIAL=""
+
+  echo "reachable:  yes (SSH OK)"
+  [[ -n "$MODEL" ]]  && echo "model:      ${MODEL}" || echo "model:      Dell N2024P"
+  [[ -n "$FW_VER" ]] && echo "firmware:   ${FW_VER}"
+  [[ -n "$SERIAL" ]] && echo "serial:     ${SERIAL}"
+  [[ -n "$UPTIME" ]] && echo "uptime:     ${UPTIME}"
+  echo "source:     ssh"
+  echo "status:     OK"
+
+else
+  # ── Ping fallback ───────────────────────────────────────────
+  if ! $SSHPASS_AVAIL; then
+    echo "note: sshpass not available on PVE, skipping SSH probe"
+  else
+    echo "note: SSH probe failed, falling back to ping"
+  fi
+
+  PING_OK=false
+  ssh $SSH_OPTS "$PVE_HOST" "ping -c1 -W2 ${SWITCH_HOST}" >/dev/null 2>&1 && PING_OK=true
+
+  if $PING_OK; then
+    echo "reachable:  yes (ping OK)"
+    echo "model:      Dell N2024P"
+    echo "source:     ping"
+    echo "status:     OK"
+  else
+    echo "reachable:  no"
+    echo "model:      Dell N2024P"
+    echo "note:       host unreachable via PVE jump"
+    echo "status:     DOWN"
+    exit 2
+  fi
+fi

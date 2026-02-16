@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# immich-status - Read-only Immich instance health and summary
+#
+# Queries Immich REST API on immich (100.114.101.50:2283).
+# API key sourced from Infisical (infrastructure/prod or immich/prod).
+#
+# Usage:
+#   immich-status
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+
+IMMICH_HOST="100.114.101.50:2283"
+IMMICH_URL="http://${IMMICH_HOST}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+CONNECT_TIMEOUT=5
+MAX_TIME=10
+
+# --- Resolve API key (try infrastructure first, then immich project) ---
+IMMICH_KEY=""
+if [[ -x "$INFISICAL_AGENT" ]]; then
+  IMMICH_KEY=$("$INFISICAL_AGENT" get infrastructure prod IMMICH_API_KEY 2>/dev/null) || true
+  if [[ -z "$IMMICH_KEY" ]]; then
+    IMMICH_KEY=$("$INFISICAL_AGENT" get immich prod IMMICH_API_KEY 2>/dev/null) || true
+  fi
+fi
+
+# --- Helper: curl with API key ---
+api_get() {
+  local path="$1"
+  if [[ -n "$IMMICH_KEY" ]]; then
+    curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+      -H "x-api-key: ${IMMICH_KEY}" "${IMMICH_URL}${path}" 2>/dev/null
+  else
+    curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+      "${IMMICH_URL}${path}" 2>/dev/null
+  fi
+}
+
+echo "immich.status"
+echo "host: immich (${IMMICH_HOST})"
+echo
+
+# --- Ping (health check) ---
+ping_response=$(api_get "/api/server/ping" 2>/dev/null) || ping_response=""
+if [[ -z "$ping_response" ]]; then
+  echo "health:     ✗ API unreachable"
+  echo "status:     UNREACHABLE"
+  exit 1
+fi
+
+# Validate ping response (Immich returns {"res":"pong"})
+ping_ok=$(echo "$ping_response" | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('res')=='pong' else 'no')" 2>/dev/null) || ping_ok="no"
+if [[ "$ping_ok" != "yes" ]]; then
+  echo "health:     ✗ API not healthy (ping failed)"
+  echo "status:     DEGRADED"
+  exit 1
+fi
+
+# --- Version (from /api/server/about) ---
+version="?"
+about_json=$(api_get "/api/server/about" 2>/dev/null) || about_json=""
+if [[ -n "$about_json" ]]; then
+  version=$(echo "$about_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('version', d.get('serverVersion', '?')))" 2>/dev/null) || version="?"
+fi
+printf "version:    %s\n" "$version"
+
+# --- Statistics (assets, disk usage, users) ---
+assets="?"
+disk_usage="?"
+users="?"
+stats_json=$(api_get "/api/server/statistics" 2>/dev/null) || stats_json=""
+if [[ -n "$stats_json" ]]; then
+  read -r assets disk_usage users < <(echo "$stats_json" | python3 -c "
+import sys, json
+
+def fmt_count(n):
+    if n >= 1000:
+        return f'{n:,}'
+    return str(n)
+
+def fmt_bytes(b):
+    if b >= 1099511627776:
+        return f'{b/1099511627776:.1f} TB'
+    elif b >= 1073741824:
+        return f'{b/1073741824:.1f} GB'
+    elif b >= 1048576:
+        return f'{b/1048576:.1f} MB'
+    return f'{b} B'
+
+d = json.load(sys.stdin)
+
+# Assets: photos + videos (or total)
+photos = d.get('photos', 0)
+videos = d.get('videos', 0)
+total = photos + videos
+if total == 0:
+    total = d.get('totalAssets', d.get('total', 0))
+
+# Disk usage
+usage = d.get('usage', d.get('usageRaw', d.get('diskUsageRaw', 0)))
+if isinstance(usage, str):
+    usage = 0
+
+# Users
+u = d.get('usageByUser', [])
+user_count = len(u) if isinstance(u, list) else '?'
+
+print(fmt_count(total), fmt_bytes(usage), user_count)
+" 2>/dev/null) || true
+fi
+
+printf "assets:     %s\n" "$assets"
+printf "disk_usage: %s\n" "$disk_usage"
+printf "users:      %s\n" "$users"
+
+# --- Health verdict ---
+echo "health:     ✓ API responding"
+echo "status:     OK"

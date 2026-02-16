@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# idrac-health-status - Read-only health probe for Dell iDRAC (LAN-only via PVE jump host)
+#
+# Probes iDRAC at 192.168.1.250 through PVE SSH tunnel.
+# Strategy: Redfish API first, IPMI fallback.
+# Credentials: Infisical (infrastructure/prod)
+#
+# Usage:
+#   idrac-health-status
+#
+# Ref: GAP-OP-534
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+IDRAC_HOST="192.168.1.250"
+PVE_HOST="root@100.96.211.33"
+SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+# ── Dependencies ──────────────────────────────────────────────
+command -v ssh >/dev/null 2>&1   || stop "missing dependency: ssh"
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+[[ -x "$INFISICAL_AGENT" ]] || stop "missing dependency: $INFISICAL_AGENT"
+
+# ── Credentials ───────────────────────────────────────────────
+IDRAC_USER=$("$INFISICAL_AGENT" get infrastructure prod IDRAC_ADMIN_USER 2>/dev/null) || stop "failed to retrieve IDRAC_ADMIN_USER from Infisical"
+IDRAC_PASS=$("$INFISICAL_AGENT" get infrastructure prod IDRAC_ADMIN_PASSWORD 2>/dev/null) || stop "failed to retrieve IDRAC_ADMIN_PASSWORD from Infisical"
+
+[[ -n "$IDRAC_USER" ]] || stop "IDRAC_ADMIN_USER is empty"
+[[ -n "$IDRAC_PASS" ]] || stop "IDRAC_ADMIN_PASSWORD is empty"
+
+# ── Header ────────────────────────────────────────────────────
+echo "idrac.health.status"
+echo "host: idrac-shop (${IDRAC_HOST} via pve)"
+echo
+
+# ── Redfish probe via PVE SSH tunnel ─────────────────────────
+REDFISH_URL="https://${IDRAC_HOST}/redfish/v1/Systems/System.Embedded.1"
+REDFISH_JSON=""
+REDFISH_OK=false
+
+REDFISH_JSON=$(ssh $SSH_OPTS "$PVE_HOST" \
+  "curl -sk -u '${IDRAC_USER}:${IDRAC_PASS}' --connect-timeout 8 --max-time 15 '${REDFISH_URL}'" 2>/dev/null) || true
+
+# Validate we got real JSON back (not an SSH error or empty response)
+if [[ -n "$REDFISH_JSON" ]] && echo "$REDFISH_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+  # Check it's actually a Redfish response (has @odata or PowerState)
+  if echo "$REDFISH_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if 'PowerState' in d or '@odata.type' in d:
+    sys.exit(0)
+sys.exit(1)
+" 2>/dev/null; then
+    REDFISH_OK=true
+  fi
+fi
+
+if $REDFISH_OK; then
+  # ── Parse Redfish response ──────────────────────────────────
+  python3 -c "
+import json, sys
+
+raw = '''${REDFISH_JSON}'''
+try:
+    d = json.loads(raw)
+except Exception as e:
+    print(f'parse error: {e}')
+    sys.exit(1)
+
+power = d.get('PowerState', 'Unknown')
+health = d.get('Status', {}).get('HealthRollup', d.get('Status', {}).get('Health', 'Unknown'))
+hostname = d.get('HostName', 'Unknown')
+mem_gib = d.get('MemorySummary', {}).get('TotalSystemMemoryGiB', 'Unknown')
+proc_summary = d.get('ProcessorSummary', {})
+proc_count = proc_summary.get('Count', '?')
+proc_model = proc_summary.get('Model', 'Unknown')
+
+print(f'power:      {power}')
+print(f'health:     {health}')
+print(f'hostname:   {hostname}')
+print(f'memory:     {mem_gib} GB')
+print(f'processors: {proc_count}x {proc_model}')
+print(f'source:     redfish')
+" 2>/dev/null || {
+    echo "parse error: failed to extract Redfish fields"
+    echo "status: PARSE_ERROR"
+    exit 1
+  }
+
+  # ── Optional: thermal data via Redfish Thermal endpoint ─────
+  THERMAL_URL="https://${IDRAC_HOST}/redfish/v1/Chassis/System.Embedded.1/Thermal"
+  THERMAL_JSON=$(ssh $SSH_OPTS "$PVE_HOST" \
+    "curl -sk -u '${IDRAC_USER}:${IDRAC_PASS}' --connect-timeout 8 --max-time 15 '${THERMAL_URL}'" 2>/dev/null) || true
+
+  if [[ -n "$THERMAL_JSON" ]]; then
+    TEMPS=$(python3 -c "
+import json, sys
+try:
+    d = json.loads('''${THERMAL_JSON}''')
+    temps = d.get('Temperatures', [])
+    parts = []
+    for t in temps:
+        name = t.get('Name', '')
+        reading = t.get('ReadingCelsius')
+        if reading is not None and reading > 0:
+            # Show key sensors only
+            for kw in ['Inlet', 'Exhaust', 'CPU', 'System Board']:
+                if kw.lower() in name.lower():
+                    parts.append(f'{name} {int(reading)}C')
+                    break
+    if parts:
+        print(', '.join(parts[:6]))
+    else:
+        print('no readings')
+except:
+    print('unavailable')
+" 2>/dev/null) || TEMPS="unavailable"
+    echo "temps:      ${TEMPS}"
+  fi
+
+  echo "status:     OK"
+
+else
+  # ── IPMI fallback via PVE SSH tunnel ────────────────────────
+  echo "note: Redfish unavailable, falling back to IPMI"
+  echo
+
+  IPMI_OUTPUT=""
+  IPMI_OUTPUT=$(ssh $SSH_OPTS "$PVE_HOST" \
+    "ipmitool -I lanplus -H ${IDRAC_HOST} -U '${IDRAC_USER}' -P '${IDRAC_PASS}' sdr type temperature" 2>/dev/null) || true
+
+  if [[ -n "$IPMI_OUTPUT" ]]; then
+    echo "temps:"
+    echo "$IPMI_OUTPUT" | while IFS='|' read -r name id status entity reading; do
+      name="$(echo "$name" | xargs)"
+      reading="$(echo "$reading" | xargs)"
+      if [[ -n "$name" && -n "$reading" ]]; then
+        printf "  %-24s %s\n" "$name" "$reading"
+      fi
+    done
+
+    # Also try power status via IPMI
+    POWER_STATUS=$(ssh $SSH_OPTS "$PVE_HOST" \
+      "ipmitool -I lanplus -H ${IDRAC_HOST} -U '${IDRAC_USER}' -P '${IDRAC_PASS}' power status" 2>/dev/null) || POWER_STATUS="unknown"
+    echo
+    echo "power:      ${POWER_STATUS}"
+    echo "source:     ipmi"
+    echo "status:     OK"
+  else
+    # ── Both methods failed — try ping as last resort ─────────
+    PING_OK=false
+    ssh $SSH_OPTS "$PVE_HOST" "ping -c1 -W2 ${IDRAC_HOST}" >/dev/null 2>&1 && PING_OK=true
+
+    if $PING_OK; then
+      echo "reachable:  yes (ping OK)"
+      echo "note:       Redfish and IPMI both failed, but host is reachable"
+      echo "status:     DEGRADED"
+      exit 1
+    else
+      echo "reachable:  no"
+      echo "note:       host unreachable via PVE jump"
+      echo "status:     DOWN"
+      exit 2
+    fi
+  fi
+fi

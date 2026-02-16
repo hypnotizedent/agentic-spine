@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# gitea-status - Read-only Gitea instance health and summary
+#
+# Queries Gitea REST API on dev-tools (100.90.167.39:3000).
+# Token sourced from Infisical (infrastructure/prod/GITEA_API_TOKEN).
+#
+# Usage:
+#   gitea-status
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+
+GITEA_HOST="100.90.167.39:3000"
+GITEA_URL="http://${GITEA_HOST}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+CONNECT_TIMEOUT=5
+MAX_TIME=10
+
+# --- Resolve API token ---
+GITEA_TOKEN=""
+if [[ -x "$INFISICAL_AGENT" ]]; then
+  GITEA_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod GITEA_API_TOKEN 2>/dev/null) || true
+fi
+
+AUTH_HEADER=""
+if [[ -n "$GITEA_TOKEN" ]]; then
+  AUTH_HEADER="Authorization: token ${GITEA_TOKEN}"
+fi
+
+# --- Helper: curl with optional auth ---
+api_get() {
+  local path="$1"
+  if [[ -n "$AUTH_HEADER" ]]; then
+    curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+      -H "$AUTH_HEADER" "${GITEA_URL}${path}" 2>/dev/null
+  else
+    curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+      "${GITEA_URL}${path}" 2>/dev/null
+  fi
+}
+
+# Headers variant (for X-Total-Count)
+api_get_headers() {
+  local path="$1"
+  if [[ -n "$AUTH_HEADER" ]]; then
+    curl -s -D - --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+      -H "$AUTH_HEADER" "${GITEA_URL}${path}" 2>/dev/null
+  else
+    curl -s -D - --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+      "${GITEA_URL}${path}" 2>/dev/null
+  fi
+}
+
+echo "gitea.status"
+echo "host: dev-tools (${GITEA_HOST})"
+echo
+
+# --- Version ---
+version_json=$(api_get "/api/v1/version" 2>/dev/null) || version_json=""
+if [[ -n "$version_json" ]]; then
+  version=$(echo "$version_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version','?'))" 2>/dev/null) || version="?"
+else
+  echo "health:     ✗ API unreachable"
+  echo "status:     UNREACHABLE"
+  exit 1
+fi
+
+printf "version:    %s\n" "$version"
+
+# --- Repos count (via X-Total-Count header) ---
+repos_response=$(api_get_headers "/api/v1/repos/search?limit=1" 2>/dev/null) || repos_response=""
+repos_count="?"
+if [[ -n "$repos_response" ]]; then
+  repos_count=$(echo "$repos_response" | grep -i "X-Total-Count" | tr -d '\r' | awk '{print $2}') || repos_count="?"
+  [[ -z "$repos_count" ]] && repos_count="?"
+fi
+printf "repos:      %s\n" "$repos_count"
+
+# --- Users count (admin endpoint) ---
+users_count="?"
+if [[ -n "$AUTH_HEADER" ]]; then
+  users_json=$(api_get "/api/v1/admin/users" 2>/dev/null) || users_json=""
+  if [[ -n "$users_json" ]]; then
+    users_count=$(echo "$users_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else '?')" 2>/dev/null) || users_count="?"
+  fi
+fi
+printf "users:      %s\n" "$users_count"
+
+# --- Runners (admin endpoint, may not exist on all versions) ---
+runners_count="?"
+if [[ -n "$AUTH_HEADER" ]]; then
+  runners_json=$(api_get "/api/v1/admin/runners" 2>/dev/null) || runners_json=""
+  if [[ -n "$runners_json" ]]; then
+    runners_count=$(echo "$runners_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else '?')" 2>/dev/null) || runners_count="?"
+  fi
+fi
+printf "runners:    %s\n" "$runners_count"
+
+# --- Health verdict ---
+echo "health:     ✓ API responding"
+echo "status:     OK"
