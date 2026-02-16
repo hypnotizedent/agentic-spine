@@ -11,13 +11,41 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-# Runtime root (mailroom/, receipts/, state/) is fixed by contract.
+# Runtime root (mailroom/, receipts/, state/) defaults to spine repo.
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 
 # Code root is derived from where this command is executed from (worktree-safe).
 SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
-STATE_DIR="$SPINE_REPO/mailroom/state"
+MAILROOM_RUNTIME_CONTRACT="$SPINE_CODE/ops/bindings/mailroom.runtime.contract.yaml"
+SPINE_INBOX_DEFAULT="$SPINE_REPO/mailroom/inbox"
+SPINE_OUTBOX_DEFAULT="$SPINE_REPO/mailroom/outbox"
+SPINE_STATE_DEFAULT="$SPINE_REPO/mailroom/state"
+SPINE_INBOX="${SPINE_INBOX:-}"
+SPINE_OUTBOX="${SPINE_OUTBOX:-}"
+SPINE_STATE="${SPINE_STATE:-}"
+
+resolve_mailroom_runtime() {
+    if [[ -f "$MAILROOM_RUNTIME_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+        local active runtime_root
+        active="$(yq e -r '.active // false' "$MAILROOM_RUNTIME_CONTRACT" 2>/dev/null || echo false)"
+        runtime_root="$(yq e -r '.runtime_root // ""' "$MAILROOM_RUNTIME_CONTRACT" 2>/dev/null || true)"
+        if [[ "$active" == "true" && -n "$runtime_root" && "$runtime_root" != "null" ]]; then
+            [[ -n "$SPINE_INBOX" ]] || SPINE_INBOX="$runtime_root/inbox"
+            [[ -n "$SPINE_OUTBOX" ]] || SPINE_OUTBOX="$runtime_root/outbox"
+            [[ -n "$SPINE_STATE" ]] || SPINE_STATE="$runtime_root/state"
+        fi
+    fi
+
+    [[ -n "$SPINE_INBOX" ]] || SPINE_INBOX="$SPINE_INBOX_DEFAULT"
+    [[ -n "$SPINE_OUTBOX" ]] || SPINE_OUTBOX="$SPINE_OUTBOX_DEFAULT"
+    [[ -n "$SPINE_STATE" ]] || SPINE_STATE="$SPINE_STATE_DEFAULT"
+}
+
+resolve_mailroom_runtime
+export SPINE_INBOX SPINE_OUTBOX SPINE_STATE
+
+STATE_DIR="$SPINE_STATE"
 CAP_FILE="$SPINE_CODE/ops/capabilities.yaml"
 RECEIPTS="$SPINE_REPO/receipts/sessions"
 LEDGER="$STATE_DIR/ledger.csv"

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+BINDING="$ROOT/ops/bindings/spine.boundary.baseline.yaml"
+AUDIT_BIN="$ROOT/ops/plugins/surface/bin/surface-boundary-audit"
+REPORT_DIR="$ROOT/docs/governance/_audits"
+STAMP="$(date +%Y%m%d)"
+REPORT="$REPORT_DIR/SURFACE_BOUNDARY_RECONCILE_${STAMP}.md"
+
+fail() {
+  echo "surface.boundary.reconcile.plan FAIL: $*" >&2
+  exit 1
+}
+
+command -v jq >/dev/null 2>&1 || fail "jq is required"
+[[ -f "$BINDING" ]] || fail "missing binding: $BINDING"
+[[ -x "$AUDIT_BIN" ]] || fail "missing audit script: $AUDIT_BIN"
+mkdir -p "$REPORT_DIR"
+
+json="$($AUDIT_BIN --json --no-fail)"
+count="$(echo "$json" | jq -r '.violation_count')"
+
+{
+  echo "---"
+  echo "status: authoritative"
+  echo "owner: \"@ronny\""
+  echo "last_verified: $(date +%Y-%m-%d)"
+  echo "scope: surface-boundary-reconcile"
+  echo "---"
+  echo
+  echo "# Surface Boundary Reconcile Plan"
+  echo
+  echo "Generated from ops/plugins/surface/bin/surface-boundary-audit."
+  echo
+  echo "Violations detected: **$count**"
+  echo
+  if [[ "$count" -eq 0 ]]; then
+    echo "No reconcile actions required."
+  else
+    echo "| Group | Rule | Path | Target | Suggested Action |"
+    echo "|---|---|---|---|---|"
+    echo "$json" | jq -r '.violations[] | "| `\(.group)` | `\(.rule_id)` | `\(.path)` | `\(.target)` | move/archive |"'
+    echo
+    echo "## Command Sketch"
+    echo
+    echo "$json" | jq -r '.violations[] | "- `mkdir -p \(.target)` then move `\(.path)`"'
+  fi
+} > "$REPORT"
+
+echo "surface.boundary.reconcile.plan"
+echo "report: ${REPORT#$ROOT/}"
+echo "violations: $count"

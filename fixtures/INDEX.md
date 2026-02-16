@@ -31,5 +31,4 @@ Complete inventory of fixture assets in this directory.
 
 | File | Description |
 |------|-------------|
-| `Spine_-_Mailroom_Enqueue.json` | n8n workflow template for enqueuing fixture events |
-| `README.md` | Directory documentation |
+| `README.md` | Pointer to canonical workbench n8n workflow exports |

@@ -52,7 +52,7 @@ For spine-native scripts, see [SCRIPTS_REGISTRY.md](SCRIPTS_REGISTRY.md) and the
 | Script | Location | Purpose |
 |--------|----------|---------|
 | `mint` | `~/code/workbench/scripts/mint` | RAG CLI (ask, health, index) |
-| `infisical-agent.sh` | Canonical: `ops/tools/infisical-agent.sh` | Secrets management with caching |
+| `infisical-agent.sh` | Canonical: `/Users/ronnyworks/code/workbench/scripts/agents/infisical-agent.sh` (spine wrapper: `ops/tools/infisical-agent.sh`) | Secrets management with caching |
 
 ### Infisical Agent Commands (Updated 2026-01-22):
 

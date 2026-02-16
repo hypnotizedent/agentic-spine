@@ -348,7 +348,7 @@ To read results:
 - `GET /outbox/read?path=<file>`
 
 Template workflow export (import into n8n):
-- `fixtures/n8n/Spine_-_Mailroom_Enqueue.json`
+- `/Users/ronnyworks/code/workbench/infra/compose/n8n/workflows/Spine_-_Mailroom_Enqueue.json`
 
 Recommended n8n env vars:
 - `SPINE_MAILROOM_BRIDGE_URL` (example: `https://<public-bridge-host>`; fallback: `http://macbook.taile9480.ts.net`)

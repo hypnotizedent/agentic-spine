@@ -7,17 +7,66 @@ scope: repo-readme
 
 # agentic-spine
 
-Detachable spine: one CLI front door + receipts + boring lifecycle.
+Control-plane only runtime for AOF.
+
+## Baseline Lock
+
+Spine owns:
+
+- governed entrypoints (`bin/`, `ops/`, `surfaces/`)
+- governance/contracts (`docs/core`, `docs/governance`, `docs/product`)
+- capability registry + verify runtime
+- receipts + mailroom contract surfaces
+
+Spine never owns:
+
+- domain tools/runbooks/workflow JSONs
+- product specs and domain implementation docs
+- HA dashboard assets
+- n8n workflow exports/snapshots
+- host/runtime artifact archives
+
+Those belong in `/Users/ronnyworks/code/workbench`.
+
+## Mailroom Model
+
+- Contract and governance remain in spine.
+- Live runtime artifacts are externalized by contract in:
+  `/Users/ronnyworks/code/.runtime/spine-mailroom`
+- Contract: `/Users/ronnyworks/code/agentic-spine/ops/bindings/mailroom.runtime.contract.yaml`
 
 ## Quickstart
 
 ```bash
-./bin/ops cap run spine.verify
-./bin/ops cap run spine.replay
-./bin/ops cap run spine.status
+cd /Users/ronnyworks/code/agentic-spine
+./bin/ops status
+./bin/ops cap list
+./bin/ops cap run stability.control.snapshot
+./bin/ops cap run verify.core.run
+./bin/ops cap run verify.route.recommend
+./bin/ops cap run verify.domain.run <domain>
 ```
 
-## CLI Commands
+Release/nightly only:
+
+```bash
+./bin/ops cap run spine.verify
+```
+
+## Canonical Flows
+
+Daily:
+- `stability.control.snapshot` -> `verify.core.run` -> `verify.route.recommend` -> `verify.domain.run <domain>`
+
+Release/nightly:
+- `spine.verify` (full certification)
+
+Boundary:
+- `surface.boundary.audit`
+- `surface.boundary.reconcile.plan`
+- `catalog.domain.sync`
+
+## CLI Commands (front door)
 
 | Command | Description |
 |---------|-------------|
@@ -44,6 +93,10 @@ Detachable spine: one CLI front door + receipts + boring lifecycle.
 ./bin/ops run --inline "..."          # run an inline task
 ./bin/ops run --file <path>           # run a task from file
 ```
+
+Domain capability catalogs:
+
+- `/Users/ronnyworks/code/agentic-spine/docs/governance/domains/CAPABILITIES_INDEX.md`
 
 ## Secrets: the gating layer
 

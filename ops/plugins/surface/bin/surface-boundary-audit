@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+BINDING="$ROOT/ops/bindings/spine.boundary.baseline.yaml"
+JSON_MODE=0
+NO_FAIL=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --json) JSON_MODE=1 ;;
+    --no-fail) NO_FAIL=1 ;;
+  esac
+done
+
+fail() {
+  echo "surface.boundary.audit FAIL: $*" >&2
+  exit 1
+}
+
+command -v yq >/dev/null 2>&1 || fail "yq is required"
+[[ -f "$BINDING" ]] || fail "missing binding: $BINDING"
+
+shopt -s globstar nullglob
+
+declare -a VIOLATIONS=()
+
+scan_group() {
+  local group="$1"
+  local rules_len
+  rules_len="$(yq e ".rules.${group} | length" "$BINDING" 2>/dev/null)"
+  [[ "$rules_len" =~ ^[0-9]+$ ]] || rules_len=0
+
+  local i
+  for ((i=0; i<rules_len; i++)); do
+    local rule_id dest archive_root
+    rule_id="$(yq e -r ".rules.${group}[${i}].id" "$BINDING")"
+    dest="$(yq e -r ".rules.${group}[${i}].destination // \"\"" "$BINDING")"
+    archive_root="$(yq e -r ".rules.${group}[${i}].archive_root // \"\"" "$BINDING")"
+
+    while IFS= read -r pattern; do
+      [[ -z "$pattern" || "$pattern" == "null" ]] && continue
+      local abs_pattern="$ROOT/$pattern"
+      local matched=0
+      local p
+      for p in $abs_pattern; do
+        [[ -e "$p" ]] || continue
+        matched=1
+        local rel="${p#$ROOT/}"
+        local target="${dest:-$archive_root}"
+        VIOLATIONS+=("${group}|${rule_id}|${rel}|${target}")
+      done
+      [[ "$matched" -eq 1 ]] || true
+    done < <(yq e -r ".rules.${group}[${i}].globs[]?" "$BINDING")
+  done
+}
+
+scan_group "move_workbench"
+scan_group "runtime_only"
+scan_group "archive_then_delete"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  {
+    echo "{"
+    echo "  \"status\": \"$([[ ${#VIOLATIONS[@]} -eq 0 ]] && echo pass || echo fail)\","
+    echo "  \"violation_count\": ${#VIOLATIONS[@]},"
+    echo "  \"violations\": ["
+    for idx in "${!VIOLATIONS[@]}"; do
+      IFS='|' read -r grp rid path target <<<"${VIOLATIONS[$idx]}"
+      comma=","
+      [[ "$idx" -eq $((${#VIOLATIONS[@]}-1)) ]] && comma=""
+      printf '    {"group":"%s","rule_id":"%s","path":"%s","target":"%s"}%s\n' "$grp" "$rid" "$path" "$target" "$comma"
+    done
+    echo "  ]"
+    echo "}"
+  }
+else
+  echo "surface.boundary.audit"
+  if [[ ${#VIOLATIONS[@]} -eq 0 ]]; then
+    echo "status: PASS"
+    echo "violations: 0"
+  else
+    echo "status: FAIL"
+    echo "violations: ${#VIOLATIONS[@]}"
+    echo
+    printf '%-20s %-36s %-70s %s\n' "GROUP" "RULE" "PATH" "TARGET"
+    printf '%-20s %-36s %-70s %s\n' "-----" "----" "----" "------"
+    for row in "${VIOLATIONS[@]}"; do
+      IFS='|' read -r grp rid path target <<<"$row"
+      printf '%-20s %-36s %-70s %s\n' "$grp" "$rid" "$path" "$target"
+    done
+  fi
+fi
+
+if [[ ${#VIOLATIONS[@]} -gt 0 && "$NO_FAIL" -ne 1 ]]; then
+  fail "boundary violations detected (${#VIOLATIONS[@]})"
+fi
+
+exit 0

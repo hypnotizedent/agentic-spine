@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/mailroom.runtime.contract.yaml"
+EXECUTE=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --execute) EXECUTE=1 ;;
+  esac
+done
+
+fail() {
+  echo "mailroom.runtime.migrate FAIL: $*" >&2
+  exit 1
+}
+
+command -v yq >/dev/null 2>&1 || fail "yq is required"
+command -v rsync >/dev/null 2>&1 || fail "rsync is required"
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+
+tracked_root="$(yq e -r '.tracked_contract_root' "$CONTRACT")"
+runtime_root="$(yq e -r '.runtime_root' "$CONTRACT")"
+
+[[ -n "$tracked_root" && "$tracked_root" != "null" ]] || fail "tracked_contract_root missing"
+[[ -n "$runtime_root" && "$runtime_root" != "null" ]] || fail "runtime_root missing"
+
+mkdir -p "$runtime_root"
+
+echo "mailroom.runtime.migrate"
+echo "mode: $([[ "$EXECUTE" -eq 1 ]] && echo execute || echo dry-run)"
+echo "tracked_root: $tracked_root"
+echo "runtime_root: $runtime_root"
+echo
+
+mapfile -t items < <(yq e -r '.runtime_migration.items[]?' "$CONTRACT")
+(( ${#items[@]} > 0 )) || fail "no runtime_migration.items configured"
+
+migrated=0
+for rel in "${items[@]}"; do
+  src="$ROOT/$rel"
+  dst="$runtime_root/${rel#mailroom/}"
+
+  if [[ ! -e "$src" ]]; then
+    echo "SKIP missing: $rel"
+    continue
+  fi
+
+  echo "PLAN $rel -> ${dst}"
+
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    mkdir -p "$(dirname "$dst")"
+    if [[ -d "$src" ]]; then
+      mkdir -p "$dst"
+      # Keep tracked .keep sentinels in the repo-side contract tree.
+      rsync -a --exclude '.keep' --remove-source-files "$src/" "$dst/"
+      find "$src" -type d -empty -delete 2>/dev/null || true
+    else
+      rsync -a "$src" "$dst"
+      rm -f "$src"
+    fi
+    migrated=$((migrated + 1))
+  fi
+done
+
+if [[ "$EXECUTE" -eq 1 ]]; then
+  yq -i '.active = true' "$CONTRACT"
+  echo
+  echo "migrated_items: $migrated"
+  echo "contract_active: true"
+else
+  echo
+  echo "dry_run_items: ${#items[@]}"
+  echo "hint: re-run with --execute to migrate"
+fi

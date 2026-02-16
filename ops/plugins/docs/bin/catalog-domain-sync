@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CAP_FILE="$ROOT/ops/capabilities.yaml"
+CATALOG_BINDING="$ROOT/ops/bindings/capability.domain.catalog.yaml"
+OUT_ROOT="$ROOT/docs/governance/domains"
+STAMP="$(date +%Y-%m-%d)"
+
+fail() {
+  echo "catalog.domain.sync FAIL: $*" >&2
+  exit 1
+}
+
+command -v yq >/dev/null 2>&1 || fail "yq is required"
+command -v jq >/dev/null 2>&1 || fail "jq is required"
+[[ -f "$CAP_FILE" ]] || fail "missing capabilities.yaml"
+[[ -f "$CATALOG_BINDING" ]] || fail "missing catalog binding"
+mkdir -p "$OUT_ROOT"
+
+records_json="$(mktemp)"
+trap 'rm -f "$records_json" "$index_tmp"' EXIT
+
+index_tmp="$(mktemp)"
+
+yq -o=json '.capabilities' "$CAP_FILE" \
+  | jq '
+      to_entries
+      | map(
+          select(.value.plane == "domain_external")
+          | {
+              capability: .key,
+              domain: (.value.domain // "unknown"),
+              safety: (.value.safety // "unknown"),
+              approval: (.value.approval // "auto"),
+              implementation_repo: (.value.implementation_repo // ""),
+              implementation_path: (.value.implementation_path // ""),
+              command: (.value.command // "")
+            }
+        )
+    ' > "$records_json"
+
+mapfile -t domains < <(jq -r '.[].domain' "$records_json" | sort -u)
+[[ ${#domains[@]} -gt 0 ]] || fail "no domain_external capabilities found"
+
+for domain in "${domains[@]}"; do
+  out_dir="$OUT_ROOT/$domain"
+  out_file="$out_dir/CAPABILITIES.md"
+  mkdir -p "$out_dir"
+
+  {
+    echo "---"
+    echo "status: authoritative"
+    echo "owner: \"@ronny\""
+    echo "last_verified: $STAMP"
+    echo "scope: domain-capability-catalog"
+    echo "domain: $domain"
+    echo "---"
+    echo
+    echo "# $domain Capability Catalog"
+    echo
+    echo "Generated from \`ops/capabilities.yaml\` by \`catalog-domain-sync\`."
+    echo
+    echo "| Capability | Safety | Approval | Implementation |"
+    echo "|---|---|---|---|"
+    jq -r --arg d "$domain" '
+      map(select(.domain == $d))
+      | sort_by(.capability)
+      | .[]
+      | "| `\(.capability)` | `\(.safety)` | `\(.approval)` | `\(.implementation_path)` |"
+    ' "$records_json"
+  } > "$out_file"
+
+  cap_count="$(jq -r --arg d "$domain" 'map(select(.domain == $d)) | length' "$records_json")"
+  echo "| \`$domain\` | $cap_count | \`docs/governance/domains/$domain/CAPABILITIES.md\` |" >> "$index_tmp"
+
+done
+
+index_file="$OUT_ROOT/CAPABILITIES_INDEX.md"
+{
+  echo "# Domain Capability Catalog Index"
+  echo
+  echo "Generated from \`ops/capabilities.yaml\` (domain_external plane)."
+  echo
+  echo "| Domain | Capabilities | Catalog |"
+  echo "|---|---:|---|"
+  sort "$index_tmp"
+} > "$index_file"
+
+while IFS= read -r domain; do
+  [[ -z "$domain" ]] && continue
+  caps_json="$(jq -cr --arg d "$domain" 'map(select(.domain == $d) | .capability)' "$records_json")"
+  yq -i "(.domains[] | select(.domain_id == \"$domain\") | .capabilities) = $caps_json" "$CATALOG_BINDING"
+  yq -i "(.domains[] | select(.domain_id == \"$domain\") | .last_synced) = \"$STAMP\"" "$CATALOG_BINDING"
+done < <(printf '%s\n' "${domains[@]}")
+
+yq -i ".updated = \"$STAMP\"" "$CATALOG_BINDING"
+
+echo "catalog.domain.sync"
+echo "domains: ${#domains[@]}"
+echo "index: docs/governance/domains/CAPABILITIES_INDEX.md"

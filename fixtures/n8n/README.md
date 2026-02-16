@@ -1,14 +1,10 @@
 # fixtures/n8n/
 
-Exported n8n workflow JSON files used as governance templates.
+Pointer surface only.
 
-## Contents
+Canonical n8n workflow exports moved to workbench:
 
-- `Spine_-_Mailroom_Enqueue.json`: n8n workflow template for enqueuing
-  fixture events into the mailroom inbox. Used by `spine.replay` to inject
-  deterministic test payloads.
+- `/Users/ronnyworks/code/workbench/infra/compose/n8n/workflows/`
+- `/Users/ronnyworks/code/workbench/infra/compose/n8n/workflows/snapshots/`
 
-## Usage
-
-These JSON files can be imported into n8n via `ops cap run n8n.workflows.import`.
-They are reference copies -- the live n8n instance is the runtime authority.
+Spine keeps this README as a route hint; workflow JSON artifacts are workbench-owned.
