@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/immich.ingest.watch.contract.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+WATCHDOG="/Users/ronnyworks/code/workbench/agents/immich/tools/immich_ingest_watchdog.py"
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "STOP: missing dependency: $1" >&2
+    exit 2
+  }
+}
+
+need_file() {
+  [[ -f "$1" ]] || {
+    echo "STOP: missing file: $1" >&2
+    exit 2
+  }
+}
+
+need_cmd yq
+need_cmd python3
+need_file "$CONTRACT"
+need_file "$SSH_BINDING"
+need_file "$WATCHDOG"
+
+mode="$(yq -r '.runtime.mode // "remote_ssh"' "$CONTRACT")"
+target_id="$(yq -r '.runtime.ssh_target_id // "immich"' "$CONTRACT")"
+remote_state_root="$(yq -r '.runtime.remote_state_root // "/home/ronny/immich-ingest"' "$CONTRACT")"
+ssh_connect_timeout="$(yq -r '.runtime.ssh.connect_timeout_sec // 10' "$CONTRACT")"
+ssh_strict_host_key_checking="$(yq -r '.runtime.ssh.strict_host_key_checking // false' "$CONTRACT")"
+ssh_user_known_hosts_file="$(yq -r '.runtime.ssh.user_known_hosts_file // "/dev/null"' "$CONTRACT")"
+ssh_batch_mode="$(yq -r '.runtime.ssh.batch_mode // true' "$CONTRACT")"
+queue_file="$(yq -r '.runtime.paths.queue_file // "queue/years.csv"' "$CONTRACT")"
+state_file="$(yq -r '.runtime.paths.state_file // "state/current.json"' "$CONTRACT")"
+heartbeat_file="$(yq -r '.runtime.paths.heartbeat_file // "state/heartbeat"' "$CONTRACT")"
+worker_log_file="$(yq -r '.runtime.paths.worker_log_file // "logs/worker.log"' "$CONTRACT")"
+pid_file="$(yq -r '.runtime.paths.pid_file // "state/worker.pid"' "$CONTRACT")"
+stale_minutes="$(yq -r '.incident_thresholds.stale_heartbeat_minutes // 20' "$CONTRACT")"
+error_window_lines="$(yq -r '.incident_thresholds.error_window_lines // 300' "$CONTRACT")"
+guided_only="$(yq -r '.policy.guided_only // true' "$CONTRACT")"
+auto_restart_worker="$(yq -r '.policy.auto_restart_worker // false' "$CONTRACT")"
+auto_mutation="$(yq -r '.policy.auto_mutation // false' "$CONTRACT")"
+status_command="$(yq -r '.guided_recovery.status_command // "~/immich-ingest/bin/status.sh"' "$CONTRACT")"
+stop_command="$(yq -r '.guided_recovery.stop_command // "~/immich-ingest/bin/stop.sh"' "$CONTRACT")"
+start_command="$(yq -r '.guided_recovery.start_command // "~/immich-ingest/bin/start.sh"' "$CONTRACT")"
+
+if [[ "$guided_only" != "true" ]]; then
+  echo "STOP: policy.guided_only must be true in $CONTRACT for this sprint." >&2
+  exit 2
+fi
+if [[ "$auto_restart_worker" == "true" || "$auto_mutation" == "true" ]]; then
+  echo "STOP: auto mutation/restart is disallowed by stabilization policy." >&2
+  exit 2
+fi
+
+host="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .host // \"\"" "$SSH_BINDING" | head -n1)"
+user="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .user // .ssh.defaults.user // \"ronny\"" "$SSH_BINDING" | head -n1)"
+port="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .port // .ssh.defaults.port // 22" "$SSH_BINDING" | head -n1)"
+
+[[ -n "$host" ]] || {
+  echo "STOP: target '$target_id' has no host in $SSH_BINDING" >&2
+  exit 2
+}
+[[ -n "$user" ]] || user="ronny"
+[[ -n "$port" ]] || port="22"
+
+cmd=(python3 "$WATCHDOG")
+if [[ "$mode" == "remote_ssh" ]]; then
+  cmd+=(
+    --remote-host "$host"
+    --remote-user "$user"
+    --remote-port "$port"
+    --remote-state-root "$remote_state_root"
+    --remote-timeout-sec "$ssh_connect_timeout"
+    --ssh-connect-timeout "$ssh_connect_timeout"
+    --queue-file "$queue_file"
+    --state-file "$state_file"
+    --heartbeat-file "$heartbeat_file"
+    --log-file "$worker_log_file"
+    --pid-file "$pid_file"
+    --stale-minutes "$stale_minutes"
+    --error-window-lines "$error_window_lines"
+    --ssh-user-known-hosts-file "$ssh_user_known_hosts_file"
+    --guided-status-command "$status_command"
+    --guided-stop-command "$stop_command"
+    --guided-start-command "$start_command"
+  )
+  if [[ "$ssh_strict_host_key_checking" == "true" ]]; then
+    cmd+=(--ssh-strict-host-key-checking)
+  fi
+  if [[ "$ssh_batch_mode" == "true" ]]; then
+    cmd+=(--ssh-batch-mode)
+  else
+    cmd+=(--ssh-no-batch-mode)
+  fi
+fi
+
+# Caller-supplied args are appended last so explicit user overrides win.
+cmd+=("$@")
+
+exec "${cmd[@]}"

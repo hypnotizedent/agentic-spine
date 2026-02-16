@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-13
+last_verified: 2026-02-16
 scope: post-gap-stabilization
 ---
 
@@ -35,6 +35,18 @@ Stability state levels:
 
 ## 2) Build-Mode Guardrails
 
+### Single-Writer Stabilization Mode (Blackhole Exit)
+
+When the objective is runtime stabilization (prevent regressions, keep services up),
+run a single active writer terminal and avoid proposal dependency for routine
+day-to-day operations.
+
+Rules:
+- One active writer terminal at a time for stabilization actions.
+- All runtime checks and recovery steps still run through governed capabilities.
+- Recovery planning remains guided-only by default (`stability.control.reconcile` prints commands; operator executes manually).
+- Proposal flow stays available for multi-file/cross-surface product changes, but is not required for routine single-writer stabilization updates.
+
 ### Allowed
 - Read-only discovery via `./bin/ops cap run <read-only-cap>`.
 - Single-surface governed mutation via `./bin/ops cap run <mutating-cap>` when no multi-agent collision risk exists.
@@ -50,8 +62,9 @@ Stability state levels:
 
 Hard stop gates before mutating:
 1. `./bin/ops status`
-2. `./bin/ops cap run spine.verify`
-3. `./bin/ops cap run gaps.status`
+2. `./bin/ops cap run verify.pack.run core-operator`
+3. `./bin/ops cap run stability.control.snapshot`
+4. `./bin/ops cap run gaps.status`
 
 ---
 
@@ -114,6 +127,7 @@ Definition: if any column is missing, lifecycle is incomplete.
 | Change Shape | Use | Why |
 |---|---|---|
 | Single read-only status/query | `./bin/ops cap run <read-only>` | Governed command + receipt, lowest overhead |
+| Day-to-day stabilization checks | `verify.pack.run core-operator` + `stability.control.snapshot` | Pack-first verification with incident detection scoped to critical runtime domains |
 | Single mutating action already implemented as capability | `./bin/ops cap run <mutating>` | Controlled execution path + policy preconditions |
 | Evidence/narrative note, no file mutation | `./bin/ops run --inline "..."` | Lightweight receipt for discovery context |
 | Multi-file, cross-surface, or multi-terminal change | Proposal flow (`proposals.submit` -> payload -> `proposals.apply`) | Prevents collision and preserves commit boundary |
@@ -166,9 +180,14 @@ Cleanup cadence:
 
 Daily (Terminal C):
 1. `./bin/ops status`
-2. `./bin/ops cap run spine.verify`
-3. `./bin/ops cap run gaps.status`
-4. `./bin/ops cap run orchestration.status`
+2. `./bin/ops cap run verify.pack.run core-operator`
+3. `./bin/ops cap run stability.control.snapshot`
+4. `./bin/ops cap run stability.control.reconcile` (run when snapshot reports incidents)
+5. `./bin/ops cap run gaps.status`
+6. `./bin/ops cap run orchestration.status`
+
+Nightly / Release:
+1. `./bin/ops cap run spine.verify`
 
 Weekly (Terminal C + delegated workers):
 1. `./bin/ops cap run verify.drift_gates.certify`

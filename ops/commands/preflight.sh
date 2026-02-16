@@ -139,6 +139,8 @@ echo "  selected: ${selected_gate_domain} (${domain_source})"
 echo "  commands:"
 echo "    ./bin/ops cap run verify.drift_gates.certify --list-domains"
 echo "    ./bin/ops cap run verify.drift_gates.certify --domain <name> --brief"
+echo "    ./bin/ops cap run verify.pack.list"
+echo "    ./bin/ops cap run verify.pack.run <agent_id|domain>"
 
 if [[ -x "$DRIFT_CERTIFIER" ]]; then
   if domain_list_out="$("$DRIFT_CERTIFIER" --list-domains 2>&1)"; then

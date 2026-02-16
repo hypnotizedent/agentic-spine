@@ -41,7 +41,7 @@ Notes:
 
 | Script | Purpose | Read-Only |
 |--------|---------|-----------|
-| `drift-gate.sh` | Constitutional drift detector (D1-D103) | Yes |
+| `drift-gate.sh` | Constitutional drift detector (D1-D123) | Yes |
 | `d16-docs-quarantine.sh` | Legacy docs quarantine enforcement | Yes |
 | `d17-root-allowlist.sh` | Root file allowlist enforcement | Yes |
 | `d18-docker-compose-drift.sh` | Docker compose drift detection | Yes |
@@ -124,6 +124,9 @@ Notes:
 | `d95-version-compat-matrix-lock.sh` | Version compat matrix lock (dependency graph + sources). Test: `surfaces/verify/tests/d95-test.sh` | Yes |
 | `d96-evidence-retention-policy-lock.sh` | Evidence retention policy lock (retention classes + purge rules). Test: `surfaces/verify/tests/d96-test.sh` | Yes |
 | `d97-surface-readonly-contract-lock.sh` | Surface readonly contract lock (surfaces + access). Test: `surfaces/verify/tests/d97-test.sh` | Yes |
+| `d121-fabric-boundary-lock.sh` | Lean-spine boundary lock (domain capability freeze + active workbench implementation paths) | Yes |
+| `d122-domain-doc-route-lock.sh` | Domain docs routing lock (spine stubs + workbench targets + route binding parity) | Yes |
+| `d123-strict-migration-policy-lock.sh` | Strict migration policy lock (strict preset + proposal-only write policy) | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
@@ -158,10 +161,10 @@ Not called by default verification flows. Run manually for ad-hoc diagnostics.
 | Category | Count |
 |----------|-------|
 | Called by `ops verify` | 10 |
-| Called by `spine.verify` (drift-gate suite) | 64 |
+| Called by `spine.verify` (drift-gate suite) | 67 |
 | Called by capabilities | 1 |
 | Manual / legacy | 9 |
-| **Total** | **84** |
+| **Total** | **87** |
 
 ---
 

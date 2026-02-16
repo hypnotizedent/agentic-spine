@@ -5,13 +5,41 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+CONTRACT="$ROOT/ops/bindings/vm.lifecycle.contract.yaml"
 
 ERRORS=0
 CHECKED=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
 ok() { [[ "${DRIFT_VERBOSE:-0}" == "1" ]] && echo "  OK: $*" || true; }
 
-VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
+yq_required() {
+  if ! command -v yq >/dev/null 2>&1; then
+    err "yq not installed"
+    echo "D100 FAIL: $ERRORS check(s) failed"
+    exit 1
+  fi
+}
+
+yq_required
+
+if [[ ! -f "$CONTRACT" ]]; then
+  err "vm.lifecycle.contract.yaml does not exist"
+  echo "D100 FAIL: $ERRORS check(s) failed"
+  exit 1
+fi
+if ! yq e '.' "$CONTRACT" >/dev/null 2>&1; then
+  err "vm.lifecycle.contract.yaml is invalid YAML"
+  echo "D100 FAIL: $ERRORS check(s) failed"
+  exit 1
+fi
+
+VM_LIFECYCLE_REL="$(yq -r '.canonical // ""' "$CONTRACT" 2>/dev/null)"
+if [[ -z "$VM_LIFECYCLE_REL" ]]; then
+  err "vm.lifecycle.contract.yaml missing canonical path"
+  echo "D100 FAIL: $ERRORS check(s) failed"
+  exit 1
+fi
+VM_LIFECYCLE="$ROOT/$VM_LIFECYCLE_REL"
 DEVICE_SSOT="$ROOT/docs/governance/DEVICE_IDENTITY_SSOT.md"
 
 # ── Check 1: Both files exist ──
@@ -27,12 +55,7 @@ if [[ ! -f "$DEVICE_SSOT" ]]; then
 fi
 ok "both SSOT files exist"
 
-# ── Check 2: Extract active shop VMs with lan_ip from vm.lifecycle.yaml ──
-if ! command -v yq >/dev/null 2>&1; then
-  err "yq not installed"
-  echo "D100 FAIL: $ERRORS check(s) failed"
-  exit 1
-fi
+# ── Check 2: Extract active shop VMs with lan_ip from canonical vm lifecycle source ──
 
 # Get hostname:lan_ip pairs for active shop VMs with non-null lan_ip
 lifecycle_data="$(yq -r '.vms[] | select(.status == "active" and .proxmox_host == "pve" and .lan_ip != null) | "\(.hostname):\(.lan_ip)"' "$VM_LIFECYCLE" 2>/dev/null)"

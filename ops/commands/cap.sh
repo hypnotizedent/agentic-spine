@@ -141,12 +141,43 @@ run_cap() {
     desc="$(yq e ".capabilities.\"$name\".description" "$CAP_FILE")"
     local post_action
     post_action="$(yq e ".capabilities.\"$name\".post_action // \"\"" "$CAP_FILE")"
+    local effective_multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES:-direct}"
+    local active_session_count=0
+
+    count_active_sessions() {
+      local sessions_dir="$SPINE_REPO/mailroom/state/sessions"
+      local count=0
+      if [[ ! -d "$sessions_dir" ]]; then
+        echo 0
+        return
+      fi
+      for session_dir in "$sessions_dir"/SES-*; do
+        [[ -d "$session_dir" ]] || continue
+        local manifest="$session_dir/session.yaml"
+        [[ -f "$manifest" ]] || continue
+        local pid
+        pid="$(sed -n 's/^pid:[[:space:]]*//p' "$manifest" | head -1)"
+        [[ -n "${pid:-}" ]] || continue
+        if kill -0 "$pid" 2>/dev/null; then
+          count=$((count + 1))
+        fi
+      done
+      echo "$count"
+    }
 
     # ── Apply approval_default from policy preset ──
     # Top-level cap runs: strict preset forces manual approval
     # Precondition runs (OPS_CAP_STACK non-empty): per-capability setting respected
     if [[ -z "${OPS_CAP_STACK:-}" ]] && [[ "$RESOLVED_APPROVAL_DEFAULT" == "manual" ]]; then
       approval="manual"
+    fi
+
+    # ── Multi-session write posture ──
+    # Balanced mode keeps direct writes for single-session work, but forces
+    # proposal-only writes while multiple active sessions exist.
+    active_session_count="$(count_active_sessions)"
+    if [[ "${active_session_count:-0}" -gt 1 ]]; then
+      effective_multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION:-proposal-only}"
     fi
 
     # ── Expand environment variables ──
@@ -167,7 +198,7 @@ run_cap() {
     echo "Safety:      $safety"
     echo "Approval:    $approval"
     echo "Run Key:     $run_key"
-    echo "Policy:      $RESOLVED_POLICY_PRESET (approval_default=$RESOLVED_APPROVAL_DEFAULT)"
+    echo "Policy:      $RESOLVED_POLICY_PRESET (approval_default=$RESOLVED_APPROVAL_DEFAULT, multi_agent_writes=$effective_multi_agent_writes, active_sessions=$active_session_count)"
     echo "Command:     $cmd ${args[*]:-}"
     echo "CWD:         $cwd"
     echo ""
@@ -203,8 +234,8 @@ run_cap() {
         exit 1
       fi
       # multi_agent_writes: proposal-only blocks direct mutating caps
-      if [[ "${RESOLVED_MULTI_AGENT_WRITES:-direct}" == "proposal-only" ]]; then
-        echo "BLOCKED: multi_agent_writes=proposal-only (policy: $RESOLVED_POLICY_PRESET)"
+      if [[ "$effective_multi_agent_writes" == "proposal-only" ]]; then
+        echo "BLOCKED: multi_agent_writes=proposal-only (policy: $RESOLVED_POLICY_PRESET, active_sessions=$active_session_count)"
         echo "Direct mutating capability '$name' blocked. Use proposal flow."
         echo ""
         echo "Remediation:"

@@ -8,19 +8,30 @@
 #   - safety: read-only | mutating | destructive
 #   - approval: auto | manual
 #   - description: what it does
+#   - plane: fabric | domain_external (optional classification)
+#   - domain: <domain-name> | none (optional classification)
+#   - implementation_repo: absolute repo root (optional)
+#   - implementation_path: repo-relative implementation path (optional)
 #
 # Rule: Only capabilities listed here can be executed via `ops cap run`
 # ═══════════════════════════════════════════════════════════════════════════
 
 version: "1.0"
-updated: "2026-02-12"
-
+updated: "2026-02-16"
+schema:
+  optional_fields:
+    - plane
+    - domain
+    - implementation_repo
+    - implementation_path
+  enums:
+    plane:
+      - fabric
+      - domain_external
 capabilities:
-
   # ─────────────────────────────────────────────────────────────────────────
   # SPINE HEALTH (always safe)
   # ─────────────────────────────────────────────────────────────────────────
-
   spine.verify:
     description: "Run drift gates to verify spine health"
     tags: [spine, verify]
@@ -30,7 +41,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   spine.replay:
     description: "Run replay test to verify determinism"
     tags: [spine, verify]
@@ -40,7 +50,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   spine.status:
     description: "Show watcher and queue status"
     tags: [spine]
@@ -50,7 +59,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   codex.worktree.status:
     description: "Check codex worktree hygiene (stale/dirty/orphaned/count)."
     tags: [spine]
@@ -60,7 +68,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   spine.watcher.status:
     description: "Canonical watcher status (launchd + PID + lock + queue counts)"
     tags: [spine]
@@ -70,7 +77,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   spine.watcher.restart:
     description: "Restart the canonical launchd watcher (bootout + bootstrap)"
     tags: [spine]
@@ -80,11 +86,9 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # MAILROOM BRIDGE (remote read/write API)
   # ─────────────────────────────────────────────────────────────────────────
-
   mailroom.bridge.status:
     description: "Read-only: show mailroom bridge server status (PID + /health)."
     tags: [mailroom]
@@ -94,7 +98,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   mailroom.bridge.start:
     description: "Mutating: start mailroom bridge server (binds per ops/bindings/mailroom.bridge.yaml)."
     tags: [mailroom]
@@ -104,7 +107,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   mailroom.bridge.stop:
     description: "Mutating: stop mailroom bridge server."
     tags: [mailroom]
@@ -114,7 +116,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   mailroom.bridge.expose.status:
     description: "Read-only: show tailnet exposure status for mailroom bridge (tailscale serve + health)."
     tags: [mailroom]
@@ -124,7 +125,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   mailroom.bridge.expose.enable:
     description: "Mutating: expose mailroom bridge to tailnet via tailscale serve (requires bridge running)."
     tags: [mailroom]
@@ -134,7 +134,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   mailroom.bridge.expose.disable:
     description: "Mutating: disable tailnet exposure for mailroom bridge (safe only if serve config is exclusive)."
     tags: [mailroom]
@@ -144,7 +143,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   loops.status:
     description: "Open loop ledger summary (open/closed counts)."
     tags: [loops]
@@ -154,7 +152,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   gaps.status:
     description: "Gap-loop reconciliation: list open gaps, check parent loop status, flag orphans."
     tags: [loops, gaps]
@@ -164,7 +161,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   gaps.claim:
     description: "Claim a gap for exclusive work. Prevents concurrent agents from working on the same gap."
     tags: [loops, gaps, claims]
@@ -174,7 +170,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   gaps.unclaim:
     description: "Release a gap claim. Only the owning process (or stale-recovery) can release."
     tags: [loops, gaps, claims]
@@ -184,7 +179,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   gaps.file:
     description: "Create a new gap entry in the registry. Atomic: acquires git-lock, appends, commits."
     tags: [loops, gaps]
@@ -194,7 +188,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   gaps.close:
     description: "Close or fix a gap. Atomic: acquires git-lock, validates claim, updates status, commits."
     tags: [loops, gaps]
@@ -204,11 +197,9 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # ORCHESTRATION (machine-enforced loop orchestration)
   # ─────────────────────────────────────────────────────────────────────────
-
   orchestration.loop.open:
     description: "Create an orchestration manifest and lane scaffold for a loop."
     tags: [orchestration, loops]
@@ -218,7 +209,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   orchestration.ticket.issue:
     description: "Issue a worker-lane ticket with assigned branch/worker metadata."
     tags: [orchestration, loops]
@@ -228,7 +218,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   orchestration.handoff.validate:
     description: "Validate lane handoff against manifest policy (branch/base/files/sequence)."
     tags: [orchestration, loops]
@@ -238,7 +227,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   orchestration.integrate:
     description: "Integrate a validated lane commit into main (dry-run default; --apply to mutate)."
     tags: [orchestration, loops]
@@ -248,7 +236,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   orchestration.loop.close:
     description: "Close an orchestration loop after all sequence lanes are integrated."
     tags: [orchestration, loops]
@@ -258,7 +245,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   orchestration.status:
     description: "Show orchestration loop/ticket/validation/integration status."
     tags: [orchestration, loops]
@@ -268,7 +254,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   orchestration.terminal.entry:
     description: "Resolve strict per-lane orchestration worktree context for launcher sessions."
     tags: [orchestration, loops]
@@ -278,11 +263,9 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout", "env"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # SESSION (terminal session traceability)
   # ─────────────────────────────────────────────────────────────────────────
-
   session.start:
     description: "Initialize a governed spine terminal session with lane, bootstrap, and telemetry."
     tags: [session]
@@ -296,7 +279,6 @@ capabilities:
         required: true
         validate: "^(scan|apply|coordinator)$"
     outputs: ["stdout", "env"]
-
   loops.reconcile:
     description: "Reconcile stale run-failure loops with superseding pass receipts (conservative auto-close)."
     tags: [loops]
@@ -308,11 +290,9 @@ capabilities:
     requires:
       - loops.status
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # MONOLITH READ (safe exploration)
   # ─────────────────────────────────────────────────────────────────────────
-
   monolith.tree:
     description: "List directory structure of allowed paths"
     tags: [monolith]
@@ -327,7 +307,6 @@ capabilities:
         default: "."
         validate: "^[a-zA-Z0-9_./-]+$"
     outputs: ["stdout"]
-
   monolith.search:
     description: "Search code with ripgrep (exit=1 treated as OK: no matches)"
     tags: [monolith]
@@ -343,7 +322,6 @@ capabilities:
         required: false
         default: "."
     outputs: ["stdout"]
-
   monolith.git_status:
     description: "Show git status of a repo"
     tags: [monolith]
@@ -357,11 +335,10 @@ capabilities:
         required: false
         default: "agentic-spine"
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # N8N (workflow governance via API; receipted)
+  # default classification: plane=domain_external, domain=n8n
   # ─────────────────────────────────────────────────────────────────────────
-
   n8n.workflows.list:
     description: "List n8n workflows (read-only). Requires secrets injection for N8N_API_KEY."
     tags: [n8n]
@@ -370,12 +347,15 @@ capabilities:
     safety: read-only
     approval: auto
     lifecycle: ready
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/
     touches_api: true
     requires:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   n8n.workflows.get:
     description: "Get a single n8n workflow by ID (read-only)."
     tags: [n8n]
@@ -392,7 +372,10 @@ capabilities:
       - name: workflow_id
         required: true
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/tools/src/
   n8n.workflows.export:
     description: "Export a single n8n workflow to JSON (mutating: writes file)."
     tags: [n8n]
@@ -412,7 +395,10 @@ capabilities:
         required: false
         default: ""
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/tools/src/
   n8n.workflows.import:
     description: "Import a workflow JSON file (mutating)."
     tags: [n8n]
@@ -429,7 +415,10 @@ capabilities:
       - name: input_file
         required: true
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/tools/src/
   n8n.workflows.activate:
     description: "Activate a workflow (mutating)."
     tags: [n8n]
@@ -446,7 +435,10 @@ capabilities:
       - name: workflow_id
         required: true
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/tools/src/
   n8n.workflows.deactivate:
     description: "Deactivate a workflow (mutating)."
     tags: [n8n]
@@ -463,7 +455,10 @@ capabilities:
       - name: workflow_id
         required: true
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/tools/src/
   n8n.workflows.update:
     description: "Update a workflow from JSON file (mutating)."
     tags: [n8n]
@@ -482,7 +477,10 @@ capabilities:
       - name: input_file
         required: true
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/tools/src/
   n8n.workflows.delete:
     description: "Delete a workflow (destructive)."
     tags: [n8n]
@@ -499,7 +497,10 @@ capabilities:
       - name: workflow_id
         required: true
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/tools/src/
   n8n.workflows.snapshot:
     description: "Export all n8n workflows to a timestamped snapshot directory via API."
     tags: [n8n, backup]
@@ -517,7 +518,10 @@ capabilities:
         required: false
         default: ""
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/tools/src/
   n8n.workflows.snapshot.status:
     description: "Check n8n workflow snapshot artifacts on automation-stack (SSH)."
     tags: [n8n, backup]
@@ -528,11 +532,30 @@ capabilities:
     lifecycle: ready
     touches_api: false
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/tools/src/
+  n8n.infra.health:
+    description: "n8n infra reliability lane check: uptime + API auth + snapshot freshness + backup coverage."
+    tags: [n8n, infra, health, backup]
+    command: "./ops/plugins/secrets/bin/secrets-exec -- ./ops/plugins/n8n/bin/n8n-infra-health"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    plane: domain_external
+    domain: n8n
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/n8n/
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
   # ─────────────────────────────────────────────────────────────────────────
   # INFRASTRUCTURE (read-only checks)
   # ─────────────────────────────────────────────────────────────────────────
-
   infra.docker_ps:
     description: "List running Docker containers"
     tags: [infra]
@@ -541,7 +564,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   spine.ripple.check:
     description: "List all binding/SSOT files referencing a given host (mutation impact check)"
     tags: [infra, spine]
@@ -551,7 +573,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   vm.governance.audit:
     description: "Read-only VM lifecycle governance coverage report (cross-file parity check)"
     tags: [infra, vm, governance]
@@ -561,7 +582,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   vm.profile.audit:
     description: "Read-only VM operating profile parity check (every active VM has valid profile)"
     tags: [infra, vm, governance]
@@ -571,7 +591,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   authority.project.status:
     description: "Read-only check: verify a product repo follows spine project-governance baseline."
     tags: [authority, governance, repos]
@@ -581,7 +600,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   authority.project.bootstrap:
     description: "Bootstrap/align a product repo to spine governance baseline (dry-run by default, --execute to mutate)."
     tags: [authority, governance, repos]
@@ -591,7 +609,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   verify.drift_gates.certify:
     description: "Fast drift gate inventory/certification report (supports --profile, --list-domains, --domain <name>, --brief)"
     tags: [verify]
@@ -601,7 +618,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   verify.drift_gates.failure_stats:
     description: "Analyze historical spine.verify receipts: per-gate fail counts and co-failure pairs"
     tags: [verify]
@@ -611,12 +627,55 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+  verify.pack.list:
+    description: "List available verify packs (agent-scoped + domain packs) and default pack."
+    tags: [verify]
+    command: "./ops/plugins/verify/bin/verify-pack list"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+  verify.pack.run:
+    description: "Run scoped verify pack by agent_id or domain (pack-first day-to-day verify)."
+    tags: [verify]
+    command: "./ops/plugins/verify/bin/verify-pack run"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+  verify.pack.explain:
+    description: "Explain which gates a verify pack executes and how they map to scripts."
+    tags: [verify]
+    command: "./ops/plugins/verify/bin/verify-pack explain"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+  stability.control.snapshot:
+    description: "Runtime reliability + predictive snapshot for critical domains (automation, finance, Z2M) with VM headroom/latency scoring."
+    tags: [stability, observability, runtime]
+    command: "./ops/plugins/observability/bin/stability-control-snapshot"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+  stability.control.reconcile:
+    description: "Guided-only reconcile planner that prints exact manual recovery commands for degraded critical domains."
+    tags: [stability, observability, runtime]
+    command: "./ops/plugins/observability/bin/stability-control-reconcile"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
   # ─────────────────────────────────────────────────────────────────────────
   # RAG (AnythingLLM + Qdrant on ai-consolidation VM 207)
   # NOTE: This does NOT change watcher RAG-lite behavior; it's an operator surface.
   # ─────────────────────────────────────────────────────────────────────────
-
   rag.health:
     description: "RAG health probe (AnythingLLM ping + Qdrant healthz)"
     tags: [rag]
@@ -626,7 +685,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   rag.anythingllm.status:
     description: "Show AnythingLLM workspace document count (requires AnythingLLM API key)"
     tags: [rag]
@@ -640,7 +698,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   rag.anythingllm.ask:
     description: "Query AnythingLLM workspace (vector RAG); prints answer + sources if available"
     tags: [rag]
@@ -654,7 +711,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   rag.anythingllm.sync:
     description: "Index governed spine docs into AnythingLLM workspace (bulk upload + embed)"
     tags: [rag]
@@ -668,7 +724,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   rag.anythingllm.tune:
     description: "Tune AnythingLLM on ai-consolidation (set Ollama chat model; recreate container)"
     tags: [rag]
@@ -678,7 +733,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   rag.mcp.server:
     description: "MCP stdio server adapter wrapping RAG query/retrieve/health for Claude Code tool calls"
     tags: [rag, mcp]
@@ -689,7 +743,6 @@ capabilities:
     lifecycle: ready
     notes: "Not invoked via ops cap run. Started by Claude Code via .mcp.json. Registered here for discoverability and D67 parity."
     outputs: ["stdout"]
-
   rag.reindex.remote.start:
     description: "Start detached/server-side RAG reindex on VM 207 (dry-run by default)"
     tags: [rag, remote, reindex]
@@ -699,7 +752,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   rag.reindex.remote.status:
     description: "Read detached/server-side RAG reindex progress/session/log status"
     tags: [rag, remote, reindex]
@@ -709,7 +761,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   rag.reindex.remote.stop:
     description: "Stop detached/server-side RAG reindex session (dry-run by default)"
     tags: [rag, remote, reindex]
@@ -719,7 +770,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   rag.reindex.remote.verify:
     description: "Verify RAG reindex completion quality against rag.reindex.quality.yaml contract"
     tags: [rag, remote, reindex, verify]
@@ -733,7 +783,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   rag.remote.dependency.probe:
     description: "Probe RAG dependencies (AnythingLLM/Qdrant/Ollama) from VM207 perspective with timing SLOs"
     tags: [rag, remote, health]
@@ -743,7 +792,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   rag.embedding.probe:
     description: "Probe embedding backend health — repeated embedding requests with dimension/latency/HTTP checks"
     tags: [rag, embedding, health]
@@ -753,7 +801,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   rag.reindex.smoke:
     description: "Short-batch smoke test — upload N docs to validate embedding pipeline before full reindex"
     tags: [rag, reindex, smoke]
@@ -767,8 +814,6 @@ capabilities:
     requires:
       - secrets.binding
       - secrets.auth.status
-
-
   secrets.status:
     description: "Check secrets configuration presence (no values, no network). Fails if not configured."
     tags: [secrets]
@@ -785,14 +830,12 @@ capabilities:
     safety: read-only
     approval: auto
     lifecycle: ready
-    auth_model: gh-cli  # Uses gh CLI auth (gh auth login), not Infisical secrets
+    auth_model: gh-cli # Uses gh CLI auth (gh auth login), not Infisical secrets
     args:
       - name: issue_number
         required: true
         validate: "^[0-9]+$"
     outputs: ["stdout"]
-
-
   secrets.binding:
     description: "Print non-secret secrets provider binding (SSOT). STOP if incomplete."
     tags: [secrets]
@@ -802,7 +845,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   secrets.auth.status:
     description: "Check secrets auth presence for Infisical (NO values). STOP if missing."
     tags: [secrets]
@@ -812,7 +854,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   secrets.auth.load:
     description: "Validate Infisical Universal Auth creds file exists + perms; print one-liner to source it. Does NOT store secrets."
     tags: [secrets]
@@ -822,7 +863,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   secrets.credentials.parity:
     description: "Audit Infisical credentials file parity across declared nodes (non-secret output only)."
     tags: [secrets]
@@ -832,7 +872,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   secrets.projects.status:
     description: "Compare SSOT inventory vs live Infisical projects. Reports parity deltas (names only, no secrets)."
     tags: [secrets]
@@ -845,7 +884,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.inventory.status:
     description: "Read-only SSOT inventory (project names + counts). No network, no secrets values."
     tags: [secrets]
@@ -855,7 +893,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   secrets.namespace.status:
     description: "Read-only namespace hygiene for bound Infisical project (required key paths + root-path freeze regression check)."
     tags: [secrets]
@@ -868,7 +905,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p1.root_cleanup.status:
     description: "Dry-run guarded check for P1 root-path cleanup eligibility (no deletes)."
     tags: [migration, secrets]
@@ -881,7 +917,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p1.root_cleanup.execute:
     description: "Execute guarded P1 root-path cleanup (delete only root copies after parity checks)."
     tags: [migration, secrets]
@@ -894,7 +929,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p2.copy_first.status:
     description: "Dry-run copy-first guard for P2 edge/network keys from root to /spine/network/edge."
     tags: [migration, secrets]
@@ -907,7 +941,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p2.copy_first.execute:
     description: "Execute copy-first for P2 edge/network keys from root to /spine/network/edge."
     tags: [migration, secrets]
@@ -920,7 +953,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p2.root_cleanup.status:
     description: "Dry-run guarded check for P2 root-path cleanup eligibility (no deletes)."
     tags: [migration, secrets]
@@ -933,7 +965,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p2.root_cleanup.execute:
     description: "Execute guarded P2 root-path cleanup (delete only root copies after parity checks)."
     tags: [migration, secrets]
@@ -946,7 +977,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p3.copy_first.status:
     description: "Dry-run copy-first guard for P3 storage/NAS keys from root to /spine/storage/nas."
     tags: [migration, secrets]
@@ -959,7 +989,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p3.copy_first.execute:
     description: "Execute copy-first for P3 storage/NAS keys from root to /spine/storage/nas."
     tags: [migration, secrets]
@@ -972,7 +1001,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p3.root_cleanup.status:
     description: "Dry-run guarded check for P3 root-path cleanup eligibility (no deletes)."
     tags: [migration, secrets]
@@ -985,7 +1013,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p3.root_cleanup.execute:
     description: "Execute guarded P3 root-path cleanup (delete only root copies after parity checks)."
     tags: [migration, secrets]
@@ -998,7 +1025,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p4.copy_first.status:
     description: "Dry-run copy-first guard for P4 commerce/mail keys from root to /spine/integrations/commerce-mail."
     tags: [migration, secrets]
@@ -1011,7 +1037,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p4.copy_first.execute:
     description: "Execute copy-first for P4 commerce/mail keys from root to /spine/integrations/commerce-mail."
     tags: [migration, secrets]
@@ -1024,7 +1049,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p4.root_cleanup.status:
     description: "Dry-run guarded check for P4 root-path cleanup eligibility (no deletes)."
     tags: [migration, secrets]
@@ -1037,7 +1061,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p4.root_cleanup.execute:
     description: "Execute guarded P4 root-path cleanup (delete only root copies after parity checks)."
     tags: [migration, secrets]
@@ -1050,7 +1073,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.immich.copy_first.status:
     description: "Dry-run copy-first guard for P5 Immich keys from root to /spine/services/immich."
     tags: [migration, secrets]
@@ -1063,7 +1085,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.immich.copy_first.execute:
     description: "Execute copy-first for P5 Immich keys from root to /spine/services/immich."
     tags: [migration, secrets]
@@ -1076,7 +1097,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.immich.root_cleanup.status:
     description: "Dry-run guarded check for P5 Immich root-path cleanup eligibility (no deletes)."
     tags: [migration, secrets]
@@ -1089,7 +1109,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.immich.root_cleanup.execute:
     description: "Execute guarded P5 Immich root-path cleanup (delete only root copies after parity checks)."
     tags: [migration, secrets]
@@ -1102,7 +1121,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.mail_archiver.copy_first.status:
     description: "Dry-run copy-first guard for P5 mail-archiver keys from root to /spine/services/mail-archiver."
     tags: [migration, secrets]
@@ -1115,7 +1133,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.mail_archiver.copy_first.execute:
     description: "Execute copy-first for P5 mail-archiver keys from root to /spine/services/mail-archiver."
     tags: [migration, secrets]
@@ -1128,7 +1145,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.mail_archiver.root_cleanup.status:
     description: "Dry-run guarded check for P5 mail-archiver root-path cleanup eligibility (no deletes)."
     tags: [migration, secrets]
@@ -1141,7 +1157,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.mail_archiver.root_cleanup.execute:
     description: "Execute guarded P5 mail-archiver root-path cleanup (delete only root copies after parity checks)."
     tags: [migration, secrets]
@@ -1154,7 +1169,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.finance.copy_first.status:
     description: "Dry-run copy-first guard for P5 finance keys from root to /spine/services/finance."
     tags: [migration, secrets]
@@ -1167,7 +1181,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.finance.copy_first.execute:
     description: "Execute copy-first for P5 finance keys from root to /spine/services/finance."
     tags: [migration, secrets]
@@ -1180,7 +1193,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.finance.root_cleanup.status:
     description: "Dry-run guarded check for P5 finance root-path cleanup eligibility (no deletes)."
     tags: [migration, secrets]
@@ -1193,7 +1205,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.finance.root_cleanup.execute:
     description: "Execute guarded P5 finance root-path cleanup (delete only root copies after parity checks)."
     tags: [migration, secrets]
@@ -1206,7 +1217,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.paperless.copy_first.status:
     description: "Dry-run copy-first guard for P5 paperless keys from root to /spine/services/paperless."
     tags: [migration, secrets]
@@ -1219,7 +1229,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.paperless.copy_first.execute:
     description: "Execute copy-first for P5 paperless keys from root to /spine/services/paperless."
     tags: [migration, secrets]
@@ -1232,7 +1241,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.paperless.root_cleanup.status:
     description: "Dry-run guarded check for P5 paperless root-path cleanup eligibility (no deletes)."
     tags: [migration, secrets]
@@ -1245,7 +1253,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.paperless.root_cleanup.execute:
     description: "Execute guarded P5 paperless root-path cleanup (delete only root copies after parity checks)."
     tags: [migration, secrets]
@@ -1258,7 +1265,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.mcpjungle.copy_first.status:
     description: "Dry-run copy-first guard for P5 mcpjungle keys from root to /spine/services/mcpjungle."
     tags: [migration, secrets]
@@ -1271,7 +1277,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.mcpjungle.copy_first.execute:
     description: "Execute copy-first for P5 mcpjungle keys from root to /spine/services/mcpjungle."
     tags: [migration, secrets]
@@ -1284,7 +1289,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.mcpjungle.root_cleanup.status:
     description: "Dry-run guarded check for P5 mcpjungle root-path cleanup eligibility (no deletes)."
     tags: [migration, secrets]
@@ -1297,7 +1301,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p5.mcpjungle.root_cleanup.execute:
     description: "Execute guarded P5 mcpjungle root-path cleanup (delete only root copies after parity checks)."
     tags: [migration, secrets]
@@ -1310,7 +1313,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p6.ai.copy_first.status:
     description: "Dry-run copy-first guard for P6 AI keys from root to /spine/ai/providers."
     tags: [migration, secrets]
@@ -1323,7 +1325,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p6.ai.copy_first.execute:
     description: "Execute copy-first for P6 AI keys from root to /spine/ai/providers."
     tags: [migration, secrets]
@@ -1336,7 +1337,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p6.ai.root_cleanup.status:
     description: "Dry-run guarded check for P6 AI key root-path cleanup eligibility (no deletes)."
     tags: [migration, secrets]
@@ -1349,7 +1349,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.p6.ai.root_cleanup.execute:
     description: "Execute guarded P6 AI key root-path cleanup (delete only root copies after parity checks)."
     tags: [migration, secrets]
@@ -1362,7 +1361,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.cli.status:
     description: "Hash parity check: canonical (spine) vs vendored (workbench) infisical-agent.sh."
     tags: [secrets]
@@ -1372,7 +1370,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   secrets.identity.rbac.status:
     description: "Probe identity project memberships and roles (no secret values). Reports deprecated_writable count."
     tags: [secrets, rbac]
@@ -1386,7 +1383,6 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   secrets.identity.rbac.lock:
     description: "Downgrade identity roles on deprecated projects to viewer (dry-run by default, --execute to mutate)."
     tags: [secrets, rbac]
@@ -1400,11 +1396,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # HOME ASSISTANT (SSOT governance)
+  # default classification: plane=domain_external, domain=home-assistant
   # ─────────────────────────────────────────────────────────────────────────
-
   ha.refresh:
     description: "Run all HA snapshot capabilities in sequence to refresh all bindings"
     tags: [ha, refresh, unified]
@@ -1418,7 +1413,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.status:
     description: "Unified HA status dashboard — API health, counts, add-ons, device map, binding freshness, gaps"
     tags: [ha, status, unified]
@@ -1427,10 +1425,13 @@ capabilities:
     safety: read-only
     approval: auto
     lifecycle: ready
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
   ha.ssot.propose:
     description: "Fetch HA live facts and diff against HASS_OPERATIONAL_RUNBOOK.md sections 2-4"
     tags: [ha, ssot, governance]
@@ -1444,7 +1445,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.ssot.apply:
     description: "Apply ha.ssot.propose diff to HASS_OPERATIONAL_RUNBOOK.md sections 2-4"
     tags: [ha, ssot, governance]
@@ -1458,7 +1462,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.config.extract:
     description: "Extract HA config files (configuration.yaml, automations.yaml, etc.) to workbench for version control"
     tags: [ha, config, extraction]
@@ -1469,7 +1476,10 @@ capabilities:
     lifecycle: ready
     touches_api: false
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.z2m.health:
     description: "Read-only: Z2M device health report — battery, staleness, bridge status for all Zigbee devices."
     tags: [ha, zigbee, z2m, health]
@@ -1481,7 +1491,10 @@ capabilities:
     touches_api: true
     requires: ["secrets.binding", "secrets.auth.status"]
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.z2m.devices.snapshot:
     description: "Read-only: extract Zigbee2MQTT device registry from HA to ops/bindings/z2m.devices.yaml."
     tags: [ha, zigbee, z2m]
@@ -1493,7 +1506,10 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.zwave.devices.snapshot:
     description: "Read-only: extract Z-Wave device list from HA API to ops/bindings/zwave.devices.yaml."
     tags: [ha, zwave, z-wave]
@@ -1507,7 +1523,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.addon.restart:
     description: "Mutating: restart an HA Supervisor add-on by slug via SSH + Supervisor API."
     tags: [ha, supervisor, addons]
@@ -1519,7 +1538,10 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.addons.snapshot:
     description: "Read-only: extract HA Supervisor add-on inventory to ops/bindings/ha.addons.yaml."
     tags: [ha, supervisor, addons]
@@ -1531,7 +1553,10 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.device.map.build:
     description: "Read-only: cross-reference HA entities with home device registry and Z2M devices to ops/bindings/ha.device.map.yaml."
     tags: [ha, devices, cross-reference]
@@ -1545,7 +1570,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.dashboard.snapshot:
     description: "Read-only: snapshot HA Lovelace dashboards to ops/bindings/ha.dashboards.yaml (SSH .storage method)"
     tags: [ha, dashboards, lovelace, snapshot]
@@ -1557,7 +1585,10 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.dashboard.backup:
     description: "Backup HA YAML dashboard files to spine infra/ha-dashboards/ for version control"
     tags: [ha, dashboards, backup]
@@ -1569,7 +1600,10 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.integrations.snapshot:
     description: "Read-only: snapshot HA config entries (integrations) to ops/bindings/ha.integrations.yaml"
     tags: [ha, integrations, snapshot]
@@ -1583,7 +1617,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.automations.snapshot:
     description: "Read-only: snapshot HA automation states to ops/bindings/ha.automations.yaml"
     tags: [ha, automations, snapshot]
@@ -1597,7 +1634,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.helpers.snapshot:
     description: "Read-only: snapshot HA helper entities (input_*, counter, timer) to ops/bindings/ha.helpers.yaml"
     tags: [ha, helpers, snapshot]
@@ -1611,7 +1651,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.scenes.snapshot:
     description: "Read-only: snapshot HA scene entities to ops/bindings/ha.scenes.yaml"
     tags: [ha, scenes, snapshot]
@@ -1625,7 +1668,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.scripts.snapshot:
     description: "Read-only: snapshot HA script entities to ops/bindings/ha.scripts.yaml"
     tags: [ha, scripts, snapshot]
@@ -1639,7 +1685,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.hacs.snapshot:
     description: "Read-only: snapshot HACS repository inventory to ops/bindings/ha.hacs.yaml"
     tags: [ha, hacs, snapshot]
@@ -1651,7 +1700,10 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.hacs.updates.check:
     description: "Read-only: check HACS repositories for pending updates from ha.hacs.yaml binding"
     tags: [ha, hacs, updates, monitoring]
@@ -1663,7 +1715,10 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.entity.state.baseline:
     description: "Read-only: snapshot all HA entity states as regression-proof baseline to ops/bindings/ha.entity.state.baseline.yaml"
     tags: [ha, entities, baseline, snapshot]
@@ -1677,7 +1732,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.ssot.baseline.build:
     description: "Read-only: build unified HA SSOT baseline from all sub-bindings to ops/bindings/ha.ssot.baseline.yaml"
     tags: [ha, ssot, baseline, unified]
@@ -1691,11 +1749,13 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   # ─────────────────────────────────────────────────────────────────────────
   # HOME ASSISTANT (scoped service calls)
   # ─────────────────────────────────────────────────────────────────────────
-
   ha.service.call:
     description: "Scoped HA service call via REST API — base for domain-specific wrappers"
     tags: [ha, service-calls, api]
@@ -1709,7 +1769,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.scene.activate:
     description: "Activate a Home Assistant scene (idempotent preset)"
     tags: [ha, service-calls, scene]
@@ -1723,7 +1786,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.light.toggle:
     description: "Toggle a Home Assistant light entity on/off"
     tags: [ha, service-calls, light]
@@ -1737,7 +1803,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.lock.control:
     description: "Lock or unlock a Home Assistant lock entity (physical security — manual approval)"
     tags: [ha, service-calls, lock, security]
@@ -1751,7 +1820,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.device.rename:
     description: "Rename an HA device via WebSocket API (sets name_by_user)"
     tags: [ha, device-registry, websocket]
@@ -1766,7 +1838,10 @@ capabilities:
       - secrets.auth.status
     post_action: ha.device.map.build
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.automation.create:
     description: "Create or update an HA automation via REST API config endpoint"
     tags: [ha, service-calls, automation]
@@ -1781,7 +1856,10 @@ capabilities:
       - secrets.auth.status
     post_action: ha.automations.snapshot
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.automation.trigger:
     description: "Trigger a Home Assistant automation"
     tags: [ha, service-calls, automation]
@@ -1795,7 +1873,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.script.run:
     description: "Run a Home Assistant script"
     tags: [ha, service-calls, script]
@@ -1809,7 +1890,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.backup.create:
     description: "Create a Home Assistant backup via SSH + ha CLI (physical backup — manual approval)"
     tags: [ha, backup, ssh]
@@ -1821,7 +1905,10 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.health.status:
     description: "HA API health probe — confirms API running, reports version, location, component count"
     tags: [ha, health, api]
@@ -1835,7 +1922,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.entity.status:
     description: "Single HA entity state lookup — returns state, friendly_name, last_changed, attributes"
     tags: [ha, entity, api]
@@ -1849,7 +1939,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.mcp.status:
     description: "MCP server file validation — checks source exists, GOVERNED_TOOLS block, ha_call_service blocked, policy doc"
     tags: [ha, mcp, validation]
@@ -1861,7 +1954,10 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.sync.start:
     description: "Start the HA sync agent daemon (event-driven binding refresh)"
     tags: [ha, sync, daemon]
@@ -1875,7 +1971,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.sync.stop:
     description: "Stop the HA sync agent daemon"
     tags: [ha, sync, daemon]
@@ -1887,7 +1986,10 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   ha.sync.status:
     description: "Check HA sync agent daemon status"
     tags: [ha, sync, daemon]
@@ -1899,24 +2001,29 @@ capabilities:
     touches_api: false
     requires: []
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home-assistant
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/home-assistant/docs/
   # ─────────────────────────────────────────────────────────────────────────
   # MEDIA (media stack governance)
+  # default classification: plane=domain_external, domain=media
   # ─────────────────────────────────────────────────────────────────────────
-
   recyclarr.sync:
     description: "Run Recyclarr sync on VM 209 to apply quality profile governance"
     command: "ssh ubuntu@100.107.36.76 'sudo docker exec recyclarr recyclarr sync'"
     safety: mutating
     approval: manual
     lifecycle: ready
+    plane: domain_external
+    domain: media
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/media/
     tags: [media, governance]
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # MINT MODULES (product operator tooling)
   # ─────────────────────────────────────────────────────────────────────────
-
   mint.modules.health:
     description: "Health probe for all mint module endpoints (fresh-slate VMs 212+213)"
     tags: [mint, health]
@@ -1926,7 +2033,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   mint.seeds.query:
     description: "Query artwork_seeds on mint-data via SSH + psql (read-only)"
     tags: [mint, seeds, query]
@@ -1936,7 +2042,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   mint.intake.validate:
     description: "Validate JSON payload against order-intake contract endpoint"
     tags: [mint, intake, validation]
@@ -1946,7 +2051,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   mint.deploy.status:
     description: "Docker container status for mint fresh-slate VMs (apps + data)"
     tags: [mint, deploy, docker]
@@ -1956,7 +2060,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   mint.migrate.dryrun:
     description: "Check pending database migrations on mint-data (read-only)"
     tags: [mint, migrations, database]
@@ -1966,7 +2069,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # MCP DOMAIN DENY POLICY (GAP-OP-095 P5)
   # ─────────────────────────────────────────────────────────────────────────
@@ -1990,12 +2092,183 @@ capabilities:
   # firefly: config-only MCP (read-only). No mutating tools to govern.
   # paperless: config-only MCP (read-only). No mutating tools to govern.
   # immich: config-only MCP (read-only). No mutating tools to govern.
-  # ms-graph: config-only MCP (read-only). No mutating tools to govern.
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # MICROSOFT GRAPH (custom non-delete mutation suite)
+  # ─────────────────────────────────────────────────────────────────────────
+  graph.mail.search:
+    description: "Search mailbox messages via Microsoft Graph (/me/messages)."
+    tags: [graph, mail]
+    command: "python3 /Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py mail_search"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    plane: domain_external
+    domain: ms-graph
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/ms-graph/tools/ms_graph_tools.py
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+  graph.mail.get:
+    description: "Get a mailbox message by id via Microsoft Graph."
+    tags: [graph, mail]
+    command: "python3 /Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py mail_get"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    plane: domain_external
+    domain: ms-graph
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/ms-graph/tools/ms_graph_tools.py
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+  graph.mail.send:
+    description: "Send an email through Microsoft Graph sendMail endpoint."
+    tags: [graph, mail]
+    command: "python3 /Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py mail_send"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    plane: domain_external
+    domain: ms-graph
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/ms-graph/tools/ms_graph_tools.py
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+  graph.mail.draft.create:
+    description: "Create an email draft via Microsoft Graph."
+    tags: [graph, mail]
+    command: "python3 /Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py draft_create"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    plane: domain_external
+    domain: ms-graph
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/ms-graph/tools/ms_graph_tools.py
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+  graph.mail.draft.update:
+    description: "Update an existing email draft via Microsoft Graph."
+    tags: [graph, mail]
+    command: "python3 /Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py draft_update"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    plane: domain_external
+    domain: ms-graph
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/ms-graph/tools/ms_graph_tools.py
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+  graph.calendar.list:
+    description: "List calendar events via Microsoft Graph."
+    tags: [graph, calendar]
+    command: "python3 /Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py calendar_list"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    plane: domain_external
+    domain: ms-graph
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/ms-graph/tools/ms_graph_tools.py
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+  graph.calendar.get:
+    description: "Get a calendar event by id via Microsoft Graph."
+    tags: [graph, calendar]
+    command: "python3 /Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py calendar_get"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    plane: domain_external
+    domain: ms-graph
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/ms-graph/tools/ms_graph_tools.py
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+  graph.calendar.create:
+    description: "Create a calendar event via Microsoft Graph."
+    tags: [graph, calendar]
+    command: "python3 /Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py calendar_create"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    plane: domain_external
+    domain: ms-graph
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/ms-graph/tools/ms_graph_tools.py
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+  graph.calendar.update:
+    description: "Update a calendar event via Microsoft Graph."
+    tags: [graph, calendar]
+    command: "python3 /Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py calendar_update"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    plane: domain_external
+    domain: ms-graph
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/ms-graph/tools/ms_graph_tools.py
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
+  graph.calendar.rsvp:
+    description: "Respond to a calendar event invite via Microsoft Graph (accept/tentative/decline)."
+    tags: [graph, calendar]
+    command: "python3 /Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py calendar_rsvp"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    plane: domain_external
+    domain: ms-graph
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/ms-graph/tools/ms_graph_tools.py
+    touches_api: true
+    requires:
+      - secrets.binding
+      - secrets.auth.status
+    outputs: ["stdout"]
   # ─────────────────────────────────────────────────────────────────────────
   # SHARE PUBLISH (curated one-way share channel)
   # ─────────────────────────────────────────────────────────────────────────
-
   share.publish.preflight:
     description: "Read-only pre-flight checks for share publish (clean tree, bindings, remote)"
     tags: [share, governance]
@@ -2005,7 +2278,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   share.publish.preview:
     description: "Read-only preview of publishable files (allowlist scan + denylist content check)"
     tags: [share, governance]
@@ -2015,7 +2287,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   share.publish.apply:
     description: "Push curated content to share channel (dry-run by default; use --execute to push)"
     tags: [share, governance]
@@ -2028,7 +2299,6 @@ capabilities:
       - share.publish.preflight
       - share.publish.preview
     outputs: ["stdout"]
-
   share.publish.status:
     description: "Single-command readiness report for share publish (aggregates preflight + preview)"
     tags: [share, governance]
@@ -2037,12 +2307,9 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # FUTURE: MUTATING (require manual approval)
   # ─────────────────────────────────────────────────────────────────────────
-
-
   secrets.exec:
     description: "Run a command with secrets injected (Infisical). Requires secrets.binding + secrets.auth.status OK."
     tags: [secrets]
@@ -2052,7 +2319,6 @@ capabilities:
     approval: operator
     lifecycle: ready
     outputs: ["stdout", "stderr"]
-
   secrets.set.interactive:
     description: "Interactive secret setter (read -s, no values printed). Uses infisical-agent.sh."
     tags: [secrets]
@@ -2075,7 +2341,6 @@ capabilities:
   # ─────────────────────────────────────────────────────────────────────────
   # CLOUDFLARE (read-only status checks)
   # ─────────────────────────────────────────────────────────────────────────
-
   cloudflare.status:
     description: "Read-only Cloudflare status (zones + DNS record counts; no values)."
     tags: [cloudflare]
@@ -2089,7 +2354,6 @@ capabilities:
       - secrets.auth.status
       - secrets.projects.status
     outputs: ["stdout"]
-
   cloudflare.dns.status:
     description: "DNS record counts per bound zone (read-only)."
     tags: [cloudflare]
@@ -2103,7 +2367,6 @@ capabilities:
       - secrets.auth.status
       - secrets.projects.status
     outputs: ["stdout"]
-
   cloudflare.tunnel.status:
     description: "Tunnel inventory + creation timestamps for bound tunnels."
     tags: [cloudflare]
@@ -2117,7 +2380,6 @@ capabilities:
       - secrets.auth.status
       - secrets.projects.status
     outputs: ["stdout"]
-
   cloudflare.inventory.sync:
     description: "Verify cloudflare.inventory metadata matches live zones/tunnels."
     tags: [cloudflare]
@@ -2131,7 +2393,6 @@ capabilities:
       - secrets.auth.status
       - secrets.projects.status
     outputs: ["stdout"]
-
   cloudflare.tunnel.ingress.status:
     description: "Export Cloudflare tunnel ingress rules (hostname -> service)."
     tags: [cloudflare]
@@ -2145,7 +2406,6 @@ capabilities:
       - secrets.auth.status
       - secrets.projects.status
     outputs: ["stdout"]
-
   cloudflare.domain_routing.diff:
     description: "Diff Cloudflare tunnel ingress hostnames vs DOMAIN_ROUTING_REGISTRY (routing_layer=cloudflare_tunnel)."
     tags: [cloudflare]
@@ -2159,11 +2419,9 @@ capabilities:
       - secrets.auth.status
       - secrets.projects.status
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # GITHUB (read-only repo health)
   # ─────────────────────────────────────────────────────────────────────────
-
   github.status:
     description: "Read-only GitHub repo health (branch, HEAD, clean, tags)."
     tags: [github]
@@ -2177,7 +2435,6 @@ capabilities:
       - secrets.auth.status
       - secrets.projects.status
     outputs: ["stdout"]
-
   github.queue.status:
     description: "GitHub queue counts (open PRs + open issues). Read-only, counts only."
     tags: [github]
@@ -2191,7 +2448,6 @@ capabilities:
       - secrets.auth.status
       - secrets.projects.status
     outputs: ["stdout"]
-
   github.actions.status:
     description: "GitHub Actions workflow run counts + latest conclusion. Read-only, no names/URLs."
     tags: [github]
@@ -2205,7 +2461,6 @@ capabilities:
       - secrets.auth.status
       - secrets.projects.status
     outputs: ["stdout"]
-
   github.labels.status:
     description: "GitHub label parity (declared vs live). Read-only, counts + delta."
     tags: [github]
@@ -2215,11 +2470,9 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # SSH (read-only connectivity checks)
   # ─────────────────────────────────────────────────────────────────────────
-
   ssh.target.status:
     description: "Connectivity status for declared SSH targets (read-only, no prompts, no known_hosts writes)."
     tags: [ssh]
@@ -2229,7 +2482,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   nodes.status:
     description: "Node/VM reachability across Tier 1-3 estate (alias for ssh.target.status)."
     tags: [host, ssh]
@@ -2239,11 +2491,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # NETWORK (LAN-only device status, cutover preflight)
+  # default classification: plane=domain_external, domain=network
   # ─────────────────────────────────────────────────────────────────────────
-
   network.lan.device.status:
     description: "Ping check for LAN-only devices via probe_via host (no credentials, read-only)."
     tags: [network]
@@ -2253,7 +2504,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.lan.host.identify:
     description: "Read-only: identify LAN host(s) via probe_via (ping + neigh + best-effort TCP/HTTP banner)."
     tags: [network]
@@ -2263,7 +2517,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.shop.audit.status:
     description: "Composite audit: shop network SSOT parity, duplicate IPs, and binding coverage (local files only)."
     tags: [network]
@@ -2272,8 +2529,11 @@ capabilities:
     safety: read-only
     approval: auto
     lifecycle: ready
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
     outputs: ["stdout"]
-
   network.ap.facts.capture:
     description: "Read-only: capture WiFi AP facts via SSH (TP-Link EAP225 via pve jump host). Creds from env or Infisical."
     command: "./ops/plugins/network/bin/network-ap-facts-capture"
@@ -2283,7 +2543,10 @@ capabilities:
     lifecycle: ready
     tags: ["wifi", "network", "shop", "lan-only"]
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.oob.guard.status:
     description: "Read-only guard: verify shop LAN (iDRAC/switch/NVR) is reachable without relying on pve (subnet router safety gate)."
     tags: [network]
@@ -2293,7 +2556,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.shop.audit.canonical:
     description: "Canonical shop audit: SSOT parity + live truth (pve) + doc IP trace. Requires pve SSH."
     tags: [network]
@@ -2303,7 +2569,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.unifi.clients.snapshot:
     description: "Read-only: snapshot UniFi client list (MAC/IP/name) via UDR6 API through pve."
     tags: [network]
@@ -2313,7 +2582,10 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.home.unifi.clients.snapshot:
     description: "Read-only: snapshot home UniFi client list (MAC/IP/name) via UDR7 API through proxmox-home."
     tags: [network, home]
@@ -2323,7 +2595,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.home.dhcp.audit:
     description: "Read-only: audit home UniFi DHCP reservations against ops/bindings/home.device.registry.yaml."
     tags: [network, home, audit]
@@ -2333,7 +2608,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.home.wifi.create:
     description: "Mutating: create a new WLAN on home UDR7 via UniFi API through proxmox-home."
     tags: [network, home]
@@ -2347,7 +2625,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.home.dhcp.reservation.create:
     description: "Mutating: create a DHCP reservation on home UDR7 via UniFi API through proxmox-home."
     tags: [network, home]
@@ -2361,7 +2642,10 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.nvr.reip.canonical:
     description: "Mutating: re-IP Hikvision NVR to canonical .216 via ISAPI (digest auth through pve)."
     tags: [network]
@@ -2371,7 +2655,10 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.cutover.preflight:
     description: "Composite pre-cutover verification (template, sequencing, companion changepack checks)."
     tags: [network]
@@ -2386,7 +2673,10 @@ capabilities:
       - network.shop.audit.status
       - network.shop.audit.canonical
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.pve.post_cutover.harden:
     description: "Mutating: post-cutover hardening on pve (tailscale accept-routes off, DNS upstream fix, prune stale NFS exports)."
     tags: [network]
@@ -2398,7 +2688,10 @@ capabilities:
     requires:
       - ssh.target.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.md1400.pm8072.stage:
     description: "Mutating: stage persistent pm80xx binding for PM8072 (MD1400 path) on pve (fixes incorrect options pm80xx new_id=...)."
     tags: [network]
@@ -2410,7 +2703,10 @@ capabilities:
     requires:
       - ssh.target.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   network.md1400.bind_test:
     description: "Mutating: hot-bind PM8072 via sysfs new_id on pve with before/after evidence capture (lspci/dmesg/lsblk)."
     tags: [network]
@@ -2422,11 +2718,13 @@ capabilities:
     requires:
       - ssh.target.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: network
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/network/
   # ─────────────────────────────────────────────────────────────────────────
   # PROXMOX MAINTENANCE (receipt-backed; guarded)
   # ─────────────────────────────────────────────────────────────────────────
-
   infra.proxmox.maintenance.precheck:
     description: "Read-only: capture guest state + MD1400/PM8072 evidence on a Proxmox host."
     tags: [infra]
@@ -2436,7 +2734,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.proxmox.maintenance.shutdown:
     description: "Mutating: guarded shutdown of all running guests on a Proxmox host (optional host poweroff)."
     tags: [infra]
@@ -2446,7 +2743,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.proxmox.maintenance.startup:
     description: "Mutating: start key guests on a Proxmox host, then print postcheck commands."
     tags: [infra]
@@ -2456,7 +2752,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.post_power.recovery.status:
     description: "Read-only: check all hosts/stacks and report what needs recovery after a power cycle."
     tags: [infra]
@@ -2466,7 +2761,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.post_power.recovery:
     description: "Mutating: orchestrated post-power-cycle recovery — brings all stacks up in dependency order and verifies health."
     tags: [infra]
@@ -2476,11 +2770,9 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # DOCKER (read-only compose status)
   # ─────────────────────────────────────────────────────────────────────────
-
   docker.compose.status:
     description: "Read-only docker compose status per stack (no restarts, no deploys)."
     tags: [docker]
@@ -2490,7 +2782,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   docker.compose.logs:
     description: "Read-only: docker compose logs for a declared stack (WARNING: may include secrets)."
     tags: [docker]
@@ -2500,7 +2791,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   docker.compose.up:
     description: "Mutating: docker compose up -d for a declared stack."
     tags: [docker]
@@ -2510,7 +2800,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   docker.compose.down:
     description: "Mutating: docker compose down for a declared stack."
     tags: [docker]
@@ -2520,7 +2809,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   docker.compose.pull:
     description: "Mutating: docker compose pull for a declared stack."
     tags: [docker]
@@ -2530,7 +2818,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # BACKUP (read-only inventory status)
   # ─────────────────────────────────────────────────────────────────────────
@@ -2538,7 +2825,6 @@ capabilities:
   # ─────────────────────────────────────────────────────────────────────────
   # SERVICES (read-only HTTP health probes)
   # ─────────────────────────────────────────────────────────────────────────
-
   services.health.status:
     description: "Read-only HTTP health probe for declared service endpoints (no auth, no verbose)."
     tags: [services]
@@ -2548,11 +2834,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # MEDIA (read-only metrics)
+  # default classification: plane=domain_external, domain=media
   # ─────────────────────────────────────────────────────────────────────────
-
   media.metrics.today:
     description: "Read-only: count imported movies today from Radarr history (bounded titles sample)."
     tags: [media]
@@ -2561,13 +2846,16 @@ capabilities:
     safety: read-only
     approval: auto
     lifecycle: ready
+    plane: domain_external
+    domain: media
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/media/
     touches_api: true
     requires:
       - secrets.binding
       - secrets.auth.status
       - secrets.projects.status
     outputs: ["stdout"]
-
   media.health.check:
     description: "Aggregate health check across media-stack VMs (209/210) — probes health endpoints for all active services."
     tags: [media, health]
@@ -2577,7 +2865,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: media
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/media/tools/src/
   media.stack.restart:
     description: "Restart docker compose stacks on media VMs (download-stack, streaming-stack). Dry-run by default."
     tags: [media, docker]
@@ -2587,7 +2878,10 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: media
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/media/tools/src/
   media.backup.create:
     description: "Create config volume snapshots for media services on both VMs. Retention: 7 days."
     tags: [media, backup]
@@ -2597,7 +2891,10 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: media
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/media/tools/src/
   media.service.status:
     description: "Get container status for media services — maps container names to service status from binding."
     tags: [media, docker, status]
@@ -2607,7 +2904,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: media
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/media/tools/src/
   media.nfs.verify:
     description: "Verify NFS mount health for media VMs — checks RW/RO modes and free space."
     tags: [media, nfs, storage]
@@ -2617,7 +2917,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: media
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/media/tools/src/
   media.status:
     description: "Unified media stack status dashboard — VM status, service counts, NFS health, storage."
     tags: [media, status, dashboard]
@@ -2627,7 +2930,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: media
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/media/tools/src/
   backup.status:
     description: "Read-only backup inventory status (file_glob only, freshness + reason codes)."
     tags: [backup]
@@ -2639,7 +2945,10 @@ capabilities:
     # NOTE: No requires - script handles SSH errors per-target with reason codes.
     # Run ssh.target.status separately if you need pre-flight SSH connectivity check.
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: backup
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/backup/
   backup.vzdump.status:
     description: "Read-only: show vzdump job config and latest vzdump artifacts on pve."
     tags: [backup]
@@ -2649,7 +2958,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: backup
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/backup/
   backup.vzdump.vmid.set:
     description: "Mutating: update vmid list for vzdump job in /etc/pve/jobs.cfg (dry-run by default)."
     tags: [backup]
@@ -2659,7 +2971,10 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: backup
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/backup/
   backup.vzdump.run:
     description: "Mutating: trigger vzdump run on pve for selected VMIDs (dry-run by default)."
     tags: [backup]
@@ -2669,7 +2984,10 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: backup
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/backup/
   backup.vzdump.prune:
     description: "Mutating: prune vzdump backups on pve storage (dry-run by default; use --execute)."
     tags: [backup]
@@ -2679,7 +2997,10 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: backup
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/backup/
   backup.calendar.generate:
     description: "Generate ICS calendar from backup schedule binding (iPhone-subscribeable)."
     tags: [backup]
@@ -2689,11 +3010,13 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: backup
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/backup/
   # ─────────────────────────────────────────────────────────────────────────
   # HOST (read-only home/config/entrypoint drift audit)
   # ─────────────────────────────────────────────────────────────────────────
-
   host.drift.audit:
     description: "Audit host-level drift across active configs, launchd entrypoints, and home output sinks."
     tags: [host]
@@ -2703,7 +3026,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   host.claude.entrypoint.status:
     description: "Check Claude entrypoint compliance (shim, path case, forbidden headings)."
     tags: [host]
@@ -2713,7 +3035,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   host.claude.entrypoint.canonicalize:
     description: "Canonicalize Claude home files: rewrite CLAUDE.md to shim, fix path case."
     tags: [host]
@@ -2723,7 +3044,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   host.hidden.inventory.status:
     description: "Hidden-root inventory: classify all dot-entries under $HOME as managed/volatile/excluded/forbidden/unmanaged."
     tags: [host]
@@ -2733,7 +3053,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   host.macbook.drift.check:
     description: "Read-only: enforce MacBook drift invariants (Claude entrypoint + workbench verifier)."
     tags: [host]
@@ -2743,7 +3062,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   host.macbook.managed_configs.apply:
     description: "Mutating: enforce managed config symlinks and canonicalize Claude entrypoint, then verify."
     tags: [host]
@@ -2753,7 +3071,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   host.macbook.bootstrap:
     description: "Mutating: bootstrap fresh Mac to spine-ready state (CLI tools, configs, symlinks, entrypoints). Idempotent, phased."
     tags: [host]
@@ -2763,7 +3080,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   host.streamdeck.status:
     description: "Check Stream Deck HA controller LaunchAgent status (loaded, PID, log paths)."
     tags: [host]
@@ -2773,7 +3089,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   host.streamdeck.reload:
     description: "Mutating: reload Stream Deck HA controller LaunchAgent (bootout + bootstrap)."
     tags: [host]
@@ -2783,7 +3098,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   host.streamdeck.snapshot:
     description: "Snapshot Stream Deck HA controller config to tracked workbench location"
     tags: [host, streamdeck, config]
@@ -2793,11 +3107,9 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # DOCS (workbench infrastructure extraction tracking)
   # ─────────────────────────────────────────────────────────────────────────
-
   docs.status:
     description: "Verify workbench infrastructure docs extraction integrity (file counts per dir)."
     tags: [docs]
@@ -2807,7 +3119,32 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+  docs.impact.status:
+    description: "Validate impact-scoped docs contract (domain runbook + notes dir + index per domain)."
+    tags: [docs, impact]
+    command: "./ops/plugins/docs/bin/docs-impact-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+  docs.impact.note:
+    description: "Create an impact-scoped receipt note in the target domain docs and cross-link indexes."
+    tags: [docs, impact]
+    command: "./ops/plugins/docs/bin/docs-impact-note"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    args:
+      - name: domain
+        required: true
+      - name: receipt_run_key
+        required: true
+      - name: summary
+        required: false
+        default: ""
+    outputs: ["stdout"]
   infra.extraction.status:
     description: "Track infrastructure extraction coverage into workbench (23 asset groups, % complete)."
     tags: [infra]
@@ -2817,7 +3154,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   docs.lint:
     description: "Lint spine docs hierarchy: folder placement, metadata headers, README registration, legacy isolation."
     tags: [docs]
@@ -2827,7 +3163,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   docs.index.verify:
     description: "Verify bidirectional parity between governance docs on disk and _index.yaml registry."
     tags: [docs]
@@ -2837,7 +3172,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   docs.freshness.audit:
     description: "Audit freshness of authoritative governance docs (age since last_verified)."
     tags: [docs]
@@ -2847,7 +3181,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   docs.legacy.audit:
     description: "Detect legacy references (deprecated paths/names) in governance and core docs."
     tags: [docs]
@@ -2857,7 +3190,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   docs.brain.freshness:
     description: "Audit freshness of docs/brain session context files (age since last_verified)."
     tags: [docs]
@@ -2867,7 +3199,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   docs.orphan.detect:
     description: "Detect .md files in core/ and governance/ unreachable from docs/README.md."
     tags: [docs]
@@ -2877,7 +3208,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   docs.frontmatter.lint:
     description: "Validate YAML frontmatter structure and required fields in governance docs."
     tags: [docs]
@@ -2887,7 +3217,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   docs.sprawl.detect:
     description: "Report governance doc sprawl metrics: counts by directory and status, threshold warnings."
     tags: [docs]
@@ -2897,7 +3226,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   docs.jd.status:
     description: "Verify Johnny Decimal documentation coverage: no duplicate IDs, all in-scope docs mapped."
     tags: [docs, johnny-decimal]
@@ -2907,11 +3235,9 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # OBSERVABILITY (Prometheus, Grafana, Loki, Uptime Kuma — VM 205)
   # ─────────────────────────────────────────────────────────────────────────
-
   observability.stack.status:
     description: "Unified health check for all 5 observability services on VM 205 (Prometheus, Grafana, Loki, Uptime Kuma, Node Exporter)."
     tags: [observability, health]
@@ -2921,7 +3247,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   prometheus.targets.status:
     description: "Read-only Prometheus scrape target health — shows UP/DOWN status for each job."
     tags: [observability, prometheus]
@@ -2931,7 +3256,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   uptime.kuma.monitors.sync:
     description: "Sync Uptime Kuma monitors from services.health.yaml. Dry-run by default, --execute to create."
     tags: [observability, uptime-kuma]
@@ -2945,7 +3269,6 @@ capabilities:
     requires:
       - secrets.binding
       - secrets.auth.status
-
   nas.health.status:
     description: "Health check for Synology DS918+ NAS — RAID, volumes, disk SMART, temps, NFS exports."
     tags: [observability, nas, storage]
@@ -2955,7 +3278,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   gitea.status:
     description: "Gitea instance health and summary — version, repos, users, runners."
     tags: [observability, gitea, dev-tools]
@@ -2969,7 +3291,6 @@ capabilities:
     requires:
       - secrets.binding
       - secrets.auth.status
-
   immich.status:
     description: "Immich photo server health — version, assets, disk usage, users."
     tags: [observability, immich]
@@ -2978,12 +3299,29 @@ capabilities:
     safety: read-only
     approval: auto
     lifecycle: ready
+    plane: domain_external
+    domain: immich
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/immich/
     outputs: ["stdout"]
     touches_api: true
     requires:
       - secrets.binding
       - secrets.auth.status
-
+  immich.ingest.watch:
+    description: "Monitor-only yearly ingest watchdog for Immich (heartbeat, queue progression, error-rate) with guided fixes."
+    tags: [observability, immich, ingest]
+    command: "./ops/plugins/observability/bin/immich-ingest-watch"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    plane: domain_external
+    domain: immich
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/immich/tools/immich_ingest_watchdog.py
+    notes: "Runtime source is contract-driven via ops/bindings/immich.ingest.watch.contract.yaml (remote SSH mode)."
+    outputs: ["stdout"]
   finance.stack.status:
     description: "Finance services health on VM 211 — Firefly III, Paperless-ngx, Ghostfolio, Mail Archiver."
     tags: [observability, finance]
@@ -2992,12 +3330,15 @@ capabilities:
     safety: read-only
     approval: auto
     lifecycle: ready
+    plane: domain_external
+    domain: finance
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: agents/finance/
     outputs: ["stdout"]
     touches_api: true
     requires:
       - secrets.binding
       - secrets.auth.status
-
   idrac.health.status:
     description: "Dell iDRAC health via PVE jump host — Redfish API with IPMI fallback."
     tags: [observability, idrac, hardware]
@@ -3011,7 +3352,6 @@ capabilities:
     requires:
       - secrets.binding
       - secrets.auth.status
-
   switch.health.status:
     description: "Dell N2024P managed switch health via PVE jump host — SSH probe with ping fallback."
     tags: [observability, switch, network]
@@ -3025,7 +3365,6 @@ capabilities:
     requires:
       - secrets.binding
       - secrets.auth.status
-
   mcp.inventory.status:
     description: "Validate workbench MCP inventory vs MCPJungle configs (read-only)."
     tags: [mcp]
@@ -3035,11 +3374,18 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+  mcp.runtime.status:
+    description: "Validate MCP runtime registrations across Codex, Claude Desktop, and OpenCode against mcp.runtime.contract."
+    tags: [mcp]
+    command: "./ops/plugins/mcp/bin/mcp-runtime-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
   # ─────────────────────────────────────────────────────────────────────────
   # INFRA RELOCATION (read-only VM/service move governance)
   # ─────────────────────────────────────────────────────────────────────────
-
   infra.placement.policy:
     description: "Canonical placement policy check (site/hypervisor/vmid/service target enforcement)."
     tags: [infra]
@@ -3049,7 +3395,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.hypervisor.identity:
     description: "Verify proxmox host identity uniqueness (id/hostname/machine-id) to prevent wrong-host execution."
     tags: [infra]
@@ -3059,7 +3404,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.docker_host.status:
     description: "Read-only docker-host governance status: SSH runtime facts + host-scoped health probe parity."
     tags: [infra, docker-host]
@@ -3069,7 +3413,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.hypervisor.hostname.set:
     description: "Set canonical hostname for a proxmox host-id (dry-run by default, --execute to mutate)."
     tags: [infra]
@@ -3081,7 +3424,6 @@ capabilities:
     requires:
       - infra.placement.policy
     outputs: ["stdout"]
-
   infra.timezone.set:
     description: "Set timezone + enable NTP on infrastructure hosts (dry-run by default, --execute to mutate)."
     tags: [infra]
@@ -3091,7 +3433,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.relocation.preflight:
     description: "Pre-flight check: host reachability + health baseline for relocation manifest."
     tags: [infra]
@@ -3101,7 +3442,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.relocation.parity:
     description: "Verify cross-SSOT parity + canonical placement policy for relocation manifest."
     tags: [infra]
@@ -3111,7 +3451,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.relocation.impact:
     description: "Print required docs/bindings/gates delta matrix for current relocation."
     tags: [infra]
@@ -3121,7 +3460,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.relocation.rollback.plan:
     description: "Generate deterministic rollback checklist and commands for current relocation."
     tags: [infra]
@@ -3131,7 +3469,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   infra.vm.provision:
     description: "Provision Proxmox VM from relocation target/profile (dry-run by default, --execute to mutate)."
     tags: [infra]
@@ -3146,7 +3483,6 @@ capabilities:
       - infra.relocation.preflight
       - infra.relocation.parity
     outputs: ["stdout"]
-
   infra.vm.bootstrap:
     description: "Bootstrap a provisioned VM to spine-ready profile baseline (dry-run by default, --execute to mutate)."
     tags: [infra]
@@ -3160,7 +3496,6 @@ capabilities:
       - infra.hypervisor.identity
       - infra.relocation.preflight
     outputs: ["stdout"]
-
   infra.relocation.state.transition:
     description: "Controlled relocation state transition + vm_targets status/IP update (dry-run by default, --execute to mutate)."
     tags: [infra]
@@ -3174,7 +3509,6 @@ capabilities:
       - infra.hypervisor.identity
       - infra.relocation.parity
     outputs: ["stdout"]
-
   infra.relocation.service.transition:
     description: "Controlled service status update within relocation manifest (dry-run by default, --execute to mutate)."
     tags: [infra]
@@ -3188,7 +3522,6 @@ capabilities:
       - infra.hypervisor.identity
       - infra.relocation.parity
     outputs: ["stdout"]
-
   infra.relocation.promote:
     description: "Promotion gate runner: validates promotion gates (tunnel, health, rollback; optional soak window), then promotes service from cutover to migrated with full gate verification (dry-run by default, --execute to mutate)."
     tags: [infra]
@@ -3202,7 +3535,6 @@ capabilities:
       - infra.hypervisor.identity
       - infra.relocation.parity
     outputs: ["stdout"]
-
   infra.proxmox.node_path.migrate:
     description: "Fix Proxmox node-name mismatch by migrating /etc/pve/nodes/<from> -> <to> on a hypervisor (dry-run by default, --execute to mutate)."
     tags: [infra]
@@ -3214,7 +3546,6 @@ capabilities:
     requires:
       - infra.hypervisor.identity
     outputs: ["stdout"]
-
   infra.vm.ready.status:
     description: "Read-only readiness report for relocation VM target (running + ssh + tailscale + profile checks)."
     tags: [infra]
@@ -3224,11 +3555,9 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────
   # BUDGET (read-only token budget diagnostics)
   # ─────────────────────────────────────────────────────────────
-
   budget.check:
     description: "Check token budget against a receipt (read-only diagnostic)."
     tags: [budget]
@@ -3238,11 +3567,9 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # MAKER (digital-to-physical toolkit)
   # ─────────────────────────────────────────────────────────────────────────
-
   maker.tools.status:
     description: "Read-only maker tools inventory probe (installed/missing/hardware status)."
     tags: [maker]
@@ -3252,7 +3579,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   maker.qr.generate:
     description: "Generate QR code (PNG/SVG/terminal) to mailroom/outbox/maker/."
     tags: [maker]
@@ -3264,7 +3590,6 @@ capabilities:
     requires:
       - maker.tools.status
     outputs: ["stdout"]
-
   maker.label.print:
     description: "Print label to Brother QL thermal printer (requires hardware)."
     tags: [maker]
@@ -3276,11 +3601,9 @@ capabilities:
     requires:
       - maker.tools.status
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # AUDIT
   # ─────────────────────────────────────────────────────────────────────────
-
   audit.export.governance_iac:
     description: "Export repo tree + governance/IaC significant file contents for spine + workbench (redacted)"
     tags: [audit]
@@ -3290,7 +3613,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   spine.audit.triage:
     description: "Triage certification audit findings against tracked gaps and loops"
     tags: [spine]
@@ -3300,7 +3622,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   agent.session.closeout:
     description: "Cross-ref recent sessions against open loops; report actionable/stale/blocked status"
     command: "./ops/plugins/audit/bin/agent-session-closeout"
@@ -3310,7 +3631,6 @@ capabilities:
     lifecycle: ready
     tags: ["governance", "loops", "audit"]
     outputs: ["stdout"]
-
   spine.release.zip:
     description: "Build a sharable zip artifact of the spine repo at HEAD (mailroom/outbox)."
     command: "./ops/plugins/release/bin/spine-release-zip"
@@ -3320,12 +3640,9 @@ capabilities:
     lifecycle: ready
     tags: ["release"]
     outputs: ["stdout"]
-
-
   # ─────────────────────────────────────────────────────────────────────────
   # HOME INFRASTRUCTURE (read-only status checks)
   # ─────────────────────────────────────────────────────────────────────────
-
   home.backup.status:
     description: "Check backup artifact freshness on proxmox-home NAS storage (VMs 100-102, LXCs 103/105)."
     tags: [backup, home]
@@ -3335,7 +3652,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/home/
   home.vm.status:
     description: "Check VM/LXC running state on proxmox-home (qm list + pct list via SSH)."
     tags: [home, proxmox]
@@ -3345,7 +3665,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/home/
   home.health.check:
     description: "HTTP health probe for home services (HA :8123, Vaultwarden :8080 via Tailscale)."
     tags: [home, health]
@@ -3355,7 +3678,10 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/home/
   home.health.alert:
     description: "Run home health probes and send HA persistent notification on failure"
     tags: [home, health, alerting]
@@ -3369,11 +3695,13 @@ capabilities:
       - secrets.binding
       - secrets.auth.status
     outputs: ["stdout"]
-
+    plane: domain_external
+    domain: home
+    implementation_repo: /Users/ronnyworks/code/workbench
+    implementation_path: docs/infrastructure/domains/home/
   # ─────────────────────────────────────────────────────────────────────────
   # PROPOSALS (mailroom-gated writes)
   # ─────────────────────────────────────────────────────────────────────────
-
   proposals.submit:
     description: "Create a new change proposal in mailroom/outbox/proposals/"
     command: "./ops/plugins/proposals/bin/proposals-submit"
@@ -3383,7 +3711,6 @@ capabilities:
     lifecycle: ready
     tags: ["proposals", "mailroom"]
     outputs: ["stdout"]
-
   proposals.list:
     description: "List all pending change proposals"
     command: "./ops/plugins/proposals/bin/proposals-list"
@@ -3393,7 +3720,6 @@ capabilities:
     lifecycle: ready
     tags: ["proposals", "mailroom"]
     outputs: ["stdout"]
-
   proposals.apply:
     description: "Apply a change proposal to the repo (creates commit)"
     command: "./ops/plugins/proposals/bin/proposals-apply"
@@ -3403,7 +3729,6 @@ capabilities:
     lifecycle: ready
     tags: ["proposals", "mailroom"]
     outputs: ["stdout"]
-
   proposals.status:
     description: "Proposal queue health summary with SLA breach detection"
     command: "./ops/plugins/proposals/bin/proposals-status"
@@ -3413,7 +3738,6 @@ capabilities:
     lifecycle: ready
     tags: ["proposals", "mailroom"]
     outputs: ["stdout"]
-
   proposals.supersede:
     description: "Mark a proposal as superseded with reason"
     command: "./ops/plugins/proposals/bin/proposals-supersede"
@@ -3423,7 +3747,6 @@ capabilities:
     lifecycle: ready
     tags: ["proposals", "mailroom"]
     outputs: ["stdout"]
-
   proposals.archive:
     description: "Archive old applied/superseded proposals to .archived/"
     command: "./ops/plugins/proposals/bin/proposals-archive"
@@ -3433,7 +3756,6 @@ capabilities:
     lifecycle: ready
     tags: ["proposals", "mailroom"]
     outputs: ["stdout"]
-
   proposals.reconcile:
     description: "Check proposal manifests against lifecycle contract"
     command: "./ops/plugins/proposals/bin/proposals-reconcile"
@@ -3443,11 +3765,9 @@ capabilities:
     lifecycle: ready
     tags: ["proposals", "mailroom"]
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # AGENT ROUTING (domain agent discovery)
   # ─────────────────────────────────────────────────────────────────────────
-
   agent.route:
     description: "Route a domain keyword to the correct agent (deterministic lookup from agents.registry.yaml)"
     tags: [agent, routing]
@@ -3457,11 +3777,9 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # AOF KERNEL ABSTRACTION (environment contracts + bootstrap)
   # ─────────────────────────────────────────────────────────────────────────
-
   aof.bootstrap:
     description: "Seed environment + identity contracts from AOF profile templates (mutating)"
     tags: [aof, bootstrap, contracts]
@@ -3471,7 +3789,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   aof.validate:
     description: "Validate .environment.yaml/.identity.yaml contract structure"
     tags: [aof, validation, contracts]
@@ -3481,7 +3798,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   aof.contract.status:
     description: "Show AOF contract acknowledgement status for current workspace"
     tags: [aof, contracts, status]
@@ -3491,7 +3807,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   aof.contract.acknowledge:
     description: "Create daily AOF contract acknowledgment marker for current workspace"
     tags: [aof, contracts, acknowledge]
@@ -3501,7 +3816,6 @@ capabilities:
     approval: manual
     lifecycle: ready
     outputs: ["stdout"]
-
   aof.status:
     description: "AOF health summary: contract state, gates, caps, policy, gaps"
     tags: [aof, status, operator]
@@ -3511,7 +3825,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   aof.version:
     description: "AOF version and contract info: commit, schema, presets, gate version"
     tags: [aof, version, operator]
@@ -3521,7 +3834,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   aof.policy.show:
     description: "Show current policy preset with all 10 knob values and discovery chain"
     tags: [aof, policy, operator]
@@ -3531,7 +3843,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   aof.tenant.show:
     description: "Show tenant profile summary (identity, secrets, policy, runtime, surfaces)"
     tags: [aof, tenant, operator]
@@ -3541,7 +3852,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   aof.verify:
     description: "Run AOF product gates D91-D97 focused verification"
     tags: [aof, verify, operator, gates]
@@ -3551,11 +3861,9 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   # ─────────────────────────────────────────────────────────────────────────
   # TENANT MANAGEMENT (AOF product)
   # ─────────────────────────────────────────────────────────────────────────
-
   tenant.profile.validate:
     description: "Validate a tenant profile YAML against the AOF tenant schema"
     tags: [tenant, validation, aof]
@@ -3565,7 +3873,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   tenant.provision.dry-run:
     description: "Print deterministic provisioning plan from a tenant profile (no mutation)"
     tags: [tenant, provisioning, aof]
@@ -3575,7 +3882,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   tenant.storage.audit:
     description: "Verify runtime storage paths comply with tenant storage contract boundaries"
     tags: [tenant, storage, audit, aof]
@@ -3585,7 +3891,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   policy.runtime.audit:
     description: "Report policy knob enforcement wiring status against runtime contract"
     tags: [policy, enforcement, audit, aof]
@@ -3595,7 +3900,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   version.compat.verify:
     description: "Verify version compatibility matrix consistency and source file validity"
     tags: [version, compatibility, verify, aof]
@@ -3605,7 +3909,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   evidence.export.plan:
     description: "Dry-run plan for evidence export and retention (no mutations)"
     tags: [evidence, retention, export, aof]
@@ -3615,7 +3918,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
   surface.readonly.audit:
     description: "Verify surface readonly contract compliance and capability coverage"
     tags: [surface, readonly, audit, aof]
@@ -3625,7 +3927,6 @@ capabilities:
     approval: auto
     lifecycle: ready
     outputs: ["stdout"]
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Safety Levels
 # ═══════════════════════════════════════════════════════════════════════════

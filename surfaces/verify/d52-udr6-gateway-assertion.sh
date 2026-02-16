@@ -17,6 +17,31 @@ SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 
 ERRORS=0
 
+resolve_doc() {
+  local path="$1"
+  if [[ ! -f "$path" ]]; then
+    echo "$path"
+    return
+  fi
+
+  if grep -q '^spine_pointer_stub: true$' "$path"; then
+    local repo rel target
+    repo="$(grep '^authority_repo:' "$path" | head -1 | cut -d':' -f2- | xargs || true)"
+    rel="$(grep '^authority_path:' "$path" | head -1 | cut -d':' -f2- | xargs || true)"
+    repo="${repo%\"}"
+    repo="${repo#\"}"
+    rel="${rel%\"}"
+    rel="${rel#\"}"
+    target="$repo/$rel"
+    if [[ -f "$target" ]]; then
+      echo "$target"
+      return
+    fi
+  fi
+
+  echo "$path"
+}
+
 # Check DEVICE_IDENTITY_SSOT.md has 192.168.1.0/24 shop subnet
 DI="$SP/docs/governance/DEVICE_IDENTITY_SSOT.md"
 if [[ -f "$DI" ]]; then
@@ -37,30 +62,30 @@ else
 fi
 
 # Check SHOP_SERVER_SSOT.md has UDR6 gateway
-SS="$SP/docs/governance/SHOP_SERVER_SSOT.md"
+SS="$(resolve_doc "$SP/docs/governance/SHOP_SERVER_SSOT.md")"
 if [[ -f "$SS" ]]; then
   if grep -q '192\.168\.1\.1' "$SS"; then
     : # good
   else
-    echo "FAIL: SHOP_SERVER_SSOT.md missing 192.168.1.1 gateway reference" >&2
+    echo "FAIL: SHOP_SERVER_SSOT missing 192.168.1.1 gateway reference (checked: $SS)" >&2
     ERRORS=$((ERRORS + 1))
   fi
 else
-  echo "FAIL: SHOP_SERVER_SSOT.md not found" >&2
+  echo "FAIL: SHOP_SERVER_SSOT not found (checked: $SS)" >&2
   ERRORS=$((ERRORS + 1))
 fi
 
 # Check NETWORK_POLICIES.md has updated shop subnet
-NP="$SP/docs/governance/NETWORK_POLICIES.md"
+NP="$(resolve_doc "$SP/docs/governance/NETWORK_POLICIES.md")"
 if [[ -f "$NP" ]]; then
   if grep -q '192\.168\.1\.0/24' "$NP"; then
     : # good
   else
-    echo "FAIL: NETWORK_POLICIES.md missing 192.168.1.0/24 shop subnet" >&2
+    echo "FAIL: NETWORK_POLICIES missing 192.168.1.0/24 shop subnet (checked: $NP)" >&2
     ERRORS=$((ERRORS + 1))
   fi
 else
-  echo "FAIL: NETWORK_POLICIES.md not found" >&2
+  echo "FAIL: NETWORK_POLICIES not found (checked: $NP)" >&2
   ERRORS=$((ERRORS + 1))
 fi
 

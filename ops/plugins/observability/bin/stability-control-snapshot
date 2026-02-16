@@ -1,0 +1,696 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT_DEFAULT="$ROOT/ops/bindings/stability.control.contract.yaml"
+
+CONTRACT="$CONTRACT_DEFAULT"
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --contract)
+      CONTRACT="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+stability-control-snapshot - Runtime reliability + predictive snapshot
+
+Usage:
+  stability-control-snapshot [--contract <path>] [--json]
+
+Behavior:
+  - Runs configured probe capabilities for critical domains.
+  - Adds predictive checks (VM disk/memory/load headroom + probe latency).
+  - Applies warn_treatment policy (critical-domain warns can be promoted).
+  - Emits markdown summary by default, JSON with --json.
+  - Exits non-zero when one or more critical domains are in incident state.
+EOF
+      exit 0
+      ;;
+    *)
+      echo "STOP: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "STOP: missing dependency: $1" >&2
+    exit 2
+  }
+}
+
+need_file() {
+  [[ -f "$1" ]] || {
+    echo "STOP: missing file: $1" >&2
+    exit 2
+  }
+}
+
+now_ms() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(int(time.time()*1000))'
+  else
+    echo $(( "$(date +%s)" * 1000 ))
+  fi
+}
+
+sanitize_detail() {
+  local input="$1"
+  input="${input//$'\t'/ }"
+  input="${input//$'\n'/ | }"
+  printf '%s' "$input"
+}
+
+promote_severity() {
+  local current="$1"
+  local incoming="$2"
+
+  if [[ "$incoming" == "incident" ]]; then
+    echo "incident"
+    return
+  fi
+  if [[ "$incoming" == "warn" && "$current" == "pass" ]]; then
+    echo "warn"
+    return
+  fi
+  echo "$current"
+}
+
+extract_heartbeat_age_minutes() {
+  local text="$1"
+  local hb
+  hb="$(printf '%s\n' "$text" | sed -nE 's/.*heartbeat(_age)?(_minutes)?[[:space:]:=]+([0-9]+).*/\3/p' | head -n1)"
+  if [[ -z "$hb" ]]; then
+    hb="$(printf '%s\n' "$text" | sed -nE 's/.*heartbeat[^0-9]*([0-9]+)[[:space:]]*m(in(utes)?)?.*/\1/p' | head -n1)"
+  fi
+  printf '%s' "$hb"
+}
+
+has_pid_missing_marker() {
+  local text="$1"
+  if printf '%s\n' "$text" | grep -qiE 'pid_file_present=false|pid[[:space:]_-]*missing|no[[:space:]_-]*worker[[:space:]_-]*pid|worker[[:space:]_-]*dead'; then
+    return 0
+  fi
+  return 1
+}
+
+is_probe_failure() {
+  local rc="$1"
+  local detail="$2"
+
+  if [[ "$rc" -ne 0 ]]; then
+    return 0
+  fi
+  if printf '%s\n' "$detail" | grep -qiE 'status:[[:space:]]*FAIL|STATUS:[[:space:]]*FAIL|summary:[[:space:]]*INCIDENT|DEGRADED|UNREACHABLE|disconnected|not connected|precondition failed|ERROR'; then
+    return 0
+  fi
+  return 1
+}
+
+classify_ssh_error() {
+  local stderr_text="$1"
+  if printf '%s\n' "$stderr_text" | grep -qi "operation not permitted"; then
+    echo "sandbox_blocked"
+    return
+  fi
+  if printf '%s\n' "$stderr_text" | grep -qi "permission denied"; then
+    echo "auth_denied"
+    return
+  fi
+  if printf '%s\n' "$stderr_text" | grep -qi "host key verification failed\|remote host identification has changed"; then
+    echo "host_key_mismatch"
+    return
+  fi
+  if printf '%s\n' "$stderr_text" | grep -qi "connection refused"; then
+    echo "connect_refused"
+    return
+  fi
+  if printf '%s\n' "$stderr_text" | grep -qi "operation timed out\|connection timed out\|timed out"; then
+    echo "connect_timeout"
+    return
+  fi
+  if printf '%s\n' "$stderr_text" | grep -qi "could not resolve hostname\|name or service not known\|no route to host"; then
+    echo "ssh_unreachable"
+    return
+  fi
+  echo "auth_or_connect"
+}
+
+PROBE_RC=0
+PROBE_RUN_KEY=""
+PROBE_DETAIL=""
+PROBE_DURATION_MS=0
+PROBE_OUTPUT=""
+
+run_probe() {
+  local capability="$1"
+  local tmp_file
+  tmp_file="$(mktemp)"
+  local start_ms end_ms
+
+  start_ms="$(now_ms)"
+  set +e
+  "$ROOT/bin/ops" cap run "$capability" >"$tmp_file" 2>&1
+  PROBE_RC=$?
+  set -e
+  end_ms="$(now_ms)"
+  PROBE_DURATION_MS=$((end_ms - start_ms))
+
+  PROBE_RUN_KEY="$(sed -n 's/^Run Key:[[:space:]]*//p' "$tmp_file" | tail -n1 | xargs || true)"
+  PROBE_DETAIL="$(grep -E 'status:[[:space:]]*FAIL|STATUS:[[:space:]]*FAIL|summary:[[:space:]]*INCIDENT|DEGRADED|UNREACHABLE|disconnected|not connected|precondition failed|ERROR|timeout' "$tmp_file" | head -n1 || true)"
+  if [[ -z "$PROBE_DETAIL" ]]; then
+    PROBE_DETAIL="$(grep -E 'summary:|status:' "$tmp_file" | tail -n1 || true)"
+  fi
+  if [[ -z "$PROBE_DETAIL" ]]; then
+    PROBE_DETAIL="exit_code=$PROBE_RC"
+  fi
+  PROBE_OUTPUT="$(cat "$tmp_file")"
+
+  rm -f "$tmp_file"
+}
+
+VM_PROBE_STATUS="pass"
+VM_PROBE_DETAIL="ok"
+
+run_vm_predictive_probe() {
+  local vm_hostname="$1"
+  local vm_state ssh_target expected_user vm_os
+  local ssh_host ssh_user ssh_port ssh_timeout
+  local local_status="pass"
+  local detail_notes=""
+
+  VM_PROBE_STATUS="pass"
+  VM_PROBE_DETAIL="ok"
+
+  local vm_row
+  vm_row="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\") | [(.status // \"\"), (.ssh_target // \"\"), (.ssh_user // \"\"), (.os // \"\")] | @tsv" "$VM_LIFECYCLE" | head -n1 || true)"
+  if [[ -z "$vm_row" ]]; then
+    VM_PROBE_STATUS="incident"
+    VM_PROBE_DETAIL="vm_not_found_in_vm_lifecycle"
+    return
+  fi
+  IFS=$'\t' read -r vm_state ssh_target expected_user vm_os <<< "$vm_row"
+
+  if [[ "$vm_state" != "active" ]]; then
+    VM_PROBE_STATUS="warn"
+    VM_PROBE_DETAIL="vm_state=$vm_state (predictive probe skipped)"
+    return
+  fi
+
+  if [[ -z "$ssh_target" || "$ssh_target" == "null" ]]; then
+    VM_PROBE_STATUS="incident"
+    VM_PROBE_DETAIL="missing_ssh_target_in_vm_lifecycle"
+    return
+  fi
+
+  local ssh_row
+  ssh_row="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target\") | [(.host // \"\"), (.user // \"\"), ((.port // \"\")|tostring), ((.connect_timeout_sec // \"\")|tostring)] | @tsv" "$SSH_TARGETS" | head -n1 || true)"
+  if [[ -z "$ssh_row" ]]; then
+    VM_PROBE_STATUS="incident"
+    VM_PROBE_DETAIL="missing_ssh_binding_for_target=$ssh_target"
+    return
+  fi
+  IFS=$'\t' read -r ssh_host ssh_user ssh_port ssh_timeout <<< "$ssh_row"
+
+  [[ -n "$ssh_host" && "$ssh_host" != "null" ]] || {
+    VM_PROBE_STATUS="incident"
+    VM_PROBE_DETAIL="ssh_binding_missing_host_for_target=$ssh_target"
+    return
+  }
+  [[ -n "$ssh_user" && "$ssh_user" != "null" ]] || ssh_user="$SSH_DEF_USER"
+  [[ -n "$ssh_port" && "$ssh_port" != "null" ]] || ssh_port="$SSH_DEF_PORT"
+  [[ -n "$ssh_timeout" && "$ssh_timeout" != "null" ]] || ssh_timeout="$SSH_DEF_TIMEOUT"
+
+  if [[ -n "$expected_user" && "$expected_user" != "null" && "$ssh_user" != "$expected_user" ]]; then
+    local_status="$(promote_severity "$local_status" "warn")"
+    detail_notes="ssh_user_mismatch(expected=$expected_user,binding=$ssh_user)"
+  fi
+
+  local out_file err_file
+  out_file="$(mktemp)"
+  err_file="$(mktemp)"
+
+  local ssh_opts=(
+    -o "ConnectTimeout=$ssh_timeout"
+    -o "StrictHostKeyChecking=$SSH_DEF_STRICT"
+    -o "UserKnownHostsFile=$SSH_DEF_KNOWN_HOSTS"
+    -o "NumberOfPasswordPrompts=0"
+    -o "LogLevel=ERROR"
+    -p "$ssh_port"
+  )
+  if [[ "$SSH_DEF_BATCH" == "true" ]]; then
+    ssh_opts+=(-o "BatchMode=yes")
+  fi
+
+  set +e
+  ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" 'bash -s' >"$out_file" 2>"$err_file" <<'EOF'
+set -euo pipefail
+
+disk_free_gb=-1
+disk_free_pct=-1
+mem_headroom_pct=-1
+load1=0
+cpu_cores=1
+apt_pending=-1
+apt_lists_age_days=-1
+
+if [ -r /proc/loadavg ]; then
+  load1="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
+fi
+cpu_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+
+df_line="$(df -Pk / 2>/dev/null | awk 'NR==2{print $4" "$5}' || true)"
+if [ -n "$df_line" ]; then
+  avail_kb="$(printf '%s\n' "$df_line" | awk '{print int($1)}')"
+  used_pct_raw="$(printf '%s\n' "$df_line" | awk '{gsub(/%/,"",$2); print int($2)}')"
+  if [ "${avail_kb:-0}" -gt 0 ]; then
+    disk_free_gb=$((avail_kb / 1024 / 1024))
+  fi
+  if [ "${used_pct_raw:-0}" -ge 0 ] 2>/dev/null; then
+    disk_free_pct=$((100 - used_pct_raw))
+  fi
+fi
+
+if [ -r /proc/meminfo ]; then
+  mem_total_kb="$(awk '/MemTotal:/ {print int($2)}' /proc/meminfo | head -n1)"
+  mem_avail_kb="$(awk '/MemAvailable:/ {print int($2)}' /proc/meminfo | head -n1)"
+  if [ "${mem_avail_kb:-0}" -eq 0 ]; then
+    mem_avail_kb="$(awk '/MemFree:/ {print int($2)}' /proc/meminfo | head -n1)"
+  fi
+  if [ "${mem_total_kb:-0}" -gt 0 ]; then
+    mem_headroom_pct=$((mem_avail_kb * 100 / mem_total_kb))
+  fi
+fi
+
+if command -v apt >/dev/null 2>&1; then
+  apt_pending="$(apt list --upgradable 2>/dev/null | awk 'NR>1{c++} END{print c+0}')"
+  latest_epoch="$(find /var/lib/apt/lists -maxdepth 1 -type f -printf '%T@\n' 2>/dev/null | awk 'BEGIN{m=0} {if($1>m) m=$1} END{if(m>0) printf "%d", m; else printf "0"}')"
+  if [ "${latest_epoch:-0}" -gt 0 ]; then
+    now_epoch="$(date +%s)"
+    age_days=$(( (now_epoch - latest_epoch) / 86400 ))
+    if [ "$age_days" -lt 0 ]; then age_days=0; fi
+    apt_lists_age_days="$age_days"
+  fi
+fi
+
+echo "disk_free_gb=$disk_free_gb"
+echo "disk_free_pct=$disk_free_pct"
+echo "mem_headroom_pct=$mem_headroom_pct"
+echo "load1=$load1"
+echo "cpu_cores=$cpu_cores"
+echo "apt_pending=$apt_pending"
+echo "apt_lists_age_days=$apt_lists_age_days"
+EOF
+  local ssh_rc=$?
+  set -e
+
+  if [[ "$ssh_rc" -ne 0 ]]; then
+    local ssh_err
+    ssh_err="$(cat "$err_file" 2>/dev/null || true)"
+    local reason
+    reason="$(classify_ssh_error "$ssh_err")"
+    VM_PROBE_STATUS="incident"
+    VM_PROBE_DETAIL="vm_predictive_probe_ssh_failure(reason=$reason,target=$ssh_target,host=$ssh_host)"
+    rm -f "$out_file" "$err_file"
+    return
+  fi
+
+  local disk_free_gb disk_free_pct mem_headroom_pct load1 cpu_cores apt_pending apt_lists_age_days
+  disk_free_gb="$(sed -n 's/^disk_free_gb=//p' "$out_file" | tail -n1)"
+  disk_free_pct="$(sed -n 's/^disk_free_pct=//p' "$out_file" | tail -n1)"
+  mem_headroom_pct="$(sed -n 's/^mem_headroom_pct=//p' "$out_file" | tail -n1)"
+  load1="$(sed -n 's/^load1=//p' "$out_file" | tail -n1)"
+  cpu_cores="$(sed -n 's/^cpu_cores=//p' "$out_file" | tail -n1)"
+  apt_pending="$(sed -n 's/^apt_pending=//p' "$out_file" | tail -n1)"
+  apt_lists_age_days="$(sed -n 's/^apt_lists_age_days=//p' "$out_file" | tail -n1)"
+
+  [[ "$cpu_cores" =~ ^[0-9]+$ ]] || cpu_cores=1
+  [[ "$disk_free_gb" =~ ^-?[0-9]+$ ]] || disk_free_gb=-1
+  [[ "$disk_free_pct" =~ ^-?[0-9]+$ ]] || disk_free_pct=-1
+  [[ "$mem_headroom_pct" =~ ^-?[0-9]+$ ]] || mem_headroom_pct=-1
+  [[ "$apt_pending" =~ ^-?[0-9]+$ ]] || apt_pending=-1
+  [[ "$apt_lists_age_days" =~ ^-?[0-9]+$ ]] || apt_lists_age_days=-1
+  [[ "$load1" =~ ^[0-9.]+$ ]] || load1="0"
+
+  local load_per_core
+  load_per_core="$(awk -v l="$load1" -v c="$cpu_cores" 'BEGIN { if (c <= 0) c=1; printf "%.2f", l/c }')"
+
+  if [[ "$disk_free_gb" -ge 0 && "$disk_free_gb" -lt "$DISK_MIN_GB" ]]; then
+    local_status="$(promote_severity "$local_status" "warn")"
+    if [[ -z "$detail_notes" ]]; then
+      detail_notes="disk_headroom_low_gb($disk_free_gb<$DISK_MIN_GB)"
+    else
+      detail_notes="$detail_notes; disk_headroom_low_gb($disk_free_gb<$DISK_MIN_GB)"
+    fi
+  fi
+  if [[ "$disk_free_pct" -ge 0 && "$disk_free_pct" -lt "$DISK_MIN_PCT" ]]; then
+    local_status="$(promote_severity "$local_status" "warn")"
+    if [[ -z "$detail_notes" ]]; then
+      detail_notes="disk_headroom_low_pct($disk_free_pct<$DISK_MIN_PCT)"
+    else
+      detail_notes="$detail_notes; disk_headroom_low_pct($disk_free_pct<$DISK_MIN_PCT)"
+    fi
+  fi
+  if [[ "$mem_headroom_pct" -ge 0 && "$mem_headroom_pct" -lt "$MEM_MIN_PCT" ]]; then
+    local_status="$(promote_severity "$local_status" "warn")"
+    if [[ -z "$detail_notes" ]]; then
+      detail_notes="memory_headroom_low_pct($mem_headroom_pct<$MEM_MIN_PCT)"
+    else
+      detail_notes="$detail_notes; memory_headroom_low_pct($mem_headroom_pct<$MEM_MIN_PCT)"
+    fi
+  fi
+
+  if [[ -n "$LOAD_PER_CORE_WARN" ]]; then
+    if awk -v v="$load_per_core" -v t="$LOAD_PER_CORE_WARN" 'BEGIN { exit !(v >= t) }'; then
+      local_status="$(promote_severity "$local_status" "warn")"
+      if [[ -z "$detail_notes" ]]; then
+        detail_notes="load_per_core_high($load_per_core>=$LOAD_PER_CORE_WARN)"
+      else
+        detail_notes="$detail_notes; load_per_core_high($load_per_core>=$LOAD_PER_CORE_WARN)"
+      fi
+    fi
+  fi
+
+  if [[ -z "$detail_notes" ]]; then
+    detail_notes="ok"
+  fi
+  detail_notes="$detail_notes; metrics(disk_free_gb=$disk_free_gb,disk_free_pct=$disk_free_pct,mem_headroom_pct=$mem_headroom_pct,load_per_core=$load_per_core,apt_pending=$apt_pending,apt_lists_age_days=$apt_lists_age_days)"
+
+  VM_PROBE_STATUS="$local_status"
+  VM_PROBE_DETAIL="$detail_notes"
+
+  rm -f "$out_file" "$err_file"
+}
+
+need_cmd yq
+need_cmd jq
+need_cmd ssh
+need_cmd awk
+need_cmd date
+need_file "$CONTRACT"
+
+VM_LIFECYCLE_REL="$(yq -r '.sources.vm_lifecycle // "ops/bindings/vm.lifecycle.yaml"' "$CONTRACT")"
+VM_CONTRACT_REL="$(yq -r '.sources.vm_lifecycle_contract // "ops/bindings/vm.lifecycle.contract.yaml"' "$CONTRACT")"
+SSH_TARGETS_REL="$(yq -r '.sources.ssh_targets // "ops/bindings/ssh.targets.yaml"' "$CONTRACT")"
+
+VM_LIFECYCLE="$ROOT/$VM_LIFECYCLE_REL"
+VM_CONTRACT="$ROOT/$VM_CONTRACT_REL"
+SSH_TARGETS="$ROOT/$SSH_TARGETS_REL"
+
+need_file "$VM_LIFECYCLE"
+need_file "$VM_CONTRACT"
+need_file "$SSH_TARGETS"
+
+SSH_DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_TARGETS")"
+SSH_DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_TARGETS")"
+SSH_DEF_TIMEOUT="$(yq -r '.ssh.defaults.connect_timeout_sec // 6' "$SSH_TARGETS")"
+SSH_DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_TARGETS")"
+SSH_DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_TARGETS")"
+SSH_DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_TARGETS")"
+
+STALE_HEARTBEAT_INCIDENT_MINUTES="$(yq -r '.incident_thresholds.stale_heartbeat_minutes // 15' "$CONTRACT")"
+DISK_MIN_GB="$(yq -r '.predictive_thresholds.vm_disk_headroom_min_gb // 20' "$CONTRACT")"
+DISK_MIN_PCT="$(yq -r '.predictive_thresholds.vm_disk_headroom_min_percent // 15' "$CONTRACT")"
+MEM_MIN_PCT="$(yq -r '.predictive_thresholds.vm_memory_headroom_min_percent // 20' "$CONTRACT")"
+LOAD_PER_CORE_WARN="$(yq -r '.predictive_thresholds.vm_load_per_core_warn // ""' "$CONTRACT")"
+API_LAT_WARN_MS="$(yq -r '.predictive_thresholds.api_latency_warn_ms // 2000' "$CONTRACT")"
+API_LAT_INCIDENT_MS="$(yq -r '.predictive_thresholds.api_latency_incident_ms // 5000' "$CONTRACT")"
+HEARTBEAT_WARN_MINUTES="$(yq -r '.predictive_thresholds.heartbeat_stale_warn_minutes // 10' "$CONTRACT")"
+PID_FILE_MISSING_IS_INCIDENT="$(yq -r '.predictive_thresholds.pid_file_missing_is_incident // true' "$CONTRACT")"
+WARN_TREATMENT_CRITICAL="$(yq -r '.warn_treatment.critical_domains // "incident"' "$CONTRACT")"
+WARN_TREATMENT_NON_CRITICAL="$(yq -r '.warn_treatment.non_critical_domains // "warn"' "$CONTRACT")"
+
+mapfile -t DOMAINS < <(yq -r '.critical_domains[].id' "$CONTRACT")
+if [[ "${#DOMAINS[@]}" -eq 0 ]]; then
+  echo "STOP: no critical domains configured in contract" >&2
+  exit 2
+fi
+
+generated_at_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+incident_count=0
+warn_count=0
+
+declare -a DOMAIN_ROWS
+declare -a PROBE_ROWS
+
+for domain in "${DOMAINS[@]}"; do
+  description="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .description // \"\"" "$CONTRACT" | head -n1)"
+  vm_hostname="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .vm_hostname // \"\"" "$CONTRACT" | head -n1)"
+
+  vmid="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\" and .status != \"decommissioned\") | .vmid // \"\"" "$VM_LIFECYCLE" | head -n1)"
+  proxmox_host="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\" and .status != \"decommissioned\") | .proxmox_host // \"\"" "$VM_LIFECYCLE" | head -n1)"
+  vm_status="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\" and .status != \"decommissioned\") | .status // \"\"" "$VM_LIFECYCLE" | head -n1)"
+  proxmox_host_ip="$(yq -r ".ssh.targets[] | select(.id == \"$proxmox_host\") | .host // \"\"" "$SSH_TARGETS" | head -n1)"
+
+  [[ -n "$vmid" ]] || vmid="n/a"
+  [[ -n "$proxmox_host" ]] || proxmox_host="n/a"
+  [[ -n "$proxmox_host_ip" ]] || proxmox_host_ip="n/a"
+  [[ -n "$vm_status" ]] || vm_status="unknown"
+
+  mapfile -t probes < <(yq -r ".probe_capabilities.\"$domain\"[]?" "$CONTRACT")
+  domain_severity="pass"
+  domain_note=""
+
+  if [[ "${#probes[@]}" -eq 0 ]]; then
+    domain_severity="incident"
+    domain_note="contract missing probe_capabilities entry"
+    PROBE_ROWS+=("$domain"$'\t'"-"$'\t'"incident"$'\t'"-"$'\t'"$domain_note")
+  fi
+
+  for cap in "${probes[@]}"; do
+    run_probe "$cap"
+    probe_status="pass"
+    probe_detail="$PROBE_DETAIL"
+
+    if is_probe_failure "$PROBE_RC" "$PROBE_DETAIL"; then
+      probe_status="incident"
+    fi
+
+    if [[ "$PROBE_DURATION_MS" -ge "$API_LAT_INCIDENT_MS" ]]; then
+      probe_status="incident"
+      probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $API_LAT_INCIDENT_MS)"
+    elif [[ "$PROBE_DURATION_MS" -ge "$API_LAT_WARN_MS" ]]; then
+      if [[ "$probe_status" == "pass" ]]; then
+        probe_status="warn"
+      fi
+      probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $API_LAT_WARN_MS)"
+    fi
+
+    hb_age="$(extract_heartbeat_age_minutes "$PROBE_OUTPUT")"
+    if [[ -n "$hb_age" && "$hb_age" =~ ^[0-9]+$ ]]; then
+      if [[ "$hb_age" -ge "$STALE_HEARTBEAT_INCIDENT_MINUTES" ]]; then
+        probe_status="incident"
+        probe_detail="$probe_detail; heartbeat_age_minutes=$hb_age (>= $STALE_HEARTBEAT_INCIDENT_MINUTES)"
+      elif [[ "$hb_age" -ge "$HEARTBEAT_WARN_MINUTES" ]]; then
+        if [[ "$probe_status" == "pass" ]]; then
+          probe_status="warn"
+        fi
+        probe_detail="$probe_detail; heartbeat_age_minutes=$hb_age (>= $HEARTBEAT_WARN_MINUTES)"
+      fi
+    fi
+
+    if [[ "$PID_FILE_MISSING_IS_INCIDENT" == "true" ]] && has_pid_missing_marker "$PROBE_OUTPUT"; then
+      probe_status="incident"
+      probe_detail="$probe_detail; pid_file_missing=true"
+    fi
+
+    if printf '%s\n' "$PROBE_DETAIL" | grep -qiE 'WARN'; then
+      if [[ "$probe_status" == "pass" ]]; then
+        probe_status="warn"
+      fi
+    fi
+
+    domain_severity="$(promote_severity "$domain_severity" "$probe_status")"
+    PROBE_ROWS+=("$domain"$'\t'"$cap"$'\t'"$probe_status"$'\t'"$PROBE_RUN_KEY"$'\t'"$(sanitize_detail "$probe_detail")")
+  done
+
+  run_vm_predictive_probe "$vm_hostname"
+  domain_severity="$(promote_severity "$domain_severity" "$VM_PROBE_STATUS")"
+  PROBE_ROWS+=("$domain"$'\t'"vm.predictive.headroom"$'\t'"$VM_PROBE_STATUS"$'\t'"-"$'\t'"$(sanitize_detail "$VM_PROBE_DETAIL")")
+
+  domain_status="healthy"
+  if [[ "$domain_severity" == "incident" ]]; then
+    domain_status="incident"
+  elif [[ "$domain_severity" == "warn" ]]; then
+    domain_status="warn"
+    # Every entry in critical_domains is treated as critical.
+    if [[ "$WARN_TREATMENT_CRITICAL" == "incident" ]]; then
+      domain_status="incident"
+      if [[ -z "$domain_note" ]]; then
+        domain_note="warn_promoted_to_incident(policy=critical_domains:$WARN_TREATMENT_CRITICAL)"
+      else
+        domain_note="$domain_note; warn_promoted_to_incident(policy=critical_domains:$WARN_TREATMENT_CRITICAL)"
+      fi
+    fi
+  fi
+
+  if [[ "$domain_status" == "incident" ]]; then
+    incident_count=$((incident_count + 1))
+  elif [[ "$domain_status" == "warn" ]]; then
+    warn_count=$((warn_count + 1))
+  fi
+
+  if [[ -n "$domain_note" ]]; then
+    DOMAIN_ROWS+=("$domain"$'\t'"$domain_status"$'\t'"$vm_hostname"$'\t'"$vmid"$'\t'"$proxmox_host"$'\t'"$proxmox_host_ip"$'\t'"$vm_status"$'\t'"$(sanitize_detail "$description")"$'\t'"$(sanitize_detail "$domain_note")")
+  else
+    DOMAIN_ROWS+=("$domain"$'\t'"$domain_status"$'\t'"$vm_hostname"$'\t'"$vmid"$'\t'"$proxmox_host"$'\t'"$proxmox_host_ip"$'\t'"$vm_status"$'\t'"$(sanitize_detail "$description")"$'\t'"")
+  fi
+done
+
+overall_status="healthy"
+if [[ "$incident_count" -gt 0 ]]; then
+  overall_status="incident"
+elif [[ "$warn_count" -gt 0 ]]; then
+  overall_status="warn"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  domains_json="$(
+    printf '%s\n' "${DOMAIN_ROWS[@]}" | jq -R -s '
+      split("\n")
+      | map(select(length > 0))
+      | map(split("\t"))
+      | map({
+          id: .[0],
+          status: .[1],
+          vm_hostname: .[2],
+          vmid: .[3],
+          proxmox_host: .[4],
+          proxmox_host_ip: .[5],
+          vm_status: .[6],
+          description: .[7],
+          policy_note: .[8]
+        })
+    '
+  )"
+
+  probes_json="$(
+    printf '%s\n' "${PROBE_ROWS[@]}" | jq -R -s '
+      split("\n")
+      | map(select(length > 0))
+      | map(split("\t"))
+      | map({
+          domain: .[0],
+          capability: .[1],
+          status: .[2],
+          run_key: .[3],
+          detail: .[4]
+        })
+    '
+  )"
+
+  jq -n \
+    --arg generated_at_utc "$generated_at_utc" \
+    --arg contract "$CONTRACT" \
+    --arg vm_lifecycle "$VM_LIFECYCLE_REL" \
+    --arg vm_lifecycle_contract "$VM_CONTRACT_REL" \
+    --arg ssh_targets "$SSH_TARGETS_REL" \
+    --arg warn_treatment_critical "$WARN_TREATMENT_CRITICAL" \
+    --arg warn_treatment_non_critical "$WARN_TREATMENT_NON_CRITICAL" \
+    --argjson incident_count "$incident_count" \
+    --argjson warn_count "$warn_count" \
+    --arg status "$overall_status" \
+    --argjson domains "$domains_json" \
+    --argjson probes "$probes_json" \
+    --argjson thresholds "$(jq -n \
+      --argjson vm_disk_headroom_min_gb "$DISK_MIN_GB" \
+      --argjson vm_disk_headroom_min_percent "$DISK_MIN_PCT" \
+      --argjson vm_memory_headroom_min_percent "$MEM_MIN_PCT" \
+      --arg vm_load_per_core_warn "$LOAD_PER_CORE_WARN" \
+      --argjson api_latency_warn_ms "$API_LAT_WARN_MS" \
+      --argjson api_latency_incident_ms "$API_LAT_INCIDENT_MS" \
+      --argjson heartbeat_stale_warn_minutes "$HEARTBEAT_WARN_MINUTES" \
+      --argjson stale_heartbeat_minutes "$STALE_HEARTBEAT_INCIDENT_MINUTES" \
+      --arg pid_file_missing_is_incident "$PID_FILE_MISSING_IS_INCIDENT" \
+      '{
+        vm_disk_headroom_min_gb: $vm_disk_headroom_min_gb,
+        vm_disk_headroom_min_percent: $vm_disk_headroom_min_percent,
+        vm_memory_headroom_min_percent: $vm_memory_headroom_min_percent,
+        vm_load_per_core_warn: (if $vm_load_per_core_warn == "" then null else ($vm_load_per_core_warn | tonumber?) end),
+        api_latency_warn_ms: $api_latency_warn_ms,
+        api_latency_incident_ms: $api_latency_incident_ms,
+        heartbeat_stale_warn_minutes: $heartbeat_stale_warn_minutes,
+        stale_heartbeat_minutes: $stale_heartbeat_minutes,
+        pid_file_missing_is_incident: ($pid_file_missing_is_incident == "true")
+      }')" \
+    '{
+      capability: "stability.control.snapshot",
+      generated_at_utc: $generated_at_utc,
+      contract: $contract,
+      authority: {
+        vm_lifecycle: $vm_lifecycle,
+        vm_lifecycle_contract: $vm_lifecycle_contract,
+        ssh_targets: $ssh_targets
+      },
+      warn_treatment: {
+        critical_domains: $warn_treatment_critical,
+        non_critical_domains: $warn_treatment_non_critical
+      },
+      predictive_thresholds: $thresholds,
+      incident_count: $incident_count,
+      warn_count: $warn_count,
+      status: $status,
+      domains: $domains,
+      probes: $probes
+    }'
+else
+  echo "stability.control.snapshot"
+  echo "generated_at_utc: $generated_at_utc"
+  echo "contract: $CONTRACT"
+  echo "authority.vm_lifecycle: $VM_LIFECYCLE_REL"
+  echo "authority.vm_lifecycle_contract: $VM_CONTRACT_REL"
+  echo "authority.ssh_targets: $SSH_TARGETS_REL"
+  echo "predictive_thresholds.vm_disk_headroom_min_gb: $DISK_MIN_GB"
+  echo "predictive_thresholds.vm_disk_headroom_min_percent: $DISK_MIN_PCT"
+  echo "predictive_thresholds.vm_memory_headroom_min_percent: $MEM_MIN_PCT"
+  if [[ -n "$LOAD_PER_CORE_WARN" ]]; then
+    echo "predictive_thresholds.vm_load_per_core_warn: $LOAD_PER_CORE_WARN"
+  fi
+  echo "predictive_thresholds.api_latency_warn_ms: $API_LAT_WARN_MS"
+  echo "predictive_thresholds.api_latency_incident_ms: $API_LAT_INCIDENT_MS"
+  echo "predictive_thresholds.heartbeat_stale_warn_minutes: $HEARTBEAT_WARN_MINUTES"
+  echo "incident_thresholds.stale_heartbeat_minutes: $STALE_HEARTBEAT_INCIDENT_MINUTES"
+  echo "predictive_thresholds.pid_file_missing_is_incident: $PID_FILE_MISSING_IS_INCIDENT"
+  echo "warn_treatment.critical_domains: $WARN_TREATMENT_CRITICAL"
+  echo "warn_treatment.non_critical_domains: $WARN_TREATMENT_NON_CRITICAL"
+  echo
+
+  printf "%-18s %-10s %-16s %-6s %-12s %-15s %-10s %-34s %s\n" "domain" "status" "vm_hostname" "vmid" "proxmox" "proxmox_ip" "vm_state" "description" "policy_note"
+  printf "%-18s %-10s %-16s %-6s %-12s %-15s %-10s %-34s %s\n" "------------------" "----------" "----------------" "------" "------------" "---------------" "----------" "----------------------------------" "------------------------------"
+  for row in "${DOMAIN_ROWS[@]}"; do
+    IFS=$'\t' read -r domain status vm_host row_vmid row_proxmox row_pve_ip row_vm_state row_desc row_note <<< "$row"
+    printf "%-18s %-10s %-16s %-6s %-12s %-15s %-10s %-34s %s\n" \
+      "$domain" "$status" "$vm_host" "$row_vmid" "$row_proxmox" "$row_pve_ip" "$row_vm_state" "${row_desc:0:34}" "$row_note"
+  done
+
+  echo
+  printf "%-18s %-30s %-9s %-44s %s\n" "domain" "probe" "state" "run_key" "detail"
+  printf "%-18s %-30s %-9s %-44s %s\n" "------------------" "------------------------------" "---------" "--------------------------------------------" "------------------------------"
+  for row in "${PROBE_ROWS[@]}"; do
+    IFS=$'\t' read -r domain cap state run_key detail <<< "$row"
+    printf "%-18s %-30s %-9s %-44s %s\n" "$domain" "$cap" "$state" "${run_key:--}" "$detail"
+  done
+
+  echo
+  if [[ "$overall_status" == "incident" ]]; then
+    echo "summary: INCIDENT ($incident_count critical domains degraded)"
+  elif [[ "$overall_status" == "warn" ]]; then
+    echo "summary: WARN ($warn_count critical domains warning)"
+  else
+    echo "summary: HEALTHY (all critical domains green)"
+  fi
+fi
+
+if [[ "$incident_count" -gt 0 ]]; then
+  exit 1
+fi
+
+exit 0

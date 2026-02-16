@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/docs.impact.contract.yaml"
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "STOP: missing dependency: $1" >&2
+    exit 2
+  }
+}
+
+need_file() {
+  [[ -f "$1" ]] || {
+    echo "STOP: missing file: $1" >&2
+    exit 2
+  }
+}
+
+need_cmd yq
+need_file "$CONTRACT"
+
+MODE="$(yq -r '.defaults.mode // ""' "$CONTRACT")"
+WB_ROOT="$(yq -r '.defaults.workbench_root // ""' "$CONTRACT")"
+[[ -n "$WB_ROOT" && "$WB_ROOT" != "null" ]] || {
+  echo "STOP: docs impact contract is missing defaults.workbench_root" >&2
+  exit 2
+}
+
+echo "docs.impact.status"
+echo "contract: $CONTRACT"
+echo "workbench_root: $WB_ROOT"
+echo
+
+if [[ "$MODE" != "impact_scoped" ]]; then
+  echo "FAIL: defaults.mode must be impact_scoped (found: $MODE)"
+  exit 1
+fi
+
+FAILS=0
+TOTAL=0
+
+printf "%-18s %-8s %-8s %-8s %s\n" "domain" "runbook" "notes" "index" "detail"
+printf "%-18s %-8s %-8s %-8s %s\n" "------------------" "--------" "--------" "--------" "----------------------------"
+
+while IFS=$'\t' read -r domain runbook_rel notes_rel index_rel; do
+  [[ -z "$domain" ]] && continue
+  TOTAL=$((TOTAL + 1))
+
+  runbook_abs="$WB_ROOT/$runbook_rel"
+  notes_abs="$WB_ROOT/$notes_rel"
+  index_abs="$WB_ROOT/$index_rel"
+
+  runbook_ok="PASS"
+  notes_ok="PASS"
+  index_ok="PASS"
+  detail="ok"
+
+  if [[ ! -f "$runbook_abs" ]]; then
+    runbook_ok="FAIL"
+    detail="missing runbook"
+    FAILS=$((FAILS + 1))
+  fi
+
+  if [[ ! -d "$notes_abs" ]]; then
+    notes_ok="FAIL"
+    detail="missing notes dir"
+    FAILS=$((FAILS + 1))
+  fi
+
+  if [[ ! -f "$index_abs" ]]; then
+    index_ok="FAIL"
+    detail="missing index"
+    FAILS=$((FAILS + 1))
+  fi
+
+  printf "%-18s %-8s %-8s %-8s %s\n" "$domain" "$runbook_ok" "$notes_ok" "$index_ok" "$detail"
+done < <(yq -r '.domains[] | [.domain, .runbook, .notes_dir, .index] | @tsv' "$CONTRACT")
+
+echo
+echo "summary: $TOTAL domains, $FAILS contract violations"
+
+if [[ "$FAILS" -gt 0 ]]; then
+  echo "status: FAIL"
+  exit 1
+fi
+
+echo "status: OK"
+

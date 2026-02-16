@@ -44,4 +44,32 @@ while IFS= read -r rule_agent; do
   [[ "$found" == "true" ]] || fail "routing rule references unknown agent: $rule_agent"
 done < <(yq e '.routing_rules[].agent' "$REGISTRY" 2>/dev/null)
 
+# 5. Active workbench-owned agents must implement under workbench/agents/
+enforce_workbench="$(yq e -r '.contracts.active_workbench_agents.enforce // false' "$REGISTRY" 2>/dev/null || echo false)"
+if [[ "$enforce_workbench" == "true" ]]; then
+  impl_root="$(yq e -r '.contracts.active_workbench_agents.implementation_root // ""' "$REGISTRY" 2>/dev/null || true)"
+  [[ -n "$impl_root" ]] || fail "contracts.active_workbench_agents.implementation_root missing"
+
+  mapfile -t exempt_ids < <(yq e -r '.contracts.active_workbench_agents.exempt_agent_ids[]?' "$REGISTRY" 2>/dev/null || true)
+
+  is_exempt() {
+    local id="$1"
+    for ex in "${exempt_ids[@]:-}"; do
+      [[ "$id" == "$ex" ]] && return 0
+    done
+    return 1
+  }
+
+  while IFS=$'\t' read -r aid status impl; do
+    [[ -z "$aid" ]] && continue
+    [[ "$status" == "active" ]] || continue
+    is_exempt "$aid" && continue
+
+    impl_expanded="${impl/#\~/$HOME}"
+    if [[ "$impl_expanded" != "$impl_root"* ]]; then
+      fail "active agent '$aid' implementation must be under '$impl_root' (found: $impl)"
+    fi
+  done < <(yq e -r '.agents[] | [.id, .implementation_status, .implementation] | @tsv' "$REGISTRY" 2>/dev/null)
+fi
+
 echo "D49 PASS: agent discovery chain intact"

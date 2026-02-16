@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/vm.lifecycle.contract.yaml"
+BACKUP_INV="$ROOT/ops/bindings/backup.inventory.yaml"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+WRITE=0
+
+fail() {
+  echo "vm.lifecycle.derived.check FAIL: $*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --write) WRITE=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+vm-lifecycle-derived-check
+
+Usage:
+  vm-lifecycle-derived-check [--write]
+
+Checks canonical vm.lifecycle authority contract and verifies derived parity:
+  - required VM fields are present for each VM entry
+  - active VM backup_target values exist in backup.inventory.yaml
+  - active VM ssh_target values exist in ssh.targets.yaml
+
+With --write, emits ops/bindings/vm.lifecycle.derived.yaml.
+USAGE
+      exit 0
+      ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+yq e '.' "$CONTRACT" >/dev/null 2>&1 || fail "invalid YAML: $CONTRACT"
+
+LIFECYCLE_REL="$(yq e -r '.canonical // ""' "$CONTRACT" 2>/dev/null || true)"
+[[ -n "$LIFECYCLE_REL" ]] || fail "contract missing canonical path"
+LIFECYCLE="$ROOT/$LIFECYCLE_REL"
+[[ -f "$LIFECYCLE" ]] || fail "missing canonical vm lifecycle file: $LIFECYCLE"
+
+[[ -f "$BACKUP_INV" ]] || fail "missing backup inventory: $BACKUP_INV"
+[[ -f "$SSH_TARGETS" ]] || fail "missing ssh targets: $SSH_TARGETS"
+
+errors=0
+err() {
+  echo "  FAIL: $*" >&2
+  errors=$((errors + 1))
+}
+
+mapfile -t required_fields < <(yq e -r '.required_vm_fields[]?' "$CONTRACT" 2>/dev/null || true)
+(( ${#required_fields[@]} > 0 )) || fail "contract required_vm_fields is empty"
+
+vm_count="$(yq e '.vms | length' "$LIFECYCLE" 2>/dev/null || echo 0)"
+[[ "$vm_count" =~ ^[0-9]+$ ]] || vm_count=0
+
+active_count=0
+
+for ((i=0; i<vm_count; i++)); do
+  vmid="$(yq e -r ".vms[$i].vmid // \"\"" "$LIFECYCLE" 2>/dev/null || true)"
+  host="$(yq e -r ".vms[$i].hostname // \"\"" "$LIFECYCLE" 2>/dev/null || true)"
+  status="$(yq e -r ".vms[$i].status // \"\"" "$LIFECYCLE" 2>/dev/null || true)"
+
+  for field in "${required_fields[@]}"; do
+    value="$(yq e -r ".vms[$i].$field // \"\"" "$LIFECYCLE" 2>/dev/null || true)"
+    if [[ -z "$value" || "$value" == "null" ]]; then
+      err "vmid=${vmid:-unknown} host=${host:-unknown}: missing required field '$field'"
+    fi
+  done
+
+  [[ "$status" == "active" ]] || continue
+  active_count=$((active_count + 1))
+
+  backup_target="$(yq e -r ".vms[$i].backup_target // \"\"" "$LIFECYCLE" 2>/dev/null || true)"
+  if [[ -n "$backup_target" ]]; then
+    if ! yq e -r '.targets[].name' "$BACKUP_INV" 2>/dev/null | grep -qx "$backup_target"; then
+      err "vmid=$vmid host=$host: backup_target '$backup_target' not found in backup.inventory.yaml"
+    fi
+  fi
+
+  ssh_target="$(yq e -r ".vms[$i].ssh_target // \"\"" "$LIFECYCLE" 2>/dev/null || true)"
+  if [[ -n "$ssh_target" ]]; then
+    if ! yq e -r '.ssh.targets[].id // .targets[].id // ""' "$SSH_TARGETS" 2>/dev/null | grep -qx "$ssh_target"; then
+      # Support current shape (targets list) and nested shape fallback.
+      if ! yq e -r '.targets[].id // ""' "$SSH_TARGETS" 2>/dev/null | grep -qx "$ssh_target"; then
+        err "vmid=$vmid host=$host: ssh_target '$ssh_target' not found in ssh.targets.yaml"
+      fi
+    fi
+  fi
+done
+
+DERIVED_REL="$(yq e -r '.derived_outputs[0] // "ops/bindings/vm.lifecycle.derived.yaml"' "$CONTRACT" 2>/dev/null || true)"
+DERIVED_PATH="$ROOT/$DERIVED_REL"
+
+if [[ "$WRITE" -eq 1 ]]; then
+  tmp="$(mktemp)"
+  {
+    echo "# Generated from vm.lifecycle.contract.yaml"
+    echo "version: 1"
+    echo "generated_at: \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+    echo "source: \"$LIFECYCLE_REL\""
+    echo "active_vms:"
+    yq e -r '.vms[] | select(.status == "active") | "  - vmid: \(.vmid)\n    hostname: \(.hostname)\n    proxmox_host: \(.proxmox_host)\n    ssh_target: \(.ssh_target)\n    backup_target: \(.backup_target)"' "$LIFECYCLE" 2>/dev/null
+  } > "$tmp"
+  mv "$tmp" "$DERIVED_PATH"
+  echo "generated: $DERIVED_REL"
+fi
+
+echo "vm.lifecycle.derived.check"
+echo "contract: ops/bindings/vm.lifecycle.contract.yaml"
+echo "canonical: $LIFECYCLE_REL"
+echo "vm_count: $vm_count"
+echo "active_vm_count: $active_count"
+echo "errors: $errors"
+
+[[ "$errors" -eq 0 ]]

@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
+
+fail() {
+  echo "mcp.runtime.status FAIL: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+need_cmd yq
+need_cmd jq
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+yq e '.' "$CONTRACT" >/dev/null 2>&1 || fail "invalid YAML: $CONTRACT"
+
+collect_codex() {
+  local path="$1"
+  [[ -f "$path" ]] || return 0
+  jq -r '.mcpServers | to_entries[]? | "\(.key)\ttrue"' "$path" 2>/dev/null || true
+}
+
+collect_opencode() {
+  local path="$1"
+  [[ -f "$path" ]] || return 0
+  jq -r '.mcp | to_entries[]? | "\(.key)\t\((.value.enabled // true)|tostring)"' "$path" 2>/dev/null || true
+}
+
+collect_claude_desktop() {
+  local path="$1"
+  local project_path="$2"
+  [[ -f "$path" ]] || return 0
+
+  # Global/static entries.
+  jq -r '.mcpServers | to_entries[]? | "\(.key)\ttrue"' "$path" 2>/dev/null || true
+
+  # Project-local explicit server objects.
+  jq -r --arg p "$project_path" '.projects[$p].mcpServers | to_entries[]? | "\(.key)\ttrue"' "$path" 2>/dev/null || true
+
+  # Project enabled mcpjson server names (runtime toggles).
+  jq -r --arg p "$project_path" '.projects[$p].enabledMcpjsonServers[]? | "\(.)\ttrue"' "$path" 2>/dev/null || true
+}
+
+collect_surface() {
+  local surface="$1"
+  local path="$2"
+  local claude_project="$3"
+
+  case "$surface" in
+    codex) collect_codex "$path" ;;
+    opencode) collect_opencode "$path" ;;
+    claude_desktop) collect_claude_desktop "$path" "$claude_project" ;;
+    *) return 0 ;;
+  esac
+}
+
+resolve_candidates() {
+  local name="$1"
+  printf '%s\n' "$name"
+  yq e -r ".aliases.\"$name\"[]?" "$CONTRACT" 2>/dev/null || true
+}
+
+surface_path_for() {
+  local surface="$1"
+  yq e -r ".surface_paths.\"$surface\" // \"\"" "$CONTRACT" 2>/dev/null || true
+}
+
+claude_project="$(yq e -r '.claude_project_path // "/Users/ronnyworks"' "$CONTRACT" 2>/dev/null || true)"
+
+errors=0
+warns=0
+
+printf 'mcp.runtime.status\n'
+printf 'contract: %s\n\n' "$CONTRACT"
+
+while IFS= read -r surface; do
+  [[ -z "$surface" ]] && continue
+
+  surface_path="$(surface_path_for "$surface")"
+  [[ -n "$surface_path" ]] || {
+    echo "[$surface] WARN: no surface path configured"
+    warns=$((warns + 1))
+    continue
+  }
+
+  mapfile -t rows < <(collect_surface "$surface" "$surface_path" "$claude_project" | awk -F'\t' 'NF>=2' | awk '!seen[$1]++')
+
+  printf '[%s]\n' "$surface"
+  printf '  config: %s\n' "$surface_path"
+
+  if [[ ! -f "$surface_path" ]]; then
+    echo "  FAIL: config file missing"
+    errors=$((errors + 1))
+    echo ""
+    continue
+  fi
+
+  if (( ${#rows[@]} == 0 )); then
+    echo "  WARN: no MCP servers discovered"
+    warns=$((warns + 1))
+  else
+    echo "  discovered:"
+    for row in "${rows[@]}"; do
+      name="${row%%$'\t'*}"
+      enabled="${row#*$'\t'}"
+      printf '    - %s (enabled=%s)\n' "$name" "$enabled"
+    done
+  fi
+
+  while IFS= read -r required; do
+    [[ -z "$required" ]] && continue
+
+    found=0
+    enabled_found=0
+    match_name=""
+
+    mapfile -t candidates < <(resolve_candidates "$required" | awk 'NF' | awk '!seen[$0]++')
+    for cand in "${candidates[@]}"; do
+      for row in "${rows[@]}"; do
+        name="${row%%$'\t'*}"
+        enabled="${row#*$'\t'}"
+        if [[ "$name" == "$cand" ]]; then
+          found=1
+          match_name="$name"
+          if [[ "$enabled" == "true" ]]; then
+            enabled_found=1
+          fi
+        fi
+      done
+    done
+
+    if [[ "$found" -eq 0 ]]; then
+      echo "  FAIL: required server '$required' not registered"
+      errors=$((errors + 1))
+      continue
+    fi
+
+    if [[ "$enabled_found" -eq 0 ]]; then
+      echo "  FAIL: required server '$required' found but disabled"
+      errors=$((errors + 1))
+      continue
+    fi
+
+    if [[ "$match_name" != "$required" ]]; then
+      echo "  PASS: required '$required' resolved via alias '$match_name'"
+    else
+      echo "  PASS: required '$required' registered+enabled"
+    fi
+  done < <(yq e -r ".required_servers_by_surface.\"$surface\"[]?" "$CONTRACT" 2>/dev/null || true)
+
+  echo ""
+done < <(yq e -r '.required_servers_by_surface | keys | .[]' "$CONTRACT" 2>/dev/null || true)
+
+printf 'summary: errors=%s warnings=%s\n' "$errors" "$warns"
+[[ "$errors" -eq 0 ]]

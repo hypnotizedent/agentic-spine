@@ -24,6 +24,7 @@
 #   RESOLVED_RECEIPT_RETENTION_DAYS   integer
 #   RESOLVED_COMMIT_SIGN_REQUIRED     true|false
 #   RESOLVED_MULTI_AGENT_WRITES       proposal-only|direct
+#   RESOLVED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION proposal-only|direct
 #
 # ═══════════════════════════════════════════════════════════════
 
@@ -38,6 +39,7 @@ _BALANCED_PROPOSAL_REQUIRED="false"
 _BALANCED_RECEIPT_RETENTION_DAYS="30"
 _BALANCED_COMMIT_SIGN_REQUIRED="false"
 _BALANCED_MULTI_AGENT_WRITES="direct"
+_BALANCED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION="proposal-only"
 
 resolve_policy_knobs() {
   local sp="${SP:-${SPINE_ROOT:-${SPINE_CODE:-$HOME/code/agentic-spine}}}"
@@ -77,6 +79,7 @@ resolve_policy_knobs() {
   local receipt_retention_days="$_BALANCED_RECEIPT_RETENTION_DAYS"
   local commit_sign_required="$_BALANCED_COMMIT_SIGN_REQUIRED"
   local multi_agent_writes="$_BALANCED_MULTI_AGENT_WRITES"
+  local multi_agent_writes_when_multi_session="$_BALANCED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION"
 
   if [[ -f "$presets_file" ]] && command -v yq >/dev/null 2>&1; then
     local prefix=".presets.${preset_name}.knobs"
@@ -112,6 +115,9 @@ resolve_policy_knobs() {
 
     val="$(yq e "${prefix}.multi_agent_writes // \"\"" "$presets_file" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && multi_agent_writes="$val"
+
+    val="$(yq e "${prefix}.multi_agent_writes_when_multi_session // \"\"" "$presets_file" 2>/dev/null || true)"
+    [[ -n "$val" && "$val" != "null" ]] && multi_agent_writes_when_multi_session="$val"
   fi
 
   # ── Step 3: Apply per-knob overrides from tenant profile ──
@@ -148,6 +154,9 @@ resolve_policy_knobs() {
 
     val="$(yq e '.policy.overrides.multi_agent_writes // ""' "$profile_path" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && multi_agent_writes="$val"
+
+    val="$(yq e '.policy.overrides.multi_agent_writes_when_multi_session // ""' "$profile_path" 2>/dev/null || true)"
+    [[ -n "$val" && "$val" != "null" ]] && multi_agent_writes_when_multi_session="$val"
   fi
 
   # ── Step 4: Export resolved values ──
@@ -162,4 +171,5 @@ resolve_policy_knobs() {
   export RESOLVED_RECEIPT_RETENTION_DAYS="$receipt_retention_days"
   export RESOLVED_COMMIT_SIGN_REQUIRED="$commit_sign_required"
   export RESOLVED_MULTI_AGENT_WRITES="$multi_agent_writes"
+  export RESOLVED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION="$multi_agent_writes_when_multi_session"
 }

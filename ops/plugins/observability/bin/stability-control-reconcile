@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT_DEFAULT="$ROOT/ops/bindings/stability.control.contract.yaml"
+
+CONTRACT="$CONTRACT_DEFAULT"
+TARGET_DOMAIN=""
+INCLUDE_ALL=0
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --contract)
+      CONTRACT="${2:-}"
+      shift 2
+      ;;
+    --domain)
+      TARGET_DOMAIN="${2:-}"
+      shift 2
+      ;;
+    --all)
+      INCLUDE_ALL=1
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+stability-control-reconcile - Guided runtime recovery planner (output-only)
+
+Usage:
+  stability-control-reconcile [--contract <path>] [--domain <id>] [--all] [--json]
+
+Behavior:
+  - Runs read-only probe capabilities for configured critical domains
+  - Selects incident domains (or explicit --domain/--all selection)
+  - Prints ordered manual recovery commands with placeholders resolved from SSOT
+  - Never executes mutating recovery commands
+EOF
+      exit 0
+      ;;
+    *)
+      echo "STOP: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "STOP: missing dependency: $1" >&2
+    exit 2
+  }
+}
+
+need_file() {
+  [[ -f "$1" ]] || {
+    echo "STOP: missing file: $1" >&2
+    exit 2
+  }
+}
+
+need_cmd yq
+need_cmd jq
+need_file "$CONTRACT"
+
+VM_LIFECYCLE_REL="$(yq -r '.sources.vm_lifecycle // "ops/bindings/vm.lifecycle.yaml"' "$CONTRACT")"
+SSH_TARGETS_REL="$(yq -r '.sources.ssh_targets // "ops/bindings/ssh.targets.yaml"' "$CONTRACT")"
+VM_LIFECYCLE="$ROOT/$VM_LIFECYCLE_REL"
+SSH_TARGETS="$ROOT/$SSH_TARGETS_REL"
+need_file "$VM_LIFECYCLE"
+need_file "$SSH_TARGETS"
+
+mapfile -t DOMAINS < <(yq -r '.critical_domains[].id' "$CONTRACT")
+if [[ "${#DOMAINS[@]}" -eq 0 ]]; then
+  echo "STOP: no critical domains configured in contract" >&2
+  exit 2
+fi
+
+if [[ -n "$TARGET_DOMAIN" ]]; then
+  found=0
+  for domain in "${DOMAINS[@]}"; do
+    if [[ "$domain" == "$TARGET_DOMAIN" ]]; then
+      found=1
+      break
+    fi
+  done
+  if [[ "$found" -eq 0 ]]; then
+    echo "STOP: unknown domain '$TARGET_DOMAIN'" >&2
+    exit 2
+  fi
+fi
+
+run_probe() {
+  local capability="$1"
+  local tmp
+  tmp="$(mktemp)"
+
+  set +e
+  "$ROOT/bin/ops" cap run "$capability" >"$tmp" 2>&1
+  local rc=$?
+  set -e
+
+  local run_key
+  run_key="$(sed -n 's/^Run Key:[[:space:]]*//p' "$tmp" | tail -n1 | xargs || true)"
+
+  local detail
+  detail="$(grep -E 'summary:|status:' "$tmp" | tail -n1 || true)"
+  if [[ -z "$detail" ]]; then
+    detail="$(grep -E 'FAIL|STOP|disconnected|unreachable' "$tmp" | head -n1 || true)"
+  fi
+  if [[ -z "$detail" ]]; then
+    detail="exit_code=$rc"
+  fi
+
+  rm -f "$tmp"
+  printf '%s\t%s\t%s\n' "$rc" "$run_key" "$detail"
+}
+
+render_template() {
+  local template="$1"
+  local vmid="$2"
+  local vm_hostname="$3"
+  local proxmox_host="$4"
+  local proxmox_host_ip="$5"
+  local z2m_addon_slug="$6"
+
+  local out="$template"
+  out="${out//\{\{vmid\}\}/$vmid}"
+  out="${out//\{\{vm_hostname\}\}/$vm_hostname}"
+  out="${out//\{\{proxmox_host\}\}/$proxmox_host}"
+  out="${out//\{\{proxmox_host_ip\}\}/$proxmox_host_ip}"
+  out="${out//\{\{z2m_addon_slug\}\}/$z2m_addon_slug}"
+  printf '%s\n' "$out"
+}
+
+declare -a DOMAIN_STATUS_ROWS
+declare -a DOMAIN_META_ROWS
+declare -a PROBE_ROWS
+
+for domain in "${DOMAINS[@]}"; do
+  vm_hostname="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .vm_hostname // \"\"" "$CONTRACT" | head -n1)"
+  z2m_addon_slug="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .z2m_addon_slug // \"\"" "$CONTRACT" | head -n1)"
+  description="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .description // \"\"" "$CONTRACT" | head -n1)"
+
+  vmid="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\" and .phase != \"decommissioned\") | .vmid" "$VM_LIFECYCLE" | head -n1)"
+  proxmox_host="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\" and .phase != \"decommissioned\") | .proxmox_host" "$VM_LIFECYCLE" | head -n1)"
+  vm_status="$(yq -r ".vms[] | select(.hostname == \"$vm_hostname\" and .phase != \"decommissioned\") | .status" "$VM_LIFECYCLE" | head -n1)"
+  proxmox_host_ip="$(yq -r ".ssh.targets[] | select(.id == \"$proxmox_host\") | .host // \"\"" "$SSH_TARGETS" | head -n1)"
+
+  [[ -n "$vmid" ]] || vmid="n/a"
+  [[ -n "$proxmox_host" ]] || proxmox_host="n/a"
+  [[ -n "$proxmox_host_ip" ]] || proxmox_host_ip="n/a"
+  [[ -n "$vm_status" ]] || vm_status="unknown"
+
+  mapfile -t probes < <(yq -r ".probe_capabilities.\"$domain\"[]?" "$CONTRACT")
+
+  domain_status="healthy"
+  first_failure_detail=""
+  first_failure_cap=""
+
+  if [[ "${#probes[@]}" -eq 0 ]]; then
+    domain_status="incident"
+    first_failure_cap="-"
+    first_failure_detail="contract missing probe_capabilities entry"
+    PROBE_ROWS+=("$domain"$'\t'"-"$'\t'"fail"$'\t'"-"$'\t'"$first_failure_detail")
+  fi
+
+  for cap in "${probes[@]}"; do
+    result="$(run_probe "$cap")"
+    rc="$(printf '%s' "$result" | cut -f1)"
+    run_key="$(printf '%s' "$result" | cut -f2)"
+    detail="$(printf '%s' "$result" | cut -f3-)"
+    probe_state="pass"
+    if [[ "$rc" -ne 0 ]] || [[ "$detail" =~ FAIL|DEGRADED|UNREACHABLE ]]; then
+      probe_state="fail"
+      domain_status="incident"
+      if [[ -z "$first_failure_detail" ]]; then
+        first_failure_cap="$cap"
+        first_failure_detail="$detail"
+      fi
+    fi
+    PROBE_ROWS+=("$domain"$'\t'"$cap"$'\t'"$probe_state"$'\t'"$run_key"$'\t'"$detail")
+  done
+
+  DOMAIN_STATUS_ROWS+=("$domain"$'\t'"$domain_status"$'\t'"$first_failure_cap"$'\t'"$first_failure_detail")
+  DOMAIN_META_ROWS+=("$domain"$'\t'"$description"$'\t'"$vm_hostname"$'\t'"$vmid"$'\t'"$proxmox_host"$'\t'"$proxmox_host_ip"$'\t'"$vm_status"$'\t'"$z2m_addon_slug")
+done
+
+declare -a SELECTED_DOMAINS
+SELECTED_DOMAINS=()
+
+if [[ -n "$TARGET_DOMAIN" ]]; then
+  SELECTED_DOMAINS+=("$TARGET_DOMAIN")
+elif [[ "$INCLUDE_ALL" -eq 1 ]]; then
+  SELECTED_DOMAINS=("${DOMAINS[@]}")
+else
+  for row in "${DOMAIN_STATUS_ROWS[@]}"; do
+    IFS=$'\t' read -r domain domain_status _ _ <<< "$row"
+    if [[ "$domain_status" == "incident" ]]; then
+      SELECTED_DOMAINS+=("$domain")
+    fi
+  done
+fi
+
+if [[ "${#SELECTED_DOMAINS[@]}" -eq 0 ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "stability.control.reconcile" \
+      --arg selection "incident-only" \
+      '{capability: $capability, selection: $selection, incidents: [], message: "No critical incidents detected."}'
+  else
+    echo "stability.control.reconcile"
+    echo "selection: incident-only"
+    echo "status: healthy"
+    echo "message: No critical incidents detected."
+  fi
+  exit 0
+fi
+
+domain_json_rows=()
+
+for selected_domain in "${SELECTED_DOMAINS[@]}"; do
+  status_row=""
+  meta_row=""
+
+  for row in "${DOMAIN_STATUS_ROWS[@]}"; do
+    IFS=$'\t' read -r domain _ <<< "$row"
+    if [[ "$domain" == "$selected_domain" ]]; then
+      status_row="$row"
+      break
+    fi
+  done
+
+  for row in "${DOMAIN_META_ROWS[@]}"; do
+    IFS=$'\t' read -r domain _ <<< "$row"
+    if [[ "$domain" == "$selected_domain" ]]; then
+      meta_row="$row"
+      break
+    fi
+  done
+
+  IFS=$'\t' read -r domain domain_status first_failure_cap first_failure_detail <<< "$status_row"
+  IFS=$'\t' read -r _ description vm_hostname vmid proxmox_host proxmox_host_ip vm_status z2m_addon_slug <<< "$meta_row"
+
+  mapfile -t raw_templates < <(yq -r ".guided_recovery_commands.\"$domain\"[]?" "$CONTRACT")
+  rendered_templates=()
+  for template in "${raw_templates[@]}"; do
+    rendered_templates+=("$(render_template "$template" "$vmid" "$vm_hostname" "$proxmox_host" "$proxmox_host_ip" "$z2m_addon_slug")")
+  done
+
+  if [[ "$JSON_MODE" -eq 0 ]]; then
+    echo "stability.control.reconcile.domain"
+    echo "domain: $domain"
+    echo "status: $domain_status"
+    echo "description: $description"
+    echo "vm_hostname: $vm_hostname"
+    echo "vmid: $vmid"
+    echo "proxmox_host: $proxmox_host"
+    echo "proxmox_host_ip: $proxmox_host_ip"
+    echo "vm_state: $vm_status"
+    if [[ -n "$first_failure_cap" ]]; then
+      echo "first_failure_capability: $first_failure_cap"
+      echo "first_failure_detail: $first_failure_detail"
+    fi
+    echo "guided_recovery_commands:"
+    if [[ "${#rendered_templates[@]}" -eq 0 ]]; then
+      echo "  (none configured)"
+    else
+      idx=1
+      for cmd in "${rendered_templates[@]}"; do
+        echo "  $idx. $cmd"
+        idx=$((idx + 1))
+      done
+    fi
+    echo
+  fi
+
+  rendered_json="$(printf '%s\n' "${rendered_templates[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+  probe_json="$(
+    printf '%s\n' "${PROBE_ROWS[@]}" | jq -R -s --arg d "$domain" '
+      split("\n")
+      | map(select(length > 0))
+      | map(split("\t"))
+      | map(select(.[0] == $d))
+      | map({
+          capability: .[1],
+          status: .[2],
+          run_key: .[3],
+          detail: .[4]
+        })
+    '
+  )"
+  domain_json_rows+=("$(
+    jq -n \
+      --arg id "$domain" \
+      --arg status "$domain_status" \
+      --arg description "$description" \
+      --arg vm_hostname "$vm_hostname" \
+      --arg vmid "$vmid" \
+      --arg proxmox_host "$proxmox_host" \
+      --arg proxmox_host_ip "$proxmox_host_ip" \
+      --arg vm_state "$vm_status" \
+      --arg first_failure_capability "$first_failure_cap" \
+      --arg first_failure_detail "$first_failure_detail" \
+      --argjson guided_recovery_commands "$rendered_json" \
+      --argjson probes "$probe_json" \
+      '{
+        id: $id,
+        status: $status,
+        description: $description,
+        vm: {
+          hostname: $vm_hostname,
+          vmid: $vmid,
+          state: $vm_state,
+          proxmox_host: $proxmox_host,
+          proxmox_host_ip: $proxmox_host_ip
+        },
+        first_failure: {
+          capability: $first_failure_capability,
+          detail: $first_failure_detail
+        },
+        guided_recovery_commands: $guided_recovery_commands,
+        probes: $probes
+      }'
+  )")
+done
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  incidents_json="$(printf '%s\n' "${domain_json_rows[@]}" | jq -s '.')"
+  jq -n \
+    --arg capability "stability.control.reconcile" \
+    --arg selection "$( [[ -n "$TARGET_DOMAIN" ]] && echo "domain:$TARGET_DOMAIN" || ([[ "$INCLUDE_ALL" -eq 1 ]] && echo "all" || echo "incident-only") )" \
+    --arg vm_lifecycle "$VM_LIFECYCLE_REL" \
+    --arg ssh_targets "$SSH_TARGETS_REL" \
+    --argjson incidents "$incidents_json" \
+    '{
+      capability: $capability,
+      selection: $selection,
+      authority: {
+        vm_lifecycle: $vm_lifecycle,
+        ssh_targets: $ssh_targets
+      },
+      incidents: $incidents,
+      policy: "guided-only-no-auto-execution"
+    }'
+fi
+
+exit 0

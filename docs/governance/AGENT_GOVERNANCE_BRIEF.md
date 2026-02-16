@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-16
 scope: agent-governance-brief
 ---
 
@@ -51,15 +51,18 @@ scope: agent-governance-brief
 
 ## Query Hierarchy
 
-- **Tier 1: Direct read** — if you know the file, read it directly.
-- **Tier 2: RAG query** — for discovery questions ("where is X documented?", "how does the proposal flow work?"), use the `spine-rag` MCP tool (`rag_query`).
-- **Tier 3: `rg` search** — for exact string matching, or when RAG is unavailable.
-- **Fallback contract:** RAG down → `rg`. Never guess.
+- **Tier 1: Direct read** — if you already know the exact file, read it directly.
+- **Tier 2: Capability-first RAG** — for discovery questions (where is X, how does Y work), start with `./bin/ops cap run rag.anythingllm.ask "<question>"`.
+- **Tier 3: MCP (optional acceleration)** — use `spine-rag` MCP only when available.
+- **Tier 4: `rg` search** — exact-string fallback when capability/MCP discovery is unavailable.
+- **Fallback contract:** capability-first RAG is canonical; MCP is optional. Never guess.
 
 ## Verify & Receipts
 
-- Run `./bin/ops cap run spine.verify` before committing — 50+ drift gates check everything.
+- Day-to-day: run `./bin/ops cap run verify.pack.run <agent_id|domain>`.
+- Certification: run `./bin/ops cap run spine.verify` for release/nightly and final cutover.
 - Every capability execution auto-generates a receipt. Ledger is append-only.
+- Domain updates are impact-scoped: update the domain runbook and add a receipt note via `./bin/ops cap run docs.impact.note <domain> <receipt_run_key>`.
 - D61 enforces session closeout every 48h: `./bin/ops cap run agent.session.closeout`.
 
 ## Quick Commands
@@ -68,7 +71,11 @@ scope: agent-governance-brief
 - `./bin/ops status` — unified work status (loops + gaps + inbox)
 - `./bin/ops loops list --open` — list open loops only
 - `./bin/ops start loop <LOOP_ID>` — start worktree for a loop
-- `./bin/ops cap run spine.verify` — full drift check
+- `./bin/ops cap run verify.pack.list` — list verify packs
+- `./bin/ops cap run verify.pack.run <agent_id|domain>` — pack-first verify
+- `./bin/ops cap run stability.control.snapshot` — runtime reliability snapshot
+- `./bin/ops cap run stability.control.reconcile` — guided recovery command planner
+- `./bin/ops cap run spine.verify` — full drift check (release/nightly)
 - `/ctx` — load full governance context
 
 ## Embed Architecture (D65)

@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-12
+last_verified: 2026-02-16
 scope: terminal-c-orchestration
 ---
 
@@ -23,17 +23,35 @@ Canonical operating model for parallel terminal work without collisions.
 5. Stop immediately on any failed gate.
 
 ## Gate 0: Baseline
-Run from `~/code/agentic-spine`:
+Daily flow is predictive-first. Run from `~/code/agentic-spine`:
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops cap run spine.verify
+./bin/ops cap run stability.control.snapshot
+```
+
+If `stability.control.snapshot` fails, stop immediately. Run guided planning:
+
+```bash
+./bin/ops cap run stability.control.reconcile
+```
+
+Execute only the printed recovery commands manually (operator-controlled), then re-run snapshot until green.
+Only after snapshot is healthy, continue day-to-day checks:
+
+```bash
+./bin/ops cap run verify.pack.run core-operator
 ./bin/ops cap run gaps.status
-./bin/ops cap run proposals.status
 ./bin/ops cap run orchestration.status
 ```
 
-If any command fails, stop and fix baseline first.
+## Nightly / Release Certification
+
+Use full-suite verification for nightly/release only (not day-to-day):
+
+```bash
+./bin/ops cap run spine.verify
+```
 
 ## Gate 1: Open Loop
 Set values:
@@ -101,10 +119,16 @@ fails, stop and resolve before continuing to the next repo.
 
 ## Gate 4: Close Loop
 ```bash
-./bin/ops cap run spine.verify
+./bin/ops cap run verify.pack.run core-operator
 ./bin/ops cap run gaps.status
 ./bin/ops cap run orchestration.loop.close --loop-id "$LOOP_ID"
 ./bin/ops cap run agent.session.closeout
+```
+
+If this loop is a release/cutover loop, run full certification before closeout:
+
+```bash
+./bin/ops cap run spine.verify
 ```
 
 ## Post-Loop Hygiene
@@ -114,7 +138,7 @@ fails, stop and resolve before continuing to the next repo.
 4. Keep stash count at zero unless explicitly preserving WIP with owner note.
 
 ## Watcher Adoption Path
-1. Phase 1: Read-only watcher only (`spine.verify`, `gaps.status`, `orchestration.status`).
+1. Phase 1: Read-only watcher only (`verify.pack.run core-operator`, `stability.control.snapshot`, `gaps.status`, `orchestration.status`).
 2. Phase 2: Proposal/ticket drafting only, no apply.
 3. Phase 3: Terminal C approves every apply action.
 4. Phase 4: Allow limited autonomous apply for low-risk lanes only.

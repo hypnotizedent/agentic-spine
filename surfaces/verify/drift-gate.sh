@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-# drift-gate.sh - Constitutional drift detector (v2.9)
+# drift-gate.sh - Constitutional drift detector (v3.0)
 # ═══════════════════════════════════════════════════════════════
 #
 # Enforces the Minimal Spine Constitution.
@@ -132,7 +132,7 @@ gate_script() {
   rm -f "$tmp" 2>/dev/null || true
 }
 
-echo "=== DRIFT GATE (v2.9) ==="
+echo "=== DRIFT GATE (v3.0) ==="
 
 # D1: Top-level directory policy (10 allowed)
 # TRIAGE: Only bin/ docs/ fixtures/ infra/ mailroom/ ops/ receipts/ surfaces/ allowed at top level. Remove or move extra directories.
@@ -1113,6 +1113,41 @@ gate_script "$SP/surfaces/verify/d119-z2m-naming-parity.sh" "D119"
 
 echo -n "D120 HA area parity... "
 gate_script "$SP/surfaces/verify/d120-ha-area-parity.sh" "D120"
+
+echo -n "D121 Fabric boundary lock... "
+if [[ -x "$SP/surfaces/verify/d121-fabric-boundary-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d121-fabric-boundary-lock.sh" "D121"
+else
+  warn "fabric boundary lock gate not present"
+fi
+
+echo -n "D122 Domain docs route lock... "
+if [[ -x "$SP/surfaces/verify/d122-domain-doc-route-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d122-domain-doc-route-lock.sh" "D122"
+else
+  warn "domain docs route lock gate not present"
+fi
+
+echo -n "D123 Balanced policy safety lock... "
+if [[ -x "$SP/surfaces/verify/d123-strict-migration-policy-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d123-strict-migration-policy-lock.sh" "D123"
+else
+  warn "balanced policy safety lock gate not present"
+fi
+
+echo -n "D124 Entry surface parity lock... "
+if [[ -x "$SP/surfaces/verify/d124-entry-surface-parity-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d124-entry-surface-parity-lock.sh" "D124"
+else
+  warn "entry surface parity lock gate not present"
+fi
+
+echo -n "D125 MCP runtime parity lock... "
+if [[ -x "$SP/surfaces/verify/d125-mcp-runtime-parity-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d125-mcp-runtime-parity-lock.sh" "D125"
+else
+  warn "mcp runtime parity lock gate not present"
+fi
 
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then

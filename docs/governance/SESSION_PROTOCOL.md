@@ -57,16 +57,24 @@ Full spine access. Follow all sections below in order.
    - Confirm gate domain pack routing before mutation:
      - `./bin/ops cap run verify.drift_gates.certify --list-domains`
      - `./bin/ops cap run verify.drift_gates.certify --domain <name> --brief`
+   - Confirm agent-scoped verify packs:
+     - `./bin/ops cap run verify.pack.list`
+     - `./bin/ops cap run verify.pack.explain <agent_id|domain>`
    - Set `OPS_GATE_DOMAIN=<name>` (default is `core`) so preflight prints the active domain pack inline.
    - Install governance hooks once per clone: `./bin/ops hooks install` (warns in preflight if missing).
    - If you are about to touch secrets, make sure you sourced `~/.config/infisical/credentials` and can run the secrets gating capabilities (`secrets.binding`, `secrets.auth.status`, etc.).
 2. **Load context**
    - Generate or read the latest `docs/brain/context.md` if the script is available (see `docs/brain/README.md`).
    - Run `./bin/ops status` to see all open work (loops, gaps, inbox, anomalies). Prioritize closing existing work before starting new work.
+   - Enforce migration-era WIP cap: max 3 active loops. If 3+ loops are active, do not open a new loop until one closes.
+   - Use a 3-card intake before mutation work:
+     - objective (single sentence)
+     - done check (how completion will be verified)
+     - first command (deterministic first execution step)
    - Check available capabilities: `./bin/ops cap list` (SSOT: `ops/capabilities.yaml`). Do not invent commands.
    - Check available CLI tools: review `ops/bindings/cli.tools.inventory.yaml` or the "Available CLI Tools" section in `context.md`. If a user asks you to use a tool, check this inventory before searching the filesystem or web.
 3. **Trace truth**
-   - Use the query hierarchy before guessing answers or inventing storylines (Rule 2 from the brain layer): direct file read → `rag_query` (spine-rag MCP) → `rg` fallback. `mint ask` is deprecated.
+   - Use the query hierarchy before guessing answers or inventing storylines (Rule 2 from the brain layer): if the exact file is known, read it directly; otherwise start with capability-first RAG (`./bin/ops cap run rag.anythingllm.ask "<query>"`) → optional `spine-rag` MCP acceleration → `rg` fallback. `mint ask` is deprecated.
    - When you need policy or structure, follow the entry chain in `docs/governance/GOVERNANCE_INDEX.md`; trust the highest-priority SSOT in `docs/governance/SSOT_REGISTRY.yaml`.
    - Before guessing remote paths, consult `ops/bindings/docker.compose.targets.yaml` and `ops/bindings/ssh.targets.yaml` first. Never assume stack paths -- bindings are the SSOT for remote host paths.
    - **Before any shop network change:** run `./bin/ops cap run network.shop.audit.status` and do not proceed if it fails (D54 enforces SSOT/binding parity).
@@ -76,6 +84,7 @@ Full spine access. Follow all sections below in order.
    - **Worktrees are optional.** `./bin/ops start loop <LOOP_ID>` creates an isolated worktree if you want one. Committing directly to main is fine.
    - **Git authority:** Gitea (`origin`) is canonical; GitHub is mirror-only. See `docs/governance/GIT_REMOTE_AUTHORITY.md`.
    - **Share publish flow:** To publish curated content to the share channel, run the three-step capability flow: `share.publish.preflight` → `share.publish.preview` → `share.publish.apply --execute`. See `docs/governance/WORKBENCH_SHARE_PROTOCOL.md`.
+   - **Impact-scoped docs:** for domain work, update only the domain runbook and create a receipt note with `./bin/ops cap run docs.impact.note <domain> <receipt_run_key>`.
 
 ### Execution Mode Decision Tree
 
@@ -84,14 +93,15 @@ Full spine access. Follow all sections below in order.
 | Single read-only query | `ops cap run` (auto-approval) |
 | Single mutating action | `ops cap run` (manual approval) |
 | Multi-step coordinated work | Open a loop, use proposal flow |
-| Quick verify/status check | `ops cap run spine.verify` or `ops status` |
+| Quick verify/status check | `ops cap run verify.pack.run <agent_id|domain>` or `ops status` |
+| Release/nightly certification | `ops cap run spine.verify` |
 
 ### Gate Domain Packs (Terminal Routing)
 
 Use domain packs to make gate applicability explicit before mutation work.
 
 - Canonical binding: `ops/bindings/gate.domain.profiles.yaml`
-- Domain list: `core`, `secrets`, `aof`, `home`, `media`, `rag`, `workbench`, `infra`, `loop_gap`
+- Domain list: `core`, `secrets`, `aof`, `home`, `media`, `n8n`, `rag`, `workbench`, `infra`, `loop_gap`
 - Terminal default: `OPS_GATE_DOMAIN` unset → `core`
 
 Recommended pre-mutation command:

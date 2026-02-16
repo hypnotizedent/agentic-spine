@@ -1,0 +1,85 @@
+# Stability Control Contract
+# Status: authoritative
+# Last verified: 2026-02-16
+
+version: 1
+updated: "2026-02-16"
+owner: "@ronny"
+scope: blackhole-exit-runtime-reliability
+
+sources:
+  vm_lifecycle: ops/bindings/vm.lifecycle.yaml
+  vm_lifecycle_contract: ops/bindings/vm.lifecycle.contract.yaml
+  ssh_targets: ops/bindings/ssh.targets.yaml
+
+critical_domains:
+  - id: automation-stack
+    description: "Automation VM and n8n lane (VM 202)."
+    vm_hostname: automation-stack
+    incident_key: automation_unreachable
+
+  - id: finance-stack
+    description: "Finance VM and compose lane (VM 211)."
+    vm_hostname: finance-stack
+    incident_key: finance_unreachable
+
+  - id: z2m-bridge
+    description: "HA Zigbee2MQTT bridge availability."
+    vm_hostname: homeassistant
+    incident_key: z2m_bridge_disconnected
+    z2m_addon_slug: 45df7312_zigbee2mqtt
+
+probe_capabilities:
+  automation-stack:
+    - n8n.infra.health
+    - services.health.status
+  finance-stack:
+    - finance.stack.status
+  z2m-bridge:
+    - ha.z2m.health
+
+incident_thresholds:
+  fail_fast_after_checks: 1
+  max_reconcile_domains_per_run: 3
+  stale_heartbeat_minutes: 15
+
+predictive_thresholds:
+  vm_disk_headroom_min_gb: 20
+  vm_disk_headroom_min_percent: 15
+  vm_memory_headroom_min_percent: 20
+  vm_load_per_core_warn: 1.5
+  api_latency_warn_ms: 2000
+  api_latency_incident_ms: 5000
+  heartbeat_stale_warn_minutes: 10
+  pid_file_missing_is_incident: true
+
+warn_treatment:
+  critical_domains: incident
+  non_critical_domains: warn
+
+guided_recovery_commands:
+  automation-stack:
+    - "./bin/ops cap run infra.proxmox.maintenance.precheck --mode precheck --host-id {{proxmox_host}}"
+    - "./bin/ops cap run infra.proxmox.maintenance.startup --mode startup --host-id {{proxmox_host}} --execute"
+    - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
+    - "./bin/ops cap run docker.compose.up automation-stack automation"
+    - "./bin/ops cap run docker.compose.up automation-stack mcpjungle"
+    - "./bin/ops cap run n8n.infra.health"
+
+  finance-stack:
+    - "./bin/ops cap run infra.proxmox.maintenance.precheck --mode precheck --host-id {{proxmox_host}}"
+    - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
+    - "./bin/ops cap run docker.compose.up finance-stack finance"
+    - "./bin/ops cap run finance.stack.status"
+
+  z2m-bridge:
+    - "./bin/ops cap run ha.addons.snapshot"
+    - "./bin/ops cap run ha.addon.restart {{z2m_addon_slug}}"
+    - "./bin/ops cap run ha.z2m.health"
+
+report_outputs:
+  default_format: markdown
+  supports_json: true
+  include_run_keys: true
+  baseline_report_path: docs/governance/_audits/BLACKHOLE_BASELINE_20260216.md
+  recovery_report_path: docs/governance/_audits/BLACKHOLE_RECOVERY_CERT_20260226.md

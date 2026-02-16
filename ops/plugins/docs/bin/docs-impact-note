@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/docs.impact.contract.yaml"
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "STOP: missing dependency: $1" >&2
+    exit 2
+  }
+}
+
+need_file() {
+  [[ -f "$1" ]] || {
+    echo "STOP: missing file: $1" >&2
+    exit 2
+  }
+}
+
+usage() {
+  cat <<'EOF'
+docs-impact-note
+
+Usage:
+  docs-impact-note <domain> <receipt_run_key> [summary]
+
+Examples:
+  docs-impact-note n8n CAP-20260216-072745__verify.pack.list__Rydqx61858 "Validated pack routing"
+  docs-impact-note media RCAP-20260216-010456__ha.backup.create__Rrfbm56521
+EOF
+}
+
+need_cmd yq
+need_file "$CONTRACT"
+
+if [[ $# -lt 2 ]]; then
+  usage >&2
+  exit 2
+fi
+
+DOMAIN="$1"
+RECEIPT_KEY_IN="$2"
+SUMMARY="${3:-Impact-scoped doc update for this task.}"
+
+WB_ROOT="$(yq -r '.defaults.workbench_root // ""' "$CONTRACT")"
+RUNBOOK_REL="$(yq -r ".domains[] | select(.domain == \"$DOMAIN\") | .runbook" "$CONTRACT")"
+NOTES_REL="$(yq -r ".domains[] | select(.domain == \"$DOMAIN\") | .notes_dir" "$CONTRACT")"
+INDEX_REL="$(yq -r ".domains[] | select(.domain == \"$DOMAIN\") | .index" "$CONTRACT")"
+
+if [[ -z "$RUNBOOK_REL" || "$RUNBOOK_REL" == "null" ]]; then
+  echo "STOP: unknown domain '$DOMAIN' in $CONTRACT" >&2
+  exit 2
+fi
+
+RUNBOOK_ABS="$WB_ROOT/$RUNBOOK_REL"
+NOTES_ABS="$WB_ROOT/$NOTES_REL"
+INDEX_ABS="$WB_ROOT/$INDEX_REL"
+
+[[ -f "$RUNBOOK_ABS" ]] || {
+  echo "STOP: runbook missing for domain '$DOMAIN': $RUNBOOK_ABS" >&2
+  exit 2
+}
+
+mkdir -p "$NOTES_ABS"
+
+RECEIPT_KEY="$RECEIPT_KEY_IN"
+if [[ "$RECEIPT_KEY_IN" == CAP-* ]]; then
+  RECEIPT_KEY="R${RECEIPT_KEY_IN}"
+fi
+
+RECEIPT_PATH="$ROOT/receipts/sessions/$RECEIPT_KEY/receipt.md"
+if [[ ! -f "$RECEIPT_PATH" ]]; then
+  RECEIPT_PATH="(missing at $ROOT/receipts/sessions/$RECEIPT_KEY/receipt.md)"
+fi
+
+DATE_STAMP="$(date +%Y%m%d)"
+SAFE_KEY="$(printf '%s' "$RECEIPT_KEY_IN" | tr -c 'A-Za-z0-9._-:' '_')"
+NOTE_FILE="$NOTES_ABS/${DATE_STAMP}__${SAFE_KEY}.md"
+NOTE_REL="${NOTE_FILE#$WB_ROOT/}"
+NOTE_BASE="$(basename "$NOTE_FILE")"
+
+if [[ ! -f "$NOTE_FILE" ]]; then
+  cat >"$NOTE_FILE" <<EOF
+---
+status: reference
+owner: "@ronny"
+last_verified: $(date +%Y-%m-%d)
+scope: domain-impact-note
+domain: ${DOMAIN}
+receipt_run_key: ${RECEIPT_KEY_IN}
+---
+
+# Impact Note: ${DOMAIN} / ${RECEIPT_KEY_IN}
+
+## Scope
+${SUMMARY}
+
+## Runbook Delta
+- Updated domain runbook: \`${RUNBOOK_REL}\`
+
+## Receipt
+- \`${RECEIPT_PATH}\`
+
+## Verification
+- Run \`./bin/ops cap run verify.pack.run ${DOMAIN}\` when a domain pack exists, otherwise use the assigned agent pack.
+EOF
+fi
+
+NOTES_INDEX="$NOTES_ABS/INDEX.md"
+if [[ ! -f "$NOTES_INDEX" ]]; then
+  cat >"$NOTES_INDEX" <<'EOF'
+# Impact Notes Index
+
+EOF
+fi
+
+if ! grep -Fq "$NOTE_BASE" "$NOTES_INDEX"; then
+  echo "- [${DATE_STAMP} ${RECEIPT_KEY_IN}](${NOTE_BASE})" >>"$NOTES_INDEX"
+fi
+
+if [[ -f "$INDEX_ABS" ]]; then
+  if ! grep -q "^## Impact Notes" "$INDEX_ABS"; then
+    {
+      echo
+      echo "## Impact Notes"
+    } >>"$INDEX_ABS"
+  fi
+  if ! grep -Fq "notes/${NOTE_BASE}" "$INDEX_ABS"; then
+    echo "- [${DATE_STAMP} ${RECEIPT_KEY_IN}](notes/${NOTE_BASE})" >>"$INDEX_ABS"
+  fi
+fi
+
+echo "docs.impact.note"
+echo "domain: $DOMAIN"
+echo "note: $NOTE_REL"
+echo "runbook: $RUNBOOK_REL"
+echo "receipt: $RECEIPT_PATH"
+echo "status: OK"

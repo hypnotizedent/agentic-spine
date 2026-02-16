@@ -24,9 +24,12 @@ EXPECTED_SCRIPTS=(
   "nas-health-status"
   "gitea-status"
   "immich-status"
+  "immich-ingest-watch"
   "finance-stack-status"
   "idrac-health-status"
   "switch-health-status"
+  "stability-control-snapshot"
+  "stability-control-reconcile"
 )
 
 echo "observability-smoke-test"

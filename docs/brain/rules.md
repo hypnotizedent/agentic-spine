@@ -5,7 +5,7 @@
 
 ```
 1. NO OPEN LOOPS = NO WORK  → ./bin/ops loops list --open
-2. NO GUESSING = RAG FIRST  → query spine-rag MCP tool, then rg fallback
+2. NO GUESSING = CAPABILITY-FIRST RAG  → run rag.anythingllm.ask, MCP optional, then rg fallback
 3. NO INVENTING             → match existing patterns
 4. FIX ONE THING            → verify before next
 5. WORK GENERATES RECEIPTS  → ./bin/ops cap run <name>
@@ -27,8 +27,9 @@ Capability SSOT: `ops/capabilities.yaml`.
 
 **Discovery path:** When you need to find how something works in the spine:
 
-1. **Query RAG** via `spine-rag` MCP tool (`rag_query`)
-2. **Fallback to rg** if RAG unavailable or you know exact file
+1. **Capability-first query** via `./bin/ops cap run rag.anythingllm.ask "<query>"`
+2. **Optional MCP acceleration** via `spine-rag` (`rag_query`) when available
+3. **Fallback to rg** if capability/MCP discovery is unavailable or you know exact file
 
 Good RAG queries:
 - "How do I file a gap?"
@@ -48,7 +49,7 @@ Code changes, git commits, database writes, deploys, docker restarts.
 
 | Working on | Read first |
 |------------|------------|
-| **Discovery/How-to** | **Query RAG** (`spine-rag` MCP tool) |
+| **Discovery/How-to** | **Capability-first RAG** (`./bin/ops cap run rag.anythingllm.ask`) |
 | Data/files | docs/governance/INFRASTRUCTURE_MAP.md |
 | Code | docs/governance/AGENTS_GOVERNANCE.md |
 | Services | docs/governance/SERVICE_REGISTRY.yaml |

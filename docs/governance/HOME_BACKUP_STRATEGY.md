@@ -1,16 +1,18 @@
 ---
-status: merged
-merged_into: docs/governance/BACKUP_GOVERNANCE.md
-merged_date: 2026-02-13
+status: authoritative
 owner: "@ronny"
-scope: home-backup-strategy
+last_verified: "2026-02-16"
+scope: domain-pointer
+spine_pointer_stub: true
+authority_plane: domain_external
+authority_repo: "/Users/ronnyworks/code/workbench"
+authority_path: "docs/infrastructure/domains/home/HOME_BACKUP_STRATEGY.md"
+route_binding: "ops/bindings/domain.docs.routes.yaml"
 ---
 
-# Home Backup Strategy (MERGED)
+# HOME_BACKUP_STRATEGY.md (Pointer)
 
-This document has been merged into [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md).
+Canonical domain document moved to:
+"/Users/ronnyworks/code/workbench/docs/infrastructure/domains/home/HOME_BACKUP_STRATEGY.md"
 
-Home site backup tiers, schedules, retention, and NFS configuration are now
-maintained as a section within the consolidated backup governance document.
-
-See: **BACKUP_GOVERNANCE.md > Home Site > Home Backup Tiers**
+Spine retains this pointer stub only.

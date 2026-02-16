@@ -12,7 +12,8 @@
 
 - **Agent ID:** ms-graph-agent
 - **Domain:** identity (Microsoft Graph API — email, calendar, identity)
-- **MCP Server:** `~/code/workbench/infra/compose/mcpjungle/servers/microsoft-graph.json` (config-only)
+- **Workbench Implementation:** `~/code/workbench/agents/ms-graph/tools/ms_graph_tools.py`
+- **MCP Mirror:** `~/code/workbench/infra/compose/mcpjungle/servers/microsoft-graph.json`
 - **Registry:** `ops/bindings/agents.registry.yaml`
 
 ## Owns (Application Layer)
@@ -31,7 +32,27 @@
 
 ## Governed Tools
 
-No custom tools in MCPJungle (config-only MCP server). All MS Graph access is read-only via configured MCP package.
+Custom governed tools are workbench-owned and invoked through spine capabilities.
+
+### Mail tools
+
+- `mail_search`
+- `mail_get`
+- `mail_send`
+- `draft_create`
+- `draft_update`
+
+### Calendar tools
+
+- `calendar_list`
+- `calendar_get`
+- `calendar_create`
+- `calendar_update`
+- `calendar_rsvp`
+
+### Sprint guardrail
+
+- Delete/cancel/purge operations remain blocked.
 
 ## Invocation
 

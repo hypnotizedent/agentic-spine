@@ -1,42 +1,18 @@
 ---
-status: draft
+status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
-scope: backup-calendar
+last_verified: "2026-02-16"
+scope: domain-pointer
+spine_pointer_stub: true
+authority_plane: domain_external
+authority_repo: "/Users/ronnyworks/code/workbench"
+authority_path: "docs/infrastructure/domains/backup/BACKUP_CALENDAR.md"
+route_binding: "ops/bindings/domain.docs.routes.yaml"
 ---
 
-# Backup Calendar (.ics)
+# BACKUP_CALENDAR.md (Pointer)
 
-Goal: make backup cadence visible and subscribable (iPhone) without SSH or digging
-through cron/jobs on each host.
+Canonical domain document moved to:
+"/Users/ronnyworks/code/workbench/docs/infrastructure/domains/backup/BACKUP_CALENDAR.md"
 
-## Generate (Spine Capability)
-
-```bash
-./bin/ops cap run backup.calendar.generate
-```
-
-Output path (governed sink):
-
-- `mailroom/outbox/backup-calendar/backup-calendar.ics`
-
-Schedule source of truth:
-
-- `ops/bindings/backup.calendar.yaml`
-
-## Subscribe (Plan)
-
-The `.ics` must be reachable over HTTPS from the iPhone. The spine does not yet
-ship a calendar server.
-
-Recommended plan:
-
-1. **Tailnet-only**: serve the file over Tailscale on a trusted node (no public internet).
-2. **Long-term**: expose the ICS from the Mailroom bridge as `GET /backup-calendar.ics`
-   with explicit auth (tracked under `LOOP-MAILROOM-MCP-BRIDGE-20260210`).
-
-## Safety Notes
-
-- The calendar should contain schedules only (no secrets).
-- Do not expose publicly without an auth boundary (Tailscale ACLs, token, or both).
-
+Spine retains this pointer stub only.

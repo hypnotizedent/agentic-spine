@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+AGENT_PROFILES="$ROOT/ops/bindings/gate.agent.profiles.yaml"
+DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
+REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+
+fail() {
+  echo "verify.pack FAIL: $*" >&2
+  exit 1
+}
+
+need_file() {
+  [[ -f "$1" ]] || fail "missing file: $1"
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+usage() {
+  cat <<'USAGE'
+verify-pack
+
+Usage:
+  verify-pack list
+  verify-pack explain <agent_id|domain>
+  verify-pack run [<agent_id|domain>] [--json]
+
+Notes:
+  - Targets resolve first from gate.agent.profiles.yaml, then from gate.domain.profiles.yaml.
+  - If no target is supplied for run, defaults.default_pack is used.
+  - spine.verify remains the full-suite certification command.
+USAGE
+}
+
+need_file "$AGENT_PROFILES"
+need_file "$DOMAIN_PROFILES"
+need_file "$REGISTRY"
+need_cmd yq
+
+resolve_target_kind() {
+  local target="$1"
+  local agent_exists
+  local domain_exists
+
+  agent_exists="$(yq e ".profiles[] | select(.agent_id == \"$target\") | .agent_id" "$AGENT_PROFILES" 2>/dev/null || true)"
+  if [[ -n "$agent_exists" && "$agent_exists" != "null" ]]; then
+    echo "agent"
+    return 0
+  fi
+
+  domain_exists="$(yq e ".domains.\"$target\"" "$DOMAIN_PROFILES" 2>/dev/null || true)"
+  if [[ -n "$domain_exists" && "$domain_exists" != "null" ]]; then
+    echo "domain"
+    return 0
+  fi
+
+  return 1
+}
+
+read_gate_ids_for_target() {
+  local target="$1"
+  local kind="$2"
+
+  if [[ "$kind" == "agent" ]]; then
+    yq e -r ".profiles[] | select(.agent_id == \"$target\") | .gate_ids[]" "$AGENT_PROFILES" 2>/dev/null || true
+    return 0
+  fi
+
+  yq e -r ".domains.\"$target\".gate_ids[]" "$DOMAIN_PROFILES" 2>/dev/null || true
+}
+
+list_targets() {
+  local default_pack
+  default_pack="$(yq e -r '.defaults.default_pack // ""' "$AGENT_PROFILES" 2>/dev/null || true)"
+
+  echo "verify.pack.list"
+  echo "default_pack: ${default_pack:-none}"
+  echo ""
+  echo "agent_profiles:"
+  while IFS=$'\t' read -r agent domains; do
+    [[ -z "$agent" ]] && continue
+    if [[ "$agent" == "$default_pack" ]]; then
+      echo "  - $agent (default) domains=[$domains]"
+    else
+      echo "  - $agent domains=[$domains]"
+    fi
+  done < <(yq e -r '.profiles[] | [.agent_id, ((.domains // []) | join(","))] | @tsv' "$AGENT_PROFILES" 2>/dev/null)
+
+  echo ""
+  echo "domain_profiles:"
+  while IFS= read -r dom; do
+    [[ -z "$dom" ]] && continue
+    echo "  - $dom"
+  done < <(yq e -r '.domains | keys | .[]' "$DOMAIN_PROFILES" 2>/dev/null || true)
+}
+
+explain_target() {
+  local target="$1"
+  local kind
+
+  kind="$(resolve_target_kind "$target")" || fail "unknown target: $target"
+
+  mapfile -t raw_ids < <(read_gate_ids_for_target "$target" "$kind")
+  mapfile -t gate_ids < <(printf '%s\n' "${raw_ids[@]:-}" | awk 'NF && !seen[$0]++')
+
+  echo "verify.pack.explain"
+  echo "target: $target"
+  echo "kind: $kind"
+  echo "gate_count: ${#gate_ids[@]}"
+  echo ""
+
+  for gid in "${gate_ids[@]}"; do
+    local script
+    local inline
+    local retired
+    script="$(yq e -r ".gates[] | select(.id == \"$gid\") | .check_script // \"\"" "$REGISTRY" 2>/dev/null || true)"
+    inline="$(yq e -r ".gates[] | select(.id == \"$gid\") | .inline // false" "$REGISTRY" 2>/dev/null || echo false)"
+    retired="$(yq e -r ".gates[] | select(.id == \"$gid\") | .retired // false" "$REGISTRY" 2>/dev/null || echo false)"
+
+    if [[ -z "$script" || "$script" == "null" ]]; then
+      echo "  - $gid script=<missing-registry-entry>"
+      continue
+    fi
+
+    echo "  - $gid script=$script inline=$inline retired=$retired"
+  done
+}
+
+run_target() {
+  local target="$1"
+  local json_mode="$2"
+  local kind
+  local pass_count=0
+  local fail_count=0
+  local skipped_inline=0
+  local skipped_retired=0
+
+  kind="$(resolve_target_kind "$target")" || fail "unknown target: $target"
+
+  mapfile -t raw_ids < <(read_gate_ids_for_target "$target" "$kind")
+  mapfile -t gate_ids < <(printf '%s\n' "${raw_ids[@]:-}" | awk 'NF && !seen[$0]++')
+  (( ${#gate_ids[@]} > 0 )) || fail "target '$target' has no gate_ids"
+
+  declare -a failing_ids=()
+
+  if [[ "$json_mode" == "0" ]]; then
+    echo "verify.pack.run"
+    echo "target: $target"
+    echo "kind: $kind"
+    echo "gate_count: ${#gate_ids[@]}"
+    echo ""
+  fi
+
+  for gid in "${gate_ids[@]}"; do
+    local script_rel
+    local inline
+    local retired
+    local script_abs
+    local tmp
+    local rc
+
+    script_rel="$(yq e -r ".gates[] | select(.id == \"$gid\") | .check_script // \"\"" "$REGISTRY" 2>/dev/null || true)"
+    inline="$(yq e -r ".gates[] | select(.id == \"$gid\") | .inline // false" "$REGISTRY" 2>/dev/null || echo false)"
+    retired="$(yq e -r ".gates[] | select(.id == \"$gid\") | .retired // false" "$REGISTRY" 2>/dev/null || echo false)"
+
+    if [[ -z "$script_rel" || "$script_rel" == "null" ]]; then
+      fail_count=$((fail_count + 1))
+      failing_ids+=("$gid")
+      [[ "$json_mode" == "0" ]] && echo "$gid FAIL missing check_script in gate.registry.yaml"
+      continue
+    fi
+
+    if [[ "$retired" == "true" ]]; then
+      skipped_retired=$((skipped_retired + 1))
+      [[ "$json_mode" == "0" ]] && echo "$gid SKIP retired"
+      continue
+    fi
+
+    if [[ "$inline" == "true" ]]; then
+      skipped_inline=$((skipped_inline + 1))
+      [[ "$json_mode" == "0" ]] && echo "$gid SKIP inline-only (covered by full spine.verify)"
+      continue
+    fi
+
+    script_abs="$ROOT/$script_rel"
+    if [[ ! -x "$script_abs" ]]; then
+      fail_count=$((fail_count + 1))
+      failing_ids+=("$gid")
+      [[ "$json_mode" == "0" ]] && echo "$gid FAIL missing/non-executable script: $script_rel"
+      continue
+    fi
+
+    tmp="$(mktemp)"
+    set +e
+    bash "$script_abs" >"$tmp" 2>&1
+    rc=$?
+    set -e
+
+    if [[ "$rc" -eq 0 ]]; then
+      pass_count=$((pass_count + 1))
+      [[ "$json_mode" == "0" ]] && echo "$gid PASS"
+    else
+      fail_count=$((fail_count + 1))
+      failing_ids+=("$gid")
+      if [[ "$json_mode" == "0" ]]; then
+        echo "$gid FAIL (rc=$rc)"
+        sed -n '1,60p' "$tmp" | sed 's/^/  /' || true
+      fi
+    fi
+
+    rm -f "$tmp" >/dev/null 2>&1 || true
+  done
+
+  if [[ "$json_mode" == "1" ]]; then
+    printf '{\n'
+    printf '  "target": "%s",\n' "$target"
+    printf '  "kind": "%s",\n' "$kind"
+    printf '  "total": %s,\n' "${#gate_ids[@]}"
+    printf '  "pass": %s,\n' "$pass_count"
+    printf '  "fail": %s,\n' "$fail_count"
+    printf '  "skipped_inline": %s,\n' "$skipped_inline"
+    printf '  "skipped_retired": %s,\n' "$skipped_retired"
+    printf '  "failing_ids": ['
+    for i in "${!failing_ids[@]}"; do
+      [[ "$i" -gt 0 ]] && printf ', '
+      printf '"%s"' "${failing_ids[$i]}"
+    done
+    printf ']\n'
+    printf '}\n'
+  else
+    echo ""
+    echo "summary: pass=$pass_count fail=$fail_count skipped_inline=$skipped_inline skipped_retired=$skipped_retired"
+  fi
+
+  [[ "$fail_count" -eq 0 ]]
+}
+
+subcmd="${1:-}"
+[[ -n "$subcmd" ]] || { usage; exit 1; }
+shift || true
+
+case "$subcmd" in
+  list)
+    list_targets
+    ;;
+  explain)
+    target="${1:-}"
+    [[ -n "$target" ]] || fail "explain requires <agent_id|domain>"
+    explain_target "$target"
+    ;;
+  run)
+    json_mode=0
+    target=""
+
+    for arg in "$@"; do
+      case "$arg" in
+        --json) json_mode=1 ;;
+        *)
+          if [[ -z "$target" ]]; then
+            target="$arg"
+          else
+            fail "unexpected argument: $arg"
+          fi
+          ;;
+      esac
+    done
+
+    if [[ -z "$target" ]]; then
+      target="$(yq e -r '.defaults.default_pack // ""' "$AGENT_PROFILES" 2>/dev/null || true)"
+      [[ -n "$target" ]] || fail "no target provided and defaults.default_pack is empty"
+    fi
+
+    run_target "$target" "$json_mode"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    fail "unknown subcommand: $subcmd"
+    ;;
+esac

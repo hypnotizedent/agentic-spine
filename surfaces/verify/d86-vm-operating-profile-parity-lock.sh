@@ -6,19 +6,26 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
+CONTRACT="$ROOT/ops/bindings/vm.lifecycle.contract.yaml"
 PROFILE="$ROOT/ops/bindings/vm.operating.profile.yaml"
 
 fail() { echo "D86 FAIL: $*" >&2; exit 1; }
 
-[[ -f "$LIFECYCLE" ]] || fail "vm.lifecycle.yaml not found"
+[[ -f "$CONTRACT" ]] || fail "vm.lifecycle.contract.yaml not found"
 [[ -f "$PROFILE" ]] || fail "vm.operating.profile.yaml not found"
 command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+
+yq e '.' "$CONTRACT" >/dev/null 2>&1 || fail "invalid YAML: vm.lifecycle.contract.yaml"
+LIFECYCLE_REL="$(yq e -r '.canonical // ""' "$CONTRACT" 2>/dev/null || true)"
+[[ -n "$LIFECYCLE_REL" ]] || fail "vm.lifecycle.contract.yaml missing canonical path"
+LIFECYCLE="$ROOT/$LIFECYCLE_REL"
+[[ -f "$LIFECYCLE" ]] || fail "canonical lifecycle file missing: $LIFECYCLE_REL"
 
 ERRORS=0
 err() { echo "  $*" >&2; ERRORS=$((ERRORS + 1)); }
 
 REQUIRED_FIELDS="ssh_mode runtime_inspection_mode health_probe_policy startup_policy diagnostic_user_policy backup_policy"
+mapfile -t REQUIRED_VM_FIELDS < <(yq e -r '.required_vm_fields[]?' "$CONTRACT" 2>/dev/null || true)
 
 # Valid enum values per field
 VALID_SSH_MODES="standard non-standard haos lxc-root none"
@@ -38,6 +45,14 @@ profile_vmids=$(yq -r '.profiles[].vmid' "$PROFILE")
 while IFS= read -r vmid; do
   [[ -z "$vmid" ]] && continue
   hostname=$(yq -r ".vms[] | select(.vmid == $vmid) | .hostname" "$LIFECYCLE")
+
+  # Check canonical vm.lifecycle required fields from contract.
+  for vm_field in "${REQUIRED_VM_FIELDS[@]:-}"; do
+    vm_val=$(yq -r ".vms[] | select(.vmid == $vmid) | .$vm_field" "$LIFECYCLE")
+    if [[ -z "$vm_val" || "$vm_val" == "null" ]]; then
+      err "Active VM $vmid ($hostname) missing required lifecycle field '$vm_field'"
+    fi
+  done
 
   if ! echo "$profile_vmids" | grep -qx "$vmid"; then
     err "Active VM $vmid ($hostname) missing from vm.operating.profile.yaml"
