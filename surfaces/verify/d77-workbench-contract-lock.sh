@@ -28,6 +28,7 @@ VIOLATIONS=()
 PLIST_ALLOWLIST=(
   "dotfiles/macbook/launchd/com.ronny.agent-inbox.plist"
   "dotfiles/macbook/launchd/com.ronny.ha-baseline-refresh.plist"
+  "dotfiles/macbook/launchd/com.ronny.ha-sync-agent.plist"
 )
 
 while IFS= read -r plist; do

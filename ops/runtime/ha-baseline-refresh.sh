@@ -84,6 +84,41 @@ else
   echo "$LOG_PREFIX WARN: ha.ssot.apply failed (runbook may be stale)"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GIT SYNC (commit + push if bindings changed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+cd "$SPINE_ROOT"
+
+CHANGED_FILES=$(git diff --name-only ops/bindings/ha.*.yaml ops/bindings/z2m.*.yaml ops/bindings/zwave.*.yaml 2>/dev/null || true)
+
+if [[ -n "$CHANGED_FILES" ]]; then
+  echo
+  echo "$LOG_PREFIX Binding changes detected, committing..."
+
+  COMMIT_TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  COMMIT_MSG="sync(ha): weekly baseline refresh [$COMMIT_TS]
+
+Snapshots: $PASS/$((PASS + FAIL)) passed
+Files changed:
+$CHANGED_FILES"
+
+  git add ops/bindings/ha.*.yaml ops/bindings/z2m.*.yaml ops/bindings/zwave.*.yaml 2>/dev/null || true
+  git commit -m "$COMMIT_MSG"
+  echo "$LOG_PREFIX Committed binding changes"
+
+  if git remote | grep -q origin; then
+    echo "$LOG_PREFIX Pushing to origin..."
+    if git push origin main 2>&1; then
+      echo "$LOG_PREFIX Pushed successfully"
+    else
+      echo "$LOG_PREFIX WARN: Push failed (may need manual intervention)"
+    fi
+  fi
+else
+  echo "$LOG_PREFIX No binding changes to commit"
+fi
+
 echo
 echo "$LOG_PREFIX Finished at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo "$LOG_PREFIX Summary: $PASS/$((PASS + FAIL)) snapshots passed, baseline built"

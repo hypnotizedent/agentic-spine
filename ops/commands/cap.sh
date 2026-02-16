@@ -139,6 +139,8 @@ run_cap() {
     approval="$(yq e ".capabilities.\"$name\".approval" "$CAP_FILE")"
     local desc
     desc="$(yq e ".capabilities.\"$name\".description" "$CAP_FILE")"
+    local post_action
+    post_action="$(yq e ".capabilities.\"$name\".post_action // \"\"" "$CAP_FILE")"
 
     # ── Apply approval_default from policy preset ──
     # Top-level cap runs: strict preset forces manual approval
@@ -288,6 +290,19 @@ run_cap() {
             exit_code=0
         else
             exit_code=$?
+        fi
+        echo "────────────────────────────────────────"
+    fi
+
+    # ── Execute post_action if defined and main cap succeeded ──
+    if [[ "$exit_code" -eq 0 && -n "${post_action:-}" && "$post_action" != "null" ]]; then
+        echo ""
+        echo "== POST-ACTION: ${post_action} =="
+        echo "────────────────────────────────────────"
+        if SPINE_REPO="$SPINE_REPO" SPINE_CODE="$SPINE_CODE" SPINE_ROOT="$SPINE_CODE" "$SPINE_CODE/bin/ops" cap run "${post_action}" 2>&1 | tee -a "$output_file"; then
+            echo "POST-ACTION OK: ${post_action}"
+        else
+            echo "POST-ACTION WARN: ${post_action} failed (non-blocking)"
         fi
         echo "────────────────────────────────────────"
     fi

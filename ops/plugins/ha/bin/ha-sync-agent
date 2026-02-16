@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# ha-sync-agent — Event-driven HA binding sync daemon
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Connects to HA WebSocket event bus and triggers snapshot capabilities
+# when relevant HA events fire. Commits and pushes binding changes.
+#
+# Usage:
+#   ha-sync-agent --daemon    # Run as background daemon
+#   ha-sync-agent --once      # Single sync check (for testing)
+#   ha-sync-agent --status    # Show current status
+#
+# Requires: websocat (WebSocket client), jq, yq
+# ═══════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_CODE="${SPINE_CODE:-$SPINE_ROOT}"
+CONFIG_FILE="$SPINE_CODE/ops/bindings/ha.sync.config.yaml"
+INFISICAL_AGENT="$SPINE_CODE/ops/tools/infisical-agent.sh"
+PID_FILE="$SPINE_ROOT/mailroom/state/ha-sync-agent.pid"
+LOG_FILE="$SPINE_ROOT/mailroom/logs/ha-sync-agent.log"
+EVENT_QUEUE="$SPINE_ROOT/mailroom/state/ha-sync-events.queue"
+
+HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_PORT="${HA_PORT:-8123}"
+
+log() {
+  local ts
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "[$ts] $*" | tee -a "$LOG_FILE"
+}
+
+die() {
+  log "FATAL: $*"
+  exit 1
+}
+
+check_deps() {
+  local missing=()
+  command -v jq >/dev/null 2>&1 || missing+=("jq")
+  command -v yq >/dev/null 2>&1 || missing+=("yq")
+  
+  if (( ${#missing[@]} > 0 )); then
+    die "Missing dependencies: ${missing[*]}. Install: brew install ${missing[*]}"
+  fi
+}
+
+check_websocket_deps() {
+  if ! command -v websocat >/dev/null 2>&1; then
+    die "Missing websocat for WebSocket connection. Install: brew install websocat"
+  fi
+}
+
+get_ha_token() {
+  if [[ -z "${HA_TOKEN:-}" ]]; then
+    HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+  fi
+  if [[ -z "${HA_TOKEN:-}" ]]; then
+    die "HA_TOKEN not available from Infisical"
+  fi
+  echo "$HA_TOKEN"
+}
+
+get_snapshot_for_event() {
+  local event_type="$1"
+  yq e ".event_mappings.\"$event_type\".snapshot" "$CONFIG_FILE" 2>/dev/null || echo "null"
+}
+
+get_commit_prefix_for_event() {
+  local event_type="$1"
+  yq e ".event_mappings.\"$event_type\".commit_prefix" "$CONFIG_FILE" 2>/dev/null || echo "sync(ha): bindings refreshed"
+}
+
+run_snapshot() {
+  local snapshot_cap="$1"
+  local commit_prefix="$2"
+  
+  log "Running snapshot: $snapshot_cap"
+  
+  if "$SPINE_CODE/bin/ops" cap run "$snapshot_cap" >> "$LOG_FILE" 2>&1; then
+    log "Snapshot completed: $snapshot_cap"
+    
+    if yq e '.git.auto_commit' "$CONFIG_FILE" | grep -q 'true'; then
+      commit_if_changed "$commit_prefix"
+    fi
+  else
+    log "ERROR: Snapshot failed: $snapshot_cap"
+    return 1
+  fi
+}
+
+commit_if_changed() {
+  local commit_prefix="$1"
+  
+  cd "$SPINE_ROOT"
+  
+  local changed_files
+  changed_files=$(git diff --name-only ops/bindings/ha.*.yaml 2>/dev/null || true)
+  
+  if [[ -n "$changed_files" ]]; then
+    log "Binding changes detected, committing..."
+    
+    local commit_msg="$commit_prefix
+
+Event-driven sync via ha-sync-agent
+Files changed:
+$changed_files"
+
+    git add ops/bindings/ha.*.yaml
+    git commit -m "$commit_msg"
+    
+    if yq e '.git.auto_push' "$CONFIG_FILE" | grep -q 'true'; then
+      log "Pushing to origin..."
+      git push origin main
+    fi
+    
+    log "Committed and pushed binding changes"
+  else
+    log "No binding changes to commit"
+  fi
+}
+
+debounce_snapshot() {
+  local event_type="$1"
+  local snapshot_cap="$2"
+  local commit_prefix="$3"
+  
+  local delay
+  delay=$(yq e '.debounce.delay_seconds' "$CONFIG_FILE" 2>/dev/null || echo "2")
+  
+  echo "${event_type}:$(date +%s)" >> "$EVENT_QUEUE"
+  sleep "$delay"
+  
+  local latest_event
+  latest_event=$(grep "^${event_type}:" "$EVENT_QUEUE" 2>/dev/null | tail -1 || true)
+  
+  if [[ -n "$latest_event" ]]; then
+    local event_time
+    event_time=$(echo "$latest_event" | cut -d: -f2)
+    local now
+    now=$(date +%s)
+    local elapsed=$((now - event_time))
+    
+    if (( elapsed >= delay )); then
+      grep -v "^${event_type}:" "$EVENT_QUEUE" > "$EVENT_QUEUE.tmp" 2>/dev/null || true
+      mv "$EVENT_QUEUE.tmp" "$EVENT_QUEUE" 2>/dev/null || true
+      
+      run_snapshot "$snapshot_cap" "$commit_prefix"
+    fi
+  fi
+}
+
+process_event() {
+  local event_json="$1"
+  
+  local event_type
+  event_type=$(echo "$event_json" | jq -r '.event_type // empty' 2>/dev/null || true)
+  
+  if [[ -z "$event_type" ]]; then
+    return
+  fi
+  
+  log "Event received: $event_type"
+  
+  local snapshot_cap
+  snapshot_cap=$(get_snapshot_for_event "$event_type")
+  
+  if [[ -z "$snapshot_cap" || "$snapshot_cap" == "null" ]]; then
+    log "No snapshot mapped for event: $event_type"
+    return
+  fi
+  
+  local commit_prefix
+  commit_prefix=$(get_commit_prefix_for_event "$event_type")
+  
+  debounce_snapshot "$event_type" "$snapshot_cap" "$commit_prefix" &
+}
+
+connect_websocket() {
+  check_websocket_deps
+  
+  local ha_token
+  ha_token=$(get_ha_token)
+  
+  local ws_url="ws://${HA_HOST}:${HA_PORT}/api/websocket"
+  log "Connecting to HA WebSocket: $ws_url"
+  
+  local auth_msg
+  auth_msg=$(jq -n --arg token "$ha_token" '{type: "auth", access_token: $token}')
+  
+  local subscribe_state
+  subscribe_state='{"id": 1, "type": "subscribe_events"}'
+  
+  {
+    echo "$auth_msg"
+    sleep 1
+    echo "$subscribe_state"
+  } | websocat -t "$ws_url" 2>> "$LOG_FILE" | while read -r line; do
+    if echo "$line" | jq -e '.type == "event"' >/dev/null 2>&1; then
+      process_event "$(echo "$line" | jq '.event')"
+    fi
+  done
+}
+
+start_daemon() {
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "ha-sync-agent already running (PID: $pid)"
+      exit 0
+    fi
+    rm -f "$PID_FILE"
+  fi
+  
+  log "Starting ha-sync-agent daemon..."
+  
+  (
+    echo $$ > "$PID_FILE"
+    trap 'rm -f "$PID_FILE"; log "Daemon stopped"' EXIT
+    
+    local attempts=0
+    local max_attempts
+    max_attempts=$(yq e '.websocket.max_reconnect_attempts' "$CONFIG_FILE" 2>/dev/null || echo "10")
+    local delay
+    delay=$(yq e '.websocket.reconnect_delay_seconds' "$CONFIG_FILE" 2>/dev/null || echo "5")
+    
+    while true; do
+      if connect_websocket; then
+        attempts=0
+      else
+        ((attempts++))
+        if (( attempts >= max_attempts )); then
+          log "Max reconnect attempts reached, exiting"
+          exit 1
+        fi
+        log "Reconnect attempt $attempts/$max_attempts in ${delay}s"
+        sleep "$delay"
+      fi
+    done
+  ) &
+  
+  disown
+  echo "ha-sync-agent started (background)"
+}
+
+stop_daemon() {
+  if [[ ! -f "$PID_FILE" ]]; then
+    echo "ha-sync-agent not running"
+    exit 0
+  fi
+  
+  local pid
+  pid=$(cat "$PID_FILE")
+  
+  if kill -0 "$pid" 2>/dev/null; then
+    log "Stopping ha-sync-agent (PID: $pid)..."
+    kill "$pid"
+    rm -f "$PID_FILE"
+    echo "ha-sync-agent stopped"
+  else
+    echo "ha-sync-agent not running (stale PID file)"
+    rm -f "$PID_FILE"
+  fi
+}
+
+show_status() {
+  echo "=== ha-sync-agent status ==="
+  
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Status: running"
+      echo "PID: $pid"
+      echo "Uptime: $(ps -o etime= -p "$pid" 2>/dev/null || echo 'unknown')"
+    else
+      echo "Status: stopped (stale PID file)"
+    fi
+  else
+    echo "Status: stopped"
+  fi
+  
+  echo
+  echo "Config: $CONFIG_FILE"
+  echo "Log: $LOG_FILE"
+  
+  if [[ -f "$LOG_FILE" ]]; then
+    echo
+    echo "Last 5 log entries:"
+    tail -5 "$LOG_FILE"
+  fi
+}
+
+single_sync() {
+  log "Running single sync (testing mode)..."
+  
+  local snapshots=(
+    "ha.automations.snapshot"
+    "ha.scripts.snapshot"
+    "ha.scenes.snapshot"
+    "ha.helpers.snapshot"
+    "ha.integrations.snapshot"
+    "ha.addons.snapshot"
+    "ha.device.map.build"
+    "ha.entity.state.baseline"
+    "ha.ssot.baseline.build"
+  )
+  
+  for snapshot in "${snapshots[@]}"; do
+    log "Snapshot: $snapshot"
+    "$SPINE_CODE/bin/ops" cap run "$snapshot" >> "$LOG_FILE" 2>&1 || true
+  done
+  
+  commit_if_changed "sync(ha): manual sync"
+}
+
+check_deps
+
+mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
+
+case "${1:---status}" in
+  --daemon|-d)
+    start_daemon
+    ;;
+  --stop)
+    stop_daemon
+    ;;
+  --status)
+    show_status
+    ;;
+  --once|--single)
+    single_sync
+    ;;
+  --foreground|-f)
+    connect_websocket
+    ;;
+  *)
+    echo "Usage: ha-sync-agent [--daemon|--stop|--status|--once|--foreground]"
+    exit 1
+    ;;
+esac
