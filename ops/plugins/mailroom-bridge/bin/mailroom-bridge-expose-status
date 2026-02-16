@@ -45,10 +45,15 @@ fi
 if [[ -n "${public_url:-}" ]]; then
   if command -v curl >/dev/null 2>&1; then
     pub_health="${public_url%/}/health"
-    if curl -fsS --max-time 8 "$pub_health" >/dev/null 2>&1; then
+    http_code="$(curl -sS --max-time 8 -o /dev/null -w "%{http_code}" "$pub_health" 2>/dev/null || echo "000")"
+    if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
       echo "  public_health: OK (${pub_health})"
+    elif [[ "$http_code" == "403" ]]; then
+      echo "  public_health: PROTECTED (${pub_health} - Cloudflare Access auth boundary, reachable)"
+    elif [[ "$http_code" == "000" ]]; then
+      echo "  public_health: FAIL (${pub_health} - connection refused or timeout)"
     else
-      echo "  public_health: FAIL (${pub_health})"
+      echo "  public_health: FAIL (${pub_health} - HTTP $http_code)"
     fi
   else
     echo "  public_health: SKIP (curl missing)"
