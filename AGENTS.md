@@ -34,13 +34,17 @@ cd /Users/ronnyworks/code/agentic-spine
 ```
 <!-- /SPINE_STARTUP_BLOCK -->
 
+Release/nightly only:
+`./bin/ops cap run spine.verify`
+
 ## Source-Of-Truth Contract
 
 - Canonical governance/runtime: `/Users/ronnyworks/code/agentic-spine`
 - Tooling workspace: `/Users/ronnyworks/code/workbench` (compose, scripts, MCP configs — editable, not a runtime environment)
 - Legacy workspace: `$LEGACY_ROOT` (read-only reference only)
 - All governed receipts: `/Users/ronnyworks/code/agentic-spine/receipts/sessions`
-- All runtime queues/logs/state: `/Users/ronnyworks/code/agentic-spine/mailroom/*`
+- Mailroom runtime root contract: `/Users/ronnyworks/code/agentic-spine/ops/bindings/mailroom.runtime.contract.yaml`
+- Active runtime queues/logs/state: `/Users/ronnyworks/code/.runtime/spine-mailroom/*` when contract `active: true`
 
 <!-- GOVERNANCE_BRIEF -->
 ---

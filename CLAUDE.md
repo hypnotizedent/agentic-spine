@@ -26,6 +26,9 @@ cd /Users/ronnyworks/code/agentic-spine
 ```
 <!-- /SPINE_STARTUP_BLOCK -->
 
+Release/nightly only:
+`./bin/ops cap run spine.verify`
+
 ## Identity
 
 - User: Ronny

@@ -118,6 +118,7 @@ while IFS= read -r term; do
       "$WB_ROOT" "$MM_ROOT" \
       --glob '!**/.git/**' \
       --glob '!**/.archive/**' \
+      --glob '!**/archive/**' \
       --glob "!**/${legacy_a}/${legacy_b}/**" \
       --glob '!**/runtime/**' \
       --glob '!**/infra/data/**' \
