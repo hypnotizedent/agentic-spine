@@ -46,7 +46,10 @@ gate_active="$(yq -r '.gate_count.active // 0' "$SP/ops/bindings/gate.registry.y
 open_gaps="$(grep -c 'status: open' "$SP/ops/bindings/operational.gaps.yaml" 2>/dev/null || true)"
 scopes_dir="$SP/mailroom/state/loop-scopes"
 if [[ -d "$scopes_dir" ]]; then
-  open_loops="$(grep -l '^status: open' "$scopes_dir"/*.scope.md 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+  set +o pipefail
+  open_loops="$(grep -l '^status: open' "$scopes_dir"/*.scope.md 2>/dev/null | wc -l | tr -d ' ')"
+  set -o pipefail
+  open_loops="${open_loops:-0}"
 else
   open_loops=0
 fi
