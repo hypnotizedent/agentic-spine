@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# mailroom-bridge-consumers-sync — Keep bridge Cap-RPC allowlist/RBAC/docs in sync with a single SSOT.
+#
+# SSOT: ops/bindings/mailroom.bridge.consumers.yaml
+# Targets:
+#   - ops/bindings/mailroom.bridge.yaml (AUTO blocks)
+#   - docs/governance/MAILROOM_BRIDGE.md (AUTO block)
+#
+# Modes:
+#   --check  : verify files already match SSOT (no writes)
+#   (default): rewrite AUTO blocks to match SSOT
+set -euo pipefail
+
+SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+
+REGISTRY="$SP/ops/bindings/mailroom.bridge.consumers.yaml"
+BRIDGE_BINDING="$SP/ops/bindings/mailroom.bridge.yaml"
+DOC="$SP/docs/governance/MAILROOM_BRIDGE.md"
+CAPS="$SP/ops/capabilities.yaml"
+
+MODE="apply"
+if [[ "${1:-}" == "--check" ]]; then
+  MODE="check"
+  shift
+fi
+
+if [[ $# -gt 0 ]]; then
+  echo "Usage: mailroom-bridge-consumers-sync [--check]" >&2
+  exit 2
+fi
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "MISSING_DEP: python3" >&2; exit 2; }
+
+[[ -f "$REGISTRY" ]] || { echo "MISSING: $REGISTRY" >&2; exit 2; }
+[[ -f "$BRIDGE_BINDING" ]] || { echo "MISSING: $BRIDGE_BINDING" >&2; exit 2; }
+[[ -f "$DOC" ]] || { echo "MISSING: $DOC" >&2; exit 2; }
+[[ -f "$CAPS" ]] || { echo "MISSING: $CAPS" >&2; exit 2; }
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir" 2>/dev/null || true' EXIT
+
+allowlist_snip="$tmpdir/allowlist.yaml"
+roles_snip="$tmpdir/roles.yaml"
+doc_snip="$tmpdir/bridge_consumers.md"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+validate_caps_exist() {
+  local cap
+  while IFS= read -r cap; do
+    [[ -z "$cap" || "$cap" == "null" ]] && continue
+    if ! yq -e ".capabilities.\"$cap\" | type == \"!!map\"" "$CAPS" >/dev/null 2>&1; then
+      fail "registry references missing capability: $cap"
+    fi
+  done < <(yq -r '.cap_rpc.allowlist[]?' "$REGISTRY" 2>/dev/null || true)
+}
+
+validate_caps_exist
+
+# ── Generate allowlist snippet ───────────────────────────────────────────────
+{
+  echo "  allowlist:"
+  while IFS= read -r cap; do
+    [[ -z "$cap" || "$cap" == "null" ]] && continue
+    echo "    - $cap"
+  done < <(yq -r '.cap_rpc.allowlist[]?' "$REGISTRY" 2>/dev/null || true)
+} > "$allowlist_snip"
+
+# ── Generate roles snippet (token_env + allow only) ──────────────────────────
+{
+  echo "  roles:"
+  while IFS= read -r role; do
+    [[ -z "$role" || "$role" == "null" ]] && continue
+    token_env="$(yq -r ".cap_rpc.roles.\"$role\".token_env // \"\"" "$REGISTRY" 2>/dev/null || true)"
+    [[ -n "$token_env" ]] || fail "role '$role' missing token_env in registry"
+
+    echo "    $role:"
+    echo "      token_env: \"$token_env\""
+
+    allow_type="$(yq -r ".cap_rpc.roles.\"$role\".allow | type" "$REGISTRY" 2>/dev/null || true)"
+    if [[ "$allow_type" == "!!str" ]]; then
+      allow_val="$(yq -r ".cap_rpc.roles.\"$role\".allow" "$REGISTRY" 2>/dev/null || true)"
+      [[ -n "$allow_val" ]] || fail "role '$role' allow is empty"
+      echo "      allow: \"$allow_val\""
+    elif [[ "$allow_type" == "!!seq" ]]; then
+      echo "      allow:"
+      while IFS= read -r cap; do
+        [[ -z "$cap" || "$cap" == "null" ]] && continue
+        echo "        - $cap"
+      done < <(yq -r ".cap_rpc.roles.\"$role\".allow[]?" "$REGISTRY" 2>/dev/null || true)
+    else
+      fail "role '$role' allow must be string '*' or list (got: ${allow_type:-<unknown>})"
+    fi
+  done < <(yq -r '.cap_rpc.roles | to_entries[].key' "$REGISTRY" 2>/dev/null || true)
+} > "$roles_snip"
+
+# ── Generate doc snippet ─────────────────────────────────────────────────────
+{
+  echo "Bridge Cap-RPC consumers (SSOT: \`ops/bindings/mailroom.bridge.consumers.yaml\`):"
+  echo ""
+  echo "| Role | Token Env | Cap-RPC access |"
+  echo "|------|-----------|----------------|"
+
+  while IFS= read -r role; do
+    [[ -z "$role" || "$role" == "null" ]] && continue
+    token_env="$(yq -r ".cap_rpc.roles.\"$role\".token_env" "$REGISTRY")"
+    allow_type="$(yq -r ".cap_rpc.roles.\"$role\".allow | type" "$REGISTRY" 2>/dev/null || true)"
+
+    if [[ "$allow_type" == "!!str" ]]; then
+      allow_val="$(yq -r ".cap_rpc.roles.\"$role\".allow" "$REGISTRY")"
+      access="\\\`$allow_val\\\` (full allowlist)"
+    else
+      access="$(
+        yq -r ".cap_rpc.roles.\"$role\".allow[]?" "$REGISTRY" \
+          | python3 -c 'import sys; caps=[l.strip() for l in sys.stdin.read().splitlines() if l.strip()]; print(", ".join(f"`{c}`" for c in caps))'
+      )"
+    fi
+
+    echo "| \`$role\` | \`$token_env\` | $access |"
+  done < <(yq -r '.cap_rpc.roles | to_entries[].key' "$REGISTRY" 2>/dev/null || true)
+
+  echo ""
+  echo "Update path:"
+  echo "- \`bash ops/plugins/mailroom-bridge/bin/mailroom-bridge-consumers-sync\`"
+} > "$doc_snip"
+
+python3 - "$MODE" "$BRIDGE_BINDING" "$allowlist_snip" "$roles_snip" <<'PY'
+import sys
+from pathlib import Path
+
+mode, binding_path, allow_snip_path, roles_snip_path = sys.argv[1:5]
+
+binding = Path(binding_path)
+allow_snip = Path(allow_snip_path).read_text(encoding="utf-8").splitlines(True)
+roles_snip = Path(roles_snip_path).read_text(encoding="utf-8").splitlines(True)
+
+start_allow = "# BEGIN AUTO: consumers.allowlist"
+end_allow = "# END AUTO: consumers.allowlist"
+start_roles = "# BEGIN AUTO: consumers.roles"
+end_roles = "# END AUTO: consumers.roles"
+
+lines = binding.read_text(encoding="utf-8").splitlines(True)
+
+def replace_block(lines, start_marker, end_marker, new_lines):
+    start = None
+    end = None
+    for i, line in enumerate(lines):
+        if start is None and start_marker in line:
+            start = i
+        elif start is not None and end_marker in line:
+            end = i
+            break
+    if start is None or end is None or end <= start:
+        raise SystemExit(f"missing/invalid AUTO block markers: {start_marker} .. {end_marker}")
+    # Keep markers, replace inner content.
+    return lines[: start + 1] + new_lines + lines[end:]
+
+new_lines = replace_block(lines, start_allow, end_allow, allow_snip)
+new_lines = replace_block(new_lines, start_roles, end_roles, roles_snip)
+
+new_text = "".join(new_lines)
+old_text = "".join(lines)
+
+if mode == "check":
+    if new_text != old_text:
+        print("DRIFT: ops/bindings/mailroom.bridge.yaml does not match registry (run sync).", file=sys.stderr)
+        raise SystemExit(1)
+    raise SystemExit(0)
+
+binding.write_text(new_text, encoding="utf-8")
+PY
+
+python3 - "$MODE" "$DOC" "$doc_snip" <<'PY'
+import sys
+from pathlib import Path
+
+mode, doc_path, snip_path = sys.argv[1:4]
+
+doc = Path(doc_path)
+snip = Path(snip_path).read_text(encoding="utf-8").splitlines(True)
+
+start = "<!-- AUTO: BRIDGE_CONSUMERS_START -->"
+end = "<!-- AUTO: BRIDGE_CONSUMERS_END -->"
+
+lines = doc.read_text(encoding="utf-8").splitlines(True)
+
+start_i = None
+end_i = None
+for i, line in enumerate(lines):
+    if start_i is None and start in line:
+        start_i = i
+        continue
+    if start_i is not None and end in line:
+        end_i = i
+        break
+
+if start_i is None or end_i is None or end_i <= start_i:
+    raise SystemExit("missing/invalid AUTO doc block markers for bridge consumers")
+
+new_lines = lines[: start_i + 1] + snip + lines[end_i:]
+new_text = "".join(new_lines)
+old_text = "".join(lines)
+
+if mode == "check":
+    if new_text != old_text:
+        print("DRIFT: docs/governance/MAILROOM_BRIDGE.md does not match registry (run sync).", file=sys.stderr)
+        raise SystemExit(1)
+    raise SystemExit(0)
+
+doc.write_text(new_text, encoding="utf-8")
+PY
+
+if [[ "$MODE" == "check" ]]; then
+  echo "OK: bridge consumers match SSOT"
+else
+  echo "OK: synced bridge consumers from SSOT"
+fi

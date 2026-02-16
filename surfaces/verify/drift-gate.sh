@@ -1095,6 +1095,13 @@ gate_script "$SP/surfaces/verify/d114-ha-automation-stability.sh" "D114"
 echo -n "D115 HA SSOT baseline freshness... "
 gate_script "$SP/surfaces/verify/d115-ha-ssot-baseline-freshness.sh" "D115"
 
+echo -n "D116 Mailroom bridge consumers registry... "
+if [[ -x "$SP/surfaces/verify/d116-mailroom-bridge-consumers-registry-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d116-mailroom-bridge-consumers-registry-lock.sh" "D116"
+else
+  warn "mailroom bridge consumers registry gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

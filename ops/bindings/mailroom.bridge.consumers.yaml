@@ -1,0 +1,99 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-16
+scope: mailroom-bridge-consumers
+version: 1
+updated: "2026-02-16"
+
+# SSOT for Cap-RPC consumer access:
+# - cap_rpc.allowlist: capabilities permitted for HTTP /cap/run
+# - cap_rpc.roles: token-scoped RBAC subsets of the allowlist
+#
+# Canonical sync path:
+#   bash ops/plugins/mailroom-bridge/bin/mailroom-bridge-consumers-sync
+#
+# Canonical verification path (drift gate):
+#   D116 mailroom-bridge-consumers-registry-lock
+
+cap_rpc:
+  allowlist:
+    - spine.verify
+    - gaps.status
+    - loops.status
+    - proposals.status
+    - policy.runtime.audit
+    - tenant.storage.audit
+    - version.compat.verify
+    - evidence.export.plan
+    - surface.readonly.audit
+    - mailroom.bridge.status
+    - aof.status
+    - aof.version
+    - aof.policy.show
+    - aof.tenant.show
+    - aof.verify
+    - media.health.check
+    - media.service.status
+    - media.nfs.verify
+
+  roles:
+    operator:
+      token_env: "MAILROOM_BRIDGE_TOKEN"
+      allow: "*"
+      description: "Full access for spine operators (all allowlisted Cap-RPC capabilities)."
+
+    monitor:
+      token_env: "MAILROOM_BRIDGE_MONITOR_TOKEN"
+      allow:
+        - spine.verify
+        - gaps.status
+        - loops.status
+        - proposals.status
+        - mailroom.bridge.status
+        - aof.status
+        - aof.version
+      description: "Read-only monitoring (AOF status/version + core summaries)."
+
+    media-consumer:
+      token_env: "MAILROOM_BRIDGE_MEDIA_TOKEN"
+      allow:
+        - media.health.check
+        - media.service.status
+        - media.nfs.verify
+      description: "Read-only media stack health consumers."
+
+json_contract:
+  # Capabilities that MUST support a stable --json envelope when consumed over Cap-RPC.
+  #
+  # Contract keys (required):
+  #   capability, schema_version, status, generated_at, data
+  envelope_keys:
+    - capability
+    - schema_version
+    - status
+    - generated_at
+    - data
+
+  # Test harness: each entry is executed as:
+  #   <capability_command> --json <args...>
+  #
+  # NOTE: Some caps support offline filters so tests don't hit live infra.
+  caps:
+    - capability: aof.status
+      args: []
+    - capability: aof.version
+      args: []
+    - capability: aof.policy.show
+      args: []
+    - capability: aof.tenant.show
+      args: []
+    - capability: aof.verify
+      args: []
+
+    - capability: media.health.check
+      args: ["--vm", "__none__"]
+    - capability: media.service.status
+      args: ["--vm", "__none__", "--service", "__none__"]
+    - capability: media.nfs.verify
+      args: ["--vm", "__none__"]

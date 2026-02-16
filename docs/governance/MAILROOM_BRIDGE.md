@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-15
+last_verified: 2026-02-16
 scope: mailroom-bridge
 ---
 
@@ -64,6 +64,19 @@ RBAC role tokens (optional):
   - Examples:
     - `MAILROOM_BRIDGE_MONITOR_TOKEN` → `mailroom/state/mailroom-bridge-monitor.token`
     - `MAILROOM_BRIDGE_MEDIA_TOKEN` → `mailroom/state/mailroom-bridge-media.token`
+
+<!-- AUTO: BRIDGE_CONSUMERS_START -->
+Bridge Cap-RPC consumers (SSOT: `ops/bindings/mailroom.bridge.consumers.yaml`):
+
+| Role | Token Env | Cap-RPC access |
+|------|-----------|----------------|
+| `operator` | `MAILROOM_BRIDGE_TOKEN` | \`*\` (full allowlist) |
+| `monitor` | `MAILROOM_BRIDGE_MONITOR_TOKEN` | `spine.verify`, `gaps.status`, `loops.status`, `proposals.status`, `mailroom.bridge.status`, `aof.status`, `aof.version` |
+| `media-consumer` | `MAILROOM_BRIDGE_MEDIA_TOKEN` | `media.health.check`, `media.service.status`, `media.nfs.verify` |
+
+Update path:
+- `bash ops/plugins/mailroom-bridge/bin/mailroom-bridge-consumers-sync`
+<!-- AUTO: BRIDGE_CONSUMERS_END -->
 
 Supported headers:
 - `Authorization: Bearer <token>`
