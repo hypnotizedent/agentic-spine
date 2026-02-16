@@ -472,6 +472,12 @@ for domain in "${DOMAINS[@]}"; do
   [[ -n "$proxmox_host_ip" ]] || proxmox_host_ip="n/a"
   [[ -n "$vm_status" ]] || vm_status="unknown"
 
+  # Resolve per-domain latency threshold override (falls back to global).
+  _domain_lat_warn="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .threshold_overrides.api_latency_warn_ms // \"\"" "$CONTRACT" | head -n1)"
+  if [[ -z "$_domain_lat_warn" || "$_domain_lat_warn" == "null" ]]; then
+    _domain_lat_warn="$API_LAT_WARN_MS"
+  fi
+
   mapfile -t probes < <(yq -r ".probe_capabilities.\"$domain\"[]?" "$CONTRACT")
   domain_severity="pass"
   domain_note=""
@@ -500,11 +506,11 @@ for domain in "${DOMAINS[@]}"; do
         probe_status="warn"
       fi
       probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $API_LAT_INCIDENT_MS)"
-    elif [[ "$PROBE_DURATION_MS" -ge "$API_LAT_WARN_MS" ]]; then
+    elif [[ "$PROBE_DURATION_MS" -ge "$_domain_lat_warn" ]]; then
       if [[ "$probe_status" == "pass" ]]; then
         probe_status="warn"
       fi
-      probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $API_LAT_WARN_MS)"
+      probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $_domain_lat_warn)"
     fi
 
     hb_age="$(extract_heartbeat_age_minutes "$PROBE_OUTPUT")"
@@ -539,7 +545,18 @@ for domain in "${DOMAINS[@]}"; do
     PROBE_ROWS+=("$domain"$'\t'"$cap"$'\t'"$probe_status"$'\t'"$PROBE_RUN_KEY"$'\t'"$(sanitize_detail "$probe_detail")")
   done
 
+  # Apply per-domain threshold overrides if configured.
+  _saved_disk_min_gb="$DISK_MIN_GB"
+  _domain_disk_gb="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .threshold_overrides.vm_disk_headroom_min_gb // \"\"" "$CONTRACT" | head -n1)"
+  if [[ -n "$_domain_disk_gb" && "$_domain_disk_gb" != "null" ]]; then
+    DISK_MIN_GB="$_domain_disk_gb"
+  fi
+
   run_vm_predictive_probe "$vm_hostname"
+
+  # Restore global threshold.
+  DISK_MIN_GB="$_saved_disk_min_gb"
+
   domain_severity="$(promote_severity "$domain_severity" "$VM_PROBE_STATUS")"
   if [[ "$VM_PROBE_STATUS" == "incident" ]]; then
     domain_vm_incident=1
