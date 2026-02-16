@@ -99,7 +99,7 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 
 ## 3. Automation Inventory
 
-> 16 automations active. Critical fix: all button triggers include `not_from: ["unavailable", "unknown"]`.
+> 17 automations active. Critical fix: all button triggers include `not_from: ["unavailable", "unknown"]`.
 
 | Automation | Entity Trigger | Action | Notes |
 |-----------|---------------|--------|-------|
@@ -116,6 +116,7 @@ External tokens cannot access the Supervisor API. Add-on management requires the
 | Office: Button → Desk Bulb | `event.0xa4c138cdbd2d0012_action` (single) | `light.toggle` office desk bulb | Zigbee button (living room) |
 | Office: BILRESA Button 1 → Toggle Desk Bulb | `event.bilresa_dual_button_button_1` (multi_press_1) | `light.toggle` office desk bulb | Matter/Thread button |
 | Office: BILRESA Button 2 → Desk Bulb Brightness | `event.bilresa_dual_button_button_2` (multi_press_1/2/long) | `light.turn_on` at 100%/50%/1% | Matter/Thread button |
+| Office: Motion Nightlight | `binary_sensor.myggspray_wrlss_mtn_sensor_occupancy` on | `light.turn_on` desk bulb at 1% | 10pm–6am only, bulb must be off |
 | System: Auto-Dismiss Localhost Login Failures | event: persistent_notification from 127.0.0.1 | Dismiss notification | Noise suppression |
 | Zigbee: Low Battery Alert | numeric_state < 20% on 6 sensors | Notify Ronny iPhone | Health monitoring |
 | Zigbee: Stale Device Alert (Daily) | time 09:00 daily | Notify if button silent > 12h | Health monitoring |
