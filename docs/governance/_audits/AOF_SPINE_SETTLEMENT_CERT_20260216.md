@@ -57,3 +57,26 @@ Control-plane settlement of `/Users/ronnyworks/code/agentic-spine` to enforce:
 ## Residual Notes
 - Full release certification via `spine.verify` remains a release/nightly lane and was intentionally not run in this settlement pass.
 - Open loops remain operational and visible via `./bin/ops status`.
+
+## Revalidation Addendum (2026-02-16, post-stabilization wiring)
+
+Current topology state:
+- Gate registry: `131 total / 130 active / 1 retired`
+- Core mode: `8` gates (`D3,D48,D63,D67,D121,D124,D126,D127`)
+- Domain assignment: `130/130` active gates assigned in `ops/bindings/gate.execution.topology.yaml`
+
+Revalidation run keys:
+| Capability | Run Key | Result |
+|---|---|---|
+| `stability.control.snapshot` | `CAP-20260216-184816__stability.control.snapshot__Rth5z9540` | WARN (runtime latency/headroom), no boundary drift |
+| `surface.boundary.audit` | `CAP-20260216-184642__surface.boundary.audit__R5taa8497` | PASS (0 violations) |
+| `surface.boundary.reconcile.plan` | `CAP-20260216-184752__surface.boundary.reconcile.plan__Rz1a28989` | PASS (`violations: 0`) |
+| `catalog.domain.sync` | `CAP-20260216-184642__catalog.domain.sync__Rvnl08556` | PASS (`domains: 10`) |
+| `verify.core.run` | `CAP-20260216-183724__verify.core.run__Rjcav92107` | PASS (8/8) |
+| `verify.domain.run aof --force` | `CAP-20260216-183724__verify.domain.run__Rp57p92108` | PASS (14/14, includes D128 + D135) |
+| `verify.release.run` | `CAP-20260216-183623__verify.release.run__R0v8983173` | BYPASS (active stabilization window) |
+
+Notes:
+- Settlement boundary remains clean after runtime externalization and catalog sync.
+- Day-to-day flow remains `snapshot -> core -> route -> domain`.
+- Release lane is intentionally gated by active stabilization mode unless `--force` is used.
