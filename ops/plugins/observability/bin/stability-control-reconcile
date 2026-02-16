@@ -80,6 +80,27 @@ if [[ "${#DOMAINS[@]}" -eq 0 ]]; then
   exit 2
 fi
 
+# Use snapshot status as incident authority so reconcile selection matches
+# predictive scoring + warn_treatment behavior from stability.control.snapshot.
+declare -a SNAPSHOT_DOMAIN_ROWS
+mapfile -t SNAPSHOT_DOMAIN_ROWS < <(
+  "$ROOT/ops/plugins/observability/bin/stability-control-snapshot" --contract "$CONTRACT" --json 2>/dev/null \
+    | jq -r '.domains[]? | [.id, .status] | @tsv' 2>/dev/null || true
+)
+
+snapshot_status_for_domain() {
+  local target="$1"
+  local row domain status
+  for row in "${SNAPSHOT_DOMAIN_ROWS[@]:-}"; do
+    IFS=$'\t' read -r domain status <<< "$row"
+    if [[ "$domain" == "$target" ]]; then
+      printf '%s\n' "$status"
+      return
+    fi
+  done
+  printf '%s\n' ""
+}
+
 if [[ -n "$TARGET_DOMAIN" ]]; then
   found=0
   for domain in "${DOMAINS[@]}"; do
@@ -186,7 +207,13 @@ for domain in "${DOMAINS[@]}"; do
     PROBE_ROWS+=("$domain"$'\t'"$cap"$'\t'"$probe_state"$'\t'"$run_key"$'\t'"$detail")
   done
 
-  DOMAIN_STATUS_ROWS+=("$domain"$'\t'"$domain_status"$'\t'"$first_failure_cap"$'\t'"$first_failure_detail")
+  snapshot_status="$(snapshot_status_for_domain "$domain")"
+  final_status="$domain_status"
+  if [[ -n "$snapshot_status" ]]; then
+    final_status="$snapshot_status"
+  fi
+
+  DOMAIN_STATUS_ROWS+=("$domain"$'\t'"$domain_status"$'\t'"$final_status"$'\t'"$first_failure_cap"$'\t'"$first_failure_detail")
   DOMAIN_META_ROWS+=("$domain"$'\t'"$description"$'\t'"$vm_hostname"$'\t'"$vmid"$'\t'"$proxmox_host"$'\t'"$proxmox_host_ip"$'\t'"$vm_status"$'\t'"$z2m_addon_slug")
 done
 
@@ -199,8 +226,8 @@ elif [[ "$INCLUDE_ALL" -eq 1 ]]; then
   SELECTED_DOMAINS=("${DOMAINS[@]}")
 else
   for row in "${DOMAIN_STATUS_ROWS[@]}"; do
-    IFS=$'\t' read -r domain domain_status _ _ <<< "$row"
-    if [[ "$domain_status" == "incident" ]]; then
+    IFS=$'\t' read -r domain _ final_status _ _ <<< "$row"
+    if [[ "$final_status" == "incident" ]]; then
       SELECTED_DOMAINS+=("$domain")
     fi
   done
@@ -243,7 +270,7 @@ for selected_domain in "${SELECTED_DOMAINS[@]}"; do
     fi
   done
 
-  IFS=$'\t' read -r domain domain_status first_failure_cap first_failure_detail <<< "$status_row"
+  IFS=$'\t' read -r domain probe_domain_status final_status first_failure_cap first_failure_detail <<< "$status_row"
   IFS=$'\t' read -r _ description vm_hostname vmid proxmox_host proxmox_host_ip vm_status z2m_addon_slug <<< "$meta_row"
 
   mapfile -t raw_templates < <(yq -r ".guided_recovery_commands.\"$domain\"[]?" "$CONTRACT")
@@ -255,7 +282,11 @@ for selected_domain in "${SELECTED_DOMAINS[@]}"; do
   if [[ "$JSON_MODE" -eq 0 ]]; then
     echo "stability.control.reconcile.domain"
     echo "domain: $domain"
-    echo "status: $domain_status"
+    echo "status: $final_status"
+    if [[ "$probe_domain_status" != "$final_status" ]]; then
+      echo "selection_basis: snapshot_status"
+      echo "probe_status: $probe_domain_status"
+    fi
     echo "description: $description"
     echo "vm_hostname: $vm_hostname"
     echo "vmid: $vmid"
@@ -297,7 +328,8 @@ for selected_domain in "${SELECTED_DOMAINS[@]}"; do
   domain_json_rows+=("$(
     jq -n \
       --arg id "$domain" \
-      --arg status "$domain_status" \
+      --arg status "$final_status" \
+      --arg probe_status "$probe_domain_status" \
       --arg description "$description" \
       --arg vm_hostname "$vm_hostname" \
       --arg vmid "$vmid" \
@@ -311,6 +343,7 @@ for selected_domain in "${SELECTED_DOMAINS[@]}"; do
       '{
         id: $id,
         status: $status,
+        probe_status: $probe_status,
         description: $description,
         vm: {
           hostname: $vm_hostname,
