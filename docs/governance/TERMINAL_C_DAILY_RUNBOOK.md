@@ -41,6 +41,7 @@ Only after snapshot is healthy, continue day-to-day checks:
 
 ```bash
 ./bin/ops cap run verify.pack.run core-operator
+./bin/ops cap run workbench.impl.audit --strict
 ./bin/ops cap run gaps.status
 ./bin/ops cap run orchestration.status
 ```

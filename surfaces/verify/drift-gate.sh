@@ -1149,6 +1149,13 @@ else
   warn "mcp runtime parity lock gate not present"
 fi
 
+echo -n "D126 Workbench implementation path lock... "
+if [[ -x "$SP/surfaces/verify/d126-workbench-implementation-path-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d126-workbench-implementation-path-lock.sh" "D126"
+else
+  warn "workbench implementation path lock gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1

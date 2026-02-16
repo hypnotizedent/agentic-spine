@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# TRIAGE: Keep domain_external capability implementation paths truthful and discoverable.
+# Verifies every domain_external capability resolves to an existing path in canonical workbench.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CAPS="${CAPABILITIES_FILE:-$ROOT/ops/capabilities.yaml}"
+BOUNDARY="${FABRIC_BOUNDARY_FILE:-$ROOT/ops/bindings/fabric.boundary.contract.yaml}"
+
+STRICT=0
+LIST_MODE=0
+DOMAIN_FILTER=""
+
+usage() {
+  cat <<'USAGE'
+workbench-impl-audit
+
+Usage:
+  workbench-impl-audit [--strict] [--list] [--domain <name>]
+
+Options:
+  --strict         Exit non-zero if any domain_external path is missing or invalid.
+  --list           Print capability -> resolved path mapping with status.
+  --domain <name>  Filter to a single domain (e.g., immich, n8n, graph).
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --strict)
+      STRICT=1
+      shift
+      ;;
+    --list)
+      LIST_MODE=1
+      shift
+      ;;
+    --domain)
+      DOMAIN_FILTER="${2:?--domain requires a value}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+fail() {
+  echo "workbench.impl.audit FAIL: $*" >&2
+  exit 1
+}
+
+[[ -f "$CAPS" ]] || fail "capabilities file missing: $CAPS"
+[[ -f "$BOUNDARY" ]] || fail "boundary contract missing: $BOUNDARY"
+command -v yq >/dev/null 2>&1 || fail "required tool missing: yq"
+
+yq e '.' "$CAPS" >/dev/null 2>&1 || fail "invalid YAML: $CAPS"
+yq e '.' "$BOUNDARY" >/dev/null 2>&1 || fail "invalid YAML: $BOUNDARY"
+
+WB_REPO="$(yq e -r '.workbench.canonical_repo // ""' "$BOUNDARY")"
+[[ -n "$WB_REPO" && "$WB_REPO" != "null" ]] || fail "missing workbench.canonical_repo in boundary contract"
+
+declare -i total=0 ok=0 missing=0 metadata_errors=0 repo_errors=0
+declare -A domain_total=()
+declare -A domain_ok=()
+declare -A domain_missing=()
+declare -a missing_entries=()
+declare -a metadata_entries=()
+declare -a repo_entries=()
+declare -a list_entries=()
+
+while IFS=$'\t' read -r cap domain repo path; do
+  [[ -z "$cap" ]] && continue
+
+  if [[ -n "$DOMAIN_FILTER" && "$domain" != "$DOMAIN_FILTER" ]]; then
+    continue
+  fi
+
+  total=$((total + 1))
+
+  domain_key="$domain"
+  [[ -n "$domain_key" ]] || domain_key="none"
+  domain_total["$domain_key"]=$(( ${domain_total["$domain_key"]:-0} + 1 ))
+
+  if [[ -z "$repo" || -z "$path" ]]; then
+    metadata_errors=$((metadata_errors + 1))
+    missing=$((missing + 1))
+    domain_missing["$domain_key"]=$(( ${domain_missing["$domain_key"]:-0} + 1 ))
+    metadata_entries+=("$cap|$domain_key|repo='$repo' path='$path'")
+    if [[ "$LIST_MODE" -eq 1 ]]; then
+      list_entries+=("$cap|$domain_key|metadata_error|<invalid>")
+    fi
+    continue
+  fi
+
+  if [[ "$repo" != "$WB_REPO" ]]; then
+    repo_errors=$((repo_errors + 1))
+    missing=$((missing + 1))
+    domain_missing["$domain_key"]=$(( ${domain_missing["$domain_key"]:-0} + 1 ))
+    repo_entries+=("$cap|$domain_key|repo=$repo expected=$WB_REPO")
+    if [[ "$LIST_MODE" -eq 1 ]]; then
+      list_entries+=("$cap|$domain_key|repo_mismatch|$repo/$path")
+    fi
+    continue
+  fi
+
+  if [[ "$path" = /* ]]; then
+    target="$path"
+  else
+    target="$repo/$path"
+  fi
+
+  if [[ "$target" != "$WB_REPO"* ]]; then
+    repo_errors=$((repo_errors + 1))
+    missing=$((missing + 1))
+    domain_missing["$domain_key"]=$(( ${domain_missing["$domain_key"]:-0} + 1 ))
+    repo_entries+=("$cap|$domain_key|target=$target outside=$WB_REPO")
+    if [[ "$LIST_MODE" -eq 1 ]]; then
+      list_entries+=("$cap|$domain_key|outside_workbench|$target")
+    fi
+    continue
+  fi
+
+  if [[ -e "$target" ]]; then
+    ok=$((ok + 1))
+    domain_ok["$domain_key"]=$(( ${domain_ok["$domain_key"]:-0} + 1 ))
+    if [[ "$LIST_MODE" -eq 1 ]]; then
+      list_entries+=("$cap|$domain_key|ok|$target")
+    fi
+  else
+    missing=$((missing + 1))
+    domain_missing["$domain_key"]=$(( ${domain_missing["$domain_key"]:-0} + 1 ))
+    missing_entries+=("$cap|$domain_key|$target")
+    if [[ "$LIST_MODE" -eq 1 ]]; then
+      list_entries+=("$cap|$domain_key|missing|$target")
+    fi
+  fi
+done < <(
+  yq e -r '.capabilities
+    | to_entries[]
+    | select((.value.plane // "") == "domain_external")
+    | [.key, (.value.domain // "none"), (.value.implementation_repo // ""), (.value.implementation_path // "")]
+    | @tsv' "$CAPS"
+)
+
+echo "workbench.impl.audit"
+echo "source: $CAPS"
+echo "workbench_repo: $WB_REPO"
+if [[ -n "$DOMAIN_FILTER" ]]; then
+  echo "domain_filter: $DOMAIN_FILTER"
+fi
+echo "domain_external_capabilities: $total"
+echo "resolved_paths_exist: $ok"
+echo "missing_paths: $missing"
+echo "metadata_errors: $metadata_errors"
+echo "repo_errors: $repo_errors"
+echo ""
+
+echo "by_domain:"
+if [[ "${#domain_total[@]}" -eq 0 ]]; then
+  echo "  (none)"
+else
+  mapfile -t domain_keys < <(printf '%s\n' "${!domain_total[@]}" | sort)
+  for domain_key in "${domain_keys[@]}"; do
+    d_total="${domain_total["$domain_key"]:-0}"
+    d_ok="${domain_ok["$domain_key"]:-0}"
+    d_missing="${domain_missing["$domain_key"]:-0}"
+    echo "  - $domain_key: total=$d_total ok=$d_ok missing=$d_missing"
+  done
+fi
+
+if [[ "${#metadata_entries[@]}" -gt 0 ]]; then
+  echo ""
+  echo "metadata_violations:"
+  for row in "${metadata_entries[@]}"; do
+    IFS='|' read -r cap domain_key detail <<<"$row"
+    echo "  - $cap (domain=$domain_key): $detail"
+  done
+fi
+
+if [[ "${#repo_entries[@]}" -gt 0 ]]; then
+  echo ""
+  echo "repo_scope_violations:"
+  for row in "${repo_entries[@]}"; do
+    IFS='|' read -r cap domain_key detail <<<"$row"
+    echo "  - $cap (domain=$domain_key): $detail"
+  done
+fi
+
+if [[ "${#missing_entries[@]}" -gt 0 ]]; then
+  echo ""
+  echo "missing_paths_detail:"
+  for row in "${missing_entries[@]}"; do
+    IFS='|' read -r cap domain_key target <<<"$row"
+    echo "  - $cap (domain=$domain_key): $target"
+  done
+fi
+
+if [[ "$LIST_MODE" -eq 1 ]]; then
+  echo ""
+  echo "capability_path_map:"
+  echo "  capability | domain | status | target"
+  if [[ "${#list_entries[@]}" -eq 0 ]]; then
+    echo "  (none)"
+  else
+    for row in "${list_entries[@]}"; do
+      IFS='|' read -r cap domain_key status target <<<"$row"
+      echo "  $cap | $domain_key | $status | $target"
+    done
+  fi
+fi
+
+if [[ "$STRICT" -eq 1 && ( "$missing" -gt 0 || "$metadata_errors" -gt 0 || "$repo_errors" -gt 0 ) ]]; then
+  exit 1
+fi
+
+exit 0
