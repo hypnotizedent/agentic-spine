@@ -10,6 +10,8 @@ SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 DEVICES_BINDING="$SPINE_ROOT/ops/bindings/z2m.devices.yaml"
 NAMING_BINDING="$SPINE_ROOT/ops/bindings/z2m.naming.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+VM_LIFECYCLE="$SPINE_ROOT/ops/bindings/vm.lifecycle.yaml"
 
 echo "ha.z2m.health"
 echo
@@ -55,19 +57,110 @@ if [[ -z "${HA_TOKEN:-}" ]]; then
   exit 2
 fi
 
-HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_HOST="${HA_HOST:-}"
 HA_PORT="${HA_PORT:-8123}"
+
+# Resolve a reachable HA endpoint. Preference order:
+#  1) explicit HA_HOST env override
+#  2) ssh.targets.yaml host for id=ha (typically Tailscale)
+#  3) vm.lifecycle.yaml LAN IP for homeassistant
+resolve_ha_candidates() {
+  if [[ -n "${HA_HOST:-}" ]]; then
+    printf '%s\n' "$HA_HOST"
+    return
+  fi
+
+  local candidate
+  candidate="$(yq -r '.ssh.targets[] | select(.id == "ha") | .host // ""' "$SSH_BINDING" 2>/dev/null || true)"
+  if [[ -n "$candidate" && "$candidate" != "null" ]]; then
+    printf '%s\n' "$candidate"
+  fi
+
+  candidate="$(yq -r '.vms[] | select(.hostname == "homeassistant") | .lan_ip // ""' "$VM_LIFECYCLE" 2>/dev/null || true)"
+  if [[ -n "$candidate" && "$candidate" != "null" ]]; then
+    printf '%s\n' "$candidate"
+  fi
+
+  # Deterministic hard fallbacks if bindings are stale.
+  printf '%s\n' "100.67.120.1"
+  printf '%s\n' "10.0.0.100"
+}
+
+probe_ha_host() {
+  local host="$1"
+  local code
+  set +e
+  code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 "http://${host}:${HA_PORT}/api/" 2>/dev/null)"
+  local rc=$?
+  set -e
+
+  [[ "$rc" -eq 0 ]] || return 1
+  case "$code" in
+    200|401|403) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+SELECTED_HA_HOST=""
+while IFS= read -r candidate; do
+  [[ -n "$candidate" ]] || continue
+  if probe_ha_host "$candidate"; then
+    SELECTED_HA_HOST="$candidate"
+    break
+  fi
+done < <(resolve_ha_candidates | awk '!seen[$0]++')
+
+if [[ -z "$SELECTED_HA_HOST" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_unreachable_on_all_known_paths"
+  echo "fix: set HA_HOST override or repair HA network routes"
+  exit 2
+fi
+
+HA_HOST="$SELECTED_HA_HOST"
 HA_BASE="http://${HA_HOST}:${HA_PORT}"
+HA_LAN_HOST="$(yq -r '.vms[] | select(.hostname == "homeassistant") | .lan_ip // ""' "$VM_LIFECYCLE" 2>/dev/null || true)"
+HA_JUMP_HOST="$(yq -r '.ssh.targets[] | select(.id == "proxmox-home") | .host // ""' "$SSH_BINDING" 2>/dev/null || true)"
+HA_JUMP_USER="$(yq -r '.ssh.targets[] | select(.id == "proxmox-home") | .user // "root"' "$SSH_BINDING" 2>/dev/null || true)"
+HA_STATE_MODE="direct"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPER: query HA API state
 # ─────────────────────────────────────────────────────────────────────────────
 
-ha_state() {
+ha_state_direct() {
   local entity_id="$1"
   curl -s --max-time 10 \
     -H "Authorization: Bearer $HA_TOKEN" \
     "${HA_BASE}/api/states/${entity_id}" 2>/dev/null
+}
+
+ha_state_via_jump() {
+  local entity_id="$1"
+  [[ -n "${HA_LAN_HOST:-}" && "$HA_LAN_HOST" != "null" ]] || return 1
+  [[ -n "${HA_JUMP_HOST:-}" && "$HA_JUMP_HOST" != "null" ]] || return 1
+  command -v ssh >/dev/null 2>&1 || return 1
+
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "${HA_JUMP_USER:-root}@${HA_JUMP_HOST}" \
+    "curl -s --max-time 10 -H 'Authorization: Bearer ${HA_TOKEN}' \
+    'http://${HA_LAN_HOST}:${HA_PORT}/api/states/${entity_id}' 2>/dev/null"
+}
+
+is_state_json() {
+  local payload="${1:-}"
+  [[ -n "$payload" ]] || return 1
+  echo "$payload" | jq -e '.state != null' >/dev/null 2>&1
+}
+
+ha_state() {
+  local entity_id="$1"
+  local payload=""
+  if [[ "$HA_STATE_MODE" == "ssh_jump" ]]; then
+    payload="$(ha_state_via_jump "$entity_id" 2>/dev/null || true)"
+  else
+    payload="$(ha_state_direct "$entity_id" 2>/dev/null || true)"
+  fi
+  printf '%s' "$payload"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,8 +170,28 @@ ha_state() {
 BRIDGE_ENTITY="binary_sensor.zigbee2mqtt_bridge_connection_state"
 VERSION_ENTITY="sensor.zigbee2mqtt_bridge_version"
 
-BRIDGE_JSON=$(ha_state "$BRIDGE_ENTITY")
-BRIDGE_STATE=$(echo "$BRIDGE_JSON" | jq -r '.state // "unknown"' 2>/dev/null)
+BRIDGE_JSON="$(ha_state_direct "$BRIDGE_ENTITY" 2>/dev/null || true)"
+if ! is_state_json "$BRIDGE_JSON"; then
+  set +e
+  BRIDGE_FALLBACK_JSON="$(ha_state_via_jump "$BRIDGE_ENTITY" 2>/dev/null)"
+  fallback_rc=$?
+  set -e
+  if [[ "$fallback_rc" -eq 0 ]] && is_state_json "$BRIDGE_FALLBACK_JSON"; then
+    HA_STATE_MODE="ssh_jump"
+    BRIDGE_JSON="$BRIDGE_FALLBACK_JSON"
+  else
+    echo "status: STOP"
+    echo "reason: ha_state_api_unreachable_or_forbidden"
+    echo "host: ${HA_HOST}"
+    if [[ -n "${HA_JUMP_HOST:-}" && -n "${HA_LAN_HOST:-}" ]]; then
+      echo "fallback: ${HA_JUMP_HOST} -> ${HA_LAN_HOST}"
+    fi
+    echo "fix: verify HA token scope and connectivity on direct/fallback paths"
+    exit 2
+  fi
+fi
+
+BRIDGE_STATE=$(echo "$BRIDGE_JSON" | jq -r '.state // "unknown"' 2>/dev/null || echo "unknown")
 if [[ "$BRIDGE_STATE" == "on" ]]; then
   BRIDGE_STATUS="connected"
 else
@@ -86,7 +199,7 @@ else
 fi
 
 VERSION_JSON=$(ha_state "$VERSION_ENTITY")
-BRIDGE_VERSION=$(echo "$VERSION_JSON" | jq -r '.state // "unknown"' 2>/dev/null)
+BRIDGE_VERSION=$(echo "$VERSION_JSON" | jq -r '.state // "unknown"' 2>/dev/null || echo "unknown")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEVICE HEALTH
@@ -115,7 +228,7 @@ while [ "$i" -lt "$NAMING_COUNT" ]; do
 
   # Query live battery from HA
   BATTERY_JSON=$(ha_state "$BATTERY_ENTITY")
-  BATTERY_VAL=$(echo "$BATTERY_JSON" | jq -r '.state // "unknown"' 2>/dev/null)
+  BATTERY_VAL=$(echo "$BATTERY_JSON" | jq -r '.state // "unknown"' 2>/dev/null || echo "unknown")
 
   # Get last_seen from devices binding (by IEEE match)
   LAST_SEEN=$(yq ".z2m_devices.devices[] | select(.ieee_address == \"$IEEE\") | .last_seen" "$DEVICES_BINDING")
@@ -149,7 +262,7 @@ while [ "$i" -lt "$NAMING_COUNT" ]; do
   STATUS_DETAIL=""
 
   # Battery check
-  if [[ "$BATTERY_VAL" != "unknown" && "$BATTERY_VAL" != "unavailable" ]]; then
+  if [[ "$BATTERY_VAL" != "unknown" && "$BATTERY_VAL" != "unavailable" && "$BATTERY_VAL" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     BATTERY_INT=${BATTERY_VAL%%.*}
     if [[ "$BATTERY_INT" -lt 20 ]]; then
       STATUS="CRIT"

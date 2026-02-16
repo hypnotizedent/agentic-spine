@@ -71,11 +71,23 @@ for i in $(seq 0 $((COUNT-1))); do
   end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   dur_ms=$((end_ms - start_ms))
 
+  # Accept either a single expected code (e.g. 200) or comma-separated set
+  # (e.g. "401,403") for endpoints that legitimately vary by route/context.
+  expect_normalized="$(echo "$expect" | tr -d '[:space:]')"
+  code_ok=0
+  IFS=',' read -r -a expected_codes <<< "$expect_normalized"
+  for expected_code in "${expected_codes[@]}"; do
+    if [[ -n "$expected_code" && "$http_code" == "$expected_code" ]]; then
+      code_ok=1
+      break
+    fi
+  done
+
   # Check HTTP code first (even if curl reported non-zero exit for HTTP errors)
-  if [[ "$http_code" == "$expect" ]]; then
+  if [[ "$code_ok" -eq 1 ]]; then
     printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "OK" "${dur_ms}ms" ""
   elif [[ "$curl_exit" -eq 0 ]]; then
-    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "DEGRADED" "${dur_ms}ms" "http=$http_code expected=$expect"
+    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "DEGRADED" "${dur_ms}ms" "http=$http_code expected=$expect_normalized"
     fail=1
   elif [[ "$curl_exit" -eq 28 ]]; then
     printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "TIMEOUT" "${dur_ms}ms" "connect/max timeout"
