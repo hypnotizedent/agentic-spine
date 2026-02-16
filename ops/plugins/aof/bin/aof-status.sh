@@ -44,9 +44,9 @@ aof_cap_count="$(grep -c '^  aof\.' "$SP/ops/capabilities.yaml" 2>/dev/null || t
 gate_total="$(yq -r '.gate_count.total // 0' "$SP/ops/bindings/gate.registry.yaml" 2>/dev/null || echo 0)"
 gate_active="$(yq -r '.gate_count.active // 0' "$SP/ops/bindings/gate.registry.yaml" 2>/dev/null || echo 0)"
 open_gaps="$(grep -c 'status: open' "$SP/ops/bindings/operational.gaps.yaml" 2>/dev/null || true)"
-orch_manifest_dir="$SP/mailroom/state/orchestration"
-if [[ -d "$orch_manifest_dir" ]]; then
-  open_loops="$(find "$orch_manifest_dir" -name 'manifest.yaml' -exec yq e '.status // "closed"' {} \; 2>/dev/null | grep -c '^open$' || echo 0)"
+scopes_dir="$SP/mailroom/state/loop-scopes"
+if [[ -d "$scopes_dir" ]]; then
+  open_loops="$(grep -l '^status: open' "$scopes_dir"/*.scope.md 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
 else
   open_loops=0
 fi
