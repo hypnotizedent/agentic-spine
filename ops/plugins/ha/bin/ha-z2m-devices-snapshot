@@ -132,19 +132,21 @@ except Exception:
     pass
 
 # Parse state.json for link quality (LQI) per device
+# state.json keys can be IEEE addresses or friendly names depending on Z2M config
 try:
     if os.path.isfile(state_path) and os.path.getsize(state_path) > 0:
         with open(state_path, 'r') as f:
             state_data = json.load(f)
-        # state.json keys are friendly names; build ieee→lqi map via config name_map
-        lqi_by_fname = {}
-        for fname, sdata in state_data.items():
+        lqi_map = {}
+        for key, sdata in state_data.items():
             if isinstance(sdata, dict) and 'linkquality' in sdata:
-                lqi_by_fname[fname] = sdata['linkquality']
+                lqi_map[key] = sdata['linkquality']
         for dev in devices:
+            ieee = dev.get('ieee_address', '')
             fname = dev.get('friendly_name', '')
-            if fname in lqi_by_fname:
-                dev['link_quality'] = lqi_by_fname[fname]
+            lqi = lqi_map.get(ieee) or lqi_map.get(fname)
+            if lqi is not None:
+                dev['link_quality'] = lqi
 except Exception:
     pass
 
