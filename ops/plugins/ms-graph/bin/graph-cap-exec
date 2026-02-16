@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# graph-cap-exec — governed MS Graph capability wrapper
+# Route: graph.* capability -> secrets-exec -> graph-token-exec -> ms_graph_tools.py
+set -euo pipefail
+
+SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+SECRETS_EXEC="$SPINE_CODE/ops/plugins/secrets/bin/secrets-exec"
+TOKEN_EXEC="$SPINE_CODE/ops/plugins/ms-graph/bin/graph-token-exec"
+TOOLS_PY="/Users/ronnyworks/code/workbench/agents/ms-graph/tools/ms_graph_tools.py"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  graph-cap-exec <operation> [args...]
+
+Operations:
+  mail_search | mail_get | mail_send | draft_create | draft_update
+  calendar_list | calendar_get | calendar_create | calendar_update | calendar_rsvp
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+  usage >&2
+  exit 1
+fi
+
+op="$1"
+shift
+
+case "$op" in
+  mail_search|mail_get|mail_send|draft_create|draft_update|calendar_list|calendar_get|calendar_create|calendar_update|calendar_rsvp)
+    ;;
+  *)
+    echo "FAIL: unknown graph operation: $op" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
+
+[[ -x "$SECRETS_EXEC" ]] || { echo "FAIL: missing executable $SECRETS_EXEC" >&2; exit 1; }
+[[ -x "$TOKEN_EXEC" ]] || { echo "FAIL: missing executable $TOKEN_EXEC" >&2; exit 1; }
+[[ -f "$TOOLS_PY" ]] || { echo "FAIL: missing tool script $TOOLS_PY" >&2; exit 1; }
+
+exec "$SECRETS_EXEC" -- "$TOKEN_EXEC" python3 "$TOOLS_PY" "$op" "$@"
