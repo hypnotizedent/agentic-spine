@@ -73,3 +73,29 @@ parent_loop: LOOP-PROXMOX-NETWORK-ALIGNMENT-V1-20260217
 2. Any mutation beyond registration/planning surfaces in this lane.
 3. Any proposal queue action other than pending proposal submission.
 4. Any failing core/aof certification gate in closeout.
+
+## Implementation Evidence
+
+### GAP-OP-646 (CLOSED)
+
+Added `plane: fabric`, `domain: infra`, and `requires:` preconditions to 6 capabilities in `ops/capabilities.yaml`:
+- `infra.proxmox.maintenance.precheck` (+ `ssh.target.status`)
+- `infra.proxmox.maintenance.shutdown` (+ `ssh.target.status`, `network.oob.guard.status`)
+- `infra.proxmox.maintenance.startup` (+ `ssh.target.status`)
+- `infra.post_power.recovery.status` (+ `ssh.target.status`)
+- `infra.post_power.recovery` (+ `ssh.target.status`)
+- `infra.proxmox.node_path.migrate` (+ `plane`/`domain` only; `requires` already present)
+
+Verification: verify.core.run 8/8 PASS, verify.domain.run aof 19/19 PASS, no regression on infra domain (D86 pre-existing).
+
+### GAP-OP-647 (CLOSED)
+
+Integrated `ops/lib/resolve-policy.sh` into 3 infra scripts:
+- `ops/plugins/infra/bin/infra-proxmox-maintenance`: sources resolve-policy.sh, emits policy banner, wires `RESOLVED_DRIFT_GATE_MODE` into OOB guard (warn=advisory, fail=hard-stop). Backward-compatible under balanced preset (drift_gate_mode=fail).
+- `ops/plugins/infra/bin/infra-post-power-recovery`: sources resolve-policy.sh, emits policy banner.
+- `ops/plugins/infra/bin/infra-proxmox-node-path-migrate`: sources resolve-policy.sh, emits policy banner.
+
+Behavioral change under non-balanced presets:
+- `permissive` preset: OOB guard failure downgrades from hard-stop to advisory warning.
+- `strict` preset: no change (drift_gate_mode=fail, same as balanced).
+- `balanced` preset: no change (drift_gate_mode=fail, same as hardcoded).

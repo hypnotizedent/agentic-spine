@@ -21,6 +21,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
 
+# ── AOF policy integration ──────────────────────────────────────────────
+POLICY_LIB="$SPINE_ROOT/ops/lib/resolve-policy.sh"
+if [[ -f "$POLICY_LIB" ]]; then
+  # shellcheck source=ops/lib/resolve-policy.sh
+  source "$POLICY_LIB"
+  resolve_policy_knobs
+fi
+
 if [[ ! -f "$SSH_BINDING" ]]; then
   echo "STOP (2): missing binding file: $SSH_BINDING"
   exit 2
@@ -98,6 +106,7 @@ echo "host_id: $HOST_ID"
 echo "target: ${target_user}@${target_host}:${target_port}"
 echo "execute: $( [[ "$EXECUTE" -eq 1 ]] && echo true || echo false )"
 echo "poweroff: $( [[ "$POWEROFF" -eq 1 ]] && echo true || echo false )"
+echo "policy: ${RESOLVED_POLICY_PRESET:-balanced} (approval_default=${RESOLVED_APPROVAL_DEFAULT:-auto}, drift_gate_mode=${RESOLVED_DRIFT_GATE_MODE:-fail})"
 echo
 
 capture_guest_state() {
@@ -147,8 +156,12 @@ oob_guard() {
   set -e
   echo
   if [[ "$rc" -ne 0 ]]; then
-    echo "STOP (2): OOB guard failed; refusing to proceed with shutdown"
-    exit 2
+    if [[ "${RESOLVED_DRIFT_GATE_MODE:-fail}" == "warn" ]]; then
+      echo "WARN: OOB guard failed (policy drift_gate_mode=warn; continuing as advisory)"
+    else
+      echo "STOP (2): OOB guard failed; refusing to proceed with shutdown"
+      exit 2
+    fi
   fi
 }
 
