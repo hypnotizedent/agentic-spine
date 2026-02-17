@@ -98,9 +98,22 @@ ALL_ASSETS="${OUTPUT_DIR}/_all_checksums.jsonl"
 PAGE=1
 PAGE_SIZE=1000
 TOTAL_FETCHED=0
+CONSECUTIVE_FAILURES=0
+MAX_CONSECUTIVE_FAILURES=3
 
 while true; do
-  BATCH=$(api_post "/api/search/metadata" "{\"page\":${PAGE},\"size\":${PAGE_SIZE}}" 2>/dev/null) || break
+  if ! BATCH=$(api_post "/api/search/metadata" "{\"page\":${PAGE},\"size\":${PAGE_SIZE}}" 2>/dev/null); then
+    CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
+    echo "  ERROR: API fetch failed on page ${PAGE} (failure ${CONSECUTIVE_FAILURES}/${MAX_CONSECUTIVE_FAILURES})" >&2
+    if [[ "$CONSECUTIVE_FAILURES" -ge "$MAX_CONSECUTIVE_FAILURES" ]]; then
+      echo '{"incomplete": true, "reason": "pagination_api_failure", "last_page": '"${PAGE}"', "fetched": '"${TOTAL_FETCHED}"'}' > "${OUTPUT_DIR}/scan_incomplete.json"
+      stop "Asset pagination failed after ${MAX_CONSECUTIVE_FAILURES} consecutive errors at page ${PAGE} (${TOTAL_FETCHED} fetched). Incomplete marker written."
+    fi
+    PAGE=$((PAGE + 1))
+    continue
+  fi
+  CONSECUTIVE_FAILURES=0
+
   COUNT=$(echo "$BATCH" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
