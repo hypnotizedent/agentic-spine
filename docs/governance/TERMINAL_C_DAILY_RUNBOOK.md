@@ -53,10 +53,15 @@ Only after snapshot is healthy, continue day-to-day checks:
 ```bash
 ./bin/ops cap run verify.core.run
 ./bin/ops cap run verify.route.recommend
+./bin/ops cap run secrets.runway.status
 ./bin/ops cap run workbench.impl.audit --strict
 ./bin/ops cap run gaps.status
 ./bin/ops cap run orchestration.status
 ```
+
+`secrets.runway.status` is the canonical pre-mutation secrets runway check:
+it validates required domain keys and audits compose stacks so new secret keys
+cannot drift without an explicit project/path route.
 
 ## Nightly / Release Certification
 
