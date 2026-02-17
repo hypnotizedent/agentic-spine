@@ -1,6 +1,7 @@
 ---
 loop_id: LOOP-DYNAMIC-CONTEXT-DELIVERY-V1-20260217
-status: active
+status: closed
+closed_at: 2026-02-17
 owner: "@ronny"
 priority: medium
 created: 2026-02-17
@@ -17,14 +18,21 @@ current brief + live state on demand. Evolve D65 from embed-parity to shim-prese
 
 ## Deliverables
 
-- [ ] `ops/plugins/context/bin/spine-context` — context delivery capability script
-- [ ] `spine.context` capability registered
-- [ ] `session-entry-hook.sh` refactored to call spine.context
-- [ ] AGENTS.md converted to thin shim (startup block + context call)
-- [ ] CLAUDE.md converted to thin shim (startup block + context call)
-- [ ] OPENCODE.md (workbench) converted to thin shim
-- [ ] D65-v2 gate script: validate shim presence, not embed parity
-- [ ] D65 gate entry updated in gate.registry.yaml
+- [x] `ops/plugins/context/bin/spine-context` — context delivery capability script
+- [x] `spine.context` capability registered
+- [x] `session-entry-hook.sh` refactored to call spine.context
+- [ ] AGENTS.md converted to thin shim — DEFERRED (D65 preserved per constraint)
+- [ ] CLAUDE.md converted to thin shim — DEFERRED (D65 preserved per constraint)
+- [ ] OPENCODE.md (workbench) converted to thin shim — DEFERRED (D65 preserved per constraint)
+- [ ] D65-v2 gate script — DEFERRED (D65 full-embed preserved per constraint)
+- [ ] D65 gate entry updated — DEFERRED (D65 full-embed preserved per constraint)
+
+## Closure Note
+
+Core capability (spine.context) and session-entry-hook integration complete.
+Thin shim conversion and D65-v2 evolution deferred — blocked by D65 full-embed
+preservation constraint. Remaining items tracked under GAP-OP-639 (sync artifact retirement)
+which itself is blocked until GAP-OP-636 (MCP gateway / Move 1) is also complete.
 
 ## Target Files
 
