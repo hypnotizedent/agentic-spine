@@ -1188,6 +1188,27 @@ else
   warn "boundary authority lock gate not present"
 fi
 
+echo -n "D131 Catalog freshness lock... "
+if [[ -x "$SP/surfaces/verify/d131-catalog-freshness-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d131-catalog-freshness-lock.sh" "D131"
+else
+  warn "catalog freshness lock gate not present"
+fi
+
+echo -n "D132 Mutation atomicity lock... "
+if [[ -x "$SP/surfaces/verify/d132-mutation-atomicity-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d132-mutation-atomicity-lock.sh" "D132"
+else
+  warn "mutation atomicity lock gate not present"
+fi
+
+echo -n "D134 Topology metadata quality lock... "
+if [[ -x "$SP/surfaces/verify/d134-topology-metadata-quality-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d134-topology-metadata-quality-lock.sh" "D134"
+else
+  warn "topology metadata quality lock gate not present"
+fi
+
 echo -n "D135 Terminal scope lock... "
 if [[ -x "$SP/surfaces/verify/d135-terminal-scope-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d135-terminal-scope-lock.sh" "D135"
