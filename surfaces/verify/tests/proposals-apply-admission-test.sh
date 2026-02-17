@@ -220,7 +220,8 @@ run_with_env() {
     export HOME="$d"
     export SPINE_CODE="$d"
     export WORKBENCH_ROOT="$d/code/workbench"
-    "$@" bash "$d/ops/plugins/proposals/bin/proposals-apply" --dry-run "$cp"
+    # Invoke directly so test coverage matches shebang runtime (/bin/bash on macOS).
+    "$@" "$d/ops/plugins/proposals/bin/proposals-apply" --dry-run "$cp"
   ) >"$out" 2>&1
 }
 
