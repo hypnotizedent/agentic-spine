@@ -1,10 +1,12 @@
 ---
 loop_id: LOOP-MINT-SUPPLIER-SYNC-IMPLEMENT-V2-20260217
 created: 2026-02-17
-status: active
+status: closed
 owner: "@ronny"
 scope: mint
 objective: Implement Supplier Sync v2 runtime slice aligned to canonical contract and acceptance evidence.
+closed_at: "2026-02-17"
+closeout_cert: docs/governance/_audits/MINT_SUPPLIER_SYNC_IMPLEMENT_STEP2_20260217.md
 ---
 
 ## Success Criteria
