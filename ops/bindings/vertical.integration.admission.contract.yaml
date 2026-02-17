@@ -1,0 +1,151 @@
+# Vertical Integration Admission Contract
+# Status: authoritative
+# Last verified: 2026-02-17
+# Scope: proposals.apply + read-only parity status for mint pricing/suppliers
+
+version: "1.0"
+updated: "2026-02-17"
+owner: "@ronny"
+scope: vertical-integration-admission
+
+admission:
+  enabled: true
+  block_conditions:
+    block_on_severity:
+      - P0
+      - P1
+    summary: "proposals.apply blocks on P0/P1 from this contract; P2 is warn-only."
+
+  manifest_requirements:
+    loop_id:
+      required: true
+      severity: P0
+      reason: "Mutating vertical-integration proposals must include loop_id."
+    changes_non_empty:
+      required: true
+      severity: P0
+      reason: "Proposal changes list cannot be empty."
+    not_required_override:
+      root_key: "vertical_integration.surface_overrides"
+      status_key: "status"
+      reason_key: "reason"
+      status_value: "not-required"
+      reason_required: true
+      severity_when_invalid: P1
+
+  required_change_matrix:
+    - id: mint_pricing_module
+      touch_any:
+        - mint-modules/pricing/**
+      required_companions:
+        - deploy_runtime_surface
+        - mcp_surface_exposure
+        - health_readiness_surface
+        - docs_contract_reference
+    - id: mint_suppliers_module
+      touch_any:
+        - mint-modules/suppliers/**
+      required_companions:
+        - deploy_runtime_surface
+        - mcp_surface_exposure
+        - health_readiness_surface
+        - docs_contract_reference
+
+companion_surfaces:
+  deploy_runtime_surface:
+    severity: P1
+    description: "Deploy compose/runtime surface updated, or explicit not-required reason."
+    satisfy_any_path:
+      - ops/bindings/docker.compose.targets.yaml
+      - docs/governance/DOMAIN_ROUTING_REGISTRY.yaml
+      - ops/plugins/mint/bin/deploy-status
+      - ops/plugins/mint/bin/modules-health
+  mcp_surface_exposure:
+    severity: P1
+    description: "MCP surface/tool exposure updated, or explicit not-required reason."
+    satisfy_any_path:
+      - .mcp.json
+      - ops/bindings/mcp.runtime.contract.yaml
+      - ops/capabilities.yaml
+      - docs/governance/DOMAIN_ROUTING_REGISTRY.yaml
+  health_readiness_surface:
+    severity: P1
+    description: "Health/readiness verification surface updated, or explicit not-required reason."
+    satisfy_any_path:
+      - ops/bindings/services.health.yaml
+      - ops/plugins/mint/bin/modules-health
+      - ops/plugins/verify/bin/vertical-integration-parity-status
+      - ops/capabilities.yaml
+  docs_contract_reference:
+    severity: P1
+    description: "Canonical docs/contracts reference updated, or explicit not-required reason."
+    satisfy_any_path:
+      - docs/governance/_audits/**
+      - docs/governance/INFRASTRUCTURE_MAP.md
+      - docs/governance/DOMAIN_ROUTING_REGISTRY.yaml
+      - docs/planning/**
+      - mailroom/state/loop-scopes/**
+
+parity_status:
+  modules:
+    - id: pricing
+      trigger_glob: mint-modules/pricing/**
+      code_surface:
+        in_repo_path: mint-modules/pricing
+        external_read_only_path: /Users/ronnyworks/code/mint-modules/pricing
+      runtime:
+        expected_containers:
+          - mint-modules-pricing
+          - pricing
+      endpoint_health:
+        url: "https://pricing.mintprints.co/health"
+        expected_http_codes:
+          - 200
+          - 301
+          - 302
+      mcp_exposure:
+        files:
+          - .mcp.json
+          - ops/bindings/mcp.runtime.contract.yaml
+        required_markers:
+          - pricing
+          - mint-pricing
+      docs_contract_reference:
+        files:
+          - ops/bindings/vertical.integration.admission.contract.yaml
+          - docs/governance/DOMAIN_ROUTING_REGISTRY.yaml
+          - docs/governance/INFRASTRUCTURE_MAP.md
+        required_markers:
+          - pricing.mintprints.co
+          - "/pricing/"
+
+    - id: suppliers
+      trigger_glob: mint-modules/suppliers/**
+      code_surface:
+        in_repo_path: mint-modules/suppliers
+        external_read_only_path: /Users/ronnyworks/code/mint-modules/suppliers
+      runtime:
+        expected_containers:
+          - mint-modules-suppliers
+          - suppliers
+      endpoint_health:
+        url: "https://suppliers.mintprints.co/health"
+        expected_http_codes:
+          - 200
+          - 301
+          - 302
+      mcp_exposure:
+        files:
+          - .mcp.json
+          - ops/bindings/mcp.runtime.contract.yaml
+        required_markers:
+          - suppliers
+          - mint-suppliers
+      docs_contract_reference:
+        files:
+          - ops/bindings/vertical.integration.admission.contract.yaml
+          - docs/governance/DOMAIN_ROUTING_REGISTRY.yaml
+          - docs/governance/INFRASTRUCTURE_MAP.md
+        required_markers:
+          - suppliers.mintprints.co
+          - "/suppliers/"

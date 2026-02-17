@@ -29,6 +29,7 @@ Admission controller (mandatory):
   - path-scoped verify.domain.run <domain> --force routing
   - workbench AOF contract checks (when workbench paths are present)
   - SSOT schema convention checks for changed ops/bindings YAML files
+  - vertical integration admission matrix checks for mint pricing/suppliers module touches
   - loop/gap linkage checks
 
 Policy:
@@ -102,6 +103,23 @@ normalize_workbench_path() {
       echo ""
       ;;
   esac
+}
+
+normalize_contract_glob() {
+  local pattern="${1:-}"
+  pattern="${pattern#./}"
+  # Bash [[ pattern matching ]] treats '*' as multi-segment wildcard already.
+  pattern="${pattern//\*\*/\*}"
+  printf '%s\n' "$pattern"
+}
+
+path_matches_contract_glob() {
+  local path="$1"
+  local glob_raw="$2"
+  local glob
+  glob="$(normalize_contract_glob "$glob_raw")"
+  [[ -n "$glob" ]] || return 1
+  [[ "$path" == $glob ]]
 }
 
 admission_add_finding() {
@@ -385,6 +403,163 @@ run_ssot_schema_conventions_admission() {
   done
 }
 
+run_vertical_integration_admission() {
+  local contract="$VERTICAL_INTEGRATION_CONTRACT"
+  local enabled matrix_count idx
+  local action path reason
+  local rule_id matched trigger_glob companion_id companion_glob
+  local -a changed_paths=()
+  local -a triggered_rules=()
+  local -a required_companions=()
+
+  if [[ ! -f "$contract" ]]; then
+    admission_add_finding "P1" "vertical_integration_contract" "missing vertical integration admission contract: $contract"
+    return
+  fi
+
+  enabled="$(yq e -r '.admission.enabled // true' "$contract" 2>/dev/null || echo true)"
+  [[ "$enabled" == "true" ]] || return
+
+  while IFS=$'\t' read -r action path reason; do
+    action="$(normalize_action "$action")"
+    case "$action" in
+      create|modify|delete) ;;
+      *) continue ;;
+    esac
+    [[ -n "$path" ]] || continue
+    if ! contains_value "$path" "${changed_paths[@]:-}"; then
+      changed_paths+=("$path")
+    fi
+  done < "$changes_tmp"
+
+  if (( ${#changed_paths[@]} == 0 )); then
+    return
+  fi
+
+  matrix_count="$(yq e '.admission.required_change_matrix | length' "$contract" 2>/dev/null || echo 0)"
+  [[ "$matrix_count" =~ ^[0-9]+$ ]] || matrix_count=0
+  if (( matrix_count == 0 )); then
+    return
+  fi
+
+  for ((idx=0; idx<matrix_count; idx++)); do
+    matched=0
+    rule_id="$(yq e -r ".admission.required_change_matrix[$idx].id // \"rule_$idx\"" "$contract" 2>/dev/null || echo "rule_$idx")"
+
+    while IFS= read -r trigger_glob; do
+      [[ -n "$trigger_glob" ]] || continue
+      for path in "${changed_paths[@]}"; do
+        if path_matches_contract_glob "$path" "$trigger_glob"; then
+          matched=1
+          break
+        fi
+      done
+      (( matched == 1 )) && break
+    done < <(yq e -r ".admission.required_change_matrix[$idx].touch_any[]?" "$contract" 2>/dev/null || true)
+
+    if (( matched == 1 )); then
+      if ! contains_value "$rule_id" "${triggered_rules[@]:-}"; then
+        triggered_rules+=("$rule_id")
+      fi
+
+      while IFS= read -r companion_id; do
+        [[ -n "$companion_id" ]] || continue
+        if ! contains_value "$companion_id" "${required_companions[@]:-}"; then
+          required_companions+=("$companion_id")
+        fi
+      done < <(yq e -r ".admission.required_change_matrix[$idx].required_companions[]?" "$contract" 2>/dev/null || true)
+    fi
+  done
+
+  if (( ${#triggered_rules[@]} == 0 )); then
+    return
+  fi
+
+  echo "Admission check: vertical integration matrix (${triggered_rules[*]})"
+
+  local loop_required loop_severity
+  local changes_required changes_severity change_count
+  loop_required="$(yq e -r '.admission.manifest_requirements.loop_id.required // true' "$contract" 2>/dev/null || echo true)"
+  loop_severity="$(yq e -r '.admission.manifest_requirements.loop_id.severity // "P0"' "$contract" 2>/dev/null || echo P0)"
+  if [[ "$loop_required" == "true" && -z "${loop_id:-}" ]]; then
+    admission_add_finding "$loop_severity" "vertical_loop_id" "vertical integration trigger matched but manifest loop_id is missing"
+  fi
+
+  changes_required="$(yq e -r '.admission.manifest_requirements.changes_non_empty.required // true' "$contract" 2>/dev/null || echo true)"
+  changes_severity="$(yq e -r '.admission.manifest_requirements.changes_non_empty.severity // "P0"' "$contract" 2>/dev/null || echo P0)"
+  change_count="$(yq e '.changes | length' "$manifest" 2>/dev/null || echo 0)"
+  [[ "$change_count" =~ ^[0-9]+$ ]] || change_count=0
+  if [[ "$changes_required" == "true" && "$change_count" -eq 0 ]]; then
+    admission_add_finding "$changes_severity" "vertical_changes" "vertical integration trigger matched but manifest changes list is empty"
+  fi
+
+  local override_root status_key reason_key status_value reason_required invalid_override_severity
+  override_root="$(yq e -r '.admission.manifest_requirements.not_required_override.root_key // "vertical_integration.surface_overrides"' "$contract" 2>/dev/null || echo "vertical_integration.surface_overrides")"
+  status_key="$(yq e -r '.admission.manifest_requirements.not_required_override.status_key // "status"' "$contract" 2>/dev/null || echo status)"
+  reason_key="$(yq e -r '.admission.manifest_requirements.not_required_override.reason_key // "reason"' "$contract" 2>/dev/null || echo reason)"
+  status_value="$(yq e -r '.admission.manifest_requirements.not_required_override.status_value // "not-required"' "$contract" 2>/dev/null || echo "not-required")"
+  reason_required="$(yq e -r '.admission.manifest_requirements.not_required_override.reason_required // true' "$contract" 2>/dev/null || echo true)"
+  invalid_override_severity="$(yq e -r '.admission.manifest_requirements.not_required_override.severity_when_invalid // "P1"' "$contract" 2>/dev/null || echo P1)"
+
+  local companion_severity companion_description
+  local companion_status companion_reason
+  local companion_path_summary
+  local -a companion_globs=()
+  local satisfied_by_change
+
+  for companion_id in "${required_companions[@]}"; do
+    companion_severity="$(yq e -r ".companion_surfaces.\"$companion_id\".severity // \"P1\"" "$contract" 2>/dev/null || echo P1)"
+    companion_description="$(yq e -r ".companion_surfaces.\"$companion_id\".description // \"\"" "$contract" 2>/dev/null || true)"
+
+    companion_globs=()
+    companion_path_summary=""
+    while IFS= read -r companion_glob; do
+      [[ -n "$companion_glob" ]] || continue
+      companion_globs+=("$companion_glob")
+      if [[ -n "$companion_path_summary" ]]; then
+        companion_path_summary+=", "
+      fi
+      companion_path_summary+="$companion_glob"
+    done < <(yq e -r ".companion_surfaces.\"$companion_id\".satisfy_any_path[]?" "$contract" 2>/dev/null || true)
+
+    if (( ${#companion_globs[@]} == 0 )); then
+      admission_add_finding "P1" "vertical_${companion_id}_contract" "contract companion '$companion_id' has no satisfy_any_path rules"
+      continue
+    fi
+
+    satisfied_by_change=0
+    for path in "${changed_paths[@]}"; do
+      for companion_glob in "${companion_globs[@]}"; do
+        if path_matches_contract_glob "$path" "$companion_glob"; then
+          satisfied_by_change=1
+          break
+        fi
+      done
+      (( satisfied_by_change == 1 )) && break
+    done
+
+    if (( satisfied_by_change == 1 )); then
+      continue
+    fi
+
+    companion_status="$(yq e -r ".${override_root}.\"$companion_id\".${status_key} // \"\"" "$manifest" 2>/dev/null || true)"
+    companion_reason="$(yq e -r ".${override_root}.\"$companion_id\".${reason_key} // \"\"" "$manifest" 2>/dev/null || true)"
+
+    if [[ "$companion_status" == "$status_value" ]]; then
+      if [[ "$reason_required" == "true" ]]; then
+        if [[ -n "$companion_reason" && "$companion_reason" != "null" ]]; then
+          continue
+        fi
+        admission_add_finding "$invalid_override_severity" "vertical_${companion_id}_override" "${override_root}.\"$companion_id\".${status_key}=${status_value} requires non-empty ${reason_key}"
+        continue
+      fi
+      continue
+    fi
+
+    admission_add_finding "$companion_severity" "vertical_${companion_id}" "vertical integration trigger(s) [${triggered_rules[*]}] require companion '$companion_id' (${companion_description}). Update one of: ${companion_path_summary}; or set manifest ${override_root}.\"$companion_id\".{${status_key}: ${status_value}, ${reason_key}: <reason>}"
+  done
+}
+
 run_loop_gap_linkage_admission() {
   local scope_file loop_status gap_rel gap_src linked_count existing_linked_count
 
@@ -503,6 +678,7 @@ run_admission_controller() {
   run_domain_routing_admission
   run_workbench_contract_admission
   run_ssot_schema_conventions_admission
+  run_vertical_integration_admission
   run_loop_gap_linkage_admission
   emit_admission_summary_and_enforce
 }
@@ -526,6 +702,7 @@ PROPOSALS_DIR="$SPINE_CODE/mailroom/outbox/proposals"
 PROPOSAL_DIR="$PROPOSALS_DIR/$PROPOSAL_NAME"
 PROPOSALS_LIFECYCLE_CONTRACT="$SPINE_CODE/ops/bindings/proposals.lifecycle.yaml"
 SCHEMA_CONVENTIONS_CONTRACT="$SPINE_CODE/ops/bindings/spine.schema.conventions.yaml"
+VERTICAL_INTEGRATION_CONTRACT="$SPINE_CODE/ops/bindings/vertical.integration.admission.contract.yaml"
 VERIFY_TOPOLOGY_BIN="$SPINE_CODE/ops/plugins/verify/bin/verify-topology"
 GAPS_FILE="$SPINE_CODE/ops/bindings/operational.gaps.yaml"
 LOOP_SCOPES_DIR="$SPINE_CODE/mailroom/state/loop-scopes"
