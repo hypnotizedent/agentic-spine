@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# terminal-contract-status — Validate terminal role contract completeness and freshness.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/terminal.role.contract.yaml"
+STAB_MODE="$ROOT/ops/bindings/stabilization.mode.yaml"
+
+FAIL=0
+
+fail_check() {
+  echo "  FAIL: $1"
+  FAIL=1
+}
+
+pass_check() {
+  echo "  PASS: $1"
+}
+
+# ── Existence checks ──
+if [[ ! -f "$CONTRACT" ]]; then
+  echo "terminal.contract.status FAIL: contract file missing ($CONTRACT)"
+  exit 1
+fi
+
+if [[ ! -f "$STAB_MODE" ]]; then
+  echo "terminal.contract.status FAIL: stabilization.mode.yaml missing ($STAB_MODE)"
+  exit 1
+fi
+
+command -v yq >/dev/null 2>&1 || {
+  echo "terminal.contract.status FAIL: missing required tool: yq"
+  exit 1
+}
+
+echo "terminal.contract.status"
+echo "contract: $CONTRACT"
+
+# ── Schema completeness ──
+version="$(yq e -r '.version // ""' "$CONTRACT")"
+if [[ -n "$version" ]]; then
+  pass_check "version present ($version)"
+else
+  fail_check "version missing"
+fi
+
+naming_pattern="$(yq e -r '.naming_pattern // ""' "$CONTRACT")"
+if [[ -n "$naming_pattern" ]]; then
+  pass_check "naming_pattern present"
+else
+  fail_check "naming_pattern missing"
+fi
+
+role_count="$(yq e -r '.roles | length' "$CONTRACT" 2>/dev/null || echo 0)"
+if [[ "$role_count" -gt 0 ]]; then
+  pass_check "roles defined ($role_count)"
+else
+  fail_check "no roles defined"
+fi
+
+heartbeat_interval="$(yq e -r '.heartbeat.interval_minutes // ""' "$CONTRACT")"
+if [[ -n "$heartbeat_interval" ]]; then
+  pass_check "heartbeat interval set (${heartbeat_interval}m)"
+else
+  fail_check "heartbeat interval missing"
+fi
+
+# ── Cross-reference: contract roles match stabilization.mode canonical_roles ──
+stab_roles="$(yq e -r '.terminal_contract.canonical_roles[]' "$STAB_MODE" 2>/dev/null | sort)"
+contract_roles="$(yq e -r '.roles[].id' "$CONTRACT" 2>/dev/null | sort)"
+
+if [[ "$stab_roles" == "$contract_roles" ]]; then
+  pass_check "contract roles match stabilization.mode canonical_roles"
+else
+  fail_check "contract roles diverge from stabilization.mode canonical_roles"
+  echo "    stabilization: $(echo "$stab_roles" | tr '\n' ', ')"
+  echo "    contract:      $(echo "$contract_roles" | tr '\n' ', ')"
+fi
+
+# ── Naming pattern parity ──
+stab_pattern="$(yq e -r '.terminal_contract.naming_pattern // ""' "$STAB_MODE")"
+if [[ "$naming_pattern" == "$stab_pattern" ]]; then
+  pass_check "naming_pattern matches stabilization.mode"
+else
+  fail_check "naming_pattern diverges from stabilization.mode"
+fi
+
+# ── Freshness check ──
+last_verified="$(yq e -r '.last_verified // ""' "$CONTRACT")"
+if [[ -n "$last_verified" ]]; then
+  pass_check "last_verified: $last_verified"
+else
+  fail_check "last_verified missing"
+fi
+
+# ── Per-role validation ──
+for i in $(seq 0 $((role_count - 1))); do
+  role_id="$(yq e -r ".roles[$i].id // \"\"" "$CONTRACT")"
+  role_type="$(yq e -r ".roles[$i].type // \"\"" "$CONTRACT")"
+  scope_count="$(yq e -r ".roles[$i].write_scope | length" "$CONTRACT" 2>/dev/null || echo 0)"
+  cap_count="$(yq e -r ".roles[$i].capabilities | length" "$CONTRACT" 2>/dev/null || echo 0)"
+
+  if [[ -z "$role_id" ]]; then
+    fail_check "role[$i] missing id"
+    continue
+  fi
+
+  if ! [[ "$role_id" =~ $naming_pattern ]]; then
+    fail_check "$role_id violates naming pattern"
+  fi
+
+  if [[ -z "$role_type" ]]; then
+    fail_check "$role_id missing type"
+  fi
+
+  if [[ "$scope_count" -eq 0 ]]; then
+    fail_check "$role_id has no write_scope entries"
+  fi
+
+  if [[ "$cap_count" -eq 0 ]]; then
+    fail_check "$role_id has no capability entitlements"
+  fi
+done
+
+# ── Summary ──
+echo ""
+if [[ "$FAIL" -gt 0 ]]; then
+  echo "terminal.contract.status FAIL: contract validation failed"
+  exit 1
+fi
+
+echo "terminal.contract.status PASS: contract valid ($role_count roles, pattern=$naming_pattern)"
+exit 0

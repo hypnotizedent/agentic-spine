@@ -1,0 +1,91 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: "2026-02-16"
+scope: terminal-role-contract
+
+version: 1
+updated_at: "2026-02-16"
+
+# Terminal role contract — formal SSOT for terminal identity, write scopes,
+# and capability entitlements. Source of truth for D135 naming enforcement.
+# Inherits naming_pattern and heartbeat config from stabilization.mode.yaml.
+
+naming_pattern: "^[A-Z]+-[A-Z0-9]+-[0-9]{2}$"
+
+heartbeat:
+  interval_minutes: 30
+  ttl_minutes: 45
+  state_dir: mailroom/state/terminal-heartbeats
+
+admission_requirements:
+  - non_overlapping_write_scope
+  - single_active_loop_per_terminal
+  - heartbeat_every_30_minutes
+
+roles:
+  - id: SPINE-CONTROL-01
+    type: control-plane
+    description: "Primary spine orchestrator. Single writer for bin/, ops/, surfaces/."
+    write_scope:
+      - bin/
+      - ops/
+      - surfaces/
+      - docs/governance/
+      - mailroom/
+    capabilities:
+      - verify.core.run
+      - verify.domain.run
+      - stability.control.snapshot
+      - proposals.apply
+      - proposals.supersede
+      - gaps.file
+      - gaps.claim
+      - gaps.close
+      - loops.reconcile
+
+  - id: SPINE-AUDIT-01
+    type: observation
+    description: "Audit and verification terminal. Read-only spine access."
+    write_scope:
+      - receipts/
+      - docs/governance/_audits/
+    capabilities:
+      - verify.core.run
+      - verify.domain.run
+      - verify.release.run
+      - stability.control.snapshot
+      - spine.verify
+
+  - id: RUNTIME-IMMICH-01
+    type: domain-runtime
+    description: "Immich domain runtime operations."
+    write_scope:
+      - ops/plugins/immich/
+      - ops/agents/immich-agent.contract.md
+    capabilities:
+      - immich.status
+      - immich.ingest.watch
+      - immich.ingest.resume
+
+  - id: DOMAIN-HA-01
+    type: domain-runtime
+    description: "Home Assistant domain operations."
+    write_scope:
+      - ops/plugins/ha/
+      - ops/agents/home-assistant-agent.contract.md
+    capabilities:
+      - ha.z2m.health
+      - ha.device.list
+      - ha.entity.list
+      - ha.automation.list
+
+  - id: DEPLOY-MINT-01
+    type: domain-runtime
+    description: "Mint domain deployment and governance."
+    write_scope:
+      - ops/plugins/mint/
+      - ops/agents/mint-agent.contract.md
+    capabilities:
+      - mint.verify
+      - mint.deploy.status
