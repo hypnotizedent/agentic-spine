@@ -1,7 +1,9 @@
 ---
 loop_id: LOOP-MINT-AOF-BASELINE-V1-20260217
 created: 2026-02-17
-status: active
+status: closed
+closed_at: 2026-02-17
+closeout_cert: docs/governance/_audits/MINT_AOF_BASELINE_V1_CERT_20260217.md
 owner: "@ronny"
 scope: mint
 objective: Establish and enforce Mint AOF baseline contracts (UI/API/DB/integration/agent) without regressing current mint-modules runtime behavior.
@@ -53,3 +55,8 @@ objective: Establish and enforce Mint AOF baseline contracts (UI/API/DB/integrat
 - `CAP-20260217-112420__verify.domain.run__Ria2y52860`
 - `CAP-20260217-112420__proposals.status__R1x6c52861`
 - `CAP-20260217-112420__gaps.status__Rn1x752988`
+
+## Closeout Note
+
+Baseline complete: contracts + enforcement + supplier sync pack + job estimator pack.
+Product lanes can start under new implementation loops.
