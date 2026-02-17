@@ -119,9 +119,9 @@ for repo in repos:
             failures.append(f"{wt}: {branch or 'unknown'} -> {' '.join(status_msgs)}")
 
 if failures:
-    print("Detected worktree issues:")
+    print("D48 FAIL: worktree issues detected")
     for f in failures:
-        print(f"  - {f}")
+        print(f"  - {f}", file=sys.stderr)
     raise SystemExit(1)
 
 # ── Stash audit ───────────────────────────────────────────────────────────
@@ -161,11 +161,11 @@ for repo in repos:
             orphaned.append(f"{repo.name}:{stash_ref} ({stash_branch}): {reason}")
 
 if orphaned:
-    print(f"Orphaned stashes detected ({len(orphaned)} of {stash_count}):")
+    print(f"D48 FAIL: orphaned stashes detected ({len(orphaned)} of {stash_count})")
     for o in orphaned:
-        print(f"  - {o}")
-    print("Fix: git stash drop <ref> for each orphaned entry")
+        print(f"  - {o}", file=sys.stderr)
+    print("Fix: git stash drop <ref> for each orphaned entry", file=sys.stderr)
     raise SystemExit(1)
 
-print(f"Worktrees clean (count={checked}). Stashes: {stash_count} (0 orphaned).")
+print(f"D48 PASS: worktrees clean (count={checked}), stashes={stash_count} (0 orphaned)")
 PY

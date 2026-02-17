@@ -17,13 +17,13 @@ ERRORS=0
 
 # Check 1: Template exists
 if [[ ! -f "$SP/docs/governance/CHANGE_PACK_TEMPLATE.md" ]]; then
-  echo "FAIL: docs/governance/CHANGE_PACK_TEMPLATE.md missing" >&2
+  echo "D53 FAIL: docs/governance/CHANGE_PACK_TEMPLATE.md missing" >&2
   ERRORS=$((ERRORS + 1))
 fi
 
 # Check 2: Sequencing rules exist
 if [[ ! -f "$SP/ops/bindings/cutover.sequencing.yaml" ]]; then
-  echo "FAIL: ops/bindings/cutover.sequencing.yaml missing" >&2
+  echo "D53 FAIL: ops/bindings/cutover.sequencing.yaml missing" >&2
   ERRORS=$((ERRORS + 1))
 fi
 
@@ -41,7 +41,7 @@ for scope in "$LOOP_DIR"/*CUTOVER*.scope.md; do
   companion="$LOOP_DIR/${base}.changepack.md"
 
   if [[ ! -f "$companion" ]]; then
-    echo "FAIL: open cutover loop $base has no companion .changepack.md" >&2
+    echo "D53 FAIL: open cutover loop $base has no companion .changepack.md" >&2
     ERRORS=$((ERRORS + 1))
   fi
 done
@@ -64,10 +64,15 @@ for pack in "$LOOP_DIR"/*.changepack.md; do
 
   for section in "${REQUIRED_SECTIONS[@]}"; do
     if ! grep -q "## $section" "$pack" 2>/dev/null; then
-      echo "FAIL: $packname missing required section: $section" >&2
+      echo "D53 FAIL: $packname missing required section: $section" >&2
       ERRORS=$((ERRORS + 1))
     fi
   done
 done
 
-[[ "$ERRORS" -eq 0 ]] && exit 0 || exit 1
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "D53 FAIL: $ERRORS change pack integrity violation(s)" >&2
+  exit 1
+fi
+echo "D53 PASS: change pack integrity valid"
+exit 0

@@ -14,11 +14,6 @@ fail() {
 # New gates must use canonical D<N> PASS:/FAIL: output patterns.
 # Remove entries as gates are migrated to canonical output vocabulary.
 LEGACY_EXCEPTIONS="
-d45
-d48
-d51
-d52
-d53
 d58
 d59
 d60
@@ -61,7 +56,7 @@ for script in "$VERIFY_DIR"/d[0-9]*-*.sh; do
   CHECKED=$((CHECKED + 1))
 
   # Gate script must reference its own gate ID in at least one output statement
-  if ! grep -E "(echo|printf).*${gate_id}" "$script" >/dev/null 2>&1; then
+  if ! grep -E "(echo|printf|print).*${gate_id}" "$script" >/dev/null 2>&1; then
     echo "  violation: $base has no output referencing $gate_id" >&2
     ERRORS=$((ERRORS + 1))
   fi

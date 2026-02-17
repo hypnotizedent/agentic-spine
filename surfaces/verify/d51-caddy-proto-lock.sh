@@ -13,7 +13,7 @@ SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CADDYFILE="$SP/ops/staged/caddy-auth/Caddyfile"
 
 if [[ ! -f "$CADDYFILE" ]]; then
-  echo "FAIL: staged Caddyfile not found at $CADDYFILE" >&2
+  echo "D51 FAIL: staged Caddyfile not found at $CADDYFILE" >&2
   exit 1
 fi
 
@@ -21,7 +21,7 @@ fi
 PROXY_BLOCKS=$(grep -c 'reverse_proxy.*127\.0\.0\.1:9000' "$CADDYFILE" 2>/dev/null || echo 0)
 
 if [[ "$PROXY_BLOCKS" -eq 0 ]]; then
-  echo "FAIL: no reverse_proxy blocks targeting :9000 found in Caddyfile" >&2
+  echo "D51 FAIL: no reverse_proxy blocks targeting :9000 found in Caddyfile" >&2
   exit 1
 fi
 
@@ -34,15 +34,16 @@ ACTIVE_PROXY_BLOCKS=$(grep 'reverse_proxy.*127\.0\.0\.1:9000' "$CADDYFILE" | gre
 ACTIVE_PROTO_HEADERS=$(grep 'header_up X-Forwarded-Proto https' "$CADDYFILE" | grep -cv '^\s*#' 2>/dev/null || echo 0)
 
 if [[ "$ACTIVE_PROTO_HEADERS" -lt "$ACTIVE_PROXY_BLOCKS" ]]; then
-  echo "FAIL: $ACTIVE_PROXY_BLOCKS active reverse_proxy :9000 blocks but only $ACTIVE_PROTO_HEADERS have X-Forwarded-Proto https" >&2
+  echo "D51 FAIL: $ACTIVE_PROXY_BLOCKS active reverse_proxy :9000 blocks but only $ACTIVE_PROTO_HEADERS have X-Forwarded-Proto https" >&2
   exit 1
 fi
 
 # Verify deploy.dependencies.yaml exists
 DEPS="$SP/ops/bindings/deploy.dependencies.yaml"
 if [[ ! -f "$DEPS" ]]; then
-  echo "FAIL: deploy.dependencies.yaml not found" >&2
+  echo "D51 FAIL: deploy.dependencies.yaml not found" >&2
   exit 1
 fi
 
+echo "D51 PASS: caddy proto lock ($ACTIVE_PROXY_BLOCKS proxy blocks, all with X-Forwarded-Proto)"
 exit 0

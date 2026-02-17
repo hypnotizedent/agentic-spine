@@ -21,7 +21,7 @@ COMPOSE="$SP/ops/bindings/docker.compose.targets.yaml"
 DEVICE_ID="$SP/docs/governance/DEVICE_IDENTITY_SSOT.md"
 
 FAIL=0
-err() { echo "  FAIL: $1" >&2; FAIL=1; }
+err() { echo "  D45 FAIL: $1" >&2; FAIL=1; }
 
 # ── Pre-checks ────────────────────────────────────────────────────
 [[ -f "$NAMING" ]]      || { err "naming.policy.yaml not found"; exit 1; }
@@ -81,4 +81,9 @@ for ((i=0; i<host_count; i++)); do
   fi
 done
 
-exit "$FAIL"
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "D45 FAIL: naming consistency violations detected" >&2
+  exit 1
+fi
+echo "D45 PASS: naming consistency lock ($host_count hosts checked)"
+exit 0

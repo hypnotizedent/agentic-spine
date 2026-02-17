@@ -48,16 +48,16 @@ if [[ -f "$DI" ]]; then
   if grep -q '192\.168\.1\.0/24.*Shop' "$DI"; then
     : # good
   else
-    echo "FAIL: DEVICE_IDENTITY_SSOT.md missing 192.168.1.0/24 shop subnet" >&2
+    echo "D52 FAIL: DEVICE_IDENTITY_SSOT.md missing 192.168.1.0/24 shop subnet" >&2
     ERRORS=$((ERRORS + 1))
   fi
   # Should NOT reference 192.168.12.0/24 as shop subnet (old)
   if grep -q '192\.168\.12\.0/24.*Shop' "$DI" 2>/dev/null; then
-    echo "FAIL: DEVICE_IDENTITY_SSOT.md still references old 192.168.12.0/24 shop subnet" >&2
+    echo "D52 FAIL: DEVICE_IDENTITY_SSOT.md still references old 192.168.12.0/24 shop subnet" >&2
     ERRORS=$((ERRORS + 1))
   fi
 else
-  echo "FAIL: DEVICE_IDENTITY_SSOT.md not found" >&2
+  echo "D52 FAIL: DEVICE_IDENTITY_SSOT.md not found" >&2
   ERRORS=$((ERRORS + 1))
 fi
 
@@ -67,11 +67,11 @@ if [[ -f "$SS" ]]; then
   if grep -q '192\.168\.1\.1' "$SS"; then
     : # good
   else
-    echo "FAIL: SHOP_SERVER_SSOT missing 192.168.1.1 gateway reference (checked: $SS)" >&2
+    echo "D52 FAIL: SHOP_SERVER_SSOT missing 192.168.1.1 gateway reference (checked: $SS)" >&2
     ERRORS=$((ERRORS + 1))
   fi
 else
-  echo "FAIL: SHOP_SERVER_SSOT not found (checked: $SS)" >&2
+  echo "D52 FAIL: SHOP_SERVER_SSOT not found (checked: $SS)" >&2
   ERRORS=$((ERRORS + 1))
 fi
 
@@ -81,11 +81,11 @@ if [[ -f "$NP" ]]; then
   if grep -q '192\.168\.1\.0/24' "$NP"; then
     : # good
   else
-    echo "FAIL: NETWORK_POLICIES missing 192.168.1.0/24 shop subnet (checked: $NP)" >&2
+    echo "D52 FAIL: NETWORK_POLICIES missing 192.168.1.0/24 shop subnet (checked: $NP)" >&2
     ERRORS=$((ERRORS + 1))
   fi
 else
-  echo "FAIL: NETWORK_POLICIES not found (checked: $NP)" >&2
+  echo "D52 FAIL: NETWORK_POLICIES not found (checked: $NP)" >&2
   ERRORS=$((ERRORS + 1))
 fi
 
@@ -93,19 +93,24 @@ fi
 if [[ -f "$DI" ]]; then
   # infra-core must be .204 (VMID), not .128 (Tailscale-derived)
   if grep -q '192\.168\.1\.128.*204' "$DI" 2>/dev/null; then
-    echo "FAIL: DEVICE_IDENTITY_SSOT.md has Tailscale-derived IP .128 for infra-core (should be .204)" >&2
+    echo "D52 FAIL: DEVICE_IDENTITY_SSOT.md has Tailscale-derived IP .128 for infra-core (should be .204)" >&2
     ERRORS=$((ERRORS + 1))
   fi
   # download-stack must be .209 (VMID), not .76 (Tailscale-derived)
   if grep -q '192\.168\.1\.76.*209' "$DI" 2>/dev/null; then
-    echo "FAIL: DEVICE_IDENTITY_SSOT.md has Tailscale-derived IP .76 for download-stack (should be .209)" >&2
+    echo "D52 FAIL: DEVICE_IDENTITY_SSOT.md has Tailscale-derived IP .76 for download-stack (should be .209)" >&2
     ERRORS=$((ERRORS + 1))
   fi
   # streaming-stack must be .210 (VMID), not .64 (Tailscale-derived)
   if grep -q '192\.168\.1\.64.*210' "$DI" 2>/dev/null; then
-    echo "FAIL: DEVICE_IDENTITY_SSOT.md has Tailscale-derived IP .64 for streaming-stack (should be .210)" >&2
+    echo "D52 FAIL: DEVICE_IDENTITY_SSOT.md has Tailscale-derived IP .64 for streaming-stack (should be .210)" >&2
     ERRORS=$((ERRORS + 1))
   fi
 fi
 
-[[ "$ERRORS" -eq 0 ]] && exit 0 || exit 1
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "D52 FAIL: $ERRORS gateway assertion violation(s)" >&2
+  exit 1
+fi
+echo "D52 PASS: UDR6 gateway assertions valid"
+exit 0
