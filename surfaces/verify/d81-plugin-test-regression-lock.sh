@@ -14,7 +14,7 @@ MANIFEST="$SP/ops/plugins/MANIFEST.yaml"
 EXEMPTIONS="$SP/ops/bindings/plugin-test-exemptions.yaml"
 
 FAIL=0
-err() { echo "  FAIL: $1" >&2; FAIL=1; }
+err() { echo "  D81 FAIL: $1" >&2; FAIL=1; }
 
 [[ -f "$MANIFEST" ]] || { err "MANIFEST.yaml not found"; exit 1; }
 [[ -f "$EXEMPTIONS" ]] || { err "plugin-test-exemptions.yaml not found"; exit 1; }
@@ -54,4 +54,9 @@ if [[ "$UNCOVERED" -gt 0 ]]; then
   echo "  $UNCOVERED plugin(s) need tests or exemption in plugin-test-exemptions.yaml" >&2
 fi
 
-exit "$FAIL"
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "D81 FAIL: plugin test regression violations detected" >&2
+  exit 1
+fi
+echo "D81 PASS: plugin test coverage valid ($plugin_count plugins checked)"
+exit 0

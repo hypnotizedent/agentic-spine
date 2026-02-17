@@ -17,8 +17,8 @@ PROPOSALS_DIR="$SP/mailroom/outbox/proposals"
 LIFECYCLE="$SP/ops/bindings/proposals.lifecycle.yaml"
 
 FAIL=0
-err() { echo "  FAIL: $1" >&2; FAIL=1; }
-warn() { echo "  WARN: $1" >&2; }
+err() { echo "  D83 FAIL: $1" >&2; FAIL=1; }
+warn() { echo "  D83 WARN: $1" >&2; }
 
 # Read thresholds from lifecycle binding
 PENDING_MAX=7
@@ -167,4 +167,9 @@ if [[ "$missing_fields" -gt 0 ]]; then
   echo "  $missing_fields required field violations" >&2
 fi
 
-exit "$FAIL"
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "D83 FAIL: proposal queue health violations detected" >&2
+  exit 1
+fi
+echo "D83 PASS: proposal queue health valid"
+exit 0

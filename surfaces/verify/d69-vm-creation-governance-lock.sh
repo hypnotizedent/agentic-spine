@@ -21,8 +21,8 @@ HEALTH_BIND="$SP/ops/bindings/services.health.yaml"
 STACK_REG="$SP/docs/governance/STACK_REGISTRY.yaml"
 
 FAIL=0
-err() { echo "  FAIL: $1" >&2; FAIL=1; }
-warn() { echo "  WARN: $1" >&2; }
+err() { echo "  D69 FAIL: $1" >&2; FAIL=1; }
+warn() { echo "  D69 WARN: $1" >&2; }
 
 # ── Preconditions ────────────────────────────────────────────────────────────
 command -v yq >/dev/null 2>&1 || { err "yq not found"; exit 1; }
@@ -131,4 +131,9 @@ for ssh_id in $ssh_ids; do
   fi
 done
 
-exit "$FAIL"
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "D69 FAIL: VM creation governance violations detected" >&2
+  exit 1
+fi
+echo "D69 PASS: VM creation governance valid ($vm_count VMs checked)"
+exit 0

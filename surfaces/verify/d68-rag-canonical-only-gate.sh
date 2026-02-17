@@ -14,7 +14,7 @@ SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 RAG_SCRIPT="$SP/ops/plugins/rag/bin/rag"
 
 if [[ ! -f "$RAG_SCRIPT" ]]; then
-  echo "FAIL: RAG script missing at $RAG_SCRIPT"
+  echo "D68 FAIL: RAG script missing at $RAG_SCRIPT"
   exit 1
 fi
 
@@ -28,14 +28,14 @@ REQUIRED_EXCLUSIONS=(
 
 for pattern in "${REQUIRED_EXCLUSIONS[@]}"; do
   if ! grep -q "$pattern" "$RAG_SCRIPT"; then
-    echo "FAIL: RAG build_manifest missing exclusion for '$pattern'"
+    echo "D68 FAIL: RAG build_manifest missing exclusion for '$pattern'"
     exit 1
   fi
 done
 
 # Check 2: Frontmatter filter present (status: field required)
 if ! grep -q 'has_required_frontmatter' "$RAG_SCRIPT"; then
-  echo "FAIL: RAG build_manifest missing frontmatter filter"
+  echo "D68 FAIL: RAG build_manifest missing frontmatter filter"
   exit 1
 fi
 
@@ -108,10 +108,10 @@ for v in violations:
 " 2>/dev/null || true)
 
 if [[ -n "$manifest_output" ]]; then
-  echo "FAIL: RAG manifest would include non-canonical docs:"
+  echo "D68 FAIL: RAG manifest would include non-canonical docs:"
   echo "$manifest_output" | head -10
   exit 1
 fi
 
-echo "PASS"
+echo "D68 PASS: RAG canonical-only gate valid"
 exit 0

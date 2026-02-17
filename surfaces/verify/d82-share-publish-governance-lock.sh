@@ -18,7 +18,7 @@ SP="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 cd "$SP"
 
 FAIL=0
-err() { echo "  FAIL: $1" >&2; FAIL=1; }
+err() { echo "  D82 FAIL: $1" >&2; FAIL=1; }
 
 # 1. Protocol doc
 [[ -f "$SP/docs/governance/WORKBENCH_SHARE_PROTOCOL.md" ]] \
@@ -108,6 +108,8 @@ if [[ -f "$APPLY" ]]; then
 fi
 
 if [[ "$FAIL" -gt 0 ]]; then
-  echo "  share publish governance: $FAIL issue(s)" >&2
+  echo "D82 FAIL: share publish governance violations detected" >&2
+  exit 1
 fi
-exit "$FAIL"
+echo "D82 PASS: share publish governance valid"
+exit 0
