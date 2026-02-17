@@ -11,14 +11,25 @@ scope: terminal-c-orchestration
 Canonical operating model for parallel terminal work without collisions.
 
 ## Planes
-1. Control Plane: Terminal C only. Opens loops, issues lane tickets, validates handoffs, integrates to `main`, closes loops.
-2. Execution Plane: Worker terminals only. One lane per terminal, code only, no integration.
-3. Observation Plane: Watcher terminal only. Read-only status checks first; no writes unless explicitly approved.
+1. Control Plane: SPINE-CONTROL-01 only. Opens loops, issues lane tickets, validates handoffs, integrates to `main`, closes loops.
+2. Execution Plane: Worker terminals only (e.g. DOMAIN-HA-01, RUNTIME-IMMICH-01). One lane per terminal, code only, no integration.
+3. Observation Plane: SPINE-AUDIT-01 only. Read-only status checks first; no writes unless explicitly approved.
+
+## Canonical Terminal Names
+| Name | Type | Scope |
+|------|------|-------|
+| SPINE-CONTROL-01 | control-plane | bin/, ops/, surfaces/ |
+| SPINE-AUDIT-01 | observation | receipts/, audits/ |
+| RUNTIME-IMMICH-01 | domain-runtime | immich ops |
+| DOMAIN-HA-01 | domain-runtime | home-assistant ops |
+| DEPLOY-MINT-01 | domain-runtime | mint deployment |
+
+Formal contract: `ops/bindings/terminal.role.contract.yaml`
 
 ## Non-Negotiables
 1. `Ctrl+Shift+S/C/O` are solo launchers only. They are never worker lane entrypoints.
 2. Worker terminals must launch with explicit `--role worker --lane <D|E|F|G>`.
-3. Terminal C is the only terminal allowed to run `orchestration.integrate --apply`.
+3. SPINE-CONTROL-01 is the only terminal allowed to run `orchestration.integrate --apply`.
 4. Do not use fallback mode unless emergency recovery is explicitly declared.
 5. Stop immediately on any failed gate.
 
@@ -69,7 +80,7 @@ Open orchestration manifest:
 ```bash
 ./bin/ops cap run orchestration.loop.open \
   --loop-id "$LOOP_ID" \
-  --apply-owner terminal-c \
+  --apply-owner SPINE-CONTROL-01 \
   --repo "$TARGET_REPO" \
   --base-sha "$BASE_SHA" \
   --lanes D,E,F \
@@ -81,9 +92,9 @@ Open orchestration manifest:
 
 ## Gate 2: Issue Lane Tickets
 ```bash
-./bin/ops cap run orchestration.ticket.issue --loop-id "$LOOP_ID" --lane D --branch worker/<feature>-D --worker terminal-d
-./bin/ops cap run orchestration.ticket.issue --loop-id "$LOOP_ID" --lane E --branch worker/<feature>-E --worker terminal-e
-./bin/ops cap run orchestration.ticket.issue --loop-id "$LOOP_ID" --lane F --branch worker/<feature>-F --worker terminal-f
+./bin/ops cap run orchestration.ticket.issue --loop-id "$LOOP_ID" --lane D --branch worker/<feature>-D --worker DOMAIN-HA-01
+./bin/ops cap run orchestration.ticket.issue --loop-id "$LOOP_ID" --lane E --branch worker/<feature>-E --worker RUNTIME-IMMICH-01
+./bin/ops cap run orchestration.ticket.issue --loop-id "$LOOP_ID" --lane F --branch worker/<feature>-F --worker DEPLOY-MINT-01
 ./bin/ops cap run orchestration.status --loop-id "$LOOP_ID"
 ```
 
@@ -146,4 +157,4 @@ If this loop is a release/cutover loop, run full certification before closeout:
 4. Phase 4: Allow limited autonomous apply for low-risk lanes only.
 
 ## Operator Reminder
-If you are about to run coding commands in Terminal C, stop. Terminal C is control plane only.
+If you are about to run coding commands in SPINE-CONTROL-01, stop. SPINE-CONTROL-01 is control plane only.
