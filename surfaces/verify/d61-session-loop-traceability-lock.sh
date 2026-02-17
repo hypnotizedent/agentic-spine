@@ -9,6 +9,7 @@ set -euo pipefail
 
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LEDGER="$SP/mailroom/state/ledger.csv"
+RECEIPTS_DIR="$SP/receipts/sessions"
 THRESHOLD_HOURS="${SESSION_CLOSEOUT_FRESHNESS_HOURS:-48}"
 SCOPES_DIR="$SP/mailroom/state/loop-scopes"
 LOOP_TTL_HIGH_HOURS="${LOOP_TTL_HIGH_HOURS:-48}"
@@ -58,6 +59,30 @@ PY
   date -j -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" +%s 2>/dev/null || echo 0
 }
 
+latest_closeout_ts_from_receipts() {
+  local receipt latest ts
+  latest="$(find "$RECEIPTS_DIR" -maxdepth 2 -type f -path '*/RCAP-*__agent.session.closeout__*/receipt.md' 2>/dev/null | sort | tail -1 || true)"
+  [[ -n "$latest" ]] || return 1
+
+  ts="$(awk -F'|' '
+    /\| End \|/ {
+      gsub(/^[ \t]+|[ \t]+$/, "", $3)
+      if ($3 != "") { print $3; found_end=1; exit }
+    }
+    /\| Generated \|/ {
+      gsub(/^[ \t]+|[ \t]+$/, "", $3)
+      if ($3 != "") { generated=$3 }
+    }
+    END {
+      if (!found_end && generated != "") print generated
+    }
+  ' "$latest")"
+
+  [[ -n "$ts" ]] || return 1
+  printf '%s\n' "$ts"
+  return 0
+}
+
 # ledger.csv is runtime state. In CI or fresh clones it may be absent; treat as
 # "unavailable" and skip the closeout freshness check (loop TTL can still run).
 SKIP_CLOSEOUT_CHECK=0
@@ -75,15 +100,24 @@ fi
 # Capability entries use prompt_file=agent.session.closeout
 
 LAST_TS=""
+LAST_TS_SOURCE=""
 if [[ "$SKIP_CLOSEOUT_CHECK" == "0" ]]; then
   while IFS=, read -r run_id created_at started_at finished_at status prompt_file _rest; do
     if [[ "$prompt_file" == "agent.session.closeout" && "$status" == "done" && -n "$finished_at" ]]; then
       LAST_TS="$finished_at"
+      LAST_TS_SOURCE="ledger"
     fi
   done < <(tail -n +2 "$LEDGER" 2>/dev/null || true)
 
   if [[ -z "$LAST_TS" ]]; then
-    err "agent.session.closeout has never been run (0 done entries in ledger)"
+    if LAST_TS="$(latest_closeout_ts_from_receipts)"; then
+      LAST_TS_SOURCE="receipts"
+      warn "ledger has no done agent.session.closeout rows; using latest receipt timestamp"
+    fi
+  fi
+
+  if [[ -z "$LAST_TS" ]]; then
+    err "agent.session.closeout has never been run (no done ledger rows or receipts)"
     exit "$FAIL"
   fi
 fi
@@ -99,7 +133,7 @@ if [[ "$SKIP_CLOSEOUT_CHECK" == "0" ]]; then
   DELTA_HOURS=$(( (NOW - LAST_EPOCH) / 3600 ))
 
   if [[ "$DELTA_HOURS" -gt "$THRESHOLD_HOURS" ]]; then
-    err "agent.session.closeout last run ${DELTA_HOURS}h ago (threshold: ${THRESHOLD_HOURS}h)"
+    err "agent.session.closeout last run ${DELTA_HOURS}h ago (threshold: ${THRESHOLD_HOURS}h, source: ${LAST_TS_SOURCE:-unknown})"
   fi
 fi
 
