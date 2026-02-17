@@ -98,7 +98,7 @@ When projects are cleaned up, the recommended structure is:
 | mint-os-api | Dashboard API runtime | `mint-os-api` + `mint-os-vault` (merged) |
 | ai-services | AI provider keys | New (from `infrastructure`) |
 | n8n | Automation | `n8n` (keep) |
-| finance-stack | Firefly, Ghostfolio | `finance-stack` (keep) |
+| finance-services | Firefly + Paperless + finance auth tokens | `infrastructure` under `/spine/services/finance` and `/spine/services/paperless` |
 | media-stack | Jellyfin, *arr | `media-stack` (keep) |
 | immich | Photos | `immich` (deduped) |
 | home-assistant | Smart home | `home-assistant` (keep) |

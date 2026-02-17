@@ -53,6 +53,9 @@ Use bundle-based rotation so agents never guess project names/paths.
 # Clipboard JSON format:
 # {"FIREFLY_PAT":"...","PAPERLESS_API_TOKEN":"..."}
 echo "yes" | ./bin/ops cap run secrets.bundle.apply finance --clipboard --sync-local-env
+
+# Enforce fail if deprecated-project shadow keys still exist
+./bin/ops cap run secrets.bundle.verify finance --fail-on-legacy-shadow
 ```
 
 Bundle contract source:
