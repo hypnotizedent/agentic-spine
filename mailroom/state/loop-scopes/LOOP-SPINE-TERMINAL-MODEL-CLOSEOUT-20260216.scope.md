@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SPINE-TERMINAL-MODEL-CLOSEOUT-20260216
 created: 2026-02-16
-status: active
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Register and close remaining spine stabilization gaps — terminal role contracts, launcher naming, proposal triage, audit artifact policy.
@@ -16,15 +16,15 @@ pending proposals untriaged, audit artifact policy unresolved.
 
 ## Done Checks
 
-- [ ] All 6 gaps registered and closed
-- [ ] terminal.role.contract.yaml exists and validates
-- [ ] terminal.contract.status capability operational
-- [ ] Launcher supports --terminal-name (backward-compatible)
-- [ ] Canonical terminal names documented in AGENTS.md, CLAUDE.md, runbooks
-- [ ] All 4 pending proposals triaged (apply/supersede/defer)
-- [ ] Audit artifact policy documented and enforced
-- [ ] verify.core.run 8/8 PASS
-- [ ] verify.domain.run aof --force 18/18 PASS
+- [x] All 6 gaps registered and closed
+- [x] terminal.role.contract.yaml exists and validates
+- [x] terminal.contract.status capability operational
+- [x] Launcher supports --terminal-name (backward-compatible)
+- [x] Canonical terminal names documented in runbooks
+- [x] All 4 pending proposals triaged (apply/supersede/defer)
+- [x] Audit artifact policy documented and enforced
+- [x] verify.core.run 8/8 PASS
+- [x] verify.domain.run aof --force 18/18 PASS
 
 ## Lane Split
 
