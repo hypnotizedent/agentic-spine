@@ -1202,6 +1202,13 @@ else
   warn "mutation atomicity lock gate not present"
 fi
 
+echo -n "D133 Output vocabulary lock... "
+if [[ -x "$SP/surfaces/verify/d133-output-vocabulary-lock.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d133-output-vocabulary-lock.sh" "D133"
+else
+  warn "output vocabulary lock gate not present"
+fi
+
 echo -n "D134 Topology metadata quality lock... "
 if [[ -x "$SP/surfaces/verify/d134-topology-metadata-quality-lock.sh" ]]; then
   gate_script "$SP/surfaces/verify/d134-topology-metadata-quality-lock.sh" "D134"
