@@ -127,6 +127,7 @@ Notes:
 | `d121-fabric-boundary-lock.sh` | Lean-spine boundary lock (domain capability freeze + active workbench implementation paths) | Yes |
 | `d122-domain-doc-route-lock.sh` | Domain docs routing lock (spine stubs + workbench targets + route binding parity) | Yes |
 | `d123-strict-migration-policy-lock.sh` | Strict migration policy lock (strict preset + proposal-only write policy) | Yes |
+| `d135-terminal-scope-lock.sh` | Terminal scope lock (canonical naming + collision-free write scopes). Deferred during stabilization window (`ops/bindings/stabilization.mode.yaml`). Contract: `ops/bindings/terminal.role.contract.yaml` | Yes |
 | `cloudflare-drift-gate.sh` | Cloudflare configuration drift | Yes |
 | `github-actions-gate.sh` | GitHub Actions workflow gate | Yes |
 | `api-preconditions.sh` | API precondition checks | Yes |
