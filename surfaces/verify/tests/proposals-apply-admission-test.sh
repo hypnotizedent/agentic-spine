@@ -160,6 +160,20 @@ gaps:
     parent_loop: "LOOP-TEST-ADMISSION-20260217"
 YAML
 
+  cat > "$d/ops/bindings/d75-gap-mutation-policy.yaml" <<'YAML'
+version: 1
+gate_id: D75
+description: "fixture D75 policy without status/lifecycle keys"
+file: ops/bindings/operational.gaps.yaml
+window: 50
+enforcement_after_sha: "46b736b"
+required_trailers:
+  - Gap-Mutation
+  - Gap-Capability
+  - Gap-Run-Key
+strict: true
+YAML
+
   cat > "$d/mailroom/state/loop-scopes/LOOP-TEST-ADMISSION-20260217.scope.md" <<'MD'
 ---
 status: active
@@ -312,5 +326,38 @@ fi
 grep -q 'schema_conventions' "$out4" || fail "CP-SCHEMA missing schema finding"
 grep -q 'touch_and_fix enforced' "$out4" || fail "CP-SCHEMA missing touch_and_fix message"
 pass "schema touch_and_fix violation blocks"
+
+# Test 5: binding without status/lifecycle must not produce empty-value P1 failures.
+tmp5="$(mktemp -d)"
+setup_fixture "$tmp5"
+write_manifest_and_files "$tmp5" CP-BINDING modify ops/bindings/d75-gap-mutation-policy.yaml
+cat > "$tmp5/mailroom/outbox/proposals/CP-BINDING/files/ops/bindings/d75-gap-mutation-policy.yaml" <<'YAML'
+version: 1
+gate_id: D75
+description: "updated fixture d75 policy without status/lifecycle keys"
+file: ops/bindings/operational.gaps.yaml
+window: 50
+enforcement_after_sha: "f094469"
+required_trailers:
+  - Gap-Mutation
+  - Gap-Capability
+  - Gap-Run-Key
+strict: true
+YAML
+init_fixture_repo "$tmp5"
+out5="$(mktemp)"
+if ! run_with_env "$tmp5" CP-BINDING "$out5" env; then
+  cat "$out5" >&2
+  fail "CP-BINDING should pass without false status/lifecycle P1 findings"
+fi
+if grep -q "non-canonical status value ''" "$out5"; then
+  cat "$out5" >&2
+  fail "CP-BINDING produced false empty status finding"
+fi
+if grep -q "non-canonical lifecycle value ''" "$out5"; then
+  cat "$out5" >&2
+  fail "CP-BINDING produced false empty lifecycle finding"
+fi
+pass "binding without status/lifecycle avoids false P1 findings"
 
 echo "All admission tests passed"
