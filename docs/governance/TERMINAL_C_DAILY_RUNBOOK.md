@@ -63,6 +63,22 @@ Only after snapshot is healthy, continue day-to-day checks:
 it validates required domain keys and audits compose stacks so new secret keys
 cannot drift without an explicit project/path route.
 
+## Weekly Workbench AOF Sweep
+
+Run once per week (SPINE-AUDIT-01 or SPINE-CONTROL-01):
+
+```bash
+cd /Users/ronnyworks/code/workbench
+./scripts/root/aof/workbench-aof-check.sh --mode all --format text --explain
+
+cd /Users/ronnyworks/code/agentic-spine
+./bin/ops cap run proposals.status
+```
+
+Escalation:
+1. Any `P0`/`P1` finding => stop proposal applies touching workbench until resolved.
+2. Open/update loop scope and publish an audit note under `docs/governance/_audits/`.
+
 ## Nightly / Release Certification
 
 Use full-suite verification for nightly/release only (not day-to-day):

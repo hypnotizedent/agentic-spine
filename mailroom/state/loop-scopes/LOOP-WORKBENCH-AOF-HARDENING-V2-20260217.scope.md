@@ -1,11 +1,12 @@
 ---
 loop_id: LOOP-WORKBENCH-AOF-HARDENING-V2-20260217
 created: 2026-02-17
-status: draft
+status: active
 owner: "@ronny"
 scope: workbench
 objective: Post-implementation hardening pass for workbench AOF contract/checker/preflight operations without adding new drift gates.
 parent_loop: LOOP-WORKBENCH-AOF-NORMALIZATION-IMPLEMENT-20260217
+activated_at: 2026-02-17
 ---
 
 ## Workstreams

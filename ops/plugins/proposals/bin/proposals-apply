@@ -182,8 +182,15 @@ run_workbench_preflight() {
     return 0
   fi
 
+  if [[ ! -d "$WORKBENCH_ROOT" ]]; then
+    echo "ERROR: Workbench preflight required, but WORKBENCH_ROOT is unreachable: $WORKBENCH_ROOT" >&2
+    echo "       Remediation: export WORKBENCH_ROOT=/Users/<user>/code/workbench and retry." >&2
+    exit 1
+  fi
+
   if [[ ! -x "$WORKBENCH_AOF_CHECKER" ]]; then
     echo "ERROR: Workbench proposal preflight required but checker missing: $WORKBENCH_AOF_CHECKER" >&2
+    echo "       Remediation: verify workbench checkout + executable checker path." >&2
     exit 1
   fi
 
@@ -192,7 +199,19 @@ run_workbench_preflight() {
   for p in "${wb_paths[@]}"; do
     checker_args+=(--changed-files "$p")
   done
-  if ! "$WORKBENCH_AOF_CHECKER" "${checker_args[@]}"; then
+  local preflight_output preflight_rc preflight_summary
+  set +e
+  preflight_output="$("$WORKBENCH_AOF_CHECKER" "${checker_args[@]}" 2>&1)"
+  preflight_rc=$?
+  set -e
+
+  echo "$preflight_output"
+  preflight_summary="$(grep -E '^summary:' <<< "$preflight_output" | tail -1 || true)"
+  if [[ -n "$preflight_summary" ]]; then
+    echo "Workbench preflight summary: $preflight_summary"
+  fi
+
+  if (( preflight_rc != 0 )); then
     echo "ERROR: Workbench AOF preflight failed (P0/P1). Proposal apply blocked." >&2
     exit 1
   fi
