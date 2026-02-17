@@ -18,9 +18,11 @@ parent_loop: LOOP-WORKBENCH-AOF-NORMALIZATION-IMPLEMENT-20260217
 | Step | Command | Run Key | Result |
 |---|---|---|---|
 | 1 | `stability.control.snapshot` | `CAP-20260217-002342__stability.control.snapshot__R2udb4954` | `WARN` (latency/load advisories only) |
-| 2 | `verify.core.run` | `CAP-20260217-002417__verify.core.run__Rqj5k8459` | `8/8 PASS` |
+| 2 | `verify.core.run` | `CAP-20260217-002654__verify.core.run__Rdeen30099` | `8/8 PASS` |
 | 3 | `verify.domain.run aof` | `CAP-20260217-002417__verify.domain.run__Rdpto8499` | `bypass` (stabilization mode) |
-| 4 | `verify.domain.run aof --force` | `CAP-20260217-002458__verify.domain.run__Rq20s20165` | `18/18 PASS` |
+| 4 | `verify.domain.run aof --force` | `CAP-20260217-002732__verify.domain.run__Rya9841721` | `18/18 PASS` |
+| 5 | `proposals.supersede <master-proposal>` | `CAP-20260217-002641__proposals.supersede__Rejrm29256` | `done` |
+| 6 | `proposals.status` | `CAP-20260217-002646__proposals.status__Rs0qi29525` | `Pending=0` |
 
 Workbench checker:
 
