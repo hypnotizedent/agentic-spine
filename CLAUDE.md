@@ -130,6 +130,18 @@ CLAUDE.md governance blocks to pointer shims — D65 enforces full embed until a
 refactor introduces a different delivery mechanism.
 <!-- /GOVERNANCE_BRIEF -->
 
+## Canonical Terminal Roles
+
+| ID | Type | Scope |
+|----|------|-------|
+| SPINE-CONTROL-01 | control-plane | bin/, ops/, surfaces/, docs/governance/, mailroom/ |
+| SPINE-AUDIT-01 | observation | receipts/, docs/governance/_audits/ |
+| DOMAIN-HA-01 | domain-runtime | ops/plugins/ha/, ops/bindings/ha.*, z2m.*, home.* |
+| RUNTIME-IMMICH-01 | domain-runtime | ops/plugins/immich/, ops/bindings/immich.* |
+| DEPLOY-MINT-01 | domain-runtime | ops/plugins/mint/, docs/governance/MINT_* |
+
+> Source: `ops/bindings/terminal.role.contract.yaml`
+
 ## Quick Reference
 
 - Runtime Repo: `~/code/agentic-spine`
