@@ -1,7 +1,7 @@
 # Infisical Projects (Canonical Map)
 
 > **Status:** authoritative
-> **Last verified:** 2026-02-04
+> **Last verified:** 2026-02-17
 
 **Purpose:** Prevent agent confusion. Agents MUST NOT guess which Infisical project to use.  
 **Rule:** The spine runtime binds exactly ONE project at a time via `ops/bindings/secrets.binding.yaml`.  
@@ -42,7 +42,7 @@
 > The workbench inventory is the external SSOT for secret key counts and project lifecycle.
 > This table is a snapshot for spine context.
 
-Last updated: 2026-02-03
+Last updated: 2026-02-17
 
 | lifecycle | project_name | project_id | env | keys | notes |
 |---|---|---|---|---|---|
@@ -51,7 +51,7 @@ Last updated: 2026-02-03
 | OVERLAPS | mint-os-vault | `66d149d6-f610-4ec3-a400-3ff42ea1aa75` | prod | ~8 | Overlaps with mint-os-api; consolidation candidate |
 | DELETE_CANDIDATE | mint-os-portal | `758e5db3-8d00-4ccf-8d91-aeaad0d6ed37` | prod | 0 | Empty project, delete candidate |
 | CLEAN | n8n | `4b9dfc6d-13e8-43c8-bd84-9beb64eb8e16` | prod | ~8 | Automation workflows |
-| CLEAN | finance-stack | `4c34714d-6d85-4aa6-b8df-5a9505f3bcef` | prod | ~14 | Firefly III, financial management |
+| DEPRECATED | finance-stack | `4c34714d-6d85-4aa6-b8df-5a9505f3bcef` | prod | ~14 | Deprecated read-only shadow. Canonical finance/paperless keys live in `infrastructure` under `/spine/services/finance` and `/spine/services/paperless`. |
 | CLEAN | media-stack | `3807f1c4-e354-4aaf-a16f-8567d7f78a7e` | prod | ~20 | Jellyfin, *arr apps, media management |
 | CLEAN_BUT_DUPED | immich | `4bf7f25e-596b-4293-9d2a-c2c7c2d0df42` | prod | ~19 | Keys duplicated in infrastructure; remove dupes from infra |
 | CLEAN | home-assistant | `5df75515-7259-4c14-98b8-5adda379aade` | prod | ~7 | Smart home control |
@@ -119,6 +119,11 @@ When projects are cleaned up, the recommended structure is:
 To verify current binding:
 ```bash
 ./bin/ops cap run secrets.binding
+```
+
+To verify canonical finance secret routing:
+```bash
+./bin/ops cap run secrets.bundle.verify finance
 ```
 
 To check if a project is ACTIVE:

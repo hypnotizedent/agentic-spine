@@ -42,3 +42,13 @@ that are invoked directly by Claude Desktop, not through the spine capability ru
 - **Secrets:** `FIREFLY_PAT`, `PAPERLESS_API_TOKEN` from Infisical `infrastructure/prod`
 - **Registration:** Add `finance-agent` entry to Claude Desktop config
 - **VM 211 reachability:** Required (Tailscale `100.76.153.100` or LAN `192.168.1.211`)
+
+### Canonical Secret Rotation
+
+```bash
+# Read-only verification (project/path/auth)
+./bin/ops cap run secrets.bundle.verify finance
+
+# Apply new tokens from clipboard JSON (no web UI path hunting)
+echo "yes" | ./bin/ops cap run secrets.bundle.apply finance --clipboard --sync-local-env
+```

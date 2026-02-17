@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-04
+last_verified: 2026-02-17
 scope: secrets-management
 github_issue: "#541"
 ---
@@ -40,6 +40,23 @@ Secrets are injected via the `secrets.exec` capability:
 # Run a command with secrets injected (requires operator approval)
 ./bin/ops cap run secrets.exec -- <command>
 ```
+
+## Canonical Bundle Rotation (CLI-Only)
+
+Use bundle-based rotation so agents never guess project names/paths.
+
+```bash
+# Verify canonical bundle route + endpoint auth (no writes)
+./bin/ops cap run secrets.bundle.verify finance
+
+# Apply new bundle values from clipboard JSON and sync local finance .env
+# Clipboard JSON format:
+# {"FIREFLY_PAT":"...","PAPERLESS_API_TOKEN":"..."}
+echo "yes" | ./bin/ops cap run secrets.bundle.apply finance --clipboard --sync-local-env
+```
+
+Bundle contract source:
+- `ops/bindings/secrets.bundle.contract.yaml`
 
 ---
 
