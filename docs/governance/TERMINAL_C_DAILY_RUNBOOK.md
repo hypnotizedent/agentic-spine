@@ -18,11 +18,11 @@ Canonical operating model for parallel terminal work without collisions.
 ## Canonical Terminal Names
 | Name | Type | Scope |
 |------|------|-------|
-| SPINE-CONTROL-01 | control-plane | bin/, ops/, surfaces/ |
-| SPINE-AUDIT-01 | observation | receipts/, audits/ |
-| RUNTIME-IMMICH-01 | domain-runtime | immich ops |
-| DOMAIN-HA-01 | domain-runtime | home-assistant ops |
-| DEPLOY-MINT-01 | domain-runtime | mint deployment |
+| SPINE-CONTROL-01 | control-plane | bin/, ops/, surfaces/, docs/governance/, docs/core/, docs/product/, docs/brain/, mailroom/ |
+| SPINE-AUDIT-01 | observation | receipts/, docs/governance/_audits/ |
+| RUNTIME-IMMICH-01 | domain-runtime | ops/plugins/immich/, ops/bindings/immich.* |
+| DOMAIN-HA-01 | domain-runtime | ops/plugins/ha/, ops/bindings/ha.*, z2m.*, home.* |
+| DEPLOY-MINT-01 | domain-runtime | ops/plugins/mint/, docs/governance/MINT_* |
 
 Formal contract: `ops/bindings/terminal.role.contract.yaml`
 

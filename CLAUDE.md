@@ -134,7 +134,7 @@ refactor introduces a different delivery mechanism.
 
 | ID | Type | Scope |
 |----|------|-------|
-| SPINE-CONTROL-01 | control-plane | bin/, ops/, surfaces/, docs/governance/, mailroom/ |
+| SPINE-CONTROL-01 | control-plane | bin/, ops/, surfaces/, docs/governance/, docs/core/, docs/product/, docs/brain/, mailroom/ |
 | SPINE-AUDIT-01 | observation | receipts/, docs/governance/_audits/ |
 | DOMAIN-HA-01 | domain-runtime | ops/plugins/ha/, ops/bindings/ha.*, z2m.*, home.* |
 | RUNTIME-IMMICH-01 | domain-runtime | ops/plugins/immich/, ops/bindings/immich.* |
