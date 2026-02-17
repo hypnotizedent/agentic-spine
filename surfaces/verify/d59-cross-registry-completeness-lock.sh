@@ -15,7 +15,7 @@ SERVICE_REG="$SP/docs/governance/SERVICE_REGISTRY.yaml"
 NAMING="$SP/ops/bindings/naming.policy.yaml"
 
 FAIL=0
-err() { echo "  FAIL: $1" >&2; FAIL=1; }
+err() { echo "  D59 FAIL: $1" >&2; FAIL=1; }
 
 [[ -f "$SSH_TARGETS" ]] || { err "ssh.targets.yaml not found"; exit 1; }
 [[ -f "$SERVICE_REG" ]] || { err "SERVICE_REGISTRY.yaml not found"; exit 1; }
@@ -56,4 +56,9 @@ for host in $ssh_hosts; do
   fi
 done
 
-exit "$FAIL"
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "D59 FAIL: cross-registry completeness violations detected" >&2
+  exit 1
+fi
+echo "D59 PASS: cross-registry completeness valid"
+exit 0

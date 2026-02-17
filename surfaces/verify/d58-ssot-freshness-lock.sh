@@ -12,7 +12,7 @@ REGISTRY="$SP/docs/governance/SSOT_REGISTRY.yaml"
 THRESHOLD="${SSOT_FRESHNESS_DAYS:-21}"
 
 FAIL=0
-err() { echo "  FAIL: $1" >&2; FAIL=1; }
+err() { echo "  D58 FAIL: $1" >&2; FAIL=1; }
 
 parse_epoch_date() {
   local ds="${1:-}"
@@ -160,4 +160,9 @@ if [[ -d "$BINDINGS_DIR" && -f "$EXEMPTIONS_FILE" ]]; then
   fi
 fi
 
-exit "$FAIL"
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "D58 FAIL: SSOT freshness violations detected" >&2
+  exit 1
+fi
+echo "D58 PASS: SSOT freshness valid (threshold=${THRESHOLD}d)"
+exit 0

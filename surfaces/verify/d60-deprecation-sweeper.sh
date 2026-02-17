@@ -11,7 +11,7 @@ SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BINDING="$SP/ops/bindings/deprecated.terms.yaml"
 
 FAIL=0
-err() { echo "  FAIL: $1" >&2; FAIL=1; }
+err() { echo "  D60 FAIL: $1" >&2; FAIL=1; }
 
 [[ -f "$BINDING" ]] || { err "deprecated.terms.yaml not found"; exit 1; }
 command -v yq >/dev/null 2>&1 || { err "yq not found"; exit 1; }
@@ -57,4 +57,9 @@ if [[ "$HITS" -gt 0 ]]; then
   echo "  $HITS deprecated term occurrences found" >&2
 fi
 
-exit "$FAIL"
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "D60 FAIL: deprecated term violations detected" >&2
+  exit 1
+fi
+echo "D60 PASS: deprecation sweeper clean ($term_count terms checked)"
+exit 0

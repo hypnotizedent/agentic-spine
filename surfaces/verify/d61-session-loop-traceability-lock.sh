@@ -14,7 +14,7 @@ SCOPES_DIR="$SP/mailroom/state/loop-scopes"
 LOOP_TTL_HIGH_HOURS="${LOOP_TTL_HIGH_HOURS:-48}"
 
 FAIL=0
-err() { echo "  FAIL: $1" >&2; FAIL=1; }
+err() { echo "  D61 FAIL: $1" >&2; FAIL=1; }
 warn() { echo "  WARN: $1" >&2; }
 
 parse_epoch_utc() {
@@ -177,7 +177,7 @@ for scope_file in sorted(Path(scopes_dir).glob("*.scope.md")):
 stale.sort(reverse=True)
 if stale:
     for age_h, loop_id, owner, created_at in stale:
-        print(f"  FAIL: high loop stale >{threshold_hours}h: {loop_id} owner={owner} age={age_h}h created={created_at}", file=sys.stderr)
+        print(f"  D61 FAIL: high loop stale >{threshold_hours}h: {loop_id} owner={owner} age={age_h}h created={created_at}", file=sys.stderr)
     sys.exit(1)
 sys.exit(0)
 PY
@@ -189,4 +189,9 @@ PY
   fi
 fi
 
-exit "$FAIL"
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "D61 FAIL: session-loop traceability violations detected" >&2
+  exit 1
+fi
+echo "D61 PASS: session-loop traceability valid"
+exit 0

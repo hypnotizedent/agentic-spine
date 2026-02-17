@@ -29,8 +29,8 @@ while IFS='|' read -r sha cname cemail subject date; do
   [[ -z "${sha:-}" ]] && continue
   if [[ "${cemail:-}" == "noreply@github.com" || "${cname:-}" == "GitHub" ]]; then
     short="${sha:0:7}"
-    echo "WARN: GitHub-authored merge detected: ${short} ${subject} (${date})"
-    echo "WARN: Policy: PRs/merges must happen on Gitea; see docs/governance/GIT_REMOTE_AUTHORITY.md"
+    echo "D64 WARN: GitHub-authored merge detected: ${short} ${subject} (${date})"
+    echo "D64 WARN: Policy: PRs/merges must happen on Gitea; see docs/governance/GIT_REMOTE_AUTHORITY.md"
     warned=$((warned + 1))
     if (( warned >= MAX_WARN )); then
       break
@@ -38,5 +38,10 @@ while IFS='|' read -r sha cname cemail subject date; do
   fi
 done < <(git log -n "$SCAN" --pretty=format:'%H|%cn|%ce|%s|%ad' --date=short 2>/dev/null || true)
 
+if [[ "$warned" -gt 0 ]]; then
+  echo "D64 PASS: $warned GitHub-authored merge(s) detected (warn-only)"
+else
+  echo "D64 PASS: no GitHub-authored merges in last $SCAN commits"
+fi
 exit 0
 
