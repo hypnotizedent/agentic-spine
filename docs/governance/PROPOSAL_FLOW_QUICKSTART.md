@@ -16,6 +16,13 @@ cd /Users/ronnyworks/code/agentic-spine
 echo "yes" | ./bin/ops cap run proposals.apply CP-YYYYMMDD-HHMMSS__your-change
 ```
 
+## Admission Routing Contract
+
+`proposals.apply` always evaluates loop/gap governance route checks by sending
+`--capability proposals.apply` into `verify.route.recommend` equivalent routing.
+This guarantees `loop_gap` domain evaluation even when changed file paths are sparse
+or do not match existing path trigger inventories.
+
 ## Workbench Preflight Behavior
 
 When a proposal touches `/Users/ronnyworks/code/workbench/**`, `proposals.apply` runs:
