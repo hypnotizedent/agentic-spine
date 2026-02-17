@@ -1,7 +1,9 @@
 ---
 loop_id: LOOP-COMMUNICATIONS-STACK-V1-PROPOSAL-20260217
 created: 2026-02-17
-status: active
+status: closed
+closed_at: 2026-02-17
+closeout_cert: docs/governance/_audits/COMMUNICATIONS_STACK_V1_PROPOSAL_CLOSEOUT_20260217.md
 owner: "@ronny"
 scope: proposal-only
 ---
@@ -27,6 +29,6 @@ Promote parked communications decision artifacts into canonical main and queue a
 - Additive stack only.
 
 ## Done Check
-- Loop scope exists and is active.
+- Loop scope exists and is closed with closeout certificate.
 - Exactly one communications proposal submitted and pending.
 - No proposal apply/supersede/archive performed.
