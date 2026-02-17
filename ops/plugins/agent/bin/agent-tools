@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-tools — Show machine-queryable tool/capability inventory for one agent.
+# Usage:
+#   agent-tools <agent-id> [--json]
+
+SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
+REGISTRY="$SPINE_CODE/ops/bindings/agents.registry.yaml"
+
+usage() {
+  cat <<'EOF'
+Usage: agent-tools <agent-id> [--json]
+
+Return agent tool surface from registry:
+  - mcp_tools
+  - capabilities
+  - endpoints
+EOF
+}
+
+[[ -f "$REGISTRY" ]] || { echo "ERROR: registry not found: $REGISTRY" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "ERROR: yq is required" >&2; exit 1; }
+
+if [[ $# -lt 1 ]]; then
+  usage >&2
+  exit 1
+fi
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+AGENT_ID="$1"
+shift || true
+OUTPUT_FORMAT="yaml"
+
+for arg in "$@"; do
+  case "$arg" in
+    --json) OUTPUT_FORMAT="json" ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown option: $arg" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ ! "$AGENT_ID" =~ ^[a-z0-9-]+$ ]]; then
+  echo "ERROR: invalid agent id: $AGENT_ID" >&2
+  exit 1
+fi
+
+AGENT_EXISTS="$(yq e -r ".agents[] | select(.id == \"$AGENT_ID\") | .id" "$REGISTRY" 2>/dev/null || true)"
+if [[ -z "$AGENT_EXISTS" ]]; then
+  echo "ERROR: agent not found: $AGENT_ID" >&2
+  exit 1
+fi
+
+SELECTOR=".agents[] | select(.id == \"$AGENT_ID\") | {\"id\": .id, \"mcp_tools\": (.mcp_tools // []), \"capabilities\": (.capabilities // []), \"endpoints\": (.endpoints // {})}"
+
+if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+  yq e -o=json "$SELECTOR" "$REGISTRY"
+else
+  yq e "$SELECTOR" "$REGISTRY"
+fi

@@ -21,11 +21,11 @@
 #   - config-only: No code, just MCP config JSON (ms-graph, firefly, paperless)
 #
 # Status: authoritative
-# Last verified: 2026-02-16
+# Last verified: 2026-02-17
 # ═══════════════════════════════════════════════════════════════════════════
 
 version: 2
-updated: "2026-02-11"
+updated: "2026-02-17"
 
 contracts:
   active_workbench_agents:
@@ -57,6 +57,49 @@ agents:
       - jellyseerr
       - bazarr
       - recyclarr
+    mcp_tools:
+      - name: media_stack_status
+        safety: read-only
+        description: "Read-only media stack diagnostics via media MCP package."
+    capabilities:
+      - media.status
+      - media.health.check
+      - media.service.status
+      - media.metrics.today
+      - media.nfs.verify
+    write_scope:
+      - /Users/ronnyworks/code/workbench/agents/media/
+      - /Users/ronnyworks/code/workbench/infra/compose/mcpjungle/servers/media-stack/
+    gates:
+      - D49
+    endpoints:
+      radarr:
+        health_id: radarr
+        url: "http://192.168.1.209:7878/ping"
+      sonarr:
+        health_id: sonarr
+        url: "http://192.168.1.209:8989/ping"
+      lidarr:
+        health_id: lidarr
+        url: "http://192.168.1.209:8686/ping"
+      prowlarr:
+        health_id: prowlarr
+        url: "http://192.168.1.209:9696/ping"
+      sabnzbd:
+        health_id: sabnzbd
+        url: "http://192.168.1.209:8080/api?mode=version&output=json"
+      jellyfin:
+        health_id: jellyfin
+        url: "http://192.168.1.210:8096/health"
+      navidrome:
+        health_id: navidrome
+        url: "http://192.168.1.210:4533/ping"
+      jellyseerr:
+        health_id: jellyseerr
+        url: "http://192.168.1.210:5055"
+      bazarr:
+        health_id: bazarr
+        url: "http://192.168.1.210:6767/ping"
 
   - id: n8n-agent
     domain: automation
@@ -72,6 +115,40 @@ agents:
       - automation-stack (VM 202)
     services:
       - n8n
+    mcp_tools:
+      - name: workflow_list
+        safety: read-only
+        description: "List n8n workflows and activation state."
+      - name: workflow_get
+        safety: read-only
+        description: "Fetch workflow details for governance review."
+      - name: execution_list
+        safety: read-only
+        description: "List recent workflow executions and failures."
+    capabilities:
+      - n8n.infra.health
+      - n8n.workflows.list
+      - n8n.workflows.get
+      - n8n.workflows.export
+      - n8n.workflows.import
+      - n8n.workflows.activate
+      - n8n.workflows.deactivate
+      - n8n.workflows.update
+      - n8n.workflows.delete
+      - n8n.workflows.snapshot
+      - n8n.workflows.snapshot.status
+    write_scope:
+      - /Users/ronnyworks/code/workbench/agents/n8n/
+      - /Users/ronnyworks/code/workbench/infra/compose/mcpjungle/servers/n8n/
+    gates:
+      - D49
+    endpoints:
+      n8n:
+        health_id: n8n
+        url: "http://100.98.70.70:5678/healthz"
+      mcpjungle:
+        health_id: mcpjungle
+        url: "http://100.98.70.70:8080/health"
 
   - id: home-assistant-agent
     domain: home-automation
@@ -86,6 +163,43 @@ agents:
       - proxmox-home VM 100
     services:
       - home-assistant
+    mcp_tools:
+      - name: ha_get_states
+        safety: read-only
+        description: "Read entity states from Home Assistant."
+      - name: ha_get_state
+        safety: read-only
+        description: "Read a single entity state."
+      - name: ha_get_history
+        safety: read-only
+        description: "Read entity history for diagnostics."
+      - name: ha_call_service
+        safety: blocked
+        description: "Blocked in MCP; use governed ha.service.call capability."
+    capabilities:
+      - ha.status
+      - ha.refresh
+      - ha.health.status
+      - ha.entity.status
+      - ha.service.call
+      - ha.automation.trigger
+      - ha.automation.create
+      - ha.device.map.build
+      - ha.ssot.propose
+      - ha.ssot.apply
+      - ha.sync.start
+      - ha.sync.stop
+      - ha.sync.status
+    write_scope:
+      - /Users/ronnyworks/code/workbench/agents/home-assistant/
+      - /Users/ronnyworks/code/workbench/infra/compose/mcpjungle/servers/home-assistant/
+    gates:
+      - D49
+      - D105
+    endpoints:
+      home_assistant:
+        health_id: home-assistant
+        url: "http://100.67.120.1:8123/api/"
 
   - id: mint-os-agent
     domain: commerce
@@ -100,6 +214,32 @@ agents:
       - docker-host (VM 200)
     services:
       - mint-os
+    mcp_tools:
+      - name: send_order_email
+        safety: blocked
+        description: "Deferred mutation tool (out of current spine scope)."
+      - name: post_production_update
+        safety: blocked
+        description: "Deferred mutation tool (out of current spine scope)."
+      - name: update_order_customer
+        safety: blocked
+        description: "Deferred mutation tool (out of current spine scope)."
+      - name: ss_place_order
+        safety: blocked
+        description: "Deferred mutation tool (out of current spine scope)."
+      - name: sanmar_place_order
+        safety: blocked
+        description: "Deferred mutation tool (out of current spine scope)."
+    capabilities:
+      - mcp.runtime.status
+    write_scope:
+      - /Users/ronnyworks/code/workbench/infra/compose/mcpjungle/servers/mint-os/
+    gates:
+      - D49
+    endpoints:
+      mint_os_api:
+        health_id: mint-os-api
+        url: "http://100.92.156.118:3335/health"
 
   - id: mint-agent
     domain: mint
@@ -121,6 +261,57 @@ agents:
       - pricing
       - shipping
       - suppliers
+    mcp_tools:
+      - name: mint.modules.health
+        safety: read-only
+        description: "Health probe for mint app/data endpoints."
+      - name: mint.seeds.query
+        safety: read-only
+        description: "Query artwork seed records."
+      - name: mint.intake.validate
+        safety: read-only
+        description: "Validate intake payload contract."
+      - name: mint.deploy.status
+        safety: read-only
+        description: "Check mint-apps and mint-data runtime status."
+      - name: mint.migrate.dryrun
+        safety: read-only
+        description: "Dry-run migration safety checks."
+    capabilities:
+      - mint.modules.health
+      - mint.seeds.query
+      - mint.intake.validate
+      - mint.deploy.status
+      - mint.migrate.dryrun
+      - mint.loop.daily
+    write_scope:
+      - /Users/ronnyworks/code/workbench/agents/mint-agent/
+      - /Users/ronnyworks/code/mint-modules/agents/mcp-server/
+    gates:
+      - D49
+      - D23
+    endpoints:
+      files_api:
+        health_id: files-api
+        url: "http://100.92.156.118:3500/health"
+      order_intake:
+        health_id: order-intake-v2
+        url: "http://100.79.183.14:3400/health"
+      quote_page:
+        health_id: quote-page
+        url: "http://100.92.156.118:3341/health"
+      finance_adapter:
+        health_id: finance-adapter
+        url: "http://100.79.183.14:3600/health"
+      pricing:
+        health_id: external
+        url: "https://pricing.mintprints.co/health"
+      suppliers:
+        health_id: external
+        url: "https://suppliers.mintprints.co/health"
+      shipping:
+        health_id: external
+        url: "https://shipping.mintprints.co/health"
 
   - id: finance-agent
     domain: finance-ops
@@ -141,6 +332,66 @@ agents:
       - paperless-ngx-vm211
       - ghostfolio-vm211
       - mail-archiver-vm211
+    mcp_tools:
+      - name: finance_status
+        safety: read-only
+        description: "Health check for finance stack services."
+      - name: list_accounts
+        safety: read-only
+        description: "List Firefly accounts and balances."
+      - name: get_account_detail
+        safety: read-only
+        description: "Get Firefly account details by ID."
+      - name: list_transactions
+        safety: read-only
+        description: "List Firefly transactions by date range."
+      - name: search_transactions
+        safety: read-only
+        description: "Search Firefly transactions by keyword."
+      - name: list_categories
+        safety: read-only
+        description: "List Firefly categories with spend totals."
+      - name: list_budgets
+        safety: read-only
+        description: "List Firefly budgets with progress."
+      - name: list_bills
+        safety: read-only
+        description: "List Firefly recurring bills."
+      - name: search_documents
+        safety: read-only
+        description: "Search Paperless documents."
+      - name: list_documents
+        safety: read-only
+        description: "List Paperless documents."
+      - name: get_document_detail
+        safety: read-only
+        description: "Get Paperless document metadata and content."
+      - name: list_tags
+        safety: read-only
+        description: "List Paperless tags."
+      - name: list_correspondents
+        safety: read-only
+        description: "List Paperless correspondents."
+    capabilities:
+      - finance.stack.status
+    write_scope:
+      - /Users/ronnyworks/code/workbench/agents/finance/
+      - /Users/ronnyworks/code/workbench/infra/compose/mcpjungle/servers/finance-stack.json
+    gates:
+      - D49
+    endpoints:
+      firefly:
+        health_id: firefly-iii-vm211
+        url: "http://100.76.153.100:8080/api/v1/about"
+      paperless:
+        health_id: paperless-ngx-vm211
+        url: "http://100.76.153.100:8000/api/"
+      ghostfolio:
+        health_id: ghostfolio-vm211
+        url: "http://100.76.153.100:3333/"
+      mail_archiver:
+        health_id: mail-archiver-vm211
+        url: "http://100.76.153.100:5100/"
 
   - id: firefly-agent
     domain: finance
@@ -155,6 +406,20 @@ agents:
       - finance-stack (VM 211)
     services:
       - firefly-iii-vm211
+    mcp_tools:
+      - name: firefly_api_readonly
+        safety: read-only
+        description: "Legacy config-only Firefly MCP surface."
+    capabilities:
+      - finance.stack.status
+    write_scope:
+      - /Users/ronnyworks/code/workbench/infra/compose/mcpjungle/servers/firefly.json
+    gates:
+      - D49
+    endpoints:
+      firefly:
+        health_id: firefly-iii-vm211
+        url: "http://100.76.153.100:8080/api/v1/about"
 
   - id: paperless-agent
     domain: documents
@@ -169,6 +434,20 @@ agents:
       - finance-stack (VM 211)
     services:
       - paperless-ngx-vm211
+    mcp_tools:
+      - name: paperless_api_readonly
+        safety: read-only
+        description: "Legacy config-only Paperless MCP surface."
+    capabilities:
+      - finance.stack.status
+    write_scope:
+      - /Users/ronnyworks/code/workbench/infra/compose/mcpjungle/servers/paperless.json
+    gates:
+      - D49
+    endpoints:
+      paperless:
+        health_id: paperless-ngx-vm211
+        url: "http://100.76.153.100:8000/api/"
 
   - id: immich-agent
     domain: photos
@@ -183,6 +462,33 @@ agents:
       - immich (VM 203)
     services:
       - immich
+    mcp_tools:
+      - name: search_assets
+        safety: read-only
+        description: "Search Immich assets."
+      - name: list_albums
+        safety: read-only
+        description: "List Immich albums."
+      - name: get_asset_metadata
+        safety: read-only
+        description: "Read Immich asset metadata."
+    capabilities:
+      - immich.status
+      - immich.ingest.watch
+      - immich.reconcile.scan
+      - immich.reconcile.plan
+      - immich.reconcile.review
+      - immich.reconcile.apply
+      - immich.reconcile.rollback
+    write_scope:
+      - /Users/ronnyworks/code/workbench/agents/immich/
+      - /Users/ronnyworks/code/workbench/infra/compose/mcpjungle/servers/immich-photos/
+    gates:
+      - D49
+    endpoints:
+      immich:
+        health_id: immich
+        url: "http://100.114.101.50:2283/api/server/ping"
 
   - id: ms-graph-agent
     domain: identity
@@ -197,6 +503,57 @@ agents:
     covers: []  # Cloud-only (Microsoft 365); no infrastructure VM binding
     services:
       - microsoft-graph
+    mcp_tools:
+      - name: mail_search
+        safety: read-only
+        description: "Search Microsoft mail."
+      - name: mail_get
+        safety: read-only
+        description: "Get Microsoft mail message detail."
+      - name: mail_send
+        safety: mutating
+        description: "Send Microsoft mail."
+      - name: draft_create
+        safety: mutating
+        description: "Create Microsoft mail draft."
+      - name: draft_update
+        safety: mutating
+        description: "Update Microsoft mail draft."
+      - name: calendar_list
+        safety: read-only
+        description: "List calendar events."
+      - name: calendar_get
+        safety: read-only
+        description: "Get calendar event detail."
+      - name: calendar_create
+        safety: mutating
+        description: "Create calendar event."
+      - name: calendar_update
+        safety: mutating
+        description: "Update calendar event."
+      - name: calendar_rsvp
+        safety: mutating
+        description: "RSVP calendar event."
+    capabilities:
+      - graph.mail.search
+      - graph.mail.get
+      - graph.mail.send
+      - graph.mail.draft.create
+      - graph.mail.draft.update
+      - graph.calendar.list
+      - graph.calendar.get
+      - graph.calendar.create
+      - graph.calendar.update
+      - graph.calendar.rsvp
+    write_scope:
+      - /Users/ronnyworks/code/workbench/agents/ms-graph/
+      - /Users/ronnyworks/code/workbench/infra/compose/mcpjungle/servers/microsoft-graph.json
+    gates:
+      - D49
+    endpoints:
+      microsoft_graph:
+        health_id: external
+        url: "https://graph.microsoft.com/v1.0/$metadata"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Routing Rules
