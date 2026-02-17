@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# gaps.quick — One-liner gap filing with auto-defaults
+#
+# Usage: gaps-quick --description "desc" [--type T] [--severity S] \
+#                   [--loop LOOP-ID] [--doc path]
+#
+# Computes next gap ID automatically, fills defaults from lifecycle.rules.yaml,
+# then delegates to gaps-file for atomic commit + optional auto-claim.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/plugins/lifecycle/lib/next-gap-id.sh"
+source "$ROOT/ops/plugins/lifecycle/lib/lifecycle-rules.sh"
+source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
+
+# Parse arguments
+DESCRIPTION="" TYPE="" SEVERITY="" LOOP="" DOC=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --description) DESCRIPTION="${2:?--description requires a value}"; shift 2 ;;
+    --type)        TYPE="${2:?--type requires a value}"; shift 2 ;;
+    --severity)    SEVERITY="${2:?--severity requires a value}"; shift 2 ;;
+    --loop)        LOOP="${2:?--loop requires a value}"; shift 2 ;;
+    --doc)         DOC="${2:?--doc requires a value}"; shift 2 ;;
+    -h|--help)
+      echo "Usage: gaps-quick --description \"desc\" [--type T] [--severity S] [--loop LOOP-ID] [--doc path]"
+      echo ""
+      echo "Files a new gap with auto-generated ID and defaults from lifecycle.rules.yaml."
+      echo "Delegates to gaps.file for atomic commit + policy-driven auto-claim."
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$DESCRIPTION" ]] || { echo "FAIL: --description required" >&2; exit 2; }
+
+# Compute defaults from rules SSOT
+[[ -z "$TYPE" ]]     && TYPE="$(gap_quick_default_type)"
+[[ -z "$SEVERITY" ]] && SEVERITY="$(gap_quick_default_severity)"
+DISCOVERED_BY="$(gap_quick_default_discovered_by)"
+
+# Compute next ID
+GAP_ID="$(next_gap_id)"
+
+# Build delegation args
+ARGS=(
+  --id "$GAP_ID"
+  --type "$TYPE"
+  --severity "$SEVERITY"
+  --description "$DESCRIPTION"
+  --discovered-by "$DISCOVERED_BY"
+)
+[[ -n "$LOOP" ]] && ARGS+=(--parent-loop "$LOOP")
+[[ -n "$DOC" ]]  && ARGS+=(--doc "$DOC")
+
+# Delegate to gaps-file (handles git-lock, commit, auto-claim)
+"$ROOT/ops/plugins/loops/bin/gaps-file" "${ARGS[@]}"
+
+# Report quick-filed summary
+CLAIMED="false"
+if [[ -f "$(claim_file "$GAP_ID")" ]]; then
+  CLAIMED="true"
+fi
+
+echo "QUICK-FILED: $GAP_ID (type=$TYPE, severity=$SEVERITY, loop=${LOOP:-none}, claimed=$CLAIMED)"

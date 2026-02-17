@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# loops.auto.close — Auto-close loops whose gaps are all resolved
+#
+# Usage: loops-auto-close [--dry-run]
+#
+# Iterates all open scope files. For each with linked gaps all resolved,
+# delegates to `ops loops close LOOP-ID`.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
+GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+
+source "$ROOT/ops/plugins/lifecycle/lib/lifecycle-rules.sh"
+
+# Frontmatter field extractor (POSIX-compatible)
+_fm_field() {
+  local file="$1" field="$2"
+  awk '/^---$/{n++; next} n==1{print} n>=2{exit}' "$file" \
+    | { grep "^${field}:" || true; } \
+    | sed "s/^${field}: *//" \
+    | tr -d '"' \
+    | head -1
+}
+
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    -h|--help)
+      echo "Usage: loops-auto-close [--dry-run]"
+      echo ""
+      echo "Auto-close loops whose linked gaps are all resolved."
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+echo "=== LOOPS AUTO-CLOSE ==="
+[[ "$DRY_RUN" == "true" ]] && echo "(dry-run mode — no changes)"
+echo ""
+
+# Build JSON gap data once (temp file avoids heredoc+stdin conflict)
+GAP_JSON_TMP="$(mktemp)"
+trap 'rm -f "$GAP_JSON_TMP"' EXIT INT TERM
+yq e -o=json '.' "$GAPS_FILE" > "$GAP_JSON_TMP" 2>/dev/null
+
+closed_count=0
+skipped_count=0
+
+for scope_file in "$SCOPES_DIR"/*.scope.md; do
+  [[ -f "$scope_file" ]] || continue
+
+  local_status="$(_fm_field "$scope_file" "status")"
+  case "$local_status" in
+    active|draft|open) ;;
+    *) continue ;;
+  esac
+
+  loop_id="$(_fm_field "$scope_file" "loop_id")"
+  [[ -z "$loop_id" ]] && continue
+
+  # Count linked gaps via python3
+  eval "$(python3 - "$loop_id" "$GAP_JSON_TMP" <<'PY'
+import json
+import sys
+
+loop_id = sys.argv[1]
+json_file = sys.argv[2]
+with open(json_file) as f:
+    data = json.load(f)
+gaps = data.get("gaps", [])
+linked = [g for g in gaps if g.get("parent_loop") == loop_id]
+total = len(linked)
+open_count = sum(1 for g in linked if g.get("status") == "open")
+print(f"TOTAL={total}")
+print(f"OPEN={open_count}")
+PY
+)"
+
+  # Skip zero-gap loops if configured
+  if [[ "$TOTAL" -eq 0 ]]; then
+    if [[ "$(loops_auto_close_skip_zero)" == "true" ]]; then
+      echo "SKIP: $loop_id (0 linked gaps — requires manual close)"
+      skipped_count=$((skipped_count + 1))
+      continue
+    fi
+  fi
+
+  # Skip if any gaps still open
+  if [[ "$OPEN" -gt 0 ]]; then
+    echo "SKIP: $loop_id ($OPEN/$TOTAL gaps still open)"
+    skipped_count=$((skipped_count + 1))
+    continue
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "WOULD-CLOSE: $loop_id ($TOTAL gaps, all resolved)"
+  else
+    "$ROOT/ops/commands/loops.sh" close "$loop_id"
+    echo "CLOSED: $loop_id ($TOTAL gaps, all resolved)"
+  fi
+  closed_count=$((closed_count + 1))
+done
+
+echo ""
+echo "Closed: $closed_count, Skipped: $skipped_count"

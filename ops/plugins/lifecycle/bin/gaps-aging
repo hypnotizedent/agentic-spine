@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# gaps.aging — Report on aging open gaps
+#
+# Usage: gaps-aging [--days N]
+#
+# Uses python3 for date arithmetic (macOS BSD date limitation).
+# Buckets: CRITICAL (>critical_days), WARNING (>warning_days)
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+
+source "$ROOT/ops/plugins/lifecycle/lib/lifecycle-rules.sh"
+
+CUSTOM_DAYS=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --days) CUSTOM_DAYS="${2:?--days requires a value}"; shift 2 ;;
+    -h|--help)
+      echo "Usage: gaps-aging [--days N]"
+      echo ""
+      echo "Report on aging open gaps. Default thresholds from lifecycle.rules.yaml."
+      echo "  --days N   Override warning threshold (critical = 2x warning)"
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+WARN_DAYS="${CUSTOM_DAYS:-$(aging_warning_days)}"
+CRIT_DAYS="$(aging_critical_days)"
+# If custom days given, scale critical proportionally
+if [[ -n "$CUSTOM_DAYS" ]]; then
+  CRIT_DAYS=$((CUSTOM_DAYS * 2))
+fi
+
+echo "=== GAP AGING REPORT ==="
+echo "Warning threshold: ${WARN_DAYS} days"
+echo "Critical threshold: ${CRIT_DAYS} days"
+echo ""
+
+python3 - "$GAPS_FILE" "$WARN_DAYS" "$CRIT_DAYS" <<'PY'
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+gaps_file = sys.argv[1]
+warn_days = int(sys.argv[2])
+crit_days = int(sys.argv[3])
+
+try:
+    result = subprocess.run(
+        ["yq", "e", "-o=json", ".", gaps_file],
+        capture_output=True, text=True, check=True
+    )
+    data = json.loads(result.stdout)
+except Exception as e:
+    print(f"ERROR: Failed to read gaps: {e}", file=sys.stderr)
+    sys.exit(1)
+
+now = datetime.now(timezone.utc)
+gaps = data.get("gaps", [])
+open_gaps = [g for g in gaps if g.get("status") == "open"]
+
+critical = []
+warning = []
+ok = []
+
+for g in open_gaps:
+    discovered = g.get("discovered_at", "")
+    if not discovered:
+        continue
+    try:
+        dt = datetime.strptime(discovered, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        continue
+    age = (now - dt).days
+    gid = g.get("id", "?")
+    sev = g.get("severity", "?")
+    desc = g.get("description", "").strip()[:50]
+    entry = {"id": gid, "severity": sev, "age": age, "desc": desc}
+
+    if age >= crit_days:
+        critical.append(entry)
+    elif age >= warn_days:
+        warning.append(entry)
+    else:
+        ok.append(entry)
+
+if critical:
+    print(f"CRITICAL ({len(critical)} gaps, >{crit_days} days):")
+    for e in sorted(critical, key=lambda x: -x["age"]):
+        print(f"  {e['id']:15s} [{e['severity']:8s}] {e['age']:3d}d  {e['desc']}")
+    print()
+
+if warning:
+    print(f"WARNING ({len(warning)} gaps, >{warn_days} days):")
+    for e in sorted(warning, key=lambda x: -x["age"]):
+        print(f"  {e['id']:15s} [{e['severity']:8s}] {e['age']:3d}d  {e['desc']}")
+    print()
+
+if not critical and not warning:
+    print("No aging gaps found.")
+else:
+    print(f"Summary: {len(critical)} critical, {len(warning)} warning, {len(ok)} ok ({len(open_gaps)} total open)")
+PY

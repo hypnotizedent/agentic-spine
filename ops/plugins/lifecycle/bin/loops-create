@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# loops.create — Create a new loop scope file from template
+#
+# Usage: loops-create --name NAME --objective "desc" [--priority high|medium|low]
+#
+# Normalizes name to uppercase, computes LOOP-{NAME}-{YYYYMMDD},
+# checks uniqueness, renders template.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
+TEMPLATE="$ROOT/ops/plugins/lifecycle/templates/loop-scope.template.md"
+
+NAME="" OBJECTIVE="" PRIORITY="medium"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name)      NAME="${2:?--name requires a value}"; shift 2 ;;
+    --objective) OBJECTIVE="${2:?--objective requires a value}"; shift 2 ;;
+    --priority)  PRIORITY="${2:?--priority requires a value}"; shift 2 ;;
+    -h|--help)
+      echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low]"
+      echo ""
+      echo "Creates a new loop scope file from template."
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$NAME" ]]      || { echo "FAIL: --name required" >&2; exit 2; }
+[[ -n "$OBJECTIVE" ]]  || { echo "FAIL: --objective required" >&2; exit 2; }
+
+case "$PRIORITY" in
+  high|medium|low) ;;
+  *) echo "FAIL: --priority must be high, medium, or low (got '$PRIORITY')" >&2; exit 2 ;;
+esac
+
+# Normalize name: uppercase, replace spaces/dashes to single dash
+NORM_NAME="$(echo "$NAME" | tr '[:lower:]' '[:upper:]' | tr ' ' '-' | tr -s '-')"
+TODAY="$(date -u +%Y%m%d)"
+LOOP_ID="LOOP-${NORM_NAME}-${TODAY}"
+
+# Check uniqueness
+SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+if [[ -f "$SCOPE_FILE" ]]; then
+  echo "FAIL: Loop already exists: $SCOPE_FILE" >&2
+  exit 1
+fi
+
+# Derive scope from name (lowercase, first word)
+SCOPE="$(echo "$NORM_NAME" | tr '[:upper:]' '[:lower:]' | cut -d'-' -f1)"
+
+# Ensure scopes directory exists
+mkdir -p "$SCOPES_DIR"
+
+# Render template via sed substitution
+sed \
+  -e "s|{{LOOP_ID}}|${LOOP_ID}|g" \
+  -e "s|{{DATE}}|$(date -u +%Y-%m-%d)|g" \
+  -e "s|{{PRIORITY}}|${PRIORITY}|g" \
+  -e "s|{{OBJECTIVE}}|${OBJECTIVE}|g" \
+  -e "s|{{SCOPE}}|${SCOPE}|g" \
+  "$TEMPLATE" > "$SCOPE_FILE"
+
+echo "CREATED: $LOOP_ID"
+echo "File: $SCOPE_FILE"

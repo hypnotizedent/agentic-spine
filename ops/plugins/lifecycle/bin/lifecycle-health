@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# lifecycle.health — Composite lifecycle dashboard
+#
+# Usage: lifecycle-health
+#
+# Shows: gap summary counts, aging report, open loop progress, orphan check.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
+GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+
+source "$ROOT/ops/plugins/lifecycle/lib/lifecycle-rules.sh"
+
+# Frontmatter field extractor (POSIX-compatible)
+_fm_field() {
+  local file="$1" field="$2"
+  awk '/^---$/{n++; next} n==1{print} n>=2{exit}' "$file" \
+    | { grep "^${field}:" || true; } \
+    | sed "s/^${field}: *//" \
+    | tr -d '"' \
+    | head -1
+}
+
+echo "=== LIFECYCLE HEALTH DASHBOARD ==="
+echo ""
+
+# ── 1. Gap summary counts ──
+echo "--- Gap Summary ---"
+python3 - "$GAPS_FILE" <<'PY'
+import json
+import subprocess
+import sys
+
+gaps_file = sys.argv[1]
+try:
+    result = subprocess.run(
+        ["yq", "e", "-o=json", ".", gaps_file],
+        capture_output=True, text=True, check=True
+    )
+    data = json.loads(result.stdout)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+
+gaps = data.get("gaps", [])
+total = len(gaps)
+by_status = {}
+for g in gaps:
+    s = g.get("status", "unknown")
+    by_status[s] = by_status.get(s, 0) + 1
+
+print(f"Total gaps: {total}")
+for status in ("open", "fixed", "closed"):
+    print(f"  {status:10s} {by_status.get(status, 0)}")
+PY
+echo ""
+
+# ── 2. Aging advisory ──
+if [[ "$(health_aging_advisory)" == "true" ]]; then
+  echo "--- Aging Advisory ---"
+  "$ROOT/ops/plugins/lifecycle/bin/gaps-aging" 2>/dev/null || echo "  (aging check unavailable)"
+  echo ""
+fi
+
+# ── 3. Open loop progress ──
+echo "--- Open Loops ---"
+open_loops=0
+for scope_file in "$SCOPES_DIR"/*.scope.md; do
+  [[ -f "$scope_file" ]] || continue
+  local_status="$(_fm_field "$scope_file" "status")"
+  case "$local_status" in
+    active|draft|open) ;;
+    *) continue ;;
+  esac
+  loop_id="$(_fm_field "$scope_file" "loop_id")"
+  [[ -z "$loop_id" ]] && continue
+  open_loops=$((open_loops + 1))
+done
+echo "Open loops: $open_loops"
+echo ""
+
+# ── 4. Orphan check ──
+if [[ "$(health_orphan_check)" == "true" ]]; then
+  echo "--- Orphan Check ---"
+
+  # Build set of closed loop IDs
+  CLOSED_LOOPS=""
+  for scope_file in "$SCOPES_DIR"/*.scope.md; do
+    [[ -f "$scope_file" ]] || continue
+    local_status="$(_fm_field "$scope_file" "status")"
+    if [[ "$local_status" == "closed" ]]; then
+      lid="$(_fm_field "$scope_file" "loop_id")"
+      [[ -n "$lid" ]] && CLOSED_LOOPS="${CLOSED_LOOPS}${lid}\n"
+    fi
+  done
+
+  # Find open gaps whose parent_loop is in a closed scope
+  orphan_count=0
+  python3 - "$GAPS_FILE" "$CLOSED_LOOPS" <<'PY'
+import json
+import subprocess
+import sys
+
+gaps_file = sys.argv[1]
+closed_raw = sys.argv[2] if len(sys.argv) > 2 else ""
+closed_loops = set(l.strip() for l in closed_raw.split("\\n") if l.strip())
+
+try:
+    result = subprocess.run(
+        ["yq", "e", "-o=json", ".", gaps_file],
+        capture_output=True, text=True, check=True
+    )
+    data = json.loads(result.stdout)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+
+gaps = data.get("gaps", [])
+orphans = []
+for g in gaps:
+    if g.get("status") != "open":
+        continue
+    pl = g.get("parent_loop", "")
+    if pl and pl in closed_loops:
+        orphans.append(g)
+
+if orphans:
+    print(f"WARN: {len(orphans)} orphaned gaps (open gap linked to closed loop):")
+    for g in orphans:
+        print(f"  {g['id']} -> {g.get('parent_loop', '?')}")
+else:
+    print("No orphaned gaps found.")
+PY
+fi
+
+echo ""
+echo "=== END LIFECYCLE HEALTH ==="

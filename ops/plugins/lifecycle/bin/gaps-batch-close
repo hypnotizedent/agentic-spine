@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# gaps.batch.close — Close all open gaps linked to a loop
+#
+# Usage: gaps-batch-close --loop LOOP-ID --status fixed|closed \
+#                         [--fixed-in "ref"] [--dry-run]
+#
+# Finds open gaps with parent_loop == LOOP-ID via yq,
+# then calls gaps-close for each (serial, each acquires git-lock independently).
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+
+LOOP_ID="" STATUS="" FIXED_IN="" DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --loop)     LOOP_ID="${2:?--loop requires a value}"; shift 2 ;;
+    --status)   STATUS="${2:?--status requires a value}"; shift 2 ;;
+    --fixed-in) FIXED_IN="${2:?--fixed-in requires a value}"; shift 2 ;;
+    --dry-run)  DRY_RUN=true; shift ;;
+    -h|--help)
+      echo "Usage: gaps-batch-close --loop LOOP-ID --status fixed|closed [--fixed-in \"ref\"] [--dry-run]"
+      echo ""
+      echo "Close all open gaps linked to a loop."
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$LOOP_ID" ]] || { echo "FAIL: --loop required" >&2; exit 2; }
+[[ -n "$STATUS" ]]  || { echo "FAIL: --status required (fixed or closed)" >&2; exit 2; }
+
+case "$STATUS" in
+  fixed|closed) ;;
+  *) echo "FAIL: --status must be 'fixed' or 'closed' (got '$STATUS')" >&2; exit 2 ;;
+esac
+
+echo "=== BATCH CLOSE: $LOOP_ID ==="
+[[ "$DRY_RUN" == "true" ]] && echo "(dry-run mode — no changes)"
+echo ""
+
+# Find open gaps linked to this loop
+OPEN_IDS="$(yq e ".gaps[] | select(.parent_loop == \"$LOOP_ID\" and .status == \"open\") | .id" "$GAPS_FILE" 2>/dev/null)"
+
+if [[ -z "$OPEN_IDS" ]]; then
+  echo "No open gaps found for loop $LOOP_ID"
+  exit 0
+fi
+
+count=0
+failed=0
+
+while IFS= read -r gap_id; do
+  [[ -z "$gap_id" ]] && continue
+  count=$((count + 1))
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "WOULD-CLOSE: $gap_id (status=$STATUS${FIXED_IN:+, fixed_in=$FIXED_IN})"
+    continue
+  fi
+
+  # Build args for gaps-close
+  ARGS=(--id "$gap_id" --status "$STATUS")
+  [[ -n "$FIXED_IN" ]] && ARGS+=(--fixed-in "$FIXED_IN")
+
+  echo "Closing $gap_id..."
+  if echo "yes" | "$ROOT/ops/plugins/loops/bin/gaps-close" "${ARGS[@]}"; then
+    echo "  OK: $gap_id"
+  else
+    echo "  FAIL: $gap_id" >&2
+    failed=$((failed + 1))
+  fi
+done <<< "$OPEN_IDS"
+
+echo ""
+echo "Total: $count, Failed: $failed"
+if [[ "$failed" -gt 0 ]]; then
+  exit 1
+fi
