@@ -6,12 +6,13 @@ set -euo pipefail
 # Notes:
 # - `ops cap run proposals.apply` already enforces `approval: manual` ("Type 'yes' to proceed").
 # - This script must not prompt for additional input, or piping `yes` into ops will deadlock.
+# - Write admission is mandatory and cannot be bypassed.
 #
 # Usage:
 #   proposals-apply [--dry-run] CP-<name>
 
 usage() {
-  cat <<'EOF'
+  cat <<'USAGE'
 Usage:
   proposals-apply [--dry-run] CP-<name>
 
@@ -22,7 +23,480 @@ Requires:
   - clean git working tree (abort otherwise)
   - manifest.yaml contains changes with action/path/reason
   - for create/modify: proposal/files/<path> exists
-EOF
+
+Admission controller (mandatory):
+  - verify.core.run equivalent
+  - path-scoped verify.domain.run <domain> --force routing
+  - workbench AOF contract checks (when workbench paths are present)
+  - SSOT schema convention checks for changed ops/bindings YAML files
+  - loop/gap linkage checks
+
+Policy:
+  - P0/P1 findings block apply
+  - P2 findings warn-only
+USAGE
+}
+
+need_cmd() {
+  local cmd="$1"
+  command -v "$cmd" >/dev/null 2>&1 || {
+    echo "ERROR: required command missing: $cmd" >&2
+    exit 1
+  }
+}
+
+contains_value() {
+  local needle="$1"
+  shift || true
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+validate_path() {
+  local p="$1"
+  if [[ -z "$p" ]]; then return 1; fi
+  if [[ "$p" == /* ]]; then return 1; fi
+  if [[ "$p" == *".."* ]]; then return 1; fi
+  if [[ "$p" == *"~"* ]]; then return 1; fi
+  if [[ "$p" == *$'\n'* ]]; then return 1; fi
+  return 0
+}
+
+normalize_action() {
+  local action="$1"
+  case "$action" in
+    create|created)
+      echo "create"
+      ;;
+    modify|update|edit|api-write)
+      echo "modify"
+      ;;
+    delete|remove)
+      echo "delete"
+      ;;
+    *)
+      echo "$action"
+      ;;
+  esac
+}
+
+normalize_workbench_path() {
+  local p="$1"
+  case "$p" in
+    "$WORKBENCH_ROOT"/*)
+      echo "$p"
+      ;;
+    /Users/*/code/workbench/*)
+      echo "$p"
+      ;;
+    workbench/*)
+      echo "$HOME/code/$p"
+      ;;
+    ../workbench/*)
+      echo "$HOME/code/${p#../}"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+admission_add_finding() {
+  local severity="$1"
+  local code="$2"
+  local detail="$3"
+  ADMISSION_FINDINGS+=("$severity|$code|$detail")
+}
+
+severity_blocks_apply() {
+  local severity="$1"
+  contains_value "$severity" "${ADMISSION_BLOCK_ON[@]}"
+}
+
+run_domain_routing_admission() {
+  local core_output core_rc
+  echo "Admission check: verify core gates"
+  set +e
+  core_output="$($VERIFY_TOPOLOGY_BIN core 2>&1)"
+  core_rc=$?
+  set -e
+  echo "$core_output"
+  if (( core_rc != 0 )); then
+    admission_add_finding "P0" "verify_core" "verify.core.run equivalent failed"
+  fi
+
+  local recommend_output recommend_rc
+  local -a recommend_cmd
+  local -a recommended_domains=()
+  local path
+  recommend_cmd=("$VERIFY_TOPOLOGY_BIN" recommend --json)
+  while IFS=$'\t' read -r action path reason; do
+    action="$(normalize_action "$action")"
+    case "$action" in
+      create|modify|delete) ;;
+      *) continue ;;
+    esac
+    [[ -n "$path" ]] || continue
+    recommend_cmd+=(--path "$path")
+  done < "$changes_tmp"
+
+  echo "Admission check: resolve affected domains"
+  set +e
+  recommend_output="$(${recommend_cmd[@]} 2>&1)"
+  recommend_rc=$?
+  set -e
+
+  if (( recommend_rc != 0 )); then
+    echo "$recommend_output"
+    admission_add_finding "P1" "verify_route" "verify.route.recommend equivalent failed"
+    return
+  fi
+
+  while IFS= read -r domain; do
+    [[ -n "$domain" ]] || continue
+    if ! contains_value "$domain" "${recommended_domains[@]:-}"; then
+      recommended_domains+=("$domain")
+    fi
+  done < <(jq -r '.recommended_domains[]?' <<< "$recommend_output" 2>/dev/null || true)
+
+  if (( ${#recommended_domains[@]} == 0 )); then
+    recommended_domains=("core")
+  fi
+
+  echo "Admission routed domains: ${recommended_domains[*]}"
+
+  local domain_output domain_rc domain
+  for domain in "${recommended_domains[@]}"; do
+    [[ "$domain" == "core" ]] && continue
+    echo "Admission check: verify domain '$domain'"
+    set +e
+    domain_output="$($VERIFY_TOPOLOGY_BIN domain "$domain" --force 2>&1)"
+    domain_rc=$?
+    set -e
+    echo "$domain_output"
+    if (( domain_rc != 0 )); then
+      admission_add_finding "P0" "verify_domain" "verify.domain.run $domain --force failed"
+    fi
+  done
+}
+
+run_workbench_contract_admission() {
+  local -a wb_paths=()
+  local normalized path action reason
+
+  while IFS=$'\t' read -r action path reason; do
+    action="$(normalize_action "$action")"
+    case "$action" in
+      create|modify|delete) ;;
+      *) continue ;;
+    esac
+    [[ -n "$path" ]] || continue
+    normalized="$(normalize_workbench_path "$path")"
+    [[ -n "$normalized" ]] || continue
+    if ! contains_value "$normalized" "${wb_paths[@]:-}"; then
+      wb_paths+=("$normalized")
+    fi
+  done < "$changes_tmp"
+
+  if (( ${#wb_paths[@]} == 0 )); then
+    return
+  fi
+
+  if [[ ! -d "$WORKBENCH_ROOT" ]]; then
+    admission_add_finding "P1" "workbench_preflight" "workbench path required but WORKBENCH_ROOT is unreachable: $WORKBENCH_ROOT"
+    return
+  fi
+
+  if [[ ! -x "$WORKBENCH_AOF_CHECKER" ]]; then
+    admission_add_finding "P1" "workbench_preflight" "workbench AOF checker missing: $WORKBENCH_AOF_CHECKER"
+    return
+  fi
+
+  echo "Admission check: workbench AOF contract"
+  local -a checker_args=()
+  checker_args=(--mode all --format text)
+  for path in "${wb_paths[@]}"; do
+    checker_args+=(--changed-files "$path")
+  done
+
+  local preflight_output preflight_rc summary_line p0 p1 p2 parsed_summary
+  set +e
+  preflight_output="$($WORKBENCH_AOF_CHECKER ${checker_args[@]} 2>&1)"
+  preflight_rc=$?
+  set -e
+  echo "$preflight_output"
+
+  summary_line="$(grep -E '^summary:' <<< "$preflight_output" | tail -1 || true)"
+  p0=0
+  p1=0
+  p2=0
+  parsed_summary=0
+  if [[ "$summary_line" =~ P0=([0-9]+)[[:space:]]+P1=([0-9]+)[[:space:]]+P2=([0-9]+) ]]; then
+    parsed_summary=1
+    p0="${BASH_REMATCH[1]}"
+    p1="${BASH_REMATCH[2]}"
+    p2="${BASH_REMATCH[3]}"
+    (( p0 > 0 )) && admission_add_finding "P0" "workbench_aof" "workbench checker reported P0 findings: $p0"
+    (( p1 > 0 )) && admission_add_finding "P1" "workbench_aof" "workbench checker reported P1 findings: $p1"
+    (( p2 > 0 )) && admission_add_finding "P2" "workbench_aof" "workbench checker reported P2 findings: $p2"
+  elif (( preflight_rc != 0 )); then
+    admission_add_finding "P1" "workbench_aof" "workbench checker failed without parseable severity summary"
+  fi
+
+  if (( preflight_rc != 0 && parsed_summary == 0 )); then
+    admission_add_finding "P1" "workbench_aof" "workbench checker exited non-zero"
+  fi
+}
+
+run_ssot_schema_conventions_admission() {
+  local schema_contract="$SCHEMA_CONVENTIONS_CONTRACT"
+  local touch_to_fix
+  local -a disallowed_keys=()
+  local -a discouraged_keys=()
+  local -a allowed_status=()
+  local -a allowed_lifecycle=()
+
+  local -a binding_paths=()
+  local action path reason
+  while IFS=$'\t' read -r action path reason; do
+    action="$(normalize_action "$action")"
+    [[ "$action" == "create" || "$action" == "modify" ]] || continue
+    case "$path" in
+      ops/bindings/*.yml|ops/bindings/*.yaml)
+        if ! contains_value "$path" "${binding_paths[@]:-}"; then
+          binding_paths+=("$path")
+        fi
+        ;;
+    esac
+  done < "$changes_tmp"
+
+  if (( ${#binding_paths[@]} == 0 )); then
+    return
+  fi
+
+  if [[ ! -f "$schema_contract" ]]; then
+    admission_add_finding "P1" "schema_conventions" "missing schema conventions contract: $schema_contract"
+    return
+  fi
+
+  touch_to_fix="$(yq e -r '.legacy_alias_rules.touch_to_fix_required // true' "$schema_contract" 2>/dev/null || echo true)"
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && disallowed_keys+=("$path")
+  done < <(yq e -r '.field_rules.disallowed_alias_keys[]?' "$schema_contract" 2>/dev/null || true)
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && discouraged_keys+=("$path")
+  done < <(yq e -r '.field_rules.discouraged_alias_keys[]?' "$schema_contract" 2>/dev/null || true)
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && allowed_status+=("$path")
+  done < <(yq e -r '.status_rules.allowed_values[]?' "$schema_contract" 2>/dev/null || true)
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && allowed_lifecycle+=("$path")
+  done < <(yq e -r '.status_rules.lifecycle_values[]?' "$schema_contract" 2>/dev/null || true)
+
+  echo "Admission check: SSOT schema conventions"
+
+  local rel src key status lifecycle
+  local -a file_keys=()
+  local -a file_allowed_alias=()
+  local -a status_values=()
+  local -a lifecycle_values=()
+
+  for rel in "${binding_paths[@]}"; do
+    src="$files_dir/$rel"
+
+    if [[ ! -f "$src" ]]; then
+      admission_add_finding "P0" "schema_conventions" "missing proposal file for binding change: $rel"
+      continue
+    fi
+
+    if ! yq e '.' "$src" >/dev/null 2>&1; then
+      admission_add_finding "P0" "schema_conventions" "invalid YAML in proposal file: $rel"
+      continue
+    fi
+
+    file_keys=()
+    while IFS= read -r key; do
+      [[ -n "$key" ]] && file_keys+=("$key")
+    done < <(yq e '.. | select(tag == "!!map") | keys | .[]' "$src" 2>/dev/null | awk 'NF && !seen[$0]++')
+
+    file_allowed_alias=()
+    while IFS= read -r key; do
+      [[ -n "$key" ]] && file_allowed_alias+=("$key")
+    done < <(yq e -r ".legacy_alias_rules.legacy_exceptions[] | select(.file == \"$rel\") | .allowed_keys[]?" "$schema_contract" 2>/dev/null || true)
+
+    for key in "${disallowed_keys[@]:-}"; do
+      [[ -n "$key" ]] || continue
+      if contains_value "$key" "${file_keys[@]:-}"; then
+        if contains_value "$key" "${file_allowed_alias[@]:-}"; then
+          if [[ "$touch_to_fix" == "true" ]]; then
+            admission_add_finding "P1" "schema_conventions" "$rel uses legacy-excepted key '$key' in touched file (touch_and_fix enforced)"
+          else
+            admission_add_finding "P2" "schema_conventions" "$rel uses legacy-excepted key '$key'"
+          fi
+        else
+          admission_add_finding "P1" "schema_conventions" "$rel includes disallowed alias key '$key'"
+        fi
+      fi
+    done
+
+    for key in "${discouraged_keys[@]:-}"; do
+      [[ -n "$key" ]] || continue
+      if contains_value "$key" "${file_keys[@]:-}"; then
+        admission_add_finding "P2" "schema_conventions" "$rel includes discouraged key '$key'"
+      fi
+    done
+
+    status_values=()
+    while IFS= read -r status; do
+      [[ -n "$status" && "$status" != "null" ]] && status_values+=("$status")
+    done < <(yq e '.. | select(tag == "!!map" and has("status")) | .status' "$src" 2>/dev/null || true)
+
+    for status in "${status_values[@]:-}"; do
+      if ! contains_value "$status" "${allowed_status[@]:-}"; then
+        admission_add_finding "P1" "schema_conventions" "$rel includes non-canonical status value '$status'"
+      fi
+    done
+
+    lifecycle_values=()
+    while IFS= read -r lifecycle; do
+      [[ -n "$lifecycle" && "$lifecycle" != "null" ]] && lifecycle_values+=("$lifecycle")
+    done < <(yq e '.. | select(tag == "!!map" and has("lifecycle")) | .lifecycle' "$src" 2>/dev/null || true)
+
+    for lifecycle in "${lifecycle_values[@]:-}"; do
+      if ! contains_value "$lifecycle" "${allowed_lifecycle[@]:-}"; then
+        admission_add_finding "P1" "schema_conventions" "$rel includes non-canonical lifecycle value '$lifecycle'"
+      fi
+    done
+  done
+}
+
+run_loop_gap_linkage_admission() {
+  local scope_file loop_status gap_rel gap_src linked_count existing_linked_count
+
+  echo "Admission check: loop/gap linkage"
+
+  if [[ -z "${loop_id:-}" ]]; then
+    admission_add_finding "P1" "loop_gap_linkage" "manifest loop_id is required for mutating proposal apply"
+    return
+  fi
+
+  scope_file="$LOOP_SCOPES_DIR/$loop_id.scope.md"
+  if [[ ! -f "$scope_file" ]]; then
+    admission_add_finding "P1" "loop_gap_linkage" "loop scope file missing for loop_id=$loop_id"
+    return
+  fi
+
+  loop_status="$(awk '/^status:/{print $2; exit}' "$scope_file" 2>/dev/null || true)"
+  case "$loop_status" in
+    active|planned|draft)
+      ;;
+    closed|done|archived)
+      admission_add_finding "P1" "loop_gap_linkage" "loop_id=$loop_id is not active (status=$loop_status)"
+      ;;
+    *)
+      admission_add_finding "P2" "loop_gap_linkage" "loop_id=$loop_id has unknown scope status '${loop_status:-unknown}'"
+      ;;
+  esac
+
+  gap_rel="ops/bindings/operational.gaps.yaml"
+  if awk -F'\t' -v p="$gap_rel" '$2 == p { found=1 } END { exit(found ? 0 : 1) }' "$changes_tmp"; then
+    gap_src="$files_dir/$gap_rel"
+    if [[ ! -f "$gap_src" ]]; then
+      admission_add_finding "P1" "loop_gap_linkage" "proposal changes $gap_rel but staged file is missing"
+      return
+    fi
+
+    linked_count="$(yq e "[.gaps[] | select(.status == \"open\" and (.parent_loop // \"\") == \"$loop_id\")] | length" "$gap_src" 2>/dev/null || echo 0)"
+    if [[ "$linked_count" =~ ^[0-9]+$ ]] && (( linked_count == 0 )); then
+      admission_add_finding "P1" "loop_gap_linkage" "proposal touches operational.gaps.yaml but no open gap is linked to loop_id=$loop_id"
+    fi
+  else
+    existing_linked_count="$(yq e "[.gaps[] | select(.status == \"open\" and (.parent_loop // \"\") == \"$loop_id\")] | length" "$GAPS_FILE" 2>/dev/null || echo 0)"
+    if [[ "$existing_linked_count" =~ ^[0-9]+$ ]] && (( existing_linked_count == 0 )); then
+      admission_add_finding "P2" "loop_gap_linkage" "no open gaps currently linked to loop_id=$loop_id"
+    fi
+  fi
+}
+
+load_admission_policy() {
+  ADMISSION_BLOCK_ON=()
+  ADMISSION_WARN_ONLY=()
+
+  if [[ -f "$PROPOSALS_LIFECYCLE_CONTRACT" ]]; then
+    while IFS= read -r sev; do
+      [[ -n "$sev" ]] && ADMISSION_BLOCK_ON+=("$sev")
+    done < <(yq e -r '.admission_controller.block_on_severity[]?' "$PROPOSALS_LIFECYCLE_CONTRACT" 2>/dev/null || true)
+
+    while IFS= read -r sev; do
+      [[ -n "$sev" ]] && ADMISSION_WARN_ONLY+=("$sev")
+    done < <(yq e -r '.admission_controller.warn_only_severity[]?' "$PROPOSALS_LIFECYCLE_CONTRACT" 2>/dev/null || true)
+  fi
+
+  if (( ${#ADMISSION_BLOCK_ON[@]} == 0 )); then
+    ADMISSION_BLOCK_ON=("P0" "P1")
+  fi
+  if (( ${#ADMISSION_WARN_ONLY[@]} == 0 )); then
+    ADMISSION_WARN_ONLY=("P2")
+  fi
+}
+
+emit_admission_summary_and_enforce() {
+  local sev code detail
+  local p0=0 p1=0 p2=0
+  local blockers=0
+
+  echo ""
+  echo "Admission controller findings:"
+  if (( ${#ADMISSION_FINDINGS[@]} == 0 )); then
+    echo "  - none"
+    echo "Admission summary: P0=0 P1=0 P2=0 total=0"
+    return 0
+  fi
+
+  for entry in "${ADMISSION_FINDINGS[@]}"; do
+    IFS='|' read -r sev code detail <<< "$entry"
+    case "$sev" in
+      P0) p0=$((p0 + 1)) ;;
+      P1) p1=$((p1 + 1)) ;;
+      P2) p2=$((p2 + 1)) ;;
+    esac
+    printf '  - %-2s %-20s %s\n' "$sev" "$code" "$detail"
+    if severity_blocks_apply "$sev"; then
+      blockers=$((blockers + 1))
+    fi
+  done
+
+  echo "Admission summary: P0=$p0 P1=$p1 P2=$p2 total=${#ADMISSION_FINDINGS[@]}"
+  echo "Admission policy: block_on=[${ADMISSION_BLOCK_ON[*]}] warn_only=[${ADMISSION_WARN_ONLY[*]}]"
+
+  if (( blockers > 0 )); then
+    echo "ERROR: Admission controller blocked proposal apply due to P0/P1 findings." >&2
+    exit 1
+  fi
+}
+
+run_admission_controller() {
+  echo "Running admission controller..."
+  need_cmd yq
+  need_cmd jq
+  [[ -x "$VERIFY_TOPOLOGY_BIN" ]] || {
+    echo "ERROR: verify topology runner not executable: $VERIFY_TOPOLOGY_BIN" >&2
+    exit 1
+  }
+
+  load_admission_policy
+  run_domain_routing_admission
+  run_workbench_contract_admission
+  run_ssot_schema_conventions_admission
+  run_loop_gap_linkage_admission
+  emit_admission_summary_and_enforce
 }
 
 DRY_RUN=0
@@ -42,6 +516,11 @@ WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 WORKBENCH_AOF_CHECKER="${WORKBENCH_AOF_CHECKER:-$WORKBENCH_ROOT/scripts/root/aof/workbench-aof-check.sh}"
 PROPOSALS_DIR="$SPINE_CODE/mailroom/outbox/proposals"
 PROPOSAL_DIR="$PROPOSALS_DIR/$PROPOSAL_NAME"
+PROPOSALS_LIFECYCLE_CONTRACT="$SPINE_CODE/ops/bindings/proposals.lifecycle.yaml"
+SCHEMA_CONVENTIONS_CONTRACT="$SPINE_CODE/ops/bindings/spine.schema.conventions.yaml"
+VERIFY_TOPOLOGY_BIN="$SPINE_CODE/ops/plugins/verify/bin/verify-topology"
+GAPS_FILE="$SPINE_CODE/ops/bindings/operational.gaps.yaml"
+LOOP_SCOPES_DIR="$SPINE_CODE/mailroom/state/loop-scopes"
 
 if [[ ! -d "$PROPOSAL_DIR" ]]; then
   echo "ERROR: Proposal not found: $PROPOSAL_DIR" >&2
@@ -136,91 +615,8 @@ fi
 
 first_reason=""
 had_error=0
-
-validate_path() {
-  local p="$1"
-  if [[ -z "$p" ]]; then return 1; fi
-  if [[ "$p" == /* ]]; then return 1; fi
-  if [[ "$p" == *".."* ]]; then return 1; fi
-  if [[ "$p" == *"~"* ]]; then return 1; fi
-  if [[ "$p" == *$'\n'* ]]; then return 1; fi
-  return 0
-}
-
-normalize_workbench_path() {
-  local p="$1"
-  case "$p" in
-    "$WORKBENCH_ROOT"/*)
-      echo "$p"
-      ;;
-    /Users/*/code/workbench/*)
-      echo "$p"
-      ;;
-    workbench/*)
-      echo "$HOME/code/$p"
-      ;;
-    ../workbench/*)
-      echo "$HOME/code/${p#../}"
-      ;;
-    *)
-      echo ""
-      ;;
-  esac
-}
-
-run_workbench_preflight() {
-  local wb_paths=()
-  local normalized=""
-  while IFS=$'\t' read -r _action _path _reason; do
-    [[ -n "$_path" ]] || continue
-    normalized="$(normalize_workbench_path "$_path")"
-    [[ -n "$normalized" ]] || continue
-    wb_paths+=("$normalized")
-  done < "$changes_tmp"
-
-  if (( ${#wb_paths[@]} == 0 )); then
-    return 0
-  fi
-
-  if [[ ! -d "$WORKBENCH_ROOT" ]]; then
-    echo "ERROR: Workbench preflight required, but WORKBENCH_ROOT is unreachable: $WORKBENCH_ROOT" >&2
-    echo "       Remediation: export WORKBENCH_ROOT=/Users/<user>/code/workbench and retry." >&2
-    exit 1
-  fi
-
-  if [[ ! -x "$WORKBENCH_AOF_CHECKER" ]]; then
-    echo "ERROR: Workbench proposal preflight required but checker missing: $WORKBENCH_AOF_CHECKER" >&2
-    echo "       Remediation: verify workbench checkout + executable checker path." >&2
-    exit 1
-  fi
-
-  echo "Running workbench AOF preflight..."
-  local checker_args=(--mode all --format text)
-  for p in "${wb_paths[@]}"; do
-    checker_args+=(--changed-files "$p")
-  done
-  local preflight_output preflight_rc preflight_summary
-  set +e
-  preflight_output="$("$WORKBENCH_AOF_CHECKER" "${checker_args[@]}" 2>&1)"
-  preflight_rc=$?
-  set -e
-
-  echo "$preflight_output"
-  preflight_summary="$(grep -E '^summary:' <<< "$preflight_output" | tail -1 || true)"
-  if [[ -n "$preflight_summary" ]]; then
-    echo "Workbench preflight summary: $preflight_summary"
-  fi
-
-  if (( preflight_rc != 0 )); then
-    echo "ERROR: Workbench AOF preflight failed (P0/P1). Proposal apply blocked." >&2
-    exit 1
-  fi
-}
-
-run_workbench_preflight
-
 while IFS=$'\t' read -r action path reason; do
-
+  action="$(normalize_action "$action")"
   if [[ -z "${first_reason}" && -n "${reason:-}" ]]; then
     first_reason="$reason"
   fi
@@ -230,16 +626,27 @@ while IFS=$'\t' read -r action path reason; do
     *)
       echo "ERROR: Invalid action '$action' in $manifest" >&2
       had_error=1
-      continue
       ;;
   esac
 
   if ! validate_path "$path"; then
     echo "ERROR: Unsafe/invalid path '$path' in $manifest" >&2
     had_error=1
-    continue
   fi
+done < "$changes_tmp"
 
+if [[ "$had_error" -ne 0 ]]; then
+  echo "ERROR: Proposal manifest validation failed before admission checks." >&2
+  exit 1
+fi
+
+declare -a ADMISSION_FINDINGS=()
+declare -a ADMISSION_BLOCK_ON=()
+declare -a ADMISSION_WARN_ONLY=()
+run_admission_controller
+
+while IFS=$'\t' read -r action path reason; do
+  action="$(normalize_action "$action")"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     printf "DRY RUN: %-6s %s\n" "$action" "$path"
     continue

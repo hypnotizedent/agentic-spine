@@ -5,8 +5,8 @@
 #
 # Decision: LOOP-PROPOSAL-LIFECYCLE-HARDENING-20260213
 
-version: "1.0"
-updated: "2026-02-13"
+version: "1.2"
+updated: "2026-02-17"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Status State Machine
@@ -150,6 +150,48 @@ sla:
   draft_hold_review_max_days: 30
   archive_applied_after_days: 3
   archive_superseded_after_days: 3
+
+# ─────────────────────────────────────────────────────────────────────────
+# Mandatory Admission Controller (proposals.apply)
+# ─────────────────────────────────────────────────────────────────────────
+# Applies to every mutating proposal apply.
+# No bypass path is allowed for normal operations.
+
+admission_controller:
+  enabled: true
+  bypass_allowed: false
+  mutating_actions:
+    canonical:
+      - create
+      - modify
+      - delete
+    aliases:
+      created: create
+      update: modify
+      edit: modify
+      api-write: modify
+      remove: delete
+  block_on_severity:
+    - P0
+    - P1
+  warn_only_severity:
+    - P2
+  checks:
+    - id: verify_core
+      description: "Run core verify gates before write application."
+      severity_on_failure: P0
+    - id: verify_domain_route
+      description: "Resolve changed paths to domains and run verify.domain.run <domain> --force."
+      severity_on_failure: P0
+    - id: workbench_aof_contract
+      description: "When workbench paths are included, run workbench AOF checker (docs/compose/secrets conventions)."
+      severity_on_failure: P0_or_P1
+    - id: ssot_schema_conventions
+      description: "For changed ops/bindings YAML, enforce spine.schema.conventions contract."
+      severity_on_failure: P1
+    - id: loop_gap_linkage
+      description: "Require loop_id linkage and valid loop scope status; enforce gap linkage when operational.gaps is touched."
+      severity_on_failure: P1
 
 # ─────────────────────────────────────────────────────────────────────────
 # Archive Rules
