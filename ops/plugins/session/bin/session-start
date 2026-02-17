@@ -214,9 +214,22 @@ echo "────────────────────────�
 echo "  Agent Routing"
 echo "──────────────────────────────────────────────────────────────"
 if command -v yq >/dev/null 2>&1 && [[ -f "$ROOT/ops/bindings/agents.registry.yaml" ]]; then
+  AGENTS_FILE="$ROOT/ops/bindings/agents.registry.yaml"
+  SHOW_SUPERSEDED="${SPINE_SESSION_SHOW_SUPERSEDED:-0}"
+  if [[ "$SHOW_SUPERSEDED" == "1" ]]; then
+    ROUTING_FILTER='.agents[] | .id + "|" + .domain + "|" + (.mcp_type // "n/a")'
+  else
+    ROUTING_FILTER='.agents[] | select((.implementation_status // "active") != "superseded") | .id + "|" + .domain + "|" + (.mcp_type // "n/a")'
+  fi
   while IFS='|' read -r agent_id domain mcp_type; do
     printf "  %-24s  domain=%-16s  mcp=%s\n" "$agent_id" "$domain" "$mcp_type"
-  done < <(yq e '.agents[] | .id + "|" + .domain + "|" + (.mcp_type // "n/a")' "$ROOT/ops/bindings/agents.registry.yaml" 2>/dev/null)
+  done < <(yq e "$ROUTING_FILTER" "$AGENTS_FILE" 2>/dev/null)
+  if [[ "$SHOW_SUPERSEDED" != "1" ]]; then
+    HIDDEN_SUPERSEDED="$(yq e '.agents | map(select((.implementation_status // "active") == "superseded")) | length' "$AGENTS_FILE" 2>/dev/null || echo "0")"
+    if [[ "$HIDDEN_SUPERSEDED" =~ ^[0-9]+$ ]] && (( HIDDEN_SUPERSEDED > 0 )); then
+      echo "  (hidden superseded agents: $HIDDEN_SUPERSEDED; set SPINE_SESSION_SHOW_SUPERSEDED=1 to show all)"
+    fi
+  fi
 fi
 
 echo ""
