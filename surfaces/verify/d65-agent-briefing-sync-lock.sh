@@ -1,54 +1,55 @@
 #!/usr/bin/env bash
-# TRIAGE: Run ops/hooks/sync-agent-surfaces.sh after editing AGENT_GOVERNANCE_BRIEF.md.
-# D65: Agent briefing sync lock
+# TRIAGE: Validate dynamic briefing delivery path (spine.context + session hook).
+# D65: Agent briefing context lock (WS-5 retirement model)
 #
-# Ensures AGENTS.md and CLAUDE.md contain the canonical governance brief
-# from docs/governance/AGENT_GOVERNANCE_BRIEF.md between marker comments.
-#
-# Fix: run ops/hooks/sync-agent-surfaces.sh
-#
+# Enforces:
+# 1) Canonical governance brief exists and is non-empty.
+# 2) Dynamic context script exists (spine-context).
+# 3) Session-entry hook is wired to dynamic context.
+# 4) Legacy sync hook exists only as retired compatibility shim.
+# 5) AGENTS.md + CLAUDE.md keep governance markers (non-breaking surface contract).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() { echo "D65 FAIL: $*" >&2; exit 1; }
 
 BRIEF_FILE="docs/governance/AGENT_GOVERNANCE_BRIEF.md"
+CONTEXT_SCRIPT="ops/plugins/context/bin/spine-context"
+SESSION_HOOK="ops/hooks/session-entry-hook.sh"
+SYNC_HOOK="ops/hooks/sync-agent-surfaces.sh"
 
-# 1. Brief file must exist and be non-empty
-[[ -f "$BRIEF_FILE" ]] || fail "D65: missing governance brief: $BRIEF_FILE"
-[[ -s "$BRIEF_FILE" ]] || fail "D65: governance brief is empty: $BRIEF_FILE"
+# 1) Canonical brief must exist and remain non-empty.
+[[ -f "$BRIEF_FILE" ]] || fail "missing governance brief: $BRIEF_FILE"
+[[ -s "$BRIEF_FILE" ]] || fail "governance brief is empty: $BRIEF_FILE"
 
-BRIEF=$(cat "$BRIEF_FILE")
-
-# 2. Brief must have required sections
-for section in "## Commit & Branch Rules" "## Capability Gotchas" "## Path & Reference Constraints" "## Verify & Receipts" "## Quick Commands"; do
-  grep -qF "$section" "$BRIEF_FILE" || fail "D65: governance brief missing section: $section"
+for section in \
+  "## Commit & Branch Rules" \
+  "## Capability Gotchas" \
+  "## Path & Reference Constraints" \
+  "## Verify & Receipts" \
+  "## Quick Commands"; do
+  grep -qF "$section" "$BRIEF_FILE" || fail "governance brief missing section: $section"
 done
 
-# 3. Check each surface file has synced content
+# 2) Dynamic context capability script must exist and be executable.
+[[ -x "$CONTEXT_SCRIPT" ]] || fail "dynamic context script missing or not executable: $CONTEXT_SCRIPT"
+
+# 3) Session-entry hook must resolve briefing via dynamic context path.
+[[ -f "$SESSION_HOOK" ]] || fail "missing session hook: $SESSION_HOOK"
+grep -qF "spine-context" "$SESSION_HOOK" || fail "session hook not wired to spine-context"
+grep -qF "spine.context" "$SESSION_HOOK" || fail "session hook missing spine.context dynamic context reference"
+
+# 4) Legacy sync hook allowed only as retired shim (no active sync dependency).
+[[ -f "$SYNC_HOOK" ]] || fail "missing compatibility shim: $SYNC_HOOK"
+grep -qF "RETIRED" "$SYNC_HOOK" || fail "legacy sync hook is still active (missing RETIRED marker)"
+
+# 5) Surface files must exist and keep governance marker contract.
 for file in AGENTS.md CLAUDE.md; do
-  [[ -f "$file" ]] || fail "D65: missing surface file: $file"
-
-  # Extract content between markers
-  if ! grep -q '<!-- GOVERNANCE_BRIEF -->' "$file"; then
-    fail "D65: $file missing <!-- GOVERNANCE_BRIEF --> marker"
-  fi
-  if ! grep -q '<!-- /GOVERNANCE_BRIEF -->' "$file"; then
-    fail "D65: $file missing <!-- /GOVERNANCE_BRIEF --> marker"
-  fi
-
-  # Extract embedded brief (content between the two markers, excluding the markers)
-  EMBEDDED=$(awk '
-    /^<!-- GOVERNANCE_BRIEF -->$/ { capture=1; next }
-    /^<!-- \/GOVERNANCE_BRIEF -->$/ { capture=0; next }
-    capture { print }
-  ' "$file")
-
-  if [[ "$EMBEDDED" != "$BRIEF" ]]; then
-    fail "D65: $file governance brief out of sync (run: ops/hooks/sync-agent-surfaces.sh)"
-  fi
+  [[ -f "$file" ]] || fail "missing surface file: $file"
+  grep -q '<!-- GOVERNANCE_BRIEF -->' "$file" || fail "$file missing <!-- GOVERNANCE_BRIEF --> marker"
+  grep -q '<!-- /GOVERNANCE_BRIEF -->' "$file" || fail "$file missing <!-- /GOVERNANCE_BRIEF --> marker"
 done
 
-echo "PASS: D65 agent briefing sync lock"
+echo "D65 PASS: dynamic briefing delivery lock valid (spine.context path)"

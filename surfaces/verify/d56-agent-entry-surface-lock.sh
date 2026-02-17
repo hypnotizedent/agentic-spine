@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Run ops/hooks/sync-agent-surfaces.sh to sync agent entry surfaces.
+# TRIAGE: Validate dynamic entry surfaces (spine.context + retired sync hooks).
 set -euo pipefail
 
 # D56: Agent Entry Surface Lock (composite)
@@ -9,8 +9,11 @@ set -euo pipefail
 #   - D26 agent read surface drift
 #   - D32 codex instruction source lock
 #   - D46 claude instruction source lock
+#   - Legacy sync hooks are retired shims (WS-5)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SYNC_AGENT_HOOK="$ROOT/ops/hooks/sync-agent-surfaces.sh"
+SYNC_SLASH_HOOK="$ROOT/ops/hooks/sync-slash-commands.sh"
 
 fail() { echo "D56 FAIL: $*" >&2; exit 1; }
 
@@ -34,12 +37,30 @@ subcheck() {
   return 1
 }
 
+retired_hook_check() {
+  local path="$1"
+  local id="$2"
+
+  if [[ ! -f "$path" ]]; then
+    echo "subcheck ${id}: FAIL (missing retired hook shim: $path)" >&2
+    return 1
+  fi
+
+  if ! grep -qF "RETIRED" "$path" 2>/dev/null; then
+    echo "subcheck ${id}: FAIL (hook still appears active: $path)" >&2
+    return 1
+  fi
+
+  return 0
+}
+
 FAILS=0
 
 subcheck "D26" "$ROOT/surfaces/verify/d26-agent-read-surface.sh" || FAILS=$((FAILS+1))
 subcheck "D32" "$ROOT/surfaces/verify/d32-codex-instruction-source-lock.sh" || FAILS=$((FAILS+1))
 subcheck "D46" "$ROOT/surfaces/verify/d46-claude-instruction-source-lock.sh" || FAILS=$((FAILS+1))
+retired_hook_check "$SYNC_AGENT_HOOK" "WS5-sync-agent-surfaces" || FAILS=$((FAILS+1))
+retired_hook_check "$SYNC_SLASH_HOOK" "WS5-sync-slash-commands" || FAILS=$((FAILS+1))
 
 (( FAILS == 0 )) || fail "agent entry surface violated (${FAILS} failing subcheck(s))"
 exit 0
-
