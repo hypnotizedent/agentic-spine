@@ -24,8 +24,14 @@ Post-closure burn-in for GAP-OP-575 (secrets runway), GAP-OP-576 (finance-adapte
 - mint.deploy.status: 7/7 running (finance-adapter Up 56m healthy) — `CAP-20260217-001439__mint.deploy.status__R10xy15082`
 - mint.migrate.dryrun: OK (0 pending) — `CAP-20260217-001446__mint.migrate.dryrun__R5eoj15210`
 
-### T+8h (~2026-02-17T12:22Z)
-- pending
+### T+11h (2026-02-17T15:51Z) — AMBER (non-closure)
+- verify.domain.run mint: bypass (stabilization mode; rerun with `--force` for gate eval) — `CAP-20260217-105158__verify.domain.run__Ragyt61208`
+- mint.modules.health: 6/6 OK — `CAP-20260217-105158__mint.modules.health__Rbeb861212`
+- mint.deploy.status: **DEGRADED** (7/8 running) — `CAP-20260217-105158__mint.deploy.status__Robnx61211`
+- mint.migrate.dryrun: OK (schema_migrations absent, 0 applied) — `CAP-20260217-105158__mint.migrate.dryrun__Rnicq61209`
+
+Blocker note: burn-in closure cannot be claimed while runtime is degraded (7/8)
+and before the T+24 checkpoint window.
 
 ### T+24h (~2026-02-18T04:22Z)
 - pending
