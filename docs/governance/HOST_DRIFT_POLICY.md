@@ -27,8 +27,10 @@ Shell profiles must define:
 CODE_ROOT=/Users/ronnyworks/code
 SPINE_ROOT=$CODE_ROOT/agentic-spine
 WORKBENCH_ROOT=$CODE_ROOT/workbench
-LEGACY_ROOT=/Users/ronnyworks/ronny-ops
 ```
+
+Compatibility aliases to legacy paths may exist, but they are non-authoritative
+and must not be used as runtime entrypoints.
 
 ## Enforcement Surfaces
 

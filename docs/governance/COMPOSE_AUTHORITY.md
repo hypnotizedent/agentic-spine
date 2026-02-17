@@ -15,6 +15,8 @@ Purpose: prevent "compose guessing" by defining where authoritative compose live
   - Live paths are declared in `ops/bindings/docker.compose.targets.yaml` (SSOT).
 - **VM-infra compose SSOT (sanitized)** lives in this repo under `ops/staged/**`.
 - **Workbench compose** (`/Users/ronnyworks/code/workbench/infra/compose/**`) is a *supporting/reference surface* for non-VM-infra stacks.
+- **Legacy ronny-ops compose is non-authoritative** and must not be used for deployment.
+  - Example stale runtime copy: `/Users/ronnyworks/ronny-ops/infrastructure/cloudflare/tunnel/docker-compose.yml`
 
 ## VM-Infra Stacks (Spine-Owned, Canonical)
 
@@ -59,4 +61,3 @@ To check what is deployed and where it lives on each host:
 Binding SSOT for live paths:
 
 - `ops/bindings/docker.compose.targets.yaml`
-
