@@ -4,24 +4,35 @@
 # Last verified: 2026-02-17
 #
 # Declares the correct startup order for hosts and stacks after a power cycle.
-# Used by infra.post_power.recovery capability.
+# Used by infra.post_power.recovery and infra.maintenance.window capabilities.
 #
 # Rules:
 #   - Hosts start in phase order (lower = earlier)
 #   - Within a host, stacks start in declared order
 #   - Health probes run after each phase to confirm readiness
 #   - docker-host is last because its services depend on infra-core (tunnel, DNS)
+#   - Each phase has a site tag (shop|home) for site-scoped maintenance
+#
+# Sites:
+#   shop  — Dell R730XD (pve), all production VMs (200-213)
+#   home  — Beelink SER7 (proxmox-home), HA VM (100), NAS
+#
+# Proxmox VM ordering (used by infra.proxmox.maintenance.shutdown/startup):
+#   shop_shutdown_order: [210, 209, 207, 206, 205, 202, 201, 200, 204]
+#   shop_startup_order:  [204, 205, 206, 207, 209, 210, 200, 202, 201]
+#   home_shutdown_order: [100]
+#   home_startup_order:  [100]
 
-version: 1
+version: 2
 updated: "2026-02-17"
 
-# Phase 1: Core infrastructure (everything else depends on these)
-# Phase 2: Observability + dev tools (important but not blocking)
-# Phase 3: Application workloads (depend on phase 1 services)
-# Phase 4: Legacy / non-critical
+# Shop phases (1-4): Core → Observability → Apps → Legacy
+# Home phases (10-11): HA VM → Home services
 
 phases:
+  # ─── Shop site (pve / R730XD) ────────────────────────────────────────
   - phase: 1
+    site: shop
     label: "Core infrastructure"
     hosts:
       - target: infra-core
@@ -38,6 +49,7 @@ phases:
           - "http://127.0.0.1:53"                     # pihole DNS
 
   - phase: 2
+    site: shop
     label: "Observability and dev tools"
     hosts:
       - target: observability
@@ -58,6 +70,7 @@ phases:
         wait_after_sec: 5
 
   - phase: 3
+    site: shop
     label: "Application workloads"
     hosts:
       - target: automation-stack
@@ -80,6 +93,7 @@ phases:
         wait_after_sec: 10
 
   - phase: 4
+    site: shop
     label: "Legacy production (docker-host)"
     hosts:
       - target: docker-host
@@ -87,3 +101,15 @@ phases:
           - mint-os
         wait_after_sec: 15
         description: "Depends on cloudflared (phase 1) for tunnel routing. Container names must not conflict with stopped containers — run compose down before up if exit code 128 detected."
+
+  # ─── Home site (proxmox-home / Beelink SER7) ─────────────────────────
+  - phase: 10
+    site: home
+    label: "Home Assistant VM"
+    hosts:
+      - target: proxmox-home
+        vm_ids: [100]
+        wait_after_sec: 30
+        description: "VM 100 (homeassistant) is the only active home VM. HAOS manages its own services — no Docker compose stacks. Allow 30s for supervisor + integrations to initialize."
+        health_probes:
+          - "http://10.0.0.100:8123/api/"  # HA REST API (requires auth but returns 401 = alive)

@@ -99,3 +99,19 @@ Behavioral change under non-balanced presets:
 - `permissive` preset: OOB guard failure downgrades from hard-stop to advisory warning.
 - `strict` preset: no change (drift_gate_mode=fail, same as balanced).
 - `balanced` preset: no change (drift_gate_mode=fail, same as hardcoded).
+
+### GAP-OP-648 (CLOSED)
+
+Home-shop maintenance parity via 3 deliverables:
+
+1. **startup.sequencing.yaml v2** — Added `site:` tag to all phases (shop for phases 1-4, home for phase 10). Added phase 10 for home site: VM 100 (homeassistant) with 30s wait + HA REST API health probe. Documented VM shutdown/startup ordering for both sites in header comments. Backward-compatible: existing `infra.post_power.recovery` reads phases sequentially and ignores the new `site` field.
+
+2. **infra-maintenance-window** — New composite orchestrator script:
+   - `--site shop|home|both` selects Proxmox host(s)
+   - `--mode precheck|shutdown|startup|verify|full` selects operation flow
+   - `--dry-run` (default) previews without executing; `--execute` performs mutations
+   - Delegates to existing capabilities (infra.proxmox.maintenance.*, infra.post_power.recovery.*, stability.control.snapshot, verify.*)
+   - Sources resolve-policy.sh, emits policy banner
+   - Cross-site ordering: shutdown=shop-then-home, startup=home-then-shop
+
+3. **infra.maintenance.window capability** — Registered in `ops/capabilities.yaml` (plane: fabric, domain: infra, requires: ssh.target.status) and `ops/bindings/capability_map.yaml` (D67 parity).

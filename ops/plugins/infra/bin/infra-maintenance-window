@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# infra-maintenance-window - Composite maintenance window orchestrator
+#
+# Chains precheck → shutdown → startup → recovery → verify for one or both
+# Proxmox sites (shop/home). Delegates to existing spine capabilities.
+#
+# Modes:
+#   --mode precheck  : read-only preflight for the selected site(s)
+#   --mode shutdown  : graceful VM shutdown on the selected site(s)
+#   --mode startup   : start VMs + recover Docker stacks on the selected site(s)
+#   --mode verify    : post-maintenance verification suite
+#   --mode full      : run all steps in sequence (precheck → shutdown → wait → startup → recovery → verify)
+#
+# Site:
+#   --site shop      : Dell R730XD (pve)
+#   --site home      : Beelink SER7 (proxmox-home)
+#   --site both      : shop first, then home (shutdown) / home first, then shop (startup)
+#
+# Safety:
+#   --dry-run        : (default) preview actions without executing
+#   --execute        : actually perform mutating operations
+#
+# Usage:
+#   infra-maintenance-window --site shop --mode full --dry-run
+#   infra-maintenance-window --site home --mode precheck
+#   infra-maintenance-window --site both --mode shutdown --execute
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+OPS="$SPINE_ROOT/bin/ops"
+SEQ_BINDING="$SPINE_ROOT/ops/bindings/startup.sequencing.yaml"
+
+# ── AOF policy integration ──────────────────────────────────────────────
+POLICY_LIB="$SPINE_ROOT/ops/lib/resolve-policy.sh"
+if [[ -f "$POLICY_LIB" ]]; then
+  # shellcheck source=ops/lib/resolve-policy.sh
+  source "$POLICY_LIB"
+  resolve_policy_knobs
+fi
+
+# ── Site → host-id mapping ──────────────────────────────────────────────
+SHOP_HOST_ID="pve"
+HOME_HOST_ID="proxmox-home"
+
+# ── Arg parsing ─────────────────────────────────────────────────────────
+MODE=""
+SITE=""
+EXECUTE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --mode) MODE="${2:-}"; shift 2 ;;
+    --site) SITE="${2:-}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    --dry-run) EXECUTE=0; shift ;;
+    -h|--help) sed -n '2,27p' "$0" | sed 's/^# //'; exit 0 ;;
+    *) echo "STOP (2): unknown arg: $1"; exit 2 ;;
+  esac
+done
+
+[[ -n "$MODE" ]] || { echo "STOP (2): --mode required (precheck|shutdown|startup|verify|full)"; exit 2; }
+[[ -n "$SITE" ]] || { echo "STOP (2): --site required (shop|home|both)"; exit 2; }
+case "$SITE" in shop|home|both) ;; *) echo "STOP (2): --site must be shop|home|both"; exit 2 ;; esac
+case "$MODE" in precheck|shutdown|startup|verify|full) ;; *) echo "STOP (2): --mode must be precheck|shutdown|startup|verify|full"; exit 2 ;; esac
+
+EXEC_FLAG="--dry-run"
+[[ "$EXECUTE" -eq 1 ]] && EXEC_FLAG="--execute"
+
+# ── Banner ──────────────────────────────────────────────────────────────
+echo "infra.maintenance.window"
+echo "mode: $MODE"
+echo "site: $SITE"
+echo "execute: $( [[ "$EXECUTE" -eq 1 ]] && echo true || echo false )"
+echo "policy: ${RESOLVED_POLICY_PRESET:-balanced} (approval_default=${RESOLVED_APPROVAL_DEFAULT:-auto}, drift_gate_mode=${RESOLVED_DRIFT_GATE_MODE:-fail})"
+echo
+
+# ── Helpers ─────────────────────────────────────────────────────────────
+run_step() {
+  local step_name="$1"
+  shift
+  echo "═══ $step_name ═══"
+  echo "command: $*"
+  echo
+  if [[ "$EXECUTE" -eq 1 ]] || [[ "$step_name" == *"precheck"* ]] || [[ "$step_name" == *"verify"* ]]; then
+    set +e
+    "$@" 2>&1
+    local rc=$?
+    set -e
+    echo
+    if [[ $rc -ne 0 ]]; then
+      echo "WARN: $step_name exited with rc=$rc"
+      echo
+    fi
+    return $rc
+  else
+    echo "(dry-run: skipped)"
+    echo
+    return 0
+  fi
+}
+
+# Build site list based on mode
+# Shutdown: shop before home (graceful order — stop dependents first)
+# Startup: home before shop (bring up HA first for monitoring)
+sites_for_shutdown() {
+  case "$SITE" in
+    shop) echo "shop" ;;
+    home) echo "home" ;;
+    both) echo "shop home" ;;
+  esac
+}
+
+sites_for_startup() {
+  case "$SITE" in
+    shop) echo "shop" ;;
+    home) echo "home" ;;
+    both) echo "home shop" ;;
+  esac
+}
+
+host_id_for_site() {
+  case "$1" in
+    shop) echo "$SHOP_HOST_ID" ;;
+    home) echo "$HOME_HOST_ID" ;;
+  esac
+}
+
+# ── Mode implementations ────────────────────────────────────────────────
+
+do_precheck() {
+  for site in $(sites_for_shutdown); do
+    local host_id
+    host_id="$(host_id_for_site "$site")"
+    run_step "precheck ($site)" \
+      "$OPS" cap run infra.proxmox.maintenance.precheck -- --mode precheck --host-id "$host_id" || true
+  done
+}
+
+do_shutdown() {
+  for site in $(sites_for_shutdown); do
+    local host_id
+    host_id="$(host_id_for_site "$site")"
+    if [[ "$EXECUTE" -eq 1 ]]; then
+      run_step "shutdown ($site)" \
+        "$OPS" cap run infra.proxmox.maintenance.shutdown -- --mode shutdown --host-id "$host_id" --execute || return 1
+    else
+      echo "═══ shutdown ($site) ═══"
+      echo "dry-run: would shut down all running guests on $host_id"
+      echo "command: $OPS cap run infra.proxmox.maintenance.shutdown -- --mode shutdown --host-id $host_id --execute"
+      echo
+    fi
+  done
+}
+
+do_startup() {
+  for site in $(sites_for_startup); do
+    local host_id
+    host_id="$(host_id_for_site "$site")"
+    if [[ "$EXECUTE" -eq 1 ]]; then
+      run_step "startup ($site)" \
+        "$OPS" cap run infra.proxmox.maintenance.startup -- --mode startup --host-id "$host_id" --execute || return 1
+    else
+      echo "═══ startup ($site) ═══"
+      echo "dry-run: would start guests on $host_id in preferred order"
+      echo "command: $OPS cap run infra.proxmox.maintenance.startup -- --mode startup --host-id $host_id --execute"
+      echo
+    fi
+  done
+
+  # Docker stack recovery (shop only — home has no Docker compose stacks)
+  if [[ "$SITE" == "shop" || "$SITE" == "both" ]]; then
+    if [[ "$EXECUTE" -eq 1 ]]; then
+      run_step "recovery (shop Docker stacks)" \
+        "$OPS" cap run infra.post_power.recovery.status || true
+      echo "note: run './bin/ops cap run infra.post_power.recovery' manually if stacks need recovery (requires manual approval)"
+    else
+      echo "═══ recovery (shop Docker stacks) ═══"
+      echo "dry-run: would check Docker stack recovery status"
+      echo "command: $OPS cap run infra.post_power.recovery.status"
+      echo "note: full recovery requires manual approval via infra.post_power.recovery"
+      echo
+    fi
+  fi
+}
+
+do_verify() {
+  echo "═══ verify ═══"
+  run_step "stability snapshot" \
+    "$OPS" cap run stability.control.snapshot || true
+  run_step "core verify" \
+    "$OPS" cap run verify.core.run || true
+  run_step "infra domain verify" \
+    "$OPS" cap run verify.domain.run infra --force || true
+  echo "verify: complete"
+  echo
+}
+
+# ── Mode dispatch ───────────────────────────────────────────────────────
+
+case "$MODE" in
+  precheck)
+    do_precheck
+    ;;
+  shutdown)
+    do_shutdown
+    ;;
+  startup)
+    do_startup
+    ;;
+  verify)
+    do_verify
+    ;;
+  full)
+    do_precheck
+
+    echo "═══════════════════════════════════════════════════════════"
+    echo "Precheck complete. Next: shutdown."
+    echo "═══════════════════════════════════════════════════════════"
+    echo
+
+    do_shutdown
+    rc=$?
+    if [[ "$EXECUTE" -eq 1 && $rc -ne 0 ]]; then
+      echo "STOP: shutdown failed; aborting maintenance window"
+      exit 1
+    fi
+
+    if [[ "$EXECUTE" -eq 1 ]]; then
+      echo "═══════════════════════════════════════════════════════════"
+      echo "Shutdown complete. Perform physical maintenance now."
+      echo "When ready, run:"
+      echo "  ./bin/ops cap run infra.maintenance.window -- --site $SITE --mode startup --execute"
+      echo "  ./bin/ops cap run infra.maintenance.window -- --site $SITE --mode verify"
+      echo "═══════════════════════════════════════════════════════════"
+    else
+      echo "═══════════════════════════════════════════════════════════"
+      echo "dry-run: after shutdown, perform physical maintenance, then:"
+      echo "  startup → recovery → verify"
+      echo "═══════════════════════════════════════════════════════════"
+    fi
+    echo
+
+    do_startup
+
+    do_verify
+    ;;
+esac
+
+echo "status: OK"
