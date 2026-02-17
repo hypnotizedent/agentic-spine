@@ -30,7 +30,6 @@ PROJECTS=(
   "mint-os-api:6c67b03e-ed17-4154-9a94-59837738e432"
   "infrastructure:01ddd93a-e0f8-4c7c-ad9f-903d76ef94d9"
   "n8n:4b9dfc6d-13e8-43c8-bd84-9beb64eb8e16"
-  "finance-stack:4c34714d-6d85-4aa6-b8df-5a9505f3bcef"
   "media-stack:3807f1c4-e354-4aaf-a16f-8567d7f78a7e"
 )
 
@@ -46,7 +45,6 @@ MONITORED_SECRETS=(
   "TWILIO_AUTH_TOKEN"
   "CLOUDFLARE_API_TOKEN"
   "HA_API_TOKEN"
-  "FIREFLY_ACCESS_TOKEN"
   "FIREFLY_PAT"
   "IMMICH_API_KEY"
   "PAPERLESS_API_TOKEN"
