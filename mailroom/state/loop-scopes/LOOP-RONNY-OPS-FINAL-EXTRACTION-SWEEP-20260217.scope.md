@@ -1,11 +1,12 @@
 ---
 loop_id: LOOP-RONNY-OPS-FINAL-EXTRACTION-SWEEP-20260217
 created: 2026-02-17
-status: draft
+status: active
 owner: "@ronny"
 scope: legacy-extraction
 objective: Final exhaustive scan of /Users/ronnyworks/ronny-ops to close extraction debt and enable clean legacy retirement.
 parent_loop: LOOP-WORKBENCH-AOF-HARDENING-V2-20260217
+activated_at: 2026-02-17
 ---
 
 ## Lanes
