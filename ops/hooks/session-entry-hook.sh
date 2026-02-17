@@ -61,7 +61,10 @@ PY
   date -j -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" "+%s" 2>/dev/null || echo 0
 }
 
-# --- Dynamic context gathering ---
+# --- Dynamic context gathering (via spine.context capability) ---
+
+# Use spine.context for governance brief delivery (Move 3: dynamic context)
+CONTEXT_SCRIPT="$SPINE_ROOT/ops/plugins/context/bin/spine-context"
 
 # Spine status (loops + gaps + inbox + proposals)
 LOOPS="(none)"
@@ -154,9 +157,13 @@ if [[ "$ACTIVE_SESSIONS" -gt 1 ]]; then
 "
 fi
 
-# Read canonical governance brief (static rules from single source)
+# Read governance brief — prefer spine.context dynamic delivery, fallback to direct file read
 BRIEF_FILE="$SPINE_ROOT/docs/governance/AGENT_GOVERNANCE_BRIEF.md"
-BRIEF=$(cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable — expected at $BRIEF_FILE)")
+if [[ -x "$CONTEXT_SCRIPT" ]]; then
+  BRIEF=$("$CONTEXT_SCRIPT" --section brief 2>/dev/null || cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable)")
+else
+  BRIEF=$(cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable — expected at $BRIEF_FILE)")
+fi
 
 # Build the system message: dynamic state + canonical brief
 MSG="## SESSION ENTRY PROTOCOL (governance hook)

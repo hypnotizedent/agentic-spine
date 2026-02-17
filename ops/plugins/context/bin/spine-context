@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# spine-context — Dynamic governance context delivery
+# Outputs governance brief + live spine state as structured markdown.
+# Replaces inline brief reading in session-entry-hook.sh.
+# Source of truth: docs/governance/AGENT_GOVERNANCE_BRIEF.md
+#
+# Usage: spine-context [--format markdown|yaml] [--section brief|status|agents|all]
+# Default: --format markdown --section all
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+
+FORMAT="markdown"
+SECTION="all"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --format) FORMAT="${2:-markdown}"; shift 2 ;;
+    --section) SECTION="${2:-all}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+# ── Brief section ──────────────────────────────────────────
+emit_brief() {
+  local brief_file="$SPINE_ROOT/docs/governance/AGENT_GOVERNANCE_BRIEF.md"
+  if [[ -f "$brief_file" ]]; then
+    cat "$brief_file"
+  else
+    echo "(governance brief unavailable — expected at $brief_file)"
+  fi
+}
+
+# ── Status section ─────────────────────────────────────────
+emit_status() {
+  local branch worktree_count
+
+  branch=$(git -C "$SPINE_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  worktree_count=$(git -C "$SPINE_ROOT" worktree list --porcelain 2>/dev/null | grep -c '^worktree' || echo 0)
+
+  echo "### Spine Status"
+  echo ""
+  echo "**Branch:** \`${branch}\` | **Worktrees:** ${worktree_count}"
+  echo ""
+
+  if [[ -x "$SPINE_ROOT/bin/ops" ]]; then
+    echo '```'
+    timeout 10 "$SPINE_ROOT/bin/ops" status --brief 2>/dev/null || echo "(status unavailable)"
+    echo '```'
+  else
+    echo '```'
+    echo "(ops binary not found)"
+    echo '```'
+  fi
+}
+
+# ── Agent summary section ──────────────────────────────────
+emit_agents() {
+  local registry="$SPINE_ROOT/ops/bindings/agents.registry.yaml"
+  if [[ ! -f "$registry" ]]; then
+    echo "### Agents"
+    echo "(registry not found)"
+    return
+  fi
+
+  echo "### Registered Agents"
+  echo ""
+  # Emit agent ID, status, and domain — lightweight summary
+  yq e '.agents[] | .id + " (" + .implementation_status + ", " + .domain + ")"' "$registry" 2>/dev/null | while read -r line; do
+    echo "- $line"
+  done
+}
+
+# ── Compose output ─────────────────────────────────────────
+case "$SECTION" in
+  brief)  emit_brief ;;
+  status) emit_status ;;
+  agents) emit_agents ;;
+  all)
+    emit_brief
+    echo ""
+    echo "---"
+    echo ""
+    emit_status
+    echo ""
+    emit_agents
+    ;;
+  *)
+    echo "ERROR: unknown section '$SECTION'. Use: brief|status|agents|all" >&2
+    exit 1
+    ;;
+esac
