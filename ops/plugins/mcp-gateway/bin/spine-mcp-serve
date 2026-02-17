@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""
+Unified spine MCP gateway.
+
+Exposes governed capabilities via stdio JSON-RPC (MCP) with:
+  - cap_list
+  - cap_run
+  - rag_query / rag_retrieve / rag_health compatibility wrappers
+"""
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+
+
+def _repo_root() -> str:
+    return os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+    )
+
+
+SPINE_ROOT = os.environ.get("SPINE_ROOT", _repo_root())
+OPS_BIN = os.path.join(SPINE_ROOT, "bin", "ops")
+CAPABILITIES_FILE = os.path.join(SPINE_ROOT, "ops", "capabilities.yaml")
+SECRETS_EXEC = os.path.join(SPINE_ROOT, "ops", "plugins", "secrets", "bin", "secrets-exec")
+RAG_BIN = os.path.join(SPINE_ROOT, "ops", "plugins", "rag", "bin", "rag")
+SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+TOOLS = [
+    {
+        "name": "cap_list",
+        "description": (
+            "List governed capabilities from ops/capabilities.yaml. "
+            "Optional filters: substring match and safety level."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "filter": {
+                    "type": "string",
+                    "description": "Optional case-insensitive substring on capability name"
+                },
+                "safety": {
+                    "type": "string",
+                    "enum": ["read-only", "mutating", "destructive"],
+                    "description": "Optional safety-level filter"
+                }
+            }
+        }
+    },
+    {
+        "name": "cap_run",
+        "description": (
+            "Run a governed capability through ./bin/ops cap run. "
+            "Manual-approval capabilities require confirm=true."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Capability name from ops/capabilities.yaml"
+                },
+                "args": {
+                    "description": "Capability arguments as array (preferred) or shell-style string",
+                    "oneOf": [
+                        {"type": "array", "items": {"type": "string"}},
+                        {"type": "string"}
+                    ]
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Set true to forward 'yes' for manual approval prompts"
+                }
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "rag_query",
+        "description": "Compatibility wrapper for legacy RAG MCP query tool.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "Question for RAG workspace"}
+            },
+            "required": ["question"]
+        }
+    },
+    {
+        "name": "rag_retrieve",
+        "description": "Compatibility wrapper for legacy RAG MCP retrieve tool.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum results (default: 5)",
+                    "default": 5
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "rag_health",
+        "description": "Compatibility wrapper for legacy RAG MCP health tool.",
+        "inputSchema": {"type": "object", "properties": {}}
+    }
+]
+
+
+def read_message() -> Tuple[Optional[Dict[str, Any]], bool]:
+    while True:
+        line = sys.stdin.readline()
+        if line == "":
+            return None, True
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            return json.loads(line), False
+        except json.JSONDecodeError:
+            continue
+
+
+def write_message(payload: Dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+
+def sanitize_noise(text: str) -> str:
+    lines = []
+    for line in (text or "").splitlines():
+        lower = line.lower()
+        if "new release of infisical" in lower:
+            continue
+        if "brew update" in lower:
+            continue
+        if line.startswith("INF "):
+            continue
+        if "Injecting" in line:
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def run_cmd(
+    args: List[str],
+    *,
+    stdin_text: Optional[str] = None,
+    timeout: int = 180,
+) -> Tuple[int, str, str]:
+    result = subprocess.run(
+        args,
+        cwd=SPINE_ROOT,
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    stdout = sanitize_noise(result.stdout)
+    stderr = sanitize_noise(result.stderr)
+    return result.returncode, stdout, stderr
+
+
+def load_capabilities() -> Dict[str, Any]:
+    code, out, err = run_cmd(
+        ["yq", "e", "-o=json", ".capabilities", CAPABILITIES_FILE],
+        timeout=30,
+    )
+    if code != 0:
+        raise RuntimeError(f"failed to read capability registry: {err or out}")
+    try:
+        parsed = json.loads(out or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid capabilities json output: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("capability registry did not parse as an object")
+    return parsed
+
+
+def normalize_cap_args(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    if isinstance(raw, str):
+        return shlex.split(raw)
+    raise RuntimeError("args must be an array of strings or a string")
+
+
+def run_capability(name: str, cap_args: List[str], confirm: bool) -> str:
+    if not SAFE_NAME.match(name or ""):
+        raise RuntimeError("invalid capability name")
+
+    capabilities = load_capabilities()
+    meta = capabilities.get(name)
+    if not isinstance(meta, dict):
+        raise RuntimeError(f"unknown capability: {name}")
+
+    approval = str(meta.get("approval", "")).strip()
+    cmd = [OPS_BIN, "cap", "run", name, *cap_args]
+    stdin_text = None
+
+    if approval == "manual":
+        if not confirm:
+            raise RuntimeError(
+                f"capability '{name}' requires manual approval; "
+                "rerun with confirm=true to forward approval"
+            )
+        stdin_text = "yes\n"
+
+    code, out, err = run_cmd(cmd, stdin_text=stdin_text, timeout=600)
+    if code != 0:
+        detail = err or out or "no output"
+        raise RuntimeError(f"cap_run failed for {name} (rc={code}): {detail}")
+    if err:
+        return f"{out}\n{err}".strip()
+    return out or "(no output)"
+
+
+def list_capabilities(filter_text: Optional[str], safety: Optional[str]) -> str:
+    capabilities = load_capabilities()
+    rows = []
+    needle = (filter_text or "").strip().lower()
+    safety_filter = (safety or "").strip()
+
+    for name in sorted(capabilities.keys()):
+        meta = capabilities.get(name) or {}
+        cap_safety = str(meta.get("safety", "")).strip()
+        if needle and needle not in name.lower():
+            continue
+        if safety_filter and cap_safety != safety_filter:
+            continue
+        rows.append({
+            "name": name,
+            "safety": cap_safety,
+            "approval": str(meta.get("approval", "")).strip(),
+            "description": str(meta.get("description", "")).strip(),
+        })
+
+    return json.dumps(
+        {
+            "count": len(rows),
+            "capabilities": rows,
+        },
+        indent=2,
+        sort_keys=False,
+    )
+
+
+def run_rag(subcommand: str, *args: str) -> str:
+    cmd = [SECRETS_EXEC, "--", RAG_BIN, subcommand, *args]
+    code, out, err = run_cmd(cmd, timeout=300)
+    if code != 0:
+        raise RuntimeError(f"rag {subcommand} failed (rc={code}): {err or out}")
+    if err:
+        return f"{out}\n{err}".strip()
+    return out or "(no output)"
+
+
+def handle_initialize(msg: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": msg["id"],
+        "result": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "spine-mcp-gateway", "version": "1.0.0"},
+        },
+    }
+
+
+def handle_tools_list(msg: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": msg["id"],
+        "result": {"tools": TOOLS},
+    }
+
+
+def handle_tools_call(msg: Dict[str, Any]) -> Dict[str, Any]:
+    name = msg.get("params", {}).get("name")
+    arguments = msg.get("params", {}).get("arguments", {})
+
+    try:
+        if name == "cap_list":
+            text = list_capabilities(
+                arguments.get("filter"),
+                arguments.get("safety"),
+            )
+        elif name == "cap_run":
+            cap_name = arguments.get("name", "")
+            cap_args = normalize_cap_args(arguments.get("args"))
+            confirm = bool(arguments.get("confirm", False))
+            text = run_capability(cap_name, cap_args, confirm)
+        elif name == "rag_query":
+            text = run_capability(
+                "rag.anythingllm.ask",
+                [arguments["question"]],
+                False,
+            )
+        elif name == "rag_retrieve":
+            limit = int(arguments.get("limit", 5))
+            text = run_rag("retrieve", arguments["query"], "--limit", str(limit))
+        elif name == "rag_health":
+            text = run_capability("rag.health", [], False)
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "id": msg["id"],
+                "error": {"code": -32601, "message": f"Unknown tool: {name}"},
+            }
+
+        return {
+            "jsonrpc": "2.0",
+            "id": msg["id"],
+            "result": {
+                "content": [{"type": "text", "text": text}]
+            },
+        }
+    except Exception as exc:
+        return {
+            "jsonrpc": "2.0",
+            "id": msg.get("id"),
+            "result": {
+                "content": [{"type": "text", "text": f"Error: {exc}"}],
+                "isError": True,
+            },
+        }
+
+
+def main() -> int:
+    while True:
+        msg, eof = read_message()
+        if eof:
+            break
+        if msg is None:
+            continue
+
+        method = msg.get("method")
+        msg_id = msg.get("id")
+
+        if method == "initialize":
+            write_message(handle_initialize(msg))
+        elif method == "notifications/initialized":
+            continue
+        elif method == "tools/list":
+            write_message(handle_tools_list(msg))
+        elif method == "tools/call":
+            write_message(handle_tools_call(msg))
+        elif method == "ping":
+            write_message({"jsonrpc": "2.0", "id": msg_id, "result": {}})
+        elif msg_id is not None:
+            write_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {
+                        "code": -32601,
+                        "message": f"Method not found: {method}",
+                    },
+                }
+            )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
