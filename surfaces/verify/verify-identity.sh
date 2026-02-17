@@ -27,7 +27,8 @@ declare -A TIER1_HOSTS=(
 
 declare -A TIER2_HOSTS=(
   ["automation-stack"]="100.98.70.70"
-  ["media-stack"]="100.117.1.53"
+  ["download-stack"]="100.107.36.76"
+  ["streaming-stack"]="100.123.207.64"
 )
 # Conditionally add immich
 if [[ "${OPS_SKIP_IMMICH:-0}" != "1" ]]; then
