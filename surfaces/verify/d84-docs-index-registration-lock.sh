@@ -15,7 +15,7 @@ SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INDEX="$SP/docs/governance/_index.yaml"
 
 FAIL=0
-err() { echo "  FAIL: $1" >&2; FAIL=1; }
+err() { echo "  D84 FAIL: $1" >&2; FAIL=1; }
 
 [[ -f "$INDEX" ]] || { err "_index.yaml not found"; exit 1; }
 command -v yq >/dev/null 2>&1 || { err "yq not found"; exit 1; }
@@ -62,4 +62,9 @@ if [[ "$PHANTOM" -gt 0 ]]; then
   echo "  $PHANTOM phantom index entries" >&2
 fi
 
-exit "$FAIL"
+if [[ "$FAIL" -eq 1 ]]; then
+  echo "D84 FAIL: docs index registration violations detected" >&2
+  exit 1
+fi
+echo "D84 PASS: docs index registration valid"
+exit 0

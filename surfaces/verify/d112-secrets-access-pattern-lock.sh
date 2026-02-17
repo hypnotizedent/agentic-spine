@@ -26,7 +26,7 @@ while IFS= read -r file; do
   [[ "$local_rel" == "$SELF_PATH" ]] && continue
   if grep -qn "$PATTERN_B" "$file" 2>/dev/null; then
     if grep -n "$PATTERN_B" "$file" 2>/dev/null | grep -v '^[0-9]*:\s*#' | grep -q .; then
-      echo "FAIL: Pattern B (CLI) found in: $file"
+      echo "D112 FAIL: Pattern B (CLI) found in: $file"
       pattern_b_hits=$((pattern_b_hits + 1))
     fi
   fi
@@ -65,7 +65,7 @@ while IFS= read -r file; do
   fi
   if grep -qn "$PATTERN_C" "$file" 2>/dev/null; then
     if grep -n "$PATTERN_C" "$file" 2>/dev/null | grep -v '^[0-9]*:\s*#' | grep -q .; then
-      echo "FAIL: Pattern C (inline auth) found in: $file"
+      echo "D112 FAIL: Pattern C (inline auth) found in: $file"
       pattern_c_hits=$((pattern_c_hits + 1))
     fi
   fi
@@ -87,7 +87,7 @@ while IFS= read -r file; do
   [[ "$local_rel" == "$SELF_PATH" ]] && continue
   if grep -qn "$PATTERN_PATH" "$file" 2>/dev/null; then
     if grep -n "$PATTERN_PATH" "$file" 2>/dev/null | grep -v '^[0-9]*:\s*#' | grep -q .; then
-      echo "FAIL: workbench shim path in: $file"
+      echo "D112 FAIL: workbench shim path in: $file"
       path_hits=$((path_hits + 1))
     fi
   fi
@@ -102,9 +102,9 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 if [[ "$FAILURES" -gt 0 ]]; then
-  echo "FAIL: $FAILURES secrets access pattern violation(s)"
+  echo "D112 FAIL: $FAILURES secrets access pattern violation(s)"
   exit 1
 fi
 
-echo "PASS: all secrets access via canonical infisical-agent.sh"
+echo "D112 PASS: all secrets access via canonical infisical-agent.sh"
 exit 0
