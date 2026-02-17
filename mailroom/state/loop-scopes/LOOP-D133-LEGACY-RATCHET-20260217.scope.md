@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-D133-LEGACY-RATCHET-20260217
 created: 2026-02-17
-status: active
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Reduce D133 legacy exception list from 22 to 0 via safe batch normalization.

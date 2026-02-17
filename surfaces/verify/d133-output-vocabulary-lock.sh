@@ -14,8 +14,6 @@ fail() {
 # New gates must use canonical D<N> PASS:/FAIL: output patterns.
 # Remove entries as gates are migrated to canonical output vocabulary.
 LEGACY_EXCEPTIONS="
-d113
-d114
 "
 
 ERRORS=0

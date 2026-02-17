@@ -10,14 +10,14 @@ HA_API="http://${HA_HOST}:${HA_PORT}/api"
 
 # Retrieve token from Infisical
 if [[ ! -x "$INFISICAL_AGENT" ]]; then
-  echo "SKIP: infisical-agent.sh not found (secrets not available)"
+  echo "D113 SKIP: infisical-agent.sh not found (secrets not available)"
   exit 0
 fi
 
 HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
 
 if [[ -z "$HA_TOKEN" ]]; then
-  echo "SKIP: could not retrieve HA_API_TOKEN from Infisical"
+  echo "D113 SKIP: could not retrieve HA_API_TOKEN from Infisical"
   exit 0
 fi
 
@@ -37,7 +37,7 @@ RESULTS=()
 z2m_resp=$(ha_state "binary_sensor.zigbee2mqtt_bridge_connection_state") || z2m_resp=""
 
 if [[ -z "$z2m_resp" ]]; then
-  RESULTS+=("SKIP: HA unreachable (connection timeout)")
+  RESULTS+=("D113 SKIP: HA unreachable (connection timeout)")
   echo "${RESULTS[0]}"
   exit 0
 fi
@@ -113,8 +113,8 @@ done
 
 # ── Output ──
 if [[ "$FAIL" -eq 1 ]]; then
-  echo "FAIL: $(IFS='; '; echo "${RESULTS[*]}")"
+  echo "D113 FAIL: $(IFS='; '; echo "${RESULTS[*]}")"
   exit 1
 fi
 
-echo "PASS ($(IFS='; '; echo "${RESULTS[*]}"))"
+echo "D113 PASS: $(IFS='; '; echo "${RESULTS[*]}")"
