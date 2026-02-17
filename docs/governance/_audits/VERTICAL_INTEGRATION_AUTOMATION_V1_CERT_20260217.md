@@ -19,7 +19,7 @@ Implement machine-enforced vertical integration admission/parity controls so pri
 - Phase 2 admission contract SSOT: PASS
 - Phase 3 proposals.apply enforcement: PASS
 - Phase 4 read-only parity capability: PASS
-- Phase 5 validation/certification: FAIL (parity capability overall FAIL)
+- Phase 5 validation/certification: PASS (re-cert green after runtime/MCP parity alignment)
 
 ## Implemented Artifacts
 
@@ -50,6 +50,9 @@ Implement machine-enforced vertical integration admission/parity controls so pri
     - endpoint health
     - MCP exposure
     - docs/contracts references
+  - Runtime source alignment added:
+    - `mint_deploy_status` mode (default)
+    - `ssh_compose_ps` mode (target + compose_path from contract)
 
 - `ops/capabilities.yaml`
   - Registered `verify.vertical_integration.parity_status`.
@@ -57,29 +60,40 @@ Implement machine-enforced vertical integration admission/parity controls so pri
 - `ops/bindings/capability_map.yaml`
   - Added map entry for `verify.vertical_integration.parity_status` (D67 parity).
 
+- `.mcp.json`
+  - Added MCP registrations:
+    - `mint-pricing`
+    - `mint-suppliers`
+
+- `ops/bindings/mcp.runtime.contract.yaml`
+  - Added optional codex MCP exposure markers for:
+    - `mint-pricing`
+    - `mint-suppliers`
+
 ## Certification Runs
 
-- `CAP-20260217-161430__verify.core.run__R5wh19717` (PASS)
-- `CAP-20260217-161506__verify.domain.run__Rzdow21917` (PASS)
-- `CAP-20260217-161516__proposals.status__Rbv5q28187` (PASS)
-- `CAP-20260217-161517__gaps.status__Rvh8s28663` (PASS)
-- `CAP-20260217-161517__verify.vertical_integration.parity_status__R2jtb9716` (overall FAIL)
+- Initial fail set:
+  - `CAP-20260217-161430__verify.core.run__R5wh19717` (PASS)
+  - `CAP-20260217-161506__verify.domain.run__Rzdow21917` (PASS)
+  - `CAP-20260217-161516__proposals.status__Rbv5q28187` (PASS)
+  - `CAP-20260217-161517__gaps.status__Rvh8s28663` (PASS)
+  - `CAP-20260217-161517__verify.vertical_integration.parity_status__R2jtb9716` (overall FAIL)
+- Re-cert green set:
+  - `CAP-20260217-162619__verify.core.run__Rq5ey38961` (PASS)
+  - `CAP-20260217-162656__verify.domain.run__Re2kn51234` (PASS)
+  - `CAP-20260217-162706__verify.vertical_integration.parity_status__Rbcc757531` (overall PASS)
+  - `CAP-20260217-162712__proposals.status__R75ht57752` (PASS)
+  - `CAP-20260217-162713__gaps.status__R5auj38960` (PASS)
 
-## Cert Blockers
+## Re-cert Result
 
-Parity capability result:
+Parity capability result (`CAP-20260217-162706__verify.vertical_integration.parity_status__Rbcc757531`):
 
-- pricing:
-  - runtime container state: FAIL (expected containers not found)
-  - MCP exposure: FAIL (required markers absent)
-- suppliers:
-  - runtime container state: FAIL (expected containers not found)
-  - MCP exposure: FAIL (required markers absent)
-
-Green criteria not met. `GAP-OP-640` remains open with blocker note.
+- pricing: PASS across all dimensions
+- suppliers: PASS across all dimensions
+- overall: PASS
 
 ## Gap/Loop Closeout
 
-- `GAP-OP-640`: kept open (cert not green).
-- `LOOP-VERTICAL-INTEGRATION-AUTOMATION-V1-20260217`: remains active pending parity blockers.
-
+- `GAP-OP-640`: eligible for closeout (green cert achieved).
+- `LOOP-VERTICAL-INTEGRATION-AUTOMATION-V1-20260217`: remains active until gap close mutation is applied and recorded.
