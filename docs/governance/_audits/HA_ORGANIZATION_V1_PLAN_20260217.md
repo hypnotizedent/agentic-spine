@@ -69,11 +69,39 @@ Prepare governed execution scaffolding for HA organization cleanup without mutat
 4. HACS pseudo-device/orphan handling policy is explicitly classified (retain, ignore, quarantine, or delete-triage).
 5. All changes remain governed by loop/gap linkage and pass `verify.core.run` + `verify.domain.run home --force`.
 
-## Operator Decision Required
+## Operator Decisions — LOCKED (2026-02-17 WS1 execution)
 
-1. Winix area placement policy (single room vs shared/common area).
-2. Firestick vs Apple TV identity model (separate entities vs unified media endpoint naming).
-3. Formal policy for reserved IP normalization range `70-89`.
-4. Laundry area treatment (separate area vs folded into utility/common).
-5. HACS handling policy for pseudo-devices and orphans (visibility and cleanup thresholds).
-6. Final tie-break rule when device naming conflicts with existing SSOT aliases.
+1. **Winix area placement:** Physically confirmed via turbo-blast test. Bedroom=bedroom, Guest Room=guest_room, Living Room=living_room, Office=office. Entity names already correct; device names and area_ids need update.
+2. **Firestick vs Apple TV:** DEFERRED to future pass. Media players not moved/renamed in WS1. User will confirm physical locations room-by-room.
+3. **IP range 70-89:** APPROVED by operator for WiFi IoT devices. Reference only in WS1 — no DHCP changes until WS2.
+4. **Laundry area:** DEFERRED. Vibration sensor stays in Entryway for now.
+5. **HACS pseudo-device handling:** DEFERRED to WS3. Leave 34 HACS plugin devices unassigned.
+6. **Naming convention:** `{area}_{function}_{qualifier}` snake_case. Applied to WS1 device set only.
+7. **TP-Link plug assignment:** TEMPORARY — AE99 as `bedroom_plug_king`, B6EE as `bedroom_plug_empress` (pending operator confirmation of which physical plug is which side).
+8. **Tuya curtain + planter:** DEFERRED. Left as-is in living_room.
+
+## WS1 Mutation Plan
+
+### Area Moves (4 devices)
+| Device ID | Current Name | From | To |
+|-----------|-------------|------|----|
+| d5133851e178cba86893f0a5ac18e578 | office_button (Z2M TS0041) | living_room | office |
+| 96775512e1b9f9c6292b2db2e0f69419 | Guest Room Smart Bulb | living_room | guest_room |
+| 989ce93ea4504ba71c1feac70573eff6 | Winix Hallway | living_room | office |
+| 7426dcfc7c55cfe7a339d7cff0b23640 | Winix Play Room | living_room | guest_room |
+
+### Renames (12 devices)
+| Device ID | Current Name | New Name |
+|-----------|-------------|----------|
+| 989ce93ea4504ba71c1feac70573eff6 | Winix Hallway | Office Purifier |
+| bcb1075aced51e98b75b66a9a91a6800 | Winix Library | Living Room Purifier |
+| 7426dcfc7c55cfe7a339d7cff0b23640 | Winix Play Room | Guest Room Purifier |
+| f439e4813d1e9b172b32c0a62b0c0d4f | Winix Bed Room | Bedroom Purifier |
+| 5a2751339a61abc65934d1ee7b9cea73 | Q8 Max | Living Room Vacuum Q8 |
+| 2cffb9c172e42724799d183e5ddd1b18 | Q8 Max Dock | Living Room Vacuum Q8 Dock |
+| c176fd7803d58ed555bc665afc8859a9 | Empress Button | Bedroom Button Empress |
+| 74f725559a00321623da25790148a79f | KING LIGHT | Bedroom Bulb King |
+| 39ebea9941b12e04a78e3a20dca5a0ab | Empress light | Bedroom Bulb Empress |
+| 30507401ebb1b318c685c79a0517ac36 | TP-LINK_Smart Plug_AE99 | Bedroom Plug King |
+| 61e23b1a8113139522ee1bcecf5f06c5 | TP-LINK_Smart Plug_B6EE | Bedroom Plug Empress |
+| e20aaef29f4e1c267f93b648a915a844 | Pogo | Bedroom Litterbot Pogo |
