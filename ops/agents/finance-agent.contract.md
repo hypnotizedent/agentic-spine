@@ -12,7 +12,7 @@
 
 - **Agent ID:** finance-agent
 - **Domain:** finance-ops (unified personal finance + document management)
-- **Implementation:** `~/code/workbench/agents/finance/` (V2 active — TypeScript MCP server)
+- **Implementation:** `~/code/workbench/agents/finance/` (V1 TypeScript MCP server)
 - **Registry:** `ops/bindings/agents.registry.yaml`
 
 ## Owns (Application Layer)
@@ -46,17 +46,59 @@ If a finance-agent finding requires an infrastructure change, file it to the spi
 
 ## Governed Tools
 
-V2 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with read-only tools:
+V1 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with 13 read-only tools:
+
+### Firefly III (8 tools)
 
 | Tool | Description |
 |------|-------------|
-| `finance_status` | Health-check all finance services on VM 211 |
-| `list_accounts` | List Firefly III accounts with balances |
-| `get_account_detail` | Get detailed account info by ID |
-| `search_documents` | Search Paperless-ngx documents |
-| `get_document` | Get document metadata by ID |
+| `finance_status` | Health-check all finance services on VM 211 (Firefly III, Paperless-ngx) |
+| `list_accounts` | List Firefly III accounts with balances, filterable by type (asset, expense, revenue, liability) |
+| `get_account_detail` | Get detailed account info by ID (balance, currency, IBAN, notes) |
+| `list_transactions` | List transactions within a date range, filterable by type (withdrawal, deposit, transfer) |
+| `search_transactions` | Search transactions by keyword across description, notes, and text fields |
+| `list_categories` | List transaction categories with current-month spending totals |
+| `list_budgets` | List budgets with period amounts and spending progress |
+| `list_bills` | List recurring bills with amounts, frequency, and next expected date |
+
+### Paperless-ngx (5 tools)
+
+| Tool | Description |
+|------|-------------|
+| `search_documents` | Full-text search across Paperless-ngx documents |
+| `list_documents` | List documents with pagination and sort options |
+| `get_document_detail` | Get document metadata, tags, correspondent, and extracted text content |
+| `list_tags` | List all document tags with document counts |
+| `list_correspondents` | List all correspondents (document sources/senders) with document counts |
 
 Superseded config-only MCP servers (`firefly.json`, `paperless.json`) are deactivated (enabled: false) in MCPJungle.
+
+## V1 Deployment Checklist
+
+The MCP server source is complete but requires workbench-side activation:
+
+```bash
+# 1. Install dependencies and build
+cd ~/code/workbench/agents/finance/tools
+npm install
+npm run build
+
+# 2. Create .env from template, populate secrets from Infisical
+cp .env.example .env
+# Set FIREFLY_PAT (from infrastructure/prod/FIREFLY_PAT)
+# Set PAPERLESS_API_TOKEN (from infrastructure/prod/PAPERLESS_API_TOKEN)
+# Set FIREFLY_URL=http://100.76.153.100:8080 (or LAN 192.168.1.211:8080)
+# Set PAPERLESS_URL=http://100.76.153.100:8000 (or LAN 192.168.1.211:8000)
+
+# 3. Register in Claude Desktop config
+# Add to ~/Library/Application Support/Claude/claude_desktop_config.json:
+#   "finance-agent": {
+#     "command": "node",
+#     "args": ["<workbench>/agents/finance/tools/build/index.js"]
+#   }
+
+# 4. Smoke test — restart Claude Desktop, invoke finance_status tool
+```
 
 ## Invocation
 
@@ -85,3 +127,14 @@ V2 roadmap includes scheduled mailroom prompts for health digest and tax calenda
 | finance-adapter | Mint billable event bridge (mint-modules repo) |
 | SimpleFIN | Daily bank sync (cron on VM 211) |
 | n8n (VM 202) | Firefly-to-Mint OS expense webhook |
+
+## V2 Roadmap
+
+| Tool | Description | Status |
+|------|-------------|--------|
+| `reconciliation_report` | Cross-service transaction reconciliation | Planned |
+| `tax_1099_summary` | Contractor payment aggregation for 1099 prep | Planned |
+| `sales_tax_dr15` | FL sales tax calculation from Mint OS + Firefly | Planned |
+| `financial_health_digest` | Cross-service financial health summary | Planned |
+| `receipt_link` | Link Paperless receipt to Firefly transaction (write-gated) | Planned |
+| `transaction_categorize` | Bulk categorize transactions (write-gated) | Planned |
