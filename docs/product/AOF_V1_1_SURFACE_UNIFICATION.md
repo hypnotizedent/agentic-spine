@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 owner: "@ronny"
 last_verified: 2026-02-17
 scope: aof-v1.1-surface-unification
@@ -14,7 +14,7 @@ parent_loop: LOOP-AOF-V1-1-SURFACE-UNIFICATION-20260217
 
 ## Status
 
-**DRAFT** — Pending operator review. No implementation until approved.
+**APPROVED** — Design reviewed and approved 2026-02-17. Implementation sequenced as Move 1 → 2 → 3.
 
 ## Problem
 
