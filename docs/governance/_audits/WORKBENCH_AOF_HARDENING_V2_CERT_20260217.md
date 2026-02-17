@@ -57,3 +57,11 @@ None active at certification time.
 ## Outcome
 
 Hardening v2 is active and operational. The workbench AOF enforcement path remains proposal-preflight based, deterministic, and auditable.
+
+## Post-Cert Patch
+
+- Commit: `4df0c60`
+- Change: dry-run mode now returns non-zero when proposal validation errors are present.
+- Validation:
+  - Dry-run with valid workbench path: `RC=0`, preflight summary emitted.
+  - Dry-run with missing workbench path: `RC=1`, strict changed-file error emitted.
