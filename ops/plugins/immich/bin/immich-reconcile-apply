@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# immich-reconcile-apply - Execute keep/drop plan (trash drops, write rollback manifest)
+# TRIAGE: Mutating. Trashes assets via DELETE /api/assets {force:false}. Manual approval required.
+#
+# Outputs:
+#   apply_manifest.yaml  — record of what was done
+#   rollback_manifest.yaml — deterministic reversal instructions
+#
+# Usage:
+#   immich-reconcile-apply [--scan-dir DIR] [--batch-size N] [--dry-run] [--min-confidence LEVEL]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v curl    >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+
+IMMICH_HOST="${IMMICH_HOST:-100.114.101.50:2283}"
+IMMICH_URL="http://${IMMICH_HOST}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+CONNECT_TIMEOUT=10
+MAX_TIME=30
+
+# --- Parse args ---
+SCAN_DIR=""
+BATCH_SIZE=50
+DRY_RUN=""
+MIN_CONFIDENCE="low"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --scan-dir) SCAN_DIR="$2"; shift 2 ;;
+    --batch-size) BATCH_SIZE="$2"; shift 2 ;;
+    --dry-run) DRY_RUN="1"; shift ;;
+    --min-confidence) MIN_CONFIDENCE="$2"; shift 2 ;;
+    *) stop "unknown arg: $1" ;;
+  esac
+done
+
+# --- Resolve scan directory ---
+RECONCILE_BASE="${SPINE_ROOT}/mailroom/outbox/immich-reconcile"
+if [[ -z "$SCAN_DIR" ]]; then
+  if [[ ! -d "$RECONCILE_BASE" ]]; then
+    stop "No scan output found. Run immich.reconcile.scan first."
+  fi
+  SCAN_DIR=$(ls -1d "${RECONCILE_BASE}"/*/  2>/dev/null | sort | tail -n1)
+  SCAN_DIR="${SCAN_DIR%/}"
+fi
+
+PLAN_FILE="${SCAN_DIR}/keep_drop_plan.json"
+[[ -f "$PLAN_FILE" ]] || stop "Missing keep_drop_plan.json in $SCAN_DIR. Run immich.reconcile.plan first."
+
+# --- Resolve API key ---
+IMMICH_KEY=""
+if [[ -x "$INFISICAL_AGENT" ]]; then
+  IMMICH_KEY=$("$INFISICAL_AGENT" get infrastructure prod IMMICH_API_KEY 2>/dev/null) || true
+  if [[ -z "$IMMICH_KEY" ]]; then
+    IMMICH_KEY=$("$INFISICAL_AGENT" get immich prod IMMICH_API_KEY 2>/dev/null) || true
+  fi
+fi
+[[ -n "$IMMICH_KEY" ]] || stop "IMMICH_API_KEY not found in Infisical"
+
+echo "immich.reconcile.apply"
+echo "host: ${IMMICH_HOST}"
+echo "plan: ${PLAN_FILE}"
+echo "batch_size: ${BATCH_SIZE}"
+echo "min_confidence: ${MIN_CONFIDENCE}"
+if [[ -n "$DRY_RUN" ]]; then
+  echo "mode: DRY-RUN (no mutations)"
+else
+  echo "mode: LIVE (will trash assets)"
+fi
+echo
+
+# --- Health check ---
+ping_ok=$(curl -sf --connect-timeout "$CONNECT_TIMEOUT" --max-time 10 \
+  -H "x-api-key: ${IMMICH_KEY}" "${IMMICH_URL}/api/server/ping" 2>/dev/null \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('res')=='pong' else 'no')" 2>/dev/null) || ping_ok="no"
+if [[ "$ping_ok" != "yes" ]]; then
+  stop "Immich API unreachable or unhealthy"
+fi
+
+# --- Build batch list and manifests ---
+APPLY_TS="$(date -u '+%Y%m%dT%H%M%SZ')"
+
+python3 - "$PLAN_FILE" "$SCAN_DIR" "$MIN_CONFIDENCE" "$APPLY_TS" "$DRY_RUN" "$BATCH_SIZE" "$IMMICH_URL" "$IMMICH_KEY" "$CONNECT_TIMEOUT" "$MAX_TIME" << 'PYEOF'
+import json
+import sys
+import urllib.request
+
+plan_file = sys.argv[1]
+scan_dir = sys.argv[2]
+min_confidence = sys.argv[3]
+apply_ts = sys.argv[4]
+dry_run = sys.argv[5] == "1"
+batch_size = int(sys.argv[6])
+immich_url = sys.argv[7]
+api_key = sys.argv[8]
+connect_timeout = int(sys.argv[9])
+max_time = int(sys.argv[10])
+
+CONF_LEVELS = {"high": 3, "medium": 2, "low": 1}
+min_conf_val = CONF_LEVELS.get(min_confidence, 1)
+
+with open(plan_file) as f:
+    plan = json.load(f)
+
+decisions = plan.get("decisions", [])
+
+# --- Filter by confidence ---
+eligible = [
+    d for d in decisions
+    if CONF_LEVELS.get(d.get("confidence", "low"), 1) >= min_conf_val
+]
+
+# --- Collect actionable drops (not already trashed) ---
+actionable = []
+for d in eligible:
+    for drop in d.get("drops", []):
+        if not drop.get("is_trashed", False):
+            actionable.append({
+                "asset_id": drop["id"],
+                "original_filename": drop.get("original_filename", ""),
+                "group_id": d["group_id"],
+                "group_type": d["group_type"],
+                "confidence": d["confidence"],
+                "keeper_id": d["keeper"]["id"],
+                "keeper_filename": d["keeper"].get("original_filename", ""),
+            })
+
+print(f"  Eligible groups:   {len(eligible)}")
+print(f"  Actionable drops:  {len(actionable)}")
+
+if not actionable:
+    print("  Nothing to do.")
+    print()
+    print("status: OK (no-op)")
+    sys.exit(0)
+
+# --- Execute in batches ---
+def api_delete(ids, force=False):
+    """Trash assets via DELETE /api/assets."""
+    url = f"{immich_url}/api/assets"
+    body = json.dumps({"ids": ids, "force": force}).encode()
+    req = urllib.request.Request(url, data=body, method="DELETE")
+    req.add_header("x-api-key", api_key)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=max_time) as resp:
+            return resp.status, resp.read().decode()
+    except Exception as e:
+        return 0, str(e)
+
+trashed_ids = []
+failed_ids = []
+batches_processed = 0
+
+for i in range(0, len(actionable), batch_size):
+    batch = actionable[i:i + batch_size]
+    batch_ids = [a["asset_id"] for a in batch]
+    batches_processed += 1
+
+    if dry_run:
+        print(f"  [DRY-RUN] Batch {batches_processed}: would trash {len(batch_ids)} assets")
+        trashed_ids.extend(batch_ids)
+    else:
+        status, body = api_delete(batch_ids, force=False)
+        if status in (200, 204):
+            print(f"  Batch {batches_processed}: trashed {len(batch_ids)} assets")
+            trashed_ids.extend(batch_ids)
+        else:
+            print(f"  Batch {batches_processed}: FAILED ({status}): {body[:200]}")
+            failed_ids.extend(batch_ids)
+
+print()
+print(f"  Trashed:  {len(trashed_ids)}")
+print(f"  Failed:   {len(failed_ids)}")
+
+# --- Write apply manifest ---
+apply_manifest = {
+    "apply_ts": apply_ts,
+    "mode": "dry-run" if dry_run else "live",
+    "plan_file": plan_file,
+    "min_confidence": min_confidence,
+    "batch_size": batch_size,
+    "total_eligible": len(eligible),
+    "total_actionable": len(actionable),
+    "total_trashed": len(trashed_ids),
+    "total_failed": len(failed_ids),
+    "trashed_assets": [
+        {
+            "asset_id": a["asset_id"],
+            "original_filename": a["original_filename"],
+            "group_id": a["group_id"],
+            "keeper_id": a["keeper_id"],
+        }
+        for a in actionable if a["asset_id"] in trashed_ids
+    ],
+    "failed_assets": [
+        a["asset_id"] for a in actionable if a["asset_id"] in failed_ids
+    ]
+}
+
+with open(f"{scan_dir}/apply_manifest.yaml", "w") as f:
+    # Write as YAML-like format (valid YAML via json subset)
+    f.write(f"# Immich Reconcile Apply Manifest\n")
+    f.write(f"# Generated: {apply_ts}\n")
+    f.write(f"# Mode: {'dry-run' if dry_run else 'live'}\n")
+    f.write(f"---\n")
+    json.dump(apply_manifest, f, indent=2)
+    f.write("\n")
+
+# --- Write rollback manifest ---
+rollback_manifest = {
+    "apply_ts": apply_ts,
+    "mode": "dry-run" if dry_run else "live",
+    "description": "Restore trashed assets from reconcile apply batch",
+    "restore_ids": trashed_ids,
+    "restore_count": len(trashed_ids),
+    "api_endpoint": "POST /api/trash/restore/assets",
+    "api_body_template": {"ids": "<<restore_ids>>"},
+}
+
+with open(f"{scan_dir}/rollback_manifest.yaml", "w") as f:
+    f.write(f"# Immich Reconcile Rollback Manifest\n")
+    f.write(f"# Apply timestamp: {apply_ts}\n")
+    f.write(f"# Use with: immich.reconcile.rollback --scan-dir {scan_dir}\n")
+    f.write(f"---\n")
+    json.dump(rollback_manifest, f, indent=2)
+    f.write("\n")
+
+print(f"  Apply manifest:    {scan_dir}/apply_manifest.yaml")
+print(f"  Rollback manifest: {scan_dir}/rollback_manifest.yaml")
+print()
+print("status: OK")
+PYEOF

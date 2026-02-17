@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# immich-reconcile-rollback - Reverse a prior apply batch using rollback manifest
+# TRIAGE: Mutating. Restores assets from trash via POST /api/trash/restore/assets. Manual approval required.
+#
+# Usage:
+#   immich-reconcile-rollback [--scan-dir DIR] [--batch-size N] [--dry-run]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v curl    >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+
+IMMICH_HOST="${IMMICH_HOST:-100.114.101.50:2283}"
+IMMICH_URL="http://${IMMICH_HOST}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+CONNECT_TIMEOUT=10
+MAX_TIME=30
+
+# --- Parse args ---
+SCAN_DIR=""
+BATCH_SIZE=50
+DRY_RUN=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --scan-dir) SCAN_DIR="$2"; shift 2 ;;
+    --batch-size) BATCH_SIZE="$2"; shift 2 ;;
+    --dry-run) DRY_RUN="1"; shift ;;
+    *) stop "unknown arg: $1" ;;
+  esac
+done
+
+# --- Resolve scan directory ---
+RECONCILE_BASE="${SPINE_ROOT}/mailroom/outbox/immich-reconcile"
+if [[ -z "$SCAN_DIR" ]]; then
+  if [[ ! -d "$RECONCILE_BASE" ]]; then
+    stop "No reconcile output found."
+  fi
+  SCAN_DIR=$(ls -1d "${RECONCILE_BASE}"/*/  2>/dev/null | sort | tail -n1)
+  SCAN_DIR="${SCAN_DIR%/}"
+fi
+
+ROLLBACK_FILE="${SCAN_DIR}/rollback_manifest.yaml"
+[[ -f "$ROLLBACK_FILE" ]] || stop "Missing rollback_manifest.yaml in $SCAN_DIR. Run immich.reconcile.apply first."
+
+# --- Resolve API key ---
+IMMICH_KEY=""
+if [[ -x "$INFISICAL_AGENT" ]]; then
+  IMMICH_KEY=$("$INFISICAL_AGENT" get infrastructure prod IMMICH_API_KEY 2>/dev/null) || true
+  if [[ -z "$IMMICH_KEY" ]]; then
+    IMMICH_KEY=$("$INFISICAL_AGENT" get immich prod IMMICH_API_KEY 2>/dev/null) || true
+  fi
+fi
+[[ -n "$IMMICH_KEY" ]] || stop "IMMICH_API_KEY not found in Infisical"
+
+echo "immich.reconcile.rollback"
+echo "host: ${IMMICH_HOST}"
+echo "rollback: ${ROLLBACK_FILE}"
+echo "batch_size: ${BATCH_SIZE}"
+if [[ -n "$DRY_RUN" ]]; then
+  echo "mode: DRY-RUN (no mutations)"
+else
+  echo "mode: LIVE (will restore assets from trash)"
+fi
+echo
+
+# --- Health check ---
+ping_ok=$(curl -sf --connect-timeout "$CONNECT_TIMEOUT" --max-time 10 \
+  -H "x-api-key: ${IMMICH_KEY}" "${IMMICH_URL}/api/server/ping" 2>/dev/null \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('yes' if d.get('res')=='pong' else 'no')" 2>/dev/null) || ping_ok="no"
+if [[ "$ping_ok" != "yes" ]]; then
+  stop "Immich API unreachable or unhealthy"
+fi
+
+# --- Execute rollback ---
+python3 - "$ROLLBACK_FILE" "$SCAN_DIR" "$DRY_RUN" "$BATCH_SIZE" "$IMMICH_URL" "$IMMICH_KEY" "$MAX_TIME" << 'PYEOF'
+import json
+import sys
+import urllib.request
+
+rollback_file = sys.argv[1]
+scan_dir = sys.argv[2]
+dry_run = sys.argv[3] == "1"
+batch_size = int(sys.argv[4])
+immich_url = sys.argv[5]
+api_key = sys.argv[6]
+max_time = int(sys.argv[7])
+
+# --- Load rollback manifest (skip YAML header lines starting with #) ---
+with open(rollback_file) as f:
+    content = f.read()
+
+# Find JSON portion after ---
+json_start = content.find("\n---\n")
+if json_start >= 0:
+    json_content = content[json_start + 5:]
+else:
+    json_content = content
+
+manifest = json.loads(json_content)
+
+restore_ids = manifest.get("restore_ids", [])
+apply_ts = manifest.get("apply_ts", "unknown")
+
+print(f"  Apply timestamp:   {apply_ts}")
+print(f"  Assets to restore: {len(restore_ids)}")
+
+if not restore_ids:
+    print("  Nothing to restore.")
+    print()
+    print("status: OK (no-op)")
+    sys.exit(0)
+
+# --- Restore in batches ---
+def api_restore(ids):
+    """Restore assets via POST /api/trash/restore/assets."""
+    url = f"{immich_url}/api/trash/restore/assets"
+    body = json.dumps({"ids": ids}).encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("x-api-key", api_key)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=max_time) as resp:
+            return resp.status, resp.read().decode()
+    except Exception as e:
+        return 0, str(e)
+
+restored_ids = []
+failed_ids = []
+batches_processed = 0
+
+for i in range(0, len(restore_ids), batch_size):
+    batch = restore_ids[i:i + batch_size]
+    batches_processed += 1
+
+    if dry_run:
+        print(f"  [DRY-RUN] Batch {batches_processed}: would restore {len(batch)} assets")
+        restored_ids.extend(batch)
+    else:
+        status, body = api_restore(batch)
+        if status in (200, 204):
+            print(f"  Batch {batches_processed}: restored {len(batch)} assets")
+            restored_ids.extend(batch)
+        else:
+            print(f"  Batch {batches_processed}: FAILED ({status}): {body[:200]}")
+            failed_ids.extend(batch)
+
+print()
+print(f"  Restored: {len(restored_ids)}")
+print(f"  Failed:   {len(failed_ids)}")
+
+# --- Write rollback receipt ---
+from datetime import datetime, timezone
+rollback_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+receipt = {
+    "rollback_ts": rollback_ts,
+    "apply_ts": apply_ts,
+    "mode": "dry-run" if dry_run else "live",
+    "total_restored": len(restored_ids),
+    "total_failed": len(failed_ids),
+    "restored_ids": restored_ids,
+    "failed_ids": failed_ids,
+}
+
+with open(f"{scan_dir}/rollback_receipt.json", "w") as f:
+    json.dump(receipt, f, indent=2)
+
+print(f"  Receipt: {scan_dir}/rollback_receipt.json")
+print()
+print("status: OK")
+PYEOF
