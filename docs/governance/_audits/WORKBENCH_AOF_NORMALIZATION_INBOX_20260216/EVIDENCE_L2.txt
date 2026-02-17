@@ -1,0 +1,141 @@
+# EVIDENCE L2 - Raw Audit Data
+# Lane B: Runtime/Deployment/Container Normalization
+# Date: 2026-02-16
+
+================================================================================
+COMPOSE FILES FOUND
+================================================================================
+./infra/compose/dashy/docker-compose.yml
+./infra/compose/n8n/docker-compose.yml
+./infra/templates/docker-compose.template.yml
+./infra/cloudflare/tunnel/docker-compose.yml
+./infra/compose/storage/docker-compose.yml
+./infra/compose/mint-os/docker-compose.yml
+./infra/compose/mint-os/docker-compose.frontends.yml
+./infra/compose/mcpjungle/docker-compose.yml
+
+================================================================================
+VERSION KEY USAGE
+================================================================================
+# Files WITH version key:
+./infra/compose/storage/docker-compose.yml:1:version: "3.8"
+./infra/compose/mint-os/docker-compose.yml:5:version: "3.8"
+
+# Files WITHOUT version key (correct):
+./infra/compose/dashy/docker-compose.yml
+./infra/compose/n8n/docker-compose.yml
+./infra/compose/mcpjungle/docker-compose.yml
+./infra/cloudflare/tunnel/docker-compose.yml
+./infra/templates/docker-compose.template.yml
+
+================================================================================
+LOGGING CONFIGURATION
+================================================================================
+# ONLY template has logging:
+./infra/templates/docker-compose.template.yml:19:x-logging: &default-logging
+./infra/templates/docker-compose.template.yml:49:    logging: *default-logging
+./infra/templates/docker-compose.template.yml:76:    logging: *default-logging
+./infra/templates/docker-compose.template.yml:114:    logging: *default-logging
+
+# All production compose files: NO LOGGING
+
+================================================================================
+DEPLOY RESOURCE LIMITS
+================================================================================
+# Template has full limits:
+./infra/templates/docker-compose.template.yml:50:    deploy:
+./infra/templates/docker-compose.template.yml:77:    deploy:
+./infra/templates/docker-compose.template.yml:115:    deploy:
+
+# Only n8n ollama has limits:
+./infra/compose/n8n/docker-compose.yml:102:    deploy:
+./infra/compose/n8n/docker-compose.yml-103-      resources:
+./infra/compose/n8n/docker-compose.yml-104-        limits:
+./infra/compose/n8n/docker-compose.yml-105-          memory: 12G
+
+================================================================================
+TUNNEL NETWORK USAGE
+================================================================================
+./infra/templates/docker-compose.template.yml:107:      - tunnel_network
+./infra/templates/docker-compose.template.yml:128:  tunnel_network:
+./infra/templates/docker-compose.template.yml:129:    external: true
+./infra/compose/storage/docker-compose.yml:44:    external: true
+./infra/compose/storage/docker-compose.yml:46:    external: true
+./infra/compose/mint-os/docker-compose.yml:123:      - tunnel_network
+./infra/compose/mint-os/docker-compose.yml:154:      - tunnel_network
+./infra/compose/mint-os/docker-compose.yml:176:      - tunnel_network
+./infra/compose/mint-os/docker-compose.yml:200:      - tunnel_network
+./infra/compose/mint-os/docker-compose.yml:221:      - tunnel_network
+./infra/compose/mint-os/docker-compose.yml:242:      - tunnel_network
+./infra/compose/mint-os/docker-compose.yml:254:  tunnel_network:
+./infra/compose/mint-os/docker-compose.yml:255:    external: true
+./infra/compose/mint-os/docker-compose.frontends.yml:26:      - tunnel_network
+./infra/compose/mint-os/docker-compose.frontends.yml:50:      - tunnel_network
+./infra/compose/mint-os/docker-compose.frontends.yml:71:      - tunnel_network
+./infra/compose/mint-os/docker-compose.frontends.yml:126:      - tunnel_network
+./infra/compose/mint-os/docker-compose.frontends.yml:148:      - tunnel_network
+./infra/compose/mint-os/docker-compose.frontends.yml:169:      - tunnel_network
+./infra/compose/mint-os/docker-compose.frontends.yml:179:    external: true
+./infra/compose/mint-os/docker-compose.frontends.yml:181:    external: true
+./infra/compose/mint-os/docker-compose.frontends.yml:182:  tunnel_network:
+./infra/compose/mint-os/docker-compose.frontends.yml:183:    external: true
+
+================================================================================
+HEALTHCHECK PATTERNS
+================================================================================
+# PostgreSQL:
+./infra/templates/docker-compose.template.yml:43-44: test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-{DB_NAME}}"]
+./infra/compose/n8n/docker-compose.yml:69-70: test: [ "CMD-SHELL", "pg_isready -U n8n -d n8n" ]
+./infra/compose/mint-os/docker-compose.yml:25-26: test: [ "CMD-SHELL", "pg_isready -U mint_os_admin -d mint_os" ]
+
+# Redis:
+./infra/templates/docker-compose.template.yml:71-72: test: ["CMD", "redis-cli", "ping"]
+./infra/compose/n8n/docker-compose.yml:85-86: test: [ "CMD", "redis-cli", "ping" ]
+./infra/compose/mint-os/docker-compose.yml:42-43: test: [ "CMD", "redis-cli", "ping" ]
+
+# HTTP Services (wget):
+./infra/templates/docker-compose.template.yml:108-109: test: ["CMD", "wget", "-q", "--spider", "http://localhost:{APP_PORT}/health"]
+./infra/compose/dashy/docker-compose.yml:19-20: test: ['CMD', 'node', '/app/services/healthcheck']
+./infra/compose/n8n/docker-compose.yml:50-51: test: [ "CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1" ]
+./infra/compose/mint-os/docker-compose.yml:124-125: test: [ "CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3335/api/health" ]
+./infra/compose/mint-os/docker-compose.yml:155-156: test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3333" ]
+./infra/compose/mcpjungle/docker-compose.yml:61-62: test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+
+================================================================================
+PORT EXPOSURE ANALYSIS
+================================================================================
+# EXPOSED TO ALL INTERFACES (0.0.0.0 implied) - SECURITY RISK:
+./infra/compose/storage/docker-compose.yml:21:    - "9000:9000"
+./infra/compose/storage/docker-compose.yml:22:    - "9001:9001"
+./infra/compose/mint-os/docker-compose.yml:22:    - "15432:5432"
+./infra/compose/mint-os/docker-compose.yml:39:    - "16379:6379"
+./infra/compose/n8n/docker-compose.yml:97:    - "11434:11434"
+
+# CORRECT (127.0.0.1 only):
+./infra/templates/docker-compose.template.yml:40:    - "127.0.0.1:{DB_PORT}:5432"
+./infra/compose/mcpjungle/docker-compose.yml:58:    - "${MCPJUNGLE_BIND_ADDR:-127.0.0.1}:8080:8080"
+
+================================================================================
+CLOUDFLARE/RUNBOOK/DEPLOYMENT REFERENCES
+================================================================================
+./scripts/root/SCRIPTS_REGISTRY.md:11:| `deploy-api.sh` | Deploy Mint OS API | GitHub Actions |
+./scripts/root/SCRIPTS_REGISTRY.md:12:| `deploy-admin.sh` | Deploy Admin UI | GitHub Actions |
+./scripts/root/SCRIPTS_REGISTRY.md:18:| `agents/cloudflare-agent.sh` | Cloudflare API operations (DNS, cache, tunnels) |
+./docs/brain-lessons/FINANCE_DEPLOY_RUNBOOK.md:5:scope: finance-deploy-runbook
+./docs/legacy/infrastructure/reference/STANDARDS_DOCKER_STACK.md:9:> **Scope**: All docker-compose based deployments
+./docs/legacy/infrastructure/reference/cloudflare/CLOUDFLARE_MAP.md:10:> **Purpose:** Single source of truth for tunnel routing and DNS configuration
+
+================================================================================
+MINIO DUPLICATION
+================================================================================
+# storage/docker-compose.yml:
+./infra/compose/storage/docker-compose.yml:17:    image: minio/minio:latest
+./infra/compose/storage/docker-compose.yml:18:    container_name: minio
+
+# mint-os/docker-compose.yml:
+./infra/compose/mint-os/docker-compose.yml:49:    image: minio/minio:latest
+./infra/compose/mint-os/docker-compose.yml:50:    container_name: minio
+
+================================================================================
+END OF EVIDENCE
+================================================================================

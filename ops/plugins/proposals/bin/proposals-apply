@@ -38,6 +38,8 @@ if [[ -z "$PROPOSAL_NAME" ]]; then
 fi
 
 SPINE_CODE="${SPINE_CODE:-.}"
+WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
+WORKBENCH_AOF_CHECKER="${WORKBENCH_AOF_CHECKER:-$WORKBENCH_ROOT/scripts/root/aof/workbench-aof-check.sh}"
 PROPOSALS_DIR="$SPINE_CODE/mailroom/outbox/proposals"
 PROPOSAL_DIR="$PROPOSALS_DIR/$PROPOSAL_NAME"
 
@@ -144,6 +146,59 @@ validate_path() {
   if [[ "$p" == *$'\n'* ]]; then return 1; fi
   return 0
 }
+
+normalize_workbench_path() {
+  local p="$1"
+  case "$p" in
+    "$WORKBENCH_ROOT"/*)
+      echo "$p"
+      ;;
+    /Users/*/code/workbench/*)
+      echo "$p"
+      ;;
+    workbench/*)
+      echo "$HOME/code/$p"
+      ;;
+    ../workbench/*)
+      echo "$HOME/code/${p#../}"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+run_workbench_preflight() {
+  local wb_paths=()
+  local normalized=""
+  while IFS=$'\t' read -r _action _path _reason; do
+    [[ -n "$_path" ]] || continue
+    normalized="$(normalize_workbench_path "$_path")"
+    [[ -n "$normalized" ]] || continue
+    wb_paths+=("$normalized")
+  done < "$changes_tmp"
+
+  if (( ${#wb_paths[@]} == 0 )); then
+    return 0
+  fi
+
+  if [[ ! -x "$WORKBENCH_AOF_CHECKER" ]]; then
+    echo "ERROR: Workbench proposal preflight required but checker missing: $WORKBENCH_AOF_CHECKER" >&2
+    exit 1
+  fi
+
+  echo "Running workbench AOF preflight..."
+  local checker_args=(--mode all --format text)
+  for p in "${wb_paths[@]}"; do
+    checker_args+=(--changed-files "$p")
+  done
+  if ! "$WORKBENCH_AOF_CHECKER" "${checker_args[@]}"; then
+    echo "ERROR: Workbench AOF preflight failed (P0/P1). Proposal apply blocked." >&2
+    exit 1
+  fi
+}
+
+run_workbench_preflight
 
 while IFS=$'\t' read -r action path reason; do
 
