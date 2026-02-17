@@ -1,6 +1,6 @@
 ---
 loop_id: LOOP-AOF-V1-1-SURFACE-ROLLDOWN-20260217
-status: active
+status: closed
 owner: "@ronny"
 priority: high
 created: 2026-02-17

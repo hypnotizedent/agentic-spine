@@ -1,6 +1,6 @@
 ---
 loop_id: LOOP-SYNC-ARTIFACT-RETIREMENT-V1-20260217
-status: active
+status: closed
 owner: "@ronny"
 priority: medium
 created: 2026-02-17

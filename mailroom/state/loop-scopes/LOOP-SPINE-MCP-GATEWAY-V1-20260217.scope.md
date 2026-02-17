@@ -1,6 +1,6 @@
 ---
 loop_id: LOOP-SPINE-MCP-GATEWAY-V1-20260217
-status: active
+status: closed
 owner: "@ronny"
 priority: high
 created: 2026-02-17
