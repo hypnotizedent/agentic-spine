@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-08
+last_verified: 2026-02-17
 scope: compose-locations
 ---
 
@@ -45,6 +45,11 @@ Examples:
 | Stack | Workbench Path |
 |------|-----------------|
 | mint-os | `/Users/ronnyworks/code/workbench/infra/compose/mint-os/` |
+| media-stack | `/Users/ronnyworks/code/workbench/infra/compose/media-stack/docker-compose.yml` |
+| finance | `/Users/ronnyworks/code/workbench/infra/compose/finance/docker-compose.yml` |
+| finance mail-archiver | `/Users/ronnyworks/code/workbench/infra/compose/finance/mail-archiver/docker-compose.yml` |
+| monitoring | `/Users/ronnyworks/code/workbench/infra/compose/monitoring/docker-compose.yml` |
+| pihole | `/Users/ronnyworks/code/workbench/infra/compose/pihole/docker-compose.yml` |
 | n8n | `/Users/ronnyworks/code/workbench/infra/compose/n8n/docker-compose.yml` |
 | dashy | `/Users/ronnyworks/code/workbench/infra/compose/dashy/docker-compose.yml` |
 | mcpjungle | `/Users/ronnyworks/code/workbench/infra/compose/mcpjungle/docker-compose.yml` |
