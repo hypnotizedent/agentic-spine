@@ -17,6 +17,13 @@ Post-closure burn-in for GAP-OP-575 (secrets runway), GAP-OP-576 (finance-adapte
 - mint.modules.health: 6/6 OK — `CAP-20260216-232331__mint.modules.health__Rfr2012007`
 - mint.deploy.status: 7/7 running (finance-adapter Up 5m healthy) — `CAP-20260216-232335__mint.deploy.status__Rompn12157`
 
+### T+1h (2026-02-17T05:13Z) — informational, non-gating — GREEN
+- stability.control.snapshot: WARN (latency only, no mint issues) — `CAP-20260217-001303__stability.control.snapshot__R1dz4385`
+- verify.pack.run mint-agent: 12/14 PASS (D79/D80 workbench-only, not mint runtime) — `CAP-20260217-001349__verify.pack.run__Rry4o3385`
+- mint.modules.health: 6/6 OK — `CAP-20260217-001432__mint.modules.health__Rcgh314910`
+- mint.deploy.status: 7/7 running (finance-adapter Up 56m healthy) — `CAP-20260217-001439__mint.deploy.status__R10xy15082`
+- mint.migrate.dryrun: OK (0 pending) — `CAP-20260217-001446__mint.migrate.dryrun__R5eoj15210`
+
 ### T+8h (~2026-02-17T12:22Z)
 - pending
 
