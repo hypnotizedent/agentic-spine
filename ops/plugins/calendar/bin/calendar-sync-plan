@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""calendar-sync-plan - read-only planner for global calendar pull/push actions."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+
+REQUIRED_LAYERS = [
+    "infrastructure",
+    "automation",
+    "identity",
+    "personal",
+    "spine",
+    "life",
+]
+
+
+def stop(msg: str, code: int = 2) -> None:
+    print(f"STOP ({code}): {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def run_yq_json(path: Path) -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            ["yq", "-o=json", ".", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        stop("missing dependency: yq")
+
+    if proc.returncode != 0:
+        stop(f"invalid YAML: {path}")
+
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        stop(f"failed to parse binding JSON: {exc}")
+    if not isinstance(data, dict):
+        stop("binding root must be a map")
+    return data
+
+
+def layer_source_refs(layer_def: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    contracts = layer_def.get("source_contracts")
+    if isinstance(contracts, list):
+        for contract in contracts:
+            if not isinstance(contract, dict):
+                continue
+            ref = str(contract.get("ref", "")).strip()
+            if ref:
+                refs.append(ref)
+    return refs
+
+
+def main() -> None:
+    script_dir = Path(__file__).resolve().parent
+    env_code = os.environ.get("SPINE_CODE") or os.environ.get("SPINE_ROOT")
+    if env_code:
+        code_root = Path(env_code).expanduser().resolve()
+    else:
+        code_root = script_dir.parents[3]
+
+    parser = argparse.ArgumentParser(description="Read-only calendar sync action planner")
+    parser.add_argument(
+        "--binding",
+        default=str(code_root / "ops/bindings/calendar.global.yaml"),
+        help="Path to calendar.global.yaml",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON plan")
+    args = parser.parse_args()
+
+    binding_path = Path(args.binding).expanduser().resolve()
+    if not binding_path.is_file():
+        stop(f"missing binding: {binding_path}")
+
+    binding = run_yq_json(binding_path)
+    layers = binding.get("layers") if isinstance(binding.get("layers"), dict) else {}
+    order = layers.get("order") if isinstance(layers.get("order"), list) else []
+    definitions = layers.get("definitions") if isinstance(layers.get("definitions"), dict) else {}
+    if order != REQUIRED_LAYERS:
+        stop(f"layers.order must equal {REQUIRED_LAYERS}")
+
+    conflict_policy = binding.get("conflict_policy") if isinstance(binding.get("conflict_policy"), dict) else {}
+    winners = conflict_policy.get("authoritative_layer_owner") if isinstance(conflict_policy.get("authoritative_layer_owner"), dict) else {}
+
+    sync_contracts = binding.get("sync_contracts") if isinstance(binding.get("sync_contracts"), dict) else {}
+    pull_caps = sync_contracts.get("pull_read_capabilities") if isinstance(sync_contracts.get("pull_read_capabilities"), list) else []
+    push_caps = sync_contracts.get("push_write_capabilities") if isinstance(sync_contracts.get("push_write_capabilities"), list) else []
+
+    if not pull_caps:
+        pull_caps = ["graph.calendar.list", "graph.calendar.get"]
+    if not push_caps:
+        push_caps = ["graph.calendar.create", "graph.calendar.update"]
+
+    actions: list[dict[str, Any]] = []
+
+    for layer in order:
+        layer_def = definitions.get(layer)
+        if not isinstance(layer_def, dict):
+            stop(f"missing layer definition: {layer}")
+
+        authority = str(layer_def.get("authority", "")).strip().lower()
+        if authority not in {"spine", "external"}:
+            stop(f"invalid authority for layer {layer}: {authority}")
+
+        winner = str(winners.get(layer, authority)).strip().lower()
+        if winner not in {"spine", "external"}:
+            stop(f"invalid conflict winner for layer {layer}: {winner}")
+
+        sources = layer_source_refs(layer_def)
+        event_count = len(layer_def.get("events") or [])
+
+        if winner == "external":
+            direction = "pull"
+            read_caps = pull_caps
+            write_caps: list[str] = []
+            note = "External calendars authoritative; planner proposes read + local reconcile only."
+        else:
+            direction = "push"
+            read_caps = pull_caps
+            write_caps = push_caps
+            note = "Spine authoritative; planner proposes remote upsert intent (dry-run only)."
+
+        actions.append(
+            {
+                "layer": layer,
+                "authority": authority,
+                "conflict_winner": winner,
+                "direction": direction,
+                "event_count": event_count,
+                "source_contracts": sources,
+                "read_capabilities": read_caps,
+                "write_capabilities": write_caps,
+                "mode": "dry-run",
+                "note": note,
+            }
+        )
+
+    summary = {
+        "capability": "calendar.sync.plan",
+        "schema_version": "1.0",
+        "status": "ok",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "data": {
+            "binding": str(binding_path),
+            "dry_run": True,
+            "actions": actions,
+            "capability_contracts": {
+                "pull_read_capabilities": pull_caps,
+                "push_write_capabilities": push_caps,
+            },
+            "notes": [
+                "No graph API capability calls are executed in v1 planner mode.",
+                "Planner output maps intent only; mutation remains operator-gated.",
+            ],
+        },
+    }
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return
+
+    print("calendar.sync.plan")
+    print(f"binding: {binding_path}")
+    print("mode: dry-run")
+    print(f"layers: {len(actions)}")
+    print(f"actions: {len(actions)}")
+    print()
+    for action in actions:
+        print(
+            f"[{action['layer']}] direction={action['direction']} "
+            f"authority={action['authority']} winner={action['conflict_winner']} "
+            f"events={action['event_count']}"
+        )
+        print(f"  read_caps: {', '.join(action['read_capabilities'])}")
+        if action["write_capabilities"]:
+            print(f"  write_caps: {', '.join(action['write_capabilities'])}")
+        else:
+            print("  write_caps: none")
+        if action["source_contracts"]:
+            print(f"  sources: {', '.join(action['source_contracts'])}")
+        else:
+            print("  sources: none")
+        print(f"  note: {action['note']}")
+        print()
+
+    print("status: OK (read-only plan; no API calls executed)")
+
+
+if __name__ == "__main__":
+    main()

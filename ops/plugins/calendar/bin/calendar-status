@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""calendar-status - validate calendar.global binding and generated artifacts."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+
+REQUIRED_LAYERS = [
+    "infrastructure",
+    "automation",
+    "identity",
+    "personal",
+    "spine",
+    "life",
+]
+
+
+def stop(msg: str, code: int = 2) -> None:
+    print(f"STOP ({code}): {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def run_yq_json(path: Path) -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            ["yq", "-o=json", ".", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        stop("missing dependency: yq")
+
+    if proc.returncode != 0:
+        stop(f"invalid YAML: {path}")
+
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        stop(f"failed to parse binding JSON: {exc}")
+    if not isinstance(data, dict):
+        stop("binding root must be a map")
+    return data
+
+
+def main() -> None:
+    script_dir = Path(__file__).resolve().parent
+    env_code = os.environ.get("SPINE_CODE") or os.environ.get("SPINE_ROOT")
+    if env_code:
+        code_root = Path(env_code).expanduser().resolve()
+    else:
+        code_root = script_dir.parents[3]
+
+    runtime_root = Path(os.environ.get("SPINE_REPO", str(code_root))).expanduser().resolve()
+
+    parser = argparse.ArgumentParser(description="Check calendar binding validity and artifact freshness")
+    parser.add_argument(
+        "--binding",
+        default=str(code_root / "ops/bindings/calendar.global.yaml"),
+        help="Path to calendar.global.yaml",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default="",
+        help="Override output directory (defaults to binding feeds.output_root under runtime root)",
+    )
+    parser.add_argument(
+        "--max-age-minutes",
+        type=int,
+        default=720,
+        help="Mark artifacts stale when older than this many minutes",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON summary")
+    args = parser.parse_args()
+
+    binding_path = Path(args.binding).expanduser().resolve()
+    if not binding_path.is_file():
+        stop(f"missing binding: {binding_path}")
+
+    binding = run_yq_json(binding_path)
+
+    layers = binding.get("layers") if isinstance(binding.get("layers"), dict) else {}
+    order = layers.get("order") if isinstance(layers.get("order"), list) else []
+    definitions = layers.get("definitions") if isinstance(layers.get("definitions"), dict) else {}
+
+    binding_valid = True
+    problems: list[str] = []
+    if order != REQUIRED_LAYERS:
+        binding_valid = False
+        problems.append("layers.order mismatch")
+
+    for layer in REQUIRED_LAYERS:
+        if layer not in definitions:
+            binding_valid = False
+            problems.append(f"missing layer definition: {layer}")
+
+    feeds = binding.get("feeds") if isinstance(binding.get("feeds"), dict) else {}
+    merged_cfg = feeds.get("merged_global_ics") if isinstance(feeds.get("merged_global_ics"), dict) else {}
+    per_layer_cfg = feeds.get("per_layer_ics") if isinstance(feeds.get("per_layer_ics"), dict) else {}
+    index_cfg = feeds.get("status_index") if isinstance(feeds.get("status_index"), dict) else {}
+
+    out_rel = str(feeds.get("output_root", "mailroom/outbox/calendar")).strip() or "mailroom/outbox/calendar"
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else (runtime_root / out_rel).resolve()
+
+    merged_name = str(merged_cfg.get("filename", "calendar-global.ics")).strip() or "calendar-global.ics"
+    layer_pattern = str(per_layer_cfg.get("filename_pattern", "calendar-{layer}.ics")).strip() or "calendar-{layer}.ics"
+    index_name = str(index_cfg.get("filename", "calendar-index.json")).strip() or "calendar-index.json"
+
+    expected_files = {"merged": out_dir / merged_name, "index": out_dir / index_name}
+    for layer in REQUIRED_LAYERS:
+        expected_files[f"layer:{layer}"] = out_dir / layer_pattern.format(layer=layer)
+
+    now = int(time.time())
+    max_age = max(args.max_age_minutes, 0)
+    missing: list[str] = []
+    stale: list[str] = []
+    freshness: dict[str, int] = {}
+
+    for key, path in expected_files.items():
+        if not path.exists():
+            missing.append(key)
+            continue
+
+        mtime = int(path.stat().st_mtime)
+        age_minutes = int((now - mtime) / 60)
+        freshness[key] = age_minutes
+        if age_minutes > max_age:
+            stale.append(key)
+
+    status = "ok"
+    exit_code = 0
+    if not binding_valid:
+        status = "fail"
+        exit_code = 1
+    elif missing or stale:
+        status = "warn"
+        exit_code = 1
+
+    summary = {
+        "capability": "calendar.status",
+        "schema_version": "1.0",
+        "status": status,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "data": {
+            "binding": str(binding_path),
+            "binding_valid": binding_valid,
+            "problems": problems,
+            "output_dir": str(out_dir),
+            "max_age_minutes": max_age,
+            "expected_files": {k: str(v) for k, v in expected_files.items()},
+            "missing": missing,
+            "stale": stale,
+            "freshness_minutes": freshness,
+        },
+    }
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        raise SystemExit(exit_code)
+
+    print("calendar.status")
+    print(f"binding: {binding_path}")
+    print(f"binding_valid: {str(binding_valid).lower()}")
+    print(f"output_dir: {out_dir}")
+    print(f"missing_files: {len(missing)}")
+    print(f"stale_files: {len(stale)}")
+    print(f"max_age_minutes: {max_age}")
+    if problems:
+        print("problems:")
+        for problem in problems:
+            print(f"  - {problem}")
+    if missing:
+        print("missing:")
+        for key in missing:
+            print(f"  - {key}")
+    if stale:
+        print("stale:")
+        for key in stale:
+            print(f"  - {key} ({freshness.get(key, -1)}m)")
+    print()
+    print(f"status: {status.upper()}")
+    raise SystemExit(exit_code)
+
+
+if __name__ == "__main__":
+    main()

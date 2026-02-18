@@ -1,0 +1,184 @@
+# Status: authoritative
+# Last verified: 2026-02-17
+# Scope: calendar-global-ssot-v1
+
+version: 1
+updated: "2026-02-17"
+owner: "@ronny"
+
+calendar:
+  id: "spine-global-v1"
+  name: "Spine Global Calendar"
+  prodid: "-//agentic-spine//calendar-global-v1//EN"
+  default_dtstart_date: "2026-02-17"
+
+timezone:
+  default: "America/New_York"
+  output:
+    include_vtimezone: true
+    fallback_timezone: "UTC"
+  handling:
+    floating_events: "interpret_in_default_timezone"
+    normalize_to_timezone: true
+
+layers:
+  order:
+    - infrastructure
+    - automation
+    - identity
+    - personal
+    - spine
+    - life
+  definitions:
+    infrastructure:
+      authority: "spine"
+      authority_direction: "spine->external"
+      source_contracts:
+        - type: "binding"
+          ref: "ops/bindings/backup.calendar.yaml"
+        - type: "capability"
+          ref: "backup.calendar.generate"
+      events:
+        - id: "infra-backup-window"
+          summary: "Infrastructure backup window"
+          description: "Canonical infrastructure backup and maintenance reserve window."
+          freq: "DAILY"
+          byhour: 2
+          byminute: 0
+          duration_minutes: 120
+
+    automation:
+      authority: "spine"
+      authority_direction: "spine->external"
+      source_contracts:
+        - type: "capability"
+          ref: "n8n.workflows.snapshot.status"
+        - type: "doc"
+          ref: "docs/governance/SESSION_PROTOCOL.md"
+      events:
+        - id: "automation-daily-control"
+          summary: "Automation control lane"
+          description: "Daily automation review lane for governed workflow operations."
+          freq: "DAILY"
+          byhour: 9
+          byminute: 0
+          duration_minutes: 30
+
+    identity:
+      authority: "external"
+      authority_direction: "external->spine"
+      source_contracts:
+        - type: "capability"
+          ref: "graph.calendar.list"
+        - type: "capability"
+          ref: "graph.calendar.get"
+      events:
+        - id: "identity-calendar-pull-anchor"
+          summary: "Identity calendar sync anchor"
+          description: "External identity calendars are authoritative; spine consumes and reconciles."
+          freq: "WEEKLY"
+          byday: ["MO", "TU", "WE", "TH", "FR"]
+          byhour: 8
+          byminute: 30
+          duration_minutes: 30
+
+    personal:
+      authority: "external"
+      authority_direction: "external->spine"
+      source_contracts:
+        - type: "capability"
+          ref: "graph.calendar.list"
+        - type: "capability"
+          ref: "graph.calendar.get"
+      events:
+        - id: "personal-calendar-review"
+          summary: "Personal calendar review"
+          description: "Personal calendars remain externally authoritative; spine keeps read models aligned."
+          freq: "DAILY"
+          byhour: 18
+          byminute: 0
+          duration_minutes: 20
+
+    spine:
+      authority: "spine"
+      authority_direction: "spine->external"
+      source_contracts:
+        - type: "binding"
+          ref: "ops/bindings/stability.control.contract.yaml"
+        - type: "capability"
+          ref: "verify.core.run"
+      events:
+        - id: "spine-verification-window"
+          summary: "Spine verification window"
+          description: "Core verification lane for runtime consistency and governance health."
+          freq: "DAILY"
+          byhour: 7
+          byminute: 30
+          duration_minutes: 30
+
+    life:
+      authority: "external"
+      authority_direction: "external->spine"
+      source_contracts:
+        - type: "doc"
+          ref: "docs/brain/memory.md"
+      events:
+        - id: "life-weekly-planning"
+          summary: "Life planning checkpoint"
+          description: "Weekly planning checkpoint integrated as a read-only life layer feed."
+          freq: "WEEKLY"
+          byday: ["SU"]
+          byhour: 17
+          byminute: 0
+          duration_minutes: 45
+
+feeds:
+  output_root: "mailroom/outbox/calendar"
+  merged_global_ics:
+    enabled: true
+    filename: "calendar-global.ics"
+  per_layer_ics:
+    enabled: true
+    filename_pattern: "calendar-{layer}.ics"
+  status_index:
+    filename: "calendar-index.json"
+
+# Deterministic output contract for generated ICS artifacts.
+determinism:
+  uid:
+    strategy: "sha1(layer|event_id|source_ref|summary)"
+    domain: "calendar.agentic-spine"
+  dtstamp:
+    strategy: "fixed_from_binding"
+    value: "20260217T000000Z"
+  ordering:
+    layer_first: true
+    event_keys: ["id", "summary"]
+
+# Conflict authority contract.
+# External calendars win for identity/personal.
+# Spine wins for infrastructure/automation/spine.
+conflict_policy:
+  authoritative_layer_owner:
+    infrastructure: "spine"
+    automation: "spine"
+    identity: "external"
+    personal: "external"
+    spine: "spine"
+    life: "external"
+  resolution_order:
+    - infrastructure
+    - automation
+    - identity
+    - personal
+    - spine
+    - life
+
+# Existing capability contracts used by read-only planner output.
+sync_contracts:
+  pull_read_capabilities:
+    - graph.calendar.list
+    - graph.calendar.get
+  push_write_capabilities:
+    - graph.calendar.create
+    - graph.calendar.update

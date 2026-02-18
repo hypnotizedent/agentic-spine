@@ -1,0 +1,508 @@
+#!/usr/bin/env python3
+"""calendar-generate - deterministic Calendar Global SSOT ICS generator."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+from typing import Any
+
+
+REQUIRED_LAYERS = [
+    "infrastructure",
+    "automation",
+    "identity",
+    "personal",
+    "spine",
+    "life",
+]
+
+
+@dataclass
+class EventRecord:
+    layer: str
+    authority: str
+    event_id: str
+    summary: str
+    description: str
+    source_ref: str
+    freq: str
+    byday: list[str]
+    byhour: int
+    byminute: int
+    duration_minutes: int
+    uid: str
+    dtstart_local: str
+    dtend_local: str
+
+
+def stop(msg: str, code: int = 2) -> None:
+    print(f"STOP ({code}): {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def run_yq_json(path: Path) -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            ["yq", "-o=json", ".", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        stop("missing dependency: yq")
+
+    if proc.returncode != 0:
+        stop(f"invalid YAML: {path}")
+
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        stop(f"failed to parse YAML JSON output: {exc}")
+    if not isinstance(data, dict):
+        stop("binding root must be a map")
+    return data
+
+
+def escape_ics_text(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def fold_ics_line(line: str, width: int = 73) -> list[str]:
+    if len(line) <= width:
+        return [line]
+    out: list[str] = []
+    remaining = line
+    while len(remaining) > width:
+        out.append(remaining[:width])
+        remaining = " " + remaining[width:]
+    out.append(remaining)
+    return out
+
+
+def parse_byday(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        vals = [str(item).strip().upper() for item in raw if str(item).strip()]
+    else:
+        vals = [x.strip().upper() for x in str(raw).split(",") if x.strip()]
+    allowed = {"MO", "TU", "WE", "TH", "FR", "SA", "SU"}
+    bad = [v for v in vals if v not in allowed]
+    if bad:
+        stop(f"invalid byday tokens: {bad}")
+    return vals
+
+
+def validate_layers(binding: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    layers = binding.get("layers")
+    if not isinstance(layers, dict):
+        stop("missing layers map")
+
+    order = layers.get("order")
+    if order != REQUIRED_LAYERS:
+        stop(f"layers.order must equal {REQUIRED_LAYERS}")
+
+    definitions = layers.get("definitions")
+    if not isinstance(definitions, dict):
+        stop("missing layers.definitions map")
+
+    for layer in REQUIRED_LAYERS:
+        layer_def = definitions.get(layer)
+        if not isinstance(layer_def, dict):
+            stop(f"missing layers.definitions.{layer}")
+
+        authority = str(layer_def.get("authority", "")).strip().lower()
+        if authority not in {"spine", "external"}:
+            stop(f"invalid authority for layer {layer}: {authority}")
+
+        events = layer_def.get("events")
+        if not isinstance(events, list):
+            stop(f"layers.definitions.{layer}.events must be a list")
+
+    return order, definitions
+
+
+def validate_conflict_policy(binding: dict[str, Any]) -> dict[str, str]:
+    cp = binding.get("conflict_policy")
+    if not isinstance(cp, dict):
+        stop("missing conflict_policy map")
+
+    winners = cp.get("authoritative_layer_owner")
+    if not isinstance(winners, dict):
+        stop("missing conflict_policy.authoritative_layer_owner")
+
+    for layer in REQUIRED_LAYERS:
+        winner = str(winners.get(layer, "")).strip().lower()
+        if winner not in {"spine", "external"}:
+            stop(f"invalid conflict winner for layer {layer}: {winner}")
+
+    if winners.get("identity") != "external" or winners.get("personal") != "external":
+        stop("identity/personal conflict policy must be external authoritative")
+    if winners.get("infrastructure") != "spine" or winners.get("automation") != "spine" or winners.get("spine") != "spine":
+        stop("infrastructure/automation/spine conflict policy must be spine authoritative")
+
+    return {layer: str(winners[layer]).strip().lower() for layer in REQUIRED_LAYERS}
+
+
+def derive_dtstamp(binding: dict[str, Any]) -> str:
+    det = binding.get("determinism") or {}
+    dtstamp_cfg = det.get("dtstamp") if isinstance(det, dict) else {}
+    value = ""
+    if isinstance(dtstamp_cfg, dict):
+        value = str(dtstamp_cfg.get("value", "")).strip()
+    if value and re.fullmatch(r"[0-9]{8}T[0-9]{6}Z", value):
+        return value
+
+    updated = str(binding.get("updated", "")).strip()
+    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", updated):
+        return updated.replace("-", "") + "T000000Z"
+    return "20260217T000000Z"
+
+
+def vtimezone_lines(tz_name: str) -> list[str]:
+    if tz_name != "America/New_York":
+        return []
+    return [
+        "BEGIN:VTIMEZONE",
+        f"TZID:{tz_name}",
+        "BEGIN:DAYLIGHT",
+        "TZOFFSETFROM:-0500",
+        "TZOFFSETTO:-0400",
+        "TZNAME:EDT",
+        "DTSTART:19700308T020000",
+        "RRULE:FREQ=YEARLY;BYDAY=2SU;BYMONTH=3",
+        "END:DAYLIGHT",
+        "BEGIN:STANDARD",
+        "TZOFFSETFROM:-0400",
+        "TZOFFSETTO:-0500",
+        "TZNAME:EST",
+        "DTSTART:19701101T020000",
+        "RRULE:FREQ=YEARLY;BYDAY=1SU;BYMONTH=11",
+        "END:STANDARD",
+        "END:VTIMEZONE",
+    ]
+
+
+def build_event_lines(event: EventRecord, tz_name: str, dtstamp: str) -> list[str]:
+    rrule_parts = [f"FREQ={event.freq}"]
+    if event.byday:
+        rrule_parts.append(f"BYDAY={','.join(event.byday)}")
+
+    lines = [
+        "BEGIN:VEVENT",
+        f"UID:{event.uid}",
+        f"DTSTAMP:{dtstamp}",
+        f"DTSTART;TZID={tz_name}:{event.dtstart_local}",
+        f"DTEND;TZID={tz_name}:{event.dtend_local}",
+        f"RRULE:{';'.join(rrule_parts)}",
+        f"SUMMARY:{escape_ics_text(event.summary)}",
+        f"DESCRIPTION:{escape_ics_text(event.description)}",
+        f"X-SPINE-LAYER:{event.layer}",
+        f"X-SPINE-AUTHORITY:{event.authority}",
+        f"X-SPINE-SOURCE:{escape_ics_text(event.source_ref)}",
+        "STATUS:CONFIRMED",
+        "END:VEVENT",
+    ]
+
+    folded: list[str] = []
+    for line in lines:
+        folded.extend(fold_ics_line(line))
+    return folded
+
+
+def build_calendar_ics(
+    calendar_name: str,
+    prodid: str,
+    tz_name: str,
+    include_vtimezone: bool,
+    events: list[EventRecord],
+    dtstamp: str,
+) -> bytes:
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        f"PRODID:{prodid}",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        f"X-WR-CALNAME:{escape_ics_text(calendar_name)}",
+        f"X-WR-TIMEZONE:{tz_name}",
+        f"X-SPINE-DTSTAMP-POLICY:{dtstamp}",
+    ]
+
+    if include_vtimezone:
+        lines.extend(vtimezone_lines(tz_name))
+
+    for event in events:
+        lines.extend(build_event_lines(event, tz_name, dtstamp))
+
+    lines.append("END:VCALENDAR")
+    return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+
+
+def event_source_ref(layer_def: dict[str, Any], event: dict[str, Any]) -> str:
+    source_from_event = str(event.get("source_ref", "")).strip()
+    if source_from_event:
+        return source_from_event
+
+    contracts = layer_def.get("source_contracts")
+    if isinstance(contracts, list):
+        for contract in contracts:
+            if isinstance(contract, dict):
+                ref = str(contract.get("ref", "")).strip()
+                if ref:
+                    return ref
+    return "unspecified"
+
+
+def build_events(
+    binding: dict[str, Any],
+    layer_order: list[str],
+    layer_defs: dict[str, Any],
+    winners: dict[str, str],
+    uid_domain: str,
+    default_dtstart_date: str,
+) -> list[EventRecord]:
+    out: list[EventRecord] = []
+
+    for layer in layer_order:
+        layer_def = layer_defs[layer]
+        authority = str(layer_def.get("authority", "")).strip().lower()
+
+        events = layer_def.get("events") or []
+        events_sorted = sorted(events, key=lambda e: (str(e.get("id", "")), str(e.get("summary", ""))))
+
+        for event in events_sorted:
+            if not isinstance(event, dict):
+                stop(f"event in layer {layer} must be a map")
+
+            event_id = str(event.get("id", "")).strip()
+            if not event_id:
+                stop(f"layer {layer} contains event without id")
+
+            summary = str(event.get("summary", "")).strip() or event_id
+            description = str(event.get("description", "")).strip() or summary
+            freq = str(event.get("freq", "DAILY")).strip().upper()
+            if freq not in {"DAILY", "WEEKLY", "MONTHLY", "YEARLY"}:
+                stop(f"invalid freq for {layer}/{event_id}: {freq}")
+
+            byhour = int(event.get("byhour", 0))
+            byminute = int(event.get("byminute", 0))
+            duration_minutes = int(event.get("duration_minutes", 60))
+            if byhour < 0 or byhour > 23:
+                stop(f"invalid byhour for {layer}/{event_id}: {byhour}")
+            if byminute < 0 or byminute > 59:
+                stop(f"invalid byminute for {layer}/{event_id}: {byminute}")
+            if duration_minutes <= 0:
+                stop(f"duration_minutes must be > 0 for {layer}/{event_id}")
+
+            start_date_str = str(event.get("dtstart_date", default_dtstart_date)).strip()
+            try:
+                start_date = date.fromisoformat(start_date_str)
+            except ValueError:
+                stop(f"invalid dtstart_date for {layer}/{event_id}: {start_date_str}")
+
+            start_dt = datetime.combine(start_date, time(byhour, byminute, 0))
+            end_dt = start_dt + timedelta(minutes=duration_minutes)
+
+            byday = parse_byday(event.get("byday"))
+
+            source_ref = event_source_ref(layer_def, event)
+            winner = winners[layer]
+            seed = f"{layer}|{event_id}|{source_ref}|{summary}|{winner}"
+            uid_hash = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:24]
+            uid = f"{uid_hash}@{uid_domain}"
+
+            out.append(
+                EventRecord(
+                    layer=layer,
+                    authority=authority,
+                    event_id=event_id,
+                    summary=summary,
+                    description=description,
+                    source_ref=source_ref,
+                    freq=freq,
+                    byday=byday,
+                    byhour=byhour,
+                    byminute=byminute,
+                    duration_minutes=duration_minutes,
+                    uid=uid,
+                    dtstart_local=start_dt.strftime("%Y%m%dT%H%M%S"),
+                    dtend_local=end_dt.strftime("%Y%m%dT%H%M%S"),
+                )
+            )
+
+    return out
+
+
+def main() -> None:
+    script_dir = Path(__file__).resolve().parent
+    code_root = script_dir.parents[3]
+    env_code = os.environ.get("SPINE_CODE") or os.environ.get("SPINE_ROOT")
+    if env_code:
+        code_root = Path(env_code).expanduser().resolve()
+
+    runtime_root = Path(os.environ.get("SPINE_REPO", str(code_root))).expanduser().resolve()
+
+    parser = argparse.ArgumentParser(description="Generate deterministic global/per-layer calendar ICS feeds")
+    parser.add_argument(
+        "--binding",
+        default=str(code_root / "ops/bindings/calendar.global.yaml"),
+        help="Path to calendar global binding",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default="",
+        help="Override output directory (defaults to binding feed output_root under runtime root)",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON summary")
+    args = parser.parse_args()
+
+    binding_path = Path(args.binding).expanduser().resolve()
+    if not binding_path.is_file():
+        stop(f"missing binding: {binding_path}")
+
+    binding = run_yq_json(binding_path)
+    layer_order, layer_defs = validate_layers(binding)
+    winners = validate_conflict_policy(binding)
+
+    calendar = binding.get("calendar") if isinstance(binding.get("calendar"), dict) else {}
+    timezone = binding.get("timezone") if isinstance(binding.get("timezone"), dict) else {}
+    feeds = binding.get("feeds") if isinstance(binding.get("feeds"), dict) else {}
+    determinism = binding.get("determinism") if isinstance(binding.get("determinism"), dict) else {}
+
+    cal_name = str(calendar.get("name", "Spine Global Calendar")).strip() or "Spine Global Calendar"
+    cal_id = str(calendar.get("id", "spine-global-v1")).strip() or "spine-global-v1"
+    prodid = str(calendar.get("prodid", "-//agentic-spine//calendar-global-v1//EN")).strip()
+    default_dtstart_date = str(calendar.get("default_dtstart_date", "2026-02-17")).strip()
+
+    tz_name = str(timezone.get("default", "America/New_York")).strip() or "America/New_York"
+    tz_out = timezone.get("output") if isinstance(timezone.get("output"), dict) else {}
+    include_vtimezone = bool(tz_out.get("include_vtimezone", True))
+
+    uid_cfg = determinism.get("uid") if isinstance(determinism.get("uid"), dict) else {}
+    uid_domain = str(uid_cfg.get("domain", "calendar.agentic-spine")).strip() or "calendar.agentic-spine"
+    dtstamp = derive_dtstamp(binding)
+
+    output_root_rel = str(feeds.get("output_root", "mailroom/outbox/calendar")).strip() or "mailroom/outbox/calendar"
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else (runtime_root / output_root_rel).resolve()
+
+    merged_cfg = feeds.get("merged_global_ics") if isinstance(feeds.get("merged_global_ics"), dict) else {}
+    per_layer_cfg = feeds.get("per_layer_ics") if isinstance(feeds.get("per_layer_ics"), dict) else {}
+    index_cfg = feeds.get("status_index") if isinstance(feeds.get("status_index"), dict) else {}
+
+    merged_filename = str(merged_cfg.get("filename", "calendar-global.ics")).strip() or "calendar-global.ics"
+    per_layer_pattern = str(per_layer_cfg.get("filename_pattern", "calendar-{layer}.ics")).strip() or "calendar-{layer}.ics"
+    index_filename = str(index_cfg.get("filename", "calendar-index.json")).strip() or "calendar-index.json"
+
+    if not bool(merged_cfg.get("enabled", True)):
+        stop("feeds.merged_global_ics.enabled must be true")
+    if not bool(per_layer_cfg.get("enabled", True)):
+        stop("feeds.per_layer_ics.enabled must be true")
+
+    events = build_events(binding, layer_order, layer_defs, winners, uid_domain, default_dtstart_date)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-layer artifacts.
+    layer_files: dict[str, str] = {}
+    for layer in layer_order:
+        layer_events = [event for event in events if event.layer == layer]
+        layer_name = f"{cal_name} ({layer})"
+        payload = build_calendar_ics(layer_name, prodid, tz_name, include_vtimezone, layer_events, dtstamp)
+
+        layer_file = out_dir / per_layer_pattern.format(layer=layer)
+        layer_file.write_bytes(payload)
+        layer_files[layer] = str(layer_file)
+
+    # Merged artifact.
+    merged_payload = build_calendar_ics(cal_name, prodid, tz_name, include_vtimezone, events, dtstamp)
+    merged_file = out_dir / merged_filename
+    merged_file.write_bytes(merged_payload)
+
+    # Index artifact for /calendar/today bridge surface.
+    index_obj = {
+        "schema_version": "1.0",
+        "calendar_id": cal_id,
+        "calendar_name": cal_name,
+        "binding": str(binding_path),
+        "timezone": tz_name,
+        "dtstamp": dtstamp,
+        "generated_from_updated": str(binding.get("updated", "")),
+        "layers": layer_order,
+        "events": [
+            {
+                "layer": event.layer,
+                "authority": event.authority,
+                "id": event.event_id,
+                "summary": event.summary,
+                "description": event.description,
+                "source_ref": event.source_ref,
+                "freq": event.freq,
+                "byday": event.byday,
+                "byhour": event.byhour,
+                "byminute": event.byminute,
+                "duration_minutes": event.duration_minutes,
+                "uid": event.uid,
+                "dtstart_local": event.dtstart_local,
+                "dtend_local": event.dtend_local,
+            }
+            for event in events
+        ],
+        "artifacts": {
+            "merged": str(merged_file),
+            "per_layer": layer_files,
+        },
+    }
+    index_file = out_dir / index_filename
+    index_file.write_text(json.dumps(index_obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    summary = {
+        "capability": "calendar.generate",
+        "schema_version": "1.0",
+        "status": "ok",
+        "generated_at": dtstamp,
+        "data": {
+            "binding": str(binding_path),
+            "output_dir": str(out_dir),
+            "timezone": tz_name,
+            "layers": layer_order,
+            "event_count": len(events),
+            "merged_ics": str(merged_file),
+            "per_layer": layer_files,
+            "index": str(index_file),
+        },
+    }
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return
+
+    print("calendar.generate")
+    print(f"binding: {binding_path}")
+    print(f"output_dir: {out_dir}")
+    print(f"timezone: {tz_name}")
+    print(f"layers: {len(layer_order)}")
+    print(f"events: {len(events)}")
+    print(f"merged_ics: {merged_file}")
+    print(f"index: {index_file}")
+    print()
+    print("status: OK")
+
+
+if __name__ == "__main__":
+    main()

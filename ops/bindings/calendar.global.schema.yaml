@@ -1,0 +1,89 @@
+# Calendar Global SSOT Schema
+# Status: authoritative
+# Last verified: 2026-02-17
+# Scope: calendar-global-ssot-v1-schema
+
+version: 1
+updated: "2026-02-17"
+owner: "@ronny"
+
+schema:
+  required_top_level:
+    - calendar
+    - timezone
+    - layers
+    - feeds
+    - determinism
+    - conflict_policy
+    - sync_contracts
+
+  layers:
+    required_order:
+      - infrastructure
+      - automation
+      - identity
+      - personal
+      - spine
+      - life
+    per_layer_required_fields:
+      - authority
+      - authority_direction
+      - source_contracts
+      - events
+    authority_enum:
+      - spine
+      - external
+
+  events:
+    required_fields:
+      - id
+      - summary
+      - freq
+      - byhour
+      - byminute
+      - duration_minutes
+    freq_enum:
+      - DAILY
+      - WEEKLY
+      - MONTHLY
+      - YEARLY
+    byhour_range: [0, 23]
+    byminute_range: [0, 59]
+    duration_minutes_min: 1
+
+  feeds:
+    required:
+      - output_root
+      - merged_global_ics
+      - per_layer_ics
+
+  determinism:
+    required:
+      - uid
+      - dtstamp
+    dtstamp_pattern: "^[0-9]{8}T[0-9]{6}Z$"
+
+  conflict_policy:
+    required:
+      - authoritative_layer_owner
+    authoritative_layer_owner_required_layers:
+      - infrastructure
+      - automation
+      - identity
+      - personal
+      - spine
+      - life
+
+  sync_contracts:
+    required:
+      - pull_read_capabilities
+      - push_write_capabilities
+
+validation:
+  - rule: "layers.order must exactly match required_order"
+  - rule: "identity and personal authority must be external"
+  - rule: "infrastructure, automation, and spine authority must be spine"
+  - rule: "feeds.merged_global_ics.enabled must be true"
+  - rule: "feeds.per_layer_ics.enabled must be true"
+  - rule: "determinism.dtstamp.value must match dtstamp_pattern"
+  - rule: "sync_contracts must reference existing graph.calendar.* capabilities"

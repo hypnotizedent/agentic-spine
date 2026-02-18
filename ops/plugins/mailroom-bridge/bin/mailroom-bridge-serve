@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import shutil
+from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -171,6 +172,127 @@ def _reduce_open_loops_from_scopes(scopes_dir: Path) -> list[dict[str, Any]]:
         )
 
     return loops
+
+
+DAY_TO_INDEX = {
+    "MO": 0,
+    "TU": 1,
+    "WE": 2,
+    "TH": 3,
+    "FR": 4,
+    "SA": 5,
+    "SU": 6,
+}
+
+
+def _today_in_timezone(tz_name: str) -> date:
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo(tz_name)).date()
+    except Exception:
+        return datetime.now().date()
+
+
+def _parse_dtstart_local(raw: str) -> datetime | None:
+    try:
+        return datetime.strptime(raw, "%Y%m%dT%H%M%S")
+    except Exception:
+        return None
+
+
+def _parse_byday(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        vals = [str(x).strip().upper() for x in raw if str(x).strip()]
+    else:
+        vals = [x.strip().upper() for x in str(raw).split(",") if x.strip()]
+    return [v for v in vals if v in DAY_TO_INDEX]
+
+
+def _event_occurs_on_date(event: dict[str, Any], on_date: date) -> bool:
+    start_raw = str(event.get("dtstart_local", "")).strip()
+    start_dt = _parse_dtstart_local(start_raw)
+    if start_dt is None:
+        return False
+
+    start_date = start_dt.date()
+    if on_date < start_date:
+        return False
+
+    freq = str(event.get("freq", "DAILY")).strip().upper()
+    if freq == "DAILY":
+        return True
+
+    if freq == "WEEKLY":
+        byday = _parse_byday(event.get("byday"))
+        if not byday:
+            return on_date.weekday() == start_date.weekday()
+        return on_date.weekday() in {DAY_TO_INDEX[d] for d in byday}
+
+    if freq == "MONTHLY":
+        return on_date.day == start_date.day
+
+    if freq == "YEARLY":
+        return (on_date.month, on_date.day) == (start_date.month, start_date.day)
+
+    return on_date == start_date
+
+
+def _calendar_today_summary(index_payload: dict[str, Any]) -> dict[str, Any]:
+    tz_name = str(index_payload.get("timezone") or "UTC")
+    today = _today_in_timezone(tz_name)
+
+    layers = index_payload.get("layers") or []
+    if not isinstance(layers, list):
+        layers = []
+    layer_rank = {name: i for i, name in enumerate(layers)}
+
+    events_raw = index_payload.get("events") or []
+    if not isinstance(events_raw, list):
+        events_raw = []
+
+    today_events: list[dict[str, Any]] = []
+    for item in events_raw:
+        if not isinstance(item, dict):
+            continue
+        if not _event_occurs_on_date(item, today):
+            continue
+
+        dtstart_local = str(item.get("dtstart_local", ""))
+        parsed = _parse_dtstart_local(dtstart_local)
+        hhmm = parsed.strftime("%H:%M") if parsed else "--:--"
+
+        today_events.append(
+            {
+                "layer": str(item.get("layer", "")),
+                "time_local": hhmm,
+                "summary": str(item.get("summary", "")),
+                "uid": str(item.get("uid", "")),
+            }
+        )
+
+    today_events.sort(
+        key=lambda row: (
+            layer_rank.get(row.get("layer", ""), 999),
+            row.get("time_local", ""),
+            row.get("summary", ""),
+        )
+    )
+
+    layer_counts: dict[str, int] = {}
+    for row in today_events:
+        layer = row.get("layer", "")
+        layer_counts[layer] = layer_counts.get(layer, 0) + 1
+
+    return {
+        "date": today.isoformat(),
+        "timezone": tz_name,
+        "count": len(today_events),
+        "layer_counts": layer_counts,
+        "events": today_events,
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -380,6 +502,62 @@ class Handler(BaseHTTPRequestHandler):
                 return self._text(HTTPStatus.OK, text, content_type="text/plain; charset=utf-8")
             except UnicodeDecodeError:
                 return self._text(HTTPStatus.OK, data.decode("latin-1"), content_type="application/octet-stream")
+
+        if path == "/calendar/feed":
+            layer = ((qs.get("layer") or ["all"])[0] or "all").strip().lower()
+            if layer in ("", "all"):
+                rel = "calendar/calendar-global.ics"
+            else:
+                allowed_layers = {"infrastructure", "automation", "identity", "personal", "spine", "life"}
+                if layer not in allowed_layers:
+                    return self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid layer", "allowed": ["all", *sorted(allowed_layers)]},
+                    )
+                rel = f"calendar/calendar-{layer}.ics"
+
+            try:
+                p = _safe_child(outbox_root, rel)
+            except ValueError:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid path"})
+            if not p.exists() or not p.is_file():
+                return self._json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": "calendar feed not found", "hint": "run calendar.generate first", "layer": layer},
+                )
+            try:
+                data = _read_limited(p, max_read)
+            except ValueError as e:
+                return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": str(e)})
+            return self._text(HTTPStatus.OK, data.decode("utf-8", errors="replace"), content_type="text/calendar; charset=utf-8")
+
+        if path == "/calendar/today":
+            try:
+                index_path = _safe_child(outbox_root, "calendar/calendar-index.json")
+            except ValueError:
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid calendar index path"})
+
+            if not index_path.exists() or not index_path.is_file():
+                return self._json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": "calendar index not found", "hint": "run calendar.generate first"},
+                )
+            try:
+                data = _read_limited(index_path, max_read)
+            except ValueError as e:
+                return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": str(e)})
+
+            try:
+                index_payload = json.loads(data.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "invalid calendar index JSON"})
+
+            if not isinstance(index_payload, dict):
+                return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "calendar index must be an object"})
+
+            summary = _calendar_today_summary(index_payload)
+            summary["source"] = str(index_path.relative_to(outbox_root))
+            return self._json(HTTPStatus.OK, summary)
 
         if path == "/receipts/read":
             rel = (qs.get("path") or [""])[0]
