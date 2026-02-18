@@ -5,7 +5,7 @@
 > **Owner:** @ronny
 > **Created:** 2026-02-11
 > **Loop:** LOOP-MCP-RUNTIME-GOVERNANCE-20260211
-> **Last reviewed:** 2026-02-16
+> **Last reviewed:** 2026-02-17
 
 ---
 
@@ -15,6 +15,7 @@
 - **Domain:** home-automation (Home Assistant configuration, automations, device management)
 - **MCP Server:** `~/code/workbench/infra/compose/mcpjungle/servers/home-assistant/`
 - **Registry:** `ops/bindings/agents.registry.yaml`
+- **Mutation contract:** `ops/bindings/ha.identity.mutation.contract.yaml`
 - **Workbench home:** `~/code/workbench/agents/home-assistant/`
 
 ## Owns (Application Layer)
@@ -94,6 +95,19 @@ Key capability clusters available via `./bin/ops cap run ha.*`:
 | Service | Host | Notes |
 |---------|------|-------|
 | Home Assistant | proxmox-home VM 100 | LAN: `10.0.0.100:8123`, Tailscale: down (GAP-OP-502) |
+
+## Mutation Contract
+
+All HA runtime mutations MUST flow through the canonical mutation contract:
+`ops/bindings/ha.identity.mutation.contract.yaml`
+
+This contract defines:
+- **Allowed surfaces:** Only spine capabilities (ha.device.rename, ha.service.call, etc.)
+- **Forbidden channels:** Manual UI, raw WebSocket, ad-hoc SSH, unmanaged scripts
+- **Post-mutation refresh:** ha.device.map.build → ha.refresh → ha.ssot.baseline.build
+- **Required SSOTs:** ha.areas.yaml, ha.orphan.classification.yaml, home.device.registry.yaml, ha.ssot.baseline.yaml
+
+Status check: `./bin/ops cap run ha.identity.mutation.contract.status`
 
 ## Known Issues
 

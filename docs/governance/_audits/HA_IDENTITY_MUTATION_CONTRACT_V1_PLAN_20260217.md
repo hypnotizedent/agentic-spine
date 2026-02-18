@@ -87,3 +87,24 @@ Expected effect: refreshed map, synchronized snapshots, and baseline parity upda
 - Add a home-domain verification hook that fails on forbidden mutation channel usage evidence.
 - Add a capability metadata/contract lint check for HA mutation surfaces (allowed list + required refresh linkage).
 - Add SSOT parity checks for the four required surfaces as precondition/postcondition controls.
+
+## Implementation Evidence (GAP-OP-655)
+
+### Artifacts Created/Updated
+
+| Artifact | Action | Purpose |
+|----------|--------|---------|
+| `ops/bindings/ha.identity.mutation.contract.yaml` | Created | Canonical mutation contract V1 |
+| `ops/agents/home-assistant-agent.contract.md` | Updated | Added mutation contract reference + section |
+| `ops/bindings/agents.registry.yaml` | Updated | Added `mutation_contract` field to home-assistant-agent |
+| `ops/plugins/home/bin/ha-identity-mutation-contract-status` | Created | Read-only status checker capability |
+| `ops/capabilities.yaml` | Updated | Registered `ha.identity.mutation.contract.status` |
+| `ops/bindings/capability_map.yaml` | Updated | Mapped capability to plugin/script |
+
+### Acceptance Criteria Met
+
+1. Allow/deny mutation path documented in `ha.identity.mutation.contract.yaml`
+2. Identity rules cover naming (`{area}_{function}_{qualifier}`), area assignment, and reconciliation
+3. Post-mutation refresh sequence explicit: ha.device.map.build -> ha.refresh -> ha.ssot.baseline.build
+4. SSOT surfaces enumerated: ha.areas.yaml, ha.orphan.classification.yaml, home.device.registry.yaml, ha.ssot.baseline.yaml
+5. Status checker capability validates contract integrity at runtime

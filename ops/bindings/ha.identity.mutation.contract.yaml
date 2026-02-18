@@ -1,0 +1,137 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# HA Identity + Mutation Contract V1
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Purpose: single canonical mutation path for Home Assistant runtime.
+# All HA device/entity mutations MUST flow through governed capabilities.
+#
+# Status: authoritative
+# Owner: @ronny
+# Last verified: 2026-02-17
+# Parent loop: LOOP-HA-IDENTITY-MUTATION-CONTRACT-V1-20260217
+# Gap: GAP-OP-655
+# ═══════════════════════════════════════════════════════════════════════════
+
+version: 1
+updated: "2026-02-17"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Allowed Mutation Surfaces
+# ─────────────────────────────────────────────────────────────────────────
+# Only these spine capabilities may mutate HA runtime state.
+# All require receipt generation + loop/gap linkage.
+
+allowed_mutation_capabilities:
+  - capability: ha.device.rename
+    scope: "Device name_by_user + area_id via WebSocket"
+    safety: mutating
+
+  - capability: ha.service.call
+    scope: "Governed service calls (light, lock, fan, scene, script, automation)"
+    safety: mutating
+
+  - capability: ha.automation.create
+    scope: "Create new automations via HA API"
+    safety: mutating
+
+  - capability: ha.automation.trigger
+    scope: "Trigger existing automations"
+    safety: mutating
+
+  - capability: ha.script.run
+    scope: "Execute HA scripts"
+    safety: mutating
+
+  - capability: ha.scene.activate
+    scope: "Activate HA scenes"
+    safety: mutating
+
+  - capability: ha.light.toggle
+    scope: "Toggle light entities"
+    safety: mutating
+
+  - capability: ha.lock.control
+    scope: "Lock/unlock entities"
+    safety: mutating
+
+# ─────────────────────────────────────────────────────────────────────────
+# Forbidden Mutation Channels
+# ─────────────────────────────────────────────────────────────────────────
+# These channels MUST NOT be used as authoritative mutation paths.
+
+forbidden_channels:
+  - channel: ha-ui-manual
+    description: "Direct HA UI configuration changes as authoritative source"
+    reason: "Bypasses receipt generation, loop/gap linkage, and SSOT refresh"
+
+  - channel: raw-websocket
+    description: "Raw WebSocket calls outside governed capabilities"
+    reason: "No capability policy enforcement, no receipts, no drift gate coverage"
+
+  - channel: adhoc-ssh
+    description: "Ad-hoc SSH mutation of HA runtime/state"
+    reason: "Unmanaged script path bypasses capability lifecycle"
+
+  - channel: unmanaged-script
+    description: "Any script path that bypasses capability policy, receipts, and loop/gap linkage"
+    reason: "No governance traceability"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Post-Mutation Refresh Sequence (MANDATORY)
+# ─────────────────────────────────────────────────────────────────────────
+# After any approved mutation batch, run these in order.
+
+post_mutation_refresh:
+  - step: 1
+    capability: ha.device.map.build
+    purpose: "Rebuild device-to-entity cross-reference map"
+
+  - step: 2
+    capability: ha.refresh
+    purpose: "Refresh all HA binding snapshots (12 surfaces)"
+
+  - step: 3
+    capability: ha.ssot.baseline.build
+    purpose: "Rebuild SSOT baseline for drift gate D115"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Required SSOT Surfaces
+# ─────────────────────────────────────────────────────────────────────────
+# These bindings MUST be current for mutation approval.
+
+required_ssot_surfaces:
+  - path: ops/bindings/ha.areas.yaml
+    purpose: "Canonical area definitions — D120 enforces parity"
+
+  - path: ops/bindings/ha.orphan.classification.yaml
+    purpose: "Orphan/pseudo-device triage policy"
+
+  - path: ops/bindings/home.device.registry.yaml
+    purpose: "Network device identity registry"
+
+  - path: ops/bindings/ha.ssot.baseline.yaml
+    purpose: "Runtime baseline snapshot — D115 enforces freshness"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Identity Model
+# ─────────────────────────────────────────────────────────────────────────
+
+naming_convention:
+  pattern: "{area}_{function}_{qualifier}"
+  case: snake_case
+  examples:
+    - "bedroom_purifier"
+    - "living_room_vacuum_q8"
+    - "bedroom_bulb_king"
+    - "office_button"
+
+area_assignment_rules:
+  - "Every mutable device resolves to exactly one canonical area"
+  - "Unassigned devices are contract violations (triage-required)"
+  - "Area fallbacks documented as policy entries in ha.orphan.classification.yaml"
+  - "Shared devices use primary-room assignment with notes"
+
+reconciliation_rules:
+  - "home.device.registry.yaml is source-of-truth for intended identity"
+  - "ha.device.map.yaml reconciles runtime identifiers to registry intent"
+  - "Divergence generates a governed gap before further mutation"
