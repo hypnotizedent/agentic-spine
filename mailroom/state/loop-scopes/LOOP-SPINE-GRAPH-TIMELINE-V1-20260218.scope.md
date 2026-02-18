@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SPINE-GRAPH-TIMELINE-V1-20260218
 opened: 2026-02-18
-status: active
+status: closed
 owner: "@ronny"
 severity: high
 scope: spine-graph-timeline-v1
