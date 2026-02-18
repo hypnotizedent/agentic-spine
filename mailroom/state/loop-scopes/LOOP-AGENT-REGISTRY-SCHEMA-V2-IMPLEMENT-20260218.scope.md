@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-AGENT-REGISTRY-SCHEMA-V2-IMPLEMENT-20260218
 created: 2026-02-18
-status: active
+status: closed
 owner: "@ronny"
 scope: agent
 priority: medium
