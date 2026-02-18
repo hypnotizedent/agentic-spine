@@ -168,3 +168,33 @@ Gradual touch-and-fix as files are modified (not big-bang):
 ### Stop Condition For Closure
 
 Loop remains `active` until D2/D3/D4 convergence work above is implemented and success criteria are fully evidenced.
+
+## 2026-02-18 Phase-2B burn-down slice
+
+- Baseline warnings count: `100`
+- After warnings count: `80`
+- Delta: `-20`
+- Files touched count: `20`
+- Files touched:
+  - `ops/bindings/agents.registry.yaml`
+  - `ops/bindings/calendar.global.schema.yaml`
+  - `ops/bindings/calendar.global.yaml`
+  - `ops/bindings/calendar.sync.contract.yaml`
+  - `ops/bindings/capability.domain.catalog.yaml`
+  - `ops/bindings/cli.tools.inventory.yaml`
+  - `ops/bindings/cutover.sequencing.yaml`
+  - `ops/bindings/deploy.dependencies.yaml`
+  - `ops/bindings/docs.johnny_decimal.yaml`
+  - `ops/bindings/drift-gates.scoped.yaml`
+  - `ops/bindings/environment.contract.schema.yaml`
+  - `ops/bindings/gate.agent.profiles.yaml`
+  - `ops/bindings/gate.domain.profiles.yaml`
+  - `ops/bindings/governance.parity.reconcile.20260217.yaml`
+  - `ops/bindings/ha.identity.mutation.contract.yaml`
+  - `ops/bindings/home.output.sinks.yaml`
+  - `ops/bindings/immich.ingest.watch.contract.yaml`
+  - `ops/bindings/infra.placement.policy.yaml`
+  - `ops/bindings/infra.relocation.plan.yaml`
+  - `ops/bindings/infra.vm.profiles.yaml`
+- Remaining warning classes still open: `updated`, `name`, `gate_id`, `domain_id`, `agent_id`, `last_synced`, `last_reviewed`, plus allowed legacy `notes`/`discovered_at`.
+- Explicit status: loop remains active for D2/D3/D4 convergence.
