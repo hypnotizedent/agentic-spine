@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-IMMICH-ORIGINAL-INGEST-YEARLY-20260216
 opened: 2026-02-16
-status: active
+status: closed
 owner: "@ronny"
 severity: high
 scope: immich-migration-ingest
@@ -156,3 +156,9 @@ Upload the old Immich/home photo corpus into the active Immich instance with str
   - ingest worker not progressing through year checkpoints
   - asset-count parity evidence is missing
   - per-year manifests/reports are incomplete
+
+## 2026-02-18 Owner Deferment Note
+
+- Closed as deferred by owner direction.
+- Requires Ronny manual review when Immich becomes a priority again.
+- Current focus is intentionally shifted to higher-leverage work.
