@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-AOF-DECOMPOSITION-VOCABULARY-NORMALIZE-20260218
 created: 2026-02-18
-status: active
+status: closed
 owner: "@ronny"
 scope: aof
 priority: high
