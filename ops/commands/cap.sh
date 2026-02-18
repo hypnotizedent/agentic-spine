@@ -1,21 +1,12 @@
 #!/usr/bin/env bash
-# ═══════════════════════════════════════════════════════════════════════════
-# ops cap - Execute governed capabilities with receipts
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# Usage:
-#   ops cap list                    List available capabilities
-#   ops cap run <name> [args...]    Execute a capability
-#   ops cap show <name>             Show capability details
-#
-# ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-# Runtime root (mailroom/, receipts/, state/) defaults to spine repo.
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-
-# Code root is derived from where this command is executed from (worktree-safe).
 SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
+_SP_LIB_DIR="${BASH_SOURCE%/*}"
+[[ "$_SP_LIB_DIR" == "${BASH_SOURCE}" ]] && _SP_LIB_DIR="$(pwd)"
+source "$_SP_LIB_DIR/../lib/yaml.sh"
 
 MAILROOM_RUNTIME_CONTRACT="$SPINE_CODE/ops/bindings/mailroom.runtime.contract.yaml"
 SPINE_INBOX_DEFAULT="$SPINE_REPO/mailroom/inbox"
@@ -26,10 +17,10 @@ SPINE_OUTBOX="${SPINE_OUTBOX:-}"
 SPINE_STATE="${SPINE_STATE:-}"
 
 resolve_mailroom_runtime() {
-    if [[ -f "$MAILROOM_RUNTIME_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+    if [[ -f "$MAILROOM_RUNTIME_CONTRACT" ]]; then
         local active runtime_root
-        active="$(yq e -r '.active // false' "$MAILROOM_RUNTIME_CONTRACT" 2>/dev/null || echo false)"
-        runtime_root="$(yq e -r '.runtime_root // ""' "$MAILROOM_RUNTIME_CONTRACT" 2>/dev/null || true)"
+        active="$(yaml_query "$MAILROOM_RUNTIME_CONTRACT" '.active' 2>/dev/null || echo false)"
+        runtime_root="$(yaml_query "$MAILROOM_RUNTIME_CONTRACT" '.runtime_root' 2>/dev/null || true)"
         if [[ "$active" == "true" && -n "$runtime_root" && "$runtime_root" != "null" ]]; then
             [[ -n "$SPINE_INBOX" ]] || SPINE_INBOX="$runtime_root/inbox"
             [[ -n "$SPINE_OUTBOX" ]] || SPINE_OUTBOX="$runtime_root/outbox"
@@ -90,11 +81,15 @@ Examples:
 EOF
 }
 
-# Check yq is available (for YAML parsing)
 check_deps() {
     if ! command -v yq >/dev/null 2>&1; then
         echo "ERROR: yq required for YAML parsing"
         echo "Install: brew install yq"
+        exit 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "ERROR: jq required for JSON processing"
+        echo "Install: brew install jq"
         exit 1
     fi
 }
@@ -103,8 +98,8 @@ list_caps() {
     echo "=== AVAILABLE CAPABILITIES ==="
     echo ""
     yq e '.capabilities | keys | .[]' "$CAP_FILE" | while read -r cap; do
-        desc="$(yq e ".capabilities.\"$cap\".description" "$CAP_FILE")"
-        safety="$(yq e ".capabilities.\"$cap\".safety" "$CAP_FILE")"
+        desc="$(yaml_query "$CAP_FILE" ".capabilities.\"$cap\".description")"
+        safety="$(yaml_query "$CAP_FILE" ".capabilities.\"$cap\".safety")"
         printf "  %-25s [%s] %s\n" "$cap" "$safety" "$desc"
     done
     echo ""
@@ -114,7 +109,7 @@ list_caps() {
 show_cap() {
     local name="$1"
 
-    if ! yq e ".capabilities.\"$name\"" "$CAP_FILE" | grep -q "description"; then
+    if ! yaml_query -e "$CAP_FILE" ".capabilities.\"$name\"" 2>/dev/null; then
         echo "ERROR: Unknown capability: $name"
         echo "Run 'ops cap list' to see available capabilities."
         exit 1
@@ -142,15 +137,13 @@ run_cap() {
     resolve_policy_knobs
 
     # ── Config extraction & validation ──
-    if ! yq e ".capabilities.\"$name\"" "$CAP_FILE" | grep -q "description"; then
+    if ! yaml_query -e "$CAP_FILE" ".capabilities.\"$name\"" 2>/dev/null; then
         echo "ERROR: Unknown capability: $name"
         echo "Run 'ops cap list' to see available capabilities."
         exit 1
     fi
 
     # ── Load capability configuration from YAML ──
-    # Optional preconditions: .requires[] (capabilities to run first)
-    # - Used to enforce secrets preflight for API-touching capabilities.
     local requires_list=()
     while IFS= read -r req; do
         [[ -z "${req:-}" || "${req:-}" == "null" ]] && continue
@@ -158,17 +151,18 @@ run_cap() {
     done < <(yq e ".capabilities.\"$name\".requires[]?" "$CAP_FILE" 2>/dev/null || true)
 
     local cmd
-    cmd="$(yq e ".capabilities.\"$name\".command" "$CAP_FILE")"
+    cmd="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".command")"
     local cwd
-    cwd="$(yq e ".capabilities.\"$name\".cwd // \"$HOME\"" "$CAP_FILE")"
+    cwd="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".cwd")"
+    [[ -z "$cwd" || "$cwd" == "null" ]] && cwd="$HOME"
     local safety
-    safety="$(yq e ".capabilities.\"$name\".safety" "$CAP_FILE")"
+    safety="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".safety")"
     local approval
-    approval="$(yq e ".capabilities.\"$name\".approval" "$CAP_FILE")"
+    approval="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".approval")"
     local desc
-    desc="$(yq e ".capabilities.\"$name\".description" "$CAP_FILE")"
+    desc="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".description")"
     local post_action
-    post_action="$(yq e ".capabilities.\"$name\".post_action // \"\"" "$CAP_FILE")"
+    post_action="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".post_action")"
     local effective_multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES:-direct}"
     local active_session_count=0
 
@@ -273,19 +267,18 @@ run_cap() {
     fi
 
     # ── Proactive mutation guard (critical domains, snapshot-driven) ──
-    # Blocks mutating/destructive capabilities when the mapped critical domain
-    # is in warn/incident state in a fresh stability snapshot.
     if [[ -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
       local guard_policy="$SPINE_CODE/ops/bindings/proactive.guard.policy.yaml"
       if [[ -f "$guard_policy" ]]; then
         local guard_enabled
-        guard_enabled="$(yq e -r '.enabled // false' "$guard_policy" 2>/dev/null || echo false)"
+        guard_enabled="$(yaml_query "$guard_policy" '.enabled' 2>/dev/null || echo false)"
         if [[ "$guard_enabled" == "true" ]]; then
           local cap_domain
-          cap_domain="$(yq e -r ".capabilities.\"$name\".domain // \"none\"" "$CAP_FILE" 2>/dev/null || echo none)"
+          cap_domain="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".domain" 2>/dev/null || echo none)"
+          [[ "$cap_domain" == "null" ]] && cap_domain="none"
 
           # Fallback domain resolution from topology capability prefixes.
-          if [[ -z "$cap_domain" || "$cap_domain" == "none" || "$cap_domain" == "null" ]]; then
+          if [[ -z "$cap_domain" || "$cap_domain" == "none" ]]; then
             cap_domain="$(yq e -r "
               .domain_metadata[]
               | select((.capability_prefixes // []) | any(. as \$p | \"$name\" | startswith(\$p)))
@@ -295,10 +288,9 @@ run_cap() {
 
           if [[ -n "${cap_domain:-}" && "$cap_domain" != "none" && "$cap_domain" != "null" ]]; then
             local critical_domains_only critical_domain
-            critical_domains_only="$(yq e -r '.critical_domains_only // true' "$guard_policy" 2>/dev/null || echo true)"
-            critical_domain="$(yq e -r ".domain_to_critical_domain.\"$cap_domain\" // \"\"" "$guard_policy" 2>/dev/null || true)"
+            critical_domains_only="$(yaml_query "$guard_policy" '.critical_domains_only' 2>/dev/null || echo true)"
+            critical_domain="$(yaml_query "$guard_policy" ".domain_to_critical_domain.\"$cap_domain\"" 2>/dev/null || true)"
 
-            # If mapping missing and policy is not critical-only, use direct domain id.
             if [[ -z "$critical_domain" && "$critical_domains_only" != "true" ]]; then
               critical_domain="$cap_domain"
             fi
@@ -315,8 +307,8 @@ run_cap() {
 
               if [[ "$allowlisted" -eq 0 ]]; then
                 local snapshot_capability snapshot_ttl trigger_statuses
-                snapshot_capability="$(yq e -r '.snapshot_capability // "stability.control.snapshot"' "$guard_policy" 2>/dev/null || echo "stability.control.snapshot")"
-                snapshot_ttl="$(yq e -r '.snapshot_ttl_minutes // 15' "$guard_policy" 2>/dev/null || echo 15)"
+                snapshot_capability="$(yaml_query "$guard_policy" '.snapshot_capability' 2>/dev/null || echo "stability.control.snapshot")"
+                snapshot_ttl="$(yaml_query "$guard_policy" '.snapshot_ttl_minutes' 2>/dev/null || echo 15)"
                 trigger_statuses="$(yq e -r '.trigger_statuses[]?' "$guard_policy" 2>/dev/null | tr '\n' ' ' || true)"
 
                 local snapshot_dir="" snapshot_run_key="" snapshot_generated="" snapshot_age_min=999999
@@ -358,7 +350,7 @@ PY
                 fi
 
                 local reconcile_tmpl reconcile_cmd
-                reconcile_tmpl="$(yq e -r '.required_reconcile_command_template // "./bin/ops cap run stability.control.reconcile --domain {{critical_domain}}"' "$guard_policy" 2>/dev/null || true)"
+                reconcile_tmpl="$(yaml_query "$guard_policy" '.required_reconcile_command_template' 2>/dev/null || echo "./bin/ops cap run stability.control.reconcile --domain {{critical_domain}}")"
                 reconcile_cmd="${reconcile_tmpl//\{\{critical_domain\}\}/$critical_domain}"
 
                 if [[ -z "$snapshot_dir" || "$snapshot_age_min" -gt "$snapshot_ttl" ]]; then

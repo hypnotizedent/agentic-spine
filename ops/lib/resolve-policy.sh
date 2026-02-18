@@ -28,6 +28,10 @@
 #
 # ═══════════════════════════════════════════════════════════════
 
+_SCRIPT_DIR="${BASH_SOURCE%/*}"
+[[ "$_SCRIPT_DIR" == "${BASH_SOURCE}" ]] && _SCRIPT_DIR="$(pwd)"
+source "$_SCRIPT_DIR/yaml.sh"
+
 # Balanced defaults (matches current hardcoded behavior — zero behavioral change)
 _BALANCED_DRIFT_GATE_MODE="fail"
 _BALANCED_WARN_POLICY="advisory"
@@ -59,7 +63,7 @@ resolve_policy_knobs() {
   # Extract preset name from profile if we have one
   if [[ -z "$preset_name" && -n "$profile_path" && -f "$profile_path" ]]; then
     if command -v yq >/dev/null 2>&1; then
-      preset_name="$(yq e '.policy.preset // ""' "$profile_path" 2>/dev/null || true)"
+      preset_name="$(yaml_query "$profile_path" '.policy.preset' 2>/dev/null || true)"
     fi
   fi
 
@@ -85,38 +89,37 @@ resolve_policy_knobs() {
     local prefix=".presets.${preset_name}.knobs"
     local val
 
-    val="$(yq e "${prefix}.drift_gate_mode // \"\"" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.drift_gate_mode" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && drift_gate_mode="$val"
 
-    val="$(yq e "${prefix}.warn_policy // \"\"" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.warn_policy" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && warn_policy="$val"
 
-    val="$(yq e "${prefix}.approval_default // \"\"" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.approval_default" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && approval_default="$val"
 
-    val="$(yq e "${prefix}.session_closeout_sla_hours // \"\"" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.session_closeout_sla_hours" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && session_closeout_sla_hours="$val"
 
-    val="$(yq e "${prefix}.stale_ssot_max_days // \"\"" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.stale_ssot_max_days" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && stale_ssot_max_days="$val"
 
-    # Boolean knobs: use direct read (not //) since yq treats false as falsy
-    val="$(yq e "${prefix}.gap_auto_claim" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.gap_auto_claim" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && gap_auto_claim="$val"
 
-    val="$(yq e "${prefix}.proposal_required" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.proposal_required" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && proposal_required="$val"
 
-    val="$(yq e "${prefix}.receipt_retention_days // \"\"" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.receipt_retention_days" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && receipt_retention_days="$val"
 
-    val="$(yq e "${prefix}.commit_sign_required" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.commit_sign_required" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && commit_sign_required="$val"
 
-    val="$(yq e "${prefix}.multi_agent_writes // \"\"" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.multi_agent_writes" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && multi_agent_writes="$val"
 
-    val="$(yq e "${prefix}.multi_agent_writes_when_multi_session // \"\"" "$presets_file" 2>/dev/null || true)"
+    val="$(yaml_query "$presets_file" "${prefix}.multi_agent_writes_when_multi_session" 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && multi_agent_writes_when_multi_session="$val"
   fi
 
@@ -124,38 +127,37 @@ resolve_policy_knobs() {
   if [[ -n "$profile_path" && -f "$profile_path" ]] && command -v yq >/dev/null 2>&1; then
     local val
 
-    val="$(yq e '.policy.overrides.drift_gate_mode // ""' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.drift_gate_mode' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && drift_gate_mode="$val"
 
-    val="$(yq e '.policy.overrides.warn_policy // ""' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.warn_policy' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && warn_policy="$val"
 
-    val="$(yq e '.policy.overrides.approval_default // ""' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.approval_default' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && approval_default="$val"
 
-    val="$(yq e '.policy.overrides.session_closeout_sla_hours // ""' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.session_closeout_sla_hours' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && session_closeout_sla_hours="$val"
 
-    val="$(yq e '.policy.overrides.stale_ssot_max_days // ""' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.stale_ssot_max_days' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && stale_ssot_max_days="$val"
 
-    # Boolean knobs: use direct read (not //) since yq treats false as falsy
-    val="$(yq e '.policy.overrides.gap_auto_claim' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.gap_auto_claim' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && gap_auto_claim="$val"
 
-    val="$(yq e '.policy.overrides.proposal_required' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.proposal_required' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && proposal_required="$val"
 
-    val="$(yq e '.policy.overrides.receipt_retention_days // ""' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.receipt_retention_days' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && receipt_retention_days="$val"
 
-    val="$(yq e '.policy.overrides.commit_sign_required' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.commit_sign_required' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && commit_sign_required="$val"
 
-    val="$(yq e '.policy.overrides.multi_agent_writes // ""' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.multi_agent_writes' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && multi_agent_writes="$val"
 
-    val="$(yq e '.policy.overrides.multi_agent_writes_when_multi_session // ""' "$profile_path" 2>/dev/null || true)"
+    val="$(yaml_query "$profile_path" '.policy.overrides.multi_agent_writes_when_multi_session' 2>/dev/null || true)"
     [[ -n "$val" && "$val" != "null" ]] && multi_agent_writes_when_multi_session="$val"
   fi
 

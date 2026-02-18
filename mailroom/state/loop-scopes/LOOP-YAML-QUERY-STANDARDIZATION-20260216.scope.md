@@ -19,11 +19,13 @@ Replace bare `yq` calls with a canonical `yaml_query` helper that bridges YAML�
    - `yq -o=json` for conversion, `jq -r` for expression evaluation
    - Normalizes `"null"` → `""`, preserves boolean `false` literally
    - `-e` flag for existence checks (exit code 0/1)
+   - **STATUS: COMPLETE (2026-02-18)**
 
 2. **Phase 1 migration** — convert the 3 highest-value libs:
-   - `ops/lib/resolve-policy.sh` (22 yq calls, boolean trap central)
-   - `ops/lib/registry.sh` (service discovery lookups)
-   - `ops/commands/cap.sh` (capability metadata loading)
+   - `ops/lib/resolve-policy.sh` (22 yq calls, boolean trap central) — **MIGRATED**
+   - `ops/lib/registry.sh` (service discovery lookups) — **MIGRATED**
+   - `ops/commands/cap.sh` (capability metadata loading) — **MIGRATED (simple field reads)**
+   - **STATUS: COMPLETE (2026-02-18)**
 
 3. **Drift gate** — new gate enforcing `yaml_query` usage in new/modified scripts
    - Allowlist existing files for gradual backfill

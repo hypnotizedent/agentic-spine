@@ -6,14 +6,11 @@ if ! REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
   REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 fi
 
-REGISTRY_FILE="$REPO_ROOT/docs/governance/SERVICE_REGISTRY.yaml"
+_SCRIPT_DIR="${BASH_SOURCE%/*}"
+[[ "$_SCRIPT_DIR" == "${BASH_SOURCE}" ]] && _SCRIPT_DIR="$(pwd)"
+source "$_SCRIPT_DIR/yaml.sh"
 
-require_yq() {
-  if ! command -v yq >/dev/null 2>&1; then
-    echo "yq is required to read $REGISTRY_FILE" >&2
-    return 1
-  fi
-}
+REGISTRY_FILE="$REPO_ROOT/docs/governance/SERVICE_REGISTRY.yaml"
 
 require_registry_file() {
   if [[ ! -f "$REGISTRY_FILE" ]]; then
@@ -25,17 +22,15 @@ require_registry_file() {
 resolve_service_field() {
   local service="$1"
   local field="$2"
-  require_yq || return 1
   require_registry_file || return 1
-  yq -r ".services[\"$service\"].$field // \"\"" "$REGISTRY_FILE"
+  yaml_query "$REGISTRY_FILE" ".services[\"$service\"].$field"
 }
 
 resolve_host_ip() {
   local host="$1"
-  require_yq || return 1
   require_registry_file || return 1
   local ip
-  ip=$(yq -r ".hosts[\"$host\"].tailscale_ip // \"\"" "$REGISTRY_FILE")
+  ip=$(yaml_query "$REGISTRY_FILE" ".hosts[\"$host\"].tailscale_ip")
   if [[ -n "$ip" ]]; then
     echo "$ip"
   else
