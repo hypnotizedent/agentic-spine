@@ -3,6 +3,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SPINE_REPO="${SPINE_REPO:-$ROOT}"
+SPINE_CODE="${SPINE_CODE:-$ROOT}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
 CONFIG="$ROOT/ops/bindings/handoff.config.yaml"
 
 fail() {
@@ -18,7 +23,7 @@ ttl_hours="$(yq -r '.defaults.ttl_hours // 72' "$CONFIG")"
 [[ "$ttl_hours" =~ ^[0-9]+$ ]] || fail "invalid ttl_hours in config"
 
 handoff_dir_rel="$(yq -r '.storage.directory // "mailroom/state/handoffs"' "$CONFIG")"
-handoff_dir="$ROOT/$handoff_dir_rel"
+handoff_dir="$(spine_resolve_mailroom_path "$handoff_dir_rel")"
 mkdir -p "$handoff_dir"
 
 stale=0

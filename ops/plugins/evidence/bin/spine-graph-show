@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+GRAPH_FILE="$ROOT/ops/bindings/spine.execution.graph.yaml"
+FORMAT="mermaid"
+VIEW_ID="core"
+
+usage() {
+  cat <<'USAGE'
+spine-graph-show
+
+Usage:
+  spine-graph-show [--format mermaid|json|yaml] [--view <id>]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --format)
+      FORMAT="${2:-}"
+      shift 2
+      ;;
+    --view)
+      VIEW_ID="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$FORMAT" in
+  mermaid|json|yaml) ;;
+  *)
+    echo "FAIL: --format must be one of mermaid|json|yaml" >&2
+    exit 2
+    ;;
+esac
+
+[[ -f "$GRAPH_FILE" ]] || { echo "FAIL: missing graph binding: $GRAPH_FILE" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "FAIL: missing dependency yq" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: missing dependency python3" >&2; exit 1; }
+
+json_tmp="$(mktemp)"
+trap 'rm -f "$json_tmp"' EXIT
+
+python3 - "$GRAPH_FILE" "$VIEW_ID" > "$json_tmp" <<'PY'
+import json
+import subprocess
+import sys
+
+binding = sys.argv[1]
+view_id = sys.argv[2]
+
+raw = subprocess.check_output(["yq", "-o=json", ".", binding], text=True)
+data = json.loads(raw)
+
+nodes = data.get("nodes") or []
+edges = data.get("edges") or []
+views = data.get("views") or []
+
+if not nodes:
+    raise SystemExit("FAIL: graph has no nodes")
+if not edges:
+    raise SystemExit("FAIL: graph has no edges")
+
+node_by_id = {}
+for node in nodes:
+    node_id = str(node.get("id") or "").strip()
+    if not node_id:
+        continue
+    node_by_id[node_id] = node
+
+edge_by_id = {}
+for edge in edges:
+    edge_id = str(edge.get("id") or "").strip()
+    if not edge_id:
+        continue
+    edge_by_id[edge_id] = edge
+
+view = None
+for item in views:
+    if str(item.get("id") or "") == view_id:
+        view = item
+        break
+
+if view is None:
+    raise SystemExit(f"FAIL: view not found: {view_id}")
+
+include_nodes = view.get("include_node_ids") or []
+include_edges = view.get("include_edge_ids") or []
+
+selected_nodes = []
+for node_id in include_nodes:
+    if node_id in node_by_id:
+        selected_nodes.append(node_by_id[node_id])
+
+selected_edges = []
+for edge_id in include_edges:
+    if edge_id in edge_by_id:
+        selected_edges.append(edge_by_id[edge_id])
+
+# Drop edges with missing node references in selected view.
+selected_node_ids = {str(n.get("id")) for n in selected_nodes}
+filtered_edges = []
+for edge in selected_edges:
+    src = str(edge.get("from") or "")
+    dst = str(edge.get("to") or "")
+    if src in selected_node_ids and dst in selected_node_ids:
+        filtered_edges.append(edge)
+
+out = {
+    "capability": "spine.graph.show",
+    "view": {
+        "id": view.get("id"),
+        "description": view.get("description") or "",
+    },
+    "nodes": selected_nodes,
+    "edges": filtered_edges,
+}
+print(json.dumps(out, indent=2))
+PY
+
+if [[ "$FORMAT" == "json" ]]; then
+  cat "$json_tmp"
+  exit 0
+fi
+
+if [[ "$FORMAT" == "yaml" ]]; then
+  yq -P '.' "$json_tmp"
+  exit 0
+fi
+
+python3 - "$json_tmp" <<'PY'
+import json
+import sys
+
+def esc(text: str) -> str:
+    return text.replace('"', '\\"')
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    payload = json.load(f)
+
+nodes = payload.get("nodes") or []
+edges = payload.get("edges") or []
+view = payload.get("view") or {}
+
+print("spine.graph.show")
+print(f"view: {view.get('id', '')}")
+print(f"description: {view.get('description', '')}")
+print("mermaid:")
+print("graph TD")
+for node in nodes:
+    node_id = str(node.get("id") or "")
+    node_type = str(node.get("type") or "")
+    label = f"{node_id} ({node_type})" if node_type else node_id
+    print(f"  {node_id}[\"{esc(label)}\"]")
+for edge in edges:
+    src = str(edge.get("from") or "")
+    dst = str(edge.get("to") or "")
+    event_type = str(edge.get("event_type") or "")
+    print(f"  {src} -->|\"{esc(event_type)}\"| {dst}")
+PY

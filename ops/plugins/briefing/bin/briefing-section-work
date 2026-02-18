@@ -2,13 +2,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SPINE_REPO="${SPINE_REPO:-$ROOT}"
+SPINE_CODE="${SPINE_CODE:-$ROOT}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
 SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
-PROPOSALS_DIR="$ROOT/mailroom/outbox/proposals"
+PROPOSALS_DIR="$SPINE_OUTBOX/proposals"
 
 loop_open=0
 if [[ -d "$SCOPES_DIR" ]]; then
-  loop_open="$( { grep -l '^status: open$' "$SCOPES_DIR"/*.scope.md 2>/dev/null || true; } | wc -l | tr -d ' ')"
+  loop_open="$( { grep -lE '^status:[[:space:]]*(active|draft|open)$' "$SCOPES_DIR"/*.scope.md 2>/dev/null || true; } | wc -l | tr -d ' ')"
 fi
 
 gap_open="$(yq -r '[.gaps[] | select(.status == "open")] | length' "$GAPS_FILE" 2>/dev/null || echo 0)"

@@ -7,34 +7,9 @@ SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 _SP_LIB_DIR="${BASH_SOURCE%/*}"
 [[ "$_SP_LIB_DIR" == "${BASH_SOURCE}" ]] && _SP_LIB_DIR="$(pwd)"
 source "$_SP_LIB_DIR/../lib/yaml.sh"
-
-MAILROOM_RUNTIME_CONTRACT="$SPINE_CODE/ops/bindings/mailroom.runtime.contract.yaml"
-SPINE_INBOX_DEFAULT="$SPINE_REPO/mailroom/inbox"
-SPINE_OUTBOX_DEFAULT="$SPINE_REPO/mailroom/outbox"
-SPINE_STATE_DEFAULT="$SPINE_REPO/mailroom/state"
-SPINE_INBOX="${SPINE_INBOX:-}"
-SPINE_OUTBOX="${SPINE_OUTBOX:-}"
-SPINE_STATE="${SPINE_STATE:-}"
-
-resolve_mailroom_runtime() {
-    if [[ -f "$MAILROOM_RUNTIME_CONTRACT" ]]; then
-        local active runtime_root
-        active="$(yaml_query "$MAILROOM_RUNTIME_CONTRACT" '.active' 2>/dev/null || echo false)"
-        runtime_root="$(yaml_query "$MAILROOM_RUNTIME_CONTRACT" '.runtime_root' 2>/dev/null || true)"
-        if [[ "$active" == "true" && -n "$runtime_root" && "$runtime_root" != "null" ]]; then
-            [[ -n "$SPINE_INBOX" ]] || SPINE_INBOX="$runtime_root/inbox"
-            [[ -n "$SPINE_OUTBOX" ]] || SPINE_OUTBOX="$runtime_root/outbox"
-            [[ -n "$SPINE_STATE" ]] || SPINE_STATE="$runtime_root/state"
-        fi
-    fi
-
-    [[ -n "$SPINE_INBOX" ]] || SPINE_INBOX="$SPINE_INBOX_DEFAULT"
-    [[ -n "$SPINE_OUTBOX" ]] || SPINE_OUTBOX="$SPINE_OUTBOX_DEFAULT"
-    [[ -n "$SPINE_STATE" ]] || SPINE_STATE="$SPINE_STATE_DEFAULT"
-}
-
-resolve_mailroom_runtime
-export SPINE_INBOX SPINE_OUTBOX SPINE_STATE
+source "$_SP_LIB_DIR/../lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+export SPINE_INBOX SPINE_OUTBOX SPINE_STATE SPINE_LOGS
 
 STATE_DIR="$SPINE_STATE"
 CAP_FILE="$SPINE_CODE/ops/capabilities.yaml"
@@ -167,23 +142,38 @@ run_cap() {
     local active_session_count=0
 
     count_active_sessions() {
-      local sessions_dir="$SPINE_REPO/mailroom/state/sessions"
+      local sessions_dir="$SPINE_STATE/sessions"
+      local repo_sessions_dir="$SPINE_REPO/mailroom/state/sessions"
       local count=0
-      if [[ ! -d "$sessions_dir" ]]; then
-        echo 0
-        return
-      fi
-      for session_dir in "$sessions_dir"/SES-*; do
-        [[ -d "$session_dir" ]] || continue
-        local manifest="$session_dir/session.yaml"
-        [[ -f "$manifest" ]] || continue
-        local pid
-        pid="$(sed -n 's/^pid:[[:space:]]*//p' "$manifest" | head -1)"
-        [[ -n "${pid:-}" ]] || continue
-        if kill -0 "$pid" 2>/dev/null; then
-          count=$((count + 1))
-        fi
+      local scanned=()
+
+      for dir in "$sessions_dir" "$repo_sessions_dir"; do
+        [[ -n "$dir" ]] || continue
+        [[ -d "$dir" ]] || continue
+
+        local seen=0
+        for existing in "${scanned[@]:-}"; do
+          if [[ "$existing" == "$dir" ]]; then
+            seen=1
+            break
+          fi
+        done
+        [[ "$seen" -eq 1 ]] && continue
+        scanned+=("$dir")
+
+        for session_dir in "$dir"/SES-*; do
+          [[ -d "$session_dir" ]] || continue
+          local manifest="$session_dir/session.yaml"
+          [[ -f "$manifest" ]] || continue
+          local pid
+          pid="$(sed -n 's/^pid:[[:space:]]*//p' "$manifest" | head -1)"
+          [[ -n "${pid:-}" ]] || continue
+          if kill -0 "$pid" 2>/dev/null; then
+            count=$((count + 1))
+          fi
+        done
       done
+
       echo "$count"
     }
 

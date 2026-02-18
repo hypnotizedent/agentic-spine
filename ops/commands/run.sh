@@ -59,38 +59,9 @@ done
 
 # Resolve SPINE_REPO
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-MAILROOM_RUNTIME_CONTRACT="${SPINE_REPO}/ops/bindings/mailroom.runtime.contract.yaml"
-
-resolve_mailroom_runtime() {
-  local inbox_default="$SPINE_REPO/mailroom/inbox"
-  local outbox_default="$SPINE_REPO/mailroom/outbox"
-  local state_default="$SPINE_REPO/mailroom/state"
-
-  local inbox="${SPINE_INBOX:-}"
-  local outbox="${SPINE_OUTBOX:-}"
-  local state="${SPINE_STATE:-}"
-
-  if [[ -f "$MAILROOM_RUNTIME_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
-    local active runtime_root
-    active="$(yq e -r '.active // false' "$MAILROOM_RUNTIME_CONTRACT" 2>/dev/null || echo false)"
-    runtime_root="$(yq e -r '.runtime_root // ""' "$MAILROOM_RUNTIME_CONTRACT" 2>/dev/null || true)"
-    if [[ "$active" == "true" && -n "$runtime_root" && "$runtime_root" != "null" ]]; then
-      [[ -n "$inbox" ]] || inbox="$runtime_root/inbox"
-      [[ -n "$outbox" ]] || outbox="$runtime_root/outbox"
-      [[ -n "$state" ]] || state="$runtime_root/state"
-    fi
-  fi
-
-  [[ -n "$inbox" ]] || inbox="$inbox_default"
-  [[ -n "$outbox" ]] || outbox="$outbox_default"
-  [[ -n "$state" ]] || state="$state_default"
-
-  export SPINE_INBOX="$inbox"
-  export SPINE_OUTBOX="$outbox"
-  export SPINE_STATE="$state"
-}
-
-resolve_mailroom_runtime
+SPINE_CODE="${SPINE_CODE:-$SPINE_REPO}"
+source "$SPINE_REPO/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 
 INBOX="${SPINE_INBOX:-$SPINE_REPO/mailroom/inbox}"
 OUTBOX="${SPINE_OUTBOX:-$SPINE_REPO/mailroom/outbox}"

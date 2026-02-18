@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SPINE_REPO="${SPINE_REPO:-$ROOT}"
+SPINE_CODE="${SPINE_CODE:-$ROOT}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+FORMAT="markdown"
+SINCE_RAW=""
+UNTIL_RAW=""
+LIMIT="300"
+EVENT_TYPE_FILTER=""
+LOOP_ID_FILTER=""
+STATUS_FILTER=""
+SCAN_RECEIPTS=0
+TIMEZONE="UTC"
+REPORT_ID=""
+TITLE="Spine Timeline Report"
+OUTPUT_PATH=""
+FORCE=0
+REFRESH_INDEX=0
+
+usage() {
+  cat <<'USAGE'
+spine-timeline-report
+
+Usage:
+  spine-timeline-report [--since <ISO8601|Nh|Nd>] [--until <ISO8601|Nh|Nd>]
+                        [--limit <n>] [--event-type <type>] [--loop-id <id>]
+                        [--status <status>] [--timezone <IANA_TZ>]
+                        [--scan-receipts] [--refresh-index]
+                        [--report-id <id>] [--title <text>]
+                        [--output <path>] [--format markdown|json] [--force]
+
+Notes:
+  - Writes report files under ${SPINE_OUTBOX}/audits by default.
+  - This capability is mutating; in multi-terminal sessions use writer-lane
+    proposal/apply flow.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --since)
+      SINCE_RAW="${2:-}"
+      shift 2
+      ;;
+    --until)
+      UNTIL_RAW="${2:-}"
+      shift 2
+      ;;
+    --limit)
+      LIMIT="${2:-}"
+      shift 2
+      ;;
+    --event-type)
+      EVENT_TYPE_FILTER="${2:-}"
+      shift 2
+      ;;
+    --loop-id)
+      LOOP_ID_FILTER="${2:-}"
+      shift 2
+      ;;
+    --status)
+      STATUS_FILTER="${2:-}"
+      shift 2
+      ;;
+    --timezone)
+      TIMEZONE="${2:-UTC}"
+      shift 2
+      ;;
+    --scan-receipts)
+      SCAN_RECEIPTS=1
+      shift
+      ;;
+    --refresh-index)
+      REFRESH_INDEX=1
+      shift
+      ;;
+    --report-id)
+      REPORT_ID="${2:-}"
+      shift 2
+      ;;
+    --title)
+      TITLE="${2:-}"
+      shift 2
+      ;;
+    --output)
+      OUTPUT_PATH="${2:-}"
+      shift 2
+      ;;
+    --format)
+      FORMAT="${2:-}"
+      shift 2
+      ;;
+    --force)
+      FORCE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "FAIL: --limit must be numeric" >&2; exit 2; }
+case "$FORMAT" in
+  markdown|json) ;;
+  *) echo "FAIL: --format must be markdown|json" >&2; exit 2 ;;
+esac
+if [[ -n "$REPORT_ID" && ! "$REPORT_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "FAIL: --report-id must match [A-Za-z0-9._-]+" >&2
+  exit 2
+fi
+
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: missing dependency python3" >&2; exit 1; }
+
+if [[ "$REFRESH_INDEX" -eq 1 ]]; then
+  "$ROOT/ops/plugins/evidence/bin/receipts-index-build" \
+    --index "$ROOT/ops/plugins/evidence/state/receipt-index.yaml" \
+    --quiet
+fi
+
+if [[ -z "$REPORT_ID" ]]; then
+  REPORT_ID="spine-timeline-$(date -u +%Y%m%d-%H%M%S)"
+fi
+
+ext="md"
+[[ "$FORMAT" == "json" ]] && ext="json"
+
+if [[ -z "$OUTPUT_PATH" ]]; then
+  OUTPUT_PATH="$SPINE_OUTBOX/audits/${REPORT_ID}.${ext}"
+elif [[ "$OUTPUT_PATH" == mailroom/* ]]; then
+  OUTPUT_PATH="$(spine_resolve_mailroom_path "$OUTPUT_PATH")"
+elif [[ "$OUTPUT_PATH" != /* ]]; then
+  OUTPUT_PATH="$SPINE_OUTBOX/audits/$OUTPUT_PATH"
+fi
+
+if [[ "$OUTPUT_PATH" =~ /$ ]]; then
+  OUTPUT_PATH="${OUTPUT_PATH}${REPORT_ID}.${ext}"
+elif [[ "$OUTPUT_PATH" != *.* ]]; then
+  OUTPUT_PATH="${OUTPUT_PATH}.${ext}"
+fi
+
+output_dir="$(dirname "$OUTPUT_PATH")"
+mkdir -p "$output_dir"
+
+query_tmp="$(mktemp)"
+report_tmp="$(mktemp "$output_dir/.${REPORT_ID}.tmp.XXXXXX")"
+cleanup() {
+  rm -f "$query_tmp" "$report_tmp" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+query_args=(--format json --limit "$LIMIT" --timezone "$TIMEZONE")
+[[ -n "$SINCE_RAW" ]] && query_args+=(--since "$SINCE_RAW")
+[[ -n "$UNTIL_RAW" ]] && query_args+=(--until "$UNTIL_RAW")
+[[ -n "$EVENT_TYPE_FILTER" ]] && query_args+=(--event-type "$EVENT_TYPE_FILTER")
+[[ -n "$LOOP_ID_FILTER" ]] && query_args+=(--loop-id "$LOOP_ID_FILTER")
+[[ -n "$STATUS_FILTER" ]] && query_args+=(--status "$STATUS_FILTER")
+[[ "$SCAN_RECEIPTS" -eq 1 ]] && query_args+=(--scan-receipts)
+
+"$ROOT/ops/plugins/evidence/bin/spine-timeline-query" "${query_args[@]}" > "$query_tmp"
+
+python3 - "$query_tmp" "$report_tmp" "$FORMAT" "$REPORT_ID" "$TITLE" "$TIMEZONE" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
+
+query_path, out_path, fmt, report_id, title, tz_name = sys.argv[1:7]
+
+with open(query_path, "r", encoding="utf-8") as f:
+    envelope = json.load(f)
+
+events = envelope.get("events") or []
+window = envelope.get("window") or {}
+source_counts = envelope.get("source_counts") or {}
+
+
+def parse_utc(value: str) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return datetime.fromisoformat(raw).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def utc_iso(value: datetime | None) -> str:
+    dt = value or datetime.now(timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+until_dt = parse_utc(str(window.get("until") or ""))
+latest_event_dt = None
+for event in events:
+    dt = parse_utc(str(event.get("created_at") or ""))
+    if dt is None:
+        continue
+    if latest_event_dt is None or dt > latest_event_dt:
+        latest_event_dt = dt
+
+# Deterministic report timestamp: prefer latest event, else window.until.
+report_created_at = utc_iso(latest_event_dt or until_dt)
+
+payload = {
+    "id": report_id,
+    "created_at": report_created_at,
+    "title": title,
+    "capability": "spine.timeline.report",
+    "writer_policy": "writer-lane only in multi-terminal mode (proposal/apply flow)",
+    "query": {
+        "window": {
+            "since": str(window.get("since") or ""),
+            "until": str(window.get("until") or ""),
+            "timezone": str(window.get("timezone") or tz_name or "UTC"),
+        },
+        "source_counts": source_counts,
+        "receipt_index_used": bool(envelope.get("receipt_index_used")),
+        "receipt_scan_used": bool(envelope.get("receipt_scan_used")),
+        "event_count": len(events),
+    },
+    "events": events,
+}
+
+if fmt == "json":
+    text = json.dumps(payload, indent=2) + "\n"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    raise SystemExit(0)
+
+tz = timezone.utc
+tz_label = str(window.get("timezone") or tz_name or "UTC")
+if tz_label.upper() != "UTC" and ZoneInfo is not None:
+    try:
+        tz = ZoneInfo(tz_label)
+    except Exception:
+        tz = timezone.utc
+        tz_label = "UTC"
+
+lines = []
+lines.append(f"# {title}")
+lines.append("")
+lines.append(f"- id: {payload['id']}")
+lines.append(f"- created_at: {payload['created_at']}")
+lines.append(f"- capability: {payload['capability']}")
+lines.append(f"- writer_policy: {payload['writer_policy']}")
+lines.append(
+    f"- window: {payload['query']['window']['since']} -> {payload['query']['window']['until']}"
+)
+lines.append(f"- timezone: {tz_label}")
+lines.append(f"- event_count: {payload['query']['event_count']}")
+lines.append("- source_counts:")
+for key in [
+    "receipt_index",
+    "receipt_scan",
+    "ledger",
+    "loop_scope",
+    "gap",
+    "handoff",
+    "orchestration",
+    "proposal",
+]:
+    lines.append(f"  - {key}: {source_counts.get(key, 0)}")
+
+if events:
+    lines.append("")
+    lines.append("## Events")
+    for event in events:
+        created_raw = str(event.get("created_at") or "")
+        created_dt = parse_utc(created_raw)
+        if created_dt is None:
+            created_local = created_raw
+        else:
+            created_local = created_dt.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+        parts = [
+            created_local,
+            str(event.get("status") or "unknown"),
+            str(event.get("event_type") or "unknown"),
+            str(event.get("subject_id") or "unknown"),
+            str(event.get("summary") or ""),
+        ]
+        detail = []
+        severity = str(event.get("severity") or "").strip()
+        actor_id = str(event.get("actor_id") or "").strip()
+        if severity:
+            detail.append(f"severity={severity}")
+        if actor_id:
+            detail.append(f"actor_id={actor_id}")
+        suffix = f" ({', '.join(detail)})" if detail else ""
+        lines.append(f"- {' | '.join(parts)}{suffix}")
+else:
+    lines.append("")
+    lines.append("No events in selected window.")
+
+with open(out_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines).rstrip() + "\n")
+PY
+
+if [[ -f "$OUTPUT_PATH" && "$FORCE" -eq 0 ]]; then
+  rm -f "$report_tmp"
+  echo "spine.timeline.report"
+  echo "status: exists"
+  echo "path: $OUTPUT_PATH"
+  exit 0
+fi
+
+if [[ "$FORCE" -eq 1 ]]; then
+  mv "$report_tmp" "$OUTPUT_PATH"
+else
+  if ! mv -n "$report_tmp" "$OUTPUT_PATH" 2>/dev/null; then
+    rm -f "$report_tmp"
+    echo "spine.timeline.report"
+    echo "status: exists"
+    echo "path: $OUTPUT_PATH"
+    exit 0
+  fi
+fi
+
+echo "spine.timeline.report"
+echo "status: wrote"
+echo "path: $OUTPUT_PATH"

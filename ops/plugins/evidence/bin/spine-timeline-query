@@ -1,0 +1,734 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SPINE_REPO="${SPINE_REPO:-$ROOT}"
+SPINE_CODE="${SPINE_CODE:-$ROOT}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+FORMAT="markdown"
+SINCE_RAW=""
+UNTIL_RAW=""
+LIMIT="300"
+EVENT_TYPE_FILTER=""
+LOOP_ID_FILTER=""
+STATUS_FILTER=""
+SCAN_RECEIPTS=0
+TIMEZONE="UTC"
+
+usage() {
+  cat <<'USAGE'
+spine-timeline-query
+
+Usage:
+  spine-timeline-query [--since <ISO8601|Nh|Nd>] [--until <ISO8601|Nh|Nd>]
+                       [--limit <n>] [--event-type <type>] [--loop-id <id>]
+                       [--status <status>] [--format markdown|json]
+                       [--timezone <IANA_TZ>] [--scan-receipts]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --since)
+      SINCE_RAW="${2:-}"
+      shift 2
+      ;;
+    --until)
+      UNTIL_RAW="${2:-}"
+      shift 2
+      ;;
+    --limit)
+      LIMIT="${2:-}"
+      shift 2
+      ;;
+    --event-type)
+      EVENT_TYPE_FILTER="${2:-}"
+      shift 2
+      ;;
+    --loop-id)
+      LOOP_ID_FILTER="${2:-}"
+      shift 2
+      ;;
+    --status)
+      STATUS_FILTER="${2:-}"
+      shift 2
+      ;;
+    --format)
+      FORMAT="${2:-}"
+      shift 2
+      ;;
+    --timezone)
+      TIMEZONE="${2:-UTC}"
+      shift 2
+      ;;
+    --scan-receipts)
+      SCAN_RECEIPTS=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "FAIL: --limit must be numeric" >&2; exit 2; }
+case "$FORMAT" in
+  markdown|json) ;;
+  *) echo "FAIL: --format must be markdown|json" >&2; exit 2 ;;
+esac
+
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: missing dependency python3" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "FAIL: missing dependency yq" >&2; exit 1; }
+
+RECEIPT_INDEX="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
+RECEIPTS_ROOT="$ROOT/receipts/sessions"
+SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
+GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+LEDGER_FILE="$SPINE_STATE/ledger.csv"
+HANDOFF_DIR="$SPINE_STATE/handoffs"
+ORCH_DIR="$SPINE_STATE/orchestration"
+PROPOSALS_DIR="$SPINE_OUTBOX/proposals"
+
+python3 - \
+  "$FORMAT" \
+  "$SINCE_RAW" \
+  "$UNTIL_RAW" \
+  "$LIMIT" \
+  "$EVENT_TYPE_FILTER" \
+  "$LOOP_ID_FILTER" \
+  "$STATUS_FILTER" \
+  "$SCAN_RECEIPTS" \
+  "$TIMEZONE" \
+  "$RECEIPT_INDEX" \
+  "$RECEIPTS_ROOT" \
+  "$SCOPES_DIR" \
+  "$GAPS_FILE" \
+  "$LEDGER_FILE" \
+  "$HANDOFF_DIR" \
+  "$ORCH_DIR" \
+  "$PROPOSALS_DIR" <<'PY'
+import csv
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
+
+(
+    output_format,
+    since_raw,
+    until_raw,
+    limit_raw,
+    event_type_filter,
+    loop_id_filter,
+    status_filter,
+    scan_receipts_raw,
+    timezone_name,
+    receipt_index_path,
+    receipts_root,
+    scopes_dir,
+    gaps_file,
+    ledger_file,
+    handoff_dir,
+    orch_dir,
+    proposals_dir,
+) = sys.argv[1:18]
+
+scan_receipts = scan_receipts_raw == "1"
+limit = int(limit_raw)
+
+source_counts = {
+    "receipt_index": 0,
+    "receipt_scan": 0,
+    "ledger": 0,
+    "loop_scope": 0,
+    "gap": 0,
+    "handoff": 0,
+    "orchestration": 0,
+    "proposal": 0,
+}
+
+
+def to_utc_iso(value: str, fallback: datetime | None = None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        if fallback is None:
+            fallback = datetime.now(timezone.utc)
+        return fallback.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        if raw.endswith("Z"):
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        elif len(raw) == 10:
+            dt = datetime.fromisoformat(raw + "T00:00:00+00:00")
+        else:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        if fallback is None:
+            fallback = datetime.now(timezone.utc)
+        return fallback.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_relative(value: str, now: datetime) -> datetime | None:
+    m = re.fullmatch(r"(\d+)([smhd])", value.strip())
+    if not m:
+        return None
+    qty = int(m.group(1))
+    unit = m.group(2)
+    if unit == "s":
+        return now - timedelta(seconds=qty)
+    if unit == "m":
+        return now - timedelta(minutes=qty)
+    if unit == "h":
+        return now - timedelta(hours=qty)
+    if unit == "d":
+        return now - timedelta(days=qty)
+    return None
+
+
+def parse_window_value(raw_value: str, now: datetime, default_value: datetime) -> datetime:
+    value = (raw_value or "").strip()
+    if not value:
+        return default_value
+    rel = parse_relative(value, now)
+    if rel is not None:
+        return rel
+    try:
+        if value.endswith("Z"):
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        elif len(value) == 10:
+            dt = datetime.fromisoformat(value + "T00:00:00+00:00")
+        else:
+            dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return default_value
+
+
+def parse_first_line(text: str) -> str:
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
+    return stripped.splitlines()[0][:180]
+
+
+def first_loop_id(text: str) -> str:
+    m = re.search(r"(LOOP-[A-Z0-9-]+-\d{8})", text or "")
+    return m.group(1) if m else ""
+
+
+def add_event(events: dict[str, dict], event: dict):
+    event_id = str(event.get("id") or "").strip()
+    if not event_id:
+        return
+
+    payload = {
+        "id": event_id,
+        "created_at": to_utc_iso(str(event.get("created_at") or "")),
+        "event_type": str(event.get("event_type") or "unknown"),
+        "subject_type": str(event.get("subject_type") or "unknown"),
+        "subject_id": str(event.get("subject_id") or "unknown"),
+        "status": str(event.get("status") or "unknown"),
+        "loop_id": str(event.get("loop_id") or ""),
+        "capability": str(event.get("capability") or ""),
+        "source_path": str(event.get("source_path") or ""),
+        "summary": str(event.get("summary") or ""),
+    }
+
+    severity = str(event.get("severity") or "").strip().lower()
+    if severity in {"low", "medium", "high", "critical"}:
+        payload["severity"] = severity
+
+    actor_id = str(event.get("actor_id") or "").strip()
+    if actor_id:
+        payload["actor_id"] = actor_id
+
+    if event_id not in events:
+        events[event_id] = payload
+
+
+def yq_json(path: Path) -> dict:
+    try:
+        out = subprocess.check_output(
+            ["yq", "-o=json", ".", str(path)],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return json.loads(out)
+    except Exception:
+        return {}
+
+
+def load_receipt_index(events: dict):
+    path = Path(receipt_index_path)
+    if not path.exists():
+        return
+    data = yq_json(path)
+    rows = data.get("entries") or []
+    for row in rows:
+        run_id = str(row.get("run_id") or "").strip()
+        if not run_id:
+            continue
+        status = str(row.get("status") or "unknown")
+        capability = str(row.get("capability") or "")
+        created_at = str(row.get("generated_at_utc") or "")
+        source_counts["receipt_index"] += 1
+        add_event(events, {
+            "id": f"receipt:{run_id}",
+            "created_at": created_at,
+            "event_type": "receipt.status",
+            "subject_type": "receipt",
+            "subject_id": run_id,
+            "status": status,
+            "loop_id": first_loop_id(run_id),
+            "capability": capability,
+            "source_path": str(row.get("receipt_path") or ""),
+            "summary": f"{capability} -> {status}" if capability else f"receipt status {status}",
+            "severity": "low" if status.lower() == "done" else "high",
+        })
+
+
+def load_receipts_scan(events: dict, since_dt: datetime):
+    root = Path(receipts_root)
+    if not root.exists():
+        return
+
+    for d in sorted(root.glob("RCAP-*")):
+        if not d.is_dir():
+            continue
+        receipt = d / "receipt.md"
+        if not receipt.exists():
+            continue
+        try:
+            if datetime.fromtimestamp(receipt.stat().st_mtime, tz=timezone.utc) < since_dt - timedelta(hours=1):
+                continue
+            text = receipt.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        run_id = ""
+        capability = ""
+        status = "unknown"
+        generated = ""
+
+        for line in text.splitlines():
+            if line.startswith("| Run ID |"):
+                run_id = line.split("|")[2].strip().strip("`")
+            elif line.startswith("| Capability |"):
+                capability = line.split("|")[2].strip().strip("`")
+            elif line.startswith("| Status |"):
+                status = line.split("|")[2].strip().strip("`")
+            elif line.startswith("| Generated |"):
+                generated = line.split("|")[2].strip().strip("`")
+
+        if not run_id:
+            continue
+
+        source_counts["receipt_scan"] += 1
+        add_event(events, {
+            "id": f"receipt:{run_id}",
+            "created_at": generated,
+            "event_type": "receipt.status",
+            "subject_type": "receipt",
+            "subject_id": run_id,
+            "status": status,
+            "loop_id": first_loop_id(run_id),
+            "capability": capability,
+            "source_path": str(receipt),
+            "summary": f"{capability} -> {status}" if capability else f"receipt status {status}",
+            "severity": "low" if status.lower() == "done" else "high",
+        })
+
+
+def load_ledger(events: dict):
+    path = Path(ledger_file)
+    if not path.exists():
+        return
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                run_id = str(row.get("run_id") or "").strip()
+                if not run_id:
+                    continue
+                created = str(row.get("created_at") or row.get("finished_at") or "")
+                status = str(row.get("status") or "unknown")
+                capability = ""
+                parts = run_id.split("__")
+                if len(parts) >= 2:
+                    capability = parts[1]
+
+                source_counts["ledger"] += 1
+                add_event(events, {
+                    "id": f"ledger:{run_id}:{created}",
+                    "created_at": created,
+                    "event_type": "capability.run",
+                    "subject_type": "capability_run",
+                    "subject_id": run_id,
+                    "status": status,
+                    "loop_id": first_loop_id(run_id + " " + str(row.get("prompt_file") or "")),
+                    "capability": capability,
+                    "source_path": str(path),
+                    "summary": f"{capability or run_id} status {status}",
+                    "severity": "low" if status.lower() == "done" else "high",
+                })
+    except Exception:
+        return
+
+
+def parse_scope_frontmatter(path: Path) -> tuple[dict, str]:
+    fm = {}
+    title = ""
+    in_fm = False
+    fm_closed = False
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.rstrip("\n")
+                if s.strip() == "---":
+                    if not in_fm:
+                        in_fm = True
+                        continue
+                    if in_fm and not fm_closed:
+                        fm_closed = True
+                        continue
+                if in_fm and not fm_closed:
+                    if ":" in s:
+                        k, v = s.split(":", 1)
+                        fm[k.strip()] = v.strip().strip('"')
+                    continue
+                if fm_closed and s.strip().startswith("#") and not title:
+                    title = re.sub(r"^#+\s*", "", s).strip()
+                    title = re.sub(r"^Loop Scope:\s*", "", title)
+                    break
+    except Exception:
+        return {}, ""
+
+    return fm, title
+
+
+def load_loop_scopes(events: dict):
+    root = Path(scopes_dir)
+    if not root.exists():
+        return
+
+    for scope in sorted(root.glob("*.scope.md")):
+        fm, title = parse_scope_frontmatter(scope)
+        loop_id = str(fm.get("loop_id") or "").strip()
+        if not loop_id:
+            continue
+
+        created = str(
+            fm.get("updated_at")
+            or fm.get("closed_at")
+            or fm.get("created_at")
+            or fm.get("created")
+            or fm.get("opened")
+            or ""
+        )
+        status = str(fm.get("status") or "unknown")
+        severity = str(fm.get("severity") or "").strip().lower()
+        source_counts["loop_scope"] += 1
+
+        add_event(events, {
+            "id": f"loop:{loop_id}",
+            "created_at": created,
+            "event_type": "loop.scope",
+            "subject_type": "loop_scope",
+            "subject_id": loop_id,
+            "status": status,
+            "loop_id": loop_id,
+            "capability": "",
+            "source_path": str(scope),
+            "summary": title or loop_id,
+            "severity": severity,
+            "actor_id": str(fm.get("owner") or ""),
+        })
+
+
+def load_gaps(events: dict):
+    path = Path(gaps_file)
+    if not path.exists():
+        return
+
+    try:
+        out = subprocess.check_output(
+            ["yq", "-o=json", ".gaps", str(path)],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        rows = json.loads(out) or []
+    except Exception:
+        rows = []
+
+    for row in rows:
+        gap_id = str(row.get("id") or "").strip()
+        if not gap_id:
+            continue
+
+        created = str(
+            row.get("created_at")
+            or row.get("discovered_at")
+            or row.get("updated_at")
+            or ""
+        )
+        status = str(row.get("status") or "unknown")
+        description = parse_first_line(str(row.get("description") or ""))
+        source_counts["gap"] += 1
+
+        add_event(events, {
+            "id": f"gap:{gap_id}",
+            "created_at": created,
+            "event_type": "gap.status",
+            "subject_type": "gap",
+            "subject_id": gap_id,
+            "status": status,
+            "loop_id": str(row.get("parent_loop") or ""),
+            "capability": "gaps",
+            "source_path": str(path),
+            "summary": description or gap_id,
+            "severity": str(row.get("severity") or ""),
+            "actor_id": str(row.get("discovered_by") or ""),
+        })
+
+
+def load_handoffs(events: dict):
+    root = Path(handoff_dir)
+    if not root.exists():
+        return
+
+    for path in sorted(root.glob("HO-*.yaml")):
+        data = yq_json(path)
+        if not data:
+            continue
+
+        handoff_id = str(data.get("id") or "").strip()
+        if not handoff_id:
+            continue
+
+        loops = data.get("loops") or []
+        loop_id = ""
+        if isinstance(loops, list) and loops:
+            loop_id = str(loops[0])
+
+        source_counts["handoff"] += 1
+        add_event(events, {
+            "id": f"handoff:{handoff_id}",
+            "created_at": str(data.get("created_at_utc") or ""),
+            "event_type": "handoff.state",
+            "subject_type": "handoff",
+            "subject_id": handoff_id,
+            "status": str(data.get("state") or "unknown"),
+            "loop_id": loop_id,
+            "capability": "session.handoff",
+            "source_path": str(path),
+            "summary": parse_first_line(str(data.get("summary") or "")),
+            "severity": "medium" if str(data.get("state") or "") == "active" else "low",
+            "actor_id": str(data.get("owner") or ""),
+        })
+
+
+def load_orchestration(events: dict):
+    root = Path(orch_dir)
+    if not root.exists():
+        return
+
+    for manifest in sorted(root.glob("*/manifest.yaml")):
+        data = yq_json(manifest)
+        if not data:
+            continue
+
+        loop_id = str(data.get("loop_id") or manifest.parent.name)
+        lanes = data.get("lanes") or {}
+        apply_owner = str(data.get("apply_owner") or "")
+        updated_at = str(data.get("updated_at") or data.get("created_at") or "")
+
+        if isinstance(lanes, dict):
+            for lane_id, lane_data in lanes.items():
+                status = "unknown"
+                actor = apply_owner
+                if isinstance(lane_data, dict):
+                    status = str(lane_data.get("status") or "unknown")
+                    actor = str(lane_data.get("worker") or actor)
+                source_counts["orchestration"] += 1
+                add_event(events, {
+                    "id": f"orchestration:{loop_id}:{lane_id}",
+                    "created_at": updated_at,
+                    "event_type": "orchestration.lane_status",
+                    "subject_type": "orchestration_lane",
+                    "subject_id": f"{loop_id}:{lane_id}",
+                    "status": status,
+                    "loop_id": loop_id,
+                    "capability": "orchestration",
+                    "source_path": str(manifest),
+                    "summary": f"lane {lane_id} status {status}",
+                    "severity": "high" if status in {"blocked", "failed"} else "low",
+                    "actor_id": actor,
+                })
+
+
+def load_proposals(events: dict):
+    root = Path(proposals_dir)
+    if not root.exists():
+        return
+
+    for manifest in sorted(root.glob("CP-*/manifest.yaml")):
+        data = yq_json(manifest)
+        if not data:
+            continue
+
+        proposal_id = str(data.get("proposal") or manifest.parent.name)
+        status = str(data.get("status") or "unknown")
+        created = str(data.get("created") or "")
+        summary = parse_first_line(str(data.get("description") or proposal_id))
+
+        source_counts["proposal"] += 1
+        add_event(events, {
+            "id": f"proposal:{proposal_id}",
+            "created_at": created,
+            "event_type": "proposal.status",
+            "subject_type": "proposal",
+            "subject_id": proposal_id,
+            "status": status,
+            "loop_id": first_loop_id(summary),
+            "capability": "proposals",
+            "source_path": str(manifest),
+            "summary": summary,
+            "severity": "medium" if status == "pending" else "low",
+            "actor_id": str(data.get("agent") or ""),
+        })
+
+
+def parse_event_dt(created_at: str) -> datetime:
+    if created_at.endswith("Z"):
+        return datetime.fromisoformat(created_at.replace("Z", "+00:00")).astimezone(timezone.utc)
+    return datetime.fromisoformat(created_at).astimezone(timezone.utc)
+
+
+now = datetime.now(timezone.utc)
+default_until = now
+default_since = now - timedelta(hours=24)
+
+since_dt = parse_window_value(since_raw, now, default_since)
+until_dt = parse_window_value(until_raw, now, default_until)
+if since_dt > until_dt:
+    since_dt, until_dt = until_dt, since_dt
+
+events: dict[str, dict] = {}
+
+load_receipt_index(events)
+if scan_receipts:
+    load_receipts_scan(events, since_dt)
+load_ledger(events)
+load_loop_scopes(events)
+load_gaps(events)
+load_handoffs(events)
+load_orchestration(events)
+load_proposals(events)
+
+filtered = []
+for event in events.values():
+    try:
+        created_dt = parse_event_dt(event["created_at"])
+    except Exception:
+        continue
+
+    if created_dt < since_dt or created_dt > until_dt:
+        continue
+    if event_type_filter and event.get("event_type") != event_type_filter:
+        continue
+    if loop_id_filter and event.get("loop_id") != loop_id_filter:
+        continue
+    if status_filter and event.get("status") != status_filter:
+        continue
+    filtered.append(event)
+
+filtered.sort(key=lambda e: (e.get("created_at", ""), e.get("id", "")), reverse=True)
+filtered = filtered[:limit]
+
+generated_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+until_iso = until_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+envelope = {
+    "capability": "spine.timeline.query",
+    "generated_at": generated_at,
+    "window": {
+        "since": since_iso,
+        "until": until_iso,
+        "timezone": timezone_name,
+    },
+    "source_counts": source_counts,
+    "receipt_index_used": source_counts["receipt_index"] > 0,
+    "receipt_scan_used": scan_receipts,
+    "events": filtered,
+}
+
+if output_format == "json":
+    print(json.dumps(envelope, indent=2))
+    raise SystemExit(0)
+
+tz = timezone.utc
+tz_label = timezone_name
+if timezone_name and timezone_name.upper() != "UTC" and ZoneInfo is not None:
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        tz = timezone.utc
+        tz_label = "UTC"
+
+print("# Spine Timeline")
+print()
+print(f"- Generated: {generated_at}")
+print(f"- Window: {since_iso} -> {until_iso}")
+print(f"- Timezone: {tz_label}")
+print(f"- Event Count: {len(filtered)}")
+print("- Sources:")
+for key in ["receipt_index", "receipt_scan", "ledger", "loop_scope", "gap", "handoff", "orchestration", "proposal"]:
+    print(f"  - {key}: {source_counts.get(key, 0)}")
+
+if not filtered:
+    print()
+    print("No events in selected window.")
+    raise SystemExit(0)
+
+print()
+print("## Events")
+for event in filtered:
+    dt_utc = parse_event_dt(event["created_at"])
+    dt_local = dt_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+    actor = event.get("actor_id")
+    severity = event.get("severity")
+
+    extras = []
+    if severity:
+        extras.append(f"severity={severity}")
+    if actor:
+        extras.append(f"actor_id={actor}")
+    extra_text = f" ({', '.join(extras)})" if extras else ""
+
+    print(
+        f"- {dt_local} | {event.get('status', 'unknown')} | {event.get('event_type', 'unknown')} | "
+        f"{event.get('subject_id', 'unknown')} | {event.get('summary', '')}{extra_text}"
+    )
+PY
