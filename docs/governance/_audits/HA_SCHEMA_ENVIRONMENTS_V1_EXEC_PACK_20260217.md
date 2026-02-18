@@ -46,3 +46,10 @@ Provide deterministic executor handoff for `GAP-OP-653` so schema/environment im
 - `GAP-OP-652`
 - `GAP-OP-654`
 - `GAP-OP-655`
+
+## Execution Evidence (Implemented)
+
+- Added `/Users/ronnyworks/code/agentic-spine/ops/bindings/ha.naming.convention.yaml` with canonical snake_case `{area}_{function}_{qualifier}` contract.
+- Added `/Users/ronnyworks/code/agentic-spine/ops/bindings/ha.environments.yaml` with `home` (active) and `shop` (planned) environment IDs.
+- Included reconciliation hooks to `ha.device.map.yaml`, `home.device.registry.yaml`, and `ha.ssot.baseline.yaml`.
+- Included post-mutation refresh contract linkage: `ha.device.map.build -> ha.refresh -> ha.ssot.baseline.build`.
