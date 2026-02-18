@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MINT-IMPLEMENT-BURNIN-24H-20260217
 created: 2026-02-17
-status: active
+status: closed
 owner: "@ronny"
 scope: mint
 objective: Track 24h sustained stability after Mint V1 implementation closeout before final burn-in gap closure.
