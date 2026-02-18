@@ -198,3 +198,33 @@ Loop remains `active` until D2/D3/D4 convergence work above is implemented and s
   - `ops/bindings/infra.vm.profiles.yaml`
 - Remaining warning classes still open: `updated`, `name`, `gate_id`, `domain_id`, `agent_id`, `last_synced`, `last_reviewed`, plus allowed legacy `notes`/`discovered_at`.
 - Explicit status: loop remains active for D2/D3/D4 convergence.
+
+## 2026-02-18 Phase-2D burn-down slice
+
+- Baseline violations/warnings: `3 / 85`
+- After violations/warnings: `0 / 66`
+- Warning delta: `-19`
+- Violation delta: `-3`
+- Files touched count: `19`
+- Files touched:
+  - `ops/bindings/alerting.rules.yaml`
+  - `ops/bindings/briefing.config.yaml`
+  - `ops/bindings/handoff.config.yaml`
+  - `ops/bindings/mailroom.bridge.consumers.yaml`
+  - `ops/bindings/mailroom.bridge.endpoints.yaml`
+  - `ops/bindings/mailroom.bridge.yaml`
+  - `ops/bindings/maker.tools.inventory.yaml`
+  - `ops/bindings/n8n.infra.reliability.contract.yaml`
+  - `ops/bindings/policy.autotune.contract.yaml`
+  - `ops/bindings/policy.runtime.contract.yaml`
+  - `ops/bindings/proactive.guard.policy.yaml`
+  - `ops/bindings/proposals.lifecycle.yaml`
+  - `ops/bindings/rag.embedding.backend.yaml`
+  - `ops/bindings/rag.metrics.normalization.yaml`
+  - `ops/bindings/rag.pipeline.contract.yaml`
+  - `ops/bindings/rag.reindex.quality.yaml`
+  - `ops/bindings/rag.remote.runner.yaml`
+  - `ops/bindings/rag.workspace.contract.yaml`
+  - `ops/bindings/receipts.index.schema.yaml`
+- Remaining warning classes still open: `updated`, `name`, `gate_id`, `domain_id`, `agent_id`, `last_synced`, `last_reviewed`, plus allowlisted legacy `notes`/`discovered_at`.
+- Explicit status: loop remains active for D2/D3/D4 convergence.
