@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+CONFIG="$ROOT/ops/bindings/handoff.config.yaml"
+STATE_FILTER="all"
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+session-handoff-list
+
+Usage:
+  session-handoff-list [--state <active|closed|expired|all>] [--json]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --state)
+      STATE_FILTER="${2:-all}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+handoff_dir="$(yq -r '.storage.directory // "mailroom/state/handoffs"' "$CONFIG")"
+full_dir="$ROOT/$handoff_dir"
+mkdir -p "$full_dir"
+
+rows='[]'
+while IFS= read -r file; do
+  [[ -f "$file" ]] || continue
+  state="$(yq -r '.state // "unknown"' "$file")"
+  if [[ "$STATE_FILTER" != "all" && "$state" != "$STATE_FILTER" ]]; then
+    continue
+  fi
+  row="$(jq -n \
+    --arg id "$(yq -r '.id // ""' "$file")" \
+    --arg state "$state" \
+    --arg owner "$(yq -r '.owner // ""' "$file")" \
+    --arg summary "$(yq -r '.summary // ""' "$file")" \
+    --arg created_at_utc "$(yq -r '.created_at_utc // ""' "$file")" \
+    --arg expires_at_utc "$(yq -r '.expires_at_utc // ""' "$file")" \
+    --arg path "$file" \
+    '{id:$id,state:$state,owner:$owner,summary:$summary,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc,path:$path}')"
+  rows="$(jq -c --argjson row "$row" '. + [$row]' <<<"$rows")"
+done < <(find "$full_dir" -maxdepth 1 -type f -name 'HO-*.yaml' | sort)
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n --arg capability "session.handoff.list" --arg state "$STATE_FILTER" --argjson handoffs "$rows" '{capability:$capability,state_filter:$state,handoffs:$handoffs}'
+  exit 0
+fi
+
+echo "session.handoff.list"
+echo "state_filter: $STATE_FILTER"
+echo "count: $(jq -r 'length' <<<"$rows")"
+jq -r '.[] | "- \(.id) [\(.state)] \(.owner): \(.summary)"' <<<"$rows"

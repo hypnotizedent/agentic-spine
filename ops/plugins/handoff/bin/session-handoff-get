@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+CONFIG="$ROOT/ops/bindings/handoff.config.yaml"
+ID=""
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+session-handoff-get
+
+Usage:
+  session-handoff-get --id HO-YYYYMMDD-HHMMSS [--json]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id)
+      ID="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -n "$ID" ]] || { echo "FAIL: --id is required" >&2; exit 2; }
+
+handoff_dir="$(yq -r '.storage.directory // "mailroom/state/handoffs"' "$CONFIG")"
+file="$ROOT/$handoff_dir/$ID.yaml"
+[[ -f "$file" ]] || { echo "FAIL: handoff not found: $ID" >&2; exit 1; }
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  yq -o=json '.' "$file"
+else
+  cat "$file"
+fi

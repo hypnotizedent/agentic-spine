@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+CONFIG="$ROOT/ops/bindings/handoff.config.yaml"
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+session-handoff-status
+
+Usage:
+  session-handoff-status [--json]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+handoff_dir="$(yq -r '.storage.directory // "mailroom/state/handoffs"' "$CONFIG")"
+full_dir="$ROOT/$handoff_dir"
+mkdir -p "$full_dir"
+
+active=0
+closed=0
+expired=0
+
+while IFS= read -r file; do
+  [[ -f "$file" ]] || continue
+  state="$(yq -r '.state // "unknown"' "$file")"
+  case "$state" in
+    active) active=$((active + 1)) ;;
+    closed) closed=$((closed + 1)) ;;
+    expired) expired=$((expired + 1)) ;;
+  esac
+done < <(find "$full_dir" -maxdepth 1 -type f -name 'HO-*.yaml' | sort)
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n --arg capability "session.handoff.status" --argjson active "$active" --argjson closed "$closed" --argjson expired "$expired" '{capability:$capability,active:$active,closed:$closed,expired:$expired}'
+  exit 0
+fi
+
+echo "session.handoff.status"
+echo "active: $active"
+echo "closed: $closed"
+echo "expired: $expired"
