@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+MANIFEST="$ROOT/ops/bindings/infra.relocation.plan.yaml"
+POLICY="$ROOT/ops/bindings/infra.placement.policy.yaml"
+CAPS="$ROOT/ops/capabilities.yaml"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+need yq
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+[[ -f "$MANIFEST" ]] || fail "missing relocation manifest: $MANIFEST"
+[[ -f "$POLICY" ]] || fail "missing placement policy: $POLICY"
+[[ -f "$CAPS" ]] || fail "missing capabilities registry: $CAPS"
+
+vm_host="$(yq e -r '.pilot.vm_target.hostname // ""' "$CONTRACT")"
+vm_id="$(yq e -r '.pilot.vm_target.vm_id // ""' "$CONTRACT")"
+profile="$(yq e -r '.pilot.vm_target.profile // ""' "$CONTRACT")"
+proxmox="$(yq e -r '.pilot.vm_target.proxmox_host // ""' "$CONTRACT")"
+provider="$(yq e -r '.pilot.provider // ""' "$CONTRACT")"
+stage="$(yq e -r '.pilot.stage // ""' "$CONTRACT")"
+mailbox_count="$(yq e '.pilot.mailboxes | length' "$CONTRACT")"
+cap_count="$(yq e '.capabilities | keys | map(select(test("^communications\\."))) | length' "$CAPS")"
+
+manifest_vm_id="$(yq e -r ".vm_targets[] | select(.hostname == \"$vm_host\") | .vm_id // \"\"" "$MANIFEST" 2>/dev/null || true)"
+policy_host_site="$(yq e -r ".hosts.\"$vm_host\".site // \"\"" "$POLICY" 2>/dev/null || true)"
+policy_req_host="$(yq e -r ".vm_target_requirements.\"$vm_host\".required_proxmox_host // \"\"" "$POLICY" 2>/dev/null || true)"
+
+status="OK"
+if [[ -z "$vm_host" || -z "$vm_id" || -z "$profile" || -z "$proxmox" ]]; then
+  status="FAIL"
+fi
+if [[ -z "$manifest_vm_id" || "$manifest_vm_id" != "$vm_id" ]]; then
+  status="FAIL"
+fi
+if [[ -z "$policy_host_site" || -z "$policy_req_host" || "$policy_req_host" != "$proxmox" ]]; then
+  status="FAIL"
+fi
+if [[ "$cap_count" -lt 4 ]]; then
+  status="FAIL"
+fi
+
+echo "communications.stack.status"
+echo "provider: $provider"
+echo "stage: $stage"
+echo "vm_target: $vm_host (vm_id=$vm_id, profile=$profile, proxmox_host=$proxmox)"
+echo "mailboxes: $mailbox_count"
+echo "communications_capabilities_registered: $cap_count"
+echo "manifest_vm_target_match: $([[ "$manifest_vm_id" == "$vm_id" ]] && echo yes || echo no)"
+echo "placement_policy_host_registered: $([[ -n "$policy_host_site" ]] && echo yes || echo no)"
+echo "placement_policy_target_requirement: $([[ "$policy_req_host" == "$proxmox" ]] && echo yes || echo no)"
+echo "status: $status"
+
+[[ "$status" == "OK" ]] || exit 1

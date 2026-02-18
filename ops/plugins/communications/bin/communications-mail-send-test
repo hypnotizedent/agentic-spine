@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+
+TO=""
+SUBJECT="Spine communications WS1 send-test"
+BODY="WS1 pilot send-test (simulation-only)."
+EXECUTE=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-mail-send-test --to <address> [--subject <text>] [--body <text>] [--execute]
+
+WS1 contract enforces simulation-only mode. --execute records simulated payload locally.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --to) TO="${2:-}"; shift 2 ;;
+    --subject) SUBJECT="${2:-}"; shift 2 ;;
+    --body) BODY="${2:-}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$TO" ]] || { usage >&2; exit 2; }
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+[[ -f "$CONTRACT" ]] || { echo "ERROR: missing contract: $CONTRACT" >&2; exit 1; }
+
+mode="$(yq e -r '.pilot.send_test.mode // "simulation-only"' "$CONTRACT")"
+default_sender="$(yq e -r '.pilot.send_test.default_sender // "ops@communications.local"' "$CONTRACT")"
+mapfile -t allowed_domains < <(yq e -r '.pilot.send_test.allowed_recipient_domains[]?' "$CONTRACT")
+
+recipient_domain="${TO##*@}"
+allowed=false
+for d in "${allowed_domains[@]:-}"; do
+  [[ "$recipient_domain" == "$d" ]] && allowed=true && break
+done
+[[ "$allowed" == true ]] || { echo "ERROR: recipient domain '$recipient_domain' not allowed by contract" >&2; exit 1; }
+
+echo "communications.mail.send.test"
+echo "mode: $mode"
+echo "from: $default_sender"
+echo "to: $TO"
+echo "subject: $SUBJECT"
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+  echo "status: DRY-RUN (pass --execute after manual approval to record simulation)"
+  exit 0
+fi
+
+stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+out_file="${TMPDIR:-/tmp}/communications-send-test-last.yaml"
+cat > "$out_file" <<YAML
+created_at: "$stamp"
+from: "$default_sender"
+to: "$TO"
+subject: "$SUBJECT"
+body: "$BODY"
+mode: "$mode"
+status: simulated
+YAML
+
+echo "status: simulated"
+echo "record: $out_file"

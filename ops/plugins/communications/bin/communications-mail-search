@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+QUERY="${1:-}"
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing dependency: $1" >&2; exit 1; }; }
+need yq
+[[ -f "$CONTRACT" ]] || { echo "ERROR: missing contract: $CONTRACT" >&2; exit 1; }
+
+rows="$(yq e -r '.pilot.mailboxes[] | [.id, .address, .role, .status] | @tsv' "$CONTRACT")"
+
+echo "communications.mail.search"
+if [[ -n "$QUERY" ]]; then
+  echo "query: $QUERY"
+fi
+printf "%-12s %-34s %-14s %-10s\n" "id" "address" "role" "status"
+printf "%-12s %-34s %-14s %-10s\n" "------------" "----------------------------------" "--------------" "----------"
+
+count=0
+while IFS=$'\t' read -r id address role status; do
+  line="$id $address $role $status"
+  if [[ -z "$QUERY" ]] || echo "$line" | grep -qi -- "$QUERY"; then
+    printf "%-12s %-34s %-14s %-10s\n" "$id" "$address" "$role" "$status"
+    count=$((count + 1))
+  fi
+done <<< "$rows"
+
+echo "matches: $count"
