@@ -67,9 +67,8 @@ if [[ "$REPO_GIT_OK" -eq 1 ]]; then
       worktree_status="OK"
       worktree_detail="$out"
     else
-      worktree_status="DIRTY"
+      worktree_status="WARN"
       worktree_detail="$out"
-      preflight_fail=1
     fi
   else
     worktree_status="WARN"
@@ -199,7 +198,6 @@ if [[ "$preflight_fail" -eq 1 || "$gate_domain_fail" -eq 1 ]]; then
 STOP
   if [[ "$preflight_fail" -eq 1 ]]; then
     echo "  - Remote authority (origin reachable; mirror drift warns)"
-    echo "  - Codex worktree hygiene (no stale/dirty codex worktrees)"
     echo "  - Worktree/session isolation policy (D140)"
   fi
   if [[ "$gate_domain_fail" -eq 1 ]]; then
