@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONTRACT="${ROOT}/ops/bindings/policy.autotune.contract.yaml"
+
+JSON_OUT=0
+WINDOW_DAYS_OVERRIDE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      JSON_OUT=1
+      shift
+      ;;
+    --window-days)
+      WINDOW_DAYS_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ ! -f "$CONTRACT" ]]; then
+  echo "STOP (2): missing contract: $CONTRACT" >&2
+  exit 2
+fi
+
+if ! command -v yq >/dev/null 2>&1; then
+  echo "STOP (2): yq required for contract parsing" >&2
+  exit 2
+fi
+
+WINDOW_DAYS="$(yq e -r '.window.days // 7' "$CONTRACT" 2>/dev/null || echo 7)"
+if [[ -n "$WINDOW_DAYS_OVERRIDE" ]]; then
+  WINDOW_DAYS="$WINDOW_DAYS_OVERRIDE"
+fi
+
+REPORT_DIR_REL="$(yq e -r '.outputs.report_dir // "mailroom/outbox/reports/policy-autotune"' "$CONTRACT" 2>/dev/null || echo "mailroom/outbox/reports/policy-autotune")"
+STATE_PATH_REL="$(yq e -r '.outputs.state_path // "mailroom/state/policy-autotune/state.json"' "$CONTRACT" 2>/dev/null || echo "mailroom/state/policy-autotune/state.json")"
+REPORT_DIR="${ROOT}/${REPORT_DIR_REL}"
+STATE_PATH="${ROOT}/${STATE_PATH_REL}"
+STATE_DIR="$(dirname "$STATE_PATH")"
+mkdir -p "$REPORT_DIR" "$STATE_DIR"
+
+CONTRACT_JSON="$(yq -o=json '.' "$CONTRACT")"
+NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STAMP="$(date -u +%Y%m%d-%H%M%S)"
+REPORT_JSON="${REPORT_DIR}/policy-autotune-weekly-${STAMP}.json"
+REPORT_MD="${REPORT_DIR}/policy-autotune-weekly-${STAMP}.md"
+
+export POLICY_AUTOTUNE_CONTRACT_JSON="$CONTRACT_JSON"
+export POLICY_AUTOTUNE_JSON_OUT="$JSON_OUT"
+python3 - "$ROOT" "$WINDOW_DAYS" "$NOW_UTC" "$REPORT_JSON" "$REPORT_MD" "$STATE_PATH" <<'PY'
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+def iso_to_dt(raw: str):
+    raw = raw.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    return dt.datetime.fromisoformat(raw)
+
+
+def run(cmd):
+    p = subprocess.run(cmd, text=True, capture_output=True)
+    return p.returncode, p.stdout, p.stderr
+
+
+root = Path(sys.argv[1]).resolve()
+window_days = int(sys.argv[2])
+now_utc = iso_to_dt(sys.argv[3])
+report_json = Path(sys.argv[4]).resolve()
+report_md = Path(sys.argv[5]).resolve()
+state_path = Path(sys.argv[6]).resolve()
+contract = json.loads(os.environ.get("POLICY_AUTOTUNE_CONTRACT_JSON", "{}"))
+
+window_start = now_utc - dt.timedelta(days=window_days)
+receipts_root = root / "receipts" / "sessions"
+
+cap_re = re.compile(r"\| Capability \| `([^`]+)` \|")
+start_re = re.compile(r"\| Start \| ([^|]+)\|")
+end_re = re.compile(r"\| End \| ([^|]+)\|")
+exit_re = re.compile(r"\| Exit Code \| (\d+) \|")
+
+records = []
+if receipts_root.exists():
+    for entry in receipts_root.iterdir():
+        receipt = entry / "receipt.md"
+        if not receipt.exists():
+            continue
+        txt = receipt.read_text(errors="ignore")
+        cap_m = cap_re.search(txt)
+        start_m = start_re.search(txt)
+        end_m = end_re.search(txt)
+        exit_m = exit_re.search(txt)
+        if not cap_m or not start_m or not end_m:
+            continue
+        try:
+            start_dt = iso_to_dt(start_m.group(1).strip())
+            end_dt = iso_to_dt(end_m.group(1).strip())
+        except Exception:
+            continue
+        if start_dt < window_start:
+            continue
+        duration = max(0, int((end_dt - start_dt).total_seconds()))
+        exit_code = int(exit_m.group(1)) if exit_m else 1
+        records.append(
+            {
+                "run_dir": entry.name,
+                "capability": cap_m.group(1),
+                "start": start_dt,
+                "end": end_dt,
+                "duration_seconds": duration,
+                "exit_code": exit_code,
+            }
+        )
+
+by_cap = {}
+for r in records:
+    cap = r["capability"]
+    if cap not in by_cap:
+        by_cap[cap] = {"count": 0, "failures": 0, "duration_seconds": 0}
+    by_cap[cap]["count"] += 1
+    by_cap[cap]["duration_seconds"] += r["duration_seconds"]
+    if r["exit_code"] != 0:
+        by_cap[cap]["failures"] += 1
+
+for cap in by_cap:
+    secs = by_cap[cap]["duration_seconds"]
+    by_cap[cap]["soak_minutes"] = round(secs / 60.0, 2)
+    cnt = by_cap[cap]["count"]
+    by_cap[cap]["failure_rate_pct"] = round((by_cap[cap]["failures"] / cnt) * 100.0, 2) if cnt else 0.0
+
+verify_run_count = sum(1 for r in records if r["capability"].startswith("verify."))
+rc, out, _ = run(["git", "-C", str(root), "rev-list", "--count", "--since", f"{window_days} days ago", "HEAD"])
+commit_count = int(out.strip() or "0") if rc == 0 else 0
+rerun_per_commit = round(verify_run_count / max(1, commit_count), 2)
+
+release_runs = [r for r in records if r["capability"] == "verify.release.run"]
+release_total = len(release_runs)
+release_fail = sum(1 for r in release_runs if r["exit_code"] != 0)
+release_fail_rate_pct = round((release_fail / release_total) * 100.0, 2) if release_total else 0.0
+
+proposals_dir = root / "mailroom" / "outbox" / "proposals"
+pending_count = 0
+pending_oldest_days = 0
+for cp in proposals_dir.glob("CP-*"):
+    manifest = cp / "manifest.yaml"
+    if not manifest.exists():
+        continue
+    txt = manifest.read_text(errors="ignore")
+    status_m = re.search(r"^status:\s*([^\n]+)$", txt, flags=re.M)
+    status = status_m.group(1).strip().strip('"').strip("'") if status_m else "pending"
+    if status in ("applied", "superseded", "draft_hold", "read-only", "invalid"):
+        continue
+    created_m = re.search(r"^created:\s*([^\n]+)$", txt, flags=re.M)
+    pending_count += 1
+    if created_m:
+        created_raw = created_m.group(1).strip().strip('"').strip("'")
+        try:
+            created_dt = iso_to_dt(created_raw)
+            age_days = int((now_utc - created_dt).total_seconds() // 86400)
+            pending_oldest_days = max(pending_oldest_days, age_days)
+        except Exception:
+            pass
+
+# Parse top fail gates from existing analyzer (best effort).
+fail_gate_counts = {}
+failure_stats_cmd = [str(root / "ops" / "plugins" / "verify" / "bin" / "drift-gates-failure-stats")]
+rc, fs_out, fs_err = run(failure_stats_cmd)
+if rc == 0:
+    for line in fs_out.splitlines():
+        m = re.match(r"\s+(D\d+):\s+(\d+)\b", line)
+        if m:
+            fail_gate_counts[m.group(1)] = int(m.group(2))
+
+guardrails = contract.get("guardrails", {})
+thresholds = contract.get("thresholds", {})
+no_touch = set(guardrails.get("no_touch_gate_ids", []))
+max_recs = int(guardrails.get("max_recommendations_per_week", 2))
+
+recommendations = []
+core_soak = by_cap.get("verify.core.run", {}).get("soak_minutes", 0.0)
+core_soak_threshold = float(thresholds.get("soak_minutes_by_cap", {}).get("verify.core.run", 180))
+rerun_threshold = float(thresholds.get("rerun_per_commit_ratio", 4.0))
+release_threshold = float(thresholds.get("release_fail_rate_pct", 20.0))
+queue_warn = int(thresholds.get("queue_pending_warn", 8))
+pending_age_warn = int(thresholds.get("pending_age_days_warn", 7))
+
+if core_soak >= core_soak_threshold and rerun_per_commit >= rerun_threshold and release_fail_rate_pct <= release_threshold:
+    if "D48" not in no_touch:
+        recommendations.append(
+            {
+                "id": "rec-demote-d48-core-lane",
+                "type": "gate-cadence-adjustment",
+                "target_gate_id": "D48",
+                "proposed_action": "keep D48 advisory in preflight/core lane and enforce in release/hygiene lanes only",
+                "reason": f"high soak ({core_soak}m) + high rerun/commit ratio ({rerun_per_commit}) with acceptable release fail rate ({release_fail_rate_pct}%)",
+            }
+        )
+
+if pending_count >= queue_warn or pending_oldest_days >= pending_age_warn:
+    recommendations.append(
+        {
+            "id": "rec-queue-hygiene-weekly",
+            "type": "queue-friction",
+            "target": "proposal-queue",
+            "proposed_action": "run weekly proposal queue compression (supersede stale registration-only CPs)",
+            "reason": f"pending_count={pending_count}, pending_oldest_days={pending_oldest_days}",
+        }
+    )
+
+if release_fail_rate_pct > release_threshold:
+    recommendations.append(
+        {
+            "id": "rec-promote-release-protection",
+            "type": "protection-ratchet",
+            "target": "release-lane",
+            "proposed_action": "promote high-value gates back into tighter cadence until release reliability recovers",
+            "reason": f"release_fail_rate_pct={release_fail_rate_pct} exceeds threshold={release_threshold}",
+        }
+    )
+
+recommendations = recommendations[:max_recs]
+
+state = {}
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text())
+    except Exception:
+        state = {}
+
+report = {
+    "capability": "policy.autotune.weekly",
+    "generated_at": now_utc.isoformat().replace("+00:00", "Z"),
+    "window_days": window_days,
+    "window_start": window_start.isoformat().replace("+00:00", "Z"),
+    "window_end": now_utc.isoformat().replace("+00:00", "Z"),
+    "contract_path": str(root / "ops" / "bindings" / "policy.autotune.contract.yaml"),
+    "guardrails": {
+        "no_touch_gate_ids": sorted(no_touch),
+        "max_recommendations_per_week": max_recs,
+        "require_human_apply": bool(guardrails.get("require_human_apply", True)),
+    },
+    "metrics": {
+        "capability_soak": by_cap,
+        "verify_runs": verify_run_count,
+        "commit_count": commit_count,
+        "rerun_per_commit_ratio": rerun_per_commit,
+        "proposal_queue": {
+            "pending_count": pending_count,
+            "pending_oldest_days": pending_oldest_days,
+        },
+        "release_quality": {
+            "runs": release_total,
+            "failures": release_fail,
+            "fail_rate_pct": release_fail_rate_pct,
+        },
+        "top_fail_gates": fail_gate_counts,
+    },
+    "recommendations": recommendations,
+    "state_path": str(state_path),
+}
+
+state["last_run_at"] = report["generated_at"]
+state["last_release_fail_rate_pct"] = release_fail_rate_pct
+state["last_recommendation_ids"] = [r["id"] for r in recommendations]
+
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+report_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+md_lines = [
+    "# Policy Autotune Weekly Report",
+    "",
+    f"- Generated: {report['generated_at']}",
+    f"- Window: last {window_days} days",
+    "",
+    "## Metrics",
+    f"- verify_runs: {verify_run_count}",
+    f"- commits: {commit_count}",
+    f"- rerun_per_commit_ratio: {rerun_per_commit}",
+    f"- pending_proposals: {pending_count}",
+    f"- pending_oldest_days: {pending_oldest_days}",
+    f"- release_fail_rate_pct: {release_fail_rate_pct}",
+    "",
+    "## Soak Minutes (selected caps)",
+]
+
+for cap in sorted(by_cap.keys()):
+    if cap in {"stability.control.snapshot", "verify.core.run", "verify.domain.run", "verify.release.run", "spine.verify"}:
+        md_lines.append(f"- {cap}: {by_cap[cap]['soak_minutes']}m ({by_cap[cap]['count']} runs)")
+
+md_lines.extend(["", "## Recommendations"])
+if recommendations:
+    for rec in recommendations:
+        target = rec.get("target_gate_id", rec.get("target", "n/a"))
+        md_lines.append(f"- {rec['id']}: {rec['proposed_action']} ({target})")
+        md_lines.append(f"  - reason: {rec['reason']}")
+else:
+    md_lines.append("- none")
+
+md_lines.append("")
+md_lines.append("## Stop Line")
+md_lines.append("observe -> decide complete; no policy files mutated by this capability.")
+md_lines.append("")
+report_md.write_text("\n".join(md_lines) + "\n")
+
+print(f"policy.autotune.weekly")
+print(f"report_json: {report_json}")
+print(f"report_md: {report_md}")
+print(f"state_path: {state_path}")
+print(f"recommendations: {len(recommendations)}")
+if os.environ.get("POLICY_AUTOTUNE_JSON_OUT", "0") == "1":
+    print(json.dumps(report))
+PY
+
+if [[ "$JSON_OUT" -eq 0 ]]; then
+  # Print readable summary without large JSON blob.
+  python3 - "$REPORT_JSON" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+m = data["metrics"]
+print("policy.autotune.weekly")
+print(f"window_days: {data['window_days']}")
+print(f"report_json: {path}")
+print(f"report_md: {path.with_suffix('.md')}")
+print("summary:")
+print(f"  verify_runs={m['verify_runs']}")
+print(f"  commits={m['commit_count']}")
+print(f"  rerun_per_commit_ratio={m['rerun_per_commit_ratio']}")
+print(f"  pending={m['proposal_queue']['pending_count']}, pending_oldest_days={m['proposal_queue']['pending_oldest_days']}")
+print(f"  release_fail_rate_pct={m['release_quality']['fail_rate_pct']}")
+print(f"recommendations={len(data['recommendations'])}")
+PY
+fi

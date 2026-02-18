@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONTRACT="${ROOT}/ops/bindings/policy.autotune.contract.yaml"
+
+DRY_RUN=0
+REPORT_JSON=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --report)
+      REPORT_JSON="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ ! -f "$CONTRACT" ]]; then
+  echo "STOP (2): missing contract: $CONTRACT" >&2
+  exit 2
+fi
+
+if ! command -v yq >/dev/null 2>&1; then
+  echo "STOP (2): yq required for contract parsing" >&2
+  exit 2
+fi
+
+REPORT_DIR_REL="$(yq e -r '.outputs.report_dir // "mailroom/outbox/reports/policy-autotune"' "$CONTRACT" 2>/dev/null || echo "mailroom/outbox/reports/policy-autotune")"
+REPORT_DIR="${ROOT}/${REPORT_DIR_REL}"
+
+if [[ -z "$REPORT_JSON" ]]; then
+  REPORT_JSON="$(ls -1t "${REPORT_DIR}"/policy-autotune-weekly-*.json 2>/dev/null | head -n1 || true)"
+fi
+
+if [[ -z "$REPORT_JSON" || ! -f "$REPORT_JSON" ]]; then
+  echo "STOP (2): no weekly report found. Run policy.autotune.weekly first." >&2
+  exit 2
+fi
+
+PROPOSAL_DESC_PREFIX="$(yq e -r '.proposal.description_prefix // "policy-autotune-weekly"' "$CONTRACT" 2>/dev/null || echo "policy-autotune-weekly")"
+PROPOSAL_LOOP_ID="$(yq e -r '.proposal.loop_id // "null"' "$CONTRACT" 2>/dev/null || echo "null")"
+AUTO_PROPOSE_ENABLED="$(yq e -r '.guardrails.auto_propose_enabled // true' "$CONTRACT" 2>/dev/null || echo true)"
+
+if [[ "$AUTO_PROPOSE_ENABLED" != "true" ]]; then
+  echo "policy.autotune.propose"
+  echo "autotune auto_propose_enabled=false (contract); exiting without submit."
+  exit 0
+fi
+
+TMP_SUMMARY="$(mktemp)"
+python3 - "$REPORT_JSON" "$TMP_SUMMARY" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+report = json.loads(Path(sys.argv[1]).read_text())
+summary_path = Path(sys.argv[2])
+recs = report.get("recommendations", [])
+summary = {
+    "generated_at": report.get("generated_at"),
+    "recommendation_count": len(recs),
+    "recommendation_ids": [r.get("id") for r in recs],
+    "report_path": str(Path(sys.argv[1]).resolve()),
+}
+summary_path.write_text(json.dumps(summary))
+PY
+REC_COUNT="$(cat "$TMP_SUMMARY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["recommendation_count"])')"
+
+if [[ "$REC_COUNT" -eq 0 ]]; then
+  echo "policy.autotune.propose"
+  echo "No recommendations in report; no proposal submitted."
+  rm -f "$TMP_SUMMARY"
+  exit 0
+fi
+
+DATE_TAG="$(date +%Y%m%d)"
+DESC="${PROPOSAL_DESC_PREFIX}-${DATE_TAG} (${REC_COUNT} recs)"
+HANDOFF_MD="${REPORT_DIR}/policy-autotune-proposal-handoff-${DATE_TAG}.md"
+
+python3 - "$REPORT_JSON" "$HANDOFF_MD" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+report = json.loads(Path(sys.argv[1]).read_text())
+dest = Path(sys.argv[2])
+lines = [
+    "# Policy Autotune Proposal Handoff",
+    "",
+    f"- Source report: `{Path(sys.argv[1]).resolve()}`",
+    f"- Generated: {report.get('generated_at')}",
+    "",
+    "## Recommendations",
+]
+for rec in report.get("recommendations", []):
+    target = rec.get("target_gate_id", rec.get("target", "n/a"))
+    lines.append(f"- {rec.get('id')}: {rec.get('proposed_action')} ({target})")
+    lines.append(f"  - reason: {rec.get('reason')}")
+lines.append("")
+lines.append("## Apply Policy")
+lines.append("- This proposal lane may submit only.")
+lines.append("- Human operator reviews and applies via proposals.apply.")
+lines.append("")
+dest.write_text("\n".join(lines) + "\n")
+PY
+
+echo "policy.autotune.propose"
+echo "report_json: $REPORT_JSON"
+echo "recommendations: $REC_COUNT"
+echo "handoff_md: $HANDOFF_MD"
+echo "description: $DESC"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "dry_run: true (no proposal submitted)"
+  rm -f "$TMP_SUMMARY"
+  exit 0
+fi
+
+if [[ "$PROPOSAL_LOOP_ID" != "null" && -n "$PROPOSAL_LOOP_ID" ]]; then
+  export SPINE_LOOP_ID="$PROPOSAL_LOOP_ID"
+fi
+
+"${ROOT}/bin/ops" cap run proposals.submit "$DESC"
+
+rm -f "$TMP_SUMMARY"

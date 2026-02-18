@@ -284,6 +284,7 @@ df -h /
 | `com.ronny.agent-inbox.plist` | On login | `hot-folder-watcher.sh` | Spine mailroom watcher (fswatch) | ACTIVE |
 | `com.ronny.docker-tunnel.plist` | On login | SSH -L 2375 | Docker tunnel to docker-host | ACTIVE |
 | `com.ronny.ha-baseline-refresh.plist` | Sun 05:00 | `ha-baseline-refresh.sh` | Weekly HA SSOT baseline refresh | ACTIVE |
+| `com.ronny.policy-autotune-weekly.plist` | Mon 09:10 | `policy-autotune-weekly.sh` | Weekly policy autotune: observe -> auto-propose (submit only) -> human apply | STAGED |
 | `com.ronny.streamdeck.ha.plist` | On login | `streamdeck_ha_controller.py` | Stream Deck HA button controller | ACTIVE |
 | `works.ronny.smb-paperless.plist` | On login | osascript SMB mount | Paperless SMB share on docker-host | ACTIVE |
 
@@ -293,7 +294,7 @@ df -h /
 
 **Crontab:** None (no crontab for ronnyworks). All scheduling via launchd.
 
-**Source:** External schedule inventory (workbench tooling via `WORKBENCH_TOOLING_INDEX.md`), verified 2026-02-05.
+**Source:** External schedule inventory (workbench tooling via `WORKBENCH_TOOLING_INDEX.md`) + spine launchd templates, verified 2026-02-18.
 
 ---
 

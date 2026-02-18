@@ -1,0 +1,80 @@
+# Policy Autotune Weekly Contract
+# Status: authoritative
+# Last verified: 2026-02-18
+# Scope: weekly-control-loop
+
+version: "1.0"
+updated: "2026-02-18"
+owner: "@ronny"
+scope: policy-autotune-weekly
+
+schedule:
+  timezone: "America/New_York"
+  weekday: "monday"
+  hour: 9
+  minute: 10
+
+window:
+  days: 7
+
+guardrails:
+  no_touch_gate_ids:
+    - D3
+    - D62
+    - D63
+    - D124
+    - D126
+    - D127
+    - D140
+  max_recommendations_per_week: 2
+  max_policy_edits_per_week: 2
+  require_human_apply: true
+  auto_propose_enabled: true
+
+tune_targets:
+  - d48_behavior
+  - core_mode_gate_membership
+  - verify_route_domain_routing
+  - check_cadence_friction
+
+metrics:
+  soak_caps:
+    - stability.control.snapshot
+    - verify.core.run
+    - verify.domain.run
+    - verify.release.run
+    - spine.verify
+  queue_caps:
+    - proposals.status
+    - gaps.status
+    - loops.status
+  recommended_sources:
+    - verify.drift_gates.failure_stats
+    - verify.pack.list
+    - slo.evidence.daily
+
+thresholds:
+  soak_minutes_by_cap:
+    verify.core.run: 180
+    stability.control.snapshot: 120
+  rerun_per_commit_ratio: 4.0
+  release_fail_rate_pct: 20.0
+  queue_pending_warn: 8
+  queue_pending_critical: 12
+  pending_age_days_warn: 7
+  pending_age_days_critical: 14
+
+decision_policy:
+  demote_after_consecutive_weeks: 2
+  promote_after_consecutive_weeks: 2
+  auto_revert_on_release_regression: true
+  release_regression_delta_pct: 10.0
+
+proposal:
+  description_prefix: "policy-autotune-weekly"
+  loop_id: null
+  note: "Proposer may submit only; apply remains human-gated."
+
+outputs:
+  report_dir: "mailroom/outbox/reports/policy-autotune"
+  state_path: "mailroom/state/policy-autotune/state.json"
