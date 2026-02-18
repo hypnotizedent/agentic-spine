@@ -1,7 +1,8 @@
 ---
 loop_id: LOOP-WORKBENCH-AOF-NORMALIZATION-IMPLEMENT-20260217
 created: 2026-02-17
-status: active
+status: closed
+closed_at: "2026-02-18"
 owner: "@ronny"
 scope: workbench
 objective: Implement canonical AOF normalization across workbench docs, compose/runtime, and secrets with proactive proposal preflight enforcement.
