@@ -129,7 +129,13 @@ Gradual touch-and-fix as files are modified (not big-bang):
 
 ## Phasing
 
-1. **Phase 1:** Land conventions schema + meta-gate (enforcement on new files only)
+1. **Phase 1:** Land conventions schema + meta-gate (enforcement on new files only) — **COMPLETE 2026-02-18**
+   - `ops/bindings/spine.schema.conventions.yaml` landed (v1)
+   - D129 gate enforcing in `aof` domain (gate mode: PASS, 0 violations)
+   - Full audit baseline: 131 files checked, 8 violations (disallowed `notes` in 8 files), 100+ discouraged warnings
+   - Touch-and-fix enforcement active: new/modified binding files validated on commit
+   - Certification: `CAP-20260217-214411__schema.conventions.audit__Rp5xp54656`
 2. **Phase 2:** Migrate high-value files (gaps, gates, VMs, loops frontmatter)
+   - 8 files with `notes` → `description` rename needed (backup.inventory, cli.tools.inventory, cloudflare.inventory, docker.compose.targets, ha.areas, mailroom.bridge.endpoints, secrets.credentials.parity, z2m.naming)
 3. **Phase 3:** CLI normalization (gap commands, error prefixes, exit codes)
 4. **Phase 4:** Backfill remaining binding files organically
