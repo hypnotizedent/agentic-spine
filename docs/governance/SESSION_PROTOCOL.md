@@ -93,7 +93,7 @@ Full spine access. Follow all sections below in order.
 | Single read-only query | `ops cap run` (auto-approval) |
 | Single mutating action | `ops cap run` (manual approval) |
 | Multi-step coordinated work | Open a loop, use proposal flow |
-| Quick verify/status check | `ops cap run stability.control.snapshot` + `ops cap run verify.core.run` + `ops cap run verify.domain.run <domain>` |
+| Quick verify/status check | `ops cap run stability.control.snapshot` + `ops cap run verify.core.run` + `ops cap run verify.pack.run <domain\|core-operator>` |
 | Release/nightly certification | `ops cap run spine.verify` |
 
 ### Gate Domain Packs (Terminal Routing)
@@ -109,7 +109,7 @@ Recommended pre-mutation command:
 ```bash
 ./bin/ops cap run stability.control.snapshot
 ./bin/ops cap run verify.core.run
-./bin/ops cap run verify.domain.run "${OPS_GATE_DOMAIN:-core}"
+./bin/ops cap run verify.pack.run "${OPS_GATE_DOMAIN:-core-operator}"
 ```
 
 ### After the session (Desktop)
