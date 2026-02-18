@@ -1,7 +1,7 @@
 ---
 status: approved
 owner: "@ronny"
-last_verified: 2026-02-17
+last_verified: 2026-02-18
 scope: aof-v1.1-surface-unification
 parent_gap: GAP-OP-627
 parent_loop: LOOP-AOF-V1-1-SURFACE-UNIFICATION-20260217
