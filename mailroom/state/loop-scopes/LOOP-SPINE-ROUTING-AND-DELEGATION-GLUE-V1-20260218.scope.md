@@ -14,6 +14,10 @@ objective: Close routing and delegation glue gaps via gateway-first parity, gove
 
 Close routing and delegation glue gaps via gateway-first parity, governed Cap-RPC task lifecycle, deterministic route JSON contract, orchestration dependency and health enforcement, and runtime/doc parity.
 
+## Context Artifact
+
+- `docs/governance/_audits/SPINE_AUTONOMOUS_ORCHESTRATION_GAP_AUDIT_20260218.md`
+
 ## Parent Gaps
 
 - GAP-OP-669
