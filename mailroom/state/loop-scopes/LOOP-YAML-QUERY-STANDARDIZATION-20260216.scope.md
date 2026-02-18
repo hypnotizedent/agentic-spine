@@ -1,7 +1,8 @@
 ---
 loop_id: LOOP-YAML-QUERY-STANDARDIZATION-20260216
 opened: 2026-02-16
-status: active
+status: closed
+closed_at: "2026-02-18"
 owner: "@ronny"
 severity: medium
 scope: yaml-query-standardization
@@ -49,3 +50,15 @@ Replace bare `yq` calls with a canonical `yaml_query` helper that bridges YAMLâ†
 
 - Discussion: 2026-02-16 session (yq expression reliability on macOS)
 - Related memory: MEMORY.md gotchas (yq boolean, has() vs select, Edit replace_all)
+
+## Closeout Evidence (2026-02-18)
+
+- Helper landed: `ops/lib/yaml.sh` present with `yaml_query` and `yaml_query -e`.
+- Phase-1 migration verified in target libs:
+  - `ops/lib/resolve-policy.sh`: 23 `yaml_query` calls
+  - `ops/lib/registry.sh`: 2 `yaml_query` calls
+  - `ops/commands/cap.sh`: 19 `yaml_query` calls (simple field reads migrated)
+- Lane certification pre/post:
+  - Pre-write lane gate: `CAP-20260217-232052__lane.standard.run__Rqsla40071`
+  - AOF post-mutation verify gate reused for session cert baseline: `CAP-20260217-233219__verify.core.run__Rdvxm21297`, `CAP-20260217-233301__verify.domain.run__Rcpzf34367`
+- Closure scope for this loop intentionally bounded to helper + phase-1 migration deliverables.
