@@ -1,6 +1,7 @@
 ---
 loop_id: LOOP-IMMICH-RECONCILE-AGENT-V1-20260217
-status: active
+status: closed
+closed_at: "2026-02-18"
 priority: high
 owner: "@ronny"
 created: 2026-02-17
