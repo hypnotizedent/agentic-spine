@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-TERMINAL-SCOPE-STATUS-RELIABILITY-V1-20260218
 created: 2026-02-18
-status: active
+status: closed
 owner: "@ronny"
 scope: terminal
 priority: high
