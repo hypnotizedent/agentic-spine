@@ -82,6 +82,25 @@ Timezone handling:
 - References existing `graph.calendar.*` capability contracts
 - Performs no mutating sync actions in v1
 
+### `calendar.sync.execute` (mutating, v1.1)
+- Contract source: `ops/bindings/calendar.sync.contract.yaml`
+- Stateful/idempotent sync with single-writer lock:
+  - lock: `mailroom/state/calendar-sync/.lock`
+  - state: `mailroom/state/calendar-sync/state.json`
+- Execution output envelope includes:
+  - `layers`
+  - `summary` (`planned`, `created`, `updated`, `pulled`, `skipped`, `conflicts`, `errors`)
+  - `actions[]`, `conflicts[]`, `errors[]`
+  - `state_path`
+- Idempotency + authority enforcement:
+  - spine-authoritative layers upsert remote events
+  - external-authoritative layers are pull-only (no remote writes)
+  - missing mapped remote event (404) recreates and remaps for spine-authoritative layers
+- Failure + retry contract:
+  - classes: `precondition_failed`, `auth_failed`, `rate_limited`, `transport_error`, `validation_error`, `conflict_error`, `state_write_error`
+  - retries only for `rate_limited` and `transport_error`
+  - `--continue-on-error` yields `status: partial` with classified failures
+
 ## Bridge Endpoint Contract
 
 ### `GET /calendar/feed` (auth required)

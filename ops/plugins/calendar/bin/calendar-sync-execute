@@ -1,0 +1,1057 @@
+#!/usr/bin/env python3
+"""calendar-sync-execute - calendar sync executor with lock/state/idempotency contract."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+REQUIRED_LAYERS = [
+    "infrastructure",
+    "automation",
+    "identity",
+    "personal",
+    "spine",
+    "life",
+]
+
+SPINE_AUTHORITATIVE = {"infrastructure", "automation", "spine"}
+EXTERNAL_AUTHORITATIVE = {"identity", "personal", "life"}
+
+
+@dataclass
+class SyncError(Exception):
+    error_class: str
+    message: str
+    exit_code: int = 1
+    code: str = ""
+    http_status: int | None = None
+    retryable: bool = False
+    attempts: int = 1
+
+
+class FileLock:
+    def __init__(self, path: Path, run_id: str, fail_on_lock_held: bool = True) -> None:
+        self.path = path
+        self.run_id = run_id
+        self.fail_on_lock_held = fail_on_lock_held
+        self.fd: int | None = None
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            self.fd = os.open(self.path, flags, 0o644)
+        except FileExistsError as exc:
+            if self.fail_on_lock_held:
+                raise SyncError(
+                    error_class="precondition_failed",
+                    message="sync_lock_held",
+                    exit_code=2,
+                    code="sync_lock_held",
+                ) from exc
+            return
+        payload = {
+            "run_id": self.run_id,
+            "pid": os.getpid(),
+            "created_at": now_iso(),
+        }
+        os.write(self.fd, (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
+
+    def release(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            return
+
+
+def now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def stop(msg: str, code: int = 2) -> None:
+    raise SyncError(error_class="precondition_failed", message=msg, exit_code=code)
+
+
+def run_yq_json(path: Path) -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            ["yq", "-o=json", ".", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise SyncError("precondition_failed", "missing dependency: yq", exit_code=2) from exc
+
+    if proc.returncode != 0:
+        raise SyncError("validation_error", f"invalid YAML: {path}", exit_code=2)
+
+    try:
+        obj = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise SyncError("validation_error", f"invalid YAML JSON parse: {exc}", exit_code=2) from exc
+
+    if not isinstance(obj, dict):
+        raise SyncError("validation_error", "binding root must be a map", exit_code=2)
+    return obj
+
+
+def parse_iso_date(value: str, field: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise SyncError("validation_error", f"invalid {field}: {value}", exit_code=2) from exc
+
+
+def sha1_hex(seed: str) -> str:
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()
+
+
+def desired_hash(payload: dict[str, Any]) -> str:
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def parse_backoff(raw: str) -> list[int]:
+    parts = [part.strip() for part in str(raw).split(",") if part.strip()]
+    if not parts:
+        return [1, 3, 8]
+    out: list[int] = []
+    for part in parts:
+        try:
+            val = int(part)
+        except ValueError as exc:
+            raise SyncError("validation_error", f"invalid retry backoff value: {part}", exit_code=2) from exc
+        if val < 0:
+            raise SyncError("validation_error", "retry backoff values must be >= 0", exit_code=2)
+        out.append(val)
+    return out
+
+
+def classify_graph_error(msg: str) -> tuple[str, bool, int | None]:
+    lower = msg.lower()
+    http_status = None
+    m = re.search(r"http\s+(\d{3})", lower)
+    if m:
+        http_status = int(m.group(1))
+
+    if "network error" in lower or "timed out" in lower or "connection" in lower:
+        return "transport_error", True, http_status
+    if http_status == 429:
+        return "rate_limited", True, http_status
+    if http_status in (401, 403):
+        return "auth_failed", False, http_status
+    if http_status == 409:
+        return "conflict_error", False, http_status
+    if http_status == 404:
+        return "conflict_error", False, http_status
+    if http_status in (400, 422):
+        return "validation_error", False, http_status
+    return "transport_error", True, http_status
+
+
+def parse_etag(result: dict[str, Any]) -> str:
+    if not isinstance(result, dict):
+        return ""
+    for key in ("@odata.etag", "etag", "eTag"):
+        val = str(result.get(key, "")).strip()
+        if val:
+            return val
+    return ""
+
+
+def state_default() -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "provider": "ms-graph",
+        "updated_at": now_iso(),
+        "mappings": {},
+        "ledger": [],
+    }
+
+
+def load_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return state_default()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SyncError("state_write_error", f"failed to parse state: {path}", exit_code=2) from exc
+    if not isinstance(raw, dict):
+        raise SyncError("state_write_error", "state root must be object", exit_code=2)
+
+    if not isinstance(raw.get("mappings"), dict):
+        raw["mappings"] = {}
+    if not isinstance(raw.get("ledger"), list):
+        raw["ledger"] = []
+    if not isinstance(raw.get("provider"), str):
+        raw["provider"] = "ms-graph"
+    if not isinstance(raw.get("schema_version"), str):
+        raw["schema_version"] = "1.0"
+    return raw
+
+
+def persist_state(path: Path, state: dict[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state["updated_at"] = now_iso()
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception as exc:
+        raise SyncError("state_write_error", f"failed writing state: {path}", exit_code=1) from exc
+
+
+def append_ledger(state: dict[str, Any], entry: dict[str, Any], path: Path) -> None:
+    ledger = state.setdefault("ledger", [])
+    if not isinstance(ledger, list):
+        state["ledger"] = []
+        ledger = state["ledger"]
+    ledger.append(entry)
+    # Keep ledger bounded.
+    if len(ledger) > 5000:
+        del ledger[: len(ledger) - 5000]
+    persist_state(path, state)
+
+
+def run_graph_op(graph_exec: Path, op: str, args: list[str]) -> dict[str, Any]:
+    cmd = [str(graph_exec), op] + args
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "graph operation failed").strip()
+        error_class, retryable, http_status = classify_graph_error(msg)
+        raise SyncError(
+            error_class=error_class,
+            message=msg,
+            exit_code=1,
+            http_status=http_status,
+            retryable=retryable,
+        )
+
+    out = (proc.stdout or "{}").strip()
+    if not out:
+        return {}
+    try:
+        parsed = json.loads(out)
+    except json.JSONDecodeError:
+        return {"raw": out}
+    if isinstance(parsed, dict):
+        return parsed
+    return {"value": parsed}
+
+
+def remote_call(
+    *,
+    graph_exec: Path,
+    op: str,
+    args: list[str],
+    retry_max_attempts: int,
+    retry_backoff: list[int],
+    run_id: str,
+    layer: str,
+    canonical_key: str,
+    mode: str,
+    state: dict[str, Any],
+    state_path: Path,
+) -> tuple[dict[str, Any], int]:
+    attempt = 0
+    while attempt < retry_max_attempts:
+        attempt += 1
+        if mode == "execute":
+            append_ledger(
+                state,
+                {
+                    "ts": now_iso(),
+                    "run_id": run_id,
+                    "phase": "before_call",
+                    "attempt": attempt,
+                    "layer": layer,
+                    "canonical_key": canonical_key,
+                    "op": op,
+                    "args": args,
+                },
+                state_path,
+            )
+        try:
+            result = run_graph_op(graph_exec, op, args)
+        except SyncError as err:
+            err.attempts = attempt
+            if mode == "execute":
+                append_ledger(
+                    state,
+                    {
+                        "ts": now_iso(),
+                        "run_id": run_id,
+                        "phase": "after_call",
+                        "attempt": attempt,
+                        "layer": layer,
+                        "canonical_key": canonical_key,
+                        "op": op,
+                        "status": "error",
+                        "error_class": err.error_class,
+                        "message": err.message,
+                        "http_status": err.http_status,
+                    },
+                    state_path,
+                )
+            if err.retryable and attempt < retry_max_attempts:
+                sleep_s = retry_backoff[min(attempt - 1, len(retry_backoff) - 1)]
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+                continue
+            raise
+
+        if mode == "execute":
+            append_ledger(
+                state,
+                {
+                    "ts": now_iso(),
+                    "run_id": run_id,
+                    "phase": "after_call",
+                    "attempt": attempt,
+                    "layer": layer,
+                    "canonical_key": canonical_key,
+                    "op": op,
+                    "status": "ok",
+                    "etag": parse_etag(result),
+                },
+                state_path,
+            )
+        return result, attempt
+
+    raise SyncError("transport_error", f"unreachable retry loop for {op}", exit_code=1)
+
+
+def source_ref_for_event(layer_def: dict[str, Any], event: dict[str, Any]) -> str:
+    from_event = str(event.get("source_ref", "")).strip()
+    if from_event:
+        return from_event
+    contracts = layer_def.get("source_contracts")
+    if isinstance(contracts, list):
+        for contract in contracts:
+            if isinstance(contract, dict):
+                ref = str(contract.get("ref", "")).strip()
+                if ref:
+                    return ref
+    return "unspecified"
+
+
+def build_event_records(binding: dict[str, Any], selected_layers: list[str]) -> dict[str, list[dict[str, Any]]]:
+    layers = binding.get("layers") if isinstance(binding.get("layers"), dict) else {}
+    order = layers.get("order") if isinstance(layers.get("order"), list) else []
+    defs = layers.get("definitions") if isinstance(layers.get("definitions"), dict) else {}
+
+    if order != REQUIRED_LAYERS:
+        raise SyncError("validation_error", f"layers.order must equal {REQUIRED_LAYERS}", exit_code=2)
+
+    calendar = binding.get("calendar") if isinstance(binding.get("calendar"), dict) else {}
+    timezone = binding.get("timezone") if isinstance(binding.get("timezone"), dict) else {}
+    tz = str(timezone.get("default", "America/New_York")).strip() or "America/New_York"
+    default_date = str(calendar.get("default_dtstart_date", "2026-02-17")).strip()
+
+    records: dict[str, list[dict[str, Any]]] = {}
+    for layer in selected_layers:
+        layer_def = defs.get(layer)
+        if not isinstance(layer_def, dict):
+            raise SyncError("validation_error", f"missing layer definition: {layer}", exit_code=2)
+        authority = str(layer_def.get("authority", "")).strip().lower()
+        if authority not in {"spine", "external"}:
+            raise SyncError("validation_error", f"invalid authority for {layer}: {authority}", exit_code=2)
+
+        events = layer_def.get("events")
+        if not isinstance(events, list):
+            raise SyncError("validation_error", f"layer {layer} events must be list", exit_code=2)
+
+        layer_records: list[dict[str, Any]] = []
+        for raw_event in events:
+            if not isinstance(raw_event, dict):
+                raise SyncError("validation_error", f"layer {layer} event must be map", exit_code=2)
+            event_id = str(raw_event.get("id", "")).strip()
+            if not event_id:
+                raise SyncError("validation_error", f"layer {layer} event missing id", exit_code=2)
+            summary = str(raw_event.get("summary", event_id)).strip() or event_id
+            description = str(raw_event.get("description", summary)).strip() or summary
+            source_ref = source_ref_for_event(layer_def, raw_event)
+
+            byhour = int(raw_event.get("byhour", 0))
+            byminute = int(raw_event.get("byminute", 0))
+            duration = int(raw_event.get("duration_minutes", 60))
+            if byhour < 0 or byhour > 23 or byminute < 0 or byminute > 59 or duration <= 0:
+                raise SyncError("validation_error", f"invalid scheduling fields for {layer}/{event_id}", exit_code=2)
+
+            event_date = str(raw_event.get("dtstart_date", default_date)).strip()
+            start_date = parse_iso_date(event_date, f"dtstart_date for {layer}/{event_id}")
+            start_dt = datetime.combine(start_date, datetime.min.time()).replace(hour=byhour, minute=byminute)
+            end_dt = start_dt + timedelta(minutes=duration)
+
+            normalized = {
+                "layer": layer,
+                "event_id": event_id,
+                "summary": summary,
+                "description": description,
+                "start": start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                "end": end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                "timezone": tz,
+                "source_ref": source_ref,
+            }
+            canonical = sha1_hex(f"{layer}|{event_id}|{source_ref}")
+            layer_records.append(
+                {
+                    "layer": layer,
+                    "authority": authority,
+                    "event_id": event_id,
+                    "source_ref": source_ref,
+                    "canonical_key": canonical,
+                    "payload": normalized,
+                    "desired_hash": desired_hash(normalized),
+                }
+            )
+        records[layer] = sorted(layer_records, key=lambda rec: rec["event_id"])
+    return records
+
+
+def mapping_entry(
+    *,
+    provider: str,
+    layer: str,
+    event_id: str,
+    source_ref: str,
+    canonical_key: str,
+    remote_calendar_id: str,
+    remote_event_id: str,
+    remote_etag: str,
+    desired_hash_value: str,
+) -> dict[str, Any]:
+    return {
+        "canonical_key": canonical_key,
+        "provider": provider,
+        "layer": layer,
+        "event_id": event_id,
+        "source_ref": source_ref,
+        "remote_calendar_id": remote_calendar_id,
+        "remote_event_id": remote_event_id,
+        "remote_etag": remote_etag,
+        "last_desired_hash": desired_hash_value,
+        "last_synced_at": now_iso(),
+        "tombstone": False,
+    }
+
+
+def parse_args(code_root: Path, runtime_root: Path) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Execute calendar sync with stateful idempotency contract")
+    parser.add_argument("--binding", default=str(code_root / "ops/bindings/calendar.global.yaml"))
+    parser.add_argument("--contract", default=str(code_root / "ops/bindings/calendar.sync.contract.yaml"))
+
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", dest="mode", action="store_const", const="dry-run")
+    mode.add_argument("--execute", dest="mode", action="store_const", const="execute")
+    parser.set_defaults(mode="dry-run")
+
+    parser.add_argument("--layer", action="append", dest="layers", choices=REQUIRED_LAYERS, default=[])
+    parser.add_argument("--window-start", default="")
+    parser.add_argument("--window-end", default="")
+    parser.add_argument("--max-pull", type=int, default=500)
+    parser.add_argument("--max-create", type=int, default=200)
+    parser.add_argument("--max-update", type=int, default=200)
+
+    err_mode = parser.add_mutually_exclusive_group()
+    err_mode.add_argument("--stop-on-first-error", dest="stop_on_first_error", action="store_true")
+    err_mode.add_argument("--continue-on-error", dest="stop_on_first_error", action="store_false")
+    parser.set_defaults(stop_on_first_error=True)
+
+    parser.add_argument("--retry-max-attempts", type=int, default=3)
+    parser.add_argument("--retry-backoff-sec", default="1,3,8")
+    parser.add_argument("--provider", default="ms-graph")
+    parser.add_argument("--state-path", default="mailroom/state/calendar-sync/state.json")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--runtime-root", default=str(runtime_root), help=argparse.SUPPRESS)
+
+    args = parser.parse_args()
+
+    if args.provider != "ms-graph":
+        stop("--provider must be ms-graph", 2)
+
+    if args.window_start and args.window_end:
+        start = parse_iso_date(args.window_start, "window-start")
+        end = parse_iso_date(args.window_end, "window-end")
+        if start > end:
+            stop("window-start must be <= window-end", 2)
+
+    if args.max_pull < 0 or args.max_create < 0 or args.max_update < 0:
+        stop("max-* values must be >= 0", 2)
+
+    if args.retry_max_attempts <= 0:
+        stop("retry-max-attempts must be > 0", 2)
+
+    return args
+
+
+def run() -> tuple[dict[str, Any], int]:
+    script_dir = Path(__file__).resolve().parent
+    env_code = os.environ.get("SPINE_CODE") or os.environ.get("SPINE_ROOT")
+    if env_code:
+        code_root = Path(env_code).expanduser().resolve()
+    else:
+        code_root = script_dir.parents[3]
+
+    runtime_root = Path(os.environ.get("SPINE_REPO", str(code_root))).expanduser().resolve()
+    args = parse_args(code_root, runtime_root)
+
+    binding_path = Path(args.binding).expanduser().resolve()
+    contract_path = Path(args.contract).expanduser().resolve()
+    if not binding_path.exists():
+        stop(f"missing binding: {binding_path}", 2)
+    if not contract_path.exists():
+        stop(f"missing contract: {contract_path}", 2)
+
+    contract = run_yq_json(contract_path)
+
+    limits = contract.get("limits") if isinstance(contract.get("limits"), dict) else {}
+    hard_caps = limits.get("hard_caps") if isinstance(limits.get("hard_caps"), dict) else {}
+    hard_max_pull = int(hard_caps.get("max_pull", 2000))
+    hard_max_create = int(hard_caps.get("max_create", 1000))
+    hard_max_update = int(hard_caps.get("max_update", 1000))
+
+    if args.max_pull > hard_max_pull or args.max_create > hard_max_create or args.max_update > hard_max_update:
+        stop(
+            f"max limits exceed hard caps (pull={hard_max_pull}, create={hard_max_create}, update={hard_max_update})",
+            2,
+        )
+
+    retry_cfg = contract.get("retry") if isinstance(contract.get("retry"), dict) else {}
+    retry_backoff_default = retry_cfg.get("backoff_seconds", [1, 3, 8])
+    if isinstance(retry_backoff_default, list) and retry_backoff_default:
+        default_backoff = ",".join(str(int(v)) for v in retry_backoff_default)
+    else:
+        default_backoff = "1,3,8"
+
+    if args.retry_backoff_sec == "1,3,8" and default_backoff != "1,3,8":
+        retry_backoff = parse_backoff(default_backoff)
+    else:
+        retry_backoff = parse_backoff(args.retry_backoff_sec)
+
+    if args.layers:
+        selected_layers = []
+        for layer in REQUIRED_LAYERS:
+            if layer in args.layers:
+                selected_layers.append(layer)
+    else:
+        selected_layers = list(REQUIRED_LAYERS)
+
+    binding = run_yq_json(binding_path)
+    event_records = build_event_records(binding, selected_layers)
+
+    lock_cfg = contract.get("runtime", {}).get("lock", {}) if isinstance(contract.get("runtime"), dict) else {}
+    lock_rel = str(lock_cfg.get("path", "mailroom/state/calendar-sync/.lock"))
+    fail_on_lock_held = bool(lock_cfg.get("fail_on_lock_held", True))
+
+    state_rel_or_abs = str(args.state_path)
+    state_path = Path(state_rel_or_abs).expanduser()
+    if not state_path.is_absolute():
+        state_path = (runtime_root / state_path).resolve()
+
+    lock_path = Path(lock_rel).expanduser()
+    if not lock_path.is_absolute():
+        lock_path = (runtime_root / lock_path).resolve()
+
+    graph_exec_env = os.environ.get("CALENDAR_SYNC_GRAPH_EXEC", "").strip()
+    graph_exec = Path(graph_exec_env).expanduser().resolve() if graph_exec_env else (code_root / "ops/plugins/ms-graph/bin/graph-cap-exec").resolve()
+    if not graph_exec.exists():
+        stop(f"missing graph executable: {graph_exec}", 2)
+
+    run_id = f"CALSYNC-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{sha1_hex(str(time.time_ns()))[:8]}"
+    mode = args.mode
+
+    summary = {
+        "planned": 0,
+        "created": 0,
+        "updated": 0,
+        "pulled": 0,
+        "skipped": 0,
+        "conflicts": 0,
+        "errors": 0,
+    }
+    actions: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    state = load_state(state_path)
+    mappings = state.setdefault("mappings", {})
+    if not isinstance(mappings, dict):
+        mappings = {}
+        state["mappings"] = mappings
+
+    lock: FileLock | None = None
+    if mode == "execute":
+        lock = FileLock(lock_path, run_id, fail_on_lock_held=fail_on_lock_held)
+        lock.acquire()
+        if not state_path.exists():
+            persist_state(state_path, state)
+
+    stopped_early = False
+
+    try:
+        create_count = 0
+        update_count = 0
+
+        for layer in selected_layers:
+            authority = "spine" if layer in SPINE_AUTHORITATIVE else "external"
+            layer_records = event_records.get(layer, [])
+
+            if authority == "external":
+                summary["planned"] += 1
+                base_action = {
+                    "layer": layer,
+                    "authority": authority,
+                    "action": "pull",
+                    "status": "planned" if mode == "dry-run" else "pulled",
+                    "event_id": "",
+                    "canonical_key": "",
+                    "attempts": 0,
+                }
+                if mode == "dry-run":
+                    actions.append(base_action)
+                    continue
+
+                try:
+                    result, attempts = remote_call(
+                        graph_exec=graph_exec,
+                        op="calendar_list",
+                        args=["--top", str(args.max_pull)],
+                        retry_max_attempts=args.retry_max_attempts,
+                        retry_backoff=retry_backoff,
+                        run_id=run_id,
+                        layer=layer,
+                        canonical_key=f"layer:{layer}",
+                        mode=mode,
+                        state=state,
+                        state_path=state_path,
+                    )
+                    pulled = result.get("value", []) if isinstance(result, dict) else []
+                    pull_count = len(pulled) if isinstance(pulled, list) else 0
+                    summary["pulled"] += pull_count
+                    base_action["attempts"] = attempts
+                    base_action["pulled_count"] = pull_count
+                    actions.append(base_action)
+                except SyncError as err:
+                    summary["errors"] += 1
+                    err_obj = {
+                        "layer": layer,
+                        "event_id": "",
+                        "canonical_key": "",
+                        "class": err.error_class,
+                        "message": err.message,
+                        "attempts": err.attempts,
+                        "http_status": err.http_status,
+                    }
+                    errors.append(err_obj)
+                    actions.append(
+                        {
+                            "layer": layer,
+                            "authority": authority,
+                            "action": "pull",
+                            "status": "error",
+                            "event_id": "",
+                            "canonical_key": "",
+                            "error_class": err.error_class,
+                            "message": err.message,
+                            "attempts": err.attempts,
+                        }
+                    )
+                    if err.error_class == "conflict_error":
+                        summary["conflicts"] += 1
+                        conflicts.append(err_obj)
+                    if args.stop_on_first_error:
+                        stopped_early = True
+                        break
+                continue
+
+            for rec in layer_records:
+                if stopped_early:
+                    break
+                summary["planned"] += 1
+
+                canonical_key = rec["canonical_key"]
+                event_id = rec["event_id"]
+                payload = rec["payload"]
+                desired_hash_value = rec["desired_hash"]
+                mapping = mappings.get(canonical_key)
+
+                if mode == "dry-run":
+                    if not mapping:
+                        action_name = "create"
+                    elif str(mapping.get("last_desired_hash", "")) == desired_hash_value:
+                        action_name = "noop"
+                    else:
+                        action_name = "update"
+                    actions.append(
+                        {
+                            "layer": layer,
+                            "authority": authority,
+                            "event_id": event_id,
+                            "canonical_key": canonical_key,
+                            "action": action_name,
+                            "status": "planned",
+                            "attempts": 0,
+                        }
+                    )
+                    continue
+
+                def record_error(err: SyncError, action_name: str) -> None:
+                    nonlocal stopped_early
+                    summary["errors"] += 1
+                    err_obj = {
+                        "layer": layer,
+                        "event_id": event_id,
+                        "canonical_key": canonical_key,
+                        "class": err.error_class,
+                        "message": err.message,
+                        "attempts": err.attempts,
+                        "http_status": err.http_status,
+                    }
+                    errors.append(err_obj)
+                    if err.error_class == "conflict_error":
+                        summary["conflicts"] += 1
+                        conflicts.append(err_obj)
+                    actions.append(
+                        {
+                            "layer": layer,
+                            "authority": authority,
+                            "event_id": event_id,
+                            "canonical_key": canonical_key,
+                            "action": action_name,
+                            "status": "error",
+                            "error_class": err.error_class,
+                            "message": err.message,
+                            "attempts": err.attempts,
+                        }
+                    )
+                    if args.stop_on_first_error:
+                        stopped_early = True
+
+                try:
+                    if not mapping or not str(mapping.get("remote_event_id", "")).strip():
+                        if create_count >= args.max_create:
+                            raise SyncError("validation_error", "max_create limit exceeded", exit_code=1)
+                        create_count += 1
+                        result, attempts = remote_call(
+                            graph_exec=graph_exec,
+                            op="calendar_create",
+                            args=[
+                                "--subject",
+                                str(payload["summary"]),
+                                "--start",
+                                str(payload["start"]),
+                                "--end",
+                                str(payload["end"]),
+                                "--timezone",
+                                str(payload["timezone"]),
+                                "--body",
+                                str(payload["description"]),
+                            ],
+                            retry_max_attempts=args.retry_max_attempts,
+                            retry_backoff=retry_backoff,
+                            run_id=run_id,
+                            layer=layer,
+                            canonical_key=canonical_key,
+                            mode=mode,
+                            state=state,
+                            state_path=state_path,
+                        )
+                        remote_event_id = str(result.get("id", "")).strip()
+                        if not remote_event_id:
+                            raise SyncError("validation_error", "calendar_create missing id", exit_code=1)
+                        etag = parse_etag(result)
+                        mappings[canonical_key] = mapping_entry(
+                            provider="ms-graph",
+                            layer=layer,
+                            event_id=event_id,
+                            source_ref=rec["source_ref"],
+                            canonical_key=canonical_key,
+                            remote_calendar_id="default",
+                            remote_event_id=remote_event_id,
+                            remote_etag=etag,
+                            desired_hash_value=desired_hash_value,
+                        )
+                        persist_state(state_path, state)
+                        summary["created"] += 1
+                        actions.append(
+                            {
+                                "layer": layer,
+                                "authority": authority,
+                                "event_id": event_id,
+                                "canonical_key": canonical_key,
+                                "action": "create",
+                                "status": "ok",
+                                "attempts": attempts,
+                                "remote_event_id": remote_event_id,
+                            }
+                        )
+                        continue
+
+                    remote_event_id = str(mapping.get("remote_event_id", "")).strip()
+                    get_result, get_attempts = remote_call(
+                        graph_exec=graph_exec,
+                        op="calendar_get",
+                        args=["--event-id", remote_event_id],
+                        retry_max_attempts=args.retry_max_attempts,
+                        retry_backoff=retry_backoff,
+                        run_id=run_id,
+                        layer=layer,
+                        canonical_key=canonical_key,
+                        mode=mode,
+                        state=state,
+                        state_path=state_path,
+                    )
+
+                    remote_etag_current = parse_etag(get_result)
+                    if (
+                        str(mapping.get("last_desired_hash", "")) == desired_hash_value
+                        and str(mapping.get("remote_etag", "")) == remote_etag_current
+                    ):
+                        summary["skipped"] += 1
+                        actions.append(
+                            {
+                                "layer": layer,
+                                "authority": authority,
+                                "event_id": event_id,
+                                "canonical_key": canonical_key,
+                                "action": "noop",
+                                "status": "ok",
+                                "attempts": get_attempts,
+                                "remote_event_id": remote_event_id,
+                            }
+                        )
+                        continue
+
+                    if update_count >= args.max_update:
+                        raise SyncError("validation_error", "max_update limit exceeded", exit_code=1)
+                    update_count += 1
+                    update_result, update_attempts = remote_call(
+                        graph_exec=graph_exec,
+                        op="calendar_update",
+                        args=[
+                            "--event-id",
+                            remote_event_id,
+                            "--subject",
+                            str(payload["summary"]),
+                            "--start",
+                            str(payload["start"]),
+                            "--end",
+                            str(payload["end"]),
+                            "--timezone",
+                            str(payload["timezone"]),
+                            "--body",
+                            str(payload["description"]),
+                        ],
+                        retry_max_attempts=args.retry_max_attempts,
+                        retry_backoff=retry_backoff,
+                        run_id=run_id,
+                        layer=layer,
+                        canonical_key=canonical_key,
+                        mode=mode,
+                        state=state,
+                        state_path=state_path,
+                    )
+                    new_etag = parse_etag(update_result) or remote_etag_current
+                    mappings[canonical_key] = mapping_entry(
+                        provider="ms-graph",
+                        layer=layer,
+                        event_id=event_id,
+                        source_ref=rec["source_ref"],
+                        canonical_key=canonical_key,
+                        remote_calendar_id=str(mapping.get("remote_calendar_id", "default") or "default"),
+                        remote_event_id=remote_event_id,
+                        remote_etag=new_etag,
+                        desired_hash_value=desired_hash_value,
+                    )
+                    persist_state(state_path, state)
+                    summary["updated"] += 1
+                    actions.append(
+                        {
+                            "layer": layer,
+                            "authority": authority,
+                            "event_id": event_id,
+                            "canonical_key": canonical_key,
+                            "action": "update",
+                            "status": "ok",
+                            "attempts": get_attempts + update_attempts,
+                            "remote_event_id": remote_event_id,
+                        }
+                    )
+                except SyncError as err:
+                    if err.http_status == 404 and mapping and str(mapping.get("remote_event_id", "")).strip():
+                        try:
+                            if create_count >= args.max_create:
+                                raise SyncError("validation_error", "max_create limit exceeded", exit_code=1)
+                            create_count += 1
+                            recreate_result, recreate_attempts = remote_call(
+                                graph_exec=graph_exec,
+                                op="calendar_create",
+                                args=[
+                                    "--subject",
+                                    str(payload["summary"]),
+                                    "--start",
+                                    str(payload["start"]),
+                                    "--end",
+                                    str(payload["end"]),
+                                    "--timezone",
+                                    str(payload["timezone"]),
+                                    "--body",
+                                    str(payload["description"]),
+                                ],
+                                retry_max_attempts=args.retry_max_attempts,
+                                retry_backoff=retry_backoff,
+                                run_id=run_id,
+                                layer=layer,
+                                canonical_key=canonical_key,
+                                mode=mode,
+                                state=state,
+                                state_path=state_path,
+                            )
+                            new_remote_id = str(recreate_result.get("id", "")).strip()
+                            if not new_remote_id:
+                                raise SyncError("validation_error", "calendar_create missing id", exit_code=1)
+                            mappings[canonical_key] = mapping_entry(
+                                provider="ms-graph",
+                                layer=layer,
+                                event_id=event_id,
+                                source_ref=rec["source_ref"],
+                                canonical_key=canonical_key,
+                                remote_calendar_id=str(mapping.get("remote_calendar_id", "default") or "default"),
+                                remote_event_id=new_remote_id,
+                                remote_etag=parse_etag(recreate_result),
+                                desired_hash_value=desired_hash_value,
+                            )
+                            persist_state(state_path, state)
+                            summary["created"] += 1
+                            actions.append(
+                                {
+                                    "layer": layer,
+                                    "authority": authority,
+                                    "event_id": event_id,
+                                    "canonical_key": canonical_key,
+                                    "action": "recreate",
+                                    "status": "ok",
+                                    "attempts": err.attempts + recreate_attempts,
+                                    "remote_event_id": new_remote_id,
+                                }
+                            )
+                            continue
+                        except SyncError as recreate_err:
+                            record_error(recreate_err, "recreate")
+                    else:
+                        record_error(err, "update" if mapping else "create")
+
+            if stopped_early:
+                break
+
+        status = "ok"
+        exit_code = 0
+        if errors:
+            if args.stop_on_first_error:
+                status = "fail"
+            else:
+                status = "partial"
+            exit_code = 1
+
+        envelope = {
+            "capability": "calendar.sync.execute",
+            "schema_version": "1.0",
+            "status": status,
+            "generated_at": now_iso(),
+            "data": {
+                "run_id": run_id,
+                "mode": mode,
+                "layers": selected_layers,
+                "summary": summary,
+                "actions": actions,
+                "conflicts": conflicts,
+                "errors": errors,
+                "state_path": str(state_path),
+            },
+        }
+        return envelope, exit_code
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def main() -> None:
+    try:
+        envelope, exit_code = run()
+    except SyncError as err:
+        fail_obj = {
+            "capability": "calendar.sync.execute",
+            "schema_version": "1.0",
+            "status": "fail",
+            "generated_at": now_iso(),
+            "data": {
+                "run_id": "",
+                "mode": "",
+                "layers": [],
+                "summary": {
+                    "planned": 0,
+                    "created": 0,
+                    "updated": 0,
+                    "pulled": 0,
+                    "skipped": 0,
+                    "conflicts": 0,
+                    "errors": 1,
+                },
+                "actions": [],
+                "conflicts": [],
+                "errors": [
+                    {
+                        "layer": "",
+                        "event_id": "",
+                        "canonical_key": "",
+                        "class": err.error_class,
+                        "message": err.message,
+                        "attempts": err.attempts,
+                        "http_status": err.http_status,
+                        "code": err.code,
+                    }
+                ],
+                "state_path": "",
+            },
+        }
+        print(json.dumps(fail_obj, indent=2, sort_keys=True))
+        raise SystemExit(err.exit_code)
+
+    if "--json" in sys.argv:
+        print(json.dumps(envelope, indent=2, sort_keys=True))
+    else:
+        data = envelope["data"]
+        print("calendar.sync.execute")
+        print(f"status: {envelope['status'].upper()}")
+        print(f"mode: {data['mode']}")
+        print(f"run_id: {data['run_id']}")
+        print(f"layers: {','.join(data['layers'])}")
+        print("summary:")
+        for key in ["planned", "created", "updated", "pulled", "skipped", "conflicts", "errors"]:
+            print(f"  {key}: {data['summary'][key]}")
+        print(f"actions: {len(data['actions'])}")
+        print(f"conflicts: {len(data['conflicts'])}")
+        print(f"errors: {len(data['errors'])}")
+        print(f"state_path: {data['state_path']}")
+
+    raise SystemExit(exit_code)
+
+
+if __name__ == "__main__":
+    main()

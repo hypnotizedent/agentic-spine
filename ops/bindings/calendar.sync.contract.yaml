@@ -1,0 +1,173 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-18
+scope: calendar-sync-exec-v1_1
+version: 1
+updated: "2026-02-18"
+
+capability:
+  name: calendar.sync.execute
+  safety: mutating
+  approval: manual
+  touches_api: true
+  requires:
+    - secrets.binding
+    - secrets.auth.status
+  command: "./ops/plugins/calendar/bin/calendar-sync-execute"
+
+runtime:
+  default_mode: dry-run
+  provider: ms-graph
+  lock:
+    path: "mailroom/state/calendar-sync/.lock"
+    fail_on_lock_held: true
+    error_code: sync_lock_held
+  stop_on_first_error_default: true
+
+layers:
+  infrastructure:
+    authority: spine
+    direction: spine_to_external
+    writes_enabled: true
+  automation:
+    authority: spine
+    direction: spine_to_external
+    writes_enabled: true
+  identity:
+    authority: external
+    direction: external_to_spine
+    writes_enabled: false
+  personal:
+    authority: external
+    direction: external_to_spine
+    writes_enabled: false
+  spine:
+    authority: spine
+    direction: spine_to_external
+    writes_enabled: true
+  life:
+    authority: external
+    direction: external_to_spine
+    writes_enabled: false
+
+sync_contracts:
+  pull_read_capabilities:
+    - graph.calendar.list
+    - graph.calendar.get
+  push_write_capabilities:
+    - graph.calendar.create
+    - graph.calendar.update
+
+state:
+  path: "mailroom/state/calendar-sync/state.json"
+  schema_version: "1.0"
+  fields_required:
+    - canonical_key
+    - provider
+    - layer
+    - event_id
+    - remote_calendar_id
+    - remote_event_id
+    - remote_etag
+    - last_desired_hash
+    - last_synced_at
+    - tombstone
+  canonical_key_policy: "sha1(layer|event_id|source_ref)"
+  desired_hash_policy: "sha256(normalized_event_payload)"
+
+idempotency:
+  noop_when:
+    - "last_desired_hash unchanged"
+    - "remote_etag unchanged"
+  create_when:
+    - "spine-authoritative event has no mapping"
+  update_when:
+    - "mapping exists and desired_hash changed"
+  recreate_when:
+    - "mapping exists but remote returns 404 (spine-authoritative only)"
+  never_write_when:
+    - "layer authority is external"
+
+conflicts:
+  winners:
+    infrastructure: spine
+    automation: spine
+    identity: external
+    personal: external
+    spine: spine
+    life: external
+  policy:
+    spine_wins: "overwrite remote for spine-authoritative layers"
+    external_wins: "pull/reconcile only; no remote write"
+
+limits:
+  defaults:
+    max_pull: 500
+    max_create: 200
+    max_update: 200
+  hard_caps:
+    max_pull: 2000
+    max_create: 1000
+    max_update: 1000
+
+retry:
+  max_attempts: 3
+  backoff_seconds: [1, 3, 8]
+  retryable_errors:
+    - rate_limited
+    - transport_error
+  non_retryable_errors:
+    - precondition_failed
+    - auth_failed
+    - validation_error
+    - conflict_error
+    - state_write_error
+
+errors:
+  classes:
+    - precondition_failed
+    - auth_failed
+    - rate_limited
+    - transport_error
+    - validation_error
+    - conflict_error
+    - state_write_error
+  partial_status_when_errors_and_continue: partial
+
+output_contract:
+  envelope_required:
+    - capability
+    - schema_version
+    - status
+    - generated_at
+    - data
+  data_required:
+    - run_id
+    - mode
+    - layers
+    - summary
+    - actions
+    - conflicts
+    - errors
+    - state_path
+  status_enum:
+    - ok
+    - warn
+    - fail
+    - partial
+
+receipts:
+  required: true
+  include:
+    - run_id
+    - mode
+    - action_counts
+    - error_classes
+    - state_path
+
+acceptance:
+  - "second execute run with unchanged inputs yields noop-only actions"
+  - "missing remote mapped event is recreated and remapped for spine-authoritative layers"
+  - "external-authoritative layers produce zero remote create/update actions"
+  - "partial outage preserves state integrity and returns partial with classified errors"
