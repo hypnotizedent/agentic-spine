@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
+RECEIPTS_ROOT="$ROOT/receipts/sessions"
+FULL=0
+SINCE_ISO=""
+JSON_MODE=0
+QUIET=0
+
+usage() {
+  cat <<'USAGE'
+receipts-index-build
+
+Usage:
+  receipts-index-build [--index <path>] [--receipts-root <path>] [--full] [--since <iso8601>] [--json] [--quiet]
+
+Builds or updates receipt intelligence index at ops/plugins/evidence/state/receipt-index.yaml.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --index)
+      INDEX_FILE="${2:-}"
+      shift 2
+      ;;
+    --receipts-root)
+      RECEIPTS_ROOT="${2:-}"
+      shift 2
+      ;;
+    --full)
+      FULL=1
+      shift
+      ;;
+    --since)
+      SINCE_ISO="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --quiet)
+      QUIET=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "FAIL: missing dependency yq" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: missing dependency python3" >&2; exit 1; }
+
+mkdir -p "$(dirname "$INDEX_FILE")"
+
+retention_days="$(yq -r '.retention_classes.session_receipts.retention_days // 30' "$ROOT/ops/bindings/evidence.retention.policy.yaml" 2>/dev/null || echo 30)"
+[[ "$retention_days" =~ ^[0-9]+$ ]] || retention_days=30
+
+tmp_json="$(mktemp)"
+
+python3 - "$INDEX_FILE" "$RECEIPTS_ROOT" "$FULL" "$SINCE_ISO" "$retention_days" >"$tmp_json" <<'PY'
+import datetime as dt
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+index_file = Path(sys.argv[1])
+receipts_root = Path(sys.argv[2])
+full_mode = sys.argv[3] == "1"
+cli_since = (sys.argv[4] or "").strip()
+retention_days = int(sys.argv[5])
+
+now = dt.datetime.now(dt.timezone.utc)
+now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_iso(text: str):
+    if not text:
+        return None
+    try:
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def run_yq_json(path: Path):
+    try:
+        out = subprocess.check_output(["yq", "-o=json", ".", str(path)], text=True)
+        return json.loads(out)
+    except Exception:
+        return None
+
+
+def extract_field(md: str, field: str):
+    pattern = rf"\|\s*{re.escape(field)}\s*\|\s*`?([^`|]+)`?\s*\|"
+    m = re.search(pattern, md)
+    return m.group(1).strip() if m else ""
+
+
+existing = run_yq_json(index_file) if index_file.exists() else None
+existing_entries = {}
+watermark_iso = ""
+
+if isinstance(existing, dict):
+    wm = existing.get("watermark") or {}
+    watermark_iso = str(wm.get("updated_at_utc") or "")
+    for row in existing.get("entries") or []:
+        rid = str(row.get("run_id") or "").strip()
+        if rid:
+            existing_entries[rid] = row
+
+since_iso = cli_since
+if not since_iso and not full_mode:
+    since_iso = watermark_iso
+
+since_dt = parse_iso(since_iso)
+
+entries = {} if full_mode else dict(existing_entries)
+scanned = 0
+indexed = 0
+
+if receipts_root.exists():
+    for path in sorted(receipts_root.glob("RCAP-*")):
+        if not path.is_dir():
+            continue
+        scanned += 1
+        mtime = dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
+        if since_dt and mtime <= since_dt:
+            continue
+
+        receipt = path / "receipt.md"
+        if not receipt.exists():
+            continue
+
+        try:
+            content = receipt.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        run_id = extract_field(content, "Run ID")
+        capability = extract_field(content, "Capability")
+        status = extract_field(content, "Status")
+        exit_code_raw = extract_field(content, "Exit Code")
+        generated = extract_field(content, "Generated")
+
+        if not run_id:
+            run_id = path.name.removeprefix("R")
+        if not capability:
+            capability = "unknown"
+        if not status:
+            status = "unknown"
+        if not generated:
+            generated = now_iso
+
+        try:
+            exit_code = int(exit_code_raw)
+        except Exception:
+            exit_code = -1
+
+        rel_receipt = str(receipt)
+        rel_output = str(path / "output.txt")
+
+        entries[run_id] = {
+            "run_id": run_id,
+            "capability": capability,
+            "status": status,
+            "exit_code": exit_code,
+            "generated_at_utc": generated,
+            "receipt_path": rel_receipt,
+            "output_path": rel_output,
+            "indexed_at_utc": now_iso,
+        }
+        indexed += 1
+
+ordered = sorted(
+    entries.values(),
+    key=lambda row: (str(row.get("generated_at_utc") or ""), str(row.get("run_id") or "")),
+    reverse=True,
+)
+
+result = {
+    "version": "1.0",
+    "updated_at_utc": now_iso,
+    "source_root": str(receipts_root),
+    "watermark": {
+        "updated_at_utc": now_iso,
+        "mode": "full" if full_mode else "incremental",
+        "since": since_iso or None,
+        "scanned_dirs": scanned,
+        "indexed_dirs": indexed,
+    },
+    "retention_days": retention_days,
+    "entries": ordered,
+}
+
+print(json.dumps(result, indent=2))
+PY
+
+yq -P '.' "$tmp_json" >"$INDEX_FILE"
+rm -f "$tmp_json"
+
+entry_count="$(yq -r '.entries | length' "$INDEX_FILE" 2>/dev/null || echo 0)"
+mode="$(yq -r '.watermark.mode // "incremental"' "$INDEX_FILE" 2>/dev/null || echo incremental)"
+updated="$(yq -r '.updated_at_utc // ""' "$INDEX_FILE" 2>/dev/null || true)"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg index "$INDEX_FILE" \
+    --arg mode "$mode" \
+    --arg updated "$updated" \
+    --argjson entries "$entry_count" \
+    '{capability:"receipts.index.build",index:$index,mode:$mode,updated_at_utc:$updated,entries:$entries}'
+  exit 0
+fi
+
+if [[ "$QUIET" -eq 0 ]]; then
+  echo "receipts.index.build"
+  echo "index: $INDEX_FILE"
+  echo "mode: $mode"
+  echo "updated_at_utc: $updated"
+  echo "entries: $entry_count"
+fi

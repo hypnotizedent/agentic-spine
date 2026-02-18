@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
+DAYS=14
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+receipts-trends
+
+Usage:
+  receipts-trends [--days <n>] [--index <path>] [--json]
+
+Shows daily receipt volume and failure-rate trend.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --days)
+      DAYS="${2:-14}"
+      shift 2
+      ;;
+    --index)
+      INDEX_FILE="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "FAIL: --days must be numeric" >&2; exit 2; }
+
+if [[ ! -f "$INDEX_FILE" ]]; then
+  "$ROOT/ops/plugins/evidence/bin/receipts-index-build" --index "$INDEX_FILE" --quiet
+fi
+
+python3 - "$INDEX_FILE" "$DAYS" "$JSON_MODE" <<'PY'
+import datetime as dt
+import json
+import subprocess
+import sys
+
+index_file = sys.argv[1]
+days = int(sys.argv[2])
+json_mode = sys.argv[3] == "1"
+
+raw = subprocess.check_output(["yq", "-o=json", ".", index_file], text=True)
+data = json.loads(raw)
+rows = data.get("entries") or []
+
+start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days - 1)).date()
+series = {}
+for i in range(days):
+    d = start + dt.timedelta(days=i)
+    series[str(d)] = {"total": 0, "fail": 0}
+
+for row in rows:
+    ts = str(row.get("generated_at_utc") or "")
+    try:
+        t = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        continue
+    day = str(t.date())
+    if day not in series:
+        continue
+    series[day]["total"] += 1
+    if str(row.get("status", "")).lower() != "done":
+        series[day]["fail"] += 1
+
+out = []
+for day in sorted(series.keys()):
+    total = series[day]["total"]
+    fail = series[day]["fail"]
+    rate = round((fail / total) * 100, 2) if total else 0.0
+    out.append({"date": day, "total": total, "fail": fail, "fail_rate_pct": rate})
+
+if json_mode:
+    print(json.dumps({"capability": "receipts.trends", "window_days": days, "daily": out}))
+    raise SystemExit(0)
+
+print("receipts.trends")
+print(f"window_days: {days}")
+print("daily:")
+for row in out:
+    print(f"  - {row['date']}: total={row['total']} fail={row['fail']} fail_rate_pct={row['fail_rate_pct']}")
+PY

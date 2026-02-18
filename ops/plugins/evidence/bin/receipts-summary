@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
+DAYS=7
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+receipts-summary
+
+Usage:
+  receipts-summary [--days <n>] [--index <path>] [--json]
+
+Shows receipt totals, pass/fail split, and top capabilities for a window.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --days)
+      DAYS="${2:-7}"
+      shift 2
+      ;;
+    --index)
+      INDEX_FILE="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "FAIL: --days must be numeric" >&2; exit 2; }
+
+if [[ ! -f "$INDEX_FILE" ]]; then
+  "$ROOT/ops/plugins/evidence/bin/receipts-index-build" --index "$INDEX_FILE" --quiet
+fi
+
+python3 - "$INDEX_FILE" "$DAYS" "$JSON_MODE" <<'PY'
+import datetime as dt
+import json
+import subprocess
+import sys
+from collections import Counter
+
+index_file = sys.argv[1]
+days = int(sys.argv[2])
+json_mode = sys.argv[3] == "1"
+
+raw = subprocess.check_output(["yq", "-o=json", ".", index_file], text=True)
+data = json.loads(raw)
+rows = data.get("entries") or []
+cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
+
+selected = []
+for row in rows:
+    ts = str(row.get("generated_at_utc") or "")
+    try:
+        t = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        continue
+    if t >= cutoff:
+        selected.append(row)
+
+total = len(selected)
+pass_count = sum(1 for r in selected if str(r.get("status", "")).lower() == "done")
+fail_count = total - pass_count
+cap_counts = Counter(str(r.get("capability") or "unknown") for r in selected)
+
+top_caps = [{"capability": cap, "count": cnt} for cap, cnt in cap_counts.most_common(8)]
+
+if json_mode:
+    print(json.dumps({
+        "capability": "receipts.summary",
+        "window_days": days,
+        "total": total,
+        "pass": pass_count,
+        "fail": fail_count,
+        "top_capabilities": top_caps,
+    }))
+    raise SystemExit(0)
+
+print("receipts.summary")
+print(f"window_days: {days}")
+print(f"total: {total}")
+print(f"pass: {pass_count}")
+print(f"fail: {fail_count}")
+print("top_capabilities:")
+for row in top_caps:
+    print(f"  - {row['capability']}: {row['count']}")
+PY

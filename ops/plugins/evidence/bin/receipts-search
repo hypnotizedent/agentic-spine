@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
+STATUS_FILTER=""
+CAP_FILTER=""
+DAYS=30
+LIMIT=50
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+receipts-search
+
+Usage:
+  receipts-search [--status <done|failed>] [--capability <prefix>] [--days <n>] [--limit <n>] [--index <path>] [--json]
+
+Search receipt index by status/capability/window.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --status)
+      STATUS_FILTER="${2:-}"
+      shift 2
+      ;;
+    --capability)
+      CAP_FILTER="${2:-}"
+      shift 2
+      ;;
+    --days)
+      DAYS="${2:-30}"
+      shift 2
+      ;;
+    --limit)
+      LIMIT="${2:-50}"
+      shift 2
+      ;;
+    --index)
+      INDEX_FILE="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "FAIL: --days must be numeric" >&2; exit 2; }
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "FAIL: --limit must be numeric" >&2; exit 2; }
+
+if [[ ! -f "$INDEX_FILE" ]]; then
+  "$ROOT/ops/plugins/evidence/bin/receipts-index-build" --index "$INDEX_FILE" --quiet
+fi
+
+python3 - "$INDEX_FILE" "$STATUS_FILTER" "$CAP_FILTER" "$DAYS" "$LIMIT" "$JSON_MODE" <<'PY'
+import datetime as dt
+import json
+import subprocess
+import sys
+
+index_file, status_filter, cap_filter, days_s, limit_s, json_mode_s = sys.argv[1:7]
+days = int(days_s)
+limit = int(limit_s)
+json_mode = json_mode_s == "1"
+
+raw = subprocess.check_output(["yq", "-o=json", ".", index_file], text=True)
+data = json.loads(raw)
+rows = data.get("entries") or []
+
+cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
+selected = []
+
+for row in rows:
+    ts = str(row.get("generated_at_utc") or "")
+    try:
+        t = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        continue
+    if t < cutoff:
+        continue
+
+    status = str(row.get("status") or "")
+    cap = str(row.get("capability") or "")
+
+    if status_filter and status.lower() != status_filter.lower():
+        continue
+    if cap_filter and not cap.startswith(cap_filter):
+        continue
+
+    selected.append(row)
+
+selected = selected[:limit]
+
+if json_mode:
+    print(json.dumps({
+        "capability": "receipts.search",
+        "window_days": days,
+        "limit": limit,
+        "count": len(selected),
+        "results": selected,
+    }))
+    raise SystemExit(0)
+
+print("receipts.search")
+print(f"window_days: {days}")
+print(f"limit: {limit}")
+print(f"count: {len(selected)}")
+for row in selected:
+    print(f"- {row.get('generated_at_utc')} {row.get('status')} {row.get('capability')} {row.get('run_id')}")
+PY
