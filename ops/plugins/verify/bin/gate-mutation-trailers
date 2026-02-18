@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+POLICY="$ROOT/ops/bindings/d128-gate-mutation-policy.yaml"
+
+usage() {
+  cat <<'USAGE'
+gate-mutation-trailers
+
+Usage:
+  gate-mutation-trailers \
+    --capability <gate.registry.add|gate.registry.update|gate.topology.assign|gate.topology.validate|domain.onboard.new> \
+    [--mutation <text>] \
+    [--run-key <CAP-...>] \
+    [--json]
+
+Emits D128-required commit trailers for gate contract mutations.
+USAGE
+}
+
+fail() {
+  echo "gate.mutation.trailers FAIL: $*" >&2
+  exit 1
+}
+
+command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
+[[ -f "$POLICY" ]] || fail "missing policy file: $POLICY"
+yq e '.' "$POLICY" >/dev/null 2>&1 || fail "invalid YAML: $POLICY"
+
+CAPABILITY=""
+MUTATION="capability"
+RUN_KEY="${SPINE_CAP_RUN_KEY:-manual}"
+JSON_MODE="false"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --capability) CAPABILITY="${2:-}"; shift 2 ;;
+    --mutation) MUTATION="${2:-}"; shift 2 ;;
+    --run-key) RUN_KEY="${2:-}"; shift 2 ;;
+    --json) JSON_MODE="true"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$CAPABILITY" ]] || fail "--capability is required"
+[[ -n "$MUTATION" ]] || fail "--mutation requires a value"
+[[ -n "$RUN_KEY" ]] || fail "--run-key requires a value"
+
+allowed_cap="$(yq e -r ".allowed_capabilities[] | select(. == \"$CAPABILITY\")" "$POLICY" | head -n1 || true)"
+if [[ -z "$allowed_cap" ]]; then
+  fail "capability '$CAPABILITY' is not in d128 allowed_capabilities"
+fi
+
+if [[ "$JSON_MODE" == "true" ]]; then
+  command -v jq >/dev/null 2>&1 || fail "missing required tool: jq"
+  jq -n \
+    --arg mutation "$MUTATION" \
+    --arg capability "$CAPABILITY" \
+    --arg run_key "$RUN_KEY" \
+    '{GateMutation: $mutation, GateCapability: $capability, GateRunKey: $run_key}'
+  exit 0
+fi
+
+cat <<EOF
+Gate-Mutation: $MUTATION
+Gate-Capability: $CAPABILITY
+Gate-Run-Key: $RUN_KEY
+EOF

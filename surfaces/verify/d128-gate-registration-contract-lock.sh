@@ -6,7 +6,19 @@ ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 POLICY_FILE="$ROOT/ops/bindings/d128-gate-mutation-policy.yaml"
 
 fail() {
-  echo "D128 FAIL: $*" >&2
+  printf 'D128 FAIL: %s\n' "$*" >&2
+  cat <<'HINT' >&2
+D128 fix path:
+  1. Mutate gate contracts using governed capabilities:
+     - gate.registry.add / gate.registry.update
+     - gate.topology.assign / gate.topology.validate
+     - domain.onboard.new
+  2. Emit required trailers:
+     ./ops/plugins/verify/bin/gate-mutation-trailers --capability <capability> --run-key <CAP-...>
+  3. Include the emitted lines in the commit message for commits touching:
+     - ops/bindings/gate.registry.yaml
+     - ops/bindings/gate.execution.topology.yaml
+HINT
   exit 1
 }
 
@@ -78,7 +90,8 @@ while IFS= read -r sha; do
 done < <(git -C "$ROOT" log --max-count="$WINDOW" "${ENFORCEMENT_SHA}..HEAD" --format="%H" -- "${TARGET_FILES[@]}" 2>/dev/null)
 
 if [[ "${#violations[@]}" -gt 0 ]]; then
-  fail "gate registration provenance violations:\n$(printf '  - %s\n' "${violations[@]}")"
+  fail "gate registration provenance violations:
+$(printf '  - %s\n' "${violations[@]}")"
 fi
 
 echo "D128 PASS: gate registration contract lock enforced (files clean, provenance valid)"
