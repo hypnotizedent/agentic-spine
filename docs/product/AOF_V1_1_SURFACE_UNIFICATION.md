@@ -16,6 +16,11 @@ parent_loop: LOOP-AOF-V1-1-SURFACE-UNIFICATION-20260217
 
 **APPROVED** — Design reviewed and approved 2026-02-17. Implementation sequenced as Move 1 → 2 → 3.
 
+**Implementation Progress:**
+- Move 1 (MCP Gateway): **DELIVERED** — `ops/plugins/mcp-gateway/bin/spine-mcp-serve` live, `.mcp.json` cutover to gateway-first (2026-02-18)
+- Move 2 (Agent Registry V2): **DELIVERED** — Schema extended, `agent.info` + `agent.tools` caps registered, all 10 agents populated (2026-02-18)
+- Move 3 (Dynamic Context): **NOT STARTED** — Pending D65-v2 design
+
 ## Problem
 
 AOF v1.0 built surfaces incrementally. Each new consumer (Claude Code, Claude Desktop,

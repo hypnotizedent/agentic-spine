@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-15
+last_verified: 2026-02-18
 scope: aof-policy-runtime-enforcement
 ---
 
