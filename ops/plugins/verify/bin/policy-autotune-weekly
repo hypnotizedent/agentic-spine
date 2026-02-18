@@ -156,11 +156,16 @@ pending_count = 0
 pending_oldest_days = 0
 for cp in proposals_dir.glob("CP-*"):
     manifest = cp / "manifest.yaml"
+    if (cp / ".applied").exists():
+        continue
     if not manifest.exists():
         continue
     txt = manifest.read_text(errors="ignore")
     status_m = re.search(r"^status:\s*([^\n]+)$", txt, flags=re.M)
     status = status_m.group(1).strip().strip('"').strip("'") if status_m else "pending"
+    if status == "pending":
+        if re.search(r"^read_only:\s*true\s*$", txt, flags=re.M) or re.search(r"^mode:\s*read-only\s*$", txt, flags=re.M):
+            status = "read-only"
     if status in ("applied", "superseded", "draft_hold", "read-only", "invalid"):
         continue
     created_m = re.search(r"^created:\s*([^\n]+)$", txt, flags=re.M)
