@@ -115,3 +115,17 @@ Home-shop maintenance parity via 3 deliverables:
    - Cross-site ordering: shutdown=shop-then-home, startup=home-then-shop
 
 3. **infra.maintenance.window capability** — Registered in `ops/capabilities.yaml` (plane: fabric, domain: infra, requires: ssh.target.status) and `ops/bindings/capability_map.yaml` (D67 parity).
+
+### GAP-OP-649 (CLOSED)
+
+Proxmox-network domain lane wiring via 3 deliverables:
+
+1. **gate.domain.profiles.yaml** — Added `proxmox-network` composite domain profile with 22 gate_ids (full infra gate set: D14–D116), capability_prefixes for `infra.proxmox.`, `infra.post_power.`, `infra.maintenance.`, `network.`, and path_triggers covering infra plugins + startup sequencing + network cutover + placement policy bindings.
+
+2. **gate.execution.topology.yaml** — Added `proxmox-network` domain_metadata entry (criticality: critical, depends_on: [core, infra], requires_runtime_sentinel: true) and inserted into release_sequence after `infra`. Capability prefixes and path_triggers mirror the domain profile for discovery/recommend consistency.
+
+3. **domain.docs.routes.yaml** — Not modified. Proxmox-network domain docs (REBOOT_HEALTH_GATE.md, NETWORK_POLICIES.md, NETWORK_RUNBOOK.md) are spine-native authoritative docs, not pointer stubs. Doc routing is only for cross-repo pointer stubs; these docs are directly accessible in `docs/governance/`.
+
+Domain resolution: `verify.domain.run proxmox-network` resolves through the profile-fallback path in verify-topology (no gate_assignments needed since proxmox-network is a composite domain). No code changes to verify-topology were required — the existing profile-fallback logic handles it correctly.
+
+Verification: verify.core.run 8/8 PASS, verify.domain.run aof 19/19 PASS, verify.domain.run proxmox-network 22 gates resolved, verify.domain.run infra 21/22 (D86 pre-existing).
