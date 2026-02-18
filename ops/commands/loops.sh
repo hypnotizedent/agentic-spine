@@ -18,6 +18,7 @@ set -euo pipefail
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 STATE_DIR="$SPINE_REPO/mailroom/state"
 SCOPES_DIR="$STATE_DIR/loop-scopes"
+source "$SPINE_REPO/ops/lib/git-lock.sh"
 
 RECEIPTS_DIR="$SPINE_REPO/receipts/sessions"
 LEDGER="$STATE_DIR/ledger.csv"
@@ -172,6 +173,7 @@ show_loop() {
 close_loop() {
     local loop_id="$1"
     local scope_file="$SCOPES_DIR/${loop_id}.scope.md"
+    local tmp_file=""
 
     if [[ ! -f "$scope_file" ]]; then
         echo "ERROR: Scope file not found: $scope_file" >&2
@@ -185,12 +187,38 @@ close_loop() {
         return 0
     fi
 
-    # Cross-platform sed -i
-    if [[ "$(uname)" == "Darwin" ]]; then
-        sed -i '' 's/^status: .*/status: closed/' "$scope_file"
-    else
-        sed -i 's/^status: .*/status: closed/' "$scope_file"
+    acquire_git_lock || exit 1
+    tmp_file="$(mktemp "${scope_file}.tmp.XXXXXX")"
+    trap 'rm -f "$tmp_file" 2>/dev/null || true; release_git_lock' EXIT INT TERM
+
+    # Atomic frontmatter update: mutate only the first status key in YAML header.
+    if ! awk '
+      BEGIN { in_fm=0; replaced=0 }
+      {
+        if ($0 == "---") {
+          if (in_fm == 0) { in_fm=1; print; next }
+          if (in_fm == 1) { in_fm=2; print; next }
+        }
+        if (in_fm == 1 && replaced == 0 && $1 == "status:") {
+          print "status: closed"
+          replaced=1
+          next
+        }
+        print
+      }
+      END {
+        if (replaced == 0) {
+          exit 2
+        }
+      }
+    ' "$scope_file" > "$tmp_file"; then
+        echo "ERROR: Failed to update frontmatter status in $scope_file" >&2
+        exit 1
     fi
+
+    mv "$tmp_file" "$scope_file"
+    trap - EXIT INT TERM
+    release_git_lock
 
     echo "CLOSED: $loop_id (updated $scope_file)"
 }
