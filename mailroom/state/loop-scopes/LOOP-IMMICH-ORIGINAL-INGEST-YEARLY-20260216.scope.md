@@ -110,3 +110,49 @@ Upload the old Immich/home photo corpus into the active Immich instance with str
 - Owner clarified that legacy API key references the old home Immich instance.
 - This loop anchors implementation planning and execution to the above non-negotiables.
 - Legacy audit confirmed prior failure modes: mixed endpoints, external-library drift, and destructive cleanup coupling.
+
+## 2026-02-18 Close-Readiness Check (SA3)
+
+### Readiness Evidence
+
+- `CAP-20260217-233457__immich.ingest.watch__Rlzwy46366`
+  - `status: warn`
+  - `heartbeat_age_minutes: 1307.62` (stale)
+  - `queue: pending=0 in_progress=None completed=18 blocked=0`
+- `CAP-20260217-233457__immich.status__R7bup46384`
+  - API health responds, but reported `assets: 0`
+
+### Closeability Verdict
+
+- Loop is **not closeable**. Acceptance criteria remain unmet (notably corpus representation and active ingest observability evidence).
+
+### Execution Pack (Next Lane)
+
+1. Baseline state capture
+   - `ssh ronny@100.114.101.50 '~/immich-ingest/bin/status.sh'`
+   - `ssh ronny@100.114.101.50 'cat /home/ronny/immich-ingest/state/current.json'`
+   - `ssh ronny@100.114.101.50 'cat /home/ronny/immich-ingest/queue/years.csv'`
+2. Worker health and progression evidence
+   - `ssh ronny@100.114.101.50 'tail -n 120 /home/ronny/immich-ingest/logs/worker.log'`
+   - `./bin/ops cap run immich.ingest.watch`
+3. Managed-asset validation
+   - `./bin/ops cap run immich.status`
+   - Record asset-count progression checkpoints per year boundary
+4. Controlled resume path (manual)
+   - `ssh ronny@100.114.101.50 '~/immich-ingest/bin/start.sh'`
+   - Stop only via `ssh ronny@100.114.101.50 '~/immich-ingest/bin/stop.sh'`
+
+### Required Artifacts Before Re-Evaluating Closure
+
+- `queue/years.csv` showing oldest->newest progression with explicit state transitions
+- `state/current.json` heartbeat freshness and current year cursor
+- `logs/worker.log` showing deterministic resume/skip behavior
+- Per-year `manifest_<year>.csv` and `report_<year>.md` evidence set
+
+### Stop Conditions
+
+- Keep loop active while any of the following are true:
+  - heartbeat age exceeds 20 minutes
+  - ingest worker not progressing through year checkpoints
+  - asset-count parity evidence is missing
+  - per-year manifests/reports are incomplete
