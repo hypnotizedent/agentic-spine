@@ -90,7 +90,12 @@ command -v yq >/dev/null 2>&1 || {
 mkdir -p "$HEARTBEAT_DIR"
 now_epoch="$(date +%s)"
 
-declare -a ids roles scopes repos branches files
+ids=()
+roles=()
+scopes=()
+repos=()
+branches=()
+files=()
 stale_count=0
 total_count=0
 
@@ -126,9 +131,9 @@ for hb_file in "$HEARTBEAT_DIR"/*.yaml; do
 done
 shopt -u nullglob
 
-active_count="${#ids[@]}"
+active_count=${#ids[@]}
 collision_count=0
-declare -a collisions
+collisions=()
 
 for ((i=0; i<active_count; i++)); do
   for ((j=i+1; j<active_count; j++)); do
@@ -155,8 +160,16 @@ if [[ "$json_mode" -eq 1 ]]; then
     exit 1
   }
 
-  active_ids_json="$(printf '%s\n' "${ids[@]:-}" | jq -R -s 'split("\n") | map(select(length > 0))')"
-  collisions_json="$(printf '%s\n' "${collisions[@]:-}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+  if [[ "$active_count" -gt 0 ]]; then
+    active_ids_json="$(printf '%s\n' "${ids[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+  else
+    active_ids_json="[]"
+  fi
+  if [[ "$collision_count" -gt 0 ]]; then
+    collisions_json="$(printf '%s\n' "${collisions[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+  else
+    collisions_json="[]"
+  fi
   jq -n \
     --arg status "$status_word" \
     --arg heartbeat_dir "$HEARTBEAT_DIR" \
