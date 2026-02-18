@@ -16,7 +16,7 @@ scope: aof-deployment-playbook
 3. Policy preset selected (strict / balanced / permissive)
 4. Infrastructure targets provisioned (VMs, services, secrets provider)
 
-## Phase 1: Profile Validation
+## Step 1: Profile Validation
 
 ```bash
 # Validate tenant profile against schema
@@ -25,7 +25,7 @@ scope: aof-deployment-playbook
 
 Fix any validation errors before proceeding.
 
-## Phase 2: Dry Run
+## Step 2: Dry Run
 
 ```bash
 # Generate provisioning plan without mutations
@@ -34,14 +34,14 @@ Fix any validation errors before proceeding.
 
 Review the plan output. Confirm all targets are correct.
 
-## Phase 3: Binding Configuration
+## Step 3: Binding Configuration
 
 1. Copy tenant profile to `ops/bindings/tenant.profile.yaml`
 2. Select policy preset in `ops/bindings/policy.presets.yaml`
 3. Configure secrets binding (`ops/bindings/secrets.binding.yaml`)
 4. Configure service registry (`docs/governance/SERVICE_REGISTRY.yaml`)
 
-## Phase 4: Gate Verification
+## Step 4: Gate Verification
 
 ```bash
 # Run full drift gate suite
@@ -50,7 +50,7 @@ Review the plan output. Confirm all targets are correct.
 
 All gates must pass. Address any failures using `/triage` workflow.
 
-## Phase 5: Acceptance
+## Step 5: Acceptance
 
 ```bash
 # Confirm acceptance gates

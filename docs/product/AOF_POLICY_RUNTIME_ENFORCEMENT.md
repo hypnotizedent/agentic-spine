@@ -13,7 +13,7 @@ scope: aof-policy-runtime-enforcement
 
 AOF defines 10 policy knobs in `ops/bindings/policy.presets.yaml`. Each knob must have a runtime enforcement point.
 
-| Knob | Enforcement Point | Wired | Phase |
+| Knob | Enforcement Point | Wired | Step |
 |------|------------------|-------|-------|
 | `drift_gate_mode` | drift-gate.sh | Yes | A |
 | `approval_default` | cap.sh | Yes | A |
@@ -26,14 +26,14 @@ AOF defines 10 policy knobs in `ops/bindings/policy.presets.yaml`. Each knob mus
 | `commit_sign_required` | pre-commit hook | Yes | B |
 | `multi_agent_writes` | cap.sh + pre-commit hook | Yes | B |
 
-## Phase A (Complete)
+## Step A (Complete)
 
 4 knobs wired through `ops/lib/resolve-policy.sh`:
 - Discovery chain: `SPINE_POLICY_PRESET` > `SPINE_TENANT_PROFILE` > `tenant.profile.yaml` > `balanced`
 - Runtime reads preset, exports knob values as environment variables
 - `drift-gate.sh` and `cap.sh` consume these variables
 
-## Phase B (Complete)
+## Step B (Complete)
 
 6 remaining knobs wired through the same `resolve-policy.sh` resolver:
 - `stale_ssot_max_days` → D58 `SSOT_FRESHNESS_DAYS` threshold override

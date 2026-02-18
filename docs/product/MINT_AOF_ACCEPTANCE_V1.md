@@ -17,23 +17,23 @@ parent_loop: LOOP-MINT-AOF-BASELINE-V1-20260217
 5. Workbench docs AOF check passes after template phase.
 6. `GAP-OP-590` remains open and linked to `LOOP-WORKBENCH-AOF-HARDENING-V2-20260217`.
 
-## Phase Exit Checks
+## Step Exit Checks
 
-### Phase 1 Exit
+### Step 1 Exit
 
 1. `MINT_AOF_CONTRACT_V1.md` published.
 2. `MINT_AOF_ENFORCEMENT_V1.md` published.
 3. `MINT_AOF_ACCEPTANCE_V1.md` published.
 4. `verify.core.run` pass and `verify.domain.run aof --force` pass.
 
-### Phase 2 Exit
+### Step 2 Exit
 
 1. Six canonical template docs created in `mint-modules/docs/CANONICAL/`.
 2. Each template includes frontmatter, no-runtime-mutation note, ADR references.
 3. `verify.core.run` pass, `verify.domain.run aof --force` pass.
 4. `workbench-aof-check --mode docs` pass.
 
-### Phase 3 Exit
+### Step 3 Exit
 
 1. Execution runway audit artifact created.
 2. Loop scope file updated with evidence run keys.

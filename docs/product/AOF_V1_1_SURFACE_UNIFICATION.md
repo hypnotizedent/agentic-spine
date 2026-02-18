@@ -14,12 +14,12 @@ parent_loop: LOOP-AOF-V1-1-SURFACE-UNIFICATION-20260217
 
 ## Status
 
-**APPROVED** — Design reviewed and approved 2026-02-17. Implementation sequenced as Move 1 → 2 → 3.
+**APPROVED** — Design reviewed and approved 2026-02-17. Implementation sequenced as Step 1 → 2 → 3.
 
 **Implementation Progress:**
-- Move 1 (MCP Gateway): **DELIVERED** — `ops/plugins/mcp-gateway/bin/spine-mcp-serve` live, `.mcp.json` cutover to gateway-first (2026-02-18)
-- Move 2 (Agent Registry V2): **DELIVERED** — Schema extended, `agent.info` + `agent.tools` caps registered, all 10 agents populated (2026-02-18)
-- Move 3 (Dynamic Context): **NOT STARTED** — Pending D65-v2 design
+- Step 1 (MCP Gateway): **DELIVERED** — `ops/plugins/mcp-gateway/bin/spine-mcp-serve` live, `.mcp.json` cutover to gateway-first (2026-02-18)
+- Step 2 (Agent Registry V2): **DELIVERED** — Schema extended, `agent.info` + `agent.tools` caps registered, all 10 agents populated (2026-02-18)
+- Step 3 (Dynamic Context): **NOT STARTED** — Pending D65-v2 design
 
 ## Problem
 
@@ -41,9 +41,9 @@ its own MCP server wiring. The result:
 - No surface can programmatically query "what tools does agent X have?"
 - New surfaces (future: Cursor, Windsurf, Codex cloud) multiply the sync burden linearly
 
-## Proposal: Three Moves
+## Proposal: Three Steps
 
-### Move 1 — Unified Spine-MCP Gateway
+### Step 1 — Unified Spine-MCP Gateway
 
 **What:** Build a single MCP server that wraps the entire capability registry as MCP tools.
 
@@ -103,14 +103,14 @@ without touching any surface config.
 - `spine.mcp.serve` — start the MCP gateway (read-only, auto-approval)
 - `agent.info` — query agent registry by ID (read-only)
 - `agent.route` — keyword-based agent routing (read-only)
-- `spine.context` — see Move 3
+- `spine.context` — see Step 3
 
 **Estimated scope:** ~300 lines of Python (server) + ~50 lines of shell (CLI wiring) +
 capability registration.
 
 ---
 
-### Move 2 — Queryable Agent Registry
+### Step 2 — Queryable Agent Registry
 
 **What:** Extend `agents.registry.yaml` with machine-queryable fields so agent contracts
 become data, not just prose.
@@ -173,14 +173,14 @@ become data, not just prose.
 2. Populate fields for all 10 agents from their `.contract.md` files
 3. `.contract.md` files become supplementary prose (not deleted, but no longer authoritative
    for tool/endpoint data)
-4. Gateway (Move 1) reads `agents.registry.yaml` to dynamically expose per-agent tools
+4. Gateway (Step 1) reads `agents.registry.yaml` to dynamically expose per-agent tools
 
 **Estimated scope:** Schema extension + 10 agent registry updates + CLI plugin (~100 lines
 shell).
 
 ---
 
-### Move 3 — Dynamic Context Delivery (`spine.context`)
+### Step 3 — Dynamic Context Delivery (`spine.context`)
 
 **What:** Replace static governance brief embeds with a capability that serves the current
 brief + live state on demand.
@@ -244,7 +244,7 @@ script + shim updates to AGENTS.md/CLAUDE.md/OPENCODE.md.
 ## Sequencing and Dependencies
 
 ```
-Move 1 (gateway)  ──────────────────►  Move 2 (registry)  ────►  Move 3 (context)
+Step 1 (gateway)  ──────────────────►  Step 2 (registry)  ────►  Step 3 (context)
                                         │                          │
                                         │ registry feeds           │ context cap
                                         │ gateway tool list        │ served via gateway
@@ -252,9 +252,9 @@ Move 1 (gateway)  ──────────────────►  Mov
 ```
 
 Each move is independently shippable and valuable:
-- **Move 1 alone** eliminates per-surface MCP config sprawl
-- **Move 1 + Move 2** adds programmatic agent discovery
-- **Move 1 + Move 2 + Move 3** completes the vision (zero-sync surfaces)
+- **Step 1 alone** eliminates per-surface MCP config sprawl
+- **Step 1 + Step 2** adds programmatic agent discovery
+- **Step 1 + Step 2 + Step 3** completes the vision (zero-sync surfaces)
 
 ## Impact Analysis
 
@@ -273,23 +273,23 @@ Each move is independently shippable and valuable:
 | `ops/capabilities.yaml` | Register new caps (spine.mcp.serve, agent.info, agent.route, spine.context) |
 | `ops/bindings/capability_map.yaml` | Navigation entries for new caps |
 | `ops/bindings/agents.registry.yaml` | Extended schema (mcp_tools, capabilities, write_scope, gates, endpoints) |
-| `AGENTS.md` | Thin shim (Move 3 only) |
-| `CLAUDE.md` | Thin shim (Move 3 only) |
+| `AGENTS.md` | Thin shim (Step 3 only) |
+| `CLAUDE.md` | Thin shim (Step 3 only) |
 | `bin/ops` | Add `mcp serve` subcommand routing |
-| `surfaces/verify/d65-agent-briefing-sync-lock.sh` | Evolve to D65-v2 (Move 3 only) |
+| `surfaces/verify/d65-agent-briefing-sync-lock.sh` | Evolve to D65-v2 (Step 3 only) |
 
 ### Files Retired
 | File | Reason |
 |------|--------|
-| `ops/hooks/sync-agent-surfaces.sh` | Replaced by dynamic context (Move 3) |
-| `ops/hooks/sync-slash-commands.sh` | Commands served via MCP gateway (Move 1) |
+| `ops/hooks/sync-agent-surfaces.sh` | Replaced by dynamic context (Step 3) |
+| `ops/hooks/sync-slash-commands.sh` | Commands served via MCP gateway (Step 1) |
 | `.mcp.json` (spine root) | Absorbed by gateway |
 | MCPJungle config-only JSONs | Absorbed by gateway cap delegation |
 
 ### Gates Affected
 | Gate | Change |
 |------|--------|
-| D65 | Evolves from embed-parity to shim-presence check (Move 3) |
+| D65 | Evolves from embed-parity to shim-presence check (Step 3) |
 | D67 | Unchanged — new caps still need both yaml registrations |
 | D63 | Unchanged — monolith paths still enforced |
 
@@ -319,4 +319,4 @@ Each move is independently shippable and valuable:
 | Gateway becomes single point of failure | Fallback: direct `./bin/ops cap run` still works, gateway is additive |
 | MCP protocol changes upstream | Python stdlib-only implementation, minimal protocol surface |
 | Agent registry schema migration breaks existing tooling | Additive fields only, no removal of existing fields |
-| D65-v2 rollout leaves surfaces with stale embeds | Staged: keep embeds until Move 3 is verified, then cut over |
+| D65-v2 rollout leaves surfaces with stale embeds | Staged: keep embeds until Step 3 is verified, then cut over |

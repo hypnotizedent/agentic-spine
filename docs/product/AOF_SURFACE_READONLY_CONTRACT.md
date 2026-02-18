@@ -33,7 +33,7 @@ The mobile/customer dashboard surface aggregates:
 - Gate pass/fail summary
 - RAG parity status
 
-This requires a lightweight API endpoint and is scoped for Phase B.
+This requires a lightweight API endpoint and is scoped for Step B.
 
 ## Enforcement
 
