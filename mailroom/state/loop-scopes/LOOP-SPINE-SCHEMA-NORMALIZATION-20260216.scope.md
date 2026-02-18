@@ -136,6 +136,35 @@ Gradual touch-and-fix as files are modified (not big-bang):
    - Touch-and-fix enforcement active: new/modified binding files validated on commit
    - Certification: `CAP-20260217-214411__schema.conventions.audit__Rp5xp54656`
 2. **Phase 2:** Migrate high-value files (gaps, gates, VMs, loops frontmatter)
-   - 8 files with `notes` → `description` rename needed (backup.inventory, cli.tools.inventory, cloudflare.inventory, docker.compose.targets, ha.areas, mailroom.bridge.endpoints, secrets.credentials.parity, z2m.naming)
+   - 2026-02-18 audit refresh: no blocking `notes` violations in the prior 8-file set; remaining work shifted to discouraged-key alias normalization.
 3. **Phase 3:** CLI normalization (gap commands, error prefixes, exit codes)
 4. **Phase 4:** Backfill remaining binding files organically
+
+## 2026-02-18 SA2 Execution Pack (Active, Not Closeable Yet)
+
+### Completed Slice In This Lane
+
+- Re-ran full conventions audit: `CAP-20260217-233438__schema.conventions.audit__Rlyru43197`.
+- Result: `violations: 0`, `warnings: 123` (gate-enforced baseline stable).
+- Extracted exact warning-key counts from audit output:
+  - `updated`: 84
+  - `name`: 25
+  - `gate_id`: 5
+  - `domain_id`: 2
+  - `last_synced`: 2
+  - `agent_id`: 1
+  - `last_reviewed`: 1
+
+### Remaining Deltas (Exact)
+
+1. Alias-key normalization backlog: 123 warning instances across `ops/bindings/*.yaml` (non-blocking today, required for convergence).
+2. Legacy-key exceptions still present and explicitly allowlisted:
+   - `ops/bindings/operational.gaps.yaml`: `notes`, `discovered_at`
+   - `ops/bindings/ssh.targets.yaml`: `notes`
+3. CLI normalization still open by strict objective (positional compatibility still exists for `gaps-claim` and `gaps-close`; final retirement policy not yet codified).
+4. Discovery normalization still open (`ops ssot list` or equivalent canonical discovery surface not yet landed).
+5. Mutation atomicity normalization still open for loops/proposals (loop close path still `sed`-based in `ops/commands/loops.sh`).
+
+### Stop Condition For Closure
+
+Loop remains `active` until D2/D3/D4 convergence work above is implemented and success criteria are fully evidenced.
