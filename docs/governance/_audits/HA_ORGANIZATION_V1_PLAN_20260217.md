@@ -118,3 +118,57 @@ Prepare governed execution scaffolding for HA organization cleanup without mutat
 | 30507401ebb1b318c685c79a0517ac36 | TP-LINK_Smart Plug_AE99 | Bedroom Plug King |
 | 61e23b1a8113139522ee1bcecf5f06c5 | TP-LINK_Smart Plug_B6EE | Bedroom Plug Empress |
 | e20aaef29f4e1c267f93b648a915a844 | Pogo | Bedroom Litterbot Pogo |
+
+## WS2 Execution Evidence (GAP-OP-652)
+
+### Artifacts Updated
+
+| Artifact | Action |
+|----------|--------|
+| `ops/bindings/home.device.registry.yaml` | IP range 70-89 formalized, UDR manual-mutation note added |
+| `ops/bindings/network.home.baseline.yaml` | Mirror range policy + UDR external-mutation note |
+| `ops/plugins/network/bin/network-home-dhcp-audit` | Fixed: summary now written even on audit failure |
+| `ops/bindings/home.dhcp.audit.yaml` | Regenerated with real evidence (was seed stub) |
+
+### DHCP Audit Results (2026-02-17)
+
+- **Registry devices checked:** 33
+- **UniFi clients total:** 41
+- **OK:** 18 (DHCP reservations match registry)
+- **FAIL:** 14 (missing DHCP reservations — require manual UDR changes)
+- **WARN:** 10 (1 gateway + 9 unknown/unregistered clients)
+
+### External Blockers (not in scope for this lane)
+
+The 14 FAIL items are devices with static IPs in the registry but no DHCP reservation on the UDR. Creating reservations requires manual UDR UI interaction or a future `network.home.dhcp.reserve` capability. These are documented below for future WS2 follow-up:
+
+| Device | Registry IP | Issue |
+|--------|------------|-------|
+| Vaultwarden | 10.0.0.102 | Decommissioned — remove from registry |
+| Ronnys-MBP | 10.0.0.229 | Personal device — expected dynamic |
+| RingDoorbell-3e | 10.0.0.162 | Needs UDR reservation |
+| roborock-vacuum-a246 | 10.0.0.96 | Needs UDR reservation |
+| C545 (camera 1) | 10.0.0.66 | Needs UDR reservation |
+| C545 (camera 2) | 10.0.0.115 | Needs UDR reservation |
+| C610_US (camera 1) | 10.0.0.125 | Needs UDR reservation |
+| C610_US (camera 2) | 10.0.0.131 | Needs UDR reservation |
+| EP25 (smart plug) | 10.0.0.208 | Needs UDR reservation |
+| Winix purifier 1 | 10.0.0.55 | Needs UDR reservation |
+| Winix purifier 2 | 10.0.0.231 | Needs UDR reservation |
+| lwip0 | 10.0.0.148 | Identity TBD |
+| Nvidia Shield TV | 10.0.0.7 | Needs UDR reservation |
+| Amazon Echo | 10.0.0.32 | Needs UDR reservation |
+
+### Unknown UniFi Clients (not in registry)
+
+| Name | MAC | IP |
+|------|-----|-----|
+| Watch | da:7e:2f:4b:df:83 | 10.0.0.139 |
+| LGwebOSTV | 4c:bc:e9:b0:8f:64 | 10.0.0.157 |
+| LG guest room | 24:e8:53:ce:22:66 | 10.0.0.182 |
+| EP25 (2nd plug) | 34:60:f9:23:b6:ee | 10.0.0.193 |
+| DESKTOP-IULTPO8 | ac:f2:3c:74:81:0f | 10.0.0.238 |
+| Watch | 12:6e:72:a8:0f:e0 | 10.0.0.62 |
+| iPhone | 3e:94:ce:2f:4f:d2 | 10.0.0.92 |
+| Watch | 3e:4b:9c:ee:ed:28 | 192.168.1.186 |
+| Mac | f6:7f:41:c3:7e:3b | 192.168.1.25 |
