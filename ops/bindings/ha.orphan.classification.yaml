@@ -24,8 +24,48 @@
 #
 # "needs-registry" devices require: area assignment + home.device.registry.yaml entry.
 # All other categories are informational — no action needed.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# Canonical Triage Classes (GAP-OP-654)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# All classification categories map to exactly one triage class:
+#
+#   hacs_pseudo_devices:
+#     Action: hide/ignore — HACS plugins create virtual "devices" with no
+#     physical counterpart. Leave unassigned to any area.
+#     Categories: system-internal (HACS entry only)
+#     Count: ~34 HACS plugin pseudo-devices
+#
+#   non_physical_service_entities:
+#     Action: none — virtual/cloud/software entities with no physical location.
+#     Categories: native-integration, uptime-kuma-probe, proxmox-subsystem,
+#                 media-service, network-service, zwave-module, nas-subsystem
+#     Owner: spine (auto-classified, no manual triage)
+#
+#   actionable_unassigned_physical_devices:
+#     Action: assign area + rename per naming convention — physical devices
+#     that exist on the network but have no area assignment in HA.
+#     Categories: smart-appliance, smart-plug, smart-bulb, media-device,
+#                 matter-device, mobile-app, needs-registry
+#     Owner: operator (room-by-room confirmation required)
+#
+#   unknown_manual_triage:
+#     Action: investigate — devices visible in HA or on the network whose
+#     identity, purpose, or ownership is not yet confirmed.
+#     Categories: needs-registry (subset where identity is unknown)
+#     Owner: operator (manual investigation required)
+#
+# Classification criteria (deterministic):
+#   1. If device has no entities or only "update" entities → hacs_pseudo_devices
+#   2. If integration is proxmoxve, synology_dsm, uptime_kuma, speedtestdotnet,
+#      sun, islamic_prayer_times → non_physical_service_entities
+#   3. If device has a MAC in home.device.registry.yaml → actionable (assign area)
+#   4. If device has no MAC and no registry match → unknown_manual_triage
+#
+# ═══════════════════════════════════════════════════════════════════════════
 
-schema_version: '1.0'
+schema_version: '1.1'
 
 classifications:
 
@@ -87,14 +127,14 @@ classifications:
     description: "WiFi appliances — vacuums, purifiers, curtain robots, pet feeders"
     action: none
     devices:
-      - name: "Q8 Max"
-      - name: "Q8 Max Dock"
+      - name: "Living Room Vacuum Q8"
+      - name: "Living Room Vacuum Q8 Dock"
       - name: "Roborock QX Revo Arc"
       - name: "Roborock QX Revo Arc Dock"
-      - name: "Winix Bed Room"
-      - name: "Winix Hallway"
-      - name: "Winix Library"
-      - name: "Winix Play Room"
+      - name: "Bedroom Purifier"
+      - name: "Office Purifier"
+      - name: "Living Room Purifier"
+      - name: "Guest Room Purifier"
       - name: "WiFi smart curtain robot"
       - name: "ROJECO 2L Pet Feeder"
 
@@ -102,7 +142,7 @@ classifications:
     description: "Smart plugs and energy monitors"
     action: none
     devices:
-      - name: "TP-LINK_Smart Plug_B6EE"
+      - name: "Bedroom Plug Empress"
 
   smart-bulb:
     description: "WiFi smart bulbs via Local Tuya or native integration"
@@ -110,8 +150,8 @@ classifications:
     devices:
       - name: "Guest Room Smart Bulb"
       - name: "Office desk smart bulb"
-      - name: "KING LIGHT"
-      - name: "Empress light"
+      - name: "Bedroom Bulb King"
+      - name: "Bedroom Bulb Empress"
 
   matter-device:
     description: "Matter/Thread devices — routed via Apple TV border router, no LAN IP"
@@ -232,3 +272,47 @@ classifications:
     action: none
     devices:
       - name: "800 Series Long Range GPIO Module"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Triage Class Mapping
+# ═══════════════════════════════════════════════════════════════════════════
+
+triage_classes:
+  hacs_pseudo_devices:
+    action: hide_ignore
+    description: "HACS plugin pseudo-devices — no physical counterpart, leave unassigned"
+    source_categories:
+      - system-internal  # HACS entry only
+    next_action_owner: none
+
+  non_physical_service_entities:
+    action: none
+    description: "Virtual/cloud/software entities with no physical location"
+    source_categories:
+      - native-integration
+      - uptime-kuma-probe
+      - proxmox-subsystem
+      - media-service
+      - network-service
+      - zwave-module
+      - nas-subsystem
+    next_action_owner: spine_auto
+
+  actionable_unassigned_physical_devices:
+    action: assign_area_and_rename
+    description: "Physical devices needing area assignment + naming convention compliance"
+    source_categories:
+      - smart-appliance
+      - smart-plug
+      - smart-bulb
+      - media-device
+      - matter-device
+      - mobile-app
+    next_action_owner: operator
+
+  unknown_manual_triage:
+    action: investigate
+    description: "Devices whose identity, purpose, or ownership is not confirmed"
+    source_categories:
+      - needs-registry
+    next_action_owner: operator

@@ -172,3 +172,33 @@ The 14 FAIL items are devices with static IPs in the registry but no DHCP reserv
 | iPhone | 3e:94:ce:2f:4f:d2 | 10.0.0.92 |
 | Watch | 3e:4b:9c:ee:ed:28 | 192.168.1.186 |
 | Mac | f6:7f:41:c3:7e:3b | 192.168.1.25 |
+
+## WS4 Execution Evidence (GAP-OP-654)
+
+### Artifacts Updated
+
+| Artifact | Action |
+|----------|--------|
+| `ops/bindings/ha.orphan.classification.yaml` | Schema v1.0 → v1.1: added canonical triage classes, updated WS1-renamed devices |
+
+### Orphan Classification Summary
+
+| Triage Class | Action | Categories | Count |
+|-------------|--------|------------|-------|
+| hacs_pseudo_devices | hide/ignore | system-internal (HACS) | ~34 |
+| non_physical_service_entities | none | native-integration, uptime-kuma-probe, proxmox-subsystem, media-service, network-service, zwave-module, nas-subsystem | ~100 |
+| actionable_unassigned_physical_devices | assign area + rename | smart-appliance, smart-plug, smart-bulb, media-device, matter-device, mobile-app | ~20 |
+| unknown_manual_triage | investigate | needs-registry | 0 (none currently) |
+
+### Classification Policy
+
+- Deterministic criteria documented in file header (4-step decision tree)
+- Each category maps to exactly one triage class
+- `next_action_owner` defined: `none`, `spine_auto`, or `operator`
+- Device names updated to reflect WS1 renames (Winix, Q8, TP-Link, bulbs)
+
+### What Remains Manual
+
+- HACS pseudo-device count is approximate (~34) — exact count requires live HA query
+- Media device area assignment deferred (operator room-by-room confirmation)
+- Future: automated classification capability could replace manual triage
