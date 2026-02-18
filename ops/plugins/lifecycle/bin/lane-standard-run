@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# lane.standard.run — One-command ceremony runner for standard lane sequences.
+#
+# Runs: snapshot -> core verify -> domain verify -> proposals.status ->
+#       gaps.status -> loops.status
+#
+# Emits a markdown report with run keys, phase results, and summary counts.
+#
+# Usage:
+#   lane-standard-run [--domains <csv>] [--skip-snapshot] [--continue-on-error] [--json]
+#
+# Flags:
+#   --domains <csv>        Comma-separated domain list (default: aof)
+#   --skip-snapshot        Skip stability.control.snapshot phase
+#   --continue-on-error    Continue on failure, report partial status
+#   --json                 Emit JSON envelope instead of text
+#
+# Exit codes:
+#   0 = all phases passed
+#   1 = one or more phases failed (or runtime error)
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+OPS="$ROOT/bin/ops"
+
+DOMAINS="aof"
+SKIP_SNAPSHOT=0
+CONTINUE_ON_ERROR=0
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --domains)
+      DOMAINS="${2:-}"
+      shift 2
+      ;;
+    --skip-snapshot)
+      SKIP_SNAPSHOT=1
+      shift
+      ;;
+    --continue-on-error)
+      CONTINUE_ON_ERROR=1
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'USAGE'
+lane-standard-run — One-command ceremony runner
+
+Usage:
+  lane-standard-run [--domains <csv>] [--skip-snapshot] [--continue-on-error] [--json]
+
+Flags:
+  --domains <csv>        Comma-separated domain list (default: aof)
+  --skip-snapshot        Skip stability.control.snapshot phase
+  --continue-on-error    Continue on failure, report partial status
+  --json                 Emit JSON envelope instead of text
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# ── Internal state ──
+TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+REPORT_DIR="$ROOT/mailroom/outbox/reports/lane-runs"
+mkdir -p "$REPORT_DIR"
+
+DOMAINS_SLUG="$(echo "$DOMAINS" | tr ',' '-')"
+REPORT_FILE="$REPORT_DIR/${TIMESTAMP}__${DOMAINS_SLUG}.md"
+
+PHASE_RESULTS=()  # "phase_name|status|run_key|detail"
+OVERALL_STATUS="pass"
+TOTAL_PASS=0
+TOTAL_FAIL=0
+TOTAL_SKIP=0
+
+# ── Helpers ──
+run_phase() {
+  local phase_name="$1"
+  shift
+  local cap_cmd="$*"
+
+  local output rc run_key
+  output="$("$OPS" cap run $cap_cmd 2>&1)" && rc=0 || rc=$?
+
+  run_key="$(echo "$output" | grep '^Run Key:' | head -1 | sed 's/^Run Key: *//')"
+  [[ -z "$run_key" ]] && run_key="none"
+
+  local status_str="pass"
+  if [[ $rc -ne 0 ]]; then
+    status_str="fail"
+    TOTAL_FAIL=$((TOTAL_FAIL + 1))
+    OVERALL_STATUS="fail"
+  else
+    TOTAL_PASS=$((TOTAL_PASS + 1))
+  fi
+
+  # Extract summary line
+  local summary
+  summary="$(echo "$output" | grep -E '^summary:|^Status:' | tail -1 | sed 's/^[^:]*: *//')"
+  [[ -z "$summary" ]] && summary="rc=$rc"
+
+  PHASE_RESULTS+=("${phase_name}|${status_str}|${run_key}|${summary}")
+
+  if [[ "$status_str" == "fail" && "$CONTINUE_ON_ERROR" -eq 0 ]]; then
+    echo "STOP: $phase_name failed (rc=$rc). Use --continue-on-error to proceed past failures." >&2
+    write_report
+    exit 1
+  fi
+}
+
+skip_phase() {
+  local phase_name="$1"
+  PHASE_RESULTS+=("${phase_name}|skip|none|skipped by flag")
+  TOTAL_SKIP=$((TOTAL_SKIP + 1))
+}
+
+write_report() {
+  {
+    echo "# Lane Standard Run Report"
+    echo ""
+    echo "- Timestamp: $TIMESTAMP"
+    echo "- Domains: $DOMAINS"
+    echo "- Overall: ${OVERALL_STATUS^^}"
+    echo "- Phases: pass=$TOTAL_PASS fail=$TOTAL_FAIL skip=$TOTAL_SKIP"
+    echo ""
+    echo "## Phase Results"
+    echo ""
+    echo "| Phase | Status | Run Key | Detail |"
+    echo "|-------|--------|---------|--------|"
+    for row in "${PHASE_RESULTS[@]}"; do
+      local ph st rk dt
+      ph="$(echo "$row" | cut -d'|' -f1)"
+      st="$(echo "$row" | cut -d'|' -f2)"
+      rk="$(echo "$row" | cut -d'|' -f3)"
+      dt="$(echo "$row" | cut -d'|' -f4)"
+      echo "| $ph | $st | \`$rk\` | $dt |"
+    done
+    echo ""
+    echo "## Summary"
+    echo ""
+    echo "- Total phases: $((TOTAL_PASS + TOTAL_FAIL + TOTAL_SKIP))"
+    echo "- Pass: $TOTAL_PASS"
+    echo "- Fail: $TOTAL_FAIL"
+    echo "- Skip: $TOTAL_SKIP"
+    echo ""
+    echo "---"
+    echo "STOP"
+  } > "$REPORT_FILE"
+}
+
+# ── Execute sequence ──
+
+# Phase 1: Stability snapshot
+if [[ "$SKIP_SNAPSHOT" -eq 1 ]]; then
+  skip_phase "stability.control.snapshot"
+else
+  run_phase "stability.control.snapshot" stability.control.snapshot
+fi
+
+# Phase 2: Core verify
+run_phase "verify.core.run" verify.core.run
+
+# Phase 3: Domain verify (one per domain)
+IFS=',' read -ra DOMAIN_LIST <<< "$DOMAINS"
+for domain in "${DOMAIN_LIST[@]}"; do
+  domain="$(echo "$domain" | tr -d ' ')"
+  run_phase "verify.domain.run:${domain}" verify.domain.run "$domain" --force
+done
+
+# Phase 4: Status checks
+run_phase "proposals.status" proposals.status
+run_phase "gaps.status" gaps.status
+run_phase "loops.status" loops.status
+
+# ── Write report ──
+write_report
+
+# ── Output ──
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  phases_json="["
+  first=1
+  for row in "${PHASE_RESULTS[@]}"; do
+    ph="$(echo "$row" | cut -d'|' -f1)"
+    st="$(echo "$row" | cut -d'|' -f2)"
+    rk="$(echo "$row" | cut -d'|' -f3)"
+    dt="$(echo "$row" | cut -d'|' -f4)"
+    [[ $first -eq 0 ]] && phases_json+=","
+    first=0
+    phases_json+="{\"phase\":\"$ph\",\"status\":\"$st\",\"run_key\":\"$rk\",\"detail\":\"$dt\"}"
+  done
+  phases_json+="]"
+
+  jq -n \
+    --arg timestamp "$TIMESTAMP" \
+    --arg domains "$DOMAINS" \
+    --arg overall "$OVERALL_STATUS" \
+    --argjson pass "$TOTAL_PASS" \
+    --argjson fail "$TOTAL_FAIL" \
+    --argjson skip "$TOTAL_SKIP" \
+    --argjson phases "$phases_json" \
+    --arg report "$REPORT_FILE" \
+    '{timestamp:$timestamp, domains:$domains, overall:$overall, pass:$pass, fail:$fail, skip:$skip, phases:$phases, report:$report}'
+else
+  echo "lane.standard.run"
+  echo "timestamp: $TIMESTAMP"
+  echo "domains: $DOMAINS"
+  echo "overall: ${OVERALL_STATUS^^}"
+  echo "phases: pass=$TOTAL_PASS fail=$TOTAL_FAIL skip=$TOTAL_SKIP"
+  echo "report: $REPORT_FILE"
+  echo ""
+  for row in "${PHASE_RESULTS[@]}"; do
+    ph="$(echo "$row" | cut -d'|' -f1)"
+    st="$(echo "$row" | cut -d'|' -f2)"
+    rk="$(echo "$row" | cut -d'|' -f3)"
+    echo "  $ph: $st ($rk)"
+  done
+fi
+
+if [[ "$OVERALL_STATUS" == "fail" ]]; then
+  exit 1
+fi
+exit 0
