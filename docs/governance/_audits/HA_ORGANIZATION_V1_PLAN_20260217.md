@@ -32,6 +32,19 @@ Prepare governed execution scaffolding for HA organization cleanup without mutat
 - Gap: `GAP-OP-653`
 - Scope: introduce canonical schema artifacts for HA naming and environment partitioning.
 
+### WS3 Decision Lock (GAP-OP-653)
+
+- Canonical files:
+  - `/Users/ronnyworks/code/agentic-spine/ops/bindings/ha.naming.convention.yaml`
+  - `/Users/ronnyworks/code/agentic-spine/ops/bindings/ha.environments.yaml`
+- Naming contract: snake_case `{area}_{function}_{qualifier}`
+- Environment IDs:
+  - `home` (active)
+  - `shop` (planned)
+- Enforcement path references:
+  - Drift gates `D117` + `D120`
+  - `./bin/ops cap run verify.domain.run home --force`
+
 ## Exact File Touch Map (HA Executor Lane)
 
 ### WS1 expected files
