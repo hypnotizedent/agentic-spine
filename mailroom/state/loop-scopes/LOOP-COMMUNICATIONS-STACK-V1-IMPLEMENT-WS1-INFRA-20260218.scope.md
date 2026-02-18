@@ -57,8 +57,13 @@ Execute WS1 infrastructure foundation for Communications Stack V1 (Stalwart lane
    - `./bin/ops cap run verify.core.run`
    - `./bin/ops cap run verify.domain.run aof --force`
    - `./bin/ops cap run verify.pack.run loop_gap`
-6. Lifecycle close:
+6. AOF hygiene normalization sweep (final step before closure):
+   - Perform a decomposition-vocabulary audit across active work artifacts.
+   - Flag and register any non-AOF-approved decomposition semantics (e.g., mixed WS/Move/Wave/Phase/Step/P-tier usage) as new gaps with parent linkage.
+   - Include sweep receipts and findings summary in closeout evidence.
+7. Lifecycle close:
    - `echo "yes" | ./bin/ops cap run gaps.close --id GAP-OP-665 --status fixed --fixed-in "<run-keys>"`
+   - `echo "yes" | ./bin/ops cap run gaps.close --id GAP-OP-666 --status fixed --fixed-in "<run-keys>"`
    - `./bin/ops loops close LOOP-COMMUNICATIONS-STACK-V1-IMPLEMENT-WS1-INFRA-20260218`
 
 ## Acceptance
@@ -66,4 +71,5 @@ Execute WS1 infrastructure foundation for Communications Stack V1 (Stalwart lane
 - Communications capability surfaces are registered and executable with expected safety/approval modes.
 - Domain/binding parity checks pass (including capability map, docs impact routes, and topology/profile updates).
 - Infra dry-run commands succeed with receipts.
+- Final AOF hygiene sweep is completed and any non-canonical workflow inconsistencies are registered via gaps.
 - Gap and loop close with receipt-linked evidence.
