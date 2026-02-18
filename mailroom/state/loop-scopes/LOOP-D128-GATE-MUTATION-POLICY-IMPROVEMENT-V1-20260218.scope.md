@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-D128-GATE-MUTATION-POLICY-IMPROVEMENT-V1-20260218
 created: 2026-02-18
-status: active
+status: closed
 owner: "@ronny"
 scope: d128
 priority: high
