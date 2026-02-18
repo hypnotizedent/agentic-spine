@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+RULES_FILE="$ROOT/ops/bindings/alerting.rules.yaml"
+SNAPSHOT_FILE="/tmp/spine-alerting-probe-latest.json"
+DRY_RUN=0
+JSON_MODE=0
+NO_PROBE=0
+
+usage() {
+  cat <<'USAGE'
+alerting-dispatch
+
+Usage:
+  alerting-dispatch [--rules <path>] [--snapshot <path>] [--dry-run] [--json] [--no-probe]
+
+Evaluates stability snapshot domain states against alert rules and dispatches alerts.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rules)
+      RULES_FILE="${2:-}"
+      shift 2
+      ;;
+    --snapshot)
+      SNAPSHOT_FILE="${2:-}"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --no-probe)
+      NO_PROBE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$RULES_FILE" ]] || { echo "FAIL: missing rules file: $RULES_FILE" >&2; exit 1; }
+
+if [[ ! -f "$SNAPSHOT_FILE" ]]; then
+  if [[ "$NO_PROBE" -eq 1 ]]; then
+    echo "FAIL: snapshot file not found: $SNAPSHOT_FILE" >&2
+    exit 1
+  fi
+  "$ROOT/ops/plugins/alerting/bin/alerting-probe" --out "$SNAPSHOT_FILE" >/dev/null
+fi
+
+jq -e '.' "$SNAPSHOT_FILE" >/dev/null 2>&1 || {
+  echo "FAIL: invalid snapshot JSON: $SNAPSHOT_FILE" >&2
+  exit 1
+}
+
+ALERT_DIR_REL="$(yq -r '.defaults.alert_outbox_dir // "mailroom/outbox/alerts"' "$RULES_FILE")"
+ALERT_DIR="$ROOT/$ALERT_DIR_REL"
+COOLDOWN_DIR="$ALERT_DIR/.cooldown"
+mkdir -p "$ALERT_DIR" "$COOLDOWN_DIR"
+
+source "$ROOT/ops/plugins/alerting/lib/alert-channels.sh"
+
+now_epoch="$(date +%s)"
+created=0
+dispatched=0
+suppressed=0
+errors=0
+
+while IFS=$'\t' read -r domain status policy_note; do
+  [[ -z "$domain" || -z "$status" ]] && continue
+
+  rule_exists="$(yq -r ".rules[] | select(.domain_id == \"$domain\") | .domain_id" "$RULES_FILE" | head -n1 || true)"
+  [[ -n "$rule_exists" ]] || continue
+
+  trigger_hit=0
+  while IFS= read -r trigger; do
+    [[ "$trigger" == "$status" ]] && trigger_hit=1
+  done < <(yq -r ".rules[] | select(.domain_id == \"$domain\") | .trigger_statuses[]?" "$RULES_FILE")
+
+  if [[ "$trigger_hit" -ne 1 ]]; then
+    continue
+  fi
+
+  cooldown="$(yq -r ".rules[] | select(.domain_id == \"$domain\") | .cooldown_seconds // 0" "$RULES_FILE")"
+  [[ "$cooldown" =~ ^[0-9]+$ ]] || cooldown=0
+
+  cooldown_file="$COOLDOWN_DIR/$domain"
+  if [[ -f "$cooldown_file" ]]; then
+    last_epoch="$(cat "$cooldown_file" 2>/dev/null || echo 0)"
+    if [[ "$last_epoch" =~ ^[0-9]+$ ]]; then
+      if (( now_epoch - last_epoch < cooldown )); then
+        suppressed=$((suppressed + 1))
+        continue
+      fi
+    fi
+  fi
+
+  stamp="$(date -u +%Y%m%d-%H%M%S)"
+  alert_file="$ALERT_DIR/ALERT-${stamp}-${domain}.yaml"
+  title="SPINE ALERT [$status] $domain"
+  summary="status=$status domain=$domain policy_note=${policy_note:-none}"
+
+  cat >"$alert_file" <<ALERT
+version: "1.0"
+generated_at_utc: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+domain_id: "$domain"
+status: "$status"
+policy_note: "${policy_note:-}"
+title: "$title"
+summary: "$summary"
+snapshot_path: "$SNAPSHOT_FILE"
+rules_file: "$RULES_FILE"
+ALERT
+
+  created=$((created + 1))
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    continue
+  fi
+
+  channel_error=0
+  while IFS= read -r channel; do
+    [[ -z "$channel" || "$channel" == "null" ]] && continue
+    if alert_dispatch_channel "$channel" "$alert_file"; then
+      dispatched=$((dispatched + 1))
+    else
+      channel_error=1
+      errors=$((errors + 1))
+    fi
+  done < <(yq -r ".rules[] | select(.domain_id == \"$domain\") | .channels[]?" "$RULES_FILE")
+
+  if [[ "$channel_error" -eq 0 ]]; then
+    echo "$now_epoch" >"$cooldown_file"
+  fi
+
+done < <(jq -r '.domains[] | [.id, .status, (.policy_note // "")] | @tsv' "$SNAPSHOT_FILE")
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg snapshot "$SNAPSHOT_FILE" \
+    --arg rules "$RULES_FILE" \
+    --argjson dry_run "$DRY_RUN" \
+    --argjson created "$created" \
+    --argjson dispatched "$dispatched" \
+    --argjson suppressed "$suppressed" \
+    --argjson errors "$errors" \
+    '{capability:"alerting.dispatch",snapshot:$snapshot,rules:$rules,dry_run:($dry_run==1),created:$created,dispatched:$dispatched,suppressed:$suppressed,errors:$errors}'
+  exit 0
+fi
+
+echo "alerting.dispatch"
+echo "snapshot: $SNAPSHOT_FILE"
+echo "rules: $RULES_FILE"
+echo "dry_run: $DRY_RUN"
+echo "alerts_created: $created"
+echo "channels_dispatched: $dispatched"
+echo "cooldown_suppressed: $suppressed"
+echo "dispatch_errors: $errors"

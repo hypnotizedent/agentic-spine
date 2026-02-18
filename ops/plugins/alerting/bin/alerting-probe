@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+OUT_FILE="/tmp/spine-alerting-probe-latest.json"
+
+usage() {
+  cat <<'USAGE'
+alerting-probe
+
+Usage:
+  alerting-probe [--out <path>]
+
+Runs stability.control.snapshot in JSON mode and stages output for dispatch.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out)
+      OUT_FILE="${2:-}"
+      [[ -n "$OUT_FILE" ]] || { echo "FAIL: --out requires a value" >&2; exit 2; }
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+mkdir -p "$(dirname "$OUT_FILE")"
+tmp_file="$(mktemp)"
+
+set +e
+"$ROOT/ops/plugins/observability/bin/stability-control-snapshot" --json >"$tmp_file"
+probe_rc=$?
+set -e
+
+if ! jq -e '.' "$tmp_file" >/dev/null 2>&1; then
+  echo "FAIL: stability snapshot did not return valid JSON" >&2
+  rm -f "$tmp_file"
+  exit 1
+fi
+
+mv "$tmp_file" "$OUT_FILE"
+
+status="$(jq -r '.status // "unknown"' "$OUT_FILE")"
+incident_count="$(jq -r '.incident_count // 0' "$OUT_FILE")"
+warn_count="$(jq -r '.warn_count // 0' "$OUT_FILE")"
+
+echo "alerting.probe"
+echo "snapshot: $OUT_FILE"
+echo "snapshot_exit_code: $probe_rc"
+echo "status: $status"
+echo "incident_count: $incident_count"
+echo "warn_count: $warn_count"
