@@ -1,7 +1,8 @@
 ---
 loop_id: LOOP-ROUTE-INTEGRITY-RATCHET-20260217
 created: 2026-02-17
-status: active
+status: closed
+closed_at: "2026-02-18"
 owner: "@ronny"
 severity: high
 scope: loop_gap
