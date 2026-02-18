@@ -1,7 +1,9 @@
 ---
 loop_id: LOOP-HA-IDENTITY-MUTATION-CONTRACT-V1-20260217
 created: 2026-02-17
-status: active
+status: closed
+closed_at: 2026-02-17
+closeout_cert: docs/governance/_audits/HA_IDENTITY_MUTATION_CONTRACT_V1_PLAN_20260217.md
 owner: "@ronny"
 scope: ha
 priority: high
