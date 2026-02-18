@@ -52,7 +52,7 @@ ops cap run gaps.status
 Claims a gap for exclusive work. Prevents concurrent agents from picking the same gap.
 
 ```bash
-ops cap run gaps.claim GAP-OP-NNN --action "description of work"
+ops cap run gaps.claim --id GAP-OP-NNN --action "description of work"
 ```
 
 - Validates gap exists and is open
@@ -64,7 +64,7 @@ ops cap run gaps.claim GAP-OP-NNN --action "description of work"
 Releases a gap claim. Only the owning process can release (or stale-recovery).
 
 ```bash
-ops cap run gaps.unclaim GAP-OP-NNN
+ops cap run gaps.unclaim --id GAP-OP-NNN
 ```
 
 ### `gaps.file` (mutating, auto)
@@ -93,7 +93,7 @@ Valid severities: `low`, `medium`, `high`, `critical`
 Closes or fixes a gap. Atomic: acquires git-lock, validates claim ownership, updates status, commits.
 
 ```bash
-echo "yes" | ops cap run gaps.close GAP-OP-NNN \
+echo "yes" | ops cap run gaps.close --id GAP-OP-NNN \
   --status fixed \
   --fixed-in "LOOP-ID or commit-ref" \
   --notes "Description of the fix"

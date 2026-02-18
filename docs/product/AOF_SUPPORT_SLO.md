@@ -31,8 +31,8 @@ These SLOs apply to the AOF spine runtime, not domain-specific workloads.
 ## Incident Workflow
 
 1. File a gap: `./bin/ops cap run gaps.file --id GAP-OP-NNN --type runtime-bug --severity high --description "..." --discovered-by "..." --doc "..."`
-2. Claim the gap: `./bin/ops cap run gaps.claim GAP-OP-NNN --action "fix description"`
-3. Fix and close: `./bin/ops cap run gaps.close GAP-OP-NNN --status fixed --fixed-in "commit-or-loop-ref"`
+2. Claim the gap: `./bin/ops cap run gaps.claim --id GAP-OP-NNN --action "fix description"`
+3. Fix and close: `./bin/ops cap run gaps.close --id GAP-OP-NNN --status fixed --fixed-in "commit-or-loop-ref"`
 
 ## Escalation
 

@@ -275,21 +275,21 @@ test_gaps_close_validation() {
   echo "Test 6: gaps-close argument validation"
 
   # Missing --status
-  if "$ROOT/ops/plugins/loops/bin/gaps-close" GAP-OP-135 2>/dev/null; then
+  if "$ROOT/ops/plugins/loops/bin/gaps-close" --id GAP-OP-135 2>/dev/null; then
     fail "gaps-close should reject missing --status"
   else
     pass "gaps-close rejects missing --status"
   fi
 
   # Invalid status
-  if "$ROOT/ops/plugins/loops/bin/gaps-close" GAP-OP-135 --status invalid 2>/dev/null; then
+  if "$ROOT/ops/plugins/loops/bin/gaps-close" --id GAP-OP-135 --status invalid 2>/dev/null; then
     fail "gaps-close should reject invalid status"
   else
     pass "gaps-close rejects invalid status"
   fi
 
   # Non-existent gap
-  if "$ROOT/ops/plugins/loops/bin/gaps-close" GAP-OP-NONEXISTENT --status fixed 2>/dev/null; then
+  if "$ROOT/ops/plugins/loops/bin/gaps-close" --id GAP-OP-NONEXISTENT --status fixed 2>/dev/null; then
     fail "gaps-close should reject non-existent gap"
   else
     pass "gaps-close rejects non-existent gap"

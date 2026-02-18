@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SPINE-SCHEMA-NORMALIZATION-20260216
 opened: 2026-02-16
-status: active
+status: closed
 owner: "@ronny"
 severity: high
 scope: spine-schema-normalization
@@ -228,3 +228,53 @@ Loop remains `active` until D2/D3/D4 convergence work above is implemented and s
   - `ops/bindings/receipts.index.schema.yaml`
 - Remaining warning classes still open: `updated`, `name`, `gate_id`, `domain_id`, `agent_id`, `last_synced`, `last_reviewed`, plus allowlisted legacy `notes`/`discovered_at`.
 - Explicit status: loop remains active for D2/D3/D4 convergence.
+
+## 2026-02-18 Final D2/D3 closure lane
+
+### D2 completion evidence (CLI argument normalization)
+
+- Gap mutation surfaces now require named `--id` arguments with no positional compatibility path:
+  - `ops/plugins/loops/bin/gaps-claim`
+  - `ops/plugins/loops/bin/gaps-unclaim`
+  - `ops/plugins/loops/bin/gaps-close`
+- Canonical docs/examples were aligned to the single named-flag pattern:
+  - `docs/governance/GAP_LIFECYCLE.md`
+  - `docs/product/AOF_SUPPORT_SLO.md`
+- Regression checks:
+  - `ops/plugins/loops/tests/test-gap-mutations.sh` (20 passed, 0 failed)
+  - `ops/plugins/aof/tests/aof-cap-runner-integration-test.sh` (4 passed, 0 failed)
+
+### D3 completion evidence (SSOT discovery normalization)
+
+- Added canonical discovery surface: `ops ssot list`
+  - Dispatcher route: `bin/ops` (`ssot` command branch)
+  - Command implementation: `ops/commands/ssot.sh`
+  - Output supports active-only/all, priority filtering, and JSON mode.
+
+### D4 completion evidence (mutation atomicity)
+
+- Loops close path is git-locked and atomic:
+  - `ops/commands/loops.sh` (`close_loop()` uses `acquire_git_lock` + atomic file replace)
+- Proposals clean-tree assertion remains enforced:
+  - `ops/plugins/proposals/bin/proposals-apply` (`git status --porcelain` guard)
+
+### Verification and certs
+
+- Preflight lane:
+  - `CAP-20260218-003717__lane.standard.run__Rgdo538144` (overall pass)
+- Post-mutation verifies:
+  - `CAP-20260218-004203__verify.core.run__Rf8qy78663` (pass)
+  - `CAP-20260218-004203__verify.domain.run__Rft9378664` (pass; includes `D129` + `D142`)
+- Status certs:
+  - `CAP-20260218-004245__loops.status__Rot0r99507`
+  - `CAP-20260218-004245__gaps.status__Rjwcr99506`
+  - `CAP-20260218-004245__proposals.status__Rf5s599508`
+
+### Closure decision
+
+- Success criteria now satisfied:
+  - conventions schema landed + enforced
+  - new binding changes pass conventions gate in verify lane
+  - gap CLI uses one consistent named-arg pattern
+  - discovery normalization for SSOTs has a canonical `ops ssot list` surface
+- Loop is ready for closure.
