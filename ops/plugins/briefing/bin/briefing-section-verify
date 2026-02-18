@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+RECEIPTS_DIR="$ROOT/receipts/sessions"
+
+latest="$(ls -1dt "$RECEIPTS_DIR"/RCAP-*__verify.pack.run__* 2>/dev/null | head -n1 || true)"
+
+if [[ -z "$latest" || ! -f "$latest/receipt.md" ]]; then
+  jq -n --arg section "verify" --arg status "degraded" --arg summary "no verify.pack receipt found" '{section:$section,status:$status,summary:$summary,details:{}}'
+  exit 0
+fi
+
+status="$(sed -n 's/^| Status | `\?\([^|`]*\)`\? |$/\1/p' "$latest/receipt.md" | head -n1 | xargs || true)"
+generated="$(sed -n 's/^| Generated | `\?\([^|`]*\)`\? |$/\1/p' "$latest/receipt.md" | head -n1 | xargs || true)"
+run_id="$(sed -n 's/^| Run ID | `\?\([^|`]*\)`\? |$/\1/p' "$latest/receipt.md" | head -n1 | xargs || true)"
+
+section_status="ok"
+if [[ "$status" != "done" ]]; then
+  section_status="degraded"
+fi
+
+summary="latest_verify_status=${status:-unknown} generated=${generated:-unknown}"
+jq -n \
+  --arg section "verify" \
+  --arg status "$section_status" \
+  --arg summary "$summary" \
+  --arg run_id "$run_id" \
+  --arg generated "$generated" \
+  --arg receipt "$latest/receipt.md" \
+  '{section:$section,status:$status,summary:$summary,details:{run_id:$run_id,generated:$generated,receipt:$receipt}}'

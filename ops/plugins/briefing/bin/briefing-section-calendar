@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+
+tmp="$(mktemp)"
+set +e
+"$ROOT/ops/plugins/calendar/bin/calendar-status" >"$tmp" 2>&1
+rc=$?
+set -e
+
+if [[ "$rc" -ne 0 ]]; then
+  detail="$(sed -n '1,4p' "$tmp" | tr '\n' ' ' | sed 's/"//g')"
+  jq -n --arg section "calendar" --arg status "degraded" --arg summary "calendar status unavailable" --arg detail "$detail" '{section:$section,status:$status,summary:$summary,details:{error:$detail}}'
+  rm -f "$tmp"
+  exit 0
+fi
+
+line="$(sed -n '1,3p' "$tmp" | tr '\n' ' ' | sed 's/"//g')"
+jq -n --arg section "calendar" --arg status "ok" --arg summary "calendar status healthy" --arg line "$line" '{section:$section,status:$status,summary:$summary,details:{output:$line}}'
+rm -f "$tmp"

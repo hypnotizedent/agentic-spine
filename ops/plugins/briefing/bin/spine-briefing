@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+CONFIG="$ROOT/ops/bindings/briefing.config.yaml"
+JSON_MODE=0
+DELTA_MODE=0
+NO_CACHE=0
+
+usage() {
+  cat <<'USAGE'
+spine-briefing
+
+Usage:
+  spine-briefing [--config <path>] [--json] [--delta] [--no-cache]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      CONFIG="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --delta)
+      DELTA_MODE=1
+      shift
+      ;;
+    --no-cache)
+      NO_CACHE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$CONFIG" ]] || { echo "FAIL: missing config: $CONFIG" >&2; exit 1; }
+
+source "$ROOT/ops/plugins/briefing/lib/briefing-cache.sh"
+
+cache_dir="$(yq -r '.cache.dir // "/tmp/spine-briefing-cache"' "$CONFIG")"
+cache_ttl_min="$(yq -r '.cache.ttl_minutes // 30' "$CONFIG")"
+[[ "$cache_ttl_min" =~ ^[0-9]+$ ]] || cache_ttl_min=30
+cache_ttl_sec=$(( cache_ttl_min * 60 ))
+
+out_md_rel="$(yq -r '.output.markdown_path // "mailroom/outbox/briefing/briefing-latest.md"' "$CONFIG")"
+out_json_rel="$(yq -r '.output.json_path // "mailroom/outbox/briefing/briefing-latest.json"' "$CONFIG")"
+out_md="$ROOT/$out_md_rel"
+out_json="$ROOT/$out_json_rel"
+mkdir -p "$(dirname "$out_md")" "$(dirname "$out_json")"
+
+prev_json='{}'
+if [[ "$DELTA_MODE" -eq 1 && -f "$out_json" ]]; then
+  prev_json="$(cat "$out_json")"
+fi
+
+sections='[]'
+while IFS=$'\t' read -r section_id runner enabled; do
+  [[ "$enabled" == "true" ]] || continue
+
+  payload=""
+  if [[ "$NO_CACHE" -eq 0 ]] && briefing_cache_is_fresh "$cache_dir" "$section_id" "$cache_ttl_sec"; then
+    payload="$(briefing_cache_read "$cache_dir" "$section_id" || true)"
+  fi
+
+  if [[ -z "$payload" ]]; then
+    if [[ ! -x "$ROOT/$runner" ]]; then
+      payload="$(jq -n --arg section "$section_id" --arg status "error" --arg summary "runner missing: $runner" '{section:$section,status:$status,summary:$summary,details:{}}')"
+    else
+      set +e
+      payload="$("$ROOT/$runner" </dev/null 2>/dev/null)"
+      rc=$?
+      set -e
+      if [[ "$rc" -ne 0 ]] || ! jq -e '.' <<<"$payload" >/dev/null 2>&1; then
+        payload="$(jq -n --arg section "$section_id" --arg status "error" --arg summary "runner failed: $runner" '{section:$section,status:$status,summary:$summary,details:{}}')"
+      fi
+    fi
+    briefing_cache_write "$cache_dir" "$section_id" "$payload"
+  fi
+
+  if [[ "$DELTA_MODE" -eq 1 ]]; then
+    prev_summary="$(jq -r --arg id "$section_id" '.sections[]? | select(.section == $id) | .summary // ""' <<<"$prev_json" | head -n1)"
+    prev_status="$(jq -r --arg id "$section_id" '.sections[]? | select(.section == $id) | .status // ""' <<<"$prev_json" | head -n1)"
+    curr_summary="$(jq -r '.summary // ""' <<<"$payload")"
+    curr_status="$(jq -r '.status // ""' <<<"$payload")"
+    changed=false
+    if [[ "$prev_summary" != "$curr_summary" || "$prev_status" != "$curr_status" ]]; then
+      changed=true
+    fi
+    payload="$(jq --argjson changed "$changed" '.details = (.details // {}) + {changed:$changed}' <<<"$payload")"
+  fi
+
+  sections="$(jq -c --argjson row "$payload" '. + [$row]' <<<"$sections")"
+done < <(yq -r '.sections[] | [.id, .runner, (.enabled|tostring)] | @tsv' "$CONFIG")
+
+overall="ok"
+if jq -e '.[] | select(.status == "error")' <<<"$sections" >/dev/null; then
+  overall="error"
+elif jq -e '.[] | select(.status == "degraded")' <<<"$sections" >/dev/null; then
+  overall="degraded"
+fi
+
+generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+result="$(jq -n \
+  --arg capability "spine.briefing" \
+  --arg generated_at_utc "$generated_at" \
+  --arg overall_status "$overall" \
+  --argjson sections "$sections" \
+  '{capability:$capability,generated_at_utc:$generated_at_utc,overall_status:$overall_status,sections:$sections}')"
+
+printf '%s\n' "$result" >"$out_json"
+
+{
+  echo "# Spine Daily Briefing"
+  echo
+  echo "- Generated: $generated_at"
+  echo "- Overall: $overall"
+  echo
+  while IFS= read -r row; do
+    section_id="$(jq -r '.section' <<<"$row")"
+    status="$(jq -r '.status' <<<"$row")"
+    summary="$(jq -r '.summary' <<<"$row")"
+    changed="$(jq -r '.details.changed // false' <<<"$row")"
+
+    header="$section_id"
+    if [[ "$DELTA_MODE" -eq 1 && "$changed" == "true" ]]; then
+      header="$section_id [CHANGED]"
+    fi
+
+    echo "## $header"
+    echo "- Status: $status"
+    echo "- Summary: $summary"
+    echo
+  done < <(jq -c '.sections[]' <<<"$result")
+} >"$out_md"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  cat "$out_json"
+else
+  cat "$out_md"
+fi

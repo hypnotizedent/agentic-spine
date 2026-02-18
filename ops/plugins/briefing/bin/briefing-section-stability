@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+
+tmp="$(mktemp)"
+set +e
+"$ROOT/ops/plugins/observability/bin/stability-control-snapshot" --json >"$tmp"
+rc=$?
+set -e
+
+if [[ "$rc" -ne 0 ]] || ! jq -e '.' "$tmp" >/dev/null 2>&1; then
+  detail="$(sed -n '1,3p' "$tmp" | tr '\n' ' ' | sed 's/"//g')"
+  jq -n --arg section "stability" --arg status "error" --arg summary "stability snapshot unavailable" --arg detail "$detail" '{section:$section,status:$status,summary:$summary,details:{error:$detail}}'
+  rm -f "$tmp"
+  exit 0
+fi
+
+status="$(jq -r '.status // "unknown"' "$tmp")"
+incident_count="$(jq -r '.incident_count // 0' "$tmp")"
+warn_count="$(jq -r '.warn_count // 0' "$tmp")"
+
+case "$status" in
+  incident) section_status="error" ;;
+  warn) section_status="degraded" ;;
+  *) section_status="ok" ;;
+esac
+
+summary="status=$status incidents=$incident_count warns=$warn_count"
+jq -n \
+  --arg section "stability" \
+  --arg status "$section_status" \
+  --arg summary "$summary" \
+  --arg raw_status "$status" \
+  --argjson incident_count "$incident_count" \
+  --argjson warn_count "$warn_count" \
+  '{section:$section,status:$status,summary:$summary,details:{raw_status:$raw_status,incident_count:$incident_count,warn_count:$warn_count}}'
+
+rm -f "$tmp"

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
+GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+PROPOSALS_DIR="$ROOT/mailroom/outbox/proposals"
+
+loop_open=0
+if [[ -d "$SCOPES_DIR" ]]; then
+  loop_open="$( { grep -l '^status: open$' "$SCOPES_DIR"/*.scope.md 2>/dev/null || true; } | wc -l | tr -d ' ')"
+fi
+
+gap_open="$(yq -r '[.gaps[] | select(.status == "open")] | length' "$GAPS_FILE" 2>/dev/null || echo 0)"
+[[ "$gap_open" =~ ^[0-9]+$ ]] || gap_open=0
+
+proposal_pending=0
+if [[ -d "$PROPOSALS_DIR" ]]; then
+  while IFS= read -r manifest; do
+    [[ -f "$manifest" ]] || continue
+    status="$(yq -r '.status // ""' "$manifest" 2>/dev/null || true)"
+    [[ "$status" == "pending" ]] && proposal_pending=$((proposal_pending + 1))
+  done < <(find "$PROPOSALS_DIR" -maxdepth 2 -name manifest.yaml -type f 2>/dev/null | sort)
+fi
+[[ "$proposal_pending" =~ ^[0-9]+$ ]] || proposal_pending=0
+
+status="ok"
+if (( gap_open > 0 || proposal_pending > 0 )); then
+  status="degraded"
+fi
+
+summary="open_loops=$loop_open open_gaps=$gap_open pending_proposals=$proposal_pending"
+jq -n \
+  --arg section "work" \
+  --arg status "$status" \
+  --arg summary "$summary" \
+  --argjson open_loops "$loop_open" \
+  --argjson open_gaps "$gap_open" \
+  --argjson pending_proposals "$proposal_pending" \
+  '{section:$section,status:$status,summary:$summary,details:{open_loops:$open_loops,open_gaps:$open_gaps,pending_proposals:$pending_proposals}}'

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+
+tmp="$(mktemp)"
+set +e
+"$ROOT/ops/plugins/alerting/bin/alerting-status" --json >"$tmp"
+rc=$?
+set -e
+
+if [[ "$rc" -ne 0 ]] || ! jq -e '.' "$tmp" >/dev/null 2>&1; then
+  jq -n --arg section "alerts" --arg status "degraded" --arg summary "alerting status unavailable" '{section:$section,status:$status,summary:$summary,details:{}}'
+  rm -f "$tmp"
+  exit 0
+fi
+
+total_alerts="$(jq -r '[.domains[].alerts] | add // 0' "$tmp")"
+active_cooldowns="$(jq -r '[.domains[] | select(.cooldown_remaining_seconds > 0)] | length' "$tmp")"
+
+section_status="ok"
+if (( total_alerts > 0 )); then
+  section_status="degraded"
+fi
+
+summary="alerts=$total_alerts cooldowns=$active_cooldowns"
+jq -n \
+  --arg section "alerts" \
+  --arg status "$section_status" \
+  --arg summary "$summary" \
+  --argjson alerts "$total_alerts" \
+  --argjson cooldowns "$active_cooldowns" \
+  '{section:$section,status:$status,summary:$summary,details:{alerts:$alerts,cooldowns:$cooldowns}}'
+
+rm -f "$tmp"
