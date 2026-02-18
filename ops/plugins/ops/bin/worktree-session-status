@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONTRACT="$ROOT/ops/bindings/worktree.session.isolation.yaml"
+
+ENFORCE=0
+BRIEF=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enforce) ENFORCE=1; shift ;;
+    --brief) BRIEF=1; shift ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+enabled=true
+main_branch="main"
+managed_prefix="/Users/ronnyworks/code/agentic-spine-.worktrees/"
+require_non_main_in_managed=true
+require_identity=true
+identity_env_var="OPS_WORKTREE_IDENTITY"
+bypass_env_var="OPS_WORKTREE_ISOLATION_BYPASS"
+bypass_allowed_value="1"
+allow_detached=false
+remediation="Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>."
+bypass_warning="Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1"
+identity_patterns=()
+contract_loaded=false
+
+if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+  contract_loaded=true
+  enabled="$(yq e -r '.policy.enabled // true' "$CONTRACT" 2>/dev/null || echo true)"
+  main_branch="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
+  managed_prefix="$(yq e -r '.policy.managed_worktree_prefix // "/Users/ronnyworks/code/agentic-spine-.worktrees/"' "$CONTRACT" 2>/dev/null || echo /Users/ronnyworks/code/agentic-spine-.worktrees/)"
+  require_non_main_in_managed="$(yq e -r '.policy.require_non_main_in_managed_worktree // true' "$CONTRACT" 2>/dev/null || echo true)"
+  require_identity="$(yq e -r '.policy.require_explicit_identity_on_non_main // true' "$CONTRACT" 2>/dev/null || echo true)"
+  identity_env_var="$(yq e -r '.policy.identity_env_var // "OPS_WORKTREE_IDENTITY"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_IDENTITY)"
+  bypass_env_var="$(yq e -r '.policy.bypass_env_var // "OPS_WORKTREE_ISOLATION_BYPASS"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS)"
+  bypass_allowed_value="$(yq e -r '.policy.bypass_allowed_value // "1"' "$CONTRACT" 2>/dev/null || echo 1)"
+  allow_detached="$(yq e -r '.policy.allow_detached_head // false' "$CONTRACT" 2>/dev/null || echo false)"
+  remediation="$(yq e -r '.messages.remediation // "Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>."' "$CONTRACT" 2>/dev/null || echo "Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>.")"
+  bypass_warning="$(yq e -r '.messages.bypass_warning // "Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1"' "$CONTRACT" 2>/dev/null || echo "Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1")"
+  while IFS= read -r pat; do
+    [[ -n "$pat" && "$pat" != "null" ]] && identity_patterns+=("$pat")
+  done < <(yq e -r '.policy.identity_patterns[]?' "$CONTRACT" 2>/dev/null || true)
+fi
+
+repo_root="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
+branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+
+bypass_value="${!bypass_env_var-}"
+identity_value="${!identity_env_var-}"
+
+issues=()
+warnings=()
+
+if [[ "$enabled" != "true" ]]; then
+  warnings+=("isolation policy disabled by contract")
+fi
+
+if [[ "$branch" == "HEAD" && "$allow_detached" != "true" ]]; then
+  issues+=("detached HEAD is not allowed by isolation policy")
+fi
+
+if [[ "$enabled" == "true" && "$branch" != "$main_branch" && "$branch" != "unknown" ]]; then
+  if [[ -n "$bypass_value" && "$bypass_value" == "$bypass_allowed_value" ]]; then
+    warnings+=("bypass active via $bypass_env_var=$bypass_value")
+  else
+    if [[ "$require_non_main_in_managed" == "true" ]]; then
+      case "$repo_root/" in
+        "$managed_prefix"*) ;;
+        *) issues+=("non-main branch '$branch' is outside managed worktree prefix '$managed_prefix'") ;;
+      esac
+    fi
+
+    if [[ "$require_identity" == "true" ]]; then
+      if [[ -z "$identity_value" ]]; then
+        issues+=("non-main branch '$branch' requires explicit identity env '$identity_env_var'")
+      elif [[ ${#identity_patterns[@]} -gt 0 ]]; then
+        identity_ok=false
+        for pat in "${identity_patterns[@]}"; do
+          if [[ "$identity_value" =~ $pat ]]; then
+            identity_ok=true
+            break
+          fi
+        done
+        if [[ "$identity_ok" != "true" ]]; then
+          issues+=("$identity_env_var='$identity_value' does not match allowed identity_patterns")
+        fi
+      fi
+    fi
+  fi
+fi
+
+if [[ "$BRIEF" -eq 1 ]]; then
+  if [[ ${#issues[@]} -eq 0 ]]; then
+    printf "PASS branch=%s repo=%s identity_var=%s identity=%s\n" "$branch" "$repo_root" "$identity_env_var" "${identity_value:-<unset>}"
+    [[ "$ENFORCE" -eq 1 ]] && exit 0
+  else
+    printf "FAIL branch=%s repo=%s issues=%s\n" "$branch" "$repo_root" "${issues[*]}"
+    [[ "$ENFORCE" -eq 1 ]] && exit 1
+  fi
+  exit 0
+fi
+
+echo "worktree.session.status"
+echo "repo: $repo_root"
+echo "branch: $branch"
+echo "contract: $CONTRACT"
+if [[ "$contract_loaded" == "true" ]]; then
+  echo "contract_loaded: yes"
+else
+  echo "contract_loaded: no (using defaults; install yq + contract for canonical policy)"
+fi
+echo "identity_env_var: $identity_env_var"
+echo "identity_value: ${identity_value:-<unset>}"
+echo "bypass_env_var: $bypass_env_var"
+echo "bypass_value: ${bypass_value:-<unset>}"
+
+echo "worktrees:"
+git -C "$ROOT" worktree list | sed 's/^/  - /'
+
+if [[ -d "$ROOT/mailroom/state/sessions" ]]; then
+  echo "sessions:"
+  ls -1 "$ROOT/mailroom/state/sessions" 2>/dev/null | sed 's/^/  - /' || true
+fi
+
+if [[ ${#warnings[@]} -gt 0 ]]; then
+  echo "warnings:"
+  for w in "${warnings[@]}"; do
+    echo "  - $w"
+  done
+fi
+
+if [[ ${#issues[@]} -gt 0 ]]; then
+  echo "issues:"
+  for i in "${issues[@]}"; do
+    echo "  - $i"
+  done
+  echo "remediation: $remediation"
+  echo "bypass: $bypass_warning"
+  echo "overall: FAIL"
+  [[ "$ENFORCE" -eq 1 ]] && exit 1
+else
+  echo "overall: PASS"
+  [[ "$ENFORCE" -eq 1 ]] && exit 0
+fi
+
+exit 0

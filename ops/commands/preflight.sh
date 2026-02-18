@@ -34,6 +34,8 @@ parity_status="unknown"
 parity_detail=""
 worktree_status="unknown"
 worktree_detail=""
+isolation_status="unknown"
+isolation_detail=""
 selected_gate_domain="${OPS_GATE_DOMAIN:-core}"
 domain_source="default(core)"
 if [[ -n "${OPS_GATE_DOMAIN:-}" ]]; then
@@ -72,6 +74,22 @@ if [[ "$REPO_GIT_OK" -eq 1 ]]; then
   else
     worktree_status="WARN"
     worktree_detail="WARN: D48 not present/executable"
+  fi
+
+  # Worktree/session isolation policy (D140).
+  D140="$REPO_ROOT/surfaces/verify/d140-worktree-session-isolation.sh"
+  if [[ -x "$D140" ]]; then
+    if out="$("$D140" 2>&1)"; then
+      isolation_status="OK"
+      isolation_detail="$out"
+    else
+      isolation_status="BLOCKED"
+      isolation_detail="$out"
+      preflight_fail=1
+    fi
+  else
+    isolation_status="WARN"
+    isolation_detail="WARN: D140 not present/executable"
   fi
 fi
 
@@ -115,6 +133,10 @@ if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/d
     echo "  worktrees (D48): $worktree_status"
     if [[ -n "${worktree_detail:-}" ]]; then
       echo "    ${worktree_detail}" | sed 's/^/    /'
+    fi
+    echo "  isolation (D140): $isolation_status"
+    if [[ -n "${isolation_detail:-}" ]]; then
+      echo "    ${isolation_detail}" | sed 's/^/    /'
     fi
 
     hooks_path="$(git -C "$REPO_ROOT" config --get core.hooksPath 2>/dev/null || true)"
@@ -178,6 +200,7 @@ STOP
   if [[ "$preflight_fail" -eq 1 ]]; then
     echo "  - Remote authority (origin reachable; mirror drift warns)"
     echo "  - Codex worktree hygiene (no stale/dirty codex worktrees)"
+    echo "  - Worktree/session isolation policy (D140)"
   fi
   if [[ "$gate_domain_fail" -eq 1 ]]; then
     echo "  - Gate domain discoverability surface is broken"

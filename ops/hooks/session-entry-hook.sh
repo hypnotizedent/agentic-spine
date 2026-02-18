@@ -15,10 +15,10 @@ if [[ -f "$MARKER" ]]; then
   echo '{}'
   exit 0
 fi
-touch "$MARKER"
 
 # Resolve spine root (relative to this script)
 SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BRANCH=$(git -C "$SPINE_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
 parse_epoch_utc() {
   local ts="${1:-}"
@@ -61,6 +61,101 @@ PY
   date -j -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" "+%s" 2>/dev/null || echo 0
 }
 
+# --- Non-main session isolation guard (GAP-OP-656) ---
+WORKTREE_ISO_CONTRACT="$SPINE_ROOT/ops/bindings/worktree.session.isolation.yaml"
+WSI_ENABLED=true
+WSI_MAIN_BRANCH="main"
+WSI_MANAGED_PREFIX="/Users/ronnyworks/code/agentic-spine-.worktrees/"
+WSI_REQUIRE_NON_MAIN_IN_MANAGED=true
+WSI_REQUIRE_IDENTITY=true
+WSI_IDENTITY_ENV_VAR="OPS_WORKTREE_IDENTITY"
+WSI_BYPASS_ENV_VAR="OPS_WORKTREE_ISOLATION_BYPASS"
+WSI_BYPASS_ALLOWED="1"
+WSI_ALLOW_DETACHED=false
+WSI_REMEDIATION="Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>."
+WSI_BYPASS_WARNING="Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1"
+WSI_IDENTITY_PATTERNS=()
+
+if [[ -f "$WORKTREE_ISO_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+  WSI_ENABLED="$(yq e -r '.policy.enabled // true' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo true)"
+  WSI_MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo main)"
+  WSI_MANAGED_PREFIX="$(yq e -r '.policy.managed_worktree_prefix // "/Users/ronnyworks/code/agentic-spine-.worktrees/"' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo /Users/ronnyworks/code/agentic-spine-.worktrees/)"
+  WSI_REQUIRE_NON_MAIN_IN_MANAGED="$(yq e -r '.policy.require_non_main_in_managed_worktree // true' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo true)"
+  WSI_REQUIRE_IDENTITY="$(yq e -r '.policy.require_explicit_identity_on_non_main // true' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo true)"
+  WSI_IDENTITY_ENV_VAR="$(yq e -r '.policy.identity_env_var // "OPS_WORKTREE_IDENTITY"' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo OPS_WORKTREE_IDENTITY)"
+  WSI_BYPASS_ENV_VAR="$(yq e -r '.policy.bypass_env_var // "OPS_WORKTREE_ISOLATION_BYPASS"' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS)"
+  WSI_BYPASS_ALLOWED="$(yq e -r '.policy.bypass_allowed_value // "1"' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo 1)"
+  WSI_ALLOW_DETACHED="$(yq e -r '.policy.allow_detached_head // false' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo false)"
+  WSI_REMEDIATION="$(yq e -r '.messages.remediation // "Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>."' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo "$WSI_REMEDIATION")"
+  WSI_BYPASS_WARNING="$(yq e -r '.messages.bypass_warning // "Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1"' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo "$WSI_BYPASS_WARNING")"
+  while IFS= read -r pat; do
+    [[ -n "$pat" && "$pat" != "null" ]] && WSI_IDENTITY_PATTERNS+=("$pat")
+  done < <(yq e -r '.policy.identity_patterns[]?' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || true)
+fi
+
+if [[ "$WSI_ENABLED" == "true" ]]; then
+  WSI_ISSUES=()
+  WSI_ROOT="$(git -C "$SPINE_ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$SPINE_ROOT")"
+  WSI_IDENTITY_VALUE="${!WSI_IDENTITY_ENV_VAR-}"
+  WSI_BYPASS_VALUE="${!WSI_BYPASS_ENV_VAR-}"
+
+  if [[ "$BRANCH" == "HEAD" && "$WSI_ALLOW_DETACHED" != "true" ]]; then
+    WSI_ISSUES+=("Detached HEAD is not allowed by isolation policy.")
+  fi
+
+  if [[ "$BRANCH" != "$WSI_MAIN_BRANCH" && "$BRANCH" != "unknown" ]]; then
+    if [[ "$WSI_BYPASS_VALUE" != "$WSI_BYPASS_ALLOWED" ]]; then
+      if [[ "$WSI_REQUIRE_NON_MAIN_IN_MANAGED" == "true" ]]; then
+        case "$WSI_ROOT/" in
+          "$WSI_MANAGED_PREFIX"*) ;;
+          *) WSI_ISSUES+=("Non-main branch '$BRANCH' is outside managed worktree prefix '$WSI_MANAGED_PREFIX'.") ;;
+        esac
+      fi
+
+      if [[ "$WSI_REQUIRE_IDENTITY" == "true" ]]; then
+        if [[ -z "$WSI_IDENTITY_VALUE" ]]; then
+          WSI_ISSUES+=("Non-main branch '$BRANCH' requires explicit identity env '$WSI_IDENTITY_ENV_VAR'.")
+        elif [[ "${#WSI_IDENTITY_PATTERNS[@]}" -gt 0 ]]; then
+          WSI_ID_OK=false
+          for pat in "${WSI_IDENTITY_PATTERNS[@]}"; do
+            if [[ "$WSI_IDENTITY_VALUE" =~ $pat ]]; then
+              WSI_ID_OK=true
+              break
+            fi
+          done
+          if [[ "$WSI_ID_OK" != "true" ]]; then
+            WSI_ISSUES+=("$WSI_IDENTITY_ENV_VAR='$WSI_IDENTITY_VALUE' does not match allowed identity patterns.")
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  if [[ "${#WSI_ISSUES[@]}" -gt 0 ]]; then
+    WSI_LINES=""
+    for issue in "${WSI_ISSUES[@]}"; do
+      WSI_LINES="${WSI_LINES}"$'\n'"- ${issue}"
+    done
+    BLOCK_MSG=$(cat <<EOF
+## SESSION ENTRY BLOCKED (D140 Worktree Session Isolation)
+
+Branch: \`${BRANCH}\`
+Worktree: \`${WSI_ROOT}\`
+
+Violations:${WSI_LINES}
+
+Remediation: ${WSI_REMEDIATION}
+${WSI_BYPASS_WARNING}
+EOF
+)
+    jq -n --arg msg "$BLOCK_MSG" '{"systemMessage": $msg}'
+    exit 0
+  fi
+fi
+
+# Marker is written only after isolation checks pass.
+touch "$MARKER"
+
 # --- Dynamic context gathering (via spine.context capability) ---
 
 # Use spine.context for governance brief delivery (Move 3: dynamic context)
@@ -94,9 +189,6 @@ if [[ -d "$PROPOSALS_DIR" ]]; then
 > **Proposal queue: ${pending} pending** (threshold: 5). Run \`proposals.status\` and triage."
   fi
 fi
-
-# Current branch
-BRANCH=$(git -C "$SPINE_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
 # Active worktree count (max allowed: 2)
 WT_COUNT=$(git -C "$SPINE_ROOT" worktree list --porcelain 2>/dev/null | grep -c '^worktree' || echo 0)
