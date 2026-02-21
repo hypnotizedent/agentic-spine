@@ -287,6 +287,13 @@ df -h /
 | `com.ronny.docker-tunnel.plist` | On login | SSH -L 2375 | Docker tunnel to docker-host | ACTIVE |
 | `com.ronny.ha-baseline-refresh.plist` | Sun 05:00 | `ha-baseline-refresh.sh` | Weekly HA SSOT baseline refresh | ACTIVE |
 | `com.ronny.policy-autotune-weekly.plist` | Mon 09:10 | `policy-autotune-weekly.sh` | Weekly policy autotune: observe -> auto-propose (submit only) -> human apply | STAGED |
+| `com.ronny.spine-daily-briefing.plist` | Daily 08:00 | `spine-daily-briefing.sh` | Daily spine situational briefing artifact | ACTIVE |
+| `com.ronny.spine-briefing-email-daily.plist` | Daily 08:05 | `spine-briefing-email-daily.sh` | Route briefing summary into communications send pipeline | ACTIVE |
+| `com.ronny.slo-evidence-daily.plist` | Daily 23:59 | `slo-evidence-daily.sh` | Daily SLO evidence capture | ACTIVE |
+| `com.ronny.n8n-snapshot-daily.plist` | Daily 03:00 | `n8n-snapshot-daily.sh` | Daily n8n workflow snapshot | ACTIVE |
+| `com.ronny.alerting-probe-cycle.plist` | Every 15m | `alerting-probe-cycle.sh` | Continuous alert probe + dispatch cycle | ACTIVE |
+| `com.ronny.immich-reconcile-weekly.plist` | Sun 02:00 | `immich-reconcile-weekly.sh` | Weekly duplicate scan for immich reconciliation | ACTIVE |
+| `com.ronny.finance-action-queue-monthly.plist` | Day 1 09:00 | `finance-action-queue-monthly.sh` | Monthly finance compliance/action queue generation | ACTIVE |
 | `com.ronny.streamdeck.ha.plist` | On login | `streamdeck_ha_controller.py` | Stream Deck HA button controller | ACTIVE |
 | `works.ronny.smb-paperless.plist` | On login | osascript SMB mount | Paperless SMB share on docker-host | ACTIVE |
 
@@ -296,7 +303,7 @@ df -h /
 
 **Crontab:** None (no crontab for ronnyworks). All scheduling via launchd.
 
-**Source:** External schedule inventory (workbench tooling via `WORKBENCH_TOOLING_INDEX.md`) + spine launchd templates, verified 2026-02-18.
+**Source:** Spine runtime launchd templates in `ops/runtime/launchd/` + live launchctl verification, verified 2026-02-21.
 
 ---
 

@@ -13,11 +13,21 @@ echo "================================"
 echo
 
 echo "Collecting verify.pack.run core-operator..."
-VERIFY_RESULT=$("$ROOT/ops/plugins/verify/bin/verify-pack" run core-operator --json 2>&1 || echo '{"total":0,"pass":0,"fail":0}')
-VERIFY_TOTAL=$(echo "$VERIFY_RESULT" | jq -r '.total // 0')
-VERIFY_PASS=$(echo "$VERIFY_RESULT" | jq -r '.pass // 0')
-VERIFY_FAIL=$(echo "$VERIFY_RESULT" | jq -r '.fail // 0')
-FAILING_IDS=$(echo "$VERIFY_RESULT" | jq -r '.failing_ids // [] | join(", ")')
+VERIFY_RESULT="$("$ROOT/ops/plugins/verify/bin/verify-pack" run core-operator --json 2>/dev/null || true)"
+if [[ -z "$VERIFY_RESULT" ]]; then
+  VERIFY_RESULT='{"total":0,"pass":0,"fail":0,"failing_ids":[]}'
+fi
+VERIFY_TOTAL=$(echo "$VERIFY_RESULT" | jq -r '.total // 0' 2>/dev/null || echo "0")
+VERIFY_PASS=$(echo "$VERIFY_RESULT" | jq -r '.pass // 0' 2>/dev/null || echo "0")
+VERIFY_FAIL=$(echo "$VERIFY_RESULT" | jq -r '.fail // 0' 2>/dev/null || echo "0")
+FAILING_IDS=$(echo "$VERIFY_RESULT" | jq -r '.failing_ids // [] | join(", ")' 2>/dev/null || echo "")
+# Guard against malformed/multiline numeric parse values before arithmetic.
+VERIFY_TOTAL="$(echo "$VERIFY_TOTAL" | tr -cd '0-9')"
+VERIFY_PASS="$(echo "$VERIFY_PASS" | tr -cd '0-9')"
+VERIFY_FAIL="$(echo "$VERIFY_FAIL" | tr -cd '0-9')"
+[[ -n "$VERIFY_TOTAL" ]] || VERIFY_TOTAL=0
+[[ -n "$VERIFY_PASS" ]] || VERIFY_PASS=0
+[[ -n "$VERIFY_FAIL" ]] || VERIFY_FAIL=0
 
 echo "Collecting stability.control.snapshot..."
 SNAPSHOT_STATUS="unknown"

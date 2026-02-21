@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""finance-ronny-action-queue
+
+Generate a deterministic, read-only operator task queue for finance cadence
+(monthly/quarterly/annual/ad-hoc), using Firefly III transaction freshness and
+simple compliance heuristics.
+"""
+
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+def parse_date(value: str) -> dt.date:
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid date '{value}' (expected YYYY-MM-DD)") from exc
+
+
+def resolve_period(cadence: str, period_start: str | None, period_end: str | None) -> tuple[dt.date, dt.date]:
+    today = dt.date.today()
+    if period_start and period_end:
+        return parse_date(period_start), parse_date(period_end)
+
+    if cadence == "quarterly":
+        quarter_start_month = ((today.month - 1) // 3) * 3 + 1
+        start = dt.date(today.year, quarter_start_month, 1)
+        end_month = quarter_start_month + 2
+        if end_month == 12:
+            end = dt.date(today.year, 12, 31)
+        else:
+            end = dt.date(today.year, end_month + 1, 1) - dt.timedelta(days=1)
+        return start, end
+
+    if cadence == "annual":
+        return dt.date(today.year, 1, 1), dt.date(today.year, 12, 31)
+
+    # monthly and ad-hoc default to current month
+    start = dt.date(today.year, today.month, 1)
+    if today.month == 12:
+        end = dt.date(today.year, 12, 31)
+    else:
+        end = dt.date(today.year, today.month + 1, 1) - dt.timedelta(days=1)
+    return start, end
+
+
+def firefly_transactions(base_url: str, token: str, period_start: dt.date, period_end: dt.date) -> tuple[list[dict], str | None]:
+    if not token:
+        return [], "missing FIREFLY_PAT token"
+
+    all_rows: list[dict] = []
+    page = 1
+    total_pages = 1
+
+    while page <= total_pages:
+        query = urllib.parse.urlencode(
+            {
+                "start": period_start.isoformat(),
+                "end": period_end.isoformat(),
+                "type": "all",
+                "limit": 50,
+                "page": page,
+            }
+        )
+        url = f"{base_url.rstrip('/')}/api/v1/transactions?{query}"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", "application/json")
+
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return [], f"firefly http error: {exc.code}"
+        except urllib.error.URLError as exc:
+            return [], f"firefly network error: {exc.reason}"
+        except TimeoutError:
+            return [], "firefly request timeout"
+        except json.JSONDecodeError:
+            return [], "firefly invalid json response"
+
+        rows = payload.get("data") or []
+        if isinstance(rows, list):
+            all_rows.extend(rows)
+
+        pagination = (payload.get("meta") or {}).get("pagination") or {}
+        try:
+            total_pages = int(pagination.get("total_pages") or 1)
+        except (TypeError, ValueError):
+            total_pages = 1
+        page += 1
+
+    return all_rows, None
+
+
+def render_queue(cadence: str, period_start: dt.date, period_end: dt.date, transactions: list[dict], pipeline_error: str | None) -> dict:
+    today = dt.date.today()
+    queue_id = f"AQ-{cadence.upper()}-{period_start.isoformat().replace('-', '')}"
+    task_seq = 0
+    tasks: list[dict] = []
+
+    def add_task(
+        title: str,
+        source_tool: str,
+        action_type: str,
+        instructions: str,
+        evidence_required: list[str],
+        due_at: str,
+        status: str,
+        blocker_reason: str | None = None,
+    ) -> None:
+        nonlocal task_seq
+        task_seq += 1
+        tasks.append(
+            {
+                "task_id": f"{queue_id}-{task_seq}",
+                "title": title,
+                "owner": "ronny",
+                "due_at": due_at,
+                "source_tool": source_tool,
+                "action_type": action_type,
+                "instructions": instructions,
+                "evidence_required": evidence_required,
+                "status": status,
+                "blocker_reason": blocker_reason,
+            }
+        )
+
+    latest_txn = ""
+    uncategorized = 0
+
+    for row in transactions:
+        attrs = row.get("attributes") or {}
+        splits = attrs.get("transactions") or []
+        split = splits[0] if splits else {}
+        raw_date = str(split.get("date") or "")
+        txn_date = raw_date.split("T")[0] if raw_date else ""
+        if txn_date and txn_date > latest_txn:
+            latest_txn = txn_date
+
+        if split and not split.get("category_name"):
+            uncategorized += 1
+
+    if pipeline_error:
+        pipeline_status = "blocked"
+        add_task(
+            title="Restore Firefly API auth for automated queue generation",
+            source_tool="finance.ronny.action.queue",
+            action_type="runtime-fix",
+            instructions=(
+                "Queue generation cannot read Firefly III transactions. "
+                "Validate secrets binding + FIREFLY_PAT route, then rerun this capability."
+            ),
+            evidence_required=["finance.ronny.action.queue returns pipeline_status healthy/degraded/empty"],
+            due_at=period_end.isoformat(),
+            status="todo",
+        )
+        pipeline_empty = True
+        stale_days = None
+    elif len(transactions) == 0:
+        pipeline_status = "empty"
+        pipeline_empty = True
+        stale_days = None
+        add_task(
+            title="Import bank transactions into Firefly III",
+            source_tool="finance.ronny.action.queue",
+            action_type="data-import",
+            instructions=(
+                "Download CSV exports from Chase/AmEx/TD and import via Firefly Data Importer. "
+                "Downstream reconciliation/tax tasks remain blocked until transactions are present."
+            ),
+            evidence_required=["Transaction count > 0 in Firefly III for the selected period"],
+            due_at=period_end.isoformat(),
+            status="todo",
+        )
+    else:
+        pipeline_empty = False
+        if latest_txn:
+            latest_date = dt.date.fromisoformat(latest_txn)
+            stale_days = (today - latest_date).days
+        else:
+            stale_days = None
+
+        if stale_days is not None and stale_days > 7:
+            pipeline_status = "degraded"
+            add_task(
+                title="Import recent transactions (pipeline stale)",
+                source_tool="finance.ronny.action.queue",
+                action_type="data-import",
+                instructions=(
+                    f"Latest transaction is {stale_days} days old ({latest_txn}). "
+                    "Import current bank CSV data to return to weekly freshness."
+                ),
+                evidence_required=["Latest transaction <= 7 days old"],
+                due_at=period_end.isoformat(),
+                status="todo",
+            )
+        else:
+            pipeline_status = "healthy"
+
+    if uncategorized > 0:
+        add_task(
+            title=f"Review {uncategorized} uncategorized transactions",
+            source_tool="finance.ronny.action.queue",
+            action_type="categorization",
+            instructions="Assign categories in Firefly III for all uncategorized transactions in the period.",
+            evidence_required=["Zero uncategorized transactions for the period"],
+            due_at=period_end.isoformat(),
+            status="blocked" if pipeline_empty else "todo",
+            blocker_reason="No transactions imported yet" if pipeline_empty else None,
+        )
+
+    add_task(
+        title="Confirm account reconciliation",
+        source_tool="finance.ronny.action.queue",
+        action_type="reconciliation",
+        instructions="Compare Firefly asset balances to bank statements and resolve discrepancies.",
+        evidence_required=["All asset account balances match bank statements"],
+        due_at=period_end.isoformat(),
+        status="blocked" if pipeline_empty else "todo",
+        blocker_reason="No transactions imported yet" if pipeline_empty else None,
+    )
+
+    add_task(
+        title="Scan and archive paper receipts",
+        source_tool="finance.ronny.action.queue",
+        action_type="document-archive",
+        instructions="Scan/photograph receipts and ingest them into Paperless with tax-document tags.",
+        evidence_required=["All period receipts are searchable in Paperless"],
+        due_at=period_end.isoformat(),
+        status="todo",
+    )
+
+    if cadence in {"quarterly", "annual"}:
+        add_task(
+            title="File FL DR-15 sales tax",
+            source_tool="finance.ronny.action.queue",
+            action_type="tax-filing",
+            instructions=(
+                "Compute quarterly taxable sales, file DR-15 on floridarevenue.com, and archive confirmation in Paperless."
+            ),
+            evidence_required=["DR-15 confirmation archived in Paperless"],
+            due_at=period_end.isoformat(),
+            status="blocked" if pipeline_empty else "todo",
+            blocker_reason="No transactions available for period tax computation" if pipeline_empty else None,
+        )
+        add_task(
+            title="Pay federal estimated tax (1040-ES) if due",
+            source_tool="finance.ronny.action.queue",
+            action_type="tax-payment",
+            instructions="Review YTD profit and submit 1040-ES payment when required. Archive receipt.",
+            evidence_required=["1040-ES payment evidence archived (if applicable)"],
+            due_at=period_end.isoformat(),
+            status="blocked" if pipeline_empty else "todo",
+            blocker_reason="No transactions available for estimate" if pipeline_empty else None,
+        )
+
+    if cadence == "annual":
+        filing_year = period_start.year
+        jan31 = dt.date(filing_year + 1, 1, 31).isoformat()
+        add_task(
+            title="Prepare and file 1099-NEC for qualifying contractors",
+            source_tool="finance.ronny.action.queue",
+            action_type="tax-filing",
+            instructions="Identify contractors >= $600, confirm W-9s, file 1099-NEC via IRS IRIS, archive copies.",
+            evidence_required=["1099-NEC filed for each qualifying contractor"],
+            due_at=jan31,
+            status="blocked" if pipeline_empty else "todo",
+            blocker_reason="No transactions available for contractor qualification" if pipeline_empty else None,
+        )
+        add_task(
+            title="Export year-end package for accountant",
+            source_tool="finance.ronny.action.queue",
+            action_type="data-export",
+            instructions="Export full-year CSV + supporting tax docs bundle and send to accountant.",
+            evidence_required=["Year-end export bundle delivered"],
+            due_at=jan31,
+            status="blocked" if pipeline_empty else "todo",
+            blocker_reason="No transactions available for export" if pipeline_empty else None,
+        )
+        add_task(
+            title="Set new-year budget targets",
+            source_tool="finance.ronny.action.queue",
+            action_type="budget-setup",
+            instructions="Review prior-year spend and update annual budget targets in Firefly III.",
+            evidence_required=["Current-year budget targets set in Firefly III"],
+            due_at=jan31,
+            status="todo",
+        )
+
+    summary = {
+        "total": len(tasks),
+        "todo": len([t for t in tasks if t["status"] == "todo"]),
+        "blocked": len([t for t in tasks if t["status"] == "blocked"]),
+        "done": len([t for t in tasks if t["status"] == "done"]),
+    }
+
+    return {
+        "tool": "finance.ronny.action.queue",
+        "queue_id": queue_id,
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "cadence": cadence,
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "pipeline_summary": {
+            "transactions_in_period": len(transactions),
+            "latest_transaction_at": latest_txn or None,
+            "pipeline_status": pipeline_status,
+            "pipeline_blocker_reason": pipeline_error,
+        },
+        "tasks": tasks,
+        "task_summary": summary,
+    }
+
+
+def persist_artifact(spine_root: str, payload: dict) -> tuple[str, str]:
+    out_dir = pathlib.Path(spine_root) / "mailroom" / "outbox" / "finance"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamped = out_dir / f"ronny-action-queue-{stamp}.json"
+    latest = out_dir / "ronny-action-queue-latest.json"
+    text = json.dumps(payload, indent=2)
+    stamped.write_text(text + "\n", encoding="utf-8")
+    latest.write_text(text + "\n", encoding="utf-8")
+    return str(stamped), str(latest)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Generate deterministic Ronny finance action queue")
+    parser.add_argument("--cadence", choices=["monthly", "quarterly", "annual", "ad-hoc"], default="monthly")
+    parser.add_argument("--period-start", help="YYYY-MM-DD")
+    parser.add_argument("--period-end", help="YYYY-MM-DD")
+    parser.add_argument("--json", action="store_true", help="Emit JSON only")
+    args = parser.parse_args()
+
+    try:
+        period_start, period_end = resolve_period(args.cadence, args.period_start, args.period_end)
+    except argparse.ArgumentTypeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    firefly_url = os.environ.get("FIREFLY_URL", "http://100.76.153.100:8080")
+    firefly_pat = os.environ.get("FIREFLY_PAT", "")
+
+    transactions, pipeline_error = firefly_transactions(firefly_url, firefly_pat, period_start, period_end)
+
+    payload = render_queue(args.cadence, period_start, period_end, transactions, pipeline_error)
+
+    spine_root = os.environ.get("SPINE_ROOT")
+    if not spine_root:
+        spine_root = str(pathlib.Path(__file__).resolve().parents[4])
+    stamped_path, latest_path = persist_artifact(spine_root, payload)
+    payload["artifact"] = {"stamped": stamped_path, "latest": latest_path}
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print("finance.ronny.action.queue")
+    print(f"queue_id: {payload['queue_id']}")
+    print(f"cadence: {payload['cadence']}")
+    print(f"period: {payload['period_start']} -> {payload['period_end']}")
+    ps = payload["pipeline_summary"]
+    print(
+        "pipeline: "
+        f"status={ps['pipeline_status']} txns={ps['transactions_in_period']} latest={ps['latest_transaction_at'] or 'n/a'}"
+    )
+    if ps.get("pipeline_blocker_reason"):
+        print(f"pipeline_blocker: {ps['pipeline_blocker_reason']}")
+    ts = payload["task_summary"]
+    print(f"tasks: total={ts['total']} todo={ts['todo']} blocked={ts['blocked']} done={ts['done']}")
+    print(f"artifact_latest: {latest_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
