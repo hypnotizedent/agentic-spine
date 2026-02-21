@@ -12,6 +12,9 @@ ok() { [[ "${DRIFT_VERBOSE:-0}" == "1" ]] && echo "  OK: $*" || true; }
 
 CONTRACT="$ROOT/ops/bindings/policy.runtime.contract.yaml"
 PRESETS="$ROOT/ops/bindings/policy.presets.yaml"
+AUDIT_SCRIPT="$ROOT/ops/plugins/policy/bin/policy-runtime-audit"
+
+command -v jq >/dev/null 2>&1 || { err "jq is required for D94 policy audit parsing"; echo "D94 FAIL: $ERRORS check(s) failed"; exit 1; }
 
 # ── Check 1: Contract exists ──
 if [[ ! -f "$CONTRACT" ]]; then
@@ -110,6 +113,52 @@ if [[ -f "$ROOT/docs/product/AOF_POLICY_RUNTIME_ENFORCEMENT.md" ]]; then
   ok "product doc exists"
 else
   err "docs/product/AOF_POLICY_RUNTIME_ENFORCEMENT.md does not exist"
+fi
+
+# ── Check 9: Policy runtime audit trail is machine-verifiable ──
+if [[ -x "$AUDIT_SCRIPT" ]]; then
+  ok "policy.runtime.audit script exists"
+  if audit_json="$("$AUDIT_SCRIPT" --json 2>/dev/null)"; then
+    if jq -e '.status == "pass"' >/dev/null <<<"$audit_json"; then
+      ok "policy.runtime.audit status is pass"
+    else
+      err "policy.runtime.audit did not report pass status"
+    fi
+
+    if jq -e '.summary.total_knobs == 10' >/dev/null <<<"$audit_json"; then
+      ok "policy.runtime.audit reports 10 knobs"
+    else
+      err "policy.runtime.audit knob summary mismatch"
+    fi
+
+    if jq -e '.history.available == true' >/dev/null <<<"$audit_json"; then
+      ok "policy.runtime.audit history backend available"
+    else
+      err "policy.runtime.audit history backend unavailable"
+    fi
+
+    if jq -e '.history.entry_count >= 1' >/dev/null <<<"$audit_json"; then
+      ok "policy.runtime.audit has at least one history entry"
+    else
+      err "policy.runtime.audit history is empty"
+    fi
+
+    for tracked in \
+      "ops/bindings/policy.presets.yaml" \
+      "ops/bindings/tenant.profile.yaml" \
+      "ops/bindings/policy.runtime.contract.yaml" \
+      "ops/lib/resolve-policy.sh"; do
+      if jq -e --arg tracked "$tracked" '.history.tracked_paths | index($tracked) != null' >/dev/null <<<"$audit_json"; then
+        ok "policy.runtime.audit tracks $tracked"
+      else
+        err "policy.runtime.audit missing tracked path: $tracked"
+      fi
+    done
+  else
+    err "policy.runtime.audit --json failed"
+  fi
+else
+  err "ops/plugins/policy/bin/policy-runtime-audit is not executable or missing"
 fi
 
 # ── Result ──

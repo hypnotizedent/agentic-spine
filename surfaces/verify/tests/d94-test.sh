@@ -17,6 +17,7 @@ setup_mock() {
   mkdir -p "$tmp/surfaces/verify"
   mkdir -p "$tmp/ops/commands"
   mkdir -p "$tmp/ops/lib"
+  mkdir -p "$tmp/ops/plugins/policy/bin"
 
   # Contract binding
   cat > "$tmp/ops/bindings/policy.runtime.contract.yaml" <<'EOF'
@@ -112,6 +113,55 @@ presets:
     knobs: {}
 EOF
 
+  cat > "$tmp/ops/bindings/tenant.profile.yaml" <<'EOF'
+version: 1
+tenant:
+  id: test
+EOF
+
+  echo "# resolve policy" > "$tmp/ops/lib/resolve-policy.sh"
+
+  # Machine-readable audit script (required by D94)
+  cat > "$tmp/ops/plugins/policy/bin/policy-runtime-audit" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "--json" ]]; then
+  echo "policy.runtime.audit"
+  exit 0
+fi
+cat <<'JSON'
+{
+  "capability": "policy.runtime.audit",
+  "status": "pass",
+  "summary": {
+    "total_knobs": 10,
+    "wired_knobs": 4,
+    "unwired_knobs": 6,
+    "coverage_percent": 40
+  },
+  "history": {
+    "available": true,
+    "tracked_paths": [
+      "ops/bindings/policy.presets.yaml",
+      "ops/bindings/tenant.profile.yaml",
+      "ops/bindings/policy.runtime.contract.yaml",
+      "ops/lib/resolve-policy.sh"
+    ],
+    "entry_count": 1,
+    "entries": [
+      {
+        "commit": "abc123",
+        "committed_at": "2026-02-21T00:00:00Z",
+        "author": "tester",
+        "subject": "seed policy files"
+      }
+    ]
+  }
+}
+JSON
+EOF
+  chmod +x "$tmp/ops/plugins/policy/bin/policy-runtime-audit"
+
   # Wired source files
   echo "# drift-gate" > "$tmp/surfaces/verify/drift-gate.sh"
   echo "# cap" > "$tmp/ops/commands/cap.sh"
@@ -181,6 +231,19 @@ test_missing_doc() {
   rm -rf "$mock"
 }
 
+# Test 5: Missing policy audit script fails
+test_missing_policy_audit_script() {
+  local mock
+  mock="$(setup_mock)"
+  rm "$mock/ops/plugins/policy/bin/policy-runtime-audit"
+  if SPINE_ROOT="$mock" bash "$GATE" >/dev/null 2>&1; then
+    fail "missing policy.runtime.audit script should fail D94"
+  else
+    pass "missing policy.runtime.audit script fails D94"
+  fi
+  rm -rf "$mock"
+}
+
 # Run all tests
 echo "D94 Tests"
 echo "════════════════════════════════════════"
@@ -188,6 +251,7 @@ test_valid_setup
 test_missing_contract
 test_missing_knob
 test_missing_doc
+test_missing_policy_audit_script
 
 echo ""
 echo "────────────────────────────────────────"

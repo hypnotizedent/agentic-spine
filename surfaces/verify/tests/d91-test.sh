@@ -81,6 +81,48 @@ MAPEOF
   chmod +x "$tmp/ops/plugins/tenant/bin/tenant-profile-validate"
   chmod +x "$tmp/ops/plugins/tenant/bin/tenant-provision-dry-run"
 
+  # Create AOF validate script
+  mkdir -p "$tmp/ops/plugins/aof/bin"
+  cat > "$tmp/ops/plugins/aof/bin/validate-environment.sh" <<'AOFEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE=".environment.yaml"
+IDENTITY_FILE=".identity.yaml"
+STRICT=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --environment-file) ENV_FILE="${2:-}"; shift 2 ;;
+    --identity-file) IDENTITY_FILE="${2:-}"; shift 2 ;;
+    --strict) STRICT=1; shift ;;
+    *) shift ;;
+  esac
+done
+
+[[ "$STRICT" -eq 1 ]] || exit 1
+[[ -f "$ENV_FILE" ]] || exit 1
+[[ -f "$IDENTITY_FILE" ]] || exit 1
+exit 0
+AOFEOF
+  chmod +x "$tmp/ops/plugins/aof/bin/validate-environment.sh"
+
+  # Create root AOF contracts
+  cat > "$tmp/.environment.yaml" <<'ENVEOF'
+version: "1.0"
+environment:
+  name: "test-env"
+  tier: "product"
+contracts:
+  preflight:
+    - step: "validate"
+ENVEOF
+  cat > "$tmp/.identity.yaml" <<'IDEOF'
+identity:
+  node_id: "test-node"
+  environment: "test-env"
+  spine_version: "v1.0.0"
+IDEOF
+
   # Create MANIFEST.yaml
   mkdir -p "$tmp/ops/plugins"
   cat > "$tmp/ops/plugins/MANIFEST.yaml" <<'MANEOF'
@@ -193,6 +235,19 @@ test_missing_readme_ref() {
   rm -rf "$mock"
 }
 
+# Test 8: Missing environment contract fails
+test_missing_environment_contract() {
+  local mock
+  mock="$(setup_mock)"
+  rm "$mock/.environment.yaml"
+  if SPINE_ROOT="$mock" bash "$GATE" >/dev/null 2>&1; then
+    fail "missing .environment.yaml should fail D91"
+  else
+    pass "missing .environment.yaml fails D91"
+  fi
+  rm -rf "$mock"
+}
+
 # Run all tests
 echo "D91 Tests"
 echo "════════════════════════════════════════"
@@ -203,6 +258,7 @@ test_missing_schema_section
 test_missing_preset
 test_non_executable_script
 test_missing_readme_ref
+test_missing_environment_contract
 
 echo ""
 echo "────────────────────────────────────────"

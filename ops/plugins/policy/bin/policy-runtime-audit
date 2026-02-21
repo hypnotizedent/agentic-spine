@@ -6,36 +6,14 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/policy.runtime.contract.yaml"
 HISTORY_LIMIT="${POLICY_AUDIT_HISTORY_LIMIT:-15}"
+JSON_MODE=0
+
 TRACKED_POLICY_PATHS=(
   "ops/bindings/policy.presets.yaml"
   "ops/bindings/tenant.profile.yaml"
+  "ops/bindings/policy.runtime.contract.yaml"
   "ops/lib/resolve-policy.sh"
 )
-
-hash_file() {
-  local path="$1"
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$path" | awk '{print $1}'
-    return
-  fi
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$path" | awk '{print $1}'
-    return
-  fi
-  echo "hash-tool-missing"
-}
-
-echo "=== Policy Runtime Audit ==="
-echo ""
-
-if [[ ! -f "$CONTRACT" ]]; then
-  echo "FAIL: policy.runtime.contract.yaml not found"
-  exit 1
-fi
-
-TOTAL=0
-WIRED=0
-UNWIRED=0
 
 KNOBS=(
   drift_gate_mode
@@ -50,42 +28,189 @@ KNOBS=(
   multi_agent_writes
 )
 
-echo "Knob enforcement status:"
+usage() {
+  cat <<'EOF'
+Usage:
+  policy-runtime-audit [--json] [--history-limit N]
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    --history-limit)
+      HISTORY_LIMIT="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required"; exit 1; }
+
+hash_file() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+    return
+  fi
+  echo "hash-tool-missing"
+}
+
+if [[ ! -f "$CONTRACT" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "policy.runtime.audit" \
+      --arg status "fail" \
+      --arg message "policy.runtime.contract.yaml not found" \
+      '{capability:$capability,status:$status,message:$message}'
+    exit 1
+  fi
+  echo "=== Policy Runtime Audit ==="
+  echo ""
+  echo "FAIL: policy.runtime.contract.yaml not found"
+  exit 1
+fi
+
+TOTAL=0
+WIRED=0
+UNWIRED=0
+knobs_json='[]'
+
 for knob in "${KNOBS[@]}"; do
   TOTAL=$((TOTAL + 1))
   block="$(sed -n "/^  ${knob}:/,/^  [a-z]/p" "$CONTRACT" | head -20)"
   wired_val="$(echo "$block" | grep 'wired:' | head -1 | awk '{print $2}')"
   point="$(echo "$block" | grep 'enforcement_point:' | head -1 | sed 's/.*: *//')"
-
   if [[ "$wired_val" == "true" ]]; then
     WIRED=$((WIRED + 1))
-    echo "  $knob: WIRED (at $point)"
+    wired_bool=true
   else
     UNWIRED=$((UNWIRED + 1))
-    echo "  $knob: NOT WIRED (at $point)"
+    wired_bool=false
   fi
+  knobs_json="$(
+    jq -c \
+      --arg knob "$knob" \
+      --arg enforcement_point "$point" \
+      --argjson wired "$wired_bool" \
+      '. + [{name:$knob,enforcement_point:$enforcement_point,wired:$wired}]' <<<"$knobs_json"
+  )"
 done
 
-echo ""
-echo "Summary: $TOTAL knobs, $WIRED wired, $UNWIRED unwired"
-echo "Coverage: $(( (WIRED * 100) / TOTAL ))%"
-echo ""
-echo "Policy source fingerprint:"
+coverage=0
+if [[ "$TOTAL" -gt 0 ]]; then
+  coverage=$(( (WIRED * 100) / TOTAL ))
+fi
+
+policy_sources_json='[]'
 for rel in "${TRACKED_POLICY_PATHS[@]}"; do
   abs="$ROOT/$rel"
   if [[ -f "$abs" ]]; then
-    echo "  $rel: $(hash_file "$abs")"
+    policy_sources_json="$(
+      jq -c --arg path "$rel" --arg hash "$(hash_file "$abs")" \
+        '. + [{path:$path,exists:true,sha256:$hash}]' <<<"$policy_sources_json"
+    )"
   else
-    echo "  $rel: MISSING"
+    policy_sources_json="$(
+      jq -c --arg path "$rel" \
+        '. + [{path:$path,exists:false,sha256:null}]' <<<"$policy_sources_json"
+    )"
   fi
 done
-echo ""
 
-echo "Policy change history (git, newest first):"
+history_available=false
+history_entries_json='[]'
 if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  history="$(git -C "$ROOT" log --date=iso-strict --pretty='format:  %h | %ad | %an | %s' -n "$HISTORY_LIMIT" -- "${TRACKED_POLICY_PATHS[@]}" 2>/dev/null || true)"
-  if [[ -n "$history" ]]; then
-    echo "$history"
+  history_available=true
+  while IFS=$'\x1f' read -r commit_hash committed_at author subject; do
+    [[ -z "${commit_hash:-}" ]] && continue
+    history_entries_json="$(
+      jq -c \
+        --arg commit "$commit_hash" \
+        --arg committed_at "$committed_at" \
+        --arg author "$author" \
+        --arg subject "$subject" \
+        '. + [{commit:$commit,committed_at:$committed_at,author:$author,subject:$subject}]' <<<"$history_entries_json"
+    )"
+  done < <(
+    git -C "$ROOT" log \
+      --date=iso-strict \
+      --pretty='format:%H%x1f%ad%x1f%an%x1f%s' \
+      -n "$HISTORY_LIMIT" \
+      -- "${TRACKED_POLICY_PATHS[@]}" 2>/dev/null || true
+  )
+fi
+
+history_count="$(jq -r 'length' <<<"$history_entries_json")"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg capability "policy.runtime.audit" \
+    --arg status "pass" \
+    --arg contract "$CONTRACT" \
+    --argjson tracked_paths "$(printf '%s\n' "${TRACKED_POLICY_PATHS[@]}" | jq -R . | jq -s .)" \
+    --argjson total_knobs "$TOTAL" \
+    --argjson wired_knobs "$WIRED" \
+    --argjson unwired_knobs "$UNWIRED" \
+    --argjson coverage "$coverage" \
+    --argjson knobs "$knobs_json" \
+    --argjson policy_sources "$policy_sources_json" \
+    --argjson history_available "$history_available" \
+    --argjson history_count "$history_count" \
+    --argjson history_entries "$history_entries_json" \
+    '{
+      capability:$capability,
+      status:$status,
+      contract:$contract,
+      summary:{
+        total_knobs:$total_knobs,
+        wired_knobs:$wired_knobs,
+        unwired_knobs:$unwired_knobs,
+        coverage_percent:$coverage
+      },
+      knobs:$knobs,
+      policy_sources:$policy_sources,
+      history:{
+        available:$history_available,
+        tracked_paths:$tracked_paths,
+        entry_count:$history_count,
+        entries:$history_entries
+      }
+    }'
+  exit 0
+fi
+
+echo "=== Policy Runtime Audit ==="
+echo ""
+echo "Knob enforcement status:"
+jq -r '.[] | "  \(.name): \(.wired|if . then "WIRED" else "NOT WIRED" end) (at \(.enforcement_point))"' <<<"$knobs_json"
+echo ""
+echo "Summary: $TOTAL knobs, $WIRED wired, $UNWIRED unwired"
+echo "Coverage: ${coverage}%"
+echo ""
+echo "Policy source fingerprint:"
+jq -r '.[] | "  \(.path): " + (if .exists then .sha256 else "MISSING" end)' <<<"$policy_sources_json"
+echo ""
+echo "Policy change history (git, newest first):"
+if [[ "$history_available" == "true" ]]; then
+  if [[ "$history_count" -gt 0 ]]; then
+    jq -r '.[] | "  \(.commit[0:7]) | \(.committed_at) | \(.author) | \(.subject)"' <<<"$history_entries_json"
   else
     echo "  none"
   fi
@@ -93,6 +218,5 @@ else
   echo "  unavailable (git repo not detected)"
 fi
 echo ""
-
 echo "AUDIT: PASS (contract valid, enforcement status reported)"
 exit 0

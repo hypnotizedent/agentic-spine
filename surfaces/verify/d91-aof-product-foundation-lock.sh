@@ -2,7 +2,8 @@
 # TRIAGE: Ensure AOF product docs, bindings, and tenant capabilities exist and are correctly wired. Create missing artifacts using LOOP-AOF-V01-FOUNDATION pattern.
 # D91: AOF product foundation lock
 # Enforces: required product docs exist, required bindings have required keys/presets,
-# tenant capabilities exist and are executable, docs discoverability is wired.
+# tenant capabilities exist and are executable, docs discoverability is wired,
+# and root AOF contracts pass strict validation.
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -118,6 +119,42 @@ if [[ -f "$DOCS_README" ]]; then
   fi
 else
   err "docs/README.md does not exist"
+fi
+
+# ── 5. Root AOF environment contract validation ──
+AOF_VALIDATE_SCRIPT="$ROOT/ops/plugins/aof/bin/validate-environment.sh"
+ENV_CONTRACT="$ROOT/.environment.yaml"
+IDENTITY_CONTRACT="$ROOT/.identity.yaml"
+
+if [[ -x "$AOF_VALIDATE_SCRIPT" ]]; then
+  ok "aof.validate script exists"
+else
+  err "ops/plugins/aof/bin/validate-environment.sh is not executable or does not exist"
+fi
+
+if [[ -f "$ENV_CONTRACT" ]]; then
+  ok ".environment.yaml exists"
+else
+  err ".environment.yaml does not exist"
+fi
+
+if [[ -f "$IDENTITY_CONTRACT" ]]; then
+  ok ".identity.yaml exists"
+else
+  err ".identity.yaml does not exist"
+fi
+
+if [[ -x "$AOF_VALIDATE_SCRIPT" && -f "$ENV_CONTRACT" && -f "$IDENTITY_CONTRACT" ]]; then
+  if validate_output="$("$AOF_VALIDATE_SCRIPT" --environment-file "$ENV_CONTRACT" --identity-file "$IDENTITY_CONTRACT" --strict 2>&1)"; then
+    ok "aof.validate strict contract check passed"
+  else
+    err "aof.validate strict contract check failed"
+    if [[ "${DRIFT_VERBOSE:-0}" == "1" ]]; then
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && echo "    $line" >&2
+      done <<<"$validate_output"
+    fi
+  fi
 fi
 
 # ── Result ──
