@@ -28,7 +28,7 @@ parent_receipts:
 | NAS (Synology) | 100.102.199.111 | https://nas:5001 |
 | Home Assistant | 100.67.120.1 | http://ha:8123 |
 | Vaultwarden | 100.93.142.63 | http://vault:8080 |
-| Pi-hole | 100.105.148.96 | http://pihole-home/admin |
+| Pi-hole (decommissioned history) | 100.105.148.96 | soft-decommissioned 2026-02-21 |
 
 ---
 
@@ -149,8 +149,8 @@ parent_receipts:
 
 | VMID | Hostname | Tailscale IP | Status | Purpose |
 |------|----------|--------------|--------|---------|
-| 103 | download-home | 100.125.138.110 | **Stopped** | *arr stack (home) |
-| 105 | pihole-home | 100.105.148.96 | **Stopped** | DNS + ad-blocking |
+| 103 | download-home | 100.125.138.110 | **Soft-decommissioned** | Legacy *arr home LXC (retained stopped, non-destructive) |
+| 105 | pihole-home | 100.105.148.96 | **Soft-decommissioned** | Legacy DNS LXC (retained stopped, non-destructive) |
 
 ### VM Details
 
@@ -195,16 +195,16 @@ parent_receipts:
 | Field | Value |
 |-------|-------|
 | Tailscale IP | 100.125.138.110 |
-| Purpose | *arr stack for home media |
-| Note | SSH access requires key setup |
+| Purpose | Legacy *arr stack for home media |
+| Status | Soft-decommissioned 2026-02-21 (no active-access expectation) |
 
 #### LXC 105: pihole-home
 
 | Field | Value |
 |-------|-------|
 | Tailscale IP | 100.105.148.96 |
-| Purpose | DNS server + ad-blocking |
-| Status | **Stopped** (was FTL listening on port 53 when running) |
+| Purpose | Legacy DNS server + ad-blocking |
+| Status | **Soft-decommissioned** 2026-02-21 (UDR DNS is canonical) |
 
 ---
 
@@ -222,8 +222,8 @@ parent_receipts:
 | TubesZB (Z-Wave) | 10.0.0.90 | - | Z-Wave coordinator |
 | homeassistant | 10.0.0.100 | 100.67.120.1 | VM 100 |
 | vaultwarden | 10.0.0.102 | 100.93.142.63 | VM 102 |
-| pihole-home | 10.0.0.53 | 100.105.148.96 | LXC 105 |
-| download-home | 10.0.0.101 | 100.125.138.110 | LXC 103 |
+| pihole-home | 10.0.0.53 | 100.105.148.96 | LXC 105 (soft-decommissioned) |
+| download-home | 10.0.0.101 | 100.125.138.110 | LXC 103 (soft-decommissioned) |
 
 ### Network Configuration
 
@@ -323,7 +323,7 @@ nfs: synology-backups
 | Frigate NVR | proxmox-home | Has iGPU for video decode |
 | Photo ML | immich (VM 101) | Already has ML container |
 | Heavy DB | NAS + SSD cache | NAS has caching capability |
-| Pi-hole secondary | download-home LXC | Low resource, always on |
+| Pi-hole secondary | N/A (legacy path retired) | download-home/pihole-home are soft-decommissioned history |
 
 ### Resource Constraints
 
@@ -357,9 +357,6 @@ ping -c1 nas
 
 # Home Assistant
 curl -s http://ha:8123/api/ -H "Authorization: Bearer $HA_TOKEN"
-
-# Pi-hole status
-ssh pihole-home "pihole status"
 
 # Vaultwarden
 curl -s http://vault:8080/
@@ -402,9 +399,9 @@ curl -s http://vault:8080/
 | vzdump jobs disabled | **RESOLVED** | ~~HIGH~~ | 3 tiered jobs enabled 2026-02-11. See Backup Configuration. |
 | No Hyper Backup tasks | OPEN | MEDIUM | NAS has no backup destinations configured. Deferred. |
 | VM 101 (immich) stopped | OPEN | MEDIUM | Not running, has migration snapshot. |
-| LXC 103 (download-home) stopped | OPEN | MEDIUM | *arr stack not running. |
-| LXC 105 (pihole-home) stopped | OPEN | MEDIUM | DNS not serving. UDR handles DNS directly. |
-| download-home SSH | OPEN | MEDIUM | Permission denied (publickey) — needs key setup |
+| LXC 103 (download-home) | **RESOLVED** | ~~MEDIUM~~ | Soft-decommissioned 2026-02-21; removed from active-access expectations. |
+| LXC 105 (pihole-home) | **RESOLVED** | ~~MEDIUM~~ | Soft-decommissioned 2026-02-21; UDR DNS is canonical. |
+| download-home SSH | **RESOLVED** | ~~MEDIUM~~ | Expectation removed by decommission decision (non-destructive). |
 | Immich home vs shop | INFO | LOW | Two instances — may consolidate |
 | UDR DNS not using pihole | INFO | LOW | DHCP hands out 10.0.0.1 (UDR), not pihole-home |
 
@@ -456,7 +453,7 @@ No open baseline loops. `OL_HOME_BASELINE_FINISH` closed 2026-02-07.
 - No Hyper Backup tasks configured
 - VM 101 (immich) stopped
 - NAS SSH works as `ronadmin`
-- download-home SSH still needs key setup
+- download-home / pihole-home moved to soft-decommissioned history (no active SSH expectation)
 
 ### 2026-01-21 Infrastructure Discovery
 

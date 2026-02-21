@@ -477,6 +477,10 @@ for domain in "${DOMAINS[@]}"; do
   if [[ -z "$_domain_lat_warn" || "$_domain_lat_warn" == "null" ]]; then
     _domain_lat_warn="$API_LAT_WARN_MS"
   fi
+  _domain_lat_incident="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .threshold_overrides.api_latency_incident_ms // \"\"" "$CONTRACT" | head -n1)"
+  if [[ -z "$_domain_lat_incident" || "$_domain_lat_incident" == "null" ]]; then
+    _domain_lat_incident="$API_LAT_INCIDENT_MS"
+  fi
 
   mapfile -t probes < <(yq -r ".probe_capabilities.\"$domain\"[]?" "$CONTRACT")
   domain_severity="pass"
@@ -499,13 +503,13 @@ for domain in "${DOMAINS[@]}"; do
       probe_status="incident"
     fi
 
-    if [[ "$PROBE_DURATION_MS" -ge "$API_LAT_INCIDENT_MS" ]]; then
+    if [[ "$PROBE_DURATION_MS" -ge "$_domain_lat_incident" ]]; then
       # Latency alone should not create an outage incident when probe semantics pass.
       # Reserve incident for semantic failures; keep high latency as warn signal.
       if [[ "$probe_status" != "incident" ]]; then
         probe_status="warn"
       fi
-      probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $API_LAT_INCIDENT_MS)"
+      probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $_domain_lat_incident)"
     elif [[ "$PROBE_DURATION_MS" -ge "$_domain_lat_warn" ]]; then
       if [[ "$probe_status" == "pass" ]]; then
         probe_status="warn"

@@ -22,7 +22,6 @@ need_file() {
 
 need_cmd yq
 need_cmd curl
-need_cmd jq
 need_file "$CONTRACT"
 need_file "$SERVICES"
 need_file "$BACKUP"
@@ -36,6 +35,7 @@ API_PATH="$(yq -r '.checks.api_auth.probe_path' "$CONTRACT")"
 API_EXPECT_HTTP="$(yq -r '.checks.api_auth.expected_http // 200' "$CONTRACT")"
 API_URL="${N8N_API_URL:-$API_DEFAULT_URL}"
 API_KEY="${N8N_API_KEY:-}"
+SKIP_API_AUTH="${N8N_INFRA_SKIP_API_AUTH:-false}"
 
 SNAPSHOT_SCRIPT_REL="$(yq -r '.checks.snapshot.check_script' "$CONTRACT")"
 SNAPSHOT_MAX_AGE="$(yq -r '.checks.snapshot.max_age_hours // 26' "$CONTRACT")"
@@ -43,6 +43,10 @@ SNAPSHOT_SCRIPT="$ROOT/$SNAPSHOT_SCRIPT_REL"
 
 BACKUP_TARGET="$(yq -r '.checks.backup_inventory.target_name' "$CONTRACT")"
 BACKUP_REQUIRE_ENABLED="$(yq -r '.checks.backup_inventory.require_enabled // true' "$CONTRACT")"
+
+if [[ "$SKIP_API_AUTH" != "true" ]]; then
+  need_cmd jq
+fi
 
 echo "n8n.infra.health"
 echo "contract: $CONTRACT"
@@ -64,8 +68,10 @@ else
   fi
 fi
 
-# 2) API auth probe
-if [[ -z "$API_KEY" ]]; then
+# 2) API auth probe (optional skip for low-latency control probes)
+if [[ "$SKIP_API_AUTH" == "true" ]]; then
+  echo "api_auth: SKIP (N8N_INFRA_SKIP_API_AUTH=true)"
+elif [[ -z "$API_KEY" ]]; then
   echo "api_auth: FAIL (N8N_API_KEY missing; run via secrets-injected capability)"
   FAILS=$((FAILS + 1))
 else
@@ -133,4 +139,3 @@ if [[ "$FAILS" -gt 0 ]]; then
   exit 1
 fi
 echo "summary: OK (all checks passed)"
-

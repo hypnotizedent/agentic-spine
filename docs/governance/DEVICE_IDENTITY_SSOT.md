@@ -43,7 +43,7 @@ This document establishes:
 |---------|---------|----------|
 | `{function}` | `macbook` | Single-purpose devices |
 | `{function}-{location}` | `proxmox-home`, `immich-1` | When same function exists in multiple locations |
-| `{stack}-{role}` | `docker-host`, `media-stack` | VMs with clear stack ownership |
+| `{stack}-{role}` | `docker-host`, `download-stack` | VMs with clear stack ownership |
 
 **Rules:**
 - Lowercase only, hyphens for separators
@@ -87,7 +87,7 @@ This document establishes:
 | Subnet | 10.0.0.0/24 |
 | Gateway | 10.0.0.1 (Ubiquiti UDR) |
 | Proxmox Host | `proxmox-home` (Beelink Mini) |
-| LXCs | pihole-home, download-home |
+| LXCs | none active (`pihole-home` + `download-home` are soft-decommissioned history) |
 | NAS | Synology 918+ (`nas`) |
 | Home Assistant | `ha` (VM on proxmox-home) |
 | Vaultwarden (rollback) | `vault` (VM on proxmox-home, VMID 102) — rollback source only (primary runs on `infra-core`) |
@@ -95,7 +95,7 @@ This document establishes:
 **Verification:**
 ```bash
 ssh proxmox-home "qm list && pct list"
-ping -c1 nas pihole-home ha vault
+ping -c1 nas ha vault
 ```
 
 ### Shop Rack (R730XD + N2024P + UDR6)
@@ -151,14 +151,12 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | dev-tools | 100.90.167.39 | Shop | Dev tools (Gitea, runner, postgres) |
 | ai-consolidation | 100.71.17.29 | Shop | AI services (Qdrant, AnythingLLM) (VM 207) |
 | automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
-| download-stack | 100.107.36.76 | Shop | Downloads + *arr (split from media-stack) |
-| streaming-stack | 100.123.207.64 | Shop | Streaming (Jellyfin, Navidrome, Jellyseerr, Bazarr, Homarr, Spotisub) (split from media-stack) |
+| download-stack | 100.107.36.76 | Shop | Downloads + *arr (split from legacy media VM) |
+| streaming-stack | 100.123.207.64 | Shop | Streaming (Jellyfin, Navidrome, Jellyseerr, Bazarr, Homarr, Spotisub) (split from legacy media VM) |
 | proxmox-home | 100.103.99.62 | Home | Proxmox VE (home host) |
 | nas | 100.102.199.111 | Home | Synology NAS |
 | vault | 100.93.142.63 | Home | Vaultwarden rollback source (VM 102) |
 | ha | 100.67.120.1 | Home | Home Assistant |
-| pihole-home | 100.105.148.96 | Home | Pi-hole |
-| download-home | 100.125.138.110 | Home | Downloads (*arr) (deferred) |
 
 ### LAN Endpoints (No Tailscale)
 
@@ -273,8 +271,6 @@ curl -s http://automation-stack:5678/healthz
 | Home Assistant | `ha` | 100.67.120.1 | Home Automation | Home | `curl -s http://ha:8123/api/` |
 | Vaultwarden (rollback) | `vault` | 100.93.142.63 | Passwords | Home | `curl -s http://vault:8080/` |
 | Synology NAS | `nas` | 100.102.199.111 | Storage | Home | `ping nas` |
-| download-home LXC | `download-home` | 100.125.138.110 | *arr (home) | Home | `ssh download-home uptime` |
-| pihole-home LXC | `pihole-home` | 100.105.148.96 | DNS | Home | `ping pihole-home` |
 
 ### Tier 4: Endpoints (Non-critical)
 
@@ -417,6 +413,8 @@ Use the loop ledger instead:
 |--------|-----------|----------------|--------|
 | `immich` (home) | 100.83.160.109 | Pending | Migrating to shop `immich-1` |
 | `media-stack` | 100.117.1.53 | 2026-02-10 | VM 201 destroyed; split to download-stack (209) + streaming-stack (210) |
+| `download-home` | 100.125.138.110 | 2026-02-21 | LXC 103 soft-decommissioned; removed from active access expectations. |
+| `pihole-home` | 100.105.148.96 | 2026-02-21 | LXC 105 soft-decommissioned; UDR DNS is canonical home path. |
 
 ---
 
@@ -453,7 +451,7 @@ Use the loop ledger instead:
 
 | Capability | Receipt | Status |
 |------------|---------|--------|
-| nodes.status | `receipts/sessions/RCAP-20260205-155125__nodes.status__Rzvvh72648/receipt.md` | FAIL (media-stack deferred) |
+| nodes.status | `receipts/sessions/RCAP-20260205-155125__nodes.status__Rzvvh72648/receipt.md` | FAIL (historical, pre-decommission split not complete) |
 | services.health.status | `receipts/sessions/RCAP-20260205-155156__services.health.status__R5omv73468/receipt.md` | 5/5 OK |
 
 **Verification Commands Run:**

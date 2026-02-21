@@ -8,6 +8,8 @@ set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 SSH_TARGET_FILE="$SPINE_REPO/ops/bindings/ssh.targets.yaml"
+BACKUP_INVENTORY_FILE="$SPINE_REPO/ops/bindings/backup.inventory.yaml"
+BACKUP_TARGET_NAME="${N8N_SNAPSHOT_BACKUP_TARGET:-app-n8n-workflows}"
 
 # Resolve automation-stack SSH target
 if command -v yq >/dev/null 2>&1 && [[ -f "$SSH_TARGET_FILE" ]]; then
@@ -18,15 +20,30 @@ else
   SSH_USER="automation"
 fi
 
-BACKUP_DIR="/home/automation/backups/n8n-workflows"
+if command -v yq >/dev/null 2>&1 && [[ -f "$BACKUP_INVENTORY_FILE" ]]; then
+  BACKUP_DIR="$(yq -r ".targets[] | select(.name == \"$BACKUP_TARGET_NAME\") | .base_path" "$BACKUP_INVENTORY_FILE" | head -n1)"
+fi
+
+if [[ -z "${BACKUP_DIR:-}" || "$BACKUP_DIR" == "null" ]]; then
+  BACKUP_DIR="/home/automation/backups/n8n-workflows"
+fi
 
 echo "=== n8n workflow snapshot status ==="
 echo "host: ${SSH_USER}@${SSH_HOST}"
 echo "path: $BACKUP_DIR"
 echo
 
-ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "${SSH_USER}@${SSH_HOST}" bash -s <<'REMOTE_SCRIPT'
-BACKUP_DIR="/home/automation/backups/n8n-workflows"
+if [[ "$SSH_USER" == "automation" ]]; then
+  REMOTE_CMD="BACKUP_DIR='$BACKUP_DIR' bash -s"
+else
+  REMOTE_CMD="sudo -n -u automation env BACKUP_DIR='$BACKUP_DIR' bash -s"
+fi
+
+ssh \
+  -o ConnectTimeout=6 \
+  -o StrictHostKeyChecking=accept-new \
+  "${SSH_USER}@${SSH_HOST}" \
+  "$REMOTE_CMD" <<'REMOTE_SCRIPT'
 
 if [[ ! -d "$BACKUP_DIR" ]]; then
   echo "STATUS: NO_SNAPSHOTS"
