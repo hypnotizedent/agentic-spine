@@ -14,6 +14,7 @@ scope: spine-control-loop
 1. `spine.control.tick` (read-only): aggregate current signals.
 2. `spine.control.plan` (read-only): produce prioritized next actions and route targets.
 3. `spine.control.execute` (mutating/manual): execute selected capability-backed actions with receipt linkage.
+4. `spine.control.cycle` (mutating/manual): autonomous observe-plan-act pass that can execute capability actions and enqueue delegated agent-tool tasks.
 
 ## Capability Contract
 
@@ -41,11 +42,25 @@ scope: spine-control-loop
 ### `spine.control.execute`
 
 - Runs selected `--action-id` items from latest plan.
-- Executes only `route_target.type=capability` items.
+- Executes `route_target.type=capability` items directly.
+- Optionally supports `route_target.type=agent_tool` via governed delegation:
+  - resolve agent using `agent.route --json`,
+  - run `agent.health.check-all` preflight (strict by default),
+  - enqueue task through `mailroom.task.enqueue`.
 - If target capability approval is manual, `--confirm` is required.
 - Writes control-plane latest artifact:
   - `mailroom/outbox/operations/control-plane-latest.json`
   - `mailroom/outbox/operations/control-plane-latest.md`
+
+### `spine.control.cycle`
+
+- Performs one autonomous pass:
+  1. collect tick
+  2. build plan
+  3. select actions by priority (`P0..P2`) and max action count
+  4. execute/delegate selected actions
+- Manual capabilities are skipped unless `--confirm-manual` is provided.
+- Delegated agent-tool tasks are health-gated unless `--allow-unhealthy-agents`.
 
 ## Runtime Path Contract
 
@@ -61,4 +76,5 @@ cd /Users/ronnyworks/code/agentic-spine
 ./bin/ops cap run spine.control.tick
 ./bin/ops cap run spine.control.plan
 echo "yes" | ./bin/ops cap run spine.control.execute --action-id A01-loop-gap-verify
+echo "yes" | ./bin/ops cap run spine.control.cycle
 ```

@@ -24,6 +24,7 @@ scope: spine-glue-v3-execution-spec
 - `spine.control.tick` (read-only)
 - `spine.control.plan` (read-only)
 - `spine.control.execute` (mutating/manual)
+- `spine.control.cycle` (mutating/manual, self-driving pass)
 - Runtime-aware artifact:
   - `mailroom/outbox/operations/control-plane-latest.json`
   - `mailroom/outbox/operations/control-plane-latest.md`

@@ -65,6 +65,7 @@ Domain-specific MCP servers in workbench remain optional providers until delegat
 - `spine.control.tick` — read-only aggregated "what matters now" snapshot.
 - `spine.control.plan` — read-only prioritized next actions with deterministic route targets (`capability|agent_tool`).
 - `spine.control.execute` — mutating/manual execution for selected capability-backed actions with receipt linkage.
+- `spine.control.cycle` — mutating/manual autonomous observe-plan-act pass with optional delegated agent-tool enqueue.
 
 Execution writes the control-plane latest artifact under runtime-aware outbox path:
 
