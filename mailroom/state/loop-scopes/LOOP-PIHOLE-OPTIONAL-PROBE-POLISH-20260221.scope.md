@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-PIHOLE-OPTIONAL-PROBE-POLISH-20260221
 created: 2026-02-21
-status: active
+status: closed
 owner: "@ronny"
 scope: pihole
 priority: medium
