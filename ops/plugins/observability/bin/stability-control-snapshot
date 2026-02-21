@@ -481,6 +481,14 @@ for domain in "${DOMAINS[@]}"; do
   if [[ -z "$_domain_lat_incident" || "$_domain_lat_incident" == "null" ]]; then
     _domain_lat_incident="$API_LAT_INCIDENT_MS"
   fi
+  _domain_hb_warn="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .threshold_overrides.heartbeat_stale_warn_minutes // \"\"" "$CONTRACT" | head -n1)"
+  if [[ -z "$_domain_hb_warn" || "$_domain_hb_warn" == "null" ]]; then
+    _domain_hb_warn="$HEARTBEAT_WARN_MINUTES"
+  fi
+  _domain_hb_incident="$(yq -r ".critical_domains[] | select(.id == \"$domain\") | .threshold_overrides.stale_heartbeat_minutes // \"\"" "$CONTRACT" | head -n1)"
+  if [[ -z "$_domain_hb_incident" || "$_domain_hb_incident" == "null" ]]; then
+    _domain_hb_incident="$STALE_HEARTBEAT_INCIDENT_MINUTES"
+  fi
 
   mapfile -t probes < <(yq -r ".probe_capabilities.\"$domain\"[]?" "$CONTRACT")
   mapfile -t latency_exemptions < <(yq -r ".probe_latency_exemptions.\"$domain\"[]?" "$CONTRACT")
@@ -530,14 +538,14 @@ for domain in "${DOMAINS[@]}"; do
 
     hb_age="$(extract_heartbeat_age_minutes "$PROBE_OUTPUT")"
     if [[ -n "$hb_age" && "$hb_age" =~ ^[0-9]+$ ]]; then
-      if [[ "$hb_age" -ge "$STALE_HEARTBEAT_INCIDENT_MINUTES" ]]; then
+      if [[ "$hb_age" -ge "$_domain_hb_incident" ]]; then
         probe_status="incident"
-        probe_detail="$probe_detail; heartbeat_age_minutes=$hb_age (>= $STALE_HEARTBEAT_INCIDENT_MINUTES)"
-      elif [[ "$hb_age" -ge "$HEARTBEAT_WARN_MINUTES" ]]; then
+        probe_detail="$probe_detail; heartbeat_age_minutes=$hb_age (>= $_domain_hb_incident)"
+      elif [[ "$hb_age" -ge "$_domain_hb_warn" ]]; then
         if [[ "$probe_status" == "pass" ]]; then
           probe_status="warn"
         fi
-        probe_detail="$probe_detail; heartbeat_age_minutes=$hb_age (>= $HEARTBEAT_WARN_MINUTES)"
+        probe_detail="$probe_detail; heartbeat_age_minutes=$hb_age (>= $_domain_hb_warn)"
       fi
     fi
 

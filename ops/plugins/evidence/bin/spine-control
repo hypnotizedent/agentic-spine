@@ -243,14 +243,45 @@ def collect_calendar_status() -> dict[str, Any]:
 def collect_alert_status() -> dict[str, Any]:
     script = ROOT / "ops/plugins/alerting/bin/alerting-status"
     if not script.exists():
-        return {"status": "error", "total_alerts": 0, "active_domains": []}
+        return {
+            "status": "error",
+            "active_alerts": 0,
+            "active_warn_alerts": 0,
+            "active_incident_alerts": 0,
+            "total_alerts": 0,
+            "active_domains": [],
+        }
     _, payload = parse_json_output(script, ["--json"])
     domains = payload.get("domains", []) if isinstance(payload, dict) else []
-    active = [d.get("domain", "") for d in domains if int(d.get("alerts", 0) or 0) > 0]
-    total = sum(int(d.get("alerts", 0) or 0) for d in domains)
+    active = []
+    total_alerts = 0
+    active_alerts = 0
+    active_warn_alerts = 0
+    active_incident_alerts = 0
+    for d in domains:
+        total_alerts += int(d.get("alerts_total", d.get("alerts", 0)) or 0)
+        active_count = int(d.get("active_alerts", 0) or 0)
+        if active_count <= 0:
+            # Backward-compat fallback for older alerting-status payloads.
+            legacy_alerts = int(d.get("alerts", 0) or 0)
+            if legacy_alerts > 0:
+                active_count = legacy_alerts
+        if active_count > 0:
+            active.append(d.get("domain", ""))
+            active_alerts += active_count
+        active_warn_alerts += int(d.get("active_warn_alerts", 0) or 0)
+        active_incident_alerts += int(d.get("active_incident_alerts", 0) or 0)
+    alert_status = "ok"
+    if active_incident_alerts > 0:
+        alert_status = "error"
+    elif active_alerts > 0:
+        alert_status = "warn"
     return {
-        "status": "ok" if total == 0 else "warn",
-        "total_alerts": total,
+        "status": alert_status,
+        "active_alerts": active_alerts,
+        "active_warn_alerts": active_warn_alerts,
+        "active_incident_alerts": active_incident_alerts,
+        "total_alerts": total_alerts,
         "active_domains": active,
         "domains": domains,
     }
@@ -420,7 +451,9 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         "open_loops": len(loops),
         "open_gaps": len(gaps),
         "pending_proposals": proposals.get("pending", 0),
-        "active_alerts": alerts.get("total_alerts", 0),
+        "active_alerts": alerts.get("active_alerts", 0),
+        "active_incident_alerts": alerts.get("active_incident_alerts", 0),
+        "alert_history_total": alerts.get("total_alerts", 0),
         "active_handoffs": handoffs.get("active", 0),
         "timeline_events": timeline.get("event_count", 0),
         "verify_failed_runs": timeline.get("verify_failed_runs", 0),
@@ -431,12 +464,13 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
     }
 
     status = "ok"
-    if summary["active_alerts"] > 0 or any(g.get("severity") == "critical" for g in gaps):
+    if alerts.get("status") == "error" or any(g.get("severity") == "critical" for g in gaps):
         status = "error"
     elif (
         summary["open_loops"] > 0
         or summary["open_gaps"] > 0
         or summary["pending_proposals"] > 0
+        or alerts.get("status") == "warn"
         or summary["verify_current_failed_runs"] > 0
         or str(calendar.get("status", "")).lower() in {"warn", "error"}
     ):

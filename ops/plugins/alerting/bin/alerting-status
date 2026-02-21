@@ -67,9 +67,54 @@ while IFS= read -r domain; do
     fi
   fi
 
-  count="$(find "$ALERT_DIR" -maxdepth 1 -type f -name "ALERT-*-${domain}.yaml" 2>/dev/null | wc -l | tr -d ' ')"
+  total_count=0
+  warn_count=0
+  incident_count=0
+  latest_status="none"
+  latest_alert_epoch=0
 
-  row="$(jq -n --arg domain "$domain" --argjson alerts "$count" --argjson cooldown_seconds "$cooldown" --argjson last_epoch "$last_epoch" --argjson cooldown_remaining_seconds "$remaining" '{domain:$domain,alerts:$alerts,cooldown_seconds:$cooldown_seconds,last_epoch:$last_epoch,cooldown_remaining_seconds:$cooldown_remaining_seconds}')"
+  for alert_file in "$ALERT_DIR"/ALERT-*-"$domain".yaml; do
+    [[ -f "$alert_file" ]] || continue
+    total_count=$((total_count + 1))
+    alert_status="$(awk -F': *' '/^status:/{gsub(/"/,"",$2); print $2; exit}' "$alert_file" || true)"
+    case "$alert_status" in
+      incident) incident_count=$((incident_count + 1)) ;;
+      warn) warn_count=$((warn_count + 1)) ;;
+    esac
+    file_epoch="$(stat -f %m "$alert_file" 2>/dev/null || stat -c %Y "$alert_file" 2>/dev/null || echo 0)"
+    if [[ "$file_epoch" =~ ^[0-9]+$ ]] && (( file_epoch >= latest_alert_epoch )); then
+      latest_alert_epoch="$file_epoch"
+      latest_status="${alert_status:-unknown}"
+    fi
+  done
+
+  active_alerts=0
+  active_warn_alerts=0
+  active_incident_alerts=0
+  active_status="none"
+  if (( remaining > 0 )) && [[ "$latest_status" != "none" ]]; then
+    active_alerts=1
+    active_status="$latest_status"
+    case "$latest_status" in
+      incident) active_incident_alerts=1 ;;
+      warn) active_warn_alerts=1 ;;
+    esac
+  fi
+
+  row="$(jq -n \
+    --arg domain "$domain" \
+    --arg latest_status "$latest_status" \
+    --arg active_status "$active_status" \
+    --argjson alerts_total "$total_count" \
+    --argjson alerts_warn_total "$warn_count" \
+    --argjson alerts_incident_total "$incident_count" \
+    --argjson active_alerts "$active_alerts" \
+    --argjson active_warn_alerts "$active_warn_alerts" \
+    --argjson active_incident_alerts "$active_incident_alerts" \
+    --argjson cooldown_seconds "$cooldown" \
+    --argjson last_epoch "$last_epoch" \
+    --argjson cooldown_remaining_seconds "$remaining" \
+    '{domain:$domain,alerts_total:$alerts_total,alerts_warn_total:$alerts_warn_total,alerts_incident_total:$alerts_incident_total,latest_status:$latest_status,active_status:$active_status,active_alerts:$active_alerts,active_warn_alerts:$active_warn_alerts,active_incident_alerts:$active_incident_alerts,cooldown_seconds:$cooldown_seconds,last_epoch:$last_epoch,cooldown_remaining_seconds:$cooldown_remaining_seconds}')"
   rows_json="$(jq -c --argjson row "$row" '. + [$row]' <<<"$rows_json")"
 done < <(yq -r '.rules[].domain_id' "$RULES_FILE")
 
@@ -82,10 +127,10 @@ echo "alerting.status"
 echo "rules: $RULES_FILE"
 echo "alert_dir: $ALERT_DIR"
 echo
-printf "%-20s %-8s %-8s %-10s\n" "domain" "alerts" "cooldown" "remaining"
-printf "%-20s %-8s %-8s %-10s\n" "--------------------" "--------" "--------" "----------"
+printf "%-20s %-8s %-8s %-8s %-10s %-10s\n" "domain" "active" "latest" "total" "cooldown" "remaining"
+printf "%-20s %-8s %-8s %-8s %-10s %-10s\n" "--------------------" "--------" "--------" "--------" "----------" "----------"
 
-jq -r '.[] | [.domain, (.alerts|tostring), (.cooldown_seconds|tostring), (.cooldown_remaining_seconds|tostring)] | @tsv' <<<"$rows_json" \
-  | while IFS=$'\t' read -r d c cd rem; do
-      printf "%-20s %-8s %-8s %-10s\n" "$d" "$c" "$cd" "$rem"
+jq -r '.[] | [.domain, (.active_alerts|tostring), .latest_status, (.alerts_total|tostring), (.cooldown_seconds|tostring), (.cooldown_remaining_seconds|tostring)] | @tsv' <<<"$rows_json" \
+  | while IFS=$'\t' read -r d active latest total cd rem; do
+      printf "%-20s %-8s %-8s %-8s %-10s %-10s\n" "$d" "$active" "$latest" "$total" "$cd" "$rem"
     done
