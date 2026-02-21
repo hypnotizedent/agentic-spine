@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-20
+last_verified: 2026-02-21
 verification_method: spine-capabilities
 scope: all-infrastructure
 github_issue: "#615"
@@ -16,7 +16,7 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 > For service endpoints/ports/health routes → CHECK `docs/governance/SERVICE_REGISTRY.yaml`.
 > Before creating ANY new device/VM/service → FOLLOW THESE RULES.
 >
-> Last Verified: February 20, 2026
+> Last Verified: February 21, 2026
 
 ---
 
@@ -90,12 +90,12 @@ This document establishes:
 | LXCs | `pihole-home` active, `download-home` soft-decommissioned |
 | NAS | Synology 918+ (`nas`) |
 | Home Assistant | `ha` (VM on proxmox-home) |
-| Vaultwarden (rollback) | `vault` (VM on proxmox-home, VMID 102) — rollback source only (primary runs on `infra-core`) |
+| Vaultwarden (legacy) | `vault` decommissioned 2026-02-16 (superseded by `infra-core`) |
 
 **Verification:**
 ```bash
 ssh proxmox-home "qm list && pct list"
-ping -c1 nas pihole-home ha vault
+ping -c1 nas pihole-home ha
 ```
 
 ### Shop Rack (R730XD + N2024P + UDR6)
@@ -153,12 +153,12 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
 | download-stack | 100.107.36.76 | Shop | Downloads + *arr (split from legacy media VM) |
 | streaming-stack | 100.123.207.64 | Shop | Streaming (Jellyfin, Navidrome, Jellyseerr, Bazarr, Homarr, Spotisub) (split from legacy media VM) |
+| immich-1 | 100.114.101.50 | Shop | Photos (VM 203) |
 | finance-stack | 100.76.153.100 | Shop | Finance (Firefly III, Paperless, Ghostfolio) (VM 211) |
 | mint-data | 100.106.72.25 | Shop | Mint data plane (PostgreSQL, MinIO, Redis) (VM 212) |
 | mint-apps | 100.79.183.14 | Shop | Mint app plane (artwork, quote-page, order-intake) (VM 213) |
 | proxmox-home | 100.103.99.62 | Home | Proxmox VE (home host) |
 | nas | 100.102.199.111 | Home | Synology NAS |
-| vault | 100.93.142.63 | Home | Vaultwarden rollback source (VM 102) |
 | ha | 100.67.120.1 | Home | Home Assistant |
 | pihole-home | 100.105.148.96 | Home | Pi-hole (home DNS) |
 
@@ -262,6 +262,14 @@ curl -s http://automation-stack:5678/healthz
 | download-stack VM | `download-stack` | 100.107.36.76 | Downloads + *arr (VM 209) | Shop | `ssh download-stack docker ps` |
 | streaming-stack VM | `streaming-stack` | 100.123.207.64 | Jellyfin + Navidrome (VM 210) | Shop | `ssh streaming-stack docker ps` |
 
+### Tier 2: Production Services (Finance + Mint)
+
+| Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
+|--------|-------------------|--------------|------|----------|--------------|
+| finance-stack VM | `finance-stack` | 100.76.153.100 | Finance (Firefly III, Paperless, Ghostfolio) (VM 211) | Shop | `ssh finance-stack docker ps` |
+| mint-data VM | `mint-data` | 100.106.72.25 | Mint data plane (PostgreSQL, MinIO, Redis) (VM 212) | Shop | `ssh mint-data docker ps` |
+| mint-apps VM | `mint-apps` | 100.79.183.14 | Mint app plane (artwork, quote-page, order-intake) (VM 213) | Shop | `ssh mint-apps docker ps` |
+
 ### Deferred (Out of Scope for Foundational Core)
 
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
@@ -273,7 +281,6 @@ curl -s http://automation-stack:5678/healthz
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
 | Home Assistant | `ha` | 100.67.120.1 | Home Automation | Home | `curl -s http://ha:8123/api/` |
-| Vaultwarden (rollback) | `vault` | 100.93.142.63 | Passwords | Home | `curl -s http://vault:8080/` |
 | Synology NAS | `nas` | 100.102.199.111 | Storage | Home | `ping nas` |
 | Pi-hole home | `pihole-home` | 100.105.148.96 | Home DNS filtering | Home | `curl -s http://pihole-home/admin/` |
 
@@ -419,6 +426,7 @@ Use the loop ledger instead:
 | `immich` (home) | 100.83.160.109 | Pending | Migrating to shop `immich-1` |
 | `media-stack` | 100.117.1.53 | 2026-02-10 | VM 201 destroyed; split to download-stack (209) + streaming-stack (210) |
 | `download-home` | 100.125.138.110 | 2026-02-21 | LXC 103 soft-decommissioned; removed from active access expectations. |
+| `vault` | 100.93.142.63 | 2026-02-16 | VM 102 decommissioned; superseded by vaultwarden on infra-core. |
 
 ---
 

@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-06
+last_verified: 2026-02-21
 verification_method: manual
 scope: ssot-update-workflow
 github_issue: "#625"
