@@ -101,6 +101,14 @@ knobs:
     wired_in: null
     validates_via: null
     gap: "Not yet wired"
+  multi_agent_writes_when_multi_session:
+    description: "Multi-session write policy"
+    enforcement_point: cap.sh
+    enforcement_mode: runtime
+    wired: false
+    wired_in: null
+    validates_via: null
+    gap: "Not yet wired"
 enforcement:
   gate: D94
 EOF
@@ -134,10 +142,10 @@ cat <<'JSON'
   "capability": "policy.runtime.audit",
   "status": "pass",
   "summary": {
-    "total_knobs": 10,
+    "total_knobs": 11,
     "wired_knobs": 4,
-    "unwired_knobs": 6,
-    "coverage_percent": 40
+    "unwired_knobs": 7,
+    "coverage_percent": 36
   },
   "history": {
     "available": true,
@@ -209,7 +217,7 @@ test_missing_contract() {
 test_missing_knob() {
   local mock
   mock="$(setup_mock)"
-  sed -i.bak '/^  multi_agent_writes:/,/gap:/d' "$mock/ops/bindings/policy.runtime.contract.yaml"
+  sed -i.bak '/^  multi_agent_writes_when_multi_session:/,/gap:/d' "$mock/ops/bindings/policy.runtime.contract.yaml"
   if SPINE_ROOT="$mock" bash "$GATE" >/dev/null 2>&1; then
     fail "missing knob should fail D94"
   else

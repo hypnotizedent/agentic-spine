@@ -11,7 +11,7 @@ scope: aof-policy-runtime-enforcement
 
 ## Policy Knobs
 
-AOF defines 10 policy knobs in `ops/bindings/policy.presets.yaml`. Each knob must have a runtime enforcement point.
+AOF defines 11 policy knobs in `ops/bindings/policy.presets.yaml`. Each knob must have a runtime enforcement point.
 
 | Knob | Enforcement Point | Wired | Step |
 |------|------------------|-------|-------|
@@ -25,6 +25,7 @@ AOF defines 10 policy knobs in `ops/bindings/policy.presets.yaml`. Each knob mus
 | `receipt_retention_days` | evidence.export.plan | Yes | B |
 | `commit_sign_required` | pre-commit hook | Yes | B |
 | `multi_agent_writes` | cap.sh + pre-commit hook | Yes | B |
+| `multi_agent_writes_when_multi_session` | cap.sh session-count guard | Yes | B |
 
 ## Step A (Complete)
 
@@ -35,13 +36,14 @@ AOF defines 10 policy knobs in `ops/bindings/policy.presets.yaml`. Each knob mus
 
 ## Step B (Complete)
 
-6 remaining knobs wired through the same `resolve-policy.sh` resolver:
+7 remaining knobs wired through the same `resolve-policy.sh` resolver:
 - `stale_ssot_max_days` → D58 `SSOT_FRESHNESS_DAYS` threshold override
 - `gap_auto_claim` → `gaps-file` auto-claims after filing when `true`
 - `proposal_required` → `cap.sh` blocks mutating caps when `true`
 - `receipt_retention_days` → `evidence-export-plan` overrides session receipt retention
 - `commit_sign_required` → `.githooks/pre-commit` blocks unsigned commits when `true`
 - `multi_agent_writes` → `cap.sh` + `.githooks/pre-commit` blocks direct writes when `proposal-only`
+- `multi_agent_writes_when_multi_session` → `cap.sh` applies stricter write policy when active session count is greater than 1
 
 ## Enforcement
 

@@ -13,6 +13,7 @@ set -euo pipefail
 #   T7: receipt_retention_days → evidence.export.plan uses policy value
 #   T8: commit_sign_required=true → pre-commit blocks unsigned commits
 #   T9: multi_agent_writes=proposal-only → pre-commit blocks main commits
+#   T10: multi_agent_writes_when_multi_session → cap.sh uses session-count override
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
@@ -182,6 +183,25 @@ echo "T9: multi_agent_writes=proposal-only blocks main in pre-commit"
     exit 1
   }
 ) && pass "multi_agent_writes blocks main in pre-commit" || fail "multi_agent_writes blocks main in pre-commit"
+
+# ── T10: multi_agent_writes_when_multi_session → cap.sh session override ──
+echo ""
+echo "T10: multi_agent_writes_when_multi_session is enforced in cap.sh"
+(
+  grep -q 'RESOLVED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION' "$ROOT/ops/commands/cap.sh" || {
+    echo "  FAIL: cap.sh does not check RESOLVED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION" >&2
+    exit 1
+  }
+  unset SPINE_POLICY_PRESET SPINE_TENANT_PROFILE
+  SP="$ROOT"
+  export SP
+  source "$ROOT/ops/lib/resolve-policy.sh"
+  resolve_policy_knobs
+  [[ "$RESOLVED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION" == "proposal-only" ]] || {
+    echo "  FAIL: balanced multi_agent_writes_when_multi_session=$RESOLVED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION expected=proposal-only" >&2
+    exit 1
+  }
+) && pass "multi_agent_writes_when_multi_session enforced" || fail "multi_agent_writes_when_multi_session enforced"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

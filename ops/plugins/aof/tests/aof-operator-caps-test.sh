@@ -93,13 +93,13 @@ test_policy_shows_all_knobs() {
   local output
   output="$(bash "$SP/ops/plugins/aof/bin/aof-policy-show.sh" 2>&1)"
   local missing=0
-  for knob in drift_gate_mode warn_policy approval_default session_closeout_sla_hours stale_ssot_max_days gap_auto_claim proposal_required receipt_retention_days commit_sign_required multi_agent_writes; do
+  for knob in drift_gate_mode warn_policy approval_default session_closeout_sla_hours stale_ssot_max_days gap_auto_claim proposal_required receipt_retention_days commit_sign_required multi_agent_writes multi_agent_writes_when_multi_session; do
     if ! echo "$output" | grep -q "$knob:"; then
       missing=$((missing + 1))
     fi
   done
   if [[ "$missing" -eq 0 ]]; then
-    pass "aof-policy-show shows all 10 knobs"
+    pass "aof-policy-show shows all 11 knobs"
   else
     fail "aof-policy-show missing $missing knobs"
   fi

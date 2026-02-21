@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TRIAGE: Policy runtime contract missing or incomplete — check ops/bindings/policy.runtime.contract.yaml
 # D94: policy-runtime-enforcement-lock
-# Enforces: policy runtime contract binding exists with all 10 knobs declared and enforcement status
+# Enforces: policy runtime contract binding exists with all 11 knobs declared and enforcement status
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -31,7 +31,7 @@ else
   err "version field missing from contract"
 fi
 
-# ── Check 3: All 10 policy knobs declared ──
+# ── Check 3: All 11 policy knobs declared ──
 REQUIRED_KNOBS=(
   drift_gate_mode
   approval_default
@@ -43,6 +43,7 @@ REQUIRED_KNOBS=(
   receipt_retention_days
   commit_sign_required
   multi_agent_writes
+  multi_agent_writes_when_multi_session
 )
 for knob in "${REQUIRED_KNOBS[@]}"; do
   if grep -q "^  ${knob}:" "$CONTRACT"; then
@@ -125,8 +126,8 @@ if [[ -x "$AUDIT_SCRIPT" ]]; then
       err "policy.runtime.audit did not report pass status"
     fi
 
-    if jq -e '.summary.total_knobs == 10' >/dev/null <<<"$audit_json"; then
-      ok "policy.runtime.audit reports 10 knobs"
+    if jq -e '.summary.total_knobs == 11' >/dev/null <<<"$audit_json"; then
+      ok "policy.runtime.audit reports 11 knobs"
     else
       err "policy.runtime.audit knob summary mismatch"
     fi

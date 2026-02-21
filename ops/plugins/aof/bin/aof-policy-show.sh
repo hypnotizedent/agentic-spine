@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# aof-policy-show — Show current policy preset with all 10 knob values.
+# aof-policy-show — Show current policy preset with all 11 knob values.
 set -euo pipefail
 
 SP="${SPINE_ROOT:-${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}}"
@@ -35,6 +35,7 @@ proposal_required="${RESOLVED_PROPOSAL_REQUIRED:-false}"
 receipt_retention_days="${RESOLVED_RECEIPT_RETENTION_DAYS:-90}"
 commit_sign_required="${RESOLVED_COMMIT_SIGN_REQUIRED:-false}"
 multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES:-direct}"
+multi_agent_writes_when_multi_session="${RESOLVED_MULTI_AGENT_WRITES_WHEN_MULTI_SESSION:-proposal-only}"
 
 discovery_source="default"
 discovery_detail="balanced"
@@ -74,6 +75,7 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --arg receipt_retention_days "$receipt_retention_days" \
     --arg commit_sign_required "$commit_sign_required" \
     --arg multi_agent_writes "$multi_agent_writes" \
+    --arg multi_agent_writes_when_multi_session "$multi_agent_writes_when_multi_session" \
     --arg discovery_source "$discovery_source" \
     --arg discovery_detail "$discovery_detail" \
     --argjson available_presets "$presets_json" \
@@ -94,7 +96,8 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
           proposal_required: $proposal_required,
           receipt_retention_days: $receipt_retention_days,
           commit_sign_required: $commit_sign_required,
-          multi_agent_writes: $multi_agent_writes
+          multi_agent_writes: $multi_agent_writes,
+          multi_agent_writes_when_multi_session: $multi_agent_writes_when_multi_session
         },
         discovery: {
           source: $discovery_source,
@@ -123,6 +126,7 @@ echo "  proposal_required:        $proposal_required"
 echo "  receipt_retention_days:   $receipt_retention_days"
 echo "  commit_sign_required:     $commit_sign_required"
 echo "  multi_agent_writes:       $multi_agent_writes"
+echo "  multi_agent_writes_when_multi_session: $multi_agent_writes_when_multi_session"
 echo ""
 echo "Discovery chain:"
 if [[ "$discovery_source" == "env.SPINE_POLICY_PRESET" ]]; then

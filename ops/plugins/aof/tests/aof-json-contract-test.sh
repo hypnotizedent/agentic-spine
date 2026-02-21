@@ -76,7 +76,7 @@ test_policy_data_keys() {
   run_json "$SP/ops/plugins/aof/bin/aof-policy-show.sh"
   if echo "$JSON_OUT" | jq -e '
       .data | has("active_preset") and has("knobs") and has("discovery") and has("available_presets") and
-      (.knobs | has("drift_gate_mode") and has("warn_policy") and has("approval_default") and has("session_closeout_sla_hours") and has("stale_ssot_max_days") and has("gap_auto_claim") and has("proposal_required") and has("receipt_retention_days") and has("commit_sign_required") and has("multi_agent_writes"))
+      (.knobs | has("drift_gate_mode") and has("warn_policy") and has("approval_default") and has("session_closeout_sla_hours") and has("stale_ssot_max_days") and has("gap_auto_claim") and has("proposal_required") and has("receipt_retention_days") and has("commit_sign_required") and has("multi_agent_writes") and has("multi_agent_writes_when_multi_session"))
     ' >/dev/null 2>&1; then
     pass "aof.policy.show data keys present"
   else
