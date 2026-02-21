@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SHOP-PIHOLE-UDR6-DNS-NORMALIZATION-20260221-20260221
 created: 2026-02-21
-status: active
+status: closed
 owner: "@ronny"
 scope: shop
 priority: high
