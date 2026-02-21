@@ -26,6 +26,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[4]
 SCHEMA_VERSION = "1.0"
+VERIFY_PASS_STATUSES = {"done", "pass", "passed", "ok", "healthy", "success"}
+VERIFY_FAIL_STATUSES = {"failed", "fail", "error", "incident", "critical"}
 
 
 def utc_now() -> str:
@@ -266,25 +268,110 @@ def collect_handoff_status() -> dict[str, Any]:
     }
 
 
+def normalize_run_status(value: Any) -> str:
+    status = str(value or "").strip().lower()
+    if status in VERIFY_PASS_STATUSES:
+        return "done"
+    if status in VERIFY_FAIL_STATUSES:
+        return "failed"
+    return status or "unknown"
+
+
+def summarize_verify_health(events: list[dict[str, Any]]) -> dict[str, Any]:
+    verify_events = [e for e in events if str(e.get("capability", "")).startswith("verify.")]
+    verify_failed = [e for e in verify_events if normalize_run_status(e.get("status", "")) == "failed"]
+
+    latest_by_capability: dict[str, dict[str, Any]] = {}
+    for event in verify_events:
+        capability = str(event.get("capability", "")).strip()
+        if capability and capability not in latest_by_capability:
+            latest_by_capability[capability] = event
+
+    current_failed_caps: list[dict[str, str]] = []
+    for capability, event in latest_by_capability.items():
+        normalized = normalize_run_status(event.get("status", ""))
+        if normalized != "failed":
+            continue
+        current_failed_caps.append(
+            {
+                "capability": capability,
+                "created_at": str(event.get("created_at", "")),
+                "status": str(event.get("status", "")),
+                "summary": str(event.get("summary", "")),
+            }
+        )
+    current_failed_caps.sort(key=lambda row: (row.get("created_at", ""), row.get("capability", "")), reverse=True)
+
+    latest_verify = verify_events[0] if verify_events else {}
+    core_latest = next((e for e in verify_events if str(e.get("capability", "")) == "verify.core.run"), {})
+    core_latest_status = normalize_run_status(core_latest.get("status", "")) if core_latest else "unknown"
+
+    return {
+        "verify_total_runs": len(verify_events),
+        "verify_failed_runs": len(verify_failed),
+        "verify_current_failed_runs": len(current_failed_caps),
+        "verify_current_failed_capabilities": current_failed_caps,
+        "verify_latest_status": normalize_run_status(latest_verify.get("status", "")) if latest_verify else "unknown",
+        "verify_latest_capability": str(latest_verify.get("capability", "")) if latest_verify else "",
+        "verify_latest_created_at": str(latest_verify.get("created_at", "")) if latest_verify else "",
+        "core_verify_latest_status": core_latest_status,
+        "core_verify_latest_created_at": str(core_latest.get("created_at", "")) if core_latest else "",
+        "core_verify_needs_attention": core_latest_status == "failed",
+    }
+
+
 def collect_timeline(window_hours: int) -> dict[str, Any]:
     script = ROOT / "ops/plugins/evidence/bin/spine-timeline-query"
     if not script.exists():
-        return {"event_count": 0, "verify_total_runs": 0, "verify_failed_runs": 0, "recent_failures": []}
+        return {
+            "event_count": 0,
+            "verify_total_runs": 0,
+            "verify_failed_runs": 0,
+            "verify_current_failed_runs": 0,
+            "verify_current_failed_capabilities": [],
+            "verify_latest_status": "unknown",
+            "verify_latest_capability": "",
+            "verify_latest_created_at": "",
+            "core_verify_latest_status": "unknown",
+            "core_verify_latest_created_at": "",
+            "core_verify_needs_attention": False,
+            "recent_failures": [],
+        }
     rc, payload = parse_json_output(script, ["--since", f"{window_hours}h", "--limit", "200", "--format", "json"])
     if rc != 0 and "events" not in payload:
-        return {"event_count": 0, "verify_total_runs": 0, "verify_failed_runs": 0, "recent_failures": []}
+        return {
+            "event_count": 0,
+            "verify_total_runs": 0,
+            "verify_failed_runs": 0,
+            "verify_current_failed_runs": 0,
+            "verify_current_failed_capabilities": [],
+            "verify_latest_status": "unknown",
+            "verify_latest_capability": "",
+            "verify_latest_created_at": "",
+            "core_verify_latest_status": "unknown",
+            "core_verify_latest_created_at": "",
+            "core_verify_needs_attention": False,
+            "recent_failures": [],
+        }
 
     events = payload.get("events", []) if isinstance(payload, dict) else []
-    verify_events = [e for e in events if str(e.get("capability", "")).startswith("verify.")]
-    verify_failed = [e for e in verify_events if str(e.get("status", "")).lower() == "failed"]
+    verify_health = summarize_verify_health(events)
     all_failed = [e for e in events if str(e.get("status", "")).lower() == "failed"]
     cap_counts = Counter(str(e.get("capability", "")) for e in events if e.get("capability"))
 
     return {
         "window_hours": window_hours,
         "event_count": len(events),
-        "verify_total_runs": len(verify_events),
-        "verify_failed_runs": len(verify_failed),
+        "verify_total_runs": verify_health.get("verify_total_runs", 0),
+        "verify_failed_runs": verify_health.get("verify_failed_runs", 0),
+        "verify_current_failed_runs": verify_health.get("verify_current_failed_runs", 0),
+        "verify_current_failed_capabilities": verify_health.get("verify_current_failed_capabilities", []),
+        "verify_latest_status": verify_health.get("verify_latest_status", "unknown"),
+        "verify_latest_capability": verify_health.get("verify_latest_capability", ""),
+        "verify_latest_created_at": verify_health.get("verify_latest_created_at", ""),
+        "core_verify_latest_status": verify_health.get("core_verify_latest_status", "unknown"),
+        "core_verify_latest_created_at": verify_health.get("core_verify_latest_created_at", ""),
+        "core_verify_needs_attention": bool(verify_health.get("core_verify_needs_attention", False)),
         "recent_failures": [
             {
                 "created_at": e.get("created_at", ""),
@@ -337,6 +424,8 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         "active_handoffs": handoffs.get("active", 0),
         "timeline_events": timeline.get("event_count", 0),
         "verify_failed_runs": timeline.get("verify_failed_runs", 0),
+        "verify_current_failed_runs": timeline.get("verify_current_failed_runs", 0),
+        "core_verify_latest_status": timeline.get("core_verify_latest_status", "unknown"),
         "graph_nodes": graph.get("node_count", 0),
         "graph_edges": graph.get("edge_count", 0),
     }
@@ -348,7 +437,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         summary["open_loops"] > 0
         or summary["open_gaps"] > 0
         or summary["pending_proposals"] > 0
-        or summary["verify_failed_runs"] > 0
+        or summary["verify_current_failed_runs"] > 0
         or str(calendar.get("status", "")).lower() in {"warn", "error"}
     ):
         status = "warn"
@@ -464,12 +553,14 @@ def build_plan_payload(tick_payload: dict[str, Any]) -> dict[str, Any]:
             route_target={"type": "capability", "capability": "stability.control.snapshot", "args": []},
         )
 
-    if timeline.get("verify_failed_runs", 0) > 0:
+    if bool(timeline.get("core_verify_needs_attention", False)):
+        created_at = str(timeline.get("core_verify_latest_created_at", "")).strip()
+        when = f" at {created_at}" if created_at else ""
         add_action(
             action_id="A40-core-verify-rerun",
             priority="P1",
             title="Re-run core verify lane",
-            reason=f"{timeline.get('verify_failed_runs', 0)} verify run(s) failed in recent timeline window.",
+            reason=f"Latest verify.core.run status is failed{when}.",
             route_target={"type": "capability", "capability": "verify.core.run", "args": []},
         )
 
@@ -954,7 +1045,9 @@ def render_tick_markdown(payload: dict[str, Any]) -> str:
         f"- Pending Proposals: {summary.get('pending_proposals', 0)}",
         f"- Active Alerts: {summary.get('active_alerts', 0)}",
         f"- Active Handoffs: {summary.get('active_handoffs', 0)}",
-        f"- Verify Failed Runs ({data.get('window_hours', 24)}h): {summary.get('verify_failed_runs', 0)}",
+        f"- Verify Failed Runs ({data.get('window_hours', 24)}h, historical): {summary.get('verify_failed_runs', 0)}",
+        f"- Verify Current Failed Runs: {summary.get('verify_current_failed_runs', 0)}",
+        f"- Core Verify Latest Status: {summary.get('core_verify_latest_status', 'unknown')}",
         f"- Graph Nodes: {summary.get('graph_nodes', 0)}",
         f"- Graph Edges: {summary.get('graph_edges', 0)}",
         "",

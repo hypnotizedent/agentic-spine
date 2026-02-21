@@ -22,6 +22,9 @@ scope: spine-control-loop
 ### `spine.control.tick`
 
 - Aggregates loops, gaps, proposal health, calendar status, alerting status, handoff status, and timeline verify signals.
+- Verify health is denoised:
+  - `verify_failed_runs` remains a historical count for recent timeline context.
+  - Active warning/urgency uses current unresolved verify state (`verify_current_failed_runs`) plus latest core verify status.
 - Emits deterministic envelope:
   - `capability`
   - `schema_version`
