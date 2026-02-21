@@ -90,17 +90,23 @@ MAX_TIME_SEC="$(yq -r '.timeouts.max_time_sec // 8' "$CONTRACT")"
 LATENCY_WARN_MS="$(yq -r '.budgets.latency_warn_ms // 3000' "$CONTRACT")"
 LATENCY_INCIDENT_MS="$(yq -r '.budgets.latency_incident_ms // 7000' "$CONTRACT")"
 MAX_FAILED_REQUIRED="$(yq -r '.budgets.max_failed_required // 0' "$CONTRACT")"
-WARN_FAILED_OPTIONAL="$(yq -r '.budgets.warn_failed_optional // 1' "$CONTRACT")"
+OPTIONAL_WARN_THRESHOLD="$(yq -r '.budgets.optional_warn_threshold // .budgets.warn_failed_optional // 1' "$CONTRACT")"
+OPTIONAL_WARN_PROMOTES_STATUS="$(yq -r '.budgets.optional_warn_promotes_status // false' "$CONTRACT")"
 SCHEMA_VERSION="$(yq -r '.reporting.envelope_schema_version // "1.0"' "$CONTRACT")"
 
 for value in \
   "$CONNECT_TIMEOUT_SEC" "$MAX_TIME_SEC" "$LATENCY_WARN_MS" "$LATENCY_INCIDENT_MS" \
-  "$MAX_FAILED_REQUIRED" "$WARN_FAILED_OPTIONAL"; do
+  "$MAX_FAILED_REQUIRED" "$OPTIONAL_WARN_THRESHOLD"; do
   [[ "$value" =~ ^[0-9]+$ ]] || {
     echo "STOP: contract expects integer timeout/budget fields" >&2
     exit 2
   }
 done
+
+if [[ "$OPTIONAL_WARN_PROMOTES_STATUS" != "true" && "$OPTIONAL_WARN_PROMOTES_STATUS" != "false" ]]; then
+  echo "STOP: budgets.optional_warn_promotes_status must be boolean true/false" >&2
+  exit 2
+fi
 
 if [[ "$LATENCY_WARN_MS" -gt "$LATENCY_INCIDENT_MS" ]]; then
   echo "STOP: latency_warn_ms cannot exceed latency_incident_ms" >&2
@@ -313,11 +319,11 @@ else
   fi
 fi
 
-if [[ "$optional_warn" -ge "$WARN_FAILED_OPTIONAL" && "$WARN_FAILED_OPTIONAL" -gt 0 ]]; then
+if [[ "$OPTIONAL_WARN_PROMOTES_STATUS" == "true" && "$optional_warn" -ge "$OPTIONAL_WARN_THRESHOLD" && "$OPTIONAL_WARN_THRESHOLD" -gt 0 ]]; then
   overall_status="$(promote_status "$overall_status" "WARN")"
 fi
 
 echo
-echo "summary: $overall_status required_ok=${required_ok}/${required_total} required_warn=$required_warn required_fail=$required_fail optional_ok=${optional_ok}/${optional_total} optional_warn=$optional_warn"
+echo "summary: $overall_status required_ok=${required_ok}/${required_total} required_warn=$required_warn required_fail=$required_fail optional_ok=${optional_ok}/${optional_total} optional_warn=$optional_warn optional_warn_promotes_status=$OPTIONAL_WARN_PROMOTES_STATUS"
 echo "status: $overall_status"
 exit 0

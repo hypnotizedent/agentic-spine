@@ -492,6 +492,7 @@ for domain in "${DOMAINS[@]}"; do
 
   mapfile -t probes < <(yq -r ".probe_capabilities.\"$domain\"[]?" "$CONTRACT")
   mapfile -t latency_exemptions < <(yq -r ".probe_latency_exemptions.\"$domain\"[]?" "$CONTRACT")
+  mapfile -t warn_exemptions < <(yq -r ".probe_warn_exemptions.\"$domain\"[]?" "$CONTRACT")
   domain_severity="pass"
   domain_note=""
   domain_probe_incidents=0
@@ -505,12 +506,21 @@ for domain in "${DOMAINS[@]}"; do
 
   for cap in "${probes[@]}"; do
     apply_duration_budget="true"
+    apply_warn_marker="true"
     for exemption in "${latency_exemptions[@]}"; do
       if [[ "$cap" == "$exemption" ]]; then
         apply_duration_budget="false"
         break
       fi
     done
+    if [[ "$domain_mode" == "maintenance" ]]; then
+      for exemption in "${warn_exemptions[@]}"; do
+        if [[ "$cap" == "$exemption" ]]; then
+          apply_warn_marker="false"
+          break
+        fi
+      done
+    fi
 
     run_probe "$cap"
     probe_status="pass"
@@ -554,7 +564,7 @@ for domain in "${DOMAINS[@]}"; do
       probe_detail="$probe_detail; pid_file_missing=true"
     fi
 
-    if printf '%s\n' "$PROBE_DETAIL" | grep -qiE 'WARN'; then
+    if [[ "$apply_warn_marker" == "true" ]] && printf '%s\n' "$PROBE_DETAIL" | grep -qiE 'WARN'; then
       if [[ "$probe_status" == "pass" ]]; then
         probe_status="warn"
       fi
