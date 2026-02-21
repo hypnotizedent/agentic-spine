@@ -1,0 +1,695 @@
+#!/usr/bin/env python3
+"""mailroom-task-worker
+
+Governed autonomous worker lane:
+- Runs `spine.control.cycle` on a bounded cadence.
+- Consumes queued `mailroom.task.*` lifecycle tasks for supported route targets.
+- Executes task actions only through governed capabilities (receipt-linked).
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
+WORKER_CONTRACT = Path(
+    os.environ.get("MAILROOM_TASK_WORKER_CONTRACT", str(ROOT / "ops/bindings/mailroom.task.worker.contract.yaml"))
+)
+
+_SHUTDOWN = False
+_CAP_APPROVALS: dict[str, str] | None = None
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_yaml(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except Exception:
+        return default
+    return default if data is None else data
+
+
+def resolve_runtime_paths() -> dict[str, Path]:
+    contract = load_yaml(RUNTIME_CONTRACT, {})
+    runtime_active = bool(contract.get("active"))
+    runtime_root = str(contract.get("runtime_root", "")).strip()
+
+    inbox = os.environ.get("SPINE_INBOX")
+    outbox = os.environ.get("SPINE_OUTBOX")
+    state = os.environ.get("SPINE_STATE")
+    logs = os.environ.get("SPINE_LOGS")
+
+    if runtime_active and runtime_root:
+        inbox = inbox or f"{runtime_root}/inbox"
+        outbox = outbox or f"{runtime_root}/outbox"
+        state = state or f"{runtime_root}/state"
+        logs = logs or f"{runtime_root}/logs"
+
+    inbox = inbox or str(ROOT / "mailroom/inbox")
+    outbox = outbox or str(ROOT / "mailroom/outbox")
+    state = state or str(ROOT / "mailroom/state")
+    logs = logs or str(ROOT / "mailroom/logs")
+
+    return {
+        "inbox": Path(inbox),
+        "outbox": Path(outbox),
+        "state": Path(state),
+        "logs": Path(logs),
+    }
+
+
+def resolve_path(base: Path, raw: str) -> Path:
+    if not raw:
+        return base
+    p = Path(raw)
+    if p.is_absolute():
+        return p
+    return base / p
+
+
+def load_capability_approvals() -> dict[str, str]:
+    global _CAP_APPROVALS
+    if _CAP_APPROVALS is not None:
+        return _CAP_APPROVALS
+    caps = load_yaml(ROOT / "ops/capabilities.yaml", {}).get("capabilities", {})
+    out: dict[str, str] = {}
+    if isinstance(caps, dict):
+        for name, body in caps.items():
+            if not isinstance(body, dict):
+                continue
+            out[str(name)] = str(body.get("approval", "auto")).strip() or "auto"
+    _CAP_APPROVALS = out
+    return out
+
+
+def is_delimiter(line: str) -> bool:
+    s = (line or "").strip()
+    if len(s) < 8:
+        return False
+    return all(ch in {"─", "-"} for ch in s)
+
+
+def extract_cap_output(stdout: str) -> str:
+    lines = stdout.splitlines()
+    executing_idx = -1
+    for i, raw in enumerate(lines):
+        if raw.strip().lower() == "executing...":
+            executing_idx = i
+            break
+    if executing_idx < 0:
+        return stdout.strip()
+
+    start_idx = -1
+    for i in range(executing_idx + 1, len(lines)):
+        if is_delimiter(lines[i]):
+            start_idx = i + 1
+            break
+    if start_idx < 0:
+        return stdout.strip()
+
+    end_idx = len(lines)
+    for i in range(start_idx, len(lines)):
+        if is_delimiter(lines[i]):
+            end_idx = i
+            break
+    return "\n".join(lines[start_idx:end_idx]).strip()
+
+
+def parse_first_json(text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"\{", text):
+        fragment = text[m.start() :]
+        try:
+            obj, _ = dec.raw_decode(fragment)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def extract_run_key(text: str) -> str:
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s.startswith("Run Key:"):
+            continue
+        val = s.split("Run Key:", 1)[1].strip()
+        if val:
+            return val.split()[0]
+    return ""
+
+
+def extract_receipt_path(text: str) -> str:
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s.startswith("Receipt:"):
+            continue
+        val = s.split("Receipt:", 1)[1].strip()
+        if val:
+            return val.split()[0]
+    return ""
+
+
+def run_ops_cap(capability: str, args: list[str], *, confirm: bool = False, timeout: int = 900) -> dict[str, Any]:
+    cmd = [str(ROOT / "bin/ops"), "cap", "run", capability] + args
+    stdin_text = "yes\n" if confirm else None
+    proc = subprocess.run(
+        cmd,
+        cwd=str(ROOT),
+        input=stdin_text,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+    )
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    combined = f"{stdout}\n{stderr}".strip()
+    out_block = extract_cap_output(stdout)
+    payload = parse_first_json(out_block) if out_block else None
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "output": out_block,
+        "payload": payload,
+        "run_key": extract_run_key(combined),
+        "receipt": extract_receipt_path(combined),
+        "command": cmd,
+    }
+
+
+def safe_reason(text: str, limit: int = 220) -> str:
+    clean = re.sub(r"\s+", " ", (text or "").strip())
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 3] + "..."
+
+
+def parse_payload(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if raw is None:
+        return {}
+    text = str(raw).strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(parsed, dict):
+        return parsed
+    return {}
+
+
+def normalize_args(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    if isinstance(raw, str):
+        return [raw] if raw.strip() else []
+    return [str(raw)]
+
+
+def pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+class TaskWorker:
+    def __init__(self, *, worker_id: str | None = None, poll_override: int | None = None, max_claims_override: int | None = None) -> None:
+        self.runtime_paths = resolve_runtime_paths()
+        self.contract = load_yaml(WORKER_CONTRACT, {})
+        self.runtime_cfg = self.contract.get("runtime", {}) if isinstance(self.contract, dict) else {}
+        self.cycle_cfg = self.contract.get("control_cycle", {}) if isinstance(self.contract, dict) else {}
+        self.task_cfg = self.contract.get("task_execution", {}) if isinstance(self.contract, dict) else {}
+        self.claim_cfg = self.task_cfg.get("claim_policy", {}) if isinstance(self.task_cfg, dict) else {}
+
+        state_root = self.runtime_paths["state"]
+        logs_root = self.runtime_paths["logs"]
+        self.pid_file = resolve_path(state_root, str(self.runtime_cfg.get("pid_file", "mailroom-task-worker.pid")))
+        self.log_file = resolve_path(logs_root, str(self.runtime_cfg.get("log_file", "mailroom-task-worker.log")))
+        self.status_file = resolve_path(state_root, str(self.runtime_cfg.get("status_file", "mailroom-task-worker.status.json")))
+
+        self.task_root = state_root / "agent-tasks"
+        self.queued_dir = self.task_root / "queued"
+        self.running_dir = self.task_root / "running"
+        self.done_dir = self.task_root / "done"
+        self.failed_dir = self.task_root / "failed"
+
+        self.worker_id = worker_id or str(self.claim_cfg.get("worker_id", "spine-control-worker"))
+        self.poll_seconds = int(poll_override if poll_override is not None else self.runtime_cfg.get("poll_seconds", 90))
+        self.error_backoff_seconds = int(self.runtime_cfg.get("error_backoff_seconds", 20))
+        self.max_claims_per_tick = int(max_claims_override if max_claims_override is not None else self.task_cfg.get("max_claims_per_tick", 3))
+        self.claim_all = bool(self.claim_cfg.get("claim_all", True))
+        self.claim_unassigned = bool(self.claim_cfg.get("claim_unassigned", True))
+        self.allow_unhealthy_claims = bool(self.claim_cfg.get("allow_unhealthy_claims", False))
+        self.execute_route_targets = {
+            str(x).strip()
+            for x in (self.task_cfg.get("execute_route_targets", []) if isinstance(self.task_cfg, dict) else [])
+            if str(x).strip()
+        } or {"capability"}
+        self.capability_allowlist = {
+            str(x).strip()
+            for x in (self.task_cfg.get("capability_allowlist", []) if isinstance(self.task_cfg, dict) else [])
+            if str(x).strip()
+        }
+        self.manual_caps_require_confirm = bool(self.task_cfg.get("manual_caps_require_confirm", True))
+
+        self._ensure_dirs()
+
+    def _ensure_dirs(self) -> None:
+        self.pid_file.parent.mkdir(parents=True, exist_ok=True)
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        self.status_file.parent.mkdir(parents=True, exist_ok=True)
+        self.queued_dir.mkdir(parents=True, exist_ok=True)
+        self.running_dir.mkdir(parents=True, exist_ok=True)
+        self.done_dir.mkdir(parents=True, exist_ok=True)
+        self.failed_dir.mkdir(parents=True, exist_ok=True)
+
+    def log(self, msg: str) -> None:
+        line = f"[{utc_now()}] {msg}"
+        try:
+            with self.log_file.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+        print(line, flush=True)
+
+    def write_status(self, payload: dict[str, Any]) -> None:
+        body = {
+            "capability": "mailroom.task.worker.status",
+            "schema_version": "1.0",
+            "generated_at": utc_now(),
+            "status": "ok",
+            "data": payload,
+        }
+        self.status_file.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def run_cycle_once(self) -> dict[str, Any]:
+        if not bool(self.cycle_cfg.get("enabled", True)):
+            return {"enabled": False, "status": "skipped"}
+
+        args = [
+            "--window-hours",
+            str(int(self.cycle_cfg.get("window_hours", 24))),
+            "--max-actions",
+            str(int(self.cycle_cfg.get("max_actions", 3))),
+            "--max-priority",
+            str(self.cycle_cfg.get("max_priority", "P1")),
+            "--json",
+        ]
+        if not bool(self.cycle_cfg.get("allow_agent_tools", True)):
+            args.append("--no-agent-tools")
+        if bool(self.cycle_cfg.get("allow_unhealthy_agents", False)):
+            args.append("--allow-unhealthy-agents")
+        if bool(self.cycle_cfg.get("confirm_manual", False)):
+            args.append("--confirm-manual")
+
+        result = run_ops_cap("spine.control.cycle", args, confirm=True, timeout=1200)
+        cycle_status = "ok" if result["ok"] else "failed"
+        if result["ok"]:
+            self.log(
+                "cycle: ok"
+                + (f" run_key={result['run_key']}" if result.get("run_key") else "")
+                + (f" receipt={result['receipt']}" if result.get("receipt") else "")
+            )
+        else:
+            self.log(f"cycle: failed rc={result['exit_code']} reason={safe_reason(result.get('stderr') or result.get('output') or '')}")
+
+        return {
+            "enabled": True,
+            "status": cycle_status,
+            "run_key": result.get("run_key", ""),
+            "receipt": result.get("receipt", ""),
+            "exit_code": result.get("exit_code", 1),
+        }
+
+    def _task_required_agents(self, task: dict[str, Any]) -> list[str]:
+        raw = task.get("required_agents", [])
+        if isinstance(raw, list):
+            return [str(x).strip() for x in raw if str(x).strip()]
+        return []
+
+    def _eligible_for_claim(self, task: dict[str, Any]) -> tuple[bool, str]:
+        route_target = str(task.get("route_target", "")).strip() or "capability"
+        if route_target not in self.execute_route_targets:
+            return False, f"unsupported route_target={route_target}"
+
+        required_agents = self._task_required_agents(task)
+        if self.claim_all:
+            return True, "claim_all=true"
+        if required_agents:
+            if self.worker_id in required_agents:
+                return True, "required_agent_match"
+            return False, f"required_agents={','.join(required_agents)} missing worker_id={self.worker_id}"
+        if self.claim_unassigned:
+            return True, "unassigned_allowed"
+        return False, "task unassigned and claim_unassigned=false"
+
+    def _extract_capability_request(self, task: dict[str, Any]) -> tuple[str, list[str], bool]:
+        payload = parse_payload(task.get("payload"))
+        route_payload = payload.get("route_target") if isinstance(payload.get("route_target"), dict) else {}
+
+        cap = str(payload.get("capability", "")).strip() or str(route_payload.get("capability", "")).strip()
+        args = normalize_args(payload.get("args", route_payload.get("args")))
+        confirm = bool(payload.get("confirm", False))
+        return cap, args, confirm
+
+    def _heartbeat(self, task_id: str, progress: str) -> None:
+        run_ops_cap("mailroom.task.heartbeat", ["--task-id", task_id, "--progress", progress, "--json"], confirm=False, timeout=180)
+
+    def _complete(self, task_id: str, result_text: str) -> None:
+        run_ops_cap("mailroom.task.complete", ["--task-id", task_id, "--result", safe_reason(result_text), "--json"], confirm=False, timeout=180)
+
+    def _fail(self, task_id: str, reason: str) -> None:
+        run_ops_cap("mailroom.task.fail", ["--task-id", task_id, "--reason", safe_reason(reason), "--json"], confirm=False, timeout=180)
+
+    def _execute_capability_task(self, task_id: str, task: dict[str, Any]) -> tuple[bool, str]:
+        capability, cap_args, payload_confirm = self._extract_capability_request(task)
+        if not capability:
+            return False, "task payload missing capability"
+
+        if self.capability_allowlist and capability not in self.capability_allowlist:
+            return False, f"capability_not_allowlisted:{capability}"
+
+        approvals = load_capability_approvals()
+        approval = approvals.get(capability, "auto")
+        if approval == "manual" and self.manual_caps_require_confirm and not payload_confirm:
+            return False, f"manual_confirmation_required:{capability}"
+
+        self._heartbeat(task_id, f"executing capability={capability}")
+        run = run_ops_cap(capability, cap_args, confirm=(approval == "manual" and payload_confirm), timeout=1200)
+        if not run["ok"]:
+            detail = run.get("stderr") or run.get("output") or f"capability failed rc={run.get('exit_code', 1)}"
+            return False, detail
+
+        run_key = run.get("run_key", "")
+        receipt = run.get("receipt", "")
+        parts = [f"capability={capability}"]
+        if run_key:
+            parts.append(f"run_key={run_key}")
+        if receipt:
+            parts.append(f"receipt={receipt}")
+        return True, " ".join(parts)
+
+    def consume_tasks_once(self) -> dict[str, Any]:
+        if not bool(self.task_cfg.get("enabled", True)):
+            return {"enabled": False, "claimed": 0, "completed": 0, "failed": 0, "skipped": 0}
+
+        files = sorted(
+            [p for p in self.queued_dir.glob("*.yaml") if p.is_file()],
+            key=lambda p: p.stat().st_mtime,
+        )
+
+        claimed = 0
+        completed = 0
+        failed = 0
+        skipped = 0
+
+        for path in files:
+            if claimed >= max(1, self.max_claims_per_tick):
+                break
+            task = load_yaml(path, {})
+            if not isinstance(task, dict):
+                skipped += 1
+                continue
+
+            task_id = str(task.get("task_id", "")).strip() or path.stem
+            ok, reason = self._eligible_for_claim(task)
+            if not ok:
+                skipped += 1
+                continue
+
+            claim_args = ["--task-id", task_id, "--worker", self.worker_id, "--json"]
+            if self.allow_unhealthy_claims:
+                claim_args.append("--allow-unhealthy")
+            claim = run_ops_cap("mailroom.task.claim", claim_args, confirm=False, timeout=240)
+            if not claim["ok"]:
+                failed += 1
+                self.log(
+                    f"task {task_id}: claim failed reason={safe_reason(claim.get('stderr') or claim.get('output') or '')}"
+                )
+                continue
+
+            claimed += 1
+            self._heartbeat(task_id, f"claimed by {self.worker_id}")
+            route_target = str(task.get("route_target", "")).strip() or "capability"
+
+            if route_target != "capability":
+                self._fail(task_id, f"unsupported_route_target:{route_target}")
+                failed += 1
+                self.log(f"task {task_id}: failed unsupported route_target={route_target}")
+                continue
+
+            ok_exec, detail = self._execute_capability_task(task_id, task)
+            if ok_exec:
+                self._complete(task_id, detail)
+                completed += 1
+                self.log(f"task {task_id}: completed {detail}")
+            else:
+                self._fail(task_id, detail)
+                failed += 1
+                self.log(f"task {task_id}: failed {safe_reason(detail)}")
+
+        return {
+            "enabled": True,
+            "claimed": claimed,
+            "completed": completed,
+            "failed": failed,
+            "skipped": skipped,
+            "max_claims_per_tick": self.max_claims_per_tick,
+        }
+
+    def run_once(self) -> dict[str, Any]:
+        cycle = self.run_cycle_once()
+        tasks = self.consume_tasks_once()
+        payload = {
+            "worker_id": self.worker_id,
+            "poll_seconds": self.poll_seconds,
+            "cycle": cycle,
+            "tasks": tasks,
+            "paths": {
+                "queued": str(self.queued_dir),
+                "running": str(self.running_dir),
+                "done": str(self.done_dir),
+                "failed": str(self.failed_dir),
+                "pid_file": str(self.pid_file),
+                "log_file": str(self.log_file),
+                "status_file": str(self.status_file),
+            },
+        }
+        self.write_status(payload)
+        return payload
+
+    def run_forever(self) -> int:
+        self._ensure_dirs()
+        if self.pid_file.exists():
+            try:
+                prior = int(self.pid_file.read_text(encoding="utf-8").strip())
+            except Exception:
+                prior = 0
+            if prior > 0 and pid_running(prior):
+                self.log(f"worker already running pid={prior}")
+                return 1
+
+        self.pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        self.log("worker start")
+        try:
+            while not _SHUTDOWN:
+                try:
+                    self.run_once()
+                except Exception as exc:
+                    self.log(f"tick failed: {safe_reason(str(exc), limit=400)}")
+                    time.sleep(max(1, self.error_backoff_seconds))
+                    continue
+
+                slept = 0
+                while slept < max(1, self.poll_seconds):
+                    if _SHUTDOWN:
+                        break
+                    time.sleep(1)
+                    slept += 1
+        finally:
+            try:
+                if self.pid_file.exists():
+                    self.pid_file.unlink()
+            except OSError:
+                pass
+            self.log("worker stop")
+        return 0
+
+    def status(self) -> int:
+        pid = 0
+        if self.pid_file.exists():
+            try:
+                pid = int(self.pid_file.read_text(encoding="utf-8").strip())
+            except Exception:
+                pid = 0
+        running = pid > 0 and pid_running(pid)
+
+        print("mailroom.task.worker")
+        print(f"  contract: {WORKER_CONTRACT}")
+        print(f"  runtime_contract: {RUNTIME_CONTRACT}")
+        print(f"  worker_id: {self.worker_id}")
+        print(f"  status: {'running' if running else 'stopped'}")
+        print(f"  pid: {pid if pid > 0 else '-'}")
+        print(f"  pid_file: {self.pid_file}")
+        print(f"  log_file: {self.log_file}")
+        print(f"  status_file: {self.status_file}")
+        print(f"  queued_dir: {self.queued_dir}")
+        if self.status_file.exists():
+            try:
+                status_payload = json.loads(self.status_file.read_text(encoding="utf-8"))
+                generated_at = status_payload.get("generated_at", "")
+                data = status_payload.get("data", {})
+                tasks = data.get("tasks", {})
+                cycle = data.get("cycle", {})
+                print(f"  last_tick: {generated_at}")
+                print(f"  last_cycle_status: {cycle.get('status', '-')}")
+                print(
+                    "  last_tasks: "
+                    f"claimed={tasks.get('claimed', 0)} "
+                    f"completed={tasks.get('completed', 0)} "
+                    f"failed={tasks.get('failed', 0)} "
+                    f"skipped={tasks.get('skipped', 0)}"
+                )
+            except Exception:
+                print("  last_tick: unreadable")
+        return 0
+
+    def stop(self) -> int:
+        if not self.pid_file.exists():
+            print("mailroom.task.worker: not running")
+            return 0
+        try:
+            pid = int(self.pid_file.read_text(encoding="utf-8").strip())
+        except Exception:
+            pid = 0
+        if pid <= 0 or not pid_running(pid):
+            try:
+                self.pid_file.unlink()
+            except OSError:
+                pass
+            print("mailroom.task.worker: not running (stale pid file removed)")
+            return 0
+
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(30):
+            if not pid_running(pid):
+                break
+            time.sleep(0.2)
+        if pid_running(pid):
+            os.kill(pid, signal.SIGKILL)
+        try:
+            if self.pid_file.exists():
+                self.pid_file.unlink()
+        except OSError:
+            pass
+        print(f"mailroom.task.worker: stopped pid={pid}")
+        return 0
+
+
+def on_signal(_signum: int, _frame: Any) -> None:
+    global _SHUTDOWN
+    _SHUTDOWN = True
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Governed autonomous worker lane for spine.control.cycle and mailroom tasks")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--daemon", action="store_true", help="Start background worker daemon")
+    mode.add_argument("--foreground", action="store_true", help="Run worker loop in foreground")
+    mode.add_argument("--once", action="store_true", help="Run a single tick (cycle + task consume)")
+    mode.add_argument("--status", action="store_true", help="Show worker status")
+    mode.add_argument("--stop", action="store_true", help="Stop worker daemon")
+    p.add_argument("--worker-id", help="Override claim policy worker id")
+    p.add_argument("--poll-seconds", type=int, help="Override poll interval in seconds")
+    p.add_argument("--max-claims-per-tick", type=int, help="Override task max claims per tick")
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    worker = TaskWorker(
+        worker_id=args.worker_id,
+        poll_override=args.poll_seconds,
+        max_claims_override=args.max_claims_per_tick,
+    )
+
+    if args.status:
+        return worker.status()
+    if args.stop:
+        return worker.stop()
+    if args.once:
+        payload = worker.run_once()
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    if args.daemon:
+        if worker.pid_file.exists():
+            try:
+                pid = int(worker.pid_file.read_text(encoding="utf-8").strip())
+            except Exception:
+                pid = 0
+            if pid > 0 and pid_running(pid):
+                print(f"mailroom.task.worker: already running pid={pid}")
+                return 0
+
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--foreground"]
+        if args.worker_id:
+            cmd.extend(["--worker-id", args.worker_id])
+        if args.poll_seconds is not None:
+            cmd.extend(["--poll-seconds", str(args.poll_seconds)])
+        if args.max_claims_per_tick is not None:
+            cmd.extend(["--max-claims-per-tick", str(args.max_claims_per_tick)])
+
+        subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(0.5)
+        return worker.status()
+
+    # default path
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+    if args.foreground:
+        return worker.run_forever()
+    payload = worker.run_once()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

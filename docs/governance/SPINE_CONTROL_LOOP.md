@@ -15,6 +15,7 @@ scope: spine-control-loop
 2. `spine.control.plan` (read-only): produce prioritized next actions and route targets.
 3. `spine.control.execute` (mutating/manual): execute selected capability-backed actions with receipt linkage.
 4. `spine.control.cycle` (mutating/manual): autonomous observe-plan-act pass that can execute capability actions and enqueue delegated agent-tool tasks.
+5. `mailroom.task.worker.*` (governed daemon): continuously runs bounded control cycles and consumes supported queued task lifecycle work.
 
 ## Capability Contract
 
@@ -62,6 +63,22 @@ scope: spine-control-loop
 - Manual capabilities are skipped unless `--confirm-manual` is provided.
 - Delegated agent-tool tasks are health-gated unless `--allow-unhealthy-agents`.
 
+## Autonomous Worker Lane
+
+Worker contract: `ops/bindings/mailroom.task.worker.contract.yaml`
+
+- `mailroom.task.worker.start` starts the governed background worker.
+- `mailroom.task.worker.status` reports daemon state, last tick summary, and runtime paths.
+- `mailroom.task.worker.once` runs one foreground tick (cycle + task consumption).
+- `mailroom.task.worker.stop` stops the worker.
+
+Worker behavior:
+
+1. Runs `spine.control.cycle` on cadence using bounded `max_actions` + `max_priority`.
+2. Consumes queued `mailroom.task.*` tasks for supported route targets.
+3. Executes task actions only through `./bin/ops cap run ...` (receipt-linked).
+4. Applies task capability allowlist + manual-confirm policy from the worker contract.
+
 ## Runtime Path Contract
 
 Artifact paths follow `ops/bindings/mailroom.runtime.contract.yaml`:
@@ -77,4 +94,7 @@ cd /Users/ronnyworks/code/agentic-spine
 ./bin/ops cap run spine.control.plan
 echo "yes" | ./bin/ops cap run spine.control.execute --action-id A01-loop-gap-verify
 echo "yes" | ./bin/ops cap run spine.control.cycle
+./bin/ops cap run mailroom.task.worker.status
+echo "yes" | ./bin/ops cap run mailroom.task.worker.start
+echo "yes" | ./bin/ops cap run mailroom.task.worker.stop
 ```
