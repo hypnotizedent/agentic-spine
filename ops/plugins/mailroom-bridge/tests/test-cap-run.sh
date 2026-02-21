@@ -5,13 +5,17 @@ set -euo pipefail
 #
 # Tests:
 #   T1: Allowlist enforcement — non-listed capability rejected
-#   T2: Allowlist enforcement — listed capability accepted
+#   T2: Allowlist includes expected governed capabilities
 #   T3: Response schema includes required fields
 #   T4: Missing capability field returns 400
 #   T5: Empty allowlist rejects all capabilities
 #   T6: RBAC role enforcement logic exists
 #   T7: Binding declares RBAC roles
 #   T8: RBAC loader constrains roles within allowlist
+#   T9: Manual approval without confirm returns explicit 400 class/code
+#   T10: Manual approval with confirm forwards yes to subprocess stdin
+#   T11: Confirm payload type enforcement exists (boolean only)
+#   T12: /cap/run response includes approval/confirm fields
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 BRIDGE="$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve"
@@ -42,18 +46,19 @@ assert 'FORBIDDEN' in code, 'FORBIDDEN status not used for allowlist rejection'
 
 # ── T2: Listed capability accepted ──
 echo ""
-echo "T2: Allowlist contains expected read-only capabilities"
+echo "T2: Allowlist contains expected governed capabilities"
 (
   # Verify binding has allowlist with expected entries (avoid grep -q in pipe — SIGPIPE + pipefail)
   allowlist="$(yq '.cap_rpc.allowlist[]' "$ROOT/ops/bindings/mailroom.bridge.yaml")"
   echo "$allowlist" | grep "spine.verify" >/dev/null || { echo "  FAIL: spine.verify not in allowlist" >&2; exit 1; }
   echo "$allowlist" | grep "gaps.status" >/dev/null || { echo "  FAIL: gaps.status not in allowlist" >&2; exit 1; }
-  # Verify no mutating capabilities in allowlist
+  echo "$allowlist" | grep "mailroom.task.enqueue" >/dev/null || { echo "  FAIL: mailroom.task.enqueue not in allowlist" >&2; exit 1; }
+  # Verify unmanaged gap mutators are still blocked
   if echo "$allowlist" | grep -E "gaps\.(file|close|claim)" >/dev/null 2>&1; then
     echo "  FAIL: mutating gap capability found in allowlist" >&2
     exit 1
   fi
-) && pass "allowlist contains read-only caps only" || fail "allowlist contains read-only caps only"
+) && pass "allowlist contains expected governed caps" || fail "allowlist contains expected governed caps"
 
 # ── T3: Response schema includes required fields ──
 echo ""
@@ -127,6 +132,55 @@ with open('$BRIDGE') as f:
 assert 'if c in cap_rpc_allowlist' in code, 'RBAC roles not constrained to allowlist'
 " || exit 1
 ) && pass "RBAC constrained to allowlist" || fail "RBAC constrained to allowlist"
+
+# ── T9: Manual confirmation required contract exists ──
+echo ""
+echo "T9: Manual cap without confirm returns 400 + manual_confirmation_required"
+(
+  python3 -c "
+with open('$BRIDGE') as f:
+    code = f.read()
+assert 'manual_confirmation_required' in code, 'manual confirmation error code not found'
+assert 'requires confirm=true for manual approval' in code, 'manual confirmation error message not found'
+assert 'HTTPStatus.BAD_REQUEST' in code, 'BAD_REQUEST status not used for manual confirmation contract'
+" || exit 1
+) && pass "manual confirmation-required contract present" || fail "manual confirmation-required contract present"
+
+# ── T10: confirm=true forwards yes stdin ──
+echo ""
+echo "T10: confirm=true forwards yes to subprocess stdin for manual caps"
+(
+  python3 -c "
+with open('$BRIDGE') as f:
+    code = f.read()
+assert 'stdin_text = b\"yes\\\\n\" if approval == \"manual\" and confirm else None' in code, 'stdin approval forwarding logic not found'
+assert 'input=stdin_text' in code, 'subprocess input forwarding not found'
+" || exit 1
+) && pass "manual stdin forwarding logic present" || fail "manual stdin forwarding logic present"
+
+# ── T11: confirm must be boolean ──
+echo ""
+echo "T11: confirm payload must be boolean"
+(
+  python3 -c "
+with open('$BRIDGE') as f:
+    code = f.read()
+assert 'confirm must be a boolean' in code, 'confirm type validation message not found'
+assert 'invalid_confirm_type' in code, 'confirm type validation error_code not found'
+" || exit 1
+) && pass "confirm boolean validation present" || fail "confirm boolean validation present"
+
+# ── T12: response includes approval + confirm ──
+echo ""
+echo "T12: /cap/run response includes approval + confirm fields"
+(
+  python3 -c "
+with open('$BRIDGE') as f:
+    code = f.read()
+assert '\"approval\"' in code, 'approval field missing from cap-run response'
+assert '\"confirm\"' in code, 'confirm field missing from cap-run response'
+" || exit 1
+) && pass "approval/confirm response fields present" || fail "approval/confirm response fields present"
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

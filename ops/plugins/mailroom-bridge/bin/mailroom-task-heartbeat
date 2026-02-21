@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/plugins/mailroom-bridge/lib/task-common.sh"
+
+CAPABILITY="mailroom.task.heartbeat"
+JSON=0
+DRY_RUN=0
+TASK_ID=""
+PROGRESS=""
+
+usage() {
+  cat <<'USAGE'
+mailroom-task-heartbeat
+
+Usage:
+  mailroom-task-heartbeat --task-id TASK-... [--progress "..."] [--json] [--dry-run]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task-id) TASK_ID="${2:?--task-id requires value}"; shift 2 ;;
+    --progress) PROGRESS="${2:?--progress requires value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+mailroom_task_require jq
+mailroom_task_require yq
+[[ -n "$TASK_ID" ]] || { echo "FAIL: --task-id required" >&2; exit 2; }
+
+running_file="$MAILROOM_TASK_RUNNING/$TASK_ID.yaml"
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  mailroom_task_init_dirs
+  [[ -f "$running_file" ]] || { echo "FAIL: running task not found: $TASK_ID" >&2; exit 1; }
+  now="$(mailroom_task_now)"
+  yq e -i \
+    ".heartbeat_at = \"$now\" | .updated_at = \"$now\" | .progress = \"${PROGRESS:-}\"" \
+    "$running_file"
+fi
+
+data="$(jq -n \
+  --arg task_id "$TASK_ID" \
+  --arg state "running" \
+  --arg file "$running_file" \
+  --arg progress "${PROGRESS:-}" \
+  --arg dry_run "$( [[ "$DRY_RUN" -eq 1 ]] && echo true || echo false )" \
+  '{task_id:$task_id,state:$state,file:$file,progress:$progress,dry_run:($dry_run=="true")}')"
+
+if [[ "$JSON" -eq 1 ]]; then
+  status="heartbeat"
+  [[ "$DRY_RUN" -eq 1 ]] && status="dry-run"
+  mailroom_task_emit_json "$CAPABILITY" "$status" "$data"
+else
+  echo "$CAPABILITY"
+  echo "task_id: $TASK_ID"
+  echo "heartbeat: updated"
+  [[ -n "$PROGRESS" ]] && echo "progress: $PROGRESS"
+  [[ "$DRY_RUN" -eq 1 ]] && echo "dry_run: true"
+fi

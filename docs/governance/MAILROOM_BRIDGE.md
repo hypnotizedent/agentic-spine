@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-16
+last_verified: 2026-02-18
 scope: mailroom-bridge
 ---
 
@@ -27,7 +27,7 @@ scope: mailroom-bridge
 - **Write-like surfaces (governed only):**
   - `POST /inbox/enqueue` delegates to `ops/runtime/inbox/agent-enqueue.sh`
   - `POST /rag/ask` delegates to `./bin/ops cap run rag.anythingllm.ask`
-  - `POST /cap/run` delegates to `./bin/ops cap run <capability>` (allowlisted read-only caps only)
+  - `POST /cap/run` delegates to `./bin/ops cap run <capability>` (allowlisted + RBAC-scoped; includes governed task lifecycle caps)
 - **No filesystem traversal:** all `path=` params are relative and traversal is rejected.
 - **No direct “write file” endpoints.** All mutation-like actions must route through governed capabilities.
 
@@ -73,6 +73,7 @@ Bridge Cap-RPC consumers (SSOT: `ops/bindings/mailroom.bridge.consumers.yaml`):
 | `operator` | `MAILROOM_BRIDGE_TOKEN` | \`*\` (full allowlist) |
 | `monitor` | `MAILROOM_BRIDGE_MONITOR_TOKEN` | `spine.verify`, `gaps.status`, `loops.status`, `proposals.status`, `mailroom.bridge.status`, `aof.status`, `aof.version` |
 | `media-consumer` | `MAILROOM_BRIDGE_MEDIA_TOKEN` | `media.health.check`, `media.service.status`, `media.nfs.verify` |
+| `task-automation` | `MAILROOM_BRIDGE_TASK_TOKEN` | `mailroom.task.enqueue`, `mailroom.task.claim`, `mailroom.task.heartbeat`, `mailroom.task.complete`, `mailroom.task.fail` |
 
 Update path:
 - `bash ops/plugins/mailroom-bridge/bin/mailroom-bridge-consumers-sync`
@@ -189,13 +190,17 @@ Body (JSON):
 ```json
 {
   "capability": "gaps.status",
-  "args": ["GAP-OP-123"]
+  "args": ["GAP-OP-123"],
+  "confirm": false
 }
 ```
 
 Effect:
 - executes an allowlisted capability via subprocess delegation
 - only capabilities in `cap_rpc.allowlist` (binding) are permitted
+- manual-approval capabilities require `"confirm": true`
+- missing confirm on manual cap returns `HTTP 400` with `error_code: "manual_confirmation_required"`
+- non-boolean confirm returns `HTTP 400` with `error_code: "invalid_confirm_type"`
 
 Response (example):
 ```json
@@ -205,8 +210,21 @@ Response (example):
   "exit_code": 0,
   "output": "...",
   "stderr": "",
+  "approval": "auto",
+  "confirm": false,
   "receipt": "receipts/sessions/RCAP-.../receipt.md",
   "run_key": "CAP-20260215-..."
+}
+```
+
+Manual-cap error response (example):
+```json
+{
+  "error": "capability 'proposals.apply' requires confirm=true for manual approval",
+  "error_code": "manual_confirmation_required",
+  "capability": "proposals.apply",
+  "approval": "manual",
+  "hint": "rerun with confirm=true"
 }
 ```
 
@@ -292,6 +310,30 @@ contract as AOF.
 RBAC scoping (when configured in `ops/bindings/mailroom.bridge.yaml`):
 - **operator** token: all allowlisted caps
 - **media-consumer** token: `media.health.check`, `media.service.status`, `media.nfs.verify` only
+
+#### Task Automation Consumer Examples
+
+Governed task lifecycle executes only through Cap-RPC and capability receipts:
+- `mailroom.task.enqueue`
+- `mailroom.task.claim`
+- `mailroom.task.heartbeat`
+- `mailroom.task.complete`
+- `mailroom.task.fail`
+
+Task caps support `--json` and return the same envelope contract keys:
+`capability`, `schema_version`, `status`, `generated_at`, `data`.
+
+Example enqueue request:
+```json
+{
+  "capability": "mailroom.task.enqueue",
+  "args": ["--summary", "Process LOOP-X task", "--required-agents", "finance-agent", "--json"]
+}
+```
+
+RBAC scoping:
+- **task-automation** token: task lifecycle caps only
+- **operator** token: full allowlist (including task lifecycle caps)
 
 ### `POST /rag/ask` (auth required)
 

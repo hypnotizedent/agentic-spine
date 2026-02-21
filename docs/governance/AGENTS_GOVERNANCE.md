@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-13
+last_verified: 2026-02-18
 scope: agent-infrastructure-governance
 github_issue: "#634"
 ---
@@ -45,18 +45,18 @@ Every new Claude Code session receives agent discovery info via `generate-contex
 
 ## MCP Bridge Scope
 
-The domain-agent MCP bridge provides tool-call access to domain agents from Claude Code sessions via `.mcp.json`.
+The runtime MCP bridge is unified through `spine` (`ops/plugins/mcp-gateway/bin/spine-mcp-serve`) and is the required server on Codex, Claude Desktop, and OpenCode per `ops/bindings/mcp.runtime.contract.yaml`.
 
-**Currently implemented:**
-- `spine-rag`: RAG query/retrieve/health via `ops/plugins/rag/bin/rag-mcp-server` (registered in `.mcp.json`)
+**Gateway tools currently implemented:**
+- `cap_list`, `cap_run` (governed capability execution)
+- `rag_query`, `rag_retrieve`, `rag_health` (compat wrappers)
+- `agent_list`, `agent_info`, `agent_tools`, `route_resolve` (registry-backed routing/discovery)
 
-**Planned (not yet implemented):**
-- Domain-agent MCP bridges for finance, media, n8n agents (requires per-agent MCP server adapters in workbench)
-- Unified `agent.route` capability provides routing lookup but does not yet bridge MCP tool calls
+**Routing capability contract:**
+- `./bin/ops cap run agent.route <domain-or-keyword>` for text lookup
+- `./bin/ops cap run agent.route --json <domain-or-keyword>` for stable envelope output (`matched|not_found|error`) consumed by gateway `route_resolve`
 
-**Routing capability:** `./bin/ops cap run agent.route <domain-or-keyword>` resolves to the correct agent using `ops/bindings/agents.registry.yaml` routing rules.
-
-> **Important:** Do not claim full domain MCP parity in documentation. Only spine-rag is currently bridged. Domain agents are accessible via their own MCP servers (registered in MCPJungle), not yet via a unified spine MCP bridge.
+Domain-specific MCP servers in workbench remain optional providers until delegated tool surfaces are fully absorbed by gateway policy.
 
 ## Safety Rules
 - No secrets in contracts or registry (names/paths only; never values)

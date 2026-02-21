@@ -164,6 +164,48 @@ orchestration_sequence_before() {
   return 0
 }
 
+orchestration_collect_depends_on() {
+  local manifest="$1"
+  local lane="$2"
+  yq e -r ".lanes.\"$lane\".depends_on[]?" "$manifest" 2>/dev/null | sed '/^$/d' || true
+}
+
+orchestration_assert_depends_on_validated() {
+  local manifest="$1"
+  local loop_dir="$2"
+  local lane="$3"
+  local dep
+
+  while IFS= read -r dep; do
+    [[ -z "$dep" ]] && continue
+    orchestration_assert_id "$dep" "depends_on lane"
+    [[ "$dep" != "$lane" ]] || orchestration_fail "lane cannot depend on itself: $lane"
+    if ! orchestration_lane_is_validated_or_integrated "$loop_dir" "$dep"; then
+      orchestration_fail "dependency not satisfied: validate $dep before $lane"
+    fi
+  done < <(orchestration_collect_depends_on "$manifest" "$lane")
+
+  return 0
+}
+
+orchestration_assert_depends_on_integrated() {
+  local manifest="$1"
+  local loop_dir="$2"
+  local lane="$3"
+  local dep
+
+  while IFS= read -r dep; do
+    [[ -z "$dep" ]] && continue
+    orchestration_assert_id "$dep" "depends_on lane"
+    [[ "$dep" != "$lane" ]] || orchestration_fail "lane cannot depend on itself: $lane"
+    if ! orchestration_lane_is_integrated "$loop_dir" "$dep"; then
+      orchestration_fail "dependency not satisfied: integrate $dep before $lane"
+    fi
+  done < <(orchestration_collect_depends_on "$manifest" "$lane")
+
+  return 0
+}
+
 orchestration_lane_status_value() {
   local file="$1"
   if [[ ! -f "$file" ]]; then

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/plugins/mailroom-bridge/lib/task-common.sh"
+
+CAPABILITY="mailroom.task.enqueue"
+JSON=0
+DRY_RUN=0
+TASK_ID=""
+SUMMARY=""
+REQUIRED_AGENTS=""
+ROUTE_TARGET=""
+PAYLOAD=""
+
+usage() {
+  cat <<'USAGE'
+mailroom-task-enqueue
+
+Usage:
+  mailroom-task-enqueue --summary "..." [--task-id TASK-...] [--required-agents "a,b"] [--route-target capability|agent_tool] [--payload "..."] [--json] [--dry-run]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task-id) TASK_ID="${2:?--task-id requires value}"; shift 2 ;;
+    --summary) SUMMARY="${2:?--summary requires value}"; shift 2 ;;
+    --required-agents) REQUIRED_AGENTS="${2:?--required-agents requires value}"; shift 2 ;;
+    --route-target) ROUTE_TARGET="${2:?--route-target requires value}"; shift 2 ;;
+    --payload) PAYLOAD="${2:?--payload requires value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+mailroom_task_require jq
+mailroom_task_require yq
+
+[[ -n "$SUMMARY" ]] || { echo "FAIL: --summary required" >&2; exit 2; }
+[[ -n "$TASK_ID" ]] || TASK_ID="$(mailroom_task_generate_id)"
+
+agents_json="$(mailroom_task_csv_to_json_array "$REQUIRED_AGENTS")"
+file="$MAILROOM_TASK_QUEUED/$TASK_ID.yaml"
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  mailroom_task_init_dirs
+  if mailroom_task_existing_file "$TASK_ID" >/dev/null 2>&1; then
+    echo "FAIL: task already exists: $TASK_ID" >&2
+    exit 1
+  fi
+
+  {
+    echo "task_id: \"$TASK_ID\""
+    echo "status: queued"
+    echo "summary: \"$SUMMARY\""
+    echo "route_target: \"${ROUTE_TARGET:-}\""
+    echo "payload: \"${PAYLOAD:-}\""
+    echo "created_at: \"$(mailroom_task_now)\""
+    echo "updated_at: \"$(mailroom_task_now)\""
+    echo "required_agents:"
+    jq -r '.[]' <<<"$agents_json" | while IFS= read -r agent; do
+      [[ -z "$agent" ]] && continue
+      echo "  - \"$agent\""
+    done
+  } >"$file"
+
+  yq e -i '.required_agents = (.required_agents // [])' "$file"
+fi
+
+data="$(jq -n \
+  --arg task_id "$TASK_ID" \
+  --arg state "queued" \
+  --arg file "$file" \
+  --arg route_target "${ROUTE_TARGET:-}" \
+  --arg summary "$SUMMARY" \
+  --argjson required_agents "$agents_json" \
+  --arg dry_run "$( [[ "$DRY_RUN" -eq 1 ]] && echo true || echo false )" \
+  '{task_id:$task_id,state:$state,file:$file,summary:$summary,route_target:$route_target,required_agents:$required_agents,dry_run:($dry_run=="true")}')"
+
+if [[ "$JSON" -eq 1 ]]; then
+  status="queued"
+  [[ "$DRY_RUN" -eq 1 ]] && status="dry-run"
+  mailroom_task_emit_json "$CAPABILITY" "$status" "$data"
+else
+  echo "$CAPABILITY"
+  echo "task_id: $TASK_ID"
+  echo "state: queued"
+  echo "file: $file"
+  [[ "$DRY_RUN" -eq 1 ]] && echo "dry_run: true"
+fi

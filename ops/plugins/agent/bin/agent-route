@@ -5,9 +5,13 @@ set -euo pipefail
 # Consults agents.registry.yaml routing_rules for deterministic lookup.
 # Usage: agent-route <domain-or-keyword>
 #        agent-route --list
+#        agent-route --json <domain-or-keyword>
 
 SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
 REGISTRY="$SPINE_CODE/ops/bindings/agents.registry.yaml"
+CAPABILITY="agent.route"
+SCHEMA_VERSION="1.0"
+REGISTRY_SOURCE="ops/bindings/agents.registry.yaml"
 
 if [[ ! -f "$REGISTRY" ]]; then
   echo "ERROR: agents.registry.yaml not found at $REGISTRY" >&2
@@ -18,28 +22,40 @@ if ! command -v yq &>/dev/null; then
   echo "ERROR: yq is required but not found in PATH" >&2
   exit 1
 fi
+if ! command -v jq &>/dev/null; then
+  echo "ERROR: jq is required but not found in PATH" >&2
+  exit 1
+fi
+
+OUTPUT_JSON=0
 
 usage() {
   echo "Usage: agent-route <domain-or-keyword>"
   echo "       agent-route --list"
+  echo "       agent-route --json <domain-or-keyword>"
   echo ""
   echo "Route a domain or keyword to the correct agent via agents.registry.yaml."
   echo ""
   echo "Options:"
   echo "  --list    Print all registered agents"
+  echo "  --json    Emit JSON envelope contract for route resolution"
   echo "  --help    Show this help"
+}
+
+now_utc() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
 # --list: print all registered agents
 list_agents() {
   local count
-  count=$(yq '.agents | length' "$REGISTRY")
+  count=$(yq e '.agents | length' "$REGISTRY")
   for ((i=0; i<count; i++)); do
     local id domain status contract
-    id=$(yq ".agents[$i].id" "$REGISTRY")
-    domain=$(yq ".agents[$i].domain" "$REGISTRY")
-    status=$(yq ".agents[$i].implementation_status" "$REGISTRY")
-    contract=$(yq ".agents[$i].contract" "$REGISTRY")
+    id=$(yq e -r ".agents[$i].id" "$REGISTRY")
+    domain=$(yq e -r ".agents[$i].domain" "$REGISTRY")
+    status=$(yq e -r ".agents[$i].implementation_status // \"unknown\"" "$REGISTRY")
+    contract=$(yq e -r ".agents[$i].contract // \"\"" "$REGISTRY")
     echo "agent: $id"
     echo "domain: $domain"
     echo "status: $status"
@@ -48,48 +64,20 @@ list_agents() {
   done
 }
 
-# Route lookup: check routing_rules[].domains[] and routing_rules[].keywords[]
-route_lookup() {
-  local input="$1"
-  local rule_count
-  rule_count=$(yq '.routing_rules | length' "$REGISTRY")
-
-  for ((i=0; i<rule_count; i++)); do
-    # Check domains
-    local domain_match
-    domain_match=$(yq ".routing_rules[$i].domains[] | select(. == \"$input\")" "$REGISTRY" 2>/dev/null || true)
-    if [[ -n "$domain_match" ]]; then
-      print_agent "$(yq ".routing_rules[$i].agent" "$REGISTRY")"
-      return 0
-    fi
-
-    # Check keywords
-    local keyword_match
-    keyword_match=$(yq ".routing_rules[$i].keywords[] | select(. == \"$input\")" "$REGISTRY" 2>/dev/null || true)
-    if [[ -n "$keyword_match" ]]; then
-      print_agent "$(yq ".routing_rules[$i].agent" "$REGISTRY")"
-      return 0
-    fi
-  done
-
-  echo "ERROR: no agent found for input: $input" >&2
-  return 1
-}
-
 # Print agent details from the agents[] array given an agent ID
-print_agent() {
+print_agent_text() {
   local agent_id="$1"
   local agent_count
-  agent_count=$(yq '.agents | length' "$REGISTRY")
+  agent_count=$(yq e '.agents | length' "$REGISTRY")
 
   for ((i=0; i<agent_count; i++)); do
     local id
-    id=$(yq ".agents[$i].id" "$REGISTRY")
+    id=$(yq e -r ".agents[$i].id" "$REGISTRY")
     if [[ "$id" == "$agent_id" ]]; then
       local domain status contract
-      domain=$(yq ".agents[$i].domain" "$REGISTRY")
-      status=$(yq ".agents[$i].implementation_status" "$REGISTRY")
-      contract=$(yq ".agents[$i].contract" "$REGISTRY")
+      domain=$(yq e -r ".agents[$i].domain" "$REGISTRY")
+      status=$(yq e -r ".agents[$i].implementation_status // \"unknown\"" "$REGISTRY")
+      contract=$(yq e -r ".agents[$i].contract // \"\"" "$REGISTRY")
       echo "agent: $id"
       echo "domain: $domain"
       echo "status: $status"
@@ -102,6 +90,101 @@ print_agent() {
   return 1
 }
 
+agent_json() {
+  local agent_id="$1"
+  AGENT_ID="$agent_id" yq e -o=json '.agents[] | select(.id == strenv(AGENT_ID)) | {"id": .id, "domain": .domain, "status": (.implementation_status // "unknown"), "contract": (.contract // "")}' "$REGISTRY"
+}
+
+emit_route_json() {
+  local status="$1"
+  local input="$2"
+  local match_type="$3"
+  local matched_value="$4"
+  local source="$5"
+  local agent_payload="${6:-null}"
+  local error_text="${7:-}"
+  local error_json='null'
+
+  if [[ -n "$error_text" ]]; then
+    error_json="$(jq -n --arg error "$error_text" '{message:$error}')"
+  fi
+
+  jq -n \
+    --arg capability "$CAPABILITY" \
+    --arg schema_version "$SCHEMA_VERSION" \
+    --arg status "$status" \
+    --arg generated_at "$(now_utc)" \
+    --arg input "$input" \
+    --arg match_type "$match_type" \
+    --arg matched_value "$matched_value" \
+    --arg source "$source" \
+    --argjson agent "$agent_payload" \
+    --argjson error "$error_json" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        input: $input,
+        match_type: $match_type,
+        matched_value: $matched_value,
+        agent: $agent,
+        source: $source
+      }
+    } + (if $error == null then {} else {error: $error} end)'
+}
+
+# Route lookup: check routing_rules[].domains[] and routing_rules[].keywords[]
+route_lookup() {
+  local input="$1"
+  local rule_count
+  rule_count=$(yq e '.routing_rules | length' "$REGISTRY")
+
+  for ((i=0; i<rule_count; i++)); do
+    local agent_id
+    agent_id="$(yq e -r ".routing_rules[$i].agent // \"\"" "$REGISTRY")"
+    [[ -n "$agent_id" ]] || continue
+
+    # Check domains
+    local domain_match
+    domain_match="$(INPUT="$input" yq e -r ".routing_rules[$i].domains[]? | select(. == strenv(INPUT))" "$REGISTRY" 2>/dev/null || true)"
+    if [[ -n "$domain_match" ]]; then
+      if [[ "$OUTPUT_JSON" -eq 1 ]]; then
+        local payload
+        payload="$(agent_json "$agent_id" 2>/dev/null || true)"
+        [[ -n "$payload" && "$payload" != "null" ]] || payload="null"
+        emit_route_json "matched" "$input" "domain" "$domain_match" "$REGISTRY_SOURCE:routing_rules[$i].domains" "$payload"
+      else
+        print_agent_text "$agent_id"
+      fi
+      return 0
+    fi
+
+    # Check keywords
+    local keyword_match
+    keyword_match="$(INPUT="$input" yq e -r ".routing_rules[$i].keywords[]? | select(. == strenv(INPUT))" "$REGISTRY" 2>/dev/null || true)"
+    if [[ -n "$keyword_match" ]]; then
+      if [[ "$OUTPUT_JSON" -eq 1 ]]; then
+        local payload
+        payload="$(agent_json "$agent_id" 2>/dev/null || true)"
+        [[ -n "$payload" && "$payload" != "null" ]] || payload="null"
+        emit_route_json "matched" "$input" "keyword" "$keyword_match" "$REGISTRY_SOURCE:routing_rules[$i].keywords" "$payload"
+      else
+        print_agent_text "$agent_id"
+      fi
+      return 0
+    fi
+  done
+
+  if [[ "$OUTPUT_JSON" -eq 1 ]]; then
+    emit_route_json "not_found" "$input" "" "" "$REGISTRY_SOURCE:routing_rules" "null"
+  else
+    echo "ERROR: no agent found for input: $input" >&2
+  fi
+  return 1
+}
+
 # ── Main ──
 
 if [[ $# -eq 0 ]]; then
@@ -109,16 +192,61 @@ if [[ $# -eq 0 ]]; then
   exit 1
 fi
 
-case "$1" in
-  --help|-h)
-    usage
-    exit 0
-    ;;
-  --list)
+LIST_MODE=0
+LOOKUP_INPUT=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --list)
+      LIST_MODE=1
+      shift
+      ;;
+    --json)
+      OUTPUT_JSON=1
+      shift
+      ;;
+    --*)
+      echo "ERROR: unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      if [[ -n "$LOOKUP_INPUT" ]]; then
+        echo "ERROR: multiple inputs provided" >&2
+        usage >&2
+        exit 1
+      fi
+      LOOKUP_INPUT="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ "$LIST_MODE" -eq 1 ]]; then
+  if [[ -n "$LOOKUP_INPUT" ]]; then
+    echo "ERROR: --list does not accept a route input" >&2
+    usage >&2
+    exit 1
+  fi
+  if [[ "$OUTPUT_JSON" -eq 1 ]]; then
+    yq e -o=json '.agents // [] | map({"id": .id, "domain": .domain, "status": (.implementation_status // "unknown"), "contract": (.contract // "")})' "$REGISTRY"
+  else
     list_agents
-    exit 0
-    ;;
-  *)
-    route_lookup "$1"
-    ;;
-esac
+  fi
+  exit 0
+fi
+
+if [[ -z "$LOOKUP_INPUT" ]]; then
+  if [[ "$OUTPUT_JSON" -eq 1 ]]; then
+    emit_route_json "error" "" "" "" "$REGISTRY_SOURCE" "null" "input is required"
+  else
+    usage >&2
+  fi
+  exit 1
+fi
+
+route_lookup "$LOOKUP_INPUT"

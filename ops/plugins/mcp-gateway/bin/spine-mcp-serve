@@ -5,6 +5,7 @@ Unified spine MCP gateway.
 Exposes governed capabilities via stdio JSON-RPC (MCP) with:
   - cap_list
   - cap_run
+  - agent_list / agent_info / agent_tools / route_resolve
   - rag_query / rag_retrieve / rag_health compatibility wrappers
 """
 
@@ -28,6 +29,10 @@ OPS_BIN = os.path.join(SPINE_ROOT, "bin", "ops")
 CAPABILITIES_FILE = os.path.join(SPINE_ROOT, "ops", "capabilities.yaml")
 SECRETS_EXEC = os.path.join(SPINE_ROOT, "ops", "plugins", "secrets", "bin", "secrets-exec")
 RAG_BIN = os.path.join(SPINE_ROOT, "ops", "plugins", "rag", "bin", "rag")
+AGENTS_REGISTRY_FILE = os.path.join(SPINE_ROOT, "ops", "bindings", "agents.registry.yaml")
+AGENT_INFO_BIN = os.path.join(SPINE_ROOT, "ops", "plugins", "agent", "bin", "agent-info")
+AGENT_TOOLS_BIN = os.path.join(SPINE_ROOT, "ops", "plugins", "agent", "bin", "agent-tools")
+AGENT_ROUTE_BIN = os.path.join(SPINE_ROOT, "ops", "plugins", "agent", "bin", "agent-route")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 TOOLS = [
@@ -79,6 +84,60 @@ TOOLS = [
             },
             "required": ["name"]
         }
+    },
+    {
+        "name": "agent_list",
+        "description": "List agents from agents.registry.yaml with optional filters.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "filter": {
+                    "type": "string",
+                    "description": "Optional case-insensitive substring filter on agent id/domain/description",
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "Optional exact domain filter",
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Optional exact implementation_status filter",
+                },
+            },
+        },
+    },
+    {
+        "name": "agent_info",
+        "description": "Fetch full machine-readable registry entry for one agent.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Agent ID from agents.registry.yaml"}
+            },
+            "required": ["agent_id"],
+        },
+    },
+    {
+        "name": "agent_tools",
+        "description": "Fetch tool/capability inventory for one agent.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Agent ID from agents.registry.yaml"}
+            },
+            "required": ["agent_id"],
+        },
+    },
+    {
+        "name": "route_resolve",
+        "description": "Resolve input to an agent using agent.route --json envelope contract.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "input": {"type": "string", "description": "Domain or keyword to resolve"},
+            },
+            "required": ["input"],
+        },
     },
     {
         "name": "rag_query",
@@ -185,6 +244,22 @@ def load_capabilities() -> Dict[str, Any]:
     return parsed
 
 
+def load_agents_registry() -> Dict[str, Any]:
+    code, out, err = run_cmd(
+        ["yq", "e", "-o=json", ".", AGENTS_REGISTRY_FILE],
+        timeout=30,
+    )
+    if code != 0:
+        raise RuntimeError(f"failed to read agent registry: {err or out}")
+    try:
+        parsed = json.loads(out or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid agent registry json output: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("agent registry did not parse as an object")
+    return parsed
+
+
 def normalize_cap_args(raw: Any) -> List[str]:
     if raw is None:
         return []
@@ -255,6 +330,96 @@ def list_capabilities(filter_text: Optional[str], safety: Optional[str]) -> str:
     )
 
 
+def list_agents(filter_text: Optional[str], domain: Optional[str], status: Optional[str]) -> str:
+    registry = load_agents_registry()
+    agents = registry.get("agents") or []
+    if not isinstance(agents, list):
+        agents = []
+
+    needle = (filter_text or "").strip().lower()
+    domain_filter = (domain or "").strip()
+    status_filter = (status or "").strip()
+
+    rows: List[Dict[str, Any]] = []
+    for agent in agents:
+        if not isinstance(agent, dict):
+            continue
+        agent_id = str(agent.get("id", "")).strip()
+        agent_domain = str(agent.get("domain", "")).strip()
+        agent_status = str(agent.get("implementation_status", "")).strip()
+        agent_description = str(agent.get("description", "")).strip()
+        agent_contract = str(agent.get("contract", "")).strip()
+        if domain_filter and agent_domain != domain_filter:
+            continue
+        if status_filter and agent_status != status_filter:
+            continue
+        if needle:
+            haystack = f"{agent_id} {agent_domain} {agent_description}".lower()
+            if needle not in haystack:
+                continue
+        rows.append(
+            {
+                "id": agent_id,
+                "domain": agent_domain,
+                "status": agent_status,
+                "description": agent_description,
+                "contract": agent_contract,
+            }
+        )
+
+    rows.sort(key=lambda row: row.get("id", ""))
+    return json.dumps(
+        {
+            "count": len(rows),
+            "agents": rows,
+        },
+        indent=2,
+        sort_keys=False,
+    )
+
+
+def _json_from_cmd(args: List[str], *, timeout: int = 120) -> Dict[str, Any]:
+    code, out, err = run_cmd(args, timeout=timeout)
+    text = (out or "").strip() or (err or "").strip()
+    if not text:
+        raise RuntimeError(f"empty output from command: {' '.join(args)}")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"expected JSON output from command: {' '.join(args)}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"expected JSON object output from command: {' '.join(args)}")
+    if code != 0:
+        status = str(parsed.get("status", "")).strip()
+        if status not in {"not_found", "error"}:
+            raise RuntimeError(f"command failed (rc={code}): {text}")
+    return parsed
+
+
+def agent_info(agent_id: str) -> str:
+    agent_id = (agent_id or "").strip()
+    if not agent_id:
+        raise RuntimeError("agent_id is required")
+    payload = _json_from_cmd([AGENT_INFO_BIN, agent_id, "--json"])
+    return json.dumps(payload, indent=2, sort_keys=False)
+
+
+def agent_tools(agent_id: str) -> str:
+    agent_id = (agent_id or "").strip()
+    if not agent_id:
+        raise RuntimeError("agent_id is required")
+    payload = _json_from_cmd([AGENT_TOOLS_BIN, agent_id, "--json"])
+    return json.dumps(payload, indent=2, sort_keys=False)
+
+
+def route_resolve(input_value: str) -> str:
+    input_value = (input_value or "").strip()
+    if not input_value:
+        raise RuntimeError("input is required")
+    payload = _json_from_cmd([AGENT_ROUTE_BIN, "--json", input_value])
+    return json.dumps(payload, indent=2, sort_keys=False)
+
+
 def run_rag(subcommand: str, *args: str) -> str:
     cmd = [SECRETS_EXEC, "--", RAG_BIN, subcommand, *args]
     code, out, err = run_cmd(cmd, timeout=300)
@@ -298,8 +463,23 @@ def handle_tools_call(msg: Dict[str, Any]) -> Dict[str, Any]:
         elif name == "cap_run":
             cap_name = arguments.get("name", "")
             cap_args = normalize_cap_args(arguments.get("args"))
-            confirm = bool(arguments.get("confirm", False))
+            confirm_raw = arguments.get("confirm", False)
+            if not isinstance(confirm_raw, bool):
+                raise RuntimeError("confirm must be a boolean")
+            confirm = confirm_raw
             text = run_capability(cap_name, cap_args, confirm)
+        elif name == "agent_list":
+            text = list_agents(
+                arguments.get("filter"),
+                arguments.get("domain"),
+                arguments.get("status"),
+            )
+        elif name == "agent_info":
+            text = agent_info(str(arguments.get("agent_id", "")))
+        elif name == "agent_tools":
+            text = agent_tools(str(arguments.get("agent_id", "")))
+        elif name == "route_resolve":
+            text = route_resolve(str(arguments.get("input", "")))
         elif name == "rag_query":
             text = run_capability(
                 "rag.anythingllm.ask",

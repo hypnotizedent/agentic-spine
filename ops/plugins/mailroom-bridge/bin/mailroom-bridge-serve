@@ -419,6 +419,17 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return capability in allow
 
+    def _capability_approval(self, capability: str) -> str:
+        """Return approval mode for a capability from ops/capabilities.yaml."""
+        caps_file = Path(self.config["spine_repo"]) / "ops/capabilities.yaml"
+        if not shutil.which("yq") or not caps_file.exists():
+            return ""
+        try:
+            out = _sh("yq", "-r", f'.capabilities."{capability}".approval // ""', str(caps_file))
+        except Exception:
+            return ""
+        return (out or "").strip()
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -780,6 +791,16 @@ class Handler(BaseHTTPRequestHandler):
         cap_args = payload.get("args") or []
         if not isinstance(cap_args, list):
             return self._json(HTTPStatus.BAD_REQUEST, {"error": "args must be a list"})
+        confirm_raw = payload.get("confirm", False)
+        if not isinstance(confirm_raw, bool):
+            return self._json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "confirm must be a boolean",
+                    "error_code": "invalid_confirm_type",
+                },
+            )
+        confirm = confirm_raw
 
         # Enforce allowlist
         allowlist = self.config.get("cap_rpc_allowlist") or []
@@ -802,15 +823,29 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "ops binary not found"})
 
         args = [str(ops_bin), "cap", "run", capability] + [str(a) for a in cap_args]
+        approval = self._capability_approval(capability)
+        if approval == "manual" and not confirm:
+            return self._json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": f"capability '{capability}' requires confirm=true for manual approval",
+                    "error_code": "manual_confirmation_required",
+                    "capability": capability,
+                    "approval": "manual",
+                    "hint": "rerun with confirm=true",
+                },
+            )
 
         env = os.environ.copy()
         env["SPINE_REPO"] = str(spine_repo)
         env["SPINE_CODE"] = str(spine_repo)
+        stdin_text = b"yes\n" if approval == "manual" and confirm else None
 
         timeout = int(self.config.get("cap_rpc_timeout") or 120)
         try:
             p = subprocess.run(
                 args,
+                input=stdin_text,
                 capture_output=True,
                 timeout=timeout,
                 env=env,
@@ -870,6 +905,8 @@ class Handler(BaseHTTPRequestHandler):
                 "exit_code": p.returncode,
                 "output": output,
                 "stderr": stderr[:2000] if p.returncode != 0 else "",
+                "approval": approval or "auto",
+                "confirm": confirm,
                 "receipt": receipt or None,
                 "run_key": run_key or None,
             },

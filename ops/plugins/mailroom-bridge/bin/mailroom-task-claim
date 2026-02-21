@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/plugins/mailroom-bridge/lib/task-common.sh"
+
+CAPABILITY="mailroom.task.claim"
+JSON=0
+DRY_RUN=0
+ALLOW_UNHEALTHY=0
+TASK_ID=""
+WORKER="${USER:-unknown}@$(hostname -s 2>/dev/null || hostname)"
+REQUIRED_AGENTS=""
+
+usage() {
+  cat <<'USAGE'
+mailroom-task-claim
+
+Usage:
+  mailroom-task-claim --task-id TASK-... [--worker name] [--required-agents "a,b"] [--allow-unhealthy] [--json] [--dry-run]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task-id) TASK_ID="${2:?--task-id requires value}"; shift 2 ;;
+    --worker) WORKER="${2:?--worker requires value}"; shift 2 ;;
+    --required-agents) REQUIRED_AGENTS="${2:?--required-agents requires value}"; shift 2 ;;
+    --allow-unhealthy) ALLOW_UNHEALTHY=1; shift ;;
+    --json) JSON=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+mailroom_task_require jq
+mailroom_task_require yq
+[[ -n "$TASK_ID" ]] || { echo "FAIL: --task-id required" >&2; exit 2; }
+
+queued_file="$MAILROOM_TASK_QUEUED/$TASK_ID.yaml"
+running_file="$MAILROOM_TASK_RUNNING/$TASK_ID.yaml"
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  mailroom_task_init_dirs
+  if [[ ! -f "$queued_file" ]]; then
+    if [[ -f "$running_file" ]]; then
+      echo "FAIL: task already claimed: $TASK_ID" >&2
+    else
+      echo "FAIL: queued task not found: $TASK_ID" >&2
+    fi
+    exit 1
+  fi
+
+  if [[ -z "$REQUIRED_AGENTS" ]]; then
+    REQUIRED_AGENTS="$(yq -r '.required_agents[]?' "$queued_file" 2>/dev/null | paste -sd, - || true)"
+  fi
+
+  health_status="skipped"
+  if [[ -n "$REQUIRED_AGENTS" && "$ALLOW_UNHEALTHY" -eq 0 ]]; then
+    health_json_tmp="$(mktemp)"
+    health_err_tmp="$(mktemp)"
+    trap 'rm -f "$health_json_tmp" "$health_err_tmp"' EXIT
+    if ! "$ROOT/bin/ops" cap run agent.health.check-all --agents "$REQUIRED_AGENTS" --strict --json >"$health_json_tmp" 2>"$health_err_tmp"; then
+      echo "FAIL: agent health preflight failed for required_agents=$REQUIRED_AGENTS" >&2
+      cat "$health_err_tmp" >&2 || true
+      exit 1
+    fi
+    health_status="strict-pass"
+  elif [[ -n "$REQUIRED_AGENTS" && "$ALLOW_UNHEALTHY" -eq 1 ]]; then
+    health_status="override"
+  fi
+
+  mv "$queued_file" "$running_file"
+  now="$(mailroom_task_now)"
+  yq e -i \
+    ".status = \"running\" | .claimed_by = \"$WORKER\" | .claimed_at = \"$now\" | .heartbeat_at = \"$now\" | .updated_at = \"$now\" | .health_preflight = \"$health_status\"" \
+    "$running_file"
+fi
+
+agents_json="$(mailroom_task_csv_to_json_array "$REQUIRED_AGENTS")"
+data="$(jq -n \
+  --arg task_id "$TASK_ID" \
+  --arg worker "$WORKER" \
+  --arg state "running" \
+  --arg file "$running_file" \
+  --argjson required_agents "$agents_json" \
+  --arg allow_unhealthy "$( [[ "$ALLOW_UNHEALTHY" -eq 1 ]] && echo true || echo false )" \
+  --arg dry_run "$( [[ "$DRY_RUN" -eq 1 ]] && echo true || echo false )" \
+  '{task_id:$task_id,state:$state,file:$file,worker:$worker,required_agents:$required_agents,allow_unhealthy:($allow_unhealthy=="true"),dry_run:($dry_run=="true")}')"
+
+if [[ "$JSON" -eq 1 ]]; then
+  status="claimed"
+  [[ "$DRY_RUN" -eq 1 ]] && status="dry-run"
+  mailroom_task_emit_json "$CAPABILITY" "$status" "$data"
+else
+  echo "$CAPABILITY"
+  echo "task_id: $TASK_ID"
+  echo "state: running"
+  echo "worker: $WORKER"
+  [[ "$DRY_RUN" -eq 1 ]] && echo "dry_run: true"
+fi

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-health-check-all — Probe configured agent endpoints and report aggregate health.
+#
+# Usage:
+#   agent-health-check-all [--agents "id1,id2"] [--timeout 3] [--strict] [--json]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
+CAPABILITY="agent.health.check-all"
+
+AGENTS_FILTER=""
+TIMEOUT=3
+STRICT=0
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+agent-health-check-all
+
+Usage:
+  agent-health-check-all [--agents "id1,id2"] [--timeout 3] [--strict] [--json]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agents) AGENTS_FILTER="${2:?--agents requires value}"; shift 2 ;;
+    --timeout) TIMEOUT="${2:?--timeout requires value}"; shift 2 ;;
+    --strict) STRICT=1; shift ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "FAIL: yq required" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "FAIL: jq required" >&2; exit 2; }
+command -v curl >/dev/null 2>&1 || { echo "FAIL: curl required" >&2; exit 2; }
+[[ -f "$REGISTRY" ]] || { echo "FAIL: missing registry: $REGISTRY" >&2; exit 1; }
+
+FILTER_JSON='[]'
+if [[ -n "$AGENTS_FILTER" ]]; then
+  FILTER_JSON="$(printf '%s' "$AGENTS_FILTER" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | sed '/^$/d' | jq -Rsc 'split("\n") | map(select(length>0))')"
+fi
+
+in_filter() {
+  local agent_id="$1"
+  jq -e --arg id "$agent_id" '. | index($id) != null' <<<"$FILTER_JSON" >/dev/null 2>&1
+}
+
+probes='[]'
+checked=0
+healthy=0
+unhealthy=0
+
+while IFS=$'\t' read -r agent_id endpoint_name endpoint_url; do
+  [[ -z "$agent_id" || -z "$endpoint_name" || -z "$endpoint_url" ]] && continue
+
+  if [[ -n "$AGENTS_FILTER" ]] && ! in_filter "$agent_id"; then
+    continue
+  fi
+
+  checked=$((checked + 1))
+  http_code=""
+  state="unhealthy"
+
+  if http_code="$(curl -sS -L --max-time "$TIMEOUT" -o /dev/null -w '%{http_code}' "$endpoint_url" 2>/dev/null || true)"; then
+    :
+  fi
+
+  if [[ "$http_code" =~ ^[0-9]{3}$ ]]; then
+    if (( http_code >= 200 && http_code < 400 )); then
+      state="healthy"
+      healthy=$((healthy + 1))
+    else
+      unhealthy=$((unhealthy + 1))
+    fi
+  else
+    http_code="000"
+    unhealthy=$((unhealthy + 1))
+  fi
+
+  probe="$(jq -n --arg agent_id "$agent_id" --arg endpoint "$endpoint_name" --arg url "$endpoint_url" --arg state "$state" --arg http_code "$http_code" '{agent_id:$agent_id,endpoint:$endpoint,url:$url,state:$state,http_code:$http_code}')"
+  probes="$(jq --argjson p "$probe" '. + [$p]' <<<"$probes")"
+done < <(yq -r '.agents[] as $a | ($a.endpoints // {}) | to_entries[]? | [$a.id, .key, (.value.url // "")] | @tsv' "$REGISTRY")
+
+status="ok"
+if (( checked == 0 )); then
+  status="no-probes"
+elif (( unhealthy > 0 )); then
+  status="degraded"
+fi
+
+data="$(jq -n \
+  --arg registry "$REGISTRY" \
+  --argjson checked "$checked" \
+  --argjson healthy "$healthy" \
+  --argjson unhealthy "$unhealthy" \
+  --argjson strict "$([[ "$STRICT" -eq 1 ]] && echo true || echo false)" \
+  --argjson filters "$FILTER_JSON" \
+  --argjson probes "$probes" \
+  '{registry:$registry,checked:$checked,healthy:$healthy,unhealthy:$unhealthy,strict:$strict,agents_filter:$filters,probes:$probes}')"
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "$CAPABILITY" \
+    --arg schema_version "1.0" \
+    --arg status "$status" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson data "$data" \
+    '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:$data}'
+else
+  echo "$CAPABILITY"
+  echo "status: $status"
+  echo "checked: $checked"
+  echo "healthy: $healthy"
+  echo "unhealthy: $unhealthy"
+fi
+
+if [[ "$STRICT" -eq 1 && "$status" != "ok" ]]; then
+  exit 1
+fi

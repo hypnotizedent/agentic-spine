@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/plugins/mailroom-bridge/lib/task-common.sh"
+
+CAPABILITY="mailroom.task.fail"
+JSON=0
+DRY_RUN=0
+TASK_ID=""
+REASON="failed"
+
+usage() {
+  cat <<'USAGE'
+mailroom-task-fail
+
+Usage:
+  mailroom-task-fail --task-id TASK-... [--reason "..."] [--json] [--dry-run]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task-id) TASK_ID="${2:?--task-id requires value}"; shift 2 ;;
+    --reason) REASON="${2:?--reason requires value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+mailroom_task_require jq
+mailroom_task_require yq
+[[ -n "$TASK_ID" ]] || { echo "FAIL: --task-id required" >&2; exit 2; }
+
+running_file="$MAILROOM_TASK_RUNNING/$TASK_ID.yaml"
+failed_file="$MAILROOM_TASK_FAILED/$TASK_ID.yaml"
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  mailroom_task_init_dirs
+  [[ -f "$running_file" ]] || { echo "FAIL: running task not found: $TASK_ID" >&2; exit 1; }
+  mv "$running_file" "$failed_file"
+  now="$(mailroom_task_now)"
+  yq e -i \
+    ".status = \"failed\" | .failure_reason = \"$REASON\" | .failed_at = \"$now\" | .updated_at = \"$now\"" \
+    "$failed_file"
+fi
+
+data="$(jq -n \
+  --arg task_id "$TASK_ID" \
+  --arg state "failed" \
+  --arg file "$failed_file" \
+  --arg reason "$REASON" \
+  --arg dry_run "$( [[ "$DRY_RUN" -eq 1 ]] && echo true || echo false )" \
+  '{task_id:$task_id,state:$state,file:$file,reason:$reason,dry_run:($dry_run=="true")}')"
+
+if [[ "$JSON" -eq 1 ]]; then
+  status="failed"
+  [[ "$DRY_RUN" -eq 1 ]] && status="dry-run"
+  mailroom_task_emit_json "$CAPABILITY" "$status" "$data"
+else
+  echo "$CAPABILITY"
+  echo "task_id: $TASK_ID"
+  echo "state: failed"
+  echo "reason: $REASON"
+  [[ "$DRY_RUN" -eq 1 ]] && echo "dry_run: true"
+fi
