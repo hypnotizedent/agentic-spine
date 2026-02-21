@@ -332,10 +332,27 @@ curl -s https://secrets.ronny.works/api/status
 curl -s http://automation-stack:5678/healthz
 # Expected: {"status":"ok"}
 
+# Automation-stack latency budget (repeated sampling + n8n quick timing)
+./bin/ops cap run automation.stack.latency.status --json
+# Expected: status=pass|warn|incident with p95/p99 and failed sample counts
+
 # Optional: local RAG stack (currently deferred)
 # curl -s http://localhost:3002/api/ping
 # Expected: {"online":true}
 ```
+
+### Automation-Stack Latency Thresholds (Self-Driving Cadence)
+
+Source of truth: `ops/bindings/automation.stack.latency.slo.yaml`
+
+| Metric | Warn | Incident | Notes |
+|--------|------|----------|-------|
+| Aggregate p95 latency | 900ms | 1500ms | Repeated samples across automation-stack service endpoints |
+| Aggregate p99 latency | 1300ms | 2200ms | Captures jitter spikes that single probes miss |
+| `n8n.infra.health.quick` duration | 2000ms | 5000ms | Control-loop readiness signal |
+| Failed samples | 1+ | 3+ | Any failed endpoint sample counts against budget |
+
+This budget is consumed by `stability.control.snapshot` via `automation.stack.latency.status`, and appears in the daily briefing stability section.
 
 ### VM Status Check (Proxmox)
 

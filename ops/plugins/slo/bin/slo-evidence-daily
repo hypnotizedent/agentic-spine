@@ -35,13 +35,45 @@ else
   DOMAIN_SUMMARY="| (timeout) | (timeout) |"
 fi
 
+echo "Collecting automation.stack.latency.status..."
+AUTOMATION_LATENCY_STATUS="unknown"
+AUTOMATION_LATENCY_P95_MS="n/a"
+AUTOMATION_LATENCY_P99_MS="n/a"
+AUTOMATION_LATENCY_N8N_MS="n/a"
+AUTOMATION_LATENCY_SAMPLES="n/a"
+AUTOMATION_LATENCY_FAILED_SAMPLES="n/a"
+
+if timeout 90 "$ROOT/ops/plugins/observability/bin/automation-stack-latency-status" --json > /tmp/slo-automation-latency-$$ 2>&1; then
+  AUTOMATION_LATENCY_STATUS="$(jq -r '.status // "unknown"' /tmp/slo-automation-latency-$$ 2>/dev/null || echo "unknown")"
+  AUTOMATION_LATENCY_P95_MS="$(jq -r '.data.p95_ms // "n/a"' /tmp/slo-automation-latency-$$ 2>/dev/null || echo "n/a")"
+  AUTOMATION_LATENCY_P99_MS="$(jq -r '.data.p99_ms // "n/a"' /tmp/slo-automation-latency-$$ 2>/dev/null || echo "n/a")"
+  AUTOMATION_LATENCY_N8N_MS="$(jq -r '.data.n8n_quick.duration_ms // "n/a"' /tmp/slo-automation-latency-$$ 2>/dev/null || echo "n/a")"
+  AUTOMATION_LATENCY_SAMPLES="$(jq -r '.data.total_samples // "n/a"' /tmp/slo-automation-latency-$$ 2>/dev/null || echo "n/a")"
+  AUTOMATION_LATENCY_FAILED_SAMPLES="$(jq -r '.data.failed_samples // "n/a"' /tmp/slo-automation-latency-$$ 2>/dev/null || echo "n/a")"
+  rm -f /tmp/slo-automation-latency-$$
+fi
+
 OPEN_LOOPS=$("$ROOT/bin/ops" loops list --open 2>/dev/null | grep -c "LOOP-" || echo "0")
 OPEN_GAPS=$("$ROOT/bin/ops" status 2>/dev/null | grep -E "gaps:.*open" | grep -oE '[0-9]+' | head -1 || echo "0")
 
 VERIFY_PCT=0
 [[ "$VERIFY_TOTAL" -gt 0 ]] && VERIFY_PCT=$((VERIFY_PASS * 100 / VERIFY_TOTAL))
 SLO_PASS="FAIL"
-[[ "$VERIFY_PCT" -ge 95 ]] && [[ "$VERIFY_FAIL" -eq 0 ]] && [[ "$INCIDENT_COUNT" -eq 0 ]] && SLO_PASS="PASS"
+[[ "$VERIFY_PCT" -ge 95 ]] && [[ "$VERIFY_FAIL" -eq 0 ]] && [[ "$INCIDENT_COUNT" -eq 0 ]] && [[ "$AUTOMATION_LATENCY_STATUS" != "incident" ]] && SLO_PASS="PASS"
+
+AUTOMATION_LATENCY_ICON="✅"
+if [[ "$AUTOMATION_LATENCY_STATUS" == "incident" ]]; then
+  AUTOMATION_LATENCY_ICON="❌"
+elif [[ "$AUTOMATION_LATENCY_STATUS" == "warn" ]]; then
+  AUTOMATION_LATENCY_ICON="⚠️"
+elif [[ "$AUTOMATION_LATENCY_STATUS" == "unknown" ]]; then
+  AUTOMATION_LATENCY_ICON="ℹ️"
+fi
+
+AUTOMATION_LATENCY_SAMPLE_ICON="✅"
+if [[ "$AUTOMATION_LATENCY_FAILED_SAMPLES" == "n/a" ]]; then
+  AUTOMATION_LATENCY_SAMPLE_ICON="ℹ️"
+fi
 
 cat > "$OUTPUT_FILE" << EOF
 ---
@@ -65,6 +97,8 @@ slo_pass: ${SLO_PASS}
 | Verify Gates | ${VERIFY_PASS}/${VERIFY_TOTAL} (${VERIFY_PCT}%) | 100% | $([[ "$VERIFY_FAIL" -eq 0 ]] && echo "✅" || echo "❌") |
 | Incidents | ${INCIDENT_COUNT} | 0 | $([[ "$INCIDENT_COUNT" -eq 0 ]] && echo "✅" || echo "❌") |
 | Warnings | ${WARN_COUNT} | 0 | $([[ "$WARN_COUNT" -eq 0 ]] && echo "✅" || echo "⚠️") |
+| Automation Latency Budget | ${AUTOMATION_LATENCY_STATUS} (p95=${AUTOMATION_LATENCY_P95_MS}ms, p99=${AUTOMATION_LATENCY_P99_MS}ms, n8n=${AUTOMATION_LATENCY_N8N_MS}ms) | non-incident | ${AUTOMATION_LATENCY_ICON} |
+| Automation Latency Samples | total=${AUTOMATION_LATENCY_SAMPLES}, failed=${AUTOMATION_LATENCY_FAILED_SAMPLES} | failed <= budget | ${AUTOMATION_LATENCY_SAMPLE_ICON} |
 | Open Loops | ${OPEN_LOOPS} | - | ℹ️ |
 | Open Gaps | ${OPEN_GAPS} | - | ℹ️ |
 

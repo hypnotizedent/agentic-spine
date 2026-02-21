@@ -19,6 +19,11 @@ fi
 status="$(jq -r '.status // "unknown"' "$tmp")"
 incident_count="$(jq -r '.incident_count // 0' "$tmp")"
 warn_count="$(jq -r '.warn_count // 0' "$tmp")"
+automation_latency_status="$(jq -r '.probes[]? | select(.domain == "automation-stack" and .capability == "automation.stack.latency.status") | .status // ""' "$tmp" | head -n1)"
+automation_latency_detail="$(jq -r '.probes[]? | select(.domain == "automation-stack" and .capability == "automation.stack.latency.status") | .detail // ""' "$tmp" | head -n1)"
+automation_latency_p95="$(printf '%s\n' "$automation_latency_detail" | sed -nE 's/.*p95_ms=([0-9-]+).*/\1/p' | head -n1)"
+automation_latency_p99="$(printf '%s\n' "$automation_latency_detail" | sed -nE 's/.*p99_ms=([0-9-]+).*/\1/p' | head -n1)"
+automation_latency_n8n="$(printf '%s\n' "$automation_latency_detail" | sed -nE 's/.*n8n_quick_ms=([0-9-]+).*/\1/p' | head -n1)"
 
 case "$status" in
   incident) section_status="error" ;;
@@ -27,6 +32,9 @@ case "$status" in
 esac
 
 summary="status=$status incidents=$incident_count warns=$warn_count"
+if [[ -n "$automation_latency_status" ]]; then
+  summary="$summary automation_latency=$automation_latency_status(p95_ms=${automation_latency_p95:-na},p99_ms=${automation_latency_p99:-na},n8n_quick_ms=${automation_latency_n8n:-na})"
+fi
 jq -n \
   --arg section "stability" \
   --arg status "$section_status" \
@@ -34,6 +42,23 @@ jq -n \
   --arg raw_status "$status" \
   --argjson incident_count "$incident_count" \
   --argjson warn_count "$warn_count" \
-  '{section:$section,status:$status,summary:$summary,details:{raw_status:$raw_status,incident_count:$incident_count,warn_count:$warn_count}}'
+  --arg automation_latency_status "$automation_latency_status" \
+  --argjson automation_latency_p95_ms "${automation_latency_p95:-null}" \
+  --argjson automation_latency_p99_ms "${automation_latency_p99:-null}" \
+  --argjson automation_latency_n8n_quick_ms "${automation_latency_n8n:-null}" \
+  '{
+    section:$section,
+    status:$status,
+    summary:$summary,
+    details:{
+      raw_status:$raw_status,
+      incident_count:$incident_count,
+      warn_count:$warn_count,
+      automation_latency_status:$automation_latency_status,
+      automation_latency_p95_ms:$automation_latency_p95_ms,
+      automation_latency_p99_ms:$automation_latency_p99_ms,
+      automation_latency_n8n_quick_ms:$automation_latency_n8n_quick_ms
+    }
+  }'
 
 rm -f "$tmp"
