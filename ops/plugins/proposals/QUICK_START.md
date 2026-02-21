@@ -44,6 +44,11 @@ SPINE_LOOP_ID=LOOP-EXAMPLE-20260221 ./bin/ops cap run proposals.submit "what you
 - `proposals.submit --help` is safe and does not create a proposal.
 - Loop ids must point to an existing non-closed scope in `mailroom/state/loop-scopes/`.
 
+### Queue Status Semantics
+
+- `pending` is the actionable operator queue.
+- `superseded` is historical audit state and must not be applied.
+
 ## For Operators: Applying Proposals
 
 ```bash

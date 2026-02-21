@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+CONTRACT_DEFAULT="$ROOT/ops/bindings/infra.core.slo.yaml"
+CONTRACT="$CONTRACT_DEFAULT"
+
+usage() {
+  cat <<'EOF'
+infra-core-slo-status - Service-level SLO status for infra-core
+
+Usage:
+  infra-core-slo-status [--contract <path>]
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --contract)
+      CONTRACT="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "STOP: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "STOP: missing dependency: $1" >&2
+    exit 2
+  }
+}
+
+need_file() {
+  [[ -f "$1" ]] || {
+    echo "STOP: missing file: $1" >&2
+    exit 2
+  }
+}
+
+now_ms() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(int(time.time()*1000))'
+  else
+    echo $(( "$(date +%s)" * 1000 ))
+  fi
+}
+
+status_rank() {
+  case "$1" in
+    OK) echo 0 ;;
+    WARN) echo 1 ;;
+    FAIL) echo 2 ;;
+    *) echo 0 ;;
+  esac
+}
+
+promote_status() {
+  local current="$1"
+  local incoming="$2"
+  if [[ "$(status_rank "$incoming")" -gt "$(status_rank "$current")" ]]; then
+    echo "$incoming"
+  else
+    echo "$current"
+  fi
+}
+
+need_cmd yq
+need_cmd curl
+need_file "$CONTRACT"
+
+SERVICES_HEALTH_REL="$(yq -r '.source_bindings.services_health // "ops/bindings/services.health.yaml"' "$CONTRACT")"
+SERVICE_REGISTRY_REL="$(yq -r '.source_bindings.service_registry // "docs/governance/SERVICE_REGISTRY.yaml"' "$CONTRACT")"
+SERVICES_HEALTH="$ROOT/$SERVICES_HEALTH_REL"
+SERVICE_REGISTRY="$ROOT/$SERVICE_REGISTRY_REL"
+
+need_file "$SERVICES_HEALTH"
+need_file "$SERVICE_REGISTRY"
+
+TARGET_HOST="$(yq -r '.target.host // "infra-core"' "$CONTRACT")"
+CONNECT_TIMEOUT_SEC="$(yq -r '.timeouts.connect_timeout_sec // 3' "$CONTRACT")"
+MAX_TIME_SEC="$(yq -r '.timeouts.max_time_sec // 8' "$CONTRACT")"
+LATENCY_WARN_MS="$(yq -r '.budgets.latency_warn_ms // 3000' "$CONTRACT")"
+LATENCY_INCIDENT_MS="$(yq -r '.budgets.latency_incident_ms // 7000' "$CONTRACT")"
+MAX_FAILED_REQUIRED="$(yq -r '.budgets.max_failed_required // 0' "$CONTRACT")"
+WARN_FAILED_OPTIONAL="$(yq -r '.budgets.warn_failed_optional // 1' "$CONTRACT")"
+SCHEMA_VERSION="$(yq -r '.reporting.envelope_schema_version // "1.0"' "$CONTRACT")"
+
+for value in \
+  "$CONNECT_TIMEOUT_SEC" "$MAX_TIME_SEC" "$LATENCY_WARN_MS" "$LATENCY_INCIDENT_MS" \
+  "$MAX_FAILED_REQUIRED" "$WARN_FAILED_OPTIONAL"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "STOP: contract expects integer timeout/budget fields" >&2
+    exit 2
+  }
+done
+
+if [[ "$LATENCY_WARN_MS" -gt "$LATENCY_INCIDENT_MS" ]]; then
+  echo "STOP: latency_warn_ms cannot exceed latency_incident_ms" >&2
+  exit 2
+fi
+
+mapfile -t REQUIRED_IDS < <(yq -r '.target.required_service_ids[]?' "$CONTRACT")
+mapfile -t OPTIONAL_IDS < <(yq -r '.target.optional_service_ids[]?' "$CONTRACT")
+
+if [[ "${#REQUIRED_IDS[@]}" -eq 0 ]]; then
+  echo "STOP: required_service_ids is empty in $CONTRACT" >&2
+  exit 2
+fi
+
+required_total="${#REQUIRED_IDS[@]}"
+optional_total="${#OPTIONAL_IDS[@]}"
+required_ok=0
+required_warn=0
+required_fail=0
+optional_ok=0
+optional_warn=0
+
+probe_state=""
+probe_note=""
+probe_latency_ms=0
+
+probe_endpoint() {
+  local url="$1"
+  local expect_raw="$2"
+  local expect="$(printf '%s' "$expect_raw" | tr -d '[:space:]')"
+  local start_ms end_ms curl_out curl_rc http_code time_total
+  local ok=0
+
+  start_ms="$(now_ms)"
+  set +e
+  curl_out="$(curl -sS -o /dev/null -w "%{http_code}\t%{time_total}" \
+    --connect-timeout "$CONNECT_TIMEOUT_SEC" \
+    --max-time "$MAX_TIME_SEC" \
+    "$url" 2>/dev/null)"
+  curl_rc=$?
+  set -e
+  end_ms="$(now_ms)"
+  probe_latency_ms=$((end_ms - start_ms))
+
+  if [[ "$curl_rc" -ne 0 ]]; then
+    probe_state="FAIL"
+    probe_note="curl_exit=$curl_rc"
+    return
+  fi
+
+  http_code="$(printf '%s' "$curl_out" | cut -f1)"
+  time_total="$(printf '%s' "$curl_out" | cut -f2)"
+  if [[ -n "$time_total" ]]; then
+    probe_latency_ms="$(awk -v t="$time_total" 'BEGIN{printf "%d", (t*1000)+0.5}')"
+  fi
+
+  IFS=',' read -r -a expected_codes <<< "$expect"
+  for expected_code in "${expected_codes[@]}"; do
+    if [[ -n "$expected_code" && "$http_code" == "$expected_code" ]]; then
+      ok=1
+      break
+    fi
+  done
+
+  if [[ "$ok" -eq 1 ]]; then
+    probe_state="OK"
+    probe_note="http=$http_code"
+  else
+    probe_state="FAIL"
+    probe_note="http=$http_code expected=$expect"
+  fi
+}
+
+echo "infra.core.slo.status"
+echo "contract: $CONTRACT"
+echo "host: $TARGET_HOST"
+echo "schema_version: $SCHEMA_VERSION"
+echo
+printf "%-14s %-9s %-8s %-8s %s\n" "SERVICE" "SCOPE" "STATUS" "LATENCY" "NOTE"
+
+for service_id in "${REQUIRED_IDS[@]}"; do
+  svc_scope="required"
+  svc_status="OK"
+  svc_note=""
+  svc_latency="-"
+
+  registry_host="$(yq -r ".services.\"$service_id\".host // \"\"" "$SERVICE_REGISTRY")"
+  if [[ -z "$registry_host" || "$registry_host" == "null" ]]; then
+    svc_status="FAIL"
+    svc_note="missing_in_service_registry"
+  elif [[ "$registry_host" != "$TARGET_HOST" ]]; then
+    svc_status="FAIL"
+    svc_note="registry_host=$registry_host expected=$TARGET_HOST"
+  fi
+
+  endpoint_row="$(yq -r ".endpoints[] | select(.id == \"$service_id\") | [(.host // \"\"), ((.enabled // true)|tostring), (.url // \"\"), ((.expect // 200)|tostring)] | @tsv" "$SERVICES_HEALTH" | head -n1 || true)"
+  if [[ -z "$endpoint_row" ]]; then
+    svc_status="FAIL"
+    svc_note="${svc_note:+$svc_note; }missing_in_services_health"
+  else
+    IFS=$'\t' read -r endpoint_host endpoint_enabled endpoint_url endpoint_expect <<< "$endpoint_row"
+    if [[ "$endpoint_host" != "$TARGET_HOST" ]]; then
+      svc_status="FAIL"
+      svc_note="${svc_note:+$svc_note; }endpoint_host=$endpoint_host expected=$TARGET_HOST"
+    fi
+    if [[ "$endpoint_enabled" != "true" ]]; then
+      svc_status="FAIL"
+      svc_note="${svc_note:+$svc_note; }endpoint_disabled"
+    fi
+    if [[ -z "$endpoint_url" || "$endpoint_url" == "null" ]]; then
+      svc_status="FAIL"
+      svc_note="${svc_note:+$svc_note; }missing_endpoint_url"
+    fi
+
+    if [[ "$svc_status" != "FAIL" ]]; then
+      probe_endpoint "$endpoint_url" "$endpoint_expect"
+      svc_latency="${probe_latency_ms}ms"
+      if [[ "$probe_state" != "OK" ]]; then
+        svc_status="FAIL"
+        svc_note="${svc_note:+$svc_note; }$probe_note"
+      else
+        svc_note="${svc_note:+$svc_note; }$probe_note"
+        if [[ "$probe_latency_ms" -ge "$LATENCY_INCIDENT_MS" ]]; then
+          svc_status="FAIL"
+          svc_note="${svc_note:+$svc_note; }latency>=${LATENCY_INCIDENT_MS}ms"
+        elif [[ "$probe_latency_ms" -ge "$LATENCY_WARN_MS" ]]; then
+          svc_status="WARN"
+          svc_note="${svc_note:+$svc_note; }latency>=${LATENCY_WARN_MS}ms"
+        fi
+      fi
+    fi
+  fi
+
+  case "$svc_status" in
+    OK) required_ok=$((required_ok + 1)) ;;
+    WARN) required_warn=$((required_warn + 1)) ;;
+    FAIL) required_fail=$((required_fail + 1)) ;;
+  esac
+  printf "%-14s %-9s %-8s %-8s %s\n" "$service_id" "$svc_scope" "$svc_status" "$svc_latency" "$svc_note"
+done
+
+for service_id in "${OPTIONAL_IDS[@]}"; do
+  svc_scope="optional"
+  svc_status="OK"
+  svc_note=""
+  svc_latency="-"
+  can_probe=1
+
+  registry_host="$(yq -r ".services.\"$service_id\".host // \"\"" "$SERVICE_REGISTRY")"
+  if [[ -z "$registry_host" || "$registry_host" == "null" ]]; then
+    svc_status="WARN"
+    svc_note="missing_in_service_registry"
+  elif [[ "$registry_host" != "$TARGET_HOST" ]]; then
+    svc_status="WARN"
+    svc_note="registry_host=$registry_host expected=$TARGET_HOST"
+  fi
+
+  endpoint_row="$(yq -r ".endpoints[] | select(.id == \"$service_id\") | [(.host // \"\"), ((.enabled // true)|tostring), (.url // \"\"), ((.expect // 200)|tostring)] | @tsv" "$SERVICES_HEALTH" | head -n1 || true)"
+  if [[ -z "$endpoint_row" ]]; then
+    svc_status="WARN"
+    svc_note="${svc_note:+$svc_note; }missing_in_services_health"
+    can_probe=0
+  else
+    IFS=$'\t' read -r endpoint_host endpoint_enabled endpoint_url endpoint_expect <<< "$endpoint_row"
+    if [[ "$endpoint_host" != "$TARGET_HOST" ]]; then
+      svc_status="WARN"
+      svc_note="${svc_note:+$svc_note; }endpoint_host=$endpoint_host expected=$TARGET_HOST"
+      can_probe=0
+    fi
+    if [[ "$endpoint_enabled" != "true" ]]; then
+      svc_status="WARN"
+      svc_note="${svc_note:+$svc_note; }endpoint_disabled"
+      can_probe=0
+    fi
+    if [[ -z "$endpoint_url" || "$endpoint_url" == "null" ]]; then
+      svc_status="WARN"
+      svc_note="${svc_note:+$svc_note; }missing_endpoint_url"
+      can_probe=0
+    fi
+
+    if [[ "$can_probe" -eq 1 ]]; then
+      probe_endpoint "$endpoint_url" "$endpoint_expect"
+      svc_latency="${probe_latency_ms}ms"
+      if [[ "$probe_state" != "OK" ]]; then
+        svc_status="WARN"
+        svc_note="${svc_note:+$svc_note; }$probe_note"
+      else
+        svc_note="${svc_note:+$svc_note; }$probe_note"
+        if [[ "$probe_latency_ms" -ge "$LATENCY_WARN_MS" ]]; then
+          svc_status="WARN"
+          svc_note="${svc_note:+$svc_note; }latency>=${LATENCY_WARN_MS}ms"
+        fi
+      fi
+    fi
+  fi
+
+  case "$svc_status" in
+    OK) optional_ok=$((optional_ok + 1)) ;;
+    WARN) optional_warn=$((optional_warn + 1)) ;;
+  esac
+  printf "%-14s %-9s %-8s %-8s %s\n" "$service_id" "$svc_scope" "$svc_status" "$svc_latency" "$svc_note"
+done
+
+overall_status="OK"
+if [[ "$required_fail" -gt "$MAX_FAILED_REQUIRED" ]]; then
+  overall_status="INCIDENT"
+else
+  if [[ "$required_fail" -gt 0 || "$required_warn" -gt 0 ]]; then
+    overall_status="WARN"
+  fi
+fi
+
+if [[ "$optional_warn" -ge "$WARN_FAILED_OPTIONAL" && "$WARN_FAILED_OPTIONAL" -gt 0 ]]; then
+  overall_status="$(promote_status "$overall_status" "WARN")"
+fi
+
+echo
+echo "summary: $overall_status required_ok=${required_ok}/${required_total} required_warn=$required_warn required_fail=$required_fail optional_ok=${optional_ok}/${optional_total} optional_warn=$optional_warn"
+echo "status: $overall_status"
+exit 0
