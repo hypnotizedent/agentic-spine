@@ -2,29 +2,167 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
-CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
-QUERY="${1:-}"
+CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
+GRAPH_EXEC="${COMMUNICATIONS_GRAPH_EXEC:-$ROOT/ops/plugins/ms-graph/bin/graph-cap-exec}"
+QUERY=""
+TOP=""
+JSON=0
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing dependency: $1" >&2; exit 1; }; }
-need yq
-[[ -f "$CONTRACT" ]] || { echo "ERROR: missing contract: $CONTRACT" >&2; exit 1; }
+extract_first_json() {
+  local raw_file="$1"
+  local out_file="$2"
+  python3 - "$raw_file" "$out_file" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
 
-rows="$(yq e -r '.pilot.mailboxes[] | [.id, .address, .role, .status] | @tsv' "$CONTRACT")"
+raw_path = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+text = raw_path.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+decoder = json.JSONDecoder()
+for idx, ch in enumerate(text):
+    if ch != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict):
+        out_path.write_text(json.dumps(obj), encoding="utf-8")
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+need yq
+need jq
+[[ -f "$CONTRACT" ]] || { echo "ERROR: missing contract: $CONTRACT" >&2; exit 1; }
+[[ -x "$GRAPH_EXEC" ]] || { echo "ERROR: missing graph executor: $GRAPH_EXEC" >&2; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --query) QUERY="${2:-}"; shift 2 ;;
+    --top) TOP="${2:-}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-mail-search [--query <text>] [--top <n>] [--json]
+
+Simulation mode: searches contract mailbox catalog.
+Live mode: runs Microsoft Graph mailbox search via graph-cap-exec.
+USAGE
+      exit 0
+      ;;
+    *)
+      if [[ -z "$QUERY" ]]; then
+        QUERY="$1"
+      else
+        echo "ERROR: unknown argument: $1" >&2
+        exit 2
+      fi
+      shift
+      ;;
+  esac
+done
+
+mode="$(yq e -r '.pilot.send_test.mode // "simulation-only"' "$CONTRACT")"
+stage="$(yq e -r '.pilot.stage // ""' "$CONTRACT")"
+backend="$(yq e -r '.pilot.execution_backend // "none"' "$CONTRACT")"
+default_top="$(yq e -r '.pilot.graph.search_default_top // 10' "$CONTRACT")"
+query_effective="${QUERY:-*}"
+top_effective="${TOP:-$default_top}"
+
+if [[ "$mode" == "simulation-only" ]]; then
+  rows="$(yq e -r '.pilot.mailboxes[] | [.id, .address, .role, .status] | @tsv' "$CONTRACT")"
+  count=0
+  matches_json="$(mktemp)"
+  trap 'rm -f "$matches_json"' EXIT
+  echo "[]" >"$matches_json"
+  while IFS=$'\t' read -r id address role status; do
+    line="$id $address $role $status"
+    if [[ -z "$QUERY" ]] || echo "$line" | grep -qi -- "$QUERY"; then
+      count=$((count + 1))
+      jq --arg id "$id" --arg address "$address" --arg role "$role" --arg status "$status" \
+        '. += [{"id":$id,"address":$address,"role":$role,"status":$status}]' \
+        "$matches_json" > "${matches_json}.tmp" && mv "${matches_json}.tmp" "$matches_json"
+    fi
+  done <<< "$rows"
+
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n \
+      --arg capability "communications.mail.search" \
+      --arg schema_version "1.0" \
+      --arg status "ok" \
+      --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg mode "$mode" \
+      --arg stage "$stage" \
+      --arg backend "$backend" \
+      --arg query "$QUERY" \
+      --argjson matches "$(cat "$matches_json")" \
+      '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,matches:($matches|length),messages:$matches}}'
+    exit 0
+  fi
+
+  echo "communications.mail.search"
+  echo "mode: $mode"
+  echo "stage: $stage"
+  [[ -n "$QUERY" ]] && echo "query: $QUERY"
+  printf "%-12s %-34s %-14s %-10s\n" "id" "address" "role" "status"
+  printf "%-12s %-34s %-14s %-10s\n" "------------" "----------------------------------" "--------------" "----------"
+  jq -r '.[] | [.id,.address,.role,.status] | @tsv' "$matches_json" | while IFS=$'\t' read -r id address role status; do
+    printf "%-12s %-34s %-14s %-10s\n" "$id" "$address" "$role" "$status"
+  done
+  echo "matches: $count"
+  exit 0
+fi
+
+# Live pilot path (Graph-backed)
+result_json_tmp="$(mktemp)"
+result_raw_tmp="$(mktemp)"
+result_err_tmp="$(mktemp)"
+trap 'rm -f "$result_raw_tmp" "$result_json_tmp" "$result_err_tmp"' EXIT
+if ! "$GRAPH_EXEC" mail_search --query "$query_effective" --top "$top_effective" >"$result_raw_tmp" 2>"$result_err_tmp"; then
+  echo "ERROR: graph mail search failed" >&2
+  cat "$result_err_tmp" >&2 || true
+  exit 1
+fi
+
+if ! extract_first_json "$result_raw_tmp" "$result_json_tmp"; then
+  echo "ERROR: graph mail search returned invalid JSON payload" >&2
+  cat "$result_raw_tmp" >&2 || true
+  exit 1
+fi
+
+message_count="$(jq -r '.value | length' "$result_json_tmp" 2>/dev/null || echo 0)"
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.mail.search" \
+    --arg schema_version "1.0" \
+    --arg status "ok" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg mode "$mode" \
+    --arg stage "$stage" \
+    --arg backend "$backend" \
+    --arg query "$query_effective" \
+    --argjson top "$top_effective" \
+    --argjson graph "$(cat "$result_json_tmp")" \
+    '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,top:$top,graph:$graph}}'
+  exit 0
+fi
 
 echo "communications.mail.search"
-if [[ -n "$QUERY" ]]; then
-  echo "query: $QUERY"
-fi
-printf "%-12s %-34s %-14s %-10s\n" "id" "address" "role" "status"
-printf "%-12s %-34s %-14s %-10s\n" "------------" "----------------------------------" "--------------" "----------"
-
-count=0
-while IFS=$'\t' read -r id address role status; do
-  line="$id $address $role $status"
-  if [[ -z "$QUERY" ]] || echo "$line" | grep -qi -- "$QUERY"; then
-    printf "%-12s %-34s %-14s %-10s\n" "$id" "$address" "$role" "$status"
-    count=$((count + 1))
-  fi
-done <<< "$rows"
-
-echo "matches: $count"
+echo "mode: $mode"
+echo "stage: $stage"
+echo "backend: $backend"
+echo "query: $query_effective"
+echo "top: $top_effective"
+echo "matches: $message_count"
+printf "%-26s %-30s %-42s\n" "received_utc" "from" "subject"
+printf "%-26s %-30s %-42s\n" "--------------------------" "------------------------------" "------------------------------------------"
+jq -r '.value[]? | [(.receivedDateTime // ""), (.from.emailAddress.address // ""), (.subject // "")] | @tsv' "$result_json_tmp" | while IFS=$'\t' read -r received from subject; do
+  printf "%-26s %-30s %-42s\n" "$received" "$from" "$subject"
+done

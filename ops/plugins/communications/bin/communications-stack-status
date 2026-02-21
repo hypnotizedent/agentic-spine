@@ -2,19 +2,49 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
-CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
 MANIFEST="$ROOT/ops/bindings/infra.relocation.plan.yaml"
 POLICY="$ROOT/ops/bindings/infra.placement.policy.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
+GRAPH_EXEC="${COMMUNICATIONS_GRAPH_EXEC:-$ROOT/ops/plugins/ms-graph/bin/graph-cap-exec}"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+extract_first_json() {
+  local raw_file="$1"
+  local out_file="$2"
+  python3 - "$raw_file" "$out_file" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+raw_path = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+text = raw_path.read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+decoder = json.JSONDecoder()
+for idx, ch in enumerate(text):
+    if ch != "{":
+        continue
+    try:
+        obj, _ = decoder.raw_decode(text[idx:])
+    except json.JSONDecodeError:
+        continue
+    if isinstance(obj, dict):
+        out_path.write_text(json.dumps(obj), encoding="utf-8")
+        sys.exit(0)
+sys.exit(1)
+PY
+}
 
 need yq
+need jq
 [[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
 [[ -f "$MANIFEST" ]] || fail "missing relocation manifest: $MANIFEST"
 [[ -f "$POLICY" ]] || fail "missing placement policy: $POLICY"
 [[ -f "$CAPS" ]] || fail "missing capabilities registry: $CAPS"
+[[ -x "$GRAPH_EXEC" ]] || fail "missing graph executor: $GRAPH_EXEC"
 
 vm_host="$(yq e -r '.pilot.vm_target.hostname // ""' "$CONTRACT")"
 vm_id="$(yq e -r '.pilot.vm_target.vm_id // ""' "$CONTRACT")"
@@ -22,8 +52,12 @@ profile="$(yq e -r '.pilot.vm_target.profile // ""' "$CONTRACT")"
 proxmox="$(yq e -r '.pilot.vm_target.proxmox_host // ""' "$CONTRACT")"
 provider="$(yq e -r '.pilot.provider // ""' "$CONTRACT")"
 stage="$(yq e -r '.pilot.stage // ""' "$CONTRACT")"
+mode="$(yq e -r '.pilot.send_test.mode // "simulation-only"' "$CONTRACT")"
+backend="$(yq e -r '.pilot.execution_backend // "none"' "$CONTRACT")"
+live_probe_query="$(yq e -r '.pilot.graph.live_probe_query // "*"' "$CONTRACT")"
 mailbox_count="$(yq e '.pilot.mailboxes | length' "$CONTRACT")"
 cap_count="$(yq e '.capabilities | keys | map(select(test("^communications\\."))) | length' "$CAPS")"
+mailbox_active_count="$(yq e '.pilot.mailboxes[] | select(.status == "active") | .id' "$CONTRACT" | sed '/^$/d' | wc -l | tr -d ' ')"
 
 manifest_vm_id="$(yq e -r ".vm_targets[] | select(.hostname == \"$vm_host\") | .vm_id // \"\"" "$MANIFEST" 2>/dev/null || true)"
 policy_host_site="$(yq e -r ".hosts.\"$vm_host\".site // \"\"" "$POLICY" 2>/dev/null || true)"
@@ -43,15 +77,46 @@ if [[ "$cap_count" -lt 4 ]]; then
   status="FAIL"
 fi
 
+live_probe_status="skipped"
+live_probe_count=0
+if [[ "$mode" != "simulation-only" ]]; then
+  if [[ "$mailbox_active_count" -lt 1 ]]; then
+    status="FAIL"
+  fi
+  probe_json_tmp="$(mktemp)"
+  probe_raw_tmp="$(mktemp)"
+  probe_err_tmp="$(mktemp)"
+  trap 'rm -f "$probe_raw_tmp" "$probe_json_tmp" "$probe_err_tmp"' EXIT
+  if "$GRAPH_EXEC" mail_search --query "$live_probe_query" --top 1 >"$probe_raw_tmp" 2>"$probe_err_tmp"; then
+    if ! extract_first_json "$probe_raw_tmp" "$probe_json_tmp"; then
+      live_probe_status="invalid_json"
+      status="FAIL"
+    elif live_probe_count="$(jq -r '.value | length' "$probe_json_tmp" 2>/dev/null)"; then
+      live_probe_status="ok"
+    else
+      live_probe_status="invalid_json"
+      status="FAIL"
+    fi
+  else
+    live_probe_status="failed"
+    status="FAIL"
+  fi
+fi
+
 echo "communications.stack.status"
 echo "provider: $provider"
 echo "stage: $stage"
+echo "mode: $mode"
+echo "execution_backend: $backend"
 echo "vm_target: $vm_host (vm_id=$vm_id, profile=$profile, proxmox_host=$proxmox)"
 echo "mailboxes: $mailbox_count"
+echo "mailboxes_active: $mailbox_active_count"
 echo "communications_capabilities_registered: $cap_count"
 echo "manifest_vm_target_match: $([[ "$manifest_vm_id" == "$vm_id" ]] && echo yes || echo no)"
 echo "placement_policy_host_registered: $([[ -n "$policy_host_site" ]] && echo yes || echo no)"
 echo "placement_policy_target_requirement: $([[ "$policy_req_host" == "$proxmox" ]] && echo yes || echo no)"
+echo "live_probe_status: $live_probe_status"
+echo "live_probe_count: $live_probe_count"
 echo "status: $status"
 
 [[ "$status" == "OK" ]] || exit 1

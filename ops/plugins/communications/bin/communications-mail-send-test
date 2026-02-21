@@ -2,18 +2,24 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
-CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
+GRAPH_EXEC="${COMMUNICATIONS_GRAPH_EXEC:-$ROOT/ops/plugins/ms-graph/bin/graph-cap-exec}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 
 TO=""
-SUBJECT="Spine communications WS1 send-test"
-BODY="WS1 pilot send-test (simulation-only)."
+SUBJECT="Spine communications live-pilot send-test"
+BODY="WS1 live pilot send-test"
 EXECUTE=0
+JSON=0
 
 usage() {
   cat <<'USAGE'
-Usage: communications-mail-send-test --to <address> [--subject <text>] [--body <text>] [--execute]
+Usage: communications-mail-send-test [--to <address>] [--subject <text>] [--body <text>] [--execute] [--json]
 
-WS1 contract enforces simulation-only mode. --execute records simulated payload locally.
+Runs governed pilot send-test using contract mode:
+- simulation-only: writes simulated artifact
+- live-pilot: sends real test mail through Microsoft Graph
 USAGE
 }
 
@@ -23,18 +29,28 @@ while [[ $# -gt 0 ]]; do
     --subject) SUBJECT="${2:-}"; shift 2 ;;
     --body) BODY="${2:-}"; shift 2 ;;
     --execute) EXECUTE=1; shift ;;
+    --json) JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-[[ -n "$TO" ]] || { usage >&2; exit 2; }
 command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
 [[ -f "$CONTRACT" ]] || { echo "ERROR: missing contract: $CONTRACT" >&2; exit 1; }
+[[ -x "$GRAPH_EXEC" ]] || { echo "ERROR: missing graph executor: $GRAPH_EXEC" >&2; exit 1; }
 
 mode="$(yq e -r '.pilot.send_test.mode // "simulation-only"' "$CONTRACT")"
-default_sender="$(yq e -r '.pilot.send_test.default_sender // "ops@communications.local"' "$CONTRACT")"
+stage="$(yq e -r '.pilot.stage // ""' "$CONTRACT")"
+backend="$(yq e -r '.pilot.execution_backend // "none"' "$CONTRACT")"
+default_sender="$(yq e -r '.pilot.send_test.default_sender // "ronny@mintprints.com"' "$CONTRACT")"
+default_recipient="$(yq e -r '.pilot.send_test.default_recipient // ""' "$CONTRACT")"
 mapfile -t allowed_domains < <(yq e -r '.pilot.send_test.allowed_recipient_domains[]?' "$CONTRACT")
+
+if [[ -z "$TO" ]]; then
+  TO="$default_recipient"
+fi
+[[ -n "$TO" ]] || { echo "ERROR: missing recipient (--to or pilot.send_test.default_recipient)" >&2; usage >&2; exit 2; }
 
 recipient_domain="${TO##*@}"
 allowed=false
@@ -43,19 +59,86 @@ for d in "${allowed_domains[@]:-}"; do
 done
 [[ "$allowed" == true ]] || { echo "ERROR: recipient domain '$recipient_domain' not allowed by contract" >&2; exit 1; }
 
-echo "communications.mail.send.test"
-echo "mode: $mode"
-echo "from: $default_sender"
-echo "to: $TO"
-echo "subject: $SUBJECT"
+stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+out_dir="$SPINE_OUTBOX/communications"
+mkdir -p "$out_dir"
+out_file="$out_dir/communications-send-test-last.yaml"
+
+emit_json() {
+  local status="$1"
+  local result="$2"
+  jq -n \
+    --arg capability "communications.mail.send.test" \
+    --arg schema_version "1.0" \
+    --arg status "$status" \
+    --arg generated_at "$stamp" \
+    --arg mode "$mode" \
+    --arg stage "$stage" \
+    --arg backend "$backend" \
+    --arg from "$default_sender" \
+    --arg to "$TO" \
+    --arg subject "$SUBJECT" \
+    --arg record "$out_file" \
+    --arg default_recipient "$default_recipient" \
+    --arg result "$result" \
+    '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,from:$from,to:$to,subject:$subject,default_recipient:$default_recipient,record:$record,result:$result}}'
+}
 
 if [[ "$EXECUTE" -ne 1 ]]; then
-  echo "status: DRY-RUN (pass --execute after manual approval to record simulation)"
+  dry_reason="DRY-RUN (pass --execute after manual approval to perform send-test)"
+  if [[ "$JSON" -eq 1 ]]; then
+    emit_json "dry-run" "$dry_reason"
+  else
+    echo "communications.mail.send.test"
+    echo "mode: $mode"
+    echo "stage: $stage"
+    echo "backend: $backend"
+    echo "from: $default_sender"
+    echo "to: $TO"
+    echo "subject: $SUBJECT"
+    echo "status: $dry_reason"
+  fi
   exit 0
 fi
 
-stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-out_file="${TMPDIR:-/tmp}/communications-send-test-last.yaml"
+if [[ "$mode" == "simulation-only" ]]; then
+  cat > "$out_file" <<YAML
+created_at: "$stamp"
+from: "$default_sender"
+to: "$TO"
+subject: "$SUBJECT"
+body: "$BODY"
+mode: "$mode"
+stage: "$stage"
+backend: "$backend"
+status: simulated
+YAML
+  if [[ "$JSON" -eq 1 ]]; then
+    emit_json "simulated" "simulation artifact written"
+  else
+    echo "communications.mail.send.test"
+    echo "mode: $mode"
+    echo "stage: $stage"
+    echo "backend: $backend"
+    echo "from: $default_sender"
+    echo "to: $TO"
+    echo "subject: $SUBJECT"
+    echo "status: simulated"
+    echo "record: $out_file"
+  fi
+  exit 0
+fi
+
+# Live pilot send path
+live_out_tmp="$(mktemp)"
+live_err_tmp="$(mktemp)"
+trap 'rm -f "$live_out_tmp" "$live_err_tmp"' EXIT
+if ! "$GRAPH_EXEC" mail_send --to "$TO" --subject "$SUBJECT" --body "$BODY" >"$live_out_tmp" 2>"$live_err_tmp"; then
+  echo "ERROR: live send failed" >&2
+  cat "$live_err_tmp" >&2 || true
+  exit 1
+fi
+
 cat > "$out_file" <<YAML
 created_at: "$stamp"
 from: "$default_sender"
@@ -63,8 +146,23 @@ to: "$TO"
 subject: "$SUBJECT"
 body: "$BODY"
 mode: "$mode"
-status: simulated
+stage: "$stage"
+backend: "$backend"
+status: sent
+graph_response: |
+$(sed 's/^/  /' "$live_out_tmp")
 YAML
 
-echo "status: simulated"
-echo "record: $out_file"
+if [[ "$JSON" -eq 1 ]]; then
+  emit_json "sent" "live pilot send completed"
+else
+  echo "communications.mail.send.test"
+  echo "mode: $mode"
+  echo "stage: $stage"
+  echo "backend: $backend"
+  echo "from: $default_sender"
+  echo "to: $TO"
+  echo "subject: $SUBJECT"
+  echo "status: sent"
+  echo "record: $out_file"
+fi
