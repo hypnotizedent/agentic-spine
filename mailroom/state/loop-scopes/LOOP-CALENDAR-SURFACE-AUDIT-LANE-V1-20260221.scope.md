@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-CALENDAR-SURFACE-AUDIT-LANE-V1-20260221
 created: 2026-02-21
-status: active
+status: closed
 owner: "@ronny"
 scope: calendar
 priority: high
