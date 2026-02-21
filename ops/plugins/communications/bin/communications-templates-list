@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+TEMPLATES_CONTRACT="${COMMUNICATIONS_TEMPLATES_CONTRACT:-$ROOT/ops/bindings/communications.templates.catalog.yaml}"
+CHANNEL=""
+MESSAGE_TYPE=""
+JSON=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --channel) CHANNEL="${2:-}"; shift 2 ;;
+    --message-type) MESSAGE_TYPE="${2:-}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-templates-list [--channel email|sms] [--message-type <type>] [--json]
+
+List canonical communications templates.
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ -f "$TEMPLATES_CONTRACT" ]] || { echo "ERROR: missing contract: $TEMPLATES_CONTRACT" >&2; exit 1; }
+
+rows="$(yq e -o=json '.templates' "$TEMPLATES_CONTRACT")"
+filtered="$rows"
+if [[ -n "$CHANNEL" ]]; then
+  filtered="$(echo "$filtered" | jq --arg channel "$CHANNEL" '[.[] | select(.channel == $channel)]')"
+fi
+if [[ -n "$MESSAGE_TYPE" ]]; then
+  filtered="$(echo "$filtered" | jq --arg message_type "$MESSAGE_TYPE" '[.[] | select(.message_type == $message_type)]')"
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.templates.list" \
+    --arg schema_version "1.0" \
+    --arg status "ok" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg channel "$CHANNEL" \
+    --arg message_type "$MESSAGE_TYPE" \
+    --argjson templates "$filtered" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        channel: $channel,
+        message_type: $message_type,
+        count: ($templates | length),
+        templates: $templates
+      }
+    }'
+  exit 0
+fi
+
+echo "communications.templates.list"
+[[ -n "$CHANNEL" ]] && echo "channel: $CHANNEL"
+[[ -n "$MESSAGE_TYPE" ]] && echo "message_type: $MESSAGE_TYPE"
+printf "%-24s %-16s %-10s %-34s\n" "template_id" "message_type" "channel" "subject"
+printf "%-24s %-16s %-10s %-34s\n" "------------------------" "----------------" "----------" "----------------------------------"
+echo "$filtered" | jq -r '.[] | [.id, .message_type, .channel, (.subject // "")] | @tsv' | \
+while IFS=$'\t' read -r id message_type channel subject; do
+  printf "%-24s %-16s %-10s %-34s\n" "$id" "$message_type" "$channel" "$subject"
+done
+echo "count: $(echo "$filtered" | jq -r 'length')"

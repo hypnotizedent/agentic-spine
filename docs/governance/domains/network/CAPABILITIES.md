@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-16
+last_verified: 2026-02-21
 scope: domain-capability-catalog
 domain: network
 ---
@@ -15,6 +15,7 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | `network.ap.facts.capture` | `read-only` | `manual` | `docs/infrastructure/domains/network/` |
 | `network.cutover.preflight` | `read-only` | `auto` | `docs/infrastructure/domains/network/` |
 | `network.home.dhcp.audit` | `read-only` | `auto` | `docs/infrastructure/domains/network/` |
+| `network.home.dhcp.dns.set` | `mutating` | `manual` | `docs/infrastructure/domains/network/` |
 | `network.home.dhcp.reservation.create` | `mutating` | `manual` | `docs/infrastructure/domains/network/` |
 | `network.home.unifi.clients.snapshot` | `read-only` | `auto` | `docs/infrastructure/domains/network/` |
 | `network.home.wifi.create` | `mutating` | `manual` | `docs/infrastructure/domains/network/` |
@@ -27,4 +28,5 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | `network.pve.post_cutover.harden` | `mutating` | `auto` | `docs/infrastructure/domains/network/` |
 | `network.shop.audit.canonical` | `read-only` | `auto` | `docs/infrastructure/domains/network/` |
 | `network.shop.audit.status` | `read-only` | `auto` | `docs/infrastructure/domains/network/` |
+| `network.shop.pihole.normalize` | `mutating` | `manual` | `docs/infrastructure/domains/network/` |
 | `network.unifi.clients.snapshot` | `read-only` | `manual` | `docs/infrastructure/domains/network/` |

@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+PROVIDERS_CONTRACT="${COMMUNICATIONS_PROVIDERS_CONTRACT:-$ROOT/ops/bindings/communications.providers.contract.yaml}"
+POLICY_CONTRACT="${COMMUNICATIONS_POLICY_CONTRACT:-$ROOT/ops/bindings/communications.policy.contract.yaml}"
+TEMPLATES_CONTRACT="${COMMUNICATIONS_TEMPLATES_CONTRACT:-$ROOT/ops/bindings/communications.templates.catalog.yaml}"
+
+CHANNEL=""
+MESSAGE_TYPE=""
+RECIPIENT=""
+SUBJECT=""
+BODY=""
+VARS_JSON="{}"
+CONSENT_STATE="unknown"
+TIMEZONE=""
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-send-preview --channel <email|sms> --message-type <type> --to <recipient> [options]
+
+Options:
+  --subject <text>              Optional subject (used for custom email).
+  --body <text>                 Optional body override (used for custom templates).
+  --vars-json <json object>     Template variables object.
+  --consent-state <state>       opted-in | opted-out | unknown (default: unknown).
+  --timezone <IANA TZ>          Override quiet-hours timezone.
+  --json                        Emit JSON envelope.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --channel) CHANNEL="${2:-}"; shift 2 ;;
+    --message-type) MESSAGE_TYPE="${2:-}"; shift 2 ;;
+    --to) RECIPIENT="${2:-}"; shift 2 ;;
+    --subject) SUBJECT="${2:-}"; shift 2 ;;
+    --body) BODY="${2:-}"; shift 2 ;;
+    --vars-json) VARS_JSON="${2:-}"; shift 2 ;;
+    --consent-state) CONSENT_STATE="${2:-}"; shift 2 ;;
+    --timezone) TIMEZONE="${2:-}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: missing dependency: python3" >&2; exit 1; }
+[[ -f "$PROVIDERS_CONTRACT" ]] || { echo "ERROR: missing contract: $PROVIDERS_CONTRACT" >&2; exit 1; }
+[[ -f "$POLICY_CONTRACT" ]] || { echo "ERROR: missing contract: $POLICY_CONTRACT" >&2; exit 1; }
+[[ -f "$TEMPLATES_CONTRACT" ]] || { echo "ERROR: missing contract: $TEMPLATES_CONTRACT" >&2; exit 1; }
+
+[[ "$CHANNEL" == "email" || "$CHANNEL" == "sms" ]] || { echo "ERROR: --channel must be email or sms" >&2; exit 2; }
+[[ -n "$MESSAGE_TYPE" ]] || { echo "ERROR: --message-type is required" >&2; exit 2; }
+[[ -n "$RECIPIENT" ]] || { echo "ERROR: --to is required" >&2; exit 2; }
+[[ "$CONSENT_STATE" == "opted-in" || "$CONSENT_STATE" == "opted-out" || "$CONSENT_STATE" == "unknown" ]] || {
+  echo "ERROR: --consent-state must be opted-in, opted-out, or unknown" >&2
+  exit 2
+}
+
+echo "$VARS_JSON" | jq -e 'type == "object"' >/dev/null 2>&1 || {
+  echo "ERROR: --vars-json must be a JSON object" >&2
+  exit 2
+}
+
+provider="$(
+  if [[ "$CHANNEL" == "email" ]]; then
+    yq e -r ".routing.message_types.\"$MESSAGE_TYPE\".email_provider // \"\"" "$PROVIDERS_CONTRACT"
+  else
+    yq e -r ".routing.message_types.\"$MESSAGE_TYPE\".sms_provider // \"\"" "$PROVIDERS_CONTRACT"
+  fi
+)"
+[[ -n "$provider" ]] || { echo "ERROR: no provider route for message_type=$MESSAGE_TYPE channel=$CHANNEL" >&2; exit 1; }
+
+provider_status="$(yq e -r ".providers.\"$provider\".status // \"inactive\"" "$PROVIDERS_CONTRACT")"
+[[ "$provider_status" == "active" ]] || { echo "ERROR: provider '$provider' is not active" >&2; exit 1; }
+
+transactional_mode="$(yq e -r '.transactional.mode // "simulation-only"' "$PROVIDERS_CONTRACT")"
+provider_execution_mode="$(yq e -r ".providers.\"$provider\".execution_mode // \"simulation-only\"" "$PROVIDERS_CONTRACT")"
+
+consent_required="$(yq e -r ".consent.channels.\"$CHANNEL\".require_opt_in" "$POLICY_CONTRACT")"
+if [[ -z "$consent_required" || "$consent_required" == "null" ]]; then
+  consent_required="true"
+fi
+policy_block_reasons="[]"
+if [[ "$consent_required" == "true" && "$CONSENT_STATE" != "opted-in" ]]; then
+  policy_block_reasons="$(echo "$policy_block_reasons" | jq -c --arg reason "consent_not_opted_in" '. + [$reason]')"
+fi
+
+tz_default="$(yq e -r '.delivery_windows.quiet_hours.timezone_default // "America/New_York"' "$POLICY_CONTRACT")"
+quiet_tz="${TIMEZONE:-$tz_default}"
+quiet_enabled="$(yq e -r '.delivery_windows.quiet_hours.enabled' "$POLICY_CONTRACT")"
+if [[ -z "$quiet_enabled" || "$quiet_enabled" == "null" ]]; then
+  quiet_enabled="true"
+fi
+quiet_start="$(yq e -r '.delivery_windows.quiet_hours.start_local // "21:00"' "$POLICY_CONTRACT")"
+quiet_end="$(yq e -r '.delivery_windows.quiet_hours.end_local // "08:00"' "$POLICY_CONTRACT")"
+sms_block_quiet="$(yq e -r '.delivery_windows.quiet_hours.sms_block_during_quiet_hours' "$POLICY_CONTRACT")"
+if [[ -z "$sms_block_quiet" || "$sms_block_quiet" == "null" ]]; then
+  sms_block_quiet="true"
+fi
+quiet_blocked="false"
+
+if [[ "$CHANNEL" == "sms" && "$quiet_enabled" == "true" && "$sms_block_quiet" == "true" ]]; then
+  quiet_blocked="$(python3 - "$quiet_tz" "$quiet_start" "$quiet_end" <<'PY'
+import datetime as dt
+import sys
+from zoneinfo import ZoneInfo
+
+tz_name, start_s, end_s = sys.argv[1], sys.argv[2], sys.argv[3]
+now = dt.datetime.now(ZoneInfo(tz_name))
+start_h, start_m = map(int, start_s.split(":"))
+end_h, end_m = map(int, end_s.split(":"))
+current_minutes = now.hour * 60 + now.minute
+start_minutes = start_h * 60 + start_m
+end_minutes = end_h * 60 + end_m
+if start_minutes < end_minutes:
+    blocked = start_minutes <= current_minutes < end_minutes
+else:
+    blocked = current_minutes >= start_minutes or current_minutes < end_minutes
+print("true" if blocked else "false")
+PY
+)"
+fi
+
+if [[ "$quiet_blocked" == "true" ]]; then
+  policy_block_reasons="$(echo "$policy_block_reasons" | jq -c --arg reason "quiet_hours_block" '. + [$reason]')"
+fi
+
+template_json="$(
+  yq e -o=json '.templates' "$TEMPLATES_CONTRACT" \
+    | jq -c --arg mt "$MESSAGE_TYPE" --arg ch "$CHANNEL" '[.[] | select(.message_type == $mt and .channel == $ch)][0]'
+)"
+[[ "$template_json" != "null" ]] || { echo "ERROR: missing template for message_type=$MESSAGE_TYPE channel=$CHANNEL" >&2; exit 1; }
+
+if [[ "$MESSAGE_TYPE" == "custom" ]]; then
+  vars_augmented="$(echo "$VARS_JSON" | jq -c --arg subject "$SUBJECT" --arg body "$BODY" '
+    . + (if ($subject | length) > 0 then {subject: $subject} else {} end)
+      + (if ($body | length) > 0 then {body_text: $body} else {} end)
+  ')"
+else
+  vars_augmented="$VARS_JSON"
+fi
+
+mapfile -t required_vars < <(echo "$template_json" | jq -r '.required_variables[]?')
+for var_name in "${required_vars[@]:-}"; do
+  [[ -n "$var_name" ]] || continue
+  if ! echo "$vars_augmented" | jq -e --arg key "$var_name" 'has($key) and (.[$key] != null) and ((.[$key] | tostring) | length > 0)' >/dev/null 2>&1; then
+    echo "ERROR: missing required template variable: $var_name" >&2
+    exit 1
+  fi
+done
+
+template_subject="$(echo "$template_json" | jq -r '.subject // ""')"
+template_body="$(echo "$template_json" | jq -r '.body_text // ""')"
+
+rendered_subject="$(python3 - "$template_subject" "$vars_augmented" <<'PY'
+import json
+import re
+import sys
+
+text = sys.argv[1]
+vars_obj = json.loads(sys.argv[2])
+def repl(match):
+    key = match.group(1).strip()
+    return str(vars_obj.get(key, ""))
+print(re.sub(r"\{\{\s*([^}]+)\s*\}\}", repl, text))
+PY
+)"
+
+rendered_body="$(python3 - "$template_body" "$vars_augmented" <<'PY'
+import json
+import re
+import sys
+
+text = sys.argv[1]
+vars_obj = json.loads(sys.argv[2])
+def repl(match):
+    key = match.group(1).strip()
+    return str(vars_obj.get(key, ""))
+print(re.sub(r"\{\{\s*([^}]+)\s*\}\}", repl, text))
+PY
+)"
+
+sms_stop_required="$(yq e -r '.consent.channels.sms.require_stop_footer' "$POLICY_CONTRACT")"
+if [[ -z "$sms_stop_required" || "$sms_stop_required" == "null" ]]; then
+  sms_stop_required="true"
+fi
+sms_stop_footer="$(yq e -r '.consent.channels.sms.stop_footer_text // "Reply STOP to opt out."' "$POLICY_CONTRACT")"
+if [[ "$CHANNEL" == "sms" && "$sms_stop_required" == "true" ]]; then
+  if ! printf "%s" "$rendered_body" | grep -Fqi "$sms_stop_footer"; then
+    if [[ -n "$rendered_body" ]]; then
+      rendered_body="${rendered_body} ${sms_stop_footer}"
+    else
+      rendered_body="$sms_stop_footer"
+    fi
+  fi
+fi
+
+generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+payload="$(
+  jq -n \
+    --arg channel "$CHANNEL" \
+    --arg message_type "$MESSAGE_TYPE" \
+    --arg recipient "$RECIPIENT" \
+    --arg provider "$provider" \
+    --arg transactional_mode "$transactional_mode" \
+    --arg provider_execution_mode "$provider_execution_mode" \
+    --arg consent_state "$CONSENT_STATE" \
+    --arg quiet_timezone "$quiet_tz" \
+    --arg subject "$rendered_subject" \
+    --arg body "$rendered_body" \
+    --arg template_id "$(echo "$template_json" | jq -r '.id // ""')" \
+    --argjson variables "$vars_augmented" \
+    --argjson policy_block_reasons "$policy_block_reasons" \
+    '{
+      channel: $channel,
+      message_type: $message_type,
+      recipient: $recipient,
+      provider: $provider,
+      transactional_mode: $transactional_mode,
+      provider_execution_mode: $provider_execution_mode,
+      consent_state: $consent_state,
+      quiet_timezone: $quiet_timezone,
+      template_id: $template_id,
+      subject: $subject,
+      body: $body,
+      variables: $variables,
+      send_allowed: (($policy_block_reasons | length) == 0),
+      policy_block_reasons: $policy_block_reasons
+    }'
+)"
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.send.preview" \
+    --arg schema_version "1.0" \
+    --arg status "ok" \
+    --arg generated_at "$generated_at" \
+    --argjson payload "$payload" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      status: $status,
+      generated_at: $generated_at,
+      data: $payload
+    }'
+  exit 0
+fi
+
+echo "communications.send.preview"
+echo "channel: $CHANNEL"
+echo "message_type: $MESSAGE_TYPE"
+echo "provider: $provider"
+echo "transactional_mode: $transactional_mode"
+echo "provider_execution_mode: $provider_execution_mode"
+echo "consent_state: $CONSENT_STATE"
+echo "send_allowed: $(echo "$payload" | jq -r '.send_allowed')"
+block_reasons="$(echo "$payload" | jq -r '.policy_block_reasons | join(",")')"
+if [[ -n "$block_reasons" ]]; then
+  echo "policy_block_reasons: $block_reasons"
+fi
+echo "to: $RECIPIENT"
+if [[ "$CHANNEL" == "email" ]]; then
+  echo "subject: $rendered_subject"
+fi
+echo "body: $rendered_body"

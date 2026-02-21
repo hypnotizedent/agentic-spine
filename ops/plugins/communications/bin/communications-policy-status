@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+POLICY_CONTRACT="${COMMUNICATIONS_POLICY_CONTRACT:-$ROOT/ops/bindings/communications.policy.contract.yaml}"
+JSON=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-policy-status [--json]
+
+Show canonical communications compliance and consent policy.
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ -f "$POLICY_CONTRACT" ]] || { echo "ERROR: missing contract: $POLICY_CONTRACT" >&2; exit 1; }
+
+policy_json="$(yq e -o=json '.' "$POLICY_CONTRACT")"
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.policy.status" \
+    --arg schema_version "1.0" \
+    --arg status "ok" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson policy "$policy_json" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      status: $status,
+      generated_at: $generated_at,
+      data: {policy: $policy}
+    }'
+  exit 0
+fi
+
+enforce_opt_in="$(yq e -r '.consent.enforce_opt_in_by_default' "$POLICY_CONTRACT")"
+[[ -z "$enforce_opt_in" || "$enforce_opt_in" == "null" ]] && enforce_opt_in="true"
+email_opt_in="$(yq e -r '.consent.channels.email.require_opt_in' "$POLICY_CONTRACT")"
+[[ -z "$email_opt_in" || "$email_opt_in" == "null" ]] && email_opt_in="true"
+sms_opt_in="$(yq e -r '.consent.channels.sms.require_opt_in' "$POLICY_CONTRACT")"
+[[ -z "$sms_opt_in" || "$sms_opt_in" == "null" ]] && sms_opt_in="true"
+sms_stop_footer="$(yq e -r '.consent.channels.sms.require_stop_footer' "$POLICY_CONTRACT")"
+[[ -z "$sms_stop_footer" || "$sms_stop_footer" == "null" ]] && sms_stop_footer="true"
+quiet_hours_enabled="$(yq e -r '.delivery_windows.quiet_hours.enabled' "$POLICY_CONTRACT")"
+[[ -z "$quiet_hours_enabled" || "$quiet_hours_enabled" == "null" ]] && quiet_hours_enabled="true"
+quiet_tz="$(yq e -r '.delivery_windows.quiet_hours.timezone_default // "America/New_York"' "$POLICY_CONTRACT")"
+quiet_start="$(yq e -r '.delivery_windows.quiet_hours.start_local // "21:00"' "$POLICY_CONTRACT")"
+quiet_end="$(yq e -r '.delivery_windows.quiet_hours.end_local // "08:00"' "$POLICY_CONTRACT")"
+sms_policy="$(yq e -r '.compliance.sms_policy // "transactional-only"' "$POLICY_CONTRACT")"
+marketing_allowed="$(yq e -r '.compliance.marketing_sms_allowed' "$POLICY_CONTRACT")"
+[[ -z "$marketing_allowed" || "$marketing_allowed" == "null" ]] && marketing_allowed="false"
+
+echo "communications.policy.status"
+echo "consent_enforce_opt_in_by_default: $enforce_opt_in"
+echo "email_require_opt_in: $email_opt_in"
+echo "sms_require_opt_in: $sms_opt_in"
+echo "sms_require_stop_footer: $sms_stop_footer"
+echo "quiet_hours_enabled: $quiet_hours_enabled"
+echo "quiet_hours_timezone: $quiet_tz"
+echo "quiet_hours_window: $quiet_start -> $quiet_end"
+echo "sms_policy: $sms_policy"
+echo "marketing_sms_allowed: $marketing_allowed"

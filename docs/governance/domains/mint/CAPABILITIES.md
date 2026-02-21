@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-16
+last_verified: 2026-02-21
 scope: domain-capability-catalog
 domain: mint
 ---
@@ -14,6 +14,7 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 |---|---|---|---|
 | `mint.deploy.status` | `read-only` | `auto` | `agents/mint-agent/` |
 | `mint.intake.validate` | `read-only` | `auto` | `agents/mint-agent/` |
+| `mint.loop.daily` | `read-only` | `auto` | `agents/mint-agent/` |
 | `mint.migrate.dryrun` | `read-only` | `auto` | `agents/mint-agent/` |
 | `mint.modules.health` | `read-only` | `auto` | `agents/mint-agent/` |
 | `mint.seeds.query` | `read-only` | `auto` | `agents/mint-agent/` |

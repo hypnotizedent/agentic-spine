@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+PROVIDERS_CONTRACT="${COMMUNICATIONS_PROVIDERS_CONTRACT:-$ROOT/ops/bindings/communications.providers.contract.yaml}"
+JSON=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-provider-status [--json]
+
+Show canonical communications provider routing and readiness state.
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ -f "$PROVIDERS_CONTRACT" ]] || { echo "ERROR: missing contract: $PROVIDERS_CONTRACT" >&2; exit 1; }
+
+transactional_mode="$(yq e -r '.transactional.mode // "simulation-only"' "$PROVIDERS_CONTRACT")"
+providers_json="$(yq e -o=json '.providers' "$PROVIDERS_CONTRACT")"
+
+ready_rows="$(
+  echo "$providers_json" | jq -c '
+    to_entries
+    | map({
+        id: .key,
+        provider_type: (.value.provider_type // "unknown"),
+        status: (.value.status // "unknown"),
+        execution_mode: (.value.execution_mode // "simulation-only"),
+        channels: (.value.channels // []),
+        required_env: (.value.required_env // [])
+      })
+  '
+)"
+
+enriched="$(
+  echo "$ready_rows" | jq -c '
+    map(
+      . as $p
+      | .env_present = (
+          ($p.required_env // [])
+          | map({key: ., present: ((env[.] // "") != "")})
+        )
+      | .missing_env = (.env_present | map(select(.present == false) | .key))
+      | .live_ready = ((.execution_mode == "live") and ((.missing_env | length) == 0))
+    )
+  '
+)"
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.provider.status" \
+    --arg schema_version "1.0" \
+    --arg status "ok" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg transactional_mode "$transactional_mode" \
+    --argjson providers "$enriched" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        transactional_mode: $transactional_mode,
+        providers: $providers
+      }
+    }'
+  exit 0
+fi
+
+echo "communications.provider.status"
+echo "transactional_mode: $transactional_mode"
+printf "%-12s %-24s %-10s %-16s %-12s %-12s\n" "provider" "type" "status" "execution_mode" "live_ready" "missing_env"
+printf "%-12s %-24s %-10s %-16s %-12s %-12s\n" "------------" "------------------------" "----------" "----------------" "------------" "------------"
+echo "$enriched" | jq -r '.[] | [.id, .provider_type, .status, .execution_mode, (if .live_ready then "yes" else "no" end), ((.missing_env | join(",")) // "")] | @tsv' | \
+while IFS=$'\t' read -r id provider_type status execution_mode live_ready missing_env; do
+  [[ -n "$missing_env" ]] || missing_env="-"
+  printf "%-12s %-24s %-10s %-16s %-12s %-12s\n" "$id" "$provider_type" "$status" "$execution_mode" "$live_ready" "$missing_env"
+done

@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+DELIVERY_CONTRACT="${COMMUNICATIONS_DELIVERY_CONTRACT:-$ROOT/ops/bindings/communications.delivery.contract.yaml}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+STATUS_FILTER=""
+PROVIDER_FILTER=""
+CHANNEL_FILTER=""
+LIMIT=20
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-delivery-log [--status <status>] [--provider <provider>] [--channel <email|sms>] [--limit <n>] [--json]
+
+Query communications delivery log records.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --status) STATUS_FILTER="${2:-}"; shift 2 ;;
+    --provider) PROVIDER_FILTER="${2:-}"; shift 2 ;;
+    --channel) CHANNEL_FILTER="${2:-}"; shift 2 ;;
+    --limit) LIMIT="${2:-}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ -f "$DELIVERY_CONTRACT" ]] || { echo "ERROR: missing contract: $DELIVERY_CONTRACT" >&2; exit 1; }
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "ERROR: --limit must be numeric" >&2; exit 2; }
+
+expand_path() {
+  local p="$1"
+  p="${p//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+  echo "$p"
+}
+
+log_path="$(expand_path "$(yq e -r '.artifacts.append_log_file // "$SPINE_OUTBOX/communications/communications-delivery-log.jsonl"' "$DELIVERY_CONTRACT")")"
+
+records_json="[]"
+if [[ -f "$log_path" ]]; then
+  records_json="$(jq -cs '.' "$log_path" 2>/dev/null || echo '[]')"
+fi
+
+filtered="$records_json"
+if [[ -n "$STATUS_FILTER" ]]; then
+  filtered="$(echo "$filtered" | jq --arg status "$STATUS_FILTER" '[.[] | select(.status == $status)]')"
+fi
+if [[ -n "$PROVIDER_FILTER" ]]; then
+  filtered="$(echo "$filtered" | jq --arg provider "$PROVIDER_FILTER" '[.[] | select(.provider == $provider)]')"
+fi
+if [[ -n "$CHANNEL_FILTER" ]]; then
+  filtered="$(echo "$filtered" | jq --arg channel "$CHANNEL_FILTER" '[.[] | select(.channel == $channel)]')"
+fi
+filtered="$(echo "$filtered" | jq --argjson limit "$LIMIT" 'sort_by(.created_at) | reverse | .[:$limit]')"
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.delivery.log" \
+    --arg schema_version "1.0" \
+    --arg status "ok" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg log_path "$log_path" \
+    --arg status_filter "$STATUS_FILTER" \
+    --arg provider_filter "$PROVIDER_FILTER" \
+    --arg channel_filter "$CHANNEL_FILTER" \
+    --argjson records "$filtered" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        log_path: $log_path,
+        filters: {
+          status: $status_filter,
+          provider: $provider_filter,
+          channel: $channel_filter
+        },
+        count: ($records | length),
+        records: $records
+      }
+    }'
+  exit 0
+fi
+
+echo "communications.delivery.log"
+echo "log_path: $log_path"
+[[ -n "$STATUS_FILTER" ]] && echo "filter_status: $STATUS_FILTER"
+[[ -n "$PROVIDER_FILTER" ]] && echo "filter_provider: $PROVIDER_FILTER"
+[[ -n "$CHANNEL_FILTER" ]] && echo "filter_channel: $CHANNEL_FILTER"
+printf "%-24s %-20s %-10s %-12s %-10s %-34s\n" "event_id" "created_at_utc" "channel" "provider" "status" "recipient"
+printf "%-24s %-20s %-10s %-12s %-10s %-34s\n" "------------------------" "--------------------" "----------" "------------" "----------" "----------------------------------"
+echo "$filtered" | jq -r '.[] | [.event_id, .created_at, .channel, .provider, .status, .recipient] | @tsv' | \
+while IFS=$'\t' read -r event_id created_at channel provider status recipient; do
+  printf "%-24s %-20s %-10s %-12s %-10s %-34s\n" "$event_id" "$created_at" "$channel" "$provider" "$status" "$recipient"
+done
+echo "count: $(echo "$filtered" | jq -r 'length')"

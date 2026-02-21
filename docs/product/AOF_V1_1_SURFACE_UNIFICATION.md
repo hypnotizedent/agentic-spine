@@ -18,7 +18,7 @@ parent_loop: LOOP-AOF-V1-1-SURFACE-UNIFICATION-20260217
 
 **Implementation Progress:**
 - Step 1 (MCP Gateway): **DELIVERED** — `ops/plugins/mcp-gateway/bin/spine-mcp-serve` live, `.mcp.json` cutover to gateway-first (2026-02-18)
-- Step 2 (Agent Registry V2): **DELIVERED** — Schema extended, `agent.info` + `agent.tools` caps registered, all 10 agents populated (2026-02-18)
+- Step 2 (Agent Registry V2): **DELIVERED** — Schema extended, `agent.info` + `agent.tools` caps registered, registry population complete (2026-02-18; extended 2026-02-21 with communications-agent)
 - Step 3 (Dynamic Context): **NOT STARTED** — Pending D65-v2 design
 
 ## Problem
@@ -170,7 +170,7 @@ become data, not just prose.
 
 **Migration path:**
 1. Add new fields to registry schema (backward-compatible — existing fields unchanged)
-2. Populate fields for all 10 agents from their `.contract.md` files
+2. Populate fields for all registered agents from their `.contract.md` files
 3. `.contract.md` files become supplementary prose (not deleted, but no longer authoritative
    for tool/endpoint data)
 4. Gateway (Step 1) reads `agents.registry.yaml` to dynamically expose per-agent tools
@@ -198,6 +198,7 @@ active_state:
 terminal_roles:
   - SPINE-CONTROL-01 (this session)
 agent_summary:
+  - communications-agent: registered (10 communications surfaces)
   - finance-agent: active (13 tools)
   - home-assistant-agent: active (37 caps)
   - immich-agent: registered (5 caps)

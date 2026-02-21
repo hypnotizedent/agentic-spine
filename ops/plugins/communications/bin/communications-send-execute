@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+PROVIDERS_CONTRACT="${COMMUNICATIONS_PROVIDERS_CONTRACT:-$ROOT/ops/bindings/communications.providers.contract.yaml}"
+DELIVERY_CONTRACT="${COMMUNICATIONS_DELIVERY_CONTRACT:-$ROOT/ops/bindings/communications.delivery.contract.yaml}"
+PREVIEW_BIN="${COMMUNICATIONS_PREVIEW_BIN:-$ROOT/ops/plugins/communications/bin/communications-send-preview}"
+GRAPH_EXEC="${COMMUNICATIONS_GRAPH_EXEC:-$ROOT/ops/plugins/ms-graph/bin/graph-cap-exec}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+CHANNEL=""
+MESSAGE_TYPE=""
+RECIPIENT=""
+SUBJECT=""
+BODY=""
+VARS_JSON="{}"
+CONSENT_STATE="unknown"
+TIMEZONE=""
+EXECUTE=0
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-send-execute --channel <email|sms> --message-type <type> --to <recipient> [options]
+
+Options:
+  --subject <text>              Optional subject (custom email).
+  --body <text>                 Optional body override.
+  --vars-json <json object>     Template variables object.
+  --consent-state <state>       opted-in | opted-out | unknown.
+  --timezone <IANA TZ>          Override quiet-hours timezone.
+  --execute                     Perform mutation (without this, dry-run only).
+  --json                        Emit JSON envelope.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --channel) CHANNEL="${2:-}"; shift 2 ;;
+    --message-type) MESSAGE_TYPE="${2:-}"; shift 2 ;;
+    --to) RECIPIENT="${2:-}"; shift 2 ;;
+    --subject) SUBJECT="${2:-}"; shift 2 ;;
+    --body) BODY="${2:-}"; shift 2 ;;
+    --vars-json) VARS_JSON="${2:-}"; shift 2 ;;
+    --consent-state) CONSENT_STATE="${2:-}"; shift 2 ;;
+    --timezone) TIMEZONE="${2:-}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "ERROR: missing dependency: curl" >&2; exit 1; }
+[[ -f "$PROVIDERS_CONTRACT" ]] || { echo "ERROR: missing contract: $PROVIDERS_CONTRACT" >&2; exit 1; }
+[[ -f "$DELIVERY_CONTRACT" ]] || { echo "ERROR: missing contract: $DELIVERY_CONTRACT" >&2; exit 1; }
+[[ -x "$PREVIEW_BIN" ]] || { echo "ERROR: missing preview script: $PREVIEW_BIN" >&2; exit 1; }
+
+preview_cmd=(
+  "$PREVIEW_BIN"
+  --channel "$CHANNEL"
+  --message-type "$MESSAGE_TYPE"
+  --to "$RECIPIENT"
+  --vars-json "$VARS_JSON"
+  --consent-state "$CONSENT_STATE"
+  --json
+)
+if [[ -n "$SUBJECT" ]]; then
+  preview_cmd+=(--subject "$SUBJECT")
+fi
+if [[ -n "$BODY" ]]; then
+  preview_cmd+=(--body "$BODY")
+fi
+if [[ -n "$TIMEZONE" ]]; then
+  preview_cmd+=(--timezone "$TIMEZONE")
+fi
+
+preview_json="$("${preview_cmd[@]}")"
+payload="$(echo "$preview_json" | jq -c '.data')"
+provider="$(echo "$payload" | jq -r '.provider')"
+channel="$(echo "$payload" | jq -r '.channel')"
+message_type="$(echo "$payload" | jq -r '.message_type')"
+recipient="$(echo "$payload" | jq -r '.recipient')"
+rendered_subject="$(echo "$payload" | jq -r '.subject // ""')"
+rendered_body="$(echo "$payload" | jq -r '.body // ""')"
+transactional_mode="$(echo "$payload" | jq -r '.transactional_mode')"
+provider_execution_mode="$(echo "$payload" | jq -r '.provider_execution_mode')"
+send_allowed="$(echo "$payload" | jq -r '.send_allowed // false')"
+policy_block_reasons="$(echo "$payload" | jq -r '.policy_block_reasons | join(",")')"
+
+expand_path() {
+  local p="$1"
+  p="${p//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+  echo "$p"
+}
+
+latest_record_path="$(expand_path "$(yq e -r '.artifacts.latest_record_file // "$SPINE_OUTBOX/communications/communications-transaction-last.yaml"' "$DELIVERY_CONTRACT")")"
+append_log_path="$(expand_path "$(yq e -r '.artifacts.append_log_file // "$SPINE_OUTBOX/communications/communications-delivery-log.jsonl"' "$DELIVERY_CONTRACT")")"
+mkdir -p "$(dirname "$latest_record_path")"
+mkdir -p "$(dirname "$append_log_path")"
+
+generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+event_id="comm-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+
+emit_json() {
+  local status="$1"
+  local provider_message_id="${2:-}"
+  local error_text="${3:-}"
+  jq -n \
+    --arg capability "communications.send.execute" \
+    --arg schema_version "1.0" \
+    --arg status "$status" \
+    --arg generated_at "$generated_at" \
+    --arg event_id "$event_id" \
+    --arg channel "$channel" \
+    --arg message_type "$message_type" \
+    --arg provider "$provider" \
+    --arg recipient "$recipient" \
+    --arg subject "$rendered_subject" \
+    --arg body "$rendered_body" \
+    --arg transactional_mode "$transactional_mode" \
+    --arg provider_execution_mode "$provider_execution_mode" \
+    --arg provider_message_id "$provider_message_id" \
+    --arg record "$latest_record_path" \
+    --arg log "$append_log_path" \
+    --arg error "$error_text" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        event_id: $event_id,
+        channel: $channel,
+        message_type: $message_type,
+        provider: $provider,
+        recipient: $recipient,
+        subject: $subject,
+        body: $body,
+        transactional_mode: $transactional_mode,
+        provider_execution_mode: $provider_execution_mode,
+        provider_message_id: $provider_message_id,
+        record: $record,
+        log: $log
+      }
+    } + (if ($error | length) > 0 then {error:{message:$error}} else {} end)'
+}
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+  dry_status="dry-run"
+  if [[ "$send_allowed" != "true" ]]; then
+    dry_status="blocked"
+  fi
+  if [[ "$JSON" -eq 1 ]]; then
+    emit_json "$dry_status" "" "$policy_block_reasons"
+  else
+    echo "communications.send.execute"
+    echo "status: $dry_status"
+    echo "provider: $provider"
+    echo "channel: $channel"
+    echo "message_type: $message_type"
+    echo "to: $recipient"
+    [[ -n "$policy_block_reasons" ]] && echo "policy_block_reasons: $policy_block_reasons"
+    [[ "$channel" == "email" ]] && echo "subject: $rendered_subject"
+    echo "body: $rendered_body"
+  fi
+  exit 0
+fi
+
+status="pending"
+provider_message_id=""
+error_text=""
+
+if [[ "$send_allowed" != "true" ]]; then
+  status="failed"
+  error_text="policy_blocked:${policy_block_reasons:-unknown}"
+elif [[ "$transactional_mode" != "live" || "$provider_execution_mode" != "live" ]]; then
+  status="simulated"
+else
+  if [[ "$provider" == "resend" && "$channel" == "email" ]]; then
+    [[ -n "${RESEND_API_KEY:-}" ]] || { echo "ERROR: RESEND_API_KEY is required for live resend sends" >&2; exit 1; }
+    from_email="${FROM_EMAIL:-$(yq e -r '.transactional.default_sender_email // ""' "$PROVIDERS_CONTRACT")}"
+    from_name="$(yq e -r '.transactional.default_sender_name // "Mint Prints"' "$PROVIDERS_CONTRACT")"
+    [[ -n "$from_email" ]] || { echo "ERROR: FROM_EMAIL or transactional.default_sender_email is required" >&2; exit 1; }
+    response_file="$(mktemp)"
+    http_code="$(
+      jq -n \
+        --arg from "${from_name} <${from_email}>" \
+        --arg to "$recipient" \
+        --arg subject "$rendered_subject" \
+        --arg text "$rendered_body" \
+        '{from:$from,to:[$to],subject:$subject,text:$text}' \
+      | curl -sS -o "$response_file" -w "%{http_code}" \
+          -X POST "https://api.resend.com/emails" \
+          -H "Authorization: Bearer ${RESEND_API_KEY}" \
+          -H "Content-Type: application/json" \
+          --data-binary @-
+    )"
+    if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
+      provider_message_id="$(jq -r '.id // ""' "$response_file")"
+      status="sent"
+    else
+      status="failed"
+      error_text="resend http_code=$http_code"
+    fi
+    rm -f "$response_file"
+  elif [[ "$provider" == "twilio" && "$channel" == "sms" ]]; then
+    [[ -n "${TWILIO_ACCOUNT_SID:-}" ]] || { echo "ERROR: TWILIO_ACCOUNT_SID is required for live twilio sends" >&2; exit 1; }
+    [[ -n "${TWILIO_AUTH_TOKEN:-}" ]] || { echo "ERROR: TWILIO_AUTH_TOKEN is required for live twilio sends" >&2; exit 1; }
+    from_phone="${TWILIO_PHONE_NUMBER:-$(yq e -r '.transactional.default_sms_from // ""' "$PROVIDERS_CONTRACT")}"
+    [[ -n "$from_phone" ]] || { echo "ERROR: TWILIO_PHONE_NUMBER or transactional.default_sms_from is required" >&2; exit 1; }
+    response_file="$(mktemp)"
+    twilio_url="https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json"
+    http_code="$(
+      curl -sS -o "$response_file" -w "%{http_code}" \
+        -u "${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}" \
+        --data-urlencode "To=${recipient}" \
+        --data-urlencode "From=${from_phone}" \
+        --data-urlencode "Body=${rendered_body}" \
+        "$twilio_url"
+    )"
+    if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
+      provider_message_id="$(jq -r '.sid // ""' "$response_file")"
+      status="sent"
+    else
+      status="failed"
+      error_text="twilio http_code=$http_code"
+    fi
+    rm -f "$response_file"
+  elif [[ "$provider" == "graph" && "$channel" == "email" ]]; then
+    [[ -x "$GRAPH_EXEC" ]] || { echo "ERROR: missing graph executor: $GRAPH_EXEC" >&2; exit 1; }
+    if "$GRAPH_EXEC" mail_send --to "$recipient" --subject "$rendered_subject" --body "$rendered_body" >/dev/null 2>&1; then
+      status="sent"
+    else
+      status="failed"
+      error_text="graph mail_send failed"
+    fi
+  else
+    status="failed"
+    error_text="unsupported live route provider=$provider channel=$channel"
+  fi
+fi
+
+cat > "$latest_record_path" <<YAML
+event_id: "$event_id"
+created_at: "$generated_at"
+channel: "$channel"
+message_type: "$message_type"
+provider: "$provider"
+recipient: "$recipient"
+subject: "$rendered_subject"
+body: "$rendered_body"
+status: "$status"
+provider_message_id: "$provider_message_id"
+error: "$error_text"
+YAML
+
+jq -nc \
+  --arg event_id "$event_id" \
+  --arg created_at "$generated_at" \
+  --arg channel "$channel" \
+  --arg message_type "$message_type" \
+  --arg provider "$provider" \
+  --arg recipient "$recipient" \
+  --arg subject "$rendered_subject" \
+  --arg status "$status" \
+  --arg provider_message_id "$provider_message_id" \
+  --arg error "$error_text" \
+  '{
+    event_id: $event_id,
+    created_at: $created_at,
+    channel: $channel,
+    message_type: $message_type,
+    provider: $provider,
+    recipient: $recipient,
+    subject: $subject,
+    status: $status,
+    provider_message_id: $provider_message_id,
+    error: $error
+  }' >> "$append_log_path"
+
+if [[ "$JSON" -eq 1 ]]; then
+  emit_json "$status" "$provider_message_id" "$error_text"
+else
+  echo "communications.send.execute"
+  echo "status: $status"
+  echo "event_id: $event_id"
+  echo "provider: $provider"
+  echo "channel: $channel"
+  echo "message_type: $message_type"
+  echo "to: $recipient"
+  [[ "$channel" == "email" ]] && echo "subject: $rendered_subject"
+  echo "record: $latest_record_path"
+  echo "log: $append_log_path"
+  [[ -n "$provider_message_id" ]] && echo "provider_message_id: $provider_message_id"
+  [[ -n "$error_text" ]] && echo "error: $error_text"
+fi
+
+if [[ "$status" == "failed" ]]; then
+  exit 1
+fi
