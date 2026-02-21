@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure README.md spine-ownership section matches spine.boundary.baseline.yaml authoritative_surfaces and mailroom.runtime.contract.yaml paths. Run verify.pack.run aof to confirm.
 # D130: Boundary Authority Lock
 # STD-001: Boundary Authority Standard - single source of truth for authoritative surfaces
 #
