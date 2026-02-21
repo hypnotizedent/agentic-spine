@@ -5,6 +5,9 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 PROVIDERS_CONTRACT="${COMMUNICATIONS_PROVIDERS_CONTRACT:-$ROOT/ops/bindings/communications.providers.contract.yaml}"
 POLICY_CONTRACT="${COMMUNICATIONS_POLICY_CONTRACT:-$ROOT/ops/bindings/communications.policy.contract.yaml}"
 TEMPLATES_CONTRACT="${COMMUNICATIONS_TEMPLATES_CONTRACT:-$ROOT/ops/bindings/communications.templates.catalog.yaml}"
+DELIVERY_CONTRACT="${COMMUNICATIONS_DELIVERY_CONTRACT:-$ROOT/ops/bindings/communications.delivery.contract.yaml}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 
 CHANNEL=""
 MESSAGE_TYPE=""
@@ -15,6 +18,7 @@ VARS_JSON="{}"
 CONSENT_STATE="unknown"
 TIMEZONE=""
 JSON=0
+NO_RECEIPT_WRITE=0
 
 usage() {
   cat <<'USAGE'
@@ -27,6 +31,7 @@ Options:
   --consent-state <state>       opted-in | opted-out | unknown (default: unknown).
   --timezone <IANA TZ>          Override quiet-hours timezone.
   --json                        Emit JSON envelope.
+  --no-receipt-write            Do not persist preview receipt artifact (internal use).
 USAGE
 }
 
@@ -41,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --consent-state) CONSENT_STATE="${2:-}"; shift 2 ;;
     --timezone) TIMEZONE="${2:-}"; shift 2 ;;
     --json) JSON=1; shift ;;
+    --no-receipt-write) NO_RECEIPT_WRITE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "ERROR: unknown argument: $1" >&2
@@ -55,6 +61,7 @@ command -v python3 >/dev/null 2>&1 || { echo "ERROR: missing dependency: python3
 [[ -f "$PROVIDERS_CONTRACT" ]] || { echo "ERROR: missing contract: $PROVIDERS_CONTRACT" >&2; exit 1; }
 [[ -f "$POLICY_CONTRACT" ]] || { echo "ERROR: missing contract: $POLICY_CONTRACT" >&2; exit 1; }
 [[ -f "$TEMPLATES_CONTRACT" ]] || { echo "ERROR: missing contract: $TEMPLATES_CONTRACT" >&2; exit 1; }
+[[ -f "$DELIVERY_CONTRACT" ]] || { echo "ERROR: missing contract: $DELIVERY_CONTRACT" >&2; exit 1; }
 
 [[ "$CHANNEL" == "email" || "$CHANNEL" == "sms" ]] || { echo "ERROR: --channel must be email or sms" >&2; exit 2; }
 [[ -n "$MESSAGE_TYPE" ]] || { echo "ERROR: --message-type is required" >&2; exit 2; }
@@ -82,7 +89,14 @@ provider_status="$(yq e -r ".providers.\"$provider\".status // \"inactive\"" "$P
 [[ "$provider_status" == "active" ]] || { echo "ERROR: provider '$provider' is not active" >&2; exit 1; }
 
 transactional_mode="$(yq e -r '.transactional.mode // "simulation-only"' "$PROVIDERS_CONTRACT")"
+cutover_phase="$(yq e -r '.transactional.cutover_phase // "phase0-simulation"' "$PROVIDERS_CONTRACT")"
 provider_execution_mode="$(yq e -r ".providers.\"$provider\".execution_mode // \"simulation-only\"" "$PROVIDERS_CONTRACT")"
+if [[ "$provider" == "resend" || "$provider" == "twilio" ]]; then
+  cutover_mode="$(yq e -r ".transactional.phase_matrix.\"$cutover_phase\".${provider}_execution_mode // \"\"" "$PROVIDERS_CONTRACT")"
+  if [[ -n "$cutover_mode" && "$cutover_mode" != "null" ]]; then
+    provider_execution_mode="$cutover_mode"
+  fi
+fi
 
 consent_required="$(yq e -r ".consent.channels.\"$CHANNEL\".require_opt_in" "$POLICY_CONTRACT")"
 if [[ -z "$consent_required" || "$consent_required" == "null" ]]; then
@@ -204,6 +218,9 @@ if [[ "$CHANNEL" == "sms" && "$sms_stop_required" == "true" ]]; then
 fi
 
 generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+preview_id=""
+preview_receipt=""
+
 payload="$(
   jq -n \
     --arg channel "$CHANNEL" \
@@ -211,6 +228,7 @@ payload="$(
     --arg recipient "$RECIPIENT" \
     --arg provider "$provider" \
     --arg transactional_mode "$transactional_mode" \
+    --arg cutover_phase "$cutover_phase" \
     --arg provider_execution_mode "$provider_execution_mode" \
     --arg consent_state "$CONSENT_STATE" \
     --arg quiet_timezone "$quiet_tz" \
@@ -225,6 +243,7 @@ payload="$(
       recipient: $recipient,
       provider: $provider,
       transactional_mode: $transactional_mode,
+      cutover_phase: $cutover_phase,
       provider_execution_mode: $provider_execution_mode,
       consent_state: $consent_state,
       quiet_timezone: $quiet_timezone,
@@ -236,6 +255,46 @@ payload="$(
       policy_block_reasons: $policy_block_reasons
     }'
 )"
+
+if [[ "$NO_RECEIPT_WRITE" -ne 1 ]]; then
+  preview_dir_raw="$(yq e -r '.artifacts.preview_receipts_dir // "$SPINE_OUTBOX/communications/previews"' "$DELIVERY_CONTRACT")"
+  preview_dir="${preview_dir_raw//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+  mkdir -p "$preview_dir"
+
+  preview_id="preview-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+  preview_receipt="$preview_dir/${preview_id}.json"
+
+  preview_doc="$(jq -n \
+    --arg preview_id "$preview_id" \
+    --arg generated_at "$generated_at" \
+    --arg channel "$CHANNEL" \
+    --arg message_type "$MESSAGE_TYPE" \
+    --arg recipient "$RECIPIENT" \
+    --arg subject "$SUBJECT" \
+    --arg body "$BODY" \
+    --arg consent_state "$CONSENT_STATE" \
+    --arg timezone "$TIMEZONE" \
+    --argjson vars_json "$VARS_JSON" \
+    --argjson payload "$payload" \
+    '{
+      preview_id: $preview_id,
+      generated_at: $generated_at,
+      request: {
+        channel: $channel,
+        message_type: $message_type,
+        recipient: $recipient,
+        subject: $subject,
+        body: $body,
+        vars_json: $vars_json,
+        consent_state: $consent_state,
+        timezone: $timezone
+      },
+      data: $payload
+    }')"
+  echo "$preview_doc" >"$preview_receipt"
+
+  payload="$(echo "$payload" | jq -c --arg preview_id "$preview_id" --arg preview_receipt "$preview_receipt" '. + {preview_id:$preview_id, preview_receipt:$preview_receipt}')"
+fi
 
 if [[ "$JSON" -eq 1 ]]; then
   jq -n \
@@ -259,12 +318,17 @@ echo "channel: $CHANNEL"
 echo "message_type: $MESSAGE_TYPE"
 echo "provider: $provider"
 echo "transactional_mode: $transactional_mode"
+echo "cutover_phase: $cutover_phase"
 echo "provider_execution_mode: $provider_execution_mode"
 echo "consent_state: $CONSENT_STATE"
 echo "send_allowed: $(echo "$payload" | jq -r '.send_allowed')"
 block_reasons="$(echo "$payload" | jq -r '.policy_block_reasons | join(",")')"
 if [[ -n "$block_reasons" ]]; then
   echo "policy_block_reasons: $block_reasons"
+fi
+if [[ -n "$preview_id" ]]; then
+  echo "preview_id: $preview_id"
+  echo "preview_receipt: $preview_receipt"
 fi
 echo "to: $RECIPIENT"
 if [[ "$CHANNEL" == "email" ]]; then

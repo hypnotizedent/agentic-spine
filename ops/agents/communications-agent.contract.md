@@ -19,9 +19,12 @@
 | Concern | System |
 |---------|--------|
 | Transactional message route policy | Spine communications contracts |
+| Preview-before-send execution boundary | Spine communications preview/execute linkage |
+| Phased live cutover control (Resend/Twilio) | Spine communications provider contract |
 | Provider routing (Graph/Resend/Twilio) | Spine communications plugin |
 | Consent/compliance checks | Spine communications policy contract |
 | Delivery artifact normalization | Spine communications delivery contract |
+| Delivery anomaly alerting | Spine communications anomaly status/dispatch surfaces |
 
 ## Defers to Spine (Infrastructure Layer)
 
@@ -45,6 +48,8 @@
 - `communications.send.preview`
 - `communications.send.execute`
 - `communications.delivery.log`
+- `communications.delivery.anomaly.status`
+- `communications.delivery.anomaly.dispatch`
 
 ## Invocation
 

@@ -3,10 +3,12 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
+PROVIDERS_CONTRACT="${COMMUNICATIONS_PROVIDERS_CONTRACT:-$ROOT/ops/bindings/communications.providers.contract.yaml}"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing dependency: $1" >&2; exit 1; }; }
 need yq
 [[ -f "$CONTRACT" ]] || { echo "ERROR: missing contract: $CONTRACT" >&2; exit 1; }
+[[ -f "$PROVIDERS_CONTRACT" ]] || { echo "ERROR: missing providers contract: $PROVIDERS_CONTRACT" >&2; exit 1; }
 
 if [[ "${1:-}" == "--json" ]]; then
   yq e -o=json '{"stage": .pilot.stage, "mode": .pilot.send_test.mode, "backend": .pilot.execution_backend, "mailboxes": .pilot.mailboxes}' "$CONTRACT"
@@ -17,12 +19,14 @@ stage="$(yq e -r '.pilot.stage // ""' "$CONTRACT")"
 mode="$(yq e -r '.pilot.send_test.mode // "simulation-only"' "$CONTRACT")"
 backend="$(yq e -r '.pilot.execution_backend // "none"' "$CONTRACT")"
 transactional_mode="$(yq e -r '.transactional.mode // "simulation-only"' "$CONTRACT")"
+transactional_cutover_phase="$(yq e -r '.transactional.cutover_phase // "phase0-simulation"' "$PROVIDERS_CONTRACT")"
 
 echo "communications.mailboxes.list"
 echo "stage: $stage"
 echo "mode: $mode"
 echo "backend: $backend"
 echo "transactional_mode: $transactional_mode"
+echo "transactional_cutover_phase: $transactional_cutover_phase"
 printf "%-12s %-34s %-14s %-10s\n" "id" "address" "role" "status"
 printf "%-12s %-34s %-14s %-10s\n" "------------" "----------------------------------" "--------------" "----------"
 yq e -r '.pilot.mailboxes[] | [.id, .address, .role, .status] | @tsv' "$CONTRACT" | \

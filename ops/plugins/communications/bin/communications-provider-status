@@ -28,19 +28,37 @@ command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exi
 [[ -f "$PROVIDERS_CONTRACT" ]] || { echo "ERROR: missing contract: $PROVIDERS_CONTRACT" >&2; exit 1; }
 
 transactional_mode="$(yq e -r '.transactional.mode // "simulation-only"' "$PROVIDERS_CONTRACT")"
+cutover_phase="$(yq e -r '.transactional.cutover_phase // "phase0-simulation"' "$PROVIDERS_CONTRACT")"
+phase_matrix_json="$(yq e -o=json '.transactional.phase_matrix // {}' "$PROVIDERS_CONTRACT")"
 providers_json="$(yq e -o=json '.providers' "$PROVIDERS_CONTRACT")"
 
 ready_rows="$(
-  echo "$providers_json" | jq -c '
+  echo "$providers_json" | jq -c --arg cutover_phase "$cutover_phase" --argjson phase_matrix "$phase_matrix_json" '
     to_entries
     | map({
         id: .key,
         provider_type: (.value.provider_type // "unknown"),
         status: (.value.status // "unknown"),
-        execution_mode: (.value.execution_mode // "simulation-only"),
+        execution_mode_base: (.value.execution_mode // "simulation-only"),
+        execution_mode_cutover: (
+          if (.key == "resend" or .key == "twilio") then
+            (($phase_matrix[$cutover_phase][(.key + "_execution_mode")] // ""))
+          else
+            ""
+          end
+        ),
         channels: (.value.channels // []),
         required_env: (.value.required_env // [])
       })
+    | map(
+        .execution_mode = (
+          if (.execution_mode_cutover | length) > 0 then
+            .execution_mode_cutover
+          else
+            .execution_mode_base
+          end
+        )
+      )
   '
 )"
 
@@ -65,6 +83,7 @@ if [[ "$JSON" -eq 1 ]]; then
     --arg status "ok" \
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg transactional_mode "$transactional_mode" \
+    --arg cutover_phase "$cutover_phase" \
     --argjson providers "$enriched" \
     '{
       capability: $capability,
@@ -73,6 +92,7 @@ if [[ "$JSON" -eq 1 ]]; then
       generated_at: $generated_at,
       data: {
         transactional_mode: $transactional_mode,
+        cutover_phase: $cutover_phase,
         providers: $providers
       }
     }'
@@ -81,6 +101,7 @@ fi
 
 echo "communications.provider.status"
 echo "transactional_mode: $transactional_mode"
+echo "cutover_phase: $cutover_phase"
 printf "%-12s %-24s %-10s %-16s %-12s %-12s\n" "provider" "type" "status" "execution_mode" "live_ready" "missing_env"
 printf "%-12s %-24s %-10s %-16s %-12s %-12s\n" "------------" "------------------------" "----------" "----------------" "------------" "------------"
 echo "$enriched" | jq -r '.[] | [.id, .provider_type, .status, .execution_mode, (if .live_ready then "yes" else "no" end), ((.missing_env | join(",")) // "")] | @tsv' | \

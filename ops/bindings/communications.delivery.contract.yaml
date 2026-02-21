@@ -7,8 +7,11 @@ owner: "@ronny"
 scope: communications-delivery-ledger
 
 artifacts:
+  preview_receipts_dir: "$SPINE_OUTBOX/communications/previews"
   latest_record_file: "$SPINE_OUTBOX/communications/communications-transaction-last.yaml"
   append_log_file: "$SPINE_OUTBOX/communications/communications-delivery-log.jsonl"
+  anomaly_alert_dir: "mailroom/outbox/alerts/communications"
+  anomaly_cooldown_dir: "mailroom/outbox/alerts/communications/.cooldown"
 
 log_schema:
   required_fields:
@@ -21,6 +24,11 @@ log_schema:
     - status
   optional_fields:
     - subject
+    - preview_id
+    - preview_receipt
+    - transactional_mode
+    - cutover_phase
+    - provider_execution_mode
     - provider_message_id
     - error
     - metadata
@@ -28,10 +36,33 @@ log_schema:
 status_lifecycle:
   allowed:
     - pending
+    - dry-run
+    - blocked
     - simulated
     - sent
     - delivered
     - failed
+
+execution_policy:
+  require_preview_receipt_for_execute: true
+  preview_max_age_minutes: 30
+  revalidate_on_execute: true
+
+anomaly_alerting:
+  enabled: true
+  evaluation_window_records: 100
+  min_records_to_alert: 10
+  cooldown_seconds: 900
+  channels:
+    - ha
+    - bridge-push
+  thresholds:
+    failure_rate_warn: 0.10
+    failure_rate_incident: 0.25
+    policy_block_rate_warn: 0.20
+    policy_block_rate_incident: 0.40
+    provider_timeout_count_warn: 2
+    provider_timeout_count_incident: 4
 
 retention:
   max_records: 5000

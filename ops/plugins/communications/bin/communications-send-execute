@@ -17,6 +17,8 @@ BODY=""
 VARS_JSON="{}"
 CONSENT_STATE="unknown"
 TIMEZONE=""
+PREVIEW_ID=""
+PREVIEW_RECEIPT=""
 EXECUTE=0
 JSON=0
 
@@ -30,6 +32,8 @@ Options:
   --vars-json <json object>     Template variables object.
   --consent-state <state>       opted-in | opted-out | unknown.
   --timezone <IANA TZ>          Override quiet-hours timezone.
+  --preview-id <id>             Required for --execute (links to preview receipt).
+  --preview-receipt <path>      Optional explicit receipt path (overrides preview-id lookup).
   --execute                     Perform mutation (without this, dry-run only).
   --json                        Emit JSON envelope.
 USAGE
@@ -45,6 +49,8 @@ while [[ $# -gt 0 ]]; do
     --vars-json) VARS_JSON="${2:-}"; shift 2 ;;
     --consent-state) CONSENT_STATE="${2:-}"; shift 2 ;;
     --timezone) TIMEZONE="${2:-}"; shift 2 ;;
+    --preview-id) PREVIEW_ID="${2:-}"; shift 2 ;;
+    --preview-receipt) PREVIEW_RECEIPT="${2:-}"; shift 2 ;;
     --execute) EXECUTE=1; shift ;;
     --json) JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -58,9 +64,100 @@ done
 command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "ERROR: missing dependency: curl" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: missing dependency: python3" >&2; exit 1; }
 [[ -f "$PROVIDERS_CONTRACT" ]] || { echo "ERROR: missing contract: $PROVIDERS_CONTRACT" >&2; exit 1; }
 [[ -f "$DELIVERY_CONTRACT" ]] || { echo "ERROR: missing contract: $DELIVERY_CONTRACT" >&2; exit 1; }
 [[ -x "$PREVIEW_BIN" ]] || { echo "ERROR: missing preview script: $PREVIEW_BIN" >&2; exit 1; }
+
+require_preview="$(yq e -r '.execution_policy.require_preview_receipt_for_execute // true' "$DELIVERY_CONTRACT")"
+preview_max_age_minutes="$(yq e -r '.execution_policy.preview_max_age_minutes // 30' "$DELIVERY_CONTRACT")"
+revalidate_on_execute="$(yq e -r '.execution_policy.revalidate_on_execute // true' "$DELIVERY_CONTRACT")"
+
+preview_dir_raw="$(yq e -r '.artifacts.preview_receipts_dir // "$SPINE_OUTBOX/communications/previews"' "$DELIVERY_CONTRACT")"
+preview_dir="${preview_dir_raw//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+mkdir -p "$preview_dir"
+
+if [[ -z "$PREVIEW_RECEIPT" && -n "$PREVIEW_ID" ]]; then
+  PREVIEW_RECEIPT="$preview_dir/${PREVIEW_ID}.json"
+fi
+
+if [[ "$EXECUTE" -eq 1 && "$require_preview" == "true" && -z "$PREVIEW_RECEIPT" ]]; then
+  echo "ERROR: --execute requires preview linkage. Run communications.send.preview first and pass --preview-id or --preview-receipt." >&2
+  exit 2
+fi
+
+preview_doc_json=""
+if [[ -n "$PREVIEW_RECEIPT" ]]; then
+  [[ -f "$PREVIEW_RECEIPT" ]] || { echo "ERROR: preview receipt not found: $PREVIEW_RECEIPT" >&2; exit 1; }
+  preview_doc_json="$(jq -c '.' "$PREVIEW_RECEIPT")"
+
+  if [[ -z "$PREVIEW_ID" ]]; then
+    PREVIEW_ID="$(echo "$preview_doc_json" | jq -r '.preview_id // ""')"
+  fi
+
+  if [[ -n "$CHANNEL" ]]; then
+    expected="$(echo "$preview_doc_json" | jq -r '.request.channel // ""')"
+    [[ "$CHANNEL" == "$expected" ]] || { echo "ERROR: --channel does not match preview receipt" >&2; exit 2; }
+  fi
+  if [[ -n "$MESSAGE_TYPE" ]]; then
+    expected="$(echo "$preview_doc_json" | jq -r '.request.message_type // ""')"
+    [[ "$MESSAGE_TYPE" == "$expected" ]] || { echo "ERROR: --message-type does not match preview receipt" >&2; exit 2; }
+  fi
+  if [[ -n "$RECIPIENT" ]]; then
+    expected="$(echo "$preview_doc_json" | jq -r '.request.recipient // ""')"
+    [[ "$RECIPIENT" == "$expected" ]] || { echo "ERROR: --to does not match preview receipt" >&2; exit 2; }
+  fi
+
+  CHANNEL="$(echo "$preview_doc_json" | jq -r '.request.channel // ""')"
+  MESSAGE_TYPE="$(echo "$preview_doc_json" | jq -r '.request.message_type // ""')"
+  RECIPIENT="$(echo "$preview_doc_json" | jq -r '.request.recipient // ""')"
+  SUBJECT="$(echo "$preview_doc_json" | jq -r '.request.subject // ""')"
+  BODY="$(echo "$preview_doc_json" | jq -r '.request.body // ""')"
+  VARS_JSON="$(echo "$preview_doc_json" | jq -c '.request.vars_json // {}')"
+  CONSENT_STATE="$(echo "$preview_doc_json" | jq -r '.request.consent_state // "unknown"')"
+  TIMEZONE="$(echo "$preview_doc_json" | jq -r '.request.timezone // ""')"
+
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    preview_generated_at="$(echo "$preview_doc_json" | jq -r '.generated_at // ""')"
+    python3 - "$preview_generated_at" "$preview_max_age_minutes" <<'PY'
+from datetime import datetime, timezone
+import sys
+
+raw_ts = (sys.argv[1] or "").strip()
+max_age_minutes = int(sys.argv[2])
+if not raw_ts:
+    print("ERROR: preview receipt missing generated_at", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+except Exception:
+    print("ERROR: preview generated_at invalid", file=sys.stderr)
+    raise SystemExit(1)
+
+if ts.tzinfo is None:
+    ts = ts.replace(tzinfo=timezone.utc)
+
+age_seconds = (datetime.now(timezone.utc) - ts).total_seconds()
+if age_seconds > (max_age_minutes * 60):
+    print("ERROR: preview receipt expired; rerun communications.send.preview", file=sys.stderr)
+    raise SystemExit(1)
+PY
+  fi
+fi
+
+[[ "$CHANNEL" == "email" || "$CHANNEL" == "sms" ]] || { echo "ERROR: --channel must be email or sms" >&2; exit 2; }
+[[ -n "$MESSAGE_TYPE" ]] || { echo "ERROR: --message-type is required" >&2; exit 2; }
+[[ -n "$RECIPIENT" ]] || { echo "ERROR: --to is required" >&2; exit 2; }
+[[ "$CONSENT_STATE" == "opted-in" || "$CONSENT_STATE" == "opted-out" || "$CONSENT_STATE" == "unknown" ]] || {
+  echo "ERROR: --consent-state must be opted-in, opted-out, or unknown" >&2
+  exit 2
+}
+
+echo "$VARS_JSON" | jq -e 'type == "object"' >/dev/null 2>&1 || {
+  echo "ERROR: --vars-json must be a JSON object" >&2
+  exit 2
+}
 
 preview_cmd=(
   "$PREVIEW_BIN"
@@ -70,6 +167,7 @@ preview_cmd=(
   --vars-json "$VARS_JSON"
   --consent-state "$CONSENT_STATE"
   --json
+  --no-receipt-write
 )
 if [[ -n "$SUBJECT" ]]; then
   preview_cmd+=(--subject "$SUBJECT")
@@ -81,8 +179,18 @@ if [[ -n "$TIMEZONE" ]]; then
   preview_cmd+=(--timezone "$TIMEZONE")
 fi
 
-preview_json="$("${preview_cmd[@]}")"
-payload="$(echo "$preview_json" | jq -c '.data')"
+current_preview_json="$(${preview_cmd[@]})"
+payload="$(echo "$current_preview_json" | jq -c '.data')"
+
+if [[ -n "$preview_doc_json" && "$EXECUTE" -eq 1 && "$revalidate_on_execute" == "true" ]]; then
+  expected_signature="$(echo "$preview_doc_json" | jq -c '.data | {channel,message_type,recipient,provider,transactional_mode,cutover_phase,provider_execution_mode,consent_state,quiet_timezone,template_id,subject,body,variables,send_allowed,policy_block_reasons}')"
+  current_signature="$(echo "$payload" | jq -c '{channel,message_type,recipient,provider,transactional_mode,cutover_phase,provider_execution_mode,consent_state,quiet_timezone,template_id,subject,body,variables,send_allowed,policy_block_reasons}')"
+  if [[ "$expected_signature" != "$current_signature" ]]; then
+    echo "ERROR: preview drift detected; rerun communications.send.preview for current policy/routing state" >&2
+    exit 1
+  fi
+fi
+
 provider="$(echo "$payload" | jq -r '.provider')"
 channel="$(echo "$payload" | jq -r '.channel')"
 message_type="$(echo "$payload" | jq -r '.message_type')"
@@ -90,6 +198,7 @@ recipient="$(echo "$payload" | jq -r '.recipient')"
 rendered_subject="$(echo "$payload" | jq -r '.subject // ""')"
 rendered_body="$(echo "$payload" | jq -r '.body // ""')"
 transactional_mode="$(echo "$payload" | jq -r '.transactional_mode')"
+cutover_phase="$(echo "$payload" | jq -r '.cutover_phase // "phase0-simulation"')"
 provider_execution_mode="$(echo "$payload" | jq -r '.provider_execution_mode')"
 send_allowed="$(echo "$payload" | jq -r '.send_allowed // false')"
 policy_block_reasons="$(echo "$payload" | jq -r '.policy_block_reasons | join(",")')"
@@ -118,6 +227,8 @@ emit_json() {
     --arg status "$status" \
     --arg generated_at "$generated_at" \
     --arg event_id "$event_id" \
+    --arg preview_id "$PREVIEW_ID" \
+    --arg preview_receipt "$PREVIEW_RECEIPT" \
     --arg channel "$channel" \
     --arg message_type "$message_type" \
     --arg provider "$provider" \
@@ -125,6 +236,7 @@ emit_json() {
     --arg subject "$rendered_subject" \
     --arg body "$rendered_body" \
     --arg transactional_mode "$transactional_mode" \
+    --arg cutover_phase "$cutover_phase" \
     --arg provider_execution_mode "$provider_execution_mode" \
     --arg provider_message_id "$provider_message_id" \
     --arg record "$latest_record_path" \
@@ -137,6 +249,8 @@ emit_json() {
       generated_at: $generated_at,
       data: {
         event_id: $event_id,
+        preview_id: $preview_id,
+        preview_receipt: $preview_receipt,
         channel: $channel,
         message_type: $message_type,
         provider: $provider,
@@ -144,6 +258,7 @@ emit_json() {
         subject: $subject,
         body: $body,
         transactional_mode: $transactional_mode,
+        cutover_phase: $cutover_phase,
         provider_execution_mode: $provider_execution_mode,
         provider_message_id: $provider_message_id,
         record: $record,
@@ -162,6 +277,8 @@ if [[ "$EXECUTE" -ne 1 ]]; then
   else
     echo "communications.send.execute"
     echo "status: $dry_status"
+    [[ -n "$PREVIEW_ID" ]] && echo "preview_id: $PREVIEW_ID"
+    [[ -n "$PREVIEW_RECEIPT" ]] && echo "preview_receipt: $PREVIEW_RECEIPT"
     echo "provider: $provider"
     echo "channel: $channel"
     echo "message_type: $message_type"
@@ -249,6 +366,8 @@ fi
 
 cat > "$latest_record_path" <<YAML
 event_id: "$event_id"
+preview_id: "$PREVIEW_ID"
+preview_receipt: "$PREVIEW_RECEIPT"
 created_at: "$generated_at"
 channel: "$channel"
 message_type: "$message_type"
@@ -256,6 +375,9 @@ provider: "$provider"
 recipient: "$recipient"
 subject: "$rendered_subject"
 body: "$rendered_body"
+transactional_mode: "$transactional_mode"
+cutover_phase: "$cutover_phase"
+provider_execution_mode: "$provider_execution_mode"
 status: "$status"
 provider_message_id: "$provider_message_id"
 error: "$error_text"
@@ -263,23 +385,33 @@ YAML
 
 jq -nc \
   --arg event_id "$event_id" \
+  --arg preview_id "$PREVIEW_ID" \
+  --arg preview_receipt "$PREVIEW_RECEIPT" \
   --arg created_at "$generated_at" \
   --arg channel "$channel" \
   --arg message_type "$message_type" \
   --arg provider "$provider" \
   --arg recipient "$recipient" \
   --arg subject "$rendered_subject" \
+  --arg transactional_mode "$transactional_mode" \
+  --arg cutover_phase "$cutover_phase" \
+  --arg provider_execution_mode "$provider_execution_mode" \
   --arg status "$status" \
   --arg provider_message_id "$provider_message_id" \
   --arg error "$error_text" \
   '{
     event_id: $event_id,
+    preview_id: $preview_id,
+    preview_receipt: $preview_receipt,
     created_at: $created_at,
     channel: $channel,
     message_type: $message_type,
     provider: $provider,
     recipient: $recipient,
     subject: $subject,
+    transactional_mode: $transactional_mode,
+    cutover_phase: $cutover_phase,
+    provider_execution_mode: $provider_execution_mode,
     status: $status,
     provider_message_id: $provider_message_id,
     error: $error
@@ -291,6 +423,8 @@ else
   echo "communications.send.execute"
   echo "status: $status"
   echo "event_id: $event_id"
+  [[ -n "$PREVIEW_ID" ]] && echo "preview_id: $PREVIEW_ID"
+  [[ -n "$PREVIEW_RECEIPT" ]] && echo "preview_receipt: $PREVIEW_RECEIPT"
   echo "provider: $provider"
   echo "channel: $channel"
   echo "message_type: $message_type"

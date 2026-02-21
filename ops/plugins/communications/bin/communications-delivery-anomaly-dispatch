@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+DELIVERY_CONTRACT="${COMMUNICATIONS_DELIVERY_CONTRACT:-$ROOT/ops/bindings/communications.delivery.contract.yaml}"
+STATUS_BIN="${COMMUNICATIONS_DELIVERY_ANOMALY_STATUS_BIN:-$ROOT/ops/plugins/communications/bin/communications-delivery-anomaly-status}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+source "$ROOT/ops/plugins/alerting/lib/alert-channels.sh"
+
+DRY_RUN=0
+JSON=0
+FORCE=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-delivery-anomaly-dispatch [--dry-run] [--force] [--json]
+
+Evaluate communications delivery anomalies and dispatch alert artifacts/channels when warn/incident.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --force) FORCE=1; shift ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ -f "$DELIVERY_CONTRACT" ]] || { echo "ERROR: missing contract: $DELIVERY_CONTRACT" >&2; exit 1; }
+[[ -x "$STATUS_BIN" ]] || { echo "ERROR: missing status script: $STATUS_BIN" >&2; exit 1; }
+
+expand_path() {
+  local p="$1"
+  p="${p//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+  if [[ "$p" == /* ]]; then
+    echo "$p"
+  else
+    echo "$ROOT/$p"
+  fi
+}
+
+status_json="$($STATUS_BIN --json)"
+status="$(echo "$status_json" | jq -r '.status // "unknown"')"
+
+alert_dir="$(expand_path "$(yq e -r '.artifacts.anomaly_alert_dir // "mailroom/outbox/alerts/communications"' "$DELIVERY_CONTRACT")")"
+cooldown_dir="$(expand_path "$(yq e -r '.artifacts.anomaly_cooldown_dir // "mailroom/outbox/alerts/communications/.cooldown"' "$DELIVERY_CONTRACT")")"
+mkdir -p "$alert_dir" "$cooldown_dir"
+
+cooldown_seconds="$(yq e -r '.anomaly_alerting.cooldown_seconds // 900' "$DELIVERY_CONTRACT")"
+[[ "$cooldown_seconds" =~ ^[0-9]+$ ]] || cooldown_seconds=900
+
+channels_json="$(yq e -o=json '.anomaly_alerting.channels // ["ha","bridge-push"]' "$DELIVERY_CONTRACT")"
+created=0
+dispatched=0
+suppressed=0
+errors=0
+alert_file=""
+
+if [[ "$status" == "warn" || "$status" == "incident" || "$FORCE" -eq 1 ]]; then
+  cooldown_file="$cooldown_dir/communications-delivery"
+  now_epoch="$(date +%s)"
+
+  if [[ "$FORCE" -ne 1 && -f "$cooldown_file" ]]; then
+    last_epoch="$(cat "$cooldown_file" 2>/dev/null || echo 0)"
+    if [[ "$last_epoch" =~ ^[0-9]+$ ]]; then
+      delta=$(( now_epoch - last_epoch ))
+      if (( delta < cooldown_seconds )); then
+        suppressed=1
+      fi
+    fi
+  fi
+
+  if [[ "$suppressed" -eq 0 ]]; then
+    stamp="$(date -u +%Y%m%d-%H%M%S)"
+    alert_file="$alert_dir/ALERT-${stamp}-communications-delivery.yaml"
+
+    reason_text="$(echo "$status_json" | jq -r '.data.reasons | join(",")')"
+    summary="status=$status reasons=${reason_text:-none} failure_rate=$(echo "$status_json" | jq -r '.data.metrics.failure_rate') policy_block_rate=$(echo "$status_json" | jq -r '.data.metrics.policy_block_rate') provider_timeout=$(echo "$status_json" | jq -r '.data.metrics.provider_timeout')"
+
+    cat >"$alert_file" <<ALERT
+version: "1.0"
+generated_at_utc: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+domain_id: "communications-delivery"
+status: "$status"
+reasons: "${reason_text:-}"
+title: "SPINE ALERT [$status] communications-delivery"
+summary: "$summary"
+contract: "$DELIVERY_CONTRACT"
+ALERT
+    created=1
+
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+      while IFS= read -r channel; do
+        [[ -n "$channel" && "$channel" != "null" ]] || continue
+        if alert_dispatch_channel "$channel" "$alert_file"; then
+          dispatched=$((dispatched + 1))
+        else
+          errors=$((errors + 1))
+        fi
+      done < <(echo "$channels_json" | jq -r '.[]?')
+      if [[ "$errors" -eq 0 ]]; then
+        echo "$now_epoch" >"$cooldown_file"
+      fi
+    fi
+  fi
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.delivery.anomaly.dispatch" \
+    --arg status "$status" \
+    --arg alert_file "$alert_file" \
+    --argjson dry_run "$( [[ "$DRY_RUN" -eq 1 ]] && echo true || echo false )" \
+    --argjson force "$( [[ "$FORCE" -eq 1 ]] && echo true || echo false )" \
+    --argjson created "$created" \
+    --argjson dispatched "$dispatched" \
+    --argjson suppressed "$suppressed" \
+    --argjson errors "$errors" \
+    '{
+      capability: $capability,
+      status: $status,
+      dry_run: $dry_run,
+      force: $force,
+      alert_file: $alert_file,
+      created: $created,
+      dispatched: $dispatched,
+      suppressed: $suppressed,
+      errors: $errors
+    }'
+  exit 0
+fi
+
+echo "communications.delivery.anomaly.dispatch"
+echo "status: $status"
+echo "dry_run: $DRY_RUN"
+echo "force: $FORCE"
+echo "alert_file: ${alert_file:-none}"
+echo "created: $created"
+echo "dispatched: $dispatched"
+echo "suppressed: $suppressed"
+echo "errors: $errors"

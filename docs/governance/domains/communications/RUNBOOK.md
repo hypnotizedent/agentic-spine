@@ -42,18 +42,31 @@ Live pilot requires:
   - Simulation mode: writes simulated artifact under runtime outbox.
   - Live mode: sends real pilot test message via Graph and writes receipt artifact under runtime outbox.
 - `communications.provider.status`
-  - Shows Graph/Resend/Twilio route status and env-readiness for live execution.
+  - Shows Graph/Resend/Twilio route status, cutover phase, and env-readiness for live execution.
 - `communications.policy.status`
   - Shows canonical consent/compliance policy (opt-in, quiet-hours, STOP footer rules).
 - `communications.templates.list`
   - Lists template catalog by channel/message type.
 - `communications.send.preview`
   - Resolves message_type + channel to canonical provider and renders message under policy gates.
+  - Writes preview receipt artifact and returns `preview_id` linkage for execute boundary.
 - `communications.send.execute`
   - Manual approval required.
-  - Simulation-first transactional execution with optional live provider dispatch when contract mode is `live`.
+  - Enforces preview linkage (`--preview-id` or `--preview-receipt`) for `--execute`.
+  - Revalidates preview against current policy/routing before send.
+  - Simulation-first transactional execution with optional live provider dispatch when contract mode is `live` and cutover phase allows live mode for the provider.
 - `communications.delivery.log`
   - Read-only query of normalized communications delivery artifacts.
+- `communications.delivery.anomaly.status`
+  - Evaluates delivery log anomaly metrics (failure rate, policy-block rate, timeout spikes) against contract thresholds.
+- `communications.delivery.anomaly.dispatch`
+  - Manual-approval alert artifact + dispatch surface with cooldown control.
+
+## Drift Lock
+
+- `D147 communications-canonical-routing-lock`
+  - Blocks direct Twilio/Resend provider calls outside canonical communications surface.
+  - Scans active runtime/agent code surfaces across spine + workbench.
 
 ## Required Preconditions
 
@@ -73,9 +86,12 @@ echo "yes" | ./bin/ops cap run communications.mail.send.test --to ronny@mintprin
 ./bin/ops cap run communications.provider.status
 ./bin/ops cap run communications.policy.status
 ./bin/ops cap run communications.templates.list --channel sms
-./bin/ops cap run communications.send.preview --channel sms --message-type payment_needed --to +15551234567 --consent-state opted-in --vars-json '{"customer_name":"Test","order_number":"30020","balance_amount":"150.00","payment_link":"https://example.com/pay"}'
-echo "yes" | ./bin/ops cap run communications.send.execute --channel sms --message-type payment_needed --to +15551234567 --consent-state opted-in --vars-json '{"customer_name":"Test","order_number":"30020","balance_amount":"150.00","payment_link":"https://example.com/pay"}' --execute
+preview_json="$(./bin/ops cap run communications.send.preview --channel sms --message-type payment_needed --to +15551234567 --consent-state opted-in --vars-json '{\"customer_name\":\"Test\",\"order_number\":\"30020\",\"balance_amount\":\"150.00\",\"payment_link\":\"https://example.com/pay\"}' --json)"
+preview_id="$(echo \"$preview_json\" | jq -r '.data.preview_id')"
+echo "yes" | ./bin/ops cap run communications.send.execute --preview-id "$preview_id" --execute
 ./bin/ops cap run communications.delivery.log --limit 10
+./bin/ops cap run communications.delivery.anomaly.status
+echo "yes" | ./bin/ops cap run communications.delivery.anomaly.dispatch --dry-run
 ```
 
 ## Evidence Pattern
@@ -86,5 +102,9 @@ echo "yes" | ./bin/ops cap run communications.send.execute --channel sms --messa
   - `$SPINE_OUTBOX/communications/communications-transaction-last.yaml`
 - Transactional append-only delivery log:
   - `$SPINE_OUTBOX/communications/communications-delivery-log.jsonl`
+- Preview linkage receipts:
+  - `$SPINE_OUTBOX/communications/previews/*.json`
+- Delivery anomaly alerts:
+  - `mailroom/outbox/alerts/communications/ALERT-*.yaml`
 - Delivery confirmation pattern:
   - Query `graph.mail.search` for unique send-test subject token.

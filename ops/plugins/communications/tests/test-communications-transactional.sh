@@ -125,14 +125,24 @@ vars='{"customer_name":"Test","order_number":"30020","balance_amount":"150.00","
 preview_out="$("$SEND_PREVIEW" --channel sms --message-type payment_needed --to +15551234567 --consent-state opted-in --vars-json "$vars" --json)"
 echo "$preview_out" | jq -e '.data.provider == "twilio"' >/dev/null || fail "preview should route to twilio"
 echo "$preview_out" | jq -e '.data.body | contains("Reply STOP to opt out.")' >/dev/null || fail "preview should append stop footer"
+preview_id="$(echo "$preview_out" | jq -r '.data.preview_id // ""')"
+preview_receipt="$(echo "$preview_out" | jq -r '.data.preview_receipt // ""')"
+[[ -n "$preview_id" ]] || fail "preview should return preview_id"
+[[ -n "$preview_receipt" && -f "$preview_receipt" ]] || fail "preview should write receipt artifact"
 pass "send preview"
 
 dry_out="$("$SEND_EXECUTE" --channel sms --message-type payment_needed --to +15551234567 --consent-state opted-in --vars-json "$vars" --json)"
 echo "$dry_out" | jq -e '.status == "dry-run"' >/dev/null || fail "send execute dry-run status mismatch"
 pass "send execute dry-run"
 
-exec_out="$("$SEND_EXECUTE" --channel sms --message-type payment_needed --to +15551234567 --consent-state opted-in --vars-json "$vars" --execute --json)"
+if "$SEND_EXECUTE" --channel sms --message-type payment_needed --to +15551234567 --consent-state opted-in --vars-json "$vars" --execute >/dev/null 2>&1; then
+  fail "send execute should require preview linkage"
+fi
+pass "send execute requires preview linkage"
+
+exec_out="$("$SEND_EXECUTE" --preview-id "$preview_id" --execute --json)"
 echo "$exec_out" | jq -e '.status == "simulated"' >/dev/null || fail "send execute simulation status mismatch"
+echo "$exec_out" | jq -e --arg preview_id "$preview_id" '.data.preview_id == $preview_id' >/dev/null || fail "execute should link preview id"
 record_path="$(echo "$exec_out" | jq -r '.data.record')"
 log_path="$(echo "$exec_out" | jq -r '.data.log')"
 [[ -f "$record_path" ]] || fail "transaction record missing"

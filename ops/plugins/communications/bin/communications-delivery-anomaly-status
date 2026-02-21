@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+DELIVERY_CONTRACT="${COMMUNICATIONS_DELIVERY_CONTRACT:-$ROOT/ops/bindings/communications.delivery.contract.yaml}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+WINDOW_OVERRIDE=""
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-delivery-anomaly-status [--window <n>] [--json]
+
+Evaluate communications delivery log anomalies (failure rate, policy-block rate, provider timeout spikes).
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --window) WINDOW_OVERRIDE="${2:-}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: missing dependency: python3" >&2; exit 1; }
+[[ -f "$DELIVERY_CONTRACT" ]] || { echo "ERROR: missing contract: $DELIVERY_CONTRACT" >&2; exit 1; }
+
+expand_path() {
+  local p="$1"
+  p="${p//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+  if [[ "$p" == /* ]]; then
+    echo "$p"
+  else
+    echo "$ROOT/$p"
+  fi
+}
+
+log_path="$(expand_path "$(yq e -r '.artifacts.append_log_file // "$SPINE_OUTBOX/communications/communications-delivery-log.jsonl"' "$DELIVERY_CONTRACT")")"
+
+anomaly_enabled="$(yq e -r '.anomaly_alerting.enabled // true' "$DELIVERY_CONTRACT")"
+window_records="$(yq e -r '.anomaly_alerting.evaluation_window_records // 100' "$DELIVERY_CONTRACT")"
+min_records="$(yq e -r '.anomaly_alerting.min_records_to_alert // 10' "$DELIVERY_CONTRACT")"
+
+if [[ -n "$WINDOW_OVERRIDE" ]]; then
+  window_records="$WINDOW_OVERRIDE"
+fi
+[[ "$window_records" =~ ^[0-9]+$ ]] || { echo "ERROR: window must be numeric" >&2; exit 2; }
+[[ "$min_records" =~ ^[0-9]+$ ]] || { echo "ERROR: min_records_to_alert must be numeric" >&2; exit 1; }
+
+failure_rate_warn="$(yq e -r '.anomaly_alerting.thresholds.failure_rate_warn // 0.10' "$DELIVERY_CONTRACT")"
+failure_rate_incident="$(yq e -r '.anomaly_alerting.thresholds.failure_rate_incident // 0.25' "$DELIVERY_CONTRACT")"
+policy_block_rate_warn="$(yq e -r '.anomaly_alerting.thresholds.policy_block_rate_warn // 0.20' "$DELIVERY_CONTRACT")"
+policy_block_rate_incident="$(yq e -r '.anomaly_alerting.thresholds.policy_block_rate_incident // 0.40' "$DELIVERY_CONTRACT")"
+timeout_warn="$(yq e -r '.anomaly_alerting.thresholds.provider_timeout_count_warn // 2' "$DELIVERY_CONTRACT")"
+timeout_incident="$(yq e -r '.anomaly_alerting.thresholds.provider_timeout_count_incident // 4' "$DELIVERY_CONTRACT")"
+
+records_json="[]"
+if [[ -f "$log_path" ]]; then
+  records_json="$(jq -cs '.' "$log_path" 2>/dev/null || echo '[]')"
+fi
+
+windowed="$(echo "$records_json" | jq --argjson window "$window_records" 'sort_by(.created_at) | reverse | .[:$window]')"
+
+total="$(echo "$windowed" | jq 'length')"
+failed="$(echo "$windowed" | jq '[.[] | select(.status == "failed")] | length')"
+policy_blocked="$(echo "$windowed" | jq '[.[] | select((.error // "") | startswith("policy_blocked"))] | length')"
+provider_timeout="$(echo "$windowed" | jq '[.[] | select(((.error // "") | ascii_downcase | test("timeout|timed out|http_code=408|http_code=504")))] | length')"
+
+calc_json="$(python3 - "$total" "$failed" "$policy_blocked" "$provider_timeout" "$min_records" "$anomaly_enabled" "$failure_rate_warn" "$failure_rate_incident" "$policy_block_rate_warn" "$policy_block_rate_incident" "$timeout_warn" "$timeout_incident" <<'PY'
+import json
+import sys
+
+total = int(sys.argv[1])
+failed = int(sys.argv[2])
+policy_blocked = int(sys.argv[3])
+provider_timeout = int(sys.argv[4])
+min_records = int(sys.argv[5])
+enabled = sys.argv[6].lower() == "true"
+failure_rate_warn = float(sys.argv[7])
+failure_rate_incident = float(sys.argv[8])
+policy_rate_warn = float(sys.argv[9])
+policy_rate_incident = float(sys.argv[10])
+timeout_warn = int(float(sys.argv[11]))
+timeout_incident = int(float(sys.argv[12]))
+
+failure_rate = (failed / total) if total else 0.0
+policy_rate = (policy_blocked / total) if total else 0.0
+
+status = "ok"
+reasons = []
+if not enabled:
+    status = "disabled"
+elif total < min_records:
+    status = "insufficient_data"
+else:
+    if failure_rate >= failure_rate_incident:
+        reasons.append("failure_rate_incident")
+    if policy_rate >= policy_rate_incident:
+        reasons.append("policy_block_rate_incident")
+    if provider_timeout >= timeout_incident:
+        reasons.append("provider_timeout_incident")
+
+    if reasons:
+        status = "incident"
+    else:
+        if failure_rate >= failure_rate_warn:
+            reasons.append("failure_rate_warn")
+        if policy_rate >= policy_rate_warn:
+            reasons.append("policy_block_rate_warn")
+        if provider_timeout >= timeout_warn:
+            reasons.append("provider_timeout_warn")
+        if reasons:
+            status = "warn"
+
+print(json.dumps({
+    "status": status,
+    "reasons": reasons,
+    "failure_rate": failure_rate,
+    "policy_block_rate": policy_rate,
+}))
+PY
+)"
+
+status="$(echo "$calc_json" | jq -r '.status')"
+reasons_json="$(echo "$calc_json" | jq -c '.reasons')"
+failure_rate="$(echo "$calc_json" | jq -r '.failure_rate')"
+policy_block_rate="$(echo "$calc_json" | jq -r '.policy_block_rate')"
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.delivery.anomaly.status" \
+    --arg schema_version "1.0" \
+    --arg status "$status" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg log_path "$log_path" \
+    --argjson anomaly_enabled "$( [[ "$anomaly_enabled" == "true" ]] && echo true || echo false )" \
+    --argjson window_records "$window_records" \
+    --argjson min_records "$min_records" \
+    --argjson total "$total" \
+    --argjson failed "$failed" \
+    --argjson policy_blocked "$policy_blocked" \
+    --argjson provider_timeout "$provider_timeout" \
+    --argjson failure_rate "$failure_rate" \
+    --argjson policy_block_rate "$policy_block_rate" \
+    --argjson reasons "$reasons_json" \
+    --argjson thresholds "$(yq e -o=json '.anomaly_alerting.thresholds' "$DELIVERY_CONTRACT")" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        anomaly_enabled: $anomaly_enabled,
+        log_path: $log_path,
+        window_records: $window_records,
+        min_records_to_alert: $min_records,
+        metrics: {
+          total: $total,
+          failed: $failed,
+          policy_blocked: $policy_blocked,
+          provider_timeout: $provider_timeout,
+          failure_rate: $failure_rate,
+          policy_block_rate: $policy_block_rate
+        },
+        thresholds: $thresholds,
+        reasons: $reasons
+      }
+    }'
+  exit 0
+fi
+
+echo "communications.delivery.anomaly.status"
+echo "status: $status"
+echo "log_path: $log_path"
+echo "anomaly_enabled: $anomaly_enabled"
+echo "window_records: $window_records"
+echo "min_records_to_alert: $min_records"
+echo "metrics_total: $total"
+echo "metrics_failed: $failed"
+echo "metrics_policy_blocked: $policy_blocked"
+echo "metrics_provider_timeout: $provider_timeout"
+echo "metrics_failure_rate: $failure_rate"
+echo "metrics_policy_block_rate: $policy_block_rate"
+reasons_csv="$(echo "$reasons_json" | jq -r 'join(",")')"
+[[ -n "$reasons_csv" ]] && echo "reasons: $reasons_csv"
