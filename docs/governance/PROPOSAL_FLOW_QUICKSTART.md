@@ -21,6 +21,11 @@ echo "yes" | ./bin/ops cap run proposals.apply CP-YYYYMMDD-HHMMSS__your-change
 Proposal manifests only support `create|modify|delete` actions (`created|update|edit|api-write|remove` normalize to those canonical values).
 `append` is not a valid action and will be rejected by `proposals.apply`.
 
+## Queue Status Semantics
+
+- `pending` proposals are the actionable queue for apply/triage.
+- `superseded` proposals are historical records only and are never actionable.
+
 ## Admission Routing Contract
 
 `proposals.apply` always evaluates loop/gap governance route checks by sending

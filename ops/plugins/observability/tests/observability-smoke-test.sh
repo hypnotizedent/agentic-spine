@@ -26,9 +26,11 @@ EXPECTED_SCRIPTS=(
   "immich-status"
   "immich-ingest-watch"
   "finance-stack-status"
+  "finance-ronny-action-queue"
   "idrac-health-status"
   "switch-health-status"
   "stability-control-snapshot"
+  "infra-core-slo-status"
   "stability-control-reconcile"
 )
 
@@ -46,12 +48,26 @@ echo "T1: Expected observability scripts exist and are executable"
 ) && pass "all expected scripts present + executable" || fail "missing or non-executable observability script"
 
 echo ""
-echo "T2: All observability scripts pass bash -n syntax check"
+echo "T2: All observability scripts pass interpreter-aware syntax checks"
 (
   for script in "${EXPECTED_SCRIPTS[@]}"; do
-    bash -n "$OBS_BIN/$script"
+    path="$OBS_BIN/$script"
+    shebang="$(head -n 1 "$path" 2>/dev/null || true)"
+    if [[ "$shebang" == *python* ]]; then
+      command -v python3 >/dev/null 2>&1 || { echo "  python3 missing for $path" >&2; exit 1; }
+      python3 - "$path" <<'PY'
+import ast
+import pathlib
+import sys
+
+target = pathlib.Path(sys.argv[1])
+ast.parse(target.read_text())
+PY
+    else
+      bash -n "$path"
+    fi
   done
-) && pass "bash -n clean for all observability scripts" || fail "bash -n failed for one or more scripts"
+) && pass "syntax clean for all observability scripts" || fail "syntax check failed for one or more scripts"
 
 echo ""
 echo "T3: MANIFEST observability script/capability counts match expected set"
