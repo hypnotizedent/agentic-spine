@@ -28,7 +28,7 @@ parent_receipts:
 | NAS (Synology) | 100.102.199.111 | https://nas:5001 |
 | Home Assistant | 100.67.120.1 | http://ha:8123 |
 | Vaultwarden (decommissioned) | 100.93.142.63 | Decommissioned 2026-02-16 (primary on infra-core) |
-| Pi-hole (decommissioned) | 100.105.148.96 | Soft-decommissioned 2026-02-21 |
+| Pi-hole | 100.105.148.96 | http://pihole-home/admin |
 
 ---
 
@@ -150,7 +150,7 @@ parent_receipts:
 | VMID | Hostname | Tailscale IP | Status | Purpose |
 |------|----------|--------------|--------|---------|
 | 103 | download-home | 100.125.138.110 | **Soft-decommissioned** | Legacy *arr home LXC (retained stopped, non-destructive) |
-| 105 | pihole-home | 100.105.148.96 | **Soft-decommissioned** | Legacy DNS LXC (retained stopped, non-destructive) |
+| 105 | pihole-home | 100.105.148.96 | **Running** | Home DNS + ad-blocking |
 
 ### VM Details
 
@@ -203,8 +203,8 @@ parent_receipts:
 | Field | Value |
 |-------|-------|
 | Tailscale IP | 100.105.148.96 |
-| Purpose | Legacy DNS server + ad-blocking |
-| Status | **Soft-decommissioned** 2026-02-21 (UDR DNS is canonical) |
+| Purpose | Home DNS server + ad-blocking |
+| Status | **Running** (reactivated 2026-02-21) |
 
 ---
 
@@ -222,7 +222,7 @@ parent_receipts:
 | TubesZB (Z-Wave) | 10.0.0.90 | - | Z-Wave coordinator |
 | homeassistant | 10.0.0.100 | 100.67.120.1 | VM 100 |
 | vaultwarden | 10.0.0.102 | 100.93.142.63 | VM 102 |
-| pihole-home | 10.0.0.53 | 100.105.148.96 | LXC 105 (soft-decommissioned) |
+| pihole-home | 10.0.0.53 | 100.105.148.96 | LXC 105 (active) |
 | download-home | 10.0.0.103 | 100.125.138.110 | LXC 103 (soft-decommissioned) |
 
 ### Network Configuration
@@ -232,7 +232,7 @@ parent_receipts:
 | Subnet | 10.0.0.0/24 |
 | Gateway | 10.0.0.1 (UDR) |
 | DHCP Range | 10.0.0.200 - 10.0.0.254 |
-| DHCP DNS | 10.0.0.1 (UDR itself, NOT pihole-home) |
+| DHCP DNS | 10.0.0.53 primary (pihole-home), 10.0.0.1 fallback |
 | WiFi SSID | pogodobby |
 
 ### Radio Coordinators
@@ -323,7 +323,7 @@ nfs: synology-backups
 | Frigate NVR | proxmox-home | Has iGPU for video decode |
 | Photo ML | immich (VM 101) | Already has ML container |
 | Heavy DB | NAS + SSD cache | NAS has caching capability |
-| Pi-hole secondary | N/A (legacy path retired) | download-home/pihole-home are soft-decommissioned history |
+| Pi-hole secondary | pihole-home LXC | Active home-local DNS filtering path |
 
 ### Resource Constraints
 
@@ -400,10 +400,10 @@ curl -s http://vault:8080/
 | No Hyper Backup tasks | OPEN | MEDIUM | NAS has no backup destinations configured. Deferred. |
 | VM 101 (immich) stopped | OPEN | MEDIUM | Not running, has migration snapshot. |
 | LXC 103 (download-home) | **RESOLVED** | ~~MEDIUM~~ | Soft-decommissioned 2026-02-21; removed from active-access expectations. |
-| LXC 105 (pihole-home) | **RESOLVED** | ~~MEDIUM~~ | Soft-decommissioned 2026-02-21; UDR DNS is canonical. |
+| LXC 105 (pihole-home) | **RESOLVED** | ~~MEDIUM~~ | Reactivated 2026-02-21; home DHCP DNS routed back to pihole-home. |
 | download-home SSH | **RESOLVED** | ~~MEDIUM~~ | Expectation removed by decommission decision (non-destructive). |
 | Immich home vs shop | INFO | LOW | Two instances — may consolidate |
-| UDR DNS not using pihole | INFO | LOW | DHCP hands out 10.0.0.1 (UDR), not pihole-home |
+| UDR DNS not using pihole | **RESOLVED** | ~~LOW~~ | DHCP DNS now set to 10.0.0.53 primary with 10.0.0.1 fallback. |
 
 ---
 
@@ -453,7 +453,7 @@ No open baseline loops. `OL_HOME_BASELINE_FINISH` closed 2026-02-07.
 - No Hyper Backup tasks configured
 - VM 101 (immich) stopped
 - NAS SSH works as `ronadmin`
-- download-home / pihole-home moved to soft-decommissioned history (no active SSH expectation)
+- download-home moved to soft-decommissioned history (no active SSH expectation)
 
 ### 2026-01-21 Infrastructure Discovery
 

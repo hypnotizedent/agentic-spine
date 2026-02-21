@@ -131,9 +131,10 @@ github_issue: "#625"
 | streaming-stack | ubuntu | ~/.ssh/id_ed25519 | VM 210 |
 | vault | root | ~/.ssh/id_ed25519 | Vaultwarden (home VM 102) |
 | ha | hassio | ~/.ssh/id_ed25519 | Home Assistant |
+| pihole-home | root | ~/.ssh/id_ed25519 | Pi-hole DNS (home LXC 105) |
 | immich | ubuntu | ~/.ssh/id_ed25519 | Photo server (shop VM 203) |
 
-Soft-decommissioned history (not active SSH expectations): `pihole-home`, `download-home`.
+Soft-decommissioned history (not active SSH expectations): `download-home`.
 
 **Config location:** `~/.ssh/config` + `~/code/workbench/dotfiles/ssh/config.d/`
 
