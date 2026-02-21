@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# host-launchagents-sync
+#
+# Governed sync/reload for spine-managed LaunchAgents.
+# Source templates: ops/runtime/launchd/*.plist
+# Install target:   ~/Library/LaunchAgents/
+#
+# Usage:
+#   host-launchagents-sync [--dry-run] [--no-reload] [--label <com.ronny.foo> ...]
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+SOURCE_DIR="${ROOT}/ops/runtime/launchd"
+DEST_DIR="${HOME}/Library/LaunchAgents"
+UID_VAL="$(id -u)"
+
+DRY_RUN=0
+NO_RELOAD=0
+declare -a REQUESTED_LABELS=()
+
+usage() {
+  cat <<'USAGE'
+host-launchagents-sync
+
+Usage:
+  host-launchagents-sync [--dry-run] [--no-reload] [--label <com.ronny.foo> ...]
+
+Options:
+  --dry-run      Show actions without mutating files or launchctl state.
+  --no-reload    Sync plist files only; do not bootout/bootstrap labels.
+  --label        Restrict to one label (repeatable). Default: all com.ronny.* templates.
+USAGE
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "FAIL: missing command: $1" >&2
+    exit 1
+  }
+}
+
+plist_label() {
+  local plist_path="$1"
+  plutil -convert json -o - "$plist_path" 2>/dev/null | jq -r '.Label // ""'
+}
+
+reload_label() {
+  local label="$1"
+  local dst_plist="$2"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "WOULD RELOAD: $label"
+    return 0
+  fi
+
+  launchctl bootout "gui/${UID_VAL}/${label}" 2>/dev/null || true
+  launchctl bootstrap "gui/${UID_VAL}" "$dst_plist"
+
+  if ! launchctl print "gui/${UID_VAL}/${label}" >/dev/null 2>&1; then
+    echo "FAIL: launchctl did not load $label after bootstrap" >&2
+    return 1
+  fi
+
+  echo "RELOADED: $label"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --no-reload)
+      NO_RELOAD=1
+      shift
+      ;;
+    --label)
+      REQUESTED_LABELS+=("${2:?--label requires value}")
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+need_cmd jq
+need_cmd plutil
+need_cmd launchctl
+
+[[ -d "$SOURCE_DIR" ]] || {
+  echo "FAIL: missing source dir: $SOURCE_DIR" >&2
+  exit 1
+}
+
+mkdir -p "$DEST_DIR"
+
+declare -a LABELS=()
+if [[ "${#REQUESTED_LABELS[@]}" -gt 0 ]]; then
+  LABELS=("${REQUESTED_LABELS[@]}")
+else
+  while IFS= read -r plist_path; do
+    [[ -f "$plist_path" ]] || continue
+    label="$(plist_label "$plist_path")"
+    [[ -n "$label" ]] || continue
+    LABELS+=("$label")
+  done < <(find "$SOURCE_DIR" -maxdepth 1 -type f -name 'com.ronny.*.plist' | sort)
+fi
+
+if [[ "${#LABELS[@]}" -eq 0 ]]; then
+  echo "FAIL: no labels resolved (source: $SOURCE_DIR)" >&2
+  exit 1
+fi
+
+copied=0
+unchanged=0
+reloaded=0
+errors=0
+
+echo "host.launchagents.sync"
+echo "source: $SOURCE_DIR"
+echo "target: $DEST_DIR"
+echo "dry_run: $DRY_RUN"
+echo "no_reload: $NO_RELOAD"
+echo
+
+for label in "${LABELS[@]}"; do
+  src_plist="$SOURCE_DIR/$label.plist"
+  dst_plist="$DEST_DIR/$label.plist"
+
+  if [[ ! -f "$src_plist" ]]; then
+    echo "FAIL: missing source plist for $label: $src_plist" >&2
+    errors=$((errors + 1))
+    continue
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    if [[ -f "$dst_plist" ]] && cmp -s "$src_plist" "$dst_plist"; then
+      echo "UNCHANGED: $label"
+      unchanged=$((unchanged + 1))
+    else
+      echo "WOULD COPY: $label -> $dst_plist"
+      copied=$((copied + 1))
+    fi
+  else
+    if [[ -f "$dst_plist" ]] && cmp -s "$src_plist" "$dst_plist"; then
+      echo "UNCHANGED: $label"
+      unchanged=$((unchanged + 1))
+    else
+      cp "$src_plist" "$dst_plist"
+      echo "COPIED: $label -> $dst_plist"
+      copied=$((copied + 1))
+    fi
+  fi
+
+  if [[ "$NO_RELOAD" -eq 1 ]]; then
+    continue
+  fi
+
+  if reload_label "$label" "$dst_plist"; then
+    reloaded=$((reloaded + 1))
+  else
+    errors=$((errors + 1))
+  fi
+done
+
+echo
+echo "summary: labels=${#LABELS[@]} copied=$copied unchanged=$unchanged reloaded=$reloaded errors=$errors"
+[[ "$errors" -eq 0 ]]

@@ -2,13 +2,15 @@
 # TRIAGE: MCP runtime drift recurred due to weak linkage between active agents and runtime contract coverage.
 # D148: mcp-agent-runtime-binding-lock
 # Enforces: canonical Claude Desktop config paths, explicit runtime binding policy for active MCP agents,
-# and required contract linkage for agent runtime bindings.
+# required contract linkage for agent runtime bindings, and required LaunchAgent scheduler parity.
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
+LAUNCHD_CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
 REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
 DOC="$ROOT/docs/product/AOF_V1_1_SURFACE_UNIFICATION.md"
+SKIP_LIVE_LAUNCHCTL="${D148_SKIP_LIVE_LAUNCHCTL:-0}"
 
 ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
@@ -25,14 +27,35 @@ need_cmd() {
 }
 
 need_cmd yq
+need_cmd jq
+need_cmd plutil
 need_file "$CONTRACT"
+need_file "$LAUNCHD_CONTRACT"
 need_file "$REGISTRY"
 need_file "$DOC"
+if [[ "$SKIP_LIVE_LAUNCHCTL" != "1" ]]; then
+  need_cmd launchctl
+fi
 
 if [[ "$ERRORS" -gt 0 ]]; then
   echo "D148 FAIL: $ERRORS precondition error(s)"
   exit 1
 fi
+
+plist_schedule_fingerprint() {
+  local plist_path="$1"
+  plutil -convert json -o - "$plist_path" 2>/dev/null \
+    | jq -c '{
+        StartInterval: (.StartInterval // null),
+        StartCalendarInterval: (.StartCalendarInterval // null)
+      }'
+}
+
+plist_label() {
+  local plist_path="$1"
+  plutil -convert json -o - "$plist_path" 2>/dev/null \
+    | jq -r '.Label // ""'
+}
 
 # 1) Canonical Claude Desktop config path linkage in runtime contract.
 expected_desktop_path="/Users/ronnyworks/Library/Application Support/Claude/claude_desktop_config.json"
@@ -130,9 +153,74 @@ if grep -q 'immich-agent: registered' "$DOC"; then
   err "stale status in docs/product/AOF_V1_1_SURFACE_UNIFICATION.md for immich-agent"
 fi
 
+# 4) Required LaunchAgents must exist in governed source templates, be installed in user launchd,
+# and preserve schedule parity. Live load-state checks are mandatory unless explicitly skipped in tests.
+source_dir="$(yq e -r '.paths.source_dir // ""' "$LAUNCHD_CONTRACT")"
+install_dir="$(yq e -r '.paths.user_launchagents_dir // ""' "$LAUNCHD_CONTRACT")"
+
+if [[ -z "$source_dir" ]]; then
+  err "launchd.runtime.contract paths.source_dir is required"
+fi
+if [[ -z "$install_dir" ]]; then
+  err "launchd.runtime.contract paths.user_launchagents_dir is required"
+fi
+
+mapfile -t required_labels < <(yq e -r '.required_labels[]?' "$LAUNCHD_CONTRACT")
+if [[ "${#required_labels[@]}" -eq 0 ]]; then
+  err "launchd.runtime.contract required_labels[] must list at least one LaunchAgent label"
+fi
+
+if [[ "$SKIP_LIVE_LAUNCHCTL" != "1" ]]; then
+  uid_val="$(id -u)"
+fi
+
+for label in "${required_labels[@]}"; do
+  [[ -n "$label" ]] || continue
+
+  src_plist="$source_dir/$label.plist"
+  dst_plist="$install_dir/$label.plist"
+
+  if [[ ! -f "$src_plist" ]]; then
+    err "required launchagent '$label' missing governed template: $src_plist"
+    continue
+  fi
+  if [[ ! -f "$dst_plist" ]]; then
+    err "required launchagent '$label' not installed at: $dst_plist"
+    continue
+  fi
+
+  src_label="$(plist_label "$src_plist")"
+  dst_label="$(plist_label "$dst_plist")"
+  if [[ "$src_label" != "$label" ]]; then
+    err "template plist label mismatch for '$label' (got '$src_label')"
+  fi
+  if [[ "$dst_label" != "$label" ]]; then
+    err "installed plist label mismatch for '$label' (got '$dst_label')"
+  fi
+
+  src_schedule="$(plist_schedule_fingerprint "$src_plist")"
+  dst_schedule="$(plist_schedule_fingerprint "$dst_plist")"
+  if [[ "$src_schedule" != "$dst_schedule" ]]; then
+    err "launchagent '$label' schedule drift: installed plist does not match governed template"
+  else
+    ok "launchagent '$label' schedule matches governed template"
+  fi
+
+  if [[ "$SKIP_LIVE_LAUNCHCTL" == "1" ]]; then
+    ok "launchagent '$label' live launchctl check skipped"
+    continue
+  fi
+
+  if ! launchctl print "gui/$uid_val/$label" >/dev/null 2>&1; then
+    err "launchagent '$label' is not loaded in launchctl"
+  else
+    ok "launchagent '$label' is loaded in launchctl"
+  fi
+done
+
 if [[ "$ERRORS" -gt 0 ]]; then
   echo "D148 FAIL: $ERRORS check(s) failed"
   exit 1
 fi
 
-echo "D148 PASS: MCP agent runtime binding lock enforced"
+echo "D148 PASS: MCP runtime + LaunchAgent scheduler binding lock enforced"
