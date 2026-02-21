@@ -22,6 +22,10 @@ TARGET_CAPS=(
   "infra.proxmox.node_path.migrate"
 )
 
+# Canonical infra-core adjacent prefixes. These must always declare both domain
+# and plane to preserve routing/pack clarity.
+PREFIX_REGEX='^(infra|caddy|auth|secrets|cloudflared|pihole|vaultwarden)\.'
+
 for cap in "${TARGET_CAPS[@]}"; do
   cap_exists="$(yq e ".capabilities[\"$cap\"] | has(\"description\")" "$CAPS" 2>/dev/null || echo "false")"
   if [[ "$cap_exists" != "true" ]]; then
@@ -53,10 +57,29 @@ for cap in "${TARGET_CAPS[@]}"; do
   fi
 done
 
+matched_caps=0
+while IFS= read -r cap; do
+  [[ -z "$cap" ]] && continue
+  matched_caps=$((matched_caps + 1))
+  plane="$(yq e ".capabilities[\"$cap\"].plane" "$CAPS" 2>/dev/null || echo "")"
+  domain="$(yq e ".capabilities[\"$cap\"].domain" "$CAPS" 2>/dev/null || echo "")"
+
+  if [[ -z "$plane" || "$plane" == "null" ]]; then
+    err "Capability '$cap' missing 'plane' field"
+  fi
+  if [[ -z "$domain" || "$domain" == "null" ]]; then
+    err "Capability '$cap' missing 'domain' field"
+  fi
+done < <(yq -r ".capabilities | to_entries[] | select(.key | test(\"${PREFIX_REGEX}\")) | .key" "$CAPS")
+
+if [[ "$matched_caps" -eq 0 ]]; then
+  err "No infra-core adjacent capabilities matched regex $PREFIX_REGEX"
+fi
+
 if [[ "$ERRORS" -gt 0 ]]; then
   echo "D137 FAIL: $ERRORS metadata gaps found"
   exit 1
 fi
 
-echo "D137 PASS: all ${#TARGET_CAPS[@]} infra capabilities have plane/domain/requires metadata"
+echo "D137 PASS: ${#TARGET_CAPS[@]} strict infra caps + ${matched_caps} infra-core adjacent caps have required metadata"
 exit 0
