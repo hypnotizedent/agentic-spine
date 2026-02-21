@@ -1,0 +1,808 @@
+#!/usr/bin/env python3
+"""spine-control
+
+Unified control-loop surfaces:
+  - spine.control.tick
+  - spine.control.plan
+  - spine.control.execute
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[4]
+SCHEMA_VERSION = "1.0"
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run_cmd(cmd: list[str], *, cwd: Path | None = None, input_text: str | None = None) -> tuple[int, str, str]:
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd or ROOT),
+        input=input_text,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def parse_frontmatter(path: Path) -> dict[str, str]:
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        return {}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    front = parts[1]
+    data: dict[str, str] = {}
+    for line in front.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        data[key.strip()] = value.strip().strip('"').strip("'")
+    return data
+
+
+def load_yaml(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    with path.open("r", encoding="utf-8") as fh:
+        loaded = yaml.safe_load(fh)
+    return default if loaded is None else loaded
+
+
+def resolve_runtime_paths() -> dict[str, Path]:
+    contract = load_yaml(ROOT / "ops/bindings/mailroom.runtime.contract.yaml", {})
+    runtime_active = bool(contract.get("active"))
+    runtime_root = str(contract.get("runtime_root", "")).strip()
+
+    inbox = os.environ.get("SPINE_INBOX")
+    outbox = os.environ.get("SPINE_OUTBOX")
+    state = os.environ.get("SPINE_STATE")
+    logs = os.environ.get("SPINE_LOGS")
+
+    if runtime_active and runtime_root:
+        inbox = inbox or f"{runtime_root}/inbox"
+        outbox = outbox or f"{runtime_root}/outbox"
+        state = state or f"{runtime_root}/state"
+        logs = logs or f"{runtime_root}/logs"
+
+    inbox = inbox or str(ROOT / "mailroom/inbox")
+    outbox = outbox or str(ROOT / "mailroom/outbox")
+    state = state or str(ROOT / "mailroom/state")
+    logs = logs or str(ROOT / "mailroom/logs")
+
+    return {
+        "inbox": Path(inbox),
+        "outbox": Path(outbox),
+        "state": Path(state),
+        "logs": Path(logs),
+    }
+
+
+def severity_rank(value: str) -> int:
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    return order.get((value or "").strip().lower(), 4)
+
+
+def gap_numeric_id(value: str) -> int:
+    m = re.search(r"(\d+)$", value or "")
+    return int(m.group(1)) if m else 999_999
+
+
+def collect_open_loops() -> list[dict[str, Any]]:
+    rc, out, _ = run_cmd([str(ROOT / "bin/ops"), "loops", "list", "--open"], cwd=ROOT)
+    if rc != 0:
+        return []
+
+    open_ids: list[str] = []
+    for line in out.splitlines():
+        m = re.search(r"(LOOP-[A-Z0-9-]+)", line)
+        if m:
+            open_ids.append(m.group(1))
+
+    loop_dir = ROOT / "mailroom/state/loop-scopes"
+    rows: list[dict[str, Any]] = []
+    for loop_id in open_ids:
+        path = loop_dir / f"{loop_id}.scope.md"
+        front = parse_frontmatter(path) if path.exists() else {}
+        rows.append(
+            {
+                "loop_id": loop_id,
+                "status": (front.get("status") or "open").strip().lower(),
+                "owner": front.get("owner", ""),
+                "priority": front.get("priority", ""),
+                "objective": front.get("objective", ""),
+                "path": str(path.relative_to(ROOT)) if path.exists() else "",
+            }
+        )
+    return rows
+
+
+def collect_open_gaps() -> list[dict[str, Any]]:
+    data = load_yaml(ROOT / "ops/bindings/operational.gaps.yaml", {})
+    rows = []
+    for item in data.get("gaps", []):
+        status = str(item.get("status", "")).strip().lower()
+        if status not in {"open", "active"}:
+            continue
+        desc = str(item.get("description", "")).strip()
+        desc = re.sub(r"\s+", " ", desc)
+        rows.append(
+            {
+                "id": item.get("id", ""),
+                "severity": item.get("severity", "medium"),
+                "status": status,
+                "parent_loop": item.get("parent_loop", ""),
+                "description": desc,
+                "doc": item.get("doc", ""),
+            }
+        )
+    rows.sort(key=lambda r: (severity_rank(r.get("severity", "")), gap_numeric_id(r.get("id", ""))))
+    return rows
+
+
+def parse_proposals_summary() -> dict[str, int]:
+    script = ROOT / "ops/plugins/proposals/bin/proposals-status"
+    if not script.exists():
+        return {
+            "total": 0,
+            "pending": 0,
+            "applied": 0,
+            "superseded": 0,
+            "draft_hold": 0,
+            "draft": 0,
+            "read_only": 0,
+            "invalid": 0,
+            "sla_breaches": 0,
+        }
+
+    rc, out, err = run_cmd([str(script)], cwd=ROOT)
+    text = out if out.strip() else err
+    summary = {
+        "total": 0,
+        "pending": 0,
+        "applied": 0,
+        "superseded": 0,
+        "draft_hold": 0,
+        "draft": 0,
+        "read_only": 0,
+        "invalid": 0,
+        "sla_breaches": 0,
+    }
+    patterns = {
+        "total": r"Total:\s+(\d+)",
+        "pending": r"Pending:\s+(\d+)",
+        "applied": r"Applied:\s+(\d+)",
+        "superseded": r"Superseded:\s+(\d+)",
+        "draft_hold": r"Draft Hold:\s+(\d+)",
+        "draft": r"Draft:\s+(\d+)",
+        "read_only": r"Read-only:\s+(\d+)",
+        "invalid": r"Invalid:\s+(\d+)",
+        "sla_breaches": r"SLA breaches:\s+(\d+)",
+    }
+    for key, pattern in patterns.items():
+        m = re.search(pattern, text)
+        if m:
+            summary[key] = int(m.group(1))
+    if rc != 0 and summary["total"] == 0:
+        summary["invalid"] = max(summary["invalid"], 1)
+    return summary
+
+
+def parse_json_output(script: Path, args: list[str]) -> tuple[int, dict[str, Any]]:
+    rc, out, err = run_cmd([str(script)] + args, cwd=ROOT)
+    text = out.strip() or err.strip()
+    if not text:
+        return rc, {}
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = {"status": "error", "error": {"message": text}}
+    return rc, payload
+
+
+def collect_calendar_status() -> dict[str, Any]:
+    script = ROOT / "ops/plugins/calendar/bin/calendar-status"
+    if not script.exists():
+        return {"status": "error", "error": {"message": "calendar-status script not found"}}
+    _, payload = parse_json_output(script, ["--json"])
+    if not payload:
+        return {"status": "error", "error": {"message": "calendar-status returned no payload"}}
+    data = payload.get("data", {})
+    return {
+        "status": payload.get("status", "unknown"),
+        "binding_valid": bool(data.get("binding_valid")),
+        "missing_count": len(data.get("missing", []) or []),
+        "stale_count": len(data.get("stale", []) or []),
+        "missing": data.get("missing", []) or [],
+        "stale": data.get("stale", []) or [],
+    }
+
+
+def collect_alert_status() -> dict[str, Any]:
+    script = ROOT / "ops/plugins/alerting/bin/alerting-status"
+    if not script.exists():
+        return {"status": "error", "total_alerts": 0, "active_domains": []}
+    _, payload = parse_json_output(script, ["--json"])
+    domains = payload.get("domains", []) if isinstance(payload, dict) else []
+    active = [d.get("domain", "") for d in domains if int(d.get("alerts", 0) or 0) > 0]
+    total = sum(int(d.get("alerts", 0) or 0) for d in domains)
+    return {
+        "status": "ok" if total == 0 else "warn",
+        "total_alerts": total,
+        "active_domains": active,
+        "domains": domains,
+    }
+
+
+def collect_handoff_status() -> dict[str, Any]:
+    script = ROOT / "ops/plugins/handoff/bin/session-handoff-status"
+    if not script.exists():
+        return {"active": 0, "closed": 0, "expired": 0}
+    _, payload = parse_json_output(script, ["--json"])
+    return {
+        "active": int(payload.get("active", 0) or 0),
+        "closed": int(payload.get("closed", 0) or 0),
+        "expired": int(payload.get("expired", 0) or 0),
+    }
+
+
+def collect_timeline(window_hours: int) -> dict[str, Any]:
+    script = ROOT / "ops/plugins/evidence/bin/spine-timeline-query"
+    if not script.exists():
+        return {"event_count": 0, "verify_total_runs": 0, "verify_failed_runs": 0, "recent_failures": []}
+    rc, payload = parse_json_output(script, ["--since", f"{window_hours}h", "--limit", "200", "--format", "json"])
+    if rc != 0 and "events" not in payload:
+        return {"event_count": 0, "verify_total_runs": 0, "verify_failed_runs": 0, "recent_failures": []}
+
+    events = payload.get("events", []) if isinstance(payload, dict) else []
+    verify_events = [e for e in events if str(e.get("capability", "")).startswith("verify.")]
+    verify_failed = [e for e in verify_events if str(e.get("status", "")).lower() == "failed"]
+    all_failed = [e for e in events if str(e.get("status", "")).lower() == "failed"]
+    cap_counts = Counter(str(e.get("capability", "")) for e in events if e.get("capability"))
+
+    return {
+        "window_hours": window_hours,
+        "event_count": len(events),
+        "verify_total_runs": len(verify_events),
+        "verify_failed_runs": len(verify_failed),
+        "recent_failures": [
+            {
+                "created_at": e.get("created_at", ""),
+                "capability": e.get("capability", ""),
+                "status": e.get("status", ""),
+                "summary": e.get("summary", ""),
+            }
+            for e in all_failed[:10]
+        ],
+        "top_capabilities": [{"capability": k, "count": v} for k, v in cap_counts.most_common(10)],
+        "source_counts": payload.get("source_counts", {}),
+    }
+
+
+def collect_tick_data(window_hours: int) -> dict[str, Any]:
+    loops = collect_open_loops()
+    gaps = collect_open_gaps()
+    proposals = parse_proposals_summary()
+    calendar = collect_calendar_status()
+    alerts = collect_alert_status()
+    handoffs = collect_handoff_status()
+    timeline = collect_timeline(window_hours)
+
+    summary = {
+        "open_loops": len(loops),
+        "open_gaps": len(gaps),
+        "pending_proposals": proposals.get("pending", 0),
+        "active_alerts": alerts.get("total_alerts", 0),
+        "active_handoffs": handoffs.get("active", 0),
+        "timeline_events": timeline.get("event_count", 0),
+        "verify_failed_runs": timeline.get("verify_failed_runs", 0),
+    }
+
+    status = "ok"
+    if summary["active_alerts"] > 0 or any(g.get("severity") == "critical" for g in gaps):
+        status = "error"
+    elif (
+        summary["open_loops"] > 0
+        or summary["open_gaps"] > 0
+        or summary["pending_proposals"] > 0
+        or summary["verify_failed_runs"] > 0
+        or str(calendar.get("status", "")).lower() in {"warn", "error"}
+    ):
+        status = "warn"
+
+    return {
+        "capability": "spine.control.tick",
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "status": status,
+        "data": {
+            "window_hours": window_hours,
+            "summary": summary,
+            "loops": loops,
+            "gaps": gaps,
+            "proposals": proposals,
+            "calendar": calendar,
+            "alerts": alerts,
+            "handoffs": handoffs,
+            "timeline": timeline,
+        },
+    }
+
+
+def build_plan_payload(tick_payload: dict[str, Any]) -> dict[str, Any]:
+    data = tick_payload.get("data", {})
+    summary = data.get("summary", {})
+    loops = data.get("loops", [])
+    gaps = data.get("gaps", [])
+    alerts = data.get("alerts", {})
+    proposals = data.get("proposals", {})
+    timeline = data.get("timeline", {})
+
+    actions: list[dict[str, Any]] = []
+
+    def add_action(
+        *,
+        action_id: str,
+        priority: str,
+        title: str,
+        reason: str,
+        route_target: dict[str, Any],
+    ) -> None:
+        actions.append(
+            {
+                "action_id": action_id,
+                "priority": priority,
+                "title": title,
+                "reason": reason,
+                "route_target": route_target,
+                "execution_mode": "automated" if route_target.get("type") == "capability" else "delegated",
+            }
+        )
+
+    if summary.get("open_gaps", 0) > 0:
+        add_action(
+            action_id="A01-loop-gap-verify",
+            priority="P0",
+            title="Run loop/gap verify pack",
+            reason=f"{summary.get('open_gaps', 0)} open gap(s) detected.",
+            route_target={"type": "capability", "capability": "verify.pack.run", "args": ["loop_gap"]},
+        )
+
+    for idx, loop in enumerate(loops[:3], start=1):
+        loop_id = loop.get("loop_id", "")
+        add_action(
+            action_id=f"A1{idx}-loop-progress-{loop_id.lower()}",
+            priority="P1",
+            title=f"Inspect loop progress: {loop_id}",
+            reason=f"Loop is {loop.get('status', 'active')} and still open.",
+            route_target={"type": "capability", "capability": "loops.progress", "args": [loop_id]},
+        )
+
+    if proposals.get("pending", 0) > 0:
+        add_action(
+            action_id="A20-proposal-queue-health",
+            priority="P1",
+            title="Review proposal queue health",
+            reason=f"{proposals.get('pending', 0)} pending proposal(s) require operator attention.",
+            route_target={"type": "capability", "capability": "proposals.status", "args": []},
+        )
+
+    if alerts.get("total_alerts", 0) > 0:
+        add_action(
+            action_id="A30-stability-snapshot",
+            priority="P0",
+            title="Capture stability control snapshot",
+            reason=f"{alerts.get('total_alerts', 0)} active alert event(s) present.",
+            route_target={"type": "capability", "capability": "stability.control.snapshot", "args": []},
+        )
+
+    if timeline.get("verify_failed_runs", 0) > 0:
+        add_action(
+            action_id="A40-core-verify-rerun",
+            priority="P1",
+            title="Re-run core verify lane",
+            reason=f"{timeline.get('verify_failed_runs', 0)} verify run(s) failed in recent timeline window.",
+            route_target={"type": "capability", "capability": "verify.core.run", "args": []},
+        )
+
+    if gaps:
+        domain_hint = gaps[0].get("parent_loop", "spine")
+    elif loops:
+        domain_hint = loops[0].get("loop_id", "spine")
+    else:
+        domain_hint = "spine"
+    add_action(
+        action_id="A90-route-discovery",
+        priority="P2",
+        title="Resolve delegation target for next work item",
+        reason="Deterministic route lookup for agent-tool handoff.",
+        route_target={"type": "agent_tool", "tool": "route_resolve", "input": domain_hint},
+    )
+
+    if not actions:
+        add_action(
+            action_id="A99-core-health",
+            priority="P2",
+            title="Run core verify lane",
+            reason="No urgent signals detected; maintain baseline health.",
+            route_target={"type": "capability", "capability": "verify.core.run", "args": []},
+        )
+
+    priority_order = {"P0": 0, "P1": 1, "P2": 2}
+    actions.sort(key=lambda row: (priority_order.get(row.get("priority", "P2"), 9), row.get("action_id", "")))
+
+    return {
+        "capability": "spine.control.plan",
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "status": "ok",
+        "data": {
+            "summary": summary,
+            "signals": {
+                "open_loop_ids": [l.get("loop_id", "") for l in loops],
+                "open_gap_ids": [g.get("id", "") for g in gaps],
+                "alerts": alerts.get("active_domains", []),
+            },
+            "actions": actions,
+            "recommended_action_ids": [a.get("action_id", "") for a in actions[:3]],
+        },
+    }
+
+
+def load_capability_approval_index() -> dict[str, str]:
+    caps = load_yaml(ROOT / "ops/capabilities.yaml", {}).get("capabilities", {})
+    index: dict[str, str] = {}
+    if isinstance(caps, dict):
+        for capability, body in caps.items():
+            approval = "auto"
+            if isinstance(body, dict):
+                approval = str(body.get("approval", "auto"))
+            index[str(capability)] = approval
+    return index
+
+
+def extract_run_key(text: str) -> str:
+    m = re.search(r"Run Key:\s+([^\s]+)", text)
+    return m.group(1) if m else ""
+
+
+def extract_receipt_path(text: str) -> str:
+    m = re.search(r"Receipt:\s+([^\s]+)", text)
+    return m.group(1) if m else ""
+
+
+def write_control_artifact(payload: dict[str, Any]) -> dict[str, str]:
+    runtime = resolve_runtime_paths()
+    out_dir = runtime["outbox"] / "operations"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    json_path = out_dir / "control-plane-latest.json"
+    md_path = out_dir / "control-plane-latest.md"
+
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    results = payload.get("data", {}).get("results", [])
+    lines = [
+        "# Control Plane Latest",
+        "",
+        f"- Generated: {payload.get('generated_at', '')}",
+        f"- Status: {payload.get('status', '')}",
+        "",
+        "## Executed Actions",
+        "",
+    ]
+    if not results:
+        lines.append("- None")
+    else:
+        for row in results:
+            lines.extend(
+                [
+                    f"### {row.get('action_id', '')}",
+                    f"- Status: {row.get('status', '')}",
+                    f"- Route: {row.get('route_target', {}).get('type', '')}",
+                    f"- Capability: {row.get('route_target', {}).get('capability', '')}",
+                    f"- Run Key: {row.get('run_key', '')}",
+                    f"- Receipt: {row.get('receipt_path', '')}",
+                    "",
+                ]
+            )
+    md_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+    return {"json": str(json_path), "markdown": str(md_path)}
+
+
+def execute_plan_actions(action_ids: list[str], *, confirm: bool, dry_run: bool, window_hours: int) -> tuple[dict[str, Any], int]:
+    tick_payload = collect_tick_data(window_hours)
+    plan_payload = build_plan_payload(tick_payload)
+    actions = plan_payload.get("data", {}).get("actions", [])
+    action_index = {a.get("action_id", ""): a for a in actions}
+    approvals = load_capability_approval_index()
+
+    results: list[dict[str, Any]] = []
+    fail_count = 0
+
+    if not action_ids:
+        return (
+            {
+                "capability": "spine.control.execute",
+                "schema_version": SCHEMA_VERSION,
+                "generated_at": utc_now(),
+                "status": "error",
+                "error": {"message": "at least one --action-id is required"},
+            },
+            1,
+        )
+
+    for action_id in action_ids:
+        action = action_index.get(action_id)
+        if not action:
+            fail_count += 1
+            results.append(
+                {
+                    "action_id": action_id,
+                    "status": "error",
+                    "error_code": "action_not_found",
+                    "message": "action_id not present in latest plan output",
+                }
+            )
+            continue
+
+        route = action.get("route_target", {})
+        route_type = route.get("type")
+        if route_type != "capability":
+            fail_count += 1
+            results.append(
+                {
+                    "action_id": action_id,
+                    "status": "error",
+                    "error_code": "agent_tool_execution_not_supported",
+                    "message": "spine.control.execute can only run capability route targets",
+                    "route_target": route,
+                }
+            )
+            continue
+
+        capability = str(route.get("capability", "")).strip()
+        args = [str(x) for x in route.get("args", [])]
+        approval = approvals.get(capability, "auto")
+
+        if approval == "manual" and not confirm:
+            fail_count += 1
+            results.append(
+                {
+                    "action_id": action_id,
+                    "status": "error",
+                    "error_code": "manual_confirmation_required",
+                    "message": f"capability '{capability}' requires --confirm",
+                    "route_target": route,
+                }
+            )
+            continue
+
+        cmd = [str(ROOT / "bin/ops"), "cap", "run", capability] + args
+
+        if dry_run:
+            results.append(
+                {
+                    "action_id": action_id,
+                    "status": "dry_run",
+                    "route_target": route,
+                    "command": cmd,
+                }
+            )
+            continue
+
+        input_text = "yes\n" if approval == "manual" else None
+        rc, out, err = run_cmd(cmd, cwd=ROOT, input_text=input_text)
+        combined = (out or "") + ("\n" + err if err else "")
+        result_status = "done" if rc == 0 else "failed"
+        if rc != 0:
+            fail_count += 1
+
+        results.append(
+            {
+                "action_id": action_id,
+                "status": result_status,
+                "exit_code": rc,
+                "route_target": route,
+                "command": cmd,
+                "run_key": extract_run_key(combined),
+                "receipt_path": extract_receipt_path(combined),
+                "output_snippet": "\n".join(combined.strip().splitlines()[-20:]),
+            }
+        )
+
+    status = "ok" if fail_count == 0 else "error"
+    payload = {
+        "capability": "spine.control.execute",
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "status": status,
+        "data": {
+            "selected_action_ids": action_ids,
+            "dry_run": dry_run,
+            "confirm": confirm,
+            "tick_summary": tick_payload.get("data", {}).get("summary", {}),
+            "plan_generated_at": plan_payload.get("generated_at", ""),
+            "results": results,
+        },
+    }
+    payload["data"]["artifacts"] = write_control_artifact(payload)
+    return payload, 0 if fail_count == 0 else 1
+
+
+def render_tick_markdown(payload: dict[str, Any]) -> str:
+    data = payload.get("data", {})
+    summary = data.get("summary", {})
+    lines = [
+        "# Spine Control Tick",
+        "",
+        f"- Generated: {payload.get('generated_at', '')}",
+        f"- Status: {payload.get('status', '')}",
+        f"- Open Loops: {summary.get('open_loops', 0)}",
+        f"- Open Gaps: {summary.get('open_gaps', 0)}",
+        f"- Pending Proposals: {summary.get('pending_proposals', 0)}",
+        f"- Active Alerts: {summary.get('active_alerts', 0)}",
+        f"- Active Handoffs: {summary.get('active_handoffs', 0)}",
+        f"- Verify Failed Runs ({data.get('window_hours', 24)}h): {summary.get('verify_failed_runs', 0)}",
+        "",
+    ]
+    loops = data.get("loops", [])
+    if loops:
+        lines.append("## Open Loops")
+        lines.append("")
+        for row in loops:
+            lines.append(f"- {row.get('loop_id', '')} ({row.get('status', '')})")
+        lines.append("")
+    gaps = data.get("gaps", [])
+    if gaps:
+        lines.append("## Open Gaps")
+        lines.append("")
+        for row in gaps:
+            lines.append(f"- {row.get('id', '')} [{row.get('severity', '')}]")
+    return "\n".join(lines).strip() + "\n"
+
+
+def render_plan_markdown(payload: dict[str, Any]) -> str:
+    data = payload.get("data", {})
+    lines = [
+        "# Spine Control Plan",
+        "",
+        f"- Generated: {payload.get('generated_at', '')}",
+        f"- Recommended: {', '.join(data.get('recommended_action_ids', [])) or '(none)'}",
+        "",
+        "## Actions",
+        "",
+    ]
+    for row in data.get("actions", []):
+        route = row.get("route_target", {})
+        route_kind = route.get("type", "")
+        if route_kind == "capability":
+            route_label = f"{route.get('capability', '')} {' '.join(route.get('args', []))}".strip()
+        else:
+            route_label = f"{route.get('tool', '')} input={route.get('input', '')}".strip()
+        lines.extend(
+            [
+                f"### {row.get('action_id', '')} [{row.get('priority', '')}]",
+                f"- Title: {row.get('title', '')}",
+                f"- Reason: {row.get('reason', '')}",
+                f"- Route: {route_kind}",
+                f"- Target: {route_label}",
+                "",
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
+def render_execute_markdown(payload: dict[str, Any]) -> str:
+    data = payload.get("data", {})
+    lines = [
+        "# Spine Control Execute",
+        "",
+        f"- Generated: {payload.get('generated_at', '')}",
+        f"- Status: {payload.get('status', '')}",
+        "",
+        "## Results",
+        "",
+    ]
+    for row in data.get("results", []):
+        lines.extend(
+            [
+                f"### {row.get('action_id', '')}",
+                f"- Status: {row.get('status', '')}",
+                f"- Run Key: {row.get('run_key', '')}",
+                f"- Receipt: {row.get('receipt_path', '')}",
+                "",
+            ]
+        )
+    artifacts = data.get("artifacts", {})
+    if artifacts:
+        lines.extend(
+            [
+                "## Artifacts",
+                "",
+                f"- JSON: {artifacts.get('json', '')}",
+                f"- Markdown: {artifacts.get('markdown', '')}",
+            ]
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Unified spine control loop surfaces")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    tick = sub.add_parser("tick", help="Aggregate control-plane signals")
+    tick.add_argument("--window-hours", type=int, default=24)
+    tick.add_argument("--json", action="store_true")
+
+    plan = sub.add_parser("plan", help="Build prioritized next-action plan")
+    plan.add_argument("--window-hours", type=int, default=24)
+    plan.add_argument("--json", action="store_true")
+
+    execute = sub.add_parser("execute", help="Execute approved plan actions")
+    execute.add_argument("--action-id", action="append", default=[])
+    execute.add_argument("--confirm", action="store_true", help="Allow manual approval capabilities")
+    execute.add_argument("--dry-run", action="store_true")
+    execute.add_argument("--window-hours", type=int, default=24)
+    execute.add_argument("--json", action="store_true")
+
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    if args.command == "tick":
+        payload = collect_tick_data(args.window_hours)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(render_tick_markdown(payload), end="")
+        return 0
+
+    if args.command == "plan":
+        payload = build_plan_payload(collect_tick_data(args.window_hours))
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(render_plan_markdown(payload), end="")
+        return 0
+
+    if args.command == "execute":
+        payload, rc = execute_plan_actions(
+            args.action_id,
+            confirm=bool(args.confirm),
+            dry_run=bool(args.dry_run),
+            window_hours=args.window_hours,
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(render_execute_markdown(payload), end="")
+        return rc
+
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

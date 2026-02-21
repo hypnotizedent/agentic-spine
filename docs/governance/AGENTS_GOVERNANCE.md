@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-18
+last_verified: 2026-02-21
 scope: agent-infrastructure-governance
 github_issue: "#634"
 ---
@@ -57,6 +57,19 @@ The runtime MCP bridge is unified through `spine` (`ops/plugins/mcp-gateway/bin/
 - `./bin/ops cap run agent.route --json <domain-or-keyword>` for stable envelope output (`matched|not_found|error`) consumed by gateway `route_resolve`
 
 Domain-specific MCP servers in workbench remain optional providers until delegated tool surfaces are fully absorbed by gateway policy.
+
+## Control-Loop Glue Surfaces
+
+`spine.control.*` is now available as the unified control-plane orchestration surface:
+
+- `spine.control.tick` — read-only aggregated "what matters now" snapshot.
+- `spine.control.plan` — read-only prioritized next actions with deterministic route targets (`capability|agent_tool`).
+- `spine.control.execute` — mutating/manual execution for selected capability-backed actions with receipt linkage.
+
+Execution writes the control-plane latest artifact under runtime-aware outbox path:
+
+- `mailroom/outbox/operations/control-plane-latest.json`
+- `mailroom/outbox/operations/control-plane-latest.md`
 
 ## Safety Rules
 - No secrets in contracts or registry (names/paths only; never values)
