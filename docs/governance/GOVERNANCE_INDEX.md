@@ -347,7 +347,7 @@ find . -path "*/.worktrees/*" -name "*.md" 2>/dev/null | head -5
 START: Agent has a question about "truth"
     │
     ├─▶ Is there an open loop for this?
-    │       NO → Record work via `./bin/ops loops collect`
+    │       NO → Create loop via `./bin/ops cap run loops.create`
     │      YES ↓
     │
     ├─▶ Can you answer via SSOT/docs/RAG/search?
