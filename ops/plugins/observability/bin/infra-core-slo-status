@@ -56,6 +56,7 @@ now_ms() {
 status_rank() {
   case "$1" in
     OK) echo 0 ;;
+    INFO) echo 0 ;;
     WARN) echo 1 ;;
     FAIL) echo 2 ;;
     *) echo 0 ;;
@@ -87,6 +88,8 @@ need_file "$SERVICE_REGISTRY"
 TARGET_HOST="$(yq -r '.target.host // "infra-core"' "$CONTRACT")"
 CONNECT_TIMEOUT_SEC="$(yq -r '.timeouts.connect_timeout_sec // 3' "$CONTRACT")"
 MAX_TIME_SEC="$(yq -r '.timeouts.max_time_sec // 8' "$CONTRACT")"
+OPTIONAL_CONNECT_TIMEOUT_SEC="$(yq -r '.timeouts.optional_connect_timeout_sec // .timeouts.connect_timeout_sec // 3' "$CONTRACT")"
+OPTIONAL_MAX_TIME_SEC="$(yq -r '.timeouts.optional_max_time_sec // .timeouts.max_time_sec // 8' "$CONTRACT")"
 LATENCY_WARN_MS="$(yq -r '.budgets.latency_warn_ms // 3000' "$CONTRACT")"
 LATENCY_INCIDENT_MS="$(yq -r '.budgets.latency_incident_ms // 7000' "$CONTRACT")"
 MAX_FAILED_REQUIRED="$(yq -r '.budgets.max_failed_required // 0' "$CONTRACT")"
@@ -95,7 +98,8 @@ OPTIONAL_WARN_PROMOTES_STATUS="$(yq -r '.budgets.optional_warn_promotes_status /
 SCHEMA_VERSION="$(yq -r '.reporting.envelope_schema_version // "1.0"' "$CONTRACT")"
 
 for value in \
-  "$CONNECT_TIMEOUT_SEC" "$MAX_TIME_SEC" "$LATENCY_WARN_MS" "$LATENCY_INCIDENT_MS" \
+  "$CONNECT_TIMEOUT_SEC" "$MAX_TIME_SEC" "$OPTIONAL_CONNECT_TIMEOUT_SEC" "$OPTIONAL_MAX_TIME_SEC" \
+  "$LATENCY_WARN_MS" "$LATENCY_INCIDENT_MS" \
   "$MAX_FAILED_REQUIRED" "$OPTIONAL_WARN_THRESHOLD"; do
   [[ "$value" =~ ^[0-9]+$ ]] || {
     echo "STOP: contract expects integer timeout/budget fields" >&2
@@ -127,6 +131,7 @@ required_ok=0
 required_warn=0
 required_fail=0
 optional_ok=0
+optional_info=0
 optional_warn=0
 
 probe_state=""
@@ -136,6 +141,8 @@ probe_latency_ms=0
 probe_endpoint() {
   local url="$1"
   local expect_raw="$2"
+  local connect_timeout="$3"
+  local max_time="$4"
   local expect="$(printf '%s' "$expect_raw" | tr -d '[:space:]')"
   local start_ms end_ms curl_out curl_rc http_code time_total
   local ok=0
@@ -143,8 +150,8 @@ probe_endpoint() {
   start_ms="$(now_ms)"
   set +e
   curl_out="$(curl -sS -o /dev/null -w "%{http_code}\t%{time_total}" \
-    --connect-timeout "$CONNECT_TIMEOUT_SEC" \
-    --max-time "$MAX_TIME_SEC" \
+    --connect-timeout "$connect_timeout" \
+    --max-time "$max_time" \
     "$url" 2>/dev/null)"
   curl_rc=$?
   set -e
@@ -222,7 +229,7 @@ for service_id in "${REQUIRED_IDS[@]}"; do
     fi
 
     if [[ "$svc_status" != "FAIL" ]]; then
-      probe_endpoint "$endpoint_url" "$endpoint_expect"
+      probe_endpoint "$endpoint_url" "$endpoint_expect" "$CONNECT_TIMEOUT_SEC" "$MAX_TIME_SEC"
       svc_latency="${probe_latency_ms}ms"
       if [[ "$probe_state" != "OK" ]]; then
         svc_status="FAIL"
@@ -288,7 +295,7 @@ for service_id in "${OPTIONAL_IDS[@]}"; do
     fi
 
     if [[ "$can_probe" -eq 1 ]]; then
-      probe_endpoint "$endpoint_url" "$endpoint_expect"
+      probe_endpoint "$endpoint_url" "$endpoint_expect" "$OPTIONAL_CONNECT_TIMEOUT_SEC" "$OPTIONAL_MAX_TIME_SEC"
       svc_latency="${probe_latency_ms}ms"
       if [[ "$probe_state" != "OK" ]]; then
         svc_status="WARN"
@@ -303,8 +310,14 @@ for service_id in "${OPTIONAL_IDS[@]}"; do
     fi
   fi
 
+  if [[ "$svc_status" == "WARN" && "$OPTIONAL_WARN_PROMOTES_STATUS" == "false" ]]; then
+    svc_status="INFO"
+    svc_note="${svc_note:+$svc_note; }non_blocking_optional_probe"
+  fi
+
   case "$svc_status" in
     OK) optional_ok=$((optional_ok + 1)) ;;
+    INFO) optional_info=$((optional_info + 1)) ;;
     WARN) optional_warn=$((optional_warn + 1)) ;;
   esac
   printf "%-14s %-9s %-8s %-8s %s\n" "$service_id" "$svc_scope" "$svc_status" "$svc_latency" "$svc_note"
@@ -324,6 +337,6 @@ if [[ "$OPTIONAL_WARN_PROMOTES_STATUS" == "true" && "$optional_warn" -ge "$OPTIO
 fi
 
 echo
-echo "summary: $overall_status required_ok=${required_ok}/${required_total} required_warn=$required_warn required_fail=$required_fail optional_ok=${optional_ok}/${optional_total} optional_warn=$optional_warn optional_warn_promotes_status=$OPTIONAL_WARN_PROMOTES_STATUS"
+echo "summary: $overall_status required_ok=${required_ok}/${required_total} required_warn=$required_warn required_fail=$required_fail optional_ok=${optional_ok}/${optional_total} optional_info=$optional_info optional_warn=$optional_warn optional_warn_promotes_status=$OPTIONAL_WARN_PROMOTES_STATUS"
 echo "status: $overall_status"
 exit 0
