@@ -1,10 +1,10 @@
 # communications-agent Contract
 
-> **Status:** registered
+> **Status:** active
 > **Domain:** communications
 > **Owner:** @ronny
 > **Created:** 2026-02-21
-> **Loop:** LOOP-SPINE-COMMUNICATIONS-TWILIO-RESEND-NORMALIZATION-V1-20260221
+> **Loop:** LOOP-AGENT-MCP-SURFACE-BUILD-20260221
 
 ---
 
@@ -12,6 +12,8 @@
 
 - **Agent ID:** communications-agent
 - **Domain:** communications (transactional email/SMS governance + mailbox operations)
+- **MCP Type:** gateway (wraps spine capabilities via subprocess)
+- **MCP Server:** `~/code/workbench/agents/communications/tools/`
 - **Registry:** `ops/bindings/agents.registry.yaml`
 
 ## Owns (Application Layer)
@@ -53,4 +55,4 @@
 
 ## Invocation
 
-Route via `agent.route` using communications keywords or use communications capabilities directly via `ops cap run`.
+On-demand via Claude Desktop MCP gateway server, or route via `agent.route` using communications keywords, or use communications capabilities directly via `ops cap run`.

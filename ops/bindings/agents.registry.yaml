@@ -456,27 +456,49 @@ agents:
 
   - id: immich-agent
     domain: photos
-    description: "Immich photo/video management: search, albums, asset metadata, deduplication governance (read-only)"
+    description: "Immich photo/video management: search, albums, asset metadata, deduplication governance, cleanup (THE RULE: keep originals = most EXIF + oldest date)"
     contract: "ops/agents/immich-agent.contract.md"
     implementation: "~/code/workbench/agents/immich/"
-    implementation_status: registered
+    implementation_status: active
     mcp_type: custom
+    mcp_server: "~/code/workbench/agents/immich/tools/mcp/"
     mcpjungle_mirror: "~/code/workbench/infra/compose/mcpjungle/servers/immich-photos/"
-    loop: "LOOP-MCP-RUNTIME-GOVERNANCE-20260211"
+    loop: "LOOP-AGENT-MCP-SURFACE-BUILD-20260221"
     covers:
       - immich (VM 203)
     services:
       - immich
     mcp_tools:
-      - name: search_assets
+      - name: photo__search_by_location
         safety: read-only
-        description: "Search Immich assets."
-      - name: list_albums
+        description: "Search photos near GPS coordinate."
+      - name: photo__search_by_date_range
         safety: read-only
-        description: "List Immich albums."
-      - name: get_asset_metadata
+        description: "Find photos within date range, optional camera filter."
+      - name: photo__find_wrong_dates
         safety: read-only
-        description: "Read Immich asset metadata."
+        description: "Identify photos with suspicious dates (clock reset)."
+      - name: photo__create_album
+        safety: mutating
+        description: "Create album with specified assets."
+      - name: photo__create_trip_album
+        safety: mutating
+        description: "Auto-create trip album by location + date search."
+      - name: photo__get_duplicates
+        safety: read-only
+        description: "Find duplicate groups with keeper recommendation per THE RULE."
+      - name: photo__trash_assets
+        safety: mutating
+        description: "Move assets to trash (default: dry_run=true, never force)."
+      - name: photo__fix_date
+        safety: mutating
+        description: "Correct dateTimeOriginal for an asset."
+      - name: photo__get_cleanup_report
+        safety: read-only
+        description: "Comprehensive library cleanup report."
+      - name: photo__get_camera_summary
+        safety: read-only
+        description: "Photo statistics grouped by camera model."
     capabilities:
       - immich.status
       - immich.ingest.watch
@@ -500,9 +522,10 @@ agents:
     description: "Canonical communications governance: transactional provider routing (Resend/Twilio), consent policy, preview-linked execution, phased cutover controls, delivery artifacts, and pilot mailbox surfaces."
     contract: "ops/agents/communications-agent.contract.md"
     implementation: "~/code/workbench/agents/communications/"
-    implementation_status: registered
+    implementation_status: active
     mcp_type: gateway
-    loop: "LOOP-SPINE-COMMUNICATIONS-TWILIO-RESEND-NORMALIZATION-V1-20260221"
+    mcp_server: "~/code/workbench/agents/communications/tools/"
+    loop: "LOOP-AGENT-MCP-SURFACE-BUILD-20260221"
     covers:
       - communications-stack (VM 214)
     services:
@@ -511,9 +534,42 @@ agents:
       - resend
       - twilio
     mcp_tools:
-      - name: communications_cap_run
+      - name: communications_stack_status
+        safety: read-only
+        description: "Communications stack status with contract parity check."
+      - name: communications_mailboxes_list
+        safety: read-only
+        description: "List pilot mailboxes from contract."
+      - name: communications_mail_search
+        safety: read-only
+        description: "Search mailbox (simulation or live Graph)."
+      - name: communications_mail_send_test
         safety: governed
-        description: "Route communications operations through spine capability surfaces."
+        description: "Send test email (manual-approval, requires confirm)."
+      - name: communications_provider_status
+        safety: read-only
+        description: "Provider routing status (Graph/Resend/Twilio)."
+      - name: communications_policy_status
+        safety: read-only
+        description: "Consent and compliance policy status."
+      - name: communications_templates_list
+        safety: read-only
+        description: "Template catalog by channel and message type."
+      - name: communications_send_preview
+        safety: read-only
+        description: "Transactional send planner with preview receipt."
+      - name: communications_send_execute
+        safety: governed
+        description: "Governed transactional send (manual-approval, requires confirm)."
+      - name: communications_delivery_log
+        safety: read-only
+        description: "Query delivery log artifacts."
+      - name: communications_delivery_anomaly_status
+        safety: read-only
+        description: "Anomaly evaluator for delivery log events."
+      - name: communications_delivery_anomaly_dispatch
+        safety: governed
+        description: "Dispatch delivery anomaly alert (manual-approval, requires confirm)."
     capabilities:
       - communications.stack.status
       - communications.mailboxes.list
