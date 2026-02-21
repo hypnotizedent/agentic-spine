@@ -198,10 +198,10 @@ active_state:
 terminal_roles:
   - SPINE-CONTROL-01 (this session)
 agent_summary:
-  - communications-agent: registered (10 communications surfaces)
+  - communications-agent: active (12 communications surfaces)
   - finance-agent: active (13 tools)
   - home-assistant-agent: active (37 caps)
-  - immich-agent: registered (5 caps)
+  - immich-agent: active (10 tools)
 startup_block: |
   (rendered startup commands)
 ```

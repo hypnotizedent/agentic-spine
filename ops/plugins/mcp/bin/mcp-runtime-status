@@ -31,29 +31,33 @@ collect_opencode() {
 }
 
 collect_claude_desktop() {
-  local path="$1"
-  local project_path="$2"
-  [[ -f "$path" ]] || return 0
+  local desktop_config_path="$1"
+  local runtime_state_path="$2"
+  local project_path="$3"
 
-  # Global/static entries.
-  jq -r '.mcpServers | to_entries[]? | "\(.key)\ttrue"' "$path" 2>/dev/null || true
+  # Desktop app static config entries.
+  if [[ -f "$desktop_config_path" ]]; then
+    jq -r '.mcpServers | to_entries[]? | "\(.key)\ttrue"' "$desktop_config_path" 2>/dev/null || true
+  fi
 
-  # Project-local explicit server objects.
-  jq -r --arg p "$project_path" '.projects[$p].mcpServers | to_entries[]? | "\(.key)\ttrue"' "$path" 2>/dev/null || true
-
-  # Project enabled mcpjson server names (runtime toggles).
-  jq -r --arg p "$project_path" '.projects[$p].enabledMcpjsonServers[]? | "\(.)\ttrue"' "$path" 2>/dev/null || true
+  # Runtime state (project toggles + mcpjson enablement) from ~/.claude.json.
+  if [[ -f "$runtime_state_path" ]]; then
+    jq -r '.mcpServers | to_entries[]? | "\(.key)\ttrue"' "$runtime_state_path" 2>/dev/null || true
+    jq -r --arg p "$project_path" '.projects[$p].mcpServers | to_entries[]? | "\(.key)\ttrue"' "$runtime_state_path" 2>/dev/null || true
+    jq -r --arg p "$project_path" '.projects[$p].enabledMcpjsonServers[]? | "\(.)\ttrue"' "$runtime_state_path" 2>/dev/null || true
+  fi
 }
 
 collect_surface() {
   local surface="$1"
   local path="$2"
   local claude_project="$3"
+  local claude_runtime_state="$4"
 
   case "$surface" in
     codex) collect_codex "$path" ;;
     opencode) collect_opencode "$path" ;;
-    claude_desktop) collect_claude_desktop "$path" "$claude_project" ;;
+    claude_desktop) collect_claude_desktop "$path" "$claude_runtime_state" "$claude_project" ;;
     *) return 0 ;;
   esac
 }
@@ -81,22 +85,35 @@ while IFS= read -r surface; do
   [[ -z "$surface" ]] && continue
 
   surface_path="$(surface_path_for "$surface")"
+  claude_state_path=""
+  if [[ "$surface" == "claude_desktop" ]]; then
+    claude_state_path="$(surface_path_for "claude_desktop_runtime_state")"
+  fi
+
   [[ -n "$surface_path" ]] || {
     echo "[$surface] WARN: no surface path configured"
     warns=$((warns + 1))
     continue
   }
 
-  mapfile -t rows < <(collect_surface "$surface" "$surface_path" "$claude_project" | awk -F'\t' 'NF>=2' | awk '!seen[$1]++')
+  mapfile -t rows < <(collect_surface "$surface" "$surface_path" "$claude_project" "$claude_state_path" | awk -F'\t' 'NF>=2' | awk '!seen[$1]++')
 
   printf '[%s]\n' "$surface"
   printf '  config: %s\n' "$surface_path"
+  if [[ "$surface" == "claude_desktop" && -n "$claude_state_path" ]]; then
+    printf '  runtime_state: %s\n' "$claude_state_path"
+  fi
 
   if [[ ! -f "$surface_path" ]]; then
     echo "  FAIL: config file missing"
     errors=$((errors + 1))
     echo ""
     continue
+  fi
+
+  if [[ "$surface" == "claude_desktop" && -n "$claude_state_path" && ! -f "$claude_state_path" ]]; then
+    echo "  WARN: runtime state file missing ($claude_state_path)"
+    warns=$((warns + 1))
   fi
 
   if (( ${#rows[@]} == 0 )); then
