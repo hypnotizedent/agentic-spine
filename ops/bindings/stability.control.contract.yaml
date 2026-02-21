@@ -2,8 +2,8 @@
 # Status: authoritative
 # Last verified: 2026-02-16
 
-version: 1
-updated: "2026-02-16"
+version: 2
+updated: "2026-02-21"
 owner: "@ronny"
 scope: blackhole-exit-runtime-reliability
 
@@ -42,6 +42,26 @@ critical_domains:
     incident_key: immich_runtime_degraded
     operating_mode: maintenance
 
+  - id: infra-core-stack
+    description: "Core infrastructure services (VM 204). Infisical, Cloudflare, Vaultwarden, Caddy, Pi-hole."
+    vm_hostname: infra-core
+    incident_key: infra_core_unreachable
+
+  - id: observability-stack
+    description: "Monitoring stack (VM 205). Prometheus, Grafana, Loki, Uptime Kuma."
+    vm_hostname: observability
+    incident_key: observability_unreachable
+
+  - id: dev-tools-stack
+    description: "Development tools (VM 206). Gitea canonical origin."
+    vm_hostname: dev-tools
+    incident_key: gitea_unreachable
+
+  - id: mint-stack
+    description: "Mint business stack (VM 212 data + VM 213 apps). PostgreSQL, MinIO, Redis, files-api, order-intake, quote-page."
+    vm_hostname: mint-data
+    incident_key: mint_runtime_degraded
+
 probe_capabilities:
   automation-stack:
     - n8n.infra.health.quick
@@ -54,6 +74,14 @@ probe_capabilities:
   immich-stack:
     - immich.status
     - immich.ingest.watch
+  infra-core-stack:
+    - services.health.status --host infra-core
+  observability-stack:
+    - observability.stack.status
+  dev-tools-stack:
+    - gitea.status
+  mint-stack:
+    - mint.modules.health
 
 probe_latency_exemptions:
   automation-stack:
@@ -103,6 +131,28 @@ guided_recovery_commands:
     - "./bin/ops cap run docker.compose.up immich immich"
     - "./bin/ops cap run immich.ingest.watch --json"
     - "./bin/ops cap run immich.status"
+
+  infra-core-stack:
+    - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
+    - "./bin/ops cap run docker.compose.up infra-core core"
+    - "./bin/ops cap run services.health.status --host infra-core"
+
+  observability-stack:
+    - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
+    - "./bin/ops cap run docker.compose.up observability monitoring"
+    - "./bin/ops cap run observability.stack.status"
+
+  dev-tools-stack:
+    - "ssh root@{{proxmox_host_ip}} \"qm start {{vmid}} && qm status {{vmid}}\""
+    - "./bin/ops cap run docker.compose.up dev-tools gitea"
+    - "./bin/ops cap run gitea.status"
+
+  mint-stack:
+    - "ssh root@{{proxmox_host_ip}} \"qm start 212 && qm status 212\""
+    - "ssh root@{{proxmox_host_ip}} \"qm start 213 && qm status 213\""
+    - "./bin/ops cap run docker.compose.up mint-data data"
+    - "./bin/ops cap run docker.compose.up mint-apps apps"
+    - "./bin/ops cap run mint.modules.health"
 
 report_outputs:
   default_format: markdown
