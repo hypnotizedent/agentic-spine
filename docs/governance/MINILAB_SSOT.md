@@ -142,14 +142,14 @@ parent_receipts:
 | VMID | Hostname | Tailscale IP | RAM | Disk | Status |
 |------|----------|--------------|-----|------|--------|
 | 100 | homeassistant | 100.67.120.1 | 4GB | 32GB | Running |
-| 101 | immich | 100.83.160.109 | 16GB | 80GB | **Stopped** (has migration snapshot from 2025-10-19) |
+| 101 | immich | — | — | — | **Destroyed** 2026-02-20 (shop VM 203 is canonical) |
 | 102 | vaultwarden | 100.93.142.63 | 2GB | 16GB | **Decommissioned** (2026-02-16; superseded by infra-core VM 204) |
 
 ### LXC Containers
 
 | VMID | Hostname | Tailscale IP | Status | Purpose |
 |------|----------|--------------|--------|---------|
-| 103 | download-home | 100.125.138.110 | **Soft-decommissioned** | Legacy *arr home LXC (retained stopped, non-destructive) |
+| 103 | download-home | — | **Destroyed** 2026-02-20 | Shop download-stack (VM 209) is canonical |
 | 105 | pihole-home | 100.105.148.96 | **Running** | Home DNS + ad-blocking |
 
 ### VM Details
@@ -164,21 +164,13 @@ parent_receipts:
 | Purpose | Home automation hub |
 | Integrations | Zigbee (SLZB-06), Z-Wave (TubesZB), UniFi |
 
-#### VM 101: Immich (Home)
+#### VM 101: Immich (Home) — DESTROYED
 
 | Field | Value |
 |-------|-------|
-| Tailscale IP | 100.83.160.109 |
-| Storage | NAS NFS mount (/volume1/im2ch) |
-| Web UI | http://immich-home:2283 |
-| Purpose | Photo management (home instance) |
-
-**Containers:**
-- immich_server
-- immich_machine_learning
-- immich_postgres
-- immich_redis
-- immich_node_exporter
+| Status | **Destroyed** 2026-02-20 (`qm destroy 101 --purge`) |
+| Final backup | `vzdump-qemu-101-2026_02_15-04_00_03.vma.zst` (18GB on NAS) |
+| Successor | Shop Immich (VM 203, 100.114.101.50) |
 
 #### VM 102: Vaultwarden (DECOMMISSIONED)
 
@@ -190,13 +182,13 @@ parent_receipts:
 
 **Note:** Final backup `vzdump-qemu-102-2026_02_15-03_01_25.vma.zst` on NAS. Retained as rollback source only.
 
-#### LXC 103: download-home
+#### LXC 103: download-home — DESTROYED
 
 | Field | Value |
 |-------|-------|
-| Tailscale IP | 100.125.138.110 |
-| Purpose | Legacy *arr stack for home media |
-| Status | Soft-decommissioned 2026-02-21 (no active-access expectation) |
+| Status | **Destroyed** 2026-02-20 (`pct destroy 103 --purge`) |
+| Final backup | `vzdump-lxc-103-2026_02_20-03_15_03.tar.zst` (485MB on NAS) |
+| Successor | Shop download-stack (VM 209, 100.107.36.76) |
 
 #### LXC 105: pihole-home
 
@@ -223,7 +215,7 @@ parent_receipts:
 | homeassistant | 10.0.0.100 | 100.67.120.1 | VM 100 |
 | vaultwarden | 10.0.0.102 | 100.93.142.63 | VM 102 |
 | pihole-home | 10.0.0.53 | 100.105.148.96 | LXC 105 (active) |
-| download-home | 10.0.0.103 | 100.125.138.110 | LXC 103 (soft-decommissioned) |
+| ~~download-home~~ | ~~10.0.0.103~~ | — | LXC 103 (destroyed 2026-02-20) |
 
 ### Network Configuration
 
@@ -293,7 +285,7 @@ nfs: synology-backups
 |-----|------|--------|----------|-----------|---------|---------|
 | backup-home-p0-daily | P0 (Critical) | VM 100 | Daily 03:00 | keep-last=3 | synology-backups | **Yes** |
 | backup-home-p1-daily | P1 (Important) | LXC 103 | Daily 03:15 | keep-last=3 | synology-backups | **No** (disabled 2026-02-20) |
-| backup-home-p2-weekly | P2 (Deferrable) | VM 101, LXC 105 | Sun 04:00 | keep-last=2 | synology-backups | **Yes** |
+| backup-home-p2-weekly | P2 (Deferrable) | LXC 105 | Sun 04:00 | keep-last=2 | synology-backups | **Yes** |
 
 **Validation:** VM 102 vzdump completed 2026-02-11 — artifact `vzdump-qemu-102-2026_02_11-08_53_32.vma.zst` (3.87GB) confirmed on NAS.
 
@@ -385,7 +377,7 @@ curl -s http://vault:8080/
 |--------|----------|------|--------|
 | Proxmox vzdump P0 | Daily 03:00 | VM 100 backup to synology-backups | **ENABLED** |
 | Proxmox vzdump P1 | Daily 03:15 | LXC 103 backup to synology-backups | **DISABLED** (2026-02-20) |
-| Proxmox vzdump P2 | Weekly Sun 04:00 | VM 101, LXC 105 backup to synology-backups | **ENABLED** |
+| Proxmox vzdump P2 | Weekly Sun 04:00 | LXC 105 backup to synology-backups | **ENABLED** |
 | Synology DSM | Weekly | RAID scrub | ACTIVE |
 | Pi-hole | Weekly | Gravity update | ACTIVE (when LXC running) |
 
@@ -398,11 +390,11 @@ curl -s http://vault:8080/
 | PVE node-name mismatch | **RESOLVED** | ~~CRITICAL~~ | Hostname canonicalized to `proxmox-home`; node path migrated and tooling restored (2026-02-20). |
 | vzdump jobs disabled | **RESOLVED** | ~~HIGH~~ | 3 tiered jobs enabled 2026-02-11. See Backup Configuration. |
 | No Hyper Backup tasks | OPEN | MEDIUM | NAS has no backup destinations configured. Deferred. |
-| VM 101 (immich) stopped | OPEN | MEDIUM | Not running, has migration snapshot. |
+| VM 101 (immich) | **RESOLVED** | ~~MEDIUM~~ | Destroyed 2026-02-20. Shop VM 203 is canonical. |
 | LXC 103 (download-home) | **RESOLVED** | ~~MEDIUM~~ | Soft-decommissioned 2026-02-21; removed from active-access expectations. |
 | LXC 105 (pihole-home) | **RESOLVED** | ~~MEDIUM~~ | Reactivated 2026-02-21; home DHCP DNS routed back to pihole-home. |
 | download-home SSH | **RESOLVED** | ~~MEDIUM~~ | Expectation removed by decommission decision (non-destructive). |
-| Immich home vs shop | INFO | LOW | Two instances — may consolidate |
+| Immich home vs shop | **RESOLVED** | ~~LOW~~ | Home instance destroyed 2026-02-20. Shop VM 203 is sole instance. |
 | UDR DNS not using pihole | **RESOLVED** | ~~LOW~~ | DHCP DNS now set to 10.0.0.53 primary with 10.0.0.1 fallback. |
 
 ---

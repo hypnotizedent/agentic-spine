@@ -440,9 +440,9 @@ Use the loop ledger instead:
 
 | Device | Former IP | Decommissioned | Reason |
 |--------|-----------|----------------|--------|
-| `immich` (home) | 100.83.160.109 | Pending | Migrating to shop `immich-1` |
+| `immich` (home) | 100.83.160.109 | 2026-02-20 | VM 101 destroyed; shop `immich-1` (VM 203) is sole instance |
 | `media-stack` | 100.117.1.53 | 2026-02-10 | VM 201 destroyed; split to download-stack (209) + streaming-stack (210) |
-| `download-home` | 100.125.138.110 | 2026-02-21 | LXC 103 soft-decommissioned; removed from active access expectations. |
+| `download-home` | 100.125.138.110 | 2026-02-20 | LXC 103 destroyed; shop download-stack (VM 209) is canonical |
 | `vault` | 100.93.142.63 | 2026-02-16 | VM 102 decommissioned; superseded by vaultwarden on infra-core. |
 
 ---
