@@ -85,6 +85,9 @@ cd "$PATHX"
 FILE=""
 if [[ -f docker-compose.yml ]]; then FILE="docker-compose.yml"; fi
 if [[ -z "$FILE" && -f compose.yml ]]; then FILE="compose.yml"; fi
+if [[ -z "$FILE" && -f docker-compose.yaml ]]; then FILE="docker-compose.yaml"; fi
+if [[ -z "$FILE" && -f compose.yaml ]]; then FILE="compose.yaml"; fi
+if [[ -z "$FILE" && -f docker-compose.prod.yml ]]; then FILE="docker-compose.prod.yml"; fi
 if [[ -z "$FILE" ]]; then
   echo "status=down reason=compose_missing running=0 total=0 note="
   exit 0
@@ -272,7 +275,11 @@ for key in $TARGET_KEYS; do
     rc=$?
     set -e
     if [[ "$rc" -ne 0 ]]; then
-      line="status=down reason=$(_classify_ssh_error "$out") running=0 total=0 note="
+      if echo "$out" | grep -q "status="; then
+        line="$(echo "$out" | grep -m1 "status=")"
+      else
+        line="status=down reason=$(_classify_ssh_error "$out") running=0 total=0 note="
+      fi
     else
       line="$out"
     fi

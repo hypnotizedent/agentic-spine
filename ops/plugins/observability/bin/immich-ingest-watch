@@ -98,7 +98,64 @@ if [[ "$mode" == "remote_ssh" ]]; then
   fi
 fi
 
+want_json="false"
+for arg in "$@"; do
+  if [[ "$arg" == "--json" ]]; then
+    want_json="true"
+    break
+  fi
+done
+
 # Caller-supplied args are appended last so explicit user overrides win.
 cmd+=("$@")
 
-exec "${cmd[@]}"
+if [[ "$want_json" != "true" ]]; then
+  exec "${cmd[@]}"
+fi
+
+set +e
+json_out="$("${cmd[@]}")"
+rc=$?
+set -e
+
+if [[ "$rc" -ne 0 ]]; then
+  echo "$json_out"
+  exit "$rc"
+fi
+
+python3 - "$json_out" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1]
+try:
+    payload = json.loads(raw)
+except Exception:
+    sys.stdout.write(raw)
+    raise SystemExit(0)
+
+status = payload.get("status")
+issues = payload.get("issues") or []
+data = payload.get("data") or {}
+state = data.get("state") or {}
+queue = data.get("queue") or {}
+pending = queue.get("pending")
+worker_running = bool(data.get("worker_running"))
+
+if (
+    status == "warn"
+    and len(issues) == 1
+    and isinstance(issues[0], str)
+    and issues[0].startswith("heartbeat stale")
+    and state.get("status") == "idle"
+    and state.get("message") == "queue_complete"
+    and (pending in (None, []))
+    and not worker_running
+):
+    payload["status"] = "ok"
+    payload["issues"] = []
+    data["heartbeat_stale_expected_idle"] = True
+    payload["data"] = data
+
+sys.stdout.write(json.dumps(payload, indent=2))
+PY

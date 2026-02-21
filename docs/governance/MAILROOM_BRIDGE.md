@@ -71,7 +71,7 @@ Bridge Cap-RPC consumers (SSOT: `ops/bindings/mailroom.bridge.consumers.yaml`):
 | Role | Token Env | Cap-RPC access |
 |------|-----------|----------------|
 | `operator` | `MAILROOM_BRIDGE_TOKEN` | \`*\` (full allowlist) |
-| `monitor` | `MAILROOM_BRIDGE_MONITOR_TOKEN` | `spine.verify`, `gaps.status`, `loops.status`, `proposals.status`, `mailroom.bridge.status`, `aof.status`, `aof.version` |
+| `monitor` | `MAILROOM_BRIDGE_MONITOR_TOKEN` | `spine.verify`, `surface.mobile.dashboard.status`, `gaps.status`, `loops.status`, `proposals.status`, `mailroom.bridge.status`, `aof.status`, `aof.version` |
 | `media-consumer` | `MAILROOM_BRIDGE_MEDIA_TOKEN` | `media.health.check`, `media.service.status`, `media.nfs.verify` |
 | `task-automation` | `MAILROOM_BRIDGE_TASK_TOKEN` | `mailroom.task.enqueue`, `mailroom.task.claim`, `mailroom.task.heartbeat`, `mailroom.task.complete`, `mailroom.task.fail` |
 

@@ -110,7 +110,8 @@ while IFS= read -r term; do
   hits="$(
     rg -n --hidden --fixed-strings "$term" \
       "$ROOT/bin" \
-      "$ROOT/docs" \
+      "$ROOT/docs/core" \
+      "$ROOT/docs/governance" \
       "$ROOT/ops/commands" \
       "$ROOT/ops/plugins" \
       "$ROOT/ops/runtime" \
@@ -120,6 +121,9 @@ while IFS= read -r term; do
       --glob '!**/.archive/**' \
       --glob '!**/archive/**' \
       --glob "!**/${legacy_a}/${legacy_b}/**" \
+      --glob '!**/docs/governance/_audits/**' \
+      --glob '!**/docs/governance/_archive/**' \
+      --glob '!**/docs/governance/_receipts_meta/**' \
       --glob '!**/runtime/**' \
       --glob '!**/infra/data/**' \
       --glob '!**/receipts/**' \

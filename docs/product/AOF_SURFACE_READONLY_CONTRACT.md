@@ -18,22 +18,22 @@ scope: aof-surface-readonly-contract
 | Loop Summary | `loops.status` | text | local | Exists |
 | RAG Status | `rag.anythingllm.status` | text | local | Exists |
 | Proposal Queue | `proposals.status` | text | local | Exists |
-| Mobile Dashboard | N/A | json | remote | Planned |
+| Mobile Dashboard | `surface.mobile.dashboard.status` | json | remote | Exists |
 
 ## Access Model
 
 - All surfaces are **read-only** — no mutations through surface endpoints
 - `local` access: CLI execution on spine host
-- `remote` access: API endpoint (planned, requires authentication)
+- `remote` access: API endpoint (requires authentication)
 
-## Mobile Dashboard (Planned)
+## Mobile Dashboard
 
 The mobile/customer dashboard surface aggregates:
 - Spine status (loops, gaps, proposals)
 - Gate pass/fail summary
 - RAG parity status
 
-This requires a lightweight API endpoint and is scoped for Step B.
+Implemented via `surface.mobile.dashboard.status` and exposed through bridge Cap-RPC allowlists for remote read-only consumption.
 
 ## Enforcement
 

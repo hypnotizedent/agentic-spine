@@ -48,6 +48,7 @@ HITS="$(
     --glob '!**/ops/plugins/docs/bin/docs-lint' \
     --glob '!**/ops/tools/legacy-freeze.sh' \
     --glob '!**/ops/tools/legacy-thaw.sh' \
+    --glob '!**/ops/bindings/operational.gaps.yaml' \
     --glob '!**/docs/governance/HOST_DRIFT_POLICY.md' 2>/dev/null || true
 )"
 

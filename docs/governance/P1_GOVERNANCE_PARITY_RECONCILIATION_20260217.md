@@ -12,9 +12,9 @@ parent_loop: LOOP-RONNY-OPS-FINAL-EXTRACTION-SWEEP-20260217
 
 Legacy references reviewed (read-only):
 
-- `/Users/ronnyworks/ronny-ops/docs/runbooks/BACKUP_GOVERNANCE.md`
-- `/Users/ronnyworks/ronny-ops/docs/runbooks/REBOOT_HEALTH_GATE.md`
-- `/Users/ronnyworks/ronny-ops/docs/governance/SSOT_REGISTRY.yaml`
+- `$LEGACY_ROOT/docs/runbooks/BACKUP_GOVERNANCE.md`
+- `$LEGACY_ROOT/docs/runbooks/REBOOT_HEALTH_GATE.md`
+- `$LEGACY_ROOT/docs/governance/SSOT_REGISTRY.yaml`
 
 Current spine targets reviewed:
 

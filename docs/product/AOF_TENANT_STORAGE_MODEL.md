@@ -21,6 +21,8 @@ AOF manages 5 storage boundaries that contain tenant-scoped data:
 | Outbox | `mailroom/outbox/` | medium | `mailroom/tenants/{tenant_id}/outbox/` |
 | Loop Scopes | `mailroom/state/loop-scopes/` | low | `mailroom/tenants/{tenant_id}/state/loop-scopes/` |
 
+Current baseline parity: `receipts/ledger/` path is now provisioned in-repo (`receipts/ledger/.keep`) for contract-complete boundary checks.
+
 ## Isolation Modes
 
 - **Logical** (current): Shared filesystem, tenant-prefixed paths. Single-tenant deployments use flat paths.

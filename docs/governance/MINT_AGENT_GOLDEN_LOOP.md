@@ -1,6 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
+last_verified: 2026-02-21
 created: 2026-02-16
 scope: mint-agent-daily-loop
 ---
