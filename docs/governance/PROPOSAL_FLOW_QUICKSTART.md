@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-17
+last_verified: 2026-02-21
 scope: proposal-flow-quickstart
 ---
 
@@ -15,6 +15,11 @@ cd /Users/ronnyworks/code/agentic-spine
 ./bin/ops cap run proposals.status
 echo "yes" | ./bin/ops cap run proposals.apply CP-YYYYMMDD-HHMMSS__your-change
 ```
+
+## Change Action Contract
+
+Proposal manifests only support `create|modify|delete` actions (`created|update|edit|api-write|remove` normalize to those canonical values).
+`append` is not a valid action and will be rejected by `proposals.apply`.
 
 ## Admission Routing Contract
 

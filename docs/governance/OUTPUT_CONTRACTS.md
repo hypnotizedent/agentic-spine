@@ -1,7 +1,7 @@
 # Output Contracts (Authoritative)
 
 > **Status:** authoritative
-> **Last verified:** 2026-02-15
+> **Last verified:** 2026-02-21
 > **Loop:** LOOP-SESSION-BRAIN-BOOTSTRAP-20260215
 
 Canonical schemas for all spine work artifacts. Agents on any surface (desktop,
@@ -29,7 +29,7 @@ LOOP-{DESCRIPTIVE-NAME}-{YYYYMMDD}.scope.md
 ---
 loop_id: LOOP-DESCRIPTIVE-NAME-YYYYMMDD     # Must match filename
 created: YYYY-MM-DD                          # ISO date
-status: active                               # active | closed | draft
+status: planned                              # planned | active | closed
 owner: "@ronny"                              # Owner handle
 scope: agentic-spine                         # Repo scope
 objective: One-line description of the goal  # What "done" means
@@ -40,9 +40,11 @@ objective: One-line description of the goal  # What "done" means
 
 | Status | Meaning |
 |--------|---------|
-| `draft` | Planned, not yet started |
+| `planned` | Planned, not yet started |
 | `active` | In progress, gaps may be linked |
 | `closed` | All deliverables complete or explicitly deferred |
+
+Legacy migration note: parser compatibility still accepts historical `draft`/`open` values, but new loop scopes must use `planned|active|closed`.
 
 #### Fields Added at Close
 

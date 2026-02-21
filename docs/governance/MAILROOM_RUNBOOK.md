@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-21
 scope: mailroom-operations
 ---
 
@@ -126,8 +126,9 @@ awk -F',' '{print $5}' mailroom/state/ledger.csv | sort | uniq -c
 **SSOT:** `mailroom/state/loop-scopes/*.scope.md`
 
 Loop status is carried in the scope file YAML frontmatter:
-- `status: active|draft|open` = open work
+- `status: planned|active` = open work
 - `status: closed` = closed work
+- Legacy parser compatibility still accepts historical `draft|open`, but touch-and-fix should normalize those to `planned|active`.
 
 ### Querying Open Loops
 

@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-15
+last_verified: 2026-02-21
 scope: session-entry
 ---
 
@@ -215,7 +215,7 @@ the YAML blocks below for desktop ingestion.
 ---
 loop_id: LOOP-DESCRIPTIVE-NAME-YYYYMMDD
 created: YYYY-MM-DD
-status: active           # active | closed | draft
+status: planned          # planned | active | closed
 owner: "@ronny"
 scope: agentic-spine
 objective: One-line description of the goal
@@ -319,8 +319,8 @@ Change proposals (`mailroom/outbox/proposals/CP-*`) follow a governed lifecycle 
 
 Every open gap in `operational.gaps.yaml` must be linked to an active loop (`parent_loop`).
 
-- **No standalone gaps older than 7 days.** If a gap cannot be loop-linked within 7 days, it must be either: (a) linked to a new or existing loop, or (b) explicitly marked `status: accepted` with owner and acceptance date.
-- **"Accepted" gaps** are policy exceptions — the owner acknowledges the gap exists and deliberately defers remediation. They still require periodic review (D58 freshness).
+- **No standalone gaps older than 7 days.** If a gap cannot be loop-linked within 7 days, it must be either: (a) linked to a new or existing loop, or (b) explicitly closed as an accepted deferral with owner/date recorded in `notes`.
+- **Accepted deferrals** are policy exceptions recorded as `status: closed` with explicit acceptance context in `notes` (owner, date, rationale). They still require periodic review (D58 freshness).
 - **`gaps.status` flags orphans and standalone gaps.** Zero orphans and zero unlinked standalone gaps is the target state.
 - **Report-and-execute, not report-and-park.** Discovering a gap means registering it AND creating the loop to fix it. Gaps without execution plans are stashed findings.
 

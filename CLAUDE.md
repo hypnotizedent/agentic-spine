@@ -38,15 +38,15 @@ Release/nightly only:
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-16
+last_verified: 2026-02-21
 scope: agent-governance-brief
 ---
 
 # Agent Governance Brief
 
 > Canonical source for all agent governance constraints.
-> Consumed by: session-entry-hook.sh (Claude Code), AGENTS.md (Codex), CLAUDE.md (Claude Desktop).
-> To update: edit this file, then run `ops/hooks/sync-agent-surfaces.sh` to propagate.
+> Consumed by: session-entry surfaces via `spine.context`.
+> `ops/hooks/sync-agent-surfaces.sh` is retired; update this file as the source of truth.
 
 ## Commit & Branch Rules
 
@@ -68,6 +68,7 @@ scope: agent-governance-brief
 - **`approval: manual`** caps prompt for stdin `yes`. In scripts: `echo "yes" | ./bin/ops cap run <cap>`. No `--` separator for args.
 - **Preconditions are enforced.** Some caps require `secrets.binding` + `secrets.auth.status` first. If a cap fails with "precondition failed", run the listed precondition cap first.
 - **`touches_api: true`** caps always need secrets preconditions — no exceptions (D63 enforces).
+- **Proposal action contract:** proposal changes must use `create|modify|delete` (with known aliases). `append` is invalid and rejected at apply time.
 
 ## Path & Reference Constraints
 
@@ -121,14 +122,11 @@ scope: agent-governance-brief
 - `./bin/ops cap run spine.verify` — full drift check (release/nightly)
 - `/ctx` — load full governance context
 
-## Embed Architecture (D65)
+## Delivery Architecture (D65)
 
-This governance brief is **fully embedded** (not pointer-shimmed) in both AGENTS.md and CLAUDE.md.
-This is intentional under D65 (agent-briefing-sync-lock): agents must receive the complete
-governance brief at session entry without needing to follow references. To update, edit this
-file and run `ops/hooks/sync-agent-surfaces.sh` to propagate. Do not convert AGENTS.md or
-CLAUDE.md governance blocks to pointer shims — D65 enforces full embed until a future D65-v2
-refactor introduces a different delivery mechanism.
+Canonical governance delivery is now `spine.context` (brief section). Embedded copies in
+`AGENTS.md` and `CLAUDE.md` remain compatibility snapshots and may lag. If any mismatch appears,
+this file is authoritative.
 <!-- /GOVERNANCE_BRIEF -->
 
 ## Canonical Terminal Roles
@@ -137,9 +135,9 @@ refactor introduces a different delivery mechanism.
 |----|------|-------|
 | SPINE-CONTROL-01 | control-plane | bin/, ops/, surfaces/, docs/governance/, docs/core/, docs/product/, docs/brain/, mailroom/ |
 | SPINE-AUDIT-01 | observation | receipts/, docs/governance/_audits/ |
-| DOMAIN-HA-01 | domain-runtime | ops/plugins/ha/, ops/bindings/ha.*, z2m.*, home.* |
-| RUNTIME-IMMICH-01 | domain-runtime | ops/plugins/immich/, ops/bindings/immich.* |
-| DEPLOY-MINT-01 | domain-runtime | ops/plugins/mint/, docs/governance/MINT_* |
+| DOMAIN-HA-01 | domain-runtime | ops/plugins/ha/, ops/agents/home-assistant-agent.contract.md |
+| RUNTIME-IMMICH-01 | domain-runtime | ops/plugins/immich/, ops/agents/immich-agent.contract.md |
+| DEPLOY-MINT-01 | domain-runtime | ops/plugins/mint/, ops/agents/mint-agent.contract.md |
 
 > Source: `ops/bindings/terminal.role.contract.yaml`
 
