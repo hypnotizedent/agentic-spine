@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-RELEASE-UNBLOCK-BOUNDARY-DOCKER-RUNTIME-LANE-20260221
 created: 2026-02-21
-status: active
+status: closed
 owner: "@ronny"
 scope: release
 priority: high
