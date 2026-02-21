@@ -286,13 +286,13 @@ nfs: synology-backups
 
 ### Proxmox vzdump
 
-> **Backups ENABLED as of 2026-02-11.** 3 tiered jobs configured and validated.
+> **Backups ENABLED as of 2026-02-11.** 2 jobs enabled, 1 job intentionally disabled for stopped LXC 103.
 > See: [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) for full strategy.
 
 | Job | Tier | Target | Schedule | Retention | Storage | Enabled |
 |-----|------|--------|----------|-----------|---------|---------|
 | backup-home-p0-daily | P0 (Critical) | VMs 100,102 | Daily 03:00 | keep-last=3 | synology-backups | **Yes** |
-| backup-home-p1-daily | P1 (Important) | LXC 103 | Daily 03:15 | keep-last=3 | synology-backups | **Yes** |
+| backup-home-p1-daily | P1 (Important) | LXC 103 | Daily 03:15 | keep-last=3 | synology-backups | **No** (disabled 2026-02-20) |
 | backup-home-p2-weekly | P2 (Deferrable) | VM 101, LXC 105 | Sun 04:00 | keep-last=2 | synology-backups | **Yes** |
 
 **Validation:** VM 102 vzdump completed 2026-02-11 — artifact `vzdump-qemu-102-2026_02_11-08_53_32.vma.zst` (3.87GB) confirmed on NAS.
@@ -307,7 +307,7 @@ nfs: synology-backups
 
 | Target | Path | Consumers | Status |
 |--------|------|-----------|--------|
-| Proxmox vzdump | `/volume1/backups/proxmox_backups` | proxmox-home vzdump | **Active** (3 jobs enabled) |
+| Proxmox vzdump | `/volume1/backups/proxmox_backups` | proxmox-home vzdump | **Active** (2 jobs enabled, 1 disabled) |
 | Mint-OS PostgreSQL | `/volume1/backups/mint-os/postgres/` | docker-host | Unverified |
 | Mint-OS configs | `/volume1/backups/mint-os/configs/` | docker-host | Unverified |
 | Home Assistant | `/volume1/backups/homeassistant_backups/` | VM 100 | Unverified |
@@ -387,7 +387,7 @@ curl -s http://vault:8080/
 | System | Schedule | Task | Status |
 |--------|----------|------|--------|
 | Proxmox vzdump P0 | Daily 03:00 | VM 100,102 backup to synology-backups | **ENABLED** |
-| Proxmox vzdump P1 | Daily 03:15 | LXC 103 backup to synology-backups | **ENABLED** |
+| Proxmox vzdump P1 | Daily 03:15 | LXC 103 backup to synology-backups | **DISABLED** (2026-02-20) |
 | Proxmox vzdump P2 | Weekly Sun 04:00 | VM 101, LXC 105 backup to synology-backups | **ENABLED** |
 | Synology DSM | Weekly | RAID scrub | ACTIVE |
 | Pi-hole | Weekly | Gravity update | ACTIVE (when LXC running) |
@@ -398,7 +398,7 @@ curl -s http://vault:8080/
 
 | Issue | Status | Severity | Notes |
 |-------|--------|----------|-------|
-| PVE node-name mismatch | **RESOLVED** | ~~CRITICAL~~ | Hostname is `pve`, tooling works. Closed 2026-02-10. |
+| PVE node-name mismatch | **RESOLVED** | ~~CRITICAL~~ | Hostname canonicalized to `proxmox-home`; node path migrated and tooling restored (2026-02-20). |
 | vzdump jobs disabled | **RESOLVED** | ~~HIGH~~ | 3 tiered jobs enabled 2026-02-11. See Backup Configuration. |
 | No Hyper Backup tasks | OPEN | MEDIUM | NAS has no backup destinations configured. Deferred. |
 | VM 101 (immich) stopped | OPEN | MEDIUM | Not running, has migration snapshot. |
