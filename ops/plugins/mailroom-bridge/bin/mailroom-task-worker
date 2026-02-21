@@ -43,9 +43,20 @@ def load_yaml(path: Path, default: Any) -> Any:
         return default
     try:
         with path.open("r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
+            docs = list(yaml.safe_load_all(fh))
     except Exception:
         return default
+    if not docs:
+        return default
+    if len(docs) == 1:
+        data = docs[0]
+    else:
+        # Support front-matter + body contracts by merging mapping documents.
+        merged: dict[str, Any] = {}
+        for doc in docs:
+            if isinstance(doc, dict):
+                merged.update(doc)
+        data = merged if merged else docs[-1]
     return default if data is None else data
 
 
@@ -384,6 +395,17 @@ class TaskWorker:
         confirm = bool(payload.get("confirm", False))
         return cap, args, confirm
 
+    def _extract_agent_tool_request(self, task: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+        payload = parse_payload(task.get("payload"))
+        route_payload = payload.get("route_target") if isinstance(payload.get("route_target"), dict) else {}
+        route_resolution = payload.get("route_resolution") if isinstance(payload.get("route_resolution"), dict) else {}
+
+        tool = str(payload.get("tool", "")).strip() or str(route_payload.get("tool", "")).strip()
+        route_input = str(payload.get("input", "")).strip() or str(route_payload.get("input", "")).strip()
+        if not route_input:
+            route_input = str(route_resolution.get("data", {}).get("input", "")).strip()
+        return tool, route_input, route_resolution
+
     def _heartbeat(self, task_id: str, progress: str) -> None:
         run_ops_cap("mailroom.task.heartbeat", ["--task-id", task_id, "--progress", progress, "--json"], confirm=False, timeout=180)
 
@@ -415,6 +437,43 @@ class TaskWorker:
         run_key = run.get("run_key", "")
         receipt = run.get("receipt", "")
         parts = [f"capability={capability}"]
+        if run_key:
+            parts.append(f"run_key={run_key}")
+        if receipt:
+            parts.append(f"receipt={receipt}")
+        return True, " ".join(parts)
+
+    def _execute_agent_tool_task(self, task_id: str, task: dict[str, Any]) -> tuple[bool, str]:
+        tool, route_input, route_resolution = self._extract_agent_tool_request(task)
+        if not tool:
+            return False, "task payload missing agent_tool"
+        if tool != "route_resolve":
+            return False, f"unsupported_agent_tool:{tool}"
+        if not route_input:
+            return False, "route_resolve_input_required"
+
+        self._heartbeat(task_id, f"executing agent_tool={tool} input={route_input}")
+        run = run_ops_cap("agent.route", ["--json", route_input], confirm=False, timeout=600)
+        if not run["ok"]:
+            detail = run.get("stderr") or run.get("output") or f"agent_tool failed rc={run.get('exit_code', 1)}"
+            return False, detail
+
+        payload = run.get("payload")
+        if not isinstance(payload, dict):
+            return False, "agent.route returned non-json payload"
+        if str(payload.get("status", "")).strip() != "matched":
+            return False, f"route_not_matched:{route_input}"
+
+        matched_agent = str(payload.get("data", {}).get("agent", {}).get("id", "")).strip()
+        expected_agent = str(route_resolution.get("data", {}).get("agent", {}).get("id", "")).strip()
+        if expected_agent and matched_agent and expected_agent != matched_agent:
+            return False, f"route_resolution_mismatch:expected={expected_agent} actual={matched_agent}"
+
+        run_key = run.get("run_key", "")
+        receipt = run.get("receipt", "")
+        parts = [f"agent_tool={tool}", f"input={route_input}"]
+        if matched_agent:
+            parts.append(f"agent_id={matched_agent}")
         if run_key:
             parts.append(f"run_key={run_key}")
         if receipt:
@@ -464,13 +523,16 @@ class TaskWorker:
             self._heartbeat(task_id, f"claimed by {self.worker_id}")
             route_target = str(task.get("route_target", "")).strip() or "capability"
 
-            if route_target != "capability":
+            if route_target == "capability":
+                ok_exec, detail = self._execute_capability_task(task_id, task)
+            elif route_target == "agent_tool":
+                ok_exec, detail = self._execute_agent_tool_task(task_id, task)
+            else:
                 self._fail(task_id, f"unsupported_route_target:{route_target}")
                 failed += 1
                 self.log(f"task {task_id}: failed unsupported route_target={route_target}")
                 continue
 
-            ok_exec, detail = self._execute_capability_task(task_id, task)
             if ok_exec:
                 self._complete(task_id, detail)
                 completed += 1

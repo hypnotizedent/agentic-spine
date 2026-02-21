@@ -52,22 +52,23 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     exit 1
   fi
 
-  {
-    echo "task_id: \"$TASK_ID\""
-    echo "status: queued"
-    echo "summary: \"$SUMMARY\""
-    echo "route_target: \"${ROUTE_TARGET:-}\""
-    echo "payload: \"${PAYLOAD:-}\""
-    echo "created_at: \"$(mailroom_task_now)\""
-    echo "updated_at: \"$(mailroom_task_now)\""
-    echo "required_agents:"
-    jq -r '.[]' <<<"$agents_json" | while IFS= read -r agent; do
-      [[ -z "$agent" ]] && continue
-      echo "  - \"$agent\""
-    done
-  } >"$file"
-
-  yq e -i '.required_agents = (.required_agents // [])' "$file"
+  now="$(mailroom_task_now)"
+  TASK_ID_ENV="$TASK_ID" \
+  SUMMARY_ENV="$SUMMARY" \
+  ROUTE_TARGET_ENV="${ROUTE_TARGET:-}" \
+  PAYLOAD_ENV="${PAYLOAD:-}" \
+  NOW_ENV="$now" \
+  AGENTS_JSON_ENV="$agents_json" \
+  yq e -n '
+    .task_id = strenv(TASK_ID_ENV) |
+    .status = "queued" |
+    .summary = strenv(SUMMARY_ENV) |
+    .route_target = strenv(ROUTE_TARGET_ENV) |
+    .payload = strenv(PAYLOAD_ENV) |
+    .created_at = strenv(NOW_ENV) |
+    .updated_at = strenv(NOW_ENV) |
+    .required_agents = (strenv(AGENTS_JSON_ENV) | fromjson)
+  ' >"$file"
 fi
 
 data="$(jq -n \
