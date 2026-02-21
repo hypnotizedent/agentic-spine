@@ -292,6 +292,7 @@ df -h /
 | `com.ronny.slo-evidence-daily.plist` | Daily 23:59 | `slo-evidence-daily.sh` | Daily SLO evidence capture | ACTIVE |
 | `com.ronny.n8n-snapshot-daily.plist` | Daily 03:00 | `n8n-snapshot-daily.sh` | Daily n8n workflow snapshot | ACTIVE |
 | `com.ronny.alerting-probe-cycle.plist` | Every 15m | `alerting-probe-cycle.sh` | Continuous alert probe + dispatch cycle | ACTIVE |
+| `com.ronny.mcp-runtime-anti-drift-cycle.plist` | Every 30m | `mcp-runtime-anti-drift-cycle.sh` | Scheduled anti-drift checks for MCP runtime parity + D148 core verify enforcement | ACTIVE |
 | `com.ronny.immich-reconcile-weekly.plist` | Sun 02:00 | `immich-reconcile-weekly.sh` | Weekly duplicate scan for immich reconciliation | ACTIVE |
 | `com.ronny.finance-action-queue-monthly.plist` | Day 1 09:00 | `finance-action-queue-monthly.sh` | Monthly finance compliance/action queue generation | ACTIVE |
 | `com.ronny.streamdeck.ha.plist` | On login | `streamdeck_ha_controller.py` | Stream Deck HA button controller | ACTIVE |
