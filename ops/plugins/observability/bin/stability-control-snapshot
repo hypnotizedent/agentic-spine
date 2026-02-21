@@ -483,6 +483,7 @@ for domain in "${DOMAINS[@]}"; do
   fi
 
   mapfile -t probes < <(yq -r ".probe_capabilities.\"$domain\"[]?" "$CONTRACT")
+  mapfile -t latency_exemptions < <(yq -r ".probe_latency_exemptions.\"$domain\"[]?" "$CONTRACT")
   domain_severity="pass"
   domain_note=""
   domain_probe_incidents=0
@@ -495,6 +496,14 @@ for domain in "${DOMAINS[@]}"; do
   fi
 
   for cap in "${probes[@]}"; do
+    apply_duration_budget="true"
+    for exemption in "${latency_exemptions[@]}"; do
+      if [[ "$cap" == "$exemption" ]]; then
+        apply_duration_budget="false"
+        break
+      fi
+    done
+
     run_probe "$cap"
     probe_status="pass"
     probe_detail="$PROBE_DETAIL"
@@ -503,18 +512,20 @@ for domain in "${DOMAINS[@]}"; do
       probe_status="incident"
     fi
 
-    if [[ "$PROBE_DURATION_MS" -ge "$_domain_lat_incident" ]]; then
-      # Latency alone should not create an outage incident when probe semantics pass.
-      # Reserve incident for semantic failures; keep high latency as warn signal.
-      if [[ "$probe_status" != "incident" ]]; then
-        probe_status="warn"
+    if [[ "$apply_duration_budget" == "true" ]]; then
+      if [[ "$PROBE_DURATION_MS" -ge "$_domain_lat_incident" ]]; then
+        # Latency alone should not create an outage incident when probe semantics pass.
+        # Reserve incident for semantic failures; keep high latency as warn signal.
+        if [[ "$probe_status" != "incident" ]]; then
+          probe_status="warn"
+        fi
+        probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $_domain_lat_incident)"
+      elif [[ "$PROBE_DURATION_MS" -ge "$_domain_lat_warn" ]]; then
+        if [[ "$probe_status" == "pass" ]]; then
+          probe_status="warn"
+        fi
+        probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $_domain_lat_warn)"
       fi
-      probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $_domain_lat_incident)"
-    elif [[ "$PROBE_DURATION_MS" -ge "$_domain_lat_warn" ]]; then
-      if [[ "$probe_status" == "pass" ]]; then
-        probe_status="warn"
-      fi
-      probe_detail="$probe_detail; latency_ms=$PROBE_DURATION_MS (>= $_domain_lat_warn)"
     fi
 
     hb_age="$(extract_heartbeat_age_minutes "$PROBE_OUTPUT")"

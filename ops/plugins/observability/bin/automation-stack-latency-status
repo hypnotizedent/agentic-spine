@@ -1,0 +1,459 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT_DEFAULT="$ROOT/ops/bindings/automation.stack.latency.slo.yaml"
+
+CONTRACT="$CONTRACT_DEFAULT"
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+automation-stack-latency-status - Repeated-sample latency budget report for automation-stack
+
+Usage:
+  automation-stack-latency-status [--contract <path>] [--json]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --contract)
+      CONTRACT="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "STOP: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "STOP: missing dependency: $1" >&2
+    exit 2
+  }
+}
+
+need_file() {
+  [[ -f "$1" ]] || {
+    echo "STOP: missing file: $1" >&2
+    exit 2
+  }
+}
+
+now_ms() {
+  python3 -c 'import time; print(int(time.time() * 1000))'
+}
+
+percentile_from_values() {
+  local percentile="$1"
+  shift
+  if [[ "$#" -eq 0 ]]; then
+    echo "-1"
+    return
+  fi
+  printf '%s\n' "$@" | sort -n | awk -v p="$percentile" '
+    {a[++n] = $1}
+    END {
+      if (n == 0) { print -1; exit }
+      idx = int((p * n + 99) / 100)
+      if (idx < 1) idx = 1
+      if (idx > n) idx = n
+      print int(a[idx])
+    }'
+}
+
+promote_status() {
+  local current="$1"
+  local incoming="$2"
+  if [[ "$incoming" == "incident" ]]; then
+    echo "incident"
+    return
+  fi
+  if [[ "$incoming" == "warn" && "$current" == "pass" ]]; then
+    echo "warn"
+    return
+  fi
+  echo "$current"
+}
+
+need_cmd yq
+need_cmd jq
+need_cmd curl
+need_cmd python3
+need_file "$CONTRACT"
+
+SERVICES_HEALTH_REL="$(yq -r '.source_bindings.services_health // "ops/bindings/services.health.yaml"' "$CONTRACT")"
+SERVICES_HEALTH="$ROOT/$SERVICES_HEALTH_REL"
+need_file "$SERVICES_HEALTH"
+
+TARGET_HOST="$(yq -r '.target.host // "automation-stack"' "$CONTRACT")"
+SAMPLE_COUNT="$(yq -r '.sampling.sample_count // 5' "$CONTRACT")"
+INTERVAL_MS="$(yq -r '.sampling.interval_ms // 200' "$CONTRACT")"
+CONNECT_TIMEOUT_SEC="$(yq -r '.sampling.connect_timeout_sec // 2' "$CONTRACT")"
+MAX_TIME_SEC="$(yq -r '.sampling.max_time_sec // 4' "$CONTRACT")"
+
+P95_WARN_MS="$(yq -r '.budgets_ms.p95_warn // 900' "$CONTRACT")"
+P95_INCIDENT_MS="$(yq -r '.budgets_ms.p95_incident // 1500' "$CONTRACT")"
+P99_WARN_MS="$(yq -r '.budgets_ms.p99_warn // 1300' "$CONTRACT")"
+P99_INCIDENT_MS="$(yq -r '.budgets_ms.p99_incident // 2200' "$CONTRACT")"
+N8N_WARN_MS="$(yq -r '.budgets_ms.n8n_quick_warn // 2000' "$CONTRACT")"
+N8N_INCIDENT_MS="$(yq -r '.budgets_ms.n8n_quick_incident // 5000' "$CONTRACT")"
+
+WARN_FAILED_SAMPLES="$(yq -r '.failure_budget.warn_failed_samples // 1' "$CONTRACT")"
+INCIDENT_FAILED_SAMPLES="$(yq -r '.failure_budget.incident_failed_samples // 3' "$CONTRACT")"
+SCHEMA_VERSION="$(yq -r '.reporting.envelope_schema_version // "1.0"' "$CONTRACT")"
+
+for value in \
+  "$SAMPLE_COUNT" "$INTERVAL_MS" "$CONNECT_TIMEOUT_SEC" "$MAX_TIME_SEC" \
+  "$P95_WARN_MS" "$P95_INCIDENT_MS" "$P99_WARN_MS" "$P99_INCIDENT_MS" \
+  "$N8N_WARN_MS" "$N8N_INCIDENT_MS" "$WARN_FAILED_SAMPLES" "$INCIDENT_FAILED_SAMPLES"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || {
+    echo "STOP: contract expects integer fields for sampling/budgets/failure_budget" >&2
+    exit 2
+  }
+done
+
+if [[ "$P95_WARN_MS" -gt "$P95_INCIDENT_MS" || "$P99_WARN_MS" -gt "$P99_INCIDENT_MS" || "$N8N_WARN_MS" -gt "$N8N_INCIDENT_MS" ]]; then
+  echo "STOP: warn budget cannot exceed incident budget" >&2
+  exit 2
+fi
+
+FILTER_ENDPOINT_IDS=()
+while IFS= read -r endpoint_id; do
+  [[ -n "$endpoint_id" && "$endpoint_id" != "null" ]] || continue
+  FILTER_ENDPOINT_IDS+=("$endpoint_id")
+done < <(yq -r '.target.endpoint_ids[]?' "$CONTRACT")
+
+endpoint_selected() {
+  local candidate="$1"
+  if [[ "${#FILTER_ENDPOINT_IDS[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  local selected
+  for selected in "${FILTER_ENDPOINT_IDS[@]}"; do
+    if [[ "$selected" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+declare -A ENDPOINT_URL
+declare -A ENDPOINT_EXPECT
+declare -A ENDPOINT_TOTAL
+declare -A ENDPOINT_SUCCESS
+declare -A ENDPOINT_FAILURE
+declare -A ENDPOINT_VALUES
+declare -A ENDPOINT_MAX
+declare -A ENDPOINT_MIN
+declare -a ENDPOINT_IDS
+
+while IFS=$'\t' read -r endpoint_id endpoint_url endpoint_expect; do
+  [[ -n "$endpoint_id" && -n "$endpoint_url" ]] || continue
+  if ! endpoint_selected "$endpoint_id"; then
+    continue
+  fi
+  ENDPOINT_IDS+=("$endpoint_id")
+  ENDPOINT_URL["$endpoint_id"]="$endpoint_url"
+  ENDPOINT_EXPECT["$endpoint_id"]="$endpoint_expect"
+  ENDPOINT_TOTAL["$endpoint_id"]=0
+  ENDPOINT_SUCCESS["$endpoint_id"]=0
+  ENDPOINT_FAILURE["$endpoint_id"]=0
+done < <(
+  yq -r ".endpoints[] | select(.host == \"$TARGET_HOST\" and ((.enabled // true) == true)) | [(.id // \"\"), (.url // \"\"), ((.expect // 200)|tostring)] | @tsv" "$SERVICES_HEALTH"
+)
+
+if [[ "${#ENDPOINT_IDS[@]}" -eq 0 ]]; then
+  echo "STOP: no enabled services.health endpoints found for host '$TARGET_HOST'" >&2
+  exit 2
+fi
+
+interval_sleep="$(awk -v ms="$INTERVAL_MS" 'BEGIN{printf "%.3f", ms/1000}')"
+
+total_samples=0
+successful_samples=0
+failed_samples=0
+declare -a ALL_SUCCESS_VALUES
+
+for ((sample_idx=1; sample_idx<=SAMPLE_COUNT; sample_idx++)); do
+  for endpoint_id in "${ENDPOINT_IDS[@]}"; do
+    url="${ENDPOINT_URL[$endpoint_id]}"
+    expect="${ENDPOINT_EXPECT[$endpoint_id]}"
+    ENDPOINT_TOTAL["$endpoint_id"]=$((ENDPOINT_TOTAL["$endpoint_id"] + 1))
+    total_samples=$((total_samples + 1))
+
+    set +e
+    curl_raw="$(curl -sS -o /dev/null -w "%{http_code}\t%{time_total}" \
+      --connect-timeout "$CONNECT_TIMEOUT_SEC" \
+      --max-time "$MAX_TIME_SEC" \
+      "$url" 2>/dev/null)"
+    curl_rc=$?
+    set -e
+
+    if [[ "$curl_rc" -ne 0 ]]; then
+      ENDPOINT_FAILURE["$endpoint_id"]=$((ENDPOINT_FAILURE["$endpoint_id"] + 1))
+      failed_samples=$((failed_samples + 1))
+      continue
+    fi
+
+    http_code="$(printf '%s' "$curl_raw" | cut -f1)"
+    time_total="$(printf '%s' "$curl_raw" | cut -f2)"
+    duration_ms="$(awk -v t="$time_total" 'BEGIN{printf "%d", (t*1000)+0.5}')"
+
+    expect_ok=0
+    IFS=',' read -r -a expect_codes <<<"$(printf '%s' "$expect" | tr -d '[:space:]')"
+    for expected_code in "${expect_codes[@]}"; do
+      if [[ -n "$expected_code" && "$http_code" == "$expected_code" ]]; then
+        expect_ok=1
+        break
+      fi
+    done
+
+    if [[ "$expect_ok" -eq 0 ]]; then
+      ENDPOINT_FAILURE["$endpoint_id"]=$((ENDPOINT_FAILURE["$endpoint_id"] + 1))
+      failed_samples=$((failed_samples + 1))
+      continue
+    fi
+
+    ENDPOINT_SUCCESS["$endpoint_id"]=$((ENDPOINT_SUCCESS["$endpoint_id"] + 1))
+    successful_samples=$((successful_samples + 1))
+    ALL_SUCCESS_VALUES+=("$duration_ms")
+
+    if [[ -z "${ENDPOINT_VALUES[$endpoint_id]:-}" ]]; then
+      ENDPOINT_VALUES["$endpoint_id"]="$duration_ms"
+      ENDPOINT_MAX["$endpoint_id"]="$duration_ms"
+      ENDPOINT_MIN["$endpoint_id"]="$duration_ms"
+    else
+      ENDPOINT_VALUES["$endpoint_id"]="${ENDPOINT_VALUES[$endpoint_id]},$duration_ms"
+      if [[ "$duration_ms" -gt "${ENDPOINT_MAX[$endpoint_id]}" ]]; then
+        ENDPOINT_MAX["$endpoint_id"]="$duration_ms"
+      fi
+      if [[ "$duration_ms" -lt "${ENDPOINT_MIN[$endpoint_id]}" ]]; then
+        ENDPOINT_MIN["$endpoint_id"]="$duration_ms"
+      fi
+    fi
+  done
+
+  if [[ "$sample_idx" -lt "$SAMPLE_COUNT" && "$INTERVAL_MS" -gt 0 ]]; then
+    sleep "$interval_sleep"
+  fi
+done
+
+p95_ms=-1
+p99_ms=-1
+if [[ "${#ALL_SUCCESS_VALUES[@]}" -gt 0 ]]; then
+  p95_ms="$(percentile_from_values 95 "${ALL_SUCCESS_VALUES[@]}")"
+  p99_ms="$(percentile_from_values 99 "${ALL_SUCCESS_VALUES[@]}")"
+fi
+
+n8n_run_key=""
+n8n_duration_ms=0
+n8n_summary=""
+n8n_status="pass"
+n8n_tmp="$(mktemp)"
+n8n_start_ms="$(now_ms)"
+set +e
+"$ROOT/bin/ops" cap run n8n.infra.health.quick >"$n8n_tmp" 2>&1
+n8n_rc=$?
+set -e
+n8n_end_ms="$(now_ms)"
+n8n_duration_ms=$((n8n_end_ms - n8n_start_ms))
+n8n_run_key="$(sed -n 's/^Run Key:[[:space:]]*//p' "$n8n_tmp" | tail -n1 | xargs || true)"
+n8n_summary="$(grep -E 'summary:' "$n8n_tmp" | tail -n1 | sed 's/[[:space:]]\+/ /g' | xargs || true)"
+if [[ "$n8n_rc" -ne 0 ]] || grep -qiE 'status:[[:space:]]*FAIL|summary:[[:space:]]*INCIDENT|UNREACHABLE|ERROR' "$n8n_tmp"; then
+  n8n_status="incident"
+elif [[ "$n8n_duration_ms" -ge "$N8N_INCIDENT_MS" ]]; then
+  n8n_status="incident"
+elif [[ "$n8n_duration_ms" -ge "$N8N_WARN_MS" ]]; then
+  n8n_status="warn"
+fi
+rm -f "$n8n_tmp"
+
+status="pass"
+status="$(promote_status "$status" "$n8n_status")"
+
+if [[ "$successful_samples" -eq 0 ]]; then
+  status="incident"
+elif [[ "$failed_samples" -ge "$INCIDENT_FAILED_SAMPLES" ]]; then
+  status="incident"
+elif [[ "$failed_samples" -ge "$WARN_FAILED_SAMPLES" ]]; then
+  status="$(promote_status "$status" "warn")"
+fi
+
+if [[ "$p95_ms" -ge 0 ]]; then
+  if [[ "$p95_ms" -ge "$P95_INCIDENT_MS" ]]; then
+    status="incident"
+  elif [[ "$p95_ms" -ge "$P95_WARN_MS" ]]; then
+    status="$(promote_status "$status" "warn")"
+  fi
+fi
+
+if [[ "$p99_ms" -ge 0 ]]; then
+  if [[ "$p99_ms" -ge "$P99_INCIDENT_MS" ]]; then
+    status="incident"
+  elif [[ "$p99_ms" -ge "$P99_WARN_MS" ]]; then
+    status="$(promote_status "$status" "warn")"
+  fi
+fi
+
+summary_state="OK"
+if [[ "$status" == "incident" ]]; then
+  summary_state="INCIDENT"
+elif [[ "$status" == "warn" ]]; then
+  summary_state="WARN"
+fi
+
+endpoint_json='[]'
+for endpoint_id in "${ENDPOINT_IDS[@]}"; do
+  endpoint_url="${ENDPOINT_URL[$endpoint_id]}"
+  endpoint_expect="${ENDPOINT_EXPECT[$endpoint_id]}"
+  endpoint_total="${ENDPOINT_TOTAL[$endpoint_id]}"
+  endpoint_success="${ENDPOINT_SUCCESS[$endpoint_id]}"
+  endpoint_failure="${ENDPOINT_FAILURE[$endpoint_id]}"
+  endpoint_values_csv="${ENDPOINT_VALUES[$endpoint_id]:-}"
+  endpoint_p95=-1
+  endpoint_p99=-1
+  endpoint_min=-1
+  endpoint_max=-1
+  if [[ -n "$endpoint_values_csv" ]]; then
+    IFS=',' read -r -a endpoint_vals <<<"$endpoint_values_csv"
+    endpoint_p95="$(percentile_from_values 95 "${endpoint_vals[@]}")"
+    endpoint_p99="$(percentile_from_values 99 "${endpoint_vals[@]}")"
+    endpoint_min="${ENDPOINT_MIN[$endpoint_id]}"
+    endpoint_max="${ENDPOINT_MAX[$endpoint_id]}"
+  fi
+  endpoint_obj="$(jq -n \
+    --arg id "$endpoint_id" \
+    --arg url "$endpoint_url" \
+    --arg expect "$endpoint_expect" \
+    --argjson samples "$endpoint_total" \
+    --argjson success "$endpoint_success" \
+    --argjson failure "$endpoint_failure" \
+    --argjson p95_ms "$endpoint_p95" \
+    --argjson p99_ms "$endpoint_p99" \
+    --argjson min_ms "$endpoint_min" \
+    --argjson max_ms "$endpoint_max" \
+    '{
+      id: $id,
+      url: $url,
+      expect: $expect,
+      samples: $samples,
+      success: $success,
+      failure: $failure,
+      p95_ms: $p95_ms,
+      p99_ms: $p99_ms,
+      min_ms: $min_ms,
+      max_ms: $max_ms
+    }')"
+  endpoint_json="$(jq -c --argjson row "$endpoint_obj" '. + [$row]' <<<"$endpoint_json")"
+done
+
+generated_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+summary_detail="summary: $summary_state host=$TARGET_HOST samples=$total_samples success=$successful_samples failed=$failed_samples p95_ms=$p95_ms p99_ms=$p99_ms n8n_quick_ms=$n8n_duration_ms"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg capability "automation.stack.latency.status" \
+    --arg schema_version "$SCHEMA_VERSION" \
+    --arg generated_at "$generated_at" \
+    --arg status "$status" \
+    --arg contract "$CONTRACT" \
+    --arg host "$TARGET_HOST" \
+    --arg services_binding "$SERVICES_HEALTH_REL" \
+    --arg n8n_run_key "$n8n_run_key" \
+    --arg n8n_summary "$n8n_summary" \
+    --argjson sample_count "$SAMPLE_COUNT" \
+    --argjson interval_ms "$INTERVAL_MS" \
+    --argjson endpoint_count "${#ENDPOINT_IDS[@]}" \
+    --argjson total_samples "$total_samples" \
+    --argjson successful_samples "$successful_samples" \
+    --argjson failed_samples "$failed_samples" \
+    --argjson p95_ms "$p95_ms" \
+    --argjson p99_ms "$p99_ms" \
+    --argjson n8n_duration_ms "$n8n_duration_ms" \
+    --argjson p95_warn "$P95_WARN_MS" \
+    --argjson p95_incident "$P95_INCIDENT_MS" \
+    --argjson p99_warn "$P99_WARN_MS" \
+    --argjson p99_incident "$P99_INCIDENT_MS" \
+    --argjson n8n_warn "$N8N_WARN_MS" \
+    --argjson n8n_incident "$N8N_INCIDENT_MS" \
+    --argjson warn_failed "$WARN_FAILED_SAMPLES" \
+    --argjson incident_failed "$INCIDENT_FAILED_SAMPLES" \
+    --argjson endpoints "$endpoint_json" \
+    '{
+      capability: $capability,
+      schema_version: $schema_version,
+      generated_at: $generated_at,
+      status: $status,
+      data: {
+        contract: $contract,
+        host: $host,
+        services_health_binding: $services_binding,
+        sample_count: $sample_count,
+        interval_ms: $interval_ms,
+        endpoint_count: $endpoint_count,
+        total_samples: $total_samples,
+        successful_samples: $successful_samples,
+        failed_samples: $failed_samples,
+        p95_ms: $p95_ms,
+        p99_ms: $p99_ms,
+        budgets_ms: {
+          p95_warn: $p95_warn,
+          p95_incident: $p95_incident,
+          p99_warn: $p99_warn,
+          p99_incident: $p99_incident,
+          n8n_quick_warn: $n8n_warn,
+          n8n_quick_incident: $n8n_incident
+        },
+        failure_budget: {
+          warn_failed_samples: $warn_failed,
+          incident_failed_samples: $incident_failed
+        },
+        n8n_quick: {
+          status: (if $n8n_duration_ms >= $n8n_incident then "incident" elif $n8n_duration_ms >= $n8n_warn then "warn" else "pass" end),
+          duration_ms: $n8n_duration_ms,
+          run_key: $n8n_run_key,
+          summary: $n8n_summary
+        },
+        endpoints: $endpoints
+      }
+    }'
+else
+  echo "automation.stack.latency.status"
+  echo "generated_at: $generated_at"
+  echo "contract: $CONTRACT"
+  echo "host: $TARGET_HOST"
+  echo "services_health_binding: $SERVICES_HEALTH_REL"
+  echo "sampling.sample_count: $SAMPLE_COUNT"
+  echo "sampling.interval_ms: $INTERVAL_MS"
+  echo "sampling.total_samples: $total_samples"
+  echo "sampling.successful_samples: $successful_samples"
+  echo "sampling.failed_samples: $failed_samples"
+  echo "sampling.p95_ms: $p95_ms"
+  echo "sampling.p99_ms: $p99_ms"
+  echo "budgets_ms.p95_warn: $P95_WARN_MS"
+  echo "budgets_ms.p95_incident: $P95_INCIDENT_MS"
+  echo "budgets_ms.p99_warn: $P99_WARN_MS"
+  echo "budgets_ms.p99_incident: $P99_INCIDENT_MS"
+  echo "budgets_ms.n8n_quick_warn: $N8N_WARN_MS"
+  echo "budgets_ms.n8n_quick_incident: $N8N_INCIDENT_MS"
+  echo "n8n_quick.run_key: ${n8n_run_key:-none}"
+  echo "n8n_quick.duration_ms: $n8n_duration_ms"
+  if [[ -n "$n8n_summary" ]]; then
+    echo "n8n_quick.detail: $n8n_summary"
+  fi
+  echo "$summary_detail"
+fi
+
+exit 0
