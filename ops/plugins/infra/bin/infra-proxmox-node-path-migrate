@@ -41,7 +41,7 @@ Usage:
 
 Behavior:
   - Copies qemu-server/* and lxc/* from /etc/pve/nodes/<from>/ into <to>/
-  - Renames /etc/pve/nodes/<from> to /etc/pve/nodes/<from>.stale.<timestamp>
+  - Retires stale guest config files from /etc/pve/nodes/<from> into /root backup
   - Restarts pvedaemon + pveproxy
   - Stops and restarts only the guests that were running at start time
 
@@ -120,11 +120,19 @@ lxc_src="$src_base/lxc"
 qemu_dst="$dst_base/qemu-server"
 lxc_dst="$dst_base/lxc"
 
-echo "Remote hostname: $(hostname 2>/dev/null || uname -n)"
+remote_hostname="$(hostname 2>/dev/null || uname -n)"
+echo "Remote hostname: $remote_hostname"
 echo "Timestamp:       $ts"
 echo "src_base:        $src_base"
 echo "dst_base:        $dst_base"
 echo
+
+if [[ "$remote_hostname" != "$TO_NODE" ]]; then
+  echo "FAIL: to-node mismatch. remote hostname is '$remote_hostname' but TO_NODE is '$TO_NODE'."
+  echo "Refusing to migrate configs to a node path that does not match live hostname."
+  echo "hint: use --to-node $remote_hostname (or do not run migration if this host uses a naming-policy exception)."
+  exit 1
+fi
 
 if [[ ! -d "$src_base" ]]; then
   echo "FAIL: missing src_base: $src_base"
@@ -191,7 +199,7 @@ if [[ "$EXECUTE" != "1" ]]; then
   echo "DRY-RUN: would:"
   echo "  1) backup: cp -a $src_base /root/pve-node-backup-$ts"
   echo "  2) copy:   qemu-server/* + lxc/* into $dst_base"
-  echo "  3) retire: mv $src_base $src_base.stale.$ts"
+  echo "  3) retire: move guest configs from $src_base/{qemu-server,lxc} to /root/pve-node-stale-$ts"
   echo "  4) restart pvedaemon + pveproxy"
   echo "  5) stop + restart only guests that are currently running"
   exit 0
@@ -207,10 +215,20 @@ echo "=== STEP 2/6: Copy configs into destination node dir ==="
 mkdir -p "$qemu_dst" "$lxc_dst"
 
 if [[ -d "$qemu_src" ]]; then
-  cp -a "$qemu_src"/* "$qemu_dst"/ 2>/dev/null || true
+  for f in "${qemu_files[@]}"; do
+    base="$(basename "$f")"
+    dst="$qemu_dst/$base"
+    [[ -f "$dst" ]] && rm -f "$dst"
+    mv "$f" "$dst"
+  done
 fi
 if [[ -d "$lxc_src" ]]; then
-  cp -a "$lxc_src"/* "$lxc_dst"/ 2>/dev/null || true
+  for f in "${lxc_files[@]}"; do
+    base="$(basename "$f")"
+    dst="$lxc_dst/$base"
+    [[ -f "$dst" ]] && rm -f "$dst"
+    mv "$f" "$dst"
+  done
 fi
 
 echo "dest qemu-server files:"
@@ -219,10 +237,31 @@ echo "dest lxc files:"
 ls -1 "$lxc_dst" 2>/dev/null || true
 echo
 
-echo "=== STEP 3/6: Retire stale node directory (removes duplicate VMID ownership) ==="
-stale_dir="${src_base}.stale.${ts}"
-mv "$src_base" "$stale_dir"
+echo "=== STEP 3/6: Archive any leftover source guest configs ==="
+stale_dir="/root/pve-node-stale-${ts}"
+mkdir -p "$stale_dir/qemu-server" "$stale_dir/lxc"
+
+retired_qemu=0
+retired_lxc=0
+
+for f in "${qemu_files[@]}"; do
+  base="$(basename "$f")"
+  if [[ -f "$f" && -f "$qemu_dst/$base" ]]; then
+    mv "$f" "$stale_dir/qemu-server/$base"
+    retired_qemu=$((retired_qemu + 1))
+  fi
+done
+
+for f in "${lxc_files[@]}"; do
+  base="$(basename "$f")"
+  if [[ -f "$f" && -f "$lxc_dst/$base" ]]; then
+    mv "$f" "$stale_dir/lxc/$base"
+    retired_lxc=$((retired_lxc + 1))
+  fi
+done
+
 echo "stale_dir=$stale_dir"
+echo "retired_qemu=$retired_qemu retired_lxc=$retired_lxc"
 echo
 
 echo "=== STEP 4/6: Restart PVE control plane services ==="
@@ -263,4 +302,3 @@ REMOTE
 ssh "${ssh_opts[@]}" "${ssh_user}@${ssh_host}" \
     HOST_ID="$HOST_ID" FROM_NODE="$FROM_NODE" TO_NODE="$TO_NODE" EXECUTE="$EXECUTE" \
     'bash -s' <<<"$remote_script"
-
