@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-10
+last_verified: 2026-02-20
 verification_method: spine-capabilities
 scope: all-infrastructure
 github_issue: "#615"
@@ -16,7 +16,7 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 > For service endpoints/ports/health routes → CHECK `docs/governance/SERVICE_REGISTRY.yaml`.
 > Before creating ANY new device/VM/service → FOLLOW THESE RULES.
 >
-> Last Verified: February 9, 2026
+> Last Verified: February 20, 2026
 
 ---
 
@@ -153,6 +153,9 @@ Deep, mutable infra detail lives in the per-location SSOT docs:
 | automation-stack | 100.98.70.70 | Shop | Automation (n8n) |
 | download-stack | 100.107.36.76 | Shop | Downloads + *arr (split from legacy media VM) |
 | streaming-stack | 100.123.207.64 | Shop | Streaming (Jellyfin, Navidrome, Jellyseerr, Bazarr, Homarr, Spotisub) (split from legacy media VM) |
+| finance-stack | 100.76.153.100 | Shop | Finance (Firefly III, Paperless, Ghostfolio) (VM 211) |
+| mint-data | 100.106.72.25 | Shop | Mint data plane (PostgreSQL, MinIO, Redis) (VM 212) |
+| mint-apps | 100.79.183.14 | Shop | Mint app plane (artwork, quote-page, order-intake) (VM 213) |
 | proxmox-home | 100.103.99.62 | Home | Proxmox VE (home host) |
 | nas | 100.102.199.111 | Home | Synology NAS |
 | vault | 100.93.142.63 | Home | Vaultwarden rollback source (VM 102) |
@@ -330,11 +333,11 @@ curl -s http://automation-stack:5678/healthz
 ```bash
 # Shop VMs
 ssh pve "qm list"
-# Expected: VMs 200, 202-210 running (201 decommissioned)
+# Expected: VMs 200, 202-213 running (201 decommissioned)
 
 # Home VMs
 ssh proxmox-home "qm list"
-# Expected: VMs 100-102 running
+# Expected: VM 100 running; VM 101 stopped; VM 102 decommissioned (stopped)
 ```
 
 ---

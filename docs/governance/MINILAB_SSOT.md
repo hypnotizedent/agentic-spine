@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-11
+last_verified: 2026-02-20
 verification_method: live-system-inspection
 scope: home-infrastructure
 github_issue: "#625"
@@ -16,7 +16,7 @@ parent_receipts:
 > Covers: Beelink (proxmox-home), Synology NAS, VMs/LXCs, and home network.
 > For device identity and Tailscale config, see [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md).
 >
-> **Last Verified:** February 11, 2026
+> **Last Verified:** February 20, 2026
 
 ---
 
@@ -27,8 +27,8 @@ parent_receipts:
 | proxmox-home | 100.103.99.62 | `ssh root@proxmox-home` |
 | NAS (Synology) | 100.102.199.111 | https://nas:5001 |
 | Home Assistant | 100.67.120.1 | http://ha:8123 |
-| Vaultwarden | 100.93.142.63 | http://vault:8080 |
-| Pi-hole (decommissioned history) | 100.105.148.96 | soft-decommissioned 2026-02-21 |
+| Vaultwarden (decommissioned) | 100.93.142.63 | Decommissioned 2026-02-16 (primary on infra-core) |
+| Pi-hole (decommissioned) | 100.105.148.96 | Soft-decommissioned 2026-02-21 |
 
 ---
 
@@ -143,7 +143,7 @@ parent_receipts:
 |------|----------|--------------|-----|------|--------|
 | 100 | homeassistant | 100.67.120.1 | 4GB | 32GB | Running |
 | 101 | immich | 100.83.160.109 | 16GB | 80GB | **Stopped** (has migration snapshot from 2025-10-19) |
-| 102 | vaultwarden | 100.93.142.63 | 2GB | 16GB | Running |
+| 102 | vaultwarden | 100.93.142.63 | 2GB | 16GB | **Decommissioned** (2026-02-16; superseded by infra-core VM 204) |
 
 ### LXC Containers
 
@@ -180,15 +180,15 @@ parent_receipts:
 - immich_redis
 - immich_node_exporter
 
-#### VM 102: Vaultwarden
+#### VM 102: Vaultwarden (DECOMMISSIONED)
 
 | Field | Value |
 |-------|-------|
 | Tailscale IP | 100.93.142.63 |
-| Web UI | http://vault:8080 |
-| Purpose | Password manager (Bitwarden-compatible) |
+| Status | **Decommissioned** 2026-02-16 |
+| Purpose | Password manager (Bitwarden-compatible) — superseded by infra-core (VM 204) |
 
-**Container:** vaultwarden (healthy)
+**Note:** Final backup `vzdump-qemu-102-2026_02_15-03_01_25.vma.zst` on NAS. Retained as rollback source only.
 
 #### LXC 103: download-home
 
@@ -223,7 +223,7 @@ parent_receipts:
 | homeassistant | 10.0.0.100 | 100.67.120.1 | VM 100 |
 | vaultwarden | 10.0.0.102 | 100.93.142.63 | VM 102 |
 | pihole-home | 10.0.0.53 | 100.105.148.96 | LXC 105 (soft-decommissioned) |
-| download-home | 10.0.0.101 | 100.125.138.110 | LXC 103 (soft-decommissioned) |
+| download-home | 10.0.0.103 | 100.125.138.110 | LXC 103 (soft-decommissioned) |
 
 ### Network Configuration
 
@@ -291,7 +291,7 @@ nfs: synology-backups
 
 | Job | Tier | Target | Schedule | Retention | Storage | Enabled |
 |-----|------|--------|----------|-----------|---------|---------|
-| backup-home-p0-daily | P0 (Critical) | VMs 100,102 | Daily 03:00 | keep-last=3 | synology-backups | **Yes** |
+| backup-home-p0-daily | P0 (Critical) | VM 100 | Daily 03:00 | keep-last=3 | synology-backups | **Yes** |
 | backup-home-p1-daily | P1 (Important) | LXC 103 | Daily 03:15 | keep-last=3 | synology-backups | **No** (disabled 2026-02-20) |
 | backup-home-p2-weekly | P2 (Deferrable) | VM 101, LXC 105 | Sun 04:00 | keep-last=2 | synology-backups | **Yes** |
 
@@ -383,7 +383,7 @@ curl -s http://vault:8080/
 
 | System | Schedule | Task | Status |
 |--------|----------|------|--------|
-| Proxmox vzdump P0 | Daily 03:00 | VM 100,102 backup to synology-backups | **ENABLED** |
+| Proxmox vzdump P0 | Daily 03:00 | VM 100 backup to synology-backups | **ENABLED** |
 | Proxmox vzdump P1 | Daily 03:15 | LXC 103 backup to synology-backups | **DISABLED** (2026-02-20) |
 | Proxmox vzdump P2 | Weekly Sun 04:00 | VM 101, LXC 105 backup to synology-backups | **ENABLED** |
 | Synology DSM | Weekly | RAID scrub | ACTIVE |
