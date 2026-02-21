@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-AOF-HARDENING-MULTI-SESSION-KNOB-NORMALIZATION-20260221
 created: 2026-02-21
-status: active
+status: closed
 owner: "@ronny"
 scope: aof
 priority: high
