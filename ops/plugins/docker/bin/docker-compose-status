@@ -118,9 +118,13 @@ fi
 TOTAL=0
 RUNNING=0
 EXITED=0
+HEALTHY=0
+UNHEALTHY=0
+STARTING=0
+WITH_HEALTH=0
 
 if command -v python3 >/dev/null 2>&1; then
-  read TOTAL RUNNING EXITED < <(python3 - "$tmp" <<PY
+  read TOTAL RUNNING EXITED HEALTHY UNHEALTHY STARTING WITH_HEALTH < <(python3 - "$tmp" <<PY
 import json, sys
 path = sys.argv[1]
 data = []
@@ -137,24 +141,49 @@ try:
     total = len(data)
     running = sum(1 for s in data if (s.get("State") or "").lower() == "running")
     exited = sum(1 for s in data if (s.get("State") or "").lower() == "exited")
-    print(total, running, exited)
+    healthy = sum(1 for s in data if (s.get("Health") or "").lower() == "healthy")
+    unhealthy = sum(1 for s in data if (s.get("Health") or "").lower() == "unhealthy")
+    starting = sum(1 for s in data if (s.get("Health") or "").lower() == "starting")
+    with_health = sum(1 for s in data if (s.get("Health") or "").strip() != "")
+    print(total, running, exited, healthy, unhealthy, starting, with_health)
 except Exception:
-    print(0, 0, 0)
+    print(0, 0, 0, 0, 0, 0, 0)
 PY
   )
 else
   TOTAL="$(grep -cE '^[[:space:]]*\\{' "$tmp" 2>/dev/null || echo 0)"
   RUNNING="$(grep -cEi '\"State\"[[:space:]]*:[[:space:]]*\"running\"' "$tmp" 2>/dev/null || echo 0)"
   EXITED="$(grep -cEi '\"State\"[[:space:]]*:[[:space:]]*\"exited\"' "$tmp" 2>/dev/null || echo 0)"
+  HEALTHY="$(grep -cEi '\"Health\"[[:space:]]*:[[:space:]]*\"healthy\"' "$tmp" 2>/dev/null || echo 0)"
+  UNHEALTHY="$(grep -cEi '\"Health\"[[:space:]]*:[[:space:]]*\"unhealthy\"' "$tmp" 2>/dev/null || echo 0)"
+  STARTING="$(grep -cEi '\"Health\"[[:space:]]*:[[:space:]]*\"starting\"' "$tmp" 2>/dev/null || echo 0)"
+  WITH_HEALTH="$(grep -cEi '\"Health\"[[:space:]]*:[[:space:]]*\"' "$tmp" 2>/dev/null || echo 0)"
 fi
 
 STATUS="ok"
 NOTE=""
-if [[ "$TOTAL" -eq 0 ]]; then STATUS="down"; NOTE="no_services"; fi
-if [[ "$EXITED" -gt 0 ]]; then STATUS="degraded"; NOTE="${EXITED}_exited"; fi
-if [[ "$RUNNING" -eq 0 && "$TOTAL" -gt 0 ]]; then STATUS="down"; NOTE="none_running"; fi
+if [[ "$TOTAL" -eq 0 ]]; then
+  STATUS="down"
+  NOTE="no_services"
+fi
+if [[ "$RUNNING" -eq 0 && "$TOTAL" -gt 0 ]]; then
+  STATUS="down"
+  NOTE="none_running"
+fi
+if [[ "$EXITED" -gt 0 ]]; then
+  STATUS="degraded"
+  NOTE="${NOTE:+$NOTE,}${EXITED}_exited"
+fi
+if [[ "$UNHEALTHY" -gt 0 ]]; then
+  STATUS="degraded"
+  NOTE="${NOTE:+$NOTE,}${UNHEALTHY}_unhealthy"
+fi
+if [[ "$STARTING" -gt 0 ]]; then
+  STATUS="degraded"
+  NOTE="${NOTE:+$NOTE,}${STARTING}_starting"
+fi
 
-echo "status=$STATUS reason=none running=$RUNNING total=$TOTAL note=$NOTE"
+echo "status=$STATUS reason=none running=$RUNNING total=$TOTAL healthy=$HEALTHY unhealthy=$UNHEALTHY starting=$STARTING healthchecks=$WITH_HEALTH note=$NOTE"
 EOS
 )"
 
