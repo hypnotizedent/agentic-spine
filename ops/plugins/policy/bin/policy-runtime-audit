@@ -1,9 +1,29 @@
 #!/usr/bin/env bash
 # policy.runtime.audit — Verify policy knob enforcement wiring status
+# and emit an auditable policy-change history view from git.
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/policy.runtime.contract.yaml"
+HISTORY_LIMIT="${POLICY_AUDIT_HISTORY_LIMIT:-15}"
+TRACKED_POLICY_PATHS=(
+  "ops/bindings/policy.presets.yaml"
+  "ops/bindings/tenant.profile.yaml"
+  "ops/lib/resolve-policy.sh"
+)
+
+hash_file() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+    return
+  fi
+  echo "hash-tool-missing"
+}
 
 echo "=== Policy Runtime Audit ==="
 echo ""
@@ -50,5 +70,29 @@ echo ""
 echo "Summary: $TOTAL knobs, $WIRED wired, $UNWIRED unwired"
 echo "Coverage: $(( (WIRED * 100) / TOTAL ))%"
 echo ""
+echo "Policy source fingerprint:"
+for rel in "${TRACKED_POLICY_PATHS[@]}"; do
+  abs="$ROOT/$rel"
+  if [[ -f "$abs" ]]; then
+    echo "  $rel: $(hash_file "$abs")"
+  else
+    echo "  $rel: MISSING"
+  fi
+done
+echo ""
+
+echo "Policy change history (git, newest first):"
+if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  history="$(git -C "$ROOT" log --date=iso-strict --pretty='format:  %h | %ad | %an | %s' -n "$HISTORY_LIMIT" -- "${TRACKED_POLICY_PATHS[@]}" 2>/dev/null || true)"
+  if [[ -n "$history" ]]; then
+    echo "$history"
+  else
+    echo "  none"
+  fi
+else
+  echo "  unavailable (git repo not detected)"
+fi
+echo ""
+
 echo "AUDIT: PASS (contract valid, enforcement status reported)"
 exit 0

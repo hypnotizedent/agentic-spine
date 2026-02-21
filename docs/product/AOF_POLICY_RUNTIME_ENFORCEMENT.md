@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-18
+last_verified: 2026-02-21
 scope: aof-policy-runtime-enforcement
 ---
 
@@ -47,4 +47,4 @@ AOF defines 10 policy knobs in `ops/bindings/policy.presets.yaml`. Each knob mus
 
 - **Binding**: `ops/bindings/policy.runtime.contract.yaml`
 - **Gate**: D94 (policy-runtime-enforcement-lock)
-- **Capability**: `policy.runtime.audit` (read-only enforcement status report)
+- **Capability**: `policy.runtime.audit` (read-only enforcement status + policy source fingerprint + recent git-backed policy change history)
