@@ -1,6 +1,6 @@
 # LOOP-AGENT-MCP-SURFACE-BUILD-20260221
 
-## Status: open
+## Status: closed
 ## Created: 2026-02-21
 ## Owner: SPINE-CONTROL-01
 
@@ -22,11 +22,11 @@ Build and activate MCP server implementations for immich-photos and communicatio
 
 ## Deliverables
 
-- [ ] immich-photos MCP server built and responding to tools/list
-- [ ] communications-agent MCP server built and responding to tools/list
-- [ ] Claude Desktop config updated with both servers
-- [ ] agents.registry.yaml updated (status + mcp_tools)
-- [ ] Agent contracts updated (status: active)
-- [ ] mcp.runtime.contract.yaml updated
-- [ ] Both gaps closed
-- [ ] Verification suite passes
+- [x] immich-photos MCP server built and responding to tools/list
+- [x] communications-agent MCP server built and responding to tools/list
+- [x] Claude Desktop config updated with both servers
+- [x] agents.registry.yaml updated (status + mcp_tools)
+- [x] Agent contracts updated (status: active)
+- [x] mcp.runtime.contract.yaml updated
+- [x] Both gaps closed (GAP-OP-754 fixed, GAP-OP-755 fixed)
+- [x] Verification suite passes (core 7/7, stability WARN only immich ingest pre-existing)
