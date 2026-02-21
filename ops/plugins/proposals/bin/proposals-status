@@ -24,6 +24,24 @@ total=0
 pending=0; applied=0; superseded=0; draft_hold=0; draft=0; readonly=0; invalid=0; other=0
 sla_breaches=0
 malformed=0
+link_valid_pending=0
+link_missing=0
+link_scope_missing=0
+link_scope_closed=0
+link_scope_unknown=0
+pending_loop_ids=""
+mismatch_lines=""
+mismatch_total=0
+mismatch_printed=0
+
+append_mismatch() {
+  local line="$1"
+  mismatch_total=$((mismatch_total + 1))
+  if [[ "$mismatch_printed" -lt 20 ]]; then
+    mismatch_lines="${mismatch_lines}  - ${line}\n"
+    mismatch_printed=$((mismatch_printed + 1))
+  fi
+}
 
 parse_epoch() {
   local ds="${1:-}"
@@ -90,6 +108,36 @@ for dir in "$PROPOSALS_DIR"/CP-*; do
 
   # SLA check for pending
   if [[ "$status" == "pending" ]]; then
+    cp_loop_id=$(grep -m1 '^loop_id:' "$manifest" 2>/dev/null | sed 's/^loop_id: *//' | tr -d '"' | tr -d "'" || echo "")
+    [[ "$cp_loop_id" == "null" ]] && cp_loop_id=""
+
+    if [[ -z "$cp_loop_id" ]]; then
+      link_missing=$((link_missing + 1))
+      append_mismatch "$bname has pending status with missing loop_id"
+    else
+      scope_file="$SP/mailroom/state/loop-scopes/${cp_loop_id}.scope.md"
+      if [[ ! -f "$scope_file" ]]; then
+        link_scope_missing=$((link_scope_missing + 1))
+        append_mismatch "$bname targets loop_id=$cp_loop_id but scope file is missing"
+      else
+        scope_status=$(awk -F': *' '/^status:/{print $2; exit}' "$scope_file" 2>/dev/null | tr -d '"' | tr -d "'" || echo "")
+        case "$scope_status" in
+          active|draft|open|planned)
+            link_valid_pending=$((link_valid_pending + 1))
+            pending_loop_ids="${pending_loop_ids}${cp_loop_id}"$'\n'
+            ;;
+          closed)
+            link_scope_closed=$((link_scope_closed + 1))
+            append_mismatch "$bname targets closed loop_id=$cp_loop_id"
+            ;;
+          *)
+            link_scope_unknown=$((link_scope_unknown + 1))
+            append_mismatch "$bname targets loop_id=$cp_loop_id with unknown scope status '${scope_status:-unknown}'"
+            ;;
+        esac
+      fi
+    fi
+
     created=$(grep -m1 '^created:' "$manifest" 2>/dev/null | sed 's/^created: *//' | tr -d '"' | tr -d "'" || echo "")
     if [[ -n "$created" ]]; then
       epoch=$(parse_epoch "$created")
@@ -129,6 +177,29 @@ for dir in "$PROPOSALS_DIR"/CP-*; do
   fi
 done
 
+open_loop_count=0
+open_loop_without_pending=0
+open_loop_without_pending_lines=""
+if [[ -d "$SP/mailroom/state/loop-scopes" ]]; then
+  for scope_file in "$SP"/mailroom/state/loop-scopes/*.scope.md; do
+    [[ -f "$scope_file" ]] || continue
+    loop_id=$(awk -F': *' '/^loop_id:/{print $2; exit}' "$scope_file" | tr -d '"' | tr -d "'" || true)
+    scope_status=$(awk -F': *' '/^status:/{print $2; exit}' "$scope_file" | tr -d '"' | tr -d "'" || true)
+    [[ -z "$loop_id" ]] && continue
+    case "$scope_status" in
+      active|draft|open)
+        open_loop_count=$((open_loop_count + 1))
+        if ! printf '%s' "$pending_loop_ids" | grep -Fxq "$loop_id"; then
+          open_loop_without_pending=$((open_loop_without_pending + 1))
+          if [[ "$open_loop_without_pending" -le 20 ]]; then
+            open_loop_without_pending_lines="${open_loop_without_pending_lines}  - ${loop_id}\n"
+          fi
+        fi
+        ;;
+    esac
+  done
+fi
+
 echo "Summary:"
 echo "  Total:       $total"
 echo "  Pending:     $pending"
@@ -146,10 +217,37 @@ echo "Health:"
 echo "  SLA breaches:    $sla_breaches"
 echo "  Malformed:       $malformed"
 
+echo ""
+echo "Loop-Proposal Linkage:"
+echo "  Pending linked to active loops: $link_valid_pending"
+echo "  Pending missing loop_id:        $link_missing"
+echo "  Pending with missing scope:     $link_scope_missing"
+echo "  Pending targeting closed loop:  $link_scope_closed"
+echo "  Pending targeting unknown loop: $link_scope_unknown"
+echo "  Open loops without pending CP:  $open_loop_without_pending/$open_loop_count"
+
 if [[ -n "$SLA_LINES" ]]; then
   echo ""
   echo "SLA Details:"
   printf "$SLA_LINES"
+fi
+
+if [[ "$mismatch_total" -gt 0 ]]; then
+  echo ""
+  echo "Linkage Mismatch Details:"
+  printf "$mismatch_lines"
+  if [[ "$mismatch_total" -gt "$mismatch_printed" ]]; then
+    echo "  ... plus $((mismatch_total - mismatch_printed)) more"
+  fi
+fi
+
+if [[ "$open_loop_without_pending" -gt 0 ]]; then
+  echo ""
+  echo "Open Loops Without Pending Proposal:"
+  printf "$open_loop_without_pending_lines"
+  if [[ "$open_loop_without_pending" -gt 20 ]]; then
+    echo "  ... plus $((open_loop_without_pending - 20)) more"
+  fi
 fi
 
 echo ""
@@ -159,9 +257,9 @@ echo "  Draft max age:         ${DRAFT_MAX}d"
 echo "  Draft hold review max: ${HOLD_REVIEW_MAX}d"
 
 # Exit non-zero if there are SLA breaches or malformed proposals
-if [[ "$sla_breaches" -gt 0 || "$malformed" -gt 0 ]]; then
+if [[ "$sla_breaches" -gt 0 || "$malformed" -gt 0 || "$mismatch_total" -gt 0 ]]; then
   echo ""
-  echo "WARN: $sla_breaches SLA breaches, $malformed malformed"
+  echo "WARN: $sla_breaches SLA breaches, $malformed malformed, $mismatch_total linkage mismatches"
 fi
 
 exit 0

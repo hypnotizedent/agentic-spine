@@ -11,6 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+PROPOSALS_DIR="$ROOT/mailroom/outbox/proposals"
 
 source "$ROOT/ops/plugins/lifecycle/lib/lifecycle-rules.sh"
 
@@ -22,6 +23,47 @@ _fm_field() {
     | sed "s/^${field}: *//" \
     | tr -d '"' \
     | head -1
+}
+
+# Return pending proposal count for a loop and emit matching proposal ids.
+# Output format:
+#   line 1: numeric pending count
+#   line N: CP-... ids (one per line)
+_pending_proposals_for_loop() {
+  local loop_id="$1"
+  local proposal_dir manifest status cp_loop_id
+  local count=0
+  local matches=""
+
+  [[ -d "$PROPOSALS_DIR" ]] || {
+    echo "0"
+    return 0
+  }
+
+  for proposal_dir in "$PROPOSALS_DIR"/CP-*; do
+    [[ -d "$proposal_dir" ]] || continue
+    [[ -f "$proposal_dir/.applied" ]] && continue
+
+    manifest="$proposal_dir/manifest.yaml"
+    [[ -f "$manifest" ]] || continue
+
+    status="$(awk -F': *' '/^status:/{print $2; exit}' "$manifest" | tr -d '"' | tr -d "'" || true)"
+    [[ -z "$status" ]] && status="pending"
+    [[ "$status" != "pending" ]] && continue
+
+    cp_loop_id="$(awk -F': *' '/^loop_id:/{print $2; exit}' "$manifest" | tr -d '"' | tr -d "'" || true)"
+    [[ "$cp_loop_id" == "null" ]] && cp_loop_id=""
+
+    if [[ "$cp_loop_id" == "$loop_id" ]]; then
+      count=$((count + 1))
+      matches="${matches}$(basename "$proposal_dir")"$'\n'
+    fi
+  done
+
+  echo "$count"
+  if [[ -n "$matches" ]]; then
+    printf '%s' "$matches"
+  fi
 }
 
 DRY_RUN=false
@@ -92,6 +134,15 @@ PY
   # Skip if any gaps still open
   if [[ "$OPEN" -gt 0 ]]; then
     echo "SKIP: $loop_id ($OPEN/$TOTAL gaps still open)"
+    skipped_count=$((skipped_count + 1))
+    continue
+  fi
+
+  pending_blob="$(_pending_proposals_for_loop "$loop_id")"
+  pending_count="$(printf '%s\n' "$pending_blob" | head -n1)"
+  if [[ "${pending_count:-0}" -gt 0 ]]; then
+    echo "SKIP: $loop_id ($pending_count pending linked proposal(s))"
+    printf '%s\n' "$pending_blob" | tail -n +2 | sed '/^$/d' | sed 's/^/  - /'
     skipped_count=$((skipped_count + 1))
     continue
   fi

@@ -71,6 +71,48 @@ _is_open_status() {
     esac
 }
 
+# Return pending proposal count for a loop and emit matching proposal ids.
+# Output format:
+#   line 1: numeric pending count
+#   line N: CP-... ids (one per line)
+_pending_proposals_for_loop() {
+    local loop_id="$1"
+    local proposals_dir="$SPINE_REPO/mailroom/outbox/proposals"
+    local proposal_dir manifest status cp_loop_id
+    local count=0
+    local matches=""
+
+    [[ -d "$proposals_dir" ]] || {
+        echo "0"
+        return 0
+    }
+
+    for proposal_dir in "$proposals_dir"/CP-*; do
+        [[ -d "$proposal_dir" ]] || continue
+        [[ -f "$proposal_dir/.applied" ]] && continue
+
+        manifest="$proposal_dir/manifest.yaml"
+        [[ -f "$manifest" ]] || continue
+
+        status="$(awk -F': *' '/^status:/{print $2; exit}' "$manifest" | tr -d '"' | tr -d "'" || true)"
+        [[ -z "$status" ]] && status="pending"
+        [[ "$status" != "pending" ]] && continue
+
+        cp_loop_id="$(awk -F': *' '/^loop_id:/{print $2; exit}' "$manifest" | tr -d '"' | tr -d "'" || true)"
+        [[ "$cp_loop_id" == "null" ]] && cp_loop_id=""
+
+        if [[ "$cp_loop_id" == "$loop_id" ]]; then
+            count=$((count + 1))
+            matches="${matches}$(basename "$proposal_dir")"$'\n'
+        fi
+    done
+
+    echo "$count"
+    if [[ -n "$matches" ]]; then
+        printf '%s' "$matches"
+    fi
+}
+
 # ── List loops ────────────────────────────────────────────────────────────
 list_loops() {
     local filter="${1:---open}"
@@ -174,6 +216,7 @@ close_loop() {
     local loop_id="$1"
     local scope_file="$SCOPES_DIR/${loop_id}.scope.md"
     local tmp_file=""
+    local pending_blob pending_count
 
     if [[ ! -f "$scope_file" ]]; then
         echo "ERROR: Scope file not found: $scope_file" >&2
@@ -185,6 +228,15 @@ close_loop() {
     if [[ "$current_status" == "closed" ]]; then
         echo "ALREADY CLOSED: $loop_id"
         return 0
+    fi
+
+    pending_blob="$(_pending_proposals_for_loop "$loop_id")"
+    pending_count="$(printf '%s\n' "$pending_blob" | head -n1)"
+    if [[ "${pending_count:-0}" -gt 0 ]]; then
+        echo "BLOCKED: $loop_id has $pending_count pending linked proposal(s)." >&2
+        echo "Resolve or supersede these proposals first:" >&2
+        printf '%s\n' "$pending_blob" | tail -n +2 | sed '/^$/d' | sed 's/^/  - /' >&2
+        exit 1
     fi
 
     acquire_git_lock || exit 1

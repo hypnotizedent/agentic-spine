@@ -3,8 +3,13 @@
 ## For Agents: Submitting a Proposal
 
 ```bash
-# 1. Create a new proposal
-./bin/ops cap run proposals.submit "what you're fixing"
+# 0. Ensure you have an active loop first (required)
+# ./bin/ops cap run loops.create --name EXAMPLE --objective "..." --priority high
+
+# 1. Create a new proposal (loop binding is mandatory)
+SPINE_LOOP_ID=LOOP-EXAMPLE-20260221 ./bin/ops cap run proposals.submit "what you're fixing"
+# or
+./bin/ops cap run proposals.submit "what you're fixing" --loop-id LOOP-EXAMPLE-20260221
 
 # This creates: mailroom/outbox/proposals/CP-20260210-220000__what-you-re-fixing/
 # With templates:
@@ -32,6 +37,12 @@
 
 # Done! The operator will see your proposal in proposals-list
 ```
+
+### Loop Binding Guardrails
+
+- `proposals.submit` now fails fast if loop binding is missing (`loop_id: null` is disallowed).
+- `proposals.submit --help` is safe and does not create a proposal.
+- Loop ids must point to an existing non-closed scope in `mailroom/state/loop-scopes/`.
 
 ## For Operators: Applying Proposals
 
@@ -97,6 +108,7 @@ changes:
 - Delete operations require operator confirmation
 - All changes create git commits with full traceability
 - Proposals track agent and loop_id for accountability
+- `ops loops close` and `loops.auto.close` are blocked while linked pending proposals exist
 
 ## Key Commands
 
