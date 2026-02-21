@@ -49,7 +49,7 @@ rg -q 'exec opencode -m openai/glm-5 \.' "$ENTRY_SH" \
 rg -q 'OPENAI_BASE_URL=.*https://api.z.ai/api/paas/v4' "$ENTRY_SH" \
   || fail "spine_terminal_entry must export OPENAI_BASE_URL to z.ai"
 
-rg -q 'launchSolo\("opencode"\)' "$HS_INIT" \
+rg -q 'launchSolo\("opencode"' "$HS_INIT" \
   || fail "Hammerspoon Ctrl+Shift+O must route through launchSolo(opencode)"
 
 rg -q '/Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool opencode' "$RAYCAST_OC" \

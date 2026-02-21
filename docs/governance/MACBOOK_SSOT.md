@@ -159,11 +159,12 @@ Soft-decommissioned history (not active SSH expectations): `download-home`.
 <!-- BEGIN AUTO HOTKEYS -->
 | Hotkey | Action | Source |
 |--------|--------|--------|
-| **Ctrl+Shift+L** | Orchestrator C (Codex) — attach to LOOP_ID | `~/.hammerspoon/` |
-| **Ctrl+Shift+S** | Launch Claude (always solo) | `~/.hammerspoon/` |
+| **Ctrl+Shift+L** | Launch Codex — SPINE-CONTROL-01 (solo, no LOOP_ID prompt) | `~/.hammerspoon/` |
+| **Ctrl+Shift+A** | Attach Orchestrator C (Codex) to LOOP_ID | `~/.hammerspoon/` |
+| **Ctrl+Shift+S** | Launch Claude — SPINE-AUDIT-01 (solo) | `~/.hammerspoon/` |
 | **Ctrl+Shift+T** | Enqueue a mailroom task (optional prompt) + show watcher status | `~/.hammerspoon/` |
-| **Ctrl+Shift+C** | Launch Codex (always solo) | `~/.hammerspoon/` |
-| **Ctrl+Shift+O** | Launch OpenCode (always solo) | `~/.hammerspoon/` |
+| **Ctrl+Shift+C** | Launch Codex — DOMAIN-HA-01 (solo) | `~/.hammerspoon/` |
+| **Ctrl+Shift+O** | Launch OpenCode — DEPLOY-MINT-01 (solo) | `~/.hammerspoon/` |
 | **Ctrl+Shift+E** | Closeout prompt → clipboard | `~/.hammerspoon/` |
 <!-- END AUTO HOTKEYS -->
 
