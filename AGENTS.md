@@ -15,7 +15,7 @@ scope: agent-runtime-contract
 
 1. Start in `~/code/agentic-spine`.
 2. Read `docs/governance/SESSION_PROTOCOL.md`.
-3. Run `./bin/ops cap run session.start` for fast startup status and verify routing.
+3. Run the Mandatory Startup Block below (3 commands, <60s).
 4. Run `./bin/ops cap list` only when you need to discover a specific capability.
 5. Execute work via `./bin/ops cap run <capability>`.
 
@@ -24,12 +24,9 @@ scope: agent-runtime-contract
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops cap run session.start
-
-# Legacy full startup lane (kept for parity and manual opt-in):
-# ./bin/ops status
-# ./bin/ops cap run stability.control.snapshot
-# ./bin/ops cap run verify.core.run
+./bin/ops status
+./bin/ops cap run stability.control.snapshot
+./bin/ops cap run verify.core.run
 ```
 <!-- /SPINE_STARTUP_BLOCK -->
 
@@ -80,8 +77,9 @@ scope: agent-governance-brief
 ## Multi-Agent Write Policy (Mailroom-Gated Writes)
 
 - **Default rule:** if multiple terminals/agents may be active, treat the repo as **read-only**.
+- **Check existing proposals first:** `./bin/ops cap run proposals.list` shows pending proposals. Always read before writing to avoid duplicate work.
 - **Submit changes as proposals:** `./bin/ops cap run proposals.submit "desc"` writes to `mailroom/outbox/proposals/` (gitignored runtime).
-- **Operator applies proposals:** `./bin/ops cap run proposals.apply CP-...` creates the commit boundary and prevents “agent B reverted agent A”.
+- **Operator applies proposals:** `./bin/ops cap run proposals.apply CP-...` creates the commit boundary and prevents "agent B reverted agent A".
 - If you see a dirty worktree you did not create, **STOP** (don’t run cleanup/verify) and coordinate first.
 
 ## Capability Gotchas
@@ -134,6 +132,8 @@ scope: agent-governance-brief
 - `./bin/ops cap run verify.route.recommend` — which domain pack to run after work
 - `./bin/ops cap run verify.pack.run <domain>` — domain-specific verify
 - `./bin/ops cap run verify.release.run` — full 148-gate certification (requires Tailscale)
+- `./bin/ops cap run proposals.list` — view pending proposals (read before apply)
+- `./bin/ops cap run proposals.status` — proposal queue health + SLA breaches
 - `./bin/ops loops list --open` — list open loops only
 - `/ctx` — load full governance context
 
