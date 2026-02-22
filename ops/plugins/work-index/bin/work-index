@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""Unified runtime work index over gaps, loops, and proposals."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+DOMAIN_ALIASES = {
+    "home-assistant": "home",
+    "home-automation": "home",
+    "finance-ops": "finance",
+    "identity": "ms-graph",
+    "email": "ms-graph",
+    "calendar": "ms-graph",
+    "photos": "immich",
+    "media-library": "immich",
+    "automation": "n8n",
+    "loop-gap": "loop_gap",
+    "loop gap": "loop_gap",
+}
+
+DOMAIN_HINTS = [
+    ("mint", "mint"),
+    ("finance", "finance"),
+    ("communications", "communications"),
+    ("immich", "immich"),
+    ("home-assistant", "home"),
+    ("home assistant", "home"),
+    ("ha.", "home"),
+    ("ms-graph", "ms-graph"),
+    ("graph.", "ms-graph"),
+    ("n8n", "n8n"),
+    ("media", "media"),
+    ("aof", "aof"),
+    ("loop", "loop_gap"),
+]
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def normalize_domain(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "unknown"
+    return DOMAIN_ALIASES.get(text, text)
+
+
+def infer_domain(*values: Any) -> str:
+    joined = " ".join(str(v or "") for v in values).lower()
+    for needle, domain in DOMAIN_HINTS:
+        if needle in joined:
+            return domain
+    return "unknown"
+
+
+def read_frontmatter(path: Path) -> dict[str, Any]:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception:
+        return {}
+
+    if not content.startswith("---\n"):
+        return {}
+
+    end = content.find("\n---", 4)
+    if end == -1:
+        return {}
+
+    raw = content[4:end]
+    try:
+        data = yaml.safe_load(raw) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def parse_loops(root: Path) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    scopes_dir = root / "mailroom/state/loop-scopes"
+    items: list[dict[str, Any]] = []
+    loop_domain_map: dict[str, str] = {}
+
+    if not scopes_dir.is_dir():
+        return items, loop_domain_map
+
+    for path in sorted(scopes_dir.glob("*.scope.md")):
+        fm = read_frontmatter(path)
+        loop_id = str(fm.get("loop_id") or path.stem.replace(".scope", "")).strip()
+        if not loop_id:
+            continue
+
+        raw_domain = fm.get("scope") or fm.get("domain")
+        domain = normalize_domain(raw_domain) if raw_domain else infer_domain(loop_id, path.name)
+        loop_domain_map[loop_id] = domain
+
+        items.append(
+            {
+                "item_id": loop_id,
+                "item_type": "loop",
+                "status": str(fm.get("status") or "unknown"),
+                "priority_or_severity": str(fm.get("priority") or "unknown"),
+                "owner": str(fm.get("owner") or "unknown"),
+                "domain": domain,
+                "source_path": str(path.relative_to(root)),
+            }
+        )
+
+    return items, loop_domain_map
+
+
+def parse_gaps(root: Path, loop_domain_map: dict[str, str]) -> list[dict[str, Any]]:
+    gaps_file = root / "ops/bindings/operational.gaps.yaml"
+    payload = load_yaml(gaps_file)
+    gaps = payload.get("gaps") or []
+    items: list[dict[str, Any]] = []
+
+    if not isinstance(gaps, list):
+        return items
+
+    for gap in gaps:
+        if not isinstance(gap, dict):
+            continue
+
+        item_id = str(gap.get("id") or "").strip()
+        if not item_id:
+            continue
+
+        loop_id = str(gap.get("parent_loop") or gap.get("discovered_by") or "").strip()
+
+        domain = normalize_domain(gap.get("domain")) if gap.get("domain") else "unknown"
+        if domain == "unknown" and loop_id in loop_domain_map:
+            domain = loop_domain_map[loop_id]
+        if domain == "unknown":
+            domain = infer_domain(gap.get("doc"), gap.get("description"), loop_id, item_id)
+
+        owner = (
+            str(gap.get("owner") or "").strip()
+            or str(gap.get("claimed_by") or "").strip()
+            or str(gap.get("discovered_by") or "").strip()
+            or "unknown"
+        )
+
+        items.append(
+            {
+                "item_id": item_id,
+                "item_type": "gap",
+                "status": str(gap.get("status") or "unknown"),
+                "priority_or_severity": str(gap.get("severity") or "unknown"),
+                "owner": owner,
+                "domain": domain,
+                "source_path": str(gaps_file.relative_to(root)),
+            }
+        )
+
+    return items
+
+
+def proposal_status(proposal_dir: Path, manifest_status: str) -> str:
+    if (proposal_dir / ".applied").exists():
+        return "applied"
+    if (proposal_dir / ".superseded").exists():
+        return "superseded"
+    if (proposal_dir / ".held").exists():
+        return "held"
+    if (proposal_dir / ".rejected").exists():
+        return "rejected"
+    return manifest_status or "pending"
+
+
+def parse_proposals(root: Path, loop_domain_map: dict[str, str]) -> list[dict[str, Any]]:
+    proposals_dir = root / "mailroom/outbox/proposals"
+    items: list[dict[str, Any]] = []
+
+    if not proposals_dir.is_dir():
+        return items
+
+    for proposal_dir in sorted(proposals_dir.glob("CP-*")):
+        if not proposal_dir.is_dir():
+            continue
+
+        proposal_id = proposal_dir.name
+        manifest_path = proposal_dir / "manifest.yaml"
+        manifest = load_yaml(manifest_path) if manifest_path.exists() else {}
+
+        manifest_status = str(manifest.get("status") or "").strip()
+        status = proposal_status(proposal_dir, manifest_status)
+
+        loop_id = str(manifest.get("loop_id") or "").strip()
+        domain = "unknown"
+        if loop_id and loop_id in loop_domain_map:
+            domain = loop_domain_map[loop_id]
+        if domain == "unknown" and manifest.get("domain"):
+            domain = normalize_domain(manifest.get("domain"))
+
+        changes = manifest.get("changes") if isinstance(manifest.get("changes"), list) else []
+        first_change_path = ""
+        if changes and isinstance(changes[0], dict):
+            first_change_path = str(changes[0].get("path") or "")
+
+        if domain == "unknown":
+            domain = infer_domain(proposal_id, loop_id, first_change_path)
+
+        items.append(
+            {
+                "item_id": proposal_id,
+                "item_type": "proposal",
+                "status": status,
+                "priority_or_severity": str(manifest.get("priority") or manifest.get("severity") or "unknown"),
+                "owner": str(manifest.get("agent") or "unknown"),
+                "domain": domain,
+                "source_path": str(manifest_path.relative_to(root)) if manifest_path.exists() else str(proposal_dir.relative_to(root)),
+            }
+        )
+
+    return items
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Unified runtime work index (gaps + loops + proposals)")
+    parser.add_argument("--domain", help="Optional domain filter (e.g. mint, home, communications)")
+    args = parser.parse_args()
+
+    root = Path(__file__).resolve().parents[4]
+
+    loop_items, loop_domain_map = parse_loops(root)
+    gap_items = parse_gaps(root, loop_domain_map)
+    proposal_items = parse_proposals(root, loop_domain_map)
+
+    items = gap_items + loop_items + proposal_items
+
+    if args.domain:
+        target = normalize_domain(args.domain)
+        items = [item for item in items if normalize_domain(item.get("domain")) == target]
+
+    items.sort(key=lambda item: (str(item.get("item_type")), str(item.get("item_id"))))
+    print(json.dumps(items, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
