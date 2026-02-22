@@ -56,26 +56,28 @@ Execute the 3-lane communications boundary model with hard separation between Mi
 | P4 | Template SSOT consolidation | **DONE** | Dual system eliminated. Spine YAML catalog is SSOT. |
 | P5 | Boundary enforcement (D151 gate) | **DONE** | D151 registered, stack contract updated, gate passes |
 
-## Gaps (Remaining Work)
+## Gaps
 
-- **GAP-OP-818**: Stack contract `transactional.mode: simulation-only` contradicts provider contract `mode: live` (P1 finish)
-- **GAP-OP-819**: Graph boundary not enforced — send_test uses Outlook, no D151 gate (P5)
-- **GAP-OP-820**: Stalwart self-hosted email not deployed — VM 214, DNS, mailboxes (P2)
-- **GAP-OP-821**: Resend intermittent 403 — Infisical injection timing investigation (D8)
+- **GAP-OP-818**: CLOSED (fixed, `fad5f67`) — Stack contract mode aligned to `live`
+- **GAP-OP-819**: CLOSED (fixed, `3212d6c`) — D151 gate registered, stack contract off Outlook
+- **GAP-OP-820**: OPEN — Stalwart self-hosted email not deployed — VM 214, DNS, mailboxes (P2, deferred to infra session)
+- **GAP-OP-821**: CLOSED (fixed) — Resend 403 was transient Infisical replication lag, resolved
 
 ## Key Decisions
 
-- **Domain for Stalwart:** `spine.mintprints.co` (subdomain to avoid Resend MX conflict) — PENDING CONFIRMATION
-- **N8N strategy:** Full deletion (not migration). All customer notifications will be rebuilt through `Spine_-_Mailroom_Enqueue` or direct spine comms plugin.
-- **Template format:** Spine YAML catalog with `body_text` is current SSOT. HTML templates can be added later when customer sends resume.
+- **Domain for Stalwart:** `spine.mintprints.co` (subdomain to avoid Resend MX conflict) — CONFIRMED in stack contract
+- **N8N strategy:** Full deletion (not migration). 36 runtime + 70 workbench files purged. Only `Spine_-_Mailroom_Enqueue` remains.
+- **Template format:** Spine YAML catalog with `body_text` is current SSOT. HTML templates deleted.
 
 ## Next Action for Any Agent
 
 ```bash
-# Quick win — finish P1 (stack contract mode alignment):
-# Edit ops/bindings/communications.stack.contract.yaml line 48
-# Change: mode: simulation-only -> mode: live
-# Then verify:
-./bin/ops cap run communications.provider.status
-./bin/ops cap run verify.core.run
+# Only remaining work: GAP-OP-820 (Stalwart deploy)
+# This requires infrastructure provisioning:
+# 1. Provision VM 214 on Proxmox
+# 2. Deploy Stalwart Docker compose
+# 3. Create DNS records for spine.mintprints.co
+# 4. Create mailboxes: ops@, alerts@, noreply@, spine@
+# 5. Update stack contract mailbox status: planned -> active
+# 6. Verify D151 still passes with live mailboxes
 ```
