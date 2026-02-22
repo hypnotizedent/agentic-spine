@@ -2,7 +2,7 @@
 date: 2026-02-21
 type: slo-evidence-daily
 snapshot_status: warn
-verify_pass: 85%
+verify_pass: 87%
 slo_pass: FAIL
 ---
 
@@ -16,12 +16,12 @@ slo_pass: FAIL
 
 | Metric | Value | Target | Status |
 |--------|-------|--------|--------|
-| Verify Gates | 6/7 (85%) | 100% | ❌ |
+| Verify Gates | 7/8 (87%) | 100% | ❌ |
 | Incidents | 0 | 0 | ✅ |
-| Warnings | 4 | 0 | ⚠️ |
-| Automation Latency Budget | pass (p95=158ms, p99=189ms, n8n=904ms) | non-incident | ✅ |
+| Warnings | 6 | 0 | ⚠️ |
+| Automation Latency Budget | warn (p95=1368ms, p99=2087ms, n8n=4412ms) | non-incident | ⚠️ |
 | Automation Latency Samples | total=20, failed=0 | failed <= budget | ✅ |
-| Open Loops | 3 | - | ℹ️ |
+| Open Loops | 8 | - | ℹ️ |
 | Open Gaps | 0 | - | ℹ️ |
 
 ## Domain Status
@@ -33,17 +33,17 @@ slo_pass: FAIL
 | z2m-bridge | healthy |
 | immich-stack | warn |
 | infra-core-stack | warn |
-| observability-stack | healthy |
+| observability-stack | warn |
 | dev-tools-stack | warn |
-| mint-stack | healthy |
+| mint-stack | warn |
 
 ## Failing Verify Gates
 
-D126
+D148
 
 ## Evidence Trail
 
-- **Generated:** 2026-02-21T07:01:25Z
+- **Generated:** 2026-02-22T05:01:38Z
 - **Run Command:** `./bin/ops cap run slo.evidence.daily`
 
 ---
