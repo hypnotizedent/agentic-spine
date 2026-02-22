@@ -9,6 +9,7 @@
 # Usage:
 #   ops terminal-launch list-lanes              List available lane profiles (JSON)
 #   ops terminal-launch list-loops              List open loops (JSON)
+#   ops terminal-launch list-roles              List terminal roles (JSON, from generated view)
 #   ops terminal-launch launch <options>        Launch a terminal
 #
 # Launch options:
@@ -25,6 +26,7 @@ WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 LANE_PROFILES_YAML="$SPINE_REPO/ops/bindings/lane.profiles.yaml"
 SCOPES_DIR="$SPINE_REPO/mailroom/state/loop-scopes"
 LAUNCHER_SCRIPT="$WORKBENCH_ROOT/scripts/root/spine_terminal_entry.sh"
+LAUNCHER_VIEW_YAML="$SPINE_REPO/ops/bindings/terminal.launcher.view.yaml"
 
 # ── Output helpers ─────────────────────────────────────────────────────────
 
@@ -38,6 +40,19 @@ json_escape() {
     echo "$s"
 }
 
+# ── View helpers ──────────────────────────────────────────────────────────
+
+_resolve_from_view() {
+    local terminal_id="$1"
+    [[ -f "$LAUNCHER_VIEW_YAML" ]] || return 1
+    local entry
+    entry=$(yq e ".terminals.\"${terminal_id}\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null) || return 1
+    [[ "$entry" != "null" ]] || return 1
+    # Emit key=value pairs
+    yq e ".terminals.\"${terminal_id}\" | to_entries | .[] | .key + \"=\" + (.value | tostring)" \
+        "$LAUNCHER_VIEW_YAML" 2>/dev/null
+}
+
 # ── Subcommands ────────────────────────────────────────────────────────────
 
 usage() {
@@ -47,6 +62,7 @@ ops terminal-launch - Lane-aware terminal app launcher
 Usage:
   ops terminal-launch list-lanes              List available lane profiles (JSON)
   ops terminal-launch list-loops              List open loops (JSON)
+  ops terminal-launch list-roles              List terminal roles (JSON, from generated view)
   ops terminal-launch list-tools              List available tools (JSON)
   ops terminal-launch launch <options>        Launch a terminal
 
@@ -191,6 +207,23 @@ PYLOOPS
     echo "$loops_json"
 }
 
+cmd_list_roles() {
+    if [[ ! -f "$LAUNCHER_VIEW_YAML" ]]; then
+        echo "[]"
+        return
+    fi
+    yq e -o=json '.terminals | to_entries | [.[] | {
+        "id": .key,
+        "label": .value.label,
+        "status": .value.status,
+        "default_tool": .value.default_tool,
+        "picker_group": .value.picker_group,
+        "sort_order": .value.sort_order,
+        "domain": .value.domain,
+        "lane_profile": .value.lane_profile
+    }] | sort_by(.sort_order, .id)' "$LAUNCHER_VIEW_YAML" 2>/dev/null || echo "[]"
+}
+
 cmd_list_tools() {
     # Output JSON array of available tools
     cat <<'EOF'
@@ -206,22 +239,41 @@ EOF
 cmd_launch() {
     local lane=""
     local loop_id=""
-    local tool="opencode"
+    local tool=""
     local terminal_name=""
     local role="solo"
-    
+    local lane_explicit=0
+    local tool_explicit=0
+    local terminal_explicit=0
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --lane) lane="${2:-}"; shift 2 ;;
+            --lane) lane="${2:-}"; lane_explicit=1; shift 2 ;;
             --loop) loop_id="${2:-}"; shift 2 ;;
-            --tool) tool="${2:-}"; shift 2 ;;
-            --terminal) terminal_name="${2:-}"; shift 2 ;;
+            --tool) tool="${2:-}"; tool_explicit=1; shift 2 ;;
+            --terminal) terminal_name="${2:-}"; terminal_explicit=1; shift 2 ;;
             --role) role="${2:-}"; shift 2 ;;
             -h|--help) usage; exit 0 ;;
             *) echo "Unknown option: $1" >&2; exit 1 ;;
         esac
     done
-    
+
+    # ── View-first defaults (explicit flags always win) ──────────────────
+    if [[ -n "$terminal_name" ]]; then
+        local _view_output _key _val
+        if _view_output=$(_resolve_from_view "$terminal_name"); then
+            while IFS='=' read -r _key _val; do
+                case "$_key" in
+                    lane_profile)  [[ $lane_explicit -eq 0 && -n "$_val" ]] && lane="$_val" ;;
+                    default_tool)  [[ $tool_explicit -eq 0 && -n "$_val" ]] && tool="$_val" ;;
+                esac
+            done <<< "$_view_output"
+        fi
+    fi
+
+    # Apply hardcoded default only if still empty after view lookup
+    [[ -z "$tool" ]] && tool="opencode"
+
     # Validate lane
     if [[ -z "$lane" ]]; then
         echo "ERROR: --lane is required" >&2
@@ -271,7 +323,12 @@ cmd_launch() {
     
     # Launch via iTerm AppleScript
     local full_cmd="SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 $LAUNCHER_SCRIPT ${cmd_args[*]}"
-    
+
+    if [[ "${TERMINAL_LAUNCH_DRY_RUN:-0}" == "1" ]]; then
+        echo "DRY_RUN: lane=$lane tool=$tool terminal=$terminal_name loop=${loop_id:-none} role=$role"
+        return
+    fi
+
     osascript -e "tell application \"iTerm\"
         activate
         set newWindow to (create window with default profile)
@@ -279,7 +336,7 @@ cmd_launch() {
             write text \"$full_cmd\"
         end tell
     end tell" 2>/dev/null
-    
+
     echo "Launched: lane=$lane tool=$tool terminal=$terminal_name loop=${loop_id:-none}"
 }
 
@@ -312,7 +369,12 @@ cmd_launch_direct() {
     esac
     
     local full_cmd="$cd_cmd && $lane_cmd && $ops_cmd && $tool_cmd"
-    
+
+    if [[ "${TERMINAL_LAUNCH_DRY_RUN:-0}" == "1" ]]; then
+        echo "DRY_RUN: lane=$lane tool=$tool terminal=$terminal_name loop=${loop_id:-none} role=$role"
+        return
+    fi
+
     osascript -e "tell application \"iTerm\"
         activate
         set newWindow to (create window with default profile)
@@ -320,7 +382,7 @@ cmd_launch_direct() {
             write text \"$full_cmd\"
         end tell
     end tell" 2>/dev/null
-    
+
     echo "Launched (direct): lane=$lane tool=$tool terminal=$terminal_name"
 }
 
@@ -408,6 +470,7 @@ PYSTATUS
 case "${1:-}" in
     list-lanes)   cmd_list_lanes ;;
     list-loops)   cmd_list_loops ;;
+    list-roles)   cmd_list_roles ;;
     list-tools)   cmd_list_tools ;;
     status)       cmd_status_json ;;
     launch)       shift; cmd_launch "$@" ;;
