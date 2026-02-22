@@ -97,20 +97,67 @@ Define deterministic generator/validator interfaces for `generated` and `index` 
   - existing `receipts.index.build` capability
   - `D142` freshness gate
 
-### 7) Routing Dispatch Generator (Planned)
+### 7) Terminal Worker Catalog Generator
+- Input:
+  - `ops/bindings/agents.registry.yaml`
+  - `ops/bindings/terminal.role.contract.yaml`
+  - `ops/bindings/gate.domain.profiles.yaml`
+  - `ops/bindings/gate.agent.profiles.yaml`
+  - `ops/capabilities.yaml`
+- Output:
+  - `ops/bindings/terminal.worker.catalog.yaml`
+- Command:
+  - `./bin/generators/gen-worker-catalog.sh`
+- Validate:
+  - every terminal role is represented exactly once
+  - domain-runtime workers resolve scoped capabilities and gate packs
+  - non-domain terminals pin verify target to `core`
+
+### 8) Routing Dispatch Generator
 - Input:
   - `ops/capabilities.yaml`
   - `ops/bindings/agents.registry.yaml`
-  - `ops/plugins/*/MANIFEST.yaml`
+  - `ops/bindings/terminal.worker.catalog.yaml`
 - Output:
   - `ops/bindings/routing.dispatch.yaml`
+- Command:
+  - `./bin/generators/gen-routing-dispatch.sh`
 - Validate:
-  - every capability has exactly one runtime dispatch target (`plugin` or `agent_route`)
+  - every capability has exactly one runtime dispatch target (`plugin`, `agent`, or `builtin`)
   - safety/approval metadata parity with `ops/capabilities.yaml`
-  - no orphan plugin routes and no dangling agent routes
-- Wire:
-  - new parity gate in verify core/domain routing lane
-  - optional pre-commit target: `gen.routing_dispatch.verify`
+  - deterministic terminal affinity derived from worker catalog
+
+### 9) Terminal Launcher View Generator
+- Input:
+  - `ops/bindings/terminal.worker.catalog.yaml`
+  - `ops/bindings/terminal.role.contract.yaml`
+- Output:
+  - `ops/bindings/terminal.launcher.view.yaml`
+- Command:
+  - `./bin/generators/gen-launcher-view.sh`
+- Validate:
+  - picker ordering is deterministic
+  - capability/gate counts match worker catalog
+  - usage-doc references exist for each terminal entry
+
+### 10) Worker Usage Docs Generator
+- Input:
+  - `ops/bindings/terminal.worker.catalog.yaml`
+- Output:
+  - `docs/governance/generated/worker-usage/*.md`
+- Command:
+  - `./bin/generators/gen-worker-usage-docs.sh`
+- Validate:
+  - one usage surface doc per terminal
+  - stale generated docs are removed
+  - generated docs retain deterministic metadata headers
+
+### 11) Unified Runtime v2 Generator
+- Command:
+  - `./bin/generators/gen-terminal-worker-runtime-v2.py`
+- Notes:
+  - Generates all v2 runtime surfaces in one pass.
+  - Supports `--check` for drift-only validation.
 
 ## Phase 3 Schema Expansion (Concrete)
 Prioritize schema definitions for top edited/critical authoritative bindings:
