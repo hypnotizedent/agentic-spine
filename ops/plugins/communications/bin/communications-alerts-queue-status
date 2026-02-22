@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# communications-alerts-queue-status — Read-only queue status for pending
+# alerting email intents.
+#
+# Safety: read-only
+# Approval: auto
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+INTENT_DIR="$ROOT/mailroom/outbox/alerts/email-intents"
+LIMIT=25
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-alerts-queue-status [--limit <n>] [--json]
+
+Read-only view of the alerting email intent queue.
+
+Output:
+  pending_count, sent_count, failed_count,
+  oldest/newest pending age, top pending intents.
+
+Options:
+  --limit <n>    Show at most N pending intents (default: 25)
+  --json         Emit JSON output
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --limit) LIMIT="${2:-25}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "ERROR: --limit must be numeric" >&2; exit 2; }
+
+now_epoch="$(date +%s)"
+
+pending_count=0
+sent_count=0
+failed_count=0
+oldest_pending_epoch=""
+newest_pending_epoch=""
+pending_intents_json="[]"
+
+if [[ -d "$INTENT_DIR" ]]; then
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    flush_status="$(yq -r '.flush_status // "pending"' "$f" 2>/dev/null || echo "error")"
+    case "$flush_status" in
+      pending)
+        pending_count=$((pending_count + 1))
+        created_at="$(yq -r '.created_at // ""' "$f" 2>/dev/null || echo "")"
+        if [[ -n "$created_at" ]]; then
+          # Parse ISO timestamp to epoch (macOS compatible)
+          file_epoch="$(TZ=UTC date -jf '%Y-%m-%dT%H:%M:%SZ' "$created_at" +%s 2>/dev/null || echo "")"
+          if [[ -n "$file_epoch" && "$file_epoch" =~ ^[0-9]+$ ]]; then
+            if [[ -z "$oldest_pending_epoch" || "$file_epoch" -lt "$oldest_pending_epoch" ]]; then
+              oldest_pending_epoch="$file_epoch"
+            fi
+            if [[ -z "$newest_pending_epoch" || "$file_epoch" -gt "$newest_pending_epoch" ]]; then
+              newest_pending_epoch="$file_epoch"
+            fi
+          fi
+        fi
+        # Collect for top-N display
+        if [[ "$pending_count" -le "$LIMIT" ]]; then
+          intent_id="$(yq -r '.intent_id // ""' "$f" 2>/dev/null || echo "")"
+          domain_id="$(yq -r '.domain_id // ""' "$f" 2>/dev/null || echo "")"
+          severity="$(yq -r '.severity // ""' "$f" 2>/dev/null || echo "")"
+          recipient="$(yq -r '.suggested_recipient // ""' "$f" 2>/dev/null || echo "")"
+          pending_intents_json="$(echo "$pending_intents_json" | jq -c \
+            --arg id "$intent_id" \
+            --arg domain "$domain_id" \
+            --arg sev "$severity" \
+            --arg created "$created_at" \
+            --arg recip "$recipient" \
+            '. + [{"intent_id":$id,"domain_id":$domain,"severity":$sev,"created_at":$created,"recipient":$recip}]')"
+        fi
+        ;;
+      sent)
+        sent_count=$((sent_count + 1))
+        ;;
+      failed)
+        failed_count=$((failed_count + 1))
+        ;;
+    esac
+  done < <(find "$INTENT_DIR" -name '*.yaml' -type f 2>/dev/null | sort)
+fi
+
+oldest_pending_age=0
+newest_pending_age=0
+if [[ -n "$oldest_pending_epoch" && "$oldest_pending_epoch" =~ ^[0-9]+$ ]]; then
+  oldest_pending_age=$((now_epoch - oldest_pending_epoch))
+fi
+if [[ -n "$newest_pending_epoch" && "$newest_pending_epoch" =~ ^[0-9]+$ ]]; then
+  newest_pending_age=$((now_epoch - newest_pending_epoch))
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.alerts.queue.status" \
+    --arg status "ok" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson pending_count "$pending_count" \
+    --argjson sent_count "$sent_count" \
+    --argjson failed_count "$failed_count" \
+    --argjson oldest_pending_age_seconds "$oldest_pending_age" \
+    --argjson newest_pending_age_seconds "$newest_pending_age" \
+    --argjson top_pending "$pending_intents_json" \
+    '{
+      capability: $capability,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        pending_count: $pending_count,
+        sent_count: $sent_count,
+        failed_count: $failed_count,
+        oldest_pending_age_seconds: $oldest_pending_age_seconds,
+        newest_pending_age_seconds: $newest_pending_age_seconds,
+        top_pending: $top_pending
+      }
+    }'
+  exit 0
+fi
+
+echo "communications.alerts.queue.status"
+echo "pending_count: $pending_count"
+echo "sent_count: $sent_count"
+echo "failed_count: $failed_count"
+echo "oldest_pending_age_seconds: $oldest_pending_age"
+echo "newest_pending_age_seconds: $newest_pending_age"
+echo ""
+if [[ "$pending_count" -gt 0 ]]; then
+  echo "Top pending intents (limit: $LIMIT):"
+  printf "  %-44s %-22s %-8s %-22s %s\n" "intent_id" "domain_id" "severity" "created_at" "recipient"
+  printf "  %-44s %-22s %-8s %-22s %s\n" "--------------------------------------------" "----------------------" "--------" "----------------------" "---"
+  echo "$pending_intents_json" | jq -r '.[] | [.intent_id, .domain_id, .severity, .created_at, .recipient] | @tsv' | \
+  while IFS=$'\t' read -r id domain sev created recip; do
+    printf "  %-44s %-22s %-8s %-22s %s\n" "$id" "$domain" "$sev" "$created" "$recip"
+  done
+else
+  echo "No pending intents."
+fi

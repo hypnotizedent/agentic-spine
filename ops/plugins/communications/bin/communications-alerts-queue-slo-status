@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# communications-alerts-queue-slo-status — Evaluate alert intent queue against
+# SLO thresholds from communications.alerts.queue.contract.yaml.
+#
+# Safety: read-only
+# Approval: auto
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+SLO_CONTRACT="${COMMUNICATIONS_ALERTS_QUEUE_CONTRACT:-$ROOT/ops/bindings/communications.alerts.queue.contract.yaml}"
+QUEUE_STATUS_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-queue-status"
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-alerts-queue-slo-status [--json]
+
+Evaluates the alerting email intent queue against SLO thresholds.
+
+Returns:
+  status: ok | warn | incident
+  reasons: list of threshold violations
+  recommended_action: flush command if action needed
+
+Options:
+  --json    Emit JSON output
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ -f "$SLO_CONTRACT" ]] || { echo "ERROR: missing SLO contract: $SLO_CONTRACT" >&2; exit 1; }
+[[ -x "$QUEUE_STATUS_BIN" ]] || { echo "ERROR: missing queue status script: $QUEUE_STATUS_BIN" >&2; exit 1; }
+
+# Load SLO thresholds
+warn_age="$(yq -r '.slo.warn_age_seconds // 3600' "$SLO_CONTRACT")"
+incident_age="$(yq -r '.slo.incident_age_seconds // 14400' "$SLO_CONTRACT")"
+max_pending_warn="$(yq -r '.slo.max_pending_warn // 50' "$SLO_CONTRACT")"
+max_pending_incident="$(yq -r '.slo.max_pending_incident // 200' "$SLO_CONTRACT")"
+flush_command="$(yq -r '.recommended_actions.flush_command // ""' "$SLO_CONTRACT")"
+
+# Get current queue status
+queue_json="$("$QUEUE_STATUS_BIN" --json 2>/dev/null)"
+if [[ -z "$queue_json" ]] || ! echo "$queue_json" | jq -e '.' >/dev/null 2>&1; then
+  echo "ERROR: failed to get queue status" >&2
+  exit 1
+fi
+
+pending_count="$(echo "$queue_json" | jq -r '.data.pending_count // 0')"
+oldest_age="$(echo "$queue_json" | jq -r '.data.oldest_pending_age_seconds // 0')"
+
+# Evaluate SLO
+slo_status="ok"
+reasons_json="[]"
+
+# Check age thresholds
+if [[ "$oldest_age" -ge "$incident_age" ]]; then
+  slo_status="incident"
+  reasons_json="$(echo "$reasons_json" | jq -c --argjson age "$oldest_age" --argjson threshold "$incident_age" \
+    '. + ["oldest_pending_age " + ($age|tostring) + "s >= incident_threshold " + ($threshold|tostring) + "s"]')"
+elif [[ "$oldest_age" -ge "$warn_age" ]]; then
+  if [[ "$slo_status" != "incident" ]]; then
+    slo_status="warn"
+  fi
+  reasons_json="$(echo "$reasons_json" | jq -c --argjson age "$oldest_age" --argjson threshold "$warn_age" \
+    '. + ["oldest_pending_age " + ($age|tostring) + "s >= warn_threshold " + ($threshold|tostring) + "s"]')"
+fi
+
+# Check count thresholds
+if [[ "$pending_count" -ge "$max_pending_incident" ]]; then
+  slo_status="incident"
+  reasons_json="$(echo "$reasons_json" | jq -c --argjson count "$pending_count" --argjson threshold "$max_pending_incident" \
+    '. + ["pending_count " + ($count|tostring) + " >= incident_threshold " + ($threshold|tostring)]')"
+elif [[ "$pending_count" -ge "$max_pending_warn" ]]; then
+  if [[ "$slo_status" != "incident" ]]; then
+    slo_status="warn"
+  fi
+  reasons_json="$(echo "$reasons_json" | jq -c --argjson count "$pending_count" --argjson threshold "$max_pending_warn" \
+    '. + ["pending_count " + ($count|tostring) + " >= warn_threshold " + ($threshold|tostring)]')"
+fi
+
+# Recommended action
+recommended_action=""
+if [[ "$slo_status" != "ok" ]]; then
+  recommended_action="$flush_command"
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.alerts.queue.slo.status" \
+    --arg slo_status "$slo_status" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson pending_count "$pending_count" \
+    --argjson oldest_pending_age_seconds "$oldest_age" \
+    --argjson warn_age_seconds "$warn_age" \
+    --argjson incident_age_seconds "$incident_age" \
+    --argjson max_pending_warn "$max_pending_warn" \
+    --argjson max_pending_incident "$max_pending_incident" \
+    --argjson reasons "$reasons_json" \
+    --arg recommended_action "$recommended_action" \
+    '{
+      capability: $capability,
+      status: $slo_status,
+      generated_at: $generated_at,
+      data: {
+        pending_count: $pending_count,
+        oldest_pending_age_seconds: $oldest_pending_age_seconds,
+        thresholds: {
+          warn_age_seconds: $warn_age_seconds,
+          incident_age_seconds: $incident_age_seconds,
+          max_pending_warn: $max_pending_warn,
+          max_pending_incident: $max_pending_incident
+        },
+        reasons: $reasons,
+        recommended_action: $recommended_action
+      }
+    }'
+  exit 0
+fi
+
+echo "communications.alerts.queue.slo.status"
+echo "status: $slo_status"
+echo "pending_count: $pending_count"
+echo "oldest_pending_age_seconds: $oldest_age"
+echo "thresholds:"
+echo "  warn_age_seconds: $warn_age"
+echo "  incident_age_seconds: $incident_age"
+echo "  max_pending_warn: $max_pending_warn"
+echo "  max_pending_incident: $max_pending_incident"
+if [[ "$(echo "$reasons_json" | jq 'length')" -gt 0 ]]; then
+  echo "reasons:"
+  echo "$reasons_json" | jq -r '.[] | "  - " + .'
+fi
+if [[ -n "$recommended_action" ]]; then
+  echo "recommended_action: $recommended_action"
+fi

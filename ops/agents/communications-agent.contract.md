@@ -52,6 +52,20 @@
 - `communications.delivery.log`
 - `communications.delivery.anomaly.status`
 - `communications.delivery.anomaly.dispatch`
+- `communications.alerts.flush`
+- `communications.alerts.queue.status`
+- `communications.alerts.queue.slo.status`
+
+## Alert Intent Queue Triage
+
+Operator workflow for alert-intent queue health:
+
+1. **Probe**: `alerting.dispatch` writes intents to `mailroom/outbox/alerts/email-intents/`
+2. **Status**: `communications.alerts.queue.status` shows pending/sent/failed counts and ages
+3. **SLO**: `communications.alerts.queue.slo.status` evaluates queue against SLO thresholds (ok/warn/incident)
+4. **Flush**: `communications.alerts.flush` sends pending intents (manual approval boundary)
+
+SLO contract: `ops/bindings/communications.alerts.queue.contract.yaml`
 
 ## Invocation
 
