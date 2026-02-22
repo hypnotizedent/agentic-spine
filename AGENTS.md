@@ -15,8 +15,8 @@ scope: agent-runtime-contract
 
 1. Start in `~/code/agentic-spine`.
 2. Read `docs/governance/SESSION_PROTOCOL.md`.
-3. Run `./bin/ops status` to check all open work (loops, gaps, inbox, anomalies).
-4. Run `./bin/ops cap list` to discover available governed capabilities.
+3. Run `./bin/ops cap run session.start` for fast startup status and verify routing.
+4. Run `./bin/ops cap list` only when you need to discover a specific capability.
 5. Execute work via `./bin/ops cap run <capability>`.
 
 <!-- SPINE_STARTUP_BLOCK -->
@@ -24,9 +24,12 @@ scope: agent-runtime-contract
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops status
-./bin/ops cap run stability.control.snapshot
-./bin/ops cap run verify.core.run
+./bin/ops cap run session.start
+
+# Legacy full startup lane (kept for parity and manual opt-in):
+# ./bin/ops status
+# ./bin/ops cap run stability.control.snapshot
+# ./bin/ops cap run verify.core.run
 ```
 <!-- /SPINE_STARTUP_BLOCK -->
 
@@ -159,9 +162,7 @@ this file is authoritative.
 cd ~/code/agentic-spine
 
 # Session start (mandatory — 3 commands, <60s total)
-./bin/ops status
-./bin/ops cap run stability.control.snapshot
-./bin/ops cap run verify.core.run
+./bin/ops cap run session.start
 
 # After domain work (before commit)
 ./bin/ops cap run verify.route.recommend

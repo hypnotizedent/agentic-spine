@@ -68,14 +68,179 @@ PY
 }
 
 usage() {
-  echo "Usage: session-start <lane>"
-  echo "  Lanes: scan | apply | coordinator"
+  cat <<'EOF'
+Usage:
+  session-start [--mode fast|full] [--strict] [--json]
+  session-start <lane>
+
+Lanes:
+  scan | apply | coordinator
+
+Notes:
+  - No args defaults to fast startup mode.
+  - full mode runs status + stability snapshot + core verify.
+EOF
   exit 1
 }
 
-[[ $# -ge 1 ]] || usage
-LANE="$1"
+run_fast_startup() {
+  local mode="fast"
+  local strict=0
+  local json_mode=0
 
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)
+        shift
+        ;;
+      --mode)
+        mode="${2:-}"
+        shift 2
+        ;;
+      --strict)
+        strict=1
+        shift
+        ;;
+      --json)
+        json_mode=1
+        shift
+        ;;
+      fast|full)
+        mode="$1"
+        shift
+        ;;
+      -h|--help)
+        usage
+        ;;
+      *)
+        echo "session.start FAIL: unknown arg: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  case "$mode" in
+    fast|full) ;;
+    *)
+      echo "session.start FAIL: --mode must be fast|full" >&2
+      return 2
+      ;;
+  esac
+
+  if [[ "$mode" == "fast" ]]; then
+    local status_brief
+    local recommend_output=""
+    local recommend_domains="core"
+    local recommend_cmd="./bin/ops cap run verify.core.run"
+
+    status_brief="$("$ROOT/bin/ops" status --brief 2>&1 || true)"
+
+    if [[ -x "$ROOT/ops/plugins/verify/bin/verify-topology" ]]; then
+      recommend_output="$("$ROOT/ops/plugins/verify/bin/verify-topology" recommend --json 2>/dev/null || true)"
+      if [[ -n "$recommend_output" ]] && jq -e '.' >/dev/null 2>&1 <<< "$recommend_output"; then
+        recommend_domains="$(jq -r '.recommended_domains | join(",")' <<< "$recommend_output" 2>/dev/null || echo core)"
+        recommend_cmd="$(jq -r '
+          (.recommended_domains // ["core"]) as $domains
+          | if ($domains | length) == 0 or $domains[0] == "core" then
+              "./bin/ops cap run verify.core.run"
+            else
+              "./bin/ops cap run verify.pack.run " + $domains[0]
+            end
+        ' <<< "$recommend_output" 2>/dev/null || echo "./bin/ops cap run verify.core.run")"
+      fi
+    fi
+
+    if [[ "$json_mode" -eq 1 ]]; then
+      jq -n \
+        --arg capability "session.start" \
+        --arg mode "fast" \
+        --arg status_brief "$status_brief" \
+        --arg recommended_domains "$recommend_domains" \
+        --arg recommended_verify_command "$recommend_cmd" \
+        '{
+          capability: $capability,
+          mode: $mode,
+          status_brief: $status_brief,
+          recommended_domains: ($recommended_domains | split(",") | map(select(length > 0))),
+          recommended_verify_command: $recommended_verify_command,
+          note: "fast lane complete; run recommended verify after domain edits"
+        }'
+    else
+      echo "session.start"
+      echo "mode: fast"
+      echo "status: ${status_brief}"
+      echo "recommended_domains: ${recommend_domains}"
+      echo "post_work_verify: ${recommend_cmd}"
+      echo "note: fast lane complete; run recommended verify after domain edits"
+    fi
+    return 0
+  fi
+
+  local status_rc=0
+  local snapshot_rc=0
+  local core_rc=0
+
+  if [[ "$json_mode" -eq 0 ]]; then
+    echo "session.start"
+    echo "mode: full"
+    echo "running: ./bin/ops status"
+  fi
+  "$ROOT/bin/ops" status >/dev/null 2>&1 || status_rc=$?
+
+  if [[ "$json_mode" -eq 0 ]]; then
+    echo "running: ./bin/ops cap run stability.control.snapshot"
+  fi
+  "$ROOT/bin/ops" cap run stability.control.snapshot >/dev/null 2>&1 || snapshot_rc=$?
+
+  if [[ "$json_mode" -eq 0 ]]; then
+    echo "running: ./bin/ops cap run verify.core.run"
+  fi
+  "$ROOT/bin/ops" cap run verify.core.run >/dev/null 2>&1 || core_rc=$?
+
+  if [[ "$json_mode" -eq 1 ]]; then
+    jq -n \
+      --arg capability "session.start" \
+      --arg mode "full" \
+      --argjson strict "$strict" \
+      --argjson status_rc "$status_rc" \
+      --argjson snapshot_rc "$snapshot_rc" \
+      --argjson core_rc "$core_rc" \
+      '{
+        capability: $capability,
+        mode: $mode,
+        strict: ($strict == 1),
+        status_rc: $status_rc,
+        snapshot_rc: $snapshot_rc,
+        core_rc: $core_rc
+      }'
+  else
+    echo "status_rc: $status_rc"
+    echo "snapshot_rc: $snapshot_rc"
+    echo "core_rc: $core_rc"
+  fi
+
+  if [[ "$strict" -eq 1 ]]; then
+    (( status_rc == 0 && snapshot_rc == 0 && core_rc == 0 )) || return 1
+    return 0
+  fi
+
+  (( core_rc == 0 )) || return "$core_rc"
+  return 0
+}
+
+if [[ $# -eq 0 ]]; then
+  run_fast_startup
+  exit $?
+fi
+
+case "${1:-}" in
+  fast|full|--mode|--strict|--json|--)
+    run_fast_startup "$@"
+    exit $?
+    ;;
+esac
+
+LANE="$1"
 case "$LANE" in
   scan|apply|coordinator) ;;
   *) echo "ERROR: unknown lane '$LANE'. Use: scan | apply | coordinator"; exit 1 ;;
