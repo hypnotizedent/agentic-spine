@@ -437,6 +437,40 @@ def collect_graph_summary() -> dict[str, Any]:
     }
 
 
+def collect_comms_queue_status() -> dict[str, Any]:
+    script = ROOT / "ops/plugins/communications/bin/communications-alerts-runtime-status"
+    if not script.exists():
+        return {
+            "slo_status": "unknown",
+            "queue_pending_count": 0,
+            "queue_oldest_age_seconds": 0,
+            "escalation_recommended": False,
+            "pending_escalation_task_count": 0,
+            "oneliner": "",
+        }
+    _, payload = parse_json_output(script, ["--json"])
+    if not payload:
+        return {
+            "slo_status": "unknown",
+            "queue_pending_count": 0,
+            "queue_oldest_age_seconds": 0,
+            "escalation_recommended": False,
+            "pending_escalation_task_count": 0,
+            "oneliner": "",
+        }
+    data = payload.get("data", {})
+    return {
+        "slo_status": str(data.get("slo_status", "unknown")),
+        "queue_pending_count": int(data.get("queue_pending_count", 0) or 0),
+        "queue_oldest_age_seconds": int(data.get("queue_oldest_age_seconds", 0) or 0),
+        "escalation_recommended": bool(data.get("escalation_recommended", False)),
+        "pending_escalation_task_count": int(data.get("pending_escalation_task_count", 0) or 0),
+        "last_escalation_at": str(data.get("last_escalation_at", "")),
+        "last_escalation_fingerprint": str(data.get("last_escalation_fingerprint", "")),
+        "oneliner": str(data.get("oneliner", "")),
+    }
+
+
 def collect_tick_data(window_hours: int) -> dict[str, Any]:
     loops = collect_open_loops()
     gaps = collect_open_gaps()
@@ -446,6 +480,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
     handoffs = collect_handoff_status()
     timeline = collect_timeline(window_hours)
     graph = collect_graph_summary()
+    comms_queue = collect_comms_queue_status()
 
     summary = {
         "open_loops": len(loops),
@@ -461,6 +496,9 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         "core_verify_latest_status": timeline.get("core_verify_latest_status", "unknown"),
         "graph_nodes": graph.get("node_count", 0),
         "graph_edges": graph.get("edge_count", 0),
+        "comms_queue_slo_status": comms_queue.get("slo_status", "unknown"),
+        "comms_queue_pending": comms_queue.get("queue_pending_count", 0),
+        "comms_queue_escalations": comms_queue.get("pending_escalation_task_count", 0),
     }
 
     status = "ok"
@@ -473,6 +511,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         or alerts.get("status") == "warn"
         or summary["verify_current_failed_runs"] > 0
         or str(calendar.get("status", "")).lower() in {"warn", "error"}
+        or comms_queue.get("slo_status") == "incident"
     ):
         status = "warn"
 
@@ -492,6 +531,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
             "handoffs": handoffs,
             "timeline": timeline,
             "graph": graph,
+            "comms_queue": comms_queue,
         },
     }
 
@@ -1084,6 +1124,7 @@ def render_tick_markdown(payload: dict[str, Any]) -> str:
         f"- Core Verify Latest Status: {summary.get('core_verify_latest_status', 'unknown')}",
         f"- Graph Nodes: {summary.get('graph_nodes', 0)}",
         f"- Graph Edges: {summary.get('graph_edges', 0)}",
+        f"- CommsQueue: {summary.get('comms_queue_slo_status', 'unknown')} (pending={summary.get('comms_queue_pending', 0)} escalations={summary.get('comms_queue_escalations', 0)})",
         "",
     ]
     loops = data.get("loops", [])

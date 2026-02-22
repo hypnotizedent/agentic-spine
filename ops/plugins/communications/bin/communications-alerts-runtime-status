@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# communications-alerts-runtime-status — Read-only communications queue +
+# escalation health rollup for watcher/status embedding.
+#
+# Aggregates:
+#   - communications.alerts.queue.status --json
+#   - communications.alerts.queue.slo.status --json
+#   - Latest escalation artifact (if any)
+#   - Recent delivery log summary
+#
+# Safety: read-only
+# Approval: auto
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+QUEUE_STATUS_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-queue-status"
+SLO_STATUS_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-queue-slo-status"
+DELIVERY_LOG_BIN="$ROOT/ops/plugins/communications/bin/communications-delivery-log"
+ESCALATION_DIR="$ROOT/mailroom/outbox/alerts/communications/escalations"
+
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-alerts-runtime-status [--json]
+
+Read-only health rollup for the communications alert intent queue and
+escalation state. Designed for embedding in watcher/status surfaces.
+
+Output fields:
+  queue_pending_count           Number of pending alert intents
+  queue_oldest_age_seconds      Age of oldest pending intent
+  slo_status                    ok|warn|incident
+  escalation_recommended        Boolean
+  last_escalation_at            ISO timestamp of most recent escalation
+  last_escalation_fingerprint   Fingerprint of most recent escalation
+  pending_escalation_task_count Number of open escalation artifacts
+  recommended_action            Flush command if action needed
+
+Options:
+  --json    Emit JSON output
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+
+# ─── Collect queue status ──────────────────────────────────────────────────
+queue_pending_count=0
+queue_oldest_age_seconds=0
+queue_sent_count=0
+queue_failed_count=0
+
+if [[ -x "$QUEUE_STATUS_BIN" ]]; then
+  queue_json="$("$QUEUE_STATUS_BIN" --json 2>/dev/null || echo '{}')"
+  if echo "$queue_json" | jq -e '.' >/dev/null 2>&1; then
+    queue_pending_count="$(echo "$queue_json" | jq -r '.data.pending_count // 0')"
+    queue_oldest_age_seconds="$(echo "$queue_json" | jq -r '.data.oldest_pending_age_seconds // 0')"
+    queue_sent_count="$(echo "$queue_json" | jq -r '.data.sent_count // 0')"
+    queue_failed_count="$(echo "$queue_json" | jq -r '.data.failed_count // 0')"
+  fi
+fi
+
+# ─── Collect SLO status ───────────────────────────────────────────────────
+slo_status="unknown"
+escalation_recommended="false"
+recommended_action=""
+slo_reasons="[]"
+
+if [[ -x "$SLO_STATUS_BIN" ]]; then
+  slo_json="$("$SLO_STATUS_BIN" --json 2>/dev/null || echo '{}')"
+  if echo "$slo_json" | jq -e '.' >/dev/null 2>&1; then
+    slo_status="$(echo "$slo_json" | jq -r '.status // "unknown"')"
+    escalation_recommended="$(echo "$slo_json" | jq -r '.data.escalation_recommended // false')"
+    recommended_action="$(echo "$slo_json" | jq -r '.data.recommended_action // ""')"
+    slo_reasons="$(echo "$slo_json" | jq -c '.data.reasons // []')"
+  fi
+fi
+
+# ─── Collect latest escalation artifact ────────────────────────────────────
+last_escalation_at=""
+last_escalation_fingerprint=""
+pending_escalation_task_count=0
+
+if [[ -d "$ESCALATION_DIR" ]]; then
+  # Count open escalation artifacts
+  while IFS= read -r esc_file; do
+    [[ -n "$esc_file" ]] || continue
+    # Only count non-proposal-skeleton YAML files
+    [[ "$esc_file" == *".proposal-skeleton"* ]] && continue
+    esc_status="$(yq -r '.status // "unknown"' "$esc_file" 2>/dev/null || echo "unknown")"
+    if [[ "$esc_status" == "open" ]]; then
+      pending_escalation_task_count=$((pending_escalation_task_count + 1))
+    fi
+  done < <(find "$ESCALATION_DIR" -name '*.yaml' -type f 2>/dev/null | sort -r)
+
+  # Get latest escalation metadata
+  latest_esc="$(find "$ESCALATION_DIR" -name 'ESCALATION-*.yaml' -type f 2>/dev/null | sort -r | head -1 || true)"
+  if [[ -n "$latest_esc" ]] && command -v yq >/dev/null 2>&1; then
+    last_escalation_at="$(yq -r '.created_at // ""' "$latest_esc" 2>/dev/null || echo "")"
+    last_escalation_fingerprint="$(yq -r '.fingerprint // ""' "$latest_esc" 2>/dev/null || echo "")"
+  fi
+fi
+
+# ─── Collect delivery log summary ─────────────────────────────────────────
+delivery_recent_count=0
+delivery_recent_failed=0
+
+if [[ -x "$DELIVERY_LOG_BIN" ]]; then
+  delivery_json="$("$DELIVERY_LOG_BIN" --limit 20 --json 2>/dev/null || echo '{}')"
+  if echo "$delivery_json" | jq -e '.' >/dev/null 2>&1; then
+    delivery_recent_count="$(echo "$delivery_json" | jq -r '.data.count // 0')"
+    delivery_recent_failed="$(echo "$delivery_json" | jq '[.data.records[]? | select(.status == "failed")] | length' 2>/dev/null || echo 0)"
+  fi
+fi
+
+# ─── Determine overall rollup status ──────────────────────────────────────
+# Inherit SLO status but also factor in delivery failures
+rollup_status="$slo_status"
+if [[ "$rollup_status" == "unknown" ]]; then
+  rollup_status="ok"
+fi
+
+# ─── Build one-liner for watcher embedding ─────────────────────────────────
+oneliner="CommsQueue: ${slo_status} (pending=${queue_pending_count} oldest=${queue_oldest_age_seconds}s escalations=${pending_escalation_task_count})"
+
+# ─── Output ────────────────────────────────────────────────────────────────
+generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+if [[ "$JSON" -eq 1 ]]; then
+  esc_rec_bool="false"
+  [[ "$escalation_recommended" == "true" ]] && esc_rec_bool="true"
+  jq -n \
+    --arg capability "communications.alerts.runtime.status" \
+    --arg status "$rollup_status" \
+    --arg generated_at "$generated_at" \
+    --argjson queue_pending_count "$queue_pending_count" \
+    --argjson queue_oldest_age_seconds "$queue_oldest_age_seconds" \
+    --argjson queue_sent_count "$queue_sent_count" \
+    --argjson queue_failed_count "$queue_failed_count" \
+    --arg slo_status "$slo_status" \
+    --argjson escalation_recommended "$esc_rec_bool" \
+    --arg last_escalation_at "$last_escalation_at" \
+    --arg last_escalation_fingerprint "$last_escalation_fingerprint" \
+    --argjson pending_escalation_task_count "$pending_escalation_task_count" \
+    --arg recommended_action "$recommended_action" \
+    --argjson slo_reasons "$slo_reasons" \
+    --argjson delivery_recent_count "$delivery_recent_count" \
+    --argjson delivery_recent_failed "$delivery_recent_failed" \
+    --arg oneliner "$oneliner" \
+    '{
+      capability: $capability,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        queue_pending_count: $queue_pending_count,
+        queue_oldest_age_seconds: $queue_oldest_age_seconds,
+        queue_sent_count: $queue_sent_count,
+        queue_failed_count: $queue_failed_count,
+        slo_status: $slo_status,
+        escalation_recommended: $escalation_recommended,
+        last_escalation_at: $last_escalation_at,
+        last_escalation_fingerprint: $last_escalation_fingerprint,
+        pending_escalation_task_count: $pending_escalation_task_count,
+        recommended_action: $recommended_action,
+        slo_reasons: $slo_reasons,
+        delivery_recent_count: $delivery_recent_count,
+        delivery_recent_failed: $delivery_recent_failed,
+        oneliner: $oneliner
+      }
+    }'
+  exit 0
+fi
+
+echo "communications.alerts.runtime.status"
+echo "status: $rollup_status"
+echo "generated_at: $generated_at"
+echo ""
+echo "$oneliner"
+echo ""
+echo "queue_pending_count: $queue_pending_count"
+echo "queue_oldest_age_seconds: $queue_oldest_age_seconds"
+echo "queue_sent_count: $queue_sent_count"
+echo "queue_failed_count: $queue_failed_count"
+echo "slo_status: $slo_status"
+echo "escalation_recommended: $escalation_recommended"
+echo "last_escalation_at: ${last_escalation_at:-(none)}"
+echo "last_escalation_fingerprint: ${last_escalation_fingerprint:-(none)}"
+echo "pending_escalation_task_count: $pending_escalation_task_count"
+echo "delivery_recent_count: $delivery_recent_count"
+echo "delivery_recent_failed: $delivery_recent_failed"
+if [[ -n "$recommended_action" ]]; then
+  echo "recommended_action: $recommended_action"
+fi

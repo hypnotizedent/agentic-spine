@@ -232,6 +232,34 @@ if proposals_dir.is_dir():
 
 proposal_total = sum(proposal_counts.values())
 
+# ── Communications queue health ──────────────────────────────────────────
+import subprocess as _sp
+
+comms_status_bin = spine / "ops" / "plugins" / "communications" / "bin" / "communications-alerts-runtime-status"
+comms_oneliner = ""
+comms_slo_status = "unknown"
+comms_pending = 0
+comms_oldest = 0
+comms_escalations = 0
+
+if comms_status_bin.exists() and os.access(str(comms_status_bin), os.X_OK):
+    try:
+        _proc = _sp.run(
+            [str(comms_status_bin), "--json"],
+            capture_output=True, text=True, timeout=15,
+            cwd=str(spine),
+        )
+        if _proc.returncode == 0 and _proc.stdout.strip():
+            _cdata = json.loads(_proc.stdout)
+            _cd = _cdata.get("data", {})
+            comms_oneliner = _cd.get("oneliner", "")
+            comms_slo_status = _cd.get("slo_status", "unknown")
+            comms_pending = int(_cd.get("queue_pending_count", 0))
+            comms_oldest = int(_cd.get("queue_oldest_age_seconds", 0))
+            comms_escalations = int(_cd.get("pending_escalation_task_count", 0))
+    except Exception:
+        pass
+
 # ── Anomaly detection ─────────────────────────────────────────────────────
 
 # Check for unlinked gaps
@@ -246,6 +274,12 @@ failed_count = inbox_lanes.get("failed", 0)
 if failed_count > 0:
     anomalies.append(f"INBOX: {failed_count} failed item(s) — investigate or archive")
 
+# Check communications queue health
+if comms_slo_status == "incident":
+    anomalies.append(f"COMMS QUEUE INCIDENT: pending={comms_pending} oldest={comms_oldest}s escalations={comms_escalations}")
+elif comms_slo_status == "warn":
+    anomalies.append(f"COMMS QUEUE WARN: pending={comms_pending} oldest={comms_oldest}s")
+
 # ── Output ────────────────────────────────────────────────────────────────
 
 if mode == "--json":
@@ -258,6 +292,13 @@ if mode == "--json":
         "inbox_total": inbox_total,
         "proposals": dict(proposal_counts),
         "anomalies": anomalies,
+        "comms_queue": {
+            "slo_status": comms_slo_status,
+            "pending": comms_pending,
+            "oldest_age_seconds": comms_oldest,
+            "escalations": comms_escalations,
+            "oneliner": comms_oneliner,
+        },
         "counts": {
             "open_loops": len(open_loops),
             "planned_loops": len(planned_loops),
@@ -280,6 +321,8 @@ if mode == "--brief":
     parts.append(f"Gaps: {len(open_gaps)} open ({len(unlinked_gaps)} unlinked)")
     parts.append(f"Proposals: {proposal_counts.get('pending', 0)} pending / {proposal_counts.get('draft_hold', 0)} held")
     parts.append(f"Inbox: {inbox_active} active / {inbox_total} total")
+    if comms_oneliner:
+        parts.append(comms_oneliner)
     parts.append(f"Anomalies: {len(anomalies)}")
     print(" | ".join(parts))
     sys.exit(0 if len(anomalies) == 0 else 1)
@@ -336,6 +379,13 @@ if inbox_total > 0:
         if count > 0:
             marker = " !" if lane_name in ("queued", "running", "failed") else ""
             print(f"  {lane_name:12s} {count}{marker}")
+    print()
+
+# ── Communications Queue ──
+if comms_oneliner:
+    print("COMMS QUEUE")
+    print("-" * 72)
+    print(f"  {comms_oneliner}")
     print()
 
 # ── Proposals Queue ──

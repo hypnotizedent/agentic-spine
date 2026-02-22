@@ -106,6 +106,16 @@ else
 fi
 
 echo
+echo "== COMMS QUEUE =="
+COMMS_STATUS_BIN="$SPINE/ops/plugins/communications/bin/communications-alerts-runtime-status"
+if [[ -x "$COMMS_STATUS_BIN" ]]; then
+  COMMS_ONELINER="$("$COMMS_STATUS_BIN" --json 2>/dev/null | jq -r '.data.oneliner // "CommsQueue: unavailable"' 2>/dev/null || echo "CommsQueue: unavailable")"
+  echo "$COMMS_ONELINER"
+else
+  echo "CommsQueue: (runtime-status script not found)"
+fi
+
+echo
 echo "== OUTBOX (latest) =="
 LATEST="$(ls -1t "$OUTBOX"/*_RESULT.md 2>/dev/null | head -1 || true)"
 if [[ -n "$LATEST" ]]; then

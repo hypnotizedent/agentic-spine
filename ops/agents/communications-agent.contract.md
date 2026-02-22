@@ -56,6 +56,17 @@
 - `communications.alerts.queue.status`
 - `communications.alerts.queue.slo.status`
 - `communications.alerts.queue.escalate`
+- `communications.alerts.runtime.status`
+
+## Watcher First Triage
+
+Standard operator triage flow when investigating communications health:
+
+1. **Check watcher/status line**: Run `./bin/ops status` or `./bin/ops cap run spine.watcher.status` and look for the `CommsQueue:` line. If it shows `ok`, no action needed.
+2. **Drill into runtime status**: `./bin/ops cap run communications.alerts.runtime.status` (or `--json` for machine-readable). Review pending count, SLO status, escalation state, and delivery summary.
+3. **Escalate (manual)**: If status is `incident`, run `echo "yes" | ./bin/ops cap run communications.alerts.queue.escalate --execute` to create governed escalation artifacts.
+4. **Flush (manual)**: Run `echo "yes" | ./bin/ops cap run communications.alerts.flush --limit 10` to send pending intents. This is a manual approval boundary.
+5. **Verify delivery**: Run `./bin/ops cap run communications.delivery.log --limit 10` to confirm sends landed.
 
 ## Alert Intent Queue Triage
 
