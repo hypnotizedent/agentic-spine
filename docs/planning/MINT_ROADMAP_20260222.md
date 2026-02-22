@@ -99,7 +99,6 @@ Route Scope Definition: `14` is the total mint-public route denominator (custome
 
 - `admin.mintprints.co`
 - `api.mintprints.co`
-- `estimator.mintprints.co`
 - `kanban.mintprints.co`
 - `kanban.ronny.works`
 - `mintprints-api.ronny.works`

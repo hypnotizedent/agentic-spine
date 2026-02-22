@@ -25,7 +25,7 @@ Evidence:
 | `mintprints-app.ronny.works` | `http://quote-page:3341` | `quote-page@mint-apps:3341` (explicit host:port) | V1 quote-form continuity | pending (alias disambiguation) |
 | `files.mintprints.co` | `http://mint-os-minio:9000` | `minio@mint-data:9000` | data-plane bucket parity proof | pending |
 | `minio.mintprints.co` | `http://mint-os-minio:9001` | `minio-console@mint-data:9001` | data-plane bucket parity proof | pending |
-| `estimator.mintprints.co` | `http://mint-os-job-estimator:3001` | `pricing@mint-apps:3700` or decommission | Rank 1 pricing decision lock + Gate 5 | pending |
+| `estimator.mintprints.co` | `http://100.79.183.14:3700` | `pricing@mint-apps:3700` | Route cutover complete 2026-02-22 | done |
 | `api.mintprints.co` | `http://mint-os-dashboard-api:3335` | `UNVERIFIED` (future order/auth/payment API gateway surface) | Rank 5+7 Gate 5 | blocked |
 | `admin.mintprints.co` | `http://mint-os-admin:3333` | `UNVERIFIED` (future admin surface) | Rank 5 + order lifecycle readiness | blocked |
 | `production.mintprints.co` | `http://mint-os-production:3336` | `UNVERIFIED` (future production/workforce surface) | Rank 5 workforce auth + lifecycle readiness | blocked |
@@ -60,7 +60,7 @@ Evidence:
 - action: only after Auth (Rank 5), Payment (Rank 6), Order Lifecycle (Rank 7) Gate 5 completion.
 
 5. `deprecation_or_contract_pending`
-- `estimator.mintprints.co`
+- ~~`estimator.mintprints.co`~~ (done — cutover to pricing@mint-apps:3700, 2026-02-22)
 - `kanban.mintprints.co`
 - `kanban.ronny.works`
 - `stock-dst.mintprints.co`
