@@ -32,8 +32,8 @@
 | Stack deployment | `ops/bindings/docker.compose.targets.yaml` |
 | Health probes | `ops/bindings/services.health.yaml` |
 | Secrets | Infisical `/spine/services/immich/` |
-| Backup/restore | `docs/brain/lessons/IMMICH_BACKUP_RESTORE.md` |
-| Operational lessons | `docs/brain/lessons/IMMICH_OPERATIONS_LESSONS.md` |
+| Backup/restore | `~/code/workbench/docs/brain-lessons/IMMICH_BACKUP_RESTORE.md` |
+| Operational lessons | `~/code/workbench/docs/brain-lessons/IMMICH_OPERATIONS_LESSONS.md` |
 
 ## Governed Tools
 

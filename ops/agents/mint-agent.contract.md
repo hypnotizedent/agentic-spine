@@ -68,7 +68,7 @@ No watchers or cron in workbench.
 | `mint.deploy.status` | read-only | Read container status on mint-apps + mint-data |
 | `mint.migrate.dryrun` | read-only | Check pending migrations without applying changes |
 
-> **Mutation policy:** `mint.deploy.sync` is the single authorized mutation capability. Requires: `approval: manual`, single-module targeting, pre-built image only (no build-on-VM), env preflight, post-deploy runtime proof. See `docs/SOPs/MINT_DEPLOY_PROMOTION_SOP_V1.md`.
+> **Mutation policy:** `mint.deploy.sync` is the single authorized mutation capability. Requires: `approval: manual`, single-module targeting, pre-built image only (no build-on-VM), env preflight, post-deploy runtime proof. See `~/code/mint-modules/docs/SOPs/MINT_DEPLOY_PROMOTION_SOP_V1.md`.
 
 ## Mutating Tool Surface
 
