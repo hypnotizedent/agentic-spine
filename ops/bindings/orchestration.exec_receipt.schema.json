@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestration.exec_receipt.schema.json",
+  "title": "Wave EXEC_RECEIPT",
+  "description": "Strict receipt schema for wave orchestration task completions. Workers emit this artifact; collect ingests it.",
+  "type": "object",
+  "required": [
+    "task_id",
+    "terminal_id",
+    "lane",
+    "status",
+    "files_changed",
+    "run_keys",
+    "blockers",
+    "ready_for_verify",
+    "timestamp_utc"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Dispatch task identifier matching the wave dispatch entry"
+    },
+    "terminal_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Terminal role ID that executed the task (e.g. SPINE-CONTROL-01, DEPLOY-MINT-01)"
+    },
+    "lane": {
+      "type": "string",
+      "enum": ["control", "execution", "audit", "watcher"],
+      "description": "Lane profile the worker operated under"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["done", "failed", "blocked"],
+      "description": "Terminal status of the dispatched task"
+    },
+    "files_changed": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Relative paths of files modified during execution"
+    },
+    "run_keys": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"
+      },
+      "description": "Capability run keys generated during execution"
+    },
+    "blockers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Blocker descriptions (non-empty when status=blocked or status=failed)"
+    },
+    "ready_for_verify": {
+      "type": "boolean",
+      "description": "Whether the task output is ready for verification"
+    },
+    "timestamp_utc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "UTC timestamp in ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ)"
+    },
+    "wave_id": {
+      "type": "string",
+      "pattern": "^WAVE-[0-9]{8}-[0-9]{2}$",
+      "description": "Optional wave ID for cross-reference"
+    },
+    "commit_hashes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{7,40}$"
+      },
+      "description": "Git commit hashes produced during execution"
+    },
+    "loop_id": {
+      "type": "string",
+      "description": "Parent loop ID if task is part of a loop"
+    },
+    "gap_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Gap IDs addressed by this task"
+    }
+  },
+  "additionalProperties": false,
+  "if": {
+    "properties": { "status": { "const": "blocked" } }
+  },
+  "then": {
+    "properties": {
+      "blockers": { "minItems": 1 }
+    }
+  }
+}

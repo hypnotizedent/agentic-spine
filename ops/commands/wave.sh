@@ -13,7 +13,9 @@
 #   ops wave status [WAVE_ID]
 #   ops wave close <WAVE_ID>
 #   ops wave preflight <domain>
+#   ops wave receipt-validate <path>
 #
+# Receipt artifacts: $RUNTIME_ROOT/waves/<WAVE_ID>/receipts/<task_id>.json
 # State: $RUNTIME_ROOT/waves/<WAVE_ID>/state.json (runtime-only)
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -63,8 +65,13 @@ Usage:
   ops wave status [WAVE_ID]                          Show wave status (or all)
   ops wave close <WAVE_ID> [--force]                 Close a wave (enforces contract)
   ops wave preflight <domain>                        Fast non-blocking preflight
+  ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
 
 Wave IDs: use WAVE-YYYYMMDD-NN format (e.g. WAVE-20260222-01)
+
+EXEC_RECEIPT Artifacts:
+  Workers emit JSON receipts to $RUNTIME_ROOT/waves/<WAVE_ID>/receipts/.
+  Use receipt-validate to check schema compliance before collect.
 
 Background Watcher:
   The watcher lane auto-enqueues long checks (stability.control.snapshot,
@@ -180,14 +187,19 @@ try:
     with open(sf) as f:
         state = json.load(f)
 
+    idx = len(state["dispatches"]) + 1
+    task_id = f"D{idx}"
+
     dispatch = {
+        "task_id": task_id,
         "lane": lane,
         "task": task,
         "status": "dispatched",
         "dispatched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "completed_at": None,
         "result": None,
-        "run_key": None
+        "run_key": None,
+        "receipt_validated": False
     }
 
     state["dispatches"].append(dispatch)
@@ -199,10 +211,9 @@ finally:
     fcntl.flock(fd, fcntl.LOCK_UN)
     os.close(fd)
 
-idx = len(state["dispatches"])
 print(f"Dispatched task #{idx} to lane '{lane}':")
 print(f"  Task: {task}")
-print(f"  Dispatch ID: D{idx}")
+print(f"  Dispatch ID: {task_id}")
 print(f"  Status: dispatched")
 if lane == "execution":
     print(f"  NOTE: execution lane is deny-scoped from docs/planning/*")
@@ -1130,7 +1141,7 @@ cmd_preflight() {
   echo "========================================================================"
 
   # Attach to active wave if one exists
-  if [[ -n "$active_wave_sf" ]]; then
+  if [[ -n "$active_wave_sf" && -f "$active_wave_sf" ]]; then
     python3 -c "
 import json
 sf = '$active_wave_sf'
@@ -1154,18 +1165,703 @@ with open(sf, 'w') as f:
   fi
 }
 
+# ── Receipt validation (pure Python, no external deps) ─────────────────
+
+cmd_receipt_validate() {
+  local receipt_path="${1:-}"
+  if [[ -z "$receipt_path" ]]; then
+    echo "Usage: ops wave receipt-validate <path-to-receipt.json>" >&2
+    exit 1
+  fi
+  if [[ ! -f "$receipt_path" ]]; then
+    echo "FAIL: File not found: $receipt_path" >&2
+    exit 1
+  fi
+
+  local schema_path="$SPINE_REPO/ops/bindings/orchestration.exec_receipt.schema.json"
+
+  python3 - "$receipt_path" "$schema_path" <<'PYVALIDATE'
+import json, sys, re, os
+
+receipt_path = sys.argv[1]
+schema_path = sys.argv[2]
+
+errors = []
+
+# Load receipt
+try:
+    with open(receipt_path) as f:
+        receipt = json.load(f)
+except json.JSONDecodeError as e:
+    print(f"FAIL: Invalid JSON: {e}")
+    sys.exit(1)
+
+if not isinstance(receipt, dict):
+    print("FAIL: Receipt must be a JSON object")
+    sys.exit(1)
+
+# Load schema for reference
+try:
+    with open(schema_path) as f:
+        schema = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    schema = None
+
+# Required fields
+required = ["task_id", "terminal_id", "lane", "status", "files_changed",
+            "run_keys", "blockers", "ready_for_verify", "timestamp_utc"]
+
+for field in required:
+    if field not in receipt:
+        errors.append(f"Missing required field: {field}")
+
+# Type checks
+str_fields = ["task_id", "terminal_id", "lane", "status", "timestamp_utc"]
+for f in str_fields:
+    if f in receipt and not isinstance(receipt[f], str):
+        errors.append(f"Field '{f}' must be a string, got {type(receipt[f]).__name__}")
+
+arr_fields = ["files_changed", "run_keys", "blockers"]
+for f in arr_fields:
+    if f in receipt and not isinstance(receipt[f], list):
+        errors.append(f"Field '{f}' must be an array, got {type(receipt[f]).__name__}")
+
+if "ready_for_verify" in receipt and not isinstance(receipt["ready_for_verify"], bool):
+    errors.append(f"Field 'ready_for_verify' must be a boolean")
+
+# Enum checks
+if receipt.get("lane") and receipt["lane"] not in ("control", "execution", "audit", "watcher"):
+    errors.append(f"Invalid lane: '{receipt['lane']}' (must be control|execution|audit|watcher)")
+
+if receipt.get("status") and receipt["status"] not in ("done", "failed", "blocked"):
+    errors.append(f"Invalid status: '{receipt['status']}' (must be done|failed|blocked)")
+
+# Non-empty string checks
+if receipt.get("task_id") == "":
+    errors.append("task_id must not be empty")
+if receipt.get("terminal_id") == "":
+    errors.append("terminal_id must not be empty")
+
+# Timestamp format
+ts = receipt.get("timestamp_utc", "")
+if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
+    errors.append(f"timestamp_utc must match YYYY-MM-DDTHH:MM:SSZ, got '{ts}'")
+
+# Run key pattern validation
+run_key_pattern = re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")
+for i, rk in enumerate(receipt.get("run_keys", [])):
+    if not isinstance(rk, str):
+        errors.append(f"run_keys[{i}] must be a string")
+    elif not run_key_pattern.match(rk):
+        errors.append(f"run_keys[{i}] '{rk}' does not match CAP-XXXXXXXX-XXXXXX__cap.name__Rxxxx pattern")
+
+# Conditional: blocked status must have blockers
+if receipt.get("status") == "blocked":
+    blockers = receipt.get("blockers", [])
+    if not blockers or len(blockers) == 0:
+        errors.append("status=blocked requires at least one entry in blockers[]")
+
+# Optional field validation
+if "wave_id" in receipt:
+    wid = receipt["wave_id"]
+    if not isinstance(wid, str) or not re.match(r"^WAVE-\d{8}-\d{2}$", wid):
+        errors.append(f"wave_id must match WAVE-YYYYMMDD-NN pattern, got '{wid}'")
+
+if "commit_hashes" in receipt:
+    if not isinstance(receipt["commit_hashes"], list):
+        errors.append("commit_hashes must be an array")
+    else:
+        for i, h in enumerate(receipt["commit_hashes"]):
+            if not isinstance(h, str) or not re.match(r"^[0-9a-f]{7,40}$", h):
+                errors.append(f"commit_hashes[{i}] must be a 7-40 char hex string")
+
+# additionalProperties check
+allowed_keys = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids"])
+for k in receipt.keys():
+    if k not in allowed_keys:
+        errors.append(f"Unknown field: '{k}' (additionalProperties not allowed)")
+
+# Output
+if errors:
+    print(f"FAIL: {len(errors)} validation error(s) in {os.path.basename(receipt_path)}:")
+    for e in errors:
+        print(f"  - {e}")
+    sys.exit(1)
+else:
+    print(f"OK: {os.path.basename(receipt_path)} is a valid EXEC_RECEIPT")
+    sys.exit(0)
+PYVALIDATE
+}
+
+# ── Enhanced collect with receipt ingestion ────────────────────────────
+
+cmd_collect_v2() {
+  local wave_id=""
+  local sync_roadmap=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --sync-roadmap) sync_roadmap=true; shift ;;
+      -*) echo "Unknown flag: $1" >&2; exit 1 ;;
+      *) wave_id="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$wave_id" ]]; then
+    echo "Usage: ops wave collect <WAVE_ID> [--sync-roadmap]" >&2
+    exit 1
+  fi
+
+  ensure_wave_exists "$wave_id"
+  local sf
+  sf="$(wave_state_file "$wave_id")"
+  local sd
+  sd="$(wave_state_dir "$wave_id")"
+  local receipts_dir="$sd/receipts"
+  local schema_path="$SPINE_REPO/ops/bindings/orchestration.exec_receipt.schema.json"
+
+  python3 - "$sf" "$sd" "$receipts_dir" "$schema_path" "$sync_roadmap" "$SPINE_REPO" <<'PYCOLLECT2'
+import json, sys, os, re, glob, fcntl
+from datetime import datetime, timezone
+
+def _validate_receipt(receipt):
+    """Validate receipt dict, return list of error strings."""
+    errors = []
+    required = ["task_id", "terminal_id", "lane", "status", "files_changed",
+                "run_keys", "blockers", "ready_for_verify", "timestamp_utc"]
+    for field in required:
+        if field not in receipt:
+            errors.append(f"Missing: {field}")
+    str_fields = ["task_id", "terminal_id", "lane", "status", "timestamp_utc"]
+    for f in str_fields:
+        if f in receipt and not isinstance(receipt[f], str):
+            errors.append(f"{f} not string")
+    arr_fields = ["files_changed", "run_keys", "blockers"]
+    for f in arr_fields:
+        if f in receipt and not isinstance(receipt[f], list):
+            errors.append(f"{f} not array")
+    if "ready_for_verify" in receipt and not isinstance(receipt["ready_for_verify"], bool):
+        errors.append("ready_for_verify not bool")
+    if receipt.get("lane") and receipt["lane"] not in ("control", "execution", "audit", "watcher"):
+        errors.append(f"bad lane: {receipt['lane']}")
+    if receipt.get("status") and receipt["status"] not in ("done", "failed", "blocked"):
+        errors.append(f"bad status: {receipt['status']}")
+    ts = receipt.get("timestamp_utc", "")
+    if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
+        errors.append("bad timestamp format")
+    rk_pat = re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")
+    for rk in receipt.get("run_keys", []):
+        if isinstance(rk, str) and not rk_pat.match(rk):
+            errors.append(f"bad run_key: {rk}")
+    if receipt.get("status") == "blocked" and not receipt.get("blockers"):
+        errors.append("blocked needs blockers[]")
+    allowed = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids"])
+    for k in receipt.keys():
+        if k not in allowed:
+            errors.append(f"unknown field: {k}")
+    return errors
+
+sf = sys.argv[1]
+sd = sys.argv[2]
+receipts_dir = sys.argv[3]
+schema_path = sys.argv[4]
+sync_roadmap = sys.argv[5] == "true"
+spine_repo = sys.argv[6]
+lock_file = sf + ".lock"
+
+# ── Load state with lock ──
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    with open(sf) as f:
+        state = json.load(f)
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+wave_id = state["wave_id"]
+print("=" * 72)
+print(f"  WAVE COLLECT: {wave_id}")
+print("=" * 72)
+print()
+
+# ── Scan receipt artifacts ──
+receipt_files = []
+valid_receipts = []
+invalid_receipts = []
+
+if os.path.isdir(receipts_dir):
+    for fn in sorted(os.listdir(receipts_dir)):
+        if fn.endswith(".json"):
+            fp = os.path.join(receipts_dir, fn)
+            receipt_files.append(fp)
+
+            try:
+                with open(fp) as rf:
+                    receipt = json.load(rf)
+            except json.JSONDecodeError as e:
+                invalid_receipts.append((fn, f"Invalid JSON: {e}"))
+                continue
+
+            # Validate receipt
+            errs = _validate_receipt(receipt)
+            if errs:
+                invalid_receipts.append((fn, "; ".join(errs)))
+            else:
+                valid_receipts.append((fn, receipt))
+
+print(f"RECEIPT ARTIFACTS ({len(receipt_files)} found, {len(valid_receipts)} valid, {len(invalid_receipts)} invalid)")
+print("-" * 72)
+
+if invalid_receipts:
+    for fn, reason in invalid_receipts:
+        print(f"  XX {fn}: {reason}")
+
+for fn, receipt in valid_receipts:
+    print(f"  OK {fn}: task={receipt['task_id']} status={receipt['status']} lane={receipt['lane']}")
+print()
+
+# ── Match receipts to dispatches and update state ──
+dispatches = state.get("dispatches", [])
+matched = 0
+receipt_map = {r["task_id"]: r for _, r in valid_receipts}
+
+for i, d in enumerate(dispatches):
+    task_id = d.get("task_id", d.get("task", f"D{i+1}"))
+    if task_id in receipt_map:
+        r = receipt_map[task_id]
+        old_status = d["status"]
+        d["status"] = r["status"]
+        d["completed_at"] = r["timestamp_utc"]
+        d["run_key"] = r["run_keys"][0] if r.get("run_keys") else d.get("run_key")
+        d["result"] = f"Receipt: {r['status']}"
+        if r.get("blockers"):
+            d["result"] += f" (blockers: {', '.join(r['blockers'])})"
+        d["receipt_file"] = os.path.basename(receipt_map[task_id].get("_source", ""))
+        d["receipt_validated"] = True
+        matched += 1
+
+# Also collect run keys from all valid receipts
+all_run_keys = []
+for _, r in valid_receipts:
+    all_run_keys.extend(r.get("run_keys", []))
+
+# Merge run keys into state results
+existing_rks = set()
+for r in state.get("results", []):
+    if r.get("run_key"):
+        existing_rks.add(r["run_key"])
+
+for rk in all_run_keys:
+    if rk not in existing_rks:
+        state.setdefault("results", []).append({"run_key": rk, "source": "receipt"})
+        existing_rks.add(rk)
+
+# Store receipt collection metadata
+state["last_collect"] = {
+    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "receipts_scanned": len(receipt_files),
+    "receipts_valid": len(valid_receipts),
+    "receipts_invalid": len(invalid_receipts),
+    "dispatches_matched": matched
+}
+
+# ── Legacy collect: dispatches + watcher ──
+print(f"DISPATCHES ({len(dispatches)})")
+print("-" * 72)
+for i, d in enumerate(dispatches, 1):
+    status_icon = {"dispatched": "->", "done": "OK", "failed": "XX", "blocked": "!!", "running": "~~"}.get(d["status"], "??")
+    receipt_tag = " [receipt]" if d.get("receipt_validated") else ""
+    print(f"  {status_icon} #{i} [{d.get('lane', '?'):10s}] {d['status']:12s} {d.get('task', '')[:45]}{receipt_tag}")
+    if d.get("run_key"):
+        print(f"     run_key: {d['run_key']}")
+print()
+
+# Watcher checks
+checks = state.get("watcher_checks", [])
+if checks:
+    done_count = sum(1 for c in checks if c["status"] == "done")
+    fail_count = sum(1 for c in checks if c["status"] == "failed")
+    running_count = sum(1 for c in checks if c["status"] == "running")
+    queued_count = sum(1 for c in checks if c["status"] == "queued")
+
+    print(f"WATCHER CHECKS ({len(checks)}: {done_count} done, {fail_count} failed, {running_count} running, {queued_count} queued)")
+    print("-" * 72)
+    for c in checks:
+        rk = f" run_key={c['run_key']}" if c.get("run_key") else ""
+        ec = f" exit={c['exit_code']}" if c.get("exit_code") is not None else ""
+        print(f"  [{c['status']:8s}] {c['cap']}{ec}{rk}")
+    print()
+
+# Preflight
+pf = state.get("preflight")
+if pf:
+    print("PREFLIGHT")
+    print("-" * 72)
+    print(f"  Domain: {pf.get('domain', '?')}")
+    print(f"  Verdict: {pf.get('verdict', '?')}")
+    if pf.get("blockers"):
+        for b in pf["blockers"]:
+            print(f"    - {b}")
+    print()
+
+# ── Write collection summary artifact ──
+summary = {
+    "wave_id": wave_id,
+    "collected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "receipts": {
+        "scanned": len(receipt_files),
+        "valid": len(valid_receipts),
+        "invalid": len(invalid_receipts),
+        "invalid_details": [{"file": fn, "reason": r} for fn, r in invalid_receipts]
+    },
+    "dispatches": {
+        "total": len(dispatches),
+        "done": sum(1 for d in dispatches if d["status"] == "done"),
+        "failed": sum(1 for d in dispatches if d["status"] == "failed"),
+        "blocked": sum(1 for d in dispatches if d["status"] == "blocked"),
+        "pending": sum(1 for d in dispatches if d["status"] == "dispatched")
+    },
+    "run_keys": list(existing_rks),
+    "ready_for_close": all(
+        d["status"] in ("done", "blocked") for d in dispatches
+    ) and len(invalid_receipts) == 0 if dispatches else False
+}
+
+summary_path = os.path.join(sd, "collect-summary.json")
+with open(summary_path, "w") as f:
+    json.dump(summary, f, indent=2)
+    f.write("\n")
+
+# ── Save updated state ──
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    with open(sf, "w") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+# ── Sync roadmap (optional) ──
+if sync_roadmap:
+    print("ROADMAP SYNC")
+    print("-" * 72)
+    # Deterministic status updates based on receipt data
+    updates = []
+    for _, r in valid_receipts:
+        entry = {
+            "task_id": r["task_id"],
+            "status": r["status"],
+            "run_keys": r.get("run_keys", []),
+            "blockers": r.get("blockers", [])
+        }
+        if r.get("loop_id"):
+            entry["loop_id"] = r["loop_id"]
+        if r.get("gap_ids"):
+            entry["gap_ids"] = r["gap_ids"]
+        updates.append(entry)
+
+    roadmap_patch_path = os.path.join(sd, "roadmap-patch.json")
+    with open(roadmap_patch_path, "w") as f:
+        json.dump({
+            "wave_id": wave_id,
+            "patched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "updates": updates
+        }, f, indent=2)
+        f.write("\n")
+    print(f"  Wrote {len(updates)} update(s) to {roadmap_patch_path}")
+    for u in updates:
+        loop_tag = f" loop={u['loop_id']}" if u.get("loop_id") else ""
+        gap_tag = f" gaps={','.join(u['gap_ids'])}" if u.get("gap_ids") else ""
+        print(f"  - {u['task_id']}: {u['status']}{loop_tag}{gap_tag}")
+    print()
+
+# ── Summary ──
+print("=" * 72)
+close_ready = summary["ready_for_close"]
+if close_ready:
+    print(f"  All dispatches resolved, receipts valid. Ready: ops wave close {wave_id}")
+elif invalid_receipts:
+    print(f"  {len(invalid_receipts)} invalid receipt(s). Fix before close.")
+else:
+    pending = summary["dispatches"]["pending"]
+    if pending:
+        print(f"  {pending} dispatch(es) still pending. Awaiting receipts.")
+    else:
+        print(f"  Collection complete. Review before close: ops wave close {wave_id}")
+print(f"  Summary: {summary_path}")
+print("=" * 72)
+PYCOLLECT2
+}
+
+# ── Enhanced close with receipt gating ─────────────────────────────────
+
+cmd_close_v2() {
+  local wave_id=""
+  local force=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=true; shift ;;
+      -*) echo "Unknown flag: $1" >&2; exit 1 ;;
+      *) wave_id="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$wave_id" ]]; then
+    echo "Usage: ops wave close <WAVE_ID> [--force]" >&2
+    exit 1
+  fi
+
+  ensure_wave_exists "$wave_id"
+  local sf
+  sf="$(wave_state_file "$wave_id")"
+  local sd
+  sd="$(wave_state_dir "$wave_id")"
+
+  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" <<'PYCLOSE2'
+import json, sys, os, re, fcntl
+from datetime import datetime, timezone
+
+sf = sys.argv[1]
+sd = sys.argv[2]
+force = sys.argv[3] == "true"
+spine_repo = sys.argv[4]
+lock_file = sf + ".lock"
+receipts_dir = os.path.join(sd, "receipts")
+
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    with open(sf) as f:
+        state = json.load(f)
+
+    if state["status"] == "closed":
+        print(f"Wave '{state['wave_id']}' is already closed.")
+        sys.exit(0)
+
+    # ── Contract enforcement (enhanced) ──
+    checks = state.get("watcher_checks", [])
+    pf = state.get("preflight")
+    dispatches = state.get("dispatches", [])
+    contract_violations = []
+
+    # 1. Watcher checks must be done/failed
+    running = [c for c in checks if c["status"] in ("queued", "running")]
+    if running:
+        statuses = "/".join(sorted(set(c["status"] for c in running)))
+        contract_violations.append(f"{len(running)} watcher check(s) still {statuses}")
+
+    # 2. Preflight required
+    if not pf:
+        contract_violations.append("Preflight has not been run (required by wave.lifecycle contract)")
+
+    # 3. All dispatches must be done or explicitly blocked
+    pending = [d for d in dispatches if d["status"] == "dispatched"]
+    if pending:
+        contract_violations.append(f"{len(pending)} dispatch(es) still pending (not done/blocked)")
+
+    # 4. Receipt validation: all receipt files must be valid JSON
+    invalid_receipts = []
+    valid_receipt_count = 0
+    if os.path.isdir(receipts_dir):
+        rk_pat = re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")
+        required_fields = ["task_id", "terminal_id", "lane", "status", "files_changed",
+                          "run_keys", "blockers", "ready_for_verify", "timestamp_utc"]
+
+        for fn in sorted(os.listdir(receipts_dir)):
+            if not fn.endswith(".json"):
+                continue
+            fp = os.path.join(receipts_dir, fn)
+            try:
+                with open(fp) as rf:
+                    r = json.load(rf)
+                # Quick validation
+                missing = [f for f in required_fields if f not in r]
+                if missing:
+                    invalid_receipts.append(f"{fn}: missing {', '.join(missing)}")
+                elif r.get("status") not in ("done", "failed", "blocked"):
+                    invalid_receipts.append(f"{fn}: invalid status '{r.get('status')}'")
+                else:
+                    valid_receipt_count += 1
+            except json.JSONDecodeError as e:
+                invalid_receipts.append(f"{fn}: invalid JSON ({e})")
+
+    if invalid_receipts:
+        contract_violations.append(f"{len(invalid_receipts)} invalid receipt(s) in receipts/")
+
+    # 5. Verify/preflight checks present
+    done_checks = [c for c in checks if c["status"] == "done"]
+    if checks and not done_checks:
+        contract_violations.append("No watcher checks completed successfully")
+
+    # ── Gate decision ──
+    if contract_violations and not force:
+        print("BLOCKED: Wave close contract not met:")
+        for v in contract_violations:
+            print(f"  - {v}")
+        if invalid_receipts:
+            print()
+            print("Invalid receipts:")
+            for ir in invalid_receipts:
+                print(f"  - {ir}")
+        print()
+        print("Options:")
+        print(f"  1. Fix issues, then retry: ops wave close {state['wave_id']}")
+        print(f"  2. Force close (skip contract): ops wave close {state['wave_id']} --force")
+        sys.exit(1)
+
+    if contract_violations and force:
+        print(f"WARNING: Forcing close with {len(contract_violations)} contract violation(s):")
+        for v in contract_violations:
+            print(f"  - {v}")
+        print()
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state["status"] = "closed"
+    state["closed_at"] = now
+    state["force_closed"] = bool(contract_violations)
+
+    with open(sf, "w") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+# ── Generate merge receipt (JSON + markdown) ──
+done_checks = sum(1 for c in checks if c["status"] == "done")
+failed_checks = sum(1 for c in checks if c["status"] == "failed")
+run_keys = [c["run_key"] for c in checks if c.get("run_key")]
+
+# Also collect run keys from receipt artifacts
+for _, r_file in [(fn, os.path.join(receipts_dir, fn))
+                   for fn in sorted(os.listdir(receipts_dir)) if fn.endswith(".json")] if os.path.isdir(receipts_dir) else []:
+    try:
+        with open(r_file) as rf:
+            r = json.load(rf)
+        for rk in r.get("run_keys", []):
+            if rk not in run_keys:
+                run_keys.append(rk)
+    except (json.JSONDecodeError, OSError):
+        pass
+
+residual_blockers = []
+for v in contract_violations:
+    residual_blockers.append(f"Contract violation (force-closed): {v}")
+for c in checks:
+    if c["status"] == "failed":
+        residual_blockers.append(f"Watcher check failed: {c['cap']} (exit={c.get('exit_code', '?')})")
+if pf and pf.get("verdict") == "no-go":
+    for b in pf.get("blockers", []):
+        residual_blockers.append(f"Preflight blocker: {b}")
+
+ready_for_adoption = not residual_blockers
+
+# JSON close receipt
+close_receipt = {
+    "wave_id": state["wave_id"],
+    "objective": state.get("objective", ""),
+    "created_at": state["created_at"],
+    "closed_at": now,
+    "force_closed": bool(contract_violations),
+    "dispatches": len(dispatches),
+    "dispatches_done": sum(1 for d in dispatches if d["status"] == "done"),
+    "dispatches_blocked": sum(1 for d in dispatches if d["status"] == "blocked"),
+    "watcher_checks_done": done_checks,
+    "watcher_checks_failed": failed_checks,
+    "valid_receipts": valid_receipt_count,
+    "invalid_receipts": len(invalid_receipts),
+    "run_keys": run_keys,
+    "residual_blockers": residual_blockers,
+    "READY_FOR_ADOPTION": ready_for_adoption
+}
+
+close_receipt_path = os.path.join(sd, "close-receipt.json")
+with open(close_receipt_path, "w") as f:
+    json.dump(close_receipt, f, indent=2)
+    f.write("\n")
+
+# Markdown receipt (backward compat)
+receipt_path = os.path.join(sd, "receipt.md")
+with open(receipt_path, "w") as rf:
+    rf.write(f"# Wave Merge Receipt: {state['wave_id']}\n\n")
+    rf.write(f"- **Wave ID**: {state['wave_id']}\n")
+    rf.write(f"- **Objective**: {state.get('objective', '(none)')}\n")
+    rf.write(f"- **Created**: {state['created_at']}\n")
+    rf.write(f"- **Closed**: {now}\n")
+    rf.write(f"- **Status**: closed\n\n")
+
+    rf.write(f"## Dispatches ({len(dispatches)})\n\n")
+    for i, d in enumerate(dispatches, 1):
+        rk = f" (run_key: {d['run_key']})" if d.get("run_key") else ""
+        receipt_tag = " [receipt-validated]" if d.get("receipt_validated") else ""
+        rf.write(f"{i}. [{d.get('lane', '?')}] {d.get('task', '')}{rk} - {d['status']}{receipt_tag}\n")
+    rf.write("\n")
+
+    rf.write(f"## Watcher Checks ({len(checks)})\n\n")
+    for c in checks:
+        rk = f" R={c['run_key']}" if c.get("run_key") else ""
+        ec = f" exit={c['exit_code']}" if c.get("exit_code") is not None else ""
+        rf.write(f"- [{c['status']}] {c['cap']}{ec}{rk}\n")
+    rf.write("\n")
+
+    rf.write(f"## EXEC_RECEIPT Artifacts ({valid_receipt_count} valid)\n\n")
+    if os.path.isdir(receipts_dir):
+        for fn in sorted(os.listdir(receipts_dir)):
+            if fn.endswith(".json"):
+                rf.write(f"- {fn}\n")
+    rf.write("\n")
+
+    rf.write(f"## Run Keys\n\n")
+    if run_keys:
+        for rk in run_keys:
+            rf.write(f"- {rk}\n")
+    else:
+        rf.write("(none collected)\n")
+    rf.write("\n")
+
+    rf.write(f"## Residual Blockers\n\n")
+    if residual_blockers:
+        for b in residual_blockers:
+            rf.write(f"- {b}\n")
+    else:
+        rf.write("(none)\n")
+    rf.write("\n")
+
+    rf.write(f"---\nREADY_FOR_ADOPTION={'true' if ready_for_adoption else 'false'}\n")
+
+print(f"Wave '{state['wave_id']}' closed.")
+print(f"  Dispatches: {len(dispatches)} ({sum(1 for d in dispatches if d['status'] == 'done')} done, {sum(1 for d in dispatches if d['status'] == 'blocked')} blocked)")
+print(f"  Checks: {done_checks} done, {failed_checks} failed")
+print(f"  Receipts: {valid_receipt_count} valid, {len(invalid_receipts)} invalid")
+if run_keys:
+    print(f"  Run keys: {len(run_keys)}")
+if residual_blockers:
+    print(f"  Residual blockers: {len(residual_blockers)}")
+    for b in residual_blockers:
+        print(f"    - {b}")
+print(f"  Close receipt: {close_receipt_path}")
+print(f"  Merge receipt: {receipt_path}")
+print(f"  READY_FOR_ADOPTION={'true' if ready_for_adoption else 'false'}")
+PYCLOSE2
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────
 
 case "${1:-}" in
-  start)      shift; cmd_start "$@" ;;
-  dispatch)   shift; cmd_dispatch "$@" ;;
-  ack)        shift; cmd_ack "$@" ;;
-  collect)    cmd_collect "${2:-}" ;;
-  status)     cmd_status "${2:-}" ;;
-  close)      shift; cmd_close "$@" ;;
-  preflight)  shift; cmd_preflight "$@" ;;
-  -h|--help)  usage ;;
-  "")         usage ;;
+  start)              shift; cmd_start "$@" ;;
+  dispatch)           shift; cmd_dispatch "$@" ;;
+  ack)                shift; cmd_ack "$@" ;;
+  collect)            shift; cmd_collect_v2 "$@" ;;
+  status)             cmd_status "${2:-}" ;;
+  close)              shift; cmd_close_v2 "$@" ;;
+  preflight)          shift; cmd_preflight "$@" ;;
+  receipt-validate)   shift; cmd_receipt_validate "$@" ;;
+  -h|--help)          usage ;;
+  "")                 usage ;;
   *)
     echo "Unknown wave subcommand: $1" >&2
     usage

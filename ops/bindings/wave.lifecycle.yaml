@@ -3,7 +3,7 @@ status: authoritative
 owner: "@ronny"
 last_verified: 2026-02-22
 scope: wave-lifecycle-contract
-version: 1
+version: 2
 
 # Wave Lifecycle Contract
 # Defines valid state transitions, required artifacts, and close criteria.
@@ -16,15 +16,38 @@ states:
       closed:
         - "All watcher checks must be done or failed (not queued/running)"
         - "Preflight must have been run at least once"
+        - "All dispatches must be done or explicitly blocked"
+        - "All receipt artifacts in receipts/ must be valid JSON per schema"
   closed:
     description: "Wave is finalized, merge receipt generated"
     allowed_transitions: []
     artifacts:
       - merge_receipt
+      - close_receipt_json
 
 # Wave ID format
 id_format: "WAVE-YYYYMMDD-NN"
 id_pattern: "^WAVE-[0-9]{8}-[0-9]{2}$"
+
+# EXEC_RECEIPT schema
+exec_receipt:
+  schema: "ops/bindings/orchestration.exec_receipt.schema.json"
+  location: "runtime/waves/<WAVE_ID>/receipts/<task_id>.json"
+  required_fields:
+    - task_id
+    - terminal_id
+    - lane
+    - status
+    - files_changed
+    - run_keys
+    - blockers
+    - ready_for_verify
+    - timestamp_utc
+  optional_fields:
+    - wave_id
+    - commit_hashes
+    - loop_id
+    - gap_ids
 
 # Preflight contract
 preflight:
@@ -78,10 +101,38 @@ merge_receipt:
     - watcher_run_keys
     - preflight_verdict
     - residual_blockers
+    - exec_receipts_summary
   optional_fields:
     - roadmap_patch_draft
     - proposal_ids
     - commit_hashes
+
+# JSON close receipt (machine-readable)
+close_receipt:
+  format: json
+  location: "runtime/waves/<WAVE_ID>/close-receipt.json"
+  required_fields:
+    - wave_id
+    - closed_at
+    - force_closed
+    - dispatches
+    - valid_receipts
+    - invalid_receipts
+    - run_keys
+    - residual_blockers
+    - READY_FOR_ADOPTION
+
+# Collect summary (written by ops wave collect)
+collect_summary:
+  format: json
+  location: "runtime/waves/<WAVE_ID>/collect-summary.json"
+  fields:
+    - wave_id
+    - collected_at
+    - receipts (scanned/valid/invalid)
+    - dispatches (total/done/failed/blocked/pending)
+    - run_keys
+    - ready_for_close
 
 # Runtime state locations
 runtime:
