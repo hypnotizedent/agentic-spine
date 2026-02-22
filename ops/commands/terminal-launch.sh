@@ -10,6 +10,7 @@
 #   ops terminal-launch list-lanes              List available lane profiles (JSON)
 #   ops terminal-launch list-loops              List open loops (JSON)
 #   ops terminal-launch list-roles              List terminal roles (JSON, from generated view)
+#   ops terminal-launch --check-source          Validate launcher view source (no launch)
 #   ops terminal-launch launch <options>        Launch a terminal
 #
 # Launch options:
@@ -42,15 +43,140 @@ json_escape() {
 
 # ── View helpers ──────────────────────────────────────────────────────────
 
+warn() {
+    echo "WARNING: $*" >&2
+}
+
+_view_file_exists() {
+    [[ -f "$LAUNCHER_VIEW_YAML" && -r "$LAUNCHER_VIEW_YAML" ]]
+}
+
+_check_source_impl() {
+    if ! _view_file_exists; then
+        echo "launcher view missing or unreadable: $LAUNCHER_VIEW_YAML" >&2
+        return 1
+    fi
+
+    if ! command -v yq >/dev/null 2>&1; then
+        echo "missing dependency: yq" >&2
+        return 1
+    fi
+
+    if ! yq e '.terminals' "$LAUNCHER_VIEW_YAML" >/dev/null 2>&1; then
+        echo "launcher view parse error: $LAUNCHER_VIEW_YAML" >&2
+        return 1
+    fi
+
+    local terminals_tag
+    terminals_tag="$(yq e '.terminals | tag' "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    if [[ "$terminals_tag" != "!!map" ]]; then
+        echo "launcher view schema error: .terminals must be a map" >&2
+        return 1
+    fi
+
+    local id required terminal_id field_value label_value description_value sort_value lane_value
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+
+        terminal_id="$(yq e ".terminals.\"${id}\".terminal_id // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+        if [[ -z "$terminal_id" ]]; then
+            echo "launcher view schema error: terminals.$id.terminal_id is required" >&2
+            return 1
+        fi
+        if [[ "$terminal_id" != "$id" ]]; then
+            echo "launcher view schema error: terminals.$id.terminal_id must equal key ($id)" >&2
+            return 1
+        fi
+
+        label_value="$(yq e ".terminals.\"${id}\".label // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+        description_value="$(yq e ".terminals.\"${id}\".description // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+        if [[ -z "$label_value" && -z "$description_value" ]]; then
+            echo "launcher view schema error: terminals.$id requires label or description" >&2
+            return 1
+        fi
+
+        for required in default_tool status picker_group sort_order lane_profile; do
+            field_value="$(yq e ".terminals.\"${id}\".${required} // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+            if [[ -z "$field_value" ]]; then
+                echo "launcher view schema error: terminals.$id.$required is required" >&2
+                return 1
+            fi
+        done
+
+        sort_value="$(yq e ".terminals.\"${id}\".sort_order // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+        if ! [[ "$sort_value" =~ ^[0-9]+$ ]]; then
+            echo "launcher view schema error: terminals.$id.sort_order must be numeric" >&2
+            return 1
+        fi
+
+        lane_value="$(yq e ".terminals.\"${id}\".lane_profile // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+        case "$lane_value" in
+            control|execution|audit|watcher) ;;
+            *)
+                echo "launcher view schema error: terminals.$id.lane_profile invalid ($lane_value)" >&2
+                return 1
+                ;;
+        esac
+    done < <(yq e '.terminals | keys | .[]' "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)
+
+    return 0
+}
+
+cmd_check_source() {
+    if _check_source_impl; then
+        local terminal_count
+        terminal_count="$(yq e '.terminals | keys | length' "$LAUNCHER_VIEW_YAML" 2>/dev/null || echo "0")"
+        echo "launcher source check PASS: terminals=${terminal_count}"
+        return 0
+    fi
+    echo "launcher source check FAIL" >&2
+    return 1
+}
+
 _resolve_from_view() {
     local terminal_id="$1"
-    [[ -f "$LAUNCHER_VIEW_YAML" ]] || return 1
+    _view_file_exists || return 1
+    command -v yq >/dev/null 2>&1 || return 1
+
     local entry
-    entry=$(yq e ".terminals.\"${terminal_id}\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null) || return 1
-    [[ "$entry" != "null" ]] || return 1
-    # Emit key=value pairs
-    yq e ".terminals.\"${terminal_id}\" | to_entries | .[] | .key + \"=\" + (.value | tostring)" \
-        "$LAUNCHER_VIEW_YAML" 2>/dev/null
+    entry="$(yq e ".terminals.\"${terminal_id}\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    [[ "$entry" != "null" && -n "$entry" ]] || return 1
+
+    local mapped_terminal_id label description default_tool status picker_group sort_order lane_profile
+    mapped_terminal_id="$(yq e ".terminals.\"${terminal_id}\".terminal_id // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    label="$(yq e ".terminals.\"${terminal_id}\".label // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    description="$(yq e ".terminals.\"${terminal_id}\".description // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    default_tool="$(yq e ".terminals.\"${terminal_id}\".default_tool // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    status="$(yq e ".terminals.\"${terminal_id}\".status // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    picker_group="$(yq e ".terminals.\"${terminal_id}\".picker_group // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    sort_order="$(yq e ".terminals.\"${terminal_id}\".sort_order // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    lane_profile="$(yq e ".terminals.\"${terminal_id}\".lane_profile // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+
+    if [[ -z "$mapped_terminal_id" || "$mapped_terminal_id" != "$terminal_id" ]]; then
+        return 2
+    fi
+    if [[ -z "$label" && -z "$description" ]]; then
+        return 2
+    fi
+    if [[ -z "$default_tool" || -z "$status" || -z "$picker_group" || -z "$sort_order" || -z "$lane_profile" ]]; then
+        return 2
+    fi
+    if ! [[ "$sort_order" =~ ^[0-9]+$ ]]; then
+        return 2
+    fi
+
+    # Deterministic launcher mapping from generated view.
+    cat <<EOF
+terminal_id=$mapped_terminal_id
+terminal_role_binding=$mapped_terminal_id
+label=$label
+description=$description
+default_tool=$default_tool
+status=$status
+picker_group=$picker_group
+sort_order=$sort_order
+lane_profile=$lane_profile
+EOF
 }
 
 # ── Subcommands ────────────────────────────────────────────────────────────
@@ -63,6 +189,7 @@ Usage:
   ops terminal-launch list-lanes              List available lane profiles (JSON)
   ops terminal-launch list-loops              List open loops (JSON)
   ops terminal-launch list-roles              List terminal roles (JSON, from generated view)
+  ops terminal-launch --check-source          Validate launcher view source (no launch)
   ops terminal-launch list-tools              List available tools (JSON)
   ops terminal-launch launch <options>        Launch a terminal
 
@@ -208,20 +335,27 @@ PYLOOPS
 }
 
 cmd_list_roles() {
-    if [[ ! -f "$LAUNCHER_VIEW_YAML" ]]; then
+    if ! _view_file_exists; then
+        echo "[]"
+        return
+    fi
+    if ! _check_source_impl >/dev/null 2>&1; then
         echo "[]"
         return
     fi
     yq e -o=json '.terminals | to_entries | [.[] | {
         "id": .key,
+        "terminal_id": .value.terminal_id,
+        "terminal_role_binding": .value.terminal_id,
         "label": .value.label,
+        "description": .value.description,
         "status": .value.status,
         "default_tool": .value.default_tool,
         "picker_group": .value.picker_group,
         "sort_order": .value.sort_order,
         "domain": .value.domain,
         "lane_profile": .value.lane_profile
-    }] | sort_by(.sort_order, .id)' "$LAUNCHER_VIEW_YAML" 2>/dev/null || echo "[]"
+    }] | sort_by(.sort_order, .terminal_id)' "$LAUNCHER_VIEW_YAML" 2>/dev/null || echo "[]"
 }
 
 cmd_list_tools() {
@@ -245,6 +379,7 @@ cmd_launch() {
     local lane_explicit=0
     local tool_explicit=0
     local terminal_explicit=0
+    local terminal_binding=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -261,13 +396,21 @@ cmd_launch() {
     # ── View-first defaults (explicit flags always win) ──────────────────
     if [[ -n "$terminal_name" ]]; then
         local _view_output _key _val
-        if _view_output=$(_resolve_from_view "$terminal_name"); then
+        if _view_output="$(_resolve_from_view "$terminal_name" 2>/dev/null)"; then
             while IFS='=' read -r _key _val; do
                 case "$_key" in
+                    terminal_role_binding) terminal_binding="$_val" ;;
                     lane_profile)  [[ $lane_explicit -eq 0 && -n "$_val" ]] && lane="$_val" ;;
                     default_tool)  [[ $tool_explicit -eq 0 && -n "$_val" ]] && tool="$_val" ;;
                 esac
             done <<< "$_view_output"
+            [[ -n "$terminal_binding" ]] && terminal_name="$terminal_binding"
+        else
+            case "$?" in
+                1) warn "launcher view unavailable or terminal '${terminal_name}' not found; using legacy launch resolution" ;;
+                2) warn "launcher view entry for '${terminal_name}' invalid; using legacy launch resolution" ;;
+                *) warn "launcher view lookup failed for '${terminal_name}'; using legacy launch resolution" ;;
+            esac
         fi
     fi
 
@@ -468,6 +611,8 @@ PYSTATUS
 # ── Dispatch ───────────────────────────────────────────────────────────────
 
 case "${1:-}" in
+    --check-source) cmd_check_source ;;
+    check-source) cmd_check_source ;;
     list-lanes)   cmd_list_lanes ;;
     list-loops)   cmd_list_loops ;;
     list-roles)   cmd_list_roles ;;
