@@ -44,41 +44,30 @@ Full spine access. Follow all sections below in order.
 ### Before you run anything
 
 1. Confirm you are in the spine repo (`cd ~/code/agentic-spine`).
-2. Read this document start to finish so you understand how sessions are assembled.
-3. Open `docs/brain/README.md` to see the hotkeys, memory rules, and context injection process.
-4. Browse `docs/governance/GOVERNANCE_INDEX.md` to learn how governance knowledge is structured and where single sources of truth live.
-5. If you operate agents, refer to `docs/governance/AGENTS_GOVERNANCE.md` and `docs/governance/CORE_AGENTIC_SCOPE.md` to understand the lifecycle and trusted directories.
-6. For cross-repo parallel work, read `docs/governance/RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md` before opening additional write terminals.
+2. Read `docs/governance/AGENT_GOVERNANCE_BRIEF.md` for the governance contract.
+3. For cross-repo parallel work, read `docs/governance/RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md`.
 
 ### Session steps
 
-1. **Greet the spine**
-   - Run `./bin/ops status` to see open work (loops, gaps, inbox).
-   - Run `./bin/ops cap run stability.control.snapshot` for runtime health.
-   - Run `./bin/ops cap run verify.core.run` — Core-8 preflight (<60s, no network calls).
-   - That's your full startup. Domain-specific verify runs AFTER domain work, not at startup.
-   - If you are about to touch secrets, source `~/.config/infisical/credentials` first.
-2. **Load context**
-   - Generate or read the latest `docs/brain/context.md` if the script is available (see `docs/brain/README.md`).
-   - Run `./bin/ops status` to see all open work (loops, gaps, inbox, anomalies). Prioritize closing existing work before starting new work.
-   - Enforce migration-era WIP cap: max 3 active loops. If 3+ loops are active, do not open a new loop until one closes.
+1. **Start the session**
+   - Run `./bin/ops cap run session.start` — this handles status, snapshot, and core verify in one command.
+   - If you need to touch secrets, source `~/.config/infisical/credentials` first.
+2. **Start work**
+   - Prioritize closing existing work (loops, gaps) before starting new work.
    - Use a 3-card intake before mutation work:
      - objective (single sentence)
      - done check (how completion will be verified)
      - first command (deterministic first execution step)
-   - Check available capabilities: `./bin/ops cap list` (SSOT: `ops/capabilities.yaml`). Do not invent commands.
-   - Check available CLI tools: review `ops/bindings/cli.tools.inventory.yaml` or the "Available CLI Tools" section in `context.md`. If a user asks you to use a tool, check this inventory before searching the filesystem or web.
+   - Discover capabilities with `./bin/ops cap list` when needed. Do not invent commands.
 3. **Trace truth**
-   - Use the query hierarchy before guessing answers or inventing storylines (Rule 2 from the brain layer): if the exact file is known, read it directly; otherwise start with capability-first RAG (`./bin/ops cap run rag.anythingllm.ask "<query>"`) → optional `spine-rag` MCP acceleration → `rg` fallback. `mint ask` is deprecated.
-   - When you need policy or structure, follow the entry chain in `docs/governance/GOVERNANCE_INDEX.md`; trust the highest-priority SSOT in `docs/governance/SSOT_REGISTRY.yaml`.
-   - Before guessing remote paths, consult `ops/bindings/docker.compose.targets.yaml` and `ops/bindings/ssh.targets.yaml` first. Never assume stack paths -- bindings are the SSOT for remote host paths.
-   - **Before any shop network change:** run `./bin/ops cap run network.shop.audit.status` and do not proceed if it fails (D54 enforces SSOT/binding parity).
+   - Query hierarchy: direct file read → `./bin/ops cap run rag.anythingllm.ask "<query>"` → `spine-rag` MCP → `rg` fallback.
+   - Before guessing remote paths, consult `ops/bindings/docker.compose.targets.yaml` and `ops/bindings/ssh.targets.yaml` first.
+   - **Before any shop network change:** run `./bin/ops cap run network.shop.audit.status` (D54 enforces).
 4. **Operate through the spine**
-   - Every command that mutates must be run through `./bin/ops cap run <capability>` or `./bin/ops run ...` so receipts land in `receipts/sessions/`.
-   - **Spine is the runtime environment.** All governed operations (capabilities, receipts, loops) execute here. Editing workbench files (compose configs, MCP configs, scripts) is allowed when a spine loop requires it, but never execute runtime operations from workbench.
-   - **Worktrees are optional.** `./bin/ops start loop <LOOP_ID>` creates an isolated worktree if you want one. Committing directly to main is fine.
-   - **Git authority:** Gitea (`origin`) is canonical; GitHub is mirror-only. See `docs/governance/GIT_REMOTE_AUTHORITY.md`.
-   - **Share publish flow:** To publish curated content to the share channel, run the three-step capability flow: `share.publish.preflight` → `share.publish.preview` → `share.publish.apply --execute`. See `docs/governance/WORKBENCH_SHARE_PROTOCOL.md`.
+   - Every mutating command must go through `./bin/ops cap run <capability>` so receipts land in `receipts/sessions/`.
+   - **Spine is the runtime environment.** Workbench file edits are allowed when a spine loop requires it.
+   - **Worktrees are optional.** Committing directly to main is fine for single-agent sessions.
+   - **Git authority:** Gitea (`origin`) is canonical; GitHub is mirror-only.
    - **Impact-scoped docs:** for domain work, update only the domain runbook and create a receipt note with `./bin/ops cap run docs.impact.note <domain> <receipt_run_key>`.
 
 ### Execution Mode Decision Tree
