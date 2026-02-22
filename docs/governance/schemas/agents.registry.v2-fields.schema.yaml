@@ -1,0 +1,181 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Schema: agents.registry.yaml v2 Registration Fields
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Purpose: Define the v2 registration fields that agents.registry.yaml
+# entries must contain for the generator pipeline to produce all four
+# generated runtime surfaces.
+#
+# This is an INPUT validation schema — it defines what the generator
+# expects to find in agents.registry.yaml, not what it produces.
+#
+# Parent design: TERMINAL_WORKER_RUNTIME_CONTRACT_V2.md §5.1
+# ═══════════════════════════════════════════════════════════════════════════
+
+---
+status: draft-schema
+owner: "@ronny"
+last_verified: "2026-02-22"
+scope: agents-registry-v2-input-schema
+version: "1.0"
+
+# ── v2 Required Fields ──────────────────────────────────────────────────
+
+v2_required_fields:
+  - field: id
+    type: string
+    description: "Unique agent identifier. e.g. 'home-assistant-agent'"
+    validation: "Must be unique across all agents[] entries."
+
+  - field: domain
+    type: string
+    description: "Domain this agent covers. Maps to gate.domain.profiles.yaml domain key."
+    validation: "Must match a domain_id in gate.domain.profiles.yaml or capability.domain.catalog.yaml."
+
+  - field: contract
+    type: string
+    description: "Path to agent contract markdown file."
+    validation: "File must exist. Path relative to repo root."
+
+  - field: capabilities_scope
+    type: object
+    description: "Declarative capability scope. Replaces flat capabilities[] array."
+    sub_fields:
+      - field: include_prefixes
+        type: array[string]
+        description: "Prefix match against capabilities.yaml keys. e.g. ['ha.', 'home.']"
+        validation: "At least one of include_prefixes or include_keys must be non-empty."
+      - field: include_keys
+        type: array[string]
+        description: "Exact capability keys to include. e.g. ['verify.core.run']"
+        validation: "Each key must exist in ops/capabilities.yaml."
+      - field: exclude_keys
+        type: array[string]
+        required: false
+        description: "Explicit deny overrides. e.g. ['ha.service.call']"
+        validation: "Each key must exist in ops/capabilities.yaml."
+
+  - field: write_scope
+    type: array[string]
+    description: "Paths this agent may write to."
+    validation: "Must not overlap with another active agent's write_scope."
+
+  - field: terminal_binding
+    type: object
+    description: "Bind this agent to a terminal worker."
+    sub_fields:
+      - field: terminal_id
+        type: string
+        description: "Target terminal from terminal.role.contract.yaml. e.g. 'DOMAIN-HA-01'"
+        validation: "Must match a role id in terminal.role.contract.yaml."
+      - field: hotkey
+        type: string | null
+        description: "Keyboard shortcut for launcher. e.g. '⌘3'"
+        validation: "Must be unique across all terminal_bindings if non-null."
+      - field: lane_profile
+        type: string
+        description: "Lane profile for session context. e.g. 'domain-runtime'"
+        validation: "Must match a defined lane in lane.profiles.yaml."
+      - field: verify_domain
+        type: string
+        description: "Domain to pass to verify.pack.run. e.g. 'home'"
+        validation: "Must match a domain key in gate.domain.profiles.yaml."
+
+# ── v2 Optional Fields ──────────────────────────────────────────────────
+
+v2_optional_fields:
+  - field: gates
+    type: array[string]
+    description: "Explicit gate overrides. If omitted, resolved from domain/agent profiles."
+    validation: "Each entry must be a valid gate id in gate.registry.yaml."
+
+  - field: implementation_status
+    type: enum
+    values: [active, planned, superseded, retired]
+    description: "Agent lifecycle status."
+    validation: "Superseded agents must have superseded_by field."
+
+# ── Legacy Compatibility ─────────────────────────────────────────────────
+
+legacy_migration:
+  description: |
+    Existing agents.registry.yaml entries use a flat `capabilities` array
+    instead of the v2 `capabilities_scope` object. The generator MUST
+    support both formats during the migration period.
+
+  normalization_rule: |
+    When `capabilities_scope` is absent but `capabilities` is present:
+    1. Set include_keys = capabilities[]
+    2. Set include_prefixes = [] (empty)
+    3. Set exclude_keys = [] (empty)
+    4. Log a deprecation warning
+
+  sunset: "Phase C enforcement gate will reject legacy format."
+
+# ── Example: v2 Registration Entry ───────────────────────────────────────
+
+example:
+  - id: home-assistant-agent
+    domain: home-automation
+    description: "Home Assistant application layer"
+    contract: "ops/agents/home-assistant-agent.contract.md"
+    implementation: "~/code/workbench/agents/home-assistant/"
+    implementation_status: active
+    mcp_type: custom
+
+    # v2 fields (new)
+    capabilities_scope:
+      include_prefixes:
+        - "ha."
+      include_keys:
+        - "home.automation.list"
+      exclude_keys: []
+
+    write_scope:
+      - "~/code/workbench/agents/home-assistant/"
+      - "~/code/workbench/infra/compose/mcpjungle/servers/home-assistant/"
+
+    terminal_binding:
+      terminal_id: DOMAIN-HA-01
+      hotkey: "⌘3"
+      lane_profile: domain-runtime
+      verify_domain: home
+
+    # existing fields (kept as-is)
+    gates:
+      - D49
+      - D105
+    endpoints:
+      home_assistant:
+        health_id: home-assistant
+        url: "http://100.67.120.1:8123/api/"
+    mcp_tools:
+      - name: ha_get_states
+        safety: read-only
+
+# ── Cross-File Validation Rules ──────────────────────────────────────────
+
+validation_rules:
+  - rule: "terminal_binding.terminal_id must exist in terminal.role.contract.yaml roles[]"
+    severity: error
+    gate: "Phase C parity gate"
+
+  - rule: "capabilities_scope.include_keys must all exist in ops/capabilities.yaml"
+    severity: error
+    gate: "Phase C parity gate"
+
+  - rule: "capabilities_scope.include_prefixes must match at least one capability"
+    severity: warning
+    gate: "Phase C parity gate"
+
+  - rule: "write_scope must not overlap with other active agents"
+    severity: error
+    gate: "D49 (existing)"
+
+  - rule: "terminal_binding.verify_domain must exist in gate.domain.profiles.yaml"
+    severity: error
+    gate: "Phase C parity gate"
+
+  - rule: "contract path must resolve to an existing file"
+    severity: error
+    gate: "D49 (existing)"

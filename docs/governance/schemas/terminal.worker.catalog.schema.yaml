@@ -1,0 +1,202 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Schema: terminal.worker.catalog.yaml
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Purpose: Unified runtime catalog per terminal worker. Generated artifact
+# that joins agents.registry.yaml + terminal.role.contract.yaml +
+# gate profiles to produce a single lookup surface for session bootstrap.
+#
+# Source SSOTs:
+#   - ops/bindings/agents.registry.yaml        (agent identity + capabilities)
+#   - ops/bindings/terminal.role.contract.yaml  (terminal roles + write scopes)
+#   - ops/bindings/gate.domain.profiles.yaml    (domain → gate mapping)
+#   - ops/bindings/gate.agent.profiles.yaml     (agent → gate overrides)
+#   - ops/capabilities.yaml                     (capability SSOT)
+#
+# Consumer: session bootstrap (terminal-launch.sh), scoped verify, open-work views
+# Ownership: generated (do not hand-edit; regenerate from SSOTs)
+# Registry: ops/bindings/registry.ownership.yaml → type: generated
+#
+# Parent design: docs/governance/TERMINAL_WORKER_RUNTIME_CONTRACT_V2.md §4.2.1
+# ═══════════════════════════════════════════════════════════════════════════
+
+---
+status: draft-schema
+owner: "@ronny"
+last_verified: "2026-02-22"
+scope: terminal-worker-catalog-schema
+version: "1.0"
+
+# ── Schema Definition ────────────────────────────────────────────────────
+
+schema:
+  generated_by: "bin/generators/gen-worker-catalog.sh"
+  generated_from:
+    - ops/bindings/agents.registry.yaml
+    - ops/bindings/terminal.role.contract.yaml
+    - ops/bindings/gate.domain.profiles.yaml
+    - ops/bindings/gate.agent.profiles.yaml
+    - ops/capabilities.yaml
+
+  entry_key: terminal_id   # top-level map keyed by terminal_id
+
+  required_fields:
+    - terminal_id           # string: e.g. "DOMAIN-HA-01"
+    - terminal_type         # enum: control-plane | observation | domain-runtime
+    - status                # enum: active | planned | retired
+    - domain                # string: domain id from agents.registry
+    - agent_id              # string | null: bound agent id (null for control-plane)
+    - agent_contract        # string | null: path to agent contract .md
+    - capabilities_scoped   # array[string]: resolved capability keys for this worker
+    - gates_scoped          # array[string]: resolved gate ids for this worker
+    - write_scope           # array[string]: terminal write paths
+    - verify_pack           # object: { domain: string, command: string }
+    - open_work_scope       # object: domain filter for loops/gaps/proposals
+    - usage_surface         # string: path to generated usage doc
+    - launcher_ref          # object: { hotkey, picker_group, sort_order }
+
+  optional_fields:
+    - endpoints             # object: health check endpoints from agent registry
+    - mcp_tools             # array: MCP tool surface from agent registry
+    - default_tool          # string: codex | claude | opencode | verify
+    - dispatch_source       # string: "routing.dispatch.yaml" (uniform ref per §7)
+
+# ── Example Entry (DOMAIN-HA-01) ─────────────────────────────────────────
+# This is what the generator would produce for one terminal worker.
+
+example:
+  DOMAIN-HA-01:
+    terminal_id: DOMAIN-HA-01
+    terminal_type: domain-runtime
+    status: active
+    domain: home-automation
+    agent_id: home-assistant-agent
+    agent_contract: ops/agents/home-assistant-agent.contract.md
+    capabilities_scoped:
+      - ha.status
+      - ha.refresh
+      - ha.health.status
+      - ha.entity.status
+      - ha.service.call
+      - ha.automation.trigger
+      - ha.automation.create
+      - ha.device.map.build
+      - ha.ssot.propose
+      - ha.ssot.apply
+      - ha.sync.start
+      - ha.sync.stop
+      - ha.sync.status
+    gates_scoped:
+      # from gate.domain.profiles.yaml → home domain
+      - D92
+      - D98
+      - D99
+      - D101
+      - D102
+      - D104
+      - D105
+      # from gate.agent.profiles.yaml → home-assistant-agent (includes core overlay)
+      - D120
+    write_scope:
+      - ops/plugins/ha/
+      - ops/agents/home-assistant-agent.contract.md
+    verify_pack:
+      domain: home
+      command: "./bin/ops cap run verify.pack.run home"
+    open_work_scope:
+      domain_filter:
+        - home-automation
+        - home
+      loop_prefix_match:
+        - "LOOP-HA-"
+        - "LOOP-HOME-"
+      gap_prefix_match:
+        - "GAP-HA-"
+        - "GAP-HOME-"
+    usage_surface: docs/governance/generated/worker-usage/DOMAIN-HA-01.md
+    launcher_ref:
+      hotkey: null          # resolved from terminal_binding in agents.registry v2 fields
+      picker_group: domain-runtime
+      sort_order: 400
+    endpoints:
+      home_assistant:
+        health_id: home-assistant
+        url: "http://100.67.120.1:8123/api/"
+        expected_http_codes: [200, 401, 403]
+    mcp_tools:
+      - name: ha_get_states
+        safety: read-only
+      - name: ha_get_state
+        safety: read-only
+      - name: ha_get_history
+        safety: read-only
+      - name: ha_call_service
+        safety: blocked
+    default_tool: codex
+
+  # ── Example: Control-plane terminal (no agent binding) ──────────────────
+
+  SPINE-CONTROL-01:
+    terminal_id: SPINE-CONTROL-01
+    terminal_type: control-plane
+    status: active
+    domain: core
+    agent_id: null
+    agent_contract: null
+    capabilities_scoped:
+      - verify.core.run
+      - verify.domain.run
+      - stability.control.snapshot
+      - proposals.apply
+      - proposals.supersede
+      - gaps.file
+      - gaps.claim
+      - gaps.close
+      - loops.reconcile
+    gates_scoped:
+      # from gate.domain.profiles.yaml → core domain
+      - D1
+      - D3
+      - D10
+      - D12
+      - D16
+      - D17
+      - D31
+      - D42
+      - D44
+      - D48
+      - D58
+      - D62
+      - D63
+      - D67
+      - D81
+      - D84
+      - D85
+      - D124
+      - D126
+      - D148
+      - D144
+    write_scope:
+      - bin/
+      - ops/
+      - surfaces/
+      - docs/governance/
+      - docs/core/
+      - docs/product/
+      - docs/brain/
+      - mailroom/
+    verify_pack:
+      domain: core
+      command: "./bin/ops cap run verify.core.run"
+    open_work_scope:
+      domain_filter: ["*"]   # control-plane sees all domains
+      loop_prefix_match: ["*"]
+      gap_prefix_match: ["*"]
+    usage_surface: docs/governance/generated/worker-usage/SPINE-CONTROL-01.md
+    launcher_ref:
+      hotkey: null
+      picker_group: core
+      sort_order: 100
+    endpoints: null
+    mcp_tools: null
+    default_tool: codex

@@ -1,0 +1,352 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Schema: terminal.launcher.view.yaml
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Purpose: Picker-ready data source for launcher UI, Raycast integration,
+# Hammerspoon hotkeys, and terminal cards. This is the ONLY file the
+# launcher reads — no more joining lane.profiles.yaml + loop-scopes +
+# terminal.role.contract at launch time.
+#
+# Source SSOTs:
+#   - ops/bindings/terminal.role.contract.yaml  (terminal identity + status)
+#   - ops/bindings/agents.registry.yaml         (agent descriptions + domains)
+#   - ops/bindings/lane.profiles.yaml           (lane display metadata)
+#   - terminal.worker.catalog.yaml              (generated: resolved capabilities)
+#
+# Consumer: ops/commands/terminal-launch.sh, Raycast script, Hammerspoon
+# Ownership: generated (do not hand-edit; regenerate from SSOTs)
+# Registry: ops/bindings/registry.ownership.yaml → type: generated
+#
+# Parent design: docs/governance/TERMINAL_WORKER_RUNTIME_CONTRACT_V2.md §4.2.4
+# ═══════════════════════════════════════════════════════════════════════════
+
+---
+status: draft-schema
+owner: "@ronny"
+last_verified: "2026-02-22"
+scope: terminal-launcher-view-schema
+version: "1.0"
+
+# ── Schema Definition ────────────────────────────────────────────────────
+
+schema:
+  generated_by: "bin/generators/gen-launcher-view.sh"
+  generated_from:
+    - ops/bindings/terminal.role.contract.yaml
+    - ops/bindings/agents.registry.yaml
+    - ops/bindings/lane.profiles.yaml
+    - ops/bindings/terminal.worker.catalog.yaml   # generated input
+
+  entry_key: terminal_id
+
+  required_fields:
+    - terminal_id           # string: e.g. "DOMAIN-HA-01"
+    - label                 # string: human-readable name for picker (e.g. "Home Assistant")
+    - description           # string: one-line description
+    - status                # enum: active | planned | retired
+    - picker_group          # enum: core | observation | domain-runtime
+    - sort_order            # integer: picker display ordering (lower = higher)
+
+  optional_fields:
+    - hotkey                # string | null: keyboard shortcut (e.g. "⌘3")
+    - icon                  # string | null: SF Symbol name or emoji
+    - default_tool          # string: codex | claude | opencode | verify
+    - domain                # string: domain id for grouping
+    - agent_id              # string | null: bound agent
+    - capability_count      # integer: number of scoped capabilities
+    - gate_count            # integer: number of scoped gates
+    - health_url            # string | null: primary health endpoint for status badge
+    - usage_doc             # string: path to generated usage doc
+    - tags                  # array[string]: search/filter tags
+
+# ── Example Entries ──────────────────────────────────────────────────────
+
+example:
+
+  # ── Core terminals ──────────────────────────────────────────────────────
+
+  SPINE-CONTROL-01:
+    terminal_id: SPINE-CONTROL-01
+    label: "Spine Control"
+    description: "Primary spine orchestrator. Single writer for bin/, ops/, surfaces/."
+    status: active
+    picker_group: core
+    sort_order: 100
+    hotkey: "⌘1"
+    icon: "gearshape.2"
+    default_tool: codex
+    domain: core
+    agent_id: null
+    capability_count: 9
+    gate_count: 21
+    health_url: null
+    usage_doc: docs/governance/generated/worker-usage/SPINE-CONTROL-01.md
+    tags: [spine, control, proposals, governance]
+
+  SPINE-EXECUTION-01:
+    terminal_id: SPINE-EXECUTION-01
+    label: "Spine Execution"
+    description: "Execution-plane terminal. Runs control cycles and planned actions."
+    status: active
+    picker_group: core
+    sort_order: 110
+    hotkey: null
+    icon: "play.circle"
+    default_tool: codex
+    domain: core
+    agent_id: null
+    capability_count: 4
+    gate_count: 0
+    health_url: null
+    usage_doc: docs/governance/generated/worker-usage/SPINE-EXECUTION-01.md
+    tags: [spine, execution, control-cycle]
+
+  # ── Observation terminals ───────────────────────────────────────────────
+
+  SPINE-AUDIT-01:
+    terminal_id: SPINE-AUDIT-01
+    label: "Spine Audit"
+    description: "Audit and verification terminal. Read-only spine access."
+    status: active
+    picker_group: observation
+    sort_order: 200
+    hotkey: "⌘2"
+    icon: "magnifyingglass"
+    default_tool: claude
+    domain: core
+    agent_id: null
+    capability_count: 5
+    gate_count: 21
+    health_url: null
+    usage_doc: docs/governance/generated/worker-usage/SPINE-AUDIT-01.md
+    tags: [spine, audit, verify, read-only]
+
+  SPINE-WATCHER-01:
+    terminal_id: SPINE-WATCHER-01
+    label: "Spine Watcher"
+    description: "Monitors mailroom queue and heartbeat state."
+    status: active
+    picker_group: observation
+    sort_order: 210
+    hotkey: null
+    icon: "eye"
+    default_tool: claude
+    domain: core
+    agent_id: null
+    capability_count: 2
+    gate_count: 0
+    health_url: null
+    usage_doc: docs/governance/generated/worker-usage/SPINE-WATCHER-01.md
+    tags: [spine, watcher, mailroom, heartbeat]
+
+  # ── Domain-runtime terminals ────────────────────────────────────────────
+
+  DOMAIN-HA-01:
+    terminal_id: DOMAIN-HA-01
+    label: "Home Assistant"
+    description: "Home Assistant domain operations."
+    status: active
+    picker_group: domain-runtime
+    sort_order: 400
+    hotkey: "⌘3"
+    icon: "house"
+    default_tool: codex
+    domain: home-automation
+    agent_id: home-assistant-agent
+    capability_count: 13
+    gate_count: 8
+    health_url: "http://100.67.120.1:8123/api/"
+    usage_doc: docs/governance/generated/worker-usage/DOMAIN-HA-01.md
+    tags: [home, automation, zigbee, entities]
+
+  DOMAIN-COMMS-01:
+    terminal_id: DOMAIN-COMMS-01
+    label: "Communications"
+    description: "Communications stack operations (Stalwart, email delivery)."
+    status: active
+    picker_group: domain-runtime
+    sort_order: 410
+    hotkey: null
+    icon: "envelope"
+    default_tool: codex
+    domain: communications
+    agent_id: communications-agent
+    capability_count: 12
+    gate_count: 6
+    health_url: "https://graph.microsoft.com/v1.0/$metadata"
+    usage_doc: docs/governance/generated/worker-usage/DOMAIN-COMMS-01.md
+    tags: [communications, email, resend, twilio, graph]
+
+  RUNTIME-IMMICH-01:
+    terminal_id: RUNTIME-IMMICH-01
+    label: "Immich Photos"
+    description: "Immich domain runtime operations."
+    status: active
+    picker_group: domain-runtime
+    sort_order: 500
+    hotkey: "⌘4"
+    icon: "photo.on.rectangle"
+    default_tool: opencode
+    domain: photos
+    agent_id: immich-agent
+    capability_count: 7
+    gate_count: 18
+    health_url: "http://100.114.101.50:2283/api/server/ping"
+    usage_doc: docs/governance/generated/worker-usage/RUNTIME-IMMICH-01.md
+    tags: [immich, photos, albums, dedup]
+
+  DEPLOY-MINT-01:
+    terminal_id: DEPLOY-MINT-01
+    label: "Mint Deploy"
+    description: "Mint domain deployment and governance."
+    status: active
+    picker_group: domain-runtime
+    sort_order: 600
+    hotkey: "⌘5"
+    icon: "shippingbox"
+    default_tool: opencode
+    domain: mint
+    agent_id: mint-agent
+    capability_count: 6
+    gate_count: 12
+    health_url: "http://100.92.156.118:3500/health"
+    usage_doc: docs/governance/generated/worker-usage/DEPLOY-MINT-01.md
+    tags: [mint, deploy, modules, commerce]
+
+  DOMAIN-FINANCE-01:
+    terminal_id: DOMAIN-FINANCE-01
+    label: "Finance"
+    description: "Finance domain operations (Ghostfolio)."
+    status: active
+    picker_group: domain-runtime
+    sort_order: 460
+    hotkey: null
+    icon: "dollarsign.circle"
+    default_tool: opencode
+    domain: finance-ops
+    agent_id: finance-agent
+    capability_count: 1
+    gate_count: 6
+    health_url: "http://100.76.153.100:8080/api/v1/about"
+    usage_doc: docs/governance/generated/worker-usage/DOMAIN-FINANCE-01.md
+    tags: [finance, firefly, paperless, ghostfolio, tax]
+
+  # ── Planned terminals (shown in picker as disabled/upcoming) ────────────
+
+  DOMAIN-MSGRAPH-01:
+    terminal_id: DOMAIN-MSGRAPH-01
+    label: "MS Graph"
+    description: "Microsoft Graph API operations (mail, calendar)."
+    status: planned
+    picker_group: domain-runtime
+    sort_order: 420
+    hotkey: null
+    icon: "envelope.badge"
+    default_tool: opencode
+    domain: identity
+    agent_id: ms-graph-agent
+    capability_count: 10
+    gate_count: 6
+    health_url: "https://graph.microsoft.com/v1.0/$metadata"
+    usage_doc: null
+    tags: [graph, mail, calendar, outlook]
+
+  DOMAIN-N8N-01:
+    terminal_id: DOMAIN-N8N-01
+    label: "n8n Automation"
+    description: "n8n workflow automation operations."
+    status: planned
+    picker_group: domain-runtime
+    sort_order: 430
+    hotkey: null
+    icon: "arrow.triangle.branch"
+    default_tool: opencode
+    domain: automation
+    agent_id: n8n-agent
+    capability_count: 11
+    gate_count: 9
+    health_url: "http://100.98.70.70:5678/healthz"
+    usage_doc: null
+    tags: [n8n, workflow, automation, webhook]
+
+  DOMAIN-MEDIA-01:
+    terminal_id: DOMAIN-MEDIA-01
+    label: "Media Stack"
+    description: "Media stack operations (Plex, Arr suite)."
+    status: planned
+    picker_group: domain-runtime
+    sort_order: 440
+    hotkey: null
+    icon: "film"
+    default_tool: opencode
+    domain: media
+    agent_id: media-agent
+    capability_count: 5
+    gate_count: 5
+    health_url: "http://192.168.1.210:8096/health"
+    usage_doc: null
+    tags: [media, jellyfin, radarr, sonarr]
+
+  DEPLOY-MINTOS-01:
+    terminal_id: DEPLOY-MINTOS-01
+    label: "Mint OS (Legacy)"
+    description: "Legacy mint-os extraction and migration."
+    status: planned
+    picker_group: domain-runtime
+    sort_order: 610
+    hotkey: null
+    icon: "archivebox"
+    default_tool: opencode
+    domain: commerce
+    agent_id: mint-os-agent
+    capability_count: 1
+    gate_count: 1
+    health_url: "http://100.92.156.118:3335/health"
+    usage_doc: null
+    tags: [mint-os, legacy, migration]
+
+  DOMAIN-PAPERLESS-01:
+    terminal_id: DOMAIN-PAPERLESS-01
+    label: "Paperless (Legacy)"
+    description: "Paperless-ngx document management operations."
+    status: planned
+    picker_group: domain-runtime
+    sort_order: 450
+    hotkey: null
+    icon: "doc.text"
+    default_tool: opencode
+    domain: documents
+    agent_id: null
+    capability_count: 1
+    gate_count: 0
+    health_url: "http://100.76.153.100:8000/api/"
+    usage_doc: null
+    tags: [paperless, documents]
+
+  DOMAIN-FIREFLY-01:
+    terminal_id: DOMAIN-FIREFLY-01
+    label: "Firefly (Legacy)"
+    description: "Firefly III budgeting operations."
+    status: planned
+    picker_group: domain-runtime
+    sort_order: 470
+    hotkey: null
+    icon: "creditcard"
+    default_tool: opencode
+    domain: finance
+    agent_id: null
+    capability_count: 1
+    gate_count: 0
+    health_url: "http://100.76.153.100:8080/api/v1/about"
+    usage_doc: null
+    tags: [firefly, budgeting, legacy]
+
+# ── Picker Rendering Contract ─────────────────────────────────────────────
+#
+# UI consumers MUST:
+#   1. Group entries by picker_group in display order: core → observation → domain-runtime
+#   2. Sort within group by sort_order ascending
+#   3. Show status badge (active=green, planned=grey, retired=hidden)
+#   4. Show capability_count and gate_count as metadata badges
+#   5. Disable interaction for planned terminals (show as upcoming)
+#   6. Use health_url for live status indicator when available

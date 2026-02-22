@@ -1,0 +1,187 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Schema: routing.dispatch.yaml
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Purpose: Deterministic dispatch map — capability key → execution target.
+# Replaces the implicit routing spread across capability_map.yaml,
+# routing_rules in agents.registry, and ad-hoc script lookups.
+#
+# Every capability key in ops/capabilities.yaml MUST appear here exactly once.
+# Every entry resolves to a concrete execution target (plugin script, agent
+# MCP tool, or built-in command).
+#
+# Source SSOTs:
+#   - ops/capabilities.yaml                     (capability SSOT — all keys)
+#   - ops/bindings/capability_map.yaml          (cap → plugin/script mapping)
+#   - ops/bindings/agents.registry.yaml         (agent MCP tools + routing_rules)
+#
+# Consumer: `ops cap run <key>`, session dispatch, terminal scoped views
+# Ownership: generated (do not hand-edit; regenerate from SSOTs)
+# Registry: ops/bindings/registry.ownership.yaml → type: generated
+#
+# Key difference from capability_map.yaml:
+#   - capability_map.yaml is a flat cap→script index
+#   - routing.dispatch.yaml adds: domain, agent binding, execution_type,
+#     safety classification, and terminal affinity
+#
+# Parent design: docs/governance/TERMINAL_WORKER_RUNTIME_CONTRACT_V2.md §4.2.2
+# ═══════════════════════════════════════════════════════════════════════════
+
+---
+status: draft-schema
+owner: "@ronny"
+last_verified: "2026-02-22"
+scope: routing-dispatch-schema
+version: "1.0"
+
+# ── Schema Definition ────────────────────────────────────────────────────
+
+schema:
+  generated_by: "bin/generators/gen-routing-dispatch.sh"
+  generated_from:
+    - ops/capabilities.yaml
+    - ops/bindings/capability_map.yaml
+    - ops/bindings/agents.registry.yaml
+
+  entry_key: capability_id   # top-level map keyed by capability id
+
+  required_fields:
+    - capability_id          # string: e.g. "ha.status"
+    - domain                 # string: resolved domain from capability prefix
+    - execution_type         # enum: plugin | mcp_tool | builtin | composite
+    - safety                 # enum: read-only | mutating | governed | blocked
+    - target                 # object: execution target details
+
+  optional_fields:
+    - agent_id               # string | null: agent that owns this capability
+    - terminal_affinity      # array[string]: terminal_ids that include this in scope
+    - notes                  # string: human context
+
+  target_schema:
+    plugin:
+      plugin_name: string    # e.g. "verify"
+      script: string         # e.g. "spine-verify.sh"
+      subcommand: string     # optional: e.g. "tick", "plan"
+    mcp_tool:
+      agent_id: string       # e.g. "home-assistant-agent"
+      tool_name: string      # e.g. "ha_get_states"
+      server: string         # e.g. "~/code/workbench/agents/home-assistant/"
+    builtin:
+      command: string        # e.g. "ops/commands/terminal-launch.sh"
+    composite:
+      steps: array           # ordered sub-capabilities to execute
+
+# ── Example Entries ──────────────────────────────────────────────────────
+
+example:
+
+  # ── Plugin-backed capability ────────────────────────────────────────────
+
+  spine.verify:
+    capability_id: spine.verify
+    domain: core
+    execution_type: plugin
+    safety: read-only
+    target:
+      plugin_name: verify
+      script: spine-verify.sh
+    agent_id: null
+    terminal_affinity:
+      - SPINE-CONTROL-01
+      - SPINE-AUDIT-01
+
+  spine.control.tick:
+    capability_id: spine.control.tick
+    domain: core
+    execution_type: plugin
+    safety: read-only
+    target:
+      plugin_name: evidence
+      script: spine-control
+      subcommand: tick
+    agent_id: null
+    terminal_affinity:
+      - SPINE-EXECUTION-01
+
+  # ── MCP-tool-backed capability ──────────────────────────────────────────
+
+  ha.status:
+    capability_id: ha.status
+    domain: home-automation
+    execution_type: mcp_tool
+    safety: read-only
+    target:
+      agent_id: home-assistant-agent
+      tool_name: ha_get_states
+      server: "~/code/workbench/agents/home-assistant/"
+    agent_id: home-assistant-agent
+    terminal_affinity:
+      - DOMAIN-HA-01
+
+  ha.service.call:
+    capability_id: ha.service.call
+    domain: home-automation
+    execution_type: mcp_tool
+    safety: blocked
+    target:
+      agent_id: home-assistant-agent
+      tool_name: ha_call_service
+      server: "~/code/workbench/agents/home-assistant/"
+    agent_id: home-assistant-agent
+    terminal_affinity:
+      - DOMAIN-HA-01
+    notes: "Blocked in MCP; use governed ha.service.call capability via spine."
+
+  # ── Builtin command capability ──────────────────────────────────────────
+
+  spine.terminal.launch:
+    capability_id: spine.terminal.launch
+    domain: core
+    execution_type: builtin
+    safety: read-only
+    target:
+      command: ops/commands/terminal-launch.sh
+    agent_id: null
+    terminal_affinity:
+      - SPINE-CONTROL-01
+
+  # ── Finance domain (MCP tool from finance-agent) ────────────────────────
+
+  finance.stack.status:
+    capability_id: finance.stack.status
+    domain: finance-ops
+    execution_type: mcp_tool
+    safety: read-only
+    target:
+      agent_id: finance-agent
+      tool_name: finance_status
+      server: "~/code/workbench/agents/finance/tools/"
+    agent_id: finance-agent
+    terminal_affinity:
+      - DOMAIN-FINANCE-01
+
+  # ── Communications domain (governed execution) ──────────────────────────
+
+  communications.send.execute:
+    capability_id: communications.send.execute
+    domain: communications
+    execution_type: mcp_tool
+    safety: governed
+    target:
+      agent_id: communications-agent
+      tool_name: communications_send_execute
+      server: "~/code/workbench/agents/communications/tools/"
+    agent_id: communications-agent
+    terminal_affinity:
+      - DOMAIN-COMMS-01
+    notes: "Governed: requires confirm=true (manual-approval cap)."
+
+# ── Parity Contract ──────────────────────────────────────────────────────
+#
+# Generator must enforce:
+#   1. Every key in ops/capabilities.yaml appears exactly once here
+#   2. Every entry has a valid execution_type and non-empty target
+#   3. terminal_affinity is derived from terminal.worker.catalog.yaml
+#      (capability_id ∈ worker.capabilities_scoped → add terminal_id)
+#   4. No orphan entries (keys here not in capabilities.yaml = error)
+#   5. Safety field matches source (capability_map or agent registry)
