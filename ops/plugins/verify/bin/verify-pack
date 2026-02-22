@@ -3,9 +3,14 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 RUNTIME="$ROOT/ops/plugins/verify/bin/verify-topology"
+RING_POLICY="$ROOT/ops/bindings/verify.ring.policy.yaml"
 
 [[ -x "$RUNTIME" ]] || {
   echo "verify.pack FAIL: missing runtime: $RUNTIME" >&2
+  exit 1
+}
+[[ -f "$RING_POLICY" ]] || {
+  echo "verify.pack FAIL: missing ring policy: $RING_POLICY" >&2
   exit 1
 }
 
@@ -21,6 +26,7 @@ Usage:
 Notes:
   - verify.pack dispatches to topology-driven runtime.
   - Day-to-day defaults to the configured default agent profile.
+  - Pack run enforces the standard verify ring latency budget.
 USAGE
 }
 
@@ -37,7 +43,7 @@ case "$sub" in
     ;;
   run)
     shift
-    exec "$RUNTIME" pack-run "$@"
+    exec env VERIFY_RING_ENTRYPOINT=standard "$RUNTIME" pack-run "$@"
     ;;
   -h|--help|"")
     usage

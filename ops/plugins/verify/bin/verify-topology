@@ -7,6 +7,7 @@ REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
 AGENT_PROFILES="$ROOT/ops/bindings/gate.agent.profiles.yaml"
 DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
 STABILIZATION_CONTRACT="$ROOT/ops/bindings/stabilization.mode.yaml"
+RING_POLICY="$ROOT/ops/bindings/verify.ring.policy.yaml"
 
 fail() {
   echo "verify.topology FAIL: $*" >&2
@@ -25,6 +26,7 @@ need_file "$TOPOLOGY"
 need_file "$REGISTRY"
 need_file "$AGENT_PROFILES"
 need_file "$DOMAIN_PROFILES"
+need_file "$RING_POLICY"
 need_cmd yq
 
 usage() {
@@ -46,6 +48,23 @@ Notes:
   - Release uses full drift-gate certification.
   - During active stabilization windows, domain/release can be bypassed unless --force is provided.
 USAGE
+}
+
+ring_budget_seconds() {
+  local ring="$1"
+  local value
+  value="$(yq e -r ".budgets_seconds.\"$ring\" // \"\"" "$RING_POLICY" 2>/dev/null || true)"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "invalid ring budget for '$ring' in $RING_POLICY"
+  echo "$value"
+}
+
+format_delta() {
+  local delta="$1"
+  if [[ "$delta" -gt 0 ]]; then
+    echo "+${delta}s"
+  else
+    echo "${delta}s"
+  fi
 }
 
 normalize_domain() {
@@ -126,8 +145,11 @@ collect_core_gate_ids() {
 
 run_gate_ids() {
   local json_mode="$1"
-  shift
+  local ring="${2:-}"
+  shift 2
   local -a input_ids=("$@")
+  local start_epoch elapsed budget delta
+  start_epoch="$(date +%s)"
 
   declare -A seen=()
   local -a gate_ids=()
@@ -227,7 +249,23 @@ run_gate_ids() {
     echo "summary: pass=$pass_count fail=$fail_count skipped_inline=$skipped_inline skipped_retired=$skipped_retired"
   fi
 
-  [[ "$fail_count" -eq 0 ]]
+  local budget_breach=0
+  if [[ -n "$ring" ]]; then
+    elapsed=$(( $(date +%s) - start_epoch ))
+    budget="$(ring_budget_seconds "$ring")"
+    delta=$(( elapsed - budget ))
+
+    if [[ "$json_mode" == "0" ]]; then
+      echo "budget: ring=$ring elapsed=${elapsed}s budget=${budget}s delta=$(format_delta "$delta")"
+    fi
+
+    if [[ "$delta" -gt 0 ]]; then
+      budget_breach=1
+      echo "verify.run FAIL: budget exceeded (ring=$ring elapsed=${elapsed}s budget=${budget}s delta=+${delta}s)" >&2
+    fi
+  fi
+
+  [[ "$fail_count" -eq 0 && "$budget_breach" -eq 0 ]]
 }
 
 parse_json_flag() {
@@ -487,7 +525,13 @@ pack_run() {
     echo
   fi
 
-  run_gate_ids "$json_mode" "${gate_ids[@]}"
+  local ring="${VERIFY_RING_ENTRYPOINT:-standard}"
+  case "$ring" in
+    instant|standard|deep) ;;
+    *) fail "invalid VERIFY_RING_ENTRYPOINT value: $ring" ;;
+  esac
+
+  run_gate_ids "$json_mode" "$ring" "${gate_ids[@]}"
 }
 
 run_core() {
@@ -499,7 +543,7 @@ run_core() {
     echo "core_gate_count: ${#core_ids[@]}"
     echo
   fi
-  run_gate_ids "$json_mode" "${core_ids[@]}"
+  run_gate_ids "$json_mode" "instant" "${core_ids[@]}"
 }
 
 run_domain() {
@@ -525,7 +569,7 @@ run_domain() {
     echo "gate_count: ${#domain_ids[@]}"
     echo
   fi
-  run_gate_ids "$json_mode" "${domain_ids[@]}"
+  run_gate_ids "$json_mode" "" "${domain_ids[@]}"
 }
 
 run_release() {
@@ -537,26 +581,46 @@ run_release() {
     emit_stabilization_bypass "release" "" "$json_mode"
     return 0
   fi
-  local tmp rc summary
+  local tmp rc summary start_epoch elapsed budget delta budget_breach status
+  start_epoch="$(date +%s)"
   tmp="$(mktemp)"
   set +e
   bash "$ROOT/surfaces/verify/drift-gate.sh" >"$tmp" 2>&1
   rc=$?
   set -e
+  elapsed=$(( $(date +%s) - start_epoch ))
+  budget="$(ring_budget_seconds "deep")"
+  delta=$(( elapsed - budget ))
+  budget_breach=0
+  if [[ "$delta" -gt 0 ]]; then
+    budget_breach=1
+  fi
 
   if [[ "$json_mode" == "1" ]]; then
     summary="$(grep -E '^DRIFT GATE:' "$tmp" | tail -n1 | xargs || true)"
+    status="$([[ "$rc" -eq 0 && "$budget_breach" -eq 0 ]] && echo pass || echo fail)"
+    if [[ "$budget_breach" -eq 1 ]]; then
+      echo "verify.release.run budget exceeded (ring=deep elapsed=${elapsed}s budget=${budget}s delta=+${delta}s)" >&2
+    fi
     jq -n \
-      --arg status "$([[ "$rc" -eq 0 ]] && echo pass || echo fail)" \
+      --arg status "$status" \
       --arg summary "$summary" \
       --arg mode "core+all-domains" \
-      '{status:$status, mode:$mode, summary:$summary}'
+      --arg ring "deep" \
+      --argjson elapsed_seconds "$elapsed" \
+      --argjson budget_seconds "$budget" \
+      --argjson budget_delta_seconds "$delta" \
+      '{status:$status, mode:$mode, summary:$summary, ring:$ring, elapsed_seconds:$elapsed_seconds, budget_seconds:$budget_seconds, budget_delta_seconds:$budget_delta_seconds}'
   else
     cat "$tmp"
+    echo "budget: ring=deep elapsed=${elapsed}s budget=${budget}s delta=$(format_delta "$delta")"
+    if [[ "$budget_breach" -eq 1 ]]; then
+      echo "verify.release.run FAIL: budget exceeded (ring=deep elapsed=${elapsed}s budget=${budget}s delta=+${delta}s)" >&2
+    fi
   fi
 
   rm -f "$tmp" >/dev/null 2>&1 || true
-  [[ "$rc" -eq 0 ]]
+  [[ "$rc" -eq 0 && "$budget_breach" -eq 0 ]]
 }
 
 recommend_route() {
