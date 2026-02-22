@@ -97,7 +97,41 @@ if [[ "$slo_status" != "ok" ]]; then
   recommended_action="$flush_command"
 fi
 
+# ─── Escalation fields (read-only advisory) ─────────────────────────────────
+escalation_recommended="false"
+escalation_reason=""
+escalation_fingerprint=""
+escalation_command='echo "yes" | ./bin/ops cap run communications.alerts.queue.escalate --execute'
+
+if [[ "$slo_status" == "incident" ]]; then
+  escalation_recommended="true"
+  escalation_reason="SLO status is incident — governed escalation available"
+
+  # Compute fingerprint (mirrors escalate script logic for consistency)
+  ESCALATION_CONTRACT="${COMMUNICATIONS_ALERTS_ESCALATION_CONTRACT:-$ROOT/ops/bindings/communications.alerts.escalation.contract.yaml}"
+  age_bucket="0"
+  if [[ -f "$ESCALATION_CONTRACT" ]]; then
+    while IFS= read -r boundary; do
+      [[ -n "$boundary" ]] || continue
+      if [[ "$oldest_age" -ge "$boundary" ]]; then
+        age_bucket="$boundary"
+      fi
+    done < <(yq -r '.dedupe.age_bucket_boundaries[]' "$ESCALATION_CONTRACT" 2>/dev/null || true)
+  fi
+  pending_bucket=$(( pending_count / 50 * 50 ))
+  fp_input="${slo_status}|${age_bucket}|${pending_bucket}"
+  if command -v md5 >/dev/null 2>&1; then
+    escalation_fingerprint="$(printf '%s' "$fp_input" | md5)"
+  elif command -v md5sum >/dev/null 2>&1; then
+    escalation_fingerprint="$(printf '%s' "$fp_input" | md5sum | cut -d' ' -f1)"
+  else
+    escalation_fingerprint="$(printf '%s' "$fp_input" | cksum | cut -d' ' -f1)"
+  fi
+fi
+
 if [[ "$JSON" -eq 1 ]]; then
+  esc_rec_bool="false"
+  [[ "$escalation_recommended" == "true" ]] && esc_rec_bool="true"
   jq -n \
     --arg capability "communications.alerts.queue.slo.status" \
     --arg slo_status "$slo_status" \
@@ -110,6 +144,10 @@ if [[ "$JSON" -eq 1 ]]; then
     --argjson max_pending_incident "$max_pending_incident" \
     --argjson reasons "$reasons_json" \
     --arg recommended_action "$recommended_action" \
+    --argjson escalation_recommended "$esc_rec_bool" \
+    --arg escalation_reason "$escalation_reason" \
+    --arg escalation_fingerprint "$escalation_fingerprint" \
+    --arg suggested_command "$escalation_command" \
     '{
       capability: $capability,
       status: $slo_status,
@@ -124,7 +162,11 @@ if [[ "$JSON" -eq 1 ]]; then
           max_pending_incident: $max_pending_incident
         },
         reasons: $reasons,
-        recommended_action: $recommended_action
+        recommended_action: $recommended_action,
+        escalation_recommended: $escalation_recommended,
+        escalation_reason: $escalation_reason,
+        escalation_fingerprint: $escalation_fingerprint,
+        suggested_command: $suggested_command
       }
     }'
   exit 0
@@ -145,4 +187,10 @@ if [[ "$(echo "$reasons_json" | jq 'length')" -gt 0 ]]; then
 fi
 if [[ -n "$recommended_action" ]]; then
   echo "recommended_action: $recommended_action"
+fi
+if [[ "$escalation_recommended" == "true" ]]; then
+  echo "escalation_recommended: true"
+  echo "escalation_reason: $escalation_reason"
+  echo "escalation_fingerprint: $escalation_fingerprint"
+  echo "suggested_command: $escalation_command"
 fi

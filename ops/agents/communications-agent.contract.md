@@ -55,6 +55,7 @@
 - `communications.alerts.flush`
 - `communications.alerts.queue.status`
 - `communications.alerts.queue.slo.status`
+- `communications.alerts.queue.escalate`
 
 ## Alert Intent Queue Triage
 
@@ -66,6 +67,63 @@ Operator workflow for alert-intent queue health:
 4. **Flush**: `communications.alerts.flush` sends pending intents (manual approval boundary)
 
 SLO contract: `ops/bindings/communications.alerts.queue.contract.yaml`
+
+## Incident Escalation Playbook
+
+When the alert-intent queue SLO status reaches **incident**, use this playbook:
+
+### Step 1: Assess queue state
+
+```bash
+./bin/ops cap run communications.alerts.queue.status --json
+```
+
+Review pending count, oldest age, and top pending intents.
+
+### Step 2: Confirm SLO breach
+
+```bash
+./bin/ops cap run communications.alerts.queue.slo.status --json
+```
+
+Check `escalation_recommended`, `escalation_reason`, and `escalation_fingerprint` fields.
+
+### Step 3: Create governed escalation artifacts
+
+```bash
+echo "yes" | ./bin/ops cap run communications.alerts.queue.escalate --execute
+```
+
+This writes:
+- Escalation artifact to `mailroom/outbox/alerts/communications/escalations/`
+- Governed mailroom task (route target: communications)
+- Proposal skeleton (draft, requires manual submit)
+
+The escalation has cooldown-based dedupe (default 1800s). Repeated runs within the cooldown window for the same fingerprint are no-ops.
+
+### Step 4: Flush pending intents (manual)
+
+```bash
+echo "yes" | ./bin/ops cap run communications.alerts.flush --limit 10
+```
+
+This sends real email. Manual approval boundary is preserved.
+
+### Step 5: Verify delivery
+
+```bash
+./bin/ops cap run communications.delivery.log --limit 10
+```
+
+### Step 6: Root-cause follow-up
+
+Investigate backlog cause:
+- Provider issues: `./bin/ops cap run communications.provider.status`
+- Policy blocks: `./bin/ops cap run communications.policy.status`
+- Throughput analysis: check pending count trend over time
+- Review escalation task in mailroom for follow-up actions
+
+Escalation contract: `ops/bindings/communications.alerts.escalation.contract.yaml`
 
 ## Invocation
 

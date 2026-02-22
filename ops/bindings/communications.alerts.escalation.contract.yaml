@@ -1,0 +1,48 @@
+# Status: authoritative
+# Last verified: 2026-02-22
+
+version: 1
+updated_at: "2026-02-22"
+owner: "@ronny"
+scope: communications-alerts-escalation
+
+# Escalation contract for alert-intent queue SLO incident breaches.
+# Consumed by communications.alerts.queue.escalate capability.
+
+enabled: true
+
+trigger_statuses:
+  - incident
+
+# Cooldown: minimum seconds between escalation runs for the same fingerprint.
+# Prevents duplicate escalation artifacts when the queue is stuck.
+cooldown_seconds: 1800
+
+escalation_channels:
+  mailroom_task:
+    enabled: true
+    route_target: communications
+    summary_template: "Incident SLO breach: alert-intent queue requires operator flush + root-cause investigation"
+  proposal_skeleton:
+    enabled: true
+    output_dir: "mailroom/outbox/alerts/communications/escalations"
+
+# Dedupe strategy: fingerprint is composed of these fields from the SLO status output.
+# If a non-expired escalation artifact exists with the same fingerprint, skip.
+dedupe:
+  fingerprint_fields:
+    - status
+    - reasons
+    - oldest_age_bucket
+  # Age buckets quantize oldest_pending_age_seconds to reduce churn.
+  # e.g. 14400-28800 is a single bucket, so re-runs within that range share a fingerprint.
+  age_bucket_boundaries:
+    - 14400
+    - 28800
+    - 57600
+    - 86400
+
+# Output paths
+output:
+  escalation_dir: "mailroom/outbox/alerts/communications/escalations"
+  cooldown_state_file: "mailroom/state/comms-escalation-cooldown.yaml"

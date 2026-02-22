@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# communications-alerts-queue-escalate — Governed incident escalation for
+# alert-intent queue SLO breaches.
+#
+# When SLO status == incident:
+#   1. Writes escalation artifact to mailroom/outbox/alerts/communications/escalations/
+#   2. Enqueues governed mailroom task (operator flush + investigate)
+#   3. Optionally drafts proposal skeleton (no auto-apply)
+#
+# Safety: mutating
+# Approval: manual
+#
+# Non-negotiables:
+#   - Does NOT auto-send email/SMS
+#   - Does NOT bypass manual approval for communications.alerts.flush
+#   - All mutations are governed + receipted
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+ESCALATION_CONTRACT="${COMMUNICATIONS_ALERTS_ESCALATION_CONTRACT:-$ROOT/ops/bindings/communications.alerts.escalation.contract.yaml}"
+SLO_STATUS_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-queue-slo-status"
+TASK_ENQUEUE_BIN="$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-task-enqueue"
+
+JSON=0
+EXECUTE=0
+DRY_RUN=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-alerts-queue-escalate [--execute] [--dry-run] [--json]
+
+Evaluate alert-intent queue SLO and, if incident, create governed escalation
+artifacts (mailroom task + proposal skeleton).
+
+Options:
+  --execute    Actually write artifacts (required for mutation)
+  --dry-run    Preview what would happen without writing
+  --json       Emit JSON output
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --execute) EXECUTE=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ -f "$ESCALATION_CONTRACT" ]] || { echo "ERROR: missing escalation contract: $ESCALATION_CONTRACT" >&2; exit 1; }
+[[ -x "$SLO_STATUS_BIN" ]] || { echo "ERROR: missing SLO status script: $SLO_STATUS_BIN" >&2; exit 1; }
+[[ -x "$TASK_ENQUEUE_BIN" ]] || { echo "ERROR: missing task enqueue script: $TASK_ENQUEUE_BIN" >&2; exit 1; }
+
+# ─── Load escalation contract ───────────────────────────────────────────────
+contract_enabled="$(yq -r '.enabled' "$ESCALATION_CONTRACT")"
+if [[ "$contract_enabled" != "true" ]]; then
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n --arg cap "communications.alerts.queue.escalate" --arg status "ok" \
+      '{capability:$cap,status:$status,data:{action:"skipped",reason:"escalation contract disabled"}}'
+  else
+    echo "communications.alerts.queue.escalate"
+    echo "action: skipped"
+    echo "reason: escalation contract disabled"
+  fi
+  exit 0
+fi
+
+cooldown_seconds="$(yq -r '.cooldown_seconds // 1800' "$ESCALATION_CONTRACT")"
+escalation_dir="$ROOT/$(yq -r '.output.escalation_dir' "$ESCALATION_CONTRACT")"
+cooldown_state_file="$ROOT/$(yq -r '.output.cooldown_state_file' "$ESCALATION_CONTRACT")"
+task_enabled="$(yq -r '.escalation_channels.mailroom_task.enabled' "$ESCALATION_CONTRACT")"
+task_route="$(yq -r '.escalation_channels.mailroom_task.route_target // "communications"' "$ESCALATION_CONTRACT")"
+task_summary_template="$(yq -r '.escalation_channels.mailroom_task.summary_template // "Incident SLO breach"' "$ESCALATION_CONTRACT")"
+proposal_enabled="$(yq -r '.escalation_channels.proposal_skeleton.enabled' "$ESCALATION_CONTRACT")"
+
+# Load age bucket boundaries as a flat list
+age_buckets="$(yq -r '.dedupe.age_bucket_boundaries[]' "$ESCALATION_CONTRACT" 2>/dev/null || echo "")"
+
+# ─── Get SLO status ─────────────────────────────────────────────────────────
+slo_json="$("$SLO_STATUS_BIN" --json 2>/dev/null)"
+if [[ -z "$slo_json" ]] || ! echo "$slo_json" | jq -e '.' >/dev/null 2>&1; then
+  echo "ERROR: failed to get SLO status" >&2
+  exit 1
+fi
+
+slo_status="$(echo "$slo_json" | jq -r '.status')"
+slo_reasons="$(echo "$slo_json" | jq -c '.data.reasons // []')"
+oldest_age="$(echo "$slo_json" | jq -r '.data.oldest_pending_age_seconds // 0')"
+pending_count="$(echo "$slo_json" | jq -r '.data.pending_count // 0')"
+
+# ─── Check if escalation needed ─────────────────────────────────────────────
+if [[ "$slo_status" != "incident" ]]; then
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n --arg cap "communications.alerts.queue.escalate" --arg status "ok" \
+      --arg slo_status "$slo_status" \
+      '{capability:$cap,status:$status,data:{action:"no_escalation_needed",slo_status:$slo_status,reason:"SLO status is not incident"}}'
+  else
+    echo "communications.alerts.queue.escalate"
+    echo "action: no_escalation_needed"
+    echo "slo_status: $slo_status"
+    echo "reason: SLO status is not incident"
+  fi
+  exit 0
+fi
+
+# ─── Compute fingerprint for dedupe ─────────────────────────────────────────
+# Quantize oldest_age into a bucket
+age_bucket="0"
+if [[ -n "$age_buckets" ]]; then
+  while IFS= read -r boundary; do
+    [[ -n "$boundary" ]] || continue
+    if [[ "$oldest_age" -ge "$boundary" ]]; then
+      age_bucket="$boundary"
+    fi
+  done <<< "$age_buckets"
+fi
+
+# Fingerprint = md5 of status + age_bucket + pending_count_bucket
+# Note: reasons contain dynamic values (exact ages), so we use stable bucket fields only
+pending_bucket=$(( pending_count / 50 * 50 ))  # quantize to nearest 50
+fingerprint_input="${slo_status}|${age_bucket}|${pending_bucket}"
+if command -v md5 >/dev/null 2>&1; then
+  fingerprint="$(printf '%s' "$fingerprint_input" | md5)"
+elif command -v md5sum >/dev/null 2>&1; then
+  fingerprint="$(printf '%s' "$fingerprint_input" | md5sum | cut -d' ' -f1)"
+else
+  # Fallback: use a simple hash via cksum
+  fingerprint="$(printf '%s' "$fingerprint_input" | cksum | cut -d' ' -f1)"
+fi
+
+# ─── Cooldown / dedupe check ────────────────────────────────────────────────
+now_epoch="$(date +%s)"
+skip_due_to_cooldown=0
+
+if [[ -f "$cooldown_state_file" ]]; then
+  last_fingerprint="$(yq -r '.last_fingerprint // ""' "$cooldown_state_file" 2>/dev/null || echo "")"
+  last_epoch="$(yq -r '.last_epoch // 0' "$cooldown_state_file" 2>/dev/null || echo "0")"
+  if [[ "$last_fingerprint" == "$fingerprint" ]]; then
+    elapsed=$((now_epoch - last_epoch))
+    if [[ "$elapsed" -lt "$cooldown_seconds" ]]; then
+      remaining=$((cooldown_seconds - elapsed))
+      skip_due_to_cooldown=1
+    fi
+  fi
+fi
+
+if [[ "$skip_due_to_cooldown" -eq 1 ]]; then
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n --arg cap "communications.alerts.queue.escalate" --arg status "ok" \
+      --arg fp "$fingerprint" --argjson remaining "$remaining" --argjson cooldown "$cooldown_seconds" \
+      '{capability:$cap,status:$status,data:{action:"dedupe_cooldown",fingerprint:$fp,cooldown_seconds:$cooldown,remaining_seconds:$remaining,reason:"escalation already filed within cooldown window"}}'
+  else
+    echo "communications.alerts.queue.escalate"
+    echo "action: dedupe_cooldown"
+    echo "fingerprint: $fingerprint"
+    echo "cooldown_seconds: $cooldown_seconds"
+    echo "remaining_seconds: $remaining"
+    echo "reason: escalation already filed within cooldown window"
+  fi
+  exit 0
+fi
+
+# ─── Execution gate ─────────────────────────────────────────────────────────
+if [[ "$EXECUTE" -eq 0 && "$DRY_RUN" -eq 0 ]]; then
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n --arg cap "communications.alerts.queue.escalate" --arg status "ok" \
+      --arg fp "$fingerprint" --arg slo_status "$slo_status" \
+      --argjson pending "$pending_count" --argjson oldest "$oldest_age" \
+      '{capability:$cap,status:$status,data:{action:"escalation_recommended",slo_status:$slo_status,fingerprint:$fp,pending_count:$pending,oldest_age:$oldest,hint:"pass --execute to create escalation artifacts"}}'
+  else
+    echo "communications.alerts.queue.escalate"
+    echo "action: escalation_recommended"
+    echo "slo_status: $slo_status"
+    echo "fingerprint: $fingerprint"
+    echo "pending_count: $pending_count"
+    echo "oldest_age: $oldest_age"
+    echo "hint: pass --execute to create escalation artifacts"
+  fi
+  exit 0
+fi
+
+# ─── Create escalation artifacts ────────────────────────────────────────────
+now_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+now_file_ts="$(date -u +%Y%m%dT%H%M%SZ)"
+escalation_id="ESCALATION-${now_file_ts}-${fingerprint:0:8}"
+
+task_id=""
+task_file=""
+artifact_path=""
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  artifact_path="${escalation_dir}/${escalation_id}.yaml"
+  task_id="TASK-${now_file_ts}-escalation"
+
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n --arg cap "communications.alerts.queue.escalate" --arg status "dry-run" \
+      --arg escalation_id "$escalation_id" --arg fp "$fingerprint" \
+      --arg artifact_path "$artifact_path" --arg task_id "$task_id" \
+      --arg slo_status "$slo_status" --argjson pending "$pending_count" \
+      --argjson oldest "$oldest_age" --argjson reasons "$slo_reasons" \
+      --arg task_enabled "$task_enabled" --arg proposal_enabled "$proposal_enabled" \
+      '{capability:$cap,status:$status,data:{action:"would_escalate",escalation_id:$escalation_id,fingerprint:$fp,artifact_path:$artifact_path,task_id:$task_id,slo_status:$slo_status,pending_count:$pending,oldest_age:$oldest,reasons:$reasons,channels:{mailroom_task:$task_enabled,proposal_skeleton:$proposal_enabled}}}'
+  else
+    echo "communications.alerts.queue.escalate"
+    echo "action: would_escalate (dry-run)"
+    echo "escalation_id: $escalation_id"
+    echo "fingerprint: $fingerprint"
+    echo "artifact_path: $artifact_path"
+    echo "task_id: $task_id"
+    echo "task_enabled: $task_enabled"
+    echo "proposal_enabled: $proposal_enabled"
+  fi
+  exit 0
+fi
+
+# ─── Write escalation artifact ──────────────────────────────────────────────
+mkdir -p "$escalation_dir"
+artifact_path="${escalation_dir}/${escalation_id}.yaml"
+
+ESCALATION_ID_ENV="$escalation_id" \
+FINGERPRINT_ENV="$fingerprint" \
+NOW_ENV="$now_ts" \
+SLO_STATUS_ENV="$slo_status" \
+PENDING_ENV="$pending_count" \
+OLDEST_ENV="$oldest_age" \
+AGE_BUCKET_ENV="$age_bucket" \
+REASONS_ENV="$slo_reasons" \
+yq e -n '
+  .escalation_id = strenv(ESCALATION_ID_ENV) |
+  .fingerprint = strenv(FINGERPRINT_ENV) |
+  .created_at = strenv(NOW_ENV) |
+  .slo_status = strenv(SLO_STATUS_ENV) |
+  .pending_count = (strenv(PENDING_ENV) | to_number) |
+  .oldest_pending_age_seconds = (strenv(OLDEST_ENV) | to_number) |
+  .age_bucket = (strenv(AGE_BUCKET_ENV) | to_number) |
+  .reasons = (strenv(REASONS_ENV) | fromjson) |
+  .channels_fired = [] |
+  .status = "open"
+' > "$artifact_path"
+
+channels_fired="[]"
+
+# ─── Enqueue mailroom task ──────────────────────────────────────────────────
+if [[ "$task_enabled" == "true" ]]; then
+  task_id="TASK-${now_file_ts}-escalation-${fingerprint:0:8}"
+  task_summary="${task_summary_template} (pending=${pending_count}, oldest_age=${oldest_age}s, fingerprint=${fingerprint:0:8})"
+
+  task_output="$("$TASK_ENQUEUE_BIN" \
+    --task-id "$task_id" \
+    --summary "$task_summary" \
+    --route-target "$task_route" \
+    --payload "escalation_id=${escalation_id}" \
+    --json 2>&1)" || true
+
+  task_state="$(echo "$task_output" | jq -r '.data.state // "unknown"' 2>/dev/null || echo "unknown")"
+  task_file="$(echo "$task_output" | jq -r '.data.file // ""' 2>/dev/null || echo "")"
+  channels_fired="$(echo "$channels_fired" | jq -c '. + ["mailroom_task"]')"
+
+  # Update artifact with task reference
+  yq -i ".mailroom_task_id = \"$task_id\" | .mailroom_task_state = \"$task_state\"" "$artifact_path"
+fi
+
+# ─── Write proposal skeleton ────────────────────────────────────────────────
+proposal_path=""
+if [[ "$proposal_enabled" == "true" ]]; then
+  proposal_path="${escalation_dir}/${escalation_id}.proposal-skeleton.yaml"
+
+  ESCALATION_ID_ENV="$escalation_id" \
+  NOW_ENV="$now_ts" \
+  PENDING_ENV="$pending_count" \
+  OLDEST_ENV="$oldest_age" \
+  yq e -n '
+    .proposal_type = "incident-escalation" |
+    .escalation_id = strenv(ESCALATION_ID_ENV) |
+    .created_at = strenv(NOW_ENV) |
+    .status = "draft" |
+    .action = "create" |
+    .description = "Proposal skeleton for incident SLO breach investigation" |
+    .suggested_actions = ["Operator flush pending intents", "Investigate backlog root cause", "Review provider/policy/throughput"] |
+    .pending_count = (strenv(PENDING_ENV) | to_number) |
+    .oldest_pending_age_seconds = (strenv(OLDEST_ENV) | to_number) |
+    .note = "This is a draft skeleton. Review and submit via proposals.submit if action needed."
+  ' > "$proposal_path"
+
+  channels_fired="$(echo "$channels_fired" | jq -c '. + ["proposal_skeleton"]')"
+
+  # Update artifact with proposal reference
+  yq -i ".proposal_skeleton_path = \"$proposal_path\"" "$artifact_path"
+fi
+
+# Update channels_fired in artifact
+CHANNELS_ENV="$channels_fired" \
+yq -i '.channels_fired = (strenv(CHANNELS_ENV) | fromjson)' "$artifact_path"
+
+# ─── Update cooldown state ──────────────────────────────────────────────────
+cooldown_dir="$(dirname "$cooldown_state_file")"
+mkdir -p "$cooldown_dir"
+
+FINGERPRINT_ENV="$fingerprint" \
+EPOCH_ENV="$now_epoch" \
+NOW_ENV="$now_ts" \
+ESC_ID_ENV="$escalation_id" \
+yq e -n '
+  .last_fingerprint = strenv(FINGERPRINT_ENV) |
+  .last_epoch = (strenv(EPOCH_ENV) | to_number) |
+  .last_escalation_at = strenv(NOW_ENV) |
+  .last_escalation_id = strenv(ESC_ID_ENV)
+' > "$cooldown_state_file"
+
+# ─── Output ─────────────────────────────────────────────────────────────────
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.alerts.queue.escalate" \
+    --arg status "ok" \
+    --arg generated_at "$now_ts" \
+    --arg escalation_id "$escalation_id" \
+    --arg fingerprint "$fingerprint" \
+    --arg artifact_path "$artifact_path" \
+    --arg task_id "${task_id:-}" \
+    --arg task_state "${task_state:-}" \
+    --arg task_file "${task_file:-}" \
+    --arg proposal_path "${proposal_path:-}" \
+    --arg slo_status "$slo_status" \
+    --argjson pending_count "$pending_count" \
+    --argjson oldest_age "$oldest_age" \
+    --argjson reasons "$slo_reasons" \
+    --argjson channels_fired "$channels_fired" \
+    '{
+      capability: $capability,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        action: "escalated",
+        escalation_id: $escalation_id,
+        fingerprint: $fingerprint,
+        artifact_path: $artifact_path,
+        slo_status: $slo_status,
+        pending_count: $pending_count,
+        oldest_pending_age_seconds: $oldest_age,
+        reasons: $reasons,
+        channels_fired: $channels_fired,
+        mailroom_task: {
+          task_id: $task_id,
+          state: $task_state,
+          file: $task_file
+        },
+        proposal_skeleton: {
+          path: $proposal_path
+        }
+      }
+    }'
+else
+  echo "communications.alerts.queue.escalate"
+  echo "action: escalated"
+  echo "escalation_id: $escalation_id"
+  echo "fingerprint: $fingerprint"
+  echo "artifact_path: $artifact_path"
+  echo "slo_status: $slo_status"
+  echo "pending_count: $pending_count"
+  echo "oldest_age: $oldest_age"
+  echo "channels_fired: $(echo "$channels_fired" | jq -r 'join(", ")')"
+  if [[ -n "${task_id:-}" ]]; then
+    echo "mailroom_task_id: $task_id"
+    echo "mailroom_task_state: ${task_state:-}"
+  fi
+  if [[ -n "${proposal_path:-}" ]]; then
+    echo "proposal_skeleton: $proposal_path"
+  fi
+fi
