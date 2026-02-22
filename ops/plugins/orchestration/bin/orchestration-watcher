@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# orchestration-watcher - Watcher queue management
+# Called by: ops cap run orchestration.watcher.{enqueue,status}
+set -euo pipefail
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine-mailroom}"
+WAVES_DIR="$RUNTIME_ROOT/waves"
+
+ACTION="${1:-status}"
+shift || true
+
+case "$ACTION" in
+  enqueue)
+    # Find active wave and dispatch watcher
+    local_wave_id="${1:-}"
+    if [[ -z "$local_wave_id" ]]; then
+      # Find first active wave
+      for wdir in "$WAVES_DIR"/*/; do
+        wf="$wdir/state.json"
+        if [[ -f "$wf" ]]; then
+          wstatus="$(python3 -c "import json; print(json.load(open('$wf')).get('status',''))" 2>/dev/null || true)"
+          if [[ "$wstatus" == "active" ]]; then
+            local_wave_id="$(python3 -c "import json; print(json.load(open('$wf')).get('wave_id',''))" 2>/dev/null)"
+            break
+          fi
+        fi
+      done
+    fi
+    if [[ -z "$local_wave_id" ]]; then
+      echo "No active wave found. Create one: ops wave start <WAVE_ID> --objective \"...\"" >&2
+      exit 1
+    fi
+    exec "$SPINE_REPO/ops/commands/wave.sh" dispatch "$local_wave_id" --lane watcher --task "Background verification checks"
+    ;;
+  status)
+    # Show watcher check status for all active waves
+    for wdir in "$WAVES_DIR"/*/; do
+      wf="$wdir/state.json"
+      if [[ -f "$wf" ]]; then
+        python3 -c "
+import json
+with open('$wf') as f:
+    state = json.load(f)
+if state.get('status') != 'active':
+    exit(0)
+checks = state.get('watcher_checks', [])
+if not checks:
+    exit(0)
+print(f\"Wave: {state['wave_id']}\")
+for c in checks:
+    rk = f' R={c[\"run_key\"]}' if c.get('run_key') else ''
+    print(f'  [{c[\"status\"]:8s}] {c[\"cap\"]}{rk}')
+" 2>/dev/null || true
+      fi
+    done
+    ;;
+  *)
+    echo "Usage: orchestration-watcher <enqueue|status> [wave_id]" >&2
+    exit 1
+    ;;
+esac

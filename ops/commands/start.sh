@@ -203,5 +203,5 @@ cat <<BOX
 ║ Session:  ${SESSION_DIR}                                   ║
 ╚═══════════════════════════════════════════════════════════╝
 
-Next: cd ${WORKTREE_DIR} && ops lane builder
+Next: cd ${WORKTREE_DIR} && ops lane open control
 BOX

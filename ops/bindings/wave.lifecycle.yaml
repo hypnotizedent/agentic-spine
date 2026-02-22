@@ -1,0 +1,89 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-22
+scope: wave-lifecycle-contract
+version: 1
+
+# Wave Lifecycle Contract
+# Defines valid state transitions, required artifacts, and close criteria.
+
+states:
+  active:
+    description: "Wave is open, accepting dispatches"
+    allowed_transitions: [closed]
+    required_before_transition:
+      closed:
+        - "All watcher checks must be done or failed (not queued/running)"
+        - "Preflight must have been run at least once"
+  closed:
+    description: "Wave is finalized, merge receipt generated"
+    allowed_transitions: []
+    artifacts:
+      - merge_receipt
+
+# Wave ID format
+id_format: "WAVE-YYYYMMDD-NN"
+id_pattern: "^WAVE-[0-9]{8}-[0-9]{2}$"
+
+# Preflight contract
+preflight:
+  target_duration_s: 120
+  checks:
+    - name: status_tick
+      source: "ops status --brief"
+      blocking: true
+      timeout_s: 15
+    - name: git_state
+      source: "git status"
+      blocking: false
+      timeout_s: 5
+    - name: domain_health
+      source: "domain-specific curl"
+      blocking: true
+      timeout_s: 30
+    - name: lane_readiness
+      source: "lane state check"
+      blocking: false
+      timeout_s: 5
+  verdicts:
+    go: "All blocking checks pass, no critical blockers"
+    no-go: "One or more blocking checks failed"
+
+# Watcher queue contract
+watcher:
+  default_checks:
+    - cap: "stability.control.snapshot"
+      priority: 1
+      timeout_s: 600
+    - cap: "verify.core.run"
+      priority: 2
+      timeout_s: 600
+    - cap: "verify.pack.run core-operator"
+      priority: 3
+      timeout_s: 600
+  states: [queued, running, done, failed]
+  run_key_pattern: "CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+
+# Merge receipt contract (generated on wave.close)
+merge_receipt:
+  format: markdown
+  location: "runtime/waves/<WAVE_ID>/receipt.md"
+  required_fields:
+    - wave_id
+    - objective
+    - created_at
+    - closed_at
+    - dispatches_summary
+    - watcher_run_keys
+    - preflight_verdict
+    - residual_blockers
+  optional_fields:
+    - roadmap_patch_draft
+    - proposal_ids
+    - commit_hashes
+
+# Runtime state locations
+runtime:
+  waves_dir: "/Users/ronnyworks/code/.runtime/spine-mailroom/waves"
+  lanes_state: "/Users/ronnyworks/code/.runtime/spine-mailroom/lanes/state.json"

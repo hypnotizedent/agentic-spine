@@ -85,7 +85,9 @@ Boundary:
 | `ops verify` | Health-check services declared in SERVICE_REGISTRY.yaml |
 | `ops ready` | Run spine gates + secrets checks (API work preflight) |
 | `ops preflight` | Print governance banner + service registry hints |
-| `ops lane <name>` | Show lane header (`builder` / `runner` / `clerk`) |
+| `ops lane <cmd>` | Lane orchestrator (`list`, `open`, `status`, `close`, `check`) |
+| `ops wave <cmd>` | Wave orchestration (`start`, `dispatch`, `ack`, `status`, `close`, `preflight`) |
+| `ops board` | Terminal dashboard (lanes + waves + checks) |
 | `ops pr [...args]` | Stage/commit/push changes and open a PR |
 | `ops close [issue]` | Run verify, confirm PR merged, update state, close issue |
 | `ops ai [--bundle]` | Bundle governance docs for AI agents |

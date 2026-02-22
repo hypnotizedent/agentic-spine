@@ -53,7 +53,7 @@ Full spine access. Follow all sections below in order.
 ### Session steps
 
 1. **Greet the spine**
-   - Run `./bin/ops preflight` or `./bin/ops lane <name>` to print governance hints.
+   - Run `./bin/ops preflight` or `./bin/ops lane list` to print governance hints.
    - Confirm gate domain pack routing before mutation:
      - `./bin/ops cap run verify.drift_gates.certify --list-domains`
      - `./bin/ops cap run verify.drift_gates.certify --domain <name> --brief`

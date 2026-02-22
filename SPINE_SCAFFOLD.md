@@ -185,7 +185,7 @@
 # ops loops <cmd>      Open Loop Engine (list, collect, close, summary)
 # ops start <issue>    Per-issue worktree + session docs
 # ops preflight        Governance banner + service registry hints
-# ops lane <name>      Lane header (builder|runner|clerk)
+# ops lane <cmd>       Lane orchestrator (list|open|status|close|check)
 # ops verify           Health-check declared services
 # ops ready            Spine gates + secrets checks (API preflight)
 # ops pr [...args]     Stage/commit/push + open PR
