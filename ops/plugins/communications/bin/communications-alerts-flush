@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# communications-alerts-flush — Flush pending alerting email intents through
+# governed communications dispatch pipeline (preview + execute).
+#
+# Safety: mutating (sends real email via communications.send.execute)
+# Approval: manual (preserves external-send approval boundary)
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+DELIVERY_CONTRACT="${COMMUNICATIONS_DELIVERY_CONTRACT:-$ROOT/ops/bindings/communications.delivery.contract.yaml}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+INTENT_DIR="$ROOT/mailroom/outbox/alerts/email-intents"
+PREVIEW_BIN="$ROOT/ops/plugins/communications/bin/communications-send-preview"
+EXECUTE_BIN="$ROOT/ops/plugins/communications/bin/communications-send-execute"
+LIMIT=0
+JSON=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-alerts-flush [--limit <n>] [--json]
+
+Reads pending email intent artifacts from mailroom/outbox/alerts/email-intents/,
+runs communications.send.preview then communications.send.execute --execute for
+each, logs delivery, and marks intent as sent.
+
+Options:
+  --limit <n>    Process at most N intents (0 = all pending, default: 0)
+  --json         Emit JSON summary
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --limit) LIMIT="${2:-0}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ -x "$PREVIEW_BIN" ]] || { echo "ERROR: missing preview script: $PREVIEW_BIN" >&2; exit 1; }
+[[ -x "$EXECUTE_BIN" ]] || { echo "ERROR: missing execute script: $EXECUTE_BIN" >&2; exit 1; }
+
+if [[ ! -d "$INTENT_DIR" ]]; then
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n --arg cap "communications.alerts.flush" --arg status "ok" \
+      '{capability:$cap,status:$status,data:{pending:0,flushed:0,failed:0,skipped:0,results:[]}}'
+  else
+    echo "communications.alerts.flush"
+    echo "pending: 0"
+    echo "flushed: 0"
+    echo "No intent directory found."
+  fi
+  exit 0
+fi
+
+# Gather pending intents
+pending_files=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  flush_status="$(yq -r '.flush_status // "pending"' "$f" 2>/dev/null || echo "error")"
+  if [[ "$flush_status" == "pending" ]]; then
+    pending_files+=("$f")
+  fi
+done < <(find "$INTENT_DIR" -name '*.yaml' -type f 2>/dev/null | sort)
+
+total_pending="${#pending_files[@]}"
+if [[ "$LIMIT" -gt 0 && "$total_pending" -gt "$LIMIT" ]]; then
+  pending_files=("${pending_files[@]:0:$LIMIT}")
+fi
+
+flushed=0
+failed=0
+skipped=0
+results=()
+
+for intent_file in "${pending_files[@]}"; do
+  intent_id="$(yq -r '.intent_id // ""' "$intent_file")"
+  domain_id="$(yq -r '.domain_id // ""' "$intent_file")"
+  title="$(yq -r '.title // ""' "$intent_file")"
+  summary="$(yq -r '.summary // ""' "$intent_file")"
+  recipient="$(yq -r '.suggested_recipient // "alerts@spine.mintprints.co"' "$intent_file")"
+
+  # Build email subject + body from alert intent
+  subject="[Spine Alert] ${title}"
+  body="Domain: ${domain_id}
+Severity: $(yq -r '.severity // "unknown"' "$intent_file")
+Summary: ${summary}
+Intent ID: ${intent_id}
+Created: $(yq -r '.created_at // ""' "$intent_file")"
+
+  # Step 1: Preview
+  preview_output=""
+  if preview_output="$(
+    "$PREVIEW_BIN" \
+      --channel email \
+      --message-type custom \
+      --to "$recipient" \
+      --subject "$subject" \
+      --body "$body" \
+      --consent-state opted-in \
+      --json 2>&1
+  )"; then
+    preview_id="$(echo "$preview_output" | jq -r '.data.preview_id // ""' 2>/dev/null || echo "")"
+    send_allowed="$(echo "$preview_output" | jq -r '.data.send_allowed // false' 2>/dev/null || echo "false")"
+
+    if [[ -z "$preview_id" ]]; then
+      echo "WARN: preview returned no preview_id for intent $intent_id — skipping" >&2
+      skipped=$((skipped + 1))
+      results+=("$(jq -nc --arg id "$intent_id" --arg st "skipped" --arg err "no preview_id" '{intent_id:$id,status:$st,error:$err}')")
+      continue
+    fi
+
+    if [[ "$send_allowed" != "true" ]]; then
+      block_reasons="$(echo "$preview_output" | jq -r '.data.policy_block_reasons | join(",")' 2>/dev/null || echo "unknown")"
+      echo "WARN: send not allowed for intent $intent_id — $block_reasons — skipping" >&2
+      skipped=$((skipped + 1))
+      results+=("$(jq -nc --arg id "$intent_id" --arg st "blocked" --arg err "$block_reasons" '{intent_id:$id,status:$st,error:$err}')")
+      continue
+    fi
+
+    # Step 2: Execute
+    exec_output=""
+    if exec_output="$(
+      "$EXECUTE_BIN" \
+        --channel email \
+        --message-type custom \
+        --to "$recipient" \
+        --subject "$subject" \
+        --body "$body" \
+        --consent-state opted-in \
+        --preview-id "$preview_id" \
+        --execute \
+        --json 2>&1
+    )"; then
+      exec_status="$(echo "$exec_output" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")"
+      event_id="$(echo "$exec_output" | jq -r '.data.event_id // ""' 2>/dev/null || echo "")"
+
+      # Mark intent as sent
+      yq -i ".flush_status = \"sent\" | .flushed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .delivery_event_id = \"$event_id\"" "$intent_file"
+      flushed=$((flushed + 1))
+      results+=("$(jq -nc --arg id "$intent_id" --arg st "$exec_status" --arg eid "$event_id" '{intent_id:$id,status:$st,event_id:$eid}')")
+    else
+      yq -i ".flush_status = \"failed\" | .flushed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$intent_file"
+      failed=$((failed + 1))
+      results+=("$(jq -nc --arg id "$intent_id" --arg st "failed" --arg err "execute failed" '{intent_id:$id,status:$st,error:$err}')")
+    fi
+  else
+    echo "WARN: preview failed for intent $intent_id — skipping" >&2
+    failed=$((failed + 1))
+    results+=("$(jq -nc --arg id "$intent_id" --arg st "failed" --arg err "preview failed" '{intent_id:$id,status:$st,error:$err}')")
+  fi
+done
+
+results_json="[]"
+for r in "${results[@]+"${results[@]}"}"; do
+  results_json="$(echo "$results_json" | jq -c --argjson item "$r" '. + [$item]')"
+done
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.alerts.flush" \
+    --arg status "ok" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson pending "$total_pending" \
+    --argjson flushed "$flushed" \
+    --argjson failed "$failed" \
+    --argjson skipped "$skipped" \
+    --argjson results "$results_json" \
+    '{
+      capability: $capability,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        pending: $pending,
+        flushed: $flushed,
+        failed: $failed,
+        skipped: $skipped,
+        results: $results
+      }
+    }'
+  exit 0
+fi
+
+echo "communications.alerts.flush"
+echo "pending: $total_pending"
+echo "flushed: $flushed"
+echo "failed: $failed"
+echo "skipped: $skipped"
+for r in "${results[@]+"${results[@]}"}"; do
+  echo "  $(echo "$r" | jq -r '[.intent_id, .status, (.event_id // .error // "")] | join(" ")')"
+done
