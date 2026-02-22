@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Ensure bin/ops preflight succeeds from the spine root before any session work.
+# TRIAGE: Validate bin/ops entrypoint wiring without invoking heavyweight preflight.
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -9,10 +9,15 @@ if [[ ! -x "$ROOT/bin/ops" ]]; then
   exit 1
 fi
 
-if "$ROOT/bin/ops" preflight >/dev/null 2>&1; then
-  echo "D3 PASS: entrypoint preflight succeeded"
+[[ -f "$ROOT/ops/capabilities.yaml" ]] || {
+  echo "D3 FAIL: missing capabilities registry at $ROOT/ops/capabilities.yaml" >&2
+  exit 1
+}
+
+if "$ROOT/bin/ops" status --brief >/dev/null 2>&1; then
+  echo "D3 PASS: entrypoint smoke checks succeeded"
   exit 0
 fi
 
-echo "D3 FAIL: bin/ops preflight failed" >&2
+echo "D3 FAIL: bin/ops status --brief smoke check failed" >&2
 exit 1

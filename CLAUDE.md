@@ -7,7 +7,7 @@
 ## Session Entry
 
 1. Read `AGENTS.md` for the full runtime contract.
-2. Run the Mandatory Startup Block below (3 commands, <60s).
+2. Run the Mandatory Startup Block below (fast startup by default).
 3. Run `./bin/ops cap list` only when you need to discover a specific capability.
 
 <!-- SPINE_STARTUP_BLOCK -->
@@ -15,9 +15,12 @@
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops status
-./bin/ops cap run stability.control.snapshot
-./bin/ops cap run verify.core.run
+./bin/ops cap run session.start
+
+# Legacy full startup lane (manual opt-in):
+# ./bin/ops status
+# ./bin/ops cap run stability.control.snapshot
+# ./bin/ops cap run verify.core.run
 ```
 <!-- /SPINE_STARTUP_BLOCK -->
 

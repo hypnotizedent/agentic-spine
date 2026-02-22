@@ -72,11 +72,11 @@ check_deps() {
 list_caps() {
     echo "=== AVAILABLE CAPABILITIES ==="
     echo ""
-    yq e '.capabilities | keys | .[]' "$CAP_FILE" | while read -r cap; do
-        desc="$(yaml_query "$CAP_FILE" ".capabilities.\"$cap\".description")"
-        safety="$(yaml_query "$CAP_FILE" ".capabilities.\"$cap\".safety")"
-        printf "  %-25s [%s] %s\n" "$cap" "$safety" "$desc"
-    done
+    yq e -r '.capabilities | to_entries[] | [.key, (.value.safety // ""), (.value.description // "")] | @tsv' "$CAP_FILE" \
+      | LC_ALL=C sort -t $'\t' -k1,1 \
+      | while IFS=$'\t' read -r cap safety desc; do
+          printf "  %-25s [%s] %s\n" "$cap" "$safety" "$desc"
+        done
     echo ""
     echo "Run: ops cap run <name> [args...]"
 }

@@ -11,6 +11,10 @@ set -euo pipefail
 # - touches_api=true requires secrets preconditions
 # - ./relative command targets exist and are executable
 #
+# Performance note:
+# - Parse YAML exactly once via yq -> JSON, then validate in-memory.
+# - Avoid per-capability yq invocations (previous path dominated verify.core latency).
+#
 # Usage:
 #   d63-capabilities-metadata-lock.sh
 #   d63-capabilities-metadata-lock.sh --file /path/to/capabilities.yaml
@@ -45,76 +49,115 @@ EOF
 done
 
 command -v yq >/dev/null 2>&1 || fail "required tool missing: yq"
+command -v python3 >/dev/null 2>&1 || fail "required tool missing: python3"
 [[ -f "$CAP_FILE" ]] || fail "missing file: $CAP_FILE"
 yq e '.' "$CAP_FILE" >/dev/null 2>&1 || fail "invalid YAML: $CAP_FILE"
 
-version="$(yq e -r '.version // ""' "$CAP_FILE" 2>/dev/null || true)"
-[[ -n "${version:-}" ]] || fail "missing .version"
+python3 - "$CAP_FILE" "$ROOT" <<'PY'
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
 
-updated="$(yq e -r '.updated // ""' "$CAP_FILE" 2>/dev/null || true)"
-[[ "$updated" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || fail "missing/invalid .updated (YYYY-MM-DD): '${updated:-}'"
+cap_file = sys.argv[1]
+root = sys.argv[2]
 
-mapfile -t caps < <(yq e -r '.capabilities | keys | .[]' "$CAP_FILE" 2>/dev/null || true)
-(( ${#caps[@]} > 0 )) || fail "no capabilities found under .capabilities"
 
-declare -A cap_exists
-for c in "${caps[@]}"; do
-  cap_exists["$c"]=1
-done
+def fail(msg: str) -> None:
+    print(f"D63 FAIL: {msg}", file=sys.stderr)
+    raise SystemExit(1)
 
-for cap in "${caps[@]}"; do
-  desc="$(yq e -r ".capabilities.\"$cap\".description // \"\"" "$CAP_FILE" 2>/dev/null || true)"
-  cmd="$(yq e -r ".capabilities.\"$cap\".command // \"\"" "$CAP_FILE" 2>/dev/null || true)"
-  safety="$(yq e -r ".capabilities.\"$cap\".safety // \"\"" "$CAP_FILE" 2>/dev/null || true)"
-  approval="$(yq e -r ".capabilities.\"$cap\".approval // \"\"" "$CAP_FILE" 2>/dev/null || true)"
 
-  [[ -n "$desc" ]] || fail "$cap missing required field: description"
-  [[ -n "$cmd" ]] || fail "$cap missing required field: command"
-  [[ -n "$safety" ]] || fail "$cap missing required field: safety"
-  [[ -n "$approval" ]] || fail "$cap missing required field: approval"
+raw = subprocess.run(
+    ["yq", "-o=json", ".", cap_file],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+if raw.returncode != 0:
+    fail(f"invalid YAML: {cap_file}")
 
-  case "$safety" in
-    read-only|mutating|destructive) ;;
-    *) fail "$cap invalid safety: '$safety' (expected read-only|mutating|destructive)" ;;
-  esac
+try:
+    data = json.loads(raw.stdout)
+except json.JSONDecodeError:
+    fail(f"unable to parse YAML as JSON: {cap_file}")
 
-  case "$approval" in
-    auto|manual|operator) ;;
-    *) fail "$cap invalid approval: '$approval' (expected auto|manual|operator)" ;;
-  esac
+version = str(data.get("version") or "")
+if not version:
+    fail("missing .version")
 
-  outputs_len="$(yq e ".capabilities.\"$cap\".outputs | length" "$CAP_FILE" 2>/dev/null || echo 0)"
-  [[ "$outputs_len" =~ ^[0-9]+$ ]] || outputs_len=0
-  (( outputs_len > 0 )) || fail "$cap missing/empty required field: outputs"
+updated = str(data.get("updated") or "")
+if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated):
+    fail(f"missing/invalid .updated (YYYY-MM-DD): '{updated}'")
 
-  # requires[] must reference known capabilities (typo guard)
-  while IFS= read -r req; do
-    [[ -z "${req:-}" || "$req" == "null" ]] && continue
-    [[ -n "${cap_exists[$req]:-}" ]] || fail "$cap requires unknown capability: $req"
-  done < <(yq e -r ".capabilities.\"$cap\".requires[]?" "$CAP_FILE" 2>/dev/null || true)
+caps = data.get("capabilities")
+if not isinstance(caps, dict) or len(caps) == 0:
+    fail("no capabilities found under .capabilities")
 
-  # touches_api=true must require secrets binding + auth status
-  touches_api="$(yq e -r ".capabilities.\"$cap\".touches_api // false" "$CAP_FILE" 2>/dev/null || echo "false")"
-  if [[ "$touches_api" == "true" ]]; then
-    has_binding=0
-    has_auth=0
-    while IFS= read -r req; do
-      [[ -z "${req:-}" || "$req" == "null" ]] && continue
-      [[ "$req" == "secrets.binding" ]] && has_binding=1
-      [[ "$req" == "secrets.auth.status" ]] && has_auth=1
-    done < <(yq e -r ".capabilities.\"$cap\".requires[]?" "$CAP_FILE" 2>/dev/null || true)
-    [[ "$has_binding" == "1" && "$has_auth" == "1" ]] || fail "$cap touches_api=true but missing requires: secrets.binding + secrets.auth.status"
-  fi
+cap_names = set(caps.keys())
+valid_safety = {"read-only", "mutating", "destructive"}
+valid_approval = {"auto", "manual", "operator"}
 
-  # ./relative command first token must exist and be executable
-  first_token="$(printf '%s\n' "$cmd" | awk '{print $1}')"
-  if [[ "$first_token" == ./* ]]; then
-    rel="${first_token#./}"
-    abs="$ROOT/$rel"
-    [[ -f "$abs" ]] || fail "$cap command target missing: $first_token (resolved: $abs)"
-    [[ -x "$abs" ]] || fail "$cap command target not executable: $first_token (resolved: $abs)"
-  fi
-done
+for cap, cfg in caps.items():
+    if not isinstance(cfg, dict):
+        fail(f"{cap} capability config must be a map")
 
-echo "D63 PASS: capabilities metadata valid"
+    desc = str(cfg.get("description") or "")
+    cmd = str(cfg.get("command") or "")
+    safety = str(cfg.get("safety") or "")
+    approval = str(cfg.get("approval") or "")
 
+    if not desc:
+        fail(f"{cap} missing required field: description")
+    if not cmd:
+        fail(f"{cap} missing required field: command")
+    if not safety:
+        fail(f"{cap} missing required field: safety")
+    if not approval:
+        fail(f"{cap} missing required field: approval")
+
+    if safety not in valid_safety:
+        fail(f"{cap} invalid safety: '{safety}' (expected read-only|mutating|destructive)")
+    if approval not in valid_approval:
+        fail(f"{cap} invalid approval: '{approval}' (expected auto|manual|operator)")
+
+    outputs = cfg.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) == 0:
+        fail(f"{cap} missing/empty required field: outputs")
+
+    requires = cfg.get("requires", [])
+    if requires is None:
+        requires = []
+    if not isinstance(requires, list):
+        fail(f"{cap} requires must be a list when present")
+
+    normalized_requires = []
+    for req in requires:
+        req_s = str(req or "").strip()
+        if not req_s:
+            continue
+        normalized_requires.append(req_s)
+        if req_s not in cap_names:
+            fail(f"{cap} requires unknown capability: {req_s}")
+
+    if bool(cfg.get("touches_api", False)):
+        if "secrets.binding" not in normalized_requires or "secrets.auth.status" not in normalized_requires:
+            fail(f"{cap} touches_api=true but missing requires: secrets.binding + secrets.auth.status")
+
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError as exc:
+        fail(f"{cap} command parse error: {exc}")
+
+    first_token = tokens[0] if tokens else ""
+    if first_token.startswith("./"):
+        abs_path = os.path.join(root, first_token[2:])
+        if not os.path.isfile(abs_path):
+            fail(f"{cap} command target missing: {first_token} (resolved: {abs_path})")
+        if not os.access(abs_path, os.X_OK):
+            fail(f"{cap} command target not executable: {first_token} (resolved: {abs_path})")
+
+print("D63 PASS: capabilities metadata valid")
+PY

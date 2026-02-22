@@ -251,10 +251,57 @@ fi
 
 # Read governance brief — prefer spine.context dynamic delivery, fallback to direct file read
 BRIEF_FILE="$SPINE_ROOT/docs/governance/AGENT_GOVERNANCE_BRIEF.md"
+BRIEF_MODE="${SESSION_ENTRY_BRIEF_MODE:-summary}"  # summary|full
 if [[ -x "$CONTEXT_SCRIPT" ]]; then
-  BRIEF=$("$CONTEXT_SCRIPT" --section brief 2>/dev/null || cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable)")
+  BRIEF_FULL=$("$CONTEXT_SCRIPT" --section brief 2>/dev/null || cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable)")
 else
-  BRIEF=$(cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable — expected at $BRIEF_FILE)")
+  BRIEF_FULL=$(cat "$BRIEF_FILE" 2>/dev/null || echo "(governance brief unavailable — expected at $BRIEF_FILE)")
+fi
+
+summarize_brief() {
+  local text="$1"
+  printf '%s\n' "$text" | awk '
+    BEGIN {
+      capture = 0
+      lines = 0
+      emitted = 0
+    }
+    /^## / {
+      if ($0 ~ /^## (Commit & Branch Rules|Multi-Agent Write Policy \(Mailroom-Gated Writes\)|Verify & Receipts|Quick Commands)$/) {
+        capture = 1
+        lines = 0
+        print
+        emitted = 1
+        next
+      }
+      capture = 0
+    }
+    capture == 1 {
+      if (lines < 12) {
+        print
+        lines++
+      }
+    }
+    END {
+      if (emitted == 0) {
+        # Fallback: keep context bounded to first lines if headings change.
+        # shellcheck disable=SC2317
+        print ""
+      }
+    }
+  '
+}
+
+if [[ "$BRIEF_MODE" == "full" ]]; then
+  BRIEF_RENDERED="$BRIEF_FULL"
+else
+  BRIEF_SUMMARY="$(summarize_brief "$BRIEF_FULL" | sed '/^[[:space:]]*$/N;/^\n$/D')"
+  if [[ -z "$BRIEF_SUMMARY" ]]; then
+    BRIEF_SUMMARY="$(printf '%s\n' "$BRIEF_FULL" | sed -n '1,80p')"
+  fi
+  BRIEF_RENDERED="$BRIEF_SUMMARY
+
+> Full brief: \`docs/governance/AGENT_GOVERNANCE_BRIEF.md\` (set \`SESSION_ENTRY_BRIEF_MODE=full\` to inject full text)."
 fi
 
 # Build the system message: dynamic state + canonical brief
@@ -274,7 +321,7 @@ ${DIRTY_WARNING}${MULTI_AGENT_WARNING}${PROPOSALS_HEALTH}
 ${LOOPS}
 \`\`\`
 
-${BRIEF}"
+${BRIEF_RENDERED}"
 
 # Output JSON with systemMessage
 jq -n --arg msg "$MSG" '{"systemMessage": $msg}'
