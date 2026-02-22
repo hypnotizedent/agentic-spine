@@ -43,7 +43,7 @@ Full spine access. Follow all sections below in order.
 
 ### Before you run anything
 
-1. Confirm you are in the spine repo (`cd /Users/ronnyworks/code/agentic-spine`).
+1. Confirm you are in the spine repo (`cd ~/code/agentic-spine`).
 2. Read this document start to finish so you understand how sessions are assembled.
 3. Open `docs/brain/README.md` to see the hotkeys, memory rules, and context injection process.
 4. Browse `docs/governance/GOVERNANCE_INDEX.md` to learn how governance knowledge is structured and where single sources of truth live.
@@ -53,16 +53,11 @@ Full spine access. Follow all sections below in order.
 ### Session steps
 
 1. **Greet the spine**
-   - Run `./bin/ops preflight` or `./bin/ops lane list` to print governance hints.
-   - Confirm gate domain pack routing before mutation:
-     - `./bin/ops cap run verify.drift_gates.certify --list-domains`
-     - `./bin/ops cap run verify.drift_gates.certify --domain <name> --brief`
-   - Confirm agent-scoped verify packs:
-     - `./bin/ops cap run verify.pack.list`
-     - `./bin/ops cap run verify.pack.explain <agent_id|domain>`
-   - Set `OPS_GATE_DOMAIN=<name>` (default is `core`) so preflight prints the active domain pack inline.
-   - Install governance hooks once per clone: `./bin/ops hooks install` (warns in preflight if missing).
-   - If you are about to touch secrets, make sure you sourced `~/.config/infisical/credentials` and can run the secrets gating capabilities (`secrets.binding`, `secrets.auth.status`, etc.).
+   - Run `./bin/ops status` to see open work (loops, gaps, inbox).
+   - Run `./bin/ops cap run stability.control.snapshot` for runtime health.
+   - Run `./bin/ops cap run verify.core.run` — Core-8 preflight (<60s, no network calls).
+   - That's your full startup. Domain-specific verify runs AFTER domain work, not at startup.
+   - If you are about to touch secrets, source `~/.config/infisical/credentials` first.
 2. **Load context**
    - Generate or read the latest `docs/brain/context.md` if the script is available (see `docs/brain/README.md`).
    - Run `./bin/ops status` to see all open work (loops, gaps, inbox, anomalies). Prioritize closing existing work before starting new work.
@@ -93,27 +88,19 @@ Full spine access. Follow all sections below in order.
 | Single read-only query | `ops cap run` (auto-approval) |
 | Single mutating action | `ops cap run` (manual approval) |
 | Multi-step coordinated work | Open a loop, use proposal flow |
-| Quick verify/status check | `ops cap run lane.standard.run` |
-| Release/nightly certification | `ops cap run spine.verify` |
+| Quick verify/status check | `ops cap run verify.core.run` |
+| Post-domain-work verify | `ops cap run verify.route.recommend` → `verify.pack.run <domain>` |
+| Release/nightly certification | `ops cap run verify.release.run` |
 
-### Gate Domain Packs (Terminal Routing)
+### Verify Tiers
 
-Use domain packs to make gate applicability explicit before mutation work.
+| Tier | When | Command | Time |
+|------|------|---------|------|
+| **Core-8** | Every session start | `verify.core.run` | <60s |
+| **Domain pack** | After domain work, before commit | `verify.pack.run <domain>` | 1-5 min |
+| **Full release** | Nightly / release only | `verify.release.run` | 10-15 min |
 
-- Canonical binding: `ops/bindings/gate.domain.profiles.yaml`
-- Domain list: `core`, `aof`, `secrets`, `infra`, `workbench`, `loop_gap`, `home`, `media`, `immich`, `n8n`, `finance`, `ms-graph`, `rag`
-- Terminal default: `OPS_GATE_DOMAIN` unset -> `core`
-
-Recommended pre-mutation command:
-
-```bash
-./bin/ops cap run lane.standard.run
-```
-
-Daily lane report artifacts:
-
-- `mailroom/outbox/operations/daily-lane/daily-lane-latest.md`
-- `mailroom/outbox/operations/daily-lane/daily-lane-latest.json`
+Network gates (infra health, backup checks, media stack) have Tailscale guards — they SKIP cleanly when VPN is disconnected instead of hanging or triggering login popups.
 
 ### After the session (Desktop)
 

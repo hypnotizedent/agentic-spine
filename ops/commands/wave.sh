@@ -228,8 +228,8 @@ _dispatch_watcher() {
   local sd="$3"
   local task_desc="$4"
 
-  # Default long checks for the watcher
-  local checks=("stability.control.snapshot" "verify.core.run" "verify.pack.run core-operator")
+  # Default checks for the watcher (core-8 only, no duplicate pack run)
+  local checks=("stability.control.snapshot" "verify.core.run")
 
   python3 - "$sf" "$task_desc" <<'PYWATCHER_INIT'
 import json, sys, fcntl, os
@@ -247,8 +247,7 @@ try:
 
     checks = [
         {"cap": "stability.control.snapshot", "status": "queued", "run_key": None, "pid": None, "exit_code": None},
-        {"cap": "verify.core.run", "status": "queued", "run_key": None, "pid": None, "exit_code": None},
-        {"cap": "verify.pack.run core-operator", "status": "queued", "run_key": None, "pid": None, "exit_code": None}
+        {"cap": "verify.core.run", "status": "queued", "run_key": None, "pid": None, "exit_code": None}
     ]
 
     state["watcher_checks"] = checks

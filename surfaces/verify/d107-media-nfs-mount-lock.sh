@@ -4,6 +4,10 @@
 # Enforces: download-stack has RW, streaming-stack has RO, both can reach NFS
 set -euo pipefail
 
+# Network gate — skip cleanly when Tailscale VPN is disconnected
+source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
+require_tailscale
+
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 TENANT_BINDING="$ROOT/ops/bindings/tenants/media-stack.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"

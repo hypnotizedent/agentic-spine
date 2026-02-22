@@ -25,17 +25,23 @@ scope: agent-runtime-contract
 ```bash
 cd ~/code/agentic-spine
 ./bin/ops status
-./bin/ops cap list
 ./bin/ops cap run stability.control.snapshot
 ./bin/ops cap run verify.core.run
-./bin/ops cap run verify.route.recommend
-./bin/ops cap run verify.pack.run <domain|core-operator>
-./bin/ops cap run spine.verify   # release/nightly certification only
 ```
 <!-- /SPINE_STARTUP_BLOCK -->
 
-Release/nightly only:
-`./bin/ops cap run spine.verify`
+## Post-Work Verify (run after domain changes, before commit)
+
+```bash
+./bin/ops cap run verify.route.recommend          # tells you which domain pack to run
+./bin/ops cap run verify.pack.run <domain>         # runs domain-specific gates
+```
+
+## Release Certification (nightly / release only)
+
+```bash
+./bin/ops cap run verify.release.run              # full 148-gate suite (requires Tailscale)
+```
 
 ## Source-Of-Truth Contract
 
@@ -109,29 +115,23 @@ scope: agent-governance-brief
 
 ## Verify & Receipts
 
-- Day-to-day preflight: run `./bin/ops cap run stability.control.snapshot` then `./bin/ops cap run verify.core.run`.
-- Domain work: run `./bin/ops cap run verify.route.recommend` and then `./bin/ops cap run verify.pack.run <domain|core-operator>` (use `verify.domain.run` only for integration/debug).
-- Certification: run `./bin/ops cap run verify.release.run` or `./bin/ops cap run spine.verify` for release/nightly and final cutover.
+- **Session start:** `stability.control.snapshot` then `verify.core.run` (8 gates, <60s, no network).
+- **After domain work:** `verify.route.recommend` → `verify.pack.run <domain>` (domain-specific gates only).
+- **Release/nightly:** `verify.release.run` (full 148-gate suite, requires Tailscale).
+- **Network gates** have Tailscale guards — they SKIP cleanly when VPN is disconnected, never hang or popup.
 - Every capability execution auto-generates a receipt. Ledger is append-only.
-- Domain updates are impact-scoped: update the domain runbook and add a receipt note via `./bin/ops cap run docs.impact.note <domain> <receipt_run_key>`.
 - D61 enforces session closeout every 48h: `./bin/ops cap run agent.session.closeout`.
 
 ## Quick Commands
 
-- `./bin/ops cap list` — discover capabilities
 - `./bin/ops status` — unified work status (loops + gaps + inbox)
-- `./bin/ops loops list --open` — list open loops only
-- `./bin/ops start loop <LOOP_ID>` — start worktree for a loop
-- `./bin/ops cap run verify.core.run` — Core-8 day-to-day verify lane
-- `./bin/ops cap run verify.pack.run <domain|core-operator>` — pack-first day-to-day verify lane
-- `./bin/ops cap run verify.route.recommend` — suggest pack-run lane from current work
-- `./bin/ops cap run verify.domain.run <domain>` — integration/debug verify lane (not default day lane)
-- `./bin/ops cap run verify.release.run` — release/nightly full certification lane
-- `./bin/ops cap run verify.pack.list` — list verify packs
-- `./bin/ops cap run verify.pack.run <agent_id|domain>` — pack-first verify
+- `./bin/ops cap list` — discover capabilities
 - `./bin/ops cap run stability.control.snapshot` — runtime reliability snapshot
-- `./bin/ops cap run stability.control.reconcile` — guided recovery command planner
-- `./bin/ops cap run spine.verify` — full drift check (release/nightly)
+- `./bin/ops cap run verify.core.run` — Core-8 preflight (<60s, no network)
+- `./bin/ops cap run verify.route.recommend` — which domain pack to run after work
+- `./bin/ops cap run verify.pack.run <domain>` — domain-specific verify
+- `./bin/ops cap run verify.release.run` — full 148-gate certification (requires Tailscale)
+- `./bin/ops loops list --open` — list open loops only
 - `/ctx` — load full governance context
 
 ## Delivery Architecture (D65)
@@ -157,16 +157,22 @@ this file is authoritative.
 
 ```bash
 cd ~/code/agentic-spine
-./bin/ops cap list                        # discover capabilities
-./bin/ops status                          # unified work status (loops + gaps + inbox)
-./bin/ops loops list --open               # list open loops only
-./bin/ops start loop <LOOP_ID>            # start worktree for a loop
-./bin/ops cap run stability.control.snapshot       # predictive runtime guardrail
-./bin/ops cap run verify.core.run                 # Core-8 day-to-day verify lane
-./bin/ops cap run verify.route.recommend          # recommend pack-run lane
-./bin/ops cap run verify.pack.run <domain|core-operator>  # pack-first day-to-day verify lane
-./bin/ops cap run verify.release.run              # release/nightly full cert lane
-./bin/ops cap run spine.verify            # full drift check (release/nightly)
-./bin/ops cap run spine.status            # quick status
-./bin/ops cap run agent.session.closeout  # session closeout (D61)
+
+# Session start (mandatory — 3 commands, <60s total)
+./bin/ops status
+./bin/ops cap run stability.control.snapshot
+./bin/ops cap run verify.core.run
+
+# After domain work (before commit)
+./bin/ops cap run verify.route.recommend
+./bin/ops cap run verify.pack.run <domain>
+
+# Release/nightly only
+./bin/ops cap run verify.release.run
+
+# Work management
+./bin/ops cap list
+./bin/ops loops list --open
+./bin/ops start loop <LOOP_ID>
+./bin/ops cap run agent.session.closeout
 ```

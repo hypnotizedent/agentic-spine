@@ -41,7 +41,10 @@ while IFS=$'\t' read -r sid path; do
   [[ -z "$sid" || -z "$path" ]] && continue
 
   abs="$path"
-  if [[ "$abs" != /* ]]; then
+  # Expand leading tilde to $HOME
+  if [[ "$abs" == "~/"* ]]; then
+    abs="$HOME/${abs#\~/}"
+  elif [[ "$abs" != /* ]]; then
     abs="$ROOT/$abs"
   fi
 

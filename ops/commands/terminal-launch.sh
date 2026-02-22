@@ -307,7 +307,7 @@ cmd_launch_direct() {
             tool_cmd="claude --dangerously-skip-permissions --add-dir $WORKBENCH_ROOT"
             ;;
         verify)
-            tool_cmd="./bin/ops cap run verify.pack.run core-operator"
+            tool_cmd="./bin/ops cap run verify.core.run"
             ;;
     esac
     

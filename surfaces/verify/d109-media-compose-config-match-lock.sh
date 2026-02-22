@@ -4,6 +4,10 @@
 # Enforces: Running containers match services declared in media.services.yaml
 set -euo pipefail
 
+# Network gate — skip cleanly when Tailscale VPN is disconnected
+source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
+require_tailscale
+
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 BINDING="$ROOT/ops/bindings/media.services.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"

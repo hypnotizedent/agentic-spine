@@ -62,10 +62,10 @@ else
   fail "recommend text mode exits 0"
   echo "$nohit_text" >&2
 fi
-if echo "$nohit_text" | grep -q 'verify.pack.run core-operator'; then
-  pass "text mode prints core-operator pack-run fallback command"
+if echo "$nohit_text" | grep -q 'verify.core.run'; then
+  pass "text mode prints verify.core.run fallback command"
 else
-  fail "text mode prints core-operator pack-run fallback command"
+  fail "text mode prints verify.core.run fallback command"
 fi
 
 echo "────────────────────────────────────────"
