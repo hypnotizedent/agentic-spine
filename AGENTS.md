@@ -51,12 +51,22 @@ Full governance contract: [`docs/governance/AGENT_GOVERNANCE_BRIEF.md`](docs/gov
 
 ## Canonical Terminal Roles
 
-| ID | Type | Scope |
-|----|------|-------|
-| SPINE-CONTROL-01 | control-plane | bin/, ops/, surfaces/, docs/governance/, docs/core/, docs/product/, docs/brain/, mailroom/ |
-| SPINE-AUDIT-01 | observation | receipts/, docs/governance/_audits/ |
-| DOMAIN-HA-01 | domain-runtime | ops/plugins/ha/, ops/agents/home-assistant-agent.contract.md |
-| RUNTIME-IMMICH-01 | domain-runtime | ops/plugins/immich/, ops/agents/immich-agent.contract.md |
-| DEPLOY-MINT-01 | domain-runtime | ops/plugins/mint/, ops/agents/mint-agent.contract.md |
+| ID | Type | Status | Scope |
+|----|------|--------|-------|
+| SPINE-CONTROL-01 | control-plane | active | bin/, ops/, surfaces/, docs/governance/, docs/core/, docs/product/, docs/brain/, mailroom/ |
+| SPINE-EXECUTION-01 | control-plane | active | mailroom/, receipts/ |
+| SPINE-AUDIT-01 | observation | active | receipts/, docs/governance/_audits/ |
+| SPINE-WATCHER-01 | observation | active | mailroom/state/, receipts/ |
+| DOMAIN-HA-01 | domain-runtime | active | ops/plugins/ha/, ops/agents/home-assistant-agent.contract.md |
+| DOMAIN-COMMS-01 | domain-runtime | active | ops/plugins/communications/, ops/agents/communications-agent.contract.md |
+| DOMAIN-MSGRAPH-01 | domain-runtime | planned | ops/plugins/ms-graph/, ops/agents/ms-graph-agent.contract.md |
+| DOMAIN-N8N-01 | domain-runtime | planned | ops/plugins/n8n/, ops/agents/n8n-agent.contract.md |
+| DOMAIN-MEDIA-01 | domain-runtime | planned | ops/plugins/media/, ops/agents/media-agent.contract.md |
+| DOMAIN-PAPERLESS-01 | domain-runtime | planned | ops/agents/paperless-agent.contract.md |
+| DOMAIN-FINANCE-01 | domain-runtime | active | ops/agents/finance-agent.contract.md |
+| DOMAIN-FIREFLY-01 | domain-runtime | planned | ops/agents/firefly-agent.contract.md |
+| RUNTIME-IMMICH-01 | domain-runtime | active | ops/plugins/immich/, ops/agents/immich-agent.contract.md |
+| DEPLOY-MINT-01 | domain-runtime | active | ops/plugins/mint/, ops/agents/mint-agent.contract.md |
+| DEPLOY-MINTOS-01 | domain-runtime | planned | ops/agents/mint-os-agent.contract.md |
 
 > Source: `ops/bindings/terminal.role.contract.yaml`

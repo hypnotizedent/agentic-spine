@@ -1,11 +1,11 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: "2026-02-16"
+last_verified: "2026-02-22"
 scope: terminal-role-contract
 
-version: 1
-updated_at: "2026-02-16"
+version: 2
+updated_at: "2026-02-22"
 
 # Terminal role contract — formal SSOT for terminal identity, write scopes,
 # and capability entitlements. Source of truth for D135 naming enforcement.
@@ -27,6 +27,10 @@ roles:
   - id: SPINE-CONTROL-01
     type: control-plane
     description: "Primary spine orchestrator. Single writer for bin/, ops/, surfaces/."
+    status: active
+    default_tool: codex
+    picker_group: core
+    sort_order: 100
     write_scope:
       - bin/
       - ops/
@@ -47,9 +51,29 @@ roles:
       - gaps.close
       - loops.reconcile
 
+  - id: SPINE-EXECUTION-01
+    type: control-plane
+    description: "Execution-plane terminal. Runs control cycles and planned actions."
+    status: active
+    default_tool: codex
+    picker_group: core
+    sort_order: 110
+    write_scope:
+      - mailroom/
+      - receipts/
+    capabilities:
+      - spine.control.tick
+      - spine.control.plan
+      - spine.control.execute
+      - spine.control.cycle
+
   - id: SPINE-AUDIT-01
     type: observation
     description: "Audit and verification terminal. Read-only spine access."
+    status: active
+    default_tool: claude
+    picker_group: observation
+    sort_order: 200
     write_scope:
       - receipts/
       - docs/governance/_audits/
@@ -60,20 +84,27 @@ roles:
       - stability.control.snapshot
       - spine.verify
 
-  - id: RUNTIME-IMMICH-01
-    type: domain-runtime
-    description: "Immich domain runtime operations."
+  - id: SPINE-WATCHER-01
+    type: observation
+    description: "Watcher terminal. Monitors mailroom queue and heartbeat state."
+    status: active
+    default_tool: claude
+    picker_group: observation
+    sort_order: 210
     write_scope:
-      - ops/plugins/immich/
-      - ops/agents/immich-agent.contract.md
+      - mailroom/state/
+      - receipts/
     capabilities:
-      - immich.status
-      - immich.ingest.watch
-      - immich.ingest.resume
+      - spine.watcher.status
+      - spine.watcher.restart
 
   - id: DOMAIN-HA-01
     type: domain-runtime
     description: "Home Assistant domain operations."
+    status: active
+    default_tool: codex
+    picker_group: domain-runtime
+    sort_order: 400
     write_scope:
       - ops/plugins/ha/
       - ops/agents/home-assistant-agent.contract.md
@@ -83,14 +114,139 @@ roles:
       - ha.entity.list
       - ha.automation.list
 
+  - id: DOMAIN-COMMS-01
+    type: domain-runtime
+    description: "Communications stack operations (Stalwart, email delivery)."
+    status: active
+    default_tool: codex
+    picker_group: domain-runtime
+    sort_order: 410
+    write_scope:
+      - ops/plugins/communications/
+      - ops/agents/communications-agent.contract.md
+    capabilities:
+      - communications.stack.status
+      - communications.mailboxes.list
+      - communications.delivery.log
+
+  - id: DOMAIN-MSGRAPH-01
+    type: domain-runtime
+    description: "Microsoft Graph API operations (mail, calendar)."
+    status: planned
+    default_tool: opencode
+    picker_group: domain-runtime
+    sort_order: 420
+    write_scope:
+      - ops/plugins/ms-graph/
+      - ops/agents/ms-graph-agent.contract.md
+    capabilities:
+      - graph.mail.search
+      - graph.calendar.list
+
+  - id: DOMAIN-N8N-01
+    type: domain-runtime
+    description: "n8n workflow automation operations."
+    status: planned
+    default_tool: opencode
+    picker_group: domain-runtime
+    sort_order: 430
+    write_scope:
+      - ops/plugins/n8n/
+      - ops/agents/n8n-agent.contract.md
+    capabilities:
+      - n8n.workflows.list
+      - n8n.infra.health
+
+  - id: DOMAIN-MEDIA-01
+    type: domain-runtime
+    description: "Media stack operations (Plex, Arr suite)."
+    status: planned
+    default_tool: opencode
+    picker_group: domain-runtime
+    sort_order: 440
+    write_scope:
+      - ops/plugins/media/
+      - ops/agents/media-agent.contract.md
+    capabilities:
+      - media.status
+      - media.health.check
+
+  - id: DOMAIN-PAPERLESS-01
+    type: domain-runtime
+    description: "Paperless-ngx document management operations."
+    status: planned
+    default_tool: opencode
+    picker_group: domain-runtime
+    sort_order: 450
+    write_scope:
+      - ops/agents/paperless-agent.contract.md
+    capabilities:
+      - secrets.p5.paperless.copy_first.status
+
+  - id: DOMAIN-FINANCE-01
+    type: domain-runtime
+    description: "Finance domain operations (Ghostfolio)."
+    status: active
+    default_tool: opencode
+    picker_group: domain-runtime
+    sort_order: 460
+    write_scope:
+      - ops/agents/finance-agent.contract.md
+    capabilities:
+      - finance.stack.status
+      - finance.ronny.action.queue
+
+  - id: DOMAIN-FIREFLY-01
+    type: domain-runtime
+    description: "Firefly III budgeting operations."
+    status: planned
+    default_tool: opencode
+    picker_group: domain-runtime
+    sort_order: 470
+    write_scope:
+      - ops/agents/firefly-agent.contract.md
+    capabilities:
+      - finance.stack.status
+
+  - id: RUNTIME-IMMICH-01
+    type: domain-runtime
+    description: "Immich domain runtime operations."
+    status: active
+    default_tool: opencode
+    picker_group: domain-runtime
+    sort_order: 500
+    write_scope:
+      - ops/plugins/immich/
+      - ops/agents/immich-agent.contract.md
+    capabilities:
+      - immich.status
+      - immich.ingest.watch
+      - immich.ingest.resume
+
   - id: DEPLOY-MINT-01
     type: domain-runtime
     description: "Mint domain deployment and governance."
+    status: active
+    default_tool: opencode
+    picker_group: domain-runtime
+    sort_order: 600
     write_scope:
       - ops/plugins/mint/
       - ops/agents/mint-agent.contract.md
     capabilities:
       - mint.verify
+      - mint.deploy.status
+
+  - id: DEPLOY-MINTOS-01
+    type: domain-runtime
+    description: "Legacy mint-os extraction and migration."
+    status: planned
+    default_tool: opencode
+    picker_group: domain-runtime
+    sort_order: 610
+    write_scope:
+      - ops/agents/mint-os-agent.contract.md
+    capabilities:
       - mint.deploy.status
 
 # Directories explicitly excluded from terminal role ownership.

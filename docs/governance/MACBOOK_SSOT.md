@@ -166,6 +166,7 @@ Soft-decommissioned history (not active SSH expectations): `download-home`.
 | **Ctrl+Shift+C** | Launch Codex — DOMAIN-HA-01 (solo) | `~/.hammerspoon/` |
 | **Ctrl+Shift+O** | Launch OpenCode — DEPLOY-MINT-01 (solo) | `~/.hammerspoon/` |
 | **Ctrl+Shift+E** | Closeout prompt → clipboard | `~/.hammerspoon/` |
+| **Ctrl+Shift+P** | Native worker picker (hs.chooser from terminal.role.contract.yaml) | `~/.hammerspoon/` |
 <!-- END AUTO HOTKEYS -->
 
 #### Raycast
