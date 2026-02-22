@@ -1,0 +1,79 @@
+# Spine Schema Conventions Audit
+
+- Mode: full
+- Status: FAIL
+- Files checked: 149
+- Violations: 2
+- Warnings: 66
+
+## Violations
+- ops/bindings/operational.gaps.yaml :: disallowed key 'notes' is legacy-excepted but file is changed (touch-and-fix required)
+- ops/bindings/operational.gaps.yaml :: disallowed key 'discovered_at' is legacy-excepted but file is changed (touch-and-fix required)
+
+## Warnings
+- ops/bindings/agents.registry.yaml :: discouraged key 'name' found
+- ops/bindings/alerting.rules.yaml :: discouraged key 'domain_id' found
+- ops/bindings/automation.stack.latency.slo.yaml :: discouraged key 'updated' found
+- ops/bindings/backup.inventory.yaml :: discouraged key 'name' found
+- ops/bindings/calendar.global.yaml :: discouraged key 'name' found
+- ops/bindings/calendar.sync.contract.yaml :: discouraged key 'name' found
+- ops/bindings/capability.domain.catalog.yaml :: discouraged key 'domain_id' found
+- ops/bindings/capability.domain.catalog.yaml :: discouraged key 'updated' found
+- ops/bindings/capability.domain.catalog.yaml :: discouraged key 'last_synced' found
+- ops/bindings/cli.tools.inventory.yaml :: discouraged key 'name' found
+- ops/bindings/cloudflare.inventory.yaml :: discouraged key 'name' found
+- ops/bindings/cutover.sequencing.yaml :: discouraged key 'name' found
+- ops/bindings/d128-gate-mutation-policy.yaml :: discouraged key 'gate_id' found
+- ops/bindings/d128-gate-mutation-policy.yaml :: discouraged key 'updated' found
+- ops/bindings/d75-gap-mutation-policy.yaml :: discouraged key 'gate_id' found
+- ops/bindings/docker.compose.targets.yaml :: discouraged key 'name' found
+- ops/bindings/docs.johnny_decimal.yaml :: discouraged key 'name' found
+- ops/bindings/drift-gates.scoped.yaml :: discouraged key 'name' found
+- ops/bindings/environment.contract.schema.yaml :: discouraged key 'name' found
+- ops/bindings/gap.schema.yaml :: discouraged key 'name' found
+- ops/bindings/gate.agent.profiles.yaml :: discouraged key 'agent_id' found
+- ops/bindings/gate.execution.topology.yaml :: discouraged key 'domain_id' found
+- ops/bindings/gate.execution.topology.yaml :: discouraged key 'gate_id' found
+- ops/bindings/gate.execution.topology.yaml :: discouraged key 'updated' found
+- ops/bindings/gate.registry.yaml :: discouraged key 'name' found
+- ops/bindings/gate.registry.yaml :: discouraged key 'updated' found
+- ops/bindings/ha.addons.yaml :: discouraged key 'name' found
+- ops/bindings/ha.areas.yaml :: discouraged key 'name' found
+- ops/bindings/ha.hacs.yaml :: discouraged key 'name' found
+- ops/bindings/ha.orphan.classification.yaml :: discouraged key 'name' found
+- ops/bindings/home-surface.allowlist.yaml :: discouraged key 'gate_id' found
+- ops/bindings/home.device.registry.yaml :: discouraged key 'name' found
+- ops/bindings/infra.core.slo.yaml :: discouraged key 'updated' found
+- ops/bindings/infra.vm.profiles.yaml :: discouraged key 'name' found
+- ops/bindings/lifecycle.rules.schema.yaml :: discouraged key 'updated' found
+- ops/bindings/lifecycle.rules.yaml :: discouraged key 'updated' found
+- ops/bindings/operational.gaps.yaml :: discouraged key 'updated' found
+- ops/bindings/secrets.bundle.contract.yaml :: discouraged key 'name' found
+- ops/bindings/secrets.bundle.contract.yaml :: discouraged key 'updated' found
+- ops/bindings/secrets.credentials.parity.yaml :: discouraged key 'updated' found
+- ops/bindings/secrets.inventory.yaml :: discouraged key 'name' found
+- ops/bindings/secrets.inventory.yaml :: discouraged key 'last_synced' found
+- ops/bindings/secrets.namespace.policy.yaml :: discouraged key 'updated' found
+- ops/bindings/secrets.runway.contract.yaml :: discouraged key 'updated' found
+- ops/bindings/share.publish.allowlist.yaml :: discouraged key 'updated' found
+- ops/bindings/share.publish.denylist.yaml :: discouraged key 'updated' found
+- ops/bindings/share.publish.remote.yaml :: discouraged key 'name' found
+- ops/bindings/share.publish.remote.yaml :: discouraged key 'updated' found
+- ops/bindings/spine.boundary.baseline.yaml :: discouraged key 'updated' found
+- ops/bindings/stability.control.contract.yaml :: discouraged key 'updated' found
+- ops/bindings/startup.sequencing.yaml :: discouraged key 'updated' found
+- ops/bindings/surface.readonly.contract.yaml :: discouraged key 'updated' found
+- ops/bindings/tenant.profile.schema.yaml :: discouraged key 'name' found
+- ops/bindings/tenant.profile.schema.yaml :: discouraged key 'updated' found
+- ops/bindings/tenant.profile.yaml :: discouraged key 'name' found
+- ops/bindings/tenant.storage.contract.yaml :: discouraged key 'updated' found
+- ops/bindings/tenants/media-stack.yaml :: discouraged key 'updated' found
+- ops/bindings/version.compat.matrix.yaml :: discouraged key 'updated' found
+- ops/bindings/vertical.integration.admission.contract.yaml :: discouraged key 'updated' found
+- ops/bindings/vm.lifecycle.contract.yaml :: discouraged key 'updated' found
+- ops/bindings/vm.lifecycle.yaml :: discouraged key 'updated' found
+- ops/bindings/vm.operating.profile.yaml :: discouraged key 'updated' found
+- ops/bindings/workbench.script.allowlist.yaml :: discouraged key 'gate_id' found
+- ops/bindings/worktree.session.isolation.yaml :: discouraged key 'updated' found
+- ops/bindings/z2m.naming.yaml :: discouraged key 'last_reviewed' found
+- ops/bindings/zwave.devices.yaml :: discouraged key 'name' found
