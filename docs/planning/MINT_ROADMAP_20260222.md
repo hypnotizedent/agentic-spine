@@ -56,6 +56,13 @@ Verified: 2026-02-22
 - **Suppliers + Shipping + Pricing extraction**: DONE.
 - **Full cutover/retirement program**: NOT DONE yet (suppliers public route verification + legacy duplicate retirement + payment lane).
 
+### Wave 13 payment closeout (2026-02-22)
+
+- `WAVE-20260222-13` is closed (D3 audit acknowledged, collect/preflight/verify lanes green).
+- Payment runtime on VM 213 is **not live**. `payment-v2` health probe returns `REFUSED`, `docker.compose.status mint-apps` reports `payment` as `down` with `reason=dir_missing`, and host precheck returned `ENV_MISSING` for `/opt/stacks/mint-apps/payment/.env`.
+- Safe deploy policy enforced: no deployment performed without real host env/secrets; no synthetic secrets created.
+- Pricing/suppliers/shipping status remains unchanged and healthy in this session.
+
 Evidence:
 
 - Tunnel ingress: `CAP-20260222-032121__cloudflare.tunnel.ingress.status__Rgt9u97088`
@@ -63,6 +70,12 @@ Evidence:
 - Docker mint-apps: `CAP-20260222-032237__docker.compose.status__Rzcb44265`
 - Docker docker-host: `CAP-20260222-032156__docker.compose.status__Rqezk99563`
 - Suppliers extraction commit: `61b186c`
+- Payment/visibility check: `CAP-20260222-033943__services.health.status__Rjg7c35707`
+- Payment compose status: `CAP-20260222-033959__docker.compose.status__R96zl36866`
+- Mint deploy status: `CAP-20260222-034009__mint.deploy.status__Rxyey37769`
+- Mint modules health: `CAP-20260222-034010__mint.modules.health__Rk6vv38064`
+- Core verify: `CAP-20260222-034012__verify.core.run__R5g5g38332`
+- Pack verify: `CAP-20260222-034101__verify.pack.run__Rh48o35706`
 
 ## Gaps/Blockers
 
@@ -72,7 +85,7 @@ Evidence:
 2. ~~Provider readiness gap: Resend and Twilio env not live-ready for customer notification paths.~~ **RESOLVED** (Wave4: Resend `live_ready=yes`, Twilio env provisioned but simulation-only per phase1 cutover)
 3. ~~Notification workflow gap: email notification workflows inactive.~~ **RESOLVED** (Wave4: 3 workflows activated — Ready for Pickup, Payment Needed, Shipped)
 4. **Auth gap**: fresh-slate replacement for legacy JWT/PIN/admin session paths is **UNVERIFIED** in current RAG evidence (`CAP-20260221-235253__rag.anythingllm.ask__R7uto40985`).
-5. **Payment gap**: fresh-slate Stripe checkout/webhook/payment-table replacement is **UNVERIFIED** in current RAG evidence (`CAP-20260221-235253__rag.anythingllm.ask__Ree5f40986`).
+5. **Payment runtime blocker**: VM 213 payment stack is not live. Host precondition `/opt/stacks/mint-apps/payment/.env` is missing and compose status reports `payment` stack `down` (`reason=dir_missing`) (`CAP-20260222-033959__docker.compose.status__R96zl36866`).
 6. ~~**Notification event emission gap**: event router pickup/shipped legs are confirmed as no-op (`P08`, `P10`) via workflow graph; v2 jobs webhook emission remains unproven.~~ **RESOLVED** (Wave6: P08/P10 no-op stubs replaced with live HTTP emission nodes, If node v2 caseSensitive fix applied to all 3 workflows, FROM domain corrected to verified `mintprints.co`, E2E test events routed without errors; `CAP-20260222-020121__n8n.workflows.list__Ryxpx6091`)
 7. Governance parity gap: D148 is resolved (`PASS`) in core verify; remaining parity risk is false-positive vertical parity + health-cap blind spots (`CAP-20260222-011540__verify.pack.run__Ro21l28962`).
 
@@ -198,7 +211,7 @@ Source of truth: this table is canonical for item state, ownership, evidence, an
 | `NOTIF-EVENT-ROUTER-WIRING` | `SPINE-AUDIT-01` | **done** | `CAP-20260222-020121__n8n.workflows.list__Ryxpx6091` | P08→Emit Ready for Pickup (httpRequest to /webhook/mint-ready-pickup), P10→Emit Shipped (httpRequest to /webhook/mint-shipped), If v2 caseSensitive fix applied, FROM domain corrected to mintprints.co |
 | `NOTIF-V2-WEBHOOK-EMIT` | `SPINE-AUDIT-01` | **done** | `CAP-20260222-020125__communications.provider.status__Rqm746836` | Event Router E2E: webhook→route→emit→notification workflow→Resend, no error executions, HTTP 200 on all test events |
 | `DOMAIN-AUTH-EXTRACTION` | `SPINE-AUDIT-01` | `blocked` | `CAP-20260221-235253__rag.anythingllm.ask__R7uto40985` | UNVERIFIED: no direct evidence of fresh-slate JWT/PIN/admin replacement found in current RAG result |
-| `DOMAIN-PAYMENT-EXTRACTION` | `SPINE-AUDIT-01` | `blocked` | `CAP-20260221-235253__rag.anythingllm.ask__Ree5f40986` | UNVERIFIED: no direct evidence of fresh-slate Stripe checkout/webhook/payment-table replacement found in current RAG result |
+| `DOMAIN-PAYMENT-EXTRACTION` | `SPINE-AUDIT-01` | `blocked` | `CAP-20260222-033959__docker.compose.status__R96zl36866` | Provision real `/opt/stacks/mint-apps/payment/.env`, sync module dir, then `docker compose up -d --build` and verify `http://100.79.183.14:4000/health` |
 | `DOMAIN-ORDER-BOUNDARY` | `SPINE-AUDIT-01` | `open` | `HO-20260222-035942` | Define order boundary and FK migration sequencing plan |
 | `PARITY-D148` | `SPINE-CONTROL-01` | `done` | `CAP-20260222-011540__verify.pack.run__Ro21l28962` | D148 now passing (8/8 core gates green) |
 | `PARITY-MODULE-HEALTH-COVERAGE` | `TERMINAL-E_AGENT_PARITY` | `open` | `CAP-20260221-225226__mint.modules.health__Rm4pp94982` | Expand health probes to all app-plane modules |
