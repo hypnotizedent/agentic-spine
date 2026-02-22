@@ -46,6 +46,24 @@ Latest Send Proof Run Key: `CAP-20260222-011521__communications.send.execute__R9
 | --- | --- | --- | --- |
 | VM 200 (`docker-host`) | `mint-os`, `mint-modules-prod`, `dashy` | Active (`13` containers running) | `CAP-20260221-225857__docker.compose.status__Rbelc23304`, `HO-20260222-040005` |
 
+### Module Extraction & Cutover Summary (Canonical)
+
+Verified: 2026-02-22
+
+- **Pricing**: done (module + runtime + route cutover).
+- **Shipping**: done for module/runtime; route is configured to fresh target, but do one final external API-path verify before calling it fully closed.
+- **Suppliers**: done for module/runtime/extraction (61b186c), but public route cutover is still unverified (not present in active tunnel ingress snapshot).
+- **Suppliers + Shipping + Pricing extraction**: DONE.
+- **Full cutover/retirement program**: NOT DONE yet (suppliers public route verification + legacy duplicate retirement + payment lane).
+
+Evidence:
+
+- Tunnel ingress: `CAP-20260222-032121__cloudflare.tunnel.ingress.status__Rgt9u97088`
+- Module health: `CAP-20260222-032127__services.health.status__Rop1j98580`
+- Docker mint-apps: `CAP-20260222-032237__docker.compose.status__Rzcb44265`
+- Docker docker-host: `CAP-20260222-032156__docker.compose.status__Rqezk99563`
+- Suppliers extraction commit: `61b186c`
+
 ## Gaps/Blockers
 
 ### System-level blockers (P0)

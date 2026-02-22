@@ -71,6 +71,16 @@ Evidence:
 - Tunnel process is still hosted from legacy stack context (`docker-compose.yml` under legacy infra path).
 - Migration objective is ingress-target replacement and route ownership normalization first; tunnel-runtime relocation is a separate infra step.
 
+## Module Status (Canonical, 2026-02-22)
+
+- **Pricing**: done (module + runtime + route cutover).
+- **Shipping**: done for module/runtime; route is configured to fresh target, but do one final external API-path verify before calling it fully closed.
+- **Suppliers**: done for module/runtime/extraction (61b186c), but public route cutover is still unverified (not present in active tunnel ingress snapshot).
+- **Suppliers + Shipping + Pricing extraction**: DONE.
+- **Full cutover/retirement program**: NOT DONE yet (suppliers public route verification + legacy duplicate retirement + payment lane).
+
+Evidence: `CAP-20260222-032121__cloudflare.tunnel.ingress.status__Rgt9u97088`
+
 ## Gate 1 outcome
 
 - Route migration dependency order is defined.
