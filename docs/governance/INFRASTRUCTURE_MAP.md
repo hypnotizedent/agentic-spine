@@ -50,8 +50,8 @@ sources: []
 
 | Task | SOP Document | Summary |
 |------|--------------|---------|
-| **Creating Quotes** | `docs/SOPs/QUOTE_CREATION_SOP.md` | Orders + line_items + imprints + junction + mockups - ALL REQUIRED |
-| **Artwork/Files** | `docs/SOPs/QUOTE_CREATION_SOP.md` | See ARTWORK FILE CLASSIFICATION section |
+| **Creating Quotes** | _(historical: was `docs/SOPs/QUOTE_CREATION_SOP.md` in legacy mint-os)_ | Orders + line_items + imprints + junction + mockups - ALL REQUIRED |
+| **Artwork/Files** | _(historical: was `docs/SOPs/QUOTE_CREATION_SOP.md` in legacy mint-os)_ | See ARTWORK FILE CLASSIFICATION section |
 | **Ronny's Actual Workflow** | `docs/ARTWORK_WORKFLOW.md` | How files ACTUALLY move: OneDrive → MinIO mapping, folder structure, naming |
 
 **Common Agent Failures:**

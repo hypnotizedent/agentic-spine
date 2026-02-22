@@ -24,7 +24,7 @@ Reference surface for session context generation and operating rules.
 | `memory.md` | Session handoff notes (append-only; optional) |
 | `generate-context.sh` | Builds `context.md` from current spine state |
 | `context.md` | Generated session context (runtime output; uncommitted) |
-| `lessons/` | Historical lesson captures (reference only) |
+| `lessons/` | Moved to `~/code/workbench/docs/brain-lessons/` (reference only) |
 | `_imported/` | Imported command context (reference only) |
 
 ## Lessons Lifecycle Policy
@@ -33,9 +33,9 @@ Brain lessons follow a governed lifecycle:
 
 | Stage | Location | Freshness SLA | Action |
 |-------|----------|---------------|--------|
-| Active lesson | `docs/brain/lessons/` | 30 days | Review and update or graduate |
+| Active lesson | `~/code/workbench/docs/brain-lessons/` | 30 days | Review and update or graduate |
 | Graduated | `docs/governance/` or `docs/core/` | Per D58 (21 days) | Promoted to authoritative doc |
-| Archived | `docs/brain/lessons/.archive/` | None | Read-only reference |
+| Archived | `~/code/workbench/docs/brain-lessons/.archive/` | None | Read-only reference |
 
 ### Rules
 
