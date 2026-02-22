@@ -1223,6 +1223,13 @@ else
   warn "terminal scope lock gate not present"
 fi
 
+echo -n "D152 Terminal role capability parity... "
+if [[ -x "$SP/surfaces/verify/d152-terminal-role-capability-parity.sh" ]]; then
+  gate_script "$SP/surfaces/verify/d152-terminal-role-capability-parity.sh" "D152"
+else
+  warn "terminal role capability parity gate not present"
+fi
+
 echo
 if [[ "$WARN_POLICY" == "strict" && "$WARN_COUNT" -gt 0 ]]; then
   FAIL=1
