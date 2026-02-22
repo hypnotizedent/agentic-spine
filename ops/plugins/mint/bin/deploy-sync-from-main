@@ -58,6 +58,8 @@ done
 MINT_APPS_HOST="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .host' "$SSH_BINDING" | head -n1)"
 MINT_APPS_USER="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .user // "ubuntu"' "$SSH_BINDING" | head -n1)"
 [[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "mint-apps ssh target missing"
+REMOTE_STACK_ROOT="/opt/stacks/mint-apps"
+REMOTE_ENV_FILE="${REMOTE_STACK_ROOT}/.env"
 
 SSH_OPTS=(-o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
 
@@ -65,7 +67,7 @@ echo "mint.deploy.sync"
 echo "mint_repo: $MINT_REPO"
 echo "ref: $REF"
 echo "modules: $MODULES_CSV"
-echo "target: ${MINT_APPS_USER}@${MINT_APPS_HOST}:/opt/stacks/mint-apps"
+echo "target: ${MINT_APPS_USER}@${MINT_APPS_HOST}:${REMOTE_STACK_ROOT}"
 echo
 
 # Ensure ref is available and valid.
@@ -74,13 +76,59 @@ git -C "$MINT_REPO" rev-parse --verify "$REF" >/dev/null 2>&1 || stop "git ref n
 resolved_ref="$(git -C "$MINT_REPO" rev-parse --short "$REF")"
 echo "resolved_ref: $resolved_ref"
 
+echo "[0/3] Remote env preflight..."
+ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "test -f '${REMOTE_ENV_FILE}'" \
+  || stop "missing remote env file: ${REMOTE_ENV_FILE}"
+
+missing_env=()
+module_requires() {
+  local mod="$1"
+  case "$mod" in
+    artwork)
+      echo "FILES_API_KEY MINIO_ACCESS_KEY MINIO_SECRET_KEY DATABASE_URL"
+      ;;
+    pricing)
+      echo "PRICING_API_KEY PRICING_DATABASE_URL"
+      ;;
+    suppliers)
+      echo "SUPPLIERS_API_KEY SUPPLIERS_DATABASE_URL"
+      ;;
+    shipping)
+      echo "SHIPPING_API_KEY SHIPPING_DATABASE_URL EASYPOST_API_KEY"
+      ;;
+    payment)
+      echo "PAYMENT_API_KEY DATABASE_URL STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET JWT_SECRET"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+IFS=',' read -r -a modules <<< "$MODULES_CSV"
+for raw_mod in "${modules[@]}"; do
+  mod="$(echo "$raw_mod" | xargs)"
+  [[ -n "$mod" ]] || continue
+  reqs="$(module_requires "$mod")"
+  [[ -n "$reqs" ]] || continue
+  for key in $reqs; do
+    if ! ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "awk -F= -v k='${key}' '\$1==k && \$2!=\"\"{found=1} END{exit found?0:1}' '${REMOTE_ENV_FILE}'"; then
+      missing_env+=("${mod}:${key}")
+    fi
+  done
+done
+if [[ "${#missing_env[@]}" -gt 0 ]]; then
+  printf "missing env keys for deploy:\n" >&2
+  printf "  - %s\n" "${missing_env[@]}" >&2
+  stop "env preflight failed"
+fi
+
 echo "[1/3] Sync tracked files to mint-apps host..."
 git -C "$MINT_REPO" archive --format=tar "$REF" \
-  | ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "cd /opt/stacks/mint-apps && tar -xf -" \
+  | ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "cd '${REMOTE_STACK_ROOT}' && tar -xf -" \
   || stop "archive sync failed"
 
 echo "[2/3] Rebuild selected module services..."
-IFS=',' read -r -a modules <<< "$MODULES_CSV"
 
 for raw_mod in "${modules[@]}"; do
   mod="$(echo "$raw_mod" | xargs)"
@@ -89,19 +137,19 @@ for raw_mod in "${modules[@]}"; do
     artwork)
       echo "  - rebuild files-api (root mint-apps compose)"
       ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-        "cd /opt/stacks/mint-apps && docker compose build files-api && docker compose up -d files-api" \
+        "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' build files-api && docker compose --env-file '${REMOTE_ENV_FILE}' up -d files-api" \
         || stop "rebuild failed for artwork/files-api"
       ;;
     quote-page|order-intake|finance-adapter)
       echo "  - rebuild $mod (root mint-apps compose)"
       ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-        "cd /opt/stacks/mint-apps && docker compose build $mod && docker compose up -d $mod" \
+        "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' build $mod && docker compose --env-file '${REMOTE_ENV_FILE}' up -d $mod" \
         || stop "rebuild failed for $mod"
       ;;
     pricing|suppliers|shipping|payment)
       echo "  - rebuild $mod (sub-stack compose)"
       ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-        "cd /opt/stacks/mint-apps/$mod && docker compose build $mod && docker compose up -d $mod" \
+        "cd '${REMOTE_STACK_ROOT}/$mod' && docker compose --env-file '${REMOTE_ENV_FILE}' build $mod && docker compose --env-file '${REMOTE_ENV_FILE}' up -d $mod" \
         || stop "rebuild failed for $mod"
       ;;
     *)

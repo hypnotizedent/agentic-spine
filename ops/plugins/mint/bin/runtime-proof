@@ -75,6 +75,12 @@ get_container_key() {
     "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= '/^API_KEY=/{sub(/^API_KEY=/,\"\" ); print; exit}'"
 }
 
+container_env_present() {
+  local container="$1" key="$2"
+  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+    "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= -v K='$key' '\$1==K && \$2!=\"\"{found=1} END{exit found?0:1}'"
+}
+
 echo "mint.runtime.proof"
 echo "mint-apps: ${MINT_APPS_USER}@${MINT_APPS_HOST}"
 echo
@@ -179,6 +185,19 @@ else
 fi
 
 # 5) Payment health
+missing_payment_env=()
+for req_key in API_KEY DATABASE_URL STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET JWT_SECRET; do
+  if ! container_env_present payment "$req_key"; then
+    missing_payment_env+=("$req_key")
+  fi
+done
+if [[ "${#missing_payment_env[@]}" -gt 0 ]]; then
+  emit_row "payment.env" "FAIL" "missing ${missing_payment_env[*]}"
+  fail=1
+else
+  emit_row "payment.env" "PASS" "required env present"
+fi
+
 http_json_check \
   "payment.health" \
   "http://${MINT_APPS_HOST}:4000/health" \
