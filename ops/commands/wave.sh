@@ -1663,14 +1663,73 @@ try:
     if pending:
         contract_violations.append(f"{len(pending)} dispatch(es) still pending (not done/blocked)")
 
-    # 4. Receipt validation: all receipt files must be valid JSON
+    # 4. Receipt validation: all receipt files must satisfy EXEC_RECEIPT contract
     invalid_receipts = []
     valid_receipt_count = 0
-    if os.path.isdir(receipts_dir):
-        rk_pat = re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")
-        required_fields = ["task_id", "terminal_id", "lane", "status", "files_changed",
-                          "run_keys", "blockers", "ready_for_verify", "timestamp_utc"]
+    valid_receipts = []
 
+    def _validate_receipt_close(receipt):
+        errors = []
+        required_fields = ["task_id", "terminal_id", "lane", "status", "files_changed",
+                           "run_keys", "blockers", "ready_for_verify", "timestamp_utc"]
+        for field in required_fields:
+            if field not in receipt:
+                errors.append(f"missing {field}")
+
+        str_fields = ["task_id", "terminal_id", "lane", "status", "timestamp_utc"]
+        for f in str_fields:
+            if f in receipt and not isinstance(receipt[f], str):
+                errors.append(f"{f} not string")
+
+        arr_fields = ["files_changed", "run_keys", "blockers"]
+        for f in arr_fields:
+            if f in receipt and not isinstance(receipt[f], list):
+                errors.append(f"{f} not array")
+
+        if "ready_for_verify" in receipt and not isinstance(receipt["ready_for_verify"], bool):
+            errors.append("ready_for_verify not bool")
+
+        if receipt.get("lane") and receipt["lane"] not in ("control", "execution", "audit", "watcher"):
+            errors.append(f"bad lane: {receipt['lane']}")
+
+        if receipt.get("status") and receipt["status"] not in ("done", "failed", "blocked"):
+            errors.append(f"bad status: {receipt['status']}")
+
+        ts = receipt.get("timestamp_utc", "")
+        if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
+            errors.append("bad timestamp format")
+
+        rk_pat = re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")
+        for rk in receipt.get("run_keys", []):
+            if not isinstance(rk, str):
+                errors.append("run_key not string")
+            elif not rk_pat.match(rk):
+                errors.append(f"bad run_key: {rk}")
+
+        if receipt.get("status") == "blocked" and not receipt.get("blockers"):
+            errors.append("blocked needs blockers[]")
+
+        if "wave_id" in receipt:
+            wid = receipt["wave_id"]
+            if not isinstance(wid, str) or not re.match(r"^WAVE-\d{8}-\d{2}$", wid):
+                errors.append(f"bad wave_id: {wid}")
+
+        if "commit_hashes" in receipt:
+            if not isinstance(receipt["commit_hashes"], list):
+                errors.append("commit_hashes not array")
+            else:
+                for h in receipt["commit_hashes"]:
+                    if not isinstance(h, str) or not re.match(r"^[0-9a-f]{7,40}$", h):
+                        errors.append(f"bad commit_hash: {h}")
+
+        allowed = set(required_fields + ["wave_id", "commit_hashes", "loop_id", "gap_ids"])
+        for key in receipt.keys():
+            if key not in allowed:
+                errors.append(f"unknown field: {key}")
+
+        return errors
+
+    if os.path.isdir(receipts_dir):
         for fn in sorted(os.listdir(receipts_dir)):
             if not fn.endswith(".json"):
                 continue
@@ -1678,14 +1737,12 @@ try:
             try:
                 with open(fp) as rf:
                     r = json.load(rf)
-                # Quick validation
-                missing = [f for f in required_fields if f not in r]
-                if missing:
-                    invalid_receipts.append(f"{fn}: missing {', '.join(missing)}")
-                elif r.get("status") not in ("done", "failed", "blocked"):
-                    invalid_receipts.append(f"{fn}: invalid status '{r.get('status')}'")
+                errs = _validate_receipt_close(r)
+                if errs:
+                    invalid_receipts.append(f"{fn}: {'; '.join(errs)}")
                 else:
                     valid_receipt_count += 1
+                    valid_receipts.append(r)
             except json.JSONDecodeError as e:
                 invalid_receipts.append(f"{fn}: invalid JSON ({e})")
 
@@ -1736,17 +1793,11 @@ done_checks = sum(1 for c in checks if c["status"] == "done")
 failed_checks = sum(1 for c in checks if c["status"] == "failed")
 run_keys = [c["run_key"] for c in checks if c.get("run_key")]
 
-# Also collect run keys from receipt artifacts
-for _, r_file in [(fn, os.path.join(receipts_dir, fn))
-                   for fn in sorted(os.listdir(receipts_dir)) if fn.endswith(".json")] if os.path.isdir(receipts_dir) else []:
-    try:
-        with open(r_file) as rf:
-            r = json.load(rf)
-        for rk in r.get("run_keys", []):
-            if rk not in run_keys:
-                run_keys.append(rk)
-    except (json.JSONDecodeError, OSError):
-        pass
+# Also collect run keys from validated receipt artifacts only
+for r in valid_receipts:
+    for rk in r.get("run_keys", []):
+        if rk not in run_keys:
+            run_keys.append(rk)
 
 residual_blockers = []
 for v in contract_violations:
