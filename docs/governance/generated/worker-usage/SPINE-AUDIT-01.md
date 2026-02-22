@@ -26,7 +26,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `verify.domain.run`
 - `verify.release.run`
 
-## Gates (21)
+## Gates (22)
 - `D1`
 - `D10`
 - `D12`
@@ -34,6 +34,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `D126`
 - `D144`
 - `D148`
+- `D153`
 - `D16`
 - `D17`
 - `D3`
