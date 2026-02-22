@@ -7,6 +7,8 @@ scope: proposal-flow-quickstart
 
 # Proposal Flow Quickstart
 
+> Full lifecycle reference: `docs/governance/PROPOSAL_LIFECYCLE_REFERENCE.md`
+
 Use this sequence for mailroom-gated writes:
 
 ```bash

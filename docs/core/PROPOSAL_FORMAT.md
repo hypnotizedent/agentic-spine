@@ -87,4 +87,4 @@ mailroom/outbox/proposals/CP-20260210-220000__fix-d48-bug/
 - `proposals.apply` is non-interactive (the manual approval gate is handled by `ops cap run`).
 - Operator working tree must be clean before applying (refuses to run otherwise).
 - Paths must be repo-relative (no absolute paths, no `..` traversal).
-- Loop tracking is optional but recommended for linked work
+- Loop binding is mandatory. `proposals.submit` enforces this at creation time. See `docs/governance/PROPOSAL_LIFECYCLE_REFERENCE.md` for the full lifecycle contract.

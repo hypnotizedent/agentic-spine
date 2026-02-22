@@ -1,5 +1,7 @@
 # Proposals System - Quick Start Guide
 
+> Full lifecycle reference: `docs/governance/PROPOSAL_LIFECYCLE_REFERENCE.md`
+
 ## For Agents: Submitting a Proposal
 
 ```bash
