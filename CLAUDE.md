@@ -15,7 +15,7 @@
 ## Mandatory Startup Block
 
 ```bash
-cd /Users/ronnyworks/code/agentic-spine
+cd ~/code/agentic-spine
 ./bin/ops status
 ./bin/ops cap list
 ./bin/ops cap run stability.control.snapshot

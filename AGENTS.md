@@ -8,12 +8,12 @@ scope: agent-runtime-contract
 # AGENTS.md - Agentic Spine Runtime Contract
 
 > Auto-loaded by local coding tools (Claude Code, Claude Desktop, Codex, etc.).
-> Canonical runtime: `/Users/ronnyworks/code/agentic-spine`
+> Canonical runtime: `~/code/agentic-spine`
 > Governance brief source: `docs/governance/AGENT_GOVERNANCE_BRIEF.md`
 
 ## Session Entry
 
-1. Start in `/Users/ronnyworks/code/agentic-spine`.
+1. Start in `~/code/agentic-spine`.
 2. Read `docs/governance/SESSION_PROTOCOL.md`.
 3. Run `./bin/ops status` to check all open work (loops, gaps, inbox, anomalies).
 4. Run `./bin/ops cap list` to discover available governed capabilities.
@@ -23,7 +23,7 @@ scope: agent-runtime-contract
 ## Mandatory Startup Block
 
 ```bash
-cd /Users/ronnyworks/code/agentic-spine
+cd ~/code/agentic-spine
 ./bin/ops status
 ./bin/ops cap list
 ./bin/ops cap run stability.control.snapshot
@@ -39,12 +39,12 @@ Release/nightly only:
 
 ## Source-Of-Truth Contract
 
-- Canonical governance/runtime: `/Users/ronnyworks/code/agentic-spine`
-- Tooling workspace: `/Users/ronnyworks/code/workbench` (compose, scripts, MCP configs — editable, not a runtime environment)
+- Canonical governance/runtime: `~/code/agentic-spine`
+- Tooling workspace: `~/code/workbench` (compose, scripts, MCP configs — editable, not a runtime environment)
 - Legacy workspace: `$LEGACY_ROOT` (read-only reference only)
-- All governed receipts: `/Users/ronnyworks/code/agentic-spine/receipts/sessions`
-- Mailroom runtime root contract: `/Users/ronnyworks/code/agentic-spine/ops/bindings/mailroom.runtime.contract.yaml`
-- Active runtime queues/logs/state: `/Users/ronnyworks/code/.runtime/spine-mailroom/*` when contract `active: true`
+- All governed receipts: `~/code/agentic-spine/receipts/sessions`
+- Mailroom runtime root contract: `~/code/agentic-spine/ops/bindings/mailroom.runtime.contract.yaml`
+- Active runtime queues/logs/state: `~/code/.runtime/spine-mailroom/*` when contract `active: true`
 
 <!-- GOVERNANCE_BRIEF -->
 ---
@@ -156,7 +156,7 @@ this file is authoritative.
 ## Canonical Commands
 
 ```bash
-cd /Users/ronnyworks/code/agentic-spine
+cd ~/code/agentic-spine
 ./bin/ops cap list                        # discover capabilities
 ./bin/ops status                          # unified work status (loops + gaps + inbox)
 ./bin/ops loops list --open               # list open loops only
