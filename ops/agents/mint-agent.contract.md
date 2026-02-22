@@ -4,7 +4,7 @@
 > **Domain:** mint
 > **Owner:** @ronny
 > **Created:** 2026-02-12
-> **Last Updated:** 2026-02-16
+> **Last Updated:** 2026-02-22
 > **Loop:** LOOP-MINT-AGENT-CANONICALIZATION-20260216
 
 ---
@@ -12,7 +12,7 @@
 ## Identity
 
 - **Agent ID:** mint-agent
-- **Domain:** mint-modules (artwork, quote-page, order-intake, pricing, shipping, suppliers, finance-adapter)
+- **Domain:** mint-modules (artwork, quote-page, order-intake, pricing, shipping, suppliers, finance-adapter, payment)
 - **Workbench Implementation (canonical):** `~/code/workbench/agents/mint-agent/`
 - **Module Tool Source (product repo):** `~/code/mint-modules/agents/mcp-server/`
 - **Registry:** `ops/bindings/agents.registry.yaml`
@@ -68,4 +68,10 @@ No watchers or cron in workbench.
 | `mint.deploy.status` | read-only | Read container status on mint-apps + mint-data |
 | `mint.migrate.dryrun` | read-only | Check pending migrations without applying changes |
 
-> **Mutation policy:** No mutation tools are authorized for `mint-agent`. Any future mutation path must be added as explicit `mint.*` capabilities with manual approval policy and gate coverage.
+> **Mutation policy:** `mint.deploy.sync` is the single authorized mutation capability. Requires: `approval: manual`, single-module targeting, pre-built image only (no build-on-VM), env preflight, post-deploy runtime proof. See `docs/SOPs/MINT_DEPLOY_PROMOTION_SOP_V1.md`.
+
+## Mutating Tool Surface
+
+| Tool | Safety | Description |
+|------|--------|-------------|
+| `mint.deploy.sync` | mutating (manual) | Promote pre-built image for single module to VM 213 |

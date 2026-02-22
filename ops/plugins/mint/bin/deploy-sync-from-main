@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# deploy-sync-from-main - Sync committed mint-modules source to mint-apps VM 213 and rebuild selected modules.
+# deploy-sync-from-main - Sync committed mint-modules source to mint-apps VM 213 and deploy a single module.
 #
 # Mutating command intended as the canonical deploy path to prevent stale runtime drift.
+# Enforces single-module targeting — multi-module CSV is rejected.
+# Does NOT build on VM — assumes pre-built image is already loaded on host.
 #
 # Default:
 #   - sync from ref origin/main
-#   - deploy modules: artwork, shipping, suppliers, pricing, payment
+#   - deploy module: artwork (single module required)
 #   - run post-deploy proofs: mint.deploy.status, mint.modules.health, mint.runtime.proof
 #
 # Usage:
-#   deploy-sync-from-main
-#   deploy-sync-from-main --ref main --modules artwork,shipping,suppliers
-#   deploy-sync-from-main --skip-proof
+#   deploy-sync-from-main --modules artwork
+#   deploy-sync-from-main --ref main --modules shipping
+#   deploy-sync-from-main --modules pricing --skip-proof
 
 set -euo pipefail
 
@@ -29,7 +31,7 @@ command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
 
 REF="origin/main"
-MODULES_CSV="artwork,shipping,suppliers,pricing,payment"
+MODULES_CSV="artwork"
 RUN_PROOF=1
 
 while [[ $# -gt 0 ]]; do
@@ -55,6 +57,14 @@ done
 [[ -n "$REF" ]] || stop "--ref cannot be empty"
 [[ -n "$MODULES_CSV" ]] || stop "--modules cannot be empty"
 
+# Single-module gate: reject multi-module CSV
+if [[ "$MODULES_CSV" == *","* ]]; then
+  stop "multi-module deploy rejected. Deploy one module at a time: --modules <single-module>. See docs/SOPs/MINT_MODULE_BUILD_SOP_V1.md Rule 5."
+fi
+
+MODULE="$(echo "$MODULES_CSV" | xargs)"
+[[ -n "$MODULE" ]] || stop "--modules cannot be empty"
+
 MINT_APPS_HOST="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .host' "$SSH_BINDING" | head -n1)"
 MINT_APPS_USER="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .user // "ubuntu"' "$SSH_BINDING" | head -n1)"
 [[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "mint-apps ssh target missing"
@@ -66,7 +76,7 @@ SSH_OPTS=(-o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=
 echo "mint.deploy.sync"
 echo "mint_repo: $MINT_REPO"
 echo "ref: $REF"
-echo "modules: $MODULES_CSV"
+echo "module: $MODULE"
 echo "target: ${MINT_APPS_USER}@${MINT_APPS_HOST}:${REMOTE_STACK_ROOT}"
 echo
 
@@ -105,18 +115,14 @@ module_requires() {
   esac
 }
 
-IFS=',' read -r -a modules <<< "$MODULES_CSV"
-for raw_mod in "${modules[@]}"; do
-  mod="$(echo "$raw_mod" | xargs)"
-  [[ -n "$mod" ]] || continue
-  reqs="$(module_requires "$mod")"
-  [[ -n "$reqs" ]] || continue
+reqs="$(module_requires "$MODULE")"
+if [[ -n "$reqs" ]]; then
   for key in $reqs; do
     if ! ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "awk -F= -v k='${key}' '\$1==k && \$2!=\"\"{found=1} END{exit found?0:1}' '${REMOTE_ENV_FILE}'"; then
-      missing_env+=("${mod}:${key}")
+      missing_env+=("${MODULE}:${key}")
     fi
   done
-done
+fi
 if [[ "${#missing_env[@]}" -gt 0 ]]; then
   printf "missing env keys for deploy:\n" >&2
   printf "  - %s\n" "${missing_env[@]}" >&2
@@ -128,35 +134,31 @@ git -C "$MINT_REPO" archive --format=tar "$REF" \
   | ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "cd '${REMOTE_STACK_ROOT}' && tar -xf -" \
   || stop "archive sync failed"
 
-echo "[2/3] Rebuild selected module services..."
+echo "[2/3] Deploy module service (pre-built image)..."
 
-for raw_mod in "${modules[@]}"; do
-  mod="$(echo "$raw_mod" | xargs)"
-  [[ -n "$mod" ]] || continue
-  case "$mod" in
-    artwork)
-      echo "  - rebuild files-api (root mint-apps compose)"
-      ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-        "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' build files-api && docker compose --env-file '${REMOTE_ENV_FILE}' up -d files-api" \
-        || stop "rebuild failed for artwork/files-api"
-      ;;
-    quote-page|order-intake|finance-adapter)
-      echo "  - rebuild $mod (root mint-apps compose)"
-      ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-        "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' build $mod && docker compose --env-file '${REMOTE_ENV_FILE}' up -d $mod" \
-        || stop "rebuild failed for $mod"
-      ;;
-    pricing|suppliers|shipping|payment)
-      echo "  - rebuild $mod (sub-stack compose)"
-      ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-        "cd '${REMOTE_STACK_ROOT}/$mod' && docker compose --env-file '${REMOTE_ENV_FILE}' build $mod && docker compose --env-file '${REMOTE_ENV_FILE}' up -d $mod" \
-        || stop "rebuild failed for $mod"
-      ;;
-    *)
-      stop "unsupported module name: $mod"
-      ;;
-  esac
-done
+case "$MODULE" in
+  artwork)
+    echo "  - deploy files-api (root mint-apps compose)"
+    ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+      "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d files-api" \
+      || stop "deploy failed for artwork/files-api"
+    ;;
+  quote-page|order-intake|finance-adapter)
+    echo "  - deploy $MODULE (root mint-apps compose)"
+    ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+      "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d $MODULE" \
+      || stop "deploy failed for $MODULE"
+    ;;
+  pricing|suppliers|shipping|payment)
+    echo "  - deploy $MODULE (sub-stack compose)"
+    ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+      "cd '${REMOTE_STACK_ROOT}/$MODULE' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d $MODULE" \
+      || stop "deploy failed for $MODULE"
+    ;;
+  *)
+    stop "unsupported module name: $MODULE"
+    ;;
+esac
 
 echo "[3/3] Post-deploy status checks..."
 "$SPINE_ROOT/ops/plugins/mint/bin/deploy-status" || true
@@ -167,5 +169,5 @@ fi
 
 echo
 echo "status: OK"
-echo "note: deployed_ref=$resolved_ref"
+echo "note: deployed_ref=$resolved_ref module=$MODULE"
 exit 0
