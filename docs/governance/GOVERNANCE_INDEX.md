@@ -38,6 +38,10 @@ Pillar entrypoints (per stack)
     └── other SSOTs listed in `SSOT_REGISTRY.yaml`
 ```
 
+Startup read surface (D26 lock):
+- `docs/governance/SESSION_PROTOCOL.md`
+- `docs/governance/AGENT_GOVERNANCE_BRIEF.md`
+
 **The 5 Rules:**
 1. NO OPEN LOOPS = NO WORK → `./bin/ops loops list --open`
 2. NO GUESSING = SSOT FIRST → direct file read → `rag_query` (spine-rag MCP) → `rg` fallback

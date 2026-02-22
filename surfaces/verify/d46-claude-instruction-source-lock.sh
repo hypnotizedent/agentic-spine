@@ -42,6 +42,29 @@ for ref in "AGENTS.md" "SESSION_PROTOCOL.md"; do
   fi
 done
 
+# Check 2b: Redirect shim must use fast startup baseline only.
+if ! grep -Fq "./bin/ops cap run session.start" "$CLAUDE_MD" 2>/dev/null; then
+  echo "D46 FAIL: CLAUDE.md missing startup baseline command: ./bin/ops cap run session.start" >&2
+  FAIL=1
+fi
+
+FORBIDDEN_STARTUP_CMDS=(
+  "./bin/ops status"
+  "./bin/ops cap list"
+  "./bin/ops cap run stability.control.snapshot"
+  "./bin/ops cap run verify.core.run"
+  "./bin/ops cap run verify.route.recommend"
+  "./bin/ops cap run verify.pack.run"
+  "./bin/ops cap run verify.release.run"
+)
+
+for cmd in "${FORBIDDEN_STARTUP_CMDS[@]}"; do
+  if grep -Fq "$cmd" "$CLAUDE_MD" 2>/dev/null; then
+    echo "D46 FAIL: CLAUDE.md must remain a redirect shim (forbidden startup command: $cmd)" >&2
+    FAIL=1
+  fi
+done
+
 # Check 3: Forbidden governance headings
 FORBIDDEN=("Authority Order" "Immutable Invariants" "Operating Loop" "Safety Defaults" "What You Must Not Do")
 for heading in "${FORBIDDEN[@]}"; do

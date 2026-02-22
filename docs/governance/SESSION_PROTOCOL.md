@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-21
+last_verified: 2026-02-22
 scope: session-entry
 ---
 
@@ -50,7 +50,8 @@ Full spine access. Follow all sections below in order.
 ### Session steps
 
 1. **Start the session**
-   - Run `./bin/ops cap run session.start` — this handles status, snapshot, and core verify in one command.
+   - Run `./bin/ops cap run session.start` — default fast startup (status brief + recommended post-work verify command).
+   - Run `./bin/ops cap run session.start full` only when explicitly requested for deep startup diagnostics.
    - If you need to touch secrets, source `~/.config/infisical/credentials` first.
 2. **Start work**
    - Prioritize closing existing work (loops, gaps) before starting new work.
@@ -58,6 +59,7 @@ Full spine access. Follow all sections below in order.
      - objective (single sentence)
      - done check (how completion will be verified)
      - first command (deterministic first execution step)
+   - If capability syntax is uncertain, run `./bin/ops cap show <capability>` before execution. Do not guess.
    - Discover capabilities with `./bin/ops cap list` when needed. Do not invent commands.
 3. **Trace truth**
    - Query hierarchy: direct file read → `./bin/ops cap run rag.anythingllm.ask "<query>"` → `spine-rag` MCP → `rg` fallback.
@@ -74,6 +76,8 @@ Full spine access. Follow all sections below in order.
 
 | Scenario | Execution Mode |
 |----------|---------------|
+| Startup baseline | `ops cap run session.start` (fast default) |
+| Deep startup diagnostics (opt-in) | `ops cap run session.start full` |
 | Single read-only query | `ops cap run` (auto-approval) |
 | Single mutating action | `ops cap run` (manual approval) |
 | Multi-step coordinated work | Open a loop, use proposal flow |
@@ -85,7 +89,7 @@ Full spine access. Follow all sections below in order.
 
 | Tier | When | Command | Time |
 |------|------|---------|------|
-| **Core-8** | Every session start | `verify.core.run` | <60s |
+| **Core-8** | On-demand quick verify (or before high-risk changes) | `verify.core.run` | <60s |
 | **Domain pack** | After domain work, before commit | `verify.pack.run <domain>` | 1-5 min |
 | **Full release** | Nightly / release only | `verify.release.run` | 10-15 min |
 

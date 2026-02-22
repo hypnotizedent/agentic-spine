@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-21
+last_verified: 2026-02-22
 scope: agent-governance-brief
 ---
 
@@ -58,9 +58,17 @@ scope: agent-governance-brief
 - **Tier 4: `rg` search** — exact-string fallback when capability/MCP discovery is unavailable.
 - **Fallback contract:** capability-first RAG is canonical; MCP is optional. Never guess.
 
+## Execution Focus Gate
+
+- **No dart-throwing.** Before mutating work, write a 3-card intake: objective, done check, first command.
+- **One capability at a time.** Run the smallest deterministic `ops cap run <capability>` for the task in front of you.
+- **Syntax certainty first.** If command shape is uncertain, run `./bin/ops cap show <capability>` before execution.
+- **Discovery is scoped.** Use `./bin/ops cap list` only when you truly need capability discovery.
+
 ## Verify & Receipts
 
-- Day-to-day preflight: run `./bin/ops cap run stability.control.snapshot` then `./bin/ops cap run verify.core.run`.
+- Session startup baseline: run `./bin/ops cap run session.start` (fast mode default).
+- Optional deep startup diagnostics: run `./bin/ops cap run session.start full` when explicitly requested.
 - Domain work: run `./bin/ops cap run verify.route.recommend` and then `./bin/ops cap run verify.pack.run <domain|core-operator>` (use `verify.domain.run` only for integration/debug).
 - Certification: run `./bin/ops cap run verify.release.run` or `./bin/ops cap run spine.verify` for release/nightly and final cutover.
 - Every capability execution auto-generates a receipt. Ledger is append-only.
@@ -69,6 +77,8 @@ scope: agent-governance-brief
 
 ## Quick Commands
 
+- `./bin/ops cap run session.start` — fast startup baseline
+- `./bin/ops cap run session.start full` — deep startup diagnostics (opt-in)
 - `./bin/ops cap list` — discover capabilities
 - `./bin/ops status` — unified work status (loops + gaps + inbox)
 - `./bin/ops loops list --open` — list open loops only
@@ -79,8 +89,7 @@ scope: agent-governance-brief
 - `./bin/ops cap run verify.domain.run <domain>` — integration/debug verify lane (not default day lane)
 - `./bin/ops cap run verify.release.run` — release/nightly full certification lane
 - `./bin/ops cap run verify.pack.list` — list verify packs
-- `./bin/ops cap run verify.pack.run <agent_id|domain>` — pack-first verify
-- `./bin/ops cap run stability.control.snapshot` — runtime reliability snapshot
+- `./bin/ops cap run stability.control.snapshot` — runtime reliability snapshot (on-demand)
 - `./bin/ops cap run stability.control.reconcile` — guided recovery command planner
 - `./bin/ops cap run spine.verify` — full drift check (release/nightly)
 - `/ctx` — load full governance context

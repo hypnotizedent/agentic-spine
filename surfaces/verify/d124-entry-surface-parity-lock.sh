@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# TRIAGE: Keep startup block identical across AGENTS/CLAUDE/OPENCODE/home-CLAUDE and route launches through spine entry.
+# TRIAGE: Keep startup block identical across governed entry surfaces and block heavy startup drift.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/entry.surface.contract.yaml"
 
 fail() {
@@ -68,6 +69,13 @@ while IFS=$'\t' read -r sid path; do
       err "surface '$sid' missing required startup line: $required"
     fi
   done < <(yq e -r '.startup_block.required_lines[]?' "$CONTRACT" 2>/dev/null || true)
+
+  while IFS= read -r forbidden; do
+    [[ -z "$forbidden" ]] && continue
+    if printf '%s\n' "$block" | grep -Fq "$forbidden"; then
+      err "surface '$sid' contains forbidden startup line: $forbidden"
+    fi
+  done < <(yq e -r '.startup_block.forbidden_lines[]?' "$CONTRACT" 2>/dev/null || true)
 
   if [[ -z "$canonical_block" ]]; then
     canonical_block="$block"

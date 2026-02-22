@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-12
+last_verified: 2026-02-22
 scope: opencode-entry-contract
 ---
 
@@ -62,7 +62,7 @@ Canonical source: `workbench/dotfiles/opencode/OPENCODE.md`
 
 Required sections (enforced by D73):
 - **Worker Lane Contract**: entry checks, hard rules, scope constraints, handoff format
-- **Solo Mode Contract**: commit policy, verify-before-commit, gap registration
+- **Solo Mode Contract**: commit policy, startup baseline (`session.start` fast default), verify-before-commit, gap registration
 - **BLOCK-ENTRY / BLOCK-SCOPE-DRIFT**: explicit stop behaviors for governance violations
 
 ## Command Compatibility Surface
