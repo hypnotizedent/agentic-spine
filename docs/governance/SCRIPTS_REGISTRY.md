@@ -10,7 +10,7 @@ scope: scripts-inventory
 Principle: only scripts listed here are allowed as official operator surfaces.
 
 ## Entry points
-- bin/ops -> ops/ops
+- bin/ops (canonical CLI entrypoint)
 
 ## Surfaces
 ### verify

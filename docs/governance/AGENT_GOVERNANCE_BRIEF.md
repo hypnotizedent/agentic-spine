@@ -9,7 +9,7 @@ scope: agent-governance-brief
 
 > Canonical source for all agent governance constraints.
 > Consumed by: session-entry surfaces via `spine.context`.
-> `ops/hooks/sync-agent-surfaces.sh` is retired; update this file as the source of truth.
+> `ops/hooks/sync-agent-surfaces.sh` has been retired and removed. Update this file as the source of truth.
 
 ## Commit & Branch Rules
 
