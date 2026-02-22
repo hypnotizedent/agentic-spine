@@ -6,11 +6,14 @@
 Session objective: documentation + alignment only.  
 Mutation policy for this artifact: no production mutations.
 
-Last Consolidated: `2026-02-22T04:20:00Z`
+Last Consolidated: `2026-02-22T04:25:00Z`
 Latest Tick Run Key: `CAP-20260221-230254__spine.control.tick__Rxuy87260`
 Latest Plan Run Key: `CAP-20260221-230254__spine.control.plan__Rjf9j7261`
 Latest Route Cutover Run Key: `CAP-20260221-231839__cloudflare.tunnel.ingress.status__R5fzy83317`
+Latest Route Verify Run Key: `CAP-20260221-232303__cloudflare.tunnel.ingress.status__Rztw827738`
 Latest Stability Run Key: `CAP-20260221-231343__stability.control.snapshot__Rtcfd46377`
+Latest Core Verify Run Key: `CAP-20260221-232304__verify.core.run__Rsyi528440`
+Latest Pack Verify Run Key: `CAP-20260221-232305__verify.pack.run__Rdvj932119`
 
 ## Current State (Fresh vs Legacy)
 
@@ -160,9 +163,9 @@ Source of truth: this table is canonical for item state, ownership, evidence, an
 | `STATE-FRESH-BASELINE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-225755__mint.deploy.status__R17dk18983` | Keep daily health snapshots and compare to route state |
 | `STATE-LEGACY-VM200` | `SPINE-AUDIT-01` | `open` | `CAP-20260221-225857__docker.compose.status__Rbelc23304` | Keep VM 200 active until replacement routes and boundaries are complete |
 | `ROUTE-ZERO-CUTOVER` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-231839__cloudflare.tunnel.ingress.status__R5fzy83317` | First 2 routes (pricing/shipping) cut over 2026-02-22 |
-| `ROUTE-CUTOVER-4` | `SPINE-CONTROL-01` | `open` | `CAP-20260221-231839__cloudflare.tunnel.ingress.status__R5fzy83317` | 2/4 done (pricing+shipping); files/minio remain |
-| `ROUTE-PRICING-MISROUTE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-231839__cloudflare.tunnel.ingress.status__R5fzy83317` | Cut over to `http://100.79.183.14:3700` — verified HTTP 200 via public route |
-| `ROUTE-SHIPPING-MISROUTE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-231839__cloudflare.tunnel.ingress.status__R5fzy83317` | Cut over to `http://100.79.183.14:3900` — verified HTTP 200 via public route |
+| `ROUTE-CUTOVER-4` | `SPINE-CONTROL-01` | `open` | `CAP-20260221-232303__cloudflare.tunnel.ingress.status__Rztw827738` | 2/4 done (pricing+shipping verified); files/minio remain |
+| `ROUTE-PRICING-MISROUTE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-232303__cloudflare.tunnel.ingress.status__Rztw827738` | Verified: `http://100.79.183.14:3700` — HTTP 200, service=pricing |
+| `ROUTE-SHIPPING-MISROUTE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-232303__cloudflare.tunnel.ingress.status__Rztw827738` | Verified: `http://100.79.183.14:3900` — HTTP 200, service=shipping |
 | `ROUTE-ALIAS-DISAMBIG` | `SPINE-CONTROL-01` | `open` | `HO-20260222-040005` | Replace alias routing for `quote-page` with explicit target host |
 | `BLOCKER-GAP-802` | `SPINE-CONTROL-01` | `blocked` | `CAP-20260221-225755__gaps.status__R7rrh18982` | Provision finance adapter key and close gap with receipt |
 | `DRIFT-MINT-DEPLOY-STATUS` | `TERMINAL-C` | `open` | `CAP-20260221-224435__mint.deploy.status__Rfmkx77795` | Update deploy status capability to include sub-project stacks |
@@ -174,7 +177,7 @@ Source of truth: this table is canonical for item state, ownership, evidence, an
 | `DOMAIN-AUTH-EXTRACTION` | `SPINE-AUDIT-01` | `blocked` | `Terminal B handoff (2026-02-22)` | Launch JWT/PIN/admin auth module extraction with actor isolation checks |
 | `DOMAIN-PAYMENT-EXTRACTION` | `SPINE-AUDIT-01` | `blocked` | `Terminal B handoff (2026-02-22)` | Launch Stripe checkout/webhook/payments-table module extraction |
 | `DOMAIN-ORDER-BOUNDARY` | `SPINE-AUDIT-01` | `open` | `HO-20260222-035942` | Define order boundary and FK migration sequencing plan |
-| `PARITY-D148` | `SPINE-CONTROL-01` | `blocked` | `CAP-20260221-225434__verify.core.run__R5mc033433` | Resolve communications-agent runtime binding mismatch and rerun core pack |
+| `PARITY-D148` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-232304__verify.core.run__Rsyi528440` | D148 now passing (8/8 core gates green) |
 | `PARITY-MODULE-HEALTH-COVERAGE` | `TERMINAL-E_AGENT_PARITY` | `open` | `CAP-20260221-225226__mint.modules.health__Rm4pp94982` | Expand health probes to all app-plane modules |
 | `PARITY-VERTICAL-FALSE-PASS` | `TERMINAL-E_AGENT_PARITY` | `open` | `CAP-20260221-225241__verify.vertical_integration.parity_status__Rlumr4519` | Retarget parity admission contract to VM 213 services |
 | `HOLD-RUNBOOK` | `SPINE-CONTROL-01` | `open` | `HO-20260222-040005` | Write hold runbook artifact and sign-off gates |
