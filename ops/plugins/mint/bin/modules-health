@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # modules-health - HTTP health probe for mint module endpoints (fresh-slate)
 #
-# Checks: files-api, order-intake, quote-page on mint-apps (VM 213)
-#         MinIO, PostgreSQL, Redis on mint-data (VM 212)
+# Checks all app modules on mint-apps (VM 213) plus data plane on mint-data (VM 212):
+#   files-api, quote-page, order-intake, finance-adapter, pricing, suppliers, shipping, payment
+#   minio, postgres, redis
 #
 # Read-only. No mutations.
 # STOP=2 on preconditions.
 #
 # Usage:
 #   modules-health              # check all mint endpoints
-#   modules-health <component>  # check specific (files-api|order-intake|quote-page|minio|postgres|redis)
+#   modules-health <component>  # check specific component
 
 set -euo pipefail
 
@@ -43,8 +44,13 @@ echo
 # HTTP endpoints to check
 declare -A ENDPOINTS=(
   [files-api]="http://${MINT_APPS_HOST}:3500/health"
-  [order-intake]="http://${MINT_APPS_HOST}:3400/health"
   [quote-page]="http://${MINT_APPS_HOST}:3341/health"
+  [order-intake]="http://${MINT_APPS_HOST}:3400/health"
+  [finance-adapter]="http://${MINT_APPS_HOST}:3600/health"
+  [pricing]="http://${MINT_APPS_HOST}:3700/health"
+  [suppliers]="http://${MINT_APPS_HOST}:3800/health"
+  [shipping]="http://${MINT_APPS_HOST}:3900/health"
+  [payment]="http://${MINT_APPS_HOST}:4000/health"
   [minio]="http://${MINT_DATA_HOST}:9000/minio/health/live"
 )
 
@@ -106,7 +112,7 @@ check_ssh_service() {
 }
 
 # HTTP checks
-for name in files-api order-intake quote-page minio; do
+for name in files-api quote-page order-intake finance-adapter pricing suppliers shipping payment minio; do
   check_http "$name" "${ENDPOINTS[$name]}"
 done
 

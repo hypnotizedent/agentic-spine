@@ -2,7 +2,8 @@
 # deploy-status - Docker container status for mint fresh-slate VMs
 #
 # Checks mint-apps (VM 213) and mint-data (VM 212) compose stacks.
-# Reports container names, states, and image tags.
+# Stack paths are read from docker.compose.targets.yaml to avoid hidden sub-stack drift.
+# Reports container names, states, status, image, and stack source.
 # Read-only. No mutations.
 # STOP=2 on preconditions.
 #
@@ -23,60 +24,78 @@ stop(){ echo "STOP (2): $*" >&2; exit 2; }
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$COMPOSE_BINDING" ]] || stop "missing binding: $COMPOSE_BINDING"
 
 FILTER="${1:-}"
 
 SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
 
-declare -A TARGETS=(
-  [mint-data]="/opt/stacks/mint-data"
-  [mint-apps]="/opt/stacks/mint-apps"
-)
+TARGETS=("mint-data" "mint-apps")
 
 echo "mint.deploy.status"
 echo
 
 total=0
 healthy=0
+checked_targets=0
 
-for target in mint-data mint-apps; do
+for target in "${TARGETS[@]}"; do
   if [[ -n "$FILTER" && "$target" != "$FILTER" ]]; then continue; fi
+  checked_targets=$((checked_targets + 1))
 
   host="$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .host" "$SSH_BINDING" | head -n1)"
   user="$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
   [[ -n "$host" && "$host" != "null" ]] || { echo "$target: NOT FOUND in ssh.targets"; continue; }
 
-  path="${TARGETS[$target]}"
   echo "=== $target (${user}@${host}) ==="
-  echo "compose_path: $path"
-
-  set +e
-  out="$(ssh "${SSH_OPTS[@]}" "${user}@${host}" \
-    "cd $path && docker compose ps -a --format '{{.Name}}\t{{.State}}\t{{.Status}}\t{{.Image}}'" 2>&1)"
-  rc=$?
-  set -e
-
-  if [[ "$rc" -ne 0 ]]; then
-    echo "STATUS: UNREACHABLE (rc=$rc)"
-    echo "$out"
+  stack_count="$(yq -r ".targets.\"$target\".stacks | length" "$COMPOSE_BINDING")"
+  if [[ "$stack_count" == "null" || -z "$stack_count" || "$stack_count" == "0" ]]; then
+    echo "STATUS: NO STACKS DECLARED IN BINDING"
     echo
     continue
   fi
 
-  if [[ -z "$out" ]]; then
-    echo "STATUS: NO CONTAINERS"
-    echo
-    continue
-  fi
+  printf "%-20s %-30s %-10s %-25s %s\n" "STACK" "CONTAINER" "STATE" "STATUS" "IMAGE"
+  for ((i=0; i<stack_count; i++)); do
+    stack_name="$(yq -r ".targets.\"$target\".stacks[$i].name // \"stack_$i\"" "$COMPOSE_BINDING")"
+    stack_path="$(yq -r ".targets.\"$target\".stacks[$i].path // \"\"" "$COMPOSE_BINDING")"
+    [[ -n "$stack_path" && "$stack_path" != "null" ]] || continue
 
-  printf "%-30s %-10s %-25s %s\n" "CONTAINER" "STATE" "STATUS" "IMAGE"
-  while IFS=$'\t' read -r name state status image; do
-    total=$((total + 1))
-    printf "%-30s %-10s %-25s %s\n" "$name" "$state" "$status" "$image"
-    [[ "${state,,}" == "running" ]] && healthy=$((healthy + 1))
-  done <<< "$out"
+    set +e
+    out="$(ssh "${SSH_OPTS[@]}" "${user}@${host}" \
+      "if [ -d \"$stack_path\" ]; then cd \"$stack_path\" && docker compose ps -a --format '{{.Name}}\t{{.State}}\t{{.Status}}\t{{.Image}}' 2>/dev/null; else echo '__STACK_PATH_MISSING__'; fi" 2>&1)"
+    rc=$?
+    set -e
+
+    if [[ "$rc" -ne 0 ]]; then
+      printf "%-20s %-30s %-10s %-25s %s\n" "$stack_name" "-" "FAIL" "rc=$rc" "$stack_path"
+      continue
+    fi
+
+    if grep -q "__STACK_PATH_MISSING__" <<<"$out"; then
+      printf "%-20s %-30s %-10s %-25s %s\n" "$stack_name" "-" "MISSING" "dir_missing" "$stack_path"
+      continue
+    fi
+
+    if [[ -z "$out" ]]; then
+      printf "%-20s %-30s %-10s %-25s %s\n" "$stack_name" "-" "EMPTY" "no_containers" "$stack_path"
+      continue
+    fi
+
+    while IFS=$'\t' read -r name state status image; do
+      [[ -n "$name" && -n "$state" && -n "$image" ]] || continue
+      total=$((total + 1))
+      printf "%-20s %-30s %-10s %-25s %s\n" "$stack_name" "$name" "$state" "$status" "$image"
+      [[ "${state,,}" == "running" ]] && healthy=$((healthy + 1))
+    done <<< "$out"
+  done
   echo
 done
+
+if [[ -n "$FILTER" && "$checked_targets" -eq 0 ]]; then
+  echo "STOP (2): unknown target '$FILTER'"
+  exit 2
+fi
 
 echo "summary: $healthy/$total containers running"
 if [[ "$healthy" -eq "$total" && "$total" -gt 0 ]]; then
