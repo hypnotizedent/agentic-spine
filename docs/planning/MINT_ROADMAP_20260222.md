@@ -6,14 +6,14 @@
 Session objective: documentation + alignment only.  
 Mutation policy for this artifact: no production mutations.
 
-Last Consolidated: `2026-02-22T04:25:00Z`
+Last Consolidated: `2026-02-22T05:57:00Z`
 Latest Tick Run Key: `CAP-20260221-230254__spine.control.tick__Rxuy87260`
 Latest Plan Run Key: `CAP-20260221-230254__spine.control.plan__Rjf9j7261`
-Latest Route Cutover Run Key: `CAP-20260221-231839__cloudflare.tunnel.ingress.status__R5fzy83317`
-Latest Route Verify Run Key: `CAP-20260221-232303__cloudflare.tunnel.ingress.status__Rztw827738`
-Latest Stability Run Key: `CAP-20260221-231343__stability.control.snapshot__Rtcfd46377`
-Latest Core Verify Run Key: `CAP-20260221-232304__verify.core.run__Rsyi528440`
-Latest Pack Verify Run Key: `CAP-20260221-232305__verify.pack.run__Rdvj932119`
+Latest Route Cutover Run Key: `CAP-20260221-233000__cloudflare.tunnel.ingress.status__Rlx4x23082`
+Latest Route Verify Run Key: `CAP-20260221-233000__cloudflare.tunnel.ingress.status__Rlx4x23082`
+Latest Stability Run Key: `CAP-20260221-232156__stability.control.snapshot__R8sk420819`
+Latest Core Verify Run Key: `CAP-20260221-232336__verify.core.run__Rkqa054468`
+Latest Pack Verify Run Key: `CAP-20260221-232512__verify.pack.run__Ryc5d87703`
 
 ## Current State (Fresh vs Legacy)
 
@@ -44,12 +44,12 @@ Latest Pack Verify Run Key: `CAP-20260221-232305__verify.pack.run__Rdvj932119`
 
 ### System-level blockers (P0)
 
-1. Provider readiness gap: Resend and Twilio env not live-ready for customer notification paths.
-2. Notification routing gap: event router pickup/shipped legs still no-op (`P08`, `P10`), and v2 jobs status updates do not emit webhook.
-3. Auth gap: no fresh-slate user auth replacement exists (legacy JWT/PIN/admin session paths are still required).
-4. Payment gap: no fresh-slate Stripe checkout/webhook/payment-table replacement exists (legacy remains revenue authority).
+1. Provider readiness gap: Resend and Twilio env not live-ready for customer notification paths (`CAP-20260221-233033__communications.provider.status__Rjsxt24559`).
+2. Notification routing gap: event router pickup/shipped legs are confirmed as no-op (`P08`, `P10`) via workflow graph; v2 jobs webhook emission remains unproven in this pass (`CAP-20260221-235253__n8n.workflows.get__Rz1vx40987`).
+3. Auth gap: fresh-slate replacement for legacy JWT/PIN/admin session paths is **UNVERIFIED** in current RAG evidence (`CAP-20260221-235253__rag.anythingllm.ask__R7uto40985`).
+4. Payment gap: fresh-slate Stripe checkout/webhook/payment-table replacement is **UNVERIFIED** in current RAG evidence (`CAP-20260221-235253__rag.anythingllm.ask__Ree5f40986`).
 5. Finance blocker: `GAP-OP-802` remains open and unlinked, blocking finance-adapter reconciliation path.
-6. Governance parity gap: D148 mismatch + false-positive vertical parity + health-cap blind spots limit trust in automated checks.
+6. Governance parity gap: D148 is resolved (`PASS`) in core verify; remaining parity risk is false-positive vertical parity + health-cap blind spots (`CAP-20260221-232336__verify.core.run__Rkqa054468`).
 
 ### Registered gap deltas from worker handoffs
 
@@ -60,10 +60,10 @@ Latest Pack Verify Run Key: `CAP-20260221-232305__verify.pack.run__Rdvj932119`
 
 Evidence anchors:
 
-- `CAP-20260221-225755__gaps.status__R7rrh18982`
-- `CAP-20260221-225807__loops.progress__Rbozo20453`
-- `CAP-20260221-225434__verify.core.run__R5mc033433`
-- `CAP-20260221-225531__verify.pack.run__Rcjb757795`
+- `CAP-20260221-233137__gaps.status__Rg0ae25574`
+- `CAP-20260221-233456__loops.progress__Rx70s31459` (run with `./bin/ops cap run loops.progress --loop <LOOP_ID>`)
+- `CAP-20260221-232336__verify.core.run__Rkqa054468`
+- `CAP-20260221-232512__verify.pack.run__Ryc5d87703`
 - `CAP-20260221-225020__mcp.runtime.status__Re7px66523` (worker handoff evidence)
 - `CAP-20260221-225022__verify.pack.run__Rlukn67107` (worker handoff evidence)
 - `CAP-20260221-225241__verify.vertical_integration.parity_status__Rlumr4519` (worker handoff evidence)
@@ -72,7 +72,7 @@ Evidence anchors:
 
 Current authoritative route state: **2/14 mint public routes are cut over to fresh-slate targets**.
 
-Route Scope Definition: `0/14` counts mint public Cloudflare ingress routes only (customer/business mint hostnames). It excludes non-mint `ronny.works` routes and external `mintprints-v3.ronny.works`.
+Route Scope Definition: `14` is the total mint-public route denominator (customer/business mint hostnames only). Runtime state is currently `2/14` cut over. Any `0/14` mention refers to baseline scope framing, not current runtime state. This excludes non-mint `ronny.works` routes and external `mintprints-v3.ronny.works`.
 
 ### Cutover-ready now (fresh target exists, legacy route still active)
 
@@ -138,7 +138,7 @@ Current interpretation: hold intent is declared, but enforcement gate is not yet
 - Provider/env readiness: Resend + Twilio + n8n env injection (notifications currently blocked).
 - Notification trigger wiring blockers: replace event-router no-op stubs + add v2 status webhook emission.
 - Auth/payment/order boundaries: start extraction loop for `LEG-001`/`LEG-002`/`LEG-003`/`LEG-004` (no partial cutover possible until auth + payments exist).
-- Resolve D148 governance failure to restore trusted core verify lane.
+- Keep D148 passing while closing remaining parity blind spots (vertical false-pass + health-cap coverage), evidence: `CAP-20260221-232336__verify.core.run__Rkqa054468`.
 
 ### P1
 
@@ -160,24 +160,24 @@ Source of truth: this table is canonical for item state, ownership, evidence, an
 
 | item_id | owner | status | evidence_run_key | next_action |
 | --- | --- | --- | --- | --- |
-| `STATE-FRESH-BASELINE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-225755__mint.deploy.status__R17dk18983` | Keep daily health snapshots and compare to route state |
+| `STATE-FRESH-BASELINE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-232156__stability.control.snapshot__R8sk420819` | Keep daily health snapshots and compare to route state |
 | `STATE-LEGACY-VM200` | `SPINE-AUDIT-01` | `open` | `CAP-20260221-225857__docker.compose.status__Rbelc23304` | Keep VM 200 active until replacement routes and boundaries are complete |
-| `ROUTE-ZERO-CUTOVER` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-231839__cloudflare.tunnel.ingress.status__R5fzy83317` | First 2 routes (pricing/shipping) cut over 2026-02-22 |
-| `ROUTE-CUTOVER-4` | `SPINE-CONTROL-01` | `open` | `CAP-20260221-232303__cloudflare.tunnel.ingress.status__Rztw827738` | 2/4 done (pricing+shipping verified); files/minio remain |
-| `ROUTE-PRICING-MISROUTE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-232303__cloudflare.tunnel.ingress.status__Rztw827738` | Verified: `http://100.79.183.14:3700` — HTTP 200, service=pricing |
-| `ROUTE-SHIPPING-MISROUTE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-232303__cloudflare.tunnel.ingress.status__Rztw827738` | Verified: `http://100.79.183.14:3900` — HTTP 200, service=shipping |
+| `ROUTE-ZERO-CUTOVER` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-233000__cloudflare.tunnel.ingress.status__Rlx4x23082` | First 2 routes (pricing/shipping) cut over 2026-02-22 |
+| `ROUTE-CUTOVER-4` | `SPINE-CONTROL-01` | `open` | `CAP-20260221-233000__cloudflare.tunnel.ingress.status__Rlx4x23082` | 2/4 done (pricing+shipping verified); files/minio remain |
+| `ROUTE-PRICING-MISROUTE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-233000__cloudflare.tunnel.ingress.status__Rlx4x23082` | Verified: `http://100.79.183.14:3700` — HTTP 200, service=pricing |
+| `ROUTE-SHIPPING-MISROUTE` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-233000__cloudflare.tunnel.ingress.status__Rlx4x23082` | Verified: `http://100.79.183.14:3900` — HTTP 200, service=shipping |
 | `ROUTE-ALIAS-DISAMBIG` | `SPINE-CONTROL-01` | `open` | `HO-20260222-040005` | Replace alias routing for `quote-page` with explicit target host |
-| `BLOCKER-GAP-802` | `SPINE-CONTROL-01` | `blocked` | `CAP-20260221-225755__gaps.status__R7rrh18982` | Provision finance adapter key and close gap with receipt |
+| `BLOCKER-GAP-802` | `SPINE-CONTROL-01` | `blocked` | `CAP-20260221-233137__gaps.status__Rg0ae25574` | Provision finance adapter key and close gap with receipt |
 | `DRIFT-MINT-DEPLOY-STATUS` | `TERMINAL-C` | `open` | `CAP-20260221-224435__mint.deploy.status__Rfmkx77795` | Update deploy status capability to include sub-project stacks |
-| `BINDING-DOCKER-PARITY` | `TERMINAL-C` | `done` | `CAP-20260221-224530__verify.pack.run__R5sv879182` | Keep docker target binding parity under verify pack guard |
+| `BINDING-DOCKER-PARITY` | `TERMINAL-C` | `done` | `CAP-20260221-232512__verify.pack.run__Ryc5d87703` | Keep docker target binding parity under verify pack guard |
 | `NOTIF-PROVIDERS-READY` | `SPINE-AUDIT-01` | `blocked` | `CAP-20260221-225007__communications.provider.status__R8p9464929` | Inject Resend/Twilio vars into runtime and validate `live_ready: yes` |
 | `NOTIF-WORKFLOW-ACTIVATION` | `SPINE-AUDIT-01` | `open` | `CAP-20260221-225010__n8n.workflows.list__Rc5zz65490` | Activate payment-needed/ready-for-pickup/shipped email workflows |
-| `NOTIF-EVENT-ROUTER-WIRING` | `SPINE-AUDIT-01` | `open` | `HO-20260222-035917` | Replace `P08/P10` no-op stubs with active webhook routes |
-| `NOTIF-V2-WEBHOOK-EMIT` | `SPINE-AUDIT-01` | `open` | `HO-20260222-035917` | Add webhook emission on `/api/v2/jobs/:id/status` transitions |
-| `DOMAIN-AUTH-EXTRACTION` | `SPINE-AUDIT-01` | `blocked` | `Terminal B handoff (2026-02-22)` | Launch JWT/PIN/admin auth module extraction with actor isolation checks |
-| `DOMAIN-PAYMENT-EXTRACTION` | `SPINE-AUDIT-01` | `blocked` | `Terminal B handoff (2026-02-22)` | Launch Stripe checkout/webhook/payments-table module extraction |
+| `NOTIF-EVENT-ROUTER-WIRING` | `SPINE-AUDIT-01` | `open` | `CAP-20260221-235253__n8n.workflows.get__Rz1vx40987` | P08/P10 are no-op nodes; replace with active webhook routes |
+| `NOTIF-V2-WEBHOOK-EMIT` | `SPINE-AUDIT-01` | `open` | `CAP-20260221-235253__n8n.workflows.get__Rz1vx40987` | Event router verified; emission source from `/api/v2/jobs/:id/status` remains UNVERIFIED |
+| `DOMAIN-AUTH-EXTRACTION` | `SPINE-AUDIT-01` | `blocked` | `CAP-20260221-235253__rag.anythingllm.ask__R7uto40985` | UNVERIFIED: no direct evidence of fresh-slate JWT/PIN/admin replacement found in current RAG result |
+| `DOMAIN-PAYMENT-EXTRACTION` | `SPINE-AUDIT-01` | `blocked` | `CAP-20260221-235253__rag.anythingllm.ask__Ree5f40986` | UNVERIFIED: no direct evidence of fresh-slate Stripe checkout/webhook/payment-table replacement found in current RAG result |
 | `DOMAIN-ORDER-BOUNDARY` | `SPINE-AUDIT-01` | `open` | `HO-20260222-035942` | Define order boundary and FK migration sequencing plan |
-| `PARITY-D148` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-232304__verify.core.run__Rsyi528440` | D148 now passing (8/8 core gates green) |
+| `PARITY-D148` | `SPINE-CONTROL-01` | `done` | `CAP-20260221-232336__verify.core.run__Rkqa054468` | D148 now passing (8/8 core gates green) |
 | `PARITY-MODULE-HEALTH-COVERAGE` | `TERMINAL-E_AGENT_PARITY` | `open` | `CAP-20260221-225226__mint.modules.health__Rm4pp94982` | Expand health probes to all app-plane modules |
 | `PARITY-VERTICAL-FALSE-PASS` | `TERMINAL-E_AGENT_PARITY` | `open` | `CAP-20260221-225241__verify.vertical_integration.parity_status__Rlumr4519` | Retarget parity admission contract to VM 213 services |
 | `HOLD-RUNBOOK` | `SPINE-CONTROL-01` | `open` | `HO-20260222-040005` | Write hold runbook artifact and sign-off gates |
