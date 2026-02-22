@@ -42,7 +42,7 @@ Execute the 3-lane communications boundary model with hard separation between Mi
 | D3 | Sender addresses scattered | **FIXED** | n8n purge eliminated all stale senders | Zero `mintprintshop.com`/`sales@`/`digest@`/`production@` references remain |
 | D4 | Two template systems | **FIXED** | n8n HTML templates deleted | Spine YAML catalog is sole template surface |
 | D5 | Briefing email reports errors | **OUT OF SCOPE** | N/A | Briefing plugin data issue, not comms |
-| D6 | Graph boundary not enforced | **OPEN** | See GAP-OP-819 | Stack contract send_test still uses Outlook |
+| D6 | Graph boundary not enforced | **FIXED** | D151 gate + stack contract update | send_test → spine.mintprints.co, mailboxes → stalwart-direct, D151 enforces boundary |
 | D7 | No shared AI mailbox | **OPEN** | See GAP-OP-820 | VM 214 not provisioned, Stalwart not deployed |
 | D8 | Resend auth failures (403) | **OPEN** | See GAP-OP-821 | Intermittent 403 in delivery log, root cause unknown |
 
@@ -50,11 +50,11 @@ Execute the 3-lane communications boundary model with hard separation between Mi
 
 | Phase | Description | Status | Remaining |
 |-------|-----------|--------|-----------|
-| P1 | Contract consistency + sender normalization | **80%** | Stack contract `transactional.mode` fix (GAP-OP-818) |
+| P1 | Contract consistency + sender normalization | **DONE** | GAP-OP-818 closed, stack contract mode=live, sender addresses normalized |
 | P2 | Stalwart bootstrap (VM 214) | **NOT STARTED** | Full VM + deploy + DNS (GAP-OP-820) |
 | P3 | N8N migration to spine governance | **SUPERSEDED** | Deleted all n8n flows. `Spine_-_Mailroom_Enqueue` is the only future path. |
 | P4 | Template SSOT consolidation | **DONE** | Dual system eliminated. Spine YAML catalog is SSOT. |
-| P5 | Boundary enforcement (D151 gate) | **NOT STARTED** | D151 gate + stack contract send_test fix (GAP-OP-819) |
+| P5 | Boundary enforcement (D151 gate) | **DONE** | D151 registered, stack contract updated, gate passes |
 
 ## Gaps (Remaining Work)
 
