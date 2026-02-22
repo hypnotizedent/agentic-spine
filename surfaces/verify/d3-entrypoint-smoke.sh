@@ -14,10 +14,14 @@ fi
   exit 1
 }
 
-if "$ROOT/bin/ops" status --brief >/dev/null 2>&1; then
+# status --brief returns rc=0 (clean) or rc=1 (open items/anomalies exist).
+# Both are valid for a smoke check — only rc>=2 indicates a hard entrypoint failure.
+local_rc=0
+"$ROOT/bin/ops" status --brief >/dev/null 2>&1 || local_rc=$?
+if [[ "$local_rc" -le 1 ]]; then
   echo "D3 PASS: entrypoint smoke checks succeeded"
   exit 0
 fi
 
-echo "D3 FAIL: bin/ops status --brief smoke check failed" >&2
+echo "D3 FAIL: bin/ops status --brief smoke check failed (rc=$local_rc)" >&2
 exit 1
