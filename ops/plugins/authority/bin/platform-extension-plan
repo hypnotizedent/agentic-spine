@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+PLAN_CONTRACT="$ROOT/ops/bindings/platform.extension.plan.contract.yaml"
+TX_CONTRACT="$ROOT/ops/bindings/platform.extension.transaction.contract.yaml"
+
+usage() {
+  cat <<'USAGE'
+platform.extension.plan
+
+Usage:
+  platform-extension-plan --transaction-file <path> [--dry-run]
+
+Options:
+  --transaction-file <path>  Transaction YAML file (required)
+  --dry-run                  Print generated plan YAML only (no write)
+  -h, --help                 Show this help
+USAGE
+}
+
+fail() {
+  echo "platform.extension.plan FAIL: $*" >&2
+  exit 1
+}
+
+TX_FILE=""
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --transaction-file)
+      TX_FILE="${2:-}"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$TX_FILE" ]] || fail "--transaction-file is required"
+[[ -f "$PLAN_CONTRACT" ]] || fail "missing plan contract: $PLAN_CONTRACT"
+[[ -f "$TX_CONTRACT" ]] || fail "missing transaction contract: $TX_CONTRACT"
+
+TX_FILE="$(cd "$(dirname "$TX_FILE")" && pwd)/$(basename "$TX_FILE")"
+[[ -f "$TX_FILE" ]] || fail "transaction file not found: $TX_FILE"
+
+command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
+
+python3 - "$PLAN_CONTRACT" "$TX_CONTRACT" "$TX_FILE" "$DRY_RUN" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+import yaml
+
+plan_contract_path = Path(sys.argv[1]).expanduser().resolve()
+tx_contract_path = Path(sys.argv[2]).expanduser().resolve()
+tx_file_path = Path(sys.argv[3]).expanduser().resolve()
+dry_run = sys.argv[4] == "1"
+
+
+def load_yaml(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+try:
+    plan_contract = load_yaml(plan_contract_path)
+    tx_contract = load_yaml(tx_contract_path)
+    tx_doc = load_yaml(tx_file_path)
+except Exception as exc:
+    print(f"platform.extension.plan FAIL: unable to parse YAML input: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+required_tx_fields = ["transaction_id", "type", "target_id", "status", "bindings_touched"]
+for field in required_tx_fields:
+    if field not in tx_doc:
+        print(f"platform.extension.plan FAIL: transaction missing field: {field}", file=sys.stderr)
+        raise SystemExit(1)
+
+transaction_id = str(tx_doc.get("transaction_id", "")).strip()
+tx_type = str(tx_doc.get("type", "")).strip()
+target_id = str(tx_doc.get("target_id", "")).strip()
+status = str(tx_doc.get("status", "")).strip()
+bindings_touched = tx_doc.get("bindings_touched")
+
+if not transaction_id or not tx_type or not target_id or not status:
+    print("platform.extension.plan FAIL: transaction id/type/target/status must be non-empty", file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(bindings_touched, list) or not bindings_touched:
+    print("platform.extension.plan FAIL: transaction bindings_touched must be a non-empty list", file=sys.stderr)
+    raise SystemExit(1)
+
+allowed_types = {str(x).strip() for x in (tx_contract.get("transaction_types") or []) if str(x).strip()}
+if allowed_types and tx_type not in allowed_types:
+    print(f"platform.extension.plan FAIL: transaction type not allowed by contract: {tx_type}", file=sys.stderr)
+    raise SystemExit(1)
+
+required_capabilities = [
+    str(x).strip()
+    for x in (plan_contract.get("required_capabilities_default") or [])
+    if str(x).strip()
+]
+required_verifications = [
+    str(x).strip()
+    for x in (plan_contract.get("required_verifications_default") or [])
+    if str(x).strip()
+]
+
+cross_repo_by_type = plan_contract.get("cross_repo_surfaces_by_type")
+if not isinstance(cross_repo_by_type, dict):
+    cross_repo_by_type = {}
+cross_repo_surfaces = [
+    str(x).strip()
+    for x in (cross_repo_by_type.get(tx_type) or [])
+    if str(x).strip()
+]
+
+payload = {
+    "transaction_id": transaction_id,
+    "type": tx_type,
+    "target_id": target_id,
+    "status": status,
+    "bindings_touched": bindings_touched,
+    "required_capabilities": required_capabilities,
+    "required_verifications": required_verifications,
+    "cross_repo_surfaces": cross_repo_surfaces,
+    "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+
+required_plan_keys = [
+    str(x).strip() for x in (plan_contract.get("required_keys") or []) if str(x).strip()
+]
+for key in required_plan_keys:
+    if key not in payload:
+        print(f"platform.extension.plan FAIL: generated plan missing required key: {key}", file=sys.stderr)
+        raise SystemExit(1)
+    value = payload.get(key)
+    if isinstance(value, list):
+        if len(value) == 0:
+            print(f"platform.extension.plan FAIL: generated plan list key is empty: {key}", file=sys.stderr)
+            raise SystemExit(1)
+        continue
+    if not str(value or "").strip():
+        print(f"platform.extension.plan FAIL: generated plan key is empty: {key}", file=sys.stderr)
+        raise SystemExit(1)
+
+artifact_template = str(plan_contract.get("artifact_path_template", "")).strip()
+if not artifact_template or "<transaction_id>" not in artifact_template:
+    print("platform.extension.plan FAIL: artifact_path_template missing <transaction_id>", file=sys.stderr)
+    raise SystemExit(1)
+
+root = plan_contract_path.parents[2]
+artifact_path = (root / artifact_template.replace("<transaction_id>", transaction_id)).resolve()
+
+if dry_run:
+    print(yaml.safe_dump(payload, sort_keys=False), end="")
+    raise SystemExit(0)
+
+artifact_path.parent.mkdir(parents=True, exist_ok=True)
+with artifact_path.open("w", encoding="utf-8") as handle:
+    yaml.safe_dump(payload, handle, sort_keys=False)
+
+print("platform.extension.plan")
+print("status: wrote")
+print(f"transaction_file: {tx_file_path}")
+print(f"plan_path: {artifact_path}")
+PY

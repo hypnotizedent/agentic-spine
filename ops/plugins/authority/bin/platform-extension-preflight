@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+TX_CONTRACT="$ROOT/ops/bindings/platform.extension.transaction.contract.yaml"
+PRE_CONTRACT="$ROOT/ops/bindings/platform.extension.preflight.contract.yaml"
+LIFECYCLE_CONTRACT="$ROOT/ops/bindings/platform.extension.lifecycle.contract.yaml"
+SERVICE_CONTRACT="$ROOT/ops/bindings/service.onboarding.contract.yaml"
+HEALTH_BINDING="$ROOT/ops/bindings/services.health.yaml"
+COMMITMENTS_CONTRACT="$ROOT/ops/bindings/operator.commitments.contract.yaml"
+BINDING_DEFAULTS="$ROOT/ops/bindings/platform.extension.binding.defaults.yaml"
+
+usage() {
+  cat <<'USAGE'
+platform.extension.preflight
+
+Usage:
+  platform-extension-preflight --transaction-file <path> [--strict]
+
+Options:
+  --transaction-file <path>  Transaction YAML file (required)
+  --strict                   Exit non-zero when any check fails
+  -h, --help                 Show this help
+USAGE
+}
+
+fail() {
+  echo "platform.extension.preflight FAIL: $*" >&2
+  exit 1
+}
+
+TX_FILE=""
+STRICT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --transaction-file)
+      TX_FILE="${2:-}"
+      shift 2
+      ;;
+    --strict)
+      STRICT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$TX_FILE" ]] || fail "--transaction-file is required"
+for file in "$TX_CONTRACT" "$PRE_CONTRACT" "$LIFECYCLE_CONTRACT" "$SERVICE_CONTRACT" "$HEALTH_BINDING" "$COMMITMENTS_CONTRACT" "$BINDING_DEFAULTS"; do
+  [[ -f "$file" ]] || fail "missing required binding: $file"
+done
+
+TX_FILE="$(cd "$(dirname "$TX_FILE")" && pwd)/$(basename "$TX_FILE")"
+[[ -f "$TX_FILE" ]] || fail "transaction file not found: $TX_FILE"
+
+command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
+
+python3 - "$TX_FILE" "$TX_CONTRACT" "$PRE_CONTRACT" "$LIFECYCLE_CONTRACT" "$SERVICE_CONTRACT" "$HEALTH_BINDING" "$COMMITMENTS_CONTRACT" "$BINDING_DEFAULTS" "$STRICT" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import json
+import sys
+
+import yaml
+
+(
+    tx_file_raw,
+    tx_contract_raw,
+    pre_contract_raw,
+    lifecycle_raw,
+    service_raw,
+    health_raw,
+    commitments_raw,
+    defaults_raw,
+    strict_raw,
+) = sys.argv[1:10]
+
+
+tx_file = Path(tx_file_raw).expanduser().resolve()
+tx_contract_path = Path(tx_contract_raw).expanduser().resolve()
+pre_contract_path = Path(pre_contract_raw).expanduser().resolve()
+lifecycle_path = Path(lifecycle_raw).expanduser().resolve()
+service_path = Path(service_raw).expanduser().resolve()
+health_path = Path(health_raw).expanduser().resolve()
+commitments_path = Path(commitments_raw).expanduser().resolve()
+defaults_path = Path(defaults_raw).expanduser().resolve()
+strict_mode = strict_raw == "1"
+
+
+def load_yaml(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def list_join(items: list[str]) -> str:
+    return "; ".join(items) if items else "ok"
+
+
+try:
+    tx_doc = load_yaml(tx_file)
+    tx_contract = load_yaml(tx_contract_path)
+    pre_contract = load_yaml(pre_contract_path)
+    lifecycle = load_yaml(lifecycle_path)
+    service_contract = load_yaml(service_path)
+    health_binding = load_yaml(health_path)
+    commitments_contract = load_yaml(commitments_path)
+    defaults = load_yaml(defaults_path)
+except Exception as exc:
+    print(f"platform.extension.preflight FAIL: unable to parse input YAML: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+required_fields = [str(x).strip() for x in (tx_contract.get("required_fields") or []) if str(x).strip()]
+required_home_keys = [str(x).strip() for x in (tx_contract.get("required_homes_keys") or []) if str(x).strip()]
+allowed_statuses = {str(x).strip() for x in (tx_contract.get("lifecycle_statuses") or []) if str(x).strip()}
+allowed_types = {str(x).strip() for x in (tx_contract.get("transaction_types") or []) if str(x).strip()}
+
+status = str(tx_doc.get("status", "")).strip()
+tx_type = str(tx_doc.get("type", "")).strip()
+target_id = str(tx_doc.get("target_id", "")).strip()
+transaction_id = str(tx_doc.get("transaction_id", tx_file.stem)).strip() or tx_file.stem
+
+checks: list[dict[str, str]] = []
+
+contract_issues: list[str] = []
+for field in required_fields:
+    if field not in tx_doc:
+        contract_issues.append(f"missing key: {field}")
+        continue
+    value = tx_doc.get(field)
+    if field == "bindings_touched":
+        if not isinstance(value, list) or len(value) == 0:
+            contract_issues.append("bindings_touched must be a non-empty list")
+        continue
+    if field == "required_homes":
+        if not isinstance(value, dict):
+            contract_issues.append("required_homes must be an object")
+        continue
+    if not str(value or "").strip():
+        contract_issues.append(f"empty value: {field}")
+
+if status and status not in allowed_statuses:
+    contract_issues.append(f"status not allowed: {status}")
+if tx_type and tx_type not in allowed_types:
+    contract_issues.append(f"type not allowed: {tx_type}")
+
+checks.append(
+    {
+        "id": "transaction_contract_completeness",
+        "status": "fail" if contract_issues else "pass",
+        "detail": list_join(contract_issues),
+    }
+)
+
+home_issues: list[str] = []
+required_homes = tx_doc.get("required_homes") if isinstance(tx_doc.get("required_homes"), dict) else {}
+for key in required_home_keys:
+    row = required_homes.get(key)
+    if not isinstance(row, dict):
+        home_issues.append(f"required_homes.{key} must be an object")
+        continue
+
+    ref = str(row.get("ref", "")).strip()
+    home_status = str(row.get("status", "")).strip().lower()
+
+    if status in {"approved", "executed", "closed"}:
+        if not ref:
+            home_issues.append(f"required_homes.{key}.ref missing for status={status}")
+        if home_status in {"", "pending"}:
+            home_issues.append(f"required_homes.{key}.status pending for status={status}")
+
+service_map = {
+    str(row.get("id", "")).strip(): row
+    for row in (service_contract.get("services") or [])
+    if isinstance(row, dict) and str(row.get("id", "")).strip()
+}
+if tx_type == "service" and target_id and not target_id.startswith("template-"):
+    service_row = service_map.get(target_id)
+    if service_row is None:
+        home_issues.append(f"service target missing in service contract: {target_id}")
+    else:
+        expected = {
+            "infisical_namespace": str(service_row.get("infisical_namespace", "")).strip(),
+            "vaultwarden_item": str(service_row.get("vaultwarden_item", "")).strip(),
+            "gitea_repo": str(service_row.get("gitea_repo_slug", "")).strip(),
+            "observability_probe": str(service_row.get("observability_probe_id", "")).strip(),
+            "workbench_home": str(service_row.get("workbench_home_path", "")).strip(),
+        }
+        for key, expected_ref in expected.items():
+            actual = str((required_homes.get(key) or {}).get("ref", "")).strip()
+            if actual != expected_ref:
+                home_issues.append(f"required_homes.{key}.ref mismatch (expected '{expected_ref}', got '{actual}')")
+
+probe_ids = {
+    str(row.get("id", "")).strip()
+    for row in (health_binding.get("endpoints") or [])
+    if isinstance(row, dict) and str(row.get("id", "")).strip()
+}
+commitment_ids = {
+    str(row.get("id", "")).strip()
+    for row in (commitments_contract.get("commitments") or [])
+    if isinstance(row, dict) and str(row.get("id", "")).strip()
+}
+
+obs_ref = str((required_homes.get("observability_probe") or {}).get("ref", "")).strip()
+if obs_ref and obs_ref not in probe_ids:
+    home_issues.append(f"observability_probe ref missing in services.health.yaml: {obs_ref}")
+
+calendar_ref = str((required_homes.get("calendar_commitment") or {}).get("ref", "")).strip()
+if calendar_ref and calendar_ref not in commitment_ids:
+    home_issues.append(f"calendar_commitment ref missing in operator.commitments.contract.yaml: {calendar_ref}")
+
+comms_ref = str((required_homes.get("communications_commitment") or {}).get("ref", "")).strip()
+if comms_ref and comms_ref not in commitment_ids:
+    home_issues.append(f"communications_commitment ref missing in operator.commitments.contract.yaml: {comms_ref}")
+
+workbench_root = str(defaults.get("workbench_root", "")).strip() or str((tx_file.parents[2] / "../workbench").resolve())
+workbench_root_path = Path(workbench_root).expanduser().resolve()
+workbench_ref = str((required_homes.get("workbench_home") or {}).get("ref", "")).strip()
+if workbench_ref:
+    resolved = (workbench_root_path / workbench_ref).resolve()
+    try:
+        resolved.relative_to(workbench_root_path)
+    except ValueError:
+        home_issues.append(f"workbench_home ref escapes workbench root: {workbench_ref}")
+    else:
+        if not resolved.exists():
+            home_issues.append(f"workbench_home ref missing under workbench root: {workbench_ref}")
+
+checks.append(
+    {
+        "id": "home_binding_parity",
+        "status": "fail" if home_issues else "pass",
+        "detail": list_join(home_issues),
+    }
+)
+
+lifecycle_issues: list[str] = []
+lifecycle_statuses = {str(x).strip() for x in (lifecycle.get("statuses") or []) if str(x).strip()}
+if status and status not in lifecycle_statuses:
+    lifecycle_issues.append(f"status not allowed by lifecycle contract: {status}")
+
+allowed_transitions = lifecycle.get("allowed_transitions") if isinstance(lifecycle.get("allowed_transitions"), dict) else {}
+history = tx_doc.get("transition_history") if isinstance(tx_doc.get("transition_history"), list) else []
+if not history and status != "planned":
+    lifecycle_issues.append("non-planned transaction must include transition_history")
+if history:
+    previous_to = None
+    for idx, row in enumerate(history):
+        if not isinstance(row, dict):
+            lifecycle_issues.append(f"transition_history[{idx}] must be object")
+            continue
+        frm = str(row.get("from", "")).strip()
+        to = str(row.get("to", "")).strip()
+        if frm not in lifecycle_statuses or to not in lifecycle_statuses:
+            lifecycle_issues.append(f"transition_history[{idx}] has invalid from/to status")
+            continue
+        allowed_to = [str(x).strip() for x in (allowed_transitions.get(frm) or []) if str(x).strip()]
+        if to not in allowed_to:
+            lifecycle_issues.append(f"illegal transition in history: {frm}->{to}")
+        if previous_to is not None and frm != previous_to:
+            lifecycle_issues.append(f"transition_history chain break at index {idx}")
+        previous_to = to
+    if previous_to and status and previous_to != status:
+        lifecycle_issues.append(f"current status '{status}' differs from last transition to '{previous_to}'")
+
+required_evidence = lifecycle.get("required_evidence") if isinstance(lifecycle.get("required_evidence"), dict) else {}
+policy = required_evidence.get(status) if isinstance(required_evidence.get(status), dict) else {}
+for field in [str(x).strip() for x in (policy.get("required_fields") or []) if str(x).strip()]:
+    value = tx_doc.get(field)
+    if isinstance(value, list):
+        if not value:
+            lifecycle_issues.append(f"required evidence list empty: {field}")
+    elif not str(value or "").strip():
+        lifecycle_issues.append(f"required evidence missing: {field}")
+
+if bool(policy.get("required_homes_all_ready", False)):
+    for key in required_home_keys:
+        row = required_homes.get(key)
+        if not isinstance(row, dict):
+            lifecycle_issues.append(f"required_homes.{key} missing for homes-ready policy")
+            continue
+        if str(row.get("status", "")).strip().lower() != "ready":
+            lifecycle_issues.append(f"required_homes.{key}.status must be ready for status={status}")
+
+checks.append(
+    {
+        "id": "lifecycle_evidence_shape",
+        "status": "fail" if lifecycle_issues else "pass",
+        "detail": list_join(lifecycle_issues),
+    }
+)
+
+overall_status = "pass" if all(row["status"] == "pass" for row in checks) else "fail"
+payload = {
+    "transaction_id": transaction_id,
+    "overall_status": overall_status,
+    "checks": checks,
+    "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+
+artifact_template = str(pre_contract.get("artifact_path_template", "")).strip()
+if not artifact_template or "<transaction_id>" not in artifact_template:
+    print("platform.extension.preflight FAIL: invalid preflight artifact_path_template", file=sys.stderr)
+    raise SystemExit(1)
+
+required_pre_keys = [str(x).strip() for x in (pre_contract.get("required_keys") or []) if str(x).strip()]
+for key in required_pre_keys:
+    if key not in payload:
+        print(f"platform.extension.preflight FAIL: generated preflight missing required key: {key}", file=sys.stderr)
+        raise SystemExit(1)
+
+root = pre_contract_path.parents[2]
+artifact_path = (root / artifact_template.replace("<transaction_id>", transaction_id)).resolve()
+artifact_path.parent.mkdir(parents=True, exist_ok=True)
+artifact_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+print("platform.extension.preflight")
+print("status: wrote")
+print(f"transaction_file: {tx_file}")
+print(f"preflight_path: {artifact_path}")
+print(f"overall_status: {overall_status}")
+
+if strict_mode and overall_status != "pass":
+    raise SystemExit(1)
+PY
