@@ -1,0 +1,87 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-22
+scope: wave-lock
+version: 1
+---
+
+# Wave Lock
+# Single source of truth for cross-agent "what wave is next".
+# Agents must read this file before proposing or starting a new wave.
+
+wave_lock:
+  lock_id: WAVE-LOCK-20260222-H6
+  as_of_commit: 6faa872dbff6b93080789878567685e3f215ec41
+  active_track: cadence
+  wave_id: W-TELEMETRY
+  objective: "Weekly execution telemetry + trend dashboard for baseline lock metrics."
+  baseline_lock_ref: "docs/governance/SPINE_BASELINE_LOCK_V1.md §8"
+  prereqs:
+    - "HYGIENE_WAVE_H5_RECEIPT READY_FOR_NEXT_WAVE: true"
+    - "D84 PASS"
+    - "D155 PASS"
+    - "D156 PASS"
+    - "D157 PASS"
+    - "D158 PASS"
+  exit_checks:
+    - "./bin/ops cap run verify.pack.run hygiene-weekly"
+    - "./bin/ops cap run verify.core.run"
+    - "./bin/ops cap run proposals.status"
+    - "telemetry artifacts generated and indexed"
+  supersedes:
+    - "next_wave: (project-attach execution — D153 + gen-project-attach + work.index)"
+    - "next_wave: (baseline freeze + monthly hygiene cadence automation)"
+  arbitration:
+    owner: "@ronny"
+    rule: "If an agent proposes a wave different from backlog.highest_pending_wave_id, reject and resync to this lock."
+
+agent_proposal_contract:
+  required_echo_fields:
+    - backlog_sha
+    - selected_wave_id
+    - highest_pending_wave_id
+    - justification_if_not_highest
+  reject_if:
+    - "selected_wave_id is absent"
+    - "selected_wave_id != highest_pending_wave_id and no justification provided"
+
+backlog:
+  highest_pending_wave_id: W-TELEMETRY
+  items:
+    - wave_id: W-ATTACH-01
+      title: "Project-attach execution"
+      status: done
+      priority: 1
+      scope: "D153 live in core, gen-project-attach, .spine-link in mint-modules, spine.work.index runtime capability"
+      baseline_lock_ref: "§4 project onboarding, §5 work tracking"
+    - wave_id: W-RING-LIVE
+      title: "Gate ring formalization"
+      status: done
+      priority: 2
+      scope: "Ring policy, D154, verify entrypoint budget enforcement"
+      baseline_lock_ref: "§3 verify speed"
+    - wave_id: W-HYGIENE-H1-H5
+      title: "Hygiene waves H1-H5"
+      status: done
+      priority: 3
+      scope: "Audits migration plan+exec, freshness policy lock, lifecycle lock, weekly cadence lock"
+      baseline_lock_ref: "§6 governance purity, §8 wave checks"
+    - wave_id: W-TELEMETRY
+      title: "Weekly execution telemetry + trend dashboard"
+      status: pending
+      priority: 4
+      scope: "Trend tracking for SPINE_BASELINE_LOCK_V1 pass/fail metrics over time"
+      baseline_lock_ref: "§8 pass/fail criteria"
+    - wave_id: W-PLUGIN-MIGRATE
+      title: "Plugin migration to project repos"
+      status: pending
+      priority: 5
+      scope: "Move non-spine-native domain plugins out of ops/plugins into project repos with bindings pointers"
+      baseline_lock_ref: "§1 inventory ceilings"
+    - wave_id: W-RECEIPT-MEMORY
+      title: "Receipt index as agent memory"
+      status: pending
+      priority: 6
+      scope: "Queryable receipt index by domain+time in session start/read surfaces"
+      baseline_lock_ref: "§4 work tracking"
