@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# network-md1400-bind-test - Hot-bind PM8072 via sysfs new_id and capture before/after evidence
+#
+# Mutating only with --execute.
+#
+# Writes "11f8 8072" to /sys/bus/pci/drivers/pm80xx/new_id on pve.
+# If the HBA firmware initializes correctly, disks behind the MD1400
+# should appear in lsblk within seconds.
+#
+# If it fails (no new disks, or "FW is not ready" in dmesg), a cold boot
+# with AC drain is required for PM8072 firmware init.
+#
+# Usage:
+#   network-md1400-bind-test [--dry-run|--execute]
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+
+EXECUTE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --execute) EXECUTE=1; shift ;;
+    --dry-run) EXECUTE=0; shift ;;
+    -h|--help)
+      sed -n '1,60p' "$0" | sed 's/^# //'
+      exit 0
+      ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_BINDING")"
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
+
+pve_host="$(yq -r '.ssh.targets[] | select(.id == "pve") | .host // ""' "$SSH_BINDING" | head -n1)"
+pve_user="$(yq -r '.ssh.targets[] | select(.id == "pve") | .user // "'"$DEF_USER"'"' "$SSH_BINDING" | head -n1)"
+pve_port="$(yq -r '.ssh.targets[] | select(.id == "pve") | .port // '"$DEF_PORT"'' "$SSH_BINDING" | head -n1)"
+pve_to="$(yq -r '.ssh.targets[] | select(.id == "pve") | .connect_timeout_sec // '"$DEF_TO"'' "$SSH_BINDING" | head -n1)"
+
+[[ -n "$pve_host" && "$pve_host" != "null" ]] || stop "ssh target 'pve' missing host in $SSH_BINDING"
+[[ -n "$pve_user" && "$pve_user" != "null" ]] || pve_user="$DEF_USER"
+[[ -n "$pve_port" && "$pve_port" != "null" ]] || pve_port="$DEF_PORT"
+[[ -n "$pve_to" && "$pve_to" != "null" ]] || pve_to="$DEF_TO"
+
+ssh_opts=(
+  -o "ConnectTimeout=${pve_to}"
+  -o "StrictHostKeyChecking=${DEF_STRICT}"
+  -o "UserKnownHostsFile=${DEF_KNOWN_HOSTS}"
+  -o "NumberOfPasswordPrompts=0"
+  -o "LogLevel=ERROR"
+)
+if [[ "$DEF_BATCH" == "true" ]]; then
+  ssh_opts+=(-o "BatchMode=yes")
+fi
+
+echo "network.md1400.bind_test"
+echo "mode: $([[ "$EXECUTE" -eq 1 ]] && echo execute || echo dry-run)"
+echo "target: pve (${pve_user}@${pve_host}:${pve_port})"
+echo
+
+# ── BEFORE snapshot ──
+remote_before='
+set -euo pipefail
+echo "== BEFORE: lspci -nnk -s 82:00.0 =="
+lspci -nnk -s 82:00.0 2>/dev/null || echo "(no device at 82:00.0)"
+echo
+echo "== BEFORE: dmesg (pm80xx) =="
+dmesg -T 2>/dev/null | grep -En "pm80xx|pm8001|FW is not ready|chip_init_failed|mpi_uninit_check|probe failed" | tail -20 || true
+echo
+echo "== BEFORE: lsblk -e7 (sd* only) =="
+lsblk -e7 -o NAME,SIZE,TYPE,MODEL 2>/dev/null | grep -E "^NAME|^sd" || true
+echo
+echo "== BEFORE: disk count =="
+before_count=$(lsblk -nd -e7 -o NAME | grep -c "^sd" || true)
+echo "sd_device_count=${before_count}"
+'
+
+set +e
+before_out="$(ssh "${ssh_opts[@]}" -p "$pve_port" "${pve_user}@${pve_host}" "bash -lc $(printf "%q" "$remote_before")" 2>&1)"
+rc=$?
+set -e
+if [[ "$rc" -ne 0 ]]; then
+  echo "$before_out"
+  fail "unable to reach pve for before-snapshot"
+fi
+echo "$before_out"
+echo
+
+before_count="$(echo "$before_out" | grep '^sd_device_count=' | cut -d= -f2)"
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+  echo "DRY-RUN: would write '11f8 8072' to /sys/bus/pci/drivers/pm80xx/new_id"
+  echo "DRY-RUN: no changes applied."
+  exit 0
+fi
+
+# ── BIND ──
+echo "== BIND: writing PCI ID to sysfs =="
+remote_bind='
+set -euo pipefail
+echo "11f8 8072" > /sys/bus/pci/drivers/pm80xx/new_id 2>&1 || true
+echo "new_id write done, waiting 5s for device enumeration..."
+sleep 5
+'
+
+set +e
+bind_out="$(ssh "${ssh_opts[@]}" -p "$pve_port" "${pve_user}@${pve_host}" "bash -lc $(printf "%q" "$remote_bind")" 2>&1)"
+bind_rc=$?
+set -e
+echo "$bind_out"
+echo
+
+# ── AFTER snapshot ──
+remote_after='
+set -euo pipefail
+echo "== AFTER: lspci -nnk -s 82:00.0 =="
+lspci -nnk -s 82:00.0 2>/dev/null || echo "(no device at 82:00.0)"
+echo
+echo "== AFTER: dmesg (pm80xx, last 30 lines) =="
+dmesg -T 2>/dev/null | grep -En "pm80xx|pm8001|FW is not ready|chip_init_failed|mpi_uninit_check|probe|phy" | tail -30 || true
+echo
+echo "== AFTER: lsblk -e7 (sd* only) =="
+lsblk -e7 -o NAME,SIZE,TYPE,MODEL 2>/dev/null | grep -E "^NAME|^sd" || true
+echo
+echo "== AFTER: disk count =="
+after_count=$(lsblk -nd -e7 -o NAME | grep -c "^sd" || true)
+echo "sd_device_count=${after_count}"
+'
+
+set +e
+after_out="$(ssh "${ssh_opts[@]}" -p "$pve_port" "${pve_user}@${pve_host}" "bash -lc $(printf "%q" "$remote_after")" 2>&1)"
+after_rc=$?
+set -e
+echo "$after_out"
+echo
+
+after_count="$(echo "$after_out" | grep '^sd_device_count=' | cut -d= -f2)"
+
+# ── VERDICT ──
+echo "== VERDICT =="
+echo "before_sd_count=${before_count:-?}"
+echo "after_sd_count=${after_count:-?}"
+
+driver_line="$(echo "$after_out" | grep -i "Kernel driver in use" || true)"
+if echo "$driver_line" | grep -qi "pm80xx"; then
+  echo "driver_bound=yes"
+else
+  echo "driver_bound=no"
+fi
+
+if [[ -n "${before_count}" && -n "${after_count}" && "${after_count}" -gt "${before_count}" ]]; then
+  new_disks=$((after_count - before_count))
+  echo "new_disks=${new_disks}"
+  echo "RESULT: SUCCESS — ${new_disks} new disk(s) appeared after hot-bind."
+elif echo "$after_out" | grep -qi "FW is not ready\|chip_init_failed"; then
+  echo "new_disks=0"
+  echo "RESULT: EXPECTED_FAIL — HBA firmware not ready. Cold boot with AC drain required."
+elif echo "$driver_line" | grep -qi "pm80xx"; then
+  echo "new_disks=0"
+  echo "RESULT: PARTIAL — driver bound but no new disks. Check cabling/EMM/drive population or cold boot needed."
+else
+  echo "new_disks=0"
+  echo "RESULT: FAIL — driver did not bind. Check dmesg above for details."
+fi
+
+echo
+echo "DONE"
+exit 0

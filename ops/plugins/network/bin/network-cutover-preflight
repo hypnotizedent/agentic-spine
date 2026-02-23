@@ -1,127 +1,16 @@
 #!/usr/bin/env bash
-# network-cutover-preflight - Composite pre-cutover verification
-#
-# Checks:
-# 1. cutover.sequencing.yaml exists
-# 2. CHANGE_PACK_TEMPLATE.md exists
-# 3. For any open cutover loop, a companion .changepack.md exists
-# 4. Companion changepack contains required sections
-#
-# Emits GO or NO-GO.
-#
-# Usage:
-#   network-cutover-preflight
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${NETWORK_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/docs/infrastructure/domains/network/spine-plugin-network/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-SEQUENCING="$SPINE_ROOT/ops/bindings/cutover.sequencing.yaml"
-TEMPLATE="$SPINE_ROOT/docs/governance/CHANGE_PACK_TEMPLATE.md"
-LOOP_DIR="$SPINE_ROOT/mailroom/state/loop-scopes"
-LEDGER="$SPINE_ROOT/mailroom/state/ledger.csv"
-
-ERRORS=0
-
-echo "network.cutover.preflight"
-echo
-
-# Check 1: cutover.sequencing.yaml exists
-echo -n "  sequencing rules... "
-if [[ -f "$SEQUENCING" ]]; then
-  echo "OK"
-else
-  echo "FAIL (missing: $SEQUENCING)"
-  ERRORS=$((ERRORS + 1))
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-# Check 2: CHANGE_PACK_TEMPLATE.md exists
-echo -n "  change pack template... "
-if [[ -f "$TEMPLATE" ]]; then
-  echo "OK"
-else
-  echo "FAIL (missing: $TEMPLATE)"
-  ERRORS=$((ERRORS + 1))
-fi
-
-# Check 3: Open cutover loops have companion .changepack.md
-echo -n "  cutover loop companions... "
-CUTOVER_LOOPS=0
-MISSING_PACKS=0
-
-# Find open cutover loops from scope files
-for scope in "$LOOP_DIR"/*CUTOVER*.scope.md; do
-  [[ -f "$scope" ]] || continue
-
-  # Check if loop is still open (status contains OPEN, CLOSING, or IN-PROGRESS — not CLOSED)
-  if grep -qiE 'Status.*CLOSED' "$scope" 2>/dev/null; then
-    continue
-  fi
-
-  CUTOVER_LOOPS=$((CUTOVER_LOOPS + 1))
-  base="$(basename "$scope" .scope.md)"
-  companion="$LOOP_DIR/${base}.changepack.md"
-
-  if [[ ! -f "$companion" ]]; then
-    echo ""
-    echo "    FAIL: missing companion for $base"
-    MISSING_PACKS=$((MISSING_PACKS + 1))
-  fi
-done
-
-if [[ "$CUTOVER_LOOPS" -eq 0 ]]; then
-  echo "OK (no open cutover loops)"
-elif [[ "$MISSING_PACKS" -eq 0 ]]; then
-  echo "OK ($CUTOVER_LOOPS loop(s), all have companions)"
-else
-  ERRORS=$((ERRORS + MISSING_PACKS))
-fi
-
-# Check 4: Companion files contain required sections
-echo -n "  changepack section checks... "
-SECTION_ERRORS=0
-
-REQUIRED_SECTIONS=(
-  "Change Description"
-  "IP Map"
-  "Rollback Map"
-  "Pre-Cutover Verification Matrix"
-  "Cutover Sequence"
-  "LAN-Only Devices"
-  "Post-Cutover Verification Matrix"
-  "Deferred Items"
-  "Documentation Sweep"
-  "Sign-Off"
-)
-
-for pack in "$LOOP_DIR"/*.changepack.md; do
-  [[ -f "$pack" ]] || continue
-  packname="$(basename "$pack")"
-
-  for section in "${REQUIRED_SECTIONS[@]}"; do
-    if ! grep -q "## $section" "$pack" 2>/dev/null; then
-      if [[ "$SECTION_ERRORS" -eq 0 ]]; then
-        echo ""
-      fi
-      echo "    FAIL: $packname missing section: $section"
-      SECTION_ERRORS=$((SECTION_ERRORS + 1))
-    fi
-  done
-done
-
-if [[ "$SECTION_ERRORS" -eq 0 ]]; then
-  echo "OK"
-else
-  ERRORS=$((ERRORS + SECTION_ERRORS))
-fi
-
-echo
-
-if [[ "$ERRORS" -eq 0 ]]; then
-  echo "result: GO"
-  exit 0
-else
-  echo "result: NO-GO ($ERRORS error(s))"
-  exit 1
-fi
+echo "WARN: network plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

@@ -1,154 +1,16 @@
 #!/usr/bin/env bash
-# network-md1400-pm8072-stage - Stage persistent pm80xx binding for PM8072 (MD1400 path)
-#
-# Mutating only with --execute.
-#
-# This fixes a common misconfiguration:
-#   options pm80xx new_id=...
-# which the pm80xx module does NOT support (ignored), preventing binding to
-# Microchip vendor ID 0x11f8.
-#
-# Correct approach:
-# - load pm80xx at boot (/etc/modules-load.d/pm80xx.conf)
-# - inject PCI ID into driver new_id sysfs at module load time via an install hook
-#
-# Usage:
-#   network-md1400-pm8072-stage [--dry-run|--execute]
-#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${NETWORK_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/docs/infrastructure/domains/network/spine-plugin-network/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-stop(){ echo "STOP (2): $*" >&2; exit 2; }
-fail(){ echo "FAIL: $*" >&2; exit 1; }
-
-command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
-command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
-[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
-
-EXECUTE=0
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --execute) EXECUTE=1; shift ;;
-    --dry-run) EXECUTE=0; shift ;;
-    -h|--help)
-      sed -n '1,60p' "$0" | sed 's/^# //'
-      exit 0
-      ;;
-    *) fail "unknown argument: $1" ;;
-  esac
-done
-
-DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
-DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
-DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
-DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_BINDING")"
-DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
-DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
-
-pve_host="$(yq -r '.ssh.targets[] | select(.id == "pve") | .host // ""' "$SSH_BINDING" | head -n1)"
-pve_user="$(yq -r '.ssh.targets[] | select(.id == "pve") | .user // "'"$DEF_USER"'"' "$SSH_BINDING" | head -n1)"
-pve_port="$(yq -r '.ssh.targets[] | select(.id == "pve") | .port // '"$DEF_PORT"'' "$SSH_BINDING" | head -n1)"
-pve_to="$(yq -r '.ssh.targets[] | select(.id == "pve") | .connect_timeout_sec // '"$DEF_TO"'' "$SSH_BINDING" | head -n1)"
-
-[[ -n "$pve_host" && "$pve_host" != "null" ]] || stop "ssh target 'pve' missing host in $SSH_BINDING"
-[[ -n "$pve_user" && "$pve_user" != "null" ]] || pve_user="$DEF_USER"
-[[ -n "$pve_port" && "$pve_port" != "null" ]] || pve_port="$DEF_PORT"
-[[ -n "$pve_to" && "$pve_to" != "null" ]] || pve_to="$DEF_TO"
-
-ssh_opts=(
-  -o "ConnectTimeout=${pve_to}"
-  -o "StrictHostKeyChecking=${DEF_STRICT}"
-  -o "UserKnownHostsFile=${DEF_KNOWN_HOSTS}"
-  -o "NumberOfPasswordPrompts=0"
-  -o "LogLevel=ERROR"
-)
-if [[ "$DEF_BATCH" == "true" ]]; then
-  ssh_opts+=(-o "BatchMode=yes")
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-echo "network.md1400.pm8072.stage"
-echo "mode: $([[ "$EXECUTE" -eq 1 ]] && echo execute || echo dry-run)"
-echo "target: pve (${pve_user}@${pve_host}:${pve_port})"
-echo
-
-remote_read='
-set -euo pipefail
-echo "== lspci (PM8072) =="
-lspci -nn -s 82:00.0 2>/dev/null || true
-echo
-echo "== pm80xx config (current) =="
-ls -la /etc/modules-load.d/pm80xx.conf /etc/modprobe.d/pm80xx.conf 2>/dev/null || true
-echo "--- /etc/modules-load.d/pm80xx.conf"
-sed -n "1,80p" /etc/modules-load.d/pm80xx.conf 2>/dev/null || true
-echo "--- /etc/modprobe.d/pm80xx.conf"
-sed -n "1,120p" /etc/modprobe.d/pm80xx.conf 2>/dev/null || true
-echo
-echo "== dmesg (pm80xx) =="
-dmesg -T 2>/dev/null | grep -En "pm80xx|pm8001|FW is not ready|chip_init failed|mpi_uninit_check|probe failed|unknown parameter" || true
-echo
-'
-
-set +e
-out="$(ssh "${ssh_opts[@]}" -p "$pve_port" "${pve_user}@${pve_host}" "bash -lc $(printf "%q" "$remote_read")" 2>&1)"
-rc=$?
-set -e
-if [[ "$rc" -ne 0 ]]; then
-  echo "$out"
-  fail "unable to reach pve"
-fi
-echo "$out"
-
-if [[ "$EXECUTE" -ne 1 ]]; then
-  echo "DRY-RUN: no changes applied."
-  exit 0
-fi
-
-echo "== APPLY =="
-
-remote_apply='
-set -euo pipefail
-
-ts="$(date +%Y%m%d%H%M%S)"
-if [[ -f /etc/modules-load.d/pm80xx.conf ]]; then
-  cp /etc/modules-load.d/pm80xx.conf "/etc/modules-load.d/pm80xx.conf.bak.${ts}"
-fi
-if [[ -f /etc/modprobe.d/pm80xx.conf ]]; then
-  cp /etc/modprobe.d/pm80xx.conf "/etc/modprobe.d/pm80xx.conf.bak.${ts}"
-fi
-
-cat > /etc/modules-load.d/pm80xx.conf <<EOF
-pm80xx
-EOF
-
-cat > /etc/modprobe.d/pm80xx.conf <<EOF
-install pm80xx /sbin/modprobe --ignore-install pm80xx; echo "11f8 8072" > /sys/bus/pci/drivers/pm80xx/new_id 2>/dev/null; true
-EOF
-
-chmod 0644 /etc/modules-load.d/pm80xx.conf /etc/modprobe.d/pm80xx.conf
-
-echo
-echo "== POSTCHECKS =="
-echo "-- /etc/modules-load.d/pm80xx.conf --"
-sed -n "1,40p" /etc/modules-load.d/pm80xx.conf || true
-echo "-- /etc/modprobe.d/pm80xx.conf --"
-sed -n "1,120p" /etc/modprobe.d/pm80xx.conf || true
-echo
-echo "NOTE: A true cold boot is still required for PM8072 firmware init. Use poweroff + remove AC for 10-20s (flea power drain) before power on."
-'
-
-set +e
-apply_out="$(ssh "${ssh_opts[@]}" -p "$pve_port" "${pve_user}@${pve_host}" "bash -lc $(printf "%q" "$remote_apply")" 2>&1)"
-apply_rc=$?
-set -e
-if [[ "$apply_rc" -ne 0 ]]; then
-  echo "$apply_out"
-  fail "apply failed"
-fi
-echo "$apply_out"
-
-echo "DONE"
-exit 0
-
+echo "WARN: network plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

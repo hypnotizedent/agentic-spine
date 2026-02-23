@@ -1,24 +1,16 @@
 #!/usr/bin/env bash
-# network-unifi-clients-snapshot — Snapshot UniFi client list (MAC/IP/name)
-#
-# Thin wrapper around unifi-agent.sh clients.
-# Registered as capability: network.unifi.clients.snapshot
-#
-# Exit:
-#   0  OK
-#   1  FAIL
-#   2  STOP (missing deps)
-#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-AGENT="$SPINE_ROOT/ops/tools/unifi-agent.sh"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${NETWORK_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/docs/infrastructure/domains/network/spine-plugin-network/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-[[ -f "$AGENT" ]] || { echo "STOP (2): missing unifi-agent.sh at $AGENT"; exit 2; }
-[[ -x "$AGENT" ]] || { echo "STOP (2): unifi-agent.sh not executable"; exit 2; }
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
+fi
 
-echo "network.unifi.clients.snapshot"
-echo
-
-"$AGENT" clients "$@"
+echo "WARN: network plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# network-ap-facts-capture - Read-only: capture WiFi AP facts via SSH
+#
+# SSHes to the ap-shop target (TP-Link EAP225) via pve jump host,
+# runs read-only commands, and outputs a doc-ready block for SHOP_SERVER_SSOT.md.
+#
+# Credentials:
+#   AP_SSH_PASSWORD env var — OR fetched via infisical-agent.sh from /spine/shop/wifi/
+#   No credentials are embedded or written to disk.
+#
+# Dependencies: sshpass (cli.tools.inventory.yaml), yq
+# Secrets:     AP_SSH_PASSWORD @ /spine/shop/wifi (secrets.namespace.policy.yaml)
+#
+# Exit:
+#   0 OK (facts captured)
+#   1 FAIL (SSH or command failure)
+#   2 STOP (preconditions)
+#
+# Usage:
+#   AP_SSH_PASSWORD=xxx network-ap-facts-capture
+#   network-ap-facts-capture              # tries Infisical
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING_FILE="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+INFISICAL_AGENT="$SPINE_ROOT/ops/tools/infisical-agent.sh"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+# ── Preconditions ──────────────────────────────────────────────────────────
+[[ -f "$BINDING_FILE" ]] || stop "missing binding: $BINDING_FILE"
+[[ -f "$INFISICAL_AGENT" ]] || stop "missing tool: $INFISICAL_AGENT"
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq (cli.tools.inventory.yaml)"
+command -v sshpass >/dev/null 2>&1 || stop "missing dependency: sshpass (cli.tools.inventory.yaml)"
+
+# ── Resolve AP target from binding ─────────────────────────────────────────
+AP_HOST="$(yq -r '.ssh.targets[] | select(.id == "ap-shop") | .host' "$BINDING_FILE")"
+AP_USER="$(yq -r '.ssh.targets[] | select(.id == "ap-shop") | .user' "$BINDING_FILE")"
+PROBE_VIA="$(yq -r '.ssh.targets[] | select(.id == "ap-shop") | .probe_via' "$BINDING_FILE")"
+
+[[ -n "$AP_HOST" && "$AP_HOST" != "null" ]] || stop "ap-shop not found or host unset in $BINDING_FILE"
+[[ -n "$PROBE_VIA" && "$PROBE_VIA" != "null" ]] || stop "ap-shop missing probe_via in $BINDING_FILE"
+
+# Resolve jump host
+PROBE_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$PROBE_VIA\") | .host" "$BINDING_FILE")"
+PROBE_USER="$(yq -r ".ssh.targets[] | select(.id == \"$PROBE_VIA\") | .user // \"root\"" "$BINDING_FILE")"
+
+[[ -n "$PROBE_HOST" && "$PROBE_HOST" != "null" ]] || stop "probe_via target '$PROBE_VIA' not found in $BINDING_FILE"
+
+# ── Resolve password (env override → infisical-agent.sh) ──────────────────
+# Use internal API URL to bypass Authentik forward auth (secrets.binding.yaml)
+SECRETS_BINDING="$SPINE_ROOT/ops/bindings/secrets.binding.yaml"
+if [[ -z "${AP_SSH_PASSWORD:-}" ]]; then
+  if [[ -f "$SECRETS_BINDING" ]]; then
+    export INFISICAL_API_URL="$(yq -r '.infisical.internal_api_url // ""' "$SECRETS_BINDING")"
+  fi
+  AP_SSH_PASSWORD="$(bash "$INFISICAL_AGENT" get-cached infrastructure prod AP_SSH_PASSWORD 2>/dev/null || true)"
+fi
+
+[[ -n "${AP_SSH_PASSWORD:-}" ]] || stop "AP_SSH_PASSWORD not set and Infisical fetch failed. Set env var or store in Infisical /spine/shop/wifi/ (see secrets.namespace.policy.yaml)."
+
+# ── SSH options ────────────────────────────────────────────────────────────
+PROXY_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR -W %h:%p ${PROBE_USER}@${PROBE_HOST}"
+
+ssh_cmd(){
+  sshpass -p "$AP_SSH_PASSWORD" ssh \
+    -o "ProxyCommand=$PROXY_CMD" \
+    -o "StrictHostKeyChecking=no" \
+    -o "UserKnownHostsFile=/dev/null" \
+    -o "HostKeyAlgorithms=+ssh-rsa" \
+    -o "PubkeyAcceptedAlgorithms=+ssh-rsa" \
+    -o "ConnectTimeout=10" \
+    -o "LogLevel=ERROR" \
+    "${AP_USER}@${AP_HOST}" "$1" 2>/dev/null || true
+}
+
+# ── Header ─────────────────────────────────────────────────────────────────
+echo "network.ap.facts.capture"
+echo "target: ap-shop ($AP_HOST via $PROBE_VIA)"
+echo
+
+# ── Connectivity test ──────────────────────────────────────────────────────
+echo -n "connectivity... "
+ping_result="$(ssh_cmd "echo __AP_OK__")"
+if ! echo "$ping_result" | grep -q "__AP_OK__"; then
+  echo "FAIL (SSH unreachable)"
+  echo
+  echo "result: FAIL"
+  exit 1
+fi
+echo "OK"
+echo
+
+# ── Gather facts ───────────────────────────────────────────────────────────
+# Each fact is best-effort; missing commands produce empty strings.
+# NOTE: The EAP225 runs a restricted busybox shell where /dev/null is not
+# writable.  All remote commands avoid stderr redirects; instead we strip
+# stderr locally inside ssh_cmd (2>/dev/null on the outer ssh call).
+
+echo "--- AP Facts (doc-ready) ---"
+echo
+
+# Model
+model="$(ssh_cmd "cat /tmp/sysinfo/model || cat /tmp/sysinfo/board_name || echo unknown" | tr -d '\r' | head -1)"
+echo "model: ${model:-unknown}"
+
+# Firmware / OS release
+firmware="$(ssh_cmd "cat /etc/openwrt_release || cat /etc/os-release || echo unknown" | tr -d '\r')"
+fw_version="$(echo "$firmware" | { grep -i 'DISTRIB_RELEASE\|VERSION_ID' || true; } | head -1 | cut -d= -f2 | tr -d "'" | tr -d '"')"
+fw_description="$(echo "$firmware" | { grep -i 'DISTRIB_DESCRIPTION\|PRETTY_NAME' || true; } | head -1 | cut -d= -f2 | tr -d "'" | tr -d '"')"
+echo "firmware_version: ${fw_version:-unknown}"
+echo "firmware_description: ${fw_description:-unknown}"
+
+# Kernel
+kernel="$(ssh_cmd "uname -r || echo unknown" | tr -d '\r' | head -1)"
+echo "kernel: ${kernel:-unknown}"
+
+# Uptime
+uptime_str="$(ssh_cmd "uptime || echo unknown" | tr -d '\r' | head -1)"
+echo "uptime: ${uptime_str:-unknown}"
+
+# MAC address (management interface)
+mac="$(ssh_cmd "cat /sys/class/net/br0/address || cat /sys/class/net/eth0/address || echo unknown" | tr -d '\r' | head -1)"
+echo "mac_address: ${mac:-unknown}"
+
+# IP config
+ip_addr="$(ssh_cmd "ip -4 addr show br0 || ip -4 addr show eth0 || echo unknown" | tr -d '\r')"
+mgmt_ip="$(echo "$ip_addr" | { grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' || true; } | head -1)"
+echo "management_ip: ${mgmt_ip:-${AP_HOST}/unknown}"
+
+# Wireless interfaces & SSIDs
+echo "wireless:"
+wifi_info="$(ssh_cmd "iwinfo || iwconfig || echo none" | tr -d '\r')"
+if [[ "$wifi_info" != "none" && -n "$wifi_info" ]]; then
+  # Parse iwinfo output for ESSID and channel
+  echo "$wifi_info" | while IFS= read -r line; do
+    if echo "$line" | grep -qiE 'ESSID|essid'; then
+      iface="$(echo "$line" | awk '{print $1}')"
+      essid="$(echo "$line" | sed -n 's/.*ESSID: "\([^"]*\)".*/\1/p' | head -1)"
+      [[ -z "$essid" ]] && essid="$(echo "$line" | { grep -oE 'ESSID:"[^"]+"' || true; } | cut -d'"' -f2)"
+      echo "  - interface: ${iface:-unknown}"
+      echo "    ssid: \"${essid:-unknown}\""
+    fi
+    if echo "$line" | grep -qiE 'Channel:'; then
+      channel="$(echo "$line" | sed -n 's/.*Channel: *\([^ ]*\).*/\1/p' | head -1)"
+      [[ -z "$channel" ]] && channel="$(echo "$line" | { grep -oE 'Channel:[0-9]+' || true; } | cut -d: -f2)"
+      echo "    channel: ${channel:-unknown}"
+    fi
+  done
+else
+  # Fallback: try UCI wireless config
+  uci_wifi="$(ssh_cmd "uci show wireless || cat /etc/config/wireless || echo none" | tr -d '\r')"
+  if [[ "$uci_wifi" != "none" && -n "$uci_wifi" ]]; then
+    echo "  # raw wireless config (parse manually):"
+    echo "$uci_wifi" | { grep -iE 'ssid|channel|mode|band|hwmode' || true; } | sed 's/^/  # /'
+  else
+    echo "  - unknown (no iwinfo/iwconfig/uci available)"
+  fi
+fi
+
+# SSH port (from binding for doc completeness)
+ap_port="$(yq -r '.ssh.targets[] | select(.id == "ap-shop") | .port // 22' "$BINDING_FILE")"
+echo "ssh_port: ${ap_port}"
+echo "ssh_user: ${AP_USER}"
+
+echo
+echo "--- End AP Facts ---"
+echo
+echo "result: OK"
+exit 0
