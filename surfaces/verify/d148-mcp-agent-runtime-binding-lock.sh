@@ -85,6 +85,11 @@ if [[ "${#active_mcp_agents[@]}" -eq 0 ]]; then
   err "no active MCP agents found in agents.registry.yaml"
 fi
 
+# Pre-cache contract surface data to avoid repeated yq calls (prevents flaky yq races).
+_cached_surface_keys="$(yq e -r '.required_servers_by_surface | keys | .[]' "$CONTRACT")"
+_cached_required_servers="$(yq e -r '.required_servers_by_surface | to_entries[] | .key + "/" + (.value[]?)' "$CONTRACT")"
+_cached_optional_servers="$(yq e -r '.optional_servers | to_entries[] | .key + "/" + (.value[]?)' "$CONTRACT")"
+
 for agent_id in "${active_mcp_agents[@]}"; do
   [[ -n "$agent_id" ]] || continue
 
@@ -124,19 +129,19 @@ for agent_id in "${active_mcp_agents[@]}"; do
       continue
     fi
 
-    if ! yq e -r '.required_servers_by_surface | keys | .[]' "$CONTRACT" | grep -Fxq "$surface"; then
+    if ! echo "$_cached_surface_keys" | grep -Fxq "$surface"; then
       err "agent '$agent_id' runtime binding surface '$surface' is not defined in required_servers_by_surface"
       continue
     fi
 
     if [[ "$required" == "true" ]]; then
-      if ! yq e -r ".required_servers_by_surface.\"$surface\"[]?" "$CONTRACT" | grep -Fxq "$server_name"; then
+      if ! echo "$_cached_required_servers" | grep -Fxq "$surface/$server_name"; then
         err "agent '$agent_id' requires '$server_name' on '$surface' but contract required_servers_by_surface is missing it"
       else
         ok "agent '$agent_id' required runtime binding '$surface/$server_name' is linked"
       fi
     else
-      if ! yq e -r ".optional_servers.\"$surface\"[]?" "$CONTRACT" | grep -Fxq "$server_name"; then
+      if ! echo "$_cached_optional_servers" | grep -Fxq "$surface/$server_name"; then
         err "agent '$agent_id' optional runtime binding '$surface/$server_name' missing in optional_servers"
       else
         ok "agent '$agent_id' optional runtime binding '$surface/$server_name' is linked"
