@@ -1,35 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# home-health-check: HTTP health probes for home services
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${HOME_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/docs/infrastructure/domains/home/spine-plugin-home/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-echo "=== Home Services Health Check ==="
-echo ""
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
+fi
 
-check_service() {
-    local name="$1" url="$2" expect="$3"
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "$url" 2>/dev/null || echo "000")
-    if [[ "$http_code" == "$expect" ]]; then
-        echo "  $name: OK (HTTP $http_code)"
-    else
-        echo "  $name: FAIL (HTTP $http_code, expected $expect)"
-    fi
-}
-
-HA_HOST="${HA_HOST:-10.0.0.100}"
-HA_PORT="${HA_PORT:-8123}"
-check_service "Home Assistant" "http://${HA_HOST}:${HA_PORT}/api/" "401"
-
-PIHOLE_HOST="${PIHOLE_HOST:-100.105.148.96}"
-PIHOLE_PORT="${PIHOLE_PORT:-80}"
-check_service "Pi-hole" "http://${PIHOLE_HOST}:${PIHOLE_PORT}/admin/" "302"
-
-echo ""
-echo "--- Stopped / Decommissioned services (skipped) ---"
-echo "  Vaultwarden (VM 102): decommissioned 2026-02-16 (superseded by infra-core)"
-echo "  Immich-home (VM 101): stopped"
-echo "  download-home (LXC 103): stopped"
-
-echo ""
-echo "=== Done ==="
+echo "WARN: home plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

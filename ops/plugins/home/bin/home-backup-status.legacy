@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# home-backup-status: Check backup artifact freshness on proxmox-home NAS storage
+
+PROXMOX_HOME_HOST="100.103.99.62"
+PROXMOX_HOME_USER="root"
+BACKUP_PATH="/mnt/pve/synology-backups/dump"
+
+echo "=== Home Backup Status ==="
+echo "Host: proxmox-home ($PROXMOX_HOME_HOST)"
+echo "Storage: $BACKUP_PATH"
+echo ""
+
+if ! ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
+    "${PROXMOX_HOME_USER}@${PROXMOX_HOME_HOST}" "exit 0" 2>/dev/null; then
+    echo "ERROR: Cannot reach proxmox-home via SSH"
+    exit 1
+fi
+
+echo "--- Backup Artifacts ---"
+ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
+    "${PROXMOX_HOME_USER}@${PROXMOX_HOME_HOST}" \
+    "ls -lht $BACKUP_PATH/vzdump-*.{vma.zst,tar.zst} 2>/dev/null | head -20 || echo 'No artifacts found'"
+
+echo ""
+echo "--- Freshness (VM backups, 26h threshold) ---"
+
+for vmid in 100 102; do
+    latest=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
+        "${PROXMOX_HOME_USER}@${PROXMOX_HOME_HOST}" \
+        "ls -t $BACKUP_PATH/vzdump-qemu-${vmid}-*.vma.zst 2>/dev/null | head -1" || true)
+    if [[ -z "$latest" ]]; then
+        echo "  VM $vmid: NO ARTIFACT"
+        continue
+    fi
+    age_sec=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
+        "${PROXMOX_HOME_USER}@${PROXMOX_HOME_HOST}" \
+        "echo \$(( \$(date +%s) - \$(stat -c %Y '$latest') ))")
+    age_h=$(( age_sec / 3600 ))
+    basename_f=$(basename "$latest")
+    if (( age_h > 26 )); then
+        echo "  VM $vmid: STALE (${age_h}h) - $basename_f"
+    else
+        echo "  VM $vmid: OK (${age_h}h) - $basename_f"
+    fi
+done
+
+echo ""
+echo "--- Freshness (LXC backups) ---"
+
+for lxcid in 103 105; do
+    latest=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
+        "${PROXMOX_HOME_USER}@${PROXMOX_HOME_HOST}" \
+        "ls -t $BACKUP_PATH/vzdump-lxc-${lxcid}-*.tar.zst 2>/dev/null | head -1" || true)
+    if [[ -z "$latest" ]]; then
+        echo "  LXC $lxcid: NO ARTIFACT"
+        continue
+    fi
+    age_sec=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
+        "${PROXMOX_HOME_USER}@${PROXMOX_HOME_HOST}" \
+        "echo \$(( \$(date +%s) - \$(stat -c %Y '$latest') ))")
+    age_h=$(( age_sec / 3600 ))
+    echo "  LXC $lxcid: ${age_h}h old - $(basename "$latest")"
+done
+
+echo ""
+echo "=== Done ==="

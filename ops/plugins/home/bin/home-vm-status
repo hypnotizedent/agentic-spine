@@ -1,31 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# home-vm-status: Check VM/LXC running state on proxmox-home
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${HOME_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/docs/infrastructure/domains/home/spine-plugin-home/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-PROXMOX_HOME_HOST="100.103.99.62"
-PROXMOX_HOME_USER="root"
-
-echo "=== Proxmox Home VM/LXC Status ==="
-echo "Host: $PROXMOX_HOME_HOST"
-echo ""
-
-if ! ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
-    "${PROXMOX_HOME_USER}@${PROXMOX_HOME_HOST}" "exit 0" 2>/dev/null; then
-    echo "ERROR: Cannot reach proxmox-home via SSH"
-    exit 1
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-echo "--- VMs ---"
-ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
-    "${PROXMOX_HOME_USER}@${PROXMOX_HOME_HOST}" \
-    "qm list" 2>/dev/null || echo "ERROR: qm list failed"
-
-echo ""
-echo "--- LXC Containers ---"
-ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
-    "${PROXMOX_HOME_USER}@${PROXMOX_HOME_HOST}" \
-    "pct list" 2>/dev/null || echo "ERROR: pct list failed"
-
-echo ""
-echo "=== Done ==="
+echo "WARN: home plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

@@ -1,92 +1,16 @@
 #!/usr/bin/env bash
-# TRIAGE: Checks ha.identity.mutation.contract.yaml exists, validates required fields, and verifies SSOT surfaces.
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${HOME_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/docs/infrastructure/domains/home/spine-plugin-home/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-CONTRACT="${SPINE_ROOT}/ops/bindings/ha.identity.mutation.contract.yaml"
-AGENT_CONTRACT="${SPINE_ROOT}/ops/agents/home-assistant-agent.contract.md"
-AGENT_REGISTRY="${SPINE_ROOT}/ops/bindings/agents.registry.yaml"
-
-errors=0
-
-echo "=== HA Identity + Mutation Contract Status ==="
-echo ""
-
-# 1. Contract file exists
-if [[ -f "$CONTRACT" ]]; then
-    echo "  contract file: OK"
-else
-    echo "  contract file: FAIL (missing: $CONTRACT)"
-    errors=$((errors + 1))
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-# 2. Required sections present
-if [[ -f "$CONTRACT" ]]; then
-    for section in allowed_mutation_capabilities forbidden_channels post_mutation_refresh required_ssot_surfaces naming_convention area_assignment_rules reconciliation_rules; do
-        if grep -q "^${section}:" "$CONTRACT" 2>/dev/null; then
-            echo "  section ${section}: OK"
-        else
-            echo "  section ${section}: FAIL (missing)"
-            errors=$((errors + 1))
-        fi
-    done
-fi
-
-echo ""
-
-# 3. Required SSOT surfaces exist
-echo "--- Required SSOT Surfaces ---"
-if [[ -f "$CONTRACT" ]]; then
-    while IFS= read -r path; do
-        full="${SPINE_ROOT}/${path}"
-        if [[ -f "$full" ]]; then
-            echo "  ${path}: OK"
-        else
-            echo "  ${path}: FAIL (missing)"
-            errors=$((errors + 1))
-        fi
-    done < <(grep 'path:' "$CONTRACT" | sed 's/.*path: *//' | tr -d '"')
-fi
-
-echo ""
-
-# 4. Agent contract references mutation contract
-echo "--- Cross-References ---"
-if grep -q "ha.identity.mutation.contract.yaml" "$AGENT_CONTRACT" 2>/dev/null; then
-    echo "  agent contract reference: OK"
-else
-    echo "  agent contract reference: FAIL (not referenced in home-assistant-agent.contract.md)"
-    errors=$((errors + 1))
-fi
-
-# 5. Agent registry references mutation contract
-if grep -q "mutation_contract:" "$AGENT_REGISTRY" 2>/dev/null; then
-    echo "  agent registry reference: OK"
-else
-    echo "  agent registry reference: FAIL (mutation_contract not in agents.registry.yaml)"
-    errors=$((errors + 1))
-fi
-
-echo ""
-
-# 6. Post-mutation refresh capabilities exist
-echo "--- Post-Mutation Refresh Capabilities ---"
-for cap in ha.device.map.build ha.refresh ha.ssot.baseline.build; do
-    if grep -q "^  ${cap}:" "${SPINE_ROOT}/ops/capabilities.yaml" 2>/dev/null; then
-        echo "  ${cap}: OK"
-    else
-        echo "  ${cap}: FAIL (not registered)"
-        errors=$((errors + 1))
-    fi
-done
-
-echo ""
-
-if [[ "$errors" -eq 0 ]]; then
-    echo "=== PASS (0 errors) ==="
-    exit 0
-else
-    echo "=== FAIL (${errors} errors) ==="
-    exit 1
-fi
+echo "WARN: home plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"
