@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-PIHOLE-BLOCKLIST-NORMALIZATION-20260223
 created: 2026-02-23
-status: active
+status: closed
 owner: "@ronny"
 scope: pihole
 priority: medium
