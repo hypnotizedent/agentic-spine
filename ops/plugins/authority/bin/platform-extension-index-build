@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+INDEX_CONTRACT="$ROOT/ops/bindings/platform.extension.index.contract.yaml"
+TX_CONTRACT="$ROOT/ops/bindings/platform.extension.transaction.contract.yaml"
+TX_DIR="$ROOT/mailroom/state/extension-transactions"
+
+usage() {
+  cat <<'EOF'
+platform.extension.index.build
+
+Usage:
+  platform-extension-index-build
+  platform-extension-index-build -h|--help
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+if [[ $# -gt 0 ]]; then
+  echo "platform.extension.index.build FAIL: unknown argument: $1" >&2
+  usage >&2
+  exit 2
+fi
+
+[[ -f "$INDEX_CONTRACT" ]] || {
+  echo "platform.extension.index.build FAIL: missing index contract: $INDEX_CONTRACT" >&2
+  exit 1
+}
+[[ -f "$TX_CONTRACT" ]] || {
+  echo "platform.extension.index.build FAIL: missing transaction contract: $TX_CONTRACT" >&2
+  exit 1
+}
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "platform.extension.index.build FAIL: missing required tool: python3" >&2
+  exit 1
+}
+
+python3 - "$INDEX_CONTRACT" "$TX_CONTRACT" "$TX_DIR" <<'PY'
+from __future__ import annotations
+
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+import json
+import sys
+
+import yaml
+
+index_contract_path = Path(sys.argv[1]).expanduser().resolve()
+tx_contract_path = Path(sys.argv[2]).expanduser().resolve()
+tx_dir = Path(sys.argv[3]).expanduser().resolve()
+
+
+def load_yaml(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+try:
+    index_contract = load_yaml(index_contract_path)
+    tx_contract = load_yaml(tx_contract_path)
+except Exception as exc:
+    print(f"platform.extension.index.build FAIL: unable to parse contracts: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+index_path_raw = str(index_contract.get("index_path", "")).strip()
+if not index_path_raw:
+    print("platform.extension.index.build FAIL: index contract missing index_path", file=sys.stderr)
+    raise SystemExit(1)
+
+root = index_contract_path.parents[2]
+index_path = (root / index_path_raw).resolve()
+max_age_hours = int(index_contract.get("freshness_policy", {}).get("max_age_hours", 24))
+required_home_keys = [str(x).strip() for x in (tx_contract.get("required_homes_keys") or []) if str(x).strip()]
+
+status_counts: Counter[str] = Counter()
+type_counts: Counter[str] = Counter()
+pending_homes: list[dict[str, object]] = []
+stale_transactions: list[dict[str, object]] = []
+
+now = datetime.now(timezone.utc)
+
+transaction_files = sorted(tx_dir.glob("TXN-*.yaml")) if tx_dir.is_dir() else []
+for path in transaction_files:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            tx = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        print(f"platform.extension.index.build FAIL: unable to parse transaction {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    if not isinstance(tx, dict):
+        continue
+
+    tx_id = str(tx.get("transaction_id", path.stem)).strip() or path.stem
+    status = str(tx.get("status", "unknown")).strip() or "unknown"
+    tx_type = str(tx.get("type", "unknown")).strip() or "unknown"
+    updated_at = str(tx.get("updated_at", "")).strip()
+
+    status_counts[status] += 1
+    type_counts[tx_type] += 1
+
+    required_homes = tx.get("required_homes") if isinstance(tx.get("required_homes"), dict) else {}
+    pending_count = 0
+    for key in required_home_keys:
+        row = required_homes.get(key)
+        if not isinstance(row, dict):
+            pending_count += 1
+            continue
+        home_status = str(row.get("status", "")).strip().lower()
+        if home_status in {"", "pending"}:
+            pending_count += 1
+
+    if pending_count > 0:
+        pending_homes.append({
+            "transaction_id": tx_id,
+            "pending_count": pending_count,
+        })
+
+    if updated_at:
+        try:
+            parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            age_hours = (now - parsed).total_seconds() / 3600.0
+            if age_hours > max_age_hours:
+                stale_transactions.append({
+                    "transaction_id": tx_id,
+                    "age_hours": round(age_hours, 2),
+                })
+        except Exception:
+            stale_transactions.append({
+                "transaction_id": tx_id,
+                "age_hours": None,
+            })
+
+payload = {
+    "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "totals_by_status": {key: status_counts[key] for key in sorted(status_counts)},
+    "totals_by_type": {key: type_counts[key] for key in sorted(type_counts)},
+    "pending_homes": pending_homes,
+    "stale_transactions": stale_transactions,
+}
+
+index_path.parent.mkdir(parents=True, exist_ok=True)
+index_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+print("platform.extension.index.build")
+print("status: wrote")
+print(f"index_path: {index_path}")
+print(f"transactions_scanned: {len(transaction_files)}")
+PY

@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+LIFECYCLE_CONTRACT="$ROOT/ops/bindings/platform.extension.lifecycle.contract.yaml"
+
+usage() {
+  cat <<'EOF'
+platform.extension.transition
+
+Usage:
+  platform-extension-transition --transaction-file <path> --to <status> [options]
+
+Options:
+  --transaction-file <path>         Transaction YAML file
+  --to <status>                     Target status
+  --reason <text>                   Optional transition reason
+  --run-key <key>                   Optional run key (repeatable)
+  --verify-core-run-key <key>       Required when closing
+  --verify-pack-run-key <key>       Required when closing
+  --proposals-status-run-key <key>  Required when closing
+  --dry-run                         Validate and print transition result only
+  -h, --help                        Show this help
+EOF
+}
+
+fail() {
+  echo "platform.extension.transition FAIL: $*" >&2
+  exit 1
+}
+
+TX_FILE=""
+TARGET_STATUS=""
+REASON=""
+DRY_RUN=0
+RUN_KEYS=()
+VERIFY_CORE=""
+VERIFY_PACK=""
+PROPOSALS_STATUS=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --transaction-file)
+      TX_FILE="${2:-}"
+      shift 2
+      ;;
+    --to)
+      TARGET_STATUS="${2:-}"
+      shift 2
+      ;;
+    --reason)
+      REASON="${2:-}"
+      shift 2
+      ;;
+    --run-key)
+      RUN_KEYS+=("${2:-}")
+      shift 2
+      ;;
+    --verify-core-run-key)
+      VERIFY_CORE="${2:-}"
+      shift 2
+      ;;
+    --verify-pack-run-key)
+      VERIFY_PACK="${2:-}"
+      shift 2
+      ;;
+    --proposals-status-run-key)
+      PROPOSALS_STATUS="${2:-}"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$TX_FILE" ]] || fail "--transaction-file is required"
+[[ -n "$TARGET_STATUS" ]] || fail "--to is required"
+[[ -f "$LIFECYCLE_CONTRACT" ]] || fail "missing lifecycle contract: $LIFECYCLE_CONTRACT"
+
+TX_FILE="$(cd "$(dirname "$TX_FILE")" && pwd)/$(basename "$TX_FILE")"
+[[ -f "$TX_FILE" ]] || fail "transaction file not found: $TX_FILE"
+
+command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
+
+python3 - "$LIFECYCLE_CONTRACT" "$TX_FILE" "$TARGET_STATUS" "$REASON" "$DRY_RUN" "$VERIFY_CORE" "$VERIFY_PACK" "$PROPOSALS_STATUS" "${RUN_KEYS[@]}" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+import yaml
+
+if len(sys.argv) < 9:
+    print("platform.extension.transition FAIL: internal argument contract mismatch", file=sys.stderr)
+    raise SystemExit(1)
+
+lifecycle_path = Path(sys.argv[1]).expanduser().resolve()
+tx_path = Path(sys.argv[2]).expanduser().resolve()
+target_status = sys.argv[3]
+reason = sys.argv[4]
+dry_run = sys.argv[5] == "1"
+verify_core = sys.argv[6]
+verify_pack = sys.argv[7]
+proposals_status = sys.argv[8]
+run_keys = [x for x in sys.argv[9:] if x]
+
+
+def load_yaml(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+try:
+    lifecycle = load_yaml(lifecycle_path)
+    tx = load_yaml(tx_path)
+except Exception as exc:
+    print(f"platform.extension.transition FAIL: unable to parse YAML: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+statuses = [str(x).strip() for x in (lifecycle.get("statuses") or []) if str(x).strip()]
+allowed = lifecycle.get("allowed_transitions") if isinstance(lifecycle.get("allowed_transitions"), dict) else {}
+required_evidence = lifecycle.get("required_evidence") if isinstance(lifecycle.get("required_evidence"), dict) else {}
+
+current_status = str(tx.get("status", "")).strip()
+if current_status not in statuses:
+    print(f"platform.extension.transition FAIL: transaction current status is invalid: {current_status}", file=sys.stderr)
+    raise SystemExit(1)
+if target_status not in statuses:
+    print(f"platform.extension.transition FAIL: target status is invalid: {target_status}", file=sys.stderr)
+    raise SystemExit(1)
+if target_status == current_status:
+    print("platform.extension.transition FAIL: target status must differ from current status", file=sys.stderr)
+    raise SystemExit(1)
+
+next_allowed = [str(x).strip() for x in (allowed.get(current_status) or []) if str(x).strip()]
+if target_status not in next_allowed:
+    print(
+        f"platform.extension.transition FAIL: illegal transition {current_status} -> {target_status} (allowed: {', '.join(next_allowed)})",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+# Merge evidence from args into in-memory transaction view for validation.
+if run_keys:
+    existing = tx.get("run_keys") if isinstance(tx.get("run_keys"), list) else []
+    merged = []
+    for item in existing + run_keys:
+        value = str(item).strip()
+        if value and value not in merged:
+            merged.append(value)
+    tx["run_keys"] = merged
+
+if verify_core:
+    tx["verify_core_run_key"] = verify_core
+if verify_pack:
+    tx["verify_pack_run_key"] = verify_pack
+if proposals_status:
+    tx["proposals_status_run_key"] = proposals_status
+
+# Validate evidence requirements for target status.
+def require_non_empty(field: str):
+    value = tx.get(field)
+    if isinstance(value, list):
+        if len(value) == 0:
+            raise ValueError(f"missing required evidence field: {field}")
+        return
+    if not str(value or "").strip():
+        raise ValueError(f"missing required evidence field: {field}")
+
+try:
+    policy = required_evidence.get(target_status) if isinstance(required_evidence.get(target_status), dict) else {}
+    required_fields = [str(x).strip() for x in (policy.get("required_fields") or []) if str(x).strip()]
+    for field in required_fields:
+        require_non_empty(field)
+
+    if bool(policy.get("required_homes_all_ready", False)):
+        required_homes = tx.get("required_homes") if isinstance(tx.get("required_homes"), dict) else {}
+        if not required_homes:
+            raise ValueError("required_homes must exist for approved transition")
+        for key, row in required_homes.items():
+            if not isinstance(row, dict):
+                raise ValueError(f"required_homes.{key} must be an object")
+            status = str(row.get("status", "")).strip().lower()
+            if status != "ready":
+                raise ValueError(f"required_homes.{key}.status must be ready for approved transition")
+except ValueError as exc:
+    print(f"platform.extension.transition FAIL: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+history = tx.get("transition_history") if isinstance(tx.get("transition_history"), list) else []
+entry = {
+    "from": current_status,
+    "to": target_status,
+    "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+if reason:
+    entry["reason"] = reason
+if run_keys:
+    entry["run_keys"] = run_keys
+
+result = {
+    "transaction_file": str(tx_path),
+    "current_status": current_status,
+    "target_status": target_status,
+    "transition": entry,
+}
+
+if dry_run:
+    print(yaml.safe_dump(result, sort_keys=False), end="")
+    raise SystemExit(0)
+
+history.append(entry)
+tx["transition_history"] = history
+tx["status"] = target_status
+tx["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+with tx_path.open("w", encoding="utf-8") as handle:
+    yaml.safe_dump(tx, handle, sort_keys=False)
+
+print("platform.extension.transition")
+print("status: wrote")
+print(f"transaction_file: {tx_path}")
+print(f"status_from: {current_status}")
+print(f"status_to: {target_status}")
+PY
