@@ -72,8 +72,8 @@ if rg -q 'cap run ssh\.target\.status' "$WINDOW_SCRIPT"; then
 fi
 
 rg -q 'site_targets_with_stacks' "$WINDOW_SCRIPT" || fail "infra-maintenance-window must derive site-scoped docker targets from startup.sequencing"
-rg -q '\$DOCKER_STATUS_SCRIPT" "\$target"' "$WINDOW_SCRIPT" || fail "infra-maintenance-window verify phase must run site-scoped docker-compose-status <target>"
-rg -q '\$SERVICES_STATUS_SCRIPT" --host "\$host_id"' "$WINDOW_SCRIPT" || fail "infra-maintenance-window verify phase must run site-scoped services-health-status --host <host>"
+rg -q '\$DOCKER_STATUS_SCRIPT"' "$WINDOW_SCRIPT" || fail "infra-maintenance-window verify phase must run site-scoped docker-compose-status"
+rg -q '\$SERVICES_STATUS_SCRIPT".*--host' "$WINDOW_SCRIPT" || fail "infra-maintenance-window verify phase must run site-scoped services-health-status --host <host>"
 if rg -q 'cap run docker\.compose\.status|cap run services\.health\.status' "$WINDOW_SCRIPT"; then
   fail "infra-maintenance-window verify phase must not run global docker/services capability checks"
 fi

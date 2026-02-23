@@ -10,6 +10,7 @@
 #   services-health-status --id <id>       # check specific endpoint id
 #   services-health-status --host <host>   # check endpoints for one host
 #   services-health-status --id <id> --host <host>
+#   services-health-status [filters...] --strict-exit
 
 set -euo pipefail
 
@@ -25,6 +26,7 @@ command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
 
 FILTER_ID=""
 FILTER_HOST=""
+STRICT_EXIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -38,6 +40,10 @@ while [[ $# -gt 0 ]]; do
       FILTER_HOST="$2"
       shift 2
       ;;
+    --strict-exit)
+      STRICT_EXIT=1
+      shift
+      ;;
     -h|--help)
       cat <<'EOF'
 Usage:
@@ -46,6 +52,9 @@ Usage:
   services-health-status --id <id>
   services-health-status --host <host>
   services-health-status --id <id> --host <host>
+
+Flags:
+  --strict-exit  Exit non-zero when any checked endpoint is not OK.
 EOF
       exit 0
       ;;
@@ -156,4 +165,9 @@ if [[ "$fail" -eq 1 ]]; then
 else
   echo "status: OK (all endpoints healthy)"
 fi
+
+if [[ "$STRICT_EXIT" -eq 1 && "$fail" -eq 1 ]]; then
+  exit 1
+fi
+
 exit 0

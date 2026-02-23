@@ -127,6 +127,45 @@ CHECKPOINT_TEMPLATE="$(yq -r '.checkpoint_path // ""' "$TX_CONTRACT")"
 mapfile -t REQUIRED_POSTCHECKS < <(yq -r '.required_postchecks[]' "$TX_CONTRACT")
 [[ "${#REQUIRED_POSTCHECKS[@]}" -gt 0 ]] || fail "contract required_postchecks is empty"
 
+verify_policy_key() {
+  local key="$1"
+  local mode_key="dry_run"
+  local value=""
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    mode_key="execute"
+  fi
+  value="$(yq -r ".verify_policy.${mode_key}.${key}" "$TX_CONTRACT" 2>/dev/null || true)"
+  if [[ "$value" == "null" ]]; then
+    value=""
+  fi
+  echo "$value"
+}
+
+VERIFY_DOCKER_TIMEOUT_SEC="$(verify_policy_key docker_timeout_sec)"
+VERIFY_DOCKER_ATTEMPTS="$(verify_policy_key docker_attempts)"
+VERIFY_DOCKER_BACKOFF_SEC="$(verify_policy_key docker_backoff_sec)"
+VERIFY_SERVICES_TIMEOUT_SEC="$(verify_policy_key services_timeout_sec)"
+VERIFY_SERVICES_ATTEMPTS="$(verify_policy_key services_attempts)"
+VERIFY_SERVICES_BACKOFF_SEC="$(verify_policy_key services_backoff_sec)"
+VERIFY_CORE_TIMEOUT_SEC="$(verify_policy_key verify_core_timeout_sec)"
+VERIFY_STRICT_EXIT="$(verify_policy_key strict_exit)"
+VERIFY_STARTUP_GRACE_SEC="$(verify_policy_key startup_grace_sec)"
+
+for numeric_key in \
+  VERIFY_DOCKER_TIMEOUT_SEC VERIFY_DOCKER_ATTEMPTS VERIFY_DOCKER_BACKOFF_SEC \
+  VERIFY_SERVICES_TIMEOUT_SEC VERIFY_SERVICES_ATTEMPTS VERIFY_SERVICES_BACKOFF_SEC \
+  VERIFY_CORE_TIMEOUT_SEC
+do
+  value="${!numeric_key:-}"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "verify_policy.${numeric_key} must be a non-negative integer"
+done
+
+if [[ -z "$VERIFY_STARTUP_GRACE_SEC" || "$VERIFY_STARTUP_GRACE_SEC" == "null" ]]; then
+  VERIFY_STARTUP_GRACE_SEC=0
+fi
+[[ "$VERIFY_STARTUP_GRACE_SEC" =~ ^[0-9]+$ ]] || fail "verify_policy.startup_grace_sec must be a non-negative integer"
+[[ "$VERIFY_STRICT_EXIT" == "true" || "$VERIFY_STRICT_EXIT" == "false" ]] || fail "verify_policy.strict_exit must be true|false"
+
 site_host() {
   local site_id="$1"
   yq -r ".sites[] | select(.id==\"$site_id\") | .host_id" "$TX_CONTRACT"
@@ -281,6 +320,41 @@ except subprocess.TimeoutExpired:
 PY
 }
 
+run_verify_with_retry() {
+  local label="$1"
+  local timeout_sec="$2"
+  local attempts="$3"
+  local backoff_sec="$4"
+  shift 4
+  local attempt=0
+  local rc=0
+
+  [[ "$attempts" =~ ^[0-9]+$ ]] || fail "invalid attempts for retry wrapper: $attempts"
+  [[ "$attempts" -ge 1 ]] || fail "retry attempts must be >= 1"
+
+  for (( attempt=1; attempt<=attempts; attempt++ )); do
+    echo "verify.attempt: ${attempt}/${attempts} label=${label}"
+    set +e
+    run_with_timeout "$timeout_sec" "$@"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+      return 0
+    fi
+    if [[ "$rc" -eq 2 ]]; then
+      echo "verify.precondition_fail: label=${label} rc=${rc}"
+      return "$rc"
+    fi
+    if [[ "$attempt" -lt "$attempts" ]]; then
+      echo "verify.retry: label=${label} rc=${rc} backoff=${backoff_sec}s"
+      sleep "$backoff_sec"
+    fi
+  done
+
+  echo "verify.final_fail: label=${label} rc=${rc}"
+  return "$rc"
+}
+
 shutdown_sites() {
   case "$SITE" in
     shop) echo "shop" ;;
@@ -433,6 +507,8 @@ phase_verify() {
   local -a verify_sites=()
   local -a stack_targets=()
   local -a service_hosts=()
+  local -a docker_cmd=()
+  local -a services_cmd=()
   local site_id target host_id
 
   case "$SITE" in
@@ -453,13 +529,25 @@ phase_verify() {
     done < <(site_targets_with_stacks "$site_id")
   done
 
+  if [[ "$EXECUTE" -eq 1 && "$MODE" == "startup" && "$VERIFY_STARTUP_GRACE_SEC" -gt 0 ]]; then
+    echo "verify.startup_grace_sec: ${VERIFY_STARTUP_GRACE_SEC}s"
+    sleep "$VERIFY_STARTUP_GRACE_SEC"
+    echo
+  fi
+
   if [[ "${#stack_targets[@]}" -eq 0 ]]; then
     echo "═══ verify :: docker compose status (site-scoped) ═══"
     echo "status: SKIP (no compose targets for selected site scope)"
     echo
   else
     for target in "${stack_targets[@]}"; do
-      run_cap verify "docker compose status $target" run_with_timeout 45 "$DOCKER_STATUS_SCRIPT" "$target"
+      docker_cmd=("$DOCKER_STATUS_SCRIPT" "$target")
+      if [[ "$VERIFY_STRICT_EXIT" == "true" ]]; then
+        docker_cmd+=(--strict-exit)
+      fi
+      run_cap verify "docker compose status $target" \
+        run_verify_with_retry "docker:${target}" "$VERIFY_DOCKER_TIMEOUT_SEC" "$VERIFY_DOCKER_ATTEMPTS" "$VERIFY_DOCKER_BACKOFF_SEC" \
+        "${docker_cmd[@]}"
       if [[ " ${service_hosts[*]} " != *" $target "* ]]; then
         service_hosts+=("$target")
       fi
@@ -484,11 +572,19 @@ phase_verify() {
         echo
         continue
       fi
-      run_cap verify "services health $host_id" run_with_timeout 30 "$SERVICES_STATUS_SCRIPT" --host "$host_id"
+      services_cmd=("$SERVICES_STATUS_SCRIPT" --host "$host_id")
+      if [[ "$VERIFY_STRICT_EXIT" == "true" ]]; then
+        services_cmd+=(--strict-exit)
+      fi
+      run_cap verify "services health $host_id" \
+        run_verify_with_retry "services:${host_id}" "$VERIFY_SERVICES_TIMEOUT_SEC" "$VERIFY_SERVICES_ATTEMPTS" "$VERIFY_SERVICES_BACKOFF_SEC" \
+        "${services_cmd[@]}"
     done
   fi
 
-  run_cap verify "postcheck verify.core.run" run_with_timeout 90 "$OPS" cap run verify.core.run
+  run_cap verify "postcheck verify.core.run" \
+    run_verify_with_retry "verify.core.run" "$VERIFY_CORE_TIMEOUT_SEC" 1 0 \
+    "$OPS" cap run verify.core.run
 }
 
 run_phase() {

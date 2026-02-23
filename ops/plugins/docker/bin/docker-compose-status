@@ -18,6 +18,7 @@
 # Usage:
 #   docker-compose-status           # check all targets
 #   docker-compose-status <host>    # check specific host
+#   docker-compose-status [<host>] --strict-exit
 
 set -euo pipefail
 
@@ -34,7 +35,36 @@ command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 [[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
 
-HOST_FILTER="${1:-}"
+HOST_FILTER=""
+STRICT_EXIT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --strict-exit)
+      STRICT_EXIT=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  docker-compose-status
+  docker-compose-status <host>
+  docker-compose-status [<host>] --strict-exit
+
+Flags:
+  --strict-exit  Exit non-zero when any checked stack is degraded/down/unreachable.
+EOF
+      exit 0
+      ;;
+    *)
+      if [[ -n "$HOST_FILTER" ]]; then
+        stop "too many host filters (expected at most one host target id)"
+      fi
+      HOST_FILTER="$1"
+      shift
+      ;;
+  esac
+done
 
 # Read targets list
 TARGET_KEYS="$(yq -r '.targets | keys | .[]' "$BINDING" 2>/dev/null || true)"
@@ -323,4 +353,9 @@ elif [[ "$total_degraded" -gt 0 ]]; then
   overall="DEGRADED"
 fi
 echo "status: $overall"
+
+if [[ "$STRICT_EXIT" -eq 1 && ( "$total_degraded" -gt 0 || "$total_down" -gt 0 ) ]]; then
+  exit 1
+fi
+
 exit 0
