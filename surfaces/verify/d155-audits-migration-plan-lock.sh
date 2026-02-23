@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# TRIAGE: Regenerate audits inventory/plan and fix invalid dry-run entries before running hygiene wave.
+# TRIAGE: Keep audits migration metadata strict while enforcing receipts/audits as the post-migration execution destination.
 # D155: audits migration plan lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-AUDITS_DIR="$ROOT/docs/governance/_audits"
 PLAN_PATH="$ROOT/ops/bindings/audits.migration.plan.yaml"
 MIGRATION_RECEIPTS_DIR="$ROOT/receipts/audits/migration"
+TARGETS_DOC="$ROOT/docs/governance/AUDITS_MIGRATION_TARGETS_V1.md"
 
 fail() {
   echo "D155 FAIL: $*" >&2
   exit 1
 }
 
-[[ -d "$AUDITS_DIR" ]] || fail "missing audits directory: $AUDITS_DIR"
 [[ -f "$PLAN_PATH" ]] || fail "missing migration plan: $PLAN_PATH"
+[[ -f "$TARGETS_DOC" ]] || fail "missing migration targets policy doc: $TARGETS_DOC"
 command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
 
 latest_inventory="$(ls -1 "$MIGRATION_RECEIPTS_DIR"/MIGRATION_INVENTORY_*.yaml 2>/dev/null | sort | tail -n 1 || true)"
@@ -33,6 +33,10 @@ inventory_path = Path(sys.argv[1])
 plan_path = Path(sys.argv[2])
 receipt_arg = (sys.argv[3] or "").strip()
 receipt_path = Path(receipt_arg) if receipt_arg else None
+
+LEGACY_AUDITS_PREFIX = "docs/governance/_audits/"
+LEGACY_KEEP_PREFIX = "docs/governance/_audits/KEEP/"
+RECEIPTS_AUDITS_PREFIX = "receipts/audits/"
 
 
 def load_yaml(path: Path):
@@ -71,6 +75,17 @@ if not isinstance(actions, list):
     errors.append("plan.actions must be a list")
     actions = []
 
+inventory_source_root = str(inventory.get("source_root", "")).strip()
+if inventory_source_root:
+    if not (
+        inventory_source_root.startswith(LEGACY_AUDITS_PREFIX.rstrip("/"))
+        or inventory_source_root.startswith(RECEIPTS_AUDITS_PREFIX.rstrip("/"))
+    ):
+        errors.append(
+            f"inventory source_root must start with '{LEGACY_AUDITS_PREFIX.rstrip('/')}' or "
+            f"'{RECEIPTS_AUDITS_PREFIX.rstrip('/')}' (got '{inventory_source_root}')"
+        )
+
 inv_total = len(entries)
 inv_move = 0
 inv_keep = 0
@@ -82,10 +97,32 @@ for idx, entry in enumerate(entries, start=1):
         continue
 
     src = str(entry.get("source_path", "")).strip()
-    if not src.startswith("docs/governance/_audits/"):
-        errors.append(f"inventory entry source outside audits root: {src or '<empty>'}")
+    if not (src.startswith(LEGACY_AUDITS_PREFIX) or src.startswith(RECEIPTS_AUDITS_PREFIX)):
+        errors.append(
+            "inventory entry source outside approved roots "
+            f"('{LEGACY_AUDITS_PREFIX}' or '{RECEIPTS_AUDITS_PREFIX}'): {src or '<empty>'}"
+        )
 
     action = str(entry.get("migration_action", "")).strip()
+    proposed_target = str(entry.get("proposed_target_path", "")).strip()
+    if not proposed_target:
+        errors.append(f"inventory entry missing proposed_target_path: {src or '<empty>'}")
+    elif action == "move":
+        if not proposed_target.startswith(RECEIPTS_AUDITS_PREFIX):
+            errors.append(
+                "inventory move action must target receipts/audits/** "
+                f"(source={src or '<empty>'} target={proposed_target})"
+            )
+    elif action in {"keep", "review"}:
+        if not (
+            proposed_target.startswith(RECEIPTS_AUDITS_PREFIX)
+            or proposed_target.startswith(LEGACY_KEEP_PREFIX)
+        ):
+            errors.append(
+                "inventory keep/review target must be receipts/audits/** or docs/governance/_audits/KEEP/** "
+                f"(source={src or '<empty>'} target={proposed_target})"
+            )
+
     if action == "move":
         inv_move += 1
     elif action == "keep":
@@ -143,12 +180,27 @@ if execution_mode:
             continue
         rid = str(row.get("id", "")).strip()
         rres = str(row.get("result", "")).strip()
+        rtarget = str(row.get("target", "")).strip()
         if not rid:
             errors.append(f"receipt.moves[{idx}] missing id")
             continue
         if rres not in {"moved", "skipped", "failed"}:
             errors.append(f"receipt.moves[{idx}] invalid result '{rres or '<empty>'}'")
             continue
+        if not rtarget:
+            errors.append(f"receipt.moves[{idx}] missing target")
+            continue
+        if rres == "moved" and not rtarget.startswith(RECEIPTS_AUDITS_PREFIX):
+            errors.append(
+                f"receipt.moves[{idx}] moved target must be receipts/audits/** (got '{rtarget}')"
+            )
+        if rres in {"skipped", "failed"} and not (
+            rtarget.startswith(RECEIPTS_AUDITS_PREFIX) or rtarget.startswith(LEGACY_KEEP_PREFIX)
+        ):
+            errors.append(
+                f"receipt.moves[{idx}] skipped/failed target must be receipts/audits/** "
+                f"or docs/governance/_audits/KEEP/** (got '{rtarget}')"
+            )
         receipt_results[rid] = rres
 
 for idx, action in enumerate(actions, start=1):
@@ -157,14 +209,32 @@ for idx, action in enumerate(actions, start=1):
         continue
 
     source = str(action.get("source", "")).strip()
-    if not source.startswith("docs/governance/_audits/"):
-        errors.append(f"plan action source outside audits root: {source or '<empty>'}")
+    target = str(action.get("target", "")).strip()
+    if not (source.startswith(LEGACY_AUDITS_PREFIX) or source.startswith(RECEIPTS_AUDITS_PREFIX)):
+        errors.append(
+            "plan action source outside approved roots "
+            f"('{LEGACY_AUDITS_PREFIX}' or '{RECEIPTS_AUDITS_PREFIX}'): {source or '<empty>'}"
+        )
+    if not target:
+        errors.append(f"plan action target missing at index {idx}")
 
     dry_run = action.get("dry_run")
     if dry_run is True:
+        if not (
+            target.startswith(RECEIPTS_AUDITS_PREFIX) or target.startswith(LEGACY_KEEP_PREFIX)
+        ):
+            errors.append(
+                "dry_run=true target must be receipts/audits/** or docs/governance/_audits/KEEP/** "
+                f"(index={idx} target={target or '<empty>'})"
+            )
         continue
 
     if dry_run is False:
+        if not target.startswith(RECEIPTS_AUDITS_PREFIX):
+            errors.append(
+                "dry_run=false action target must be receipts/audits/** "
+                f"(index={idx} target={target or '<empty>'})"
+            )
         if not execution_mode:
             errors.append(f"plan action dry_run=false without execution-mode metadata at index {idx}")
             continue
