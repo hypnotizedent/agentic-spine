@@ -14,17 +14,38 @@
 #   - Each phase has a site tag (shop|home) for site-scoped maintenance
 #
 # Sites:
-#   shop  — Dell R730XD (pve), all production VMs (200-213)
+#   shop  — Dell R730XD (pve), all production VMs (200-214, excluding 201 destroyed)
 #   home  — Beelink SER7 (proxmox-home), HA VM (100), NAS
 #
-# Proxmox VM ordering (used by infra.proxmox.maintenance.shutdown/startup):
-#   shop_shutdown_order: [210, 209, 207, 206, 205, 202, 201, 200, 204]
-#   shop_startup_order:  [204, 205, 206, 207, 209, 210, 200, 202, 201]
-#   home_shutdown_order: [100]
-#   home_startup_order:  [100]
+# VM ordering is authoritative in the shop_vm_lifecycle / home_vm_lifecycle keys below.
+# Do NOT rely on comment-parsing for VM lists.
 
-version: 2
-updated: "2026-02-17"
+version: 3
+updated: "2026-02-23"
+
+# ── Authoritative VM lifecycle lists ──────────────────────────────────────────
+# These are the SSOT for which VMs exist on each site and their startup/shutdown order.
+# infra.proxmox.maintenance reads these keys at runtime.
+#
+# Rules:
+#   - startup_order: VMs start in this order (infra-first, legacy-last)
+#   - shutdown_order: reverse of startup, with exceptions noted
+#   - destroyed/template VMs are excluded from both lists
+#   - VMs not in the ordered list are treated as "unordered" (started/stopped last)
+
+shop_vm_lifecycle:
+  host_id: pve
+  active_vm_ids: [200, 202, 203, 204, 205, 206, 207, 209, 210, 211, 212, 213, 214]
+  destroyed_vm_ids: [201]  # media-stack, decommissioned 2026-02-10
+  template_vm_ids: [9000]  # ubuntu-2404-cloudinit-template
+  startup_order:  [204, 205, 206, 207, 209, 210, 200, 202, 203, 211, 212, 213, 214]
+  shutdown_order: [214, 213, 212, 211, 203, 210, 209, 207, 206, 205, 202, 200, 204]
+
+home_vm_lifecycle:
+  host_id: proxmox-home
+  active_vm_ids: [100]
+  startup_order:  [100]
+  shutdown_order: [100]
 
 # Shop phases (1-4): Core → Observability → Apps → Legacy
 # Home phases (10-11): HA VM → Home services

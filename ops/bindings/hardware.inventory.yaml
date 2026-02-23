@@ -1,0 +1,134 @@
+# Hardware Inventory Binding (SSOT)
+# Non-secret. Spine-native.
+# Status: authoritative
+# Last verified: 2026-02-23
+#
+# Physical machine inventory for all Proxmox hosts and NAS.
+# Used by maintenance, capacity planning, and hardware audit capabilities.
+#
+# Rules:
+#   - Each entry is a physical machine (not a VM)
+#   - service_tag is the Dell/manufacturer hardware identifier
+#   - storage_controllers lists all HBAs/RAID controllers with PCIe slot and driver
+#   - external_shelves lists DAS/SAN attachments
+#   - last_verified is the date of the most recent physical or remote audit
+#   - evidence_refs links to receipt IDs or photo filenames for traceability
+
+version: 1
+updated: "2026-02-23"
+
+machines:
+  - machine_id: pve
+    hostname: pve
+    site: shop
+    model: "Dell PowerEdge R730XD"
+    form_factor: "2U rackmount (12-bay LFF front + 2-bay SFF rear)"
+    service_tag: HSZZD42
+    riser_part_numbers: ["0FM487"]
+    rack_position: "U17-18"
+    cpu: "2x Intel Xeon E5-2640 v3 (16 cores / 32 threads, 2.6GHz)"
+    ram: "192GB DDR4 ECC (12x 16GB DIMMs, 12/24 slots populated)"
+    power: "2x 750W Platinum PSU (redundant)"
+    os: "Proxmox VE 9.1.4 (kernel 6.14.8-2-pve)"
+    boot_drives: "2x Seagate ST9500620SS 500GB SAS 2.5 inch (rear flex bays, sdm/sdn)"
+
+    storage_controllers:
+      - name: "Dell HBA330 Mini"
+        chipset: "Broadcom LSI SAS3008"
+        pcie_slot: "03:00.0"
+        driver: mpt3sas
+        mode: "IT (JBOD passthrough)"
+        firmware: "16.00.11.00"
+        role: "Internal drives (12 front LFF bays)"
+        status: active
+
+      - name: "Broadcom SAS9300-8e"
+        chipset: "Broadcom LSI SAS3008"
+        pcie_slot: "82:00.0"
+        driver: mpt3sas
+        mode: "IT (JBOD passthrough)"
+        role: "External SAS — MD1400 DAS shelf"
+        status: active
+        installed: "2026-02-23"
+        replaces: "Microchip PM8072 SPCv (defective — PCI ID mismatch + firmware init failure, GAP-OP-037)"
+
+    internal_drives:
+      - pool: tank
+        type: "RAIDZ2"
+        count: 8
+        model: "Seagate ST4000NM0063"
+        capacity: "4TB SAS"
+        devices: "sda-sdh"
+      - pool: media
+        type: "RAIDZ1"
+        count: 4
+        model: "Seagate ST8000AS0002"
+        capacity: "8TB SATA (Archive/SMR)"
+        devices: "sdi-sdl"
+
+    external_shelves:
+      - shelf_id: md1400
+        model: "Dell MD1400"
+        service_tag: HRW2F42
+        rack_position: "U14-16"
+        sas_cable: "Dell DP/N 0GYK61 (Mini-SAS HD SFF-8644)"
+        connected_to: "SAS9300-8e (82:00.0)"
+        drive_count: 12
+        drive_model: "Seagate ST4000NM0063"
+        drive_capacity: "4TB SAS (Constellation ES.3)"
+        block_device_count: 24
+        block_device_range: "sdo-sdal"
+        dual_path: true
+        multipath_configured: false
+        zfs_pool: null
+        status: "active — drives visible, no pool configured yet"
+        last_verified: "2026-02-23"
+
+    nics: "4x 1GbE (eno1-4) + iDRAC, only eno1 active (bridged to vmbr0)"
+    idrac_ip: "192.168.1.250"
+    lan_ip: "192.168.1.184"
+    tailscale_ip: "100.96.211.33"
+    active_vm_count: 13
+    last_verified: "2026-02-23"
+    evidence_refs:
+      - "CAP-20260223-160024__infra.proxmox.maintenance.precheck__Rd4lp24486"
+      - "CAP-20260223-172214__infra.post_power.recovery.status__Rryxe92847"
+    evidence_photos:
+      - "IMG_2210"   # riser board DP/N 0FM487 (left angle)
+      - "IMG_2211"   # service tag HSZZD42 (rear label)
+      - "IMG_2215"   # external LSI SAS controller card installed
+      - "IMG_2217"   # riser board DP/N 0FM487 (right angle)
+      - "IMG_2220"   # DIMM banks populated (overview)
+      - "IMG_2221"   # DIMM banks populated (close-up left)
+      - "IMG_2222"   # DIMM banks populated (close-up right)
+      - "IMG_2225"   # internal controller/heatsink area
+
+  - machine_id: proxmox-home
+    hostname: proxmox-home
+    site: home
+    model: "Beelink SER7"
+    form_factor: "Mini PC"
+    service_tag: null
+    cpu: "AMD Ryzen 7 7840HS"
+    ram: "32GB DDR5"
+    os: "Proxmox VE"
+    boot_drives: "NVMe SSD"
+    storage_controllers: []
+    external_shelves: []
+    tailscale_ip: "100.103.99.62"
+    active_vm_count: 1
+    last_verified: "2026-02-23"
+    evidence_refs:
+      - "CAP-20260223-160016__ssh.target.status__Rnumy22319"
+
+  - machine_id: nas
+    hostname: synology918
+    site: home
+    model: "Synology DS918+"
+    form_factor: "4-bay NAS"
+    service_tag: null
+    role: "Backup target, media storage, offsite sync destination"
+    tailscale_ip: "100.102.199.111"
+    last_verified: "2026-02-23"
+    evidence_refs:
+      - "CAP-20260223-160016__ssh.target.status__Rnumy22319"
