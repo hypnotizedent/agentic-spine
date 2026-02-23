@@ -177,7 +177,7 @@ Soft-decommissioned history (not active SSH expectations): `download-home`.
 | **Raycast** | `Claude Code` | `SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 /Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool claude` |
 | **Raycast** | `Codex Full Auto` | `SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 /Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool codex` |
 | **Raycast** | `OpenCode` | `SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 /Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool opencode` |
-| **Raycast** | `Spine Comms Flush` | `cd /Users/ronnyworks/code/agentic-spine && echo \"yes\" | ./bin/ops cap run communications.alerts.flush --limit 10` |
+| **Raycast** | `Spine Comms Flush` | `cd /Users/ronnyworks/code/workbench && ./scripts/root/operator/communications-ops.sh retry --limit 10` |
 | **Raycast** | `Spine Start Routine` | `SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 /Users/ronnyworks/code/workbench/scripts/root/spine_terminal_entry.sh --role solo --tool verify` |
 <!-- END AUTO RAYCAST -->
 
