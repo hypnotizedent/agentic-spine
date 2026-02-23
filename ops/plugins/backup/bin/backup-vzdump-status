@@ -1,92 +1,16 @@
 #!/usr/bin/env bash
-# backup.vzdump.status - Inspect vzdump job config and latest backup artifacts on pve.
-# Read-only. No prompts. No known_hosts writes.
-
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-SSH_TARGETS_FILE="${SSH_TARGETS_FILE:-$ROOT/ops/bindings/ssh.targets.yaml}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${BACKUP_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/docs/infrastructure/domains/backup/spine-plugin-backup/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
-_need yq
-_need ssh
-_need sed
-
-if [[ ! -f "$SSH_TARGETS_FILE" ]]; then
-  echo "STOP: missing ssh targets binding: $SSH_TARGETS_FILE" >&2
-  exit 2
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-TARGET_ID="${1:-pve}"
-
-DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_TARGETS_FILE")"
-DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_TARGETS_FILE")"
-DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_TARGETS_FILE")"
-DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_TARGETS_FILE")"
-DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 6' "$SSH_TARGETS_FILE")"
-
-SSH_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_TARGETS_FILE" | head -n1)"
-SSH_USER="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"root\"" "$SSH_TARGETS_FILE" | head -n1)"
-SSH_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // ${DEF_PORT}" "$SSH_TARGETS_FILE" | head -n1)"
-SSH_TO="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .connect_timeout_sec // ${DEF_TO}" "$SSH_TARGETS_FILE" | head -n1)"
-
-if [[ -z "$SSH_HOST" || "$SSH_HOST" == "null" ]]; then
-  echo "STOP: unknown ssh target id: $TARGET_ID" >&2
-  exit 2
-fi
-
-ssh_opts=(
-  -n
-  -o "ConnectTimeout=$SSH_TO"
-  -o "StrictHostKeyChecking=$DEF_STRICT"
-  -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
-  -o "NumberOfPasswordPrompts=0"
-  -o "LogLevel=ERROR"
-  -p "$SSH_PORT"
-)
-if [[ "$DEF_BATCH" == "true" ]]; then
-  ssh_opts+=(-o "BatchMode=yes")
-fi
-
-REMOTE_SCRIPT='
-set -euo pipefail
-echo "=== pve identity ==="
-hostname
-pveversion || true
-echo
-
-echo "=== /etc/pve/jobs.cfg (vzdump sections) ==="
-if [[ -f /etc/pve/jobs.cfg ]]; then
-  # Print all vzdump job blocks. jobs.cfg blocks are indented under the header.
-  # This prints from each "vzdump:" header until the next top-level "<name>:" header.
-  awk "BEGIN{p=0} /^vzdump:/{p=1; print; next} /^[A-Za-z0-9_-]+:/{if(p==1){print; p=0}; next} {if(p==1) print}" \
-    /etc/pve/jobs.cfg | sed -n "1,200p"
-else
-  echo "MISSING: /etc/pve/jobs.cfg"
-fi
-echo
-
-echo "=== /tank/backups/vzdump/dump (latest 30) ==="
-if [[ -d /tank/backups/vzdump/dump ]]; then
-  ls -lth /tank/backups/vzdump/dump | head -n 31 || true
-else
-  echo "MISSING: /tank/backups/vzdump/dump"
-fi
-echo
-
-echo "=== vzdump files (qemu 200/202/203/204/205/206/207/209/210) ==="
-if [[ -d /tank/backups/vzdump/dump ]]; then
-  for id in 200 202 203 204 205 206 207 209 210; do
-    echo "--- $id ---"
-    ls -1t /tank/backups/vzdump/dump/vzdump-qemu-${id}-*.vma.zst 2>/dev/null | head -n 3 || true
-    if ! ls -1 /tank/backups/vzdump/dump/vzdump-qemu-${id}-*.vma.zst >/dev/null 2>&1; then
-      echo "(no matches)"
-    fi
-  done
-fi
-'
-
-echo "backup.vzdump.status"
-echo "target: $TARGET_ID (${SSH_USER}@${SSH_HOST}:${SSH_PORT})"
-echo
-ssh "${ssh_opts[@]}" "${SSH_USER}@${SSH_HOST}" "bash -lc $(printf "%q" "$REMOTE_SCRIPT")"
+echo "WARN: backup plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

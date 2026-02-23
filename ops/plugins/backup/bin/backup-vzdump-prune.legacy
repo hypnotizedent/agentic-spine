@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# backup.vzdump.prune - Prune vzdump backups on pve storage using pvesm prune-backups.
+#
+# Default is DRY-RUN. Use --execute to delete.
+# This exists to make retention enforcement receipt-backed and repeatable.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SSH_TARGETS_FILE="${SSH_TARGETS_FILE:-$ROOT/ops/bindings/ssh.targets.yaml}"
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+need yq
+need ssh
+need sed
+
+if [[ ! -f "$SSH_TARGETS_FILE" ]]; then
+  echo "STOP: missing ssh targets binding: $SSH_TARGETS_FILE" >&2
+  exit 2
+fi
+
+TARGET_ID="pve"
+STORAGE_ID="tank-backups"
+KEEP_LAST="2"
+TYPE="qemu"
+EXECUTE="false"
+
+usage() {
+  cat <<EOF
+backup.vzdump.prune - Prune vzdump backups on pve storage.
+
+Usage:
+  backup-vzdump-prune [--target <id>] [--storage <id>] [--keep-last <n>] [--type <qemu|lxc>] [--execute]
+
+Defaults:
+  --target   pve
+  --storage  tank-backups
+  --keep-last 2
+  --type     qemu
+  (dry-run unless --execute)
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target) TARGET_ID="${2:-}"; shift 2 ;;
+    --storage) STORAGE_ID="${2:-}"; shift 2 ;;
+    --keep-last) KEEP_LAST="${2:-}"; shift 2 ;;
+    --type) TYPE="${2:-}"; shift 2 ;;
+    --execute) EXECUTE="true"; shift 1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "STOP: unknown arg: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if ! echo "$KEEP_LAST" | grep -Eq '^[0-9]+$'; then
+  echo "STOP: --keep-last must be an integer (got: $KEEP_LAST)" >&2
+  exit 2
+fi
+
+case "$TYPE" in
+  qemu|lxc) ;;
+  *) echo "STOP: --type must be qemu|lxc (got: $TYPE)" >&2; exit 2 ;;
+esac
+
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_TARGETS_FILE")"
+DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_TARGETS_FILE")"
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_TARGETS_FILE")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_TARGETS_FILE")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 6' "$SSH_TARGETS_FILE")"
+
+SSH_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_TARGETS_FILE" | head -n1)"
+SSH_USER="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"root\"" "$SSH_TARGETS_FILE" | head -n1)"
+SSH_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // ${DEF_PORT}" "$SSH_TARGETS_FILE" | head -n1)"
+SSH_TO="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .connect_timeout_sec // ${DEF_TO}" "$SSH_TARGETS_FILE" | head -n1)"
+
+if [[ -z "$SSH_HOST" || "$SSH_HOST" == "null" ]]; then
+  echo "STOP: unknown ssh target id: $TARGET_ID" >&2
+  exit 2
+fi
+
+ssh_opts=(
+  -n
+  -o "ConnectTimeout=$SSH_TO"
+  -o "StrictHostKeyChecking=$DEF_STRICT"
+  -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+  -o "NumberOfPasswordPrompts=0"
+  -o "LogLevel=ERROR"
+  -p "$SSH_PORT"
+)
+if [[ "$DEF_BATCH" == "true" ]]; then
+  ssh_opts+=(-o "BatchMode=yes")
+fi
+
+REMOTE_SCRIPT='
+set -euo pipefail
+storage="$1"
+keep_last="$2"
+type="$3"
+execute="$4"
+
+echo "=== pve identity ==="
+hostname
+pveversion || true
+echo
+
+echo "=== storage.cfg: prune-backups (tank-backups) ==="
+if [[ -f /etc/pve/storage.cfg ]]; then
+  awk "BEGIN{p=0} /^dir: tank-backups$/{p=1} p{print} /^$/{if(p){exit}}" /etc/pve/storage.cfg || true
+else
+  echo "MISSING: /etc/pve/storage.cfg"
+fi
+echo
+
+echo "=== pvesm prune-backups preview ==="
+pvesm prune-backups "$storage" --dry-run 1 --keep-last "$keep_last" --type "$type" | sed -n "1,240p"
+echo
+
+if [[ "$execute" != "true" ]]; then
+  echo "DRY-RUN ONLY (pass --execute to delete)"
+  exit 0
+fi
+
+echo "=== pvesm prune-backups apply ==="
+pvesm prune-backups "$storage" --keep-last "$keep_last" --type "$type" | sed -n "1,240p"
+'
+
+echo "backup.vzdump.prune"
+echo "target: $TARGET_ID (${SSH_USER}@${SSH_HOST}:${SSH_PORT})"
+echo "storage: $STORAGE_ID"
+echo "type: $TYPE"
+echo "keep_last: $KEEP_LAST"
+echo "execute: $EXECUTE"
+echo
+
+ssh "${ssh_opts[@]}" "${SSH_USER}@${SSH_HOST}" "bash -lc $(printf "%q" "$REMOTE_SCRIPT") -- $(printf "%q" "$STORAGE_ID") $(printf "%q" "$KEEP_LAST") $(printf "%q" "$TYPE") $(printf "%q" "$EXECUTE")"
+
