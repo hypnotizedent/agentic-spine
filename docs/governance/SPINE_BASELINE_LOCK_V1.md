@@ -171,3 +171,5 @@ document an explicit ceiling adjustment with justification.
 
 These are valid future work but they don't change the baseline lock.
 The lock measures the spine's structural health, not its feature set.
+
+W25 lockdown complete on 2026-02-23; normalization execution now allowlist-only.
