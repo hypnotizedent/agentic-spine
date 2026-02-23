@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+CONTRACT="$ROOT/ops/bindings/platform.extension.transaction.contract.yaml"
+DEFAULTS="$ROOT/ops/bindings/platform.extension.binding.defaults.yaml"
+SERVICE_CONTRACT="$ROOT/ops/bindings/service.onboarding.contract.yaml"
+COMMITMENTS_CONTRACT="$ROOT/ops/bindings/operator.commitments.contract.yaml"
+
+usage() {
+  cat <<'EOF'
+platform.extension.bind
+
+Usage:
+  platform-extension-bind --type <site|workstation|business|service|mcp|agent> --target-id <id> [--transaction-file <path>] [--apply] [--dry-run]
+
+Options:
+  --type <type>              Extension transaction type
+  --target-id <id>           Target identifier
+  --transaction-file <path>  Existing transaction YAML to update (required with --apply)
+  --apply                    Write resolved required_homes into transaction file and update updated_at
+  --dry-run                  Print resolved payload only (no writes)
+  -h, --help                 Show this help
+EOF
+}
+
+fail() {
+  echo "platform.extension.bind FAIL: $*" >&2
+  exit 1
+}
+
+TYPE=""
+TARGET_ID=""
+TRANSACTION_FILE=""
+APPLY=0
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --type)
+      TYPE="${2:-}"
+      shift 2
+      ;;
+    --target-id)
+      TARGET_ID="${2:-}"
+      shift 2
+      ;;
+    --transaction-file)
+      TRANSACTION_FILE="${2:-}"
+      shift 2
+      ;;
+    --apply)
+      APPLY=1
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$TYPE" ]] || fail "--type is required"
+[[ -n "$TARGET_ID" ]] || fail "--target-id is required"
+
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+[[ -f "$DEFAULTS" ]] || fail "missing defaults binding: $DEFAULTS"
+[[ -f "$SERVICE_CONTRACT" ]] || fail "missing service onboarding binding: $SERVICE_CONTRACT"
+[[ -f "$COMMITMENTS_CONTRACT" ]] || fail "missing commitments binding: $COMMITMENTS_CONTRACT"
+
+if [[ "$APPLY" -eq 1 && -z "$TRANSACTION_FILE" ]]; then
+  fail "--apply requires --transaction-file"
+fi
+if [[ "$APPLY" -eq 1 && "$DRY_RUN" -eq 1 ]]; then
+  fail "--apply and --dry-run are mutually exclusive"
+fi
+if [[ -n "$TRANSACTION_FILE" ]]; then
+  TRANSACTION_FILE="$(cd "$(dirname "$TRANSACTION_FILE")" && pwd)/$(basename "$TRANSACTION_FILE")"
+  [[ -f "$TRANSACTION_FILE" ]] || fail "transaction file not found: $TRANSACTION_FILE"
+fi
+
+command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
+
+python3 - "$CONTRACT" "$DEFAULTS" "$SERVICE_CONTRACT" "$COMMITMENTS_CONTRACT" "$TYPE" "$TARGET_ID" "$TRANSACTION_FILE" "$APPLY" "$DRY_RUN" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+import yaml
+
+(
+    contract_raw,
+    defaults_raw,
+    service_raw,
+    commitments_raw,
+    tx_type,
+    target_id,
+    tx_file_raw,
+    apply_raw,
+    dry_run_raw,
+) = sys.argv[1:10]
+
+contract_path = Path(contract_raw).expanduser().resolve()
+defaults_path = Path(defaults_raw).expanduser().resolve()
+service_path = Path(service_raw).expanduser().resolve()
+commitments_path = Path(commitments_raw).expanduser().resolve()
+tx_file = Path(tx_file_raw).expanduser().resolve() if tx_file_raw else None
+apply_mode = apply_raw == "1"
+dry_run = dry_run_raw == "1"
+
+
+def load_yaml(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+try:
+    contract = load_yaml(contract_path)
+    defaults = load_yaml(defaults_path)
+    service_contract = load_yaml(service_path)
+    commitments_contract = load_yaml(commitments_path)
+except Exception as exc:
+    print(f"platform.extension.bind FAIL: unable to parse bindings: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+allowed_types = [str(x).strip() for x in (contract.get("transaction_types") or []) if str(x).strip()]
+if tx_type not in allowed_types:
+    print(f"platform.extension.bind FAIL: unsupported type '{tx_type}' (allowed: {', '.join(allowed_types)})", file=sys.stderr)
+    raise SystemExit(1)
+
+required_home_keys = [str(x).strip() for x in (contract.get("required_homes_keys") or []) if str(x).strip()]
+if not required_home_keys:
+    print("platform.extension.bind FAIL: contract required_homes_keys is empty", file=sys.stderr)
+    raise SystemExit(1)
+
+service_rows = {
+    str(row.get("id", "")).strip(): row
+    for row in (service_contract.get("services") or [])
+    if isinstance(row, dict) and str(row.get("id", "")).strip()
+}
+
+commitment_ids = {
+    str(row.get("id", "")).strip()
+    for row in (commitments_contract.get("commitments") or [])
+    if isinstance(row, dict) and str(row.get("id", "")).strip()
+}
+
+commitment_defaults = defaults.get("default_commitments") if isinstance(defaults.get("default_commitments"), dict) else {}
+calendar_commitment_id = str(commitment_defaults.get("calendar_commitment_id", "")).strip()
+communications_commitment_id = str(commitment_defaults.get("communications_commitment_id", "")).strip()
+
+if not calendar_commitment_id or calendar_commitment_id not in commitment_ids:
+    print(
+        f"platform.extension.bind FAIL: default calendar_commitment_id is missing or unknown: {calendar_commitment_id}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+if not communications_commitment_id or communications_commitment_id not in commitment_ids:
+    print(
+        f"platform.extension.bind FAIL: default communications_commitment_id is missing or unknown: {communications_commitment_id}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+required_homes: dict[str, dict[str, str]] = {
+    key: {"status": "pending", "ref": ""}
+    for key in required_home_keys
+}
+
+if tx_type == "service":
+    service_row = service_rows.get(target_id)
+    if target_id.startswith("template-") and service_row is None:
+        print(
+            f"platform.extension.bind FAIL: template service target not found in service.onboarding.contract.yaml: {target_id}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if not target_id.startswith("template-") and service_row is None:
+        print(
+            f"platform.extension.bind FAIL: service target not found in service.onboarding.contract.yaml: {target_id}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if service_row is None:
+        print(f"platform.extension.bind FAIL: unable to resolve service row for target '{target_id}'", file=sys.stderr)
+        raise SystemExit(1)
+
+    mapping = {
+        "infisical_namespace": str(service_row.get("infisical_namespace", "")).strip(),
+        "vaultwarden_item": str(service_row.get("vaultwarden_item", "")).strip(),
+        "gitea_repo": str(service_row.get("gitea_repo_slug", "")).strip(),
+        "observability_probe": str(service_row.get("observability_probe_id", "")).strip(),
+        "workbench_home": str(service_row.get("workbench_home_path", "")).strip(),
+        "calendar_commitment": calendar_commitment_id,
+        "communications_commitment": communications_commitment_id,
+    }
+
+    missing = [key for key, value in mapping.items() if not value]
+    if missing:
+        print(
+            f"platform.extension.bind FAIL: unresolved service homes for '{target_id}': {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    for key, value in mapping.items():
+        if key in required_homes:
+            required_homes[key] = {"status": "ready", "ref": value}
+else:
+    for key in required_homes:
+        if key == "calendar_commitment":
+            required_homes[key] = {"status": "ready", "ref": calendar_commitment_id}
+        elif key == "communications_commitment":
+            required_homes[key] = {"status": "ready", "ref": communications_commitment_id}
+        else:
+            required_homes[key] = {
+                "status": "pending",
+                "ref": f"TEMPLATE::{tx_type}::{target_id}::{key}",
+            }
+
+payload: dict[str, object] = {
+    "type": tx_type,
+    "target_id": target_id,
+    "required_homes": required_homes,
+}
+
+if tx_file is not None:
+    try:
+        tx_doc = load_yaml(tx_file)
+    except Exception as exc:
+        print(f"platform.extension.bind FAIL: unable to parse transaction file: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    file_type = str(tx_doc.get("type", "")).strip()
+    file_target = str(tx_doc.get("target_id", "")).strip()
+    if file_type and file_type != tx_type:
+        print(
+            f"platform.extension.bind FAIL: --type '{tx_type}' mismatches transaction file type '{file_type}'",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if file_target and file_target != target_id:
+        print(
+            f"platform.extension.bind FAIL: --target-id '{target_id}' mismatches transaction file target '{file_target}'",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    payload["transaction_id"] = str(tx_doc.get("transaction_id", tx_file.stem)).strip() or tx_file.stem
+
+if apply_mode:
+    assert tx_file is not None
+    tx_doc = load_yaml(tx_file)
+    tx_doc["required_homes"] = required_homes
+    tx_doc["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    tx_file.write_text(yaml.safe_dump(tx_doc, sort_keys=False), encoding="utf-8")
+    print("platform.extension.bind")
+    print("status: wrote")
+    print(f"transaction_file: {tx_file}")
+    raise SystemExit(0)
+
+if dry_run or not apply_mode:
+    print(yaml.safe_dump(payload, sort_keys=False), end="")
+PY
