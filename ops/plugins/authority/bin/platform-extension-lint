@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+WORKBENCH_ROOT="${SPINE_WORKBENCH:-$HOME/code/workbench}"
+CONTRACT="$ROOT/ops/bindings/platform.extension.naming.contract.yaml"
+SITES_BINDING="$ROOT/ops/bindings/topology.sites.yaml"
+WORKSTATIONS_BINDING="$ROOT/ops/bindings/topology.workstations.yaml"
+BUSINESS_BINDING="$ROOT/ops/bindings/business.registry.yaml"
+SERVICE_BINDING="$ROOT/ops/bindings/service.onboarding.contract.yaml"
+AGENTS_BINDING="$ROOT/ops/bindings/agents.registry.yaml"
+HEALTH_BINDING="$ROOT/ops/bindings/services.health.yaml"
+STACK_MAP="$WORKBENCH_ROOT/scripts/root/deploy/stack-map.sh"
+
+usage() {
+  cat <<'USAGE'
+platform.extension.lint
+
+Usage:
+  platform-extension-lint
+  platform-extension-lint -h|--help
+
+Output:
+  Deterministic JSON report with arrays:
+    - collisions
+    - missing_refs
+    - invalid_names
+    - vmid_overlap
+USAGE
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+if [[ $# -gt 0 ]]; then
+  echo "platform.extension.lint FAIL: unknown argument: $1" >&2
+  usage >&2
+  exit 2
+fi
+
+for file in "$CONTRACT" "$SITES_BINDING" "$WORKSTATIONS_BINDING" "$BUSINESS_BINDING" "$SERVICE_BINDING" "$AGENTS_BINDING" "$HEALTH_BINDING" "$STACK_MAP"; do
+  [[ -f "$file" ]] || {
+    echo "platform.extension.lint FAIL: missing required input: $file" >&2
+    exit 1
+  }
+done
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "platform.extension.lint FAIL: missing required tool: python3" >&2
+  exit 1
+}
+
+python3 - "$CONTRACT" "$SITES_BINDING" "$WORKSTATIONS_BINDING" "$BUSINESS_BINDING" "$SERVICE_BINDING" "$AGENTS_BINDING" "$HEALTH_BINDING" "$STACK_MAP" <<'PY'
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+import json
+import re
+import sys
+
+import yaml
+
+(
+    contract_raw,
+    sites_raw,
+    workstations_raw,
+    business_raw,
+    service_raw,
+    agents_raw,
+    health_raw,
+    stack_map_raw,
+) = sys.argv[1:9]
+
+contract_path = Path(contract_raw).expanduser().resolve()
+sites_path = Path(sites_raw).expanduser().resolve()
+workstations_path = Path(workstations_raw).expanduser().resolve()
+business_path = Path(business_raw).expanduser().resolve()
+service_path = Path(service_raw).expanduser().resolve()
+agents_path = Path(agents_raw).expanduser().resolve()
+health_path = Path(health_raw).expanduser().resolve()
+stack_map_path = Path(stack_map_raw).expanduser().resolve()
+
+
+def load_yaml(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+@dataclass(frozen=True)
+class Ref:
+    kind: str
+    source: str
+
+
+try:
+    contract = load_yaml(contract_path)
+    sites_doc = load_yaml(sites_path)
+    workstations_doc = load_yaml(workstations_path)
+    business_doc = load_yaml(business_path)
+    service_doc = load_yaml(service_path)
+    agents_doc = load_yaml(agents_path)
+    health_doc = load_yaml(health_path)
+except Exception as exc:
+    print(f"platform.extension.lint FAIL: unable to parse YAML input: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+naming_rules = contract.get("naming_rules") if isinstance(contract.get("naming_rules"), dict) else {}
+id_regex_raw = str(naming_rules.get("id_regex", "")).strip() or r"^[a-z0-9][a-z0-9-]*$"
+stack_regex_raw = str(naming_rules.get("stack_id_regex", "")).strip() or r"^[a-z0-9][a-z0-9-]*$"
+forbid_uppercase = bool(naming_rules.get("forbid_uppercase", True))
+forbid_spaces = bool(naming_rules.get("forbid_spaces", True))
+
+id_regex = re.compile(id_regex_raw)
+stack_regex = re.compile(stack_regex_raw)
+stack_extract_regex = re.compile(r"^DEPLOY_STACK_METHOD\[([^\]]+)\]")
+stack_host_extract_regex = re.compile(r'^DEPLOY_STACK_HOST\[([^\]]+)\]="([^"]*)"')
+
+vm_policy = contract.get("vm_range_policy") if isinstance(contract.get("vm_range_policy"), dict) else {}
+active_statuses = {
+    str(x).strip().lower()
+    for x in (vm_policy.get("active_statuses") or ["active"])
+    if str(x).strip()
+}
+range_regex = re.compile(str(vm_policy.get("range_pattern", r"^[0-9]+-[0-9]+$")).strip())
+require_vmid_range = bool(vm_policy.get("required_for_active_sites", True))
+cross_ref_policy = contract.get("cross_reference_policy") if isinstance(contract.get("cross_reference_policy"), dict) else {}
+service_ref_statuses = {
+    str(x).strip().lower()
+    for x in (cross_ref_policy.get("enforce_for_service_statuses") or ["active"])
+    if str(x).strip()
+}
+probe_resolution = cross_ref_policy.get("observability_probe_resolution") if isinstance(cross_ref_policy.get("observability_probe_resolution"), dict) else {}
+allow_stack_id_passthrough = bool(probe_resolution.get("allow_stack_id_passthrough", False))
+allow_stack_host_coverage = bool(probe_resolution.get("allow_stack_host_coverage", False))
+
+sites = [row for row in (sites_doc.get("sites") or []) if isinstance(row, dict)]
+workstations = [row for row in (workstations_doc.get("workstations") or []) if isinstance(row, dict)]
+businesses = [row for row in (business_doc.get("businesses") or []) if isinstance(row, dict)]
+services = [row for row in (service_doc.get("services") or []) if isinstance(row, dict)]
+agents = [row for row in (agents_doc.get("agents") or []) if isinstance(row, dict)]
+endpoints = [row for row in (health_doc.get("endpoints") or []) if isinstance(row, dict)]
+
+stack_ids: set[str] = set()
+stack_hosts: dict[str, str] = {}
+for line in stack_map_path.read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    method_match = stack_extract_regex.match(stripped)
+    if method_match:
+        stack_ids.add(method_match.group(1).strip())
+    host_match = stack_host_extract_regex.match(stripped)
+    if host_match:
+        stack_hosts[host_match.group(1).strip()] = host_match.group(2).strip()
+
+site_ids: list[str] = []
+workstation_ids: list[str] = []
+business_ids: list[str] = []
+service_ids: list[str] = []
+agent_ids: list[str] = []
+deploy_stack_ids: list[str] = []
+probe_ids: list[str] = []
+tailscale_aliases: list[str] = []
+
+site_id_set: set[str] = set()
+agent_id_set: set[str] = set()
+endpoint_id_set: set[str] = set()
+
+for row in sites:
+    site_id = str(row.get("id", "")).strip()
+    if site_id:
+        site_ids.append(site_id)
+        site_id_set.add(site_id)
+    site_status = str(row.get("status", "")).strip().lower()
+    if site_status in active_statuses:
+        anchor = str(row.get("tailscale_anchor", "")).strip()
+        if anchor:
+            tailscale_aliases.append(anchor)
+
+for row in workstations:
+    workstation_id = str(row.get("id", "")).strip()
+    if workstation_id:
+        workstation_ids.append(workstation_id)
+    workstation_status = str(row.get("status", "")).strip().lower()
+    if workstation_status in active_statuses:
+        alias = str(row.get("tailscale_alias", "")).strip()
+        if alias:
+            tailscale_aliases.append(alias)
+
+for row in businesses:
+    business_id = str(row.get("id", "")).strip()
+    if business_id:
+        business_ids.append(business_id)
+
+for row in services:
+    service_id = str(row.get("id", "")).strip()
+    if service_id:
+        service_ids.append(service_id)
+    stack_id = str(row.get("deploy_stack_id", "")).strip()
+    if stack_id:
+        deploy_stack_ids.append(stack_id)
+    probe_id = str(row.get("observability_probe_id", "")).strip()
+    if probe_id:
+        probe_ids.append(probe_id)
+
+for row in agents:
+    agent_id = str(row.get("id", "")).strip()
+    if agent_id:
+        agent_ids.append(agent_id)
+        agent_id_set.add(agent_id)
+
+for row in endpoints:
+    endpoint_id = str(row.get("id", "")).strip()
+    if endpoint_id:
+        endpoint_id_set.add(endpoint_id)
+
+collisions: list[dict[str, object]] = []
+missing_refs: list[dict[str, str]] = []
+invalid_names: list[dict[str, str]] = []
+vmid_overlap: list[dict[str, object]] = []
+
+
+def add_collisions(kind: str, values: list[str]) -> None:
+    seen: dict[str, int] = defaultdict(int)
+    for value in values:
+        seen[value] += 1
+    for value, count in sorted(seen.items()):
+        if count > 1:
+            collisions.append({"class": kind, "value": value, "count": count})
+
+
+add_collisions("site_ids", site_ids)
+add_collisions("workstation_ids", workstation_ids)
+add_collisions("business_ids", business_ids)
+add_collisions("service_ids", service_ids)
+add_collisions("agent_ids", agent_ids)
+add_collisions("deploy_stack_ids", deploy_stack_ids)
+add_collisions("observability_probe_ids", probe_ids)
+add_collisions("tailscale_aliases", tailscale_aliases)
+
+cross_domain = defaultdict(list)
+for value in site_ids:
+    cross_domain[value].append("site")
+for value in workstation_ids:
+    cross_domain[value].append("workstation")
+for value in business_ids:
+    cross_domain[value].append("business")
+for value in service_ids:
+    cross_domain[value].append("service")
+for value in agent_ids:
+    cross_domain[value].append("agent")
+for value, domains in sorted(cross_domain.items()):
+    unique_domains = sorted(set(domains))
+    if len(unique_domains) > 1:
+        collisions.append({"class": "cross_domain_ids", "value": value, "domains": unique_domains})
+
+
+def name_ok(value: str, regex: re.Pattern[str], kind: str, source: str) -> None:
+    if not value:
+        return
+    if not regex.fullmatch(value):
+        invalid_names.append({"class": kind, "value": value, "source": source, "reason": "regex_mismatch"})
+        return
+    if forbid_uppercase and any(ch.isupper() for ch in value):
+        invalid_names.append({"class": kind, "value": value, "source": source, "reason": "uppercase_forbidden"})
+    if forbid_spaces and any(ch.isspace() for ch in value):
+        invalid_names.append({"class": kind, "value": value, "source": source, "reason": "spaces_forbidden"})
+
+
+for row in sites:
+    value = str(row.get("id", "")).strip()
+    name_ok(value, id_regex, "site.id", f"site:{value or 'unknown'}")
+
+for row in workstations:
+    value = str(row.get("id", "")).strip()
+    name_ok(value, id_regex, "workstation.id", f"workstation:{value or 'unknown'}")
+
+for row in businesses:
+    value = str(row.get("id", "")).strip()
+    name_ok(value, id_regex, "business.id", f"business:{value or 'unknown'}")
+
+for row in services:
+    value = str(row.get("id", "")).strip()
+    name_ok(value, id_regex, "service.id", f"service:{value or 'unknown'}")
+    stack_id = str(row.get("deploy_stack_id", "")).strip()
+    name_ok(stack_id, stack_regex, "service.deploy_stack_id", f"service:{value or 'unknown'}")
+    probe_id = str(row.get("observability_probe_id", "")).strip()
+    name_ok(probe_id, id_regex, "service.observability_probe_id", f"service:{value or 'unknown'}")
+
+for row in agents:
+    value = str(row.get("id", "")).strip()
+    name_ok(value, id_regex, "agent.id", f"agent:{value or 'unknown'}")
+
+for row in workstations:
+    ws_id = str(row.get("id", "")).strip() or "unknown"
+    site_ref = str(row.get("site", "")).strip()
+    if site_ref and site_ref not in site_id_set:
+        missing_refs.append({
+            "class": "workstation.site",
+            "source": f"workstation:{ws_id}",
+            "missing": site_ref,
+        })
+
+for row in businesses:
+    business_id = str(row.get("id", "")).strip() or "unknown"
+    site_ref = str(row.get("primary_site", "")).strip()
+    if site_ref and site_ref not in site_id_set:
+        missing_refs.append({
+            "class": "business.primary_site",
+            "source": f"business:{business_id}",
+            "missing": site_ref,
+        })
+
+for row in services:
+    service_id = str(row.get("id", "")).strip() or "unknown"
+    service_status = str(row.get("status", "")).strip().lower()
+    if service_status not in service_ref_statuses:
+        continue
+
+    agent_ref = str(row.get("owning_agent_id", "")).strip()
+    if agent_ref and agent_ref not in agent_id_set:
+        missing_refs.append({
+            "class": "service.owning_agent_id",
+            "source": f"service:{service_id}",
+            "missing": agent_ref,
+        })
+
+    stack_ref = str(row.get("deploy_stack_id", "")).strip()
+    if stack_ref and stack_ref not in stack_ids:
+        missing_refs.append({
+            "class": "service.deploy_stack_id",
+            "source": f"service:{service_id}",
+            "missing": stack_ref,
+        })
+
+    probe_ref = str(row.get("observability_probe_id", "")).strip()
+    if probe_ref:
+        probe_resolved = probe_ref in endpoint_id_set
+        if not probe_resolved and allow_stack_id_passthrough:
+            probe_resolved = stack_ref and probe_ref == stack_ref and stack_ref in stack_ids
+        if not probe_resolved and allow_stack_host_coverage and stack_ref:
+            stack_host = stack_hosts.get(stack_ref, "")
+            probe_resolved = bool(stack_host and any(str(row.get("host", "")).strip() == stack_host for row in endpoints))
+        if not probe_resolved:
+            missing_refs.append({
+                "class": "service.observability_probe_id",
+                "source": f"service:{service_id}",
+                "missing": probe_ref,
+            })
+
+active_ranges: list[tuple[str, int, int, str]] = []
+for row in sites:
+    site_id = str(row.get("id", "")).strip() or "unknown"
+    site_status = str(row.get("status", "")).strip().lower()
+    vm_range = str(row.get("vmid_range", "")).strip()
+    if site_status not in active_statuses:
+        continue
+    if require_vmid_range and not vm_range:
+        vmid_overlap.append({
+            "class": "vmid_range_missing",
+            "site": site_id,
+            "range": "",
+        })
+        continue
+    if vm_range and not range_regex.fullmatch(vm_range):
+        vmid_overlap.append({
+            "class": "vmid_range_invalid",
+            "site": site_id,
+            "range": vm_range,
+        })
+        continue
+    if vm_range:
+        start_raw, end_raw = vm_range.split("-", 1)
+        start = int(start_raw)
+        end = int(end_raw)
+        if start > end:
+            vmid_overlap.append({
+                "class": "vmid_range_invalid",
+                "site": site_id,
+                "range": vm_range,
+            })
+            continue
+        active_ranges.append((site_id, start, end, vm_range))
+
+for i in range(len(active_ranges)):
+    a_site, a_start, a_end, a_range = active_ranges[i]
+    for j in range(i + 1, len(active_ranges)):
+        b_site, b_start, b_end, b_range = active_ranges[j]
+        if max(a_start, b_start) <= min(a_end, b_end):
+            vmid_overlap.append({
+                "class": "vmid_range_overlap",
+                "site_a": a_site,
+                "range_a": a_range,
+                "site_b": b_site,
+                "range_b": b_range,
+            })
+
+# Deterministic ordering
+collisions = sorted(collisions, key=lambda x: (str(x.get("class", "")), str(x.get("value", "")), str(x.get("domains", ""))))
+missing_refs = sorted(missing_refs, key=lambda x: (x["class"], x["source"], x["missing"]))
+invalid_names = sorted(invalid_names, key=lambda x: (x["class"], x["source"], x["value"], x["reason"]))
+vmid_overlap = sorted(vmid_overlap, key=lambda x: json.dumps(x, sort_keys=True))
+
+report = {
+    "collisions": collisions,
+    "missing_refs": missing_refs,
+    "invalid_names": invalid_names,
+    "vmid_overlap": vmid_overlap,
+}
+
+print(json.dumps(report, indent=2, sort_keys=True))
+
+has_findings = any(len(report[key]) > 0 for key in ("collisions", "missing_refs", "invalid_names", "vmid_overlap"))
+raise SystemExit(1 if has_findings else 0)
+PY
