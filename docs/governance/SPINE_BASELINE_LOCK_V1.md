@@ -83,7 +83,7 @@ Agents should answer "what's my work?" with one query, not three.
 | operational.gaps.yaml | Track defects/missing items | 778 fixed, 37 non-fixed (13 open per `ops status`) |
 | mailroom/state/loop-scopes/ | Track ongoing work streams | Active |
 | mailroom/outbox/proposals/ | Track change requests | 2 pending, 12 applied, 7 superseded |
-| spine.work.index (runtime) | Unified read view | Planned (project-attach wave) |
+| spine.work.index (runtime) | Unified read view | Live (W-ATTACH-01) |
 
 **Rule:** After project-attach wave, `spine.work.index --domain <X>`
 must return all open items for a domain in one call. Agents must not
@@ -97,10 +97,10 @@ spine governance with minimal manual wiring?
 
 | Step | Target | Status |
 |------|--------|--------|
-| Register project | 1 file edit (agents.registry.yaml project_binding) | Planned |
-| Generate governance bundle | 1 command (gen-project-attach.sh) | Planned |
-| Verify attach | 1 gate (D153 project-attach parity) | Planned |
-| View project work | 1 command (spine.work.index --domain) | Planned |
+| Register project | 1 file edit (agents.registry.yaml project_binding) | Live |
+| Generate governance bundle | 1 command (gen-project-attach.sh) | Live |
+| Verify attach | 1 gate (D153 project-attach parity) | Live |
+| View project work | 1 command (spine.work.index --domain) | Live |
 | Manual multi-file wiring | Zero | Current: 5+ files |
 
 **Rule:** After project-attach wave, onboarding a new project must
@@ -135,7 +135,7 @@ Agents operate within rails, not improvising structure.
 | Agents don't create new registries | registry.ownership.yaml parity gate |
 | Agents don't hand-edit generated files | ownership type check in generators |
 | Agents don't add gates without topology wiring | D127 topology assignment check |
-| Agents don't modify outside declared write_scope | terminal.role.contract (planned gate — no explicit verify gate wired yet) |
+| Agents don't modify outside declared write_scope | D152 terminal-role-capability-parity (live in verify.core.run) |
 | Agents use one registration path | project_binding via agents.registry.yaml |
 
 **Rule:** If an agent creates a file not covered by registry.ownership.yaml,
