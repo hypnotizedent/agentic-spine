@@ -1,101 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# n8n-workflows — spine wrapper for workbench n8n workflow CLI
-#
-# Goals:
-# - Keep n8n workflow governance actions receipted via spine capabilities.
-# - Avoid hardcoded secrets providers/IDs in the execution path (use secrets.exec to inject N8N_API_KEY).
-# - Prevent accidental fallback to legacy/incorrect secret fetching paths inside workbench scripts.
-#
-# Expected usage (via capability):
-#   ./bin/ops cap run n8n.workflows.list
-#   ./bin/ops cap run n8n.workflows.get <workflow_id>
-#   ./bin/ops cap run n8n.workflows.export <workflow_id> <output.json>
-#
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${N8N_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/agents/n8n/tools/src/spine-plugin-n8n/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
-WORKFLOWS_CLI="${WORKBENCH_ROOT}/infra/compose/n8n/n8n-workflows.sh"
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-
-usage() {
-  cat <<'EOF'
-n8n-workflows (spine wrapper)
-
-Usage:
-  n8n-workflows <command> [args]
-
-Commands:
-  list
-  get <id>
-  export <id> [file]
-  export-all [dir]         Export all workflows to directory (default: fixtures/n8n/snapshots/<date>/)
-  import <file.json>
-  activate <id>
-  deactivate <id>
-  update <id> <file.json>
-  delete <id>
-
-Environment:
-  N8N_API_KEY   Required. Prefer running via spine capability which injects this via secrets.exec.
-  N8N_API_URL   Optional. Defaults to https://n8n.ronny.works (workbench script appends /api/v1).
-EOF
-}
-
-if [[ $# -lt 1 ]]; then
-  usage >&2
-  exit 2
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-cmd="$1"
-shift || true
-
-# Hard requirement: force callers to supply the API key via env injection
-# (so we don't silently fall back to any embedded Infisical logic in workbench scripts).
-if [[ -z "${N8N_API_KEY:-}" ]]; then
-  echo "STOP: N8N_API_KEY is not set." >&2
-  echo "hint: run via spine capability (it injects secrets) or export N8N_API_KEY in your environment." >&2
-  exit 2
-fi
-
-# export-all is handled inline (not delegated to workbench)
-if [[ "$cmd" == "export-all" ]]; then
-  N8N_API_URL="${N8N_API_URL:-https://n8n.ronny.works}"
-  out_dir="${1:-$SPINE_REPO/fixtures/n8n/snapshots/$(date +%Y%m%d-%H%M%S)}"
-  mkdir -p "$out_dir"
-
-  # Fetch all workflow IDs
-  ids_json=$(curl -s -X GET "${N8N_API_URL}/api/v1/workflows" \
-    -H "X-N8N-API-KEY: $N8N_API_KEY")
-
-  ids=$(echo "$ids_json" | jq -r '.data[].id')
-  if [[ -z "$ids" ]]; then
-    echo "WARN: no workflows found or API error" >&2
-    echo "$ids_json" | jq '.' >&2
-    exit 1
-  fi
-
-  count=0
-  for wf_id in $ids; do
-    wf_json=$(curl -s -X GET "${N8N_API_URL}/api/v1/workflows/${wf_id}" \
-      -H "X-N8N-API-KEY: $N8N_API_KEY")
-    wf_name=$(echo "$wf_json" | jq -r '.name // "unnamed"' | tr ' ' '_' | tr -cd 'A-Za-z0-9_-')
-    # Export clean JSON (strip credentials, keep structure)
-    echo "$wf_json" | jq '{id, name, active, nodes, connections, settings}' \
-      > "${out_dir}/${wf_id}__${wf_name}.json"
-    count=$((count + 1))
-  done
-
-  echo "OK: exported $count workflows to $out_dir"
-  ls -la "$out_dir"
-  exit 0
-fi
-
-if [[ ! -x "$WORKFLOWS_CLI" ]]; then
-  echo "STOP: missing or not executable: $WORKFLOWS_CLI" >&2
-  echo "hint: expected workbench at: $WORKBENCH_ROOT" >&2
-  exit 2
-fi
-
-exec "$WORKFLOWS_CLI" "$cmd" "$@"
-
+echo "WARN: n8n plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

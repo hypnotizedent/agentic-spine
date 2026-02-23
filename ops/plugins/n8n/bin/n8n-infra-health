@@ -1,141 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
-CONTRACT="$ROOT/ops/bindings/n8n.infra.reliability.contract.yaml"
-SERVICES="$ROOT/ops/bindings/services.health.yaml"
-BACKUP="$ROOT/ops/bindings/backup.inventory.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${N8N_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/agents/n8n/tools/src/spine-plugin-n8n/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "STOP: missing dependency: $1" >&2
-    exit 2
-  }
-}
-
-need_file() {
-  [[ -f "$1" ]] || {
-    echo "STOP: missing file: $1" >&2
-    exit 2
-  }
-}
-
-need_cmd yq
-need_cmd curl
-need_file "$CONTRACT"
-need_file "$SERVICES"
-need_file "$BACKUP"
-
-ENDPOINT_ID="$(yq -r '.checks.service_health.endpoint_id' "$CONTRACT")"
-EXPECT_HTTP="$(yq -r '.checks.service_health.expected_http // 200' "$CONTRACT")"
-SERVICE_URL="$(yq -r ".endpoints[] | select(.id == \"$ENDPOINT_ID\") | .url" "$SERVICES" | head -n1)"
-
-API_DEFAULT_URL="$(yq -r '.checks.api_auth.default_api_url' "$CONTRACT")"
-API_PATH="$(yq -r '.checks.api_auth.probe_path' "$CONTRACT")"
-API_EXPECT_HTTP="$(yq -r '.checks.api_auth.expected_http // 200' "$CONTRACT")"
-API_URL="${N8N_API_URL:-$API_DEFAULT_URL}"
-API_KEY="${N8N_API_KEY:-}"
-SKIP_API_AUTH="${N8N_INFRA_SKIP_API_AUTH:-false}"
-
-SNAPSHOT_SCRIPT_REL="$(yq -r '.checks.snapshot.check_script' "$CONTRACT")"
-SNAPSHOT_MAX_AGE="$(yq -r '.checks.snapshot.max_age_hours // 26' "$CONTRACT")"
-SNAPSHOT_SCRIPT="$ROOT/$SNAPSHOT_SCRIPT_REL"
-
-BACKUP_TARGET="$(yq -r '.checks.backup_inventory.target_name' "$CONTRACT")"
-BACKUP_REQUIRE_ENABLED="$(yq -r '.checks.backup_inventory.require_enabled // true' "$CONTRACT")"
-
-if [[ "$SKIP_API_AUTH" != "true" ]]; then
-  need_cmd jq
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-echo "n8n.infra.health"
-echo "contract: $CONTRACT"
-echo
-
-FAILS=0
-
-# 1) Service health
-if [[ -z "$SERVICE_URL" || "$SERVICE_URL" == "null" ]]; then
-  echo "service_health: FAIL (missing endpoint '$ENDPOINT_ID' in $SERVICES)"
-  FAILS=$((FAILS + 1))
-else
-  svc_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$SERVICE_URL" || echo 000)"
-  if [[ "$svc_code" == "$EXPECT_HTTP" ]]; then
-    echo "service_health: PASS ($SERVICE_URL -> HTTP $svc_code)"
-  else
-    echo "service_health: FAIL ($SERVICE_URL -> HTTP $svc_code, expected $EXPECT_HTTP)"
-    FAILS=$((FAILS + 1))
-  fi
-fi
-
-# 2) API auth probe (optional skip for low-latency control probes)
-if [[ "$SKIP_API_AUTH" == "true" ]]; then
-  echo "api_auth: SKIP (N8N_INFRA_SKIP_API_AUTH=true)"
-elif [[ -z "$API_KEY" ]]; then
-  echo "api_auth: FAIL (N8N_API_KEY missing; run via secrets-injected capability)"
-  FAILS=$((FAILS + 1))
-else
-  api_code="$(curl -s -o /tmp/n8n_api_probe_$$.json -w "%{http_code}" \
-    --connect-timeout 5 --max-time 10 \
-    -H "X-N8N-API-KEY: $API_KEY" \
-    "${API_URL}${API_PATH}" || echo 000)"
-  if [[ "$api_code" == "$API_EXPECT_HTTP" ]]; then
-    if jq -e '.data != null' "/tmp/n8n_api_probe_$$.json" >/dev/null 2>&1; then
-      echo "api_auth: PASS (${API_URL}${API_PATH} -> HTTP $api_code)"
-    else
-      echo "api_auth: FAIL (${API_URL}${API_PATH} -> HTTP $api_code, JSON missing .data)"
-      FAILS=$((FAILS + 1))
-    fi
-  else
-    echo "api_auth: FAIL (${API_URL}${API_PATH} -> HTTP $api_code, expected $API_EXPECT_HTTP)"
-    FAILS=$((FAILS + 1))
-  fi
-  rm -f "/tmp/n8n_api_probe_$$.json" >/dev/null 2>&1 || true
-fi
-
-# 3) Snapshot freshness
-if [[ ! -x "$SNAPSHOT_SCRIPT" ]]; then
-  echo "snapshot: FAIL (missing script: $SNAPSHOT_SCRIPT_REL)"
-  FAILS=$((FAILS + 1))
-else
-  set +e
-  snapshot_out="$("$SNAPSHOT_SCRIPT" 2>&1)"
-  snapshot_rc=$?
-  set -e
-
-  if [[ "$snapshot_rc" -ne 0 ]]; then
-    echo "snapshot: FAIL (snapshot status script failed)"
-    echo "$snapshot_out" | sed 's/^/  /'
-    FAILS=$((FAILS + 1))
-  else
-    age_hours="$(echo "$snapshot_out" | sed -n 's/^latest_age_hours: //p' | head -n1)"
-    if [[ -n "$age_hours" && "$age_hours" =~ ^[0-9]+$ ]] && (( age_hours <= SNAPSHOT_MAX_AGE )); then
-      echo "snapshot: PASS (latest_age_hours=$age_hours <= $SNAPSHOT_MAX_AGE)"
-    else
-      echo "snapshot: FAIL (latest_age_hours=${age_hours:-unknown}, max=$SNAPSHOT_MAX_AGE)"
-      echo "$snapshot_out" | sed 's/^/  /'
-      FAILS=$((FAILS + 1))
-    fi
-  fi
-fi
-
-# 4) Backup inventory coverage
-backup_enabled="$(yq -r ".targets[] | select(.name == \"$BACKUP_TARGET\") | .enabled" "$BACKUP" | head -n1)"
-if [[ -z "$backup_enabled" || "$backup_enabled" == "null" ]]; then
-  echo "backup_inventory: FAIL (target '$BACKUP_TARGET' missing in $BACKUP)"
-  FAILS=$((FAILS + 1))
-else
-  if [[ "$BACKUP_REQUIRE_ENABLED" == "true" && "$backup_enabled" != "true" ]]; then
-    echo "backup_inventory: FAIL (target '$BACKUP_TARGET' is not enabled)"
-    FAILS=$((FAILS + 1))
-  else
-    echo "backup_inventory: PASS (target '$BACKUP_TARGET' enabled=$backup_enabled)"
-  fi
-fi
-
-echo
-if [[ "$FAILS" -gt 0 ]]; then
-  echo "summary: FAIL ($FAILS checks failed)"
-  exit 1
-fi
-echo "summary: OK (all checks passed)"
+echo "WARN: n8n plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

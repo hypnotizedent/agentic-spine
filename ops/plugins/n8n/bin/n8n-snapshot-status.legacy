@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+#
+# n8n-snapshot-status — check n8n workflow snapshot artifacts on automation-stack
+#
+# Runs via SSH to automation-stack. Reports latest snapshot, age, count.
+#
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SSH_TARGET_FILE="$SPINE_REPO/ops/bindings/ssh.targets.yaml"
+BACKUP_INVENTORY_FILE="$SPINE_REPO/ops/bindings/backup.inventory.yaml"
+BACKUP_TARGET_NAME="${N8N_SNAPSHOT_BACKUP_TARGET:-app-n8n-workflows}"
+
+# Resolve automation-stack SSH target
+if command -v yq >/dev/null 2>&1 && [[ -f "$SSH_TARGET_FILE" ]]; then
+  SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "automation-stack") | .host' "$SSH_TARGET_FILE")
+  SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "automation-stack") | .user' "$SSH_TARGET_FILE")
+else
+  SSH_HOST="100.98.70.70"
+  SSH_USER="automation"
+fi
+
+if command -v yq >/dev/null 2>&1 && [[ -f "$BACKUP_INVENTORY_FILE" ]]; then
+  BACKUP_DIR="$(yq -r ".targets[] | select(.name == \"$BACKUP_TARGET_NAME\") | .base_path" "$BACKUP_INVENTORY_FILE" | head -n1)"
+fi
+
+if [[ -z "${BACKUP_DIR:-}" || "$BACKUP_DIR" == "null" ]]; then
+  BACKUP_DIR="/home/automation/backups/n8n-workflows"
+fi
+
+echo "=== n8n workflow snapshot status ==="
+echo "host: ${SSH_USER}@${SSH_HOST}"
+echo "path: $BACKUP_DIR"
+echo
+
+if [[ "$SSH_USER" == "automation" ]]; then
+  REMOTE_CMD="BACKUP_DIR='$BACKUP_DIR' bash -s"
+else
+  REMOTE_CMD="sudo -n -u automation env BACKUP_DIR='$BACKUP_DIR' bash -s"
+fi
+
+ssh \
+  -o ConnectTimeout=6 \
+  -o StrictHostKeyChecking=accept-new \
+  "${SSH_USER}@${SSH_HOST}" \
+  "$REMOTE_CMD" <<'REMOTE_SCRIPT'
+
+if [[ ! -d "$BACKUP_DIR" ]]; then
+  echo "STATUS: NO_SNAPSHOTS"
+  echo "detail: backup directory does not exist"
+  exit 1
+fi
+
+snapshot_count=$(find "$BACKUP_DIR" -maxdepth 1 -mindepth 1 -type d | wc -l)
+if [[ "$snapshot_count" -eq 0 ]]; then
+  echo "STATUS: NO_SNAPSHOTS"
+  echo "detail: backup directory exists but contains no snapshots"
+  exit 1
+fi
+
+latest=$(ls -1d "$BACKUP_DIR"/*/  2>/dev/null | sort | tail -1)
+latest_name=$(basename "$latest")
+latest_manifest="${latest}manifest.txt"
+
+if [[ -f "$latest_manifest" ]]; then
+  wf_count=$(grep 'workflow_count:' "$latest_manifest" | awk '{print $2}')
+else
+  wf_count=$(find "$latest" -name '*.json' -type f | wc -l)
+fi
+
+# Calculate age in hours
+latest_epoch=$(stat -c %Y "$latest" 2>/dev/null || stat -f %m "$latest" 2>/dev/null)
+now_epoch=$(date +%s)
+age_hours=$(( (now_epoch - latest_epoch) / 3600 ))
+
+echo "STATUS: OK"
+echo "total_snapshots: $snapshot_count"
+echo "latest: $latest_name"
+echo "latest_workflows: $wf_count"
+echo "latest_age_hours: $age_hours"
+
+if [[ "$age_hours" -gt 26 ]]; then
+  echo "WARN: latest snapshot is older than 26 hours (stale)"
+fi
+
+echo
+echo "all snapshots:"
+for d in $(ls -1d "$BACKUP_DIR"/*/ 2>/dev/null | sort); do
+  name=$(basename "$d")
+  count=$(find "$d" -name '*.json' -type f | wc -l)
+  echo "  $name  ($count workflows)"
+done
+REMOTE_SCRIPT
