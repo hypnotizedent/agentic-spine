@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+CONTRACT="$ROOT/ops/bindings/platform.extension.transaction.contract.yaml"
+SITES_BINDING="$ROOT/ops/bindings/topology.sites.yaml"
+WORKSTATIONS_BINDING="$ROOT/ops/bindings/topology.workstations.yaml"
+BUSINESS_BINDING="$ROOT/ops/bindings/business.registry.yaml"
+SERVICE_BINDING="$ROOT/ops/bindings/service.onboarding.contract.yaml"
+AGENTS_BINDING="$ROOT/ops/bindings/agents.registry.yaml"
+MCP_CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
+TRANSACTION_DIR="$ROOT/mailroom/state/extension-transactions"
+
+usage() {
+  cat <<'EOF'
+platform.extension.scaffold
+
+Usage:
+  platform-extension-scaffold --type <type> --target-id <id> --owner <owner> --loop-id <loop> --proposal-id <cp-or-TBD> [--dry-run]
+
+Options:
+  --type <type>           Transaction type (site|workstation|business|service|mcp|agent)
+  --target-id <id>        Target identifier in the type-specific registry
+  --owner <owner>         Owner handle (example: @ronny)
+  --loop-id <loop>        Linked loop scope id
+  --proposal-id <id>      Linked proposal id (or TBD placeholder)
+  --dry-run               Print transaction YAML only, do not write file
+  -h, --help              Show this help
+EOF
+}
+
+fail() {
+  echo "platform.extension.scaffold FAIL: $*" >&2
+  exit 1
+}
+
+TYPE=""
+TARGET_ID=""
+OWNER=""
+LOOP_ID=""
+PROPOSAL_ID=""
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --type)
+      TYPE="${2:-}"
+      shift 2
+      ;;
+    --target-id)
+      TARGET_ID="${2:-}"
+      shift 2
+      ;;
+    --owner)
+      OWNER="${2:-}"
+      shift 2
+      ;;
+    --loop-id)
+      LOOP_ID="${2:-}"
+      shift 2
+      ;;
+    --proposal-id)
+      PROPOSAL_ID="${2:-}"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$TYPE" ]] || fail "--type is required"
+[[ -n "$TARGET_ID" ]] || fail "--target-id is required"
+[[ -n "$OWNER" ]] || fail "--owner is required"
+[[ -n "$LOOP_ID" ]] || fail "--loop-id is required"
+[[ -n "$PROPOSAL_ID" ]] || fail "--proposal-id is required"
+
+for file in "$CONTRACT" "$SITES_BINDING" "$WORKSTATIONS_BINDING" "$BUSINESS_BINDING" "$SERVICE_BINDING" "$AGENTS_BINDING" "$MCP_CONTRACT"; do
+  [[ -f "$file" ]] || fail "required binding missing: $file"
+done
+
+command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
+
+python3 - "$ROOT" "$CONTRACT" "$SITES_BINDING" "$WORKSTATIONS_BINDING" "$BUSINESS_BINDING" "$SERVICE_BINDING" "$AGENTS_BINDING" "$MCP_CONTRACT" "$TRANSACTION_DIR" "$TYPE" "$TARGET_ID" "$OWNER" "$LOOP_ID" "$PROPOSAL_ID" "$DRY_RUN" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import re
+import sys
+
+import yaml
+
+(
+    root_raw,
+    contract_raw,
+    sites_raw,
+    workstations_raw,
+    businesses_raw,
+    services_raw,
+    agents_raw,
+    mcp_raw,
+    transaction_dir_raw,
+    tx_type,
+    target_id,
+    owner,
+    loop_id,
+    proposal_id,
+    dry_run_raw,
+) = sys.argv[1:16]
+
+root = Path(root_raw).expanduser().resolve()
+contract_path = Path(contract_raw).expanduser().resolve()
+sites_path = Path(sites_raw).expanduser().resolve()
+workstations_path = Path(workstations_raw).expanduser().resolve()
+businesses_path = Path(businesses_raw).expanduser().resolve()
+services_path = Path(services_raw).expanduser().resolve()
+agents_path = Path(agents_raw).expanduser().resolve()
+mcp_path = Path(mcp_raw).expanduser().resolve()
+transaction_dir = Path(transaction_dir_raw).expanduser().resolve()
+dry_run = dry_run_raw == "1"
+
+
+def load_yaml(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+try:
+    contract = load_yaml(contract_path)
+    sites_doc = load_yaml(sites_path)
+    workstations_doc = load_yaml(workstations_path)
+    businesses_doc = load_yaml(businesses_path)
+    services_doc = load_yaml(services_path)
+    agents_doc = load_yaml(agents_path)
+    mcp_doc = load_yaml(mcp_path)
+except Exception as exc:
+    print(f"platform.extension.scaffold FAIL: unable to parse YAML inputs: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+transaction_types = [str(x).strip() for x in (contract.get("transaction_types") or []) if str(x).strip()]
+if tx_type not in transaction_types:
+    print(
+        f"platform.extension.scaffold FAIL: unsupported --type '{tx_type}' (allowed: {', '.join(transaction_types)})",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+if target_id.startswith("template-"):
+    target_exists = True
+    missing_msg = ""
+else:
+    target_exists = False
+    missing_msg = f"target '{target_id}' not found for type '{tx_type}'"
+
+    if tx_type == "site":
+        site_ids = {
+            str(row.get("id", "")).strip()
+            for row in (sites_doc.get("sites") or [])
+            if isinstance(row, dict) and str(row.get("id", "")).strip()
+        }
+        target_exists = target_id in site_ids
+    elif tx_type == "workstation":
+        workstation_ids = {
+            str(row.get("id", "")).strip()
+            for row in (workstations_doc.get("workstations") or [])
+            if isinstance(row, dict) and str(row.get("id", "")).strip()
+        }
+        target_exists = target_id in workstation_ids
+    elif tx_type == "business":
+        business_ids = {
+            str(row.get("id", "")).strip()
+            for row in (businesses_doc.get("businesses") or [])
+            if isinstance(row, dict) and str(row.get("id", "")).strip()
+        }
+        target_exists = target_id in business_ids
+    elif tx_type == "service":
+        service_ids = {
+            str(row.get("id", "")).strip()
+            for row in (services_doc.get("services") or [])
+            if isinstance(row, dict) and str(row.get("id", "")).strip()
+        }
+        target_exists = target_id in service_ids
+    elif tx_type == "agent":
+        agent_rows = [
+            row
+            for row in (agents_doc.get("agents") or [])
+            if isinstance(row, dict) and str(row.get("id", "")).strip() == target_id
+        ]
+        if agent_rows:
+            contract_rel = str(agent_rows[0].get("contract", "")).strip()
+            if contract_rel:
+                contract_target = (root / contract_rel).resolve()
+                target_exists = contract_target.is_file()
+                if not target_exists:
+                    missing_msg = f"agent contract path missing for '{target_id}': {contract_rel}"
+            else:
+                missing_msg = f"agent '{target_id}' missing contract path in agents.registry"
+    elif tx_type == "mcp":
+        mcp_ids: set[str] = set()
+        gateway = mcp_doc.get("gateway") if isinstance(mcp_doc.get("gateway"), dict) else {}
+        gateway_name = str(gateway.get("server_name", "")).strip()
+        if gateway_name:
+            mcp_ids.add(gateway_name)
+        required = mcp_doc.get("required_servers_by_surface") if isinstance(mcp_doc.get("required_servers_by_surface"), dict) else {}
+        optional = mcp_doc.get("optional_servers") if isinstance(mcp_doc.get("optional_servers"), dict) else {}
+        aliases = mcp_doc.get("aliases") if isinstance(mcp_doc.get("aliases"), dict) else {}
+        for source in (required, optional):
+            for servers in source.values():
+                if isinstance(servers, list):
+                    for server in servers:
+                        value = str(server).strip()
+                        if value:
+                            mcp_ids.add(value)
+        for alias_key, alias_values in aliases.items():
+            key = str(alias_key).strip()
+            if key:
+                mcp_ids.add(key)
+            if isinstance(alias_values, list):
+                for alias in alias_values:
+                    value = str(alias).strip()
+                    if value:
+                        mcp_ids.add(value)
+        target_exists = target_id in mcp_ids
+
+if not target_exists:
+    print(f"platform.extension.scaffold FAIL: {missing_msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+now = datetime.now(timezone.utc)
+date_stamp = now.strftime("%Y%m%d")
+time_stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+slug = re.sub(r"[^a-z0-9]+", "-", target_id.lower()).strip("-") or "target"
+transaction_id = f"TXN-{date_stamp}-{tx_type}-{slug}"
+
+bindings_touched = []
+refs = contract.get("type_binding_refs") if isinstance(contract.get("type_binding_refs"), dict) else {}
+entry = refs.get(tx_type) if isinstance(refs.get(tx_type), dict) else {}
+for ref in (entry.get("required_bindings") or []):
+    value = str(ref).strip()
+    if value:
+        bindings_touched.append(value)
+
+required_home_keys = [str(x).strip() for x in (contract.get("required_homes_keys") or []) if str(x).strip()]
+required_homes = {
+    key: {
+        "status": "pending",
+        "ref": "",
+    }
+    for key in required_home_keys
+}
+
+doc = {
+    "transaction_id": transaction_id,
+    "type": tx_type,
+    "target_id": target_id,
+    "owner": owner,
+    "status": "planned",
+    "created_at": time_stamp,
+    "updated_at": time_stamp,
+    "loop_id": loop_id,
+    "proposal_id": proposal_id,
+    "bindings_touched": bindings_touched,
+    "required_homes": required_homes,
+}
+
+payload = yaml.safe_dump(doc, sort_keys=False)
+
+if dry_run:
+    print(payload, end="")
+    raise SystemExit(0)
+
+transaction_dir.mkdir(parents=True, exist_ok=True)
+target_file = transaction_dir / f"{transaction_id}.yaml"
+if target_file.exists():
+    print(f"platform.extension.scaffold FAIL: transaction already exists: {target_file}", file=sys.stderr)
+    raise SystemExit(1)
+
+target_file.write_text(payload, encoding="utf-8")
+print("platform.extension.scaffold")
+print(f"status: wrote")
+print(f"file: {target_file}")
+print(f"transaction_id: {transaction_id}")
+PY

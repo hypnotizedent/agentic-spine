@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+CONTRACT="$ROOT/ops/bindings/platform.extension.transaction.contract.yaml"
+TRANSACTION_DIR="$ROOT/mailroom/state/extension-transactions"
+
+usage() {
+  cat <<'EOF'
+platform.extension.status
+
+Usage:
+  platform-extension-status
+  platform-extension-status -h|--help
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+if [[ $# -gt 0 ]]; then
+  echo "platform.extension.status FAIL: unknown argument: $1" >&2
+  usage >&2
+  exit 2
+fi
+
+[[ -f "$CONTRACT" ]] || {
+  echo "platform.extension.status FAIL: missing contract: $CONTRACT" >&2
+  exit 1
+}
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "platform.extension.status FAIL: missing required tool: python3" >&2
+  exit 1
+}
+
+python3 - "$CONTRACT" "$TRANSACTION_DIR" <<'PY'
+from __future__ import annotations
+
+from collections import Counter
+from pathlib import Path
+import sys
+
+import yaml
+
+contract_path = Path(sys.argv[1]).expanduser().resolve()
+transaction_dir = Path(sys.argv[2]).expanduser().resolve()
+
+
+def load_yaml(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+try:
+    contract = load_yaml(contract_path)
+except Exception as exc:
+    print(f"platform.extension.status FAIL: unable to parse contract: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+required_home_keys = [str(x).strip() for x in (contract.get("required_homes_keys") or []) if str(x).strip()]
+
+if not transaction_dir.is_dir():
+    print("platform.extension.status")
+    print("transactions_total: 0")
+    print("status_counts: {}")
+    print("type_counts: {}")
+    print("missing_homes: []")
+    raise SystemExit(0)
+
+transaction_files = sorted(transaction_dir.glob("TXN-*.yaml"))
+if not transaction_files:
+    print("platform.extension.status")
+    print("transactions_total: 0")
+    print("status_counts: {}")
+    print("type_counts: {}")
+    print("missing_homes: []")
+    raise SystemExit(0)
+
+status_counts: Counter[str] = Counter()
+type_counts: Counter[str] = Counter()
+missing_home_rows: list[tuple[str, int]] = []
+
+for path in transaction_files:
+    try:
+        doc = load_yaml(path)
+    except Exception as exc:
+        print(f"platform.extension.status FAIL: unable to parse transaction {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    status = str(doc.get("status", "unknown")).strip() or "unknown"
+    tx_type = str(doc.get("type", "unknown")).strip() or "unknown"
+    tx_id = str(doc.get("transaction_id", path.stem)).strip() or path.stem
+
+    status_counts[status] += 1
+    type_counts[tx_type] += 1
+
+    missing = 0
+    required_homes = doc.get("required_homes") if isinstance(doc.get("required_homes"), dict) else {}
+    for key in required_home_keys:
+        row = required_homes.get(key)
+        if not isinstance(row, dict):
+            missing += 1
+            continue
+        home_status = str(row.get("status", "")).strip().lower()
+        if home_status in {"", "pending"}:
+            missing += 1
+
+    missing_home_rows.append((tx_id, missing))
+
+print("platform.extension.status")
+print(f"transactions_total: {len(transaction_files)}")
+print("status_counts:")
+for key in sorted(status_counts.keys()):
+    print(f"  {key}: {status_counts[key]}")
+print("type_counts:")
+for key in sorted(type_counts.keys()):
+    print(f"  {key}: {type_counts[key]}")
+print("missing_homes:")
+for tx_id, missing in missing_home_rows:
+    print(f"  - {tx_id}: {missing}")
+PY
