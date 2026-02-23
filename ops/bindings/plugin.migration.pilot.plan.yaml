@@ -1,0 +1,72 @@
+version: "1.0"
+updated: "2026-02-23"
+owner: "@ronny"
+scope: w-plugin-migrate-pilot-plan
+wave_id: W-PLUGIN-MIGRATE
+inventory_ref: ops/bindings/plugin.migration.inventory.yaml
+
+objective: >-
+  Prove one safe plugin migration path (project-owned domain slice) before any
+  bulk movement, while preserving existing capability commands and verify gates.
+
+pilot_slice:
+  domain_id: n8n
+  plugin: n8n
+  classification: project-owned
+  reason: >-
+    n8n is externally owned (workbench), bounded to four spine plugin scripts,
+    and has a clear capability surface suitable for wrapper-pointer validation.
+  current_spine_paths:
+    - ops/plugins/n8n/bin/n8n-infra-health
+    - ops/plugins/n8n/bin/n8n-snapshot-cron
+    - ops/plugins/n8n/bin/n8n-snapshot-status
+    - ops/plugins/n8n/bin/n8n-workflows
+  target_project_repo: /Users/ronnyworks/code/workbench
+  target_project_path: agents/n8n/tools/src/
+
+constraints:
+  - no bulk plugin moves before pilot parity proof
+  - preserve existing capability command entrypoints in ops/capabilities.yaml
+  - keep verify.pack.run hygiene-weekly and verify.core.run behavior unchanged
+
+preflight_requirements:
+  - plugin inventory reviewed and accepted
+  - pointer contract drafted for pilot plugin path mapping
+  - parity gate spec approved (allocate next available gate ID at implementation time)
+
+planned_parity_gate:
+  gate_id: TBD
+  name: plugin-pointer-parity-lock
+  checks:
+    - every project-owned pilot capability resolves through a declared pointer mapping
+    - pointer target path exists in owning project repo
+    - wrapper command exits non-zero with clear error when pointer target missing
+    - capability command strings remain backward compatible
+
+pilot_execution_steps:
+  - step: P1
+    action: create plugin pointer mapping binding for n8n scripts
+    output: ops/bindings/plugin.pointer.map.yaml
+  - step: P2
+    action: convert spine n8n scripts into pointer wrappers to workbench target
+    output: ops/plugins/n8n/bin/* wrappers
+  - step: P3
+    action: run parity gate + hygiene verify pack + proposals status
+    output: receipts/sessions/RCAP-* verification receipts
+  - step: P4
+    action: publish pilot receipt with rollback notes
+    output: receipts/audits/migration/W_PLUGIN_MIGRATE_N8N_PILOT_<YYYYMMDD>.yaml
+
+success_criteria:
+  - parity gate PASS for n8n scope
+  - no regressions in existing n8n capability command contracts
+  - hygiene-weekly pack remains green
+
+rollback_plan:
+  - revert n8n wrapper scripts to prior inline implementations
+  - remove pilot pointer entries
+  - rerun verify.pack.run hygiene-weekly and proposals.status
+
+post_pilot_next_step:
+  - expand parity gate coverage to remaining project-owned plugins
+  - migrate bulk set only after two consecutive green pilot validations
