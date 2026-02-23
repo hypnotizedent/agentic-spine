@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
 DAYS=7
+DOMAIN_FILTER="all"
 JSON_MODE=0
 
 usage() {
@@ -11,7 +12,7 @@ usage() {
 receipts-summary
 
 Usage:
-  receipts-summary [--days <n>] [--index <path>] [--json]
+  receipts-summary [--days <n>] [--domain <name|none|all>] [--index <path>] [--json]
 
 Shows receipt totals, pass/fail split, and top capabilities for a window.
 USAGE
@@ -23,12 +24,19 @@ while [[ $# -gt 0 ]]; do
       DAYS="${2:-7}"
       shift 2
       ;;
+    --domain)
+      DOMAIN_FILTER="${2:-all}"
+      shift 2
+      ;;
     --index)
       INDEX_FILE="${2:-}"
       shift 2
       ;;
     --json)
       JSON_MODE=1
+      shift
+      ;;
+    --)
       shift
       ;;
     -h|--help)
@@ -48,7 +56,7 @@ if [[ ! -f "$INDEX_FILE" ]]; then
   "$ROOT/ops/plugins/evidence/bin/receipts-index-build" --index "$INDEX_FILE" --quiet
 fi
 
-python3 - "$INDEX_FILE" "$DAYS" "$JSON_MODE" <<'PY'
+python3 - "$INDEX_FILE" "$DAYS" "$DOMAIN_FILTER" "$JSON_MODE" <<'PY'
 import datetime as dt
 import json
 import subprocess
@@ -57,14 +65,15 @@ from collections import Counter
 
 index_file = sys.argv[1]
 days = int(sys.argv[2])
-json_mode = sys.argv[3] == "1"
+domain_filter = (sys.argv[3] or "all").strip().lower()
+json_mode = sys.argv[4] == "1"
 
 raw = subprocess.check_output(["yq", "-o=json", ".", index_file], text=True)
 data = json.loads(raw)
 rows = data.get("entries") or []
 cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
 
-selected = []
+window_selected = []
 for row in rows:
     ts = str(row.get("generated_at_utc") or "")
     try:
@@ -72,7 +81,14 @@ for row in rows:
     except Exception:
         continue
     if t >= cutoff:
-        selected.append(row)
+        window_selected.append(row)
+
+selected = []
+for row in window_selected:
+    domain = str(row.get("domain") or "none")
+    if domain_filter != "all" and domain.lower() != domain_filter:
+        continue
+    selected.append(row)
 
 total = len(selected)
 pass_count = sum(1 for r in selected if str(r.get("status", "")).lower() == "done")
@@ -85,6 +101,7 @@ if json_mode:
     print(json.dumps({
         "capability": "receipts.summary",
         "window_days": days,
+        "domain_filter": domain_filter,
         "total": total,
         "pass": pass_count,
         "fail": fail_count,
@@ -94,6 +111,7 @@ if json_mode:
 
 print("receipts.summary")
 print(f"window_days: {days}")
+print(f"domain_filter: {domain_filter}")
 print(f"total: {total}")
 print(f"pass: {pass_count}")
 print(f"fail: {fail_count}")

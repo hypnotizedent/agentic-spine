@@ -134,6 +134,9 @@ run_fast_startup() {
     local recommend_output=""
     local recommend_domains="core"
     local recommend_cmd="./bin/ops cap run verify.core.run"
+    local recommended_first_domain="core"
+    local receipt_memory_domain="none"
+    local receipt_memory_hint="./bin/ops cap run receipts.summary -- --domain none --days 7"
 
     status_brief="$("$ROOT/bin/ops" status --brief 2>&1 || true)"
 
@@ -152,6 +155,16 @@ run_fast_startup() {
       fi
     fi
 
+    recommended_first_domain="${recommend_domains%%,*}"
+    recommended_first_domain="${recommended_first_domain//[[:space:]]/}"
+    [[ -n "$recommended_first_domain" ]] || recommended_first_domain="core"
+    if [[ "$recommended_first_domain" == "core" || "$recommended_first_domain" == "none" ]]; then
+      receipt_memory_domain="none"
+    else
+      receipt_memory_domain="$recommended_first_domain"
+    fi
+    receipt_memory_hint="./bin/ops cap run receipts.summary -- --domain ${receipt_memory_domain} --days 7"
+
     if [[ "$json_mode" -eq 1 ]]; then
       jq -n \
         --arg capability "session.start" \
@@ -159,12 +172,14 @@ run_fast_startup() {
         --arg status_brief "$status_brief" \
         --arg recommended_domains "$recommend_domains" \
         --arg recommended_verify_command "$recommend_cmd" \
+        --arg receipt_memory_hint "$receipt_memory_hint" \
         '{
           capability: $capability,
           mode: $mode,
           status_brief: $status_brief,
           recommended_domains: ($recommended_domains | split(",") | map(select(length > 0))),
           recommended_verify_command: $recommended_verify_command,
+          receipt_memory_hint_command: $receipt_memory_hint,
           note: "fast lane complete; run recommended verify after domain edits"
         }'
     else
@@ -173,6 +188,7 @@ run_fast_startup() {
       echo "status: ${status_brief}"
       echo "recommended_domains: ${recommend_domains}"
       echo "post_work_verify: ${recommend_cmd}"
+      echo "receipt_memory_hint: ${receipt_memory_hint}"
       echo "note: fast lane complete; run recommended verify after domain edits"
     fi
     return 0

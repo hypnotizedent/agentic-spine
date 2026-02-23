@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
 STATUS_FILTER=""
 CAP_FILTER=""
+DOMAIN_FILTER="all"
 DAYS=30
 LIMIT=50
 JSON_MODE=0
@@ -14,7 +15,7 @@ usage() {
 receipts-search
 
 Usage:
-  receipts-search [--status <done|failed>] [--capability <prefix>] [--days <n>] [--limit <n>] [--index <path>] [--json]
+  receipts-search [--status <done|failed>] [--capability <prefix>] [--domain <name|none|all>] [--days <n>] [--limit <n>] [--index <path>] [--json]
 
 Search receipt index by status/capability/window.
 USAGE
@@ -28,6 +29,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --capability)
       CAP_FILTER="${2:-}"
+      shift 2
+      ;;
+    --domain)
+      DOMAIN_FILTER="${2:-all}"
       shift 2
       ;;
     --days)
@@ -44,6 +49,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --json)
       JSON_MODE=1
+      shift
+      ;;
+    --)
       shift
       ;;
     -h|--help)
@@ -64,16 +72,17 @@ if [[ ! -f "$INDEX_FILE" ]]; then
   "$ROOT/ops/plugins/evidence/bin/receipts-index-build" --index "$INDEX_FILE" --quiet
 fi
 
-python3 - "$INDEX_FILE" "$STATUS_FILTER" "$CAP_FILTER" "$DAYS" "$LIMIT" "$JSON_MODE" <<'PY'
+python3 - "$INDEX_FILE" "$STATUS_FILTER" "$CAP_FILTER" "$DOMAIN_FILTER" "$DAYS" "$LIMIT" "$JSON_MODE" <<'PY'
 import datetime as dt
 import json
 import subprocess
 import sys
 
-index_file, status_filter, cap_filter, days_s, limit_s, json_mode_s = sys.argv[1:7]
+index_file, status_filter, cap_filter, domain_filter, days_s, limit_s, json_mode_s = sys.argv[1:8]
 days = int(days_s)
 limit = int(limit_s)
 json_mode = json_mode_s == "1"
+domain_filter = (domain_filter or "all").strip().lower()
 
 raw = subprocess.check_output(["yq", "-o=json", ".", index_file], text=True)
 data = json.loads(raw)
@@ -89,6 +98,10 @@ for row in rows:
     except Exception:
         continue
     if t < cutoff:
+        continue
+
+    domain = str(row.get("domain") or "none")
+    if domain_filter != "all" and domain.lower() != domain_filter:
         continue
 
     status = str(row.get("status") or "")
@@ -107,6 +120,7 @@ if json_mode:
     print(json.dumps({
         "capability": "receipts.search",
         "window_days": days,
+        "domain_filter": domain_filter,
         "limit": limit,
         "count": len(selected),
         "results": selected,
@@ -115,6 +129,7 @@ if json_mode:
 
 print("receipts.search")
 print(f"window_days: {days}")
+print(f"domain_filter: {domain_filter}")
 print(f"limit: {limit}")
 print(f"count: {len(selected)}")
 for row in selected:

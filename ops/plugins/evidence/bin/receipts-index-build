@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
 RECEIPTS_ROOT="$ROOT/receipts/sessions"
+CAPABILITIES_FILE="$ROOT/ops/capabilities.yaml"
 FULL=0
 SINCE_ISO=""
 JSON_MODE=0
@@ -46,6 +47,9 @@ while [[ $# -gt 0 ]]; do
       QUIET=1
       shift
       ;;
+    --)
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -67,11 +71,9 @@ retention_days="$(yq -r '.retention_classes.session_receipts.retention_days // 3
 
 tmp_json="$(mktemp)"
 
-python3 - "$INDEX_FILE" "$RECEIPTS_ROOT" "$FULL" "$SINCE_ISO" "$retention_days" >"$tmp_json" <<'PY'
+python3 - "$INDEX_FILE" "$RECEIPTS_ROOT" "$FULL" "$SINCE_ISO" "$retention_days" "$CAPABILITIES_FILE" >"$tmp_json" <<'PY'
 import datetime as dt
-import glob
 import json
-import os
 import re
 import subprocess
 import sys
@@ -82,6 +84,7 @@ receipts_root = Path(sys.argv[2])
 full_mode = sys.argv[3] == "1"
 cli_since = (sys.argv[4] or "").strip()
 retention_days = int(sys.argv[5])
+capabilities_file = Path(sys.argv[6])
 
 now = dt.datetime.now(dt.timezone.utc)
 now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -110,6 +113,27 @@ def extract_field(md: str, field: str):
     return m.group(1).strip() if m else ""
 
 
+def capability_meta():
+    data = run_yq_json(capabilities_file) if capabilities_file.exists() else None
+    caps = data.get("capabilities") if isinstance(data, dict) else {}
+    meta = {}
+    if isinstance(caps, dict):
+        for cap_name, cap_row in caps.items():
+            if not isinstance(cap_row, dict):
+                continue
+            domain = str(cap_row.get("domain") or "none").strip() or "none"
+            plane = str(cap_row.get("plane") or "fabric").strip() or "fabric"
+            if domain.lower() == "null":
+                domain = "none"
+            if plane.lower() == "null":
+                plane = "fabric"
+            meta[str(cap_name)] = {"domain": domain, "plane": plane}
+    return meta
+
+
+cap_meta = capability_meta()
+
+
 existing = run_yq_json(index_file) if index_file.exists() else None
 existing_entries = {}
 watermark_iso = ""
@@ -120,7 +144,18 @@ if isinstance(existing, dict):
     for row in existing.get("entries") or []:
         rid = str(row.get("run_id") or "").strip()
         if rid:
-            existing_entries[rid] = row
+            row_copy = dict(row)
+            cap = str(row_copy.get("capability") or "")
+            meta = cap_meta.get(cap, {})
+            domain = str(row_copy.get("domain") or meta.get("domain") or "none").strip() or "none"
+            plane = str(row_copy.get("plane") or meta.get("plane") or "fabric").strip() or "fabric"
+            if domain.lower() == "null":
+                domain = "none"
+            if plane.lower() == "null":
+                plane = "fabric"
+            row_copy["domain"] = domain
+            row_copy["plane"] = plane
+            existing_entries[rid] = row_copy
 
 since_iso = cli_since
 if not since_iso and not full_mode:
@@ -165,6 +200,10 @@ if receipts_root.exists():
         if not generated:
             generated = now_iso
 
+        cap_info = cap_meta.get(capability, {})
+        domain = str(cap_info.get("domain") or "none").strip() or "none"
+        plane = str(cap_info.get("plane") or "fabric").strip() or "fabric"
+
         try:
             exit_code = int(exit_code_raw)
         except Exception:
@@ -178,6 +217,8 @@ if receipts_root.exists():
             "capability": capability,
             "status": status,
             "exit_code": exit_code,
+            "domain": domain,
+            "plane": plane,
             "generated_at_utc": generated,
             "receipt_path": rel_receipt,
             "output_path": rel_output,

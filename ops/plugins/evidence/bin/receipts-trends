@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
 DAYS=14
+DOMAIN_FILTER="all"
 JSON_MODE=0
 
 usage() {
@@ -11,7 +12,7 @@ usage() {
 receipts-trends
 
 Usage:
-  receipts-trends [--days <n>] [--index <path>] [--json]
+  receipts-trends [--days <n>] [--domain <name|none|all>] [--index <path>] [--json]
 
 Shows daily receipt volume and failure-rate trend.
 USAGE
@@ -23,12 +24,19 @@ while [[ $# -gt 0 ]]; do
       DAYS="${2:-14}"
       shift 2
       ;;
+    --domain)
+      DOMAIN_FILTER="${2:-all}"
+      shift 2
+      ;;
     --index)
       INDEX_FILE="${2:-}"
       shift 2
       ;;
     --json)
       JSON_MODE=1
+      shift
+      ;;
+    --)
       shift
       ;;
     -h|--help)
@@ -48,7 +56,7 @@ if [[ ! -f "$INDEX_FILE" ]]; then
   "$ROOT/ops/plugins/evidence/bin/receipts-index-build" --index "$INDEX_FILE" --quiet
 fi
 
-python3 - "$INDEX_FILE" "$DAYS" "$JSON_MODE" <<'PY'
+python3 - "$INDEX_FILE" "$DAYS" "$DOMAIN_FILTER" "$JSON_MODE" <<'PY'
 import datetime as dt
 import json
 import subprocess
@@ -56,7 +64,8 @@ import sys
 
 index_file = sys.argv[1]
 days = int(sys.argv[2])
-json_mode = sys.argv[3] == "1"
+domain_filter = (sys.argv[3] or "all").strip().lower()
+json_mode = sys.argv[4] == "1"
 
 raw = subprocess.check_output(["yq", "-o=json", ".", index_file], text=True)
 data = json.loads(raw)
@@ -77,6 +86,9 @@ for row in rows:
     day = str(t.date())
     if day not in series:
         continue
+    domain = str(row.get("domain") or "none")
+    if domain_filter != "all" and domain.lower() != domain_filter:
+        continue
     series[day]["total"] += 1
     if str(row.get("status", "")).lower() != "done":
         series[day]["fail"] += 1
@@ -89,11 +101,12 @@ for day in sorted(series.keys()):
     out.append({"date": day, "total": total, "fail": fail, "fail_rate_pct": rate})
 
 if json_mode:
-    print(json.dumps({"capability": "receipts.trends", "window_days": days, "daily": out}))
+    print(json.dumps({"capability": "receipts.trends", "window_days": days, "domain_filter": domain_filter, "daily": out}))
     raise SystemExit(0)
 
 print("receipts.trends")
 print(f"window_days: {days}")
+print(f"domain_filter: {domain_filter}")
 print("daily:")
 for row in out:
     print(f"  - {row['date']}: total={row['total']} fail={row['fail']} fail_rate_pct={row['fail_rate_pct']}")
