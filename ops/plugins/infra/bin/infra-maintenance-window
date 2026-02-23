@@ -1,111 +1,254 @@
 #!/usr/bin/env bash
-# infra-maintenance-window - Composite maintenance window orchestrator
-#
-# Chains precheck → shutdown → startup → recovery → verify for one or both
-# Proxmox sites (shop/home). Delegates to existing spine capabilities.
-#
-# Modes:
-#   --mode precheck  : read-only preflight for the selected site(s)
-#   --mode shutdown  : graceful VM shutdown on the selected site(s)
-#   --mode startup   : start VMs + recover Docker stacks on the selected site(s)
-#   --mode verify    : post-maintenance verification suite
-#   --mode full      : run all steps in sequence (precheck → shutdown → wait → startup → recovery → verify)
-#
-# Site:
-#   --site shop      : Dell R730XD (pve)
-#   --site home      : Beelink SER7 (proxmox-home)
-#   --site both      : shop first, then home (shutdown) / home first, then shop (startup)
-#
-# Safety:
-#   --dry-run        : (default) preview actions without executing
-#   --execute        : actually perform mutating operations
-#
-# Usage:
-#   infra-maintenance-window --site shop --mode full --dry-run
-#   infra-maintenance-window --site home --mode precheck
-#   infra-maintenance-window --site both --mode shutdown --execute
-#
+# infra-maintenance-window - Checkpointed multisite maintenance transaction orchestrator.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 OPS="$SPINE_ROOT/bin/ops"
-SEQ_BINDING="$SPINE_ROOT/ops/bindings/startup.sequencing.yaml"
+TX_CONTRACT="$SPINE_ROOT/ops/bindings/infra.maintenance.transaction.contract.yaml"
 
-# ── AOF policy integration ──────────────────────────────────────────────
-POLICY_LIB="$SPINE_ROOT/ops/lib/resolve-policy.sh"
-if [[ -f "$POLICY_LIB" ]]; then
-  # shellcheck source=ops/lib/resolve-policy.sh
-  source "$POLICY_LIB"
-  resolve_policy_knobs
-fi
-
-# ── Site → host-id mapping ──────────────────────────────────────────────
-SHOP_HOST_ID="pve"
-HOME_HOST_ID="proxmox-home"
-
-# ── Arg parsing ─────────────────────────────────────────────────────────
 MODE=""
 SITE=""
+WINDOW_ID=""
+RESUME_FROM=""
 EXECUTE=0
+ALLOW_OOB_LOSS=0
+ACK_TOKEN=""
+POWEROFF_SHOP=0
+POWEROFF_HOME=0
+
+usage() {
+  cat <<'USAGE'
+infra.maintenance.window
+
+Usage:
+  infra-maintenance-window --site <shop|home|both> --mode <precheck|shutdown|startup|recovery|verify|full>
+                          [--window-id <id>] [--resume-from <phase>] [--execute|--dry-run]
+                          [--allow-oob-loss] [--ack-token <token>] [--poweroff-shop] [--poweroff-home]
+USAGE
+}
+
+fail() {
+  echo "STOP (2): $*" >&2
+  exit 2
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --) shift ;;
-    --mode) MODE="${2:-}"; shift 2 ;;
-    --site) SITE="${2:-}"; shift 2 ;;
-    --execute) EXECUTE=1; shift ;;
-    --dry-run) EXECUTE=0; shift ;;
-    -h|--help) sed -n '2,27p' "$0" | sed 's/^# //'; exit 0 ;;
-    *) echo "STOP (2): unknown arg: $1"; exit 2 ;;
+    --)
+      shift
+      ;;
+    --mode)
+      MODE="${2:-}"
+      shift 2
+      ;;
+    --site)
+      SITE="${2:-}"
+      shift 2
+      ;;
+    --window-id)
+      WINDOW_ID="${2:-}"
+      shift 2
+      ;;
+    --resume-from)
+      RESUME_FROM="${2:-}"
+      shift 2
+      ;;
+    --execute)
+      EXECUTE=1
+      shift
+      ;;
+    --dry-run)
+      EXECUTE=0
+      shift
+      ;;
+    --allow-oob-loss)
+      ALLOW_OOB_LOSS=1
+      shift
+      ;;
+    --ack-token)
+      ACK_TOKEN="${2:-}"
+      shift 2
+      ;;
+    --poweroff-shop)
+      POWEROFF_SHOP=1
+      shift
+      ;;
+    --poweroff-home)
+      POWEROFF_HOME=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown arg: $1"
+      ;;
   esac
 done
 
-[[ -n "$MODE" ]] || { echo "STOP (2): --mode required (precheck|shutdown|startup|verify|full)"; exit 2; }
-[[ -n "$SITE" ]] || { echo "STOP (2): --site required (shop|home|both)"; exit 2; }
-case "$SITE" in shop|home|both) ;; *) echo "STOP (2): --site must be shop|home|both"; exit 2 ;; esac
-case "$MODE" in precheck|shutdown|startup|verify|full) ;; *) echo "STOP (2): --mode must be precheck|shutdown|startup|verify|full"; exit 2 ;; esac
+[[ -n "$SITE" ]] || fail "--site required (shop|home|both)"
+[[ -n "$MODE" ]] || fail "--mode required (precheck|shutdown|startup|recovery|verify|full)"
+case "$SITE" in
+  shop|home|both) ;;
+  *) fail "--site must be shop|home|both" ;;
+esac
+case "$MODE" in
+  precheck|shutdown|startup|recovery|verify|full) ;;
+  *) fail "--mode must be precheck|shutdown|startup|recovery|verify|full" ;;
+esac
 
-EXEC_FLAG="--dry-run"
-[[ "$EXECUTE" -eq 1 ]] && EXEC_FLAG="--execute"
+[[ -x "$OPS" ]] || fail "missing executable: $OPS"
+[[ -f "$TX_CONTRACT" ]] || fail "missing transaction contract: $TX_CONTRACT"
+command -v yq >/dev/null 2>&1 || fail "yq is required but not found"
+command -v python3 >/dev/null 2>&1 || fail "python3 is required but not found"
 
-# ── Banner ──────────────────────────────────────────────────────────────
-echo "infra.maintenance.window"
-echo "mode: $MODE"
-echo "site: $SITE"
-echo "execute: $( [[ "$EXECUTE" -eq 1 ]] && echo true || echo false )"
-echo "policy: ${RESOLVED_POLICY_PRESET:-balanced} (approval_default=${RESOLVED_APPROVAL_DEFAULT:-auto}, drift_gate_mode=${RESOLVED_DRIFT_GATE_MODE:-fail})"
-echo
+mapfile -t PHASE_ORDER < <(yq -r '.phase_order[]' "$TX_CONTRACT")
+[[ "${#PHASE_ORDER[@]}" -gt 0 ]] || fail "contract phase_order is empty"
 
-# ── Helpers ─────────────────────────────────────────────────────────────
-run_step() {
-  local step_name="$1"
-  shift
-  echo "═══ $step_name ═══"
-  echo "command: $*"
-  echo
-  if [[ "$EXECUTE" -eq 1 ]] || [[ "$step_name" == *"precheck"* ]] || [[ "$step_name" == *"verify"* ]]; then
-    set +e
-    "$@" 2>&1
-    local rc=$?
-    set -e
-    echo
-    if [[ $rc -ne 0 ]]; then
-      echo "WARN: $step_name exited with rc=$rc"
-      echo
-    fi
-    return $rc
-  else
-    echo "(dry-run: skipped)"
-    echo
-    return 0
-  fi
+ACK_TOKEN_REQUIRED="$(yq -r '.oob_policy.ack_token // ""' "$TX_CONTRACT")"
+[[ -n "$ACK_TOKEN_REQUIRED" ]] || fail "contract oob_policy.ack_token is missing"
+
+CHECKPOINT_TEMPLATE="$(yq -r '.checkpoint_path // ""' "$TX_CONTRACT")"
+[[ -n "$CHECKPOINT_TEMPLATE" ]] || fail "contract checkpoint_path is missing"
+[[ "$CHECKPOINT_TEMPLATE" == *"<window_id>"* ]] || fail "contract checkpoint_path must include <window_id>"
+
+mapfile -t REQUIRED_POSTCHECKS < <(yq -r '.required_postchecks[]' "$TX_CONTRACT")
+[[ "${#REQUIRED_POSTCHECKS[@]}" -gt 0 ]] || fail "contract required_postchecks is empty"
+
+site_host() {
+  local site_id="$1"
+  yq -r ".sites[] | select(.id==\"$site_id\") | .host_id" "$TX_CONTRACT"
 }
 
-# Build site list based on mode
-# Shutdown: shop before home (graceful order — stop dependents first)
-# Startup: home before shop (bring up HA first for monitoring)
-sites_for_shutdown() {
+SHOP_HOST_ID="$(site_host shop)"
+HOME_HOST_ID="$(site_host home)"
+[[ -n "$SHOP_HOST_ID" && "$SHOP_HOST_ID" != "null" ]] || fail "missing shop host mapping in contract"
+[[ -n "$HOME_HOST_ID" && "$HOME_HOST_ID" != "null" ]] || fail "missing home host mapping in contract"
+
+if [[ -z "$WINDOW_ID" ]]; then
+  WINDOW_ID="MW-$(date -u +%Y%m%dT%H%M%SZ)-$SITE"
+fi
+
+CHECKPOINT_PATH="$SPINE_ROOT/${CHECKPOINT_TEMPLATE//<window_id>/$WINDOW_ID}"
+mkdir -p "$(dirname "$CHECKPOINT_PATH")"
+
+phase_index() {
+  local needle="$1"
+  local i
+  for i in "${!PHASE_ORDER[@]}"; do
+    if [[ "${PHASE_ORDER[$i]}" == "$needle" ]]; then
+      echo "$i"
+      return 0
+    fi
+  done
+  echo "-1"
+  return 1
+}
+
+RESUME_INDEX=-1
+if [[ -n "$RESUME_FROM" ]]; then
+  RESUME_INDEX="$(phase_index "$RESUME_FROM")"
+  [[ "$RESUME_INDEX" != "-1" ]] || fail "--resume-from phase not in contract: $RESUME_FROM"
+fi
+
+checkpoint_write() {
+  local phase="$1"
+  local status="$2"
+  local note="$3"
+  local phase_order_csv
+  phase_order_csv="$(IFS=,; echo "${PHASE_ORDER[*]}")"
+
+  python3 - "$CHECKPOINT_PATH" "$WINDOW_ID" "$SITE" "$MODE" "$EXECUTE" "$RESUME_FROM" "$ALLOW_OOB_LOSS" "$ACK_TOKEN" "$ACK_TOKEN_REQUIRED" "$phase_order_csv" "$phase" "$status" "$note" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+import yaml
+
+(
+    checkpoint_raw,
+    window_id,
+    site,
+    mode,
+    execute_raw,
+    resume_from,
+    allow_oob_raw,
+    ack_token,
+    ack_required,
+    phase_order_csv,
+    phase,
+    status,
+    note,
+) = sys.argv[1:14]
+
+checkpoint = Path(checkpoint_raw).expanduser().resolve()
+phase_order = [x for x in phase_order_csv.split(",") if x]
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+if checkpoint.exists():
+    data = yaml.safe_load(checkpoint.read_text(encoding="utf-8")) or {}
+else:
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+
+data["window_id"] = window_id
+data["site"] = site
+data["mode"] = mode
+data["execute"] = execute_raw == "1"
+data["resume_from"] = resume_from or None
+data["updated_at"] = now
+data["phase_order"] = phase_order
+data["oob_ack"] = {
+    "allow_oob_loss": allow_oob_raw == "1",
+    "ack_token_provided": bool(ack_token),
+    "ack_token_matches_contract": bool(ack_token and ack_token == ack_required),
+}
+
+phases = data.get("phases")
+if not isinstance(phases, dict):
+    phases = {}
+for key in phase_order:
+    row = phases.get(key)
+    if not isinstance(row, dict):
+        phases[key] = {"status": "pending"}
+
+if phase:
+    row = phases.get(phase, {})
+    if not isinstance(row, dict):
+        row = {}
+    row["status"] = status
+    row["updated_at"] = now
+    if note:
+        row["note"] = note
+    phases[phase] = row
+    data["current_phase"] = phase
+
+data["phases"] = phases
+
+checkpoint.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+PY
+}
+
+run_cap() {
+  local phase="$1"
+  local label="$2"
+  shift 2
+  echo "═══ ${phase} :: ${label} ═══"
+  echo "command: $*"
+  echo
+  if ! "$@"; then
+    checkpoint_write "$phase" failed "$label failed"
+    return 1
+  fi
+  return 0
+}
+
+shutdown_sites() {
   case "$SITE" in
     shop) echo "shop" ;;
     home) echo "home" ;;
@@ -113,7 +256,7 @@ sites_for_shutdown() {
   esac
 }
 
-sites_for_startup() {
+startup_sites() {
   case "$SITE" in
     shop) echo "shop" ;;
     home) echo "home" ;;
@@ -121,132 +264,150 @@ sites_for_startup() {
   esac
 }
 
-host_id_for_site() {
+host_for_site() {
   case "$1" in
     shop) echo "$SHOP_HOST_ID" ;;
     home) echo "$HOME_HOST_ID" ;;
+    *) return 1 ;;
   esac
 }
 
-# ── Mode implementations ────────────────────────────────────────────────
-
-do_precheck() {
-  for site in $(sites_for_shutdown); do
-    local host_id
-    host_id="$(host_id_for_site "$site")"
-    run_step "precheck ($site)" \
-      "$OPS" cap run infra.proxmox.maintenance.precheck -- --mode precheck --host-id "$host_id" || true
+phase_precheck() {
+  local site_id host_id
+  for site_id in $(shutdown_sites); do
+    host_id="$(host_for_site "$site_id")"
+    run_cap precheck "$site_id precheck" \
+      "$OPS" cap run infra.proxmox.maintenance.precheck -- --mode precheck --host-id "$host_id"
   done
 }
 
-do_shutdown() {
-  for site in $(sites_for_shutdown); do
-    local host_id
-    host_id="$(host_id_for_site "$site")"
+phase_shutdown() {
+  local site_id host_id
+  local args
+  for site_id in $(shutdown_sites); do
+    host_id="$(host_for_site "$site_id")"
+    args=("$OPS" cap run infra.proxmox.maintenance.shutdown -- --mode shutdown --host-id "$host_id")
     if [[ "$EXECUTE" -eq 1 ]]; then
-      run_step "shutdown ($site)" \
-        "$OPS" cap run infra.proxmox.maintenance.shutdown -- --mode shutdown --host-id "$host_id" --execute || return 1
+      args+=(--execute)
     else
-      echo "═══ shutdown ($site) ═══"
-      echo "dry-run: would shut down all running guests on $host_id"
-      echo "command: $OPS cap run infra.proxmox.maintenance.shutdown -- --mode shutdown --host-id $host_id --execute"
-      echo
+      args+=(--dry-run)
     fi
+    if [[ "$ALLOW_OOB_LOSS" -eq 1 ]]; then
+      args+=(--allow-oob-loss)
+    fi
+    if [[ -n "$ACK_TOKEN" ]]; then
+      args+=(--ack-token "$ACK_TOKEN")
+    fi
+    if [[ "$EXECUTE" -eq 1 ]]; then
+      if [[ "$site_id" == "shop" && "$POWEROFF_SHOP" -eq 1 ]]; then
+        args+=(--poweroff)
+      fi
+      if [[ "$site_id" == "home" && "$POWEROFF_HOME" -eq 1 ]]; then
+        args+=(--poweroff)
+      fi
+    fi
+    run_cap shutdown "$site_id shutdown" "${args[@]}"
   done
 }
 
-do_startup() {
-  for site in $(sites_for_startup); do
-    local host_id
-    host_id="$(host_id_for_site "$site")"
+phase_startup() {
+  local site_id host_id
+  local args
+  for site_id in $(startup_sites); do
+    host_id="$(host_for_site "$site_id")"
+    args=("$OPS" cap run infra.proxmox.maintenance.startup -- --mode startup --host-id "$host_id")
     if [[ "$EXECUTE" -eq 1 ]]; then
-      run_step "startup ($site)" \
-        "$OPS" cap run infra.proxmox.maintenance.startup -- --mode startup --host-id "$host_id" --execute || return 1
+      args+=(--execute)
     else
-      echo "═══ startup ($site) ═══"
-      echo "dry-run: would start guests on $host_id in preferred order"
-      echo "command: $OPS cap run infra.proxmox.maintenance.startup -- --mode startup --host-id $host_id --execute"
-      echo
+      args+=(--dry-run)
     fi
+    run_cap startup "$site_id startup" "${args[@]}"
   done
+}
 
-  # Docker stack recovery (shop only — home has no Docker compose stacks)
-  if [[ "$SITE" == "shop" || "$SITE" == "both" ]]; then
-    if [[ "$EXECUTE" -eq 1 ]]; then
-      run_step "recovery (shop Docker stacks)" \
-        "$OPS" cap run infra.post_power.recovery.status || true
-      echo "note: run './bin/ops cap run infra.post_power.recovery' manually if stacks need recovery (requires manual approval)"
-    else
-      echo "═══ recovery (shop Docker stacks) ═══"
-      echo "dry-run: would check Docker stack recovery status"
-      echo "command: $OPS cap run infra.post_power.recovery.status"
-      echo "note: full recovery requires manual approval via infra.post_power.recovery"
-      echo
-    fi
+phase_recovery() {
+  if [[ "$SITE" == "home" ]]; then
+    echo "═══ recovery :: home site (no docker compose recovery required) ═══"
+    echo
+    return 0
+  fi
+
+  if [[ "$EXECUTE" -eq 1 ]]; then
+    run_cap recovery "shop recovery execute" "$OPS" cap run infra.post_power.recovery
+  else
+    run_cap recovery "shop recovery dry-run status" "$OPS" cap run infra.post_power.recovery.status
   fi
 }
 
-do_verify() {
-  echo "═══ verify ═══"
-  run_step "stability snapshot" \
-    "$OPS" cap run stability.control.snapshot || true
-  run_step "core verify" \
-    "$OPS" cap run verify.core.run || true
-  run_step "infra domain verify" \
-    "$OPS" cap run verify.domain.run infra --force || true
-  echo "verify: complete"
-  echo
+phase_verify() {
+  local cap
+  for cap in "${REQUIRED_POSTCHECKS[@]}"; do
+    run_cap verify "postcheck $cap" "$OPS" cap run "$cap"
+  done
 }
 
-# ── Mode dispatch ───────────────────────────────────────────────────────
+run_phase() {
+  local phase="$1"
+  checkpoint_write "$phase" running "started"
+  case "$phase" in
+    precheck) phase_precheck ;;
+    shutdown) phase_shutdown ;;
+    startup) phase_startup ;;
+    recovery) phase_recovery ;;
+    verify) phase_verify ;;
+    *) fail "unknown phase in dispatcher: $phase" ;;
+  esac
+  checkpoint_write "$phase" completed "completed"
+}
 
+echo "infra.maintenance.window"
+echo "window_id: $WINDOW_ID"
+echo "checkpoint_path: $CHECKPOINT_PATH"
+echo "mode: $MODE"
+echo "site: $SITE"
+echo "execute: $( [[ "$EXECUTE" -eq 1 ]] && echo true || echo false )"
+echo "resume_from: ${RESUME_FROM:-none}"
+echo "allow_oob_loss: $( [[ "$ALLOW_OOB_LOSS" -eq 1 ]] && echo true || echo false )"
+echo
+
+selected_phases=()
 case "$MODE" in
   precheck)
-    do_precheck
+    selected_phases=(precheck)
     ;;
   shutdown)
-    do_shutdown
+    selected_phases=(shutdown)
     ;;
   startup)
-    do_startup
+    selected_phases=(startup recovery verify)
+    ;;
+  recovery)
+    selected_phases=(recovery)
     ;;
   verify)
-    do_verify
+    selected_phases=(verify)
     ;;
   full)
-    do_precheck
-
-    echo "═══════════════════════════════════════════════════════════"
-    echo "Precheck complete. Next: shutdown."
-    echo "═══════════════════════════════════════════════════════════"
-    echo
-
-    do_shutdown
-    rc=$?
-    if [[ "$EXECUTE" -eq 1 && $rc -ne 0 ]]; then
-      echo "STOP: shutdown failed; aborting maintenance window"
-      exit 1
-    fi
-
-    if [[ "$EXECUTE" -eq 1 ]]; then
-      echo "═══════════════════════════════════════════════════════════"
-      echo "Shutdown complete. Perform physical maintenance now."
-      echo "When ready, run:"
-      echo "  ./bin/ops cap run infra.maintenance.window -- --site $SITE --mode startup --execute"
-      echo "  ./bin/ops cap run infra.maintenance.window -- --site $SITE --mode verify"
-      echo "═══════════════════════════════════════════════════════════"
-    else
-      echo "═══════════════════════════════════════════════════════════"
-      echo "dry-run: after shutdown, perform physical maintenance, then:"
-      echo "  startup → recovery → verify"
-      echo "═══════════════════════════════════════════════════════════"
-    fi
-    echo
-
-    do_startup
-
-    do_verify
+    selected_phases=(precheck shutdown)
     ;;
 esac
+
+for phase in "${selected_phases[@]}"; do
+  if [[ "$RESUME_INDEX" -ge 0 ]]; then
+    idx="$(phase_index "$phase")"
+    if [[ "$idx" -lt "$RESUME_INDEX" ]]; then
+      continue
+    fi
+  fi
+  run_phase "$phase"
+done
+
+if [[ "$MODE" == "full" ]]; then
+  echo
+  echo "maintenance_boundary: physical_maintenance_required"
+  echo "resume_command: ./bin/ops cap run infra.maintenance.window -- --site $SITE --mode startup --execute --window-id $WINDOW_ID"
+  echo "status: OK"
+  exit 0
+fi
 
 echo "status: OK"
