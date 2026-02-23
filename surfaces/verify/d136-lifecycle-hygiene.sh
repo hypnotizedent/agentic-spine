@@ -35,7 +35,8 @@ for field in version updated owner; do
 done
 
 for path in '.rules.gap_quick.default_type' '.rules.gap_quick.default_severity' \
-            '.rules.aging.thresholds.warning_days' '.rules.aging.thresholds.critical_days'; do
+            '.rules.aging.thresholds.warning_days' '.rules.aging.thresholds.critical_days' \
+            '.rules.linkage.parent_loop.required_for_statuses' '.rules.linkage.parent_loop.advisory_for_statuses'; do
   val="$(yq e "$path" "$RULES_FILE" 2>/dev/null || true)"
   if [[ -z "$val" || "$val" == "null" ]]; then
     echo "D136 FAIL: missing required field '$path' in lifecycle.rules.yaml" >&2
@@ -49,59 +50,147 @@ if [[ ! -f "$SCHEMA_FILE" ]]; then
   errors=$((errors + 1))
 fi
 
-# ── Check 3: no orphaned gaps (open gap linked to closed loop) ──
-if [[ -d "$SCOPES_DIR" ]]; then
-  # Build list of closed loop IDs
-  closed_loops=""
-  for scope_file in "$SCOPES_DIR"/*.scope.md; do
-    [[ -f "$scope_file" ]] || continue
-    local_status="$(awk '/^---$/{n++; next} n==1{print} n>=2{exit}' "$scope_file" \
-      | { grep "^status:" || true; } \
-      | sed 's/^status: *//' | tr -d '"' | head -1)"
-    if [[ "$local_status" == "closed" ]]; then
-      lid="$(awk '/^---$/{n++; next} n==1{print} n>=2{exit}' "$scope_file" \
-        | { grep "^loop_id:" || true; } \
-        | sed 's/^loop_id: *//' | tr -d '"' | head -1)"
-      [[ -n "$lid" ]] && closed_loops="${closed_loops}${lid}|"
-    fi
-  done
+# ── Check 3: parent_loop linkage hygiene (required open/accepted, advisory closed/fixed) ──
+if ! python3 - "$RULES_FILE" "$GAPS_FILE" "$SCOPES_DIR" <<'PY'
+from __future__ import annotations
 
-  if [[ -n "$closed_loops" ]]; then
-    # Remove trailing pipe
-    closed_loops="${closed_loops%|}"
-
-    orphan_count="$(python3 - "$GAPS_FILE" "$closed_loops" <<'PY'
 import json
 import subprocess
 import sys
+from pathlib import Path
 
-gaps_file = sys.argv[1]
-closed_pattern = sys.argv[2]
-closed_set = set(closed_pattern.split("|"))
+rules_file = Path(sys.argv[1])
+gaps_file = Path(sys.argv[2])
+scopes_dir = Path(sys.argv[3])
 
-try:
-    result = subprocess.run(
-        ["yq", "e", "-o=json", ".", gaps_file],
-        capture_output=True, text=True, check=True
+
+def yq_json(path: Path, expr: str):
+    try:
+        result = subprocess.run(
+            ["yq", "e", "-o=json", expr, str(path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        text = result.stdout.strip()
+        return json.loads(text) if text else None
+    except Exception:
+        return None
+
+
+required_statuses_raw = yq_json(
+    rules_file,
+    ".rules.linkage.parent_loop.required_for_statuses // [\"open\", \"accepted\"]",
+)
+advisory_statuses_raw = yq_json(
+    rules_file,
+    ".rules.linkage.parent_loop.advisory_for_statuses // [\"closed\", \"fixed\"]",
+)
+
+required_statuses = {
+    str(s).strip().lower()
+    for s in (required_statuses_raw or [])
+    if str(s).strip()
+}
+advisory_statuses = {
+    str(s).strip().lower()
+    for s in (advisory_statuses_raw or [])
+    if str(s).strip()
+}
+
+if not required_statuses:
+    required_statuses = {"open", "accepted"}
+if not advisory_statuses:
+    advisory_statuses = {"closed", "fixed"}
+
+gaps_doc = yq_json(gaps_file, ".") or {}
+gaps = gaps_doc.get("gaps", []) if isinstance(gaps_doc, dict) else []
+
+closed_loops: set[str] = set()
+if scopes_dir.is_dir():
+    for scope_file in sorted(scopes_dir.glob("*.scope.md")):
+        text = scope_file.read_text(encoding="utf-8", errors="ignore")
+        if not text.startswith("---"):
+            continue
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            continue
+        frontmatter = parts[1]
+        status = ""
+        loop_id = ""
+        for raw_line in frontmatter.splitlines():
+            line = raw_line.strip()
+            if line.startswith("status:"):
+                status = line.split(":", 1)[1].strip().strip('"').lower()
+            elif line.startswith("loop_id:"):
+                loop_id = line.split(":", 1)[1].strip().strip('"')
+        if status == "closed" and loop_id:
+            closed_loops.add(loop_id)
+
+missing_required: list[tuple[str, str]] = []
+orphan_open: list[tuple[str, str]] = []
+advisory_missing: list[tuple[str, str]] = []
+
+for gap in gaps:
+    if not isinstance(gap, dict):
+        continue
+    gap_id = str(gap.get("id", "<unknown>")).strip() or "<unknown>"
+    status = str(gap.get("status", "")).strip().lower()
+    parent_loop = gap.get("parent_loop")
+    parent_loop_str = "" if parent_loop is None else str(parent_loop).strip()
+
+    if status in required_statuses and not parent_loop_str:
+        missing_required.append((gap_id, status))
+
+    if status == "open" and parent_loop_str and parent_loop_str in closed_loops:
+        orphan_open.append((gap_id, parent_loop_str))
+
+    if status in advisory_statuses and not parent_loop_str:
+        advisory_missing.append((gap_id, status))
+
+max_print = 25
+if missing_required:
+    for gap_id, status in missing_required[:max_print]:
+        print(
+            f"D136 FAIL: {gap_id} status={status} requires parent_loop linkage",
+            file=sys.stderr,
+        )
+    if len(missing_required) > max_print:
+        print(
+            f"D136 FAIL: ... and {len(missing_required) - max_print} more required-linkage gaps",
+            file=sys.stderr,
+        )
+
+if orphan_open:
+    for gap_id, loop_id in orphan_open[:max_print]:
+        print(
+            f"D136 FAIL: {gap_id} status=open linked to closed loop {loop_id}",
+            file=sys.stderr,
+        )
+    if len(orphan_open) > max_print:
+        print(
+            f"D136 FAIL: ... and {len(orphan_open) - max_print} more open->closed loop link violations",
+            file=sys.stderr,
+        )
+
+if advisory_missing:
+    print(
+        "D136 WARN: "
+        f"{len(advisory_missing)} historical gap(s) in advisory statuses "
+        f"{sorted(advisory_statuses)} missing parent_loop linkage",
+        file=sys.stderr,
     )
-    data = json.loads(result.stdout)
-except Exception:
-    print("0")
-    sys.exit(0)
 
-gaps = data.get("gaps", [])
-orphans = sum(1 for g in gaps
-              if g.get("status") == "open"
-              and g.get("parent_loop", "") in closed_set)
-print(orphans)
+if missing_required or orphan_open:
+    print(
+        "D136 FAIL: parent_loop linkage violations "
+        f"(required_missing={len(missing_required)} open_orphans={len(orphan_open)})",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 PY
-)"
-
-    if [[ "$orphan_count" -gt 0 ]]; then
-      echo "D136 FAIL: $orphan_count orphaned gaps (open gap linked to closed loop)" >&2
-      errors=$((errors + 1))
-    fi
-  fi
+then
+  errors=$((errors + 1))
 fi
 
 # ── Check 4: aging advisory (warn, don't fail) ──
