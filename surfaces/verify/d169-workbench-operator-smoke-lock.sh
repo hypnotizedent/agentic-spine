@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Run workbench operator smoke suite directly and remediate failing checks before re-running verify pack.
 # Enforce deterministic operator smoke checks for workbench surfaces.
 set -euo pipefail
 

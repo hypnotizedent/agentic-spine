@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Restore proposals-preflight operator script and raycast wrapper with required dry-run forwarding checks.
 # Enforce workbench proposal preflight operator surface and dry-run forwarding.
 set -euo pipefail
 
