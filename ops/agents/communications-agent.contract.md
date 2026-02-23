@@ -57,6 +57,7 @@
 - `communications.alerts.queue.slo.status`
 - `communications.alerts.queue.escalate`
 - `communications.alerts.runtime.status`
+- `communications.alerts.incident.bundle.create`
 
 ## Watcher First Triage
 
@@ -135,6 +136,40 @@ Investigate backlog cause:
 - Review escalation task in mailroom for follow-up actions
 
 Escalation contract: `ops/bindings/communications.alerts.escalation.contract.yaml`
+
+## Incident Bundle Playbook
+
+One-command reproducible incident triage. Gathers all pipeline signals into a single artifact.
+
+### Quick triage (dry summary)
+
+```bash
+./bin/ops cap run communications.alerts.incident.bundle.create
+```
+
+### Machine-readable output
+
+```bash
+./bin/ops cap run communications.alerts.incident.bundle.create --json
+```
+
+### Write bundle artifact
+
+```bash
+./bin/ops cap run communications.alerts.incident.bundle.create --write
+```
+
+Bundle is written to `mailroom/outbox/alerts/communications/incidents/BUNDLE-<timestamp>.json`.
+
+The bundle contains:
+- Queue status (pending, sent, failed counts and ages)
+- SLO status with threshold evaluation and reasons
+- Runtime health rollup
+- Recent escalation artifacts (latest N)
+- Recent delivery log entries (latest N)
+- Recommended next commands based on current state
+
+Use `--limit <n>` to control how many recent artifacts are included (default: 20).
 
 ## Invocation
 

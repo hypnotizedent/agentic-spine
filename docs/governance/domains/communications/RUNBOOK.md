@@ -62,11 +62,32 @@ Live pilot requires:
 - `communications.delivery.anomaly.dispatch`
   - Manual-approval alert artifact + dispatch surface with cooldown control.
 
+## Incident Bundle
+
+One-command incident triage for the alert intent pipeline:
+
+```bash
+# Dry summary
+./bin/ops cap run communications.alerts.incident.bundle.create
+
+# JSON output
+./bin/ops cap run communications.alerts.incident.bundle.create --json
+
+# Write bundle artifact
+./bin/ops cap run communications.alerts.incident.bundle.create --write
+```
+
+Bundle artifact: `mailroom/outbox/alerts/communications/incidents/BUNDLE-<timestamp>.json`
+
 ## Drift Lock
 
 - `D147 communications-canonical-routing-lock`
   - Blocks direct Twilio/Resend provider calls outside canonical communications surface.
   - Scans active runtime/agent code surfaces across spine + workbench.
+- `D151 communications-boundary-lock`
+  - No Outlook as automated sender, no stale domains, stack-provider mode parity.
+- `D160 communications-queue-pipeline-lock`
+  - V1-V6 queue pipeline integrity: required capabilities, contracts, safety/approval invariants, alerting channel guard.
 
 ## Required Preconditions
 

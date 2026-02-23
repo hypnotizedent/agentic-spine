@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# briefing-section-comms-incident — Compact comms incident section for spine.briefing.
+#
+# Emits a JSON section payload. Non-blocking: if comms runtime status is
+# unavailable, returns status=unavailable rather than hard-failing.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+RUNTIME_STATUS_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-runtime-status"
+
+# ─── Gather runtime status ──────────────────────────────────────────────
+runtime_json='{}'
+data_ok=false
+
+if [[ -x "$RUNTIME_STATUS_BIN" ]]; then
+  set +e
+  runtime_json="$("$RUNTIME_STATUS_BIN" --json 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]] && echo "$runtime_json" | jq -e '.' >/dev/null 2>&1; then
+    data_ok=true
+  else
+    runtime_json='{}'
+  fi
+fi
+
+if [[ "$data_ok" != "true" ]]; then
+  jq -n \
+    --arg section "comms_incident" \
+    --arg status "unavailable" \
+    --arg summary "comms runtime status unavailable" \
+    '{section:$section,status:$status,summary:$summary,details:{}}'
+  exit 0
+fi
+
+# ─── Extract fields ──────────────────────────────────────────────────────
+slo_status="$(echo "$runtime_json" | jq -r '.data.slo_status // "unknown"')"
+pending="$(echo "$runtime_json" | jq -r '.data.queue_pending_count // 0')"
+oldest="$(echo "$runtime_json" | jq -r '.data.queue_oldest_age_seconds // 0')"
+escalation_recommended="$(echo "$runtime_json" | jq -r '.data.escalation_recommended // false')"
+last_esc="$(echo "$runtime_json" | jq -r '.data.last_escalation_at // "(none)"')"
+last_fp="$(echo "$runtime_json" | jq -r '.data.last_escalation_fingerprint // ""')"
+
+# ─── Determine section status ───────────────────────────────────────────
+section_status="ok"
+case "$slo_status" in
+  incident) section_status="degraded" ;;
+  warn)     section_status="degraded" ;;
+  ok)       section_status="ok" ;;
+  *)        section_status="ok" ;;
+esac
+
+# Only include section content when status is warn/incident
+if [[ "$slo_status" == "ok" || "$slo_status" == "unknown" ]]; then
+  summary="comms queue ok (pending=${pending})"
+  jq -n \
+    --arg section "comms_incident" \
+    --arg status "$section_status" \
+    --arg summary "$summary" \
+    --arg slo_status "$slo_status" \
+    --argjson pending "$pending" \
+    '{section:$section,status:$status,summary:$summary,details:{slo_status:$slo_status,pending:$pending}}'
+  exit 0
+fi
+
+# ─── Warn/Incident: include full context ─────────────────────────────────
+summary="COMMS INCIDENT: slo=${slo_status} pending=${pending} oldest=${oldest}s escalation_recommended=${escalation_recommended}"
+
+suggested_commands='[
+  "./bin/ops cap run communications.alerts.queue.status",
+  "./bin/ops cap run communications.alerts.queue.slo.status",
+  "echo \"yes\" | ./bin/ops cap run communications.alerts.queue.escalate --execute",
+  "echo \"yes\" | ./bin/ops cap run communications.alerts.flush --limit 10",
+  "./bin/ops cap run communications.delivery.log --limit 10"
+]'
+
+jq -n \
+  --arg section "comms_incident" \
+  --arg status "$section_status" \
+  --arg summary "$summary" \
+  --arg slo_status "$slo_status" \
+  --argjson pending "$pending" \
+  --argjson oldest "$oldest" \
+  --arg escalation_recommended "$escalation_recommended" \
+  --arg last_escalation "$last_esc" \
+  --arg last_fingerprint "$last_fp" \
+  --argjson suggested_commands "$suggested_commands" \
+  '{
+    section: $section,
+    status: $status,
+    summary: $summary,
+    details: {
+      slo_status: $slo_status,
+      pending: $pending,
+      oldest_age_seconds: $oldest,
+      escalation_recommended: $escalation_recommended,
+      last_escalation: $last_escalation,
+      last_fingerprint: $last_fingerprint,
+      suggested_commands: $suggested_commands
+    }
+  }'

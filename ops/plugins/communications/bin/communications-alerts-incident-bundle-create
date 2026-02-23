@@ -1,0 +1,342 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# communications-alerts-incident-bundle-create — One-command incident triage
+# bundle for the communications alert intent pipeline.
+#
+# Gathers data from:
+#   - communications.alerts.queue.status --json
+#   - communications.alerts.queue.slo.status --json
+#   - communications.alerts.runtime.status --json
+#   - Recent escalation artifacts (latest N)
+#   - Recent delivery log entries (latest N)
+#
+# Produces a single bundle artifact or dry summary.
+#
+# Safety: read-only
+# Approval: auto
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+QUEUE_STATUS_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-queue-status"
+SLO_STATUS_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-queue-slo-status"
+RUNTIME_STATUS_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-runtime-status"
+DELIVERY_LOG_BIN="$ROOT/ops/plugins/communications/bin/communications-delivery-log"
+ESCALATION_DIR="$ROOT/mailroom/outbox/alerts/communications/escalations"
+BUNDLE_DIR="$ROOT/mailroom/outbox/alerts/communications/incidents"
+
+JSON=0
+LIMIT=20
+WRITE=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-alerts-incident-bundle-create [--json] [--limit <n>] [--write]
+
+One-command incident triage bundle for the communications alert intent pipeline.
+
+Gathers queue status, SLO status, runtime status, recent escalations, and
+recent delivery log entries into a single summary.
+
+Options:
+  --json       Emit JSON output
+  --limit <n>  Limit recent artifacts (default: 20)
+  --write      Write bundle artifact to mailroom/outbox/alerts/communications/incidents/
+               (if omitted, dry summary only)
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    --limit) LIMIT="${2:-20}"; shift 2 ;;
+    --write) WRITE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "ERROR: --limit must be numeric" >&2; exit 2; }
+
+generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+now_file_ts="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# ─── Collect queue status ──────────────────────────────────────────────────
+queue_json='{}'
+queue_ok=false
+if [[ -x "$QUEUE_STATUS_BIN" ]]; then
+  set +e
+  queue_json="$("$QUEUE_STATUS_BIN" --json 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]] && echo "$queue_json" | jq -e '.' >/dev/null 2>&1; then
+    queue_ok=true
+  else
+    queue_json='{}'
+  fi
+fi
+
+pending_count=0
+oldest_age=0
+sent_count=0
+failed_count=0
+if [[ "$queue_ok" == "true" ]]; then
+  pending_count="$(echo "$queue_json" | jq -r '.data.pending_count // 0')"
+  oldest_age="$(echo "$queue_json" | jq -r '.data.oldest_pending_age_seconds // 0')"
+  sent_count="$(echo "$queue_json" | jq -r '.data.sent_count // 0')"
+  failed_count="$(echo "$queue_json" | jq -r '.data.failed_count // 0')"
+fi
+
+# ─── Collect SLO status ──────────────────────────────────────────────────
+slo_json='{}'
+slo_ok=false
+if [[ -x "$SLO_STATUS_BIN" ]]; then
+  set +e
+  slo_json="$("$SLO_STATUS_BIN" --json 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]] && echo "$slo_json" | jq -e '.' >/dev/null 2>&1; then
+    slo_ok=true
+  else
+    slo_json='{}'
+  fi
+fi
+
+slo_status="unknown"
+escalation_recommended="false"
+slo_reasons="[]"
+escalation_fingerprint=""
+if [[ "$slo_ok" == "true" ]]; then
+  slo_status="$(echo "$slo_json" | jq -r '.status // "unknown"')"
+  escalation_recommended="$(echo "$slo_json" | jq -r '.data.escalation_recommended // false')"
+  slo_reasons="$(echo "$slo_json" | jq -c '.data.reasons // []')"
+  escalation_fingerprint="$(echo "$slo_json" | jq -r '.data.escalation_fingerprint // ""')"
+fi
+
+# ─── Collect runtime status ──────────────────────────────────────────────
+runtime_json='{}'
+runtime_ok=false
+if [[ -x "$RUNTIME_STATUS_BIN" ]]; then
+  set +e
+  runtime_json="$("$RUNTIME_STATUS_BIN" --json 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]] && echo "$runtime_json" | jq -e '.' >/dev/null 2>&1; then
+    runtime_ok=true
+  else
+    runtime_json='{}'
+  fi
+fi
+
+runtime_status="unknown"
+pending_escalation_task_count=0
+last_escalation_at=""
+last_escalation_fingerprint=""
+delivery_recent_count=0
+delivery_recent_failed=0
+if [[ "$runtime_ok" == "true" ]]; then
+  runtime_status="$(echo "$runtime_json" | jq -r '.status // "unknown"')"
+  pending_escalation_task_count="$(echo "$runtime_json" | jq -r '.data.pending_escalation_task_count // 0')"
+  last_escalation_at="$(echo "$runtime_json" | jq -r '.data.last_escalation_at // ""')"
+  last_escalation_fingerprint="$(echo "$runtime_json" | jq -r '.data.last_escalation_fingerprint // ""')"
+  delivery_recent_count="$(echo "$runtime_json" | jq -r '.data.delivery_recent_count // 0')"
+  delivery_recent_failed="$(echo "$runtime_json" | jq -r '.data.delivery_recent_failed // 0')"
+fi
+
+# ─── Collect recent escalation artifacts ─────────────────────────────────
+recent_escalations="[]"
+if [[ -d "$ESCALATION_DIR" ]]; then
+  esc_count=0
+  while IFS= read -r esc_file; do
+    [[ -n "$esc_file" ]] || continue
+    [[ "$esc_file" == *".proposal-skeleton"* ]] && continue
+    [[ "$esc_count" -lt "$LIMIT" ]] || break
+
+    esc_id="$(yq -r '.escalation_id // ""' "$esc_file" 2>/dev/null || echo "")"
+    esc_fp="$(yq -r '.fingerprint // ""' "$esc_file" 2>/dev/null || echo "")"
+    esc_created="$(yq -r '.created_at // ""' "$esc_file" 2>/dev/null || echo "")"
+    esc_status="$(yq -r '.status // "unknown"' "$esc_file" 2>/dev/null || echo "unknown")"
+    esc_slo="$(yq -r '.slo_status // ""' "$esc_file" 2>/dev/null || echo "")"
+    esc_pending="$(yq -r '.pending_count // 0' "$esc_file" 2>/dev/null || echo "0")"
+
+    recent_escalations="$(echo "$recent_escalations" | jq -c \
+      --arg id "$esc_id" \
+      --arg fp "$esc_fp" \
+      --arg created "$esc_created" \
+      --arg status "$esc_status" \
+      --arg slo "$esc_slo" \
+      --arg pending "$esc_pending" \
+      '. + [{"escalation_id":$id,"fingerprint":$fp,"created_at":$created,"status":$status,"slo_status":$slo,"pending_count":($pending|tonumber)}]')"
+    esc_count=$((esc_count + 1))
+  done < <(find "$ESCALATION_DIR" -name 'ESCALATION-*.yaml' -type f 2>/dev/null | sort -r)
+fi
+
+# ─── Collect recent delivery log entries ─────────────────────────────────
+delivery_log_json='{}'
+delivery_records="[]"
+if [[ -x "$DELIVERY_LOG_BIN" ]]; then
+  set +e
+  delivery_log_json="$("$DELIVERY_LOG_BIN" --limit "$LIMIT" --json 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]] && echo "$delivery_log_json" | jq -e '.' >/dev/null 2>&1; then
+    delivery_records="$(echo "$delivery_log_json" | jq -c '.data.records // []')"
+  fi
+fi
+
+# ─── Derive incident status ─────────────────────────────────────────────
+# Use SLO status as primary signal; fall back to runtime status
+incident_status="$slo_status"
+if [[ "$incident_status" == "unknown" ]]; then
+  incident_status="$runtime_status"
+fi
+if [[ "$incident_status" == "unknown" ]]; then
+  incident_status="ok"
+fi
+
+# ─── Collect recent task IDs from escalation artifacts ───────────────────
+recent_task_ids="[]"
+if [[ -d "$ESCALATION_DIR" ]]; then
+  task_count=0
+  while IFS= read -r esc_file; do
+    [[ -n "$esc_file" ]] || continue
+    [[ "$esc_file" == *".proposal-skeleton"* ]] && continue
+    [[ "$task_count" -lt "$LIMIT" ]] || break
+    task_id="$(yq -r '.mailroom_task_id // ""' "$esc_file" 2>/dev/null || echo "")"
+    if [[ -n "$task_id" ]]; then
+      recent_task_ids="$(echo "$recent_task_ids" | jq -c --arg t "$task_id" '. + [$t]')"
+      task_count=$((task_count + 1))
+    fi
+  done < <(find "$ESCALATION_DIR" -name 'ESCALATION-*.yaml' -type f 2>/dev/null | sort -r)
+fi
+
+# ─── Build recommended next commands ────────────────────────────────────
+recommended_next="[]"
+recommended_next="$(echo "$recommended_next" | jq -c '. + ["./bin/ops cap run communications.alerts.queue.status"]')"
+recommended_next="$(echo "$recommended_next" | jq -c '. + ["./bin/ops cap run communications.alerts.queue.slo.status"]')"
+if [[ "$escalation_recommended" == "true" ]]; then
+  recommended_next="$(echo "$recommended_next" | jq -c '. + ["echo \"yes\" | ./bin/ops cap run communications.alerts.queue.escalate --execute"]')"
+fi
+recommended_next="$(echo "$recommended_next" | jq -c '. + ["echo \"yes\" | ./bin/ops cap run communications.alerts.flush --limit 10"]')"
+recommended_next="$(echo "$recommended_next" | jq -c '. + ["./bin/ops cap run communications.delivery.log --limit 10"]')"
+
+# ─── Construct bundle ───────────────────────────────────────────────────
+esc_rec_bool="false"
+[[ "$escalation_recommended" == "true" ]] && esc_rec_bool="true"
+
+bundle_json="$(jq -n \
+  --arg capability "communications.alerts.incident.bundle.create" \
+  --arg generated_at "$generated_at" \
+  --arg incident_status "$incident_status" \
+  --argjson pending_count "$pending_count" \
+  --argjson oldest_age "$oldest_age" \
+  --argjson sent_count "$sent_count" \
+  --argjson failed_count "$failed_count" \
+  --arg slo_status "$slo_status" \
+  --argjson escalation_recommended "$esc_rec_bool" \
+  --arg latest_escalation_fingerprint "${last_escalation_fingerprint:-${escalation_fingerprint:-}}" \
+  --arg last_escalation_at "$last_escalation_at" \
+  --argjson pending_escalation_task_count "$pending_escalation_task_count" \
+  --argjson delivery_recent_count "$delivery_recent_count" \
+  --argjson delivery_recent_failed "$delivery_recent_failed" \
+  --argjson slo_reasons "$slo_reasons" \
+  --argjson recent_escalations "$recent_escalations" \
+  --argjson recent_task_ids "$recent_task_ids" \
+  --argjson delivery_records "$delivery_records" \
+  --argjson recommended_next_commands "$recommended_next" \
+  --argjson wrote false \
+  '{
+    capability: $capability,
+    generated_at: $generated_at,
+    summary: {
+      incident_status: $incident_status,
+      pending_count: $pending_count,
+      oldest_age_seconds: $oldest_age,
+      sent_count: $sent_count,
+      failed_count: $failed_count,
+      slo_status: $slo_status,
+      escalation_recommended: $escalation_recommended,
+      latest_escalation_fingerprint: $latest_escalation_fingerprint,
+      last_escalation_at: $last_escalation_at,
+      pending_escalation_task_count: $pending_escalation_task_count,
+      delivery_recent_count: $delivery_recent_count,
+      delivery_recent_failed: $delivery_recent_failed,
+      slo_reasons: $slo_reasons,
+      recent_task_ids: $recent_task_ids,
+      recommended_next_commands: $recommended_next_commands
+    },
+    recent_escalations: $recent_escalations,
+    recent_delivery_records: $delivery_records,
+    wrote: $wrote
+  }')"
+
+# ─── Write bundle artifact ─────────────────────────────────────────────
+bundle_path=""
+if [[ "$WRITE" -eq 1 ]]; then
+  mkdir -p "$BUNDLE_DIR"
+  bundle_path="${BUNDLE_DIR}/BUNDLE-${now_file_ts}.json"
+  printf '%s\n' "$bundle_json" | jq --arg path "$bundle_path" '.bundle_path = $path | .wrote = true' > "$bundle_path"
+  bundle_json="$(jq --arg path "$bundle_path" '.bundle_path = $path | .wrote = true' <<< "$bundle_json")"
+fi
+
+# ─── Output ─────────────────────────────────────────────────────────────
+if [[ "$JSON" -eq 1 ]]; then
+  printf '%s\n' "$bundle_json"
+  exit 0
+fi
+
+# Human-readable summary
+echo "communications.alerts.incident.bundle.create"
+echo "generated_at: $generated_at"
+echo ""
+echo "=== Incident Summary ==="
+echo "incident_status: $incident_status"
+echo "pending_count: $pending_count"
+echo "oldest_age_seconds: $oldest_age"
+echo "sent_count: $sent_count"
+echo "failed_count: $failed_count"
+echo "slo_status: $slo_status"
+echo "escalation_recommended: $escalation_recommended"
+echo "latest_escalation_fingerprint: ${last_escalation_fingerprint:-${escalation_fingerprint:-(none)}}"
+echo "last_escalation_at: ${last_escalation_at:-(none)}"
+echo "pending_escalation_task_count: $pending_escalation_task_count"
+echo "delivery_recent_count: $delivery_recent_count"
+echo "delivery_recent_failed: $delivery_recent_failed"
+echo ""
+
+if [[ "$(echo "$slo_reasons" | jq 'length')" -gt 0 ]]; then
+  echo "SLO Reasons:"
+  echo "$slo_reasons" | jq -r '.[] | "  - " + .'
+  echo ""
+fi
+
+esc_count="$(echo "$recent_escalations" | jq 'length')"
+if [[ "$esc_count" -gt 0 ]]; then
+  echo "Recent Escalations (${esc_count}):"
+  echo "$recent_escalations" | jq -r '.[] | "  - " + .escalation_id + " (" + .status + ", " + .created_at + ")"'
+  echo ""
+fi
+
+task_count="$(echo "$recent_task_ids" | jq 'length')"
+if [[ "$task_count" -gt 0 ]]; then
+  echo "Recent Task IDs:"
+  echo "$recent_task_ids" | jq -r '.[] | "  - " + .'
+  echo ""
+fi
+
+echo "=== Recommended Next Commands ==="
+echo "$recommended_next" | jq -r '.[] | "  " + .'
+echo ""
+
+if [[ -n "$bundle_path" ]]; then
+  echo "Bundle written: $bundle_path"
+else
+  echo "(dry summary — pass --write to create bundle artifact)"
+fi
