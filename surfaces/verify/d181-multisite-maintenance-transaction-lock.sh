@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/infra.maintenance.transaction.contract.yaml"
+CAPABILITIES_FILE="$ROOT/ops/capabilities.yaml"
 MAINT_SCRIPT="$ROOT/ops/plugins/infra/bin/infra-proxmox-maintenance"
 WINDOW_SCRIPT="$ROOT/ops/plugins/infra/bin/infra-maintenance-window"
 
@@ -12,7 +13,7 @@ fail() {
   exit 1
 }
 
-for file in "$CONTRACT" "$MAINT_SCRIPT" "$WINDOW_SCRIPT"; do
+for file in "$CONTRACT" "$CAPABILITIES_FILE" "$MAINT_SCRIPT" "$WINDOW_SCRIPT"; do
   [[ -f "$file" ]] || fail "missing required file: $file"
 done
 [[ -x "$MAINT_SCRIPT" ]] || fail "maintenance script not executable: $MAINT_SCRIPT"
@@ -36,6 +37,19 @@ for cap in ssh.target.status docker.compose.status services.health.status verify
   yq -r '.required_postchecks[]' "$CONTRACT" | rg -qx "$cap" || fail "required_postchecks missing $cap"
 done
 
+for cap in \
+  infra.proxmox.maintenance.precheck \
+  infra.proxmox.maintenance.shutdown \
+  infra.proxmox.maintenance.startup \
+  infra.post_power.recovery.status \
+  infra.post_power.recovery \
+  infra.maintenance.window
+do
+  if yq -r ".capabilities.\"$cap\".requires[]?" "$CAPABILITIES_FILE" | rg -qx 'ssh.target.status'; then
+    fail "$cap must not declare global requires:ssh.target.status; runtime site-scoped preflight must be used"
+  fi
+done
+
 if rg -n 'preferred=\([[:space:]]*(210|204|100)' "$MAINT_SCRIPT" >/dev/null 2>&1; then
   fail "infra-proxmox-maintenance still contains hardcoded preferred VM arrays"
 fi
@@ -51,6 +65,18 @@ rg -q 'shop OOB guard failed; pass --allow-oob-loss' "$MAINT_SCRIPT" || fail "in
 for flag in --window-id --resume-from --allow-oob-loss --ack-token --poweroff-shop --poweroff-home; do
   rg -q -- "$flag" "$WINDOW_SCRIPT" || fail "infra-maintenance-window missing $flag"
 done
+
+rg -q '\$SSH_STATUS_SCRIPT" --id' "$WINDOW_SCRIPT" || fail "infra-maintenance-window must perform site-scoped ssh preflight via ssh-target-status --id"
+if rg -q 'cap run ssh\.target\.status' "$WINDOW_SCRIPT"; then
+  fail "infra-maintenance-window must not invoke global cap run ssh.target.status"
+fi
+
+rg -q 'site_targets_with_stacks' "$WINDOW_SCRIPT" || fail "infra-maintenance-window must derive site-scoped docker targets from startup.sequencing"
+rg -q '\$DOCKER_STATUS_SCRIPT" "\$target"' "$WINDOW_SCRIPT" || fail "infra-maintenance-window verify phase must run site-scoped docker-compose-status <target>"
+rg -q '\$SERVICES_STATUS_SCRIPT" --host "\$host_id"' "$WINDOW_SCRIPT" || fail "infra-maintenance-window verify phase must run site-scoped services-health-status --host <host>"
+if rg -q 'cap run docker\.compose\.status|cap run services\.health\.status' "$WINDOW_SCRIPT"; then
+  fail "infra-maintenance-window verify phase must not run global docker/services capability checks"
+fi
 
 rg -q 'checkpoint_path:' "$WINDOW_SCRIPT" || fail "infra-maintenance-window missing checkpoint output"
 rg -q 'checkpoint_write' "$WINDOW_SCRIPT" || fail "infra-maintenance-window missing checkpoint writer"
