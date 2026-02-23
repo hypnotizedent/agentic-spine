@@ -1,0 +1,464 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+CONTRACT="$ROOT/ops/bindings/weekly.execution.telemetry.contract.yaml"
+RECEIPTS_ROOT="$ROOT/receipts/sessions"
+OUT_DIR="$ROOT/receipts/audits/telemetry"
+CHECK_MODE=0
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+weekly-execution-telemetry
+
+Usage:
+  weekly-execution-telemetry [--contract <path>] [--receipts-root <path>] [--out-dir <path>] [--check] [--json]
+
+Modes:
+  default (no --check): compute current week telemetry and write weekly + rolling trend artifacts.
+  --check: validate latest telemetry/trend artifacts against contract freshness and signal requirements.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --contract)
+      CONTRACT="${2:-}"
+      shift 2
+      ;;
+    --receipts-root)
+      RECEIPTS_ROOT="${2:-}"
+      shift 2
+      ;;
+    --out-dir)
+      OUT_DIR="${2:-}"
+      shift 2
+      ;;
+    --check)
+      CHECK_MODE=1
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$CONTRACT" ]] || { echo "FAIL: missing contract: $CONTRACT" >&2; exit 1; }
+[[ -d "$RECEIPTS_ROOT" ]] || { echo "FAIL: missing receipts root: $RECEIPTS_ROOT" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: missing dependency python3" >&2; exit 1; }
+
+python3 - "$CONTRACT" "$RECEIPTS_ROOT" "$OUT_DIR" "$CHECK_MODE" "$JSON_MODE" <<'PY'
+from __future__ import annotations
+
+import datetime as dt
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+contract_path = Path(sys.argv[1])
+receipts_root = Path(sys.argv[2])
+out_dir = Path(sys.argv[3])
+check_mode = sys.argv[4] == "1"
+json_mode = sys.argv[5] == "1"
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"FAIL: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+try:
+    contract = load_yaml(contract_path)
+except Exception as exc:
+    fail(f"contract parse error: {exc}")
+
+if not isinstance(contract, dict):
+    fail("contract root must be a map")
+
+for key in ("reporting_window_days", "trend_window_weeks", "required_signals", "freshness_sla_hours"):
+    if key not in contract:
+        fail(f"contract missing required key: {key}")
+
+try:
+    reporting_window_days = int(contract.get("reporting_window_days"))
+    trend_window_weeks = int(contract.get("trend_window_weeks"))
+    freshness_sla_hours = float(contract.get("freshness_sla_hours"))
+except Exception:
+    fail("contract numeric fields must be valid numbers")
+
+if reporting_window_days <= 0:
+    fail("reporting_window_days must be > 0")
+if trend_window_weeks <= 0:
+    fail("trend_window_weeks must be > 0")
+if freshness_sla_hours <= 0:
+    fail("freshness_sla_hours must be > 0")
+
+required_signals = contract.get("required_signals")
+if not isinstance(required_signals, dict):
+    fail("required_signals must be a map")
+
+lock_gates = required_signals.get("lock_gates")
+if not isinstance(lock_gates, list) or not all(isinstance(g, str) and g for g in lock_gates):
+    fail("required_signals.lock_gates must be a non-empty list of gate IDs")
+
+signal_keys = [
+    "verify_hygiene_weekly_status",
+    "verify_core_status",
+    "proposals_pending_count",
+    "proposals_linkage_mismatch_count",
+    "instant_ring_budget_delta_seconds",
+]
+for key in signal_keys:
+    if key not in required_signals:
+        fail(f"required_signals missing key: {key}")
+
+
+def extract_table_value(receipt_text: str, field: str) -> str:
+    pattern = rf"\|\s*{re.escape(field)}\s*\|\s*`?([^`|]+)`?\s*\|"
+    match = re.search(pattern, receipt_text)
+    return match.group(1).strip() if match else ""
+
+
+def parse_generated_to_dt(value: str) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def list_receipt_dirs(capability: str) -> list[Path]:
+    return sorted(receipts_root.glob(f"RCAP-*__{capability}__*"), reverse=True)
+
+
+def load_receipt_dir(path: Path) -> dict[str, Any] | None:
+    receipt_md = path / "receipt.md"
+    output_txt = path / "output.txt"
+    if not receipt_md.exists() or not output_txt.exists():
+        return None
+
+    try:
+        receipt_text = receipt_md.read_text(encoding="utf-8", errors="replace")
+        output_text = output_txt.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    generated = extract_table_value(receipt_text, "Generated")
+    generated_dt = parse_generated_to_dt(generated)
+
+    return {
+        "dir": path,
+        "receipt_path": receipt_md,
+        "output_path": output_txt,
+        "status": extract_table_value(receipt_text, "Status").lower() or "unknown",
+        "exit_code": extract_table_value(receipt_text, "Exit Code"),
+        "generated": generated,
+        "generated_dt": generated_dt,
+        "output": output_text,
+    }
+
+
+def find_latest_receipt(capability: str, predicate=None) -> dict[str, Any] | None:
+    for candidate in list_receipt_dirs(capability):
+        loaded = load_receipt_dir(candidate)
+        if loaded is None:
+            continue
+        if predicate is None or predicate(loaded):
+            return loaded
+    return None
+
+
+def parse_gate_statuses(output_text: str, gates: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for gate in gates:
+        match = re.search(rf"^{re.escape(gate)}\s+(PASS|FAIL)\b", output_text, flags=re.MULTILINE)
+        if not match:
+            result[gate] = "missing"
+        else:
+            result[gate] = match.group(1).lower()
+    return result
+
+
+def parse_budget_delta_seconds(output_text: str) -> int | None:
+    match = re.search(r"budget:\s*ring=instant[^\n]*delta=([+-]?\d+)s", output_text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
+def parse_summary_fail_count(output_text: str) -> int | None:
+    match = re.search(r"summary:\s*pass=\d+\s+fail=(\d+)", output_text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
+def parse_proposals_metrics(output_text: str) -> tuple[int | None, int | None]:
+    pending_match = re.search(r"^\s*Pending:\s+(\d+)\s*$", output_text, flags=re.MULTILINE)
+    pending = int(pending_match.group(1)) if pending_match else None
+
+    mismatch_keys = [
+        r"Pending missing loop_id:\s+(\d+)",
+        r"Pending with missing scope:\s+(\d+)",
+        r"Pending targeting closed loop:\s+(\d+)",
+        r"Pending targeting unknown loop:\s+(\d+)",
+    ]
+    mismatch_total = 0
+    found_any = False
+    for pattern in mismatch_keys:
+        match = re.search(pattern, output_text)
+        if match:
+            mismatch_total += int(match.group(1))
+            found_any = True
+
+    return pending, (mismatch_total if found_any else None)
+
+
+def latest_weekly_file(directory: Path) -> Path | None:
+    files = sorted(directory.glob("WEEKLY_EXECUTION_TELEMETRY_*.yaml"))
+    return files[-1] if files else None
+
+
+now_utc = dt.datetime.now(dt.timezone.utc)
+telemetry_date = now_utc.strftime("%Y%m%d")
+telemetry_path = out_dir / f"WEEKLY_EXECUTION_TELEMETRY_{telemetry_date}.yaml"
+trends_path = out_dir / "WEEKLY_EXECUTION_TRENDS_12W.yaml"
+
+if check_mode:
+    latest_path = latest_weekly_file(out_dir)
+    if latest_path is None:
+        fail("no weekly telemetry file found")
+    if not trends_path.exists():
+        fail("missing trend file WEEKLY_EXECUTION_TRENDS_12W.yaml")
+
+    try:
+        latest = load_yaml(latest_path)
+    except Exception as exc:
+        fail(f"unable to parse latest telemetry file {latest_path.name}: {exc}")
+
+    try:
+        trends = load_yaml(trends_path)
+    except Exception as exc:
+        fail(f"unable to parse trends file: {exc}")
+
+    generated_raw = str(latest.get("generated_at", "")).strip()
+    generated_dt = parse_generated_to_dt(generated_raw)
+    if generated_dt is None:
+        fail("latest telemetry file missing/invalid generated_at")
+
+    age_hours = (now_utc - generated_dt).total_seconds() / 3600.0
+    if age_hours > freshness_sla_hours:
+        fail(
+            f"latest telemetry file stale: age_hours={age_hours:.2f} exceeds freshness_sla_hours={freshness_sla_hours}"
+        )
+
+    signals = latest.get("signals")
+    if not isinstance(signals, dict):
+        fail("latest telemetry file missing signals map")
+
+    lock_gate_status = signals.get("lock_gates")
+    if not isinstance(lock_gate_status, dict):
+        fail("latest telemetry file missing signals.lock_gates map")
+
+    missing_lock_gates = [gate for gate in lock_gates if gate not in lock_gate_status]
+    if missing_lock_gates:
+        fail("latest telemetry missing lock gate statuses: " + ", ".join(missing_lock_gates))
+
+    missing_signal_keys = [key for key in signal_keys if key not in signals]
+    if missing_signal_keys:
+        fail("latest telemetry missing required signals: " + ", ".join(missing_signal_keys))
+
+    entries = trends.get("entries")
+    if not isinstance(entries, list):
+        fail("trends file entries must be a list")
+    if len(entries) > trend_window_weeks:
+        fail(f"trends file has {len(entries)} entries; exceeds cap {trend_window_weeks}")
+
+    result = {
+        "capability": "weekly.execution.telemetry",
+        "mode": "check",
+        "latest_week_file": str(latest_path),
+        "freshness_age_hours": round(age_hours, 2),
+        "trend_entries": len(entries),
+        "status": "ok",
+    }
+
+    if json_mode:
+        print(json.dumps(result))
+    else:
+        print("weekly.execution.telemetry")
+        print("mode: check")
+        print(f"latest_week_file: {result['latest_week_file']}")
+        print(f"freshness_age_hours: {result['freshness_age_hours']}")
+        print(f"trend_entries: {result['trend_entries']}")
+        print("status: OK")
+
+    raise SystemExit(0)
+
+# Generation mode
+weekly_hygiene = find_latest_receipt(
+    "verify.pack.run",
+    predicate=lambda row: "target: hygiene-weekly" in row["output"],
+)
+verify_core = find_latest_receipt("verify.core.run")
+proposals_status = find_latest_receipt("proposals.status")
+
+if weekly_hygiene is None:
+    fail("unable to locate verify.pack.run receipt for hygiene-weekly")
+if verify_core is None:
+    fail("unable to locate verify.core.run receipt")
+if proposals_status is None:
+    fail("unable to locate proposals.status receipt")
+
+weekly_status = "pass"
+weekly_fail_count = parse_summary_fail_count(weekly_hygiene["output"])
+if weekly_hygiene["status"] != "done":
+    weekly_status = "failed"
+elif weekly_fail_count is not None and weekly_fail_count > 0:
+    weekly_status = "failed"
+
+core_status = "pass" if verify_core["status"] == "done" else "failed"
+core_budget_delta = parse_budget_delta_seconds(verify_core["output"])
+if core_budget_delta is None:
+    core_budget_delta = 0
+
+lock_gate_status = parse_gate_statuses(weekly_hygiene["output"], lock_gates)
+pending_count, linkage_mismatch_count = parse_proposals_metrics(proposals_status["output"])
+if pending_count is None:
+    pending_count = 0
+if linkage_mismatch_count is None:
+    linkage_mismatch_count = 0
+
+known_issues: list[str] = []
+if "D148 FAIL" in verify_core["output"]:
+    known_issues.append("D148 immich contract/server mismatch")
+if core_budget_delta > 0:
+    known_issues.append(f"instant ring budget breach (+{core_budget_delta}s)")
+
+week_start = (now_utc.date() - dt.timedelta(days=now_utc.weekday())).isoformat()
+week_end = (dt.date.fromisoformat(week_start) + dt.timedelta(days=6)).isoformat()
+iso_year, iso_week, _ = now_utc.isocalendar()
+week_label = f"{iso_year}-W{iso_week:02d}"
+
+signals = {
+    "lock_gates": lock_gate_status,
+    "verify_hygiene_weekly_status": weekly_status,
+    "verify_core_status": core_status,
+    "proposals_pending_count": int(pending_count),
+    "proposals_linkage_mismatch_count": int(linkage_mismatch_count),
+    "instant_ring_budget_delta_seconds": int(core_budget_delta),
+}
+
+telemetry_payload = {
+    "version": "1.0",
+    "generated_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "week": {
+        "label": week_label,
+        "start_date": week_start,
+        "end_date": week_end,
+        "reporting_window_days": reporting_window_days,
+    },
+    "signals": signals,
+    "known_baseline_issues_observed": known_issues,
+    "sources": {
+        "verify_hygiene_weekly_receipt": str(weekly_hygiene["receipt_path"]),
+        "verify_core_receipt": str(verify_core["receipt_path"]),
+        "proposals_status_receipt": str(proposals_status["receipt_path"]),
+    },
+}
+
+out_dir.mkdir(parents=True, exist_ok=True)
+with telemetry_path.open("w", encoding="utf-8") as handle:
+    yaml.safe_dump(telemetry_payload, handle, sort_keys=False)
+
+if trends_path.exists():
+    try:
+        trends_payload = load_yaml(trends_path)
+    except Exception:
+        trends_payload = {}
+else:
+    trends_payload = {}
+
+entries = trends_payload.get("entries") if isinstance(trends_payload.get("entries"), list) else []
+entries = [entry for entry in entries if isinstance(entry, dict) and str(entry.get("week_start", "")).strip() != week_start]
+
+entry = {
+    "week_label": week_label,
+    "week_start": week_start,
+    "week_end": week_end,
+    "telemetry_file": str(telemetry_path),
+    "lock_gates_passed": all(lock_gate_status.get(g) == "pass" for g in lock_gates),
+    "verify_hygiene_weekly_status": weekly_status,
+    "verify_core_status": core_status,
+    "proposals_pending_count": int(pending_count),
+    "proposals_linkage_mismatch_count": int(linkage_mismatch_count),
+    "instant_ring_budget_delta_seconds": int(core_budget_delta),
+    "known_baseline_issues_observed": known_issues,
+    "generated_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+entries.append(entry)
+entries.sort(key=lambda row: str(row.get("week_start", "")))
+if len(entries) > trend_window_weeks:
+    entries = entries[-trend_window_weeks:]
+
+trends_output = {
+    "version": "1.0",
+    "updated_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "trend_window_weeks": trend_window_weeks,
+    "entries": entries,
+}
+with trends_path.open("w", encoding="utf-8") as handle:
+    yaml.safe_dump(trends_output, handle, sort_keys=False)
+
+result = {
+    "capability": "weekly.execution.telemetry",
+    "mode": "generate",
+    "week_label": week_label,
+    "telemetry_week_file": str(telemetry_path),
+    "trends_file": str(trends_path),
+    "trend_entries_count": len(entries),
+    "known_baseline_issues_observed": known_issues,
+}
+
+if json_mode:
+    print(json.dumps(result))
+else:
+    print("weekly.execution.telemetry")
+    print("mode: generate")
+    print(f"week_label: {week_label}")
+    print(f"telemetry_week_file: {telemetry_path}")
+    print(f"trends_file: {trends_path}")
+    print(f"trend_entries_count: {len(entries)}")
+    if known_issues:
+        print("known_baseline_issues_observed:")
+        for issue in known_issues:
+            print(f"  - {issue}")
+    print("status: OK")
+PY
