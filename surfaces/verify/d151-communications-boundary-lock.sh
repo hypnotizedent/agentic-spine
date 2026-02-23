@@ -46,21 +46,36 @@ if [[ $mailbox_count -gt 0 && $outlook_stubs -eq $mailbox_count ]]; then
   fail_v "all $mailbox_count stack contract mailboxes stub to Outlook (@mintprints.com)"
 fi
 
-# --- Check 3: No mintprintshop.com in any contract sender field ---
+# --- Check 3: Lane C mailboxes must be @spine.ronny.works (not stale @spine.mintprints.co) ---
+while IFS= read -r addr; do
+  [[ -z "$addr" || "$addr" == "null" ]] && continue
+  if [[ "$addr" == *"@spine.mintprints.co" ]]; then
+    fail_v "stale Lane C domain in mailbox: $addr (should be @spine.ronny.works)"
+  fi
+done < <(yq e '.pilot.mailboxes[].address' "$STACK_CONTRACT" 2>/dev/null)
+
+if [[ "$send_test_sender" == *"@spine.mintprints.co" ]]; then
+  fail_v "send_test.default_sender uses stale Lane C domain: $send_test_sender"
+fi
+if [[ "$send_test_recipient" == *"@spine.mintprints.co" ]]; then
+  fail_v "send_test.default_recipient uses stale Lane C domain: $send_test_recipient"
+fi
+
+# --- Check 4: No mintprintshop.com in any contract sender field ---
 for contract in "$STACK_CONTRACT" "$PROVIDER_CONTRACT"; do
   if grep -q "mintprintshop\.com" "$contract" 2>/dev/null; then
     fail_v "stale domain mintprintshop.com found in $(basename "$contract")"
   fi
 done
 
-# --- Check 4: Provider contract must agree on Resend execution mode ---
+# --- Check 5: Provider contract must agree on Resend execution mode ---
 top_mode=$(yq e '.transactional.mode' "$PROVIDER_CONTRACT" 2>/dev/null)
 resend_mode=$(yq e '.providers.resend.execution_mode' "$PROVIDER_CONTRACT" 2>/dev/null)
 if [[ "$top_mode" != "$resend_mode" && "$top_mode" != "null" && "$resend_mode" != "null" ]]; then
   fail_v "provider contract mode mismatch: transactional.mode=$top_mode vs resend.execution_mode=$resend_mode"
 fi
 
-# --- Check 5: Stack contract transactional.mode must match provider ---
+# --- Check 6: Stack contract transactional.mode must match provider ---
 stack_tx_mode=$(yq e '.transactional.mode' "$STACK_CONTRACT" 2>/dev/null)
 if [[ "$stack_tx_mode" != "$top_mode" && "$stack_tx_mode" != "null" && "$top_mode" != "null" ]]; then
   fail_v "stack contract transactional.mode=$stack_tx_mode disagrees with provider contract mode=$top_mode"
@@ -72,4 +87,4 @@ if [[ $violations -gt 0 ]]; then
   exit 1
 fi
 
-echo "D151 PASS: communications boundary lock valid (checks=5, violations=0)"
+echo "D151 PASS: communications boundary lock valid (checks=6, violations=0)"

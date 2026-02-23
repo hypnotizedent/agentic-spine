@@ -77,7 +77,7 @@ domain_id: "${domain_id}"
 severity: "${status}"
 title: "${title}"
 summary: "${summary}"
-suggested_recipient: "alerts@spine.mintprints.co"
+suggested_recipient: "alerts@spine.ronny.works"
 source_alert: "$(basename "$alert_file")"
 flush_status: pending
 INTENT
