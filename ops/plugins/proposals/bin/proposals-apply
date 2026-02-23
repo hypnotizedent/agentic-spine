@@ -122,6 +122,29 @@ path_matches_contract_glob() {
   [[ "$path" == $glob ]]
 }
 
+companion_satisfied_by_existing() {
+  local companion_glob="$1"
+  # Non-wildcard: direct file check in main tree or proposal staging
+  if [[ "$companion_glob" != *"*"* && "$companion_glob" != *"?"* ]]; then
+    [[ -f "$SPINE_CODE/$companion_glob" || -f "$files_dir/$companion_glob" ]] && return 0
+    return 1
+  fi
+  # Wildcard: check parent directory for any matching files
+  local parent="${companion_glob%%\**}"
+  parent="${parent%/}"
+  [[ -n "$parent" ]] || parent="."
+  local match
+  if [[ -d "$SPINE_CODE/$parent" ]]; then
+    match="$(find "$SPINE_CODE/$parent" -type f 2>/dev/null | head -1)"
+    [[ -n "$match" ]] && return 0
+  fi
+  if [[ -d "$files_dir/$parent" ]]; then
+    match="$(find "$files_dir/$parent" -type f 2>/dev/null | head -1)"
+    [[ -n "$match" ]] && return 0
+  fi
+  return 1
+}
+
 admission_add_finding() {
   local severity="$1"
   local code="$2"
@@ -188,17 +211,49 @@ run_domain_routing_admission() {
 
   echo "Admission routed domains: ${recommended_domains[*]}"
 
-  local domain_output domain_rc domain
+  # Run domain verifies in parallel (max 4 concurrent)
+  local -a domain_pids=()
+  local -a domain_names=()
+  local -a domain_tmpfiles=()
+
   for domain in "${recommended_domains[@]}"; do
     [[ "$domain" == "core" ]] && continue
-    echo "Admission check: verify domain '$domain'"
-    set +e
-    domain_output="$($VERIFY_TOPOLOGY_BIN domain "$domain" --force 2>&1)"
-    domain_rc=$?
-    set -e
-    echo "$domain_output"
-    if (( domain_rc != 0 )); then
-      admission_add_finding "P0" "verify_domain" "verify.domain.run $domain --force failed"
+    local dtmp
+    dtmp="$(mktemp "/tmp/spine-domain-verify.XXXXXX")"
+    domain_tmpfiles+=("$dtmp")
+    domain_names+=("$domain")
+    (
+      set +e
+      "$VERIFY_TOPOLOGY_BIN" domain "$domain" --force 2>&1
+      printf '\nDOMAIN_VERIFY_EXIT=%d\n' $?
+    ) > "$dtmp" &
+    domain_pids+=($!)
+  done
+
+  # Wait for all domain verifies
+  local wpid
+  for wpid in "${domain_pids[@]:-}"; do
+    [[ -z "$wpid" ]] && continue
+    wait "$wpid" 2>/dev/null || true
+  done
+
+  # Aggregate results deterministically (ordered by domain)
+  local didx
+  for ((didx=0; didx<${#domain_names[@]}; didx++)); do
+    local dname="${domain_names[$didx]}"
+    local dtmpf="${domain_tmpfiles[$didx]}"
+    echo "Admission check: verify domain '$dname'"
+    if [[ -f "$dtmpf" ]]; then
+      local drc_line drc=0
+      drc_line="$(grep '^DOMAIN_VERIFY_EXIT=' "$dtmpf" | tail -1 || true)"
+      if [[ "$drc_line" =~ DOMAIN_VERIFY_EXIT=([0-9]+) ]]; then
+        drc="${BASH_REMATCH[1]}"
+      fi
+      grep -v '^DOMAIN_VERIFY_EXIT=' "$dtmpf" || true
+      rm -f "$dtmpf"
+      if (( drc != 0 )); then
+        admission_add_finding "P0" "verify_domain" "verify.domain.run $dname --force failed"
+      fi
     fi
   done
 }
@@ -542,6 +597,17 @@ run_vertical_integration_admission() {
       continue
     fi
 
+    # Check if companion is satisfied by files already on disk or in proposal staging
+    for companion_glob in "${companion_globs[@]}"; do
+      if companion_satisfied_by_existing "$companion_glob"; then
+        satisfied_by_change=1
+        break
+      fi
+    done
+    if (( satisfied_by_change == 1 )); then
+      continue
+    fi
+
     companion_status="$(yq e -r ".${override_root}.\"$companion_id\".${status_key} // \"\"" "$manifest" 2>/dev/null || true)"
     companion_reason="$(yq e -r ".${override_root}.\"$companion_id\".${reason_key} // \"\"" "$manifest" 2>/dev/null || true)"
 
@@ -829,10 +895,14 @@ run_admission_controller() {
 }
 
 DRY_RUN=0
-if [[ "${1:-}" == "--dry-run" ]]; then
-  DRY_RUN=1
-  shift
-fi
+BOOTSTRAP_LOOP_SCOPE=0
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --bootstrap-loop-scope) BOOTSTRAP_LOOP_SCOPE=1; shift ;;
+    *) echo "ERROR: Unknown flag: $1" >&2; usage; exit 2 ;;
+  esac
+done
 
 PROPOSAL_NAME="${1:-}"
 if [[ -z "$PROPOSAL_NAME" ]]; then
@@ -969,6 +1039,27 @@ done < "$changes_tmp"
 if [[ "$had_error" -ne 0 ]]; then
   echo "ERROR: Proposal manifest validation failed before admission checks." >&2
   exit 1
+fi
+
+# Phase B: inline loop scope bootstrap
+if [[ "$BOOTSTRAP_LOOP_SCOPE" -eq 1 && -n "${loop_id:-}" ]]; then
+  scope_rel="mailroom/state/loop-scopes/${loop_id}.scope.md"
+  if [[ ! -f "$SPINE_CODE/$scope_rel" ]]; then
+    echo "Bootstrap: creating loop scope for $loop_id"
+    mkdir -p "$files_dir/mailroom/state/loop-scopes"
+    cat > "$files_dir/$scope_rel" <<SCOPE
+---
+loop_id: $loop_id
+status: active
+created: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+---
+# $loop_id
+
+Bootstrapped by proposals-apply --bootstrap-loop-scope.
+SCOPE
+    # Inject synthetic create change before admission
+    printf 'create\t%s\tbootstrap loop scope\n' "$scope_rel" >> "$changes_tmp"
+  fi
 fi
 
 declare -a ADMISSION_FINDINGS=()

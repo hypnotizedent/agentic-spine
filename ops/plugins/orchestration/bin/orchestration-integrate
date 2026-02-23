@@ -3,7 +3,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
 source "$(orchestration_root)/ops/lib/git-lock.sh"
-acquire_git_lock
+acquire_git_lock orchestration
 
 usage() {
   cat <<'USAGE'
@@ -100,19 +100,23 @@ COMMIT_SHA="${COMMIT_SHA:-$validated_commit}"
 
 git -C "$repo" cat-file -e "$COMMIT_SHA^{commit}" >/dev/null 2>&1 || orchestration_fail "commit not found: $COMMIT_SHA"
 
-set +e
-mapfile -t prior_lanes < <(orchestration_sequence_before "$manifest" "$LANE")
-seq_rc=$?
-set -e
-if [[ "$seq_rc" -eq 2 ]]; then
-  orchestration_fail "lane not present in sequence: $LANE"
-fi
-for prior_lane in "${prior_lanes[@]:-}"; do
-  [[ -z "$prior_lane" ]] && continue
-  if ! orchestration_lane_is_integrated "$loop_dir" "$prior_lane"; then
-    orchestration_fail "out-of-sequence: integrate $prior_lane before $LANE"
+sequence_mode="$(yq e -r '.sequence_mode // "strict"' "$manifest")"
+
+if [[ "$sequence_mode" == "strict" ]]; then
+  set +e
+  mapfile -t prior_lanes < <(orchestration_sequence_before "$manifest" "$LANE")
+  seq_rc=$?
+  set -e
+  if [[ "$seq_rc" -eq 2 ]]; then
+    orchestration_fail "lane not present in sequence: $LANE"
   fi
-done
+  for prior_lane in "${prior_lanes[@]:-}"; do
+    [[ -z "$prior_lane" ]] && continue
+    if ! orchestration_lane_is_integrated "$loop_dir" "$prior_lane"; then
+      orchestration_fail "out-of-sequence: integrate $prior_lane before $LANE"
+    fi
+  done
+fi
 orchestration_assert_depends_on_integrated "$manifest" "$loop_dir" "$LANE"
 
 integration_file="$loop_dir/integrations/$LANE.yaml"

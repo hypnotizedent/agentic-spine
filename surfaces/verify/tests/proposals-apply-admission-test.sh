@@ -179,6 +179,28 @@ YAML
 status: active
 ---
 MD
+
+  cat > "$d/ops/bindings/vertical.integration.admission.contract.yaml" <<'YAML'
+version: "1.0"
+updated: "2026-02-17"
+admission:
+  enabled: true
+  required_change_matrix: []
+companion_surfaces: {}
+YAML
+
+  cat > "$d/ops/bindings/change.intake.policy.yaml" <<'YAML'
+version: "1.0"
+decision_rules:
+  proposal_required_if:
+    any_true:
+      - "changed_file_count >= 3"
+      - "changed_surface_count >= 2"
+      - "involves_cross_repo"
+      - "involves_multi_agent"
+      - "introduces_new_binding"
+      - "risk_severity in [high, critical]"
+YAML
 }
 
 write_manifest_and_files() {
@@ -360,5 +382,121 @@ if grep -q "non-canonical lifecycle value ''" "$out5"; then
   fail "CP-BINDING produced false empty lifecycle finding"
 fi
 pass "binding without status/lifecycle avoids false P1 findings"
+
+# Test 6: companion file on disk satisfies vertical integration (proposal-aware admission).
+tmp6="$(mktemp -d)"
+setup_fixture "$tmp6"
+# Override contract to have a trigger + companion requirement
+cat > "$tmp6/ops/bindings/vertical.integration.admission.contract.yaml" <<'YAML'
+version: "1.0"
+updated: "2026-02-17"
+admission:
+  enabled: true
+  manifest_requirements:
+    loop_id:
+      required: true
+      severity: P0
+    changes_non_empty:
+      required: true
+      severity: P0
+    not_required_override:
+      root_key: "vertical_integration.surface_overrides"
+      status_key: "status"
+      reason_key: "reason"
+      status_value: "not-required"
+      reason_required: true
+      severity_when_invalid: P1
+  required_change_matrix:
+    - id: test_trigger
+      touch_any:
+        - "docs/triggered/*"
+      required_companions:
+        - test_companion
+companion_surfaces:
+  test_companion:
+    severity: P1
+    description: "test companion surface"
+    satisfy_any_path:
+      - "docs/companion.md"
+YAML
+# Create the companion file on disk (not in proposal changes)
+mkdir -p "$tmp6/docs"
+echo "companion exists" > "$tmp6/docs/companion.md"
+# Create a proposal that touches the trigger path
+write_manifest_and_files "$tmp6" CP-COMPANION create docs/triggered/feature.md
+echo "feature" > "$tmp6/mailroom/outbox/proposals/CP-COMPANION/files/docs/triggered/feature.md"
+init_fixture_repo "$tmp6"
+out6="$(mktemp)"
+if ! run_with_env "$tmp6" CP-COMPANION "$out6" env; then
+  cat "$out6" >&2
+  fail "CP-COMPANION should pass when companion exists on disk"
+fi
+if grep -q 'vertical_test_companion' "$out6"; then
+  cat "$out6" >&2
+  fail "CP-COMPANION should not fire vertical companion finding when file exists on disk"
+fi
+pass "proposal-aware: companion on disk satisfies vertical integration"
+
+# Test 7: companion file in proposal staging satisfies vertical integration.
+tmp7="$(mktemp -d)"
+setup_fixture "$tmp7"
+cat > "$tmp7/ops/bindings/vertical.integration.admission.contract.yaml" <<'YAML'
+version: "1.0"
+updated: "2026-02-17"
+admission:
+  enabled: true
+  manifest_requirements:
+    loop_id:
+      required: true
+      severity: P0
+    changes_non_empty:
+      required: true
+      severity: P0
+    not_required_override:
+      root_key: "vertical_integration.surface_overrides"
+      status_key: "status"
+      reason_key: "reason"
+      status_value: "not-required"
+      reason_required: true
+      severity_when_invalid: P1
+  required_change_matrix:
+    - id: test_trigger
+      touch_any:
+        - "docs/triggered/*"
+      required_companions:
+        - test_companion
+companion_surfaces:
+  test_companion:
+    severity: P1
+    description: "test companion surface"
+    satisfy_any_path:
+      - "docs/companion.md"
+YAML
+# Companion is NOT on disk, but IS in proposal staging
+mkdir -p "$tmp7/mailroom/outbox/proposals/CP-STAGED/files/docs/triggered"
+mkdir -p "$tmp7/mailroom/outbox/proposals/CP-STAGED/files/docs"
+echo "staged companion" > "$tmp7/mailroom/outbox/proposals/CP-STAGED/files/docs/companion.md"
+echo "feature" > "$tmp7/mailroom/outbox/proposals/CP-STAGED/files/docs/triggered/feature.md"
+cat > "$tmp7/mailroom/outbox/proposals/CP-STAGED/manifest.yaml" <<'YAML'
+proposal: CP-STAGED
+agent: "test@fixture"
+created: 2026-02-17T00:00:00Z
+loop_id: LOOP-TEST-ADMISSION-20260217
+changes:
+  - action: create
+    path: docs/triggered/feature.md
+    reason: "fixture"
+YAML
+init_fixture_repo "$tmp7"
+out7="$(mktemp)"
+if ! run_with_env "$tmp7" CP-STAGED "$out7" env; then
+  cat "$out7" >&2
+  fail "CP-STAGED should pass when companion exists in proposal staging"
+fi
+if grep -q 'vertical_test_companion' "$out7"; then
+  cat "$out7" >&2
+  fail "CP-STAGED should not fire vertical companion finding when file in staging"
+fi
+pass "proposal-aware: companion in staging satisfies vertical integration"
 
 echo "All admission tests passed"

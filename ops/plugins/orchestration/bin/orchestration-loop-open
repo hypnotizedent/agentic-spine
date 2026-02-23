@@ -3,7 +3,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
 source "$(orchestration_root)/ops/lib/git-lock.sh"
-acquire_git_lock
+acquire_git_lock orchestration
 
 usage() {
   cat <<'USAGE'
@@ -32,6 +32,7 @@ REPO_PATH=""
 BASE_SHA=""
 LANES_CSV=""
 SEQUENCE_CSV=""
+SEQUENCE_MODE="strict"
 FORCE=0
 
 allow_items=()
@@ -48,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --base-sha) BASE_SHA="${2:-}"; shift 2 ;;
     --lanes) LANES_CSV="${2:-}"; shift 2 ;;
     --sequence) SEQUENCE_CSV="${2:-}"; shift 2 ;;
+    --sequence-mode) SEQUENCE_MODE="${2:-strict}"; shift 2 ;;
     --allow) allow_items+=("${2:-}"); shift 2 ;;
     --forbid) forbid_items+=("${2:-}"); shift 2 ;;
     --check) check_items+=("${2:-}"); shift 2 ;;
@@ -62,6 +64,11 @@ done
 
 orchestration_assert_id "$LOOP_ID" "loop id"
 [[ "$LOOP_ID" =~ ^LOOP- ]] || orchestration_fail "loop id must start with LOOP-"
+
+case "$SEQUENCE_MODE" in
+  strict|depends_only) ;;
+  *) orchestration_fail "--sequence-mode must be 'strict' or 'depends_only'" ;;
+esac
 
 orchestration_need yq
 orchestration_need git
@@ -98,6 +105,7 @@ allow: {}
 forbid: []
 checks: {}
 sequence: []
+sequence_mode: $SEQUENCE_MODE
 created_at: $created_at
 updated_at: $created_at
 YAML

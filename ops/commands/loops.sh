@@ -239,7 +239,7 @@ close_loop() {
         exit 1
     fi
 
-    acquire_git_lock || exit 1
+    acquire_git_lock gaps || exit 1
     tmp_file="$(mktemp "${scope_file}.tmp.XXXXXX")"
     trap 'rm -f "$tmp_file" 2>/dev/null || true; release_git_lock' EXIT INT TERM
 
