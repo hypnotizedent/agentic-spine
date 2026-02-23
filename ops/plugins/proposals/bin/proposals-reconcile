@@ -1,121 +1,407 @@
 #!/usr/bin/env bash
-# proposals-reconcile: Metadata/schema normalization report
-# Checks all active proposals against lifecycle contract
+# proposals-reconcile: proposal lifecycle/linkage report and normalization helper
 set -euo pipefail
 
 SP="${SPINE_CODE:-.}"
 PROPOSALS_DIR="$SP/mailroom/outbox/proposals"
-LIFECYCLE="$SP/ops/bindings/proposals.lifecycle.yaml"
+LOOP_SCOPES_DIR="$SP/mailroom/state/loop-scopes"
 
-echo "═══════════════════════════════════════════════════════════════════════════"
-echo "Proposal Reconciliation Report"
-echo "═══════════════════════════════════════════════════════════════════════════"
-echo ""
+CHECK_LINKAGE=0
+NORMALIZE_STATUS=0
+RECEIPT_OUT=""
 
-issues=0
-checked=0
+usage() {
+  cat <<'USAGE'
+Usage: proposals-reconcile [--check-linkage] [--normalize-status] [--receipt-out <path>]
 
-check_field() {
-  local manifest="$1"
-  local field="$2"
-  local alt_field="${3:-}"
+Modes:
+  --check-linkage    Report proposal lifecycle/linkage drift (non-mutating).
+  --normalize-status Apply lifecycle status normalization rules (metadata only).
 
-  if grep -q "^${field}:" "$manifest"; then
-    return 0
-  fi
-  if [[ -n "$alt_field" ]] && grep -q "^${alt_field}:" "$manifest"; then
-    return 0
-  fi
-  return 1
+Notes:
+  - If no mode flag is provided, defaults to --check-linkage.
+  - --receipt-out writes a YAML execution record (used for hygiene wave receipts).
+USAGE
 }
 
-for dir in "$PROPOSALS_DIR"/CP-*; do
-  [[ -d "$dir" ]] || continue
-  bname=$(basename "$dir")
-  manifest="$dir/manifest.yaml"
-  checked=$((checked + 1))
-
-  dir_issues=""
-
-  # Check manifest exists
-  if [[ ! -f "$manifest" ]]; then
-    dir_issues="${dir_issues}  - MISSING: manifest.yaml\n"
-    issues=$((issues + 1))
-    echo "[$bname]"
-    printf "$dir_issues"
-    continue
-  fi
-
-  # Determine status
-  status="pending"
-  if [[ -f "$dir/.applied" ]]; then
-    status="applied"
-  elif grep -q '^status:' "$manifest"; then
-    status=$(grep -m1 '^status:' "$manifest" | sed 's/^status: *//' | tr -d '"' | tr -d "'")
-  fi
-
-  # Check universal required fields
-  if ! check_field "$manifest" "proposal" "proposal_id"; then
-    dir_issues="${dir_issues}  - MISSING: proposal (identifier)\n"
-    issues=$((issues + 1))
-  fi
-  if ! check_field "$manifest" "agent" "author"; then
-    dir_issues="${dir_issues}  - MISSING: agent\n"
-    issues=$((issues + 1))
-  fi
-  if ! check_field "$manifest" "created"; then
-    dir_issues="${dir_issues}  - MISSING: created\n"
-    issues=$((issues + 1))
-  fi
-
-  # Check status-specific fields
-  case "$status" in
-    pending)
-      if ! check_field "$manifest" "changes"; then
-        dir_issues="${dir_issues}  - MISSING: changes (required for pending)\n"
-        issues=$((issues + 1))
-      fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check-linkage)
+      CHECK_LINKAGE=1
+      shift
       ;;
-    superseded)
-      if ! check_field "$manifest" "superseded_at"; then
-        dir_issues="${dir_issues}  - MISSING: superseded_at\n"
-        issues=$((issues + 1))
-      fi
-      if ! check_field "$manifest" "superseded_reason"; then
-        dir_issues="${dir_issues}  - MISSING: superseded_reason\n"
-        issues=$((issues + 1))
-      fi
+    --normalize-status)
+      NORMALIZE_STATUS=1
+      shift
       ;;
-    draft_hold)
-      if ! check_field "$manifest" "owner"; then
-        dir_issues="${dir_issues}  - MISSING: owner (required for draft_hold)\n"
-        issues=$((issues + 1))
-      fi
-      if ! check_field "$manifest" "review_date"; then
-        dir_issues="${dir_issues}  - MISSING: review_date (required for draft_hold)\n"
-        issues=$((issues + 1))
-      fi
+    --receipt-out)
+      RECEIPT_OUT="${2:-}"
+      shift 2
       ;;
-    applied)
-      if [[ ! -f "$dir/.applied" ]]; then
-        dir_issues="${dir_issues}  - MISSING: .applied marker file\n"
-        issues=$((issues + 1))
-      fi
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      usage >&2
+      exit 2
       ;;
   esac
-
-  # Report issues for this proposal
-  if [[ -n "$dir_issues" ]]; then
-    echo "[$bname] (status: $status)"
-    printf "$dir_issues"
-    echo ""
-  fi
 done
 
-echo "───────────────────────────────────────────────────────────────────────────"
-echo "Checked: $checked proposals"
-echo "Issues:  $issues"
-
-if [[ "$issues" -eq 0 ]]; then
-  echo "All proposals conform to lifecycle contract."
+if [[ "$CHECK_LINKAGE" -eq 0 && "$NORMALIZE_STATUS" -eq 0 ]]; then
+  CHECK_LINKAGE=1
 fi
+
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: missing dependency python3" >&2; exit 1; }
+
+python3 - "$PROPOSALS_DIR" "$LOOP_SCOPES_DIR" "$CHECK_LINKAGE" "$NORMALIZE_STATUS" "$RECEIPT_OUT" <<'PY'
+from __future__ import annotations
+
+import datetime as dt
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+proposals_dir = Path(sys.argv[1])
+loop_scopes_dir = Path(sys.argv[2])
+check_linkage = sys.argv[3] == "1"
+normalize_status = sys.argv[4] == "1"
+receipt_out_arg = (sys.argv[5] or "").strip()
+receipt_out = Path(receipt_out_arg) if receipt_out_arg else None
+
+ACTIVE_LOOP_STATUSES = {"active", "planned", "open", "draft"}
+PRESERVE_STATUSES = {"superseded", "read-only", "readonly", "invalid"}
+TODAY = dt.date.today()
+REVIEW_DATE_DEFAULT = (TODAY + dt.timedelta(days=7)).isoformat()
+
+
+def clean_scalar(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"null", "none"}:
+        return ""
+    return text
+
+
+def quote_yaml_scalar(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_.@/:-]+", value or ""):
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def upsert_top_level_field(text: str, field: str, value: str) -> tuple[str, bool]:
+    line = f"{field}: {quote_yaml_scalar(value)}"
+    pattern = re.compile(rf"^{re.escape(field)}:\s*.*$", flags=re.MULTILINE)
+    if pattern.search(text):
+        updated = pattern.sub(line, text, count=1)
+        changed = updated != text
+        return updated, changed
+
+    if text and not text.endswith("\n"):
+        text += "\n"
+    updated = text + line + "\n"
+    return updated, True
+
+
+def parse_loop_scope_status(loop_id: str) -> tuple[str, str]:
+    if not loop_id:
+        return "missing", ""
+
+    scope_path = loop_scopes_dir / f"{loop_id}.scope.md"
+    if not scope_path.exists():
+        return "invalid", "scope_missing"
+
+    try:
+        raw = scope_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return "invalid", "scope_unreadable"
+
+    status = ""
+    if raw.startswith("---\n"):
+        end_idx = raw.find("\n---", 4)
+        if end_idx != -1:
+            frontmatter = raw[4:end_idx + 1]
+            try:
+                parsed = yaml.safe_load(frontmatter) or {}
+                status = clean_scalar(parsed.get("status"))
+            except Exception:
+                status = ""
+
+    if not status:
+        match = re.search(r"^status:\s*([^\n#]+)", raw, flags=re.MULTILINE)
+        if match:
+            status = clean_scalar(match.group(1).strip().strip('"').strip("'"))
+
+    lowered = status.lower()
+    if lowered in ACTIVE_LOOP_STATUSES:
+        return "valid", lowered
+    if lowered == "closed":
+        return "closed", lowered
+    return "invalid", lowered or "unknown"
+
+
+def compute_hold_reason(loop_id: str, loop_state: str, loop_detail: str) -> str:
+    if loop_state == "missing":
+        return "loop_id missing or null; pending linkage cannot be validated"
+    if loop_state == "closed":
+        return f"loop_id '{loop_id}' is closed; pending linkage requires an active loop scope"
+    if loop_state == "invalid" and loop_detail == "scope_missing":
+        return f"loop_id '{loop_id}' does not have a matching loop scope file"
+    if loop_state == "invalid":
+        return (
+            f"loop_id '{loop_id}' is not active (scope status '{loop_detail}'); "
+            "pending linkage requires active/planned/open/draft"
+        )
+    return "pending linkage requirements not met"
+
+
+def load_manifest(path: Path) -> tuple[dict[str, Any] | None, str, str | None]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return None, "", f"manifest unreadable: {exc}"
+
+    try:
+        parsed = yaml.safe_load(raw)
+    except Exception as exc:
+        return None, raw, f"manifest parse error: {exc}"
+
+    if parsed is None:
+        parsed = {}
+    if not isinstance(parsed, dict):
+        return None, raw, "manifest top-level must be a map"
+
+    return parsed, raw, None
+
+
+checked_count = 0
+normalized_count = 0
+moved_to_draft_hold_count = 0
+unresolved_count = 0
+actions: list[dict[str, Any]] = []
+
+for proposal_dir in sorted(proposals_dir.glob("CP-*")):
+    if not proposal_dir.is_dir():
+        continue
+
+    checked_count += 1
+    proposal_name = proposal_dir.name
+    manifest_path = proposal_dir / "manifest.yaml"
+    applied_marker = (proposal_dir / ".applied").exists()
+
+    action: dict[str, Any] = {
+        "proposal": proposal_name,
+        "manifest_path": str(manifest_path),
+        "applied_marker": applied_marker,
+        "from_status": None,
+        "to_status": None,
+        "result": "unchanged",
+        "reason": "",
+    }
+
+    if not manifest_path.exists():
+        unresolved_count += 1
+        action.update(
+            {
+                "result": "unresolved",
+                "reason": "manifest.yaml missing",
+            }
+        )
+        actions.append(action)
+        continue
+
+    parsed, raw, parse_error = load_manifest(manifest_path)
+    if parse_error:
+        unresolved_count += 1
+        action.update(
+            {
+                "result": "unresolved",
+                "reason": parse_error,
+            }
+        )
+        actions.append(action)
+        continue
+
+    assert parsed is not None
+
+    loop_id = clean_scalar(parsed.get("loop_id"))
+    status = clean_scalar(parsed.get("status"))
+    agent = clean_scalar(parsed.get("agent") or parsed.get("author"))
+    owner = clean_scalar(parsed.get("owner"))
+    review_date = clean_scalar(parsed.get("review_date"))
+    hold_reason = clean_scalar(parsed.get("hold_reason"))
+
+    loop_state, loop_detail = parse_loop_scope_status(loop_id)
+
+    action.update(
+        {
+            "loop_id": loop_id or None,
+            "loop_state": loop_state,
+            "loop_detail": loop_detail,
+            "from_status": status or None,
+            "to_status": status or None,
+        }
+    )
+
+    target_status = status
+    reasons: list[str] = []
+
+    if applied_marker:
+        if status != "applied":
+            target_status = "applied"
+            reasons.append(".applied marker requires manifest status=applied")
+    elif status.lower() in PRESERVE_STATUSES:
+        # Preserve superseded/read-only/invalid unless malformed.
+        pass
+    else:
+        if not status:
+            if loop_state == "valid":
+                target_status = "pending"
+                reasons.append("status missing with valid loop linkage; normalized to pending")
+            else:
+                target_status = "draft_hold"
+                reasons.append(
+                    "status missing and loop linkage not safely valid; normalized to draft_hold"
+                )
+        elif status == "pending":
+            if loop_state != "valid":
+                target_status = "draft_hold"
+                reasons.append("pending status requires active loop linkage; normalized to draft_hold")
+
+    current_effective_status = status
+    would_change_status = target_status != current_effective_status
+
+    missing_draft_fields = False
+    hold_reason_value = hold_reason
+    if target_status == "draft_hold":
+        if not hold_reason_value:
+            hold_reason_value = compute_hold_reason(loop_id, loop_state, loop_detail)
+        if not owner or not review_date or not hold_reason:
+            missing_draft_fields = True
+
+    if check_linkage:
+        effective_status = target_status if (normalize_status and target_status) else status
+        effective_owner = owner
+        effective_review_date = review_date
+        effective_hold_reason = hold_reason
+        if normalize_status and effective_status == "draft_hold":
+            effective_owner = effective_owner or agent or "unknown"
+            effective_review_date = effective_review_date or REVIEW_DATE_DEFAULT
+            effective_hold_reason = effective_hold_reason or hold_reason_value
+
+        if applied_marker and effective_status != "applied":
+            unresolved_count += 1
+            reasons.append("linkage check: .applied marker mismatch")
+
+        if effective_status == "pending":
+            if not loop_id:
+                unresolved_count += 1
+                reasons.append("linkage check: pending requires non-null loop_id")
+            elif loop_state != "valid":
+                unresolved_count += 1
+                reasons.append("linkage check: pending loop_id must resolve to active loop scope")
+
+        if effective_status == "draft_hold":
+            if not effective_owner or not effective_review_date or not effective_hold_reason:
+                unresolved_count += 1
+                reasons.append("linkage check: draft_hold requires owner/review_date/hold_reason")
+
+        if not effective_status and not applied_marker:
+            unresolved_count += 1
+            reasons.append("linkage check: status missing")
+
+    if normalize_status:
+        new_raw = raw
+        file_changed = False
+
+        if target_status:
+            new_raw, changed = upsert_top_level_field(new_raw, "status", target_status)
+            file_changed = file_changed or changed
+
+        if target_status == "draft_hold":
+            owner_value = owner or agent or "unknown"
+            review_date_value = review_date or REVIEW_DATE_DEFAULT
+            hold_reason_value = hold_reason or hold_reason_value
+
+            new_raw, changed = upsert_top_level_field(new_raw, "owner", owner_value)
+            file_changed = file_changed or changed
+            new_raw, changed = upsert_top_level_field(new_raw, "review_date", review_date_value)
+            file_changed = file_changed or changed
+            new_raw, changed = upsert_top_level_field(new_raw, "hold_reason", hold_reason_value)
+            file_changed = file_changed or changed
+
+        if file_changed:
+            manifest_path.write_text(new_raw, encoding="utf-8")
+            normalized_count += 1
+            action["result"] = "normalized"
+        else:
+            action["result"] = "unchanged"
+
+    if would_change_status and target_status == "draft_hold":
+        moved_to_draft_hold_count += 1
+
+    action["to_status"] = target_status or None
+    action["reason"] = "; ".join(dict.fromkeys(reasons))
+
+    # Mark unresolved only when this proposal had unresolved reasons in check mode.
+    if check_linkage and "linkage check:" in action["reason"]:
+        if action["result"] != "normalized":
+            action["result"] = "unresolved"
+
+    actions.append(action)
+
+
+print("═══════════════════════════════════════════════════════════════════════════")
+print("Proposal Reconciliation Report")
+print("═══════════════════════════════════════════════════════════════════════════")
+print("")
+
+if normalize_status:
+    print("mode: normalize-status")
+elif check_linkage:
+    print("mode: check-linkage")
+else:
+    print("mode: report")
+print("")
+
+for row in actions:
+    if row.get("result") == "unchanged" and not row.get("reason"):
+        continue
+    print(f"[{row['proposal']}] result={row['result']}")
+    if row.get("from_status") != row.get("to_status"):
+        print(f"  status: {row.get('from_status') or 'missing'} -> {row.get('to_status') or 'missing'}")
+    if row.get("reason"):
+        print(f"  reason: {row['reason']}")
+
+print("───────────────────────────────────────────────────────────────────────────")
+print(f"checked: {checked_count}")
+print(f"normalized: {normalized_count}")
+print(f"moved_to_draft_hold: {moved_to_draft_hold_count}")
+print(f"unresolved: {unresolved_count}")
+
+if not any(row.get("result") != "unchanged" for row in actions) and unresolved_count == 0:
+    print("All proposals conform to lifecycle/linkage contract.")
+
+if receipt_out is not None:
+    receipt_payload = {
+        "version": "1.0",
+        "generated_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "mode": "normalize-status" if normalize_status else "check-linkage",
+        "checked_count": checked_count,
+        "normalized_count": normalized_count,
+        "moved_to_draft_hold_count": moved_to_draft_hold_count,
+        "unresolved_count": unresolved_count,
+        "actions": actions,
+    }
+    receipt_out.parent.mkdir(parents=True, exist_ok=True)
+    with receipt_out.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(receipt_payload, handle, sort_keys=False)
+PY
