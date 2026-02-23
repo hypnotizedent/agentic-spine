@@ -1213,6 +1213,11 @@ scope: w20-normalization-strategy-only
 ### Proposed SSOT and migration map (no execution in W20)
 
 - Proposed SSOT: `/Users/ronnyworks/code/agentic-spine/ops/bindings/mcp.runtime.contract.yaml`
+- Canonical read order (for deterministic preflight and operator review):
+  1. `/Users/ronnyworks/code/agentic-spine/ops/bindings/mcp.runtime.contract.yaml` (contract authority)
+  2. `/Users/ronnyworks/code/agentic-spine/.mcp.json` (Codex runtime surface)
+  3. `/Users/ronnyworks/code/workbench/.mcp.json` (Claude Desktop runtime surface)
+  4. `/Users/ronnyworks/code/workbench/dotfiles/opencode/opencode.json` (OpenCode runtime surface)
 - Phase 1 (W21 docs-only): publish explicit precedence order (contract first, runtime configs second) in governance docs.
 - Phase 2 (later wave): add contract-vs-runtime diff report command, no auto-mutation.
 - Phase 3 (later wave): evaluate removing redundant config-local declarations only after parity gate update.
