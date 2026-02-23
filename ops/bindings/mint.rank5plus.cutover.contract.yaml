@@ -1,0 +1,337 @@
+# Mint Rank5+ Cutover Orchestration Contract
+# Status: authoritative
+# Last verified: 2026-02-22
+# Scope: mint-rank5plus-orchestration
+# Owner: "@ronny"
+# Related: LOOP-MINT-TABLE-OWNERSHIP-AUDIT-20260222, LOOP-MINT-SECRETS-BOOTSTRAP-CONTRACT-20260222,
+#          LOOP-MINT-AUTH-PHASE0-CONTRACT-20260222, LOOP-MINT-PAYMENT-PHASE0-CONTRACT-20260222,
+#          LOOP-MINT-ORDER-LIFECYCLE-PHASE0-CONTRACT-20260222, LOOP-MINT-NOTIFICATION-PHASE0-CONTRACT-20260222,
+#          LOOP-MINT-TUNNEL-MIGRATION-CONTRACT-20260222
+
+version: "1.0"
+updated: "2026-02-22"
+owner: "@ronny"
+scope: mint-rank5plus-orchestration
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPENDENCY CHAIN
+# Execution order for Rank 5+ module cutovers
+# ─────────────────────────────────────────────────────────────────────────────
+
+dependency_chain:
+  description: "Sequential dependency chain for Rank 5+ Mint module extraction"
+  phases:
+    - phase: foundation
+      description: "Foundation phase - table ownership and secrets must resolve first"
+      loops:
+        - LOOP-MINT-TABLE-OWNERSHIP-AUDIT-20260222
+        - LOOP-MINT-SECRETS-BOOTSTRAP-CONTRACT-20260222
+      gate_criteria:
+        - "All critical table ownership decisions resolved (customers, orders, payments)"
+        - "All required Infisical namespaces provisioned"
+        - "Gate-2 entry criteria documented and accepted"
+      
+    - phase: core_services
+      description: "Core service extraction - auth and payment"
+      loops:
+        - LOOP-MINT-AUTH-PHASE0-CONTRACT-20260222
+        - LOOP-MINT-PAYMENT-PHASE0-CONTRACT-20260222
+      depends_on: [foundation]
+      gate_criteria:
+        - "Auth module boundary contract signed"
+        - "Payment activation gate passed (Stripe webhook verification)"
+        - "Shared auth integration verified"
+      
+    - phase: business_logic
+      description: "Business logic extraction - order lifecycle and notification"
+      loops:
+        - LOOP-MINT-ORDER-LIFECYCLE-PHASE0-CONTRACT-20260222
+        - LOOP-MINT-NOTIFICATION-PHASE0-CONTRACT-20260222
+      depends_on: [core_services]
+      gate_criteria:
+        - "Order lifecycle extraction from legacy v2-jobs.cjs documented"
+        - "Notification routing map complete"
+        - "Comms-agent credential wiring verified"
+      
+    - phase: infra_migration
+      description: "Infrastructure migration - tunnel cutover"
+      loops:
+        - LOOP-MINT-TUNNEL-MIGRATION-CONTRACT-20260222
+      depends_on: [core_services, business_logic]
+      gate_criteria:
+        - "All Rank 5-7 module deployments complete"
+        - "Cloudflare tunnel routes updated to fresh-slate targets"
+        - "Legacy route decommission verified"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TABLE AUTHORITY MATRIX
+# Decisions required before Gate-2 for Rank 5-8
+# ─────────────────────────────────────────────────────────────────────────────
+
+table_authority_matrix:
+  description: "Ownership decisions for shared/contested tables blocking Gate-2"
+  
+  tables:
+    - name: customers
+      owner_writer: 
+        status: pending_decision
+        candidates:
+          - module: auth
+            evidence: "auth.cjs:170, auth.cjs:345 - customer signup/profile writes"
+          - module: order-lifecycle
+            evidence: "v2-checkout.cjs:120, v2-checkout.cjs:130 - checkout creates/finds customers"
+      allowed_readers:
+        - auth
+        - payment
+        - order-lifecycle
+        - notification
+        - finance-adapter
+      decision_required_by: "Gate-2 entry"
+      
+    - name: orders
+      owner_writer:
+        status: pending_decision
+        candidates:
+          - module: payment
+            evidence: "stripe-webhooks.cjs:174, v2-checkout.cjs:167 - payment status/amounts/session"
+          - module: order-lifecycle
+            evidence: "v2-jobs.cjs:1105, v2-jobs.cjs:183 - status/customer/totals"
+      allowed_readers:
+        - auth
+        - payment
+        - order-lifecycle
+        - notification
+        - shipping
+        - finance-adapter
+      decision_required_by: "Gate-2 entry"
+      
+    - name: payments
+      owner_writer:
+        status: pending_decision
+        candidates:
+          - module: payment
+            evidence: "stripe-webhooks.cjs:188 - Stripe payment inserts"
+          - module: order-lifecycle
+            evidence: "v2-jobs.cjs:1562 - manual payment inserts"
+      allowed_readers:
+        - payment
+        - order-lifecycle
+        - finance-adapter
+      decision_required_by: "Gate-2 entry"
+      
+    - name: activity_log
+      owner_writer:
+        status: pending_decision
+        candidates:
+          - module: notification
+            evidence: "Planned dispatch history target"
+          - module: order-lifecycle
+            evidence: "v2-jobs.cjs:4273, v2-jobs.cjs:4327 - SMS/invoice events"
+      allowed_readers:
+        - notification
+        - order-lifecycle
+        - admin-dashboard
+      notes: "Table definition unresolved in migrations - requires DDL discovery first"
+      decision_required_by: "Gate-2 entry"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REQUIRED INFISICAL NAMESPACES
+# Rank 5+ module namespace coverage
+# ─────────────────────────────────────────────────────────────────────────────
+
+required_infisical_namespaces:
+  description: "Namespace additions required for Rank 5+ modules (per ADR-003)"
+  
+  namespaces:
+    - path: /spine/services/auth
+      module: auth
+      required_keys:
+        - JWT_SECRET
+        - ADMIN_JWT_SECRET
+        - AUTH_ACCESS_TOKEN_TTL
+        - AUTH_REFRESH_TOKEN_TTL
+        - PIN_TOKEN_TTL
+      status: pending
+      blocking_loops:
+        - LOOP-MINT-AUTH-PHASE0-CONTRACT-20260222
+        
+    - path: /spine/services/payment
+      module: payment
+      required_keys:
+        - STRIPE_SECRET_KEY
+        - STRIPE_WEBHOOK_SECRET
+        - CUSTOMER_APP_URL
+        - PAYMENT_DEPOSIT_DEFAULT_PERCENT
+      status: pending
+      blocking_loops:
+        - LOOP-MINT-PAYMENT-PHASE0-CONTRACT-20260222
+        
+    - path: /spine/services/order-lifecycle
+      module: order-lifecycle
+      required_keys:
+        - ORDER_LIFECYCLE_API_KEY
+        - ORDER_LIFECYCLE_DATABASE_URL
+        - MINIO_ENDPOINT
+        - MINIO_ACCESS_KEY
+        - MINIO_SECRET_KEY
+        - N8N_EVENT_WEBHOOK_URL
+      status: pending
+      blocking_loops:
+        - LOOP-MINT-ORDER-LIFECYCLE-PHASE0-CONTRACT-20260222
+        
+    - path: /spine/services/notification
+      module: notification
+      required_keys:
+        - RESEND_API_KEY
+        - FROM_EMAIL
+        - TWILIO_ACCOUNT_SID
+        - TWILIO_AUTH_TOKEN
+        - TWILIO_PHONE_NUMBER
+        - NOTIFICATION_DEFAULT_CHANNEL_POLICY
+      status: pending
+      blocking_loops:
+        - LOOP-MINT-NOTIFICATION-PHASE0-CONTRACT-20260222
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE-2 ENTRY CRITERIA
+# Per-loop requirements for advancing to execution phase
+# ─────────────────────────────────────────────────────────────────────────────
+
+gate2_entry_criteria:
+  
+  LOOP-MINT-TABLE-OWNERSHIP-AUDIT-20260222:
+    description: "Table ownership decisions resolved"
+    criteria:
+      - "customers owner_writer decision documented"
+      - "orders owner_writer decision documented"
+      - "payments owner_writer decision documented"
+      - "activity_log owner_writer decision documented OR DDL discovery complete"
+    verification_command: "./bin/ops cap run verify.pack.run mint"
+    
+  LOOP-MINT-SECRETS-BOOTSTRAP-CONTRACT-20260222:
+    description: "Secrets namespaces provisioned"
+    criteria:
+      - "/spine/services/auth namespace exists in Infisical"
+      - "/spine/services/payment namespace exists in Infisical"
+      - "/spine/services/order-lifecycle namespace exists in Infisical"
+      - "/spine/services/notification namespace exists in Infisical"
+    verification_command: "./bin/ops cap run secrets.projects.status"
+    
+  LOOP-MINT-AUTH-PHASE0-CONTRACT-20260222:
+    description: "Auth module boundary ready"
+    criteria:
+      - "Auth module boundary contract signed (customer JWT, admin sessions, PIN)"
+      - "Shared auth package dependencies resolved"
+      - "JWT secret provisioned in Infisical"
+    verification_command: "./bin/ops cap run verify.pack.run mint"
+    
+  LOOP-MINT-PAYMENT-PHASE0-CONTRACT-20260222:
+    description: "Payment activation gate passed"
+    criteria:
+      - "Stripe webhook endpoint verified"
+      - "Payment database adapter migrated from in-memory to Postgres"
+      - "Shared auth integration verified"
+      - "Deploy compose manifest includes payment service"
+    verification_command: "./bin/ops cap run verify.pack.run mint"
+    
+  LOOP-MINT-ORDER-LIFECYCLE-PHASE0-CONTRACT-20260222:
+    description: "Order lifecycle extraction documented"
+    criteria:
+      - "v2-jobs.cjs extraction targets documented"
+      - "Order state machine contract defined"
+      - "Integration tests for order lifecycle pass"
+    verification_command: "./bin/ops cap run verify.pack.run mint"
+    
+  LOOP-MINT-NOTIFICATION-PHASE0-CONTRACT-20260222:
+    description: "Notification routing complete"
+    criteria:
+      - "Event-to-channel routing map documented"
+      - "Comms-agent credential wiring verified"
+      - "Notification service health endpoint responding"
+    verification_command: "./bin/ops cap run verify.pack.run mint"
+    
+  LOOP-MINT-TUNNEL-MIGRATION-CONTRACT-20260222:
+    description: "Tunnel cutover ready"
+    criteria:
+      - "All Rank 5-7 modules deployed to mint-apps"
+      - "Cloudflare tunnel configuration prepared"
+      - "Rollback plan documented"
+    verification_command: "./bin/ops cap run verify.pack.run mint"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROLLBACK CHECKPOINTS
+# Safe rollback points during cutover
+# ─────────────────────────────────────────────────────────────────────────────
+
+rollback_checkpoints:
+  
+  foundation_rollback:
+    trigger: "Foundation phase failure"
+    actions:
+      - "Revert secrets.namespace.policy.yaml additions"
+      - "Restore previous operational.gaps.yaml state"
+    command: "git revert HEAD~N --no-commit"
+    
+  core_services_rollback:
+    trigger: "Auth/Payment deployment failure"
+    actions:
+      - "Rollback auth module to previous version"
+      - "Rollback payment module to previous version"
+      - "Restore legacy route handlers"
+    command: "cd /opt/stacks/mint-apps && docker compose down && docker compose up -d --build previous"
+    
+  tunnel_rollback:
+    trigger: "Tunnel cutover failure"
+    actions:
+      - "Restore legacy Cloudflare tunnel configuration"
+      - "Revert DNS routes to legacy docker-host"
+    command: "./bin/ops cap run cloudflare.tunnel.rollback"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OPERATOR DECISIONS REQUIRED
+# Blocking decisions that cannot be inferred
+# ─────────────────────────────────────────────────────────────────────────────
+
+operator_decisions_required:
+  
+  - id: OD-TABLE-001
+    question: "Which module owns writes to 'customers' table?"
+    options:
+      - value: "auth"
+        implications: "Auth module responsible for all customer writes; order-lifecycle reads only"
+      - value: "order-lifecycle"
+        implications: "Order-lifecycle creates customers during checkout; auth reads for auth context"
+      - value: "shared-write"
+        implications: "Both modules write; requires row-level locking or event sourcing"
+    decision_by: "Gate-2 entry"
+    blocking_loops:
+      - LOOP-MINT-AUTH-PHASE0-CONTRACT-20260222
+      - LOOP-MINT-ORDER-LIFECYCLE-PHASE0-CONTRACT-20260222
+      
+  - id: OD-TABLE-002
+    question: "Which module owns writes to 'orders' table?"
+    options:
+      - value: "payment"
+        implications: "Payment module updates order status on payment events"
+      - value: "order-lifecycle"
+        implications: "Order-lifecycle owns full order state machine"
+      - value: "shared-write"
+        implications: "Both write; requires coordination contract"
+    decision_by: "Gate-2 entry"
+    blocking_loops:
+      - LOOP-MINT-PAYMENT-PHASE0-CONTRACT-20260222
+      - LOOP-MINT-ORDER-LIFECYCLE-PHASE0-CONTRACT-20260222
+      
+  - id: OD-TABLE-003
+    question: "Which module owns writes to 'payments' table?"
+    options:
+      - value: "payment"
+        implications: "Payment module owns all payment records"
+      - value: "order-lifecycle"
+        implications: "Order-lifecycle creates manual payments; payment handles Stripe"
+      - value: "shared-write"
+        implications: "Both create payments; requires source discriminator"
+    decision_by: "Gate-2 entry"
+    blocking_loops:
+      - LOOP-MINT-PAYMENT-PHASE0-CONTRACT-20260222
+      - LOOP-MINT-ORDER-LIFECYCLE-PHASE0-CONTRACT-20260222
