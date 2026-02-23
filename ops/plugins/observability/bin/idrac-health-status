@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 
 IDRAC_HOST="192.168.1.250"
-PVE_HOST="root@100.96.211.33"
+SSH_BINDING="${SPINE_ROOT}/ops/bindings/ssh.targets.yaml"
 SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
@@ -24,9 +24,22 @@ stop(){ echo "STOP (2): $*" >&2; exit 2; }
 # ── Dependencies ──────────────────────────────────────────────
 command -v ssh >/dev/null 2>&1   || stop "missing dependency: ssh"
 command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
 
 INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 [[ -x "$INFISICAL_AGENT" ]] || stop "missing dependency: $INFISICAL_AGENT"
+
+# ── PVE jump host from binding ────────────────────────────────
+DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_BINDING" 2>/dev/null || echo "root")"
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_BINDING" 2>/dev/null || echo "22")"
+PVE_HOST_IP="$(yq -r '.ssh.targets[] | select(.id == "pve") | .host // ""' "$SSH_BINDING" | head -n1)"
+PVE_USER="$(yq -r '.ssh.targets[] | select(.id == "pve") | .user // ""' "$SSH_BINDING" | head -n1)"
+PVE_PORT="$(yq -r '.ssh.targets[] | select(.id == "pve") | .port // ""' "$SSH_BINDING" | head -n1)"
+[[ -n "$PVE_HOST_IP" && "$PVE_HOST_IP" != "null" ]] || stop "ssh target 'pve' missing host in $SSH_BINDING"
+[[ -n "$PVE_USER" && "$PVE_USER" != "null" ]] || PVE_USER="$DEF_USER"
+[[ -n "$PVE_PORT" && "$PVE_PORT" != "null" ]] || PVE_PORT="$DEF_PORT"
+PVE_HOST="${PVE_USER}@${PVE_HOST_IP}"
 
 # ── Credentials ───────────────────────────────────────────────
 IDRAC_USER=$("$INFISICAL_AGENT" get infrastructure prod IDRAC_ADMIN_USER 2>/dev/null) || stop "failed to retrieve IDRAC_ADMIN_USER from Infisical"
@@ -45,7 +58,7 @@ REDFISH_URL="https://${IDRAC_HOST}/redfish/v1/Systems/System.Embedded.1"
 REDFISH_JSON=""
 REDFISH_OK=false
 
-REDFISH_JSON=$(ssh $SSH_OPTS "$PVE_HOST" \
+REDFISH_JSON=$(ssh $SSH_OPTS -p "$PVE_PORT" "$PVE_HOST" \
   "curl -sk -u '${IDRAC_USER}:${IDRAC_PASS}' --connect-timeout 8 --max-time 15 '${REDFISH_URL}'" 2>/dev/null) || true
 
 # Validate we got real JSON back (not an SSH error or empty response)
@@ -96,7 +109,7 @@ print(f'source:     redfish')
 
   # ── Optional: thermal data via Redfish Thermal endpoint ─────
   THERMAL_URL="https://${IDRAC_HOST}/redfish/v1/Chassis/System.Embedded.1/Thermal"
-  THERMAL_JSON=$(ssh $SSH_OPTS "$PVE_HOST" \
+  THERMAL_JSON=$(ssh $SSH_OPTS -p "$PVE_PORT" "$PVE_HOST" \
     "curl -sk -u '${IDRAC_USER}:${IDRAC_PASS}' --connect-timeout 8 --max-time 15 '${THERMAL_URL}'" 2>/dev/null) || true
 
   if [[ -n "$THERMAL_JSON" ]]; then
@@ -133,7 +146,7 @@ else
   echo
 
   IPMI_OUTPUT=""
-  IPMI_OUTPUT=$(ssh $SSH_OPTS "$PVE_HOST" \
+  IPMI_OUTPUT=$(ssh $SSH_OPTS -p "$PVE_PORT" "$PVE_HOST" \
     "ipmitool -I lanplus -H ${IDRAC_HOST} -U '${IDRAC_USER}' -P '${IDRAC_PASS}' sdr type temperature" 2>/dev/null) || true
 
   if [[ -n "$IPMI_OUTPUT" ]]; then
@@ -147,7 +160,7 @@ else
     done
 
     # Also try power status via IPMI
-    POWER_STATUS=$(ssh $SSH_OPTS "$PVE_HOST" \
+    POWER_STATUS=$(ssh $SSH_OPTS -p "$PVE_PORT" "$PVE_HOST" \
       "ipmitool -I lanplus -H ${IDRAC_HOST} -U '${IDRAC_USER}' -P '${IDRAC_PASS}' power status" 2>/dev/null) || POWER_STATUS="unknown"
     echo
     echo "power:      ${POWER_STATUS}"
@@ -156,7 +169,7 @@ else
   else
     # ── Both methods failed — try ping as last resort ─────────
     PING_OK=false
-    ssh $SSH_OPTS "$PVE_HOST" "ping -c1 -W2 ${IDRAC_HOST}" >/dev/null 2>&1 && PING_OK=true
+    ssh $SSH_OPTS -p "$PVE_PORT" "$PVE_HOST" "ping -c1 -W2 ${IDRAC_HOST}" >/dev/null 2>&1 && PING_OK=true
 
     if $PING_OK; then
       echo "reachable:  yes (ping OK)"

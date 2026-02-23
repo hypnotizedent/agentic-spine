@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# recyclarr-sync - governed Recyclarr execution via ssh.targets/docker.compose.targets bindings
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+SSH_BINDING="${SPINE_ROOT}/ops/bindings/ssh.targets.yaml"
+COMPOSE_BINDING="${SPINE_ROOT}/ops/bindings/docker.compose.targets.yaml"
+TARGET_KEY="${RECYCLARR_TARGET_KEY:-download-stack}"
+REMOTE_COMMAND="${RECYCLARR_REMOTE_COMMAND:-sudo docker exec recyclarr recyclarr sync}"
+
+stop() {
+  echo "STOP (2): $*" >&2
+  exit 2
+}
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$COMPOSE_BINDING" ]] || stop "missing binding: $COMPOSE_BINDING"
+
+ssh_target_id="$(yq -r ".targets.\"$TARGET_KEY\".ssh_target // \"$TARGET_KEY\"" "$COMPOSE_BINDING" 2>/dev/null || true)"
+[[ -n "$ssh_target_id" && "$ssh_target_id" != "null" ]] || stop "missing ssh_target for compose target '$TARGET_KEY'"
+
+def_user="$(yq -r '.ssh.defaults.user // "root"' "$SSH_BINDING" 2>/dev/null || echo "root")"
+def_port="$(yq -r '.ssh.defaults.port // 22' "$SSH_BINDING" 2>/dev/null || echo "22")"
+def_to="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING" 2>/dev/null || echo "5")"
+
+ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .user // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+ssh_port="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .port // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+ssh_to="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .connect_timeout_sec // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+
+[[ -n "$ssh_host" && "$ssh_host" != "null" ]] || stop "ssh target '$ssh_target_id' missing host in $SSH_BINDING"
+[[ -n "$ssh_user" && "$ssh_user" != "null" ]] || ssh_user="$def_user"
+[[ -n "$ssh_port" && "$ssh_port" != "null" ]] || ssh_port="$def_port"
+[[ -n "$ssh_to" && "$ssh_to" != "null" ]] || ssh_to="$def_to"
+
+echo "recyclarr.sync"
+echo "target: $TARGET_KEY (ssh_target=$ssh_target_id ${ssh_user}@${ssh_host}:${ssh_port})"
+echo "command: $REMOTE_COMMAND"
+echo
+
+ssh \
+  -o "ConnectTimeout=${ssh_to}" \
+  -o StrictHostKeyChecking=accept-new \
+  -o BatchMode=yes \
+  -p "$ssh_port" \
+  "${ssh_user}@${ssh_host}" \
+  "$REMOTE_COMMAND"
