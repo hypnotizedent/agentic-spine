@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
+RECEIPTS_ROOT="$ROOT/receipts/sessions"
+POLICY_FILE=""
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+receipts-index-coverage
+
+Usage:
+  receipts-index-coverage [--index <path>] [--receipts-root <path>] [--policy <path>] [--json]
+
+Compares receipts/sessions corpus against the active receipts index.
+Outputs coverage_percent, missing_entries_count, and watermark_age_hours.
+When --policy is provided, warn/fail thresholds are evaluated.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --index)
+      INDEX_FILE="${2:-}"
+      shift 2
+      ;;
+    --receipts-root)
+      RECEIPTS_ROOT="${2:-}"
+      shift 2
+      ;;
+    --policy)
+      POLICY_FILE="${2:-}"
+      shift 2
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$INDEX_FILE" ]] || { echo "FAIL: index not found: $INDEX_FILE" >&2; exit 1; }
+[[ -d "$RECEIPTS_ROOT" ]] || { echo "FAIL: receipts root not found: $RECEIPTS_ROOT" >&2; exit 1; }
+if [[ -n "$POLICY_FILE" && ! -f "$POLICY_FILE" ]]; then
+  echo "FAIL: policy file not found: $POLICY_FILE" >&2
+  exit 1
+fi
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: missing dependency python3" >&2; exit 1; }
+
+python3 - "$INDEX_FILE" "$RECEIPTS_ROOT" "$POLICY_FILE" "$JSON_MODE" <<'PY'
+from __future__ import annotations
+
+import datetime as dt
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+index_path = Path(sys.argv[1])
+receipts_root = Path(sys.argv[2])
+policy_arg = (sys.argv[3] or "").strip()
+json_mode = sys.argv[4] == "1"
+policy_path = Path(policy_arg) if policy_arg else None
+
+
+def load_yaml(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+try:
+    index = load_yaml(index_path)
+except Exception as exc:
+    print(f"FAIL: unable to parse index: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+policy = {}
+if policy_path is not None:
+    try:
+        policy = load_yaml(policy_path)
+    except Exception as exc:
+        print(f"FAIL: unable to parse policy: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+entries = index.get("entries")
+if not isinstance(entries, list):
+    print("FAIL: index.entries must be a list", file=sys.stderr)
+    raise SystemExit(1)
+
+index_run_ids: set[str] = set()
+for row in entries:
+    if not isinstance(row, dict):
+        continue
+    run_id = str(row.get("run_id", "")).strip()
+    if run_id:
+        index_run_ids.add(run_id)
+
+corpus_run_ids: set[str] = set()
+for entry in receipts_root.glob("RCAP-*"):
+    if not entry.is_dir():
+        continue
+    receipt = entry / "receipt.md"
+    if not receipt.exists():
+        continue
+    name = entry.name
+    run_id = name[1:] if name.startswith("R") else name
+    corpus_run_ids.add(run_id)
+
+indexed_count = len(index_run_ids & corpus_run_ids)
+corpus_count = len(corpus_run_ids)
+missing_entries = sorted(corpus_run_ids - index_run_ids)
+missing_count = len(missing_entries)
+coverage_percent = (indexed_count / corpus_count * 100.0) if corpus_count else 100.0
+
+now = dt.datetime.now(dt.timezone.utc)
+watermark_raw = (
+    index.get("watermark", {}).get("updated_at_utc")
+    if isinstance(index.get("watermark"), dict)
+    else None
+) or index.get("updated_at_utc")
+watermark_age_hours = None
+if watermark_raw:
+    try:
+        watermark_dt = dt.datetime.fromisoformat(str(watermark_raw).replace("Z", "+00:00"))
+        watermark_age_hours = max(0.0, (now - watermark_dt).total_seconds() / 3600.0)
+    except Exception:
+        watermark_age_hours = None
+
+status = "pass"
+warnings: list[str] = []
+failures: list[str] = []
+
+if policy:
+    thresholds = policy.get("coverage_thresholds")
+    if not isinstance(thresholds, dict):
+        failures.append("policy.coverage_thresholds must be a map")
+    else:
+        cov = thresholds.get("minimum_coverage_percent")
+        age = thresholds.get("watermark_age_hours")
+        missing = thresholds.get("missing_entries")
+
+        def read_float(section: dict, key: str, label: str) -> float | None:
+            value = section.get(key) if isinstance(section, dict) else None
+            if value is None:
+                failures.append(f"policy threshold missing: {label}.{key}")
+                return None
+            try:
+                return float(value)
+            except Exception:
+                failures.append(f"policy threshold invalid number: {label}.{key}={value!r}")
+                return None
+
+        cov_warn = read_float(cov or {}, "warn_below", "minimum_coverage_percent")
+        cov_fail = read_float(cov or {}, "fail_below", "minimum_coverage_percent")
+        age_warn = read_float(age or {}, "warn_above", "watermark_age_hours")
+        age_fail = read_float(age or {}, "fail_above", "watermark_age_hours")
+        miss_warn = read_float(missing or {}, "warn_above", "missing_entries")
+        miss_fail = read_float(missing or {}, "fail_above", "missing_entries")
+
+        if cov_warn is not None and cov_fail is not None:
+            if cov_warn < cov_fail:
+                failures.append("policy minimum_coverage_percent warn_below must be >= fail_below")
+            if coverage_percent < cov_fail:
+                failures.append(
+                    f"coverage_percent {coverage_percent:.2f} below fail threshold {cov_fail:.2f}"
+                )
+            elif coverage_percent < cov_warn:
+                warnings.append(
+                    f"coverage_percent {coverage_percent:.2f} below warn threshold {cov_warn:.2f}"
+                )
+
+        if watermark_age_hours is not None and age_warn is not None and age_fail is not None:
+            if age_warn > age_fail:
+                failures.append("policy watermark_age_hours warn_above must be <= fail_above")
+            if watermark_age_hours > age_fail:
+                failures.append(
+                    f"watermark_age_hours {watermark_age_hours:.2f} above fail threshold {age_fail:.2f}"
+                )
+            elif watermark_age_hours > age_warn:
+                warnings.append(
+                    f"watermark_age_hours {watermark_age_hours:.2f} above warn threshold {age_warn:.2f}"
+                )
+
+        if miss_warn is not None and miss_fail is not None:
+            if miss_warn > miss_fail:
+                failures.append("policy missing_entries warn_above must be <= fail_above")
+            if float(missing_count) > miss_fail:
+                failures.append(
+                    f"missing_entries_count {missing_count} above fail threshold {int(miss_fail)}"
+                )
+            elif float(missing_count) > miss_warn:
+                warnings.append(
+                    f"missing_entries_count {missing_count} above warn threshold {int(miss_warn)}"
+                )
+
+if failures:
+    status = "fail"
+elif warnings:
+    status = "warn"
+
+result = {
+    "capability": "receipts.index.coverage",
+    "index": str(index_path),
+    "receipts_root": str(receipts_root),
+    "sessions_total": corpus_count,
+    "indexed_total": indexed_count,
+    "missing_entries_count": missing_count,
+    "coverage_percent": round(coverage_percent, 2),
+    "watermark_updated_at_utc": watermark_raw,
+    "watermark_age_hours": round(watermark_age_hours, 2) if watermark_age_hours is not None else None,
+    "status": status,
+    "warnings": warnings,
+    "failures": failures,
+}
+
+if json_mode:
+    print(json.dumps(result))
+else:
+    print("receipts.index.coverage")
+    print(f"index: {result['index']}")
+    print(f"receipts_root: {result['receipts_root']}")
+    print(f"sessions_total: {result['sessions_total']}")
+    print(f"indexed_total: {result['indexed_total']}")
+    print(f"missing_entries_count: {result['missing_entries_count']}")
+    print(f"coverage_percent: {result['coverage_percent']:.2f}")
+    print(f"watermark_updated_at_utc: {result['watermark_updated_at_utc']}")
+    print(f"watermark_age_hours: {result['watermark_age_hours']}")
+    print(f"status: {result['status']}")
+    if warnings:
+        print("warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+    if failures:
+        print("failures:")
+        for failure in failures:
+            print(f"  - {failure}")
+
+if status == "fail":
+    raise SystemExit(1)
+PY

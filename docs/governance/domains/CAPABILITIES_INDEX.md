@@ -1,3 +1,7 @@
+---
+last_verified: 2026-02-23
+---
+
 # Domain Capability Catalog Index
 
 Generated from `ops/capabilities.yaml` (domain_external plane).

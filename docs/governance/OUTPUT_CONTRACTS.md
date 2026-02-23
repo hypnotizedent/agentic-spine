@@ -1,3 +1,7 @@
+---
+last_verified: 2026-02-23
+---
+
 # Output Contracts (Authoritative)
 
 > **Status:** authoritative

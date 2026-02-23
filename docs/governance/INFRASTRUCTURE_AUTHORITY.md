@@ -3,6 +3,7 @@ status: deprecated
 deprecated_date: 2026-01-25
 superseded_by: docs/governance/SERVICE_REGISTRY.yaml
 reason: Governance cleanup - consolidated to single SSOT
+last_verified: 2026-02-23
 ---
 
 # ⚠️ DEPRECATED
