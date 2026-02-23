@@ -118,4 +118,62 @@ yq e -r '.status' "$done_file" | grep '^done$' >/dev/null || fail "done task sta
 yq e -r '.result' "$done_file" | grep 'agent_tool=route_resolve' >/dev/null || fail "done result should include delegated agent_tool execution detail"
 pass "worker consumes delegated agent_tool task end-to-end"
 
+# ── max_claims_per_tick enforcement test ──
+# Contract above sets max_claims_per_tick=2. Enqueue 4 tasks, run once,
+# verify only 2 are claimed (the bound is enforced).
+
+contract_bounded="$tmp/worker.bounded.contract.yaml"
+cat >"$contract_bounded" <<'YAML'
+runtime:
+  poll_seconds: 300
+  error_backoff_seconds: 1
+  pid_file: "mailroom-task-worker.pid"
+  log_file: "mailroom-task-worker.log"
+  status_file: "mailroom-task-worker.status.json"
+control_cycle:
+  enabled: false
+task_execution:
+  enabled: true
+  max_claims_per_tick: 2
+  claim_policy:
+    worker_id: "test-worker"
+    claim_all: true
+  execute_route_targets:
+    - capability
+  capability_allowlist:
+    - verify.core.run
+YAML
+
+bounded_env=(
+  "MAILROOM_TASK_WORKER_CONTRACT=$contract_bounded"
+  "SPINE_INBOX=$tmp/runtime/inbox"
+  "SPINE_OUTBOX=$tmp/runtime/outbox"
+  "SPINE_STATE=$tmp/runtime/state"
+  "SPINE_LOGS=$tmp/runtime/logs"
+)
+
+# Clean queued dir from previous tests
+rm -f "$tmp/runtime/state/agent-tasks/queued/"*.yaml 2>/dev/null || true
+
+cap_payload="$(jq -cn '{capability:"verify.core.run"}')"
+for i in 1 2 3 4; do
+  env "${bounded_env[@]}" "$ENQUEUE_BIN" \
+    --task-id "TASK-BOUND-$i" \
+    --summary "bounded test task $i" \
+    --route-target capability \
+    --payload "$cap_payload" \
+    --json >/dev/null
+done
+
+queued_before="$(ls "$tmp/runtime/state/agent-tasks/queued/"*.yaml 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$queued_before" == "4" ]] || fail "expected 4 queued tasks, got $queued_before"
+
+bounded_json="$(env "${bounded_env[@]}" "$BIN" --once | extract_json)"
+bounded_claimed="$(echo "$bounded_json" | jq -r '.tasks.claimed')"
+bounded_max="$(echo "$bounded_json" | jq -r '.tasks.max_claims_per_tick')"
+
+[[ "$bounded_max" == "2" ]] || fail "max_claims_per_tick should be 2, got $bounded_max"
+[[ "$bounded_claimed" -le 2 ]] || fail "claimed ($bounded_claimed) exceeds max_claims_per_tick bound (2)"
+pass "max_claims_per_tick=2 enforced: claimed=$bounded_claimed max=$bounded_max"
+
 echo "mailroom-task-worker tests"

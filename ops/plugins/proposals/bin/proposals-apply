@@ -665,6 +665,150 @@ emit_admission_summary_and_enforce() {
   fi
 }
 
+run_change_intake_policy_admission() {
+  local intake_policy="$CHANGE_INTAKE_POLICY"
+  if [[ ! -f "$intake_policy" ]]; then
+    admission_add_finding "P2" "change_intake_policy" "change intake policy file missing: $intake_policy"
+    return
+  fi
+
+  echo "Admission check: change intake policy classification"
+
+  # Count changed files and surfaces
+  local -a changed_files=()
+  local -a changed_surfaces=()
+  local action path reason surface
+  while IFS=$'\t' read -r action path reason; do
+    action="$(normalize_action "$action")"
+    case "$action" in
+      create|modify|delete) ;;
+      *) continue ;;
+    esac
+    [[ -n "$path" ]] || continue
+    if ! contains_value "$path" "${changed_files[@]:-}"; then
+      changed_files+=("$path")
+    fi
+    # Derive surface from path prefix
+    surface="${path%%/*}"
+    if ! contains_value "$surface" "${changed_surfaces[@]:-}"; then
+      changed_surfaces+=("$surface")
+    fi
+  done < "$changes_tmp"
+
+  local file_count=${#changed_files[@]}
+  local surface_count=${#changed_surfaces[@]}
+
+  # Check cross-repo (workbench paths present)
+  local involves_cross_repo="false"
+  for path in "${changed_files[@]}"; do
+    case "$path" in
+      workbench/*|../workbench/*)
+        involves_cross_repo="true"
+        break
+        ;;
+    esac
+  done
+
+  # Check multi-agent (manifest agent field + required_agents)
+  local involves_multi_agent="false"
+  local agent_count=0
+  if [[ -n "${agent:-}" ]]; then
+    agent_count=1
+  fi
+  local required_agents_raw
+  required_agents_raw="$(yq e -r '.required_agents[]?' "$manifest" 2>/dev/null || true)"
+  if [[ -n "$required_agents_raw" ]]; then
+    involves_multi_agent="true"
+  fi
+
+  # Check new binding/SSOT introduction
+  local introduces_new_binding="false"
+  for path in "${changed_files[@]}"; do
+    case "$path" in
+      ops/bindings/*.yaml|ops/bindings/*.yml)
+        # Check if this is a create action
+        local check_action
+        check_action="$(awk -F'\t' -v p="$path" '$2 == p { print $1; exit }' "$changes_tmp")"
+        check_action="$(normalize_action "$check_action")"
+        if [[ "$check_action" == "create" ]]; then
+          introduces_new_binding="true"
+          break
+        fi
+        ;;
+    esac
+  done
+
+  # Determine risk severity from manifest or default to medium
+  local risk_severity
+  risk_severity="$(yq e -r '.risk_severity // "medium"' "$manifest" 2>/dev/null || echo medium)"
+
+  # Evaluate proposal_required_if (any_true)
+  local proposal_required="false"
+
+  # Read thresholds from policy
+  local file_threshold surface_threshold
+  file_threshold="$(yq e -r '.decision_rules.proposal_required_if.any_true[] | select(test("changed_file_count"))' "$intake_policy" 2>/dev/null | head -1 || true)"
+  surface_threshold="$(yq e -r '.decision_rules.proposal_required_if.any_true[] | select(test("changed_surface_count"))' "$intake_policy" 2>/dev/null | head -1 || true)"
+
+  # Default thresholds from policy: changed_file_count >= 3, changed_surface_count >= 2
+  local file_limit=3
+  local surface_limit=2
+  if [[ "$file_threshold" =~ ([0-9]+) ]]; then
+    file_limit="${BASH_REMATCH[1]}"
+  fi
+  if [[ "$surface_threshold" =~ ([0-9]+) ]]; then
+    surface_limit="${BASH_REMATCH[1]}"
+  fi
+
+  if (( file_count >= file_limit )); then
+    proposal_required="true"
+  fi
+  if (( surface_count >= surface_limit )); then
+    proposal_required="true"
+  fi
+  if [[ "$involves_cross_repo" == "true" ]]; then
+    proposal_required="true"
+  fi
+  if [[ "$involves_multi_agent" == "true" ]]; then
+    proposal_required="true"
+  fi
+  if [[ "$introduces_new_binding" == "true" ]]; then
+    proposal_required="true"
+  fi
+  if [[ "$risk_severity" == "high" || "$risk_severity" == "critical" ]]; then
+    proposal_required="true"
+  fi
+
+  # Classify change
+  local change_class="single_mutation_low_risk"
+  if [[ "$risk_severity" == "high" || "$risk_severity" == "critical" ]]; then
+    change_class="high_risk_change"
+  elif [[ "$proposal_required" == "true" ]]; then
+    change_class="coordinated_multi_step"
+  fi
+
+  # Emit classification
+  printf '  files=%d surfaces=%d cross_repo=%s multi_agent=%s new_binding=%s risk=%s\n' \
+    "$file_count" "$surface_count" "$involves_cross_repo" "$involves_multi_agent" "$introduces_new_binding" "$risk_severity"
+  printf '  classification: %s proposal_required: %s\n' "$change_class" "$proposal_required"
+
+  # Enforcement: if proposal_required and this is a proposal apply, we're on the
+  # correct path. But if the change class is high_risk_change, verify the manifest
+  # declares appropriate approval context.
+  if [[ "$change_class" == "high_risk_change" ]]; then
+    local terminal_c_approval
+    terminal_c_approval="$(yq e -r '.terminal_c_approval // ""' "$manifest" 2>/dev/null || true)"
+    if [[ -z "$terminal_c_approval" || "$terminal_c_approval" == "null" ]]; then
+      admission_add_finding "P1" "change_intake_policy" "high-risk change class requires terminal_c_approval in manifest (risk=$risk_severity)"
+    fi
+  fi
+
+  # If proposal_required but the execution path expects preflight verify, check loop_id
+  if [[ "$proposal_required" == "true" && -z "${loop_id:-}" ]]; then
+    admission_add_finding "P1" "change_intake_policy" "proposal-required change missing loop_id (files=$file_count surfaces=$surface_count cross_repo=$involves_cross_repo)"
+  fi
+}
+
 run_admission_controller() {
   echo "Running admission controller..."
   need_cmd yq
@@ -680,6 +824,7 @@ run_admission_controller() {
   run_ssot_schema_conventions_admission
   run_vertical_integration_admission
   run_loop_gap_linkage_admission
+  run_change_intake_policy_admission
   emit_admission_summary_and_enforce
 }
 
@@ -705,6 +850,7 @@ SCHEMA_CONVENTIONS_CONTRACT="$SPINE_CODE/ops/bindings/spine.schema.conventions.y
 VERTICAL_INTEGRATION_CONTRACT="$SPINE_CODE/ops/bindings/vertical.integration.admission.contract.yaml"
 VERIFY_TOPOLOGY_BIN="$SPINE_CODE/ops/plugins/verify/bin/verify-topology"
 GAPS_FILE="$SPINE_CODE/ops/bindings/operational.gaps.yaml"
+CHANGE_INTAKE_POLICY="$SPINE_CODE/ops/bindings/change.intake.policy.yaml"
 LOOP_SCOPES_DIR="$SPINE_CODE/mailroom/state/loop-scopes"
 
 if [[ ! -d "$PROPOSAL_DIR" ]]; then

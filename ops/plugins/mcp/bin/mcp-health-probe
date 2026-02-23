@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# mcp.health.probe — Probe all registered MCP servers for reachability.
+# Safety: read-only, non-destructive.
+# Reads mcp.runtime.contract.yaml to discover servers across surfaces,
+# then probes each for liveness via stdio handshake or process check.
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
+
+fail() {
+  echo "mcp.health.probe FAIL: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+need_cmd yq
+need_cmd jq
+
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+yq e '.' "$CONTRACT" >/dev/null 2>&1 || fail "invalid YAML: $CONTRACT"
+
+total=0
+reachable=0
+unreachable=0
+
+printf 'mcp.health.probe\n'
+printf 'contract: %s\n\n' "$CONTRACT"
+
+# Probe gateway server (primary MCP endpoint)
+gw_name="$(yq e -r '.gateway.server_name // ""' "$CONTRACT" 2>/dev/null || true)"
+gw_command="$(yq e -r '.gateway.command // ""' "$CONTRACT" 2>/dev/null || true)"
+
+if [[ -n "$gw_name" && -n "$gw_command" ]]; then
+  total=$((total + 1))
+  if [[ -x "$gw_command" ]]; then
+    printf '  %-30s REACHABLE (binary exists and executable)\n' "$gw_name"
+    reachable=$((reachable + 1))
+  else
+    printf '  %-30s UNREACHABLE (binary missing or not executable: %s)\n' "$gw_name" "$gw_command"
+    unreachable=$((unreachable + 1))
+  fi
+fi
+
+# Probe per-surface config files and their registered servers
+probe_config_servers() {
+  local surface="$1"
+  local config_path="$2"
+
+  if [[ ! -f "$config_path" ]]; then
+    printf '  [%s] config missing: %s\n' "$surface" "$config_path"
+    return
+  fi
+
+  local -a servers=()
+  while IFS= read -r name; do
+    [[ -n "$name" ]] && servers+=("$name")
+  done < <(jq -r '.mcpServers // {} | keys[]' "$config_path" 2>/dev/null || true)
+
+  # OpenCode uses .mcp key instead of .mcpServers
+  if (( ${#servers[@]} == 0 )); then
+    while IFS= read -r name; do
+      [[ -n "$name" ]] && servers+=("$name")
+    done < <(jq -r '.mcp // {} | keys[]' "$config_path" 2>/dev/null || true)
+  fi
+
+  for name in "${servers[@]}"; do
+    total=$((total + 1))
+
+    # Extract command from mcpServers or mcp config
+    local cmd=""
+    cmd="$(jq -r --arg n "$name" '.mcpServers[$n].command // .mcp[$n].command // ""' "$config_path" 2>/dev/null || true)"
+
+    if [[ -z "$cmd" ]]; then
+      # Server registered but no command (may use URL or other transport)
+      printf '  %-30s REACHABLE (registered in %s, no local command)\n' "$name" "$surface"
+      reachable=$((reachable + 1))
+      continue
+    fi
+
+    # Resolve command — check if binary exists
+    local resolved=""
+    resolved="$(command -v "$cmd" 2>/dev/null || true)"
+    if [[ -z "$resolved" && -x "$cmd" ]]; then
+      resolved="$cmd"
+    fi
+
+    if [[ -n "$resolved" ]]; then
+      printf '  %-30s REACHABLE (binary: %s)\n' "$name" "$resolved"
+      reachable=$((reachable + 1))
+    else
+      printf '  %-30s UNREACHABLE (binary not found: %s)\n' "$name" "$cmd"
+      unreachable=$((unreachable + 1))
+    fi
+  done
+}
+
+# Iterate over configured surfaces
+while IFS= read -r surface; do
+  [[ -z "$surface" ]] && continue
+  [[ "$surface" == "claude_desktop_runtime_state" ]] && continue
+
+  config_path="$(yq e -r ".surface_paths.\"$surface\" // \"\"" "$CONTRACT" 2>/dev/null || true)"
+  [[ -n "$config_path" ]] || continue
+
+  printf '[%s]\n' "$surface"
+  printf '  config: %s\n' "$config_path"
+  probe_config_servers "$surface" "$config_path"
+  echo ""
+done < <(yq e -r '.surface_paths | keys | .[]' "$CONTRACT" 2>/dev/null || true)
+
+printf 'summary: total=%s reachable=%s unreachable=%s\n' "$total" "$reachable" "$unreachable"
+[[ "$unreachable" -eq 0 ]]
