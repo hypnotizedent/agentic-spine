@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# immich-reconcile-plan - Score EXIF richness + apply keeper decision order
+# TRIAGE: Read-only planner. Reads scan output, produces keep/drop plan.
+#
+# Outputs:
+#   keep_drop_plan.json in the same scan output directory
+#
+# Usage:
+#   immich-reconcile-plan [--scan-dir DIR]
+#
+# If --scan-dir is omitted, uses the latest scan under mailroom/outbox/immich-reconcile/
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+
+# --- Parse args ---
+SCAN_DIR=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --scan-dir) SCAN_DIR="$2"; shift 2 ;;
+    *) stop "unknown arg: $1" ;;
+  esac
+done
+
+# --- Resolve scan directory ---
+RECONCILE_BASE="${SPINE_ROOT}/mailroom/outbox/immich-reconcile"
+if [[ -z "$SCAN_DIR" ]]; then
+  if [[ ! -d "$RECONCILE_BASE" ]]; then
+    stop "No scan output found. Run immich.reconcile.scan first."
+  fi
+  SCAN_DIR=$(ls -1d "${RECONCILE_BASE}"/*/  2>/dev/null | sort | tail -n1)
+  SCAN_DIR="${SCAN_DIR%/}"
+fi
+
+[[ -d "$SCAN_DIR" ]] || stop "Scan directory not found: $SCAN_DIR"
+[[ -f "$SCAN_DIR/phash_groups.json" ]] || stop "Missing phash_groups.json in $SCAN_DIR"
+
+echo "immich.reconcile.plan"
+echo "scan_dir: ${SCAN_DIR}"
+echo
+
+# --- Run planner ---
+python3 - "$SCAN_DIR" << 'PYEOF'
+import json
+import sys
+import re
+
+scan_dir = sys.argv[1]
+
+# --- Load scan data ---
+with open(f"{scan_dir}/phash_groups.json") as f:
+    phash_data = json.load(f)
+
+sha_data = {"groups": []}
+sha_path = f"{scan_dir}/sha_groups.json"
+try:
+    with open(sha_path) as f:
+        sha_data = json.load(f)
+except FileNotFoundError:
+    pass
+
+run_ts = phash_data.get("run_ts", "unknown")
+
+# --- EXIF richness scoring ---
+# Each non-null EXIF field contributes points.
+# Camera metadata is weighted higher than location (originals-first policy).
+EXIF_WEIGHTS = {
+    "make": 2,
+    "model": 2,
+    "lens_model": 3,
+    "f_number": 2,
+    "exposure_time": 2,
+    "iso": 2,
+    "focal_length": 2,
+    "date_time_original": 3,
+    "latitude": 1,
+    "longitude": 1,
+    "city": 1,
+    "country": 1,
+    "state": 1,
+    "width": 1,
+    "height": 1,
+    "file_size": 1,
+    "orientation": 1,
+    "description": 2,
+    "rating": 1,
+}
+
+COPY_SUFFIX_RE = re.compile(r'[\s_-]*\(?(?:copy|kopie|copia|copie)\)?[\s_-]*\d*|[\s_-]*\(\d+\)(?=\.\w+$|$)', re.IGNORECASE)
+
+def exif_richness(exif):
+    """Score 0-30 based on populated EXIF fields."""
+    if not exif:
+        return 0
+    score = 0
+    for field, weight in EXIF_WEIGHTS.items():
+        val = exif.get(field)
+        if val is not None and val != "" and val != 0:
+            score += weight
+    return score
+
+def has_copy_suffix(filename):
+    """Detect copy-suffix patterns: (1), (2), _copy, etc."""
+    return bool(COPY_SUFFIX_RE.search(filename))
+
+def keeper_sort_key(asset):
+    """
+    Deterministic keeper decision order (lower = better keeper):
+    1. Prefer non-trashed
+    2. Prefer higher EXIF richness score
+    3. Prefer earlier localDateTime
+    4. Prefer cleaner filename (no copy suffix)
+    5. Stable UUID tie-break
+    """
+    is_trashed = 1 if asset.get("is_trashed", False) else 0
+    richness = -exif_richness(asset.get("exif", {}))  # negate: higher is better
+    local_dt = asset.get("local_date_time") or asset.get("file_created_at") or "9999"
+    copy_penalty = 1 if has_copy_suffix(asset.get("original_filename", "")) else 0
+    uuid = asset.get("id", "")
+    return (is_trashed, richness, local_dt, copy_penalty, uuid)
+
+def plan_group(group, group_type):
+    """Produce keep/drop decisions for a duplicate group."""
+    assets = group.get("assets", [])
+    if len(assets) < 2:
+        return None
+
+    # Score all assets
+    scored = []
+    for a in assets:
+        exif = a.get("exif", {})
+        scored.append({
+            **a,
+            "exif_richness": exif_richness(exif),
+            "has_copy_suffix": has_copy_suffix(a.get("original_filename", "")),
+        })
+
+    # Sort: best keeper first
+    scored.sort(key=keeper_sort_key)
+
+    keeper = scored[0]
+    drops = scored[1:]
+
+    # Confidence: high if keeper is clearly better, medium if close
+    keeper_score = keeper["exif_richness"]
+    best_drop_score = max(d["exif_richness"] for d in drops) if drops else 0
+    if keeper_score > best_drop_score + 5:
+        confidence = "high"
+    elif keeper_score > best_drop_score:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    return {
+        "group_id": group.get("duplicate_id") or group.get("checksum", ""),
+        "group_type": group_type,
+        "asset_count": len(assets),
+        "confidence": confidence,
+        "keeper": {
+            "id": keeper["id"],
+            "original_filename": keeper.get("original_filename", ""),
+            "exif_richness": keeper["exif_richness"],
+            "is_trashed": keeper.get("is_trashed", False),
+            "local_date_time": keeper.get("local_date_time"),
+            "reason": f"richness={keeper['exif_richness']}, trashed={keeper.get('is_trashed', False)}, copy_suffix={keeper.get('has_copy_suffix', False)}"
+        },
+        "drops": [{
+            "id": d["id"],
+            "original_filename": d.get("original_filename", ""),
+            "exif_richness": d["exif_richness"],
+            "is_trashed": d.get("is_trashed", False),
+            "local_date_time": d.get("local_date_time"),
+            "reason": f"richness={d['exif_richness']}, trashed={d.get('is_trashed', False)}, copy_suffix={d.get('has_copy_suffix', False)}"
+        } for d in drops]
+    }
+
+# --- Process all groups ---
+decisions = []
+skipped = 0
+
+# pHash groups
+for g in phash_data.get("groups", []):
+    result = plan_group(g, "phash")
+    if result:
+        decisions.append(result)
+    else:
+        skipped += 1
+
+# SHA groups (only those not already covered by pHash)
+phash_asset_ids = set()
+for g in phash_data.get("groups", []):
+    for a in g.get("assets", []):
+        phash_asset_ids.add(a.get("id", ""))
+
+for g in sha_data.get("groups", []):
+    # Check if all assets in this SHA group are already in pHash groups
+    sha_ids = set(a.get("id", "") for a in g.get("assets", []))
+    if sha_ids.issubset(phash_asset_ids):
+        skipped += 1
+        continue
+    result = plan_group(g, "sha")
+    if result:
+        decisions.append(result)
+    else:
+        skipped += 1
+
+# --- Statistics ---
+total_drops = sum(len(d["drops"]) for d in decisions)
+total_already_trashed = sum(
+    1 for d in decisions for drop in d["drops"] if drop.get("is_trashed")
+)
+confidence_counts = {}
+for d in decisions:
+    c = d["confidence"]
+    confidence_counts[c] = confidence_counts.get(c, 0) + 1
+
+plan = {
+    "run_ts": run_ts,
+    "scan_dir": scan_dir,
+    "stats": {
+        "total_groups": len(decisions),
+        "total_drops": total_drops,
+        "total_already_trashed": total_already_trashed,
+        "actionable_drops": total_drops - total_already_trashed,
+        "skipped_groups": skipped,
+        "confidence": confidence_counts,
+    },
+    "decisions": decisions
+}
+
+with open(f"{scan_dir}/keep_drop_plan.json", "w") as f:
+    json.dump(plan, f, indent=2)
+
+# --- Print summary ---
+print(f"  Total groups planned:  {len(decisions)}")
+print(f"  Total drops:           {total_drops}")
+print(f"  Already trashed:       {total_already_trashed}")
+print(f"  Actionable drops:      {total_drops - total_already_trashed}")
+print(f"  Skipped groups:        {skipped}")
+print(f"  Confidence breakdown:  {confidence_counts}")
+PYEOF
+
+echo
+echo "Plan complete."
+echo "output: ${SCAN_DIR}/keep_drop_plan.json"
+echo "status: OK"

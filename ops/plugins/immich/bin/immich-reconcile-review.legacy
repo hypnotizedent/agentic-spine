@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# immich-reconcile-review - Human-readable summary of keep/drop plan
+# TRIAGE: Read-only reviewer. Reads plan output, prints formatted report.
+#
+# Usage:
+#   immich-reconcile-review [--scan-dir DIR] [--top N] [--show-low]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+
+# --- Parse args ---
+SCAN_DIR=""
+TOP=20
+SHOW_LOW=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --scan-dir) SCAN_DIR="$2"; shift 2 ;;
+    --top) TOP="$2"; shift 2 ;;
+    --show-low) SHOW_LOW="1"; shift ;;
+    *) stop "unknown arg: $1" ;;
+  esac
+done
+
+# --- Resolve scan directory ---
+RECONCILE_BASE="${SPINE_ROOT}/mailroom/outbox/immich-reconcile"
+if [[ -z "$SCAN_DIR" ]]; then
+  if [[ ! -d "$RECONCILE_BASE" ]]; then
+    stop "No scan output found. Run immich.reconcile.scan first."
+  fi
+  SCAN_DIR=$(ls -1d "${RECONCILE_BASE}"/*/  2>/dev/null | sort | tail -n1)
+  SCAN_DIR="${SCAN_DIR%/}"
+fi
+
+PLAN_FILE="${SCAN_DIR}/keep_drop_plan.json"
+[[ -f "$PLAN_FILE" ]] || stop "Missing keep_drop_plan.json in $SCAN_DIR. Run immich.reconcile.plan first."
+
+echo "immich.reconcile.review"
+echo "plan: ${PLAN_FILE}"
+echo
+
+python3 - "$PLAN_FILE" "$TOP" "$SHOW_LOW" << 'PYEOF'
+import json
+import sys
+
+plan_file = sys.argv[1]
+top_n = int(sys.argv[2])
+show_low = sys.argv[3] == "1"
+
+with open(plan_file) as f:
+    plan = json.load(f)
+
+stats = plan.get("stats", {})
+decisions = plan.get("decisions", [])
+
+# --- Overall Summary ---
+print("=" * 70)
+print("RECONCILIATION PLAN REVIEW")
+print("=" * 70)
+print(f"  Run timestamp:     {plan.get('run_ts', '?')}")
+print(f"  Scan directory:    {plan.get('scan_dir', '?')}")
+print()
+print(f"  Total groups:      {stats.get('total_groups', 0)}")
+print(f"  Total drops:       {stats.get('total_drops', 0)}")
+print(f"  Already trashed:   {stats.get('total_already_trashed', 0)}")
+print(f"  Actionable drops:  {stats.get('actionable_drops', 0)}")
+print(f"  Skipped:           {stats.get('skipped_groups', 0)}")
+print()
+
+conf = stats.get("confidence", {})
+print("  Confidence breakdown:")
+for level in ["high", "medium", "low"]:
+    count = conf.get(level, 0)
+    bar = "#" * min(count // 10, 50)
+    print(f"    {level:8} {count:6}  {bar}")
+print()
+
+# --- Type breakdown ---
+phash_groups = [d for d in decisions if d.get("group_type") == "phash"]
+sha_groups = [d for d in decisions if d.get("group_type") == "sha"]
+print(f"  By type:")
+print(f"    pHash groups:    {len(phash_groups)}")
+print(f"    SHA groups:      {len(sha_groups)}")
+print()
+
+# --- Largest groups ---
+by_size = sorted(decisions, key=lambda d: d.get("asset_count", 0), reverse=True)
+print("-" * 70)
+print(f"LARGEST GROUPS (top {top_n})")
+print("-" * 70)
+for d in by_size[:top_n]:
+    keeper = d.get("keeper", {})
+    drops = d.get("drops", [])
+    actionable = sum(1 for dr in drops if not dr.get("is_trashed"))
+    print(f"  [{d['confidence']:6}] {d['group_type']:5} | {d['asset_count']} assets | "
+          f"keeper: {keeper.get('original_filename', '?')[:40]} (richness={keeper.get('exif_richness', 0)}) | "
+          f"{actionable} actionable drops")
+print()
+
+# --- Low confidence groups (need human review) ---
+low_conf = [d for d in decisions if d.get("confidence") == "low"]
+if low_conf:
+    print("-" * 70)
+    print(f"LOW CONFIDENCE GROUPS ({len(low_conf)} — may need manual review)")
+    print("-" * 70)
+    shown = low_conf[:top_n] if show_low else low_conf[:5]
+    for d in shown:
+        keeper = d.get("keeper", {})
+        drops = d.get("drops", [])
+        print(f"  Group: {d['group_id'][:36]}  ({d['group_type']})")
+        print(f"    KEEP: {keeper.get('original_filename', '?')[:50]}  richness={keeper.get('exif_richness', 0)}  dt={keeper.get('local_date_time', '?')[:19]}")
+        for dr in drops[:3]:
+            print(f"    DROP: {dr.get('original_filename', '?')[:50]}  richness={dr.get('exif_richness', 0)}  dt={dr.get('local_date_time', '?')[:19]}  trashed={dr.get('is_trashed')}")
+        if len(drops) > 3:
+            print(f"    ... and {len(drops) - 3} more drops")
+        print()
+    if not show_low and len(low_conf) > 5:
+        print(f"  (showing 5 of {len(low_conf)} — use --show-low to see all)")
+    print()
+
+# --- Actionable summary ---
+actionable_drops = [
+    dr for d in decisions for dr in d.get("drops", [])
+    if not dr.get("is_trashed")
+]
+print("=" * 70)
+print("ACTIONABLE SUMMARY")
+print("=" * 70)
+print(f"  Assets to trash:   {len(actionable_drops)}")
+print(f"  Already trashed:   {stats.get('total_already_trashed', 0)}")
+print(f"  Total cleanup:     {stats.get('total_drops', 0)}")
+print()
+print("Next steps:")
+print("  1. Review low-confidence groups above")
+print("  2. Run: immich.reconcile.apply --scan-dir <dir>")
+print("     (requires manual approval, writes rollback manifest)")
+print()
+print("status: OK")
+PYEOF
