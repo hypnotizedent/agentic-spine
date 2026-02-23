@@ -164,6 +164,17 @@ run_gate_ids() {
 
   ((${#gate_ids[@]} > 0)) || fail "no gates resolved for run"
 
+  # Pre-fetch all gate metadata in a single yq call (avoids 3 calls per gate).
+  declare -A gate_script=()
+  declare -A gate_inline=()
+  declare -A gate_retired=()
+  while IFS=$'\t' read -r _gid _script _inline _retired; do
+    [[ -n "$_gid" ]] || continue
+    gate_script["$_gid"]="$_script"
+    gate_inline["$_gid"]="$_inline"
+    gate_retired["$_gid"]="$_retired"
+  done < <(yq e -r '.gates[] | [.id, (.check_script // ""), (.inline // false | tostring), (.retired // false | tostring)] | @tsv' "$REGISTRY" 2>/dev/null || true)
+
   local pass_count=0
   local fail_count=0
   local skipped_inline=0
@@ -179,9 +190,9 @@ run_gate_ids() {
   for gid in "${gate_ids[@]}"; do
     local script_rel inline retired script_abs tmp rc
 
-    script_rel="$(yq e -r ".gates[] | select(.id == \"$gid\") | .check_script // \"\"" "$REGISTRY" 2>/dev/null || true)"
-    inline="$(yq e -r ".gates[] | select(.id == \"$gid\") | .inline // false" "$REGISTRY" 2>/dev/null || echo false)"
-    retired="$(yq e -r ".gates[] | select(.id == \"$gid\") | .retired // false" "$REGISTRY" 2>/dev/null || echo false)"
+    script_rel="${gate_script[$gid]:-}"
+    inline="${gate_inline[$gid]:-false}"
+    retired="${gate_retired[$gid]:-false}"
 
     if [[ -z "$script_rel" || "$script_rel" == "null" ]]; then
       fail_count=$((fail_count + 1))

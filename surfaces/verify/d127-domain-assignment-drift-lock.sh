@@ -58,30 +58,29 @@ domain_defined() {
 mapfile -t active_gate_ids < <(yq e -r '.gates[] | select((.retired // false) != true) | .id' "$REGISTRY")
 [[ "${#active_gate_ids[@]}" -gt 0 ]] || fail "no active gates found in registry"
 
-# Build assignment lookup
-mapfile -t assignment_rows < <(yq -o=json e '.gate_assignments[]' "$TOPOLOGY" 2>/dev/null | jq -c '.')
-[[ "${#assignment_rows[@]}" -gt 0 ]] || fail "topology.gate_assignments is empty"
-
+# Build assignment lookup — single yq call with TSV output (avoids per-row jq)
 declare -A assign_count=()
 declare -A assign_primary=()
+assignment_line_count=0
 
-for row in "${assignment_rows[@]}"; do
-  gate_id="$(jq -r '.gate_id // ""' <<<"$row")"
-  primary_domain="$(jq -r '.primary_domain // ""' <<<"$row")"
-  family="$(jq -r '.family // ""' <<<"$row")"
+while IFS='|' read -r gate_id primary_domain secondary_csv family; do
   [[ -n "$gate_id" ]] || continue
+  assignment_line_count=$((assignment_line_count + 1))
   assign_count["$gate_id"]=$(( ${assign_count["$gate_id"]:-0} + 1 ))
   assign_primary["$gate_id"]="$primary_domain"
 
   [[ -n "$primary_domain" ]] || fail "gate $gate_id has empty primary_domain"
   domain_defined "$primary_domain" || fail "gate $gate_id primary_domain '$primary_domain' is undefined"
 
-  while IFS= read -r sec; do
+  if [[ -n "$secondary_csv" ]]; then
+    IFS=',' read -r -a sec_arr <<< "$secondary_csv"
+    for sec in "${sec_arr[@]}"; do
       [[ -z "$sec" ]] && continue
       domain_defined "$sec" || fail "gate $gate_id secondary_domain '$sec' is undefined"
-  done < <(jq -r '.secondary_domains[]?' <<<"$row")
-
-done
+    done
+  fi
+done < <(yq e -r '.gate_assignments[] | [.gate_id, (.primary_domain // ""), ((.secondary_domains // []) | join(",")), (.family // "")] | join("|")' "$TOPOLOGY" 2>/dev/null)
+[[ "$assignment_line_count" -gt 0 ]] || fail "topology.gate_assignments is empty"
 
 # Every active gate must be assigned exactly once.
 for gid in "${active_gate_ids[@]}"; do
@@ -96,20 +95,29 @@ for gid in "${active_gate_ids[@]}"; do
 done
 
 # Core gates must be active + assigned.
+# Build active-gate lookup from already-extracted active_gate_ids (avoids per-gate yq).
+declare -A active_gate_set=()
+for _ag in "${active_gate_ids[@]}"; do active_gate_set["$_ag"]=1; done
+
 for gid in "${core_gate_ids[@]}"; do
-  is_active="$(yq e -r ".gates[] | select(.id == \"$gid\") | ((.retired // false) | tostring)" "$REGISTRY" | head -n1)"
-  [[ "$is_active" == "false" ]] || fail "core gate '$gid' is retired or missing"
+  [[ -n "${active_gate_set[$gid]:-}" ]] || fail "core gate '$gid' is retired or missing"
   [[ -n "${assign_primary["$gid"]:-}" ]] || fail "core gate '$gid' has no assignment"
 done
 
-require_primary="$(yq e -r '.validation_rules.require_primary_domain_for_all_active_gates // true' "$TOPOLOGY")"
-reject_undefined="$(yq e -r '.validation_rules.reject_undefined_domain_refs // true' "$TOPOLOGY")"
-require_release_coverage="$(yq e -r '.validation_rules.require_release_sequence_coverage // true' "$TOPOLOGY")"
+# Batch validation_rules extraction (single yq call instead of 3).
+_vrules="$(yq e -r '[
+  (.validation_rules.require_primary_domain_for_all_active_gates // true | tostring),
+  (.validation_rules.reject_undefined_domain_refs // true | tostring),
+  (.validation_rules.require_release_sequence_coverage // true | tostring)
+] | @tsv' "$TOPOLOGY")"
+IFS=$'\t' read -r require_primary reject_undefined require_release_coverage <<< "$_vrules"
+
+# Pre-fetch release_sequence once (used in both checks below).
+mapfile -t release_domains < <(yq e -r '.release_sequence[]?' "$TOPOLOGY")
 
 if [[ "$reject_undefined" == "true" ]]; then
   mapfile -t profile_domains < <(yq e -r '.domains | keys | .[]' "$DOMAIN_PROFILES")
   mapfile -t agent_domains < <(yq e -r '.profiles[].domains[]?' "$AGENT_PROFILES")
-  mapfile -t release_domains < <(yq e -r '.release_sequence[]?' "$TOPOLOGY")
 
   for dom in "${profile_domains[@]}" "${agent_domains[@]}" "${release_domains[@]}"; do
     [[ -z "$dom" ]] && continue
@@ -118,18 +126,13 @@ if [[ "$reject_undefined" == "true" ]]; then
 fi
 
 if [[ "$require_release_coverage" == "true" ]]; then
-  mapfile -t release_domains < <(yq e -r '.release_sequence[]?' "$TOPOLOGY")
   [[ "${#release_domains[@]}" -gt 0 ]] || fail "release_sequence is empty"
 
+  declare -A _release_set=()
+  for rd in "${release_domains[@]}"; do _release_set["$rd"]=1; done
+
   for dom in "${defined_domains[@]}"; do
-    found=0
-    for rd in "${release_domains[@]}"; do
-      if [[ "$rd" == "$dom" ]]; then
-        found=1
-        break
-      fi
-    done
-    [[ "$found" -eq 1 ]] || fail "release_sequence missing domain '$dom'"
+    [[ -n "${_release_set[$dom]:-}" ]] || fail "release_sequence missing domain '$dom'"
   done
 fi
 

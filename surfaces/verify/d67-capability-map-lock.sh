@@ -30,31 +30,25 @@ map_count=${#map_caps[@]}
 [[ "$source_count" -eq 0 ]] && fail "no capabilities found in source"
 [[ "$map_count" -eq 0 ]] && fail "no capabilities found in map"
 
-# Check for caps in source but missing from map
-missing=0
-for cap in "${source_caps[@]}"; do
-  found=false
-  for mcap in "${map_caps[@]}"; do
-    [[ "$cap" == "$mcap" ]] && found=true && break
-  done
-  if [[ "$found" != "true" ]]; then
-    echo "  MISSING from map: $cap" >&2
-    missing=$((missing + 1))
-  fi
-done
+# Use comm on sorted lists instead of O(n^2) nested loops
+source_sorted="$(printf '%s\n' "${source_caps[@]}" | sort)"
+map_sorted="$(printf '%s\n' "${map_caps[@]}" | sort)"
 
-# Check for phantom caps in map not in source
+# Items in source but not in map (missing)
+missing=0
+while IFS= read -r cap; do
+  [[ -z "$cap" ]] && continue
+  echo "  MISSING from map: $cap" >&2
+  missing=$((missing + 1))
+done < <(comm -23 <(echo "$source_sorted") <(echo "$map_sorted"))
+
+# Items in map but not in source (phantom)
 phantom=0
-for mcap in "${map_caps[@]}"; do
-  found=false
-  for cap in "${source_caps[@]}"; do
-    [[ "$cap" == "$mcap" ]] && found=true && break
-  done
-  if [[ "$found" != "true" ]]; then
-    echo "  PHANTOM in map: $mcap" >&2
-    phantom=$((phantom + 1))
-  fi
-done
+while IFS= read -r mcap; do
+  [[ -z "$mcap" ]] && continue
+  echo "  PHANTOM in map: $mcap" >&2
+  phantom=$((phantom + 1))
+done < <(comm -13 <(echo "$source_sorted") <(echo "$map_sorted"))
 
 if [[ $missing -gt 0 || $phantom -gt 0 ]]; then
   fail "map drift: $missing missing, $phantom phantom (source=$source_count map=$map_count)"
