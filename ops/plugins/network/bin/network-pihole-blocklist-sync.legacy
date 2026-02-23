@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# network.pihole.blocklist.sync
+# Sync Pi-hole adlists between shop and home instances using v6 API.
+# Dry-run by default. Pass --execute to apply changes.
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+source "$SPINE_ROOT/ops/tools/infisical-agent.sh"
+
+EXECUTE=0
+DIRECTION="bidirectional"
+
+usage() {
+  cat <<'EOF'
+network-pihole-blocklist-sync
+
+Usage:
+  network-pihole-blocklist-sync [--execute] [--direction <bidirectional|shop-to-home|home-to-shop>]
+
+Behavior:
+  - Fetches adlists from both shop and home Pi-hole v6 instances.
+  - Compares lists and reports differences.
+  - Dry-run by default.
+  - With --execute: adds missing lists to bring both instances into parity,
+    then updates gravity on any instance that changed.
+
+Instances:
+  Shop: infra-core (100.92.91.128:8053)
+  Home: pihole-home (10.0.0.53:80)
+
+Examples:
+  network-pihole-blocklist-sync
+  network-pihole-blocklist-sync --execute
+  network-pihole-blocklist-sync --execute --direction shop-to-home
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --execute) EXECUTE=1; shift ;;
+    --direction) DIRECTION="${2:?--direction requires a value}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$DIRECTION" in
+  bidirectional|shop-to-home|home-to-shop) ;;
+  *) echo "FAIL: --direction must be bidirectional, shop-to-home, or home-to-shop" >&2; exit 2 ;;
+esac
+
+command -v jq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: jq" >&2; exit 2; }
+command -v curl >/dev/null 2>&1 || { echo "STOP (2): missing dependency: curl" >&2; exit 2; }
+
+# Instance definitions
+SHOP_HOST="100.92.91.128"
+SHOP_PORT="8053"
+HOME_HOST="10.0.0.53"
+HOME_PORT="80"
+
+# Fetch secrets
+SHOP_PW="$(infisical_get_secret "infrastructure" "prod" "PIHOLE_WEB_PASSWORD")"
+HOME_PW="$(infisical_get_secret "infrastructure" "prod" "PIHOLE_HOME_PASSWORD")"
+
+[[ -n "$SHOP_PW" ]] || { echo "FAIL: could not retrieve PIHOLE_WEB_PASSWORD from Infisical" >&2; exit 1; }
+[[ -n "$HOME_PW" ]] || { echo "FAIL: could not retrieve PIHOLE_HOME_PASSWORD from Infisical" >&2; exit 1; }
+
+# Auth helper: returns SID
+pihole_auth() {
+  local host="$1" port="$2" password="$3"
+  local sid
+  sid=$(curl -s --connect-timeout 10 -X POST "http://${host}:${port}/api/auth" \
+    -H 'Content-Type: application/json' \
+    -d "{\"password\":\"${password}\"}" | jq -r '.session.sid // empty')
+  [[ -n "$sid" ]] || { echo "FAIL: auth failed for ${host}:${port}" >&2; return 1; }
+  echo "$sid"
+}
+
+# Fetch adlists: returns JSON array of {address, type, enabled, comment}
+pihole_get_lists() {
+  local host="$1" port="$2" sid="$3"
+  curl -s --connect-timeout 10 "http://${host}:${port}/api/lists" \
+    -H "sid: ${sid}" | jq '[.lists[] | {address, type, enabled, comment}]'
+}
+
+# Add adlist (type must be query param per v6 API)
+pihole_add_list() {
+  local host="$1" port="$2" sid="$3" address="$4" list_type="$5" comment="$6"
+  curl -s --connect-timeout 10 -X POST "http://${host}:${port}/api/lists?type=${list_type}" \
+    -H "sid: ${sid}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"address\":\"${address}\",\"comment\":\"${comment}\"}" | jq .
+}
+
+# Update gravity via SSH (API has no gravity endpoint)
+pihole_gravity() {
+  local target="$1"
+  if [[ "$target" == "shop" ]]; then
+    ssh infra-core 'sudo docker exec pihole pihole -g' 2>&1
+  else
+    ssh pihole-home 'pihole -g' 2>&1
+  fi
+}
+
+echo "network.pihole.blocklist.sync"
+echo "direction: $DIRECTION"
+echo "mode: $([ "$EXECUTE" -eq 1 ] && echo "EXECUTE" || echo "DRY-RUN")"
+echo
+
+# Authenticate
+echo "-- authenticating --"
+SHOP_SID="$(pihole_auth "$SHOP_HOST" "$SHOP_PORT" "$SHOP_PW")"
+echo "shop (${SHOP_HOST}:${SHOP_PORT}): authenticated"
+HOME_SID="$(pihole_auth "$HOME_HOST" "$HOME_PORT" "$HOME_PW")"
+echo "home (${HOME_HOST}:${HOME_PORT}): authenticated"
+echo
+
+# Fetch lists
+echo "-- fetching adlists --"
+SHOP_LISTS="$(pihole_get_lists "$SHOP_HOST" "$SHOP_PORT" "$SHOP_SID")"
+HOME_LISTS="$(pihole_get_lists "$HOME_HOST" "$HOME_PORT" "$HOME_SID")"
+
+SHOP_COUNT="$(echo "$SHOP_LISTS" | jq length)"
+HOME_COUNT="$(echo "$HOME_LISTS" | jq length)"
+echo "shop: $SHOP_COUNT lists"
+echo "home: $HOME_COUNT lists"
+echo
+
+# Extract addresses for comparison
+SHOP_ADDRS="$(echo "$SHOP_LISTS" | jq -r '.[].address' | sort)"
+HOME_ADDRS="$(echo "$HOME_LISTS" | jq -r '.[].address' | sort)"
+
+# Find differences
+MISSING_ON_HOME=""
+MISSING_ON_SHOP=""
+
+if [[ "$DIRECTION" == "bidirectional" || "$DIRECTION" == "shop-to-home" ]]; then
+  while IFS= read -r addr; do
+    [[ -z "$addr" ]] && continue
+    if ! echo "$HOME_ADDRS" | grep -qxF "$addr"; then
+      MISSING_ON_HOME="${MISSING_ON_HOME}${addr}\n"
+    fi
+  done <<< "$SHOP_ADDRS"
+fi
+
+if [[ "$DIRECTION" == "bidirectional" || "$DIRECTION" == "home-to-shop" ]]; then
+  while IFS= read -r addr; do
+    [[ -z "$addr" ]] && continue
+    if ! echo "$SHOP_ADDRS" | grep -qxF "$addr"; then
+      MISSING_ON_SHOP="${MISSING_ON_SHOP}${addr}\n"
+    fi
+  done <<< "$HOME_ADDRS"
+fi
+
+# Report
+SHOP_CHANGED=0
+HOME_CHANGED=0
+
+echo "-- sync analysis --"
+if [[ -n "$MISSING_ON_HOME" ]]; then
+  echo "Missing on HOME (will add from shop):"
+  printf "  %b" "$MISSING_ON_HOME"
+  HOME_CHANGED=1
+else
+  [[ "$DIRECTION" == "bidirectional" || "$DIRECTION" == "shop-to-home" ]] && echo "HOME: in sync with shop"
+fi
+
+if [[ -n "$MISSING_ON_SHOP" ]]; then
+  echo "Missing on SHOP (will add from home):"
+  printf "  %b" "$MISSING_ON_SHOP"
+  SHOP_CHANGED=1
+else
+  [[ "$DIRECTION" == "bidirectional" || "$DIRECTION" == "home-to-shop" ]] && echo "SHOP: in sync with home"
+fi
+
+if [[ "$HOME_CHANGED" -eq 0 && "$SHOP_CHANGED" -eq 0 ]]; then
+  echo
+  echo "RESULT: both instances are congruent. Nothing to do."
+  exit 0
+fi
+
+echo
+
+if [[ "$EXECUTE" -ne 1 ]]; then
+  echo "DRY-RUN: no changes applied. Re-run with --execute to sync."
+  exit 0
+fi
+
+# Apply missing lists
+if [[ -n "$MISSING_ON_HOME" ]]; then
+  echo "-- adding missing lists to HOME --"
+  while IFS= read -r addr; do
+    [[ -z "$addr" ]] && continue
+    list_type="$(echo "$SHOP_LISTS" | jq -r --arg a "$addr" '.[] | select(.address == $a) | .type')"
+    comment="$(echo "$SHOP_LISTS" | jq -r --arg a "$addr" '.[] | select(.address == $a) | .comment')"
+    echo "  adding: $addr (type=$list_type)"
+    pihole_add_list "$HOME_HOST" "$HOME_PORT" "$HOME_SID" "$addr" "$list_type" "${comment:-synced from shop}" >/dev/null
+  done < <(printf '%b' "$MISSING_ON_HOME")
+fi
+
+if [[ -n "$MISSING_ON_SHOP" ]]; then
+  echo "-- adding missing lists to SHOP --"
+  while IFS= read -r addr; do
+    [[ -z "$addr" ]] && continue
+    list_type="$(echo "$HOME_LISTS" | jq -r --arg a "$addr" '.[] | select(.address == $a) | .type')"
+    comment="$(echo "$HOME_LISTS" | jq -r --arg a "$addr" '.[] | select(.address == $a) | .comment')"
+    echo "  adding: $addr (type=$list_type)"
+    pihole_add_list "$SHOP_HOST" "$SHOP_PORT" "$SHOP_SID" "$addr" "$list_type" "${comment:-synced from home}" >/dev/null
+  done < <(printf '%b' "$MISSING_ON_SHOP")
+fi
+
+# Update gravity where needed
+if [[ "$HOME_CHANGED" -eq 1 ]]; then
+  echo
+  echo "-- updating gravity on HOME --"
+  pihole_gravity "home"
+fi
+
+if [[ "$SHOP_CHANGED" -eq 1 ]]; then
+  echo
+  echo "-- updating gravity on SHOP --"
+  pihole_gravity "shop"
+fi
+
+echo
+echo "DONE: blocklist sync complete."
+
+# Final verification
+echo
+echo "-- post-sync verification --"
+SHOP_SID2="$(pihole_auth "$SHOP_HOST" "$SHOP_PORT" "$SHOP_PW")"
+HOME_SID2="$(pihole_auth "$HOME_HOST" "$HOME_PORT" "$HOME_PW")"
+SHOP_FINAL="$(pihole_get_lists "$SHOP_HOST" "$SHOP_PORT" "$SHOP_SID2" | jq length)"
+HOME_FINAL="$(pihole_get_lists "$HOME_HOST" "$HOME_PORT" "$HOME_SID2" | jq length)"
+echo "shop: $SHOP_FINAL lists"
+echo "home: $HOME_FINAL lists"
+[[ "$SHOP_FINAL" -eq "$HOME_FINAL" ]] && echo "PARITY: both instances have $SHOP_FINAL lists" || echo "WARN: list count mismatch (shop=$SHOP_FINAL, home=$HOME_FINAL)"
