@@ -17,8 +17,8 @@ fail() {
 [[ -f "$PLAN_PATH" ]] || fail "missing migration plan: $PLAN_PATH"
 command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
 
-latest_inventory="$(ls -1 "$AUDITS_DIR"/MIGRATION_INVENTORY_*.yaml 2>/dev/null | sort | tail -n 1 || true)"
-[[ -n "$latest_inventory" ]] || fail "missing inventory: docs/governance/_audits/MIGRATION_INVENTORY_YYYYMMDD.yaml"
+latest_inventory="$(ls -1 "$MIGRATION_RECEIPTS_DIR"/MIGRATION_INVENTORY_*.yaml 2>/dev/null | sort | tail -n 1 || true)"
+[[ -n "$latest_inventory" ]] || fail "missing inventory: receipts/audits/migration/MIGRATION_INVENTORY_YYYYMMDD.yaml"
 latest_move_receipt="$(ls -1 "$MIGRATION_RECEIPTS_DIR"/H2_*_move_receipt.yaml 2>/dev/null | sort | tail -n 1 || true)"
 
 python3 - "$latest_inventory" "$PLAN_PATH" "$latest_move_receipt" <<'PY'
