@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.device.map.build — Cross-reference HA entities with home device registry + Z2M devices
+# Queries HA REST API (states + template) and merges with local SSOT bindings.
+# Output: ops/bindings/ha.device.map.yaml
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+OUTPUT="$SPINE_ROOT/ops/bindings/ha.device.map.yaml"
+DEVICE_REGISTRY="$SPINE_ROOT/ops/bindings/home.device.registry.yaml"
+Z2M_REGISTRY="$SPINE_ROOT/ops/bindings/z2m.devices.yaml"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_PORT="${HA_PORT:-8123}"
+HA_BASE="http://${HA_HOST}:${HA_PORT}"
+
+TMPDIR_WORK=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+
+echo "ha.device.map.build"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRECONDITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+command -v python3 >/dev/null 2>&1 || { echo "STOP (2): python3 not found"; exit 2; }
+command -v curl >/dev/null 2>&1 || { echo "STOP (2): curl not found"; exit 2; }
+
+if [[ ! -f "$DEVICE_REGISTRY" ]]; then
+  echo "STOP (2): home.device.registry.yaml not found"
+  exit 2
+fi
+
+if [[ ! -f "$Z2M_REGISTRY" ]]; then
+  echo "STOP (2): z2m.devices.yaml not found"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RETRIEVE HA TOKEN
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ ! -x "$INFISICAL_AGENT" ]]; then
+  echo "STOP (2): infisical-agent.sh not found"
+  exit 2
+fi
+
+HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+
+if [[ -z "${HA_TOKEN:-}" ]]; then
+  echo "STOP (2): could not retrieve HA_API_TOKEN from Infisical"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUERY HA API
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 1. Get all states
+echo "Fetching HA states..."
+HTTP_CODE=$(curl -s -o "$TMPDIR_WORK/states.json" -w '%{http_code}' --connect-timeout 10 \
+  -H "Authorization: Bearer $HA_TOKEN" "${HA_BASE}/api/states" 2>/dev/null) || HTTP_CODE="000"
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "STOP (2): HA API returned HTTP $HTTP_CODE"
+  exit 2
+fi
+
+# 2. Get device details via template endpoint (REST device_registry is WS-only)
+echo "Fetching HA device details via template..."
+curl -s -X POST "${HA_BASE}/api/template" \
+  -H "Authorization: Bearer $HA_TOKEN" \
+  -H "Content-Type: application/json" \
+  --connect-timeout 15 \
+  -d '{"template": "{% set ns = namespace(devices=[]) %}{% for state in states %}{% set did = device_id(state.entity_id) %}{% if did and did not in ns.devices %}{% set ns.devices = ns.devices + [did] %}{% endif %}{% endfor %}{% for did in ns.devices %}{{ did }}|{{ device_attr(did, \"name\") }}|{{ device_attr(did, \"manufacturer\") }}|{{ device_attr(did, \"model\") }}|{{ device_attr(did, \"identifiers\") }}|{{ device_attr(did, \"connections\") }}|{{ area_name(did) }}\n{% endfor %}"}' \
+  > "$TMPDIR_WORK/devices.txt" 2>/dev/null
+
+if [[ ! -s "$TMPDIR_WORK/devices.txt" ]]; then
+  echo "STOP (2): template endpoint returned empty device list"
+  exit 2
+fi
+
+# 3. Get entity -> device_id mapping via template
+echo "Fetching entity-device mapping..."
+curl -s -X POST "${HA_BASE}/api/template" \
+  -H "Authorization: Bearer $HA_TOKEN" \
+  -H "Content-Type: application/json" \
+  --connect-timeout 15 \
+  -d '{"template": "{% for state in states %}{% set did = device_id(state.entity_id) %}{% if did %}{{ state.entity_id }}|{{ did }}\n{% endif %}{% endfor %}"}' \
+  > "$TMPDIR_WORK/entity_device_map.txt" 2>/dev/null
+
+echo "Building cross-reference map..."
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CROSS-REFERENCE (Python)
+# ─────────────────────────────────────────────────────────────────────────────
+
+python3 - "$TMPDIR_WORK" "$DEVICE_REGISTRY" "$Z2M_REGISTRY" "$OUTPUT" << 'PYEOF'
+import json, sys, datetime, re, os
+
+try:
+    import yaml
+except ImportError:
+    print("STOP (2): PyYAML not installed", file=sys.stderr)
+    sys.exit(2)
+
+tmpdir, dev_reg_path, z2m_reg_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+# ── Load HA states ──────────────────────────────────────────────────────────
+with open(os.path.join(tmpdir, 'states.json'), 'r') as f:
+    states = json.load(f)
+
+# ── Load HA device details ──────────────────────────────────────────────────
+ha_devices = {}  # device_id -> {name, manufacturer, model, identifiers, connections, area}
+with open(os.path.join(tmpdir, 'devices.txt'), 'r') as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split('|')
+        if len(parts) < 7:
+            continue
+        did = parts[0]
+        ha_devices[did] = {
+            'name': parts[1],
+            'manufacturer': parts[2],
+            'model': parts[3],
+            'identifiers_raw': parts[4],
+            'connections_raw': parts[5],
+            'area': parts[6] if parts[6] != 'None' else None,
+        }
+
+# ── Parse MAC addresses from connections ────────────────────────────────────
+mac_re = re.compile(r"'mac',\s*'([0-9a-f:]+)'", re.I)
+for did, dev in ha_devices.items():
+    macs = mac_re.findall(dev['connections_raw'])
+    dev['macs'] = [m.lower() for m in macs]
+
+# ── Parse Z2M IEEE from identifiers ────────────────────────────────────────
+z2m_ieee_re = re.compile(r"zigbee2mqtt_(0x[0-9a-f]+)", re.I)
+for did, dev in ha_devices.items():
+    matches = z2m_ieee_re.findall(dev['identifiers_raw'])
+    dev['z2m_ieee'] = matches[0] if matches else None
+
+# ── Load entity -> device_id mapping ────────────────────────────────────────
+entity_to_device = {}
+with open(os.path.join(tmpdir, 'entity_device_map.txt'), 'r') as f:
+    for line in f:
+        line = line.strip()
+        if '|' not in line:
+            continue
+        entity_id, did = line.split('|', 1)
+        entity_to_device[entity_id] = did
+
+# Build device -> entities map
+device_entities = {}
+for eid, did in entity_to_device.items():
+    device_entities.setdefault(did, []).append(eid)
+
+# ── Load home device registry ──────────────────────────────────────────────
+with open(dev_reg_path, 'r') as f:
+    dev_reg = yaml.safe_load(f) or {}
+network_devices = dev_reg.get('devices', [])
+
+# Build MAC -> network device ID map (skip decommissioned devices)
+mac_to_net_id = {}
+name_to_net_id = {}
+ip_to_net_id = {}
+for nd in network_devices:
+    if nd.get('status') == 'decommissioned':
+        continue
+    nid = nd.get('id', '')
+    mac = nd.get('mac')
+    if mac:
+        mac_to_net_id[mac.lower()] = nid
+    name = nd.get('name', '')
+    if name:
+        name_to_net_id[name.lower()] = nid
+    ip = nd.get('ip', '')
+    if ip:
+        ip_to_net_id[ip] = nid
+
+# ── Load Z2M device registry ───────────────────────────────────────────────
+with open(z2m_reg_path, 'r') as f:
+    z2m_reg = yaml.safe_load(f) or {}
+z2m_devices = z2m_reg.get('z2m_devices', {}).get('devices', [])
+
+# Build IEEE -> Z2M device map
+ieee_to_z2m = {}
+for zd in z2m_devices:
+    ieee = zd.get('ieee_address', '')
+    if ieee:
+        ieee_to_z2m[ieee.lower()] = zd
+
+# ── Cross-reference ─────────────────────────────────────────────────────────
+# Classify HA devices
+addon_keywords = {'Home Assistant App', 'Home Assistant Supervisor', 'Home Assistant Core'}
+plugin_models = {'plugin', 'integration', 'theme'}
+
+output_devices = []
+matched_count = 0
+z2m_matched_count = 0
+orphan_count = 0
+
+for did, dev in sorted(ha_devices.items(), key=lambda x: x[1]['name']):
+    # Skip HA internal (Supervisor, Core) and add-ons
+    if dev['model'] in addon_keywords or 'hassio' in dev['identifiers_raw']:
+        continue
+    # Skip HACS plugins/integrations/themes
+    if dev['model'] in plugin_models:
+        continue
+
+    entry = {
+        'ha_device_id': did,
+        'ha_name': dev['name'],
+        'manufacturer': dev['manufacturer'] if dev['manufacturer'] != 'None' else None,
+        'model': dev['model'] if dev['model'] != 'None' else None,
+        'area': dev['area'],
+    }
+
+    # Entities for this device
+    entities = sorted(device_entities.get(did, []))
+    entry['entity_count'] = len(entities)
+    entry['entities'] = entities
+
+    # Match by MAC address
+    net_match = None
+    match_method = None
+    for mac in dev['macs']:
+        if mac in mac_to_net_id:
+            net_match = mac_to_net_id[mac]
+            match_method = 'mac'
+            break
+
+    # Match by name (fuzzy)
+    if not net_match:
+        dev_name_lower = dev['name'].lower().strip()
+        for net_name, nid in name_to_net_id.items():
+            if net_name == dev_name_lower:
+                net_match = nid
+                match_method = 'name_exact'
+                break
+            # Partial name matching for known patterns
+            if dev_name_lower in net_name or net_name in dev_name_lower:
+                net_match = nid
+                match_method = 'name_partial'
+                break
+
+    if net_match:
+        entry['network_device_id'] = net_match
+        entry['match_method'] = match_method
+        matched_count += 1
+
+    # Match Z2M devices
+    if dev['z2m_ieee']:
+        z2m_ieee_lower = dev['z2m_ieee'].lower()
+        if z2m_ieee_lower in ieee_to_z2m:
+            z2m_dev = ieee_to_z2m[z2m_ieee_lower]
+            entry['z2m_ieee'] = dev['z2m_ieee']
+            entry['z2m_friendly_name'] = z2m_dev.get('friendly_name')
+            entry['z2m_model'] = z2m_dev.get('model')
+            z2m_matched_count += 1
+
+    if 'network_device_id' not in entry and 'z2m_ieee' not in entry:
+        entry['orphan'] = True
+        orphan_count += 1
+
+    output_devices.append(entry)
+
+# ── Load orphan classifications ──────────────────────────────────────────
+classify_path = os.path.join(os.environ.get('SPINE_ROOT', os.path.expanduser('~/code/agentic-spine')),
+                             'ops/bindings/ha.orphan.classification.yaml')
+orphan_categories = {}  # category -> count
+if os.path.isfile(classify_path):
+    with open(classify_path, 'r') as f:
+        classify_data = yaml.safe_load(f) or {}
+    # Build name -> category lookup from all categories
+    name_to_category = {}
+    for cat_name, cat_info in classify_data.get('classifications', {}).items():
+        for dev in cat_info.get('devices', []):
+            dname = dev.get('name', '').lower().strip()
+            if dname:
+                name_to_category[dname] = cat_name
+    # Apply classifications to orphan devices
+    classified = 0
+    for dev_entry in output_devices:
+        if dev_entry.get('orphan'):
+            dname = dev_entry.get('ha_name', '').lower().strip()
+            cat = name_to_category.get(dname)
+            if cat:
+                dev_entry['orphan_category'] = cat
+                orphan_categories[cat] = orphan_categories.get(cat, 0) + 1
+                classified += 1
+            else:
+                dev_entry['orphan_category'] = 'needs-registry'
+                orphan_categories['needs-registry'] = orphan_categories.get('needs-registry', 0) + 1
+    if classified:
+        print(f"  Classified {classified}/{orphan_count} orphan(s) from classification file")
+
+# ── Merge manual overrides ──────────────────────────────────────────────────
+overrides_path = os.path.join(os.environ.get('SPINE_ROOT', os.path.expanduser('~/code/agentic-spine')),
+                              'ops/bindings/ha.device.map.overrides.yaml')
+if os.path.isfile(overrides_path):
+    with open(overrides_path, 'r') as f:
+        overrides_data = yaml.safe_load(f) or {}
+    overrides_by_id = {o['ha_device_id']: o for o in overrides_data.get('overrides', [])}
+    enriched = 0
+    for dev_entry in output_devices:
+        ov = overrides_by_id.get(dev_entry['ha_device_id'])
+        if ov:
+            for k, v in ov.items():
+                if k != 'ha_device_id':
+                    dev_entry[k] = v
+            enriched += 1
+    if enriched:
+        print(f"  Merged {enriched} manual override(s) from overrides file")
+
+# ── Build output ────────────────────────────────────────────────────────────
+binding = {
+    'schema_version': '1.0',
+    'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'source': 'ha.device.map.build',
+    'summary': {
+        'device_count': len(output_devices),
+        'entity_count': sum(d['entity_count'] for d in output_devices),
+        'network_matched': matched_count,
+        'z2m_matched': z2m_matched_count,
+        'orphans': orphan_count,
+        'orphan_categories': orphan_categories if orphan_categories else None,
+    },
+    'devices': output_devices,
+}
+
+header = '# HA Device Map (SSOT)\n'
+header += '# Auto-generated by ha.device.map.build — do not hand-edit.\n'
+header += '# Cross-references HA entities with home.device.registry.yaml and z2m.devices.yaml.\n'
+header += '# Status: authoritative\n\n'
+
+with open(out_path, 'w') as f:
+    f.write(header)
+    yaml.dump(binding, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
+
+# ── Summary ─────────────────────────────────────────────────────────────────
+print(f"Wrote {out_path}")
+print(f"  {len(output_devices)} HA devices (excl. add-ons, HACS plugins)")
+print(f"  {sum(d['entity_count'] for d in output_devices)} entities across those devices")
+print(f"  {matched_count} matched to network device registry (by MAC or name)")
+print(f"  {z2m_matched_count} matched to Z2M device registry (by IEEE address)")
+print(f"  {orphan_count} orphaned (no network or Z2M match)")
+if orphan_categories:
+    for cat, cnt in sorted(orphan_categories.items()):
+        print(f"    {cat}: {cnt}")
+    needs = orphan_categories.get('needs-registry', 0)
+    if needs == 0:
+        print(f"  All orphans classified — no action items")
+PYEOF
+
+echo
+echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"

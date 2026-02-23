@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.config.extract - Extract HA config files to workbench for version control
+# Requires: SSH access to hassio@ha
+# Safety: read-only (reads from HA, writes to workbench — no HA mutations)
+# Excludes: secrets.yaml (contains actual secrets)
+
+WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
+TARGET_DIR="$WORKBENCH_ROOT/infra/homeassistant/config"
+HA_SSH="hassio@ha"
+
+# Files to extract (secrets.yaml intentionally excluded)
+CONFIG_FILES=(
+  configuration.yaml
+  automations.yaml
+  scripts.yaml
+  scenes.yaml
+  customize_hidden_entities.yaml
+  groups.yaml
+)
+
+echo "ha.config.extract"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRECONDITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$HA_SSH" "echo ok" >/dev/null 2>&1; then
+  echo "status: STOP"
+  echo "reason: ha_ssh_unreachable"
+  echo "fix: check Tailscale connectivity and SSH key for hassio@ha"
+  exit 2
+fi
+
+mkdir -p "$TARGET_DIR"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXTRACT
+# ─────────────────────────────────────────────────────────────────────────────
+
+EXTRACTED=0
+FAILED=0
+CHECKSUMS=""
+
+for file in "${CONFIG_FILES[@]}"; do
+  if ssh "$HA_SSH" "sudo test -f /config/$file" 2>/dev/null; then
+    if ssh "$HA_SSH" "sudo cat /config/$file" > "$TARGET_DIR/$file" 2>/dev/null; then
+      lines=$(wc -l < "$TARGET_DIR/$file" | tr -d ' ')
+      sha=$(shasum -a 256 "$TARGET_DIR/$file" | cut -c1-12)
+      echo "  extracted: $file ($lines lines, sha256:$sha...)"
+      CHECKSUMS="${CHECKSUMS}  $file: $sha\n"
+      EXTRACTED=$((EXTRACTED + 1))
+    else
+      echo "  FAIL: $file (SSH cat failed)"
+      FAILED=$((FAILED + 1))
+    fi
+  else
+    echo "  skip: $file (not found on HA)"
+  fi
+done
+
+echo
+echo "status: OK"
+echo "extracted: $EXTRACTED"
+echo "failed: $FAILED"
+echo "target: $TARGET_DIR"
+echo "checksums:"
+printf "$CHECKSUMS"
+
+if [[ "$FAILED" -gt 0 ]]; then
+  exit 1
+fi
+exit 0

@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.ssot.apply - Apply ha.ssot.propose diff to HASS_OPERATIONAL_RUNBOOK.md sections 2-4
+# Requires: secrets.binding, secrets.auth.status
+# Safety: mutating (writes to runbook file)
+# Does NOT git-add/commit — operator handles
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+RUNBOOK="$SPINE_REPO/docs/governance/HASS_OPERATIONAL_RUNBOOK.md"
+PROPOSE_SCRIPT="$SPINE_REPO/ops/plugins/ha/bin/ha-ssot-propose"
+
+echo "ha.ssot.apply"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRECONDITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+command -v python3 >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_python3"; exit 2; }
+
+if [[ ! -f "$RUNBOOK" ]]; then
+  echo "status: STOP"
+  echo "reason: missing_runbook"
+  exit 2
+fi
+
+if [[ ! -x "$PROPOSE_SCRIPT" ]]; then
+  echo "status: STOP"
+  echo "reason: missing_propose_script"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RUN PROPOSE (or accept stdin)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "--from-stdin" ]]; then
+  PROPOSE_OUTPUT="$(cat)"
+else
+  echo "running: ha.ssot.propose"
+  echo
+  PROPOSE_OUTPUT="$("$PROPOSE_SCRIPT" 2>&1)" || {
+    rc=$?
+    echo "$PROPOSE_OUTPUT"
+    echo
+    echo "status: STOP"
+    echo "reason: propose_failed"
+    exit "$rc"
+  }
+fi
+
+# Check for NO_DRIFT
+if echo "$PROPOSE_OUTPUT" | grep -q "^status: NO_DRIFT"; then
+  echo "$PROPOSE_OUTPUT"
+  echo
+  echo "apply: skipped (no drift)"
+  echo "status: OK"
+  exit 0
+fi
+
+# Check for STOP
+if echo "$PROPOSE_OUTPUT" | grep -q "^status: STOP"; then
+  echo "$PROPOSE_OUTPUT"
+  echo
+  echo "apply: aborted (propose reported STOP)"
+  exit 2
+fi
+
+# Extract proposed markdown after separator
+PROPOSED_MD="$(echo "$PROPOSE_OUTPUT" | sed -n '/^---PROPOSED_MARKDOWN---$/,$ p' | tail -n +2)"
+
+if [[ -z "$PROPOSED_MD" ]]; then
+  echo "status: STOP"
+  echo "reason: no_proposed_markdown_in_output"
+  exit 1
+fi
+
+# Print the YAML diff portion (everything before the separator)
+echo "$PROPOSE_OUTPUT" | sed '/^---PROPOSED_MARKDOWN---$/,$ d'
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPLY: Replace sections 2-4 in runbook
+# ─────────────────────────────────────────────────────────────────────────────
+
+python3 - "$RUNBOOK" <<PYEOF "$PROPOSED_MD"
+import sys
+import re
+from datetime import date
+
+runbook_path = sys.argv[1]
+proposed_md = sys.argv[2]
+
+with open(runbook_path, "r") as f:
+    lines = f.readlines()
+
+# Find section boundaries
+section_starts = {}
+for i, line in enumerate(lines):
+    m = re.match(r'^## (\d+)\.\s', line)
+    if m:
+        section_starts[int(m.group(1))] = i
+
+if 2 not in section_starts or 5 not in section_starts:
+    print("status: STOP")
+    print("reason: could_not_parse_section_boundaries")
+    sys.exit(1)
+
+# Section 2 starts at section_starts[2], section 5 starts at section_starts[5]
+# We replace everything from section 2 start to section 5 start (exclusive)
+before = lines[:section_starts[2]]
+after = lines[section_starts[5]:]
+
+# Update the last_extracted date in the proposed markdown
+today = date.today().strftime("%Y-%m-%d")
+
+# Ensure proposed_md ends with the separator line before section 5
+proposed_lines = proposed_md.rstrip("\n").split("\n")
+# Add trailing newline separator
+proposed_lines.append("")
+
+# Build new content
+new_content = "".join(before) + "\n".join(proposed_lines) + "\n" + "".join(after)
+
+with open(runbook_path, "w") as f:
+    f.write(new_content)
+
+print(f"applied: sections 2-4 updated ({len(proposed_lines)} lines)")
+print(f"date: {today}")
+PYEOF
+
+echo
+echo "file: $RUNBOOK"
+echo "status: OK"
+echo "note: file updated but NOT committed — operator handles git"

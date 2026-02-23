@@ -1,84 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ha.hacs.updates.check — Check HACS repositories for pending updates
-# Reads ha.hacs.yaml binding, compares installed_version vs available_version.
-# Reports any repos where versions differ.
-# Prerequisite: run ha.hacs.snapshot first to get fresh data.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${HA_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/agents/home-assistant/docs/spine-plugin-ha/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-HACS_BINDING="$SPINE_ROOT/ops/bindings/ha.hacs.yaml"
-
-echo "ha.hacs.updates.check"
-echo
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PRECONDITIONS
-# ─────────────────────────────────────────────────────────────────────────────
-
-command -v python3 >/dev/null 2>&1 || { echo "STOP (2): python3 not found"; exit 2; }
-
-if [[ ! -f "$HACS_BINDING" ]]; then
-  echo "STOP (2): ha.hacs.yaml binding not found. Run ha.hacs.snapshot first."
-  exit 2
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CHECK FOR UPDATES
-# ─────────────────────────────────────────────────────────────────────────────
-
-python3 - "$HACS_BINDING" << 'PYEOF'
-import sys
-
-try:
-    import yaml
-except ImportError:
-    print("STOP (2): PyYAML not installed", file=sys.stderr)
-    sys.exit(2)
-
-binding_path = sys.argv[1]
-
-with open(binding_path, 'r') as f:
-    data = yaml.safe_load(f)
-
-if not data or data.get('fallback'):
-    print("WARN: HACS binding is in fallback mode — no repo data available.")
-    print("Run ha.hacs.snapshot with SSH access first.")
-    sys.exit(0)
-
-repos = data.get('repositories', [])
-generated = data.get('generated', 'unknown')
-updates_available = []
-up_to_date = 0
-no_version = 0
-
-for repo in repos:
-    installed = repo.get('installed_version', '')
-    available = repo.get('available_version', '')
-    name = repo.get('repository', repo.get('name', 'unknown'))
-
-    if not installed or not available:
-        no_version += 1
-        continue
-
-    if installed != available:
-        updates_available.append({
-            'repository': name,
-            'category': repo.get('category', ''),
-            'installed': installed,
-            'available': available,
-        })
-    else:
-        up_to_date += 1
-
-print(f"HACS Update Check (data from: {generated})")
-print(f"  {len(repos)} total repos, {up_to_date} up-to-date, {no_version} no version info")
-print()
-
-if updates_available:
-    print(f"  {len(updates_available)} updates available:")
-    for u in sorted(updates_available, key=lambda x: x['repository']):
-        print(f"    {u['repository']:50s}  {u['installed']:15s} → {u['available']}")
-else:
-    print("  All HACS repos are up to date.")
-PYEOF
+echo "WARN: ha plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

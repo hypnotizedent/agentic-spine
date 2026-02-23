@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# ha.backup.create — Create a Home Assistant backup via SSH + ha CLI
+# SSH to hassio@ha (Tailscale), run ha backups new
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+command -v yq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: yq"; exit 2; }
+
+echo "ha.backup.create"
+echo
+
+# ── Resolve SSH target ──
+HA_HOST="$(yq -r '.ssh.targets[] | select(.id == "ha") | .host' "$SSH_BINDING" 2>/dev/null)"
+HA_USER="$(yq -r '.ssh.targets[] | select(.id == "ha") | .user // "hassio"' "$SSH_BINDING" 2>/dev/null)"
+
+if [[ -z "$HA_HOST" || "$HA_HOST" == "null" ]]; then
+  echo "FAIL: no 'ha' entry in ssh.targets.yaml"
+  exit 1
+fi
+
+SSH_OPTS="-o ConnectTimeout=15 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+
+# ── Create backup ──
+BACKUP_NAME="ha-backup-$(date '+%Y%m%d-%H%M%S')"
+echo "Creating backup: $BACKUP_NAME"
+
+set +e
+OUTPUT="$(ssh $SSH_OPTS "${HA_USER}@${HA_HOST}" "bash -l -c 'ha backups new --name ${BACKUP_NAME}'" 2>&1)"
+RC=$?
+set -e
+
+if [[ $RC -ne 0 ]]; then
+  echo "FAIL: SSH command failed (rc=$RC)"
+  echo "$OUTPUT"
+  exit 1
+fi
+
+# ── Parse output ──
+SLUG="$(echo "$OUTPUT" | grep -i 'slug' | head -1 | sed 's/.*: *//' || true)"
+
+echo
+echo "status: OK"
+echo "backup_name: $BACKUP_NAME"
+if [[ -n "$SLUG" ]]; then
+  echo "slug: $SLUG"
+fi
+echo "host: ${HA_USER}@${HA_HOST}"
+echo "location: /backup/${BACKUP_NAME}.tar"

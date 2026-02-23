@@ -1,151 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ha.helpers.snapshot — Snapshot HA helper entities to ops/bindings/ha.helpers.yaml
-# Queries HA REST API for input_boolean, input_select, input_datetime, input_number,
-# input_text, counter, and timer entities.
-# Output: ops/bindings/ha.helpers.yaml
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${HA_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/agents/home-assistant/docs/spine-plugin-ha/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$SPINE_ROOT/ops/bindings/ha.helpers.yaml"
-INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
-HA_HOST="${HA_HOST:-10.0.0.100}"
-HA_PORT="${HA_PORT:-8123}"
-HA_BASE="http://${HA_HOST}:${HA_PORT}"
-
-TMPDIR_WORK=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_WORK"' EXIT
-
-echo "ha.helpers.snapshot"
-echo
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PRECONDITIONS
-# ─────────────────────────────────────────────────────────────────────────────
-
-command -v python3 >/dev/null 2>&1 || { echo "STOP (2): python3 not found"; exit 2; }
-command -v curl >/dev/null 2>&1 || { echo "STOP (2): curl not found"; exit 2; }
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RETRIEVE HA TOKEN
-# ─────────────────────────────────────────────────────────────────────────────
-
-if [[ ! -x "$INFISICAL_AGENT" ]]; then
-  echo "STOP (2): infisical-agent.sh not found"
-  exit 2
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
-
-if [[ -z "${HA_TOKEN:-}" ]]; then
-  echo "STOP (2): could not retrieve HA_API_TOKEN from Infisical"
-  exit 2
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# QUERY HA API — all states, filter helper entities
-# ─────────────────────────────────────────────────────────────────────────────
-
-echo "Fetching all states..."
-HTTP_CODE=$(curl -s -o "$TMPDIR_WORK/states.json" -w '%{http_code}' --connect-timeout 10 \
-  -H "Authorization: Bearer $HA_TOKEN" "${HA_BASE}/api/states" 2>/dev/null) || HTTP_CODE="000"
-
-if [[ "$HTTP_CODE" != "200" ]]; then
-  echo "STOP (2): /api/states returned HTTP $HTTP_CODE"
-  exit 2
-fi
-
-echo
-echo "Building helper binding..."
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BUILD YAML BINDING (Python)
-# ─────────────────────────────────────────────────────────────────────────────
-
-python3 - "$TMPDIR_WORK" "$OUTPUT" << 'PYEOF'
-import json, sys, datetime, os
-
-try:
-    import yaml
-except ImportError:
-    print("STOP (2): PyYAML not installed", file=sys.stderr)
-    sys.exit(2)
-
-tmpdir, out_path = sys.argv[1], sys.argv[2]
-
-HELPER_PREFIXES = ('input_boolean.', 'input_select.', 'input_datetime.', 'input_number.', 'input_text.', 'counter.', 'timer.')
-
-# ── Load all states ──────────────────────────────────────────────────────────
-with open(os.path.join(tmpdir, 'states.json'), 'r') as f:
-    all_states = json.load(f)
-
-# ── Filter helper entities ───────────────────────────────────────────────────
-helpers = []
-by_domain = {}
-
-for entity in sorted(all_states, key=lambda e: e.get('entity_id', '')):
-    eid = entity.get('entity_id', '')
-    if not any(eid.startswith(p) for p in HELPER_PREFIXES):
-        continue
-
-    domain = eid.split('.')[0]
-    by_domain[domain] = by_domain.get(domain, 0) + 1
-
-    attrs = entity.get('attributes', {})
-
-    # Build domain-relevant attributes
-    extra = {}
-    if domain == 'input_select':
-        extra['options'] = attrs.get('options', [])
-    elif domain == 'input_number':
-        extra['min'] = attrs.get('min', None)
-        extra['max'] = attrs.get('max', None)
-        extra['step'] = attrs.get('step', None)
-        extra['mode'] = attrs.get('mode', None)
-    elif domain == 'input_datetime':
-        extra['has_date'] = attrs.get('has_date', False)
-        extra['has_time'] = attrs.get('has_time', False)
-    elif domain == 'timer':
-        extra['duration'] = attrs.get('duration', None)
-
-    entry = {
-        'entity_id': eid,
-        'domain': domain,
-        'friendly_name': attrs.get('friendly_name', ''),
-        'state': entity.get('state', ''),
-    }
-    if extra:
-        entry['attributes'] = extra
-
-    helpers.append(entry)
-
-# ── Build output binding ─────────────────────────────────────────────────────
-binding = {
-    'schema_version': '1.0',
-    'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-    'source': 'ha.helpers.snapshot',
-    'summary': {
-        'helper_count': len(helpers),
-        'by_domain': dict(sorted(by_domain.items())),
-    },
-    'helpers': helpers,
-}
-
-header = '# HA Helper Entity Snapshot (SSOT)\n'
-header += '# Auto-generated by ha.helpers.snapshot — do not hand-edit.\n'
-header += '# Helper entities (input_*, counter, timer) extracted via HA REST API.\n'
-header += '# Status: authoritative\n\n'
-
-with open(out_path, 'w') as f:
-    f.write(header)
-    yaml.dump(binding, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
-
-# ── Summary ──────────────────────────────────────────────────────────────────
-print(f"Wrote {out_path}")
-print(f"  {len(helpers)} helpers")
-for d, c in sorted(by_domain.items()):
-    print(f"  {d}: {c}")
-PYEOF
-
-echo
-echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"
+echo "WARN: ha plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

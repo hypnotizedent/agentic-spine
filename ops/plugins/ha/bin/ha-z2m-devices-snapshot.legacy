@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.z2m.devices.snapshot — Extract Zigbee2MQTT device registry from HA
+# Reads Z2M database.db via SSH + docker exec, parses to YAML binding.
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+OUTPUT="$SPINE_ROOT/ops/bindings/z2m.devices.yaml"
+SSH_TARGET="hassio@ha"
+Z2M_CONTAINER_DEFAULT="addon_45df7312_zigbee2mqtt"
+Z2M_DB_PATH="/config/zigbee2mqtt/database.db"
+Z2M_CFG_PATH="/config/zigbee2mqtt/configuration.yaml"
+Z2M_STATE_PATH="/config/zigbee2mqtt/state.json"
+SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+TMPDIR_WORK=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+
+echo "ha.z2m.devices.snapshot"
+echo
+
+# Check SSH connectivity
+if ! ssh $SSH_OPTS "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
+  echo "STOP (2): cannot reach $SSH_TARGET via SSH"
+  exit 2
+fi
+
+# Discover Z2M container name dynamically via Supervisor API
+Z2M_SLUG=$(ssh $SSH_OPTS "$SSH_TARGET" \
+  'bash -l -c '"'"'curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons'"'"'' 2>/dev/null \
+  | python3 -c "import json,sys; data=json.load(sys.stdin); slugs=[a['slug'] for a in data.get('data',{}).get('addons',[]) if 'zigbee2mqtt' in a.get('slug','').lower()]; print(slugs[0] if slugs else '')" 2>/dev/null) || Z2M_SLUG=""
+
+if [[ -n "$Z2M_SLUG" ]]; then
+  Z2M_CONTAINER="addon_${Z2M_SLUG}"
+  echo "Discovered Z2M container: $Z2M_CONTAINER (slug: $Z2M_SLUG)"
+else
+  Z2M_CONTAINER="$Z2M_CONTAINER_DEFAULT"
+  echo "WARN: Could not discover Z2M slug, using default: $Z2M_CONTAINER"
+fi
+
+# Extract database.db and configuration.yaml to temp files
+ssh $SSH_OPTS "$SSH_TARGET" \
+  "sudo docker exec $Z2M_CONTAINER cat $Z2M_DB_PATH 2>/dev/null" \
+  > "$TMPDIR_WORK/database.db" 2>/dev/null
+
+ssh $SSH_OPTS "$SSH_TARGET" \
+  "sudo docker exec $Z2M_CONTAINER cat $Z2M_CFG_PATH 2>/dev/null" \
+  > "$TMPDIR_WORK/config.yaml" 2>/dev/null
+
+# Extract state.json for link quality data (optional — graceful if unavailable)
+ssh $SSH_OPTS "$SSH_TARGET" \
+  "sudo docker exec $Z2M_CONTAINER cat $Z2M_STATE_PATH 2>/dev/null" \
+  > "$TMPDIR_WORK/state.json" 2>/dev/null || true
+
+if [[ ! -s "$TMPDIR_WORK/database.db" ]]; then
+  echo "STOP (2): Z2M database.db is empty or inaccessible"
+  exit 2
+fi
+
+# Parse JSONL database + config into YAML binding
+python3 - "$TMPDIR_WORK/database.db" "$TMPDIR_WORK/config.yaml" "$TMPDIR_WORK/state.json" "$OUTPUT" << 'PYEOF'
+import json, sys, datetime, os
+try:
+    import yaml
+except ImportError:
+    print("STOP (2): PyYAML not installed", file=sys.stderr)
+    sys.exit(2)
+
+db_path, cfg_path, state_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+# Parse JSONL database
+devices = []
+with open(db_path, 'r') as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get('type') == 'Coordinator':
+            continue
+
+        ieee = d.get('ieeeAddr', '')
+        model = d.get('modelId', 'unknown')
+        manufacturer = d.get('manufName', 'unknown')
+        power = d.get('powerSource', 'unknown')
+        last_seen_ms = d.get('lastSeen', 0)
+
+        # Battery from genPowerCfg cluster
+        battery_pct = None
+        ep1 = d.get('endpoints', {}).get('1', {})
+        clusters = ep1.get('clusters', {})
+        pwr = clusters.get('genPowerCfg', {}).get('attributes', {})
+        raw_pct = pwr.get('batteryPercentageRemaining')
+        if raw_pct is not None:
+            battery_pct = raw_pct // 2  # ZCL reports 2x actual
+
+        last_seen_str = ''
+        if last_seen_ms:
+            try:
+                dt = datetime.datetime.fromtimestamp(last_seen_ms / 1000, tz=datetime.timezone.utc)
+                last_seen_str = dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+            except Exception:
+                pass
+
+        dev = {
+            'ieee_address': ieee,
+            'model': model,
+            'manufacturer': manufacturer,
+            'power_source': power,
+            'last_seen': last_seen_str,
+            'interview': d.get('interviewState', 'unknown'),
+        }
+        if battery_pct is not None:
+            dev['battery_percent'] = battery_pct
+        devices.append(dev)
+
+# Parse Z2M config for friendly names
+try:
+    with open(cfg_path, 'r') as f:
+        config = yaml.safe_load(f) or {}
+    name_map = {}
+    if 'devices' in config:
+        for addr, info in config['devices'].items():
+            if isinstance(info, dict) and 'friendly_name' in info:
+                name_map[addr] = info['friendly_name']
+    for dev in devices:
+        if dev['ieee_address'] in name_map:
+            dev['friendly_name'] = name_map[dev['ieee_address']]
+except Exception:
+    pass
+
+# Parse state.json for link quality (LQI) per device
+# state.json keys can be IEEE addresses or friendly names depending on Z2M config
+try:
+    if os.path.isfile(state_path) and os.path.getsize(state_path) > 0:
+        with open(state_path, 'r') as f:
+            state_data = json.load(f)
+        lqi_map = {}
+        for key, sdata in state_data.items():
+            if isinstance(sdata, dict) and 'linkquality' in sdata:
+                lqi_map[key] = sdata['linkquality']
+        for dev in devices:
+            ieee = dev.get('ieee_address', '')
+            fname = dev.get('friendly_name', '')
+            lqi = lqi_map.get(ieee) or lqi_map.get(fname)
+            if lqi is not None:
+                dev['link_quality'] = lqi
+except Exception:
+    pass
+
+devices.sort(key=lambda d: d.get('friendly_name', d['ieee_address']))
+
+output = {
+    'z2m_devices': {
+        'last_snapshot': datetime.datetime.now(tz=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'coordinator_ieee': '0x00124b002f8f7a4e',
+        'device_count': len(devices),
+        'devices': devices,
+    }
+}
+
+header = '# Z2M Device Registry (SSOT)\n'
+header += '# Auto-generated by ha.z2m.devices.snapshot — do not hand-edit.\n'
+header += '# Source: Zigbee2MQTT database.db on HA (container discovered at runtime)\n'
+header += '# Status: authoritative\n\n'
+
+with open(out_path, 'w') as f:
+    f.write(header)
+    yaml.dump(output, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+print(f"device_count={len(devices)}")
+PYEOF
+
+DEVICE_COUNT=$(grep 'device_count:' "$OUTPUT" | head -1 | awk '{print $2}')
+echo "Wrote $OUTPUT ($DEVICE_COUNT devices)"
+echo
+echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"

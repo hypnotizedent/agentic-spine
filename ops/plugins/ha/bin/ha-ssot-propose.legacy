@@ -1,0 +1,474 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.ssot.propose - Fetch HA live facts, diff against HASS_OPERATIONAL_RUNBOOK.md sections 2-4
+# Requires: secrets.binding, secrets.auth.status
+# Output: YAML diff + proposed markdown (separated by ---PROPOSED_MARKDOWN---)
+# Safety: read-only (no writes to any file)
+
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+RUNBOOK="$SPINE_REPO/docs/governance/HASS_OPERATIONAL_RUNBOOK.md"
+INFISICAL_AGENT="${SPINE_REPO}/ops/tools/infisical-agent.sh"
+
+echo "ha.ssot.propose"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRECONDITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+command -v yq >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_yq"; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_jq"; exit 2; }
+command -v curl >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_curl"; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_python3"; exit 2; }
+
+[[ -x "$INFISICAL_AGENT" ]] || { echo "status: STOP"; echo "reason: infisical_agent_not_found"; exit 2; }
+
+if [[ ! -f "$RUNBOOK" ]]; then
+  echo "status: STOP"
+  echo "reason: missing_runbook"
+  echo "fix: ensure docs/governance/HASS_OPERATIONAL_RUNBOOK.md exists"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FETCH HA_API_TOKEN FROM INFISICAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+
+if [[ -z "${HA_TOKEN:-}" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_token_unavailable"
+  echo "fix: check Infisical auth (secrets.auth.load) and HA_API_TOKEN at home-assistant/prod"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HEALTH CHECK HA API
+# ─────────────────────────────────────────────────────────────────────────────
+
+HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_PORT="${HA_PORT:-8123}"
+HA_BASE="http://${HA_HOST}:${HA_PORT}"
+
+set +e
+HA_CONFIG="$(curl -s --max-time 10 -w '\n%{http_code}' -X GET "${HA_BASE}/api/config" \
+  -H "Authorization: Bearer ${HA_TOKEN}" \
+  -H "Content-Type: application/json" 2>/dev/null)"
+curl_rc=$?
+set -e
+
+if [[ "$curl_rc" -ne 0 || -z "${HA_CONFIG:-}" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_api_unreachable"
+  echo "fix: check HA connectivity (default LAN ${HA_HOST}:${HA_PORT}, override via HA_HOST)"
+  exit 2
+fi
+
+HA_CONFIG_CODE="$(echo "$HA_CONFIG" | tail -n1)"
+
+if [[ "$HA_CONFIG_CODE" == "401" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_api_auth_failed"
+  echo "fix: HA_API_TOKEN in Infisical may be expired or invalid"
+  exit 2
+fi
+
+if [[ "$HA_CONFIG_CODE" != "200" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_api_error"
+  echo "detail: HTTP $HA_CONFIG_CODE"
+  exit 2
+fi
+
+echo "ha_api: reachable"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FETCH HA FACTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Integrations
+set +e
+INTEGRATIONS_RAW="$(curl -s --max-time 15 -X GET "${HA_BASE}/api/config/config_entries/entry" \
+  -H "Authorization: Bearer ${HA_TOKEN}" \
+  -H "Content-Type: application/json" 2>/dev/null)"
+curl_rc=$?
+set -e
+
+if [[ "$curl_rc" -ne 0 || -z "${INTEGRATIONS_RAW:-}" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_integrations_fetch_failed"
+  exit 2
+fi
+
+# States (automations + helpers)
+set +e
+STATES_RAW="$(curl -s --max-time 15 -X GET "${HA_BASE}/api/states" \
+  -H "Authorization: Bearer ${HA_TOKEN}" \
+  -H "Content-Type: application/json" 2>/dev/null)"
+curl_rc=$?
+set -e
+
+if [[ "$curl_rc" -ne 0 || -z "${STATES_RAW:-}" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_states_fetch_failed"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIFF + PROPOSE (Python)
+# ─────────────────────────────────────────────────────────────────────────────
+
+python3 - "$RUNBOOK" <<'PYEOF' "$INTEGRATIONS_RAW" "$STATES_RAW"
+import sys
+import json
+import re
+from datetime import date
+
+runbook_path = sys.argv[1]
+integrations_json = sys.argv[2]
+states_json = sys.argv[3]
+
+# ── Parse live data ──────────────────────────────────────────────────────────
+
+integrations = json.loads(integrations_json)
+states = json.loads(states_json)
+
+# Build live integration inventory: group by domain, collect titles
+live_integrations = {}
+for entry in integrations:
+    domain = entry.get("domain", "unknown")
+    title = entry.get("title", "")
+    state = entry.get("state", "loaded")
+    if state not in ("loaded", "setup_retry", "not_loaded"):
+        continue  # skip migration entries etc
+    if domain not in live_integrations:
+        live_integrations[domain] = []
+    if title and title not in live_integrations[domain]:
+        live_integrations[domain].append(title)
+
+# Sort domains and titles
+for domain in live_integrations:
+    live_integrations[domain].sort()
+
+# Build live automation inventory
+live_automations = {}
+for s in states:
+    eid = s.get("entity_id", "")
+    if not eid.startswith("automation."):
+        continue
+    attrs = s.get("attributes", {})
+    friendly = attrs.get("friendly_name", eid)
+    state_val = s.get("state", "unknown")
+    last_triggered = attrs.get("last_triggered", "")
+    live_automations[friendly] = {
+        "entity_id": eid,
+        "state": state_val,
+        "last_triggered": last_triggered,
+    }
+
+# Build live helper inventory
+helper_domains = ("input_boolean", "input_select", "input_datetime", "input_number", "input_text", "input_button", "counter", "timer")
+live_helpers = {}
+for s in states:
+    eid = s.get("entity_id", "")
+    domain = eid.split(".")[0] if "." in eid else ""
+    if domain not in helper_domains:
+        continue
+    attrs = s.get("attributes", {})
+    friendly = attrs.get("friendly_name", eid)
+    live_helpers[eid] = {
+        "type": domain.replace("input_", "").capitalize() if domain.startswith("input_") else domain.capitalize(),
+        "friendly_name": friendly,
+    }
+
+# ── Parse runbook sections 2-4 ──────────────────────────────────────────────
+
+with open(runbook_path, "r") as f:
+    runbook_lines = f.readlines()
+
+# Find section boundaries
+section_starts = {}
+for i, line in enumerate(runbook_lines):
+    m = re.match(r'^## (\d+)\.\s', line)
+    if m:
+        section_starts[int(m.group(1))] = i
+
+if 2 not in section_starts or 3 not in section_starts or 4 not in section_starts or 5 not in section_starts:
+    print("status: STOP")
+    print("reason: could_not_parse_section_boundaries")
+    sys.exit(1)
+
+# Parse existing integration table (section 2)
+def parse_table(lines, start_line, end_line):
+    """Parse a markdown table, return list of row-dicts keyed by header."""
+    rows = []
+    headers = []
+    in_table = False
+    for i in range(start_line, end_line):
+        line = lines[i].strip()
+        if line.startswith("|") and not in_table:
+            # Header row
+            headers = [h.strip().strip("*") for h in line.split("|")[1:-1]]
+            in_table = True
+            continue
+        if in_table and line.startswith("|---"):
+            continue  # separator
+        if in_table and line.startswith("|"):
+            cells = [c.strip() for c in line.split("|")[1:-1]]
+            row = {}
+            for j, h in enumerate(headers):
+                row[h] = cells[j] if j < len(cells) else ""
+            rows.append(row)
+        elif in_table and not line.startswith("|"):
+            in_table = False
+    return rows, headers
+
+existing_integrations, _ = parse_table(runbook_lines, section_starts[2], section_starts[3])
+existing_automations, _ = parse_table(runbook_lines, section_starts[3], section_starts[4])
+existing_helpers, _ = parse_table(runbook_lines, section_starts[4], section_starts[5])
+
+# ── Build integration category map from existing ─────────────────────────────
+
+# Preserve existing categories where possible
+domain_category = {}
+for row in existing_integrations:
+    domain = row.get("Domain", "").strip()
+    cat = row.get("Category", "").strip()
+    if domain and cat:
+        domain_category[domain] = cat
+
+# ── Compute diffs ────────────────────────────────────────────────────────────
+
+# Section 2: Integration diff
+existing_domains = {row.get("Domain", "").strip() for row in existing_integrations}
+# Handle comma-separated domains like "radarr, sonarr, lidarr"
+expanded_existing = set()
+for d in existing_domains:
+    for part in d.split(","):
+        expanded_existing.add(part.strip())
+
+live_domains = set(live_integrations.keys())
+
+new_domains = sorted(live_domains - expanded_existing)
+removed_domains = sorted(expanded_existing - live_domains)
+
+# Section 3: Automation diff
+existing_auto_names = {row.get("Automation", "").strip() for row in existing_automations}
+live_auto_names = set(live_automations.keys())
+new_automations = sorted(live_auto_names - existing_auto_names)
+removed_automations = sorted(existing_auto_names - live_auto_names)
+
+# Section 4: Helper diff
+existing_helper_ids = set()
+for row in existing_helpers:
+    eid = row.get("Entity ID", "").strip().strip("`")
+    if eid:
+        existing_helper_ids.add(eid)
+
+live_helper_ids = set(live_helpers.keys())
+new_helpers = sorted(live_helper_ids - existing_helper_ids)
+removed_helpers = sorted(existing_helper_ids - live_helper_ids)
+
+# ── Determine drift status ──────────────────────────────────────────────────
+
+total_changes = len(new_domains) + len(removed_domains) + len(new_automations) + len(removed_automations) + len(new_helpers) + len(removed_helpers)
+
+if total_changes == 0:
+    print("status: NO_DRIFT")
+    print("sections_checked: [2, 3, 4]")
+    print("changes: 0")
+    sys.exit(0)
+
+# ── Output YAML diff ────────────────────────────────────────────────────────
+
+print("status: DRIFT_DETECTED")
+print(f"changes: {total_changes}")
+print()
+print("section_2_integrations:")
+print(f"  live_domains: {len(live_domains)}")
+print(f"  existing_domains: {len(expanded_existing)}")
+print(f"  added: {len(new_domains)}")
+if new_domains:
+    for d in new_domains:
+        titles = ", ".join(live_integrations.get(d, [d]))
+        print(f"    - {d}: \"{titles}\"")
+print(f"  removed: {len(removed_domains)}")
+if removed_domains:
+    for d in removed_domains:
+        print(f"    - {d}")
+print()
+print("section_3_automations:")
+print(f"  live_count: {len(live_automations)}")
+print(f"  existing_count: {len(existing_auto_names)}")
+print(f"  added: {len(new_automations)}")
+if new_automations:
+    for a in new_automations:
+        print(f"    - \"{a}\"")
+print(f"  removed: {len(removed_automations)}")
+if removed_automations:
+    for a in removed_automations:
+        print(f"    - \"{a}\"")
+print()
+print("section_4_helpers:")
+print(f"  live_count: {len(live_helpers)}")
+print(f"  existing_count: {len(existing_helper_ids)}")
+print(f"  added: {len(new_helpers)}")
+if new_helpers:
+    for h in new_helpers:
+        info = live_helpers[h]
+        print(f"    - \"{h}\": {info['type']}")
+print(f"  removed: {len(removed_helpers)}")
+if removed_helpers:
+    for h in removed_helpers:
+        print(f"    - \"{h}\"")
+
+# ── Generate proposed markdown ───────────────────────────────────────────────
+
+today = date.today().strftime("%Y-%m-%d")
+proposed = []
+
+# Section 2: Integration Inventory
+proposed.append(f"## 2. Integration Inventory\n")
+proposed.append(f"\n")
+proposed.append(f"> Source: HA API `/api/config/config_entries/entry` (last extracted {today})\n")
+proposed.append(f"> Policy: tracked via API extraction, not manual. `ha.ssot.propose` will automate.\n")
+proposed.append(f"\n")
+proposed.append(f"### Active Integrations (Key Entries)\n")
+proposed.append(f"\n")
+proposed.append(f"| Domain | Name/Title | Category |\n")
+proposed.append(f"|--------|-----------|----------|\n")
+
+# Merge existing rows + new domains, sorted by domain
+all_integration_rows = []
+# Keep existing rows with their categories
+for row in existing_integrations:
+    domain_field = row.get("Domain", "").strip()
+    name_field = row.get("Name/Title", "").strip()
+    cat_field = row.get("Category", "").strip()
+    # Check if any sub-domains in a comma-separated field are still live
+    sub_domains = [d.strip() for d in domain_field.split(",")]
+    still_live = [d for d in sub_domains if d in live_domains]
+    if still_live:
+        # Update names from live data if single domain
+        if len(sub_domains) == 1 and sub_domains[0] in live_integrations:
+            live_titles = live_integrations[sub_domains[0]]
+            if live_titles:
+                name_field = ", ".join(live_titles)
+        all_integration_rows.append((domain_field, name_field, cat_field))
+
+# Add genuinely new domains
+for d in new_domains:
+    titles = ", ".join(live_integrations.get(d, [d]))
+    cat = domain_category.get(d, "Uncategorized")
+    all_integration_rows.append((d, titles, cat))
+
+# Sort by domain
+all_integration_rows.sort(key=lambda r: r[0].lower())
+
+for domain_field, name_field, cat_field in all_integration_rows:
+    proposed.append(f"| {domain_field} | {name_field} | {cat_field} |\n")
+
+proposed.append(f"\n")
+proposed.append(f"**Total:** ~{len(live_domains)} domains across ~{len(integrations)} config entries.\n")
+proposed.append(f"\n")
+proposed.append(f"---\n")
+proposed.append(f"\n")
+
+# Section 3: Automation Inventory
+proposed.append(f"## 3. Automation Inventory\n")
+proposed.append(f"\n")
+proposed.append(f"> {len(live_automations)} automations active. Critical fix: all button triggers include `not_from: [\"unavailable\", \"unknown\"]`.\n")
+proposed.append(f"\n")
+proposed.append(f"| Automation | Entity Trigger | Action | Notes |\n")
+proposed.append(f"|-----------|---------------|--------|-------|\n")
+
+# Keep existing rows with their detail columns, update with live state
+existing_auto_map = {}
+for row in existing_automations:
+    name = row.get("Automation", "").strip()
+    existing_auto_map[name] = row
+
+auto_rows = []
+# Existing automations that are still live
+for name in sorted(existing_auto_map.keys()):
+    if name in live_auto_names or name not in removed_automations:
+        row = existing_auto_map[name]
+        trigger = row.get("Entity Trigger", "").strip()
+        action = row.get("Action", "").strip()
+        notes = row.get("Notes", "").strip()
+        auto_rows.append((name, trigger, action, notes))
+
+# New automations
+for name in new_automations:
+    info = live_automations[name]
+    auto_rows.append((name, "(needs manual detail)", "(needs manual detail)", f"state: {info['state']}"))
+
+auto_rows.sort(key=lambda r: r[0].lower())
+
+for name, trigger, action, notes in auto_rows:
+    proposed.append(f"| {name} | {trigger} | {action} | {notes} |\n")
+
+proposed.append(f"\n")
+
+# Preserve Critical Fix History subsection from existing
+crit_start = None
+crit_end = section_starts[4]
+for i in range(section_starts[3], section_starts[4]):
+    if "### Critical Fix History" in runbook_lines[i]:
+        crit_start = i
+        break
+
+if crit_start is not None:
+    for i in range(crit_start, section_starts[4]):
+        line = runbook_lines[i]
+        if line.strip() == "---":
+            break
+        proposed.append(line)
+
+proposed.append(f"\n")
+proposed.append(f"---\n")
+proposed.append(f"\n")
+
+# Section 4: Helper / Input Entity Inventory
+proposed.append(f"## 4. Helper / Input Entity Inventory\n")
+proposed.append(f"\n")
+proposed.append(f"| Entity ID | Type | Purpose |\n")
+proposed.append(f"|-----------|------|--------|\n")
+
+# Merge existing helpers with live
+existing_helper_map = {}
+for row in existing_helpers:
+    eid = row.get("Entity ID", "").strip().strip("`")
+    existing_helper_map[eid] = row
+
+helper_rows = []
+# Existing helpers that are still live
+for eid in sorted(existing_helper_map.keys()):
+    if eid in live_helper_ids:
+        row = existing_helper_map[eid]
+        htype = row.get("Type", "").strip()
+        purpose = row.get("Purpose", "").strip()
+        helper_rows.append((eid, htype, purpose))
+
+# New helpers
+for eid in new_helpers:
+    info = live_helpers[eid]
+    helper_rows.append((eid, info["type"], info["friendly_name"]))
+
+helper_rows.sort(key=lambda r: r[0])
+
+for eid, htype, purpose in helper_rows:
+    proposed.append(f"| `{eid}` | {htype} | {purpose} |\n")
+
+proposed.append(f"\n")
+
+# ── Output separator + proposed markdown ─────────────────────────────────────
+
+print()
+print("---PROPOSED_MARKDOWN---")
+for line in proposed:
+    sys.stdout.write(line)
+PYEOF

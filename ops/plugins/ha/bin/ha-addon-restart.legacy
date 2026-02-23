@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.addon.restart — Restart an HA Supervisor add-on by slug
+# Uses SSH + Supervisor API (SUPERVISOR_TOKEN injected by HA environment).
+# Safety: mutating (restarts a running add-on)
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ADDONS_BINDING="$SPINE_ROOT/ops/bindings/ha.addons.yaml"
+SSH_TARGET="hassio@ha"
+SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ARGUMENT PARSING
+# ─────────────────────────────────────────────────────────────────────────────
+
+SLUG="${1:-}"
+
+if [[ -z "$SLUG" ]]; then
+  echo "ha.addon.restart"
+  echo
+  echo "usage: ha-addon-restart <addon_slug>"
+  echo "example: ha-addon-restart 45df7312_zigbee2mqtt"
+  echo
+  if [[ -f "$ADDONS_BINDING" ]]; then
+    echo "Available add-ons (from ha.addons.yaml):"
+    yq '.addons[] | "  " + .slug + " (" + .name + ")"' "$ADDONS_BINDING" 2>/dev/null || true
+  fi
+  exit 1
+fi
+
+echo "ha.addon.restart"
+echo "  slug: $SLUG"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VALIDATE SLUG
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ -f "$ADDONS_BINDING" ]]; then
+  ADDON_NAME=$(yq ".addons[] | select(.slug == \"$SLUG\") | .name" "$ADDONS_BINDING" 2>/dev/null)
+  if [[ -z "$ADDON_NAME" || "$ADDON_NAME" == "null" ]]; then
+    echo "WARN: slug '$SLUG' not found in ha.addons.yaml — proceeding anyway"
+  else
+    echo "  addon: $ADDON_NAME"
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHECK SSH
+# ─────────────────────────────────────────────────────────────────────────────
+
+if ! ssh $SSH_OPTS "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
+  echo "status: STOP"
+  echo "reason: ssh_unreachable"
+  echo "fix: check SSH connectivity to $SSH_TARGET"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESTART VIA SUPERVISOR API
+# ─────────────────────────────────────────────────────────────────────────────
+
+echo "  restarting..."
+
+RESPONSE=$(ssh $SSH_OPTS "$SSH_TARGET" \
+  "bash -l -c 'curl -s -w \"\n%{http_code}\" -X POST -H \"Authorization: Bearer \$SUPERVISOR_TOKEN\" http://supervisor/addons/$SLUG/restart'" 2>/dev/null)
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [[ "$HTTP_CODE" == "200" ]]; then
+  RESULT=$(echo "$BODY" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('result','unknown'))" 2>/dev/null) || RESULT="unknown"
+  if [[ "$RESULT" == "ok" ]]; then
+    echo "  status: OK"
+    echo "  result: restarted"
+  else
+    echo "  status: WARN"
+    echo "  result: $RESULT"
+    echo "  body: $BODY"
+  fi
+else
+  echo "  status: FAIL"
+  echo "  http_code: $HTTP_CODE"
+  echo "  body: $BODY"
+  exit 1
+fi

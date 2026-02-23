@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.health.status — HA API health probe with version and component count
+# Requires: infisical-agent.sh with HA_API_TOKEN at home-assistant/prod
+# Safety: read-only
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+
+echo "ha.health.status"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRECONDITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+command -v curl >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_curl"; exit 2; }
+command -v jq >/dev/null 2>&1  || { echo "status: STOP"; echo "reason: missing_dep_jq"; exit 2; }
+
+if [[ ! -x "$INFISICAL_AGENT" ]]; then
+  echo "status: STOP"
+  echo "reason: infisical_agent_not_found"
+  echo "fix: ensure infisical-agent.sh exists at $INFISICAL_AGENT"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FETCH HA_API_TOKEN FROM INFISICAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+
+if [[ -z "${HA_TOKEN:-}" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_token_unavailable"
+  echo "fix: check Infisical auth and HA_API_TOKEN at home-assistant/prod"
+  exit 2
+fi
+
+HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_PORT="${HA_PORT:-8123}"
+HA_BASE="http://${HA_HOST}:${HA_PORT}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROBE 1: GET /api/ (API running check)
+# ─────────────────────────────────────────────────────────────────────────────
+
+set +e
+API_RESPONSE="$(curl -s --max-time 10 -w '\n%{http_code}' "$HA_BASE/api/" \
+  -H "Authorization: Bearer $HA_TOKEN" 2>/dev/null)"
+api_rc=$?
+set -e
+
+if [[ "$api_rc" -ne 0 || -z "${API_RESPONSE:-}" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_api_unreachable"
+  echo "fix: check HA connectivity (default LAN ${HA_HOST}:${HA_PORT}, override via HA_HOST)"
+  exit 1
+fi
+
+API_HTTP="$(echo "$API_RESPONSE" | tail -n1)"
+API_BODY="$(echo "$API_RESPONSE" | sed '$d')"
+
+if [[ "$API_HTTP" == "401" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_api_auth_failed"
+  echo "http_code: $API_HTTP"
+  exit 1
+fi
+
+if [[ "$API_HTTP" != "200" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_api_error"
+  echo "http_code: $API_HTTP"
+  exit 1
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROBE 2: GET /api/config (version + details)
+# ─────────────────────────────────────────────────────────────────────────────
+
+set +e
+CONFIG_RESPONSE="$(curl -s --max-time 10 -w '\n%{http_code}' "$HA_BASE/api/config" \
+  -H "Authorization: Bearer $HA_TOKEN" 2>/dev/null)"
+config_rc=$?
+set -e
+
+if [[ "$config_rc" -ne 0 || -z "${CONFIG_RESPONSE:-}" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_config_unreachable"
+  exit 1
+fi
+
+CONFIG_HTTP="$(echo "$CONFIG_RESPONSE" | tail -n1)"
+CONFIG_BODY="$(echo "$CONFIG_RESPONSE" | sed '$d')"
+
+if [[ "$CONFIG_HTTP" != "200" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_config_error"
+  echo "http_code: $CONFIG_HTTP"
+  exit 1
+fi
+
+VERSION="$(echo "$CONFIG_BODY" | jq -r '.version // "unknown"')"
+LOCATION="$(echo "$CONFIG_BODY" | jq -r '.location_name // "unknown"')"
+COMPONENTS="$(echo "$CONFIG_BODY" | jq -r '.components | length // 0')"
+
+echo "status: OK"
+echo "http_code: $API_HTTP"
+echo "version: $VERSION"
+echo "location_name: $LOCATION"
+echo "components: $COMPONENTS"

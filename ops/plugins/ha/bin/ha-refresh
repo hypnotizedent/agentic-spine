@@ -1,85 +1,16 @@
 #!/usr/bin/env bash
-# ═══════════════════════════════════════════════════════════════════════════
-# ha-refresh — Run all HA snapshot capabilities in one command
-# ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-SPINE_CODE="${SPINE_CODE:-$SPINE_ROOT}"
-CAP_RUNNER="$SPINE_CODE/bin/ops"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${HA_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/agents/home-assistant/docs/spine-plugin-ha/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-START_TIME=$(date +%s)
-
-echo "═══════════════════════════════════════════════════════════════════════════"
-echo "HA REFRESH — Refresh all HA bindings"
-echo "═══════════════════════════════════════════════════════════════════════════"
-echo
-
-SNAPSHOTS=(
-  "ha.addons.snapshot"
-  "ha.automations.snapshot"
-  "ha.dashboard.snapshot"
-  "ha.helpers.snapshot"
-  "ha.integrations.snapshot"
-  "ha.scenes.snapshot"
-  "ha.scripts.snapshot"
-  "ha.hacs.snapshot"
-  "ha.entity.state.baseline"
-  "ha.device.map.build"
-  "ha.z2m.devices.snapshot"
-  "ha.zwave.devices.snapshot"
-)
-
-PASS=0
-FAIL=0
-FAILED_CAPS=()
-
-for cap in "${SNAPSHOTS[@]}"; do
-  printf "%-35s " "$cap"
-  if "$CAP_RUNNER" cap run "$cap" >/dev/null 2>&1; then
-    PASS=$((PASS + 1))
-    echo "✓"
-  else
-    FAIL=$((FAIL + 1))
-    FAILED_CAPS+=("$cap")
-    echo "✗"
-  fi
-done
-
-echo
-echo "─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─"
-echo "BASELINE BUILD"
-echo "─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─"
-
-printf "%-35s " "ha.ssot.baseline.build"
-if "$CAP_RUNNER" cap run ha.ssot.baseline.build >/dev/null 2>&1; then
-  echo "✓"
-else
-  FAIL=$((FAIL + 1))
-  FAILED_CAPS+=("ha.ssot.baseline.build")
-  echo "✗"
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-END_TIME=$(date +%s)
-DURATION=$((END_TIME - START_TIME))
-
-echo
-echo "═══════════════════════════════════════════════════════════════════════════"
-echo "SUMMARY"
-echo "═══════════════════════════════════════════════════════════════════════════"
-echo "  Passed:   $PASS"
-echo "  Failed:   $FAIL"
-echo "  Duration: ${DURATION}s"
-echo
-
-if (( FAIL > 0 )); then
-  echo "Failed capabilities:"
-  for cap in "${FAILED_CAPS[@]}"; do
-    echo "  - $cap"
-  done
-  echo
-  exit 1
-fi
-
-echo "All HA bindings refreshed successfully."
-exit 0
+echo "WARN: ha plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

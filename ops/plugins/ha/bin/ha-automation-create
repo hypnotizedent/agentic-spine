@@ -1,119 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ha.automation.create — Create or update an HA automation via REST API
-# Uses: POST /api/config/automation/config/{id}
-# Requires: HA_API_TOKEN from Infisical, HA reachable
-# Safety: mutating (creates/updates automations in HA)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${HA_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/agents/home-assistant/docs/spine-plugin-ha/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
-HA_API="http://10.0.0.100:8123"
-
-echo "ha.automation.create"
-echo
-
-# ── Argument parsing ──
-AUTOMATION_ID=""
-ALIAS=""
-DESCRIPTION=""
-TRIGGER_JSON=""
-ACTION_JSON=""
-MODE="single"
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --id)          AUTOMATION_ID="$2"; shift 2 ;;
-    --alias)       ALIAS="$2";        shift 2 ;;
-    --description) DESCRIPTION="$2";  shift 2 ;;
-    --trigger)     TRIGGER_JSON="$2"; shift 2 ;;
-    --action)      ACTION_JSON="$2";  shift 2 ;;
-    --mode)        MODE="$2";         shift 2 ;;
-    *)
-      echo "usage: ha-automation-create --id <id> --alias <name> --trigger '<json>' --action '<json>' [--description <desc>] [--mode single|parallel|queued]"
-      exit 1
-      ;;
-  esac
-done
-
-if [[ -z "$AUTOMATION_ID" || -z "$ALIAS" || -z "$TRIGGER_JSON" || -z "$ACTION_JSON" ]]; then
-  echo "usage: ha-automation-create --id <id> --alias <name> --trigger '<json>' --action '<json>'"
-  echo
-  echo "  --id          Unique automation ID (used in entity_id: automation.<id>)"
-  echo "  --alias       Human-readable name"
-  echo "  --trigger     Trigger config as JSON array"
-  echo "  --action      Action config as JSON array"
-  echo "  --description Optional description"
-  echo "  --mode        Execution mode: single (default), parallel, queued"
-  exit 1
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-echo "  id:    $AUTOMATION_ID"
-echo "  alias: $ALIAS"
-echo "  mode:  $MODE"
-echo
-
-# ── Preconditions ──
-command -v curl >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_curl"; exit 2; }
-command -v jq >/dev/null 2>&1  || { echo "status: STOP"; echo "reason: missing_dep_jq"; exit 2; }
-[[ -x "$INFISICAL_AGENT" ]] || { echo "status: STOP"; echo "reason: infisical_agent_not_found"; exit 2; }
-
-# ── Fetch token ──
-HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
-if [[ -z "${HA_TOKEN:-}" ]]; then
-  echo "status: STOP"
-  echo "reason: ha_token_unavailable"
-  exit 2
-fi
-
-# ── Build payload ──
-PAYLOAD=$(jq -n \
-  --arg alias "$ALIAS" \
-  --arg desc "$DESCRIPTION" \
-  --arg mode "$MODE" \
-  --argjson trigger "$TRIGGER_JSON" \
-  --argjson action "$ACTION_JSON" \
-  '{alias: $alias, description: $desc, mode: $mode, trigger: $trigger, action: $action}')
-
-# ── Call HA config API ──
-URL="${HA_API}/api/config/automation/config/${AUTOMATION_ID}"
-
-set +e
-RESPONSE=$(curl -s --max-time 15 -w '\n%{http_code}' -X POST "$URL" \
-  -H "Authorization: Bearer $HA_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$PAYLOAD" 2>/dev/null)
-curl_rc=$?
-set -e
-
-if [[ "$curl_rc" -ne 0 || -z "${RESPONSE:-}" ]]; then
-  echo "status: FAIL"
-  echo "reason: ha_api_unreachable"
-  exit 1
-fi
-
-HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-BODY=$(echo "$RESPONSE" | sed '$d')
-
-case "$HTTP_CODE" in
-  200)
-    echo "status: OK"
-    echo "http_code: $HTTP_CODE"
-    echo "automation_id: $AUTOMATION_ID"
-    echo "entity_id: automation.${AUTOMATION_ID}"
-    echo "result: $BODY"
-    ;;
-  401|403)
-    echo "status: FAIL"
-    echo "reason: ha_api_auth_failed"
-    echo "http_code: $HTTP_CODE"
-    exit 1
-    ;;
-  *)
-    echo "status: FAIL"
-    echo "reason: ha_api_error"
-    echo "http_code: $HTTP_CODE"
-    echo "response: $BODY"
-    exit 1
-    ;;
-esac
+echo "WARN: ha plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

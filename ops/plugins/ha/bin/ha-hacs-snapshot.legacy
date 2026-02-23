@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.hacs.snapshot — Snapshot HACS repository inventory to ops/bindings/ha.hacs.yaml
+# Method: SSH into HA, read /config/.storage/hacs.repositories JSON
+# Fallback: if SSH/file read fails, writes minimal binding with HACS update entity state from API
+# Output: ops/bindings/ha.hacs.yaml
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+OUTPUT="$SPINE_ROOT/ops/bindings/ha.hacs.yaml"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+SSH_TARGET="hassio@ha"
+SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_PORT="${HA_PORT:-8123}"
+HA_BASE="http://${HA_HOST}:${HA_PORT}"
+
+TMPDIR_WORK=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+
+echo "ha.hacs.snapshot"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRECONDITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+command -v python3 >/dev/null 2>&1 || { echo "STOP (2): python3 not found"; exit 2; }
+command -v curl >/dev/null 2>&1 || { echo "STOP (2): curl not found"; exit 2; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRY SSH PATH: read HACS .storage file
+# ─────────────────────────────────────────────────────────────────────────────
+
+HACS_METHOD="ssh"
+echo "Attempting SSH to read HACS repository data..."
+
+if ssh $SSH_OPTS "$SSH_TARGET" "test -f /config/.storage/hacs.repositories" 2>/dev/null; then
+  ssh $SSH_OPTS "$SSH_TARGET" "cat /config/.storage/hacs.repositories" \
+    > "$TMPDIR_WORK/hacs_repos.json" 2>/dev/null || HACS_METHOD="fallback"
+  # Validate JSON
+  if [[ -s "$TMPDIR_WORK/hacs_repos.json" ]]; then
+    python3 -c "import json; json.load(open('$TMPDIR_WORK/hacs_repos.json'))" 2>/dev/null || HACS_METHOD="fallback"
+  else
+    HACS_METHOD="fallback"
+  fi
+else
+  echo "  SSH file not found or SSH failed"
+  HACS_METHOD="fallback"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FALLBACK: query HA API for HACS update entity
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ "$HACS_METHOD" == "fallback" ]]; then
+  echo "  Falling back to HA API for HACS update entity state..."
+
+  HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+  if [[ -z "${HA_TOKEN:-}" ]]; then
+    echo "STOP (2): could not retrieve HA_API_TOKEN from Infisical"
+    exit 2
+  fi
+
+  HTTP_CODE=$(curl -s -o "$TMPDIR_WORK/hacs_entity.json" -w '%{http_code}' --connect-timeout 10 \
+    -H "Authorization: Bearer $HA_TOKEN" "${HA_BASE}/api/states/update.hacs_update" 2>/dev/null) || HTTP_CODE="000"
+
+  if [[ "$HTTP_CODE" != "200" ]]; then
+    echo "WARN: HACS update entity not found (HTTP $HTTP_CODE) — writing empty binding"
+    echo '{}' > "$TMPDIR_WORK/hacs_entity.json"
+  fi
+fi
+
+echo
+echo "Building HACS binding (method=$HACS_METHOD)..."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUILD YAML BINDING (Python)
+# ─────────────────────────────────────────────────────────────────────────────
+
+python3 - "$TMPDIR_WORK" "$OUTPUT" "$HACS_METHOD" << 'PYEOF'
+import json, sys, datetime, os
+
+try:
+    import yaml
+except ImportError:
+    print("STOP (2): PyYAML not installed", file=sys.stderr)
+    sys.exit(2)
+
+tmpdir, out_path, method = sys.argv[1], sys.argv[2], sys.argv[3]
+
+repos = []
+
+if method == "ssh":
+    # ── Parse HACS .storage format ───────────────────────────────────────────
+    with open(os.path.join(tmpdir, 'hacs_repos.json'), 'r') as f:
+        data = json.load(f)
+
+    # HACS .storage format: {"version": N, "data": {"<numeric_id>": {...}, ...}}
+    # Each repo entry has: full_name, category, installed (bool), repository_manifest, etc.
+    # Only repos with "installed": true are actually installed by the user.
+    repo_data = data.get('data', {})
+
+    # repo_data is a dict keyed by numeric repo IDs
+    all_repos = []
+    if isinstance(repo_data, dict):
+        all_repos = list(repo_data.values())
+    elif isinstance(repo_data, list):
+        all_repos = repo_data
+
+    for repo in sorted(all_repos, key=lambda r: r.get('full_name', r.get('repository', ''))):
+        if not repo.get('installed'):
+            continue
+        manifest = repo.get('repository_manifest', {})
+        repos.append({
+            'repository': repo.get('full_name', repo.get('repository', '')),
+            'category': repo.get('category', 'unknown'),
+            'installed_version': repo.get('installed_version', manifest.get('version', '')),
+            'available_version': repo.get('available_version', repo.get('last_version', manifest.get('version', ''))),
+            'name': manifest.get('name', repo.get('full_name', '').split('/')[-1] if repo.get('full_name') else ''),
+        })
+
+    binding = {
+        'schema_version': '1.0',
+        'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'source': 'ha.hacs.snapshot',
+        'method': 'ssh',
+        'fallback': False,
+        'summary': {
+            'repo_count': len(repos),
+            'by_category': {},
+        },
+        'repositories': repos,
+    }
+
+    # Count by category
+    for r in repos:
+        cat = r.get('category', 'unknown')
+        binding['summary']['by_category'][cat] = binding['summary']['by_category'].get(cat, 0) + 1
+
+else:
+    # ── Fallback: minimal binding from HACS update entity ────────────────────
+    entity_path = os.path.join(tmpdir, 'hacs_entity.json')
+    entity = {}
+    if os.path.isfile(entity_path):
+        with open(entity_path, 'r') as f:
+            try:
+                entity = json.load(f)
+            except json.JSONDecodeError:
+                entity = {}
+
+    binding = {
+        'schema_version': '1.0',
+        'generated': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'source': 'ha.hacs.snapshot',
+        'method': 'fallback',
+        'fallback': True,
+        'summary': {
+            'repo_count': 0,
+            'note': 'SSH read of .storage/hacs.repositories failed; minimal fallback binding',
+        },
+        'hacs_update_entity': {
+            'entity_id': 'update.hacs_update',
+            'state': entity.get('state', 'unknown'),
+            'installed_version': entity.get('attributes', {}).get('installed_version', ''),
+            'latest_version': entity.get('attributes', {}).get('latest_version', ''),
+        },
+        'repositories': [],
+    }
+
+header = '# HA HACS Snapshot (SSOT)\n'
+header += '# Auto-generated by ha.hacs.snapshot — do not hand-edit.\n'
+header += f'# Method: {method} | Fallback: {method != "ssh"}\n'
+header += '# Status: authoritative\n\n'
+
+with open(out_path, 'w') as f:
+    f.write(header)
+    yaml.dump(binding, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+print(f"Wrote {out_path}")
+if method == "ssh":
+    print(f"  {len(repos)} HACS repositories")
+    for cat, count in sorted(binding['summary']['by_category'].items()):
+        print(f"    {cat}: {count}")
+else:
+    print(f"  Fallback mode — HACS update entity state: {binding.get('hacs_update_entity', {}).get('state', 'unknown')}")
+PYEOF
+
+echo
+echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"

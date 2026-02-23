@@ -1,82 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ha.dashboard.backup — Backup HA YAML dashboard files to workbench for version control
-# Reads dashboard filenames from ha.dashboards.yaml binding, then rsyncs from HA via SSH.
-# Output directory: workbench/infra/ha-dashboards/
-# Only backs up YAML-mode dashboards (not storage-mode).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SCRIPT_NAME="$(basename "$0")"
+PROJECT_ROOT="${HA_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/agents/home-assistant/docs/spine-plugin-ha/bin}"
+PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
+LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
-DASHBOARDS_BINDING="$SPINE_ROOT/ops/bindings/ha.dashboards.yaml"
-BACKUP_DIR="$WORKBENCH_ROOT/infra/ha-dashboards"
-SSH_TARGET="hassio@ha"
-SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
-
-# Transitional fallback: if workbench path does not exist yet, write to legacy spine path.
-if [[ ! -d "$WORKBENCH_ROOT/infra" && -d "$SPINE_ROOT/infra" ]]; then
-  BACKUP_DIR="$SPINE_ROOT/infra/ha-dashboards"
+if [[ -x "$PROJECT_SCRIPT" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
 fi
 
-echo "ha.dashboard.backup"
-echo
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PRECONDITIONS
-# ─────────────────────────────────────────────────────────────────────────────
-
-command -v python3 >/dev/null 2>&1 || { echo "STOP (2): python3 not found"; exit 2; }
-
-if [[ ! -f "$DASHBOARDS_BINDING" ]]; then
-  echo "STOP (2): ha.dashboards.yaml binding not found. Run ha.dashboard.snapshot first."
-  exit 2
-fi
-
-# Test SSH connectivity
-if ! ssh $SSH_OPTS "$SSH_TARGET" "echo ok" >/dev/null 2>&1; then
-  echo "STOP (2): SSH to HA failed"
-  exit 2
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# EXTRACT YAML DASHBOARD FILENAMES
-# ─────────────────────────────────────────────────────────────────────────────
-
-YAML_FILES=$(python3 -c "
-import yaml
-with open('$DASHBOARDS_BINDING') as f:
-    data = yaml.safe_load(f)
-for d in data.get('dashboards', []):
-    if d.get('mode') == 'yaml' and d.get('filename'):
-        print(d['filename'])
-" 2>/dev/null)
-
-if [[ -z "$YAML_FILES" ]]; then
-  echo "No YAML dashboards found in binding."
-  exit 0
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BACKUP DASHBOARDS
-# ─────────────────────────────────────────────────────────────────────────────
-
-mkdir -p "$BACKUP_DIR"
-PASS=0
-FAIL=0
-
-while IFS= read -r filename; do
-  [[ -z "$filename" ]] && continue
-  basename_file=$(basename "$filename")
-  echo "  Backing up: $filename → $BACKUP_DIR/$basename_file"
-  if ssh -n $SSH_OPTS "$SSH_TARGET" "sudo cat /config/$filename" > "$BACKUP_DIR/$basename_file" 2>/dev/null; then
-    PASS=$((PASS + 1))
-  else
-    echo "    WARN: failed to read $filename"
-    FAIL=$((FAIL + 1))
-  fi
-done <<< "$YAML_FILES"
-
-echo
-echo "Dashboard backup complete: $PASS succeeded, $FAIL failed"
-echo "Backup directory: $BACKUP_DIR"
-ls -la "$BACKUP_DIR"
+echo "WARN: ha plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+exec "$LEGACY_SCRIPT" "$@"

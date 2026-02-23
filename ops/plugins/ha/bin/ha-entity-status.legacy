@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.entity.status — Single entity state lookup via HA REST API
+# Requires: infisical-agent.sh with HA_API_TOKEN at home-assistant/prod
+# Safety: read-only
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ARGUMENT PARSING
+# ─────────────────────────────────────────────────────────────────────────────
+
+ENTITY_ID="${1:-}"
+
+if [[ -z "$ENTITY_ID" ]]; then
+  echo "ha.entity.status"
+  echo
+  echo "usage: ha-entity-status <entity_id>"
+  echo "example: ha-entity-status light.living_room"
+  exit 1
+fi
+
+echo "ha.entity.status"
+echo "  entity: $ENTITY_ID"
+echo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRECONDITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+command -v curl >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_curl"; exit 2; }
+command -v jq >/dev/null 2>&1  || { echo "status: STOP"; echo "reason: missing_dep_jq"; exit 2; }
+
+if [[ ! -x "$INFISICAL_AGENT" ]]; then
+  echo "status: STOP"
+  echo "reason: infisical_agent_not_found"
+  echo "fix: ensure infisical-agent.sh exists at $INFISICAL_AGENT"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FETCH HA_API_TOKEN FROM INFISICAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+
+if [[ -z "${HA_TOKEN:-}" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_token_unavailable"
+  echo "fix: check Infisical auth and HA_API_TOKEN at home-assistant/prod"
+  exit 2
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/states/<entity_id>
+# ─────────────────────────────────────────────────────────────────────────────
+
+HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_PORT="${HA_PORT:-8123}"
+HA_BASE="http://${HA_HOST}:${HA_PORT}"
+URL="${HA_BASE}/api/states/${ENTITY_ID}"
+
+set +e
+RESPONSE="$(curl -s --max-time 10 -w '\n%{http_code}' "$URL" \
+  -H "Authorization: Bearer $HA_TOKEN" 2>/dev/null)"
+curl_rc=$?
+set -e
+
+if [[ "$curl_rc" -ne 0 || -z "${RESPONSE:-}" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_api_unreachable"
+  echo "fix: check HA connectivity (default LAN ${HA_HOST}:${HA_PORT}, override via HA_HOST)"
+  exit 1
+fi
+
+HTTP_CODE="$(echo "$RESPONSE" | tail -n1)"
+BODY="$(echo "$RESPONSE" | sed '$d')"
+
+if [[ "$HTTP_CODE" == "401" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_api_auth_failed"
+  exit 1
+fi
+
+if [[ "$HTTP_CODE" == "404" ]]; then
+  echo "status: NOT_FOUND"
+  echo "entity: $ENTITY_ID"
+  echo "reason: entity_not_found"
+  exit 1
+fi
+
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "status: FAIL"
+  echo "reason: ha_api_error"
+  echo "http_code: $HTTP_CODE"
+  exit 1
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSE RESPONSE
+# ─────────────────────────────────────────────────────────────────────────────
+
+STATE="$(echo "$BODY" | jq -r '.state // "unknown"')"
+FRIENDLY_NAME="$(echo "$BODY" | jq -r '.attributes.friendly_name // "unknown"')"
+LAST_CHANGED="$(echo "$BODY" | jq -r '.last_changed // "unknown"')"
+
+echo "status: OK"
+echo "entity: $ENTITY_ID"
+echo "state: $STATE"
+echo "friendly_name: $FRIENDLY_NAME"
+echo "last_changed: $LAST_CHANGED"
+echo "attributes:"
+echo "$BODY" | jq -r '.attributes | to_entries[] | "  \(.key): \(.value)"' 2>/dev/null | head -20

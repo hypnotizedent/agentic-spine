@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.mcp.status — MCP server file validation (no API calls)
+# Checks: source exists, GOVERNED_TOOLS block present, ha_call_service blocked, policy doc exists
+# Safety: read-only
+
+echo "ha.mcp.status"
+echo
+
+PASS=0
+FAIL=0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHECK 1: MCP source exists
+# ─────────────────────────────────────────────────────────────────────────────
+
+MCP_SRC="$HOME/code/workbench/infra/compose/mcpjungle/servers/home-assistant/src/index.ts"
+
+if [[ -f "$MCP_SRC" ]]; then
+  echo "check: mcp_source_exists"
+  echo "  result: PASS"
+  echo "  path: $MCP_SRC"
+  PASS=$((PASS + 1))
+else
+  echo "check: mcp_source_exists"
+  echo "  result: FAIL"
+  echo "  expected: $MCP_SRC"
+  FAIL=$((FAIL + 1))
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHECK 2: GOVERNED_TOOLS block present
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ -f "$MCP_SRC" ]] && grep -q 'GOVERNED_TOOLS' "$MCP_SRC"; then
+  echo "check: governed_tools_block"
+  echo "  result: PASS"
+  PASS=$((PASS + 1))
+else
+  echo "check: governed_tools_block"
+  echo "  result: FAIL"
+  echo "  reason: GOVERNED_TOOLS block not found in MCP source"
+  FAIL=$((FAIL + 1))
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHECK 3: ha_call_service is null/blocked
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ -f "$MCP_SRC" ]] && grep -q '"ha_call_service": null' "$MCP_SRC"; then
+  echo "check: ha_call_service_blocked"
+  echo "  result: PASS"
+  echo "  value: null (blocked)"
+  PASS=$((PASS + 1))
+else
+  echo "check: ha_call_service_blocked"
+  echo "  result: FAIL"
+  echo "  reason: ha_call_service is not null — may be unblocked"
+  FAIL=$((FAIL + 1))
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHECK 4: Policy doc exists
+# ─────────────────────────────────────────────────────────────────────────────
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+POLICY_DOC="$SPINE_ROOT/docs/governance/HASS_MCP_INTEGRATION.md"
+
+if [[ -f "$POLICY_DOC" ]]; then
+  echo "check: mcp_policy_doc"
+  echo "  result: PASS"
+  echo "  path: docs/governance/HASS_MCP_INTEGRATION.md"
+  PASS=$((PASS + 1))
+else
+  echo "check: mcp_policy_doc"
+  echo "  result: FAIL"
+  echo "  expected: docs/governance/HASS_MCP_INTEGRATION.md"
+  FAIL=$((FAIL + 1))
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUMMARY
+# ─────────────────────────────────────────────────────────────────────────────
+
+echo
+TOTAL=$((PASS + FAIL))
+if [[ "$FAIL" -eq 0 ]]; then
+  echo "status: OK"
+else
+  echo "status: FAIL"
+fi
+echo "checks: $TOTAL"
+echo "pass: $PASS"
+echo "fail: $FAIL"

@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha.device.rename — Rename an HA device via WebSocket API
+# Uses: config/device_registry/update (WebSocket-only, not REST)
+# Requires: HA_API_TOKEN, python3 with websockets module
+# Safety: mutating (sets name_by_user on device)
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_PORT="${HA_PORT:-8123}"
+
+echo "ha.device.rename"
+echo
+
+# ── Argument parsing ──
+DEVICE_ID=""
+NEW_NAME=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --device-id) DEVICE_ID="$2"; shift 2 ;;
+    --name)      NEW_NAME="$2";  shift 2 ;;
+    *)
+      echo "usage: ha-device-rename --device-id <ha_device_id> --name <new_name>"
+      echo
+      echo "  Sets name_by_user on the HA device registry entry."
+      echo "  Use ha.device.map.yaml to find device IDs."
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$DEVICE_ID" || -z "$NEW_NAME" ]]; then
+  echo "usage: ha-device-rename --device-id <ha_device_id> --name <new_name>"
+  exit 1
+fi
+
+echo "  device_id: $DEVICE_ID"
+echo "  new_name:  $NEW_NAME"
+echo
+
+# ── Preconditions ──
+command -v python3 >/dev/null 2>&1 || { echo "status: STOP"; echo "reason: missing_dep_python3"; exit 2; }
+python3 -c "import websockets" 2>/dev/null || { echo "status: STOP"; echo "reason: missing_dep_websockets (pip3 install websockets)"; exit 2; }
+[[ -x "$INFISICAL_AGENT" ]] || { echo "status: STOP"; echo "reason: infisical_agent_not_found"; exit 2; }
+
+# ── Fetch token ──
+HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+if [[ -z "${HA_TOKEN:-}" ]]; then
+  echo "status: STOP"
+  echo "reason: ha_token_unavailable"
+  exit 2
+fi
+
+# ── Rename via WebSocket ──
+python3 - "$HA_TOKEN" "$HA_HOST" "$HA_PORT" "$DEVICE_ID" "$NEW_NAME" << 'PYEOF'
+import asyncio, json, sys
+
+async def rename():
+    import websockets
+    token, host, port, device_id, new_name = sys.argv[1:6]
+    uri = f"ws://{host}:{port}/api/websocket"
+
+    async with websockets.connect(uri) as ws:
+        msg = json.loads(await ws.recv())
+        if msg["type"] != "auth_required":
+            print(f"status: FAIL\nreason: unexpected_ws_msg\ndetail: {msg}")
+            sys.exit(1)
+
+        await ws.send(json.dumps({"type": "auth", "access_token": token}))
+        msg = json.loads(await ws.recv())
+        if msg["type"] != "auth_ok":
+            print(f"status: FAIL\nreason: ha_ws_auth_failed\ndetail: {msg}")
+            sys.exit(1)
+
+        await ws.send(json.dumps({
+            "id": 1,
+            "type": "config/device_registry/update",
+            "device_id": device_id,
+            "name_by_user": new_name
+        }))
+        msg = json.loads(await ws.recv())
+
+        if msg.get("success"):
+            dev = msg.get("result", {})
+            print("status: OK")
+            print(f"device_id: {device_id}")
+            print(f"name_by_user: {dev.get('name_by_user')}")
+            print(f"integration_name: {dev.get('name')}")
+            print(f"manufacturer: {dev.get('manufacturer')}")
+            print(f"area_id: {dev.get('area_id')}")
+        else:
+            print(f"status: FAIL\nreason: ws_update_failed\ndetail: {json.dumps(msg)}")
+            sys.exit(1)
+
+asyncio.run(rename())
+PYEOF
