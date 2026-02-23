@@ -1266,3 +1266,19 @@ scope: w20-normalization-strategy-only
 - `/Users/ronnyworks/code/workbench/bin/mint`
 - `/Users/ronnyworks/code/agentic-spine/ops/bindings/agents.registry.yaml` (`project_binding.repo_path`)
 - Generator-managed outputs unless source/generator is part of an approved wave
+
+## W22 Execution Delta (Allowlisted)
+
+- Wave: `WORKBENCH-BUILD-W22-ALLOWLIST-MATERIALIZE-AND-EXEC-20260223`
+- Allowlist counts:
+  - docs/examples paths: `1`
+  - Class-B frontmatter files: `5`
+  - temporal normalization targets: `0`
+- Before/after (this wave scope only):
+  - `/Users/ronnyworks/code/` docs path occurrences in allowlisted docs: `7 -> 0`
+  - allowlisted Class-B files missing leading `---`: `5 -> 0`
+  - top-level `updated:` keys in touched files: `0 -> 0`
+- Executed counts:
+  - docs path normalizations: `7`
+  - frontmatter markers added: `5`
+  - `updated` -> `updated_at` conversions: `0`
