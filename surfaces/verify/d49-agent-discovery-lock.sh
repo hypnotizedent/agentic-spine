@@ -47,8 +47,9 @@ done < <(yq e '.routing_rules[].agent' "$REGISTRY" 2>/dev/null)
 # 5. Active workbench-owned agents must implement under workbench/agents/
 enforce_workbench="$(yq e -r '.contracts.active_workbench_agents.enforce // false' "$REGISTRY" 2>/dev/null || echo false)"
 if [[ "$enforce_workbench" == "true" ]]; then
-  impl_root="$(yq e -r '.contracts.active_workbench_agents.implementation_root // ""' "$REGISTRY" 2>/dev/null || true)"
-  [[ -n "$impl_root" ]] || fail "contracts.active_workbench_agents.implementation_root missing"
+  impl_root_raw="$(yq e -r '.contracts.active_workbench_agents.implementation_root // ""' "$REGISTRY" 2>/dev/null || true)"
+  [[ -n "$impl_root_raw" ]] || fail "contracts.active_workbench_agents.implementation_root missing"
+  impl_root="${impl_root_raw/#\~/$HOME}"
 
   mapfile -t exempt_ids < <(yq e -r '.contracts.active_workbench_agents.exempt_agent_ids[]?' "$REGISTRY" 2>/dev/null || true)
 

@@ -194,6 +194,7 @@ Notes (Shop LAN-only endpoints):
 | finance-stack | `finance-stack` | 192.168.1.211 | 211 | bc:24:11:6f:74:82 | Finance (Firefly III, Paperless, Ghostfolio) |
 | mint-data | `mint-data` | 192.168.1.212 | 212 | bc:24:11:2b:85:2b | Fresh-slate data plane (PostgreSQL + MinIO + Redis) |
 | mint-apps | `mint-apps` | 192.168.1.213 | 213 | bc:24:11:39:7a:46 | Fresh-slate app plane (artwork, quote-page, order-intake) |
+| communications-stack | `communications-stack` | 192.168.1.26 | 214 | bc:24:11:24:82:05 | Stalwart mail server (DHCP .26). Tailscale: 100.115.16.37. |
 
 ### Subnet Table
 
