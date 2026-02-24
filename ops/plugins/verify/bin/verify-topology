@@ -213,6 +213,48 @@ run_gate_ids() {
   local skipped_inline=0
   local skipped_retired=0
   local -a failing_ids=()
+  local parallel_jobs=1
+  if [[ "${VERIFY_PARALLEL_JOBS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    parallel_jobs="${VERIFY_PARALLEL_JOBS}"
+  elif [[ "$ring" == "standard" || "$ring" == "deep" ]]; then
+    parallel_jobs=4
+  fi
+
+  declare -A gate_mode=()
+  declare -A gate_script_abs=()
+  declare -A gate_meta_fail_msg=()
+  local gid script_rel inline retired script_abs
+  for gid in "${gate_ids[@]}"; do
+    script_rel="${gate_script[$gid]:-}"
+    inline="${gate_inline[$gid]:-false}"
+    retired="${gate_retired[$gid]:-false}"
+
+    if [[ -z "$script_rel" || "$script_rel" == "null" ]]; then
+      gate_mode["$gid"]="meta_fail"
+      gate_meta_fail_msg["$gid"]="missing check_script"
+      continue
+    fi
+
+    if [[ "$retired" == "true" ]]; then
+      gate_mode["$gid"]="skip_retired"
+      continue
+    fi
+
+    if [[ "$inline" == "true" ]]; then
+      gate_mode["$gid"]="skip_inline"
+      continue
+    fi
+
+    script_abs="$ROOT/$script_rel"
+    if [[ ! -x "$script_abs" ]]; then
+      gate_mode["$gid"]="meta_fail"
+      gate_meta_fail_msg["$gid"]="missing/non-executable script: $script_rel"
+      continue
+    fi
+
+    gate_mode["$gid"]="run"
+    gate_script_abs["$gid"]="$script_abs"
+  done
 
   if [[ "$json_mode" == "0" ]]; then
     echo "verify.run"
@@ -220,60 +262,75 @@ run_gate_ids() {
     echo
   fi
 
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  local current_batch=0
   for gid in "${gate_ids[@]}"; do
-    local script_rel inline retired script_abs tmp rc
+    [[ "${gate_mode[$gid]:-}" == "run" ]] || continue
 
-    script_rel="${gate_script[$gid]:-}"
-    inline="${gate_inline[$gid]:-false}"
-    retired="${gate_retired[$gid]:-false}"
+    local out_file rc_file
+    out_file="$tmp_dir/${gid}.out"
+    rc_file="$tmp_dir/${gid}.rc"
+    (
+      set +e
+      bash "${gate_script_abs[$gid]}" >"$out_file" 2>&1
+      echo "$?" >"$rc_file"
+    ) &
+    current_batch=$((current_batch + 1))
 
-    if [[ -z "$script_rel" || "$script_rel" == "null" ]]; then
-      fail_count=$((fail_count + 1))
-      failing_ids+=("$gid")
-      [[ "$json_mode" == "0" ]] && echo "$gid FAIL missing check_script"
-      continue
+    if (( current_batch >= parallel_jobs )); then
+      set +e
+      wait
+      set -e
+      current_batch=0
     fi
-
-    if [[ "$retired" == "true" ]]; then
-      skipped_retired=$((skipped_retired + 1))
-      [[ "$json_mode" == "0" ]] && echo "$gid SKIP retired"
-      continue
-    fi
-
-    if [[ "$inline" == "true" ]]; then
-      skipped_inline=$((skipped_inline + 1))
-      [[ "$json_mode" == "0" ]] && echo "$gid SKIP inline-only"
-      continue
-    fi
-
-    script_abs="$ROOT/$script_rel"
-    if [[ ! -x "$script_abs" ]]; then
-      fail_count=$((fail_count + 1))
-      failing_ids+=("$gid")
-      [[ "$json_mode" == "0" ]] && echo "$gid FAIL missing/non-executable script: $script_rel"
-      continue
-    fi
-
-    tmp="$(mktemp)"
-    set +e
-    bash "$script_abs" >"$tmp" 2>&1
-    rc=$?
-    set -e
-
-    if [[ "$rc" -eq 0 ]]; then
-      pass_count=$((pass_count + 1))
-      [[ "$json_mode" == "0" ]] && echo "$gid PASS"
-    else
-      fail_count=$((fail_count + 1))
-      failing_ids+=("$gid")
-      if [[ "$json_mode" == "0" ]]; then
-        echo "$gid FAIL (rc=$rc)"
-        sed -n '1,60p' "$tmp" | sed 's/^/  /' || true
-      fi
-    fi
-
-    rm -f "$tmp" >/dev/null 2>&1 || true
   done
+
+  set +e
+  wait
+  set -e
+
+  local rc out_file
+  for gid in "${gate_ids[@]}"; do
+    case "${gate_mode[$gid]:-meta_fail}" in
+      skip_retired)
+        skipped_retired=$((skipped_retired + 1))
+        [[ "$json_mode" == "0" ]] && echo "$gid SKIP retired"
+        ;;
+      skip_inline)
+        skipped_inline=$((skipped_inline + 1))
+        [[ "$json_mode" == "0" ]] && echo "$gid SKIP inline-only"
+        ;;
+      meta_fail)
+        fail_count=$((fail_count + 1))
+        failing_ids+=("$gid")
+        [[ "$json_mode" == "0" ]] && echo "$gid FAIL ${gate_meta_fail_msg[$gid]}"
+        ;;
+      run)
+        out_file="$tmp_dir/${gid}.out"
+        rc="$(cat "$tmp_dir/${gid}.rc" 2>/dev/null || echo 99)"
+        if [[ "$rc" -eq 0 ]]; then
+          pass_count=$((pass_count + 1))
+          [[ "$json_mode" == "0" ]] && echo "$gid PASS"
+        else
+          fail_count=$((fail_count + 1))
+          failing_ids+=("$gid")
+          if [[ "$json_mode" == "0" ]]; then
+            echo "$gid FAIL (rc=$rc)"
+            sed -n '1,60p' "$out_file" | sed 's/^/  /' || true
+          fi
+        fi
+        ;;
+      *)
+        fail_count=$((fail_count + 1))
+        failing_ids+=("$gid")
+        [[ "$json_mode" == "0" ]] && echo "$gid FAIL unknown gate mode"
+        ;;
+    esac
+  done
+
+  rm -rf "$tmp_dir" >/dev/null 2>&1 || true
 
   if [[ "$json_mode" == "1" ]]; then
     local failing_json="[]"
