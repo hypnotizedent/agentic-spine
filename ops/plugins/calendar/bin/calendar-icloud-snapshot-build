@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""calendar-icloud-snapshot-build - build normalized iCloud calendar snapshot (read-only)."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(f"missing contract: {path}")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"YAML root must be mapping: {path}")
+    return payload
+
+
+def unfold_ics_lines(text: str) -> list[str]:
+    lines = text.replace("\r\n", "\n").split("\n")
+    out: list[str] = []
+    for line in lines:
+        if not line:
+            continue
+        if (line.startswith(" ") or line.startswith("\t")) and out:
+            out[-1] += line[1:]
+            continue
+        out.append(line)
+    return out
+
+
+def parse_ics_dt(raw: str) -> str:
+    value = raw.strip()
+    if not value:
+        return ""
+    try:
+        if len(value) == 8 and value.isdigit():
+            return datetime.strptime(value, "%Y%m%d").date().isoformat()
+        if value.endswith("Z"):
+            dt = datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        dt = datetime.strptime(value, "%Y%m%dT%H%M%S")
+        return dt.isoformat()
+    except ValueError:
+        return value
+
+
+def parse_ics_events(text: str, source_calendar_id: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    current: dict[str, str] | None = None
+    for line in unfold_ics_lines(text):
+        if line == "BEGIN:VEVENT":
+            current = {}
+            continue
+        if line == "END:VEVENT":
+            if current is not None:
+                uid = current.get("UID", "").strip()
+                if uid:
+                    events.append(
+                        {
+                            "source": "icloud",
+                            "source_calendar_id": source_calendar_id,
+                            "source_event_id": uid,
+                            "title": current.get("SUMMARY", "").strip() or uid,
+                            "start": parse_ics_dt(current.get("DTSTART", "")),
+                            "end": parse_ics_dt(current.get("DTEND", "")),
+                            "read_only": True,
+                            "immutable_by_source": True,
+                        }
+                    )
+            current = None
+            continue
+        if current is None or ":" not in line:
+            continue
+        raw_key, value = line.split(":", 1)
+        key = raw_key.split(";", 1)[0].strip().upper()
+        current[key] = value.strip()
+    return events
+
+
+def try_fetch_ics(url: str, username: str, password: str, timeout_sec: int) -> str:
+    auth = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", f"Basic {auth}")
+    req.add_header("Accept", "text/calendar, text/plain;q=0.9, */*;q=0.1")
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+    return body
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build iCloud read-only snapshot")
+    parser.add_argument("--json", action="store_true", help="Emit JSON payload")
+    parser.add_argument("--timeout-sec", type=int, default=20, help="HTTP timeout for optional live fetch")
+    args = parser.parse_args()
+
+    script_dir = Path(__file__).resolve().parent
+    root = Path(os.environ.get("SPINE_ROOT", str(script_dir.parents[3]))).expanduser().resolve()
+    contract_path = root / "ops/bindings/calendar.external.providers.contract.yaml"
+
+    try:
+        contract = load_yaml(contract_path)
+    except Exception as exc:
+        fail(str(exc))
+
+    providers = contract.get("providers") if isinstance(contract.get("providers"), dict) else {}
+    icloud = providers.get("icloud") if isinstance(providers.get("icloud"), dict) else {}
+    if not icloud:
+        fail("providers.icloud block missing in calendar.external.providers.contract.yaml")
+
+    snapshot = icloud.get("snapshot") if isinstance(icloud.get("snapshot"), dict) else {}
+    output_rel = str(snapshot.get("output_path", "mailroom/outbox/calendar/external/icloud.snapshot.json")).strip()
+    output_path = (root / output_rel).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    allowlist = icloud.get("allowlist_calendar_ids")
+    if not isinstance(allowlist, list):
+        fail("providers.icloud.allowlist_calendar_ids must be list")
+    enabled = bool(icloud.get("enabled", False))
+
+    # Optional runtime source inputs (no secrets in repo).
+    fixture_path = os.environ.get("CALENDAR_ICLOUD_SNAPSHOT_SOURCE", "").strip()
+    caldav_url = os.environ.get("CALENDAR_ICLOUD_CALDAV_URL", "").strip()
+    username = os.environ.get("CALENDAR_ICLOUD_USERNAME", "").strip()
+    password = os.environ.get("CALENDAR_ICLOUD_APP_PASSWORD", "").strip()
+
+    events: list[dict[str, Any]] = []
+    errors: list[str] = []
+    source = "none"
+
+    if fixture_path:
+        source = "fixture"
+        fixture = Path(fixture_path).expanduser()
+        if not fixture.is_file():
+            errors.append(f"fixture missing: {fixture}")
+        else:
+            text = fixture.read_text(encoding="utf-8", errors="replace")
+            events.extend(parse_ics_events(text, source_calendar_id="fixture"))
+    elif enabled and caldav_url and username and password:
+        source = "live_caldav_get"
+        targets = allowlist or ["default"]
+        for calendar_id in targets:
+            url = caldav_url.replace("{calendar_id}", str(calendar_id))
+            try:
+                body = try_fetch_ics(url, username, password, args.timeout_sec)
+                events.extend(parse_ics_events(body, source_calendar_id=str(calendar_id)))
+            except Exception as exc:
+                errors.append(f"live fetch failed for calendar {calendar_id}: {exc}")
+    elif enabled:
+        errors.append(
+            "iCloud provider enabled but no fixture or live credentials supplied "
+            "(CALENDAR_ICLOUD_SNAPSHOT_SOURCE or CALENDAR_ICLOUD_CALDAV_URL/USERNAME/APP_PASSWORD)"
+        )
+
+    payload = {
+        "capability": "calendar.icloud.snapshot.build",
+        "status": "ok" if not errors else "warn",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "schema_version": "1.0",
+        "data": {
+            "provider": "icloud",
+            "mode": "read-only",
+            "enabled": enabled,
+            "allowlist_calendar_ids": allowlist,
+            "source": source,
+            "event_count": len(events),
+            "events": events,
+            "immutable_by_source": True,
+            "snapshot_path": str(output_path),
+            "errors": errors,
+        },
+    }
+
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("calendar.icloud.snapshot.build")
+        print(f"provider_enabled: {str(enabled).lower()}")
+        print(f"event_count: {len(events)}")
+        print(f"source: {source}")
+        print(f"snapshot_path: {output_path}")
+        if errors:
+            print(f"errors: {len(errors)}")
+            for item in errors:
+                print(f"- {item}")
+        print(f"status: {payload['status'].upper()}")
+
+
+if __name__ == "__main__":
+    main()

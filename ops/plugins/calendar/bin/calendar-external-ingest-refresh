@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""calendar-external-ingest-refresh - refresh iCloud/Google read-only snapshots and local layers."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing contract: {path}")
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"YAML root must be mapping: {path}")
+    return payload
+
+
+def run_snapshot(script: Path) -> dict[str, Any]:
+    proc = subprocess.run([str(script), "--json"], capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        fail(f"snapshot script failed ({script.name}): {(proc.stderr or proc.stdout).strip()}")
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        fail(f"{script.name} emitted invalid JSON: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"{script.name} output root must be mapping")
+    return payload
+
+
+def parse_dt_iso(raw: str) -> datetime:
+    value = raw.strip()
+    if not value:
+        return datetime.now(timezone.utc)
+    try:
+        if len(value) == 10 and value[4] == "-" and value[7] == "-":
+            dt = datetime.fromisoformat(value + "T00:00:00+00:00")
+            return dt
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def to_ics_utc(raw: str, fallback_minutes: int = 30) -> tuple[str, str]:
+    start = parse_dt_iso(raw)
+    end = start + timedelta(minutes=fallback_minutes)
+    return (
+        start.strftime("%Y%m%dT%H%M%SZ"),
+        end.strftime("%Y%m%dT%H%M%SZ"),
+    )
+
+
+def escape_ics_text(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def event_ics(event: dict[str, Any], provider: str) -> str:
+    source_event_id = str(event.get("source_event_id", "")).strip() or "unknown"
+    uid = hashlib.sha1(f"{provider}|{source_event_id}".encode("utf-8")).hexdigest()[:24] + "@external-calendar"
+    title = str(event.get("title", "")).strip() or source_event_id
+    start_raw = str(event.get("start", "")).strip()
+    end_raw = str(event.get("end", "")).strip()
+
+    start_utc, fallback_end = to_ics_utc(start_raw)
+    if end_raw:
+        end_utc = parse_dt_iso(end_raw).strftime("%Y%m%dT%H%M%SZ")
+    else:
+        end_utc = fallback_end
+
+    dtstamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//agentic-spine//calendar-external-ingest//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{dtstamp}",
+        f"DTSTART:{start_utc}",
+        f"DTEND:{end_utc}",
+        f"SUMMARY:{escape_ics_text(title)}",
+        f"X-SPINE-EXTERNAL-PROVIDER:{provider}",
+        "X-SPINE-READONLY:true",
+        "X-SPINE-IMMUTABLE:true",
+        "END:VEVENT",
+        "END:VCALENDAR",
+        "",
+    ]
+    return "\r\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Refresh external calendar snapshots and local read-only layers")
+    parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    args = parser.parse_args()
+
+    script_dir = Path(__file__).resolve().parent
+    root = Path(os.environ.get("SPINE_ROOT", str(script_dir.parents[3]))).expanduser().resolve()
+    contract_path = root / "ops/bindings/calendar.external.providers.contract.yaml"
+    contract = load_yaml(contract_path)
+
+    providers = contract.get("providers") if isinstance(contract.get("providers"), dict) else {}
+    ingest = contract.get("ingest") if isinstance(contract.get("ingest"), dict) else {}
+    merge = ingest.get("merge") if isinstance(ingest.get("merge"), dict) else {}
+    local_layers = merge.get("local_layers") if isinstance(merge.get("local_layers"), dict) else {}
+
+    if not providers:
+        fail("providers block missing in calendar.external.providers.contract.yaml")
+    if not local_layers:
+        fail("ingest.merge.local_layers block missing in calendar.external.providers.contract.yaml")
+
+    icloud_script = script_dir / "calendar-icloud-snapshot-build"
+    google_script = script_dir / "calendar-google-snapshot-build"
+    if not icloud_script.is_file() or not google_script.is_file():
+        fail("snapshot build scripts missing")
+
+    icloud_payload = run_snapshot(icloud_script)
+    google_payload = run_snapshot(google_script)
+
+    snapshots = {"icloud": icloud_payload, "google": google_payload}
+
+    output_dir = (root / str(ingest.get("output_dir", "mailroom/outbox/calendar/external"))).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    index_path = (root / str(ingest.get("external_index_path", "mailroom/outbox/calendar/external/external-calendar-index.json"))).resolve()
+
+    local_store = (root / str(merge.get("target_local_store_path", "mailroom/state/calendar-sync/writable/external"))).resolve()
+    local_store.mkdir(parents=True, exist_ok=True)
+
+    provider_events: dict[str, list[dict[str, Any]]] = {}
+    for provider, payload in snapshots.items():
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        events = data.get("events") if isinstance(data.get("events"), list) else []
+        provider_events[provider] = [item for item in events if isinstance(item, dict)]
+
+    layer_results: dict[str, dict[str, Any]] = {}
+    for layer_id, layer_conf in local_layers.items():
+        if not isinstance(layer_conf, dict):
+            fail(f"ingest.merge.local_layers.{layer_id} must be mapping")
+        provider = str(layer_conf.get("provider", "")).strip()
+        if provider not in provider_events:
+            fail(f"local layer {layer_id} references unknown provider {provider!r}")
+
+        layer_dir = local_store / layer_id
+        layer_dir.mkdir(parents=True, exist_ok=True)
+
+        # Rebuild deterministic read-only layer contents each refresh.
+        for old in layer_dir.glob("*.ics"):
+            old.unlink()
+
+        written = 0
+        for event in provider_events[provider]:
+            source_event_id = str(event.get("source_event_id", "")).strip() or "unknown"
+            file_hash = hashlib.sha1(f"{provider}|{source_event_id}".encode("utf-8")).hexdigest()[:20]
+            filename = f"{file_hash}.ics"
+            payload = event_ics(event, provider=provider)
+            (layer_dir / filename).write_text(payload, encoding="utf-8")
+            written += 1
+
+        manifest = {
+            "layer": layer_id,
+            "provider": provider,
+            "read_only": bool(layer_conf.get("read_only", False)),
+            "immutable_by_source": bool(layer_conf.get("immutable_by_source", False)),
+            "event_count": written,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "source_snapshot": str(
+                (root / str((providers.get(provider, {}) or {}).get("snapshot", {}).get("output_path", ""))).resolve()
+            ),
+        }
+        (layer_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        layer_results[layer_id] = {
+            "provider": provider,
+            "path": str(layer_dir),
+            "event_count": written,
+            "read_only": manifest["read_only"],
+            "immutable_by_source": manifest["immutable_by_source"],
+        }
+
+    index_payload = {
+        "capability": "calendar.external.ingest.refresh",
+        "status": "ok",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "schema_version": "1.0",
+        "data": {
+            "providers": {
+                "icloud": {
+                    "snapshot_path": str((root / str(providers.get("icloud", {}).get("snapshot", {}).get("output_path", ""))).resolve()),
+                    "event_count": len(provider_events["icloud"]),
+                    "status": icloud_payload.get("status", "unknown"),
+                },
+                "google": {
+                    "snapshot_path": str((root / str(providers.get("google", {}).get("snapshot", {}).get("output_path", ""))).resolve()),
+                    "event_count": len(provider_events["google"]),
+                    "status": google_payload.get("status", "unknown"),
+                },
+            },
+            "external_writeback_enabled": bool((contract.get("provider_mode") or {}).get("writeback_enabled", False)),
+            "local_layer_store_path": str(local_store),
+            "layers": layer_results,
+            "snapshot_paths": [
+                str((root / str(providers.get("icloud", {}).get("snapshot", {}).get("output_path", ""))).resolve()),
+                str((root / str(providers.get("google", {}).get("snapshot", {}).get("output_path", ""))).resolve()),
+            ],
+        },
+    }
+    index_path.write_text(json.dumps(index_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if args.json:
+        print(json.dumps(index_payload, indent=2, sort_keys=True))
+    else:
+        print("calendar.external.ingest.refresh")
+        print(f"index_path: {index_path}")
+        print(f"local_layer_store: {local_store}")
+        print(f"icloud_events: {len(provider_events['icloud'])}")
+        print(f"google_events: {len(provider_events['google'])}")
+        print("status: OK")
+
+
+if __name__ == "__main__":
+    main()

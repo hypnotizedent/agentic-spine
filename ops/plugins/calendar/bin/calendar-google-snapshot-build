@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""calendar-google-snapshot-build - build normalized Google Calendar snapshot (read-only)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(f"missing contract: {path}")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"YAML root must be mapping: {path}")
+    return payload
+
+
+def exchange_refresh_token(
+    client_id: str,
+    client_secret: str,
+    refresh_token: str,
+    timeout_sec: int,
+) -> str:
+    data = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    token = str(payload.get("access_token", "")).strip()
+    if not token:
+        raise RuntimeError("token response missing access_token")
+    return token
+
+
+def google_list_events(access_token: str, calendar_id: str, timeout_sec: int) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode(
+        {
+            "singleEvents": "true",
+            "showDeleted": "false",
+            "maxResults": "2500",
+            "orderBy": "startTime",
+        }
+    )
+    encoded_id = urllib.parse.quote(calendar_id, safe="")
+    url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_id}/events?{query}"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        return []
+    return items
+
+
+def normalize_google_event(item: dict[str, Any], calendar_id: str) -> dict[str, Any]:
+    start = ""
+    end = ""
+    if isinstance(item.get("start"), dict):
+        start = str(item["start"].get("dateTime") or item["start"].get("date") or "").strip()
+    if isinstance(item.get("end"), dict):
+        end = str(item["end"].get("dateTime") or item["end"].get("date") or "").strip()
+    event_id = str(item.get("id", "")).strip()
+    title = str(item.get("summary", "")).strip() or event_id or "untitled"
+
+    return {
+        "source": "google",
+        "source_calendar_id": calendar_id,
+        "source_event_id": event_id,
+        "title": title,
+        "start": start,
+        "end": end,
+        "read_only": True,
+        "immutable_by_source": True,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build Google read-only snapshot")
+    parser.add_argument("--json", action="store_true", help="Emit JSON payload")
+    parser.add_argument("--timeout-sec", type=int, default=20, help="HTTP timeout for optional live fetch")
+    args = parser.parse_args()
+
+    script_dir = Path(__file__).resolve().parent
+    root = Path(os.environ.get("SPINE_ROOT", str(script_dir.parents[3]))).expanduser().resolve()
+    contract_path = root / "ops/bindings/calendar.external.providers.contract.yaml"
+
+    try:
+        contract = load_yaml(contract_path)
+    except Exception as exc:
+        fail(str(exc))
+
+    providers = contract.get("providers") if isinstance(contract.get("providers"), dict) else {}
+    google = providers.get("google") if isinstance(providers.get("google"), dict) else {}
+    if not google:
+        fail("providers.google block missing in calendar.external.providers.contract.yaml")
+
+    snapshot = google.get("snapshot") if isinstance(google.get("snapshot"), dict) else {}
+    output_rel = str(snapshot.get("output_path", "mailroom/outbox/calendar/external/google.snapshot.json")).strip()
+    output_path = (root / output_rel).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    allowlist_block = google.get("allowlist") if isinstance(google.get("allowlist"), dict) else {}
+    allowlist = allowlist_block.get("calendar_ids")
+    if not isinstance(allowlist, list):
+        fail("providers.google.allowlist.calendar_ids must be list")
+    enabled = bool(google.get("enabled", False))
+
+    fixture_path = os.environ.get("CALENDAR_GOOGLE_SNAPSHOT_SOURCE", "").strip()
+    client_id = os.environ.get("CALENDAR_GOOGLE_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("CALENDAR_GOOGLE_CLIENT_SECRET", "").strip()
+    refresh_token = os.environ.get("CALENDAR_GOOGLE_REFRESH_TOKEN", "").strip()
+    allowlist_env = os.environ.get("CALENDAR_GOOGLE_CALENDAR_IDS", "").strip()
+    if allowlist_env:
+        allowlist = [item.strip() for item in allowlist_env.split(",") if item.strip()]
+
+    events: list[dict[str, Any]] = []
+    errors: list[str] = []
+    source = "none"
+
+    if fixture_path:
+        source = "fixture"
+        fixture = Path(fixture_path).expanduser()
+        if not fixture.is_file():
+            errors.append(f"fixture missing: {fixture}")
+        else:
+            try:
+                payload = json.loads(fixture.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                errors.append(f"fixture JSON parse failed: {exc}")
+                payload = {}
+            items = payload.get("items", payload if isinstance(payload, list) else [])
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        events.append(normalize_google_event(item, calendar_id="fixture"))
+    elif enabled and client_id and client_secret and refresh_token and allowlist:
+        source = "google_api"
+        try:
+            token = exchange_refresh_token(client_id, client_secret, refresh_token, args.timeout_sec)
+            for calendar_id in allowlist:
+                try:
+                    items = google_list_events(token, calendar_id, args.timeout_sec)
+                    for item in items:
+                        if isinstance(item, dict):
+                            events.append(normalize_google_event(item, calendar_id))
+                except urllib.error.HTTPError as exc:
+                    errors.append(f"google events fetch failed for {calendar_id}: HTTP {exc.code}")
+                except Exception as exc:
+                    errors.append(f"google events fetch failed for {calendar_id}: {exc}")
+        except Exception as exc:
+            errors.append(f"google token exchange failed: {exc}")
+    elif enabled:
+        errors.append(
+            "Google provider enabled but missing live credentials/allowlist "
+            "(CALENDAR_GOOGLE_CLIENT_ID/CLIENT_SECRET/REFRESH_TOKEN/CALENDAR_IDS)"
+        )
+
+    payload = {
+        "capability": "calendar.google.snapshot.build",
+        "status": "ok" if not errors else "warn",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "schema_version": "1.0",
+        "data": {
+            "provider": "google",
+            "mode": "read-only",
+            "enabled": enabled,
+            "allowlist_calendar_ids": allowlist,
+            "source": source,
+            "event_count": len(events),
+            "events": events,
+            "immutable_by_source": True,
+            "snapshot_path": str(output_path),
+            "errors": errors,
+        },
+    }
+
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("calendar.google.snapshot.build")
+        print(f"provider_enabled: {str(enabled).lower()}")
+        print(f"event_count: {len(events)}")
+        print(f"source: {source}")
+        print(f"snapshot_path: {output_path}")
+        if errors:
+            print(f"errors: {len(errors)}")
+            for item in errors:
+                print(f"- {item}")
+        print(f"status: {payload['status'].upper()}")
+
+
+if __name__ == "__main__":
+    main()
