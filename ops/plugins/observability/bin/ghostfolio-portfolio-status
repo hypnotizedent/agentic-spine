@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# ghostfolio-portfolio-status - Portfolio overview from Ghostfolio on VM 211
+#
+# Probes: Ghostfolio /api/v1/portfolio/holdings, /api/v1/account
+# Host: finance-stack (VM 211, Tailscale 100.76.153.100)
+# Auth: GHOSTFOLIO_ACCESS_TOKEN via infisical-agent.sh → anonymous login → JWT
+#
+# Usage:
+#   ghostfolio-portfolio-status
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+
+HOST_IP="100.76.153.100"
+GF_PORT=3333
+CONNECT_TIMEOUT=5
+MAX_TIME=15
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v jq >/dev/null 2>&1  || stop "missing dependency: jq"
+
+# ── Fetch Ghostfolio access token from Infisical ────────────────────────
+GF_ACCESS_TOKEN=""
+if [[ -x "$INFISICAL_AGENT" ]]; then
+  GF_ACCESS_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod GHOSTFOLIO_ACCESS_TOKEN 2>/dev/null) || GF_ACCESS_TOKEN=""
+fi
+
+if [[ -z "$GF_ACCESS_TOKEN" ]]; then
+  stop "GHOSTFOLIO_ACCESS_TOKEN not available from Infisical"
+fi
+
+# ── Two-step auth: security token → JWT ─────────────────────────────────
+jwt_response=$(curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+  -X POST "http://${HOST_IP}:${GF_PORT}/api/v1/auth/anonymous" \
+  -H "Content-Type: application/json" \
+  -d "{\"accessToken\":\"${GF_ACCESS_TOKEN}\"}" 2>/dev/null) || true
+
+JWT=$(echo "$jwt_response" | jq -r '.authToken // empty' 2>/dev/null)
+if [[ -z "$JWT" ]]; then
+  stop "Ghostfolio auth failed — could not obtain JWT"
+fi
+
+AUTH_HEADER="Authorization: Bearer ${JWT}"
+
+# ── Fetch helper ────────────────────────────────────────────────────────
+gf_fetch() {
+  local path="$1"
+  curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+    -H "$AUTH_HEADER" -H "Accept: application/json" \
+    "http://${HOST_IP}:${GF_PORT}${path}" 2>/dev/null || echo ""
+}
+
+# ── Portfolio holdings ──────────────────────────────────────────────────
+echo "ghostfolio.portfolio.status"
+echo "host: finance-stack (VM 211, ${HOST_IP}:${GF_PORT})"
+echo
+
+holdings_json=$(gf_fetch "/api/v1/portfolio/holdings")
+
+if [[ -z "$holdings_json" ]] || ! echo "$holdings_json" | jq -e '.holdings' >/dev/null 2>&1; then
+  echo "  holdings: UNAVAILABLE"
+else
+  holdings_count=$(echo "$holdings_json" | jq '.holdings | length' 2>/dev/null)
+  echo "  holdings: ${holdings_count} positions"
+
+  # Top 5 holdings by value
+  top_holdings=$(echo "$holdings_json" | jq -r '
+    [.holdings[] | select(.valueInBaseCurrency != null)]
+    | sort_by(-.valueInBaseCurrency)
+    | .[0:5]
+    | .[] | "    \(.symbol // .name)\t$\(.valueInBaseCurrency | . * 100 | round / 100)"
+  ' 2>/dev/null)
+
+  if [[ -n "$top_holdings" ]]; then
+    echo "  top holdings:"
+    echo "$top_holdings"
+  fi
+fi
+
+# ── Accounts ────────────────────────────────────────────────────────────
+accounts_json=$(gf_fetch "/api/v1/account")
+
+if [[ -z "$accounts_json" ]] || ! echo "$accounts_json" | jq -e '.accounts' >/dev/null 2>&1; then
+  echo "  accounts: UNAVAILABLE"
+else
+  echo
+  echo "  accounts:"
+  echo "$accounts_json" | jq -r '
+    .accounts[]
+    | "    \(.name)\tbalance=$\(.balance | . * 100 | round / 100)"
+  ' 2>/dev/null
+fi
+
+# ── Summary ─────────────────────────────────────────────────────────────
+echo
+total_value=$(echo "$holdings_json" | jq '[.holdings[].valueInBaseCurrency // 0] | add | . * 100 | round / 100' 2>/dev/null || echo "N/A")
+echo "summary: portfolio_value=\$${total_value}"
+echo "status: OK"
