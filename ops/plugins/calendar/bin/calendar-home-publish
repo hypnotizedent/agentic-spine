@@ -1,0 +1,539 @@
+#!/usr/bin/env python3
+"""calendar-home-publish - bulk-publish spine calendar SSOT events to Radicale CalDAV home."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing contract: {path}")
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # pragma: no cover - runtime guard
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"YAML root must be mapping: {path}")
+    return payload
+
+
+def read_secret_var(name: str) -> str:
+    val = os.environ.get(name, "").strip()
+    if val:
+        return val
+    file_var = os.environ.get(f"{name}_FILE", "").strip()
+    if file_var:
+        try:
+            return Path(file_var).expanduser().read_text(encoding="utf-8").strip()
+        except Exception as exc:  # pragma: no cover - runtime guard
+            fail(f"unable to read secret file for {name}: {exc}")
+    return ""
+
+
+def escape_ics_text(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def fold_ics_line(line: str, width: int = 73) -> list[str]:
+    if len(line) <= width:
+        return [line]
+    out: list[str] = []
+    remaining = line
+    while len(remaining) > width:
+        out.append(remaining[:width])
+        remaining = " " + remaining[width:]
+    out.append(remaining)
+    return out
+
+
+def vtimezone_lines(tz_name: str) -> list[str]:
+    if tz_name != "America/New_York":
+        return []
+    return [
+        "BEGIN:VTIMEZONE",
+        f"TZID:{tz_name}",
+        "BEGIN:DAYLIGHT",
+        "TZOFFSETFROM:-0500",
+        "TZOFFSETTO:-0400",
+        "TZNAME:EDT",
+        "DTSTART:19700308T020000",
+        "RRULE:FREQ=YEARLY;BYDAY=2SU;BYMONTH=3",
+        "END:DAYLIGHT",
+        "BEGIN:STANDARD",
+        "TZOFFSETFROM:-0400",
+        "TZOFFSETTO:-0500",
+        "TZNAME:EST",
+        "DTSTART:19701101T020000",
+        "RRULE:FREQ=YEARLY;BYDAY=1SU;BYMONTH=11",
+        "END:STANDARD",
+        "END:VTIMEZONE",
+    ]
+
+
+def build_single_event_ics(event: dict[str, Any], tz_name: str, dtstamp: str) -> str:
+    """Wrap a single SSOT event into a complete VCALENDAR with VTIMEZONE."""
+    rrule_parts = [f"FREQ={event['freq']}"]
+    byday = event.get("byday") or []
+    if byday:
+        rrule_parts.append(f"BYDAY={','.join(byday)}")
+
+    vevent_lines = [
+        "BEGIN:VEVENT",
+        f"UID:{event['uid']}",
+        f"DTSTAMP:{dtstamp}",
+        f"DTSTART;TZID={tz_name}:{event['dtstart_local']}",
+        f"DTEND;TZID={tz_name}:{event['dtend_local']}",
+        f"RRULE:{';'.join(rrule_parts)}",
+        f"SUMMARY:{escape_ics_text(event['summary'])}",
+        f"DESCRIPTION:{escape_ics_text(event['description'])}",
+        f"X-SPINE-LAYER:{event['layer']}",
+        f"X-SPINE-AUTHORITY:{event['authority']}",
+        f"X-SPINE-SOURCE:{escape_ics_text(event.get('source_ref', 'unspecified'))}",
+        "STATUS:CONFIRMED",
+        "END:VEVENT",
+    ]
+
+    folded_vevent: list[str] = []
+    for line in vevent_lines:
+        folded_vevent.extend(fold_ics_line(line))
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//agentic-spine//calendar-home-publish-v1//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+    ]
+    lines.extend(vtimezone_lines(tz_name))
+    lines.extend(folded_vevent)
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def ssh_curl_put(
+    host: str,
+    url: str,
+    payload: str,
+    username: str,
+    password: str,
+    remote_stack_path: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """PUT a single ICS payload to Radicale via SSH + curl."""
+    result: dict[str, Any] = {
+        "url": url,
+        "attempted": not dry_run,
+        "ok": False,
+        "output": "",
+        "auth_source": "none",
+    }
+
+    if dry_run:
+        result["ok"] = True
+        result["output"] = "dry-run"
+        return result
+
+    if username and password:
+        result["auth_source"] = "env"
+        remote_cmd = (
+            "curl -fsS -u "
+            + shlex.quote(f"{username}:{password}")
+            + " -X PUT -H 'Content-Type: text/calendar; charset=utf-8' --data-binary @- "
+            + shlex.quote(url)
+            + " >/dev/null"
+        )
+    else:
+        if not remote_stack_path:
+            fail(
+                "missing calendar home credentials and home.remote_stack_path unavailable for host auth fallback"
+            )
+        result["auth_source"] = "host_env"
+        remote_cmd = (
+            "set -a; source "
+            + shlex.quote(f"{remote_stack_path}/.env")
+            + "; set +a; "
+            + "curl -fsS -u \"$RADICALE_ADMIN_USERNAME:$RADICALE_ADMIN_PASSWORD\" "
+            + "-X PUT -H 'Content-Type: text/calendar; charset=utf-8' --data-binary @- "
+            + shlex.quote(url)
+            + " >/dev/null"
+        )
+
+    ssh_cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        host, remote_cmd,
+    ]
+    proc = subprocess.run(ssh_cmd, input=payload, capture_output=True, text=True, check=False)
+    result["output"] = (proc.stdout or proc.stderr or "").strip()
+    if proc.returncode != 0:
+        result["ok"] = False
+        return result
+    result["ok"] = True
+    return result
+
+
+def ssh_curl_delete(
+    host: str,
+    url: str,
+    username: str,
+    password: str,
+    remote_stack_path: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """DELETE a single ICS resource from Radicale via SSH + curl."""
+    result: dict[str, Any] = {
+        "url": url,
+        "attempted": not dry_run,
+        "ok": False,
+        "output": "",
+        "auth_source": "none",
+    }
+
+    if dry_run:
+        result["ok"] = True
+        result["output"] = "dry-run"
+        return result
+
+    if username and password:
+        result["auth_source"] = "env"
+        remote_cmd = (
+            "curl -fsS -u "
+            + shlex.quote(f"{username}:{password}")
+            + " -X DELETE "
+            + shlex.quote(url)
+            + " >/dev/null"
+        )
+    else:
+        if not remote_stack_path:
+            fail(
+                "missing calendar home credentials and home.remote_stack_path unavailable for host auth fallback"
+            )
+        result["auth_source"] = "host_env"
+        remote_cmd = (
+            "set -a; source "
+            + shlex.quote(f"{remote_stack_path}/.env")
+            + "; set +a; "
+            + "curl -fsS -u \"$RADICALE_ADMIN_USERNAME:$RADICALE_ADMIN_PASSWORD\" "
+            + "-X DELETE "
+            + shlex.quote(url)
+            + " >/dev/null"
+        )
+
+    ssh_cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        host, remote_cmd,
+    ]
+    proc = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+    result["output"] = (proc.stdout or proc.stderr or "").strip()
+    result["ok"] = proc.returncode == 0
+    return result
+
+
+def ssh_propfind_collection(
+    host: str,
+    url: str,
+    username: str,
+    password: str,
+    remote_stack_path: str,
+) -> list[str]:
+    """PROPFIND the collection to list existing .ics hrefs. Returns list of UID stems (without .ics)."""
+    if username and password:
+        remote_cmd = (
+            "curl -sS -u "
+            + shlex.quote(f"{username}:{password}")
+            + " -X PROPFIND -H 'Depth: 1' -H 'Content-Type: application/xml' "
+            + shlex.quote(url)
+        )
+    else:
+        if not remote_stack_path:
+            fail(
+                "missing calendar home credentials and home.remote_stack_path unavailable for host auth fallback"
+            )
+        remote_cmd = (
+            "set -a; source "
+            + shlex.quote(f"{remote_stack_path}/.env")
+            + "; set +a; "
+            + "curl -sS -u \"$RADICALE_ADMIN_USERNAME:$RADICALE_ADMIN_PASSWORD\" "
+            + "-X PROPFIND -H 'Depth: 1' -H 'Content-Type: application/xml' "
+            + shlex.quote(url)
+        )
+
+    ssh_cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        host, remote_cmd,
+    ]
+    proc = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        fail(f"PROPFIND failed on {url}: {(proc.stderr or proc.stdout or '').strip()}")
+
+    body = proc.stdout or ""
+    # Extract href values ending in .ics from the XML response
+    hrefs = re.findall(r"<[^>]*href[^>]*>([^<]*\.ics)</", body, re.IGNORECASE)
+    if not hrefs:
+        # Try without namespace prefix
+        hrefs = re.findall(r"<href>([^<]*\.ics)</href>", body, re.IGNORECASE)
+    if not hrefs:
+        # Broader pattern for DAV responses
+        hrefs = re.findall(r">([^<]*\.ics)<", body)
+
+    uids: list[str] = []
+    for href in hrefs:
+        basename = href.rsplit("/", 1)[-1]
+        if basename.endswith(".ics"):
+            uids.append(basename[:-4])
+    return uids
+
+
+def main() -> None:
+    script_dir = Path(__file__).resolve().parent
+    root = Path(os.environ.get("SPINE_ROOT", str(script_dir.parents[3]))).expanduser().resolve()
+
+    parser = argparse.ArgumentParser(
+        description="Bulk-publish spine calendar SSOT events to Radicale CalDAV home"
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Show actions without executing")
+    parser.add_argument("--prune-stale", action="store_true", help="Delete remote events not in SSOT")
+    parser.add_argument(
+        "--layer", action="append", dest="layers", default=None,
+        help="Filter to specific layer(s) — repeatable",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON envelope")
+    args = parser.parse_args()
+
+    # --- Load and validate contracts ---
+    home_contract_path = root / "ops/bindings/calendar.home.contract.yaml"
+    sync_contract_path = root / "ops/bindings/calendar.sync.contract.yaml"
+
+    home = load_yaml(home_contract_path)
+    sync = load_yaml(sync_contract_path)
+
+    home_section = home.get("home") if isinstance(home.get("home"), dict) else {}
+    endpoint = home_section.get("endpoint") if isinstance(home_section.get("endpoint"), dict) else {}
+
+    provider = str(home_section.get("provider", "")).strip()
+    host = str(home_section.get("host", "")).strip()
+    remote_stack_path = str(home_section.get("remote_stack_path", "")).strip()
+    write_mode = str(home_section.get("write_mode", "")).strip()
+
+    if provider != "communications-calendar":
+        fail(f"calendar home provider must be communications-calendar (actual={provider!r})")
+    if host != "communications-stack":
+        fail(f"calendar home host must be communications-stack (actual={host!r})")
+    if write_mode != "local-only":
+        fail(f"calendar home write_mode must be local-only (actual={write_mode!r})")
+
+    sync_push_caps = (
+        sync.get("sync_contracts", {}).get("push_write_capabilities", [])
+        if isinstance(sync.get("sync_contracts"), dict)
+        else []
+    )
+    if not isinstance(sync_push_caps, list) or sync_push_caps:
+        fail(f"calendar sync push_write_capabilities must remain empty (actual={sync_push_caps!r})")
+
+    # --- Load calendar index ---
+    index_path = root / "mailroom/outbox/calendar/calendar-index.json"
+    if not index_path.is_file():
+        fail(
+            f"missing calendar index: {index_path}\n"
+            "  hint: run 'calendar.generate' first to produce the SSOT index"
+        )
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"unable to parse calendar index: {exc}")
+
+    events = index.get("events") or []
+    if not isinstance(events, list):
+        fail("calendar index 'events' must be a list")
+
+    tz_name = str(index.get("timezone", "America/New_York")).strip()
+    dtstamp = str(index.get("dtstamp", "")).strip()
+    if not dtstamp:
+        dtstamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
+    # --- Apply layer filter ---
+    if args.layers:
+        valid_layers = set(index.get("layers") or [])
+        for layer in args.layers:
+            if layer not in valid_layers:
+                fail(f"unknown layer '{layer}' — valid: {sorted(valid_layers)}")
+        events = [e for e in events if e.get("layer") in args.layers]
+
+    if not events:
+        fail("no events to publish (check layer filter or calendar index)")
+
+    # --- Resolve credentials ---
+    base_url = str(endpoint.get("base_url", "")).strip().rstrip("/")
+    collection = str(endpoint.get("calendar_collection", "/spine_calendar_admin/")).strip()
+    if not collection.startswith("/"):
+        collection = "/" + collection
+    if not collection.endswith("/"):
+        collection = collection + "/"
+
+    if not base_url:
+        fail("calendar.home.contract endpoint.base_url is required")
+
+    username = read_secret_var("CALENDAR_HOME_USERNAME") or read_secret_var("RADICALE_ADMIN_USERNAME")
+    password = read_secret_var("CALENDAR_HOME_PASSWORD") or read_secret_var("RADICALE_ADMIN_PASSWORD")
+
+    # --- Publish events ---
+    actions: list[dict[str, Any]] = []
+    put_ok = 0
+    put_fail = 0
+    ssot_uids: set[str] = set()
+
+    for event in events:
+        uid = str(event.get("uid", "")).strip()
+        if not uid:
+            continue
+        ssot_uids.add(uid)
+
+        ics_payload = build_single_event_ics(event, tz_name, dtstamp)
+        remote_url = f"{base_url}{collection}{uid}.ics"
+
+        result = ssh_curl_put(
+            host=host,
+            url=remote_url,
+            payload=ics_payload,
+            username=username,
+            password=password,
+            remote_stack_path=remote_stack_path,
+            dry_run=args.dry_run,
+        )
+
+        action = {
+            "action": "put",
+            "uid": uid,
+            "layer": event.get("layer", ""),
+            "summary": event.get("summary", ""),
+            "url": remote_url,
+            "ok": result["ok"],
+            "auth_source": result["auth_source"],
+            "output": result["output"],
+        }
+        actions.append(action)
+
+        if result["ok"]:
+            put_ok += 1
+        else:
+            put_fail += 1
+
+    # --- Prune stale ---
+    prune_actions: list[dict[str, Any]] = []
+    prune_ok = 0
+    prune_fail = 0
+
+    if args.prune_stale:
+        remote_uids = ssh_propfind_collection(
+            host=host,
+            url=f"{base_url}{collection}",
+            username=username,
+            password=password,
+            remote_stack_path=remote_stack_path,
+        )
+        stale_uids = [uid for uid in remote_uids if uid not in ssot_uids]
+
+        for uid in stale_uids:
+            remote_url = f"{base_url}{collection}{uid}.ics"
+            result = ssh_curl_delete(
+                host=host,
+                url=remote_url,
+                username=username,
+                password=password,
+                remote_stack_path=remote_stack_path,
+                dry_run=args.dry_run,
+            )
+            prune_action = {
+                "action": "delete",
+                "uid": uid,
+                "url": remote_url,
+                "ok": result["ok"],
+                "output": result["output"],
+            }
+            prune_actions.append(prune_action)
+            if result["ok"]:
+                prune_ok += 1
+            else:
+                prune_fail += 1
+
+    # --- Output ---
+    has_errors = put_fail > 0 or prune_fail > 0
+    status = "fail" if has_errors else "ok"
+
+    payload = {
+        "capability": "calendar.home.publish",
+        "status": status,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "data": {
+            "dry_run": args.dry_run,
+            "provider": provider,
+            "host": host,
+            "base_url": base_url,
+            "collection": collection,
+            "timezone": tz_name,
+            "dtstamp": dtstamp,
+            "layer_filter": args.layers or [],
+            "events_total": len(events),
+            "put_ok": put_ok,
+            "put_fail": put_fail,
+            "prune_stale": args.prune_stale,
+            "prune_ok": prune_ok,
+            "prune_fail": prune_fail,
+            "actions": actions,
+            "prune_actions": prune_actions,
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("calendar.home.publish")
+        print(f"provider: {provider}")
+        print(f"host: {host}")
+        print(f"collection: {collection}")
+        print(f"timezone: {tz_name}")
+        print(f"dry_run: {str(args.dry_run).lower()}")
+        if args.layers:
+            print(f"layer_filter: {', '.join(args.layers)}")
+        print(f"events: {len(events)}")
+        print(f"put_ok: {put_ok}")
+        print(f"put_fail: {put_fail}")
+        if args.prune_stale:
+            print(f"prune_ok: {prune_ok}")
+            print(f"prune_fail: {prune_fail}")
+        if not args.json:
+            for action in actions:
+                mark = "OK" if action["ok"] else "FAIL"
+                print(f"  [{mark}] PUT {action['layer']}/{action['uid']} — {action['summary']}")
+            for action in prune_actions:
+                mark = "OK" if action["ok"] else "FAIL"
+                print(f"  [{mark}] DELETE {action['uid']}")
+        print(f"status: {status.upper()}")
+
+    raise SystemExit(0 if status == "ok" else 1)
+
+
+if __name__ == "__main__":
+    main()
