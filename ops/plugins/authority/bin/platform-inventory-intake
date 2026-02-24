@@ -126,6 +126,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     reconcile = sub.add_parser("reconcile")
     reconcile.add_argument("--domain", choices=["network", "ha", "media"], required=True)
+    reconcile.add_argument("--emit-intake-stubs", dest="emit_intake_stubs", action="store_true")
+    reconcile.add_argument("--no-emit-intake-stubs", dest="emit_intake_stubs", action="store_false")
+    reconcile.set_defaults(emit_intake_stubs=True)
+    reconcile.add_argument("--write-stubs", action="store_true")
+    reconcile.add_argument("--limit", type=int, default=250)
+    reconcile.add_argument("--offset", type=int, default=0)
+    reconcile.add_argument("--owner-agent", dest="owner_agent", default="")
+    reconcile.add_argument("--location-id", dest="location_id", default="")
+    reconcile.add_argument(
+        "--runbook-path",
+        dest="runbook_path",
+        default="docs/governance/generated/W43_INVENTORY_INTAKE_UNION_LOCK_20260223.md",
+    )
 
     return parser
 
@@ -624,8 +637,103 @@ def observed_items_for_domain(root: Path, domain: str) -> list[dict]:
     return items
 
 
-def run_reconcile(args, root: Path) -> None:
+def reconcile_default_owner_agent(domain: str) -> str:
+    if domain == "media":
+        return "media-agent"
+    return "home-assistant-agent"
+
+
+def reconcile_default_location_id(domain: str) -> str:
+    if domain == "media":
+        return "shop-supplies-bin-b1"
+    return "TODO-location-id"
+
+
+def reconcile_intake_class(source_class: str) -> str:
+    if source_class in {"movie", "tv", "music"}:
+        return "material"
+    return "part"
+
+
+def reconcile_normalized_item_id(item_id: str) -> str:
+    return re.sub(r"[^a-z0-9-]+", "-", item_id.lower()).strip("-") or "item"
+
+
+def build_reconcile_stub_payload(
+    *,
+    row: dict,
+    owner_agent: str,
+    location_id: str,
+    runbook_path: str,
+    location_site: str,
+) -> tuple[str, str, dict, dict]:
+    item_id = str(row["id"])
+    item_class = str(row["class"])
+    intake_class = reconcile_intake_class(item_class)
+    normalized_id = reconcile_normalized_item_id(item_id)
+    intake_id = f"ITK-{today_iso().replace('-', '')}-{intake_class}-{normalized_id}"
+    ts = now_iso()
+    stub_payload = {
+        "intake_id": intake_id,
+        "class": intake_class,
+        "item_id": item_id,
+        "status": "draft",
+        "lifecycle_status": "draft",
+        "owner_agent": owner_agent,
+        "site": location_site,
+        "location_id": location_id,
+        "evidence_refs": [],
+        "runbook_path": runbook_path,
+        "touches_runtime": False,
+        "runtime_homes": {},
+        "required_homes": {
+            "owner_agent": owner_agent,
+            "site": location_site,
+            "location_id": location_id,
+            "evidence_refs": [],
+            "runbook_path": runbook_path,
+            "infisical_namespace": "",
+            "vaultwarden_item": "",
+            "gitea_repo": "",
+            "observability_probe": "",
+        },
+        "created_at": ts,
+        "updated_at": ts,
+    }
+    suggested_intake = {
+        "class": intake_class,
+        "id": item_id,
+        "owner-agent": owner_agent,
+        "site": location_site,
+        "location-id": location_id,
+        "runbook-path": runbook_path,
+    }
+    return intake_id, f"mailroom/outbox/intake/{intake_id}.yaml", suggested_intake, stub_payload
+
+
+def run_reconcile(args, root: Path, agents: set[str], locations: dict[str, str]) -> None:
     domain = args.domain
+    if args.limit < 0:
+        fail("--limit must be >= 0")
+    if args.limit > 10000:
+        fail("--limit must be <= 10000")
+    if args.offset < 0:
+        fail("--offset must be >= 0")
+
+    owner_agent = str(args.owner_agent or "").strip() or reconcile_default_owner_agent(domain)
+    location_id = str(args.location_id or "").strip() or reconcile_default_location_id(domain)
+    runbook_path = str(args.runbook_path or "").strip() or "docs/governance/generated/W43_INVENTORY_INTAKE_UNION_LOCK_20260223.md"
+    location_site = locations.get(location_id, "")
+
+    if args.write_stubs:
+        assert_owner(owner_agent, agents)
+        if location_id not in locations:
+            fail(f"write-stubs requires valid location_id in inventory.locations.yaml: {location_id}")
+        location_site = locations[location_id]
+        runbook_target = Path(runbook_path) if runbook_path.startswith("/") else (root / runbook_path)
+        if not runbook_target.is_file():
+            fail(f"write-stubs requires existing runbook_path: {runbook_path}")
+
     if domain == "ha":
         devices_path, devices_ledger = load_domain_ledger(root, "ha_devices")
         autos_path, autos_ledger = load_domain_ledger(root, "ha_automations")
@@ -648,42 +756,88 @@ def run_reconcile(args, root: Path) -> None:
             managed[(item_id, item_class)] = row
 
     observed_items = observed_items_for_domain(root, domain)
-    unmanaged: list[dict] = []
+    unmanaged_candidates: list[dict] = []
     for row in observed_items:
         key = (row["id"], row["class"])
         if key in managed:
             continue
-        intake_class = "material" if row["class"] in {"movie", "tv", "music"} else "part"
-        normalized_id = re.sub(r"[^a-z0-9-]+", "-", row["id"].lower()).strip("-") or "item"
-        intake_id = f"ITK-{today_iso().replace('-', '')}-{intake_class}-{normalized_id}"
-        unmanaged.append(
+        suggested_site = location_site or str(row.get("location_or_site", "")).strip() or "unknown"
+        intake_id, intake_file, suggested_intake, stub_payload = build_reconcile_stub_payload(
+            row=row,
+            owner_agent=owner_agent,
+            location_id=location_id,
+            runbook_path=runbook_path,
+            location_site=suggested_site,
+        )
+        entry = {
+            "id": row["id"],
+            "class": row["class"],
+            "source_system": row["source_system"],
+            "first_seen_at": row["first_seen_at"],
+            "location_or_site": row["location_or_site"],
+        }
+        if args.emit_intake_stubs:
+            entry["suggested_intake_file"] = intake_file
+            entry["suggested_intake"] = suggested_intake
+        unmanaged_candidates.append(
             {
-                "id": row["id"],
-                "class": row["class"],
-                "source_system": row["source_system"],
-                "first_seen_at": row["first_seen_at"],
-                "location_or_site": row["location_or_site"],
-                "suggested_intake_file": f"mailroom/outbox/intake/{intake_id}.yaml",
-                "suggested_intake": {
-                    "class": intake_class,
-                    "id": row["id"],
-                    "owner-agent": "home-assistant-agent" if domain in {"network", "ha"} else "media-agent",
-                    "site": row["location_or_site"],
-                    "location-id": "TODO-location-id",
-                    "runbook-path": "docs/governance/generated/W43_INVENTORY_INTAKE_UNION_LOCK_20260223.md",
-                },
+                "entry": entry,
+                "intake_id": intake_id,
+                "stub_payload": stub_payload,
             }
         )
+
+    unmanaged_candidates.sort(
+        key=lambda item: (
+            str(item["entry"].get("class", "")).lower(),
+            str(item["entry"].get("id", "")).lower(),
+        )
+    )
+    unmanaged_total = len(unmanaged_candidates)
+    selected_candidates = unmanaged_candidates[args.offset : args.offset + args.limit] if args.limit else []
+    selected_unmanaged = [item["entry"] for item in selected_candidates]
+
+    stubs_written = 0
+    stubs_skipped_existing = 0
+    stubs_failed = 0
+    if args.write_stubs:
+        intake_dir = root / "mailroom/outbox/intake"
+        intake_dir.mkdir(parents=True, exist_ok=True)
+        for candidate in selected_candidates:
+            output_path = intake_dir / f"{candidate['intake_id']}.yaml"
+            if output_path.exists():
+                stubs_skipped_existing += 1
+                continue
+            try:
+                output_path.write_text(
+                    yaml.safe_dump(candidate["stub_payload"], sort_keys=False),
+                    encoding="utf-8",
+                )
+                stubs_written += 1
+            except Exception as exc:
+                stubs_failed += 1
+                print(
+                    f"platform.inventory.intake FAIL: write-stubs error for {output_path}: {exc}",
+                    file=sys.stderr,
+                )
 
     payload = {
         "domain": domain,
         "ledger_paths": [str(path.relative_to(root)) for path in ledger_paths],
         "observed_count": len(observed_items),
-        "managed_count": len(observed_items) - len(unmanaged),
-        "unmanaged_count": len(unmanaged),
-        "unmanaged_items": unmanaged,
+        "managed_count": len(observed_items) - unmanaged_total,
+        "unmanaged_count": unmanaged_total,
+        "unmanaged_items": selected_unmanaged,
     }
     print(yaml.safe_dump(payload, sort_keys=False), end="")
+    print(f"unmanaged_total: {unmanaged_total}", file=sys.stderr)
+    print(f"selected_for_stub: {len(selected_candidates)}", file=sys.stderr)
+    print(f"stubs_written: {stubs_written}", file=sys.stderr)
+    print(f"stubs_skipped_existing: {stubs_skipped_existing}", file=sys.stderr)
+    print(f"stubs_failed: {stubs_failed}", file=sys.stderr)
+
+    if args.write_stubs and stubs_failed > 0:
+        fail(f"write-stubs failed for {stubs_failed} intake file(s)")
 
 
 def main() -> None:
@@ -716,7 +870,7 @@ def main() -> None:
         run_transaction(args, root, agents, locations, "count")
         return
     if args.command == "reconcile":
-        run_reconcile(args, root)
+        run_reconcile(args, root, agents, locations)
         return
 
     fail(f"unsupported command: {args.command}")

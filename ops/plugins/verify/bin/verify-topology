@@ -28,6 +28,7 @@ need_file "$AGENT_PROFILES"
 need_file "$DOMAIN_PROFILES"
 need_file "$RING_POLICY"
 need_cmd yq
+need_cmd python3
 
 usage() {
   cat <<'USAGE'
@@ -64,6 +65,27 @@ format_delta() {
     echo "+${delta}s"
   else
     echo "${delta}s"
+  fi
+}
+
+monotonic_ms() {
+  python3 - <<'PY'
+import time
+print(int(time.monotonic() * 1000))
+PY
+}
+
+ms_to_seconds() {
+  local ms="$1"
+  awk -v value="$ms" 'BEGIN { printf "%.3f", value / 1000 }'
+}
+
+format_delta_ms() {
+  local delta_ms="$1"
+  if (( delta_ms > 0 )); then
+    echo "+$(ms_to_seconds "$delta_ms")s"
+  else
+    echo "$(ms_to_seconds "$delta_ms")s"
   fi
 }
 
@@ -148,8 +170,8 @@ run_gate_ids() {
   local ring="${2:-}"
   shift 2
   local -a input_ids=("$@")
-  local start_epoch elapsed budget delta
-  start_epoch="$(date +%s)"
+  local start_ms elapsed_ms budget budget_ms delta_ms elapsed_seconds
+  start_ms="$(monotonic_ms)"
 
   declare -A seen=()
   local -a gate_ids=()
@@ -262,17 +284,19 @@ run_gate_ids() {
 
   local budget_breach=0
   if [[ -n "$ring" ]]; then
-    elapsed=$(( $(date +%s) - start_epoch ))
+    elapsed_ms=$(( $(monotonic_ms) - start_ms ))
     budget="$(ring_budget_seconds "$ring")"
-    delta=$(( elapsed - budget ))
+    budget_ms=$(( budget * 1000 ))
+    delta_ms=$(( elapsed_ms - budget_ms ))
+    elapsed_seconds="$(ms_to_seconds "$elapsed_ms")"
 
     if [[ "$json_mode" == "0" ]]; then
-      echo "budget: ring=$ring elapsed=${elapsed}s budget=${budget}s delta=$(format_delta "$delta")"
+      echo "budget: ring=$ring elapsed=${elapsed_seconds}s budget=${budget}s delta=$(format_delta_ms "$delta_ms")"
     fi
 
-    if [[ "$delta" -gt 0 ]]; then
+    if [[ "$delta_ms" -gt 0 ]]; then
       budget_breach=1
-      echo "verify.run FAIL: budget exceeded (ring=$ring elapsed=${elapsed}s budget=${budget}s delta=+${delta}s)" >&2
+      echo "verify.run FAIL: budget exceeded (ring=$ring elapsed=${elapsed_seconds}s budget=${budget}s delta=$(format_delta_ms "$delta_ms"))" >&2
     fi
   fi
 
@@ -592,18 +616,21 @@ run_release() {
     emit_stabilization_bypass "release" "" "$json_mode"
     return 0
   fi
-  local tmp rc summary start_epoch elapsed budget delta budget_breach status
-  start_epoch="$(date +%s)"
+  local tmp rc summary start_ms elapsed_ms elapsed_seconds budget budget_ms delta_ms delta_seconds budget_breach status
+  start_ms="$(monotonic_ms)"
   tmp="$(mktemp)"
   set +e
   bash "$ROOT/surfaces/verify/drift-gate.sh" >"$tmp" 2>&1
   rc=$?
   set -e
-  elapsed=$(( $(date +%s) - start_epoch ))
+  elapsed_ms=$(( $(monotonic_ms) - start_ms ))
+  elapsed_seconds="$(ms_to_seconds "$elapsed_ms")"
   budget="$(ring_budget_seconds "deep")"
-  delta=$(( elapsed - budget ))
+  budget_ms=$(( budget * 1000 ))
+  delta_ms=$(( elapsed_ms - budget_ms ))
+  delta_seconds="$(ms_to_seconds "$delta_ms")"
   budget_breach=0
-  if [[ "$delta" -gt 0 ]]; then
+  if [[ "$delta_ms" -gt 0 ]]; then
     budget_breach=1
   fi
 
@@ -611,22 +638,22 @@ run_release() {
     summary="$(grep -E '^DRIFT GATE:' "$tmp" | tail -n1 | xargs || true)"
     status="$([[ "$rc" -eq 0 && "$budget_breach" -eq 0 ]] && echo pass || echo fail)"
     if [[ "$budget_breach" -eq 1 ]]; then
-      echo "verify.release.run budget exceeded (ring=deep elapsed=${elapsed}s budget=${budget}s delta=+${delta}s)" >&2
+      echo "verify.release.run budget exceeded (ring=deep elapsed=${elapsed_seconds}s budget=${budget}s delta=$(format_delta_ms "$delta_ms"))" >&2
     fi
     jq -n \
       --arg status "$status" \
       --arg summary "$summary" \
       --arg mode "core+all-domains" \
       --arg ring "deep" \
-      --argjson elapsed_seconds "$elapsed" \
+      --argjson elapsed_seconds "$elapsed_seconds" \
       --argjson budget_seconds "$budget" \
-      --argjson budget_delta_seconds "$delta" \
+      --argjson budget_delta_seconds "$delta_seconds" \
       '{status:$status, mode:$mode, summary:$summary, ring:$ring, elapsed_seconds:$elapsed_seconds, budget_seconds:$budget_seconds, budget_delta_seconds:$budget_delta_seconds}'
   else
     cat "$tmp"
-    echo "budget: ring=deep elapsed=${elapsed}s budget=${budget}s delta=$(format_delta "$delta")"
+    echo "budget: ring=deep elapsed=${elapsed_seconds}s budget=${budget}s delta=$(format_delta_ms "$delta_ms")"
     if [[ "$budget_breach" -eq 1 ]]; then
-      echo "verify.release.run FAIL: budget exceeded (ring=deep elapsed=${elapsed}s budget=${budget}s delta=+${delta}s)" >&2
+      echo "verify.release.run FAIL: budget exceeded (ring=deep elapsed=${elapsed_seconds}s budget=${budget}s delta=$(format_delta_ms "$delta_ms"))" >&2
     fi
   fi
 
