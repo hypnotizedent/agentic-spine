@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# cloudflare-dns-record-set — create or update a DNS record in a Cloudflare zone
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2
+  exit 2
+fi
+
+usage() {
+  cat <<'EOF'
+Usage: cloudflare-dns-record-set --zone-id ZONE_ID --type TYPE --name NAME --content CONTENT [OPTIONS]
+
+Required:
+  --zone-id   ID    Cloudflare zone ID
+  --type      TYPE  Record type (A, AAAA, CNAME, MX, TXT, SRV, etc.)
+  --name      NAME  Record name (FQDN or @ for root)
+  --content   VAL   Record value/content
+
+Optional:
+  --ttl       SEC   TTL in seconds (default: 1 = auto)
+  --proxied         Enable Cloudflare proxy (orange cloud)
+  --no-proxy        Disable Cloudflare proxy (DNS-only)
+  --priority  NUM   MX/SRV priority
+  --comment   TEXT  Record comment
+  --json            Emit JSON output
+  --dry-run         Show what would be done without making changes
+
+Creates the record if it does not exist. Updates if a matching record
+(same type + name) already exists. For record types that allow multiple
+records (MX, TXT), use --content to match the specific record to update.
+EOF
+  exit 0
+}
+
+# Defaults
+ZONE_ID="" TYPE="" NAME="" CONTENT=""
+TTL=1 PROXIED="" PRIORITY="" COMMENT="" JSON_OUT=0 DRY_RUN=0
+
+while (( $# > 0 )); do
+  case "$1" in
+    --zone-id)   ZONE_ID="$2"; shift 2 ;;
+    --type)      TYPE="$2"; shift 2 ;;
+    --name)      NAME="$2"; shift 2 ;;
+    --content)   CONTENT="$2"; shift 2 ;;
+    --ttl)       TTL="$2"; shift 2 ;;
+    --proxied)   PROXIED="true"; shift ;;
+    --no-proxy)  PROXIED="false"; shift ;;
+    --priority)  PRIORITY="$2"; shift 2 ;;
+    --comment)   COMMENT="$2"; shift 2 ;;
+    --json)      JSON_OUT=1; shift ;;
+    --dry-run)   DRY_RUN=1; shift ;;
+    -h|--help)   usage ;;
+    --)          shift ;;
+    *)           echo "Unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# Validate required args
+[[ -z "$ZONE_ID" ]] && { echo "STOP: --zone-id required" >&2; exit 1; }
+[[ -z "$TYPE" ]]    && { echo "STOP: --type required" >&2; exit 1; }
+[[ -z "$NAME" ]]    && { echo "STOP: --name required" >&2; exit 1; }
+[[ -z "$CONTENT" ]] && { echo "STOP: --content required" >&2; exit 1; }
+
+TYPE="$(echo "$TYPE" | tr '[:lower:]' '[:upper:]')"
+
+# Build JSON payload
+PAYLOAD=$(python3 -c "
+import json, sys
+p = {'type': '$TYPE', 'name': '$NAME', 'content': '''$CONTENT''', 'ttl': $TTL}
+proxied = '$PROXIED'
+priority = '$PRIORITY'
+comment = '$COMMENT'
+if proxied: p['proxied'] = proxied == 'true'
+if priority: p['priority'] = int(priority)
+if comment: p['comment'] = comment
+print(json.dumps(p))
+")
+
+# Search for existing record (same type + name)
+EXISTING=$(curl -fsS \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "${CF_API}/zones/${ZONE_ID}/dns_records?type=${TYPE}&name=${NAME}&per_page=100" 2>&1) || {
+  echo "STOP: failed to query existing records" >&2
+  exit 3
+}
+
+RECORD_ID=$(echo "$EXISTING" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+results = data.get('result', [])
+content_match = '''$CONTENT'''
+# For multi-value types (MX, TXT), match on content too
+multi_types = {'MX', 'TXT', 'SRV'}
+record_type = '$TYPE'
+for r in results:
+    if record_type in multi_types:
+        if r.get('content') == content_match:
+            print(r['id']); sys.exit(0)
+    else:
+        print(r['id']); sys.exit(0)
+print('')
+" 2>/dev/null || echo "")
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ -n "$RECORD_ID" ]]; then
+    ACTION="update"
+  else
+    ACTION="create"
+  fi
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    echo "{\"dry_run\": true, \"action\": \"$ACTION\", \"type\": \"$TYPE\", \"name\": \"$NAME\", \"record_id\": \"${RECORD_ID:-null}\"}"
+  else
+    echo "cloudflare.dns.record.set (dry-run)"
+    echo "action: $ACTION"
+    echo "type: $TYPE"
+    echo "name: $NAME"
+    echo "content: $CONTENT"
+    [[ -n "$RECORD_ID" ]] && echo "record_id: $RECORD_ID"
+    echo "status: DRY-RUN"
+  fi
+  exit 0
+fi
+
+if [[ -n "$RECORD_ID" ]]; then
+  # Update existing record
+  RESULT=$(curl -fsS -X PUT \
+    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD" \
+    "${CF_API}/zones/${ZONE_ID}/dns_records/${RECORD_ID}" 2>&1) || {
+    echo "STOP: failed to update record $RECORD_ID" >&2
+    echo "$RESULT" >&2
+    exit 4
+  }
+  ACTION="updated"
+else
+  # Create new record
+  RESULT=$(curl -fsS -X POST \
+    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD" \
+    "${CF_API}/zones/${ZONE_ID}/dns_records" 2>&1) || {
+    echo "STOP: failed to create record" >&2
+    echo "$RESULT" >&2
+    exit 5
+  }
+  ACTION="created"
+fi
+
+# Extract result fields
+RESULT_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',{}).get('id',''))" 2>/dev/null || echo "")
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  echo "$RESULT" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+r = data.get('result', {})
+out = {
+    'capability': 'cloudflare.dns.record.set',
+    'status': 'ok',
+    'action': '$ACTION',
+    'record': {
+        'id': r.get('id'),
+        'type': r.get('type'),
+        'name': r.get('name'),
+        'content': r.get('content'),
+        'proxied': r.get('proxied'),
+        'ttl': r.get('ttl'),
+    }
+}
+print(json.dumps(out, indent=2))
+"
+else
+  echo "cloudflare.dns.record.set"
+  echo "action: $ACTION"
+  echo "type: $TYPE"
+  echo "name: $NAME"
+  echo "content: $CONTENT"
+  echo "record_id: $RESULT_ID"
+  [[ -n "$PROXIED" ]] && echo "proxied: $PROXIED"
+  echo "status: OK"
+fi
