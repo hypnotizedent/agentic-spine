@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SCRIPT_CODE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ACTIVE_CODE_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+
+if [[ -n "$ACTIVE_CODE_ROOT" && -f "$ACTIVE_CODE_ROOT/ops/capabilities.yaml" ]]; then
+    SPINE_CODE="$ACTIVE_CODE_ROOT"
+    # Prefer active checkout/worktree for runtime artifacts (receipts/mailroom state).
+    SPINE_REPO="$ACTIVE_CODE_ROOT"
+else
+    SPINE_CODE="${SPINE_CODE:-$SCRIPT_CODE_ROOT}"
+    SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
+fi
 
 _SP_LIB_DIR="${BASH_SOURCE%/*}"
 [[ "$_SP_LIB_DIR" == "${BASH_SOURCE}" ]] && _SP_LIB_DIR="$(pwd)"
@@ -36,6 +45,32 @@ ensure_state_dir() {
             cat "$LEDGER"
         } > "$tmp"
         mv "$tmp" "$LEDGER"
+    fi
+}
+
+# Bootstrap runtime directories/files that may be absent in fresh worktrees.
+ensure_runtime_scaffold() {
+    local proposals_dir="$SPINE_CODE/mailroom/outbox/proposals"
+    local loop_scopes_dir="$SPINE_CODE/mailroom/state/loop-scopes"
+    local calendar_dir="$SPINE_CODE/mailroom/outbox/calendar"
+    local calendar_external_dir="$calendar_dir/external"
+    local evidence_state_dir="$SPINE_CODE/ops/plugins/evidence/state"
+    local receipt_index="$evidence_state_dir/receipt-index.yaml"
+
+    mkdir -p \
+        "$RECEIPTS" \
+        "$proposals_dir" \
+        "$loop_scopes_dir" \
+        "$calendar_dir" \
+        "$calendar_external_dir" \
+        "$evidence_state_dir"
+
+    if [[ ! -f "$receipt_index" ]]; then
+        cat > "$receipt_index" <<EOF
+updated_at_utc: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+source_root: "$RECEIPTS"
+entries: []
+EOF
     fi
 }
 
@@ -106,6 +141,7 @@ run_cap() {
 
     # Ensure runtime state is bootstrapped before executing anything.
     ensure_state_dir
+    ensure_runtime_scaffold
 
     # ── Resolve active policy preset ──
     source "$SPINE_CODE/ops/lib/resolve-policy.sh"

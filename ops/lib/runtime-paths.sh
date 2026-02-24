@@ -34,8 +34,17 @@ _spine_runtime_contract_value() {
 }
 
 spine_runtime_resolve_paths() {
-  SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-  SPINE_CODE="${SPINE_CODE:-$SPINE_REPO}"
+  local detected_root=""
+  detected_root="$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$detected_root" && -f "$detected_root/ops/capabilities.yaml" ]]; then
+    SPINE_CODE="$detected_root"
+    SPINE_REPO="$detected_root"
+  else
+    if [[ -z "${SPINE_CODE:-}" ]]; then
+      SPINE_CODE="${SPINE_REPO:-$HOME/code/agentic-spine}"
+    fi
+    SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
+  fi
 
   local contract_file="$SPINE_CODE/ops/bindings/mailroom.runtime.contract.yaml"
   local inbox_default="$SPINE_REPO/mailroom/inbox"

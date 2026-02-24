@@ -5,23 +5,30 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 INDEX_FILE="$ROOT/ops/plugins/evidence/state/receipt-index.yaml"
+RECEIPTS_DIR="$ROOT/receipts/sessions"
 SESSION_START_SCRIPT="$ROOT/ops/plugins/session/bin/session-start"
 RECEIPTS_SEARCH_BIN="$ROOT/ops/plugins/evidence/bin/receipts-search"
 RECEIPTS_SUMMARY_BIN="$ROOT/ops/plugins/evidence/bin/receipts-summary"
 RECEIPTS_TRENDS_BIN="$ROOT/ops/plugins/evidence/bin/receipts-trends"
+RECEIPTS_INDEX_BUILD_BIN="$ROOT/ops/plugins/evidence/bin/receipts-index-build"
 
 fail() {
   echo "D161 FAIL: $*" >&2
   exit 1
 }
 
-[[ -f "$INDEX_FILE" ]] || fail "missing receipt index: $INDEX_FILE"
 command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
 command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
 [[ -x "$SESSION_START_SCRIPT" ]] || fail "missing session-start script: $SESSION_START_SCRIPT"
 [[ -x "$RECEIPTS_SEARCH_BIN" ]] || fail "missing receipts-search binary: $RECEIPTS_SEARCH_BIN"
 [[ -x "$RECEIPTS_SUMMARY_BIN" ]] || fail "missing receipts-summary binary: $RECEIPTS_SUMMARY_BIN"
 [[ -x "$RECEIPTS_TRENDS_BIN" ]] || fail "missing receipts-trends binary: $RECEIPTS_TRENDS_BIN"
+[[ -x "$RECEIPTS_INDEX_BUILD_BIN" ]] || fail "missing receipts-index-build binary: $RECEIPTS_INDEX_BUILD_BIN"
+
+if [[ ! -f "$INDEX_FILE" ]]; then
+  "$RECEIPTS_INDEX_BUILD_BIN" --index "$INDEX_FILE" --quiet || fail "unable to build missing receipt index"
+fi
+[[ -f "$INDEX_FILE" ]] || fail "missing receipt index: $INDEX_FILE"
 
 index_contract_tsv="$(yq e -r '[.entries | length, ([.entries[] | select((.domain // "") == "")] | length), ([.entries[] | select((.plane // "") == "")] | length)] | @tsv' "$INDEX_FILE" 2>/dev/null || true)"
 IFS=$'\t' read -r entries_total missing_domain missing_plane <<< "$index_contract_tsv"
@@ -29,9 +36,21 @@ IFS=$'\t' read -r entries_total missing_domain missing_plane <<< "$index_contrac
 [[ "$entries_total" =~ ^[0-9]+$ ]] || fail "receipt index contract invalid: entries is missing or non-numeric"
 [[ "$missing_domain" =~ ^[0-9]+$ ]] || fail "receipt index contract invalid: missing_domain is non-numeric"
 [[ "$missing_plane" =~ ^[0-9]+$ ]] || fail "receipt index contract invalid: missing_plane is non-numeric"
-(( entries_total > 0 )) || fail "receipt index contract invalid: entries list is empty"
 if (( missing_domain > 0 || missing_plane > 0 )); then
   fail "receipt index contract invalid: index entry contract violation (missing_domain=$missing_domain missing_plane=$missing_plane)"
+fi
+
+if (( entries_total == 0 )); then
+  receipt_dirs=0
+  if [[ -d "$RECEIPTS_DIR" ]]; then
+    receipt_dirs="$(find "$RECEIPTS_DIR" -maxdepth 1 -mindepth 1 -type d -name 'RCAP-*' 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  [[ "$receipt_dirs" =~ ^[0-9]+$ ]] || receipt_dirs=0
+  if (( receipt_dirs == 0 )); then
+    echo "D161 PASS: bootstrap receipt index empty and no session receipts yet (entries=0)"
+    exit 0
+  fi
+  fail "receipt index contract invalid: entries list is empty while receipt sessions exist (${receipt_dirs})"
 fi
 
 search_tmp="$(mktemp)"

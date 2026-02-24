@@ -36,8 +36,18 @@ case "$PRIORITY" in
   *) echo "FAIL: --priority must be high, medium, or low (got '$PRIORITY')" >&2; exit 2 ;;
 esac
 
-# Normalize name: uppercase, replace spaces/dashes to single dash
-NORM_NAME="$(echo "$NAME" | tr '[:lower:]' '[:upper:]' | tr ' ' '-' | tr -s '-')"
+# Normalize name:
+# - uppercase
+# - collapse separators
+# - strip leading LOOP- prefixes if caller already provided them
+# - keep only [A-Z0-9-]
+NORM_NAME="$(echo "$NAME" \
+  | tr '[:lower:]' '[:upper:]' \
+  | sed -E 's/[[:space:]_]+/-/g; s/[^A-Z0-9-]//g; s/-+/-/g; s/^-+//; s/-+$//')"
+while [[ "$NORM_NAME" == LOOP-* ]]; do
+  NORM_NAME="${NORM_NAME#LOOP-}"
+done
+[[ -n "$NORM_NAME" ]] || { echo "FAIL: --name resolves to empty loop name after normalization" >&2; exit 2; }
 TODAY="$(date -u +%Y%m%d)"
 LOOP_ID="LOOP-${NORM_NAME}-${TODAY}"
 

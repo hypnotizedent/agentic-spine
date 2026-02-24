@@ -32,6 +32,10 @@ Examples:
   docker-compose-logs automation-stack mcpjungle --tail 200
   docker-compose-logs docker-host mint-os --tail 200 dashboard-api
   docker-compose-logs download-stack download-stack --follow --tail 50 prowlarr
+
+Notes:
+  - Service arguments accept either compose service names OR container_name values.
+  - Container names are normalized to their backing compose service automatically.
 EOF
 }
 
@@ -180,7 +184,74 @@ fi
 args=(logs --no-color --tail "$TAIL")
 if [[ "$FOLLOW" == "1" ]]; then args+=(--follow); fi
 if [[ -n "$SINCE" ]]; then args+=(--since "$SINCE"); fi
-args+=("${SERVICES[@]}")
+
+SERVICE_ARGS=()
+if [[ "${#SERVICES[@]}" -gt 0 ]]; then
+  mapfile -t declared_services < <("${DOCKER_CMD[@]}" compose -f "$FILE" config --services 2>/dev/null || true)
+  if [[ "${#declared_services[@]}" -eq 0 ]]; then
+    echo "FAIL: unable to resolve compose services for $PATHX" >&2
+    exit 2
+  fi
+
+  declare -A service_index=()
+  for svc in "${declared_services[@]}"; do
+    [[ -n "$svc" ]] && service_index["$svc"]=1
+  done
+
+  declare -A container_to_service=()
+  if command -v python3 >/dev/null 2>&1; then
+    compose_json="$("${DOCKER_CMD[@]}" compose -f "$FILE" config --format json 2>/dev/null || true)"
+    if [[ -n "${compose_json:-}" ]]; then
+      while IFS=$'\t' read -r cname svc; do
+        [[ -n "$cname" && -n "$svc" ]] && container_to_service["$cname"]="$svc"
+      done < <(COMPOSE_JSON="$compose_json" python3 - <<'PY'
+import json
+import os
+
+raw = os.environ.get("COMPOSE_JSON", "")
+if not raw:
+    raise SystemExit(0)
+
+try:
+    payload = json.loads(raw)
+except Exception:
+    raise SystemExit(0)
+
+services = payload.get("services") or {}
+for service_name, cfg in services.items():
+    if not isinstance(cfg, dict):
+        continue
+    cname = str(cfg.get("container_name") or "").strip()
+    if cname:
+        print(f"{cname}\t{service_name}")
+PY
+      )
+    fi
+  fi
+
+  declare -A dedupe=()
+  for req in "${SERVICES[@]}"; do
+    [[ -n "$req" ]] || continue
+    resolved=""
+    if [[ -n "${service_index[$req]:-}" ]]; then
+      resolved="$req"
+    elif [[ -n "${container_to_service[$req]:-}" ]]; then
+      resolved="${container_to_service[$req]}"
+      echo "INFO: mapped container '$req' -> service '$resolved'" >&2
+    else
+      echo "FAIL: unknown compose service/container '$req' in $PATHX" >&2
+      echo "Known services: ${declared_services[*]}" >&2
+      exit 2
+    fi
+
+    if [[ -z "${dedupe[$resolved]:-}" ]]; then
+      dedupe["$resolved"]=1
+      SERVICE_ARGS+=("$resolved")
+    fi
+  done
+fi
+
+args+=("${SERVICE_ARGS[@]}")
 
 "${DOCKER_CMD[@]}" compose -f "$FILE" "${args[@]}"
 EOS
@@ -194,4 +265,3 @@ done
 # shellcheck disable=SC2086
 ssh "${ssh_opts[@]}" -p "$ssh_port" "${ssh_user}@${ssh_host}" \
   "bash -lc $(printf "%q" "$REMOTE_SCRIPT") -- $(printf "%q" "$stack_path") $(printf "%q" "$TAIL") $(printf "%q" "$FOLLOW") $(printf "%q" "$SINCE")${service_args}"
-
