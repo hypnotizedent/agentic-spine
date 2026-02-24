@@ -46,7 +46,7 @@ If a finance-agent finding requires an infrastructure change, file it to the spi
 
 ## Governed Tools
 
-V1 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with 13 read-only tools:
+V1.1 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with 21 tools:
 
 ### Firefly III (8 tools)
 
@@ -71,33 +71,45 @@ V1 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with 1
 | `list_tags` | List all document tags with document counts |
 | `list_correspondents` | List all correspondents (document sources/senders) with document counts |
 
+### Ghostfolio (3 tools)
+
+| Tool | Description |
+|------|-------------|
+| `ghostfolio_holdings` | List investment holdings with current values and allocation |
+| `ghostfolio_accounts` | List Ghostfolio investment accounts with balances |
+| `ghostfolio_activities` | List investment activities (buy, sell, dividend) |
+
+### Tax & Compliance (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `tax_1099_summary` | Contractor payment aggregation for 1099 prep |
+| `sales_tax_dr15` | FL sales tax calculation from Mint OS + Firefly |
+
+### Agent Pipeline (3 tools)
+
+| Tool | Description |
+|------|-------------|
+| `finance_transaction_pipeline_status` | Transaction import pipeline health and sync status |
+| `finance_ronny_action_queue` | Pending manual actions requiring owner review |
+| `finance_filing_packet` | Generate filing packet for tax/compliance deadlines |
+
 Superseded config-only MCP servers (`firefly.json`, `paperless.json`) are deactivated (enabled: false) in MCPJungle.
 
-## V1 Deployment Checklist
+## Deployment
 
-The MCP server source is complete but requires workbench-side activation:
+MCP server is live. SimpleFIN daily sync active (cron `0 6 * * *` on VM 211).
 
 ```bash
-# 1. Install dependencies and build
+# Build (after changes)
 cd ~/code/workbench/agents/finance/tools
-npm install
-npm run build
+npm install && npm run build
 
-# 2. Create .env from template, populate secrets from Infisical
-cp .env.example .env
-# Set FIREFLY_PAT (from infrastructure/prod/FIREFLY_PAT)
-# Set PAPERLESS_API_TOKEN (from infrastructure/prod/PAPERLESS_API_TOKEN)
-# Set FIREFLY_URL=http://100.76.153.100:8080 (or LAN 192.168.1.211:8080)
-# Set PAPERLESS_URL=http://100.76.153.100:8000 (or LAN 192.168.1.211:8000)
-
-# 3. Register in Claude Desktop config
-# Add to ~/Library/Application Support/Claude/claude_desktop_config.json:
-#   "finance-agent": {
-#     "command": "node",
-#     "args": ["<workbench>/agents/finance/tools/build/index.js"]
-#   }
-
-# 4. Smoke test — restart Claude Desktop, invoke finance_status tool
+# Secrets (Infisical infrastructure/prod)
+# FIREFLY_ACCESS_TOKEN, PAPERLESS_API_TOKEN, GHOSTFOLIO_ACCESS_TOKEN
+# FIREFLY_URL=http://100.76.153.100:8080
+# PAPERLESS_URL=http://100.76.153.100:8000
+# GHOSTFOLIO_URL=http://100.76.153.100:3333
 ```
 
 ## Invocation
@@ -133,8 +145,6 @@ V2 roadmap includes scheduled mailroom prompts for health digest and tax calenda
 | Tool | Description | Status |
 |------|-------------|--------|
 | `reconciliation_report` | Cross-service transaction reconciliation | Planned |
-| `tax_1099_summary` | Contractor payment aggregation for 1099 prep | Planned |
-| `sales_tax_dr15` | FL sales tax calculation from Mint OS + Firefly | Planned |
 | `financial_health_digest` | Cross-service financial health summary | Planned |
 | `receipt_link` | Link Paperless receipt to Firefly transaction (write-gated) | Planned |
 | `transaction_categorize` | Bulk categorize transactions (write-gated) | Planned |
