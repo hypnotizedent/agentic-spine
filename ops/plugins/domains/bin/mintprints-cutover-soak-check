@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# mintprints-cutover-soak-check — read-only post-W56 soak verification
+# Checks: tunnel ingress, DNS state, HTTP health, mail parity, Shopify fallback viability
+# Exit 0 = all pass, exit 1 = critical failure
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+# Re-exec under secrets injection BEFORE arg parsing
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+[[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || { echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2; exit 2; }
+[[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || { echo "STOP: CLOUDFLARE_ACCOUNT_ID missing" >&2; exit 2; }
+
+TUNNEL_NAME="homelab-tunnel"
+ZONE_NAME="mintprints.com"
+ZONE_ID="3188b91150231e1caf44514c8ad221da"
+SHOPIFY_FALLBACK_IP="23.227.38.66"
+TS="$(TZ=UTC date '+%Y-%m-%dT%H:%M:%SZ')"
+OUTBOX="$ROOT/mailroom/outbox/domains"
+mkdir -p "$OUTBOX"
+
+CRITICAL_FAIL=0
+RESULTS=""
+
+add_result() {
+  local check="$1" status="$2" detail="$3"
+  RESULTS="${RESULTS}  ${check}:\n    status: ${status}\n    detail: \"${detail}\"\n"
+  if [[ "$status" == "FAIL" ]]; then
+    CRITICAL_FAIL=1
+  fi
+}
+
+echo "domains.mintprints.soak.status"
+echo "timestamp: ${TS}"
+echo ""
+
+# ── Check 1: Tunnel Ingress ──────────────────────────────────────────────────
+
+echo "== tunnel ingress =="
+TUNNEL_ID="$(python3 - "$BINDING_FILE" "$TUNNEL_NAME" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+for t in data.get("tunnels", []):
+    if t.get("name") == sys.argv[2]:
+        print(t["id"])
+        sys.exit(0)
+sys.exit(1)
+PY
+)" || { echo "STOP: tunnel not found in binding" >&2; exit 2; }
+
+INGRESS_RAW="$(curl -fsS \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations")"
+
+INGRESS_CHECK="$(echo "$INGRESS_RAW" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+cfg = data.get("result", {}).get("config", {})
+ingress = cfg.get("ingress", [])
+expected = {
+    "mintprints.com": "http://quote-page:3341",
+    "www.mintprints.com": "http://quote-page:3341",
+    "customer.mintprints.com": "http://quote-page:3341",
+}
+found = {}
+for rule in ingress:
+    h = rule.get("hostname", "")
+    s = rule.get("service", "")
+    if h in expected:
+        found[h] = s
+
+missing = []
+mismatch = []
+for h, exp_svc in expected.items():
+    if h not in found:
+        missing.append(h)
+    elif found[h] != exp_svc:
+        mismatch.append(f"{h}: got={found[h]} want={exp_svc}")
+
+if missing or mismatch:
+    sep = ","
+    parts = []
+    if missing:
+        parts.append("missing=[" + sep.join(missing) + "]")
+    if mismatch:
+        parts.append("mismatch=[" + sep.join(mismatch) + "]")
+    print("FAIL|" + "; ".join(parts))
+else:
+    print("PASS|all 3 hostnames present with correct service target")
+')"
+
+IFS='|' read -r INGRESS_STATUS INGRESS_DETAIL <<< "$INGRESS_CHECK"
+echo "  ${INGRESS_STATUS}: ${INGRESS_DETAIL}"
+add_result "tunnel_ingress" "$INGRESS_STATUS" "$INGRESS_DETAIL"
+
+# ── Check 2: DNS State ──────────────────────────────────────────────────────
+
+echo "== dns state =="
+DNS_RAW="$(curl -fsS \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "${CF_API}/zones/${ZONE_ID}/dns_records?per_page=100")"
+
+DNS_CHECK="$(echo "$DNS_RAW" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+records = data.get("result", [])
+
+# Build lookup: (type, name) -> content
+by_key = {}
+for r in records:
+    key = (r["type"], r["name"])
+    by_key[key] = r["content"]
+
+issues = []
+
+# Apex must be CNAME to tunnel (not A to Shopify 23.227.38.66)
+apex_cname = by_key.get(("CNAME", "mintprints.com"))
+apex_a = by_key.get(("A", "mintprints.com"))
+if apex_a:
+    issues.append(f"apex has A record {apex_a} (should be CNAME to tunnel)")
+if not apex_cname:
+    issues.append("apex missing CNAME record")
+elif "cfargotunnel.com" not in apex_cname:
+    issues.append(f"apex CNAME not tunnel-targeted: {apex_cname}")
+
+# www must point to apex (not shops.myshopify.com)
+www_cname = by_key.get(("CNAME", "www.mintprints.com"))
+if not www_cname:
+    issues.append("www missing CNAME record")
+elif www_cname == "shops.myshopify.com":
+    issues.append("www still points to Shopify (shops.myshopify.com)")
+elif www_cname != "mintprints.com":
+    issues.append(f"www CNAME unexpected: {www_cname}")
+
+if issues:
+    print("FAIL|" + "; ".join(issues))
+else:
+    print(f"PASS|apex CNAME={apex_cname}, www CNAME={www_cname}")
+')"
+
+IFS='|' read -r DNS_STATUS DNS_DETAIL <<< "$DNS_CHECK"
+echo "  ${DNS_STATUS}: ${DNS_DETAIL}"
+add_result "dns_state" "$DNS_STATUS" "$DNS_DETAIL"
+
+# ── Check 3: HTTP Health ─────────────────────────────────────────────────────
+
+echo "== http health =="
+HTTP_FAIL=0
+
+# Helper: get HTTP status code without -f (which causes double output on failure)
+http_code() {
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null)" || true
+  echo "${code:-000}"
+}
+
+# mintprints.com → expect 200 or 301 (app redirects /quote)
+APEX_HTTP="$(http_code 'https://mintprints.com')"
+if [[ "$APEX_HTTP" =~ ^(200|301|302|308)$ ]]; then
+  echo "  PASS: https://mintprints.com -> ${APEX_HTTP}"
+else
+  echo "  FAIL: https://mintprints.com -> ${APEX_HTTP} (expected 200/301/302/308)"
+  HTTP_FAIL=1
+fi
+
+# www.mintprints.com → expect 301/308 redirect to apex, or 200 after redirect
+WWW_HTTP="$(http_code 'https://www.mintprints.com')"
+if [[ "$WWW_HTTP" =~ ^(200|301|302|308)$ ]]; then
+  echo "  PASS: https://www.mintprints.com -> ${WWW_HTTP}"
+else
+  echo "  FAIL: https://www.mintprints.com -> ${WWW_HTTP} (expected 200/301/302/308)"
+  HTTP_FAIL=1
+fi
+
+# customer.mintprints.com → expect 200 or 301
+CUST_HTTP="$(http_code 'https://customer.mintprints.com')"
+if [[ "$CUST_HTTP" =~ ^(200|301|302|308)$ ]]; then
+  echo "  PASS: https://customer.mintprints.com -> ${CUST_HTTP}"
+else
+  echo "  FAIL: https://customer.mintprints.com -> ${CUST_HTTP} (expected 200/301/302/308)"
+  HTTP_FAIL=1
+fi
+
+if [[ "$HTTP_FAIL" -eq 0 ]]; then
+  add_result "http_health" "PASS" "apex=${APEX_HTTP} www=${WWW_HTTP} customer=${CUST_HTTP}"
+else
+  add_result "http_health" "FAIL" "apex=${APEX_HTTP} www=${WWW_HTTP} customer=${CUST_HTTP}"
+fi
+
+# ── Check 4: Mail DNS Parity ─────────────────────────────────────────────────
+
+echo "== mail dns parity =="
+MAIL_CHECK="$(echo "$DNS_RAW" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+records = data.get("result", [])
+
+# Build lookup: (type, name) -> content
+by_key = {}
+for r in records:
+    key = (r["type"], r["name"])
+    if key not in by_key:
+        by_key[key] = []
+    by_key[key].append(r["content"])
+
+expected_mail = {
+    ("MX", "mintprints.com"): "mintprints-com.mail.protection.outlook.com",
+    ("CNAME", "autodiscover.mintprints.com"): "autodiscover.outlook.com",
+    ("CNAME", "selector1._domainkey.mintprints.com"): "selector1-mintprints-com._domainkey.mintprints.k-v1.dkim.mail.microsoft",
+    ("CNAME", "selector2._domainkey.mintprints.com"): "selector2-mintprints-com._domainkey.mintprints.k-v1.dkim.mail.microsoft",
+}
+
+# TXT records use substring match (content may be quoted differently)
+expected_txt = {
+    ("TXT", "mintprints.com"): "v=spf1 include:spf.protection.outlook.com",
+    ("TXT", "_dmarc.mintprints.com"): "v=DMARC1",
+    ("TXT", "default._domainkey.mintprints.com"): "v=DKIM1",
+}
+
+issues = []
+
+for key, expected_content in expected_mail.items():
+    contents = by_key.get(key, [])
+    if not contents:
+        issues.append(f"MISSING {key[0]} {key[1]}")
+    elif not any(expected_content in c for c in contents):
+        issues.append(f"CHANGED {key[0]} {key[1]}: got={contents[0]}")
+
+for key, expected_substr in expected_txt.items():
+    contents = by_key.get(key, [])
+    if not contents:
+        issues.append(f"MISSING {key[0]} {key[1]}")
+    elif not any(expected_substr in c for c in contents):
+        issues.append(f"CHANGED {key[0]} {key[1]}")
+
+if issues:
+    print("FAIL|" + "; ".join(issues))
+else:
+    print("PASS|all 7 mail records (MX/SPF/DKIM/DMARC/autodiscover) verified unchanged")
+')"
+
+IFS='|' read -r MAIL_STATUS MAIL_DETAIL <<< "$MAIL_CHECK"
+echo "  ${MAIL_STATUS}: ${MAIL_DETAIL}"
+add_result "mail_dns_parity" "$MAIL_STATUS" "$MAIL_DETAIL"
+
+# ── Check 5: Shopify Fallback Viability ───────────────────────────────────────
+
+echo "== shopify fallback viability =="
+SHOPIFY_HTTP="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+  --resolve "mintprints.com:443:${SHOPIFY_FALLBACK_IP}" \
+  -I "https://mintprints.com" 2>/dev/null || echo "000")"
+
+if [[ "$SHOPIFY_HTTP" == "200" || "$SHOPIFY_HTTP" == "301" || "$SHOPIFY_HTTP" == "302" ]]; then
+  echo "  VIABLE: Shopify at ${SHOPIFY_FALLBACK_IP} responded ${SHOPIFY_HTTP}"
+  add_result "shopify_fallback" "VIABLE" "Shopify at ${SHOPIFY_FALLBACK_IP} responded ${SHOPIFY_HTTP}"
+elif [[ "$SHOPIFY_HTTP" == "421" ]]; then
+  echo "  DEGRADED: Shopify at ${SHOPIFY_FALLBACK_IP} responded ${SHOPIFY_HTTP} (custom domain config may have drifted)"
+  add_result "shopify_fallback" "DEGRADED" "Shopify responded ${SHOPIFY_HTTP} — custom domain config may be stale"
+else
+  echo "  NOT-VIABLE: Shopify at ${SHOPIFY_FALLBACK_IP} responded ${SHOPIFY_HTTP}"
+  add_result "shopify_fallback" "NOT-VIABLE" "Shopify responded ${SHOPIFY_HTTP}"
+fi
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+
+echo ""
+echo "---"
+
+# Write YAML summary
+OUTFILE="${OUTBOX}/mintprints-soak-check-$(TZ=UTC date '+%Y%m%d-%H%M%S').yaml"
+cat > "$OUTFILE" <<EOF
+snapshot_at: "${TS}"
+source: domains.mintprints.soak.status
+zone: mintprints.com
+critical_fail: $([ "$CRITICAL_FAIL" -eq 0 ] && echo "false" || echo "true")
+checks:
+$(echo -e "$RESULTS")
+http_codes:
+  apex: "${APEX_HTTP}"
+  www: "${WWW_HTTP}"
+  customer: "${CUST_HTTP}"
+  shopify_fallback: "${SHOPIFY_HTTP}"
+EOF
+
+echo "output: ${OUTFILE}"
+
+if [[ "$CRITICAL_FAIL" -eq 0 ]]; then
+  echo "status: PASS"
+  exit 0
+else
+  echo "status: FAIL (critical failure detected)"
+  exit 1
+fi

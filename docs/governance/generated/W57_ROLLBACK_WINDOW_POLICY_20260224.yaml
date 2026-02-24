@@ -1,0 +1,110 @@
+---
+version: 1
+created_at: "2026-02-24T20:10:00Z"
+owner: "@ronny"
+scope: w57-rollback-window-policy
+domain: mintprints.com
+wave: W56
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROLLBACK WINDOW DEFINITION
+# ─────────────────────────────────────────────────────────────────────────────
+rollback_window:
+  open_date: "2026-02-24T07:00:00-05:00"
+  open_event: "W56 cutover: mintprints.com apex/www moved from Shopify to CF tunnel"
+  close_by: "2026-03-03T23:59:59-05:00"
+  close_by_note: "Hard 7-day boundary. Extension requires explicit blocker documentation."
+  status: open
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLOSURE CRITERIA
+# ─────────────────────────────────────────────────────────────────────────────
+closure_criteria:
+  all_required: true
+  criteria:
+    - id: C1
+      description: "Soak check passes for 72+ consecutive hours with no critical DNS or tunnel failures"
+      status: pending
+      evidence: null
+
+    - id: C2
+      description: "Mail DNS parity verified unchanged across all soak intervals (MX/SPF/DKIM/DMARC/autodiscover)"
+      status: pending
+      evidence: null
+
+    - id: C3
+      description: "Domain gates D195, D200, D201, D202 all PASS"
+      status: pending
+      evidence: null
+
+    - id: C4
+      description: "HTTP health for apex and www returns 200/301 from CF tunnel (not Shopify)"
+      status: pending
+      evidence: null
+
+    - id: C5
+      description: "No user-reported issues with mintprints.com during soak window"
+      status: pending
+      evidence: null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FALLBACK VIABILITY CHECKS
+# ─────────────────────────────────────────────────────────────────────────────
+fallback_viability:
+  description: "Probe Shopify fallback IP to confirm rollback remains possible"
+  shopify_ip: "23.227.38.66"
+  check_method: "curl --resolve mintprints.com:443:23.227.38.66 -I https://mintprints.com"
+  schedule: "Every soak check interval until close date"
+  expected_responses:
+    viable: [200, 301, 302]
+    degraded: [421]
+    not_viable: [000, 403, 404, 500, 502, 503]
+  risk_note: "Shopify custom domain config may drift independently. A 421 response indicates Shopify no longer recognizes mintprints.com as a bound custom domain. If degraded, rollback requires re-adding custom domain in Shopify admin before DNS revert."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROLLBACK PROCEDURE (if needed before close date)
+# ─────────────────────────────────────────────────────────────────────────────
+rollback_procedure:
+  steps:
+    - step: 1
+      action: "Delete apex CNAME (tunnel) from Cloudflare DNS"
+      command: "cloudflare.dns.record.set --zone mintprints.com --type A --name mintprints.com --content 23.227.38.66 --proxied true"
+      note: "CF API requires DELETE CNAME then POST A — type change not supported via PUT"
+
+    - step: 2
+      action: "Update www CNAME to point back to Shopify"
+      command: "cloudflare.dns.record.set --zone mintprints.com --type CNAME --name www --content shops.myshopify.com --proxied true"
+
+    - step: 3
+      action: "Remove tunnel ingress rules for mintprints.com and www.mintprints.com"
+      command: "cloudflare.tunnel.ingress.set --hostname mintprints.com --remove && cloudflare.tunnel.ingress.set --hostname www.mintprints.com --remove"
+
+    - step: 4
+      action: "Verify Shopify is serving mintprints.com"
+      command: "curl -I https://mintprints.com"
+      expected: "200 or 301 from Shopify"
+
+    - step: 5
+      action: "Verify mail records unchanged"
+      command: "domains.mintprints.soak.status"
+      expected: "mail_dns_parity: PASS"
+
+  estimated_duration: "15 minutes"
+  risk: "Shopify custom domain config drift may require re-adding domain in Shopify admin panel"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DECISION AT CLOSE DATE
+# ─────────────────────────────────────────────────────────────────────────────
+close_date_decision:
+  options:
+    - decision: close-window
+      condition: "All closure criteria (C1-C5) met"
+      action: "Mark rollback window closed. Proceed with Shopify retirement checklist."
+      next_wave: "W58 (Shopify retirement execution)"
+
+    - decision: extend-with-blocker
+      condition: "One or more closure criteria not met"
+      action: "Document blocker(s), set new close-by date (max +7 days), file GAP for unresolved issues"
+      max_extensions: 2
+      hard_deadline: "2026-03-17T23:59:59-05:00"
+      note: "After 2 extensions, forced decision: accept risk and close, or revert to Shopify"

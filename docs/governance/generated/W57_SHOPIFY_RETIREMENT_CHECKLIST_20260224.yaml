@@ -1,0 +1,203 @@
+---
+version: 1
+created_at: "2026-02-24T20:10:00Z"
+owner: "@ronny"
+scope: w57-shopify-retirement-checklist
+domain: mintprints.com
+wave: W56
+status: open
+sign_off: null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. DEPENDENCY INVENTORY
+# ─────────────────────────────────────────────────────────────────────────────
+dependency_inventory:
+  shopify_store:
+    store_name: "hypnotized-2"
+    store_url: "hypnotized-2.myshopify.com"
+    plan: "Basic Shopify"
+    domains_bound:
+      - mintprints.com
+      - www.mintprints.com
+    note: "apex/www were cut over from Shopify to CF tunnel in W56"
+
+  theme:
+    name: "Dawn (customized)"
+    status: "active but no longer serving traffic for mintprints.com"
+    risk: "low — theme is generic, not a custom build"
+
+  apps_installed:
+    - name: "Shopify Email"
+      status: "unused — Microsoft 365 is primary email"
+    - name: "Shopify Inbox"
+      status: "unused"
+    note: "No third-party apps with external webhooks"
+
+  webhooks:
+    active_count: 0
+    note: "No webhooks configured — all order processing via quote-page app"
+
+  checkout:
+    type: "Shopify Checkout (standard)"
+    status: "not active for mintprints.com — quote-page handles all customer interaction"
+    payment_processors: []
+    note: "No Shopify Payments configured for mintprints.com"
+
+  dns_records_referencing_shopify:
+    - type: CNAME
+      name: account.mintprints.com
+      content: shops.myshopify.com
+      status: "still active — legacy, can be removed"
+    note: "apex/www already cut over in W56"
+
+  legacy_cpanel_records:
+    - autoconfig.mintprints.com
+    - cpcalendars.mintprints.com
+    - cpcontacts.mintprints.com
+    - cpanel.mintprints.com
+    - ftp.mintprints.com
+    - mail.mintprints.com
+    - webmail.mintprints.com
+    - whm.mintprints.com
+    note: "All point to 162.241.218.139 (old cPanel host). Can be removed after verification."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. EVIDENCE REQUIRED BEFORE RETIREMENT
+# ─────────────────────────────────────────────────────────────────────────────
+evidence_required:
+  - id: E1
+    description: "Soak check passes for 72+ hours with no critical failures"
+    status: pending
+    evidence: null
+
+  - id: E2
+    description: "Mail DNS parity verified unchanged across all soak intervals"
+    status: pending
+    evidence: null
+
+  - id: E3
+    description: "No active Shopify orders or pending fulfillments"
+    status: pending
+    evidence: null
+
+  - id: E4
+    description: "Shopify custom domain binding for mintprints.com removed from Shopify admin"
+    status: pending
+    evidence: null
+
+  - id: E5
+    description: "account.mintprints.com CNAME to shops.myshopify.com removed from Cloudflare DNS"
+    status: pending
+    evidence: null
+
+  - id: E6
+    description: "Legacy cPanel DNS records cleaned up (8 records)"
+    status: pending
+    evidence: null
+
+  - id: E7
+    description: "Rollback window formally closed (W57 policy)"
+    status: pending
+    evidence: null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. REVERSIBLE VS IRREVERSIBLE ACTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+actions:
+  reversible:
+    - id: R1
+      action: "Remove account.mintprints.com CNAME from Cloudflare DNS"
+      rollback: "Re-create CNAME account.mintprints.com -> shops.myshopify.com"
+      risk: low
+
+    - id: R2
+      action: "Remove legacy cPanel A records from Cloudflare DNS"
+      rollback: "Re-create A records pointing to 162.241.218.139"
+      risk: low
+
+    - id: R3
+      action: "Disable Shopify storefront (set to password-protected)"
+      rollback: "Remove password protection"
+      risk: low
+
+  irreversible:
+    - id: I1
+      action: "Remove mintprints.com custom domain from Shopify admin"
+      risk: medium
+      note: "Shopify may not immediately re-bind the custom domain. Re-adding could require support intervention."
+      warning: "This makes DNS rollback to 23.227.38.66 non-functional for mintprints.com"
+
+    - id: I2
+      action: "Cancel Shopify subscription/plan"
+      risk: high
+      note: "Loses access to store data, theme customizations, and order history. Export all data first."
+      prerequisite: "E3 (no pending orders), E7 (rollback window closed), full data export completed"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. RETIREMENT SEQUENCING
+# ─────────────────────────────────────────────────────────────────────────────
+retirement_sequence:
+  - step: 1
+    action: "Complete all soak evidence (E1-E2)"
+    prerequisite: "72h soak window"
+    owner: "@ronny"
+
+  - step: 2
+    action: "Close rollback window (W57 policy)"
+    prerequisite: "step 1"
+    owner: "@ronny"
+
+  - step: 3
+    action: "Remove account.mintprints.com CNAME (R1)"
+    prerequisite: "step 2"
+    owner: "@ronny"
+
+  - step: 4
+    action: "Remove legacy cPanel DNS records (R2)"
+    prerequisite: "step 2"
+    owner: "@ronny"
+
+  - step: 5
+    action: "Export all Shopify data (orders, customers, products, theme)"
+    prerequisite: "step 2"
+    owner: "@ronny"
+
+  - step: 6
+    action: "Verify no active orders (E3)"
+    prerequisite: "step 5"
+    owner: "@ronny"
+
+  - step: 7
+    action: "Remove custom domain from Shopify admin (I1)"
+    prerequisite: "step 6, E4"
+    owner: "@ronny"
+
+  - step: 8
+    action: "Disable storefront with password (R3)"
+    prerequisite: "step 7"
+    owner: "@ronny"
+
+  - step: 9
+    action: "Cancel Shopify plan (I2) — optional, may retain for other domains"
+    prerequisite: "step 8, full data export verified"
+    owner: "@ronny"
+    note: "Hypnotized domains still use this Shopify store. Do NOT cancel if hypnotized-2.myshopify.com serves other domains."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. RISK ASSESSMENT
+# ─────────────────────────────────────────────────────────────────────────────
+risks:
+  - id: RISK-1
+    severity: medium
+    description: "Restoring DNS to 23.227.38.66 may not fully restore Shopify behavior if custom domain config drifts"
+    mitigation: "Shopify fallback viability probe in soak check monitors this. Close rollback window before removing custom domain."
+
+  - id: RISK-2
+    severity: low
+    description: "Hypnotized domains share the same Shopify store (hypnotized-2.myshopify.com)"
+    mitigation: "Do NOT cancel Shopify plan — only remove mintprints.com custom domain. Hypnotized domains remain unaffected."
+
+  - id: RISK-3
+    severity: low
+    description: "Legacy cPanel records point to decommissioned host (162.241.218.139)"
+    mitigation: "These records serve no purpose. Removal is safe but should happen after rollback window closes."
