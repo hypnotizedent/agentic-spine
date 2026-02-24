@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# Safety: mutating (sends email via Stalwart SMTP)
+# TRIAGE: Direct SMTP send through Stalwart mail server — agent-facing email capability
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+INFISICAL_AGENT="$ROOT/ops/tools/infisical-agent.sh"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+TO=""
+SUBJECT=""
+BODY=""
+BODY_FILE=""
+FROM_MAILBOX="noreply"
+EXECUTE=0
+JSON_OUT=0
+
+# ── arg parse ─────────────────────────────────────────────────────────────────
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --to)       TO="${2:-}"; shift 2 ;;
+    --subject)  SUBJECT="${2:-}"; shift 2 ;;
+    --body)     BODY="${2:-}"; shift 2 ;;
+    --body-file) BODY_FILE="${2:-}"; shift 2 ;;
+    --from)     FROM_MAILBOX="${2:-}"; shift 2 ;;
+    --execute)  EXECUTE=1; shift ;;
+    --json)     JSON_OUT=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-stalwart-send [OPTIONS]
+
+Send email directly via Stalwart SMTPS (port 465) from spine.ronny.works.
+
+Options:
+  --to ADDRESS        Recipient email address (required)
+  --subject TEXT      Email subject line (required)
+  --body TEXT         Email body (plain text)
+  --body-file PATH    Read body from file (overrides --body)
+  --from MAILBOX      Sender mailbox: ops, alerts, noreply (default: noreply)
+  --execute           Actually send (without this, dry-run only)
+  --json              Output as JSON instead of YAML
+  -h, --help          Show this help
+
+Sender addresses:
+  ops@spine.ronny.works       Operational messages
+  alerts@spine.ronny.works    Alert notifications
+  noreply@spine.ronny.works   System/automated messages (default)
+
+Environment:
+  STALWART_SMTP_HOST          Override SMTP host (default: mail.spine.ronny.works)
+  STALWART_SMTP_PORT          Override SMTP port (default: 465)
+USAGE
+      exit 0
+      ;;
+    --) shift ;; # ignore bare -- separator from cap runner
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+# ── validate ──────────────────────────────────────────────────────────────────
+need python3
+[[ -n "$TO" ]] || fail "missing --to (recipient address)"
+[[ -n "$SUBJECT" ]] || fail "missing --subject"
+
+if [[ -n "$BODY_FILE" ]]; then
+  [[ -f "$BODY_FILE" ]] || fail "body file not found: $BODY_FILE"
+  BODY="$(cat "$BODY_FILE")"
+fi
+[[ -n "$BODY" ]] || fail "missing --body or --body-file"
+
+# Validate sender mailbox
+case "$FROM_MAILBOX" in
+  ops|alerts|noreply) ;;
+  *) fail "invalid --from: must be ops, alerts, or noreply" ;;
+esac
+
+FROM_ADDR="${FROM_MAILBOX}@spine.ronny.works"
+
+# ── resolve SMTP credentials ────────────────────────────────────────────────
+# Use hostname (not IP) for TLS certificate validation
+SMTP_HOST="${STALWART_SMTP_HOST:-mail.spine.ronny.works}"
+SMTP_PORT="${STALWART_SMTP_PORT:-465}"
+
+# Map mailbox to credential env var name
+case "$FROM_MAILBOX" in
+  ops)     SECRET_KEY="STALWART_OPS_PASSWORD" ;;
+  alerts)  SECRET_KEY="STALWART_ALERTS_PASSWORD" ;;
+  noreply) SECRET_KEY="STALWART_NOREPLY_PASSWORD" ;;
+esac
+
+# Resolve password: try env var first (set by secrets-exec), then infisical-agent
+SMTP_PASS=""
+case "$FROM_MAILBOX" in
+  ops)     SMTP_PASS="${STALWART_OPS_PASSWORD:-}" ;;
+  alerts)  SMTP_PASS="${STALWART_ALERTS_PASSWORD:-}" ;;
+  noreply) SMTP_PASS="${STALWART_NOREPLY_PASSWORD:-}" ;;
+esac
+
+if [ -z "$SMTP_PASS" ]; then
+  if [ -f "$INFISICAL_AGENT" ]; then
+    # shellcheck source=ops/tools/infisical-agent.sh
+    source "$INFISICAL_AGENT"
+    SMTP_PASS="$(infisical_get_secret "infrastructure" "prod" "$SECRET_KEY" 2>/dev/null || true)"
+  fi
+fi
+
+if [ -z "$SMTP_PASS" ]; then
+  fail "$SECRET_KEY not set and not found in Infisical (path: infrastructure/prod/$SECRET_KEY). Register secret first."
+fi
+
+# ── output setup ─────────────────────────────────────────────────────────────
+stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+out_dir="$SPINE_OUTBOX/communications"
+mkdir -p "$out_dir"
+out_file="$out_dir/stalwart-send-last.yaml"
+
+# ── dry-run mode ─────────────────────────────────────────────────────────────
+if [[ "$EXECUTE" -ne 1 ]]; then
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 -c '
+import json, sys
+print(json.dumps({
+    "capability": "communications.stalwart.send",
+    "schema_version": "1.0",
+    "status": "dry-run",
+    "generated_at": sys.argv[1],
+    "data": {
+        "from": sys.argv[2],
+        "to": sys.argv[3],
+        "subject": sys.argv[4],
+        "body_length": len(sys.argv[5]),
+        "smtp_host": sys.argv[6],
+        "smtp_port": int(sys.argv[7]),
+        "note": "Pass --execute to send"
+    }
+}, indent=2))
+' "$stamp" "$FROM_ADDR" "$TO" "$SUBJECT" "$BODY" "$SMTP_HOST" "$SMTP_PORT"
+  else
+    echo "communications.stalwart.send"
+    echo "status: dry-run"
+    echo "from: $FROM_ADDR"
+    echo "to: $TO"
+    echo "subject: $SUBJECT"
+    echo "body_length: ${#BODY}"
+    echo "smtp_host: $SMTP_HOST"
+    echo "smtp_port: $SMTP_PORT"
+    echo "note: Pass --execute to send"
+  fi
+  exit 0
+fi
+
+# ── send via SMTPS ───────────────────────────────────────────────────────────
+SEND_RESULT="$(python3 - "$SMTP_HOST" "$SMTP_PORT" "$FROM_ADDR" "$SMTP_PASS" "$TO" "$SUBJECT" "$BODY" "$stamp" <<'PYEOF'
+import smtplib
+import ssl
+import sys
+import json
+from email.mime.text import MIMEText
+from email.utils import formatdate, make_msgid
+
+smtp_host = sys.argv[1]
+smtp_port = int(sys.argv[2])
+from_addr = sys.argv[3]
+smtp_pass = sys.argv[4]
+to_addr = sys.argv[5]
+subject = sys.argv[6]
+body = sys.argv[7]
+stamp = sys.argv[8]
+
+msg = MIMEText(body, "plain", "utf-8")
+msg["From"] = from_addr
+msg["To"] = to_addr
+msg["Subject"] = subject
+msg["Date"] = formatdate(localtime=True)
+msg["Message-ID"] = make_msgid(domain="spine.ronny.works")
+msg["X-Spine-Agent"] = "communications.stalwart.send"
+
+try:
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL(smtp_host, smtp_port, context=context, timeout=15) as server:
+        # Stalwart SMTP auth uses local part only (not full email address)
+        smtp_user = from_addr.split("@")[0]
+        server.login(smtp_user, smtp_pass)
+        server.sendmail(from_addr, [to_addr], msg.as_string())
+    print(json.dumps({
+        "status": "sent",
+        "message_id": msg["Message-ID"],
+        "from": from_addr,
+        "to": to_addr,
+        "subject": subject,
+        "timestamp": stamp,
+    }))
+except smtplib.SMTPAuthenticationError as e:
+    print(json.dumps({"status": "auth_error", "error": str(e)}))
+    sys.exit(1)
+except smtplib.SMTPException as e:
+    print(json.dumps({"status": "smtp_error", "error": str(e)}))
+    sys.exit(1)
+except Exception as e:
+    print(json.dumps({"status": "error", "error": str(e)}))
+    sys.exit(1)
+PYEOF
+)" || fail "SMTP send failed"
+
+# Parse result
+send_status="$(echo "$SEND_RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status","unknown"))')"
+
+if [[ "$send_status" != "sent" ]]; then
+  echo "$SEND_RESULT" >&2
+  fail "send failed with status: $send_status"
+fi
+
+message_id="$(echo "$SEND_RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("message_id",""))')"
+
+# Write delivery record
+cat > "$out_file" <<YAML
+created_at: "$stamp"
+capability: communications.stalwart.send
+from: "$FROM_ADDR"
+to: "$TO"
+subject: "$SUBJECT"
+body_length: ${#BODY}
+message_id: "$message_id"
+smtp_host: "$SMTP_HOST"
+smtp_port: $SMTP_PORT
+status: sent
+YAML
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  echo "$SEND_RESULT"
+else
+  echo "communications.stalwart.send"
+  echo "status: sent"
+  echo "from: $FROM_ADDR"
+  echo "to: $TO"
+  echo "subject: $SUBJECT"
+  echo "message_id: $message_id"
+  echo "record: $out_file"
+fi
