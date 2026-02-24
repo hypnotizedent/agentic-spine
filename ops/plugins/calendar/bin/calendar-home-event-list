@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""calendar-home-event-list - list events in governed local calendar home (Radicale)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing contract: {path}")
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # pragma: no cover - runtime guard
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"YAML root must be mapping: {path}")
+    return payload
+
+
+def read_secret_var(name: str) -> str:
+    val = os.environ.get(name, "").strip()
+    if val:
+        return val
+    file_var = os.environ.get(f"{name}_FILE", "").strip()
+    if file_var:
+        try:
+            return Path(file_var).expanduser().read_text(encoding="utf-8").strip()
+        except Exception as exc:  # pragma: no cover - runtime guard
+            fail(f"unable to read secret file for {name}: {exc}")
+    return ""
+
+
+def ssh_propfind_collection(
+    host: str,
+    url: str,
+    username: str,
+    password: str,
+    remote_stack_path: str,
+) -> list[str]:
+    """PROPFIND the collection to list existing .ics hrefs. Returns list of UID stems (without .ics)."""
+    if username and password:
+        remote_cmd = (
+            "curl -sS -u "
+            + shlex.quote(f"{username}:{password}")
+            + " -X PROPFIND -H 'Depth: 1' -H 'Content-Type: application/xml' "
+            + shlex.quote(url)
+        )
+    else:
+        if not remote_stack_path:
+            fail(
+                "missing calendar home credentials and home.remote_stack_path unavailable for host auth fallback"
+            )
+        remote_cmd = (
+            "set -a; source "
+            + shlex.quote(f"{remote_stack_path}/.env")
+            + "; set +a; "
+            + "curl -sS -u \"$RADICALE_ADMIN_USERNAME:$RADICALE_ADMIN_PASSWORD\" "
+            + "-X PROPFIND -H 'Depth: 1' -H 'Content-Type: application/xml' "
+            + shlex.quote(url)
+        )
+
+    ssh_cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        host, remote_cmd,
+    ]
+    proc = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        fail(f"PROPFIND failed on {url}: {(proc.stderr or proc.stdout or '').strip()}")
+
+    body = proc.stdout or ""
+    hrefs = re.findall(r"<[^>]*href[^>]*>([^<]*\.ics)</", body, re.IGNORECASE)
+    if not hrefs:
+        hrefs = re.findall(r"<href>([^<]*\.ics)</href>", body, re.IGNORECASE)
+    if not hrefs:
+        hrefs = re.findall(r">([^<]*\.ics)<", body)
+
+    uids: list[str] = []
+    for href in hrefs:
+        basename = href.rsplit("/", 1)[-1]
+        if basename.endswith(".ics"):
+            uids.append(basename[:-4])
+    return uids
+
+
+def ssh_curl_get(
+    host: str,
+    url: str,
+    username: str,
+    password: str,
+    remote_stack_path: str,
+) -> str:
+    """GET a single ICS resource from Radicale via SSH + curl. Returns body text."""
+    if username and password:
+        remote_cmd = (
+            "curl -sS -u "
+            + shlex.quote(f"{username}:{password}")
+            + " -H 'Accept: text/calendar' "
+            + shlex.quote(url)
+        )
+    else:
+        if not remote_stack_path:
+            fail(
+                "missing calendar home credentials and home.remote_stack_path unavailable for host auth fallback"
+            )
+        remote_cmd = (
+            "set -a; source "
+            + shlex.quote(f"{remote_stack_path}/.env")
+            + "; set +a; "
+            + "curl -sS -u \"$RADICALE_ADMIN_USERNAME:$RADICALE_ADMIN_PASSWORD\" "
+            + "-H 'Accept: text/calendar' "
+            + shlex.quote(url)
+        )
+
+    ssh_cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        host, remote_cmd,
+    ]
+    proc = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        fail(f"GET failed on {url}: {(proc.stderr or proc.stdout or '').strip()}")
+    return proc.stdout or ""
+
+
+def parse_ics_field(ics_text: str, field: str) -> str:
+    """Extract a single ICS field value, handling line folding."""
+    # Unfold continuation lines (RFC 5545: CRLF + space/tab)
+    unfolded = re.sub(r"\r?\n[ \t]", "", ics_text)
+    pattern = re.compile(rf"^{re.escape(field)}[;:](.*)$", re.MULTILINE | re.IGNORECASE)
+    match = pattern.search(unfolded)
+    if not match:
+        return ""
+    raw = match.group(1)
+    # Strip TZID parameter prefix if present (e.g., "TZID=America/New_York:20260223T090000")
+    if ":" in raw and not raw.startswith("http"):
+        raw = raw.rsplit(":", 1)[-1]
+    # Unescape ICS text
+    return raw.replace("\\n", "\n").replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+
+
+def main() -> None:
+    script_dir = Path(__file__).resolve().parent
+    root = Path(os.environ.get("SPINE_ROOT", str(script_dir.parents[3]))).expanduser().resolve()
+
+    parser = argparse.ArgumentParser(description="List events in governed local calendar home")
+    parser.add_argument("--calendar-id", default="spine", help="Local calendar collection id")
+    parser.add_argument("--json", action="store_true", help="Emit JSON summary")
+    args = parser.parse_args()
+
+    home_contract_path = root / "ops/bindings/calendar.home.contract.yaml"
+    sync_contract_path = root / "ops/bindings/calendar.sync.contract.yaml"
+
+    home = load_yaml(home_contract_path)
+    sync = load_yaml(sync_contract_path)
+
+    home_section = home.get("home") if isinstance(home.get("home"), dict) else {}
+    endpoint = home_section.get("endpoint") if isinstance(home_section.get("endpoint"), dict) else {}
+
+    provider = str(home_section.get("provider", "")).strip()
+    host = str(home_section.get("host", "")).strip()
+    remote_stack_path = str(home_section.get("remote_stack_path", "")).strip()
+
+    if provider != "communications-calendar":
+        fail(f"calendar home provider must be communications-calendar (actual={provider!r})")
+    if host != "communications-stack":
+        fail(f"calendar home host must be communications-stack (actual={host!r})")
+
+    base_url = str(endpoint.get("base_url", "")).strip().rstrip("/")
+    collection = str(endpoint.get("calendar_collection", "/spine/")).strip()
+    if not collection.startswith("/"):
+        collection = "/" + collection
+    if not collection.endswith("/"):
+        collection = collection + "/"
+
+    if not base_url:
+        fail("calendar.home.contract endpoint.base_url is required")
+
+    username = read_secret_var("CALENDAR_HOME_USERNAME") or read_secret_var("RADICALE_ADMIN_USERNAME")
+    password = read_secret_var("CALENDAR_HOME_PASSWORD") or read_secret_var("RADICALE_ADMIN_PASSWORD")
+
+    # List UIDs via PROPFIND
+    uids = ssh_propfind_collection(
+        host=host,
+        url=f"{base_url}{collection}",
+        username=username,
+        password=password,
+        remote_stack_path=remote_stack_path,
+    )
+
+    # Fetch each event
+    events: list[dict[str, str]] = []
+    for uid in uids:
+        event_url = f"{base_url}{collection}{uid}.ics"
+        ics_text = ssh_curl_get(
+            host=host,
+            url=event_url,
+            username=username,
+            password=password,
+            remote_stack_path=remote_stack_path,
+        )
+        summary = parse_ics_field(ics_text, "SUMMARY")
+        dtstart = parse_ics_field(ics_text, "DTSTART")
+        dtend = parse_ics_field(ics_text, "DTEND")
+        description = parse_ics_field(ics_text, "DESCRIPTION")
+
+        events.append({
+            "uid": uid,
+            "summary": summary,
+            "dtstart": dtstart,
+            "dtend": dtend,
+            "description": description,
+        })
+
+    payload = {
+        "capability": "calendar.home.event.list",
+        "status": "ok",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "data": {
+            "calendar_id": args.calendar_id,
+            "provider": provider,
+            "host": host,
+            "collection": collection,
+            "event_count": len(events),
+            "events": events,
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("calendar.home.event.list")
+        print(f"provider: {provider}")
+        print(f"collection: {collection}")
+        print(f"events: {len(events)}")
+        print()
+        for ev in events:
+            print(f"  uid: {ev['uid']}")
+            print(f"  summary: {ev['summary']}")
+            print(f"  dtstart: {ev['dtstart']}")
+            print(f"  dtend: {ev['dtend']}")
+            if ev["description"]:
+                desc_short = ev["description"][:80]
+                if len(ev["description"]) > 80:
+                    desc_short += "..."
+                print(f"  description: {desc_short}")
+            print()
+        print("status: OK")
+
+
+if __name__ == "__main__":
+    main()

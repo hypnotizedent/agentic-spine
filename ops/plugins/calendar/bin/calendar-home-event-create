@@ -104,6 +104,7 @@ def main() -> None:
     parser.add_argument("--start", required=True, help="Start datetime (ISO-8601 with timezone)")
     parser.add_argument("--end", required=True, help="End datetime (ISO-8601 with timezone)")
     parser.add_argument("--description", default="", help="Event description")
+    parser.add_argument("--description-file", default=None, help="Read description from file path (bypasses shell escaping)")
     parser.add_argument("--calendar-id", default="spine", help="Local calendar collection id")
     parser.add_argument("--local-only", action="store_true", help="Write local store only (skip Radicale PUT)")
     parser.add_argument("--json", action="store_true", help="Emit JSON summary")
@@ -151,7 +152,15 @@ def main() -> None:
 
     seed = f"{args.title}|{args.start}|{args.end}|{uuid.uuid4()}"
     event_uid = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:20] + "@spine-calendar-home"
-    description = args.description.strip() or "Created via calendar.home.event.create"
+    if args.description and args.description_file:
+        fail("cannot specify both --description and --description-file")
+    if args.description_file:
+        desc_path = Path(args.description_file).expanduser()
+        if not desc_path.is_file():
+            fail(f"description file not found: {desc_path}")
+        description = desc_path.read_text(encoding="utf-8").strip() or "Created via calendar.home.event.create"
+    else:
+        description = args.description.strip() or "Created via calendar.home.event.create"
     ics_payload = event_ics(
         uid=event_uid,
         title=args.title.strip(),

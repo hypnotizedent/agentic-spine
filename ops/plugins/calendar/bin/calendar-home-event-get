@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""calendar-home-event-get - get a specific event from governed local calendar home (Radicale)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing contract: {path}")
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # pragma: no cover - runtime guard
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"YAML root must be mapping: {path}")
+    return payload
+
+
+def read_secret_var(name: str) -> str:
+    val = os.environ.get(name, "").strip()
+    if val:
+        return val
+    file_var = os.environ.get(f"{name}_FILE", "").strip()
+    if file_var:
+        try:
+            return Path(file_var).expanduser().read_text(encoding="utf-8").strip()
+        except Exception as exc:  # pragma: no cover - runtime guard
+            fail(f"unable to read secret file for {name}: {exc}")
+    return ""
+
+
+def ssh_curl_get(
+    host: str,
+    url: str,
+    username: str,
+    password: str,
+    remote_stack_path: str,
+) -> str:
+    """GET a single ICS resource from Radicale via SSH + curl. Returns body text."""
+    if username and password:
+        remote_cmd = (
+            "curl -sS -u "
+            + shlex.quote(f"{username}:{password}")
+            + " -H 'Accept: text/calendar' "
+            + shlex.quote(url)
+        )
+    else:
+        if not remote_stack_path:
+            fail(
+                "missing calendar home credentials and home.remote_stack_path unavailable for host auth fallback"
+            )
+        remote_cmd = (
+            "set -a; source "
+            + shlex.quote(f"{remote_stack_path}/.env")
+            + "; set +a; "
+            + "curl -sS -u \"$RADICALE_ADMIN_USERNAME:$RADICALE_ADMIN_PASSWORD\" "
+            + "-H 'Accept: text/calendar' "
+            + shlex.quote(url)
+        )
+
+    ssh_cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        host, remote_cmd,
+    ]
+    proc = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        fail(f"GET failed on {url}: {(proc.stderr or proc.stdout or '').strip()}")
+    return proc.stdout or ""
+
+
+def parse_ics_field(ics_text: str, field: str) -> str:
+    """Extract a single ICS field value, handling line folding."""
+    unfolded = re.sub(r"\r?\n[ \t]", "", ics_text)
+    pattern = re.compile(rf"^{re.escape(field)}[;:](.*)$", re.MULTILINE | re.IGNORECASE)
+    match = pattern.search(unfolded)
+    if not match:
+        return ""
+    raw = match.group(1)
+    if ":" in raw and not raw.startswith("http"):
+        raw = raw.rsplit(":", 1)[-1]
+    return raw.replace("\\n", "\n").replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+
+
+def main() -> None:
+    script_dir = Path(__file__).resolve().parent
+    root = Path(os.environ.get("SPINE_ROOT", str(script_dir.parents[3]))).expanduser().resolve()
+
+    parser = argparse.ArgumentParser(description="Get a specific event from governed local calendar home")
+    parser.add_argument("--uid", required=True, help="Event UID to retrieve")
+    parser.add_argument("--calendar-id", default="spine", help="Local calendar collection id")
+    parser.add_argument("--json", action="store_true", help="Emit JSON summary")
+    args = parser.parse_args()
+
+    home_contract_path = root / "ops/bindings/calendar.home.contract.yaml"
+    home = load_yaml(home_contract_path)
+
+    home_section = home.get("home") if isinstance(home.get("home"), dict) else {}
+    endpoint = home_section.get("endpoint") if isinstance(home_section.get("endpoint"), dict) else {}
+
+    provider = str(home_section.get("provider", "")).strip()
+    host = str(home_section.get("host", "")).strip()
+    remote_stack_path = str(home_section.get("remote_stack_path", "")).strip()
+
+    if provider != "communications-calendar":
+        fail(f"calendar home provider must be communications-calendar (actual={provider!r})")
+    if host != "communications-stack":
+        fail(f"calendar home host must be communications-stack (actual={host!r})")
+
+    base_url = str(endpoint.get("base_url", "")).strip().rstrip("/")
+    collection = str(endpoint.get("calendar_collection", "/spine/")).strip()
+    if not collection.startswith("/"):
+        collection = "/" + collection
+    if not collection.endswith("/"):
+        collection = collection + "/"
+
+    if not base_url:
+        fail("calendar.home.contract endpoint.base_url is required")
+
+    username = read_secret_var("CALENDAR_HOME_USERNAME") or read_secret_var("RADICALE_ADMIN_USERNAME")
+    password = read_secret_var("CALENDAR_HOME_PASSWORD") or read_secret_var("RADICALE_ADMIN_PASSWORD")
+
+    event_url = f"{base_url}{collection}{args.uid}.ics"
+    ics_text = ssh_curl_get(
+        host=host,
+        url=event_url,
+        username=username,
+        password=password,
+        remote_stack_path=remote_stack_path,
+    )
+
+    summary = parse_ics_field(ics_text, "SUMMARY")
+    dtstart = parse_ics_field(ics_text, "DTSTART")
+    dtend = parse_ics_field(ics_text, "DTEND")
+    description = parse_ics_field(ics_text, "DESCRIPTION")
+    dtstamp = parse_ics_field(ics_text, "DTSTAMP")
+    rrule = parse_ics_field(ics_text, "RRULE")
+
+    event_data = {
+        "uid": args.uid,
+        "summary": summary,
+        "dtstart": dtstart,
+        "dtend": dtend,
+        "description": description,
+        "dtstamp": dtstamp,
+        "rrule": rrule,
+        "ics_raw": ics_text,
+    }
+
+    payload = {
+        "capability": "calendar.home.event.get",
+        "status": "ok",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "data": {
+            "calendar_id": args.calendar_id,
+            "provider": provider,
+            "host": host,
+            "collection": collection,
+            "event": event_data,
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("calendar.home.event.get")
+        print(f"provider: {provider}")
+        print(f"collection: {collection}")
+        print(f"uid: {args.uid}")
+        print(f"summary: {summary}")
+        print(f"dtstart: {dtstart}")
+        print(f"dtend: {dtend}")
+        print(f"dtstamp: {dtstamp}")
+        if rrule:
+            print(f"rrule: {rrule}")
+        if description:
+            print(f"description: {description}")
+        print()
+        print("--- raw ICS ---")
+        print(ics_text)
+        print("status: OK")
+
+
+if __name__ == "__main__":
+    main()

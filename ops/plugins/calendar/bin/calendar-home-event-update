@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+"""calendar-home-event-update - update an existing event in governed local calendar home (Radicale)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing contract: {path}")
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # pragma: no cover - runtime guard
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"YAML root must be mapping: {path}")
+    return payload
+
+
+def read_secret_var(name: str) -> str:
+    val = os.environ.get(name, "").strip()
+    if val:
+        return val
+    file_var = os.environ.get(f"{name}_FILE", "").strip()
+    if file_var:
+        try:
+            return Path(file_var).expanduser().read_text(encoding="utf-8").strip()
+        except Exception as exc:  # pragma: no cover - runtime guard
+            fail(f"unable to read secret file for {name}: {exc}")
+    return ""
+
+
+def parse_iso_dt(raw: str, field: str) -> datetime:
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        fail(f"invalid {field} datetime (ISO-8601 required): {raw}")
+    if dt.tzinfo is None:
+        fail(f"{field} must include timezone offset: {raw}")
+    return dt
+
+
+def to_ics_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def escape_ics_text(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def ssh_curl_get(
+    host: str,
+    url: str,
+    username: str,
+    password: str,
+    remote_stack_path: str,
+) -> str:
+    """GET a single ICS resource from Radicale via SSH + curl."""
+    if username and password:
+        remote_cmd = (
+            "curl -sS -u "
+            + shlex.quote(f"{username}:{password}")
+            + " -H 'Accept: text/calendar' "
+            + shlex.quote(url)
+        )
+    else:
+        if not remote_stack_path:
+            fail(
+                "missing calendar home credentials and home.remote_stack_path unavailable for host auth fallback"
+            )
+        remote_cmd = (
+            "set -a; source "
+            + shlex.quote(f"{remote_stack_path}/.env")
+            + "; set +a; "
+            + "curl -sS -u \"$RADICALE_ADMIN_USERNAME:$RADICALE_ADMIN_PASSWORD\" "
+            + "-H 'Accept: text/calendar' "
+            + shlex.quote(url)
+        )
+
+    ssh_cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        host, remote_cmd,
+    ]
+    proc = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        fail(f"GET failed on {url}: {(proc.stderr or proc.stdout or '').strip()}")
+    return proc.stdout or ""
+
+
+def ssh_curl_put(
+    host: str,
+    url: str,
+    payload: str,
+    username: str,
+    password: str,
+    remote_stack_path: str,
+) -> dict[str, Any]:
+    """PUT a single ICS payload to Radicale via SSH + curl."""
+    result: dict[str, Any] = {
+        "url": url,
+        "attempted": True,
+        "ok": False,
+        "output": "",
+        "auth_source": "none",
+    }
+
+    if username and password:
+        result["auth_source"] = "env"
+        remote_cmd = (
+            "curl -fsS -u "
+            + shlex.quote(f"{username}:{password}")
+            + " -X PUT -H 'Content-Type: text/calendar; charset=utf-8' --data-binary @- "
+            + shlex.quote(url)
+            + " >/dev/null"
+        )
+    else:
+        if not remote_stack_path:
+            fail(
+                "missing calendar home credentials and home.remote_stack_path unavailable for host auth fallback"
+            )
+        result["auth_source"] = "host_env"
+        remote_cmd = (
+            "set -a; source "
+            + shlex.quote(f"{remote_stack_path}/.env")
+            + "; set +a; "
+            + "curl -fsS -u \"$RADICALE_ADMIN_USERNAME:$RADICALE_ADMIN_PASSWORD\" "
+            + "-X PUT -H 'Content-Type: text/calendar; charset=utf-8' --data-binary @- "
+            + shlex.quote(url)
+            + " >/dev/null"
+        )
+
+    ssh_cmd = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        host, remote_cmd,
+    ]
+    proc = subprocess.run(ssh_cmd, input=payload, capture_output=True, text=True, check=False)
+    result["output"] = (proc.stdout or proc.stderr or "").strip()
+    if proc.returncode != 0:
+        result["ok"] = False
+        return result
+    result["ok"] = True
+    return result
+
+
+def parse_ics_field(ics_text: str, field: str) -> str:
+    """Extract a single ICS field value, handling line folding."""
+    unfolded = re.sub(r"\r?\n[ \t]", "", ics_text)
+    pattern = re.compile(rf"^{re.escape(field)}[;:](.*)$", re.MULTILINE | re.IGNORECASE)
+    match = pattern.search(unfolded)
+    if not match:
+        return ""
+    raw = match.group(1)
+    if ":" in raw and not raw.startswith("http"):
+        raw = raw.rsplit(":", 1)[-1]
+    return raw.replace("\\n", "\n").replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+
+
+def replace_ics_field(ics_text: str, field: str, new_value: str) -> str:
+    """Replace a field value in ICS text. Handles line-folded content."""
+    unfolded = re.sub(r"\r?\n[ \t]", "", ics_text)
+    escaped = escape_ics_text(new_value)
+    pattern = re.compile(rf"^({re.escape(field)}:)(.*)$", re.MULTILINE | re.IGNORECASE)
+    match = pattern.search(unfolded)
+    if match:
+        unfolded = pattern.sub(rf"\g<1>{escaped}", unfolded, count=1)
+    return unfolded
+
+
+def replace_ics_datetime_field(ics_text: str, field: str, new_dt: datetime) -> str:
+    """Replace a datetime field in ICS text (handles both bare and TZID-parameterized forms)."""
+    unfolded = re.sub(r"\r?\n[ \t]", "", ics_text)
+    utc_str = to_ics_utc(new_dt)
+    # Match field with optional parameters (e.g., DTSTART;TZID=...)
+    pattern = re.compile(rf"^{re.escape(field)}[;:].*$", re.MULTILINE | re.IGNORECASE)
+    match = pattern.search(unfolded)
+    if match:
+        unfolded = pattern.sub(f"{field}:{utc_str}", unfolded, count=1)
+    return unfolded
+
+
+def update_dtstamp(ics_text: str) -> str:
+    """Update the DTSTAMP to current UTC time."""
+    now_utc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    unfolded = re.sub(r"\r?\n[ \t]", "", ics_text)
+    pattern = re.compile(r"^DTSTAMP:.*$", re.MULTILINE | re.IGNORECASE)
+    return pattern.sub(f"DTSTAMP:{now_utc}", unfolded)
+
+
+def main() -> None:
+    script_dir = Path(__file__).resolve().parent
+    root = Path(os.environ.get("SPINE_ROOT", str(script_dir.parents[3]))).expanduser().resolve()
+
+    parser = argparse.ArgumentParser(description="Update an existing event in governed local calendar home")
+    parser.add_argument("--uid", required=True, help="Event UID to update")
+    parser.add_argument("--title", default=None, help="New event title (SUMMARY)")
+    parser.add_argument("--start", default=None, help="New start datetime (ISO-8601 with timezone)")
+    parser.add_argument("--end", default=None, help="New end datetime (ISO-8601 with timezone)")
+    parser.add_argument("--description", default=None, help="New event description")
+    parser.add_argument("--description-file", default=None, help="Read description from file path")
+    parser.add_argument("--calendar-id", default="spine", help="Local calendar collection id")
+    parser.add_argument("--json", action="store_true", help="Emit JSON summary")
+    args = parser.parse_args()
+
+    if args.description is not None and args.description_file is not None:
+        fail("cannot specify both --description and --description-file")
+
+    description_value = args.description
+    if args.description_file is not None:
+        desc_path = Path(args.description_file).expanduser()
+        if not desc_path.is_file():
+            fail(f"description file not found: {desc_path}")
+        description_value = desc_path.read_text(encoding="utf-8")
+
+    if all(v is None for v in [args.title, args.start, args.end, description_value]):
+        fail("at least one field to update is required (--title, --start, --end, --description, --description-file)")
+
+    home_contract_path = root / "ops/bindings/calendar.home.contract.yaml"
+    sync_contract_path = root / "ops/bindings/calendar.sync.contract.yaml"
+
+    home = load_yaml(home_contract_path)
+    sync = load_yaml(sync_contract_path)
+
+    home_section = home.get("home") if isinstance(home.get("home"), dict) else {}
+    endpoint = home_section.get("endpoint") if isinstance(home_section.get("endpoint"), dict) else {}
+
+    provider = str(home_section.get("provider", "")).strip()
+    host = str(home_section.get("host", "")).strip()
+    remote_stack_path = str(home_section.get("remote_stack_path", "")).strip()
+
+    if provider != "communications-calendar":
+        fail(f"calendar home provider must be communications-calendar (actual={provider!r})")
+    if host != "communications-stack":
+        fail(f"calendar home host must be communications-stack (actual={host!r})")
+
+    sync_push_caps = (
+        sync.get("sync_contracts", {}).get("push_write_capabilities", [])
+        if isinstance(sync.get("sync_contracts"), dict)
+        else []
+    )
+    if not isinstance(sync_push_caps, list) or sync_push_caps:
+        fail(f"calendar sync push_write_capabilities must remain empty (actual={sync_push_caps!r})")
+
+    base_url = str(endpoint.get("base_url", "")).strip().rstrip("/")
+    collection = str(endpoint.get("calendar_collection", "/spine/")).strip()
+    if not collection.startswith("/"):
+        collection = "/" + collection
+    if not collection.endswith("/"):
+        collection = collection + "/"
+
+    if not base_url:
+        fail("calendar.home.contract endpoint.base_url is required")
+
+    username = read_secret_var("CALENDAR_HOME_USERNAME") or read_secret_var("RADICALE_ADMIN_USERNAME")
+    password = read_secret_var("CALENDAR_HOME_PASSWORD") or read_secret_var("RADICALE_ADMIN_PASSWORD")
+
+    event_url = f"{base_url}{collection}{args.uid}.ics"
+
+    # GET existing event
+    ics_text = ssh_curl_get(
+        host=host,
+        url=event_url,
+        username=username,
+        password=password,
+        remote_stack_path=remote_stack_path,
+    )
+
+    if not ics_text.strip():
+        fail(f"event not found or empty response for UID: {args.uid}")
+
+    # Apply merge-patch: only override provided fields
+    updated_ics = ics_text
+    fields_changed: list[str] = []
+
+    if args.title is not None:
+        updated_ics = replace_ics_field(updated_ics, "SUMMARY", args.title.strip())
+        fields_changed.append("title")
+
+    if args.start is not None:
+        start_dt = parse_iso_dt(args.start, "start")
+        updated_ics = replace_ics_datetime_field(updated_ics, "DTSTART", start_dt)
+        fields_changed.append("start")
+
+    if args.end is not None:
+        end_dt = parse_iso_dt(args.end, "end")
+        updated_ics = replace_ics_datetime_field(updated_ics, "DTEND", end_dt)
+        fields_changed.append("end")
+
+    if description_value is not None:
+        updated_ics = replace_ics_field(updated_ics, "DESCRIPTION", description_value.strip())
+        fields_changed.append("description")
+
+    # Update DTSTAMP to reflect modification time
+    updated_ics = update_dtstamp(updated_ics)
+
+    # Ensure proper line endings
+    if "\r\n" not in updated_ics:
+        updated_ics = updated_ics.replace("\n", "\r\n")
+    if not updated_ics.endswith("\r\n"):
+        updated_ics += "\r\n"
+
+    # PUT back
+    put_result = ssh_curl_put(
+        host=host,
+        url=event_url,
+        payload=updated_ics,
+        username=username,
+        password=password,
+        remote_stack_path=remote_stack_path,
+    )
+
+    if not put_result["ok"]:
+        fail(f"remote calendar update failed: {put_result['output'] or 'curl returned non-zero'}")
+
+    # Update local store copy if it exists
+    local_store_rel = str(
+        sync.get("local_calendar_store", {}).get("path", "mailroom/state/calendar-sync/writable")
+    ).strip()
+    local_store_root = (root / local_store_rel).resolve()
+    local_events_dir = local_store_root / "events"
+    local_updated = False
+    if local_events_dir.is_dir():
+        for ics_file in local_events_dir.glob(f"*{args.uid}*.ics"):
+            ics_file.write_text(updated_ics, encoding="utf-8")
+            local_updated = True
+
+    payload = {
+        "capability": "calendar.home.event.update",
+        "status": "ok",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "data": {
+            "uid": args.uid,
+            "calendar_id": args.calendar_id,
+            "provider": provider,
+            "host": host,
+            "fields_changed": fields_changed,
+            "remote_put": put_result,
+            "local_store_updated": local_updated,
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("calendar.home.event.update")
+        print(f"provider: {provider}")
+        print(f"uid: {args.uid}")
+        print(f"fields_changed: {', '.join(fields_changed)}")
+        print(f"remote_put_ok: {str(put_result['ok']).lower()}")
+        print(f"remote_auth_source: {put_result['auth_source']}")
+        print(f"local_store_updated: {str(local_updated).lower()}")
+        print("status: OK")
+
+
+if __name__ == "__main__":
+    main()
