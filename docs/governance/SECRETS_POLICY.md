@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-17
+last_verified: 2026-02-24
 scope: secrets-management
 github_issue: "#541"
 ---
@@ -21,8 +21,8 @@ github_issue: "#541"
    but never secret values. See `docs/core/SECRETS_BINDING.md`.
 4. **Namespace under `/spine/*`.** New infrastructure secrets must be created under
    `/spine/*` secret paths (not root `/`) to avoid legacy collision.
-5. **Freeze root-path debt.** Root-path (`/`) legacy keys are frozen by policy;
-   adding new root keys is a regression until migration completes.
+5. **Hard-zero root path.** Root-path (`/`) keys are not allowed in infrastructure/prod.
+   All governed keys must resolve to `/spine/*` namespace routes.
 
 ---
 
@@ -51,7 +51,7 @@ Use bundle-based rotation so agents never guess project names/paths.
 
 # Apply new bundle values from clipboard JSON and sync local finance .env
 # Clipboard JSON format:
-# {"FIREFLY_PAT":"...","PAPERLESS_API_TOKEN":"..."}
+# {"FIREFLY_ACCESS_TOKEN":"...","PAPERLESS_API_TOKEN":"..."}
 echo "yes" | ./bin/ops cap run secrets.bundle.apply finance --clipboard --sync-local-env
 
 # Enforce fail if deprecated-project shadow keys still exist
@@ -106,6 +106,7 @@ surfaces/verify/check-secret-expiry.sh
 |----------|-------------|
 | [SECRETS_BINDING.md](../core/SECRETS_BINDING.md) | Non-secret binding metadata |
 | [INFISICAL_PROJECTS.md](../core/INFISICAL_PROJECTS.md) | Project inventory |
-| `ops/bindings/secrets.namespace.policy.yaml` | Namespace policy + root freeze snapshot |
+| `ops/bindings/secrets.namespace.policy.yaml` | Namespace policy + hard-zero root lock |
+| `ops/bindings/secrets.enforcement.contract.yaml` | Strict enforcement toggles + deprecated alias contract |
 | `ops/staged/SECRETS_NAMESPACE_MIGRATION_MAP.md` | Phased migration plan for GAP-OP-013 |
 | [GOVERNANCE_INDEX.md](GOVERNANCE_INDEX.md) | Governance entry point |

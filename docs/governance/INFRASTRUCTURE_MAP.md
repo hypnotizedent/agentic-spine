@@ -1026,7 +1026,7 @@ interface UnifiedProduct {
 ### Auth (Infisical)
 - **mint-os-api/prod:** `FIREFLY_III_BASE_URL`, `FIREFLY_III_PAT`, `FIREFLY_DEFAULT_SOURCE_ACCOUNT`
 - **finance-stack/prod:** `FIREFLY_API_URL`, `FIREFLY_ACCESS_TOKEN`
-- **infrastructure/prod:** `FIREFLY_PAT` (source for mint-os-api PAT)
+- **infrastructure/prod:** `FIREFLY_ACCESS_TOKEN` (canonical finance token route at `/spine/services/finance`)
 
 ### Sync Directions
 - **Firefly → Mint OS:** Webhook → n8n → `expenses` table (finance runbook)

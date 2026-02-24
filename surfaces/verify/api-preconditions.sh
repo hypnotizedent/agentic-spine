@@ -30,6 +30,23 @@ for cap in "${api_caps[@]}"; do
   fi
 done
 
+# High-risk secrets capabilities MUST also enforce namespace + enforcement prechecks.
+HIGH_RISK_SECRETS_CAPS=(
+  "secrets.exec"
+  "secrets.set.interactive"
+  "secrets.bundle.verify"
+  "secrets.bundle.apply"
+)
+
+for cap in "${HIGH_RISK_SECRETS_CAPS[@]}"; do
+  reqs="$(yq e -N ".capabilities.\"$cap\".requires[]? // \"\"" "$CAP_FILE" | tr '\n' ' ')"
+  if [[ "$reqs" != *"secrets.namespace.status"* ]] || [[ "$reqs" != *"secrets.enforcement.status"* ]]; then
+    echo "FAIL: $cap missing strict secrets preconditions: secrets.namespace.status + secrets.enforcement.status"
+    echo "  requires: ${reqs:-<none>}"
+    fails=1
+  fi
+done
+
 if [[ "$fails" -ne 0 ]]; then
   echo "STOP: API preconditions rule violated"
   exit 1

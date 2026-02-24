@@ -19,6 +19,7 @@ SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 SECRETS_BINDING="${SPINE_REPO}/ops/bindings/secrets.binding.yaml"
 SECRETS_NAMESPACE_POLICY="${SPINE_REPO}/ops/bindings/secrets.namespace.policy.yaml"
 SECRETS_INVENTORY="${SPINE_REPO}/ops/bindings/secrets.inventory.yaml"
+SECRETS_ENFORCEMENT_CONTRACT="${SPINE_REPO}/ops/bindings/secrets.enforcement.contract.yaml"
 
 # Prefer internal_api_url from binding (bypasses Authentik forward auth),
 # fall back to env var, then public URL.
@@ -120,6 +121,98 @@ log_success() { echo -e "${GREEN}✓${NC} $1"; }
 log_error() { echo -e "${RED}✗${NC} $1" >&2; }
 log_info() { echo -e "${YELLOW}→${NC} $1"; }
 
+UNREGISTERED_SECRET_PATH="__UNREGISTERED__"
+
+enforcement_contract_value() {
+  local expr="$1"
+  local fallback="${2:-}"
+  if [[ -f "$SECRETS_ENFORCEMENT_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+    local value
+    value="$(yq e -r "${expr} // \"\"" "$SECRETS_ENFORCEMENT_CONTRACT" 2>/dev/null || true)"
+    if [[ -n "$value" && "$value" != "null" ]]; then
+      echo "$value"
+      return 0
+    fi
+  fi
+  echo "$fallback"
+}
+
+enforcement_bool() {
+  local expr="$1"
+  local fallback="${2:-false}"
+  local value
+  value="$(enforcement_contract_value "$expr" "$fallback")"
+  if [[ "$value" == "true" ]]; then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
+strict_unknown_infrastructure_keys_allowed() {
+  enforcement_bool '.enforcement.unknown_infrastructure_keys_allowed' 'false'
+}
+
+strict_root_path_allowed() {
+  enforcement_bool '.enforcement.root_path_allowed' 'false'
+}
+
+break_glass_env_var() {
+  enforcement_contract_value '.break_glass.env_var' 'SPINE_SECRETS_BREAK_GLASS'
+}
+
+break_glass_required_value() {
+  enforcement_contract_value '.break_glass.required_value' '1'
+}
+
+break_glass_reason_env_var() {
+  enforcement_contract_value '.break_glass.reason_required_env_var' 'SPINE_SECRETS_BREAK_GLASS_REASON'
+}
+
+is_break_glass_enabled() {
+  local env_var required current reason_var reason
+  env_var="$(break_glass_env_var)"
+  required="$(break_glass_required_value)"
+  reason_var="$(break_glass_reason_env_var)"
+  current="${!env_var:-}"
+  reason="${!reason_var:-}"
+  if [[ "$current" == "$required" ]]; then
+    if [[ -n "$reason" ]]; then
+      echo "TELEMETRY: secrets_break_glass=1 reason=${reason}" >&2
+    else
+      echo "TELEMETRY: secrets_break_glass=1 reason=unspecified" >&2
+    fi
+    return 0
+  fi
+  return 1
+}
+
+lookup_policy_path_for_key() {
+  local key="${1:-}"
+  [[ -n "$key" ]] || { echo ""; return 0; }
+  if [[ ! -f "$SECRETS_NAMESPACE_POLICY" ]] || ! command -v yq >/dev/null 2>&1; then
+    echo ""
+    return 0
+  fi
+  local resolved
+  resolved="$(yq e -r ".rules.required_key_paths.${key} // \"\"" "$SECRETS_NAMESPACE_POLICY" 2>/dev/null || true)"
+  if [[ -n "$resolved" && "$resolved" != "null" ]]; then
+    echo "$resolved"
+    return 0
+  fi
+  resolved="$(yq e -r ".rules.key_path_overrides.${key} // \"\"" "$SECRETS_NAMESPACE_POLICY" 2>/dev/null || true)"
+  if [[ -n "$resolved" && "$resolved" != "null" ]]; then
+    echo "$resolved"
+    return 0
+  fi
+  resolved="$(yq e -r ".rules.planned_key_paths.${key} // \"\"" "$SECRETS_NAMESPACE_POLICY" 2>/dev/null || true)"
+  if [[ -n "$resolved" && "$resolved" != "null" ]]; then
+    echo "$resolved"
+    return 0
+  fi
+  echo ""
+}
+
 # ═══════════════════════════════════════════════════════════════
 # CACHE FUNCTIONS
 # ═══════════════════════════════════════════════════════════════
@@ -137,7 +230,7 @@ get_cache_path() {
 }
 
 # Resolve canonical path for key operations.
-# Falls back to "/" when no namespace policy applies.
+# For infrastructure/prod, unknown keys fail closed unless break-glass is active.
 resolve_secret_path() {
   local project="${1:-}"
   local env="${2:-}"
@@ -150,16 +243,53 @@ resolve_secret_path() {
   fi
 
   if [[ ! -f "$SECRETS_NAMESPACE_POLICY" ]] || ! command -v yq >/dev/null 2>&1; then
-    echo "/"
+    if [[ "$(strict_unknown_infrastructure_keys_allowed)" == "true" ]] || is_break_glass_enabled; then
+      echo "/"
+      return 0
+    fi
+    echo "$UNREGISTERED_SECRET_PATH"
     return 0
   fi
 
   local resolved
-  resolved="$(yq e -r ".rules.key_path_overrides.${key} // \"\"" "$SECRETS_NAMESPACE_POLICY" 2>/dev/null || true)"
+  resolved="$(lookup_policy_path_for_key "$key")"
   if [[ -n "$resolved" && "$resolved" != "null" ]]; then
     echo "$resolved"
-  else
+  elif [[ "$(strict_unknown_infrastructure_keys_allowed)" == "true" ]] || is_break_glass_enabled; then
     echo "/"
+  else
+    echo "$UNREGISTERED_SECRET_PATH"
+  fi
+}
+
+guard_registered_secret_path() {
+  local project="${1:-}"
+  local env="${2:-}"
+  local key="${3:-}"
+  local secret_path="${4:-}"
+
+  if [[ "$project" != "infrastructure" || "$env" != "prod" ]]; then
+    return 0
+  fi
+
+  if [[ "$secret_path" == "$UNREGISTERED_SECRET_PATH" || -z "$secret_path" ]]; then
+    if is_break_glass_enabled; then
+      log_info "BREAK_GLASS: unresolved route allowed for key '$key' in $project/$env"
+      return 0
+    fi
+    log_error "STOP: unregistered key route for '$key' in infrastructure/prod."
+    log_info "Add policy route in ops/bindings/secrets.namespace.policy.yaml under rules.key_path_overrides."
+    exit 1
+  fi
+
+  if [[ "$secret_path" == "/" && "$(strict_root_path_allowed)" != "true" ]]; then
+    if is_break_glass_enabled; then
+      log_info "BREAK_GLASS: root route allowed for key '$key' in $project/$env"
+      return 0
+    fi
+    log_error "STOP: root path '/' is blocked for infrastructure/prod key '$key'."
+    log_info "Create a /spine/* route in rules.key_path_overrides."
+    exit 1
   fi
 }
 
@@ -328,6 +458,7 @@ infisical_get_secret() {
   project_id=$(get_project_id "$project")
   local secret_path
   secret_path=$(resolve_secret_path "$project" "$env" "$key")
+  guard_registered_secret_path "$project" "$env" "$key" "$secret_path"
   local encoded_path
   encoded_path=$(urlencode "$secret_path")
 
@@ -357,6 +488,7 @@ infisical_get_secret_cached() {
   local cache_file
   local secret_path
   secret_path=$(resolve_secret_path "$project" "$env" "$key")
+  guard_registered_secret_path "$project" "$env" "$key" "$secret_path"
   cache_file=$(get_cache_path "$project" "$env" "$key" "$secret_path")
 
   # Check if we should use cache
@@ -444,6 +576,7 @@ infisical_set_secret() {
   project_id=$(get_project_id "$project")
   local secret_path
   secret_path=$(resolve_secret_path "$project" "$env" "$key")
+  guard_registered_secret_path "$project" "$env" "$key" "$secret_path"
 
   local token
   token=$(infisical_auth)
@@ -493,6 +626,7 @@ infisical_delete_secret() {
   project_id=$(get_project_id "$project")
   local secret_path
   secret_path=$(resolve_secret_path "$project" "$env" "$key")
+  guard_registered_secret_path "$project" "$env" "$key" "$secret_path"
 
   local token
   token=$(infisical_auth)

@@ -5,8 +5,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 POLICY="$ROOT/ops/bindings/secrets.namespace.policy.yaml"
+ENFORCEMENT_CONTRACT="$ROOT/ops/bindings/secrets.enforcement.contract.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
 PLUGIN="$ROOT/ops/plugins/secrets/bin/secrets-namespace-status"
+ENFORCEMENT_PLUGIN="$ROOT/ops/plugins/secrets/bin/secrets-enforcement-status"
 COPY_PLUGIN="$ROOT/ops/plugins/secrets/bin/secrets-cohort-copy-first"
 
 fail() { echo "D43 FAIL: $*" >&2; exit 1; }
@@ -16,12 +18,15 @@ command -v rg >/dev/null 2>&1 || fail "required tool missing: rg"
 
 [[ -f "$POLICY" ]] || fail "missing policy: ops/bindings/secrets.namespace.policy.yaml"
 yq e '.' "$POLICY" >/dev/null 2>&1 || fail "invalid YAML: ops/bindings/secrets.namespace.policy.yaml"
+[[ -f "$ENFORCEMENT_CONTRACT" ]] || fail "missing contract: ops/bindings/secrets.enforcement.contract.yaml"
+yq e '.' "$ENFORCEMENT_CONTRACT" >/dev/null 2>&1 || fail "invalid YAML: ops/bindings/secrets.enforcement.contract.yaml"
 
 for field in \
   '.version' \
   '.infisical.project_id' \
   '.infisical.environment' \
   '.namespace.canonical_base_path' \
+  '.freeze.mode' \
   '.freeze.root_path' \
   '.rules.required_key_paths.AUTHENTIK_SECRET_KEY' \
   '.rules.required_key_paths.AUTHENTIK_DB_PASSWORD' \
@@ -32,19 +37,28 @@ done
 
 freeze_count="$(yq e '.freeze.allowed_root_keys | length' "$POLICY" 2>/dev/null || echo 0)"
 [[ "$freeze_count" =~ ^[0-9]+$ ]] || fail "policy freeze list length is invalid"
-(( freeze_count >= 1 )) || fail "policy freeze list is empty"
+root_mode="$(yq e -r '.freeze.mode // ""' "$POLICY" 2>/dev/null || true)"
+[[ "$root_mode" == "hard_zero" || "$root_mode" == "legacy_freeze" ]] || fail "policy freeze.mode must be hard_zero|legacy_freeze"
+if [[ "$root_mode" == "hard_zero" ]]; then
+  (( freeze_count == 0 )) || fail "policy hard_zero mode requires freeze.allowed_root_keys to be empty"
+fi
 
 forbid_count="$(yq e '.rules.forbidden_root_keys | length' "$POLICY" 2>/dev/null || echo 0)"
 [[ "$forbid_count" =~ ^[0-9]+$ ]] || fail "policy forbidden_root_keys length is invalid"
 (( forbid_count >= 1 )) || fail "policy forbidden_root_keys is empty"
 
 [[ -x "$PLUGIN" ]] || fail "missing executable plugin: ops/plugins/secrets/bin/secrets-namespace-status"
+[[ -x "$ENFORCEMENT_PLUGIN" ]] || fail "missing executable plugin: ops/plugins/secrets/bin/secrets-enforcement-status"
 [[ -x "$COPY_PLUGIN" ]] || fail "missing executable plugin: ops/plugins/secrets/bin/secrets-cohort-copy-first"
 
 rg -n '^\s*secrets\.namespace\.status:' "$CAPS" >/dev/null 2>&1 \
   || fail "capability missing: secrets.namespace.status"
 rg -n 'secrets-namespace-status' "$CAPS" >/dev/null 2>&1 \
   || fail "capability command missing: secrets-namespace-status"
+rg -n '^\s*secrets\.enforcement\.status:' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability missing: secrets.enforcement.status"
+rg -n 'secrets-enforcement-status' "$CAPS" >/dev/null 2>&1 \
+  || fail "capability command missing: secrets-enforcement-status"
 rg -n '^\s*secrets\.p1\.root_cleanup\.status:' "$CAPS" >/dev/null 2>&1 \
   || fail "capability missing: secrets.p1.root_cleanup.status"
 rg -n '^\s*secrets\.p1\.root_cleanup\.execute:' "$CAPS" >/dev/null 2>&1 \

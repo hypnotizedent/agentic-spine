@@ -153,7 +153,7 @@ become data, not just prose.
     firefly:
       host: "100.76.153.100"
       port: 8080
-      auth: infisical/finance/prod/FIREFLY_PAT
+      auth: infisical/infrastructure/prod/spine/services/finance/FIREFLY_ACCESS_TOKEN
     paperless:
       host: "100.76.153.100"
       port: 8000
