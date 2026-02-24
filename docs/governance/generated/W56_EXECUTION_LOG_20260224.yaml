@@ -1,0 +1,77 @@
+task_id: W56
+date: "2026-02-24"
+phase: 2-live-cutover
+branch: codex/w56-mintprints-cutover-20260224
+cutover_timestamp_utc: "2026-02-24T18:55:00Z"
+
+tunnel_ingress_mutations:
+  - hostname: mintprints.com
+    service: "http://quote-page:3341"
+    action: added
+    run_key: CAP-20260224-135432__cloudflare.tunnel.ingress.set__Rt1mn2541
+    result: OK
+    rule_count_after: 42
+
+  - hostname: www.mintprints.com
+    service: "http://quote-page:3341"
+    action: added
+    run_key: CAP-20260224-135445__cloudflare.tunnel.ingress.set__Rgckt5170
+    result: OK
+    rule_count_after: 43
+
+dns_mutations:
+  - record: mintprints.com
+    before:
+      type: A
+      content: "23.227.38.66"
+      proxied: true
+      record_id: "5af9fb3873d60b15e3b796e0d8bac73d"
+    after:
+      type: CNAME
+      content: "ae7d4462-cfb2-4919-802e-41c01742a9eb.cfargotunnel.com"
+      proxied: true
+      record_id: "af60086cd880b85be0e6a139701c9e9f"
+    method: "DELETE old A record + POST new CNAME (type change not supported via PUT)"
+    run_key_create: CAP-20260224-135554__cloudflare.dns.record.set__R05j811812
+
+  - record: www.mintprints.com
+    before:
+      type: CNAME
+      content: "shops.myshopify.com"
+      proxied: true
+      record_id: "52d77b8aaaed062f517405d13f196c30"
+    after:
+      type: CNAME
+      content: "mintprints.com"
+      proxied: true
+      record_id: "52d77b8aaaed062f517405d13f196c30"
+    method: "PUT update (same type, content changed)"
+    run_key: CAP-20260224-135607__cloudflare.dns.record.set__Rzslb13370
+
+forbidden_records_untouched:
+  MX: "mintprints-com.mail.protection.outlook.com"
+  SPF: "v=spf1 include:spf.protection.outlook.com -all"
+  DKIM_selector1: "selector1-mintprints-com._domainkey.mintprints.k-v1.dkim.mail.microsoft"
+  DKIM_selector2: "selector2-mintprints-com._domainkey.mintprints.k-v1.dkim.mail.microsoft"
+  DKIM_default: "v=DKIM1; k=rsa; p=MIIBIjAN..."
+  DMARC: "v=DMARC1; p=none;"
+  autodiscover: "autodiscover.outlook.com (proxied=false)"
+
+rollback_values:
+  apex:
+    type: A
+    content: "23.227.38.66"
+    proxied: true
+  www:
+    type: CNAME
+    content: "shops.myshopify.com"
+    proxied: true
+
+verification:
+  dns_propagation:
+    google_8_8_8_8: "104.21.20.177, 172.67.193.70 (Cloudflare edge — CORRECT)"
+    cloudflare_1_1_1_1: "23.227.38.66 (cached — stale, will expire)"
+  http_via_edge:
+    apex: "301 -> /quote (Express/quote-page via tunnel — CORRECT)"
+    www: "301 -> /quote (Express/quote-page via tunnel — CORRECT)"
+    customer: "301 -> /quote (unchanged, healthy)"
