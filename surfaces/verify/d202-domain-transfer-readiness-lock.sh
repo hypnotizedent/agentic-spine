@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Domain transfer readiness: domains marked transfer_ready must have Cloudflare nameservers active in registrar snapshot.
+# TRIAGE: Domain transfer readiness: domains marked transfer_ready must have Cloudflare nameservers (from registrar snapshot or portfolio).
 # D202: Domain transfer readiness lock
 set -euo pipefail
 
@@ -33,12 +33,23 @@ if [[ ! -f "$SNAPSHOT" ]]; then
   exit 0
 fi
 
+# Helper: get effective nameservers JSON for a domain.
+# Uses Namecheap snapshot for namecheap-registered domains, portfolio for others.
+get_effective_ns() {
+  local domain="$1"
+  local registrar
+  registrar=$(yq e ".domains[] | select(.domain == \"$domain\") | .registrar" "$PORTFOLIO_FILE" 2>/dev/null)
+  if [[ "$registrar" == "namecheap" ]]; then
+    jq -r --arg d "$domain" '.domains[] | select(.domain == $d) | .nameservers // []' "$SNAPSHOT" 2>/dev/null
+  else
+    # Domain not at Namecheap — use portfolio nameservers as effective source
+    yq e -o=json ".domains[] | select(.domain == \"$domain\") | .nameservers // []" "$PORTFOLIO_FILE" 2>/dev/null
+  fi
+}
+
 checks=0
 
-# --- Check 1: Domains with transfer_ready=false must NOT have Cloudflare NS ---
-# (This is informational — the real guard is Check 2)
-
-# --- Check 2: No domain may be marked transfer_ready=true unless current NS are Cloudflare ---
+# --- Check 1: No domain may be marked transfer_ready=true unless effective NS are Cloudflare ---
 checks=$((checks + 1))
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
@@ -47,12 +58,10 @@ while IFS= read -r line; do
 
   [[ -z "$domain" || "$domain" == "null" ]] && continue
 
-  # Only check domains marked transfer_ready: true
   if [[ "$transfer_ready" == "true" ]]; then
-    # Verify nameservers in snapshot are Cloudflare
-    ns_json=$(jq -r --arg d "$domain" '.domains[] | select(.domain == $d) | .nameservers // []' "$SNAPSHOT" 2>/dev/null)
+    ns_json=$(get_effective_ns "$domain")
     if [[ -z "$ns_json" || "$ns_json" == "[]" || "$ns_json" == "null" ]]; then
-      fail_v "$domain marked transfer_ready=true but no nameservers in snapshot"
+      fail_v "$domain marked transfer_ready=true but no nameservers found"
       continue
     fi
     # Check each nameserver contains cloudflare
@@ -63,7 +72,7 @@ while IFS= read -r line; do
   fi
 done < <(yq e '.domains[] | .domain + "|" + (.transfer_ready // "null" | tostring)' "$PORTFOLIO_FILE" 2>/dev/null)
 
-# --- Check 3: Domains with transfer_ready=false must have non-CF NS (consistency) ---
+# --- Check 2: Domains with transfer_ready=false must have non-CF effective NS (consistency) ---
 checks=$((checks + 1))
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
@@ -73,9 +82,9 @@ while IFS= read -r line; do
   [[ -z "$domain" || "$domain" == "null" ]] && continue
 
   if [[ "$transfer_ready" == "false" ]]; then
-    ns_json=$(jq -r --arg d "$domain" '.domains[] | select(.domain == $d) | .nameservers // []' "$SNAPSHOT" 2>/dev/null)
+    ns_json=$(get_effective_ns "$domain")
     if [[ -z "$ns_json" || "$ns_json" == "[]" || "$ns_json" == "null" ]]; then
-      continue  # No snapshot data, skip
+      continue  # No NS data, skip
     fi
     # All NS should be non-Cloudflare if transfer_ready=false
     all_cf=$(echo "$ns_json" | jq -r '[.[] | test("cloudflare")] | all' 2>/dev/null)

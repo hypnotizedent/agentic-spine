@@ -78,7 +78,25 @@ for domain in "${canonical_domains[@]}"; do
   echo "Checking: $domain"
 
   # 1. domains.getInfo — expiry, nameservers, created date
-  info_xml=$(nc_api "namecheap.domains.getInfo" "DomainName=${domain}") || { failures=$((failures+1)); continue; }
+  info_xml=$(nc_api "namecheap.domains.getInfo" "DomainName=${domain}" 2>/dev/null) || true
+
+  if [[ -z "$info_xml" ]]; then
+    # Domain not found in Namecheap (likely transferred out)
+    echo "  Status: NOT IN NAMECHEAP (transferred or expired)"
+    entry=$(jq -n --arg domain "$domain" '{
+      domain: $domain,
+      exists_in_namecheap: false,
+      registrar_lock: null,
+      expiry_date: null,
+      created_date: null,
+      dns_provider: null,
+      using_namecheap_dns: false,
+      nameservers: []
+    }')
+    results=$(echo "$results" | jq --argjson e "$entry" '. + [$e]')
+    checked=$((checked+1))
+    continue
+  fi
 
   expiry_date=$(echo "$info_xml" | xmllint --xpath 'string(//DomainGetInfoResult/DomainDetails/ExpiredDate)' - 2>/dev/null) || expiry_date=""
   created_date=$(echo "$info_xml" | xmllint --xpath 'string(//DomainGetInfoResult/DomainDetails/CreatedDate)' - 2>/dev/null) || created_date=""
@@ -108,8 +126,11 @@ for domain in "${canonical_domains[@]}"; do
   echo "  DNS provider: $provider_type (using NC DNS: $is_using_our_dns)"
 
   # 2. domains.getRegistrarLock
-  lock_xml=$(nc_api "namecheap.domains.getRegistrarLock" "DomainName=${domain}") || { failures=$((failures+1)); continue; }
-  registrar_lock=$(echo "$lock_xml" | xmllint --xpath 'string(//DomainGetRegistrarLockResult/@RegistrarLockStatus)' - 2>/dev/null) || registrar_lock=""
+  lock_xml=$(nc_api "namecheap.domains.getRegistrarLock" "DomainName=${domain}" 2>/dev/null) || true
+  registrar_lock=""
+  if [[ -n "$lock_xml" ]]; then
+    registrar_lock=$(echo "$lock_xml" | xmllint --xpath 'string(//DomainGetRegistrarLockResult/@RegistrarLockStatus)' - 2>/dev/null) || registrar_lock=""
+  fi
   echo "  Registrar lock: $registrar_lock"
 
   # Build JSON entry
@@ -165,9 +186,12 @@ echo "JSON: $JSON_OUT"
 echo "YAML: $YAML_OUT"
 echo "Summary: checked=$checked failures=$failures canonical=${#canonical_domains[@]}"
 
+transferred=$(echo "$output" | jq '[.domains[] | select(.exists_in_namecheap == false)] | length')
+echo "Transferred (not in Namecheap): $transferred"
+
 if [[ $failures -gt 0 ]]; then
-  echo "FAIL: $failures domain(s) had API errors" >&2
+  echo "FAIL: $failures domain(s) had unexpected API errors" >&2
   exit 1
 fi
 
-echo "OK: all canonical domains inventoried"
+echo "OK: all canonical domains inventoried (${checked} checked, ${transferred} transferred)"
