@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# namecheap-domains-status — read-only registrar inventory for canonical domains
+# Calls Namecheap API (getList, getInfo, getRegistrarLock) and
+# writes normalized snapshot to mailroom/outbox/domains/.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+AGENT="$ROOT/ops/tools/infisical-agent.sh"
+ROOTS_FILE="$ROOT/ops/bindings/domain.canonical.roots.yaml"
+OUTBOX="$ROOT/mailroom/outbox/domains"
+JSON_OUT="$OUTBOX/namecheap-domains-status.json"
+YAML_OUT="$OUTBOX/namecheap-domains-status.yaml"
+
+need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "FAIL: missing command: $1" >&2; exit 1; }; }
+need_cmd yq
+need_cmd jq
+need_cmd curl
+need_cmd xmllint
+
+# ── Load secrets ──────────────────────────────────────────────────────────
+NC_API_USER=$("$AGENT" get infrastructure prod NAMECHEAP_API_USER 2>/dev/null) || { echo "FAIL: NAMECHEAP_API_USER not available" >&2; exit 1; }
+NC_API_KEY=$("$AGENT" get infrastructure prod NAMECHEAP_API_KEY 2>/dev/null) || { echo "FAIL: NAMECHEAP_API_KEY not available" >&2; exit 1; }
+NC_USERNAME=$("$AGENT" get infrastructure prod NAMECHEAP_USERNAME 2>/dev/null) || { echo "FAIL: NAMECHEAP_USERNAME not available" >&2; exit 1; }
+NC_CLIENT_IP=$("$AGENT" get infrastructure prod NAMECHEAP_CLIENT_IP 2>/dev/null) || { echo "FAIL: NAMECHEAP_CLIENT_IP not available" >&2; exit 1; }
+
+for v in NC_API_USER NC_API_KEY NC_USERNAME NC_CLIENT_IP; do
+  eval "val=\$$v"
+  [[ -n "$val" ]] || { echo "FAIL: $v is empty" >&2; exit 1; }
+done
+
+NC_ENDPOINT="https://api.namecheap.com/xml.response"
+
+# ── Load canonical roots ──────────────────────────────────────────────────
+[[ -f "$ROOTS_FILE" ]] || { echo "FAIL: canonical roots missing: $ROOTS_FILE" >&2; exit 1; }
+
+canonical_domains=()
+while IFS= read -r d; do
+  [[ -z "$d" || "$d" == "null" ]] && continue
+  canonical_domains+=("$d")
+done < <(yq e '.roots[].domain' "$ROOTS_FILE" 2>/dev/null)
+
+[[ ${#canonical_domains[@]} -gt 0 ]] || { echo "FAIL: no canonical domains found" >&2; exit 1; }
+echo "Canonical domains: ${canonical_domains[*]}"
+
+# ── Helper: call Namecheap API and strip XML namespace ────────────────────
+nc_api() {
+  local command="$1"
+  shift
+  local url="${NC_ENDPOINT}?ApiUser=${NC_API_USER}&ApiKey=${NC_API_KEY}&UserName=${NC_USERNAME}&ClientIp=${NC_CLIENT_IP}&Command=${command}"
+  for param in "$@"; do
+    url="${url}&${param}"
+  done
+  local response
+  response=$(curl -s --max-time 30 "$url") || { echo "FAIL: API call failed for $command" >&2; return 1; }
+
+  # Strip XML namespace to make XPath queries work
+  response=$(echo "$response" | sed 's/ xmlns="[^"]*"//g')
+
+  # Check for API errors
+  local status
+  status=$(echo "$response" | xmllint --xpath 'string(/*/@Status)' - 2>/dev/null) || status=""
+  if [[ "$status" == "ERROR" ]]; then
+    local err_msg
+    err_msg=$(echo "$response" | xmllint --xpath 'string(//Errors/Error)' - 2>/dev/null) || err_msg="unknown"
+    echo "FAIL: Namecheap API error ($command): $err_msg" >&2
+    return 1
+  fi
+  echo "$response"
+}
+
+# ── Collect data per domain ───────────────────────────────────────────────
+results="[]"
+failures=0
+checked=0
+
+for domain in "${canonical_domains[@]}"; do
+  echo "──────────────────────────────────────"
+  echo "Checking: $domain"
+
+  # 1. domains.getInfo — expiry, nameservers, created date
+  info_xml=$(nc_api "namecheap.domains.getInfo" "DomainName=${domain}") || { failures=$((failures+1)); continue; }
+
+  expiry_date=$(echo "$info_xml" | xmllint --xpath 'string(//DomainGetInfoResult/DomainDetails/ExpiredDate)' - 2>/dev/null) || expiry_date=""
+  created_date=$(echo "$info_xml" | xmllint --xpath 'string(//DomainGetInfoResult/DomainDetails/CreatedDate)' - 2>/dev/null) || created_date=""
+  is_using_our_dns=$(echo "$info_xml" | xmllint --xpath 'string(//DomainGetInfoResult/DnsDetails/@IsUsingOurDNS)' - 2>/dev/null) || is_using_our_dns=""
+  provider_type=$(echo "$info_xml" | xmllint --xpath 'string(//DomainGetInfoResult/DnsDetails/@ProviderType)' - 2>/dev/null) || provider_type=""
+  auto_renew=$(echo "$info_xml" | xmllint --xpath 'string(//DomainGetInfoResult/@IsExpired)' - 2>/dev/null) || auto_renew=""
+
+  # Extract nameservers
+  nameservers="[]"
+  ns_count=$(echo "$info_xml" | xmllint --xpath 'count(//DomainGetInfoResult/DnsDetails/Nameserver)' - 2>/dev/null) || ns_count="0"
+  ns_count=$(printf '%.0f' "$ns_count" 2>/dev/null) || ns_count="0"
+  if [[ "$ns_count" -gt 0 ]]; then
+    ns_json="["
+    for ((i=1; i<=ns_count; i++)); do
+      ns_val=$(echo "$info_xml" | xmllint --xpath "string(//DomainGetInfoResult/DnsDetails/Nameserver[$i])" - 2>/dev/null) || ns_val=""
+      [[ -z "$ns_val" ]] && continue
+      if [[ $i -gt 1 ]]; then ns_json="${ns_json},"; fi
+      ns_json="${ns_json}\"${ns_val}\""
+    done
+    ns_json="${ns_json}]"
+    nameservers="$ns_json"
+  fi
+
+  echo "  Expiry: $expiry_date"
+  echo "  Created: $created_date"
+  echo "  Nameservers: $nameservers"
+  echo "  DNS provider: $provider_type (using NC DNS: $is_using_our_dns)"
+
+  # 2. domains.getRegistrarLock
+  lock_xml=$(nc_api "namecheap.domains.getRegistrarLock" "DomainName=${domain}") || { failures=$((failures+1)); continue; }
+  registrar_lock=$(echo "$lock_xml" | xmllint --xpath 'string(//DomainGetRegistrarLockResult/@RegistrarLockStatus)' - 2>/dev/null) || registrar_lock=""
+  echo "  Registrar lock: $registrar_lock"
+
+  # Build JSON entry
+  entry=$(jq -n \
+    --arg domain "$domain" \
+    --arg expiry "$expiry_date" \
+    --arg created "$created_date" \
+    --arg lock "$registrar_lock" \
+    --arg dns_provider "$provider_type" \
+    --arg using_nc_dns "$is_using_our_dns" \
+    --argjson ns "$nameservers" \
+    '{
+      domain: $domain,
+      exists_in_namecheap: true,
+      registrar_lock: $lock,
+      expiry_date: $expiry,
+      created_date: $created,
+      dns_provider: $dns_provider,
+      using_namecheap_dns: ($using_nc_dns == "true"),
+      nameservers: $ns
+    }')
+
+  results=$(echo "$results" | jq --argjson e "$entry" '. + [$e]')
+  checked=$((checked+1))
+done
+
+echo "══════════════════════════════════════"
+
+# ── Build final output ────────────────────────────────────────────────────
+timestamp=$(TZ=UTC date '+%Y-%m-%dT%H:%M:%SZ')
+output=$(jq -n \
+  --arg ts "$timestamp" \
+  --argjson domains "$results" \
+  --argjson total "${#canonical_domains[@]}" \
+  --argjson checked "$checked" \
+  --argjson failures "$failures" \
+  '{
+    snapshot_at: $ts,
+    source: "namecheap-api",
+    mode: "read-only",
+    canonical_domains_total: $total,
+    domains_checked: $checked,
+    failures: $failures,
+    domains: $domains
+  }')
+
+# ── Write outputs ─────────────────────────────────────────────────────────
+mkdir -p "$OUTBOX"
+echo "$output" | jq '.' > "$JSON_OUT"
+echo "$output" | yq -P '.' > "$YAML_OUT"
+
+echo "JSON: $JSON_OUT"
+echo "YAML: $YAML_OUT"
+echo "Summary: checked=$checked failures=$failures canonical=${#canonical_domains[@]}"
+
+if [[ $failures -gt 0 ]]; then
+  echo "FAIL: $failures domain(s) had API errors" >&2
+  exit 1
+fi
+
+echo "OK: all canonical domains inventoried"
