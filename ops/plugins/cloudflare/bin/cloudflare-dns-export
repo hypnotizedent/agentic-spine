@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# cloudflare-dns-export — export full DNS records for all bound zones to mailroom/outbox
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2
+  exit 2
+fi
+
+OUTBOX="$ROOT/mailroom/outbox/domains"
+mkdir -p "$OUTBOX"
+
+ZONES="$(curl -fsS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" "${CF_API}/zones?per_page=50")"
+echo "$ZONES" | python3 -c "
+import json, os, sys, urllib.request
+from datetime import datetime, timezone
+
+print('cloudflare.dns.export')
+zones = json.load(sys.stdin).get('result', [])
+print(f'zones: {len(zones)}')
+api = os.environ.get('CLOUDFLARE_API_BASE', 'https://api.cloudflare.com/client/v4').rstrip('/')
+token = os.environ['CLOUDFLARE_API_TOKEN']
+outbox = os.environ.get('SPINE_DNS_OUTBOX', '$OUTBOX')
+ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+date_tag = datetime.now(timezone.utc).strftime('%Y%m%d')
+
+for zone in zones:
+    zid = zone.get('id')
+    name = zone.get('name')
+
+    # Fetch all records (paginate)
+    all_records = []
+    page = 1
+    while True:
+        req = urllib.request.Request(
+            f'{api}/zones/{zid}/dns_records?per_page=100&page={page}',
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception as exc:
+            print(f'- {name}: STOP (dns export failed: {exc})')
+            break
+
+        results = data.get('result', [])
+        all_records.extend(results)
+        info = data.get('result_info', {})
+        total_pages = info.get('total_pages', 1)
+        if page >= total_pages:
+            break
+        page += 1
+
+    # Write JSON export
+    export = {
+        'zone': name,
+        'zone_id': zid,
+        'exported_at': ts,
+        'total_records': len(all_records),
+        'records': [
+            {
+                'type': r.get('type'),
+                'name': r.get('name'),
+                'content': r.get('content'),
+                'proxied': r.get('proxied'),
+                'ttl': r.get('ttl'),
+                'priority': r.get('priority'),
+            }
+            for r in sorted(all_records, key=lambda x: (x.get('type', ''), x.get('name', '')))
+        ],
+    }
+
+    json_path = os.path.join(outbox, f'{name}-cf-dns-export-{date_tag}.json')
+    with open(json_path, 'w') as f:
+        json.dump(export, f, indent=2)
+
+    print(f'- {name}: {len(all_records)} records -> {json_path}')
+
+print('OK')
+" SPINE_DNS_OUTBOX="$OUTBOX"
