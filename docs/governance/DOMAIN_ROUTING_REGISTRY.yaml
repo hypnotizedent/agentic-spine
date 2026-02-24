@@ -537,3 +537,48 @@ zones:
         note: "DNS-only record, no routing target"
         references:
           - infrastructure/domains/DOMAIN_REGISTRY.md
+
+  - zone: mintprints.com
+    source:
+      dns_export_file: "mailroom/outbox/domains/mintprints.com-cf-dns-export-20260224.json"
+      note: "DNS at Namecheap BasicDNS. CF zone added 2026-02-24 with auto-import. NS switch pending DKIM + email parity."
+    hostnames:
+      - hostname: mintprints.com
+        service: shopify-storefront
+        stack: external:shopify
+        routing_layer: direct
+        authority_source: namecheap_dns
+        target_hint: "A 23.227.38.66 (Shopify IP)"
+        note: "Apex serves Shopify storefront. Pending cut to quote-page via tunnel."
+        references:
+          - docs/governance/generated/W53_SHOPIFY_EXIT_CUTOVER_CHECKLIST_20260224.yaml
+
+      - hostname: www.mintprints.com
+        service: shopify-redirect
+        stack: external:shopify
+        routing_layer: direct
+        authority_source: namecheap_dns
+        target_hint: "CNAME shops.myshopify.com (301 -> apex)"
+        note: "www redirect to Shopify apex. Pending cut with apex."
+        references:
+          - docs/governance/generated/W53_SHOPIFY_EXIT_CUTOVER_CHECKLIST_20260224.yaml
+
+      - hostname: customer.mintprints.com
+        service: quote-page
+        stack: mint-apps
+        routing_layer: cloudflare_tunnel
+        authority_source: cloudflare_dashboard
+        target_hint: "http://quote-page:3341 (mint-apps VM 213 100.79.183.14 via cloudflared extra_hosts)"
+        note: "Staged 2026-02-24 (W53). Tunnel ingress + CF DNS CNAME pre-staged. Activates on NS switch."
+        references:
+          - docs/governance/generated/W53_SHOPIFY_EXIT_CUTOVER_CHECKLIST_20260224.yaml
+
+      - hostname: autodiscover.mintprints.com
+        service: outlook-autodiscover
+        stack: external:microsoft365
+        routing_layer: direct
+        authority_source: cloudflare_dns
+        target_hint: "CNAME autodiscover.outlook.com (DNS-only, proxied=false)"
+        note: "M365 email autodiscover. Fixed proxy mode 2026-02-24 (GAP-OP-849)."
+        references:
+          - docs/governance/generated/W50C_MINTPRINTS_COM_TRANSFER_PREFLIGHT_20260224.yaml

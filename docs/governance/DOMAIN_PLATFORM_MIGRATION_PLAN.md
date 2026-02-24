@@ -26,8 +26,8 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 | Domain | Zone | Registrar | DNS | Email | Criticality | Wave |
 |--------|------|-----------|-----|-------|-------------|------|
 | ronny.works | ronny | Namecheap (permanent — .works TLD unsupported by CF Registrar) | Cloudflare | None active (legacy MX unused) | P1 | N/A |
-| mintprints.co | mintprints | Namecheap | Cloudflare | Resend/AWS SES | P1 | W2 |
-| mintprints.com | mintprints | Namecheap | **Namecheap** (CF NS reverted 2026-02-24 — zone never added) | Microsoft 365 | **P0** | W3 |
+| mintprints.co | mintprints | Namecheap (pendingTransfer to Cloudflare) | Cloudflare | Resend/AWS SES | P1 | W2 |
+| mintprints.com | mintprints | Namecheap | **Namecheap** (CF zone added, NS switch blocked on DKIM) | Microsoft 365 | **P0** | W3 |
 
 **SSOT:** `ops/bindings/domain.portfolio.registry.yaml`
 

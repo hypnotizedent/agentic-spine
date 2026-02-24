@@ -1,0 +1,121 @@
+# W53: Shopify Exit Cutover Checklist for mintprints.com
+# Generated: 2026-02-24T16:31Z
+# Task: SPINE-W53-DOMAIN-CUTOVER-PREP-20260224
+# Mode: checklist-only (NO blind cut authorized)
+
+domain: mintprints.com
+target: move apex/www off Shopify to quote-first endpoint
+
+current_shopify_records:
+  - type: A
+    name: mintprints.com
+    content: "23.227.38.66"
+    purpose: "Shopify storefront apex hosting"
+    proxied: true
+  - type: CNAME
+    name: www.mintprints.com
+    content: shops.myshopify.com
+    purpose: "Shopify www redirect (301 -> apex)"
+    proxied: true
+  - type: CNAME
+    name: account.mintprints.com
+    content: shops.myshopify.com
+    purpose: "Shopify customer accounts portal"
+    proxied: true
+
+replacement_records:
+  - type: CNAME
+    name: mintprints.com
+    content: "ae7d4462-cfb2-4919-802e-41c01742a9eb.cfargotunnel.com"
+    purpose: "Apex -> tunnel -> quote-page:3341 (same as customer.mintprints.com)"
+    proxied: true
+    note: "CF flattens apex CNAME automatically"
+  - type: CNAME
+    name: www.mintprints.com
+    content: "mintprints.com"
+    purpose: "www -> apex redirect"
+    proxied: true
+  - type: CNAME
+    name: account.mintprints.com
+    content: "ae7d4462-cfb2-4919-802e-41c01742a9eb.cfargotunnel.com"
+    purpose: "Customer accounts -> tunnel (or remove if not needed)"
+    proxied: true
+    decision_needed: true
+
+rollback_records:
+  - type: A
+    name: mintprints.com
+    content: "23.227.38.66"
+    proxied: true
+  - type: CNAME
+    name: www.mintprints.com
+    content: shops.myshopify.com
+    proxied: true
+  - type: CNAME
+    name: account.mintprints.com
+    content: shops.myshopify.com
+    proxied: true
+
+tunnel_ingress_staged:
+  customer_mintprints_com:
+    hostname: customer.mintprints.com
+    service: "http://quote-page:3341"
+    status: STAGED
+    dns_cname_id: "6692d718f20702582c3169526cd4d219"
+    note: "Pre-staged 2026-02-24. Activates when NS switches to Cloudflare."
+
+  apex_mintprints_com:
+    hostname: mintprints.com
+    service: "http://quote-page:3341"
+    status: NOT_STAGED
+    note: "Needs tunnel ingress rule for apex BEFORE Shopify exit cut"
+
+preconditions_for_cut:
+  - id: P1
+    description: "DKIM selectors active and validated in CF DNS"
+    status: BLOCKED
+    blocker: "GAP-OP-850 — M365 admin action needed"
+  - id: P2
+    description: "customer.mintprints.com endpoint healthy (200)"
+    status: STAGED
+    note: "DNS not resolving yet (NS at Namecheap). Backend healthy via .co twin."
+  - id: P3
+    description: "NS switched to Cloudflare for mintprints.com"
+    status: BLOCKED
+    blocker: "B7 — waiting for DKIM + P2 verification"
+  - id: P4
+    description: "Tunnel ingress rule for apex mintprints.com"
+    status: NOT_DONE
+    note: "Need to add tunnel rule for bare domain before cut"
+  - id: P5
+    description: "Quote-page verified healthy on mint-apps VM 213"
+    status: PASS
+    evidence: "customer.mintprints.co returns 200 in 0.4s"
+  - id: P6
+    description: "finance-adapter health restored"
+    status: FAIL
+    note: "curl=22 (connection refused) — not blocking quote-page but may affect order flow"
+
+cut_window_rules:
+  - "All P1-P5 must be PASS before any DNS changes"
+  - "Rollback within 24h: revert DNS records to rollback_records values"
+  - "CF proxy mode means DNS changes propagate instantly (no TTL wait)"
+  - "Shopify storefront becomes inaccessible once apex A record changes"
+  - "Verify email send/receive test BEFORE cutting apex"
+
+shopify_exit_ready: false
+reason_not_ready: |
+  Blocked on:
+  1. P1: DKIM selectors not yet configured (M365 admin action)
+  2. P3: NS still at Namecheap (must switch first)
+  3. P4: Apex tunnel ingress rule not staged
+  4. P6: finance-adapter unhealthy (non-blocking but risk to order flow)
+
+next_steps:
+  - "M365 admin: enable DKIM for mintprints.com, provide selector CNAME targets"
+  - "Add DKIM CNAME records to CF zone"
+  - "Switch NS at Namecheap to Cloudflare (nile/rosemary)"
+  - "Verify customer.mintprints.com loads (200)"
+  - "Add tunnel ingress rule for bare mintprints.com"
+  - "Run email send/receive test"
+  - "Then proceed to apex/www cut with 24h rollback window"
