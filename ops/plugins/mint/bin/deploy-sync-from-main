@@ -3,7 +3,7 @@
 #
 # Mutating command intended as the canonical deploy path to prevent stale runtime drift.
 # Enforces single-module targeting — multi-module CSV is rejected.
-# Does NOT build on VM — assumes pre-built image is already loaded on host.
+# Builds only the targeted service on-host and avoids dependency restarts.
 #
 # Default:
 #   - sync from ref origin/main
@@ -134,25 +134,25 @@ git -C "$MINT_REPO" archive --format=tar "$REF" \
   | ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "cd '${REMOTE_STACK_ROOT}' && tar -xf -" \
   || stop "archive sync failed"
 
-echo "[2/3] Deploy module service (pre-built image)..."
+echo "[2/3] Deploy module service (single-service build)..."
 
 case "$MODULE" in
   artwork)
-    echo "  - deploy files-api (root mint-apps compose)"
+    echo "  - deploy files-api (root mint-apps compose, --no-deps --build)"
     ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-      "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d files-api" \
+      "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build files-api" \
       || stop "deploy failed for artwork/files-api"
     ;;
   quote-page|order-intake|finance-adapter)
-    echo "  - deploy $MODULE (root mint-apps compose)"
+    echo "  - deploy $MODULE (root mint-apps compose, --no-deps --build)"
     ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-      "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d $MODULE" \
+      "cd '${REMOTE_STACK_ROOT}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build $MODULE" \
       || stop "deploy failed for $MODULE"
     ;;
   pricing|suppliers|shipping|payment)
-    echo "  - deploy $MODULE (sub-stack compose)"
+    echo "  - deploy $MODULE (sub-stack compose, --no-deps --build)"
     ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
-      "cd '${REMOTE_STACK_ROOT}/$MODULE' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d $MODULE" \
+      "cd '${REMOTE_STACK_ROOT}/$MODULE' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps --build $MODULE" \
       || stop "deploy failed for $MODULE"
     ;;
   *)
