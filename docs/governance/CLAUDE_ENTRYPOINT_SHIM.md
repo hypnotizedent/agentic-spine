@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-08
+last_verified: 2026-02-24
 scope: claude-entrypoint-governance
 ---
 
