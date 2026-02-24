@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# network-inventory-snapshot-build
+# Builds a unified network + hardware inventory snapshot.
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+OUTPUT="$ROOT/ops/bindings/network.inventory.snapshot.yaml"
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "STOP (2): missing dependency python3" >&2
+  exit 2
+}
+
+python3 - "$ROOT" "$OUTPUT" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import re
+import sys
+
+import yaml
+
+root = Path(sys.argv[1]).expanduser().resolve()
+output_path = Path(sys.argv[2]).expanduser().resolve()
+
+HOME_OBS = root / "ops/bindings/network.unifi.home.clients.observed.yaml"
+SHOP_OBS = root / "ops/bindings/network.unifi.shop.clients.observed.yaml"
+HARDWARE = root / "ops/bindings/hardware.inventory.yaml"
+PARTS = root / "ops/bindings/hardware.parts.inventory.yaml"
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_iso() -> str:
+    return now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_iso() -> str:
+    return now_utc().strftime("%Y-%m-%d")
+
+
+def load_yaml(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def as_list(doc: dict, key: str) -> list:
+    values = doc.get(key)
+    if isinstance(values, list):
+        return values
+    return []
+
+
+def lower_text(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+def marker_from_text(text: str) -> str:
+    value = text.lower()
+    if not value:
+        return ""
+    if "rma" in value:
+        return "rma"
+    if "depleted" in value:
+        return "depleted"
+    if "historical_failure" in value or "failure" in value or "failed" in value:
+        return "failure"
+    if "upgrade" in value or "obsolete" in value:
+        return "upgrade"
+    return ""
+
+
+for required in (HOME_OBS, SHOP_OBS, HARDWARE, PARTS):
+    if not required.is_file():
+        print(f"network-inventory-snapshot-build FAIL: missing source binding {required}", file=sys.stderr)
+        raise SystemExit(1)
+
+home_doc = load_yaml(HOME_OBS)
+shop_doc = load_yaml(SHOP_OBS)
+hardware_doc = load_yaml(HARDWARE)
+parts_doc = load_yaml(PARTS)
+stamp = now_iso()
+
+home_devices = as_list(home_doc, "devices")
+shop_devices = as_list(shop_doc, "devices")
+machines = as_list(hardware_doc, "machines")
+parts = as_list(parts_doc, "parts")
+
+hardware_assets: list[dict] = []
+upgrade_candidates: list[dict] = []
+candidate_seen: set[tuple[str, str, str]] = set()
+
+
+def add_candidate(item_id: str, asset_type: str, marker: str, reason: str, source_binding: str) -> None:
+    key = (item_id, asset_type, marker)
+    if not item_id or not marker or key in candidate_seen:
+        return
+    candidate_seen.add(key)
+    upgrade_candidates.append(
+        {
+            "id": item_id,
+            "asset_type": asset_type,
+            "marker": marker,
+            "reason": reason,
+            "source_binding": source_binding,
+            "last_seen_at": stamp,
+            "status": "candidate",
+        }
+    )
+
+
+for machine in machines:
+    if not isinstance(machine, dict):
+        continue
+    machine_id = str(machine.get("machine_id") or machine.get("hostname") or "").strip()
+    if not machine_id:
+        continue
+    machine_status = str(machine.get("status") or machine.get("lifecycle_status") or "active").strip() or "active"
+    hardware_assets.append(
+        {
+            "asset_type": "machine",
+            "id": machine_id,
+            "site": str(machine.get("site") or "").strip(),
+            "status": machine_status,
+            "model": str(machine.get("model") or "").strip(),
+            "source_binding": "ops/bindings/hardware.inventory.yaml",
+        }
+    )
+
+    marker = marker_from_text(machine_status)
+    if marker:
+        add_candidate(machine_id, "machine", marker, machine_status, "ops/bindings/hardware.inventory.yaml")
+
+    notes_marker = marker_from_text(str(machine.get("notes") or ""))
+    if notes_marker:
+        add_candidate(machine_id, "machine", notes_marker, "notes", "ops/bindings/hardware.inventory.yaml")
+
+    for controller in machine.get("storage_controllers") or []:
+        if not isinstance(controller, dict):
+            continue
+        controller_name = str(controller.get("name") or "controller").strip()
+        controller_id = f"{machine_id}::controller::{re.sub(r'[^a-z0-9]+', '-', controller_name.lower()).strip('-') or 'unknown'}"
+        controller_status = str(controller.get("status") or controller.get("lifecycle_status") or "").strip()
+        marker = marker_from_text(controller_status)
+        if marker:
+            add_candidate(
+                controller_id,
+                "controller",
+                marker,
+                controller_status,
+                "ops/bindings/hardware.inventory.yaml",
+            )
+
+
+for part in parts:
+    if not isinstance(part, dict):
+        continue
+    part_id = str(part.get("id") or "").strip()
+    if not part_id:
+        continue
+    lifecycle = str(part.get("lifecycle_status") or "").strip()
+    status = str(part.get("status") or lifecycle or "active").strip() or "active"
+    hardware_assets.append(
+        {
+            "asset_type": "part",
+            "id": part_id,
+            "site": str(part.get("site") or "").strip(),
+            "status": status,
+            "lifecycle_status": lifecycle,
+            "on_hand_qty": part.get("on_hand_qty"),
+            "source_binding": "ops/bindings/hardware.parts.inventory.yaml",
+        }
+    )
+
+    marker = marker_from_text(lifecycle) or marker_from_text(status)
+    if marker:
+        add_candidate(part_id, "part", marker, lifecycle or status, "ops/bindings/hardware.parts.inventory.yaml")
+
+snapshot_doc = {
+    "status": "authoritative",
+    "owner": "@ronny",
+    "last_verified": today_iso(),
+    "scope": "network-hardware-unified-snapshot",
+    "version": 1,
+    "updated_at": today_iso(),
+    "generated_at": stamp,
+    "freshness_policy": {
+        "max_age_hours": 24,
+        "freshness_field": "generated_at",
+    },
+    "source_capability": "network-inventory-snapshot-build",
+    "home_devices": home_devices,
+    "shop_devices": shop_devices,
+    "hardware_assets": sorted(hardware_assets, key=lambda item: (item.get("asset_type", ""), item.get("id", ""))),
+    "upgrade_candidates": sorted(upgrade_candidates, key=lambda item: (item["asset_type"], item["id"], item["marker"])),
+}
+
+output_path.parent.mkdir(parents=True, exist_ok=True)
+output_path.write_text(yaml.safe_dump(snapshot_doc, sort_keys=False), encoding="utf-8")
+
+print("network-inventory-snapshot-build")
+print(f"output: {output_path}")
+print(f"home_devices: {len(home_devices)}")
+print(f"shop_devices: {len(shop_devices)}")
+print(f"hardware_assets: {len(hardware_assets)}")
+print(f"upgrade_candidates: {len(upgrade_candidates)}")
+PY

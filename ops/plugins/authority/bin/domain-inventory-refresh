@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+OPS_BIN="$ROOT/bin/ops"
+MODE=""
+INTERVAL_MIN=30
+CAP_TIMEOUT_SEC="${CAP_TIMEOUT_SEC:-180}"
+
+usage() {
+  cat <<'USAGE'
+domain-inventory-refresh
+
+Usage:
+  ./bin/ops cap run domain-inventory-refresh -- --once
+  ./bin/ops cap run domain-inventory-refresh -- --loop --interval-min 30
+
+Flags:
+  --once                Run one refresh cycle and exit.
+  --loop                Run refresh cycles forever.
+  --interval-min <n>    Loop interval in minutes (default: 30, min: 1).
+USAGE
+}
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --once)
+      MODE="once"
+      shift
+      ;;
+    --loop)
+      MODE="loop"
+      shift
+      ;;
+    --interval-min)
+      INTERVAL_MIN="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "domain-inventory-refresh FAIL: unknown arg '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+[[ -x "$OPS_BIN" ]] || {
+  echo "domain-inventory-refresh FAIL: missing ops runner at $OPS_BIN" >&2
+  exit 2
+}
+
+if [[ -z "$MODE" ]]; then
+  echo "domain-inventory-refresh FAIL: specify --once or --loop" >&2
+  usage >&2
+  exit 1
+fi
+
+if ! [[ "$INTERVAL_MIN" =~ ^[0-9]+$ ]] || [[ "$INTERVAL_MIN" -lt 1 ]]; then
+  echo "domain-inventory-refresh FAIL: --interval-min must be an integer >= 1" >&2
+  exit 1
+fi
+
+if ! [[ "$CAP_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [[ "$CAP_TIMEOUT_SEC" -lt 1 ]]; then
+  echo "domain-inventory-refresh FAIL: CAP_TIMEOUT_SEC must be an integer >= 1" >&2
+  exit 1
+fi
+
+command -v timeout >/dev/null 2>&1 || {
+  echo "domain-inventory-refresh FAIL: missing dependency 'timeout'" >&2
+  exit 2
+}
+
+run_cap() {
+  local cap_name="$1"
+  shift || true
+  echo "[domain-inventory-refresh] running: $cap_name $*"
+  printf 'yes\n' | timeout "$CAP_TIMEOUT_SEC" "$OPS_BIN" cap run "$cap_name" "$@"
+}
+
+binding_fresh() {
+  local binding_path="$1"
+  local max_age_hours="${2:-24}"
+  python3 - "$binding_path" "$max_age_hours" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+import yaml
+
+path = Path(sys.argv[1]).expanduser().resolve()
+max_age_hours = int(sys.argv[2])
+
+if not path.is_file():
+    raise SystemExit(1)
+
+try:
+    with path.open("r", encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle) or {}
+except Exception:
+    raise SystemExit(1)
+
+if not isinstance(doc, dict):
+    raise SystemExit(1)
+
+stamp = str(doc.get("generated_at") or doc.get("generated") or "").strip()
+if not stamp:
+    raise SystemExit(1)
+
+try:
+    if stamp.endswith("Z"):
+        stamp = stamp[:-1] + "+00:00"
+    dt = datetime.fromisoformat(stamp)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age_hours = (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 3600.0
+except Exception:
+    raise SystemExit(1)
+
+if age_hours <= max_age_hours:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+run_cap_or_fresh() {
+  local cap_name="$1"
+  local fallback_binding="$2"
+  shift 2 || true
+
+  if run_cap "$cap_name" "$@"; then
+    return 0
+  fi
+
+  if binding_fresh "$fallback_binding" 24; then
+    echo "[domain-inventory-refresh] WARN: $cap_name failed but fallback binding is fresh: $fallback_binding"
+    return 0
+  fi
+
+  echo "[domain-inventory-refresh] FAIL: $cap_name failed and fallback binding is missing/stale: $fallback_binding" >&2
+  return 1
+}
+
+run_once_cycle() {
+  echo "[domain-inventory-refresh] cycle_start: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  run_cap_or_fresh network.home.unifi.clients.snapshot "$ROOT/ops/bindings/network.unifi.home.clients.observed.yaml"
+  run_cap_or_fresh network.unifi.clients.snapshot "$ROOT/ops/bindings/network.unifi.shop.clients.observed.yaml"
+  run_cap_or_fresh media-content-snapshot-refresh "$ROOT/ops/bindings/media.content.snapshot.yaml"
+  run_cap_or_fresh ha-inventory-snapshot-build "$ROOT/ops/bindings/ha.inventory.snapshot.yaml"
+  run_cap_or_fresh network-inventory-snapshot-build "$ROOT/ops/bindings/network.inventory.snapshot.yaml"
+
+  run_cap platform.inventory.intake -- reconcile --domain media
+  run_cap platform.inventory.intake -- reconcile --domain ha
+  run_cap platform.inventory.intake -- reconcile --domain network
+
+  echo "[domain-inventory-refresh] cycle_done: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+if [[ "$MODE" == "once" ]]; then
+  run_once_cycle
+  exit 0
+fi
+
+while true; do
+  run_once_cycle
+  echo "[domain-inventory-refresh] sleeping: ${INTERVAL_MIN}m"
+  sleep "$((INTERVAL_MIN * 60))"
+done

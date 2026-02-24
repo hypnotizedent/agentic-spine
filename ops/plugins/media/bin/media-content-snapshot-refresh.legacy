@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# media-content-snapshot-refresh
+# Refreshes and normalizes ops/bindings/media.content.snapshot.yaml with
+# movie/tv/music item-level IDs for ledger parity enforcement.
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+OUTPUT="$ROOT/ops/bindings/media.content.snapshot.yaml"
+SERVICES="$ROOT/ops/bindings/services.health.yaml"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+STRICT=0
+
+usage() {
+  cat <<'USAGE'
+media-content-snapshot-refresh
+
+Usage:
+  ./bin/ops cap run media-content-snapshot-refresh
+  ./bin/ops cap run media-content-snapshot-refresh -- --strict
+
+Flags:
+  --strict   fail if a source API call cannot be completed.
+USAGE
+}
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" && -x "$SECRETS_EXEC" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --strict)
+      STRICT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "FAIL: unknown arg '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "STOP (2): missing dependency python3" >&2
+  exit 2
+}
+
+python3 - "$OUTPUT" "$SERVICES" "$STRICT" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+
+import yaml
+
+output_path = Path(sys.argv[1]).expanduser().resolve()
+services_path = Path(sys.argv[2]).expanduser().resolve()
+strict_mode = sys.argv[3] == "1"
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_iso() -> str:
+    return now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_iso() -> str:
+    return now_utc().strftime("%Y-%m-%d")
+
+
+def load_yaml(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def save_yaml(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def sanitize_id(text: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return value or "unknown"
+
+
+def endpoint_for(services_doc: dict, endpoint_id: str) -> str:
+    for row in services_doc.get("endpoints") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("id", "")).strip() == endpoint_id:
+            return str(row.get("url", "")).strip()
+    return ""
+
+
+def base_from_ping(url: str) -> str:
+    raw = url.strip().rstrip("/")
+    if raw.endswith("/ping"):
+        return raw[:-5]
+    return raw
+
+
+def api_get_json(url: str, api_key: str):
+    req = urllib.request.Request(url, headers={"X-Api-Key": api_key})
+    with urllib.request.urlopen(req, timeout=45) as resp:
+        body = resp.read().decode("utf-8")
+    return json.loads(body)
+
+
+def normalize_item(row: dict | str, fallback_prefix: str, fallback_seen_at: str) -> dict | None:
+    if isinstance(row, str):
+        item_id = row.strip()
+        if not item_id:
+            return None
+        return {
+            "id": item_id,
+            "title": item_id,
+            "source_id": item_id,
+            "year_or_release": "",
+            "first_seen_at": fallback_seen_at,
+            "last_seen_at": fallback_seen_at,
+            "status": "active",
+        }
+
+    if not isinstance(row, dict):
+        return None
+
+    item_id = str(row.get("id", "")).strip()
+    if not item_id:
+        return None
+
+    title = str(row.get("title", "")).strip() or item_id
+    source_id = str(row.get("source_id", "")).strip() or f"{fallback_prefix}:{item_id}"
+    year_or_release = str(row.get("year_or_release", "")).strip()
+    first_seen_at = str(row.get("first_seen_at", "")).strip() or fallback_seen_at
+    last_seen_at = str(row.get("last_seen_at", "")).strip() or fallback_seen_at
+    status = str(row.get("status", "")).strip() or "active"
+
+    return {
+        "id": item_id,
+        "title": title,
+        "source_id": source_id,
+        "year_or_release": year_or_release,
+        "first_seen_at": first_seen_at,
+        "last_seen_at": last_seen_at,
+        "status": status,
+    }
+
+
+def existing_map(snapshot_doc: dict, section: str) -> dict[str, dict]:
+    generated = str(snapshot_doc.get("generated_at", "")).strip() or now_iso()
+    out: dict[str, dict] = {}
+    for row in snapshot_doc.get(section) or []:
+        normalized = normalize_item(row, section, generated)
+        if not normalized:
+            continue
+        out[normalized["id"]] = normalized
+    return out
+
+
+def merge_items(existing: dict[str, dict], fetched: list[dict], fallback_prefix: str, stamp: str) -> list[dict]:
+    if fetched:
+        merged: list[dict] = []
+        seen_ids: set[str] = set()
+        for row in fetched:
+            item_id = str(row.get("id", "")).strip()
+            if not item_id or item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+            prev = existing.get(item_id, {})
+            first_seen = str(prev.get("first_seen_at", "")).strip() or stamp
+            status = str(row.get("status", "")).strip() or str(prev.get("status", "")).strip() or "active"
+            merged.append(
+                {
+                    "id": item_id,
+                    "title": str(row.get("title", "")).strip() or str(prev.get("title", "")).strip() or item_id,
+                    "source_id": str(row.get("source_id", "")).strip() or str(prev.get("source_id", "")).strip() or f"{fallback_prefix}:{item_id}",
+                    "year_or_release": str(row.get("year_or_release", "")).strip() or str(prev.get("year_or_release", "")).strip(),
+                    "first_seen_at": first_seen,
+                    "last_seen_at": stamp,
+                    "status": status,
+                }
+            )
+        return sorted(merged, key=lambda item: item["id"])
+
+    fallback_rows = []
+    for row in existing.values():
+        normalized = normalize_item(row, fallback_prefix, stamp)
+        if normalized:
+            fallback_rows.append(normalized)
+    return sorted(fallback_rows, key=lambda item: item["id"])
+
+
+def parse_movie_rows(base_url: str, api_key: str) -> list[dict]:
+    rows = api_get_json(f"{base_url}/api/v3/movie", api_key)
+    out: list[dict] = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title", "")).strip()
+        if not title:
+            continue
+        tmdb_id = str(row.get("tmdbId") or "").strip()
+        radarr_id = str(row.get("id") or "").strip()
+        item_id = f"movie-{tmdb_id or radarr_id or sanitize_id(title)}"
+        status = "active"
+        monitored = row.get("monitored")
+        if monitored is False:
+            status = "inactive"
+        out.append(
+            {
+                "id": item_id,
+                "title": title,
+                "source_id": f"radarr:{radarr_id or tmdb_id or item_id}",
+                "year_or_release": str(row.get("year") or row.get("inCinemas") or "").strip(),
+                "status": status,
+            }
+        )
+    return out
+
+
+def parse_tv_rows(base_url: str, api_key: str) -> list[dict]:
+    rows = api_get_json(f"{base_url}/api/v3/series", api_key)
+    out: list[dict] = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title", "")).strip()
+        if not title:
+            continue
+        tvdb_id = str(row.get("tvdbId") or "").strip()
+        sonarr_id = str(row.get("id") or "").strip()
+        item_id = f"tv-{tvdb_id or sonarr_id or sanitize_id(title)}"
+        status = "active"
+        monitored = row.get("monitored")
+        if monitored is False:
+            status = "inactive"
+        out.append(
+            {
+                "id": item_id,
+                "title": title,
+                "source_id": f"sonarr:{sonarr_id or tvdb_id or item_id}",
+                "year_or_release": str(row.get("year") or row.get("firstAired") or "").strip(),
+                "status": status,
+            }
+        )
+    return out
+
+
+def parse_music_rows(base_url: str, api_key: str) -> list[dict]:
+    rows = api_get_json(f"{base_url}/api/v1/artist", api_key)
+    out: list[dict] = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("artistName", "")).strip() or str(row.get("artistNameSort", "")).strip()
+        if not title:
+            continue
+        foreign_id = str(row.get("foreignArtistId") or "").strip()
+        lidarr_id = str(row.get("id") or "").strip()
+        item_id = f"music-{foreign_id or lidarr_id or sanitize_id(title)}"
+        status = "active"
+        monitored = row.get("monitored")
+        if monitored is False:
+            status = "inactive"
+        out.append(
+            {
+                "id": item_id,
+                "title": title,
+                "source_id": f"lidarr:{lidarr_id or foreign_id or item_id}",
+                "year_or_release": str(row.get("overview") or "").strip()[:64],
+                "status": status,
+            }
+        )
+    return out
+
+
+snapshot = load_yaml(output_path)
+services = load_yaml(services_path)
+stamp = now_iso()
+
+auth = {
+    "radarr": os.environ.get("RADARR_API_KEY", "").strip(),
+    "sonarr": os.environ.get("SONARR_API_KEY", "").strip(),
+    "lidarr": os.environ.get("LIDARR_API_KEY", "").strip(),
+}
+
+bases = {
+    "radarr": base_from_ping(endpoint_for(services, "radarr")),
+    "sonarr": base_from_ping(endpoint_for(services, "sonarr")),
+    "lidarr": base_from_ping(endpoint_for(services, "lidarr")),
+}
+
+existing_movies = existing_map(snapshot, "movies")
+existing_tv = existing_map(snapshot, "tv")
+existing_music = existing_map(snapshot, "music")
+
+errors: list[str] = []
+source_state: dict[str, str] = {}
+
+fetched_movies: list[dict] = []
+if bases["radarr"] and auth["radarr"]:
+    try:
+        fetched_movies = parse_movie_rows(bases["radarr"], auth["radarr"])
+        source_state["radarr"] = f"ok:{len(fetched_movies)}"
+    except Exception as exc:
+        errors.append(f"radarr fetch failed: {exc}")
+        source_state["radarr"] = "error"
+else:
+    source_state["radarr"] = "missing-config"
+
+fetched_tv: list[dict] = []
+if bases["sonarr"] and auth["sonarr"]:
+    try:
+        fetched_tv = parse_tv_rows(bases["sonarr"], auth["sonarr"])
+        source_state["sonarr"] = f"ok:{len(fetched_tv)}"
+    except Exception as exc:
+        errors.append(f"sonarr fetch failed: {exc}")
+        source_state["sonarr"] = "error"
+else:
+    source_state["sonarr"] = "missing-config"
+
+fetched_music: list[dict] = []
+if bases["lidarr"] and auth["lidarr"]:
+    try:
+        fetched_music = parse_music_rows(bases["lidarr"], auth["lidarr"])
+        source_state["lidarr"] = f"ok:{len(fetched_music)}"
+    except Exception as exc:
+        errors.append(f"lidarr fetch failed: {exc}")
+        source_state["lidarr"] = "error"
+else:
+    source_state["lidarr"] = "missing-config"
+
+movies = merge_items(existing_movies, fetched_movies, "movie", stamp)
+tv = merge_items(existing_tv, fetched_tv, "tv", stamp)
+music = merge_items(existing_music, fetched_music, "music", stamp)
+
+if strict_mode and errors:
+    print("media-content-snapshot-refresh FAIL: source fetch errors in --strict mode", file=sys.stderr)
+    for msg in errors:
+        print(f"  - {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not movies and not tv and not music and errors:
+    print("media-content-snapshot-refresh FAIL: no media items available and all fetch attempts failed", file=sys.stderr)
+    for msg in errors:
+        print(f"  - {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+snapshot_doc = {
+    "status": "authoritative",
+    "owner": "@ronny",
+    "last_verified": today_iso(),
+    "scope": "media-content-observed-snapshot",
+    "version": 1,
+    "updated_at": today_iso(),
+    "generated_at": stamp,
+    "freshness_policy": {
+        "max_age_hours": 24,
+        "freshness_field": "generated_at",
+    },
+    "source_capability": "media-content-snapshot-refresh",
+    "movies": movies,
+    "tv": tv,
+    "music": music,
+}
+
+save_yaml(output_path, snapshot_doc)
+
+print("media-content-snapshot-refresh")
+print(f"output: {output_path}")
+print(f"movies: {len(movies)}")
+print(f"tv: {len(tv)}")
+print(f"music: {len(music)}")
+print(
+    "sources: "
+    + ", ".join(f"{name}={state}" for name, state in sorted(source_state.items()))
+)
+if errors:
+    for msg in errors:
+        print(f"WARN: {msg}", file=sys.stderr)
+PY

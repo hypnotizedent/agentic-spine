@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: reconcile media.content.snapshot.yaml item IDs against media.content.ledger.yaml before rerunning hygiene-weekly.
+# TRIAGE: reconcile media.content.snapshot.yaml movies/tv/music item IDs (not source service IDs) against media.content.ledger.yaml before rerunning hygiene-weekly.
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -120,6 +120,7 @@ ledger_map = {
 
 observed_items = []
 observed_items.extend(normalize_items(observed.get("movies"), "movie"))
+observed_items.extend(normalize_items(observed.get("tv"), "tv"))
 observed_items.extend(normalize_items(observed.get("music"), "music"))
 
 allowed_ledger_status = {"approved", "ignored"}
@@ -158,8 +159,14 @@ for item_id, item_class in observed_items:
             f"unledgered media {item_class} item {item_id} observed age={age_hours:.1f}h (warning threshold {warn_under}h)"
         )
 
-for msg in warnings:
+warn_limit = 25
+for msg in warnings[:warn_limit]:
     print(f"D191 WARN: {msg}", file=sys.stderr)
+if len(warnings) > warn_limit:
+    print(
+        f"D191 WARN: suppressed {len(warnings) - warn_limit} additional warning(s)",
+        file=sys.stderr,
+    )
 
 if violations:
     for msg in violations:

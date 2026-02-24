@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ha-inventory-snapshot-build
+# Builds a unified HA inventory snapshot from governed HA bindings.
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+OUTPUT="$ROOT/ops/bindings/ha.inventory.snapshot.yaml"
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "STOP (2): missing dependency python3" >&2
+  exit 2
+}
+
+python3 - "$ROOT" "$OUTPUT" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+import yaml
+
+root = Path(sys.argv[1]).expanduser().resolve()
+output_path = Path(sys.argv[2]).expanduser().resolve()
+
+
+SECTION_SOURCES: dict[str, tuple[str, str]] = {
+    "devices": ("ops/bindings/ha.device.map.yaml", "devices"),
+    "entities": ("ops/bindings/ha.entity.state.baseline.yaml", "entities"),
+    "scenes": ("ops/bindings/ha.scenes.yaml", "scenes"),
+    "dashboards": ("ops/bindings/ha.dashboards.yaml", "dashboards"),
+    "automations": ("ops/bindings/ha.automations.yaml", "automations"),
+    "addons": ("ops/bindings/ha.addons.yaml", "addons"),
+    "integrations": ("ops/bindings/ha.integrations.yaml", "integrations"),
+    "hacs_addons": ("ops/bindings/ha.hacs.yaml", "repositories"),
+}
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_iso() -> str:
+    return now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_iso() -> str:
+    return now_utc().strftime("%Y-%m-%d")
+
+
+def load_yaml(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def list_from(doc: dict, key: str) -> list:
+    values = doc.get(key)
+    if isinstance(values, list):
+        return values
+    return []
+
+
+missing: list[str] = []
+section_values: dict[str, list] = {}
+section_counts: dict[str, int] = {}
+source_metadata: dict[str, dict] = {}
+
+for section, (relative_path, key) in SECTION_SOURCES.items():
+    source_path = root / relative_path
+    if not source_path.is_file():
+        missing.append(relative_path)
+        section_values[section] = []
+        section_counts[section] = 0
+        source_metadata[section] = {
+            "binding": relative_path,
+            "missing": True,
+        }
+        continue
+
+    doc = load_yaml(source_path)
+    values = list_from(doc, key)
+    section_values[section] = values
+    section_counts[section] = len(values)
+    source_metadata[section] = {
+        "binding": relative_path,
+        "generated": str(doc.get("generated_at") or doc.get("generated") or doc.get("updated_at") or ""),
+    }
+
+if missing:
+    print("ha-inventory-snapshot-build FAIL: missing source bindings", file=sys.stderr)
+    for item in missing:
+        print(f"  - {item}", file=sys.stderr)
+    raise SystemExit(1)
+
+stamp = now_iso()
+snapshot_doc = {
+    "status": "authoritative",
+    "owner": "@ronny",
+    "last_verified": today_iso(),
+    "scope": "ha-inventory-unified-snapshot",
+    "version": 1,
+    "updated_at": today_iso(),
+    "generated_at": stamp,
+    "freshness_policy": {
+        "max_age_hours": 24,
+        "freshness_field": "generated_at",
+    },
+    "source_capability": "ha-inventory-snapshot-build",
+    "source_bindings": source_metadata,
+    "summary": section_counts,
+    "devices": section_values["devices"],
+    "entities": section_values["entities"],
+    "scenes": section_values["scenes"],
+    "dashboards": section_values["dashboards"],
+    "automations": section_values["automations"],
+    "addons": section_values["addons"],
+    "integrations": section_values["integrations"],
+    "hacs_addons": section_values["hacs_addons"],
+}
+
+output_path.parent.mkdir(parents=True, exist_ok=True)
+output_path.write_text(yaml.safe_dump(snapshot_doc, sort_keys=False), encoding="utf-8")
+
+print("ha-inventory-snapshot-build")
+print(f"output: {output_path}")
+for section in (
+    "devices",
+    "entities",
+    "scenes",
+    "dashboards",
+    "automations",
+    "addons",
+    "integrations",
+    "hacs_addons",
+):
+    print(f"{section}: {section_counts[section]}")
+PY
