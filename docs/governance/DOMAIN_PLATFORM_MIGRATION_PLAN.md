@@ -181,7 +181,7 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 
 | ID | Blocker | Domain | Resolution |
 |----|---------|--------|------------|
-| B1 | mintprints.com Cloudflare zone not added | mintprints.com | **OPEN** — zone must be added to CF account before NS migration. W50C confirmed zone absent via API. |
+| B1 | ~~mintprints.com Cloudflare zone not added~~ | mintprints.com | **RESOLVED** — zone added 2026-02-24, ID `3188b91150231e1caf44514c8ad221da` |
 | B2 | mintprints.com DNS export missing | mintprints.com | Export current DNS records from Namecheap DNS |
 | B3 | ~~ronny.works email forwarding rules unknown~~ | ronny.works | **RESOLVED** — no email in use on @ronny.works |
 | B4 | ~~Domain expiry dates stale~~ | All | **RESOLVED** via Namecheap API (W49.2, 2026-02-24) |
