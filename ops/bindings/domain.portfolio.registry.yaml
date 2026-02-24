@@ -28,16 +28,19 @@ version: 1
 updated_at: "2026-02-23"
 owner: "@ronny"
 
-# Canonical roots only. DNS authority already delegated to Cloudflare for all zones.
+# Canonical roots only. DNS authority delegated to Cloudflare for mintprints.co and ronny.works.
+# mintprints.com DNS is still at Namecheap (registrar-servers.com) — must migrate to CF before transfer.
 # Migration target: Cloudflare Registrar for all domains.
 
 domains:
   - domain: mintprints.com
     business_zone: mintprints
     registrar: namecheap
-    dns_authority: cloudflare
-    nameservers: [TBD]  # Cloudflare NS — zone ID not yet inventoried
+    dns_authority: namecheap  # CURRENT TRUTH: DNS still at Namecheap, NOT Cloudflare
+    nameservers: [dns1.registrar-servers.com, dns2.registrar-servers.com]  # Namecheap default NS
+    target_nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]  # CF target
     cloudflare_zone_id: null  # NOT in cloudflare.inventory.yaml — blocker
+    transfer_ready: false  # BLOCKED: DNS must be migrated to Cloudflare first (D202 enforces)
     email_authority:
       provider: microsoft-365
       mx_target: "outlook (Microsoft 365)"
@@ -54,13 +57,14 @@ domains:
     criticality: P0
     migration_wave: W3
     rollback_owner: "@ronny"
-    expiry: "2025-12-27"  # Source: legacy DOMAIN_REGISTRY.md — verify current
+    expiry: "10/30/2026"  # Source: Namecheap API 2026-02-24
     auto_renew: true
     notes: >
       Primary business domain. Microsoft 365 email is the highest-risk dependency.
       Shopify storefront is the public customer-facing website.
       Must be LAST in migration wave order. Requires email parity gate before transfer.
-      Cloudflare zone ID unknown — not inventoried in cloudflare.inventory.yaml.
+      BLOCKER: DNS is still at Namecheap (registrar-servers.com). Must migrate DNS to
+      Cloudflare before any registrar transfer work can begin. D202 gate enforces this.
 
   - domain: mintprints.co
     business_zone: mintprints
@@ -96,18 +100,20 @@ domains:
     criticality: P1
     migration_wave: W2
     rollback_owner: "@ronny"
-    expiry: "2025-12-26"  # Source: legacy DOMAIN_REGISTRY.md — verify current
-    auto_renew: true
+    transfer_ready: true  # DNS at Cloudflare, registrar lock needs enabling
+    expiry: "04/26/2026"  # Source: Namecheap API 2026-02-24
+    auto_renew: false  # Source: Namecheap API — consider enabling
     notes: >
       Operational business domain. All mint-os and mint-apps services route through
       Cloudflare tunnel. Transactional email via Resend. DNS fully managed by Cloudflare.
       Active customer-facing subdomains (customer, estimator, pricing).
+      NOTE: Registrar lock is currently OFF — should be enabled for security.
 
   - domain: ronny.works
     business_zone: ronny
     registrar: namecheap
     dns_authority: cloudflare
-    nameservers: [TBD]  # Cloudflare NS — need to verify
+    nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]  # Source: Namecheap API 2026-02-24
     cloudflare_zone_id: "6d3f8f903534aafb27fe1ea2b1bd7269"
     email_authority:
       provider: namecheap-email-forwarding
@@ -144,7 +150,8 @@ domains:
     criticality: P1
     migration_wave: W1
     rollback_owner: "@ronny"
-    expiry: "2026-01-15"  # Source: legacy DOMAIN_REGISTRY.md — verify current
+    transfer_ready: true  # DNS at Cloudflare, email forwarding migration still required
+    expiry: "12/31/2026"  # Source: Namecheap API 2026-02-24
     auto_renew: true
     notes: >
       Personal/home/media domain. 25+ self-hosted services via CF tunnel.
@@ -187,7 +194,7 @@ summary:
   canonical_roots_binding: "ops/bindings/domain.canonical.roots.yaml"
   registrar: namecheap
   target_registrar: cloudflare
-  dns_authority: cloudflare  # Already migrated for all domains
+  dns_authority: mixed  # mintprints.co + ronny.works on Cloudflare; mintprints.com still on Namecheap
   waves: 3
   p0_domains: 1  # mintprints.com
   p1_domains: 2  # mintprints.co, ronny.works
