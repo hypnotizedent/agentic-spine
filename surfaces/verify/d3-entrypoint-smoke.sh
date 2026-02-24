@@ -14,14 +14,11 @@ fi
   exit 1
 }
 
-# status --brief returns rc=0 (clean) or rc=1 (open items/anomalies exist).
-# Both are valid for a smoke check — only rc>=2 indicates a hard entrypoint failure.
-local_rc=0
-"$ROOT/bin/ops" status --brief >/dev/null 2>&1 || local_rc=$?
-if [[ "$local_rc" -le 1 ]]; then
+# Keep D3 as an entrypoint smoke check only; avoid status aggregation cost.
+if "$ROOT/bin/ops" --help >/dev/null 2>&1 && "$ROOT/bin/ops" cap list >/dev/null 2>&1; then
   echo "D3 PASS: entrypoint smoke checks succeeded"
   exit 0
 fi
 
-echo "D3 FAIL: bin/ops status --brief smoke check failed (rc=$local_rc)" >&2
+echo "D3 FAIL: bin/ops smoke checks failed (--help/cap list)" >&2
 exit 1

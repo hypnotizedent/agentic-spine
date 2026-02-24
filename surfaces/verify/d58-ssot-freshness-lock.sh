@@ -11,158 +11,168 @@ SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REGISTRY="$SP/docs/governance/SSOT_REGISTRY.yaml"
 THRESHOLD="${SSOT_FRESHNESS_DAYS:-21}"
 
-FAIL=0
-err() { echo "  D58 FAIL: $1" >&2; FAIL=1; }
+[[ -f "$REGISTRY" ]] || { echo "  D58 FAIL: SSOT_REGISTRY.yaml not found" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "  D58 FAIL: python3 not found" >&2; exit 1; }
 
-parse_epoch_date() {
-  local ds="${1:-}"
-  [[ -n "$ds" ]] || { echo 0; return; }
-
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$ds" <<'PY'
+python3 - "$REGISTRY" "$SP/docs/governance" "$SP/ops/bindings" "$THRESHOLD" <<'PY'
+import re
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
-ds = (sys.argv[1] or "").strip()
-try:
-    dt = datetime.fromisoformat(ds)
-except Exception:
-    print(0)
-    raise SystemExit(0)
+import yaml
 
-if dt.tzinfo is None:
-    dt = dt.replace(tzinfo=timezone.utc)
+registry_path = Path(sys.argv[1])
+gov_dir = Path(sys.argv[2])
+bindings_dir = Path(sys.argv[3])
+threshold = int(sys.argv[4])
+now_epoch = int(datetime.now(timezone.utc).timestamp())
 
-print(int(dt.timestamp()))
+failures = []
+warnings = []
+stale_ssot_count = 0
+stale_doc_count = 0
+stale_binding_count = 0
+missing_last_verified_count = 0
+
+
+def parse_epoch_date(raw):
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value or value.lower() == "null":
+        return None
+    value = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(value)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+with registry_path.open("r", encoding="utf-8") as handle:
+    registry = yaml.safe_load(handle) or {}
+
+for row in registry.get("ssots") or []:
+    if not isinstance(row, dict):
+        continue
+    reviewed = row.get("last_reviewed")
+    reviewed_epoch = parse_epoch_date(reviewed)
+    if reviewed_epoch is None:
+        continue
+    age_days = (now_epoch - reviewed_epoch) // 86400
+    if age_days > threshold:
+        stale_ssot_count += 1
+        failures.append(
+            f"{row.get('id', 'unknown')}: last_reviewed={reviewed} ({age_days}d ago, threshold={threshold}d)"
+        )
+
+if gov_dir.is_dir():
+    status_re = re.compile(r"^status:\s*(.+?)\s*$")
+    lv_re = re.compile(r"^last_verified:\s*(.+?)\s*$")
+    for docfile in sorted(gov_dir.glob("*.md")):
+        with docfile.open("r", encoding="utf-8", errors="ignore") as handle:
+            lines = [line.rstrip("\n") for _, line in zip(range(16), handle)]
+
+        status = None
+        for line in lines[:10]:
+            m = status_re.match(line.strip())
+            if m:
+                status = m.group(1).strip().strip("\"'")
+                break
+        if status != "authoritative":
+            continue
+
+        lv = None
+        for line in lines[:15]:
+            m = lv_re.match(line.strip())
+            if m:
+                lv = m.group(1).strip().strip("\"'")
+                break
+
+        if not lv or lv.lower() == "null":
+            missing_last_verified_count += 1
+            warnings.append(f"{docfile.name} (authoritative) missing last_verified")
+            continue
+
+        lv_epoch = parse_epoch_date(lv)
+        if lv_epoch is None:
+            continue
+
+        lv_age = (now_epoch - lv_epoch) // 86400
+        if lv_age > threshold:
+            stale_doc_count += 1
+            failures.append(
+                f"{docfile.name}: last_verified={lv} ({lv_age}d ago, threshold={threshold}d)"
+            )
+
+exempt_files = set()
+exemptions_file = bindings_dir / "binding.freshness.exemptions.yaml"
+if bindings_dir.is_dir() and exemptions_file.is_file():
+    with exemptions_file.open("r", encoding="utf-8") as handle:
+        exemptions = yaml.safe_load(handle) or {}
+    for row in exemptions.get("exempt") or []:
+        if isinstance(row, dict):
+            name = (row.get("file") or "").strip()
+            if name:
+                exempt_files.add(name)
+
+    updated_re = re.compile(r"^updated:\s*(.+?)\s*$")
+    for binding in sorted(bindings_dir.glob("*.yaml")):
+        bname = binding.name
+        if bname == "binding.freshness.exemptions.yaml" or bname in exempt_files:
+            continue
+
+        with binding.open("r", encoding="utf-8", errors="ignore") as handle:
+            lines = [line.rstrip("\n") for _, line in zip(range(20), handle)]
+
+        updated = None
+        for line in lines:
+            m = updated_re.match(line.strip())
+            if m:
+                updated = m.group(1).strip().strip("\"'")
+                break
+        if not updated or updated.lower() == "null":
+            continue
+
+        updated_epoch = parse_epoch_date(updated)
+        if updated_epoch is None:
+            continue
+
+        updated_age = (now_epoch - updated_epoch) // 86400
+        if updated_age > threshold:
+            stale_binding_count += 1
+            failures.append(
+                f"{bname}: updated={updated} ({updated_age}d ago, threshold={threshold}d)"
+            )
+
+for w in warnings:
+    print(f"  WARN: {w}", file=sys.stderr)
+
+if missing_last_verified_count > 0:
+    print(
+        f"  {missing_last_verified_count} authoritative docs missing last_verified (warning only)",
+        file=sys.stderr,
+    )
+
+for f in failures:
+    print(f"  D58 FAIL: {f}", file=sys.stderr)
+
+if stale_ssot_count > 0:
+    print(
+        f"  {stale_ssot_count} SSOTs exceed freshness threshold of {threshold} days",
+        file=sys.stderr,
+    )
+if stale_doc_count > 0:
+    print(f"  {stale_doc_count} authoritative docs exceed freshness threshold", file=sys.stderr)
+if stale_binding_count > 0:
+    print(f"  {stale_binding_count} normative bindings exceed freshness threshold", file=sys.stderr)
+
+if failures:
+    print("D58 FAIL: SSOT freshness violations detected", file=sys.stderr)
+    raise SystemExit(1)
+
+print(f"D58 PASS: SSOT freshness valid (threshold={threshold}d)")
 PY
-    return
-  fi
-
-  if date --version >/dev/null 2>&1; then
-    date -d "$ds" +%s 2>/dev/null || echo 0
-    return
-  fi
-
-  date -j -f "%Y-%m-%d" "$ds" +%s 2>/dev/null || echo 0
-}
-
-[[ -f "$REGISTRY" ]] || { err "SSOT_REGISTRY.yaml not found"; exit 1; }
-command -v yq >/dev/null 2>&1 || { err "yq not found"; exit 1; }
-
-# Get current date as epoch
-NOW=$(date +%s)
-
-# Iterate all SSOTs with last_reviewed
-ssot_count=$(yq '.ssots | length' "$REGISTRY")
-STALE=0
-for ((i=0; i<ssot_count; i++)); do
-  id=$(yq -r ".ssots[$i].id" "$REGISTRY")
-  reviewed=$(yq -r ".ssots[$i].last_reviewed" "$REGISTRY")
-
-  [[ "$reviewed" == "null" || -z "$reviewed" ]] && continue
-
-  reviewed_epoch=$(parse_epoch_date "$reviewed")
-
-  [[ "$reviewed_epoch" -eq 0 ]] && continue
-
-  age_days=$(( (NOW - reviewed_epoch) / 86400 ))
-  if [[ "$age_days" -gt "$THRESHOLD" ]]; then
-    err "$id: last_reviewed=$reviewed (${age_days}d ago, threshold=${THRESHOLD}d)"
-    STALE=$((STALE + 1))
-  fi
-done
-
-if [[ "$STALE" -gt 0 ]]; then
-  echo "  $STALE SSOTs exceed freshness threshold of ${THRESHOLD} days" >&2
-fi
-
-# Second pass: authoritative governance docs with missing/stale last_verified
-GOV_DIR="$SP/docs/governance"
-MISSING_LV=0
-STALE_LV=0
-if [[ -d "$GOV_DIR" ]]; then
-  while IFS= read -r docfile; do
-    # Extract status from frontmatter (first 10 lines)
-    doc_status=$(head -10 "$docfile" | grep -E '^status:\s' | head -1 | sed 's/^status:\s*//' | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
-    [[ "$doc_status" == "authoritative" ]] || continue
-
-    lv=$(head -15 "$docfile" | grep -E '^last_verified:\s' | head -1 | sed 's/^last_verified:\s*//' | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
-    basename_doc=$(basename "$docfile")
-
-    if [[ -z "$lv" || "$lv" == "null" ]]; then
-      echo "  WARN: $basename_doc (authoritative) missing last_verified" >&2
-      MISSING_LV=$((MISSING_LV + 1))
-      continue
-    fi
-
-    lv_epoch=$(parse_epoch_date "$lv")
-    [[ "$lv_epoch" -eq 0 ]] && continue
-
-    lv_age=$(( (NOW - lv_epoch) / 86400 ))
-    if [[ "$lv_age" -gt "$THRESHOLD" ]]; then
-      err "$basename_doc: last_verified=$lv (${lv_age}d ago, threshold=${THRESHOLD}d)"
-      STALE_LV=$((STALE_LV + 1))
-    fi
-  done < <(find "$GOV_DIR" -maxdepth 1 -name '*.md' -type f | sort)
-
-  if [[ "$MISSING_LV" -gt 0 ]]; then
-    echo "  $MISSING_LV authoritative docs missing last_verified (warning only)" >&2
-  fi
-  if [[ "$STALE_LV" -gt 0 ]]; then
-    echo "  $STALE_LV authoritative docs exceed freshness threshold" >&2
-  fi
-fi
-
-# Third pass: binding files with updated: field (non-exempt only)
-BINDINGS_DIR="$SP/ops/bindings"
-EXEMPTIONS_FILE="$BINDINGS_DIR/binding.freshness.exemptions.yaml"
-STALE_BIND=0
-
-if [[ -d "$BINDINGS_DIR" && -f "$EXEMPTIONS_FILE" ]]; then
-  # Build exempt file list
-  exempt_files=""
-  if command -v yq >/dev/null 2>&1; then
-    exempt_count=$(yq '.exempt | length' "$EXEMPTIONS_FILE")
-    for ((j=0; j<exempt_count; j++)); do
-      ef=$(yq -r ".exempt[$j].file" "$EXEMPTIONS_FILE")
-      exempt_files="$exempt_files|$ef"
-    done
-  fi
-
-  for binding in "$BINDINGS_DIR"/*.yaml; do
-    [[ -f "$binding" ]] || continue
-    bname=$(basename "$binding")
-
-    # Skip the exemptions file itself
-    [[ "$bname" == "binding.freshness.exemptions.yaml" ]] && continue
-
-    # Skip exempt files
-    if echo "$exempt_files" | grep -qF "|$bname"; then
-      continue
-    fi
-
-    # Extract updated: from first 20 lines (top-level field)
-    bind_updated=$(head -20 "$binding" | grep -E '^updated:\s' | head -1 | sed 's/^updated:\s*//' | tr -d '"' | tr -d "'" | xargs 2>/dev/null || true)
-    [[ -z "$bind_updated" || "$bind_updated" == "null" ]] && continue
-
-    bind_epoch=$(parse_epoch_date "$bind_updated")
-    [[ "$bind_epoch" -eq 0 ]] && continue
-
-    bind_age=$(( (NOW - bind_epoch) / 86400 ))
-    if [[ "$bind_age" -gt "$THRESHOLD" ]]; then
-      err "$bname: updated=$bind_updated (${bind_age}d ago, threshold=${THRESHOLD}d)"
-      STALE_BIND=$((STALE_BIND + 1))
-    fi
-  done
-
-  if [[ "$STALE_BIND" -gt 0 ]]; then
-    echo "  $STALE_BIND normative bindings exceed freshness threshold" >&2
-  fi
-fi
-
-if [[ "$FAIL" -eq 1 ]]; then
-  echo "D58 FAIL: SSOT freshness violations detected" >&2
-  exit 1
-fi
-echo "D58 PASS: SSOT freshness valid (threshold=${THRESHOLD}d)"
-exit 0
