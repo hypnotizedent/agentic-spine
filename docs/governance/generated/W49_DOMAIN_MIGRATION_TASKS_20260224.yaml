@@ -1,0 +1,257 @@
+# W49 Domain Platform Migration — Execution Tasks
+# Status: plan-only (no execution authorized)
+# Created: 2026-02-23
+# Task ID: SPINE-W49-DOMAIN-PLATFORM-MIGRATION-PLAN-ONLY-20260224
+# Canonical roots: ops/bindings/domain.canonical.roots.yaml
+#
+# Only canonical domain roots (mintprints.com, mintprints.co, ronny.works) appear here.
+# Non-canonical domains are tracked in workbench legacy docs only.
+
+version: 1
+created_at: "2026-02-23"
+owner: "@ronny"
+execution_authorized: false
+
+tasks:
+
+  # ─── Phase 0: Blocker Resolution ──────────────────────────────────────────
+
+  - id: T01
+    phase: 0
+    title: "Inventory mintprints.com Cloudflare zone"
+    description: >
+      Query Cloudflare API (zones list) or dashboard to find mintprints.com zone ID.
+      If zone does not exist, create it. Add zone ID to cloudflare.inventory.yaml
+      and domain.portfolio.registry.yaml.
+    blocker_ref: B1
+    domain: mintprints.com
+    risk: none
+    mutates_infra: false
+    status: pending
+
+  - id: T02
+    phase: 0
+    title: "Export mintprints.com DNS baseline"
+    description: >
+      Export full DNS record set for mintprints.com from Cloudflare.
+      Save to workbench:infra/cloudflare/exports/dns-records-mintprints-com-YYYY-MM-DD.json.
+      Document MX, SPF, DKIM, DMARC records for Microsoft 365.
+    blocker_ref: [B2, B5]
+    domain: mintprints.com
+    risk: none
+    mutates_infra: false
+    status: pending
+
+  - id: T03
+    phase: 0
+    title: "Export ronny.works email forwarding rules"
+    description: >
+      Log into Namecheap dashboard. Document all email forwarding rules for ronny.works
+      (source address -> destination address). Save to workbench or spine for reference.
+    blocker_ref: B3
+    domain: ronny.works
+    risk: none
+    mutates_infra: false
+    status: pending
+
+  - id: T04
+    phase: 0
+    title: "Verify domain expiry dates"
+    description: >
+      Check current expiry dates for all 3 canonical domains via Namecheap dashboard.
+      Update domain.portfolio.registry.yaml with verified dates.
+      Flag any domains expiring within 90 days (must renew before transfer).
+    blocker_ref: B4
+    domain: all
+    risk: none
+    mutates_infra: false
+    status: pending
+
+  - id: T05
+    phase: 0
+    title: "Document Shopify DNS requirements for mintprints.com"
+    description: >
+      Check Shopify admin for required DNS records (A record, CNAME, TXT verification).
+      Document which records are Shopify-mandatory. Verify these exist in CF DNS.
+    blocker_ref: B6
+    domain: mintprints.com
+    risk: none
+    mutates_infra: false
+    status: pending
+
+  # ─── Phase 1: Wave 1 — ronny.works ─────────────────────────────────────────
+
+  - id: T10
+    phase: 1
+    wave: W1
+    title: "Migrate ronny.works email forwarding to Cloudflare Email Routing"
+    description: >
+      Configure Cloudflare Email Routing with same forwarding rules as Namecheap.
+      Update MX records in CF DNS. Update SPF record. Test send/receive.
+    domain: ronny.works
+    risk: medium
+    mutates_infra: true
+    gate: G2
+    depends_on: [T03]
+    status: pending
+
+  - id: T11
+    phase: 1
+    wave: W1
+    title: "Pass G2 email migration gate for ronny.works"
+    domain: ronny.works
+    risk: none
+    mutates_infra: false
+    gate: G2
+    depends_on: [T10]
+    status: pending
+
+  - id: T12
+    phase: 1
+    wave: W1
+    title: "Transfer ronny.works to Cloudflare Registrar"
+    description: >
+      Unlock at Namecheap. Get EPP code. Transfer. Approve ICANN.
+      Verify all 25+ tunnel-routed services respond. Verify email.
+    domain: ronny.works
+    risk: medium
+    mutates_infra: true
+    gate: G3
+    depends_on: [T04, T11]
+    status: pending
+
+  - id: T13
+    phase: 1
+    wave: W1
+    title: "Validate W1 — ronny.works at Cloudflare Registrar"
+    description: >
+      Run G3 for ronny.works. All services up, email working, WHOIS correct.
+      7-day soak before W2.
+    domain: ronny.works
+    risk: none
+    mutates_infra: false
+    gate: G3
+    depends_on: [T12]
+    status: pending
+
+  # ─── Phase 2: Wave 2 — mintprints.co ───────────────────────────────────────
+
+  - id: T20
+    phase: 2
+    wave: W2
+    title: "Transfer mintprints.co to Cloudflare Registrar"
+    description: >
+      Unlock at Namecheap. Get EPP code. Transfer. Approve ICANN.
+      Verify all 16 tunnel-routed services. Verify Resend email delivery.
+    domain: mintprints.co
+    risk: medium
+    mutates_infra: true
+    gate: G3
+    depends_on: [T04, T13]
+    status: pending
+
+  - id: T21
+    phase: 2
+    wave: W2
+    title: "Validate W2 — mintprints.co at Cloudflare Registrar"
+    description: >
+      Run G3 for mintprints.co. customer.mintprints.co reachable.
+      Test transactional email send via Resend. 7-day soak before W3.
+    domain: mintprints.co
+    risk: none
+    mutates_infra: false
+    gate: G3
+    depends_on: [T20]
+    status: pending
+
+  # ─── Phase 3: Wave 3 — mintprints.com ──────────────────────────────────────
+
+  - id: T30
+    phase: 3
+    wave: W3
+    title: "Run G1 email parity gate for mintprints.com"
+    description: >
+      Execute all 8 G1 checks: MX, SPF, DKIM, DMARC parity + send/receive matrix.
+      Document results. Must all pass before transfer.
+    domain: mintprints.com
+    risk: none
+    mutates_infra: false
+    gate: G1
+    depends_on: [T01, T02, T05, T21]
+    status: pending
+
+  - id: T31
+    phase: 3
+    wave: W3
+    title: "Lower mintprints.com DNS TTLs to 60s"
+    description: >
+      48h before transfer: lower all mintprints.com DNS record TTLs to 60s.
+      This enables fast rollback if records need changing.
+    domain: mintprints.com
+    risk: low
+    mutates_infra: true
+    depends_on: [T30]
+    status: pending
+
+  - id: T32
+    phase: 3
+    wave: W3
+    title: "Transfer mintprints.com to Cloudflare Registrar"
+    description: >
+      Unlock at Namecheap. Get EPP code. Transfer. Approve ICANN.
+      Monitor Outlook email during transfer. Verify Shopify storefront.
+    domain: mintprints.com
+    risk: high
+    mutates_infra: true
+    gate: [G1, G3]
+    depends_on: [T31]
+    status: pending
+
+  - id: T33
+    phase: 3
+    wave: W3
+    title: "Validate W3 — mintprints.com at Cloudflare Registrar"
+    description: >
+      Run G1 + G3 for mintprints.com. Full send/receive email matrix.
+      Shopify loads. WHOIS correct. 7-day soak.
+    domain: mintprints.com
+    risk: none
+    mutates_infra: false
+    gate: [G1, G3]
+    depends_on: [T32]
+    status: pending
+
+  - id: T34
+    phase: 3
+    wave: W3
+    title: "Restore mintprints.com DNS TTLs to 3600s"
+    domain: mintprints.com
+    risk: none
+    mutates_infra: true
+    depends_on: [T33]
+    status: pending
+
+  # ─── Phase 4: Cleanup ──────────────────────────────────────────────────────
+
+  - id: T40
+    phase: 4
+    title: "Update all SSOT files"
+    description: >
+      Update domain.portfolio.registry.yaml (registrar: cloudflare for all).
+      Update cloudflare.inventory.yaml with any new zone IDs.
+    domain: all
+    risk: none
+    mutates_infra: false
+    depends_on: [T34]
+    status: pending
+
+summary:
+  total_tasks: 17
+  phase_0_blockers: 5
+  phase_1_w1_tasks: 4
+  phase_2_w2_tasks: 2
+  phase_3_w3_tasks: 5
+  phase_4_cleanup: 1
+  mutating_tasks: 7
+  non_mutating_tasks: 10
+  estimated_calendar_weeks: "4-5 (minimum 7-day soak between waves)"

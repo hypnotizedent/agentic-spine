@@ -1,0 +1,193 @@
+# Status: authoritative
+# Last verified: 2026-02-23
+# Scope: domain-portfolio-ssot-v1
+#
+# Purpose:
+#   Machine-readable SSOT for canonical domain portfolio.
+#   Only domains listed in domain.canonical.roots.yaml may appear here.
+#   D200 gate enforces this constraint.
+#
+# Cross-references:
+#   - ops/bindings/domain.canonical.roots.yaml (canonical roots — D200 gate)
+#   - docs/governance/DOMAIN_ROUTING_REGISTRY.yaml (hostname-level routing)
+#   - docs/governance/SERVICE_REGISTRY.yaml (service-level inventory)
+#   - ops/bindings/cloudflare.inventory.yaml (Cloudflare zone/tunnel IDs)
+#   - ops/bindings/communications.stack.contract.yaml (email routing)
+#   - ops/bindings/communications.providers.contract.yaml (transactional email)
+#
+# Non-canonical domains (brand protection, parked, legacy) are tracked in
+#   workbench:docs/legacy/infrastructure/reference/domains/DOMAIN_REGISTRY.md only.
+#
+# Update procedure (docs-only):
+#   1) Verify registrar state via Namecheap dashboard (read-only).
+#   2) Verify DNS state via Cloudflare dashboard or API (read-only).
+#   3) Update this file with any changes.
+#   4) Run: ./bin/ops cap run verify.route.recommend
+
+version: 1
+updated_at: "2026-02-23"
+owner: "@ronny"
+
+# Canonical roots only. DNS authority already delegated to Cloudflare for all zones.
+# Migration target: Cloudflare Registrar for all domains.
+
+domains:
+  - domain: mintprints.com
+    business_zone: mintprints
+    registrar: namecheap
+    dns_authority: cloudflare
+    nameservers: [TBD]  # Cloudflare NS — zone ID not yet inventoried
+    cloudflare_zone_id: null  # NOT in cloudflare.inventory.yaml — blocker
+    email_authority:
+      provider: microsoft-365
+      mx_target: "outlook (Microsoft 365)"
+      spf: "TBD"
+      dkim: "TBD — Microsoft 365 managed"
+      dmarc: "TBD"
+    web_authority:
+      origin: "shopify (storefront)"
+      proxy: none
+      note: "Public Shopify storefront. Separate from self-hosted mint-os/mint-apps stack."
+    services:
+      - microsoft-365-email
+      - shopify-storefront
+    criticality: P0
+    migration_wave: W3
+    rollback_owner: "@ronny"
+    expiry: "2025-12-27"  # Source: legacy DOMAIN_REGISTRY.md — verify current
+    auto_renew: true
+    notes: >
+      Primary business domain. Microsoft 365 email is the highest-risk dependency.
+      Shopify storefront is the public customer-facing website.
+      Must be LAST in migration wave order. Requires email parity gate before transfer.
+      Cloudflare zone ID unknown — not inventoried in cloudflare.inventory.yaml.
+
+  - domain: mintprints.co
+    business_zone: mintprints
+    registrar: namecheap
+    dns_authority: cloudflare
+    nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]
+    cloudflare_zone_id: "8455a1754ffe2f296d74e985a89069f3"
+    email_authority:
+      provider: resend
+      mx_target: "inbound-smtp.us-east-1.amazonaws.com"
+      spf: "v=spf1 include:_spf.resend.com ~all"
+      dkim: "resend._domainkey (RSA key configured)"
+      dmarc: "v=DMARC1; p=none;"
+    web_authority:
+      origin: "cloudflare-tunnel (homelab-tunnel)"
+      proxy: cloudflare
+      note: "16 subdomains via CF tunnel. artwork via CF Pages."
+    services:
+      - mint-os-admin
+      - mint-os-production
+      - mint-os-kanban
+      - quote-page
+      - files-api
+      - pricing
+      - shipping
+      - suppliers
+      - estimator
+      - mcp
+      - minio
+      - stock-dst
+      - artwork-browser
+      - resend-transactional-email
+    criticality: P1
+    migration_wave: W2
+    rollback_owner: "@ronny"
+    expiry: "2025-12-26"  # Source: legacy DOMAIN_REGISTRY.md — verify current
+    auto_renew: true
+    notes: >
+      Operational business domain. All mint-os and mint-apps services route through
+      Cloudflare tunnel. Transactional email via Resend. DNS fully managed by Cloudflare.
+      Active customer-facing subdomains (customer, estimator, pricing).
+
+  - domain: ronny.works
+    business_zone: ronny
+    registrar: namecheap
+    dns_authority: cloudflare
+    nameservers: [TBD]  # Cloudflare NS — need to verify
+    cloudflare_zone_id: "6d3f8f903534aafb27fe1ea2b1bd7269"
+    email_authority:
+      provider: namecheap-email-forwarding
+      mx_target: "eforward1-5.registrar-servers.com"
+      spf: "v=spf1 include:spf.efwd.registrar-servers.com ~all"
+      dkim: none
+      dmarc: none
+    web_authority:
+      origin: "cloudflare-tunnel (homelab-tunnel)"
+      proxy: cloudflare
+      note: "25+ subdomains via CF tunnel. Root A record at 173.203.204.123."
+    services:
+      - home-assistant
+      - immich
+      - jellyfin
+      - navidrome
+      - grafana
+      - n8n
+      - open-webui
+      - gitea
+      - firefly-iii
+      - ghostfolio
+      - paperless-ngx
+      - vaultwarden
+      - infisical
+      - authentik
+      - pihole
+      - dashy
+      - jellyseerr
+      - spotisub
+      - minio
+      - mail-archiver
+      - spine-mailroom-bridge
+    criticality: P1
+    migration_wave: W1
+    rollback_owner: "@ronny"
+    expiry: "2026-01-15"  # Source: legacy DOMAIN_REGISTRY.md — verify current
+    auto_renew: true
+    notes: >
+      Personal/home/media domain. 25+ self-hosted services via CF tunnel.
+      Email forwarding still uses Namecheap registrar servers — must migrate
+      MX to Cloudflare Email Routing or Stalwart before registrar transfer.
+      spine.ronny.works runs Stalwart (VM 214) for ops email.
+
+# Migration wave definitions (canonical roots only)
+waves:
+  W1:
+    label: "Personal/home infrastructure"
+    domains: [ronny.works]
+    risk: medium
+    email_impact: "MX migration required (Namecheap forwarding -> CF Email Routing or Stalwart)"
+    service_impact: "25+ tunnel-routed services (DNS already at CF — no service disruption expected)"
+    estimated_domains: 1
+    prerequisite: "ronny.works email forwarding migrated off Namecheap"
+
+  W2:
+    label: "Business operations"
+    domains: [mintprints.co]
+    risk: medium
+    email_impact: "Resend transactional email (DNS already at CF — no email disruption expected)"
+    service_impact: "16 tunnel-routed business services"
+    estimated_domains: 1
+    prerequisite: "W1 validated, customer-facing service health confirmed"
+
+  W3:
+    label: "Business primary"
+    domains: [mintprints.com]
+    risk: high
+    email_impact: "Microsoft 365 email — MUST preserve MX/SPF/DKIM/DMARC parity"
+    service_impact: "Shopify storefront"
+    estimated_domains: 1
+    prerequisite: "W2 validated, email parity gate passed, Shopify DNS compatibility confirmed"
+
+# Summary
+summary:
+  total_domains: 3
+  canonical_roots_binding: "ops/bindings/domain.canonical.roots.yaml"
+  registrar: namecheap
+  target_registrar: cloudflare
+  dns_authority: cloudflare  # Already migrated for all domains
+  waves: 3
+  p0_domains: 1  # mintprints.com
+  p1_domains: 2  # mintprints.co, ronny.works

@@ -61,12 +61,26 @@ if [[ "$send_test_recipient" == *"@spine.mintprints.co" ]]; then
   fail_v "send_test.default_recipient uses stale Lane C domain: $send_test_recipient"
 fi
 
-# --- Check 4: No mintprintshop.com in any contract sender field ---
-for contract in "$STACK_CONTRACT" "$PROVIDER_CONTRACT"; do
-  if grep -q "mintprintshop\.com" "$contract" 2>/dev/null; then
-    fail_v "stale domain mintprintshop.com found in $(basename "$contract")"
-  fi
-done
+# --- Check 4: Contract email addresses must use canonical domain roots only ---
+ROOTS_FILE="$ROOT/ops/bindings/domain.canonical.roots.yaml"
+if [[ -f "$ROOTS_FILE" ]]; then
+  for contract in "$STACK_CONTRACT" "$PROVIDER_CONTRACT"; do
+    while IFS= read -r email_ref; do
+      [[ -z "$email_ref" ]] && continue
+      domain_part="${email_ref#*@}"
+      is_canonical=false
+      while IFS= read -r root; do
+        [[ -z "$root" || "$root" == "null" ]] && continue
+        case "$domain_part" in
+          "$root"|*."$root") is_canonical=true; break ;;
+        esac
+      done < <(yq e '.roots[].domain' "$ROOTS_FILE" 2>/dev/null)
+      if [[ "$is_canonical" == "false" ]]; then
+        fail_v "non-canonical domain in $(basename "$contract"): $email_ref"
+      fi
+    done < <(grep -oE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' "$contract" 2>/dev/null | sort -u)
+  done
+fi
 
 # --- Check 5: Provider contract must agree on Resend execution mode ---
 top_mode=$(yq e '.transactional.mode' "$PROVIDER_CONTRACT" 2>/dev/null)
