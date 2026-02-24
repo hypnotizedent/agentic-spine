@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-FINANCE-SIMPLEFIN-ACTIVATION-20260224
 created: 2026-02-24
-status: active
+status: closed
 owner: "@ronny"
 scope: finance
 priority: high

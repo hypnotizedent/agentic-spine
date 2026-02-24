@@ -104,9 +104,9 @@ if [[ -f "$PLAN_DOC" ]]; then
     if ! is_canonical "$domain_ref"; then
       fail_v "non-canonical domain in migration plan: $domain_ref"
     fi
-  done < <(grep -oE '\b[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.(com|co|works)\b' "$PLAN_DOC" 2>/dev/null \
+  done < <(grep -oE '\b[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.(com|co|works|clothing|design)\b' "$PLAN_DOC" 2>/dev/null \
     | grep -vE '\.(contract|stack|providers|policy|templates|delivery|sync|global|inventory|routing)\.' \
-    | grep -vE '(cloudflare\.com|namecheap\.com|shopify\.com|resend\.com|amazonaws\.com|amazonses\.com|pages\.dev|registrar-servers\.com|microsoft\.com)' \
+    | grep -vE '(cloudflare\.com|namecheap\.com|shopify\.com|myshopify\.com|resend\.com|amazonaws\.com|amazonses\.com|pages\.dev|registrar-servers\.com|microsoft\.com|icloud\.com|icloudmailadmin\.com|outlook\.com)' \
     | sort -u)
 fi
 

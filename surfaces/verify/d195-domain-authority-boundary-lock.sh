@@ -38,6 +38,11 @@ expected = {
         "owning_domains": ["communications", "core", "aof"],
         "mailbox_domain": "spine.ronny.works",
     },
+    "hypno": {
+        "owning_domains": ["hypno"],
+        "business_data_allowed": True,
+        "personal_data_allowed": False,
+    },
     "microsoft-provider": {
         "owning_domains": ["microsoft"],
         "role": "external_dependency_only",
@@ -115,5 +120,5 @@ if violations:
         print(f"D195 FAIL: {item}", file=sys.stderr)
     raise SystemExit(1)
 
-print("D195 PASS: domain authority boundary lock valid (zones=4, overlaps=0)")
+print("D195 PASS: domain authority boundary lock valid (zones=5, overlaps=0)")
 PY
