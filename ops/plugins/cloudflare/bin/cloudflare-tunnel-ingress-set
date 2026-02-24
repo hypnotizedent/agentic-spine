@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# cloudflare-tunnel-ingress-set — add or remove a tunnel ingress rule (hostname -> service)
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+# Re-exec under secrets injection BEFORE arg parsing (args pass through)
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+TUNNEL_NAME_DEFAULT="homelab-tunnel"
+TUNNEL_NAME="${TUNNEL_NAME_DEFAULT}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  cloudflare-tunnel-ingress-set --hostname HOST --service SVC [OPTIONS]
+  cloudflare-tunnel-ingress-set --remove --hostname HOST [OPTIONS]
+
+Required:
+  --hostname  HOST  Public hostname (e.g., mintprints.com)
+  --service   SVC   Backend service URL (e.g., http://quote-page:3341)
+
+Actions:
+  (default)         Add or update an ingress rule
+  --remove          Remove the ingress rule for --hostname
+
+Optional:
+  --tunnel    NAME  Tunnel name (default: homelab-tunnel)
+  --json            Emit JSON output
+  --dry-run         Show what would be done without making changes
+
+Adds/updates/removes a single ingress rule in the tunnel configuration.
+The catch-all rule is always preserved as the last entry.
+EOF
+  exit 0
+}
+
+# Defaults
+HOSTNAME="" SERVICE="" REMOVE=0 JSON_OUT=0 DRY_RUN=0
+
+while (( $# > 0 )); do
+  case "$1" in
+    --hostname) HOSTNAME="$2"; shift 2 ;;
+    --service)  SERVICE="$2"; shift 2 ;;
+    --tunnel)   TUNNEL_NAME="$2"; shift 2 ;;
+    --remove)   REMOVE=1; shift ;;
+    --json)     JSON_OUT=1; shift ;;
+    --dry-run)  DRY_RUN=1; shift ;;
+    -h|--help)  usage ;;
+    --)         shift ;;
+    *)          echo "STOP: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -n "$HOSTNAME" ]] || { echo "STOP: --hostname required" >&2; exit 1; }
+if [[ "$REMOVE" -eq 0 && -z "$SERVICE" ]]; then
+  echo "STOP: --service required (or use --remove)" >&2; exit 1
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+[[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]  || { echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2; exit 2; }
+[[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || { echo "STOP: CLOUDFLARE_ACCOUNT_ID missing" >&2; exit 2; }
+
+# Resolve tunnel ID from binding
+TUNNEL_ID="${CLOUDFLARE_TUNNEL_ID:-}"
+if [[ -z "${TUNNEL_ID:-}" ]]; then
+  [[ -f "$BINDING_FILE" ]] || { echo "STOP: binding missing: $BINDING_FILE" >&2; exit 2; }
+  TUNNEL_ID="$(python3 - "$BINDING_FILE" "$TUNNEL_NAME" <<'PY'
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+for t in data.get("tunnels", []):
+    if (t.get("name") or "").strip() == name:
+        tid = (t.get("id") or "").strip()
+        if tid:
+            print(tid); sys.exit(0)
+sys.exit(0)
+PY
+)"
+fi
+
+[[ -n "${TUNNEL_ID:-}" ]] || { echo "STOP: tunnel id not found for '$TUNNEL_NAME'" >&2; exit 2; }
+
+CONFIG_URL="${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations"
+
+# GET current tunnel configuration
+CURRENT=$(curl -fsS \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "$CONFIG_URL" 2>&1) || {
+  echo "STOP: failed to fetch tunnel config" >&2
+  echo "$CURRENT" >&2
+  exit 3
+}
+
+# Merge the new rule into the config
+NEW_CONFIG=$(echo "$CURRENT" | python3 -c "
+import json, sys
+
+hostname = sys.argv[1]
+service = sys.argv[2]
+remove = sys.argv[3] == '1'
+
+data = json.load(sys.stdin)
+if not data.get('success', False):
+    print('STOP: Cloudflare API returned success=false', file=sys.stderr)
+    sys.exit(3)
+
+result = data.get('result', {})
+cfg = result.get('config') or result.get('configuration') or result
+ingress = cfg.get('ingress', [])
+
+# Separate catch-all (no hostname) from hostname rules
+catch_all = [r for r in ingress if not r.get('hostname')]
+rules = [r for r in ingress if r.get('hostname')]
+
+# Check if hostname already exists
+existing_idx = None
+for i, r in enumerate(rules):
+    if (r.get('hostname') or '').strip().lower() == hostname.lower():
+        existing_idx = i
+        break
+
+if remove:
+    if existing_idx is None:
+        print(json.dumps({'action': 'noop', 'reason': f'hostname {hostname} not found in ingress'}))
+        sys.exit(0)
+    removed_rule = rules.pop(existing_idx)
+    action = 'removed'
+else:
+    new_rule = {'hostname': hostname, 'service': service}
+    if existing_idx is not None:
+        old_service = rules[existing_idx].get('service', '')
+        rules[existing_idx] = new_rule
+        action = 'updated'
+    else:
+        rules.append(new_rule)
+        action = 'added'
+
+# Reassemble: hostname rules + catch-all at end
+new_ingress = rules + catch_all
+new_cfg = dict(cfg)
+new_cfg['ingress'] = new_ingress
+
+# Output the new config and action metadata
+output = {
+    'action': action,
+    'hostname': hostname,
+    'service': service if not remove else '',
+    'config': {'config': new_cfg},
+    'rule_count': len(rules),
+}
+print(json.dumps(output))
+" "$HOSTNAME" "$SERVICE" "$REMOVE") || {
+  echo "STOP: failed to merge ingress rule" >&2
+  exit 3
+}
+
+ACTION=$(echo "$NEW_CONFIG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('action',''))")
+
+if [[ "$ACTION" == "noop" ]]; then
+  REASON=$(echo "$NEW_CONFIG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reason',''))")
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    echo "{\"capability\": \"cloudflare.tunnel.ingress.set\", \"status\": \"noop\", \"reason\": \"$REASON\"}"
+  else
+    echo "cloudflare.tunnel.ingress.set"
+    echo "action: noop"
+    echo "reason: $REASON"
+    echo "status: OK"
+  fi
+  exit 0
+fi
+
+RULE_COUNT=$(echo "$NEW_CONFIG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('rule_count',0))")
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    echo "{\"capability\": \"cloudflare.tunnel.ingress.set\", \"dry_run\": true, \"action\": \"$ACTION\", \"hostname\": \"$HOSTNAME\", \"service\": \"$SERVICE\", \"rule_count\": $RULE_COUNT}"
+  else
+    echo "cloudflare.tunnel.ingress.set (dry-run)"
+    echo "action: $ACTION"
+    echo "hostname: $HOSTNAME"
+    [[ "$REMOVE" -eq 0 ]] && echo "service: $SERVICE"
+    echo "rule_count: $RULE_COUNT"
+    echo "status: DRY-RUN"
+  fi
+  exit 0
+fi
+
+# PUT the new configuration
+PUT_PAYLOAD=$(echo "$NEW_CONFIG" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['config']))")
+
+RESULT=$(curl -fsS -X PUT \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "$PUT_PAYLOAD" \
+  "$CONFIG_URL" 2>&1) || {
+  echo "STOP: failed to PUT tunnel config" >&2
+  echo "$RESULT" >&2
+  exit 4
+}
+
+# Verify success
+SUCCESS=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('success', False))" 2>/dev/null || echo "False")
+if [[ "$SUCCESS" != "True" ]]; then
+  echo "STOP: Cloudflare API returned success=false on PUT" >&2
+  echo "$RESULT" >&2
+  exit 4
+fi
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  python3 -c "
+import json
+print(json.dumps({
+    'capability': 'cloudflare.tunnel.ingress.set',
+    'status': 'ok',
+    'action': '$ACTION',
+    'hostname': '$HOSTNAME',
+    'service': '$([ "$REMOVE" -eq 0 ] && echo "$SERVICE" || echo "")',
+    'rule_count': $RULE_COUNT,
+}, indent=2))
+"
+else
+  echo "cloudflare.tunnel.ingress.set"
+  echo "action: $ACTION"
+  echo "hostname: $HOSTNAME"
+  [[ "$REMOVE" -eq 0 ]] && echo "service: $SERVICE"
+  echo "rule_count: $RULE_COUNT"
+  echo "status: OK"
+fi
