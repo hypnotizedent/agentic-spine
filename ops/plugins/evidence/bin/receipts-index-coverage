@@ -56,8 +56,16 @@ if [[ -n "$POLICY_FILE" && ! -f "$POLICY_FILE" ]]; then
   exit 1
 fi
 command -v python3 >/dev/null 2>&1 || { echo "FAIL: missing dependency python3" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "FAIL: missing dependency yq" >&2; exit 1; }
 
-python3 - "$INDEX_FILE" "$RECEIPTS_ROOT" "$POLICY_FILE" "$JSON_MODE" <<'PY'
+INDEX_JSON="$(mktemp "/tmp/spine-receipts-index.XXXXXX.json")"
+trap 'rm -f "$INDEX_JSON" 2>/dev/null || true' EXIT INT TERM
+if ! yq -o=json "." "$INDEX_FILE" > "$INDEX_JSON" 2>/dev/null; then
+  echo "FAIL: unable to convert index YAML to JSON: $INDEX_FILE" >&2
+  exit 1
+fi
+
+python3 - "$INDEX_JSON" "$RECEIPTS_ROOT" "$POLICY_FILE" "$JSON_MODE" "$INDEX_FILE" <<'PY'
 from __future__ import annotations
 
 import datetime as dt
@@ -67,10 +75,11 @@ from pathlib import Path
 
 import yaml
 
-index_path = Path(sys.argv[1])
+index_json_path = Path(sys.argv[1])
 receipts_root = Path(sys.argv[2])
 policy_arg = (sys.argv[3] or "").strip()
 json_mode = sys.argv[4] == "1"
+index_file_display = sys.argv[5]
 policy_path = Path(policy_arg) if policy_arg else None
 
 
@@ -78,11 +87,11 @@ def load_yaml(path: Path):
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
 
-
 try:
-    index = load_yaml(index_path)
+    with index_json_path.open("r", encoding="utf-8") as handle:
+        index = json.load(handle) or {}
 except Exception as exc:
-    print(f"FAIL: unable to parse index: {exc}", file=sys.stderr)
+    print(f"FAIL: unable to parse converted index JSON: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
 policy = {}
@@ -211,7 +220,7 @@ elif warnings:
 
 result = {
     "capability": "receipts.index.coverage",
-    "index": str(index_path),
+    "index": str(index_file_display),
     "receipts_root": str(receipts_root),
     "sessions_total": corpus_count,
     "indexed_total": indexed_count,
