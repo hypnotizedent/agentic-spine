@@ -520,22 +520,33 @@ def observed_items_for_domain(root: Path, domain: str) -> list[dict]:
     items: list[dict] = []
 
     if domain == "network":
-        observed = load_yaml(root / "ops/bindings/home.device.registry.yaml")
-        for row in observed.get("devices") or []:
-            if not isinstance(row, dict):
-                continue
-            item_id = str(row.get("id", "")).strip()
-            if not item_id:
-                continue
-            items.append(
-                {
-                    "id": item_id,
-                    "class": "device",
-                    "source_system": "home.device.registry",
-                    "first_seen_at": "2026-02-23T00:00:00Z",
-                    "location_or_site": "home",
-                }
-            )
+        home_observed = load_yaml(root / "ops/bindings/network.unifi.home.clients.observed.yaml")
+        shop_observed = load_yaml(root / "ops/bindings/network.unifi.shop.clients.observed.yaml")
+
+        def add_network_rows(doc: dict, source_name: str):
+            source_stamp = str(doc.get("generated_at") or now_iso())
+            for row in doc.get("devices") or []:
+                if not isinstance(row, dict):
+                    continue
+                item_id = str(row.get("id", "")).strip()
+                if not item_id:
+                    continue
+                observed_status = str(row.get("status", "active")).strip().lower()
+                if observed_status not in {"active", "online", "present"}:
+                    continue
+                site = str(row.get("site", "")).strip() or "unknown"
+                items.append(
+                    {
+                        "id": item_id,
+                        "class": "device",
+                        "source_system": source_name,
+                        "first_seen_at": source_stamp,
+                        "location_or_site": site,
+                    }
+                )
+
+        add_network_rows(home_observed, "network.unifi.home.clients.observed")
+        add_network_rows(shop_observed, "network.unifi.shop.clients.observed")
         return items
 
     if domain == "ha":
@@ -579,37 +590,33 @@ def observed_items_for_domain(root: Path, domain: str) -> list[dict]:
         return items
 
     if domain == "media":
-        media = load_yaml(root / "ops/bindings/media.services.yaml")
-        services = media.get("services") if isinstance(media.get("services"), dict) else {}
-        source_stamp = str(media.get("updated_at") or "2026-02-23")
-        if len(source_stamp) == 10:
-            source_stamp = f"{source_stamp}T00:00:00Z"
+        snapshot = load_yaml(root / "ops/bindings/media.content.snapshot.yaml")
+        source_stamp = str(snapshot.get("generated_at") or now_iso())
 
-        for service_id, row in services.items():
-            if not isinstance(row, dict):
-                continue
-            sid = str(service_id).strip()
-            if not sid:
-                continue
-            description = str(row.get("description", "")).lower()
-            if sid in {"radarr", "jellyfin"} or "movie" in description:
-                item_class = "movie"
-            elif sid in {"lidarr", "navidrome"} or "music" in description:
-                item_class = "music"
-            else:
-                continue
+        def add_media_rows(values, item_class: str):
+            if not isinstance(values, list):
+                return
+            for row in values:
+                if isinstance(row, str):
+                    item_id = row.strip()
+                elif isinstance(row, dict):
+                    item_id = str(row.get("id", "")).strip()
+                else:
+                    continue
+                if not item_id:
+                    continue
+                items.append(
+                    {
+                        "id": item_id,
+                        "class": item_class,
+                        "source_system": "media.content.snapshot",
+                        "first_seen_at": source_stamp,
+                        "location_or_site": "shop",
+                    }
+                )
 
-            vm = str(row.get("vm", "")).strip()
-            location = "shop" if vm else "unknown"
-            items.append(
-                {
-                    "id": sid,
-                    "class": item_class,
-                    "source_system": "media.services",
-                    "first_seen_at": source_stamp,
-                    "location_or_site": location,
-                }
-            )
+        add_media_rows(snapshot.get("movies"), "movie")
+        add_media_rows(snapshot.get("music"), "music")
         return items
 
     fail(f"unsupported reconcile domain: {domain}")

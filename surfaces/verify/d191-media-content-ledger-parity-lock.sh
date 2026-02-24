@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# TRIAGE: reconcile media.content.ledger.yaml with observed media.services movie/music surfaces before rerunning hygiene-weekly.
+# TRIAGE: reconcile media.content.snapshot.yaml item IDs against media.content.ledger.yaml before rerunning hygiene-weekly.
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 LEDGER="$ROOT/ops/bindings/media.content.ledger.yaml"
-OBSERVED="$ROOT/ops/bindings/media.services.yaml"
+OBSERVED="$ROOT/ops/bindings/media.content.snapshot.yaml"
 
 fail() {
   echo "D191 FAIL: $*" >&2
@@ -36,7 +36,7 @@ def load_yaml(path: Path):
     return data
 
 
-def parse_ts(value: str) -> datetime | None:
+def parse_dt(value: str):
     text = (value or "").strip()
     if not text:
         return None
@@ -53,7 +53,7 @@ def parse_ts(value: str) -> datetime | None:
         return None
 
 
-def parse_expires(value: str):
+def parse_date(value: str):
     text = (value or "").strip()
     if not text:
         return None
@@ -67,12 +67,45 @@ def parse_expires(value: str):
         return None
 
 
+def normalize_items(values, default_class: str):
+    out = []
+    if not isinstance(values, list):
+        return out
+    for row in values:
+        if isinstance(row, str):
+            item_id = row.strip()
+        elif isinstance(row, dict):
+            item_id = str(row.get("id", "")).strip()
+        else:
+            continue
+        if not item_id:
+            continue
+        out.append((item_id, default_class))
+    return out
+
+
 try:
     ledger = load_yaml(ledger_path)
     observed = load_yaml(observed_path)
 except Exception as exc:
     print(f"D191 FAIL: unable to parse bindings: {exc}", file=sys.stderr)
     raise SystemExit(1)
+
+violations: list[str] = []
+warnings: list[str] = []
+now = datetime.now(timezone.utc)
+
+freshness = observed.get("freshness_policy") if isinstance(observed.get("freshness_policy"), dict) else {}
+max_age_hours = int(freshness.get("max_age_hours", 24))
+generated_at = parse_dt(str(observed.get("generated_at", "")))
+if generated_at is None:
+    violations.append("media.content.snapshot generated_at missing or invalid")
+else:
+    observed_age_hours = (now - generated_at).total_seconds() / 3600.0
+    if observed_age_hours > max_age_hours:
+        violations.append(
+            f"media.content.snapshot stale ({observed_age_hours:.1f}h > {max_age_hours}h)"
+        )
 
 policy = ledger.get("grace_policy") if isinstance(ledger.get("grace_policy"), dict) else {}
 warn_under = int(policy.get("warn_under_hours", 24))
@@ -85,51 +118,37 @@ ledger_map = {
     if isinstance(row, dict) and str(row.get("id", "")).strip()
 }
 
-media_services = observed.get("services") if isinstance(observed.get("services"), dict) else {}
-observed_stamp = parse_ts(str(observed.get("updated_at", ""))) or datetime.now(timezone.utc)
+observed_items = []
+observed_items.extend(normalize_items(observed.get("movies"), "movie"))
+observed_items.extend(normalize_items(observed.get("music"), "music"))
 
-observed_items: dict[str, str] = {}
-for service_id, row in media_services.items():
-    if not isinstance(row, dict):
-        continue
-    sid = str(service_id).strip()
-    if not sid:
-        continue
-    desc = str(row.get("description", "")).lower()
-    if sid in {"radarr", "jellyfin"} or "movie" in desc:
-        observed_items[sid] = "movie"
-    elif sid in {"lidarr", "navidrome"} or "music" in desc:
-        observed_items[sid] = "music"
+allowed_ledger_status = {"approved", "ignored"}
 
-if not observed_items:
-    print("D191 PASS: no observed media movie/music surfaces found")
-    raise SystemExit(0)
-
-allowed = {"approved", "ignored"}
-warnings: list[str] = []
-violations: list[str] = []
-now = datetime.now(timezone.utc)
-
-for item_id, item_class in sorted(observed_items.items()):
+for item_id, item_class in observed_items:
     entry = ledger_map.get(item_id)
     if entry:
         status = str(entry.get("status", "")).strip().lower()
-        if status not in allowed:
+        if status not in allowed_ledger_status:
             violations.append(f"{item_id}: status must be approved|ignored (got {status or 'empty'})")
             continue
-        if status == "ignored":
-            expires = parse_expires(str(entry.get("expires_on", "")))
-            if expires is None:
-                violations.append(f"{item_id}: ignored items require valid expires_on")
-                continue
-            if expires < now.date():
-                violations.append(f"{item_id}: ignored expires_on is in the past ({expires.isoformat()})")
+
         entry_class = str(entry.get("class", "")).strip().lower()
         if entry_class and entry_class != item_class:
-            violations.append(f"{item_id}: class mismatch (ledger={entry_class}, observed={item_class})")
+            violations.append(f"{item_id}: class mismatch observed={item_class} ledger={entry_class}")
+
+        if status == "ignored":
+            expires_on = parse_date(str(entry.get("expires_on", "")))
+            if expires_on is None:
+                violations.append(f"{item_id}: ignored entries require valid expires_on")
+                continue
+            if expires_on < now.date():
+                violations.append(f"{item_id}: ignored expires_on is in the past ({expires_on.isoformat()})")
         continue
 
-    age_hours = (now - observed_stamp).total_seconds() / 3600.0
+    age_hours = 0.0
+    if generated_at is not None:
+        age_hours = (now - generated_at).total_seconds() / 3600.0
+
     if age_hours >= fail_at:
         violations.append(
             f"unledgered media {item_class} item {item_id} observed age={age_hours:.1f}h (fail threshold {fail_at}h)"
@@ -148,7 +167,5 @@ if violations:
     print(f"D191 FAIL: media content ledger parity violations ({len(violations)} finding(s))", file=sys.stderr)
     raise SystemExit(1)
 
-print(
-    f"D191 PASS: media content ledger parity valid ({len(observed_items)} observed, {len(ledger_map)} ledgered, warnings={len(warnings)})"
-)
+print(f"D191 PASS: media item ledger parity valid (observed={len(observed_items)} ledger={len(ledger_map)} warnings={len(warnings)})")
 PY
