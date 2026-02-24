@@ -120,6 +120,7 @@ def main() -> None:
 
     provider = str(home_section.get("provider", "")).strip()
     host = str(home_section.get("host", "")).strip()
+    remote_stack_path = str(home_section.get("remote_stack_path", "")).strip()
     write_mode = str(home_section.get("write_mode", "")).strip()
     if provider != "communications-calendar":
         fail(f"calendar home provider must be communications-calendar (actual={provider!r})")
@@ -171,27 +172,40 @@ def main() -> None:
         collection = collection + "/"
 
     remote_url = f"{base_url}{collection}{event_uid}.ics"
-    remote_put = {"attempted": False, "ok": False, "output": "", "url": remote_url}
+    remote_put = {"attempted": False, "ok": False, "output": "", "url": remote_url, "auth_source": "none"}
 
     if not args.local_only:
         username = read_secret_var("CALENDAR_HOME_USERNAME") or read_secret_var("RADICALE_ADMIN_USERNAME")
         password = read_secret_var("CALENDAR_HOME_PASSWORD") or read_secret_var("RADICALE_ADMIN_PASSWORD")
-        if not username or not password:
-            fail(
-                "missing calendar home credentials; set CALENDAR_HOME_USERNAME/CALENDAR_HOME_PASSWORD "
-                "(or RADICALE_ADMIN_USERNAME/RADICALE_ADMIN_PASSWORD)"
-            )
         if not base_url:
             fail("calendar.home.contract endpoint.base_url is required for remote write")
 
         remote_put["attempted"] = True
-        remote_cmd = (
-            "curl -fsS -u "
-            + shlex.quote(f"{username}:{password}")
-            + " -X PUT -H 'Content-Type: text/calendar; charset=utf-8' --data-binary @- "
-            + shlex.quote(remote_url)
-            + " >/dev/null"
-        )
+        if username and password:
+            remote_put["auth_source"] = "env"
+            remote_cmd = (
+                "curl -fsS -u "
+                + shlex.quote(f"{username}:{password}")
+                + " -X PUT -H 'Content-Type: text/calendar; charset=utf-8' --data-binary @- "
+                + shlex.quote(remote_url)
+                + " >/dev/null"
+            )
+        else:
+            if not remote_stack_path:
+                fail(
+                    "missing calendar home credentials and home.remote_stack_path unavailable for host auth fallback"
+                )
+            remote_put["auth_source"] = "host_env"
+            remote_cmd = (
+                "set -a; source "
+                + shlex.quote(f"{remote_stack_path}/.env")
+                + "; set +a; "
+                + "curl -fsS -u \"$RADICALE_ADMIN_USERNAME:$RADICALE_ADMIN_PASSWORD\" "
+                + "-X PUT -H 'Content-Type: text/calendar; charset=utf-8' --data-binary @- "
+                + shlex.quote(remote_url)
+                + " >/dev/null"
+            )
+
         ssh_cmd = [
             "ssh",
             "-o",
@@ -240,6 +254,7 @@ def main() -> None:
         print(f"remote_put_attempted: {str(remote_put['attempted']).lower()}")
         print(f"remote_put_ok: {str(remote_put['ok']).lower()}")
         if remote_put["attempted"]:
+            print(f"remote_auth_source: {remote_put['auth_source']}")
             print(f"remote_url: {remote_url}")
         print("status: OK")
 
