@@ -2,111 +2,15 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-INTAKE_DIR="$ROOT/mailroom/outbox/intake"
-AGENTS_BINDING="$ROOT/ops/bindings/agents.registry.yaml"
-LOCATIONS_BINDING="$ROOT/ops/bindings/inventory.locations.yaml"
-
-usage() {
-  cat <<'USAGE'
-platform.inventory.intake
-
-Usage:
-  platform-inventory-intake scaffold --class <part|material> --id <item_id> --owner-agent <agent_id> --site <site_id> --location-id <location_id> --runbook-path <path> [--dry-run]
-  platform-inventory-intake validate --file <path>
-
-Options:
-  --class <part|material>     Intake class
-  --id <item_id>              Item identifier
-  --owner-agent <agent_id>    Owner agent id from agents.registry.yaml
-  --site <site_id>            Site id
-  --location-id <location_id> Inventory location id from inventory.locations.yaml
-  --runbook-path <path>       Runbook path (repo-relative preferred)
-  --dry-run                   Print output only; do not write file
-  --file <path>               Intake envelope file to validate
-  -h, --help                  Show this help
-USAGE
-}
-
-fail() {
-  echo "platform.inventory.intake FAIL: $*" >&2
-  exit 1
-}
-
-[[ -f "$AGENTS_BINDING" ]] || fail "missing agents binding: $AGENTS_BINDING"
-[[ -f "$LOCATIONS_BINDING" ]] || fail "missing locations binding: $LOCATIONS_BINDING"
-command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
 
 if [[ "${1:-}" == "--" ]]; then
   shift
 fi
 
-SUBCOMMAND="${1:-}"
-[[ -n "$SUBCOMMAND" ]] || {
-  usage
-  exit 1
-}
-shift || true
-
-case "$SUBCOMMAND" in
-  scaffold)
-    CLASS=""
-    ITEM_ID=""
-    OWNER_AGENT=""
-    SITE_ID=""
-    LOCATION_ID=""
-    RUNBOOK_PATH=""
-    DRY_RUN=0
-
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --class)
-          CLASS="${2:-}"
-          shift 2
-          ;;
-        --id)
-          ITEM_ID="${2:-}"
-          shift 2
-          ;;
-        --owner-agent)
-          OWNER_AGENT="${2:-}"
-          shift 2
-          ;;
-        --site)
-          SITE_ID="${2:-}"
-          shift 2
-          ;;
-        --location-id)
-          LOCATION_ID="${2:-}"
-          shift 2
-          ;;
-        --runbook-path)
-          RUNBOOK_PATH="${2:-}"
-          shift 2
-          ;;
-        --dry-run)
-          DRY_RUN=1
-          shift
-          ;;
-        -h|--help)
-          usage
-          exit 0
-          ;;
-        *)
-          fail "unknown argument for scaffold: $1"
-          ;;
-      esac
-    done
-
-    [[ -n "$CLASS" ]] || fail "--class is required"
-    [[ -n "$ITEM_ID" ]] || fail "--id is required"
-    [[ -n "$OWNER_AGENT" ]] || fail "--owner-agent is required"
-    [[ -n "$SITE_ID" ]] || fail "--site is required"
-    [[ -n "$LOCATION_ID" ]] || fail "--location-id is required"
-    [[ -n "$RUNBOOK_PATH" ]] || fail "--runbook-path is required"
-
-    python3 - "$ROOT" "$INTAKE_DIR" "$AGENTS_BINDING" "$LOCATIONS_BINDING" "$CLASS" "$ITEM_ID" "$OWNER_AGENT" "$SITE_ID" "$LOCATION_ID" "$RUNBOOK_PATH" "$DRY_RUN" <<'PY'
+python3 - "$ROOT" "$@" <<'PY'
 from __future__ import annotations
 
+import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -114,295 +18,522 @@ import sys
 
 import yaml
 
-(
-    root_raw,
-    intake_dir_raw,
-    agents_raw,
-    locations_raw,
-    item_class,
-    item_id,
-    owner_agent,
-    site_id,
-    location_id,
-    runbook_path,
-    dry_run_raw,
-) = sys.argv[1:12]
 
-root = Path(root_raw).expanduser().resolve()
-intake_dir = Path(intake_dir_raw).expanduser().resolve()
-agents_path = Path(agents_raw).expanduser().resolve()
-locations_path = Path(locations_raw).expanduser().resolve()
-dry_run = dry_run_raw == "1"
+def fail(message: str) -> None:
+    print(f"platform.inventory.intake FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
 
 
-def load_yaml(path: Path):
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
+def load_yaml(path: Path) -> dict:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
     if not isinstance(data, dict):
-        raise ValueError(f"expected mapping at YAML root: {path}")
+        fail(f"expected mapping at YAML root: {path}")
     return data
 
 
-try:
+def save_yaml(path: Path, data: dict) -> None:
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_iso() -> str:
+    return now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_iso() -> str:
+    return now_utc().strftime("%Y-%m-%d")
+
+
+def normalize_number(value: float):
+    if abs(value - round(value)) < 1e-9:
+        return int(round(value))
+    return round(value, 6)
+
+
+def require_file(path: Path, label: str) -> None:
+    if not path.is_file():
+        fail(f"missing {label}: {path}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="platform-inventory-intake")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    scaffold = sub.add_parser("scaffold")
+    scaffold.add_argument("--class", dest="item_class", choices=["part", "material"], required=True)
+    scaffold.add_argument("--id", dest="item_id", required=True)
+    scaffold.add_argument("--owner-agent", required=True)
+    scaffold.add_argument("--site", required=True)
+    scaffold.add_argument("--location-id", required=True)
+    scaffold.add_argument("--runbook-path", required=True)
+    scaffold.add_argument("--dry-run", action="store_true")
+
+    validate = sub.add_parser("validate")
+    validate.add_argument("--file", dest="file_path", required=True)
+
+    receive = sub.add_parser("receive")
+    receive.add_argument("--class", dest="item_class", choices=["part", "material"], required=True)
+    receive.add_argument("--id", dest="item_id", required=True)
+    receive.add_argument("--qty", type=float, required=True)
+    receive.add_argument("--uom", required=True)
+    receive.add_argument("--to-location-id", required=True)
+    receive.add_argument("--owner-agent", required=True)
+    receive.add_argument("--evidence-ref", action="append", default=[])
+    receive.add_argument("--loop-id", default="LOOP-INVENTORY-UNSPECIFIED")
+    receive.add_argument("--proposal-id", default="CP-TBD")
+
+    issue = sub.add_parser("issue")
+    issue.add_argument("--class", dest="item_class", choices=["part", "material"], required=True)
+    issue.add_argument("--id", dest="item_id", required=True)
+    issue.add_argument("--qty", type=float, required=True)
+    issue.add_argument("--uom", required=True)
+    issue.add_argument("--from-location-id", required=True)
+    issue.add_argument("--owner-agent", required=True)
+    issue.add_argument("--evidence-ref", action="append", default=[])
+    issue.add_argument("--loop-id", default="LOOP-INVENTORY-UNSPECIFIED")
+    issue.add_argument("--proposal-id", default="CP-TBD")
+
+    move = sub.add_parser("move")
+    move.add_argument("--class", dest="item_class", choices=["part", "material"], required=True)
+    move.add_argument("--id", dest="item_id", required=True)
+    move.add_argument("--qty", type=float, required=True)
+    move.add_argument("--uom", required=True)
+    move.add_argument("--from-location-id", required=True)
+    move.add_argument("--to-location-id", required=True)
+    move.add_argument("--owner-agent", required=True)
+    move.add_argument("--evidence-ref", action="append", default=[])
+    move.add_argument("--loop-id", default="LOOP-INVENTORY-UNSPECIFIED")
+    move.add_argument("--proposal-id", default="CP-TBD")
+
+    count = sub.add_parser("count")
+    count.add_argument("--class", dest="item_class", choices=["part", "material"], required=True)
+    count.add_argument("--id", dest="item_id", required=True)
+    count.add_argument("--counted-qty", type=float, required=True)
+    count.add_argument("--uom", required=True)
+    count.add_argument("--location-id", required=True)
+    count.add_argument("--owner-agent", required=True)
+    count.add_argument("--reason", default="")
+    count.add_argument("--evidence-ref", action="append", default=[])
+    count.add_argument("--loop-id", default="LOOP-INVENTORY-UNSPECIFIED")
+    count.add_argument("--proposal-id", default="CP-TBD")
+
+    return parser
+
+
+def resolve_inventory_doc(root: Path, item_class: str) -> tuple[Path, str]:
+    if item_class == "part":
+        return root / "ops/bindings/hardware.parts.inventory.yaml", "parts"
+    return root / "ops/bindings/business.inventory.catalog.yaml", "materials"
+
+
+def load_inventory_item(root: Path, item_class: str, item_id: str) -> tuple[Path, dict, str, list[dict], dict, int]:
+    doc_path, key = resolve_inventory_doc(root, item_class)
+    require_file(doc_path, f"{item_class} inventory binding")
+    doc = load_yaml(doc_path)
+    rows = doc.get(key)
+    if not isinstance(rows, list):
+        fail(f"{doc_path}: {key} must be a list")
+
+    for idx, row in enumerate(rows):
+        if isinstance(row, dict) and str(row.get("id", "")).strip() == item_id:
+            return doc_path, doc, key, rows, row, idx
+
+    fail(f"item not found for class={item_class}: {item_id}")
+
+
+def load_agents(root: Path) -> set[str]:
+    agents_path = root / "ops/bindings/agents.registry.yaml"
+    require_file(agents_path, "agents binding")
     agents_doc = load_yaml(agents_path)
+    return {
+        str(row.get("id", "")).strip()
+        for row in (agents_doc.get("agents") or [])
+        if isinstance(row, dict) and str(row.get("id", "")).strip()
+    }
+
+
+def load_locations(root: Path) -> dict[str, str]:
+    locations_path = root / "ops/bindings/inventory.locations.yaml"
+    require_file(locations_path, "inventory locations binding")
     locations_doc = load_yaml(locations_path)
-except Exception as exc:
-    print(f"platform.inventory.intake FAIL: unable to parse bindings: {exc}", file=sys.stderr)
-    raise SystemExit(1)
+    out: dict[str, str] = {}
+    for row in (locations_doc.get("locations") or []):
+        if not isinstance(row, dict):
+            continue
+        loc_id = str(row.get("id", "")).strip()
+        site = str(row.get("site", "")).strip()
+        if loc_id:
+            out[loc_id] = site
+    return out
 
-allowed_classes = {"part", "material"}
-if item_class not in allowed_classes:
-    print(f"platform.inventory.intake FAIL: --class must be one of {sorted(allowed_classes)}", file=sys.stderr)
-    raise SystemExit(1)
 
-if not re.fullmatch(r"^[a-z0-9][a-z0-9-]*$", item_id):
-    print("platform.inventory.intake FAIL: --id must match ^[a-z0-9][a-z0-9-]*$", file=sys.stderr)
-    raise SystemExit(1)
+def load_ledger(root: Path) -> tuple[Path, dict, list[dict]]:
+    ledger_path = root / "ops/bindings/inventory.transaction.ledger.yaml"
+    require_file(ledger_path, "inventory transaction ledger")
+    ledger_doc = load_yaml(ledger_path)
+    txns = ledger_doc.get("transactions")
+    if not isinstance(txns, list):
+        fail(f"{ledger_path}: transactions must be a list")
+    return ledger_path, ledger_doc, txns
 
-agents = {
-    str(row.get("id", "")).strip()
-    for row in (agents_doc.get("agents") or [])
-    if isinstance(row, dict) and str(row.get("id", "")).strip()
-}
-if owner_agent not in agents:
-    print(f"platform.inventory.intake FAIL: owner agent not found in agents.registry.yaml: {owner_agent}", file=sys.stderr)
-    raise SystemExit(1)
 
-locations = {
-    str(row.get("id", "")).strip(): str(row.get("site", "")).strip()
-    for row in (locations_doc.get("locations") or [])
-    if isinstance(row, dict) and str(row.get("id", "")).strip()
-}
-if location_id not in locations:
-    print(f"platform.inventory.intake FAIL: location_id not found in inventory.locations.yaml: {location_id}", file=sys.stderr)
-    raise SystemExit(1)
-if locations[location_id] != site_id:
-    print(
-        f"platform.inventory.intake FAIL: site/location mismatch ({site_id} vs location site {locations[location_id]})",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
+def parse_float(value, label: str) -> float:
+    try:
+        return float(value)
+    except Exception:
+        fail(f"{label} must be numeric")
 
-runbook_target = (root / runbook_path).resolve() if not runbook_path.startswith("/") else Path(runbook_path)
-if not runbook_target.is_file() and not dry_run:
-    print(f"platform.inventory.intake FAIL: runbook_path does not exist: {runbook_path}", file=sys.stderr)
-    raise SystemExit(1)
 
-now = datetime.now(timezone.utc)
-date_stamp = now.strftime("%Y%m%d")
-ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-intake_id = f"ITK-{date_stamp}-{item_class}-{item_id}"
-filename = f"{intake_id}.yaml"
-output_path = intake_dir / filename
+def assert_owner(owner_agent: str, agents: set[str]) -> None:
+    if owner_agent not in agents:
+        fail(f"owner_agent not found in agents.registry.yaml: {owner_agent}")
 
-payload = {
-    "intake_id": intake_id,
-    "class": item_class,
-    "item_id": item_id,
-    "status": "draft",
-    "lifecycle_status": "draft",
-    "owner_agent": owner_agent,
-    "site": site_id,
-    "location_id": location_id,
-    "evidence_refs": [],
-    "runbook_path": runbook_path,
-    "touches_runtime": False,
-    "runtime_homes": {},
-    "required_homes": {
+
+def assert_location(location_id: str, site: str, locations: dict[str, str], label: str) -> None:
+    if location_id not in locations:
+        fail(f"{label} location not found in inventory.locations.yaml: {location_id}")
+    if site and locations[location_id] != site:
+        fail(f"{label} location site mismatch ({location_id} site={locations[location_id]} expected={site})")
+
+
+def assert_uom(item: dict, uom: str) -> None:
+    expected = str(item.get("unit_of_measure", "")).strip()
+    if expected and expected != uom:
+        fail(f"uom mismatch: expected {expected}, got {uom}")
+
+
+def make_txn_id(existing: set[str], item_class: str, item_id: str, action: str) -> str:
+    base = f"ITXN-{now_utc().strftime('%Y%m%d-%H%M%S')}-{item_class}-{item_id}-{action}"
+    candidate = base
+    counter = 1
+    while candidate in existing:
+        candidate = f"{base}-{counter}"
+        counter += 1
+    return candidate
+
+
+def append_ledger_row(
+    txns: list[dict],
+    item_class: str,
+    item_id: str,
+    action: str,
+    qty_delta: float,
+    uom: str,
+    from_location_id: str,
+    to_location_id: str,
+    evidence_refs: list[str],
+    owner_agent: str,
+    loop_id: str,
+    proposal_id: str,
+) -> dict:
+    existing = {
+        str(row.get("txn_id", "")).strip()
+        for row in txns
+        if isinstance(row, dict) and str(row.get("txn_id", "")).strip()
+    }
+    row = {
+        "txn_id": make_txn_id(existing, item_class, item_id, action),
+        "item_class": item_class,
+        "item_id": item_id,
+        "action": action,
+        "qty_delta": normalize_number(qty_delta),
+        "uom": uom,
+        "from_location_id": from_location_id,
+        "to_location_id": to_location_id,
+        "evidence_refs": [x for x in evidence_refs if x],
         "owner_agent": owner_agent,
-        "site": site_id,
-        "location_id": location_id,
+        "recorded_at": now_iso(),
+        "loop_id": loop_id,
+        "proposal_id": proposal_id,
+        "status": "recorded",
+    }
+    txns.append(row)
+    return row
+
+
+def run_scaffold(args, root: Path, agents: set[str], locations: dict[str, str]) -> None:
+    item_id = args.item_id.strip()
+    if not re.fullmatch(r"^[a-z0-9][a-z0-9-]*$", item_id):
+        fail("--id must match ^[a-z0-9][a-z0-9-]*$")
+
+    assert_owner(args.owner_agent, agents)
+    assert_location(args.location_id, args.site, locations, "scaffold")
+
+    runbook_path = args.runbook_path
+    runbook_target = Path(runbook_path) if runbook_path.startswith("/") else (root / runbook_path)
+    if not runbook_target.is_file() and not args.dry_run:
+        fail(f"runbook_path does not exist: {runbook_path}")
+
+    now = now_utc()
+    date_stamp = now.strftime("%Y%m%d")
+    ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    intake_id = f"ITK-{date_stamp}-{args.item_class}-{item_id}"
+    payload = {
+        "intake_id": intake_id,
+        "class": args.item_class,
+        "item_id": item_id,
+        "status": "draft",
+        "lifecycle_status": "draft",
+        "owner_agent": args.owner_agent,
+        "site": args.site,
+        "location_id": args.location_id,
         "evidence_refs": [],
         "runbook_path": runbook_path,
-        "infisical_namespace": "",
-        "vaultwarden_item": "",
-        "gitea_repo": "",
-        "observability_probe": "",
-    },
-    "created_at": ts,
-    "updated_at": ts,
-}
+        "touches_runtime": False,
+        "runtime_homes": {},
+        "required_homes": {
+            "owner_agent": args.owner_agent,
+            "site": args.site,
+            "location_id": args.location_id,
+            "evidence_refs": [],
+            "runbook_path": runbook_path,
+            "infisical_namespace": "",
+            "vaultwarden_item": "",
+            "gitea_repo": "",
+            "observability_probe": "",
+        },
+        "created_at": ts,
+        "updated_at": ts,
+    }
 
-text = yaml.safe_dump(payload, sort_keys=False)
+    text = yaml.safe_dump(payload, sort_keys=False)
+    if args.dry_run:
+        print(text, end="")
+        return
 
-if dry_run:
-    print(text, end="")
-    raise SystemExit(0)
-
-intake_dir.mkdir(parents=True, exist_ok=True)
-if output_path.exists():
-    print(f"platform.inventory.intake FAIL: intake file already exists: {output_path}", file=sys.stderr)
-    raise SystemExit(1)
-
-output_path.write_text(text, encoding="utf-8")
-print(f"platform.inventory.intake OK: wrote {output_path}")
-PY
-    ;;
-
-  validate)
-    FILE_PATH=""
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --file)
-          FILE_PATH="${2:-}"
-          shift 2
-          ;;
-        -h|--help)
-          usage
-          exit 0
-          ;;
-        *)
-          fail "unknown argument for validate: $1"
-          ;;
-      esac
-    done
-
-    [[ -n "$FILE_PATH" ]] || fail "--file is required"
-
-    python3 - "$ROOT" "$AGENTS_BINDING" "$LOCATIONS_BINDING" "$FILE_PATH" <<'PY'
-from __future__ import annotations
-
-from pathlib import Path
-import re
-import sys
-
-import yaml
-
-root = Path(sys.argv[1]).expanduser().resolve()
-agents_path = Path(sys.argv[2]).expanduser().resolve()
-locations_path = Path(sys.argv[3]).expanduser().resolve()
-file_arg = sys.argv[4]
-target = Path(file_arg).expanduser().resolve() if file_arg.startswith("/") else (root / file_arg).resolve()
+    intake_dir = root / "mailroom/outbox/intake"
+    intake_dir.mkdir(parents=True, exist_ok=True)
+    output_path = intake_dir / f"{intake_id}.yaml"
+    if output_path.exists():
+        fail(f"intake file already exists: {output_path}")
+    output_path.write_text(text, encoding="utf-8")
+    print(f"platform.inventory.intake OK: wrote {output_path}")
 
 
-def load_yaml(path: Path):
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"expected mapping at YAML root: {path}")
-    return data
+def run_validate(args, root: Path, agents: set[str], locations: dict[str, str]) -> None:
+    target = Path(args.file_path)
+    if not target.is_absolute():
+        target = (root / target).resolve()
+    if not target.is_file():
+        fail(f"intake file not found: {target}")
 
-
-if not target.is_file():
-    print(f"platform.inventory.intake FAIL: intake file not found: {target}", file=sys.stderr)
-    raise SystemExit(1)
-
-try:
-    agents_doc = load_yaml(agents_path)
-    locations_doc = load_yaml(locations_path)
     doc = load_yaml(target)
-except Exception as exc:
-    print(f"platform.inventory.intake FAIL: parse error: {exc}", file=sys.stderr)
-    raise SystemExit(1)
+    errors: list[str] = []
 
-errors: list[str] = []
-required = [
-    "intake_id",
-    "class",
-    "item_id",
-    "status",
-    "lifecycle_status",
-    "owner_agent",
-    "site",
-    "location_id",
-    "evidence_refs",
-    "runbook_path",
-    "touches_runtime",
-    "runtime_homes",
-    "required_homes",
-    "created_at",
-    "updated_at",
-]
-for key in required:
-    if key not in doc:
-        errors.append(f"missing key: {key}")
+    required = [
+        "intake_id",
+        "class",
+        "item_id",
+        "status",
+        "lifecycle_status",
+        "owner_agent",
+        "site",
+        "location_id",
+        "evidence_refs",
+        "runbook_path",
+        "touches_runtime",
+        "runtime_homes",
+        "required_homes",
+        "created_at",
+        "updated_at",
+    ]
+    for key in required:
+        if key not in doc:
+            errors.append(f"missing key: {key}")
 
-if errors:
-    for err in errors:
-        print(f"platform.inventory.intake FAIL: {target} :: {err}", file=sys.stderr)
-    raise SystemExit(1)
+    if str(doc.get("class", "")).strip() not in {"part", "material"}:
+        errors.append("class must be part|material")
 
-allowed_classes = {"part", "material"}
-if str(doc.get("class", "")).strip() not in allowed_classes:
-    errors.append("class must be part|material")
+    lifecycle_values = {"draft", "proposed", "approved", "recorded", "active", "depleted", "retired", "rma"}
+    for key in ("status", "lifecycle_status"):
+        if str(doc.get(key, "")).strip() not in lifecycle_values:
+            errors.append(f"{key} must be one of {sorted(lifecycle_values)}")
 
-allowed_lifecycle = {"draft", "proposed", "approved", "recorded", "active", "depleted", "retired", "rma"}
-for key in ("status", "lifecycle_status"):
-    value = str(doc.get(key, "")).strip()
-    if value not in allowed_lifecycle:
-        errors.append(f"{key} must be one of {sorted(allowed_lifecycle)}")
+    intake_id = str(doc.get("intake_id", "")).strip()
+    if not re.fullmatch(r"^ITK-\d{8}-(part|material)-[a-z0-9][a-z0-9-]*$", intake_id):
+        errors.append("intake_id format invalid")
 
-intake_id = str(doc.get("intake_id", "")).strip()
-if not re.fullmatch(r"^ITK-\d{8}-(part|material)-[a-z0-9][a-z0-9-]*$", intake_id):
-    errors.append("intake_id does not match ITK-<YYYYMMDD>-<class>-<id>")
+    owner_agent = str(doc.get("owner_agent", "")).strip()
+    if owner_agent not in agents:
+        errors.append(f"owner_agent not found in agents.registry.yaml: {owner_agent}")
 
-agents = {
-    str(row.get("id", "")).strip()
-    for row in (agents_doc.get("agents") or [])
-    if isinstance(row, dict) and str(row.get("id", "")).strip()
-}
-owner_agent = str(doc.get("owner_agent", "")).strip()
-if owner_agent not in agents:
-    errors.append(f"owner_agent not found in agents.registry.yaml: {owner_agent}")
+    location_id = str(doc.get("location_id", "")).strip()
+    site = str(doc.get("site", "")).strip()
+    if location_id not in locations:
+        errors.append(f"location_id not found in inventory.locations.yaml: {location_id}")
+    elif locations[location_id] != site:
+        errors.append(f"site/location mismatch ({site} vs {locations[location_id]})")
 
-locations = {
-    str(row.get("id", "")).strip(): str(row.get("site", "")).strip()
-    for row in (locations_doc.get("locations") or [])
-    if isinstance(row, dict) and str(row.get("id", "")).strip()
-}
-location_id = str(doc.get("location_id", "")).strip()
-site = str(doc.get("site", "")).strip()
-if location_id not in locations:
-    errors.append(f"location_id not found in inventory.locations.yaml: {location_id}")
-elif locations[location_id] != site:
-    errors.append(f"site/location mismatch ({site} vs {locations[location_id]})")
+    runbook_path = str(doc.get("runbook_path", "")).strip()
+    if runbook_path:
+        runbook_target = Path(runbook_path) if runbook_path.startswith("/") else (root / runbook_path)
+        if not runbook_target.is_file():
+            errors.append(f"runbook_path does not exist: {runbook_path}")
 
-runbook_path = str(doc.get("runbook_path", "")).strip()
-if not runbook_path:
-    errors.append("runbook_path cannot be empty")
-else:
-    runbook_target = (root / runbook_path).resolve() if not runbook_path.startswith("/") else Path(runbook_path)
-    if not runbook_target.is_file():
-        errors.append(f"runbook_path does not exist: {runbook_path}")
+    if not isinstance(doc.get("evidence_refs"), list):
+        errors.append("evidence_refs must be a list")
 
-evidence_refs = doc.get("evidence_refs")
-if not isinstance(evidence_refs, list):
-    errors.append("evidence_refs must be a list")
+    runtime_homes = doc.get("runtime_homes")
+    if not isinstance(runtime_homes, dict):
+        errors.append("runtime_homes must be a mapping")
+        runtime_homes = {}
 
-required_homes = doc.get("required_homes")
-if not isinstance(required_homes, dict):
-    errors.append("required_homes must be a mapping")
-else:
-    for key in ("owner_agent", "site", "location_id", "evidence_refs", "runbook_path"):
-        if key not in required_homes:
-            errors.append(f"required_homes missing key: {key}")
+    if bool(doc.get("touches_runtime", False)):
+        for key in ("infisical_namespace", "vaultwarden_item", "gitea_repo", "observability_probe"):
+            if not str(runtime_homes.get(key, "")).strip():
+                errors.append(f"touches_runtime=true requires runtime_homes.{key}")
 
-runtime_homes = doc.get("runtime_homes")
-if not isinstance(runtime_homes, dict):
-    errors.append("runtime_homes must be a mapping")
+    if errors:
+        for err in errors:
+            print(f"platform.inventory.intake FAIL: {target} :: {err}", file=sys.stderr)
+        raise SystemExit(1)
 
-if bool(doc.get("touches_runtime", False)):
-    for key in ("infisical_namespace", "vaultwarden_item", "gitea_repo", "observability_probe"):
-        value = ""
-        if isinstance(runtime_homes, dict):
-            value = str(runtime_homes.get(key, "")).strip()
-        if not value:
-            errors.append(f"touches_runtime=true requires runtime_homes.{key}")
+    print(f"platform.inventory.intake PASS: {target}")
 
-if errors:
-    for err in errors:
-        print(f"platform.inventory.intake FAIL: {target} :: {err}", file=sys.stderr)
-    raise SystemExit(1)
 
-print(f"platform.inventory.intake PASS: {target}")
+def run_transaction(args, root: Path, agents: set[str], locations: dict[str, str], mode: str) -> None:
+    assert_owner(args.owner_agent, agents)
+
+    doc_path, doc, key, rows, item, idx = load_inventory_item(root, args.item_class, args.item_id)
+    current_qty = parse_float(item.get("on_hand_qty", 0), "on_hand_qty")
+    assert_uom(item, args.uom)
+
+    ledger_path, ledger_doc, txns = load_ledger(root)
+
+    if mode == "receive":
+        if args.qty <= 0:
+            fail("receive requires --qty > 0")
+        assert_location(args.to_location_id, str(item.get("site", "")).strip(), locations, "receive")
+        qty_delta = args.qty
+        new_qty = current_qty + args.qty
+        from_loc = ""
+        to_loc = args.to_location_id
+        action = "receive"
+    elif mode == "issue":
+        if args.qty <= 0:
+            fail("issue requires --qty > 0")
+        if str(item.get("location_id", "")).strip() != args.from_location_id:
+            fail(f"issue from-location mismatch: item location is {item.get('location_id')}")
+        assert_location(args.from_location_id, str(item.get("site", "")).strip(), locations, "issue")
+        qty_delta = -args.qty
+        new_qty = current_qty + qty_delta
+        if new_qty < 0:
+            fail("negative inventory rejected for issue action")
+        from_loc = args.from_location_id
+        to_loc = ""
+        action = "issue"
+    elif mode == "move":
+        if args.qty <= 0:
+            fail("move requires --qty > 0")
+        if args.qty > current_qty:
+            fail("move qty exceeds on_hand_qty")
+        if str(item.get("location_id", "")).strip() != args.from_location_id:
+            fail(f"move from-location mismatch: item location is {item.get('location_id')}")
+        assert_location(args.from_location_id, str(item.get("site", "")).strip(), locations, "move-from")
+        assert_location(args.to_location_id, "", locations, "move-to")
+        qty_delta = 0.0
+        new_qty = current_qty
+        from_loc = args.from_location_id
+        to_loc = args.to_location_id
+        action = "move"
+        item["location_id"] = args.to_location_id
+        item["site"] = locations[args.to_location_id]
+    elif mode == "count":
+        counted_qty = args.counted_qty
+        if counted_qty < 0:
+            fail("counted quantity cannot be negative")
+        if str(item.get("location_id", "")).strip() != args.location_id:
+            fail(f"count location mismatch: item location is {item.get('location_id')}")
+        assert_location(args.location_id, str(item.get("site", "")).strip(), locations, "count")
+        qty_delta = counted_qty - current_qty
+        if qty_delta < 0 and not str(args.reason or "").strip():
+            fail("negative adjustment requires --reason")
+        new_qty = counted_qty
+        from_loc = args.location_id
+        to_loc = args.location_id
+        action = "adjust"
+        item["last_counted_at"] = today_iso()
+    else:
+        fail(f"unsupported transaction mode: {mode}")
+
+    item["on_hand_qty"] = normalize_number(new_qty)
+    if mode in {"receive", "issue"}:
+        item["location_id"] = to_loc or from_loc or str(item.get("location_id", "")).strip()
+    if mode in {"receive", "move", "count"}:
+        final_loc = str(item.get("location_id", "")).strip()
+        if final_loc in locations:
+            item["site"] = locations[final_loc]
+
+    doc["updated_at"] = today_iso()
+    rows[idx] = item
+    doc[key] = rows
+
+    evidence_refs = list(args.evidence_ref or [])
+    if mode == "count" and str(args.reason or "").strip():
+        evidence_refs.append(f"reason:{args.reason.strip()}")
+
+    row = append_ledger_row(
+        txns=txns,
+        item_class=args.item_class,
+        item_id=args.item_id,
+        action=action,
+        qty_delta=qty_delta,
+        uom=args.uom,
+        from_location_id=from_loc,
+        to_location_id=to_loc,
+        evidence_refs=evidence_refs,
+        owner_agent=args.owner_agent,
+        loop_id=args.loop_id,
+        proposal_id=args.proposal_id,
+    )
+    ledger_doc["updated_at"] = today_iso()
+
+    save_yaml(doc_path, doc)
+    save_yaml(ledger_path, ledger_doc)
+
+    print(f"platform.inventory.intake OK: {mode} recorded {row['txn_id']}")
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        fail("missing root argument")
+
+    root = Path(sys.argv[1]).expanduser().resolve()
+    parser = build_parser()
+    args = parser.parse_args(sys.argv[2:])
+
+    agents = load_agents(root)
+    locations = load_locations(root)
+
+    if args.command == "scaffold":
+        run_scaffold(args, root, agents, locations)
+        return
+    if args.command == "validate":
+        run_validate(args, root, agents, locations)
+        return
+    if args.command == "receive":
+        run_transaction(args, root, agents, locations, "receive")
+        return
+    if args.command == "issue":
+        run_transaction(args, root, agents, locations, "issue")
+        return
+    if args.command == "move":
+        run_transaction(args, root, agents, locations, "move")
+        return
+    if args.command == "count":
+        run_transaction(args, root, agents, locations, "count")
+        return
+
+    fail(f"unsupported command: {args.command}")
+
+
+if __name__ == "__main__":
+    main()
 PY
-    ;;
-
-  -h|--help)
-    usage
-    ;;
-
-  *)
-    fail "unknown subcommand: $SUBCOMMAND"
-    ;;
-esac
