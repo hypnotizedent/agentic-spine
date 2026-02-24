@@ -15,7 +15,7 @@ scope: domain-platform-migration-plan
 
 ## Executive Summary
 
-Migrate 3 canonical domain roots from Namecheap (registrar) to Cloudflare Registrar. DNS authority is delegated to Cloudflare for 2 of 3 zones (mintprints.co, ronny.works). **mintprints.com DNS is still at Namecheap** (dns1/dns2.registrar-servers.com) and must be migrated to Cloudflare before registrar transfer.
+Migrate 3 canonical domain roots from Namecheap (registrar) to Cloudflare Registrar. DNS authority is delegated to Cloudflare for all 3 zones. mintprints.com DNS was migrated from Namecheap to Cloudflare on 2026-02-24 (W49.4). This migration is now registrar-only (domain registration transfer, not DNS migration).
 
 Non-canonical domains (brand protection, parked) are tracked in workbench legacy docs only and are out of scope for this plan.
 
@@ -27,7 +27,7 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 |--------|------|-----------|-----|-------|-------------|------|
 | ronny.works | ronny | Namecheap | Cloudflare | NC forwarding + Stalwart | P1 | W1 |
 | mintprints.co | mintprints | Namecheap | Cloudflare | Resend/AWS SES | P1 | W2 |
-| mintprints.com | mintprints | Namecheap | **Namecheap** | Microsoft 365 | **P0** | W3 |
+| mintprints.com | mintprints | Namecheap | Cloudflare (migrated 2026-02-24) | Microsoft 365 | **P0** | W3 |
 
 **SSOT:** `ops/bindings/domain.portfolio.registry.yaml`
 
@@ -40,7 +40,7 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 **Scope:** Move domain registration for 3 canonical roots to Cloudflare Registrar.
 
 **Prerequisites (all domains):**
-1. DNS must be on Cloudflare (**mintprints.com NOT satisfied** — DNS still at Namecheap, D202 enforces)
+1. DNS must be on Cloudflare (satisfied for all 3 as of 2026-02-24)
 2. Domain must be unlocked at Namecheap
 3. EPP/auth code obtained from Namecheap
 4. Domain must not be within 60 days of registration/last transfer
@@ -74,7 +74,7 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 
 #### Wave 3 — Business Primary (mintprints.com, HIGH risk)
 - Microsoft 365 email + Shopify storefront
-- **Requires DNS migration to Cloudflare first** (currently at Namecheap registrar-servers.com)
+- DNS migrated to Cloudflare (completed 2026-02-24, W49.4)
 - **Requires email parity gate (see Gate G1)**
 - **Requires transfer-readiness gate D202 to pass**
 - Validation: Outlook send/receive matrix, Shopify storefront loads, DNS records unchanged
@@ -212,7 +212,7 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 | B4 | ~~Domain expiry dates stale~~ | All | **RESOLVED** via Namecheap API (W49.2, 2026-02-24) |
 | B5 | mintprints.com MX/SPF/DKIM records not documented | mintprints.com | Export from Cloudflare DNS or M365 admin |
 | B6 | Shopify DNS requirements undocumented | mintprints.com | Check Shopify admin for required DNS records |
-| B7 | **mintprints.com DNS still at Namecheap** | mintprints.com | Migrate nameservers to Cloudflare before any transfer (D202 enforces) |
+| B7 | ~~mintprints.com DNS still at Namecheap~~ | mintprints.com | **RESOLVED** — NS migrated to Cloudflare 2026-02-24 (W49.4) |
 
 ---
 
@@ -222,10 +222,10 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 |--------|-----------|-------|
 | Email provider (Microsoft 365) | High complexity | 8/10 |
 | Customer-facing storefront (Shopify) | Medium | 4/10 |
-| DNS NOT at Cloudflare (still Namecheap) | High | 8/10 |
+| DNS at Cloudflare (migrated 2026-02-24) | Low | 2/10 |
 | Transfer lock period | Medium | 5/10 |
 | Business continuity | High | 9/10 |
-| **Composite risk score** | | **6.8/10** |
+| **Composite risk score** | | **5.6/10** |
 
 ---
 
