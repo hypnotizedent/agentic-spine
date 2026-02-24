@@ -26,8 +26,8 @@ trap 'rm -rf "$TMP"' EXIT
 BINDING="$TMP/calendar.global.yaml"
 RUNTIME="$TMP/runtime"
 STATE="$RUNTIME/mailroom/state/calendar-sync/state.json"
-GRAPH_DB="$TMP/mock-graph-db.json"
-MOCK_GRAPH="$TMP/mock-graph-cap-exec"
+MICROSOFT_DB="$TMP/mock-microsoft-db.json"
+MOCK_MICROSOFT="$TMP/mock-microsoft-cap-exec"
 
 cat > "$BINDING" <<'EOF'
 version: 1
@@ -76,7 +76,7 @@ layers:
       authority: "external"
       source_contracts:
         - type: "capability"
-          ref: "graph.calendar.list"
+          ref: "microsoft.calendar.list"
       events:
         - id: "identity-anchor"
           summary: "Identity Anchor"
@@ -87,7 +87,7 @@ layers:
       authority: "external"
       source_contracts:
         - type: "capability"
-          ref: "graph.calendar.list"
+          ref: "microsoft.calendar.list"
       events:
         - id: "personal-anchor"
           summary: "Personal Anchor"
@@ -126,14 +126,14 @@ conflict_policy:
     life: "external"
 sync_contracts:
   pull_read_capabilities:
-    - graph.calendar.list
-    - graph.calendar.get
+    - microsoft.calendar.list
+    - microsoft.calendar.get
   push_write_capabilities:
-    - graph.calendar.create
-    - graph.calendar.update
+    - microsoft.calendar.create
+    - microsoft.calendar.update
 EOF
 
-cat > "$MOCK_GRAPH" <<'PY'
+cat > "$MOCK_MICROSOFT" <<'PY'
 #!/usr/bin/env python3
 import json
 import os
@@ -190,7 +190,7 @@ def main():
     op = sys.argv[1]
     params = parse_args(sys.argv[2:])
 
-    db_path = Path(os.environ["MOCK_GRAPH_DB"])
+    db_path = Path(os.environ["MOCK_MICROSOFT_DB"])
     db = load_db(db_path)
 
     maybe_fail(db, op)
@@ -253,10 +253,10 @@ def main():
 if __name__ == "__main__":
     main()
 PY
-chmod +x "$MOCK_GRAPH"
+chmod +x "$MOCK_MICROSOFT"
 
-export CALENDAR_SYNC_GRAPH_EXEC="$MOCK_GRAPH"
-export MOCK_GRAPH_DB="$GRAPH_DB"
+export CALENDAR_SYNC_MICROSOFT_EXEC="$MOCK_MICROSOFT"
+export MOCK_MICROSOFT_DB="$MICROSOFT_DB"
 export SPINE_REPO="$RUNTIME"
 
 echo ""
@@ -295,8 +295,8 @@ echo "T3: mapped missing remote event is recreated and remapped"
 (
   key="$(jq -r '.mappings | keys[0]' "$STATE")"
   old_id="$(jq -r --arg k "$key" '.mappings[$k].remote_event_id' "$STATE")"
-  jq --arg rid "$old_id" 'del(.events[$rid])' "$GRAPH_DB" > "$GRAPH_DB.tmp"
-  mv "$GRAPH_DB.tmp" "$GRAPH_DB"
+  jq --arg rid "$old_id" 'del(.events[$rid])' "$MICROSOFT_DB" > "$MICROSOFT_DB.tmp"
+  mv "$MICROSOFT_DB.tmp" "$MICROSOFT_DB"
 
   out="$($EXEC --binding "$BINDING" --state-path "$STATE" --execute --json)"
   new_id="$(jq -r --arg k "$key" '.mappings[$k].remote_event_id' "$STATE")"
@@ -317,7 +317,7 @@ echo ""
 echo "T5: partial outage yields partial status and no mapping corruption"
 (
   rm -rf "$RUNTIME"
-  rm -f "$GRAPH_DB"
+  rm -f "$MICROSOFT_DB"
   export MOCK_TRANSPORT_FAIL_OP="calendar_create"
   export MOCK_TRANSPORT_FAIL_ALWAYS="1"
 

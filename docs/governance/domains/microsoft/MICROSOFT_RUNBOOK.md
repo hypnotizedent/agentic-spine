@@ -6,14 +6,14 @@ scope: domain-pointer-index
 spine_pointer_stub: true
 authority_plane: domain_external
 authority_repo: "/Users/ronnyworks/code/workbench"
-authority_path: "agents/ms-graph/docs/RUNBOOK.md"
-source_path: "docs/governance/GRAPH_RUNBOOK.md"
+authority_path: "agents/microsoft/docs/RUNBOOK.md"
+source_path: "docs/governance/MICROSOFT_RUNBOOK.md"
 ---
 
-# GRAPH_RUNBOOK.md (Domain Route Stub)
+# MICROSOFT_RUNBOOK.md (Domain Route Stub)
 
 Source path in spine:
-"docs/governance/GRAPH_RUNBOOK.md"
+"docs/governance/MICROSOFT_RUNBOOK.md"
 
 Canonical domain content:
-"/Users/ronnyworks/code/workbench/agents/ms-graph/docs/RUNBOOK.md"
+"/Users/ronnyworks/code/workbench/agents/microsoft/docs/RUNBOOK.md"

@@ -22,7 +22,7 @@ Define deterministic, non-destructive target mapping for migrating `docs/governa
    - Fallback: `YYYYMMDD` token
    - Final fallback: source file modified time (UTC)
 3. Resolve domain from source path tokens:
-   - Domain keywords map to canonical domains (for example: `communications`, `ms-graph`, `home`, `mint`, `n8n`, `finance`, `infra`, `rag`, `workbench`, `secrets`, `aof`, `core`).
+   - Domain keywords map to canonical domains (for example: `communications`, `microsoft`, `home`, `mint`, `n8n`, `finance`, `infra`, `rag`, `workbench`, `secrets`, `aof`, `core`).
    - If no deterministic domain match exists, route to `_shared`.
 4. Classification routing:
    - `evidence_runtime` -> receipts destination (`<domain>` or `_shared`)

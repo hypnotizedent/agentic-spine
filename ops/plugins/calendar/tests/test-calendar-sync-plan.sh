@@ -41,12 +41,12 @@ echo "T2: identity/personal plan directions are pull (external authoritative)"
 ) && pass "identity/personal pull direction" || fail "identity/personal pull direction"
 
 echo ""
-echo "T3: infrastructure/automation/spine include planned graph upsert caps"
+echo "T3: infrastructure/automation/spine include planned microsoft upsert caps"
 (
   out="$("$PLAN" --json)"
   echo "$out" | jq -e '
     ([.data.actions[] | select(.layer == "infrastructure" or .layer == "automation" or .layer == "spine") | .direction] | all(. == "push")) and
-    ([.data.actions[] | select(.layer == "infrastructure" or .layer == "automation" or .layer == "spine") | (.write_capabilities | index("graph.calendar.create") != null and index("graph.calendar.update") != null)] | all(. == true))
+    ([.data.actions[] | select(.layer == "infrastructure" or .layer == "automation" or .layer == "spine") | (.write_capabilities | index("microsoft.calendar.create") != null and index("microsoft.calendar.update") != null)] | all(. == true))
   ' >/dev/null
 ) && pass "spine-authoritative layers include upsert contracts" || fail "spine-authoritative layers include upsert contracts"
 

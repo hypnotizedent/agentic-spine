@@ -30,7 +30,7 @@ using pre-migration endpoints.
 1. SERVICE_REGISTRY: mint-os frontends registered, stopped services marked, immich host ssh fixed — DONE
 2. Health probes: caddy added, stale docker-host finance entries removed, policy notes for non-probeable — DONE
 3. Agents: firefly/paperless agents point to finance-stack VM 211 — DONE
-4. MCP configs: paperless.json points to VM 211, microsoft-graph.json Azure IDs externalized — DONE
+4. MCP configs: paperless.json points to VM 211, microsoft.json Azure IDs externalized — DONE
 5. Secrets namespace: N8N_ENCRYPTION_KEY and mint-os vendor keys mapped — DONE
 6. spine.verify PASS — DONE (D1-D69 ALL PASS)
 

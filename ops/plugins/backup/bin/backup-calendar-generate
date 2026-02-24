@@ -8,9 +8,14 @@ PROJECT_ROOT="${BACKUP_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/doc
 PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
 LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
 
-if [[ -x "$PROJECT_SCRIPT" ]]; then
-  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
+# Prevent wrapper recursion when delegated project script re-enters canonical spine path.
+if [[ -x "$PROJECT_SCRIPT" && "${BACKUP_PLUGIN_DELEGATED:-0}" != "1" ]]; then
+  exec env SPINE_ROOT="$SPINE_ROOT" BACKUP_PLUGIN_DELEGATED=1 "$PROJECT_SCRIPT" "$@"
 fi
 
-echo "WARN: backup plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+if [[ "${BACKUP_PLUGIN_DELEGATED:-0}" == "1" ]]; then
+  echo "WARN: backup plugin fallback active; delegation loop guard engaged for $PROJECT_SCRIPT" >&2
+else
+  echo "WARN: backup plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
+fi
 exec "$LEGACY_SCRIPT" "$@"

@@ -81,16 +81,16 @@ Generated from audit `AUDIT-CODE-FOLDER-DRIFT-20260222`. Items ordered by priori
 - **Commands:**
   ```bash
   cd ~/code/workbench
-  git diff agents/ms-graph/docs/INDEX.md  # Review changes
+  git diff agents/microsoft/docs/INDEX.md  # Review changes
 
   # If changes are intentional:
-  git add agents/ms-graph/docs/INDEX.md agents/ms-graph/docs/notes/INDEX.md \
+  git add agents/microsoft/docs/INDEX.md agents/microsoft/docs/notes/INDEX.md \
     dotfiles/macbook/README.md dotfiles/opencode/opencode.json \
-    agents/ms-graph/docs/notes/20260220__CAP-*.md
+    agents/microsoft/docs/notes/20260220__CAP-*.md
   git commit -m "chore: commit pending workbench state changes"
 
   # If changes are accidental:
-  git checkout -- agents/ms-graph/docs/INDEX.md agents/ms-graph/docs/notes/INDEX.md \
+  git checkout -- agents/microsoft/docs/INDEX.md agents/microsoft/docs/notes/INDEX.md \
     dotfiles/macbook/README.md dotfiles/opencode/opencode.json
   ```
 - **Done check:** `git status --short | wc -l` < 5 (excluding n8n if Q-02 not done)

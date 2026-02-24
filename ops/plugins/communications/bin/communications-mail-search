@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
-GRAPH_EXEC="${COMMUNICATIONS_GRAPH_EXEC:-$ROOT/ops/plugins/ms-graph/bin/graph-cap-exec}"
+MICROSOFT_EXEC="${COMMUNICATIONS_MICROSOFT_EXEC:-${COMMUNICATIONS_MICROSOFT_EXEC_LEGACY:-$ROOT/ops/plugins/microsoft/bin/microsoft-cap-exec}}"
 QUERY=""
 TOP=""
 JSON=0
@@ -40,7 +40,7 @@ PY
 need yq
 need jq
 [[ -f "$CONTRACT" ]] || { echo "ERROR: missing contract: $CONTRACT" >&2; exit 1; }
-[[ -x "$GRAPH_EXEC" ]] || { echo "ERROR: missing graph executor: $GRAPH_EXEC" >&2; exit 1; }
+[[ -x "$MICROSOFT_EXEC" ]] || { echo "ERROR: missing Microsoft executor: $MICROSOFT_EXEC" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,7 +52,7 @@ while [[ $# -gt 0 ]]; do
 Usage: communications-mail-search [--query <text>] [--top <n>] [--json]
 
 Simulation mode: searches contract mailbox catalog.
-Live mode: runs Microsoft Graph mailbox search via graph-cap-exec.
+Live mode: runs Microsoft mailbox search via Microsoft executor.
 USAGE
       exit 0
       ;;
@@ -71,7 +71,7 @@ done
 mode="$(yq e -r '.pilot.send_test.mode // "simulation-only"' "$CONTRACT")"
 stage="$(yq e -r '.pilot.stage // ""' "$CONTRACT")"
 backend="$(yq e -r '.pilot.execution_backend // "none"' "$CONTRACT")"
-default_top="$(yq e -r '.pilot.graph.search_default_top // 10' "$CONTRACT")"
+default_top="$(yq e -r '.pilot.microsoft.search_default_top // 10' "$CONTRACT")"
 query_effective="${QUERY:-*}"
 top_effective="${TOP:-$default_top}"
 
@@ -119,19 +119,19 @@ if [[ "$mode" == "simulation-only" ]]; then
   exit 0
 fi
 
-# Live pilot path (Graph-backed)
+# Live pilot path (Microsoft-backed)
 result_json_tmp="$(mktemp)"
 result_raw_tmp="$(mktemp)"
 result_err_tmp="$(mktemp)"
 trap 'rm -f "$result_raw_tmp" "$result_json_tmp" "$result_err_tmp"' EXIT
-if ! "$GRAPH_EXEC" mail_search --query "$query_effective" --top "$top_effective" >"$result_raw_tmp" 2>"$result_err_tmp"; then
-  echo "ERROR: graph mail search failed" >&2
+if ! "$MICROSOFT_EXEC" mail_search --query "$query_effective" --top "$top_effective" >"$result_raw_tmp" 2>"$result_err_tmp"; then
+  echo "ERROR: microsoft mail search failed" >&2
   cat "$result_err_tmp" >&2 || true
   exit 1
 fi
 
 if ! extract_first_json "$result_raw_tmp" "$result_json_tmp"; then
-  echo "ERROR: graph mail search returned invalid JSON payload" >&2
+  echo "ERROR: microsoft mail search returned invalid JSON payload" >&2
   cat "$result_raw_tmp" >&2 || true
   exit 1
 fi
@@ -149,8 +149,8 @@ if [[ "$JSON" -eq 1 ]]; then
     --arg backend "$backend" \
     --arg query "$query_effective" \
     --argjson top "$top_effective" \
-    --argjson graph "$(cat "$result_json_tmp")" \
-    '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,top:$top,graph:$graph}}'
+    --argjson microsoft "$(cat "$result_json_tmp")" \
+    '{capability:$capability,schema_version:$schema_version,status:$status,generated_at:$generated_at,data:{mode:$mode,stage:$stage,backend:$backend,query:$query,top:$top,microsoft:$microsoft}}'
   exit 0
 fi
 

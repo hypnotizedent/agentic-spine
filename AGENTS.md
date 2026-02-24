@@ -59,7 +59,7 @@ Full governance contract: [`docs/governance/AGENT_GOVERNANCE_BRIEF.md`](docs/gov
 | SPINE-WATCHER-01 | observation | active | mailroom/state/, receipts/ |
 | DOMAIN-HA-01 | domain-runtime | active | ops/plugins/ha/, ops/agents/home-assistant-agent.contract.md |
 | DOMAIN-COMMS-01 | domain-runtime | active | ops/plugins/communications/, ops/agents/communications-agent.contract.md |
-| DOMAIN-MSGRAPH-01 | domain-runtime | planned | ops/plugins/ms-graph/, ops/agents/ms-graph-agent.contract.md |
+| DOMAIN-MICROSOFT-01 | domain-runtime | planned | ops/plugins/microsoft/, ops/agents/microsoft-agent.contract.md |
 | DOMAIN-N8N-01 | domain-runtime | planned | ops/plugins/n8n/, ops/agents/n8n-agent.contract.md |
 | DOMAIN-MEDIA-01 | domain-runtime | planned | ops/plugins/media/, ops/agents/media-agent.contract.md |
 | DOMAIN-PAPERLESS-01 | domain-runtime | planned | ops/agents/paperless-agent.contract.md |

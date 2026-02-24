@@ -38,7 +38,7 @@ DOMAIN_ALIASES = {
     "home-assistant": "home",
     "home-automation": "home",
     "finance-ops": "finance",
-    "identity": "ms-graph",
+    "identity": "microsoft",
     "photos": "immich",
     "media-library": "immich",
     "commerce": "mint",

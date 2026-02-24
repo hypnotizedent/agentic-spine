@@ -23,7 +23,7 @@ MCPJungle and workbench MCP tool servers bypass the spine mailroom by making dir
 | P2 | Block/route mutating MCP tools to spine-governed capability path only | P1 | **DONE** |
 | P3 | Register all MCPJungle servers in agents.registry.yaml with contracts | P2 | **DONE** |
 | P4 | Add drift gate for local vs MCPJungle MCP server code parity | P3 | **DONE** |
-| P5 | Add spine capabilities (or explicit deny policy) for HA/Mint/Firefly/Paperless/Immich/MS Graph | P3 | **DONE** |
+| P5 | Add spine capabilities (or explicit deny policy) for HA/Mint/Firefly/Paperless/Immich/Microsoft | P3 | **DONE** |
 
 ---
 
@@ -81,7 +81,7 @@ Add agent registry entries + spine contracts for:
 - firefly-agent (domain: finance)
 - paperless-agent (domain: documents)
 - immich-agent (domain: photos)
-- ms-graph-agent (domain: identity/email)
+- microsoft-agent (domain: identity/email)
 
 Each needs: `ops/agents/<id>.contract.md` + routing_rules entry in agents.registry.yaml.
 

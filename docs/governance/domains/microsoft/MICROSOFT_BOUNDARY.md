@@ -6,14 +6,14 @@ scope: domain-pointer-index
 spine_pointer_stub: true
 authority_plane: domain_external
 authority_repo: "/Users/ronnyworks/code/workbench"
-authority_path: "agents/ms-graph/docs/BOUNDARY.md"
-source_path: "docs/governance/GRAPH_BOUNDARY.md"
+authority_path: "agents/microsoft/docs/BOUNDARY.md"
+source_path: "docs/governance/MICROSOFT_BOUNDARY.md"
 ---
 
-# GRAPH_BOUNDARY.md (Domain Route Stub)
+# MICROSOFT_BOUNDARY.md (Domain Route Stub)
 
 Source path in spine:
-"docs/governance/GRAPH_BOUNDARY.md"
+"docs/governance/MICROSOFT_BOUNDARY.md"
 
 Canonical domain content:
-"/Users/ronnyworks/code/workbench/agents/ms-graph/docs/BOUNDARY.md"
+"/Users/ronnyworks/code/workbench/agents/microsoft/docs/BOUNDARY.md"

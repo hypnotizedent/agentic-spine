@@ -1,4 +1,4 @@
-# ms-graph-agent Contract
+# microsoft-agent Contract
 
 > **Status:** registered
 > **Domain:** identity
@@ -10,25 +10,25 @@
 
 ## Identity
 
-- **Agent ID:** ms-graph-agent
-- **Domain:** identity (Microsoft Graph API — email, calendar, identity)
-- **Workbench Implementation:** `~/code/workbench/agents/ms-graph/tools/ms_graph_tools.py`
-- **MCP Mirror:** `~/code/workbench/infra/compose/mcpjungle/servers/microsoft-graph.json`
+- **Agent ID:** microsoft-agent
+- **Domain:** identity (Microsoft API — email, calendar, identity)
+- **Workbench Implementation:** `~/code/workbench/agents/microsoft/tools/microsoft_tools.py`
+- **MCP Mirror:** `~/code/workbench/infra/compose/mcpjungle/servers/microsoft.json`
 - **Registry:** `ops/bindings/agents.registry.yaml`
 
 ## Owns (Application Layer)
 
 | Concern | System |
 |---------|--------|
-| Email search/read | MS Graph API |
-| Calendar queries | MS Graph API |
-| Identity/profile lookups | MS Graph API |
+| Email search/read | Microsoft API |
+| Calendar queries | Microsoft API |
+| Identity/profile lookups | Microsoft API |
 
 ## Defers to Spine (Infrastructure Layer)
 
 | Concern | Spine Artifact |
 |---------|---------------|
-| Secrets (OAuth tokens) | Infisical `/spine/services/microsoft-graph/` |
+| Secrets (OAuth tokens) | Infisical `/spine/services/microsoft/` |
 
 ## Governed Tools
 
@@ -62,4 +62,4 @@ On-demand via Claude Desktop MCP. No watchers, no cron.
 
 | Service | Host | Notes |
 |---------|------|-------|
-| Microsoft Graph API | graph.microsoft.com | Cloud service (no VM) |
+| Microsoft API | graph.microsoft.com | Cloud service (no VM) |

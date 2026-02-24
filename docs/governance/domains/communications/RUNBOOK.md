@@ -23,7 +23,7 @@ Define the canonical live-pilot operating flow for communications surfaces in sp
 Live pilot requires:
 
 - `pilot.send_test.mode: live-pilot`
-- `pilot.execution_backend: microsoft-graph`
+- `pilot.execution_backend: microsoft`
 - Active mailbox rows in `pilot.mailboxes[]`
 - Transactional provider and policy contracts present and parseable
 
@@ -31,18 +31,18 @@ Live pilot requires:
 
 - `communications.stack.status`
   - Validates contract + infra target parity.
-  - In live mode, runs Graph probe and fails on non-JSON/no-response payload.
+  - In live mode, runs Microsoft probe and fails on non-JSON/no-response payload.
 - `communications.mailboxes.list`
   - Shows stage/mode/backend and pilot mailbox roster.
 - `communications.mail.search`
   - Simulation mode: searches mailbox catalog in contract.
-  - Live mode: executes Graph mailbox query via governed Graph helper.
+  - Live mode: executes Microsoft mailbox query via governed Microsoft helper.
 - `communications.mail.send.test`
   - Manual approval required.
   - Simulation mode: writes simulated artifact under runtime outbox.
-  - Live mode: sends real pilot test message via Graph and writes receipt artifact under runtime outbox.
+  - Live mode: sends real pilot test message via Microsoft and writes receipt artifact under runtime outbox.
 - `communications.provider.status`
-  - Shows Graph/Resend/Twilio route status, cutover phase, and env-readiness for live execution.
+  - Shows Microsoft/Resend/Twilio route status, cutover phase, and env-readiness for live execution.
 - `communications.policy.status`
   - Shows canonical consent/compliance policy (opt-in, quiet-hours, STOP footer rules).
 - `communications.templates.list`
@@ -91,7 +91,7 @@ Bundle artifact: `mailroom/outbox/alerts/communications/incidents/BUNDLE-<timest
 
 ## Required Preconditions
 
-Communications live surfaces rely on Graph and therefore require:
+Communications live surfaces rely on Microsoft and therefore require:
 
 - `secrets.binding`
 - `secrets.auth.status`
@@ -128,4 +128,4 @@ echo "yes" | ./bin/ops cap run communications.delivery.anomaly.dispatch --dry-ru
 - Delivery anomaly alerts:
   - `mailroom/outbox/alerts/communications/ALERT-*.yaml`
 - Delivery confirmation pattern:
-  - Query `graph.mail.search` for unique send-test subject token.
+  - Query `microsoft.mail.search` for unique send-test subject token.

@@ -57,7 +57,7 @@ the grade was about operational clarity, not correctness.
 
 - `docs/ACTIVE_DOCS_INDEX.md` — navigation index
 - `ops/bindings/capability_map.yaml` — 165-entry cap-to-plugin map
-- `ops/agents/{home-assistant,mint-os,firefly,paperless,immich,ms-graph}-agent.contract.md` — 6 contracts
+- `ops/agents/{home-assistant,mint-os,firefly,paperless,immich,microsoft}-agent.contract.md` — 6 contracts
 - `ops/plugins/loops/bin/gaps-status` — gap-loop reconciliation script
 - `surfaces/verify/d66-mcp-parity-gate.sh` — MCP parity gate
 - `surfaces/verify/d67-capability-map-lock.sh` — capability map lock

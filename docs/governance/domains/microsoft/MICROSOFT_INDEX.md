@@ -6,14 +6,14 @@ scope: domain-pointer-index
 spine_pointer_stub: true
 authority_plane: domain_external
 authority_repo: "/Users/ronnyworks/code/workbench"
-authority_path: "agents/ms-graph/docs/INDEX.md"
-source_path: "docs/governance/GRAPH_INDEX.md"
+authority_path: "agents/microsoft/docs/INDEX.md"
+source_path: "docs/governance/MICROSOFT_INDEX.md"
 ---
 
-# GRAPH_INDEX.md (Domain Route Stub)
+# MICROSOFT_INDEX.md (Domain Route Stub)
 
 Source path in spine:
-"docs/governance/GRAPH_INDEX.md"
+"docs/governance/MICROSOFT_INDEX.md"
 
 Canonical domain content:
-"/Users/ronnyworks/code/workbench/agents/ms-graph/docs/INDEX.md"
+"/Users/ronnyworks/code/workbench/agents/microsoft/docs/INDEX.md"

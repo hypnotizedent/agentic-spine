@@ -108,7 +108,7 @@ Edit `ops/bindings/gate.execution.topology.yaml` — add an entry to the `gate_a
     family: {category}
 ```
 
-Valid domains: `core`, `aof`, `n8n`, `infra`, `media`, `ms-graph`, `immich`, `finance`, `loop_gap`.
+Valid domains: `core`, `aof`, `n8n`, `infra`, `media`, `microsoft`, `immich`, `finance`, `loop_gap`.
 
 ### 5. Decide the gate tier
 

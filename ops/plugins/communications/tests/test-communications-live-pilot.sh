@@ -29,8 +29,8 @@ scope: communications-stack-ws1
 pilot:
   stage: ws1-live-pilot
   provider: stalwart
-  execution_backend: microsoft-graph
-  graph:
+  execution_backend: microsoft
+  microsoft:
     cap_exec: "fake"
     live_probe_query: "*"
     search_default_top: 5
@@ -54,8 +54,8 @@ pilot:
       status: active
 YAML
 
-graph_exec="$tmp/fake/graph-cap-exec"
-cat >"$graph_exec" <<'SH'
+microsoft_exec="$tmp/fake/microsoft-cap-exec"
+cat >"$microsoft_exec" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 action="${1:-}"
@@ -79,13 +79,13 @@ fi
 echo "unsupported action: $action" >&2
 exit 2
 SH
-chmod +x "$graph_exec"
+chmod +x "$microsoft_exec"
 
 export COMMUNICATIONS_STACK_CONTRACT="$contract"
-export COMMUNICATIONS_GRAPH_EXEC="$graph_exec"
+export COMMUNICATIONS_MICROSOFT_EXEC_LEGACY="$microsoft_exec"
 export SPINE_OUTBOX="$tmp/outbox"
 
-# stack status must parse mixed-output graph payload and report live probe OK
+# stack status must parse mixed-output microsoft payload and report live probe OK
 stack_out="$("$STACK_STATUS")"
 echo "$stack_out" | grep "status: OK" >/dev/null || fail "stack status should pass in live-pilot"
 echo "$stack_out" | grep "live_probe_status: ok" >/dev/null || fail "stack live probe should be ok"

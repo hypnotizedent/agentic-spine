@@ -142,7 +142,7 @@ def parse_backoff(raw: str) -> list[int]:
     return out
 
 
-def classify_graph_error(msg: str) -> tuple[str, bool, int | None]:
+def classify_microsoft_error(msg: str) -> tuple[str, bool, int | None]:
     lower = msg.lower()
     http_status = None
     m = re.search(r"http\s+(\d{3})", lower)
@@ -177,7 +177,7 @@ def parse_etag(result: dict[str, Any]) -> str:
 def state_default() -> dict[str, Any]:
     return {
         "schema_version": "1.0",
-        "provider": "ms-graph",
+        "provider": "microsoft",
         "updated_at": now_iso(),
         "mappings": {},
         "ledger": [],
@@ -199,7 +199,7 @@ def load_state(path: Path) -> dict[str, Any]:
     if not isinstance(raw.get("ledger"), list):
         raw["ledger"] = []
     if not isinstance(raw.get("provider"), str):
-        raw["provider"] = "ms-graph"
+        raw["provider"] = "microsoft"
     if not isinstance(raw.get("schema_version"), str):
         raw["schema_version"] = "1.0"
     return raw
@@ -228,12 +228,12 @@ def append_ledger(state: dict[str, Any], entry: dict[str, Any], path: Path) -> N
     persist_state(path, state)
 
 
-def run_graph_op(graph_exec: Path, op: str, args: list[str]) -> dict[str, Any]:
-    cmd = [str(graph_exec), op] + args
+def run_microsoft_op(microsoft_exec: Path, op: str, args: list[str]) -> dict[str, Any]:
+    cmd = [str(microsoft_exec), op] + args
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        msg = (proc.stderr or proc.stdout or "graph operation failed").strip()
-        error_class, retryable, http_status = classify_graph_error(msg)
+        msg = (proc.stderr or proc.stdout or "microsoft operation failed").strip()
+        error_class, retryable, http_status = classify_microsoft_error(msg)
         raise SyncError(
             error_class=error_class,
             message=msg,
@@ -256,7 +256,7 @@ def run_graph_op(graph_exec: Path, op: str, args: list[str]) -> dict[str, Any]:
 
 def remote_call(
     *,
-    graph_exec: Path,
+    microsoft_exec: Path,
     op: str,
     args: list[str],
     retry_max_attempts: int,
@@ -287,7 +287,7 @@ def remote_call(
                 state_path,
             )
         try:
-            result = run_graph_op(graph_exec, op, args)
+            result = run_microsoft_op(microsoft_exec, op, args)
         except SyncError as err:
             err.attempts = attempt
             if mode == "execute":
@@ -475,15 +475,15 @@ def parse_args(code_root: Path, runtime_root: Path) -> argparse.Namespace:
 
     parser.add_argument("--retry-max-attempts", type=int, default=3)
     parser.add_argument("--retry-backoff-sec", default="1,3,8")
-    parser.add_argument("--provider", default="ms-graph")
+    parser.add_argument("--provider", default="microsoft")
     parser.add_argument("--state-path", default="mailroom/state/calendar-sync/state.json")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--runtime-root", default=str(runtime_root), help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
-    if args.provider != "ms-graph":
-        stop("--provider must be ms-graph", 2)
+    if args.provider != "microsoft":
+        stop("--provider must be microsoft", 2)
 
     if args.window_start and args.window_end:
         start = parse_iso_date(args.window_start, "window-start")
@@ -568,10 +568,10 @@ def run() -> tuple[dict[str, Any], int]:
     if not lock_path.is_absolute():
         lock_path = (runtime_root / lock_path).resolve()
 
-    graph_exec_env = os.environ.get("CALENDAR_SYNC_GRAPH_EXEC", "").strip()
-    graph_exec = Path(graph_exec_env).expanduser().resolve() if graph_exec_env else (code_root / "ops/plugins/ms-graph/bin/graph-cap-exec").resolve()
-    if not graph_exec.exists():
-        stop(f"missing graph executable: {graph_exec}", 2)
+    microsoft_exec_env = os.environ.get("CALENDAR_SYNC_MICROSOFT_EXEC", "").strip()
+    microsoft_exec = Path(microsoft_exec_env).expanduser().resolve() if microsoft_exec_env else (code_root / "ops/plugins/microsoft/bin/microsoft-cap-exec").resolve()
+    if not microsoft_exec.exists():
+        stop(f"missing microsoft executable: {microsoft_exec}", 2)
 
     run_id = f"CALSYNC-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{sha1_hex(str(time.time_ns()))[:8]}"
     mode = args.mode
@@ -629,7 +629,7 @@ def run() -> tuple[dict[str, Any], int]:
 
                 try:
                     result, attempts = remote_call(
-                        graph_exec=graph_exec,
+                        microsoft_exec=microsoft_exec,
                         op="calendar_list",
                         args=["--top", str(args.max_pull)],
                         retry_max_attempts=args.retry_max_attempts,
@@ -749,7 +749,7 @@ def run() -> tuple[dict[str, Any], int]:
                             raise SyncError("validation_error", "max_create limit exceeded", exit_code=1)
                         create_count += 1
                         result, attempts = remote_call(
-                            graph_exec=graph_exec,
+                            microsoft_exec=microsoft_exec,
                             op="calendar_create",
                             args=[
                                 "--subject",
@@ -777,7 +777,7 @@ def run() -> tuple[dict[str, Any], int]:
                             raise SyncError("validation_error", "calendar_create missing id", exit_code=1)
                         etag = parse_etag(result)
                         mappings[canonical_key] = mapping_entry(
-                            provider="ms-graph",
+                            provider="microsoft",
                             layer=layer,
                             event_id=event_id,
                             source_ref=rec["source_ref"],
@@ -805,7 +805,7 @@ def run() -> tuple[dict[str, Any], int]:
 
                     remote_event_id = str(mapping.get("remote_event_id", "")).strip()
                     get_result, get_attempts = remote_call(
-                        graph_exec=graph_exec,
+                        microsoft_exec=microsoft_exec,
                         op="calendar_get",
                         args=["--event-id", remote_event_id],
                         retry_max_attempts=args.retry_max_attempts,
@@ -842,7 +842,7 @@ def run() -> tuple[dict[str, Any], int]:
                         raise SyncError("validation_error", "max_update limit exceeded", exit_code=1)
                     update_count += 1
                     update_result, update_attempts = remote_call(
-                        graph_exec=graph_exec,
+                        microsoft_exec=microsoft_exec,
                         op="calendar_update",
                         args=[
                             "--event-id",
@@ -869,7 +869,7 @@ def run() -> tuple[dict[str, Any], int]:
                     )
                     new_etag = parse_etag(update_result) or remote_etag_current
                     mappings[canonical_key] = mapping_entry(
-                        provider="ms-graph",
+                        provider="microsoft",
                         layer=layer,
                         event_id=event_id,
                         source_ref=rec["source_ref"],
@@ -900,7 +900,7 @@ def run() -> tuple[dict[str, Any], int]:
                                 raise SyncError("validation_error", "max_create limit exceeded", exit_code=1)
                             create_count += 1
                             recreate_result, recreate_attempts = remote_call(
-                                graph_exec=graph_exec,
+                                microsoft_exec=microsoft_exec,
                                 op="calendar_create",
                                 args=[
                                     "--subject",
@@ -927,7 +927,7 @@ def run() -> tuple[dict[str, Any], int]:
                             if not new_remote_id:
                                 raise SyncError("validation_error", "calendar_create missing id", exit_code=1)
                             mappings[canonical_key] = mapping_entry(
-                                provider="ms-graph",
+                                provider="microsoft",
                                 layer=layer,
                                 event_id=event_id,
                                 source_ref=rec["source_ref"],

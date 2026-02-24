@@ -10,7 +10,7 @@ DELIVERY_CONTRACT="${COMMUNICATIONS_DELIVERY_CONTRACT:-$ROOT/ops/bindings/commun
 MANIFEST="$ROOT/ops/bindings/infra.relocation.plan.yaml"
 POLICY="$ROOT/ops/bindings/infra.placement.policy.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
-GRAPH_EXEC="${COMMUNICATIONS_GRAPH_EXEC:-$ROOT/ops/plugins/ms-graph/bin/graph-cap-exec}"
+MICROSOFT_EXEC="${COMMUNICATIONS_MICROSOFT_EXEC:-${COMMUNICATIONS_MICROSOFT_EXEC_LEGACY:-$ROOT/ops/plugins/microsoft/bin/microsoft-cap-exec}}"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
@@ -52,7 +52,7 @@ need jq
 [[ -f "$MANIFEST" ]] || fail "missing relocation manifest: $MANIFEST"
 [[ -f "$POLICY" ]] || fail "missing placement policy: $POLICY"
 [[ -f "$CAPS" ]] || fail "missing capabilities registry: $CAPS"
-[[ -x "$GRAPH_EXEC" ]] || fail "missing graph executor: $GRAPH_EXEC"
+[[ -x "$MICROSOFT_EXEC" ]] || fail "missing Microsoft executor: $MICROSOFT_EXEC"
 
 vm_host="$(yq e -r '.pilot.vm_target.hostname // ""' "$CONTRACT")"
 vm_id="$(yq e -r '.pilot.vm_target.vm_id // ""' "$CONTRACT")"
@@ -64,7 +64,7 @@ mode="$(yq e -r '.pilot.send_test.mode // "simulation-only"' "$CONTRACT")"
 backend="$(yq e -r '.pilot.execution_backend // "none"' "$CONTRACT")"
 transactional_mode="$(yq e -r '.transactional.mode // "simulation-only"' "$CONTRACT")"
 transactional_cutover_phase="$(yq e -r '.transactional.cutover_phase // "phase0-simulation"' "$PROVIDERS_CONTRACT")"
-live_probe_query="$(yq e -r '.pilot.graph.live_probe_query // "*"' "$CONTRACT")"
+live_probe_query="$(yq e -r '.pilot.microsoft.live_probe_query // "*"' "$CONTRACT")"
 mailbox_count="$(yq e '.pilot.mailboxes | length' "$CONTRACT")"
 cap_count="$(yq e '.capabilities | keys | map(select(test("^communications\\."))) | length' "$CAPS")"
 mailbox_active_count="$(yq e '.pilot.mailboxes[] | select(.status == "active") | .id' "$CONTRACT" | sed '/^$/d' | wc -l | tr -d ' ')"
@@ -97,7 +97,7 @@ if [[ "$mode" != "simulation-only" ]]; then
   probe_raw_tmp="$(mktemp)"
   probe_err_tmp="$(mktemp)"
   trap 'rm -f "$probe_raw_tmp" "$probe_json_tmp" "$probe_err_tmp"' EXIT
-  if "$GRAPH_EXEC" mail_search --query "$live_probe_query" --top 1 >"$probe_raw_tmp" 2>"$probe_err_tmp"; then
+  if "$MICROSOFT_EXEC" mail_search --query "$live_probe_query" --top 1 >"$probe_raw_tmp" 2>"$probe_err_tmp"; then
     if ! extract_first_json "$probe_raw_tmp" "$probe_json_tmp"; then
       live_probe_status="invalid_json"
       status="FAIL"

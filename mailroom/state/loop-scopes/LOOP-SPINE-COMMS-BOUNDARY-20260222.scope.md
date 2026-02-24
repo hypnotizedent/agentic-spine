@@ -5,7 +5,7 @@ status: closed
 owner: "@ronny"
 scope: spine
 priority: high
-objective: Execute 3-lane communications boundary: fix remaining contract contradictions, deploy Stalwart (Lane C), enforce Graph boundary with D151 gate. Tracks 8 disconnects from COMMUNICATIONS_AUDIT_20260222.
+objective: Execute 3-lane communications boundary: fix remaining contract contradictions, deploy Stalwart (Lane C), enforce Microsoft boundary with D151 gate. Tracks 8 disconnects from COMMUNICATIONS_AUDIT_20260222.
 ---
 
 # Loop Scope: LOOP-SPINE-COMMS-BOUNDARY-20260222
@@ -23,13 +23,13 @@ Execute the 3-lane communications boundary model with hard separation between Mi
 
 | Lane | Provider | Domain | Purpose |
 |------|----------|--------|---------|
-| A: Graph | Microsoft 365 | `@mintprints.com` | Ronny's work email. READ=auto, SEND=human-approval |
+| A: Microsoft | Microsoft 365 | `@mintprints.com` | Ronny's work email. READ=auto, SEND=human-approval |
 | B: Resend | Resend API | `noreply@mintprints.co` | Customer transactional notifications (governed) |
 | C: Stalwart | Self-hosted | `@spine.mintprints.co` (proposed) | Spine ops, agent inbox, catchall, alerts |
 
 ## Canonical Sender Identities
 
-- **Work mailbox:** `info@mintprints.com` (Graph, Lane A)
+- **Work mailbox:** `info@mintprints.com` (Microsoft, Lane A)
 - **Customer automation:** `noreply@mintprints.co` (Resend, Lane B)
 - **Spine operations:** `spine@spine.mintprints.co` (Stalwart, Lane C — planned)
 
@@ -42,7 +42,7 @@ Execute the 3-lane communications boundary model with hard separation between Mi
 | D3 | Sender addresses scattered | **FIXED** | n8n purge eliminated all stale senders | Zero `mintprintshop.com`/`sales@`/`digest@`/`production@` references remain |
 | D4 | Two template systems | **FIXED** | n8n HTML templates deleted | Spine YAML catalog is sole template surface |
 | D5 | Briefing email reports errors | **OUT OF SCOPE** | N/A | Briefing plugin data issue, not comms |
-| D6 | Graph boundary not enforced | **FIXED** | D151 gate + stack contract update | send_test → spine.mintprints.co, mailboxes → stalwart-direct, D151 enforces boundary |
+| D6 | Microsoft boundary not enforced | **FIXED** | D151 gate + stack contract update | send_test → spine.mintprints.co, mailboxes → stalwart-direct, D151 enforces boundary |
 | D7 | No shared AI mailbox | **OPEN** | See GAP-OP-820 | VM 214 not provisioned, Stalwart not deployed |
 | D8 | Resend auth failures (403) | **OPEN** | See GAP-OP-821 | Intermittent 403 in delivery log, root cause unknown |
 

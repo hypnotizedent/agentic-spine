@@ -11,7 +11,7 @@
 
 | Provider | Purpose | Status | Send Domain |
 |----------|---------|--------|-------------|
-| **Microsoft Graph** | Ronny's work email (Outlook). Calendar, identity, operational mailbox | Live | `ronny@mintprints.com` (Outlook 365) |
+| **Microsoft** | Ronny's work email (Outlook). Calendar, identity, operational mailbox | Live | `ronny@mintprints.com` (Outlook 365) |
 | **Resend** | Transactional customer emails (quotes, payments, shipping) | Phase 1 live (partially working) | `noreply@mintprints.co` (verified in Cloudflare + Resend) |
 | **Twilio** | Transactional SMS (customer notifications) | Simulation-only | `+15619335513` |
 
@@ -21,7 +21,7 @@
 |-----------|-------|-----------|---------------|
 | **Spine communications plugin** | `ops/plugins/communications/` (12 binaries) | Yes — preview → execute → delivery log, D147 drift lock | Briefing email, test sends, quote-ready via Resend |
 | **N8N workflows** | Docker VM, direct HTTP to `api.resend.com` | No — bypasses spine governance entirely | Payment-needed, shipped, ready-for-pickup, pricing-ready, daily digest |
-| **MS Graph agent** | `workbench/agents/ms-graph/tools/ms_graph_tools.py` | Partially — spine contract, but no D147 coverage for Graph sends | Live-pilot send-test, A01 quote alerts via Outlook |
+| **Microsoft agent** | `workbench/agents/microsoft/tools/microsoft_tools.py` | Partially — spine contract, but no D147 coverage for Microsoft sends | Live-pilot send-test, A01 quote alerts via Outlook |
 
 ### 4 Domains In Play
 
@@ -67,7 +67,7 @@ These bypass the spine communications plugin entirely — no preview receipts, n
 | Sender | Where Used | Works? |
 |--------|-----------|--------|
 | `noreply@mintprints.co` | Spine comms plugin, quote request webhook | Yes — Resend verified |
-| `ronny@mintprints.com` | Stack contract default, Graph send-test | Yes — Outlook 365 |
+| `ronny@mintprints.com` | Stack contract default, Microsoft send-test | Yes — Outlook 365 |
 | `sales@mintprints.com` | A01 n8n workflow (New Quote Alert) | **NO — NDR bounce: "sales wasn't found at mintprints.com"** |
 | `orders@mintprintshop.com` | A02 n8n workflow (Pricing Ready) | **UNKNOWN — wrong domain entirely** |
 | `digest@mintprints.com` | A05 n8n workflow (Daily Digest) | **UNKNOWN — likely doesn't exist in Outlook** |
@@ -93,12 +93,12 @@ The "Spine Daily Briefing 2026-02-22 (error)" PDF shows the briefing system corr
 
 But the briefing DATA has errors — "stability snapshot unavailable", "calendar status unavailable", "verify status unknown". The email pipeline works; the upstream data collectors don't. This is a briefing plugin issue, not a communications issue.
 
-### DISCONNECT 6: Graph Boundary Not Enforced
+### DISCONNECT 6: Microsoft Boundary Not Enforced
 
 The governance docs say Outlook is "STRICTLY for work" and should not be touched for spine operations. But:
 
 - The stack contract's `send_test` uses `ronny@mintprints.com` (Outlook) as both sender and recipient
-- The `communications-mail-send-test` binary sends via Graph (Outlook)
+- The `communications-mail-send-test` binary sends via Microsoft (Outlook)
 - The live-pilot send-test PDF confirms this — sent from "Ronny Hantash" via Outlook
 
 The spine is currently using Ronny's work Outlook for test sends. This should route through the self-hosted email once deployed.
@@ -122,13 +122,13 @@ This suggests either API key rotation issues or rate limiting. The RESEND_API_KE
 
 ## The 3-Lane Model (What Should Exist)
 
-### Lane 1: Outlook (Microsoft Graph) — RONNY'S WORK EMAIL
+### Lane 1: Outlook (Microsoft) — RONNY'S WORK EMAIL
 
 - **Scope:** Ronny's personal/business email. Client communications where Ronny is the sender. Calendar. Identity.
 - **Addresses:** `ronny@mintprints.com` (primary), any future team mailboxes on `@mintprints.com`
 - **Who sends:** Ronny manually, or a future "Ronny's AI assistant" agent with explicit approval
 - **NOT for:** Spine operations, automated notifications, agent-to-agent comms, test sends
-- **Governance:** MS-Graph agent contract, Graph boundary doc. Agents can READ (search, list) but SEND requires explicit human approval per message.
+- **Governance:** Microsoft agent contract, Microsoft boundary doc. Agents can READ (search, list) but SEND requires explicit human approval per message.
 
 ### Lane 2: Resend — TRANSACTIONAL CUSTOMER EMAIL
 
@@ -175,7 +175,7 @@ This suggests either API key rotation issues or rate limiting. The RESEND_API_KE
 4. **Configure DNS**: Add MX + SPF + DKIM for the Stalwart domain
 5. **Update stack contract**: Point mailboxes to real Stalwart addresses instead of Outlook stubs
 6. **Move briefing email**: Route daily briefing through Stalwart instead of Resend (it's an internal operational email, not a customer notification)
-7. **Move send-test**: Route live-pilot tests through Stalwart instead of Outlook Graph
+7. **Move send-test**: Route live-pilot tests through Stalwart instead of Outlook Microsoft
 
 ### Phase 3: Govern N8N Email Sends (Week 2)
 
@@ -196,12 +196,12 @@ Two options:
 2. **Move templates to spine**: `ops/bindings/communications.templates/` with HTML files referenced by the YAML catalog
 3. **Update spine send-preview**: Render HTML templates with variable interpolation instead of plain text bodies
 
-### Phase 5: Graph Boundary Enforcement (Week 3)
+### Phase 5: Microsoft Boundary Enforcement (Week 3)
 
 1. **Remove Outlook from spine operations**: No more `ronny@mintprints.com` as send-test sender/recipient
 2. **Update stack contract**: send-test routes through Stalwart
-3. **Add drift gate D151**: Enforce that no spine capability sends email via Graph (only reads are allowed)
-4. **Document the boundary**: Update GRAPH_BOUNDARY.md with the 3-lane model
+3. **Add drift gate D151**: Enforce that no spine capability sends email via Microsoft (only reads are allowed)
+4. **Document the boundary**: Update MICROSOFT_BOUNDARY.md with the 3-lane model
 
 ---
 
@@ -217,10 +217,10 @@ Two options:
 | `ops/plugins/communications/bin/*` | 12 spine capability binaries |
 | `ops/runtime/spine-briefing-email-daily.sh` | Briefing → email pipeline (launchd scheduled) |
 | `ops/agents/communications-agent.contract.md` | MCP gateway agent contract |
-| `ops/agents/ms-graph-agent.contract.md` | Graph agent contract + boundary |
+| `ops/agents/microsoft-agent.contract.md` | Microsoft agent contract + boundary |
 | `workbench/agents/communications/tools/src/index.ts` | Communications MCP gateway implementation |
-| `workbench/agents/ms-graph/tools/ms_graph_tools.py` | Graph tools (mail, calendar) |
+| `workbench/agents/microsoft/tools/microsoft_tools.py` | Microsoft tools (mail, calendar) |
 | `workbench/infra/compose/n8n/email-templates/` | HTML email templates for n8n |
 | `workbench/infra/compose/n8n/workflows/` | N8N workflow JSON files (6 email senders) |
-| `docs/governance/GRAPH_BOUNDARY.md` | Graph boundary governance (stub → workbench) |
+| `docs/governance/MICROSOFT_BOUNDARY.md` | Microsoft boundary governance (stub → workbench) |
 | `surfaces/verify/d147-communications-canonical-routing-lock.sh` | Drift lock for Resend/Twilio centralization |

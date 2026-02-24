@@ -70,9 +70,9 @@ if [[ -f "$f" ]]; then
   check "$f" "TZ env" "$val"
 fi
 
-# ── Workbench MS Graph tools timezone defaults ──
+# ── Workbench Microsoft tools timezone defaults ──
 
-f="$WORKBENCH/agents/ms-graph/tools/ms_graph_tools.py"
+f="$WORKBENCH/agents/microsoft/tools/microsoft_tools.py"
 if [[ -f "$f" ]]; then
   # Check that the hardcoded fallback matches SSOT
   bad_defaults="$(grep -n 'default=.*UTC' "$f" | grep -i timezone || true)"
