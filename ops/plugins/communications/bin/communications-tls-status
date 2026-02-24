@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+JSON=0
+HOST="${STALWART_TLS_HOST:-100.115.16.37}"
+TIMEOUT=10
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --json) JSON=1; shift ;;
+    --host) HOST="$2"; shift 2 ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-tls-status [--json] [--host HOST]
+
+Check TLS certificate status on Stalwart mail server endpoints.
+
+Probes: IMAPS (993), SMTPS (465), STARTTLS (587), HTTPS (8443)
+Default host: 100.115.16.37 (Tailscale), override via STALWART_TLS_HOST or --host.
+
+Exit 0 on success, 1 if any endpoint unreachable or cert expiring within 7 days.
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v openssl >/dev/null 2>&1 || { echo "ERROR: missing dependency: openssl" >&2; exit 1; }
+
+overall_status="OK"
+results=()
+
+probe_tls() {
+  local label="$1" port="$2" starttls_proto="${3:-}"
+  local connect_args=(-connect "${HOST}:${port}" -servername mail.spine.ronny.works)
+  [[ -n "$starttls_proto" ]] && connect_args+=(-starttls "$starttls_proto")
+
+  local cert_text
+  cert_text="$(echo "" | timeout "$TIMEOUT" openssl s_client "${connect_args[@]}" 2>/dev/null)" || true
+
+  local issuer subject not_after days_left status
+  issuer="$(echo "$cert_text" | openssl x509 -noout -issuer 2>/dev/null | sed 's/^issuer=//')" || issuer=""
+  subject="$(echo "$cert_text" | openssl x509 -noout -subject 2>/dev/null | sed 's/^subject=//')" || subject=""
+  not_after="$(echo "$cert_text" | openssl x509 -noout -enddate 2>/dev/null | sed 's/^notAfter=//')" || not_after=""
+
+  if [[ -z "$not_after" ]]; then
+    status="FAIL"
+    days_left=""
+    overall_status="FAIL"
+  else
+    local expiry_epoch now_epoch
+    expiry_epoch="$(TZ=UTC date -jf '%b %d %H:%M:%S %Y %Z' "$not_after" '+%s' 2>/dev/null)" || \
+      expiry_epoch="$(TZ=UTC date -d "$not_after" '+%s' 2>/dev/null)" || expiry_epoch=0
+    now_epoch="$(date '+%s')"
+    days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
+
+    if [[ "$days_left" -lt 0 ]]; then
+      status="FAIL"
+      overall_status="FAIL"
+    elif [[ "$days_left" -lt 7 ]]; then
+      status="WARN"
+      [[ "$overall_status" != "FAIL" ]] && overall_status="WARN"
+    else
+      status="OK"
+    fi
+  fi
+
+  results+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$label" "$port" "$status" "$issuer" "$subject" "$not_after" "$days_left")")
+}
+
+probe_tls "IMAPS" 993
+probe_tls "SMTPS" 465
+probe_tls "STARTTLS" 587 smtp
+probe_tls "HTTPS" 8443
+
+if [[ "$JSON" -eq 1 ]]; then
+  endpoints_json="["
+  first=1
+  for row in "${results[@]}"; do
+    IFS=$'\t' read -r label port status issuer subject not_after days_left <<< "$row"
+    [[ "$first" -eq 1 ]] && first=0 || endpoints_json+=","
+    endpoints_json+="$(printf '{"label":"%s","port":%s,"status":"%s","issuer":"%s","subject":"%s","not_after":"%s","days_until_expiry":%s}' \
+      "$label" "$port" "$status" "$issuer" "$subject" "$not_after" "${days_left:-null}")"
+  done
+  endpoints_json+="]"
+
+  printf '{"capability":"communications.tls.status","schema_version":"1.0","status":"%s","generated_at":"%s","data":{"host":"%s","endpoints":%s}}\n' \
+    "$overall_status" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOST" "$endpoints_json" | jq .
+  [[ "$overall_status" == "FAIL" ]] && exit 1
+  exit 0
+fi
+
+echo "communications.tls.status"
+echo "host: $HOST"
+echo "status: $overall_status"
+echo ""
+printf "%-10s %-6s %-6s %-40s %-30s %s\n" "endpoint" "port" "status" "issuer" "expiry" "days_left"
+printf "%-10s %-6s %-6s %-40s %-30s %s\n" "----------" "------" "------" "----------------------------------------" "------------------------------" "---------"
+for row in "${results[@]}"; do
+  IFS=$'\t' read -r label port status issuer subject not_after days_left <<< "$row"
+  printf "%-10s %-6s %-6s %-40s %-30s %s\n" "$label" "$port" "$status" "$issuer" "$not_after" "${days_left:--}"
+done
+
+[[ "$overall_status" == "FAIL" ]] && exit 1
+exit 0
