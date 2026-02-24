@@ -15,7 +15,7 @@ scope: domain-platform-migration-plan
 
 ## Executive Summary
 
-Migrate 3 canonical domain roots from Namecheap (registrar) to Cloudflare Registrar. DNS authority is delegated to Cloudflare for all 3 zones. mintprints.com DNS was migrated from Namecheap to Cloudflare on 2026-02-24 (W49.4). This migration is now registrar-only (domain registration transfer, not DNS migration).
+Migrate 2 of 3 canonical domain roots from Namecheap (registrar) to Cloudflare Registrar. DNS authority is delegated to Cloudflare for all 3 zones. mintprints.com DNS was migrated from Namecheap to Cloudflare on 2026-02-24 (W49.4). ronny.works is excluded — Cloudflare Registrar does not support the `.works` TLD (stays at Namecheap, DNS at Cloudflare). This migration is registrar-only (domain registration transfer, not DNS migration).
 
 Non-canonical domains (brand protection, parked) are tracked in workbench legacy docs only and are out of scope for this plan.
 
@@ -25,7 +25,7 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 
 | Domain | Zone | Registrar | DNS | Email | Criticality | Wave |
 |--------|------|-----------|-----|-------|-------------|------|
-| ronny.works | ronny | Namecheap | Cloudflare | NC forwarding + Stalwart | P1 | W1 |
+| ronny.works | ronny | Namecheap (permanent — .works TLD unsupported by CF Registrar) | Cloudflare | None active (legacy MX unused) | P1 | N/A |
 | mintprints.co | mintprints | Namecheap | Cloudflare | Resend/AWS SES | P1 | W2 |
 | mintprints.com | mintprints | Namecheap | Cloudflare (migrated 2026-02-24) | Microsoft 365 | **P0** | W3 |
 
@@ -61,10 +61,9 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 
 **Wave execution order:**
 
-#### Wave 1 — Personal Infrastructure (ronny.works, medium risk)
-- **Prerequisite:** Migrate email forwarding off Namecheap (see Workstream A.email)
-- 25+ services via CF tunnel (no disruption expected — DNS stays at CF)
-- Validation: All tunnel-routed services respond, email delivery tested
+#### ~~Wave 1 — Personal Infrastructure (ronny.works)~~ CANCELLED
+- **Reason:** Cloudflare Registrar does not support `.works` TLD. Domain stays at Namecheap.
+- DNS at Cloudflare, no service impact. No email in use on @ronny.works.
 
 #### Wave 2 — Business Operations (mintprints.co, medium risk)
 - 16 tunnel-routed services + Resend transactional email
@@ -81,24 +80,9 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 
 ---
 
-### Workstream A.email: ronny.works Email Forwarding Migration
+### ~~Workstream A.email: ronny.works Email Forwarding Migration~~ CANCELLED
 
-**Problem:** ronny.works MX records point to `eforward1-5.registrar-servers.com` (Namecheap email forwarding). Transferring the registrar to Cloudflare will break this forwarding.
-
-**Options:**
-1. **Cloudflare Email Routing (recommended)** — Free, built-in. Forward to any external mailbox.
-2. **Stalwart (self-hosted)** — Already running on VM 214 for `spine.ronny.works`.
-3. **Drop forwarding** — If no active email on @ronny.works is needed.
-
-**Procedure (Option 1 — CF Email Routing):**
-1. Identify current forwarding rules at Namecheap (which addresses forward where)
-2. Configure equivalent rules in Cloudflare Email Routing (dashboard)
-3. Update MX records in Cloudflare DNS to CF email routing servers
-4. Update SPF record to include Cloudflare
-5. Test send/receive before registrar transfer
-6. Proceed with W1 registrar transfer only after email confirmed working
-
-**Hard gate:** Do NOT transfer ronny.works registrar until email forwarding is migrated and tested.
+**Reason:** ronny.works registrar transfer cancelled (`.works` TLD unsupported by Cloudflare Registrar). No active email on @ronny.works — legacy MX records are unused Namecheap defaults. No migration needed.
 
 ---
 
@@ -148,18 +132,9 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 
 **Pass criteria:** All 8 checks green. Any failure = no-go.
 
-### G2: ronny.works Email Migration Gate
+### ~~G2: ronny.works Email Migration Gate~~ CANCELLED
 
-**Trigger:** Must pass before W1 (ronny.works registrar transfer).
-
-**Checks:**
-1. Email forwarding rules replicated in Cloudflare Email Routing
-2. MX records updated to Cloudflare email routing servers
-3. SPF record updated
-4. Test email to @ronny.works forwarded successfully
-5. Test reply from forwarded address works
-
-**Pass criteria:** All 5 checks green.
+**Reason:** W1 cancelled — `.works` TLD unsupported by Cloudflare Registrar. No email in use on @ronny.works.
 
 ### G3: Service Continuity Gate (per wave)
 
