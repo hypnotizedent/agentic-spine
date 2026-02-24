@@ -35,16 +35,16 @@ domains:
   - domain: mintprints.com
     business_zone: mintprints
     registrar: namecheap
-    dns_authority: cloudflare  # Migrated 2026-02-24 (W49.4)
-    nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]  # Source: Namecheap API 2026-02-24
-    cloudflare_zone_id: null  # NOT in cloudflare.inventory.yaml — blocker B1 still open
-    transfer_ready: true  # DNS at Cloudflare as of W49.4 (D202 enforces)
+    dns_authority: namecheap  # Reverted 2026-02-24 — zone never added to Cloudflare, W49.4 NS change was premature
+    nameservers: [dns1.registrar-servers.com, dns2.registrar-servers.com]  # Source: Namecheap revert 2026-02-24
+    cloudflare_zone_id: null  # Zone must be added to Cloudflare before NS migration
+    transfer_ready: false  # DNS NOT at Cloudflare — must add zone + verify before transfer
     email_authority:
       provider: microsoft-365
-      mx_target: "outlook (Microsoft 365)"
-      spf: "TBD"
-      dkim: "TBD — Microsoft 365 managed"
-      dmarc: "TBD"
+      mx_target: "mintprints-com.mail.protection.outlook.com"
+      spf: "v=spf1 include:spf.protection.outlook.com -all"
+      dkim: "TBD — need to verify selector1/selector2 CNAME records"
+      dmarc: "TBD — need to check _dmarc.mintprints.com"
     web_authority:
       origin: "shopify (storefront)"
       proxy: none
@@ -60,7 +60,8 @@ domains:
     notes: >
       Primary business domain. Microsoft 365 email is the highest-risk dependency.
       Shopify storefront is the public customer-facing website.
-      Must be LAST in migration wave order. Requires email parity gate before transfer.
+      W49.4 NS change REVERTED 2026-02-24 — zone was never added to Cloudflare.
+      Correct sequence: add CF zone → import records → verify email+shopify → switch NS → transfer registrar.
       DNS migrated to Cloudflare 2026-02-24 (W49.4). Cloudflare zone ID still unknown (B1).
 
   - domain: mintprints.co
@@ -189,7 +190,7 @@ summary:
   canonical_roots_binding: "ops/bindings/domain.canonical.roots.yaml"
   registrar: namecheap
   target_registrar: cloudflare
-  dns_authority: cloudflare  # All 3 domains migrated to Cloudflare NS (mintprints.com migrated W49.4, 2026-02-24)
+  dns_authority: mixed  # mintprints.co + ronny.works at Cloudflare; mintprints.com at Namecheap (reverted 2026-02-24)
   waves: 3
   p0_domains: 1  # mintprints.com
   p1_domains: 2  # mintprints.co, ronny.works

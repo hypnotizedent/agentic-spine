@@ -27,7 +27,7 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 |--------|------|-----------|-----|-------|-------------|------|
 | ronny.works | ronny | Namecheap (permanent — .works TLD unsupported by CF Registrar) | Cloudflare | None active (legacy MX unused) | P1 | N/A |
 | mintprints.co | mintprints | Namecheap | Cloudflare | Resend/AWS SES | P1 | W2 |
-| mintprints.com | mintprints | Namecheap | Cloudflare (migrated 2026-02-24) | Microsoft 365 | **P0** | W3 |
+| mintprints.com | mintprints | Namecheap | **Namecheap** (CF NS reverted 2026-02-24 — zone never added) | Microsoft 365 | **P0** | W3 |
 
 **SSOT:** `ops/bindings/domain.portfolio.registry.yaml`
 
@@ -181,13 +181,14 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 
 | ID | Blocker | Domain | Resolution |
 |----|---------|--------|------------|
-| B1 | mintprints.com Cloudflare zone ID not in inventory | mintprints.com | Query CF API or dashboard |
-| B2 | mintprints.com DNS export missing | mintprints.com | Export current DNS records from Cloudflare |
-| B3 | ronny.works email forwarding rules unknown | ronny.works | Export current rules from Namecheap dashboard |
+| B1 | mintprints.com Cloudflare zone not added | mintprints.com | **OPEN** — zone must be added to CF account before NS migration. W50C confirmed zone absent via API. |
+| B2 | mintprints.com DNS export missing | mintprints.com | Export current DNS records from Namecheap DNS |
+| B3 | ~~ronny.works email forwarding rules unknown~~ | ronny.works | **RESOLVED** — no email in use on @ronny.works |
 | B4 | ~~Domain expiry dates stale~~ | All | **RESOLVED** via Namecheap API (W49.2, 2026-02-24) |
-| B5 | mintprints.com MX/SPF/DKIM records not documented | mintprints.com | Export from Cloudflare DNS or M365 admin |
-| B6 | Shopify DNS requirements undocumented | mintprints.com | Check Shopify admin for required DNS records |
-| B7 | ~~mintprints.com DNS still at Namecheap~~ | mintprints.com | **RESOLVED** — NS migrated to Cloudflare 2026-02-24 (W49.4) |
+| B5 | mintprints.com MX/SPF/DKIM records partially documented | mintprints.com | MX+SPF captured from Namecheap DNS. DKIM+DMARC still TBD. |
+| B6 | Shopify DNS requirements undocumented | mintprints.com | A=23.227.38.66, www CNAME=shops.myshopify.com (captured from Namecheap DNS) |
+| B7 | mintprints.com DNS at Namecheap (NOT Cloudflare) | mintprints.com | **REOPENED** — W49.4 NS change reverted 2026-02-24. Zone never added to CF. Premature NS switch caused DNS outage. |
+| B8 | mintprints.com DKIM selectors not documented | mintprints.com | Check selector1/selector2._domainkey.mintprints.com at Namecheap DNS |
 
 ---
 
@@ -197,7 +198,7 @@ Non-canonical domains (brand protection, parked) are tracked in workbench legacy
 |--------|-----------|-------|
 | Email provider (Microsoft 365) | High complexity | 8/10 |
 | Customer-facing storefront (Shopify) | Medium | 4/10 |
-| DNS at Cloudflare (migrated 2026-02-24) | Low | 2/10 |
+| DNS NOT at Cloudflare (reverted — zone never added) | High | 8/10 |
 | Transfer lock period | Medium | 5/10 |
 | Business continuity | High | 9/10 |
 | **Composite risk score** | | **5.6/10** |
