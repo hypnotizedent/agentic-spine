@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# Safety: read-only
+# TRIAGE: IMAP poll — reads UNSEEN messages from Stalwart ops@ mailbox
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
+INFISICAL_AGENT="$ROOT/ops/tools/infisical-agent.sh"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+LIMIT=10
+DRY_RUN=0
+JSON_OUT=0
+MAILBOX=""
+MARK_SEEN=0
+
+# ── arg parse ─────────────────────────────────────────────────────────────────
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --limit)     LIMIT="${2:-10}"; shift 2 ;;
+    --dry-run)   DRY_RUN=1; shift ;;
+    --json)      JSON_OUT=1; shift ;;
+    --mailbox)   MAILBOX="${2:-}"; shift 2 ;;
+    --mark-seen) MARK_SEEN=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-inbox-poll [OPTIONS]
+
+Poll Stalwart IMAP inbox for unread messages (ops@ mailbox).
+
+Options:
+  --limit N       Max messages to fetch (default: 10)
+  --dry-run       List unread count only, do not fetch bodies
+  --json          Output as JSON instead of YAML
+  --mailbox ADDR  Override mailbox (default: from contract)
+  --mark-seen     Mark fetched messages as SEEN (default: no)
+  -h, --help      Show this help
+
+Environment:
+  STALWART_IMAP_HOST    Override IMAP host (default: from contract VM target Tailscale IP)
+  STALWART_IMAP_PORT    Override IMAP port (default: 993)
+  STALWART_OPS_USER     Override IMAP username
+  STALWART_OPS_PASSWORD Override IMAP password (skips Infisical lookup)
+USAGE
+      exit 0
+      ;;
+    --) shift ;; # ignore bare -- separator from cap runner
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+# ── dependencies ──────────────────────────────────────────────────────────────
+need python3
+need yq
+
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+
+# ── resolve IMAP host from contract ──────────────────────────────────────────
+# Default to Tailscale IP for VM 214 (communications-stack)
+IMAP_HOST="${STALWART_IMAP_HOST:-100.115.16.37}"
+IMAP_PORT="${STALWART_IMAP_PORT:-993}"
+
+# ── resolve mailbox from contract if not overridden ──────────────────────────
+if [ -z "$MAILBOX" ]; then
+  MAILBOX="$(yq e -r '.pilot.mailboxes[] | select(.id == "ops") | .address' "$CONTRACT")"
+fi
+[ -n "$MAILBOX" ] || fail "could not resolve ops mailbox from contract"
+
+# ── resolve credentials ─────────────────────────────────────────────────────
+IMAP_USER="${STALWART_OPS_USER:-$MAILBOX}"
+IMAP_PASS="${STALWART_OPS_PASSWORD:-}"
+
+if [ -z "$IMAP_PASS" ]; then
+  if [ -f "$INFISICAL_AGENT" ]; then
+    # shellcheck source=ops/tools/infisical-agent.sh
+    source "$INFISICAL_AGENT"
+    IMAP_PASS="$(infisical_get_secret "infrastructure" "prod" "STALWART_OPS_PASSWORD" 2>/dev/null || true)"
+  fi
+fi
+
+if [ -z "$IMAP_PASS" ]; then
+  fail "STALWART_OPS_PASSWORD not set and not found in Infisical (path: infrastructure/prod/STALWART_OPS_PASSWORD). Register secret first."
+fi
+
+# ── IMAP poll via python3 ───────────────────────────────────────────────────
+python3 - "$IMAP_HOST" "$IMAP_PORT" "$IMAP_USER" "$IMAP_PASS" "$LIMIT" "$DRY_RUN" "$JSON_OUT" "$MARK_SEEN" "$MAILBOX" <<'PYEOF'
+import imaplib
+import email
+import email.utils
+import email.header
+import json
+import sys
+import datetime
+
+imap_host = sys.argv[1]
+imap_port = int(sys.argv[2])
+imap_user = sys.argv[3]
+imap_pass = sys.argv[4]
+limit = int(sys.argv[5])
+dry_run = sys.argv[6] == "1"
+json_out = sys.argv[7] == "1"
+mark_seen = sys.argv[8] == "1"
+mailbox_addr = sys.argv[9]
+
+def decode_header_value(raw):
+    """Decode RFC 2047 encoded header values."""
+    if raw is None:
+        return ""
+    parts = email.header.decode_header(raw)
+    decoded = []
+    for part, charset in parts:
+        if isinstance(part, bytes):
+            decoded.append(part.decode(charset or "utf-8", errors="replace"))
+        else:
+            decoded.append(part)
+    return " ".join(decoded)
+
+def extract_body(msg):
+    """Extract text/plain body, falling back to text/html stripped of tags."""
+    if msg.is_multipart():
+        text_plain = None
+        text_html = None
+        for part in msg.walk():
+            ct = part.get_content_type()
+            cd = str(part.get("Content-Disposition", ""))
+            if "attachment" in cd:
+                continue
+            if ct == "text/plain" and text_plain is None:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    charset = part.get_content_charset() or "utf-8"
+                    text_plain = payload.decode(charset, errors="replace")
+            elif ct == "text/html" and text_html is None:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    charset = part.get_content_charset() or "utf-8"
+                    text_html = payload.decode(charset, errors="replace")
+        if text_plain:
+            return text_plain.strip()
+        if text_html:
+            # Rudimentary tag strip
+            import re
+            return re.sub(r"<[^>]+>", "", text_html).strip()
+        return ""
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            return payload.decode(charset, errors="replace").strip()
+        return ""
+
+def format_date(raw_date):
+    """Parse email date to ISO 8601."""
+    if not raw_date:
+        return ""
+    try:
+        parsed = email.utils.parsedate_to_datetime(raw_date)
+        return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return raw_date
+
+try:
+    # Connect via IMAP4_SSL (port 993)
+    conn = imaplib.IMAP4_SSL(imap_host, imap_port)
+    conn.login(imap_user, imap_pass)
+    conn.select("INBOX", readonly=(not mark_seen))
+
+    # Search for UNSEEN messages
+    status, data = conn.search(None, "UNSEEN")
+    if status != "OK":
+        print("ERROR: IMAP search failed: " + status, file=sys.stderr)
+        sys.exit(1)
+
+    msg_ids = data[0].split() if data[0] else []
+    unseen_count = len(msg_ids)
+
+    # Apply limit (newest first — reverse order)
+    fetch_ids = list(reversed(msg_ids))[:limit]
+
+    if dry_run:
+        now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        if json_out:
+            result = {
+                "capability": "communications.inbox.poll",
+                "schema_version": "1.0",
+                "status": "ok",
+                "generated_at": now,
+                "dry_run": True,
+                "data": {
+                    "mailbox": mailbox_addr,
+                    "imap_host": imap_host,
+                    "unseen_count": unseen_count,
+                    "limit": limit,
+                }
+            }
+            print(json.dumps(result, indent=2))
+        else:
+            print("communications.inbox.poll")
+            print("mode: dry-run")
+            print("mailbox: " + mailbox_addr)
+            print("imap_host: " + imap_host)
+            print("unseen_count: " + str(unseen_count))
+            print("limit: " + str(limit))
+            print("status: ok")
+        conn.logout()
+        sys.exit(0)
+
+    messages = []
+    for mid in fetch_ids:
+        # Use BODY.PEEK[] to avoid marking as read unless --mark-seen
+        fetch_cmd = "(BODY[])" if mark_seen else "(BODY.PEEK[])"
+        status, msg_data = conn.fetch(mid, fetch_cmd)
+        if status != "OK" or not msg_data or not msg_data[0]:
+            continue
+        raw_email = msg_data[0][1]
+        if isinstance(raw_email, bytes):
+            msg = email.message_from_bytes(raw_email)
+        else:
+            msg = email.message_from_string(raw_email)
+
+        from_addr = decode_header_value(msg.get("From", ""))
+        subject = decode_header_value(msg.get("Subject", ""))
+        date_raw = msg.get("Date", "")
+        date_iso = format_date(date_raw)
+        message_id = msg.get("Message-ID", "")
+        body = extract_body(msg)
+
+        # Truncate body for output sanity (max 2000 chars)
+        if len(body) > 2000:
+            body = body[:2000] + "\n... [truncated]"
+
+        messages.append({
+            "message_id": message_id,
+            "from": from_addr,
+            "subject": subject,
+            "date": date_iso,
+            "body": body,
+        })
+
+    conn.logout()
+
+    now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if json_out:
+        result = {
+            "capability": "communications.inbox.poll",
+            "schema_version": "1.0",
+            "status": "ok",
+            "generated_at": now,
+            "dry_run": False,
+            "data": {
+                "mailbox": mailbox_addr,
+                "imap_host": imap_host,
+                "unseen_count": unseen_count,
+                "fetched_count": len(messages),
+                "limit": limit,
+                "messages": messages,
+            }
+        }
+        print(json.dumps(result, indent=2))
+    else:
+        print("communications.inbox.poll")
+        print("mailbox: " + mailbox_addr)
+        print("imap_host: " + imap_host)
+        print("unseen_count: " + str(unseen_count))
+        print("fetched: " + str(len(messages)))
+        print("limit: " + str(limit))
+        print("---")
+        for m in messages:
+            print("- message_id: " + json.dumps(m["message_id"]))
+            print("  from: " + json.dumps(m["from"]))
+            print("  subject: " + json.dumps(m["subject"]))
+            print("  date: " + json.dumps(m["date"]))
+            # Indent body lines for YAML-ish output
+            body_lines = m["body"].split("\n")
+            if len(body_lines) == 1 and len(body_lines[0]) < 120:
+                print("  body: " + json.dumps(m["body"]))
+            else:
+                print("  body: |")
+                for line in body_lines:
+                    print("    " + line)
+        print("---")
+        print("status: ok")
+
+except imaplib.IMAP4.error as e:
+    print("ERROR: IMAP error: " + str(e), file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print("ERROR: " + str(e), file=sys.stderr)
+    sys.exit(1)
+PYEOF
