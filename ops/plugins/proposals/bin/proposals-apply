@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../../../lib/git-lock.sh"
+
 # proposals-apply: Apply a change proposal to the repo (non-interactive).
 #
 # Notes:
@@ -875,6 +878,69 @@ run_change_intake_policy_admission() {
   fi
 }
 
+start_admission_task() {
+  local task_id="$1"
+  local task_fn="$2"
+
+  local out_tmp findings_tmp rc_tmp
+  out_tmp="$(mktemp "/tmp/spine-admission-${task_id}.out.XXXXXX")"
+  findings_tmp="$(mktemp "/tmp/spine-admission-${task_id}.findings.XXXXXX")"
+  rc_tmp="$(mktemp "/tmp/spine-admission-${task_id}.rc.XXXXXX")"
+
+  (
+    set +e
+    ADMISSION_FINDINGS=()
+    "$task_fn"
+    local rc=$?
+    printf '%s\n' "$rc" > "$rc_tmp"
+    printf '%s\n' "${ADMISSION_FINDINGS[@]:-}" > "$findings_tmp"
+    exit 0
+  ) > "$out_tmp" 2>&1 &
+
+  ADMISSION_TASK_IDS+=("$task_id")
+  ADMISSION_TASK_PIDS+=($!)
+  ADMISSION_TASK_OUTPUTS+=("$out_tmp")
+  ADMISSION_TASK_FINDINGS+=("$findings_tmp")
+  ADMISSION_TASK_RCS+=("$rc_tmp")
+}
+
+collect_admission_tasks() {
+  local idx pid task_id out_tmp findings_tmp rc_tmp rc entry
+
+  for pid in "${ADMISSION_TASK_PIDS[@]:-}"; do
+    [[ -z "$pid" ]] && continue
+    wait "$pid" 2>/dev/null || true
+  done
+
+  for ((idx=0; idx<${#ADMISSION_TASK_IDS[@]}; idx++)); do
+    task_id="${ADMISSION_TASK_IDS[$idx]}"
+    out_tmp="${ADMISSION_TASK_OUTPUTS[$idx]}"
+    findings_tmp="${ADMISSION_TASK_FINDINGS[$idx]}"
+    rc_tmp="${ADMISSION_TASK_RCS[$idx]}"
+
+    [[ -f "$out_tmp" ]] && cat "$out_tmp"
+    rc=1
+    if [[ -f "$rc_tmp" ]] && read -r rc < "$rc_tmp"; then
+      :
+    fi
+    if [[ ! "$rc" =~ ^[0-9]+$ ]]; then
+      rc=1
+    fi
+    if (( rc != 0 )); then
+      admission_add_finding "P0" "admission_runtime" "${task_id} admission check failed unexpectedly (rc=$rc)"
+    fi
+
+    if [[ -f "$findings_tmp" ]]; then
+      while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        ADMISSION_FINDINGS+=("$entry")
+      done < "$findings_tmp"
+    fi
+
+    rm -f "$out_tmp" "$findings_tmp" "$rc_tmp" >/dev/null 2>&1 || true
+  done
+}
+
 run_admission_controller() {
   echo "Running admission controller..."
   need_cmd yq
@@ -885,12 +951,22 @@ run_admission_controller() {
   }
 
   load_admission_policy
-  run_domain_routing_admission
-  run_workbench_contract_admission
-  run_ssot_schema_conventions_admission
-  run_vertical_integration_admission
-  run_loop_gap_linkage_admission
-  run_change_intake_policy_admission
+
+  # Admission checks are independent; execute in parallel and merge findings deterministically.
+  ADMISSION_TASK_IDS=()
+  ADMISSION_TASK_PIDS=()
+  ADMISSION_TASK_OUTPUTS=()
+  ADMISSION_TASK_FINDINGS=()
+  ADMISSION_TASK_RCS=()
+
+  start_admission_task "domain-routing" run_domain_routing_admission
+  start_admission_task "workbench-contract" run_workbench_contract_admission
+  start_admission_task "ssot-schema" run_ssot_schema_conventions_admission
+  start_admission_task "vertical-integration" run_vertical_integration_admission
+  start_admission_task "loop-gap-linkage" run_loop_gap_linkage_admission
+  start_admission_task "change-intake-policy" run_change_intake_policy_admission
+  collect_admission_tasks
+
   emit_admission_summary_and_enforce
 }
 
@@ -964,6 +1040,8 @@ if [[ -n "$(git status --porcelain)" ]]; then
   git status --porcelain | sed -n '1,60p' >&2
   exit 1
 fi
+
+base_head="$(git rev-parse HEAD)"
 
 agent=$(awk '/^agent:/{sub(/^agent: */, ""); gsub(/"/, ""); print; exit}' "$manifest")
 created=$(awk '/^created:/{sub(/^created: */, ""); gsub(/"/, ""); print; exit}' "$manifest")
@@ -1066,6 +1144,30 @@ declare -a ADMISSION_FINDINGS=()
 declare -a ADMISSION_BLOCK_ON=()
 declare -a ADMISSION_WARN_ONLY=()
 run_admission_controller
+
+# Acquire a narrow lock for mutation only; admission checks run outside the lock.
+if [[ "$DRY_RUN" -ne 1 ]]; then
+  SPINE_REPO="${SPINE_REPO:-$SPINE_CODE}"
+  acquire_git_lock proposals || exit 1
+  trap 'release_git_lock; rm -f "$changes_tmp" 2>/dev/null || true' EXIT INT TERM
+
+  current_head="$(git rev-parse HEAD)"
+  if [[ "$current_head" != "$base_head" ]]; then
+    echo "ERROR: HEAD changed during admission (before=$base_head after=$current_head). Re-run proposals.apply." >&2
+    exit 1
+  fi
+
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo "ERROR: Working tree changed during admission. Re-run proposals.apply." >&2
+    git status --porcelain | sed -n '1,60p' >&2
+    exit 1
+  fi
+
+  if [[ -f "$PROPOSAL_DIR/.applied" ]]; then
+    echo "ERROR: Proposal already applied by another session: $PROPOSAL_NAME" >&2
+    exit 1
+  fi
+fi
 
 while IFS=$'\t' read -r action path reason; do
   action="$(normalize_action "$action")"
