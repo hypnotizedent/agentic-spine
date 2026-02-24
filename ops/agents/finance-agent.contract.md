@@ -96,6 +96,18 @@ V1.1 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with
 
 Superseded config-only MCP servers (`firefly.json`, `paperless.json`) are deactivated (enabled: false) in MCPJungle.
 
+## Spine Capabilities (Observability Layer)
+
+The spine exposes 3 read-only capabilities for finance observability. These are NOT the MCP tools above — they are independent spine scripts invoked via `./bin/ops cap run`:
+
+| Capability | Description |
+|------------|-------------|
+| `finance.stack.status` | Health probe for all 4 services on VM 211 |
+| `finance.ronny.action.queue` | Deterministic operator task queue (monthly/quarterly/annual) |
+| `ghostfolio.portfolio.status` | Ghostfolio holdings, accounts, portfolio value |
+
+The 21 MCP tools above live in `workbench/agents/finance/tools/` and are workbench-only.
+
 ## Deployment
 
 MCP server is live. SimpleFIN daily sync active (cron `0 6 * * *` on VM 211).
@@ -105,8 +117,9 @@ MCP server is live. SimpleFIN daily sync active (cron `0 6 * * *` on VM 211).
 cd ~/code/workbench/agents/finance/tools
 npm install && npm run build
 
-# Secrets (Infisical infrastructure/prod)
-# FIREFLY_ACCESS_TOKEN, PAPERLESS_API_TOKEN, GHOSTFOLIO_ACCESS_TOKEN
+# Secrets (Infisical infrastructure/prod at /spine/services/finance)
+# FIREFLY_ACCESS_TOKEN, GHOSTFOLIO_ACCESS_TOKEN, FINANCE_ADAPTER_API_KEY, SIMPLEFIN_TOKEN
+# Paperless: PAPERLESS_API_TOKEN at /spine/services/paperless
 # FIREFLY_URL=http://100.76.153.100:8080
 # PAPERLESS_URL=http://100.76.153.100:8000
 # GHOSTFOLIO_URL=http://100.76.153.100:3333
