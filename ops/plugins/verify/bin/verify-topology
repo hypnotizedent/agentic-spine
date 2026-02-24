@@ -37,6 +37,7 @@ verify-topology
 Usage:
   verify-topology core [--json]
   verify-topology domain <domain_id> [--json] [--force]
+  verify-topology domains-run <domain_csv|domain...> [--json] [--force]
   verify-topology release [--json] [--force]
   verify-topology recommend [--path <path>]... [--capability <cap>]... [--json]
   verify-topology pack-list
@@ -116,6 +117,16 @@ is_topology_domain() {
 
 unique_lines() {
   awk 'NF && !seen[$0]++'
+}
+
+contains_value() {
+  local needle="$1"
+  shift || true
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
 }
 
 collect_domain_gate_ids() {
@@ -607,6 +618,63 @@ run_domain() {
   run_gate_ids "$json_mode" "" "${domain_ids[@]}"
 }
 
+run_domains() {
+  local json_mode force_mode
+  json_mode="$(parse_json_flag "$@")"
+  force_mode="$(parse_force_flag "$@")"
+
+  local -a input_domains=()
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --json|--force) ;;
+      *) input_domains+=("$arg") ;;
+    esac
+  done
+
+  ((${#input_domains[@]} > 0)) || fail "usage: verify-topology domains-run <domain_csv|domain...> [--json] [--force]"
+
+  local -a domains=()
+  local token raw normalized
+  for raw in "${input_domains[@]}"; do
+    IFS=',' read -r -a split <<< "$raw"
+    for token in "${split[@]}"; do
+      token="$(echo "$token" | xargs)"
+      [[ -n "$token" ]] || continue
+      normalized="$(normalize_domain "$token")"
+      if ! contains_value "$normalized" "${domains[@]:-}"; then
+        domains+=("$normalized")
+      fi
+    done
+  done
+
+  ((${#domains[@]} > 0)) || fail "no domains resolved"
+
+  if [[ "$force_mode" == "0" ]] && stabilization_is_active && stabilization_bypass_enabled "domain"; then
+    emit_stabilization_bypass "domains" "$(IFS=,; echo "${domains[*]}")" "$json_mode"
+    return 0
+  fi
+
+  local -a gate_ids=()
+  local domain
+  for domain in "${domains[@]}"; do
+    mapfile -t domain_ids < <(collect_domain_gate_ids "$domain")
+    ((${#domain_ids[@]} > 0)) || fail "domain '$domain' resolved with no gates"
+    gate_ids+=("${domain_ids[@]}")
+  done
+
+  mapfile -t gate_ids < <(printf '%s\n' "${gate_ids[@]}" | unique_lines)
+
+  if [[ "$json_mode" == "0" ]]; then
+    echo "verify.domains.run"
+    echo "domains: $(IFS=,; echo "${domains[*]}")"
+    echo "gate_count: ${#gate_ids[@]}"
+    echo
+  fi
+
+  run_gate_ids "$json_mode" "" "${gate_ids[@]}"
+}
+
 run_release() {
   local json_mode force_mode
   json_mode="$(parse_json_flag "$@")"
@@ -767,6 +835,10 @@ case "$cmd" in
     domain="$2"
     shift 2
     run_domain "$domain" "$@"
+    ;;
+  domains|domains-run)
+    shift
+    run_domains "$@"
     ;;
   release|release-run)
     shift
