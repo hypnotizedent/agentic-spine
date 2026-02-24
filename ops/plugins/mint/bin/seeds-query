@@ -7,7 +7,7 @@
 # Usage:
 #   seeds-query                        # latest 20 seeds
 #   seeds-query --status pending       # filter by status
-#   seeds-query --source quote-page    # filter by source
+#   seeds-query --source quote_form    # filter by source
 #   seeds-query --email foo@bar.com    # filter by email
 #   seeds-query --limit 50             # change result limit
 #   seeds-query --count                # count only
@@ -56,9 +56,9 @@ validate_input() {
 
 # Build WHERE clause
 WHERE_PARTS=()
-[[ -n "$STATUS" ]] && WHERE_PARTS+=("status = '$STATUS'")
-[[ -n "$SOURCE" ]] && WHERE_PARTS+=("source = '$SOURCE'")
-[[ -n "$EMAIL" ]]  && WHERE_PARTS+=("customer_email = '$EMAIL'")
+[[ -n "$STATUS" ]] && WHERE_PARTS+=("s.status = '$STATUS'")
+[[ -n "$SOURCE" ]] && WHERE_PARTS+=("s.source = '$SOURCE'")
+[[ -n "$EMAIL" ]]  && WHERE_PARTS+=("COALESCE(c.email, s.from_email) = '$EMAIL'")
 
 WHERE=""
 if [[ ${#WHERE_PARTS[@]} -gt 0 ]]; then
@@ -75,14 +75,24 @@ echo "host: ${USER}@${HOST} (mint-data VM 212)"
 echo
 
 if [[ "$COUNT_ONLY" == "true" ]]; then
-  QUERY="SELECT count(*) AS total FROM artwork_seeds $WHERE;"
+  QUERY="SELECT count(*) AS total
+FROM artwork_seeds s
+LEFT JOIN artwork_contacts c ON c.id = s.contact_id
+$WHERE;"
 else
-  QUERY="SELECT id, customer_email, source, status, created_at FROM artwork_seeds $WHERE ORDER BY created_at DESC LIMIT $LIMIT;"
+  QUERY="SELECT s.id, COALESCE(c.email, s.from_email) AS customer_email, s.source, s.status, COALESCE(CAST(j.job_number AS text), '-') AS job_number, s.created_at
+FROM artwork_seeds s
+LEFT JOIN artwork_contacts c ON c.id = s.contact_id
+LEFT JOIN artwork_job_seed_links jsl ON jsl.seed_id = s.id AND jsl.relation = 'attached'
+LEFT JOIN artwork_jobs j ON j.id = jsl.job_id
+$WHERE
+ORDER BY s.created_at DESC
+LIMIT $LIMIT;"
 fi
 
 set +e
 RESULT="$(ssh "${SSH_OPTS[@]}" "${USER}@${HOST}" \
-  "docker exec mint-postgres psql -U postgres -d artwork -c \"$QUERY\"" 2>&1)"
+  "docker exec -i mint-modules-postgres sh -lc 'PGPASSWORD=\"\${POSTGRES_PASSWORD:-}\" psql -v ON_ERROR_STOP=1 -U \"\${POSTGRES_USER:-mint}\" -d \"\${POSTGRES_DB:-mint_modules}\"'" <<< "$QUERY" 2>&1)"
 rc=$?
 set -e
 
