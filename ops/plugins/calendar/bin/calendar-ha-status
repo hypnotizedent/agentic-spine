@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""calendar-ha-status - report HA calendar ingest contract + snapshot/index status."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}")
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing contract: {path}")
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"YAML root must be mapping: {path}")
+    return payload
+
+
+def load_json(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def parse_generated_age_hours(raw: str) -> float | None:
+    value = raw.strip()
+    if not value:
+        return None
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return (now - dt.astimezone(timezone.utc)).total_seconds() / 3600.0
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Show Home Assistant calendar ingest status")
+    parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    args = parser.parse_args()
+
+    script_dir = Path(__file__).resolve().parent
+    root = Path(os.environ.get("SPINE_ROOT", str(script_dir.parents[3]))).expanduser().resolve()
+    contract_path = root / "ops/bindings/calendar.ha.ingest.contract.yaml"
+    contract = load_yaml(contract_path)
+
+    output = contract.get("output") if isinstance(contract.get("output"), dict) else {}
+    merge = contract.get("merge") if isinstance(contract.get("merge"), dict) else {}
+    provider_mode = contract.get("provider_mode") if isinstance(contract.get("provider_mode"), dict) else {}
+    freshness = contract.get("freshness") if isinstance(contract.get("freshness"), dict) else {}
+
+    snapshot_path = (root / str(output.get("snapshot_path", "mailroom/outbox/calendar/ha/ha.snapshot.json"))).resolve()
+    index_path = (root / str(output.get("index_path", "mailroom/outbox/calendar/ha/ha-calendar-index.json"))).resolve()
+    layer_id = str(merge.get("layer_id", "")).strip()
+    local_store = (root / str(merge.get("target_local_store_path", "mailroom/state/calendar-sync/writable/external"))).resolve()
+    layer_path = local_store / layer_id if layer_id else local_store
+    manifest_path = layer_path / "manifest.json"
+
+    snapshot = load_json(snapshot_path)
+    index = load_json(index_path)
+    manifest = load_json(manifest_path)
+
+    snapshot_generated = str(snapshot.get("generated_at", "")).strip() if snapshot else ""
+    index_generated = str(index.get("generated_at", "")).strip() if index else ""
+    max_age = int(freshness.get("max_snapshot_age_hours", 24) or 24)
+
+    snapshot_age = parse_generated_age_hours(snapshot_generated)
+    index_age = parse_generated_age_hours(index_generated)
+
+    errors: list[str] = []
+    if provider_mode.get("ingest_mode") != "read-only":
+        errors.append("provider_mode.ingest_mode must be read-only")
+    if provider_mode.get("writeback_enabled") is not False:
+        errors.append("provider_mode.writeback_enabled must be false")
+    if not snapshot:
+        errors.append("snapshot missing")
+    if not index:
+        errors.append("index missing")
+    if snapshot_age is not None and snapshot_age > max_age:
+        errors.append(f"snapshot age exceeds freshness limit ({snapshot_age:.2f}h > {max_age}h)")
+    if not manifest:
+        errors.append("layer manifest missing")
+
+    payload = {
+        "capability": "calendar.ha.status",
+        "status": "ok" if not errors else "warn",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "data": {
+            "contract_path": str(contract_path),
+            "provider_mode": {
+                "ingest_mode": provider_mode.get("ingest_mode"),
+                "writeback_enabled": provider_mode.get("writeback_enabled"),
+            },
+            "snapshot_path": str(snapshot_path),
+            "snapshot_exists": bool(snapshot),
+            "snapshot_generated_at": snapshot_generated,
+            "snapshot_age_hours": snapshot_age,
+            "index_path": str(index_path),
+            "index_exists": bool(index),
+            "index_generated_at": index_generated,
+            "index_age_hours": index_age,
+            "layer_path": str(layer_path),
+            "layer_manifest_path": str(manifest_path),
+            "layer_manifest_exists": bool(manifest),
+            "freshness_limit_hours": max_age,
+            "errors": errors,
+        },
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("calendar.ha.status")
+        print(f"contract: {contract_path}")
+        print(f"snapshot_exists: {str(bool(snapshot)).lower()}")
+        print(f"index_exists: {str(bool(index)).lower()}")
+        print(f"layer_manifest_exists: {str(bool(manifest)).lower()}")
+        if snapshot_age is not None:
+            print(f"snapshot_age_hours: {snapshot_age:.2f}")
+        print(f"freshness_limit_hours: {max_age}")
+        if errors:
+            print(f"errors: {len(errors)}")
+            for item in errors:
+                print(f"- {item}")
+        print(f"status: {payload['status'].upper()}")
+
+
+if __name__ == "__main__":
+    main()

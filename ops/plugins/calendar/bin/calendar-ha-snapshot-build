@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""calendar-ha-snapshot-build - build normalized HA calendar snapshot (read-only)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(f"missing YAML file: {path}")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"YAML root must be mapping: {path}")
+    return payload
+
+
+def parse_dt(raw: Any) -> datetime | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def event_sort_key(event: dict[str, Any]) -> tuple[str, str]:
+    start = str(event.get("start", "")).strip()
+    source_event_id = str(event.get("source_event_id", "")).strip()
+    return (start, source_event_id)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build Home Assistant read-only calendar snapshot")
+    parser.add_argument(
+        "--feed",
+        default="all",
+        help="Feed scope to build (default: all enabled feeds)",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON payload")
+    args = parser.parse_args()
+
+    script_dir = Path(__file__).resolve().parent
+    root = Path(os.environ.get("SPINE_ROOT", str(script_dir.parents[3]))).expanduser().resolve()
+    contract_path = root / "ops/bindings/calendar.ha.ingest.contract.yaml"
+
+    try:
+        contract = load_yaml(contract_path)
+    except Exception as exc:
+        fail(str(exc))
+
+    provider_mode = contract.get("provider_mode") if isinstance(contract.get("provider_mode"), dict) else {}
+    source = contract.get("source") if isinstance(contract.get("source"), dict) else {}
+    feeds = contract.get("feeds") if isinstance(contract.get("feeds"), dict) else {}
+    output = contract.get("output") if isinstance(contract.get("output"), dict) else {}
+
+    if provider_mode.get("ingest_mode") != "read-only":
+        fail("provider_mode.ingest_mode must be read-only")
+    if provider_mode.get("writeback_enabled") is not False:
+        fail("provider_mode.writeback_enabled must be false")
+    if not feeds:
+        fail("feeds mapping missing in calendar.ha.ingest.contract.yaml")
+
+    feed_scope = args.feed.strip()
+    selected_feeds: list[str]
+    if feed_scope == "all":
+        selected_feeds = [feed_id for feed_id, conf in feeds.items() if isinstance(conf, dict) and bool(conf.get("enabled", False))]
+    else:
+        if feed_scope not in feeds:
+            fail(f"unknown feed: {feed_scope!r}")
+        selected_feeds = [feed_scope]
+
+    source_rel = str(source.get("automation_snapshot_binding", "")).strip()
+    if not source_rel:
+        fail("source.automation_snapshot_binding is required")
+    source_path = (root / source_rel).resolve()
+
+    try:
+        source_doc = load_yaml(source_path)
+    except Exception as exc:
+        fail(f"unable to load HA automation snapshot: {exc}")
+
+    automations = source_doc.get("automations")
+    if not isinstance(automations, list):
+        fail("ha.automations snapshot must contain automations list")
+
+    output_rel = str(output.get("snapshot_path", "")).strip()
+    if not output_rel:
+        fail("output.snapshot_path is required")
+    output_path = (root / output_rel).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now(timezone.utc)
+    events: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    for feed_id in selected_feeds:
+        feed = feeds.get(feed_id)
+        if not isinstance(feed, dict):
+            warnings.append(f"feed {feed_id} is not a mapping; skipped")
+            continue
+        if not bool(feed.get("enabled", False)):
+            continue
+
+        calendar_id = str(feed.get("calendar_id", "")).strip() or feed_id
+        include_prefixes = feed.get("include_entity_id_prefixes")
+        include_patterns = feed.get("include_friendly_name_patterns")
+        include_prefixes = include_prefixes if isinstance(include_prefixes, list) else []
+        include_patterns = include_patterns if isinstance(include_patterns, list) else []
+        include_without_last_triggered = bool(feed.get("include_without_last_triggered", False))
+        lookback_days = int(feed.get("lookback_days", 0) or 0)
+        default_duration_minutes = int(feed.get("default_duration_minutes", 15) or 15)
+        max_events = int(feed.get("max_events", 200) or 200)
+        cutoff = now - timedelta(days=lookback_days) if lookback_days > 0 else None
+
+        feed_events: list[dict[str, Any]] = []
+        for item in automations:
+            if not isinstance(item, dict):
+                continue
+            entity_id = str(item.get("entity_id", "")).strip()
+            friendly_name = str(item.get("friendly_name", "")).strip()
+            state = str(item.get("state", "")).strip()
+            current = int(item.get("current", 0) or 0)
+
+            include = True
+            if include_prefixes or include_patterns:
+                include = False
+                if entity_id and any(entity_id.startswith(str(prefix)) for prefix in include_prefixes):
+                    include = True
+                if friendly_name and any(str(pattern).lower() in friendly_name.lower() for pattern in include_patterns):
+                    include = True
+            if not include:
+                continue
+
+            triggered_at = parse_dt(item.get("last_triggered"))
+            if triggered_at is None and not include_without_last_triggered:
+                continue
+            if triggered_at is None:
+                triggered_at = now
+            if cutoff and triggered_at < cutoff:
+                continue
+
+            end_at = triggered_at + timedelta(minutes=max(1, default_duration_minutes))
+            source_event_id = f"{entity_id}|{triggered_at.isoformat()}"
+            title_base = friendly_name or entity_id or "Home Assistant automation"
+
+            feed_events.append(
+                {
+                    "source": "home_assistant",
+                    "source_calendar_id": calendar_id,
+                    "source_event_id": source_event_id,
+                    "title": f"{title_base} (triggered)",
+                    "start": triggered_at.isoformat(),
+                    "end": end_at.isoformat(),
+                    "read_only": True,
+                    "immutable_by_source": True,
+                    "feed": feed_id,
+                    "metadata": {
+                        "entity_id": entity_id,
+                        "friendly_name": friendly_name,
+                        "state": state,
+                        "current": current,
+                    },
+                }
+            )
+
+        feed_events.sort(key=event_sort_key, reverse=True)
+        events.extend(feed_events[: max(0, max_events)])
+
+    events.sort(key=event_sort_key, reverse=True)
+    data_status = "ok" if not warnings else "warn"
+
+    payload = {
+        "capability": "calendar.ha.snapshot.build",
+        "status": data_status,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "schema_version": "1.0",
+        "data": {
+            "provider": "home_assistant",
+            "mode": "read-only",
+            "feed_scope": feed_scope,
+            "feeds_selected": selected_feeds,
+            "source": str(source_path),
+            "event_count": len(events),
+            "events": events,
+            "immutable_by_source": True,
+            "snapshot_path": str(output_path),
+            "warnings": warnings,
+        },
+    }
+
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("calendar.ha.snapshot.build")
+        print(f"feed_scope: {feed_scope}")
+        print(f"feeds_selected: {selected_feeds}")
+        print(f"event_count: {len(events)}")
+        print(f"snapshot_path: {output_path}")
+        if warnings:
+            print(f"warnings: {len(warnings)}")
+            for item in warnings:
+                print(f"- {item}")
+        print(f"status: {data_status.upper()}")
+
+
+if __name__ == "__main__":
+    main()

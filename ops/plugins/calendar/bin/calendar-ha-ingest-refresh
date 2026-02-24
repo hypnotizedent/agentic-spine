@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""calendar-ha-ingest-refresh - refresh HA read-only snapshot and rebuild local immutable layer."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"missing contract: {path}")
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse YAML {path}: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"YAML root must be mapping: {path}")
+    return payload
+
+
+def run_snapshot(script: Path, feed: str) -> dict[str, Any]:
+    cmd = [str(script), "--json", "--feed", feed]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        fail(f"snapshot script failed ({script.name}): {(proc.stderr or proc.stdout).strip()}")
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        fail(f"{script.name} emitted invalid JSON: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"{script.name} output root must be mapping")
+    return payload
+
+
+def parse_dt_iso(raw: str) -> datetime:
+    value = raw.strip()
+    if not value:
+        return datetime.now(timezone.utc)
+    try:
+        if len(value) == 10 and value[4] == "-" and value[7] == "-":
+            dt = datetime.fromisoformat(value + "T00:00:00+00:00")
+            return dt
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def to_ics_utc(raw: str, fallback_minutes: int = 15) -> tuple[str, str]:
+    start = parse_dt_iso(raw)
+    end = start + timedelta(minutes=fallback_minutes)
+    return (
+        start.strftime("%Y%m%dT%H%M%SZ"),
+        end.strftime("%Y%m%dT%H%M%SZ"),
+    )
+
+
+def escape_ics_text(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def event_ics(event: dict[str, Any], provider: str) -> str:
+    source_event_id = str(event.get("source_event_id", "")).strip() or "unknown"
+    uid = hashlib.sha1(f"{provider}|{source_event_id}".encode("utf-8")).hexdigest()[:24] + "@external-calendar"
+    title = str(event.get("title", "")).strip() or source_event_id
+    start_raw = str(event.get("start", "")).strip()
+    end_raw = str(event.get("end", "")).strip()
+
+    start_utc, fallback_end = to_ics_utc(start_raw)
+    if end_raw:
+        end_utc = parse_dt_iso(end_raw).strftime("%Y%m%dT%H%M%SZ")
+    else:
+        end_utc = fallback_end
+
+    dtstamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//agentic-spine//calendar-ha-ingest//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{dtstamp}",
+        f"DTSTART:{start_utc}",
+        f"DTEND:{end_utc}",
+        f"SUMMARY:{escape_ics_text(title)}",
+        "X-SPINE-EXTERNAL-PROVIDER:home-assistant",
+        "X-SPINE-READONLY:true",
+        "X-SPINE-IMMUTABLE:true",
+        "END:VEVENT",
+        "END:VCALENDAR",
+        "",
+    ]
+    return "\r\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Refresh HA calendar snapshot and local read-only layer")
+    parser.add_argument("--feed", default="all", help="Feed scope to refresh (default: all enabled feeds)")
+    parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    args = parser.parse_args()
+
+    script_dir = Path(__file__).resolve().parent
+    root = Path(os.environ.get("SPINE_ROOT", str(script_dir.parents[3]))).expanduser().resolve()
+    contract_path = root / "ops/bindings/calendar.ha.ingest.contract.yaml"
+    contract = load_yaml(contract_path)
+
+    output = contract.get("output") if isinstance(contract.get("output"), dict) else {}
+    merge = contract.get("merge") if isinstance(contract.get("merge"), dict) else {}
+    provider_mode = contract.get("provider_mode") if isinstance(contract.get("provider_mode"), dict) else {}
+
+    if provider_mode.get("ingest_mode") != "read-only":
+        fail("provider_mode.ingest_mode must be read-only")
+    if provider_mode.get("writeback_enabled") is not False:
+        fail("provider_mode.writeback_enabled must be false")
+
+    snapshot_rel = str(output.get("snapshot_path", "")).strip()
+    index_rel = str(output.get("index_path", "")).strip()
+    target_store_rel = str(merge.get("target_local_store_path", "")).strip()
+    layer_id = str(merge.get("layer_id", "")).strip()
+    if not snapshot_rel:
+        fail("output.snapshot_path missing")
+    if not index_rel:
+        fail("output.index_path missing")
+    if not target_store_rel:
+        fail("merge.target_local_store_path missing")
+    if not layer_id:
+        fail("merge.layer_id missing")
+
+    snapshot_script = script_dir / "calendar-ha-snapshot-build"
+    if not snapshot_script.is_file():
+        fail(f"missing snapshot builder: {snapshot_script}")
+    snapshot_payload = run_snapshot(snapshot_script, feed=args.feed)
+
+    snapshot_data = snapshot_payload.get("data") if isinstance(snapshot_payload.get("data"), dict) else {}
+    events = snapshot_data.get("events") if isinstance(snapshot_data.get("events"), list) else []
+    events = [item for item in events if isinstance(item, dict)]
+
+    snapshot_path = (root / snapshot_rel).resolve()
+    index_path = (root / index_rel).resolve()
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+
+    target_store = (root / target_store_rel).resolve()
+    target_store.mkdir(parents=True, exist_ok=True)
+    layer_dir = target_store / layer_id
+    layer_dir.mkdir(parents=True, exist_ok=True)
+
+    for old in layer_dir.glob("*.ics"):
+        old.unlink()
+
+    written = 0
+    for event in events:
+        source_event_id = str(event.get("source_event_id", "")).strip() or f"event-{written}"
+        file_hash = hashlib.sha1(source_event_id.encode("utf-8")).hexdigest()[:20]
+        filename = f"{file_hash}.ics"
+        payload = event_ics(event, provider="home-assistant")
+        (layer_dir / filename).write_text(payload, encoding="utf-8")
+        written += 1
+
+    manifest = {
+        "layer": layer_id,
+        "provider": "home_assistant",
+        "read_only": bool(merge.get("read_only", False)),
+        "immutable_by_source": bool(merge.get("immutable_by_source", False)),
+        "event_count": written,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source_snapshot": str(snapshot_path),
+    }
+    (layer_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    payload = {
+        "capability": "calendar.ha.ingest.refresh",
+        "status": "ok" if snapshot_payload.get("status") == "ok" else "warn",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "schema_version": "1.0",
+        "data": {
+            "provider": "home_assistant",
+            "mode": "read-only",
+            "feed_scope": args.feed,
+            "snapshot_path": str(snapshot_path),
+            "snapshot_status": str(snapshot_payload.get("status", "unknown")),
+            "snapshot_event_count": len(events),
+            "snapshot_warnings": snapshot_data.get("warnings", []) if isinstance(snapshot_data.get("warnings"), list) else [],
+            "local_layer_store_path": str(target_store),
+            "layer": {
+                "id": layer_id,
+                "path": str(layer_dir),
+                "event_count": written,
+                "read_only": manifest["read_only"],
+                "immutable_by_source": manifest["immutable_by_source"],
+            },
+            "provider_writeback_enabled": bool(provider_mode.get("writeback_enabled", True)),
+        },
+    }
+    index_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("calendar.ha.ingest.refresh")
+        print(f"feed_scope: {args.feed}")
+        print(f"snapshot_path: {snapshot_path}")
+        print(f"index_path: {index_path}")
+        print(f"layer_path: {layer_dir}")
+        print(f"event_count: {written}")
+        print(f"status: {payload['status'].upper()}")
+
+
+if __name__ == "__main__":
+    main()
