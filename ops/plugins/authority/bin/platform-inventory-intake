@@ -124,6 +124,9 @@ def build_parser() -> argparse.ArgumentParser:
     count.add_argument("--loop-id", default="LOOP-INVENTORY-UNSPECIFIED")
     count.add_argument("--proposal-id", default="CP-TBD")
 
+    reconcile = sub.add_parser("reconcile")
+    reconcile.add_argument("--domain", choices=["network", "ha", "media"], required=True)
+
     return parser
 
 
@@ -501,6 +504,180 @@ def run_transaction(args, root: Path, agents: set[str], locations: dict[str, str
     print(f"platform.inventory.intake OK: {mode} recorded {row['txn_id']}")
 
 
+def load_domain_ledger(root: Path, domain: str) -> tuple[Path, dict]:
+    ledger_map = {
+        "network": root / "ops/bindings/network.devices.ledger.yaml",
+        "ha_devices": root / "ops/bindings/ha.devices.ledger.yaml",
+        "ha_automations": root / "ops/bindings/ha.automations.ledger.yaml",
+        "media": root / "ops/bindings/media.content.ledger.yaml",
+    }
+    path = ledger_map[domain]
+    require_file(path, f"{domain} ledger binding")
+    return path, load_yaml(path)
+
+
+def observed_items_for_domain(root: Path, domain: str) -> list[dict]:
+    items: list[dict] = []
+
+    if domain == "network":
+        observed = load_yaml(root / "ops/bindings/home.device.registry.yaml")
+        for row in observed.get("devices") or []:
+            if not isinstance(row, dict):
+                continue
+            item_id = str(row.get("id", "")).strip()
+            if not item_id:
+                continue
+            items.append(
+                {
+                    "id": item_id,
+                    "class": "device",
+                    "source_system": "home.device.registry",
+                    "first_seen_at": "2026-02-23T00:00:00Z",
+                    "location_or_site": "home",
+                }
+            )
+        return items
+
+    if domain == "ha":
+        devices = load_yaml(root / "ops/bindings/ha.device.map.yaml")
+        automations = load_yaml(root / "ops/bindings/ha.automations.yaml")
+        device_ts = str(devices.get("generated") or "2026-02-23T00:00:00Z")
+        auto_ts = str(automations.get("generated") or "2026-02-23T00:00:00Z")
+
+        for row in devices.get("devices") or []:
+            if not isinstance(row, dict):
+                continue
+            item_id = str(row.get("ha_device_id", "")).strip()
+            if not item_id:
+                continue
+            area = str(row.get("area") or "").strip() or "home"
+            items.append(
+                {
+                    "id": item_id,
+                    "class": "device",
+                    "source_system": "ha.device.map",
+                    "first_seen_at": device_ts,
+                    "location_or_site": area,
+                }
+            )
+
+        for row in automations.get("automations") or []:
+            if not isinstance(row, dict):
+                continue
+            item_id = str(row.get("entity_id", "")).strip()
+            if not item_id:
+                continue
+            items.append(
+                {
+                    "id": item_id,
+                    "class": "automation",
+                    "source_system": "ha.automations",
+                    "first_seen_at": auto_ts,
+                    "location_or_site": "home",
+                }
+            )
+        return items
+
+    if domain == "media":
+        media = load_yaml(root / "ops/bindings/media.services.yaml")
+        services = media.get("services") if isinstance(media.get("services"), dict) else {}
+        source_stamp = str(media.get("updated_at") or "2026-02-23")
+        if len(source_stamp) == 10:
+            source_stamp = f"{source_stamp}T00:00:00Z"
+
+        for service_id, row in services.items():
+            if not isinstance(row, dict):
+                continue
+            sid = str(service_id).strip()
+            if not sid:
+                continue
+            description = str(row.get("description", "")).lower()
+            if sid in {"radarr", "jellyfin"} or "movie" in description:
+                item_class = "movie"
+            elif sid in {"lidarr", "navidrome"} or "music" in description:
+                item_class = "music"
+            else:
+                continue
+
+            vm = str(row.get("vm", "")).strip()
+            location = "shop" if vm else "unknown"
+            items.append(
+                {
+                    "id": sid,
+                    "class": item_class,
+                    "source_system": "media.services",
+                    "first_seen_at": source_stamp,
+                    "location_or_site": location,
+                }
+            )
+        return items
+
+    fail(f"unsupported reconcile domain: {domain}")
+    return items
+
+
+def run_reconcile(args, root: Path) -> None:
+    domain = args.domain
+    if domain == "ha":
+        devices_path, devices_ledger = load_domain_ledger(root, "ha_devices")
+        autos_path, autos_ledger = load_domain_ledger(root, "ha_automations")
+        ledger_paths = [devices_path, autos_path]
+        rows: list[dict] = []
+        rows.extend([x for x in (devices_ledger.get("items") or []) if isinstance(x, dict)])
+        rows.extend([x for x in (autos_ledger.get("items") or []) if isinstance(x, dict)])
+    else:
+        path, ledger = load_domain_ledger(root, domain)
+        ledger_paths = [path]
+        rows = [x for x in (ledger.get("items") or []) if isinstance(x, dict)]
+
+    managed_status = {"approved", "ignored"}
+    managed: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        item_id = str(row.get("id", "")).strip()
+        item_class = str(row.get("class", "")).strip()
+        status = str(row.get("status", "")).strip().lower()
+        if item_id and item_class and status in managed_status:
+            managed[(item_id, item_class)] = row
+
+    observed_items = observed_items_for_domain(root, domain)
+    unmanaged: list[dict] = []
+    for row in observed_items:
+        key = (row["id"], row["class"])
+        if key in managed:
+            continue
+        intake_class = "material" if row["class"] in {"movie", "music"} else "part"
+        normalized_id = re.sub(r"[^a-z0-9-]+", "-", row["id"].lower()).strip("-") or "item"
+        intake_id = f"ITK-{today_iso().replace('-', '')}-{intake_class}-{normalized_id}"
+        unmanaged.append(
+            {
+                "id": row["id"],
+                "class": row["class"],
+                "source_system": row["source_system"],
+                "first_seen_at": row["first_seen_at"],
+                "location_or_site": row["location_or_site"],
+                "suggested_intake_file": f"mailroom/outbox/intake/{intake_id}.yaml",
+                "suggested_intake": {
+                    "class": intake_class,
+                    "id": row["id"],
+                    "owner-agent": "home-assistant-agent" if domain in {"network", "ha"} else "media-agent",
+                    "site": row["location_or_site"],
+                    "location-id": "TODO-location-id",
+                    "runbook-path": "docs/governance/generated/W43_INVENTORY_INTAKE_UNION_LOCK_20260223.md",
+                },
+            }
+        )
+
+    payload = {
+        "domain": domain,
+        "ledger_paths": [str(path.relative_to(root)) for path in ledger_paths],
+        "observed_count": len(observed_items),
+        "managed_count": len(observed_items) - len(unmanaged),
+        "unmanaged_count": len(unmanaged),
+        "unmanaged_items": unmanaged,
+    }
+    print(yaml.safe_dump(payload, sort_keys=False), end="")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         fail("missing root argument")
@@ -529,6 +706,9 @@ def main() -> None:
         return
     if args.command == "count":
         run_transaction(args, root, agents, locations, "count")
+        return
+    if args.command == "reconcile":
+        run_reconcile(args, root)
         return
 
     fail(f"unsupported command: {args.command}")
