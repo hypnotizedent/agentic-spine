@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
+python3 - "$ROOT" "$@" <<'PY'
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import sys
+
+import yaml
+
+
+def fail(message: str) -> None:
+    print(f"domains.change.plan FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_yaml_mapping(path: Path, label: str) -> dict:
+    if not path.is_file():
+        fail(f"missing {label}: {path}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception as exc:
+        fail(f"unable to parse {label} YAML ({path}): {exc}")
+    if not isinstance(data, dict):
+        fail(f"{label} must be a YAML mapping: {path}")
+    return data
+
+
+def cleaned_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def value_non_empty(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(str(item).strip() for item in value)
+    if isinstance(value, dict):
+        return bool(value)
+    return True
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="domains-change-plan")
+    parser.add_argument(
+        "--file",
+        "-f",
+        dest="change_file",
+        required=True,
+        help="Path to domain change request YAML",
+    )
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    args = parse_args(sys.argv[2:])
+    root = Path(sys.argv[1]).expanduser().resolve()
+
+    schema_path = root / "ops/bindings/domain.change.request.schema.yaml"
+    contract_path = root / "ops/bindings/domain.operations.contract.yaml"
+
+    change_path = Path(args.change_file).expanduser()
+    if not change_path.is_absolute():
+        change_path = (Path.cwd() / change_path).resolve()
+
+    schema = load_yaml_mapping(schema_path, "domain change request schema")
+    contract = load_yaml_mapping(contract_path, "domain operations contract")
+    request = load_yaml_mapping(change_path, "domain change request")
+
+    violations: list[str] = []
+
+    required_fields = schema.get("required_fields", [])
+    if not isinstance(required_fields, list) or not all(isinstance(v, str) and v.strip() for v in required_fields):
+        fail("schema required_fields must be a non-empty list of strings")
+
+    for field in required_fields:
+        if field not in request:
+            violations.append(f"missing required field: {field}")
+
+    field_enums = schema.get("field_enums", {})
+    if field_enums and not isinstance(field_enums, dict):
+        fail("schema field_enums must be a mapping")
+
+    for field, allowed in sorted(field_enums.items()):
+        if field not in request:
+            continue
+        if not isinstance(allowed, list):
+            fail(f"schema field_enums.{field} must be a list")
+        value = str(request.get(field, "")).strip()
+        allowed_values = [str(item).strip() for item in allowed if str(item).strip()]
+        if value and allowed_values and value not in allowed_values:
+            violations.append(f"field {field} has invalid value '{value}' (allowed={allowed_values})")
+
+    list_fields = schema.get("list_fields", [])
+    if list_fields and not isinstance(list_fields, list):
+        fail("schema list_fields must be a list")
+    for field in list_fields:
+        if field not in request:
+            continue
+        if not isinstance(request.get(field), list):
+            violations.append(f"field {field} must be a list")
+        elif any(not str(item).strip() for item in request.get(field, [])):
+            violations.append(f"field {field} contains blank entries")
+
+    non_empty_fields = schema.get("non_empty_fields", [])
+    if non_empty_fields and not isinstance(non_empty_fields, list):
+        fail("schema non_empty_fields must be a list")
+    for field in non_empty_fields:
+        if field not in request:
+            continue
+        if not value_non_empty(request.get(field)):
+            violations.append(f"field {field} must be non-empty")
+
+    workflow = contract.get("workflow", {})
+    if not isinstance(workflow, dict):
+        fail("contract workflow must be a mapping")
+
+    states = workflow.get("states", [])
+    expected_states = ["intake", "preflight", "execution", "postcheck", "soak", "closeout"]
+    if states != expected_states:
+        violations.append(
+            "contract workflow.states must equal "
+            + " -> ".join(expected_states)
+        )
+
+    operation_types = contract.get("operation_types", {})
+    if not isinstance(operation_types, dict):
+        fail("contract operation_types must be a mapping")
+
+    operation_type = str(request.get("operation_type", "")).strip()
+    if operation_type not in operation_types:
+        violations.append(f"operation_type not found in contract: {operation_type or '<empty>'}")
+        operation_contract = {}
+    else:
+        operation_contract = operation_types[operation_type]
+
+    prechecks = cleaned_list(request.get("prechecks", []))
+    postchecks = cleaned_list(request.get("postchecks", []))
+
+    required_prechecks = cleaned_list(operation_contract.get("required_prechecks", []))
+    required_postchecks = cleaned_list(operation_contract.get("required_postchecks", []))
+
+    pre_set = set(prechecks)
+    post_set = set(postchecks)
+
+    for check in required_prechecks:
+        if check not in pre_set:
+            violations.append(f"missing required precheck for {operation_type}: {check}")
+    for check in required_postchecks:
+        if check not in post_set:
+            violations.append(f"missing required postcheck for {operation_type}: {check}")
+
+    if violations:
+        for finding in violations:
+            print(f"domains.change.plan FAIL: {finding}", file=sys.stderr)
+        raise SystemExit(1)
+
+    execution_steps = cleaned_list(request.get("execution_steps", []))
+    rollback_steps = cleaned_list(request.get("rollback_steps", []))
+
+    success_criteria_raw = request.get("success_criteria")
+    if isinstance(success_criteria_raw, list):
+        success_criteria = [str(item).strip() for item in success_criteria_raw if str(item).strip()]
+    elif isinstance(success_criteria_raw, str):
+        success_criteria = [success_criteria_raw.strip()] if success_criteria_raw.strip() else []
+    else:
+        success_criteria = []
+
+    no_mail_break_controls = cleaned_list(request.get("no_mail_break_controls", []))
+
+    additional_prechecks = sorted(set(prechecks) - set(required_prechecks))
+    additional_postchecks = sorted(set(postchecks) - set(required_postchecks))
+
+    print("domains.change.plan")
+    print(f"request_file: {change_path}")
+    print(f"change_id: {request.get('change_id')}")
+    print(f"domain: {request.get('domain')}")
+    print(f"business_zone: {request.get('business_zone')}")
+    print(f"operation_type: {operation_type}")
+    print(f"owner: {request.get('owner')}")
+    print(f"risk_class: {request.get('risk_class')}")
+    print(f"blast_radius: {request.get('blast_radius')}")
+    print("workflow: " + " -> ".join(expected_states))
+
+    def print_stage(stage: str, items: list[str]) -> None:
+        print()
+        print(f"[{stage}]")
+        if not items:
+            print("(none)")
+            return
+        for idx, item in enumerate(items, start=1):
+            print(f"{idx}. {item}")
+
+    print_stage(
+        "intake",
+        [
+            f"Change request registered: {request.get('change_id')}",
+            f"Domain scope confirmed: {request.get('domain')} ({request.get('business_zone')})",
+            f"Owner/risk captured: owner={request.get('owner')}, risk={request.get('risk_class')}, blast_radius={request.get('blast_radius')}",
+            f"Operation contract selected: {operation_type}",
+        ],
+    )
+
+    pre_items = [f"[required] {check}" for check in required_prechecks]
+    pre_items.extend(f"[additional] {check}" for check in additional_prechecks)
+    print_stage("preflight", pre_items)
+
+    print_stage("execution", execution_steps)
+
+    post_items = [f"[required] {check}" for check in required_postchecks]
+    post_items.extend(f"[additional] {check}" for check in additional_postchecks)
+    print_stage("postcheck", post_items)
+
+    soak_items = [f"[success] {item}" for item in success_criteria]
+    soak_items.extend(f"[no-mail-break] {item}" for item in no_mail_break_controls)
+    print_stage("soak", soak_items)
+
+    closeout_items = [f"[rollback] {step}" for step in rollback_steps]
+    closeout_items.append("Record closeout receipt and run key linkage.")
+    print_stage("closeout", closeout_items)
+
+
+if __name__ == "__main__":
+    main()
+PY

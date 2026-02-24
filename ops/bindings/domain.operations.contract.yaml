@@ -1,0 +1,95 @@
+version: "1.0"
+updated: "2026-02-24"
+owner: "@ronny"
+scope: domain-operations-factory
+
+workflow:
+  states:
+    - intake
+    - preflight
+    - execution
+    - postcheck
+    - soak
+    - closeout
+  transitions:
+    intake: [preflight]
+    preflight: [execution]
+    execution: [postcheck]
+    postcheck: [soak]
+    soak: [closeout]
+
+operation_types:
+  registrar_transfer:
+    description: Move registrar of record while preserving existing DNS/mail behavior.
+    required_prechecks:
+      - canonical_domain_confirmed
+      - transfer_auth_code_captured
+      - losing_registrar_snapshot_captured
+      - target_registrar_account_ready
+      - registrar_lock_state_recorded
+    required_postchecks:
+      - registrar_of_record_matches_target
+      - nameserver_intended_state_confirmed
+      - transfer_completion_receipt_recorded
+
+  dns_cutover:
+    description: Change authoritative nameserver/DNS control plane with controlled rollback.
+    required_prechecks:
+      - source_zone_export_captured
+      - destination_zone_import_validated
+      - ttl_reduction_window_completed
+      - mail_records_parity_verified
+      - cutover_window_approved
+    required_postchecks:
+      - authoritative_ns_match_destination
+      - critical_records_resolve_correctly
+      - dns_diff_against_plan_clean
+
+  dkim_enablement:
+    description: Publish/enable DKIM selectors without mutating mail routing.
+    required_prechecks:
+      - selector_targets_from_mail_provider_recorded
+      - selector_records_staged_in_dns_plan
+      - current_dkim_state_captured
+      - no_mail_break_controls_attached
+    required_postchecks:
+      - selectors_resolve_publicly
+      - provider_reports_selector_valid
+      - dkim_state_marked_enabled
+
+  service_cname_cutover:
+    description: Repoint service hostnames by CNAME while preserving dependency controls.
+    required_prechecks:
+      - current_cname_targets_snapshotted
+      - target_service_health_passes
+      - dependency_inventory_acknowledged
+      - rollback_target_verified
+    required_postchecks:
+      - cname_targets_match_plan
+      - endpoint_health_checks_pass
+      - synthetic_user_journey_passes
+
+  website_origin_cutover:
+    description: Shift website origin from platform/provider to self-hosted origin.
+    required_prechecks:
+      - incumbent_origin_snapshot_captured
+      - replacement_origin_health_passes
+      - edge_proxy_rules_staged
+      - mail_isolation_controls_confirmed
+      - commerce_dependency_matrix_reviewed
+    required_postchecks:
+      - apex_and_www_serve_replacement_origin
+      - tls_and_redirect_behavior_valid
+      - transaction_or_form_flow_smoke_test_pass
+
+  rollback:
+    description: Restore previous known-good registrar/DNS/origin state after failed cutover.
+    required_prechecks:
+      - rollback_trigger_condition_met
+      - last_known_good_snapshot_available
+      - rollback_window_open
+      - stakeholder_notification_prepared
+    required_postchecks:
+      - previous_state_restored
+      - service_health_recovered
+      - incident_closeout_notes_recorded

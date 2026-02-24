@@ -1,0 +1,123 @@
+plan_id: W54_HYPNO_CLOUDFLARE_ONBOARDING_PLAN_20260224
+generated_at: "2026-02-24T17:00:00Z"
+status: planned
+mode: roadmap-only
+objective: Onboard Hypno domain portfolio into Cloudflare with governed transfer, DNS, and DKIM readiness workflow.
+
+scope:
+  business_zone: hypno
+  repository: /Users/ronnyworks/code/agentic-spine
+  boundary_controls:
+    - Preserve W48 zone boundaries between mintprints, ronny, and spine-comms.
+    - Keep Hypno onboarding isolated from existing production mail domains until explicit cutover approval.
+
+assumptions:
+  - Hypno domain root(s) will be confirmed during intake.
+  - This artifact is planning-only and performs no live DNS/mail/registrar mutations.
+
+wave_sequence:
+  - wave_0_intake
+  - wave_1_preflight
+  - wave_2_execution
+  - wave_3_postcheck
+  - wave_4_soak
+  - wave_5_closeout
+
+no_mail_break_controls:
+  - Do not mutate MX/SPF/DKIM/DMARC during registrar transfer wave.
+  - Keep current mail-routing records unchanged until postcheck parity is green.
+  - Require pre- and post-cutover mail-flow synthetic checks before and after nameserver change.
+  - Roll back immediately if inbound or outbound mail checks regress.
+
+waves:
+  wave_0_intake:
+    prechecks:
+      - Confirm canonical Hypno domains and ownership authority.
+      - Capture current registrar, nameserver, DNS, and mail-routing snapshots.
+      - Classify each domain by operation type (transfer, DNS cutover, DKIM enablement).
+    execution_steps:
+      - Register a domain change request per domain under mailroom/outbox/domains/change-requests/.
+      - Assign owner, risk class, blast radius, and rollback lead for each request.
+      - Validate requests with domains.change.plan.
+    rollback_steps:
+      - Mark wave as blocked and retain incumbent registrar/DNS state when required metadata is missing.
+    soak_criteria:
+      - All domain requests validate with no schema or contract violations.
+    closeout_criteria:
+      - Intake artifacts are linked to run keys and ready for preflight.
+
+  wave_1_preflight:
+    prechecks:
+      - Cloudflare zones created for each Hypno domain.
+      - Destination DNS zone import parity completed against source exports.
+      - DKIM selector targets obtained from mail provider and staged in plan.
+    execution_steps:
+      - Build deterministic cutover checklist per domain (intake->closeout stages).
+      - Confirm TTL strategy and rollback snapshots.
+      - Stage no-mail-break controls in each request.
+    rollback_steps:
+      - Stop before execution and retain incumbent DNS authority if parity diff is non-zero.
+    soak_criteria:
+      - Zone parity diff is zero for critical records (A/AAAA/CNAME/TXT/MX).
+    closeout_criteria:
+      - Transfer and DNS cutover windows are approved.
+
+  wave_2_execution:
+    prechecks:
+      - Approved maintenance window and comms ready.
+      - Pre-cutover health checks pass for web and mail endpoints.
+      - Rollback plan validated against current registrar state.
+    execution_steps:
+      - Execute registrar transfer workflow per domain.
+      - Switch nameservers to Cloudflare only for domains with parity-approved zones.
+      - Apply planned DKIM selector records without changing mail routing.
+    rollback_steps:
+      - Restore previous nameservers and registrar controls using recorded snapshots.
+      - Revert DKIM-related DNS changes if provider validation fails.
+    soak_criteria:
+      - Nameserver and DNS propagation converge on intended targets.
+      - Mail synthetic checks remain healthy with no delivery regression.
+    closeout_criteria:
+      - Domains advance to postcheck with all execution receipts captured.
+
+  wave_3_postcheck:
+    prechecks:
+      - DNS propagation observed across multiple public resolvers.
+      - Mail provider dashboards available for DKIM verification.
+    execution_steps:
+      - Verify authoritative NS, critical web records, MX/SPF/DKIM/DMARC parity.
+      - Confirm provider-side DKIM status for each selector.
+      - Record residual risk and any deferred fixes.
+    rollback_steps:
+      - Trigger rollback on any critical mail or web failure.
+    soak_criteria:
+      - 24-hour stability window with no critical incidents.
+    closeout_criteria:
+      - Postcheck evidence attached to each change request.
+
+  wave_4_soak:
+    prechecks:
+      - Monitoring and alert routes enabled.
+    execution_steps:
+      - Continue synthetic monitoring for DNS, HTTP, and mail flow.
+      - Track any delayed propagation anomalies and remediate.
+    rollback_steps:
+      - Revert affected domain to previous known-good authority if stability drops.
+    soak_criteria:
+      - 72-hour no-mail-break and no-web-break stability pass.
+    closeout_criteria:
+      - Domain set qualifies for final closeout.
+
+  wave_5_closeout:
+    prechecks:
+      - All prior waves completed with linked receipts.
+    execution_steps:
+      - Finalize runbook updates and change logs.
+      - Mark requests closed with success criteria evidence.
+      - Queue any follow-up hardening tasks for W55+.
+    rollback_steps:
+      - Re-open requests and execute rollback playbook if latent defects are discovered.
+    soak_criteria:
+      - No unresolved critical defects at closeout time.
+    closeout_criteria:
+      - Hypno onboarding roadmap complete and execution-ready.
