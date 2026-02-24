@@ -47,6 +47,16 @@ def run_snapshot(script: Path) -> dict[str, Any]:
     return payload
 
 
+def load_snapshot(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def parse_dt_iso(raw: str) -> datetime:
     value = raw.strip()
     if not value:
@@ -120,6 +130,12 @@ def event_ics(event: dict[str, Any], provider: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Refresh external calendar snapshots and local read-only layers")
+    parser.add_argument(
+        "--provider",
+        choices=["icloud", "google", "all"],
+        default="all",
+        help="Provider scope for snapshot refresh (default: all)",
+    )
     parser.add_argument("--json", action="store_true", help="Emit JSON output")
     args = parser.parse_args()
 
@@ -138,15 +154,15 @@ def main() -> None:
     if not local_layers:
         fail("ingest.merge.local_layers block missing in calendar.external.providers.contract.yaml")
 
-    icloud_script = script_dir / "calendar-icloud-snapshot-build"
-    google_script = script_dir / "calendar-google-snapshot-build"
-    if not icloud_script.is_file() or not google_script.is_file():
+    snapshot_scripts = {
+        "icloud": script_dir / "calendar-icloud-snapshot-build",
+        "google": script_dir / "calendar-google-snapshot-build",
+    }
+    if not all(path.is_file() for path in snapshot_scripts.values()):
         fail("snapshot build scripts missing")
 
-    icloud_payload = run_snapshot(icloud_script)
-    google_payload = run_snapshot(google_script)
-
-    snapshots = {"icloud": icloud_payload, "google": google_payload}
+    selected = ["icloud", "google"] if args.provider == "all" else [args.provider]
+    snapshots: dict[str, dict[str, Any]] = {}
 
     output_dir = (root / str(ingest.get("output_dir", "mailroom/outbox/calendar/external"))).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -154,6 +170,21 @@ def main() -> None:
 
     local_store = (root / str(merge.get("target_local_store_path", "mailroom/state/calendar-sync/writable/external"))).resolve()
     local_store.mkdir(parents=True, exist_ok=True)
+
+    # Build selected provider snapshots now, and load existing snapshot payloads for others.
+    for provider in ("icloud", "google"):
+        snapshot_rel = str((providers.get(provider, {}) or {}).get("snapshot", {}).get("output_path", "").strip()
+        snapshot_path = (root / snapshot_rel).resolve() if snapshot_rel else None
+        if provider in selected:
+            snapshots[provider] = run_snapshot(snapshot_scripts[provider])
+            continue
+        if snapshot_path:
+            loaded = load_snapshot(snapshot_path)
+            if loaded is not None:
+                snapshots[provider] = loaded
+                continue
+        # Keep union ingest deterministic even for provider-scoped refresh when snapshot missing.
+        snapshots[provider] = run_snapshot(snapshot_scripts[provider])
 
     provider_events: dict[str, list[dict[str, Any]]] = {}
     for provider, payload in snapshots.items():
@@ -212,16 +243,17 @@ def main() -> None:
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "schema_version": "1.0",
         "data": {
+            "provider_scope": args.provider,
             "providers": {
                 "icloud": {
                     "snapshot_path": str((root / str(providers.get("icloud", {}).get("snapshot", {}).get("output_path", ""))).resolve()),
                     "event_count": len(provider_events["icloud"]),
-                    "status": icloud_payload.get("status", "unknown"),
+                    "status": snapshots["icloud"].get("status", "unknown"),
                 },
                 "google": {
                     "snapshot_path": str((root / str(providers.get("google", {}).get("snapshot", {}).get("output_path", ""))).resolve()),
                     "event_count": len(provider_events["google"]),
-                    "status": google_payload.get("status", "unknown"),
+                    "status": snapshots["google"].get("status", "unknown"),
                 },
             },
             "external_writeback_enabled": bool((contract.get("provider_mode") or {}).get("writeback_enabled", False)),
@@ -239,6 +271,7 @@ def main() -> None:
         print(json.dumps(index_payload, indent=2, sort_keys=True))
     else:
         print("calendar.external.ingest.refresh")
+        print(f"provider_scope: {args.provider}")
         print(f"index_path: {index_path}")
         print(f"local_layer_store: {local_store}")
         print(f"icloud_events: {len(provider_events['icloud'])}")
