@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# TRIAGE: enforce external calendar snapshot freshness and schema completeness.
-# D205: calendar external snapshot freshness lock
+# TRIAGE: enforce external snapshot normalization into calendar home union ingest surface.
+# D205: calendar-home-union-ingest-lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -17,7 +17,6 @@ command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
 python3 - "$CONTRACT" "$ROOT" <<'PY'
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sys
@@ -26,16 +25,6 @@ import yaml
 
 contract_path = Path(sys.argv[1]).expanduser().resolve()
 root = Path(sys.argv[2]).expanduser().resolve()
-
-
-def parse_iso(raw: str) -> datetime:
-    value = raw.strip()
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
-    dt = datetime.fromisoformat(value)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
 
 def load_json(path: Path):
@@ -54,115 +43,113 @@ if not isinstance(contract, dict):
 
 providers = contract.get("providers") if isinstance(contract.get("providers"), dict) else {}
 ingest = contract.get("ingest") if isinstance(contract.get("ingest"), dict) else {}
+merge = ingest.get("merge") if isinstance(ingest.get("merge"), dict) else {}
+layers = merge.get("local_layers") if isinstance(merge.get("local_layers"), dict) else {}
 violations: list[str] = []
-now = datetime.now(timezone.utc)
 
-required_provider_fields = {"capability", "status", "generated_at", "schema_version", "data"}
-required_data_fields = {"provider", "mode", "event_count", "events", "snapshot_path"}
+required_event_fields = {"source", "source_calendar_id", "source_event_id", "title", "start", "end", "read_only", "immutable_by_source"}
 
-provider_payloads: dict[str, dict] = {}
-
+snapshot_paths: dict[str, Path] = {}
 for provider in ("icloud", "google"):
     block = providers.get(provider)
     if not isinstance(block, dict):
         violations.append(f"providers.{provider} block missing")
         continue
-
-    snapshot = block.get("snapshot") if isinstance(block.get("snapshot"), dict) else {}
-    rel = str(snapshot.get("output_path", "")).strip()
+    snap = block.get("snapshot") if isinstance(block.get("snapshot"), dict) else {}
+    rel = str(snap.get("output_path", "")).strip()
     if not rel:
         violations.append(f"providers.{provider}.snapshot.output_path missing")
         continue
     path = (root / rel).resolve()
+    snapshot_paths[provider] = path
     if not path.is_file():
-        violations.append(f"snapshot file missing for {provider}: {path}")
+        violations.append(f"snapshot missing for {provider}: {path}")
         continue
-
     try:
         payload = load_json(path)
     except Exception as exc:
-        violations.append(f"invalid JSON for {provider} snapshot: {exc}")
+        violations.append(f"invalid {provider} snapshot JSON: {exc}")
         continue
     if not isinstance(payload, dict):
         violations.append(f"{provider} snapshot root must be mapping")
         continue
-
-    missing = sorted(required_provider_fields - set(payload.keys()))
-    if missing:
-        violations.append(f"{provider} snapshot missing required fields: {missing}")
-
-    generated_at = str(payload.get("generated_at", "")).strip()
-    if not generated_at:
-        violations.append(f"{provider} snapshot generated_at missing")
-    else:
-        try:
-            dt = parse_iso(generated_at)
-            max_age_hours = int(snapshot.get("max_snapshot_age_hours", 24))
-            age = now - dt
-            if age > timedelta(hours=max_age_hours):
-                violations.append(
-                    f"{provider} snapshot stale: age={age} exceeds {max_age_hours}h (generated_at={generated_at})"
-                )
-        except Exception as exc:
-            violations.append(f"{provider} generated_at parse failed: {exc}")
-
     data = payload.get("data")
     if not isinstance(data, dict):
         violations.append(f"{provider} snapshot data block missing")
-    else:
-        missing_data = sorted(required_data_fields - set(data.keys()))
-        if missing_data:
-            violations.append(f"{provider} snapshot data missing fields: {missing_data}")
-        events = data.get("events")
-        if not isinstance(events, list):
-            violations.append(f"{provider} snapshot data.events must be list")
-        if str(data.get("mode", "")).strip() != "read-only":
-            violations.append(f"{provider} snapshot data.mode must be read-only")
-
-    provider_payloads[provider] = payload
+        continue
+    events = data.get("events")
+    if not isinstance(events, list):
+        violations.append(f"{provider} snapshot data.events must be list")
+        continue
+    for idx, event in enumerate(events):
+        if not isinstance(event, dict):
+            violations.append(f"{provider} snapshot event[{idx}] must be mapping")
+            continue
+        missing = sorted(required_event_fields - set(event.keys()))
+        if missing:
+            violations.append(f"{provider} snapshot event[{idx}] missing fields: {missing}")
 
 index_rel = str(ingest.get("external_index_path", "")).strip()
 if not index_rel:
     violations.append("ingest.external_index_path missing")
+    index_path = None
 else:
     index_path = (root / index_rel).resolve()
     if not index_path.is_file():
-        violations.append(f"external index file missing: {index_path}")
-    else:
-        try:
-            index_payload = load_json(index_path)
-        except Exception as exc:
-            violations.append(f"external index invalid JSON: {exc}")
-        else:
-            if not isinstance(index_payload, dict):
-                violations.append("external index root must be mapping")
-            else:
-                for field in ("capability", "status", "generated_at", "schema_version", "data"):
-                    if field not in index_payload:
-                        violations.append(f"external index missing field: {field}")
-                data = index_payload.get("data")
-                if not isinstance(data, dict):
-                    violations.append("external index data block missing")
-                else:
-                    providers_data = data.get("providers")
-                    if not isinstance(providers_data, dict):
-                        violations.append("external index data.providers missing")
-                    else:
-                        for provider in ("icloud", "google"):
-                            if provider not in providers_data:
-                                violations.append(f"external index providers missing {provider}")
-                    layers = data.get("layers")
-                    if not isinstance(layers, dict):
-                        violations.append("external index data.layers missing")
-                    else:
-                        for layer in ("external_icloud", "external_google"):
-                            if layer not in layers:
-                                violations.append(f"external index layers missing {layer}")
+        violations.append(f"external index missing: {index_path}")
+
+if index_path and index_path.is_file():
+    try:
+        index_payload = load_json(index_path)
+    except Exception as exc:
+        violations.append(f"invalid external index JSON: {exc}")
+        index_payload = {}
+    if isinstance(index_payload, dict):
+        data = index_payload.get("data") if isinstance(index_payload.get("data"), dict) else {}
+        idx_layers = data.get("layers") if isinstance(data.get("layers"), dict) else {}
+        store_path = str(data.get("local_layer_store_path", "")).strip()
+        if not store_path:
+            violations.append("external index data.local_layer_store_path missing")
+        for layer_id, provider in (("external_icloud", "icloud"), ("external_google", "google")):
+            layer = idx_layers.get(layer_id) if isinstance(idx_layers.get(layer_id), dict) else {}
+            if not layer:
+                violations.append(f"external index data.layers.{layer_id} missing")
+                continue
+            if layer.get("provider") != provider:
+                violations.append(f"external index data.layers.{layer_id}.provider must be {provider}")
+            if layer.get("read_only") is not True:
+                violations.append(f"external index data.layers.{layer_id}.read_only must be true")
+            if layer.get("immutable_by_source") is not True:
+                violations.append(f"external index data.layers.{layer_id}.immutable_by_source must be true")
+
+            layer_dir = Path(str(layer.get("path", ""))).expanduser()
+            if not layer_dir.is_dir():
+                violations.append(f"local union layer directory missing: {layer_dir}")
+                continue
+            manifest_path = layer_dir / "manifest.json"
+            if not manifest_path.is_file():
+                violations.append(f"local union layer manifest missing: {manifest_path}")
+                continue
+            try:
+                manifest = load_json(manifest_path)
+            except Exception as exc:
+                violations.append(f"invalid manifest JSON ({manifest_path}): {exc}")
+                continue
+            if manifest.get("read_only") is not True:
+                violations.append(f"manifest read_only must be true: {manifest_path}")
+            if manifest.get("immutable_by_source") is not True:
+                violations.append(f"manifest immutable_by_source must be true: {manifest_path}")
+            expected_snapshot = str(snapshot_paths.get(provider, Path("")))
+            source_snapshot = str(manifest.get("source_snapshot", "")).strip()
+            if expected_snapshot and source_snapshot and source_snapshot != expected_snapshot:
+                violations.append(
+                    f"manifest source snapshot mismatch for {layer_id}: expected={expected_snapshot} actual={source_snapshot}"
+                )
 
 if violations:
     for item in violations:
         print(f"D205 FAIL: {item}", file=sys.stderr)
     raise SystemExit(1)
 
-print("D205 PASS: external calendar snapshots fresh (<24h) and schema/index complete")
+print("D205 PASS: external snapshots normalize into calendar-home union ingest schema/location")
 PY

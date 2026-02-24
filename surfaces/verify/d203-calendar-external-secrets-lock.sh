@@ -103,6 +103,8 @@ for cap in sorted(provider_write_caps):
 for role in roles.get("roles", []) or []:
     if not isinstance(role, dict):
         continue
+    if str(role.get("status", "")).strip() != "active":
+        continue
     role_id = role.get("id", "<unknown-role>")
     role_type = str(role.get("type", "")).strip()
     for cap in role.get("capabilities", []) or []:
@@ -115,6 +117,8 @@ for role in roles.get("roles", []) or []:
 worker_map = workers.get("workers") if isinstance(workers.get("workers"), dict) else {}
 for worker_id, worker in worker_map.items():
     if not isinstance(worker, dict):
+        continue
+    if str(worker.get("status", "")).strip() != "active":
         continue
     worker_type = str(worker.get("terminal_type", "")).strip()
     for cap in worker.get("capabilities_scoped", []) or []:
