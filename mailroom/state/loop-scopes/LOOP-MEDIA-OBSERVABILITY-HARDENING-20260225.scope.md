@@ -21,25 +21,32 @@ Continuation loop absorbing deferred gaps from:
 - LOOP-PRIVADO-VPN-CANONICAL-SETUP-20260225 (closed — VPN canonical, D223 active)
 - LOOP-MEDIA-SECRETS-CANONICAL-TRACE-20260225 (closed — D224 active, runway normalized)
 
-## Linked Gaps (10)
+## Linked Gaps (10) — 8/10 closed
 
-| Gap | Sev | Type | Blocker | Checkpoint |
-|-----|-----|------|---------|------------|
-| GAP-OP-895 | low | missing-entry | Manual HA UI (Music Assistant addon) | Next HA maintenance window |
-| GAP-OP-896 | low | unclear-doc | 2-week soak gate (Tubifarry eval) | 2026-03-11 |
-| GAP-OP-897 | medium | missing-entry | Implement media.vpn.health cap | Next media-agent session |
-| GAP-OP-898 | medium | missing-entry | Implement media.slskd.status cap | Next media-agent session |
-| GAP-OP-899 | medium | missing-entry | Implement media.soularr.status cap | Next media-agent session |
-| GAP-OP-900 | medium | missing-entry | Implement media.qbittorrent.status cap | Next media-agent session |
-| GAP-OP-901 | medium | missing-entry | Implement media.sonarr.metrics.today cap | Next media-agent session |
-| GAP-OP-902 | high | missing-entry | Implement media.pipeline.trace cap (depends on 897-901) | After tier-1 caps shipped |
-| GAP-OP-903 | medium | missing-entry | MCP tool parity (depends on 897-902 spine caps) | After tier-1 caps shipped |
-| GAP-OP-904 | high | missing-entry | Manual Infisical provisioning of 8 secrets | Next secrets maintenance window |
+| Gap | Sev | Status | Description | Fixed In |
+|-----|-----|--------|-------------|----------|
+| GAP-OP-895 | low | **OPEN** | Music Assistant HA addon not integrated | Checkpoint: next HA maintenance window |
+| GAP-OP-896 | low | **OPEN** | Tubifarry plugin evaluation | Checkpoint: 2026-03-11 soak gate |
+| GAP-OP-897 | medium | fixed | media.vpn.health capability | commit 1b8e5cf |
+| GAP-OP-898 | medium | fixed | media.slskd.status capability | commit 1b8e5cf |
+| GAP-OP-899 | medium | fixed | media.soularr.status capability | commit 1b8e5cf |
+| GAP-OP-900 | medium | fixed | media.qbittorrent.status capability | commit 1b8e5cf |
+| GAP-OP-901 | medium | fixed | media.sonarr.metrics.today capability | commit 1b8e5cf |
+| GAP-OP-902 | high | fixed | media.pipeline.trace composite capability | commit 1b8e5cf |
+| GAP-OP-903 | medium | fixed | MCP tool parity (5 tools) | workbench commit 0f03d13 |
+| GAP-OP-904 | high | fixed | Infisical secrets provisioned (8/8) | secrets runway verified |
 
-## Implementation Priority
+## Remaining Checkpoints
 
-1. **Tier 1 — Spine caps** (897-901): Implement 5 telemetry capabilities — each is self-contained, can be built in parallel
-2. **Tier 2 — Composite** (902): Pipeline trace depends on tier-1 caps
-3. **Tier 3 — MCP tools** (903): Workbench MCP wrappers depend on tier-1+2 spine caps
-4. **Manual** (895, 904): HA UI + Infisical provisioning — no code dependency
-5. **Soak gate** (896): Decision at 2026-03-11 based on Soularr wanted-count reduction
+1. **GAP-OP-895** (Music Assistant HA): Manual addon installation via HA UI. No code dependency. Trigger: next HA maintenance window.
+2. **GAP-OP-896** (Tubifarry evaluation): Decision gate at 2026-03-11. If Soularr reduces wanted to <200, skip. If >500 remain, evaluate Tubifarry.
+
+## Execution Summary (2026-02-25)
+
+- Phase 0: Loop + gaps registered, baseline captured
+- Phase 1: 8/8 Infisical secrets provisioned (download-stack + streaming-stack)
+- Phase 2: 5 tier-1 telemetry caps implemented and verified
+- Phase 3: media.pipeline.trace composite + 5 MCP tools shipped
+- Phase 4: MCP parity verified (workbench commit 0f03d13)
+- Phase 5: GAP-OP-895/896 assessed — both blocked on non-code prerequisites
+- Phase 6: verify.core.run 15/15, verify.pack.run secrets 11/11, verify.pack.run media 10/10
