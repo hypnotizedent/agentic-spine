@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# vaultwarden.cli.auth.status - Verify Vaultwarden CLI automation prerequisites
+#
+# Checks:
+#  - bw CLI is installed
+#  - required Vaultwarden CLI auth secrets exist in Infisical
+#  - optional live login probe (--probe-login)
+#
+# Never prints secret values.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+INFISICAL_AGENT="$SPINE_ROOT/ops/tools/infisical-agent.sh"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+[[ -x "$INFISICAL_AGENT" ]] || _stop "missing infisical agent: $INFISICAL_AGENT"
+
+PROJECT="infrastructure"
+ENV_NAME="prod"
+PROBE_LOGIN=false
+
+usage() {
+  cat <<USAGE
+Usage: vaultwarden-cli-auth-status [options]
+
+Options:
+  --project <name>      Infisical project (default: infrastructure)
+  --env <name>          Infisical environment (default: prod)
+  --probe-login         Perform live bw login/unlock probe (local session only)
+  -h, --help            Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift; continue ;;
+    --project)
+      PROJECT="${2:?--project requires value}"; shift 2 ;;
+    --env)
+      ENV_NAME="${2:?--env requires value}"; shift 2 ;;
+    --probe-login)
+      PROBE_LOGIN=true; shift ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      _stop "unknown arg: $1" ;;
+  esac
+done
+
+read_secret() {
+  local key="$1"
+  "$INFISICAL_AGENT" get-cached "$PROJECT" "$ENV_NAME" "$key" --no-cache 2>/dev/null || true
+}
+
+echo "vaultwarden.cli.auth.status"
+echo "target: ${PROJECT}/${ENV_NAME}"
+echo
+
+failures=0
+
+if command -v bw >/dev/null 2>&1; then
+  echo "bw_cli: INSTALLED ($(bw --version 2>/dev/null | head -n1))"
+else
+  echo "bw_cli: MISSING"
+  failures=$((failures + 1))
+fi
+
+if "$INFISICAL_AGENT" auth-token >/dev/null 2>&1; then
+  echo "infisical_auth: OK"
+else
+  echo "infisical_auth: FAIL"
+  failures=$((failures + 1))
+fi
+
+declare -A REQUIRED_KEYS=(
+  [VAULTWARDEN_BW_SERVER_URL]="server_url"
+  [VAULTWARDEN_BW_CLIENTID]="client_id"
+  [VAULTWARDEN_BW_CLIENTSECRET]="client_secret"
+  [VAULTWARDEN_BW_MASTER_PASSWORD]="master_password"
+)
+
+declare -A VALUES=()
+for key in "${!REQUIRED_KEYS[@]}"; do
+  v="$(read_secret "$key")"
+  if [[ -n "$v" ]]; then
+    echo "${REQUIRED_KEYS[$key]}: SET"
+    VALUES["$key"]="$v"
+  else
+    echo "${REQUIRED_KEYS[$key]}: MISSING"
+    failures=$((failures + 1))
+  fi
+done
+
+# Optional non-mutating remote probe (local CLI session state only)
+if [[ "$PROBE_LOGIN" == "true" ]]; then
+  echo
+  echo "probe_login: enabled"
+  if (( failures > 0 )); then
+    echo "probe_login_result: SKIP (missing prerequisites)"
+  elif ! command -v bw >/dev/null 2>&1; then
+    echo "probe_login_result: SKIP (bw missing)"
+  else
+    SERVER_URL="${VALUES[VAULTWARDEN_BW_SERVER_URL]}"
+    CLIENT_ID="${VALUES[VAULTWARDEN_BW_CLIENTID]}"
+    CLIENT_SECRET="${VALUES[VAULTWARDEN_BW_CLIENTSECRET]}"
+    MASTER_PASSWORD="${VALUES[VAULTWARDEN_BW_MASTER_PASSWORD]}"
+
+    # Start scope-rewriting HTTPS proxy for bw <-> Vaultwarden compatibility.
+    # bw v2026.1.0: requires HTTPS + sends scope=api+offline_access (VW rejects it).
+    PROXY_SCRIPT="$SCRIPT_DIR/../lib/scope-proxy.py"
+    if [[ ! -f "$PROXY_SCRIPT" ]]; then
+      echo "probe_login_result: SKIP (scope-proxy.py missing)"
+    elif ! command -v python3 >/dev/null 2>&1; then
+      echo "probe_login_result: SKIP (python3 missing)"
+    else
+      probe_failed=0
+      PROXY_PID=""
+      _probe_cleanup() {
+        [[ -n "$PROXY_PID" ]] && kill "$PROXY_PID" 2>/dev/null || true
+      }
+
+      # Proxy target: always use LAN endpoint for reliability (no DNS dependency).
+      # The VAULTWARDEN_BW_SERVER_URL secret is the canonical URL for reference;
+      # the proxy bypasses it and goes direct via Tailscale/LAN.
+      VW_LAN_TARGET="${VW_LAN_TARGET:-http://100.92.91.128:8081}"
+      PROXY_OUT="$(mktemp)"
+      python3 "$PROXY_SCRIPT" --target "$VW_LAN_TARGET" > "$PROXY_OUT" 2>/dev/null &
+      PROXY_PID=$!
+
+      # Wait for proxy ready (up to 5s)
+      for _i in $(seq 1 50); do
+        grep -q "status: ready" "$PROXY_OUT" 2>/dev/null && break
+        kill -0 "$PROXY_PID" 2>/dev/null || { probe_failed=1; break; }
+        sleep 0.1
+      done
+
+      if (( probe_failed == 0 )) && grep -q "status: ready" "$PROXY_OUT" 2>/dev/null; then
+        PROXY_PORT="$(grep '^proxy_url:' "$PROXY_OUT" | sed 's|.*://127.0.0.1:||')"
+
+        bw logout >/dev/null 2>&1 || true
+        bw config server "https://127.0.0.1:${PROXY_PORT}" >/dev/null 2>&1
+
+        NODE_TLS_REJECT_UNAUTHORIZED=0 BW_CLIENTID="$CLIENT_ID" BW_CLIENTSECRET="$CLIENT_SECRET" \
+          bw login --apikey >/dev/null 2>&1 || probe_failed=1
+
+        SESSION="$(NODE_TLS_REJECT_UNAUTHORIZED=0 BW_PASSWORD="$MASTER_PASSWORD" \
+          bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
+        if [[ -z "$SESSION" ]]; then
+          probe_failed=1
+        else
+          NODE_TLS_REJECT_UNAUTHORIZED=0 BW_SESSION="$SESSION" \
+            bw list items --search "__spine_probe__" >/dev/null 2>&1 || probe_failed=1
+          NODE_TLS_REJECT_UNAUTHORIZED=0 bw lock --session "$SESSION" >/dev/null 2>&1 || true
+        fi
+        NODE_TLS_REJECT_UNAUTHORIZED=0 bw logout >/dev/null 2>&1 || true
+      else
+        probe_failed=1
+      fi
+
+      rm -f "$PROXY_OUT"
+      _probe_cleanup
+    fi
+
+    unset SERVER_URL CLIENT_ID CLIENT_SECRET MASTER_PASSWORD SESSION
+
+    if (( probe_failed == 0 )); then
+      echo "probe_login_result: PASS"
+    else
+      echo "probe_login_result: FAIL"
+      failures=$((failures + 1))
+    fi
+  fi
+fi
+
+echo
+if (( failures == 0 )); then
+  echo "result: PASS"
+  exit 0
+else
+  echo "result: FAIL"
+  echo "failures: $failures"
+  exit 1
+fi

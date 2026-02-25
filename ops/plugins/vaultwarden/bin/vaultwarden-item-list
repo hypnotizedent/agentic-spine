@@ -1,18 +1,13 @@
 #!/usr/bin/env bash
-# vaultwarden.item.list — Read-only listing of Vaultwarden vault items
+# vaultwarden.item.list - Vault item metadata listing with bw CLI support and SQLite fallback
 #
-# Outputs item metadata: type, folder, creation date, update date.
-# Cipher names and data are end-to-end encrypted in SQLite — this capability
-# can only report counts and type breakdowns from the database directly.
-#
-# For full item listing with names, the bw CLI must be authenticated.
-# This script will attempt bw CLI first, falling back to SQLite metadata.
+# Priority mode:
+#   1) bw CLI mode (named metadata: name, folder, URI, type, timestamps)
+#   2) SQLite fallback (type/folder/date breakdown only; names are encrypted)
 #
 # WRITE-ENDPOINT DENIAL: This capability MUST NOT create, update, or delete
 # any Vaultwarden vault items. Output MUST NOT contain passwords, TOTP seeds,
 # notes content, or custom field values.
-#
-# Governance: docs/governance/VAULTWARDEN_INFISICAL_CONTRACT.md
 
 set -euo pipefail
 
@@ -20,10 +15,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 
 SSH_TARGETS="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+INFISICAL_AGENT="$SPINE_ROOT/ops/tools/infisical-agent.sh"
 
 _stop() { echo "STOP (2): $*" >&2; exit 2; }
 
-command -v yq  >/dev/null 2>&1 || _stop "missing dependency: yq"
+command -v yq >/dev/null 2>&1 || _stop "missing dependency: yq"
+command -v jq >/dev/null 2>&1 || _stop "missing dependency: jq"
 [[ -f "$SSH_TARGETS" ]] || _stop "missing binding: $SSH_TARGETS"
 
 VW_HOST=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .host' "$SSH_TARGETS")
@@ -34,40 +31,184 @@ SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes"
 VW_DATA="/opt/stacks/vaultwarden/vw-data"
 DB="$VW_DATA/db.sqlite3"
 
-# Parse args
 SHOW_TRASHED=false
 OUTPUT_FORMAT="table"
+MODE="auto" # auto|bw|sqlite
+
 while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --include-trashed) SHOW_TRASHED=true; shift ;;
-        --format)          OUTPUT_FORMAT="${2:?--format requires table|csv}"; shift 2 ;;
-        -h|--help)
-            echo "Usage: vaultwarden-item-list [--include-trashed] [--format table|csv]"
-            echo ""
-            echo "Lists vault item metadata (no secrets). Cipher names are encrypted in SQLite;"
-            echo "only type/folder/date breakdowns are available without bw CLI auth."
-            exit 0 ;;
-        *) _stop "unknown arg: $1" ;;
-    esac
+  case "$1" in
+    --) shift; continue ;;
+    --include-trashed) SHOW_TRASHED=true; shift ;;
+    --format) OUTPUT_FORMAT="${2:?--format requires table|csv}"; shift 2 ;;
+    --mode) MODE="${2:?--mode requires auto|bw|sqlite}"; shift 2 ;;
+    -h|--help)
+      cat <<USAGE
+Usage: vaultwarden-item-list [--mode auto|bw|sqlite] [--include-trashed] [--format table|csv]
+
+Modes:
+  auto    Use bw CLI metadata mode when auth is configured; otherwise fallback to SQLite metadata
+  bw      Force bw CLI mode (fails if bw/auth prerequisites are missing)
+  sqlite  Force SQLite metadata mode (no names; encrypted-at-rest limitations)
+USAGE
+      exit 0 ;;
+    *) _stop "unknown arg: $1" ;;
+  esac
 done
 
-echo "vaultwarden.item.list"
-echo "host: ${VW_USER}@${VW_HOST}"
-echo "mode: sqlite-metadata (encrypted names — type/date/folder breakdown only)"
-echo
+case "$OUTPUT_FORMAT" in
+  table|csv) ;;
+  *) _stop "invalid --format '$OUTPUT_FORMAT' (expected table|csv)" ;;
+esac
 
-if ! ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" "echo OK" &>/dev/null; then
+case "$MODE" in
+  auto|bw|sqlite) ;;
+  *) _stop "invalid --mode '$MODE' (expected auto|bw|sqlite)" ;;
+esac
+
+read_secret() {
+  local key="$1"
+  if [[ ! -x "$INFISICAL_AGENT" ]]; then
+    echo ""
+    return 0
+  fi
+  "$INFISICAL_AGENT" get-cached infrastructure prod "$key" --no-cache 2>/dev/null || true
+}
+
+bw_prereqs_ready() {
+  command -v bw >/dev/null 2>&1 || return 1
+  [[ -x "$INFISICAL_AGENT" ]] || return 1
+
+  local server clientid clientsecret master
+  server="$(read_secret VAULTWARDEN_BW_SERVER_URL)"
+  clientid="$(read_secret VAULTWARDEN_BW_CLIENTID)"
+  clientsecret="$(read_secret VAULTWARDEN_BW_CLIENTSECRET)"
+  master="$(read_secret VAULTWARDEN_BW_MASTER_PASSWORD)"
+
+  [[ -n "$server" && -n "$clientid" && -n "$clientsecret" && -n "$master" ]]
+}
+
+print_bw_table() {
+  local json="$1"
+  printf "%-30s %-10s %-18s %-9s %-20s %s\n" "NAME" "TYPE" "FOLDER" "STATUS" "UPDATED_AT" "URI"
+  printf "%-30s %-10s %-18s %-9s %-20s %s\n" "──────────────────────────────" "──────────" "──────────────────" "─────────" "────────────────────" "────────────────────────────────────────"
+
+  jq -r '.[] | [(.name // ""), (.type // ""), (.folder // ""), (.status // ""), (.updated // ""), (.uri // "")] | @tsv' <<<"$json" |
+  while IFS=$'\t' read -r name type folder status updated uri; do
+    printf "%-30.30s %-10.10s %-18.18s %-9.9s %-20.20s %s\n" "$name" "$type" "$folder" "$status" "${updated:0:19}" "$uri"
+  done
+}
+
+print_bw_csv() {
+  local json="$1"
+  jq -r '(["id","name","type","folder","status","username","uri","updated"] | @csv), (.[] | [.id, .name, .type, .folder, .status, .username, .uri, .updated] | @csv)' <<<"$json"
+}
+
+run_bw_mode() {
+  local server clientid clientsecret master
+  local session items folders filtered
+
+  server="$(read_secret VAULTWARDEN_BW_SERVER_URL)"
+  clientid="$(read_secret VAULTWARDEN_BW_CLIENTID)"
+  clientsecret="$(read_secret VAULTWARDEN_BW_CLIENTSECRET)"
+  master="$(read_secret VAULTWARDEN_BW_MASTER_PASSWORD)"
+
+  if [[ -z "$server" || -z "$clientid" || -z "$clientsecret" || -z "$master" ]]; then
+    echo "FAIL: bw mode requires VAULTWARDEN_BW_SERVER_URL/CLIENTID/CLIENTSECRET/MASTER_PASSWORD in Infisical"
+    return 3
+  fi
+
+  command -v bw >/dev/null 2>&1 || {
+    echo "FAIL: bw CLI not installed"
+    return 3
+  }
+
+  bw logout >/dev/null 2>&1 || true
+
+  bw config server "$server" >/dev/null 2>&1 || {
+    echo "FAIL: could not configure bw server: $server"
+    bw logout >/dev/null 2>&1 || true
+    return 1
+  }
+
+  BW_CLIENTID="$clientid" BW_CLIENTSECRET="$clientsecret" bw login --apikey >/dev/null 2>&1 || {
+    echo "FAIL: bw login --apikey failed"
+    bw logout >/dev/null 2>&1 || true
+    return 1
+  }
+
+  session="$(BW_PASSWORD="$master" bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
+  if [[ -z "$session" ]]; then
+    echo "FAIL: bw unlock failed"
+    bw logout >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  BW_SESSION="$session" bw sync --session "$session" >/dev/null 2>&1 || true
+
+  items="$(BW_SESSION="$session" bw list items --session "$session" 2>/dev/null || true)"
+  folders="$(BW_SESSION="$session" bw list folders --session "$session" 2>/dev/null || echo '[]')"
+
+  bw lock --session "$session" >/dev/null 2>&1 || true
+  bw logout >/dev/null 2>&1 || true
+
+  [[ -n "$items" ]] || {
+    echo "FAIL: bw list items returned no data"
+    return 1
+  }
+
+  filtered="$(jq -c \
+    --argjson folders "$folders" \
+    --arg include_trashed "$SHOW_TRASHED" '
+      ($folders | map({(.id): .name}) | add // {}) as $folder_map
+      | [ .[]
+          | (if $include_trashed == "true" then . else select(.deletedDate == null) end)
+          | {
+              id: (.id // ""),
+              name: (.name // ""),
+              type: (if .type == 1 then "Login" elif .type == 2 then "SecureNote" elif .type == 3 then "Card" elif .type == 4 then "Identity" else "Unknown" end),
+              folder: (if .folderId then ($folder_map[.folderId] // "(unknown)") else "(unfiled)" end),
+              status: (if .deletedDate then "trashed" else "active" end),
+              username: (.login.username // ""),
+              uri: ((.login.uris // []) | map(.uri // "") | map(select(length > 0)) | join("; ")),
+              updated: (.revisionDate // "")
+            }
+        ]' <<<"$items")"
+
+  echo "vaultwarden.item.list"
+  echo "mode: bw-cli"
+  echo "server: $server"
+  echo "include_trashed: $SHOW_TRASHED"
+  echo
+
+  if [[ "$OUTPUT_FORMAT" == "csv" ]]; then
+    print_bw_csv "$filtered"
+  else
+    print_bw_table "$filtered"
+  fi
+
+  echo
+  echo "count: $(jq 'length' <<<"$filtered")"
+  return 0
+}
+
+run_sqlite_mode() {
+  local trash_clause type_data folder_count folder_data recent
+
+  echo "vaultwarden.item.list"
+  echo "host: ${VW_USER}@${VW_HOST}"
+  echo "mode: sqlite-metadata (encrypted names - type/date/folder breakdown only)"
+  echo
+
+  if ! ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" "echo OK" &>/dev/null; then
     echo "FAIL: cannot SSH to infra-core ($VW_HOST)"
-    exit 1
-fi
+    return 1
+  fi
 
-# Build trash filter
-TRASH_CLAUSE=""
-[[ "$SHOW_TRASHED" == "true" ]] || TRASH_CLAUSE="WHERE deleted_at IS NULL"
+  trash_clause=""
+  [[ "$SHOW_TRASHED" == "true" ]] || trash_clause="WHERE deleted_at IS NULL"
 
-# ── Type breakdown ──
-echo "=== Item Type Breakdown ==="
-TYPE_DATA=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash <<SSHEOF
+  echo "=== Item Type Breakdown ==="
+  type_data=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash <<SSHEOF
 sqlite3 -readonly -separator '|' "$DB" "
 SELECT
     CASE atype
@@ -80,37 +221,35 @@ SELECT
     COUNT(*),
     MIN(created_at),
     MAX(updated_at)
-FROM ciphers $TRASH_CLAUSE
+FROM ciphers $trash_clause
 GROUP BY atype
 ORDER BY COUNT(*) DESC;
 "
 SSHEOF
 ) || true
 
-if [[ -n "$TYPE_DATA" ]]; then
+  if [[ -n "$type_data" ]]; then
     printf "%-15s %8s   %-20s %-20s\n" "TYPE" "COUNT" "OLDEST" "NEWEST"
     printf "%-15s %8s   %-20s %-20s\n" "───────────" "────────" "────────────────────" "────────────────────"
     while IFS='|' read -r type count oldest newest; do
-        printf "%-15s %8s   %-20s %-20s\n" "$type" "$count" "${oldest:0:19}" "${newest:0:19}"
-    done <<< "$TYPE_DATA"
-else
+      printf "%-15s %8s   %-20s %-20s\n" "$type" "$count" "${oldest:0:19}" "${newest:0:19}"
+    done <<< "$type_data"
+  else
     echo "(no type data available)"
-fi
+  fi
 
-echo
-
-# ── Folder breakdown ──
-echo "=== Folder Breakdown ==="
-FOLDER_COUNT=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash -s "$DB" <<'SSHEOF'
+  echo
+  echo "=== Folder Breakdown ==="
+  folder_count=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash -s "$DB" <<'SSHEOF'
 sqlite3 -readonly "$1" "SELECT COUNT(*) FROM folders;"
 SSHEOF
 ) || echo "0"
 
-if [[ "$FOLDER_COUNT" == "0" ]]; then
-    echo "(no folders — vault is a flat namespace)"
+  if [[ "$folder_count" == "0" ]]; then
+    echo "(no folders - vault is a flat namespace)"
     echo "hint: recommended folders: infrastructure, finance, mint-prints, personal, spine-services, hypnotized"
-else
-    FOLDER_DATA=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash -s "$DB" "$TRASH_CLAUSE" <<'SSHEOF'
+  else
+    folder_data=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash -s "$DB" "$trash_clause" <<'SSHEOF'
 DB="$1"; FILTER="$2"
 sqlite3 -readonly -separator '|' "$DB" "
 SELECT
@@ -121,21 +260,19 @@ GROUP BY c.folder_uuid
 ORDER BY COUNT(c.uuid) DESC;
 "
 SSHEOF
-    ) || true
-    if [[ -n "$FOLDER_DATA" ]]; then
-        printf "%-30s %8s\n" "FOLDER" "ITEMS"
-        printf "%-30s %8s\n" "──────────────────────────────" "────────"
-        while IFS='|' read -r folder items; do
-            printf "%-30s %8s\n" "$folder" "$items"
-        done <<< "$FOLDER_DATA"
+) || true
+    if [[ -n "$folder_data" ]]; then
+      printf "%-30s %8s\n" "FOLDER" "ITEMS"
+      printf "%-30s %8s\n" "──────────────────────────────" "────────"
+      while IFS='|' read -r folder items; do
+        printf "%-30s %8s\n" "$folder" "$items"
+      done <<< "$folder_data"
     fi
-fi
+  fi
 
-echo
-
-# ── Recently modified items ──
-echo "=== Last 10 Modified (by date) ==="
-RECENT=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash -s "$DB" <<'SSHEOF'
+  echo
+  echo "=== Last 10 Modified (by date) ==="
+  recent=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash -s "$DB" <<'SSHEOF'
 sqlite3 -readonly -separator '|' "$1" "
 SELECT
     CASE atype WHEN 1 THEN 'Login' WHEN 2 THEN 'Note' WHEN 3 THEN 'Card' WHEN 4 THEN 'Identity' END,
@@ -148,16 +285,39 @@ LIMIT 10;
 SSHEOF
 ) || true
 
-if [[ -n "$RECENT" ]]; then
+  if [[ -n "$recent" ]]; then
     printf "%-10s %-10s %-25s\n" "TYPE" "STATUS" "UPDATED_AT"
     printf "%-10s %-10s %-25s\n" "──────────" "──────────" "─────────────────────────"
     while IFS='|' read -r type updated status; do
-        printf "%-10s %-10s %-25s\n" "$type" "$status" "${updated:0:19}"
-    done <<< "$RECENT"
-else
+      printf "%-10s %-10s %-25s\n" "$type" "$status" "${updated:0:19}"
+    done <<< "$recent"
+  else
     echo "(no recent data available)"
+  fi
+
+  echo
+  echo "note: sqlite mode cannot decrypt cipher names. Configure bw auth secrets to enable named metadata mode."
+  return 0
+}
+
+if [[ "$MODE" == "bw" ]]; then
+  run_bw_mode
+  exit $?
 fi
 
-echo
-echo "note: cipher names are end-to-end encrypted in SQLite. For a full named listing,"
-echo "      use the bw CLI authenticated as the vault owner (human-only operation)."
+if [[ "$MODE" == "sqlite" ]]; then
+  run_sqlite_mode
+  exit $?
+fi
+
+# auto mode
+if bw_prereqs_ready; then
+  if run_bw_mode; then
+    exit 0
+  fi
+  echo
+  echo "WARN: bw mode failed; falling back to sqlite mode"
+  echo
+fi
+
+run_sqlite_mode

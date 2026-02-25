@@ -58,6 +58,22 @@ Infrastructure admin credentials (Proxmox login, NAS login, HA login, etc.) exis
 - Report drift findings as operational gaps via `gaps.file`
 - Verify backup recency and integrity via `vaultwarden.backup.verify`
 
+### Opt-In Automation Mode (CLI)
+
+Agent-driven Vaultwarden CLI execution is allowed only when all of the following are true:
+
+1. `vaultwarden.cli.auth.status` returns `PASS`.
+2. Vaultwarden CLI auth secrets are present under `/spine/vm-infra/vaultwarden/`.
+3. Mutating runs use a manual approval gate and produce receipts.
+
+Required Vaultwarden CLI auth keys (Infisical, infrastructure/prod):
+
+- `VAULTWARDEN_BW_SERVER_URL`
+- `VAULTWARDEN_BW_CLIENTID`
+- `VAULTWARDEN_BW_CLIENTSECRET`
+- `VAULTWARDEN_BW_MASTER_PASSWORD`
+- `VAULTWARDEN_ADMIN_TOKEN_PLAINTEXT` (optional; admin panel/API only)
+
 ## Drift Reconciliation Policy
 
 | Signal | Detection | Response |

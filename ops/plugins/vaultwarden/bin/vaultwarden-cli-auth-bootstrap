@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# vaultwarden.cli.auth.bootstrap - Store Vaultwarden CLI auth material in Infisical
+#
+# Writes (infrastructure/prod by default, path governed by namespace policy):
+#   - VAULTWARDEN_BW_CLIENTID
+#   - VAULTWARDEN_BW_CLIENTSECRET
+#   - VAULTWARDEN_BW_MASTER_PASSWORD
+#   - VAULTWARDEN_BW_SERVER_URL
+# Optional:
+#   - VAULTWARDEN_ADMIN_TOKEN_PLAINTEXT (with --include-admin-token)
+#
+# Security:
+# - Prompts with hidden input when interactive.
+# - Never prints secret values.
+# - Fails if any required write fails.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+INFISICAL_AGENT="$SPINE_ROOT/ops/tools/infisical-agent.sh"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+[[ -x "$INFISICAL_AGENT" ]] || _stop "missing infisical agent: $INFISICAL_AGENT"
+
+PROJECT="infrastructure"
+ENV_NAME="prod"
+SERVER_URL="${VW_BW_SERVER_URL:-https://vault-cli.ronny.works}"
+INCLUDE_ADMIN_TOKEN=false
+NON_INTERACTIVE=false
+
+usage() {
+  cat <<USAGE
+Usage: vaultwarden-cli-auth-bootstrap [options]
+
+Options:
+  --project <name>         Infisical project (default: infrastructure)
+  --env <name>             Infisical environment (default: prod)
+  --server-url <url>       Vaultwarden base URL (default: https://vault.ronny.works)
+  --include-admin-token    Also set VAULTWARDEN_ADMIN_TOKEN_PLAINTEXT
+  --non-interactive        Require all values via environment variables
+  -h, --help               Show help
+
+Env vars (preferred for non-interactive runs):
+  VW_BW_CLIENTID
+  VW_BW_CLIENTSECRET
+  VW_BW_MASTER_PASSWORD
+  VW_BW_SERVER_URL
+  VW_ADMIN_TOKEN_PLAINTEXT (used only with --include-admin-token)
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift; continue ;;
+    --project)
+      PROJECT="${2:?--project requires value}"; shift 2 ;;
+    --env)
+      ENV_NAME="${2:?--env requires value}"; shift 2 ;;
+    --server-url)
+      SERVER_URL="${2:?--server-url requires value}"; shift 2 ;;
+    --include-admin-token)
+      INCLUDE_ADMIN_TOKEN=true; shift ;;
+    --non-interactive)
+      NON_INTERACTIVE=true; shift ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      _stop "unknown arg: $1" ;;
+  esac
+done
+
+get_secret_value() {
+  local env_name="$1"
+  local prompt="$2"
+  local current="${!env_name:-}"
+
+  if [[ -n "$current" ]]; then
+    printf '%s' "$current"
+    return 0
+  fi
+
+  if [[ "$NON_INTERACTIVE" == "true" ]]; then
+    _stop "missing $env_name in non-interactive mode"
+  fi
+
+  if [[ ! -t 0 ]]; then
+    _stop "missing $env_name and no interactive TTY available"
+  fi
+
+  local input=""
+  read -r -s -p "$prompt: " input
+  echo
+  [[ -n "$input" ]] || _stop "$env_name cannot be empty"
+  printf '%s' "$input"
+}
+
+set_secret() {
+  local key="$1"
+  local value="$2"
+
+  if "$INFISICAL_AGENT" set "$PROJECT" "$ENV_NAME" "$key" "$value" >/dev/null 2>&1; then
+    echo "OK: $key"
+  else
+    echo "FAIL: $key"
+    return 1
+  fi
+}
+
+echo "vaultwarden.cli.auth.bootstrap"
+echo "target: ${PROJECT}/${ENV_NAME}"
+echo "server: ${SERVER_URL}"
+echo
+
+CLIENT_ID="$(get_secret_value VW_BW_CLIENTID "Vaultwarden BW_CLIENTID")"
+CLIENT_SECRET="$(get_secret_value VW_BW_CLIENTSECRET "Vaultwarden BW_CLIENTSECRET")"
+MASTER_PASSWORD="$(get_secret_value VW_BW_MASTER_PASSWORD "Vaultwarden BW master password")"
+
+failures=0
+set_secret "VAULTWARDEN_BW_SERVER_URL" "$SERVER_URL" || failures=$((failures + 1))
+set_secret "VAULTWARDEN_BW_CLIENTID" "$CLIENT_ID" || failures=$((failures + 1))
+set_secret "VAULTWARDEN_BW_CLIENTSECRET" "$CLIENT_SECRET" || failures=$((failures + 1))
+set_secret "VAULTWARDEN_BW_MASTER_PASSWORD" "$MASTER_PASSWORD" || failures=$((failures + 1))
+
+if [[ "$INCLUDE_ADMIN_TOKEN" == "true" ]]; then
+  ADMIN_TOKEN="$(get_secret_value VW_ADMIN_TOKEN_PLAINTEXT "Vaultwarden ADMIN token plaintext")"
+  set_secret "VAULTWARDEN_ADMIN_TOKEN_PLAINTEXT" "$ADMIN_TOKEN" || failures=$((failures + 1))
+  unset ADMIN_TOKEN
+fi
+
+unset CLIENT_ID CLIENT_SECRET MASTER_PASSWORD
+
+if (( failures > 0 )); then
+  echo
+  echo "result: FAIL"
+  echo "failures: $failures"
+  exit 1
+fi
+
+echo
+echo "result: PASS"
+echo "next: run ./bin/ops cap run vaultwarden.cli.auth.status"

@@ -16,6 +16,11 @@ Password vault (Vaultwarden) for human-managed secrets and bootstrap credentials
 
 Sensitive secrets are stored in Infisical at `/spine/vm-infra/vaultwarden/`:
 - `VAULTWARDEN_ADMIN_TOKEN` — admin panel access token
+- `VAULTWARDEN_ADMIN_TOKEN_PLAINTEXT` — optional plaintext admin token for API/admin automation
+- `VAULTWARDEN_BW_SERVER_URL` — Vaultwarden base URL for `bw` CLI
+- `VAULTWARDEN_BW_CLIENTID` — Vaultwarden API key client ID for `bw` CLI
+- `VAULTWARDEN_BW_CLIENTSECRET` — Vaultwarden API key client secret for `bw` CLI
+- `VAULTWARDEN_BW_MASTER_PASSWORD` — Vaultwarden account master password for `bw unlock`
 
 Non-secret configuration lives in the host-local `.env` file (do not commit).
 Keys required are listed in `.env.example` (DOMAIN, LOG_LEVEL, TZ, etc.).
@@ -32,4 +37,3 @@ From this repo:
 ./bin/ops cap run services.health.status
 ./bin/ops cap run docker.compose.status
 ```
-
