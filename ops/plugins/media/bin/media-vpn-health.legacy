@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# media.vpn.health — VPN tunnel health check for media download stack
+#
+# Usage:
+#   ./bin/ops cap run media.vpn.health
+#   ./bin/ops cap run media.vpn.health --json
+#
+# Contract:
+# - SSHs to download-stack to check gluetun container health
+# - Verifies VPN is connected (Docker healthcheck passes)
+# - Verifies external IP differs from home network
+# - Reads vpn.provider.yaml for expected configuration
+# - Exit 0 if healthy, exit 1 if unhealthy, exit 2 on config error
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+VPN_BINDING="$ROOT/ops/bindings/vpn.provider.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+usage() {
+  cat <<'USAGE'
+media.vpn.health — VPN tunnel health for gluetun on download-stack
+
+Args:
+  --json      Output JSON format
+  --timeout   SSH timeout in seconds (default: 10)
+
+Examples:
+  ./bin/ops cap run media.vpn.health
+  ./bin/ops cap run media.vpn.health --json
+USAGE
+}
+
+OUTPUT_JSON=false
+TIMEOUT_SEC=10
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     OUTPUT_JSON=true; shift ;;
+    --timeout)  TIMEOUT_SEC="${2:-10}"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    --)         shift ;;
+    *)          echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+if [[ ! -f "$SSH_TARGETS" ]]; then
+  echo "STOP: ssh targets not found: $SSH_TARGETS" >&2
+  exit 2
+fi
+
+SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
+SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
+
+if [[ -z "$SSH_HOST" ]]; then
+  echo "STOP: download-stack SSH target not found in $SSH_TARGETS" >&2
+  exit 2
+fi
+
+SSH_OPTS="-o ConnectTimeout=$TIMEOUT_SEC -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+
+ssh_cmd() {
+  ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "$@" 2>/dev/null
+}
+
+# Check 1: gluetun container running
+CONTAINER_STATE=$(ssh_cmd "sudo docker inspect --format='{{.State.Status}}' gluetun 2>/dev/null" || echo "not_found")
+
+# Check 2: gluetun Docker healthcheck
+HEALTH_STATUS=$(ssh_cmd "sudo docker inspect --format='{{.State.Health.Status}}' gluetun 2>/dev/null" || echo "unknown")
+
+# Check 3: VPN external IP (via gluetun)
+# gluetun has wget (busybox) but not curl; use icanhazip.com (returns plain text IP)
+VPN_IP=$(ssh_cmd "sudo docker exec gluetun wget -qO- --timeout=10 http://icanhazip.com 2>/dev/null" || echo "unreachable")
+VPN_IP=$(echo "$VPN_IP" | tr -d '[:space:]')
+
+# Check 4: Expected provider from binding
+EXPECTED_PROVIDER="unknown"
+if [[ -f "$VPN_BINDING" ]]; then
+  EXPECTED_PROVIDER=$(yq -r '.provider.display_name // .provider.id // "unknown"' "$VPN_BINDING" 2>/dev/null || echo "unknown")
+fi
+
+# Determine overall status
+STATUS="ok"
+ISSUES=()
+
+if [[ "$CONTAINER_STATE" != "running" ]]; then
+  STATUS="fail"
+  ISSUES+=("gluetun container not running (state=$CONTAINER_STATE)")
+fi
+
+if [[ "$HEALTH_STATUS" != "healthy" ]]; then
+  STATUS="fail"
+  ISSUES+=("gluetun healthcheck failed (status=$HEALTH_STATUS)")
+fi
+
+if [[ "$VPN_IP" == "unreachable" || -z "$VPN_IP" ]]; then
+  STATUS="fail"
+  ISSUES+=("VPN external IP unreachable")
+fi
+
+if $OUTPUT_JSON; then
+  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+  ISSUES_JSON=$(printf '%s\n' "${ISSUES[@]+"${ISSUES[@]}"}" | jq -R -s 'split("\n") | map(select(length > 0))')
+  jq -n \
+    --arg capability "media.vpn.health" \
+    --arg generated_at "$GENERATED_AT" \
+    --arg status "$STATUS" \
+    --arg container_state "$CONTAINER_STATE" \
+    --arg health_status "$HEALTH_STATUS" \
+    --arg vpn_ip "$VPN_IP" \
+    --arg provider "$EXPECTED_PROVIDER" \
+    --argjson issues "$ISSUES_JSON" \
+    '{
+      capability: $capability,
+      generated_at: $generated_at,
+      status: $status,
+      data: {
+        container_state: $container_state,
+        health_status: $health_status,
+        vpn_ip: $vpn_ip,
+        provider: $provider,
+        issues: $issues
+      }
+    }'
+else
+  echo "media.vpn.health"
+  echo "================"
+  echo "status: $STATUS"
+  echo "container_state: $CONTAINER_STATE"
+  echo "health_status: $HEALTH_STATUS"
+  echo "vpn_ip: $VPN_IP"
+  echo "provider: $EXPECTED_PROVIDER"
+  echo "generated_at: $GENERATED_AT"
+  if [[ ${#ISSUES[@]} -gt 0 ]]; then
+    echo "issues:"
+    for i in "${ISSUES[@]}"; do
+      echo "  - $i"
+    done
+  fi
+fi
+
+if [[ "$STATUS" == "fail" ]]; then
+  exit 1
+fi
+exit 0

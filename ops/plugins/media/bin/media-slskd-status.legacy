@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# media.slskd.status — slskd (Soulseek) runtime status
+#
+# Usage:
+#   ./bin/ops cap run media.slskd.status
+#   ./bin/ops cap run media.slskd.status --json
+#
+# Contract:
+# - SSHs to download-stack to query slskd container status and API
+# - slskd runs behind gluetun (network_mode: service:gluetun)
+# - API port 5030 is exposed via gluetun
+# - Exit 0 if connected, exit 1 if issues, exit 2 on config error
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+SERVICES_BINDING="$ROOT/ops/bindings/services.health.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+usage() {
+  cat <<'USAGE'
+media.slskd.status — slskd (Soulseek) runtime telemetry
+
+Args:
+  --json      Output JSON format
+  --timeout   SSH/HTTP timeout in seconds (default: 10)
+
+Examples:
+  ./bin/ops cap run media.slskd.status
+  ./bin/ops cap run media.slskd.status --json
+USAGE
+}
+
+OUTPUT_JSON=false
+TIMEOUT_SEC=10
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     OUTPUT_JSON=true; shift ;;
+    --timeout)  TIMEOUT_SEC="${2:-10}"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    --)         shift ;;
+    *)          echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+if [[ ! -f "$SSH_TARGETS" ]]; then
+  echo "STOP: ssh targets not found: $SSH_TARGETS" >&2
+  exit 2
+fi
+
+SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
+SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
+
+if [[ -z "$SSH_HOST" ]]; then
+  echo "STOP: download-stack SSH target not found" >&2
+  exit 2
+fi
+
+SSH_OPTS="-o ConnectTimeout=$TIMEOUT_SEC -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+
+ssh_cmd() {
+  ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "$@" 2>/dev/null
+}
+
+# Check 1: Container status
+CONTAINER_STATE=$(ssh_cmd "sudo docker inspect --format='{{.State.Status}}' slskd 2>/dev/null" || echo "not_found")
+
+# Check 2: Container uptime
+STARTED_AT=$(ssh_cmd "sudo docker inspect --format='{{.State.StartedAt}}' slskd 2>/dev/null" || echo "unknown")
+
+# Check 3: Soulseek connection from recent logs
+LOG_SNIPPET=$(ssh_cmd "sudo docker logs slskd --tail 20 2>&1" || echo "")
+SOULSEEK_CONNECTED="false"
+if echo "$LOG_SNIPPET" | grep -qi "connected\|logged in\|soulseek"; then
+  SOULSEEK_CONNECTED="true"
+fi
+
+# Check 4: API reachability (slskd on port 5030 via gluetun)
+SLSKD_URL="http://localhost:5030"
+API_REACHABLE=$(ssh_cmd "curl -fsS --max-time 5 ${SLSKD_URL}/api/v0/application 2>/dev/null | head -c 500" || echo "unreachable")
+
+# Check 5: Transfer stats from Docker stats
+TRANSFER_LINE=$(ssh_cmd "sudo docker stats --no-stream --format '{{.NetIO}}' slskd 2>/dev/null" || echo "unknown")
+
+# Determine status
+STATUS="ok"
+ISSUES=()
+
+if [[ "$CONTAINER_STATE" != "running" ]]; then
+  STATUS="fail"
+  ISSUES+=("slskd container not running (state=$CONTAINER_STATE)")
+fi
+
+if [[ "$API_REACHABLE" == "unreachable" ]]; then
+  STATUS="fail"
+  ISSUES+=("slskd API unreachable at $SLSKD_URL")
+fi
+
+if $OUTPUT_JSON; then
+  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+  ISSUES_JSON=$(printf '%s\n' "${ISSUES[@]+"${ISSUES[@]}"}" | jq -R -s 'split("\n") | map(select(length > 0))')
+  jq -n \
+    --arg capability "media.slskd.status" \
+    --arg generated_at "$GENERATED_AT" \
+    --arg status "$STATUS" \
+    --arg container_state "$CONTAINER_STATE" \
+    --arg started_at "$STARTED_AT" \
+    --arg soulseek_connected "$SOULSEEK_CONNECTED" \
+    --arg api_reachable "$(if [[ "$API_REACHABLE" != "unreachable" ]]; then echo "true"; else echo "false"; fi)" \
+    --arg net_io "$TRANSFER_LINE" \
+    --argjson issues "$ISSUES_JSON" \
+    '{
+      capability: $capability,
+      generated_at: $generated_at,
+      status: $status,
+      data: {
+        container_state: $container_state,
+        started_at: $started_at,
+        soulseek_connected: ($soulseek_connected == "true"),
+        api_reachable: ($api_reachable == "true"),
+        net_io: $net_io,
+        issues: $issues
+      }
+    }'
+else
+  echo "media.slskd.status"
+  echo "==================="
+  echo "status: $STATUS"
+  echo "container_state: $CONTAINER_STATE"
+  echo "started_at: $STARTED_AT"
+  echo "soulseek_connected: $SOULSEEK_CONNECTED"
+  echo "api_reachable: $(if [[ "$API_REACHABLE" != "unreachable" ]]; then echo "true"; else echo "false"; fi)"
+  echo "net_io: $TRANSFER_LINE"
+  echo "generated_at: $GENERATED_AT"
+  if [[ ${#ISSUES[@]} -gt 0 ]]; then
+    echo "issues:"
+    for i in "${ISSUES[@]}"; do
+      echo "  - $i"
+    done
+  fi
+fi
+
+if [[ "$STATUS" == "fail" ]]; then
+  exit 1
+fi
+exit 0

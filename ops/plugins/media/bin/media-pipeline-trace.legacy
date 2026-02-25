@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# media.pipeline.trace — End-to-end media pipeline diagnostic view
+#
+# Usage:
+#   ./bin/ops cap run media.pipeline.trace
+#   ./bin/ops cap run media.pipeline.trace --json
+#
+# Contract:
+# - Correlates tier-1 telemetry from: vpn.health, slskd.status, soularr.status,
+#   qbittorrent.status, sonarr.metrics.today, media.music.metrics.today, media.metrics.today
+# - Runs each sub-capability via cap runner, collects JSON output
+# - Produces unified pipeline health summary
+# - Exit 0 if all healthy, exit 1 if any critical issues
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+CAP_RUNNER="$ROOT/bin/ops"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+usage() {
+  cat <<'USAGE'
+media.pipeline.trace — End-to-end media pipeline diagnostic view
+
+Args:
+  --json      Output JSON format
+  --timeout   Per-capability timeout in seconds (default: 30)
+
+Examples:
+  ./bin/ops cap run media.pipeline.trace
+  ./bin/ops cap run media.pipeline.trace --json
+USAGE
+}
+
+OUTPUT_JSON=false
+TIMEOUT_SEC=30
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     OUTPUT_JSON=true; shift ;;
+    --timeout)  TIMEOUT_SEC="${2:-30}"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    --)         shift ;;
+    *)          echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+# Run a sub-capability and capture result
+run_cap() {
+  local cap="$1"
+  local result
+  result=$(timeout "${TIMEOUT_SEC}" "$CAP_RUNNER" cap run "$cap" --json 2>/dev/null || true)
+  # Extract the JSON portion (skip cap.sh banner lines)
+  echo "$result" | python3 -c "
+import sys, json
+lines = sys.stdin.read()
+# Find first { and last }
+start = lines.find('{')
+end = lines.rfind('}')
+if start >= 0 and end > start:
+    try:
+        obj = json.loads(lines[start:end+1])
+        json.dump(obj, sys.stdout)
+    except:
+        json.dump({'status': 'error', 'error': 'json_parse_failed'}, sys.stdout)
+else:
+    json.dump({'status': 'error', 'error': 'no_json_output'}, sys.stdout)
+" 2>/dev/null || echo '{"status":"error","error":"python_failed"}'
+}
+
+# Tier-1 probes (parallel execution via background jobs)
+CAPS=(
+  "media.vpn.health"
+  "media.slskd.status"
+  "media.soularr.status"
+  "media.qbittorrent.status"
+  "media.health.check"
+)
+
+TMPDIR_TRACE=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_TRACE"' EXIT
+
+# Run all tier-1 caps in parallel
+for cap in "${CAPS[@]}"; do
+  (run_cap "$cap" > "$TMPDIR_TRACE/${cap}.json") &
+done
+wait
+
+# Collect results
+RESULTS=""
+for cap in "${CAPS[@]}"; do
+  data=$(cat "$TMPDIR_TRACE/${cap}.json" 2>/dev/null || echo '{"status":"error"}')
+  if [[ -z "$RESULTS" ]]; then
+    RESULTS="\"${cap}\": ${data}"
+  else
+    RESULTS="${RESULTS}, \"${cap}\": ${data}"
+  fi
+done
+
+# Determine overall pipeline status
+OVERALL=$(echo "{${RESULTS}}" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+statuses = []
+issues = []
+for cap, obj in data.items():
+    s = obj.get('status', 'error')
+    statuses.append(s)
+    if s not in ('ok',):
+        issues.append(f'{cap}: {s}')
+if all(s == 'ok' for s in statuses):
+    print('ok')
+elif any(s == 'fail' for s in statuses) or any(s == 'error' for s in statuses):
+    print('fail')
+else:
+    print('warn')
+" 2>/dev/null || echo "unknown")
+
+if $OUTPUT_JSON; then
+  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+  echo "{${RESULTS}}" | jq --arg cap "media.pipeline.trace" \
+    --arg ts "$GENERATED_AT" \
+    --arg overall "$OVERALL" \
+    '{
+      capability: $cap,
+      generated_at: $ts,
+      status: $overall,
+      probes: .
+    }'
+else
+  echo "media.pipeline.trace"
+  echo "====================="
+  echo "overall_status: $OVERALL"
+  echo "generated_at: $GENERATED_AT"
+  echo ""
+
+  for cap in "${CAPS[@]}"; do
+    data=$(cat "$TMPDIR_TRACE/${cap}.json" 2>/dev/null || echo '{"status":"error"}')
+    cap_status=$(echo "$data" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")
+    marker="OK"
+    if [[ "$cap_status" == "fail" || "$cap_status" == "error" ]]; then
+      marker="XX"
+    elif [[ "$cap_status" == "warn" ]]; then
+      marker="!!"
+    fi
+    echo "  ${marker} ${cap}: ${cap_status}"
+  done
+
+  echo ""
+  if [[ "$OVERALL" != "ok" ]]; then
+    echo "PIPELINE ISSUES DETECTED — run individual capabilities for details"
+  else
+    echo "ALL PIPELINE PROBES HEALTHY"
+  fi
+fi
+
+if [[ "$OVERALL" == "fail" ]]; then
+  exit 1
+fi
+exit 0

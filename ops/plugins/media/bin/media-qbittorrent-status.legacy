@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# media.qbittorrent.status — qBittorrent queue and throughput telemetry
+#
+# Usage:
+#   ./bin/ops cap run media.qbittorrent.status
+#   ./bin/ops cap run media.qbittorrent.status --json
+#
+# Contract:
+# - SSHs to download-stack to query qBittorrent WebUI API
+# - Reports active/stalled/completed torrents, speeds, disk usage
+# - qBittorrent WebUI at port 8081 (direct bridge, not VPN)
+# - Exit 0 if reachable, exit 1 if issues, exit 2 on config error
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+SERVICES_BINDING="$ROOT/ops/bindings/media.services.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+usage() {
+  cat <<'USAGE'
+media.qbittorrent.status — qBittorrent queue telemetry
+
+Args:
+  --json      Output JSON format
+  --timeout   SSH/HTTP timeout in seconds (default: 10)
+
+Examples:
+  ./bin/ops cap run media.qbittorrent.status
+  ./bin/ops cap run media.qbittorrent.status --json
+USAGE
+}
+
+OUTPUT_JSON=false
+TIMEOUT_SEC=10
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     OUTPUT_JSON=true; shift ;;
+    --timeout)  TIMEOUT_SEC="${2:-10}"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    --)         shift ;;
+    *)          echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+if [[ ! -f "$SSH_TARGETS" ]]; then
+  echo "STOP: ssh targets not found: $SSH_TARGETS" >&2
+  exit 2
+fi
+
+SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
+SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
+
+if [[ -z "$SSH_HOST" ]]; then
+  echo "STOP: download-stack SSH target not found" >&2
+  exit 2
+fi
+
+SSH_OPTS="-o ConnectTimeout=$TIMEOUT_SEC -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+
+ssh_cmd() {
+  ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "$@" 2>/dev/null
+}
+
+# Check 1: Container status
+CONTAINER_STATE=$(ssh_cmd "sudo docker inspect --format='{{.State.Status}}' qbittorrent 2>/dev/null" || echo "not_found")
+
+# Check 2: qBittorrent API — transfer info (no auth required for API v2 by default)
+QBIT_URL="http://localhost:8081"
+TRANSFER_INFO=$(ssh_cmd "curl -fsS --max-time 5 ${QBIT_URL}/api/v2/transfer/info 2>/dev/null" || echo "{}")
+
+# Check 3: Torrent counts by state
+TORRENT_LIST=$(ssh_cmd "curl -fsS --max-time 10 ${QBIT_URL}/api/v2/torrents/info 2>/dev/null" || echo "[]")
+
+# Parse with Python (handle JSON safely via stdin)
+STATS=$(printf '%s\n---SPLIT---\n%s' "$TRANSFER_INFO" "$TORRENT_LIST" | python3 -c "
+import json, sys
+raw = sys.stdin.read()
+parts = raw.split('---SPLIT---')
+try:
+    transfer = json.loads(parts[0].strip()) if len(parts) > 0 else {}
+except: transfer = {}
+try:
+    torrents = json.loads(parts[1].strip()) if len(parts) > 1 else []
+except: torrents = []
+
+dl_speed = transfer.get('dl_info_speed', 0)
+up_speed = transfer.get('up_info_speed', 0)
+connection = transfer.get('connection_status', 'unknown')
+
+active = sum(1 for t in torrents if t.get('state', '').startswith(('downloading', 'uploading', 'stalledUP', 'forcedUP', 'forcedDL')))
+stalled = sum(1 for t in torrents if t.get('state', '') in ('stalledDL',))
+completed = sum(1 for t in torrents if t.get('state', '') in ('pausedUP', 'uploading', 'stalledUP'))
+errored = sum(1 for t in torrents if t.get('state', '') in ('error', 'missingFiles'))
+
+print(f'dl_speed_bytes={dl_speed}')
+print(f'up_speed_bytes={up_speed}')
+print(f'connection_status={connection}')
+print(f'total_torrents={len(torrents)}')
+print(f'active={active}')
+print(f'stalled={stalled}')
+print(f'completed={completed}')
+print(f'errored={errored}')
+" 2>/dev/null || echo "dl_speed_bytes=0
+up_speed_bytes=0
+connection_status=unreachable
+total_torrents=0
+active=0
+stalled=0
+completed=0
+errored=0")
+
+# Parse stats into variables
+eval "$STATS" 2>/dev/null || true
+
+# Human-readable speeds
+DL_SPEED_HR=$(python3 -c "s=${dl_speed_bytes:-0}; print(f'{s/1024/1024:.1f} MB/s') if s > 1048576 else print(f'{s/1024:.1f} KB/s')" 2>/dev/null || echo "0 KB/s")
+UP_SPEED_HR=$(python3 -c "s=${up_speed_bytes:-0}; print(f'{s/1024/1024:.1f} MB/s') if s > 1048576 else print(f'{s/1024:.1f} KB/s')" 2>/dev/null || echo "0 KB/s")
+
+# Determine status
+STATUS="ok"
+ISSUES=()
+
+if [[ "$CONTAINER_STATE" != "running" ]]; then
+  STATUS="fail"
+  ISSUES+=("qbittorrent container not running (state=$CONTAINER_STATE)")
+fi
+
+if [[ "${connection_status:-unknown}" == "unreachable" ]]; then
+  STATUS="fail"
+  ISSUES+=("qBittorrent API unreachable")
+elif [[ "${connection_status:-unknown}" == "disconnected" ]]; then
+  STATUS="warn"
+  ISSUES+=("qBittorrent connection status: disconnected")
+fi
+
+if [[ "${errored:-0}" -gt 0 ]]; then
+  STATUS="warn"
+  ISSUES+=("$errored torrents in error state")
+fi
+
+if $OUTPUT_JSON; then
+  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+  ISSUES_JSON=$(printf '%s\n' "${ISSUES[@]+"${ISSUES[@]}"}" | jq -R -s 'split("\n") | map(select(length > 0))')
+  jq -n \
+    --arg capability "media.qbittorrent.status" \
+    --arg generated_at "$GENERATED_AT" \
+    --arg status "$STATUS" \
+    --arg container_state "$CONTAINER_STATE" \
+    --arg connection "${connection_status:-unknown}" \
+    --argjson dl_speed "${dl_speed_bytes:-0}" \
+    --argjson up_speed "${up_speed_bytes:-0}" \
+    --arg dl_speed_hr "$DL_SPEED_HR" \
+    --arg up_speed_hr "$UP_SPEED_HR" \
+    --argjson total "${total_torrents:-0}" \
+    --argjson active "${active:-0}" \
+    --argjson stalled "${stalled:-0}" \
+    --argjson completed "${completed:-0}" \
+    --argjson errored "${errored:-0}" \
+    --argjson issues "$ISSUES_JSON" \
+    '{
+      capability: $capability,
+      generated_at: $generated_at,
+      status: $status,
+      data: {
+        container_state: $container_state,
+        connection_status: $connection,
+        speeds: { dl_bytes_sec: $dl_speed, up_bytes_sec: $up_speed, dl_human: $dl_speed_hr, up_human: $up_speed_hr },
+        queue: { total: $total, active: $active, stalled: $stalled, completed: $completed, errored: $errored },
+        issues: $issues
+      }
+    }'
+else
+  echo "media.qbittorrent.status"
+  echo "========================="
+  echo "status: $STATUS"
+  echo "container_state: $CONTAINER_STATE"
+  echo "connection: ${connection_status:-unknown}"
+  echo "dl_speed: $DL_SPEED_HR"
+  echo "up_speed: $UP_SPEED_HR"
+  echo "total_torrents: ${total_torrents:-0}"
+  echo "active: ${active:-0}"
+  echo "stalled: ${stalled:-0}"
+  echo "completed: ${completed:-0}"
+  echo "errored: ${errored:-0}"
+  echo "generated_at: $GENERATED_AT"
+  if [[ ${#ISSUES[@]} -gt 0 ]]; then
+    echo "issues:"
+    for i in "${ISSUES[@]}"; do
+      echo "  - $i"
+    done
+  fi
+fi
+
+if [[ "$STATUS" == "fail" ]]; then
+  exit 1
+fi
+exit 0

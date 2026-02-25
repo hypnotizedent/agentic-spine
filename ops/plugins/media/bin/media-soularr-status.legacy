@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# media.soularr.status — Soularr cycle telemetry
+#
+# Usage:
+#   ./bin/ops cap run media.soularr.status
+#   ./bin/ops cap run media.soularr.status --json
+#
+# Contract:
+# - SSHs to download-stack to check soularr container status and logs
+# - Soularr has no API; telemetry is extracted from container logs
+# - Reports last cycle time, search results, and error state
+# - Exit 0 if running, exit 1 if issues, exit 2 on config error
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+usage() {
+  cat <<'USAGE'
+media.soularr.status — Soularr cycle telemetry
+
+Args:
+  --json      Output JSON format
+  --tail N    Number of log lines to analyze (default: 50)
+  --timeout   SSH timeout in seconds (default: 10)
+
+Examples:
+  ./bin/ops cap run media.soularr.status
+  ./bin/ops cap run media.soularr.status --json
+USAGE
+}
+
+OUTPUT_JSON=false
+TAIL_LINES=50
+TIMEOUT_SEC=10
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     OUTPUT_JSON=true; shift ;;
+    --tail)     TAIL_LINES="${2:-50}"; shift 2 ;;
+    --timeout)  TIMEOUT_SEC="${2:-10}"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    --)         shift ;;
+    *)          echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+if [[ ! -f "$SSH_TARGETS" ]]; then
+  echo "STOP: ssh targets not found: $SSH_TARGETS" >&2
+  exit 2
+fi
+
+SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
+SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
+
+if [[ -z "$SSH_HOST" ]]; then
+  echo "STOP: download-stack SSH target not found" >&2
+  exit 2
+fi
+
+SSH_OPTS="-o ConnectTimeout=$TIMEOUT_SEC -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+
+ssh_cmd() {
+  ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "$@" 2>/dev/null
+}
+
+# Check 1: Container status
+CONTAINER_STATE=$(ssh_cmd "sudo docker inspect --format='{{.State.Status}}' soularr 2>/dev/null" || echo "not_found")
+
+# Check 2: Container uptime
+STARTED_AT=$(ssh_cmd "sudo docker inspect --format='{{.State.StartedAt}}' soularr 2>/dev/null" || echo "unknown")
+
+# Check 3: Recent logs analysis
+LOGS=$(ssh_cmd "sudo docker logs soularr --tail $TAIL_LINES 2>&1" || echo "")
+
+# Extract last cycle timestamp
+LAST_CYCLE=$(echo "$LOGS" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | tail -1)
+if [[ -z "$LAST_CYCLE" ]]; then
+  LAST_CYCLE="unknown"
+fi
+
+# Count searches and results in recent logs
+SEARCH_COUNT=$(echo "$LOGS" | grep -ci "search\|searching" || true)
+GRAB_COUNT=$(echo "$LOGS" | grep -ci "grabbed\|download\|found" || true)
+ERROR_COUNT=$(echo "$LOGS" | grep -ci "error\|exception\|fail" || true)
+SLEEP_LINE=$(echo "$LOGS" | grep -i "sleep\|wait\|interval\|next" | tail -1 || true)
+
+# Determine status
+STATUS="ok"
+ISSUES=()
+
+if [[ "$CONTAINER_STATE" != "running" ]]; then
+  STATUS="fail"
+  ISSUES+=("soularr container not running (state=$CONTAINER_STATE)")
+fi
+
+if [[ $ERROR_COUNT -gt 5 ]]; then
+  STATUS="warn"
+  ISSUES+=("high error count in recent logs ($ERROR_COUNT errors)")
+fi
+
+if $OUTPUT_JSON; then
+  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+  ISSUES_JSON=$(printf '%s\n' "${ISSUES[@]+"${ISSUES[@]}"}" | jq -R -s 'split("\n") | map(select(length > 0))')
+  jq -n \
+    --arg capability "media.soularr.status" \
+    --arg generated_at "$GENERATED_AT" \
+    --arg status "$STATUS" \
+    --arg container_state "$CONTAINER_STATE" \
+    --arg started_at "$STARTED_AT" \
+    --arg last_cycle "$LAST_CYCLE" \
+    --argjson search_count "$SEARCH_COUNT" \
+    --argjson grab_count "$GRAB_COUNT" \
+    --argjson error_count "$ERROR_COUNT" \
+    --arg sleep_info "$SLEEP_LINE" \
+    --argjson issues "$ISSUES_JSON" \
+    '{
+      capability: $capability,
+      generated_at: $generated_at,
+      status: $status,
+      data: {
+        container_state: $container_state,
+        started_at: $started_at,
+        last_cycle: $last_cycle,
+        search_count: $search_count,
+        grab_count: $grab_count,
+        error_count: $error_count,
+        sleep_info: $sleep_info,
+        issues: $issues
+      }
+    }'
+else
+  echo "media.soularr.status"
+  echo "====================="
+  echo "status: $STATUS"
+  echo "container_state: $CONTAINER_STATE"
+  echo "started_at: $STARTED_AT"
+  echo "last_cycle: $LAST_CYCLE"
+  echo "search_count: $SEARCH_COUNT"
+  echo "grab_count: $GRAB_COUNT"
+  echo "error_count: $ERROR_COUNT"
+  echo "sleep_info: $SLEEP_LINE"
+  echo "generated_at: $GENERATED_AT"
+  if [[ ${#ISSUES[@]} -gt 0 ]]; then
+    echo "issues:"
+    for i in "${ISSUES[@]}"; do
+      echo "  - $i"
+    done
+  fi
+fi
+
+if [[ "$STATUS" == "fail" ]]; then
+  exit 1
+fi
+exit 0
