@@ -108,60 +108,38 @@ if [[ "$PROBE_LOGIN" == "true" ]]; then
     CLIENT_SECRET="${VALUES[VAULTWARDEN_BW_CLIENTSECRET]}"
     MASTER_PASSWORD="${VALUES[VAULTWARDEN_BW_MASTER_PASSWORD]}"
 
-    # Start scope-rewriting HTTPS proxy for bw <-> Vaultwarden compatibility.
-    # bw v2026.1.0: requires HTTPS + sends scope=api+offline_access (VW rejects it).
-    PROXY_SCRIPT="$SCRIPT_DIR/../lib/scope-proxy.py"
-    if [[ ! -f "$PROXY_SCRIPT" ]]; then
-      echo "probe_login_result: SKIP (scope-proxy.py missing)"
+    # Use shared proxy session (same code path as vaultwarden-item-list bw mode).
+    # shellcheck source=../lib/proxy-session.sh
+    PROXY_LIB="$SCRIPT_DIR/../lib/proxy-session.sh"
+    if [[ ! -f "$PROXY_LIB" ]]; then
+      echo "probe_login_result: SKIP (proxy-session.sh missing)"
     elif ! command -v python3 >/dev/null 2>&1; then
       echo "probe_login_result: SKIP (python3 missing)"
     else
+      source "$PROXY_LIB"
       probe_failed=0
-      PROXY_PID=""
-      _probe_cleanup() {
-        [[ -n "$PROXY_PID" ]] && kill "$PROXY_PID" 2>/dev/null || true
-      }
 
-      # Proxy target: always use LAN endpoint for reliability (no DNS dependency).
-      # The VAULTWARDEN_BW_SERVER_URL secret is the canonical URL for reference;
-      # the proxy bypasses it and goes direct via Tailscale/LAN.
-      VW_LAN_TARGET="${VW_LAN_TARGET:-http://100.92.91.128:8081}"
-      PROXY_OUT="$(mktemp)"
-      python3 "$PROXY_SCRIPT" --target "$VW_LAN_TARGET" > "$PROXY_OUT" 2>/dev/null &
-      PROXY_PID=$!
+      if ! vw_proxy_start; then
+        echo "probe_login_result: FAIL (proxy start failed)"
+        probe_failed=1
+      else
+        vw_bw logout >/dev/null 2>&1 || true
 
-      # Wait for proxy ready (up to 5s)
-      for _i in $(seq 1 50); do
-        grep -q "status: ready" "$PROXY_OUT" 2>/dev/null && break
-        kill -0 "$PROXY_PID" 2>/dev/null || { probe_failed=1; break; }
-        sleep 0.1
-      done
+        BW_CLIENTID="$CLIENT_ID" BW_CLIENTSECRET="$CLIENT_SECRET" \
+          vw_bw login --apikey >/dev/null 2>&1 || probe_failed=1
 
-      if (( probe_failed == 0 )) && grep -q "status: ready" "$PROXY_OUT" 2>/dev/null; then
-        PROXY_PORT="$(grep '^proxy_url:' "$PROXY_OUT" | sed 's|.*://127.0.0.1:||')"
-
-        bw logout >/dev/null 2>&1 || true
-        bw config server "https://127.0.0.1:${PROXY_PORT}" >/dev/null 2>&1
-
-        NODE_TLS_REJECT_UNAUTHORIZED=0 BW_CLIENTID="$CLIENT_ID" BW_CLIENTSECRET="$CLIENT_SECRET" \
-          bw login --apikey >/dev/null 2>&1 || probe_failed=1
-
-        SESSION="$(NODE_TLS_REJECT_UNAUTHORIZED=0 BW_PASSWORD="$MASTER_PASSWORD" \
-          bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
+        SESSION="$(BW_PASSWORD="$MASTER_PASSWORD" \
+          vw_bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
         if [[ -z "$SESSION" ]]; then
           probe_failed=1
         else
-          NODE_TLS_REJECT_UNAUTHORIZED=0 BW_SESSION="$SESSION" \
-            bw list items --search "__spine_probe__" >/dev/null 2>&1 || probe_failed=1
-          NODE_TLS_REJECT_UNAUTHORIZED=0 bw lock --session "$SESSION" >/dev/null 2>&1 || true
+          BW_SESSION="$SESSION" \
+            vw_bw list items --search "__spine_probe__" >/dev/null 2>&1 || probe_failed=1
+          vw_bw lock --session "$SESSION" >/dev/null 2>&1 || true
         fi
-        NODE_TLS_REJECT_UNAUTHORIZED=0 bw logout >/dev/null 2>&1 || true
-      else
-        probe_failed=1
+        vw_bw logout >/dev/null 2>&1 || true
+        vw_proxy_stop
       fi
-
-      rm -f "$PROXY_OUT"
-      _probe_cleanup
     fi
 
     unset SERVER_URL CLIENT_ID CLIENT_SECRET MASTER_PASSWORD SESSION

@@ -117,39 +117,36 @@ run_bw_mode() {
     return 3
   fi
 
-  command -v bw >/dev/null 2>&1 || {
-    echo "FAIL: bw CLI not installed"
-    return 3
-  }
+  # Source shared proxy session (same code path as auth-status probe)
+  # shellcheck source=../lib/proxy-session.sh
+  source "$SCRIPT_DIR/../lib/proxy-session.sh"
 
-  bw logout >/dev/null 2>&1 || true
-
-  bw config server "$server" >/dev/null 2>&1 || {
-    echo "FAIL: could not configure bw server: $server"
-    bw logout >/dev/null 2>&1 || true
+  vw_proxy_start || {
+    echo "FAIL: could not start scope-rewriting proxy"
     return 1
   }
 
-  BW_CLIENTID="$clientid" BW_CLIENTSECRET="$clientsecret" bw login --apikey >/dev/null 2>&1 || {
+  vw_bw logout >/dev/null 2>&1 || true
+
+  BW_CLIENTID="$clientid" BW_CLIENTSECRET="$clientsecret" vw_bw login --apikey >/dev/null 2>&1 || {
     echo "FAIL: bw login --apikey failed"
-    bw logout >/dev/null 2>&1 || true
     return 1
   }
 
-  session="$(BW_PASSWORD="$master" bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
+  session="$(BW_PASSWORD="$master" vw_bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
   if [[ -z "$session" ]]; then
     echo "FAIL: bw unlock failed"
-    bw logout >/dev/null 2>&1 || true
     return 1
   fi
 
-  BW_SESSION="$session" bw sync --session "$session" >/dev/null 2>&1 || true
+  BW_SESSION="$session" vw_bw sync --session "$session" >/dev/null 2>&1 || true
 
-  items="$(BW_SESSION="$session" bw list items --session "$session" 2>/dev/null || true)"
-  folders="$(BW_SESSION="$session" bw list folders --session "$session" 2>/dev/null || echo '[]')"
+  items="$(BW_SESSION="$session" vw_bw list items --session "$session" 2>/dev/null || true)"
+  folders="$(BW_SESSION="$session" vw_bw list folders --session "$session" 2>/dev/null || echo '[]')"
 
-  bw lock --session "$session" >/dev/null 2>&1 || true
-  bw logout >/dev/null 2>&1 || true
+  vw_bw lock --session "$session" >/dev/null 2>&1 || true
+  vw_bw logout >/dev/null 2>&1 || true
+  vw_proxy_stop
 
   [[ -n "$items" ]] || {
     echo "FAIL: bw list items returned no data"
@@ -159,7 +156,7 @@ run_bw_mode() {
   filtered="$(jq -c \
     --argjson folders "$folders" \
     --arg include_trashed "$SHOW_TRASHED" '
-      ($folders | map({(.id): .name}) | add // {}) as $folder_map
+      ($folders | map(select(.id != null) | {(.id): .name}) | add // {}) as $folder_map
       | [ .[]
           | (if $include_trashed == "true" then . else select(.deletedDate == null) end)
           | {

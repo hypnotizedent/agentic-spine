@@ -1,83 +1,28 @@
 #!/usr/bin/env bash
-# vaultwarden-bw - Run bw CLI through scope-rewriting HTTPS proxy
+# vaultwarden-bw - Run a single bw CLI command through scope-rewriting HTTPS proxy
 #
-# Solves two bw v2026.1.0 incompatibilities with Vaultwarden:
-#   1. bw sends scope=api+offline_access, Vaultwarden rejects it
-#   2. bw requires HTTPS (InsecureUrlNotAllowedError)
-#
-# Method: starts a local HTTPS reverse proxy (self-signed cert) that rewrites
-#         scope=api, configures bw to use it, runs the command, then cleans up.
+# For multi-command flows (login → unlock → list), source proxy-session.sh instead:
+#   source ops/plugins/vaultwarden/lib/proxy-session.sh
+#   vw_proxy_start; vw_bw login ...; vw_bw unlock ...; vw_proxy_stop
 #
 # Usage:
 #   vaultwarden-bw <bw-args...>
-#   vaultwarden-bw login --apikey
-#   vaultwarden-bw unlock --passwordenv BW_PASSWORD --raw
+#   vaultwarden-bw status
 #
 # Env:
-#   VW_SERVER_URL  - Vaultwarden endpoint (default: http://100.92.91.128:8081)
-#   VW_PROXY_PORT  - Local proxy port (default: 0 = OS-assigned)
-#
-# The wrapper:
-#   1. Starts scope-proxy.py HTTPS on localhost (OS-assigned port, self-signed cert)
-#   2. Runs: bw config server https://127.0.0.1:<port>
-#   3. Runs: NODE_TLS_REJECT_UNAUTHORIZED=0 bw <args>
-#   4. Kills the proxy on exit (trap)
+#   VW_PROXY_TARGET - Vaultwarden backend (default: http://100.92.91.128:8081)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
-PROXY_SCRIPT="$LIB_DIR/scope-proxy.py"
 
-_stop() { echo "STOP (2): $*" >&2; exit 2; }
+# shellcheck source=../lib/proxy-session.sh
+source "$SCRIPT_DIR/../lib/proxy-session.sh"
 
-[[ -f "$PROXY_SCRIPT" ]] || _stop "missing scope-proxy.py at $PROXY_SCRIPT"
-command -v python3 >/dev/null 2>&1 || _stop "python3 not found"
-command -v bw >/dev/null 2>&1 || _stop "bw CLI not found"
+trap vw_proxy_stop EXIT
 
-# Default target: Vaultwarden direct via LAN (no DNS dependency)
-VW_SERVER_URL="${VW_SERVER_URL:-http://100.92.91.128:8081}"
-VW_PROXY_PORT="${VW_PROXY_PORT:-0}"
-PROXY_PID=""
-PROXY_PORT=""
+# Clear stale bw state if config points to dead proxy
+bw logout >/dev/null 2>&1 || true
 
-cleanup() {
-  if [[ -n "$PROXY_PID" ]]; then
-    kill "$PROXY_PID" 2>/dev/null || true
-    wait "$PROXY_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT
-
-# Start HTTPS proxy in background, capture startup output
-PROXY_OUTPUT="$(mktemp)"
-python3 "$PROXY_SCRIPT" --target "$VW_SERVER_URL" --port "$VW_PROXY_PORT" > "$PROXY_OUTPUT" 2>/dev/null &
-PROXY_PID=$!
-
-# Wait for proxy to be ready (up to 5s)
-for i in $(seq 1 50); do
-  if grep -q "status: ready" "$PROXY_OUTPUT" 2>/dev/null; then
-    break
-  fi
-  if ! kill -0 "$PROXY_PID" 2>/dev/null; then
-    rm -f "$PROXY_OUTPUT"
-    _stop "scope proxy exited unexpectedly"
-  fi
-  sleep 0.1
-done
-
-if ! grep -q "status: ready" "$PROXY_OUTPUT" 2>/dev/null; then
-  rm -f "$PROXY_OUTPUT"
-  _stop "scope proxy failed to start within 5 seconds"
-fi
-
-PROXY_PORT="$(grep '^proxy_url:' "$PROXY_OUTPUT" | sed 's|.*://127.0.0.1:||')"
-rm -f "$PROXY_OUTPUT"
-
-[[ -n "$PROXY_PORT" ]] || _stop "could not determine proxy port"
-
-# Point bw at the HTTPS proxy (self-signed cert)
-bw config server "https://127.0.0.1:${PROXY_PORT}" >/dev/null 2>&1
-
-# Run bw with TLS verification disabled (self-signed cert on localhost)
-NODE_TLS_REJECT_UNAUTHORIZED=0 bw "$@"
+vw_proxy_start || exit $?
+vw_bw "$@"
