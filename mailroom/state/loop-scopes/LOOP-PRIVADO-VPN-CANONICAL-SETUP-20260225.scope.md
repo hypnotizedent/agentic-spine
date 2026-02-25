@@ -112,12 +112,15 @@ Document in the runbook:
 - **Phase 5**: PENDING  
   Workbench-side topology documents still need parallel update.
 
-## Gaps (to be filed)
+## Gaps
 
-- VPN provider not canonically documented (new binding needed)
-- Gluetun no health probe in services.health.yaml
-- No D-gate for VPN connectivity health
-- qBittorrent VPN decision not documented
+### Resolved (via Privado canonical wiring commit a8e0e1f)
+- VPN provider binding: DONE (vpn.provider.yaml created)
+- D223 media-vpn-routing-lock: DONE (gluetun healthy, slskd tunneled, qBittorrent route parity)
+- qBittorrent VPN decision: DONE (QB-VPN-ROUTE-001 = direct)
+
+### Observability Backlog (filed 2026-02-25)
+- `GAP-OP-897` (medium): VPN egress IP attestation + leak/killswitch evidence — D223 validates routing but cannot attest external IP is non-home or DNS/WebRTC leak protection is active. Need media.vpn.health capability.
 
 ## Success Criteria
 
