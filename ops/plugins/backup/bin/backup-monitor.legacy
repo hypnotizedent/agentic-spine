@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# backup.monitor - Evaluate backup.status and enqueue governed email intent on degradation.
+# Mutating: writes intent files under mailroom/outbox/alerts/email-intents.
+#
+# Usage:
+#   backup-monitor [--dry-run] [--json] [--force] [--cooldown-sec <n>]
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+BACKUP_STATUS_BIN="$ROOT/ops/plugins/backup/bin/backup-status"
+INTENT_DIR="$ROOT/mailroom/outbox/alerts/email-intents"
+ALERT_DIR="$ROOT/mailroom/outbox/alerts/backup-monitor"
+STATE_FILE="$ROOT/mailroom/state/backup-monitor.state"
+
+DRY_RUN=0
+JSON_MODE=0
+FORCE=0
+COOLDOWN_SEC=3600
+
+usage() {
+  cat <<'USAGE'
+backup.monitor - Evaluate backup.status and queue alert intents.
+
+Usage:
+  backup-monitor [--dry-run] [--json] [--force] [--cooldown-sec <n>]
+
+Options:
+  --dry-run           Show what would be enqueued without writing intent files.
+  --json              Emit JSON envelope.
+  --force             Ignore dedupe cooldown and enqueue if degraded.
+  --cooldown-sec <n>  Suppress duplicate fingerprint alerts within N seconds (default: 3600).
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    --force) FORCE=1; shift ;;
+    --cooldown-sec) COOLDOWN_SEC="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ "$COOLDOWN_SEC" =~ ^[0-9]+$ ]] || { echo "FAIL: --cooldown-sec must be an integer" >&2; exit 2; }
+[[ -x "$BACKUP_STATUS_BIN" ]] || { echo "FAIL: missing backup-status script: $BACKUP_STATUS_BIN" >&2; exit 1; }
+
+status_output="$("$BACKUP_STATUS_BIN" 2>&1)"
+status_rc=$?
+if [[ $status_rc -ne 0 ]]; then
+  echo "FAIL: backup.status invocation failed" >&2
+  echo "$status_output" >&2
+  exit 1
+fi
+
+summary_line="$(printf '%s\n' "$status_output" | grep '^summary:' | tail -n1 || true)"
+degraded_count=0
+if [[ -n "$summary_line" ]]; then
+  parsed="$(printf '%s\n' "$summary_line" | sed -E 's/.*\| ([0-9]+) degraded.*/\1/' || true)"
+  if [[ "$parsed" =~ ^[0-9]+$ ]]; then
+    degraded_count="$parsed"
+  fi
+fi
+
+degraded_lines="$(printf '%s\n' "$status_output" | grep -E '\b(STALE|ERROR|MISSING)\b' || true)"
+if [[ -z "$degraded_lines" && "$degraded_count" -eq 0 ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg cap "backup.monitor" \
+      --arg status "ok" \
+      --arg summary "${summary_line:-summary: unknown}" \
+      '{capability:$cap,status:$status,degraded_count:0,intent_enqueued:false,summary:$summary}'
+  else
+    echo "backup.monitor"
+    echo "status: ok"
+    echo "degraded_count: 0"
+    echo "intent_enqueued: false"
+    echo "summary: ${summary_line:-summary: unknown}"
+  fi
+  exit 0
+fi
+
+if [[ "$degraded_count" -eq 0 ]]; then
+  degraded_count="$(printf '%s\n' "$degraded_lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+fi
+
+fingerprint="$(
+  {
+    printf '%s\n' "${summary_line:-}"
+    printf '%s\n' "$degraded_lines"
+  } | shasum -a 256 | awk '{print $1}'
+)"
+now_epoch="$(date -u +%s)"
+now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+suppressed=0
+previous_fingerprint=""
+previous_epoch=0
+if [[ -f "$STATE_FILE" ]]; then
+  previous_epoch="$(awk -F'|' 'NR==1{print $1}' "$STATE_FILE" 2>/dev/null || echo 0)"
+  previous_fingerprint="$(awk -F'|' 'NR==1{print $2}' "$STATE_FILE" 2>/dev/null || echo "")"
+  [[ "$previous_epoch" =~ ^[0-9]+$ ]] || previous_epoch=0
+fi
+
+if [[ "$FORCE" -eq 0 && -n "$previous_fingerprint" && "$previous_fingerprint" == "$fingerprint" ]]; then
+  age=$((now_epoch - previous_epoch))
+  if [[ $age -lt "$COOLDOWN_SEC" ]]; then
+    suppressed=1
+  fi
+fi
+
+severity="warn"
+if printf '%s\n' "$degraded_lines" | grep -Eq '\b(ERROR|MISSING)\b'; then
+  severity="incident"
+fi
+
+intent_enqueued=0
+intent_id=""
+intent_file=""
+alert_file=""
+if [[ "$suppressed" -eq 0 ]]; then
+  alert_id="backup-monitor-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}"
+  alert_file="$ALERT_DIR/${alert_id}.txt"
+  intent_id="email-intent-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}"
+  intent_file="$INTENT_DIR/${intent_id}.yaml"
+
+  summary_body="$(cat <<EOF
+Backup monitor detected ${degraded_count} degraded target(s).
+${summary_line:-summary: unavailable}
+
+Degraded rows:
+$(printf '%s\n' "$degraded_lines" | sed '/^$/d' | head -n 12)
+EOF
+)"
+
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    mkdir -p "$ALERT_DIR" "$INTENT_DIR" "$(dirname "$STATE_FILE")"
+    {
+      echo "generated_at: $now_iso"
+      echo "capability: backup.monitor"
+      echo "summary: ${summary_line:-unknown}"
+      echo
+      echo "$status_output"
+    } >"$alert_file"
+
+    cat >"$intent_file" <<INTENT
+intent_id: "${intent_id}"
+created_at: "${now_iso}"
+domain_id: "backup-monitor"
+severity: "${severity}"
+title: "Backup monitor: ${degraded_count} degraded target(s)"
+summary: |-
+$(printf '%s\n' "$summary_body" | sed 's/^/  /')
+suggested_recipient: "alerts@spine.ronny.works"
+source_alert: "$(basename "$alert_file")"
+flush_status: pending
+INTENT
+
+    echo "${now_epoch}|${fingerprint}" >"$STATE_FILE"
+  fi
+  intent_enqueued=1
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg cap "backup.monitor" \
+    --arg status "ok" \
+    --arg summary "${summary_line:-summary: unavailable}" \
+    --arg severity "$severity" \
+    --arg degraded_lines "$degraded_lines" \
+    --arg intent_id "$intent_id" \
+    --arg intent_file "$intent_file" \
+    --arg alert_file "$alert_file" \
+    --argjson degraded_count "$degraded_count" \
+    --argjson dry_run "$DRY_RUN" \
+    --argjson suppressed "$suppressed" \
+    --argjson enqueued "$intent_enqueued" \
+    '{
+      capability:$cap,
+      status:$status,
+      dry_run:($dry_run==1),
+      degraded_count:$degraded_count,
+      severity:$severity,
+      summary:$summary,
+      suppressed:($suppressed==1),
+      intent_enqueued:($enqueued==1),
+      intent_id:(if $intent_id=="" then null else $intent_id end),
+      intent_file:(if $intent_file=="" then null else $intent_file end),
+      alert_file:(if $alert_file=="" then null else $alert_file end),
+      degraded_lines: ($degraded_lines | split("\n") | map(select(length > 0)))
+    }'
+else
+  echo "backup.monitor"
+  echo "status: ok"
+  echo "dry_run: $DRY_RUN"
+  echo "degraded_count: $degraded_count"
+  echo "severity: $severity"
+  echo "summary: ${summary_line:-summary: unavailable}"
+  echo "suppressed: $suppressed"
+  echo "intent_enqueued: $intent_enqueued"
+  if [[ -n "$intent_id" ]]; then
+    echo "intent_id: $intent_id"
+    echo "intent_file: $intent_file"
+    echo "alert_file: $alert_file"
+  fi
+fi

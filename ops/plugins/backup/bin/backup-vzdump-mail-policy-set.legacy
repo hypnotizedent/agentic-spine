@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# backup.vzdump.mail.policy.set - Enforce Proxmox vzdump mailnotification policy.
+# Mutating. Updates /etc/pve/jobs.cfg on a target host with backup + dry-run support.
+#
+# Usage:
+#   backup-vzdump-mail-policy-set [--target <id>] [--job <job_id>] \
+#     [--mailnotification <always|failure|never>] [--dry-run|--execute]
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SSH_TARGETS_FILE="${SSH_TARGETS_FILE:-$ROOT/ops/bindings/ssh.targets.yaml}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+_need yq
+_need ssh
+_need python3
+_need diff
+
+if [[ ! -f "$SSH_TARGETS_FILE" ]]; then
+  echo "STOP: missing ssh targets binding: $SSH_TARGETS_FILE" >&2
+  exit 2
+fi
+
+TARGET_ID="pve"
+JOB_ID=""
+MAILNOTIFICATION="never"
+MODE="dry-run"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target) TARGET_ID="${2:-}"; shift 2;;
+    --job) JOB_ID="${2:-}"; shift 2;;
+    --mailnotification) MAILNOTIFICATION="${2:-}"; shift 2;;
+    --dry-run) MODE="dry-run"; shift;;
+    --execute) MODE="execute"; shift;;
+    -h|--help)
+      cat <<'USAGE'
+backup.vzdump.mail.policy.set - Enforce vzdump mailnotification policy
+
+Usage:
+  backup-vzdump-mail-policy-set [--target <id>] [--job <job_id>] \
+    [--mailnotification <always|failure|never>] [--dry-run|--execute]
+
+Defaults:
+  --target pve
+  --mailnotification never
+  --dry-run
+USAGE
+      exit 0
+      ;;
+    *) echo "STOP: unknown arg: $1" >&2; exit 2;;
+  esac
+done
+
+case "$MAILNOTIFICATION" in
+  always|failure|never) ;;
+  *)
+    echo "STOP: --mailnotification must be one of: always, failure, never" >&2
+    exit 2
+    ;;
+esac
+
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_TARGETS_FILE")"
+DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_TARGETS_FILE")"
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_TARGETS_FILE")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_TARGETS_FILE")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 6' "$SSH_TARGETS_FILE")"
+
+SSH_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_TARGETS_FILE" | head -n1)"
+SSH_USER="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"root\"" "$SSH_TARGETS_FILE" | head -n1)"
+SSH_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // ${DEF_PORT}" "$SSH_TARGETS_FILE" | head -n1)"
+SSH_TO="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .connect_timeout_sec // ${DEF_TO}" "$SSH_TARGETS_FILE" | head -n1)"
+
+if [[ -z "$SSH_HOST" || "$SSH_HOST" == "null" ]]; then
+  echo "STOP: unknown ssh target id: $TARGET_ID" >&2
+  exit 2
+fi
+
+ssh_opts=(
+  -n
+  -o "ConnectTimeout=$SSH_TO"
+  -o "StrictHostKeyChecking=$DEF_STRICT"
+  -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+  -o "NumberOfPasswordPrompts=0"
+  -o "LogLevel=ERROR"
+  -p "$SSH_PORT"
+)
+if [[ "$DEF_BATCH" == "true" ]]; then
+  ssh_opts+=(-o "BatchMode=yes")
+fi
+
+REMOTE_SCRIPT='
+set -euo pipefail
+
+JOB_ID="$1"
+MAILNOTIFICATION="$2"
+MODE="$3"
+
+CFG="/etc/pve/jobs.cfg"
+if [[ ! -f "$CFG" ]]; then
+  echo "STOP: missing $CFG" >&2
+  exit 2
+fi
+
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+bkp="${CFG}.bak.${ts}"
+tmp="/tmp/jobs.cfg.${ts}.$$"
+
+cp -a "$CFG" "$tmp"
+
+UPDATED_JOBS="$(
+python3 - "$tmp" "$JOB_ID" "$MAILNOTIFICATION" <<'"'"'PY'"'"'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+job_filter = sys.argv[2].strip()
+mailnotification = sys.argv[3].strip()
+
+text = path.read_text(encoding="utf-8")
+lines = text.splitlines(True)
+
+header_re = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+
+out = []
+i = 0
+updated = []
+
+while i < len(lines):
+    line = lines[i]
+    is_header = (not line.startswith((" ", "\t")))
+    match = header_re.match(line.rstrip("\n")) if is_header else None
+    if not match:
+        out.append(line)
+        i += 1
+        continue
+
+    section = match.group(1)
+    section_id = match.group(2).strip()
+    block = [line]
+    i += 1
+    while i < len(lines):
+        nxt = lines[i]
+        nxt_is_header = (not nxt.startswith((" ", "\t")))
+        if nxt_is_header and header_re.match(nxt.rstrip("\n")):
+            break
+        block.append(nxt)
+        i += 1
+
+    if section != "vzdump":
+        out.extend(block)
+        continue
+
+    target = not job_filter or section_id == job_filter
+    if not target:
+        out.extend(block)
+        continue
+
+    body = block[1:]
+    replaced = False
+    indent = "    "
+    rewritten = [block[0]]
+    for raw in body:
+        stripped = raw.lstrip()
+        if stripped.startswith("mailnotification "):
+            prefix = raw[: len(raw) - len(stripped)]
+            if prefix:
+                indent = prefix
+            rewritten.append(f"{indent}mailnotification {mailnotification}\n")
+            replaced = True
+        else:
+            rewritten.append(raw)
+
+    if not replaced:
+        rewritten.insert(1, f"{indent}mailnotification {mailnotification}\n")
+
+    updated.append(section_id)
+    out.extend(rewritten)
+
+if job_filter and job_filter not in updated:
+    raise SystemExit(f"STOP: vzdump job {job_filter} not found")
+if not updated:
+    raise SystemExit("STOP: no vzdump jobs found in jobs.cfg")
+
+path.write_text("".join(out), encoding="utf-8")
+print("\n".join(updated))
+PY
+)"
+
+echo "backup.vzdump.mail.policy.set"
+echo "mode: $MODE"
+echo "mailnotification: $MAILNOTIFICATION"
+echo "updated_jobs:"
+while IFS= read -r job; do
+  [[ -n "$job" ]] || continue
+  echo "  - $job"
+done <<< "$UPDATED_JOBS"
+
+if [[ "$MODE" == "dry-run" ]]; then
+  echo
+  echo "DRY-RUN: showing diff only; not writing."
+  diff -u "$CFG" "$tmp" || true
+  rm -f "$tmp"
+  exit 0
+fi
+
+cp -a "$CFG" "$bkp"
+echo "backup: $bkp"
+
+cp -a "$tmp" "$CFG"
+rm -f "$tmp"
+sync
+echo "updated: $CFG"
+'
+
+echo "backup.vzdump.mail.policy.set (remote)"
+ssh "${ssh_opts[@]}" "${SSH_USER}@${SSH_HOST}" \
+  "bash -lc $(printf "%q" "$REMOTE_SCRIPT") -- $(printf "%q" "$JOB_ID") $(printf "%q" "$MAILNOTIFICATION") $(printf "%q" "$MODE")"

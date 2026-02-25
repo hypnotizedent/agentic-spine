@@ -17,5 +17,10 @@ Canonical domain document moved to:
 
 Spine retains this pointer stub only.
 
+Related backup governance artifacts maintained in spine:
+- `docs/governance/STALWART_BACKUP_RESTORE.md`
+- `docs/governance/FINANCE_STACK_BACKUP_RESTORE.md`
+- `docs/governance/BACKUP_ONBOARDING.md`
+
 Legacy parity reconciliation (P1 Wave-2B) is recorded in:
 `docs/governance/P1_GOVERNANCE_PARITY_RECONCILIATION_20260217.md`.
