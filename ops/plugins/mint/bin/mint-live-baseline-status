@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# mint-live-baseline-status - Enforce "live modules first" baseline before auth extraction.
+#
+# Read-only status surface:
+#   - live_health_green: mint.modules.health status line must be OK
+#   - contract_parity_green: D222 + mint quoteflow + mint no-legacy guard must pass
+#   - agent_smoke_green: mint.runtime.proof must pass
+#   - queue_marker_green: execution queue must explicitly block EQ-1 by D225
+#
+# Usage:
+#   mint-live-baseline-status
+#   mint-live-baseline-status --strict
+#
+# Exit codes:
+#   0 = all green (or non-strict mode with red checks)
+#   1 = one or more checks red (strict mode)
+#   2 = precondition/configuration failure
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+CONTRACT="$SPINE_ROOT/ops/bindings/mint.module.sequence.contract.yaml"
+MINT_MODULES_ROOT="${MINT_MODULES_ROOT:-$HOME/code/mint-modules}"
+
+STRICT=0
+if [[ "${1:-}" == "--strict" ]]; then
+  STRICT=1
+fi
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v rg >/dev/null 2>&1 || stop "missing dependency: rg"
+[[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+
+QUEUE_FILE="$(yq -r '.queue_contract.file // ""' "$CONTRACT")"
+[[ -n "$QUEUE_FILE" && "$QUEUE_FILE" != "null" ]] || stop "queue_contract.file missing in contract"
+[[ -f "$QUEUE_FILE" ]] || stop "queue file not found: $QUEUE_FILE"
+
+auth_state="$(yq -r '.auth_module.state // ""' "$CONTRACT")"
+blocked_gate="$(yq -r '.auth_module.blocked_by_gate // ""' "$CONTRACT")"
+[[ "$auth_state" == "deferred" ]] || stop "auth_module.state must be deferred (actual=$auth_state)"
+[[ "$blocked_gate" == "D225" ]] || stop "auth_module.blocked_by_gate must be D225 (actual=$blocked_gate)"
+
+for prereq in live_health_green contract_parity_green agent_smoke_green; do
+  if ! yq -e ".prerequisites.$prereq" "$CONTRACT" >/dev/null 2>&1; then
+    stop "missing prerequisite in contract: $prereq"
+  fi
+done
+
+run_and_capture() {
+  local outfile="$1"
+  shift
+  set +e
+  "$@" >"$outfile" 2>&1
+  local rc=$?
+  set -e
+  return "$rc"
+}
+
+report_row() {
+  printf "%-24s %-8s %s\n" "$1" "$2" "$3"
+}
+
+overall_red=0
+
+echo "mint.live.baseline.status"
+echo "contract: $CONTRACT"
+echo "queue: $QUEUE_FILE"
+echo
+printf "%-24s %-8s %s\n" "CHECK" "STATE" "DETAIL"
+
+# 1) live_health_green
+tmp_live="$(mktemp)"
+if run_and_capture "$tmp_live" "$SPINE_ROOT/ops/plugins/mint/bin/modules-health"; then
+  if rg -q '^status: OK' "$tmp_live"; then
+    report_row "live_health_green" "GREEN" "mint.modules.health status OK"
+  else
+    detail="$(rg '^status:' "$tmp_live" | tail -n1 || true)"
+    report_row "live_health_green" "RED" "${detail:-status line missing}"
+    overall_red=1
+  fi
+else
+  report_row "live_health_green" "RED" "mint.modules.health execution failed"
+  overall_red=1
+fi
+rm -f "$tmp_live"
+
+# 2) contract_parity_green
+parity_red=0
+tmp_d222="$(mktemp)"
+if run_and_capture "$tmp_d222" "$SPINE_ROOT/surfaces/verify/d222-quote-alert-provider-boundary-lock.sh"; then
+  :
+else
+  parity_red=1
+fi
+rm -f "$tmp_d222"
+
+tmp_quote="$(mktemp)"
+if run_and_capture "$tmp_quote" "$MINT_MODULES_ROOT/scripts/guard/quoteflow-baseline-lock.sh" "$MINT_MODULES_ROOT"; then
+  :
+else
+  parity_red=1
+fi
+rm -f "$tmp_quote"
+
+tmp_legacy="$(mktemp)"
+if run_and_capture "$tmp_legacy" bash "$MINT_MODULES_ROOT/scripts/guard/no-legacy-coupling.sh"; then
+  :
+else
+  parity_red=1
+fi
+rm -f "$tmp_legacy"
+
+if [[ "$parity_red" -eq 0 ]]; then
+  report_row "contract_parity_green" "GREEN" "D222 + mint guards pass"
+else
+  report_row "contract_parity_green" "RED" "one or more parity checks failed"
+  overall_red=1
+fi
+
+# 3) agent_smoke_green
+tmp_smoke="$(mktemp)"
+if run_and_capture "$tmp_smoke" "$SPINE_ROOT/ops/plugins/mint/bin/runtime-proof"; then
+  if rg -q '^status: OK' "$tmp_smoke"; then
+    report_row "agent_smoke_green" "GREEN" "mint.runtime.proof status OK"
+  else
+    detail="$(rg '^status:' "$tmp_smoke" | tail -n1 || true)"
+    report_row "agent_smoke_green" "RED" "${detail:-status line missing}"
+    overall_red=1
+  fi
+else
+  report_row "agent_smoke_green" "RED" "mint.runtime.proof failed"
+  overall_red=1
+fi
+rm -f "$tmp_smoke"
+
+# 4) queue marker alignment
+if rg -q 'BLOCKED_BY_D225' "$QUEUE_FILE" && rg -q 'AUTH_DEFERRED_UNTIL_LIVE_BASELINE' "$QUEUE_FILE"; then
+  report_row "queue_marker_green" "GREEN" "EQ-1 auth queue markers present"
+else
+  report_row "queue_marker_green" "RED" "missing BLOCKED_BY_D225/AUTH_DEFERRED_UNTIL_LIVE_BASELINE markers"
+  overall_red=1
+fi
+
+echo
+if [[ "$overall_red" -eq 0 ]]; then
+  echo "status: OK (live modules baseline is green; auth can be considered)"
+  exit 0
+fi
+
+echo "status: FAIL (live baseline is red; auth remains blocked)"
+if [[ "$STRICT" -eq 1 ]]; then
+  exit 1
+fi
+exit 0

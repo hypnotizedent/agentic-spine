@@ -47,6 +47,9 @@ if transactional.get("customer_notifications_canonical_provider") != "resend":
     violations.append(
         "transactional.customer_notifications_canonical_provider must be resend"
     )
+expected_sender = str(transactional.get("default_sender_email") or "").strip().lower()
+if not expected_sender:
+    violations.append("transactional.default_sender_email must be set")
 
 providers = providers_doc.get("providers", {})
 microsoft_mode = (providers.get("microsoft") or {}).get("execution_mode")
@@ -128,9 +131,9 @@ else:
                 violations.append(
                     f"workflow {workflow_id} must not route quote alerts through Stalwart/spine domains"
                 )
-            if "noreply@mintprints.co" not in blob:
+            if expected_sender and expected_sender not in blob:
                 violations.append(
-                    f"workflow {workflow_id} must use noreply@mintprints.co sender"
+                    f"workflow {workflow_id} must use sender {expected_sender}"
                 )
 
             node_types = [str(node.get("type", "")) for node in nodes if isinstance(node, dict)]
