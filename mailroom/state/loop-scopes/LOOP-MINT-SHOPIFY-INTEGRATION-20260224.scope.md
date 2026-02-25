@@ -43,14 +43,14 @@ do not satisfy the gap (execution phases P1-P5 remain).
 | Normalized intake schema | `shopify-module/schema/mint-intake-normalized.schema.json` |
 | Sample webhook fixture | `shopify-module/fixtures/sample-order-webhook.json` |
 | Sample normalized output | `shopify-module/fixtures/sample-normalized-intake.json` |
-| Module skeleton (Express) | `shopify-module/src/` (all routes return 501) |
+| Module skeleton (Express) | `shopify-module/src/` (Shopify API routes return 501; /health returns 200) |
 | Dockerfile + compose | `shopify-module/Dockerfile`, `docker-compose.yml` |
 
 ### Audit Summary
 
 - **34 Shopify-related files** found across agentic-spine (integration registry, gap, loop, domain migration docs, soak checks, secrets namespace)
 - **0 files** in mint-modules before this work
-- **10 files** in workbench (legacy SSOT, token script, MCP inventory, authority doc)
+- **13 files** in workbench (legacy SSOT, token script, MCP inventory, authority doc, scripts registry, NAS inventory, archive refs)
 - Legacy OAuth routes in mint-os: `routes/shopify.cjs` (working but not in mint-modules)
 - Shopify credentials in Infisical at `/spine/integrations/commerce-mail` (6 keys)
 
