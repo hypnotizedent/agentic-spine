@@ -53,6 +53,11 @@
 - `communications.delivery.anomaly.status`
 - `communications.delivery.anomaly.dispatch`
 - `communications.alerts.flush`
+- `communications.alerts.dispatcher.start`
+- `communications.alerts.dispatcher.status`
+- `communications.alerts.dispatcher.stop`
+- `communications.alerts.dispatcher.worker.once`
+- `communications.alerts.deadletter.replay`
 - `communications.alerts.queue.status`
 - `communications.alerts.queue.slo.status`
 - `communications.alerts.queue.escalate`
@@ -65,18 +70,21 @@ Standard operator triage flow when investigating communications health:
 
 1. **Check watcher/status line**: Run `./bin/ops status` or `./bin/ops cap run spine.watcher.status` and look for the `CommsQueue:` line. If it shows `ok`, no action needed.
 2. **Drill into runtime status**: `./bin/ops cap run communications.alerts.runtime.status` (or `--json` for machine-readable). Review pending count, SLO status, escalation state, and delivery summary.
-3. **Escalate (manual)**: If status is `incident`, run `echo "yes" | ./bin/ops cap run communications.alerts.queue.escalate --execute` to create governed escalation artifacts.
-4. **Flush (manual)**: Run `echo "yes" | ./bin/ops cap run communications.alerts.flush --limit 10` to send pending intents. This is a manual approval boundary.
-5. **Verify delivery**: Run `./bin/ops cap run communications.delivery.log --limit 10` to confirm sends landed.
+3. **Ensure dispatcher is running**: `./bin/ops cap run communications.alerts.dispatcher.status` and, if needed, `echo "yes" | ./bin/ops cap run communications.alerts.dispatcher.start`.
+4. **Escalate (manual)**: If status is `incident`, run `echo "yes" | ./bin/ops cap run communications.alerts.queue.escalate --execute` to create governed escalation artifacts.
+5. **Break-glass flush (manual)**: Run `echo "yes" | ./bin/ops cap run communications.alerts.flush --limit 10` only when immediate manual intervention is required.
+6. **Replay dead-letter (manual)**: Run `echo "yes" | ./bin/ops cap run communications.alerts.deadletter.replay --limit 10` after root cause is fixed.
+7. **Verify delivery**: Run `./bin/ops cap run communications.delivery.log --limit 10` to confirm sends landed.
 
 ## Alert Intent Queue Triage
 
 Operator workflow for alert-intent queue health:
 
 1. **Probe**: `alerting.dispatch` writes intents to `mailroom/outbox/alerts/email-intents/`
-2. **Status**: `communications.alerts.queue.status` shows pending/sent/failed counts and ages
-3. **SLO**: `communications.alerts.queue.slo.status` evaluates queue against SLO thresholds (ok/warn/incident)
-4. **Flush**: `communications.alerts.flush` sends pending intents (manual approval boundary)
+2. **Dispatcher**: `communications.alerts.dispatcher.start` keeps queue draining automatically.
+3. **Status**: `communications.alerts.queue.status` shows pending/retry/dead-letter counts and ages.
+4. **SLO**: `communications.alerts.queue.slo.status` evaluates queue against SLO thresholds (ok/warn/incident).
+5. **Break-glass + replay**: `communications.alerts.flush` is manual override; `communications.alerts.deadletter.replay` requeues failed dead-letter intents after root cause fix.
 
 SLO contract: `ops/bindings/communications.alerts.queue.contract.yaml`
 
@@ -113,21 +121,36 @@ This writes:
 
 The escalation has cooldown-based dedupe (default 1800s). Repeated runs within the cooldown window for the same fingerprint are no-ops.
 
-### Step 4: Flush pending intents (manual)
+### Step 4: Ensure dispatcher is active
+
+```bash
+./bin/ops cap run communications.alerts.dispatcher.status
+echo "yes" | ./bin/ops cap run communications.alerts.dispatcher.start
+```
+
+Dispatcher continuously drains pending intents in bounded batches.
+
+### Step 5: Break-glass flush pending intents (manual)
 
 ```bash
 echo "yes" | ./bin/ops cap run communications.alerts.flush --limit 10
 ```
 
-This sends real email. Manual approval boundary is preserved.
+Use this only for immediate manual intervention.
 
-### Step 5: Verify delivery
+### Step 6: Replay dead-letter after root cause fix
+
+```bash
+echo "yes" | ./bin/ops cap run communications.alerts.deadletter.replay --limit 10
+```
+
+### Step 7: Verify delivery
 
 ```bash
 ./bin/ops cap run communications.delivery.log --limit 10
 ```
 
-### Step 6: Root-cause follow-up
+### Step 8: Root-cause follow-up
 
 Investigate backlog cause:
 - Provider issues: `./bin/ops cap run communications.provider.status`

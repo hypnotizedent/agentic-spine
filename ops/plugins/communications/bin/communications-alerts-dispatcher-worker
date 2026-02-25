@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# communications-alerts-dispatcher-worker — autonomous dispatcher loop for
+# alert email intents. Runs communications-alerts-flush in bounded batches.
+#
+# Safety: mutating
+# Approval: manual (start/stop are manual capability boundaries)
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+QUEUE_CONTRACT="${COMMUNICATIONS_ALERTS_QUEUE_CONTRACT:-$ROOT/ops/bindings/communications.alerts.queue.contract.yaml}"
+FLUSH_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-flush"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+MODE="once"
+JSON=0
+POLL_OVERRIDE=""
+BATCH_OVERRIDE=""
+WORKER_ID="alerts-dispatcher"
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-alerts-dispatcher-worker [--once|--foreground] [options]
+
+Modes:
+  --once                Run one dispatcher tick (default)
+  --foreground          Run continuously in foreground
+
+Options:
+  --poll-seconds <n>    Override poll interval
+  --batch-limit <n>     Override flush batch limit per tick
+  --worker-id <id>      Worker identifier in heartbeat
+  --json                Emit JSON envelope
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --once)
+      MODE="once"
+      shift
+      ;;
+    --foreground)
+      MODE="foreground"
+      shift
+      ;;
+    --poll-seconds)
+      POLL_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --batch-limit)
+      BATCH_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --worker-id)
+      WORKER_ID="${2:-alerts-dispatcher}"
+      shift 2
+      ;;
+    --json)
+      JSON=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: missing dependency: python3" >&2; exit 1; }
+[[ -f "$QUEUE_CONTRACT" ]] || { echo "ERROR: missing queue contract: $QUEUE_CONTRACT" >&2; exit 1; }
+[[ -x "$FLUSH_BIN" ]] || { echo "ERROR: missing flush script: $FLUSH_BIN" >&2; exit 1; }
+
+expand_path() {
+  local p="$1"
+  p="${p//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+  echo "$p"
+}
+
+pid_running() {
+  local pid="$1"
+  [[ -n "$pid" && "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1
+}
+
+dispatcher_enabled="$(yq -r '.dispatcher.enabled // true' "$QUEUE_CONTRACT")"
+poll_seconds="$(yq -r '.dispatcher.poll_interval_seconds // 60' "$QUEUE_CONTRACT")"
+batch_limit="$(yq -r '.dispatcher.batch_limit // 10' "$QUEUE_CONTRACT")"
+pid_file_raw="$(yq -r '.dispatcher.pid_file // "$SPINE_OUTBOX/communications/.alerts-dispatcher.pid"' "$QUEUE_CONTRACT")"
+heartbeat_file_raw="$(yq -r '.dispatcher.heartbeat_file // "$SPINE_OUTBOX/communications/alerts-dispatcher-heartbeat.json"' "$QUEUE_CONTRACT")"
+log_file_raw="$(yq -r '.dispatcher.log_file // "$SPINE_OUTBOX/communications/alerts-dispatcher.log"' "$QUEUE_CONTRACT")"
+
+[[ -n "$POLL_OVERRIDE" ]] && poll_seconds="$POLL_OVERRIDE"
+[[ -n "$BATCH_OVERRIDE" ]] && batch_limit="$BATCH_OVERRIDE"
+
+[[ "$poll_seconds" =~ ^[0-9]+$ ]] || { echo "ERROR: poll_seconds must be numeric" >&2; exit 2; }
+[[ "$batch_limit" =~ ^[0-9]+$ ]] || { echo "ERROR: batch_limit must be numeric" >&2; exit 2; }
+(( poll_seconds > 0 )) || { echo "ERROR: poll_seconds must be > 0" >&2; exit 2; }
+(( batch_limit > 0 )) || { echo "ERROR: batch_limit must be > 0" >&2; exit 2; }
+
+PID_FILE="$(expand_path "$pid_file_raw")"
+HEARTBEAT_FILE="$(expand_path "$heartbeat_file_raw")"
+LOG_FILE="$(expand_path "$log_file_raw")"
+
+mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$HEARTBEAT_FILE")" "$(dirname "$LOG_FILE")"
+
+write_heartbeat() {
+  local tick_status="$1"
+  local flush_json="$2"
+  local error_text="$3"
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  local pending eligible processed flushed failed dead_lettered deferred
+  pending="$(echo "$flush_json" | jq -r '.data.pending // 0' 2>/dev/null || echo 0)"
+  eligible="$(echo "$flush_json" | jq -r '.data.eligible // 0' 2>/dev/null || echo 0)"
+  processed="$(echo "$flush_json" | jq -r '.data.processed // 0' 2>/dev/null || echo 0)"
+  flushed="$(echo "$flush_json" | jq -r '.data.flushed // 0' 2>/dev/null || echo 0)"
+  failed="$(echo "$flush_json" | jq -r '.data.failed // 0' 2>/dev/null || echo 0)"
+  dead_lettered="$(echo "$flush_json" | jq -r '.data.dead_lettered // 0' 2>/dev/null || echo 0)"
+  deferred="$(echo "$flush_json" | jq -r '.data.deferred // 0' 2>/dev/null || echo 0)"
+
+  tmp_file="${HEARTBEAT_FILE}.tmp.$$"
+  jq -n \
+    --arg capability "communications.alerts.dispatcher.worker" \
+    --arg worker_id "$WORKER_ID" \
+    --arg generated_at "$now" \
+    --arg status "$tick_status" \
+    --arg pid "$$" \
+    --arg log_file "$LOG_FILE" \
+    --argjson poll_seconds "$poll_seconds" \
+    --argjson batch_limit "$batch_limit" \
+    --argjson pending "$pending" \
+    --argjson eligible "$eligible" \
+    --argjson processed "$processed" \
+    --argjson flushed "$flushed" \
+    --argjson failed "$failed" \
+    --argjson dead_lettered "$dead_lettered" \
+    --argjson deferred "$deferred" \
+    --arg error_text "$error_text" \
+    '{
+      capability: $capability,
+      worker_id: $worker_id,
+      generated_at: $generated_at,
+      status: $status,
+      pid: ($pid | tonumber),
+      config: {
+        poll_seconds: $poll_seconds,
+        batch_limit: $batch_limit,
+        log_file: $log_file
+      },
+      last_tick: {
+        pending: $pending,
+        eligible: $eligible,
+        processed: $processed,
+        flushed: $flushed,
+        failed: $failed,
+        dead_lettered: $dead_lettered,
+        deferred: $deferred
+      },
+      error: (if ($error_text | length) > 0 then $error_text else null end)
+    }' > "$tmp_file"
+  mv "$tmp_file" "$HEARTBEAT_FILE"
+}
+
+flush_once() {
+  local out rc
+  set +e
+  out="$($FLUSH_BIN --limit "$batch_limit" --json 2>&1)"
+  rc=$?
+  set -e
+
+  if [[ "$rc" -ne 0 ]]; then
+    echo "$out"
+    return "$rc"
+  fi
+
+  if ! echo "$out" | jq -e '.capability == "communications.alerts.flush" and .status == "ok"' >/dev/null 2>&1; then
+    echo "$out"
+    return 1
+  fi
+
+  echo "$out"
+}
+
+emit_tick_result() {
+  local tick_status="$1"
+  local flush_json="$2"
+  local error_text="$3"
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ "$JSON" -eq 1 ]]; then
+    jq -n \
+      --arg capability "communications.alerts.dispatcher.worker.once" \
+      --arg status "$tick_status" \
+      --arg generated_at "$now" \
+      --arg worker_id "$WORKER_ID" \
+      --arg pid_file "$PID_FILE" \
+      --arg heartbeat_file "$HEARTBEAT_FILE" \
+      --arg log_file "$LOG_FILE" \
+      --argjson poll_seconds "$poll_seconds" \
+      --argjson batch_limit "$batch_limit" \
+      --argjson flush "$flush_json" \
+      --arg error_text "$error_text" \
+      '{
+        capability: $capability,
+        status: $status,
+        generated_at: $generated_at,
+        data: {
+          worker_id: $worker_id,
+          pid_file: $pid_file,
+          heartbeat_file: $heartbeat_file,
+          log_file: $log_file,
+          poll_seconds: $poll_seconds,
+          batch_limit: $batch_limit,
+          flush: $flush
+        }
+      } + (if ($error_text | length) > 0 then {error:{message:$error_text}} else {} end)'
+    return
+  fi
+
+  pending="$(echo "$flush_json" | jq -r '.data.pending // 0' 2>/dev/null || echo 0)"
+  processed="$(echo "$flush_json" | jq -r '.data.processed // 0' 2>/dev/null || echo 0)"
+  flushed="$(echo "$flush_json" | jq -r '.data.flushed // 0' 2>/dev/null || echo 0)"
+  failed="$(echo "$flush_json" | jq -r '.data.failed // 0' 2>/dev/null || echo 0)"
+  dead_lettered="$(echo "$flush_json" | jq -r '.data.dead_lettered // 0' 2>/dev/null || echo 0)"
+
+  echo "communications.alerts.dispatcher.worker.once"
+  echo "status: $tick_status"
+  echo "pending: $pending"
+  echo "processed: $processed"
+  echo "flushed: $flushed"
+  echo "failed: $failed"
+  echo "dead_lettered: $dead_lettered"
+  echo "heartbeat_file: $HEARTBEAT_FILE"
+  if [[ -n "$error_text" ]]; then
+    echo "error: $error_text"
+  fi
+}
+
+run_tick() {
+  local flush_json tick_status error_text
+  tick_status="ok"
+  error_text=""
+  flush_json='{}'
+
+  if ! flush_json="$(flush_once)"; then
+    tick_status="error"
+    error_text="$flush_json"
+    flush_json='{}'
+  fi
+
+  write_heartbeat "$tick_status" "$flush_json" "$error_text"
+
+  if [[ "$MODE" == "once" ]]; then
+    emit_tick_result "$tick_status" "$flush_json" "$error_text"
+  else
+    processed="$(echo "$flush_json" | jq -r '.data.processed // 0' 2>/dev/null || echo 0)"
+    flushed="$(echo "$flush_json" | jq -r '.data.flushed // 0' 2>/dev/null || echo 0)"
+    failed="$(echo "$flush_json" | jq -r '.data.failed // 0' 2>/dev/null || echo 0)"
+    dead_lettered="$(echo "$flush_json" | jq -r '.data.dead_lettered // 0' 2>/dev/null || echo 0)"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) tick status=$tick_status processed=$processed flushed=$flushed failed=$failed dead_lettered=$dead_lettered" >> "$LOG_FILE"
+    if [[ -n "$error_text" ]]; then
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) tick_error=$error_text" >> "$LOG_FILE"
+    fi
+  fi
+
+  if [[ "$tick_status" == "error" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+cleanup() {
+  if [[ -f "$PID_FILE" ]]; then
+    existing_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ "$existing_pid" == "$$" ]]; then
+      rm -f "$PID_FILE"
+    fi
+  fi
+}
+
+shutdown_requested=0
+on_signal() {
+  shutdown_requested=1
+}
+
+if [[ "$dispatcher_enabled" != "true" ]]; then
+  echo "ERROR: dispatcher.enabled is false in contract" >&2
+  exit 2
+fi
+
+if [[ "$MODE" == "once" ]]; then
+  run_tick
+  exit 0
+fi
+
+existing_pid=""
+if [[ -f "$PID_FILE" ]]; then
+  existing_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+fi
+if pid_running "$existing_pid"; then
+  echo "ERROR: dispatcher worker already running (pid=$existing_pid)" >&2
+  exit 2
+fi
+
+printf '%s\n' "$$" > "$PID_FILE"
+trap on_signal INT TERM
+trap cleanup EXIT
+
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) dispatcher_start worker_id=$WORKER_ID pid=$$ poll_seconds=$poll_seconds batch_limit=$batch_limit" >> "$LOG_FILE"
+
+while [[ "$shutdown_requested" -eq 0 ]]; do
+  run_tick || true
+  remaining="$poll_seconds"
+  while [[ "$shutdown_requested" -eq 0 && "$remaining" -gt 0 ]]; do
+    sleep 1 || true
+    remaining=$((remaining - 1))
+  done
+done
+
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) dispatcher_stop worker_id=$WORKER_ID pid=$$" >> "$LOG_FILE"

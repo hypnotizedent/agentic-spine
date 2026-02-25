@@ -8,7 +8,7 @@ set -euo pipefail
 # Approval: manual (preserves external-send approval boundary)
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
-DELIVERY_CONTRACT="${COMMUNICATIONS_DELIVERY_CONTRACT:-$ROOT/ops/bindings/communications.delivery.contract.yaml}"
+QUEUE_CONTRACT="${COMMUNICATIONS_ALERTS_QUEUE_CONTRACT:-$ROOT/ops/bindings/communications.alerts.queue.contract.yaml}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
@@ -24,10 +24,11 @@ Usage: communications-alerts-flush [--limit <n>] [--json]
 
 Reads pending email intent artifacts from mailroom/outbox/alerts/email-intents/,
 runs communications.send.preview then communications.send.execute --execute for
-each, logs delivery, and marks intent as sent.
+each eligible intent, applies retry/backoff policy, and dead-letters exhausted
+intents.
 
 Options:
-  --limit <n>    Process at most N intents (0 = all pending, default: 0)
+  --limit <n>    Process at most N eligible intents (0 = all eligible, default: 0)
   --json         Emit JSON summary
 USAGE
 }
@@ -46,50 +47,137 @@ done
 
 command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: missing dependency: python3" >&2; exit 1; }
 [[ -x "$PREVIEW_BIN" ]] || { echo "ERROR: missing preview script: $PREVIEW_BIN" >&2; exit 1; }
 [[ -x "$EXECUTE_BIN" ]] || { echo "ERROR: missing execute script: $EXECUTE_BIN" >&2; exit 1; }
+[[ -f "$QUEUE_CONTRACT" ]] || { echo "ERROR: missing queue contract: $QUEUE_CONTRACT" >&2; exit 1; }
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "ERROR: --limit must be numeric" >&2; exit 2; }
 
-if [[ ! -d "$INTENT_DIR" ]]; then
-  if [[ "$JSON" -eq 1 ]]; then
-    jq -n --arg cap "communications.alerts.flush" --arg status "ok" \
-      '{capability:$cap,status:$status,data:{pending:0,flushed:0,failed:0,skipped:0,results:[]}}'
-  else
-    echo "communications.alerts.flush"
-    echo "pending: 0"
-    echo "flushed: 0"
-    echo "No intent directory found."
-  fi
-  exit 0
+retry_enabled="$(yq -r '.retry_policy.enabled // true' "$QUEUE_CONTRACT")"
+max_attempts="$(yq -r '.retry_policy.max_attempts // 5' "$QUEUE_CONTRACT")"
+base_delay="$(yq -r '.retry_policy.base_delay_seconds // 60' "$QUEUE_CONTRACT")"
+max_delay="$(yq -r '.retry_policy.max_delay_seconds // 3600' "$QUEUE_CONTRACT")"
+backoff_multiplier="$(yq -r '.retry_policy.backoff_multiplier // 2' "$QUEUE_CONTRACT")"
+dead_letter_dir_raw="$(yq -r '.retry_policy.dead_letter_dir // "$SPINE_OUTBOX/alerts/email-intents-dead-letter"' "$QUEUE_CONTRACT")"
+
+DEAD_LETTER_DIR="${dead_letter_dir_raw//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+mkdir -p "$INTENT_DIR" "$DEAD_LETTER_DIR"
+
+iso_to_epoch() {
+  local iso="$1"
+  python3 - "$iso" <<'PY'
+from datetime import datetime
+import sys
+
+raw = (sys.argv[1] or "").strip()
+if not raw:
+    print("")
+    raise SystemExit(0)
+try:
+    ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+except Exception:
+    print("")
+    raise SystemExit(0)
+print(int(ts.timestamp()))
+PY
+}
+
+epoch_to_iso() {
+  local epoch="$1"
+  python3 - "$epoch" <<'PY'
+from datetime import datetime, timezone
+import sys
+print(datetime.fromtimestamp(int(sys.argv[1]), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+calc_backoff_seconds() {
+  local attempt="$1"
+  local delay="$base_delay"
+  local i=1
+  while (( i < attempt )); do
+    delay=$(( delay * backoff_multiplier ))
+    if (( delay >= max_delay )); then
+      delay="$max_delay"
+      break
+    fi
+    i=$(( i + 1 ))
+  done
+  echo "$delay"
+}
+
+json_escape() {
+  printf '%s' "$1" | jq -Rs '.'
+}
+
+now_epoch="$(date +%s)"
+now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+eligible_files=()
+outstanding_count=0
+deferred_count=0
+
+if [[ -d "$INTENT_DIR" ]]; then
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    flush_status="$(yq -r '.flush_status // "pending"' "$f" 2>/dev/null || echo "pending")"
+
+    case "$flush_status" in
+      sent|dead-letter)
+        continue
+        ;;
+      retry_scheduled)
+        outstanding_count=$((outstanding_count + 1))
+        next_retry_at="$(yq -r '.next_retry_at // ""' "$f" 2>/dev/null || echo "")"
+        if [[ -n "$next_retry_at" ]]; then
+          next_retry_epoch="$(iso_to_epoch "$next_retry_at")"
+          if [[ -n "$next_retry_epoch" && "$next_retry_epoch" =~ ^[0-9]+$ && "$next_retry_epoch" -gt "$now_epoch" ]]; then
+            deferred_count=$((deferred_count + 1))
+            continue
+          fi
+        fi
+        eligible_files+=("$f")
+        ;;
+      *)
+        outstanding_count=$((outstanding_count + 1))
+        eligible_files+=("$f")
+        ;;
+    esac
+  done < <(find "$INTENT_DIR" -name '*.yaml' -type f 2>/dev/null | sort)
 fi
 
-# Gather pending intents
-pending_files=()
-while IFS= read -r f; do
-  [[ -n "$f" ]] || continue
-  flush_status="$(yq -r '.flush_status // "pending"' "$f" 2>/dev/null || echo "error")"
-  if [[ "$flush_status" == "pending" ]]; then
-    pending_files+=("$f")
-  fi
-done < <(find "$INTENT_DIR" -name '*.yaml' -type f 2>/dev/null | sort)
-
-total_pending="${#pending_files[@]}"
-if [[ "$LIMIT" -gt 0 && "$total_pending" -gt "$LIMIT" ]]; then
-  pending_files=("${pending_files[@]:0:$LIMIT}")
+eligible_count="${#eligible_files[@]}"
+selected_files=("${eligible_files[@]}")
+if [[ "$LIMIT" -gt 0 && "$eligible_count" -gt "$LIMIT" ]]; then
+  selected_files=("${eligible_files[@]:0:$LIMIT}")
 fi
+selected_count="${#selected_files[@]}"
 
 flushed=0
 failed=0
+dead_lettered=0
 skipped=0
 results=()
 
-for intent_file in "${pending_files[@]}"; do
+record_result() {
+  local payload="$1"
+  results+=("$payload")
+}
+
+for intent_file in "${selected_files[@]}"; do
   intent_id="$(yq -r '.intent_id // ""' "$intent_file")"
   domain_id="$(yq -r '.domain_id // ""' "$intent_file")"
   title="$(yq -r '.title // ""' "$intent_file")"
   summary="$(yq -r '.summary // ""' "$intent_file")"
   recipient="$(yq -r '.suggested_recipient // "alerts@spine.ronny.works"' "$intent_file")"
 
-  # Build email subject + body from alert intent
+  attempts_raw="$(yq -r '.attempts // 0' "$intent_file" 2>/dev/null || echo 0)"
+  if [[ ! "$attempts_raw" =~ ^[0-9]+$ ]]; then
+    attempts_raw=0
+  fi
+  attempt_num=$((attempts_raw + 1))
+  attempted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
   subject="[Spine Alert] ${title}"
   body="Domain: ${domain_id}
 Severity: $(yq -r '.severity // "unknown"' "$intent_file")
@@ -97,9 +185,12 @@ Summary: ${summary}
 Intent ID: ${intent_id}
 Created: $(yq -r '.created_at // ""' "$intent_file")"
 
-  # Step 1: Preview
+  failure_reason=""
   preview_output=""
-  if preview_output="$(
+  preview_id=""
+  send_allowed="false"
+
+  if preview_output="$((
     "$PREVIEW_BIN" \
       --channel email \
       --message-type custom \
@@ -107,94 +198,130 @@ Created: $(yq -r '.created_at // ""' "$intent_file")"
       --subject "$subject" \
       --body "$body" \
       --consent-state opted-in \
-      --json 2>&1
-  )"; then
+      --json
+  ) 2>&1)"; then
     preview_id="$(echo "$preview_output" | jq -r '.data.preview_id // ""' 2>/dev/null || echo "")"
     send_allowed="$(echo "$preview_output" | jq -r '.data.send_allowed // false' 2>/dev/null || echo "false")"
 
     if [[ -z "$preview_id" ]]; then
-      echo "WARN: preview returned no preview_id for intent $intent_id — skipping" >&2
-      skipped=$((skipped + 1))
-      results+=("$(jq -nc --arg id "$intent_id" --arg st "skipped" --arg err "no preview_id" '{intent_id:$id,status:$st,error:$err}')")
-      continue
-    fi
-
-    if [[ "$send_allowed" != "true" ]]; then
+      failure_reason="preview_missing_preview_id"
+    elif [[ "$send_allowed" != "true" ]]; then
       block_reasons="$(echo "$preview_output" | jq -r '.data.policy_block_reasons | join(",")' 2>/dev/null || echo "unknown")"
-      echo "WARN: send not allowed for intent $intent_id — $block_reasons — skipping" >&2
-      skipped=$((skipped + 1))
-      results+=("$(jq -nc --arg id "$intent_id" --arg st "blocked" --arg err "$block_reasons" '{intent_id:$id,status:$st,error:$err}')")
-      continue
-    fi
-
-    # Step 2: Execute
-    exec_output=""
-    if exec_output="$(
-      "$EXECUTE_BIN" \
-        --channel email \
-        --message-type custom \
-        --to "$recipient" \
-        --subject "$subject" \
-        --body "$body" \
-        --consent-state opted-in \
-        --preview-id "$preview_id" \
-        --execute \
-        --json 2>&1
-    )"; then
-      exec_status="$(echo "$exec_output" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")"
-      event_id="$(echo "$exec_output" | jq -r '.data.event_id // ""' 2>/dev/null || echo "")"
-
-      # Mark intent as sent
-      yq -i ".flush_status = \"sent\" | .flushed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" | .delivery_event_id = \"$event_id\"" "$intent_file"
-      flushed=$((flushed + 1))
-      results+=("$(jq -nc --arg id "$intent_id" --arg st "$exec_status" --arg eid "$event_id" '{intent_id:$id,status:$st,event_id:$eid}')")
+      failure_reason="policy_blocked:${block_reasons}"
     else
-      yq -i ".flush_status = \"failed\" | .flushed_at = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$intent_file"
-      failed=$((failed + 1))
-      results+=("$(jq -nc --arg id "$intent_id" --arg st "failed" --arg err "execute failed" '{intent_id:$id,status:$st,error:$err}')")
+      exec_output=""
+      if exec_output="$((
+        "$EXECUTE_BIN" \
+          --channel email \
+          --message-type custom \
+          --to "$recipient" \
+          --subject "$subject" \
+          --body "$body" \
+          --consent-state opted-in \
+          --preview-id "$preview_id" \
+          --execute \
+          --json
+      ) 2>&1)"; then
+        exec_status="$(echo "$exec_output" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")"
+        event_id="$(echo "$exec_output" | jq -r '.data.event_id // ""' 2>/dev/null || echo "")"
+
+        yq -i \
+          ".flush_status = \"sent\" | .flushed_at = \"$attempted_at\" | .delivery_event_id = \"$event_id\" | .attempts = $attempt_num | .last_attempt_at = \"$attempted_at\" | .last_error = \"\" | del(.next_retry_at, .retry_delay_seconds, .dead_lettered_at, .dead_letter_reason)" \
+          "$intent_file"
+
+        flushed=$((flushed + 1))
+        record_result "$(jq -nc --arg id "$intent_id" --arg st "$exec_status" --arg eid "$event_id" '{intent_id:$id,status:$st,event_id:$eid}')"
+        continue
+      else
+        failure_reason="execute_failed"
+      fi
     fi
   else
-    echo "WARN: preview failed for intent $intent_id — skipping" >&2
-    failed=$((failed + 1))
-    results+=("$(jq -nc --arg id "$intent_id" --arg st "failed" --arg err "preview failed" '{intent_id:$id,status:$st,error:$err}')")
+    failure_reason="preview_failed"
   fi
+
+  failed=$((failed + 1))
+  failure_json="$(json_escape "$failure_reason")"
+
+  if [[ "$retry_enabled" == "true" && "$attempt_num" -ge "$max_attempts" ]]; then
+    yq -i \
+      ".flush_status = \"dead-letter\" | .attempts = $attempt_num | .last_attempt_at = \"$attempted_at\" | .dead_lettered_at = \"$attempted_at\" | .dead_letter_reason = $failure_json | .last_error = $failure_json | del(.next_retry_at, .retry_delay_seconds)" \
+      "$intent_file"
+
+    dead_letter_target="$DEAD_LETTER_DIR/$(basename "$intent_file")"
+    mv "$intent_file" "$dead_letter_target"
+    dead_lettered=$((dead_lettered + 1))
+    record_result "$(jq -nc --arg id "$intent_id" --arg st "dead-letter" --arg err "$failure_reason" --arg path "$dead_letter_target" '{intent_id:$id,status:$st,error:$err,dead_letter_path:$path}')"
+    continue
+  fi
+
+  if [[ "$retry_enabled" == "true" ]]; then
+    retry_delay="$(calc_backoff_seconds "$attempt_num")"
+    next_retry_epoch=$(( $(date +%s) + retry_delay ))
+    next_retry_at="$(epoch_to_iso "$next_retry_epoch")"
+
+    yq -i \
+      ".flush_status = \"retry_scheduled\" | .attempts = $attempt_num | .last_attempt_at = \"$attempted_at\" | .next_retry_at = \"$next_retry_at\" | .retry_delay_seconds = $retry_delay | .last_error = $failure_json" \
+      "$intent_file"
+
+    record_result "$(jq -nc --arg id "$intent_id" --arg st "retry_scheduled" --arg err "$failure_reason" --arg next "$next_retry_at" --argjson delay "$retry_delay" '{intent_id:$id,status:$st,error:$err,next_retry_at:$next,retry_delay_seconds:$delay}')"
+  else
+    yq -i \
+      ".flush_status = \"failed\" | .attempts = $attempt_num | .last_attempt_at = \"$attempted_at\" | .last_error = $failure_json" \
+      "$intent_file"
+
+    record_result "$(jq -nc --arg id "$intent_id" --arg st "failed" --arg err "$failure_reason" '{intent_id:$id,status:$st,error:$err}')"
+  fi
+
 done
 
 results_json="[]"
-for r in "${results[@]+"${results[@]}"}"; do
+for r in "${results[@]+${results[@]}}"; do
   results_json="$(echo "$results_json" | jq -c --argjson item "$r" '. + [$item]')"
 done
 
 if [[ "$JSON" -eq 1 ]]; then
   jq -n \
-    --arg capability "communications.alerts.flush" \
+    --arg cap "communications.alerts.flush" \
     --arg status "ok" \
-    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --argjson pending "$total_pending" \
+    --arg generated_at "$now_iso" \
+    --argjson pending "$outstanding_count" \
+    --argjson eligible "$eligible_count" \
+    --argjson processed "$selected_count" \
     --argjson flushed "$flushed" \
     --argjson failed "$failed" \
+    --argjson dead_lettered "$dead_lettered" \
     --argjson skipped "$skipped" \
+    --argjson deferred "$deferred_count" \
     --argjson results "$results_json" \
     '{
-      capability: $capability,
-      status: $status,
-      generated_at: $generated_at,
-      data: {
-        pending: $pending,
-        flushed: $flushed,
-        failed: $failed,
-        skipped: $skipped,
-        results: $results
+      capability:$cap,
+      status:$status,
+      generated_at:$generated_at,
+      data:{
+        pending:$pending,
+        eligible:$eligible,
+        processed:$processed,
+        flushed:$flushed,
+        failed:$failed,
+        dead_lettered:$dead_lettered,
+        skipped:$skipped,
+        deferred:$deferred,
+        results:$results
       }
     }'
   exit 0
 fi
 
 echo "communications.alerts.flush"
-echo "pending: $total_pending"
+echo "pending: $outstanding_count"
+echo "eligible: $eligible_count"
+echo "processed: $selected_count"
 echo "flushed: $flushed"
 echo "failed: $failed"
+echo "dead_lettered: $dead_lettered"
+echo "deferred: $deferred_count"
 echo "skipped: $skipped"
-for r in "${results[@]+"${results[@]}"}"; do
-  echo "  $(echo "$r" | jq -r '[.intent_id, .status, (.event_id // .error // "")] | join(" ")')"
+for r in "${results[@]+${results[@]}}"; do
+  echo "  $(echo "$r" | jq -r '[.intent_id, .status, (.event_id // .next_retry_at // .dead_letter_path // .error // "")] | join(" ")')"
 done

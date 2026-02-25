@@ -10,6 +10,7 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 SLO_CONTRACT="${COMMUNICATIONS_ALERTS_QUEUE_CONTRACT:-$ROOT/ops/bindings/communications.alerts.queue.contract.yaml}"
 QUEUE_STATUS_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-queue-status"
+DISPATCHER_STATUS_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-dispatcher-status"
 JSON=0
 
 usage() {
@@ -21,7 +22,7 @@ Evaluates the alerting email intent queue against SLO thresholds.
 Returns:
   status: ok | warn | incident
   reasons: list of threshold violations
-  recommended_action: flush command if action needed
+  recommended_action: command for quickest remediation
 
 Options:
   --json    Emit JSON output
@@ -44,60 +45,94 @@ command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exi
 [[ -f "$SLO_CONTRACT" ]] || { echo "ERROR: missing SLO contract: $SLO_CONTRACT" >&2; exit 1; }
 [[ -x "$QUEUE_STATUS_BIN" ]] || { echo "ERROR: missing queue status script: $QUEUE_STATUS_BIN" >&2; exit 1; }
 
-# Load SLO thresholds
 warn_age="$(yq -r '.slo.warn_age_seconds // 3600' "$SLO_CONTRACT")"
 incident_age="$(yq -r '.slo.incident_age_seconds // 14400' "$SLO_CONTRACT")"
 max_pending_warn="$(yq -r '.slo.max_pending_warn // 50' "$SLO_CONTRACT")"
 max_pending_incident="$(yq -r '.slo.max_pending_incident // 200' "$SLO_CONTRACT")"
-flush_command="$(yq -r '.recommended_actions.flush_command // ""' "$SLO_CONTRACT")"
+dead_letter_warn="$(yq -r '.slo.dead_letter_warn // 1' "$SLO_CONTRACT")"
+dead_letter_incident="$(yq -r '.slo.dead_letter_incident // 10' "$SLO_CONTRACT")"
 
-# Get current queue status
-queue_json="$("$QUEUE_STATUS_BIN" --json 2>/dev/null)"
+dispatcher_enabled="$(yq -r '.dispatcher.enabled // true' "$SLO_CONTRACT")"
+flush_command="$(yq -r '.recommended_actions.flush_command // ""' "$SLO_CONTRACT")"
+dispatcher_start_command="$(yq -r '.recommended_actions.dispatcher_start_command // ""' "$SLO_CONTRACT")"
+replay_dead_letter_command="$(yq -r '.recommended_actions.replay_dead_letter_command // ""' "$SLO_CONTRACT")"
+
+queue_json="$($QUEUE_STATUS_BIN --json 2>/dev/null)"
 if [[ -z "$queue_json" ]] || ! echo "$queue_json" | jq -e '.' >/dev/null 2>&1; then
   echo "ERROR: failed to get queue status" >&2
   exit 1
 fi
 
 pending_count="$(echo "$queue_json" | jq -r '.data.pending_count // 0')"
+pending_ready_count="$(echo "$queue_json" | jq -r '.data.pending_ready_count // 0')"
 oldest_age="$(echo "$queue_json" | jq -r '.data.oldest_pending_age_seconds // 0')"
+dead_letter_count="$(echo "$queue_json" | jq -r '.data.dead_letter_count // 0')"
 
-# Evaluate SLO
+dispatcher_running="false"
+dispatcher_status="unknown"
+if [[ "$dispatcher_enabled" == "true" && -x "$DISPATCHER_STATUS_BIN" ]]; then
+  dispatcher_json="$($DISPATCHER_STATUS_BIN --json 2>/dev/null || echo '{}')"
+  if echo "$dispatcher_json" | jq -e '.' >/dev/null 2>&1; then
+    dispatcher_running="$(echo "$dispatcher_json" | jq -r '.data.running // false')"
+    dispatcher_status="$(echo "$dispatcher_json" | jq -r '.status // "unknown"')"
+  fi
+fi
+
 slo_status="ok"
 reasons_json="[]"
 
-# Check age thresholds
 if [[ "$oldest_age" -ge "$incident_age" ]]; then
   slo_status="incident"
-  reasons_json="$(echo "$reasons_json" | jq -c --argjson age "$oldest_age" --argjson threshold "$incident_age" \
-    '. + ["oldest_pending_age " + ($age|tostring) + "s >= incident_threshold " + ($threshold|tostring) + "s"]')"
+  reasons_json="$(echo "$reasons_json" | jq -c --argjson age "$oldest_age" --argjson threshold "$incident_age" '. + ["oldest_pending_age " + ($age|tostring) + "s >= incident_threshold " + ($threshold|tostring) + "s"]')"
 elif [[ "$oldest_age" -ge "$warn_age" ]]; then
   if [[ "$slo_status" != "incident" ]]; then
     slo_status="warn"
   fi
-  reasons_json="$(echo "$reasons_json" | jq -c --argjson age "$oldest_age" --argjson threshold "$warn_age" \
-    '. + ["oldest_pending_age " + ($age|tostring) + "s >= warn_threshold " + ($threshold|tostring) + "s"]')"
+  reasons_json="$(echo "$reasons_json" | jq -c --argjson age "$oldest_age" --argjson threshold "$warn_age" '. + ["oldest_pending_age " + ($age|tostring) + "s >= warn_threshold " + ($threshold|tostring) + "s"]')"
 fi
 
-# Check count thresholds
 if [[ "$pending_count" -ge "$max_pending_incident" ]]; then
   slo_status="incident"
-  reasons_json="$(echo "$reasons_json" | jq -c --argjson count "$pending_count" --argjson threshold "$max_pending_incident" \
-    '. + ["pending_count " + ($count|tostring) + " >= incident_threshold " + ($threshold|tostring)]')"
+  reasons_json="$(echo "$reasons_json" | jq -c --argjson count "$pending_count" --argjson threshold "$max_pending_incident" '. + ["pending_count " + ($count|tostring) + " >= incident_threshold " + ($threshold|tostring)]')"
 elif [[ "$pending_count" -ge "$max_pending_warn" ]]; then
   if [[ "$slo_status" != "incident" ]]; then
     slo_status="warn"
   fi
-  reasons_json="$(echo "$reasons_json" | jq -c --argjson count "$pending_count" --argjson threshold "$max_pending_warn" \
-    '. + ["pending_count " + ($count|tostring) + " >= warn_threshold " + ($threshold|tostring)]')"
+  reasons_json="$(echo "$reasons_json" | jq -c --argjson count "$pending_count" --argjson threshold "$max_pending_warn" '. + ["pending_count " + ($count|tostring) + " >= warn_threshold " + ($threshold|tostring)]')"
 fi
 
-# Recommended action
+if [[ "$dead_letter_count" -ge "$dead_letter_incident" ]]; then
+  slo_status="incident"
+  reasons_json="$(echo "$reasons_json" | jq -c --argjson count "$dead_letter_count" --argjson threshold "$dead_letter_incident" '. + ["dead_letter_count " + ($count|tostring) + " >= incident_threshold " + ($threshold|tostring)]')"
+elif [[ "$dead_letter_count" -ge "$dead_letter_warn" ]]; then
+  if [[ "$slo_status" != "incident" ]]; then
+    slo_status="warn"
+  fi
+  reasons_json="$(echo "$reasons_json" | jq -c --argjson count "$dead_letter_count" --argjson threshold "$dead_letter_warn" '. + ["dead_letter_count " + ($count|tostring) + " >= warn_threshold " + ($threshold|tostring)]')"
+fi
+
+if [[ "$dispatcher_enabled" == "true" && "$pending_count" -gt 0 && "$dispatcher_running" != "true" ]]; then
+  if [[ "$slo_status" == "ok" ]]; then
+    slo_status="warn"
+  fi
+  reasons_json="$(echo "$reasons_json" | jq -c '. + ["dispatcher_not_running_with_pending_queue"]')"
+fi
+
 recommended_action=""
-if [[ "$slo_status" != "ok" ]]; then
-  recommended_action="$flush_command"
+if [[ "$pending_count" -gt 0 ]]; then
+  if [[ "$dispatcher_enabled" == "true" ]]; then
+    if [[ "$dispatcher_running" != "true" && -n "$dispatcher_start_command" ]]; then
+      recommended_action="$dispatcher_start_command"
+    else
+      recommended_action=""
+    fi
+  else
+    recommended_action="$flush_command"
+  fi
+elif [[ "$dead_letter_count" -gt 0 ]]; then
+  recommended_action="$replay_dead_letter_command"
 fi
 
-# ─── Escalation fields (read-only advisory) ─────────────────────────────────
 escalation_recommended="false"
 escalation_reason=""
 escalation_fingerprint=""
@@ -106,20 +141,10 @@ escalation_command='echo "yes" | ./bin/ops cap run communications.alerts.queue.e
 if [[ "$slo_status" == "incident" ]]; then
   escalation_recommended="true"
   escalation_reason="SLO status is incident — governed escalation available"
-
-  # Compute fingerprint (mirrors escalate script logic for consistency)
-  ESCALATION_CONTRACT="${COMMUNICATIONS_ALERTS_ESCALATION_CONTRACT:-$ROOT/ops/bindings/communications.alerts.escalation.contract.yaml}"
-  age_bucket="0"
-  if [[ -f "$ESCALATION_CONTRACT" ]]; then
-    while IFS= read -r boundary; do
-      [[ -n "$boundary" ]] || continue
-      if [[ "$oldest_age" -ge "$boundary" ]]; then
-        age_bucket="$boundary"
-      fi
-    done < <(yq -r '.dedupe.age_bucket_boundaries[]' "$ESCALATION_CONTRACT" 2>/dev/null || true)
-  fi
+  age_bucket=$(( oldest_age / 3600 * 3600 ))
   pending_bucket=$(( pending_count / 50 * 50 ))
-  fp_input="${slo_status}|${age_bucket}|${pending_bucket}"
+  dead_letter_bucket=$(( dead_letter_count / 10 * 10 ))
+  fp_input="${slo_status}|${age_bucket}|${pending_bucket}|${dead_letter_bucket}"
   if command -v md5 >/dev/null 2>&1; then
     escalation_fingerprint="$(printf '%s' "$fp_input" | md5)"
   elif command -v md5sum >/dev/null 2>&1; then
@@ -137,11 +162,18 @@ if [[ "$JSON" -eq 1 ]]; then
     --arg slo_status "$slo_status" \
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson pending_count "$pending_count" \
+    --argjson pending_ready_count "$pending_ready_count" \
+    --argjson dead_letter_count "$dead_letter_count" \
     --argjson oldest_pending_age_seconds "$oldest_age" \
     --argjson warn_age_seconds "$warn_age" \
     --argjson incident_age_seconds "$incident_age" \
     --argjson max_pending_warn "$max_pending_warn" \
     --argjson max_pending_incident "$max_pending_incident" \
+    --argjson dead_letter_warn "$dead_letter_warn" \
+    --argjson dead_letter_incident "$dead_letter_incident" \
+    --arg dispatcher_enabled "$dispatcher_enabled" \
+    --arg dispatcher_running "$dispatcher_running" \
+    --arg dispatcher_status "$dispatcher_status" \
     --argjson reasons "$reasons_json" \
     --arg recommended_action "$recommended_action" \
     --argjson escalation_recommended "$esc_rec_bool" \
@@ -154,12 +186,21 @@ if [[ "$JSON" -eq 1 ]]; then
       generated_at: $generated_at,
       data: {
         pending_count: $pending_count,
+        pending_ready_count: $pending_ready_count,
+        dead_letter_count: $dead_letter_count,
         oldest_pending_age_seconds: $oldest_pending_age_seconds,
         thresholds: {
           warn_age_seconds: $warn_age_seconds,
           incident_age_seconds: $incident_age_seconds,
           max_pending_warn: $max_pending_warn,
-          max_pending_incident: $max_pending_incident
+          max_pending_incident: $max_pending_incident,
+          dead_letter_warn: $dead_letter_warn,
+          dead_letter_incident: $dead_letter_incident
+        },
+        dispatcher: {
+          enabled: ($dispatcher_enabled == "true"),
+          running: ($dispatcher_running == "true"),
+          status: $dispatcher_status
         },
         reasons: $reasons,
         recommended_action: $recommended_action,
@@ -175,12 +216,18 @@ fi
 echo "communications.alerts.queue.slo.status"
 echo "status: $slo_status"
 echo "pending_count: $pending_count"
+echo "pending_ready_count: $pending_ready_count"
+echo "dead_letter_count: $dead_letter_count"
 echo "oldest_pending_age_seconds: $oldest_age"
 echo "thresholds:"
 echo "  warn_age_seconds: $warn_age"
 echo "  incident_age_seconds: $incident_age"
 echo "  max_pending_warn: $max_pending_warn"
 echo "  max_pending_incident: $max_pending_incident"
+echo "  dead_letter_warn: $dead_letter_warn"
+echo "  dead_letter_incident: $dead_letter_incident"
+echo "dispatcher_enabled: $dispatcher_enabled"
+echo "dispatcher_running: $dispatcher_running"
 if [[ "$(echo "$reasons_json" | jq 'length')" -gt 0 ]]; then
   echo "reasons:"
   echo "$reasons_json" | jq -r '.[] | "  - " + .'

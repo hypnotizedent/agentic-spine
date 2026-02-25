@@ -22,6 +22,10 @@ need_cmd yq
 
 # ─── Check 1: Required capabilities exist ────────────────────────────────
 required_caps=(
+  "communications.alerts.dispatcher.start"
+  "communications.alerts.dispatcher.status"
+  "communications.alerts.dispatcher.stop"
+  "communications.alerts.deadletter.replay"
   "communications.alerts.queue.status"
   "communications.alerts.queue.slo.status"
   "communications.alerts.runtime.status"
@@ -52,6 +56,7 @@ done
 # ─── Check 3: Safety/approval invariants ────────────────────────────────
 # Read-only + auto caps
 readonly_auto_caps=(
+  "communications.alerts.dispatcher.status"
   "communications.alerts.queue.status"
   "communications.alerts.queue.slo.status"
   "communications.alerts.runtime.status"
@@ -72,6 +77,9 @@ done
 # Mutating + manual caps
 mutating_manual_caps=(
   "communications.alerts.flush"
+  "communications.alerts.dispatcher.start"
+  "communications.alerts.dispatcher.stop"
+  "communications.alerts.deadletter.replay"
   "communications.alerts.queue.escalate"
 )
 
@@ -89,8 +97,9 @@ done
 # ─── Check 4: Alerting channel guard ────────────────────────────────────
 # The alerting.dispatch capability (if it exists) must NOT have direct provider
 # dispatch (Resend/Twilio API calls) in its command chain. It writes intents only.
-# We verify this by checking that the flush capability is the only path with
-# secrets-exec (provider dispatch requires secrets).
+# We verify this by ensuring queue dispatch surfaces do not force global
+# secrets-exec wrappers (scoped provider secret resolution happens inside
+# communications execution scripts).
 alerting_dispatch_cmd="$(yq e '.capabilities."alerting.dispatch".command // ""' "$CAPS_FILE" 2>/dev/null || echo "")"
 if [[ -n "$alerting_dispatch_cmd" && "$alerting_dispatch_cmd" != "null" ]]; then
   # alerting.dispatch must NOT contain secrets-exec (intent-only model)
@@ -99,16 +108,28 @@ if [[ -n "$alerting_dispatch_cmd" && "$alerting_dispatch_cmd" != "null" ]]; then
   fi
 fi
 
-# communications.alerts.flush MUST use secrets-exec (it's the governed dispatch path)
+# communications.alerts.flush MUST NOT use secrets-exec (precondition scope is
+# communications-critical routes/secrets, not global namespace health).
 flush_cmd="$(yq e '.capabilities."communications.alerts.flush".command // ""' "$CAPS_FILE" 2>/dev/null || echo "")"
 if [[ -n "$flush_cmd" && "$flush_cmd" != "null" ]]; then
-  if ! echo "$flush_cmd" | grep -q "secrets-exec"; then
-    fail_v "communications.alerts.flush command must use secrets-exec (governed dispatch path)"
+  if echo "$flush_cmd" | grep -q "secrets-exec"; then
+    fail_v "communications.alerts.flush command must not use secrets-exec (must avoid broad namespace coupling)"
+  fi
+fi
+
+send_exec_cmd="$(yq e '.capabilities."communications.send.execute".command // ""' "$CAPS_FILE" 2>/dev/null || echo "")"
+if [[ -n "$send_exec_cmd" && "$send_exec_cmd" != "null" ]]; then
+  if echo "$send_exec_cmd" | grep -q "secrets-exec"; then
+    fail_v "communications.send.execute command must not use secrets-exec wrapper"
   fi
 fi
 
 # ─── Check 5: Implementation scripts exist and are executable ────────────
 cap_scripts=(
+  "$ROOT/ops/plugins/communications/bin/communications-alerts-dispatcher-start"
+  "$ROOT/ops/plugins/communications/bin/communications-alerts-dispatcher-status"
+  "$ROOT/ops/plugins/communications/bin/communications-alerts-dispatcher-stop"
+  "$ROOT/ops/plugins/communications/bin/communications-alerts-deadletter-replay"
   "$ROOT/ops/plugins/communications/bin/communications-alerts-queue-status"
   "$ROOT/ops/plugins/communications/bin/communications-alerts-queue-slo-status"
   "$ROOT/ops/plugins/communications/bin/communications-alerts-runtime-status"

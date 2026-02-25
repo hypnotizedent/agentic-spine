@@ -8,6 +8,7 @@ set -euo pipefail
 # Approval: auto
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+QUEUE_CONTRACT="${COMMUNICATIONS_ALERTS_QUEUE_CONTRACT:-$ROOT/ops/bindings/communications.alerts.queue.contract.yaml}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 
@@ -22,7 +23,8 @@ Usage: communications-alerts-queue-status [--limit <n>] [--json]
 Read-only view of the alerting email intent queue.
 
 Output:
-  pending_count, sent_count, failed_count,
+  pending_count, pending_ready_count, retry_scheduled_count,
+  sent_count, failed_count, dead_letter_count,
   oldest/newest pending age, top pending intents.
 
 Options:
@@ -45,13 +47,40 @@ done
 
 command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: missing dependency: python3" >&2; exit 1; }
 [[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "ERROR: --limit must be numeric" >&2; exit 2; }
+
+retry_enabled="$(yq -r '.retry_policy.enabled // true' "$QUEUE_CONTRACT" 2>/dev/null || echo true)"
+dead_letter_dir_raw="$(yq -r '.retry_policy.dead_letter_dir // "$SPINE_OUTBOX/alerts/email-intents-dead-letter"' "$QUEUE_CONTRACT" 2>/dev/null || echo '$SPINE_OUTBOX/alerts/email-intents-dead-letter')"
+DEAD_LETTER_DIR="${dead_letter_dir_raw//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+
+iso_to_epoch() {
+  local iso="$1"
+  python3 - "$iso" <<'PY'
+from datetime import datetime
+import sys
+
+raw = (sys.argv[1] or "").strip()
+if not raw:
+    print("")
+    raise SystemExit(0)
+try:
+    ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+except Exception:
+    print("")
+    raise SystemExit(0)
+print(int(ts.timestamp()))
+PY
+}
 
 now_epoch="$(date +%s)"
 
 pending_count=0
+pending_ready_count=0
+retry_scheduled_count=0
 sent_count=0
 failed_count=0
+dead_letter_count=0
 oldest_pending_epoch=""
 newest_pending_epoch=""
 pending_intents_json="[]"
@@ -59,46 +88,103 @@ pending_intents_json="[]"
 if [[ -d "$INTENT_DIR" ]]; then
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
-    flush_status="$(yq -r '.flush_status // "pending"' "$f" 2>/dev/null || echo "error")"
+    flush_status="$(yq -r '.flush_status // "pending"' "$f" 2>/dev/null || echo "pending")"
+    created_at="$(yq -r '.created_at // ""' "$f" 2>/dev/null || echo "")"
+    attempts="$(yq -r '.attempts // 0' "$f" 2>/dev/null || echo 0)"
+    next_retry_at="$(yq -r '.next_retry_at // ""' "$f" 2>/dev/null || echo "")"
+    last_error="$(yq -r '.last_error // ""' "$f" 2>/dev/null || echo "")"
+
+    if [[ ! "$attempts" =~ ^[0-9]+$ ]]; then
+      attempts=0
+    fi
+
+    ready_now="false"
     case "$flush_status" in
-      pending)
-        pending_count=$((pending_count + 1))
-        created_at="$(yq -r '.created_at // ""' "$f" 2>/dev/null || echo "")"
-        if [[ -n "$created_at" ]]; then
-          # Parse ISO timestamp to epoch (macOS compatible)
-          file_epoch="$(TZ=UTC date -jf '%Y-%m-%dT%H:%M:%SZ' "$created_at" +%s 2>/dev/null || echo "")"
-          if [[ -n "$file_epoch" && "$file_epoch" =~ ^[0-9]+$ ]]; then
-            if [[ -z "$oldest_pending_epoch" || "$file_epoch" -lt "$oldest_pending_epoch" ]]; then
-              oldest_pending_epoch="$file_epoch"
-            fi
-            if [[ -z "$newest_pending_epoch" || "$file_epoch" -gt "$newest_pending_epoch" ]]; then
-              newest_pending_epoch="$file_epoch"
-            fi
-          fi
-        fi
-        # Collect for top-N display
-        if [[ "$pending_count" -le "$LIMIT" ]]; then
-          intent_id="$(yq -r '.intent_id // ""' "$f" 2>/dev/null || echo "")"
-          domain_id="$(yq -r '.domain_id // ""' "$f" 2>/dev/null || echo "")"
-          severity="$(yq -r '.severity // ""' "$f" 2>/dev/null || echo "")"
-          recipient="$(yq -r '.suggested_recipient // ""' "$f" 2>/dev/null || echo "")"
-          pending_intents_json="$(echo "$pending_intents_json" | jq -c \
-            --arg id "$intent_id" \
-            --arg domain "$domain_id" \
-            --arg sev "$severity" \
-            --arg created "$created_at" \
-            --arg recip "$recipient" \
-            '. + [{"intent_id":$id,"domain_id":$domain,"severity":$sev,"created_at":$created,"recipient":$recip}]')"
-        fi
-        ;;
       sent)
         sent_count=$((sent_count + 1))
+        continue
+        ;;
+      dead-letter)
+        dead_letter_count=$((dead_letter_count + 1))
+        continue
+        ;;
+      retry_scheduled)
+        retry_scheduled_count=$((retry_scheduled_count + 1))
+        if [[ "$retry_enabled" == "true" ]]; then
+          if [[ -z "$next_retry_at" ]]; then
+            ready_now="true"
+          else
+            next_retry_epoch="$(iso_to_epoch "$next_retry_at")"
+            if [[ -n "$next_retry_epoch" && "$next_retry_epoch" =~ ^[0-9]+$ && "$next_retry_epoch" -le "$now_epoch" ]]; then
+              ready_now="true"
+            fi
+          fi
+        else
+          ready_now="true"
+        fi
         ;;
       failed)
         failed_count=$((failed_count + 1))
+        ready_now="true"
+        ;;
+      *)
+        ready_now="true"
         ;;
     esac
+
+    pending_count=$((pending_count + 1))
+    if [[ "$ready_now" == "true" ]]; then
+      pending_ready_count=$((pending_ready_count + 1))
+    fi
+
+    if [[ -n "$created_at" ]]; then
+      file_epoch="$(iso_to_epoch "$created_at")"
+      if [[ -n "$file_epoch" && "$file_epoch" =~ ^[0-9]+$ ]]; then
+        if [[ -z "$oldest_pending_epoch" || "$file_epoch" -lt "$oldest_pending_epoch" ]]; then
+          oldest_pending_epoch="$file_epoch"
+        fi
+        if [[ -z "$newest_pending_epoch" || "$file_epoch" -gt "$newest_pending_epoch" ]]; then
+          newest_pending_epoch="$file_epoch"
+        fi
+      fi
+    fi
+
+    if [[ "$(echo "$pending_intents_json" | jq 'length')" -lt "$LIMIT" ]]; then
+      intent_id="$(yq -r '.intent_id // ""' "$f" 2>/dev/null || echo "")"
+      domain_id="$(yq -r '.domain_id // ""' "$f" 2>/dev/null || echo "")"
+      severity="$(yq -r '.severity // ""' "$f" 2>/dev/null || echo "")"
+      recipient="$(yq -r '.suggested_recipient // ""' "$f" 2>/dev/null || echo "")"
+      pending_intents_json="$(echo "$pending_intents_json" | jq -c \
+        --arg id "$intent_id" \
+        --arg domain "$domain_id" \
+        --arg sev "$severity" \
+        --arg created "$created_at" \
+        --arg recip "$recipient" \
+        --arg status "$flush_status" \
+        --argjson attempts "$attempts" \
+        --arg next_retry_at "$next_retry_at" \
+        --arg ready_now "$ready_now" \
+        --arg last_error "$last_error" \
+        '. + [{
+          intent_id:$id,
+          domain_id:$domain,
+          severity:$sev,
+          created_at:$created,
+          recipient:$recip,
+          flush_status:$status,
+          attempts:$attempts,
+          next_retry_at:$next_retry_at,
+          ready_now:($ready_now == "true"),
+          last_error:$last_error
+        }]')"
+    fi
   done < <(find "$INTENT_DIR" -name '*.yaml' -type f 2>/dev/null | sort)
+fi
+
+if [[ -d "$DEAD_LETTER_DIR" ]]; then
+  while IFS= read -r _; do
+    dead_letter_count=$((dead_letter_count + 1))
+  done < <(find "$DEAD_LETTER_DIR" -name '*.yaml' -type f 2>/dev/null | sort)
 fi
 
 oldest_pending_age=0
@@ -116,8 +202,11 @@ if [[ "$JSON" -eq 1 ]]; then
     --arg status "ok" \
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson pending_count "$pending_count" \
+    --argjson pending_ready_count "$pending_ready_count" \
+    --argjson retry_scheduled_count "$retry_scheduled_count" \
     --argjson sent_count "$sent_count" \
     --argjson failed_count "$failed_count" \
+    --argjson dead_letter_count "$dead_letter_count" \
     --argjson oldest_pending_age_seconds "$oldest_pending_age" \
     --argjson newest_pending_age_seconds "$newest_pending_age" \
     --argjson top_pending "$pending_intents_json" \
@@ -127,8 +216,11 @@ if [[ "$JSON" -eq 1 ]]; then
       generated_at: $generated_at,
       data: {
         pending_count: $pending_count,
+        pending_ready_count: $pending_ready_count,
+        retry_scheduled_count: $retry_scheduled_count,
         sent_count: $sent_count,
         failed_count: $failed_count,
+        dead_letter_count: $dead_letter_count,
         oldest_pending_age_seconds: $oldest_pending_age_seconds,
         newest_pending_age_seconds: $newest_pending_age_seconds,
         top_pending: $top_pending
@@ -139,18 +231,21 @@ fi
 
 echo "communications.alerts.queue.status"
 echo "pending_count: $pending_count"
+echo "pending_ready_count: $pending_ready_count"
+echo "retry_scheduled_count: $retry_scheduled_count"
 echo "sent_count: $sent_count"
 echo "failed_count: $failed_count"
+echo "dead_letter_count: $dead_letter_count"
 echo "oldest_pending_age_seconds: $oldest_pending_age"
 echo "newest_pending_age_seconds: $newest_pending_age"
 echo ""
 if [[ "$pending_count" -gt 0 ]]; then
   echo "Top pending intents (limit: $LIMIT):"
-  printf "  %-44s %-22s %-8s %-22s %s\n" "intent_id" "domain_id" "severity" "created_at" "recipient"
-  printf "  %-44s %-22s %-8s %-22s %s\n" "--------------------------------------------" "----------------------" "--------" "----------------------" "---"
-  echo "$pending_intents_json" | jq -r '.[] | [.intent_id, .domain_id, .severity, .created_at, .recipient] | @tsv' | \
-  while IFS=$'\t' read -r id domain sev created recip; do
-    printf "  %-44s %-22s %-8s %-22s %s\n" "$id" "$domain" "$sev" "$created" "$recip"
+  printf "  %-44s %-18s %-8s %-6s %-20s %-7s %s\n" "intent_id" "status" "severity" "attempt" "next_retry_at" "ready" "recipient"
+  printf "  %-44s %-18s %-8s %-6s %-20s %-7s %s\n" "--------------------------------------------" "------------------" "--------" "------" "--------------------" "-------" "---------"
+  echo "$pending_intents_json" | jq -r '.[] | [.intent_id, .flush_status, .severity, (.attempts|tostring), .next_retry_at, (.ready_now|tostring), .recipient] | @tsv' | \
+  while IFS=$'\t' read -r id status sev attempt next_retry ready recip; do
+    printf "  %-44s %-18s %-8s %-6s %-20s %-7s %s\n" "$id" "$status" "$sev" "$attempt" "$next_retry" "$ready" "$recip"
   done
 else
   echo "No pending intents."

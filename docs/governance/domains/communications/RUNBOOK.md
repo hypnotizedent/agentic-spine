@@ -91,10 +91,11 @@ Bundle artifact: `mailroom/outbox/alerts/communications/incidents/BUNDLE-<timest
 
 ## Required Preconditions
 
-Communications live surfaces rely on Microsoft and therefore require:
+Communications dispatch preconditions are scoped to communications-critical routes:
 
-- `secrets.binding`
-- `secrets.auth.status`
+- Provider contract + route policy parseability (`communications.providers.contract.yaml`, `communications.policy.contract.yaml`)
+- Provider credentials for the active live route (for example `RESEND_API_KEY` or `TWILIO_*`)
+- No global `secrets.namespace.status` dependency for queue flush/dispatch surfaces
 
 ## Canonical Commands
 
@@ -107,12 +108,15 @@ echo "yes" | ./bin/ops cap run communications.mail.send.test --to ronny@mintprin
 ./bin/ops cap run communications.provider.status
 ./bin/ops cap run communications.policy.status
 ./bin/ops cap run communications.templates.list --channel sms
+./bin/ops cap run communications.alerts.dispatcher.status
+echo "yes" | ./bin/ops cap run communications.alerts.dispatcher.start
 preview_json="$(./bin/ops cap run communications.send.preview --channel sms --message-type payment_needed --to +15551234567 --consent-state opted-in --vars-json '{\"customer_name\":\"Test\",\"order_number\":\"30020\",\"balance_amount\":\"150.00\",\"payment_link\":\"https://example.com/pay\"}' --json)"
 preview_id="$(echo \"$preview_json\" | jq -r '.data.preview_id')"
 echo "yes" | ./bin/ops cap run communications.send.execute --preview-id "$preview_id" --execute
 ./bin/ops cap run communications.delivery.log --limit 10
 ./bin/ops cap run communications.delivery.anomaly.status
 echo "yes" | ./bin/ops cap run communications.delivery.anomaly.dispatch --dry-run
+echo "yes" | ./bin/ops cap run communications.alerts.deadletter.replay --limit 10
 ```
 
 ## Evidence Pattern

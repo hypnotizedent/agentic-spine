@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# communications-alerts-dispatcher-stop — stop background dispatcher worker.
+#
+# Safety: mutating
+# Approval: manual
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+QUEUE_CONTRACT="${COMMUNICATIONS_ALERTS_QUEUE_CONTRACT:-$ROOT/ops/bindings/communications.alerts.queue.contract.yaml}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+JSON=0
+FORCE=0
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-alerts-dispatcher-stop [--force] [--json]
+
+Stops autonomous communications alerts dispatcher worker.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE=1
+      shift
+      ;;
+    --json)
+      JSON=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ -f "$QUEUE_CONTRACT" ]] || { echo "ERROR: missing queue contract: $QUEUE_CONTRACT" >&2; exit 1; }
+
+expand_path() {
+  local p="$1"
+  p="${p//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+  echo "$p"
+}
+
+pid_running() {
+  local pid="$1"
+  [[ -n "$pid" && "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1
+}
+
+find_worker_pid() {
+  command -v pgrep >/dev/null 2>&1 || { echo 0; return; }
+  while IFS= read -r candidate; do
+    [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
+    if pid_running "$candidate"; then
+      echo "$candidate"
+      return
+    fi
+  done < <(pgrep -f 'communications-alerts-dispatcher-worker --foreground' 2>/dev/null || true)
+  echo 0
+}
+
+json_out() {
+  local status="$1"
+  local pid="$2"
+  local note="$3"
+  jq -n \
+    --arg capability "communications.alerts.dispatcher.stop" \
+    --arg status "$status" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson pid "$pid" \
+    --arg pid_file "$PID_FILE" \
+    --arg launch_label "$LAUNCH_LABEL" \
+    --arg launch_plist "$LAUNCH_PLIST" \
+    --arg note "$note" \
+    '{
+      capability: $capability,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        pid: (if $pid > 0 then $pid else null end),
+        pid_file: $pid_file,
+        launchd_label: $launch_label,
+        launchd_plist: $launch_plist
+      }
+    } + (if ($note | length) > 0 then {note:$note} else {} end)'
+}
+
+pid_file_raw="$(yq -r '.dispatcher.pid_file // "$SPINE_OUTBOX/communications/.alerts-dispatcher.pid"' "$QUEUE_CONTRACT")"
+PID_FILE="$(expand_path "$pid_file_raw")"
+LAUNCH_LABEL="${COMMUNICATIONS_ALERTS_DISPATCHER_LAUNCH_LABEL:-com.ronny.communications-alerts-dispatcher}"
+LAUNCH_PLIST="${COMMUNICATIONS_ALERTS_DISPATCHER_LAUNCH_PLIST:-$HOME/Library/LaunchAgents/${LAUNCH_LABEL}.plist}"
+
+pid=""
+if [[ -f "$PID_FILE" ]]; then
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+fi
+if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+  pid=0
+fi
+if ! pid_running "$pid"; then
+  pid="$(find_worker_pid)"
+fi
+
+# Preferred runtime on macOS: launchd
+launchd_note=""
+if command -v launchctl >/dev/null 2>&1 && [[ -f "$LAUNCH_PLIST" ]]; then
+  svc="$(launchctl list "$LAUNCH_LABEL" 2>/dev/null || true)"
+  svc_pid="$(printf '%s\n' "$svc" | awk -F' = ' '/"PID"/ {gsub(/[^0-9]/,"",$2); print $2; exit}')"
+  if [[ "$svc_pid" =~ ^[1-9][0-9]*$ ]]; then
+    pid="$svc_pid"
+  fi
+
+  if [[ -z "$svc" ]]; then
+    launchd_note="launchd_not_loaded"
+  else
+    launchctl bootout "gui/$(id -u)" "$LAUNCH_PLIST" >/dev/null 2>&1 || true
+
+    stopped=0
+    for _ in {1..40}; do
+      if ! pid_running "$pid"; then
+        stopped=1
+        break
+      fi
+      sleep 0.1
+    done
+
+    if [[ "$stopped" -ne 1 && "$FORCE" -eq 1 ]] && pid_running "$pid"; then
+      kill -9 "$pid" >/dev/null 2>&1 || true
+      for _ in {1..20}; do
+        if ! pid_running "$pid"; then
+          stopped=1
+          break
+        fi
+        sleep 0.1
+      done
+    fi
+
+    rm -f "$PID_FILE" 2>/dev/null || true
+
+    if [[ "$stopped" -ne 1 ]] && pid_running "$pid"; then
+      if [[ "$JSON" -eq 1 ]]; then
+        json_out "error" "$pid" "dispatcher did not stop"
+      else
+        echo "ERROR: dispatcher did not stop" >&2
+      fi
+      exit 1
+    fi
+
+    if [[ "$JSON" -eq 1 ]]; then
+      json_out "stopped" "$pid" "launchd"
+    else
+      echo "communications.alerts.dispatcher.stop"
+      echo "status: stopped"
+      echo "runtime: launchd"
+      [[ "$pid" -gt 0 ]] && echo "pid: $pid"
+    fi
+    exit 0
+  fi
+fi
+
+# Fallback runtime: pid file / detached process
+if ! pid_running "$pid"; then
+  rm -f "$PID_FILE" 2>/dev/null || true
+  if [[ "$JSON" -eq 1 ]]; then
+    json_out "not-running" 0 "$launchd_note"
+  else
+    echo "communications.alerts.dispatcher.stop"
+    echo "status: not-running"
+    echo "pid_file: $PID_FILE"
+    [[ -n "$launchd_note" ]] && echo "note: $launchd_note"
+  fi
+  exit 0
+fi
+
+kill "$pid" >/dev/null 2>&1 || true
+
+stopped=0
+for _ in {1..40}; do
+  if ! pid_running "$pid"; then
+    stopped=1
+    break
+  fi
+  sleep 0.1
+done
+
+if [[ "$stopped" -ne 1 && "$FORCE" -eq 1 ]]; then
+  kill -9 "$pid" >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    if ! pid_running "$pid"; then
+      stopped=1
+      break
+    fi
+    sleep 0.1
+  done
+fi
+
+if [[ "$stopped" -ne 1 ]]; then
+  if [[ "$JSON" -eq 1 ]]; then
+    json_out "error" "$pid" "dispatcher did not stop; rerun with --force"
+  else
+    echo "ERROR: dispatcher did not stop; rerun with --force" >&2
+  fi
+  exit 1
+fi
+
+rm -f "$PID_FILE" 2>/dev/null || true
+
+if [[ "$JSON" -eq 1 ]]; then
+  json_out "stopped" "$pid" "detached-process"
+else
+  echo "communications.alerts.dispatcher.stop"
+  echo "status: stopped"
+  echo "runtime: detached-process"
+  echo "pid: $pid"
+fi

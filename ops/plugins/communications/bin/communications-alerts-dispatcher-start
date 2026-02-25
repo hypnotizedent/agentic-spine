@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# communications-alerts-dispatcher-start — start background dispatcher worker.
+#
+# Safety: mutating
+# Approval: manual
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+QUEUE_CONTRACT="${COMMUNICATIONS_ALERTS_QUEUE_CONTRACT:-$ROOT/ops/bindings/communications.alerts.queue.contract.yaml}"
+WORKER_BIN="$ROOT/ops/plugins/communications/bin/communications-alerts-dispatcher-worker"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+JSON=0
+POLL_OVERRIDE=""
+BATCH_OVERRIDE=""
+WORKER_ID="alerts-dispatcher"
+
+usage() {
+  cat <<'USAGE'
+Usage: communications-alerts-dispatcher-start [--poll-seconds <n>] [--batch-limit <n>] [--worker-id <id>] [--json]
+
+Starts autonomous communications alert dispatcher worker in background.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --poll-seconds)
+      POLL_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --batch-limit)
+      BATCH_OVERRIDE="${2:-}"
+      shift 2
+      ;;
+    --worker-id)
+      WORKER_ID="${2:-alerts-dispatcher}"
+      shift 2
+      ;;
+    --json)
+      JSON=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: missing dependency: yq" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "ERROR: missing dependency: jq" >&2; exit 1; }
+[[ -f "$QUEUE_CONTRACT" ]] || { echo "ERROR: missing queue contract: $QUEUE_CONTRACT" >&2; exit 1; }
+[[ -x "$WORKER_BIN" ]] || { echo "ERROR: missing worker script: $WORKER_BIN" >&2; exit 1; }
+
+expand_path() {
+  local p="$1"
+  p="${p//\$SPINE_OUTBOX/$SPINE_OUTBOX}"
+  echo "$p"
+}
+
+pid_running() {
+  local pid="$1"
+  [[ -n "$pid" && "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1
+}
+
+find_worker_pid() {
+  command -v pgrep >/dev/null 2>&1 || { echo 0; return; }
+  while IFS= read -r candidate; do
+    [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || continue
+    if pid_running "$candidate"; then
+      echo "$candidate"
+      return
+    fi
+  done < <(pgrep -f 'communications-alerts-dispatcher-worker --foreground' 2>/dev/null || true)
+  echo 0
+}
+
+json_out() {
+  local status="$1"
+  local pid="$2"
+  local message="$3"
+  jq -n \
+    --arg capability "communications.alerts.dispatcher.start" \
+    --arg status "$status" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg pid_file "$PID_FILE" \
+    --arg log_file "$LOG_FILE" \
+    --arg launch_label "$LAUNCH_LABEL" \
+    --arg launch_plist "$LAUNCH_PLIST" \
+    --argjson pid "$pid" \
+    --argjson poll_seconds "$poll_seconds" \
+    --argjson batch_limit "$batch_limit" \
+    --arg message "$message" \
+    '{
+      capability: $capability,
+      status: $status,
+      generated_at: $generated_at,
+      data: {
+        pid: (if $pid > 0 then $pid else null end),
+        pid_file: $pid_file,
+        log_file: $log_file,
+        poll_seconds: $poll_seconds,
+        batch_limit: $batch_limit,
+        launchd_label: $launch_label,
+        launchd_plist: $launch_plist
+      }
+    } + (if ($message | length) > 0 then {note:$message} else {} end)'
+}
+
+dispatcher_enabled="$(yq -r '.dispatcher.enabled // true' "$QUEUE_CONTRACT")"
+poll_seconds="$(yq -r '.dispatcher.poll_interval_seconds // 60' "$QUEUE_CONTRACT")"
+batch_limit="$(yq -r '.dispatcher.batch_limit // 10' "$QUEUE_CONTRACT")"
+pid_file_raw="$(yq -r '.dispatcher.pid_file // "$SPINE_OUTBOX/communications/.alerts-dispatcher.pid"' "$QUEUE_CONTRACT")"
+log_file_raw="$(yq -r '.dispatcher.log_file // "$SPINE_OUTBOX/communications/alerts-dispatcher.log"' "$QUEUE_CONTRACT")"
+
+[[ -n "$POLL_OVERRIDE" ]] && poll_seconds="$POLL_OVERRIDE"
+[[ -n "$BATCH_OVERRIDE" ]] && batch_limit="$BATCH_OVERRIDE"
+
+[[ "$poll_seconds" =~ ^[0-9]+$ ]] || { echo "ERROR: poll_seconds must be numeric" >&2; exit 2; }
+[[ "$batch_limit" =~ ^[0-9]+$ ]] || { echo "ERROR: batch_limit must be numeric" >&2; exit 2; }
+(( poll_seconds > 0 )) || { echo "ERROR: poll_seconds must be > 0" >&2; exit 2; }
+(( batch_limit > 0 )) || { echo "ERROR: batch_limit must be > 0" >&2; exit 2; }
+
+PID_FILE="$(expand_path "$pid_file_raw")"
+LOG_FILE="$(expand_path "$log_file_raw")"
+LAUNCH_LABEL="${COMMUNICATIONS_ALERTS_DISPATCHER_LAUNCH_LABEL:-com.ronny.communications-alerts-dispatcher}"
+LAUNCH_PLIST="${COMMUNICATIONS_ALERTS_DISPATCHER_LAUNCH_PLIST:-$HOME/Library/LaunchAgents/${LAUNCH_LABEL}.plist}"
+
+mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")" "$(dirname "$LAUNCH_PLIST")"
+
+if [[ "$dispatcher_enabled" != "true" ]]; then
+  echo "ERROR: dispatcher.enabled is false in contract" >&2
+  exit 2
+fi
+
+existing_pid=""
+if [[ -f "$PID_FILE" ]]; then
+  existing_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+fi
+if ! pid_running "$existing_pid"; then
+  existing_pid="$(find_worker_pid)"
+fi
+if pid_running "$existing_pid"; then
+  if [[ "$JSON" -eq 1 ]]; then
+    json_out "already-running" "$existing_pid" ""
+  else
+    echo "communications.alerts.dispatcher.start"
+    echo "status: already-running"
+    echo "pid: $existing_pid"
+    echo "pid_file: $PID_FILE"
+    echo "log_file: $LOG_FILE"
+  fi
+  exit 0
+fi
+
+# Preferred runtime on macOS: launchd detaches worker lifecycle from cap runner.
+launchd_error=""
+if command -v launchctl >/dev/null 2>&1; then
+  args_xml="      <string>${WORKER_BIN}</string>\n      <string>--foreground</string>\n      <string>--worker-id</string>\n      <string>${WORKER_ID}</string>\n      <string>--poll-seconds</string>\n      <string>${poll_seconds}</string>\n      <string>--batch-limit</string>\n      <string>${batch_limit}</string>"
+  err_log="${LOG_FILE}.err"
+
+  cat > "$LAUNCH_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>${LAUNCH_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+${args_xml}
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${ROOT}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>SPINE_ROOT</key>
+      <string>${ROOT}</string>
+      <key>PATH</key>
+      <string>${HOME}/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${LOG_FILE}</string>
+    <key>StandardErrorPath</key>
+    <string>${err_log}</string>
+  </dict>
+</plist>
+PLIST
+
+  rm -f "$PID_FILE" 2>/dev/null || true
+  launchctl bootout "gui/$(id -u)" "$LAUNCH_PLIST" >/dev/null 2>&1 || true
+  set +e
+  bootstrap_out="$(launchctl bootstrap "gui/$(id -u)" "$LAUNCH_PLIST" 2>&1)"
+  bootstrap_rc=$?
+  set -e
+
+  if [[ "$bootstrap_rc" -eq 0 ]]; then
+    started_pid=0
+    for _ in {1..80}; do
+      svc="$(launchctl list "$LAUNCH_LABEL" 2>/dev/null || true)"
+      svc_pid="$(printf '%s\n' "$svc" | awk -F' = ' '/"PID"/ {gsub(/[^0-9]/,"",$2); print $2; exit}')"
+      if pid_running "$svc_pid"; then
+        started_pid="$svc_pid"
+        break
+      fi
+      sleep 0.1
+    done
+
+    if pid_running "$started_pid"; then
+      if [[ "$JSON" -eq 1 ]]; then
+        json_out "started" "$started_pid" "launchd"
+      else
+        echo "communications.alerts.dispatcher.start"
+        echo "status: started"
+        echo "runtime: launchd"
+        echo "pid: $started_pid"
+        echo "pid_file: $PID_FILE"
+        echo "log_file: $LOG_FILE"
+        echo "launchd_label: $LAUNCH_LABEL"
+        echo "launchd_plist: $LAUNCH_PLIST"
+      fi
+      exit 0
+    fi
+
+    launchd_error="launchd started but no worker PID"
+  else
+    launchd_error="$bootstrap_out"
+  fi
+fi
+
+# Fallback runtime: double-fork detached process.
+rm -f "$PID_FILE" 2>/dev/null || true
+python3 - "$WORKER_BIN" "$ROOT" "$LOG_FILE" "$WORKER_ID" "$poll_seconds" "$batch_limit" <<'PY'
+import os
+import sys
+
+worker, root, log_file, worker_id, poll_seconds, batch_limit = sys.argv[1:]
+cmd = [worker, "--foreground", "--worker-id", worker_id, "--poll-seconds", poll_seconds, "--batch-limit", batch_limit]
+
+pid = os.fork()
+if pid > 0:
+    raise SystemExit(0)
+
+os.setsid()
+pid2 = os.fork()
+if pid2 > 0:
+    os._exit(0)
+
+os.chdir(root)
+fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+os.dup2(fd, 1)
+os.dup2(fd, 2)
+devnull = os.open("/dev/null", os.O_RDONLY)
+os.dup2(devnull, 0)
+os.execv(cmd[0], cmd)
+PY
+
+started_pid=0
+for _ in {1..60}; do
+  if [[ -f "$PID_FILE" ]]; then
+    candidate="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if pid_running "$candidate"; then
+      started_pid="$candidate"
+      break
+    fi
+  fi
+  sleep 0.1
+done
+
+if ! pid_running "$started_pid"; then
+  if [[ "$JSON" -eq 1 ]]; then
+    msg="dispatcher failed to start"
+    if [[ -n "$launchd_error" ]]; then
+      msg="${msg}; launchd_error=${launchd_error}"
+    fi
+    json_out "error" 0 "$msg"
+  else
+    echo "ERROR: dispatcher failed to start; inspect log_file: $LOG_FILE" >&2
+    [[ -n "$launchd_error" ]] && echo "launchd_error: $launchd_error" >&2
+  fi
+  exit 1
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  json_out "started" "$started_pid" "detached-process"
+else
+  echo "communications.alerts.dispatcher.start"
+  echo "status: started"
+  echo "runtime: detached-process"
+  echo "pid: $started_pid"
+  echo "pid_file: $PID_FILE"
+  echo "log_file: $LOG_FILE"
+fi
