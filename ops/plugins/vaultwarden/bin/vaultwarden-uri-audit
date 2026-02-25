@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+# vaultwarden.uri.audit - Read-only URI drift audit for Vaultwarden items.
+#
+# Output fields (JSON/CSV):
+# item_id,name,type,folder,status,updated,item_uri,scheme,host,port,class,
+# stale_signals,duplicate_group,duplicate_count,canonical_host,canonical_url
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+INFISICAL_AGENT="$SPINE_ROOT/ops/tools/infisical-agent.sh"
+CANONICAL_FILE_DEFAULT="$SPINE_ROOT/ops/data/vaultwarden/canonical_hosts.yaml"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+MODE="auto"
+SHOW_TRASHED=false
+FORMAT="table"
+OUTPUT=""
+CANONICAL_FILE="$CANONICAL_FILE_DEFAULT"
+
+usage() {
+  cat <<USAGE
+Usage: vaultwarden-uri-audit [options]
+
+Options:
+  --mode <auto|bw>      Default: auto (uses bw CLI path)
+  --include-trashed     Include trashed items in audit rows
+  --format <table|csv|json>  Output format (default: table)
+  --canonical <path>    Canonical hosts YAML (default: ops/data/vaultwarden/canonical_hosts.yaml)
+  --output <path>       Write output to file (stdout if omitted)
+  -h, --help            Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift; continue ;;
+    --mode)
+      MODE="${2:?--mode requires auto|bw}"; shift 2 ;;
+    --include-trashed)
+      SHOW_TRASHED=true; shift ;;
+    --format)
+      FORMAT="${2:?--format requires table|csv|json}"; shift 2 ;;
+    --canonical)
+      CANONICAL_FILE="${2:?--canonical requires path}"; shift 2 ;;
+    --output)
+      OUTPUT="${2:?--output requires path}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      _stop "unknown arg: $1" ;;
+  esac
+done
+
+case "$MODE" in
+  auto|bw) ;;
+  *) _stop "invalid --mode '$MODE' (expected auto|bw)" ;;
+esac
+
+case "$FORMAT" in
+  table|csv|json) ;;
+  *) _stop "invalid --format '$FORMAT' (expected table|csv|json)" ;;
+esac
+
+command -v python3 >/dev/null 2>&1 || _stop "missing dependency: python3"
+command -v yq >/dev/null 2>&1 || _stop "missing dependency: yq"
+command -v bw >/dev/null 2>&1 || _stop "missing dependency: bw CLI"
+[[ -x "$INFISICAL_AGENT" ]] || _stop "missing infisical agent: $INFISICAL_AGENT"
+[[ -f "$CANONICAL_FILE" ]] || _stop "missing canonical hosts file: $CANONICAL_FILE"
+
+read_secret() {
+  local key="$1"
+  "$INFISICAL_AGENT" get-cached infrastructure prod "$key" --no-cache 2>/dev/null || true
+}
+
+SERVER_URL="$(read_secret VAULTWARDEN_BW_SERVER_URL)"
+CLIENT_ID="$(read_secret VAULTWARDEN_BW_CLIENTID)"
+CLIENT_SECRET="$(read_secret VAULTWARDEN_BW_CLIENTSECRET)"
+MASTER_PASSWORD="$(read_secret VAULTWARDEN_BW_MASTER_PASSWORD)"
+
+[[ -n "$SERVER_URL" && -n "$CLIENT_ID" && -n "$CLIENT_SECRET" && -n "$MASTER_PASSWORD" ]] || {
+  _stop "missing Vaultwarden bw auth secrets in Infisical (/spine/vm-infra/vaultwarden)"
+}
+
+# shellcheck source=../lib/proxy-session.sh
+source "$SCRIPT_DIR/../lib/proxy-session.sh"
+
+TMP_DIR="$(mktemp -d)"
+ITEMS_JSON="$TMP_DIR/items.json"
+FOLDERS_JSON="$TMP_DIR/folders.json"
+CANONICAL_JSON="$TMP_DIR/canonical.json"
+RESULT_JSON="$TMP_DIR/audit.json"
+SESSION=""
+
+cleanup() {
+  if [[ -n "$SESSION" ]]; then
+    BW_SESSION="$SESSION" vw_bw lock --session "$SESSION" >/dev/null 2>&1 || true
+  fi
+  vw_bw logout >/dev/null 2>&1 || true
+  vw_proxy_stop || true
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+vw_proxy_start || _stop "could not start scope-rewriting proxy"
+vw_bw logout >/dev/null 2>&1 || true
+BW_CLIENTID="$CLIENT_ID" BW_CLIENTSECRET="$CLIENT_SECRET" vw_bw login --apikey >/dev/null 2>&1 || _stop "bw login --apikey failed"
+
+SESSION="$(BW_PASSWORD="$MASTER_PASSWORD" vw_bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
+[[ -n "$SESSION" ]] || _stop "bw unlock failed"
+
+BW_SESSION="$SESSION" vw_bw sync --session "$SESSION" >/dev/null 2>&1 || true
+BW_SESSION="$SESSION" vw_bw list items --session "$SESSION" > "$ITEMS_JSON"
+BW_SESSION="$SESSION" vw_bw list folders --session "$SESSION" > "$FOLDERS_JSON"
+yq -o=json '.' "$CANONICAL_FILE" > "$CANONICAL_JSON"
+
+python3 - "$ITEMS_JSON" "$FOLDERS_JSON" "$CANONICAL_JSON" "$SHOW_TRASHED" "$RESULT_JSON" <<'PY'
+import ipaddress
+import json
+import sys
+from collections import Counter
+from urllib.parse import urlparse
+
+items_path, folders_path, canonical_path, include_trashed_raw, result_path = sys.argv[1:6]
+include_trashed = include_trashed_raw.lower() == "true"
+
+with open(items_path, "r", encoding="utf-8") as f:
+    items = json.load(f)
+with open(folders_path, "r", encoding="utf-8") as f:
+    folders = json.load(f)
+with open(canonical_path, "r", encoding="utf-8") as f:
+    canonical_raw = json.load(f)
+
+folder_map = {str(f.get("id")): f.get("name", "") for f in folders if f.get("id")}
+canonical_hosts = canonical_raw.get("canonical_hosts", {}) if isinstance(canonical_raw, dict) else {}
+
+alias_to_canonical = {}
+for host, cfg in canonical_hosts.items():
+    host_l = str(host).strip().lower()
+    if not host_l:
+        continue
+    alias_to_canonical[host_l] = host_l
+    aliases = cfg.get("aliases", []) if isinstance(cfg, dict) else []
+    for alias in aliases:
+        alias_l = str(alias).strip().lower()
+        if alias_l:
+            alias_to_canonical[alias_l] = host_l
+
+
+def parse_uri(uri: str):
+    if not uri:
+        return "", "", ""
+    raw = uri.strip()
+    parsed = urlparse(raw)
+    if not parsed.scheme and not parsed.netloc:
+        parsed = urlparse("//" + raw)
+    return (parsed.scheme or "").lower(), (parsed.hostname or "").lower(), str(parsed.port or "")
+
+
+def classify_host(host: str):
+    if not host:
+        return "none"
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return "localhost"
+    try:
+        ipaddress.ip_address(host)
+        return "ip"
+    except ValueError:
+        return "domain"
+
+
+def stale_signals(scheme: str, host: str, host_class: str):
+    signals = []
+    if not host:
+        return signals
+
+    if host.endswith(".taile9480.ts.net"):
+        signals.append("old_tailscale_domain")
+
+    if host_class == "localhost":
+        signals.append("localhost_url")
+
+    if host_class == "ip":
+        try:
+            ip_obj = ipaddress.ip_address(host)
+            if ip_obj.is_private:
+                signals.append("private_lan_ip")
+            if ip_obj in ipaddress.ip_network("192.168.12.0/24"):
+                signals.append("old_shop_lan_ip")
+            if ip_obj in ipaddress.ip_network("100.64.0.0/10"):
+                signals.append("tailscale_cgnat_ip")
+        except ValueError:
+            pass
+
+    if scheme == "http" and host not in {"localhost", "127.0.0.1", "::1"}:
+        signals.append("insecure_http")
+
+    return sorted(set(signals))
+
+rows = []
+type_map = {1: "Login", 2: "SecureNote", 3: "Card", 4: "Identity"}
+
+for item in items:
+    deleted = item.get("deletedDate") is not None
+    if deleted and not include_trashed:
+        continue
+
+    item_id = str(item.get("id") or "")
+    name = str(item.get("name") or "")
+    atype = type_map.get(item.get("type"), "Unknown")
+    folder_id = item.get("folderId")
+    folder = folder_map.get(str(folder_id), "(unfiled)") if folder_id else "(unfiled)"
+    status = "trashed" if deleted else "active"
+    updated = str(item.get("revisionDate") or "")
+
+    uris = []
+    login = item.get("login") or {}
+    for u in (login.get("uris") or []):
+        uri = str((u or {}).get("uri") or "").strip()
+        if uri:
+            uris.append(uri)
+
+    if not uris:
+        uris = [""]
+
+    for uri in uris:
+        scheme, host, port = parse_uri(uri)
+        host_class = classify_host(host)
+        signals = stale_signals(scheme, host, host_class)
+
+        canonical_host = alias_to_canonical.get(host, "") if host else ""
+        canonical_url = ""
+        if canonical_host:
+            cfg = canonical_hosts.get(canonical_host, {})
+            canonical_url = str(cfg.get("canonical_url") or "")
+            if host and host != canonical_host:
+                signals.append("canonical_alias")
+
+        rows.append({
+            "item_id": item_id,
+            "name": name,
+            "type": atype,
+            "folder": folder,
+            "status": status,
+            "updated": updated,
+            "item_uri": uri,
+            "scheme": scheme,
+            "host": host,
+            "port": port,
+            "class": host_class,
+            "stale_signals": sorted(set(signals)),
+            "duplicate_group": "",
+            "duplicate_count": 0,
+            "canonical_host": canonical_host,
+            "canonical_url": canonical_url,
+        })
+
+host_counts = Counter(r["host"] for r in rows if r["host"])
+for row in rows:
+    host = row["host"]
+    count = host_counts.get(host, 0)
+    row["duplicate_count"] = count
+    row["duplicate_group"] = f"host:{host}" if host and count > 1 else ""
+
+rows.sort(key=lambda r: (r["name"].lower(), r["item_id"], r["item_uri"]))
+
+with open(result_path, "w", encoding="utf-8") as f:
+    json.dump(rows, f, indent=2)
+PY
+
+emit_output() {
+  local dest="$1"
+  case "$FORMAT" in
+    json)
+      cat "$RESULT_JSON" > "$dest"
+      ;;
+    csv)
+      python3 - "$RESULT_JSON" > "$dest" <<'PY'
+import csv
+import json
+import sys
+
+rows = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+fields = [
+    "item_id","name","type","folder","status","updated","item_uri",
+    "scheme","host","port","class","stale_signals","duplicate_group",
+    "duplicate_count","canonical_host","canonical_url"
+]
+writer = csv.DictWriter(sys.stdout, fieldnames=fields)
+writer.writeheader()
+for r in rows:
+    out = dict(r)
+    out["stale_signals"] = ";".join(r.get("stale_signals", []))
+    writer.writerow(out)
+PY
+      ;;
+    table)
+      python3 - "$RESULT_JSON" > "$dest" <<'PY'
+import json
+import sys
+from collections import Counter
+
+rows = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+print("vaultwarden.uri.audit")
+print()
+print(f"rows: {len(rows)}")
+status_counts = Counter(r.get("status", "") for r in rows)
+print(f"active_rows: {status_counts.get('active', 0)}")
+print(f"trashed_rows: {status_counts.get('trashed', 0)}")
+print()
+print(f"{'NAME':30} {'FOLDER':16} {'HOST':28} {'CLASS':10} {'DUP':4} SIGNALS")
+print(f"{'-'*30} {'-'*16} {'-'*28} {'-'*10} {'-'*4} {'-'*28}")
+for r in rows:
+    signals = ",".join(r.get("stale_signals", []))
+    print(f"{(r.get('name','') or '')[:30]:30} {(r.get('folder','') or '')[:16]:16} {(r.get('host','') or '-')[:28]:28} {(r.get('class','') or '')[:10]:10} {str(r.get('duplicate_count',0)):>4} {signals[:80]}")
+PY
+      ;;
+  esac
+}
+
+if [[ -n "$OUTPUT" ]]; then
+  emit_output "$OUTPUT"
+  if [[ "$FORMAT" == "table" ]]; then
+    echo
+    echo "output: $OUTPUT"
+  fi
+else
+  emit_output /dev/stdout
+fi

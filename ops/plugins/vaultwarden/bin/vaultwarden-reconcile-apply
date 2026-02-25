@@ -1,0 +1,449 @@
+#!/usr/bin/env bash
+# vaultwarden.reconcile.apply - Guarded Vaultwarden mutation surface.
+#
+# Default mode is dry-run. Use --execute + --confirm GO-LIVE-VAULTWARDEN-CLI to mutate.
+# Allowed mutations only:
+# - URI update
+# - Folder move
+# - Soft-delete to trash (retire_candidate only, requires --allow-retire)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+INFISICAL_AGENT="$SPINE_ROOT/ops/tools/infisical-agent.sh"
+RULES_FILE_DEFAULT="$SPINE_ROOT/ops/data/vaultwarden/reconcile_rules.yaml"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+REPORT_INPUT=""
+RULES_FILE="$RULES_FILE_DEFAULT"
+MODE="auto"
+EXECUTE=false
+ALLOW_RETIRE=false
+ACTIONS_FILTER="update_uri,move_folder,quarantine,retire_candidate"
+ITEM_IDS=""
+TAKE=""
+MAX_ACTIONS=""
+CONFIRM_VALUE=""
+OUTPUT=""
+
+usage() {
+  cat <<USAGE
+Usage: vaultwarden-reconcile-apply [options]
+
+Options:
+  --input <path>          Reconcile report JSON (omit to generate)
+  --rules <path>          reconcile_rules.yaml path
+  --mode <auto|bw>        Mode for generated report (default: auto)
+  --actions <csv>         Actions to apply (default: update_uri,move_folder,quarantine,retire_candidate)
+  --item-ids <csv>        Restrict to specific item IDs (comma-separated)
+  --take <n>              Apply only first N planned rows after filters
+  --allow-retire          Allow retire_candidate -> soft delete to trash
+  --max-actions <n>       Max allowed actions in this run
+  --execute               Perform mutations (default: dry-run)
+  --confirm <phrase>      Required when --execute (default phrase from reconcile_rules.yaml)
+  --output <path>         Receipt JSON path (default: receipts/audits/infra/vaultwarden-reconcile-apply-<ts>.json)
+  -h, --help              Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift; continue ;;
+    --input)
+      REPORT_INPUT="${2:?--input requires path}"; shift 2 ;;
+    --rules)
+      RULES_FILE="${2:?--rules requires path}"; shift 2 ;;
+    --mode)
+      MODE="${2:?--mode requires auto|bw}"; shift 2 ;;
+    --actions)
+      ACTIONS_FILTER="${2:?--actions requires csv}"; shift 2 ;;
+    --item-ids)
+      ITEM_IDS="${2:?--item-ids requires csv}"; shift 2 ;;
+    --take)
+      TAKE="${2:?--take requires integer}"; shift 2 ;;
+    --allow-retire)
+      ALLOW_RETIRE=true; shift ;;
+    --max-actions)
+      MAX_ACTIONS="${2:?--max-actions requires integer}"; shift 2 ;;
+    --execute)
+      EXECUTE=true; shift ;;
+    --confirm)
+      CONFIRM_VALUE="${2:?--confirm requires phrase}"; shift 2 ;;
+    --output)
+      OUTPUT="${2:?--output requires path}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      _stop "unknown arg: $1" ;;
+  esac
+done
+
+case "$MODE" in
+  auto|bw) ;;
+  *) _stop "invalid --mode '$MODE' (expected auto|bw)" ;;
+esac
+
+command -v python3 >/dev/null 2>&1 || _stop "missing dependency: python3"
+command -v jq >/dev/null 2>&1 || _stop "missing dependency: jq"
+command -v yq >/dev/null 2>&1 || _stop "missing dependency: yq"
+command -v bw >/dev/null 2>&1 || _stop "missing dependency: bw CLI"
+[[ -x "$INFISICAL_AGENT" ]] || _stop "missing infisical agent: $INFISICAL_AGENT"
+[[ -f "$RULES_FILE" ]] || _stop "missing rules file: $RULES_FILE"
+
+MAX_DEFAULT="$(yq -r '.apply_safety.max_actions_default // 100' "$RULES_FILE")"
+MAX_HARD_STOP="$(yq -r '.apply_safety.max_actions_execute_hard_stop // 250' "$RULES_FILE")"
+CONFIRM_PHRASE="$(yq -r '.apply_safety.require_confirm_phrase // "GO-LIVE-VAULTWARDEN-CLI"' "$RULES_FILE")"
+QUARANTINE_FOLDER="$(yq -r '.actions.quarantine_folder // "90-quarantine"' "$RULES_FILE")"
+
+if [[ -z "$MAX_ACTIONS" ]]; then
+  MAX_ACTIONS="$MAX_DEFAULT"
+fi
+[[ "$MAX_ACTIONS" =~ ^[0-9]+$ ]] || _stop "--max-actions must be integer"
+[[ "$MAX_DEFAULT" =~ ^[0-9]+$ ]] || _stop "rules max_actions_default must be integer"
+[[ "$MAX_HARD_STOP" =~ ^[0-9]+$ ]] || _stop "rules max_actions_execute_hard_stop must be integer"
+if [[ -n "$TAKE" ]]; then
+  [[ "$TAKE" =~ ^[0-9]+$ ]] || _stop "--take must be integer"
+fi
+
+if [[ "$EXECUTE" == "true" ]]; then
+  [[ -n "$CONFIRM_VALUE" ]] || _stop "--execute requires --confirm <phrase>"
+  [[ "$CONFIRM_VALUE" == "$CONFIRM_PHRASE" ]] || _stop "confirm phrase mismatch (expected '$CONFIRM_PHRASE')"
+fi
+
+TMP_DIR="$(mktemp -d)"
+REPORT_JSON="$TMP_DIR/reconcile-report.json"
+PLAN_JSON="$TMP_DIR/reconcile-plan.json"
+
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+if [[ -z "$OUTPUT" ]]; then
+  mkdir -p "$SPINE_ROOT/receipts/audits/infra"
+  OUTPUT="$SPINE_ROOT/receipts/audits/infra/vaultwarden-reconcile-apply-${TS}.json"
+fi
+
+SESSION=""
+
+cleanup() {
+  if [[ -n "$SESSION" ]]; then
+    if declare -f vw_bw >/dev/null 2>&1; then
+      BW_SESSION="$SESSION" vw_bw lock --session "$SESSION" >/dev/null 2>&1 || true
+    fi
+  fi
+  if declare -f vw_bw >/dev/null 2>&1; then
+    vw_bw logout >/dev/null 2>&1 || true
+  fi
+  if declare -f vw_proxy_stop >/dev/null 2>&1; then
+    vw_proxy_stop || true
+  fi
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+if [[ -n "$REPORT_INPUT" ]]; then
+  [[ -f "$REPORT_INPUT" ]] || _stop "input report not found: $REPORT_INPUT"
+  cp "$REPORT_INPUT" "$REPORT_JSON"
+else
+  "$SCRIPT_DIR/vaultwarden-reconcile-report" --mode "$MODE" --format json --output "$REPORT_JSON" >/dev/null
+fi
+
+python3 - "$REPORT_JSON" "$PLAN_JSON" "$ACTIONS_FILTER" "$ALLOW_RETIRE" "$QUARANTINE_FOLDER" "$ITEM_IDS" "$TAKE" <<'PY'
+import json
+import sys
+
+report_path, plan_path, actions_csv, allow_retire_raw, quarantine_folder, item_ids_csv, take_raw = sys.argv[1:8]
+allow_retire = allow_retire_raw.lower() == "true"
+allowed = {a.strip() for a in actions_csv.split(",") if a.strip()}
+item_ids = {i.strip() for i in item_ids_csv.split(",") if i.strip()} if item_ids_csv else set()
+take = int(take_raw) if take_raw else 0
+
+report = json.load(open(report_path, "r", encoding="utf-8"))
+actions = report.get("actions", [])
+
+planned = []
+skipped = []
+
+for action in actions:
+    kind = str(action.get("action") or "")
+    item_id = str(action.get("item_id") or "")
+    if not kind or kind == "keep":
+        continue
+
+    if item_ids and item_id not in item_ids:
+        skipped.append({"item_id": item_id, "name": action.get("name", ""), "action": kind, "reason": "item_id_not_selected"})
+        continue
+
+    if kind not in allowed:
+        skipped.append({"item_id": item_id, "name": action.get("name", ""), "action": kind, "reason": "action_not_selected"})
+        continue
+
+    if kind == "retire_candidate" and not allow_retire:
+        skipped.append({"item_id": item_id, "name": action.get("name", ""), "action": kind, "reason": "retire_not_allowed"})
+        continue
+
+    record = {
+        "item_id": item_id,
+        "name": action.get("name", ""),
+        "action": kind,
+        "current_folder": action.get("current_folder", ""),
+        "proposed_folder": action.get("proposed_folder", ""),
+        "proposed_uri": action.get("proposed_uri", ""),
+        "reasons": action.get("reasons", []),
+    }
+
+    if kind == "quarantine" and not record["proposed_folder"]:
+      record["proposed_folder"] = quarantine_folder
+
+    planned.append(record)
+
+if take > 0:
+    overflow = planned[take:]
+    planned = planned[:take]
+    for rec in overflow:
+        skipped.append({"item_id": rec.get("item_id", ""), "name": rec.get("name", ""), "action": rec.get("action", ""), "reason": "take_limit"})
+
+plan = {
+    "generated_from": report_path,
+    "summary": {
+        "planned": len(planned),
+        "skipped": len(skipped),
+    },
+    "planned": planned,
+    "skipped": skipped,
+}
+json.dump(plan, open(plan_path, "w", encoding="utf-8"), indent=2)
+PY
+
+PLANNED_COUNT="$(jq -r '.summary.planned // 0' "$PLAN_JSON")"
+SKIPPED_COUNT="$(jq -r '.summary.skipped // 0' "$PLAN_JSON")"
+
+MAX_EXCEEDED=false
+if (( PLANNED_COUNT > MAX_ACTIONS )); then
+  if [[ "$EXECUTE" == "true" ]]; then
+    _stop "planned actions ($PLANNED_COUNT) exceed --max-actions ($MAX_ACTIONS)"
+  else
+    MAX_EXCEEDED=true
+  fi
+fi
+if [[ "$EXECUTE" == "true" ]] && (( PLANNED_COUNT > MAX_HARD_STOP )); then
+  _stop "planned actions ($PLANNED_COUNT) exceed hard stop ($MAX_HARD_STOP)"
+fi
+
+# shellcheck source=../lib/proxy-session.sh
+source "$SCRIPT_DIR/../lib/proxy-session.sh"
+
+read_secret() {
+  local key="$1"
+  "$INFISICAL_AGENT" get-cached infrastructure prod "$key" --no-cache 2>/dev/null || true
+}
+
+capture_counts() {
+  local active trash folders total
+  active="$(BW_SESSION="$SESSION" vw_bw list items --session "$SESSION" 2>/dev/null | jq 'length' 2>/dev/null || echo 0)"
+  trash="$(BW_SESSION="$SESSION" vw_bw list items --trash --session "$SESSION" 2>/dev/null | jq 'length' 2>/dev/null || echo 0)"
+  folders="$(BW_SESSION="$SESSION" vw_bw list folders --session "$SESSION" 2>/dev/null | jq 'length' 2>/dev/null || echo 0)"
+  total=$((active + trash))
+  printf '{"active":%s,"trashed":%s,"folders":%s,"total":%s}' "$active" "$trash" "$folders" "$total"
+}
+
+APPLIED_JSONL="$TMP_DIR/applied.jsonl"
+SKIPPED_EXEC_JSONL="$TMP_DIR/skipped_exec.jsonl"
+ERRORS_JSONL="$TMP_DIR/errors.jsonl"
+: > "$APPLIED_JSONL"
+: > "$SKIPPED_EXEC_JSONL"
+: > "$ERRORS_JSONL"
+
+BEFORE_COUNTS='{}'
+AFTER_COUNTS='{}'
+
+if [[ "$EXECUTE" == "true" ]]; then
+  SERVER_URL="$(read_secret VAULTWARDEN_BW_SERVER_URL)"
+  CLIENT_ID="$(read_secret VAULTWARDEN_BW_CLIENTID)"
+  CLIENT_SECRET="$(read_secret VAULTWARDEN_BW_CLIENTSECRET)"
+  MASTER_PASSWORD="$(read_secret VAULTWARDEN_BW_MASTER_PASSWORD)"
+  [[ -n "$SERVER_URL" && -n "$CLIENT_ID" && -n "$CLIENT_SECRET" && -n "$MASTER_PASSWORD" ]] || {
+    _stop "missing Vaultwarden bw auth secrets in Infisical"
+  }
+
+  vw_proxy_start || _stop "could not start scope-rewriting proxy"
+  vw_bw logout >/dev/null 2>&1 || true
+  BW_CLIENTID="$CLIENT_ID" BW_CLIENTSECRET="$CLIENT_SECRET" vw_bw login --apikey >/dev/null 2>&1 || _stop "bw login failed"
+  SESSION="$(BW_PASSWORD="$MASTER_PASSWORD" vw_bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
+  [[ -n "$SESSION" ]] || _stop "bw unlock failed"
+  BW_SESSION="$SESSION" vw_bw sync --session "$SESSION" >/dev/null 2>&1 || true
+
+  BEFORE_COUNTS="$(capture_counts)"
+
+  FOLDERS_RAW="$TMP_DIR/folders-raw.json"
+  BW_SESSION="$SESSION" vw_bw list folders --session "$SESSION" > "$FOLDERS_RAW"
+
+  declare -A FOLDER_ID_BY_NAME
+  while IFS=$'\t' read -r fname fid; do
+    [[ -n "$fname" && -n "$fid" ]] || continue
+    if [[ -z "${FOLDER_ID_BY_NAME[$fname]:-}" ]]; then
+      FOLDER_ID_BY_NAME["$fname"]="$fid"
+    fi
+  done < <(jq -r '.[] | select(.name != null and .id != null) | [.name, .id] | @tsv' "$FOLDERS_RAW")
+
+  mapfile -t PLAN_ROWS < <(jq -r '.planned[] | @base64' "$PLAN_JSON")
+  for row_b64 in "${PLAN_ROWS[@]}"; do
+    row_json="$(printf '%s' "$row_b64" | base64 --decode)"
+    item_id="$(jq -r '.item_id // ""' <<<"$row_json")"
+    item_name="$(jq -r '.name // ""' <<<"$row_json")"
+    action="$(jq -r '.action // ""' <<<"$row_json")"
+    proposed_uri="$(jq -r '.proposed_uri // ""' <<<"$row_json")"
+    proposed_folder="$(jq -r '.proposed_folder // ""' <<<"$row_json")"
+
+    if [[ -z "$item_id" || -z "$action" ]]; then
+      jq -nc --arg item_id "$item_id" --arg name "$item_name" --arg action "$action" --arg reason "missing_item_or_action" '{item_id:$item_id,name:$name,action:$action,reason:$reason}' >> "$SKIPPED_EXEC_JSONL"
+      continue
+    fi
+
+    if [[ "$action" == "retire_candidate" ]]; then
+      if BW_SESSION="$SESSION" vw_bw delete item "$item_id" --session "$SESSION" >/dev/null 2>&1; then
+        jq -nc --arg item_id "$item_id" --arg name "$item_name" --arg action "$action" '{item_id:$item_id,name:$name,action:$action,result:"applied"}' >> "$APPLIED_JSONL"
+      else
+        jq -nc --arg item_id "$item_id" --arg name "$item_name" --arg action "$action" --arg err "bw delete failed" '{item_id:$item_id,name:$name,action:$action,error:$err}' >> "$ERRORS_JSONL"
+      fi
+      continue
+    fi
+
+    folder_id=""
+    if [[ -n "$proposed_folder" ]]; then
+      folder_id="${FOLDER_ID_BY_NAME[$proposed_folder]:-}"
+      if [[ -z "$folder_id" ]]; then
+        jq -nc --arg item_id "$item_id" --arg name "$item_name" --arg action "$action" --arg reason "target_folder_missing:$proposed_folder" '{item_id:$item_id,name:$name,action:$action,reason:$reason}' >> "$SKIPPED_EXEC_JSONL"
+        continue
+      fi
+    fi
+
+    item_json="$(BW_SESSION="$SESSION" vw_bw get item "$item_id" --session "$SESSION" 2>/dev/null || true)"
+    if [[ -z "$item_json" ]]; then
+      jq -nc --arg item_id "$item_id" --arg name "$item_name" --arg action "$action" --arg reason "item_not_found" '{item_id:$item_id,name:$name,action:$action,reason:$reason}' >> "$SKIPPED_EXEC_JSONL"
+      continue
+    fi
+
+    updated_json="$item_json"
+
+    if [[ -n "$proposed_uri" ]]; then
+      item_type="$(jq -r '.type // 0' <<<"$item_json")"
+      if [[ "$item_type" != "1" ]]; then
+        jq -nc --arg item_id "$item_id" --arg name "$item_name" --arg action "$action" --arg reason "uri_update_non_login_item" '{item_id:$item_id,name:$name,action:$action,reason:$reason}' >> "$SKIPPED_EXEC_JSONL"
+        continue
+      fi
+      updated_json="$(jq -c --arg uri "$proposed_uri" '.login = (.login // {}) | .login.uris = [{"uri":$uri}]' <<<"$updated_json")"
+    fi
+
+    if [[ -n "$folder_id" ]]; then
+      updated_json="$(jq -c --arg folder_id "$folder_id" '.folderId = $folder_id' <<<"$updated_json")"
+    fi
+
+    before_norm="$(jq -S -c . <<<"$item_json")"
+    after_norm="$(jq -S -c . <<<"$updated_json")"
+    if [[ "$before_norm" == "$after_norm" ]]; then
+      jq -nc --arg item_id "$item_id" --arg name "$item_name" --arg action "$action" --arg reason "no_change" '{item_id:$item_id,name:$name,action:$action,reason:$reason}' >> "$SKIPPED_EXEC_JSONL"
+      continue
+    fi
+
+    encoded="$(printf '%s' "$updated_json" | BW_SESSION="$SESSION" vw_bw encode 2>/dev/null || true)"
+    if [[ -z "$encoded" ]]; then
+      jq -nc --arg item_id "$item_id" --arg name "$item_name" --arg action "$action" --arg err "bw encode failed" '{item_id:$item_id,name:$name,action:$action,error:$err}' >> "$ERRORS_JSONL"
+      continue
+    fi
+
+    if BW_SESSION="$SESSION" vw_bw edit item "$item_id" "$encoded" --session "$SESSION" >/dev/null 2>&1; then
+      jq -nc --arg item_id "$item_id" --arg name "$item_name" --arg action "$action" --arg proposed_uri "$proposed_uri" --arg proposed_folder "$proposed_folder" '{item_id:$item_id,name:$name,action:$action,proposed_uri:$proposed_uri,proposed_folder:$proposed_folder,result:"applied"}' >> "$APPLIED_JSONL"
+    else
+      jq -nc --arg item_id "$item_id" --arg name "$item_name" --arg action "$action" --arg err "bw edit failed" '{item_id:$item_id,name:$name,action:$action,error:$err}' >> "$ERRORS_JSONL"
+    fi
+  done
+
+  AFTER_COUNTS="$(capture_counts)"
+else
+  BEFORE_COUNTS="$(jq -c '{active:(.summary.total_items // 0), trashed:0, folders:0, total:(.summary.total_items // 0)}' "$REPORT_JSON")"
+  AFTER_COUNTS="$BEFORE_COUNTS"
+fi
+
+python3 - "$PLAN_JSON" "$OUTPUT" "$EXECUTE" "$REPORT_JSON" "$BEFORE_COUNTS" "$AFTER_COUNTS" "$APPLIED_JSONL" "$SKIPPED_EXEC_JSONL" "$ERRORS_JSONL" "$MAX_ACTIONS" "$MAX_EXCEEDED" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+(
+    plan_path,
+    output_path,
+    execute_raw,
+    report_path,
+    before_counts_raw,
+    after_counts_raw,
+    applied_jsonl,
+    skipped_jsonl,
+    errors_jsonl,
+    max_actions_raw,
+    max_exceeded_raw,
+) = sys.argv[1:12]
+
+execute = execute_raw.lower() == "true"
+plan = json.load(open(plan_path, "r", encoding="utf-8"))
+report = json.load(open(report_path, "r", encoding="utf-8"))
+before_counts = json.loads(before_counts_raw)
+after_counts = json.loads(after_counts_raw)
+max_actions = int(max_actions_raw)
+max_exceeded = max_exceeded_raw.lower() == "true"
+
+
+def load_jsonl(path):
+    out = []
+    if not os.path.isfile(path):
+        return out
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            out.append(json.loads(line))
+    return out
+
+applied = load_jsonl(applied_jsonl)
+skipped_exec = load_jsonl(skipped_jsonl)
+errors = load_jsonl(errors_jsonl)
+
+receipt = {
+    "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "mode": "execute" if execute else "dry-run",
+    "max_actions": max_actions,
+    "max_actions_exceeded": max_exceeded,
+    "plan_summary": plan.get("summary", {}),
+    "report_summary": report.get("summary", {}),
+    "before_counts": before_counts,
+    "after_counts": after_counts,
+    "applied": applied,
+    "skipped_preplan": plan.get("skipped", []),
+    "skipped_execute": skipped_exec,
+    "errors": errors,
+}
+
+with open(output_path, "w", encoding="utf-8") as f:
+    json.dump(receipt, f, indent=2)
+PY
+
+APPLIED_COUNT="$(wc -l < "$APPLIED_JSONL" | tr -d ' ')"
+ERROR_COUNT="$(wc -l < "$ERRORS_JSONL" | tr -d ' ')"
+SKIP_EXEC_COUNT="$(wc -l < "$SKIPPED_EXEC_JSONL" | tr -d ' ')"
+
+echo "vaultwarden.reconcile.apply"
+echo "mode: $([[ "$EXECUTE" == "true" ]] && echo execute || echo dry-run)"
+echo "planned: $PLANNED_COUNT"
+echo "preplan_skipped: $SKIPPED_COUNT"
+echo "applied: $APPLIED_COUNT"
+echo "execute_skipped: $SKIP_EXEC_COUNT"
+echo "errors: $ERROR_COUNT"
+if [[ "$MAX_EXCEEDED" == "true" ]]; then
+  echo "warn: planned actions exceed --max-actions (dry-run only)"
+fi
+echo "receipt: $OUTPUT"
+
+if [[ "$EXECUTE" == "true" && "$ERROR_COUNT" != "0" ]]; then
+  exit 1
+fi

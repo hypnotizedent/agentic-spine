@@ -1,0 +1,413 @@
+#!/usr/bin/env bash
+# vaultwarden.reconcile.report - Build a deterministic Vaultwarden drift remediation plan.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+CANONICAL_FILE_DEFAULT="$SPINE_ROOT/ops/data/vaultwarden/canonical_hosts.yaml"
+TAXONOMY_FILE_DEFAULT="$SPINE_ROOT/ops/data/vaultwarden/folder_taxonomy.yaml"
+RULES_FILE_DEFAULT="$SPINE_ROOT/ops/data/vaultwarden/reconcile_rules.yaml"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+AUDIT_INPUT=""
+HEALTH_INPUT=""
+FORMAT="table"
+OUTPUT=""
+MODE="auto"
+SHOW_TRASHED=false
+TIMEOUT="4"
+CANONICAL_FILE="$CANONICAL_FILE_DEFAULT"
+TAXONOMY_FILE="$TAXONOMY_FILE_DEFAULT"
+RULES_FILE="$RULES_FILE_DEFAULT"
+
+usage() {
+  cat <<USAGE
+Usage: vaultwarden-reconcile-report [options]
+
+Options:
+  --audit-input <path>      URI audit JSON input (omit to generate)
+  --health-input <path>     URI health JSON input (omit to generate)
+  --mode <auto|bw>          Mode for generated audit data (default: auto)
+  --include-trashed         Include trashed entries in generated audit data
+  --timeout <seconds>       Healthcheck timeout when generated (default: 4)
+  --canonical <path>        canonical_hosts.yaml path
+  --taxonomy <path>         folder_taxonomy.yaml path
+  --rules <path>            reconcile_rules.yaml path
+  --format <table|csv|json> Output format (default: table)
+  --output <path>           Write output to file (stdout if omitted)
+  -h, --help                Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift; continue ;;
+    --audit-input)
+      AUDIT_INPUT="${2:?--audit-input requires path}"; shift 2 ;;
+    --health-input)
+      HEALTH_INPUT="${2:?--health-input requires path}"; shift 2 ;;
+    --mode)
+      MODE="${2:?--mode requires auto|bw}"; shift 2 ;;
+    --include-trashed)
+      SHOW_TRASHED=true; shift ;;
+    --timeout)
+      TIMEOUT="${2:?--timeout requires seconds}"; shift 2 ;;
+    --canonical)
+      CANONICAL_FILE="${2:?--canonical requires path}"; shift 2 ;;
+    --taxonomy)
+      TAXONOMY_FILE="${2:?--taxonomy requires path}"; shift 2 ;;
+    --rules)
+      RULES_FILE="${2:?--rules requires path}"; shift 2 ;;
+    --format)
+      FORMAT="${2:?--format requires table|csv|json}"; shift 2 ;;
+    --output)
+      OUTPUT="${2:?--output requires path}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      _stop "unknown arg: $1" ;;
+  esac
+done
+
+case "$MODE" in
+  auto|bw) ;;
+  *) _stop "invalid --mode '$MODE' (expected auto|bw)" ;;
+esac
+
+case "$FORMAT" in
+  table|csv|json) ;;
+  *) _stop "invalid --format '$FORMAT' (expected table|csv|json)" ;;
+esac
+
+[[ "$TIMEOUT" =~ ^[0-9]+([.][0-9]+)?$ ]] || _stop "--timeout must be numeric"
+
+command -v python3 >/dev/null 2>&1 || _stop "missing dependency: python3"
+command -v yq >/dev/null 2>&1 || _stop "missing dependency: yq"
+[[ -f "$CANONICAL_FILE" ]] || _stop "missing canonical file: $CANONICAL_FILE"
+[[ -f "$TAXONOMY_FILE" ]] || _stop "missing taxonomy file: $TAXONOMY_FILE"
+[[ -f "$RULES_FILE" ]] || _stop "missing rules file: $RULES_FILE"
+
+TMP_DIR="$(mktemp -d)"
+AUDIT_JSON="$TMP_DIR/uri-audit.json"
+HEALTH_JSON="$TMP_DIR/uri-health.json"
+CANONICAL_JSON="$TMP_DIR/canonical.json"
+TAXONOMY_JSON="$TMP_DIR/taxonomy.json"
+RULES_JSON="$TMP_DIR/rules.json"
+REPORT_JSON="$TMP_DIR/reconcile-report.json"
+
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+if [[ -n "$AUDIT_INPUT" ]]; then
+  [[ -f "$AUDIT_INPUT" ]] || _stop "audit input not found: $AUDIT_INPUT"
+  cp "$AUDIT_INPUT" "$AUDIT_JSON"
+else
+  cmd=("$SCRIPT_DIR/vaultwarden-uri-audit" --mode "$MODE" --format json --output "$AUDIT_JSON")
+  [[ "$SHOW_TRASHED" == "true" ]] && cmd+=(--include-trashed)
+  "${cmd[@]}" >/dev/null
+fi
+
+if [[ -n "$HEALTH_INPUT" ]]; then
+  [[ -f "$HEALTH_INPUT" ]] || _stop "health input not found: $HEALTH_INPUT"
+  cp "$HEALTH_INPUT" "$HEALTH_JSON"
+else
+  "$SCRIPT_DIR/vaultwarden-uri-healthcheck" --input "$AUDIT_JSON" --format json --timeout "$TIMEOUT" --output "$HEALTH_JSON" >/dev/null
+fi
+
+yq -o=json '.' "$CANONICAL_FILE" > "$CANONICAL_JSON"
+yq -o=json '.' "$TAXONOMY_FILE" > "$TAXONOMY_JSON"
+yq -o=json '.' "$RULES_FILE" > "$RULES_JSON"
+
+python3 - "$AUDIT_JSON" "$HEALTH_JSON" "$CANONICAL_JSON" "$TAXONOMY_JSON" "$RULES_JSON" "$REPORT_JSON" <<'PY'
+import json
+import re
+import sys
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+
+(
+    audit_path,
+    health_path,
+    canonical_path,
+    taxonomy_path,
+    rules_path,
+    report_path,
+) = sys.argv[1:7]
+
+audit_rows = json.load(open(audit_path, "r", encoding="utf-8"))
+health_rows = json.load(open(health_path, "r", encoding="utf-8"))
+canonical = json.load(open(canonical_path, "r", encoding="utf-8"))
+taxonomy = json.load(open(taxonomy_path, "r", encoding="utf-8"))
+rules = json.load(open(rules_path, "r", encoding="utf-8"))
+
+canonical_hosts = canonical.get("canonical_hosts", {}) if isinstance(canonical, dict) else {}
+valid_folders = set((taxonomy.get("folders") or {}).keys()) if isinstance(taxonomy, dict) else set()
+
+rule_quarantine_folder = ((rules.get("actions") or {}).get("quarantine_folder") or "90-quarantine")
+rule_retire_folder = ((rules.get("actions") or {}).get("retire_folder") or "99-retired")
+folder_rules = rules.get("folder_inference") or []
+
+health_by_key = {}
+for h in health_rows:
+    key = (str(h.get("item_id") or ""), str(h.get("item_uri") or ""))
+    health_by_key[key] = h
+
+items = defaultdict(list)
+for row in audit_rows:
+    items[str(row.get("item_id") or "")].append(row)
+
+
+def infer_folder(name: str, hosts):
+    for rule in folder_rules:
+        folder = str(rule.get("folder") or "").strip()
+        if not folder:
+            continue
+
+        host_regex = str(rule.get("host_regex") or "").strip()
+        if host_regex:
+            for host in hosts:
+                if host and re.search(host_regex, host, flags=re.IGNORECASE):
+                    return folder, f"rule:{rule.get('id', 'host_regex')}"
+
+        name_regex = str(rule.get("name_regex") or "").strip()
+        if name_regex and name and re.search(name_regex, name, flags=re.IGNORECASE):
+            return folder, f"rule:{rule.get('id', 'name_regex')}"
+
+    return "", ""
+
+
+def canonical_folder_for_hosts(hosts):
+    for host in hosts:
+        if not host:
+            continue
+        cfg = canonical_hosts.get(host)
+        if isinstance(cfg, dict):
+            folder = str(cfg.get("folder") or "").strip()
+            if folder:
+                return folder, f"canonical:{host}"
+    return "", ""
+
+
+actions = []
+for item_id, rows in items.items():
+    first = rows[0]
+    name = str(first.get("name") or "")
+    item_type = str(first.get("type") or "")
+    current_folder = str(first.get("folder") or "(unfiled)")
+    status = str(first.get("status") or "")
+
+    uris = []
+    hosts = []
+    stale = set()
+    for r in rows:
+        uri = str(r.get("item_uri") or "")
+        host = str(r.get("host") or "")
+        if uri and uri not in uris:
+            uris.append(uri)
+        if host and host not in hosts:
+            hosts.append(host)
+        for s in (r.get("stale_signals") or []):
+            stale.add(str(s))
+
+    health_matches = []
+    for r in rows:
+        key = (item_id, str(r.get("item_uri") or ""))
+        hm = health_by_key.get(key)
+        if hm:
+            health_matches.append(hm)
+
+    reachable_any = any(bool(h.get("reachable")) for h in health_matches)
+    dns_any = any(bool(h.get("dns_resolves")) for h in health_matches)
+
+    proposed_uri = ""
+    uri_reason = ""
+    for r in rows:
+        canonical_url = str(r.get("canonical_url") or "").strip()
+        if canonical_url and canonical_url not in uris:
+            proposed_uri = canonical_url
+            uri_reason = f"canonical-url:{r.get('canonical_host','')}"
+            break
+
+    expected_folder, folder_reason = canonical_folder_for_hosts([str(r.get("canonical_host") or "") for r in rows])
+    if not expected_folder:
+        expected_folder, folder_reason = infer_folder(name, hosts)
+    if not expected_folder and current_folder == "(unfiled)":
+        expected_folder = "00-inbox"
+        folder_reason = "default:unfiled"
+
+    reasons = []
+    confidence = "medium"
+    action = "keep"
+    proposed_folder = ""
+
+    if proposed_uri:
+        action = "update_uri"
+        reasons.append(uri_reason)
+        confidence = "high"
+        if expected_folder and expected_folder != current_folder:
+            proposed_folder = expected_folder
+            reasons.append(f"folder:{folder_reason}")
+
+    elif expected_folder and expected_folder != current_folder:
+        action = "move_folder"
+        proposed_folder = expected_folder
+        reasons.append(f"folder:{folder_reason}")
+        confidence = "medium" if expected_folder != "00-inbox" else "low"
+
+    elif stale:
+        if reachable_any:
+            action = "quarantine"
+            proposed_folder = rule_quarantine_folder
+            reasons.append("stale-but-reachable")
+            confidence = "medium"
+        else:
+            action = "retire_candidate"
+            proposed_folder = rule_retire_folder
+            reasons.append("stale-and-unreachable")
+            confidence = "high"
+
+    elif current_folder == "(unfiled)":
+        action = "move_folder"
+        proposed_folder = "00-inbox"
+        reasons.append("default:unfiled")
+        confidence = "low"
+
+    if proposed_folder and valid_folders and proposed_folder not in valid_folders:
+        reasons.append("proposed_folder_not_in_taxonomy")
+        confidence = "low"
+
+    actions.append(
+        {
+            "item_id": item_id,
+            "name": name,
+            "type": item_type,
+            "status": status,
+            "action": action,
+            "confidence": confidence,
+            "current_folder": current_folder,
+            "proposed_folder": proposed_folder,
+            "current_uris": uris,
+            "proposed_uri": proposed_uri,
+            "primary_host": hosts[0] if hosts else "",
+            "hosts": hosts,
+            "stale_signals": sorted(stale),
+            "health": {
+                "reachable_any": reachable_any,
+                "dns_any": dns_any,
+                "rows": len(health_matches),
+            },
+            "reasons": reasons,
+        }
+    )
+
+actions.sort(key=lambda a: (a["action"], a["name"].lower(), a["item_id"]))
+summary = Counter(a["action"] for a in actions)
+
+report = {
+    "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "summary": {
+        "total_items": len(actions),
+        "keep": summary.get("keep", 0),
+        "update_uri": summary.get("update_uri", 0),
+        "move_folder": summary.get("move_folder", 0),
+        "quarantine": summary.get("quarantine", 0),
+        "retire_candidate": summary.get("retire_candidate", 0),
+    },
+    "actions": actions,
+}
+
+with open(report_path, "w", encoding="utf-8") as f:
+    json.dump(report, f, indent=2)
+PY
+
+emit_output() {
+  local dest="$1"
+  case "$FORMAT" in
+    json)
+      cat "$REPORT_JSON" > "$dest"
+      ;;
+    csv)
+      python3 - "$REPORT_JSON" > "$dest" <<'PY'
+import csv
+import json
+import sys
+
+report = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+actions = report.get("actions", [])
+fields = [
+    "item_id", "name", "type", "status", "action", "confidence",
+    "current_folder", "proposed_folder", "primary_host", "current_uris",
+    "proposed_uri", "stale_signals", "health_reachable_any", "reasons"
+]
+writer = csv.DictWriter(sys.stdout, fieldnames=fields)
+writer.writeheader()
+for a in actions:
+    writer.writerow(
+        {
+            "item_id": a.get("item_id", ""),
+            "name": a.get("name", ""),
+            "type": a.get("type", ""),
+            "status": a.get("status", ""),
+            "action": a.get("action", ""),
+            "confidence": a.get("confidence", ""),
+            "current_folder": a.get("current_folder", ""),
+            "proposed_folder": a.get("proposed_folder", ""),
+            "primary_host": a.get("primary_host", ""),
+            "current_uris": ";".join(a.get("current_uris", []) or []),
+            "proposed_uri": a.get("proposed_uri", ""),
+            "stale_signals": ";".join(a.get("stale_signals", []) or []),
+            "health_reachable_any": str((a.get("health") or {}).get("reachable_any", False)).lower(),
+            "reasons": ";".join(a.get("reasons", []) or []),
+        }
+    )
+PY
+      ;;
+    table)
+      python3 - "$REPORT_JSON" > "$dest" <<'PY'
+import json
+import sys
+
+report = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+summary = report.get("summary", {})
+actions = report.get("actions", [])
+
+print("vaultwarden.reconcile.report")
+print()
+print("summary:")
+for key in ["total_items", "keep", "update_uri", "move_folder", "quarantine", "retire_candidate"]:
+    print(f"  {key}: {summary.get(key, 0)}")
+
+print()
+print(f"{'ACTION':16} {'NAME':30} {'FOLDER':16} {'PRIMARY_HOST':28} REASONS")
+print(f"{'-'*16} {'-'*30} {'-'*16} {'-'*28} {'-'*48}")
+for a in actions:
+    if a.get("action") == "keep":
+        continue
+    reasons = ",".join(a.get("reasons", []) or [])
+    folder = a.get("proposed_folder") or a.get("current_folder") or ""
+    print(
+        f"{(a.get('action','') or '')[:16]:16} "
+        f"{(a.get('name','') or '')[:30]:30} "
+        f"{folder[:16]:16} "
+        f"{(a.get('primary_host','') or '-')[:28]:28} "
+        f"{reasons[:120]}"
+    )
+PY
+      ;;
+  esac
+}
+
+if [[ -n "$OUTPUT" ]]; then
+  emit_output "$OUTPUT"
+  if [[ "$FORMAT" == "table" ]]; then
+    echo
+    echo "output: $OUTPUT"
+  fi
+else
+  emit_output /dev/stdout
+fi

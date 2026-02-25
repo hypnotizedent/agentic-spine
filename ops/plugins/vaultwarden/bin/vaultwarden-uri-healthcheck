@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+# vaultwarden.uri.healthcheck - Read-only URI reachability checks for Vaultwarden entries.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+INPUT=""
+FORMAT="table"
+TIMEOUT="4"
+LIMIT="0"
+MODE="auto"
+SHOW_TRASHED=false
+OUTPUT=""
+
+usage() {
+  cat <<USAGE
+Usage: vaultwarden-uri-healthcheck [options]
+
+Options:
+  --input <path>        URI audit JSON input (if omitted, runs vaultwarden-uri-audit)
+  --format <table|csv|json>  Output format (default: table)
+  --timeout <seconds>   Per-URI timeout (default: 4)
+  --limit <n>           Max unique URIs to check (0 = no limit, default)
+  --mode <auto|bw>      Mode passed to uri audit when --input is omitted
+  --include-trashed     Include trashed rows when generating audit input
+  --output <path>       Write output to file (stdout if omitted)
+  -h, --help            Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift; continue ;;
+    --input)
+      INPUT="${2:?--input requires path}"; shift 2 ;;
+    --format)
+      FORMAT="${2:?--format requires table|csv|json}"; shift 2 ;;
+    --timeout)
+      TIMEOUT="${2:?--timeout requires seconds}"; shift 2 ;;
+    --limit)
+      LIMIT="${2:?--limit requires integer}"; shift 2 ;;
+    --mode)
+      MODE="${2:?--mode requires auto|bw}"; shift 2 ;;
+    --include-trashed)
+      SHOW_TRASHED=true; shift ;;
+    --output)
+      OUTPUT="${2:?--output requires path}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      _stop "unknown arg: $1" ;;
+  esac
+done
+
+case "$FORMAT" in
+  table|csv|json) ;;
+  *) _stop "invalid --format '$FORMAT' (expected table|csv|json)" ;;
+esac
+
+case "$MODE" in
+  auto|bw) ;;
+  *) _stop "invalid --mode '$MODE' (expected auto|bw)" ;;
+esac
+
+[[ "$TIMEOUT" =~ ^[0-9]+([.][0-9]+)?$ ]] || _stop "--timeout must be numeric"
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || _stop "--limit must be integer"
+
+command -v python3 >/dev/null 2>&1 || _stop "missing dependency: python3"
+
+TMP_DIR="$(mktemp -d)"
+AUDIT_JSON="$TMP_DIR/uri-audit.json"
+RESULT_JSON="$TMP_DIR/uri-health.json"
+
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+if [[ -n "$INPUT" ]]; then
+  [[ -f "$INPUT" ]] || _stop "input file not found: $INPUT"
+  cp "$INPUT" "$AUDIT_JSON"
+else
+  cmd=("$SCRIPT_DIR/vaultwarden-uri-audit" --mode "$MODE" --format json --output "$AUDIT_JSON")
+  [[ "$SHOW_TRASHED" == "true" ]] && cmd+=(--include-trashed)
+  "${cmd[@]}" >/dev/null
+fi
+
+python3 - "$AUDIT_JSON" "$RESULT_JSON" "$TIMEOUT" "$LIMIT" <<'PY'
+import csv
+import ipaddress
+import json
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+
+input_path, output_path, timeout_raw, limit_raw = sys.argv[1:5]
+timeout = float(timeout_raw)
+limit = int(limit_raw)
+
+rows = json.load(open(input_path, "r", encoding="utf-8"))
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def parse_uri(uri: str):
+    if not uri:
+        return "", "", ""
+    parsed = urlparse(uri)
+    if not parsed.scheme and not parsed.netloc:
+        parsed = urlparse("//" + uri)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or ""
+    return scheme, host, str(port)
+
+
+def tcp_probe(host: str, port: int, timeout_s: float):
+    if not host or not port:
+        return False, ""
+    try:
+        start = time.time()
+        cmd = ["nc", "-z", "-w", str(max(1, int(timeout_s))), host, str(port)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(2.0, timeout_s + 1.0))
+        elapsed_ms = int((time.time() - start) * 1000)
+        if proc.returncode == 0:
+            return True, str(elapsed_ms)
+        err = (proc.stderr or proc.stdout or "").strip()
+        return False, err or "tcp_probe_failed"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def http_probe(url: str, timeout_s: float):
+    try:
+        start = time.time()
+        timeout_i = max(1, int(timeout_s))
+        cmd = [
+            "curl",
+            "-kLsS",
+            "-o", "/dev/null",
+            "-w", "%{http_code}",
+            "--max-time", str(timeout_i),
+            "--connect-timeout", str(timeout_i),
+            url,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(2.0, timeout_s + 1.0))
+        elapsed_ms = int((time.time() - start) * 1000)
+        code_raw = (proc.stdout or "").strip()
+        code = int(code_raw) if code_raw.isdigit() else 0
+        if proc.returncode == 0 and code > 0:
+            return True, code, elapsed_ms, ""
+        # Any HTTP response code still proves reachability.
+        if code > 0:
+            err = (proc.stderr or "").strip()
+            return True, code, elapsed_ms, err
+        err = (proc.stderr or proc.stdout or "").strip()
+        return False, 0, 0, err or "http_probe_failed"
+    except Exception as exc:
+        return False, 0, 0, str(exc)
+
+
+def check_uri(uri: str):
+    scheme, host, port_s = parse_uri(uri)
+    checked = now_iso()
+    result = {
+        "item_uri": uri,
+        "scheme": scheme,
+        "host": host,
+        "port": port_s,
+        "dns_resolves": False,
+        "reachable": False,
+        "http_status": "",
+        "tcp_open": False,
+        "latency_ms": "",
+        "error": "",
+        "checked_at": checked,
+    }
+
+    if not uri or not host:
+        result["error"] = "no_uri"
+        return result
+
+    # Avoid a separate blocking DNS resolver call; infer DNS signal from probe outcome.
+    result["dns_resolves"] = is_ip(host)
+    dns_err = ""
+
+    if scheme in {"http", "https"}:
+        url = uri
+        ok, code, latency, err = http_probe(url, timeout)
+        result["reachable"] = ok
+        result["http_status"] = str(code) if code else ""
+        result["latency_ms"] = str(latency) if latency else ""
+        if not ok:
+            probe_port = int(port_s) if str(port_s).isdigit() else (443 if scheme == "https" else 80)
+            tcp_ok, tcp_meta = tcp_probe(host, probe_port, timeout)
+            result["tcp_open"] = tcp_ok
+            if tcp_ok:
+                result["reachable"] = True
+                result["dns_resolves"] = True
+                result["latency_ms"] = tcp_meta
+            else:
+                result["error"] = err or dns_err or tcp_meta
+        else:
+            result["tcp_open"] = True
+            result["dns_resolves"] = True
+            if err:
+                result["error"] = err
+        return result
+
+    probe_port = int(port_s) if str(port_s).isdigit() else 443
+    tcp_ok, tcp_meta = tcp_probe(host, probe_port, timeout)
+    result["tcp_open"] = tcp_ok
+    result["reachable"] = tcp_ok
+    if tcp_ok:
+        result["dns_resolves"] = True
+        result["latency_ms"] = tcp_meta
+    else:
+        result["error"] = dns_err or tcp_meta
+    return result
+
+unique_order = []
+seen = set()
+for row in rows:
+    uri = str(row.get("item_uri") or "")
+    if uri not in seen:
+        seen.add(uri)
+        unique_order.append(uri)
+
+if limit > 0:
+    unique_order = unique_order[:limit]
+
+checks = {}
+max_workers = min(24, max(1, len(unique_order)))
+with ThreadPoolExecutor(max_workers=max_workers) as exe:
+    futures = {exe.submit(check_uri, uri): uri for uri in unique_order}
+    for fut in as_completed(futures):
+        uri = futures[fut]
+        try:
+            checks[uri] = fut.result()
+        except Exception as exc:
+            checks[uri] = {
+                "item_uri": uri,
+                "scheme": "",
+                "host": "",
+                "port": "",
+                "dns_resolves": False,
+                "reachable": False,
+                "http_status": "",
+                "tcp_open": False,
+                "latency_ms": "",
+                "error": str(exc),
+                "checked_at": now_iso(),
+            }
+
+out_rows = []
+for row in rows:
+    uri = str(row.get("item_uri") or "")
+    if limit > 0 and uri not in checks:
+        continue
+    c = checks.get(uri, check_uri(uri))
+    out_rows.append({
+        "item_id": row.get("item_id", ""),
+        "name": row.get("name", ""),
+        "folder": row.get("folder", ""),
+        "status": row.get("status", ""),
+        "item_uri": uri,
+        "host": c.get("host", ""),
+        "dns_resolves": bool(c.get("dns_resolves", False)),
+        "reachable": bool(c.get("reachable", False)),
+        "http_status": c.get("http_status", ""),
+        "tcp_open": bool(c.get("tcp_open", False)),
+        "latency_ms": c.get("latency_ms", ""),
+        "error": c.get("error", ""),
+        "checked_at": c.get("checked_at", ""),
+    })
+
+with open(output_path, "w", encoding="utf-8") as f:
+    json.dump(out_rows, f, indent=2)
+PY
+
+emit_output() {
+  local dest="$1"
+  case "$FORMAT" in
+    json)
+      cat "$RESULT_JSON" > "$dest"
+      ;;
+    csv)
+      python3 - "$RESULT_JSON" > "$dest" <<'PY'
+import csv
+import json
+import sys
+rows = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+fields = [
+    "item_id","name","folder","status","item_uri","host",
+    "dns_resolves","reachable","http_status","tcp_open","latency_ms","error","checked_at"
+]
+writer = csv.DictWriter(sys.stdout, fieldnames=fields)
+writer.writeheader()
+for row in rows:
+    writer.writerow(row)
+PY
+      ;;
+    table)
+      python3 - "$RESULT_JSON" > "$dest" <<'PY'
+import json
+import sys
+from collections import Counter
+
+rows = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+reach = Counter(bool(r.get("reachable", False)) for r in rows)
+print("vaultwarden.uri.healthcheck")
+print()
+print(f"rows: {len(rows)}")
+print(f"reachable: {reach.get(True, 0)}")
+print(f"unreachable: {reach.get(False, 0)}")
+print()
+print(f"{'NAME':30} {'HOST':28} {'REACH':6} {'DNS':5} {'HTTP':5} ERROR")
+print(f"{'-'*30} {'-'*28} {'-'*6} {'-'*5} {'-'*5} {'-'*40}")
+for r in rows:
+    print(
+        f"{(r.get('name','') or '')[:30]:30} "
+        f"{(r.get('host','') or '-')[:28]:28} "
+        f"{('yes' if r.get('reachable') else 'no'):6} "
+        f"{('yes' if r.get('dns_resolves') else 'no'):5} "
+        f"{str(r.get('http_status','') or '-'):5} "
+        f"{(r.get('error','') or '')[:80]}"
+    )
+PY
+      ;;
+  esac
+}
+
+if [[ -n "$OUTPUT" ]]; then
+  emit_output "$OUTPUT"
+  if [[ "$FORMAT" == "table" ]]; then
+    echo
+    echo "output: $OUTPUT"
+  fi
+else
+  emit_output /dev/stdout
+fi

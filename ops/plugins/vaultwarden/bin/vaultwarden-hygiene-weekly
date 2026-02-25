@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# vaultwarden.hygiene.weekly - Weekly read-only Vaultwarden hygiene runner.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+MODE="auto"
+SHOW_TRASHED=false
+TIMEOUT="4"
+LIMIT="0"
+OUT_DIR_BASE="$SPINE_ROOT/receipts/audits/infra"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+usage() {
+  cat <<USAGE
+Usage: vaultwarden-hygiene-weekly [options]
+
+Options:
+  --mode <auto|bw>       Mode for uri audit (default: auto)
+  --include-trashed      Include trashed rows
+  --timeout <seconds>    Healthcheck timeout per URI (default: 4)
+  --limit <n>            Max unique URIs to probe in healthcheck (0 = all, default)
+  --out-dir <path>       Base output directory (default: receipts/audits/infra)
+  -h, --help             Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift; continue ;;
+    --mode)
+      MODE="${2:?--mode requires auto|bw}"; shift 2 ;;
+    --include-trashed)
+      SHOW_TRASHED=true; shift ;;
+    --timeout)
+      TIMEOUT="${2:?--timeout requires seconds}"; shift 2 ;;
+    --limit)
+      LIMIT="${2:?--limit requires integer}"; shift 2 ;;
+    --out-dir)
+      OUT_DIR_BASE="${2:?--out-dir requires path}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *) _stop "unknown arg: $1" ;;
+  esac
+done
+
+case "$MODE" in
+  auto|bw) ;;
+  *) _stop "invalid --mode '$MODE' (expected auto|bw)" ;;
+esac
+[[ "$TIMEOUT" =~ ^[0-9]+([.][0-9]+)?$ ]] || _stop "--timeout must be numeric"
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || _stop "--limit must be integer"
+
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_DIR="$OUT_DIR_BASE/vaultwarden-hygiene-${TS}"
+mkdir -p "$RUN_DIR"
+
+AUDIT_JSON="$RUN_DIR/uri-audit.json"
+HEALTH_JSON="$RUN_DIR/uri-healthcheck.json"
+REPORT_JSON="$RUN_DIR/reconcile-report.json"
+APPLY_RECEIPT="$RUN_DIR/reconcile-apply-dry-run.json"
+SUMMARY_MD="$RUN_DIR/summary.md"
+
+cmd_audit=("$SCRIPT_DIR/vaultwarden-uri-audit" --mode "$MODE" --format json --output "$AUDIT_JSON")
+cmd_health=("$SCRIPT_DIR/vaultwarden-uri-healthcheck" --input "$AUDIT_JSON" --format json --timeout "$TIMEOUT" --limit "$LIMIT" --output "$HEALTH_JSON")
+cmd_report=("$SCRIPT_DIR/vaultwarden-reconcile-report" --audit-input "$AUDIT_JSON" --health-input "$HEALTH_JSON" --format json --output "$REPORT_JSON")
+cmd_apply=("$SCRIPT_DIR/vaultwarden-reconcile-apply" --input "$REPORT_JSON" --max-actions 100 --output "$APPLY_RECEIPT")
+
+if [[ "$SHOW_TRASHED" == "true" ]]; then
+  cmd_audit+=(--include-trashed)
+fi
+
+"${cmd_audit[@]}" >/dev/null
+"${cmd_health[@]}" >/dev/null
+"${cmd_report[@]}" >/dev/null
+"${cmd_apply[@]}" >/dev/null
+
+python3 - "$REPORT_JSON" "$APPLY_RECEIPT" "$SUMMARY_MD" "$RUN_DIR" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+report_path, apply_path, summary_path, run_dir = sys.argv[1:5]
+report = json.load(open(report_path, "r", encoding="utf-8"))
+apply_receipt = json.load(open(apply_path, "r", encoding="utf-8"))
+summary = report.get("summary", {})
+
+lines = []
+lines.append("# Vaultwarden Hygiene Weekly Receipt")
+lines.append("")
+lines.append(f"- generated_at: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
+lines.append(f"- run_dir: {run_dir}")
+lines.append("")
+lines.append("## Reconcile Summary")
+for key in ["total_items", "keep", "update_uri", "move_folder", "quarantine", "retire_candidate"]:
+    lines.append(f"- {key}: {summary.get(key, 0)}")
+lines.append("")
+lines.append("## Apply Dry-Run Summary")
+plan_summary = apply_receipt.get("plan_summary", {})
+lines.append(f"- planned: {plan_summary.get('planned', 0)}")
+lines.append(f"- skipped: {plan_summary.get('skipped', 0)}")
+lines.append(f"- errors: {len(apply_receipt.get('errors', []))}")
+
+with open(summary_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+PY
+
+echo "vaultwarden.hygiene.weekly"
+echo "run_dir: $RUN_DIR"
+echo "audit: $AUDIT_JSON"
+echo "health: $HEALTH_JSON"
+echo "report: $REPORT_JSON"
+echo "apply_dry_run: $APPLY_RECEIPT"
+echo "summary: $SUMMARY_MD"
