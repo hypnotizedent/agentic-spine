@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# home.backup.vzdump.run — Trigger vzdump run on proxmox-home for selected VMIDs.
+# TRIAGE: check proxmox-home SSH connectivity, vzdump job config, storage mount
+#
+# Mutating. Default is dry-run (prints command). Use --execute to run.
+# Also supports --restart-scheduler to restart pvescheduler before backup.
+#
+# Usage:
+#   home-backup-vzdump-run [--vmids 100,105] [--storage synology-backups] [--restart-scheduler] [--execute]
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SSH_TARGETS_FILE="${SSH_TARGETS_FILE:-$ROOT/ops/bindings/ssh.targets.yaml}"
+
+_need() { command -v "$1" >/dev/null 2>&1 || { echo "STOP: missing dependency: $1" >&2; exit 2; }; }
+_need yq
+_need ssh
+
+[[ -f "$SSH_TARGETS_FILE" ]] || { echo "STOP: missing ssh targets: $SSH_TARGETS_FILE" >&2; exit 2; }
+
+TARGET_ID="proxmox-home"
+VMIDS_CSV="100,105"
+STORAGE="synology-backups"
+COMPRESS="zstd"
+MODE="snapshot"
+MAXFILES="3"
+EXECUTE="0"
+RESTART_SCHED="0"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --vmids) VMIDS_CSV="${2:?--vmids requires a value}"; shift 2 ;;
+    --storage) STORAGE="${2:?--storage requires a value}"; shift 2 ;;
+    --compress) COMPRESS="${2:?--compress requires a value}"; shift 2 ;;
+    --mode) MODE="${2:?--mode requires a value}"; shift 2 ;;
+    --maxfiles) MAXFILES="${2:?--maxfiles requires a value}"; shift 2 ;;
+    --restart-scheduler) RESTART_SCHED="1"; shift ;;
+    --execute) EXECUTE="1"; shift ;;
+    --dry-run) EXECUTE="0"; shift ;;
+    -h|--help)
+      echo "Usage: $0 [--vmids <csv>] [--storage <name>] [--restart-scheduler] [--execute]"
+      exit 0
+      ;;
+    *) echo "STOP: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_TARGETS_FILE")"
+SSH_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_TARGETS_FILE" | head -n1)"
+SSH_USER="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"root\"" "$SSH_TARGETS_FILE" | head -n1)"
+SSH_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // ${DEF_PORT}" "$SSH_TARGETS_FILE" | head -n1)"
+
+if [[ -z "$SSH_HOST" || "$SSH_HOST" == "null" ]]; then
+  echo "STOP: unknown ssh target id: $TARGET_ID" >&2
+  exit 2
+fi
+
+ssh_opts=(
+  -o "ConnectTimeout=6"
+  -o "StrictHostKeyChecking=no"
+  -o "BatchMode=yes"
+  -o "LogLevel=ERROR"
+  -p "$SSH_PORT"
+)
+
+echo "home.backup.vzdump.run"
+echo "target: $TARGET_ID ($SSH_USER@$SSH_HOST:$SSH_PORT)"
+echo "vmids: $VMIDS_CSV"
+echo "storage: $STORAGE"
+echo "compress: $COMPRESS"
+echo "mode: $MODE"
+echo "maxfiles: $MAXFILES"
+echo "restart_scheduler: $RESTART_SCHED"
+echo "execute: $EXECUTE"
+echo
+
+# Step 1: Preflight checks (always run)
+echo "=== preflight ==="
+ssh "${ssh_opts[@]}" "${SSH_USER}@${SSH_HOST}" "pvesm status | grep -w '$STORAGE' && echo 'mount: OK' || echo 'mount: FAIL'"
+echo
+
+if [[ "$EXECUTE" != "1" ]]; then
+  echo "DRY-RUN: would restart scheduler ($RESTART_SCHED) and run vzdump for $VMIDS_CSV"
+  echo "Pass --execute to run."
+  exit 0
+fi
+
+# Step 2: Restart scheduler if requested
+if [[ "$RESTART_SCHED" == "1" ]]; then
+  echo "=== restarting pvescheduler ==="
+  ssh "${ssh_opts[@]}" "${SSH_USER}@${SSH_HOST}" "systemctl restart pvescheduler && echo 'pvescheduler restarted OK' && sleep 2 && systemctl status pvescheduler --no-pager | head -5"
+  echo
+fi
+
+# Step 3: Run vzdump for each VMID
+# LXC containers need --tmpdir /var/tmp to avoid NFS permission issues with lxc-usernsexec
+IFS=',' read -ra VMID_ARRAY <<< "$VMIDS_CSV"
+for vmid in "${VMID_ARRAY[@]}"; do
+  echo "=== vzdump VMID $vmid ==="
+  # Detect if VMID is LXC (pct) or QEMU (qm) to set tmpdir
+  TMPDIR_OPT=""
+  IS_LXC="$(ssh "${ssh_opts[@]}" "${SSH_USER}@${SSH_HOST}" "pct status $vmid 2>/dev/null && echo LXC || echo QEMU")"
+  if echo "$IS_LXC" | grep -q LXC; then
+    TMPDIR_OPT="--tmpdir /var/tmp"
+    echo "  (LXC detected — using --tmpdir /var/tmp for NFS compat)"
+  fi
+  ssh "${ssh_opts[@]}" "${SSH_USER}@${SSH_HOST}" "vzdump $vmid --storage '$STORAGE' --compress '$COMPRESS' --mode '$MODE' --prune-backups 'keep-last=$MAXFILES' $TMPDIR_OPT" 2>&1
+  echo
+done
+
+echo "=== post-check ==="
+ssh "${ssh_opts[@]}" "${SSH_USER}@${SSH_HOST}" "ls -lt /mnt/pve/synology-backups/dump/ | head -10"
+echo
+echo "done"
