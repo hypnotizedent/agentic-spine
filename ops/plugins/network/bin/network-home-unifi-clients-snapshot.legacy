@@ -6,10 +6,19 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 AGENT="$SPINE_ROOT/ops/tools/unifi-home-agent.sh"
+OBSERVED_BINDING="$SPINE_ROOT/ops/bindings/network.unifi.home.clients.observed.yaml"
 
 [[ -x "$AGENT" ]] || { echo "STOP (2): missing unifi-home-agent.sh"; exit 2; }
+[[ -f "$OBSERVED_BINDING" ]] || { echo "STOP (2): missing observed binding: $OBSERVED_BINDING"; exit 2; }
+command -v yq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: yq"; exit 2; }
 
 echo "network.home.unifi.clients.snapshot"
 echo
 
 "$AGENT" clients "$@"
+
+NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TODAY_UTC="$(date -u +%Y-%m-%d)"
+yq -i \
+  ".generated_at = \"$NOW_UTC\" | .updated_at = \"$TODAY_UTC\" | .last_verified = \"$TODAY_UTC\"" \
+  "$OBSERVED_BINDING"
