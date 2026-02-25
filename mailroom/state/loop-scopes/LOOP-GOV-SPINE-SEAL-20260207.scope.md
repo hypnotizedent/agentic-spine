@@ -1,7 +1,7 @@
 # LOOP-GOV-SPINE-SEAL-20260207
 
-> **Status:** open (blocked)
-> **Blocked By:** LOOP-INFRA-VM-RESTRUCTURE-20260206
+> **Status:** open
+> **Blocked By:** none (previously LOOP-INFRA-VM-RESTRUCTURE-20260206, now complete)
 > **Owner:** @ronny
 > **Created:** 2026-02-07
 > **Severity:** medium
