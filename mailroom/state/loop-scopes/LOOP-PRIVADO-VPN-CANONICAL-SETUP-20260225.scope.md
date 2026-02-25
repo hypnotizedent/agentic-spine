@@ -20,7 +20,7 @@ Privado VPN was provisioned for the music pipeline upgrade (LOOP-MUSIC-PIPELINE-
 
 ### Current State (from audit)
 
-- **Gluetun container**: added to download-stack docker-compose (not yet deployed)
+- **Gluetun container**: deployed and healthy on download-stack
 - **Provider**: Privado VPN, OpenVPN protocol, Netherlands default
 - **Tunneled service**: slskd only (network_mode: "service:gluetun")
 - **NOT tunneled**: qBittorrent (direct bridge, ports 8081/6881), SABnzbd
@@ -29,9 +29,9 @@ Privado VPN was provisioned for the music pipeline upgrade (LOOP-MUSIC-PIPELINE-
 - **Privado DNS-over-HTTPS**: https://dns.privadovpn.com/nhtlinlzxhvo
 - **Privado DNS-over-TLS**: nhtlinlzxhvo.dns.privadovpn.com
 - **Privado features available**: SOCKS5 proxy, Email Relay, Control Tower DNS
-- **No health probe** for gluetun in services.health.yaml
-- **No VPN provider binding** document exists
-- **No D-gate** checks VPN health
+- **VPN provider binding**: `ops/bindings/vpn.provider.yaml` (authoritative)
+- **Runbook**: `docs/runbooks/privado-vpn-setup.md`
+- **D-gate**: `D223 media-vpn-routing-lock` enforces provider/routing/runtime parity
 
 ## Phases
 
@@ -98,6 +98,19 @@ Document in the runbook:
 
 1. Update workbench network runbook to include Privado VPN as secondary provider
 2. Update DEVICE_IDENTITY_SSOT.md to note: "Tailscale = primary overlay, Privado VPN = media P2P tunnel"
+
+## Execution Status (2026-02-25)
+
+- **Phase 1**: DONE  
+  Created `ops/bindings/vpn.provider.yaml` and `docs/runbooks/privado-vpn-setup.md`.
+- **Phase 2**: DONE  
+  Added `D223 media-vpn-routing-lock` and wired it into media verify topology.
+- **Phase 3**: DONE  
+  qBittorrent decision gate documented as `QB-VPN-ROUTE-001` with current route mode `direct`.
+- **Phase 4**: DONE  
+  DNS policy captured in `vpn.provider.yaml` and runbook (Pi-hole remains Cloudflare; tunnel DNS isolated to gluetun).
+- **Phase 5**: PENDING  
+  Workbench-side topology documents still need parallel update.
 
 ## Gaps (to be filed)
 
