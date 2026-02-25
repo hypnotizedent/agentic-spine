@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MUSIC-PIPELINE-UPGRADE-20260225
 created: 2026-02-25
-status: active
+status: closed
 owner: "@ronny"
 scope: music
 priority: high
@@ -27,11 +27,17 @@ Activate full Soulseek pipeline behind Privado VPN tunnel, tune Soularr, add dai
 - `GAP-OP-896` (low): Tubifarry evaluation soak gate.
   - Decision checkpoint due: **2026-03-11**.
 
-### Observability Backlog (filed 2026-02-25)
+### Observability Backlog (filed 2026-02-25 — re-parented to LOOP-MEDIA-OBSERVABILITY-HARDENING-20260225)
 
-- `GAP-OP-898` (medium): slskd runtime telemetry — Soulseek connection status, peer count, active transfers.
-- `GAP-OP-899` (medium): Soularr cycle telemetry — last cycle result, match rate, failure count.
-- `GAP-OP-900` (medium): qBittorrent queue/throughput/stall telemetry — active torrents, speeds, stalled count.
-- `GAP-OP-901` (medium): Sonarr daily metrics parity — media.sonarr.metrics.today mirroring Radarr/Lidarr pattern.
-- `GAP-OP-902` (high): End-to-end media pipeline trace — huntarr → arr → download → import → streaming.
-- `GAP-OP-903` (medium): MCP parity for 5 observability tools (get_vpn_status, get_slskd_status, get_soularr_status, get_qbittorrent_queue, get_pipeline_health).
+- `GAP-OP-898` (medium): slskd runtime telemetry
+- `GAP-OP-899` (medium): Soularr cycle telemetry
+- `GAP-OP-900` (medium): qBittorrent queue telemetry
+- `GAP-OP-901` (medium): Sonarr daily metrics parity
+- `GAP-OP-902` (high): End-to-end media pipeline trace
+- `GAP-OP-903` (medium): MCP parity for 5 observability tools
+- `GAP-OP-904` (high): 8 unprovisioned Infisical secrets
+
+## Closure
+
+**Closed**: 2026-02-25 via WAVE-20260225-PRIVADO-SECRETS-MUSIC-CLOSEOUT
+**Outcome**: Core pipeline deployed and operational (gluetun+slskd+soularr+huntarr on VM 209). 8/8 infrastructure gaps fixed. 9 deferred observability/provisioning gaps re-parented to continuation loop LOOP-MEDIA-OBSERVABILITY-HARDENING-20260225. Baseline: 1685 wanted albums, 22.9% completion.

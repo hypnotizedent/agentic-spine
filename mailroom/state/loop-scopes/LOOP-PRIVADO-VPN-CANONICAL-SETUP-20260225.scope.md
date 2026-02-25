@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-PRIVADO-VPN-CANONICAL-SETUP-20260225
 created: 2026-02-25
-status: active
+status: closed
 owner: "@ronny"
 scope: privado
 priority: medium
@@ -119,8 +119,13 @@ Document in the runbook:
 - D223 media-vpn-routing-lock: DONE (gluetun healthy, slskd tunneled, qBittorrent route parity)
 - qBittorrent VPN decision: DONE (QB-VPN-ROUTE-001 = direct)
 
-### Observability Backlog (filed 2026-02-25)
-- `GAP-OP-897` (medium): VPN egress IP attestation + leak/killswitch evidence — D223 validates routing but cannot attest external IP is non-home or DNS/WebRTC leak protection is active. Need media.vpn.health capability.
+### Observability Backlog (filed 2026-02-25 — re-parented to LOOP-MEDIA-OBSERVABILITY-HARDENING-20260225)
+- `GAP-OP-897` (medium): VPN egress IP attestation + leak/killswitch evidence
+
+## Closure
+
+**Closed**: 2026-02-25 via WAVE-20260225-PRIVADO-SECRETS-MUSIC-CLOSEOUT
+**Outcome**: Privado VPN canonically documented (vpn.provider.yaml + runbook), D223 gate active, qBittorrent decision gate documented. Phase 5 (workbench topology) deferred. GAP-OP-897 re-parented to continuation loop LOOP-MEDIA-OBSERVABILITY-HARDENING-20260225.
 
 ## Success Criteria
 
