@@ -166,3 +166,24 @@ Definition of done:
 - verify green
 - receipts captured
 - closeout traceability complete
+
+---
+
+## Platform Extension Kit (W31–W37)
+
+`ops/bindings/service.onboarding.contract.yaml` is the machine-enforceable replacement for manual onboarding checklists. New or changed services must satisfy this contract before execution lanes are considered complete.
+
+### Extension Gates (D173-D180)
+
+- `D173 site-topology-parity-lock`: Enforces canonical site topology parity across SSH targets, compose target bindings, and active VMID ranges.
+- `D174 service-onboarding-parity-lock`: Enforces required onboarding homes, naming rules, owning-agent parity, and deploy-stack parity for active services.
+- `D175 operator-commitments-union-lock`: Enforces valid commitment references across calendar events, communications templates, and escalation policy IDs.
+- `D176 platform-extension-transaction-lock`: Enforces required extension transaction fields, loop linkage, completion homes, and site/service target parity.
+- `D177 platform-extension-home-binding-lock`: Enforces required-home reference parity and strict service-home binding alignment.
+- `D178 platform-extension-lifecycle-lock`: Enforces legal lifecycle transitions, evidence requirements, and extension transaction index freshness.
+- `D179 platform-extension-artifact-completeness-lock`: Enforces required plan/preflight artifact presence, schema completeness, and lifecycle freshness.
+- `D180 platform-extension-namespace-collision-lock`: Enforces namespace uniqueness, VMID range non-overlap, naming policy, and cross-reference parity.
+
+`ops/bindings/onboarding.transaction.contract.yaml` and the `ops/bindings/platform.extension.*.contract.yaml` family define the extension transaction lifecycle end to end.
+
+Namespace standards are defined in `ops/bindings/platform.extension.naming.contract.yaml`.
