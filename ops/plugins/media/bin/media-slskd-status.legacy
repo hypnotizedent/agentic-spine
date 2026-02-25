@@ -15,7 +15,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
-SERVICES_BINDING="$ROOT/ops/bindings/services.health.yaml"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 usage() {
@@ -73,19 +72,103 @@ CONTAINER_STATE=$(ssh_cmd "sudo docker inspect --format='{{.State.Status}}' slsk
 # Check 2: Container uptime
 STARTED_AT=$(ssh_cmd "sudo docker inspect --format='{{.State.StartedAt}}' slskd 2>/dev/null" || echo "unknown")
 
-# Check 3: Soulseek connection from recent logs
-LOG_SNIPPET=$(ssh_cmd "sudo docker logs slskd --tail 20 2>&1" || echo "")
-SOULSEEK_CONNECTED="false"
-if echo "$LOG_SNIPPET" | grep -qi "connected\|logged in\|soulseek"; then
-  SOULSEEK_CONNECTED="true"
+# Check 3: slskd application state from API (authoritative connection telemetry)
+SLSKD_URL="http://localhost:5030"
+# slskd often enables API-key auth; read key from in-container config first.
+SLSKD_CONFIG=$(ssh_cmd "sudo docker exec slskd sh -lc 'cat /app/slskd.yml' 2>/dev/null" || echo "")
+SLSKD_API_KEY=$(printf '%s\n' "$SLSKD_CONFIG" | awk '/^[[:space:]]*key:[[:space:]]*/ {print $2; exit}' || true)
+
+if [[ -n "$SLSKD_API_KEY" ]]; then
+  APP_JSON=$(ssh_cmd "curl -fsS --max-time 5 -H 'X-API-Key: ${SLSKD_API_KEY}' ${SLSKD_URL}/api/v0/application 2>/dev/null" || echo "")
+else
+  APP_JSON=$(ssh_cmd "curl -fsS --max-time 5 ${SLSKD_URL}/api/v0/application 2>/dev/null" || echo "")
 fi
 
-# Check 4: API reachability (slskd on port 5030 via gluetun)
-SLSKD_URL="http://localhost:5030"
-API_REACHABLE=$(ssh_cmd "curl -fsS --max-time 5 ${SLSKD_URL}/api/v0/application 2>/dev/null | head -c 500" || echo "unreachable")
+# Fallback for unauthenticated deployments or stale config.
+if [[ -z "$APP_JSON" ]]; then
+  APP_JSON=$(ssh_cmd "curl -fsS --max-time 5 ${SLSKD_URL}/api/v0/application 2>/dev/null" || echo "")
+fi
 
-# Check 5: Transfer stats from Docker stats
+API_REACHABLE="false"
+IS_CONNECTED="false"
+IS_LOGGED_IN="false"
+SOULSEEK_STATE="unknown"
+SOULSEEK_SERVER="unknown"
+SOULSEEK_CONNECTED="false"
+
+if [[ -n "$APP_JSON" ]]; then
+  API_REACHABLE="true"
+  PARSED_FIELDS=$(APP_JSON="$APP_JSON" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+import sys
+
+raw = os.environ.get("APP_JSON", "").strip()
+is_connected = "false"
+is_logged_in = "false"
+state = "unknown"
+server = "unknown"
+
+if raw:
+    try:
+        data = json.loads(raw)
+        server_obj = data.get("server") if isinstance(data.get("server"), dict) else {}
+        is_connected = "true" if bool(data.get("isConnected", server_obj.get("isConnected", False))) else "false"
+        is_logged_in = "true" if bool(data.get("isLoggedIn", server_obj.get("isLoggedIn", False))) else "false"
+
+        api_state = data.get("state") or server_obj.get("state")
+        if isinstance(api_state, str) and api_state.strip():
+            state = api_state.strip()
+
+        server_raw = (
+            data.get("serverAddress")
+            or data.get("serverHost")
+            or data.get("server")
+            or server_obj.get("ipEndPoint")
+            or server_obj.get("address")
+        )
+        if isinstance(server_raw, dict):
+            host = server_raw.get("host") or server_raw.get("hostname")
+            port = server_raw.get("port")
+            if host and port:
+                server = f"{host}:{port}"
+            elif host:
+                server = str(host)
+        elif server_raw:
+            server = str(server_raw)
+    except Exception:
+        pass
+
+print(f"is_connected={is_connected}")
+print(f"is_logged_in={is_logged_in}")
+print(f"state={state}")
+print(f"server={server}")
+PY
+)
+
+  while IFS='=' read -r key value; do
+    case "$key" in
+      is_connected) IS_CONNECTED="$value" ;;
+      is_logged_in) IS_LOGGED_IN="$value" ;;
+      state) SOULSEEK_STATE="$value" ;;
+      server) SOULSEEK_SERVER="$value" ;;
+    esac
+  done <<< "$PARSED_FIELDS"
+fi
+
+# Check 4: Transfer stats from Docker stats
 TRANSFER_LINE=$(ssh_cmd "sudo docker stats --no-stream --format '{{.NetIO}}' slskd 2>/dev/null" || echo "unknown")
+
+# Check 5: Detect recent SQLite lock failures in logs (common NFS symptom)
+RECENT_LOGS=$(ssh_cmd "sudo docker logs slskd --tail 200 2>&1" || echo "")
+DB_LOCK_ERRORS=$(printf '%s' "$RECENT_LOGS" | grep -ci "database is locked" || true)
+
+# Canonical Soulseek connectivity signal: API booleans/state
+if [[ "$IS_CONNECTED" == "true" && "$IS_LOGGED_IN" == "true" ]]; then
+  SOULSEEK_CONNECTED="true"
+elif echo "$SOULSEEK_STATE" | grep -qi "connected"; then
+  SOULSEEK_CONNECTED="true"
+fi
 
 # Determine status
 STATUS="ok"
@@ -96,9 +179,21 @@ if [[ "$CONTAINER_STATE" != "running" ]]; then
   ISSUES+=("slskd container not running (state=$CONTAINER_STATE)")
 fi
 
-if [[ "$API_REACHABLE" == "unreachable" ]]; then
+if [[ "$API_REACHABLE" != "true" ]]; then
   STATUS="fail"
   ISSUES+=("slskd API unreachable at $SLSKD_URL")
+fi
+
+if [[ "$API_REACHABLE" == "true" && "$SOULSEEK_CONNECTED" != "true" ]]; then
+  STATUS="fail"
+  ISSUES+=("Soulseek connection not established (state=$SOULSEEK_STATE, isConnected=$IS_CONNECTED, isLoggedIn=$IS_LOGGED_IN)")
+fi
+
+if [[ "$DB_LOCK_ERRORS" -gt 0 ]]; then
+  if [[ "$STATUS" != "fail" ]]; then
+    STATUS="warn"
+  fi
+  ISSUES+=("SQLite lock errors in recent logs ($DB_LOCK_ERRORS); slskd DB storage may be lock-unsafe")
 fi
 
 if $OUTPUT_JSON; then
@@ -111,7 +206,12 @@ if $OUTPUT_JSON; then
     --arg container_state "$CONTAINER_STATE" \
     --arg started_at "$STARTED_AT" \
     --arg soulseek_connected "$SOULSEEK_CONNECTED" \
-    --arg api_reachable "$(if [[ "$API_REACHABLE" != "unreachable" ]]; then echo "true"; else echo "false"; fi)" \
+    --arg is_connected "$IS_CONNECTED" \
+    --arg is_logged_in "$IS_LOGGED_IN" \
+    --arg soulseek_state "$SOULSEEK_STATE" \
+    --arg soulseek_server "$SOULSEEK_SERVER" \
+    --arg api_reachable "$API_REACHABLE" \
+    --argjson db_lock_errors "$DB_LOCK_ERRORS" \
     --arg net_io "$TRANSFER_LINE" \
     --argjson issues "$ISSUES_JSON" \
     '{
@@ -122,7 +222,12 @@ if $OUTPUT_JSON; then
         container_state: $container_state,
         started_at: $started_at,
         soulseek_connected: ($soulseek_connected == "true"),
+        is_connected: ($is_connected == "true"),
+        is_logged_in: ($is_logged_in == "true"),
+        soulseek_state: $soulseek_state,
+        soulseek_server: $soulseek_server,
         api_reachable: ($api_reachable == "true"),
+        db_lock_errors: $db_lock_errors,
         net_io: $net_io,
         issues: $issues
       }
@@ -134,7 +239,12 @@ else
   echo "container_state: $CONTAINER_STATE"
   echo "started_at: $STARTED_AT"
   echo "soulseek_connected: $SOULSEEK_CONNECTED"
-  echo "api_reachable: $(if [[ "$API_REACHABLE" != "unreachable" ]]; then echo "true"; else echo "false"; fi)"
+  echo "is_connected: $IS_CONNECTED"
+  echo "is_logged_in: $IS_LOGGED_IN"
+  echo "soulseek_state: $SOULSEEK_STATE"
+  echo "soulseek_server: $SOULSEEK_SERVER"
+  echo "api_reachable: $API_REACHABLE"
+  echo "db_lock_errors: $DB_LOCK_ERRORS"
   echo "net_io: $TRANSFER_LINE"
   echo "generated_at: $GENERATED_AT"
   if [[ ${#ISSUES[@]} -gt 0 ]]; then
