@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MINT-SHOPIFY-INTEGRATION-20260224
 created: 2026-02-24
-status: active
+status: deferred
 owner: "@ronny"
 scope: mint
 priority: medium
@@ -30,6 +30,9 @@ gates or release verification. Will be picked up when Mint module work resumes.
 
 Stage-0 contracts and stubs delivered. GAP-OP-874 remains open — stubs alone
 do not satisfy the gap (execution phases P1-P5 remain).
+
+P1 sandbox intentionally not started. Loop returned to deferred status.
+No live Shopify API calls, no webhook registration, no OAuth flow.
 
 ### Artifacts Created (mint-modules repo, commit 948f3b3)
 
