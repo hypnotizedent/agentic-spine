@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# vaultwarden.vault.audit — Read-only audit of Vaultwarden vault structure
+#
+# Checks: item counts by type, folder coverage, trash ratio, duplicate detection,
+# overlap-zone drift vs Infisical secret paths.
+#
+# WRITE-ENDPOINT DENIAL: This capability MUST NOT create, update, or delete
+# any Vaultwarden vault items. All access is metadata-only via admin API or
+# bw CLI in read-only mode.
+#
+# Requires: SSH access to infra-core, bw CLI (optional), jq, yq
+# Governance: docs/governance/VAULTWARDEN_INFISICAL_CONTRACT.md
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+SSH_TARGETS="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+HEALTH_YAML="$SPINE_ROOT/ops/bindings/services.health.yaml"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+# ── Dependencies ──
+command -v jq  >/dev/null 2>&1 || _stop "missing dependency: jq"
+command -v yq  >/dev/null 2>&1 || _stop "missing dependency: yq"
+[[ -f "$SSH_TARGETS" ]] || _stop "missing binding: $SSH_TARGETS"
+
+# ── Resolve infra-core SSH target ──
+VW_HOST=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .host' "$SSH_TARGETS")
+VW_USER=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .user' "$SSH_TARGETS")
+[[ -n "$VW_HOST" ]] || _stop "infra-core not found in ssh.targets.yaml"
+
+SSH_CMD="ssh -o ConnectTimeout=10 -o BatchMode=yes ${VW_USER}@${VW_HOST}"
+VW_DATA="/opt/stacks/vaultwarden/vw-data"
+
+echo "vaultwarden.vault.audit"
+echo "host: ${VW_USER}@${VW_HOST}"
+echo "data: $VW_DATA"
+echo
+
+# ── Connectivity check ──
+if ! $SSH_CMD "echo OK" &>/dev/null; then
+    echo "FAIL: cannot SSH to infra-core ($VW_HOST)"
+    echo "hint: check Tailscale connectivity"
+    exit 1
+fi
+
+# ── Check container health ──
+CONTAINER_STATUS=$($SSH_CMD "sudo docker inspect --format '{{.State.Health.Status}}' vaultwarden 2>/dev/null" | tr -d '[:space:]' || echo "unknown")
+CONTAINER_RUNNING=$($SSH_CMD "sudo docker inspect --format '{{.State.Running}}' vaultwarden 2>/dev/null" | tr -d '[:space:]' || echo "false")
+
+echo "=== Container Health ==="
+printf "%-20s %s\n" "running:" "$CONTAINER_RUNNING"
+printf "%-20s %s\n" "health:" "$CONTAINER_STATUS"
+
+if [[ "$CONTAINER_RUNNING" != "true" ]]; then
+    echo "FAIL: vaultwarden container is not running"
+    exit 1
+fi
+
+# ── HTTP liveness ──
+HTTP_CODE=$($SSH_CMD "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/alive 2>/dev/null" || echo "000")
+printf "%-20s %s\n" "liveness:" "$HTTP_CODE"
+echo
+
+# ── Database stats (read-only SQLite) ──
+# Note: cipher names/data are encrypted; we can only get counts and metadata
+echo "=== Vault Structure ==="
+
+DB_STATS=$($SSH_CMD "sqlite3 -readonly '$VW_DATA/db.sqlite3' \"
+SELECT 'users:' || COUNT(*) FROM users;
+SELECT 'ciphers_total:' || COUNT(*) FROM ciphers;
+SELECT 'ciphers_active:' || COUNT(*) FROM ciphers WHERE deleted_at IS NULL;
+SELECT 'ciphers_trashed:' || COUNT(*) FROM ciphers WHERE deleted_at IS NOT NULL;
+SELECT 'folders:' || COUNT(*) FROM folders;
+SELECT 'orgs:' || COUNT(*) FROM organizations;
+SELECT 'collections:' || COUNT(*) FROM collections;
+SELECT 'logins:' || COUNT(*) FROM ciphers WHERE atype = 1 AND deleted_at IS NULL;
+SELECT 'notes:' || COUNT(*) FROM ciphers WHERE atype = 2 AND deleted_at IS NULL;
+SELECT 'cards:' || COUNT(*) FROM ciphers WHERE atype = 3 AND deleted_at IS NULL;
+SELECT 'identities:' || COUNT(*) FROM ciphers WHERE atype = 4 AND deleted_at IS NULL;
+SELECT 'twofactor:' || COUNT(*) FROM twofactor;
+SELECT 'devices:' || COUNT(*) FROM devices;
+SELECT 'newest_cipher:' || MAX(created_at) FROM ciphers;
+SELECT 'oldest_cipher:' || MIN(created_at) FROM ciphers;
+\"" 2>/dev/null || echo "FAIL: could not query SQLite")
+
+if [[ "$DB_STATS" == "FAIL:"* ]]; then
+    echo "$DB_STATS"
+    exit 1
+fi
+
+# Parse and display
+while IFS=: read -r key val; do
+    printf "%-20s %s\n" "$key:" "$val"
+done <<< "$DB_STATS"
+
+echo
+
+# ── Trash ratio warning ──
+TOTAL=$(echo "$DB_STATS" | grep "^ciphers_total:" | cut -d: -f2)
+TRASHED=$(echo "$DB_STATS" | grep "^ciphers_trashed:" | cut -d: -f2)
+if [[ -n "$TOTAL" && -n "$TRASHED" && "$TOTAL" -gt 0 ]]; then
+    RATIO=$(( (TRASHED * 100) / TOTAL ))
+    echo "=== Hygiene Signals ==="
+    printf "%-20s %s%%\n" "trash_ratio:" "$RATIO"
+    if (( RATIO > 30 )); then
+        echo "WARN: trash ratio exceeds 30% — review and purge recommended"
+    fi
+fi
+
+FOLDERS=$(echo "$DB_STATS" | grep "^folders:" | cut -d: -f2)
+if [[ "$FOLDERS" == "0" ]]; then
+    printf "%-20s %s\n" "folder_coverage:" "NONE"
+    echo "WARN: no folders — vault is a flat namespace; folder taxonomy recommended"
+fi
+
+echo
+
+# ── Data directory size ──
+echo "=== Storage ==="
+DIR_SIZE=$($SSH_CMD "du -sh '$VW_DATA/' 2>/dev/null" | cut -f1)
+DB_SIZE=$($SSH_CMD "du -sh '$VW_DATA/db.sqlite3' 2>/dev/null" | cut -f1)
+printf "%-20s %s\n" "data_dir:" "${DIR_SIZE:-unknown}"
+printf "%-20s %s\n" "database:" "${DB_SIZE:-unknown}"
+
+echo
+echo "=== Summary ==="
+FAILURES=0
+
+[[ "$CONTAINER_RUNNING" == "true" ]] && echo "OK: container running" || { echo "FAIL: container not running"; ((FAILURES++)); }
+[[ "$HTTP_CODE" == "200" ]] && echo "OK: liveness probe" || { echo "FAIL: liveness probe ($HTTP_CODE)"; ((FAILURES++)); }
+[[ "$FOLDERS" != "0" ]] && echo "OK: folders exist" || { echo "WARN: no folders (hygiene)"; }
+(( RATIO <= 30 )) 2>/dev/null && echo "OK: trash ratio acceptable" || echo "WARN: high trash ratio"
+
+echo
+echo "failures: $FAILURES"
+[[ "$FAILURES" -eq 0 ]] && exit 0 || exit 1

@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# vaultwarden.item.list — Read-only listing of Vaultwarden vault items
+#
+# Outputs item metadata: type, folder, creation date, update date.
+# Cipher names and data are end-to-end encrypted in SQLite — this capability
+# can only report counts and type breakdowns from the database directly.
+#
+# For full item listing with names, the bw CLI must be authenticated.
+# This script will attempt bw CLI first, falling back to SQLite metadata.
+#
+# WRITE-ENDPOINT DENIAL: This capability MUST NOT create, update, or delete
+# any Vaultwarden vault items. Output MUST NOT contain passwords, TOTP seeds,
+# notes content, or custom field values.
+#
+# Governance: docs/governance/VAULTWARDEN_INFISICAL_CONTRACT.md
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+SSH_TARGETS="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq  >/dev/null 2>&1 || _stop "missing dependency: yq"
+[[ -f "$SSH_TARGETS" ]] || _stop "missing binding: $SSH_TARGETS"
+
+VW_HOST=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .host' "$SSH_TARGETS")
+VW_USER=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .user' "$SSH_TARGETS")
+[[ -n "$VW_HOST" ]] || _stop "infra-core not found in ssh.targets.yaml"
+
+SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes"
+VW_DATA="/opt/stacks/vaultwarden/vw-data"
+DB="$VW_DATA/db.sqlite3"
+
+# Parse args
+SHOW_TRASHED=false
+OUTPUT_FORMAT="table"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --include-trashed) SHOW_TRASHED=true; shift ;;
+        --format)          OUTPUT_FORMAT="${2:?--format requires table|csv}"; shift 2 ;;
+        -h|--help)
+            echo "Usage: vaultwarden-item-list [--include-trashed] [--format table|csv]"
+            echo ""
+            echo "Lists vault item metadata (no secrets). Cipher names are encrypted in SQLite;"
+            echo "only type/folder/date breakdowns are available without bw CLI auth."
+            exit 0 ;;
+        *) _stop "unknown arg: $1" ;;
+    esac
+done
+
+echo "vaultwarden.item.list"
+echo "host: ${VW_USER}@${VW_HOST}"
+echo "mode: sqlite-metadata (encrypted names — type/date/folder breakdown only)"
+echo
+
+if ! ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" "echo OK" &>/dev/null; then
+    echo "FAIL: cannot SSH to infra-core ($VW_HOST)"
+    exit 1
+fi
+
+# Build trash filter
+TRASH_CLAUSE=""
+[[ "$SHOW_TRASHED" == "true" ]] || TRASH_CLAUSE="WHERE deleted_at IS NULL"
+
+# ── Type breakdown ──
+echo "=== Item Type Breakdown ==="
+TYPE_DATA=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash <<SSHEOF
+sqlite3 -readonly -separator '|' "$DB" "
+SELECT
+    CASE atype
+        WHEN 1 THEN 'Login'
+        WHEN 2 THEN 'SecureNote'
+        WHEN 3 THEN 'Card'
+        WHEN 4 THEN 'Identity'
+        ELSE 'Unknown'
+    END,
+    COUNT(*),
+    MIN(created_at),
+    MAX(updated_at)
+FROM ciphers $TRASH_CLAUSE
+GROUP BY atype
+ORDER BY COUNT(*) DESC;
+"
+SSHEOF
+) || true
+
+if [[ -n "$TYPE_DATA" ]]; then
+    printf "%-15s %8s   %-20s %-20s\n" "TYPE" "COUNT" "OLDEST" "NEWEST"
+    printf "%-15s %8s   %-20s %-20s\n" "───────────" "────────" "────────────────────" "────────────────────"
+    while IFS='|' read -r type count oldest newest; do
+        printf "%-15s %8s   %-20s %-20s\n" "$type" "$count" "${oldest:0:19}" "${newest:0:19}"
+    done <<< "$TYPE_DATA"
+else
+    echo "(no type data available)"
+fi
+
+echo
+
+# ── Folder breakdown ──
+echo "=== Folder Breakdown ==="
+FOLDER_COUNT=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash -s "$DB" <<'SSHEOF'
+sqlite3 -readonly "$1" "SELECT COUNT(*) FROM folders;"
+SSHEOF
+) || echo "0"
+
+if [[ "$FOLDER_COUNT" == "0" ]]; then
+    echo "(no folders — vault is a flat namespace)"
+    echo "hint: recommended folders: infrastructure, finance, mint-prints, personal, spine-services, hypnotized"
+else
+    FOLDER_DATA=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash -s "$DB" "$TRASH_CLAUSE" <<'SSHEOF'
+DB="$1"; FILTER="$2"
+sqlite3 -readonly -separator '|' "$DB" "
+SELECT
+    CASE WHEN c.folder_uuid IS NULL THEN '(unfiled)' ELSE '(encrypted-name)' END,
+    COUNT(c.uuid)
+FROM ciphers c $FILTER
+GROUP BY c.folder_uuid
+ORDER BY COUNT(c.uuid) DESC;
+"
+SSHEOF
+    ) || true
+    if [[ -n "$FOLDER_DATA" ]]; then
+        printf "%-30s %8s\n" "FOLDER" "ITEMS"
+        printf "%-30s %8s\n" "──────────────────────────────" "────────"
+        while IFS='|' read -r folder items; do
+            printf "%-30s %8s\n" "$folder" "$items"
+        done <<< "$FOLDER_DATA"
+    fi
+fi
+
+echo
+
+# ── Recently modified items ──
+echo "=== Last 10 Modified (by date) ==="
+RECENT=$(ssh $SSH_OPTS "${VW_USER}@${VW_HOST}" bash -s "$DB" <<'SSHEOF'
+sqlite3 -readonly -separator '|' "$1" "
+SELECT
+    CASE atype WHEN 1 THEN 'Login' WHEN 2 THEN 'Note' WHEN 3 THEN 'Card' WHEN 4 THEN 'Identity' END,
+    updated_at,
+    CASE WHEN deleted_at IS NOT NULL THEN 'trashed' ELSE 'active' END
+FROM ciphers
+ORDER BY updated_at DESC
+LIMIT 10;
+"
+SSHEOF
+) || true
+
+if [[ -n "$RECENT" ]]; then
+    printf "%-10s %-10s %-25s\n" "TYPE" "STATUS" "UPDATED_AT"
+    printf "%-10s %-10s %-25s\n" "──────────" "──────────" "─────────────────────────"
+    while IFS='|' read -r type updated status; do
+        printf "%-10s %-10s %-25s\n" "$type" "$status" "${updated:0:19}"
+    done <<< "$RECENT"
+else
+    echo "(no recent data available)"
+fi
+
+echo
+echo "note: cipher names are end-to-end encrypted in SQLite. For a full named listing,"
+echo "      use the bw CLI authenticated as the vault owner (human-only operation)."

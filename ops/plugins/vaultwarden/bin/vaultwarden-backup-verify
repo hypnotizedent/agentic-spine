@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# vaultwarden.backup.verify — Read-only: verify Vaultwarden backup recency and integrity
+#
+# Checks:
+#   1. Latest backup exists on NAS
+#   2. Backup age is within threshold (default: 48 hours)
+#   3. Backup size is non-trivial (> 100KB)
+#   4. Sentinel file (db.sqlite3) is present inside the archive
+#   5. Local data directory on infra-core has expected structure
+#
+# WRITE-ENDPOINT DENIAL: This capability MUST NOT create, modify, or delete
+# any backup files. It only reads metadata and file listings.
+#
+# Governance: docs/governance/VAULTWARDEN_BACKUP_RESTORE.md
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+SSH_TARGETS="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+_stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || _stop "missing dependency: yq"
+[[ -f "$SSH_TARGETS" ]] || _stop "missing binding: $SSH_TARGETS"
+
+# ── Configuration ──
+NAS_HOST="nas"
+NAS_BACKUP_PATH="/volume1/backups/apps/vaultwarden"
+MAX_AGE_HOURS="${VW_BACKUP_MAX_AGE_HOURS:-48}"
+MIN_SIZE_KB=100
+
+VW_HOST=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .host' "$SSH_TARGETS")
+VW_USER=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .user' "$SSH_TARGETS")
+SSH_VW="ssh -o ConnectTimeout=10 -o BatchMode=yes ${VW_USER}@${VW_HOST}"
+SSH_NAS="ssh -o ConnectTimeout=10 -o BatchMode=yes ${NAS_HOST}"
+
+echo "vaultwarden.backup.verify"
+echo "nas: $NAS_HOST:$NAS_BACKUP_PATH"
+echo "source: ${VW_USER}@${VW_HOST}"
+echo "threshold: ${MAX_AGE_HOURS}h"
+echo
+
+FAILURES=0
+WARNINGS=0
+
+# ── Check 1: NAS connectivity ──
+if ! $SSH_NAS "echo OK" &>/dev/null; then
+    echo "FAIL: cannot SSH to NAS ($NAS_HOST)"
+    echo "hint: check SSH key and Tailscale/network connectivity"
+    exit 1
+fi
+echo "OK: NAS reachable"
+
+# ── Check 2: Backup directory exists ──
+if ! $SSH_NAS "test -d '$NAS_BACKUP_PATH'"; then
+    echo "FAIL: backup directory not found: $NAS_BACKUP_PATH"
+    ((FAILURES++))
+fi
+
+# ── Check 3: Latest backup file ──
+LATEST=$($SSH_NAS "ls -1t '$NAS_BACKUP_PATH'/vaultwarden-backup-*.tar.gz 2>/dev/null | head -1" || echo "")
+
+if [[ -z "$LATEST" ]]; then
+    echo "FAIL: no backup files found in $NAS_BACKUP_PATH"
+    ((FAILURES++))
+else
+    LATEST_NAME=$(basename "$LATEST")
+    echo "OK: latest backup: $LATEST_NAME"
+
+    # ── Check 4: Backup age ──
+    LATEST_EPOCH=$($SSH_NAS "stat -c '%Y' '$LATEST' 2>/dev/null || stat -f '%m' '$LATEST' 2>/dev/null" || echo "0")
+    NOW_EPOCH=$(date +%s)
+    AGE_HOURS=$(( (NOW_EPOCH - LATEST_EPOCH) / 3600 ))
+
+    if (( AGE_HOURS > MAX_AGE_HOURS )); then
+        echo "FAIL: backup is ${AGE_HOURS}h old (threshold: ${MAX_AGE_HOURS}h)"
+        ((FAILURES++))
+    else
+        echo "OK: backup age: ${AGE_HOURS}h (within ${MAX_AGE_HOURS}h threshold)"
+    fi
+
+    # ── Check 5: Backup size ──
+    SIZE_KB=$($SSH_NAS "du -k '$LATEST' 2>/dev/null" | cut -f1 || echo "0")
+    if (( SIZE_KB < MIN_SIZE_KB )); then
+        echo "FAIL: backup size ${SIZE_KB}KB is below ${MIN_SIZE_KB}KB minimum"
+        ((FAILURES++))
+    else
+        SIZE_HUMAN=$($SSH_NAS "du -h '$LATEST' 2>/dev/null" | cut -f1)
+        echo "OK: backup size: ${SIZE_HUMAN}"
+    fi
+
+    # ── Check 6: Sentinel inside archive (non-destructive listing) ──
+    HAS_DB=$($SSH_NAS "tar -tzf '$LATEST' 2>/dev/null | grep -c 'db.sqlite3'" || echo "0")
+    if [[ "$HAS_DB" == "0" ]]; then
+        echo "FAIL: db.sqlite3 not found inside backup archive"
+        ((FAILURES++))
+    else
+        echo "OK: db.sqlite3 present in archive"
+    fi
+fi
+
+# ── Check 7: Backup count / retention ──
+BACKUP_COUNT=$($SSH_NAS "ls -1 '$NAS_BACKUP_PATH'/vaultwarden-backup-*.tar.gz 2>/dev/null | wc -l" | tr -d ' ')
+echo "INFO: $BACKUP_COUNT backups retained on NAS"
+
+if (( BACKUP_COUNT < 2 )); then
+    echo "WARN: fewer than 2 backups — retention risk"
+    ((WARNINGS++))
+fi
+
+echo
+
+# ── Check 8: Live data directory health ──
+echo "=== Live Data Check ==="
+if $SSH_VW "echo OK" &>/dev/null; then
+    if $SSH_VW "test -f '/opt/stacks/vaultwarden/vw-data/db.sqlite3'"; then
+        echo "OK: live db.sqlite3 exists"
+        LIVE_SIZE=$($SSH_VW "du -h '/opt/stacks/vaultwarden/vw-data/db.sqlite3'" | cut -f1)
+        echo "INFO: live DB size: $LIVE_SIZE"
+    else
+        echo "FAIL: live db.sqlite3 not found at /opt/stacks/vaultwarden/vw-data/"
+        ((FAILURES++))
+    fi
+else
+    echo "SKIP: cannot SSH to infra-core (Tailscale down?)"
+    ((WARNINGS++))
+fi
+
+echo
+
+# ── Summary ──
+echo "=== Summary ==="
+echo "failures: $FAILURES"
+echo "warnings: $WARNINGS"
+
+if [[ "$FAILURES" -eq 0 ]]; then
+    echo "result: PASS"
+    exit 0
+else
+    echo "result: FAIL"
+    exit 1
+fi
