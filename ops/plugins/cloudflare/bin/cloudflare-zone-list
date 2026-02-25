@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.zone.list — read-only listing of all Cloudflare zones with activation status
+# Shows: zone name, id, status, plan, name_servers, activated_on
+# Requires: CLOUDFLARE_API_TOKEN via secrets injection
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  echo "STOP: CLOUDFLARE_API_TOKEN not present in injected environment." >&2
+  exit 2
+fi
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_OUT=1; shift ;;
+    --) shift ;;
+    *) shift ;;
+  esac
+done
+
+python3 - "$CF_API" "${JSON_OUT:-0}" <<'PYEOF'
+import json, sys, os, urllib.request
+
+api = sys.argv[1]
+json_out = sys.argv[2] == "1"
+token = os.environ["CLOUDFLARE_API_TOKEN"]
+
+def get(url):
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    })
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+# Fetch all zones (paginated)
+all_zones = []
+page = 1
+while True:
+    data = get(f"{api}/zones?per_page=50&page={page}")
+    if not data.get("success", False):
+        print("STOP: Cloudflare API returned success=false for zones.", file=sys.stderr)
+        sys.exit(2)
+    all_zones.extend(data.get("result", []))
+    info = data.get("result_info", {})
+    if page >= info.get("total_pages", 1):
+        break
+    page += 1
+
+results = []
+for z in all_zones:
+    results.append({
+        "name": z.get("name"),
+        "id": z.get("id"),
+        "status": z.get("status"),
+        "plan": z.get("plan", {}).get("name", "unknown"),
+        "name_servers": z.get("name_servers", []),
+        "activated_on": z.get("activated_on", "unknown"),
+        "paused": z.get("paused", False),
+    })
+
+if json_out:
+    print(json.dumps(results, indent=2))
+else:
+    print("cloudflare.zone.list")
+    print(f"zones: {len(results)}")
+    print()
+    fmt = "{:<30s} {:<12s} {:<15s} {:<12s} {:<6s}"
+    print(fmt.format("ZONE", "STATUS", "PLAN", "ACTIVATED", "PAUSED"))
+    print("-" * 75)
+    for r in results:
+        print(fmt.format(
+            r["name"],
+            r["status"],
+            r["plan"][:15],
+            str(r["activated_on"])[:10],
+            str(r["paused"]),
+        ))
+PYEOF

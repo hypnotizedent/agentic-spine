@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.registrar.status — read-only registrar transfer status for all domains
+# Shows: registrar, status, auto_renew, expires_at, locked per domain
+# Requires: CLOUDFLARE_API_TOKEN via secrets injection
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-}"
+
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  echo "STOP: CLOUDFLARE_API_TOKEN not present in injected environment." >&2
+  exit 2
+fi
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_OUT=1; shift ;;
+    --) shift ;;
+    *) shift ;;
+  esac
+done
+
+# Read zones from inventory binding
+if [[ ! -f "$INVENTORY" ]]; then
+  echo "STOP: cloudflare.inventory.yaml not found at $INVENTORY" >&2
+  exit 2
+fi
+
+python3 - "$CF_API" "$INVENTORY" "${JSON_OUT:-0}" <<'PYEOF'
+import json, sys, os, urllib.request, urllib.error
+
+api = sys.argv[1]
+inventory = sys.argv[2]
+json_out = sys.argv[3] == "1"
+token = os.environ["CLOUDFLARE_API_TOKEN"]
+account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+
+with open(inventory) as f:
+    inv = json.load(f)
+
+zones = inv.get("zones", [])
+if not account_id:
+    account_id = inv.get("account_id", "")
+
+def get(url):
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    })
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+results = []
+for z in zones:
+    name = z["name"]
+    try:
+        # Registrar API: GET /accounts/{account_id}/registrar/domains/{domain}
+        url = f"{api}/accounts/{account_id}/registrar/domains/{name}"
+        data = get(url)
+        if not data.get("success", False):
+            results.append({"domain": name, "status": "API_ERROR", "detail": str(data.get("errors", []))})
+            continue
+        r = data.get("result", {})
+        results.append({
+            "domain": name,
+            "registrar": r.get("current_registrar", "unknown"),
+            "status": r.get("registry_statuses", r.get("status", "unknown")),
+            "auto_renew": r.get("auto_renew", None),
+            "expires_at": r.get("expires_at", "unknown"),
+            "locked": r.get("locked", None),
+            "transfer_in": r.get("transfer_in", {}).get("status", None),
+        })
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            results.append({"domain": name, "status": "not_at_cf_registrar"})
+        else:
+            results.append({"domain": name, "status": f"HTTP_{e.code}"})
+    except Exception as e:
+        results.append({"domain": name, "status": f"ERROR: {e}"})
+
+if json_out:
+    print(json.dumps(results, indent=2))
+else:
+    print("cloudflare.registrar.status")
+    print(f"domains: {len(results)}")
+    print()
+    fmt = "{:<30s} {:<25s} {:<12s} {:<12s} {:<12s}"
+    print(fmt.format("DOMAIN", "STATUS", "AUTO_RENEW", "LOCKED", "EXPIRES"))
+    print("-" * 91)
+    for r in results:
+        status = str(r.get("status", "unknown"))
+        if isinstance(status, list):
+            status = ",".join(status) if status else "active"
+        auto = str(r.get("auto_renew", "-"))
+        locked = str(r.get("locked", "-"))
+        expires = str(r.get("expires_at", "-"))[:10]
+        transfer = r.get("transfer_in")
+        if transfer:
+            status = f"{status} (transfer:{transfer})"
+        print(fmt.format(r["domain"], status[:25], auto[:12], locked[:12], expires[:12]))
+PYEOF

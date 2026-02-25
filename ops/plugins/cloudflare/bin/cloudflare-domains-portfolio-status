@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# domains.portfolio.status — unified view of registrar + DNS + zone status per domain
+# Orchestrates cloudflare.zone.list + cloudflare.registrar.status into a single view
+# Requires: CLOUDFLARE_API_TOKEN via secrets injection
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+  echo "STOP: CLOUDFLARE_API_TOKEN not present in injected environment." >&2
+  exit 2
+fi
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_OUT=1; shift ;;
+    --) shift ;;
+    *) shift ;;
+  esac
+done
+
+python3 - "$CF_API" "$INVENTORY" "${JSON_OUT:-0}" <<'PYEOF'
+import json, sys, os, urllib.request, urllib.error
+
+api = sys.argv[1]
+inventory = sys.argv[2]
+json_out = sys.argv[3] == "1"
+token = os.environ["CLOUDFLARE_API_TOKEN"]
+
+with open(inventory) as f:
+    inv = json.load(f)
+account_id = inv.get("account_id", os.environ.get("CLOUDFLARE_ACCOUNT_ID", ""))
+
+def get(url):
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    })
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+# 1. Fetch all zones
+all_zones = {}
+page = 1
+while True:
+    data = get(f"{api}/zones?per_page=50&page={page}")
+    if not data.get("success"):
+        break
+    for z in data.get("result", []):
+        all_zones[z["name"]] = z
+    info = data.get("result_info", {})
+    if page >= info.get("total_pages", 1):
+        break
+    page += 1
+
+# 2. Fetch registrar status per domain
+results = []
+for domain_name in sorted(all_zones.keys()):
+    z = all_zones[domain_name]
+    zid = z["id"]
+
+    # Zone info
+    entry = {
+        "domain": domain_name,
+        "zone_status": z.get("status", "unknown"),
+        "plan": z.get("plan", {}).get("name", "unknown"),
+        "name_servers": z.get("name_servers", []),
+    }
+
+    # DNS record count
+    try:
+        dns = get(f"{api}/zones/{zid}/dns_records?per_page=1")
+        entry["dns_records"] = (dns.get("result_info") or {}).get("total_count", 0)
+    except Exception:
+        entry["dns_records"] = "error"
+
+    # SPF check (apex TXT containing v=spf1)
+    try:
+        spf = get(f"{api}/zones/{zid}/dns_records?type=TXT&name={domain_name}&per_page=100")
+        spf_records = [r for r in spf.get("result", []) if "v=spf1" in r.get("content", "")]
+        entry["spf"] = spf_records[0]["content"][:60] if spf_records else "MISSING"
+    except Exception:
+        entry["spf"] = "error"
+
+    # DMARC check (apex _dmarc TXT)
+    try:
+        dmarc = get(f"{api}/zones/{zid}/dns_records?type=TXT&name=_dmarc.{domain_name}&per_page=10")
+        dmarc_records = [r for r in dmarc.get("result", []) if "v=DMARC1" in r.get("content", "")]
+        entry["dmarc"] = dmarc_records[0]["content"][:60] if dmarc_records else "MISSING"
+    except Exception:
+        entry["dmarc"] = "error"
+
+    # Registrar status
+    try:
+        reg = get(f"{api}/accounts/{account_id}/registrar/domains/{domain_name}")
+        if reg.get("success"):
+            r = reg.get("result", {})
+            entry["registrar"] = "cloudflare"
+            reg_status = r.get("registry_statuses", r.get("status", "unknown"))
+            entry["registrar_status"] = ",".join(reg_status) if isinstance(reg_status, list) else str(reg_status)
+            entry["auto_renew"] = r.get("auto_renew", None)
+            entry["expires_at"] = str(r.get("expires_at", ""))[:10]
+            entry["locked"] = r.get("locked", None)
+            ti = r.get("transfer_in", {})
+            if ti and ti.get("status"):
+                entry["transfer_status"] = ti["status"]
+        else:
+            entry["registrar"] = "external"
+    except urllib.error.HTTPError as e:
+        entry["registrar"] = "external" if e.code == 404 else f"error_{e.code}"
+    except Exception:
+        entry["registrar"] = "error"
+
+    results.append(entry)
+
+if json_out:
+    print(json.dumps(results, indent=2))
+else:
+    print("domains.portfolio.status")
+    print(f"domains: {len(results)}")
+    print()
+    fmt = "{:<28s} {:<10s} {:<12s} {:<8s} {:<10s} {:<8s} {:<8s}"
+    print(fmt.format("DOMAIN", "ZONE", "REGISTRAR", "DNS#", "EXPIRES", "SPF", "DMARC"))
+    print("-" * 84)
+    for r in results:
+        reg = r.get("registrar", "?")
+        if r.get("transfer_status"):
+            reg = f"{reg}({r['transfer_status'][:6]})"
+        spf = "OK" if r.get("spf", "").startswith("v=spf1") else r.get("spf", "?")[:8]
+        dmarc = "OK" if r.get("dmarc", "").startswith("v=DMARC1") else r.get("dmarc", "?")[:8]
+        print(fmt.format(
+            r["domain"],
+            r.get("zone_status", "?")[:10],
+            reg[:12],
+            str(r.get("dns_records", "?"))[:8],
+            r.get("expires_at", "-")[:10],
+            spf,
+            dmarc,
+        ))
+PYEOF
