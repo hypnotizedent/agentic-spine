@@ -49,6 +49,7 @@ for vm in "${MEDIA_VMS[@]}"; do
 
   declared_services=$(yq -r ".services | to_entries[] | select(.value.vm == \"$vm\") | .key" "$BINDING" 2>/dev/null | sort)
 
+  docker_cmd="docker"
   docker_out=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$ssh_ref" "docker ps --format '{{.Names}}'" 2>&1 || true)
   if echo "$docker_out" | grep -qi "permission denied while trying to connect to the docker api"; then
     docker_out=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$ssh_ref" "sudo -n docker ps --format '{{.Names}}'" 2>&1 || true)
@@ -56,6 +57,7 @@ for vm in "${MEDIA_VMS[@]}"; do
       err "$vm: docker socket permission denied and sudo fallback unavailable"
       continue
     fi
+    docker_cmd="sudo -n docker"
   fi
 
   running_containers=$(printf '%s\n' "$docker_out" | sort)
@@ -83,6 +85,34 @@ for vm in "${MEDIA_VMS[@]}"; do
       fi
     fi
   done
+
+  if [[ "$vm" == "download-stack" ]]; then
+    poster_user=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$ssh_ref" "$docker_cmd inspect --format '{{.Config.User}}' posterizarr" 2>/dev/null || true)
+    poster_config_src=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$ssh_ref" "$docker_cmd inspect --format '{{range .Mounts}}{{if eq .Destination \"/config\"}}{{.Source}}{{end}}{{end}}' posterizarr" 2>/dev/null || true)
+    poster_owner=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$ssh_ref" "sudo -n stat -c '%u:%g' /mnt/docker/volumes/posterizarr" 2>/dev/null || true)
+    flare_config_src=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$ssh_ref" "$docker_cmd inspect --format '{{range .Mounts}}{{if eq .Destination \"/config\"}}{{.Source}}{{end}}{{end}}' flaresolverr" 2>/dev/null || true)
+    decy_app_src=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$ssh_ref" "$docker_cmd inspect --format '{{range .Mounts}}{{if eq .Destination \"/app\"}}{{.Source}}{{end}}{{end}}' decypharr" 2>/dev/null || true)
+
+    case "$poster_user" in
+      nobody:nogroup|65534:65533|65534) ok "posterizarr runtime user=$poster_user" ;;
+      *) err "posterizarr runtime user='$poster_user' (expected nobody:nogroup or uid 65534)" ;;
+    esac
+
+    [[ "$poster_config_src" == /mnt/docker/volumes/posterizarr* ]] \
+      || err "posterizarr /config source='$poster_config_src' (expected /mnt/docker/volumes/posterizarr*)"
+    [[ "$poster_owner" == "65534:65533" ]] \
+      || err "posterizarr config owner='$poster_owner' (expected 65534:65533)"
+
+    [[ "$flare_config_src" == /mnt/docker/volumes/flaresolverr/config* ]] \
+      || err "flaresolverr /config source='$flare_config_src' (expected /mnt/docker/volumes/flaresolverr/config*)"
+    [[ "$flare_config_src" != /var/lib/docker/volumes/* ]] \
+      || err "flaresolverr /config backed by docker volume ('$flare_config_src') (expected bind mount)"
+
+    [[ "$decy_app_src" == /mnt/docker/volumes/decypharr/app* ]] \
+      || err "decypharr /app source='$decy_app_src' (expected /mnt/docker/volumes/decypharr/app*)"
+    [[ "$decy_app_src" != /var/lib/docker/volumes/* ]] \
+      || err "decypharr /app backed by docker volume ('$decy_app_src') (expected bind mount)"
+  fi
 done
 
 if [[ "$ERRORS" -gt 0 ]]; then
