@@ -52,6 +52,12 @@ for svc_type in $SERVICE_TYPES; do
     sonarr)
       for k in "${!SONARR_LANG_IDS[@]}"; do EXPECTED_IDS["$k"]="${SONARR_LANG_IDS[$k]}"; done
       ;;
+    lidarr)
+      ok "lidarr: no TRaSH language CFs available yet (skipped)"
+      unset EXPECTED_IDS
+      declare -A EXPECTED_IDS
+      continue
+      ;;
     *)
       err "$svc_type: no known language TRaSH IDs mapped — add mapping to D220 gate"
       unset EXPECTED_IDS
