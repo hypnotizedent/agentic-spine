@@ -19,9 +19,9 @@ Establish canonical Vaultwarden governance: fix backup drift, create workbench h
 | Gap | Severity | Status | Description |
 |-----|----------|--------|-------------|
 | GAP-OP-878 | high | **fixed** | Backup script path drift (host + data dir) |
-| GAP-OP-879 | high | open | No folders — flat namespace |
+| GAP-OP-879 | high | **fixed** | Folder taxonomy created (vault no longer flat) |
 | GAP-OP-880 | medium | open | 336 items in trash (42%) |
-| GAP-OP-881 | medium | open | Admin plaintext token not in Infisical |
+| GAP-OP-881 | medium | **fixed** | Admin plaintext token now present in Infisical |
 | GAP-OP-882 | low | open | Only 2/422 logins have TOTP |
 
 ## Stage 1 Deliverables (repo-safe, no live mutations)
@@ -34,8 +34,15 @@ Establish canonical Vaultwarden governance: fix backup drift, create workbench h
 
 ## Stage 2 (requires GO-LIVE-VAULTWARDEN approval)
 
-- [ ] Vault folder creation (GAP-OP-879)
+- [x] Vault folder creation (GAP-OP-879)
 - [ ] Trash review and purge (GAP-OP-880)
-- [ ] Admin token plaintext rotation into Infisical (GAP-OP-881)
+- [x] Admin token plaintext rotation into Infisical (GAP-OP-881)
 - [ ] TOTP coverage review (GAP-OP-882)
-- [ ] Overlap-zone reconciliation run
+- [x] Overlap-zone reconciliation run
+
+## Stage 3 (forensic chain-of-custody)
+
+- [x] Built export-vs-live discrepancy ledger (active + trash coverage)
+- [x] Restored 7 high-confidence missing entries into `98-forensic-recovered`
+- [x] Re-ran forensic diff: `missing_high_confidence=0`, `ambiguous=0`
+- [x] Published forensic receipt: `receipts/audits/infra/2026/VAULTWARDEN_TRANSITION_FORENSIC_2026-02-25.md`
