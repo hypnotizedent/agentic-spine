@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# media.storage.status — media persistence/volume invariants for critical helper containers
+#
+# Usage:
+#   ./bin/ops cap run media.storage.status
+#   ./bin/ops cap run media.storage.status --json
+#
+# Contract:
+# - SSHs to download-stack and inspects posterizarr/flaresolverr/decypharr
+# - Verifies bind-mount persistence for flaresolverr /config and decypharr /app
+# - Verifies posterizarr /config ownership for nobody:nogroup runtime writes
+# - Exit 0 if invariants hold, exit 1 if broken, exit 2 on config/runtime errors
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+usage() {
+  cat <<'USAGE'
+media.storage.status — persistence and mount invariants for media helper containers
+
+Args:
+  --json      Output JSON format
+  --timeout   SSH timeout in seconds (default: 10)
+
+Examples:
+  ./bin/ops cap run media.storage.status
+  ./bin/ops cap run media.storage.status --json
+USAGE
+}
+
+OUTPUT_JSON=false
+TIMEOUT_SEC=10
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)     OUTPUT_JSON=true; shift ;;
+    --timeout)  TIMEOUT_SEC="${2:-10}"; shift 2 ;;
+    -h|--help)  usage; exit 0 ;;
+    --)         shift ;;
+    *)          echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
+
+if [[ ! -f "$SSH_TARGETS" ]]; then
+  echo "STOP: ssh targets not found: $SSH_TARGETS" >&2
+  exit 2
+fi
+
+SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .host // ""' "$SSH_TARGETS" 2>/dev/null || true)
+SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "download-stack") | .user // "ubuntu"' "$SSH_TARGETS" 2>/dev/null || true)
+
+if [[ -z "$SSH_HOST" ]]; then
+  echo "STOP: download-stack SSH target not found in $SSH_TARGETS" >&2
+  exit 2
+fi
+
+SSH_OPTS="-o ConnectTimeout=$TIMEOUT_SEC -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
+
+ssh_cmd() {
+  ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "$@" 2>/dev/null
+}
+
+INSPECT_JSON=$(ssh_cmd "sudo docker inspect posterizarr flaresolverr decypharr 2>/dev/null" || echo "")
+if [[ -z "$INSPECT_JSON" || "$INSPECT_JSON" == "[]" ]]; then
+  echo "STOP: unable to inspect posterizarr/flaresolverr/decypharr on download-stack" >&2
+  exit 2
+fi
+
+POSTER_OWNER=$(ssh_cmd "sudo stat -c '%u:%g' /mnt/docker/volumes/posterizarr 2>/dev/null" || echo "missing")
+POSTER_MODE=$(ssh_cmd "sudo stat -c '%a' /mnt/docker/volumes/posterizarr 2>/dev/null" || echo "missing")
+
+PARSED_JSON=$(INSPECT_JSON="$INSPECT_JSON" POSTER_OWNER="$POSTER_OWNER" POSTER_MODE="$POSTER_MODE" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+
+raw = os.environ.get("INSPECT_JSON", "").strip()
+poster_owner = os.environ.get("POSTER_OWNER", "missing")
+poster_mode = os.environ.get("POSTER_MODE", "missing")
+
+status = "ok"
+issues = []
+data = {
+    "posterizarr": {},
+    "flaresolverr": {},
+    "decypharr": {},
+    "checks": {
+        "posterizarr_owner": {"actual": poster_owner, "expected": "65534:65533"},
+    },
+}
+
+try:
+    inspected = json.loads(raw)
+except Exception:
+    print(json.dumps({
+        "status": "fail",
+        "issues": ["docker inspect output not parseable"],
+        "data": data,
+    }))
+    raise SystemExit(0)
+
+index = {}
+for c in inspected:
+    name = str(c.get("Name", "")).lstrip("/")
+    index[name] = c
+
+def mount_src(container_obj, dest):
+    for m in container_obj.get("Mounts", []) or []:
+        if m.get("Destination") == dest:
+            return str(m.get("Source") or "")
+    return ""
+
+for required in ("posterizarr", "flaresolverr", "decypharr"):
+    if required not in index:
+        status = "fail"
+        issues.append(f"{required} container missing")
+
+if status == "fail":
+    print(json.dumps({"status": status, "issues": issues, "data": data}))
+    raise SystemExit(0)
+
+poster = index["posterizarr"]
+flare = index["flaresolverr"]
+decy = index["decypharr"]
+
+poster_user = str((poster.get("Config") or {}).get("User") or "")
+poster_state = str((poster.get("State") or {}).get("Status") or "unknown")
+poster_cfg = mount_src(poster, "/config")
+data["posterizarr"] = {
+    "state": poster_state,
+    "user": poster_user,
+    "config_mount": poster_cfg,
+    "config_owner": poster_owner,
+    "config_mode": poster_mode,
+}
+
+flare_state = str((flare.get("State") or {}).get("Status") or "unknown")
+flare_user = str((flare.get("Config") or {}).get("User") or "")
+flare_cfg = mount_src(flare, "/config")
+data["flaresolverr"] = {
+    "state": flare_state,
+    "user": flare_user,
+    "config_mount": flare_cfg,
+}
+
+decy_state = str((decy.get("State") or {}).get("Status") or "unknown")
+decy_user = str((decy.get("Config") or {}).get("User") or "")
+decy_app = mount_src(decy, "/app")
+decy_cfg = mount_src(decy, "/config")
+data["decypharr"] = {
+    "state": decy_state,
+    "user": decy_user,
+    "app_mount": decy_app,
+    "config_mount": decy_cfg,
+}
+
+if poster_state != "running":
+    status = "fail"
+    issues.append(f"posterizarr not running (state={poster_state})")
+if flare_state != "running":
+    status = "fail"
+    issues.append(f"flaresolverr not running (state={flare_state})")
+if decy_state != "running":
+    status = "fail"
+    issues.append(f"decypharr not running (state={decy_state})")
+
+if not poster_cfg.startswith("/mnt/docker/volumes/posterizarr"):
+    status = "fail"
+    issues.append(f"posterizarr /config not bound to canonical host path (actual={poster_cfg or 'missing'})")
+
+if poster_owner != "65534:65533":
+    status = "fail"
+    issues.append(f"posterizarr config owner mismatch (actual={poster_owner}, expected=65534:65533)")
+
+if not flare_cfg.startswith("/mnt/docker/volumes/flaresolverr/config"):
+    status = "fail"
+    issues.append(f"flaresolverr /config is not canonical bind mount (actual={flare_cfg or 'missing'})")
+elif flare_cfg.startswith("/var/lib/docker/volumes/"):
+    status = "fail"
+    issues.append("flaresolverr /config is docker-managed volume (anonymous/named) instead of canonical bind mount")
+
+if not decy_app.startswith("/mnt/docker/volumes/decypharr/app"):
+    status = "fail"
+    issues.append(f"decypharr /app is not canonical bind mount (actual={decy_app or 'missing'})")
+elif decy_app.startswith("/var/lib/docker/volumes/"):
+    status = "fail"
+    issues.append("decypharr /app is docker-managed volume (anonymous/named) instead of canonical bind mount")
+
+print(json.dumps({
+    "status": status,
+    "issues": issues,
+    "data": data,
+}))
+PY
+)
+
+if [[ -z "$PARSED_JSON" ]]; then
+  echo "STOP: parsing media storage status failed" >&2
+  exit 2
+fi
+
+STATUS=$(printf '%s' "$PARSED_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status","fail"))' 2>/dev/null || echo "fail")
+ISSUES_JSON=$(printf '%s' "$PARSED_JSON" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("issues", [])))' 2>/dev/null || echo "[]")
+DATA_JSON=$(printf '%s' "$PARSED_JSON" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("data", {})))' 2>/dev/null || echo "{}")
+
+if $OUTPUT_JSON; then
+  command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+  jq -n \
+    --arg capability "media.storage.status" \
+    --arg generated_at "$GENERATED_AT" \
+    --arg status "$STATUS" \
+    --argjson issues "$ISSUES_JSON" \
+    --argjson data "$DATA_JSON" \
+    '{
+      capability: $capability,
+      generated_at: $generated_at,
+      status: $status,
+      data: ($data + {issues: $issues})
+    }'
+else
+  echo "media.storage.status"
+  echo "===================="
+  echo "status: $STATUS"
+  echo "generated_at: $GENERATED_AT"
+  echo ""
+  printf '%s' "$DATA_JSON" | python3 - <<'PY'
+import json
+import sys
+d = json.loads(sys.stdin.read() or "{}")
+for k in ("posterizarr", "flaresolverr", "decypharr"):
+    v = d.get(k, {})
+    print(f"{k}:")
+    for sk, sv in v.items():
+        print(f"  {sk}: {sv}")
+checks = d.get("checks", {})
+if checks:
+    print("checks:")
+    for ck, cv in checks.items():
+        print(f"  {ck}: actual={cv.get('actual')} expected={cv.get('expected')}")
+PY
+  issue_count=$(printf '%s' "$ISSUES_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo "0")
+  if [[ "$issue_count" -gt 0 ]]; then
+    echo "issues:"
+    printf '%s' "$ISSUES_JSON" | python3 - <<'PY'
+import json
+import sys
+for item in json.loads(sys.stdin.read() or "[]"):
+    print(f"  - {item}")
+PY
+  fi
+fi
+
+if [[ "$STATUS" == "fail" ]]; then
+  exit 1
+fi
+exit 0

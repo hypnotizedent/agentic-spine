@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MEDIA-OBSERVABILITY-HARDENING-20260225
 created: 2026-02-25
-status: active
+status: closed
 owner: "@ronny"
 scope: media
 priority: medium
