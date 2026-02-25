@@ -3,7 +3,8 @@ set -euo pipefail
 
 # loops.create — Create a new loop scope file from template
 #
-# Usage: loops-create --name NAME --objective "desc" [--priority high|medium|low]
+# Usage: loops-create --name NAME --objective "desc" [--priority high|medium|low] \
+#                   [--phase "P0:desc"]... [--success "criterion"]... [--dod "item"]...
 #
 # Normalizes name to uppercase, computes LOOP-{NAME}-{YYYYMMDD},
 # checks uniqueness, renders template.
@@ -13,16 +14,23 @@ SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 TEMPLATE="$ROOT/ops/plugins/lifecycle/templates/loop-scope.template.md"
 
 NAME="" OBJECTIVE="" PRIORITY="medium"
+declare -a PHASES=()
+declare -a SUCCESS_CRITERIA=()
+declare -a DOD_ITEMS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --) shift ;;
     --name)      NAME="${2:?--name requires a value}"; shift 2 ;;
     --objective) OBJECTIVE="${2:?--objective requires a value}"; shift 2 ;;
     --priority)  PRIORITY="${2:?--priority requires a value}"; shift 2 ;;
+    --phase)     PHASES+=("${2:?--phase requires a value}"); shift 2 ;;
+    --success)   SUCCESS_CRITERIA+=("${2:?--success requires a value}"); shift 2 ;;
+    --dod)       DOD_ITEMS+=("${2:?--dod requires a value}"); shift 2 ;;
     -h|--help)
-      echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low]"
+      echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low] [--phase \"P0:desc\"]... [--success \"criterion\"]... [--dod \"item\"]..."
       echo ""
-      echo "Creates a new loop scope file from template."
+      echo "Creates a new loop scope file from template with optional scaffold sections."
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -72,6 +80,48 @@ sed \
   -e "s|{{OBJECTIVE}}|${OBJECTIVE}|g" \
   -e "s|{{SCOPE}}|${SCOPE}|g" \
   "$TEMPLATE" > "$SCOPE_FILE"
+
+# Append scaffold sections for consistent loop structure
+{
+  echo ""
+  echo "## Phases"
+  if (( ${#PHASES[@]} == 0 )); then
+    echo "- P0: capture and classify findings"
+    echo "- P1: implement changes"
+    echo "- P2: verify and close out"
+  else
+    for phase in "${PHASES[@]}"; do
+      if [[ "$phase" == *:* ]]; then
+        phase_name="${phase%%:*}"
+        phase_desc="${phase#*:}"
+        echo "- ${phase_name}: ${phase_desc}"
+      else
+        echo "- $phase"
+      fi
+    done
+  fi
+  echo ""
+  echo "## Success Criteria"
+  if (( ${#SUCCESS_CRITERIA[@]} == 0 )); then
+    echo "- All linked gaps/proposals are captured and linked to this loop."
+    echo "- Relevant verify pack(s) pass."
+  else
+    for criterion in "${SUCCESS_CRITERIA[@]}"; do
+      echo "- $criterion"
+    done
+  fi
+  echo ""
+  echo "## Definition Of Done"
+  if (( ${#DOD_ITEMS[@]} == 0 )); then
+    echo "- Scope artifacts updated and committed."
+    echo "- Receipted verification run keys recorded."
+    echo "- Loop status can be moved to closed."
+  else
+    for item in "${DOD_ITEMS[@]}"; do
+      echo "- $item"
+    done
+  fi
+} >> "$SCOPE_FILE"
 
 echo "CREATED: $LOOP_ID"
 echo "File: $SCOPE_FILE"

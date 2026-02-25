@@ -3,9 +3,13 @@ set -euo pipefail
 
 # gaps.file — Create a new gap entry (atomic, git-locked)
 #
-# Usage: gaps-file --id GAP-OP-NNN --type <type> --severity <sev> \
+# Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \
 #                  --description "desc" --discovered-by "source" \
-#                  [--doc "path"] [--parent-loop "LOOP-ID"]
+#                  [--doc "path"] [--parent-loop "LOOP-ID"] \
+#                  [--description-file path] [--no-commit]
+#
+# Batch usage:
+#   gaps-file --batch /path/to/gaps.yaml [--parent-loop LOOP-ID] [--no-commit]
 #
 # Acquires git-lock, appends to operational.gaps.yaml, commits, releases lock.
 # Validates all required fields and rejects duplicates.
@@ -14,25 +18,125 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
 source "$ROOT/ops/lib/resolve-policy.sh"
+source "$ROOT/ops/plugins/lifecycle/lib/next-gap-id.sh"
 resolve_policy_knobs
 
+yaml_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+validate_type() {
+  local value="$1"
+  case "$value" in
+    stale-ssot|missing-entry|agent-behavior|unclear-doc|duplicate-truth|runtime-bug) ;;
+    *)
+      echo "FAIL: invalid --type '$value' (valid: stale-ssot, missing-entry, agent-behavior, unclear-doc, duplicate-truth, runtime-bug)" >&2
+      exit 2
+      ;;
+  esac
+}
+
+validate_severity() {
+  local value="$1"
+  case "$value" in
+    low|medium|high|critical) ;;
+    *)
+      echo "FAIL: invalid --severity '$value' (valid: low, medium, high, critical)" >&2
+      exit 2
+      ;;
+  esac
+}
+
+load_description() {
+  local inline_desc="$1"
+  local desc_file="$2"
+  if [[ -n "$inline_desc" && -n "$desc_file" ]]; then
+    echo "FAIL: cannot specify both --description and --description-file" >&2
+    exit 2
+  fi
+  if [[ -n "$desc_file" ]]; then
+    [[ -f "$desc_file" ]] || { echo "FAIL: --description-file not found: $desc_file" >&2; exit 2; }
+    cat "$desc_file"
+    return 0
+  fi
+  printf '%s' "$inline_desc"
+}
+
+append_gap_entry() {
+  local gap_id="$1"
+  local type="$2"
+  local severity="$3"
+  local description="$4"
+  local discovered_by="$5"
+  local parent_loop="$6"
+  local doc="$7"
+  local today="$8"
+  local timestamp="$9"
+
+  [[ -n "$gap_id" ]]        || { echo "FAIL: gap id required" >&2; exit 2; }
+  [[ -n "$type" ]]          || { echo "FAIL: type required for $gap_id" >&2; exit 2; }
+  [[ -n "$severity" ]]      || { echo "FAIL: severity required for $gap_id" >&2; exit 2; }
+  [[ -n "$description" ]]   || { echo "FAIL: description required for $gap_id" >&2; exit 2; }
+  [[ -n "$discovered_by" ]] || { echo "FAIL: discovered_by required for $gap_id" >&2; exit 2; }
+
+  validate_type "$type"
+  validate_severity "$severity"
+  gap_exists "$gap_id" && { echo "FAIL: $gap_id already exists in gap registry" >&2; exit 1; }
+
+  local tmpfile
+  tmpfile="$(mktemp)"
+  {
+    echo "id: \"$(yaml_escape "$gap_id")\""
+    echo "discovered_by: \"$(yaml_escape "$discovered_by")\""
+    echo "discovered_at: \"$today\""
+    echo "type: $type"
+    if [[ -n "$doc" ]]; then
+      echo "doc: \"$(yaml_escape "$doc")\""
+    else
+      echo "doc: null"
+    fi
+    echo "description: |"
+    printf '%s\n' "$description" | sed 's/^/  /'
+    echo "severity: $severity"
+    echo "status: open"
+    echo "notes: \"Filed via gaps.file at $(yaml_escape "$timestamp")\""
+    if [[ -n "$parent_loop" ]]; then
+      echo "parent_loop: \"$(yaml_escape "$parent_loop")\""
+    fi
+  } > "$tmpfile"
+
+  yq e -i ".gaps += [load(\"$tmpfile\")]" "$GAPS_FILE" || {
+    rm -f "$tmpfile"
+    echo "FAIL: yq append failed for $gap_id" >&2
+    exit 1
+  }
+  rm -f "$tmpfile"
+}
+
 # Parse arguments
-GAP_ID="" TYPE="" SEVERITY="" DESCRIPTION="" DISCOVERED_BY="" PARENT_LOOP="" DOC=""
+GAP_ID="" TYPE="" SEVERITY="" DESCRIPTION="" DESCRIPTION_FILE="" DISCOVERED_BY="" PARENT_LOOP="" DOC=""
+BATCH_FILE="" NO_COMMIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
+    --batch)         BATCH_FILE="${2:?--batch requires a value}"; shift 2 ;;
+    --no-commit)     NO_COMMIT=1; shift ;;
     --id)            GAP_ID="${2:?--id requires a value}"; shift 2 ;;
     --type)          TYPE="${2:?--type requires a value}"; shift 2 ;;
     --severity)      SEVERITY="${2:?--severity requires a value}"; shift 2 ;;
     --description)   DESCRIPTION="${2:?--description requires a value}"; shift 2 ;;
+    --description-file) DESCRIPTION_FILE="${2:?--description-file requires a value}"; shift 2 ;;
     --discovered-by) DISCOVERED_BY="${2:?--discovered-by requires a value}"; shift 2 ;;
     --parent-loop)   PARENT_LOOP="${2:?--parent-loop requires a value}"; shift 2 ;;
     --doc)           DOC="${2:?--doc requires a value}"; shift 2 ;;
     -h|--help)
-      echo "Usage: gaps-file --id GAP-OP-NNN --type <type> --severity <sev> \\"
+      echo "Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \\"
       echo "                 --description \"desc\" --discovered-by \"source\" \\"
-      echo "                 [--doc \"path\"] [--parent-loop \"LOOP-ID\"]"
+      echo "                 [--doc \"path\"] [--parent-loop \"LOOP-ID\"] \\"
+      echo "                 [--description-file path] [--no-commit]"
+      echo ""
+      echo "Batch: gaps-file --batch /path/to/gaps.yaml [--parent-loop LOOP-ID] [--no-commit]"
       echo ""
       echo "Types: stale-ssot | missing-entry | agent-behavior | unclear-doc | duplicate-truth | runtime-bug"
       echo "Severities: low | medium | high | critical"
@@ -41,72 +145,97 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Validate required fields
-[[ -n "$GAP_ID" ]]        || { echo "FAIL: --id required" >&2; exit 2; }
-[[ -n "$TYPE" ]]          || { echo "FAIL: --type required" >&2; exit 2; }
-[[ -n "$SEVERITY" ]]      || { echo "FAIL: --severity required" >&2; exit 2; }
-[[ -n "$DESCRIPTION" ]]   || { echo "FAIL: --description required" >&2; exit 2; }
-[[ -n "$DISCOVERED_BY" ]] || { echo "FAIL: --discovered-by required" >&2; exit 2; }
-
-# Validate type
-case "$TYPE" in
-  stale-ssot|missing-entry|agent-behavior|unclear-doc|duplicate-truth|runtime-bug) ;;
-  *) echo "FAIL: invalid --type '$TYPE' (valid: stale-ssot, missing-entry, agent-behavior, unclear-doc, duplicate-truth, runtime-bug)" >&2; exit 2 ;;
-esac
-
-# Validate severity
-case "$SEVERITY" in
-  low|medium|high|critical) ;;
-  *) echo "FAIL: invalid --severity '$SEVERITY' (valid: low, medium, high, critical)" >&2; exit 2 ;;
-esac
-
-# Check for duplicates before acquiring lock
-gap_exists "$GAP_ID" && { echo "FAIL: $GAP_ID already exists in gap registry" >&2; exit 1; }
-
 # Acquire git lock
 acquire_git_lock gaps || exit 1
 
-# Temp file for the new entry
-TMPFILE=$(mktemp)
-trap 'rm -f "$TMPFILE"; release_git_lock' EXIT INT TERM
+trap 'release_git_lock' EXIT INT TERM
 
 TODAY=$(date -u +%Y-%m-%d)
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+declare -a FILED_GAP_IDS=()
 
-# Build YAML entry
-cat > "$TMPFILE" <<YAMLEOF
-id: "$GAP_ID"
-discovered_by: "$DISCOVERED_BY"
-discovered_at: "$TODAY"
-type: $TYPE
-doc: "${DOC:-null}"
-description: |
-  $DESCRIPTION
-severity: $SEVERITY
-status: open
-notes: "Filed via gaps.file at $TIMESTAMP"
-YAMLEOF
+if [[ -n "$BATCH_FILE" ]]; then
+  [[ -f "$BATCH_FILE" ]] || { echo "FAIL: --batch file not found: $BATCH_FILE" >&2; exit 2; }
+  [[ -z "$GAP_ID$TYPE$SEVERITY$DESCRIPTION$DESCRIPTION_FILE$DOC" ]] || {
+    echo "FAIL: --batch cannot be combined with single-gap fields (--id/--type/--severity/--description/--description-file/--doc)" >&2
+    exit 2
+  }
 
-# Add optional parent_loop
-if [[ -n "$PARENT_LOOP" ]]; then
-  echo "parent_loop: \"$PARENT_LOOP\"" >> "$TMPFILE"
+  batch_root_expr="$(yq e -r 'if type == "!!seq" then "." elif has("gaps") then ".gaps" else "" end' "$BATCH_FILE" 2>/dev/null || true)"
+  [[ -n "$batch_root_expr" ]] || { echo "FAIL: --batch must be a YAML list or object with .gaps list" >&2; exit 2; }
+  batch_count="$(yq e -r "($batch_root_expr | length) // 0" "$BATCH_FILE" 2>/dev/null || echo 0)"
+  [[ "$batch_count" =~ ^[0-9]+$ ]] || { echo "FAIL: invalid batch length in $BATCH_FILE" >&2; exit 2; }
+  (( batch_count > 0 )) || { echo "FAIL: --batch contains no gap entries" >&2; exit 2; }
+
+  batch_dir="$(cd "$(dirname "$BATCH_FILE")" && pwd)"
+  for ((i=0; i<batch_count; i++)); do
+    item_expr="$batch_root_expr[$i]"
+    item_gap_id="$(yq e -r "$item_expr.id // \"auto\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_type="$(yq e -r "$item_expr.type // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_severity="$(yq e -r "$item_expr.severity // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_doc="$(yq e -r "$item_expr.doc // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_discovered_by="$(yq e -r "$item_expr.discovered_by // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_parent_loop="$(yq e -r "$item_expr.parent_loop // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_description="$(yq e -r "$item_expr.description // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+    item_description_file="$(yq e -r "$item_expr.description_file // \"\"" "$BATCH_FILE" 2>/dev/null || true)"
+
+    [[ "$item_doc" == "null" ]] && item_doc=""
+    [[ "$item_discovered_by" == "null" ]] && item_discovered_by=""
+    [[ "$item_parent_loop" == "null" ]] && item_parent_loop=""
+    [[ "$item_description_file" == "null" ]] && item_description_file=""
+
+    if [[ -n "$item_description_file" ]]; then
+      if [[ "$item_description_file" != /* ]]; then
+        item_description_file="$batch_dir/$item_description_file"
+      fi
+    fi
+
+    [[ -n "$item_discovered_by" ]] || item_discovered_by="$DISCOVERED_BY"
+    [[ -n "$item_parent_loop" ]] || item_parent_loop="$PARENT_LOOP"
+    item_description="$(load_description "$item_description" "$item_description_file")"
+
+    [[ -n "$item_gap_id" ]] || item_gap_id="auto"
+    if [[ "$item_gap_id" == "auto" ]]; then
+      item_gap_id="$(next_gap_id)"
+    fi
+    [[ "$item_gap_id" =~ ^GAP-OP-[0-9]+$ ]] || { echo "FAIL: invalid gap id in batch entry $i: '$item_gap_id'" >&2; exit 2; }
+
+    append_gap_entry "$item_gap_id" "$item_type" "$item_severity" "$item_description" "$item_discovered_by" "$item_parent_loop" "$item_doc" "$TODAY" "$TIMESTAMP"
+    FILED_GAP_IDS+=("$item_gap_id")
+  done
+else
+  [[ -n "$GAP_ID" ]]        || { echo "FAIL: --id required (--id auto supported)" >&2; exit 2; }
+  [[ -n "$TYPE" ]]          || { echo "FAIL: --type required" >&2; exit 2; }
+  [[ -n "$SEVERITY" ]]      || { echo "FAIL: --severity required" >&2; exit 2; }
+  [[ -n "$DISCOVERED_BY" ]] || { echo "FAIL: --discovered-by required" >&2; exit 2; }
+
+  DESCRIPTION="$(load_description "$DESCRIPTION" "$DESCRIPTION_FILE")"
+  [[ -n "$DESCRIPTION" ]] || { echo "FAIL: --description or --description-file required" >&2; exit 2; }
+
+  if [[ "$GAP_ID" == "auto" ]]; then
+    GAP_ID="$(next_gap_id)"
+  fi
+  [[ "$GAP_ID" =~ ^GAP-OP-[0-9]+$ ]] || { echo "FAIL: invalid --id '$GAP_ID' (expected GAP-OP-NNN or auto)" >&2; exit 2; }
+
+  append_gap_entry "$GAP_ID" "$TYPE" "$SEVERITY" "$DESCRIPTION" "$DISCOVERED_BY" "$PARENT_LOOP" "$DOC" "$TODAY" "$TIMESTAMP"
+  FILED_GAP_IDS+=("$GAP_ID")
 fi
 
-# Append to gaps array
-yq e -i ".gaps += [load(\"$TMPFILE\")]" "$GAPS_FILE" || {
-  echo "FAIL: yq append failed" >&2
-  exit 1
-}
-
-# Update timestamp
+# Update timestamp once per run
 yq e -i ".updated = \"$TIMESTAMP\"" "$GAPS_FILE"
 
-# Commit
 git -C "$ROOT" add "$GAPS_FILE"
-git -C "$ROOT" commit -m "$(cat <<EOF
-gov($GAP_ID): register gap via gaps.file
+if [[ "$NO_COMMIT" -eq 0 ]]; then
+  if (( ${#FILED_GAP_IDS[@]} == 1 )); then
+    COMMIT_SUBJECT="gov(${FILED_GAP_IDS[0]}): register gap via gaps.file"
+  else
+    COMMIT_SUBJECT="gov(gaps.batch): register ${#FILED_GAP_IDS[@]} gaps via gaps.file"
+  fi
+  FILED_IDS_CSV="$(IFS=,; echo "${FILED_GAP_IDS[*]}")"
+  git -C "$ROOT" commit -m "$(cat <<EOF
+$COMMIT_SUBJECT
 
-Type: $TYPE | Severity: $SEVERITY
+Filed IDs: $FILED_IDS_CSV
 Filed via atomic gaps.file capability.
 
 Gap-Mutation: capability
@@ -115,12 +244,19 @@ Gap-Run-Key: ${SPINE_CAP_RUN_KEY:-manual}
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 EOF
 )"
+else
+  echo "STAGED (no commit): ${FILED_GAP_IDS[*]}"
+fi
 
-echo "FILED: $GAP_ID (type=$TYPE, severity=$SEVERITY)"
+for filed_id in "${FILED_GAP_IDS[@]}"; do
+  echo "FILED: $filed_id"
+done
 
 # Auto-claim if policy knob says so
 if [[ "${RESOLVED_GAP_AUTO_CLAIM:-false}" == "true" ]]; then
-  claim_gap "$GAP_ID" "auto-claimed by policy (gap_auto_claim=true)" && \
-    echo "AUTO-CLAIMED: $GAP_ID by PID $$" || \
-    echo "WARN: auto-claim failed for $GAP_ID (may already be claimed)" >&2
+  for filed_id in "${FILED_GAP_IDS[@]}"; do
+    claim_gap "$filed_id" "auto-claimed by policy (gap_auto_claim=true)" && \
+      echo "AUTO-CLAIMED: $filed_id by PID $$" || \
+      echo "WARN: auto-claim failed for $filed_id (may already be claimed)" >&2
+  done
 fi

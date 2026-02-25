@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+
+command -v yq >/dev/null 2>&1 || { echo "FAIL: missing dependency: yq" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "FAIL: missing dependency: python3" >&2; exit 2; }
+[[ -f "$GAPS_FILE" ]] || { echo "FAIL: missing file: $GAPS_FILE" >&2; exit 2; }
+
+DESCRIPTION=""
+DESCRIPTION_FILE=""
+THRESHOLD="0.80"
+LIMIT="10"
+STATUS="open"
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --description) DESCRIPTION="${2:?--description requires a value}"; shift 2 ;;
+    --description-file) DESCRIPTION_FILE="${2:?--description-file requires a value}"; shift 2 ;;
+    --threshold) THRESHOLD="${2:?--threshold requires a value}"; shift 2 ;;
+    --limit) LIMIT="${2:?--limit requires a value}"; shift 2 ;;
+    --status) STATUS="${2:?--status requires a value}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  gaps-dedupe --description "text" [--threshold 0.80] [--limit 10] [--status open|all] [--json]
+  gaps-dedupe --description-file /path/to/desc.txt [--threshold 0.80] [--limit 10] [--status open|all] [--json]
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ -n "$DESCRIPTION" && -n "$DESCRIPTION_FILE" ]]; then
+  echo "FAIL: cannot specify both --description and --description-file" >&2
+  exit 2
+fi
+if [[ -n "$DESCRIPTION_FILE" ]]; then
+  [[ -f "$DESCRIPTION_FILE" ]] || { echo "FAIL: --description-file not found: $DESCRIPTION_FILE" >&2; exit 2; }
+  DESCRIPTION="$(cat "$DESCRIPTION_FILE")"
+fi
+[[ -n "$DESCRIPTION" ]] || { echo "FAIL: --description or --description-file required" >&2; exit 2; }
+[[ "$STATUS" == "open" || "$STATUS" == "all" ]] || { echo "FAIL: --status must be open|all" >&2; exit 2; }
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || { echo "FAIL: --limit must be integer" >&2; exit 2; }
+
+GAPS_JSON="$(yq e -o=json '.gaps' "$GAPS_FILE" 2>/dev/null || echo '[]')"
+
+python3 - "$DESCRIPTION" "$THRESHOLD" "$LIMIT" "$STATUS" "$JSON_MODE" "$GAPS_JSON" <<'PY'
+import difflib
+import json
+import re
+import sys
+
+query = sys.argv[1].strip()
+threshold = float(sys.argv[2])
+limit = int(sys.argv[3])
+status_filter = sys.argv[4]
+json_mode = sys.argv[5] == "1"
+raw = sys.argv[6]
+
+def normalize(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+try:
+    gaps = json.loads(raw)
+except Exception:
+    gaps = []
+
+nq = normalize(query)
+matches = []
+for gap in gaps:
+    if not isinstance(gap, dict):
+        continue
+    if status_filter == "open" and str(gap.get("status", "")).strip() != "open":
+        continue
+    desc = str(gap.get("description", "")).strip()
+    if not desc:
+        continue
+    score = difflib.SequenceMatcher(None, nq, normalize(desc)).ratio()
+    if score < threshold:
+        continue
+    matches.append({
+        "id": str(gap.get("id", "")).strip(),
+        "score": round(score, 4),
+        "status": str(gap.get("status", "")).strip() or "unknown",
+        "severity": str(gap.get("severity", "")).strip() or "unknown",
+        "parent_loop": str(gap.get("parent_loop", "")).strip(),
+        "description": desc,
+    })
+
+matches.sort(key=lambda item: item["score"], reverse=True)
+matches = matches[:limit]
+
+if json_mode:
+    print(json.dumps({
+        "query": query,
+        "threshold": threshold,
+        "limit": limit,
+        "status_filter": status_filter,
+        "matches": matches,
+    }, indent=2))
+    sys.exit(0)
+
+print("gaps.dedupe")
+print(f"threshold: {threshold:.2f}")
+print(f"status_filter: {status_filter}")
+print(f"matches: {len(matches)}")
+if not matches:
+    print("  - none")
+    sys.exit(0)
+
+for item in matches:
+    loop = item["parent_loop"] if item["parent_loop"] else "none"
+    print(f"  - {item['id']} score={item['score']:.2f} severity={item['severity']} status={item['status']} loop={loop}")
+    print(f"    desc: {item['description']}")
+PY

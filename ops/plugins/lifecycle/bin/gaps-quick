@@ -3,8 +3,9 @@ set -euo pipefail
 
 # gaps.quick — One-liner gap filing with auto-defaults
 #
-# Usage: gaps-quick --description "desc" [--type T] [--severity S] \
-#                   [--loop LOOP-ID] [--doc path]
+# Usage: gaps-quick (--description "desc" | --description-file path) \
+#                   [--type T] [--severity S] [--loop LOOP-ID] \
+#                   [--doc path] [--no-commit]
 #
 # Computes next gap ID automatically, fills defaults from lifecycle.rules.yaml,
 # then delegates to gaps-file for atomic commit + optional auto-claim.
@@ -15,17 +16,20 @@ source "$ROOT/ops/plugins/lifecycle/lib/lifecycle-rules.sh"
 source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
 
 # Parse arguments
-DESCRIPTION="" TYPE="" SEVERITY="" LOOP="" DOC=""
+DESCRIPTION="" DESCRIPTION_FILE="" TYPE="" SEVERITY="" LOOP="" DOC="" NO_COMMIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --) shift ;;
     --description) DESCRIPTION="${2:?--description requires a value}"; shift 2 ;;
+    --description-file) DESCRIPTION_FILE="${2:?--description-file requires a value}"; shift 2 ;;
     --type)        TYPE="${2:?--type requires a value}"; shift 2 ;;
     --severity)    SEVERITY="${2:?--severity requires a value}"; shift 2 ;;
     --loop)        LOOP="${2:?--loop requires a value}"; shift 2 ;;
     --doc)         DOC="${2:?--doc requires a value}"; shift 2 ;;
+    --no-commit)   NO_COMMIT=1; shift ;;
     -h|--help)
-      echo "Usage: gaps-quick --description \"desc\" [--type T] [--severity S] [--loop LOOP-ID] [--doc path]"
+      echo "Usage: gaps-quick (--description \"desc\" | --description-file path) [--type T] [--severity S] [--loop LOOP-ID] [--doc path] [--no-commit]"
       echo ""
       echo "Files a new gap with auto-generated ID and defaults from lifecycle.rules.yaml."
       echo "Delegates to gaps.file for atomic commit + policy-driven auto-claim."
@@ -34,7 +38,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$DESCRIPTION" ]] || { echo "FAIL: --description required" >&2; exit 2; }
+if [[ -n "$DESCRIPTION" && -n "$DESCRIPTION_FILE" ]]; then
+  echo "FAIL: cannot specify both --description and --description-file" >&2
+  exit 2
+fi
+if [[ -n "$DESCRIPTION_FILE" ]]; then
+  [[ -f "$DESCRIPTION_FILE" ]] || { echo "FAIL: --description-file not found: $DESCRIPTION_FILE" >&2; exit 2; }
+fi
+if [[ -z "$DESCRIPTION" && -z "$DESCRIPTION_FILE" ]]; then
+  echo "FAIL: --description or --description-file required" >&2
+  exit 2
+fi
 
 # Compute defaults from rules SSOT
 [[ -z "$TYPE" ]]     && TYPE="$(gap_quick_default_type)"
@@ -49,11 +63,16 @@ ARGS=(
   --id "$GAP_ID"
   --type "$TYPE"
   --severity "$SEVERITY"
-  --description "$DESCRIPTION"
   --discovered-by "$DISCOVERED_BY"
 )
+if [[ -n "$DESCRIPTION_FILE" ]]; then
+  ARGS+=(--description-file "$DESCRIPTION_FILE")
+else
+  ARGS+=(--description "$DESCRIPTION")
+fi
 [[ -n "$LOOP" ]] && ARGS+=(--parent-loop "$LOOP")
 [[ -n "$DOC" ]]  && ARGS+=(--doc "$DOC")
+[[ "$NO_COMMIT" -eq 1 ]] && ARGS+=(--no-commit)
 
 # Delegate to gaps-file (handles git-lock, commit, auto-claim)
 "$ROOT/ops/plugins/loops/bin/gaps-file" "${ARGS[@]}"

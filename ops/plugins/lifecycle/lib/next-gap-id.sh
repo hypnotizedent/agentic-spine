@@ -10,8 +10,8 @@ next_gap_id() {
   local max_num=0
 
   while IFS= read -r gid; do
-    # Extract numeric suffix from GAP-OP-NNN
-    local num="${gid##GAP-OP-}"
+    [[ "$gid" =~ ^GAP-OP-([0-9]+)$ ]] || continue
+    local num="${BASH_REMATCH[1]}"
     # Strip leading zeros for arithmetic (10# prefix handles octal)
     num=$((10#$num))
     if [[ "$num" -gt "$max_num" ]]; then
