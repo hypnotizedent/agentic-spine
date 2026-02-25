@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Keep EQ-1 auth deferred until mint live baseline status is green.
 # D225: mint-live-before-auth-lock
 # Enforce "live modules first" sequencing:
 # - auth module remains deferred
