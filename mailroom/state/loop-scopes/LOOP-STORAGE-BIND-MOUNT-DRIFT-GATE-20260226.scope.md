@@ -1,11 +1,12 @@
 ---
 loop_id: LOOP-STORAGE-BIND-MOUNT-DRIFT-GATE-20260226
 created: 2026-02-26
-status: active
+status: closed
 owner: "@ronny"
 scope: storage
 priority: high
 objective: Enforce governed non-boot bind-mount policy for high-write service paths and prevent boot-disk exhaustion regressions across VM stacks.
+superseded_by: LOOP-STORAGE-BOOT-DRIVE-AUDIT-20260226
 ---
 
 # Loop Scope: LOOP-STORAGE-BIND-MOUNT-DRIFT-GATE-20260226
@@ -13,6 +14,14 @@ objective: Enforce governed non-boot bind-mount policy for high-write service pa
 ## Objective
 
 Enforce governed non-boot bind-mount policy for high-write service paths and prevent boot-disk exhaustion regressions across VM stacks.
+
+## Closeout
+
+Closed on 2026-02-26 after merge into LOOP-STORAGE-BOOT-DRIVE-AUDIT-20260226 as the communications-specific storage lane.
+Retained outcomes:
+- D233 gate implemented and wired in communications verify pack.
+- Communications mail-archiver upload path remapped to non-boot storage.
+- GAP-OP-940 tracked under canonical storage audit loop.
 
 ## Phases
 - P0: register-governance-gap

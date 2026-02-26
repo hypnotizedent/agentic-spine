@@ -8,6 +8,8 @@ priority: high
 objective: Infrastructure-wide read-only audit of all VM container storage mounts to identify boot-drive violations, establish storage placement policy, and add drift gates to prevent recurrence.
 related_loops:
   - LOOP-STORAGE-BIND-MOUNT-DRIFT-GATE-20260226
+absorbed_loops:
+  - LOOP-STORAGE-BIND-MOUNT-DRIFT-GATE-20260226
 ---
 
 # Loop Scope: LOOP-STORAGE-BOOT-DRIVE-AUDIT-20260226
