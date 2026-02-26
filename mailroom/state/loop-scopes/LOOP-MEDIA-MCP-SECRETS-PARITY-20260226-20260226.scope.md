@@ -63,13 +63,13 @@ Close GAP-OP-963/964/965 (media MCP tool wrappers, parity enforcement, secrets n
 | GAP-OP-963 | FIXED | MCPJungle mirror synced: 6 bridge tools added, version 3.2.0->3.3.0, D66 parity verified |
 | GAP-OP-964 | FIXED | `.githooks/pre-commit` + `scripts/root/mcp/mcp-parity-check.sh`, `core.hooksPath` set |
 | GAP-OP-965 | FIXED | `agents/media/tools/run.sh` wrapper sources infisical-agent.sh auth-token + `infisical run`, `.mcp.json` updated |
-| GAP-OP-966 | OPEN | Parent_loop linked; naming backfill deferred (not addressable in this loop) |
+| GAP-OP-966 | OPEN | Not addressed; parent_loop removed to avoid open_orphan (deferred to future loop) |
 
 ### D136 Delta
 
 - **Before:** required_missing=11
-- **After:** required_missing=7
-- **Reduction:** -4 (963/964/965 fixed, 966 parent_loop linked)
+- **After:** required_missing=8 (7 pre-existing + GAP-OP-966 unlinked)
+- **Reduction:** -3 from fixed gaps (963/964/965); GAP-OP-966 remains unlinked (open, deferred)
 
 ### qB/VPN Security Attestation
 
