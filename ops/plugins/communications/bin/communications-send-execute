@@ -326,7 +326,13 @@ else
   if [[ "$provider" == "resend" && "$channel" == "email" ]]; then
     resend_api_key="$(resolve_secret "RESEND_API_KEY" || true)"
     [[ -n "$resend_api_key" ]] || { echo "ERROR: RESEND_API_KEY is required for live resend sends" >&2; exit 1; }
-    from_email="${FROM_EMAIL:-$(yq e -r '.transactional.default_sender_email // ""' "$PROVIDERS_CONTRACT")}"
+    from_email="${FROM_EMAIL:-}"
+    if [[ -z "$from_email" ]]; then
+      from_email="$(resolve_secret "FROM_EMAIL" || true)"
+    fi
+    if [[ -z "$from_email" ]]; then
+      from_email="$(yq e -r '.transactional.default_sender_email // ""' "$PROVIDERS_CONTRACT")"
+    fi
     from_name="$(yq e -r '.transactional.default_sender_name // "Mint Prints"' "$PROVIDERS_CONTRACT")"
     [[ -n "$from_email" ]] || { echo "ERROR: FROM_EMAIL or transactional.default_sender_email is required" >&2; exit 1; }
     response_file="$(mktemp)"
