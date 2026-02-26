@@ -26,7 +26,7 @@ check_tls() {
   [[ -n "$starttls_proto" ]] && connect_args+=(-starttls "$starttls_proto")
 
   local cert_text
-  cert_text="$(echo "" | timeout "$TIMEOUT" openssl s_client "${connect_args[@]}" 2>/dev/null)" || true
+  cert_text="$(timeout "$TIMEOUT" openssl s_client "${connect_args[@]}" </dev/null 2>/dev/null)" || true
 
   local subject not_after
   subject="$(echo "$cert_text" | openssl x509 -noout -subject 2>/dev/null | sed 's/^subject=//')" || subject=""
