@@ -9,6 +9,8 @@ execution_mode: background
 active_terminal: SPINE-EXECUTION-01
 blocked_by: "200GB mail-archiver upload/import lane is currently running in another terminal session"
 operator_note: "Background lane only until upload/import completion receipt is posted; avoid duplicate ingest actions from other terminals."
+last_heartbeat_utc: "2026-02-26T08:28:41Z"
+heartbeat_ttl_minutes: 45
 objective: Import full Microsoft 365 (ronny@mintprints.com) mailbox into mail-archiver on VM 214 via Graph API MIME export → EML import pipeline
 ---
 

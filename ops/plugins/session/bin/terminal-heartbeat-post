@@ -6,6 +6,7 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 STATE_DIR="${SPINE_STATE:-$ROOT/mailroom/state}"
 CONTRACT="$ROOT/ops/bindings/stabilization.mode.yaml"
 HEARTBEAT_DIR="$STATE_DIR/terminal-heartbeats"
+LOOP_HEARTBEAT_DIR="$STATE_DIR/loop-heartbeats"
 
 usage() {
   cat <<'EOF'
@@ -111,6 +112,24 @@ EOF
 
 mv "$tmp_file" "$heartbeat_file"
 
+loop_heartbeat_file=""
+if [[ -n "${loop_id:-}" ]]; then
+  mkdir -p "$LOOP_HEARTBEAT_DIR"
+  safe_loop_id="$(printf '%s' "$loop_id" | tr -cs 'A-Za-z0-9._-' '_')"
+  loop_heartbeat_file="$LOOP_HEARTBEAT_DIR/${safe_loop_id}.yaml"
+  loop_tmp_file="${loop_heartbeat_file}.tmp.$$"
+  cat > "$loop_tmp_file" <<EOF
+version: 1
+loop_id: "$loop_id"
+terminal_id: "$terminal_id"
+last_heartbeat_utc: "$heartbeat_at"
+heartbeat_ttl_minutes: $ttl_minutes
+expires_at: "$expires_at"
+terminal_status: "$status"
+EOF
+  mv "$loop_tmp_file" "$loop_heartbeat_file"
+fi
+
 if [[ "$json_mode" -eq 1 ]]; then
   command -v jq >/dev/null 2>&1 || {
     echo "FAIL: --json requires jq" >&2
@@ -127,6 +146,7 @@ if [[ "$json_mode" -eq 1 ]]; then
     --arg heartbeat_at "$heartbeat_at" \
     --arg expires_at "$expires_at" \
     --arg heartbeat_file "$heartbeat_file" \
+    --arg loop_heartbeat_file "$loop_heartbeat_file" \
     '{
       terminal_id: $terminal_id,
       role: $role,
@@ -137,7 +157,8 @@ if [[ "$json_mode" -eq 1 ]]; then
       status: $status,
       heartbeat_at: $heartbeat_at,
       expires_at: $expires_at,
-      heartbeat_file: $heartbeat_file
+      heartbeat_file: $heartbeat_file,
+      loop_heartbeat_file: $loop_heartbeat_file
     }'
   exit 0
 fi
@@ -153,3 +174,6 @@ echo "status: $status"
 echo "heartbeat_at: $heartbeat_at"
 echo "expires_at: $expires_at"
 echo "heartbeat_file: $heartbeat_file"
+if [[ -n "$loop_heartbeat_file" ]]; then
+  echo "loop_heartbeat_file: $loop_heartbeat_file"
+fi

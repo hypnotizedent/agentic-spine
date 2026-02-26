@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# loops.background.stop — clear background-active marker for a loop.
+#
+# Usage:
+#   loops-background-stop --loop-id LOOP-ID [--note "text"] [--keep-blocker]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
+LOOP_HEARTBEAT_DIR="$ROOT/mailroom/state/loop-heartbeats"
+source "$ROOT/ops/lib/git-lock.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  loops-background-stop --loop-id LOOP-ID [--note "text"] [--keep-blocker]
+
+Sets execution_mode=foreground and clears active_terminal.
+By default also sets blocked_by=none and removes runtime loop heartbeat state.
+EOF
+}
+
+loop_id=""
+note=""
+clear_blocker=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --loop-id) loop_id="${2:?--loop-id requires a value}"; shift 2 ;;
+    --note) note="${2:?--note requires a value}"; shift 2 ;;
+    --keep-blocker) clear_blocker=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$loop_id" ]] || { echo "FAIL: --loop-id required" >&2; exit 2; }
+
+scope_file="$SCOPES_DIR/${loop_id}.scope.md"
+[[ -f "$scope_file" ]] || { echo "FAIL: scope file not found: $scope_file" >&2; exit 1; }
+
+heartbeat_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+acquire_git_lock gaps || exit 1
+tmp_file="$(mktemp "${scope_file}.tmp.XXXXXX")"
+trap 'rm -f "$tmp_file" 2>/dev/null || true; release_git_lock' EXIT INT TERM
+
+python3 - "$scope_file" "$heartbeat_at" "$note" "$clear_blocker" > "$tmp_file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+scope = Path(sys.argv[1])
+heartbeat_at = sys.argv[2]
+note = sys.argv[3]
+clear_blocker = sys.argv[4] == "1"
+
+text = scope.read_text()
+lines = text.splitlines(keepends=True)
+fm_markers = [i for i, line in enumerate(lines) if line.strip() == "---"]
+if len(fm_markers) < 2:
+    raise SystemExit(f"FAIL: missing YAML frontmatter in {scope}")
+
+fm_start, fm_end = fm_markers[0], fm_markers[1]
+fm_lines = lines[fm_start + 1:fm_end]
+
+def yaml_scalar(value: str, numeric: bool = False) -> str:
+    if numeric:
+        return value
+    if re.fullmatch(r"[A-Za-z0-9._@/-]+", value):
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f"\"{escaped}\""
+
+def upsert(field: str, value: str, numeric: bool = False) -> None:
+    rendered = f"{field}: {yaml_scalar(value, numeric=numeric)}\n"
+    for idx, line in enumerate(fm_lines):
+        if re.match(rf"^{re.escape(field)}:\s*", line):
+            fm_lines[idx] = rendered
+            return
+    insert_at = len(fm_lines)
+    for idx, line in enumerate(fm_lines):
+        if re.match(r"^objective:\s*", line):
+            insert_at = idx
+            break
+    fm_lines.insert(insert_at, rendered)
+
+upsert("execution_mode", "foreground")
+upsert("active_terminal", "none")
+upsert("last_heartbeat_utc", heartbeat_at)
+if clear_blocker:
+    upsert("blocked_by", "none")
+if note:
+    upsert("operator_note", note)
+
+result = lines[:fm_start + 1] + fm_lines + lines[fm_end:]
+sys.stdout.write("".join(result))
+PY
+
+mv "$tmp_file" "$scope_file"
+
+safe_loop_id="$(printf '%s' "$loop_id" | tr -cs 'A-Za-z0-9._-' '_')"
+loop_heartbeat_file="$LOOP_HEARTBEAT_DIR/${safe_loop_id}.yaml"
+rm -f "$loop_heartbeat_file"
+
+trap - EXIT INT TERM
+release_git_lock
+
+echo "loops.background.stop"
+echo "loop_id: $loop_id"
+echo "execution_mode: foreground"
+echo "active_terminal: none"
+echo "last_heartbeat_utc: $heartbeat_at"
+if [[ "$clear_blocker" -eq 1 ]]; then
+  echo "blocked_by: none"
+fi
+if [[ -n "$note" ]]; then
+  echo "operator_note: $note"
+fi
+echo "scope_file: $scope_file"
+echo "loop_heartbeat_file_removed: $loop_heartbeat_file"

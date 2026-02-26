@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from collections import Counter
 from pathlib import Path
 
@@ -33,6 +34,7 @@ scopes_dir = spine / "mailroom" / "state" / "loop-scopes"
 orch_dir = spine / "mailroom" / "state" / "orchestration"
 gaps_file = spine / "ops" / "bindings" / "operational.gaps.yaml"
 inbox_dir = spine / "mailroom" / "inbox"
+loop_heartbeat_dir = spine / "mailroom" / "state" / "loop-heartbeats"
 
 FM_RE = re.compile(r"^---\s*$")
 
@@ -93,6 +95,9 @@ if scopes_dir.is_dir():
             "active_terminal": fm.get("active_terminal", ""),
             "blocked_by": fm.get("blocked_by", ""),
             "operator_note": fm.get("operator_note", ""),
+            "last_heartbeat_utc": fm.get("last_heartbeat_utc", ""),
+            "heartbeat_ttl_minutes": fm.get("heartbeat_ttl_minutes", ""),
+            "heartbeat_source": "scope",
             "title": fm.get("_title", f.stem),
             "file": str(f.relative_to(spine)),
         }
@@ -141,6 +146,9 @@ if orch_dir.is_dir():
             "active_terminal": "",
             "blocked_by": "",
             "operator_note": "",
+            "last_heartbeat_utc": "",
+            "heartbeat_ttl_minutes": "",
+            "heartbeat_source": "",
             "title": loop_id,
             "file": str(manifest_path.relative_to(spine)),
             "source": "orchestration",
@@ -153,6 +161,53 @@ if orch_dir.is_dir():
             anomalies.append(anomaly_msg)
         elif orch_status == "closed":
             closed_loops.append(entry)
+
+# ── Overlay runtime loop heartbeat state ──────────────────────────────────
+
+def parse_kv_yaml(path):
+    data = {}
+    try:
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            key, val = line.split(":", 1)
+            data[key.strip()] = val.strip().strip('"').strip("'")
+    except OSError:
+        return {}
+    return data
+
+def parse_iso_utc(value):
+    if not value:
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+for loop in open_loops:
+    loop_id = loop.get("loop_id", "")
+    if not loop_id:
+        continue
+    safe_loop_id = re.sub(r"[^A-Za-z0-9._-]", "_", loop_id)
+    hb_file = loop_heartbeat_dir / f"{safe_loop_id}.yaml"
+    if not hb_file.exists():
+        continue
+    hb = parse_kv_yaml(hb_file)
+    if hb.get("last_heartbeat_utc"):
+        loop["last_heartbeat_utc"] = hb["last_heartbeat_utc"]
+        loop["heartbeat_source"] = "runtime"
+    if hb.get("heartbeat_ttl_minutes"):
+        loop["heartbeat_ttl_minutes"] = hb["heartbeat_ttl_minutes"]
+        loop["heartbeat_source"] = "runtime"
+    if hb.get("terminal_id"):
+        loop["active_terminal"] = hb["terminal_id"]
 
 # ── Parse gaps ────────────────────────────────────────────────────────────
 
@@ -288,6 +343,49 @@ if comms_slo_status == "incident":
 elif comms_slo_status == "warn":
     anomalies.append(f"COMMS QUEUE WARN: pending={comms_pending} oldest={comms_oldest}s")
 
+# Check background loop heartbeat freshness
+now_utc = datetime.now(timezone.utc)
+stale_background_count = 0
+for loop in open_loops:
+    if loop.get("execution_mode") != "background":
+        continue
+
+    loop_id = loop.get("loop_id", "?")
+    track_enabled = bool(str(loop.get("heartbeat_ttl_minutes", "")).strip() or str(loop.get("last_heartbeat_utc", "")).strip())
+    if not track_enabled:
+        continue
+
+    ttl_raw = str(loop.get("heartbeat_ttl_minutes", "")).strip()
+    try:
+        ttl_minutes = int(ttl_raw) if ttl_raw else 45
+    except ValueError:
+        ttl_minutes = 45
+
+    heartbeat_raw = str(loop.get("last_heartbeat_utc", "")).strip()
+    if not heartbeat_raw:
+        loop["background_heartbeat_stale"] = True
+        loop["heartbeat_age_minutes"] = None
+        stale_background_count += 1
+        anomalies.append(f"LOOP BACKGROUND STALE: {loop_id} missing heartbeat (ttl={ttl_minutes}m)")
+        continue
+
+    heartbeat_dt = parse_iso_utc(heartbeat_raw)
+    if heartbeat_dt is None:
+        loop["background_heartbeat_stale"] = True
+        loop["heartbeat_age_minutes"] = None
+        stale_background_count += 1
+        anomalies.append(f"LOOP BACKGROUND STALE: {loop_id} invalid heartbeat '{heartbeat_raw}'")
+        continue
+
+    age_minutes = max(0.0, (now_utc - heartbeat_dt).total_seconds() / 60.0)
+    loop["heartbeat_age_minutes"] = age_minutes
+    loop["background_heartbeat_stale"] = age_minutes > ttl_minutes
+    if loop["background_heartbeat_stale"]:
+        stale_background_count += 1
+        anomalies.append(
+            f"LOOP BACKGROUND STALE: {loop_id} heartbeat age={age_minutes:.1f}m ttl={ttl_minutes}m"
+        )
+
 # ── Output ────────────────────────────────────────────────────────────────
 
 if mode == "--json":
@@ -309,6 +407,8 @@ if mode == "--json":
         },
         "counts": {
             "open_loops": len(open_loops),
+            "background_loops": sum(1 for loop in open_loops if loop.get("execution_mode") == "background"),
+            "stale_background_loops": stale_background_count,
             "planned_loops": len(planned_loops),
             "closed_loops": len(closed_loops),
             "open_gaps": len(open_gaps),
@@ -326,7 +426,10 @@ if mode == "--brief":
     background_open = sum(1 for loop in open_loops if loop.get("execution_mode") == "background")
     loop_part = f"Loops: {len(open_loops)} open"
     if background_open:
-        loop_part += f" ({background_open} background)"
+        loop_part += f" ({background_open} background"
+        if stale_background_count:
+            loop_part += f", {stale_background_count} stale"
+        loop_part += ")"
     parts = [loop_part]
     if planned_loops:
         parts[0] += f" + {len(planned_loops)} planned"
@@ -364,6 +467,26 @@ else:
             if loop.get("active_terminal"):
                 line += f", terminal={loop['active_terminal']}"
             print(f"  {'':8s}  {'':15s} {line}")
+            heartbeat_at = loop.get("last_heartbeat_utc", "")
+            ttl_raw = str(loop.get("heartbeat_ttl_minutes", "")).strip()
+            ttl_minutes = ttl_raw if ttl_raw else "45"
+            track_enabled = bool(ttl_raw or heartbeat_at)
+            if track_enabled:
+                if heartbeat_at:
+                    hb_line = f"heartbeat: {heartbeat_at} (ttl={ttl_minutes}m"
+                    if loop.get("heartbeat_source"):
+                        hb_line += f", source={loop['heartbeat_source']}"
+                    age = loop.get("heartbeat_age_minutes")
+                    if isinstance(age, (int, float)):
+                        hb_line += f", age={age:.1f}m"
+                    hb_line += ")"
+                    if loop.get("background_heartbeat_stale"):
+                        hb_line += " [STALE]"
+                    print(f"  {'':8s}  {'':15s} {hb_line}")
+                else:
+                    print(f"  {'':8s}  {'':15s} heartbeat: missing (ttl={ttl_minutes}m) [STALE]")
+            else:
+                print(f"  {'':8s}  {'':15s} heartbeat tracking: not initialized")
         if loop.get("blocked_by") and loop["blocked_by"] != "none":
             print(f"  {'':8s}  {'':15s} blocked_by: {loop['blocked_by']}")
         if loop.get("operator_note"):
@@ -435,6 +558,8 @@ if planned_loops:
     parts.append(f"{len(planned_loops)} planned")
 if open_gaps:
     parts.append(f"{len(open_gaps)} gaps")
+if stale_background_count:
+    parts.append(f"{stale_background_count} stale background")
 pending_count = proposal_counts.get("pending", 0)
 if pending_count:
     parts.append(f"{pending_count} pending proposals")
