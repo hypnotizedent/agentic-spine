@@ -36,12 +36,12 @@ Containers/VMs repeatedly get default-setup to boot drives because:
 
 ## Phases
 
-- P0: Read-only SSH audit (complete)
-- P1: File gaps for each violation category
-- P2: Create `infra.storage.placement.policy.yaml` binding
-- P3: Update VM creation contract with storage step
-- P4: Implement infrastructure-wide drift gate(s)
-- P5: Remediation plan per-VM (capture-only, no runtime changes this loop)
+- P0: Read-only SSH audit (DONE)
+- P1: File gaps for each violation category (DONE — 7 gaps: GAP-OP-941–947)
+- P2: Create `infra.storage.placement.policy.yaml` binding (DONE — commit bcaa5bb)
+- P3: Update VM creation contract with storage step (DONE — GAP-OP-944 closed)
+- P4: Implement infrastructure-wide drift gate(s) (DONE — D234, GAP-OP-946 closed)
+- P5: Remediation plan per-VM (DONE — captured in storage placement policy remediation_priority)
 
 ## Success Criteria
 
@@ -58,3 +58,19 @@ Containers/VMs repeatedly get default-setup to boot drives because:
 - D234+ gate enforces storage placement
 - VM_CREATION_CONTRACT.md updated with storage step
 - No runtime changes (capture-only audit)
+
+## Gap Summary
+
+| Gap | Severity | Status | Description |
+|-----|----------|--------|-------------|
+| GAP-OP-941 | critical | open | VM 211 finance-stack boot drive at 75%, all data on boot |
+| GAP-OP-942 | high | open | VMs 204/205/206/207/212 all persistent data on boot |
+| GAP-OP-943 | high | **fixed** | Missing storage placement policy binding |
+| GAP-OP-944 | high | **fixed** | VM creation contract missing storage provisioning step |
+| GAP-OP-945 | high | **fixed** | VM profile missing data disk configuration |
+| GAP-OP-946 | high | **fixed** | Missing infrastructure-wide storage drift gate |
+| GAP-OP-947 | medium | open | Docker image bloat on boot drives (210, 213) |
+
+## Audit Summary
+
+This loop's capture-only objective is complete. 4/7 gaps fixed (policy + process). 3 gaps remain open for runtime remediation (separate loops per VM).

@@ -13,6 +13,7 @@ scope: vm-lifecycle-governance
 > **Authority boundary:**
 > - This contract defines the *process*. Hardware/topology facts live in SHOP_SERVER_SSOT.md.
 > - Service placement rules live in `ops/bindings/infra.placement.policy.yaml`.
+> - Storage tier placement lives in `ops/bindings/infra.storage.placement.policy.yaml`.
 > - Per-VM state lives in `ops/bindings/vm.lifecycle.yaml` (the lifecycle binding).
 > - Relocation-specific workflow lives in INFRA_RELOCATION_PROTOCOL.md.
 
@@ -52,6 +53,7 @@ PLAN ──▶ PROVISION ──▶ REGISTER ──▶ VALIDATE ──▶ OPERATE
 - **Resource envelope:** CPU cores, RAM, boot disk — from profile or explicitly overridden
 - **Role:** Primary workload description (e.g. `finance-stack`, `observability`)
 - **Stacks/services:** What compose stacks and services will run on this VM
+- **Storage tier:** Consult `infra.storage.placement.policy.yaml` — does this VM need a dedicated data disk (ZFS zvol), NFS mount, or boot-only?
 
 ### SSOT Impact Preview
 
@@ -68,6 +70,7 @@ The following files WILL need updates by the end of REGISTER phase:
 | `ops/bindings/docker.compose.targets.yaml` | Compose target entry |
 | `ops/bindings/services.health.yaml` | Health probe endpoints |
 | `ops/bindings/backup.inventory.yaml` | Backup target entry |
+| `ops/bindings/infra.storage.placement.policy.yaml` | Storage tier declaration for this VM |
 | `ops/bindings/secrets.namespace.policy.yaml` | Secret paths (if services need secrets) |
 
 ---
@@ -90,11 +93,23 @@ The following files WILL need updates by the end of REGISTER phase:
    - Static IP (preferred) or DHCP
    - SSH public key injection (MUST happen before first boot)
    - DNS nameserver
-4. **Set boot policy:**
+4. **Provision storage tier** (per `infra.storage.placement.policy.yaml`):
+   - **boot-only:** No action (stateless workloads, SQLite on `/opt/appdata`)
+   - **tank-vms:** Create ZFS zvol, attach as virtio disk:
+     ```
+     zfs create -V <SIZE> tank/vms/vm-<VMID>-data
+     qm set <VMID> --virtio1 tank/vms/vm-<VMID>-data
+     ```
+   - **tank-docker / nfs-media:** Configure NFS mount in cloud-init or post-boot:
+     ```
+     echo "<NFS_SOURCE> <MOUNT_PATH> nfs defaults 0 0" >> /etc/fstab
+     ```
+   - Update Docker data-root if data disk is mounted (e.g., `/mnt/docker`)
+5. **Set boot policy:**
    ```
    qm set <VMID> --onboot 1
    ```
-5. **Start VM and wait for cloud-init:**
+6. **Start VM and wait for cloud-init:**
    ```
    qm start <VMID>
    qm guest exec <VMID> -- cloud-init status --wait
@@ -283,6 +298,7 @@ Every rollback must produce:
 | `ops/bindings/vm.lifecycle.yaml` | Per-VM state tracking (lifecycle binding) |
 | `ops/bindings/infra.vm.profiles.yaml` | Reusable bootstrap profiles |
 | `ops/bindings/infra.placement.policy.yaml` | Where VMs are allowed to be placed |
+| `ops/bindings/infra.storage.placement.policy.yaml` | What storage tier each VM should use |
 | `docs/governance/INFRA_RELOCATION_PROTOCOL.md` | Protocol for moving services between VMs |
 | `docs/governance/SHOP_SERVER_SSOT.md` | Hardware-level VM inventory |
 | `docs/governance/SERVICE_REGISTRY.yaml` | Service-to-host mapping |
