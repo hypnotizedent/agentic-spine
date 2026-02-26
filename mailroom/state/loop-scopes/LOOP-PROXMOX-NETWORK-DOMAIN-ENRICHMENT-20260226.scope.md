@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-PROXMOX-NETWORK-DOMAIN-ENRICHMENT-20260226
 created: 2026-02-26
-status: active
+status: closed
 owner: "@ronny"
 scope: governance
 priority: medium
