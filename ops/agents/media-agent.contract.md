@@ -1,6 +1,6 @@
 # media-agent Contract
 
-> **Status:** registered
+> **Status:** active
 > **Domain:** media
 > **Owner:** @ronny
 > **Created:** 2026-02-08
