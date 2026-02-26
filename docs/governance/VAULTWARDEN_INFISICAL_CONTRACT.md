@@ -104,6 +104,27 @@ Recommended folder structure to align with spine domain roots:
 3. If Infisical secret: run `./bin/ops cap run secrets.get <path>` to verify propagation.
 4. If Vaultwarden credential: browser extension sync confirms propagation.
 
+## TOTP Coverage Policy (Vaultwarden)
+
+Vaultwarden TOTP storage is policy-driven, not percentage-driven.
+
+Rules:
+
+1. Break-glass accounts SHOULD store TOTP seed in Vaultwarden:
+   - Vaultwarden account itself
+   - primary identity/email account used for account recovery
+   - primary admin identity for spine control-plane systems
+2. Non-critical services MAY keep TOTP in a separate authenticator app or hardware token.
+3. Coverage health gate is minimum-presence, not blanket coverage:
+   - if `vaultwarden.vault.audit` reports `twofactor == 0`, file a medium-severity gap.
+   - if `twofactor >= 1`, treat as policy-compliant and continue periodic review.
+4. Review cadence: monthly metadata audit and owner-led expansion of break-glass TOTP set as needed.
+
+Current posture (2026-02-26):
+
+- `vaultwarden.vault.audit` shows `twofactor=1` (`CAP-20260226-020813__vaultwarden.vault.audit__R9elc7799`).
+- Disposition: compliant with current minimum-presence policy; no forced full-vault TOTP backfill required.
+
 ## Governance
 
 - **Enforced by:** `vaultwarden.vault.audit` capability (read-only)

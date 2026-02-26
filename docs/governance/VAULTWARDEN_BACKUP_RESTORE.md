@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-24
+last_verified: 2026-02-26
 scope: app-backup-restore
 ---
 
@@ -159,3 +159,22 @@ If Vaultwarden is completely unavailable:
 
 Minimum: quarterly restore test into a scratch environment (or after any major Vaultwarden upgrade).
 Record evidence as a spine receipt + note in the relevant loop/gap.
+
+## Vault Hygiene Policy (Trash Disposition)
+
+Purpose: define when an elevated Vaultwarden trash ratio is a policy-accepted carry-forward vs an incident that requires immediate cleanup.
+
+Disposition policy:
+
+1. `vaultwarden.backup.verify` MUST be `PASS` before any destructive cleanup of trashed entries.
+2. If forensic reconciliation reports no high-confidence missing records, elevated trash ratio is treated as hygiene debt (not incident) until a scheduled owner cleanup window.
+3. Escalate to a new high-severity gap if either condition is true:
+   - `trash_ratio >= 50%` for two consecutive audits, or
+   - `ciphers_trashed >= 400`.
+4. During cleanup windows, retain recovery candidates in folder `98-forensic-recovery` first, then permanently delete only confirmed stale entries.
+
+Current disposition (2026-02-26):
+
+- Latest audit: `ciphers_trashed=368`, `trash_ratio=46%` (`CAP-20260226-020813__vaultwarden.vault.audit__R9elc7799`)
+- Backup verification: `PASS` (`CAP-20260226-020813__vaultwarden.backup.verify__Rb3lc7800`)
+- Status: policy-accepted carry-forward with weekly monitoring until owner cleanup session.
