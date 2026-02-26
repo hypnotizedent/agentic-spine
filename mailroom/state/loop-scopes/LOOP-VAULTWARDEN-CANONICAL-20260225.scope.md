@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-VAULTWARDEN-CANONICAL-20260225
 created: 2026-02-25
-status: active
+status: closed
 owner: "@ronny"
 scope: vaultwarden
 priority: high
@@ -46,3 +46,19 @@ Establish canonical Vaultwarden governance: fix backup drift, create workbench h
 - [x] Restored 7 high-confidence missing entries into `98-forensic-recovered`
 - [x] Re-ran forensic diff: `missing_high_confidence=0`, `ambiguous=0`
 - [x] Published forensic receipt: `receipts/audits/infra/2026/VAULTWARDEN_TRANSITION_FORENSIC_2026-02-25.md`
+
+## Completion Record
+
+- **Closed:** 2026-02-26
+- **Closure type:** canonicalization complete; operational hygiene carried forward
+- **Carry-forward loop:** `LOOP-VAULTWARDEN-HYGIENE-CARRYFORWARD-20260226-20260226`
+- **Carry-forward gaps:** `GAP-OP-880`, `GAP-OP-882`
+
+### Governed Evidence
+
+| Action | Run Key | Outcome |
+|---|---|---|
+| Loop create (carry-forward) | `CAP-20260226-012719__loops.create__Reit77853` | New hygiene loop created |
+| Vault structure audit | `CAP-20260226-012501__vaultwarden.vault.audit__Ryytu86059` | PASS, trash_ratio=46%, twofactor=1 |
+| Backup verification | `CAP-20260226-012501__vaultwarden.backup.verify__Ramlc86060` | PASS |
+| CLI auth status | `CAP-20260226-012501__vaultwarden.cli.auth.status__Rsjuz86073` | PASS |
