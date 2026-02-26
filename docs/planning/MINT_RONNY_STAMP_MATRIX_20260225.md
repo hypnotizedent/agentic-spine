@@ -1,30 +1,56 @@
 ---
-status: working
+status: authoritative
 owner: "@ronny"
 created: 2026-02-25
+last_updated: 2026-02-26
 scope: mint-ronny-stamp-matrix
 authority: LOOP-MINT-RONNY-APPROVAL-STAMP-LANE-20260225
 ---
 
-# Mint Ronny Stamp Matrix (Template)
+# Mint Ronny Stamp Matrix (2026-02-26)
 
-## Policy
+## Source Evidence
 
-1. `APPROVED_BY_RONNY` requires an operator-performed test and run-key evidence.
-2. `BUILT_NOT_STAMPED` means built but not operator-approved.
-3. No module may be called "live" without stamp evidence.
+1. Probe consistency source:
+   `/Users/ronnyworks/code/agentic-spine/docs/planning/MINT_RUNTIME_PROBE_CONSISTENCY_20260226.md`
+2. Runtime evidence pack (single pack used for this matrix update):
+   - `CAP-20260226-023620__mint.modules.health__Rj6b460582`
+   - `CAP-20260226-023620__mint.deploy.status__Rsfpf60583`
+   - `CAP-20260226-023620__mint.runtime.proof__Rhfbl60584`
+   - `CAP-20260226-023620__mint.live.baseline.status__R12yz60585`
+3. Canonical policy reference:
+   `/Users/ronnyworks/code/agentic-spine/docs/planning/MINT_RUNTIME_TRUTH_CANONICAL_20260225.md`
 
-## Matrix
+## Claim Policy (Strict)
 
-| Module/Surface | Claim State | Operator Test Script | Latest Run Keys | Stamp Date | Notes |
+1. Allowed stamp states in this matrix: `APPROVED_BY_RONNY`,
+   `BUILT_NOT_STAMPED`, `NOT_BUILT`.
+2. Only `APPROVED_BY_RONNY` surfaces may be described as live.
+3. `BUILT_NOT_STAMPED` and `NOT_BUILT` surfaces are explicitly non-live and
+   must not use live/working/verified claim language.
+
+## Built Surfaces In Scope
+
+| Module/Surface | Stamp Status | Operator Test Script | Run-Key Evidence | Stamp Date | Notes |
 |---|---|---|---|---|---|
-| quote-page | APPROVED_BY_RONNY | quote-submit -> email -> minio visibility | (add run keys) | (add date) | Trusted baseline |
-| artwork/files-api | BUILT_NOT_STAMPED | (add script) | (add run keys) | - |  |
-| order-intake | BUILT_NOT_STAMPED | (add script) | (add run keys) | - |  |
-| pricing | BUILT_NOT_STAMPED | (add script) | (add run keys) | - |  |
-| suppliers | BUILT_NOT_STAMPED | (add script) | (add run keys) | - |  |
-| shipping | BUILT_NOT_STAMPED | (add script) | (add run keys) | - |  |
-| finance-adapter | BUILT_NOT_STAMPED | (add script) | (add run keys) | - |  |
-| payment | BUILT_NOT_STAMPED | (add script) | (add run keys) | - | Readiness contract applies |
-| shopify-module | BUILT_NOT_STAMPED | (add script) | (add run keys) | - |  |
-| digital-proofs | BUILT_NOT_STAMPED | (add script) | (add run keys) | - |  |
+| quote-page | APPROVED_BY_RONNY | quote submit -> Ronny email receipt -> MinIO object visibility | CAP-20260226-023620__mint.live.baseline.status__R12yz60585; CAP-20260225-183201__mint.live.baseline.status__R5zhy57019 | pre-2026-02-25 baseline trust lane | Trusted baseline lane; only currently approved live flow |
+| artwork/files-api | BUILT_NOT_STAMPED | upload presigned flow + file visibility check | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583; CAP-20260226-023620__mint.runtime.proof__Rhfbl60584 | - | Runtime healthy; operator stamp pending |
+| order-intake | BUILT_NOT_STAMPED | intake validate + submit dry run | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | - | Healthy and deployed; proof-surface coverage still missing |
+| pricing | BUILT_NOT_STAMPED | estimator/pricing endpoint parity smoke | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583; CAP-20260226-023620__mint.runtime.proof__Rhfbl60584 | - | Runtime proof pass; operator stamp pending |
+| suppliers | BUILT_NOT_STAMPED | supplier search + stock parity smoke | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583; CAP-20260226-023620__mint.runtime.proof__Rhfbl60584 | - | Runtime proof pass; operator stamp pending |
+| shipping | BUILT_NOT_STAMPED | shipping quote/address parity smoke | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583; CAP-20260226-023620__mint.runtime.proof__Rhfbl60584 | - | Runtime proof pass; operator stamp pending |
+| finance-adapter | BUILT_NOT_STAMPED | finance event ingest dry run | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | - | Healthy and deployed; proof-surface coverage still missing |
+| payment | BUILT_NOT_STAMPED | checkout create + webhook receive smoke (safe path) | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583; CAP-20260226-023620__mint.runtime.proof__Rhfbl60584; CAP-20260226-023620__mint.live.baseline.status__R12yz60585 | - | Binary readiness call tracked in payment contract |
+| shopify-module | BUILT_NOT_STAMPED | inbound webhook scaffold dry-run normalization | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | - | Built scaffold; not in fresh-slate runtime proof target set |
+| digital-proofs | BUILT_NOT_STAMPED | proof document generation dry run | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | - | Built codebase surface; runtime lane not in current probe scope |
+
+## Explicit Defers (Not Built)
+
+| Module/Surface | Stamp Status | Run-Key Evidence | Notes |
+|---|---|---|---|
+| auth | NOT_BUILT | CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | Roadmap marks as new Phase 2 extraction target; no deployed module lane yet |
+| customers | NOT_BUILT | CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | Roadmap marks as new Phase 2 extraction target; no deployed module lane yet |
+| orders | NOT_BUILT | CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | Roadmap marks as new Phase 3 extraction target; no deployed module lane yet |
+| quotes | NOT_BUILT | CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | Roadmap marks as new Phase 3 extraction target; no deployed module lane yet |
+| notifications | NOT_BUILT | CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | Roadmap marks as new Phase 3 extraction target; no deployed module lane yet |
+| production | NOT_BUILT | CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | Roadmap marks as new Phase 3 extraction target; no deployed module lane yet |

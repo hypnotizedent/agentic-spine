@@ -2,6 +2,7 @@
 status: authoritative
 owner: "@ronny"
 created: 2026-02-25
+last_updated: 2026-02-26
 scope: mint-payment-runtime-readiness
 authority: LOOP-MINT-PAYMENT-RUNTIME-READINESS-20260225
 ---
@@ -44,3 +45,32 @@ Each payment readiness review must include run keys for:
 
 If any precondition fails -> `NOT_LIVE`.
 If all preconditions pass and Ronny test stamp exists -> `READY_FOR_RONNY_STAMP`.
+
+## Execution Snapshot (2026-02-26)
+
+Source evidence pack:
+1. `/Users/ronnyworks/code/agentic-spine/docs/planning/MINT_RUNTIME_PROBE_CONSISTENCY_20260226.md`
+2. `CAP-20260226-023620__mint.modules.health__Rj6b460582`
+3. `CAP-20260226-023620__mint.deploy.status__Rsfpf60583`
+4. `CAP-20260226-023620__mint.runtime.proof__Rhfbl60584`
+5. `CAP-20260226-023620__mint.live.baseline.status__R12yz60585`
+
+Precondition check:
+
+| Precondition | Evidence | Result |
+|---|---|---|
+| payment health endpoint responds | `mint.modules.health`, `mint.runtime.proof` | PASS |
+| required payment env keys present | `mint.runtime.proof` (`payment.env PASS`) | PASS |
+| no contradiction across health/deploy/proof | all four caps above report OK/GREEN | PASS |
+| Ronny operator payment test stamp exists | no payment stamp recorded in stamp matrix | FAIL |
+
+## Binary Status Call (Loop 7)
+
+`NOT_LIVE`
+
+Reason:
+1. Runtime preconditions pass, but payment does not yet have a Ronny operator
+   stamp.
+2. Contract rule requires both runtime pass + Ronny stamp for
+   `READY_FOR_RONNY_STAMP`.
+3. No end-to-end payment->finance bridge live claim is permitted in this state.
