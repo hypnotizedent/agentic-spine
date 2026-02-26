@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-21
+last_verified: 2026-02-26
 scope: domain-capability-catalog
 domain: communications
 ---
@@ -16,6 +16,7 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | `communications.delivery.anomaly.status` | `read-only` | `auto` | `ops/plugins/communications/` |
 | `communications.delivery.log` | `read-only` | `auto` | `ops/plugins/communications/` |
 | `communications.mail.search` | `read-only` | `auto` | `ops/plugins/communications/` |
+| `communications.mailarchiver.import.status` | `read-only` | `auto` | `ops/plugins/communications/` |
 | `communications.mail.send.test` | `mutating` | `manual` | `ops/plugins/communications/` |
 | `communications.mailboxes.list` | `read-only` | `auto` | `ops/plugins/communications/` |
 | `communications.policy.status` | `read-only` | `auto` | `ops/plugins/communications/` |

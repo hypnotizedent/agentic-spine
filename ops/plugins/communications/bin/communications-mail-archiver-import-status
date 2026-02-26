@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
+SSH_BINDING="${SSH_TARGETS_FILE:-$ROOT/ops/bindings/ssh.targets.yaml}"
+
+TARGET_ID=""
+TAIL_LINES=800
+JSON=0
+APP_CONTAINER="mail-archiver"
+DB_CONTAINER="mail-archiver-db"
+STALWART_CONTAINER="stalwart-mail"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+need yq
+need jq
+need ssh
+need python3
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+[[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --target|--ssh-id) TARGET_ID="${2:?--target requires a value}"; shift 2 ;;
+    --tail) TAIL_LINES="${2:?--tail requires a value}"; shift 2 ;;
+    --app-container) APP_CONTAINER="${2:?--app-container requires a value}"; shift 2 ;;
+    --db-container) DB_CONTAINER="${2:?--db-container requires a value}"; shift 2 ;;
+    --stalwart-container) STALWART_CONTAINER="${2:?--stalwart-container requires a value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-mail-archiver-import-status [--target <ssh-target-id>] [--tail <n>] [--json]
+
+Read-only structured status for mail-archiver import progress on communications-stack.
+Returns:
+  - container/runtime state (mail-archiver, mail-archiver-db, stalwart-mail)
+  - non-boot storage usage for mail-archiver root
+  - parsed import markers from recent mail-archiver logs
+  - canonical archived email row count from PostgreSQL (mail_archiver."ArchivedEmails")
+USAGE
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ "$TAIL_LINES" =~ ^[0-9]+$ ]] || fail "--tail must be an integer"
+(( TAIL_LINES > 0 )) || fail "--tail must be > 0"
+
+if [[ -z "$TARGET_ID" ]]; then
+  TARGET_ID="$(yq e -r '.pilot.vm_target.hostname // ""' "$CONTRACT")"
+fi
+[[ -n "$TARGET_ID" && "$TARGET_ID" != "null" ]] || fail "target id not found (set --target or pilot.vm_target.hostname)"
+
+NONBOOT_ROOT="$(yq e -r '.mail_archiver.storage_invariants.nonboot_root // "/srv/mail-archiver"' "$CONTRACT")"
+[[ -n "$NONBOOT_ROOT" && "$NONBOOT_ROOT" != "null" ]] || NONBOOT_ROOT="/srv/mail-archiver"
+
+DEF_USER="$(yq e -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq e -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq e -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+DEF_BATCH="$(yq e -r '.ssh.defaults.batch_mode // true' "$SSH_BINDING")"
+DEF_STRICT="$(yq e -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
+DEF_KNOWN_HOSTS="$(yq e -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
+
+TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
+TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
+TARGET_TO="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .connect_timeout_sec // $DEF_TO" "$SSH_BINDING")"
+TARGET_EXTRA_OPTS="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .ssh_extra_opts // \"\"" "$SSH_BINDING")"
+
+[[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host in $SSH_BINDING"
+[[ -n "$TARGET_USER" && "$TARGET_USER" != "null" ]] || TARGET_USER="$DEF_USER"
+[[ "$TARGET_PORT" =~ ^[0-9]+$ ]] || TARGET_PORT="$DEF_PORT"
+[[ "$TARGET_TO" =~ ^[0-9]+$ ]] || TARGET_TO="$DEF_TO"
+
+SSH_OPTS=(
+  -p "$TARGET_PORT"
+  -o "ConnectTimeout=$TARGET_TO"
+  -o "BatchMode=$DEF_BATCH"
+  -o "StrictHostKeyChecking=$DEF_STRICT"
+  -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+)
+if [[ -n "$TARGET_EXTRA_OPTS" && "$TARGET_EXTRA_OPTS" != "null" ]]; then
+  # shellcheck disable=SC2206
+  EXTRA_OPTS=( $TARGET_EXTRA_OPTS )
+  SSH_OPTS+=("${EXTRA_OPTS[@]}")
+fi
+
+SSH_TARGET="${TARGET_USER}@${TARGET_HOST}"
+
+read_remote_meta() {
+  ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "bash -s -- \"$NONBOOT_ROOT\" \"$APP_CONTAINER\" \"$DB_CONTAINER\" \"$STALWART_CONTAINER\"" <<'EOS'
+set -euo pipefail
+
+NONBOOT_ROOT="${1:-/srv/mail-archiver}"
+APP_CONTAINER="${2:-mail-archiver}"
+DB_CONTAINER="${3:-mail-archiver-db}"
+STALWART_CONTAINER="${4:-stalwart-mail}"
+
+DOCKER=(docker)
+if ! docker info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    DOCKER=(sudo -n docker)
+  else
+    DOCKER=()
+  fi
+fi
+
+container_state() {
+  local name="$1"
+  if [[ "${#DOCKER[@]}" -eq 0 ]]; then
+    echo "docker_unreachable|none|0"
+    return
+  fi
+  "${DOCKER[@]}" inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}' "$name" 2>/dev/null || echo "missing|none|0"
+}
+
+APP_STATE="$(container_state "$APP_CONTAINER")"
+DB_STATE="$(container_state "$DB_CONTAINER")"
+STALWART_STATE="$(container_state "$STALWART_CONTAINER")"
+
+DISK_STATS="$(df -B1 "$NONBOOT_ROOT" 2>/dev/null | awk 'NR==2 {print $2 "|" $3 "|" $4 "|" $5}' || true)"
+[[ -n "$DISK_STATS" ]] || DISK_STATS="0|0|0|0%"
+
+DB_COUNT=""
+if [[ "${#DOCKER[@]}" -gt 0 ]]; then
+  DB_COUNT="$("${DOCKER[@]}" exec "$DB_CONTAINER" psql -U mailuser -d MailArchiver -t -A -c "SELECT count(*) FROM mail_archiver.\"ArchivedEmails\";" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -z "$DB_COUNT" ]]; then
+    DB_COUNT="$("${DOCKER[@]}" exec "$DB_CONTAINER" psql -U mailuser -d MailArchiver -t -A -c "SELECT count(*) FROM public.\"ArchivedEmails\";" 2>/dev/null | tr -d '[:space:]' || true)"
+  fi
+  if [[ -z "$DB_COUNT" ]]; then
+    DB_COUNT="$("${DOCKER[@]}" exec "$DB_CONTAINER" psql -U mailuser -d MailArchiver -t -A -c "SELECT count(*) FROM \"ArchivedEmails\";" 2>/dev/null | tr -d '[:space:]' || true)"
+  fi
+fi
+
+echo "${APP_STATE};${DB_STATE};${STALWART_STATE};${DISK_STATS};${DB_COUNT}"
+EOS
+}
+
+read_remote_logs() {
+  ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "bash -s -- \"$APP_CONTAINER\" \"$TAIL_LINES\"" <<'EOS'
+set -euo pipefail
+
+APP_CONTAINER="${1:-mail-archiver}"
+TAIL_LINES="${2:-800}"
+
+DOCKER=(docker)
+if ! docker info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    DOCKER=(sudo -n docker)
+  else
+    DOCKER=()
+  fi
+fi
+
+if [[ "${#DOCKER[@]}" -eq 0 ]]; then
+  echo ""
+  exit 0
+fi
+
+"${DOCKER[@]}" logs "$APP_CONTAINER" --tail "$TAIL_LINES" 2>&1 || true
+EOS
+}
+
+META_RAW=""
+if ! META_RAW="$(read_remote_meta)"; then
+  fail "ssh metadata probe failed for target '$TARGET_ID' ($SSH_TARGET)"
+fi
+
+IFS=';' read -r APP_STATE DB_STATE STALWART_STATE DISK_STATS DB_COUNT <<< "$META_RAW"
+IFS='|' read -r APP_STATUS APP_HEALTH APP_RESTARTS <<< "${APP_STATE:-missing|none|0}"
+IFS='|' read -r DB_STATUS DB_HEALTH DB_RESTARTS <<< "${DB_STATE:-missing|none|0}"
+IFS='|' read -r STALWART_STATUS STALWART_HEALTH STALWART_RESTARTS <<< "${STALWART_STATE:-missing|none|0}"
+IFS='|' read -r DISK_TOTAL_BYTES DISK_USED_BYTES DISK_AVAIL_BYTES DISK_USED_PCT <<< "${DISK_STATS:-0|0|0|0%}"
+
+LOG_TEXT=""
+if ! LOG_TEXT="$(read_remote_logs)"; then
+  LOG_TEXT=""
+fi
+
+LOG_TMP="$(mktemp)"
+trap 'rm -f "$LOG_TMP"' EXIT INT TERM
+printf '%s\n' "$LOG_TEXT" > "$LOG_TMP"
+
+PARSED_LOG_JSON="$(python3 - "$LOG_TMP" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+lines = text.splitlines()
+
+uuid_re = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+processed_re = re.compile(r"Processed(?:\s+Count)?\s*[:=]?\s*([0-9,]+).*?([0-9]+(?:\.[0-9]+)?)\s*%", re.IGNORECASE)
+summary_re = re.compile(r"Success:\s*([0-9,]+).*?Failed:\s*([0-9,]+).*?Malformed:\s*([0-9,]+).*?Skipped:\s*([0-9,]+)", re.IGNORECASE)
+
+latest_started = {"idx": -1, "job_id": None}
+latest_completed = {"idx": -1, "job_id": None}
+latest_processed = {"idx": -1, "count": None, "percent": None}
+latest_summary = {"idx": -1, "success": None, "failed": None, "malformed": None, "skipped": None}
+
+for idx, raw_line in enumerate(lines):
+    line = raw_line.strip()
+    lower = line.lower()
+    uuids = uuid_re.findall(line)
+
+    if "mbox" in lower and ("start" in lower or "begin" in lower or "queued" in lower):
+        job_id = uuids[-1] if uuids else None
+        latest_started = {"idx": idx, "job_id": job_id}
+
+    if "mbox" in lower and ("complete" in lower or "completed" in lower or "finish" in lower):
+        job_id = uuids[-1] if uuids else None
+        latest_completed = {"idx": idx, "job_id": job_id}
+
+    m_processed = processed_re.search(line)
+    if m_processed:
+        latest_processed = {
+            "idx": idx,
+            "count": int(m_processed.group(1).replace(",", "")),
+            "percent": float(m_processed.group(2)),
+        }
+
+    m_summary = summary_re.search(line)
+    if m_summary:
+        latest_summary = {
+            "idx": idx,
+            "success": int(m_summary.group(1).replace(",", "")),
+            "failed": int(m_summary.group(2).replace(",", "")),
+            "malformed": int(m_summary.group(3).replace(",", "")),
+            "skipped": int(m_summary.group(4).replace(",", "")),
+        }
+
+if latest_started["idx"] > latest_completed["idx"] and latest_started["idx"] >= 0:
+    state = "running"
+elif latest_completed["idx"] >= 0:
+    state = "complete"
+elif re.search(r"\bmbox\b", text, re.IGNORECASE):
+    state = "unknown"
+else:
+    state = "unknown"
+
+print(json.dumps({
+    "state": state,
+    "active_job_id": latest_started["job_id"],
+    "last_completed_job_id": latest_completed["job_id"],
+    "processed_count": latest_processed["count"],
+    "percent_complete_raw": latest_processed["percent"],
+    "summary": {
+        "success": latest_summary["success"],
+        "failed": latest_summary["failed"],
+        "malformed": latest_summary["malformed"],
+        "skipped": latest_summary["skipped"],
+    },
+}))
+PY
+)"
+
+IMPORT_STATE="$(printf '%s' "$PARSED_LOG_JSON" | jq -r '.state // "unknown"')"
+ACTIVE_JOB_ID="$(printf '%s' "$PARSED_LOG_JSON" | jq -r '.active_job_id // empty')"
+LAST_COMPLETED_JOB_ID="$(printf '%s' "$PARSED_LOG_JSON" | jq -r '.last_completed_job_id // empty')"
+PROCESSED_COUNT="$(printf '%s' "$PARSED_LOG_JSON" | jq -r '.processed_count // empty')"
+PERCENT_COMPLETE_RAW="$(printf '%s' "$PARSED_LOG_JSON" | jq -r '.percent_complete_raw // empty')"
+SUCCESS_COUNT="$(printf '%s' "$PARSED_LOG_JSON" | jq -r '.summary.success // empty')"
+FAILED_COUNT="$(printf '%s' "$PARSED_LOG_JSON" | jq -r '.summary.failed // empty')"
+MALFORMED_COUNT="$(printf '%s' "$PARSED_LOG_JSON" | jq -r '.summary.malformed // empty')"
+SKIPPED_COUNT="$(printf '%s' "$PARSED_LOG_JSON" | jq -r '.summary.skipped // empty')"
+
+STATUS="OK"
+if [[ "$APP_STATUS" != "running" || "$DB_STATUS" != "running" ]]; then
+  STATUS="FAIL"
+elif [[ "$IMPORT_STATE" == "running" || "$IMPORT_STATE" == "unknown" ]]; then
+  STATUS="WARN"
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.mailarchiver.import.status" \
+    --arg schema_version "1.0" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg status "$STATUS" \
+    --arg target_id "$TARGET_ID" \
+    --arg ssh_target "$SSH_TARGET" \
+    --arg nonboot_root "$NONBOOT_ROOT" \
+    --arg app_container "$APP_CONTAINER" \
+    --arg db_container "$DB_CONTAINER" \
+    --arg stalwart_container "$STALWART_CONTAINER" \
+    --arg app_status "$APP_STATUS" \
+    --arg app_health "$APP_HEALTH" \
+    --arg app_restarts "$APP_RESTARTS" \
+    --arg db_status "$DB_STATUS" \
+    --arg db_health "$DB_HEALTH" \
+    --arg db_restarts "$DB_RESTARTS" \
+    --arg stalwart_status "$STALWART_STATUS" \
+    --arg stalwart_health "$STALWART_HEALTH" \
+    --arg stalwart_restarts "$STALWART_RESTARTS" \
+    --arg disk_total_bytes "${DISK_TOTAL_BYTES:-0}" \
+    --arg disk_used_bytes "${DISK_USED_BYTES:-0}" \
+    --arg disk_avail_bytes "${DISK_AVAIL_BYTES:-0}" \
+    --arg disk_used_pct "${DISK_USED_PCT:-0%}" \
+    --arg db_archived_emails_count "${DB_COUNT:-}" \
+    --arg import_state "$IMPORT_STATE" \
+    --arg active_job_id "${ACTIVE_JOB_ID:-}" \
+    --arg last_completed_job_id "${LAST_COMPLETED_JOB_ID:-}" \
+    --arg processed_count "${PROCESSED_COUNT:-}" \
+    --arg percent_complete_raw "${PERCENT_COMPLETE_RAW:-}" \
+    --arg success_count "${SUCCESS_COUNT:-}" \
+    --arg failed_count "${FAILED_COUNT:-}" \
+    --arg malformed_count "${MALFORMED_COUNT:-}" \
+    --arg skipped_count "${SKIPPED_COUNT:-}" \
+    '{
+      capability:$capability,
+      schema_version:$schema_version,
+      status:$status,
+      generated_at:$generated_at,
+      data:{
+        target_id:$target_id,
+        ssh_target:$ssh_target,
+        containers:{
+          app:{name:$app_container,status:$app_status,health:$app_health,restarts:($app_restarts|tonumber? // 0)},
+          db:{name:$db_container,status:$db_status,health:$db_health,restarts:($db_restarts|tonumber? // 0)},
+          stalwart:{name:$stalwart_container,status:$stalwart_status,health:$stalwart_health,restarts:($stalwart_restarts|tonumber? // 0)}
+        },
+        storage:{
+          nonboot_root:$nonboot_root,
+          total_bytes:($disk_total_bytes|tonumber? // 0),
+          used_bytes:($disk_used_bytes|tonumber? // 0),
+          available_bytes:($disk_avail_bytes|tonumber? // 0),
+          used_pct:$disk_used_pct
+        },
+        import:{
+          state:$import_state,
+          active_job_id:($active_job_id | if length > 0 then . else null end),
+          last_completed_job_id:($last_completed_job_id | if length > 0 then . else null end),
+          processed_count:($processed_count | if length > 0 then (tonumber? // null) else null end),
+          percent_complete_raw:($percent_complete_raw | if length > 0 then (tonumber? // null) else null end),
+          summary:{
+            success:($success_count | if length > 0 then (tonumber? // null) else null end),
+            failed:($failed_count | if length > 0 then (tonumber? // null) else null end),
+            malformed:($malformed_count | if length > 0 then (tonumber? // null) else null end),
+            skipped:($skipped_count | if length > 0 then (tonumber? // null) else null end)
+          },
+          db_archived_emails_count:($db_archived_emails_count | if length > 0 then (tonumber? // null) else null end)
+        },
+        note:"percent_complete_raw is estimator-based and can exceed 100%; treat db_archived_emails_count plus completion markers as source of truth."
+      }
+    }'
+  [[ "$STATUS" == "FAIL" ]] && exit 1 || exit 0
+fi
+
+echo "communications.mailarchiver.import.status"
+echo "target: $TARGET_ID ($SSH_TARGET:$TARGET_PORT)"
+echo "app_container: $APP_CONTAINER status=$APP_STATUS health=$APP_HEALTH restarts=$APP_RESTARTS"
+echo "db_container: $DB_CONTAINER status=$DB_STATUS health=$DB_HEALTH restarts=$DB_RESTARTS"
+echo "stalwart_container: $STALWART_CONTAINER status=$STALWART_STATUS health=$STALWART_HEALTH restarts=$STALWART_RESTARTS"
+echo "storage_root: $NONBOOT_ROOT"
+echo "storage_bytes_total: ${DISK_TOTAL_BYTES:-0}"
+echo "storage_bytes_used: ${DISK_USED_BYTES:-0}"
+echo "storage_bytes_available: ${DISK_AVAIL_BYTES:-0}"
+echo "storage_used_pct: ${DISK_USED_PCT:-0%}"
+echo "import_state: $IMPORT_STATE"
+[[ -n "$ACTIVE_JOB_ID" ]] && echo "active_job_id: $ACTIVE_JOB_ID"
+[[ -n "$LAST_COMPLETED_JOB_ID" ]] && echo "last_completed_job_id: $LAST_COMPLETED_JOB_ID"
+[[ -n "$PROCESSED_COUNT" ]] && echo "processed_count: $PROCESSED_COUNT"
+[[ -n "$PERCENT_COMPLETE_RAW" ]] && echo "percent_complete_raw: $PERCENT_COMPLETE_RAW"
+if [[ -n "$SUCCESS_COUNT" || -n "$FAILED_COUNT" || -n "$MALFORMED_COUNT" || -n "$SKIPPED_COUNT" ]]; then
+  echo "summary_success: ${SUCCESS_COUNT:-unknown}"
+  echo "summary_failed: ${FAILED_COUNT:-unknown}"
+  echo "summary_malformed: ${MALFORMED_COUNT:-unknown}"
+  echo "summary_skipped: ${SKIPPED_COUNT:-unknown}"
+fi
+[[ -n "${DB_COUNT:-}" ]] && echo "db_archived_emails_count: $DB_COUNT"
+echo "note: percent_complete_raw is estimator-based and can exceed 100%; treat db_archived_emails_count plus completion markers as source of truth."
+echo "status: $STATUS"
+
+[[ "$STATUS" == "FAIL" ]] && exit 1 || exit 0

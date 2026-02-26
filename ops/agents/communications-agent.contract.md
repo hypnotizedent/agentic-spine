@@ -43,6 +43,7 @@
 - `communications.stack.status`
 - `communications.mailboxes.list`
 - `communications.mail.search`
+- `communications.mailarchiver.import.status`
 - `communications.mail.send.test`
 - `communications.provider.status`
 - `communications.policy.status`

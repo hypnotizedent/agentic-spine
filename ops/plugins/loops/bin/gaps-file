@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \
 #                  --description "desc" --discovered-by "source" \
-#                  [--doc "path"] [--parent-loop "LOOP-ID"] \
+#                  [--doc "path"] [--parent-loop "LOOP-ID"] [--loop "LOOP-ID"] \
 #                  [--description-file path] [--no-commit]
 #
 # Batch usage:
@@ -23,6 +23,13 @@ resolve_policy_knobs
 
 yaml_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+infer_parent_loop() {
+  local discovered_by="$1"
+  if [[ "$discovered_by" =~ ^LOOP-[A-Z0-9-]+$ ]]; then
+    printf '%s' "$discovered_by"
+  fi
 }
 
 validate_type() {
@@ -129,11 +136,12 @@ while [[ $# -gt 0 ]]; do
     --description-file) DESCRIPTION_FILE="${2:?--description-file requires a value}"; shift 2 ;;
     --discovered-by) DISCOVERED_BY="${2:?--discovered-by requires a value}"; shift 2 ;;
     --parent-loop)   PARENT_LOOP="${2:?--parent-loop requires a value}"; shift 2 ;;
+    --loop)          PARENT_LOOP="${2:?--loop requires a value}"; shift 2 ;;
     --doc)           DOC="${2:?--doc requires a value}"; shift 2 ;;
     -h|--help)
       echo "Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \\"
       echo "                 --description \"desc\" --discovered-by \"source\" \\"
-      echo "                 [--doc \"path\"] [--parent-loop \"LOOP-ID\"] \\"
+      echo "                 [--doc \"path\"] [--parent-loop \"LOOP-ID\"] [--loop \"LOOP-ID\"] \\"
       echo "                 [--description-file path] [--no-commit]"
       echo ""
       echo "Batch: gaps-file --batch /path/to/gaps.yaml [--parent-loop LOOP-ID] [--no-commit]"
@@ -192,6 +200,9 @@ if [[ -n "$BATCH_FILE" ]]; then
 
     [[ -n "$item_discovered_by" ]] || item_discovered_by="$DISCOVERED_BY"
     [[ -n "$item_parent_loop" ]] || item_parent_loop="$PARENT_LOOP"
+    if [[ -z "$item_parent_loop" ]]; then
+      item_parent_loop="$(infer_parent_loop "$item_discovered_by")"
+    fi
     item_description="$(load_description "$item_description" "$item_description_file")"
 
     [[ -n "$item_gap_id" ]] || item_gap_id="auto"
@@ -208,6 +219,9 @@ else
   [[ -n "$TYPE" ]]          || { echo "FAIL: --type required" >&2; exit 2; }
   [[ -n "$SEVERITY" ]]      || { echo "FAIL: --severity required" >&2; exit 2; }
   [[ -n "$DISCOVERED_BY" ]] || { echo "FAIL: --discovered-by required" >&2; exit 2; }
+  if [[ -z "$PARENT_LOOP" ]]; then
+    PARENT_LOOP="$(infer_parent_loop "$DISCOVERED_BY")"
+  fi
 
   DESCRIPTION="$(load_description "$DESCRIPTION" "$DESCRIPTION_FILE")"
   [[ -n "$DESCRIPTION" ]] || { echo "FAIL: --description or --description-file required" >&2; exit 2; }
