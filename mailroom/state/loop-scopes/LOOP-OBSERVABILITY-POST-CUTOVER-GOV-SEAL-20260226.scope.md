@@ -1,5 +1,5 @@
 ---
-status: active
+status: closed
 owner: "@ronny"
 created: "2026-02-26"
 priority: high
