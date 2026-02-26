@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MINT-LEGACY-RUNTIME-DETACH-CLEANUP-20260225
 created: 2026-02-25
-status: active
+status: deferred
 owner: "@ronny"
 scope: mint
 severity: critical
@@ -42,3 +42,42 @@ legacy host, creating split-brain risk and misleading "live" claims.
    allowed in this loop.
 4. Do not claim legacy runtime behavior as current module truth.
 
+## Operator Hold (2026-02-26)
+
+This loop is intentionally deferred by operator direction pending explicit data-risk
+review. Execution mode is restricted to non-destructive reads and classification
+updates only.
+
+## What This Loop Does (When Resumed)
+
+1. Classify runtime authority (`LIVE_SPINE_NATIVE` vs `LEGACY_DOCKER_HOST`) with
+   before/after receipts.
+2. Remove only approved duplicate legacy runtime paths after explicit operator go.
+3. Keep legacy-hold data areas preserved until separately approved for archive or
+   migration.
+
+## What You Could Lose If Destructive Steps Are Approved Later
+
+Potentially destructive targets (must remain protected unless separately approved):
+1. `/home/docker-host/backups` (~3.2G historical backups/receipts).
+2. `/mnt/data/mint-os/postgres` (~1.5G legacy database state).
+3. `/mnt/docker/mint-os-data/minio` (legacy MinIO buckets such as
+   `customer-artwork`, `production-files`, `imprint-mockups`).
+4. `/home/docker-host/stacks/mail-archiver/postgres-data` (~8.6G).
+5. `/mnt/docker/hypno-ssot` (~57G non-mint business asset corpus).
+
+## Non-Destructive Contract (Enforced For This Loop)
+
+1. No `rm -rf` on data-bearing paths.
+2. No `docker compose down -v`.
+3. No `docker volume rm` for mint/mail/hypno data lanes.
+4. No backup directory mutation under `/home/docker-host/backups`.
+5. Allowed actions: read-only capability runs, classification docs, and risk
+   receipts only.
+
+## Evidence Snapshot (Read-Only)
+
+Capability run keys:
+- `CAP-20260226-024059__infra.docker_host.status__R9h1f30554`
+- `CAP-20260226-024150__docker.compose.status__Rp0ji36887`
+- `CAP-20260226-024059__services.health.status__Rxu6p30556`

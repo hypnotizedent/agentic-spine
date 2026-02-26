@@ -53,6 +53,14 @@ claiming unverified runtime behavior.
 4. `LOOP-MINT-PAYMENT-RUNTIME-READINESS-20260225`
 5. `LOOP-MINT-SSOT-DOC-RUNTIME-ALIGNMENT-20260225`
 
+## Current State Snapshot (2026-02-26)
+
+1. `LOOP-MINT-RONNY-APPROVAL-STAMP-LANE-20260225` -> `closed`
+2. `LOOP-MINT-RUNTIME-PROBE-CONSISTENCY-20260225` -> `closed`
+3. `LOOP-MINT-LEGACY-RUNTIME-DETACH-CLEANUP-20260225` -> `deferred` (operator hold; non-destructive only)
+4. `LOOP-MINT-PAYMENT-RUNTIME-READINESS-20260225` -> `active` (`NOT_LIVE`, awaiting explicit smoke/stamp evidence)
+5. `LOOP-MINT-SSOT-DOC-RUNTIME-ALIGNMENT-20260225` -> `active`
+
 ## Out of Scope (Explicit Defers)
 
 1. Auth extraction/implementation.
