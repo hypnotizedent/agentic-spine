@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-DOCKER-HOST-SAFE-DEPRECATION-BATCH-20260226-20260226
 created: 2026-02-26
-status: active
+status: closed
 owner: "@ronny"
 scope: docker
 priority: high

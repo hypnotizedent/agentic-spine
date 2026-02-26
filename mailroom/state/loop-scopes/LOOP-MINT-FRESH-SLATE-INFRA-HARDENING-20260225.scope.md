@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MINT-FRESH-SLATE-INFRA-HARDENING-20260225
 created: 2026-02-25
-status: active
+status: closed
 owner: "@ronny"
 scope: mint
 severity: high

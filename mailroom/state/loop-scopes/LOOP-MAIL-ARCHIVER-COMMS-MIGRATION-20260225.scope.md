@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MAIL-ARCHIVER-COMMS-MIGRATION-20260225
 created: 2026-02-25
-status: active
+status: closed
 owner: "@ronny"
 scope: communications
 priority: high
