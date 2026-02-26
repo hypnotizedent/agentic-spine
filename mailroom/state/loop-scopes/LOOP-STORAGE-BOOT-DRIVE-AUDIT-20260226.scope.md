@@ -34,14 +34,14 @@ Containers/VMs repeatedly get default-setup to boot drives because:
 ### MEDIUM: VMs 210, 202, 214 — partial issues
 ### LOW: VMs 200, 209, 213, 100, 105 — managed correctly
 
-## Phases
+## Steps
 
-- P0: Read-only SSH audit (DONE)
-- P1: File gaps for each violation category (DONE — 7 gaps: GAP-OP-941–947)
-- P2: Create `infra.storage.placement.policy.yaml` binding (DONE — commit bcaa5bb)
-- P3: Update VM creation contract with storage step (DONE — GAP-OP-944 closed)
-- P4: Implement infrastructure-wide drift gate(s) (DONE — D234, GAP-OP-946 closed)
-- P5: Remediation plan per-VM (DONE — captured in storage placement policy remediation_priority)
+- Step 0: Read-only SSH audit (DONE)
+- Step 1: File gaps for each violation category (DONE — 7 gaps: GAP-OP-941–947)
+- Step 2: Create `infra.storage.placement.policy.yaml` binding (DONE — commit bcaa5bb)
+- Step 3: Update VM creation contract with storage step (DONE — GAP-OP-944 closed)
+- Step 4: Implement infrastructure-wide drift gate(s) (DONE — D234, GAP-OP-946 closed)
+- Step 5: Remediation plan per-VM (DONE — captured in storage placement policy remediation_priority)
 
 ## Success Criteria
 

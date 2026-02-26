@@ -29,18 +29,18 @@ Safely migrate the mail-archiver service from finance-stack (VM 211) to communic
 - GAP-OP-924: Mail-archiver backup/restore contract missing (medium)
 - GAP-OP-925: Mail-archiver storage retention/lifecycle governance missing (medium)
 
-## Execution Phases
+## Execution Steps
 
-| Phase | Action | Status |
-|-------|--------|--------|
-| P0 | Register gaps + loop (capture-only) | DONE |
-| P1 | Control-plane bindings (contracts, vm.lifecycle, compose targets) | DONE |
-| P2 | Backup + export from VM 211 (pg_dump, data export, count verification) | NOT STARTED |
-| P3 | Shadow deploy on VM 214 (compose, restore, parity check) | NOT STARTED |
-| P4 | Gmail mbox import (build capability, import 200GB, verify, delete source) | NOT STARTED |
-| P5 | Email account linkage (Gmail/iCloud/Microsoft/Stalwart connections) | NOT STARTED |
-| P6 | Traffic cutover (cloudflared/DNS, startup sequencing update) | NOT STARTED |
-| P7 | Legacy cleanup (stop on VM 211, update registries, remove from finance probes) | NOT STARTED |
+| Step | Action | Status |
+|------|--------|--------|
+| Step 0 | Register gaps + loop (capture-only) | DONE |
+| Step 1 | Control-plane bindings (contracts, vm.lifecycle, compose targets) | DONE |
+| Step 2 | Backup + export from VM 211 (pg_dump, data export, count verification) | NOT STARTED |
+| Step 3 | Shadow deploy on VM 214 (compose, restore, parity check) | NOT STARTED |
+| Step 4 | Gmail mbox import (build capability, import 200GB, verify, delete source) | NOT STARTED |
+| Step 5 | Email account linkage (Gmail/iCloud/Microsoft/Stalwart connections) | NOT STARTED |
+| Step 6 | Traffic cutover (cloudflared/DNS, startup sequencing update) | NOT STARTED |
+| Step 7 | Legacy cleanup (stop on VM 211, update registries, remove from finance probes) | NOT STARTED |
 
 ## Unknowns / Blockers
 

@@ -14,11 +14,11 @@ objective: Execute docker-host legacy cleanup through governed, non-rogue batche
 
 Execute docker-host legacy cleanup through governed, non-rogue batches with strict before/after receipts and explicit mint/runtime deferrals
 
-## Phases
-- P0: read-only-evidence-trace-and-ranking
-- P1: close-audit-chain-gaps-mcp-routing-secrets
-- P2: tier1-cleanup-batch-with-receipts
-- P3: post-batch-verify-and-gap-closeout
+## Steps
+- Step 0: read-only-evidence-trace-and-ranking
+- Step 1: close-audit-chain-gaps-mcp-routing-secrets
+- Step 2: tier1-cleanup-batch-with-receipts
+- Step 3: post-batch-verify-and-gap-closeout
 
 ## Success Criteria
 - No destructive docker-host cleanup occurs outside governed capabilities and receipts
