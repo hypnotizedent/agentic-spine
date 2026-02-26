@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# mint-live-baseline-status - Enforce "live modules first" baseline before auth extraction.
+# mint-live-baseline-status - Enforce mint live baseline with dual auth-state semantics.
 #
 # Read-only status surface:
 #   - live_health_green: mint.modules.health status line must be OK
 #   - contract_parity_green: D222 + mint quoteflow guard must pass
 #   - agent_smoke_green: mint.runtime.proof must pass
-#   - queue_marker_green: execution queue must explicitly block EQ-1 by D225
+#   - queue_marker_green:
+#       mode A (deferred): execution queue must explicitly block EQ-1 by D225
+#       mode B (extracted_complete): queue block markers become N/A-green when EQ-1 is completed
 #
 # Usage:
 #   mint-live-baseline-status
@@ -44,8 +46,25 @@ QUEUE_FILE="$(yq -r '.queue_contract.file // ""' "$CONTRACT")"
 
 auth_state="$(yq -r '.auth_module.state // ""' "$CONTRACT")"
 blocked_gate="$(yq -r '.auth_module.blocked_by_gate // ""' "$CONTRACT")"
-[[ "$auth_state" == "deferred" ]] || stop "auth_module.state must be deferred (actual=$auth_state)"
+accepted_states="$(yq -r '.auth_module.accepted_states[]? // ""' "$CONTRACT" || true)"
+[[ -n "$auth_state" && "$auth_state" != "null" ]] || stop "auth_module.state missing in contract"
 [[ "$blocked_gate" == "D225" ]] || stop "auth_module.blocked_by_gate must be D225 (actual=$blocked_gate)"
+
+if [[ -n "$accepted_states" ]]; then
+  if ! printf '%s\n' "$accepted_states" | rg -qx "$auth_state"; then
+    stop "auth_module.state not allowed by auth_module.accepted_states (state=$auth_state)"
+  fi
+else
+  case "$auth_state" in
+    deferred|extracted_complete) ;;
+    *) stop "unsupported auth_module.state (actual=$auth_state)" ;;
+  esac
+fi
+
+deferred_marker_a="$(yq -r '.auth_module.deferred_markers[0] // .queue_contract.required_markers[0] // "BLOCKED_BY_D225"' "$CONTRACT")"
+deferred_marker_b="$(yq -r '.auth_module.deferred_markers[1] // .queue_contract.required_markers[1] // "AUTH_DEFERRED_UNTIL_LIVE_BASELINE"' "$CONTRACT")"
+completion_heading="$(yq -r '.auth_module.completion.heading // "### EQ-1: Auth Module"' "$CONTRACT")"
+completion_status_pattern="$(yq -r '.auth_module.completion.status_pattern // "Execution status.*COMPLETED"' "$CONTRACT")"
 
 for prereq in live_health_green contract_parity_green agent_smoke_green; do
   if ! yq -e ".prerequisites.$prereq" "$CONTRACT" >/dev/null 2>&1; then
@@ -144,17 +163,46 @@ else
 fi
 rm -f "$tmp_smoke"
 
-# 4) queue marker alignment
-if rg -q 'BLOCKED_BY_D225' "$QUEUE_FILE" && rg -q 'AUTH_DEFERRED_UNTIL_LIVE_BASELINE' "$QUEUE_FILE"; then
-  report_row "queue_marker_green" "GREEN" "EQ-1 auth queue markers present"
+# 4) queue marker alignment (state-aware)
+eq1_heading_present=0
+eq1_status_complete=0
+eq1_section="$(awk -v heading="$completion_heading" '
+  index($0, heading) {in_section=1}
+  in_section {
+    if ($0 ~ /^### EQ-[0-9]+:/ && index($0, heading) == 0) exit
+    print
+  }
+' "$QUEUE_FILE")"
+
+if [[ -n "$eq1_section" ]]; then
+  eq1_heading_present=1
+fi
+if [[ -n "$eq1_section" ]] && printf '%s\n' "$eq1_section" | rg -q "$completion_status_pattern"; then
+  eq1_status_complete=1
+fi
+
+if [[ "$auth_state" == "deferred" ]]; then
+  if rg -q "$deferred_marker_a" "$QUEUE_FILE" && rg -q "$deferred_marker_b" "$QUEUE_FILE"; then
+    report_row "queue_marker_green" "GREEN" "deferred mode markers present ($deferred_marker_a + $deferred_marker_b)"
+  else
+    report_row "queue_marker_green" "RED" "deferred mode missing $deferred_marker_a/$deferred_marker_b markers"
+    overall_red=1
+  fi
+elif [[ "$auth_state" == "extracted_complete" ]]; then
+  if [[ "$eq1_heading_present" -eq 1 && "$eq1_status_complete" -eq 1 ]]; then
+    report_row "queue_marker_green" "GREEN" "N/A-green (EQ-1 completed; deferred markers not required)"
+  else
+    report_row "queue_marker_green" "RED" "auth extracted_complete but EQ-1 completion evidence missing in queue"
+    overall_red=1
+  fi
 else
-  report_row "queue_marker_green" "RED" "missing BLOCKED_BY_D225/AUTH_DEFERRED_UNTIL_LIVE_BASELINE markers"
+  report_row "queue_marker_green" "RED" "unsupported auth_state=$auth_state"
   overall_red=1
 fi
 
 echo
 if [[ "$overall_red" -eq 0 ]]; then
-  echo "status: OK (live modules baseline is green; auth remains operator-deferred until explicitly unlocked)"
+  echo "status: OK (live modules baseline is green; auth_state=$auth_state)"
   exit 0
 fi
 
