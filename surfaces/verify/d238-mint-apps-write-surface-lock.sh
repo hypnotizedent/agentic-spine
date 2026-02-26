@@ -76,7 +76,7 @@ ssh_user="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .user // "ubunt
 [[ -n "$ssh_host" ]] || { echo "D238 FAIL: mint-apps ssh target missing" >&2; exit 1; }
 
 ref="$ssh_user@$ssh_host"
-opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+opts=(-n -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 if ! ssh "${opts[@]}" "$ref" "true" >/dev/null 2>&1; then
   echo "D238 FAIL: ssh unreachable ($ref)" >&2
   exit 1
@@ -96,10 +96,22 @@ while IFS= read -r c; do
 
   upload_dirs="$(ssh "${opts[@]}" "$ref" "docker exec '$c' sh -lc 'find /tmp -maxdepth 2 -type d 2>/dev/null | grep -Ei \"upload|uploads|scratch\" || true'" 2>/dev/null || true)"
   if [[ -n "$upload_dirs" ]]; then
-    has_tmp_mount="$(ssh "${opts[@]}" "$ref" "docker inspect --format '{{range .Mounts}}{{if eq .Destination \"/tmp\"}}yes{{end}}{{end}}' '$c'" 2>/dev/null || true)"
-    if [[ "$has_tmp_mount" != "yes" ]]; then
-      finding "MEDIUM" "STOR-006: container '$c' has upload-like tmp dirs without /tmp bind mount"
-    fi
+    mount_dests="$(ssh "${opts[@]}" "$ref" "docker inspect --format '{{range .Mounts}}{{.Destination}}{{\"\\n\"}}{{end}}' '$c'" 2>/dev/null || true)"
+    while IFS= read -r upload_dir; do
+      [[ -z "$upload_dir" ]] && continue
+      governed=0
+      while IFS= read -r mount_dest; do
+        [[ -z "$mount_dest" ]] && continue
+        if [[ "$upload_dir" == "$mount_dest" || "$upload_dir" == "$mount_dest/"* ]]; then
+          governed=1
+          break
+        fi
+      done <<< "$mount_dests"
+      if [[ "$governed" -ne 1 ]]; then
+        finding "MEDIUM" "STOR-006: container '$c' upload path '$upload_dir' is not covered by a bind mount"
+        break
+      fi
+    done <<< "$upload_dirs"
   fi
 
 done <<< "$containers"

@@ -54,10 +54,11 @@ ssh_user="$(yq -r '.ssh.targets[] | select(.id == "mint-data") | .user // "ubunt
 
 require_appendonly="$(yq -r '.mint_data_contract.redis.require_appendonly // true' "$GUARD_POLICY" 2>/dev/null || echo true)"
 required_prefix="$(yq -r '.mint_data_contract.redis.require_named_volume_prefix // "mint-data_"' "$GUARD_POLICY" 2>/dev/null || echo mint-data_)"
+required_bind_prefix="$(yq -r '.mint_data_contract.redis.require_bind_mount_prefix // ""' "$GUARD_POLICY" 2>/dev/null || echo "")"
 target_tier="$(yq -r '.vm_storage.mint-data.target_storage_tier // ""' "$STORAGE_POLICY" 2>/dev/null || true)"
 
 ref="$ssh_user@$ssh_host"
-opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+opts=(-n -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 if ! ssh "${opts[@]}" "$ref" "true" >/dev/null 2>&1; then
   echo "D236 FAIL: ssh unreachable ($ref)" >&2
   exit 1
@@ -105,8 +106,23 @@ if [[ -n "$redis" ]]; then
   if [[ -z "$redis_save" ]]; then
     finding "MEDIUM" "STOR-003: redis save cadence is empty"
   fi
+  named_ok="true"
+  bind_ok="true"
   if [[ -n "$required_prefix" && "$redis_source" != *"/volumes/${required_prefix}"* ]]; then
-    finding "MEDIUM" "STOR-003: redis volume source '$redis_source' does not match required prefix '$required_prefix'"
+    named_ok="false"
+  fi
+  if [[ -n "$required_bind_prefix" && "$redis_source" != "$required_bind_prefix"* ]]; then
+    bind_ok="false"
+  fi
+
+  if [[ -n "$required_prefix" && -n "$required_bind_prefix" ]]; then
+    if [[ "$named_ok" != "true" && "$bind_ok" != "true" ]]; then
+      finding "MEDIUM" "STOR-003: redis source '$redis_source' matches neither named prefix '$required_prefix' nor bind prefix '$required_bind_prefix'"
+    fi
+  elif [[ -n "$required_prefix" && "$named_ok" != "true" ]]; then
+    finding "MEDIUM" "STOR-003: redis source '$redis_source' does not match required named prefix '$required_prefix'"
+  elif [[ -n "$required_bind_prefix" && "$bind_ok" != "true" ]]; then
+    finding "MEDIUM" "STOR-003: redis source '$redis_source' does not match required bind prefix '$required_bind_prefix'"
   fi
 fi
 

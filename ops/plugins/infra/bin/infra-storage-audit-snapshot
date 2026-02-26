@@ -39,6 +39,7 @@ images_warn_gb="$(yq -r '.thresholds.docker_images_warn_gb // 15' "$GUARD_POLICY
 build_warn_gb="$(yq -r '.thresholds.docker_build_cache_warn_gb // 10' "$GUARD_POLICY")"
 tmp_mb="$(yq -r '.thresholds.host_tmp_large_file_mb // 10' "$GUARD_POLICY")"
 redis_prefix="$(yq -r '.mint_data_contract.redis.require_named_volume_prefix // "mint-data_"' "$GUARD_POLICY")"
+redis_bind_prefix="$(yq -r '.mint_data_contract.redis.require_bind_mount_prefix // ""' "$GUARD_POLICY")"
 
 to_gb() {
   local raw="$(echo "${1:-0}" | tr -d ' ' | tr '[:lower:]' '[:upper:]')"
@@ -110,6 +111,7 @@ fi
 
 host_tmp_large="$(ssh "${opts[@]}" "$ma_ref" "find /tmp -maxdepth 2 -type f -size +${tmp_mb}M 2>/dev/null | head -n1" 2>/dev/null || true)"
 quote_upload_tmp="$(ssh "${opts[@]}" "$ma_ref" "docker exec quote-page sh -lc 'find /tmp -maxdepth 2 -type d 2>/dev/null | grep -Ei \"quote-page-uploads|upload|uploads\" | head -n1 || true'" 2>/dev/null || true)"
+quote_mount_dests="$(ssh "${opts[@]}" "$ma_ref" "docker inspect --format '{{range .Mounts}}{{.Destination}}{{\"\\n\"}}{{end}}' quote-page 2>/dev/null" 2>/dev/null || true)"
 
 stor001=0
 stor002=0
@@ -122,11 +124,51 @@ stor008=0
 
 if [[ "$md_root_pct" =~ ^[0-9]+$ ]] && (( md_root_pct >= root_warn_pct )); then stor001=1; fi
 if [[ -n "$md_root_dev" && -n "$md_docker_dev" && "$md_root_dev" == "$md_docker_dev" ]]; then stor002=1; fi
-if [[ "$redis_appendonly" != "yes" || "$redis_source" != *"/volumes/${redis_prefix}"* ]]; then stor003=1; fi
+if [[ "$redis_appendonly" != "yes" ]]; then
+  stor003=1
+else
+  redis_named_ok=1
+  redis_bind_ok=1
+  if [[ -n "$redis_prefix" && "$redis_source" != *"/volumes/${redis_prefix}"* ]]; then
+    redis_named_ok=0
+  fi
+  if [[ -n "$redis_bind_prefix" && "$redis_source" != "$redis_bind_prefix"* ]]; then
+    redis_bind_ok=0
+  fi
+
+  if [[ -n "$redis_prefix" && -n "$redis_bind_prefix" ]]; then
+    if [[ "$redis_named_ok" -ne 1 && "$redis_bind_ok" -ne 1 ]]; then
+      stor003=1
+    fi
+  elif [[ -n "$redis_prefix" ]]; then
+    if [[ "$redis_named_ok" -ne 1 ]]; then
+      stor003=1
+    fi
+  elif [[ -n "$redis_bind_prefix" ]]; then
+    if [[ "$redis_bind_ok" -ne 1 ]]; then
+      stor003=1
+    fi
+  fi
+fi
 if [[ -n "$md_root_dev" && -n "$md_docker_dev" && "$md_root_dev" == "$md_docker_dev" ]]; then stor004=1; fi
 if [[ -n "$ma_root_dev" && -n "$ma_docker_dev" && "$ma_root_dev" == "$ma_docker_dev" ]]; then stor004=1; fi
 if ge "$ma_images_gb" "$images_warn_gb" || ge "$ma_build_gb" "$build_warn_gb"; then stor005=1; fi
-if [[ -n "$host_tmp_large" || -n "$quote_upload_tmp" ]]; then stor006=1; fi
+if [[ -n "$host_tmp_large" ]]; then
+  stor006=1
+fi
+if [[ -n "$quote_upload_tmp" ]]; then
+  quote_governed=0
+  while IFS= read -r dest; do
+    [[ -z "$dest" ]] && continue
+    if [[ "$quote_upload_tmp" == "$dest" || "$quote_upload_tmp" == "$dest/"* ]]; then
+      quote_governed=1
+      break
+    fi
+  done <<< "$quote_mount_dests"
+  if [[ "$quote_governed" -ne 1 ]]; then
+    stor006=1
+  fi
+fi
 if yq -e '.stor_findings[] | select(.id == "STOR-007") | .existing_gap_ids | length > 0' "$STOR_MAP" >/dev/null 2>&1; then stor007=1; fi
 if yq -e '.gates[] | select(.id == "D235")' "$GATE_REGISTRY" >/dev/null 2>&1 && yq -e '.gates[] | select(.id == "D239")' "$GATE_REGISTRY" >/dev/null 2>&1; then stor008=1; fi
 
