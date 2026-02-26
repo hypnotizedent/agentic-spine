@@ -57,7 +57,7 @@ claiming unverified runtime behavior.
 
 1. `LOOP-MINT-RONNY-APPROVAL-STAMP-LANE-20260225` -> `closed`
 2. `LOOP-MINT-RUNTIME-PROBE-CONSISTENCY-20260225` -> `closed`
-3. `LOOP-MINT-LEGACY-RUNTIME-DETACH-CLEANUP-20260225` -> `deferred` (operator hold; non-destructive only)
+3. `LOOP-MINT-LEGACY-RUNTIME-DETACH-CLEANUP-20260225` -> `deferred` (operator hold; non-destructive stop-only batch executed, no deletes)
 4. `LOOP-MINT-PAYMENT-RUNTIME-READINESS-20260225` -> `active` (`NOT_LIVE`, awaiting explicit smoke/stamp evidence)
 5. `LOOP-MINT-SSOT-DOC-RUNTIME-ALIGNMENT-20260225` -> `active`
 

@@ -81,3 +81,51 @@ Capability run keys:
 - `CAP-20260226-024059__infra.docker_host.status__R9h1f30554`
 - `CAP-20260226-024150__docker.compose.status__Rp0ji36887`
 - `CAP-20260226-024059__services.health.status__Rxu6p30556`
+
+## Non-Destructive Stop-Only Batch (2026-02-26)
+
+Operator-approved scope executed:
+1. Classification-only receipts capture.
+2. Stop-only action on duplicate legacy module containers:
+   `files-api`, `quote-page`, `order-intake`.
+3. No delete actions.
+4. No volume mutation.
+5. No backup-path mutation.
+
+Pre-state receipts:
+- `CAP-20260226-025944__infra.docker_host.status__Rjvkg12345`
+- `CAP-20260226-025944__docker.compose.status__Rtdb312465`
+- `CAP-20260226-025949__services.health.status__Ra8ul20384`
+- `CAP-20260226-025949__cloudflare.tunnel.ingress.status__Rn32b20389`
+- `CAP-20260226-025949__cloudflare.domain_routing.diff__R06h120405`
+
+Stop-only command result (ssh execution, non-destructive):
+1. `files-api` exited.
+2. `quote-page` exited.
+3. `order-intake` exited.
+4. `docker ps` confirms no running duplicate containers in `mint-modules-prod`.
+
+Post-state receipts:
+- `CAP-20260226-030538__infra.docker_host.status__R4hgd53429`
+- `CAP-20260226-030538__docker.compose.status__R0a5l53430`
+- `CAP-20260226-030538__mint.modules.health__Riuj853431`
+- `CAP-20260226-030538__mint.runtime.proof__Ricct53432`
+- `CAP-20260226-030538__mint.live.baseline.status__R41w853433`
+
+Observed outcome:
+1. Docker-host duplicate module runtime path is inactive (containers stopped).
+2. Fresh-slate mint runtime remains healthy (`mint.modules.health` and
+   `mint.runtime.proof` both `OK`).
+3. Loop remains deferred for any destructive cleanup phase.
+
+## Mint-Modules Contract Alignment Reviewed
+
+Validated against:
+1. `/Users/ronnyworks/code/mint-modules/docs/ARCHITECTURE/MINT_TRANSITION_STATE.md`
+2. `/Users/ronnyworks/code/mint-modules/docs/CANONICAL/NO_LEGACY_COUPLING.md`
+3. `/Users/ronnyworks/code/mint-modules/docs/CANONICAL/ACTIVE_AUTHORITY.md`
+
+Contract alignment note:
+1. Active runtime authority remains mint-apps (VM 213) + mint-data (VM 212).
+2. Legacy docker-host runtime is `LEGACY_ONLY` / non-authoritative.
+3. Stop-only detachment is consistent with zero-legacy-coupling policy.
