@@ -119,6 +119,23 @@ unique_lines() {
   awk 'NF && !seen[$0]++'
 }
 
+tailscale_online_from_status() {
+  tailscale status --json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    print("false")
+    raise SystemExit(0)
+
+self_obj = payload.get("Self") if isinstance(payload, dict) else {}
+online = bool((self_obj or {}).get("Online"))
+print("true" if online else "false")
+' || echo "false"
+}
+
 contains_value() {
   local needle="$1"
   shift || true
@@ -249,6 +266,7 @@ run_gate_ids() {
   declare -A gate_mode=()
   declare -A gate_script_abs=()
   declare -A gate_meta_fail_msg=()
+  local tailscale_guard_needed=0
   local gid script_rel inline retired script_abs
   for gid in "${gate_ids[@]}"; do
     script_rel="${gate_script[$gid]:-}"
@@ -280,6 +298,11 @@ run_gate_ids() {
 
     gate_mode["$gid"]="run"
     gate_script_abs["$gid"]="$script_abs"
+    if [[ "$tailscale_guard_needed" -eq 0 ]]; then
+      if grep -Eq 'tailscale-guard\.sh|require_tailscale' "$script_abs" 2>/dev/null; then
+        tailscale_guard_needed=1
+      fi
+    fi
   done
 
   if [[ "$json_mode" == "0" ]]; then
@@ -290,6 +313,19 @@ run_gate_ids() {
 
   local tmp_dir
   tmp_dir="$(mktemp -d)"
+  local tailscale_cache_file=""
+  if [[ "$tailscale_guard_needed" -eq 1 ]]; then
+    tailscale_cache_file="$tmp_dir/tailscale_guard.cache"
+    local tailscale_online="missing_cli"
+    if command -v tailscale >/dev/null 2>&1; then
+      tailscale_online="$(tailscale_online_from_status)"
+      case "$tailscale_online" in
+        true|false) ;;
+        *) tailscale_online="false" ;;
+      esac
+    fi
+    printf 'online=%s\n' "$tailscale_online" >"$tailscale_cache_file"
+  fi
 
   local current_batch=0
   for gid in "${gate_ids[@]}"; do
@@ -300,7 +336,11 @@ run_gate_ids() {
     rc_file="$tmp_dir/${gid}.rc"
     (
       set +e
-      bash "${gate_script_abs[$gid]}" >"$out_file" 2>&1
+      if [[ -n "$tailscale_cache_file" ]]; then
+        VERIFY_TAILSCALE_GUARD_CACHE_FILE="$tailscale_cache_file" bash "${gate_script_abs[$gid]}" >"$out_file" 2>&1
+      else
+        bash "${gate_script_abs[$gid]}" >"$out_file" 2>&1
+      fi
       echo "$?" >"$rc_file"
     ) &
     current_batch=$((current_batch + 1))
