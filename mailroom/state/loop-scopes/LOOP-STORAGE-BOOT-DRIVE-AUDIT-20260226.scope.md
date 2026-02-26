@@ -64,13 +64,20 @@ Containers/VMs repeatedly get default-setup to boot drives because:
 | Gap | Severity | Status | Description |
 |-----|----------|--------|-------------|
 | GAP-OP-941 | critical | open | VM 211 finance-stack boot drive at 75%, all data on boot |
-| GAP-OP-942 | high | open | VMs 204/205/206/207/212 all persistent data on boot |
+| GAP-OP-942 | high | **fixed** | Superseded — split into per-VM gaps 952-956 |
 | GAP-OP-943 | high | **fixed** | Missing storage placement policy binding |
 | GAP-OP-944 | high | **fixed** | VM creation contract missing storage provisioning step |
 | GAP-OP-945 | high | **fixed** | VM profile missing data disk configuration |
 | GAP-OP-946 | high | **fixed** | Missing infrastructure-wide storage drift gate |
-| GAP-OP-947 | medium | open | Docker image bloat on boot drives (210, 213) |
+| GAP-OP-947 | medium | **fixed** | Superseded — split into per-VM gaps 957-958 |
+| GAP-OP-952 | high | open | VM 204 (infra-core) all data on boot |
+| GAP-OP-953 | high | open | VM 205 (observability) all data on boot |
+| GAP-OP-954 | medium | open | VM 206 (dev-tools) all data on boot |
+| GAP-OP-955 | medium | open | VM 207 (ai-consolidation) all data on boot |
+| GAP-OP-956 | critical | open | VM 212 (mint-data) 81% boot, all data on boot (mint terminal) |
+| GAP-OP-957 | medium | open | VM 210 (streaming-stack) docker image bloat 54% |
+| GAP-OP-958 | low | open | VM 213 (mint-apps) docker image bloat (mint terminal) |
 
 ## Audit Summary
 
-This loop's capture-only objective is complete. 4/7 gaps fixed (policy + process). 3 gaps remain open for runtime remediation (separate loops per VM).
+Capture-only objective complete. 6/14 gaps fixed (policy + process + superseded bundles). 8 per-VM gaps remain open for runtime remediation. Mint VMs (956, 958) owned by mint terminal.
