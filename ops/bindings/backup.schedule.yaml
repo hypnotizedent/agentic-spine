@@ -1,0 +1,61 @@
+# Status: authoritative
+# Last verified: 2026-02-26
+
+version: 1
+updated_at: "2026-02-26"
+owner: "@ronny"
+scope: backup-schedule-v1
+timezone: "America/New_York"
+
+jobs:
+  - id: vm-214-vzdump-daily
+    enabled: true
+    kind: vm-vzdump
+    stack: communications-stack
+    host: pve
+    schedule_cron: "0 2 * * *"
+    inventory_target: vm-214-communications-stack-primary
+    vm_lifecycle_backup_target: vm-214-communications-stack-primary
+    retention: keep-last=2
+    evidence_ref: ops/bindings/backup.inventory.yaml
+
+  - id: mail-archiver-db-pgdump-daily
+    enabled: true
+    kind: pg-dump
+    stack: communications-stack
+    host: communications-stack
+    schedule_cron: "20 2 * * *"
+    container: mail-archiver-db
+    database: MailArchiver
+    output_dir: /srv/mail-archiver/backups/postgres
+    file_pattern: mail-archiver-db_<YYYYMMDDTHHMMSSZ>.sql.gz
+    retention_days: 30
+
+  - id: mail-archiver-uploads-snapshot-daily
+    enabled: true
+    kind: filesystem-tar
+    stack: communications-stack
+    host: communications-stack
+    schedule_cron: "35 2 * * *"
+    source_dir: /srv/mail-archiver/uploads
+    output_dir: /srv/mail-archiver/backups/uploads
+    file_pattern: mail-archiver-uploads_<YYYYMMDDTHHMMSSZ>.tar.gz
+    retention_days: 14
+
+  - id: mail-archiver-restore-drill-monthly
+    enabled: true
+    kind: restore-drill
+    stack: communications-stack
+    host: communications-stack
+    schedule_cron: "0 4 1 * *"
+    procedure_ref: ops/bindings/mail.archiver.backup.contract.yaml
+    dry_run: true
+
+references:
+  contracts:
+    - ops/bindings/backup.inventory.yaml
+    - ops/bindings/vm.lifecycle.yaml
+    - ops/bindings/mail.archiver.backup.contract.yaml
+  closes_gaps:
+    - GAP-OP-924
+

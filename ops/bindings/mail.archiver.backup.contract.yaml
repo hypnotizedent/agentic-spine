@@ -1,0 +1,64 @@
+# Status: authoritative
+# Last verified: 2026-02-26
+
+version: 1
+updated_at: "2026-02-26"
+owner: "@ronny"
+scope: mail-archiver-backup-restore
+
+runtime:
+  vm:
+    id: "214"
+    hostname: communications-stack
+    tailscale_ip: 100.115.16.37
+  stack: communications-stack
+  containers:
+    app: mail-archiver
+    db: mail-archiver-db
+
+backup_coverage:
+  vm_level:
+    enabled: true
+    schedule_id: vm-214-vzdump-daily
+    inventory_target: vm-214-communications-stack-primary
+    vm_lifecycle_backup_target: vm-214-communications-stack-primary
+    source_bindings:
+      - ops/bindings/backup.inventory.yaml
+      - ops/bindings/vm.lifecycle.yaml
+  app_level:
+    - id: postgres-dump
+      schedule_id: mail-archiver-db-pgdump-daily
+      storage_path: /srv/mail-archiver/backups/postgres
+      retention_days: 30
+      command_template: "docker exec mail-archiver-db pg_dump -U mailuser MailArchiver | gzip > /srv/mail-archiver/backups/postgres/mail-archiver-db_<timestamp>.sql.gz"
+    - id: uploads-snapshot
+      schedule_id: mail-archiver-uploads-snapshot-daily
+      storage_path: /srv/mail-archiver/backups/uploads
+      retention_days: 14
+      command_template: "tar -czf /srv/mail-archiver/backups/uploads/mail-archiver-uploads_<timestamp>.tar.gz -C /srv/mail-archiver/uploads ."
+
+restore_sop:
+  objective: "Recover mail-archiver service and DB on VM 214 with bounded data loss."
+  rpo_hours: 24
+  rto_hours: 4
+  ordered_steps:
+    - "Validate latest vm-214 vzdump artifact exists and is recent."
+    - "Restore VM 214 snapshot if full host failure is involved."
+    - "Stop mail-archiver and mail-archiver-db containers."
+    - "Restore latest mail-archiver-db pg_dump into MailArchiver database."
+    - "Restore uploads snapshot to /srv/mail-archiver/uploads when required."
+    - "Start containers and verify health endpoint plus login."
+    - "Run governed validation checks and capture receipts."
+
+verification:
+  post_restore_commands:
+    - "./bin/ops cap run communications.stack.status"
+    - "./bin/ops cap run verify.pack.run communications"
+    - "./bin/ops cap run services.health.status --id mail-archiver-vm214"
+
+references:
+  schedule_binding: ops/bindings/backup.schedule.yaml
+  retention_binding: ops/bindings/mail.archiver.retention.contract.yaml
+  closes_gaps:
+    - GAP-OP-924
+

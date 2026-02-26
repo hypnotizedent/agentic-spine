@@ -1,0 +1,105 @@
+# Status: authoritative
+# Last verified: 2026-02-26
+
+version: 1
+updated_at: "2026-02-26"
+owner: "@ronny"
+scope: mail-archiver-account-linkage
+
+mail_archiver:
+  host: communications-stack
+  vm_id: "214"
+  service_id: mail-archiver-vm214
+  base_url: "http://100.115.16.37:5100/"
+  parent_loop: LOOP-MAIL-ARCHIVER-CONTRACT-CLOSURE-20260226-20260226
+
+linkage_policy:
+  ingestion_mode: read-only
+  allow_sendback: false
+  require_explicit_enable: true
+  default_state: planned
+  boundary_rules:
+    - "Only accounts listed in this contract are allowed as mail-archiver sources."
+    - "Connectors are ingest-only (IMAP/OAuth read) and cannot send email."
+    - "New sources require explicit contract update plus governed evidence."
+
+accounts:
+  - id: stalwart-ops
+    provider: stalwart
+    mailbox: ops@spine.ronny.works
+    source_kind: self-hosted
+    connection:
+      protocol: imap
+      host: 100.115.16.37
+      port: 993
+      security: tls
+      auth_method: password
+      username_ref: infisical://spine/services/mail-archiver/STALWART_OPS_USERNAME
+      password_ref: infisical://spine/services/mail-archiver/STALWART_OPS_PASSWORD
+    sync:
+      state: active
+      cadence_cron: "*/15 * * * *"
+      backfill_enabled: true
+      max_lookback_days: 30
+
+  - id: gmail-primary
+    provider: gmail
+    mailbox: hypnotizedent@gmail.com
+    source_kind: external
+    connection:
+      protocol: imap
+      host: imap.gmail.com
+      port: 993
+      security: tls
+      auth_method: app-password
+      username_ref: infisical://spine/services/mail-archiver/GMAIL_PRIMARY_USERNAME
+      password_ref: infisical://spine/services/mail-archiver/GMAIL_PRIMARY_APP_PASSWORD
+    sync:
+      state: planned
+      cadence_cron: "0 */6 * * *"
+      backfill_enabled: false
+      blocked_by:
+        - GAP-OP-922
+
+  - id: icloud-primary
+    provider: icloud
+    mailbox: ronny@hantash.com
+    source_kind: external
+    connection:
+      protocol: imap
+      host: imap.mail.me.com
+      port: 993
+      security: tls
+      auth_method: app-password
+      username_ref: infisical://spine/services/mail-archiver/ICLOUD_PRIMARY_USERNAME
+      password_ref: infisical://spine/services/mail-archiver/ICLOUD_PRIMARY_APP_PASSWORD
+    sync:
+      state: planned
+      cadence_cron: "30 */6 * * *"
+      backfill_enabled: false
+
+  - id: microsoft-primary
+    provider: microsoft-outlook
+    mailbox: ronny@mintprints.com
+    source_kind: external
+    connection:
+      protocol: oauth-imap
+      host: outlook.office365.com
+      port: 993
+      security: tls
+      auth_method: oauth-client
+      tenant_id_ref: infisical://spine/services/mail-archiver/M365_TENANT_ID
+      client_id_ref: infisical://spine/services/mail-archiver/M365_CLIENT_ID
+      client_secret_ref: infisical://spine/services/mail-archiver/M365_CLIENT_SECRET
+    sync:
+      state: planned
+      cadence_cron: "0 */8 * * *"
+      backfill_enabled: false
+
+evidence:
+  verify_commands:
+    - "./bin/ops cap run communications.stack.status"
+    - "./bin/ops cap run verify.pack.run communications"
+  closes_gaps:
+    - GAP-OP-923
+
