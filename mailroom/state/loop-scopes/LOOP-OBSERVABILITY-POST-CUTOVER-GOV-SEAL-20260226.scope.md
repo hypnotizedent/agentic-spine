@@ -1,5 +1,5 @@
 ---
-status: closed
+status: active
 owner: "@ronny"
 created: "2026-02-26"
 priority: high
@@ -16,8 +16,11 @@ provenance gap filing for commits missing Gate-* trailers.
 
 ## Linked Gaps
 
-- GAP-OP-967: mail-archiver SERVICE_REGISTRY stale (vm211 vs vm214 health probe)
 - GAP-OP-968: D128 provenance missing on observability-lane commits d39aece, 879c9af
+
+## Re-parented Gaps
+
+- GAP-OP-967: re-parented to LOOP-MAIL-ARCHIVER-COMMS-MIGRATION-20260225 (natural resolution owner)
 
 ## Constraints
 
