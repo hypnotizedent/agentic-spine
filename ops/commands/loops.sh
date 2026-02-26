@@ -141,7 +141,8 @@ list_loops() {
     for scope_file in "$SCOPES_DIR"/*.scope.md; do
         [[ -f "$scope_file" ]] || continue
 
-        local loop_id status severity owner title
+        local loop_id status severity owner title execution_mode active_terminal blocked_by
+        local display_title="" state_tags="" detail=""
         loop_id="$(_fm_field "$scope_file" "loop_id")"
         [[ -z "$loop_id" ]] && continue
 
@@ -149,6 +150,9 @@ list_loops() {
         severity="$(_fm_field "$scope_file" "severity")"
         owner="$(_fm_field "$scope_file" "owner")"
         title="$(_scope_title "$scope_file")"
+        execution_mode="$(_fm_field "$scope_file" "execution_mode")"
+        active_terminal="$(_fm_field "$scope_file" "active_terminal")"
+        blocked_by="$(_fm_field "$scope_file" "blocked_by")"
 
         # Normalize missing fields
         [[ -z "$status" ]] && status="unknown"
@@ -162,24 +166,38 @@ list_loops() {
         esac
 
         # Only show title if it differs from loop_id
-        local display_title=""
         [[ "$title" != "$loop_id" ]] && display_title="$title"
+
+        [[ "$execution_mode" == "background" ]] && state_tags="${state_tags} [background]"
+        if [[ -n "$blocked_by" && "$blocked_by" != "none" ]]; then
+            state_tags="${state_tags} [blocked]"
+        fi
 
         case "$filter" in
             --open)
                 _is_open_status "$status" || continue
-                printf "  [%-8s] %-15s %s" "$severity" "$owner" "$loop_id"
+                printf "  [%-8s] %-15s %s%s" "$severity" "$owner" "$loop_id" "$state_tags"
                 [[ -n "$display_title" ]] && printf "  %s" "$display_title"
                 printf "\n"
+                detail=""
+                if [[ "$execution_mode" == "background" ]]; then
+                    detail="execution=background"
+                    [[ -n "$active_terminal" ]] && detail="${detail}; terminal=${active_terminal}"
+                fi
+                if [[ -n "$blocked_by" && "$blocked_by" != "none" ]]; then
+                    [[ -n "$detail" ]] && detail="${detail}; "
+                    detail="${detail}blocked_by=${blocked_by}"
+                fi
+                [[ -n "$detail" ]] && printf "  %-10s %-15s %s\n" "" "" "$detail"
                 ;;
             --closed)
                 _is_open_status "$status" && continue
-                printf "  [%-8s] %-15s %s" "$severity" "$owner" "$loop_id"
+                printf "  [%-8s] %-15s %s%s" "$severity" "$owner" "$loop_id" "$state_tags"
                 [[ -n "$display_title" ]] && printf "  %s" "$display_title"
                 printf "\n"
                 ;;
             --all)
-                printf "  [%-8s] %-8s %-15s %s" "$severity" "$status" "$owner" "$loop_id"
+                printf "  [%-8s] %-8s %-15s %s%s" "$severity" "$status" "$owner" "$loop_id" "$state_tags"
                 [[ -n "$display_title" ]] && printf "  %s" "$display_title"
                 printf "\n"
                 ;;
@@ -305,6 +323,7 @@ closed_count = 0
 total = 0
 severity_counts = Counter()
 owner_counts = Counter()
+background_open = []
 
 FM_RE = re.compile(r'^---\s*$')
 
@@ -334,6 +353,8 @@ for f in sorted(scopes_dir.glob("*.scope.md")):
         open_count += 1
         severity_counts[severity] += 1
         owner_counts[owner] += 1
+        if fm.get("execution_mode", "") == "background":
+            background_open.append(fm.get("loop_id", f.stem))
     elif status == "closed":
         closed_count += 1
 
@@ -341,6 +362,7 @@ print("By Status:")
 print(f"  Open:   {open_count}")
 print(f"  Closed: {closed_count}")
 print(f"  Total:  {total}")
+print(f"  Background Open: {len(background_open)}")
 print()
 
 print("By Severity (open only):")
@@ -356,6 +378,11 @@ if not owner_counts:
 else:
     for owner in sorted(owner_counts):
         print(f"  {owner}: {owner_counts[owner]}")
+if background_open:
+    print()
+    print("Background Loops (open):")
+    for loop_id in background_open:
+        print(f"  {loop_id}")
 PY
 }
 

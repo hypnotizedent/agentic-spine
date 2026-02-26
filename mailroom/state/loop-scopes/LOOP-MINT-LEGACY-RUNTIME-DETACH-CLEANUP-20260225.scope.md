@@ -5,6 +5,10 @@ status: deferred
 owner: "@ronny"
 scope: mint
 severity: critical
+execution_mode: background
+active_terminal: SPINE-EXECUTION-01
+blocked_by: "Mail-archiver 200GB upload/import lane is still active in another terminal; destructive detach remains on hold"
+operator_note: "Classification + stop-only are complete; continue non-destructive hold until upload/import loop is closed."
 objective: Remove split-brain risk by detaching duplicate mint-modules runtime behavior from legacy docker-host path
 ---
 

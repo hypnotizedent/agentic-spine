@@ -55,12 +55,21 @@ while IFS='|' read -r gap_id severity parent_loop; do
   fi
 
   loop_status=$(awk '/^status:/{print $2; exit}' "$scope_file" 2>/dev/null || echo "unknown")
+  loop_mode=$(sed -n 's/^execution_mode:[[:space:]]*//p' "$scope_file" | head -n1 | tr -d '"')
+  active_terminal=$(sed -n 's/^active_terminal:[[:space:]]*//p' "$scope_file" | head -n1 | tr -d '"')
+  blocked_by=$(sed -n 's/^blocked_by:[[:space:]]*//p' "$scope_file" | head -n1 | tr -d '"')
 
   if [[ "$loop_status" == "closed" ]]; then
     echo "  [$severity] $gap_id → $parent_loop (ORPHANED — loop closed, gap open)"
     orphan_count=$((orphan_count + 1))
   else
-    echo "  [$severity] $gap_id → $parent_loop ($loop_status)"
+    loop_state="$loop_status"
+    [[ "$loop_mode" == "background" ]] && loop_state="${loop_state}/background"
+    [[ -n "$active_terminal" ]] && loop_state="${loop_state}, terminal=${active_terminal}"
+    echo "  [$severity] $gap_id → $parent_loop ($loop_state)"
+    if [[ -n "$blocked_by" && "$blocked_by" != "none" ]]; then
+      echo "             note: $blocked_by"
+    fi
   fi
 done < <(yq e '.gaps[] | select(.status == "open") | .id + "|" + .severity + "|" + (.parent_loop // "null")' "$GAPS" 2>/dev/null)
 

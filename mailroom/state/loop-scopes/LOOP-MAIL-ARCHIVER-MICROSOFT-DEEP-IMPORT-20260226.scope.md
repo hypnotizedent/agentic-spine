@@ -5,6 +5,10 @@ status: active
 owner: "@ronny"
 scope: communications
 priority: medium
+execution_mode: background
+active_terminal: SPINE-EXECUTION-01
+blocked_by: "200GB mail-archiver upload/import lane is currently running in another terminal session"
+operator_note: "Background lane only until upload/import completion receipt is posted; avoid duplicate ingest actions from other terminals."
 objective: Import full Microsoft 365 (ronny@mintprints.com) mailbox into mail-archiver on VM 214 via Graph API MIME export → EML import pipeline
 ---
 
@@ -13,6 +17,11 @@ objective: Import full Microsoft 365 (ronny@mintprints.com) mailbox into mail-ar
 ## Objective
 
 Import the complete ronny@mintprints.com mailbox into mail-archiver using the Graph API → EML pipeline documented in `docs/governance/MAIL_ARCHIVER_MICROSOFT_DEEP_ARCHIVE_PLAN.md`.
+
+## Background Execution Marker
+
+- This loop is actively being worked in a separate terminal while a long-running upload/import completes.
+- Treat this as `active/background` and avoid duplicate imports until the current transfer lane posts a completion receipt.
 
 ## Gaps Linked
 

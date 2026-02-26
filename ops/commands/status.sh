@@ -89,6 +89,10 @@ if scopes_dir.is_dir():
             "status": status,
             "severity": fm.get("severity", "-"),
             "owner": fm.get("owner", "unassigned"),
+            "execution_mode": fm.get("execution_mode", ""),
+            "active_terminal": fm.get("active_terminal", ""),
+            "blocked_by": fm.get("blocked_by", ""),
+            "operator_note": fm.get("operator_note", ""),
             "title": fm.get("_title", f.stem),
             "file": str(f.relative_to(spine)),
         }
@@ -133,6 +137,10 @@ if orch_dir.is_dir():
             "status": orch_status,
             "severity": "-",
             "owner": mf.get("apply_owner", "unassigned"),
+            "execution_mode": "",
+            "active_terminal": "",
+            "blocked_by": "",
+            "operator_note": "",
             "title": loop_id,
             "file": str(manifest_path.relative_to(spine)),
             "source": "orchestration",
@@ -315,7 +323,11 @@ if mode == "--json":
     sys.exit(0)
 
 if mode == "--brief":
-    parts = [f"Loops: {len(open_loops)} open"]
+    background_open = sum(1 for loop in open_loops if loop.get("execution_mode") == "background")
+    loop_part = f"Loops: {len(open_loops)} open"
+    if background_open:
+        loop_part += f" ({background_open} background)"
+    parts = [loop_part]
     if planned_loops:
         parts[0] += f" + {len(planned_loops)} planned"
     parts.append(f"Gaps: {len(open_gaps)} open ({len(unlinked_gaps)} unlinked)")
@@ -343,9 +355,19 @@ if not open_loops:
     print("  (none)")
 else:
     for loop in sorted_loops:
-        print(f"  [{loop['severity']:8s}] {loop['owner']:15s} {loop['loop_id']}")
+        bg_tag = " [background]" if loop.get("execution_mode") == "background" else ""
+        print(f"  [{loop['severity']:8s}] {loop['owner']:15s} {loop['loop_id']}{bg_tag}")
         if loop["title"] != loop["loop_id"]:
             print(f"  {'':8s}  {'':15s} {loop['title']}")
+        if loop.get("execution_mode") == "background":
+            line = "background lane"
+            if loop.get("active_terminal"):
+                line += f", terminal={loop['active_terminal']}"
+            print(f"  {'':8s}  {'':15s} {line}")
+        if loop.get("blocked_by") and loop["blocked_by"] != "none":
+            print(f"  {'':8s}  {'':15s} blocked_by: {loop['blocked_by']}")
+        if loop.get("operator_note"):
+            print(f"  {'':8s}  {'':15s} note: {loop['operator_note']}")
 print()
 
 # ── Planned Loops ──
