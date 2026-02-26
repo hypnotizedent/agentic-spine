@@ -1,8 +1,12 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-26
+scope: media-domain-governance
+---
+
 # Media Domain Governance
 
-> **Status:** authoritative
-> **Owner:** @ronny
-> **Last verified:** 2026-02-26
 > **Loop:** LOOP-MEDIA-GOVERNANCE-NORMALIZATION-20260226
 
 ---

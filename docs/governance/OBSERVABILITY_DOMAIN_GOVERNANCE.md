@@ -1,8 +1,12 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-26
+scope: observability-domain-governance
+---
+
 # Observability Domain Governance
 
-> **Status:** authoritative
-> **Owner:** @ronny
-> **Last verified:** 2026-02-26
 > **Loop:** LOOP-OBSERVABILITY-DOMAIN-ENRICHMENT-20260226
 
 ---

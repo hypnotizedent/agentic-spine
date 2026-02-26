@@ -1,8 +1,11 @@
-# Mail-Archiver Microsoft Deep Archive Plan
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-26
+scope: mail-archiver-microsoft-deep-archive
+---
 
-> Status: authoritative
-> Last verified: 2026-02-26
-> Owner: @ronny
+# Mail-Archiver Microsoft Deep Archive Plan
 
 ## Objective
 
