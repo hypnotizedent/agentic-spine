@@ -35,6 +35,8 @@ Safely migrate the mail-archiver service from finance-stack (VM 211) to communic
 |------|--------|--------|
 | Step 0 | Register gaps + loop (capture-only) | DONE |
 | Step 1 | Control-plane bindings (contracts, vm.lifecycle, compose targets) | DONE |
+| Step 1b | Registry canonicalization (12 files, ingress IP, STACK_REGISTRY) | DONE |
+| Step 1c | Governance contracts (account linkage, backup, retention) | DONE |
 | Step 2 | Backup + export from VM 211 (pg_dump, data export, count verification) | NOT STARTED |
 | Step 3 | Shadow deploy on VM 214 (compose, restore, parity check) | NOT STARTED |
 | Step 4 | Gmail mbox import (build capability, import 200GB, verify, delete source) | NOT STARTED |
@@ -50,9 +52,9 @@ Safely migrate the mail-archiver service from finance-stack (VM 211) to communic
 - **BLOCKER-2 [RESOLVED 2026-02-25]**: Exact Gmail takeout source path locked.
   - Path: `/mnt/docker/mail-archive-import/All-mail.mbox`
   - Size: `189440618235` bytes
-- **BLOCKER-3**: Email account list for archiver linkage — which Gmail addresses, which iCloud addresses, which Microsoft/Outlook addresses, which Stalwart spine.ronny.works mailboxes (ops@, alerts@, noreply@?)
-- **BLOCKER-4**: Retention policy decision — keep all email forever? Prune after N years? Per-account policies?
-- **BLOCKER-5**: Backup cadence decision — daily vzdump? Postgres pg_dump cron? Both? Frequency?
+- **BLOCKER-3 [RESOLVED 2026-02-26]**: Email account list locked in `mail.archiver.account.linkage.contract.yaml` (stalwart-ops active, gmail/icloud/microsoft planned).
+- **BLOCKER-4 [RESOLVED 2026-02-26]**: Retention policy locked in `mail.archiver.retention.contract.yaml` (class-based retention, 70/85/92% thresholds).
+- **BLOCKER-5 [RESOLVED 2026-02-26]**: Backup cadence locked in `backup.schedule.yaml` (vzdump 02:00, pg_dump 02:20, uploads 02:35 daily).
 
 ## Constraints
 
@@ -66,8 +68,8 @@ Safely migrate the mail-archiver service from finance-stack (VM 211) to communic
 - [ ] Mail-archiver running on VM 214 with all data intact (message count parity)
 - [ ] 200GB Gmail takeout fully imported with verification receipt
 - [ ] Gmail, iCloud, Microsoft, Stalwart accounts linked with connection receipts
-- [ ] Backup contract in place with tested restore procedure
-- [ ] Retention policy documented and enforced
+- [x] Backup contract in place with tested restore procedure
+- [x] Retention policy documented and enforced
 - [ ] All drift gates passing post-migration
 - [ ] Docker-host (VM 200) has zero mail-archiver data remaining
 - [ ] finance.stack.status updated to exclude mail-archiver

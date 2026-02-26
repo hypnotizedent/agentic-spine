@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MAIL-ARCHIVER-CONTRACT-CLOSURE-20260226-20260226
 created: 2026-02-26
-status: active
+status: closed
 owner: "@ronny"
 scope: mail
 priority: high
