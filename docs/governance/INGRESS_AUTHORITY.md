@@ -40,7 +40,8 @@ Cloudflare (DNS + Tunnel Public Hostnames)  [dashboard-managed]
                  |      - vault.ronny.works  -> Vaultwarden (:8081)
                  |
                  +--> Direct routes (via Tailscale IP or extra_hosts DNS names):
-                        - Finance: firefly-iii, ghostfolio, paperless-ngx, mail-archiver → VM 211
+                        - Finance: firefly-iii, ghostfolio, paperless-ngx → VM 211
+                        - Communications: mail-archiver → VM 214
                         - Mint OS: admin, api, production, kanban, estimator, etc. → VM 200
                         - Media: jellyfin, music, requests, spotisub → VM 210
                         - Native-auth: chat (Open WebUI), grafana, n8n → VMs 202/205

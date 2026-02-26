@@ -47,7 +47,7 @@ Examples:
 | mint-os | `/Users/ronnyworks/code/workbench/infra/compose/mint-os/` |
 | media-stack | `/Users/ronnyworks/code/workbench/infra/compose/media-stack/docker-compose.yml` |
 | finance | `/Users/ronnyworks/code/workbench/infra/compose/finance/docker-compose.yml` |
-| finance mail-archiver | `/Users/ronnyworks/code/workbench/infra/compose/finance/mail-archiver/docker-compose.yml` |
+| communications-stack mail-archiver | `/opt/stacks/communications-stack/docker-compose.yml` (VM 214) |
 | monitoring | `/Users/ronnyworks/code/workbench/infra/compose/monitoring/docker-compose.yml` |
 | pihole | `/Users/ronnyworks/code/workbench/infra/compose/pihole/docker-compose.yml` |
 | n8n | `/Users/ronnyworks/code/workbench/infra/compose/n8n/docker-compose.yml` |
