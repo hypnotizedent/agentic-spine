@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+STOR_MAP="$ROOT/ops/bindings/mint.storage.findings.map.yaml"
+GUARD_POLICY="$ROOT/ops/bindings/mint.storage.guard.policy.yaml"
+GATE_REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+
+FORMAT="text"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --format)
+      FORMAT="${2:-text}"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: infra-storage-audit-snapshot [--format text|json]"
+      exit 0
+      ;;
+    *)
+      echo "infra.storage.audit.snapshot FAIL: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ "$FORMAT" == "text" || "$FORMAT" == "json" ]] || { echo "infra.storage.audit.snapshot FAIL: invalid --format $FORMAT" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || { echo "infra.storage.audit.snapshot FAIL: yq missing" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "infra.storage.audit.snapshot FAIL: python3 missing" >&2; exit 1; }
+[[ -f "$SSH_BINDING" ]] || { echo "infra.storage.audit.snapshot FAIL: missing $SSH_BINDING" >&2; exit 1; }
+[[ -f "$STOR_MAP" ]] || { echo "infra.storage.audit.snapshot FAIL: missing $STOR_MAP" >&2; exit 1; }
+[[ -f "$GUARD_POLICY" ]] || { echo "infra.storage.audit.snapshot FAIL: missing $GUARD_POLICY" >&2; exit 1; }
+[[ -f "$GATE_REGISTRY" ]] || { echo "infra.storage.audit.snapshot FAIL: missing $GATE_REGISTRY" >&2; exit 1; }
+
+root_warn_pct="$(yq -r '.thresholds.root_usage_warn_pct // 60' "$GUARD_POLICY")"
+images_warn_gb="$(yq -r '.thresholds.docker_images_warn_gb // 15' "$GUARD_POLICY")"
+build_warn_gb="$(yq -r '.thresholds.docker_build_cache_warn_gb // 10' "$GUARD_POLICY")"
+tmp_mb="$(yq -r '.thresholds.host_tmp_large_file_mb // 10' "$GUARD_POLICY")"
+redis_prefix="$(yq -r '.mint_data_contract.redis.require_named_volume_prefix // "mint-data_"' "$GUARD_POLICY")"
+
+to_gb() {
+  local raw="$(echo "${1:-0}" | tr -d ' ' | tr '[:lower:]' '[:upper:]')"
+  if [[ "$raw" =~ ^([0-9]+(\.[0-9]+)?)(B|KB|MB|GB|TB)$ ]]; then
+    local num="${BASH_REMATCH[1]}"
+    local unit="${BASH_REMATCH[3]}"
+    case "$unit" in
+      B) awk -v n="$num" 'BEGIN { printf "%.6f", n / 1024 / 1024 / 1024 }' ;;
+      KB) awk -v n="$num" 'BEGIN { printf "%.6f", n / 1024 / 1024 }' ;;
+      MB) awk -v n="$num" 'BEGIN { printf "%.6f", n / 1024 }' ;;
+      GB) awk -v n="$num" 'BEGIN { printf "%.6f", n }' ;;
+      TB) awk -v n="$num" 'BEGIN { printf "%.6f", n * 1024 }' ;;
+    esac
+    return
+  fi
+  echo "0"
+}
+
+ge() {
+  local a="$1" b="$2"
+  awk -v a="$a" -v b="$b" 'BEGIN { exit !(a >= b) }'
+}
+
+host_metric() {
+  local id="$1"
+  local ssh_host ssh_user ref opts root_pct docker_root summary images_sz build_sz volumes_sz
+  ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$id\") | .host // \"\"" "$SSH_BINDING")"
+  ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$id\") | .user // \"ubuntu\"" "$SSH_BINDING")"
+  ref="$ssh_user@$ssh_host"
+  opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+
+  root_pct="$(ssh "${opts[@]}" "$ref" "df --output=pcent / | tail -1 | tr -d ' %'" 2>/dev/null || echo "")"
+  docker_root="$(ssh "${opts[@]}" "$ref" "docker info 2>/dev/null | awk -F': ' '/Docker Root Dir/ {print \$2}'" 2>/dev/null || echo "")"
+  summary="$(ssh "${opts[@]}" "$ref" "docker system df --format '{{.Type}}|{{.Size}}'" 2>/dev/null || true)"
+  images_sz="$(echo "$summary" | awk -F'|' '$1=="Images" {print $2; exit}')"
+  build_sz="$(echo "$summary" | awk -F'|' '$1=="Build Cache" {print $2; exit}')"
+  volumes_sz="$(echo "$summary" | awk -F'|' '$1=="Local Volumes" {print $2; exit}')"
+  echo "$root_pct|$docker_root|$images_sz|$build_sz|$volumes_sz"
+}
+
+mint_data_metric="$(host_metric mint-data)"
+mint_apps_metric="$(host_metric mint-apps)"
+
+IFS='|' read -r md_root_pct md_docker_root md_images_sz md_build_sz md_volumes_sz <<< "$mint_data_metric"
+IFS='|' read -r ma_root_pct ma_docker_root ma_images_sz ma_build_sz ma_volumes_sz <<< "$mint_apps_metric"
+
+md_images_gb="$(to_gb "$md_images_sz")"
+md_build_gb="$(to_gb "$md_build_sz")"
+md_volumes_gb="$(to_gb "$md_volumes_sz")"
+ma_images_gb="$(to_gb "$ma_images_sz")"
+ma_build_gb="$(to_gb "$ma_build_sz")"
+
+md_ref="$(yq -r '.ssh.targets[] | select(.id == "mint-data") | (.user // "ubuntu") + "@" + .host' "$SSH_BINDING")"
+ma_ref="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | (.user // "ubuntu") + "@" + .host' "$SSH_BINDING")"
+opts=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+
+md_root_dev="$(ssh "${opts[@]}" "$md_ref" "findmnt -n -o SOURCE --target /" 2>/dev/null || true)"
+ma_root_dev="$(ssh "${opts[@]}" "$ma_ref" "findmnt -n -o SOURCE --target /" 2>/dev/null || true)"
+md_docker_dev="$(ssh "${opts[@]}" "$md_ref" "findmnt -n -o SOURCE --target '${md_docker_root:-/var/lib/docker}'" 2>/dev/null || true)"
+ma_docker_dev="$(ssh "${opts[@]}" "$ma_ref" "findmnt -n -o SOURCE --target '${ma_docker_root:-/var/lib/docker}'" 2>/dev/null || true)"
+
+redis_container="$(ssh "${opts[@]}" "$md_ref" "docker ps --format '{{.Names}}' | grep -E 'redis' | head -1" 2>/dev/null || true)"
+redis_appendonly=""
+redis_source=""
+if [[ -n "$redis_container" ]]; then
+  redis_appendonly="$(ssh "${opts[@]}" "$md_ref" "docker exec '$redis_container' redis-cli CONFIG GET appendonly | tail -n1" 2>/dev/null | tr -d '\r' | xargs || true)"
+  redis_source="$(ssh "${opts[@]}" "$md_ref" "docker inspect --format '{{range .Mounts}}{{if eq .Destination \"/data\"}}{{.Source}}{{end}}{{end}}' '$redis_container'" 2>/dev/null | tr -d '\r' | xargs || true)"
+fi
+
+host_tmp_large="$(ssh "${opts[@]}" "$ma_ref" "find /tmp -maxdepth 2 -type f -size +${tmp_mb}M 2>/dev/null | head -n1" 2>/dev/null || true)"
+quote_upload_tmp="$(ssh "${opts[@]}" "$ma_ref" "docker exec quote-page sh -lc 'find /tmp -maxdepth 2 -type d 2>/dev/null | grep -Ei \"quote-page-uploads|upload|uploads\" | head -n1 || true'" 2>/dev/null || true)"
+
+stor001=0
+stor002=0
+stor003=0
+stor004=0
+stor005=0
+stor006=0
+stor007=0
+stor008=0
+
+if [[ "$md_root_pct" =~ ^[0-9]+$ ]] && (( md_root_pct >= root_warn_pct )); then stor001=1; fi
+if [[ -n "$md_root_dev" && -n "$md_docker_dev" && "$md_root_dev" == "$md_docker_dev" ]]; then stor002=1; fi
+if [[ "$redis_appendonly" != "yes" || "$redis_source" != *"/volumes/${redis_prefix}"* ]]; then stor003=1; fi
+if [[ -n "$md_root_dev" && -n "$md_docker_dev" && "$md_root_dev" == "$md_docker_dev" ]]; then stor004=1; fi
+if [[ -n "$ma_root_dev" && -n "$ma_docker_dev" && "$ma_root_dev" == "$ma_docker_dev" ]]; then stor004=1; fi
+if ge "$ma_images_gb" "$images_warn_gb" || ge "$ma_build_gb" "$build_warn_gb"; then stor005=1; fi
+if [[ -n "$host_tmp_large" || -n "$quote_upload_tmp" ]]; then stor006=1; fi
+if yq -e '.stor_findings[] | select(.id == "STOR-007") | .existing_gap_ids | length > 0' "$STOR_MAP" >/dev/null 2>&1; then stor007=1; fi
+if yq -e '.gates[] | select(.id == "D235")' "$GATE_REGISTRY" >/dev/null 2>&1 && yq -e '.gates[] | select(.id == "D239")' "$GATE_REGISTRY" >/dev/null 2>&1; then stor008=1; fi
+
+json_payload="$(python3 - "$STOR_MAP" "$md_root_pct" "$ma_root_pct" "$md_images_gb" "$md_build_gb" "$md_volumes_gb" "$ma_images_gb" "$ma_build_gb" "$redis_appendonly" "$redis_source" "$host_tmp_large" "$quote_upload_tmp" "$stor001" "$stor002" "$stor003" "$stor004" "$stor005" "$stor006" "$stor007" "$stor008" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+import yaml
+
+map_path = sys.argv[1]
+with open(map_path, "r", encoding="utf-8") as fh:
+    mapping = yaml.safe_load(fh) or {}
+
+metrics = {
+    "mint_data": {
+        "root_pct": sys.argv[2],
+        "images_gb": sys.argv[4],
+        "build_cache_gb": sys.argv[5],
+        "local_volumes_gb": sys.argv[6],
+        "redis_appendonly": sys.argv[9],
+        "redis_source": sys.argv[10],
+    },
+    "mint_apps": {
+        "root_pct": sys.argv[3],
+        "images_gb": sys.argv[7],
+        "build_cache_gb": sys.argv[8],
+        "tmp_large_file": sys.argv[11],
+        "quote_tmp_upload_dir": sys.argv[12],
+    },
+}
+
+observed = {
+    "STOR-001": bool(int(sys.argv[13])),
+    "STOR-002": bool(int(sys.argv[14])),
+    "STOR-003": bool(int(sys.argv[15])),
+    "STOR-004": bool(int(sys.argv[16])),
+    "STOR-005": bool(int(sys.argv[17])),
+    "STOR-006": bool(int(sys.argv[18])),
+    "STOR-007": bool(int(sys.argv[19])),
+    "STOR-008": bool(int(sys.argv[20])),
+}
+
+stor_rows = []
+for row in mapping.get("stor_findings", []):
+    rid = row.get("id")
+    stor_rows.append({
+        "id": rid,
+        "severity": row.get("severity"),
+        "wave_bucket": row.get("wave_bucket"),
+        "existing_gap_ids": row.get("existing_gap_ids", []),
+        "existing_loop_ids": row.get("existing_loop_ids", []),
+        "observed": observed.get(rid, False),
+    })
+
+out = {
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "source": "infra.storage.audit.snapshot",
+    "hosts": metrics,
+    "governance_linkage": {
+        "mapping_file": map_path,
+        "root_cause_clusters": mapping.get("root_cause_clusters", []),
+    },
+    "stor_findings": stor_rows,
+}
+print(json.dumps(out, indent=2))
+PY
+)"
+
+if [[ "$FORMAT" == "json" ]]; then
+  printf '%s\n' "$json_payload"
+  exit 0
+fi
+
+echo "infra.storage.audit.snapshot"
+echo "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "mint_data: root=${md_root_pct}% images=${md_images_gb}GB build_cache=${md_build_gb}GB volumes=${md_volumes_gb}GB redis_appendonly=${redis_appendonly:-unknown}"
+echo "mint_apps: root=${ma_root_pct}% images=${ma_images_gb}GB build_cache=${ma_build_gb}GB tmp_large=${host_tmp_large:-none} quote_tmp=${quote_upload_tmp:-none}"
+echo "stor_findings_observed:"
+JSON_PAYLOAD="$json_payload" python3 - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["JSON_PAYLOAD"])
+for row in data.get("stor_findings", []):
+    rid = row.get("id", "")
+    observed = str(bool(row.get("observed", False))).lower()
+    gaps = len(row.get("existing_gap_ids", []))
+    print(f"  - {rid}: observed={observed} gaps={gaps}")
+PY
