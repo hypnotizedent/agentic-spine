@@ -156,7 +156,28 @@ if [[ "${RESOLVED_MULTI_AGENT_WRITES:-direct}" == "proposal-only" ]]; then
   fi
 fi
 
-# ─── Guard 4: Capability metadata validation ───────────────
+# ─── Guard 4: Hook-fast AOF hygiene checks (staged only) ───
+# Keep pre-commit lightweight while catching common AOF drift early.
+
+if echo "$staged" | rg -q '^ops/bindings/.*\.ya?ml$'; then
+  schema_audit="ops/plugins/verify/bin/schema-conventions-audit"
+  if [[ ! -x "$schema_audit" ]]; then
+    echo "STOP: missing schema audit runner: $schema_audit" >&2
+    exit 1
+  fi
+  "$schema_audit" --mode staged
+fi
+
+if echo "$staged" | rg -q '^(mailroom/state/loop-scopes/.*\.scope\.md|docs/product/.*\.md)$'; then
+  d145_gate="surfaces/verify/d145-aof-decomposition-vocabulary-lock.sh"
+  if [[ ! -x "$d145_gate" ]]; then
+    echo "STOP: missing decomposition vocabulary gate: $d145_gate" >&2
+    exit 1
+  fi
+  "$d145_gate" --staged-only
+fi
+
+# ─── Guard 5: Capability metadata validation ───────────────
 # Main-branch commits are allowed. Worktrees are optional, not mandatory.
 # Drift gates (spine.verify) catch problems; the pre-commit hook stays lean.
 

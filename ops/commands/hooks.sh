@@ -22,12 +22,13 @@ ops hooks
 
 Usage:
   ops hooks status   Show whether hooks are installed for this repo
-  ops hooks install  Configure git to use .githooks/ and ensure pre-commit is executable
+  ops hooks install  Configure git to use .githooks/ and ensure required hooks are executable
 EOF
 }
 
 hooks_path="$(git -C "$REPO_ROOT" config --get core.hooksPath 2>/dev/null || true)"
-hook_file="$REPO_ROOT/.githooks/pre-commit"
+pre_hook="$REPO_ROOT/.githooks/pre-commit"
+commit_msg_hook="$REPO_ROOT/.githooks/commit-msg"
 
 case "$cmd" in
   status)
@@ -37,23 +38,37 @@ case "$cmd" in
     else
       echo "status: WARN (core.hooksPath is not .githooks)"
     fi
-    if [[ -x "$hook_file" ]]; then
-      echo "pre-commit: OK ($hook_file executable)"
+    if [[ -x "$pre_hook" ]]; then
+      echo "pre-commit: OK ($pre_hook executable)"
     else
-      echo "pre-commit: WARN ($hook_file missing or not executable)"
+      echo "pre-commit: WARN ($pre_hook missing or not executable)"
+    fi
+    if [[ -x "$commit_msg_hook" ]]; then
+      echo "commit-msg: OK ($commit_msg_hook executable)"
+    else
+      echo "commit-msg: WARN ($commit_msg_hook missing or not executable)"
     fi
     ;;
   install)
     mkdir -p "$REPO_ROOT/.githooks"
-    if [[ -f "$hook_file" ]]; then
-      chmod +x "$hook_file" || true
+    if [[ -f "$pre_hook" ]]; then
+      chmod +x "$pre_hook" || true
+    fi
+    if [[ -f "$commit_msg_hook" ]]; then
+      chmod +x "$commit_msg_hook" || true
     fi
     git -C "$REPO_ROOT" config core.hooksPath .githooks
     echo "Installed: core.hooksPath=.githooks"
-    if [[ -x "$hook_file" ]]; then
+    if [[ -x "$pre_hook" ]]; then
       echo "pre-commit: OK"
     else
-      echo "pre-commit: WARN (missing or not executable): $hook_file"
+      echo "pre-commit: WARN (missing or not executable): $pre_hook"
+      exit 1
+    fi
+    if [[ -x "$commit_msg_hook" ]]; then
+      echo "commit-msg: OK"
+    else
+      echo "commit-msg: WARN (missing or not executable): $commit_msg_hook"
       exit 1
     fi
     ;;

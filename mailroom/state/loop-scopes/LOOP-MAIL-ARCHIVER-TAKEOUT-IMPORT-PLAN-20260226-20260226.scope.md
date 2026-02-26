@@ -14,11 +14,11 @@ objective: Open focused execution loop for GAP-OP-922 with staged 200GB takeout 
 
 Open focused execution loop for GAP-OP-922 with staged 200GB takeout import and validation plan before mutation.
 
-## Phases
-- P1: Source attestation + checksum baseline
-- P2: Pilot chunk import with rollback guard
-- P3: Full staged import windows with SLO monitoring
-- P4: Post-import validation + archive hold decision
+## Steps
+- Step 1: Source attestation + checksum baseline
+- Step 2: Pilot chunk import with rollback guard
+- Step 3: Full staged import windows with SLO monitoring
+- Step 4: Post-import validation + archive hold decision
 
 ## Success Criteria
 - Staged plan includes commands, evidence gates, and abort criteria

@@ -17,11 +17,12 @@ usage() {
 schema-conventions-audit
 
 Usage:
-  schema-conventions-audit [--mode full|gate] [--json] [--report]
+  schema-conventions-audit [--mode full|gate|staged] [--json] [--report]
 
 Modes:
-  full  - audit all ops/bindings YAML files
-  gate  - audit changed binding files + always_validate_files from conventions contract
+  full    - audit all ops/bindings YAML files
+  gate    - audit changed binding files (staged/unstaged/untracked) + always_validate_files
+  staged  - audit staged binding files + always_validate_files (hook-friendly)
 USAGE
 }
 
@@ -50,7 +51,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$MODE" == "full" || "$MODE" == "gate" ]] || fail "--mode must be full or gate"
+[[ "$MODE" == "full" || "$MODE" == "gate" || "$MODE" == "staged" ]] || fail "--mode must be full, gate, or staged"
 
 command -v yq >/dev/null 2>&1 || fail "required tool missing: yq"
 command -v jq >/dev/null 2>&1 || fail "required tool missing: jq"
@@ -111,16 +112,26 @@ collect_changed_binding_files() {
 }
 
 mapfile -t CHANGED_FILES < <(collect_changed_binding_files)
+collect_staged_binding_files() {
+  git -C "$ROOT" diff --cached --name-only --diff-filter=ACMRT 2>/dev/null \
+    | rg '^ops/bindings/.*\.ya?ml$' | awk '!seen[$0]++'
+}
+
+mapfile -t STAGED_FILES < <(collect_staged_binding_files)
 
 declare -a CANDIDATES=()
 if [[ "$MODE" == "full" ]]; then
   while IFS= read -r f; do
     CANDIDATES+=("$f")
   done < <(find "$ROOT/ops/bindings" -type f \( -name '*.yaml' -o -name '*.yml' \) | sed "s|^$ROOT/||" | sort)
-else
+elif [[ "$MODE" == "gate" ]]; then
   mapfile -t ALWAYS_VALIDATE < <(yq e -r '.policy.always_validate_files[]?' "$CONTRACT")
   CANDIDATES+=("${ALWAYS_VALIDATE[@]}")
   CANDIDATES+=("${CHANGED_FILES[@]}")
+else
+  mapfile -t ALWAYS_VALIDATE < <(yq e -r '.policy.always_validate_files[]?' "$CONTRACT")
+  CANDIDATES+=("${ALWAYS_VALIDATE[@]}")
+  CANDIDATES+=("${STAGED_FILES[@]}")
 fi
 
 # unique + drop empties
@@ -165,7 +176,11 @@ audit_file() {
   mapfile -t PRESENT_KEYS < <(yq e '.. | select(tag == "!!map") | keys | .[]' "$abs" 2>/dev/null | awk 'NF && !seen[$0]++')
 
   local is_changed=0
-  if contains_in_array "$rel" "${CHANGED_FILES[@]}"; then
+  if [[ "$MODE" == "staged" ]]; then
+    if contains_in_array "$rel" "${STAGED_FILES[@]}"; then
+      is_changed=1
+    fi
+  elif contains_in_array "$rel" "${CHANGED_FILES[@]}"; then
     is_changed=1
   fi
 

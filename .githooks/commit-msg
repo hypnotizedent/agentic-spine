@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Spine commit-msg hook (versioned)
+#
+# Guard:
+# - D128 gate mutation provenance trailers when gate registry/topology files are staged.
+
+MSG_FILE="${1:-}"
+[[ -n "$MSG_FILE" && -f "$MSG_FILE" ]] || exit 0
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "${ROOT:-}" ]] || exit 0
+cd "$ROOT"
+
+POLICY_FILE="$ROOT/ops/bindings/d128-gate-mutation-policy.yaml"
+[[ -f "$POLICY_FILE" ]] || exit 0
+command -v yq >/dev/null 2>&1 || exit 0
+
+mapfile -t TARGET_FILES < <(yq e -r '.files[]?' "$POLICY_FILE")
+mapfile -t ALLOWED_CAPS < <(yq e -r '.allowed_capabilities[]?' "$POLICY_FILE")
+[[ "${#TARGET_FILES[@]}" -gt 0 ]] || exit 0
+
+mapfile -t STAGED_FILES < <(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null || true)
+[[ "${#STAGED_FILES[@]}" -gt 0 ]] || exit 0
+
+need_d128=0
+for target in "${TARGET_FILES[@]}"; do
+  for staged in "${STAGED_FILES[@]}"; do
+    if [[ "$staged" == "$target" ]]; then
+      need_d128=1
+      break 2
+    fi
+  done
+done
+[[ "$need_d128" -eq 1 ]] || exit 0
+
+msg="$(cat "$MSG_FILE")"
+msg="${msg//\\n/$'\n'}"
+
+missing=()
+grep -q '^Gate-Mutation:' <<<"$msg" || missing+=("Gate-Mutation")
+grep -q '^Gate-Capability:' <<<"$msg" || missing+=("Gate-Capability")
+grep -q '^Gate-Run-Key:' <<<"$msg" || missing+=("Gate-Run-Key")
+
+capability="$(sed -n 's/^Gate-Capability:[[:space:]]*//p' <<<"$msg" | head -n1 | xargs || true)"
+if [[ -n "$capability" ]]; then
+  allowed=0
+  for cap in "${ALLOWED_CAPS[@]}"; do
+    if [[ "$capability" == "$cap" ]]; then
+      allowed=1
+      break
+    fi
+  done
+  if [[ "$allowed" -ne 1 ]]; then
+    missing+=("Gate-Capability(not-allowed:${capability})")
+  fi
+fi
+
+run_key="$(sed -n 's/^Gate-Run-Key:[[:space:]]*//p' <<<"$msg" | head -n1 | xargs || true)"
+if grep -q '^Gate-Run-Key:' <<<"$msg" && [[ -z "$run_key" ]]; then
+  missing+=("Gate-Run-Key(empty)")
+fi
+
+if [[ "${#missing[@]}" -gt 0 ]]; then
+  echo "BLOCKED: D128 trailer policy for gate mutations." >&2
+  echo "Missing/invalid: ${missing[*]}" >&2
+  echo >&2
+  echo "Staged gate files:" >&2
+  for target in "${TARGET_FILES[@]}"; do
+    if printf '%s\n' "${STAGED_FILES[@]}" | grep -qx "$target"; then
+      echo "  - $target" >&2
+    fi
+  done
+  echo >&2
+  echo "Add commit trailers to this message:" >&2
+  echo "  Gate-Mutation: capability" >&2
+  echo "  Gate-Capability: <allowed capability>" >&2
+  echo "  Gate-Run-Key: <CAP-...>" >&2
+  echo >&2
+  echo "Allowed capabilities:" >&2
+  for cap in "${ALLOWED_CAPS[@]}"; do
+    echo "  - $cap" >&2
+  done
+  echo >&2
+  echo "Helper:" >&2
+  echo "  ./ops/plugins/verify/bin/gate-mutation-trailers --capability <allowed capability> --run-key <CAP-...>" >&2
+  exit 1
+fi
+
+exit 0
