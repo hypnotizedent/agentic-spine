@@ -44,6 +44,26 @@ _No governed tools registered. Media operations are read-only via API._
 
 On-demand via Claude Code session. No watchers, no cron, no schedulers (WORKBENCH_CONTRACT compliance). Spine may invoke via mailroom prompt if needed.
 
+## Library Organization (P6 — 2026-02-26)
+
+Import list intake is governed by `ops/bindings/media.import.policy.yaml`. Key rules:
+
+- **Tier system:** Every import list must have a tier tag (`tier-must-have`, `tier-nice-to-have`, `tier-fill-later`)
+- **Must-have:** Curated top-rated, awards, personal watchlist. Root: `/movies`, monitored: true
+- **Nice-to-have:** Trending, popular, genre best-of with rating floors. Root: `/movies`, monitored: true
+- **Fill-later:** Broad studio/genre lists, stubs only. Root: `/movies-archive`, monitored: false
+- **Banned list types:** TMDb keyword/company lists (firehose with no rating floor)
+- **Archive split:** `/movies-archive/` root folder in Radarr, "Movies Archive" library in Jellyfin (admin-only)
+- **Drift gate D240** prevents regression — enabled lists must have tier tags, banned types blocked
+
+### Jellyfin Plugins
+
+| Plugin | Purpose | Repository |
+|--------|---------|------------|
+| Home Screen Sections | Netflix-style home screen rows | IAmParadox manifest |
+| Collection Sections | Collection-driven library browsing | IAmParadox manifest |
+| Auto Collections | Automatic genre/decade/studio collections | KeksBombe manifest |
+
 ## Drift Gates
 
 | Gate | Name | Scope |
@@ -51,6 +71,7 @@ On-demand via Claude Code session. No watchers, no cron, no schedulers (WORKBENC
 | D106-D110 | Media infra hygiene | Port collision, NFS mounts, health, compose parity, HA overlap |
 | D191-D192 | Content ledger/snapshot | Observed-to-ledger parity, snapshot freshness |
 | D220 | Recyclarr language enforcement | Language CFs (Not English, Not Original) in all *arr sections |
+| D240 | Import list policy lock | Tier tags, banned list types, archive routing |
 
 ## Quality Profile Governance (P5 — 2026-02-24)
 
