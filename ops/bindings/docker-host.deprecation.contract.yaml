@@ -1,0 +1,114 @@
+# Status: authoritative
+# Last verified: 2026-02-26
+
+version: 1
+updated_at: "2026-02-26"
+owner: "@ronny"
+scope: docker-host-safe-deprecation
+loop: LOOP-SPINE-GOVERNANCE-NORMALIZATION-SEQUENCE-20260226-20260226
+
+host:
+  vmid: "200"
+  hostname: docker-host
+  role: legacy-production
+  policy_mode: docs-first
+  objective: >
+    Eliminate non-authoritative docker-host fragments that create agent confusion
+    while deferring Mint-OS runtime decommission work to the Mint lane.
+
+authorities:
+  vm_lifecycle: ops/bindings/vm.lifecycle.yaml
+  stack_targets: ops/bindings/docker.compose.targets.yaml
+  service_registry: docs/governance/SERVICE_REGISTRY.yaml
+  legacy_policy: docs/governance/LEGACY_DEPRECATION.md
+  sequence_contract: ops/bindings/spine.governance.sequence.contract.yaml
+
+action_classes:
+  safe_cleanup_now:
+    description: "No active runtime dependency expected; remove after standard receipt capture."
+    items:
+      - id: orphaned-volumes-pihole-secrets
+        scope:
+          - pihole_pihole_config
+          - pihole_pihole_dnsmasq
+          - secrets_pg_data
+          - secrets_redis_data
+      - id: zombie-stack-dirs-migrated
+        scope:
+          - stacks/finance/
+          - stacks/mail-archiver/
+          - stacks/pihole/
+          - stacks/cloudflared/
+          - stacks/secrets/
+      - id: stale-cron-entries
+        scope:
+          - backup-finance.sh
+          - backup-infrastructure.sh
+          - backup-media-configs.sh
+          - check-secret-expiry.sh
+      - id: deprecated-script
+        scope:
+          - ~/simplefin-daily-sync.sh
+
+  verify_first:
+    description: "Requires explicit dependency check and verification receipt before cleanup."
+    items:
+      - id: sync-to-synology-cron
+        required_receipt: "dependency_proven_unused"
+      - id: mcpjungle-stack-dir
+        required_receipt: "runtime_not_authoritative"
+      - id: mint-os-data-stack-dir
+        required_receipt: "runtime_not_authoritative"
+      - id: infrastructure-stack-dir
+        required_receipt: "runtime_not_authoritative"
+      - id: github-actions-runner-legacy-repo
+        required_receipt: "repo_runtime_retired_or_repointed"
+
+  defer_mint_lane:
+    description: "Do not mutate in this contract; owned by Mint loops/agents."
+    items:
+      - id: mint-os-frontends-and-api
+        scope:
+          - mint-os-admin
+          - mint-os-customer
+          - mint-os-production
+          - mint-os-kanban
+          - mint-os-dashboard-api
+          - mint-os-postgres
+          - mint-os-redis
+      - id: mint-modules-duplicates
+        scope:
+          - order-intake
+          - quote-page
+          - files-api
+      - id: minio-and-mint-db-backup-jobs
+        scope:
+          - minio
+          - backup-mint-minio.sh
+          - backup-mint-postgres.sh
+          - supplier-sync
+          - mint-os-watchdog
+
+agent_guardrails:
+  - "No runtime stop/remove actions under defer_mint_lane in this loop."
+  - "Every cleanup action needs before/after status receipt."
+  - "Run scoped verify after each cleanup batch."
+  - "If authority is ambiguous, classify as verify_first and do not delete."
+
+canonical_commands:
+  status:
+    - ./bin/ops cap run infra.docker_host.status
+    - ./bin/ops cap run services.health.run
+    - ./bin/ops cap run communications.alerts.queue.status
+  verify:
+    - ./bin/ops cap run verify.route.recommend
+    - ./bin/ops cap run verify.pack.run infra
+  break_glass:
+    - echo "yes" | ./bin/ops cap run communications.alerts.flush --limit 10
+
+evidence_requirements:
+  must_include:
+    - capability_run_key
+    - receipt_path
+    - before_after_snapshot
+    - linked_gap_id

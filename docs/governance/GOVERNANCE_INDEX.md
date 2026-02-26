@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-15
+last_verified: 2026-02-26
 scope: governance-guide
 github_issue: "#541"
 ---
@@ -124,6 +124,8 @@ Commands:
 | `POST_GAP_OPERATING_MODEL.md` | Canonical stabilization contract, lifecycle templates, ownership model, and 30/60/90 roadmap |
 | `BUILD_MODE_CHECKLIST.md` | Operator stop-gated checklist for predictable build-mode execution |
 | `ONBOARDING_PLAYBOOK.md` | Standard onboarding workflow for VM/agent/capability/tool/surface changes |
+| `SPINE_GOVERNANCE_NORMALIZATION_SEQUENCE.md` | Single canonical sequence across VM/stack/service/routing/health/queue/deprecation governance |
+| `DOCKER_HOST_DEPRECATION_RUNBOOK.md` | Safe docker-host legacy fragment deprecation flow with explicit Mint runtime deferral |
 | `GAP_LIFECYCLE.md` | Gap registry lifecycle, mutation capabilities, claim semantics, D75 lock |
 | `RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md` | Cross-repo operating contract for stable parallel execution across spine/workbench/mint-modules |
 | `WORKBENCH_SHARE_PROTOCOL.md` | Governance for publishing curated workbench content to GitHub share channel |
