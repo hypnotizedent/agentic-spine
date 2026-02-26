@@ -29,12 +29,12 @@ Safely migrate the mail-archiver service from finance-stack (VM 211) to communic
 - GAP-OP-924: Mail-archiver backup/restore contract missing (medium)
 - GAP-OP-925: Mail-archiver storage retention/lifecycle governance missing (medium)
 
-## Execution Phases (planned, not started)
+## Execution Phases
 
 | Phase | Action | Status |
 |-------|--------|--------|
 | P0 | Register gaps + loop (capture-only) | DONE |
-| P1 | Control-plane bindings (contracts, vm.lifecycle, compose targets) | NOT STARTED |
+| P1 | Control-plane bindings (contracts, vm.lifecycle, compose targets) | DONE |
 | P2 | Backup + export from VM 211 (pg_dump, data export, count verification) | NOT STARTED |
 | P3 | Shadow deploy on VM 214 (compose, restore, parity check) | NOT STARTED |
 | P4 | Gmail mbox import (build capability, import 200GB, verify, delete source) | NOT STARTED |
@@ -42,10 +42,14 @@ Safely migrate the mail-archiver service from finance-stack (VM 211) to communic
 | P6 | Traffic cutover (cloudflared/DNS, startup sequencing update) | NOT STARTED |
 | P7 | Legacy cleanup (stop on VM 211, update registries, remove from finance probes) | NOT STARTED |
 
-## Unknowns / Blockers (must resolve before P1)
+## Unknowns / Blockers
 
-- **BLOCKER-1**: Exact mail-archiver software identity (MailPiler? Stalwart archive? Other?) — determines mbox import method, API surface, and compose config
-- **BLOCKER-2**: Exact path of 200GB Gmail takeout .mbox file on docker-host (VM 200) — needed for P4 data planning
+- **BLOCKER-1 [RESOLVED 2026-02-25]**: Exact mail-archiver software identity locked.
+  - Image: `s1t5/mailarchiver:latest`
+  - Entrypoint: `dotnet MailArchiver.dll`
+- **BLOCKER-2 [RESOLVED 2026-02-25]**: Exact Gmail takeout source path locked.
+  - Path: `/mnt/docker/mail-archive-import/All-mail.mbox`
+  - Size: `189440618235` bytes
 - **BLOCKER-3**: Email account list for archiver linkage — which Gmail addresses, which iCloud addresses, which Microsoft/Outlook addresses, which Stalwart spine.ronny.works mailboxes (ops@, alerts@, noreply@?)
 - **BLOCKER-4**: Retention policy decision — keep all email forever? Prune after N years? Per-account policies?
 - **BLOCKER-5**: Backup cadence decision — daily vzdump? Postgres pg_dump cron? Both? Frequency?
