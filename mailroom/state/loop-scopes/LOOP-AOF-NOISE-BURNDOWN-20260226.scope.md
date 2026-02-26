@@ -1,5 +1,6 @@
 ---
-status: active
+loop_id: LOOP-AOF-NOISE-BURNDOWN-20260226
+status: closed
 owner: "@ronny"
 created: "2026-02-26"
 priority: high
@@ -15,10 +16,10 @@ to 21/21 PASS, reducing cross-terminal false-red noise.
 
 ## Linked Gaps
 
-- GAP-OP-936: pricing tests pre-commit (parked, no natural parent)
-- GAP-PEK-001: bootstrap capabilities not implemented (parked, deferred)
-- GAP-PEK-002: operator health index not built (parked, deferred)
-- GAP-OP-966: inconsistent discovered_by naming (orphan from closed media MCP loop)
+- GAP-OP-936: pricing auth/test mismatch in lane evidence (fixed)
+- GAP-PEK-001: bootstrap capabilities deferred with accepted governance disposition (closed)
+- GAP-PEK-002: operator health index deferred with accepted governance disposition (closed)
+- GAP-OP-966: historical discovered_by naming backfill deferred with accepted disposition (closed)
 
 ## Steps
 
@@ -34,8 +35,14 @@ to 21/21 PASS, reducing cross-terminal false-red noise.
 - D59 cross-registry: PASS
 - D85 gate registry parity: PASS
 - Orphaned gaps: 0 (CAP-20260226-012907__gaps.status__Rq74m55094)
+- Pricing auth probe (no key): 401 PASS (CAP-20260226-021836__secrets.exec__Rn0l280137)
+- Pricing auth probe (with key): 200 PASS (CAP-20260226-021904__secrets.exec__Ri9sx91171)
+- Mint runtime proof: PASS (CAP-20260226-021800__mint.runtime.proof__Rqm8h71069)
+- Loop progress 4/4 complete (CAP-20260226-022006__loops.progress__Rsz2p12703)
 
 ## Notes
 
-Loop remains active — 4 linked gaps still open (all parked/deferred).
-Primary objective achieved: AOF pack restored to 21/21 PASS.
+Loop closed after resolving all 4 linked gaps:
+
+- `GAP-OP-936` fixed via governed pricing auth reconciliation evidence.
+- `GAP-PEK-001`, `GAP-PEK-002`, and `GAP-OP-966` closed as explicit governance-backed defer dispositions (backlog curation, not implementation).
