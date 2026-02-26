@@ -1,0 +1,233 @@
+# Infrastructure Storage Placement Policy (SSOT)
+# Non-secret. Spine-native.
+# Status: authoritative
+# Last verified: 2026-02-26
+# Created: LOOP-STORAGE-BOOT-DRIVE-AUDIT-20260226
+#
+# Authority: This binding declares what storage tier each VM's persistent
+# data should use. The VM creation contract references this binding in
+# the PROVISION phase to determine data disk requirements.
+#
+# Storage tiers:
+#   boot-only      — No separate data disk needed (stateless or ephemeral workloads)
+#   tank-docker    — ZFS dataset on pve:tank/docker (NFS export or zvol)
+#   tank-vms       — ZFS zvol on pve:tank/vms (passed through as virtio disk)
+#   nfs-media      — NFS mount from pve media pool (read-only or read-write)
+#   local-ext4     — /opt/appdata on boot disk for SQLite (NFS-incompatible; intentional)
+#
+# Boot drive threshold: 80% usage triggers alert. >90% is critical.
+
+version: 1
+updated: "2026-02-26"
+owner: "@ronny"
+
+# What MUST be on boot drives (acceptable):
+boot_drive_acceptable:
+  - os_kernel_bootloader
+  - docker_engine_binary
+  - docker_image_layers        # read-mostly, cached
+  - compose_files_and_env      # small config files
+  - opt_appdata_sqlite          # NFS-incompatible, intentional
+  - ephemeral_temp_data
+
+# What MUST NOT be on boot drives (violations):
+boot_drive_violations:
+  - postgresql_data_directories
+  - redis_persistence_files
+  - document_storage            # paperless media/consume/export
+  - vector_databases            # qdrant
+  - git_repositories            # gitea
+  - object_storage              # minio
+  - timeseries_databases        # prometheus tsdb
+  - log_ingestion_data          # loki
+  - mail_server_data            # stalwart, mail-archiver
+  - unbounded_growth_paths      # anything that grows without limit
+
+# Boot drive usage thresholds
+thresholds:
+  boot_usage_warn_pct: 80
+  boot_usage_critical_pct: 90
+
+# Per-VM storage placement declarations
+# status: current = what IS happening, target = what SHOULD happen
+vm_storage:
+  docker-host:
+    vmid: 200
+    boot_disk_gb: 300
+    current_storage_tier: tank-docker
+    target_storage_tier: tank-docker
+    data_mount: /mnt/docker
+    data_source: "pve:tank/docker (NFS)"
+    status: compliant
+    notes: "Legacy VM. Data on NFS /mnt/docker/mint-os-data/. Legacy docker volumes for migrated services."
+
+  automation-stack:
+    vmid: 202
+    boot_disk_gb: 100
+    current_storage_tier: tank-vms
+    target_storage_tier: tank-vms
+    data_mount: null
+    data_source: "pve:tank/vms/vm-202-disk-0 (ZFS zvol)"
+    status: partial
+    notes: "Boot disk is ZFS-backed zvol (not local-lvm). Docker volumes still on boot filesystem. Consider data disk for n8n/postgres."
+    gap: GAP-OP-942
+
+  immich:
+    vmid: 203
+    boot_disk_gb: 100
+    current_storage_tier: tank-docker
+    target_storage_tier: tank-docker
+    data_mount: null
+    data_source: "pve:tank/immich (ZFS, 2.6TB)"
+    status: compliant
+    notes: "Photo library on tank/immich ZFS dataset. Boot disk on local-lvm but data is properly separated."
+
+  infra-core:
+    vmid: 204
+    boot_disk_gb: 50
+    current_storage_tier: boot-only
+    target_storage_tier: tank-vms
+    data_mount: null
+    data_source: "none (ALL on /var/lib/docker/volumes/ on boot)"
+    status: violation
+    notes: "CRITICAL: Infisical Postgres, Authentik Postgres/Redis, Vaultwarden DB, Pi-hole — all on boot. Needs dedicated data disk."
+    gap: GAP-OP-942
+
+  observability:
+    vmid: 205
+    boot_disk_gb: 50
+    current_storage_tier: boot-only
+    target_storage_tier: tank-vms
+    data_mount: null
+    data_source: "none (ALL on /var/lib/docker/volumes/ on boot)"
+    status: violation
+    notes: "Prometheus TSDB, Grafana dashboards, Loki ingestion — all on boot. Loki grows unbounded."
+    gap: GAP-OP-942
+
+  dev-tools:
+    vmid: 206
+    boot_disk_gb: 50
+    current_storage_tier: boot-only
+    target_storage_tier: tank-vms
+    data_mount: null
+    data_source: "none (ALL on /var/lib/docker/volumes/ on boot)"
+    status: violation
+    notes: "Gitea repos + PostgreSQL — all on boot."
+    gap: GAP-OP-942
+
+  ai-consolidation:
+    vmid: 207
+    boot_disk_gb: 200
+    current_storage_tier: boot-only
+    target_storage_tier: tank-vms
+    data_mount: null
+    data_source: "none (ALL on /var/lib/docker/volumes/ on boot)"
+    status: violation
+    notes: "Qdrant vectors + AnythingLLM — all on boot. 200GB boot is larger but still wrong tier."
+    gap: GAP-OP-942
+
+  download-stack:
+    vmid: 209
+    boot_disk_gb: 50
+    current_storage_tier: tank-docker
+    target_storage_tier: tank-docker
+    data_mount: /mnt/docker
+    data_source: "pve:tank/docker/download-stack (NFS)"
+    nfs_mounts:
+      - path: /mnt/docker
+        source: "192.168.1.184:/tank/docker/download-stack"
+        mode: rw
+      - path: /mnt/media
+        source: "192.168.1.184:/media"
+        mode: rw
+    status: compliant
+    notes: "Configs on NFS. /opt/appdata for SQLite (intentional). Media on NFS."
+
+  streaming-stack:
+    vmid: 210
+    boot_disk_gb: 50
+    current_storage_tier: tank-docker
+    target_storage_tier: tank-docker
+    data_mount: /mnt/docker
+    data_source: "pve:tank/docker/streaming-stack (NFS)"
+    nfs_mounts:
+      - path: /mnt/docker
+        source: "192.168.1.184:/tank/docker/streaming-stack"
+        mode: rw
+      - path: /mnt/media
+        source: "192.168.1.184:/media"
+        mode: ro
+    status: compliant
+    notes: "Configs on NFS (RW), media on NFS (RO). Docker images bloating boot to 54%."
+    gap: GAP-OP-947
+
+  finance-stack:
+    vmid: 211
+    boot_disk_gb: 96
+    current_storage_tier: boot-only
+    target_storage_tier: tank-vms
+    data_mount: null
+    data_source: "none (ALL on /opt/stacks/finance/data/ on boot)"
+    status: violation
+    notes: "CRITICAL: 75% boot usage. Postgres, Redis, Paperless, Firefly, Ghostfolio — all on boot. Highest priority remediation."
+    gap: GAP-OP-941
+
+  mint-data:
+    vmid: 212
+    boot_disk_gb: 50
+    current_storage_tier: boot-only
+    target_storage_tier: tank-vms
+    data_mount: null
+    data_source: "none (PostgreSQL + MinIO + Redis on boot)"
+    status: violation
+    notes: "PostgreSQL 16, MinIO object storage, Redis — all on boot. MinIO grows unbounded."
+    gap: GAP-OP-942
+
+  mint-apps:
+    vmid: 213
+    boot_disk_gb: 50
+    current_storage_tier: boot-only
+    target_storage_tier: boot-only
+    data_mount: null
+    data_source: "none (stateless containers)"
+    status: compliant
+    notes: "Stateless containers, no persistent mounts. Docker image bloat only concern."
+    gap: GAP-OP-947
+
+  communications-stack:
+    vmid: 214
+    boot_disk_gb: 50
+    current_storage_tier: tank-vms
+    target_storage_tier: tank-vms
+    data_mount: null
+    data_source: "pve:tank/vms/vm-214-disk-0 (ZFS zvol, 1.06TB)"
+    status: partial
+    notes: "Boot is ZFS zvol (not local-lvm). Stalwart on named volume. Mail-archiver needs /srv/mail-archiver non-boot path."
+    gap: GAP-OP-940
+
+# Remediation priority (by VM, ordered by urgency):
+remediation_priority:
+  - vmid: 211
+    hostname: finance-stack
+    urgency: critical
+    action: "Attach ZFS zvol from tank/vms, migrate /opt/stacks/finance/data/ to dedicated disk"
+  - vmid: 204
+    hostname: infra-core
+    urgency: high
+    action: "Attach ZFS zvol, move /var/lib/docker/volumes/ (Infisical/Authentik/VW/PiHole) to data disk"
+  - vmid: 205
+    hostname: observability
+    urgency: high
+    action: "Attach ZFS zvol, move Prometheus TSDB + Loki data to data disk"
+  - vmid: 212
+    hostname: mint-data
+    urgency: high
+    action: "Attach ZFS zvol, move PostgreSQL + MinIO + Redis to data disk"
+  - vmid: 206
+    hostname: dev-tools
+    urgency: medium
+    action: "Attach ZFS zvol, move Gitea repos + PostgreSQL to data disk"
+  - vmid: 207
+    hostname: ai-consolidation
+    urgency: medium
+    action: "Attach ZFS zvol, move Qdrant vectors to data disk"
