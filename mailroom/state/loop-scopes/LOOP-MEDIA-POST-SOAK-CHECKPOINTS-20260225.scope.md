@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MEDIA-POST-SOAK-CHECKPOINTS-20260225
 created: 2026-02-25
-status: active
+status: closed
 owner: "@ronny"
 scope: media
 priority: low
