@@ -12,7 +12,7 @@
 
 - **Agent ID:** media-agent
 - **Domain:** media (download-stack + streaming-stack)
-- **Implementation:** `~/code/workbench/agents/media/` (pending — see loop)
+- **Implementation:** `~/code/workbench/agents/media/` (active)
 - **Registry:** `ops/bindings/agents.registry.yaml`
 
 ## Owns (Application Layer)
