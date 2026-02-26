@@ -21,6 +21,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 CONTRACT="$SPINE_ROOT/ops/bindings/mint.module.sequence.contract.yaml"
+PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
 MINT_MODULES_ROOT="${MINT_MODULES_ROOT:-$HOME/code/mint-modules}"
 
 STRICT=0
@@ -33,6 +35,8 @@ stop(){ echo "STOP (2): $*" >&2; exit 2; }
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v rg >/dev/null 2>&1 || stop "missing dependency: rg"
 [[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+[[ -f "$PROBE_BINDING" ]] || stop "missing binding: $PROBE_BINDING"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
 
 QUEUE_FILE="$(yq -r '.queue_contract.file // ""' "$CONTRACT")"
 [[ -n "$QUEUE_FILE" && "$QUEUE_FILE" != "null" ]] || stop "queue_contract.file missing in contract"
@@ -68,8 +72,20 @@ overall_red=0
 echo "mint.live.baseline.status"
 echo "contract: $CONTRACT"
 echo "queue: $QUEUE_FILE"
+echo "probe.binding: $PROBE_BINDING"
 echo
 printf "%-24s %-8s %s\n" "CHECK" "STATE" "DETAIL"
+
+app_target_id="$(yq -r '.targets.app_plane.ssh_target // ""' "$PROBE_BINDING")"
+data_target_id="$(yq -r '.targets.data_plane.ssh_target // ""' "$PROBE_BINDING")"
+app_host="$(yq -r ".ssh.targets[] | select(.id == \"$app_target_id\") | .host // \"\"" "$SSH_BINDING" | head -n1)"
+data_host="$(yq -r ".ssh.targets[] | select(.id == \"$data_target_id\") | .host // \"\"" "$SSH_BINDING" | head -n1)"
+if [[ -z "$app_target_id" || "$app_target_id" == "null" || -z "$data_target_id" || "$data_target_id" == "null" || -z "$app_host" || "$app_host" == "null" || -z "$data_host" || "$data_host" == "null" ]]; then
+  report_row "probe_target_green" "RED" "invalid mint.probe.targets or ssh target mapping"
+  overall_red=1
+else
+  report_row "probe_target_green" "GREEN" "app=${app_target_id}@${app_host} data=${data_target_id}@${data_host}"
+fi
 
 # 1) live_health_green
 tmp_live="$(mktemp)"
@@ -138,7 +154,7 @@ fi
 
 echo
 if [[ "$overall_red" -eq 0 ]]; then
-  echo "status: OK (live modules baseline is green; auth can be considered)"
+  echo "status: OK (live modules baseline is green; auth remains operator-deferred until explicitly unlocked)"
   exit 0
 fi
 

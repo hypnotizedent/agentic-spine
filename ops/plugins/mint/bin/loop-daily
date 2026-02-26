@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# loop-daily - Run the mint-agent daily operating loop
+# loop-daily - Run the Mint daily evidence loop with closeout-ready run keys.
 #
-# Executes the golden loop sequence:
-#   1. agent.route mint-modules
-#   2. verify.pack.run mint-agent
-#   3. mint.modules.health
-#   4. mint.migrate.dryrun
+# Sequence:
+#   1) mint.modules.health
+#   2) mint.deploy.status
+#   3) mint.runtime.proof
+#   4) mint.live.baseline.status
+#   5) verify.pack.run mint
+#   6) verify.core.run
+#   7) loops.status
+#   8) gaps.status
 #
 # Read-only. No mutations.
 # STOP=2 on preconditions.
 #
 # Usage:
-#   loop-daily              # run full loop
-#   loop-daily --summary    # one-line summary only
+#   loop-daily
+#   loop-daily --summary
 
 set -euo pipefail
 
@@ -21,13 +25,19 @@ SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 OPS="$SPINE_ROOT/bin/ops"
 
 SUMMARY_ONLY=false
-[[ "${1:-}" == "--summary" ]] && SUMMARY_ONLY=true
+for arg in "$@"; do
+  case "$arg" in
+    --summary) SUMMARY_ONLY=true ;;
+    --) ;;
+  esac
+done
 
 [[ -x "$OPS" ]] || { echo "STOP (2): ops entrypoint not found: $OPS" >&2; exit 2; }
+command -v rg >/dev/null 2>&1 || { echo "STOP (2): rg not found" >&2; exit 2; }
 
 echo "mint.loop.daily"
 echo "started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo ""
+echo
 
 pass=0
 fail=0
@@ -37,7 +47,7 @@ run_step() {
   local name="$1"
   shift
   local cap_args=("$@")
-  local rc
+  local rc output run_key detail
 
   if [[ "$SUMMARY_ONLY" == "false" ]]; then
     echo "--- $name ---"
@@ -48,40 +58,46 @@ run_step() {
   rc=$?
   set -e
 
+  run_key="$(printf "%s\n" "$output" | rg '^Run Key:' | tail -n1 | awk '{print $3}' || true)"
+  [[ -z "$run_key" ]] && run_key="unknown"
+  detail="$(printf "%s\n" "$output" | rg '^(status:|summary:)' | tail -n1 || true)"
+  [[ -z "$detail" ]] && detail="status: unknown"
+
   if [[ "$rc" -eq 0 ]]; then
     pass=$((pass + 1))
-    results+=("$name: PASS")
-    if [[ "$SUMMARY_ONLY" == "false" ]]; then
-      echo "$output" | tail -5
-      echo ""
-    fi
+    results+=("$name|PASS|$run_key|$detail")
   else
     fail=$((fail + 1))
-    results+=("$name: FAIL")
-    if [[ "$SUMMARY_ONLY" == "false" ]]; then
-      echo "$output" | tail -10
-      echo ""
-    fi
+    results+=("$name|FAIL|$run_key|$detail")
+  fi
+
+  if [[ "$SUMMARY_ONLY" == "false" ]]; then
+    printf "%s\n" "$output" | tail -20
+    echo
   fi
 }
 
-run_step "agent.route" agent.route mint-modules
-run_step "verify.pack.run" verify.pack.run mint-agent
 run_step "mint.modules.health" mint.modules.health
-run_step "mint.migrate.dryrun" mint.migrate.dryrun
+run_step "mint.deploy.status" mint.deploy.status
+run_step "mint.runtime.proof" mint.runtime.proof
+run_step "mint.live.baseline.status" mint.live.baseline.status
+run_step "verify.pack.run mint" verify.pack.run mint
+run_step "verify.core.run" verify.core.run
+run_step "loops.status" loops.status
+run_step "gaps.status" gaps.status
 
 echo "=== SUMMARY ==="
-for r in "${results[@]}"; do
-  echo "  $r"
+printf "%-28s %-6s %-44s %s\n" "STEP" "STATE" "RUN_KEY" "DETAIL"
+for row in "${results[@]}"; do
+  IFS='|' read -r step state key detail <<< "$row"
+  printf "%-28s %-6s %-44s %s\n" "$step" "$state" "$key" "$detail"
 done
-echo ""
+echo
 
 total=$((pass + fail))
 echo "result: ${pass}/${total} passed"
-
 if [[ "$fail" -gt 0 ]]; then
   echo "status: FAIL"
   exit 1
 fi
-
 echo "status: OK"

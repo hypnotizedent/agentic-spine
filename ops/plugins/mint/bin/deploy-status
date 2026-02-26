@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
 COMPOSE_BINDING="$SPINE_ROOT/ops/bindings/docker.compose.targets.yaml"
+PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
@@ -25,14 +26,21 @@ command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
 [[ -f "$COMPOSE_BINDING" ]] || stop "missing binding: $COMPOSE_BINDING"
+[[ -f "$PROBE_BINDING" ]] || stop "missing binding: $PROBE_BINDING"
 
 FILTER="${1:-}"
 
 SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
 
-TARGETS=("mint-data" "mint-apps")
+DATA_TARGET_ID="$(yq -r '.targets.data_plane.ssh_target // ""' "$PROBE_BINDING")"
+APP_TARGET_ID="$(yq -r '.targets.app_plane.ssh_target // ""' "$PROBE_BINDING")"
+[[ -n "$DATA_TARGET_ID" && "$DATA_TARGET_ID" != "null" ]] || stop "missing data_plane.ssh_target in $PROBE_BINDING"
+[[ -n "$APP_TARGET_ID" && "$APP_TARGET_ID" != "null" ]] || stop "missing app_plane.ssh_target in $PROBE_BINDING"
+TARGETS=("$DATA_TARGET_ID" "$APP_TARGET_ID")
 
 echo "mint.deploy.status"
+echo "probe.binding: $PROBE_BINDING"
+echo "targets: data=$DATA_TARGET_ID app=$APP_TARGET_ID"
 echo
 
 total=0
