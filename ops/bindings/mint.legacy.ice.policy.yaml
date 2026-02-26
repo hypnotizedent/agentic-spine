@@ -1,0 +1,86 @@
+version: v1
+status: active
+owner: "@ronny"
+last_verified: 2026-02-26
+scope: mint-legacy-data-ice-guard-policy
+
+mode:
+  default_policy: report
+  active_wave: wave-13-legacy-data-ice-observe
+  enforce_enabled: false
+  no_runtime_mutation: true
+
+authority_contract:
+  expected_data_target: mint-data
+  expected_app_target: mint-apps
+  expected_data_vmid: 212
+  expected_app_vmid: 213
+  live_runtime_authority_targets:
+    - mint-data
+    - mint-apps
+  live_runtime_vm_ids:
+    - 212
+    - 213
+  legacy_hold_target: docker-host
+  legacy_hold_vm_id: 200
+
+legacy_path_contract:
+  forbidden_runtime_roots:
+    - /Users/ronnyworks/ronny-ops
+    - ~/ronny-ops
+    - $HOME/ronny-ops
+
+legacy_ingress_hold_contract:
+  compose_target: docker-host
+  legacy_module_stack_name: mint-modules-prod
+  required_stack_flags:
+    legacy_only: true
+    authoritative_runtime: false
+  legacy_health_endpoints_must_be_disabled:
+    - mint-os-api
+    - minio
+    - files-api
+    - quote-page
+
+legacy_data_ice_contract:
+  vm_lifecycle_id: 200
+  required_vm_role: legacy-production
+  required_vm_status: active
+  required_services:
+    - mint-os-postgres
+    - mint-os-redis
+    - minio
+  required_backup_targets:
+    - vm-200-docker-host-primary
+    - vm-200-docker-host-offsite
+
+governance_linkage:
+  findings:
+    - id: LEGACY-ICE-001
+      title: mint authority drift to legacy runtime
+      severity: high
+      existing_gap_ids: [GAP-OP-962]
+      existing_loop_ids: [LOOP-DOCKER-HOST-SAFE-DEPRECATION-BATCH-20260226-20260226]
+    - id: LEGACY-ICE-002
+      title: legacy ronny-ops path references in active mint surfaces
+      severity: high
+      existing_gap_ids: [GAP-OP-962]
+      existing_loop_ids: [LOOP-DOCKER-HOST-SAFE-DEPRECATION-BATCH-20260226-20260226]
+    - id: LEGACY-ICE-003
+      title: ingress still treats legacy app surfaces as active runtime
+      severity: medium
+      existing_gap_ids: [GAP-OP-967]
+      existing_loop_ids: [LOOP-MAIL-ARCHIVER-COMMS-MIGRATION-20260225]
+    - id: LEGACY-ICE-004
+      title: legacy data services not preserved as explicit ice authority
+      severity: medium
+      existing_gap_ids: [GAP-OP-968]
+      existing_loop_ids: [LOOP-OBSERVABILITY-POST-CUTOVER-GOV-SEAL-20260226]
+
+promotion_to_enforce:
+  prerequisites:
+    - "Three consecutive report runs with no unexpected findings on D241-D244"
+    - "cloudflare.domain_routing.diff resolved or explicitly waived for legacy hold routes"
+    - "All LEGACY-ICE findings mapped to open/fixed gaps and active loops"
+  rollback_trigger:
+    - "Any enforce failure on D241-D244 after promotion"
