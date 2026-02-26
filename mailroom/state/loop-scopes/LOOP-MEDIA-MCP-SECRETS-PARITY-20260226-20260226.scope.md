@@ -1,0 +1,84 @@
+---
+loop_id: LOOP-MEDIA-MCP-SECRETS-PARITY-20260226-20260226
+created: 2026-02-26
+status: closed
+owner: "@ronny"
+scope: media
+priority: high
+objective: Close GAP-OP-963/964/965 (media MCP tool wrappers, parity enforcement, secrets normalization) and fix D136 parent_loop linkage for media gaps 963-966
+---
+
+# Loop Scope: LOOP-MEDIA-MCP-SECRETS-PARITY-20260226-20260226
+
+## Objective
+
+Close GAP-OP-963/964/965 (media MCP tool wrappers, parity enforcement, secrets normalization) and fix D136 parent_loop linkage for media gaps 963-966
+
+## Phases
+- P0: Governance setup and gap analysis
+- P1: Sync MCPJungle mirror (GAP-963)
+- P2: Add parity enforcement (GAP-964)
+- P3: Normalize secrets pattern (GAP-965)
+- P4: Fix D136 linkage and close gaps
+- P5: qB revalidation and verification
+
+## Success Criteria
+- GAP-OP-963/964/965 closed with evidence
+- D136 required_missing reduced by 4
+- qB auth and route posture verified
+
+## Definition Of Done
+- All verify packs pass, governed evidence recorded, loop closed
+
+## Completion Record
+
+- **Closed:** 2026-02-26
+
+### Governed Run Keys
+
+| Action | Run Key | Evidence |
+|--------|---------|----------|
+| Session start | `CAP-20260226-005814__session.start__Rj4vj89086` | Receipted |
+| Loop create | `CAP-20260226-010249__loops.create__Ry5r325024` | Receipted |
+| qB auth probe (PASS) | `CAP-20260226-011125__secrets.exec__Rgl3b2467` | Receipted |
+| verify.pack.run media (16/16) | `CAP-20260226-011142__verify.pack.run__Roz8p7779` | Receipted |
+| verify.pack.run secrets (11/11) | `CAP-20260226-011156__verify.pack.run__Rcuot10449` | Receipted |
+| verify.pack.run aof | `CAP-20260226-011211__verify.pack.run__Rp8eh16812` | Receipted (D136: 11->7, expected) |
+
+### Ungoverned Actions (no capability run key)
+
+| Action | Method | Justification |
+|--------|--------|---------------|
+| `docker restart qbittorrent` | Raw SSH to download-stack | No single-container restart capability; cleared in-memory anti-brute-force IP ban. Correctness verified by subsequent governed `secrets.exec` probe PASS. |
+
+### Gap Lifecycle
+
+| Gap | Status | Fix |
+|-----|--------|-----|
+| GAP-OP-963 | FIXED | MCPJungle mirror synced: 6 bridge tools added, version 3.2.0->3.3.0, D66 parity verified |
+| GAP-OP-964 | FIXED | `.githooks/pre-commit` + `scripts/root/mcp/mcp-parity-check.sh`, `core.hooksPath` set |
+| GAP-OP-965 | FIXED | `agents/media/tools/run.sh` wrapper sources infisical-agent.sh auth-token + `infisical run`, `.mcp.json` updated |
+| GAP-OP-966 | OPEN | Parent_loop linked; naming backfill deferred (not addressable in this loop) |
+
+### D136 Delta
+
+- **Before:** required_missing=11
+- **After:** required_missing=7
+- **Reduction:** -4 (963/964/965 fixed, 966 parent_loop linked)
+
+### qB/VPN Security Attestation
+
+- **Route mode:** `direct` per QB-VPN-ROUTE-001 (unchanged)
+- **Arr->qB:** all 3 apps (radarr, sonarr, lidarr) confirmed `host=qbittorrent port=8081`
+- **Auth:** qB login OK with governed Infisical credentials (`web_ui_username=admin`)
+- **VPN/gluetun:** posture unchanged, gluetun serves music pipeline (slskd/soularr), not qB
+
+### Probe Output
+
+```
+radarr: qbit enabled=True host=qbittorrent port=8081 user=admin category=None priority=2
+sonarr: qbit enabled=True host=qbittorrent port=8081 user=admin category=None priority=2
+lidarr: qbit enabled=True host=qbittorrent port=8081 user=admin category=None priority=2
+qbittorrent: login OK web_ui_username=admin
+RESULT: PASS
+```
