@@ -129,3 +129,11 @@ Contract alignment note:
 1. Active runtime authority remains mint-apps (VM 213) + mint-data (VM 212).
 2. Legacy docker-host runtime is `LEGACY_ONLY` / non-authoritative.
 3. Stop-only detachment is consistent with zero-legacy-coupling policy.
+
+## Legacy Data Hold Artifact (2026-02-26)
+
+Manifest:
+- `/Users/ronnyworks/code/agentic-spine/docs/planning/MINT_LEGACY_DATA_HOLD_MANIFEST_20260226.md`
+
+Raw snapshot receipt:
+- `/Users/ronnyworks/code/agentic-spine/receipts/audits/LEGACY_DATA_HOLD_RECEIPT_20260226T081048Z.txt`
