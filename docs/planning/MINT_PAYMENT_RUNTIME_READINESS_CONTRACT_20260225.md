@@ -54,6 +54,9 @@ Source evidence pack:
 3. `CAP-20260226-023620__mint.deploy.status__Rsfpf60583`
 4. `CAP-20260226-023620__mint.runtime.proof__Rhfbl60584`
 5. `CAP-20260226-023620__mint.live.baseline.status__R12yz60585`
+6. `CAP-20260226-031228__secrets.exec__Rflok78425` (payment schema apply)
+7. `CAP-20260226-031621__secrets.exec__Rhkqa63035` (payment schema verify PASS)
+8. `CAP-20260226-031402__secrets.exec__Ruh1m4088` (checkout + webhook smoke PASS)
 
 Precondition check:
 
@@ -62,15 +65,17 @@ Precondition check:
 | payment health endpoint responds | `mint.modules.health`, `mint.runtime.proof` | PASS |
 | required payment env keys present | `mint.runtime.proof` (`payment.env PASS`) | PASS |
 | no contradiction across health/deploy/proof | all four caps above report OK/GREEN | PASS |
-| Ronny operator payment test stamp exists | no payment stamp recorded in stamp matrix | FAIL |
+| safe payment smoke path (checkout create + webhook receive) | `CAP-20260226-031402__secrets.exec__Ruh1m4088` | PASS |
+| payment persistence schema available (`payment_records`, `payment_webhook_events`) | `CAP-20260226-031621__secrets.exec__Rhkqa63035` | PASS |
+| Ronny operator payment test stamp exists | Ronny approval recorded in session (2026-02-26) and reflected in stamp matrix | PASS |
 
 ## Binary Status Call (Loop 7)
 
-`NOT_LIVE`
+`READY_FOR_RONNY_STAMP`
 
 Reason:
-1. Runtime preconditions pass, but payment does not yet have a Ronny operator
-   stamp.
-2. Contract rule requires both runtime pass + Ronny stamp for
-   `READY_FOR_RONNY_STAMP`.
-3. No end-to-end payment->finance bridge live claim is permitted in this state.
+1. Runtime preconditions pass.
+2. Safe smoke path pass is captured with governed evidence.
+3. Ronny operator payment stamp is now approved.
+4. Payment->finance bridge remains deferred; this state is runtime readiness
+   only, not full order-lifecycle-live claim.

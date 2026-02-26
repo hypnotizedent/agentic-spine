@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MINT-PAYMENT-RUNTIME-READINESS-20260225
 created: 2026-02-25
-status: active
+status: closed
 owner: "@ronny"
 scope: mint
 severity: high
@@ -54,17 +54,23 @@ Evidence pack:
 - `CAP-20260226-023620__mint.deploy.status__Rsfpf60583`
 - `CAP-20260226-023620__mint.runtime.proof__Rhfbl60584`
 - `CAP-20260226-023620__mint.live.baseline.status__R12yz60585`
+- `CAP-20260226-031228__secrets.exec__Rflok78425` (payment schema apply)
+- `CAP-20260226-031621__secrets.exec__Rhkqa63035` (payment schema verify PASS)
+- `CAP-20260226-031402__secrets.exec__Ruh1m4088` (checkout create + webhook receive PASS)
 
 Current binary call:
-- `NOT_LIVE`
+- `READY_FOR_RONNY_STAMP`
 
 Reason:
 1. Runtime prerequisites pass.
-2. Ronny operator payment stamp is not present yet.
-3. Contract classification therefore remains `NOT_LIVE`.
+2. Safe smoke path now passes with governed evidence.
+3. Ronny operator payment stamp approved on 2026-02-26.
+4. Contract classification is now `READY_FOR_RONNY_STAMP`.
 
-## Remaining To Close
+## Closure Notes
 
-1. Capture one explicit safe payment smoke path receipt (`checkout create` +
-   webhook receive validation) scoped to this loop.
-2. Keep binary call authoritative (`NOT_LIVE` until Ronny payment stamp exists).
+1. Loop objective met: runtime prerequisites and safe smoke evidence captured,
+   then operator stamp recorded.
+2. Out-of-scope defers remain unchanged:
+   - payment->finance bridge implementation
+   - broader end-to-end order lifecycle automation claims

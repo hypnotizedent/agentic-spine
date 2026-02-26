@@ -18,6 +18,9 @@ authority: LOOP-MINT-RONNY-APPROVAL-STAMP-LANE-20260225
    - `CAP-20260226-023620__mint.deploy.status__Rsfpf60583`
    - `CAP-20260226-023620__mint.runtime.proof__Rhfbl60584`
    - `CAP-20260226-023620__mint.live.baseline.status__R12yz60585`
+   - `CAP-20260226-031228__secrets.exec__Rflok78425` (payment schema apply)
+   - `CAP-20260226-031621__secrets.exec__Rhkqa63035` (payment schema verify PASS)
+   - `CAP-20260226-031402__secrets.exec__Ruh1m4088` (checkout + webhook smoke PASS)
 3. Canonical policy reference:
    `/Users/ronnyworks/code/agentic-spine/docs/planning/MINT_RUNTIME_TRUTH_CANONICAL_20260225.md`
 
@@ -40,7 +43,7 @@ authority: LOOP-MINT-RONNY-APPROVAL-STAMP-LANE-20260225
 | suppliers | BUILT_NOT_STAMPED | supplier search + stock parity smoke | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583; CAP-20260226-023620__mint.runtime.proof__Rhfbl60584 | - | Runtime proof pass; operator stamp pending |
 | shipping | BUILT_NOT_STAMPED | shipping quote/address parity smoke | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583; CAP-20260226-023620__mint.runtime.proof__Rhfbl60584 | - | Runtime proof pass; operator stamp pending |
 | finance-adapter | BUILT_NOT_STAMPED | finance event ingest dry run | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | - | Healthy and deployed; proof-surface coverage still missing |
-| payment | BUILT_NOT_STAMPED | checkout create + webhook receive smoke (safe path) | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583; CAP-20260226-023620__mint.runtime.proof__Rhfbl60584; CAP-20260226-023620__mint.live.baseline.status__R12yz60585 | - | Binary readiness call tracked in payment contract |
+| payment | APPROVED_BY_RONNY | checkout create + webhook receive smoke (safe path) | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583; CAP-20260226-023620__mint.runtime.proof__Rhfbl60584; CAP-20260226-023620__mint.live.baseline.status__R12yz60585; CAP-20260226-031228__secrets.exec__Rflok78425; CAP-20260226-031621__secrets.exec__Rhkqa63035; CAP-20260226-031402__secrets.exec__Ruh1m4088 | 2026-02-26 | Ronny approved runtime readiness stamp; payment contract now classified READY_FOR_RONNY_STAMP |
 | shopify-module | BUILT_NOT_STAMPED | inbound webhook scaffold dry-run normalization | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | - | Built scaffold; not in fresh-slate runtime proof target set |
 | digital-proofs | BUILT_NOT_STAMPED | proof document generation dry run | CAP-20260226-023620__mint.modules.health__Rj6b460582; CAP-20260226-023620__mint.deploy.status__Rsfpf60583 | - | Built codebase surface; runtime lane not in current probe scope |
 
