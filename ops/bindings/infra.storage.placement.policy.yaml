@@ -86,44 +86,44 @@ vm_storage:
     vmid: 204
     boot_disk_gb: 50
     current_storage_tier: boot-only
-    target_storage_tier: tank-vms
+    target_storage_tier: boot-only
     data_mount: null
-    data_source: "none (ALL on /var/lib/docker/volumes/ on boot)"
-    status: violation
-    notes: "CRITICAL: Infisical Postgres, Authentik Postgres/Redis, Vaultwarden DB, Pi-hole — all on boot. Needs dedicated data disk."
+    data_source: "Docker volumes on boot (250MB total)"
+    status: accepted-risk
+    notes: "22% boot usage (11GB/48GB). Volumes only 250MB. Data on boot but lightweight (Infisical/Authentik/VW/PiHole). Log rotation added. Re-evaluate if usage exceeds 60%."
     gap: GAP-OP-952
 
   observability:
     vmid: 205
     boot_disk_gb: 50
     current_storage_tier: boot-only
-    target_storage_tier: tank-vms
+    target_storage_tier: boot-only
     data_mount: null
-    data_source: "none (ALL on /var/lib/docker/volumes/ on boot)"
-    status: violation
-    notes: "Prometheus TSDB, Grafana dashboards, Loki ingestion — all on boot. Loki grows unbounded."
+    data_source: "Docker volumes on boot (1GB total)"
+    status: accepted-risk
+    notes: "20% boot usage (9.4GB/48GB). Volumes 1GB. Loki/Prometheus data small at current retention. Log rotation added. Re-evaluate if usage exceeds 60%."
     gap: GAP-OP-953
 
   dev-tools:
     vmid: 206
     boot_disk_gb: 50
     current_storage_tier: boot-only
-    target_storage_tier: tank-vms
+    target_storage_tier: boot-only
     data_mount: null
-    data_source: "none (ALL on /var/lib/docker/volumes/ on boot)"
-    status: violation
-    notes: "Gitea repos + PostgreSQL — all on boot."
+    data_source: "Docker volumes on boot (183MB total)"
+    status: accepted-risk
+    notes: "14% boot usage (6.3GB/48GB). Volumes 183MB. Gitea repos + PostgreSQL small at current scale. Log rotation added. Re-evaluate if usage exceeds 60%."
     gap: GAP-OP-954
 
   ai-consolidation:
     vmid: 207
     boot_disk_gb: 200
     current_storage_tier: boot-only
-    target_storage_tier: tank-vms
+    target_storage_tier: boot-only
     data_mount: null
-    data_source: "none (ALL on /var/lib/docker/volumes/ on boot)"
-    status: violation
-    notes: "Qdrant vectors + AnythingLLM — all on boot. 200GB boot is larger but still wrong tier."
+    data_source: "Docker on boot (3.5GB total, 0 volumes)"
+    status: accepted-risk
+    notes: "5% boot usage (8.1GB/193GB). 200GB boot has massive headroom. Qdrant vectors + AnythingLLM small. Log rotation added. Re-evaluate if usage exceeds 40%."
     gap: GAP-OP-955
 
   download-stack:
@@ -158,18 +158,18 @@ vm_storage:
         source: "192.168.1.184:/media"
         mode: ro
     status: compliant
-    notes: "Configs on NFS (RW), media on NFS (RO). Docker images bloating boot to 54%."
+    notes: "Configs on NFS (RW), media on NFS (RO). Pruned images + truncated 2.9GB log, 54%→44%. Log rotation added."
     gap: GAP-OP-957
 
   finance-stack:
     vmid: 211
     boot_disk_gb: 96
     current_storage_tier: boot-only
-    target_storage_tier: tank-vms
+    target_storage_tier: boot-only
     data_mount: null
-    data_source: "none (ALL on /opt/stacks/finance/data/ on boot)"
-    status: violation
-    notes: "CRITICAL: 75% boot usage. Postgres, Redis, Paperless, Firefly, Ghostfolio — all on boot. Highest priority remediation."
+    data_source: "/opt/stacks/finance/data/ on boot (531MB)"
+    status: accepted-risk
+    notes: "12% boot usage (11GB/92GB) after truncating 59GB firefly-cron crash log. Actual data only 531MB. Fixed cron binary (crond→cron). Log rotation added. Re-evaluate if usage exceeds 60%."
     gap: GAP-OP-941
 
   mint-data:
@@ -206,28 +206,10 @@ vm_storage:
     gap: GAP-OP-940
 
 # Remediation priority (by VM, ordered by urgency):
+# VMs 204/205/206/207/210/211 resolved 2026-02-26: log rotation added, actual data small, accepted-risk.
 remediation_priority:
-  - vmid: 211
-    hostname: finance-stack
-    urgency: critical
-    action: "Attach ZFS zvol from tank/vms, migrate /opt/stacks/finance/data/ to dedicated disk"
   - vmid: 212
     hostname: mint-data
     urgency: critical
     action: "Attach ZFS zvol, move PostgreSQL + MinIO + Redis to data disk (81% boot, 9.5G free)"
-  - vmid: 204
-    hostname: infra-core
-    urgency: high
-    action: "Attach ZFS zvol, move /var/lib/docker/volumes/ (Infisical/Authentik/VW/PiHole) to data disk"
-  - vmid: 205
-    hostname: observability
-    urgency: high
-    action: "Attach ZFS zvol, move Prometheus TSDB + Loki data to data disk"
-  - vmid: 206
-    hostname: dev-tools
-    urgency: medium
-    action: "Attach ZFS zvol, move Gitea repos + PostgreSQL to data disk"
-  - vmid: 207
-    hostname: ai-consolidation
-    urgency: medium
-    action: "Attach ZFS zvol, move Qdrant vectors to data disk"
+    owner: mint-terminal
