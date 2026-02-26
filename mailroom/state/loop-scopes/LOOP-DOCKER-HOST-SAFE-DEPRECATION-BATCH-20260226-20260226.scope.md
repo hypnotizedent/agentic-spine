@@ -76,3 +76,48 @@ Before any destructive batch:
 `./bin/ops cap run verify.route.recommend`
 `./bin/ops cap run verify.pack.run infra`
 5. Close gaps with `gaps.close` using run keys from this loop only.
+
+## Tier 1 Batch Execution (2026-02-26)
+
+Execution status: completed (Tier 1 only).
+
+### Mutations applied on docker-host
+- Removed orphan volumes:
+  - `pihole_pihole_config`
+  - `pihole_pihole_dnsmasq`
+  - `secrets_pg_data`
+  - `secrets_redis_data`
+- Removed zombie dirs:
+  - `~/stacks/finance`
+  - `~/stacks/pihole`
+  - `~/stacks/cloudflared`
+  - `~/stacks/secrets`
+- Removed stale cron entries:
+  - `backup-finance.sh`
+  - `backup-infrastructure.sh`
+  - `backup-media-configs.sh`
+  - `check-secret-expiry.sh`
+- Cron backups written on docker-host:
+  - `/home/docker-host/backups/crontab.pre_tier1_20260226T043418Z.txt`
+  - `/home/docker-host/backups/crontab.post_tier1_20260226T043418Z.txt`
+
+### Pre-state run keys
+- `CAP-20260225-233402__infra.docker_host.status__Rt7qh43210`
+- `CAP-20260225-233402__communications.alerts.queue.status__R66e343211`
+- `CAP-20260225-233402__communications.alerts.dispatcher.status__Rspak43212`
+
+### Post-state validation
+- Volumes absent (4/4): verified via ssh post-check.
+- Tier 1 dirs absent (4/4): verified via ssh post-check.
+- Deferred dirs untouched:
+  - `~/stacks/mail-archiver` present
+  - `~/stacks/infrastructure` present
+  - `~/stacks/mint-os-data` present
+- Target stale cron lines removed; keep-crons still present (`sync-to-synology`, mint backup jobs, watchdog, docker prune).
+
+### Post-state run keys
+- `CAP-20260225-233434__infra.docker_host.status__R5g0b53180`
+- `CAP-20260225-233434__communications.alerts.queue.status__Rojvl53181`
+- `CAP-20260225-233434__communications.alerts.dispatcher.status__R4nnz53182`
+- `CAP-20260225-233434__verify.route.recommend__Rzxyh53183`
+- `CAP-20260225-233442__verify.pack.run__Rhpb456159` (failed on pre-existing stale network snapshot gates D188/D194; unrelated to Tier 1 cleanup actions)
