@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# communications-mail-archiver-import-eml-upload — governed EML import to mail-archiver
+# Domain: communications
+# Safety: mutating (uploads files, inserts into DB)
+# Approval: manual
+#
+# Usage:
+#   communications-mail-archiver-import-eml-upload --source-dir <path> [options]
+#
+# Transfers .eml files from local source directory to communications-stack (VM 214),
+# parses each EML, and inserts into mail_archiver.ArchivedEmails via psql.
+set -euo pipefail
+
+TARGET="${TARGET:-communications-stack}"
+SOURCE_DIR=""
+BATCH_SIZE=0
+ACCOUNT_ID="${MAIL_ACCOUNT_ID:-3}"
+DISK_THRESHOLD=70
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMPORTER_SCRIPT="$SCRIPT_DIR/../lib/eml_import.py"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  communications-mail-archiver-import-eml-upload --source-dir <path> [options]
+
+Options:
+  --source-dir <path>    Local directory containing .eml files (required)
+  --target <ssh-target>  SSH target for communications-stack (default: communications-stack)
+  --batch-size <n>       Max files to transfer per invocation (0=all)
+  --account-id <n>       MailAccount ID for imported messages (default: 3)
+  --disk-threshold <n>   Max disk usage % before abort (default: 70)
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --source-dir) SOURCE_DIR="$2"; shift 2 ;;
+    --target) TARGET="$2"; shift 2 ;;
+    --batch-size) BATCH_SIZE="$2"; shift 2 ;;
+    --account-id) ACCOUNT_ID="$2"; shift 2 ;;
+    --disk-threshold) DISK_THRESHOLD="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$SOURCE_DIR" ]]; then
+  echo "FAIL: --source-dir is required" >&2
+  usage >&2
+  exit 1
+fi
+
+if [[ ! -d "$SOURCE_DIR" ]]; then
+  echo "FAIL: source directory does not exist: $SOURCE_DIR" >&2
+  exit 1
+fi
+
+# --- Pre-checks ---
+echo "=== Pre-checks ==="
+
+# Count local .eml files
+EML_COUNT=$(find "$SOURCE_DIR" -maxdepth 1 -name '*.eml' -type f | wc -l | tr -d ' ')
+echo "local_eml_files: $EML_COUNT"
+
+if [[ "$EML_COUNT" -eq 0 ]]; then
+  echo "FAIL: no .eml files found in $SOURCE_DIR" >&2
+  exit 1
+fi
+
+# Check remote disk usage
+echo "checking remote disk usage on $TARGET..."
+DISK_OUTPUT=$(ssh "$TARGET" "df /srv/mail-archiver" 2>/dev/null | tail -1)
+DISK_USED_PCT=$(echo "$DISK_OUTPUT" | awk '{print $5}' | tr -d '%')
+echo "remote_disk_used_pct: ${DISK_USED_PCT}%"
+
+if [[ "$DISK_USED_PCT" -ge "$DISK_THRESHOLD" ]]; then
+  echo "FAIL: disk usage ${DISK_USED_PCT}% >= threshold ${DISK_THRESHOLD}%" >&2
+  exit 1
+fi
+
+# Check container health
+CONTAINER_STATUS=$(ssh "$TARGET" "sudo docker inspect --format='{{.State.Status}}' mail-archiver 2>/dev/null" || echo "unknown")
+echo "container_status: $CONTAINER_STATUS"
+
+if [[ "$CONTAINER_STATUS" != "running" ]]; then
+  echo "FAIL: mail-archiver container not running (status: $CONTAINER_STATUS)" >&2
+  exit 1
+fi
+
+# Get DB counts before
+DB_COUNT_BEFORE=$(ssh "$TARGET" 'echo "SELECT count(*) FROM mail_archiver.\"ArchivedEmails\";" | sudo docker exec -i mail-archiver-db psql -U mailuser -d MailArchiver -t -A' 2>/dev/null | tr -d ' ' || echo "0")
+ACCT_COUNT_BEFORE=$(ssh "$TARGET" "echo 'SELECT count(*) FROM mail_archiver.\"ArchivedEmails\" WHERE \"MailAccountId\"=$ACCOUNT_ID;' | sudo docker exec -i mail-archiver-db psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tr -d ' ' || echo "0")
+echo "db_count_before: $DB_COUNT_BEFORE"
+echo "account_count_before: $ACCT_COUNT_BEFORE (account_id=$ACCOUNT_ID)"
+
+# --- Transfer ---
+echo ""
+echo "=== Transfer ==="
+
+REMOTE_STAGING="/tmp/eml-import-staging"
+ssh "$TARGET" "mkdir -p $REMOTE_STAGING" 2>/dev/null
+
+# Build file list (optionally limited by batch size)
+TRANSFER_LIST=$(mktemp)
+if [[ "$BATCH_SIZE" -gt 0 ]]; then
+  find "$SOURCE_DIR" -maxdepth 1 -name '*.eml' -type f | head -n "$BATCH_SIZE" > "$TRANSFER_LIST"
+else
+  find "$SOURCE_DIR" -maxdepth 1 -name '*.eml' -type f > "$TRANSFER_LIST"
+fi
+TRANSFER_COUNT=$(wc -l < "$TRANSFER_LIST" | tr -d ' ')
+echo "files_to_transfer: $TRANSFER_COUNT"
+
+# SCP files to remote staging
+TRANSFERRED=0
+while IFS= read -r eml_file; do
+  scp -q "$eml_file" "$TARGET:$REMOTE_STAGING/"
+  TRANSFERRED=$((TRANSFERRED + 1))
+  if [[ $((TRANSFERRED % 100)) -eq 0 ]]; then
+    echo "  scp progress: $TRANSFERRED/$TRANSFER_COUNT"
+  fi
+done < "$TRANSFER_LIST"
+rm -f "$TRANSFER_LIST"
+echo "transfer_complete: $TRANSFERRED files"
+
+# --- Import via direct DB insert ---
+echo ""
+echo "=== Import ==="
+
+# Ensure importer script is on remote
+scp -q "$IMPORTER_SCRIPT" "$TARGET:/tmp/eml_import.py"
+
+# Run importer: parse .eml files → generate SQL → pipe to psql
+echo "running EML → DB import (account_id=$ACCOUNT_ID)..."
+IMPORT_LOG=$(ssh "$TARGET" "EML_DIR=$REMOTE_STAGING MAIL_ACCOUNT_ID=$ACCOUNT_ID python3 /tmp/eml_import.py 2>&1 >/dev/null")
+echo "$IMPORT_LOG"
+
+# Pipe SQL to psql (separate step to capture errors)
+ssh "$TARGET" "EML_DIR=$REMOTE_STAGING MAIL_ACCOUNT_ID=$ACCOUNT_ID python3 /tmp/eml_import.py 2>/dev/null | sudo docker exec -i mail-archiver-db psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tail -5
+
+# Clean staging
+ssh "$TARGET" "rm -rf $REMOTE_STAGING" 2>/dev/null
+
+# --- Final stats ---
+echo ""
+echo "=== Final Stats ==="
+DB_COUNT_AFTER=$(ssh "$TARGET" 'echo "SELECT count(*) FROM mail_archiver.\"ArchivedEmails\";" | sudo docker exec -i mail-archiver-db psql -U mailuser -d MailArchiver -t -A' 2>/dev/null | tr -d ' ' || echo "?")
+ACCT_COUNT_AFTER=$(ssh "$TARGET" "echo 'SELECT count(*) FROM mail_archiver.\"ArchivedEmails\" WHERE \"MailAccountId\"=$ACCOUNT_ID;' | sudo docker exec -i mail-archiver-db psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tr -d ' ' || echo "?")
+echo "db_count_after: $DB_COUNT_AFTER"
+echo "db_delta: $((DB_COUNT_AFTER - DB_COUNT_BEFORE))"
+echo "account_count_after: $ACCT_COUNT_AFTER (account_id=$ACCOUNT_ID)"
+echo "account_delta: $((ACCT_COUNT_AFTER - ACCT_COUNT_BEFORE))"
+echo "transferred: $TRANSFERRED"
+echo "status: OK"
