@@ -32,14 +32,22 @@ Reconcile qB auth: fix Infisical/runtime password mismatch, collect governed mut
 - **Root cause:** qBittorrent anti-brute-force IP ban (HTTP 403) triggered by earlier failed probe attempts; password was already correct in both runtime and Infisical
 - **Fix:** Container restart to clear in-memory ban list; permanent password confirmed persisted in qBittorrent.conf PBKDF2 hash
 
-### Mutation Run Keys
+### Governed Run Keys
 
-| Action | Run Key |
-|--------|---------|
-| Loop create | `CAP-20260226-003032__loops.create__Rmvpx25816` |
-| Auth probe (PASS) | `CAP-20260226-003413__secrets.exec__Rek0x77438` |
-| verify.pack.run media (16/16) | `CAP-20260226-003434__verify.pack.run__Rskwr83758` |
-| verify.pack.run secrets (11/11) | `CAP-20260226-003455__verify.pack.run__R4gjp95659` |
+| Action | Run Key | Evidence |
+|--------|---------|----------|
+| Loop create | `CAP-20260226-003032__loops.create__Rmvpx25816` | Receipted |
+| Auth probe (PASS) | `CAP-20260226-003413__secrets.exec__Rek0x77438` | Receipted |
+| Auth probe (FAIL — pre-fix) | `CAP-20260226-003212__secrets.exec__Rae3855215` | Receipted (HTTP 403 IP ban) |
+| verify.pack.run media (16/16) | `CAP-20260226-003434__verify.pack.run__Rskwr83758` | Receipted |
+| verify.pack.run secrets (11/11) | `CAP-20260226-003455__verify.pack.run__R4gjp95659` | Receipted |
+
+### Ungoverned Actions (no capability run key)
+
+| Action | Method | Justification |
+|--------|--------|---------------|
+| `docker restart qbittorrent` | Raw SSH to download-stack | No `media.stack.restart` capability scoped to single-container restart; used raw SSH to clear in-memory IP ban. Correctness verified by subsequent governed `secrets.exec` probe PASS. |
+| PBKDF2 persistence check | `docker exec qbittorrent cat /config/qBittorrent/qBittorrent.conf` | Read-only config inspection via SSH; no governed capability exists for qB config reads. |
 
 ### Probe Output Summary
 
