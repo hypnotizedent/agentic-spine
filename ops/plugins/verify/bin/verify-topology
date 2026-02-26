@@ -129,6 +129,26 @@ contains_value() {
   return 1
 }
 
+receipt_output_has_mixed_status() {
+  local out_file="$1"
+  [[ -s "$out_file" ]] || return 1
+
+  # Only check outputs that look like capability receipts marked complete.
+  grep -Eqi '(^|[[:space:]])(DONE|Status:[[:space:]]+done|status:[[:space:]]+done|status:[[:space:]]+OK)' "$out_file" || return 1
+
+  # Require at least one explicit success marker.
+  grep -Eq '(^|[^A-Z])PASS([^A-Z]|$)|RESULT:[[:space:]]+PASS' "$out_file" || return 1
+
+  # Flag mixed output when common hard-error signatures coexist with success markers.
+  grep -Eqi 'failed to wait for command termination|^FAIL:|command not found|Traceback|Exception|unbound variable|unexpected EOF|No such file or directory|[[:space:]]ERROR:' "$out_file" || return 1
+  return 0
+}
+
+print_receipt_mixed_status_excerpt() {
+  local out_file="$1"
+  grep -Ein 'failed to wait for command termination|^FAIL:|command not found|Traceback|Exception|unbound variable|unexpected EOF|No such file or directory|[[:space:]]ERROR:' "$out_file" | head -n 8 | sed 's/^/    /' || true
+}
+
 collect_domain_gate_ids() {
   local raw_domain="$1"
   local domain
@@ -212,7 +232,13 @@ run_gate_ids() {
   local fail_count=0
   local skipped_inline=0
   local skipped_retired=0
+  local receipt_integrity_warnings=0
   local -a failing_ids=()
+  local receipt_integrity_mode="${VERIFY_RECEIPT_INTEGRITY_MODE:-warn}"
+  case "$receipt_integrity_mode" in
+    off|warn|fail) ;;
+    *) fail "invalid VERIFY_RECEIPT_INTEGRITY_MODE value: $receipt_integrity_mode (expected off|warn|fail)" ;;
+  esac
   local parallel_jobs=1
   if [[ "${VERIFY_PARALLEL_JOBS:-}" =~ ^[1-9][0-9]*$ ]]; then
     parallel_jobs="${VERIFY_PARALLEL_JOBS}"
@@ -311,8 +337,26 @@ run_gate_ids() {
         out_file="$tmp_dir/${gid}.out"
         rc="$(cat "$tmp_dir/${gid}.rc" 2>/dev/null || echo 99)"
         if [[ "$rc" -eq 0 ]]; then
-          pass_count=$((pass_count + 1))
-          [[ "$json_mode" == "0" ]] && echo "$gid PASS"
+          if [[ "$receipt_integrity_mode" != "off" ]] && receipt_output_has_mixed_status "$out_file"; then
+            if [[ "$receipt_integrity_mode" == "fail" ]]; then
+              fail_count=$((fail_count + 1))
+              failing_ids+=("$gid")
+              if [[ "$json_mode" == "0" ]]; then
+                echo "$gid FAIL receipt-integrity-mixed-status"
+                print_receipt_mixed_status_excerpt "$out_file"
+              fi
+            else
+              pass_count=$((pass_count + 1))
+              receipt_integrity_warnings=$((receipt_integrity_warnings + 1))
+              if [[ "$json_mode" == "0" ]]; then
+                echo "$gid WARN receipt-integrity-mixed-status"
+                print_receipt_mixed_status_excerpt "$out_file"
+              fi
+            fi
+          else
+            pass_count=$((pass_count + 1))
+            [[ "$json_mode" == "0" ]] && echo "$gid PASS"
+          fi
         else
           fail_count=$((fail_count + 1))
           failing_ids+=("$gid")
@@ -343,11 +387,15 @@ run_gate_ids() {
       --argjson fail "$fail_count" \
       --argjson skipped_inline "$skipped_inline" \
       --argjson skipped_retired "$skipped_retired" \
+      --argjson receipt_integrity_warnings "$receipt_integrity_warnings" \
       --argjson failing_ids "$failing_json" \
-      '{total:$total, pass:$pass, fail:$fail, skipped_inline:$skipped_inline, skipped_retired:$skipped_retired, failing_ids:$failing_ids}'
+      '{total:$total, pass:$pass, fail:$fail, skipped_inline:$skipped_inline, skipped_retired:$skipped_retired, receipt_integrity_warnings:$receipt_integrity_warnings, failing_ids:$failing_ids}'
   else
     echo
     echo "summary: pass=$pass_count fail=$fail_count skipped_inline=$skipped_inline skipped_retired=$skipped_retired"
+    if [[ "$receipt_integrity_warnings" -gt 0 ]]; then
+      echo "receipt_integrity_warnings: $receipt_integrity_warnings"
+    fi
   fi
 
   local budget_breach=0
@@ -786,6 +834,34 @@ run_release() {
   [[ "$rc" -eq 0 && "$budget_breach" -eq 0 ]]
 }
 
+is_loop_gap_doc_only_set() {
+  local -a input_paths=("$@")
+  local saw_loop_signal=0
+  local p
+
+  ((${#input_paths[@]} > 0)) || return 1
+
+  for p in "${input_paths[@]}"; do
+    [[ -n "$p" ]] || continue
+
+    case "$p" in
+      mailroom/state/loop-scopes/*|ops/bindings/operational.gaps.yaml|ops/plugins/loops/*)
+        saw_loop_signal=1
+        ;;
+    esac
+
+    case "$p" in
+      mailroom/state/loop-scopes/*|docs/planning/*|docs/governance/*|ops/bindings/operational.gaps.yaml|ops/plugins/loops/*)
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
+
+  [[ "$saw_loop_signal" -eq 1 ]]
+}
+
 recommend_route() {
   local json_mode=0
   local -a paths=()
@@ -855,6 +931,11 @@ recommend_route() {
   mapfile -t recommended_domains < <(printf '%s\n' "${!hits[@]}" | awk 'NF' | sort)
   if (( ${#recommended_domains[@]} == 0 )); then
     recommended_domains=("core")
+  fi
+
+  # Reduce noisy recommendations for loop/doc-only governance edits.
+  if [[ "${#capabilities[@]}" -eq 0 ]] && is_loop_gap_doc_only_set "${paths[@]}"; then
+    recommended_domains=("loop_gap")
   fi
 
   if [[ "$json_mode" == "1" ]]; then
