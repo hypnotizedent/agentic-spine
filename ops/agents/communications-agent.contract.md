@@ -70,10 +70,10 @@
 
 The Resend MCP server v2.1 may run alongside the spine communications gateway under the following rules:
 
-- **Transactional sends**: Spine-only (D257 enforces). Resend MCP `send_email`/`batch_send_emails` are FORBIDDEN.
+- **Transactional sends**: Spine-only (D263 enforces). Resend MCP `send_email`/`batch_send_emails` are FORBIDDEN.
 - **Read operations**: Allowed via Resend MCP (list emails, read inbound, list contacts, list domains).
-- **Governed mutations**: Manual approval required (create/update/remove contacts via D259).
-- **Broadcasts**: Forbidden until D260 governance gate passes in enforce mode.
+- **Governed mutations**: Manual approval required (create/update/remove contacts via D265).
+- **Broadcasts**: Forbidden until D266 governance gate passes in enforce mode.
 
 Policy doc: `docs/canonical/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md`
 Contract: `docs/canonical/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml`

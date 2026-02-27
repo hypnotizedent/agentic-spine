@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # TRIAGE: Resend webhook event schema requirements must be documented in expansion contract before any webhook ingest surface is wired.
-# D258: communications-resend-webhook-schema-lock
+# D264: communications-resend-webhook-schema-lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 fail() {
-  echo "D258 FAIL: $*" >&2
+  echo "D264 FAIL: $*" >&2
   exit 1
 }
 
@@ -44,8 +44,8 @@ gap_ref=$(yq e '.inbound.gap' "$CONTRACT" 2>/dev/null)
 [[ -n "$gap_ref" && "$gap_ref" != "null" ]] || fail_v "inbound.gap reference must be set"
 
 if [[ $violations -gt 0 ]]; then
-  echo "D258 FAIL: webhook schema lock: $violations violation(s)" >&2
+  echo "D264 FAIL: webhook schema lock: $violations violation(s)" >&2
   exit 1
 fi
 
-echo "D258 PASS: webhook schema lock valid (events=$event_count, requirements=$req_count, gap=$gap_ref)"
+echo "D264 PASS: webhook schema lock valid (events=$event_count, requirements=$req_count, gap=$gap_ref)"

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # TRIAGE: Broadcast campaign governance must require manual approval, rate guards, budget limits, and suppression enforcement before any broadcast sends are enabled.
-# D260: communications-broadcast-governance-lock
+# D266: communications-broadcast-governance-lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 fail() {
-  echo "D260 FAIL: $*" >&2
+  echo "D266 FAIL: $*" >&2
   exit 1
 }
 
@@ -64,8 +64,8 @@ gap_ref=$(yq e '.broadcasts.gap' "$CONTRACT" 2>/dev/null)
 [[ -n "$gap_ref" && "$gap_ref" != "null" ]] || fail_v "broadcasts.gap reference must be set"
 
 if [[ $violations -gt 0 ]]; then
-  echo "D260 FAIL: broadcast governance lock: $violations violation(s)" >&2
+  echo "D266 FAIL: broadcast governance lock: $violations violation(s)" >&2
   exit 1
 fi
 
-echo "D260 PASS: broadcast governance lock valid (status=$broadcast_status, safety_reqs=$req_count, gap=$gap_ref)"
+echo "D266 PASS: broadcast governance lock valid (status=$broadcast_status, safety_reqs=$req_count, gap=$gap_ref)"

@@ -13,13 +13,13 @@ parent_loop: LOOP-SPINE-RESEND-CANONICAL-UPGRADE-20260227-20260301-20260227
 | # | Check | Status | Evidence Run Key | Notes |
 |---|-------|--------|------------------|-------|
 | 1 | Resend provider live-ready proof | PASS | CAP-20260227-113704__communications.provider.status__Rysv057327 | Resend: active, execution_mode=live, all env keys present |
-| 2 | Transactional send authority remains spine-only | PASS | CAP-20260227-113539__verify.pack.run__Rcbyr45364 | D147 PASS + D257 PASS (owner=spine, enforcement=strict) |
+| 2 | Transactional send authority remains spine-only | PASS | CAP-20260227-113539__verify.pack.run__Rcbyr45364 | D147 PASS + D263 PASS (owner=spine, enforcement=strict) |
 | 3 | D147/D222 still pass after changes | PASS | CAP-20260227-113539__verify.pack.run__Rcbyr45364 | 27/27 communications pack pass |
-| 4 | New D-gates pass in configured mode | PASS | CAP-20260227-113539__verify.pack.run__Rcbyr45364 | D257 PASS, D258 PASS, D259 PASS, D260 PASS, D261 REPORT (documented bypass), D262 PASS |
+| 4 | New D-gates pass in configured mode | PASS | CAP-20260227-113539__verify.pack.run__Rcbyr45364 | D263 PASS, D264 PASS, D265 PASS, D266 PASS, D267 REPORT (documented bypass), D268 PASS |
 | 5 | Delivery log has preview-linked receipts | PASS | CAP-20260227-113709__communications.delivery.log__Ra2yl58478 | 5 recent entries with provider_message_id, status=sent |
-| 6 | Inbound polling/webhook path governance proof | PASS | CAP-20260227-113712__communications.inbox.poll__Rs2er58747 | inbox.poll dry-run OK (2 unseen), D258 webhook schema lock PASS |
-| 7 | Contacts/broadcast governance controls present | PASS | CAP-20260227-113539__verify.pack.run__Rcbyr45364 | D259 PASS (contacts: approval+rate+suppression), D260 PASS (broadcast: approval+rate+budget+suppression+unsub) |
-| 8 | n8n bypass status | PASS (DEFERRED) | CAP-20260227-113539__verify.pack.run__Rcbyr45364 | D261 REPORT: bypass detected + documented. GAP-OP-1026 open as explicit blocker. |
+| 6 | Inbound polling/webhook path governance proof | PASS | CAP-20260227-113712__communications.inbox.poll__Rs2er58747 | inbox.poll dry-run OK (2 unseen), D264 webhook schema lock PASS |
+| 7 | Contacts/broadcast governance controls present | PASS | CAP-20260227-113539__verify.pack.run__Rcbyr45364 | D265 PASS (contacts: approval+rate+suppression), D266 PASS (broadcast: approval+rate+budget+suppression+unsub) |
+| 8 | n8n bypass status | PASS (DEFERRED) | CAP-20260227-113539__verify.pack.run__Rcbyr45364 | D267 REPORT: bypass detected + documented. GAP-OP-1026 open as explicit blocker. |
 | 9 | No protected lane mutation | PASS | CAP-20260227-113721__gaps.status__Rltga60024 | GAP-OP-973 untouched, LOOP-MAIL-ARCHIVER still background |
 | 10 | Loops/gaps orphan count = 0 | PASS | CAP-20260227-113721__gaps.status__Rltga60024 | 0 orphaned gaps |
 

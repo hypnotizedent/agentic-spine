@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # TRIAGE: Transactional email send authority must remain in spine communications pipeline only. Resend MCP send_email and batch_send_emails are forbidden in governed paths.
-# D257: resend-mcp-transactional-send-authority-lock
+# D263: resend-mcp-transactional-send-authority-lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 fail() {
-  echo "D257 FAIL: $*" >&2
+  echo "D263 FAIL: $*" >&2
   exit 1
 }
 
@@ -49,4 +49,4 @@ canonical_provider=$(yq e '.transactional.customer_notifications_canonical_provi
 D147_SCRIPT="$ROOT/surfaces/verify/d147-communications-canonical-routing-lock.sh"
 [[ -f "$D147_SCRIPT" ]] || fail "D147 gate script missing (defense in depth requires canonical routing lock)"
 
-echo "D257 PASS: transactional send authority lock valid (owner=spine, enforcement=strict, send_email=FORBIDDEN, provider=active)"
+echo "D263 PASS: transactional send authority lock valid (owner=spine, enforcement=strict, send_email=FORBIDDEN, provider=active)"

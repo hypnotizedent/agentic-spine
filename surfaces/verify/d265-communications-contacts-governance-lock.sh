@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # TRIAGE: Contacts lifecycle governance must require manual approval, rate guards, and suppression enforcement before any contact mutations are enabled.
-# D259: communications-contacts-governance-lock
+# D265: communications-contacts-governance-lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 fail() {
-  echo "D259 FAIL: $*" >&2
+  echo "D265 FAIL: $*" >&2
   exit 1
 }
 
@@ -60,8 +60,8 @@ if [[ -f "$POLICY" ]]; then
 fi
 
 if [[ $violations -gt 0 ]]; then
-  echo "D259 FAIL: contacts governance lock: $violations violation(s)" >&2
+  echo "D265 FAIL: contacts governance lock: $violations violation(s)" >&2
   exit 1
 fi
 
-echo "D259 PASS: contacts governance lock valid (status=$contacts_status, safety_reqs=$req_count, gap=$gap_ref)"
+echo "D265 PASS: contacts governance lock valid (status=$contacts_status, safety_reqs=$req_count, gap=$gap_ref)"

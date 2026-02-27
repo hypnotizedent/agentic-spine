@@ -92,17 +92,17 @@ Bundle artifact: `mailroom/outbox/alerts/communications/incidents/BUNDLE-<timest
   - No Outlook as automated sender, no stale domains, stack-provider mode parity.
 - `D160 communications-queue-pipeline-lock`
   - V1-V6 queue pipeline integrity: required capabilities, contracts, safety/approval invariants, alerting channel guard.
-- `D257 resend-mcp-transactional-send-authority-lock`
+- `D263 resend-mcp-transactional-send-authority-lock`
   - Transactional email send authority remains spine-only. Resend MCP send_email classified FORBIDDEN.
-- `D258 communications-resend-webhook-schema-lock`
+- `D264 communications-resend-webhook-schema-lock`
   - Webhook event schema requirements documented before ingest surface wiring.
-- `D259 communications-contacts-governance-lock`
+- `D265 communications-contacts-governance-lock`
   - Contacts mutations require manual approval, rate guards, suppression enforcement.
-- `D260 communications-broadcast-governance-lock`
+- `D266 communications-broadcast-governance-lock`
   - Broadcast sends require manual approval, rate/budget guards, suppression, unsubscribe.
-- `D261 n8n-resend-direct-bypass-lock`
+- `D267 n8n-resend-direct-bypass-lock`
   - n8n workflows must not call Resend API directly. Reports if documented bypass with gap.
-- `D262 communications-resend-expansion-contract-parity-lock`
+- `D268 communications-resend-expansion-contract-parity-lock`
   - Expansion contract and MCP coexistence policy must exist and be internally consistent.
 
 ## Resend Expansion
