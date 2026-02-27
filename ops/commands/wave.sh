@@ -1176,6 +1176,26 @@ cmd_preflight() {
   local blockers=()
   local verdict="go"
   local next_action=""
+  local preflight_contract="$SPINE_REPO/ops/bindings/orchestration.preflight.scope.contract.yaml"
+  local clean_mode="scope_clean_required"
+  local scope_dirty_max="10"
+  local ambient_blocking="false"
+  local ambient_report_dir="$RUNTIME_ROOT/preflight/ambient-drift"
+  local ambient_report=""
+  local ambient_dirty_total=0
+  local -a ambient_repos=("$SPINE_REPO" "$HOME/code/workbench" "$HOME/code/mint-modules")
+
+  if [[ -f "$preflight_contract" ]] && command -v yq >/dev/null 2>&1; then
+    clean_mode="$(yq e -r '.policy.clean_mode // "scope_clean_required"' "$preflight_contract" 2>/dev/null || echo "scope_clean_required")"
+    scope_dirty_max="$(yq e -r '.policy.scope_dirty_max_files // 10' "$preflight_contract" 2>/dev/null || echo "10")"
+    ambient_blocking="$(yq e -r '.policy.ambient_blocking // false' "$preflight_contract" 2>/dev/null || echo "false")"
+    ambient_report_dir="$(yq e -r '.policy.ambient_report_dir // "'"$RUNTIME_ROOT/preflight/ambient-drift"'"' "$preflight_contract" 2>/dev/null || echo "$RUNTIME_ROOT/preflight/ambient-drift")"
+    mapfile -t ambient_repos < <(yq e -r '.policy.ambient_repos[]?' "$preflight_contract" 2>/dev/null || true)
+    if [[ "${#ambient_repos[@]}" -eq 0 ]]; then
+      ambient_repos=("$SPINE_REPO" "$HOME/code/workbench" "$HOME/code/mint-modules")
+    fi
+  fi
+  [[ "$scope_dirty_max" =~ ^[0-9]+$ ]] || scope_dirty_max="10"
 
   echo "=" * 72 2>/dev/null || true
   echo "========================================================================"
@@ -1195,16 +1215,82 @@ cmd_preflight() {
   fi
   echo
 
-  # ── 2. Git state check ──
+  # ── 2. Git state check (scope-clean + ambient-drift ledger) ──
   echo "[2/4] Git state..."
+  local scope_repo="$SPINE_REPO"
+  if [[ -n "$active_wave_sf" && -f "$active_wave_sf" ]]; then
+    local scoped_repo
+    scoped_repo="$(python3 -c "import json; s=json.load(open('$active_wave_sf')); w=(s.get('workspace') or {}); print(w.get('repo') or '')" 2>/dev/null || true)"
+    if [[ -n "$scoped_repo" && "$scoped_repo" != "null" ]]; then
+      scope_repo="$scoped_repo"
+    fi
+  fi
+
+  local scope_repo_real
+  scope_repo_real="$(python3 -c "import os; print(os.path.realpath('$scope_repo'))" 2>/dev/null || echo "$scope_repo")"
   local branch
-  branch="$(git -C "$SPINE_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
+  branch="$(git -C "$scope_repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
   local dirty
-  dirty="$(git -C "$SPINE_REPO" status --porcelain 2>/dev/null | head -5 | wc -l | tr -d ' ')"
-  echo "  Branch: $branch"
-  echo "  Dirty files: $dirty"
-  if [[ "$dirty" -gt 10 ]]; then
-    blockers+=("Excessive dirty files ($dirty)")
+  dirty="$(git -C "$scope_repo" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  echo "  Scope clean mode: $clean_mode"
+  echo "  Scope repo: $scope_repo_real"
+  echo "  Scope branch: $branch"
+  echo "  Scope dirty files: $dirty"
+  if [[ "$clean_mode" == "scope_clean_required" ]] && [[ "$dirty" -gt "$scope_dirty_max" ]]; then
+    blockers+=("Scope dirty files exceed threshold ($dirty > $scope_dirty_max) in $scope_repo_real")
+  fi
+
+  local ambient_rows=()
+  local repo
+  for repo in "${ambient_repos[@]}"; do
+    [[ -n "$repo" && "$repo" != "null" ]] || continue
+    repo="${repo/#\~/$HOME}"
+    if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      continue
+    fi
+    local repo_real
+    repo_real="$(python3 -c "import os; print(os.path.realpath('$repo'))" 2>/dev/null || echo "$repo")"
+    if [[ "$repo_real" == "$scope_repo_real" ]]; then
+      continue
+    fi
+    local repo_branch repo_dirty
+    repo_branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
+    repo_dirty="$(git -C "$repo" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ "$repo_dirty" -gt 0 ]]; then
+      ambient_dirty_total=$((ambient_dirty_total + repo_dirty))
+      ambient_rows+=("$repo_real|$repo_branch|$repo_dirty")
+    fi
+  done
+
+  mkdir -p "$ambient_report_dir"
+  ambient_report="$ambient_report_dir/ambient-drift-$(date -u +%Y%m%dT%H%M%SZ).md"
+  {
+    echo "# Ambient Drift Ledger"
+    echo
+    echo "- checked_at: $(ts_now)"
+    echo "- clean_mode: $clean_mode"
+    echo "- scope_repo: $scope_repo_real"
+    echo "- scope_dirty_files: $dirty"
+    echo
+    echo "| Repo | Branch | Dirty Files |"
+    echo "|---|---|---:|"
+    if [[ "${#ambient_rows[@]}" -eq 0 ]]; then
+      echo "| (none) | - | 0 |"
+    else
+      local row
+      for row in "${ambient_rows[@]}"; do
+        IFS='|' read -r rr rb rd <<< "$row"
+        echo "| $rr | $rb | $rd |"
+      done
+    fi
+  } > "$ambient_report"
+
+  echo "  Ambient drift report: $ambient_report"
+  if [[ "$ambient_dirty_total" -gt 0 ]]; then
+    echo "  Ambient dirty files (non-scope): $ambient_dirty_total"
+    if [[ "$ambient_blocking" == "true" ]]; then
+      blockers+=("Ambient drift blocking enabled: $ambient_dirty_total dirty files outside scope")
+    fi
   fi
   echo
 
@@ -1296,6 +1382,11 @@ state['preflight'] = {
     'verdict': '$verdict',
     'duration_s': $duration_s,
     'blockers': blockers_list,
+    'scope_clean_mode': '$clean_mode',
+    'scope_repo': '$scope_repo_real',
+    'scope_dirty_files': int('$dirty'),
+    'ambient_dirty_files': int('$ambient_dirty_total'),
+    'ambient_report': '$ambient_report',
     'next_action': '$next_action',
     'checked_at': '$(ts_now)'
 }

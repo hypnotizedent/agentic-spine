@@ -23,6 +23,7 @@ python3 - "$REGISTRY" "$DOMAIN_PROFILES" "$AGENT_PROFILES" <<'PY'
 from __future__ import annotations
 
 import sys
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -30,6 +31,7 @@ import yaml
 registry_path = Path(sys.argv[1])
 domain_profiles_path = Path(sys.argv[2])
 agent_profiles_path = Path(sys.argv[3])
+policy_path = registry_path.parent / "project.attach.link.policy.yaml"
 
 
 def load_yaml(path: Path):
@@ -40,6 +42,10 @@ def load_yaml(path: Path):
 registry = load_yaml(registry_path)
 domain_profiles = load_yaml(domain_profiles_path)
 agent_profiles = load_yaml(agent_profiles_path)
+policy_doc = load_yaml(policy_path) if policy_path.is_file() else {}
+policy = policy_doc.get("policy") or {}
+attach_filename = str(policy.get("attach_filename", ".spine-link.yaml")).strip() or ".spine-link.yaml"
+require_git_root = bool(policy.get("repo_path_must_be_git_root", True))
 
 agents = registry.get("agents") or []
 if not isinstance(agents, list):
@@ -56,6 +62,20 @@ errors: list[str] = []
 checked = 0
 
 required = ["repo_path", "project_id", "domain", "agent_id", "gate_pack", "verify_command", "governance_bundle", "spine_link_version"]
+
+
+def resolve_git_root(path: Path):
+    proc = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    if not out:
+        return None
+    return Path(out).resolve()
 
 for agent in agents:
     if not isinstance(agent, dict):
@@ -87,6 +107,18 @@ for agent in agents:
         errors.append(f"{aid}: repo_path must be absolute under /Users/ronnyworks/code/ (got: {repo_path})")
         continue
 
+    repo_dir = Path(repo_path).resolve()
+    if require_git_root:
+        git_root = resolve_git_root(repo_dir)
+        if git_root is None:
+            errors.append(f"{aid}: project_binding.repo_path is not a git worktree root (got: {repo_path})")
+            continue
+        if git_root != repo_dir:
+            errors.append(
+                f"{aid}: project_binding.repo_path must be repository root (got: {repo_path}, root: {git_root})"
+            )
+            continue
+
     if bdomain != adomain:
         errors.append(f"{aid}: project_binding.domain '{bdomain}' must match agent domain '{adomain}'")
 
@@ -98,7 +130,7 @@ for agent in agents:
             f"{aid}: project_binding.gate_pack '{bgate_pack}' does not resolve to domain pack or agent pack"
         )
 
-    link_path = Path(repo_path) / ".spine-link.yaml"
+    link_path = repo_dir / attach_filename
     if not link_path.is_file():
         errors.append(f"{aid}: missing attach file: {link_path}")
         continue

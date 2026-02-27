@@ -40,4 +40,4 @@ cd /Users/ronnyworks/code/agentic-spine
 
 `schema.conventions.audit` writes a report to:
 
-- `/Users/ronnyworks/code/agentic-spine/docs/governance/_audits/SPINE_SCHEMA_CONVENTIONS_AUDIT_<YYYYMMDD>.md`
+- `/Users/ronnyworks/code/agentic-spine/receipts/audits/governance/SPINE_SCHEMA_CONVENTIONS_AUDIT_<YYYYMMDD>.md`

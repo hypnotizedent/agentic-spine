@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
+POLICY="$ROOT/ops/bindings/project.attach.link.policy.yaml"
 CHECK_MODE=0
 
 usage() {
@@ -41,10 +42,11 @@ done
   exit 1
 }
 
-python3 - "$REGISTRY" "$CHECK_MODE" <<'PY'
+python3 - "$REGISTRY" "$CHECK_MODE" "$POLICY" <<'PY'
 from __future__ import annotations
 
 import sys
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +54,7 @@ import yaml
 
 REGISTRY = Path(sys.argv[1]).resolve()
 CHECK_MODE = sys.argv[2] == "1"
+POLICY = Path(sys.argv[3]).resolve()
 
 ROOT = REGISTRY.parents[2]
 ROOT_STR = str(ROOT)
@@ -82,12 +85,34 @@ def dump_yaml(payload: dict[str, Any]) -> str:
 with REGISTRY.open("r", encoding="utf-8") as f:
     doc = yaml.safe_load(f) or {}
 
+policy_doc: dict[str, Any] = {}
+if POLICY.is_file():
+    with POLICY.open("r", encoding="utf-8") as f:
+        policy_doc = yaml.safe_load(f) or {}
+policy = policy_doc.get("policy") or {}
+ATTACH_FILENAME = str(policy.get("attach_filename", ".spine-link.yaml")).strip() or ".spine-link.yaml"
+REPO_PATH_MUST_BE_GIT_ROOT = bool(policy.get("repo_path_must_be_git_root", True))
+
 agents = doc.get("agents") or []
 if not isinstance(agents, list):
     fail("agents.registry.yaml has invalid agents[] payload")
 
 errors: list[str] = []
 updates: list[Path] = []
+
+
+def resolve_git_root(path: Path) -> Path | None:
+    proc = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    if not out:
+        return None
+    return Path(out).resolve()
 
 for agent in agents:
     if not isinstance(agent, dict):
@@ -117,6 +142,18 @@ for agent in agents:
         )
         continue
 
+    repo_dir = Path(repo_path).resolve()
+    if REPO_PATH_MUST_BE_GIT_ROOT:
+        git_root = resolve_git_root(repo_dir)
+        if git_root is None:
+            errors.append(f"{agent_id}: project_binding.repo_path is not a git worktree root (got: {repo_path})")
+            continue
+        if git_root != repo_dir:
+            errors.append(
+                f"{agent_id}: project_binding.repo_path must be repository root (got: {repo_path}, root: {git_root})"
+            )
+            continue
+
     if str(project_binding.get("agent_id", "")).strip() != agent_id:
         errors.append(
             f"{agent_id}: project_binding.agent_id must match agent id (got: {project_binding.get('agent_id')})"
@@ -128,7 +165,7 @@ for agent in agents:
         errors.append(f"{agent_id}: project_binding.governance_bundle must be a non-empty list")
         continue
 
-    link_path = Path(repo_path) / ".spine-link.yaml"
+    link_path = repo_dir / ATTACH_FILENAME
 
     payload: dict[str, Any] = {
         "status": "generated",

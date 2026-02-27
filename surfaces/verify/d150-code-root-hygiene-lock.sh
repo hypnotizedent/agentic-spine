@@ -49,7 +49,7 @@ if (( ${#VIOLATIONS[@]} > 0 )); then
   echo "ENFORCEMENT: Agent-generated documentation must use the mailroom:" >&2
   echo "  Reports  → mailroom/outbox/reports/" >&2
   echo "  Proposals → mailroom/outbox/proposals/" >&2
-  echo "  Audits   → docs/governance/_audits/" >&2
+  echo "  Audits   → receipts/audits/governance/" >&2
   echo "  Use: ./bin/ops cap run proposals.submit \"description\"" >&2
   exit 1
 fi
