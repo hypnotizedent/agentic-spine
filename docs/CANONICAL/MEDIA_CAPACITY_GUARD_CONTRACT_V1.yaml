@@ -1,0 +1,74 @@
+status: authoritative
+owner: "@ronny"
+last_verified: "2026-02-27"
+scope: media-capacity-guard
+version: "v1"
+summary: "Canonical governance contract for media pool capacity ownership, drift detection, and lifecycle reconciliation."
+
+targets:
+  storage_host_id: pve
+  pools:
+    media:
+      warn_pct: 80
+      fail_pct: 85
+    md1400:
+      role: sibling_capacity_reference
+
+staleness:
+  stale_days: 7
+  stale_requires:
+    - open_owning_gap
+    - active_owning_loop
+    - downward_trend_evidence_within_days: 7
+
+ownership:
+  owning_terminal: SPINE-EXECUTION-01
+  owning_loop_id: LOOP-INFRA-MEDIA-CAPACITY-GUARD-20260227
+  owning_loop_prefix: LOOP-INFRA-MEDIA-CAPACITY-GUARD-
+
+protected_no_touch:
+  loops:
+    - LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226
+  gaps:
+    - GAP-OP-973
+  notes:
+    - "Do not mutate active EWS lane artifacts."
+    - "Do not mutate active MD1400 rsync lane artifacts."
+
+gates:
+  D257:
+    id: D257
+    name: media-capacity-guard-lock
+    policy_mode: report
+    script: surfaces/verify/d257-media-capacity-guard-lock.sh
+    structured_reasons:
+      - critical_breach
+      - stale_unowned
+      - threshold_breach
+    fail_conditions:
+      - "media >= 85%"
+      - "media >= 80% with no open owning gap"
+      - "media >= 80% older than stale_days without downward trend evidence"
+
+lifecycle_wrapper:
+  capability_id: infra.media.capacity.guard.reconcile
+  script: ops/plugins/infra/bin/infra-media-capacity-guard-reconcile
+  required_behavior:
+    - "Run D257 in report mode for deterministic finding extraction"
+    - "No mutation when D257 PASS"
+    - "Open or update exactly one owning gap when WARN/FAIL"
+    - "Ensure owning loop scope exists"
+    - "Emit HW brief line for session.start"
+
+session_start_contract:
+  line_shape: "HW: media=<cap>% <state> | md1400=<cap>% | capacity_gap=<id|none> | age=<days>"
+  unknown_fallback: "HW: UNKNOWN (media capacity brief unavailable)"
+
+enforce_promotion_criteria:
+  required:
+    - "D257 behavior validated in report mode with stable outputs"
+    - "verify.pack.run mint passes"
+    - "verify.pack.run communications passes"
+    - "Master receipt decision=READY_FOR_ENFORCE_PROMOTION"
+  on_fail:
+    decision: HOLD_WITH_BLOCKERS
