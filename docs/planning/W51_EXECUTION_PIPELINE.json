@@ -1,0 +1,303 @@
+{
+  "pipeline_meta": {
+    "generated_at": "2026-02-27T03:56:00Z",
+    "loop_id": "LOOP-SPINE-FOUNDATIONAL-FORENSIC-UPGRADE-20260227",
+    "execution_window": "Sat 2026-03-01 - Sun 2026-03-02",
+    "mode": "autonomous_execution_ready"
+  },
+  "readiness_score": {
+    "overall": 78,
+    "factors": {
+      "container_health": 70,
+      "governance_coverage": 95,
+      "vm_governance": 100,
+      "storage_visibility": 60,
+      "automation_coverage": 75
+    }
+  },
+  "protected_lanes": [
+    "LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226",
+    "GAP-OP-973",
+    "ews-import",
+    "md1400-rsync"
+  ],
+  "waves": [
+    {
+      "wave_id": "WAVE_1",
+      "name": "Container Health Restoration",
+      "scheduled": "Sat 09:00-12:00",
+      "objective": "Restore all container health probes to healthy status",
+      "actions": [
+        {
+          "action_id": "N01",
+          "problem": "Stopped containers with failing health probes",
+          "type": "decision_required",
+          "options": [
+            {"option": "A", "description": "Restart containers (order-intake, quote-page, files-api)"},
+            {"option": "B", "description": "Disable health probes for stopped containers"}
+          ],
+          "verification": "infra.docker_host.status shows OK for all probes",
+          "rollback": "docker stop <container>"
+        },
+        {
+          "action_id": "N02",
+          "problem": "minio image 173 days old",
+          "type": "command",
+          "commands": [
+            "ssh docker-host 'docker pull minio/minio:latest'",
+            "ssh docker-host 'cd /opt/mint-os && docker compose up -d minio'"
+          ],
+          "verification": "services.health.status shows minio OK",
+          "rollback": "docker tag minio/minio:previous minio/minio:latest"
+        },
+        {
+          "action_id": "N04",
+          "problem": "Containers exited with OOM (137)",
+          "type": "investigation",
+          "commands": [
+            "ssh docker-host 'docker inspect order-intake --format \"{{.HostConfig.Memory}}\"'",
+            "ssh docker-host 'docker inspect files-api --format \"{{.HostConfig.Memory}}\"'",
+            "ssh docker-host 'docker inspect mint-os-job-estimator --format \"{{.HostConfig.Memory}}\"'"
+          ],
+          "output": "Report memory limits, recommend adjustments",
+          "rollback": "N/A (read-only investigation)"
+        }
+      ],
+      "exit_criteria": {
+        "check": "infra.docker_host.status",
+        "expected": "PASS"
+      }
+    },
+    {
+      "wave_id": "WAVE_2",
+      "name": "MD1400 Storage Systemization",
+      "scheduled": "Sat 13:00-17:00",
+      "objective": "Establish MD1400 capacity monitoring foundation",
+      "actions": [
+        {
+          "action_id": "N03",
+          "problem": "MD1400 capacity unknown",
+          "type": "manual_check",
+          "commands": [
+            "ssh pve 'lsblk | grep -A20 sd'",
+            "ssh pve 'df -h | grep -E \"md1400|sd[a-z]\"'"
+          ],
+          "output_artifact": "docs/planning/MD1400_CAPACITY_BASELINE.md",
+          "rollback": "N/A (documentation only)"
+        },
+        {
+          "action_id": "W01",
+          "problem": "No MD1400 capacity alerting",
+          "type": "capability_creation",
+          "capability_id": "infra.storage.md1400.capacity",
+          "script_path": "ops/plugins/infra/bin/infra-storage-md1400-capacity",
+          "gate_linkage": ["STOR-004", "STOR-007", "STOR-008"],
+          "commands": [
+            "Create script at ops/plugins/infra/bin/infra-storage-md1400-capacity",
+            "Add capability entry to ops/capabilities.yaml",
+            "Link to gates in gate.registry.yaml"
+          ],
+          "verification": "./bin/ops cap show infra.storage.md1400.capacity",
+          "rollback": "Remove from capabilities.yaml, delete script"
+        }
+      ],
+      "exit_criteria": {
+        "check": "./bin/ops cap show infra.storage.md1400.capacity",
+        "expected": "Capability exists"
+      }
+    },
+    {
+      "wave_id": "WAVE_3",
+      "name": "Media & Service Diagnostics",
+      "scheduled": "Sat 18:00-21:00",
+      "objective": "Create diagnostic capabilities for common issues",
+      "actions": [
+        {
+          "action_id": "W02",
+          "problem": "No media playback diagnostics",
+          "type": "capability_creation",
+          "capability_id": "media.playback.diagnose",
+          "script_path": "ops/plugins/media/bin/media-playback-diagnose",
+          "commands": [
+            "Create script that checks jellyfin logs, codec status, transcode queue",
+            "Add capability entry to ops/capabilities.yaml"
+          ],
+          "verification": "./bin/ops cap run media.playback.diagnose",
+          "rollback": "Remove from capabilities.yaml, delete script"
+        },
+        {
+          "action_id": "W03",
+          "problem": "Slow navidrome response (3165ms)",
+          "type": "investigation",
+          "commands": [
+            "ssh streaming-stack 'docker logs navidrome --tail 100'",
+            "ssh streaming-stack 'docker stats navidrome --no-stream'"
+          ],
+          "output": "Report resource usage, recommend adjustments",
+          "rollback": "N/A (investigation only)"
+        },
+        {
+          "action_id": "W06",
+          "problem": "No service diagnosis capability",
+          "type": "capability_creation",
+          "capability_id": "services.health.diagnose",
+          "script_path": "ops/plugins/services/bin/services-health-diagnose",
+          "commands": [
+            "Create script that analyzes failed probes, logs, container status",
+            "Add capability entry to ops/capabilities.yaml"
+          ],
+          "verification": "./bin/ops cap run services.health.diagnose",
+          "rollback": "Remove from capabilities.yaml, delete script"
+        }
+      ],
+      "exit_criteria": {
+        "checks": [
+          "./bin/ops cap show media.playback.diagnose",
+          "./bin/ops cap show services.health.diagnose"
+        ],
+        "expected": "Both capabilities exist"
+      }
+    },
+    {
+      "wave_id": "WAVE_4",
+      "name": "Governance Hardening",
+      "scheduled": "Sun 09:00-12:00",
+      "objective": "Close governance gaps and improve freshness",
+      "actions": [
+        {
+          "action_id": "N05",
+          "problem": "Governance docs missing last_verified",
+          "type": "documentation",
+          "commands": [
+            "For each docs/governance/*.md without last_verified, add: last_verified: 2026-03-01"
+          ],
+          "verification": "grep -L 'last_verified' docs/governance/*.md returns empty",
+          "rollback": "git checkout -- docs/governance/"
+        },
+        {
+          "action_id": "W07",
+          "problem": "No doc freshness automation",
+          "type": "capability_creation",
+          "capability_id": "governance.freshness.check",
+          "script_path": "ops/plugins/governance/bin/governance-freshness-check",
+          "commands": [
+            "Create script that checks 90-day freshness policy",
+            "Add capability entry to ops/capabilities.yaml"
+          ],
+          "verification": "./bin/ops cap run governance.freshness.check",
+          "rollback": "Remove from capabilities.yaml, delete script"
+        },
+        {
+          "action_id": "W10",
+          "problem": "vm.lifecycle.* file overlap",
+          "type": "analysis",
+          "commands": [
+            "diff ops/bindings/vm.lifecycle.yaml ops/bindings/vm.lifecycle.contract.yaml"
+          ],
+          "output": "Recommendation for consolidation",
+          "rollback": "N/A (analysis only)"
+        }
+      ],
+      "exit_criteria": {
+        "check": "./bin/ops cap run governance.freshness.check",
+        "expected": "0 stale documents"
+      }
+    },
+    {
+      "wave_id": "WAVE_5",
+      "name": "Backup & Verification",
+      "scheduled": "Sun 13:00-16:00",
+      "objective": "Improve backup visibility and reporting",
+      "actions": [
+        {
+          "action_id": "W05",
+          "problem": "No backup summary capability",
+          "type": "capability_creation",
+          "capability_id": "backup.verify.report",
+          "script_path": "ops/plugins/backup/bin/backup-verify-report",
+          "commands": [
+            "Create script that summarizes last verify run, failures, recommendations",
+            "Add capability entry to ops/capabilities.yaml"
+          ],
+          "verification": "./bin/ops cap run backup.verify.report",
+          "rollback": "Remove from capabilities.yaml, delete script"
+        },
+        {
+          "action_id": "BACKUP_VERIFY",
+          "problem": "Run full backup verification",
+          "type": "command",
+          "commands": [
+            "./bin/ops cap run backup.verify.all"
+          ],
+          "verification": "Exit code 0, receipt generated",
+          "rollback": "N/A (verification only)"
+        }
+      ],
+      "exit_criteria": {
+        "check": "./bin/ops cap show backup.verify.report",
+        "expected": "Capability exists"
+      }
+    },
+    {
+      "wave_id": "WAVE_6",
+      "name": "Documentation & Closeout",
+      "scheduled": "Sun 17:00-19:00",
+      "objective": "Document findings and prepare for 2-week hardening",
+      "actions": [
+        {
+          "action_id": "LOOP_UPDATE",
+          "problem": "Update loop with completed phases",
+          "type": "documentation",
+          "commands": [
+            "Update mailroom/state/loop-scopes/LOOP-SPINE-FOUNDATIONAL-FORENSIC-UPGRADE-20260227-20260227.scope.md"
+          ],
+          "rollback": "git checkout -- mailroom/state/loop-scopes/"
+        },
+        {
+          "action_id": "CLOSEOUT",
+          "problem": "Run capability closeout",
+          "type": "command",
+          "commands": [
+            "./bin/ops cap run loops.status",
+            "./bin/ops cap run gaps.status",
+            "./bin/ops cap run verify.pack.run mint",
+            "./bin/ops cap run verify.pack.run communications"
+          ],
+          "verification": "All commands return exit code 0",
+          "rollback": "N/A (read-only status checks)"
+        }
+      ],
+      "exit_criteria": {
+        "checks": [
+          "./bin/ops cap run gaps.status | grep -c 'open' | grep -q '^1$'"
+        ],
+        "expected": "No new open gaps"
+      }
+    }
+  ],
+  "two_week_hardening_actions": [
+    {"action_id": "T01", "description": "Create infra.storage.md1400.balance", "effort": "8h", "depends_on": ["W01"]},
+    {"action_id": "T02", "description": "Create secrets.rotate capability", "effort": "8h", "depends_on": []},
+    {"action_id": "T03", "description": "Create secrets.sync capability", "effort": "6h", "depends_on": []},
+    {"action_id": "T04", "description": "Automate session initialization hook", "effort": "4h", "depends_on": ["W07"]},
+    {"action_id": "T05", "description": "Create gate.coverage.audit capability", "effort": "4h", "depends_on": []},
+    {"action_id": "T06", "description": "Automate finance reconciliation", "effort": "6h", "depends_on": []},
+    {"action_id": "T07", "description": "Add HA escalation paths", "effort": "4h", "depends_on": []},
+    {"action_id": "T08", "description": "Create backup access procedures", "effort": "8h", "depends_on": ["WAVE_1", "WAVE_2", "WAVE_3", "WAVE_4", "WAVE_5", "WAVE_6"]},
+    {"action_id": "T09", "description": "Document media library decision criteria", "effort": "4h", "depends_on": []},
+    {"action_id": "T10", "description": "Create incident response playbooks", "effort": "6h", "depends_on": []},
+    {"action_id": "T11", "description": "Reduce manual operation ratio to 20%", "effort": "40h", "depends_on": ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T10"]},
+    {"action_id": "T12", "description": "Close 12 STOR gate gaps", "effort": "6h", "depends_on": ["W01"]}
+  ],
+  "success_criteria": {
+    "container_health": {"target": "100%", "check": "infra.docker_host.status"},
+    "md1400_visibility": {"target": "capability exists", "check": "./bin/ops cap show infra.storage.md1400.capacity"},
+    "governance_freshness": {"target": "100%", "check": "./bin/ops cap run governance.freshness.check"},
+    "backup_reporting": {"target": "capability exists", "check": "./bin/ops cap show backup.verify.report"},
+    "no_new_gaps": {"target": 0, "check": "./bin/ops cap run gaps.status"}
+  },
+  "attestation": {
+    "no_mutations_in_planning": true,
+    "active_lanes_untouched": true
+  }
+}
