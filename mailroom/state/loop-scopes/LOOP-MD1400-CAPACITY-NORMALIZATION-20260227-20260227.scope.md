@@ -20,9 +20,9 @@ objective: Normalize MD1400 capacity into governed runtime, reduce media pressur
 Normalize MD1400 capacity into governed runtime, reduce media pressure, and eliminate storage drift.
 
 ## Phases
-- P0: capture and classify findings
-- P1: implement changes
-- P2: verify and close out
+- Step-0: capture and classify findings
+- Step-1: implement changes
+- Step-2: verify and close out
 
 ## Success Criteria
 - MD1400 pool governed and active
@@ -31,7 +31,7 @@ Normalize MD1400 capacity into governed runtime, reduce media pressure, and elim
 
 ## Execution Evidence (2026-02-27)
 
-### Wave 0: Baseline + Drift (Read-Only)
+### Stage 0: Baseline + Drift (Read-Only)
 - `CAP-20260226-225229__session.start__Rqmns59757`
 - `CAP-20260226-225246__infra.hypervisor.identity__Rrnm565483`
 - `CAP-20260226-225251__infra.proxmox.maintenance.precheck__Rim0h65784`
@@ -42,7 +42,7 @@ Normalize MD1400 capacity into governed runtime, reduce media pressure, and elim
 - `CAP-20260226-225419__verify.pack.run__Rdc6081959` (media pass)
 - `CAP-20260226-225419__gaps.status__Ra99381969`
 
-### Wave 1: Governance Lane Registration
+### Stage 1: Governance Lane Registration
 - `CAP-20260226-225459__loops.create__Rn7ga87197`
 - `CAP-20260226-225503__loops.background.start__Rv04487779`
 - `CAP-20260226-225508__gaps.quick__Rngws88679` -> `GAP-OP-1033`
@@ -50,22 +50,22 @@ Normalize MD1400 capacity into governed runtime, reduce media pressure, and elim
 - `CAP-20260226-225521__gaps.quick__Rnl0x90172` -> `GAP-OP-1035`
 - `CAP-20260226-225529__gaps.quick__R9ebn90925` -> `GAP-OP-1036`
 
-### Wave 2: Deterministic MD1400 Evidence Pack
+### Stage 2: Deterministic MD1400 Evidence Pack
 - `CAP-20260226-225541__infra.storage.audit.snapshot__R6d9q93895`
 - Raw command artifact bundle: `docs/planning/_artifacts/md1400-normalization-20260227/`
 
-### Wave 3: Drift Hygiene Before Provision
+### Stage 3: Drift Hygiene Before Provision
 - `CAP-20260226-225711__domain-inventory-refresh__Rda9997576`
 - `CAP-20260226-225824__verify.pack.run__R4qtk1777` (infra 41/41 PASS, D188 cleared)
 - pm80xx stale live config removed on `pve`; backup retained at `/root/md1400-normalize-backup/pm80xx.conf`
 
-### Wave 4 Gate
+### Stage 4 Gate
 - `ALLOW_MD1400_PROVISION=<unset>`
 - Destructive provisioning intentionally not executed in this run.
 - `CAP-20260226-230033__verify.pack.run__Rzx969303` (media 16/16 PASS)
 - `CAP-20260226-230033__gaps.status__Rsj7o9304` (0 orphaned gaps)
 
-### Wave 4 Activation (Approved + Executed)
+### Stage 4 Activation (Approved + Executed)
 - operator approval received: `ALLOW_MD1400_PROVISION=yes`
 - `CAP-20260226-230842__infra.storage.audit.snapshot__Ralj748827` (preflight receipt)
 - initial destructive attempt stopped on non-zero `sgdisk` (gate honored)
@@ -87,14 +87,14 @@ Normalize MD1400 capacity into governed runtime, reduce media pressure, and elim
 - note: `gaps.close` attempt for `GAP-OP-1033` required manual approval and did not mutate:
   - `CAP-20260226-231513__gaps.close__R0tqi73349`
 
-### Post-Wave 4 Operator Closure Update
+### Post-Stage 4 Operator Closure Update
 - `CAP-20260226-231925__gaps.close__Rapck1117` -> `GAP-OP-1033` fixed
 - `CAP-20260226-231937__gaps.status__R56tz1732` confirms `GAP-OP-1036` remains open
 - verify remains green:
   - `CAP-20260226-231801__verify.pack.run__Rd8dl91088` (`infra` 41/41 PASS)
   - `CAP-20260226-231801__verify.pack.run__Rqawc91089` (`media` 16/16 PASS)
 
-### Wave 5 Copy-First Migration (In Progress)
+### Stage 5 Copy-First Migration (In Progress)
 - `CAP-20260226-232501__infra.storage.audit.snapshot__R4drt6444` (wave entry receipt)
 - forensic source snapshot created: `media@forensic-20260226-2325`
 - dry-run rsync baseline captured (`16-wave5-rsync-dryrun-stats.txt`; 0 deletions)
@@ -110,7 +110,7 @@ Normalize MD1400 capacity into governed runtime, reduce media pressure, and elim
     - `docs/planning/_artifacts/md1400-normalization-20260227/23-wave5-closeout-watcher.pid`
     - `docs/planning/_artifacts/md1400-normalization-20260227/23-wave5-closeout-watcher.log`
   - status: watcher did not remain active; closeout artifacts `20`-`22` and `24`-`27` are still pending and will be executed when rsync completes.
-- source data deletion in Wave 5: NO
+- source data deletion in Stage 5: NO
 
 ### Post-Validation Gap Closures (Non-Destructive)
 - `CAP-20260226-230652__gaps.close__Rvdxw30728` -> `GAP-OP-1034` fixed
