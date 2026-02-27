@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # TRIAGE: n8n workflows must not call Resend API directly. Transactional sends must route through spine or use the official Resend n8n node with governed configuration.
-# D267: n8n-resend-direct-bypass-lock
+# D272: n8n-resend-direct-bypass-lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
 
 fail() {
-  echo "D267 FAIL: $*" >&2
+  echo "D272 FAIL: $*" >&2
   exit 1
 }
 
@@ -25,7 +25,7 @@ N8N_DIRS=()
 [[ -d "$ROOT/ops/plugins/n8n" ]] && N8N_DIRS+=("$ROOT/ops/plugins/n8n")
 
 if [[ ${#N8N_DIRS[@]} -eq 0 ]]; then
-  echo "D267 PASS: n8n-resend-direct-bypass-lock valid (no n8n workflow directories found)"
+  echo "D272 PASS: n8n-resend-direct-bypass-lock valid (no n8n workflow directories found)"
   exit 0
 fi
 
@@ -57,15 +57,15 @@ if [[ -f "$CONTRACT" ]]; then
 
   if [[ $bypass_count -gt 0 ]]; then
     if [[ "$bypass_status" == "ungoverned_bypass" && -n "$gap_ref" && "$gap_ref" != "null" ]]; then
-      echo "D267 REPORT: n8n bypass detected but documented (status=$bypass_status, gap=$gap_ref, hits=$bypass_count)"
+      echo "D272 REPORT: n8n bypass detected but documented (status=$bypass_status, gap=$gap_ref, hits=$bypass_count)"
       exit 0
     fi
   fi
 fi
 
 if [[ $violations -gt 0 ]]; then
-  echo "D267 FAIL: n8n-resend-direct-bypass-lock: $violations violation(s) (undocumented bypass)" >&2
+  echo "D272 FAIL: n8n-resend-direct-bypass-lock: $violations violation(s) (undocumented bypass)" >&2
   exit 1
 fi
 
-echo "D267 PASS: n8n-resend-direct-bypass-lock valid (bypass_hits=$bypass_count)"
+echo "D272 PASS: n8n-resend-direct-bypass-lock valid (bypass_hits=$bypass_count)"

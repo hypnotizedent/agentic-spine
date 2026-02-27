@@ -47,12 +47,12 @@ parent_loop: LOOP-SPINE-RESEND-CANONICAL-UPGRADE-20260227-20260301-20260227
 
 | ID | Name | Mode | Status |
 |----|------|------|--------|
-| D263 | resend-mcp-transactional-send-authority-lock | report | PASS |
-| D264 | communications-resend-webhook-schema-lock | report | PASS |
-| D265 | communications-contacts-governance-lock | report | PASS |
-| D266 | communications-broadcast-governance-lock | report | PASS |
-| D267 | n8n-resend-direct-bypass-lock | report | REPORT (documented bypass) |
-| D268 | communications-resend-expansion-contract-parity-lock | report | PASS |
+| D268 | resend-mcp-transactional-send-authority-lock | report | PASS |
+| D269 | communications-resend-webhook-schema-lock | report | PASS |
+| D270 | communications-contacts-governance-lock | report | PASS |
+| D271 | communications-broadcast-governance-lock | report | PASS |
+| D272 | n8n-resend-direct-bypass-lock | report | REPORT (documented bypass) |
+| D273 | communications-resend-expansion-contract-parity-lock | report | PASS |
 
 ## Files Changed
 
@@ -64,16 +64,16 @@ parent_loop: LOOP-SPINE-RESEND-CANONICAL-UPGRADE-20260227-20260301-20260227
 - `docs/governance/domains/communications/RUNBOOK.md` (UPDATED)
 - `ops/agents/communications-agent.contract.md` (UPDATED)
 - `ops/bindings/operational.gaps.yaml` (UPDATED: +6 gaps, 2 closed)
-- `ops/bindings/gate.registry.yaml` (UPDATED: +6 gates D263-D268)
+- `ops/bindings/gate.registry.yaml` (UPDATED: +6 gates D268-D273)
 - `ops/bindings/gate.execution.topology.yaml` (UPDATED: +6 topology entries)
 - `ops/bindings/gate.domain.profiles.yaml` (UPDATED: communications +6 gates)
 - `ops/bindings/gate.agent.profiles.yaml` (UPDATED: communications-agent +6 gates)
-- `surfaces/verify/d263-resend-mcp-transactional-send-authority-lock.sh` (NEW)
-- `surfaces/verify/d264-communications-resend-webhook-schema-lock.sh` (NEW)
-- `surfaces/verify/d265-communications-contacts-governance-lock.sh` (NEW)
-- `surfaces/verify/d266-communications-broadcast-governance-lock.sh` (NEW)
-- `surfaces/verify/d267-n8n-resend-direct-bypass-lock.sh` (NEW)
-- `surfaces/verify/d268-communications-resend-expansion-contract-parity-lock.sh` (NEW)
+- `surfaces/verify/d268-resend-mcp-transactional-send-authority-lock.sh` (NEW)
+- `surfaces/verify/d269-communications-resend-webhook-schema-lock.sh` (NEW)
+- `surfaces/verify/d270-communications-contacts-governance-lock.sh` (NEW)
+- `surfaces/verify/d271-communications-broadcast-governance-lock.sh` (NEW)
+- `surfaces/verify/d272-n8n-resend-direct-bypass-lock.sh` (NEW)
+- `surfaces/verify/d273-communications-resend-expansion-contract-parity-lock.sh` (NEW)
 - `mailroom/state/loop-scopes/LOOP-SPINE-RESEND-CANONICAL-UPGRADE-20260227-20260301-20260227.scope.md` (NEW)
 
 ## Acceptance Matrix Summary (10 rows)
@@ -122,8 +122,8 @@ parent_loop: LOOP-SPINE-RESEND-CANONICAL-UPGRADE-20260227-20260301-20260227
 
 ## Blockers / Deferred
 
-- GAP-OP-1026: n8n A01 workflow still calls Resend API directly. D267 reports the bypass but does not block (report mode). Migration to official n8n Resend node or spine capability deferred to next wave.
-- D263-D268: all in report mode. Promotion to enforce deferred until n8n bypass is remediated.
+- GAP-OP-1026: n8n A01 workflow still calls Resend API directly. D272 reports the bypass but does not block (report mode). Migration to official n8n Resend node or spine capability deferred to next wave.
+- D268-D273: all in report mode. Promotion to enforce deferred until n8n bypass is remediated.
 
 ## Final Decision: READY_FOR_NEXT_WAVE
 

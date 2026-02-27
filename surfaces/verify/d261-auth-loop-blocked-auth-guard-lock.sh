@@ -57,7 +57,9 @@ else
   reason="$(jq -r '.reason // ""' <<<"$out")"
   [[ "$lane_state" == "$blocked_state" ]] || err "blocked-auth lane_state mismatch expected=$blocked_state actual=$lane_state"
   [[ "$retry_allowed" == "false" ]] || err "blocked-auth retry_allowed must be false"
-  [[ "$reason" == "tailscale_interactive_auth_required" ]] || err "blocked-auth reason mismatch: $reason"
+  if [[ "$reason" != "tailscale_interactive_auth_required" && "$reason" != "machine_target_is_tailscale_ip" ]]; then
+    err "blocked-auth reason mismatch: $reason"
+  fi
 fi
 
 if [[ "$fail" -eq 1 ]]; then

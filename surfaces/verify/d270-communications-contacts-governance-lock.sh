@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # TRIAGE: Contacts lifecycle governance must require manual approval, rate guards, and suppression enforcement before any contact mutations are enabled.
-# D265: communications-contacts-governance-lock
+# D270: communications-contacts-governance-lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 fail() {
-  echo "D265 FAIL: $*" >&2
+  echo "D270 FAIL: $*" >&2
   exit 1
 }
 
 command -v yq >/dev/null 2>&1 || fail "missing command: yq"
 command -v rg >/dev/null 2>&1 || fail "missing command: rg"
 
-CONTRACT="$ROOT/docs/canonical/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml"
+CONTRACT="$ROOT/docs/CANONICAL/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml"
 [[ -f "$CONTRACT" ]] || fail "expansion contract missing: $CONTRACT"
 
 violations=0
@@ -52,7 +52,7 @@ gap_ref=$(yq e '.contacts.gap' "$CONTRACT" 2>/dev/null)
 [[ -n "$gap_ref" && "$gap_ref" != "null" ]] || fail_v "contacts.gap reference must be set"
 
 # Check 4: MCP coexistence policy classifies contact mutations as governed
-POLICY="$ROOT/docs/canonical/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md"
+POLICY="$ROOT/docs/CANONICAL/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md"
 if [[ -f "$POLICY" ]]; then
   if ! rg -q 'create_contact.*manual approval' "$POLICY" 2>/dev/null; then
     fail_v "MCP coexistence policy must classify create_contact as requiring manual approval"
@@ -60,8 +60,8 @@ if [[ -f "$POLICY" ]]; then
 fi
 
 if [[ $violations -gt 0 ]]; then
-  echo "D265 FAIL: contacts governance lock: $violations violation(s)" >&2
+  echo "D270 FAIL: contacts governance lock: $violations violation(s)" >&2
   exit 1
 fi
 
-echo "D265 PASS: contacts governance lock valid (status=$contacts_status, safety_reqs=$req_count, gap=$gap_ref)"
+echo "D270 PASS: contacts governance lock valid (status=$contacts_status, safety_reqs=$req_count, gap=$gap_ref)"

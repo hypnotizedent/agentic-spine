@@ -4,7 +4,7 @@ owner: "@ronny"
 last_verified: 2026-02-27
 scope: resend-mcp-coexistence-policy
 parent_loop: LOOP-SPINE-RESEND-CANONICAL-UPGRADE-20260227-20260301-20260227
-gate_enforcement: D263, D268
+gate_enforcement: D268, D273
 ---
 
 # Communications Resend MCP Coexistence Policy V1
@@ -39,7 +39,7 @@ Claude Desktop / Claude Code
          |--- create_contact       (GOVERNED - manual approval)
          |--- send_email           (FORBIDDEN - spine authority)
          |--- batch_send_emails    (FORBIDDEN - spine authority)
-         |--- send_broadcast       (FORBIDDEN - requires gate D266)
+         |--- send_broadcast       (FORBIDDEN - requires gate D271)
 ```
 
 ## Tool Classification
@@ -67,19 +67,19 @@ Claude Desktop / Claude Code
 
 | Tool | Gate | Condition |
 |------|------|-----------|
-| `create_contact` | D265 | Manual approval, suppression check |
-| `update_contact` | D265 | Manual approval |
-| `remove_contact` | D265 | Manual approval |
-| `create_webhook` | D264 | Manual approval, schema validation |
+| `create_contact` | D270 | Manual approval, suppression check |
+| `update_contact` | D270 | Manual approval |
+| `remove_contact` | D270 | Manual approval |
+| `create_webhook` | D269 | Manual approval, schema validation |
 
 ### Forbidden (spine authority or infrastructure mutation)
 
 | Tool | Reason |
 |------|--------|
-| `send_email` | Transactional send authority is spine-only (D263) |
-| `batch_send_emails` | Transactional send authority is spine-only (D263) |
-| `create_broadcast` | Requires broadcast governance gate (D266) |
-| `send_broadcast` | Requires broadcast governance gate (D266) |
+| `send_email` | Transactional send authority is spine-only (D268) |
+| `batch_send_emails` | Transactional send authority is spine-only (D268) |
+| `create_broadcast` | Requires broadcast governance gate (D271) |
+| `send_broadcast` | Requires broadcast governance gate (D271) |
 | `create_api_key` | Infrastructure mutation |
 | `remove_api_key` | Infrastructure mutation |
 | `create_domain` | Infrastructure mutation |
@@ -88,8 +88,8 @@ Claude Desktop / Claude Code
 
 ## Enforcement
 
-1. **D263** (resend-mcp-transactional-send-authority-lock): Validates no direct Resend MCP `send_email` or `batch_send_emails` calls exist in governed paths.
-2. **D268** (communications-resend-expansion-contract-parity-lock): Validates this policy document and the expansion contract are present and consistent.
+1. **D268** (resend-mcp-transactional-send-authority-lock): Validates no direct Resend MCP `send_email` or `batch_send_emails` calls exist in governed paths.
+2. **D273** (communications-resend-expansion-contract-parity-lock): Validates this policy document and the expansion contract are present and consistent.
 3. **D147** (existing): Validates no direct `api.resend.com` calls outside `ops/plugins/communications/`.
 
 ## Installation Guidance
@@ -115,5 +115,5 @@ The `RESEND_API_KEY` is sourced from Infisical at path `/spine/services/communic
 
 1. **Current (W53)**: Policy documented, gates in report mode, no MCP server installed yet.
 2. **Next wave**: Install Resend MCP server in Claude Desktop with read-only scope.
-3. **Future wave**: Enable governed mutations (contacts) after D265 passes in enforce mode.
-4. **Future wave**: Enable broadcast surface after D266 passes in enforce mode.
+3. **Future wave**: Enable governed mutations (contacts) after D270 passes in enforce mode.
+4. **Future wave**: Enable broadcast surface after D271 passes in enforce mode.

@@ -53,12 +53,12 @@ Resend shipped their "Email for Agents" platform overhaul on 2026-02-26, includi
 
 | ID | Name | Purpose |
 |----|------|---------|
-| D263 | resend-mcp-transactional-send-authority-lock | No Resend MCP send_email in governed paths |
-| D264 | communications-resend-webhook-schema-lock | Webhook event schema contract present |
-| D265 | communications-contacts-governance-lock | Contacts mutations require approval |
-| D266 | communications-broadcast-governance-lock | Broadcast sends require approval + rate guard |
-| D267 | n8n-resend-direct-bypass-lock | n8n must not call Resend API directly |
-| D268 | communications-resend-expansion-contract-parity-lock | Contract + policy docs present and consistent |
+| D273 | resend-mcp-transactional-send-authority-lock | No Resend MCP send_email in governed paths |
+| D269 | communications-resend-webhook-schema-lock | Webhook event schema contract present |
+| D270 | communications-contacts-governance-lock | Contacts mutations require approval |
+| D271 | communications-broadcast-governance-lock | Broadcast sends require approval + rate guard |
+| D272 | n8n-resend-direct-bypass-lock | n8n must not call Resend API directly |
+| D273 | communications-resend-expansion-contract-parity-lock | Contract + policy docs present and consistent |
 
 ## Protected Lanes (NOT TOUCHED)
 
@@ -73,7 +73,7 @@ Resend shipped their "Email for Agents" platform overhaul on 2026-02-26, includi
 2. `docs/CANONICAL/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md`
 3. `docs/planning/W53_RESEND_EXPANSION_AUDIT.md` (this file)
 4. `docs/planning/W53_RESEND_ACCEPTANCE_MATRIX.md`
-5. 6 gate scripts (D263-D268)
+5. 6 gate scripts (D268-D273)
 6. Gate registry + topology + profile wiring
 7. Updated RUNBOOK.md and communications-agent.contract.md
 8. Master receipt

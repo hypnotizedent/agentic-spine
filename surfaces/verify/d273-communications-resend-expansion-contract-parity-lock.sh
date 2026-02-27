@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # TRIAGE: Resend expansion contract and MCP coexistence policy must exist and be internally consistent.
-# D268: communications-resend-expansion-contract-parity-lock
+# D273: communications-resend-expansion-contract-parity-lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 fail() {
-  echo "D268 FAIL: $*" >&2
+  echo "D273 FAIL: $*" >&2
   exit 1
 }
 
@@ -19,8 +19,8 @@ fail_v() {
   violations=$((violations + 1))
 }
 
-CONTRACT="$ROOT/docs/canonical/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml"
-POLICY="$ROOT/docs/canonical/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md"
+CONTRACT="$ROOT/docs/CANONICAL/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml"
+POLICY="$ROOT/docs/CANONICAL/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md"
 PROVIDERS="$ROOT/ops/bindings/communications.providers.contract.yaml"
 
 # Check 1: Both files exist
@@ -29,7 +29,7 @@ PROVIDERS="$ROOT/ops/bindings/communications.providers.contract.yaml"
 [[ -f "$PROVIDERS" ]] || fail_v "provider contract missing: $PROVIDERS"
 
 # Stop early if core files missing
-[[ $violations -gt 0 ]] && { echo "D268 FAIL: $violations file(s) missing" >&2; exit 1; }
+[[ $violations -gt 0 ]] && { echo "D273 FAIL: $violations file(s) missing" >&2; exit 1; }
 
 # Check 2: Contract has all required sections
 for section in transactional_send_authority mcp_coexistence inbound contacts broadcasts n8n_bypass gaps; do
@@ -38,7 +38,7 @@ for section in transactional_send_authority mcp_coexistence inbound contacts bro
 done
 
 # Check 3: Policy references correct gate IDs
-for gate_id in D263 D268; do
+for gate_id in D268 D273; do
   if ! rg -q "$gate_id" "$POLICY" 2>/dev/null; then
     fail_v "policy does not reference gate $gate_id"
   fi
@@ -63,8 +63,8 @@ for tool in send_email batch_send_emails send_broadcast; do
 done
 
 if [[ $violations -gt 0 ]]; then
-  echo "D268 FAIL: expansion contract parity lock: $violations violation(s)" >&2
+  echo "D273 FAIL: expansion contract parity lock: $violations violation(s)" >&2
   exit 1
 fi
 
-echo "D268 PASS: expansion contract parity lock valid (sections=7, gaps=$gap_count, forbidden_tools=3)"
+echo "D273 PASS: expansion contract parity lock valid (sections=7, gaps=$gap_count, forbidden_tools=3)"

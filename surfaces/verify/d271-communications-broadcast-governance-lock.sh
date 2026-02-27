@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # TRIAGE: Broadcast campaign governance must require manual approval, rate guards, budget limits, and suppression enforcement before any broadcast sends are enabled.
-# D266: communications-broadcast-governance-lock
+# D271: communications-broadcast-governance-lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 fail() {
-  echo "D266 FAIL: $*" >&2
+  echo "D271 FAIL: $*" >&2
   exit 1
 }
 
 command -v yq >/dev/null 2>&1 || fail "missing command: yq"
 
-CONTRACT="$ROOT/docs/canonical/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml"
+CONTRACT="$ROOT/docs/CANONICAL/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml"
 [[ -f "$CONTRACT" ]] || fail "expansion contract missing: $CONTRACT"
 
 violations=0
@@ -52,7 +52,7 @@ done < <(yq e '.broadcasts.safety_requirements[]' "$CONTRACT" 2>/dev/null)
 [[ "$has_unsubscribe" == "true" ]] || fail_v "broadcast safety must require unsubscribe link"
 
 # Check 3: MCP coexistence policy classifies broadcast sends as forbidden
-POLICY="$ROOT/docs/canonical/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md"
+POLICY="$ROOT/docs/CANONICAL/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md"
 if [[ -f "$POLICY" ]]; then
   if ! rg -q 'send_broadcast.*FORBIDDEN' "$POLICY" 2>/dev/null; then
     fail_v "MCP coexistence policy must classify send_broadcast as FORBIDDEN"
@@ -64,8 +64,8 @@ gap_ref=$(yq e '.broadcasts.gap' "$CONTRACT" 2>/dev/null)
 [[ -n "$gap_ref" && "$gap_ref" != "null" ]] || fail_v "broadcasts.gap reference must be set"
 
 if [[ $violations -gt 0 ]]; then
-  echo "D266 FAIL: broadcast governance lock: $violations violation(s)" >&2
+  echo "D271 FAIL: broadcast governance lock: $violations violation(s)" >&2
   exit 1
 fi
 
-echo "D266 PASS: broadcast governance lock valid (status=$broadcast_status, safety_reqs=$req_count, gap=$gap_ref)"
+echo "D271 PASS: broadcast governance lock valid (status=$broadcast_status, safety_reqs=$req_count, gap=$gap_ref)"

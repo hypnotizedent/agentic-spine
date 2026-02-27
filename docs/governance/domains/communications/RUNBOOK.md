@@ -92,24 +92,24 @@ Bundle artifact: `mailroom/outbox/alerts/communications/incidents/BUNDLE-<timest
   - No Outlook as automated sender, no stale domains, stack-provider mode parity.
 - `D160 communications-queue-pipeline-lock`
   - V1-V6 queue pipeline integrity: required capabilities, contracts, safety/approval invariants, alerting channel guard.
-- `D263 resend-mcp-transactional-send-authority-lock`
+- `D268 resend-mcp-transactional-send-authority-lock`
   - Transactional email send authority remains spine-only. Resend MCP send_email classified FORBIDDEN.
-- `D264 communications-resend-webhook-schema-lock`
+- `D269 communications-resend-webhook-schema-lock`
   - Webhook event schema requirements documented before ingest surface wiring.
-- `D265 communications-contacts-governance-lock`
+- `D270 communications-contacts-governance-lock`
   - Contacts mutations require manual approval, rate guards, suppression enforcement.
-- `D266 communications-broadcast-governance-lock`
+- `D271 communications-broadcast-governance-lock`
   - Broadcast sends require manual approval, rate/budget guards, suppression, unsubscribe.
-- `D267 n8n-resend-direct-bypass-lock`
+- `D272 n8n-resend-direct-bypass-lock`
   - n8n workflows must not call Resend API directly. Reports if documented bypass with gap.
-- `D268 communications-resend-expansion-contract-parity-lock`
+- `D273 communications-resend-expansion-contract-parity-lock`
   - Expansion contract and MCP coexistence policy must exist and be internally consistent.
 
 ## Resend Expansion
 
 Resend MCP v2.1 coexistence policy is documented at:
-- `docs/canonical/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml`
-- `docs/canonical/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md`
+- `docs/CANONICAL/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml`
+- `docs/CANONICAL/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md`
 
 Spine retains transactional send authority. Resend MCP is scoped to read-only and governed mutations only.
 
