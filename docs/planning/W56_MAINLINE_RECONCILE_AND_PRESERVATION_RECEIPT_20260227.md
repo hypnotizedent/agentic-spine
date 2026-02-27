@@ -36,8 +36,9 @@ scope: w56-mainline-reconcile-and-preservation
 
 - `gate.topology.validate`: `CAP-20260227-175135__gate.topology.validate__Runet43608` (PASS)
 - `verify.pack.run secrets`: `CAP-20260227-175135__verify.pack.run__Rtchi43609` (PASS 23/23)
-- `verify.pack.run communications`: `CAP-20260227-175136__verify.pack.run__Rf6dx43613` (FAIL 31/32)
-  - only fail: `D208` stale HA snapshot age (25.30h > 24h)
+- `verify.pack.run communications` initial: `CAP-20260227-175136__verify.pack.run__Rf6dx43613` (FAIL 31/32; D208 stale age)
+- `calendar.ha.ingest.refresh`: `CAP-20260227-175355__calendar.ha.ingest.refresh__Ri0i069632` (DONE)
+- `verify.pack.run communications` rerun: `CAP-20260227-175357__verify.pack.run__Rtv9169631` (PASS 32/32)
 - `verify.pack.run mint`: `CAP-20260227-175136__verify.pack.run__Rpu3043617` (PASS 38/38)
 - `loops.status`: `CAP-20260227-175136__loops.status__Rd3es43625`
 - `gaps.status`: `CAP-20260227-175136__gaps.status__Rmdhz43623`
@@ -65,7 +66,7 @@ scope: w56-mainline-reconcile-and-preservation
 - Open protected/background lane remains unchanged:
   - `LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226`
   - `GAP-OP-973`
-- `verify.pack.run communications` requires D208 freshness refresh to return full green.
+- Communications pack is fully green after HA ingest refresh.
 
 ## Attestation
 
