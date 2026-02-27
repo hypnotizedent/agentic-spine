@@ -44,6 +44,7 @@
 - `communications.mailboxes.list`
 - `communications.mail.search`
 - `communications.mailarchiver.import.status`
+- `communications.mailarchiver.import.monitor`
 - `communications.mail.send.test`
 - `communications.provider.status`
 - `communications.policy.status`
@@ -76,6 +77,7 @@ Standard operator triage flow when investigating communications health:
 5. **Break-glass flush (manual)**: Run `echo "yes" | ./bin/ops cap run communications.alerts.flush --limit 10` only when immediate manual intervention is required.
 6. **Replay dead-letter (manual)**: Run `echo "yes" | ./bin/ops cap run communications.alerts.deadletter.replay --limit 10` after root cause is fixed.
 7. **Verify delivery**: Run `./bin/ops cap run communications.delivery.log --limit 10` to confirm sends landed.
+8. **Check auth-loop state**: Run `./ops/plugins/communications/bin/communications-mail-archiver-import-monitor --json` and confirm lane state is not `BLOCKED_AUTH`.
 
 ## Alert Intent Queue Triage
 

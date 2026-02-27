@@ -41,6 +41,10 @@ Live pilot requires:
   - Manual approval required.
   - Simulation mode: writes simulated artifact under runtime outbox.
   - Live mode: sends real pilot test message via Microsoft and writes receipt artifact under runtime outbox.
+- `communications.mailarchiver.import.monitor`
+  - Single-flight wrapper for import status checks.
+  - Classifies interactive auth URL/check responses as `BLOCKED_AUTH`.
+  - Writes monitor lane state artifact and sets `retry_allowed=false` in blocked-auth state.
 - `communications.provider.status`
   - Shows Microsoft/Resend/Twilio route status, cutover phase, and env-readiness for live execution.
 - `communications.policy.status`
@@ -104,6 +108,7 @@ cd /Users/ronnyworks/code/agentic-spine
 ./bin/ops cap run communications.stack.status
 ./bin/ops cap run communications.mailboxes.list
 ./bin/ops cap run communications.mail.search --query "*" --top 5
+./ops/plugins/communications/bin/communications-mail-archiver-import-monitor --json
 echo "yes" | ./bin/ops cap run communications.mail.send.test --to ronny@mintprints.com --subject "pilot test" --body "hello" --execute
 ./bin/ops cap run communications.provider.status
 ./bin/ops cap run communications.policy.status
@@ -118,6 +123,12 @@ echo "yes" | ./bin/ops cap run communications.send.execute --preview-id "$previe
 echo "yes" | ./bin/ops cap run communications.delivery.anomaly.dispatch --dry-run
 echo "yes" | ./bin/ops cap run communications.alerts.deadletter.replay --limit 10
 ```
+
+## Lifecycle Runbook
+
+Cross-domain Tailscale + SSH lifecycle SOP (auth incident, onboarding checklist, monitor behavior, tombstones):
+
+- `docs/governance/TAILSCALE_SSH_LIFECYCLE_OPERATIONS_RUNBOOK.md`
 
 ## Evidence Pattern
 
