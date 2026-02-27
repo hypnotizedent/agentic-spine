@@ -136,6 +136,14 @@ print("true" if online else "false")
 ' || echo "false"
 }
 
+resolve_tailscale_probe_mode() {
+  local mode="${VERIFY_TAILSCALE_PROBE_MODE:-active}"
+  case "$mode" in
+    active|passive) echo "$mode" ;;
+    *) echo "active" ;;
+  esac
+}
+
 contains_value() {
   local needle="$1"
   shift || true
@@ -317,12 +325,19 @@ run_gate_ids() {
   if [[ "$tailscale_guard_needed" -eq 1 ]]; then
     tailscale_cache_file="$tmp_dir/tailscale_guard.cache"
     local tailscale_online="missing_cli"
+    local tailscale_probe_mode
+    tailscale_probe_mode="$(resolve_tailscale_probe_mode)"
     if command -v tailscale >/dev/null 2>&1; then
-      tailscale_online="$(tailscale_online_from_status)"
-      case "$tailscale_online" in
-        true|false) ;;
-        *) tailscale_online="false" ;;
-      esac
+      if [[ "$tailscale_probe_mode" == "active" ]]; then
+        tailscale_online="$(tailscale_online_from_status)"
+        case "$tailscale_online" in
+          true|false) ;;
+          *) tailscale_online="false" ;;
+        esac
+      else
+        # Passive mode avoids triggering tailscale auth/browser flows.
+        tailscale_online="false"
+      fi
     fi
     printf 'online=%s\n' "$tailscale_online" >"$tailscale_cache_file"
   fi
