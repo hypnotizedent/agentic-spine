@@ -134,6 +134,7 @@ run_fast_startup() {
 
   if [[ "$mode" == "fast" ]]; then
     local status_brief
+    local hardware_brief=""
     local recommend_output=""
     local recommend_domains="core"
     local recommend_cmd="./bin/ops cap run verify.core.run"
@@ -142,6 +143,12 @@ run_fast_startup() {
     local receipt_memory_hint="./bin/ops cap run receipts.summary -- --domain none --days 7"
 
     status_brief="$("$ROOT/bin/ops" status --brief 2>&1 || true)"
+    if [[ -x "$ROOT/ops/plugins/infra/bin/infra-media-capacity-guard-reconcile" ]]; then
+      hardware_brief="$("$ROOT/ops/plugins/infra/bin/infra-media-capacity-guard-reconcile" --brief 2>/dev/null || true)"
+    fi
+    if [[ -z "$hardware_brief" ]]; then
+      hardware_brief="HW: UNKNOWN (media capacity brief unavailable)"
+    fi
 
     if [[ -x "$ROOT/ops/plugins/verify/bin/verify-topology" ]]; then
       recommend_output="$("$ROOT/ops/plugins/verify/bin/verify-topology" recommend --json 2>/dev/null || true)"
@@ -173,6 +180,7 @@ run_fast_startup() {
         --arg capability "session.start" \
         --arg mode "fast" \
         --arg status_brief "$status_brief" \
+        --arg hardware_brief "$hardware_brief" \
         --arg recommended_domains "$recommend_domains" \
         --arg recommended_verify_command "$recommend_cmd" \
         --arg receipt_memory_hint "$receipt_memory_hint" \
@@ -180,6 +188,7 @@ run_fast_startup() {
           capability: $capability,
           mode: $mode,
           status_brief: $status_brief,
+          hardware_brief: $hardware_brief,
           recommended_domains: ($recommended_domains | split(",") | map(select(length > 0))),
           recommended_verify_command: $recommended_verify_command,
           receipt_memory_hint_command: $receipt_memory_hint,
@@ -189,6 +198,7 @@ run_fast_startup() {
       echo "session.start"
       echo "mode: fast"
       echo "status: ${status_brief}"
+      echo "hardware_brief: ${hardware_brief}"
       echo "recommended_domains: ${recommend_domains}"
       echo "post_work_verify: ${recommend_cmd}"
       echo "receipt_memory_hint: ${receipt_memory_hint}"

@@ -1,0 +1,401 @@
+#!/usr/bin/env bash
+# infra.media.capacity.guard.reconcile
+# Controlled lifecycle wrapper for D257 media pool capacity governance.
+set -euo pipefail
+
+ROOT_DEFAULT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+ROOT="${SPINE_CODE:-$ROOT_DEFAULT}"
+POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
+D257_SCRIPT="$ROOT/surfaces/verify/d257-media-capacity-guard-lock.sh"
+
+MODE="reconcile"
+DRY_RUN=0
+
+usage() {
+  cat <<'USAGE'
+Usage: infra-media-capacity-guard-reconcile [--brief] [--check-only] [--dry-run]
+
+Modes:
+  --brief       Emit session.start hardware brief line only (read-only)
+  --check-only  Run D257 report-only check and print status (read-only)
+  --dry-run     Reconcile evaluation with no filesystem mutation
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --brief)
+      MODE="brief"
+      shift
+      ;;
+    --check-only)
+      MODE="check"
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "infra.media.capacity.guard.reconcile FAIL: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$POLICY_FILE" ]] || { echo "infra.media.capacity.guard.reconcile FAIL: missing $POLICY_FILE" >&2; exit 1; }
+[[ -f "$SSH_BINDING" ]] || { echo "infra.media.capacity.guard.reconcile FAIL: missing $SSH_BINDING" >&2; exit 1; }
+[[ -f "$GAPS_FILE" ]] || { echo "infra.media.capacity.guard.reconcile FAIL: missing $GAPS_FILE" >&2; exit 1; }
+[[ -f "$D257_SCRIPT" ]] || { echo "infra.media.capacity.guard.reconcile FAIL: missing $D257_SCRIPT" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "infra.media.capacity.guard.reconcile FAIL: yq missing" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "infra.media.capacity.guard.reconcile FAIL: python3 missing" >&2; exit 1; }
+command -v ssh >/dev/null 2>&1 || { echo "infra.media.capacity.guard.reconcile FAIL: ssh missing" >&2; exit 1; }
+
+WARN_PCT="$(yq -r '.thresholds.media_warn_pct // 80' "$POLICY_FILE")"
+FAIL_PCT="$(yq -r '.thresholds.media_fail_pct // 85' "$POLICY_FILE")"
+STORAGE_HOST_ID="$(yq -r '.target.storage_host_id // "pve"' "$POLICY_FILE")"
+MEDIA_POOL="$(yq -r '.target.pool_name // "media"' "$POLICY_FILE")"
+MD_POOL="$(yq -r '.target.sibling_pool_name // "md1400"' "$POLICY_FILE")"
+OWNING_LOOP_ID="$(yq -r '.ownership.owning_loop_id // "LOOP-INFRA-MEDIA-CAPACITY-GUARD-20260227"' "$POLICY_FILE")"
+OWNING_LOOP_PREFIX="$(yq -r '.ownership.owning_loop_prefix // "LOOP-INFRA-MEDIA-CAPACITY-GUARD-"' "$POLICY_FILE")"
+OWNING_TERMINAL="$(yq -r '.ownership.owning_terminal // "SPINE-EXECUTION-01"' "$POLICY_FILE")"
+MILESTONE_DUE_WINDOW="$(yq -r '.evidence.milestone_due_window // "48h"' "$POLICY_FILE")"
+
+readarray -t PROTECTED_GAPS < <(yq -r '.protected.no_touch_gap_ids[]?' "$POLICY_FILE" 2>/dev/null || true)
+readarray -t PROTECTED_LOOPS < <(yq -r '.protected.no_touch_loop_ids[]?' "$POLICY_FILE" 2>/dev/null || true)
+
+contains_value() {
+  local needle="$1"
+  shift || true
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
+ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" 2>/dev/null || echo ubuntu)"
+[[ -n "$ssh_host" ]] || { echo "infra.media.capacity.guard.reconcile FAIL: missing ssh target id='$STORAGE_HOST_ID'" >&2; exit 1; }
+REF="$ssh_user@$ssh_host"
+SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+
+get_pool_pct() {
+  local pool="$1"
+  local raw pct
+  raw="$(ssh "${SSH_OPTS[@]}" "$REF" "zpool list -Hp -o capacity '$pool' 2>/dev/null | head -1" 2>/dev/null || true)"
+  if [[ -z "$raw" ]]; then
+    raw="$(ssh "${SSH_OPTS[@]}" "$REF" "zpool list '$pool' -H 2>/dev/null | awk '{print \$5}' | head -1" 2>/dev/null || true)"
+  fi
+  pct="$(python3 - "$raw" <<'PY'
+import re, sys
+m = re.search(r'(\d+(\.\d+)?)', (sys.argv[1] or '').strip())
+print(int(float(m.group(1)))) if m else print('')
+PY
+)"
+  printf '%s' "$pct"
+}
+
+find_open_gap() {
+  local protected_csv
+  protected_csv="$(IFS=, ; echo "${PROTECTED_GAPS[*]:-}")"
+  python3 - "$GAPS_FILE" "$OWNING_LOOP_PREFIX" "$protected_csv" <<'PY'
+import datetime
+import sys
+import yaml
+
+path, prefix, protected_csv = sys.argv[1], sys.argv[2], sys.argv[3]
+protected = {x.strip() for x in protected_csv.split(',') if x.strip()}
+with open(path, 'r', encoding='utf-8') as f:
+    doc = yaml.safe_load(f) or {}
+rows = []
+for g in doc.get('gaps', []):
+    if g.get('status') != 'open':
+        continue
+    gid = str(g.get('id') or '').strip()
+    if not gid or gid in protected:
+        continue
+    parent = str(g.get('parent_loop') or '').strip()
+    desc = str(g.get('description') or '').lower()
+    discovered = str(g.get('discovered_at') or '').strip()
+    if parent.startswith(prefix) or ('media' in desc and ('capacity' in desc or 'zpool' in desc)):
+        rows.append((discovered, gid, parent, str(g.get('severity') or 'high').strip()))
+rows.sort(key=lambda r: (r[0], r[1]))
+if rows:
+    print('|'.join(rows[0]))
+PY
+}
+
+calc_age_days() {
+  local discovered="$1"
+  python3 - "$discovered" <<'PY'
+import datetime
+import sys
+s = (sys.argv[1] or '').strip()
+if not s:
+    print(0)
+    raise SystemExit(0)
+try:
+    d = datetime.date.fromisoformat(s[:10])
+except Exception:
+    print(0)
+    raise SystemExit(0)
+print((datetime.date.today() - d).days)
+PY
+}
+
+MEDIA_PCT="$(get_pool_pct "$MEDIA_POOL")"
+MD_PCT="$(get_pool_pct "$MD_POOL")"
+
+if [[ -z "$MEDIA_PCT" ]]; then
+  if [[ "$MODE" == "brief" ]]; then
+    echo "HW: UNKNOWN (pool probe failed for $MEDIA_POOL on $STORAGE_HOST_ID) | run: infra.media.capacity.guard.reconcile --check-only"
+    exit 0
+  fi
+  echo "infra.media.capacity.guard.reconcile FAIL: unable to read media pool capacity" >&2
+  exit 1
+fi
+
+GAP_ROW="$(find_open_gap || true)"
+GAP_ID=""
+GAP_DISCOVERED=""
+GAP_PARENT_LOOP=""
+if [[ -n "$GAP_ROW" ]]; then
+  IFS='|' read -r GAP_DISCOVERED GAP_ID GAP_PARENT_LOOP _gap_sev <<< "$GAP_ROW"
+fi
+
+GAP_AGE_DAYS=0
+if [[ -n "$GAP_DISCOVERED" ]]; then
+  GAP_AGE_DAYS="$(calc_age_days "$GAP_DISCOVERED")"
+fi
+
+STATE="OK"
+if (( MEDIA_PCT >= FAIL_PCT )); then
+  STATE="FAIL"
+elif (( MEDIA_PCT >= WARN_PCT )); then
+  STATE="WARN"
+fi
+
+age_field="none"
+if [[ -n "$GAP_ID" ]]; then
+  age_field="${GAP_AGE_DAYS}d"
+fi
+
+HW_BRIEF="HW: media=${MEDIA_PCT}% ${STATE} | md1400=${MD_PCT:-unknown}% | capacity_gap=${GAP_ID:-none} | age=${age_field}"
+
+if [[ "$MODE" == "brief" ]]; then
+  echo "$HW_BRIEF"
+  exit 0
+fi
+
+D257_OUT=""
+if ! D257_OUT="$("$D257_SCRIPT" --policy report 2>&1)"; then
+  echo "$D257_OUT" >&2
+  echo "infra.media.capacity.guard.reconcile FAIL: D257 execution failed" >&2
+  exit 1
+fi
+
+if [[ "$MODE" == "check" ]]; then
+  echo "infra.media.capacity.guard.reconcile"
+  echo "mode: check-only"
+  echo "$HW_BRIEF"
+  echo "$D257_OUT"
+  exit 0
+fi
+
+reasons=()
+if grep -q "critical_breach:" <<< "$D257_OUT"; then
+  reasons+=("critical_breach")
+fi
+if grep -q "stale_unowned:" <<< "$D257_OUT"; then
+  reasons+=("stale_unowned")
+fi
+if grep -q "stale_no_trend:\|ownership_mismatch:" <<< "$D257_OUT"; then
+  reasons+=("threshold_breach")
+fi
+
+if grep -q "D257 PASS" <<< "$D257_OUT"; then
+  echo "infra.media.capacity.guard.reconcile"
+  echo "mode: reconcile"
+  echo "$HW_BRIEF"
+  echo "d257: PASS"
+  echo "mutation: none"
+  echo "protected_no_touch: true"
+  exit 0
+fi
+
+if contains_value "$OWNING_LOOP_ID" "${PROTECTED_LOOPS[@]:-}"; then
+  echo "infra.media.capacity.guard.reconcile HOLD: owning loop is protected ($OWNING_LOOP_ID); no mutation performed" >&2
+  echo "$HW_BRIEF"
+  exit 1
+fi
+
+scope_file="$SCOPES_DIR/${OWNING_LOOP_ID}.scope.md"
+loop_created=0
+if [[ ! -f "$scope_file" ]]; then
+  mkdir -p "$SCOPES_DIR"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    cat > "$scope_file" <<LOOP
+---
+loop_id: $OWNING_LOOP_ID
+created: $(date -u +%Y-%m-%d)
+status: active
+owner: "@ronny"
+scope: infra
+priority: high
+execution_mode: coordinated
+active_terminal: $OWNING_TERMINAL
+objective: Keep media pool capacity below WARN threshold and prevent unowned/stale capacity drift.
+---
+
+# Loop Scope: $OWNING_LOOP_ID
+
+## Objective
+
+Keep media capacity governed with daily evidence until `<80%` and enforce ownership linkage for WARN/FAIL states.
+
+## Milestones
+
+- Capture zpool evidence timestamps and current pool percentages.
+- Keep a single open owning gap linked to this loop.
+- Execute utilization/remediation actions to reduce media below WARN threshold.
+
+## Due Window
+
+- $MILESTONE_DUE_WINDOW
+LOOP
+  fi
+  loop_created=1
+fi
+
+update_gap_payload="$(python3 - "$GAPS_FILE" "$OWNING_LOOP_ID" "$OWNING_LOOP_PREFIX" "$MEDIA_PCT" "$STATE" "${reasons[*]:-threshold_breach}" "$MILESTONE_DUE_WINDOW" "$OWNING_TERMINAL" "$DRY_RUN" "${PROTECTED_GAPS[*]:-}" <<'PY'
+import datetime
+import sys
+import yaml
+
+(
+    gaps_path,
+    loop_id,
+    loop_prefix,
+    media_pct,
+    state,
+    reasons,
+    due_window,
+    owner_terminal,
+    dry_run,
+    protected_csv,
+) = sys.argv[1:11]
+
+dry = dry_run == "1"
+protected = {x.strip() for x in protected_csv.split() if x.strip()}
+
+with open(gaps_path, 'r', encoding='utf-8') as f:
+    doc = yaml.safe_load(f) or {}
+gaps = doc.setdefault('gaps', [])
+
+def is_candidate(g):
+    if g.get('status') != 'open':
+        return False
+    gid = str(g.get('id') or '').strip()
+    if not gid or gid in protected:
+        return False
+    parent = str(g.get('parent_loop') or '').strip()
+    desc = str(g.get('description') or '').lower()
+    return parent.startswith(loop_prefix) or ('media' in desc and 'capacity' in desc)
+
+candidate = None
+for g in gaps:
+    if is_candidate(g):
+        candidate = g
+        break
+
+now = datetime.datetime.now(datetime.timezone.utc)
+now_iso = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+today = now.strftime('%Y-%m-%d')
+sev = 'critical' if int(media_pct) >= 85 else 'high'
+reason_text = reasons.strip() or 'threshold_breach'
+note = (
+    f"media_pct={media_pct}% state={state}; reasons={reason_text}; "
+    f"owner_terminal={owner_terminal}; due_window={due_window}; observed_at={now_iso}"
+)
+
+result = {
+    'action': '',
+    'gap_id': '',
+    'updated': False,
+}
+
+if candidate is not None:
+    gid = str(candidate.get('id') or '').strip()
+    existing_notes = str(candidate.get('notes') or '').strip()
+    if existing_notes:
+        candidate['notes'] = existing_notes + "\n" + note
+    else:
+        candidate['notes'] = note
+    candidate['parent_loop'] = loop_id
+    candidate['severity'] = sev
+    result['action'] = 'updated'
+    result['gap_id'] = gid
+    result['updated'] = True
+else:
+    max_id = 0
+    for g in gaps:
+        gid = str(g.get('id') or '')
+        if gid.startswith('GAP-OP-'):
+            try:
+                max_id = max(max_id, int(gid.split('GAP-OP-')[1]))
+            except Exception:
+                pass
+    new_id = f"GAP-OP-{max_id + 1}"
+    new_gap = {
+        'id': new_id,
+        'discovered_by': 'infra.media.capacity.guard.reconcile',
+        'discovered_at': today,
+        'type': 'runtime-bug',
+        'doc': 'ops/bindings/infra.capacity.guard.policy.yaml',
+        'description': (
+            'Media pool capacity guard breach: media capacity is at or above WARN threshold and requires governed ownership until below 80%.\n'
+            f'Observed state: media={media_pct}% ({state}).\n'
+            'Guard contract requires one owning gap with loop linkage and recurring evidence.'
+        ),
+        'severity': sev,
+        'status': 'open',
+        'notes': note,
+        'parent_loop': loop_id,
+    }
+    gaps.append(new_gap)
+    result['action'] = 'opened'
+    result['gap_id'] = new_id
+    result['updated'] = True
+
+if result['updated']:
+    doc['updated'] = now_iso
+
+if not dry and result['updated']:
+    with open(gaps_path, 'w', encoding='utf-8') as f:
+        yaml.safe_dump(doc, f, sort_keys=False, allow_unicode=False)
+
+print(f"{result['action']}|{result['gap_id']}|{str(result['updated']).lower()}")
+PY
+)"
+
+IFS='|' read -r gap_action gap_id _gap_updated <<< "$update_gap_payload"
+
+echo "infra.media.capacity.guard.reconcile"
+echo "mode: reconcile"
+echo "$HW_BRIEF"
+echo "d257: REPORT"
+echo "reasons: ${reasons[*]:-threshold_breach}"
+echo "loop: $OWNING_LOOP_ID (created=$loop_created)"
+echo "gap: ${gap_id:-none} action=${gap_action:-none}"
+echo "dry_run: $DRY_RUN"
+echo "protected_no_touch: true"
+
+exit 0
