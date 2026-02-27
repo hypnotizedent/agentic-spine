@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+
+MODE="report-only"
+TOKEN=""
+MANIFEST=""
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+worktree-lifecycle-cleanup
+
+Usage:
+  worktree-lifecycle-cleanup --mode report-only|archive-only|delete [--token <token>] [--manifest <path>] [--json]
+
+Modes:
+  report-only  Classify only; no filesystem/git mutations.
+  archive-only Snapshot + archive candidate worktrees (no delete).
+  delete       Token-gated delete path (requires archive manifest when contract enabled).
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --mode) MODE="${2:-}"; shift 2 ;;
+    --token) TOKEN="${2:-}"; shift 2 ;;
+    --manifest) MANIFEST="${2:-}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+case "$MODE" in
+  report-only|archive-only|delete) ;;
+  *) echo "FAIL: --mode must be report-only|archive-only|delete" >&2; exit 2 ;;
+esac
+
+MAIN_BRANCH="main"
+CANONICAL_ROOT="$HOME/.wt"
+LEASE_FILENAME=".spine-lane-lease.yaml"
+LEASE_TTL_HOURS="24"
+ARCHIVE_ROOT="$HOME/code/_closeout_backups/worktree-lifecycle"
+DELETE_TOKEN_ENV="OPS_WORKTREE_DELETE_TOKEN"
+DELETE_TOKEN_VALUE="RELEASE_MAIN_CLEANUP_WINDOW"
+REQUIRE_ARCHIVE="true"
+REQUIRE_MERGED_OR_TOKEN="true"
+BLOCK_ACTIVE_LEASE="true"
+
+if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
+  MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo "$MAIN_BRANCH")"
+  CANONICAL_ROOT="$(yq e -r '.policy.canonical_worktree_root // "~/.wt"' "$CONTRACT" 2>/dev/null || echo "$CANONICAL_ROOT")"
+  LEASE_FILENAME="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$CONTRACT" 2>/dev/null || echo "$LEASE_FILENAME")"
+  LEASE_TTL_HOURS="$(yq e -r '.policy.lease_ttl_hours_default // 24' "$CONTRACT" 2>/dev/null || echo "$LEASE_TTL_HOURS")"
+  ARCHIVE_ROOT="$(yq e -r '.runtime.archive_root // "~/code/_closeout_backups/worktree-lifecycle"' "$CONTRACT" 2>/dev/null || echo "$ARCHIVE_ROOT")"
+  DELETE_TOKEN_ENV="$(yq e -r '.cleanup.delete_token_env_var // "OPS_WORKTREE_DELETE_TOKEN"' "$CONTRACT" 2>/dev/null || echo "$DELETE_TOKEN_ENV")"
+  DELETE_TOKEN_VALUE="$(yq e -r '.cleanup.delete_token_value // "RELEASE_MAIN_CLEANUP_WINDOW"' "$CONTRACT" 2>/dev/null || echo "$DELETE_TOKEN_VALUE")"
+  REQUIRE_ARCHIVE="$(yq e -r '.cleanup.require_archive_before_delete // true' "$CONTRACT" 2>/dev/null || echo true)"
+  REQUIRE_MERGED_OR_TOKEN="$(yq e -r '.cleanup.require_branch_merged_or_explicit_token // true' "$CONTRACT" 2>/dev/null || echo true)"
+  BLOCK_ACTIVE_LEASE="$(yq e -r '.cleanup.block_if_active_lease // true' "$CONTRACT" 2>/dev/null || echo true)"
+fi
+
+if [[ "$CANONICAL_ROOT" == "~/"* ]]; then
+  CANONICAL_ROOT="$HOME/${CANONICAL_ROOT#~/}"
+fi
+if [[ "$ARCHIVE_ROOT" == "~/"* ]]; then
+  ARCHIVE_ROOT="$HOME/${ARCHIVE_ROOT#~/}"
+fi
+
+ENV_TOKEN="${!DELETE_TOKEN_ENV-}"
+if [[ -z "$TOKEN" ]]; then
+  TOKEN="$ENV_TOKEN"
+fi
+EXPLICIT_TOKEN=0
+if [[ -n "$TOKEN" && "$TOKEN" == "$DELETE_TOKEN_VALUE" ]]; then
+  EXPLICIT_TOKEN=1
+fi
+
+RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_ID="WORKTREE-LC-${RUN_TS}-$$"
+ARTIFACT_DIR="$ROOT/receipts/worktree-lifecycle-cleanup/$RUN_ID"
+mkdir -p "$ARTIFACT_DIR"
+
+REPORT_JSON="$ARTIFACT_DIR/report.json"
+REPORT_MD="$ARTIFACT_DIR/report.md"
+ARCHIVE_MANIFEST="$ARTIFACT_DIR/archive-manifest.json"
+ACTIONS_LOG="$ARTIFACT_DIR/actions.log"
+
+python3 - "$ROOT" "$MAIN_BRANCH" "$CANONICAL_ROOT" "$LEASE_FILENAME" "$LEASE_TTL_HOURS" "$REPORT_JSON" <<'PY'
+import json
+import sys
+import subprocess
+from pathlib import Path
+from datetime import datetime, timezone
+
+repo_root = Path(sys.argv[1]).resolve()
+main_branch = sys.argv[2]
+canonical_root = Path(sys.argv[3]).expanduser().resolve()
+lease_filename = sys.argv[4]
+default_ttl = float(sys.argv[5])
+out_path = Path(sys.argv[6])
+now = datetime.now(timezone.utc)
+
+def sh(args, check=True):
+    p = subprocess.run(args, text=True, capture_output=True)
+    if check and p.returncode != 0:
+        raise RuntimeError(p.stderr.strip() or p.stdout.strip() or "command failed")
+    return p.returncode, p.stdout
+
+def parse_worktrees():
+    _, out = sh(["git", "-C", str(repo_root), "worktree", "list", "--porcelain"])
+    rows = []
+    cur = {}
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line:
+            if cur:
+                rows.append(cur)
+                cur = {}
+            continue
+        if " " not in line:
+            continue
+        k, v = line.split(" ", 1)
+        cur[k] = v.strip()
+    if cur:
+        rows.append(cur)
+    parsed = []
+    for row in rows:
+        wt = row.get("worktree")
+        if not wt:
+            continue
+        branch = row.get("branch", "")
+        if branch.startswith("refs/heads/"):
+            branch = branch.split("refs/heads/", 1)[1]
+        if not branch:
+            rc, out = sh(["git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD"], check=False)
+            branch = out.strip() if rc == 0 else "<detached>"
+        parsed.append((Path(wt).resolve(), branch))
+    return parsed
+
+def merged(branch):
+    if branch == "<detached>":
+        return False
+    return subprocess.run(["git","-C",str(repo_root),"merge-base","--is-ancestor",branch,main_branch]).returncode == 0
+
+def branch_age_hours(branch):
+    if branch == "<detached>":
+        return None
+    rc, out = sh(["git","-C",str(repo_root),"show","-s","--format=%ct",branch], check=False)
+    if rc != 0 or not out.strip().isdigit():
+        return None
+    ts = datetime.fromtimestamp(int(out.strip()), tz=timezone.utc)
+    return max(0.0, (now - ts).total_seconds() / 3600.0)
+
+def parse_lease(path: Path):
+    if not path.exists():
+        return {"present": False}
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    kv = {}
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s or s == "---" or ":" not in s:
+            continue
+        k, v = s.split(":", 1)
+        kv[k.strip()] = v.strip().strip('"')
+    ttl = float(kv.get("ttl_hours") or default_ttl)
+    hb = kv.get("heartbeat_at")
+    active = False
+    age_h = None
+    if hb:
+        try:
+            dt = datetime.fromisoformat(hb.replace("Z", "+00:00"))
+            age_h = max(0.0, (now - dt).total_seconds() / 3600.0)
+        except Exception:
+            age_h = None
+    status = (kv.get("status") or "").lower()
+    if status in {"active", "running"}:
+        if age_h is None:
+            active = True
+        else:
+            active = age_h <= ttl
+    return {
+        "present": True,
+        "path": str(path),
+        "status": status or "unknown",
+        "owner": kv.get("owner"),
+        "loop_or_wave_id": kv.get("loop_or_wave_id"),
+        "heartbeat_at": kv.get("heartbeat_at"),
+        "ttl_hours": ttl,
+        "age_hours": age_h,
+        "active": active,
+    }
+
+rows = []
+for wt, branch in parse_worktrees():
+    if wt == repo_root:
+        continue
+    lease = parse_lease(wt / lease_filename)
+    rows.append({
+        "worktree": str(wt),
+        "branch": branch,
+        "canonical_root_ok": str(wt).startswith(str(canonical_root) + "/"),
+        "merged_into_main": merged(branch),
+        "branch_age_hours": branch_age_hours(branch),
+        "lease": lease,
+    })
+
+payload = {
+    "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "repo": str(repo_root),
+    "main_branch": main_branch,
+    "canonical_root": str(canonical_root),
+    "lease_filename": lease_filename,
+    "worktrees": rows,
+}
+out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+print(str(out_path))
+PY
+
+python3 - "$REPORT_JSON" "$REPORT_MD" "$MODE" "$BLOCK_ACTIVE_LEASE" "$REQUIRE_MERGED_OR_TOKEN" "$EXPLICIT_TOKEN" <<'PY'
+import json, sys
+from pathlib import Path
+
+report = json.loads(Path(sys.argv[1]).read_text())
+md = Path(sys.argv[2])
+mode = sys.argv[3]
+block_active = sys.argv[4].lower() == "true"
+require_merged_or_token = sys.argv[5].lower() == "true"
+explicit_token = sys.argv[6] == "1"
+
+rows = report["worktrees"]
+blocked = []
+delete_candidates = []
+root_violations = []
+for row in rows:
+    reasons = []
+    lease = row.get("lease") or {}
+    if not row.get("canonical_root_ok"):
+        reasons.append("noncanonical_worktree_root")
+        root_violations.append(row["worktree"])
+    if block_active and lease.get("active"):
+        reasons.append("active_lease")
+    if require_merged_or_token and not row.get("merged_into_main") and not explicit_token:
+        reasons.append("not_merged_no_token")
+
+    if reasons:
+        blocked.append({"worktree": row["worktree"], "branch": row["branch"], "reasons": reasons})
+    else:
+        delete_candidates.append({"worktree": row["worktree"], "branch": row["branch"]})
+
+summary = {
+    "mode": mode,
+    "worktree_count": len(rows),
+    "delete_candidate_count": len(delete_candidates),
+    "blocked_count": len(blocked),
+    "root_violation_count": len(root_violations),
+}
+
+report["summary"] = summary
+report["delete_candidates"] = delete_candidates
+report["blocked"] = blocked
+report["root_violations"] = root_violations
+Path(sys.argv[1]).write_text(json.dumps(report, indent=2) + "\n")
+
+with md.open("w", encoding="utf-8") as f:
+    f.write("# Worktree Lifecycle Cleanup Report\n\n")
+    f.write(f"- mode: {mode}\n")
+    f.write(f"- worktrees: {summary['worktree_count']}\n")
+    f.write(f"- delete_candidates: {summary['delete_candidate_count']}\n")
+    f.write(f"- blocked: {summary['blocked_count']}\n")
+    f.write(f"- root_violations: {summary['root_violation_count']}\n\n")
+    f.write("## Delete Candidates\n")
+    for item in delete_candidates:
+      f.write(f"- {item['worktree']} | {item['branch']}\n")
+    if not delete_candidates:
+      f.write("- none\n")
+    f.write("\n## Blocked\n")
+    for item in blocked:
+      f.write(f"- {item['worktree']} | {item['branch']} | {','.join(item['reasons'])}\n")
+    if not blocked:
+      f.write("- none\n")
+PY
+
+: > "$ACTIONS_LOG"
+
+if [[ "$MODE" == "archive-only" || "$MODE" == "delete" ]]; then
+  mkdir -p "$ARCHIVE_ROOT"
+  ARCHIVE_RUN_DIR="$ARCHIVE_ROOT/$RUN_ID"
+  mkdir -p "$ARCHIVE_RUN_DIR"
+
+  python3 - "$REPORT_JSON" "$ARCHIVE_RUN_DIR" "$ARCHIVE_MANIFEST" "$ACTIONS_LOG" <<'PY'
+import json, sys, tarfile
+from pathlib import Path
+
+report = json.loads(Path(sys.argv[1]).read_text())
+archive_dir = Path(sys.argv[2])
+manifest_path = Path(sys.argv[3])
+actions_log = Path(sys.argv[4])
+
+items = []
+for row in report.get("delete_candidates", []):
+    wt = Path(row["worktree"])
+    if not wt.exists():
+        continue
+    safe_name = wt.name.replace("/", "_")
+    tar_path = archive_dir / f"{safe_name}.tgz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        tf.add(str(wt), arcname=wt.name)
+    items.append({
+        "worktree": str(wt),
+        "archive": str(tar_path),
+        "branch": row.get("branch"),
+    })
+
+manifest = {
+    "archive_dir": str(archive_dir),
+    "items": items,
+}
+manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+with actions_log.open("a", encoding="utf-8") as f:
+    f.write(f"archive_created={manifest_path}\n")
+    for item in items:
+        f.write(f"archived={item['worktree']}|{item['archive']}\n")
+PY
+fi
+
+if [[ "$MODE" == "delete" ]]; then
+  if [[ "$EXPLICIT_TOKEN" -ne 1 ]]; then
+    echo "FAIL: delete mode requires explicit token ($DELETE_TOKEN_ENV=$DELETE_TOKEN_VALUE or --token)" >&2
+    exit 1
+  fi
+
+  if [[ "$REQUIRE_ARCHIVE" == "true" ]]; then
+    if [[ -z "$MANIFEST" ]]; then
+      MANIFEST="$ARCHIVE_MANIFEST"
+    fi
+    if [[ ! -f "$MANIFEST" ]]; then
+      echo "FAIL: delete mode requires archive manifest (--manifest)" >&2
+      exit 1
+    fi
+  fi
+
+  python3 - "$ROOT" "$REPORT_JSON" "$MANIFEST" "$REQUIRE_ARCHIVE" "$ACTIONS_LOG" <<'PY'
+import json, sys, subprocess
+from pathlib import Path
+
+repo = Path(sys.argv[1]).resolve()
+report = json.loads(Path(sys.argv[2]).read_text())
+manifest_path = Path(sys.argv[3]) if sys.argv[4].lower() == "true" else None
+require_archive = sys.argv[4].lower() == "true"
+actions = Path(sys.argv[5])
+
+archived = set()
+if require_archive and manifest_path and manifest_path.exists():
+    m = json.loads(manifest_path.read_text())
+    for item in m.get("items", []):
+        archived.add(item.get("worktree"))
+
+with actions.open("a", encoding="utf-8") as log:
+    for item in report.get("delete_candidates", []):
+        wt = item["worktree"]
+        br = item.get("branch") or ""
+        if require_archive and wt not in archived:
+            log.write(f"skip={wt}|not_archived\n")
+            continue
+
+        rm = subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", wt], text=True, capture_output=True)
+        if rm.returncode != 0:
+            log.write(f"skip={wt}|remove_failed|{(rm.stderr or rm.stdout).strip()}\n")
+            continue
+        log.write(f"deleted_worktree={wt}|{br}\n")
+
+        if br and br != "<detached>":
+            d = subprocess.run(["git", "-C", str(repo), "branch", "-d", br], text=True, capture_output=True)
+            if d.returncode == 0:
+                log.write(f"deleted_branch={br}\n")
+            else:
+                log.write(f"skip_branch={br}|{(d.stderr or d.stdout).strip()}\n")
+PY
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  cat "$REPORT_JSON"
+else
+  echo "worktree.lifecycle.cleanup"
+  echo "mode=$MODE"
+  echo "artifact.report_md=$REPORT_MD"
+  echo "artifact.report_json=$REPORT_JSON"
+  echo "artifact.archive_manifest=${ARCHIVE_MANIFEST:-none}"
+  echo "artifact.actions=$ACTIONS_LOG"
+fi

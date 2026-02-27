@@ -16,8 +16,10 @@ scope: agent-governance-brief
 - **Single-agent sessions:** commit directly to `main` is allowed.
 - **Multi-agent sessions:** direct commit is disallowed by default; use proposal flow + apply-owner.
 - **Worktrees are optional.** `./bin/ops start loop <LOOP_ID>` creates an isolated worktree if you want one. Not mandatory.
-- **Wave default:** `./bin/ops wave start <WAVE_ID> --objective "..."` auto-provisions a deterministic worktree (`.worktrees/waves/<WAVE_ID>`) unless `--worktree off` is set.
+- **Wave default:** `./bin/ops wave start <WAVE_ID> --objective "..."` auto-provisions a deterministic worktree (`~/.wt/<repo>/<WAVE_ID>`) unless `--worktree off` is set.
 - **D48 is lifecycle-aware:** classify first with `./bin/ops cap run worktree.lifecycle.reconcile -- --json`, then close loop/wave owners explicitly before any optional git cleanup.
+- **Cleanup is 3-phase and token-gated:** `worktree.lifecycle.cleanup --mode report-only|archive-only|delete` and delete requires explicit token policy.
+- **Path recovery is canonicalized:** if a lane worktree path disappears, run `worktree.lifecycle.rehydrate` against the branch instead of ad-hoc `git worktree add`.
 - **Gitea is canonical** (origin). GitHub is a mirror. D62 enforces.
 
 ## Multi-Agent Write Policy (Mailroom-Gated Writes)

@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+
+LEASE_FILENAME=".spine-lane-lease.yaml"
+LEASE_TTL_HOURS="24"
+OWNER="${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}"
+IDENTITY="${OPS_WORKTREE_IDENTITY:-}"
+
+if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
+  LEASE_FILENAME="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$CONTRACT" 2>/dev/null || echo "$LEASE_FILENAME")"
+  LEASE_TTL_HOURS="$(yq e -r '.policy.lease_ttl_hours_default // 24' "$CONTRACT" 2>/dev/null || echo "$LEASE_TTL_HOURS")"
+fi
+
+REPO_ROOT="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
+BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+LEASE_PATH="$ROOT/$LEASE_FILENAME"
+
+if [[ ! -f "$LEASE_PATH" ]]; then
+  LOOP_OR_WAVE="$IDENTITY"
+  if [[ -z "$LOOP_OR_WAVE" ]]; then
+    LOOP_OR_WAVE="$BRANCH"
+  fi
+  cat > "$LEASE_PATH" <<LEASENEW
+---
+version: 1
+status: active
+owner: "$OWNER"
+loop_or_wave_id: "$LOOP_OR_WAVE"
+repo: "$REPO_ROOT"
+worktree: "$ROOT"
+branch: "$BRANCH"
+created_at: "$NOW"
+heartbeat_at: "$NOW"
+ttl_hours: $LEASE_TTL_HOURS
+---
+LEASENEW
+  echo "worktree.lease.heartbeat created lease: $LEASE_PATH"
+  exit 0
+fi
+
+python3 - "$LEASE_PATH" "$NOW" "$OWNER" "$BRANCH" "$REPO_ROOT" "$ROOT" "$LEASE_TTL_HOURS" "$IDENTITY" <<'PY'
+import sys
+from pathlib import Path
+
+lease_path = Path(sys.argv[1])
+now = sys.argv[2]
+owner = sys.argv[3]
+branch = sys.argv[4]
+repo = sys.argv[5]
+worktree = sys.argv[6]
+ttl = sys.argv[7]
+identity = sys.argv[8]
+
+raw = lease_path.read_text(encoding="utf-8", errors="ignore")
+lines = [ln for ln in raw.splitlines() if ln.strip() and ln.strip() != "---"]
+kv = {}
+for ln in lines:
+    if ":" not in ln:
+        continue
+    k, v = ln.split(":", 1)
+    kv[k.strip()] = v.strip().strip('"')
+
+kv.setdefault("version", "1")
+kv["status"] = kv.get("status", "active")
+kv["owner"] = kv.get("owner", owner)
+kv["loop_or_wave_id"] = kv.get("loop_or_wave_id", identity or branch)
+kv["repo"] = kv.get("repo", repo)
+kv["worktree"] = kv.get("worktree", worktree)
+kv["branch"] = branch
+kv["created_at"] = kv.get("created_at", now)
+kv["heartbeat_at"] = now
+kv["ttl_hours"] = kv.get("ttl_hours", ttl)
+
+ordered = [
+    "version", "status", "owner", "loop_or_wave_id", "repo", "worktree",
+    "branch", "created_at", "heartbeat_at", "closed_at", "ttl_hours"
+]
+out = ["---"]
+for key in ordered:
+    if key in kv and str(kv[key]).strip() != "":
+        val = str(kv[key])
+        if key in {"version", "ttl_hours"} and val.replace('.', '', 1).isdigit():
+            out.append(f"{key}: {val}")
+        else:
+            out.append(f'{key}: "{val}"')
+out.append("---")
+lease_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+
+echo "worktree.lease.heartbeat updated: $LEASE_PATH"

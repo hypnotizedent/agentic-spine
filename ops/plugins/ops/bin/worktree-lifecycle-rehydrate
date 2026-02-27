@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+
+REPO_PATH="$ROOT"
+BRANCH=""
+LANE=""
+OWNER="${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}"
+FORCE=0
+
+usage() {
+  cat <<'USAGE'
+worktree-lifecycle-rehydrate
+
+Usage:
+  worktree-lifecycle-rehydrate --branch <branch> [--lane <lane>] [--repo <path>] [--owner <id>] [--force]
+
+Behavior:
+  - Recreates missing canonical worktree path (~/.wt/<repo>/<lane>) for an existing branch.
+  - Writes/refreshes lane lease metadata.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --branch) BRANCH="${2:-}"; shift 2 ;;
+    --lane) LANE="${2:-}"; shift 2 ;;
+    --repo) REPO_PATH="${2:-}"; shift 2 ;;
+    --owner) OWNER="${2:-}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+if [[ -z "$BRANCH" ]]; then
+  echo "--branch is required" >&2
+  usage
+  exit 2
+fi
+
+REPO_ROOT="$(git -C "$REPO_PATH" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$REPO_ROOT" ]]; then
+  echo "FAIL: --repo is not a git repository path: $REPO_PATH" >&2
+  exit 1
+fi
+
+CANONICAL_ROOT="$HOME/.wt"
+LEASE_FILENAME=".spine-lane-lease.yaml"
+LEASE_TTL_HOURS="24"
+if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
+  CANONICAL_ROOT="$(yq e -r '.policy.canonical_worktree_root // "~/.wt"' "$CONTRACT" 2>/dev/null || echo "$CANONICAL_ROOT")"
+  LEASE_FILENAME="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$CONTRACT" 2>/dev/null || echo "$LEASE_FILENAME")"
+  LEASE_TTL_HOURS="$(yq e -r '.policy.lease_ttl_hours_default // 24' "$CONTRACT" 2>/dev/null || echo "$LEASE_TTL_HOURS")"
+fi
+if [[ "$CANONICAL_ROOT" == "~/"* ]]; then
+  CANONICAL_ROOT="$HOME/${CANONICAL_ROOT#~/}"
+fi
+
+if [[ -z "$LANE" ]]; then
+  if [[ "$BRANCH" == codex/* ]]; then
+    LANE="${BRANCH#codex/}"
+  elif [[ "$BRANCH" == orchestration/* ]]; then
+    LANE="${BRANCH#orchestration/}"
+  else
+    LANE="${BRANCH//\//-}"
+  fi
+fi
+
+REPO_NAME="$(basename "$REPO_ROOT")"
+TARGET_WT="$CANONICAL_ROOT/$REPO_NAME/$LANE"
+NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+# Ensure branch exists locally, or materialize from origin if present.
+if ! git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    git -C "$REPO_ROOT" branch "$BRANCH" "origin/$BRANCH" >/dev/null
+  else
+    echo "FAIL: branch not found locally or on origin: $BRANCH" >&2
+    exit 1
+  fi
+fi
+
+OCCUPIED_WT="$(python3 - "$REPO_ROOT" "$BRANCH" <<'PY'
+import sys
+from pathlib import Path
+import subprocess
+repo = Path(sys.argv[1]).resolve()
+branch = sys.argv[2]
+proc = subprocess.run(["git","-C",str(repo),"worktree","list","--porcelain"], text=True, capture_output=True, check=True)
+wt = ""
+for raw in proc.stdout.splitlines():
+    ln = raw.strip()
+    if ln.startswith("worktree "):
+        wt = ln.split(" ",1)[1].strip()
+    elif ln.startswith("branch refs/heads/"):
+        b = ln.split("refs/heads/",1)[1].strip()
+        if b == branch:
+            print(wt)
+            break
+PY
+)"
+
+if [[ -n "$OCCUPIED_WT" && "$OCCUPIED_WT" != "$TARGET_WT" && "$FORCE" -ne 1 ]]; then
+  echo "worktree.lifecycle.rehydrate reused existing branch worktree"
+  echo "branch=$BRANCH"
+  echo "worktree=$OCCUPIED_WT"
+  exit 0
+fi
+
+if [[ -n "$OCCUPIED_WT" && "$OCCUPIED_WT" != "$TARGET_WT" && "$FORCE" -eq 1 ]]; then
+  git -C "$REPO_ROOT" worktree remove --force "$OCCUPIED_WT"
+fi
+
+if git -C "$TARGET_WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  CURRENT_BRANCH="$(git -C "$TARGET_WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  if [[ "$CURRENT_BRANCH" != "$BRANCH" ]]; then
+    echo "FAIL: target worktree exists with different branch ($CURRENT_BRANCH): $TARGET_WT" >&2
+    exit 1
+  fi
+else
+  mkdir -p "$(dirname "$TARGET_WT")"
+  git -C "$REPO_ROOT" worktree add "$TARGET_WT" "$BRANCH" >/dev/null
+fi
+
+LEASE_PATH="$TARGET_WT/$LEASE_FILENAME"
+cat > "$LEASE_PATH" <<LEASE
+---
+version: 1
+status: active
+owner: "$OWNER"
+loop_or_wave_id: "$LANE"
+repo: "$REPO_ROOT"
+worktree: "$TARGET_WT"
+branch: "$BRANCH"
+created_at: "$NOW"
+heartbeat_at: "$NOW"
+ttl_hours: $LEASE_TTL_HOURS
+---
+LEASE
+
+echo "worktree.lifecycle.rehydrate done"
+echo "repo=$REPO_ROOT"
+echo "branch=$BRANCH"
+echo "lane=$LANE"
+echo "worktree=$TARGET_WT"
+echo "lease=$LEASE_PATH"

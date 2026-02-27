@@ -138,9 +138,25 @@ cmd_start() {
     default_branch="$(git -C "$workspace_repo" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')"
     default_branch="${default_branch:-main}"
 
+    local lifecycle_contract="$SPINE_REPO/ops/bindings/worktree.lifecycle.contract.yaml"
+    local canonical_root="$HOME/.wt"
+    local lease_filename=".spine-lane-lease.yaml"
+    local lease_ttl_hours="24"
+    local lease_owner="${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}"
+    if command -v yq >/dev/null 2>&1 && [[ -f "$lifecycle_contract" ]]; then
+      canonical_root="$(yq e -r '.policy.canonical_worktree_root // "~/.wt"' "$lifecycle_contract" 2>/dev/null || echo "$canonical_root")"
+      lease_filename="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$lifecycle_contract" 2>/dev/null || echo "$lease_filename")"
+      lease_ttl_hours="$(yq e -r '.policy.lease_ttl_hours_default // 24' "$lifecycle_contract" 2>/dev/null || echo "$lease_ttl_hours")"
+    fi
+    if [[ "$canonical_root" == "~/"* ]]; then
+      canonical_root="$HOME/${canonical_root#~/}"
+    fi
+
     git -C "$workspace_repo" fetch --prune origin "$default_branch" >/dev/null 2>&1 || true
     workspace_branch="codex/${wave_id}"
-    workspace_worktree="$workspace_repo/.worktrees/waves/${wave_id}"
+    local repo_name
+    repo_name="$(basename "$workspace_repo")"
+    workspace_worktree="$canonical_root/$repo_name/${wave_id}"
 
     if ! git -C "$workspace_repo" show-ref --verify --quiet "refs/heads/$workspace_branch"; then
       if git -C "$workspace_repo" show-ref --verify --quiet "refs/remotes/origin/$default_branch"; then
@@ -196,6 +212,24 @@ PYOCCUPIED
     fi
 
     workspace_enabled="true"
+
+    # Materialize or refresh lane lease metadata so cleanup can reason about ownership.
+    local lease_path="$workspace_worktree/$lease_filename"
+    cat > "$lease_path" <<EOF
+---
+version: 1
+status: active
+owner: "$lease_owner"
+loop_or_wave_id: "$wave_id"
+repo: "$workspace_repo"
+worktree: "$workspace_worktree"
+branch: "$workspace_branch"
+created_at: "$(ts_now)"
+heartbeat_at: "$(ts_now)"
+ttl_hours: $lease_ttl_hours
+---
+EOF
+    workspace_note="${workspace_note:-existing deterministic wave worktree} + lease refreshed"
 
     if command -v release_git_lock >/dev/null 2>&1; then
       release_git_lock
@@ -2151,6 +2185,51 @@ print(f"  Close receipt: {close_receipt_path}")
 print(f"  Merge receipt: {receipt_path}")
 print(f"  READY_FOR_ADOPTION={'true' if ready_for_adoption else 'false'}")
 PYCLOSE2
+
+  # Mark workspace lease as pending_close if the wave had an auto workspace.
+  local lease_filename=".spine-lane-lease.yaml"
+  local lifecycle_contract="$SPINE_REPO/ops/bindings/worktree.lifecycle.contract.yaml"
+  if command -v yq >/dev/null 2>&1 && [[ -f "$lifecycle_contract" ]]; then
+    lease_filename="$(yq e -r '.policy.lease_filename // ".spine-lane-lease.yaml"' "$lifecycle_contract" 2>/dev/null || echo "$lease_filename")"
+  fi
+  local workspace_path
+  workspace_path="$(python3 - "$sf" <<'PYLEASEPATH'
+import json, sys
+state = json.load(open(sys.argv[1]))
+w = state.get("workspace") or {}
+print(w.get("worktree") or "")
+PYLEASEPATH
+)"
+  if [[ -n "$workspace_path" && -f "$workspace_path/$lease_filename" ]]; then
+    python3 - "$workspace_path/$lease_filename" <<'PYLEASEUPDATE'
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+p = Path(sys.argv[1])
+raw = p.read_text(encoding="utf-8", errors="ignore")
+lines = raw.splitlines()
+body = [ln for ln in lines if ln.strip() and ln.strip() != "---"]
+kv = {}
+for ln in body:
+    if ":" not in ln:
+        continue
+    k, v = ln.split(":", 1)
+    kv[k.strip()] = v.strip().strip('"')
+kv["status"] = "pending_close"
+kv["heartbeat_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+kv["closed_at"] = kv["heartbeat_at"]
+out = ["---"]
+for k in [
+    "version", "status", "owner", "loop_or_wave_id", "repo", "worktree",
+    "branch", "created_at", "heartbeat_at", "closed_at", "ttl_hours"
+]:
+    if k in kv:
+        out.append(f'{k}: "{kv[k]}"' if k not in {"version", "ttl_hours"} else f"{k}: {kv[k]}")
+out.append("---")
+p.write_text("\n".join(out) + "\n", encoding="utf-8")
+PYLEASEUPDATE
+  fi
 }
 
 # ── Dispatch ─────────────────────────────────────────────────────────────
