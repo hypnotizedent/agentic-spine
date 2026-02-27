@@ -61,7 +61,7 @@ PROTECTED_GAPS=("GAP-OP-973")
 PROTECTED_RUNTIME_LANES=("ews-import" "md1400-rsync")
 PROTECTED_BRANCH_REGEXES=("^main$" "^codex/cleanup-night-snapshot-.*$")
 PROTECTED_WORKTREE_GLOBS=("mailroom/state/loop-scopes/LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226.scope.md" "docs/planning/MD1400_*")
-SNAPSHOT_ROOT="/Users/ronnyworks/code/_closeout_backups"
+SNAPSHOT_ROOT="/Users/ronnyworks/.local/state/agentic-spine/closeout_backups"
 
 if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
   PROTECTED_LOOPS=()
@@ -89,7 +89,7 @@ if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
     [[ -n "$row" && "$row" != "null" ]] && PROTECTED_WORKTREE_GLOBS+=("$row")
   done < <(yq e -r '.protected_scope.file_globs[]?' "$CONTRACT" 2>/dev/null || true)
 
-  SNAPSHOT_ROOT="$(yq e -r '.snapshot_policy.output_root // "/Users/ronnyworks/code/_closeout_backups"' "$CONTRACT" 2>/dev/null || echo "/Users/ronnyworks/code/_closeout_backups")"
+  SNAPSHOT_ROOT="$(yq e -r '.snapshot_policy.output_root // "/Users/ronnyworks/.local/state/agentic-spine/closeout_backups"' "$CONTRACT" 2>/dev/null || echo "/Users/ronnyworks/.local/state/agentic-spine/closeout_backups")"
 fi
 
 # Conservative fallback if contract parsing produced empty lists.
