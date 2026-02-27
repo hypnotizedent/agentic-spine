@@ -1,0 +1,511 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+
+MODE="report"
+JSON_MODE=0
+BRIEF_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --json) JSON_MODE=1; shift ;;
+    --gate) MODE="gate"; shift ;;
+    --brief) BRIEF_MODE=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+worktree-lifecycle-reconcile
+
+Usage:
+  worktree-lifecycle-reconcile [--json] [--brief]
+  worktree-lifecycle-reconcile --gate [--brief]
+
+Notes:
+  - Read-only classifier for worktree lifecycle hygiene.
+  - --gate emits D48-style PASS/FAIL and exits non-zero on lifecycle issues.
+USAGE
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+MAIN_BRANCH="main"
+PREFIX_CSV="codex/,orchestration/"
+MERGED_GRACE_HOURS="24"
+CLOSED_OWNER_GRACE_HOURS="6"
+UNOWNED_LOCAL_GRACE_HOURS="168"
+FAIL_ON_DETACHED="true"
+FAIL_ON_DIRTY_CLOSED="true"
+WARN_ON_DIRTY_ACTIVE="true"
+WAVES_DIR="$HOME/code/.runtime/spine-mailroom/waves"
+LOOPS_SCOPE_DIR="mailroom/state/loop-scopes"
+
+if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+  MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
+  MERGED_GRACE_HOURS="$(yq e -r '.policy.merged_branch_grace_hours // 24' "$CONTRACT" 2>/dev/null || echo 24)"
+  CLOSED_OWNER_GRACE_HOURS="$(yq e -r '.policy.closed_owner_grace_hours // 6' "$CONTRACT" 2>/dev/null || echo 6)"
+  UNOWNED_LOCAL_GRACE_HOURS="$(yq e -r '.policy.unowned_local_branch_grace_hours // 168' "$CONTRACT" 2>/dev/null || echo 168)"
+  FAIL_ON_DETACHED="$(yq e -r '.policy.fail_on_detached_head // true' "$CONTRACT" 2>/dev/null || echo true)"
+  FAIL_ON_DIRTY_CLOSED="$(yq e -r '.policy.fail_on_dirty_when_owner_closed // true' "$CONTRACT" 2>/dev/null || echo true)"
+  WARN_ON_DIRTY_ACTIVE="$(yq e -r '.policy.warn_on_dirty_when_owner_active // true' "$CONTRACT" 2>/dev/null || echo true)"
+  WAVES_DIR="$(yq e -r '.runtime.waves_state_dir // "~/code/.runtime/spine-mailroom/waves"' "$CONTRACT" 2>/dev/null || echo "$WAVES_DIR")"
+  LOOPS_SCOPE_DIR="$(yq e -r '.runtime.loops_scope_dir // "mailroom/state/loop-scopes"' "$CONTRACT" 2>/dev/null || echo "$LOOPS_SCOPE_DIR")"
+
+  prefix_accum=""
+  while IFS= read -r prefix; do
+    [[ -n "$prefix" && "$prefix" != "null" ]] || continue
+    if [[ -n "$prefix_accum" ]]; then
+      prefix_accum+=" ,${prefix}"
+    else
+      prefix_accum="$prefix"
+    fi
+  done < <(yq e -r '.policy.local_branch_prefixes_allow_no_remote[]?' "$CONTRACT" 2>/dev/null || true)
+  if [[ -n "$prefix_accum" ]]; then
+    PREFIX_CSV="${prefix_accum// ,/,}"
+  fi
+fi
+
+python3 - "$ROOT" "$MAIN_BRANCH" "$PREFIX_CSV" "$MERGED_GRACE_HOURS" "$CLOSED_OWNER_GRACE_HOURS" "$UNOWNED_LOCAL_GRACE_HOURS" "$FAIL_ON_DETACHED" "$FAIL_ON_DIRTY_CLOSED" "$WARN_ON_DIRTY_ACTIVE" "$WAVES_DIR" "$LOOPS_SCOPE_DIR" "$MODE" "$JSON_MODE" "$BRIEF_MODE" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+main_branch = sys.argv[2]
+local_prefixes = [p for p in sys.argv[3].split(",") if p]
+merged_grace_h = float(sys.argv[4])
+closed_owner_grace_h = float(sys.argv[5])
+unowned_local_grace_h = float(sys.argv[6])
+fail_on_detached = sys.argv[7].lower() == "true"
+fail_on_dirty_closed = sys.argv[8].lower() == "true"
+warn_on_dirty_active = sys.argv[9].lower() == "true"
+waves_dir = Path(os.path.expanduser(sys.argv[10]))
+loops_scope_rel = sys.argv[11]
+mode = sys.argv[12]
+json_mode = sys.argv[13] == "1"
+brief_mode = sys.argv[14] == "1"
+
+now_epoch = time.time()
+
+
+def sh(args, check=True):
+    proc = subprocess.run(args, text=True, capture_output=True)
+    if check and proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "command failed")
+    return proc.returncode, proc.stdout
+
+
+def parse_bool(value):
+    return str(value).lower() in {"1", "true", "yes", "on"}
+
+
+def parse_iso_epoch(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def parse_frontmatter(path: Path):
+    data = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return data
+    if not lines or lines[0].strip() != "---":
+        return data
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        data[key.strip()] = val.strip().strip('"')
+    return data
+
+
+def parse_worktrees(repo_root: Path):
+    _, out = sh(["git", "-C", str(repo_root), "worktree", "list", "--porcelain"])
+    entries = []
+    current = {}
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line:
+            if current:
+                entries.append(current)
+                current = {}
+            continue
+        if " " not in line:
+            continue
+        key, value = line.split(" ", 1)
+        current[key] = value.strip()
+    if current:
+        entries.append(current)
+
+    parsed = []
+    for entry in entries:
+        wt = entry.get("worktree")
+        if not wt:
+            continue
+        branch = entry.get("branch", "")
+        parsed.append((Path(wt).resolve(), branch.strip()))
+    return parsed
+
+
+def merged_into_main(repo_root: Path, branch: str):
+    rc, out = sh(["git", "-C", str(repo_root), "branch", "--merged", main_branch, "--list", branch], check=False)
+    return bool((out or "").strip()) and rc == 0
+
+
+def has_origin_branch(repo_root: Path, branch: str):
+    rc, _ = sh(["git", "-C", str(repo_root), "rev-parse", "--verify", "--quiet", f"origin/{branch}"], check=False)
+    return rc == 0
+
+
+def branch_head_epoch(repo_root: Path, branch: str):
+    rc, out = sh(["git", "-C", str(repo_root), "show", "-s", "--format=%ct", branch], check=False)
+    if rc != 0:
+        return None
+    text = (out or "").strip()
+    if not text.isdigit():
+        return None
+    return float(text)
+
+
+def branch_age_hours(repo_root: Path, branch: str):
+    epoch = branch_head_epoch(repo_root, branch)
+    if epoch is None:
+        return None
+    return max(0.0, (now_epoch - epoch) / 3600.0)
+
+
+def is_local_prefix(branch: str):
+    for prefix in local_prefixes:
+        if branch.startswith(prefix):
+            return True
+    return False
+
+
+def discover_session_loop_id(worktree: Path):
+    session_root = worktree / "docs" / "sessions"
+    if not session_root.exists():
+        return None
+    candidates = sorted(
+        [p for p in session_root.glob("*/SESSION_LOG.md") if p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for cand in candidates:
+        fm = parse_frontmatter(cand)
+        loop_id = (fm.get("loop_id") or "").strip()
+        if loop_id.startswith("LOOP-"):
+            return loop_id
+    return None
+
+
+repo_root = Path(subprocess.check_output(["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True).strip()).resolve()
+
+# Loop scopes (authoritative owner state)
+loop_scopes = {}
+loops_scope_dir = (repo_root / loops_scope_rel).resolve()
+if loops_scope_dir.exists():
+    for scope in loops_scope_dir.glob("*.scope.md"):
+        fm = parse_frontmatter(scope)
+        loop_id = (fm.get("loop_id") or scope.name.replace(".scope.md", "")).strip()
+        status = (fm.get("status") or "").strip().lower()
+        loop_scopes[loop_id] = {
+            "status": status,
+            "mtime": scope.stat().st_mtime,
+            "path": str(scope),
+        }
+
+# Wave workspace owners (runtime state)
+wave_worktrees = {}
+if waves_dir.exists():
+    for state_file in waves_dir.glob("*/state.json"):
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        workspace = state.get("workspace") or {}
+        wt = workspace.get("worktree")
+        if not wt:
+            continue
+        wave_worktrees[str(Path(wt).resolve())] = {
+            "wave_id": state.get("wave_id"),
+            "status": (state.get("status") or "").strip().lower(),
+            "closed_at": state.get("closed_at"),
+            "created_at": state.get("created_at"),
+        }
+
+worktree_rows = []
+issues = []
+warnings = []
+
+for wt, raw_branch in parse_worktrees(repo_root):
+    if wt == repo_root:
+        continue
+
+    branch = (raw_branch or "").strip()
+    if branch.startswith("refs/heads/"):
+        branch = branch.replace("refs/heads/", "", 1)
+    if not branch:
+        rc, out = sh(["git", "-C", str(wt), "symbolic-ref", "--short", "HEAD"], check=False)
+        branch = (out or "").strip() if rc == 0 else "<detached>"
+
+    row = {
+        "path": str(wt),
+        "branch": branch,
+        "owner_type": "none",
+        "owner_id": None,
+        "owner_state": "unknown",
+        "owner_age_hours": None,
+        "has_origin": None,
+        "merged_into_main": False,
+        "branch_age_hours": None,
+        "dirty": False,
+        "issues": [],
+        "warnings": [],
+    }
+
+    wave = wave_worktrees.get(str(wt))
+    loop_id = None
+    if wave:
+        row["owner_type"] = "wave"
+        row["owner_id"] = wave.get("wave_id")
+        wave_status = wave.get("status") or "unknown"
+        row["owner_state"] = "closed" if wave_status == "closed" else "active" if wave_status == "active" else wave_status
+        closed_epoch = parse_iso_epoch(wave.get("closed_at"))
+        if closed_epoch is not None:
+            row["owner_age_hours"] = max(0.0, (now_epoch - closed_epoch) / 3600.0)
+    else:
+        if branch.startswith("codex/LOOP-"):
+            loop_id = branch.split("codex/", 1)[1]
+        else:
+            m = re.search(r"/orchestration/(LOOP-[^/]+)/", str(wt))
+            if m:
+                loop_id = m.group(1)
+            else:
+                loop_id = discover_session_loop_id(wt)
+
+        if loop_id:
+            row["owner_type"] = "loop"
+            row["owner_id"] = loop_id
+            scope = loop_scopes.get(loop_id)
+            if scope:
+                status = scope.get("status") or "unknown"
+                if status == "closed":
+                    row["owner_state"] = "closed"
+                    row["owner_age_hours"] = max(0.0, (now_epoch - scope["mtime"]) / 3600.0)
+                elif status in {"active", "planned", "draft", "open"}:
+                    row["owner_state"] = "active"
+                else:
+                    row["owner_state"] = status
+            else:
+                row["owner_state"] = "unknown"
+
+    if branch == "<detached>":
+        if fail_on_detached:
+            row["issues"].append("detached_head")
+    else:
+        row["merged_into_main"] = merged_into_main(repo_root, branch)
+        row["has_origin"] = has_origin_branch(repo_root, branch)
+        row["branch_age_hours"] = branch_age_hours(repo_root, branch)
+
+        if not row["has_origin"]:
+            if is_local_prefix(branch):
+                row["warnings"].append("local_branch_no_remote")
+            else:
+                row["issues"].append("orphan_branch_no_remote")
+
+        if row["merged_into_main"]:
+            age = row["branch_age_hours"]
+            if age is not None and age >= merged_grace_h:
+                row["issues"].append("merged_branch_past_grace")
+            else:
+                row["warnings"].append("merged_branch_within_grace")
+
+        if row["owner_type"] == "none" and is_local_prefix(branch):
+            age = row["branch_age_hours"]
+            if age is not None and age >= unowned_local_grace_h:
+                row["issues"].append("unowned_local_branch_past_grace")
+
+    dirty_rc, dirty_out = sh(["git", "-C", str(wt), "status", "--porcelain"], check=False)
+    row["dirty"] = bool((dirty_out or "").strip())
+    if row["dirty"]:
+        if row["owner_state"] == "closed" and fail_on_dirty_closed:
+            row["issues"].append("dirty_closed_owner")
+        elif row["owner_state"] == "active" and warn_on_dirty_active:
+            row["warnings"].append("dirty_active_owner")
+        else:
+            row["warnings"].append("dirty_unowned")
+
+    if row["owner_state"] == "closed":
+        age = row["owner_age_hours"]
+        if age is not None and age >= closed_owner_grace_h:
+            row["issues"].append(f"closed_{row['owner_type']}_zombie")
+        else:
+            row["warnings"].append(f"closed_{row['owner_type']}_within_grace")
+
+    worktree_rows.append(row)
+    for code in row["issues"]:
+        issues.append({
+            "path": row["path"],
+            "branch": row["branch"],
+            "code": code,
+            "owner_type": row["owner_type"],
+            "owner_id": row["owner_id"],
+            "owner_state": row["owner_state"],
+        })
+    for code in row["warnings"]:
+        warnings.append({
+            "path": row["path"],
+            "branch": row["branch"],
+            "code": code,
+            "owner_type": row["owner_type"],
+            "owner_id": row["owner_id"],
+            "owner_state": row["owner_state"],
+        })
+
+# Stash audit
+stash_issues = []
+stash_warnings = []
+_, stash_out = sh(["git", "-C", str(repo_root), "stash", "list"], check=False)
+stash_lines = [ln.strip() for ln in stash_out.splitlines() if ln.strip()]
+for line in stash_lines:
+    ref = line.split(":", 1)[0].strip()
+    if " On " in line:
+        branch_part = line.split(" On ", 1)[1]
+    elif " on " in line:
+        branch_part = line.split(" on ", 1)[1]
+    else:
+        continue
+    stash_branch = branch_part.split(":", 1)[0].strip()
+    if not stash_branch or stash_branch in {"main", "master"}:
+        continue
+
+    rc, _ = sh(["git", "-C", str(repo_root), "rev-parse", "--verify", "--quiet", f"refs/heads/{stash_branch}"], check=False)
+    exists = rc == 0
+    if not exists:
+        stash_issues.append({"ref": ref, "branch": stash_branch, "code": "stash_branch_gone"})
+    elif merged_into_main(repo_root, stash_branch):
+        stash_issues.append({"ref": ref, "branch": stash_branch, "code": "stash_branch_merged"})
+    elif is_local_prefix(stash_branch):
+        stash_warnings.append({"ref": ref, "branch": stash_branch, "code": "stash_local_branch"})
+
+summary = {
+    "repo": str(repo_root),
+    "checked_worktrees": len(worktree_rows),
+    "worktree_issue_count": len(issues),
+    "worktree_warning_count": len(warnings),
+    "stash_count": len(stash_lines),
+    "stash_issue_count": len(stash_issues),
+    "stash_warning_count": len(stash_warnings),
+    "total_issue_count": len(issues) + len(stash_issues),
+    "total_warning_count": len(warnings) + len(stash_warnings),
+    "policy": {
+        "main_branch": main_branch,
+        "local_branch_prefixes_allow_no_remote": local_prefixes,
+        "merged_branch_grace_hours": merged_grace_h,
+        "closed_owner_grace_hours": closed_owner_grace_h,
+        "unowned_local_branch_grace_hours": unowned_local_grace_h,
+    },
+}
+
+payload = {
+    "summary": summary,
+    "worktrees": worktree_rows,
+    "issues": issues,
+    "warnings": warnings,
+    "stash_issues": stash_issues,
+    "stash_warnings": stash_warnings,
+}
+
+if json_mode:
+    print(json.dumps(payload, indent=2))
+else:
+    if brief_mode:
+        status = "FAIL" if summary["total_issue_count"] > 0 else "PASS"
+        print(
+            f"{status} issues={summary['total_issue_count']} warnings={summary['total_warning_count']} "
+            f"worktrees={summary['checked_worktrees']} stashes={summary['stash_count']}"
+        )
+    elif mode == "gate":
+        if summary["total_issue_count"] > 0:
+            print("D48 FAIL: worktree lifecycle issues detected")
+            for item in issues:
+                owner = item["owner_id"] or "none"
+                print(
+                    f"  - {item['path']}: {item['branch']} -> {item['code']} "
+                    f"(owner={item['owner_type']}:{owner} state={item['owner_state']})"
+                )
+            for item in stash_issues:
+                print(f"  - stash {item['ref']} ({item['branch']}): {item['code']}")
+            if warnings:
+                print("  WARNINGS:")
+                for item in warnings:
+                    owner = item["owner_id"] or "none"
+                    print(
+                        f"    - {item['path']}: {item['branch']} -> {item['code']} "
+                        f"(owner={item['owner_type']}:{owner} state={item['owner_state']})"
+                    )
+            if stash_warnings:
+                for item in stash_warnings:
+                    print(f"    - stash {item['ref']} ({item['branch']}): {item['code']}")
+        else:
+            print(
+                "D48 PASS: lifecycle clean "
+                f"(worktrees={summary['checked_worktrees']} warnings={summary['total_warning_count']} "
+                f"stashes={summary['stash_count']})"
+            )
+    else:
+        print("worktree.lifecycle.reconcile")
+        print(f"repo: {summary['repo']}")
+        print(f"checked_worktrees: {summary['checked_worktrees']}")
+        print(f"issues: {summary['total_issue_count']}")
+        print(f"warnings: {summary['total_warning_count']}")
+        print(f"stashes: {summary['stash_count']}")
+
+        if issues:
+            print("issue_details:")
+            for item in issues:
+                owner = item["owner_id"] or "none"
+                print(
+                    f"  - {item['path']}: {item['branch']} -> {item['code']} "
+                    f"(owner={item['owner_type']}:{owner} state={item['owner_state']})"
+                )
+        if warnings:
+            print("warning_details:")
+            for item in warnings:
+                owner = item["owner_id"] or "none"
+                print(
+                    f"  - {item['path']}: {item['branch']} -> {item['code']} "
+                    f"(owner={item['owner_type']}:{owner} state={item['owner_state']})"
+                )
+        if stash_issues:
+            print("stash_issues:")
+            for item in stash_issues:
+                print(f"  - {item['ref']} ({item['branch']}): {item['code']}")
+        if stash_warnings:
+            print("stash_warnings:")
+            for item in stash_warnings:
+                print(f"  - {item['ref']} ({item['branch']}): {item['code']}")
+
+if mode == "gate" and summary["total_issue_count"] > 0:
+    sys.exit(1)
+PY

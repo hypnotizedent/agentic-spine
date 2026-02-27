@@ -7,7 +7,7 @@
 # background watcher for long checks, and unified status view.
 #
 # Usage:
-#   ops wave start <WAVE_ID> --objective "<text>"
+#   ops wave start <WAVE_ID> --objective "<text>" [--worktree auto|off] [--repo <path>]
 #   ops wave dispatch <WAVE_ID> --lane <lane> --task "<text>"
 #   ops wave collect <WAVE_ID>
 #   ops wave status [WAVE_ID]
@@ -24,6 +24,7 @@ SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine-mailroom}"
 WAVES_DIR="$RUNTIME_ROOT/waves"
 LANES_STATE="$RUNTIME_ROOT/lanes/state.json"
+source "$SPINE_REPO/ops/lib/git-lock.sh" 2>/dev/null || true
 
 mkdir -p "$WAVES_DIR"
 
@@ -58,7 +59,8 @@ usage() {
 ops wave - Wave orchestration with lane-aware dispatch
 
 Usage:
-  ops wave start <WAVE_ID> --objective "<text>"      Create a new wave
+  ops wave start <WAVE_ID> --objective "<text>" [--worktree auto|off] [--repo <path>]
+                                                    Create a new wave (default auto worktree)
   ops wave dispatch <WAVE_ID> --lane <L> --task "T"  Dispatch task to a lane
   ops wave ack <WAVE_ID> --lane <L> --result "text"  Acknowledge task completion
   ops wave collect <WAVE_ID>                         Collect results from lanes
@@ -83,17 +85,30 @@ EOF
 cmd_start() {
   local wave_id=""
   local objective=""
+  local worktree_mode="auto"
+  local workspace_repo="$SPINE_REPO"
+  local workspace_enabled="false"
+  local workspace_branch=""
+  local workspace_worktree=""
+  local workspace_note=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --) shift ;;
       --objective) objective="${2:-}"; shift 2 ;;
+      --worktree) worktree_mode="${2:-}"; shift 2 ;;
+      --repo) workspace_repo="${2:-}"; shift 2 ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
     esac
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave start <WAVE_ID> --objective \"<text>\"" >&2
+    echo "Usage: ops wave start <WAVE_ID> --objective \"<text>\" [--worktree auto|off] [--repo <path>]" >&2
+    exit 1
+  fi
+  if [[ "$worktree_mode" != "auto" && "$worktree_mode" != "off" ]]; then
+    echo "Usage: --worktree must be auto or off (got: $worktree_mode)" >&2
     exit 1
   fi
 
@@ -108,13 +123,99 @@ cmd_start() {
 
   mkdir -p "$sd"
 
-  python3 - "$sf" "$wave_id" "$objective" <<'PYSTART'
+  if [[ "$worktree_mode" == "auto" ]]; then
+    workspace_repo="$(git -C "$workspace_repo" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -z "$workspace_repo" ]]; then
+      echo "Wave '$wave_id' start blocked: --repo is not a git worktree path." >&2
+      exit 1
+    fi
+
+    if command -v acquire_git_lock >/dev/null 2>&1; then
+      acquire_git_lock wave || exit 1
+    fi
+
+    local default_branch
+    default_branch="$(git -C "$workspace_repo" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')"
+    default_branch="${default_branch:-main}"
+
+    git -C "$workspace_repo" fetch --prune origin "$default_branch" >/dev/null 2>&1 || true
+    workspace_branch="codex/${wave_id}"
+    workspace_worktree="$workspace_repo/.worktrees/waves/${wave_id}"
+
+    if ! git -C "$workspace_repo" show-ref --verify --quiet "refs/heads/$workspace_branch"; then
+      if git -C "$workspace_repo" show-ref --verify --quiet "refs/remotes/origin/$default_branch"; then
+        git -C "$workspace_repo" branch "$workspace_branch" "origin/$default_branch" >/dev/null
+      else
+        git -C "$workspace_repo" branch "$workspace_branch" "$default_branch" >/dev/null
+      fi
+    fi
+
+    local occupied_worktree=""
+    occupied_worktree="$(python3 - "$workspace_repo" "$workspace_branch" <<'PYOCCUPIED'
+import sys
+from pathlib import Path
+import subprocess
+
+repo = Path(sys.argv[1]).resolve()
+branch = sys.argv[2]
+proc = subprocess.run(
+    ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+    text=True,
+    capture_output=True,
+    check=True,
+)
+current_wt = ""
+for raw in proc.stdout.splitlines():
+    line = raw.strip()
+    if not line:
+        continue
+    if line.startswith("worktree "):
+        current_wt = line.split(" ", 1)[1].strip()
+        continue
+    if line.startswith("branch refs/heads/"):
+        b = line.split("refs/heads/", 1)[1].strip()
+        if b == branch:
+            print(current_wt)
+            break
+PYOCCUPIED
+)"
+
+    if [[ -n "$occupied_worktree" && "$occupied_worktree" != "$workspace_worktree" ]]; then
+      workspace_worktree="$occupied_worktree"
+      workspace_note="reused existing branch worktree"
+    fi
+
+    if ! git -C "$workspace_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      mkdir -p "$(dirname "$workspace_worktree")"
+      git -C "$workspace_repo" worktree add "$workspace_worktree" "$workspace_branch" >/dev/null
+      if [[ -z "$workspace_note" ]]; then
+        workspace_note="created deterministic wave worktree"
+      fi
+    elif [[ -z "$workspace_note" ]]; then
+      workspace_note="existing deterministic wave worktree"
+    fi
+
+    workspace_enabled="true"
+
+    if command -v release_git_lock >/dev/null 2>&1; then
+      release_git_lock
+    fi
+  else
+    workspace_note="worktree auto-provision disabled (--worktree off)"
+  fi
+
+  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" <<'PYSTART'
 import json, sys
 from datetime import datetime, timezone
 
 sf = sys.argv[1]
 wave_id = sys.argv[2]
 objective = sys.argv[3] if len(sys.argv) > 3 else ""
+workspace_enabled = (sys.argv[4].lower() == "true") if len(sys.argv) > 4 else False
+workspace_repo = sys.argv[5] if len(sys.argv) > 5 else ""
+workspace_worktree = sys.argv[6] if len(sys.argv) > 6 else ""
+workspace_branch = sys.argv[7] if len(sys.argv) > 7 else ""
+workspace_note = sys.argv[8] if len(sys.argv) > 8 else ""
 
 state = {
     "wave_id": wave_id,
@@ -125,7 +226,15 @@ state = {
     "dispatches": [],
     "watcher_checks": [],
     "preflight": None,
-    "results": []
+    "results": [],
+    "workspace": {
+        "enabled": workspace_enabled,
+        "repo": workspace_repo if workspace_enabled else None,
+        "worktree": workspace_worktree if workspace_enabled else None,
+        "branch": workspace_branch if workspace_enabled else None,
+        "lifecycle_state": "active" if workspace_enabled else "disabled",
+        "note": workspace_note,
+    },
 }
 
 with open(sf, "w") as f:
@@ -136,6 +245,13 @@ print(f"Wave '{wave_id}' created.")
 if objective:
     print(f"  Objective: {objective}")
 print(f"  Status: active")
+if workspace_enabled:
+    print(f"  Worktree: {workspace_worktree}")
+    print(f"  Branch:   {workspace_branch}")
+    if workspace_note:
+        print(f"  Note:     {workspace_note}")
+elif workspace_note:
+    print(f"  Note: {workspace_note}")
 print(f"  Next: ops wave preflight <domain>")
 print(f"         ops wave dispatch {wave_id} --lane <lane> --task \"...\"")
 PYSTART
@@ -148,6 +264,7 @@ cmd_dispatch() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --) shift ;;
       --lane) lane="${2:-}"; shift 2 ;;
       --task) task="${2:-}"; shift 2 ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -477,6 +594,9 @@ PYCOLLECT
 }
 
 cmd_status() {
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
   local wave_id="${1:-}"
 
   # If no wave_id, list all waves
@@ -518,6 +638,11 @@ print(f"  Objective: {state.get('objective', '(none)')}")
 print(f"  Created:   {state['created_at']}")
 if state.get("closed_at"):
     print(f"  Closed:    {state['closed_at']}")
+workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else None
+if workspace and workspace.get("enabled"):
+    print(f"  Worktree:  {workspace.get('worktree')}")
+    print(f"  Branch:    {workspace.get('branch')}")
+    print(f"  Lifecycle: {workspace.get('lifecycle_state', 'active')}")
 print()
 
 # Open lanes
@@ -693,6 +818,7 @@ cmd_ack() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --) shift ;;
       --lane) lane="${2:-}"; shift 2 ;;
       --result) result="${2:-}"; shift 2 ;;
       --run-key) run_key="${2:-}"; shift 2 ;;
@@ -804,6 +930,7 @@ cmd_close() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --) shift ;;
       --force) force=true; shift ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
@@ -875,6 +1002,12 @@ try:
     state["status"] = "closed"
     state["closed_at"] = now
     state["force_closed"] = bool(contract_violations)
+    workspace = state.get("workspace")
+    if isinstance(workspace, dict) and workspace.get("enabled"):
+        workspace["lifecycle_state"] = "pending_close"
+        workspace["closed_at"] = now
+        workspace["close_action"] = "explicit_cleanup_required"
+        state["workspace"] = workspace
 
     with open(sf, "w") as f:
         json.dump(state, f, indent=2)
@@ -888,6 +1021,7 @@ dispatches = state.get("dispatches", [])
 done_checks = sum(1 for c in checks if c["status"] == "done")
 failed_checks = sum(1 for c in checks if c["status"] == "failed")
 run_keys = [c["run_key"] for c in checks if c.get("run_key")]
+workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
 pf = state.get("preflight", {})
 
 residual_blockers = []
@@ -909,6 +1043,13 @@ with open(receipt_path, "w") as rf:
     rf.write(f"- **Created**: {state['created_at']}\n")
     rf.write(f"- **Closed**: {now}\n")
     rf.write(f"- **Status**: closed\n\n")
+    if workspace.get("enabled"):
+        rf.write("## Workspace Lifecycle\n\n")
+        rf.write(f"- Repo: {workspace.get('repo')}\n")
+        rf.write(f"- Worktree: {workspace.get('worktree')}\n")
+        rf.write(f"- Branch: {workspace.get('branch')}\n")
+        rf.write(f"- Lifecycle State: {workspace.get('lifecycle_state')}\n")
+        rf.write("- Cleanup: explicit close path required (non-destructive by default)\n\n")
 
     rf.write(f"## Dispatches ({len(dispatches)})\n\n")
     for i, d in enumerate(dispatches, 1):
@@ -962,6 +1103,8 @@ with open(receipt_path, "w") as rf:
 print(f"Wave '{state['wave_id']}' closed.")
 print(f"  Dispatches: {len(dispatches)}")
 print(f"  Checks: {done_checks} done, {failed_checks} failed")
+if workspace.get("enabled"):
+    print(f"  Workspace lifecycle: pending_close ({workspace.get('worktree')})")
 if run_keys:
     print(f"  Run keys: {', '.join(run_keys)}")
 if residual_blockers:
@@ -980,6 +1123,7 @@ cmd_preflight() {
   # Parse args: ops wave preflight <domain> [--wave WAVE_ID]
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --) shift ;;
       --wave) target_wave="${2:-}"; shift 2 ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) domain="$1"; shift ;;
@@ -1300,6 +1444,7 @@ cmd_collect_v2() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --) shift ;;
       --sync-roadmap) sync_roadmap=true; shift ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
@@ -1603,6 +1748,7 @@ cmd_close_v2() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --) shift ;;
       --force) force=true; shift ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
@@ -1779,6 +1925,12 @@ try:
     state["status"] = "closed"
     state["closed_at"] = now
     state["force_closed"] = bool(contract_violations)
+    workspace = state.get("workspace")
+    if isinstance(workspace, dict) and workspace.get("enabled"):
+        workspace["lifecycle_state"] = "pending_close"
+        workspace["closed_at"] = now
+        workspace["close_action"] = "explicit_cleanup_required"
+        state["workspace"] = workspace
 
     with open(sf, "w") as f:
         json.dump(state, f, indent=2)
@@ -1791,6 +1943,7 @@ finally:
 done_checks = sum(1 for c in checks if c["status"] == "done")
 failed_checks = sum(1 for c in checks if c["status"] == "failed")
 run_keys = [c["run_key"] for c in checks if c.get("run_key")]
+workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
 
 # Also collect run keys from validated receipt artifacts only
 for r in valid_receipts:
@@ -1826,7 +1979,8 @@ close_receipt = {
     "invalid_receipts": len(invalid_receipts),
     "run_keys": run_keys,
     "residual_blockers": residual_blockers,
-    "READY_FOR_ADOPTION": ready_for_adoption
+    "READY_FOR_ADOPTION": ready_for_adoption,
+    "workspace": workspace if workspace else None,
 }
 
 close_receipt_path = os.path.join(sd, "close-receipt.json")
@@ -1843,6 +1997,13 @@ with open(receipt_path, "w") as rf:
     rf.write(f"- **Created**: {state['created_at']}\n")
     rf.write(f"- **Closed**: {now}\n")
     rf.write(f"- **Status**: closed\n\n")
+    if workspace.get("enabled"):
+        rf.write("## Workspace Lifecycle\n\n")
+        rf.write(f"- Repo: {workspace.get('repo')}\n")
+        rf.write(f"- Worktree: {workspace.get('worktree')}\n")
+        rf.write(f"- Branch: {workspace.get('branch')}\n")
+        rf.write(f"- Lifecycle State: {workspace.get('lifecycle_state')}\n")
+        rf.write("- Cleanup: explicit close path required (non-destructive by default)\n\n")
 
     rf.write(f"## Dispatches ({len(dispatches)})\n\n")
     for i, d in enumerate(dispatches, 1):
@@ -1887,6 +2048,8 @@ print(f"Wave '{state['wave_id']}' closed.")
 print(f"  Dispatches: {len(dispatches)} ({sum(1 for d in dispatches if d['status'] == 'done')} done, {sum(1 for d in dispatches if d['status'] == 'blocked')} blocked)")
 print(f"  Checks: {done_checks} done, {failed_checks} failed")
 print(f"  Receipts: {valid_receipt_count} valid, {len(invalid_receipts)} invalid")
+if workspace.get("enabled"):
+    print(f"  Workspace lifecycle: pending_close ({workspace.get('worktree')})")
 if run_keys:
     print(f"  Run keys: {len(run_keys)}")
 if residual_blockers:
@@ -1906,7 +2069,7 @@ case "${1:-}" in
   dispatch)           shift; cmd_dispatch "$@" ;;
   ack)                shift; cmd_ack "$@" ;;
   collect)            shift; cmd_collect_v2 "$@" ;;
-  status)             cmd_status "${2:-}" ;;
+  status)             shift; cmd_status "$@" ;;
   close)              shift; cmd_close_v2 "$@" ;;
   preflight)          shift; cmd_preflight "$@" ;;
   receipt-validate)   shift; cmd_receipt_validate "$@" ;;

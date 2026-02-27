@@ -16,7 +16,8 @@ scope: agent-governance-brief
 - **Single-agent sessions:** commit directly to `main` is allowed.
 - **Multi-agent sessions:** direct commit is disallowed by default; use proposal flow + apply-owner.
 - **Worktrees are optional.** `./bin/ops start loop <LOOP_ID>` creates an isolated worktree if you want one. Not mandatory.
-- **If using worktrees, clean up after merging** (D48). Use `ops close loop <LOOP_ID>` to tear down worktree + branch + stashes. Stale/merged/orphaned worktrees fail `spine.verify`.
+- **Wave default:** `./bin/ops wave start <WAVE_ID> --objective "..."` auto-provisions a deterministic worktree (`.worktrees/waves/<WAVE_ID>`) unless `--worktree off` is set.
+- **D48 is lifecycle-aware:** classify first with `./bin/ops cap run worktree.lifecycle.reconcile -- --json`, then close loop/wave owners explicitly before any optional git cleanup.
 - **Gitea is canonical** (origin). GitHub is a mirror. D62 enforces.
 
 ## Multi-Agent Write Policy (Mailroom-Gated Writes)
@@ -83,6 +84,7 @@ scope: agent-governance-brief
 - `./bin/ops status` — unified work status (loops + gaps + inbox)
 - `./bin/ops loops list --open` — list open loops only
 - `./bin/ops start loop <LOOP_ID>` — start worktree for a loop
+- `./bin/ops cap run worktree.lifecycle.reconcile -- --json` — classify stale candidates (non-destructive)
 - `./bin/ops cap run verify.core.run` — Core-8 day-to-day verify lane
 - `./bin/ops cap run verify.pack.run <domain|core-operator>` — pack-first day-to-day verify lane
 - `./bin/ops cap run verify.route.recommend` — suggest pack-run lane from current work

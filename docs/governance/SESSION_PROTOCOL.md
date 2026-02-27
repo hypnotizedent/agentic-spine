@@ -321,10 +321,10 @@ Every open gap in `operational.gaps.yaml` must be linked to an active loop (`par
 
 When using codex worktrees (`.worktrees/codex-*`):
 
-1. **Create** — branch from `origin/main` (fetch first): `git worktree add .worktrees/<name> -b codex/<name> origin/main`
-2. **Base** — never stack codex branches without an explicit `--base` in the PR; rebase before opening PRs.
-3. **Proof** — `git status` must be clean inside the worktree; D48 fails `spine.verify` on dirty worktrees.
-4. **Retire** — after merge, remove immediately: `ops close loop <LOOP_ID>` or `git worktree remove .worktrees/<name>`; D48 flags merged/dirty/orphaned worktrees and orphaned stashes.
+1. **Create** — default lane flow is `ops wave start <WAVE_ID> --objective "..."` with auto workspace provisioning (`.worktrees/waves/<WAVE_ID>`, branch `codex/<WAVE_ID>`). Manual `git worktree add` is fallback only.
+2. **Base** — branch from `origin/main` (fetch first) when provisioning manual branches; never stack codex branches without explicit base intent.
+3. **Classify before cleanup** — run `./bin/ops cap run worktree.lifecycle.reconcile -- --json` to see owner/state (`wave`, `loop`, `none`) and stale candidates.
+4. **Retire explicitly** — lifecycle closeout first (`ops wave close`, `ops loops close`), then optional git cleanup. D48 now enforces lifecycle violations, not raw missing `origin/codex/*`.
 
 ---
 
