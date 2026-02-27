@@ -13,8 +13,8 @@ parent_loop: LOOP-SPINE-RESEND-CANONICAL-UPGRADE-20260227-20260301-20260227
 - **Loop ID**: LOOP-SPINE-RESEND-CANONICAL-UPGRADE-20260227-20260301-20260227
 - **Branch**: codex/w53-resend-canonical-upgrade-20260227
 - **Worker SHAs (A/B/C)**: 037b99f / 7d0afa8+77ed11e / 5516e05
-- **Merge chain**: 037b99f -> 7d0afa8 -> 77ed11e -> 2129998 -> 5516e05
-- **Head SHA**: 5516e05
+- **Merge chain**: 037b99f -> 7d0afa8 -> 77ed11e -> 2129998 -> 5516e05 -> 8608ed1
+- **Head SHA**: 8608ed1
 
 ## Run Keys / Results
 
