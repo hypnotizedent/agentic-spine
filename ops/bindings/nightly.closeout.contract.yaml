@@ -1,0 +1,124 @@
+version: 1
+status: active
+owner: "@ronny"
+last_verified: "2026-02-27"
+description: "Canonical nightly closeout lifecycle contract (single-orchestrator, governed, receipt-first)."
+
+lifecycle_lock:
+  protected_loops:
+    - LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226
+  protected_gaps:
+    - GAP-OP-973
+  protected_branch_patterns:
+    - "^main$"
+    - "^codex/cleanup-night-snapshot-.*$"
+  protected_worktree_paths:
+    - mailroom/state/loop-scopes/LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226.scope.md
+    - docs/planning/MD1400_*
+  snapshot_required: true
+  prune_policy: non_destructive_first
+
+entrypoint:
+  capability: nightly.closeout
+  command: ./ops/commands/nightly-closeout.sh
+  mode_default: dry-run
+  require_explicit_apply: true
+
+safety:
+  no_secret_values_in_logs: true
+  no_vm_or_infra_mutations: true
+  no_force_push: true
+  require_snapshot_before_destructive: true
+  require_dry_run_before_apply: true
+  stop_on_scope_violation: true
+
+protected_scope:
+  loops:
+    - LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226
+  gaps:
+    - GAP-OP-973
+  runtime_lanes:
+    - ews-import
+    - md1400-rsync
+  file_globs:
+    - mailroom/state/loop-scopes/LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226.scope.md
+    - docs/planning/MD1400_*
+  branch_regexes:
+    - "^main$"
+    - "^codex/cleanup-night-snapshot-.*$"
+
+snapshot_policy:
+  enabled: true
+  output_root: /Users/ronnyworks/code/_closeout_backups
+  create_git_bundle: true
+  bundle_name_format: "{repo}-allrefs-{utc}.bundle"
+  include_ref_inventory: true
+
+cleanup_policy:
+  prune_local_branches: true
+  prune_remote_codex_branches: true
+  prune_worktrees: true
+  remove_stale_unregistered_paths: true
+  non_destructive_first: true
+  protect_checked_out_branches: true
+  protect_default_branches:
+    - main
+
+classification:
+  protected_when:
+    - has_open_loop
+    - has_open_gap
+    - matches_protected_scope
+  prune_candidate_when:
+    - merged_or_cherry_equivalent
+    - no_active_loop_or_gap_link
+    - not_protected
+  hold_when:
+    - attribution_confidence_low
+    - lineage_unresolved
+
+reconciliation:
+  reconcile_loops: true
+  reconcile_gaps: true
+  allow_auto_close: false
+  require_lineage_artifact_for_mismatch: true
+  lineage_artifact_path: /Users/ronnyworks/code/agentic-spine/docs/planning/W49_GAP_LINEAGE_RECON_20260227.md
+
+verification:
+  required_capabilities:
+    - gate.topology.validate
+    - verify.pack.run secrets
+    - verify.pack.run mint
+    - codex.worktree.status
+    - worktree.lifecycle.reconcile
+  accepted_baseline_exceptions:
+    - gate: D205
+      reason: external_calendar_snapshot_baseline_noise
+      allow_only_if_unchanged: true
+
+receipts:
+  require_master_receipt: true
+  master_receipt_path: /Users/ronnyworks/code/agentic-spine/docs/planning/W49_NIGHTLY_CLOSEOUT_AUTOPILOT_MASTER_RECEIPT.md
+  require_dryrun_receipt: true
+  dryrun_receipt_path: /Users/ronnyworks/code/agentic-spine/docs/planning/W49_NIGHTLY_CLOSEOUT_DRYRUN_20260227.md
+  require_apply_receipt: true
+  apply_receipt_path: /Users/ronnyworks/code/agentic-spine/docs/planning/W49_NIGHTLY_CLOSEOUT_APPLY_20260227.md
+  include_run_keys: true
+  include_parity_matrix: true
+  include_before_after_metrics: true
+
+push_policy:
+  remotes_required:
+    - origin
+    - github
+  optional_remotes:
+    - share
+  require_parity_check: true
+  fail_if_non_ff_main: true
+
+success_criteria:
+  - "single orchestrator terminal completed dry-run + apply"
+  - "protected lanes untouched"
+  - "no orphaned gaps introduced"
+  - "all required verify checks pass (except accepted unchanged baseline exceptions)"
+  - "master receipt complete and auditable"

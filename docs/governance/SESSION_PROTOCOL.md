@@ -53,6 +53,7 @@ Full spine access. Follow all sections below in order.
    - Run `./bin/ops cap run session.start` — default fast startup (status brief + recommended post-work verify command).
    - Run `./bin/ops cap run session.start full` only when explicitly requested for deep startup diagnostics.
    - If you need to touch secrets, source `~/.config/infisical/credentials` first.
+   - Canonical nightly closeout SOP entrypoint: `./bin/ops cap run nightly.closeout -- --mode dry-run` then `./bin/ops cap run nightly.closeout -- --mode apply`.
 2. **Start work**
    - Prioritize closing existing work (loops, gaps) before starting new work.
    - Use a 3-card intake before mutation work:
@@ -84,6 +85,7 @@ Full spine access. Follow all sections below in order.
 | Quick verify/status check | `ops cap run verify.core.run` |
 | Post-domain-work verify | `ops cap run verify.route.recommend` → `verify.pack.run <domain>` |
 | Release/nightly certification | `ops cap run verify.release.run` |
+| Lifecycle nightly closeout | `ops cap run nightly.closeout -- --mode dry-run` → `ops cap run nightly.closeout -- --mode apply` |
 
 ### Verify Tiers
 

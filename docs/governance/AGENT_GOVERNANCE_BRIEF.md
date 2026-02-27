@@ -70,6 +70,7 @@ scope: agent-governance-brief
 
 - Session startup baseline: run `./bin/ops cap run session.start` (fast mode default).
 - Optional deep startup diagnostics: run `./bin/ops cap run session.start full` when explicitly requested.
+- Canonical nightly closeout SOP entrypoint: run `./bin/ops cap run nightly.closeout -- --mode dry-run`, then `./bin/ops cap run nightly.closeout -- --mode apply`.
 - Domain work: run `./bin/ops cap run verify.route.recommend` and then `./bin/ops cap run verify.pack.run <domain|core-operator>` (use `verify.domain.run` only for integration/debug).
 - Certification: run `./bin/ops cap run verify.release.run` or `./bin/ops cap run spine.verify` for release/nightly and final cutover.
 - Every capability execution auto-generates a receipt. Ledger is append-only.
@@ -93,6 +94,8 @@ scope: agent-governance-brief
 - `./bin/ops cap run verify.pack.list` — list verify packs
 - `./bin/ops cap run stability.control.snapshot` — runtime reliability snapshot (on-demand)
 - `./bin/ops cap run stability.control.reconcile` — guided recovery command planner
+- `./bin/ops cap run nightly.closeout -- --mode dry-run` — lifecycle closeout classification + plan (no destructive actions)
+- `./bin/ops cap run nightly.closeout -- --mode apply` — snapshot-first nightly closeout apply path (protected lanes enforced)
 - `./bin/ops cap run spine.verify` — full drift check (release/nightly)
 - `/ctx` — load full governance context
 
