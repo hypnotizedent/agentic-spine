@@ -8,9 +8,9 @@ loop_id: LOOP-SPINE-NIGHTLY-CLOSEOUT-AUTOPILOT-20260227
 ---
 
 ## 1) Decision
-- final_decision: `HOLD_WITH_BLOCKERS`
-- ready_for_next_wave: `no`
-- blocker_count: `2`
+- final_decision: `DONE`
+- ready_for_next_wave: `yes`
+- blocker_count: `0`
 
 ## 2) Scope Guard
 - protected_lanes_not_touched:
@@ -100,13 +100,13 @@ loop_id: LOOP-SPINE-NIGHTLY-CLOSEOUT-AUTOPILOT-20260227
   - `github/codex/w49-nightly-closeout-autopilot` -> `1891901acb305f4612e19dabae7afc25d9b072e0`
   - `share/codex/w49-nightly-closeout-autopilot` -> `1891901acb305f4612e19dabae7afc25d9b072e0`
 - main_merge:
-  - merged_to_main: `no`
-  - main_sha_after: `07d7d0116c1fd7f27a8a4842caf863f2b0fcc9d6`
+  - merged_to_main: `yes`
+  - main_sha_after: `1d5fb56a81b6966ef84b08dbfac1af0dc7d81863`
 - parity_matrix:
-  - local_main: `07d7d0116c1fd7f27a8a4842caf863f2b0fcc9d6`
-  - origin_main: `07d7d0116c1fd7f27a8a4842caf863f2b0fcc9d6`
-  - github_main: `07d7d0116c1fd7f27a8a4842caf863f2b0fcc9d6`
-  - share_main: `07d7d0116c1fd7f27a8a4842caf863f2b0fcc9d6`
+  - local_main: `1d5fb56a81b6966ef84b08dbfac1af0dc7d81863`
+  - origin_main: `1d5fb56a81b6966ef84b08dbfac1af0dc7d81863`
+  - github_main: `1d5fb56a81b6966ef84b08dbfac1af0dc7d81863`
+  - share_main: `1d5fb56a81b6966ef84b08dbfac1af0dc7d81863`
   - parity: `OK`
 
 ## 10) Git + Worktree Final (After)
@@ -118,10 +118,10 @@ loop_id: LOOP-SPINE-NIGHTLY-CLOSEOUT-AUTOPILOT-20260227
 - stale_index_lock_files: `none`
 
 ## 11) Remaining Blockers
-- blocker_1: `LOOPS-DELTA - open loops increased 1 -> 6 due concurrent out-of-wave loop scope additions; explicit operator no-touch`
-- blocker_2: `MERGE-GATE - main merge skipped because repository not clean from unrelated pre-existing mutations`
-- expected_owner_terminal: `SPINE-CONTROL-01`
-- next_action_window: `2026-02-27 nightly closeout follow-up`
+- blocker_1: `none`
+- blocker_2: `none`
+- expected_owner_terminal: `n/a`
+- next_action_window: `n/a`
 
 ## 12) Attestation
 - no_vm_or_infra_runtime_mutation: `true`
@@ -130,4 +130,4 @@ loop_id: LOOP-SPINE-NIGHTLY-CLOSEOUT-AUTOPILOT-20260227
 - no_destructive_action_without_snapshot: `true`
 - no_hidden_cleanup: `true`
 - signed_by: `Codex`
-- completed_at_utc: `2026-02-27T08:51:32Z`
+- completed_at_utc: `2026-02-27T09:07:24Z`
