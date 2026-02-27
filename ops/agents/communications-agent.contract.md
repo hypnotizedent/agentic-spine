@@ -43,6 +43,7 @@
 - `communications.stack.status`
 - `communications.mailboxes.list`
 - `communications.mail.search`
+- `communications.mailarchiver.import.monitor`
 - `communications.mailarchiver.import.status`
 - `communications.mailarchiver.import.monitor`
 - `communications.mail.send.test`
@@ -75,8 +76,8 @@ The Resend MCP server v2.1 may run alongside the spine communications gateway un
 - **Governed mutations**: Manual approval required (create/update/remove contacts via D265).
 - **Broadcasts**: Forbidden until D266 governance gate passes in enforce mode.
 
-Policy doc: `docs/canonical/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md`
-Contract: `docs/canonical/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml`
+Policy doc: `docs/CANONICAL/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md`
+Contract: `docs/CANONICAL/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml`
 
 ## Watcher First Triage
 
