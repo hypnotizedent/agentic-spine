@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SPINE-W54-TAILSCALE-SSH-LIFECYCLE-CANONICALIZATION-20260227-20260301-20260227
 created: 2026-02-27
-status: active
+status: closed
 owner: "@ronny"
 scope: spine
 priority: high

@@ -24,8 +24,10 @@ terminal_role: SPINE-CONTROL-01
 - Wave C (runbooks + SOP): `b764b4e` (`docs(w54c): add tailscale+ssh lifecycle SOP and domain runbooks`)
 - Wave D (master receipt): `ac1af5c` (`docs(w54d): finalize lifecycle master receipt`)
 - Wave E (push parity receipt sync): `fc22960` (`docs(w54e): sync receipt push parity attestation`)
-- Merge chain: `07b6477 -> 5a11bb6 -> 6d4d732 -> a3052f0 -> b764b4e -> ac1af5c -> fc22960`
-- FF readiness after integration: `main...branch = 0 left / 6 right`
+- Wave F (core attach parity fix + FF merge-ready tip): `8e719cb` (`fix(core): align media project binding to nested spine-link path`)
+- Main merge protocol commit chain: `07b6477 -> ... -> 8e719cb` (FF merged to `main`)
+- Ambient cleanup closure commit: `983fb30` (`fix(GAP-OP-1023): mark fixed via gaps.close`)
+- FF readiness attestation at merge time: `main...w54 = 0 left / 0 right`
 
 ## Run Keys by Phase
 
@@ -38,6 +40,9 @@ terminal_role: SPINE-CONTROL-01
 | Phase 0/1 setup | `gaps.file` | `CAP-20260227-153348__gaps.file__R2phd12692` | done |
 | Phase 1 | forensic audit evidence commit | `6d4d732` | done |
 | Phase 6 | branch integration | `git rebase main` (base `07b6477`) | done |
+| Phase 6 | pre-merge route verify | `CAP-20260227-161724__verify.core.run__Rtwa333667` | pass |
+| Phase 6 | FF merge to `main` | `main: 07b6477 -> 8e719cb` | done |
+| Phase 6 | post-merge re-verify | `CAP-20260227-161802__verify.core.run__R9bd335098` | pass |
 | Phase 5 re-verify | `gate.topology.validate` | `CAP-20260227-160903__gate.topology.validate__R5hj498574` | pass |
 | Phase 5 re-verify | `verify.pack.run secrets` | `CAP-20260227-160914__verify.pack.run__R9hyq98919` | pass |
 | Phase 5 re-verify | `verify.pack.run communications` | `CAP-20260227-160934__verify.pack.run__Rcfnv7357` | failed (prereq artifacts missing) |
@@ -51,6 +56,8 @@ terminal_role: SPINE-CONTROL-01
 | Phase 5 re-verify | `loops.status` | `CAP-20260227-161032__loops.status__R3vv124056` | done |
 | Phase 5 re-verify | `gaps.status` | `CAP-20260227-161032__gaps.status__Rrlbr24057` | done |
 | Phase 5 re-verify | `verify.route.recommend` | `CAP-20260227-161032__verify.route.recommend__R8eik24058` | done |
+| Phase 6 closeout | `gaps.status` | `CAP-20260227-162214__gaps.status__R8prg55827` | done (`GAP-OP-1023` no longer open) |
+| Phase 6 closeout | `loops.status` | `CAP-20260227-162247__loops.status__Rasra58615` | done (`W54` loop closed) |
 
 Route recommendation rationale (`CAP-20260227-161032__verify.route.recommend__R8eik24058`): rebased head was clean with no pending deltas, so only `core` verification was recommended.
 
@@ -70,12 +77,16 @@ From `docs/planning/W54_TAILSCALE_SSH_FORENSIC_DRIFT_MATRIX.md`:
 
 Preflight invariant applied for this wave: `SCOPE_CLEAN_REQUIRED` (not global clean).
 
-Out-of-scope ambient drift classified as `OBSERVE_ONLY` and non-blocking:
+Out-of-scope ambient drift was initially classified `OBSERVE_ONLY` and non-blocking:
 
 - `/Users/ronnyworks/code/agentic-spine/docs/governance/_audits/SPINE_SCHEMA_CONVENTIONS_AUDIT_20260227.md`
 - `/Users/ronnyworks/code/workbench/agents/media/.spine-link.yaml`
 
-Normalization is tracked in cleanup lane gap `GAP-OP-1023` (owner `@ronny`).
+Normalization closure:
+
+- `agentic-spine`: no floating `_audits/SPINE_SCHEMA_CONVENTIONS_AUDIT_20260227.md` artifact present
+- `workbench`: `agents/media/.spine-link.yaml` is now canonical tracked state (`workbench` commit `14b1d13`)
+- `GAP-OP-1023` closed as `fixed` (`agentic-spine` commit `983fb30`)
 
 ## Contract Files Changed/Added
 
@@ -118,7 +129,7 @@ Registry/topology/profile surfaces updated:
 
 ## Open/Deferred Gaps with Owner
 
-Open gaps from `CAP-20260227-161032__gaps.status__Rrlbr24057`:
+Open gaps from `CAP-20260227-162214__gaps.status__R8prg55827`:
 
 - `GAP-OP-973` (`@ronny`) - protected lane
 - `GAP-OP-1018` (`@ronny`)
@@ -126,7 +137,6 @@ Open gaps from `CAP-20260227-161032__gaps.status__Rrlbr24057`:
 - `GAP-OP-1020` (`@ronny`)
 - `GAP-OP-1021` (`@ronny`)
 - `GAP-OP-1022` (`@ronny`)
-- `GAP-OP-1023` (`@ronny`) - ambient drift normalization
 
 ## Protected-Lane Attestation
 
@@ -141,13 +151,14 @@ The following remained untouched during W54 execution:
 
 | Remote | Status |
 |---|---|
-| local | synced (rebased branch tip) |
-| origin | synced (`git push --force-with-lease origin ...` + `ls-remote` verification) |
-| github | synced (`git push --force-with-lease github ...` + `ls-remote` verification) |
-| share | synced (`git push --force-with-lease share ...` + `ls-remote` verification) |
+| local/main | synced (FF-merged W54 + GAP-OP-1023 closure) |
+| origin/main | synced (`git push origin main`) |
+| github/main | synced (`git push github main`) |
+| share/main | synced (`git push share main`) |
+| w54 lane branch | synced at `8e719cb` across origin/github/share |
 
 ## Final Decision
 
-`MERGE_READY`
+`DONE`
 
-Main merge is explicitly deferred until token: `RELEASE_MAIN_MERGE_WINDOW`.
+`RELEASE_MAIN_MERGE_WINDOW` was provided and consumed for FF merge protocol.
