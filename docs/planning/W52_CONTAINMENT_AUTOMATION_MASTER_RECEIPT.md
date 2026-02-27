@@ -22,7 +22,7 @@ loop_id: LOOP-SPINE-W52-CONTAINMENT-AUTOMATION-20260227-20260301
 ## 3) Branch + SHA
 - branch: `codex/w52-night-closeout-20260227`
 - base_main_sha: `8506d816c7c0094e8820a0fa59925eb0e8136202`
-- head_sha: `375b671`
+- head_sha: `see branch tip (codex/w52-night-closeout-20260227)`
 - merged_to_main: `no`
 - main_sha_after: `8506d816c7c0094e8820a0fa59925eb0e8136202`
 
