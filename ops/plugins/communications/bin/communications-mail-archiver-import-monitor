@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+STACK_CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
+LIFECYCLE_CONTRACT="${TAILSCALE_SSH_LIFECYCLE_CONTRACT:-$ROOT/ops/bindings/tailscale.ssh.lifecycle.contract.yaml}"
+SSH_BINDING="${SSH_TARGETS_FILE:-$ROOT/ops/bindings/ssh.targets.yaml}"
+STATUS_BIN="${MAIL_ARCHIVER_IMPORT_STATUS_BIN:-$ROOT/ops/plugins/communications/bin/communications-mail-archiver-import-status}"
+
+JSON=0
+WRITE_STATE=1
+TARGET_ID=""
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+need yq
+need jq
+[[ -f "$STACK_CONTRACT" ]] || fail "missing contract: $STACK_CONTRACT"
+[[ -f "$LIFECYCLE_CONTRACT" ]] || fail "missing contract: $LIFECYCLE_CONTRACT"
+[[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
+[[ -x "$STATUS_BIN" ]] || fail "missing executable status surface: $STATUS_BIN"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target|--ssh-id) TARGET_ID="${2:?--target requires a value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    --no-state-write) WRITE_STATE=0; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-mail-archiver-import-monitor [--target <ssh-target-id>] [--json] [--no-state-write]
+
+Canonical monitor wrapper for mail-archiver import status.
+Enforces:
+  - machine polling transport mode policy (non-interactive only)
+  - BLOCKED_AUTH classification when interactive auth URL/check is detected
+  - single-flight lock (one checker at a time)
+USAGE
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+if [[ -z "$TARGET_ID" ]]; then
+  TARGET_ID="$(yq e -r '.mail_archiver.monitoring.machine_status_target.ssh_target // ""' "$STACK_CONTRACT")"
+fi
+[[ -n "$TARGET_ID" && "$TARGET_ID" != "null" ]] || fail "monitor target id missing in contract (mail_archiver.monitoring.machine_status_target.ssh_target)"
+
+TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
+TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"\"" "$SSH_BINDING")"
+TARGET_ACCESS_METHOD="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .access_method // \"ssh\"" "$SSH_BINDING")"
+[[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host in $SSH_BINDING"
+
+TARGET_MODE="$(yq e -r '.mail_archiver.monitoring.machine_status_target.mode // "open_ssh_batch"' "$STACK_CONTRACT")"
+REQUIRE_NONINTERACTIVE="$(yq e -r '.mail_archiver.monitoring.machine_status_target.require_noninteractive // true' "$STACK_CONTRACT")"
+
+BLOCKED_STATE="$(yq e -r '.monitoring.blocked_auth.lane_state // "BLOCKED_AUTH"' "$LIFECYCLE_CONTRACT")"
+BLOCKED_RETRY_ALLOWED="$(yq e -r '.monitoring.blocked_auth.retry_allowed // false' "$LIFECYCLE_CONTRACT")"
+STATE_FILE_REL="$(yq e -r '.mail_archiver.monitoring.blocked_auth_state.state_file // "mailroom/state/communications/mail-archiver-import-monitor.state.yaml"' "$STACK_CONTRACT")"
+LOCK_FILE_REL="$(yq e -r '.mail_archiver.monitoring.single_flight.lock_file // "mailroom/state/locks/mail-archiver-import-monitor.lock"' "$STACK_CONTRACT")"
+
+STATE_FILE="$ROOT/$STATE_FILE_REL"
+LOCK_FILE="$ROOT/$LOCK_FILE_REL"
+mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$LOCK_FILE")"
+
+is_tailscale_auth_challenge() {
+  local text="${1:-}"
+  grep -Eiq 'tailscale ssh requires an additional check|to authenticate, visit:|login\.tailscale\.com' <<<"$text"
+}
+
+write_state_yaml() {
+  local lane_state="$1"
+  local retry_allowed="$2"
+  local reason="$3"
+  local status_rc="$4"
+  local raw_status="$5"
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  cat >"$STATE_FILE" <<EOF
+updated_at: "$ts"
+capability: communications.mailarchiver.import.monitor
+lane_state: "$lane_state"
+retry_allowed: $retry_allowed
+target:
+  id: "$TARGET_ID"
+  host: "$TARGET_HOST"
+  user: "$TARGET_USER"
+  mode: "$TARGET_MODE"
+last_run:
+  status_rc: $status_rc
+  raw_status: "$raw_status"
+  reason: "$reason"
+EOF
+}
+
+emit_json() {
+  local lane_state="$1"
+  local retry_allowed="$2"
+  local reason="$3"
+  local status_rc="$4"
+  local raw_status="$5"
+  jq -n \
+    --arg capability "communications.mailarchiver.import.monitor" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg lane_state "$lane_state" \
+    --argjson retry_allowed "$retry_allowed" \
+    --arg target_id "$TARGET_ID" \
+    --arg target_host "$TARGET_HOST" \
+    --arg target_user "$TARGET_USER" \
+    --arg target_mode "$TARGET_MODE" \
+    --arg reason "$reason" \
+    --arg raw_status "$raw_status" \
+    --argjson status_rc "$status_rc" \
+    '{
+      capability: $capability,
+      generated_at: $generated_at,
+      lane_state: $lane_state,
+      retry_allowed: $retry_allowed,
+      target: {id:$target_id, host:$target_host, user:$target_user, mode:$target_mode},
+      status: {code:$status_rc, raw:$raw_status},
+      reason: $reason
+    }'
+}
+
+# Single-flight lock: avoid concurrent checkers that can amplify auth challenges.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    [[ "$JSON" -eq 1 ]] && emit_json "SINGLE_FLIGHT_ACTIVE" true "lock_busy" 0 "SKIP" || \
+      echo "communications.mailarchiver.import.monitor: SINGLE_FLIGHT_ACTIVE (lock busy: $LOCK_FILE)"
+    exit 0
+  fi
+else
+  LOCK_DIR="${LOCK_FILE}.d"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    [[ "$JSON" -eq 1 ]] && emit_json "SINGLE_FLIGHT_ACTIVE" true "lock_busy" 0 "SKIP" || \
+      echo "communications.mailarchiver.import.monitor: SINGLE_FLIGHT_ACTIVE (lock busy: $LOCK_DIR)"
+    exit 0
+  fi
+  trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+fi
+
+# Machine policy preflight: interactive mode is forbidden for monitors.
+if [[ "$REQUIRE_NONINTERACTIVE" == "true" ]]; then
+  case "$TARGET_MODE" in
+    open_ssh_batch|lan_open_ssh|openssh_batch_via_tailscale_ip) ;;
+    *)
+      if [[ "$WRITE_STATE" -eq 1 ]]; then
+        write_state_yaml "$BLOCKED_STATE" "$BLOCKED_RETRY_ALLOWED" "forbidden_transport_mode:${TARGET_MODE}" 0 "BLOCKED_AUTH"
+      fi
+      [[ "$JSON" -eq 1 ]] && emit_json "$BLOCKED_STATE" "$BLOCKED_RETRY_ALLOWED" "forbidden_transport_mode:${TARGET_MODE}" 0 "BLOCKED_AUTH" || \
+        echo "communications.mailarchiver.import.monitor: $BLOCKED_STATE (forbidden machine transport mode: $TARGET_MODE)"
+      exit 0
+      ;;
+  esac
+fi
+
+if [[ "$TARGET_MODE" == "lan_open_ssh" && "$TARGET_ACCESS_METHOD" != "lan_only" ]]; then
+  if [[ "$WRITE_STATE" -eq 1 ]]; then
+    write_state_yaml "$BLOCKED_STATE" "$BLOCKED_RETRY_ALLOWED" "lan_mode_requires_lan_only_target" 0 "BLOCKED_AUTH"
+  fi
+  [[ "$JSON" -eq 1 ]] && emit_json "$BLOCKED_STATE" "$BLOCKED_RETRY_ALLOWED" "lan_mode_requires_lan_only_target" 0 "BLOCKED_AUTH" || \
+    echo "communications.mailarchiver.import.monitor: $BLOCKED_STATE (target '$TARGET_ID' must be lan_only for lan_open_ssh mode)"
+  exit 0
+fi
+
+set +e
+STATUS_OUTPUT="$("$STATUS_BIN" --target "$TARGET_ID" --json 2>&1)"
+STATUS_RC=$?
+set -e
+
+if is_tailscale_auth_challenge "$STATUS_OUTPUT"; then
+  if [[ "$WRITE_STATE" -eq 1 ]]; then
+    write_state_yaml "$BLOCKED_STATE" "$BLOCKED_RETRY_ALLOWED" "tailscale_interactive_auth_required" "$STATUS_RC" "BLOCKED_AUTH"
+  fi
+  [[ "$JSON" -eq 1 ]] && emit_json "$BLOCKED_STATE" "$BLOCKED_RETRY_ALLOWED" "tailscale_interactive_auth_required" "$STATUS_RC" "BLOCKED_AUTH" || \
+    echo "communications.mailarchiver.import.monitor: $BLOCKED_STATE (tailscale interactive auth required)"
+  exit 0
+fi
+
+RAW_STATUS="UNKNOWN"
+if jq -e '.' >/dev/null 2>&1 <<<"$STATUS_OUTPUT"; then
+  RAW_STATUS="$(jq -r '.status // "UNKNOWN"' <<<"$STATUS_OUTPUT")"
+fi
+
+LANE_STATE="DEGRADED"
+RETRY_ALLOWED=true
+REASON="status_surface_result"
+case "$RAW_STATUS" in
+  OK) LANE_STATE="HEALTHY"; RETRY_ALLOWED=true ;;
+  WARN) LANE_STATE="DEGRADED"; RETRY_ALLOWED=true ;;
+  FAIL) LANE_STATE="FAILED"; RETRY_ALLOWED=true ;;
+  *)
+    if [[ "$STATUS_RC" -eq 0 ]]; then
+      LANE_STATE="HEALTHY"
+      RAW_STATUS="OK"
+    else
+      LANE_STATE="FAILED"
+    fi
+    ;;
+esac
+
+if [[ "$WRITE_STATE" -eq 1 ]]; then
+  write_state_yaml "$LANE_STATE" "$RETRY_ALLOWED" "$REASON" "$STATUS_RC" "$RAW_STATUS"
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  emit_json "$LANE_STATE" "$RETRY_ALLOWED" "$REASON" "$STATUS_RC" "$RAW_STATUS"
+else
+  echo "communications.mailarchiver.import.monitor"
+  echo "target: $TARGET_ID ($TARGET_USER@$TARGET_HOST)"
+  echo "mode: $TARGET_MODE"
+  echo "lane_state: $LANE_STATE"
+  echo "raw_status: $RAW_STATUS"
+  echo "status_rc: $STATUS_RC"
+  echo "retry_allowed: $RETRY_ALLOWED"
+  echo "state_file: $STATE_FILE_REL"
+fi
+
+exit 0

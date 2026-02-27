@@ -1,0 +1,88 @@
+status: authoritative
+owner: "@ronny"
+last_verified: "2026-02-27"
+scope: tailscale-control-plane-and-auth-authority
+version: "v1"
+summary: "Canonical authority for Tailscale control-plane usage, auth posture, and machine-vs-human access boundaries."
+
+authority:
+  control_plane:
+    canonical_url: "https://admin.tailscale.com/admin/machines"
+    operator_plane_only: true
+    notes:
+      - "Control-plane changes are human-authorized actions."
+      - "Machine monitors must not perform interactive control-plane auth."
+  local_runtime:
+    allowed_cli_read_surfaces:
+      - "tailscale status --json"
+      - "tailscale debug prefs"
+      - "tailscale serve status --json"
+    forbidden_machine_commands:
+      - "tailscale login"
+      - "tailscale up (without noninteractive auth key path)"
+      - "tailscale ssh (interactive path)"
+
+auth_modes:
+  machine_noninteractive:
+    allowed:
+      - auth_key_bootstrap_only
+      - openssh_batch_lan
+      - openssh_batch_via_tailscale_ip
+    forbidden:
+      - browser_auth_url
+      - interactive_tailscale_ssh
+    blocked_state_on_violation: BLOCKED_AUTH
+  human_interactive:
+    allowed:
+      - tailscale_ssh_interactive
+      - browser_auth_url
+      - tailscale_admin_console
+    constraints:
+      - "Human interactive actions require explicit operator intent."
+
+monitoring_policy:
+  single_flight_required: true
+  blocked_auth_retry_allowed: false
+  blocked_auth_patterns:
+    - "tailscale ssh requires an additional check"
+    - "to authenticate, visit:"
+    - "login.tailscale.com"
+  required_state_fields:
+    - lane_state
+    - retry_allowed
+    - reason
+    - target.id
+    - target.host
+    - last_run.status_rc
+
+preflight_policy:
+  cleanliness_invariant: SCOPE_CLEAN_REQUIRED
+  execution_scope: isolated_execution_worktree_only
+  out_of_scope_drift_handling: OBSERVE_ONLY
+  cleanup_lane_required_for_ambient_drift: true
+
+lifecycle_bindings:
+  ssh_targets: "ops/bindings/ssh.targets.yaml"
+  vm_lifecycle: "ops/bindings/vm.lifecycle.yaml"
+  service_registry: "docs/governance/SERVICE_REGISTRY.yaml"
+  workbench_ssh_contract: "ops/bindings/workbench.ssh.attach.contract.yaml"
+
+tombstones:
+  - id: TS-LEGACY-001
+    path: "/Users/ronnyworks/code/workbench/docs/legacy/infrastructure/runbooks/TAILSCALE_GOVERNANCE.md"
+    state: tombstoned_reference_only
+    replacement: "docs/CANONICAL/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml"
+  - id: TS-LEGACY-002
+    path: "/Users/ronnyworks/code/workbench/scripts/root/bootstrap/new-vm.sh"
+    state: tombstoned_for_machine_monitoring
+    replacement: "docs/governance/TAILSCALE_SSH_LIFECYCLE_OPERATIONS_RUNBOOK.md"
+    note: "Legacy helper can remain for human bootstrap context, but not for machine polling flows."
+  - id: TS-LEGACY-003
+    path: "/Users/ronnyworks/code/workbench/scripts/root/bootstrap/new-lxc.sh"
+    state: tombstoned_for_machine_monitoring
+    replacement: "docs/governance/TAILSCALE_SSH_LIFECYCLE_OPERATIONS_RUNBOOK.md"
+    note: "Legacy helper can remain for human bootstrap context, but not for machine polling flows."
+
+promotion_policy:
+  default_gate_mode: report
+  enforce_requires_clean_runs: 3

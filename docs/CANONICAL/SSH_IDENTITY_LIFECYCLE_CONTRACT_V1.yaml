@@ -1,0 +1,58 @@
+status: authoritative
+owner: "@ronny"
+last_verified: "2026-02-27"
+scope: ssh-identity-lifecycle
+version: "v1"
+summary: "Canonical SSH identity lifecycle contract for onboarding, mutation, retirement, and parity enforcement."
+
+authoritative_sources:
+  - "ops/bindings/ssh.targets.yaml"
+  - "ops/bindings/vm.lifecycle.yaml"
+  - "docs/governance/SERVICE_REGISTRY.yaml"
+  - "ops/bindings/workbench.ssh.attach.contract.yaml"
+
+lifecycle:
+  onboarding:
+    required_before_active:
+      - "vm.lifecycle entry exists with status=registered|active and non-empty tailscale_ip"
+      - "ssh.targets entry exists for vm lifecycle ssh_target"
+      - "SERVICE_REGISTRY hosts entry exists for vm hostname with tailscale_ip and ssh target linkage"
+      - "workbench SSH parity contract remains valid"
+      - "D258-D262 report-mode checks pass"
+  change:
+    required_for_host_or_user_change:
+      - "Update ssh.targets + vm.lifecycle + SERVICE_REGISTRY in same lane"
+      - "Preserve or update approved alias override table when vm hostname != ssh target"
+      - "Run verify.pack.run communications, secrets, mint"
+  retirement:
+    required_before_decommissioned:
+      - "Set vm.lifecycle status=decommissioned"
+      - "Tombstone SSH target with explicit rationale or remove target when no longer referenced"
+      - "Mark related service entries as deprecated|retired|stopped"
+      - "Record decommission decision in runbook receipt"
+
+approved_alias_overrides:
+  - vm_hostname: homeassistant
+    ssh_target: ha
+    rationale: "Legacy hostname preserved while SSH alias remains compact."
+
+machine_vs_human_access:
+  machine_monitoring:
+    interactive_auth_allowed: false
+    allowed_transport_modes:
+      - open_ssh_batch
+      - lan_open_ssh
+      - openssh_batch_via_tailscale_ip
+  human_interactive:
+    interactive_auth_allowed: true
+    allowed_transport_modes:
+      - tailscale_ssh_interactive
+      - open_ssh_batch
+      - lan_open_ssh
+
+gates:
+  - D258
+  - D259
+  - D260
+  - D261
+  - D262

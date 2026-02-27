@@ -1,0 +1,74 @@
+status: authoritative
+owner: "@ronny"
+last_verified: "2026-02-27"
+scope: tailscale-ssh-lifecycle-governance
+version: "1.0"
+
+contracts:
+  tailscale_authority: "docs/CANONICAL/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml"
+  ssh_identity_lifecycle: "docs/CANONICAL/SSH_IDENTITY_LIFECYCLE_CONTRACT_V1.yaml"
+
+preflight:
+  cleanliness_invariant: SCOPE_CLEAN_REQUIRED
+  execution_scope: isolated_execution_worktree_only
+  out_of_scope_drift: OBSERVE_ONLY
+  cleanup_lane_required: true
+
+lifecycle_sources:
+  ssh_targets_binding: "ops/bindings/ssh.targets.yaml"
+  vm_lifecycle_binding: "ops/bindings/vm.lifecycle.yaml"
+  service_registry: "docs/governance/SERVICE_REGISTRY.yaml"
+  workbench_ssh_attach_contract: "ops/bindings/workbench.ssh.attach.contract.yaml"
+
+machine_vs_human_access:
+  machine_access:
+    interactive_auth_allowed: false
+    allowed_transport_modes:
+      - open_ssh_batch
+      - lan_open_ssh
+      - openssh_batch_via_tailscale_ip
+    forbidden_transport_modes:
+      - tailscale_ssh_interactive
+  human_access:
+    interactive_auth_allowed: true
+    allowed_transport_modes:
+      - tailscale_ssh_interactive
+      - open_ssh_batch
+      - lan_open_ssh
+
+monitoring:
+  machine_monitor_surfaces:
+    - capability_id: communications.mailarchiver.import.monitor
+      script: ops/plugins/communications/bin/communications-mail-archiver-import-monitor
+      transport_mode: openssh_batch_via_tailscale_ip
+      target_contract_path: mail_archiver.monitoring.machine_status_target.ssh_target
+      state_file_contract_path: mail_archiver.monitoring.blocked_auth_state.state_file
+      lock_file_contract_path: mail_archiver.monitoring.single_flight.lock_file
+  blocked_auth:
+    lane_state: BLOCKED_AUTH
+    retry_allowed: false
+    auth_url_patterns:
+      - "tailscale ssh requires an additional check"
+      - "to authenticate, visit:"
+      - "login.tailscale.com"
+
+approved_alias_overrides:
+  - vm_hostname: homeassistant
+    ssh_target: ha
+    rationale: "Legacy hostname alias."
+
+tombstones:
+  - id: TS-LEGACY-001
+    path: "/Users/ronnyworks/code/workbench/docs/legacy/infrastructure/runbooks/TAILSCALE_GOVERNANCE.md"
+    state: tombstoned_reference_only
+  - id: TS-LEGACY-002
+    path: "/Users/ronnyworks/code/workbench/scripts/root/bootstrap/new-vm.sh"
+    state: tombstoned_for_machine_monitoring
+  - id: TS-LEGACY-003
+    path: "/Users/ronnyworks/code/workbench/scripts/root/bootstrap/new-lxc.sh"
+    state: tombstoned_for_machine_monitoring
+
+gate_policy:
+  ids: [D258, D259, D260, D261, D262]
+  default_mode: report
+  promote_to_enforce_after_clean_runs: 3
