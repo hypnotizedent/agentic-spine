@@ -130,10 +130,10 @@ The following remained untouched during W54 execution:
 
 | Remote | Status |
 |---|---|
-| local | pending final push |
-| origin | pending final push |
-| github | pending final push |
-| share | pending final push |
+| local | synced (branch tip) |
+| origin | synced (`git push -u origin ...` + `ls-remote` verification) |
+| github | synced (`git push github ...` + `ls-remote` verification) |
+| share | synced (`git push share ...` + `ls-remote` verification) |
 
 ## Final Decision
 
