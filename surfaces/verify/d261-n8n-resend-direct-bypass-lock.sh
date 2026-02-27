@@ -49,7 +49,7 @@ while IFS= read -r line; do
 done <"$bypass_file"
 
 # Check: expansion contract documents the bypass
-CONTRACT="$ROOT/docs/canonical/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml"
+CONTRACT="$ROOT/docs/CANONICAL/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml"
 if [[ -f "$CONTRACT" ]]; then
   command -v yq >/dev/null 2>&1 || fail "missing command: yq"
   bypass_status=$(yq e '.n8n_bypass.current_status' "$CONTRACT" 2>/dev/null)

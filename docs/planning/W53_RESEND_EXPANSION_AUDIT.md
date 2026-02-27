@@ -69,8 +69,8 @@ Resend shipped their "Email for Agents" platform overhaul on 2026-02-26, includi
 
 ## Deliverables
 
-1. `docs/canonical/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml`
-2. `docs/canonical/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md`
+1. `docs/CANONICAL/COMMUNICATIONS_RESEND_EXPANSION_CONTRACT_V1.yaml`
+2. `docs/CANONICAL/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md`
 3. `docs/planning/W53_RESEND_EXPANSION_AUDIT.md` (this file)
 4. `docs/planning/W53_RESEND_ACCEPTANCE_MATRIX.md`
 5. 6 gate scripts (D257-D262)

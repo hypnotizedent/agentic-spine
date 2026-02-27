@@ -1,0 +1,169 @@
+# Status: authoritative
+# Last verified: 2026-02-27
+# Owner: @ronny
+# Parent loop: LOOP-SPINE-RESEND-CANONICAL-UPGRADE-20260227-20260301-20260227
+# Gate enforcement: D257, D258, D259, D260, D261, D262
+
+schema_version: "1.0"
+updated_at: "2026-02-27"
+owner: "@ronny"
+scope: communications-resend-expansion
+description: |
+  Canonical contract for Resend platform expansion surfaces.
+  Covers inbound email, webhook events, contacts lifecycle,
+  broadcast campaigns, and MCP coexistence with spine gateway.
+  Transactional send authority remains spine-only.
+
+# ─── TRANSACTIONAL SEND AUTHORITY ───────────────────────────
+transactional_send_authority:
+  owner: spine
+  enforcement: strict
+  description: |
+    All production transactional email sends MUST route through the
+    spine communications preview-then-execute pipeline. Direct Resend
+    API calls for transactional sends are FORBIDDEN outside
+    ops/plugins/communications/ execution surface.
+  allowed_paths:
+    - ops/plugins/communications/bin/communications-send-execute
+  forbidden_paths:
+    - "Direct Resend MCP send_email tool for transactional paths"
+    - "n8n HTTP Request nodes calling api.resend.com/emails"
+    - "Any script outside ops/plugins/communications/ calling Resend send API"
+  gates:
+    - D147  # existing canonical routing lock
+    - D257  # new transactional send authority lock
+    - D261  # n8n bypass lock
+
+# ─── RESEND MCP COEXISTENCE ─────────────────────────────────
+mcp_coexistence:
+  policy_doc: "docs/canonical/COMMUNICATIONS_RESEND_MCP_COEXISTENCE_POLICY_V1.md"
+  spine_gateway_remains: true
+  resend_mcp_allowed_scope:
+    read_only:
+      - "list_emails (read delivery status)"
+      - "get_email (read single email)"
+      - "list_contacts (read audience)"
+      - "get_contact (read single contact)"
+      - "list_domains (read domain config)"
+      - "get_domain (read domain status)"
+      - "list_broadcasts (read campaigns)"
+      - "get_broadcast (read single campaign)"
+      - "list_received_emails (read inbound)"
+      - "read_received_email (read single inbound)"
+      - "list_received_email_attachments (read attachments)"
+      - "download_received_email_attachment (download attachment)"
+    governed_mutating:
+      - "create_contact (manual approval required)"
+      - "update_contact (manual approval required)"
+      - "remove_contact (manual approval required)"
+      - "create_webhook (manual approval required)"
+    forbidden:
+      - "send_email (transactional send authority is spine-only)"
+      - "batch_send_emails (transactional send authority is spine-only)"
+      - "create_broadcast (requires broadcast governance gate)"
+      - "send_broadcast (requires broadcast governance gate)"
+      - "create_api_key (infrastructure mutation)"
+      - "remove_api_key (infrastructure mutation)"
+  gate: D262  # expansion contract parity lock
+
+# ─── INBOUND EMAIL + WEBHOOKS ───────────────────────────────
+inbound:
+  status: planned
+  description: |
+    Resend inbound email routing allows agents to read replies to
+    transactional emails. Webhook events provide real-time delivery
+    status (delivered, bounced, complained, opened, clicked).
+  planned_domain: "reply.mintprints.com"
+  webhook_events:
+    - email.sent
+    - email.delivered
+    - email.delivery_delayed
+    - email.complained
+    - email.bounced
+    - email.opened
+    - email.clicked
+  webhook_schema_requirements:
+    - "All webhook payloads must be validated against Resend schema"
+    - "Events must be persisted to mailroom/outbox/alerts/ pipeline"
+    - "Webhook endpoint must verify Resend signature header"
+    - "No PII may be logged from webhook payloads"
+  gap: GAP-OP-1023
+  gate: D258
+
+# ─── CONTACTS LIFECYCLE ─────────────────────────────────────
+contacts:
+  status: planned
+  description: |
+    Governed surface for Resend audience/contact management.
+    All contact mutations require manual approval.
+  safety_requirements:
+    - "Contact creation requires manual approval"
+    - "Bulk operations require rate guard (max 100 per batch)"
+    - "Suppression list must be honored before any contact add"
+    - "Unsubscribe requests must be processed within 24h"
+    - "No contact data may be exported without approval"
+  planned_capabilities:
+    - communications.contacts.list
+    - communications.contacts.get
+    - communications.contacts.create
+    - communications.contacts.update
+    - communications.contacts.remove
+    - communications.contacts.segments.list
+  gap: GAP-OP-1024
+  gate: D259
+
+# ─── BROADCAST CAMPAIGNS ────────────────────────────────────
+broadcasts:
+  status: planned
+  description: |
+    Governed surface for Resend broadcast/campaign management.
+    All broadcast sends require manual approval plus budget guard.
+  safety_requirements:
+    - "Broadcast creation requires manual approval"
+    - "Broadcast send requires explicit manual approval"
+    - "Rate guard: max 1 broadcast per hour, max 5 per day"
+    - "Budget guard: max 1000 recipients per broadcast initially"
+    - "Suppression list enforcement before send"
+    - "Preview required before send (mirrors transactional pattern)"
+    - "All broadcasts must include unsubscribe link"
+  planned_capabilities:
+    - communications.broadcast.list
+    - communications.broadcast.get
+    - communications.broadcast.create
+    - communications.broadcast.send
+    - communications.broadcast.schedule
+  gap: GAP-OP-1025
+  gate: D260
+
+# ─── N8N BYPASS REMEDIATION ─────────────────────────────────
+n8n_bypass:
+  description: |
+    A01_New_Quote_Alert.json currently makes direct HTTP POST to
+    api.resend.com/emails with Bearer RESEND_API_KEY. This bypasses
+    spine preview-execute governance. Target: migrate to spine
+    capability call or mark as explicitly governed exception.
+  current_status: ungoverned_bypass
+  target_status: governed_or_migrated
+  gap: GAP-OP-1026
+  gate: D261
+
+# ─── GAP REGISTRY ───────────────────────────────────────────
+gaps:
+  - id: GAP-OP-1023
+    label: RESEND-EXP-01
+    subject: missing inbound webhook ingest surface
+  - id: GAP-OP-1024
+    label: RESEND-EXP-02
+    subject: missing contacts lifecycle governed surface
+  - id: GAP-OP-1025
+    label: RESEND-EXP-03
+    subject: missing broadcast lifecycle governed surface
+  - id: GAP-OP-1026
+    label: RESEND-EXP-04
+    subject: n8n direct Resend bypass path
+  - id: GAP-OP-1027
+    label: RESEND-EXP-05
+    subject: missing MCP coexistence boundary contract
+  - id: GAP-OP-1028
+    label: RESEND-EXP-06
+    subject: missing acceptance cert
