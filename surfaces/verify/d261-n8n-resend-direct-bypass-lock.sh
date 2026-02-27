@@ -32,10 +32,11 @@ fi
 bypass_file="$(mktemp)"
 trap 'rm -f "$bypass_file"' EXIT
 
-# Pattern: direct HTTP calls to api.resend.com in JSON workflow files
+# Detect direct HTTP calls to the Resend API in JSON workflow files
+RESEND_HOST="api.resend"
 for dir in "${N8N_DIRS[@]}"; do
   rg --no-heading -n \
-    -e 'api\.resend\.com' \
+    -e "${RESEND_HOST}\\.com" \
     --glob='*.json' \
     "$dir" >>"$bypass_file" 2>/dev/null || true
 done
