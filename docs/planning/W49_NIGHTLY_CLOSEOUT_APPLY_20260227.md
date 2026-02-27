@@ -81,21 +81,22 @@ loop_id: LOOP-SPINE-NIGHTLY_CLOSEOUT-AUTOPILOT-20260227
 
 ## 8) Git/Push Parity
 - pushed_branch: `codex/w49-nightly-closeout-autopilot`
-- pushed_to_origin: `<pending>`
-- pushed_to_github: `<pending>`
-- pushed_to_share: `<pending>`
-- main_merge_performed: `<pending>`
+- pushed_to_origin: `1891901acb305f4612e19dabae7afc25d9b072e0`
+- pushed_to_github: `1891901acb305f4612e19dabae7afc25d9b072e0`
+- pushed_to_share: `1891901acb305f4612e19dabae7afc25d9b072e0`
+- main_merge_performed: `no`
 - main_parity:
-  - local_main: `<pending>`
-  - origin_main: `<pending>`
-  - github_main: `<pending>`
-  - share_main: `<pending>`
-  - parity: `<pending>`
+  - local_main: `07d7d0116c1fd7f27a8a4842caf863f2b0fcc9d6`
+  - origin_main: `07d7d0116c1fd7f27a8a4842caf863f2b0fcc9d6`
+  - github_main: `07d7d0116c1fd7f27a8a4842caf863f2b0fcc9d6`
+  - share_main: `07d7d0116c1fd7f27a8a4842caf863f2b0fcc9d6`
+  - parity: `OK`
 
 ## 9) Final Decision
 - decision: `HOLD_WITH_BLOCKERS`
 - blockers_remaining:
   - `LOOPS-DELTA: open loops increased from baseline due concurrent out-of-wave loop scopes; operator instructed no-touch`
+  - `MAIN-MERGE-SKIPPED: repository not clean (unrelated tracked/untracked changes), so FF-safe clean merge condition not met`
 - next_action_owner: `SPINE-CONTROL-01`
 - next_action_window: `2026-02-27 night closeout window`
 
