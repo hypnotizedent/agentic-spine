@@ -2,6 +2,7 @@
 
 - loop_id: LOOP-SPINE-W55-WORKTREE-LIFECYCLE-CANONICALIZATION-20260227
 - branch: codex/w55-worktree-lifecycle-governance-20260227
+- integration_sha: 621eb0d
 - status: MERGE_READY
 
 ## Baseline Verification (No Competing System)
