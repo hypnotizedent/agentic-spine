@@ -120,7 +120,7 @@ fi
 git push -u origin HEAD
 
 origin_url="$(git remote get-url origin 2>/dev/null || true)"
-web_base="${GITEA_WEB_BASE:-http://gitea:3000}"
+web_base="${GITEA_WEB_BASE:-}"
 
 services_health="$REPO_ROOT/ops/bindings/services.health.yaml"
 if command -v yq >/dev/null 2>&1 && [[ -f "$services_health" ]]; then
@@ -139,8 +139,32 @@ elif [[ "$origin_url" =~ ^git@[^:]+:[[:alnum:]_.-]+/[[:alnum:]_.-]+\.git$ ]]; th
   repo_path="${repo_path%.git}"
 fi
 
+if [[ -z "$web_base" ]]; then
+  origin_host=""
+  if [[ "$origin_url" =~ ^ssh://git@[^/]+/ ]]; then
+    origin_host="${origin_url#ssh://git@}"
+    origin_host="${origin_host%%/*}"
+    origin_host="${origin_host%%:*}"
+  elif [[ "$origin_url" =~ ^git@[^:]+: ]]; then
+    origin_host="${origin_url#git@}"
+    origin_host="${origin_host%%:*}"
+  elif [[ "$origin_url" =~ ^https?://[^/]+/ ]]; then
+    origin_host="${origin_url#*://}"
+    origin_host="${origin_host%%/*}"
+    origin_host="${origin_host%%:*}"
+  fi
+  if [[ -n "$origin_host" ]]; then
+    web_base="https://${origin_host}"
+  fi
+fi
+
 if [[ -z "${repo_path:-}" ]]; then
   echo "Pushed to origin. Open PR manually in Gitea (could not parse origin URL): $origin_url"
+  exit 0
+fi
+
+if [[ -z "$web_base" ]]; then
+  echo "Pushed to origin. Open PR manually in Gitea (could not resolve web base): $origin_url"
   exit 0
 fi
 

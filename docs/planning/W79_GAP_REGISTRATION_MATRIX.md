@@ -6,10 +6,10 @@ Source report: `mailroom/outbox/reports/W77_FORENSIC_AUDIT_REPORT.md`
 ## Summary
 
 - total_findings: 54
-- true_unresolved_linked_to_gap: 31
-- fixed_in_program_waves: 12
+- true_unresolved_linked_to_gap: 27
+- fixed_in_program_waves: 15
 - blocked_with_evidence: 2
-- noop_fixed_with_evidence: 8
+- noop_fixed_with_evidence: 9
 - stale_false_with_evidence: 1
 - unclassified: 0
 - registration_acceptance: PASS
@@ -38,7 +38,7 @@ Source report: `mailroom/outbox/reports/W77_FORENSIC_AUDIT_REPORT.md`
 | S-H2 | agentic-spine | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1156 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | README last_verified=2026-02-11 |
 | S-H3 | agentic-spine | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1157 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | gaps.status open=96 and many without regression_lock_id |
 | S-H4 | agentic-spine | high | STALE_FALSE | stale_false | - | - | current failure history query shows 0 release-scope failures today |
-| S-H5 | agentic-spine | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1158 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | proxy-session.sh + pr.sh still include hardcoded defaults |
+| S-H5 | agentic-spine | high | FIXED | linked_gap | GAP-OP-1158 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | hardcoded proxy defaults removed from governed vaultwarden/gitea command paths |
 | S-L1 | agentic-spine | low | NOOP_FIXED | noop_fixed | - | - | projection surfaces align with gate authority counts |
 | S-L2 | agentic-spine | low | NOOP_FIXED | noop_fixed | - | - | authority map checks currently passing |
 | S-L3 | agentic-spine | low | NOOP_FIXED | noop_fixed | - | - | contract coverage present and routable |
@@ -54,8 +54,8 @@ Source report: `mailroom/outbox/reports/W77_FORENSIC_AUDIT_REPORT.md`
 | WB-C5 | workbench | critical | NOOP_FIXED | noop_fixed | - | - | ha-sync-agent now present/allowed and no active contract violation reproduced |
 | WB-C6 | workbench | critical | FIXED | linked_gap | GAP-OP-1167 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | Media MCP URLs moved to Infisical placeholders |
 | WB-C7 | workbench | critical | FIXED | linked_gap | GAP-OP-1168 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | SimpleFIN script now uses portable HOME-based SPINE_ROOT |
-| WB-H1 | workbench | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1169 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | legacy-aliases.sh references mintprints-api.ronny.works |
-| WB-H2 | workbench | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1170 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | monitoring_inventory includes infra-core:8080 and 100.92.91.128:8080 |
+| WB-H1 | workbench | high | FIXED | linked_gap | GAP-OP-1169 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | legacy alias api-health moved to canonical api.mintprints.co endpoint |
+| WB-H2 | workbench | high | FIXED | linked_gap | GAP-OP-1170 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | infisical monitoring endpoint canonicalized to infra-core hostname source |
 | WB-H3 | workbench | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1171 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | 7 skeleton agent directories lack runnable implementation |
 | WB-H4 | workbench | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1172 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | 4 agent tool dirs have .env.example without .env |
 | WB-H5 | workbench | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1173 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | 13 scripts contain /Users/ronnyworks |
@@ -69,6 +69,6 @@ Source report: `mailroom/outbox/reports/W77_FORENSIC_AUDIT_REPORT.md`
 | XR-C2 | cross-repo | critical | FIXED | linked_gap | GAP-OP-1189 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | Final non-legacy FIREFLY alias outlier normalized; active workbench+mint surfaces canonicalized |
 | XR-H1 | cross-repo | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1190 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | no tailscale_ip_registry binding file present in spine |
 | XR-H2 | cross-repo | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1191 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | no launchd templates for finance-stack-backup/simplefin-daily-sync |
-| XR-H3 | cross-repo | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1192 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | no explicit gates tie mint/workbench satellite runtime state into spine verify rings |
+| XR-H3 | cross-repo | high | NOOP_FIXED | noop_fixed | GAP-OP-1192 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | D294+D295 satellite parity gates already present and routed in topology/profiles |
 | XR-M1 | cross-repo | medium | TRUE_UNRESOLVED | linked_gap | GAP-OP-1193 | LOOP-W79-T3-MEDIUM-LOW-COSMETIC-20260228 | mint-modules MCP integration not comprehensively surfaced in spine docs/contracts |
 | XR-M2 | cross-repo | medium | TRUE_UNRESOLVED | linked_gap | GAP-OP-1194 | LOOP-W79-T3-MEDIUM-LOW-COSMETIC-20260228 | DNS parity gates rely on manual invocation without autonomous probing cadence |

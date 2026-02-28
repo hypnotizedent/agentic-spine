@@ -27,10 +27,10 @@ _VW_PROXY_PID=""
 _VW_PROXY_PORT=""
 _VW_PROXY_OUTPUT=""
 
-# Default: derive from services.health SSOT, fallback to service hostname.
+# Default: derive from services.health SSOT only; callers can override via env.
 _VW_SPINE_ROOT="$(cd "$_VW_LIB_DIR/../../../.." && pwd)"
 _VW_SERVICES_HEALTH="$_VW_SPINE_ROOT/ops/bindings/services.health.yaml"
-_VW_DEFAULT_TARGET="http://vaultwarden:8081"
+_VW_DEFAULT_TARGET=""
 if command -v yq >/dev/null 2>&1 && [[ -f "$_VW_SERVICES_HEALTH" ]]; then
   _vw_health_url="$(yq e -r '.endpoints[] | select(.id=="vaultwarden") | .url // ""' "$_VW_SERVICES_HEALTH" 2>/dev/null | head -n1)"
   if [[ -n "$_vw_health_url" ]]; then
@@ -44,6 +44,11 @@ vw_proxy_start() {
   if [[ -n "$_VW_PROXY_PID" ]] && kill -0 "$_VW_PROXY_PID" 2>/dev/null; then
     return 0
   fi
+
+  [[ -n "$VW_PROXY_TARGET" ]] || {
+    echo "STOP (2): VW_PROXY_TARGET unresolved (set env or register vaultwarden url in services.health.yaml)" >&2
+    return 2
+  }
 
   [[ -f "$_VW_PROXY_SCRIPT" ]] || { echo "STOP (2): missing scope-proxy.py" >&2; return 2; }
   command -v python3 >/dev/null 2>&1 || { echo "STOP (2): python3 not found" >&2; return 2; }

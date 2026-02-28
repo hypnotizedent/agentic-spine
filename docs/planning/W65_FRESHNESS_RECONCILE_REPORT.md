@@ -1,13 +1,13 @@
 # W65 Freshness Reconcile Report
 
-Generated: 2026-02-28T10:26:35Z
+Generated: 2026-02-28T15:51:29Z
 Source contract: `/Users/ronnyworks/code/agentic-spine/ops/bindings/freshness.reconcile.contract.yaml`
 Source registry: `/Users/ronnyworks/code/agentic-spine/ops/bindings/gate.registry.yaml`
 
 ## Summary
 
-- freshness_gates_total: **68**
-- pass_count: **68**
+- freshness_gates_total: **70**
+- pass_count: **70**
 - refreshed_count: **0**
 - rerun_count: **0**
 - unresolved_count: **0**
@@ -90,3 +90,5 @@ Source registry: `/Users/ronnyworks/code/agentic-spine/ops/bindings/gate.registr
 | D283 | domain-taxonomy-bridge-parity-lock | pass | n/a | not_applicable | pass | n/a |
 | D286 | critical-asset-utilization-freshness-lock | pass | n/a | not_applicable | pass | n/a |
 | D287 | verify-failure-snapshot-fatigue-lock | pass | n/a | not_applicable | pass | n/a |
+| D294 | proxmox-rogue-vm-detection-lock | pass | n/a | not_applicable | pass | n/a |
+| D295 | undeclared-docker-stack-detection-lock | pass | n/a | not_applicable | pass | n/a |
