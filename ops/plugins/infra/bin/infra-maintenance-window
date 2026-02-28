@@ -21,15 +21,17 @@ ALLOW_OOB_LOSS=0
 ACK_TOKEN=""
 POWEROFF_SHOP=0
 POWEROFF_HOME=0
+POWEROFF_SITE_ARGS=()
 
 usage() {
   cat <<'USAGE'
 infra.maintenance.window
 
 Usage:
-  infra-maintenance-window --site <shop|home|both> --mode <precheck|shutdown|startup|recovery|verify|full>
+  infra-maintenance-window --site <site-id|site-id,site-id|all|both> --mode <precheck|shutdown|startup|recovery|verify|full>
                           [--window-id <id>] [--resume-from <phase>] [--execute|--dry-run]
                           [--allow-oob-loss] [--ack-token <token>] [--poweroff-shop] [--poweroff-home]
+                          [--poweroff-site <site-id>]
 USAGE
 }
 
@@ -83,6 +85,10 @@ while [[ $# -gt 0 ]]; do
       POWEROFF_HOME=1
       shift
       ;;
+    --poweroff-site)
+      POWEROFF_SITE_ARGS+=("${2:-}")
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -93,12 +99,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$SITE" ]] || fail "--site required (shop|home|both)"
+[[ -n "$SITE" ]] || fail "--site required (site-id|csv|all|both)"
 [[ -n "$MODE" ]] || fail "--mode required (precheck|shutdown|startup|recovery|verify|full)"
-case "$SITE" in
-  shop|home|both) ;;
-  *) fail "--site must be shop|home|both" ;;
-esac
 case "$MODE" in
   precheck|shutdown|startup|recovery|verify|full) ;;
   *) fail "--mode must be precheck|shutdown|startup|recovery|verify|full" ;;
@@ -171,10 +173,61 @@ site_host() {
   yq -r ".sites[] | select(.id==\"$site_id\") | .host_id" "$TX_CONTRACT"
 }
 
-SHOP_HOST_ID="$(site_host shop)"
-HOME_HOST_ID="$(site_host home)"
-[[ -n "$SHOP_HOST_ID" && "$SHOP_HOST_ID" != "null" ]] || fail "missing shop host mapping in contract"
-[[ -n "$HOME_HOST_ID" && "$HOME_HOST_ID" != "null" ]] || fail "missing home host mapping in contract"
+mapfile -t SITE_IDS < <(yq -r '.sites[].id' "$TX_CONTRACT")
+[[ "${#SITE_IDS[@]}" -gt 0 ]] || fail "contract sites list is empty"
+
+site_in_contract() {
+  local needle="$1"
+  local site_id
+  for site_id in "${SITE_IDS[@]}"; do
+    if [[ "$site_id" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+for site_id in "${SITE_IDS[@]}"; do
+  host_id="$(site_host "$site_id")"
+  [[ -n "$host_id" && "$host_id" != "null" ]] || fail "missing host mapping in contract for site '$site_id'"
+done
+
+if [[ "$SITE" == "both" ]]; then
+  SITE="all"
+fi
+
+SELECTED_SITE_IDS=()
+if [[ "$SITE" == "all" ]]; then
+  SELECTED_SITE_IDS=("${SITE_IDS[@]}")
+else
+  IFS=',' read -r -a requested_sites <<< "$SITE"
+  for requested in "${requested_sites[@]}"; do
+    site_id="$(echo "$requested" | xargs)"
+    [[ -n "$site_id" ]] || continue
+    site_in_contract "$site_id" || fail "--site contains unknown site id: $site_id (known: $(IFS=,; echo "${SITE_IDS[*]}"))"
+    if [[ " ${SELECTED_SITE_IDS[*]} " != *" $site_id "* ]]; then
+      SELECTED_SITE_IDS+=("$site_id")
+    fi
+  done
+fi
+[[ "${#SELECTED_SITE_IDS[@]}" -gt 0 ]] || fail "--site resolved to zero sites"
+
+if [[ "$POWEROFF_SHOP" -eq 1 ]]; then
+  POWEROFF_SITE_ARGS+=("shop")
+fi
+if [[ "$POWEROFF_HOME" -eq 1 ]]; then
+  POWEROFF_SITE_ARGS+=("home")
+fi
+
+POWEROFF_SITE_IDS=()
+for requested in "${POWEROFF_SITE_ARGS[@]}"; do
+  site_id="$(echo "$requested" | xargs)"
+  [[ -n "$site_id" ]] || fail "--poweroff-site requires non-empty site id"
+  site_in_contract "$site_id" || fail "--poweroff-site contains unknown site id: $site_id"
+  if [[ " ${POWEROFF_SITE_IDS[*]} " != *" $site_id "* ]]; then
+    POWEROFF_SITE_IDS+=("$site_id")
+  fi
+done
 
 if [[ -z "$WINDOW_ID" ]]; then
   WINDOW_ID="MW-$(date -u +%Y%m%dT%H%M%SZ)-$SITE"
@@ -356,27 +409,29 @@ run_verify_with_retry() {
 }
 
 shutdown_sites() {
-  case "$SITE" in
-    shop) echo "shop" ;;
-    home) echo "home" ;;
-    both) echo "shop home" ;;
-  esac
+  printf '%s\n' "${SELECTED_SITE_IDS[@]}"
 }
 
 startup_sites() {
-  case "$SITE" in
-    shop) echo "shop" ;;
-    home) echo "home" ;;
-    both) echo "home shop" ;;
-  esac
+  local idx
+  for (( idx=${#SELECTED_SITE_IDS[@]}-1; idx>=0; idx-- )); do
+    echo "${SELECTED_SITE_IDS[$idx]}"
+  done
 }
 
 host_for_site() {
-  case "$1" in
-    shop) echo "$SHOP_HOST_ID" ;;
-    home) echo "$HOME_HOST_ID" ;;
-    *) return 1 ;;
-  esac
+  site_host "$1"
+}
+
+site_should_poweroff() {
+  local site_id="$1"
+  if [[ "${#POWEROFF_SITE_IDS[@]}" -eq 0 ]]; then
+    return 1
+  fi
+  if [[ " ${POWEROFF_SITE_IDS[*]} " == *" $site_id "* ]]; then
+    return 0
+  fi
+  return 1
 }
 
 site_preflight() {
@@ -461,13 +516,8 @@ phase_shutdown() {
     if [[ -n "$ACK_TOKEN" ]]; then
       args+=(--ack-token "$ACK_TOKEN")
     fi
-    if [[ "$EXECUTE" -eq 1 ]]; then
-      if [[ "$site_id" == "shop" && "$POWEROFF_SHOP" -eq 1 ]]; then
-        args+=(--poweroff)
-      fi
-      if [[ "$site_id" == "home" && "$POWEROFF_HOME" -eq 1 ]]; then
-        args+=(--poweroff)
-      fi
+    if [[ "$EXECUTE" -eq 1 ]] && site_should_poweroff "$site_id"; then
+      args+=(--poweroff)
     fi
     run_cap shutdown "$site_id shutdown" "${args[@]}"
   done
@@ -490,16 +540,29 @@ phase_startup() {
 }
 
 phase_recovery() {
-  if [[ "$SITE" == "home" ]]; then
-    echo "═══ recovery :: home site (no docker compose recovery required) ═══"
+  local site_id target
+  local needs_recovery=0
+  for site_id in "${SELECTED_SITE_IDS[@]}"; do
+    while IFS= read -r target; do
+      [[ -n "$target" ]] || continue
+      needs_recovery=1
+      break
+    done < <(site_targets_with_stacks "$site_id")
+    if [[ "$needs_recovery" -eq 1 ]]; then
+      break
+    fi
+  done
+
+  if [[ "$needs_recovery" -eq 0 ]]; then
+    echo "═══ recovery :: selected site scope has no docker compose targets ═══"
     echo
     return 0
   fi
 
   if [[ "$EXECUTE" -eq 1 ]]; then
-    run_cap recovery "shop recovery execute" "$OPS" cap run infra.post_power.recovery
+    run_cap recovery "recovery execute (site-scoped stacks present)" "$OPS" cap run infra.post_power.recovery
   else
-    run_cap recovery "shop recovery dry-run status" "$OPS" cap run infra.post_power.recovery.status
+    run_cap recovery "recovery dry-run status (site-scoped stacks present)" "$OPS" cap run infra.post_power.recovery.status
   fi
 }
 
@@ -511,12 +574,7 @@ phase_verify() {
   local -a services_cmd=()
   local site_id target host_id
 
-  case "$SITE" in
-    shop) verify_sites=(shop) ;;
-    home) verify_sites=(home) ;;
-    both) verify_sites=(shop home) ;;
-    *) fail "verify phase does not support site '$SITE'" ;;
-  esac
+  verify_sites=("${SELECTED_SITE_IDS[@]}")
 
   for site_id in "${verify_sites[@]}"; do
     site_preflight "$site_id"
@@ -554,7 +612,7 @@ phase_verify() {
     done
   fi
 
-  if [[ "$SITE" == "home" || "$SITE" == "both" ]]; then
+  if [[ " ${SELECTED_SITE_IDS[*]} " == *" home "* ]]; then
     if [[ " ${service_hosts[*]} " != *" ha "* ]]; then
       service_hosts+=("ha")
     fi

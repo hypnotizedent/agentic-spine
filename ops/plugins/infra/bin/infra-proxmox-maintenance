@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# infra-proxmox-maintenance - Receipt-backed Proxmox maintenance helper with site-aware VM ordering.
+# infra-proxmox-maintenance - Receipt-backed Proxmox maintenance helper with site-aware guest ordering.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -134,7 +134,7 @@ ssh_pve() {
   ssh "${ssh_opts[@]}" -p "$TARGET_PORT" "${TARGET_USER}@${TARGET_HOST}" "$@"
 }
 
-resolve_vm_order() {
+resolve_guest_order() {
   local site="$1"
   local action="$2"
   python3 - "$SEQ_BINDING" "$site" "$action" <<'PY'
@@ -192,17 +192,33 @@ for _, vm_id in rows:
 PY
 }
 
-assert_qm_exists() {
+guest_kind() {
   local id="$1"
-  if ! ssh_pve "qm status $id >/dev/null 2>&1"; then
-    fail "expected VM $id missing on host-id $HOST_ID"
+  if ssh_pve "qm status $id >/dev/null 2>&1"; then
+    echo "qm"
+    return 0
+  fi
+  if ssh_pve "pct status $id >/dev/null 2>&1"; then
+    echo "pct"
+    return 0
+  fi
+  return 1
+}
+
+assert_guest_exists() {
+  local id="$1"
+  if ! guest_kind "$id" >/dev/null 2>&1; then
+    fail "expected guest $id missing on host-id $HOST_ID"
   fi
 }
 
-is_qm_running() {
+is_guest_running() {
   local id="$1"
+  local kind
   local state
-  state="$(ssh_pve "qm status $id 2>/dev/null | awk '{print \$2}'" || true)"
+  kind="$(guest_kind "$id" || true)"
+  [[ -n "$kind" ]] || return 1
+  state="$(ssh_pve "$kind status $id 2>/dev/null | awk '{print \$2}'" || true)"
   [[ "$state" == "running" ]]
 }
 
@@ -210,12 +226,42 @@ assert_expected_running() {
   local ids=("$@")
   local missing=0
   for id in "${ids[@]}"; do
-    if ! is_qm_running "$id"; then
-      echo "- vm $id: NOT RUNNING" >&2
+    if ! is_guest_running "$id"; then
+      echo "- guest $id: NOT RUNNING" >&2
       missing=1
     fi
   done
-  [[ "$missing" -eq 0 ]] || fail "startup assertion failed: one or more expected VMs are not running"
+  [[ "$missing" -eq 0 ]] || fail "startup assertion failed: one or more expected guests are not running"
+}
+
+shutdown_guest() {
+  local id="$1"
+  local kind
+  kind="$(guest_kind "$id" || true)"
+  [[ -n "$kind" ]] || fail "guest $id missing on host-id $HOST_ID"
+
+  if is_guest_running "$id"; then
+    echo "- $kind $id: shutdown"
+    ssh_pve "$kind shutdown $id --timeout $SHUTDOWN_TIMEOUT_SEC >/dev/null"
+    if is_guest_running "$id"; then
+      echo "  $kind $id: force stop"
+      ssh_pve "$kind stop $id >/dev/null"
+    fi
+    if is_guest_running "$id"; then
+      fail "guest $id remained running after shutdown+stop"
+    fi
+  else
+    echo "- $kind $id: already stopped"
+  fi
+}
+
+start_guest() {
+  local id="$1"
+  local kind
+  kind="$(guest_kind "$id" || true)"
+  [[ -n "$kind" ]] || fail "guest $id missing on host-id $HOST_ID"
+  echo "- $kind $id: start"
+  ssh_pve "$kind start $id >/dev/null 2>&1 || true"
 }
 
 capture_guest_state() {
@@ -271,13 +317,13 @@ enforce_shop_oob_policy() {
   fail "shop OOB guard failed; pass --allow-oob-loss with --ack-token $ACK_TOKEN_REQUIRED to continue"
 }
 
-shutdown_vms() {
-  mapfile -t expected_ids < <(resolve_vm_order "$SITE_ID" shutdown)
-  [[ "${#expected_ids[@]}" -gt 0 ]] || fail "no shutdown VM order resolved from startup.sequencing for site '$SITE_ID'"
+shutdown_guests() {
+  mapfile -t expected_ids < <(resolve_guest_order "$SITE_ID" shutdown)
+  [[ "${#expected_ids[@]}" -gt 0 ]] || fail "no shutdown guest order resolved from startup.sequencing for site '$SITE_ID'"
 
   echo "shutdown.plan"
   echo "site: $SITE_ID"
-  echo "ordered_vm_ids: [$(IFS=,; echo "${expected_ids[*]}")]"
+  echo "ordered_guest_ids: [$(IFS=,; echo "${expected_ids[*]}")]"
   echo "shutdown_timeout_sec: $SHUTDOWN_TIMEOUT_SEC"
   echo
 
@@ -289,35 +335,25 @@ shutdown_vms() {
   fi
 
   for id in "${expected_ids[@]}"; do
-    assert_qm_exists "$id"
-    if is_qm_running "$id"; then
-      echo "- qm $id: shutdown"
-      ssh_pve "qm shutdown $id --timeout $SHUTDOWN_TIMEOUT_SEC >/dev/null"
-      if is_qm_running "$id"; then
-        echo "  qm $id: force stop"
-        ssh_pve "qm stop $id >/dev/null"
-      fi
-      if is_qm_running "$id"; then
-        fail "vm $id remained running after shutdown+stop"
-      fi
-    else
-      echo "- qm $id: already stopped"
-    fi
+    assert_guest_exists "$id"
+    shutdown_guest "$id"
   done
 
   echo
   echo "shutdown.verify"
   ssh_pve 'qm list 2>/dev/null'
   echo
+  ssh_pve 'pct list 2>/dev/null'
+  echo
 }
 
-startup_vms() {
-  mapfile -t expected_ids < <(resolve_vm_order "$SITE_ID" startup)
-  [[ "${#expected_ids[@]}" -gt 0 ]] || fail "no startup VM order resolved from startup.sequencing for site '$SITE_ID'"
+startup_guests() {
+  mapfile -t expected_ids < <(resolve_guest_order "$SITE_ID" startup)
+  [[ "${#expected_ids[@]}" -gt 0 ]] || fail "no startup guest order resolved from startup.sequencing for site '$SITE_ID'"
 
   echo "startup.plan"
   echo "site: $SITE_ID"
-  echo "ordered_vm_ids: [$(IFS=,; echo "${expected_ids[*]}")]"
+  echo "ordered_guest_ids: [$(IFS=,; echo "${expected_ids[*]}")]"
   echo
 
   if [[ "$EXECUTE" -ne 1 ]]; then
@@ -328,14 +364,15 @@ startup_vms() {
   fi
 
   for id in "${expected_ids[@]}"; do
-    assert_qm_exists "$id"
-    echo "- qm $id: start"
-    ssh_pve "qm start $id >/dev/null 2>&1 || true"
+    assert_guest_exists "$id"
+    start_guest "$id"
   done
 
   echo
   echo "startup.verify"
   ssh_pve 'qm list 2>/dev/null'
+  echo
+  ssh_pve 'pct list 2>/dev/null'
   echo
 
   assert_expected_running "${expected_ids[@]}"
@@ -367,7 +404,7 @@ case "$MODE" in
   shutdown)
     enforce_shop_oob_policy
     capture_guest_state
-    shutdown_vms
+    shutdown_guests
     if [[ "$EXECUTE" -eq 1 && "$POWEROFF" -eq 1 ]]; then
       echo "host.poweroff"
       echo "- action: poweroff $HOST_ID"
@@ -381,7 +418,7 @@ case "$MODE" in
     ;;
   startup)
     capture_md1400_evidence
-    startup_vms
+    startup_guests
     echo "postchecks.required: ssh.target.status, docker.compose.status, services.health.status, verify.core.run"
     echo "status: OK"
     ;;
