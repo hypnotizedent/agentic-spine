@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-W69B-FRESHNESS-RECOVERY-AND-FINAL-PROMOTION-20260228
 created: 2026-02-28
-status: active
+status: closed
 owner: "@ronny"
 scope: w69b
 priority: high
