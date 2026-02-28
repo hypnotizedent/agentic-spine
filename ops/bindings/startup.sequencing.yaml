@@ -21,7 +21,7 @@
 # Do NOT rely on comment-parsing for VM lists.
 
 version: 3
-updated: "2026-02-25"
+updated: "2026-02-28"
 
 # ── Authoritative VM lifecycle lists ──────────────────────────────────────────
 # These are the SSOT for which VMs exist on each site and their startup/shutdown order.
@@ -43,9 +43,9 @@ shop_vm_lifecycle:
 
 home_vm_lifecycle:
   host_id: proxmox-home
-  active_vm_ids: [100]
-  startup_order:  [100]
-  shutdown_order: [100]
+  active_vm_ids: [100, 105]
+  startup_order:  [100, 105]
+  shutdown_order: [105, 100]
 
 # Shop phases (1-4): Core → Observability → Apps → Legacy
 # Home phases (10-11): HA VM → Home services
@@ -137,6 +137,17 @@ phases:
       - target: proxmox-home
         vm_ids: [100]
         wait_after_sec: 30
-        description: "VM 100 (homeassistant) is the only active home VM. HAOS manages its own services — no Docker compose stacks. Allow 30s for supervisor + integrations to initialize."
+        description: "VM 100 (homeassistant) HAOS runtime. Allow 30s for supervisor + integrations to initialize."
         health_probes:
           - "http://10.0.0.100:8123/api/"  # HA REST API (requires auth but returns 401 = alive)
+
+  - phase: 11
+    site: home
+    label: "Home DNS LXC"
+    hosts:
+      - target: proxmox-home
+        vm_ids: [105]
+        wait_after_sec: 10
+        description: "VM 105 (pihole-home) local DNS filter LXC."
+        health_probes:
+          - "http://10.0.0.53/admin/"  # Pi-hole admin endpoint
