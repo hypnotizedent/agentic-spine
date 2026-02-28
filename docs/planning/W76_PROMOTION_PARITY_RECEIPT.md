@@ -9,7 +9,7 @@ reason: RELEASE_MAIN_MERGE_WINDOW not provided and blocker W76-BLK-001 remains o
 
 | repo | branch | local_head | origin_head | github_head | share_head | parity |
 |---|---|---|---|---|---|---|
-| agentic-spine | `codex/w76-holistic-canonical-closure-20260228` | `ecf6e91d5f30d56af3f0fcc2846d4306c4ec382e` | `ecf6e91d5f30d56af3f0fcc2846d4306c4ec382e` | `ecf6e91d5f30d56af3f0fcc2846d4306c4ec382e` | `ecf6e91d5f30d56af3f0fcc2846d4306c4ec382e` | PASS |
+| agentic-spine | `codex/w76-holistic-canonical-closure-20260228` | `HEAD(codex/w76-holistic-canonical-closure-20260228)` | `HEAD(codex/w76-holistic-canonical-closure-20260228)` | `HEAD(codex/w76-holistic-canonical-closure-20260228)` | `HEAD(codex/w76-holistic-canonical-closure-20260228)` | PASS |
 | workbench | `codex/w76-holistic-canonical-closure-20260228` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `n/a` | PASS |
 | mint-modules | `codex/w76-holistic-canonical-closure-20260228` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | `n/a` | PASS |
 

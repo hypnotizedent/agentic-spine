@@ -6,7 +6,7 @@ branch: codex/w76-holistic-canonical-closure-20260228
 
 ## Repo Heads
 
-- agentic-spine: `ecf6e91d5f30d56af3f0fcc2846d4306c4ec382e`
+- agentic-spine: `HEAD(codex/w76-holistic-canonical-closure-20260228)`
 - workbench: `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6`
 - mint-modules: `7aae532e2a0fe8d741123c9631cfe5f8001c3d19`
 
