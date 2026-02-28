@@ -15,11 +15,12 @@ objective: Normalize maintenance lifecycle governance so all sites (shop, home, 
 Normalize maintenance lifecycle governance so all sites (shop, home, future 3rd) are held to the same standard. LXC containers, NAS nodes, and Proxmox hosts must be first-class citizens in the orchestration boundary. Covers 4 gap groups: LXC lifecycle in maintenance scripts, NAS lifecycle governance, home site parity, and script site-abstraction for 3rd-site readiness.
 
 ## Steps
-- Step 1: capture and classify findings (COMPLETE — 26 gaps filed)
-- Step 2: implement changes
-- Step 3: verify and close out
+- Step 0: Initial forensic sweep — capture script-level gaps (COMPLETE — 26 gaps filed)
+- Step 1: Deep forensic audit — Proxmox, HA, UniFi, NAS (COMPLETE — 35 additional gaps filed)
+- Step 2: Implement changes
+- Step 3: Verify and close out
 
-## Linked Gaps (26)
+## Linked Gaps (61 total)
 
 ### Group A: LXC Container Lifecycle — NOT GOVERNED (5 gaps)
 - GAP-OP-1037: infra-proxmox-maintenance uses only qm — no pct (LXC) shutdown/startup support [CRITICAL]
@@ -55,16 +56,69 @@ Normalize maintenance lifecycle governance so all sites (shop, home, future 3rd)
 - GAP-OP-1068: Recovery decision hardcoded (skip if home) — should be contract-driven [HIGH]
 - GAP-OP-1069: OOB subnet hardcoded to 192.168.1.0/24 (shop LAN) [MEDIUM]
 
+### Group E: Normalization — DNS, SSOT Drift, Stale Data (10 gaps)
+- GAP-OP-1110: Home DNS policy fragmented across 3 resolvers with no contract [CRITICAL]
+- GAP-OP-1111: Pi-hole binary missing on LXC 105 — DNS filtering dead [CRITICAL]
+- GAP-OP-1121: HA Proxmox shop integration stale — 200+ unavailable entities [HIGH]
+- GAP-OP-1130: HOME_NETWORK_DEVICE_ONBOARDING.md and AUDIT_RUNBOOK stale [MEDIUM]
+- GAP-OP-1131: Tailscale SSOT drift — nvidia-shield, firestick, accept-routes false [MEDIUM]
+- GAP-OP-1132: UDR7 gateway MAC mismatch in registry [MEDIUM]
+- GAP-OP-1133: 2 unknown devices on home network not in any registry [MEDIUM]
+- GAP-OP-1135: PVE 8.4.1 vs shop 9.1.4 + 19 pending APT updates [MEDIUM]
+- GAP-OP-1136: Orphan LVM volumes + stale backups for destroyed VMs [MEDIUM]
+- GAP-OP-1139: HA token name inconsistency (HA_API_TOKEN vs IOT_HA_API_TOKEN) [MEDIUM]
+
+### Group F: Governance — PVE Boot, Security, Domains (10 gaps)
+- GAP-OP-1112: PVE boot-order race — 3 services FAILED after reboot [CRITICAL]
+- GAP-OP-1113: LXC 105 missing onboot:1 [CRITICAL] (FIXED this session)
+- GAP-OP-1114: pvescheduler FAILED — backup jobs not running [CRITICAL] (FIXED this session)
+- GAP-OP-1115: Home site boot recovery contract missing [CRITICAL]
+- GAP-OP-1122: No VLAN segmentation — flat 10.0.0.0/24 [HIGH]
+- GAP-OP-1123: SSH security not hardened — root password auth, no firewall [HIGH]
+- GAP-OP-1124: proxmox-boot-tool broken — kernel updates may not propagate to EFI [HIGH]
+- GAP-OP-1125: Home site zero domain decomposition [HIGH]
+- GAP-OP-1134: Postfix mail delivery broken — backup notifications failing [MEDIUM]
+- GAP-OP-1137: Home VM/LXC provisioning profile missing [MEDIUM]
+
+### Group G: HA Integration Health + Power Cycle Resilience (10 gaps)
+- GAP-OP-1116: HA dashboards missing after power cycle [HIGH]
+- GAP-OP-1117: Two HA addons failed to start at boot [HIGH]
+- GAP-OP-1118: Jellyfin auth expired (container ID c4c376c45905) [HIGH]
+- GAP-OP-1119: ZWave JS integration in setup_retry [HIGH]
+- GAP-OP-1120: Zigbee2MQTT all entities unavailable [HIGH]
+- GAP-OP-1127: HA integration health contract missing [HIGH]
+- GAP-OP-1126: WiFi IoT DHCP reservations unverified [HIGH]
+- GAP-OP-1128: Switches not normalized — no IP clustering contract [MEDIUM]
+- GAP-OP-1129: OTBR setup_retry — Thread network down [MEDIUM]
+- GAP-OP-1138: US-8-60W switch all entities unavailable [MEDIUM]
+
+### Group H: Low Priority — Cleanup + Optimization (5 gaps)
+- GAP-OP-1140: HA automations stale (mailbox 4mo, auto_dismiss never) [LOW]
+- GAP-OP-1141: NAS single NIC — no link aggregation [LOW]
+- GAP-OP-1142: CPU governor performance on 24/7 mini-PC [LOW]
+- GAP-OP-1143: Ghost USB NIC + unused WiFi interface residuals [LOW]
+- GAP-OP-1144: No home compose target bindings active [LOW]
+
 ## Severity Summary
-- CRITICAL: 11
-- HIGH: 10
-- MEDIUM: 5
+- CRITICAL: 17
+- HIGH: 22
+- MEDIUM: 17
+- LOW: 5
+
+## Immediate Fixes Applied This Session
+- LXC 105: `pct set 105 -onboot 1` (GAP-OP-1113)
+- pvescheduler: `systemctl restart pvescheduler` (GAP-OP-1114)
+- pve-firewall: `systemctl restart pve-firewall` (GAP-OP-1112 partial)
+- /etc/hosts: fixed stale `192.168.12.202 pve.prox pve` → `10.0.0.179 proxmox-home.local proxmox-home`
 
 ## Success Criteria
-- All 26 linked gaps resolved (fixed or documented-as-accepted-risk).
+- All 61 linked gaps resolved (fixed or documented-as-accepted-risk).
 - infra.maintenance.window supports LXC lifecycle for home site.
 - NAS has shutdown/startup capabilities and is in startup.sequencing.yaml.
 - Scripts read site list from contract — 3rd site onboarding requires binding-only changes.
+- Home site has boot recovery contract, DNS policy, VLAN segmentation plan.
+- HA integrations all healthy after power cycle with post-boot verification.
+- All SSOTs updated (device registry, onboarding docs, Tailscale, DHCP audit).
 - Relevant verify pack(s) pass.
 
 ## Definition Of Done
