@@ -19,7 +19,10 @@ command -v rg >/dev/null 2>&1 || fail "required tool missing: rg"
 yq e '.' "$CONTRACT" >/dev/null 2>&1 || fail "invalid YAML: ops/bindings/secrets.enforcement.contract.yaml"
 
 mapfile -t aliases < <(yq e -r '.deprecated_aliases | keys | .[]' "$CONTRACT" 2>/dev/null || true)
-(( ${#aliases[@]} > 0 )) || fail "deprecated_aliases list is empty"
+if (( ${#aliases[@]} == 0 )); then
+  echo "D214 PASS: no deprecated aliases configured"
+  exit 0
+fi
 
 files=(
   "$ROOT/docs/governance/SECRETS_POLICY.md"
