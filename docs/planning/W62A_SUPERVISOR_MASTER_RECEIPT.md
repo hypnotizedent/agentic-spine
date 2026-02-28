@@ -15,6 +15,8 @@
 
 | command | run_key | result |
 |---|---|---|
+| `./bin/ops cap run session.start` | CAP-20260227-222049__session.start__R80qx47172 | PASS |
+| `./bin/ops cap run loops.create --name SPINE-W62A-CROSS-REPO-TAIL-REMEDIATION-20260228 ...` | CAP-20260227-222123__loops.create__Ri12c54727 | PASS |
 | `./bin/ops cap run gate.topology.validate` | CAP-20260227-222539__gate.topology.validate__R8ib160581 | PASS |
 | `./bin/ops cap run verify.route.recommend` | CAP-20260227-222542__verify.route.recommend__Rhhfx60863 | PASS |
 | `./bin/ops cap run verify.pack.run core` | CAP-20260227-222547__verify.pack.run__Rptvr61445 | PASS |
