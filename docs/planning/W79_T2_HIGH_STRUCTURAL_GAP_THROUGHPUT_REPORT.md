@@ -15,7 +15,7 @@
 ## Summary
 
 - gaps_fixed_or_closed_count: 4
-- gaps_updated_count: 9
+- gaps_updated_count: 4
 - open_gaps_before: 132
 - open_gaps_after: 128
 - orphaned_open_gaps_after: 0
