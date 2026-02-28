@@ -1,29 +1,44 @@
 # W79 Program Master Receipt
 
-- wave_id: `W79_TRUTH_FIRST_RELIABILITY_HARDENING_20260228`
+- wave_id: `W79_TRUTH_FIRST_PROGRAM_20260228`
 - decision: `CONTINUE_NEXT_WAVE`
-- scope_phase_completed: `Phase 0/1/2 setup + registration`
+- scope_phase_completed: `T1 critical structural tranche (partial)`
 
 ## Counters
 
 - report_findings_total: 54
-- report_findings_true_unresolved_remaining: 45
+- report_findings_fixed: 10
+- report_findings_blocked: 3
 - report_findings_noop_fixed: 8
 - report_findings_stale_false: 1
-- open_loops: 27
-- open_gaps: 144
+- report_findings_true_unresolved_remaining: 32
+- open_loops: 28
+- open_gaps: 134
 - orphaned_open_gaps: 0
 - freshness_unresolved: 0
 
-## Outcome
+## Tranche Outcome
 
-- Every report-sourced finding is now classified and linked to a canonical disposition.
-- TRUE_UNRESOLVED findings are linked to open gaps (no unclassified rows).
-- Parent tier loops (T0/T1/T2/T3) are opened for execution engine sequencing.
-- Required verify block was executed; initial D79 failure was remediated by adding
-  `scripts/root/security/committed-secret-check.sh` to the workbench script allowlist,
-  then `verify.pack.run workbench` passed on rerun.
-- Next action is T0 security remediation execution; program cannot declare done yet.
+- D148 regression introduced by mandatory scheduler-label enforcement was rolled back in non-runtime mode.
+- Required verify block completed green after rollback.
+- Critical structural fixes landed across repos:
+  - S-C1 (freshness mapping coverage)
+  - S-C4 (D21 metadata parity)
+  - S-C5 (agents.registry required metadata)
+  - WB-C2/C3/C4/C6/C7 (hardcoded endpoint + key canonicalization + path portability)
+  - MM-C1/C2 (hardcoded runtime endpoint normalization)
+- Token/operator blocked findings carried forward explicitly:
+  - S-C2 (runtime launchagent install/load requires `RELEASE_RUNTIME_CHANGE_WINDOW`)
+  - WB-C1 (credential rotation, with blocker gaps 1195/1196/1197)
+  - XR-C2 (partial fixed; residual cross-repo doc/config outlier remains)
+
+## Verify Summary
+
+- topology/route: PASS
+- core/secrets/workbench/hygiene-weekly/communications/mint packs: PASS
+- verify.run fast/domain communications: PASS
+- verify.freshness.reconcile: unresolved_count=0
+- loops.status + gaps.status: PASS, orphaned_open_gaps=0
 
 ## Attestations
 
