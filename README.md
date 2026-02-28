@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-11
+last_verified: 2026-02-28
 scope: repo-readme
 ---
 
@@ -146,9 +146,9 @@ Set `SPINE_ENGINE_PROVIDER` to select the AI engine for `ops run`:
 
 | Provider | File | Model | Notes |
 |----------|------|-------|-------|
-| `zai` (default) | `engine/zai.sh` | `glm-5` (`ZAI_MODEL` override) | z.ai completion, `max_tokens=200`, `temperature=0` |
-| `claude` | `engine/claude.sh` | Anthropic Claude | Requires `ANTHROPIC_API_KEY` via secrets surface |
-| `openai` | `engine/openai.sh` | OpenAI | Requires `OPENAI_API_KEY` via secrets surface |
-| `local_echo` | `engine/local_echo.sh` | — | Echo-back stub for testing (no API call) |
+| `zai` (default) | `ops/engine/zai.sh` | `glm-4.7-flash` (`ZAI_MODEL` override) | z.ai completion, `max_tokens=200`, `temperature=0` |
+| `claude` | `ops/engine/claude.sh` | Anthropic Claude | Requires `ANTHROPIC_API_KEY` via secrets surface |
+| `openai` | `ops/engine/openai.sh` | OpenAI | Requires `OPENAI_API_KEY` via secrets surface |
+| `local_echo` | `ops/engine/local_echo.sh` | — | Echo-back stub for testing (no API call) |
 
 Receipts include API usage for token spend monitoring.

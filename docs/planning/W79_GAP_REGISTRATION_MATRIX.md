@@ -6,8 +6,8 @@ Source report: `mailroom/outbox/reports/W77_FORENSIC_AUDIT_REPORT.md`
 ## Summary
 
 - total_findings: 54
-- true_unresolved_linked_to_gap: 27
-- fixed_in_program_waves: 15
+- true_unresolved_linked_to_gap: 25
+- fixed_in_program_waves: 17
 - blocked_with_evidence: 2
 - noop_fixed_with_evidence: 9
 - stale_false_with_evidence: 1
@@ -34,8 +34,8 @@ Source report: `mailroom/outbox/reports/W77_FORENSIC_AUDIT_REPORT.md`
 | S-C3 | agentic-spine | critical | FIXED | linked_gap | GAP-OP-1152 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | Hardcoded command-surface IP defaults removed; verify block PASS |
 | S-C4 | agentic-spine | critical | FIXED | linked_gap | GAP-OP-1153 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | D21 metadata repaired (ring set); gate topology PASS |
 | S-C5 | agentic-spine | critical | FIXED | linked_gap | GAP-OP-1154 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | Active agent metadata completed (name + runner_capability) |
-| S-H1 | agentic-spine | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1155 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | engine/zai.sh, engine/claude.sh, engine/openai.sh, engine/local_echo.sh missing |
-| S-H2 | agentic-spine | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1156 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | README last_verified=2026-02-11 |
+| S-H1 | agentic-spine | high | FIXED | linked_gap | GAP-OP-1155 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | README engine provider table corrected to canonical `ops/engine/*.sh` paths |
+| S-H2 | agentic-spine | high | FIXED | linked_gap | GAP-OP-1156 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | README `last_verified` refreshed to `2026-02-28` |
 | S-H3 | agentic-spine | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1157 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | gaps.status open=96 and many without regression_lock_id |
 | S-H4 | agentic-spine | high | STALE_FALSE | stale_false | - | - | current failure history query shows 0 release-scope failures today |
 | S-H5 | agentic-spine | high | FIXED | linked_gap | GAP-OP-1158 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | hardcoded proxy defaults removed from governed vaultwarden/gitea command paths |

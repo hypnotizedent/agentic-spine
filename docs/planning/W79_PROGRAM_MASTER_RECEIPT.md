@@ -2,33 +2,31 @@
 
 - wave_id: `W79_TRUTH_FIRST_PROGRAM_20260228`
 - decision: `CONTINUE_NEXT_WAVE`
-- scope_phase_completed: `T2 high structural tranche continuation`
+- scope_phase_completed: `T2C blocker-clear attempt + structural slice`
 
 ## Counters
 
 - report_findings_total: 54
-- report_findings_fixed: 15
+- report_findings_fixed: 17
 - report_findings_blocked: 2
 - report_findings_noop_fixed: 9
 - report_findings_stale_false: 1
-- report_findings_true_unresolved_remaining: 27
+- report_findings_true_unresolved_remaining: 25
 - open_loops: 28
-- open_gaps: 128
+- open_gaps: 126
 - orphaned_open_gaps: 0
 - freshness_unresolved: 0
 
-## Wave Outcome (T2 High Structural)
+## Wave Outcome (T2C)
 
 - Blocker lane:
-  - S-C2 remains blocked (runtime token absent for scheduler install/load path).
-  - WB-C1 remains blocked (operator rotations still pending; refs validated as secret-based).
+  - `S-C2` remains blocked (`RELEASE_RUNTIME_CHANGE_WINDOW` absent).
+  - `WB-C1` remains blocked (operator UI rotation evidence still missing for Sonarr/Radarr/Printavo).
 - Structural tranche:
-  - S-H5 fixed by removing hardcoded proxy defaults in governed spine command surfaces (`ops/commands/pr.sh`, `ops/plugins/vaultwarden/lib/proxy-session.sh`).
-  - WB-H1 fixed by normalizing legacy alias endpoint to canonical `api.mintprints.co`.
-  - WB-H2 fixed by canonicalizing Infisical monitoring endpoint source to `infra-core` host authority.
-  - XR-H3 reconciled as NOOP_FIXED via pre-existing satellite parity gates `D294` + `D295` already routed in verify topology/profiles.
-- Required verify block completed green.
-- Gap throughput this wave: open gaps reduced `132 -> 128`.
+  - `S-H1` fixed: README engine-provider paths now reference canonical `ops/engine/*.sh` surfaces.
+  - `S-H2` fixed: README `last_verified` refreshed to `2026-02-28`.
+- Required verify block completed PASS after rerun.
+- Gap throughput this wave: open gaps reduced `128 -> 126`.
 
 ## Verify Summary
 
