@@ -2,40 +2,35 @@
 
 - wave_id: `W79_TRUTH_FIRST_PROGRAM_20260228`
 - decision: `CONTINUE_NEXT_WAVE`
-- scope_phase_completed: `T1 critical structural tranche (partial)`
+- scope_phase_completed: `T1B/T2 blocker-clear + critical tranche continuation`
 
 ## Counters
 
 - report_findings_total: 54
-- report_findings_fixed: 10
-- report_findings_blocked: 3
+- report_findings_fixed: 12
+- report_findings_blocked: 2
 - report_findings_noop_fixed: 8
 - report_findings_stale_false: 1
-- report_findings_true_unresolved_remaining: 32
+- report_findings_true_unresolved_remaining: 31
 - open_loops: 28
-- open_gaps: 134
+- open_gaps: 132
 - orphaned_open_gaps: 0
 - freshness_unresolved: 0
 
-## Tranche Outcome
+## Wave Outcome (T1B/T2)
 
-- D148 regression introduced by mandatory scheduler-label enforcement was rolled back in non-runtime mode.
-- Required verify block completed green after rollback.
-- Critical structural fixes landed across repos:
-  - S-C1 (freshness mapping coverage)
-  - S-C4 (D21 metadata parity)
-  - S-C5 (agents.registry required metadata)
-  - WB-C2/C3/C4/C6/C7 (hardcoded endpoint + key canonicalization + path portability)
-  - MM-C1/C2 (hardcoded runtime endpoint normalization)
-- Token/operator blocked findings carried forward explicitly:
-  - S-C2 (runtime launchagent install/load requires `RELEASE_RUNTIME_CHANGE_WINDOW`)
-  - WB-C1 (credential rotation, with blocker gaps 1195/1196/1197)
-  - XR-C2 (partial fixed; residual cross-repo doc/config outlier remains)
+- Blocker lane:
+  - S-C2 remains blocked (runtime token absent for scheduler install/load path).
+  - WB-C1 remains blocked (operator rotations still pending; refs validated as secret-based).
+  - XR-C2 cleared and fixed (final non-legacy FIREFLY alias outlier normalized).
+- Structural tranche:
+  - S-C3 fixed by removing hardcoded IP defaults from spine command/proxy surfaces (`ops/commands/wave.sh`, `ops/commands/pr.sh`, `ops/plugins/vaultwarden/lib/proxy-session.sh`).
+- Required verify block completed green.
+- Gap throughput this wave: open gaps reduced `134 -> 132`.
 
 ## Verify Summary
 
-- topology/route: PASS
-- core/secrets/workbench/hygiene-weekly/communications/mint packs: PASS
+- core/secrets/workbench/hygiene-weekly/communications/mint: PASS
 - verify.run fast/domain communications: PASS
 - verify.freshness.reconcile: unresolved_count=0
 - loops.status + gaps.status: PASS, orphaned_open_gaps=0

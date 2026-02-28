@@ -120,7 +120,15 @@ fi
 git push -u origin HEAD
 
 origin_url="$(git remote get-url origin 2>/dev/null || true)"
-web_base="http://100.90.167.39:3000"
+web_base="${GITEA_WEB_BASE:-http://gitea:3000}"
+
+services_health="$REPO_ROOT/ops/bindings/services.health.yaml"
+if command -v yq >/dev/null 2>&1 && [[ -f "$services_health" ]]; then
+  gitea_health_url="$(yq e -r '.endpoints[] | select(.id=="gitea") | .url // ""' "$services_health" 2>/dev/null | head -n1)"
+  if [[ -n "$gitea_health_url" ]]; then
+    web_base="${GITEA_WEB_BASE:-${gitea_health_url%/api/healthz}}"
+  fi
+fi
 
 repo_path=""
 if [[ "$origin_url" =~ ^ssh://git@[^/]+/[[:alnum:]_.-]+/[[:alnum:]_.-]+\.git$ ]]; then

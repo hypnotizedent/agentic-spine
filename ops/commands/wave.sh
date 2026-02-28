@@ -1337,7 +1337,16 @@ cmd_preflight() {
       if command -v curl >/dev/null 2>&1; then
         # Try mint module health endpoint (fast, 5s timeout)
         local mh_out
-        mh_out="$(curl -s --connect-timeout 5 --max-time 10 http://100.76.153.100:3100/health 2>/dev/null || echo 'unreachable')"
+        local mint_health_url="http://finance-adapter:3600/health"
+        local services_health="$SPINE_REPO/ops/bindings/services.health.yaml"
+        if command -v yq >/dev/null 2>&1 && [[ -f "$services_health" ]]; then
+          local mapped_mint_health_url
+          mapped_mint_health_url="$(yq e -r '.endpoints[] | select(.id=="finance-adapter") | .url // ""' "$services_health" 2>/dev/null | head -n1)"
+          if [[ -n "$mapped_mint_health_url" ]]; then
+            mint_health_url="$mapped_mint_health_url"
+          fi
+        fi
+        mh_out="$(curl -s --connect-timeout 5 --max-time 10 "$mint_health_url" 2>/dev/null || echo 'unreachable')"
         if echo "$mh_out" | grep -qi "ok\|healthy\|alive"; then
           mint_health="healthy"
         elif [[ "$mh_out" == "unreachable" ]]; then
@@ -1353,7 +1362,16 @@ cmd_preflight() {
       local ha_health="unknown"
       if command -v curl >/dev/null 2>&1; then
         local ha_out
-        ha_out="$(curl -s --connect-timeout 5 --max-time 10 http://10.0.0.100:8123/api/ 2>/dev/null || echo 'unreachable')"
+        local ha_health_url="http://home-assistant:8123/api/"
+        local services_health="$SPINE_REPO/ops/bindings/services.health.yaml"
+        if command -v yq >/dev/null 2>&1 && [[ -f "$services_health" ]]; then
+          local mapped_ha_health_url
+          mapped_ha_health_url="$(yq e -r '.endpoints[] | select(.id=="home-assistant") | .url // ""' "$services_health" 2>/dev/null | head -n1)"
+          if [[ -n "$mapped_ha_health_url" ]]; then
+            ha_health_url="$mapped_ha_health_url"
+          fi
+        fi
+        ha_out="$(curl -s --connect-timeout 5 --max-time 10 "$ha_health_url" 2>/dev/null || echo 'unreachable')"
         if echo "$ha_out" | grep -qi "API running\|message"; then
           ha_health="healthy"
         else

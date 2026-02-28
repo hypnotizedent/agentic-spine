@@ -13,8 +13,8 @@
 #   vw_proxy_stop                      # kills proxy
 #
 # Env:
-#   VW_PROXY_TARGET - Vaultwarden backend (default: http://100.92.91.128:8081)
-#                     This is the LAN endpoint the proxy forwards to.
+#   VW_PROXY_TARGET - Vaultwarden backend (default sourced from services.health binding)
+#                     This is the endpoint the proxy forwards to.
 #                     Callers should NOT change this unless testing a different VW instance.
 
 # Guard against double-source
@@ -27,8 +27,17 @@ _VW_PROXY_PID=""
 _VW_PROXY_PORT=""
 _VW_PROXY_OUTPUT=""
 
-# Default: Vaultwarden direct via Tailscale LAN (no DNS dependency)
-VW_PROXY_TARGET="${VW_PROXY_TARGET:-http://100.92.91.128:8081}"
+# Default: derive from services.health SSOT, fallback to service hostname.
+_VW_SPINE_ROOT="$(cd "$_VW_LIB_DIR/../../../.." && pwd)"
+_VW_SERVICES_HEALTH="$_VW_SPINE_ROOT/ops/bindings/services.health.yaml"
+_VW_DEFAULT_TARGET="http://vaultwarden:8081"
+if command -v yq >/dev/null 2>&1 && [[ -f "$_VW_SERVICES_HEALTH" ]]; then
+  _vw_health_url="$(yq e -r '.endpoints[] | select(.id=="vaultwarden") | .url // ""' "$_VW_SERVICES_HEALTH" 2>/dev/null | head -n1)"
+  if [[ -n "$_vw_health_url" ]]; then
+    _VW_DEFAULT_TARGET="${_vw_health_url%/alive}"
+  fi
+fi
+VW_PROXY_TARGET="${VW_PROXY_TARGET:-$_VW_DEFAULT_TARGET}"
 
 vw_proxy_start() {
   # Idempotent: if proxy already running, just return

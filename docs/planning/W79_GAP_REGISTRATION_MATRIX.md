@@ -6,9 +6,9 @@ Source report: `mailroom/outbox/reports/W77_FORENSIC_AUDIT_REPORT.md`
 ## Summary
 
 - total_findings: 54
-- true_unresolved_linked_to_gap: 32
-- fixed_in_program_waves: 10
-- blocked_with_evidence: 3
+- true_unresolved_linked_to_gap: 31
+- fixed_in_program_waves: 12
+- blocked_with_evidence: 2
 - noop_fixed_with_evidence: 8
 - stale_false_with_evidence: 1
 - unclassified: 0
@@ -31,7 +31,7 @@ Source report: `mailroom/outbox/reports/W77_FORENSIC_AUDIT_REPORT.md`
 | MM-M3 | mint-modules | medium | TRUE_UNRESOLVED | linked_gap | GAP-OP-1184 | LOOP-W79-T3-MEDIUM-LOW-COSMETIC-20260228 | payment module contains TODO replace with postgres adapter |
 | S-C1 | agentic-spine | critical | FIXED | linked_gap | GAP-OP-1150 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | Freshness mappings expanded to 70/70 coverage; hygiene-weekly + reconcile PASS |
 | S-C2 | agentic-spine | critical | BLOCKED | linked_gap | GAP-OP-1151 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | Runtime launchagent install/load required; deferred until RELEASE_RUNTIME_CHANGE_WINDOW |
-| S-C3 | agentic-spine | critical | TRUE_UNRESOLVED | linked_gap | GAP-OP-1152 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | rg hardcoded IPs in wave.sh/services.health/proxy-session/pr.sh |
+| S-C3 | agentic-spine | critical | FIXED | linked_gap | GAP-OP-1152 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | Hardcoded command-surface IP defaults removed; verify block PASS |
 | S-C4 | agentic-spine | critical | FIXED | linked_gap | GAP-OP-1153 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | D21 metadata repaired (ring set); gate topology PASS |
 | S-C5 | agentic-spine | critical | FIXED | linked_gap | GAP-OP-1154 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | Active agent metadata completed (name + runner_capability) |
 | S-H1 | agentic-spine | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1155 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | engine/zai.sh, engine/claude.sh, engine/openai.sh, engine/local_echo.sh missing |
@@ -66,7 +66,7 @@ Source report: `mailroom/outbox/reports/W77_FORENSIC_AUDIT_REPORT.md`
 | WB-M2 | workbench | medium | TRUE_UNRESOLVED | linked_gap | GAP-OP-1175 | LOOP-W79-T3-MEDIUM-LOW-COSMETIC-20260228 | DEFERRED.md expiries exist without automated enforcement |
 | WB-M3 | workbench | medium | TRUE_UNRESOLVED | linked_gap | GAP-OP-1176 | LOOP-W79-T3-MEDIUM-LOW-COSMETIC-20260228 | placeholder conventions vary (CHANGEME/empty/commented) |
 | XR-C1 | cross-repo | critical | TRUE_UNRESOLVED | linked_gap | GAP-OP-1188 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | cross-repo scan finds >70k files containing /Users/ronnyworks |
-| XR-C2 | cross-repo | critical | BLOCKED | linked_gap | GAP-OP-1189 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | Active paths fixed; one non-legacy documentation outlier remains and is tracked |
+| XR-C2 | cross-repo | critical | FIXED | linked_gap | GAP-OP-1189 | LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228 | Final non-legacy FIREFLY alias outlier normalized; active workbench+mint surfaces canonicalized |
 | XR-H1 | cross-repo | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1190 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | no tailscale_ip_registry binding file present in spine |
 | XR-H2 | cross-repo | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1191 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | no launchd templates for finance-stack-backup/simplefin-daily-sync |
 | XR-H3 | cross-repo | high | TRUE_UNRESOLVED | linked_gap | GAP-OP-1192 | LOOP-W79-T2-HIGH-STRUCTURAL-20260228 | no explicit gates tie mint/workbench satellite runtime state into spine verify rings |
