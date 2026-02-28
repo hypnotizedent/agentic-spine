@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-W75-WEEKLY-STEADY-STATE-20260228
 created: 2026-02-28
-status: active
+status: closed
 owner: "@ronny"
 scope: w75
 priority: medium
