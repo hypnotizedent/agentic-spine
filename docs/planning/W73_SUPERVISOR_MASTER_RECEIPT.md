@@ -31,4 +31,4 @@
 See: [W73_RUN_KEY_LEDGER.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W73_RUN_KEY_LEDGER.md)
 
 ## Closeout SHA
-- branch_head: `TBD_AFTER_COMMIT`
+- branch_head: `664b3bc136076d5f7397e5f7d2a9bd5e32e1bbd9`
