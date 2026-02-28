@@ -7,9 +7,9 @@ decision: MERGE_READY
 
 | repo | branch | expected_status |
 |---|---|---|
-| /Users/ronnyworks/code/agentic-spine | codex/w62a-cross-repo-tail-remediation-20260228 | `## codex/w62a-cross-repo-tail-remediation-20260228...origin/codex/w62a-cross-repo-tail-remediation-20260228` (clean) |
-| /Users/ronnyworks/code/workbench | codex/w62a-cross-repo-tail-remediation-20260228 | `## codex/w62a-cross-repo-tail-remediation-20260228...origin/codex/w62a-cross-repo-tail-remediation-20260228` (clean) |
-| /Users/ronnyworks/code/mint-modules | codex/w62a-cross-repo-tail-remediation-20260228 | `## codex/w62a-cross-repo-tail-remediation-20260228...origin/codex/w62a-cross-repo-tail-remediation-20260228` (clean) |
+| /Users/ronnyworks/code/agentic-spine | codex/w62a-cross-repo-tail-remediation-20260228 | `## codex/w62a-cross-repo-tail-remediation-20260228...share/codex/w62a-cross-repo-tail-remediation-20260228` (clean) |
+| /Users/ronnyworks/code/workbench | codex/w62a-cross-repo-tail-remediation-20260228 | `## codex/w62a-cross-repo-tail-remediation-20260228...github/codex/w62a-cross-repo-tail-remediation-20260228` (clean) |
+| /Users/ronnyworks/code/mint-modules | codex/w62a-cross-repo-tail-remediation-20260228 | `## codex/w62a-cross-repo-tail-remediation-20260228...github/codex/w62a-cross-repo-tail-remediation-20260228` (clean) |
 
 ## Appendix: Report-Only Non-Canonical Branches/Worktrees
 
