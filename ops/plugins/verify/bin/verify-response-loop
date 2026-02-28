@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+CAP_RUNNER="${SPINE_ROOT}/bin/ops"
+HISTORY_FILE="${VERIFY_FAILURE_HISTORY_FILE:-$SPINE_ROOT/ops/plugins/verify/state/verify-failure-class-history.ndjson}"
+GATE_REGISTRY="${VERIFY_GATE_REGISTRY_FILE:-$SPINE_ROOT/ops/bindings/gate.registry.yaml}"
+GAPS_FILE="${VERIFY_GAPS_FILE:-$SPINE_ROOT/ops/bindings/operational.gaps.yaml}"
+CURSOR_FILE="${VERIFY_RESPONSE_CURSOR_FILE:-/tmp/verify-response-loop.cursor}"
+GATE_REVIEW_QUEUE_FILE="${VERIFY_GATE_REVIEW_QUEUE_FILE:-/tmp/verify-gate-review-queue.ndjson}"
+DEFAULT_PARENT_LOOP="${VERIFY_RESPONSE_PARENT_LOOP:-LOOP-W79-T2-HIGH-STRUCTURAL-20260228}"
+
+fail() {
+  echo "verify.response.loop FAIL: $*" >&2
+  exit 1
+}
+
+[[ -x "$CAP_RUNNER" ]] || fail "missing cap runner: $CAP_RUNNER"
+[[ -f "$HISTORY_FILE" ]] || fail "missing verify failure history: $HISTORY_FILE"
+[[ -f "$GATE_REGISTRY" ]] || fail "missing gate registry: $GATE_REGISTRY"
+[[ -f "$GAPS_FILE" ]] || fail "missing gaps file: $GAPS_FILE"
+command -v jq >/dev/null 2>&1 || fail "missing dependency: jq"
+command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+
+latest_line="$(tail -n 1 "$HISTORY_FILE" 2>/dev/null || true)"
+if [[ -z "$latest_line" ]]; then
+  echo "verify.response.loop: no history entries"
+  echo "0 freshness auto-reconciled, 0 gaps opened, 0 gate bugs flagged"
+  exit 0
+fi
+
+if ! jq -e . >/dev/null 2>&1 <<<"$latest_line"; then
+  fail "latest history entry is not valid JSON"
+fi
+
+fingerprint="$(jq -r '[.timestamp_utc // "", .run_key // "", .scope // ""] | join("|")' <<<"$latest_line")"
+last_fingerprint="$(cat "$CURSOR_FILE" 2>/dev/null || true)"
+if [[ -n "$last_fingerprint" && "$last_fingerprint" == "$fingerprint" ]]; then
+  echo "verify.response.loop: already processed latest run ($fingerprint)"
+  echo "0 freshness auto-reconciled, 0 gaps opened, 0 gate bugs flagged"
+  exit 0
+fi
+
+run_key="$(jq -r '.run_key // "manual"' <<<"$latest_line")"
+scope="$(jq -r '.scope // "unknown"' <<<"$latest_line")"
+timestamp_utc="$(jq -r '.timestamp_utc // ""' <<<"$latest_line")"
+
+mapfile -t freshness_ids < <(jq -r '.failure_class.freshness[]?' <<<"$latest_line")
+mapfile -t deterministic_ids < <(jq -r '.failure_class.deterministic[]?' <<<"$latest_line")
+mapfile -t gate_bug_ids < <(jq -r '.failure_class.gate_bug[]?' <<<"$latest_line")
+
+freshness_reconciled=0
+gaps_opened=0
+gate_bugs_flagged=0
+
+if ((${#freshness_ids[@]} > 0)); then
+  if "$CAP_RUNNER" cap run verify.freshness.reconcile >/dev/null 2>&1; then
+    freshness_reconciled="${#freshness_ids[@]}"
+  else
+    echo "verify.response.loop WARN: verify.freshness.reconcile failed for run_key=$run_key" >&2
+  fi
+fi
+
+if ((${#deterministic_ids[@]} > 0)); then
+  batch_file="$(mktemp)"
+  cleanup_batch() { rm -f "$batch_file"; }
+  trap cleanup_batch EXIT
+
+  echo "gaps:" > "$batch_file"
+  for gid in "${deterministic_ids[@]}"; do
+    [[ -n "$gid" ]] || continue
+    existing_open="$(
+      GID="$gid" yq e '[.gaps[] | select(.status == "open" and ((.description // "") | contains("Auto-opened by verify-response-loop for gate " + strenv(GID) + ".")))] | length' "$GAPS_FILE" 2>/dev/null || echo 0
+    )"
+    if [[ "$existing_open" =~ ^[0-9]+$ ]] && (( existing_open > 0 )); then
+      continue
+    fi
+
+    gate_name="$(
+      GID="$gid" yq e -r '.gates[] | select(.id == strenv(GID)) | .name // ""' "$GATE_REGISTRY" 2>/dev/null | head -n1
+    )"
+    gate_ring="$(
+      GID="$gid" yq e -r '.gates[] | select(.id == strenv(GID)) | .ring // "standard"' "$GATE_REGISTRY" 2>/dev/null | head -n1
+    )"
+    gate_doc="$(
+      GID="$gid" yq e -r '.gates[] | select(.id == strenv(GID)) | .check_script // ""' "$GATE_REGISTRY" 2>/dev/null | head -n1
+    )"
+
+    case "$gate_ring" in
+      instant) gap_severity="critical" ;;
+      deep) gap_severity="medium" ;;
+      *) gap_severity="high" ;;
+    esac
+
+    [[ -n "$gate_doc" ]] || gate_doc="ops/plugins/verify/bin/verify-run"
+    [[ -n "$gate_name" ]] || gate_name="Unknown gate"
+
+    cat >> "$batch_file" <<EOF
+  - id: auto
+    type: runtime-bug
+    severity: $gap_severity
+    discovered_by: verify-response-loop
+    doc: $gate_doc
+    description: |
+      Auto-opened by verify-response-loop for gate $gid.
+      run_key: $run_key
+      timestamp_utc: $timestamp_utc
+      scope: $scope
+      gate_name: $gate_name
+      gate_ring: $gate_ring
+      failure_class: deterministic
+      source_history: ops/plugins/verify/state/verify-failure-class-history.ndjson
+EOF
+    gaps_opened=$((gaps_opened + 1))
+  done
+
+  if (( gaps_opened > 0 )); then
+    if ! "$CAP_RUNNER" cap run gaps.file -- --batch "$batch_file" --parent-loop "$DEFAULT_PARENT_LOOP" >/dev/null 2>&1; then
+      echo "verify.response.loop WARN: gaps.file batch failed for run_key=$run_key" >&2
+      gaps_opened=0
+    fi
+  fi
+
+  rm -f "$batch_file"
+  trap - EXIT
+fi
+
+if ((${#gate_bug_ids[@]} > 0)); then
+  for gid in "${gate_bug_ids[@]}"; do
+    [[ -n "$gid" ]] || continue
+    jq -cn \
+      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg run_key "$run_key" \
+      --arg scope "$scope" \
+      --arg gate_id "$gid" \
+      --arg source_history "$HISTORY_FILE" \
+      '{timestamp_utc:$ts,run_key:$run_key,scope:$scope,gate_id:$gate_id,classification:"gate_bug",source_history:$source_history}' >> "$GATE_REVIEW_QUEUE_FILE"
+    gate_bugs_flagged=$((gate_bugs_flagged + 1))
+  done
+fi
+
+printf '%s\n' "$fingerprint" > "$CURSOR_FILE"
+echo "${freshness_reconciled} freshness auto-reconciled, ${gaps_opened} gaps opened, ${gate_bugs_flagged} gate bugs flagged"
