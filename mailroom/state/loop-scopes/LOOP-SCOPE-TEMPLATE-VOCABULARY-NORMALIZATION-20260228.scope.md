@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SCOPE-TEMPLATE-VOCABULARY-NORMALIZATION-20260228
 created: 2026-02-28
-status: active
+status: closed
 owner: "@ronny"
 scope: scope
 priority: medium
