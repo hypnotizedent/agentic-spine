@@ -12,10 +12,28 @@ def pct(value: float) -> str:
     return f"{value * 100:.2f}%"
 
 
+def confidence_from_exposure(exposure: int, fail_rate: float) -> str:
+    if exposure >= 12 and fail_rate >= 0.75:
+        return "high"
+    if exposure >= 6:
+        return "medium"
+    return "low"
+
+
+def confidence_from_stability(exposure: int) -> str:
+    if exposure >= 12:
+        return "high"
+    if exposure >= 6:
+        return "medium"
+    return "low"
+
+
 def main() -> None:
     root = Path(__file__).resolve().parents[4]
     scorecard_json = root / "docs/planning/W62B_GATE_QUALITY_SCORECARD.json"
-    out_md = root / "docs/planning/W62B_GATE_PORTFOLIO_RECOMMENDATIONS.md"
+    out_md = root / "docs/planning/W65_GATE_PORTFOLIO_RECOMMENDATIONS.md"
+    out_json = root / "docs/planning/W65_GATE_PORTFOLIO_RECOMMENDATIONS.json"
+    compat_md = root / "docs/planning/W62B_GATE_PORTFOLIO_RECOMMENDATIONS.md"
 
     if not scorecard_json.exists():
         fail(f"missing scorecard json: {scorecard_json}")
@@ -29,52 +47,81 @@ def main() -> None:
     demotion_min_exposure = 2
     retirement_min_exposure = 6
 
+    recommendations = []
     demotion_candidates = []
     retirement_candidates = []
 
     for gate in gates:
-        gate_id = gate.get("id", "")
-        gate_class = gate.get("gate_class", "")
+        gate_id = str(gate.get("id", "")).strip()
+        gate_name = str(gate.get("name", "")).strip()
+        gate_class = str(gate.get("gate_class", "")).strip()
         exposure = int(gate.get("exposure_count", 0))
         fail_rate = float(gate.get("fail_rate", 0.0))
         pass_rate = float(gate.get("pass_rate", 0.0))
         fail_count = int(gate.get("fail_count", 0))
         drift = int(gate.get("real_drift_evidence_count", 0))
 
-        if gate_class != "advisory" and exposure >= demotion_min_exposure and fail_rate > demotion_fail_rate_threshold and drift == 0:
-            demotion_candidates.append(
-                {
-                    "id": gate_id,
-                    "name": gate.get("name", ""),
-                    "gate_class": gate_class,
-                    "exposure_count": exposure,
-                    "fail_count": fail_count,
-                    "fail_rate": fail_rate,
-                    "real_drift_evidence_count": drift,
-                    "candidate_action": "demote_to_advisory",
-                    "rationale": "fail_rate > 50% with zero deterministic drift evidence in horizon",
-                }
-            )
+        if (
+            gate_class != "advisory"
+            and exposure >= demotion_min_exposure
+            and fail_rate > demotion_fail_rate_threshold
+            and drift == 0
+        ):
+            row = {
+                "gate_id": gate_id,
+                "gate_name": gate_name,
+                "current_class": gate_class,
+                "recommendation_type": "demote_to_advisory",
+                "reason": "fail_rate > 50% with zero deterministic drift evidence",
+                "confidence": confidence_from_exposure(exposure, fail_rate),
+                "next_action": "open demotion proposal and verify in shadow mode for 7 days",
+                "exposure_count": exposure,
+                "fail_count": fail_count,
+                "fail_rate": fail_rate,
+                "real_drift_evidence_count": drift,
+            }
+            demotion_candidates.append(row)
+            recommendations.append(row)
 
         if gate_class != "advisory" and exposure >= retirement_min_exposure and pass_rate == 1.0 and fail_count == 0:
-            retirement_candidates.append(
-                {
-                    "id": gate_id,
-                    "name": gate.get("name", ""),
-                    "gate_class": gate_class,
-                    "exposure_count": exposure,
-                    "pass_rate": pass_rate,
-                    "candidate_action": "retire_review",
-                    "rationale": f"pass_rate == 100% for long horizon (>= {retirement_min_exposure} exposures)",
-                }
-            )
+            row = {
+                "gate_id": gate_id,
+                "gate_name": gate_name,
+                "current_class": gate_class,
+                "recommendation_type": "retire_review",
+                "reason": f"pass_rate == 100% for long horizon (>= {retirement_min_exposure} exposures)",
+                "confidence": confidence_from_stability(exposure),
+                "next_action": "open retirement review with owner and expiry",
+                "exposure_count": exposure,
+                "fail_count": fail_count,
+                "pass_rate": pass_rate,
+            }
+            retirement_candidates.append(row)
+            recommendations.append(row)
 
-    demotion_candidates.sort(key=lambda x: (-x["fail_rate"], -x["fail_count"], x["id"]))
-    retirement_candidates.sort(key=lambda x: (-x["exposure_count"], x["id"]))
+    demotion_candidates.sort(key=lambda x: (-x["fail_rate"], -x["fail_count"], x["gate_id"]))
+    retirement_candidates.sort(key=lambda x: (-x["exposure_count"], x["gate_id"]))
+    recommendations.sort(key=lambda x: (x["recommendation_type"], x["gate_id"]))
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    json_payload = {
+        "generated_at_utc": generated_at,
+        "input_scorecard": str(scorecard_json),
+        "mode": "report-only",
+        "rules": {
+            "demotion": f"fail_rate > {int(demotion_fail_rate_threshold * 100)}% and real_drift_evidence_count == 0 and exposure_count >= {demotion_min_exposure}",
+            "retirement_review": f"pass_rate == 100% and fail_count == 0 and exposure_count >= {retirement_min_exposure}",
+        },
+        "recommendations": recommendations,
+        "summary": {
+            "demotion_candidates": len(demotion_candidates),
+            "retirement_review_candidates": len(retirement_candidates),
+            "registry_mutation": "none",
+        },
+    }
+
     lines = [
-        "# W62-B Gate Portfolio Recommendations (Report-Only)",
+        "# W65 Gate Portfolio Recommendations (Report-Only)",
         "",
         f"Generated: {generated_at}",
         f"Input scorecard: `{scorecard_json}`",
@@ -85,37 +132,19 @@ def main() -> None:
         f"- Retirement review recommendation: `pass_rate == 100%` for long horizon (`exposure_count >= {retirement_min_exposure}`).",
         "- Enforcement mode: **report-only**. This capability does **not** mutate `ops/bindings/gate.registry.yaml`.",
         "",
-        "## Advisory Demotion Candidates (Report-Only)",
+        "## Recommendations",
         "",
-        "| gate_id | gate_name | current_class | exposure_count | fail_count | fail_rate | real_drift_evidence_count | candidate_action | rationale |",
-        "|---|---|---|---:|---:|---:|---:|---|---|",
+        "| gate_id | gate_name | current_class | recommendation_type | reason | confidence | next_action |",
+        "|---|---|---|---|---|---|---|",
     ]
 
-    if demotion_candidates:
-        for row in demotion_candidates:
+    if recommendations:
+        for row in recommendations:
             lines.append(
-                f"| {row['id']} | {row['name']} | {row['gate_class']} | {row['exposure_count']} | {row['fail_count']} | {pct(row['fail_rate'])} | {row['real_drift_evidence_count']} | {row['candidate_action']} | {row['rationale']} |"
+                f"| {row['gate_id']} | {row['gate_name']} | {row['current_class']} | {row['recommendation_type']} | {row['reason']} | {row['confidence']} | {row['next_action']} |"
             )
     else:
-        lines.append("| none | n/a | n/a | 0 | 0 | 0.00% | 0 | none | no gates met demotion rule in this horizon |")
-
-    lines.extend(
-        [
-            "",
-            "## Retirement Review Candidates (Report-Only)",
-            "",
-            "| gate_id | gate_name | current_class | exposure_count | pass_rate | candidate_action | rationale |",
-            "|---|---|---|---:|---:|---|---|",
-        ]
-    )
-
-    if retirement_candidates:
-        for row in retirement_candidates:
-            lines.append(
-                f"| {row['id']} | {row['name']} | {row['gate_class']} | {row['exposure_count']} | {pct(row['pass_rate'])} | {row['candidate_action']} | {row['rationale']} |"
-            )
-    else:
-        lines.append("| none | n/a | n/a | 0 | 0.00% | none | no gates met retirement-review rule in this horizon |")
+        lines.append("| none | n/a | n/a | none | no gate met recommendation rules in this horizon | n/a | no action |")
 
     lines.extend(
         [
@@ -129,10 +158,14 @@ def main() -> None:
     )
 
     out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out_json.write_text(json.dumps(json_payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    compat_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print("verify.gate_portfolio.recommendations")
     print(f"input_scorecard: {scorecard_json}")
     print(f"recommendations_md: {out_md}")
+    print(f"recommendations_json: {out_json}")
+    print(f"compatibility_md: {compat_md}")
     print(f"demotion_candidates: {len(demotion_candidates)}")
     print(f"retirement_review_candidates: {len(retirement_candidates)}")
 

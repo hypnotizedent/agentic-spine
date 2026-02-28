@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"gate-budget-add-one-retire-one-report FAIL: {message}")
+
+
+def load_yaml(path: Path) -> dict:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        fail(f"unable to parse yaml {path}: {exc}")
+    if not isinstance(data, dict):
+        fail(f"yaml root must be map: {path}")
+    return data
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parents[4]
+    contract_path = root / "ops/bindings/gate.budget.add_one_retire_one.contract.yaml"
+
+    if not contract_path.exists():
+        fail(f"missing contract: {contract_path}")
+
+    contract = load_yaml(contract_path)
+    sources = contract.get("sources", {}) if isinstance(contract.get("sources"), dict) else {}
+    baseline = contract.get("baseline", {}) if isinstance(contract.get("baseline"), dict) else {}
+    report_cfg = contract.get("report", {}) if isinstance(contract.get("report"), dict) else {}
+
+    registry_path = root / str(sources.get("gate_registry", "ops/bindings/gate.registry.yaml"))
+    rec_json_path = root / str(
+        sources.get("recommendations_json", "docs/planning/W65_GATE_PORTFOLIO_RECOMMENDATIONS.json")
+    )
+    report_path = root / str(report_cfg.get("markdown_path", "docs/planning/W65_GATE_BUDGET_REPORT.md"))
+
+    if not registry_path.exists():
+        fail(f"missing gate registry: {registry_path}")
+
+    registry = load_yaml(registry_path)
+    gates = registry.get("gates", [])
+    if not isinstance(gates, list):
+        fail("gate registry malformed (gates must be list)")
+
+    current_invariants = sum(1 for gate in gates if gate.get("gate_class") == "invariant")
+    baseline_invariants = int(baseline.get("invariant_count", current_invariants))
+
+    delta = current_invariants - baseline_invariants
+    invariants_added = max(delta, 0)
+    invariants_retired = max(-delta, 0)
+
+    recommendations = []
+    rec_parse_note = "recommendations source available"
+    if rec_json_path.exists():
+        try:
+            rec_obj = json.loads(rec_json_path.read_text(encoding="utf-8"))
+            rec_list = rec_obj.get("recommendations", [])
+            if isinstance(rec_list, list):
+                recommendations = rec_list
+            else:
+                rec_parse_note = "recommendations source malformed (recommendations must be list)"
+        except Exception:
+            rec_parse_note = "recommendations source unreadable"
+    else:
+        rec_parse_note = "recommendations source missing"
+
+    plan_count = 0
+    for row in recommendations:
+        if not isinstance(row, dict):
+            continue
+        current_class = str(row.get("current_class", "")).strip()
+        rec_type = str(row.get("recommendation_type", "")).strip()
+        if current_class == "invariant" and rec_type in {"demote_to_advisory", "retire_review"}:
+            plan_count += 1
+
+    violations = max(0, invariants_added - plan_count)
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# W65 Gate Budget Report (Report-Only)",
+        "",
+        f"Generated: {generated}",
+        f"Contract: `{contract_path}`",
+        f"Registry: `{registry_path}`",
+        f"Recommendations: `{rec_json_path}` ({rec_parse_note})",
+        "",
+        "## Metrics",
+        "",
+        f"- baseline_invariants: **{baseline_invariants}**",
+        f"- current_invariants: **{current_invariants}**",
+        f"- invariants_added: **{invariants_added}**",
+        f"- invariants_retired: **{invariants_retired}**",
+        f"- delta: **{delta}**",
+        f"- retirement_or_demotion_plan_count: **{plan_count}**",
+        f"- violations: **{violations}**",
+        "",
+        "## Rule",
+        "",
+        "- Violation when `net_new_invariants > 0` and there is no matching retirement/demotion plan coverage.",
+        "- Enforcement mode in W65: **report-only** (no blocking, no registry mutation).",
+    ]
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    print("verify.gate_budget.report")
+    print(f"baseline_invariants: {baseline_invariants}")
+    print(f"current_invariants: {current_invariants}")
+    print(f"invariants_added: {invariants_added}")
+    print(f"invariants_retired: {invariants_retired}")
+    print(f"delta: {delta}")
+    print(f"retirement_or_demotion_plan_count: {plan_count}")
+    print(f"violations: {violations}")
+    print(f"report_md: {report_path}")
+
+
+if __name__ == "__main__":
+    main()

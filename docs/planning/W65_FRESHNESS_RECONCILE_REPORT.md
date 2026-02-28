@@ -1,30 +1,29 @@
-# W63 Freshness Reconcile Report
+# W65 Freshness Reconcile Report
 
-Generated: 2026-02-28T06:12:27Z
+Generated: 2026-02-28T06:35:00Z
 Source contract: `/Users/ronnyworks/code/agentic-spine/ops/bindings/freshness.reconcile.contract.yaml`
 Source registry: `/Users/ronnyworks/code/agentic-spine/ops/bindings/gate.registry.yaml`
 
 ## Summary
 
 - freshness_gates_total: **68**
-- pass_count: **60**
+- pass_count: **66**
 - refreshed_count: **0**
 - rerun_count: **0**
-- unresolved_count: **8**
+- unresolved_count: **2**
 
 ## Unresolved Reason Counts
 
 | reason | count |
 |---|---:|
-| inline_gate_not_individually_rerunnable | 2 |
-| no_refresh_capability | 6 |
+| no_refresh_capability | 2 |
 
 ## Gate Reconciliation Detail
 
 | gate_id | gate_name | initial_status | refresh_capability | refresh_status | final_status | unresolved_reason |
 |---|---|---|---|---|---|---|
-| D5 | no-legacy-coupling | skipped | n/a | not_applicable | unresolved | inline_gate_not_individually_rerunnable |
-| D11 | home-surface | skipped | n/a | not_applicable | unresolved | inline_gate_not_individually_rerunnable |
+| D5 | no-legacy-coupling | pass | n/a | not_applicable | pass | n/a |
+| D11 | home-surface | pass | n/a | not_applicable | pass | n/a |
 | D17 | root-allowlist | pass | n/a | not_applicable | pass | n/a |
 | D26 | agent-read-surface | pass | n/a | not_applicable | pass | n/a |
 | D32 | codex-instruction-source-lock | pass | n/a | not_applicable | pass | n/a |
@@ -47,25 +46,25 @@ Source registry: `/Users/ronnyworks/code/agentic-spine/ops/bindings/gate.registr
 | D124 | entry-surface-parity-lock | pass | n/a | not_applicable | pass | n/a |
 | D131 | catalog-freshness-lock | pass | n/a | not_applicable | pass | n/a |
 | D139 | nas-baseline-coverage | pass | n/a | not_applicable | pass | n/a |
-| D142 | receipt-index-freshness | pass | n/a | not_applicable | pass | n/a |
+| D142 | receipt-index-freshness | failed | n/a | not_applicable | unresolved | no_refresh_capability |
 | D147 | communications-canonical-routing-lock | pass | n/a | not_applicable | pass | n/a |
 | D148 | mcp-agent-runtime-binding-lock | pass | n/a | not_applicable | pass | n/a |
 | D150 | code-root-hygiene-lock | pass | n/a | not_applicable | pass | n/a |
 | D151 | communications-boundary-lock | pass | n/a | not_applicable | pass | n/a |
 | D156 | governance-freshness-and-receipts-policy-lock | pass | n/a | not_applicable | pass | n/a |
-| D157 | proposals-lifecycle-linkage-lock | failed | n/a | not_applicable | unresolved | no_refresh_capability |
+| D157 | proposals-lifecycle-linkage-lock | pass | n/a | not_applicable | pass | n/a |
 | D159 | weekly-execution-telemetry-lock | pass | n/a | not_applicable | pass | n/a |
-| D162 | operator-smoothness-lock | failed | n/a | not_applicable | unresolved | no_refresh_capability |
+| D162 | operator-smoothness-lock | pass | n/a | not_applicable | pass | n/a |
 | D167 | workbench-operator-surface-lock | pass | n/a | not_applicable | pass | n/a |
 | D174 | service-onboarding-parity-lock | pass | n/a | not_applicable | pass | n/a |
 | D176 | platform-extension-transaction-lock | pass | n/a | not_applicable | pass | n/a |
-| D178 | platform-extension-lifecycle-lock | pass | n/a | not_applicable | pass | n/a |
+| D178 | platform-extension-lifecycle-lock | failed | n/a | not_applicable | unresolved | no_refresh_capability |
 | D179 | platform-extension-artifact-completeness-lock | pass | n/a | not_applicable | pass | n/a |
 | D185 | inventory-home-union-lock | pass | n/a | not_applicable | pass | n/a |
-| D191 | media-content-ledger-parity-lock | failed | n/a | not_applicable | unresolved | no_refresh_capability |
-| D192 | media-content-snapshot-freshness-lock | failed | n/a | not_applicable | unresolved | no_refresh_capability |
-| D193 | ha-inventory-snapshot-completeness-lock | failed | n/a | not_applicable | unresolved | no_refresh_capability |
-| D194 | network-inventory-snapshot-parity-lock | failed | n/a | not_applicable | unresolved | no_refresh_capability |
+| D191 | media-content-ledger-parity-lock | pass | n/a | not_applicable | pass | n/a |
+| D192 | media-content-snapshot-freshness-lock | pass | n/a | not_applicable | pass | n/a |
+| D193 | ha-inventory-snapshot-completeness-lock | pass | n/a | not_applicable | pass | n/a |
+| D194 | network-inventory-snapshot-parity-lock | pass | n/a | not_applicable | pass | n/a |
 | D201 | domain-registrar-parity-lock | pass | n/a | not_applicable | pass | n/a |
 | D202 | domain-transfer-readiness-lock | pass | n/a | not_applicable | pass | n/a |
 | D205 | calendar-home-union-ingest-lock | pass | n/a | not_applicable | pass | n/a |

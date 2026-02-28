@@ -37,6 +37,24 @@ def gate_sort_key(gate_id: str) -> tuple[int, str]:
     return (10**9, gate_id)
 
 
+def run_fast_wrapper_failing_ids(root: Path, timeout: int, env: dict[str, str]) -> tuple[bool, set[str]]:
+    rc, out = run_cmd(["./ops/plugins/verify/bin/verify-run", "fast", "--json"], timeout, root, env)
+    if rc != 0:
+        return False, set()
+
+    try:
+        parsed = json.loads(out or "{}")
+    except json.JSONDecodeError:
+        return False, set()
+
+    wrapper = parsed.get("wrapper", {}) if isinstance(parsed, dict) else {}
+    failing = wrapper.get("failing_ids", []) if isinstance(wrapper, dict) else []
+    if not isinstance(failing, list):
+        return False, set()
+
+    return True, {str(gid).strip() for gid in failing if str(gid).strip()}
+
+
 def main() -> None:
     root = Path(__file__).resolve().parents[4]
     registry_path = root / "ops/bindings/gate.registry.yaml"
@@ -83,6 +101,17 @@ def main() -> None:
     rerun_count = 0
     reason_counts: Counter[str] = Counter()
 
+    inline_fail_ids_cache: set[str] | None = None
+
+    def get_inline_fail_ids(refresh: bool = False) -> tuple[bool, set[str]]:
+        nonlocal inline_fail_ids_cache
+        if inline_fail_ids_cache is None or refresh:
+            ok, ids = run_fast_wrapper_failing_ids(root, gate_timeout, env)
+            if not ok:
+                return False, set()
+            inline_fail_ids_cache = ids
+        return True, set(inline_fail_ids_cache)
+
     for gate in sorted(freshness_gates, key=lambda g: gate_sort_key(str(g.get("id", "")))):
         gate_id = str(gate.get("id", "")).strip()
         gate_name = str(gate.get("name", "")).strip()
@@ -101,11 +130,72 @@ def main() -> None:
         }
 
         if inline:
-            row["initial_status"] = "skipped"
-            row["final_status"] = "unresolved"
-            row["unresolved_reason"] = "inline_gate_not_individually_rerunnable"
-            unresolved_count += 1
-            reason_counts[row["unresolved_reason"]] += 1
+            ok_inline, inline_fail_ids = get_inline_fail_ids(refresh=False)
+            if not ok_inline:
+                row["initial_status"] = "failed"
+                row["final_status"] = "unresolved"
+                row["unresolved_reason"] = "inline_verify_wrapper_failed"
+                unresolved_count += 1
+                reason_counts[row["unresolved_reason"]] += 1
+                rows.append(row)
+                continue
+
+            inline_failed = gate_id in inline_fail_ids
+            if not inline_failed:
+                row["initial_status"] = "pass"
+                row["final_status"] = "pass"
+                pass_count += 1
+                rows.append(row)
+                continue
+
+            row["initial_status"] = "failed"
+            mapping = refresh_map.get(gate_id, {}) or {}
+            capability = str(mapping.get("capability", "")).strip()
+            args = mapping.get("args", []) or []
+
+            if not capability:
+                row["final_status"] = "unresolved"
+                row["unresolved_reason"] = "no_refresh_capability"
+                unresolved_count += 1
+                reason_counts[row["unresolved_reason"]] += 1
+                rows.append(row)
+                continue
+
+            row["refresh_capability"] = capability
+            refresh_cmd = ["./bin/ops", "cap", "run", capability]
+            if args:
+                refresh_cmd.extend(str(x) for x in args)
+
+            rc_refresh, _ = run_cmd(refresh_cmd, refresh_timeout, root, env)
+            if rc_refresh != 0:
+                row["refresh_status"] = "failed"
+                row["final_status"] = "unresolved"
+                row["unresolved_reason"] = "refresh_capability_failed"
+                unresolved_count += 1
+                reason_counts[row["unresolved_reason"]] += 1
+                rows.append(row)
+                continue
+
+            row["refresh_status"] = "ran"
+            rerun_count += 1
+            ok_inline_rerun, inline_fail_ids = get_inline_fail_ids(refresh=True)
+            if not ok_inline_rerun:
+                row["final_status"] = "unresolved"
+                row["unresolved_reason"] = "inline_verify_wrapper_failed"
+                unresolved_count += 1
+                reason_counts[row["unresolved_reason"]] += 1
+                rows.append(row)
+                continue
+
+            if gate_id not in inline_fail_ids:
+                row["final_status"] = "refreshed"
+                refreshed_count += 1
+            else:
+                row["final_status"] = "unresolved"
+                row["unresolved_reason"] = "still_failing_after_refresh"
+                unresolved_count += 1
+                reason_counts[row["unresolved_reason"]] += 1
+
             rows.append(row)
             continue
 
@@ -143,7 +233,6 @@ def main() -> None:
         row["refresh_capability"] = capability
         refresh_cmd = ["./bin/ops", "cap", "run", capability]
         if args:
-            refresh_cmd.append("--")
             refresh_cmd.extend(str(x) for x in args)
 
         rc_refresh, _ = run_cmd(refresh_cmd, refresh_timeout, root, env)
@@ -189,7 +278,7 @@ def main() -> None:
     report_json.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
     lines = [
-        "# W63 Freshness Reconcile Report",
+        "# W65 Freshness Reconcile Report",
         "",
         f"Generated: {generated}",
         f"Source contract: `{contract_path}`",
