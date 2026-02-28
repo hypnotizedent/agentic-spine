@@ -1,7 +1,8 @@
 ---
 loop_id: LOOP-SPINE-W60-REGRESSION-LOCKS-20260227-20260302
 created: 2026-02-28
-status: active
+status: closed
+closed_at: 2026-02-28
 owner: "@ronny"
 scope: spine
 priority: high
