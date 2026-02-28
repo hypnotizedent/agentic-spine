@@ -10,7 +10,7 @@ Mode: deterministic fill-only (no narrative-only completion)
 |---|---|---|
 | branch_spine | `codex/w63-outcome-closure-automation-20260228` | `codex/w63-outcome-closure-automation-20260228` |
 | base_main_sha_spine | `<sha>` | `9bf15d54330994a3098f1f6a8c0970791fe1cd15` |
-| final_branch_sha_spine | `<sha>` | `n/a` |
+| final_branch_sha_spine | `<sha>` | `captured in final terminal output` |
 | decision | `MERGE_READY` or `HOLD_WITH_BLOCKERS` or `DONE` | `MERGE_READY` |
 | protected_lane_mutation | `false` | `false` |
 | vm_infra_runtime_mutation | `false` | `false` |
@@ -128,7 +128,7 @@ Mode: deterministic fill-only (no narrative-only completion)
 | orphaned_open_gaps | `0` |
 | promoted_to_main | `false` |
 | promotion_sha | `n/a` |
-| closeout_sha | `n/a` |
+| closeout_sha | `captured in final terminal output` |
 | attestation_no_protected_lane_mutation | `true` |
 | attestation_no_vm_infra_runtime_mutation | `true` |
 | attestation_no_secret_value_printing | `true` |

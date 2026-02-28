@@ -10,7 +10,7 @@
 | preflight_sha | `6c99a0ba2d04d24f80088b8ed3a215e3a8477d81` |
 | branch_sha | `6c99a0ba2d04d24f80088b8ed3a215e3a8477d81` |
 | promotion_sha | `n/a` |
-| closeout_sha | `n/a` |
+| closeout_sha | `captured in final terminal output` |
 
 ## Run Key Table
 
