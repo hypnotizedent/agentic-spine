@@ -3,22 +3,21 @@
 ## agentic-spine
 
 - branch: `codex/w79-program-t0-20260228`
-- local: `36f0aa132edf570b39360ba03e48d14256820727`
-- origin: `missing`
-- github: `missing`
-- share: `missing`
+- local: `6941390e4c38ba5a8b7ae56638e0123b72b621bc`
+- origin: `6941390e4c38ba5a8b7ae56638e0123b72b621bc`
+- github: `6941390e4c38ba5a8b7ae56638e0123b72b621bc`
+- share: `6941390e4c38ba5a8b7ae56638e0123b72b621bc`
 
 ## workbench
 
 - branch: `codex/w79-program-t0-20260228`
-- local: `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6`
-- origin: `missing`
-- github: `missing`
+- local: `5bccabc85a956560ba13dbf56416a5de0a81e3d6`
+- origin: `5bccabc85a956560ba13dbf56416a5de0a81e3d6`
+- github: `5bccabc85a956560ba13dbf56416a5de0a81e3d6`
 
 ## mint-modules
 
 - branch: `codex/w79-program-t0-20260228`
 - local: `7aae532e2a0fe8d741123c9631cfe5f8001c3d19`
-- origin: `missing`
-- github: `missing`
-
+- origin: `7aae532e2a0fe8d741123c9631cfe5f8001c3d19`
+- github: `7aae532e2a0fe8d741123c9631cfe5f8001c3d19`

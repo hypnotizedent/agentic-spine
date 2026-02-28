@@ -25,3 +25,4 @@
 | 14 | verify.run fast | CAP-20260228-092647__verify.run__R8hnk33697 | done — 10/10 PASS |
 | 15 | loops.status (final) | CAP-20260228-092652__loops.status__Rzvfs34416 | done |
 | 16 | gaps.status (final) | CAP-20260228-092652__gaps.status__... | done |
+| 17 | verify.pack.run workbench (post D79 allowlist patch) | CAP-20260228-092834__verify.pack.run__Rnl7252473 | done — 27/27 PASS |
