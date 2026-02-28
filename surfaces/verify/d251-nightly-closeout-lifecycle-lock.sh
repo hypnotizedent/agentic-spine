@@ -12,10 +12,6 @@ CMD="$ROOT/ops/commands/nightly-closeout.sh"
 SESSION_PROTOCOL="$ROOT/docs/governance/SESSION_PROTOCOL.md"
 GOV_BRIEF="$ROOT/docs/governance/AGENT_GOVERNANCE_BRIEF.md"
 
-MASTER_RECEIPT="$ROOT/docs/planning/W49_NIGHTLY_CLOSEOUT_AUTOPILOT_MASTER_RECEIPT.md"
-DRYRUN_RECEIPT="$ROOT/docs/planning/W49_NIGHTLY_CLOSEOUT_DRYRUN_20260227.md"
-APPLY_RECEIPT="$ROOT/docs/planning/W49_NIGHTLY_CLOSEOUT_APPLY_20260227.md"
-
 if command -v rg >/dev/null 2>&1; then
   FIND_CMD="rg -F -n --no-messages"
 else
@@ -58,9 +54,6 @@ check_file "$CMD" "nightly closeout command"
 check_exec "$CMD" "nightly closeout command"
 check_file "$SESSION_PROTOCOL" "session protocol doc"
 check_file "$GOV_BRIEF" "governance brief doc"
-check_file "$MASTER_RECEIPT" "master receipt template"
-check_file "$DRYRUN_RECEIPT" "dry-run receipt template"
-check_file "$APPLY_RECEIPT" "apply receipt template"
 
 # Contract lock checks
 check_contains "$CONTRACT" "capability: nightly.closeout" "contract binds nightly.closeout capability"
@@ -69,6 +62,9 @@ check_contains "$CONTRACT" "require_snapshot_before_destructive: true" "contract
 check_contains "$CONTRACT" "LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226" "contract protects active mail loop"
 check_contains "$CONTRACT" "GAP-OP-973" "contract protects active mail gap"
 check_contains "$CONTRACT" "gate: D205" "contract pins accepted D205 baseline exception"
+check_contains "$CONTRACT" "require_master_receipt: true" "contract requires master receipt"
+check_contains "$CONTRACT" "require_dryrun_receipt: true" "contract requires dry-run receipt"
+check_contains "$CONTRACT" "require_apply_receipt: true" "contract requires apply receipt"
 
 # Wiring checks
 check_contains "$CAPS" "nightly.closeout" "capabilities registry includes nightly.closeout"

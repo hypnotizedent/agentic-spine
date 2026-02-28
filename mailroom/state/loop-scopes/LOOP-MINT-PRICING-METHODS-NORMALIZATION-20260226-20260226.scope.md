@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MINT-PRICING-METHODS-NORMALIZATION-20260226-20260226
 created: 2026-02-26
-status: active
+status: closed
 owner: "@ronny"
 scope: mint
 priority: high

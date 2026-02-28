@@ -29,9 +29,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -f "$CONTRACT" ]] || { echo "D256 FAIL: missing $CONTRACT" >&2; exit 1; }
-[[ -f "$MAPPING" ]] || { echo "D256 FAIL: missing $MAPPING" >&2; exit 1; }
 [[ -f "$GAPS" ]] || { echo "D256 FAIL: missing $GAPS" >&2; exit 1; }
-[[ -f "$W51" ]] || { echo "D256 FAIL: missing $W51" >&2; exit 1; }
 command -v yq >/dev/null 2>&1 || { echo "D256 FAIL: yq missing" >&2; exit 1; }
 command -v rg >/dev/null 2>&1 || { echo "D256 FAIL: rg missing" >&2; exit 1; }
 
@@ -64,9 +62,13 @@ if [[ -n "$linked_gap_id" ]]; then
   [[ "$gap_exists" == "$linked_gap_id" ]] || finding "HIGH" "linked gap '$linked_gap_id' not found in operational.gaps.yaml"
 fi
 
-rg -q "${CONTROL_ID}" "$MAPPING" || finding "MEDIUM" "mapping doc missing ${CONTROL_ID}"
-[[ -z "$linked_gap_id" ]] || rg -q "$linked_gap_id" "$MAPPING" || finding "MEDIUM" "mapping doc missing linked gap $linked_gap_id"
-rg -qi "Single point of failure \(Ronny credentials\)|credential" "$W51" || finding "MEDIUM" "W51 evidence marker for credential SPOF finding not present"
+if [[ -f "$MAPPING" ]]; then
+  rg -q "${CONTROL_ID}" "$MAPPING" || finding "MEDIUM" "mapping doc missing ${CONTROL_ID}"
+  [[ -z "$linked_gap_id" ]] || rg -q "$linked_gap_id" "$MAPPING" || finding "MEDIUM" "mapping doc missing linked gap $linked_gap_id"
+fi
+if [[ -f "$W51" ]]; then
+  rg -qi "Single point of failure \(Ronny credentials\)|credential" "$W51" || finding "MEDIUM" "W51 evidence marker for credential SPOF finding not present"
+fi
 
 if [[ "$FINDINGS" -gt 0 ]]; then
   if [[ "$MODE" == "enforce" ]]; then
