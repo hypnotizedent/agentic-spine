@@ -1,11 +1,18 @@
 # W74 Branch Zero Status Report
 
-## Clean Status Snapshot
+## Clean Status Snapshot (Post-Promotion)
 | repo | branch | status |
 |---|---|---|
-| agentic-spine | codex/w74-final-closeout-branch-zero-20260228 | clean |
-| workbench | codex/w74-final-closeout-branch-zero-20260228 | clean |
-| mint-modules | codex/w74-final-closeout-branch-zero-20260228 | clean |
+| agentic-spine | main | clean |
+| workbench | main | clean |
+| mint-modules | main | clean |
 
-## Command
-- `git status --short --branch`
+## Remaining `codex/*` Branches
+| repo | local_count | remote_count |
+|---|---:|---:|
+| agentic-spine | 4 | 3 |
+| workbench | 5 | 4 |
+| mint-modules | 5 | 4 |
+
+## Note
+Remaining branches are intentional keep-open/archive sets from classification; merged-safe backlog was executed under cleanup token.

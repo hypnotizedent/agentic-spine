@@ -1,8 +1,9 @@
 # W74 Supervisor Master Receipt
 
 - wave_id: `W74_FINAL_CLOSEOUT_BRANCH_ZERO_20260228`
-- decision: `MERGE_READY`
-- token_cleanup_window_provided: `false`
+- decision: `DONE`
+- token_merge_window_provided: `true`
+- token_cleanup_window_provided: `true`
 
 ## Baseline vs Final Counters
 - open_loops: `25 -> 19`
@@ -19,12 +20,15 @@
   - LOOP-SPINE-W70-WORKBENCH-VERIFY-BUDGET-CALIBRATION-20260228-20260228-20260228
   - LOOP-SPINE-W72-RUNTIME-RECOVERY-HA-MEDIA-FRESHNESS-20260228-20260228
   - LOOP-SPINE-W73-UNASSIGNED-GATE-TRIAGE-20260228-20260228-20260228
-
-## Branch Backlog Summary
-See [W74_BRANCH_CLASSIFICATION_MATRIX.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W74_BRANCH_CLASSIFICATION_MATRIX.md).
+- branch_cleanup_execution: `completed (guarded, token-gated)`
 
 ## Verification Summary
-All required W74 night verify runs passed (see [W74_RUN_KEY_LEDGER.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W74_RUN_KEY_LEDGER.md)).
+Post-merge verify block passed (see Phase 6 run keys in [W74_RUN_KEY_LEDGER.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W74_RUN_KEY_LEDGER.md)).
+
+## Final Receipts
+- [W74_BRANCH_ZERO_DONE_RECEIPT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W74_BRANCH_ZERO_DONE_RECEIPT.md)
+- [W74_PROMOTION_PARITY_RECEIPT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W74_PROMOTION_PARITY_RECEIPT.md)
+- [W74_BRANCH_ZERO_STATUS_REPORT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W74_BRANCH_ZERO_STATUS_REPORT.md)
 
 ## Blockers
 - none

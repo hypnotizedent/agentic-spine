@@ -33,3 +33,17 @@
 - verify.run -- domain communications: `CAP-20260228-060010__verify.run__Rc5kn65329`
 - loops.status (final): `CAP-20260228-060017__loops.status__Rup9d67432`
 - gaps.status (final): `CAP-20260228-060018__gaps.status__R6gej22404`
+
+## Phase 6 — Post-Promotion Verify
+- gate.topology.validate: `CAP-20260228-062459__gate.topology.validate__R6i7f11900`
+- verify.route.recommend: `CAP-20260228-062500__verify.route.recommend__R4ec712164`
+- verify.pack.run core: `CAP-20260228-062500__verify.pack.run__R8nts12410`
+- verify.pack.run secrets: `CAP-20260228-062502__verify.pack.run__Rsf0z13146`
+- verify.pack.run workbench: `CAP-20260228-062518__verify.pack.run__Rw0rd19172`
+- verify.pack.run hygiene-weekly: `CAP-20260228-062614__verify.pack.run__Rbgel38457`
+- verify.pack.run communications: `CAP-20260228-062635__verify.pack.run__Rlefg49689`
+- verify.pack.run mint: `CAP-20260228-062641__verify.pack.run__Rd66h51541`
+- verify.run -- fast: `CAP-20260228-062714__verify.run__Rzbh454718`
+- verify.run -- domain communications: `CAP-20260228-062716__verify.run__Rw9dr55192`
+- loops.status: `CAP-20260228-062723__loops.status__Ragmi57294`
+- gaps.status: `CAP-20260228-062724__gaps.status__R795j57527`
