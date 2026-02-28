@@ -5,10 +5,10 @@ Branch-only wave (no main promotion).
 Branch: `codex/w71-final-completion-drift-burndown-20260228`
 
 ## Parity Snapshot
-- local: `3412cf52e0f9aefebd6faa99fb449d74e77548dc`
-- origin: `3412cf52e0f9aefebd6faa99fb449d74e77548dc`
-- github: `3412cf52e0f9aefebd6faa99fb449d74e77548dc`
-- share: `3412cf52e0f9aefebd6faa99fb449d74e77548dc`
+- local: `469582c171ce0cf6baf7f2f37c2149f25f87a820`
+- origin: `469582c171ce0cf6baf7f2f37c2149f25f87a820`
+- github: `469582c171ce0cf6baf7f2f37c2149f25f87a820`
+- share: `469582c171ce0cf6baf7f2f37c2149f25f87a820`
 
 ## Result
 - local_vs_origin: equal
