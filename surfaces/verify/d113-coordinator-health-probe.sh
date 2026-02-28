@@ -7,14 +7,9 @@ INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
 HA_API="http://${HA_HOST}:${HA_PORT}/api"
-HA_GATE_MODE="${HA_GATE_MODE:-enforce}"  # enforce | report
 
 precondition_fail() {
   local message="$1"
-  if [[ "$HA_GATE_MODE" == "report" ]]; then
-    echo "D113 REPORT: $message"
-    exit 0
-  fi
   echo "D113 FAIL: $message" >&2
   exit 1
 }

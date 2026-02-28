@@ -7,17 +7,12 @@ SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 DEVICES_BINDING="$SPINE_ROOT/ops/bindings/z2m.devices.yaml"
 NAMING_BINDING="$SPINE_ROOT/ops/bindings/z2m.naming.yaml"
-HA_GATE_MODE="${HA_GATE_MODE:-enforce}"  # enforce | report
 FAIL=0
 
 err() { echo "D118 FAIL: $*" >&2; FAIL=1; }
 
 precondition_fail() {
   local message="$1"
-  if [[ "$HA_GATE_MODE" == "report" ]]; then
-    echo "D118 REPORT: $message"
-    exit 0
-  fi
   echo "D118 FAIL: $message" >&2
   exit 1
 }

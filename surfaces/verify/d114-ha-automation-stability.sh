@@ -8,14 +8,9 @@ AUTOMATION_LEDGER="${SPINE_ROOT}/ops/bindings/ha.automations.ledger.yaml"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
 HA_API="http://${HA_HOST}:${HA_PORT}/api"
-HA_GATE_MODE="${HA_GATE_MODE:-enforce}"  # enforce | report
 
 precondition_fail() {
   local message="$1"
-  if [[ "$HA_GATE_MODE" == "report" ]]; then
-    echo "D114 REPORT: $message"
-    exit 0
-  fi
   echo "D114 FAIL: $message" >&2
   exit 1
 }
@@ -60,13 +55,6 @@ if [[ "$ACTUAL_COUNT" -eq "$EXPECTED_COUNT" ]]; then
 fi
 
 ENTITY_LIST=$(echo "$ALL_STATES" | jq -r '[.[] | select(.entity_id | startswith("automation.")) | select(.state != "unavailable") | .entity_id] | sort | .[]' 2>/dev/null) || ENTITY_LIST="(parse error)"
-if [[ "$HA_GATE_MODE" == "report" ]]; then
-  echo "D114 REPORT: automation count drift (actual=$ACTUAL_COUNT expected=$EXPECTED_COUNT)"
-  echo "Active automations:"
-  echo "$ENTITY_LIST"
-  exit 0
-fi
-
 echo "D114 FAIL: automation count drift (actual=$ACTUAL_COUNT expected=$EXPECTED_COUNT)"
 echo "Active automations:"
 echo "$ENTITY_LIST"

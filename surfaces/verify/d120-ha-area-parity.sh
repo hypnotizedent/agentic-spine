@@ -8,17 +8,12 @@ AREAS_SSOT="$ROOT/ops/bindings/ha.areas.yaml"
 INFISICAL_AGENT="$ROOT/ops/tools/infisical-agent.sh"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
-HA_GATE_MODE="${HA_GATE_MODE:-enforce}"  # enforce | report
 FAIL=0
 
 err() { echo "D120 FAIL: $*" >&2; FAIL=1; }
 
 precondition_fail() {
   local message="$1"
-  if [[ "$HA_GATE_MODE" == "report" ]]; then
-    echo "D120 REPORT: $message"
-    exit 0
-  fi
   echo "D120 FAIL: $message" >&2
   exit 1
 }
