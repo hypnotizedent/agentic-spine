@@ -3,7 +3,9 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-CONTRACT="$ROOT/ops/bindings/single.authority.contract.yaml"
+WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
+MINT_ROOT="${MINT_ROOT:-$HOME/code/mint-modules}"
+CONTRACT="$ROOT/ops/bindings/authority.concerns.yaml"
 
 fail() {
   echo "D275 FAIL: $*" >&2
@@ -25,6 +27,8 @@ err() {
 mapfile -t concerns < <(yq e -r '.concerns | keys | .[]' "$CONTRACT")
 [[ "${#concerns[@]}" -gt 0 ]] || err "contract has no concerns"
 
+declare -A authoritative_paths=()
+
 for concern in "${concerns[@]}"; do
   authoritative_count=0
   non_authoritative_count=0
@@ -37,6 +41,7 @@ for concern in "${concerns[@]}"; do
     case "$state" in
       authoritative)
         authoritative_count=$((authoritative_count + 1))
+        authoritative_paths["$path"]=1
         ;;
       projection|tombstoned)
         non_authoritative_count=$((non_authoritative_count + 1))
@@ -75,8 +80,24 @@ for concern in "${concerns[@]}"; do
   fi
 done
 
+if [[ "$(yq e -r '.policy.require_concern_map_update_for_new_authoritative_surface // false' "$CONTRACT")" == "true" ]]; then
+  mapfile -t discovered_authoritative < <(
+    rg -l \
+      -g '*.yaml' \
+      -g '*.md' \
+      -e '^[[:space:]#-]*authority_state:[[:space:]]*authoritative([[:space:]]|$)' \
+      -e '^[[:space:]#-]*gate_metadata_authority:[[:space:]]*authoritative([[:space:]]|$)' \
+      "$ROOT/docs" "$ROOT/ops" "$WORKBENCH_ROOT" "$MINT_ROOT" 2>/dev/null \
+      | sort -u
+  )
+
+  for path in "${discovered_authoritative[@]}"; do
+    [[ -n "${authoritative_paths[$path]:-}" ]] || err "authoritative marker exists outside concern map: $path"
+  done
+fi
+
 if [[ "$errors" -gt 0 ]]; then
   fail "$errors violation(s)"
 fi
 
-echo "D275 PASS: single-authority-per-concern contract enforced (concerns=${#concerns[@]})"
+echo "D275 PASS: authority concern map enforced (concerns=${#concerns[@]})"

@@ -1,10 +1,10 @@
 ---
 status: generated
 owner: '@ronny'
-last_verified: '2026-02-27'
+last_verified: '2026-02-28'
 scope: routing-dispatch
 version: '2.0'
-generated_at: '2026-02-27T09:18:33Z'
+generated_at: '2026-02-28T02:41:48Z'
 generated_by: bin/generators/gen-terminal-worker-runtime-v2.py
 generated_from:
 - ops/capabilities.yaml
@@ -1526,6 +1526,34 @@ dispatch:
     agent_id: null
     terminal_affinity: []
     description: Detect .md files in core/ and governance/ unreachable from docs/README.md.
+  docs.projection.sync:
+    capability_id: docs.projection.sync
+    domain: core
+    execution_target: plugin
+    safety: mutating
+    approval: auto
+    target:
+      plugin: docs
+      script: docs-projection-sync
+      command: ./ops/plugins/docs/bin/docs-projection-sync
+    agent_id: null
+    terminal_affinity: []
+    description: Generate canonical entry projections and rewrite AGENTS.md/CLAUDE.md
+      projection blocks from contracts.
+  docs.projection.verify:
+    capability_id: docs.projection.verify
+    domain: core
+    execution_target: plugin
+    safety: read-only
+    approval: auto
+    target:
+      plugin: docs
+      script: docs-projection-verify
+      command: ./ops/plugins/docs/bin/docs-projection-verify
+    agent_id: null
+    terminal_affinity: []
+    description: Verify canonical entry projections are deterministic and projection
+      blocks match generator output.
   docs.sprawl.detect:
     capability_id: docs.sprawl.detect
     domain: core
@@ -3025,7 +3053,8 @@ dispatch:
     target:
       plugin: infra
       script: infra-proxmox-maintenance
-      command: ./ops/plugins/infra/bin/infra-proxmox-maintenance
+      subcommand: --mode
+      command: ./ops/plugins/infra/bin/infra-proxmox-maintenance --mode precheck
     agent_id: null
     terminal_affinity: []
     description: 'Read-only: capture guest state + MD1400/PM8072 evidence on a Proxmox
@@ -3039,7 +3068,8 @@ dispatch:
     target:
       plugin: infra
       script: infra-proxmox-maintenance
-      command: ./ops/plugins/infra/bin/infra-proxmox-maintenance
+      subcommand: --mode
+      command: ./ops/plugins/infra/bin/infra-proxmox-maintenance --mode shutdown
     agent_id: null
     terminal_affinity: []
     description: 'Mutating: guarded shutdown of all running guests on a Proxmox host
@@ -3053,7 +3083,8 @@ dispatch:
     target:
       plugin: infra
       script: infra-proxmox-maintenance
-      command: ./ops/plugins/infra/bin/infra-proxmox-maintenance
+      subcommand: --mode
+      command: ./ops/plugins/infra/bin/infra-proxmox-maintenance --mode startup
     agent_id: null
     terminal_affinity: []
     description: 'Mutating: start key guests on a Proxmox host, then print postcheck
@@ -4885,7 +4916,8 @@ dispatch:
       command: ./ops/plugins/orchestration/bin/orchestration-preflight-fast
     agent_id: null
     terminal_affinity: []
-    description: Fast non-blocking preflight (<=120s) with scope-clean verdict and ambient drift ledger.
+    description: Fast non-blocking preflight (<=120s) with scope-clean verdict and
+      ambient drift ledger.
   orchestration.status:
     capability_id: orchestration.status
     domain: loop_gap
@@ -7332,6 +7364,20 @@ dispatch:
     terminal_affinity: []
     description: Recommend pack-run lane from changed paths/capabilities using topology
       path_triggers and prefixes.
+  verify.run:
+    capability_id: verify.run
+    domain: core
+    execution_target: plugin
+    safety: read-only
+    approval: auto
+    target:
+      plugin: verify
+      script: verify-run
+      command: ./ops/plugins/verify/bin/verify-run
+    agent_id: null
+    terminal_affinity: []
+    description: 'Canonical verify wrapper surface. Scope profiles: fast (invariants),
+      domain (invariants + freshness), release (full). Supports shadow parity mode.'
   verify.vertical_integration.parity_status:
     capability_id: verify.vertical_integration.parity_status
     domain: core
@@ -7387,6 +7433,20 @@ dispatch:
     terminal_affinity: []
     description: Read-only VM operating profile parity check (every active VM has
       valid profile)
+  wave.closeout.finalize:
+    capability_id: wave.closeout.finalize
+    domain: wave
+    execution_target: plugin
+    safety: mutating
+    approval: manual
+    target:
+      plugin: ops
+      script: wave-closeout-finalize
+      command: ./ops/plugins/ops/bin/wave-closeout-finalize
+    agent_id: null
+    terminal_affinity: []
+    description: 'Atomic closeout finalization: validate run-keyed receipts, stage
+      only expected receipts, enforce D274, commit, and push parity.'
   workbench.impl.audit:
     capability_id: workbench.impl.audit
     domain: workbench
@@ -7401,20 +7461,19 @@ dispatch:
     terminal_affinity: []
     description: Audit domain_external implementation paths against canonical workbench
       repo for discovery + parity.
-  worktree.lifecycle.reconcile:
-    capability_id: worktree.lifecycle.reconcile
+  worktree.lease.heartbeat:
+    capability_id: worktree.lease.heartbeat
     domain: worktree
     execution_target: plugin
-    safety: read-only
+    safety: mutating
     approval: auto
     target:
       plugin: ops
-      script: worktree-lifecycle-reconcile
-      command: ./ops/plugins/ops/bin/worktree-lifecycle-reconcile
+      script: worktree-lease-heartbeat
+      command: ./ops/plugins/ops/bin/worktree-lease-heartbeat
     agent_id: null
     terminal_affinity: []
-    description: Read-only lifecycle classifier for worktree ownership, stale candidates,
-      and D48 gate alignment.
+    description: Refresh or create lane lease heartbeat for current worktree.
   worktree.lifecycle.cleanup:
     capability_id: worktree.lifecycle.cleanup
     domain: worktree
@@ -7429,20 +7488,20 @@ dispatch:
     terminal_affinity: []
     description: Three-phase worktree lifecycle cleanup (report-only, archive-only,
       token-gated delete).
-  wave.closeout.finalize:
-    capability_id: wave.closeout.finalize
+  worktree.lifecycle.reconcile:
+    capability_id: worktree.lifecycle.reconcile
     domain: worktree
     execution_target: plugin
-    safety: mutating
-    approval: manual
+    safety: read-only
+    approval: auto
     target:
       plugin: ops
-      script: wave-closeout-finalize
-      command: ./ops/plugins/ops/bin/wave-closeout-finalize
+      script: worktree-lifecycle-reconcile
+      command: ./ops/plugins/ops/bin/worktree-lifecycle-reconcile
     agent_id: null
     terminal_affinity: []
-    description: Atomic closeout finalization for receipt staging, run-key validation,
-      D274 enforcement, commit, and push parity.
+    description: Read-only lifecycle classifier for worktree ownership, stale candidates,
+      and D48 gate alignment.
   worktree.lifecycle.rehydrate:
     capability_id: worktree.lifecycle.rehydrate
     domain: worktree
@@ -7457,19 +7516,6 @@ dispatch:
     terminal_affinity: []
     description: Auto-rehydrate missing canonical worktree path from existing branch
       and refresh lease metadata.
-  worktree.lease.heartbeat:
-    capability_id: worktree.lease.heartbeat
-    domain: worktree
-    execution_target: plugin
-    safety: mutating
-    approval: auto
-    target:
-      plugin: ops
-      script: worktree-lease-heartbeat
-      command: ./ops/plugins/ops/bin/worktree-lease-heartbeat
-    agent_id: null
-    terminal_affinity: []
-    description: Refresh or create lane lease heartbeat for current worktree.
   worktree.session.status:
     capability_id: worktree.session.status
     domain: worktree

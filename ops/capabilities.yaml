@@ -674,6 +674,18 @@ capabilities:
     outputs: ["stdout"]
     domain: loop_gap
     plane: fabric
+    flags:
+      - "--id GAP-OP-NNN|auto"
+      - "--type stale-ssot|missing-entry|agent-behavior|unclear-doc|duplicate-truth|runtime-bug"
+      - "--severity low|medium|high|critical"
+      - "--description <text> | --description-file <path>"
+      - "--parent-loop LOOP-... (required)"
+      - "--batch <yaml>"
+      - "--wait-seconds <n>"
+      - "--no-commit"
+    examples:
+      - "./bin/ops cap run gaps.file -- --id auto --type runtime-bug --severity high --description \"Example\" --discovered-by LOOP-EXAMPLE-20260228 --parent-loop LOOP-EXAMPLE-20260228"
+      - "./bin/ops cap run gaps.file -- --batch /tmp/gaps.yaml --parent-loop LOOP-EXAMPLE-20260228"
   gaps.next_id:
     description: "Return next available GAP-OP ID from committed registry under lock."
     tags: [loops, gaps]
@@ -798,6 +810,15 @@ capabilities:
     outputs: ["stdout"]
     domain: loop_gap
     plane: fabric
+    flags:
+      - "--name <loop-name>"
+      - "--objective <text>"
+      - "--priority high|medium|low"
+      - "--phase \"Step N: ...\" (repeatable)"
+      - "--success <criterion> (repeatable)"
+      - "--dod <definition-of-done item> (repeatable)"
+    examples:
+      - "./bin/ops cap run loops.create -- --name W61-VERIFY-SURFACE-UNIFICATION-SHADOW --objective \"Unify verify surface in shadow mode\" --priority high"
   gaps.batch.close:
     description: "Close all open gaps linked to a loop in one command."
     tags: [lifecycle, gaps]
@@ -1801,6 +1822,25 @@ capabilities:
     outputs: ["stdout"]
     domain: none
     plane: fabric
+  verify.run:
+    description: "Canonical verify wrapper surface. Scope profiles: fast (invariants), domain (invariants + freshness), release (full). Supports shadow parity mode."
+    tags: [verify]
+    command: "./ops/plugins/verify/bin/verify-run"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout", "ops/plugins/verify/state/verify-failure-class-history.ndjson"]
+    domain: none
+    plane: fabric
+    flags:
+      - "fast | domain <domain_id> | release"
+      - "--shadow"
+      - "--json"
+    examples:
+      - "./bin/ops cap run verify.run -- fast --shadow"
+      - "./bin/ops cap run verify.run -- domain communications --shadow"
+      - "./bin/ops cap run verify.run -- release --json"
   gate.topology.validate:
     description: "Validate gate.execution.topology contract integrity and domain assignment completeness."
     tags: [verify, governance]
@@ -5085,7 +5125,7 @@ capabilities:
   infra.proxmox.maintenance.precheck:
     description: "Read-only: capture guest state + MD1400/PM8072 evidence on a Proxmox host."
     tags: [infra]
-    command: "./ops/plugins/infra/bin/infra-proxmox-maintenance"
+    command: "./ops/plugins/infra/bin/infra-proxmox-maintenance --mode precheck"
     cwd: "$SPINE_CODE"
     safety: read-only
     approval: auto
@@ -5095,10 +5135,17 @@ capabilities:
     requires:
       - infra.hypervisor.identity
     outputs: ["stdout"]
+    modes:
+      - "precheck (auto-injected)"
+    flags:
+      - "--host-id <target>"
+      - "--execute | --dry-run"
+    examples:
+      - "./bin/ops cap run infra.proxmox.maintenance.precheck -- --host-id pve"
   infra.proxmox.maintenance.shutdown:
     description: "Mutating: guarded shutdown of all running guests on a Proxmox host (optional host poweroff)."
     tags: [infra]
-    command: "./ops/plugins/infra/bin/infra-proxmox-maintenance"
+    command: "./ops/plugins/infra/bin/infra-proxmox-maintenance --mode shutdown"
     cwd: "$SPINE_CODE"
     safety: mutating
     approval: auto
@@ -5108,10 +5155,20 @@ capabilities:
     requires:
       - infra.hypervisor.identity
     outputs: ["stdout"]
+    modes:
+      - "shutdown (auto-injected)"
+    flags:
+      - "--host-id <target>"
+      - "--execute | --dry-run"
+      - "--allow-oob-loss"
+      - "--ack-token <token>"
+      - "--poweroff"
+    examples:
+      - "./bin/ops cap run infra.proxmox.maintenance.shutdown -- --host-id pve --execute --poweroff"
   infra.proxmox.maintenance.startup:
     description: "Mutating: start key guests on a Proxmox host, then print postcheck commands."
     tags: [infra]
-    command: "./ops/plugins/infra/bin/infra-proxmox-maintenance"
+    command: "./ops/plugins/infra/bin/infra-proxmox-maintenance --mode startup"
     cwd: "$SPINE_CODE"
     safety: mutating
     approval: auto
@@ -5121,6 +5178,13 @@ capabilities:
     requires:
       - infra.hypervisor.identity
     outputs: ["stdout"]
+    modes:
+      - "startup (auto-injected)"
+    flags:
+      - "--host-id <target>"
+      - "--execute | --dry-run"
+    examples:
+      - "./bin/ops cap run infra.proxmox.maintenance.startup -- --host-id pve --execute"
   infra.post_power.recovery.status:
     description: "Read-only: check all hosts/stacks and report what needs recovery after a power cycle."
     tags: [infra]
@@ -5843,6 +5907,28 @@ capabilities:
     description: "Report governance doc sprawl metrics: counts by directory and status, threshold warnings."
     tags: [docs]
     command: "./ops/plugins/docs/bin/docs-sprawl-detect"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: none
+    plane: fabric
+  docs.projection.sync:
+    description: "Generate canonical entry projections and rewrite AGENTS.md/CLAUDE.md projection blocks from contracts."
+    tags: [docs, governance, generator]
+    command: "./ops/plugins/docs/bin/docs-projection-sync"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout", "docs/governance/generated/*"]
+    domain: none
+    plane: fabric
+  docs.projection.verify:
+    description: "Verify canonical entry projections are deterministic and projection blocks match generator output."
+    tags: [docs, governance, generator]
+    command: "./ops/plugins/docs/bin/docs-projection-verify"
     cwd: "$SPINE_CODE"
     safety: read-only
     approval: auto

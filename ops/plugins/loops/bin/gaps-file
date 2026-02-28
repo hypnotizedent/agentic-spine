@@ -32,6 +32,53 @@ infer_parent_loop() {
   fi
 }
 
+derive_gap_title() {
+  local description="$1"
+  local fallback_id="$2"
+  local first_line sentence
+
+  first_line="$(printf '%s\n' "$description" | sed -n '/[^[:space:]]/{s/^[[:space:]]*//;p;q;}')"
+  [[ -n "$first_line" ]] || first_line="$fallback_id open gap"
+
+  sentence="$(printf '%s' "$first_line" | sed -E 's/^(.{1,110})$/\1/; t; s/^(.{1,107}).*$/\1.../')"
+  printf '%s' "$sentence"
+}
+
+validate_parent_loop() {
+  local value="$1"
+  [[ "$value" =~ ^LOOP-[A-Z0-9-]+$ ]] || {
+    echo "FAIL: invalid --parent-loop '$value' (expected LOOP-...)" >&2
+    exit 2
+  }
+}
+
+require_parent_loop() {
+  local value="$1"
+  local context="$2"
+  if [[ -z "$value" ]]; then
+    echo "FAIL: $context missing parent_loop. Policy requires --parent-loop (no-new-unlinked-gap)." >&2
+    exit 2
+  fi
+  validate_parent_loop "$value"
+}
+
+acquire_git_lock_with_retry() {
+  local wait_seconds="$1"
+  local started_at now
+  started_at="$(date +%s)"
+  while true; do
+    if acquire_git_lock gaps; then
+      return 0
+    fi
+    now="$(date +%s)"
+    if (( now - started_at >= wait_seconds )); then
+      echo "FAIL: unable to acquire git.gaps.lock within ${wait_seconds}s" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 validate_type() {
   local value="$1"
   case "$value" in
@@ -79,6 +126,7 @@ append_gap_entry() {
   local doc="$7"
   local today="$8"
   local timestamp="$9"
+  local title classification
 
   [[ -n "$gap_id" ]]        || { echo "FAIL: gap id required" >&2; exit 2; }
   [[ -n "$type" ]]          || { echo "FAIL: type required for $gap_id" >&2; exit 2; }
@@ -90,13 +138,18 @@ append_gap_entry() {
   validate_severity "$severity"
   gap_exists "$gap_id" && { echo "FAIL: $gap_id already exists in gap registry" >&2; exit 1; }
 
+  title="$(derive_gap_title "$description" "$gap_id")"
+  classification="$type"
+
   local tmpfile
   tmpfile="$(mktemp)"
   {
     echo "id: \"$(yaml_escape "$gap_id")\""
+    echo "title: \"$(yaml_escape "$title")\""
     echo "discovered_by: \"$(yaml_escape "$discovered_by")\""
     echo "discovered_at: \"$today\""
     echo "type: $type"
+    echo "classification: $classification"
     if [[ -n "$doc" ]]; then
       echo "doc: \"$(yaml_escape "$doc")\""
     else
@@ -123,12 +176,14 @@ append_gap_entry() {
 # Parse arguments
 GAP_ID="" TYPE="" SEVERITY="" DESCRIPTION="" DESCRIPTION_FILE="" DISCOVERED_BY="" PARENT_LOOP="" DOC=""
 BATCH_FILE="" NO_COMMIT=0
+WAIT_SECONDS="${GAPS_FILE_LOCK_WAIT_SECONDS:-15}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
     --batch)         BATCH_FILE="${2:?--batch requires a value}"; shift 2 ;;
     --no-commit)     NO_COMMIT=1; shift ;;
+    --wait-seconds)  WAIT_SECONDS="${2:?--wait-seconds requires a value}"; shift 2 ;;
     --id)            GAP_ID="${2:?--id requires a value}"; shift 2 ;;
     --type)          TYPE="${2:?--type requires a value}"; shift 2 ;;
     --severity)      SEVERITY="${2:?--severity requires a value}"; shift 2 ;;
@@ -141,10 +196,13 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \\"
       echo "                 --description \"desc\" --discovered-by \"source\" \\"
-      echo "                 [--doc \"path\"] [--parent-loop \"LOOP-ID\"] [--loop \"LOOP-ID\"] \\"
+      echo "                 [--doc \"path\"] --parent-loop \"LOOP-ID\" [--loop \"LOOP-ID\"] \\"
       echo "                 [--description-file path] [--no-commit]"
       echo ""
-      echo "Batch: gaps-file --batch /path/to/gaps.yaml [--parent-loop LOOP-ID] [--no-commit]"
+      echo "Batch: gaps-file --batch /path/to/gaps.yaml --parent-loop LOOP-ID [--no-commit]"
+      echo ""
+      echo "Policy: parent_loop is required (no-new-unlinked-gap)."
+      echo "Ergonomics: auto-retry lock acquisition up to --wait-seconds (default: 15)."
       echo ""
       echo "Types: stale-ssot | missing-entry | agent-behavior | unclear-doc | duplicate-truth | runtime-bug"
       echo "Severities: low | medium | high | critical"
@@ -153,8 +211,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Acquire git lock
-acquire_git_lock gaps || exit 1
+[[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || { echo "FAIL: --wait-seconds must be an integer >= 0" >&2; exit 2; }
+
+# Acquire git lock (retry for batch/sequential ergonomics)
+acquire_git_lock_with_retry "$WAIT_SECONDS" || exit 1
 
 trap 'release_git_lock' EXIT INT TERM
 
@@ -169,7 +229,16 @@ if [[ -n "$BATCH_FILE" ]]; then
     exit 2
   }
 
-  batch_root_expr="$(yq e -r 'if type == "!!seq" then "." elif has("gaps") then ".gaps" else "" end' "$BATCH_FILE" 2>/dev/null || true)"
+  batch_root_expr=""
+  batch_type="$(yq e -r 'type' "$BATCH_FILE" 2>/dev/null || true)"
+  if [[ "$batch_type" == "!!seq" ]]; then
+    batch_root_expr="."
+  elif [[ "$batch_type" == "!!map" ]]; then
+    has_gaps="$(yq e -r 'has("gaps")' "$BATCH_FILE" 2>/dev/null || true)"
+    if [[ "$has_gaps" == "true" ]]; then
+      batch_root_expr=".gaps"
+    fi
+  fi
   [[ -n "$batch_root_expr" ]] || { echo "FAIL: --batch must be a YAML list or object with .gaps list" >&2; exit 2; }
   batch_count="$(yq e -r "($batch_root_expr | length) // 0" "$BATCH_FILE" 2>/dev/null || echo 0)"
   [[ "$batch_count" =~ ^[0-9]+$ ]] || { echo "FAIL: invalid batch length in $BATCH_FILE" >&2; exit 2; }
@@ -203,6 +272,7 @@ if [[ -n "$BATCH_FILE" ]]; then
     if [[ -z "$item_parent_loop" ]]; then
       item_parent_loop="$(infer_parent_loop "$item_discovered_by")"
     fi
+    require_parent_loop "$item_parent_loop" "batch entry $i"
     item_description="$(load_description "$item_description" "$item_description_file")"
 
     [[ -n "$item_gap_id" ]] || item_gap_id="auto"
@@ -222,6 +292,7 @@ else
   if [[ -z "$PARENT_LOOP" ]]; then
     PARENT_LOOP="$(infer_parent_loop "$DISCOVERED_BY")"
   fi
+  require_parent_loop "$PARENT_LOOP" "single gap request"
 
   DESCRIPTION="$(load_description "$DESCRIPTION" "$DESCRIPTION_FILE")"
   [[ -n "$DESCRIPTION" ]] || { echo "FAIL: --description or --description-file required" >&2; exit 2; }

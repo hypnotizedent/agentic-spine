@@ -14,10 +14,10 @@ objective: Convert W51 findings into canonical governance controls with report-f
 
 Convert W51 findings into canonical governance controls with report-first gates and receipts.
 
-## Phases
-- P0: capture and classify findings
-- P1: implement changes
-- P2: verify and close out
+## Steps
+- Step 1: capture and classify findings
+- Step 2: implement changes
+- Step 3: verify and close out
 
 ## Success Criteria
 - All linked gaps/proposals are captured and linked to this loop.

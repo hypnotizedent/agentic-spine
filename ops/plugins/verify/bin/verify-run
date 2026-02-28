@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+VERIFY_TOPOLOGY="$ROOT/ops/plugins/verify/bin/verify-topology"
+VERIFY_PACK="$ROOT/ops/plugins/verify/bin/verify-pack"
+REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+CLASS_CONTRACT="$ROOT/ops/bindings/verify.failure.classification.contract.yaml"
+HISTORY_DIR="$ROOT/ops/plugins/verify/state"
+HISTORY_FILE="$HISTORY_DIR/verify-failure-class-history.ndjson"
+
+fail() {
+  echo "verify.run FAIL: $*" >&2
+  exit 1
+}
+
+[[ -x "$VERIFY_TOPOLOGY" ]] || fail "missing verify runtime: $VERIFY_TOPOLOGY"
+[[ -x "$VERIFY_PACK" ]] || fail "missing verify pack runtime: $VERIFY_PACK"
+[[ -f "$REGISTRY" ]] || fail "missing gate registry: $REGISTRY"
+[[ -f "$CLASS_CONTRACT" ]] || fail "missing failure classification contract: $CLASS_CONTRACT"
+command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+command -v jq >/dev/null 2>&1 || fail "missing dependency: jq"
+
+usage() {
+  cat <<'USAGE'
+verify.run
+
+Usage:
+  verify-run fast [--json] [--shadow]
+  verify-run domain <domain_id> [--json] [--shadow]
+  verify-run release [--json] [--shadow]
+
+Scopes:
+  fast    => invariants only (core)
+  domain  => invariants + freshness for selected domain (core + domain)
+  release => full release suite
+
+Flags:
+  --shadow   run wrapper and legacy path in parallel and emit parity diff
+  --json     emit machine-readable JSON output
+USAGE
+}
+
+json_mode=0
+shadow_mode=0
+scope="${1:-}"
+shift || true
+
+case "$scope" in
+  fast|domain|release) ;;
+  -h|--help|"") usage; exit 0 ;;
+  *) fail "unknown scope '$scope' (expected fast|domain|release)" ;;
+esac
+
+target_domain=""
+if [[ "$scope" == "domain" ]]; then
+  [[ $# -ge 1 ]] || fail "domain scope requires <domain_id>"
+  target_domain="$1"
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) json_mode=1; shift ;;
+    --shadow) shadow_mode=1; shift ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+mapfile -t freshness_keywords < <(yq e -r '.freshness_keywords[]' "$CLASS_CONTRACT")
+
+run_json_cmd() {
+  local -a cmd=("$@")
+  local out rc
+  set +e
+  out="$("${cmd[@]}" --json 2>/dev/null)"
+  rc=$?
+  set -e
+
+  if [[ -z "$out" ]] || ! jq -e . >/dev/null 2>&1 <<<"$out"; then
+    out='{"total":0,"pass":0,"fail":1,"skipped_inline":0,"skipped_retired":0,"receipt_integrity_warnings":0,"failing_ids":[]}'
+    rc=1
+  else
+    out="$(jq -c . <<<"$out")"
+  fi
+
+  printf '%s\t%s\n' "$rc" "$out"
+}
+
+merge_json_results() {
+  local a="$1"
+  local b="$2"
+  jq -cn --argjson a "$a" --argjson b "$b" '
+    {
+      total: (($a.total // 0) + ($b.total // 0)),
+      pass: (($a.pass // 0) + ($b.pass // 0)),
+      fail: (($a.fail // 0) + ($b.fail // 0)),
+      skipped_inline: (($a.skipped_inline // 0) + ($b.skipped_inline // 0)),
+      skipped_retired: (($a.skipped_retired // 0) + ($b.skipped_retired // 0)),
+      receipt_integrity_warnings: (($a.receipt_integrity_warnings // 0) + ($b.receipt_integrity_warnings // 0)),
+      failing_ids: ((($a.failing_ids // []) + ($b.failing_ids // [])) | unique)
+    }
+  '
+}
+
+classify_failing_ids() {
+  local failing_json="$1"
+  local -a deterministic=()
+  local -a freshness=()
+  local -a gate_bug=()
+
+  mapfile -t ids < <(jq -r '.[]?' <<<"$failing_json")
+  local gid script_rel name desc blob kw
+
+  for gid in "${ids[@]}"; do
+    [[ -n "$gid" ]] || continue
+
+    script_rel="$(yq e -r ".gates[] | select(.id == \"$gid\") | .check_script // \"\"" "$REGISTRY" 2>/dev/null || true)"
+    if [[ -z "$script_rel" || "$script_rel" == "null" || ! -x "$ROOT/$script_rel" ]]; then
+      gate_bug+=("$gid")
+      continue
+    fi
+
+    name="$(yq e -r ".gates[] | select(.id == \"$gid\") | .name // \"\"" "$REGISTRY" 2>/dev/null || true)"
+    desc="$(yq e -r ".gates[] | select(.id == \"$gid\") | .description // \"\"" "$REGISTRY" 2>/dev/null || true)"
+    blob="${name,,} ${desc,,}"
+
+    is_freshness=0
+    for kw in "${freshness_keywords[@]}"; do
+      [[ -n "$kw" ]] || continue
+      if [[ "$blob" == *"${kw,,}"* ]]; then
+        is_freshness=1
+        break
+      fi
+    done
+
+    if [[ "$is_freshness" -eq 1 ]]; then
+      freshness+=("$gid")
+    else
+      deterministic+=("$gid")
+    fi
+  done
+
+  jq -n \
+    --argjson deterministic "$(printf '%s\n' "${deterministic[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+    --argjson freshness "$(printf '%s\n' "${freshness[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+    --argjson gate_bug "$(printf '%s\n' "${gate_bug[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+    '{deterministic:$deterministic, freshness:$freshness, gate_bug:$gate_bug}'
+}
+
+append_history() {
+  local scope_label="$1"
+  local run_result_json="$2"
+  local class_json="$3"
+
+  mkdir -p "$HISTORY_DIR"
+
+  jq -cn \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg scope "$scope_label" \
+    --arg run_key "${SPINE_CAP_RUN_KEY:-manual}" \
+    --argjson result "$run_result_json" \
+    --argjson failure_class "$class_json" \
+    '{timestamp_utc:$ts,scope:$scope,run_key:$run_key,result:$result,failure_class:$failure_class}' >> "$HISTORY_FILE"
+}
+
+run_wrapper() {
+  local scope_label="$1"
+  local domain_label="$2"
+  local wrapper_json wrapper_rc part_a_json part_a_rc part_b_json part_b_rc
+
+  case "$scope_label" in
+    fast)
+      IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" core)
+      ;;
+    domain)
+      IFS=$'\t' read -r part_a_rc part_a_json < <(run_json_cmd "$VERIFY_TOPOLOGY" core)
+      IFS=$'\t' read -r part_b_rc part_b_json < <(run_json_cmd "$VERIFY_TOPOLOGY" domain "$domain_label")
+      wrapper_json="$(merge_json_results "$part_a_json" "$part_b_json")"
+      if [[ "$part_a_rc" -eq 0 && "$part_b_rc" -eq 0 ]]; then
+        wrapper_rc=0
+      else
+        wrapper_rc=1
+      fi
+      ;;
+    release)
+      IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" release)
+      ;;
+    *) fail "internal scope error: $scope_label" ;;
+  esac
+
+  printf '%s\t%s\n' "$wrapper_rc" "$wrapper_json"
+}
+
+run_legacy() {
+  local scope_label="$1"
+  local domain_label="$2"
+  local legacy_json legacy_rc part_a_json part_a_rc part_b_json part_b_rc
+
+  case "$scope_label" in
+    fast)
+      IFS=$'\t' read -r legacy_rc legacy_json < <(run_json_cmd "$VERIFY_TOPOLOGY" core)
+      ;;
+    domain)
+      IFS=$'\t' read -r part_a_rc part_a_json < <(run_json_cmd "$VERIFY_TOPOLOGY" core)
+      IFS=$'\t' read -r part_b_rc part_b_json < <(run_json_cmd "$VERIFY_PACK" run "$domain_label")
+      legacy_json="$(merge_json_results "$part_a_json" "$part_b_json")"
+      if [[ "$part_a_rc" -eq 0 && "$part_b_rc" -eq 0 ]]; then
+        legacy_rc=0
+      else
+        legacy_rc=1
+      fi
+      ;;
+    release)
+      IFS=$'\t' read -r legacy_rc legacy_json < <(run_json_cmd "$VERIFY_TOPOLOGY" release)
+      ;;
+    *) fail "internal scope error: $scope_label" ;;
+  esac
+
+  printf '%s\t%s\n' "$legacy_rc" "$legacy_json"
+}
+
+parity_diff() {
+  local wrapper_json="$1"
+  local legacy_json="$2"
+
+  jq -cn --argjson w "$wrapper_json" --argjson l "$legacy_json" '
+    {
+      total_delta: (($w.total // 0) - ($l.total // 0)),
+      pass_delta: (($w.pass // 0) - ($l.pass // 0)),
+      fail_delta: (($w.fail // 0) - ($l.fail // 0)),
+      wrapper_only_failures: ((($w.failing_ids // []) - ($l.failing_ids // [])) | unique),
+      legacy_only_failures: ((($l.failing_ids // []) - ($w.failing_ids // [])) | unique)
+    }
+  '
+}
+
+IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_wrapper "$scope" "$target_domain")
+
+class_json="$(classify_failing_ids "$(jq -c '.failing_ids // []' <<<"$wrapper_json")")"
+if jq -e '.status == "fail" and ((.failing_ids // []) | length == 0)' >/dev/null 2>&1 <<<"$wrapper_json"; then
+  class_json="$(jq '.deterministic += ["RELEASE_SUITE"]' <<<"$class_json")"
+fi
+append_history "${scope}${target_domain:+:$target_domain}" "$wrapper_json" "$class_json"
+
+legacy_rc=0
+legacy_json='{}'
+diff_json='{}'
+if [[ "$shadow_mode" -eq 1 ]]; then
+  IFS=$'\t' read -r legacy_rc legacy_json < <(run_legacy "$scope" "$target_domain")
+  diff_json="$(parity_diff "$wrapper_json" "$legacy_json")"
+fi
+
+if [[ "$json_mode" -eq 1 ]]; then
+  jq -n \
+    --arg scope "$scope" \
+    --arg domain "$target_domain" \
+    --argjson wrapper_rc "$wrapper_rc" \
+    --argjson wrapper "$wrapper_json" \
+    --argjson shadow "$shadow_mode" \
+    --argjson legacy_rc "$legacy_rc" \
+    --argjson legacy "$legacy_json" \
+    --argjson parity_diff "$diff_json" \
+    --argjson failure_class "$class_json" \
+    --arg history_file "$HISTORY_FILE" \
+    '{scope:$scope,domain:$domain,wrapper_rc:$wrapper_rc,wrapper:$wrapper,shadow_mode:$shadow,legacy_rc:$legacy_rc,legacy:$legacy,parity_diff:$parity_diff,failure_class:$failure_class,history_file:$history_file}'
+else
+  echo "verify.run"
+  echo "scope: $scope"
+  [[ -n "$target_domain" ]] && echo "domain: $target_domain"
+  echo "wrapper: total=$(jq -r '.total // 0' <<<"$wrapper_json") pass=$(jq -r '.pass // 0' <<<"$wrapper_json") fail=$(jq -r '.fail // 0' <<<"$wrapper_json")"
+  echo "failure_class: deterministic=$(jq -r '.deterministic | length' <<<"$class_json") freshness=$(jq -r '.freshness | length' <<<"$class_json") gate_bug=$(jq -r '.gate_bug | length' <<<"$class_json")"
+  if [[ "$shadow_mode" -eq 1 ]]; then
+    echo "shadow_legacy: total=$(jq -r '.total // 0' <<<"$legacy_json") pass=$(jq -r '.pass // 0' <<<"$legacy_json") fail=$(jq -r '.fail // 0' <<<"$legacy_json")"
+    echo "parity_diff: total_delta=$(jq -r '.total_delta // 0' <<<"$diff_json") pass_delta=$(jq -r '.pass_delta // 0' <<<"$diff_json") fail_delta=$(jq -r '.fail_delta // 0' <<<"$diff_json")"
+    echo "parity_wrapper_only_failures: $(jq -r '(.wrapper_only_failures // []) | join(",")' <<<"$diff_json")"
+    echo "parity_legacy_only_failures: $(jq -r '(.legacy_only_failures // []) | join(",")' <<<"$diff_json")"
+  fi
+  echo "history_file: $HISTORY_FILE"
+fi
+
+exit "$wrapper_rc"
