@@ -25,8 +25,8 @@ status: final
 | A8 | D178/D188 freshness issue resolved or formally blocked with linked open gaps + owner/ETA | PASS | D178 pass; D188/D191/D192 blocked and linked via `GAP-OP-1109` in [W69_FRESHNESS_AUTOMATION_RECOVERY_REPORT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W69_FRESHNESS_AUTOMATION_RECOVERY_REPORT.md) |
 | A9 | mint lifecycle contradiction resolved and CI lifecycle lock wired | PASS | [W69_MINT_LIFECYCLE_PARITY_REPORT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W69_MINT_LIFECYCLE_PARITY_REPORT.md), [W69_CI_WIRING_REPORT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W69_CI_WIRING_REPORT.md) |
 | A10 | required verify block passes with run keys recorded | FAIL | `verify.pack.run hygiene-weekly` failed (`CAP-20260228-031700__verify.pack.run__Rzofg23378`) on D188/D191/D192 freshness |
-| A11 | parity local=origin=github(/share where present) | PENDING | finalized in [W69_PROMOTION_PARITY_RECEIPT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W69_PROMOTION_PARITY_RECEIPT.md) after push |
-| A12 | clean status on all three repos | PENDING | finalized in [W69_BRANCH_ZERO_STATUS_REPORT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W69_BRANCH_ZERO_STATUS_REPORT.md) after commit/push |
+| A11 | parity local=origin=github(/share where present) | PASS | [W69_PROMOTION_PARITY_RECEIPT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W69_PROMOTION_PARITY_RECEIPT.md) parity table |
+| A12 | clean status on all three repos | PASS | [W69_BRANCH_ZERO_STATUS_REPORT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W69_BRANCH_ZERO_STATUS_REPORT.md) |
 | A13 | no orphaned open gaps introduced | PASS | `CAP-20260228-032618__gaps.status__Rw40m13084` (`Orphaned gaps: 0`) |
 | A14 | attestations all true | PASS | see [W69_SUPERVISOR_MASTER_RECEIPT.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W69_SUPERVISOR_MASTER_RECEIPT.md) |
 

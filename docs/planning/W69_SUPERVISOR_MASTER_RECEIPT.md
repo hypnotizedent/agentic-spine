@@ -10,15 +10,15 @@ decision: HOLD_WITH_BLOCKERS
 | preflight_main_sha_spine | `cf7aba99f34262cbefce1d77ada7b90520e6fd2b` |
 | preflight_main_sha_workbench | `e1d97b7318b3415e8cafef30c7c494a585e7aec6` |
 | preflight_main_sha_mint_modules | `b98bf32126ad931842a2bb8983c3b8194286a4fd` |
-| branch_head_spine | `TBD_AT_CLOSEOUT` |
-| branch_head_workbench | `TBD_AT_CLOSEOUT` |
-| branch_head_mint_modules | `TBD_AT_CLOSEOUT` |
+| branch_head_spine (parity snapshot) | `9015594f552c5d36bf7a7a69e264154ecd6df135` |
+| branch_head_workbench (parity snapshot) | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` |
+| branch_head_mint_modules (parity snapshot) | `fb2105c3309c8d802b9930349c811e2fc4954354` |
 | promotion_sha | `n/a (no RELEASE_MAIN_MERGE_WINDOW for W69)` |
-| closeout_sha | `TBD_AT_CLOSEOUT` |
+| closeout_sha | `captured in latest spine branch parity table` |
 
 ## Acceptance Summary
 
-- score: `11/14 PASS` (`A11/A12 pending until push status capture`, `A10 fail`)
+- score: `13/14 PASS` (`A10 fail`)
 - blocking criterion: `A10`
 
 ## Blockers
