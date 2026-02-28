@@ -10,8 +10,8 @@ wave_id: W78_TRUTH_FIRST_RELIABILITY_HARDENING_20260228
 | A4 | Undeclared stack gate exists and runs | PASS | `surfaces/verify/d295-undeclared-docker-stack-detection-lock.sh`; included in hygiene-weekly run key above |  |
 | A5 | Critical freshness gates fully mapped | PASS | `docs/planning/W78_FRESHNESS_COVERAGE_REPORT.md` |  |
 | A6 | Launchd runtime contract includes 3 missing labels | PASS | `ops/bindings/launchd.runtime.contract.yaml` |  |
-| A7 | Required verify block passes or blockers explicit | FAIL | `docs/planning/W78_RUN_KEY_LEDGER.md` | `W78-BLK-001` |
-| A8 | orphaned_open_gaps remains 0 | PASS | `CAP-20260228-083126__gaps.status__Rrasq2305` |  |
+| A7 | Required verify block passes or blockers explicit | PASS | `docs/planning/W78_RUN_KEY_LEDGER.md`; W78B verify keys `CAP-20260228-090506__verify.pack.run__Rpcdv68723`, `CAP-20260228-090507__verify.pack.run__Rs05h69505`, `CAP-20260228-090620__verify.pack.run__Ru1kk89380`, `CAP-20260228-090633__verify.run__Rz2f491470` |  |
+| A8 | orphaned_open_gaps remains 0 | PASS | `CAP-20260228-090752__gaps.status__Rkr6d3030` |  |
 | A9 | Telemetry exception preserved unstaged | PASS | `git status` shows only `ops/plugins/verify/state/verify-failure-class-history.ndjson` unstaged at closeout |  |
 | A10 | Branch-zero classification has 0 ambiguous rows | PASS | `docs/planning/W78_BRANCH_ZERO_REPORT.md` |  |
 
@@ -19,4 +19,4 @@ wave_id: W78_TRUTH_FIRST_RELIABILITY_HARDENING_20260228
 
 | blocker_id | description | owner | next_action |
 |---|---|---|---|
-| W78-BLK-001 | D148 launchagent install/load parity fails without runtime enablement window (`com.ronny.ha-baseline-refresh`, `com.ronny.domain-inventory-refresh-daily`, `com.ronny.extension-index-refresh-daily`) | @ronny | Execute tokened runtime-enable path with `RELEASE_RUNTIME_CHANGE_WINDOW`, then rerun W78 verify block |
+| none |  |  |  |

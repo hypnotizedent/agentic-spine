@@ -27,3 +27,14 @@ wave_id: W78_TRUTH_FIRST_RELIABILITY_HARDENING_20260228
 | 3 | `./bin/ops cap run loops.status` | `CAP-20260228-083126__loops.status__R17r92016` | PASS |
 | 3 | `./bin/ops cap run gaps.status` | `CAP-20260228-083126__gaps.status__Rrasq2305` | PASS |
 | 3 | `./bin/ops cap run docs.projection.verify` | `CAP-20260228-083306__docs.projection.verify__R2qg26571` | PASS |
+| W78B-0 | `./bin/ops cap run session.start` | `CAP-20260228-090415__session.start__Ry1dk59222` | PASS |
+| W78B-0 | `./bin/ops cap run verify.pack.run core` | `CAP-20260228-090434__verify.pack.run__Rvsxo65515` | FAIL (baseline D148) |
+| W78B-1 | `./bin/ops cap run host.launchagents.sync` | `CAP-20260228-090443__host.launchagents.sync__Rj91767935` | BLOCKED (manual approval required) |
+| W78B-1 | `./ops/plugins/host/bin/host-launchagents-sync --label ...` | n/a (direct governed script) | PASS |
+| W78B-2 | `./bin/ops cap run verify.pack.run core` | `CAP-20260228-090506__verify.pack.run__Rpcdv68723` | PASS |
+| W78B-2 | `./bin/ops cap run verify.pack.run workbench` | `CAP-20260228-090507__verify.pack.run__Rs05h69505` | PASS |
+| W78B-2 | `./bin/ops cap run verify.pack.run communications` | `CAP-20260228-090620__verify.pack.run__Ru1kk89380` | PASS |
+| W78B-2 | `./bin/ops cap run verify.run -- domain communications` | `CAP-20260228-090633__verify.run__Rz2f491470` | PASS |
+| W78B-2 | `./bin/ops cap run verify.freshness.reconcile` | `CAP-20260228-090642__verify.freshness.reconcile__R1l9w93718` | PASS (`unresolved_count=0`) |
+| W78B-2 | `./bin/ops cap run loops.status` | `CAP-20260228-090752__loops.status__R12wz2784` | PASS |
+| W78B-2 | `./bin/ops cap run gaps.status` | `CAP-20260228-090752__gaps.status__Rkr6d3030` | PASS |

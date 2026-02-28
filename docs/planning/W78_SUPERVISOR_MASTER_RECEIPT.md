@@ -2,7 +2,7 @@
 
 wave_id: W78_TRUTH_FIRST_RELIABILITY_HARDENING_20260228
 branch: codex/w78-truth-first-reliability-hardening-20260228
-decision: HOLD_WITH_BLOCKERS
+decision: MERGE_READY
 
 ## Baseline vs Final Counters
 
@@ -11,7 +11,7 @@ decision: HOLD_WITH_BLOCKERS
 | open_loops | 21 | 22 | +1 |
 | open_gaps | 95 | 96 | +1 |
 | orphaned_open_gaps | 0 | 0 | 0 |
-| freshness_unresolved | 1 | 1 | 0 |
+| freshness_unresolved | 1 | 0 | -1 |
 
 ## Claim Reconciliation Summary
 
@@ -24,7 +24,7 @@ decision: HOLD_WITH_BLOCKERS
 
 | blocker_id | scope | evidence | reason | owner | next_action |
 |---|---|---|---|---|---|
-| W78-BLK-001 | D148 / launchd parity | `CAP-20260228-082821__verify.pack.run__Redpt40680`, `CAP-20260228-082840__verify.pack.run__R8wme49819`, `CAP-20260228-082958__verify.pack.run__Rmloq85200` | runtime install/load parity requires runtime-enable window; token absent in W78 | @ronny | Run tokened runtime-enable path, then rerun required verify block |
+| none |  |  |  |  |  |
 
 ## Outcome Summary
 
@@ -32,6 +32,7 @@ decision: HOLD_WITH_BLOCKERS
 - New inventory enforcement gates (D294/D295) registered and running.
 - Freshness coverage expanded; critical freshness gates mapped; backlog formalized via `GAP-OP-1149`.
 - Launchd contract parity updated with missing labels and governed template added.
+- W78-BLK-001 cleared in W78B by syncing/reloading required launchagents and rerunning verify block.
 
 ## Attestations
 
