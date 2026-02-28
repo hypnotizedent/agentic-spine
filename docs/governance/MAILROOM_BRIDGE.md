@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-18
+last_verified: 2026-02-28
 scope: mailroom-bridge
 ---
 

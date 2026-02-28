@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-17
+last_verified: 2026-02-28
 scope: p1-wave-2b-governance-parity
 parent_loop: LOOP-RONNY-OPS-FINAL-EXTRACTION-SWEEP-20260217
 ---

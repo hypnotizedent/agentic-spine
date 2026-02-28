@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-17
+last_verified: 2026-02-28
 scope: reboot-validation
 github_issue: "#610"
 ---
