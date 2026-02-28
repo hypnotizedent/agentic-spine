@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-22
+last_verified: 2026-02-28
 scope: agent-runtime-contract
 ---
 
@@ -16,10 +16,10 @@ scope: agent-runtime-contract
 # ENTRY SURFACE GATE METADATA (generated)
 source_registry: ops/bindings/gate.registry.yaml
 registry_updated: 2026-02-28
-gate_count_total: 289
-gate_count_active: 288
+gate_count_total: 290
+gate_count_active: 289
 gate_count_retired: 1
-max_gate_id: D291
+max_gate_id: D292
 <!-- ENTRY_SURFACE_GATE_METADATA_END -->
 
 ## Session Entry

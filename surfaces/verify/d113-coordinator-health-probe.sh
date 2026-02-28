@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Coordinator health — Z2M bridge must be connected, SLZB-06MU ethernet on, TubesZB ESPHome reachable. If HA unreachable, gate SKIPs gracefully.
+# TRIAGE: Coordinator health — Z2M bridge must be connected, SLZB-06MU ethernet on, TubesZB ESPHome reachable.
 set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -7,21 +7,27 @@ INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
 HA_API="http://${HA_HOST}:${HA_PORT}/api"
+HA_GATE_MODE="${HA_GATE_MODE:-enforce}"  # enforce | report
 
-# Retrieve token from Infisical
+precondition_fail() {
+  local message="$1"
+  if [[ "$HA_GATE_MODE" == "report" ]]; then
+    echo "D113 REPORT: $message"
+    exit 0
+  fi
+  echo "D113 FAIL: $message" >&2
+  exit 1
+}
+
 if [[ ! -x "$INFISICAL_AGENT" ]]; then
-  echo "D113 SKIP: infisical-agent.sh not found (secrets not available)"
-  exit 0
+  precondition_fail "infisical-agent.sh not found (secrets precondition unavailable)"
 fi
 
 HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
-
-if [[ -z "$HA_TOKEN" ]]; then
-  echo "D113 SKIP: could not retrieve HA_API_TOKEN from Infisical"
-  exit 0
+if [[ -z "${HA_TOKEN:-}" ]]; then
+  precondition_fail "could not retrieve HA_API_TOKEN from Infisical"
 fi
 
-# Helper: query HA entity state
 ha_state() {
   local entity="$1"
   curl -s --connect-timeout 5 \
@@ -32,18 +38,12 @@ ha_state() {
 FAIL=0
 RESULTS=()
 
-# ── Check 1: Z2M bridge connection state ──
-# Z2M exposes binary_sensor.zigbee2mqtt_bridge_connection_state (on/off)
 z2m_resp=$(ha_state "binary_sensor.zigbee2mqtt_bridge_connection_state") || z2m_resp=""
-
 if [[ -z "$z2m_resp" ]]; then
-  RESULTS+=("D113 SKIP: HA unreachable (connection timeout)")
-  echo "${RESULTS[0]}"
-  exit 0
+  precondition_fail "HA unreachable (connection timeout)"
 fi
 
 z2m_state=$(echo "$z2m_resp" | jq -r '.state // "unavailable"' 2>/dev/null) || z2m_state="unavailable"
-
 if [[ "$z2m_state" == "on" ]]; then
   RESULTS+=("Z2M: connected")
 elif [[ "$z2m_state" == "off" ]]; then
@@ -56,12 +56,9 @@ else
   RESULTS+=("Z2M: WARN (state=$z2m_state)")
 fi
 
-# ── Check 2: SLZB-06MU ethernet status ──
 slzb_resp=$(ha_state "binary_sensor.slzb_06mu_ethernet") || slzb_resp=""
-
 if [[ -n "$slzb_resp" ]]; then
   slzb_state=$(echo "$slzb_resp" | jq -r '.state // "unavailable"' 2>/dev/null) || slzb_state="unavailable"
-
   if [[ "$slzb_state" == "on" ]]; then
     RESULTS+=("SLZB-06MU ethernet: on")
   elif [[ "$slzb_state" == "off" || "$slzb_state" == "unavailable" ]]; then
@@ -70,15 +67,12 @@ if [[ -n "$slzb_resp" ]]; then
     RESULTS+=("SLZB-06MU ethernet: $slzb_state")
   fi
 else
-  RESULTS+=("SLZB-06MU ethernet: SKIP (entity not found)")
+  RESULTS+=("SLZB-06MU ethernet: WARN (entity not found)")
 fi
 
-# ── Check 3: TubesZB ESPHome health ──
 tubeszb_resp=$(ha_state "sensor.tubeszb_2026_zw_esp_ip_address") || tubeszb_resp=""
-
 if [[ -n "$tubeszb_resp" ]]; then
   tubeszb_ip=$(echo "$tubeszb_resp" | jq -r '.state // "unavailable"' 2>/dev/null) || tubeszb_ip="unavailable"
-
   if [[ "$tubeszb_ip" == "10.0.0.90" ]]; then
     RESULTS+=("TubesZB: online ($tubeszb_ip)")
   elif [[ "$tubeszb_ip" == "unavailable" ]]; then
@@ -87,7 +81,6 @@ if [[ -n "$tubeszb_resp" ]]; then
     RESULTS+=("TubesZB: online ($tubeszb_ip)")
   fi
 
-  # Check Z-Wave serial connected state
   zw_serial_resp=$(ha_state "binary_sensor.tubeszb_2026_zw_tubeszb_zw_serial_connected") || zw_serial_resp=""
   if [[ -n "$zw_serial_resp" ]]; then
     zw_serial=$(echo "$zw_serial_resp" | jq -r '.state // "unknown"' 2>/dev/null) || zw_serial="unknown"
@@ -98,10 +91,9 @@ if [[ -n "$tubeszb_resp" ]]; then
     fi
   fi
 else
-  RESULTS+=("TubesZB: SKIP (entity not found)")
+  RESULTS+=("TubesZB: WARN (entity not found)")
 fi
 
-# ── Check 4: Firmware versions (informational) ──
 for entity in "update.slzb_06mu_core_firmware" "update.slzb_06mu_zigbee_firmware"; do
   fw_resp=$(ha_state "$entity") || fw_resp=""
   if [[ -n "$fw_resp" ]]; then
@@ -111,7 +103,6 @@ for entity in "update.slzb_06mu_core_firmware" "update.slzb_06mu_zigbee_firmware
   fi
 done
 
-# ── Output ──
 if [[ "$FAIL" -eq 1 ]]; then
   echo "D113 FAIL: $(IFS='; '; echo "${RESULTS[*]}")"
   exit 1

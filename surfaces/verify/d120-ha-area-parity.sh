@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # TRIAGE: HA area parity drift. Check ha.areas.yaml against HA live area registry.
 # D120: ha-area-parity
-# Enforces: HA areas match SSOT binding (ha.areas.yaml) — names, icons, area count.
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -9,30 +8,38 @@ AREAS_SSOT="$ROOT/ops/bindings/ha.areas.yaml"
 INFISICAL_AGENT="$ROOT/ops/tools/infisical-agent.sh"
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
+HA_GATE_MODE="${HA_GATE_MODE:-enforce}"  # enforce | report
 FAIL=0
 
 err() { echo "D120 FAIL: $*" >&2; FAIL=1; }
 
-if [[ ! -f "$AREAS_SSOT" ]]; then
-  echo "D120 FAIL: missing $AREAS_SSOT" >&2
+precondition_fail() {
+  local message="$1"
+  if [[ "$HA_GATE_MODE" == "report" ]]; then
+    echo "D120 REPORT: $message"
+    exit 0
+  fi
+  echo "D120 FAIL: $message" >&2
   exit 1
+}
+
+if [[ ! -f "$AREAS_SSOT" ]]; then
+  precondition_fail "missing $AREAS_SSOT"
+fi
+if [[ ! -x "$INFISICAL_AGENT" ]]; then
+  precondition_fail "infisical-agent.sh not available"
 fi
 
-# ── Get HA token ──
-HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+HA_TOKEN=$($INFISICAL_AGENT get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
 if [[ -z "${HA_TOKEN:-}" ]]; then
-  echo "D120 SKIP: HA_API_TOKEN not available"
-  exit 0
+  precondition_fail "HA_API_TOKEN not available"
 fi
 export HA_TOKEN
 
-# ── Check: HA reachable ──
 if ! curl -sf -o /dev/null -m 5 "http://${HA_HOST}:${HA_PORT}/api/" -H "Authorization: Bearer $HA_TOKEN" 2>/dev/null; then
-  echo "D120 SKIP: HA not reachable at ${HA_HOST}:${HA_PORT}"
-  exit 0
+  precondition_fail "HA not reachable at ${HA_HOST}:${HA_PORT}"
 fi
 
-# ── Fetch live areas via WebSocket ──
 LIVE_AREAS=$(python3 -c "
 import json, asyncio, websockets, os
 async def get():
@@ -52,13 +59,8 @@ asyncio.run(get())
 " 2>/dev/null) || true
 
 if [[ -z "$LIVE_AREAS" || "$LIVE_AREAS" == "AUTH_FAILED" ]]; then
-  echo "D120 SKIP: could not fetch HA areas"
-  exit 0
+  precondition_fail "could not fetch HA areas"
 fi
-
-# ── Check 1: Every SSOT area exists in HA with correct name ──
-SSOT_COUNT=$(yq e '.areas | length' "$AREAS_SSOT")
-LIVE_COUNT=$(echo "$LIVE_AREAS" | wc -l | tr -d ' ')
 
 CHECKED=0
 while IFS= read -r area_id; do
@@ -83,12 +85,10 @@ for line in sys.stdin:
   fi
 done < <(yq -r '.areas[].area_id' "$AREAS_SSOT")
 
-# ── Check 2: No HA areas missing from SSOT ──
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
   live_id=$(echo "$line" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['area_id'])" 2>/dev/null || true)
   [[ -z "$live_id" ]] && continue
-
   ssot_match=$(yq -r ".areas[] | select(.area_id == \"$live_id\") | .area_id" "$AREAS_SSOT" 2>/dev/null)
   if [[ -z "$ssot_match" ]]; then
     err "area '$live_id' exists in HA but missing from SSOT"
@@ -96,7 +96,7 @@ while IFS= read -r line; do
 done <<< "$LIVE_AREAS"
 
 if [[ "$FAIL" -eq 0 ]]; then
-  echo "PASS ($CHECKED areas verified)"
+  echo "D120 PASS ($CHECKED areas verified)"
 else
   exit 1
 fi

@@ -1,68 +1,62 @@
 #!/usr/bin/env bash
-# TRIAGE: Z2M device battery or staleness out of bounds. Run ha.z2m.health for details. Replace batteries for <20%. Check Z2M bridge if disconnected.
+# TRIAGE: Z2M device battery or staleness out of bounds. Run ha.z2m.health for details.
 # D118: z2m-device-health
-# Checks: battery >20%, staleness <48h (unless exempt or within active
-# time-bound maintenance window), bridge connected.
 set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 DEVICES_BINDING="$SPINE_ROOT/ops/bindings/z2m.devices.yaml"
 NAMING_BINDING="$SPINE_ROOT/ops/bindings/z2m.naming.yaml"
+HA_GATE_MODE="${HA_GATE_MODE:-enforce}"  # enforce | report
 FAIL=0
 
 err() { echo "D118 FAIL: $*" >&2; FAIL=1; }
 
-# ── Preconditions (SKIP if unavailable) ──
+precondition_fail() {
+  local message="$1"
+  if [[ "$HA_GATE_MODE" == "report" ]]; then
+    echo "D118 REPORT: $message"
+    exit 0
+  fi
+  echo "D118 FAIL: $message" >&2
+  exit 1
+}
 
 if [[ ! -f "$DEVICES_BINDING" ]]; then
-  echo "D118 SKIP: z2m.devices.yaml missing"
-  exit 0
+  precondition_fail "z2m.devices.yaml missing"
 fi
-
 if [[ ! -f "$NAMING_BINDING" ]]; then
-  echo "D118 SKIP: z2m.naming.yaml missing"
-  exit 0
+  precondition_fail "z2m.naming.yaml missing"
 fi
-
 if [[ ! -x "$INFISICAL_AGENT" ]]; then
-  echo "D118 SKIP: infisical-agent.sh not available"
-  exit 0
+  precondition_fail "infisical-agent.sh not available"
 fi
 
-command -v curl >/dev/null 2>&1 || { echo "D118 SKIP: curl not available"; exit 0; }
-command -v jq >/dev/null 2>&1  || { echo "D118 SKIP: jq not available"; exit 0; }
-command -v yq >/dev/null 2>&1  || { echo "D118 SKIP: yq not available"; exit 0; }
-command -v python3 >/dev/null 2>&1 || { echo "D118 SKIP: python3 not available"; exit 0; }
+command -v curl >/dev/null 2>&1 || precondition_fail "curl not available"
+command -v jq >/dev/null 2>&1  || precondition_fail "jq not available"
+command -v yq >/dev/null 2>&1  || precondition_fail "yq not available"
+command -v python3 >/dev/null 2>&1 || precondition_fail "python3 not available"
 
 HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
 if [[ -z "${HA_TOKEN:-}" ]]; then
-  echo "D118 SKIP: HA token unavailable"
-  exit 0
+  precondition_fail "HA token unavailable"
 fi
 
 HA_HOST="${HA_HOST:-10.0.0.100}"
 HA_PORT="${HA_PORT:-8123}"
 HA_BASE="http://${HA_HOST}:${HA_PORT}"
 
-# Quick connectivity check
 BRIDGE_RESP=$(curl -s --max-time 5 \
   -H "Authorization: Bearer $HA_TOKEN" \
   "${HA_BASE}/api/states/binary_sensor.zigbee2mqtt_bridge_connection_state" 2>/dev/null) || true
-
 if [[ -z "${BRIDGE_RESP:-}" ]]; then
-  echo "D118 SKIP: HA API unreachable"
-  exit 0
+  precondition_fail "HA API unreachable"
 fi
-
-# ── Check 1: Bridge connected ──
 
 BRIDGE_STATE=$(echo "$BRIDGE_RESP" | jq -r '.state // "unknown"' 2>/dev/null)
 if [[ "$BRIDGE_STATE" != "on" ]]; then
   err "Z2M bridge not connected (state: $BRIDGE_STATE)"
 fi
-
-# ── Check 2: Battery levels ──
 
 NOW_EPOCH=$(date +%s)
 
@@ -106,13 +100,11 @@ while [ "$i" -lt "$NAMING_COUNT" ]; do
   MAINTENANCE_UNTIL=$(yq ".devices[$i].maintenance_until // \"\"" "$NAMING_BINDING")
   MAINTENANCE_NOTE=$(yq ".devices[$i].maintenance_note // \"\"" "$NAMING_BINDING")
 
-  # Skip battery check for stale_exempt devices (event-only, battery reading unreliable)
   if [[ "$STALE_EXEMPT" != "true" ]]; then
     BATTERY_ENTITY="sensor.${PREFIX}_battery"
     BATTERY_JSON=$(curl -s --max-time 5 \
       -H "Authorization: Bearer $HA_TOKEN" \
       "${HA_BASE}/api/states/${BATTERY_ENTITY}" 2>/dev/null) || true
-
     if [[ -n "${BATTERY_JSON:-}" ]]; then
       BATTERY_VAL=$(echo "$BATTERY_JSON" | jq -r '.state // "unknown"' 2>/dev/null)
       if [[ "$BATTERY_VAL" != "unknown" && "$BATTERY_VAL" != "unavailable" ]]; then
@@ -123,8 +115,6 @@ while [ "$i" -lt "$NAMING_COUNT" ]; do
       fi
     fi
   fi
-
-  # ── Check 3: Staleness ──
 
   if [[ "$STALE_EXEMPT" != "true" ]]; then
     LAST_SEEN=$(yq ".z2m_devices.devices[] | select(.ieee_address == \"$IEEE\") | .last_seen" "$DEVICES_BINDING")
@@ -155,7 +145,7 @@ while [ "$i" -lt "$NAMING_COUNT" ]; do
 done
 
 if [[ "$FAIL" -eq 0 ]]; then
-  echo "PASS ($CHECKED devices, bridge $BRIDGE_STATE)"
+  echo "D118 PASS ($CHECKED devices, bridge $BRIDGE_STATE)"
 else
   exit 1
 fi

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # TRIAGE: Communications queue pipeline V1-V6 integrity: required capabilities, contracts, safety/approval invariants, alerting channel guard.
-# D160: Communications queue pipeline lock
+# D292: Communications queue pipeline lock
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
@@ -13,12 +13,12 @@ fail_v() {
 }
 
 need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || { echo "D160 FAIL: missing command: $1" >&2; exit 1; }
+  command -v "$1" >/dev/null 2>&1 || { echo "D292 FAIL: missing command: $1" >&2; exit 1; }
 }
 
 need_cmd yq
 
-[[ -f "$CAPS_FILE" ]] || { echo "D160 FAIL: capabilities.yaml not found" >&2; exit 1; }
+[[ -f "$CAPS_FILE" ]] || { echo "D292 FAIL: capabilities.yaml not found" >&2; exit 1; }
 
 # ─── Check 1: Required capabilities exist ────────────────────────────────
 required_caps=(
@@ -147,8 +147,8 @@ done
 # ─── Result ──────────────────────────────────────────────────────────────
 checks_run=5
 if [[ $violations -gt 0 ]]; then
-  echo "D160 FAIL: communications queue pipeline lock: $violations violation(s) detected (checks=$checks_run)" >&2
+  echo "D292 FAIL: communications queue pipeline lock: $violations violation(s) detected (checks=$checks_run)" >&2
   exit 1
 fi
 
-echo "D160 PASS: communications queue pipeline lock valid (checks=$checks_run, caps=${#required_caps[@]}, contracts=${#required_contracts[@]}, violations=0)"
+echo "D292 PASS: communications queue pipeline lock valid (checks=$checks_run, caps=${#required_caps[@]}, contracts=${#required_contracts[@]}, violations=0)"
