@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -303,6 +304,25 @@ def walk_tree(root: Path, exclude_git_internals: bool = True) -> list[str]:
     return sorted(paths)
 
 
+def tracked_file_set(root: Path) -> set[str]:
+    """Return tracked files for a repository root."""
+    cmd = ["git", "-C", str(root), "ls-files"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return set()
+
+    if proc.returncode != 0:
+        return set()
+
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+
 def walk_workbench_scoped(root: Path) -> list[str]:
     """Walk workbench with restricted subtrees only."""
     paths = []
@@ -550,6 +570,8 @@ def main():
 
     spine_paths = walk_tree(SPINE_CODE)
     workbench_paths = walk_workbench_scoped(WORKBENCH_REPO)
+    spine_tracked = tracked_file_set(SPINE_CODE)
+    workbench_tracked = tracked_file_set(WORKBENCH_REPO)
 
     # Write TREE files
     with open(outdir / "TREE.agentic-spine.paths.txt", "w") as f:
@@ -581,6 +603,8 @@ def main():
     # --- Spine files ---
     for relpath in spine_paths:
         if relpath.endswith("/"):
+            continue
+        if relpath not in spine_tracked:
             continue
         full = SPINE_CODE / relpath
         if not full.exists() or not full.is_file():
@@ -653,6 +677,8 @@ def main():
     # --- Workbench files ---
     for relpath in workbench_paths:
         if relpath.endswith("/"):
+            continue
+        if relpath not in workbench_tracked:
             continue
         full = WORKBENCH_REPO / relpath
         if not full.exists() or not full.is_file():

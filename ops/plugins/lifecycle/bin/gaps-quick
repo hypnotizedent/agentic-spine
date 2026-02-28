@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Usage: gaps-quick (--description "desc" | --description-file path) \
 #                   [--type T] [--severity S] [--loop LOOP-ID] \
-#                   [--doc path] [--no-commit]
+#                   [--doc path] [--no-commit|--commit]
 #
 # Computes next gap ID automatically, fills defaults from lifecycle.rules.yaml,
 # then delegates to gaps-file for atomic commit + optional auto-claim.
@@ -16,7 +16,12 @@ source "$ROOT/ops/plugins/lifecycle/lib/lifecycle-rules.sh"
 source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
 
 # Parse arguments
-DESCRIPTION="" DESCRIPTION_FILE="" TYPE="" SEVERITY="" LOOP="" DOC="" NO_COMMIT=0
+DESCRIPTION="" DESCRIPTION_FILE="" TYPE="" SEVERITY="" LOOP="" DOC=""
+NO_COMMIT_DEFAULT_RAW="${GAPS_QUICK_NO_COMMIT_DEFAULT:-${GAPS_FILE_NO_COMMIT_DEFAULT:-0}}"
+case "$NO_COMMIT_DEFAULT_RAW" in
+  1|true|TRUE|yes|YES|on|ON) NO_COMMIT=1 ;;
+  *) NO_COMMIT=0 ;;
+esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,11 +33,13 @@ while [[ $# -gt 0 ]]; do
     --loop)        LOOP="${2:?--loop requires a value}"; shift 2 ;;
     --doc)         DOC="${2:?--doc requires a value}"; shift 2 ;;
     --no-commit)   NO_COMMIT=1; shift ;;
+    --commit)      NO_COMMIT=0; shift ;;
     -h|--help)
-      echo "Usage: gaps-quick (--description \"desc\" | --description-file path) [--type T] [--severity S] [--loop LOOP-ID] [--doc path] [--no-commit]"
+      echo "Usage: gaps-quick (--description \"desc\" | --description-file path) [--type T] [--severity S] [--loop LOOP-ID] [--doc path] [--no-commit|--commit]"
       echo ""
       echo "Files a new gap with auto-generated ID and defaults from lifecycle.rules.yaml."
       echo "Delegates to gaps.file for atomic commit + policy-driven auto-claim."
+      echo "Env knob: GAPS_QUICK_NO_COMMIT_DEFAULT=1 (or GAPS_FILE_NO_COMMIT_DEFAULT=1)."
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac

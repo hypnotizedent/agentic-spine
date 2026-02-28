@@ -6,7 +6,7 @@ set -euo pipefail
 # Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \
 #                  --description "desc" --discovered-by "source" \
 #                  [--doc "path"] [--parent-loop "LOOP-ID"] [--loop "LOOP-ID"] \
-#                  [--description-file path] [--no-commit]
+#                  [--description-file path] [--no-commit|--commit]
 #
 # Batch usage:
 #   gaps-file --batch /path/to/gaps.yaml [--parent-loop LOOP-ID] [--no-commit]
@@ -41,6 +41,7 @@ derive_gap_title() {
   [[ -n "$first_line" ]] || first_line="$fallback_id open gap"
 
   sentence="$(printf '%s' "$first_line" | sed -E 's/^(.{1,110})$/\1/; t; s/^(.{1,107}).*$/\1.../')"
+  [[ -n "$sentence" ]] || sentence="$fallback_id open gap"
   printf '%s' "$sentence"
 }
 
@@ -175,7 +176,12 @@ append_gap_entry() {
 
 # Parse arguments
 GAP_ID="" TYPE="" SEVERITY="" DESCRIPTION="" DESCRIPTION_FILE="" DISCOVERED_BY="" PARENT_LOOP="" DOC=""
-BATCH_FILE="" NO_COMMIT=0
+BATCH_FILE=""
+NO_COMMIT_DEFAULT_RAW="${GAPS_FILE_NO_COMMIT_DEFAULT:-0}"
+case "$NO_COMMIT_DEFAULT_RAW" in
+  1|true|TRUE|yes|YES|on|ON) NO_COMMIT=1 ;;
+  *) NO_COMMIT=0 ;;
+esac
 WAIT_SECONDS="${GAPS_FILE_LOCK_WAIT_SECONDS:-15}"
 
 while [[ $# -gt 0 ]]; do
@@ -183,6 +189,7 @@ while [[ $# -gt 0 ]]; do
     --) shift ;;
     --batch)         BATCH_FILE="${2:?--batch requires a value}"; shift 2 ;;
     --no-commit)     NO_COMMIT=1; shift ;;
+    --commit)        NO_COMMIT=0; shift ;;
     --wait-seconds)  WAIT_SECONDS="${2:?--wait-seconds requires a value}"; shift 2 ;;
     --id)            GAP_ID="${2:?--id requires a value}"; shift 2 ;;
     --type)          TYPE="${2:?--type requires a value}"; shift 2 ;;
@@ -197,11 +204,12 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \\"
       echo "                 --description \"desc\" --discovered-by \"source\" \\"
       echo "                 [--doc \"path\"] --parent-loop \"LOOP-ID\" [--loop \"LOOP-ID\"] \\"
-      echo "                 [--description-file path] [--no-commit]"
+      echo "                 [--description-file path] [--no-commit|--commit]"
       echo ""
-      echo "Batch: gaps-file --batch /path/to/gaps.yaml --parent-loop LOOP-ID [--no-commit]"
+      echo "Batch: gaps-file --batch /path/to/gaps.yaml --parent-loop LOOP-ID [--no-commit|--commit]"
       echo ""
       echo "Policy: parent_loop is required (no-new-unlinked-gap)."
+      echo "Env knob: GAPS_FILE_NO_COMMIT_DEFAULT=1 defaults to staging-only mode."
       echo "Ergonomics: auto-retry lock acquisition up to --wait-seconds (default: 15)."
       echo ""
       echo "Types: stale-ssot | missing-entry | agent-behavior | unclear-doc | duplicate-truth | runtime-bug"
