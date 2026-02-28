@@ -1,7 +1,7 @@
 ---
 status: brain-memory
 owner: "@ronny"
-last_verified: 2026-02-21
+last_verified: 2026-02-28
 scope: agent-memory
 ---
 
@@ -9,6 +9,12 @@ scope: agent-memory
 
 > Historical notes only. Do not use this file for current loop/gap truth.
 > Current authoritative state: `./bin/ops status`, `./bin/ops cap run loops.status`, `./bin/ops cap run gaps.status`.
+
+## Current Counter Snapshot (2026-02-28 UTC)
+
+- Capabilities: 542
+- Total gaps: 1159
+- Open gaps: 120
 
 > UDR swap caused home site unreachable. Nothing blocked remotely tonight that doesn't create churn.
 
