@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# proposals-archive: Move applied/superseded proposals to .archived/
+# proposals-archive: Move applied/superseded proposals to .archived/ and purge aged archives.
 # Usage: proposals-archive [--applied-days N] [--superseded-days N] [--dry-run]
+#                         [--purge-archived] [--purge-days N] [--no-purge]
 set -euo pipefail
 
 SP="${SPINE_CODE:-.}"
 PROPOSALS_DIR="$SP/mailroom/outbox/proposals"
 ARCHIVE_DIR="$PROPOSALS_DIR/.archived"
 LIFECYCLE="$SP/ops/bindings/proposals.lifecycle.yaml"
+RETENTION_POLICY="$SP/ops/bindings/evidence.retention.policy.yaml"
 
 NOW=$(date +%s)
 
@@ -20,12 +22,28 @@ else
 fi
 
 DRY_RUN=false
+PURGE_ARCHIVED=false
+PURGE_DAYS=30
+
+if command -v yq >/dev/null 2>&1 && [[ -f "$RETENTION_POLICY" ]]; then
+  retention_days=$(yq -r '.retention_classes.proposals.retention_days // 30' "$RETENTION_POLICY")
+  purge_requires=$(yq -r '.retention_classes.proposals.purge_requires // "manual_approval"' "$RETENTION_POLICY")
+  if [[ "$retention_days" =~ ^[0-9]+$ ]]; then
+    PURGE_DAYS="$retention_days"
+  fi
+  if [[ "$purge_requires" == "auto" ]]; then
+    PURGE_ARCHIVED=true
+  fi
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --applied-days) APPLIED_DAYS="$2"; shift 2 ;;
     --superseded-days) SUPERSEDED_DAYS="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
+    --purge-archived) PURGE_ARCHIVED=true; shift ;;
+    --purge-days) PURGE_DAYS="$2"; PURGE_ARCHIVED=true; shift 2 ;;
+    --no-purge) PURGE_ARCHIVED=false; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -62,6 +80,7 @@ echo "Thresholds: applied > ${APPLIED_DAYS}d, superseded > ${SUPERSEDED_DAYS}d"
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "MODE: dry-run (no moves)"
 fi
+echo "Purge archived: ${PURGE_ARCHIVED} (>${PURGE_DAYS}d)"
 echo ""
 
 for dir in "$PROPOSALS_DIR"/CP-*; do
@@ -118,5 +137,33 @@ for dir in "$PROPOSALS_DIR"/CP-*; do
   archived=$((archived + 1))
 done
 
+purged=0
+purge_skipped=0
+if [[ "$PURGE_ARCHIVED" == "true" ]]; then
+  while IFS= read -r -d '' dir; do
+    mtime=0
+    if stat_mtime=$(stat -f "%m" "$dir" 2>/dev/null); then
+      mtime="$stat_mtime"
+    elif stat_mtime=$(stat -c "%Y" "$dir" 2>/dev/null); then
+      mtime="$stat_mtime"
+    fi
+    [[ "$mtime" -gt 0 ]] || continue
+
+    age_days=$(( (NOW - mtime) / 86400 ))
+    if [[ "$age_days" -lt "$PURGE_DAYS" ]]; then
+      purge_skipped=$((purge_skipped + 1))
+      continue
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "  WOULD PURGE: $(basename "$dir") (${age_days}d old)"
+    else
+      rm -rf "$dir"
+      echo "  PURGED: $(basename "$dir") (${age_days}d old)"
+    fi
+    purged=$((purged + 1))
+  done < <(find "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -type d -print0)
+fi
+
 echo ""
-echo "Results: $archived archived, $skipped below threshold"
+echo "Results: $archived archived, $skipped below threshold, $purged purged, $purge_skipped purge-below-threshold"

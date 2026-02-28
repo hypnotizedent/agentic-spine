@@ -87,7 +87,7 @@ fi
 
 ok "storage placement policy: $VIOLATION_COUNT violations, $VIOLATION_WITH_GAP with gaps"
 
-if [[ "$ERRORS" -gt 0 ]]; then
+if [[ "$ERRORS" -gt 0 || "$SKIPS" -gt 0 ]]; then
   echo "D234 FAIL: $ERRORS check(s) failed ($SKIPS skipped)"
   exit 1
 fi
