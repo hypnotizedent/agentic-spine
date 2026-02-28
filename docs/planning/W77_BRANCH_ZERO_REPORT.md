@@ -20,7 +20,7 @@ cleanup_execution: report-only
 | agentic-spine | codex/w74-final-closeout-branch-zero-20260228 | MERGED_SAFE_DELETE | 0 | 7 | 62f068ed87b8 | 62f068ed87b8 | 62f068ed87b8 | 62f068ed87b8 | branch head reachable from main |
 | agentic-spine | codex/w75-weekly-steady-state-20260228 | CHERRY_PICK_REQUIRED | 4 | 5 | 2552a9bc068b | 2552a9bc068b | 2552a9bc068b | 2552a9bc068b | contains commits not merged to main |
 | agentic-spine | codex/w76-holistic-canonical-closure-20260228 | MERGED_SAFE_DELETE | 0 | 0 | 441e034dae50 | 441e034dae50 | 441e034dae50 | 441e034dae50 | branch head reachable from main |
-| agentic-spine | codex/w77-weekly-steady-state-enforcement-20260228 | KEEP_OPEN | 0 | 0 | 441e034dae50 | - | - | - | active W77 wave branch |
+| agentic-spine | codex/w77-weekly-steady-state-enforcement-20260228 | KEEP_OPEN | 2 | 0 | 8d1ca75eacd4 | 8d1ca75eacd4 | 8d1ca75eacd4 | 8d1ca75eacd4 | active W77 wave branch |
 | workbench | codex/w62a-cross-repo-tail-remediation-20260228 | CHERRY_PICK_REQUIRED | 1 | 1 | a2e7caccaaa1 | a2e7caccaaa1 | a2e7caccaaa1 | - | contains commits not merged to main |
 | workbench | codex/w62b-learning-system-20260228 | CHERRY_PICK_REQUIRED | 1 | 1 | a2e7caccaaa1 | a2e7caccaaa1 | a2e7caccaaa1 | - | contains commits not merged to main |
 | workbench | codex/w63-outcome-closure-automation-20260228 | CHERRY_PICK_REQUIRED | 1 | 1 | a2e7caccaaa1 | - | - | - | contains commits not merged to main |
@@ -28,7 +28,7 @@ cleanup_execution: report-only
 | workbench | codex/w65-control-loop-completion-20260228 | CHERRY_PICK_REQUIRED | 1 | 1 | a2e7caccaaa1 | a2e7caccaaa1 | a2e7caccaaa1 | - | contains commits not merged to main |
 | workbench | codex/w75-weekly-steady-state-20260228 | MERGED_SAFE_DELETE | 0 | 0 | 5a67eb5daca7 | 5a67eb5daca7 | 5a67eb5daca7 | - | branch head reachable from main |
 | workbench | codex/w76-holistic-canonical-closure-20260228 | MERGED_SAFE_DELETE | 0 | 0 | 5a67eb5daca7 | 5a67eb5daca7 | 5a67eb5daca7 | - | branch head reachable from main |
-| workbench | codex/w77-weekly-steady-state-enforcement-20260228 | KEEP_OPEN | 0 | 0 | 5a67eb5daca7 | - | - | - | active W77 wave branch |
+| workbench | codex/w77-weekly-steady-state-enforcement-20260228 | KEEP_OPEN | 0 | 0 | 5a67eb5daca7 | 5a67eb5daca7 | 5a67eb5daca7 | - | active W77 wave branch |
 | mint-modules | codex/w62a-cross-repo-tail-remediation-20260228 | CHERRY_PICK_REQUIRED | 1 | 2 | cceb95684555 | cceb95684555 | cceb95684555 | - | contains commits not merged to main |
 | mint-modules | codex/w62b-learning-system-20260228 | CHERRY_PICK_REQUIRED | 1 | 2 | cceb95684555 | cceb95684555 | cceb95684555 | - | contains commits not merged to main |
 | mint-modules | codex/w63-outcome-closure-automation-20260228 | CHERRY_PICK_REQUIRED | 1 | 2 | cceb95684555 | - | - | - | contains commits not merged to main |
@@ -36,4 +36,4 @@ cleanup_execution: report-only
 | mint-modules | codex/w65-control-loop-completion-20260228 | CHERRY_PICK_REQUIRED | 1 | 2 | cceb95684555 | cceb95684555 | cceb95684555 | - | contains commits not merged to main |
 | mint-modules | codex/w75-weekly-steady-state-20260228 | MERGED_SAFE_DELETE | 0 | 0 | fb2105c3309c | fb2105c3309c | fb2105c3309c | - | branch head reachable from main |
 | mint-modules | codex/w76-holistic-canonical-closure-20260228 | CHERRY_PICK_REQUIRED | 1 | 0 | 7aae532e2a0f | 7aae532e2a0f | 7aae532e2a0f | - | contains commits not merged to main |
-| mint-modules | codex/w77-weekly-steady-state-enforcement-20260228 | KEEP_OPEN | 1 | 0 | 7aae532e2a0f | - | - | - | active W77 wave branch |
+| mint-modules | codex/w77-weekly-steady-state-enforcement-20260228 | KEEP_OPEN | 1 | 0 | 7aae532e2a0f | 7aae532e2a0f | 7aae532e2a0f | - | active W77 wave branch |

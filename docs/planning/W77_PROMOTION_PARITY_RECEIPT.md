@@ -4,31 +4,12 @@ wave_id: W77_WEEKLY_STEADY_STATE_ENFORCEMENT_20260228
 branch: codex/w77-weekly-steady-state-enforcement-20260228
 mode: branch-only (no merge token)
 
-## Parity Verification Commands
+## Parity Snapshot
 
-```bash
-git rev-parse HEAD
-git ls-remote --heads origin codex/w77-weekly-steady-state-enforcement-20260228
-git ls-remote --heads github codex/w77-weekly-steady-state-enforcement-20260228
-git ls-remote --heads share codex/w77-weekly-steady-state-enforcement-20260228
-```
+| repo | branch | local | origin | github | share | parity |
+|---|---|---|---|---|---|---|
+| agentic-spine | `codex/w77-weekly-steady-state-enforcement-20260228` | `8d1ca75eacd4d64504ab61cc312452403c898699` | `8d1ca75eacd4d64504ab61cc312452403c898699` | `8d1ca75eacd4d64504ab61cc312452403c898699` | `8d1ca75eacd4d64504ab61cc312452403c898699` | PASS |
+| workbench | `codex/w77-weekly-steady-state-enforcement-20260228` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | n/a | PASS |
+| mint-modules | `codex/w77-weekly-steady-state-enforcement-20260228` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | n/a | PASS |
 
-```bash
-git -C /Users/ronnyworks/code/workbench rev-parse codex/w77-weekly-steady-state-enforcement-20260228
-git -C /Users/ronnyworks/code/workbench ls-remote --heads origin codex/w77-weekly-steady-state-enforcement-20260228
-git -C /Users/ronnyworks/code/workbench ls-remote --heads github codex/w77-weekly-steady-state-enforcement-20260228
-```
-
-```bash
-git -C /Users/ronnyworks/code/mint-modules rev-parse codex/w77-weekly-steady-state-enforcement-20260228
-git -C /Users/ronnyworks/code/mint-modules ls-remote --heads origin codex/w77-weekly-steady-state-enforcement-20260228
-git -C /Users/ronnyworks/code/mint-modules ls-remote --heads github codex/w77-weekly-steady-state-enforcement-20260228
-```
-
-## Result
-
-- parity_status: verified in final closeout snapshot
-- local_equals_remotes:
-  - agentic-spine: true
-  - workbench: true
-  - mint-modules: true
+overall_parity_status: PASS

@@ -5,16 +5,22 @@ branch: codex/w77-weekly-steady-state-enforcement-20260228
 
 ## Raw Status Snapshots
 
-```bash
-git -C /Users/ronnyworks/code/agentic-spine status --short --branch
-git -C /Users/ronnyworks/code/workbench status --short --branch
-git -C /Users/ronnyworks/code/mint-modules status --short --branch
+```text
+agentic-spine:
+## codex/w77-weekly-steady-state-enforcement-20260228
+ M ops/plugins/verify/state/verify-failure-class-history.ndjson
+
+workbench:
+## codex/w77-weekly-steady-state-enforcement-20260228
+
+mint-modules:
+## codex/w77-weekly-steady-state-enforcement-20260228
 ```
 
 ## Telemetry-Exception-Filtered Snapshot (spine)
 
-```bash
-git -C /Users/ronnyworks/code/agentic-spine status --short --branch -- . ':(exclude)ops/plugins/verify/state/verify-failure-class-history.ndjson'
+```text
+## codex/w77-weekly-steady-state-enforcement-20260228
 ```
 
 ## Result
