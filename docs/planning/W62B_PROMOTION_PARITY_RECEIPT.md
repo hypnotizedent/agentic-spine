@@ -6,21 +6,21 @@ Decision: MERGE_READY (no main promotion token provided)
 
 ## Branch Parity Snapshot
 
-Snapshot branch head (spine): `1b67a3b525ef09b7bb08698bbe614dda66866a55`
+Snapshot branch head (spine): `06a1d9db797e40169b4ef5403c44df1c56cc6714`
 
 | repo | branch | local | origin | github | share | parity |
 |---|---|---|---|---|---|---|
-| agentic-spine | `codex/w62b-learning-system-20260228` | `1b67a3b525ef09b7bb08698bbe614dda66866a55` | `1b67a3b525ef09b7bb08698bbe614dda66866a55` | `1b67a3b525ef09b7bb08698bbe614dda66866a55` | `1b67a3b525ef09b7bb08698bbe614dda66866a55` | equal |
+| agentic-spine | `codex/w62b-learning-system-20260228` | `06a1d9db797e40169b4ef5403c44df1c56cc6714` | `06a1d9db797e40169b4ef5403c44df1c56cc6714` | `06a1d9db797e40169b4ef5403c44df1c56cc6714` | `06a1d9db797e40169b4ef5403c44df1c56cc6714` | equal |
 | workbench | `codex/w62b-learning-system-20260228` | `a2e7caccaaa153751da4c2edea97f0ce0a10cadb` | `a2e7caccaaa153751da4c2edea97f0ce0a10cadb` | `a2e7caccaaa153751da4c2edea97f0ce0a10cadb` | n/a | equal |
 | mint-modules | `codex/w62b-learning-system-20260228` | `cceb9568455524dd6272b850ae67eee1d93e8556` | `cceb9568455524dd6272b850ae67eee1d93e8556` | `cceb9568455524dd6272b850ae67eee1d93e8556` | n/a | equal |
 
 ## Before/After SHA (No Promotion)
 
-| repo | preflight_main_sha (before) | branch_snapshot_sha (after remediation branch) |
-|---|---|---|
-| agentic-spine | `9bf15d54330994a3098f1f6a8c0970791fe1cd15` | `1b67a3b525ef09b7bb08698bbe614dda66866a55` |
-| workbench | `e1d97b7318b3415e8cafef30c7c494a585e7aec6` | `a2e7caccaaa153751da4c2edea97f0ce0a10cadb` |
-| mint-modules | `b98bf32126ad931842a2bb8983c3b8194286a4fd` | `cceb9568455524dd6272b850ae67eee1d93e8556` |
+| repo | preflight_main_sha (before) | remediation_branch_sha | final_branch_head |
+|---|---|---|---|
+| agentic-spine | `9bf15d54330994a3098f1f6a8c0970791fe1cd15` | `1b67a3b525ef09b7bb08698bbe614dda66866a55` | `06a1d9db797e40169b4ef5403c44df1c56cc6714` |
+| workbench | `e1d97b7318b3415e8cafef30c7c494a585e7aec6` | `a2e7caccaaa153751da4c2edea97f0ce0a10cadb` | `a2e7caccaaa153751da4c2edea97f0ce0a10cadb` |
+| mint-modules | `b98bf32126ad931842a2bb8983c3b8194286a4fd` | `cceb9568455524dd6272b850ae67eee1d93e8556` | `cceb9568455524dd6272b850ae67eee1d93e8556` |
 
 ## Mainline Baseline (Not Promoted)
 
