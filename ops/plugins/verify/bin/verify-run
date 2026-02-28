@@ -5,6 +5,9 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 VERIFY_TOPOLOGY="$ROOT/ops/plugins/verify/bin/verify-topology"
 VERIFY_PACK="$ROOT/ops/plugins/verify/bin/verify-pack"
 REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
+DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
+PROFILE_CONTRACT="$ROOT/ops/bindings/verify.run.profile.contract.yaml"
 CLASS_CONTRACT="$ROOT/ops/bindings/verify.failure.classification.contract.yaml"
 HISTORY_DIR="$ROOT/ops/plugins/verify/state"
 HISTORY_FILE="$HISTORY_DIR/verify-failure-class-history.ndjson"
@@ -17,6 +20,9 @@ fail() {
 [[ -x "$VERIFY_TOPOLOGY" ]] || fail "missing verify runtime: $VERIFY_TOPOLOGY"
 [[ -x "$VERIFY_PACK" ]] || fail "missing verify pack runtime: $VERIFY_PACK"
 [[ -f "$REGISTRY" ]] || fail "missing gate registry: $REGISTRY"
+[[ -f "$TOPOLOGY" ]] || fail "missing topology binding: $TOPOLOGY"
+[[ -f "$DOMAIN_PROFILES" ]] || fail "missing domain profiles binding: $DOMAIN_PROFILES"
+[[ -f "$PROFILE_CONTRACT" ]] || fail "missing verify profile contract: $PROFILE_CONTRACT"
 [[ -f "$CLASS_CONTRACT" ]] || fail "missing failure classification contract: $CLASS_CONTRACT"
 command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 command -v jq >/dev/null 2>&1 || fail "missing dependency: jq"
@@ -31,8 +37,8 @@ Usage:
   verify-run release [--json] [--shadow]
 
 Scopes:
-  fast    => invariants only (core)
-  domain  => invariants + freshness for selected domain (core + domain)
+  fast    => class-driven invariants only (contract profile)
+  domain  => class-driven invariants + freshness (contract profile)
   release => full release suite
 
 Flags:
@@ -43,6 +49,11 @@ USAGE
 
 json_mode=0
 shadow_mode=0
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
 scope="${1:-}"
 shift || true
 
@@ -68,6 +79,104 @@ while [[ $# -gt 0 ]]; do
 done
 
 mapfile -t freshness_keywords < <(yq e -r '.freshness_keywords[]' "$CLASS_CONTRACT")
+
+declare -A gate_class_map=()
+declare -A gate_retired_map=()
+while IFS=$'\t' read -r gid gclass retired; do
+  [[ -n "$gid" ]] || continue
+  gate_class_map["$gid"]="$gclass"
+  gate_retired_map["$gid"]="$retired"
+done < <(yq e -r '.gates[] | [.id, (.gate_class // ""), (.retired // false | tostring)] | @tsv' "$REGISTRY")
+
+normalize_domain() {
+  local raw="${1:-}"
+  case "$raw" in
+    core) echo "core" ;;
+    loop-gap|loop_gap) echo "loop_gap" ;;
+    home-automation) echo "home" ;;
+    finance-ops) echo "finance" ;;
+    automation) echo "n8n" ;;
+    photos) echo "immich" ;;
+    identity|email|calendar|microsoft) echo "microsoft" ;;
+    *) echo "$raw" ;;
+  esac
+}
+
+class_in_set() {
+  local needle="$1"
+  shift || true
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+unique_ids() {
+  awk 'NF && !seen[$0]++'
+}
+
+collect_domain_candidate_ids() {
+  local raw_domain="$1"
+  local domain
+  domain="$(normalize_domain "$raw_domain")"
+
+  declare -A seen=()
+  local gid
+
+  while IFS= read -r gid; do
+    [[ -n "$gid" ]] || continue
+    seen["$gid"]=1
+  done < <(yq e -r ".gate_assignments[] | select((.primary_domain == \"$domain\") or ((.secondary_domains // []) | index(\"$domain\"))) | .gate_id" "$TOPOLOGY" 2>/dev/null || true)
+
+  if [[ "${#seen[@]}" -eq 0 ]]; then
+    while IFS= read -r gid; do
+      [[ -n "$gid" ]] || continue
+      seen["$gid"]=1
+    done < <(yq e -r ".domains.\"$raw_domain\".gate_ids[]?" "$DOMAIN_PROFILES" 2>/dev/null || true)
+
+    if [[ "$domain" != "$raw_domain" ]]; then
+      while IFS= read -r gid; do
+        [[ -n "$gid" ]] || continue
+        seen["$gid"]=1
+      done < <(yq e -r ".domains.\"$domain\".gate_ids[]?" "$DOMAIN_PROFILES" 2>/dev/null || true)
+    fi
+  fi
+
+  for gid in "${!seen[@]}"; do
+    printf '%s\n' "$gid"
+  done | sort -V
+}
+
+collect_ids_for_domain_and_classes() {
+  local domain="$1"
+  shift || true
+  local -a classes=("$@")
+  local gid gate_class retired
+
+  while IFS= read -r gid; do
+    [[ -n "$gid" ]] || continue
+    gate_class="${gate_class_map[$gid]:-}"
+    retired="${gate_retired_map[$gid]:-false}"
+    [[ "$retired" == "true" ]] && continue
+    class_in_set "$gate_class" "${classes[@]}" || continue
+    echo "$gid"
+  done < <(collect_domain_candidate_ids "$domain")
+}
+
+collect_core_ids_by_classes() {
+  local -a classes=("$@")
+  local gid gate_class retired
+
+  while IFS= read -r gid; do
+    [[ -n "$gid" ]] || continue
+    gate_class="${gate_class_map[$gid]:-}"
+    retired="${gate_retired_map[$gid]:-false}"
+    [[ "$retired" == "true" ]] && continue
+    class_in_set "$gate_class" "${classes[@]}" || continue
+    echo "$gid"
+  done < <(yq e -r '.core_mode.core_gate_ids[]?' "$TOPOLOGY")
+}
 
 run_json_cmd() {
   local -a cmd=("$@")
@@ -168,20 +277,56 @@ run_wrapper() {
   local scope_label="$1"
   local domain_label="$2"
   local wrapper_json wrapper_rc part_a_json part_a_rc part_b_json part_b_rc
+  local ring include_core
+  local -a gate_ids=()
+  local -a classes=()
+  local -a split=()
+  local gid
 
   case "$scope_label" in
     fast)
-      IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" core)
+      ring="$(yq e -r '.profiles.fast.ring // "instant"' "$PROFILE_CONTRACT")"
+      while IFS=$'\t' read -r fast_domain class_csv; do
+        [[ -n "$fast_domain" ]] || continue
+        IFS=',' read -r -a split <<< "$class_csv"
+        classes=()
+        for gid in "${split[@]}"; do
+          [[ -n "$gid" ]] && classes+=("$gid")
+        done
+        if [[ "$(normalize_domain "$fast_domain")" == "core" ]]; then
+          while IFS= read -r gid; do
+            [[ -n "$gid" ]] && gate_ids+=("$gid")
+          done < <(collect_core_ids_by_classes "${classes[@]}")
+        else
+          while IFS= read -r gid; do
+            [[ -n "$gid" ]] && gate_ids+=("$gid")
+          done < <(collect_ids_for_domain_and_classes "$fast_domain" "${classes[@]}")
+        fi
+      done < <(yq e -r '.profiles.fast.domains[] | [.domain, (.classes | join(","))] | @tsv' "$PROFILE_CONTRACT")
+
+      mapfile -t gate_ids < <(printf '%s\n' "${gate_ids[@]}" | unique_ids)
+      ((${#gate_ids[@]} > 0)) || fail "fast profile resolved zero class-driven gates"
+      IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" ids-run "${gate_ids[@]}" --ring "$ring")
       ;;
     domain)
-      IFS=$'\t' read -r part_a_rc part_a_json < <(run_json_cmd "$VERIFY_TOPOLOGY" core)
-      IFS=$'\t' read -r part_b_rc part_b_json < <(run_json_cmd "$VERIFY_TOPOLOGY" domain "$domain_label")
-      wrapper_json="$(merge_json_results "$part_a_json" "$part_b_json")"
-      if [[ "$part_a_rc" -eq 0 && "$part_b_rc" -eq 0 ]]; then
-        wrapper_rc=0
-      else
-        wrapper_rc=1
+      ring="$(yq e -r '.profiles.domain.ring // "standard"' "$PROFILE_CONTRACT")"
+      include_core="$(yq e -r '.profiles.domain.include_core_base // true' "$PROFILE_CONTRACT")"
+
+      if [[ "$include_core" == "true" ]]; then
+        mapfile -t classes < <(yq e -r '.profiles.domain.core_base.classes[]' "$PROFILE_CONTRACT")
+        while IFS= read -r gid; do
+          [[ -n "$gid" ]] && gate_ids+=("$gid")
+        done < <(collect_core_ids_by_classes "${classes[@]}")
       fi
+
+      mapfile -t classes < <(yq e -r '.profiles.domain.target.classes[]' "$PROFILE_CONTRACT")
+      while IFS= read -r gid; do
+        [[ -n "$gid" ]] && gate_ids+=("$gid")
+      done < <(collect_ids_for_domain_and_classes "$domain_label" "${classes[@]}")
+
+      mapfile -t gate_ids < <(printf '%s\n' "${gate_ids[@]}" | unique_ids)
+      ((${#gate_ids[@]} > 0)) || fail "domain profile resolved zero class-driven gates for '$domain_label'"
+      IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" ids-run "${gate_ids[@]}" --ring "$ring")
       ;;
     release)
       IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" release)

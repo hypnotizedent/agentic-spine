@@ -38,6 +38,7 @@ Usage:
   verify-topology core [--json]
   verify-topology domain <domain_id> [--json] [--force]
   verify-topology domains-run <domain_csv|domain...> [--json] [--force]
+  verify-topology ids-run <gate_id...> [--json] [--ring instant|standard|deep]
   verify-topology release [--json] [--force]
   verify-topology recommend [--path <path>]... [--capability <cap>]... [--json]
   verify-topology pack-list
@@ -835,6 +836,57 @@ run_domains() {
   run_gate_ids "$json_mode" "" "${gate_ids[@]}"
 }
 
+run_ids() {
+  local json_mode ring=""
+  json_mode="$(parse_json_flag "$@")"
+
+  local -a gate_ids=()
+  local -a split=()
+  local raw token
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)
+        shift
+        ;;
+      --ring)
+        [[ $# -ge 2 ]] || fail "--ring requires value"
+        ring="$2"
+        shift 2
+        ;;
+      *)
+        raw="$1"
+        IFS=',' read -r -a split <<< "$raw"
+        for token in "${split[@]}"; do
+          token="$(echo "$token" | xargs)"
+          [[ -n "$token" ]] || continue
+          [[ "$token" =~ ^D[0-9]+$ ]] || fail "invalid gate id in ids-run: $token"
+          gate_ids+=("$token")
+        done
+        shift
+        ;;
+    esac
+  done
+
+  ((${#gate_ids[@]} > 0)) || fail "usage: verify-topology ids-run <gate_id...> [--json] [--ring instant|standard|deep]"
+
+  if [[ -n "$ring" ]]; then
+    case "$ring" in
+      instant|standard|deep) ;;
+      *) fail "invalid --ring value: $ring (expected instant|standard|deep)" ;;
+    esac
+  fi
+
+  if [[ "$json_mode" == "0" ]]; then
+    echo "verify.ids.run"
+    echo "gate_count: ${#gate_ids[@]}"
+    [[ -n "$ring" ]] && echo "ring: $ring"
+    echo
+  fi
+
+  run_gate_ids "$json_mode" "$ring" "${gate_ids[@]}"
+}
+
 run_release() {
   local json_mode force_mode
   json_mode="$(parse_json_flag "$@")"
@@ -1033,6 +1085,10 @@ case "$cmd" in
   domains|domains-run)
     shift
     run_domains "$@"
+    ;;
+  ids|ids-run)
+    shift
+    run_ids "$@"
     ;;
   release|release-run)
     shift

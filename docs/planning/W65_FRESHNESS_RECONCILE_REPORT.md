@@ -1,15 +1,15 @@
 # W65 Freshness Reconcile Report
 
-Generated: 2026-02-28T06:35:00Z
+Generated: 2026-02-28T07:08:41Z
 Source contract: `/Users/ronnyworks/code/agentic-spine/ops/bindings/freshness.reconcile.contract.yaml`
 Source registry: `/Users/ronnyworks/code/agentic-spine/ops/bindings/gate.registry.yaml`
 
 ## Summary
 
 - freshness_gates_total: **68**
-- pass_count: **66**
-- refreshed_count: **0**
-- rerun_count: **0**
+- pass_count: **63**
+- refreshed_count: **3**
+- rerun_count: **3**
 - unresolved_count: **2**
 
 ## Unresolved Reason Counts
@@ -61,10 +61,10 @@ Source registry: `/Users/ronnyworks/code/agentic-spine/ops/bindings/gate.registr
 | D178 | platform-extension-lifecycle-lock | failed | n/a | not_applicable | unresolved | no_refresh_capability |
 | D179 | platform-extension-artifact-completeness-lock | pass | n/a | not_applicable | pass | n/a |
 | D185 | inventory-home-union-lock | pass | n/a | not_applicable | pass | n/a |
-| D191 | media-content-ledger-parity-lock | pass | n/a | not_applicable | pass | n/a |
+| D191 | media-content-ledger-parity-lock | failed | media-content-snapshot-refresh | ran | refreshed | n/a |
 | D192 | media-content-snapshot-freshness-lock | pass | n/a | not_applicable | pass | n/a |
-| D193 | ha-inventory-snapshot-completeness-lock | pass | n/a | not_applicable | pass | n/a |
-| D194 | network-inventory-snapshot-parity-lock | pass | n/a | not_applicable | pass | n/a |
+| D193 | ha-inventory-snapshot-completeness-lock | failed | ha-inventory-snapshot-build | ran | refreshed | n/a |
+| D194 | network-inventory-snapshot-parity-lock | failed | network-inventory-snapshot-build | ran | refreshed | n/a |
 | D201 | domain-registrar-parity-lock | pass | n/a | not_applicable | pass | n/a |
 | D202 | domain-transfer-readiness-lock | pass | n/a | not_applicable | pass | n/a |
 | D205 | calendar-home-union-ingest-lock | pass | n/a | not_applicable | pass | n/a |

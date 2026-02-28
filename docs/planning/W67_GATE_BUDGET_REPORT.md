@@ -1,9 +1,9 @@
-# W65 Gate Budget Report (Report-Only)
+# W67 Gate Budget Report
 
-Generated: 2026-02-28T06:54:18Z
+Generated: 2026-02-28T07:09:13Z
 Contract: `/Users/ronnyworks/code/agentic-spine/ops/bindings/gate.budget.add_one_retire_one.contract.yaml`
 Registry: `/Users/ronnyworks/code/agentic-spine/ops/bindings/gate.registry.yaml`
-Recommendations: `/Users/ronnyworks/code/agentic-spine/docs/planning/W65_GATE_PORTFOLIO_RECOMMENDATIONS.json` (recommendations source available)
+Recommendations: `/Users/ronnyworks/code/agentic-spine/docs/planning/W67_GATE_PORTFOLIO_RECOMMENDATIONS.json` (recommendations source available)
 
 ## Metrics
 
@@ -12,10 +12,10 @@ Recommendations: `/Users/ronnyworks/code/agentic-spine/docs/planning/W65_GATE_PO
 - invariants_added: **0**
 - invariants_retired: **0**
 - delta: **0**
-- retirement_or_demotion_plan_count: **33**
+- retirement_or_demotion_plan_count: **34**
 - violations: **0**
 
 ## Rule
 
 - Violation when `net_new_invariants > 0` and there is no matching retirement/demotion plan coverage.
-- Enforcement mode in W65: **report-only** (no blocking, no registry mutation).
+- Enforcement mode: **enforce**.

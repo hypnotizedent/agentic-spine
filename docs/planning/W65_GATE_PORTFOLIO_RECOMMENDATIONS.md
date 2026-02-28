@@ -1,6 +1,6 @@
-# W65 Gate Portfolio Recommendations (Report-Only)
+# W67 Gate Portfolio Recommendations (Report-Only)
 
-Generated: 2026-02-28T06:35:01Z
+Generated: 2026-02-28T07:05:21Z
 Input scorecard: `/Users/ronnyworks/code/agentic-spine/docs/planning/W62B_GATE_QUALITY_SCORECARD.json`
 
 ## Rules Evaluated
@@ -13,6 +13,7 @@ Input scorecard: `/Users/ronnyworks/code/agentic-spine/docs/planning/W62B_GATE_Q
 
 | gate_id | gate_name | current_class | recommendation_type | reason | confidence | next_action |
 |---|---|---|---|---|---|---|
+| D84 | docs-index-registration-lock | invariant | demote_to_advisory | fail_rate > 50% with zero deterministic drift evidence | low | open demotion proposal and verify in shadow mode for 7 days |
 | D121 | fabric-boundary-lock | freshness | retire_review | pass_rate == 100% for long horizon (>= 6 exposures) | high | open retirement review with owner and expiry |
 | D124 | entry-surface-parity-lock | freshness | retire_review | pass_rate == 100% for long horizon (>= 6 exposures) | high | open retirement review with owner and expiry |
 | D126 | workbench-implementation-path-lock | invariant | retire_review | pass_rate == 100% for long horizon (>= 6 exposures) | high | open retirement review with owner and expiry |
@@ -62,6 +63,6 @@ Input scorecard: `/Users/ronnyworks/code/agentic-spine/docs/planning/W62B_GATE_Q
 
 ## Summary
 
-- demotion_candidates: **0**
+- demotion_candidates: **1**
 - retirement_review_candidates: **46**
 - registry_mutation: **none (report-only)**
