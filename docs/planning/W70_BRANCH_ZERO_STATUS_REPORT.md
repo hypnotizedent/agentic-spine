@@ -2,7 +2,10 @@
 
 Branch: `codex/w70-workbench-verify-budget-calibration-20260228`
 
-Status snapshot commands:
-- `git status --short --branch`
+## Status Snapshot
+```
+## codex/w70-workbench-verify-budget-calibration-20260228
+```
 
-(Values filled after commit/push in this same wave.)
+## Command Used
+- `git status --short --branch`
