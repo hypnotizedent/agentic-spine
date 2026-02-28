@@ -8,6 +8,6 @@ promotion_to_main: not_executed (no RELEASE_MAIN_MERGE_WINDOW provided)
 
 | repo | branch | local | origin | github | share | parity |
 |---|---|---|---|---|---|---|
-| agentic-spine | `codex/w69-branch-drift-registration-hardening-20260228` | `3ff1876a0e846b831bf932b2a70f7c017509ad48` | `3ff1876a0e846b831bf932b2a70f7c017509ad48` | `3ff1876a0e846b831bf932b2a70f7c017509ad48` | `3ff1876a0e846b831bf932b2a70f7c017509ad48` | yes |
-| workbench | `codex/w69-branch-drift-registration-hardening-20260228` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | n/a | yes |
-| mint-modules | `codex/w69-branch-drift-registration-hardening-20260228` | `fb2105c3309c8d802b9930349c811e2fc4954354` | `fb2105c3309c8d802b9930349c811e2fc4954354` | `fb2105c3309c8d802b9930349c811e2fc4954354` | n/a | yes |
+| agentic-spine | `codex/w69-branch-drift-registration-hardening-20260228` | equal | equal | equal | equal | yes |
+| workbench | `codex/w69-branch-drift-registration-hardening-20260228` | equal | equal | equal | n/a | yes |
+| mint-modules | `codex/w69-branch-drift-registration-hardening-20260228` | equal | equal | equal | n/a | yes |

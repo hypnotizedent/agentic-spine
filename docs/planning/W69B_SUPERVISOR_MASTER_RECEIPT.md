@@ -16,7 +16,7 @@ W69B cleared the W69 freshness blocker set (`D188/D191/D192/D193/D194`) and re-e
 | preflight_mint_head | `fb2105c3309c8d802b9930349c811e2fc4954354` |
 | w69b_loop_id | `LOOP-W69B-FRESHNESS-RECOVERY-AND-FINAL-PROMOTION-20260228` |
 | promotion_status | `not executed (no RELEASE_MAIN_MERGE_WINDOW provided in W69B prompt)` |
-| closeout_branch_head_spine | `3ff1876a0e846b831bf932b2a70f7c017509ad48` |
+| closeout_branch_head_spine | `see parity assertion in W69B_PROMOTION_PARITY_RECEIPT.md` |
 
 ## Verify Block Final State
 
