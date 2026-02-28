@@ -39,6 +39,7 @@ fi
 [[ "$MODE" == "report" || "$MODE" == "enforce" ]] || { echo "D242 FAIL: invalid policy mode '$MODE'" >&2; exit 2; }
 
 FINDINGS=0
+LEGACY_PATH_PATTERN='/Users/[^/]+/ronny-ops|~/ronny-ops|\$HOME/ronny-ops'
 finding() {
   local severity="$1"
   shift
@@ -46,7 +47,7 @@ finding() {
   FINDINGS=$((FINDINGS + 1))
 }
 
-legacy_path_hits="$(rg -n --no-heading '/Users/ronnyworks/ronny-ops|~/ronny-ops|\$HOME/ronny-ops' "$MINT_PLUGIN_DIR" 2>/dev/null || true)"
+legacy_path_hits="$(rg -n --no-heading "$LEGACY_PATH_PATTERN" "$MINT_PLUGIN_DIR" 2>/dev/null || true)"
 if [[ -n "$legacy_path_hits" ]]; then
   first_hit="$(echo "$legacy_path_hits" | head -n1)"
   finding "HIGH" "mint plugin script references legacy ronny-ops path ($first_hit)"
@@ -54,7 +55,7 @@ fi
 
 while IFS=$'\t' read -r cap_id cap_cmd; do
   [[ -z "$cap_id" ]] && continue
-  if echo "$cap_cmd" | rg -q '/Users/ronnyworks/ronny-ops|~/ronny-ops|\$HOME/ronny-ops'; then
+  if echo "$cap_cmd" | rg -q "$LEGACY_PATH_PATTERN"; then
     finding "HIGH" "$cap_id command references legacy ronny-ops path: '$cap_cmd'"
   fi
   if echo "$cap_cmd" | rg -qi 'mint-os'; then
