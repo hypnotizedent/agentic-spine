@@ -1,5 +1,7 @@
 ---
-status: authoritative
+status: projection
+authority_state: projection
+projection_of: ops/bindings/agents.registry.yaml
 owner: "@ronny"
 last_verified: "2026-02-16"
 scope: domain-pointer-index

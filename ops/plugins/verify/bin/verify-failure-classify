@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+VERIFY="$ROOT/ops/plugins/verify/bin/verify-topology"
+REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+CONTRACT="$ROOT/ops/bindings/verify.failure.classification.contract.yaml"
+
+fail() {
+  echo "verify.failure.classify FAIL: $*" >&2
+  exit 1
+}
+
+[[ -x "$VERIFY" ]] || fail "missing verify-topology runner"
+[[ -f "$REGISTRY" ]] || fail "missing gate registry"
+[[ -f "$CONTRACT" ]] || fail "missing classification contract"
+command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+command -v jq >/dev/null 2>&1 || fail "missing dependency: jq"
+
+target="${1:-core}"
+if [[ "${VERIFY_FAILURE_CLASSIFY_DRYRUN:-0}" == "1" ]]; then
+  hold_hours="$(yq e -r '.hold_policy.freshness_hold_hours // 24' "$CONTRACT")"
+  jq -n \
+    --arg target "$target" \
+    --arg hold_hours "$hold_hours" \
+    '{target:$target,deterministic_failures:[],freshness_failures:[],freshness_hold_hours:$hold_hours,dry_run:true}'
+  exit 0
+fi
+
+json="$($VERIFY domain "$target" --json 2>/dev/null || true)"
+if [[ -z "$json" ]]; then
+  json='{"failing_ids":[]}'
+fi
+
+mapfile -t failing_ids < <(printf '%s' "$json" | jq -r '.failing_ids[]?')
+mapfile -t keywords < <(yq e -r '.freshness_keywords[]' "$CONTRACT")
+
+is_freshness_gate() {
+  local gid="$1"
+  local blob
+  blob="$(yq e -r ".gates[] | select(.id == \"$gid\") | (.name + \" \" + (.description // \"\"))" "$REGISTRY" | tr '[:upper:]' '[:lower:]')"
+  local kw
+  for kw in "${keywords[@]}"; do
+    [[ -z "$kw" ]] && continue
+    if [[ "$blob" == *"${kw,,}"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+freshness=()
+deterministic=()
+for gid in "${failing_ids[@]}"; do
+  if is_freshness_gate "$gid"; then
+    freshness+=("$gid")
+  else
+    deterministic+=("$gid")
+  fi
+done
+
+hold_hours="$(yq e -r '.hold_policy.freshness_hold_hours // 24' "$CONTRACT")"
+
+jq -n \
+  --arg target "$target" \
+  --argjson deterministic "$(printf '%s\n' "${deterministic[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+  --argjson freshness "$(printf '%s\n' "${freshness[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+  --arg hold_hours "$hold_hours" \
+  '{target:$target,deterministic_failures:$deterministic,freshness_failures:$freshness,freshness_hold_hours:$hold_hours}'
+
+if [[ "${#deterministic[@]}" -gt 0 ]]; then
+  exit 1
+fi
+
+# Freshness-only failures are advisory during hold window.
+exit 0

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+POLICY="$ROOT/ops/bindings/evidence.retention.policy.yaml"
+SESSIONS="$ROOT/receipts/sessions"
+OUT_DIR="$ROOT/receipts/audits/governance"
+DATE_UTC="$(date -u +%Y-%m-%d)"
+OUT_JSON="$OUT_DIR/receipts-checksum-parity-${DATE_UTC}.json"
+OUT_MD="$OUT_DIR/receipts-checksum-parity-${DATE_UTC}.md"
+
+command -v yq >/dev/null 2>&1 || { echo "receipts.checksum.parity.report FAIL: missing yq" >&2; exit 1; }
+command -v shasum >/dev/null 2>&1 || { echo "receipts.checksum.parity.report FAIL: missing shasum" >&2; exit 1; }
+
+retention="$(yq e -r '.retention_classes.session_receipts.retention_days // 30' "$POLICY" 2>/dev/null || echo 30)"
+[[ "$retention" =~ ^[0-9]+$ ]] || retention=30
+
+mkdir -p "$OUT_DIR"
+
+tmp_json="$(mktemp)"
+echo '{"generated_at_utc":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","retention_days":'"$retention"',"candidates":[]}' > "$tmp_json"
+
+while IFS= read -r d; do
+  [[ -d "$d" ]] || continue
+  receipt="$d/receipt.md"
+  [[ -f "$receipt" ]] || continue
+  checksum="$(shasum -a 256 "$receipt" | awk '{print $1}')"
+  rel="${d#$ROOT/}"
+  tmp2="$(mktemp)"
+  jq --arg path "$rel" --arg checksum "$checksum" '.candidates += [{path:$path,receipt_sha256:$checksum}]' "$tmp_json" > "$tmp2"
+  mv "$tmp2" "$tmp_json"
+done < <(find "$SESSIONS" -mindepth 1 -maxdepth 1 -type d -mtime +"$retention" | sort)
+
+mv "$tmp_json" "$OUT_JSON"
+count="$(jq -r '.candidates | length' "$OUT_JSON")"
+
+cat > "$OUT_MD" <<EOF_MD
+# Receipts Checksum Parity Report
+
+generated_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+retention_days: $retention
+candidates: $count
+json_report: ${OUT_JSON#$ROOT/}
+
+This report is required before archive/delete lifecycle actions touching receipts.
+EOF_MD
+
+echo "receipts.checksum.parity.report"
+echo "retention_days: $retention"
+echo "candidates: $count"
+echo "json_report: ${OUT_JSON#$ROOT/}"
+echo "markdown_report: ${OUT_MD#$ROOT/}"

@@ -10,6 +10,8 @@ CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 
 echo "[slo-evidence-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+"$CAP_RUNNER" cap run services.health.status
 "$CAP_RUNNER" cap run slo.evidence.daily
+"$SPINE_ROOT/ops/plugins/verify/bin/verify-failure-classify" core
 
 echo "[slo-evidence-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
