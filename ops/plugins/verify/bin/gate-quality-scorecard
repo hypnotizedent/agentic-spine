@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+import json
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"gate-quality-scorecard FAIL: {message}")
+
+
+def gate_sort_key(gate_id: str) -> tuple[int, str]:
+    if gate_id.startswith("D"):
+        suffix = gate_id[1:]
+        if suffix.isdigit():
+            return (int(suffix), gate_id)
+    return (10**9, gate_id)
+
+
+def pct(value: float) -> str:
+    return f"{value * 100:.2f}%"
+
+
+def load_yaml(path: Path) -> dict:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle) or {}
+    except FileNotFoundError:
+        fail(f"missing file: {path}")
+
+
+def parse_scope(scope: str, core_gate_ids: set[str], domain_gate_map: dict[str, set[str]], active_gate_ids: set[str]) -> set[str]:
+    label = (scope or "").strip()
+    if label == "fast":
+        return set(core_gate_ids)
+    if label.startswith("domain:"):
+        domain = label.split(":", 1)[1].strip()
+        return set(core_gate_ids) | set(domain_gate_map.get(domain, set()))
+    if label.startswith("domain "):
+        domain = label.split(None, 1)[1].strip()
+        return set(core_gate_ids) | set(domain_gate_map.get(domain, set()))
+    if label == "release":
+        return set(active_gate_ids)
+    if label == "core":
+        return set(core_gate_ids)
+    return set(core_gate_ids)
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parents[4]
+    history_path = root / "ops/plugins/verify/state/verify-failure-class-history.ndjson"
+    registry_path = root / "ops/bindings/gate.registry.yaml"
+    topology_path = root / "ops/bindings/gate.execution.topology.yaml"
+    out_md = root / "docs/planning/W62B_GATE_QUALITY_SCORECARD.md"
+    out_json = root / "docs/planning/W62B_GATE_QUALITY_SCORECARD.json"
+
+    registry = load_yaml(registry_path)
+    topology = load_yaml(topology_path)
+
+    gates = registry.get("gates", [])
+    if not isinstance(gates, list) or not gates:
+        fail("gate registry has no gates")
+
+    gate_meta: dict[str, dict] = {}
+    active_gate_ids: set[str] = set()
+    for gate in gates:
+        gate_id = str(gate.get("id", "")).strip()
+        if not gate_id:
+            continue
+        retired = bool(gate.get("retired", False))
+        status = str(gate.get("status", "")).lower()
+        lifecycle = str(gate.get("lifecycle", "")).lower()
+        category = str(gate.get("category", "")).lower()
+        if status == "retired" or lifecycle == "retired" or category == "retired":
+            retired = True
+
+        gate_class = str(gate.get("gate_class", "invariant")).strip() or "invariant"
+        blocking = gate_class != "advisory" and not retired
+
+        gate_meta[gate_id] = {
+            "id": gate_id,
+            "name": str(gate.get("name", "")),
+            "gate_class": gate_class,
+            "severity": str(gate.get("severity", "")),
+            "ring": str(gate.get("ring", "")),
+            "retired": retired,
+            "blocking": blocking,
+        }
+        if not retired:
+            active_gate_ids.add(gate_id)
+
+    core_gate_ids = set(topology.get("core_mode", {}).get("core_gate_ids", []) or [])
+    core_gate_ids &= active_gate_ids
+
+    domain_gate_map: dict[str, set[str]] = defaultdict(set)
+    for assignment in topology.get("gate_assignments", []) or []:
+        gate_id = str(assignment.get("gate_id", "")).strip()
+        if not gate_id or gate_id not in active_gate_ids:
+            continue
+        primary = str(assignment.get("primary_domain", "")).strip()
+        if primary:
+            domain_gate_map[primary].add(gate_id)
+        for domain in assignment.get("secondary_domains", []) or []:
+            d = str(domain).strip()
+            if d:
+                domain_gate_map[d].add(gate_id)
+
+    history_records = []
+    if history_path.exists():
+        for raw_line in history_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                history_records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    exposure_count: Counter[str] = Counter()
+    fail_count: Counter[str] = Counter()
+    class_count: dict[str, Counter[str]] = defaultdict(Counter)
+
+    blocking_fail_events = 0
+    blocking_false_fail_events = 0
+    unknown_failure_events = 0
+
+    scope_counts: Counter[str] = Counter()
+
+    timestamps = []
+    for record in history_records:
+        ts = record.get("timestamp_utc")
+        if isinstance(ts, str) and ts:
+            timestamps.append(ts)
+
+        scope = str(record.get("scope", "")).strip()
+        scope_counts[scope or "unknown"] += 1
+
+        scope_gate_ids = parse_scope(scope, core_gate_ids, domain_gate_map, active_gate_ids)
+        for gate_id in scope_gate_ids:
+            exposure_count[gate_id] += 1
+
+        result = record.get("result", {}) or {}
+        failing_ids = set(result.get("failing_ids", []) or [])
+        fc = record.get("failure_class", {}) or {}
+
+        class_map: dict[str, str] = {}
+        for cls in ("deterministic", "freshness", "gate_bug"):
+            for gate_id in fc.get(cls, []) or []:
+                gid = str(gate_id).strip()
+                if gid in gate_meta:
+                    class_map[gid] = cls
+
+        for gate_id in (failing_ids | set(class_map.keys())):
+            gid = str(gate_id).strip()
+            if gid not in gate_meta:
+                if gid:
+                    unknown_failure_events += 1
+                continue
+            failure_class = class_map.get(gid, "deterministic")
+            fail_count[gid] += 1
+            class_count[gid][failure_class] += 1
+            if gate_meta[gid]["blocking"]:
+                blocking_fail_events += 1
+                if failure_class in {"freshness", "gate_bug"}:
+                    blocking_false_fail_events += 1
+
+    gate_rows = []
+    for gate_id in sorted(active_gate_ids, key=gate_sort_key):
+        exposure = int(exposure_count.get(gate_id, 0))
+        failures = int(fail_count.get(gate_id, 0))
+        passes = max(0, exposure - failures)
+        fail_rate = (failures / exposure) if exposure > 0 else 0.0
+        pass_rate = (passes / exposure) if exposure > 0 else 0.0
+        deterministic = int(class_count[gate_id].get("deterministic", 0))
+        freshness = int(class_count[gate_id].get("freshness", 0))
+        gate_bug = int(class_count[gate_id].get("gate_bug", 0))
+        false_fail_ratio = ((freshness + gate_bug) / failures) if failures > 0 else 0.0
+        gate_rows.append(
+            {
+                "id": gate_id,
+                "name": gate_meta[gate_id]["name"],
+                "gate_class": gate_meta[gate_id]["gate_class"],
+                "severity": gate_meta[gate_id]["severity"],
+                "ring": gate_meta[gate_id]["ring"],
+                "exposure_count": exposure,
+                "fail_count": failures,
+                "pass_count": passes,
+                "fail_rate": round(fail_rate, 6),
+                "pass_rate": round(pass_rate, 6),
+                "failure_class_distribution": {
+                    "deterministic": deterministic,
+                    "freshness": freshness,
+                    "gate_bug": gate_bug,
+                },
+                "real_drift_evidence_count": deterministic,
+                "inferred_false_fail_ratio": round(false_fail_ratio, 6),
+                "blocking": bool(gate_meta[gate_id]["blocking"]),
+                "observed": exposure > 0,
+            }
+        )
+
+    noisy_invariants = [
+        row
+        for row in gate_rows
+        if row["gate_class"] == "invariant" and row["exposure_count"] > 0 and row["fail_count"] > 0
+    ]
+    noisy_invariants.sort(
+        key=lambda row: (
+            -row["fail_rate"],
+            -row["fail_count"],
+            gate_sort_key(row["id"]),
+        )
+    )
+    top_noisy_invariants = noisy_invariants[:10]
+
+    inferred_false_fail_ratio_blocking = (
+        blocking_false_fail_events / blocking_fail_events if blocking_fail_events > 0 else 0.0
+    )
+
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    horizon_start = min(timestamps) if timestamps else "n/a"
+    horizon_end = max(timestamps) if timestamps else "n/a"
+
+    payload = {
+        "generated_at_utc": generated_at,
+        "source_history": str(history_path),
+        "source_registry": str(registry_path),
+        "source_topology": str(topology_path),
+        "horizon": {
+            "run_count": len(history_records),
+            "start_utc": horizon_start,
+            "end_utc": horizon_end,
+            "scope_counts": dict(sorted(scope_counts.items())),
+        },
+        "summary": {
+            "gates_total": len(gates),
+            "active_gates": len(active_gate_ids),
+            "gates_observed": sum(1 for row in gate_rows if row["observed"]),
+            "blocking_fail_events": blocking_fail_events,
+            "blocking_false_fail_events": blocking_false_fail_events,
+            "inferred_false_fail_ratio_blocking": round(inferred_false_fail_ratio_blocking, 6),
+            "unknown_failure_events": unknown_failure_events,
+        },
+        "top_noisy_invariant_gates": top_noisy_invariants,
+        "gates": gate_rows,
+    }
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+
+    lines = [
+        "# W62-B Gate Quality Scorecard",
+        "",
+        f"Generated: {generated_at}",
+        f"Source NDJSON: `{history_path}`",
+        f"Horizon: runs={len(history_records)} start={horizon_start} end={horizon_end}",
+        "",
+        "## Summary",
+        "",
+        f"- Active gates: **{len(active_gate_ids)}** (registry total={len(gates)})",
+        f"- Gates observed in horizon: **{payload['summary']['gates_observed']}**",
+        f"- Blocking fail events: **{blocking_fail_events}**",
+        f"- Inferred blocking false-fail events (freshness + gate_bug): **{blocking_false_fail_events}**",
+        f"- Inferred false-fail ratio for blocking gates: **{pct(inferred_false_fail_ratio_blocking)}**",
+        f"- Unknown failure events (non-gate ids): **{unknown_failure_events}**",
+        "",
+        "## Top Noisy Invariant Gates",
+        "",
+        "| gate_id | gate_name | exposure_count | fail_count | fail_rate | deterministic | freshness | gate_bug |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+
+    if top_noisy_invariants:
+        for row in top_noisy_invariants:
+            dist = row["failure_class_distribution"]
+            lines.append(
+                f"| {row['id']} | {row['name']} | {row['exposure_count']} | {row['fail_count']} | {pct(row['fail_rate'])} | {dist['deterministic']} | {dist['freshness']} | {dist['gate_bug']} |"
+            )
+    else:
+        lines.append("| none | n/a | 0 | 0 | 0.00% | 0 | 0 | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Highest Fail-Rate Gates (Observed)",
+            "",
+            "| gate_id | gate_class | exposure_count | fail_count | fail_rate | pass_rate | inferred_false_fail_ratio |",
+            "|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+
+    observed_with_fails = [row for row in gate_rows if row["exposure_count"] > 0 and row["fail_count"] > 0]
+    observed_with_fails.sort(
+        key=lambda row: (
+            -row["fail_rate"],
+            -row["fail_count"],
+            gate_sort_key(row["id"]),
+        )
+    )
+    for row in observed_with_fails[:20]:
+        lines.append(
+            f"| {row['id']} | {row['gate_class']} | {row['exposure_count']} | {row['fail_count']} | {pct(row['fail_rate'])} | {pct(row['pass_rate'])} | {pct(row['inferred_false_fail_ratio'])} |"
+        )
+    if not observed_with_fails:
+        lines.append("| none | n/a | 0 | 0 | 0.00% | 0.00% | 0.00% |")
+
+    out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    print("verify.gate_quality.scorecard")
+    print(f"history_runs: {len(history_records)}")
+    print(f"scorecard_md: {out_md}")
+    print(f"scorecard_json: {out_json}")
+
+
+if __name__ == "__main__":
+    main()

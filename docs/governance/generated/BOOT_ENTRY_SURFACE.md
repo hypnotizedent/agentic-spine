@@ -15,8 +15,8 @@ cd ~/code/agentic-spine
 ## Post-Work Verify
 
 ```bash
-./bin/ops cap run verify.route.recommend
-./bin/ops cap run verify.pack.run <domain>
+./bin/ops cap run verify.run -- fast
+./bin/ops cap run verify.run -- domain <domain>
 ```
 
 ## Release Certification

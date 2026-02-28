@@ -82,8 +82,8 @@ Full spine access. Follow all sections below in order.
 | Single read-only query | `ops cap run` (auto-approval) |
 | Single mutating action | `ops cap run` (manual approval) |
 | Multi-step coordinated work | Open a loop, use proposal flow |
-| Quick verify/status check | `ops cap run verify.core.run` |
-| Post-domain-work verify | `ops cap run verify.route.recommend` → `verify.pack.run <domain>` |
+| Quick verify/status check | `ops cap run verify.run -- fast` |
+| Post-domain-work verify | `ops cap run verify.run -- domain <domain>` |
 | Release/nightly certification | `ops cap run verify.release.run` |
 | Lifecycle nightly closeout | `ops cap run nightly.closeout -- --mode dry-run` → `ops cap run nightly.closeout -- --mode apply` |
 
@@ -91,8 +91,8 @@ Full spine access. Follow all sections below in order.
 
 | Tier | When | Command | Time |
 |------|------|---------|------|
-| **Core-8** | On-demand quick verify (or before high-risk changes) | `verify.core.run` | <60s |
-| **Domain pack** | After domain work, before commit | `verify.pack.run <domain>` | 1-5 min |
+| **Fast** | On-demand quick verify (or before high-risk changes) | `verify.run -- fast` | <60s |
+| **Domain** | After domain work, before commit | `verify.run -- domain <domain>` | 1-5 min |
 | **Full release** | Nightly / release only | `verify.release.run` | 10-15 min |
 
 Network gates (infra health, backup checks, media stack) have Tailscale guards — they SKIP cleanly when VPN is disconnected instead of hanging or triggering login popups.

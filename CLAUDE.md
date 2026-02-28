@@ -34,8 +34,8 @@ cd ~/code/agentic-spine
 ## Post-Work Verify (run after domain changes, before commit)
 
 ```bash
-./bin/ops cap run verify.route.recommend          # tells you which domain pack to run
-./bin/ops cap run verify.pack.run <domain>         # runs domain-specific gates
+./bin/ops cap run verify.run -- fast                # canonical quick verify entry
+./bin/ops cap run verify.run -- domain <domain>     # canonical domain verify entry
 ```
 
 ## Release Certification (nightly / release only)

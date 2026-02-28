@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"slo-report FAIL: {message}")
+
+
+def load_yaml(path: Path) -> dict:
+    if not path.exists():
+        fail(f"missing file: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def pct(value: float) -> str:
+    return f"{value * 100:.2f}%"
+
+
+def extract_block(text: str, marker_start: str, marker_end: str) -> str:
+    lines = text.splitlines()
+    capture = False
+    block_lines = []
+    for line in lines:
+        if line.strip() == marker_start.strip():
+            capture = True
+            continue
+        if line.strip() == marker_end.strip():
+            break
+        if capture:
+            block_lines.append(line)
+    return "\n".join(block_lines).strip()
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parents[4]
+
+    authority_path = root / "ops/bindings/authority.concerns.yaml"
+    boot_contract_path = root / "ops/bindings/entry.boot.surface.contract.yaml"
+    entry_surface_contract_path = root / "ops/bindings/entry.surface.contract.yaml"
+    session_protocol_path = root / "docs/governance/SESSION_PROTOCOL.md"
+    gaps_path = root / "ops/bindings/operational.gaps.yaml"
+    scorecard_path = root / "docs/planning/W62B_GATE_QUALITY_SCORECARD.json"
+
+    out_md = root / "docs/planning/W62B_SLO_REPORT.md"
+    out_json = root / "docs/planning/W62B_SLO_REPORT.json"
+
+    authority = load_yaml(authority_path)
+    boot_contract = load_yaml(boot_contract_path)
+    entry_surface_contract = load_yaml(entry_surface_contract_path)
+    gaps_doc = load_yaml(gaps_path)
+
+    if not scorecard_path.exists():
+        fail(f"missing scorecard input: {scorecard_path}")
+    scorecard = json.loads(scorecard_path.read_text(encoding="utf-8"))
+
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    metrics = []
+
+    # SLO 1: Boot Ambiguity
+    startup = boot_contract.get("startup_block", {})
+    surfaces = boot_contract.get("surfaces", []) or []
+    marker_start = startup.get("marker_start", "")
+    marker_end = startup.get("marker_end", "")
+    heading = startup.get("heading", "## Mandatory Startup Block")
+    shell = startup.get("shell", "bash")
+    startup_commands = startup.get("commands", []) or []
+
+    expected_startup_block = "\n".join([
+        heading,
+        "",
+        f"```{shell}",
+        *startup_commands,
+        "```",
+    ]).strip()
+
+    compliant_boot_surfaces = 0
+    noncompliant_boot_surfaces = []
+    for rel in surfaces:
+        path = (root / rel).expanduser()
+        if not path.exists():
+            noncompliant_boot_surfaces.append(f"{rel}:missing")
+            continue
+        text = path.read_text(encoding="utf-8")
+        block = extract_block(text, marker_start, marker_end)
+        if block == expected_startup_block:
+            compliant_boot_surfaces += 1
+        else:
+            noncompliant_boot_surfaces.append(rel)
+
+    boot_den = max(1, len(surfaces))
+    boot_num = compliant_boot_surfaces
+    boot_value = boot_num / boot_den
+    metrics.append(
+        {
+            "id": "Boot Ambiguity",
+            "type": "ratio_high_good",
+            "numerator": boot_num,
+            "denominator": boot_den,
+            "value": round(boot_value, 6),
+            "target": ">= 1.00",
+            "status": "PASS" if boot_value >= 1.0 else "FAIL",
+            "notes": "noncompliant=" + (", ".join(noncompliant_boot_surfaces) if noncompliant_boot_surfaces else "none"),
+        }
+    )
+
+    # SLO 2: Verify Ambiguity
+    verify_files = [
+        root / "AGENTS.md",
+        root / "CLAUDE.md",
+        session_protocol_path,
+        boot_contract_path,
+        entry_surface_contract_path,
+    ]
+    forbidden_patterns = [
+        r"verify\.pack\.run\s*<domain>",
+        r"verify\.core\.run",
+    ]
+
+    verify_num = 0
+    verify_issues = []
+    for path in verify_files:
+        if not path.exists():
+            verify_issues.append(f"{path}:missing")
+            continue
+        text = path.read_text(encoding="utf-8")
+        has_canonical = "verify.run" in text
+        has_forbidden = any(re.search(pattern, text) for pattern in forbidden_patterns)
+        if has_canonical and not has_forbidden:
+            verify_num += 1
+        else:
+            reason = []
+            if not has_canonical:
+                reason.append("missing verify.run")
+            if has_forbidden:
+                reason.append("legacy direct verify reference")
+            verify_issues.append(f"{path.relative_to(root)}: {'; '.join(reason)}")
+
+    verify_den = max(1, len(verify_files))
+    verify_value = verify_num / verify_den
+    metrics.append(
+        {
+            "id": "Verify Ambiguity",
+            "type": "ratio_high_good",
+            "numerator": verify_num,
+            "denominator": verify_den,
+            "value": round(verify_value, 6),
+            "target": ">= 1.00",
+            "status": "PASS" if verify_value >= 1.0 else "FAIL",
+            "notes": "issues=" + (" | ".join(verify_issues) if verify_issues else "none"),
+        }
+    )
+
+    # SLO 3: Authority Ambiguity
+    concerns = authority.get("concerns", {}) or {}
+    authority_num = 0
+    authority_den = max(1, len(concerns))
+    authority_issues = []
+
+    for concern_id, payload in concerns.items():
+        sources = payload.get("sources", []) or []
+        states = [str(source.get("state", "")).strip() for source in sources]
+        authoritative_count = sum(1 for state in states if state == "authoritative")
+        invalid_state_count = sum(1 for state in states if state not in {"authoritative", "projection", "tombstoned"})
+        if authoritative_count == 1 and invalid_state_count == 0:
+            authority_num += 1
+        else:
+            authority_issues.append(
+                f"{concern_id}: authoritative_count={authoritative_count}, invalid_states={invalid_state_count}"
+            )
+
+    authority_value = authority_num / authority_den
+    metrics.append(
+        {
+            "id": "Authority Ambiguity",
+            "type": "ratio_high_good",
+            "numerator": authority_num,
+            "denominator": authority_den,
+            "value": round(authority_value, 6),
+            "target": ">= 1.00",
+            "status": "PASS" if authority_value >= 1.0 else "FAIL",
+            "notes": "issues=" + (" | ".join(authority_issues) if authority_issues else "none"),
+        }
+    )
+
+    # SLO 4: Closure Integrity
+    gaps = gaps_doc.get("gaps", []) or []
+    open_gaps = [gap for gap in gaps if str(gap.get("status", "")).strip() == "open"]
+    closure_den = max(1, len(open_gaps))
+    closure_num = 0
+    orphan_count = 0
+    missing_title_count = 0
+
+    for gap in open_gaps:
+        parent = str(gap.get("parent_loop", "")).strip()
+        title = str(gap.get("title", "")).strip()
+        has_parent = bool(parent)
+        has_title = bool(title) and title.lower() != "null"
+        if not has_parent:
+            orphan_count += 1
+        if not has_title:
+            missing_title_count += 1
+        if has_parent and has_title:
+            closure_num += 1
+
+    closure_value = closure_num / closure_den
+    metrics.append(
+        {
+            "id": "Closure Integrity",
+            "type": "ratio_high_good",
+            "numerator": closure_num,
+            "denominator": closure_den,
+            "value": round(closure_value, 6),
+            "target": ">= 1.00",
+            "status": "PASS" if closure_value >= 1.0 else "FAIL",
+            "notes": f"open_gaps={len(open_gaps)} orphaned={orphan_count} missing_title={missing_title_count}",
+        }
+    )
+
+    # SLO 5: Freshness Noise
+    summary = scorecard.get("summary", {}) or {}
+    freshness_num = int(summary.get("blocking_false_fail_events", 0))
+    freshness_den = int(summary.get("blocking_fail_events", 0))
+    freshness_ratio = (freshness_num / freshness_den) if freshness_den > 0 else 0.0
+    freshness_target = 0.02
+
+    metrics.append(
+        {
+            "id": "Freshness Noise",
+            "type": "ratio_low_good",
+            "numerator": freshness_num,
+            "denominator": freshness_den,
+            "value": round(freshness_ratio, 6),
+            "target": f"<= {freshness_target:.2f}",
+            "status": "PASS" if freshness_ratio <= freshness_target else "FAIL",
+            "notes": "derived from blocking failure-class telemetry in scorecard",
+        }
+    )
+
+    overall_pass = all(metric["status"] == "PASS" for metric in metrics)
+
+    payload = {
+        "generated_at_utc": generated_at,
+        "source_files": {
+            "authority_concerns": str(authority_path),
+            "entry_boot_contract": str(boot_contract_path),
+            "entry_surface_contract": str(entry_surface_contract_path),
+            "session_protocol": str(session_protocol_path),
+            "operational_gaps": str(gaps_path),
+            "gate_quality_scorecard": str(scorecard_path),
+        },
+        "metrics": metrics,
+        "overall_status": "PASS" if overall_pass else "FAIL",
+    }
+
+    out_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    lines = [
+        "# W62-B Product SLO Report",
+        "",
+        f"Generated: {generated_at}",
+        "",
+        "| slo_id | numerator | denominator | value | target | status | notes |",
+        "|---|---:|---:|---:|---|---|---|",
+    ]
+
+    for metric in metrics:
+        lines.append(
+            f"| {metric['id']} | {metric['numerator']} | {metric['denominator']} | {pct(metric['value'])} | {metric['target']} | {metric['status']} | {metric['notes']} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            f"Overall status: **{'PASS' if overall_pass else 'FAIL'}**",
+            f"JSON artifact: `{out_json}`",
+        ]
+    )
+
+    out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    print("verify.slo.report")
+    print(f"slo_report_md: {out_md}")
+    print(f"slo_report_json: {out_json}")
+    print(f"overall_status: {'PASS' if overall_pass else 'FAIL'}")
+
+
+if __name__ == "__main__":
+    main()
