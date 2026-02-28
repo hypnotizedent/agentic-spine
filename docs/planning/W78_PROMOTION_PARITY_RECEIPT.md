@@ -6,11 +6,11 @@ promotion_to_main: not_requested (no `RELEASE_MAIN_MERGE_WINDOW`)
 
 ## Branch Parity Snapshot
 
-| repo | branch | local | origin | github | share | parity |
-|---|---|---|---|---|---|---|
-| agentic-spine | `codex/w78-truth-first-reliability-hardening-20260228` | `078a9e7c0ce9f6e6fac3dc088368f4746ea7a325` | `078a9e7c0ce9f6e6fac3dc088368f4746ea7a325` | `078a9e7c0ce9f6e6fac3dc088368f4746ea7a325` | `078a9e7c0ce9f6e6fac3dc088368f4746ea7a325` | PASS |
-| workbench | `codex/w78-truth-first-reliability-hardening-20260228` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | n/a | PASS |
-| mint-modules | `codex/w78-truth-first-reliability-hardening-20260228` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | n/a | PASS |
+| repo | branch | local_vs_origin | local_vs_github | local_vs_share | parity |
+|---|---|---|---|---|---|
+| agentic-spine | `codex/w78-truth-first-reliability-hardening-20260228` | equal | equal | equal | PASS |
+| workbench | `codex/w78-truth-first-reliability-hardening-20260228` | equal | equal | n/a | PASS |
+| mint-modules | `codex/w78-truth-first-reliability-hardening-20260228` | equal | equal | n/a | PASS |
 
 ## FF-Safe Promotion Path
 
