@@ -10,10 +10,10 @@ decision: MERGE_READY
 
 | milestone | value |
 |---|---|
-| preflight_branch_head | to-be-filled-at-closeout |
+| preflight_branch_head | dbc18d53e9f630ff60afbfac690aa05cdb821186 |
 | w66_phase_gate | PASS |
 | w67_phase_gate | PASS |
-| closeout_branch_head | to-be-filled-at-closeout |
+| closeout_branch_head | f0527ce45ad1c0f667acb7850db7be0579409d12 |
 | promotion_head | n/a (no `RELEASE_MAIN_MERGE_WINDOW`) |
 
 ## Baseline vs Final Counters
