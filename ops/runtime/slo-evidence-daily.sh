@@ -40,6 +40,8 @@ run_with_retry "verify.run fast" \
   "$CAP_RUNNER" cap run verify.run -- fast
 run_with_retry "verify.freshness.reconcile" \
   "$CAP_RUNNER" cap run verify.freshness.reconcile
+run_with_retry "docs.freshness.audit" \
+  "$CAP_RUNNER" cap run docs.freshness.audit
 run_with_retry "slo.evidence.daily" \
   "$CAP_RUNNER" cap run slo.evidence.daily
 run_with_retry "verify-failure-classify core" \

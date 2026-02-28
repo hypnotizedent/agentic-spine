@@ -1,10 +1,11 @@
 # LOOP-GOV-SPINE-SEAL-20260207
 
-> **Status:** open
+> **Status:** closed
 > **Blocked By:** none (previously LOOP-INFRA-VM-RESTRUCTURE-20260206, now complete)
 > **Owner:** @ronny
 > **Created:** 2026-02-07
 > **Severity:** medium
+> **Closed:** 2026-02-28 (objectives met; legacy loop scope retained for historical trace)
 
 ---
 

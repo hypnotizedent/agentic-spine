@@ -1,10 +1,11 @@
 # LOOP-OBSERVABILITY-DEPLOY-20260208
 
-> **Status:** open
+> **Status:** closed
 > **Blocked By:** LOOP-INFRA-CADDY-AUTH-20260207
 > **Owner:** @ronny
 > **Created:** 2026-02-08
 > **Severity:** high
+> **Closed:** 2026-02-28 (objectives met; legacy loop scope retained for historical trace)
 
 ---
 

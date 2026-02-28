@@ -73,8 +73,8 @@ scope: agent-governance-brief
 - Session startup baseline: run `./bin/ops cap run session.start` (fast mode default).
 - Optional deep startup diagnostics: run `./bin/ops cap run session.start full` when explicitly requested.
 - Canonical nightly closeout SOP entrypoint: run `./bin/ops cap run nightly.closeout -- --mode dry-run`, then `./bin/ops cap run nightly.closeout -- --mode apply`.
-- Domain work: run `./bin/ops cap run verify.route.recommend` and then `./bin/ops cap run verify.pack.run <domain|core-operator>` (use `verify.domain.run` only for integration/debug).
-- Certification: run `./bin/ops cap run verify.release.run` or `./bin/ops cap run spine.verify` for release/nightly and final cutover.
+- Domain work: run `./bin/ops cap run verify.route.recommend` and then `./bin/ops cap run verify.run -- domain <domain>` (pack-level commands remain available for diagnostics).
+- Certification: run `./bin/ops cap run verify.run -- release` or `./bin/ops cap run verify.release.run` for release/nightly and final cutover.
 - Every capability execution auto-generates a receipt. Ledger is append-only.
 - Domain updates are impact-scoped: update the domain runbook and add a receipt note via `./bin/ops cap run docs.impact.note <domain> <receipt_run_key>`.
 - D61 enforces session closeout every 48h: `./bin/ops cap run agent.session.closeout`.
@@ -88,12 +88,12 @@ scope: agent-governance-brief
 - `./bin/ops loops list --open` — list open loops only
 - `./bin/ops start loop <LOOP_ID>` — start worktree for a loop
 - `./bin/ops cap run worktree.lifecycle.reconcile -- --json` — classify stale candidates (non-destructive)
-- `./bin/ops cap run verify.core.run` — Core-8 day-to-day verify lane
-- `./bin/ops cap run verify.pack.run <domain|core-operator>` — pack-first day-to-day verify lane
-- `./bin/ops cap run verify.route.recommend` — suggest pack-run lane from current work
-- `./bin/ops cap run verify.domain.run <domain>` — integration/debug verify lane (not default day lane)
-- `./bin/ops cap run verify.release.run` — release/nightly full certification lane
-- `./bin/ops cap run verify.pack.list` — list verify packs
+- `./bin/ops cap run verify.run -- fast` — canonical quick verify lane
+- `./bin/ops cap run verify.run -- domain <domain>` — canonical post-domain verify lane
+- `./bin/ops cap run verify.run -- release` — canonical release/nightly verify lane
+- `./bin/ops cap run verify.route.recommend` — suggest verify scope from current work
+- `./bin/ops cap run verify.pack.run <domain>` — pack-level diagnostics/debug lane
+- `./bin/ops cap run verify.release.run` — legacy full certification lane (still supported)
 - `./bin/ops cap run stability.control.snapshot` — runtime reliability snapshot (on-demand)
 - `./bin/ops cap run stability.control.reconcile` — guided recovery command planner
 - `./bin/ops cap run nightly.closeout -- --mode dry-run` — lifecycle closeout classification + plan (no destructive actions)
