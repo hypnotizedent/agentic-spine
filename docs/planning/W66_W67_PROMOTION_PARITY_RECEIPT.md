@@ -9,10 +9,10 @@ promotion_to_main: false (token `RELEASE_MAIN_MERGE_WINDOW` not provided)
 
 | ref | sha |
 |---|---|
-| local/codex/w66-w67-projection-enforcement-20260228 | f0527ce45ad1c0f667acb7850db7be0579409d12 |
-| origin/codex/w66-w67-projection-enforcement-20260228 | f0527ce45ad1c0f667acb7850db7be0579409d12 |
-| github/codex/w66-w67-projection-enforcement-20260228 | f0527ce45ad1c0f667acb7850db7be0579409d12 |
-| share/codex/w66-w67-projection-enforcement-20260228 | f0527ce45ad1c0f667acb7850db7be0579409d12 |
+| local/codex/w66-w67-projection-enforcement-20260228 | 2ac82bf70a0733983662dce32c868a616c458c51 |
+| origin/codex/w66-w67-projection-enforcement-20260228 | 2ac82bf70a0733983662dce32c868a616c458c51 |
+| github/codex/w66-w67-projection-enforcement-20260228 | 2ac82bf70a0733983662dce32c868a616c458c51 |
+| share/codex/w66-w67-projection-enforcement-20260228 | 2ac82bf70a0733983662dce32c868a616c458c51 |
 
 ## Main Parity (Unchanged)
 

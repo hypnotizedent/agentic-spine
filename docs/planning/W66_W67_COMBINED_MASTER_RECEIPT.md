@@ -13,7 +13,7 @@ decision: MERGE_READY
 | preflight_branch_head | dbc18d53e9f630ff60afbfac690aa05cdb821186 |
 | w66_phase_gate | PASS |
 | w67_phase_gate | PASS |
-| closeout_branch_head | f0527ce45ad1c0f667acb7850db7be0579409d12 |
+| closeout_branch_head | 2ac82bf70a0733983662dce32c868a616c458c51 |
 | promotion_head | n/a (no `RELEASE_MAIN_MERGE_WINDOW`) |
 
 ## Baseline vs Final Counters
