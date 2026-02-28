@@ -15,7 +15,7 @@ Mode: deterministic fill-only (no freeform substitutions)
 | base_main_sha_workbench | `<sha>` | `e1d97b7318b3415e8cafef30c7c494a585e7aec6` |
 | base_main_sha_mint_modules | `<sha>` | `b98bf32126ad931842a2bb8983c3b8194286a4fd` |
 | remediation_branch_sha_spine | `<sha>` | `1b67a3b525ef09b7bb08698bbe614dda66866a55` |
-| final_branch_sha_spine | `<sha>` | `5422c008dfdc1a5b9f006d9c52bd09d617d62ac1` |
+| final_branch_sha_spine | `<sha>` | `d9f17929a137d630ea3bbf07be75396e49d000cb` |
 | final_branch_sha_workbench | `<sha>` | `a2e7caccaaa153751da4c2edea97f0ce0a10cadb` |
 | final_branch_sha_mint_modules | `<sha>` | `cceb9568455524dd6272b850ae67eee1d93e8556` |
 | decision | `MERGE_READY` or `HOLD_WITH_BLOCKERS` or `DONE` | `MERGE_READY` |
@@ -121,7 +121,7 @@ Mode: deterministic fill-only (no freeform substitutions)
 | blockers_open | `none` |
 | promoted_to_main | `false` |
 | promotion_sha | `n/a` |
-| closeout_sha | `5422c008dfdc1a5b9f006d9c52bd09d617d62ac1` |
+| closeout_sha | `d9f17929a137d630ea3bbf07be75396e49d000cb` |
 | attestation_no_protected_lane_mutation | `true` |
 | attestation_no_vm_infra_runtime_mutation | `true` |
 | attestation_no_secret_value_printing | `true` |

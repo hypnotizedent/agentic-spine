@@ -5,11 +5,11 @@ Wave: LOOP-SPINE-W62B-LEARNING-SYSTEM-20260228
 
 ## Clean Status Snapshot
 
-- Spine clean-state snapshot was captured from detached worktree at closeout SHA `5422c008dfdc1a5b9f006d9c52bd09d617d62ac1`.
+- Spine clean-state snapshot was captured from detached worktree at closeout SHA `d9f17929a137d630ea3bbf07be75396e49d000cb`.
 - Workbench and mint-modules were captured from active W62-B branches.
 
 ```text
-[spine_snapshot_sha] 5422c008dfdc1a5b9f006d9c52bd09d617d62ac1
+[spine_snapshot_sha] d9f17929a137d630ea3bbf07be75396e49d000cb
 [spine_snapshot_status]
 ## HEAD (no branch)
 
