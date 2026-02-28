@@ -27,9 +27,17 @@ branch: codex/w76-holistic-canonical-closure-20260228
 | phase5 | `./bin/ops cap run loops.status` | `CAP-20260228-072444__loops.status__R0ch65988` | PASS |
 | phase5 | `./bin/ops cap run gaps.status` | `CAP-20260228-072444__gaps.status__R48ao6452` | PASS |
 | phase5 | `./bin/ops cap run docs.projection.verify` | `CAP-20260228-072459__docs.projection.verify__Rt0de11283` | PASS |
+| w76b | `./bin/ops cap run session.start` | `CAP-20260228-074005__session.start__Rhvl059096` | PASS |
+| w76b | `./bin/ops cap run verify.pack.run core` | `CAP-20260228-074455__verify.pack.run__Rotzg76960` | PASS |
+| w76b | `./bin/ops cap run verify.pack.run hygiene-weekly` | `CAP-20260228-074458__verify.pack.run__Retw477701` | PASS |
+| w76b | `./bin/ops cap run verify.run -- fast` | `CAP-20260228-074526__verify.run__Rb8hi89079` | PASS |
+| w76b | `./bin/ops cap run loops.status` | `CAP-20260228-074530__loops.status__Ricn689557` | PASS |
+| w76b | `./bin/ops cap run gaps.status` | `CAP-20260228-074532__gaps.status__Re7ug89808` | PASS |
 
 ## Non-run-key Gate Evidence
 
 - `bash surfaces/verify/d83-proposal-queue-health-lock.sh` -> PASS
-- `bash surfaces/verify/d111-rag-embedding-smoke-preflight.sh` -> FAIL (`remote_execution_failed` in smoke evidence)
+- W76B baseline `bash surfaces/verify/d111-rag-embedding-smoke-preflight.sh` -> FAIL (`remote_execution_failed`)
+- W76B recovery `./ops/plugins/rag/bin/rag-reindex-smoke --batch-size 1 --execute` -> PASS (`uploaded=1, failed=0`, evidence: `mailroom/state/rag-sync/smoke-evidence.json`)
+- W76B post-check `bash surfaces/verify/d111-rag-embedding-smoke-preflight.sh` -> PASS
 - `bash surfaces/verify/d284-gap-reference-integrity-lock.sh` -> PASS

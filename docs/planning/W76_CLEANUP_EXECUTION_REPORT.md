@@ -21,3 +21,4 @@ cd /Users/ronnyworks/code/agentic-spine
 ## Attestation
 
 - No destructive cleanup actions were executed in W76.
+- W76B blocker-clearance updated receipts only; cleanup token state and execution path remain unchanged.

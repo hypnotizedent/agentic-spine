@@ -1,7 +1,7 @@
 # W76 Supervisor Master Receipt
 
 wave_id: W76_HOLISTIC_CANONICAL_CLOSURE_20260228
-decision: HOLD_WITH_BLOCKERS
+decision: MERGE_READY
 branch: codex/w76-holistic-canonical-closure-20260228
 
 ## Repo Heads
@@ -12,8 +12,8 @@ branch: codex/w76-holistic-canonical-closure-20260228
 
 ## Outcome Summary
 
-- acceptance_score: 15/16
-- blockers_open: 1
+- acceptance_score: 16/16
+- blockers_open: 0
 - baseline_counters: open_loops=19, open_gaps=92, orphaned_open_gaps=0
 - final_counters: open_loops=20, open_gaps=95, orphaned_open_gaps=0
 - loops_closed_count: 0
@@ -23,7 +23,7 @@ branch: codex/w76-holistic-canonical-closure-20260228
 
 | blocker_id | reason | owner | next_action | evidence |
 |---|---|---|---|---|
-| W76-BLK-001 | D111 still fails due smoke evidence `remote_execution_failed` | @ronny | Restore successful `rag.reindex.smoke --execute` runtime evidence and rerun D111 | `bash surfaces/verify/d111-rag-embedding-smoke-preflight.sh` |
+| none | none | n/a | n/a | D111 cleared in W76B (`bash surfaces/verify/d111-rag-embedding-smoke-preflight.sh` PASS after smoke execute) |
 
 ## Required Verify Block
 
