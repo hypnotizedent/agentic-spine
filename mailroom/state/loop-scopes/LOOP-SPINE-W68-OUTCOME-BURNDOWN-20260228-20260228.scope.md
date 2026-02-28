@@ -1,18 +1,18 @@
 ---
-loop_id: LOOP-SPINE-W64-BACKLOG-THROUGHPUT-CLOSURE-20260228
+loop_id: LOOP-SPINE-W68-OUTCOME-BURNDOWN-20260228-20260228
 created: 2026-02-28
-status: closed
+status: active
 owner: "@ronny"
 scope: spine
 priority: medium
-objective: Close ready non-protected loops and linked gaps using deterministic closure primitive
+objective: Reduce open loops and open gaps safely via evidence-backed closures.
 ---
 
-# Loop Scope: LOOP-SPINE-W64-BACKLOG-THROUGHPUT-CLOSURE-20260228
+# Loop Scope: LOOP-SPINE-W68-OUTCOME-BURNDOWN-20260228-20260228
 
 ## Objective
 
-Close ready non-protected loops and linked gaps using deterministic closure primitive
+Reduce open loops and open gaps safely via evidence-backed closures.
 
 ## Phases
 - Step 1: capture and classify findings
