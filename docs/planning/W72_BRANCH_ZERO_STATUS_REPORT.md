@@ -2,7 +2,7 @@
 
 ## Agentic-Spine
 - branch: `codex/w72-runtime-recovery-20260228`
-- head: `7e64176a0ede76e91a8f503e2c5a372c1fb32759`
+- head: `032bc4e1e35a6ca42b15df2ed808b18741a0376f`
 - status: clean
 
 ## Workbench
