@@ -2,7 +2,7 @@
 
 ## Agentic-Spine
 - branch: `codex/w73-unassigned-gate-triage-20260228`
-- head: `664b3bc136076d5f7397e5f7d2a9bd5e32e1bbd9`
+- head: `observed at closeout (see git rev-parse in terminal payload)`
 - status: clean
 
 ## Workbench
