@@ -1,4 +1,8 @@
 # W71.5 Branch Zero Status Report
 
-Status snapshot to fill after commit/push:
-- `git status --short --branch`
+Branch: `codex/w71-final-completion-drift-burndown-20260228`
+
+## Status Snapshot
+```
+## codex/w71-final-completion-drift-burndown-20260228
+```
