@@ -40,8 +40,20 @@ yq -o=json '.capabilities' "$CAP_FILE" \
         )
     ' > "$records_json"
 
-mapfile -t domains < <(jq -r '.[].domain' "$records_json" | sort -u)
-[[ ${#domains[@]} -gt 0 ]] || fail "no domain_external capabilities found"
+mapfile -t capability_domains < <(jq -r '.[].domain' "$records_json" | sort -u)
+mapfile -t catalog_domains < <(yq -r '.domains[].domain_id' "$CATALOG_BINDING" | sort -u)
+
+declare -A seen_domains=()
+domains=()
+for domain in "${capability_domains[@]}" "${catalog_domains[@]}"; do
+  [[ -z "${domain:-}" || "$domain" == "null" ]] && continue
+  if [[ -z "${seen_domains[$domain]+x}" ]]; then
+    seen_domains[$domain]=1
+    domains+=("$domain")
+  fi
+done
+
+[[ ${#domains[@]} -gt 0 ]] || fail "no domains found from capabilities or catalog binding"
 
 for domain in "${domains[@]}"; do
   out_dir="$OUT_ROOT/$domain"

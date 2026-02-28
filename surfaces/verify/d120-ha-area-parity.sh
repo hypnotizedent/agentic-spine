@@ -35,23 +35,117 @@ if ! curl -sf -o /dev/null -m 5 "http://${HA_HOST}:${HA_PORT}/api/" -H "Authoriz
   precondition_fail "HA not reachable at ${HA_HOST}:${HA_PORT}"
 fi
 
-LIVE_AREAS=$(python3 -c "
-import json, asyncio, websockets, os
+fetch_areas_ws() {
+  python3 - "$HA_HOST" "$HA_PORT" <<'PY'
+import asyncio
+import json
+import os
+import sys
+
+host = sys.argv[1]
+port = sys.argv[2]
+token = os.environ.get("HA_TOKEN", "")
+if not token:
+    sys.exit(1)
+
+try:
+    import websockets
+except Exception:
+    sys.exit(1)
+
 async def get():
-    token = os.environ['HA_TOKEN']
-    async with websockets.connect('ws://${HA_HOST}:${HA_PORT}/api/websocket') as ws:
-        await ws.recv()
-        await ws.send(json.dumps({'type': 'auth', 'access_token': token}))
-        auth = json.loads(await ws.recv())
-        if auth['type'] != 'auth_ok':
-            print('AUTH_FAILED')
-            return
-        await ws.send(json.dumps({'id': 1, 'type': 'config/area_registry/list'}))
-        r = json.loads(await ws.recv())
-        for a in r.get('result', []):
-            print(json.dumps({'area_id': a['area_id'], 'name': a.get('name',''), 'icon': a.get('icon','')}))
-asyncio.run(get())
-" 2>/dev/null) || true
+    try:
+        uri = f"ws://{host}:{port}/api/websocket"
+        async with websockets.connect(uri) as ws:
+            await ws.recv()
+            await ws.send(json.dumps({"type": "auth", "access_token": token}))
+            auth = json.loads(await ws.recv())
+            if auth.get("type") != "auth_ok":
+                print("AUTH_FAILED")
+                return 2
+
+            await ws.send(json.dumps({"id": 1, "type": "config/area_registry/list"}))
+            response = json.loads(await ws.recv())
+            result = response.get("result")
+            if not isinstance(result, list):
+                return 1
+
+            for area in result:
+                area_id = area.get("area_id")
+                if not area_id:
+                    continue
+                print(json.dumps({
+                    "area_id": area_id,
+                    "name": area.get("name", ""),
+                    "icon": area.get("icon", ""),
+                }))
+            return 0
+    except Exception:
+        return 1
+
+rc = asyncio.run(get())
+sys.exit(rc)
+PY
+}
+
+fetch_areas_rest() {
+  local endpoint payload parsed
+  for endpoint in "/api/config/area_registry/list" "/api/config/area_registry"; do
+    payload="$(curl -sf -m 8 "http://${HA_HOST}:${HA_PORT}${endpoint}" \
+      -H "Authorization: Bearer $HA_TOKEN" \
+      -H "Content-Type: application/json" 2>/dev/null || true)"
+    [[ -z "$payload" ]] && continue
+
+    parsed="$(printf '%s' "$payload" | python3 - <<'PY' 2>/dev/null || true
+import json
+import sys
+
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit(1)
+
+try:
+    data = json.loads(raw)
+except Exception:
+    sys.exit(1)
+
+if isinstance(data, dict) and isinstance(data.get("result"), list):
+    data = data["result"]
+
+if not isinstance(data, list):
+    sys.exit(1)
+
+lines = []
+for area in data:
+    if not isinstance(area, dict):
+        continue
+    area_id = area.get("area_id")
+    if not area_id:
+        continue
+    lines.append(json.dumps({
+        "area_id": area_id,
+        "name": area.get("name", ""),
+        "icon": area.get("icon", ""),
+    }))
+
+if not lines:
+    sys.exit(1)
+
+print("\\n".join(lines))
+PY
+)"
+    if [[ -n "$parsed" ]]; then
+      printf '%s\n' "$parsed"
+      return 0
+    fi
+  done
+  return 1
+}
+
+LIVE_AREAS="$(fetch_areas_ws 2>/dev/null || true)"
+if [[ -z "$LIVE_AREAS" || "$LIVE_AREAS" == "AUTH_FAILED" ]]; then
+  LIVE_AREAS="$(fetch_areas_rest 2>/dev/null || true)"
+fi
 
 if [[ -z "$LIVE_AREAS" || "$LIVE_AREAS" == "AUTH_FAILED" ]]; then
   precondition_fail "could not fetch HA areas"
