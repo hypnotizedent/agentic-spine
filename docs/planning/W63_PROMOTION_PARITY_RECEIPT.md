@@ -10,8 +10,8 @@ Promotion to main: not executed
 | repo | branch | parity_status | notes |
 |---|---|---|---|
 | agentic-spine | `codex/w63-outcome-closure-automation-20260228` | `match` | local == origin == github == share |
-| workbench | `codex/w63-outcome-closure-automation-20260228` | `match` | local == origin == github |
-| mint-modules | `codex/w63-outcome-closure-automation-20260228` | `match` | local == origin == github |
+| workbench | `codex/w63-outcome-closure-automation-20260228` | `n/a` | untouched in W63; no branch push/parity action required |
+| mint-modules | `codex/w63-outcome-closure-automation-20260228` | `n/a` | untouched in W63; no branch push/parity action required |
 
 ## Chronology Snapshot
 
