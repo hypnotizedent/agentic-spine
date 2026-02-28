@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+CLOSEOUT_CONTRACT="$ROOT/ops/bindings/wave.closeout.contract.yaml"
 
 MODE="report-only"
 TOKEN=""
@@ -50,6 +51,9 @@ DELETE_TOKEN_VALUE="RELEASE_MAIN_CLEANUP_WINDOW"
 REQUIRE_ARCHIVE="true"
 REQUIRE_MERGED_OR_TOKEN="true"
 BLOCK_ACTIVE_LEASE="true"
+REQUIRE_CLEAN_WORKTREE_DELETE="true"
+REQUIRE_RECEIPT_GATE_PASS_DELETE="true"
+RECEIPT_GATE_SCRIPT="$ROOT/surfaces/verify/d274-receipt-closeout-completeness-lock.sh"
 
 if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
   MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo "$MAIN_BRANCH")"
@@ -62,6 +66,13 @@ if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
   REQUIRE_ARCHIVE="$(yq e -r '.cleanup.require_archive_before_delete // true' "$CONTRACT" 2>/dev/null || echo true)"
   REQUIRE_MERGED_OR_TOKEN="$(yq e -r '.cleanup.require_branch_merged_or_explicit_token // true' "$CONTRACT" 2>/dev/null || echo true)"
   BLOCK_ACTIVE_LEASE="$(yq e -r '.cleanup.block_if_active_lease // true' "$CONTRACT" 2>/dev/null || echo true)"
+fi
+
+if command -v yq >/dev/null 2>&1 && [[ -f "$CLOSEOUT_CONTRACT" ]]; then
+  REQUIRE_CLEAN_WORKTREE_DELETE="$(yq e -r '.closeout.require_clean_worktree_for_cleanup_delete // true' "$CLOSEOUT_CONTRACT" 2>/dev/null || echo true)"
+  REQUIRE_RECEIPT_GATE_PASS_DELETE="$(yq e -r '.closeout.require_receipt_gate_pass_for_cleanup_delete // true' "$CLOSEOUT_CONTRACT" 2>/dev/null || echo true)"
+  RECEIPT_GATE_REL="$(yq e -r '.finalize.gate_script // "surfaces/verify/d274-receipt-closeout-completeness-lock.sh"' "$CLOSEOUT_CONTRACT" 2>/dev/null || echo "surfaces/verify/d274-receipt-closeout-completeness-lock.sh")"
+  RECEIPT_GATE_SCRIPT="$ROOT/$RECEIPT_GATE_REL"
 fi
 
 if [[ "$CANONICAL_ROOT" == "~/"* ]]; then
@@ -142,6 +153,12 @@ def parse_worktrees():
         parsed.append((Path(wt).resolve(), branch))
     return parsed
 
+def worktree_clean(path: Path):
+    rc, out = sh(["git", "-C", str(path), "status", "--porcelain"], check=False)
+    if rc != 0:
+        return False
+    return not bool(out.strip())
+
 def merged(branch):
     if branch == "<detached>":
         return False
@@ -206,6 +223,7 @@ for wt, branch in parse_worktrees():
         "canonical_root_ok": str(wt).startswith(str(canonical_root) + "/"),
         "merged_into_main": merged(branch),
         "branch_age_hours": branch_age_hours(branch),
+        "worktree_clean": worktree_clean(wt),
         "lease": lease,
     })
 
@@ -221,7 +239,7 @@ out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 print(str(out_path))
 PY
 
-python3 - "$REPORT_JSON" "$REPORT_MD" "$MODE" "$BLOCK_ACTIVE_LEASE" "$REQUIRE_MERGED_OR_TOKEN" "$EXPLICIT_TOKEN" <<'PY'
+python3 - "$REPORT_JSON" "$REPORT_MD" "$MODE" "$BLOCK_ACTIVE_LEASE" "$REQUIRE_MERGED_OR_TOKEN" "$EXPLICIT_TOKEN" "$REQUIRE_CLEAN_WORKTREE_DELETE" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -231,6 +249,7 @@ mode = sys.argv[3]
 block_active = sys.argv[4].lower() == "true"
 require_merged_or_token = sys.argv[5].lower() == "true"
 explicit_token = sys.argv[6] == "1"
+require_clean_delete = sys.argv[7].lower() == "true"
 
 rows = report["worktrees"]
 blocked = []
@@ -246,6 +265,8 @@ for row in rows:
         reasons.append("active_lease")
     if require_merged_or_token and not row.get("merged_into_main") and not explicit_token:
         reasons.append("not_merged_no_token")
+    if require_clean_delete and not row.get("worktree_clean", True):
+        reasons.append("dirty_worktree")
 
     if reasons:
         blocked.append({"worktree": row["worktree"], "branch": row["branch"], "reasons": reasons})
@@ -334,6 +355,14 @@ if [[ "$MODE" == "delete" ]]; then
     exit 1
   fi
 
+  if [[ "$REQUIRE_RECEIPT_GATE_PASS_DELETE" == "true" ]]; then
+    if [[ ! -x "$RECEIPT_GATE_SCRIPT" ]]; then
+      echo "FAIL: delete mode requires receipt gate script: $RECEIPT_GATE_SCRIPT" >&2
+      exit 1
+    fi
+    "$RECEIPT_GATE_SCRIPT" --policy enforce
+  fi
+
   if [[ "$REQUIRE_ARCHIVE" == "true" ]]; then
     if [[ -z "$MANIFEST" ]]; then
       MANIFEST="$ARCHIVE_MANIFEST"
@@ -344,7 +373,7 @@ if [[ "$MODE" == "delete" ]]; then
     fi
   fi
 
-  python3 - "$ROOT" "$REPORT_JSON" "$MANIFEST" "$REQUIRE_ARCHIVE" "$ACTIONS_LOG" <<'PY'
+  python3 - "$ROOT" "$REPORT_JSON" "$MANIFEST" "$REQUIRE_ARCHIVE" "$ACTIONS_LOG" "$REQUIRE_CLEAN_WORKTREE_DELETE" <<'PY'
 import json, sys, subprocess
 from pathlib import Path
 
@@ -353,6 +382,7 @@ report = json.loads(Path(sys.argv[2]).read_text())
 manifest_path = Path(sys.argv[3]) if sys.argv[4].lower() == "true" else None
 require_archive = sys.argv[4].lower() == "true"
 actions = Path(sys.argv[5])
+require_clean = sys.argv[6].lower() == "true"
 
 archived = set()
 if require_archive and manifest_path and manifest_path.exists():
@@ -367,6 +397,15 @@ with actions.open("a", encoding="utf-8") as log:
         if require_archive and wt not in archived:
             log.write(f"skip={wt}|not_archived\n")
             continue
+
+        if require_clean:
+            st = subprocess.run(["git", "-C", wt, "status", "--porcelain"], text=True, capture_output=True)
+            if st.returncode != 0:
+                log.write(f"skip={wt}|status_check_failed|{(st.stderr or st.stdout).strip()}\n")
+                continue
+            if (st.stdout or "").strip():
+                log.write(f"skip={wt}|dirty_worktree\n")
+                continue
 
         rm = subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", wt], text=True, capture_output=True)
         if rm.returncode != 0:

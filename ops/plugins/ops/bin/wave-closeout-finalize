@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONTRACT="$ROOT/ops/bindings/wave.closeout.contract.yaml"
+
+declare -a RECEIPTS=()
+declare -a RUN_KEYS=()
+declare -a REMOTES=()
+COMMIT_MESSAGE=""
+NO_PUSH=0
+
+usage() {
+  cat <<'USAGE'
+wave-closeout-finalize
+
+Usage:
+  wave-closeout-finalize --receipt <path> [--receipt <path> ...] [--run-key <CAP-...> ...]
+                         [--message "<commit message>"] [--remote origin,github,share] [--no-push]
+
+Behavior:
+  - Validates run key presence in each receipt.
+  - Stages expected receipts only.
+  - Enforces D274 receipt crumb lock before commit.
+  - Commits and pushes with remote parity checks.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --receipt)
+      RECEIPTS+=("${2:-}")
+      shift 2
+      ;;
+    --run-key)
+      RUN_KEYS+=("${2:-}")
+      shift 2
+      ;;
+    --message)
+      COMMIT_MESSAGE="${2:-}"
+      shift 2
+      ;;
+    --remote)
+      IFS=',' read -r -a REMOTES <<< "${2:-}"
+      shift 2
+      ;;
+    --no-push)
+      NO_PUSH=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "wave.closeout.finalize FAIL: unknown arg: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+[[ -d "$ROOT/.git" || -f "$ROOT/.git" ]] || {
+  echo "wave.closeout.finalize FAIL: not a git repository root: $ROOT" >&2
+  exit 1
+}
+
+if [[ "${#RECEIPTS[@]}" -eq 0 ]]; then
+  echo "wave.closeout.finalize FAIL: at least one --receipt is required" >&2
+  exit 2
+fi
+
+RUN_KEY_REGEX='CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+'
+MIN_RUN_KEYS_PER_RECEIPT=1
+REQUIRE_RUN_KEYS="true"
+REQUIRE_CLEAN_INDEX="true"
+GATE_SCRIPT="$ROOT/surfaces/verify/d274-receipt-closeout-completeness-lock.sh"
+DEFAULT_REMOTES=(origin github share)
+
+if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
+  RUN_KEY_REGEX="$(yq e -r '.closeout.run_key_regex // "'"$RUN_KEY_REGEX"'"' "$CONTRACT" 2>/dev/null || echo "$RUN_KEY_REGEX")"
+  MIN_RUN_KEYS_PER_RECEIPT="$(yq e -r '.closeout.min_run_keys_per_receipt // 1' "$CONTRACT" 2>/dev/null || echo 1)"
+  REQUIRE_RUN_KEYS="$(yq e -r '.closeout.require_run_keys // true' "$CONTRACT" 2>/dev/null || echo true)"
+  REQUIRE_CLEAN_INDEX="$(yq e -r '.finalize.require_clean_index_before_stage // true' "$CONTRACT" 2>/dev/null || echo true)"
+  GATE_SCRIPT_REL="$(yq e -r '.finalize.gate_script // "surfaces/verify/d274-receipt-closeout-completeness-lock.sh"' "$CONTRACT" 2>/dev/null || echo "surfaces/verify/d274-receipt-closeout-completeness-lock.sh")"
+  GATE_SCRIPT="$ROOT/$GATE_SCRIPT_REL"
+  mapfile -t DEFAULT_REMOTES < <(yq e -r '.finalize.default_remotes[]?' "$CONTRACT" 2>/dev/null || true)
+fi
+
+if [[ "${#REMOTES[@]}" -eq 0 ]]; then
+  REMOTES=("${DEFAULT_REMOTES[@]}")
+fi
+[[ "${#REMOTES[@]}" -gt 0 ]] || REMOTES=(origin github share)
+
+if [[ "$REQUIRE_CLEAN_INDEX" == "true" ]] && ! git -C "$ROOT" diff --cached --quiet; then
+  echo "wave.closeout.finalize FAIL: staged index is not clean; commit staged changes first" >&2
+  exit 1
+fi
+
+for rk in "${RUN_KEYS[@]}"; do
+  [[ "$rk" =~ $RUN_KEY_REGEX ]] || {
+    echo "wave.closeout.finalize FAIL: invalid run key format: $rk" >&2
+    exit 1
+  }
+done
+
+for receipt in "${RECEIPTS[@]}"; do
+  abs="$receipt"
+  [[ "$abs" = /* ]] || abs="$ROOT/$receipt"
+  [[ -f "$abs" ]] || {
+    echo "wave.closeout.finalize FAIL: missing receipt file: $receipt" >&2
+    exit 1
+  }
+  if [[ "$REQUIRE_RUN_KEYS" == "true" ]]; then
+    count="$(rg -o "$RUN_KEY_REGEX" "$abs" | wc -l | tr -d ' ')"
+    [[ "${count:-0}" -ge "$MIN_RUN_KEYS_PER_RECEIPT" ]] || {
+      echo "wave.closeout.finalize FAIL: receipt missing run keys ($receipt)" >&2
+      exit 1
+    }
+  fi
+  git -C "$ROOT" add -- "$abs"
+done
+
+if [[ -x "$GATE_SCRIPT" ]]; then
+  "$GATE_SCRIPT" --policy enforce
+else
+  echo "wave.closeout.finalize FAIL: missing gate script: $GATE_SCRIPT" >&2
+  exit 1
+fi
+
+if git -C "$ROOT" diff --cached --quiet; then
+  echo "wave.closeout.finalize FAIL: no staged receipt changes to commit" >&2
+  exit 1
+fi
+
+if [[ -z "$COMMIT_MESSAGE" ]]; then
+  COMMIT_MESSAGE="docs(closeout): finalize receipt set"
+fi
+
+git -C "$ROOT" commit -m "$COMMIT_MESSAGE"
+HEAD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+
+if [[ "$NO_PUSH" -eq 0 ]]; then
+  for remote in "${REMOTES[@]}"; do
+    [[ -n "$remote" ]] || continue
+    git -C "$ROOT" push "$remote" "$BRANCH"
+  done
+fi
+
+echo "wave.closeout.finalize"
+echo "branch=$BRANCH"
+echo "head=$HEAD_SHA"
+echo "receipts_count=${#RECEIPTS[@]}"
+echo "run_keys_count=${#RUN_KEYS[@]}"
+echo "push_enabled=$((1-NO_PUSH))"
+
+if [[ "$NO_PUSH" -eq 0 ]]; then
+  for remote in "${REMOTES[@]}"; do
+    [[ -n "$remote" ]] || continue
+    remote_sha="$(git -C "$ROOT" ls-remote "$remote" "refs/heads/$BRANCH" | awk '{print $1}' | head -1)"
+    if [[ -z "$remote_sha" ]]; then
+      echo "wave.closeout.finalize FAIL: missing remote branch on $remote/$BRANCH" >&2
+      exit 1
+    fi
+    if [[ "$remote_sha" != "$HEAD_SHA" ]]; then
+      echo "wave.closeout.finalize FAIL: parity mismatch on $remote ($remote_sha != $HEAD_SHA)" >&2
+      exit 1
+    fi
+    echo "parity.$remote=$remote_sha"
+  done
+fi
