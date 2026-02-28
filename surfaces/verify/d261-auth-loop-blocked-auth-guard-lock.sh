@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Ensure BLOCKED_AUTH semantics and retry suppression remain canonical.
 # D261: Auth-loop blocked-auth guard lock.
 # Validates machine monitor behavior for auth URL detection -> BLOCKED_AUTH
 # with retry suppression.

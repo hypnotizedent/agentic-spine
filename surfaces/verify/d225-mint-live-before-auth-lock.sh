@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Align mint runtime claim-state docs with lifecycle registry before rerun.
 # D225: Keep mint live baseline gate semantics valid across auth lifecycle modes.
 # D225: mint-live-before-auth-lock
 # Enforce "live modules first" sequencing:

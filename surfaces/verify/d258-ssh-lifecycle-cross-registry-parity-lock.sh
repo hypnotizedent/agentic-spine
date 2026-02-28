@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Repair ssh.targets/vm.lifecycle/service-registry parity before rerun.
 # D258: SSH lifecycle cross-registry parity lock.
 # Enforces vm.lifecycle <-> ssh.targets <-> SERVICE_REGISTRY hosts parity for active shop VMs
 # and validates workbench SSH attach contract anchor paths.

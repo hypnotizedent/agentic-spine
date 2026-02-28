@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Remove duplicate/undocumented alias truth across lifecycle registries.
 # D262: SSH/Tailscale duplicate-truth lock.
 # Detects duplicate or undocumented truth sources for host alias + tailscale target mappings.
 set -euo pipefail

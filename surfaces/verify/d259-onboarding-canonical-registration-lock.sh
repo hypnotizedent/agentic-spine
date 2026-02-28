@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Complete vm lifecycle + ssh/tailscale registration for active hosts.
 # D259: Onboarding canonical registration lock.
 # Blocks active/registered shop VM lifecycle states when canonical SSH + Tailscale
 # registration is incomplete across vm.lifecycle, ssh.targets, and SERVICE_REGISTRY.

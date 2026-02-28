@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Pair any new invariant gates with explicit demotion/retirement plan.
 # D291: gate-budget-add-one-retire-one-lock
 set -euo pipefail
 

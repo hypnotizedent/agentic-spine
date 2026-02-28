@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Restore nightly closeout wiring/contracts before enabling scheduled closeout runs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

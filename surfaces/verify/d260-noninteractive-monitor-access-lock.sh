@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Remove interactive SSH mode leakage from machine monitor paths.
 # D260: Noninteractive monitor access lock.
 # Ensures machine monitor surfaces use non-interactive transport and do not
 # invoke interactive Tailscale SSH paths.
