@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SPINE-W52-CONTAINMENT-AUTOMATION-20260227-20260301
 created: 2026-02-27
-status: active
+status: closed
 owner: "@ronny"
 scope: spine
 priority: medium
