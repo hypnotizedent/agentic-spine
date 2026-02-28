@@ -16,6 +16,7 @@ Token status: `RELEASE_MAIN_CLEANUP_WINDOW` not provided
 | W60-A08 | W60-F008 | `agentic-spine/ops/bindings/services.health.yaml` | normalize | Added `immich-server` alias endpoint for service-registry parity. | done | `rg -n 'id: immich-server|id: immich' ops/bindings/services.health.yaml` |
 | W60-A09 | W60-F024 | `workbench/dotfiles/ssh/config.d/tailscale.conf` | normalize | Added explicit `Host communications-stack-lan` primary alias with LAN host binding. | done | `rg -n '^Host communications-stack-lan$|^    HostName 192\\.168\\.1\\.26$' /Users/ronnyworks/code/workbench/dotfiles/ssh/config.d/tailscale.conf` |
 | W60-A10 | W60-F020 | `mint-modules/docs/ARCHITECTURE/MINT_TRANSITION_STATE.md` | normalize | Added `Module Inventory Coverage Gaps (W60)` section; classified 9 untracked module roots as `CONTRACT_ONLY`. | done | `rg -n 'Module Inventory Coverage Gaps|CONTRACT_ONLY' /Users/ronnyworks/code/mint-modules/docs/ARCHITECTURE/MINT_TRANSITION_STATE.md` |
+| W60-A11 | W60-F-BACKBONE | `agentic-spine/docs/planning/W60_BACKBONE_CONTRACT_V1_1.md` | normalize | Added V1.1 backbone contract patch with truth-first classification, concern-map authority locking, reserved gate IDs, staged fix-to-lock enforcement, lifecycle exclusions, projection generation contract, and no-new-authority rule. | done | `sed -n '1,220p' docs/planning/W60_BACKBONE_CONTRACT_V1_1.md` |
 
 ## Non-Destructive Compliance
 
