@@ -1,22 +1,22 @@
 ---
-loop_id: LOOP-SPINE-NIGHTLY-CLOSEOUT-AUTOPILOT-20260227
-created: 2026-02-27
-status: closed
+loop_id: LOOP-W75-WEEKLY-STEADY-STATE-20260228
+created: 2026-02-28
+status: active
 owner: "@ronny"
-scope: spine
+scope: w75
 priority: medium
-objective: Nightly closeout autopilot
+objective: Weekly steady-state governance maintenance
 ---
 
-# Loop Scope: LOOP-SPINE-NIGHTLY-CLOSEOUT-AUTOPILOT-20260227
+# Loop Scope: LOOP-W75-WEEKLY-STEADY-STATE-20260228
 
 ## Objective
 
-Nightly closeout autopilot
+Weekly steady-state governance maintenance
 
 ## Phases
 - Step 1: capture and classify findings
-- Step 2: implement lifecycle closeout wiring
+- Step 2: implement changes
 - Step 3: verify and close out
 
 ## Success Criteria
