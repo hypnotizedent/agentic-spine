@@ -8,7 +8,7 @@ main_promotion: not_executed (no RELEASE_MAIN_MERGE_WINDOW for W69)
 
 | repo | branch | local | origin | github | share | parity |
 |---|---|---|---|---|---|---|
-| agentic-spine | `codex/w69-branch-drift-registration-hardening-20260228` | `9015594f552c5d36bf7a7a69e264154ecd6df135` | `9015594f552c5d36bf7a7a69e264154ecd6df135` | `9015594f552c5d36bf7a7a69e264154ecd6df135` | `9015594f552c5d36bf7a7a69e264154ecd6df135` | yes |
+| agentic-spine | `codex/w69-branch-drift-registration-hardening-20260228` | `d0312d85d7fff373997e692292eac80600f0473e` | `d0312d85d7fff373997e692292eac80600f0473e` | `d0312d85d7fff373997e692292eac80600f0473e` | `d0312d85d7fff373997e692292eac80600f0473e` | yes |
 | workbench | `codex/w69-branch-drift-registration-hardening-20260228` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | n/a | yes |
 | mint-modules | `codex/w69-branch-drift-registration-hardening-20260228` | `fb2105c3309c8d802b9930349c811e2fc4954354` | `fb2105c3309c8d802b9930349c811e2fc4954354` | `fb2105c3309c8d802b9930349c811e2fc4954354` | n/a | yes |
 
