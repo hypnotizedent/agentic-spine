@@ -4,6 +4,12 @@ wave_id: W76_HOLISTIC_CANONICAL_CLOSURE_20260228
 decision: HOLD_WITH_BLOCKERS
 branch: codex/w76-holistic-canonical-closure-20260228
 
+## Repo Heads
+
+- agentic-spine: `bd0c54d87b478ec783867028b72cfe547d4415cc`
+- workbench: `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6`
+- mint-modules: `7aae532e2a0fe8d741123c9631cfe5f8001c3d19`
+
 ## Outcome Summary
 
 - acceptance_score: 15/16
@@ -21,7 +27,7 @@ branch: codex/w76-holistic-canonical-closure-20260228
 
 ## Required Verify Block
 
-All required phase-5 verify commands passed (see run-key ledger).
+All required phase-5 verify commands passed (see [W76_RUN_KEY_LEDGER.md](/Users/ronnyworks/code/agentic-spine/docs/planning/W76_RUN_KEY_LEDGER.md)).
 
 ## Pre-existing Local Modifications
 

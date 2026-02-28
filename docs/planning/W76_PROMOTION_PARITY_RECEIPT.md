@@ -3,11 +3,17 @@
 wave_id: W76_HOLISTIC_CANONICAL_CLOSURE_20260228
 decision: HOLD_WITH_BLOCKERS
 promotion_to_main: not_performed
-reason: RELEASE_MAIN_MERGE_WINDOW not provided and blocker remains open.
+reason: RELEASE_MAIN_MERGE_WINDOW not provided and blocker W76-BLK-001 remains open.
 
 ## Branch Parity Snapshot
 
-To be populated after branch push in this wave closeout:
-- local/origin/github/share parity for `agentic-spine`
-- local/origin/github parity for `workbench`
-- local/origin/github parity for `mint-modules`
+| repo | branch | local_head | origin_head | github_head | share_head | parity |
+|---|---|---|---|---|---|---|
+| agentic-spine | `codex/w76-holistic-canonical-closure-20260228` | `bd0c54d87b478ec783867028b72cfe547d4415cc` | `bd0c54d87b478ec783867028b72cfe547d4415cc` | `bd0c54d87b478ec783867028b72cfe547d4415cc` | `bd0c54d87b478ec783867028b72cfe547d4415cc` | PASS |
+| workbench | `codex/w76-holistic-canonical-closure-20260228` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6` | `n/a` | PASS |
+| mint-modules | `codex/w76-holistic-canonical-closure-20260228` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | `7aae532e2a0fe8d741123c9631cfe5f8001c3d19` | `n/a` | PASS |
+
+## FF Promotion Status
+
+- FF-only promotion to `main` was intentionally not executed in W76.
+- Promotion remains token-gated and blocker-gated.
