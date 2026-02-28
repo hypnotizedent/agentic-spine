@@ -10,7 +10,7 @@
 ## Remaining `codex/*` Branches
 | repo | local_count | remote_count |
 |---|---:|---:|
-| agentic-spine | 4 | 3 |
+| agentic-spine | 3 | 3 |
 | workbench | 5 | 4 |
 | mint-modules | 5 | 4 |
 

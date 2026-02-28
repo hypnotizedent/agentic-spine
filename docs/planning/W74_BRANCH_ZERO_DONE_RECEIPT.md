@@ -9,7 +9,7 @@ cleanup_token: RELEASE_MAIN_CLEANUP_WINDOW
 ## Promotion (FF-only) Completed
 | repo | promoted_branch | main_head | parity |
 |---|---|---|---|
-| agentic-spine | codex/w74-final-closeout-branch-zero-20260228 | 62f068ed87b8ff5510bdac86a13092de1c540539 | local=origin=github=share |
+| agentic-spine | codex/w74-final-closeout-branch-zero-20260228 | 3a89d9819219265deb8eece119281a9c825adcd0 | local=origin=github=share |
 | workbench | codex/w74-final-closeout-branch-zero-20260228 | 5a67eb5daca70b2f34a3a5ebd29151ef9541d1a6 | local=origin=github |
 | mint-modules | codex/w74-final-closeout-branch-zero-20260228 | fb2105c3309c8d802b9930349c811e2fc4954354 | local=origin=github |
 
@@ -31,11 +31,10 @@ cleanup_token: RELEASE_MAIN_CLEANUP_WINDOW
 Source plan: `docs/planning/W74_BRANCH_DELETE_PLAN.md`
 
 - MERGED_SAFE_DELETE rows processed: 25
-- local branch deletions completed: 23
+- local branch deletions from plan: 23
 - remote delete operations completed: 34
 - guarded skips (branch missing on target remote/local): 32
-- blocked local delete (not fully merged to its historical upstream):
-  - `agentic-spine/codex/w60-supervisor-canonical-upgrade-20260227`
+- post-plan guarded local delete completed: `agentic-spine/codex/w60-supervisor-canonical-upgrade-20260227`
 
 ## Remaining `codex/*` Branches (Intentional)
 | repo | remaining remote branches | note |
