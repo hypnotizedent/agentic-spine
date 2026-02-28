@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+import json
+import subprocess
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"outcome.slo.report FAIL: {message}")
+
+
+def run_capability(root: Path, capability: str, args: list[str], timeout: int) -> tuple[int, float, str]:
+    cmd = ["./bin/ops", "cap", "run", capability]
+    if args:
+        cmd.append("--")
+        cmd.extend(args)
+
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        elapsed = time.monotonic() - start
+        output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        return proc.returncode, elapsed, output
+    except subprocess.TimeoutExpired:
+        elapsed = time.monotonic() - start
+        return 124, elapsed, "timeout"
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parents[4]
+    contract_path = root / "ops/bindings/outcome.slo.contract.yaml"
+    capabilities_path = root / "ops/capabilities.yaml"
+
+    if not contract_path.exists():
+        fail(f"missing file: {contract_path}")
+    if not capabilities_path.exists():
+        fail(f"missing file: {capabilities_path}")
+
+    contract = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+    capabilities = yaml.safe_load(capabilities_path.read_text(encoding="utf-8")) or {}
+    capability_map = (capabilities or {}).get("capabilities", {}) or {}
+
+    probes = contract.get("probes", []) or []
+    if not probes:
+        fail("contract has no probes")
+
+    required_domains = set((contract.get("critical_tier", {}) or {}).get("required_domains", []) or [])
+    if not required_domains:
+        fail("critical_tier.required_domains is empty")
+
+    report_cfg = contract.get("report", {}) or {}
+    report_md = root / report_cfg.get("markdown_path", "docs/planning/W63_OUTCOME_SLO_REPORT.md")
+    report_json = root / report_cfg.get("json_path", "docs/planning/W63_OUTCOME_SLO_REPORT.json")
+
+    rows = []
+    critical_covered = set()
+    critical_pass = 0
+    critical_total = 0
+
+    for probe in probes:
+        probe_id = str(probe.get("id", "")).strip()
+        domain = str(probe.get("domain", "")).strip()
+        tier = str(probe.get("tier", "")).strip() or "standard"
+        capability = str(probe.get("capability", "")).strip()
+        args = [str(x) for x in (probe.get("args", []) or [])]
+
+        if not probe_id or not domain or not capability:
+            fail("probe requires id/domain/capability")
+
+        cap_registered = capability in capability_map
+        rc = 127
+        elapsed = 0.0
+        status = "failed"
+        output_excerpt = "capability_not_registered"
+
+        if cap_registered:
+            rc, elapsed, output = run_capability(root, capability, args, timeout=180)
+            status = "pass" if rc == 0 else "failed"
+            output_excerpt = " ".join(output.split())[:200] if output else ""
+
+        if tier == "critical":
+            critical_total += 1
+            critical_covered.add(domain)
+            if status == "pass":
+                critical_pass += 1
+
+        rows.append(
+            {
+                "probe_id": probe_id,
+                "domain": domain,
+                "tier": tier,
+                "capability": capability,
+                "args": args,
+                "capability_registered": cap_registered,
+                "status": status,
+                "exit_code": rc,
+                "elapsed_seconds": round(elapsed, 3),
+                "output_excerpt": output_excerpt,
+            }
+        )
+
+    missing_domains = sorted(required_domains - critical_covered)
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    payload = {
+        "generated_at_utc": generated,
+        "source_contract": str(contract_path),
+        "required_critical_domains": sorted(required_domains),
+        "critical_domains_covered": sorted(critical_covered),
+        "critical_domains_missing": missing_domains,
+        "critical_probe_total": critical_total,
+        "critical_probe_pass": critical_pass,
+        "critical_probe_fail": critical_total - critical_pass,
+        "rows": rows,
+    }
+
+    report_md.parent.mkdir(parents=True, exist_ok=True)
+    report_json.parent.mkdir(parents=True, exist_ok=True)
+    report_json.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+
+    lines = [
+        "# W63 Outcome SLO Report",
+        "",
+        f"Generated: {generated}",
+        f"Source contract: `{contract_path}`",
+        "",
+        "## Critical Tier Coverage",
+        "",
+        f"- required_domains: **{', '.join(sorted(required_domains))}**",
+        f"- covered_domains: **{', '.join(sorted(critical_covered)) if critical_covered else 'none'}**",
+        f"- missing_domains: **{', '.join(missing_domains) if missing_domains else 'none'}**",
+        f"- critical_probe_pass: **{critical_pass}/{critical_total}**",
+        "",
+        "## Probe Results",
+        "",
+        "| probe_id | domain | tier | capability | status | exit_code | elapsed_seconds |",
+        "|---|---|---|---|---|---:|---:|",
+    ]
+
+    for row in rows:
+        lines.append(
+            f"| {row['probe_id']} | {row['domain']} | {row['tier']} | {row['capability']} | {row['status']} | {row['exit_code']} | {row['elapsed_seconds']:.3f} |"
+        )
+
+    report_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    print("outcome.slo.report")
+    print(f"critical_domains_required: {len(required_domains)}")
+    print(f"critical_domains_covered: {len(critical_covered)}")
+    print(f"critical_probe_pass: {critical_pass}/{critical_total}")
+    print(f"report_md: {report_md}")
+    print(f"report_json: {report_json}")
+
+
+if __name__ == "__main__":
+    main()

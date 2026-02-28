@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SPINE-W62A-CROSS-REPO-TAIL-REMEDIATION-20260228-20260228
 created: 2026-02-28
-status: active
+status: closed
 owner: "@ronny"
 scope: spine
 priority: high

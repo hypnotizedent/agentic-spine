@@ -1,0 +1,414 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/loop.closeout.contract.yaml"
+SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
+GAPS_FILE="$ROOT/ops/bindings/operational.gaps.yaml"
+
+source "$ROOT/ops/lib/git-lock.sh"
+
+usage() {
+  cat <<'USAGE'
+loop-closeout-finalize
+
+Usage:
+  loop-closeout-finalize --loop-id LOOP-... --acceptance-matrix <path> \
+    [--regression-lock-id D###-...] [--evidence <ref>] [--owner <owner>] \
+    [--expiry-check <date-or-cadence>] [--root-cause <text>] \
+    [--receipt-path <path>] [--no-close-linked-gaps]
+
+Validation:
+  - acceptance matrix has PASS state with no FAIL rows/placeholders
+  - required run keys exist in acceptance matrix or companion supervisor receipt
+  - decision is MERGE_READY or DONE
+  - blocker_count is zero when explicitly declared
+
+Behavior:
+  - closes loop scope status to closed
+  - closes linked open gaps (status=fixed) unless --no-close-linked-gaps
+  - enforces fix-to-lock for linked high/critical gaps
+  - emits a single closeout receipt markdown file
+USAGE
+}
+
+SELF_CHECK=0
+LOOP_ID=""
+ACCEPTANCE_MATRIX=""
+REGRESSION_LOCK_ID=""
+EVIDENCE=""
+OWNER=""
+EXPIRY_CHECK=""
+ROOT_CAUSE=""
+RECEIPT_PATH=""
+CLOSE_LINKED_GAPS=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --self-check)
+      SELF_CHECK=1
+      shift
+      ;;
+    --loop-id)
+      LOOP_ID="${2:-}"
+      shift 2
+      ;;
+    --acceptance-matrix)
+      ACCEPTANCE_MATRIX="${2:-}"
+      shift 2
+      ;;
+    --regression-lock-id)
+      REGRESSION_LOCK_ID="${2:-}"
+      shift 2
+      ;;
+    --evidence)
+      EVIDENCE="${2:-}"
+      shift 2
+      ;;
+    --owner)
+      OWNER="${2:-}"
+      shift 2
+      ;;
+    --expiry-check)
+      EXPIRY_CHECK="${2:-}"
+      shift 2
+      ;;
+    --root-cause)
+      ROOT_CAUSE="${2:-}"
+      shift 2
+      ;;
+    --receipt-path)
+      RECEIPT_PATH="${2:-}"
+      shift 2
+      ;;
+    --no-close-linked-gaps)
+      CLOSE_LINKED_GAPS=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "loop.closeout.finalize FAIL: unknown arg: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+for required in "$CONTRACT" "$SCOPES_DIR" "$GAPS_FILE" "$ROOT/ops/commands/loops.sh"; do
+  [[ -e "$required" ]] || {
+    echo "loop.closeout.finalize FAIL: missing required path: $required" >&2
+    exit 1
+  }
+done
+command -v yq >/dev/null 2>&1 || { echo "loop.closeout.finalize FAIL: missing dependency yq" >&2; exit 1; }
+command -v rg >/dev/null 2>&1 || { echo "loop.closeout.finalize FAIL: missing dependency rg" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "loop.closeout.finalize FAIL: missing dependency python3" >&2; exit 1; }
+
+if [[ "$SELF_CHECK" -eq 1 ]]; then
+  yq e '.version and .validation and .fix_to_lock and .protected_lanes and .closeout_receipts' "$CONTRACT" >/dev/null
+  echo "loop.closeout.finalize self-check PASS: contract and dependencies present"
+  exit 0
+fi
+
+[[ -n "$LOOP_ID" ]] || { echo "loop.closeout.finalize FAIL: --loop-id required" >&2; exit 2; }
+[[ -n "$ACCEPTANCE_MATRIX" ]] || { echo "loop.closeout.finalize FAIL: --acceptance-matrix required" >&2; exit 2; }
+
+if [[ "$ACCEPTANCE_MATRIX" != /* ]]; then
+  ACCEPTANCE_MATRIX="$ROOT/$ACCEPTANCE_MATRIX"
+fi
+[[ -f "$ACCEPTANCE_MATRIX" ]] || { echo "loop.closeout.finalize FAIL: acceptance matrix not found: $ACCEPTANCE_MATRIX" >&2; exit 1; }
+
+RUN_KEY_REGEX="$(yq e -r '.validation.run_key_regex // "CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"' "$CONTRACT")"
+MIN_RUN_KEYS="$(yq e -r '.validation.min_required_run_keys // 1' "$CONTRACT")"
+RECEIPT_DIR_REL="$(yq e -r '.closeout_receipts.directory // "docs/planning/loop-closeouts"' "$CONTRACT")"
+REQUIRE_MATRIX_PASS="$(yq e -r '.validation.require_acceptance_pass // true' "$CONTRACT")"
+
+mapfile -t PROTECTED_LOOPS < <(yq e -r '.protected_lanes.loops[]? // ""' "$CONTRACT" | sed '/^$/d')
+mapfile -t PROTECTED_LOOP_PREFIXES < <(yq e -r '.protected_lanes.loop_prefixes[]? // ""' "$CONTRACT" | sed '/^$/d')
+mapfile -t PROTECTED_GAPS < <(yq e -r '.protected_lanes.gaps[]? // ""' "$CONTRACT" | sed '/^$/d')
+mapfile -t P0P1_SEVERITIES < <(yq e -r '.fix_to_lock.p0_p1_severities[]? // ""' "$CONTRACT" | sed '/^$/d')
+
+if [[ "${#P0P1_SEVERITIES[@]}" -eq 0 ]]; then
+  P0P1_SEVERITIES=(critical high)
+fi
+
+for protected in "${PROTECTED_LOOPS[@]}"; do
+  [[ "$LOOP_ID" != "$protected" ]] || {
+    echo "loop.closeout.finalize FAIL: loop is protected lane: $LOOP_ID" >&2
+    exit 1
+  }
+done
+for prefix in "${PROTECTED_LOOP_PREFIXES[@]}"; do
+  [[ "$LOOP_ID" == "$prefix"* ]] && {
+    echo "loop.closeout.finalize FAIL: loop matches protected prefix '$prefix': $LOOP_ID" >&2
+    exit 1
+  }
+done
+
+SCOPE_FILE="$SCOPES_DIR/${LOOP_ID}.scope.md"
+[[ -f "$SCOPE_FILE" ]] || { echo "loop.closeout.finalize FAIL: scope file not found: $SCOPE_FILE" >&2; exit 1; }
+
+current_status="$(awk '/^status:/{print $2; exit}' "$SCOPE_FILE" | tr -d '"' || true)"
+case "$current_status" in
+  active|draft|open) ;;
+  closed)
+    echo "loop.closeout.finalize FAIL: loop already closed: $LOOP_ID" >&2
+    exit 1
+    ;;
+  *)
+    echo "loop.closeout.finalize FAIL: unsupported loop status '$current_status' for $LOOP_ID" >&2
+    exit 1
+    ;;
+esac
+
+validation_json="$(python3 - "$ACCEPTANCE_MATRIX" "$RUN_KEY_REGEX" "$MIN_RUN_KEYS" <<'PY'
+import pathlib
+import re
+import sys
+import json
+
+matrix_path = pathlib.Path(sys.argv[1])
+run_key_re = re.compile(sys.argv[2])
+min_keys = int(sys.argv[3])
+text = matrix_path.read_text(encoding="utf-8")
+
+errors = []
+
+if "<value>" in text:
+    errors.append("acceptance matrix contains <value> placeholders")
+if "PASS/FAIL" in text:
+    errors.append("acceptance matrix contains PASS/FAIL placeholders")
+if re.search(r"\|\s*FAIL\s*\|", text):
+    errors.append("acceptance matrix contains FAIL result rows")
+
+run_key_count = len(run_key_re.findall(text))
+companion_files = []
+if run_key_count < min_keys:
+    name = matrix_path.name
+    stem_prefix = name.split("ACCEPTANCE_MATRIX", 1)[0]
+    if stem_prefix:
+        candidate_names = [
+            f"{stem_prefix}SUPERVISOR_MASTER_RECEIPT.md",
+            f"{stem_prefix}MASTER_RECEIPT.md",
+        ]
+        for candidate in candidate_names:
+            p = matrix_path.parent / candidate
+            if p.exists():
+                companion_files.append(str(p))
+                run_key_count += len(run_key_re.findall(p.read_text(encoding="utf-8")))
+
+if run_key_count < min_keys:
+    errors.append(f"required run keys missing: found={run_key_count}, min_required={min_keys}")
+
+decision = None
+match = re.search(r"^decision:\s*([A-Z_]+)\s*$", text, flags=re.MULTILINE)
+if match:
+    decision = match.group(1)
+
+for line in text.splitlines():
+    line = line.strip()
+    m = re.match(r"^\|\s*decision\s*\|[^|]*\|\s*`?([A-Z_]+)`?\s*\|", line)
+    if m:
+        decision = m.group(1)
+    m = re.match(r"^\|\s*final_decision\s*\|\s*`?([A-Z_]+)`?\s*\|", line)
+    if m:
+        decision = m.group(1)
+
+if decision is None:
+    errors.append("unable to resolve decision from acceptance matrix")
+elif decision not in {"MERGE_READY", "DONE"}:
+    errors.append(f"decision must be MERGE_READY or DONE, got {decision}")
+
+blocker_count = None
+for line in text.splitlines():
+    line = line.strip()
+    m = re.match(r"^\|\s*blocker_count\s*\|\s*`?([0-9]+)`?\s*\|", line)
+    if m:
+        blocker_count = int(m.group(1))
+        break
+
+if blocker_count is not None and blocker_count > 0:
+    errors.append(f"blocker_count must be 0, got {blocker_count}")
+
+pass_rows = len(re.findall(r"\|\s*PASS\s*\|", text))
+if pass_rows == 0 and "score:" not in text and "acceptance_score" not in text:
+    errors.append("acceptance matrix has no PASS evidence")
+
+if errors:
+    for err in errors:
+        print(f"loop.closeout.finalize FAIL: {err}", file=sys.stderr)
+    sys.exit(1)
+
+print(json.dumps({
+    "decision": decision,
+    "blocker_count": blocker_count if blocker_count is not None else 0,
+    "run_key_count": run_key_count,
+    "companion_files": companion_files,
+    "pass_rows": pass_rows,
+}))
+PY
+)"
+
+if [[ "$REQUIRE_MATRIX_PASS" != "true" ]]; then
+  echo "loop.closeout.finalize WARN: contract disables strict acceptance-pass enforcement"
+fi
+
+declare -a LINKED_GAP_IDS=()
+declare -a LINKED_GAP_SEVERITIES=()
+while IFS=$'\t' read -r gid sev; do
+  [[ -n "$gid" ]] || continue
+  LINKED_GAP_IDS+=("$gid")
+  LINKED_GAP_SEVERITIES+=("${sev,,}")
+done < <(yq e -r ".gaps[] | select((.parent_loop // \"\") == \"$LOOP_ID\" and .status == \"open\") | [.id, (.severity // \"\")] | @tsv" "$GAPS_FILE")
+
+linked_open_count="${#LINKED_GAP_IDS[@]}"
+closed_gap_count=0
+blocked_gap_count=0
+
+severity_requires_fix_to_lock() {
+  local severity="${1,,}"
+  local sev
+  for sev in "${P0P1_SEVERITIES[@]}"; do
+    [[ "$severity" == "${sev,,}" ]] && return 0
+  done
+  return 1
+}
+
+is_protected_gap() {
+  local gid="$1"
+  local g
+  for g in "${PROTECTED_GAPS[@]}"; do
+    [[ "$gid" == "$g" ]] && return 0
+  done
+  return 1
+}
+
+if [[ "$CLOSE_LINKED_GAPS" -eq 1 ]]; then
+  for idx in "${!LINKED_GAP_IDS[@]}"; do
+    gid="${LINKED_GAP_IDS[$idx]}"
+    sev="${LINKED_GAP_SEVERITIES[$idx]}"
+
+    if is_protected_gap "$gid"; then
+      echo "loop.closeout.finalize FAIL: linked gap is protected and cannot be closed: $gid" >&2
+      blocked_gap_count=$((blocked_gap_count + 1))
+      continue
+    fi
+
+    if severity_requires_fix_to_lock "$sev"; then
+      if [[ -z "$REGRESSION_LOCK_ID" || -z "$EVIDENCE" ]]; then
+        echo "loop.closeout.finalize FAIL: linked $sev gap $gid requires --regression-lock-id and --evidence" >&2
+        blocked_gap_count=$((blocked_gap_count + 1))
+        continue
+      fi
+    fi
+  done
+fi
+
+if [[ "$blocked_gap_count" -gt 0 ]]; then
+  echo "loop.closeout.finalize FAIL: blocker_count=$blocked_gap_count (loop remains active)" >&2
+  exit 1
+fi
+
+acquire_git_lock gaps || exit 1
+trap 'release_git_lock' EXIT INT TERM
+
+if [[ "$CLOSE_LINKED_GAPS" -eq 1 ]]; then
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  close_note="Closed by loop.closeout.finalize (${SPINE_CAP_RUN_KEY:-manual})"
+
+  for idx in "${!LINKED_GAP_IDS[@]}"; do
+    gid="${LINKED_GAP_IDS[$idx]}"
+    sev="${LINKED_GAP_SEVERITIES[$idx]}"
+
+    yq e -i "(.gaps[] | select(.id == \"$gid\")).status = \"fixed\"" "$GAPS_FILE"
+    yq e -i "(.gaps[] | select(.id == \"$gid\")).fixed_in = \"$LOOP_ID\"" "$GAPS_FILE"
+    yq e -i "(.gaps[] | select(.id == \"$gid\")).notes = ((.notes // \"\") + (if (.notes // \"\") == \"\" then \"\" else \" | \" end) + \"$close_note\")" "$GAPS_FILE"
+
+    if severity_requires_fix_to_lock "$sev"; then
+      yq e -i "(.gaps[] | select(.id == \"$gid\")).regression_lock_id = \"$REGRESSION_LOCK_ID\"" "$GAPS_FILE"
+      yq e -i "(.gaps[] | select(.id == \"$gid\")).evidence = \"$EVIDENCE\"" "$GAPS_FILE"
+      [[ -n "$OWNER" ]] && yq e -i "(.gaps[] | select(.id == \"$gid\")).owner = \"$OWNER\"" "$GAPS_FILE"
+      [[ -n "$EXPIRY_CHECK" ]] && yq e -i "(.gaps[] | select(.id == \"$gid\")).expiry_check = \"$EXPIRY_CHECK\"" "$GAPS_FILE"
+      [[ -n "$ROOT_CAUSE" ]] && yq e -i "(.gaps[] | select(.id == \"$gid\")).root_cause = \"$ROOT_CAUSE\"" "$GAPS_FILE"
+    fi
+
+    closed_gap_count=$((closed_gap_count + 1))
+  done
+
+  if [[ "$closed_gap_count" -gt 0 ]]; then
+    yq e -i ".updated = \"$timestamp\"" "$GAPS_FILE"
+  fi
+fi
+
+# Atomic frontmatter status mutation.
+tmp_file="$(mktemp "${SCOPE_FILE}.tmp.XXXXXX")"
+if ! awk '
+  BEGIN { in_fm=0; replaced=0 }
+  {
+    if ($0 == "---") {
+      if (in_fm == 0) { in_fm=1; print; next }
+      if (in_fm == 1) { in_fm=2; print; next }
+    }
+    if (in_fm == 1 && replaced == 0 && $1 == "status:") {
+      print "status: closed"
+      replaced=1
+      next
+    }
+    print
+  }
+  END {
+    if (replaced == 0) {
+      exit 2
+    }
+  }
+' "$SCOPE_FILE" > "$tmp_file"; then
+  rm -f "$tmp_file"
+  echo "loop.closeout.finalize FAIL: unable to update loop status in $SCOPE_FILE" >&2
+  exit 1
+fi
+mv "$tmp_file" "$SCOPE_FILE"
+
+if [[ -z "$RECEIPT_PATH" ]]; then
+  RECEIPT_PATH="$ROOT/$RECEIPT_DIR_REL/${LOOP_ID}.closeout.md"
+elif [[ "$RECEIPT_PATH" != /* ]]; then
+  RECEIPT_PATH="$ROOT/$RECEIPT_PATH"
+fi
+mkdir -p "$(dirname "$RECEIPT_PATH")"
+
+matrix_decision="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("decision","unknown"))' "$validation_json")"
+matrix_run_keys="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("run_key_count",0))' "$validation_json")"
+
+cat > "$RECEIPT_PATH" <<EOF
+# Loop Closeout Receipt
+
+- loop_id: $LOOP_ID
+- status: closed
+- acceptance_matrix: $ACCEPTANCE_MATRIX
+- matrix_decision: $matrix_decision
+- matrix_run_key_count: $matrix_run_keys
+- linked_open_gaps_before: $linked_open_count
+- linked_gaps_closed: $closed_gap_count
+- linked_gap_close_mode: $([[ "$CLOSE_LINKED_GAPS" -eq 1 ]] && echo "enabled" || echo "disabled")
+- regression_lock_id_applied: ${REGRESSION_LOCK_ID:-n/a}
+- evidence_reference: ${EVIDENCE:-n/a}
+- closeout_gate: D289 loop-closeout-completeness-lock
+- capability: loop.closeout.finalize
+- run_key: ${SPINE_CAP_RUN_KEY:-manual}
+- generated_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
+release_git_lock
+trap - EXIT INT TERM
+
+echo "loop.closeout.finalize"
+echo "loop_id=$LOOP_ID"
+echo "acceptance_matrix=$ACCEPTANCE_MATRIX"
+echo "linked_open_gaps_before=$linked_open_count"
+echo "linked_gaps_closed=$closed_gap_count"
+echo "receipt=$RECEIPT_PATH"
