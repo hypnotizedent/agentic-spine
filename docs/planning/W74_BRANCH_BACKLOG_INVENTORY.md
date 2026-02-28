@@ -19,7 +19,7 @@
 | agentic-spine | codex/w72-runtime-recovery-20260228 | 618f2fcd2a96bbc0422c5bba1455d64048daa2e6 | 0 | 3 | yes |
 | agentic-spine | codex/w72-w73-promote-20260228 | ed73f0a72227fafcf05c5845fe9cec93e40e8d18 | 0 | 0 | yes |
 | agentic-spine | codex/w73-unassigned-gate-triage-20260228 | 165124fe6d4df11fa13ffd7ddeb1b32f3a54bedf | 3 | 12 | no |
-| agentic-spine | codex/w74-final-closeout-branch-zero-20260228 | ed73f0a72227fafcf05c5845fe9cec93e40e8d18 | 0 | 0 | yes |
+| agentic-spine | codex/w74-final-closeout-branch-zero-20260228 | 6bcad4b7dbf7b90bcf7c91c3ff287f024da3263f | 1 | 0 | no |
 | workbench | codex/w60-supervisor-canonical-upgrade-20260227 | e1d97b7318b3415e8cafef30c7c494a585e7aec6 | 0 | 1 | yes |
 | workbench | codex/w61-entry-projection-verify-unification-20260228 | e1d97b7318b3415e8cafef30c7c494a585e7aec6 | 0 | 1 | yes |
 | workbench | codex/w62a-cross-repo-tail-remediation-20260228 | a2e7caccaaa153751da4c2edea97f0ce0a10cadb | 1 | 1 | no |

@@ -145,15 +145,6 @@ git -C /Users/ronnyworks/code/agentic-spine push github --delete codex/w72-w73-p
 git -C /Users/ronnyworks/code/agentic-spine push share --delete codex/w72-w73-promote-20260228
 ```
 
-### agentic-spine :: codex/w74-final-closeout-branch-zero-20260228
-- head_sha: `ed73f0a72227fafcf05c5845fe9cec93e40e8d18`
-```bash
-git -C /Users/ronnyworks/code/agentic-spine branch -d codex/w74-final-closeout-branch-zero-20260228
-git -C /Users/ronnyworks/code/agentic-spine push origin --delete codex/w74-final-closeout-branch-zero-20260228
-git -C /Users/ronnyworks/code/agentic-spine push github --delete codex/w74-final-closeout-branch-zero-20260228
-git -C /Users/ronnyworks/code/agentic-spine push share --delete codex/w74-final-closeout-branch-zero-20260228
-```
-
 ### workbench :: codex/w60-supervisor-canonical-upgrade-20260227
 - head_sha: `e1d97b7318b3415e8cafef30c7c494a585e7aec6`
 ```bash
