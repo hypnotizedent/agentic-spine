@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+POLICY="$ROOT/ops/bindings/verify.ring.policy.yaml"
+
+fix_hint() {
+  cat <<'EOF'
+fix_hint: run W70 calibration flow (12x ./bin/ops cap run verify.pack.run workbench), recompute p95+5%, update verify.ring.policy.yaml, and link override_receipt_reference before raising threshold.
+EOF
+}
+
+fail() {
+  echo "workbench-budget-regression-lock FAIL: $*" >&2
+  fix_hint >&2
+  exit 1
+}
+
+need_num() {
+  local raw="$1"
+  local name="$2"
+  [[ "$raw" =~ ^[0-9]+$ ]] || fail "invalid numeric value for $name: '$raw'"
+}
+
+[[ -f "$POLICY" ]] || fail "missing policy file: $POLICY"
+command -v yq >/dev/null 2>&1 || fail "missing command: yq"
+
+standard_budget="$(yq e -r '.budgets_seconds.standard // ""' "$POLICY" 2>/dev/null || true)"
+workbench_budget="$(yq e -r '.pack_budget_overrides_seconds.workbench // ""' "$POLICY" 2>/dev/null || true)"
+calibrated_budget="$(yq e -r '.calibrations.workbench_pack_standard.calibrated_budget_seconds // ""' "$POLICY" 2>/dev/null || true)"
+approved_max="$(yq e -r '.calibrations.workbench_pack_standard.approved_max_seconds_without_override // ""' "$POLICY" 2>/dev/null || true)"
+override_receipt="$(yq e -r '.calibrations.workbench_pack_standard.override_receipt_reference // ""' "$POLICY" 2>/dev/null || true)"
+
+need_num "$standard_budget" "budgets_seconds.standard"
+need_num "$workbench_budget" "pack_budget_overrides_seconds.workbench"
+need_num "$calibrated_budget" "calibrations.workbench_pack_standard.calibrated_budget_seconds"
+need_num "$approved_max" "calibrations.workbench_pack_standard.approved_max_seconds_without_override"
+
+[[ "$workbench_budget" -eq "$calibrated_budget" ]] || fail "workbench override ($workbench_budget) must equal calibrated_budget_seconds ($calibrated_budget)"
+[[ "$workbench_budget" -ge "$standard_budget" ]] || fail "workbench override ($workbench_budget) must be >= standard budget ($standard_budget)"
+
+if [[ "$workbench_budget" -gt "$approved_max" ]]; then
+  [[ -n "$override_receipt" && "$override_receipt" != "null" ]] || fail "override required: workbench budget $workbench_budget exceeds approved max $approved_max"
+  if [[ "$override_receipt" = /* ]]; then
+    [[ -f "$override_receipt" ]] || fail "override receipt not found: $override_receipt"
+  else
+    [[ -f "$ROOT/$override_receipt" ]] || fail "override receipt not found: $ROOT/$override_receipt"
+  fi
+fi
+
+echo "workbench-budget-regression-lock PASS: standard=$standard_budget workbench=$workbench_budget approved_max=$approved_max override_receipt=${override_receipt:-none}"

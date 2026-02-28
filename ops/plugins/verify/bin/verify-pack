@@ -43,9 +43,20 @@ case "$sub" in
     ;;
   run)
     shift
+    target="${1:-}"
+    if [[ "$target" == "workbench" ]]; then
+      lock_script=""
+      wb_budget=""
+      lock_script="$ROOT/ops/plugins/verify/bin/workbench-budget-regression-lock"
+      [[ -x "$lock_script" ]] || { echo "verify.pack FAIL: missing regression lock: $lock_script" >&2; exit 1; }
+      "$lock_script"
+      wb_budget="$(yq e -r '.pack_budget_overrides_seconds.workbench // ""' "$RING_POLICY" 2>/dev/null || true)"
+      [[ "$wb_budget" =~ ^[0-9]+$ ]] || { echo "verify.pack FAIL: invalid workbench pack budget override in $RING_POLICY" >&2; exit 1; }
+      exec env VERIFY_RING_ENTRYPOINT=standard VERIFY_RING_BUDGET_OVERRIDE_SECONDS="$wb_budget" "$RUNTIME" pack-run "$@"
+    fi
     # Communications pack can trigger local tailscale browser auth popups on some
     # macOS clients; default this pack to passive probe mode unless explicitly set.
-    if [[ "${1:-}" == "communications" && -z "${VERIFY_TAILSCALE_PROBE_MODE:-}" ]]; then
+    if [[ "$target" == "communications" && -z "${VERIFY_TAILSCALE_PROBE_MODE:-}" ]]; then
       exec env VERIFY_RING_ENTRYPOINT=standard VERIFY_TAILSCALE_PROBE_MODE=passive "$RUNTIME" pack-run "$@"
     fi
     exec env VERIFY_RING_ENTRYPOINT=standard "$RUNTIME" pack-run "$@"
