@@ -7,17 +7,17 @@ wave_id: W69B_FRESHNESS_RECOVERY_AND_FINAL_PROMOTION_20260228
 ### agentic-spine
 
 ```text
-TBD
+## codex/w69-branch-drift-registration-hardening-20260228
 ```
 
 ### workbench
 
 ```text
-TBD
+## codex/w69-branch-drift-registration-hardening-20260228
 ```
 
 ### mint-modules
 
 ```text
-TBD
+## codex/w69-branch-drift-registration-hardening-20260228
 ```
