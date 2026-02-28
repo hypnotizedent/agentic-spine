@@ -1,6 +1,6 @@
 # LOOP-GOV-CLAUDE-ENTRYPOINT-LOCK-20260208
 
-**Status:** open
+**Status:** closed
 **Severity:** medium
 **Owner:** @ronny
 **Created:** 2026-02-08
