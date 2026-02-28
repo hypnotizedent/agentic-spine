@@ -65,7 +65,7 @@ extraction/verification capabilities needed for governed operations:
 | GAP-OP-338 | P2 | Home network audit runbook |
 | GAP-OP-339 | P2 | Scoped service calls |
 | GAP-OP-340 | P3 | Entity ↔ Network mapping |
-| GAP-OP-34- | P3 | Health alerting |
+| GAP-OP-034 | P3 | Health alerting |
 | GAP-OP-342 | P3 | Stream Deck config tracking |
 
 ## Acceptance Criteria

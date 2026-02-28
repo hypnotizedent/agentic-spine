@@ -22,7 +22,7 @@ MCP + RAG workstreams paused by operator decision.
 - [x] Revert 1 modified workbench file (mcpjungle media-stack index.ts)
 - [x] Close LOOP-RAG-INDEX-PARITY-20260211 (deferred, already committed closed)
 - [x] Close LOOP-MCP-GOVERNANCE-PARITY-20260212 (untracked file removed)
-- [x] Close GAP-OP-111 (reverted from operational.gaps.yaml — MCP paused)
+- [x] Close historical MCP pause gap reference (reverted from operational.gaps.yaml — MCP paused)
 
 ## Rationale
 

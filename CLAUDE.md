@@ -8,7 +8,8 @@
 
 1. Read `AGENTS.md` for the full runtime contract.
 2. Run the Mandatory Startup Block below (fast startup by default).
-3. Run `./bin/ops cap list` only when you need to discover a specific capability.
+3. Run `./bin/ops cap show <capability>` when syntax/flags are uncertain.
+4. Run `./bin/ops cap list` only when you need to discover a specific capability.
 
 <!-- SPINE_STARTUP_BLOCK -->
 ## Mandatory Startup Block
@@ -29,7 +30,7 @@ cd ~/code/agentic-spine
 ## Release Certification (nightly / release only)
 
 ```bash
-./bin/ops cap run verify.release.run              # full 148-gate suite (requires Tailscale)
+./bin/ops cap run verify.release.run              # full release certification suite (requires Tailscale)
 ```
 
 ## Identity
