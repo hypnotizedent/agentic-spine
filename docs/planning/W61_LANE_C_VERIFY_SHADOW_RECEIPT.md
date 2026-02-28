@@ -20,10 +20,10 @@ Lane: C (`verify surface shadow unification`)
 ## Evidence
 
 - `verify.run fast --shadow --json`
-  - run key: `CAP-20260227-214501__verify.run__R3j1x74833`
+  - run key: `CAP-20260227-215731__verify.run__Rcax889244`
   - parity: PASS (delta=0)
 - `verify.run domain communications --shadow --json`
-  - run key: `CAP-20260227-214507__verify.run__Rz8x676732`
+  - run key: `CAP-20260227-215734__verify.run__Rok4g88361`
   - parity: PASS (delta=0)
 - `verify.run release --json`
   - run key: `CAP-20260227-214554__verify.run__Rfp4f82295`
