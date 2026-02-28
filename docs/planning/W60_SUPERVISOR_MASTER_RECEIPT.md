@@ -63,6 +63,7 @@ Supervisor terminal: `SPINE-CONTROL-01`
 | Gate reclassification/budget report emitted with waivers | PASS | `docs/planning/W60_GATE_RECLASSIFICATION_BUDGET_REPORT.md` + policy waivers |
 | Fix-to-lock closure map created | PASS | `docs/planning/W60_FIX_TO_LOCK_MAPPING.md` |
 | Regression lock catalog created | PASS | `docs/planning/W60_REGRESSION_LOCK_CATALOG.md` |
+| Branch zero-status report emitted | PASS | `docs/planning/W60_BRANCH_ZERO_STATUS_REPORT.md` |
 | loops.status and gaps.status reconciled | PASS | run keys above; orphaned gaps = 0 |
 
 ## Remaining Blockers

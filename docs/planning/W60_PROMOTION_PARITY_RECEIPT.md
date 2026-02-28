@@ -38,6 +38,11 @@ Promotion policy: `fetch --all --prune`, `ff-only`, push all required remotes, v
 | `workbench` | `e1d97b7318b3415e8cafef30c7c494a585e7aec6` | `e1d97b7318b3415e8cafef30c7c494a585e7aec6` | `e1d97b7318b3415e8cafef30c7c494a585e7aec6` | n/a | PASS |
 | `mint-modules` | `b98bf32126ad931842a2bb8983c3b8194286a4fd` | `b98bf32126ad931842a2bb8983c3b8194286a4fd` | `b98bf32126ad931842a2bb8983c3b8194286a4fd` | n/a | PASS |
 
+## Closeout Parity Continuation
+
+- Post-receipt closeout parity is tracked in `docs/planning/W60_BRANCH_ZERO_STATUS_REPORT.md`.
+- Requirement enforced: all repos end at clean worktree + zero divergence on `main` across required remotes.
+
 ## Evidence Commands
 
 - `git rev-parse main`
