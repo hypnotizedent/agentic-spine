@@ -17,6 +17,8 @@ echo "[freshness-critical-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 "$CAP_RUNNER" cap run network.home.dhcp.audit
 "$CAP_RUNNER" cap run calendar.external.ingest.refresh
 "$CAP_RUNNER" cap run calendar.ha.ingest.refresh
+"$CAP_RUNNER" cap run infra.storage.audit.snapshot
+"$CAP_RUNNER" cap run cloudflare.inventory.sync
 "$CAP_RUNNER" cap run verify.freshness.reconcile
 
 echo "[freshness-critical-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

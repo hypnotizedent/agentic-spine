@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# nas-startup (legacy fallback) - Wake and verify Synology NAS availability.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+HOME_REGISTRY="$SPINE_ROOT/ops/bindings/home.device.registry.yaml"
+
+EXECUTE=0
+WAIT_TIMEOUT_SEC=300
+NAS_ID="nas"
+MAC_OVERRIDE=""
+
+usage() {
+  cat <<'USAGE'
+nas.startup
+
+Usage:
+  nas-startup [--execute|--dry-run] [--wait-timeout-sec N] [--mac XX:XX:XX:XX:XX:XX]
+USAGE
+}
+
+fail() {
+  echo "STOP (2): $*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --execute) EXECUTE=1; shift ;;
+    --dry-run) EXECUTE=0; shift ;;
+    --wait-timeout-sec) WAIT_TIMEOUT_SEC="${2:-300}"; shift 2 ;;
+    --mac) MAC_OVERRIDE="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || fail "missing dependency: ssh"
+[[ -f "$SSH_BINDING" ]] || fail "missing binding: $SSH_BINDING"
+[[ -f "$HOME_REGISTRY" ]] || fail "missing binding: $HOME_REGISTRY"
+
+host="$(yq -r ".ssh.targets[] | select(.id == \"$NAS_ID\") | .host // \"\"" "$SSH_BINDING" | head -n1)"
+user="$(yq -r ".ssh.targets[] | select(.id == \"$NAS_ID\") | .user // \"\"" "$SSH_BINDING" | head -n1)"
+port="$(yq -r ".ssh.targets[] | select(.id == \"$NAS_ID\") | .port // 22" "$SSH_BINDING" | head -n1)"
+timeout="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+strict="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
+known_hosts="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
+mac="$MAC_OVERRIDE"
+if [[ -z "$mac" ]]; then
+  mac="$(yq -r ".devices[] | select(.id == \"$NAS_ID\") | .mac // \"\"" "$HOME_REGISTRY" | head -n1)"
+fi
+
+[[ -n "$host" ]] || fail "nas host not found in ssh targets"
+[[ -n "$user" ]] || fail "nas user not found in ssh targets"
+[[ -n "$mac" ]] || fail "nas MAC not found in home.device.registry (or provide --mac)"
+
+ssh_base=(
+  -o "ConnectTimeout=${timeout}"
+  -o "StrictHostKeyChecking=${strict}"
+  -o "UserKnownHostsFile=${known_hosts}"
+  -o "NumberOfPasswordPrompts=0"
+  -o "BatchMode=yes"
+  -o "LogLevel=ERROR"
+  -p "$port"
+)
+
+nas_ssh() {
+  ssh "${ssh_base[@]}" "${user}@${host}" "$@"
+}
+
+send_wol() {
+  local wol_mac="$1"
+  if command -v wakeonlan >/dev/null 2>&1; then
+    wakeonlan "$wol_mac" >/dev/null
+    return 0
+  fi
+
+  python3 - "$wol_mac" <<'PY'
+import socket
+import sys
+
+mac = sys.argv[1].replace(":", "").replace("-", "").strip()
+if len(mac) != 12:
+    raise SystemExit(1)
+
+packet = bytes.fromhex("FF" * 6 + mac * 16)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+sock.sendto(packet, ("255.255.255.255", 9))
+sock.close()
+PY
+}
+
+echo "nas.startup"
+echo "target: ${user}@${host}:${port}"
+echo "mac: $mac"
+echo "execute: $([[ "$EXECUTE" -eq 1 ]] && echo true || echo false)"
+echo
+
+if nas_ssh "true" >/dev/null 2>&1; then
+  echo "status: OK"
+  echo "detail: NAS already reachable"
+  exit 0
+fi
+
+if [[ "$EXECUTE" -eq 0 ]]; then
+  echo "status: DRY_RUN"
+  echo "action: would send Wake-on-LAN and wait for NAS SSH to become reachable"
+  exit 0
+fi
+
+echo "sending_wol: true"
+for _ in 1 2 3; do
+  if ! send_wol "$mac"; then
+    fail "failed to send wake-on-lan packet"
+  fi
+  sleep 1
+done
+
+echo "waiting_for_online: ${WAIT_TIMEOUT_SEC}s"
+elapsed=0
+while [[ "$elapsed" -lt "$WAIT_TIMEOUT_SEC" ]]; do
+  if nas_ssh "true" >/dev/null 2>&1; then
+    echo "status: OK"
+    echo "online_after_sec: $elapsed"
+    exit 0
+  fi
+  sleep 5
+  elapsed=$((elapsed + 5))
+done
+
+fail "NAS SSH still unreachable after ${WAIT_TIMEOUT_SEC}s"

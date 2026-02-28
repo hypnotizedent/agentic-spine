@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# nas-shutdown (legacy fallback) - Shut down Synology NAS via SSH.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+EXECUTE=0
+WAIT_TIMEOUT_SEC=120
+NAS_ID="nas"
+
+usage() {
+  cat <<'USAGE'
+nas.shutdown
+
+Usage:
+  nas-shutdown [--execute|--dry-run] [--wait-timeout-sec N]
+USAGE
+}
+
+fail() {
+  echo "STOP (2): $*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --execute) EXECUTE=1; shift ;;
+    --dry-run) EXECUTE=0; shift ;;
+    --wait-timeout-sec) WAIT_TIMEOUT_SEC="${2:-120}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || fail "missing dependency: ssh"
+[[ -f "$SSH_BINDING" ]] || fail "missing binding: $SSH_BINDING"
+
+host="$(yq -r ".ssh.targets[] | select(.id == \"$NAS_ID\") | .host // \"\"" "$SSH_BINDING" | head -n1)"
+user="$(yq -r ".ssh.targets[] | select(.id == \"$NAS_ID\") | .user // \"\"" "$SSH_BINDING" | head -n1)"
+port="$(yq -r ".ssh.targets[] | select(.id == \"$NAS_ID\") | .port // 22" "$SSH_BINDING" | head -n1)"
+timeout="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+strict="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
+known_hosts="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
+
+[[ -n "$host" ]] || fail "nas host not found in ssh targets"
+[[ -n "$user" ]] || fail "nas user not found in ssh targets"
+
+ssh_base=(
+  -o "ConnectTimeout=${timeout}"
+  -o "StrictHostKeyChecking=${strict}"
+  -o "UserKnownHostsFile=${known_hosts}"
+  -o "NumberOfPasswordPrompts=0"
+  -o "BatchMode=yes"
+  -o "LogLevel=ERROR"
+  -p "$port"
+)
+
+nas_ssh() {
+  ssh "${ssh_base[@]}" "${user}@${host}" "$@"
+}
+
+echo "nas.shutdown"
+echo "target: ${user}@${host}:${port}"
+echo "execute: $([[ "$EXECUTE" -eq 1 ]] && echo true || echo false)"
+echo
+
+if [[ "$EXECUTE" -eq 0 ]]; then
+  echo "status: DRY_RUN"
+  echo "action: would queue remote Synology shutdown and wait for host to go offline"
+  exit 0
+fi
+
+if ! nas_ssh "true" >/dev/null 2>&1; then
+  fail "NAS SSH precheck failed (${user}@${host})"
+fi
+
+# Queue shutdown asynchronously so the SSH command can return before the host powers off.
+remote_cmd="$(cat <<'EOS'
+nohup bash -lc 'sleep 2; if command -v synopoweroff >/dev/null 2>&1; then synopoweroff -s; elif [[ -x /usr/syno/sbin/synopoweroff ]]; then /usr/syno/sbin/synopoweroff -s; elif command -v poweroff >/dev/null 2>&1; then poweroff; fi' >/dev/null 2>&1 &
+EOS
+)"
+
+if ! nas_ssh "$remote_cmd" >/dev/null 2>&1; then
+  fail "failed to queue NAS shutdown command"
+fi
+
+echo "queued_shutdown: true"
+echo "waiting_for_offline: ${WAIT_TIMEOUT_SEC}s"
+
+elapsed=0
+while [[ "$elapsed" -lt "$WAIT_TIMEOUT_SEC" ]]; do
+  if ! nas_ssh "true" >/dev/null 2>&1; then
+    echo "status: OK"
+    echo "offline_after_sec: $elapsed"
+    exit 0
+  fi
+  sleep 3
+  elapsed=$((elapsed + 3))
+done
+
+fail "NAS still reachable after ${WAIT_TIMEOUT_SEC}s"
