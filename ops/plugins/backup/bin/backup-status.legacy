@@ -22,6 +22,7 @@ fi
 DEFAULT_STALE="$(yq -r '.defaults.stale_after_hours // 26' "$BINDING_FILE")"
 DEFAULT_SSH_TIMEOUT="$(yq -r '.defaults.ssh_timeout_sec // 6' "$BINDING_FILE")"
 TZ_NAME="$(yq -r '.defaults.timezone // "America/New_York"' "$BINDING_FILE")"
+TAILSCALE_PROBE_MODE="${VERIFY_TAILSCALE_PROBE_MODE:-passive}"
 
 # enabled targets only
 TARGET_LINES="$(
@@ -70,6 +71,7 @@ _fmt_iso_local() {
 
 _classify_ssh_error() {
   local stderr="$1"
+  if echo "$stderr" | grep -qi "tailscale ssh requires an additional check"; then echo "tailscale_interactive_auth_required"; return; fi
   # Seen in sandboxed runtimes where outbound SSH is blocked by policy.
   if echo "$stderr" | grep -qi "operation not permitted"; then echo "sandbox_blocked"; return; fi
   if echo "$stderr" | grep -qi "permission denied"; then echo "auth_denied"; return; fi
@@ -119,6 +121,13 @@ while IFS=$'\t' read -r NAME HOST BASE_PATH GLOB STALE_HOURS SSH_TIMEOUT; do
   [[ -n "$SSH_USER" && "$SSH_USER" != "null" ]] || SSH_USER="$DEF_USER"
   [[ -n "$SSH_PORT" && "$SSH_PORT" != "null" ]] || SSH_PORT="$DEF_PORT"
 
+  # Passive mode avoids interactive tailscale SSH browser auth popups.
+  if [[ "$TAILSCALE_PROBE_MODE" == "passive" && "$SSH_HOST" =~ ^100\. ]]; then
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "machine_target_is_tailscale_ip"
+    continue
+  fi
+
   # Remote probe script (read-only: test -d, ls, stat only)
   REMOTE_SCRIPT='
 set -euo pipefail
@@ -159,6 +168,11 @@ echo "MTIME=$MTIME"
 
   if [[ $RC -ne 0 ]]; then
     REASON="$(_classify_ssh_error "$ERR")"
+    if [[ "$REASON" == "tailscale_interactive_auth_required" || "$REASON" == "machine_target_is_tailscale_ip" ]]; then
+      printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+        "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "$REASON"
+      continue
+    fi
     printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
       "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "ERROR" "$REASON"
     DEGRADED=$((DEGRADED+1))
