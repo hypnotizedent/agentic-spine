@@ -8,6 +8,7 @@ set -euo pipefail
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 SNAPSHOT_FILE="${SPINE_ROOT}/mailroom/outbox/alerts/mcp-runtime-anti-drift-latest.json"
+source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 TMP_DIR="$(mktemp -d)"
 cleanup() {
@@ -18,6 +19,12 @@ trap cleanup EXIT
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "[mcp-runtime-anti-drift-cycle] missing dependency: $1" >&2
+    spine_enqueue_email_intent \
+      "mcp-runtime-anti-drift" \
+      "incident" \
+      "mcp-runtime-anti-drift missing dependency" \
+      "dependency=${1} missing; anti-drift cycle aborted." \
+      "mcp-runtime-anti-drift-cycle"
     exit 1
   }
 }
@@ -35,7 +42,8 @@ run_cap() {
   local out_file="$2"
 
   set +e
-  "$CAP_RUNNER" cap run "$cap_name" >"$out_file" 2>&1
+  spine_job_run "mcp-runtime-anti-drift-cycle:${cap_name}" \
+    "$CAP_RUNNER" cap run "$cap_name" >"$out_file" 2>&1
   local rc=$?
   set -e
   return "$rc"
@@ -107,7 +115,8 @@ jq -n \
   }' >"$SNAPSHOT_FILE"
 
 set +e
-"$CAP_RUNNER" cap run alerting.dispatch --snapshot "$SNAPSHOT_FILE" --no-probe
+spine_job_run "mcp-runtime-anti-drift-cycle:alerting.dispatch" \
+  "$CAP_RUNNER" cap run alerting.dispatch --snapshot "$SNAPSHOT_FILE" --no-probe
 dispatch_rc=$?
 set -e
 

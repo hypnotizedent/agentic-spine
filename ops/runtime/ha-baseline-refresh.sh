@@ -11,6 +11,7 @@ set -euo pipefail
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="$SPINE_ROOT/bin/ops"
 LOG_PREFIX="[ha-baseline-refresh]"
+source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 echo "$LOG_PREFIX Starting HA baseline refresh at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo
@@ -48,7 +49,9 @@ FAIL=0
 
 for cap in "${SNAPSHOT_CAPS[@]}"; do
   echo "$LOG_PREFIX Running: $cap"
-  if "$CAP_RUNNER" cap run "$cap" 2>&1; then
+  if spine_job_run \
+    "ha-baseline-refresh:${cap}" \
+    "$CAP_RUNNER" cap run "$cap" 2>&1; then
     PASS=$((PASS + 1))
     echo "$LOG_PREFIX OK: $cap"
   else
@@ -66,7 +69,9 @@ echo
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo "$LOG_PREFIX Running: ha.ssot.baseline.build"
-if "$CAP_RUNNER" cap run ha.ssot.baseline.build 2>&1; then
+if spine_job_run \
+  "ha-baseline-refresh:ha.ssot.baseline.build" \
+  "$CAP_RUNNER" cap run ha.ssot.baseline.build 2>&1; then
   echo "$LOG_PREFIX OK: baseline built successfully"
 else
   echo "$LOG_PREFIX FATAL: ha.ssot.baseline.build failed"
@@ -78,7 +83,9 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo "$LOG_PREFIX Running: ha.ssot.apply (runbook drift sync)"
-if echo "yes" | "$CAP_RUNNER" cap run ha.ssot.apply 2>&1; then
+if echo "yes" | spine_job_run \
+  "ha-baseline-refresh:ha.ssot.apply" \
+  "$CAP_RUNNER" cap run ha.ssot.apply 2>&1; then
   echo "$LOG_PREFIX OK: runbook synced"
 else
   echo "$LOG_PREFIX WARN: ha.ssot.apply failed (runbook may be stale)"
@@ -113,6 +120,11 @@ $CHANGED_FILES"
       echo "$LOG_PREFIX Pushed successfully"
     else
       echo "$LOG_PREFIX WARN: Push failed (may need manual intervention)"
+      spine_enqueue_email_intent \
+        "ha-baseline-refresh" \
+        "warn" \
+        "ha-baseline-refresh push failed" \
+        "Binding changes were committed but push to origin failed. Manual intervention may be required."
     fi
   fi
 else
