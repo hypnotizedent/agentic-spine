@@ -1,12 +1,12 @@
 ---
 loop_id: LOOP-MEDIA-HISTORY-CANONICALIZATION-20260301
 created: 2026-03-01
-status: closed
+status: active
 owner: "@ronny"
 scope: media
 priority: medium
-horizon: now
-execution_readiness: runnable
+horizon: later
+execution_readiness: blocked
 objective: Historical reconstruction and canonical contract updates for media topology, storage tiering, and transfer workflow
 ---
 
