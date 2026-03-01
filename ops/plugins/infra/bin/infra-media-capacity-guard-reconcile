@@ -67,6 +67,7 @@ OWNING_LOOP_ID="$(yq -r '.ownership.owning_loop_id // "LOOP-INFRA-MEDIA-CAPACITY
 OWNING_LOOP_PREFIX="$(yq -r '.ownership.owning_loop_prefix // "LOOP-INFRA-MEDIA-CAPACITY-GUARD-"' "$POLICY_FILE")"
 OWNING_TERMINAL="$(yq -r '.ownership.owning_terminal // "SPINE-EXECUTION-01"' "$POLICY_FILE")"
 MILESTONE_DUE_WINDOW="$(yq -r '.evidence.milestone_due_window // "48h"' "$POLICY_FILE")"
+SNAPSHOT_REL_PATH="$(yq -r '.runway.snapshot_path // "ops/bindings/media.capacity.snapshot.yaml"' "$POLICY_FILE")"
 
 readarray -t PROTECTED_GAPS < <(yq -r '.protected.no_touch_gap_ids[]?' "$POLICY_FILE" 2>/dev/null || true)
 readarray -t PROTECTED_LOOPS < <(yq -r '.protected.no_touch_loop_ids[]?' "$POLICY_FILE" 2>/dev/null || true)
@@ -189,6 +190,14 @@ if [[ -n "$GAP_ID" ]]; then
 fi
 
 HW_BRIEF="HW: media=${MEDIA_PCT}% ${STATE} | md1400=${MD_PCT:-unknown}% | capacity_gap=${GAP_ID:-none} | age=${age_field}"
+SNAPSHOT_PATH="$SNAPSHOT_REL_PATH"
+[[ "$SNAPSHOT_PATH" = /* ]] || SNAPSHOT_PATH="$ROOT/$SNAPSHOT_PATH"
+if [[ -f "$SNAPSHOT_PATH" ]]; then
+  snapshot_status="$(yq -r '.runway_status // "unknown"' "$SNAPSHOT_PATH" 2>/dev/null || echo unknown)"
+  snapshot_days_to_fail="$(yq -r '.projection.days_to_fail // "none"' "$SNAPSHOT_PATH" 2>/dev/null || echo none)"
+  snapshot_generated_at="$(yq -r '.generated_at_utc // ""' "$SNAPSHOT_PATH" 2>/dev/null || true)"
+  HW_BRIEF="${HW_BRIEF} | runway=${snapshot_status} | days_to_fail=${snapshot_days_to_fail} | snapshot=${snapshot_generated_at:-unknown}"
+fi
 
 if [[ "$MODE" == "brief" ]]; then
   echo "$HW_BRIEF"
@@ -259,7 +268,7 @@ objective: Keep media pool capacity below WARN threshold and prevent unowned/sta
 
 ## Objective
 
-Keep media capacity governed with daily evidence until `<80%` and enforce ownership linkage for WARN/FAIL states.
+Keep media capacity governed with daily evidence until below 80% and enforce ownership linkage for WARN/FAIL states.
 
 ## Milestones
 

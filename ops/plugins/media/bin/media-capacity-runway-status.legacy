@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
+
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'USAGE'
+media.capacity.runway.status
+
+Usage:
+  ./bin/ops cap run media.capacity.runway.status
+  ./bin/ops cap run media.capacity.runway.status --json
+USAGE
+      exit 0
+      ;;
+    --)
+      shift
+      ;;
+    *)
+      echo "media.capacity.runway.status FAIL: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "media.capacity.runway.status FAIL: missing dependency yq" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "media.capacity.runway.status FAIL: missing dependency python3" >&2; exit 1; }
+
+SNAPSHOT_REL="$(yq -r '.runway.snapshot_path // "ops/bindings/media.capacity.snapshot.yaml"' "$POLICY_FILE" 2>/dev/null || echo 'ops/bindings/media.capacity.snapshot.yaml')"
+SNAPSHOT_PATH="$SNAPSHOT_REL"
+[[ "$SNAPSHOT_PATH" = /* ]] || SNAPSHOT_PATH="$ROOT/$SNAPSHOT_PATH"
+
+python3 - "$SNAPSHOT_PATH" "$JSON_MODE" <<'PY'
+import json
+import pathlib
+import sys
+
+import yaml
+
+snapshot_path = pathlib.Path(sys.argv[1])
+json_mode = sys.argv[2] == "1"
+
+if not snapshot_path.exists():
+    payload = {
+        "capability": "media.capacity.runway.status",
+        "status": "unknown",
+        "reason": "snapshot missing",
+        "snapshot_path": str(snapshot_path),
+    }
+    if json_mode:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print("media.capacity.runway.status")
+        print("status: unknown")
+        print("reason: snapshot missing")
+        print(f"snapshot_path: {snapshot_path}")
+    raise SystemExit(0)
+
+obj = yaml.safe_load(snapshot_path.read_text(encoding="utf-8")) or {}
+pool = obj.get("pool", {}) if isinstance(obj, dict) else {}
+projection = obj.get("projection", {}) if isinstance(obj, dict) else {}
+policy_eval = obj.get("policy_evaluation", {}) if isinstance(obj, dict) else {}
+
+payload = {
+    "capability": "media.capacity.runway.status",
+    "status": str(obj.get("runway_status", "unknown")),
+    "generated_at_utc": str(obj.get("generated_at_utc", "")),
+    "usage_pct": pool.get("usage_pct"),
+    "days_to_warn": projection.get("days_to_warn"),
+    "days_to_fail": projection.get("days_to_fail"),
+    "runway_min_days": policy_eval.get("runway_min_days"),
+    "policy_compliant": policy_eval.get("compliant"),
+    "snapshot_path": str(snapshot_path),
+}
+
+if json_mode:
+    print(json.dumps(payload, sort_keys=True))
+else:
+    print("media.capacity.runway.status")
+    print(f"status: {payload['status']}")
+    print(f"generated_at_utc: {payload['generated_at_utc']}")
+    print(f"usage_pct: {payload['usage_pct']}")
+    print(f"days_to_warn: {payload['days_to_warn']}")
+    print(f"days_to_fail: {payload['days_to_fail']}")
+    print(f"runway_min_days: {payload['runway_min_days']}")
+    print(f"policy_compliant: {payload['policy_compliant']}")
+    print(f"snapshot_path: {payload['snapshot_path']}")
+PY

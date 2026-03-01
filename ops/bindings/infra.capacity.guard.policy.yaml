@@ -1,9 +1,9 @@
 status: authoritative
 owner: "@ronny"
-last_verified: "2026-02-27"
+last_verified: "2026-03-01"
 scope: media-capacity-guard-policy
-version: "1.0"
-updated: "2026-02-27T00:00:00Z"
+version: "2.0"
+updated: "2026-03-01T00:00:00Z"
 mode:
   default_policy: report
   enforce_promotion_criteria:
@@ -15,6 +15,54 @@ thresholds:
   media_warn_pct: 80
   media_fail_pct: 85
   stale_days: 7
+runway:
+  runway_min_days: 30
+  projection_freshness_ttl_hours: 30
+  growth_window_days: 14
+  top_contributors_limit: 8
+  snapshot_path: ops/bindings/media.capacity.snapshot.yaml
+  history_path: mailroom/state/capacity/media-capacity-history.ndjson
+action_matrix:
+  healthy:
+    severity: low
+    trigger: "runway_status=healthy"
+    required_actions:
+      - "Keep daily snapshot refresh active."
+      - "No reclaim action required."
+  warn:
+    severity: medium
+    trigger: "runway_status=warn or usage>=media_warn_pct"
+    required_actions:
+      - "Review top contributors and reclaim candidates from regenerable class."
+      - "Open/maintain owning loop+gap linkage until runway recovers."
+  critical:
+    severity: high
+    trigger: "runway_status=critical or usage>=media_fail_pct"
+    required_actions:
+      - "Escalate reclaim execution in primary media lane."
+      - "Freeze nonessential ingest until days_to_fail recovers above runway_min_days."
+tiered_reclaim_policy:
+  regenerable:
+    priority: p1
+    examples:
+      - "cache"
+      - "downloads"
+      - "transcode"
+    action: "Reclaim first; safe to rebuild from source."
+  stateful:
+    priority: p3
+    examples:
+      - "app-config"
+      - "metadata"
+      - "database"
+    action: "Do not reclaim without explicit backup + restore plan."
+  unknown:
+    priority: p2
+    action: "Classify before reclaim; default to hold."
+policy_links:
+  wan_transfer_policy:
+    policy_ref: ops/bindings/media.topology.history.yaml
+    rule: "No bulk media transfer over WAN — tier-3 media remains local to shop media lane."
 target:
   storage_host_id: pve
   pool_name: media

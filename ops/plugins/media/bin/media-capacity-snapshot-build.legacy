@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+POLICY_FILE="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+
+DRY_RUN=0
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+media.capacity.snapshot.build
+
+Usage:
+  ./bin/ops cap run media.capacity.snapshot.build
+  ./bin/ops cap run media.capacity.snapshot.build --dry-run
+  ./bin/ops cap run media.capacity.snapshot.build --json
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      ;;
+    *)
+      echo "media.capacity.snapshot.build FAIL: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "media.capacity.snapshot.build FAIL: missing dependency yq" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "media.capacity.snapshot.build FAIL: missing dependency python3" >&2; exit 1; }
+command -v ssh >/dev/null 2>&1 || { echo "media.capacity.snapshot.build FAIL: missing dependency ssh" >&2; exit 1; }
+[[ -f "$POLICY_FILE" ]] || { echo "media.capacity.snapshot.build FAIL: missing policy $POLICY_FILE" >&2; exit 1; }
+[[ -f "$SSH_BINDING" ]] || { echo "media.capacity.snapshot.build FAIL: missing ssh binding $SSH_BINDING" >&2; exit 1; }
+
+STORAGE_HOST_ID="$(yq -r '.target.storage_host_id // "pve"' "$POLICY_FILE")"
+POOL_NAME="$(yq -r '.target.pool_name // "media"' "$POLICY_FILE")"
+WARN_PCT="$(yq -r '.thresholds.media_warn_pct // 80' "$POLICY_FILE")"
+FAIL_PCT="$(yq -r '.thresholds.media_fail_pct // 85' "$POLICY_FILE")"
+RUNWAY_MIN_DAYS="$(yq -r '.runway.runway_min_days // 30' "$POLICY_FILE")"
+WINDOW_DAYS="$(yq -r '.runway.growth_window_days // 14' "$POLICY_FILE")"
+TTL_HOURS="$(yq -r '.runway.projection_freshness_ttl_hours // 30' "$POLICY_FILE")"
+TOP_LIMIT="$(yq -r '.runway.top_contributors_limit // 8' "$POLICY_FILE")"
+SNAPSHOT_REL="$(yq -r '.runway.snapshot_path // "ops/bindings/media.capacity.snapshot.yaml"' "$POLICY_FILE")"
+HISTORY_REL="$(yq -r '.runway.history_path // "mailroom/state/capacity/media-capacity-history.ndjson"' "$POLICY_FILE")"
+NO_WAN_RULE="$(yq -r '.policy_links.wan_transfer_policy.rule // ""' "$POLICY_FILE")"
+
+SNAPSHOT_PATH="$SNAPSHOT_REL"
+[[ "$SNAPSHOT_PATH" = /* ]] || SNAPSHOT_PATH="$ROOT/$SNAPSHOT_PATH"
+HISTORY_PATH="$HISTORY_REL"
+[[ "$HISTORY_PATH" = /* ]] || HISTORY_PATH="$ROOT/$HISTORY_PATH"
+
+ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
+ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$STORAGE_HOST_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" 2>/dev/null || echo ubuntu)"
+[[ -n "$ssh_host" ]] || { echo "media.capacity.snapshot.build FAIL: ssh target '$STORAGE_HOST_ID' not found" >&2; exit 1; }
+
+REF="$ssh_user@$ssh_host"
+SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+
+if ! ssh "${SSH_OPTS[@]}" "$REF" "true" >/dev/null 2>&1; then
+  echo "media.capacity.snapshot.build FAIL: ssh unreachable ($REF)" >&2
+  exit 1
+fi
+
+pool_line="$(ssh "${SSH_OPTS[@]}" "$REF" "zpool list -Hp -o size,allocated,free,capacity '$POOL_NAME' 2>/dev/null | head -1" 2>/dev/null || true)"
+if [[ -z "$pool_line" ]]; then
+  echo "media.capacity.snapshot.build FAIL: unable to read zpool metrics for '$POOL_NAME'" >&2
+  exit 1
+fi
+
+dataset_tmp="$(mktemp)"
+trap 'rm -f "$dataset_tmp"' EXIT
+ssh "${SSH_OPTS[@]}" "$REF" "zfs list -Hp -o name,used -r '$POOL_NAME' 2>/dev/null" > "$dataset_tmp" || true
+
+ts_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "$(dirname "$SNAPSHOT_PATH")" "$(dirname "$HISTORY_PATH")"
+
+python3 - "$ROOT" "$POLICY_FILE" "$SNAPSHOT_PATH" "$HISTORY_PATH" "$dataset_tmp" "$ts_utc" "$pool_line" "$POOL_NAME" "$STORAGE_HOST_ID" "$WARN_PCT" "$FAIL_PCT" "$RUNWAY_MIN_DAYS" "$WINDOW_DAYS" "$TTL_HOURS" "$TOP_LIMIT" "$NO_WAN_RULE" "$DRY_RUN" "$JSON_MODE" <<'PY'
+import datetime as dt
+import json
+import math
+import os
+import pathlib
+import sys
+
+import yaml
+
+(
+    root,
+    policy_path,
+    snapshot_path,
+    history_path,
+    dataset_path,
+    ts_utc,
+    pool_line,
+    pool_name,
+    host_id,
+    warn_pct,
+    fail_pct,
+    runway_min_days,
+    window_days,
+    ttl_hours,
+    top_limit,
+    no_wan_rule,
+    dry_run,
+    json_mode,
+) = sys.argv[1:19]
+
+root_path = pathlib.Path(root)
+policy_path = pathlib.Path(policy_path)
+snapshot_path = pathlib.Path(snapshot_path)
+history_path = pathlib.Path(history_path)
+dataset_path = pathlib.Path(dataset_path)
+
+dry = dry_run == "1"
+json_out = json_mode == "1"
+
+warn_pct_i = int(float(warn_pct))
+fail_pct_i = int(float(fail_pct))
+runway_min_days_i = int(float(runway_min_days))
+window_days_i = int(float(window_days))
+ttl_hours_i = int(float(ttl_hours))
+top_limit_i = int(float(top_limit))
+
+parts = (pool_line or "").strip().split("\t")
+if len(parts) < 4:
+    print("media.capacity.snapshot.build FAIL: unexpected zpool output format", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    bytes_total = int(float(parts[0]))
+    bytes_used = int(float(parts[1]))
+    bytes_free = int(float(parts[2]))
+except Exception:
+    print("media.capacity.snapshot.build FAIL: non-numeric zpool metrics", file=sys.stderr)
+    raise SystemExit(1)
+
+pct_text = parts[3].strip().replace("%", "")
+try:
+    usage_pct = int(round(float(pct_text)))
+except Exception:
+    usage_pct = int(round((bytes_used / bytes_total) * 100)) if bytes_total > 0 else 0
+
+sample = {
+    "generated_at_utc": ts_utc,
+    "pool": pool_name,
+    "bytes_total": bytes_total,
+    "bytes_used": bytes_used,
+    "bytes_free": bytes_free,
+    "usage_pct": usage_pct,
+}
+
+history_rows = []
+if history_path.exists():
+    for line in history_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        history_rows.append(row)
+
+history_rows.append(sample)
+
+def parse_ts(value: str):
+    value = (value or "").strip()
+    if not value:
+        return None
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        return dt.datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+now_dt = parse_ts(ts_utc)
+window_start = now_dt - dt.timedelta(days=window_days_i) if now_dt else None
+window_rows = []
+for row in history_rows:
+    row_ts = parse_ts(str(row.get("generated_at_utc", "")))
+    if row_ts is None:
+        continue
+    if window_start and row_ts < window_start:
+        continue
+    window_rows.append((row_ts, row))
+
+window_rows.sort(key=lambda item: item[0])
+sample_count = len(window_rows)
+slope_bytes_per_day = None
+slope_basis = {
+    "method": "first_last_delta",
+    "sample_count": sample_count,
+    "window_days": window_days_i,
+    "first_sample_at_utc": "",
+    "last_sample_at_utc": "",
+}
+
+if sample_count >= 2:
+    first_dt, first_row = window_rows[0]
+    last_dt, last_row = window_rows[-1]
+    elapsed_days = max((last_dt - first_dt).total_seconds() / 86400.0, 0.0)
+    if elapsed_days > 0:
+        first_used = float(first_row.get("bytes_used", 0) or 0)
+        last_used = float(last_row.get("bytes_used", 0) or 0)
+        slope_bytes_per_day = (last_used - first_used) / elapsed_days
+    slope_basis["first_sample_at_utc"] = first_dt.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    slope_basis["last_sample_at_utc"] = last_dt.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+elif sample_count == 1:
+    only_dt, _ = window_rows[0]
+    stamp = only_dt.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    slope_basis["first_sample_at_utc"] = stamp
+    slope_basis["last_sample_at_utc"] = stamp
+
+
+def projected_days(threshold_pct: int):
+    threshold_bytes = bytes_total * (threshold_pct / 100.0)
+    if bytes_used >= threshold_bytes:
+        return 0.0
+    if slope_bytes_per_day is None or slope_bytes_per_day <= 0:
+        return None
+    days = (threshold_bytes - bytes_used) / slope_bytes_per_day
+    return max(days, 0.0)
+
+
+days_to_warn = projected_days(warn_pct_i)
+days_to_fail = projected_days(fail_pct_i)
+
+if usage_pct >= fail_pct_i:
+    runway_status = "critical"
+elif usage_pct >= warn_pct_i:
+    runway_status = "warn"
+elif days_to_fail is not None and days_to_fail < runway_min_days_i:
+    runway_status = "critical"
+elif days_to_warn is not None and days_to_warn < runway_min_days_i:
+    runway_status = "warn"
+else:
+    runway_status = "healthy"
+
+policy_compliant = runway_status == "healthy"
+if policy_compliant:
+    compliance_reason = "runway status healthy and projection above runway_min_days target"
+else:
+    compliance_reason = "runway status not healthy (warn/critical) against runway_min_days target"
+
+contributors = []
+if dataset_path.exists():
+    for line in dataset_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        name = parts[0].strip()
+        try:
+            used = int(float(parts[1].strip()))
+        except Exception:
+            continue
+        if name == pool_name:
+            continue
+        lname = name.lower()
+        if any(token in lname for token in ["cache", "downloads", "download", "tmp", "transcode", "staging", "recycle"]):
+            klass = "regenerable"
+        elif any(token in lname for token in ["config", "appdata", "metadata", "db", "database", "sqlite", "postgres", "redis", "state"]):
+            klass = "stateful"
+        else:
+            klass = "unknown"
+        contributors.append({
+            "dataset": name,
+            "used_bytes": used,
+            "used_gib": round(used / (1024 ** 3), 2),
+            "class": klass,
+        })
+
+contributors.sort(key=lambda row: row["used_bytes"], reverse=True)
+contributors = contributors[:top_limit_i]
+
+snapshot = {
+    "status": "generated",
+    "owner": "@ronny",
+    "last_verified": now_dt.strftime("%Y-%m-%d") if now_dt else "",
+    "scope": "media-capacity-snapshot",
+    "version": 1,
+    "generated_at_utc": ts_utc,
+    "source": {
+        "capability": "media.capacity.snapshot.build",
+        "host_id": host_id,
+        "pool_name": pool_name,
+    },
+    "pool": {
+        "usage_pct": usage_pct,
+        "bytes_used": bytes_used,
+        "bytes_free": bytes_free,
+        "bytes_total": bytes_total,
+        "warn_pct": warn_pct_i,
+        "fail_pct": fail_pct_i,
+    },
+    "growth": {
+        "window_days": window_days_i,
+        "slope_basis": slope_basis,
+        "slope_bytes_per_day": None if slope_bytes_per_day is None else round(slope_bytes_per_day, 2),
+    },
+    "projection": {
+        "days_to_warn": None if days_to_warn is None else round(days_to_warn, 2),
+        "days_to_fail": None if days_to_fail is None else round(days_to_fail, 2),
+    },
+    "runway_status": runway_status,
+    "top_contributors": contributors,
+    "policy_evaluation": {
+        "runway_min_days": runway_min_days_i,
+        "compliant": bool(policy_compliant),
+        "reason": compliance_reason,
+        "projection_freshness_ttl_hours": ttl_hours_i,
+    },
+    "policy_reference": {
+        "path": str(policy_path.relative_to(root_path)),
+        "thresholds": {
+            "warn_pct": warn_pct_i,
+            "fail_pct": fail_pct_i,
+        },
+        "runway_min_days": runway_min_days_i,
+        "no_bulk_wan_transfer_rule": no_wan_rule,
+    },
+}
+
+if not dry:
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    with history_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(sample, sort_keys=True) + "\n")
+
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    with snapshot_path.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(snapshot, fh, sort_keys=False, allow_unicode=False)
+
+if json_out:
+    print(json.dumps({
+        "capability": "media.capacity.snapshot.build",
+        "generated_at_utc": ts_utc,
+        "snapshot_path": str(snapshot_path),
+        "history_path": str(history_path),
+        "usage_pct": usage_pct,
+        "days_to_warn": snapshot["projection"]["days_to_warn"],
+        "days_to_fail": snapshot["projection"]["days_to_fail"],
+        "runway_status": runway_status,
+        "policy_compliant": bool(policy_compliant),
+        "dry_run": dry,
+    }, sort_keys=True))
+else:
+    print("media.capacity.snapshot.build")
+    print(f"generated_at_utc: {ts_utc}")
+    print(f"snapshot_path: {snapshot_path}")
+    print(f"history_path: {history_path}")
+    print(f"usage_pct: {usage_pct}")
+    print(f"days_to_warn: {snapshot['projection']['days_to_warn']}")
+    print(f"days_to_fail: {snapshot['projection']['days_to_fail']}")
+    print(f"runway_status: {runway_status}")
+    print(f"policy_compliant: {str(bool(policy_compliant)).lower()}")
+    print(f"top_contributors_count: {len(contributors)}")
+    print(f"dry_run: {str(dry).lower()}")
+PY

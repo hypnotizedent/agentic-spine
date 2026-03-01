@@ -542,6 +542,79 @@ def collect_friction_queue_status() -> dict[str, Any]:
     }
 
 
+def collect_media_capacity_runway() -> dict[str, Any]:
+    policy = load_yaml(ROOT / "ops/bindings/infra.capacity.guard.policy.yaml", {})
+    runway_cfg = policy.get("runway", {}) if isinstance(policy, dict) else {}
+    snapshot_rel = str(runway_cfg.get("snapshot_path", "ops/bindings/media.capacity.snapshot.yaml"))
+    ttl_hours = int(runway_cfg.get("projection_freshness_ttl_hours", 30) or 30)
+
+    snapshot_path = Path(snapshot_rel)
+    if not snapshot_path.is_absolute():
+        snapshot_path = ROOT / snapshot_rel
+
+    if not snapshot_path.exists():
+        return {
+            "status": "unknown",
+            "snapshot_present": False,
+            "snapshot_path": str(snapshot_path),
+            "reason": "snapshot_missing",
+            "usage_pct": None,
+            "days_to_fail": None,
+            "policy_compliant": None,
+            "age_hours": None,
+        }
+
+    payload = load_yaml(snapshot_path, {})
+    if not isinstance(payload, dict):
+        return {
+            "status": "error",
+            "snapshot_present": True,
+            "snapshot_path": str(snapshot_path),
+            "reason": "snapshot_parse_error",
+            "usage_pct": None,
+            "days_to_fail": None,
+            "policy_compliant": None,
+            "age_hours": None,
+        }
+
+    generated_at = str(payload.get("generated_at_utc", ""))
+    age_hours = None
+    if generated_at:
+        try:
+            ts = generated_at[:-1] + "+00:00" if generated_at.endswith("Z") else generated_at
+            gen_dt = dt.datetime.fromisoformat(ts)
+            if gen_dt.tzinfo is None:
+                gen_dt = gen_dt.replace(tzinfo=dt.timezone.utc)
+            age_hours = round((dt.datetime.now(dt.timezone.utc) - gen_dt.astimezone(dt.timezone.utc)).total_seconds() / 3600.0, 2)
+        except ValueError:
+            age_hours = None
+
+    runway_status = str(payload.get("runway_status", "unknown"))
+    policy_eval = payload.get("policy_evaluation", {}) if isinstance(payload.get("policy_evaluation"), dict) else {}
+    projection = payload.get("projection", {}) if isinstance(payload.get("projection"), dict) else {}
+    pool = payload.get("pool", {}) if isinstance(payload.get("pool"), dict) else {}
+    policy_compliant = policy_eval.get("compliant")
+
+    status = runway_status
+    if age_hours is not None and age_hours > ttl_hours:
+        status = "stale"
+
+    return {
+        "status": status,
+        "snapshot_present": True,
+        "snapshot_path": str(snapshot_path),
+        "reason": "",
+        "generated_at_utc": generated_at,
+        "age_hours": age_hours,
+        "ttl_hours": ttl_hours,
+        "usage_pct": pool.get("usage_pct"),
+        "days_to_warn": projection.get("days_to_warn"),
+        "days_to_fail": projection.get("days_to_fail"),
+        "policy_compliant": policy_compliant,
+        "runway_min_days": policy_eval.get("runway_min_days"),
+    }
+
+
 def collect_tick_data(window_hours: int) -> dict[str, Any]:
     loops = collect_open_loops()
     gaps = collect_open_gaps()
@@ -554,6 +627,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
     comms_queue = collect_comms_queue_status()
     scheduler = collect_launchd_scheduler_status()
     friction = collect_friction_queue_status()
+    media_capacity_runway = collect_media_capacity_runway()
 
     summary = {
         "open_loops": len(loops),
@@ -585,6 +659,10 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         "friction_filed": int(friction.get("summary", {}).get("filed", 0)),
         "friction_matched": int(friction.get("summary", {}).get("matched", 0)),
         "friction_dedupe_rate": float(friction.get("summary", {}).get("dedupe_rate", 0.0)),
+        "media_capacity_runway_status": media_capacity_runway.get("status", "unknown"),
+        "media_capacity_usage_pct": media_capacity_runway.get("usage_pct"),
+        "media_capacity_days_to_fail": media_capacity_runway.get("days_to_fail"),
+        "media_capacity_policy_compliant": media_capacity_runway.get("policy_compliant"),
     }
 
     status = "ok"
@@ -593,6 +671,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         or any(g.get("severity") == "critical" for g in gaps)
         or scheduler.get("status") == "error"
         or friction.get("status") == "error"
+        or media_capacity_runway.get("status") == "critical"
     ):
         status = "error"
     elif (
@@ -605,6 +684,8 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         or comms_queue.get("slo_status") == "incident"
         or scheduler.get("status") == "warn"
         or friction.get("status") == "warn"
+        or media_capacity_runway.get("status") in {"warn", "stale", "unknown"}
+        or media_capacity_runway.get("policy_compliant") is False
     ):
         status = "warn"
 
@@ -627,6 +708,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
             "comms_queue": comms_queue,
             "scheduler": scheduler,
             "friction": friction,
+            "media_capacity_runway": media_capacity_runway,
         },
     }
 
@@ -1219,6 +1301,7 @@ def render_tick_markdown(payload: dict[str, Any]) -> str:
         f"- Core Verify Latest Status: {summary.get('core_verify_latest_status', 'unknown')}",
         f"- Graph Nodes: {summary.get('graph_nodes', 0)}",
         f"- Graph Edges: {summary.get('graph_edges', 0)}",
+        f"- Media Capacity Runway: {summary.get('media_capacity_runway_status', 'unknown')} (usage={summary.get('media_capacity_usage_pct', 'n/a')}% days_to_fail={summary.get('media_capacity_days_to_fail', 'n/a')} compliant={summary.get('media_capacity_policy_compliant', 'n/a')})",
         f"- CommsQueue: {summary.get('comms_queue_slo_status', 'unknown')} (pending={summary.get('comms_queue_pending', 0)} escalations={summary.get('comms_queue_escalations', 0)})",
         f"- FrictionQueue: {summary.get('friction_status', 'unknown')} (queued={summary.get('friction_queued', 0)} stale={summary.get('friction_stale', 0)} filed={summary.get('friction_filed', 0)} matched={summary.get('friction_matched', 0)} dedupe_rate={summary.get('friction_dedupe_rate', 0.0)})",
         "",
