@@ -4,7 +4,23 @@ set -euo pipefail
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 REGISTRY="${SPINE_ROOT}/ops/bindings/launchd.scheduler.registry.yaml"
 SCHEDULER_STATUS_SCRIPT="${SPINE_ROOT}/ops/plugins/host/bin/launchd-scheduler-health-status"
+CAP_RUNNER="${SPINE_ROOT}/bin/ops"
+AUTO_RESTART=0
 source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --auto-restart) AUTO_RESTART=1; shift ;;
+    -h|--help)
+      echo "Usage: launchd-health-check.sh [--auto-restart]"
+      exit 0
+      ;;
+    *)
+      echo "[launchd-health-check] unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
 
 check_launchd_health() {
   if [[ ! -f "$REGISTRY" ]]; then
@@ -34,21 +50,32 @@ check_launchd_health() {
     return 0
   fi
 
-  local uid_val missing
+  local uid_val missing recovered
+  local -a missing_labels=()
   uid_val="$(id -u)"
   missing=0
-  missing_labels=()
+  recovered=0
   for label in "${labels[@]}"; do
     if launchctl print "gui/${uid_val}/${label}" >/dev/null 2>&1; then
       echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] OK ${label}"
-    else
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] MISSING ${label}"
-      missing=$((missing + 1))
-      missing_labels+=("$label")
+      continue
     fi
+
+    if [[ "$AUTO_RESTART" -eq 1 ]]; then
+      if "$CAP_RUNNER" cap run recovery.launchd.restart -- --label "$label" >/dev/null 2>&1 && \
+         launchctl print "gui/${uid_val}/${label}" >/dev/null 2>&1; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] RECOVERED ${label} (auto-restart)"
+        recovered=$((recovered + 1))
+        continue
+      fi
+    fi
+
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] MISSING ${label}"
+    missing=$((missing + 1))
+    missing_labels+=("$label")
   done
 
-  echo "[launchd-health-check] labels=${#labels[@]} missing=${missing}"
+  echo "[launchd-health-check] labels=${#labels[@]} missing=${missing} recovered=${recovered} auto_restart=${AUTO_RESTART}"
   if [[ "$missing" -gt 0 ]]; then
     spine_enqueue_email_intent \
       "launchd-health-check" \

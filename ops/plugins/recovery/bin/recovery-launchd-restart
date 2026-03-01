@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+STATE_DIR="${SPINE_STATE:-$SPINE_ROOT/mailroom/state}"
+
+usage() {
+  cat <<'USAGE'
+recovery-launchd-restart
+
+Usage:
+  recovery-launchd-restart --label <launchd.label> [--dry-run]
+USAGE
+}
+
+stop() {
+  echo "recovery.launchd.restart FAIL: $*" >&2
+  exit 1
+}
+
+LABEL=""
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --label) LABEL="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$LABEL" ]] || stop "--label is required"
+command -v launchctl >/dev/null 2>&1 || stop "missing dependency: launchctl"
+
+uid_val="$(id -u)"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+[[ -f "$PLIST" ]] || stop "plist not found: $PLIST"
+
+base_name="${LABEL##*.}"
+pid_file="$STATE_DIR/${base_name}.pid"
+lock_dir="$STATE_DIR/locks/${base_name}.lock"
+alt_lock="$STATE_DIR/${base_name}.lock"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "recovery.launchd.restart"
+  echo "label: $LABEL"
+  echo "plist: $PLIST"
+  echo "result: dry-run"
+  exit 0
+fi
+
+if launchctl print "gui/${uid_val}/${LABEL}" >/dev/null 2>&1; then
+  launchctl bootout "gui/${uid_val}" "$PLIST" >/dev/null 2>&1 || launchctl bootout "gui/${uid_val}/${LABEL}" >/dev/null 2>&1 || true
+fi
+
+[[ -d "$lock_dir" ]] && rm -rf "$lock_dir"
+[[ -d "$alt_lock" ]] && rm -rf "$alt_lock"
+[[ -f "$pid_file" ]] && rm -f "$pid_file"
+
+launchctl bootstrap "gui/${uid_val}" "$PLIST"
+sleep 2
+launchctl print "gui/${uid_val}/${LABEL}" >/dev/null 2>&1 || stop "launchctl verify failed for $LABEL"
+
+echo "recovery.launchd.restart"
+echo "label: $LABEL"
+echo "result: success"

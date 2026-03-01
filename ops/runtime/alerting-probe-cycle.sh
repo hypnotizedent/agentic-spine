@@ -8,6 +8,7 @@ set -euo pipefail
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
+SNAPSHOT_FILE="/tmp/spine-alerting-probe-latest.json"
 source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 hydrate_ha_alerting_secrets() {
@@ -51,6 +52,17 @@ if ! spine_job_run "alerting-probe-cycle:alerting.dispatch" "$CAP_RUNNER" cap ru
     "Scheduled alerting dispatch failed; review alerting logs and channel health." \
     "alerting-probe-cycle"
   exit 1
+fi
+
+# If alerting snapshot exposes failing_gates, opportunistically trigger deterministic recovery.
+if command -v jq >/dev/null 2>&1 && [[ -f "$SNAPSHOT_FILE" ]]; then
+  mapfile -t recovery_gate_ids < <(
+    jq -r '([.failing_gates[]?] + [.domains[]?.failing_gates[]?]) | unique | .[]?' "$SNAPSHOT_FILE" 2>/dev/null || true
+  )
+  for gid in "${recovery_gate_ids[@]}"; do
+    [[ -n "$gid" ]] || continue
+    "$CAP_RUNNER" cap run recovery.dispatch -- --gate-id "$gid" --failure-class deterministic >/dev/null 2>&1 || true
+  done
 fi
 
 echo "[alerting-probe-cycle] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
