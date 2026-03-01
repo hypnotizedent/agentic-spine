@@ -192,36 +192,44 @@ def main() -> None:
     )
 
     # SLO 4: Closure Integrity
+    # Measure resolved high/critical gaps that carry a real regression lock
+    # (legacy placeholder lock ids do not satisfy this SLO).
     gaps = gaps_doc.get("gaps", []) or []
-    open_gaps = [gap for gap in gaps if str(gap.get("status", "")).strip() == "open"]
-    closure_den = max(1, len(open_gaps))
+    resolved_hc_gaps = [
+        gap for gap in gaps
+        if str(gap.get("status", "")).strip() in {"fixed", "closed"}
+        and str(gap.get("severity", "")).strip() in {"high", "critical"}
+    ]
+    closure_den = len(resolved_hc_gaps)
     closure_num = 0
-    orphan_count = 0
-    missing_title_count = 0
+    legacy_placeholder_count = 0
+    missing_lock_count = 0
 
-    for gap in open_gaps:
-        parent = str(gap.get("parent_loop", "")).strip()
-        title = str(gap.get("title", "")).strip()
-        has_parent = bool(parent)
-        has_title = bool(title) and title.lower() != "null"
-        if not has_parent:
-            orphan_count += 1
-        if not has_title:
-            missing_title_count += 1
-        if has_parent and has_title:
-            closure_num += 1
+    for gap in resolved_hc_gaps:
+        lock_id = str(gap.get("regression_lock_id", "")).strip()
+        if not lock_id:
+            missing_lock_count += 1
+            continue
+        if lock_id.startswith("LEGACY-NO-REGRESSION-LOCK-"):
+            legacy_placeholder_count += 1
+            continue
+        closure_num += 1
 
-    closure_value = closure_num / closure_den
+    closure_value = (closure_num / closure_den) if closure_den > 0 else 1.0
     metrics.append(
         {
             "id": "Closure Integrity",
             "type": "ratio_high_good",
             "numerator": closure_num,
-            "denominator": closure_den,
+            "denominator": max(1, closure_den),
             "value": round(closure_value, 6),
             "target": ">= 1.00",
             "status": "PASS" if closure_value >= 1.0 else "FAIL",
-            "notes": f"open_gaps={len(open_gaps)} orphaned={orphan_count} missing_title={missing_title_count}",
+            "notes": (
+                f"resolved_high_critical={closure_den} "
+                f"missing_lock={missing_lock_count} "
+                f"legacy_placeholder={legacy_placeholder_count}"
+            ),
         }
     )
 

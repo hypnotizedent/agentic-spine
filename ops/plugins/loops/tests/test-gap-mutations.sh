@@ -304,6 +304,12 @@ test_gaps_close_validation() {
     else
       pass "gaps-close enforces regression lock for high/critical gaps"
     fi
+
+    if "$ROOT/ops/plugins/loops/bin/gaps-close" --id "$high_or_critical" --status fixed --regression-lock-id "LEGACY-NO-REGRESSION-LOCK-PRE-20260301" 2>/dev/null; then
+      fail "gaps-close should reject legacy placeholder regression lock ids"
+    else
+      pass "gaps-close rejects legacy placeholder regression lock ids"
+    fi
   else
     pass "no high/critical open gaps available for regression lock validation"
   fi

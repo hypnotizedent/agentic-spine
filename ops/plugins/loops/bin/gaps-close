@@ -53,11 +53,12 @@ gap_is_open "$GAP_ID" || { echo "FAIL: $GAP_ID is not open (current status is no
 
 GAP_SEVERITY="$(yq e -r ".gaps[] | select(.id == \"$GAP_ID\") | .severity // \"\"" "$GAPS_FILE" 2>/dev/null | head -n1)"
 EXISTING_LOCK_ID="$(yq e -r ".gaps[] | select(.id == \"$GAP_ID\") | .regression_lock_id // \"\"" "$GAPS_FILE" 2>/dev/null | head -n1)"
+LOCK_ID_EFFECTIVE="${REGRESSION_LOCK_ID:-$EXISTING_LOCK_ID}"
 
 # Enforce fix-to-lock discipline for high/critical closures.
 if [[ "$GAP_SEVERITY" == "high" || "$GAP_SEVERITY" == "critical" ]]; then
-  if [[ -z "$REGRESSION_LOCK_ID" && -z "$EXISTING_LOCK_ID" ]]; then
-    echo "FAIL: $GAP_ID severity=$GAP_SEVERITY requires --regression-lock-id (or existing regression_lock_id)" >&2
+  if [[ -z "$LOCK_ID_EFFECTIVE" || "$LOCK_ID_EFFECTIVE" == LEGACY-NO-REGRESSION-LOCK-* ]]; then
+    echo "FAIL: $GAP_ID severity=$GAP_SEVERITY requires a non-legacy regression_lock_id" >&2
     exit 1
   fi
 fi
