@@ -7,9 +7,12 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
+source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 echo "[immich-reconcile-weekly] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-"$CAP_RUNNER" cap run immich.reconcile.scan
+spine_job_run \
+  "immich-reconcile-weekly:immich.reconcile.scan" \
+  "$CAP_RUNNER" cap run immich.reconcile.scan
 
 echo "[immich-reconcile-weekly] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

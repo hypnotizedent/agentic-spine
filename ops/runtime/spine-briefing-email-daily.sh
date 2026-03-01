@@ -8,6 +8,7 @@ set -euo pipefail
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 STACK_CONTRACT="${SPINE_ROOT}/ops/bindings/communications.stack.contract.yaml"
+source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -60,8 +61,10 @@ if [[ -z "$preview_id" || "$preview_id" == "null" ]]; then
   exit 1
 fi
 
-"$CAP_RUNNER" cap run secrets.binding
-"$CAP_RUNNER" cap run secrets.auth.status
+spine_job_run "spine-briefing-email-daily:secrets.binding" \
+  "$CAP_RUNNER" cap run secrets.binding
+spine_job_run "spine-briefing-email-daily:secrets.auth.status" \
+  "$CAP_RUNNER" cap run secrets.auth.status
 echo "yes" | "$CAP_RUNNER" cap run communications.send.execute --preview-id "$preview_id" --execute --json
 
 echo "[spine-briefing-email-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

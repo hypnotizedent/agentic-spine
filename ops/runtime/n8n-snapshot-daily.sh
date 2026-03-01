@@ -7,9 +7,12 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
+source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 echo "[n8n-snapshot-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-"$CAP_RUNNER" cap run n8n.workflows.snapshot
+spine_job_run \
+  "n8n-snapshot-daily:n8n.workflows.snapshot" \
+  "$CAP_RUNNER" cap run n8n.workflows.snapshot
 
 echo "[n8n-snapshot-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
