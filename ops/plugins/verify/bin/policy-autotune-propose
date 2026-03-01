@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 CONTRACT="${ROOT}/ops/bindings/policy.autotune.contract.yaml"
+EMAIL_INTENT_DIR="${ROOT}/mailroom/outbox/alerts/email-intents"
 
 DRY_RUN=0
 REPORT_JSON=""
@@ -33,6 +34,71 @@ if ! command -v yq >/dev/null 2>&1; then
   echo "STOP (2): yq required for contract parsing" >&2
   exit 2
 fi
+
+enqueue_email_intent() {
+  local severity="$1"
+  local title="$2"
+  local summary="$3"
+  local intent_id created_at intent_file
+  intent_id="email-intent-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}"
+  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  intent_file="${EMAIL_INTENT_DIR}/${intent_id}.yaml"
+  mkdir -p "${EMAIL_INTENT_DIR}"
+  cat >"${intent_file}" <<INTENT
+intent_id: "${intent_id}"
+created_at: "${created_at}"
+domain_id: "policy-autotune"
+severity: "${severity}"
+title: "${title}"
+summary: |-
+$(printf '%s\n' "${summary}" | sed 's/^/  /')
+suggested_recipient: "alerts@spine.ronny.works"
+source_alert: "policy-autotune-propose"
+flush_status: pending
+INTENT
+}
+
+loop_scope_status() {
+  local loop_id="$1"
+  local scope_file="${ROOT}/mailroom/state/loop-scopes/${loop_id}.scope.md"
+  [[ -f "${scope_file}" ]] || return 1
+  awk -F': *' '/^status:/{print $2; exit}' "${scope_file}" | tr -d '"' | tr -d "'"
+}
+
+resolve_fallback_loop_id() {
+  local scope_file loop_id status
+
+  # Prefer policy/autotune-designated loops if present.
+  for scope_file in "${ROOT}"/mailroom/state/loop-scopes/*.scope.md; do
+    [[ -f "${scope_file}" ]] || continue
+    loop_id="$(basename "${scope_file}" .scope.md)"
+    if [[ "${loop_id}" != *"POLICY"* && "${loop_id}" != *"AUTOTUNE"* ]]; then
+      continue
+    fi
+    status="$(loop_scope_status "${loop_id}" || true)"
+    case "${status}" in
+      active|draft|open|planned)
+        echo "${loop_id}"
+        return 0
+        ;;
+    esac
+  done
+
+  # Fallback to any usable open/planned loop to avoid dead-end failure.
+  for scope_file in "${ROOT}"/mailroom/state/loop-scopes/*.scope.md; do
+    [[ -f "${scope_file}" ]] || continue
+    loop_id="$(basename "${scope_file}" .scope.md)"
+    status="$(loop_scope_status "${loop_id}" || true)"
+    case "${status}" in
+      active|draft|open|planned)
+        echo "${loop_id}"
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
 
 REPORT_DIR_REL="$(yq e -r '.outputs.report_dir // "mailroom/outbox/reports/policy-autotune"' "$CONTRACT" 2>/dev/null || echo "mailroom/outbox/reports/policy-autotune")"
 REPORT_DIR="${ROOT}/${REPORT_DIR_REL}"
@@ -125,10 +191,30 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-if [[ "$PROPOSAL_LOOP_ID" != "null" && -n "$PROPOSAL_LOOP_ID" ]]; then
-  export SPINE_LOOP_ID="$PROPOSAL_LOOP_ID"
+if [[ -z "${PROPOSAL_LOOP_ID}" || "${PROPOSAL_LOOP_ID}" == "null" ]]; then
+  PROPOSAL_LOOP_ID="$(resolve_fallback_loop_id || true)"
 fi
 
-"${ROOT}/bin/ops" cap run proposals.submit "$DESC"
+if [[ -z "${PROPOSAL_LOOP_ID}" || "${PROPOSAL_LOOP_ID}" == "null" ]]; then
+  enqueue_email_intent \
+    "warn" \
+    "policy.autotune.propose skipped (no active/planned loop binding)" \
+    "recommendations=${REC_COUNT}; report=${REPORT_JSON}; no loop_id available for proposals.submit."
+  echo "submit: skipped (no usable loop_id)"
+  rm -f "$TMP_SUMMARY"
+  exit 0
+fi
+
+echo "loop_id: ${PROPOSAL_LOOP_ID}"
+export SPINE_LOOP_ID="$PROPOSAL_LOOP_ID"
+
+if ! "${ROOT}/bin/ops" cap run proposals.submit "$DESC"; then
+  enqueue_email_intent \
+    "incident" \
+    "policy.autotune.propose failed to submit proposal" \
+    "loop_id=${PROPOSAL_LOOP_ID}; recommendations=${REC_COUNT}; report=${REPORT_JSON}."
+  rm -f "$TMP_SUMMARY"
+  exit 1
+fi
 
 rm -f "$TMP_SUMMARY"

@@ -14,6 +14,31 @@ def fail(message: str) -> None:
     raise SystemExit(f"verify.freshness.reconcile FAIL: {message}")
 
 
+def write_email_intent(root: Path, *, domain_id: str, severity: str, title: str, summary: str, source_alert: str) -> Path:
+    intent_dir = root / "mailroom/outbox/alerts/email-intents"
+    intent_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    intent_id = f"email-intent-{stamp}-{os.getpid()}"
+    intent_path = intent_dir / f"{intent_id}.yaml"
+    body = "\n".join(
+        [
+            f'intent_id: "{intent_id}"',
+            f'created_at: "{datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}"',
+            f'domain_id: "{domain_id}"',
+            f'severity: "{severity}"',
+            f'title: "{title}"',
+            "summary: |-",
+            *[f"  {line}" for line in summary.splitlines()],
+            'suggested_recipient: "alerts@spine.ronny.works"',
+            f'source_alert: "{source_alert}"',
+            "flush_status: pending",
+            "",
+        ]
+    )
+    intent_path.write_text(body, encoding="utf-8")
+    return intent_path
+
+
 def run_cmd(cmd: list[str], timeout: int, cwd: Path, env: dict[str, str]) -> tuple[int, str]:
     try:
         result = subprocess.run(
@@ -329,6 +354,20 @@ def main() -> None:
         )
 
     report_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    if unresolved_count > 0:
+        top_reasons = ", ".join(f"{reason}={count}" for reason, count in sorted(reason_counts.items()))
+        write_email_intent(
+            root,
+            domain_id="freshness-reconcile",
+            severity="warn",
+            title="verify.freshness.reconcile unresolved failures remain",
+            summary=(
+                f"unresolved_count={unresolved_count}; refreshed_count={refreshed_count}; "
+                f"rerun_count={rerun_count}; reasons={top_reasons or 'none'}; report={report_json}"
+            ),
+            source_alert="verify-freshness-reconcile",
+        )
 
     print("verify.freshness.reconcile")
     print(f"freshness_gates_total: {len(freshness_gates)}")

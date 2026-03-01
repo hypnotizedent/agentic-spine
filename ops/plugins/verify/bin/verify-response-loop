@@ -7,12 +7,37 @@ HISTORY_FILE="${VERIFY_FAILURE_HISTORY_FILE:-$SPINE_ROOT/ops/plugins/verify/stat
 GATE_REGISTRY="${VERIFY_GATE_REGISTRY_FILE:-$SPINE_ROOT/ops/bindings/gate.registry.yaml}"
 GAPS_FILE="${VERIFY_GAPS_FILE:-$SPINE_ROOT/ops/bindings/operational.gaps.yaml}"
 CURSOR_FILE="${VERIFY_RESPONSE_CURSOR_FILE:-/tmp/verify-response-loop.cursor}"
-GATE_REVIEW_QUEUE_FILE="${VERIFY_GATE_REVIEW_QUEUE_FILE:-/tmp/verify-gate-review-queue.ndjson}"
+GATE_REVIEW_QUEUE_FILE="${VERIFY_GATE_REVIEW_QUEUE_FILE:-$SPINE_ROOT/mailroom/outbox/alerts/verify-gate-review-queue.ndjson}"
+EMAIL_INTENT_DIR="${VERIFY_RESPONSE_EMAIL_INTENT_DIR:-$SPINE_ROOT/mailroom/outbox/alerts/email-intents}"
 DEFAULT_PARENT_LOOP="${VERIFY_RESPONSE_PARENT_LOOP:-LOOP-W79-T2-HIGH-STRUCTURAL-20260228}"
 
 fail() {
   echo "verify.response.loop FAIL: $*" >&2
   exit 1
+}
+
+enqueue_email_intent() {
+  local domain_id="$1"
+  local severity="$2"
+  local title="$3"
+  local summary="$4"
+  local intent_id created_at intent_file
+  intent_id="email-intent-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}"
+  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  intent_file="${EMAIL_INTENT_DIR}/${intent_id}.yaml"
+  mkdir -p "${EMAIL_INTENT_DIR}"
+  cat >"${intent_file}" <<INTENT
+intent_id: "${intent_id}"
+created_at: "${created_at}"
+domain_id: "${domain_id}"
+severity: "${severity}"
+title: "${title}"
+summary: |-
+$(printf '%s\n' "${summary}" | sed 's/^/  /')
+suggested_recipient: "alerts@spine.ronny.works"
+source_alert: "verify-response-loop"
+flush_status: pending
+INTENT
 }
 
 [[ -x "$CAP_RUNNER" ]] || fail "missing cap runner: $CAP_RUNNER"
@@ -58,6 +83,11 @@ if ((${#freshness_ids[@]} > 0)); then
     freshness_reconciled="${#freshness_ids[@]}"
   else
     echo "verify.response.loop WARN: verify.freshness.reconcile failed for run_key=$run_key" >&2
+    enqueue_email_intent \
+      "verify-response-loop" \
+      "warn" \
+      "verify.freshness.reconcile failed in response loop" \
+      "run_key=${run_key} scope=${scope} freshness_gate_count=${#freshness_ids[@]}: scheduled reconcile failed from verify-response-loop."
   fi
 fi
 
@@ -117,6 +147,11 @@ EOF
   if (( gaps_opened > 0 )); then
     if ! "$CAP_RUNNER" cap run gaps.file -- --batch "$batch_file" --parent-loop "$DEFAULT_PARENT_LOOP" >/dev/null 2>&1; then
       echo "verify.response.loop WARN: gaps.file batch failed for run_key=$run_key" >&2
+      enqueue_email_intent \
+        "verify-response-loop" \
+        "incident" \
+        "verify-response-loop failed to auto-file deterministic gaps" \
+        "run_key=${run_key} scope=${scope} attempted_gaps=${gaps_opened} parent_loop=${DEFAULT_PARENT_LOOP}."
       gaps_opened=0
     fi
   fi
@@ -126,6 +161,7 @@ EOF
 fi
 
 if ((${#gate_bug_ids[@]} > 0)); then
+  mkdir -p "$(dirname "$GATE_REVIEW_QUEUE_FILE")"
   for gid in "${gate_bug_ids[@]}"; do
     [[ -n "$gid" ]] || continue
     jq -cn \
@@ -137,6 +173,22 @@ if ((${#gate_bug_ids[@]} > 0)); then
       '{timestamp_utc:$ts,run_key:$run_key,scope:$scope,gate_id:$gate_id,classification:"gate_bug",source_history:$source_history}' >> "$GATE_REVIEW_QUEUE_FILE"
     gate_bugs_flagged=$((gate_bugs_flagged + 1))
   done
+fi
+
+if (( gaps_opened > 0 )); then
+  enqueue_email_intent \
+    "verify-response-loop" \
+    "incident" \
+    "Deterministic verify failures auto-filed as gaps" \
+    "run_key=${run_key} scope=${scope} gaps_opened=${gaps_opened} parent_loop=${DEFAULT_PARENT_LOOP}."
+fi
+
+if (( gate_bugs_flagged > 0 )); then
+  enqueue_email_intent \
+    "verify-response-loop" \
+    "warn" \
+    "Gate bug classifications queued for review" \
+    "run_key=${run_key} scope=${scope} gate_bugs_flagged=${gate_bugs_flagged} queue_file=${GATE_REVIEW_QUEUE_FILE}."
 fi
 
 printf '%s\n' "$fingerprint" > "$CURSOR_FILE"

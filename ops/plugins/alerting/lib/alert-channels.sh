@@ -43,7 +43,7 @@ alert_channel_ha() {
 
   if [[ -z "$ha_url" || -z "$ha_token" ]]; then
     echo "WARN alerting.dispatch: HA channel skipped (missing ${ha_url_var}/${ha_token_var})" >&2
-    return 0
+    return 1
   fi
 
   title="$(alert_yaml '.title' "$alert_file")"

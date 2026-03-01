@@ -140,17 +140,21 @@ ALERT
   fi
 
   channel_error=0
+  channel_success=0
   while IFS= read -r channel; do
     [[ -z "$channel" || "$channel" == "null" ]] && continue
     if alert_dispatch_channel "$channel" "$alert_file"; then
       dispatched=$((dispatched + 1))
+      channel_success=$((channel_success + 1))
     else
       channel_error=1
       errors=$((errors + 1))
     fi
   done < <(yq -r ".rules[] | select(.domain_id == \"$domain\") | .channels[]?" "$RULES_FILE")
 
-  if [[ "$channel_error" -eq 0 ]]; then
+  # Set cooldown if at least one channel delivered successfully.
+  # This prevents alert spam when one channel is degraded but others are healthy.
+  if [[ "$channel_success" -gt 0 ]]; then
     echo "$now_epoch" >"$cooldown_file"
   fi
 
