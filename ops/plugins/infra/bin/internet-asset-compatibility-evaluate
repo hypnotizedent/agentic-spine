@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# Evaluate compatibility of a candidate asset against current infrastructure.
+# Input: candidate attributes via flags.
+# Output: compatible|incompatible + reasons + impacted domains + required follow-ups.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+AUTHORITY="$ROOT/ops/bindings/internet.asset.registry.yaml"
+HW_INV="$ROOT/ops/bindings/hardware.inventory.yaml"
+
+SITE=""
+DOMAIN=""
+CLASS=""
+MODEL=""
+INTERFACE=""
+FORM_FACTOR=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --site) SITE="$2"; shift 2 ;;
+    --domain) DOMAIN="$2"; shift 2 ;;
+    --class) CLASS="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
+    --interface) INTERFACE="$2"; shift 2 ;;
+    --form-factor) FORM_FACTOR="$2"; shift 2 ;;
+    --) shift ;;
+    -h|--help)
+      cat <<HELP
+Usage: internet-asset-compatibility-evaluate --site <home|shop> --domain <domain> --class <class> --model <model> [--interface <type>] [--form-factor <type>]
+
+Evaluates whether a candidate asset is compatible with current infrastructure.
+
+Required:
+  --site          home or shop
+  --domain        compute, storage, networking, power, cabling, rack, hardware, iot
+  --class         Asset class (e.g. storage.hdd, network.switch)
+  --model         Model name/number
+
+Optional:
+  --interface     Interface type (sata, sas, nvme, ethernet, usb, etc.)
+  --form-factor   Physical form factor (2.5in, 3.5in, rackmount, etc.)
+HELP
+      exit 0
+      ;;
+    *) echo "internet.asset.compatibility.evaluate FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "internet.asset.compatibility.evaluate FAIL: yq missing" >&2; exit 1; }
+[[ -f "$AUTHORITY" ]] || { echo "internet.asset.compatibility.evaluate FAIL: missing $AUTHORITY" >&2; exit 1; }
+[[ -n "$SITE" ]] || { echo "internet.asset.compatibility.evaluate FAIL: --site required" >&2; exit 2; }
+[[ -n "$DOMAIN" ]] || { echo "internet.asset.compatibility.evaluate FAIL: --domain required" >&2; exit 2; }
+[[ -n "$CLASS" ]] || { echo "internet.asset.compatibility.evaluate FAIL: --class required" >&2; exit 2; }
+[[ -n "$MODEL" ]] || { echo "internet.asset.compatibility.evaluate FAIL: --model required" >&2; exit 2; }
+
+blockers=()
+warnings=()
+impacted_domains=()
+follow_ups=()
+fit_score=100
+
+# Site validation
+valid_sites="$(yq -r '.sites[].id' "$AUTHORITY" | tr '\n' ' ')"
+if ! echo "$valid_sites" | grep -qw "$SITE"; then
+  blockers+=("unknown site: $SITE (valid: $valid_sites)")
+  fit_score=0
+fi
+
+# Domain impact tracking
+impacted_domains+=("$DOMAIN")
+
+# Storage compatibility checks
+if [[ "$CLASS" == storage.hdd || "$CLASS" == storage.ssd ]]; then
+  if [[ "$SITE" == "shop" ]]; then
+    if [[ "$INTERFACE" == "sas" ]]; then
+      # Check MD1400 capacity
+      md1400_current="$(yq -r '.assets[] | select(.asset_id == "SHOP-DAS-DELL-MD1400-01") | .compatibility.storage_interface.current_drives // 0' "$AUTHORITY")"
+      md1400_max="$(yq -r '.assets[] | select(.asset_id == "SHOP-DAS-DELL-MD1400-01") | .compatibility.storage_interface.max_drives // 0' "$AUTHORITY")"
+      available=$((md1400_max - md1400_current))
+      if [[ "$available" -le 0 ]]; then
+        blockers+=("MD1400 shelf full ($md1400_current/$md1400_max drives)")
+        fit_score=$((fit_score - 50))
+      else
+        follow_ups+=("Add drive to MD1400 shelf ($available slots available)")
+      fi
+      impacted_domains+=("storage")
+    elif [[ "$INTERFACE" == "sata" ]]; then
+      # Check internal bays
+      internal_current="$(yq -r '.machines[0].internal_drives | map(.count) | add // 0' "$HW_INV" 2>/dev/null || echo "12")"
+      if [[ "$internal_current" -ge 12 ]]; then
+        blockers+=("internal SATA bays full (12/12)")
+        fit_score=$((fit_score - 50))
+      fi
+      impacted_domains+=("storage")
+    fi
+  elif [[ "$SITE" == "home" ]]; then
+    nas_max="$(yq -r '.assets[] | select(.asset_id == "HOME-NAS-SYNOLOGY-DS918-01") | .compatibility.storage_interface.max_drives // 4' "$AUTHORITY")"
+    follow_ups+=("Verify NAS bay availability (max $nas_max drives)")
+    impacted_domains+=("storage")
+  fi
+fi
+
+# Network switch compatibility
+if [[ "$CLASS" == network.switch ]]; then
+  follow_ups+=("Update home.device.registry.yaml with new switch entry")
+  follow_ups+=("Verify VLAN/PoE requirements")
+  impacted_domains+=("network")
+fi
+
+# Rack slot checks (shop only)
+if [[ "$SITE" == "shop" && -n "$FORM_FACTOR" ]]; then
+  if [[ "$FORM_FACTOR" == *rackmount* ]]; then
+    follow_ups+=("Verify rack U-slot availability in Rittal VRIS38 S (38U total)")
+    impacted_domains+=("rack")
+  fi
+fi
+
+# Required follow-ups
+follow_ups+=("Run ./bin/ops cap run verify.run -- fast after installation")
+if [[ "$DOMAIN" == "storage" || "$DOMAIN" == "compute" ]]; then
+  follow_ups+=("Run ./bin/ops cap run verify.run -- domain infra after installation")
+fi
+follow_ups+=("Update internet.asset.registry.yaml with new asset entry")
+
+# Dedup impacted domains
+mapfile -t impacted_domains < <(printf '%s\n' "${impacted_domains[@]}" | sort -u)
+
+# Determine verdict
+if [[ "${#blockers[@]}" -gt 0 ]]; then
+  verdict="incompatible"
+  fit_score=$((fit_score < 0 ? 0 : fit_score))
+else
+  verdict="compatible"
+fi
+
+# Output
+echo "---"
+echo "internet_asset_compatibility_evaluation:"
+echo "  candidate:"
+echo "    site: $SITE"
+echo "    domain: $DOMAIN"
+echo "    class: $CLASS"
+echo "    model: \"$MODEL\""
+[[ -n "$INTERFACE" ]] && echo "    interface: $INTERFACE"
+[[ -n "$FORM_FACTOR" ]] && echo "    form_factor: \"$FORM_FACTOR\""
+echo "  verdict: $verdict"
+echo "  fit_score: $fit_score"
+echo "  blockers:"
+if [[ "${#blockers[@]}" -eq 0 ]]; then
+  echo "    []"
+else
+  for b in "${blockers[@]}"; do
+    echo "    - \"$b\""
+  done
+fi
+echo "  warnings:"
+if [[ "${#warnings[@]}" -eq 0 ]]; then
+  echo "    []"
+else
+  for w in "${warnings[@]}"; do
+    echo "    - \"$w\""
+  done
+fi
+echo "  impacted_domains:"
+for d in "${impacted_domains[@]}"; do
+  echo "    - $d"
+done
+echo "  required_follow_ups:"
+for f in "${follow_ups[@]}"; do
+  echo "    - \"$f\""
+done
+
+echo ""
+echo "internet.asset.compatibility.evaluate PASS: verdict=$verdict fit_score=$fit_score blockers=${#blockers[@]}"

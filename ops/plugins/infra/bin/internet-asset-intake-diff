@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# Compare candidate inputs against internet.asset.registry authority.
+# Emits deterministic diff buckets: exact_match, probable_match, conflict,
+# unmatched_candidate, unmatched_authority.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+AUTHORITY="$ROOT/ops/bindings/internet.asset.registry.yaml"
+CANDIDATE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --candidate) CANDIDATE="$2"; shift 2 ;;
+    --) shift ;;
+    -h|--help)
+      echo "Usage: internet-asset-intake-diff --candidate <path>"
+      echo "  Compares candidate artifact against authority registry."
+      echo "  Default candidate: docs/planning/_artifacts/HARDWARE_PHONE_INGEST_CANDIDATE_MAP_20260301.yaml"
+      exit 0
+      ;;
+    *) echo "internet.asset.intake.diff FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "internet.asset.intake.diff FAIL: yq missing" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "internet.asset.intake.diff FAIL: python3 missing" >&2; exit 1; }
+[[ -f "$AUTHORITY" ]] || { echo "internet.asset.intake.diff FAIL: missing authority $AUTHORITY" >&2; exit 1; }
+
+# Default candidate if not specified
+if [[ -z "$CANDIDATE" ]]; then
+  CANDIDATE="$ROOT/docs/planning/_artifacts/HARDWARE_PHONE_INGEST_CANDIDATE_MAP_20260301.yaml"
+fi
+[[ -f "$CANDIDATE" ]] || { echo "internet.asset.intake.diff FAIL: missing candidate $CANDIDATE" >&2; exit 1; }
+
+NOW_UTC="$(python3 -c "from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+
+python3 - "$AUTHORITY" "$CANDIDATE" "$NOW_UTC" <<'PYEOF'
+import sys, json, subprocess
+
+authority_path = sys.argv[1]
+candidate_path = sys.argv[2]
+now_utc = sys.argv[3]
+
+def yq_load(path):
+    result = subprocess.run(["yq", "-o", "json", ".", path], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"FAIL: yq parse error on {path}: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    return json.loads(result.stdout)
+
+authority = yq_load(authority_path)
+candidate = yq_load(candidate_path)
+
+auth_assets = {a["asset_id"]: a for a in authority.get("assets", [])}
+cand_items = candidate.get("phone_hardware_ingest_candidate_projection", {}).get("candidate_items", [])
+
+# Build identifier indexes for authority
+auth_by_service_tag = {}
+auth_by_serial = {}
+auth_by_mac = {}
+auth_by_model_site = {}
+
+for aid, a in auth_assets.items():
+    ids = a.get("identifiers") or {}
+    if ids.get("service_tag"):
+        auth_by_service_tag[ids["service_tag"].upper()] = aid
+    if ids.get("serial_number"):
+        auth_by_serial[str(ids["serial_number"]).upper()] = aid
+    if ids.get("mac_address"):
+        auth_by_mac[ids["mac_address"].upper()] = aid
+    for mac_list_key in ["mac_addresses"]:
+        for mac in (ids.get(mac_list_key) or []):
+            auth_by_mac[mac.upper()] = aid
+    key = f"{a.get('model','').upper()}|{a.get('site','').upper()}"
+    auth_by_model_site[key] = aid
+
+exact = []
+probable = []
+conflicts = []
+unmatched_cand = []
+matched_auth_ids = set()
+
+for c in cand_items:
+    cid = c["id"]
+    c_ids = c.get("identifiers") or {}
+    matched = False
+
+    # Try service_tag
+    for st_key in ["service_tag"]:
+        st = c_ids.get(st_key, "")
+        if st and st.upper() in auth_by_service_tag:
+            aid = auth_by_service_tag[st.upper()]
+            exact.append({"candidate_id": cid, "authority_id": aid, "match_key": "service_tag", "value": st})
+            matched_auth_ids.add(aid)
+            matched = True
+            break
+
+    if matched:
+        continue
+
+    # Try serial
+    sn = c_ids.get("serial_number", "")
+    if sn and str(sn).upper() in auth_by_serial:
+        aid = auth_by_serial[str(sn).upper()]
+        exact.append({"candidate_id": cid, "authority_id": aid, "match_key": "serial_number", "value": sn})
+        matched_auth_ids.add(aid)
+        continue
+
+    # Try MAC
+    for mac_key in ["mac_address", "cm_mac", "wan_mac", "mta_mac"]:
+        mac = c_ids.get(mac_key, "")
+        if mac and mac.upper() in auth_by_mac:
+            aid = auth_by_mac[mac.upper()]
+            exact.append({"candidate_id": cid, "authority_id": aid, "match_key": "mac_address", "value": mac})
+            matched_auth_ids.add(aid)
+            matched = True
+            break
+    for mac in (c_ids.get("mac_addresses") or []):
+        if mac.upper() in auth_by_mac:
+            aid = auth_by_mac[mac.upper()]
+            exact.append({"candidate_id": cid, "authority_id": aid, "match_key": "mac_address", "value": mac})
+            matched_auth_ids.add(aid)
+            matched = True
+            break
+
+    if matched:
+        continue
+
+    # Try model+site
+    site = c.get("site_id", "").upper()
+    model = c.get("model", "").upper()
+    key = f"{model}|{site}"
+    if key in auth_by_model_site:
+        aid = auth_by_model_site[key]
+        # Check for conflicts (e.g. different service tags)
+        a_ids = auth_assets[aid].get("identifiers") or {}
+        conflict_found = False
+        if c_ids.get("service_tag") and a_ids.get("service_tag"):
+            if c_ids["service_tag"].upper() != a_ids["service_tag"].upper():
+                conflicts.append({
+                    "candidate_id": cid, "authority_id": aid,
+                    "kind": "service_tag_mismatch",
+                    "candidate_value": c_ids["service_tag"],
+                    "authority_value": a_ids["service_tag"]
+                })
+                conflict_found = True
+        if not conflict_found:
+            probable.append({"candidate_id": cid, "authority_id": aid, "match_key": "model_site", "model": model})
+            matched_auth_ids.add(aid)
+        continue
+
+    unmatched_cand.append({"candidate_id": cid, "model": c.get("model",""), "site": c.get("site_id","")})
+
+unmatched_auth = [{"authority_id": aid, "model": a.get("model",""), "site": a.get("site","")}
+                  for aid, a in auth_assets.items() if aid not in matched_auth_ids]
+
+result = {
+    "internet_asset_intake_diff": {
+        "generated_at_utc": now_utc,
+        "authority_source": "ops/bindings/internet.asset.registry.yaml",
+        "candidate_source": candidate_path,
+        "buckets": {
+            "exact_match": exact,
+            "probable_match": probable,
+            "conflict": conflicts,
+            "unmatched_candidate": unmatched_cand,
+            "unmatched_authority": unmatched_auth
+        },
+        "summary": {
+            "exact_match_count": len(exact),
+            "probable_match_count": len(probable),
+            "conflict_count": len(conflicts),
+            "unmatched_candidate_count": len(unmatched_cand),
+            "unmatched_authority_count": len(unmatched_auth)
+        }
+    }
+}
+
+import yaml
+print(yaml.dump(result, default_flow_style=False, sort_keys=False))
+print(f"internet.asset.intake.diff PASS: {len(exact)} exact, {len(probable)} probable, {len(conflicts)} conflicts, {len(unmatched_cand)} unmatched candidates, {len(unmatched_auth)} unmatched authority", file=sys.stderr)
+PYEOF
