@@ -5,6 +5,8 @@ status: active
 owner: "@ronny"
 scope: {{SCOPE}}
 priority: {{PRIORITY}}
+horizon: now
+execution_readiness: runnable
 objective: {{OBJECTIVE}}
 ---
 

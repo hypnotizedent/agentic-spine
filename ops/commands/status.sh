@@ -98,6 +98,8 @@ if scopes_dir.is_dir():
             "last_heartbeat_utc": fm.get("last_heartbeat_utc", ""),
             "heartbeat_ttl_minutes": fm.get("heartbeat_ttl_minutes", ""),
             "heartbeat_source": "scope",
+            "horizon": fm.get("horizon", "now"),
+            "execution_readiness": fm.get("execution_readiness", "runnable"),
             "title": fm.get("_title", f.stem),
             "file": str(f.relative_to(spine)),
         }
@@ -411,6 +413,9 @@ if mode == "--json":
             "stale_background_loops": stale_background_count,
             "planned_loops": len(planned_loops),
             "closed_loops": len(closed_loops),
+            "horizon_now": sum(1 for loop in open_loops if loop.get("horizon", "now") == "now"),
+            "horizon_later": sum(1 for loop in open_loops if loop.get("horizon", "now") == "later"),
+            "horizon_future": sum(1 for loop in open_loops if loop.get("horizon", "now") == "future"),
             "open_gaps": len(open_gaps),
             "linked_gaps": len(linked_gaps),
             "unlinked_gaps": len(unlinked_gaps),
@@ -424,12 +429,23 @@ if mode == "--json":
 
 if mode == "--brief":
     background_open = sum(1 for loop in open_loops if loop.get("execution_mode") == "background")
+    now_runnable = sum(1 for loop in open_loops if loop.get("horizon", "now") == "now" and loop.get("execution_readiness", "runnable") == "runnable")
+    later_count = sum(1 for loop in open_loops if loop.get("horizon", "now") == "later")
+    future_count = sum(1 for loop in open_loops if loop.get("horizon", "now") == "future")
     loop_part = f"Loops: {len(open_loops)} open"
     if background_open:
         loop_part += f" ({background_open} background"
         if stale_background_count:
             loop_part += f", {stale_background_count} stale"
         loop_part += ")"
+    # Show horizon breakdown if any non-now loops exist
+    if later_count or future_count:
+        loop_part += f" [now={now_runnable}"
+        if later_count:
+            loop_part += f" later={later_count}"
+        if future_count:
+            loop_part += f" future={future_count}"
+        loop_part += "]"
     parts = [loop_part]
     if planned_loops:
         parts[0] += f" + {len(planned_loops)} planned"
@@ -452,14 +468,28 @@ print()
 sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "-": 4, "unknown": 5}
 sorted_loops = sorted(open_loops, key=lambda x: sev_order.get(x["severity"], 9))
 
+# Partition into eligible (now+runnable) vs deferred
+eligible_loops = [l for l in sorted_loops if l.get("horizon", "now") == "now" and l.get("execution_readiness", "runnable") == "runnable"]
+deferred_loops = [l for l in sorted_loops if l not in eligible_loops]
+
 print(f"OPEN LOOPS ({len(open_loops)})")
 print("-" * 72)
 if not open_loops:
     print("  (none)")
 else:
+    if deferred_loops:
+        print(f"  Eligible (now+runnable): {len(eligible_loops)}  |  Deferred (later/future/blocked): {len(deferred_loops)}")
+        print()
     for loop in sorted_loops:
-        bg_tag = " [background]" if loop.get("execution_mode") == "background" else ""
-        print(f"  [{loop['severity']:8s}] {loop['owner']:15s} {loop['loop_id']}{bg_tag}")
+        tags = ""
+        if loop.get("execution_mode") == "background":
+            tags += " [background]"
+        horizon = loop.get("horizon", "now")
+        if horizon != "now":
+            tags += f" [{horizon}]"
+        if loop.get("execution_readiness", "runnable") == "blocked":
+            tags += " [not-runnable]"
+        print(f"  [{loop['severity']:8s}] {loop['owner']:15s} {loop['loop_id']}{tags}")
         if loop["title"] != loop["loop_id"]:
             print(f"  {'':8s}  {'':15s} {loop['title']}")
         if loop.get("execution_mode") == "background":
