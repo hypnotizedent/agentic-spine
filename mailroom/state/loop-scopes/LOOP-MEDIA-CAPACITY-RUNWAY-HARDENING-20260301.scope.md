@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MEDIA-CAPACITY-RUNWAY-HARDENING-20260301
 created: 2026-03-01
-status: active
+status: closed
 owner: "@ronny"
 scope: media
 priority: high
