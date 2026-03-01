@@ -3,6 +3,7 @@
 > Project-level instruction surface for the agentic-spine repo.
 > Loaded automatically by Claude Code and Claude Desktop.
 > Governance brief source: `docs/governance/AGENT_GOVERNANCE_BRIEF.md`
+> canonical_boot_surface: `docs/governance/generated/BOOT_ENTRY_SURFACE.md`
 > entry_surface_gate_metadata: projection
 > projection_of: `ops/bindings/gate.registry.yaml`
 <!-- ENTRY_SURFACE_GATE_METADATA_START -->

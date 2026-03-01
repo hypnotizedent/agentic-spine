@@ -7,6 +7,7 @@ ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 WORKBENCH="${SPINE_WORKBENCH:-$HOME/code/workbench}"
 PROFILE="$ROOT/ops/bindings/tenant.profile.yaml"
 LAUNCHD_CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
+LAUNCHD_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
 
 fail() {
   echo "D171 FAIL: $*" >&2
@@ -89,6 +90,9 @@ fi
 # ── Launchd runtime timezone env parity ──
 
 if [[ -f "$LAUNCHD_CONTRACT" ]]; then
+  contract_schedule_tz="$(yq -r '.schedule_timezone // ""' "$LAUNCHD_CONTRACT")"
+  check "$LAUNCHD_CONTRACT" "schedule_timezone" "$contract_schedule_tz"
+
   launchd_source_dir="$(yq -r '.paths.source_dir // ""' "$LAUNCHD_CONTRACT")"
   if [[ -n "$launchd_source_dir" && -d "$launchd_source_dir" ]]; then
     required_env_tz="$(yq -r '.required_env[]?' "$LAUNCHD_CONTRACT" 2>/dev/null | grep -Fx 'TZ' || true)"
@@ -110,6 +114,35 @@ if [[ -f "$LAUNCHD_CONTRACT" ]]; then
       check "$plist" "EnvironmentVariables.SPINE_OPERATOR_TZ" "$operator_tz_val"
     done < <(find "$launchd_source_dir" -maxdepth 1 -type f -name 'com.ronny*.plist' -print0)
   fi
+fi
+
+if [[ -f "$LAUNCHD_REGISTRY" ]]; then
+  registry_schedule_tz="$(yq -r '.schedule_timezone // ""' "$LAUNCHD_REGISTRY")"
+  check "$LAUNCHD_REGISTRY" "schedule_timezone" "$registry_schedule_tz"
+fi
+
+# ── Host system timezone parity (launchd schedule parsing uses host timezone) ──
+
+system_tz=""
+if command -v systemsetup >/dev/null 2>&1; then
+  systemsetup_out="$(systemsetup -gettimezone 2>/dev/null || true)"
+  if [[ "$systemsetup_out" =~ Time[[:space:]]Zone:[[:space:]](.+) ]]; then
+    system_tz="${BASH_REMATCH[1]}"
+  fi
+fi
+
+if [[ -z "$system_tz" && -L "/etc/localtime" ]]; then
+  localtime_target="$(readlink /etc/localtime || true)"
+  if [[ "$localtime_target" == *"/zoneinfo/"* ]]; then
+    system_tz="${localtime_target##*/zoneinfo/}"
+  fi
+fi
+
+if [[ -z "$system_tz" ]]; then
+  echo "D171 MISMATCH: could not determine host system timezone (systemsetup denied and /etc/localtime unresolved)" >&2
+  ERRORS=$((ERRORS + 1))
+else
+  check "host-system" "timezone" "$system_tz"
 fi
 
 # ── Result ──

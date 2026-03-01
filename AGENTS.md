@@ -10,6 +10,7 @@ scope: agent-runtime-contract
 > Auto-loaded by local coding tools (Claude Code, Claude Desktop, Codex, etc.).
 > Canonical runtime: `~/code/agentic-spine`
 > Governance brief source: `docs/governance/AGENT_GOVERNANCE_BRIEF.md`
+> canonical_boot_surface: `docs/governance/generated/BOOT_ENTRY_SURFACE.md`
 > entry_surface_gate_metadata: projection
 > projection_of: `ops/bindings/gate.registry.yaml`
 <!-- ENTRY_SURFACE_GATE_METADATA_START -->

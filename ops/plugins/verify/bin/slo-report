@@ -68,6 +68,8 @@ def main() -> None:
     # SLO 1: Boot Ambiguity
     startup = boot_contract.get("startup_block", {})
     surfaces = boot_contract.get("surfaces", []) or []
+    generated_rel = str(boot_contract.get("generated_file", "") or "").strip()
+    generated_path = (root / generated_rel) if generated_rel else None
     marker_start = startup.get("marker_start", "")
     marker_end = startup.get("marker_end", "")
     heading = startup.get("heading", "## Mandatory Startup Block")
@@ -82,7 +84,9 @@ def main() -> None:
         "```",
     ]).strip()
 
-    compliant_boot_surfaces = 0
+    canonical_boot_exists = bool(generated_path and generated_path.exists())
+    startup_block_parity_count = 0
+    projection_ref_count = 0
     noncompliant_boot_surfaces = []
     for rel in surfaces:
         path = (root / rel).expanduser()
@@ -91,13 +95,17 @@ def main() -> None:
             continue
         text = path.read_text(encoding="utf-8")
         block = extract_block(text, marker_start, marker_end)
-        if block == expected_startup_block:
-            compliant_boot_surfaces += 1
-        else:
+        if block != expected_startup_block:
             noncompliant_boot_surfaces.append(rel)
+            continue
+        startup_block_parity_count += 1
+        if generated_rel and generated_rel in text:
+            projection_ref_count += 1
+        else:
+            noncompliant_boot_surfaces.append(f"{rel}:missing canonical_boot_surface_ref")
 
-    boot_den = max(1, len(surfaces))
-    boot_num = compliant_boot_surfaces
+    boot_den = max(1, 1 + len(surfaces))
+    boot_num = (1 if canonical_boot_exists else 0) + projection_ref_count
     boot_value = boot_num / boot_den
     metrics.append(
         {
@@ -108,7 +116,13 @@ def main() -> None:
             "value": round(boot_value, 6),
             "target": ">= 1.00",
             "status": "PASS" if boot_value >= 1.0 else "FAIL",
-            "notes": "noncompliant=" + (", ".join(noncompliant_boot_surfaces) if noncompliant_boot_surfaces else "none"),
+            "notes": (
+                f"canonical_boot_file={generated_rel or '(unset)'} "
+                f"canonical_exists={'yes' if canonical_boot_exists else 'no'} "
+                f"startup_block_parity={startup_block_parity_count}/{len(surfaces)} "
+                "noncompliant="
+                + (", ".join(noncompliant_boot_surfaces) if noncompliant_boot_surfaces else "none")
+            ),
         }
     )
 
