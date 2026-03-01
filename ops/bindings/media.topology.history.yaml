@@ -1,0 +1,203 @@
+# Media Topology History (SSOT)
+# Status: authoritative
+# Owner: "@ronny"
+# Last verified: 2026-03-01
+# Created: LOOP-MEDIA-HISTORY-CANONICALIZATION-20260301
+#
+# Machine-readable historical record of media infrastructure topology changes.
+# NOT a narrative doc — structured timeline of architectural transitions.
+# Projection of: git history, receipts, operational.gaps.yaml evidence
+
+version: 1
+updated_at: "2026-03-01"
+owner: "@ronny"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Architecture Eras
+# ─────────────────────────────────────────────────────────────────────────
+
+eras:
+  - id: monolithic-media-stack
+    period: "pre-2026-02-08"
+    description: "Single VM 201 running all media services (download + streaming)"
+    vm: media-stack
+    vm_id: 201
+    location: pve-shop
+    services:
+      download: [sabnzbd, prowlarr, radarr, sonarr, lidarr]
+      streaming: [jellyfin, navidrome, jellyseerr, bazarr]
+    storage:
+      config: "pve:tank/docker/media-stack (NFS)"
+      media: "pve:/media (NFS)"
+    problems:
+      - "SABnzbd saturated disk I/O during downloads causing Jellyfin buffering"
+      - "Radarr/Sonarr import operations spiked CPU causing Navidrome transcoding stutters"
+    decommissioned: "2026-02-10"
+    decom_method: "qm destroy --purge + zfs destroy tank/docker/media-stack"
+    evidence:
+      loop: LOOP-MEDIA-STACK-SPLIT-20260208
+      commits: ["04e1158", "3e1de65", "241bff6"]
+
+  - id: split-download-streaming
+    period: "2026-02-10 to present"
+    description: "Download-stack (VM 209) and streaming-stack (VM 210) separated by I/O profile"
+    vms:
+      download-stack:
+        vm_id: 209
+        ip: 192.168.1.209
+        location: pve-shop
+        services: [prowlarr, radarr, sonarr, lidarr, recyclarr, flaresolverr, sabnzbd, qbittorrent, slskd, soularr, huntarr, autopulse, crosswatch, gluetun, watchtower, node-exporter, swaparr-radarr, swaparr-sonarr, swaparr-lidarr, unpackerr, trailarr, posterizarr, decypharr, crowdsec]
+        container_count: 24
+        storage:
+          config: "pve:tank/docker/download-stack (NFS RW)"
+          media: "pve:/media (NFS RW)"
+          sqlite: "/opt/appdata (boot disk, intentional)"
+      streaming-stack:
+        vm_id: 210
+        ip: 192.168.1.210
+        location: pve-shop
+        services: [jellyfin, navidrome, jellyseerr, bazarr, wizarr, spotisub, subgen, homarr, watchtower, node-exporter]
+        container_count: 10
+        storage:
+          config: "pve:tank/docker/streaming-stack (NFS RW)"
+          media: "pve:/media (NFS RO)"
+    evidence:
+      loop: LOOP-MEDIA-STACK-SPLIT-20260208
+      commits: ["04e1158", "3e1de65"]
+
+# ─────────────────────────────────────────────────────────────────────────
+# Download Client Evolution
+# ─────────────────────────────────────────────────────────────────────────
+
+download_clients:
+  - id: sabnzbd
+    type: usenet
+    status: active
+    priority: 1
+    vpn_route: direct
+    port: 8080
+    introduced: "pre-2026-02-08"
+    detail: "Primary download client. VPN not required for Usenet transport."
+
+  - id: qbittorrent
+    type: bittorrent
+    status: active
+    priority: 2
+    vpn_route: direct
+    port: 8081
+    introduced: "2026-02-26"
+    decision_gate: QB-VPN-ROUTE-001
+    evidence:
+      commit: e09f72b
+      loop: LOOP-MEDIA-QBITTORRENT-END-TO-END-20260226
+      gap_closed: GAP-OP-910
+
+  - id: slskd
+    type: soulseek
+    status: active
+    vpn_route: gluetun-tunnel
+    port: 5030
+    introduced: "2026-02-25"
+    detail: "Music-only via gluetun VPN tunnel. Paired with Soularr for automation."
+
+# ─────────────────────────────────────────────────────────────────────────
+# Storage Architecture
+# ─────────────────────────────────────────────────────────────────────────
+
+storage:
+  media_pool:
+    source: "pve:/media"
+    type: ZFS
+    gate: D257
+    thresholds:
+      warn_pct: 80
+      fail_pct: 85
+    current_usage_pct: 81
+
+  md1400:
+    description: "Dell MD1400 DAS shelf — 12x ST4000NM0063 (3.6TB SAS, dual-path)"
+    status: active
+    controller: "SAS9300-8e (Broadcom SAS3008)"
+    replaced: "PM8072 (defective, replaced 2026-02-23)"
+    drives: 12
+    capacity_raw_tb: 43.2
+    evidence:
+      loop: LOOP-MD1400-SAS-RECOVERY-20260208
+      normalization: LOOP-MD1400-CAPACITY-NORMALIZATION-20260227
+
+  synology:
+    model: DS918+
+    hostname: nas
+    tailscale_ip: 100.102.199.111
+    location: home
+    role: backup-storage
+    backup_lane: "/volume1/backups/"
+    gate: D139
+    detail: "Primary backup target for Gitea, system backups. Not used for media ingest."
+
+# ─────────────────────────────────────────────────────────────────────────
+# Transfer Architecture
+# ─────────────────────────────────────────────────────────────────────────
+
+transfer:
+  wan:
+    shop:
+      provider: "T-Mobile 5G"
+      measured_down_mbps: 865
+      measured_up_mbps: 309
+    home:
+      provider: unknown
+      measured_down_mbps: null
+      measured_up_mbps: null
+      gap: GAP-OP-865
+
+  sneakernet:
+    lifecycle: deprecated
+    detail: "Legacy sneakernet.sh cleaned to tombstone. No active shuttle capability."
+    evidence:
+      gap_ref: "GAP-OP-880 area (workbench scripts)"
+
+  policy:
+    - "Media downloads happen on pve-shop only (VM 209)"
+    - "Streaming happens on pve-shop only (VM 210)"
+    - "No bulk media transfer over WAN — all media is local to pve-shop"
+    - "Synology NAS is backup-only, not media ingest"
+    - "Home network has no media processing role"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Network Topology (media-relevant)
+# ─────────────────────────────────────────────────────────────────────────
+
+network:
+  sites:
+    home:
+      proxmox: proxmox-home
+      vmid_range: 100-199
+      media_role: none
+      devices: [macbook, beelink, nas, pihole-home, ha]
+
+    shop:
+      proxmox: pve
+      vmid_range: 200-299
+      media_role: primary
+      media_vms: [download-stack, streaming-stack]
+      storage: [tank/docker, tank/media, md1400]
+
+# ─────────────────────────────────────────────────────────────────────────
+# Music Pipeline Architecture
+# ─────────────────────────────────────────────────────────────────────────
+
+music_pipeline:
+  status: active
+  components:
+    - lidarr: "Music management (arr-stack)"
+    - slskd: "Soulseek client (gluetun tunnel)"
+    - soularr: "HA integration bridge"
+    - navidrome: "Music streaming server"
+  deferred:
+    tubifarry:
+      decision: "skip-current-cycle"
+      date: "2026-02-26"
+      reason: "Maintain Soularr+Lidarr path. Music Assistant HA provider setup pending."
+      gap: GAP-OP-906
+      evidence: "commit 51dd9c7"
