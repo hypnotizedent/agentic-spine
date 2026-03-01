@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# recovery-capability-commit
+#
+# Run a capability, detect allowlisted diffs, and create a scoped commit.
+# Used by recovery-dispatch for capability_commit recovery type.
+#
+# Usage:
+#   recovery-capability-commit \
+#     --capability projection.reconcile \
+#     --allowlist-file ops/bindings/projection.reconcile.allowlist.txt \
+#     --commit-message "chore(projection): reconcile gate metadata" \
+#     [--trailer-capability projection.reconcile] \
+#     [--dry-run]
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+fail() { echo "recovery-capability-commit FAIL: $*" >&2; exit 1; }
+
+CAPABILITY=""
+ALLOWLIST_FILE=""
+COMMIT_MESSAGE=""
+TRAILER_CAPABILITY=""
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --capability) CAPABILITY="${2:-}"; shift 2 ;;
+    --allowlist-file) ALLOWLIST_FILE="${2:-}"; shift 2 ;;
+    --commit-message) COMMIT_MESSAGE="${2:-}"; shift 2 ;;
+    --trailer-capability) TRAILER_CAPABILITY="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help)
+      echo "Usage: recovery-capability-commit --capability CAP --allowlist-file FILE --commit-message MSG [--trailer-capability CAP] [--dry-run]"
+      exit 0
+      ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$CAPABILITY" ]] || fail "--capability is required"
+[[ -n "$ALLOWLIST_FILE" ]] || fail "--allowlist-file is required"
+[[ -n "$COMMIT_MESSAGE" ]] || fail "--commit-message is required"
+
+allowlist_path="$SPINE_ROOT/$ALLOWLIST_FILE"
+[[ -f "$allowlist_path" ]] || fail "allowlist not found: $allowlist_path"
+
+cd "$SPINE_ROOT"
+
+# ── Ensure clean working tree before running capability ──
+if [[ -n "$(git diff --name-only 2>/dev/null)" ]]; then
+  fail "working tree has uncommitted changes; refusing to proceed"
+fi
+
+# ── Run the capability ──
+echo "[recovery-capability-commit] running capability: $CAPABILITY"
+run_key=""
+cap_output="$("$SPINE_ROOT/bin/ops" cap run "$CAPABILITY" 2>&1)" || {
+  echo "$cap_output" >&2
+  fail "capability '$CAPABILITY' failed"
+}
+# Extract run key from output
+run_key="$(echo "$cap_output" | sed -n 's/^Run Key:[[:space:]]*//p' | tail -1)"
+echo "[recovery-capability-commit] capability completed (run_key=${run_key:-none})"
+
+# ── Detect diffs against allowlist ──
+mapfile -t changed_files < <(git diff --name-only 2>/dev/null || true)
+
+if [[ "${#changed_files[@]}" -eq 0 ]]; then
+  echo "[recovery-capability-commit] no changes detected; skipping commit"
+  exit 0
+fi
+
+mapfile -t allowed_files < <(grep -v '^#' "$allowlist_path" | grep -v '^$' || true)
+
+staged_count=0
+for changed in "${changed_files[@]}"; do
+  [[ -n "$changed" ]] || continue
+  allowed=false
+  for allow in "${allowed_files[@]}"; do
+    [[ -n "$allow" ]] || continue
+    if [[ "$changed" == "$allow" ]]; then
+      allowed=true
+      break
+    fi
+  done
+  if [[ "$allowed" == "false" ]]; then
+    fail "file '$changed' modified but not in allowlist ($ALLOWLIST_FILE)"
+  fi
+  git add "$changed"
+  staged_count=$((staged_count + 1))
+done
+
+if [[ "$staged_count" -eq 0 ]]; then
+  echo "[recovery-capability-commit] no allowlisted changes to commit"
+  exit 0
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "[recovery-capability-commit] dry-run: would commit $staged_count file(s)"
+  git checkout -- . 2>/dev/null || true
+  exit 0
+fi
+
+# ── Build commit message with trailers ──
+full_msg="$COMMIT_MESSAGE"
+
+# Append D128 trailers if gate files are in the changeset
+gate_files_touched=false
+for changed in "${changed_files[@]}"; do
+  case "$changed" in
+    ops/bindings/gate.registry.yaml|ops/bindings/gate.execution.topology.yaml)
+      gate_files_touched=true
+      break
+      ;;
+  esac
+done
+
+if [[ "$gate_files_touched" == "true" ]]; then
+  trailer_cap="${TRAILER_CAPABILITY:-$CAPABILITY}"
+  full_msg="${full_msg}
+
+Gate-Mutation: capability
+Gate-Capability: ${trailer_cap}
+Gate-Run-Key: ${run_key:-CAP-RECOVERY-AUTO}"
+fi
+
+full_msg="${full_msg}
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+
+git commit -m "$full_msg"
+echo "[recovery-capability-commit] committed $staged_count file(s)"

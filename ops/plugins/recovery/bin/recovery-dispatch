@@ -234,6 +234,31 @@ run_action() {
       message="capability_retry rc=$cmd_rc"
       ;;
 
+    capability_commit)
+      capability="$(yq e -r ".actions[$match_index].recovery.capability // \"\"" "$BINDING_FILE")"
+      local allowlist_file
+      allowlist_file="$(yq e -r ".actions[$match_index].recovery.allowlist_file // \"\"" "$BINDING_FILE")"
+      local commit_msg
+      commit_msg="$(yq e -r ".actions[$match_index].recovery.commit_message // \"chore: auto-recovery commit\"" "$BINDING_FILE")"
+      local trailer_cap
+      trailer_cap="$(yq e -r ".actions[$match_index].recovery.trailer_capability // \"\"" "$BINDING_FILE")"
+      [[ -n "$capability" ]] || stop "action '$action_id' missing recovery.capability"
+      [[ -n "$allowlist_file" ]] || stop "action '$action_id' missing recovery.allowlist_file"
+
+      local commit_cmd=("$SPINE_ROOT/ops/plugins/recovery/bin/recovery-capability-commit"
+        --capability "$capability"
+        --allowlist-file "$allowlist_file"
+        --commit-message "$commit_msg")
+      if [[ -n "$trailer_cap" && "$trailer_cap" != "null" ]]; then
+        commit_cmd+=(--trailer-capability "$trailer_cap")
+      fi
+      set +e
+      "${commit_cmd[@]}" >/dev/null 2>&1
+      cmd_rc=$?
+      set -e
+      message="capability_commit rc=$cmd_rc"
+      ;;
+
     alert_only)
       alert_capability="$(yq e -r ".actions[$match_index].recovery.capability // \"\"" "$BINDING_FILE")"
       if [[ -n "$alert_capability" && "$alert_capability" != "null" ]]; then
