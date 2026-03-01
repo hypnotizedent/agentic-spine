@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# projection-reconcile
+#
+# Unified reconciliation of all gate registry projections:
+#   1. gen-gate-registry-header.sh — gate_count + description in gate.registry.yaml
+#   2. docs-projection-sync         — entry-surface metadata in AGENTS.md, CLAUDE.md, generated/
+#   3. docs-projection-verify       — deterministic verification of all projections
+#
+# Default: no-commit (projection.reconcile only writes; commit is recovery's job).
+# Supports --dry-run to show what would change without writing.
+#
+# Usage:
+#   projection-reconcile             # reconcile all projections
+#   projection-reconcile --dry-run   # check for drift without writing
+
+ROOT="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help)
+      echo "Usage: projection-reconcile [--dry-run]"
+      exit 0
+      ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+fail() { echo "projection.reconcile FAIL: $*" >&2; exit 1; }
+
+GEN_HEADER="$ROOT/bin/generators/gen-gate-registry-header.sh"
+SYNC="$ROOT/ops/plugins/docs/bin/docs-projection-sync"
+VERIFY="$ROOT/ops/plugins/docs/bin/docs-projection-verify"
+
+[[ -x "$GEN_HEADER" ]] || fail "missing: $GEN_HEADER"
+[[ -x "$SYNC" ]]       || fail "missing: $SYNC"
+[[ -x "$VERIFY" ]]     || fail "missing: $VERIFY"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "[projection.reconcile] dry-run: checking for drift..."
+
+  header_rc=0
+  "$GEN_HEADER" --check >/dev/null 2>&1 || header_rc=$?
+
+  verify_rc=0
+  "$VERIFY" >/dev/null 2>&1 || verify_rc=$?
+
+  if [[ "$header_rc" -eq 0 && "$verify_rc" -eq 0 ]]; then
+    echo "projection.reconcile"
+    echo "status: OK"
+    echo "drift: none"
+    exit 0
+  fi
+
+  echo "projection.reconcile"
+  echo "status: DRIFT_DETECTED"
+  [[ "$header_rc" -ne 0 ]] && echo "  header: stale"
+  [[ "$verify_rc" -ne 0 ]] && echo "  surfaces: stale"
+  exit 0
+fi
+
+# ── Step 1: reconcile gate registry header ──
+echo "[projection.reconcile] reconciling gate registry header..."
+"$GEN_HEADER" || fail "gen-gate-registry-header.sh failed"
+
+# ── Step 2: sync entry-surface projections ──
+echo "[projection.reconcile] syncing entry-surface projections..."
+"$SYNC" || fail "docs-projection-sync failed"
+
+# ── Step 3: verify everything is deterministic ──
+echo "[projection.reconcile] verifying projections..."
+"$VERIFY" || fail "docs-projection-verify failed (post-sync)"
+
+echo "projection.reconcile"
+echo "status: OK"
