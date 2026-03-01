@@ -4,7 +4,8 @@ set -euo pipefail
 # gaps.close — Close or fix a gap (atomic, git-locked)
 #
 # Usage: gaps-close --id <GAP_ID> --status <fixed|closed> \
-#                   [--fixed-in "reference"] [--notes "description"]
+#                   [--fixed-in "reference"] [--notes "description"] \
+#                   [--regression-lock-id "D###|LOCK-ID"]
 #
 # Acquires git-lock, validates claim ownership (if claimed),
 # updates gap status in operational.gaps.yaml, commits, cleans up claim.
@@ -14,12 +15,13 @@ source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: gaps-close --id <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"]"
+  echo "Usage: gaps-close --id <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"] [--regression-lock-id \"id\"]"
   exit 0
 fi
 
 GAP_ID=""
 STATUS="" FIXED_IN="" NOTES=""
+REGRESSION_LOCK_ID=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,8 +30,9 @@ while [[ $# -gt 0 ]]; do
     --status)   STATUS="${2:?--status requires a value}"; shift 2 ;;
     --fixed-in) FIXED_IN="${2:?--fixed-in requires a value}"; shift 2 ;;
     --notes)    NOTES="${2:?--notes requires a value}"; shift 2 ;;
+    --regression-lock-id) REGRESSION_LOCK_ID="${2:?--regression-lock-id requires a value}"; shift 2 ;;
     -h|--help)
-      echo "Usage: gaps-close --id <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"]"
+      echo "Usage: gaps-close --id <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"] [--regression-lock-id \"id\"]"
       exit 0 ;;
     *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -47,6 +50,17 @@ esac
 # Validate gap exists and is open
 gap_exists "$GAP_ID" || { echo "FAIL: $GAP_ID does not exist in gap registry" >&2; exit 1; }
 gap_is_open "$GAP_ID" || { echo "FAIL: $GAP_ID is not open (current status is not 'open')" >&2; exit 1; }
+
+GAP_SEVERITY="$(yq e -r ".gaps[] | select(.id == \"$GAP_ID\") | .severity // \"\"" "$GAPS_FILE" 2>/dev/null | head -n1)"
+EXISTING_LOCK_ID="$(yq e -r ".gaps[] | select(.id == \"$GAP_ID\") | .regression_lock_id // \"\"" "$GAPS_FILE" 2>/dev/null | head -n1)"
+
+# Enforce fix-to-lock discipline for high/critical closures.
+if [[ "$GAP_SEVERITY" == "high" || "$GAP_SEVERITY" == "critical" ]]; then
+  if [[ -z "$REGRESSION_LOCK_ID" && -z "$EXISTING_LOCK_ID" ]]; then
+    echo "FAIL: $GAP_ID severity=$GAP_SEVERITY requires --regression-lock-id (or existing regression_lock_id)" >&2
+    exit 1
+  fi
+fi
 
 # Verify claim ownership (no claim = Terminal C direct, allowed)
 verify_claim_ownership "$GAP_ID" || exit 1
@@ -74,6 +88,11 @@ if [[ -n "$NOTES" ]]; then
   yq e -i "(.gaps[] | select(.id == \"$GAP_ID\")).notes = \"$NOTES\"" "$GAPS_FILE"
 fi
 
+# Update regression lock id if provided
+if [[ -n "$REGRESSION_LOCK_ID" ]]; then
+  yq e -i "(.gaps[] | select(.id == \"$GAP_ID\")).regression_lock_id = \"$REGRESSION_LOCK_ID\"" "$GAPS_FILE"
+fi
+
 # Update file timestamp
 yq e -i ".updated = \"$TIMESTAMP\"" "$GAPS_FILE"
 
@@ -88,6 +107,7 @@ ${FIXED_IN:+Fixed in: $FIXED_IN}
 Gap-Mutation: capability
 Gap-Capability: gaps.close
 Gap-Run-Key: ${SPINE_CAP_RUN_KEY:-manual}
+${REGRESSION_LOCK_ID:+Regression-Lock-ID: $REGRESSION_LOCK_ID}
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 EOF
 )"

@@ -294,6 +294,19 @@ test_gaps_close_validation() {
   else
     pass "gaps-close rejects non-existent gap"
   fi
+
+  # High/critical gaps require regression lock id
+  local high_or_critical
+  high_or_critical="$(yq e -r '.gaps[] | select(.status == "open" and (.severity == "high" or .severity == "critical")) | .id' "$ORIG_GAPS_FILE" | head -n1)"
+  if [[ -n "$high_or_critical" && "$high_or_critical" != "null" ]]; then
+    if "$ROOT/ops/plugins/loops/bin/gaps-close" --id "$high_or_critical" --status fixed 2>/dev/null; then
+      fail "gaps-close should require --regression-lock-id for high/critical gaps"
+    else
+      pass "gaps-close enforces regression lock for high/critical gaps"
+    fi
+  else
+    pass "no high/critical open gaps available for regression lock validation"
+  fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────
