@@ -9,13 +9,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 SERVICE_REGISTRY="$ROOT/docs/governance/SERVICE_REGISTRY.yaml"
-STORAGE_POLICY="$ROOT/ops/bindings/infra.storage.placement.policy.yaml"
+CAPACITY_POLICY="$ROOT/ops/bindings/infra.capacity.guard.policy.yaml"
 
 fail=0
 err() { echo "D259 FAIL: $*" >&2; fail=1; }
 
 command -v yq >/dev/null 2>&1 || { echo "D259 FAIL: missing dependency: yq" >&2; exit 1; }
-for f in "$SSH_BINDING" "$VM_BINDING" "$SERVICE_REGISTRY" "$STORAGE_POLICY"; do
+for f in "$SSH_BINDING" "$VM_BINDING" "$SERVICE_REGISTRY" "$CAPACITY_POLICY"; do
   [[ -f "$f" ]] || { echo "D259 FAIL: missing file: $f" >&2; exit 1; }
 done
 
@@ -53,15 +53,15 @@ for ((i=0; i<vm_count; i++)); do
   [[ "$sr_ts_ip" == "$vm_ts_ip" ]] || err "$hostname: SERVICE_REGISTRY tailscale_ip mismatch expected=$vm_ts_ip actual=$sr_ts_ip"
   [[ "$sr_ssh" == "$ssh_target" ]] || err "$hostname: SERVICE_REGISTRY ssh mismatch expected=$ssh_target actual=$sr_ssh"
 
-  lane="$(yq e -r ".vm_storage.\"$hostname\".capacity_lane // \"\"" "$STORAGE_POLICY" 2>/dev/null || true)"
-  budget_class="$(yq e -r ".vm_storage.\"$hostname\".capacity_budget_class // \"\"" "$STORAGE_POLICY" 2>/dev/null || true)"
-  retention_ref="$(yq e -r ".vm_storage.\"$hostname\".retention_policy_ref // \"\"" "$STORAGE_POLICY" 2>/dev/null || true)"
-  reclaim_ref="$(yq e -r ".vm_storage.\"$hostname\".reclaim_policy_ref // \"\"" "$STORAGE_POLICY" 2>/dev/null || true)"
+  lane="$(yq e -r ".onboarding_capacity_contract.by_hostname.\"$hostname\".capacity_lane // \"\"" "$CAPACITY_POLICY" 2>/dev/null || true)"
+  budget_class="$(yq e -r ".onboarding_capacity_contract.by_hostname.\"$hostname\".capacity_budget_class // \"\"" "$CAPACITY_POLICY" 2>/dev/null || true)"
+  retention_ref="$(yq e -r ".onboarding_capacity_contract.by_hostname.\"$hostname\".retention_policy_ref // \"\"" "$CAPACITY_POLICY" 2>/dev/null || true)"
+  reclaim_ref="$(yq e -r ".onboarding_capacity_contract.by_hostname.\"$hostname\".reclaim_policy_ref // \"\"" "$CAPACITY_POLICY" 2>/dev/null || true)"
 
-  [[ -n "$lane" && "$lane" != "null" ]] || err "$hostname: infra.storage.placement.policy missing capacity_lane"
-  [[ -n "$budget_class" && "$budget_class" != "null" ]] || err "$hostname: infra.storage.placement.policy missing capacity_budget_class"
-  [[ -n "$retention_ref" && "$retention_ref" != "null" ]] || err "$hostname: infra.storage.placement.policy missing retention_policy_ref"
-  [[ -n "$reclaim_ref" && "$reclaim_ref" != "null" ]] || err "$hostname: infra.storage.placement.policy missing reclaim_policy_ref"
+  [[ -n "$lane" && "$lane" != "null" ]] || err "$hostname: infra.capacity.guard.policy onboarding contract missing capacity_lane"
+  [[ -n "$budget_class" && "$budget_class" != "null" ]] || err "$hostname: infra.capacity.guard.policy onboarding contract missing capacity_budget_class"
+  [[ -n "$retention_ref" && "$retention_ref" != "null" ]] || err "$hostname: infra.capacity.guard.policy onboarding contract missing retention_policy_ref"
+  [[ -n "$reclaim_ref" && "$reclaim_ref" != "null" ]] || err "$hostname: infra.capacity.guard.policy onboarding contract missing reclaim_policy_ref"
 
   if [[ -n "$retention_ref" && "$retention_ref" != "null" ]]; then
     retention_file="${retention_ref%%#*}"
