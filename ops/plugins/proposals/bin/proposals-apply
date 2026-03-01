@@ -665,6 +665,26 @@ run_loop_gap_linkage_admission() {
   fi
 }
 
+run_gap_id_validity_admission() {
+  echo "Admission check: gap ID validity"
+
+  # Extract GAP-OP-XXXX references from manifest change reasons
+  local gap_refs=()
+  while IFS= read -r gap_id; do
+    [[ -n "$gap_id" ]] && gap_refs+=("$gap_id")
+  done < <(yq e -r '.changes[].reason // "" ' "$manifest" 2>/dev/null | grep -oE 'GAP-OP-[0-9]+' | sort -u)
+
+  if (( ${#gap_refs[@]} == 0 )); then
+    return
+  fi
+
+  for gap_id in "${gap_refs[@]}"; do
+    if ! yq e -e ".gaps[] | select(.id == \"$gap_id\")" "$GAPS_FILE" >/dev/null 2>&1; then
+      admission_add_finding "P2" "gap_id_validity" "referenced $gap_id does not exist in operational.gaps.yaml"
+    fi
+  done
+}
+
 load_admission_policy() {
   ADMISSION_BLOCK_ON=()
   ADMISSION_WARN_ONLY=()
@@ -952,6 +972,7 @@ run_admission_controller() {
   start_admission_task "ssot-schema" run_ssot_schema_conventions_admission
   start_admission_task "vertical-integration" run_vertical_integration_admission
   start_admission_task "loop-gap-linkage" run_loop_gap_linkage_admission
+  start_admission_task "gap-id-validity" run_gap_id_validity_admission
   start_admission_task "change-intake-policy" run_change_intake_policy_admission
   collect_admission_tasks
 

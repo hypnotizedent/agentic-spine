@@ -85,6 +85,47 @@ for dir in "$PROPOSALS_DIR"/CP-*/; do
   fi
 done
 
+# Implementation commit label fidelity: check that labels match actual commit messages
+for dir in "$PROPOSALS_DIR"/CP-*/; do
+  [[ -d "$dir" ]] || continue
+  cp_name=$(basename "$dir")
+  manifest="$dir/manifest.yaml"
+  [[ -f "$manifest" ]] || continue
+  commit_count=$(yq e '.implementation_commits | length' "$manifest" 2>/dev/null || echo 0)
+  if [[ "$commit_count" =~ ^[0-9]+$ ]] && (( commit_count > 0 )); then
+    for (( i=0; i<commit_count; i++ )); do
+      hash=$(yq e ".implementation_commits[$i].hash" "$manifest" 2>/dev/null || echo "")
+      label=$(yq e ".implementation_commits[$i].label" "$manifest" 2>/dev/null || echo "")
+      [[ -n "$hash" && "$hash" != "null" ]] || continue
+      actual_subject=$(git log --format='%s' -1 "$hash" 2>/dev/null || echo "")
+      if [[ -z "$actual_subject" ]]; then
+        warn "$cp_name: implementation_commits[$i].hash=$hash not found in git history"
+        warnings=$((warnings + 1))
+      fi
+    done
+  fi
+done
+
+# Gap ID validity: check that referenced GAP-OP-XXXX IDs exist
+GAPS_FILE="$SP/ops/bindings/operational.gaps.yaml"
+if [[ -f "$GAPS_FILE" ]]; then
+  for dir in "$PROPOSALS_DIR"/CP-*/; do
+    [[ -d "$dir" ]] || continue
+    cp_name=$(basename "$dir")
+    manifest="$dir/manifest.yaml"
+    [[ -f "$manifest" ]] || continue
+    status=$(grep -m1 '^status:' "$manifest" 2>/dev/null | sed 's/^status: *//' | tr -d '"' | tr -d "'" | tr 'A-Z' 'a-z' || echo "")
+    [[ "$status" == "pending" || "$status" == "applied" || "$status" == "executed" ]] || continue
+    gap_refs=$(grep -oE 'GAP-OP-[0-9]+' "$manifest" 2>/dev/null | sort -u || true)
+    for gap_id in $gap_refs; do
+      if ! yq e -e ".gaps[] | select(.id == \"$gap_id\")" "$GAPS_FILE" >/dev/null 2>&1; then
+        warn "$cp_name: references $gap_id which does not exist in operational.gaps.yaml"
+        warnings=$((warnings + 1))
+      fi
+    done
+  done
+fi
+
 echo ""
 echo "Summary: $errors errors, $warnings warnings"
 

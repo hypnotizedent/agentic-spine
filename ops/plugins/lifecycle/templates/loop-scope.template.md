@@ -13,3 +13,9 @@ objective: {{OBJECTIVE}}
 ## Objective
 
 {{OBJECTIVE}}
+
+## Guard Commands
+
+<!-- Machine-readable: agents use these to resume/verify without rediscovery -->
+- **Verify**: `./bin/ops cap run verify.run -- fast`
+- **Handoff**: `./bin/ops cap run session.handoff.create --summary "checkpoint" --loops {{LOOP_ID}}`

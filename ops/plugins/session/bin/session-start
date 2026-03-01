@@ -175,6 +175,16 @@ run_fast_startup() {
     fi
     receipt_memory_hint="./bin/ops cap run receipts.summary -- --domain ${receipt_memory_domain} --days 7"
 
+    # Check for active handoffs from prior sessions
+    local active_handoff_hint=""
+    if [[ -x "$ROOT/ops/plugins/handoff/bin/session-handoff-list" ]]; then
+      local active_count
+      active_count="$("$ROOT/ops/plugins/handoff/bin/session-handoff-list" --state active --json 2>/dev/null | jq -r 'length' 2>/dev/null || echo 0)"
+      if [[ "$active_count" =~ ^[0-9]+$ ]] && (( active_count > 0 )); then
+        active_handoff_hint="$active_count active handoff(s) — run: ./bin/ops cap run session.handoff.list --state active"
+      fi
+    fi
+
     if [[ "$json_mode" -eq 1 ]]; then
       jq -n \
         --arg capability "session.start" \
@@ -184,6 +194,7 @@ run_fast_startup() {
         --arg recommended_domains "$recommend_domains" \
         --arg recommended_verify_command "$recommend_cmd" \
         --arg receipt_memory_hint "$receipt_memory_hint" \
+        --arg active_handoff_hint "$active_handoff_hint" \
         '{
           capability: $capability,
           mode: $mode,
@@ -193,7 +204,7 @@ run_fast_startup() {
           recommended_verify_command: $recommended_verify_command,
           receipt_memory_hint_command: $receipt_memory_hint,
           note: "fast lane complete; run recommended verify after domain edits"
-        }'
+        } + (if $active_handoff_hint != "" then {active_handoff_hint: $active_handoff_hint} else {} end)'
     else
       echo "session.start"
       echo "mode: fast"
@@ -202,6 +213,9 @@ run_fast_startup() {
       echo "recommended_domains: ${recommend_domains}"
       echo "post_work_verify: ${recommend_cmd}"
       echo "receipt_memory_hint: ${receipt_memory_hint}"
+      if [[ -n "$active_handoff_hint" ]]; then
+        echo "active_handoff: ${active_handoff_hint}"
+      fi
       echo "note: fast lane complete; run recommended verify after domain edits"
     fi
     return 0
