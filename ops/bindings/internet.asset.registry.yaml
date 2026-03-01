@@ -1,0 +1,613 @@
+# Internet Asset Registry (SSOT)
+# Canonical authority for all internet-touching physical assets across sites.
+# Status: authoritative
+# authority_state: authoritative
+# scope: internet-asset-registry
+# Last verified: 2026-03-01
+#
+# This is the ONE canonical surface for procurement, compatibility evaluation,
+# lifecycle tracking, and deterministic update routing of physical assets that
+# touch the network or compute infrastructure.
+#
+# Existing domain SSOTs (hardware.inventory.yaml, vm.lifecycle.yaml,
+# home.device.registry.yaml, etc.) remain authoritative for their domains.
+# This registry indexes across them and adds lifecycle/provenance/compatibility
+# metadata that no single domain SSOT carries.
+#
+# Rules:
+#   - Each entry is a physical asset (machine, drive, switch, coordinator, cable, etc.)
+#   - asset_id is globally unique (SITE-DOMAIN-VENDOR-MODEL-NN pattern)
+#   - source_binding links to the authoritative domain SSOT path
+#   - provenance tracks how the data was verified
+#   - lifecycle_state governs operational status
+#   - compatibility dimensions enable procurement decisions
+
+version: 1
+updated_at: "2026-03-01"
+owner: "@ronny"
+timezone: "America/New_York"
+
+metadata:
+  status: authoritative
+  authority_state: authoritative
+  scope: internet-asset-registry
+  freshness_policy:
+    max_age_hours: 24
+    freshness_field: updated_at
+
+# ─────────────────────────────────────────────────────────────
+# Lifecycle Model
+# ─────────────────────────────────────────────────────────────
+
+lifecycle_states:
+  - active          # in production use
+  - planned         # ordered or earmarked, not yet deployed
+  - decommissioned  # removed from production, retained for reference
+  - tombstoned      # permanently removed, historical record only
+  - extra           # on-hand spare, not deployed
+
+# ─────────────────────────────────────────────────────────────
+# Provenance / Confidence Model
+# ─────────────────────────────────────────────────────────────
+# Precedence: machine_verified > receipt_verified > user_confirmed > candidate_unverified
+
+provenance_levels:
+  - id: machine_verified
+    rank: 1
+    description: "Confirmed by runtime probe, API, or SSH command output"
+  - id: receipt_verified
+    rank: 2
+    description: "Confirmed by purchase receipt, shipping label, or photo evidence"
+  - id: user_confirmed
+    rank: 3
+    description: "User stated in governed session; no machine/receipt backup"
+  - id: candidate_unverified
+    rank: 4
+    description: "Phone photo or LLM-derived; requires promotion before authoritative use"
+
+# ─────────────────────────────────────────────────────────────
+# Update Contract (deterministic triggers)
+# ─────────────────────────────────────────────────────────────
+
+update_contract:
+  package_received:
+    description: "Physical package arrived (drive, cable, card, etc.)"
+    required_update_targets:
+      - path: ops/bindings/hardware.parts.inventory.yaml
+        action: "add or update part entry with receipt evidence"
+      - path: ops/bindings/internet.asset.registry.yaml
+        action: "add asset entry with lifecycle_state=planned or active"
+    required_verify_commands:
+      - "./bin/ops cap run verify.run -- fast"
+    handoff_artifact: "receipts/sessions/package-intake-*.md"
+
+  deal_candidate:
+    description: "Online deal found, needs compatibility evaluation before purchase"
+    required_update_targets:
+      - path: ops/bindings/internet.asset.registry.yaml
+        action: "run internet.asset.compatibility.evaluate capability"
+    required_verify_commands: []
+    handoff_artifact: "receipts/sessions/deal-evaluation-*.md"
+
+  new_vm_joined:
+    description: "New VM provisioned on Proxmox"
+    required_update_targets:
+      - path: ops/bindings/vm.lifecycle.yaml
+        action: "add VM entry with status=provisioned"
+      - path: ops/bindings/ssh.targets.yaml
+        action: "add SSH target entry"
+      - path: ops/bindings/internet.asset.registry.yaml
+        action: "update parent machine active_vm_count"
+    required_verify_commands:
+      - "./bin/ops cap run verify.run -- domain infra"
+    handoff_artifact: "receipts/sessions/vm-provision-*.md"
+
+  new_drive_ordered:
+    description: "New storage drive ordered for expansion or replacement"
+    required_update_targets:
+      - path: ops/bindings/hardware.parts.inventory.yaml
+        action: "add part entry with lifecycle_status=proposed"
+      - path: ops/bindings/internet.asset.registry.yaml
+        action: "add asset entry with lifecycle_state=planned"
+    required_verify_commands:
+      - "./bin/ops cap run verify.run -- fast"
+    handoff_artifact: "receipts/sessions/drive-order-*.md"
+
+  ha_automation_request:
+    description: "New HA automation needs device context"
+    required_update_targets:
+      - path: ops/bindings/home.device.registry.yaml
+        action: "verify device entry exists with ha_entities"
+      - path: ops/bindings/z2m.devices.yaml
+        action: "verify Zigbee device entry if applicable"
+    required_verify_commands:
+      - "./bin/ops cap run verify.run -- domain iot"
+    handoff_artifact: "receipts/sessions/ha-automation-*.md"
+
+# ─────────────────────────────────────────────────────────────
+# Compatibility Dimensions (for procurement decisions)
+# ─────────────────────────────────────────────────────────────
+
+compatibility_dimensions:
+  site:
+    description: "Physical site where asset will be deployed"
+    values: [home, shop]
+  power:
+    description: "Power requirements and available capacity"
+    fields: [wattage, connector_type, ups_protected]
+  network:
+    description: "Network connectivity requirements"
+    fields: [interface_type, speed, vlan, protocol]
+  protocol:
+    description: "Communication protocol requirements"
+    values: [ethernet, sas, sata, nvme, usb, zigbee, zwave, matter, wifi, cloud]
+  rack_slot:
+    description: "Physical rack position and form factor"
+    fields: [form_factor, rack_units, bay_type, available_slots]
+  storage_interface:
+    description: "Storage controller and interface compatibility"
+    fields: [interface, controller, max_drives, current_drives]
+  domain_touchpoints:
+    description: "Spine domains impacted by adding this asset"
+    values: [infra, media, iot, network, compute, storage, communications]
+  migration_impact:
+    description: "Services or VMs that would need migration"
+    fields: [affected_vms, affected_stacks, downtime_required]
+
+# ─────────────────────────────────────────────────────────────
+# Assets
+# ─────────────────────────────────────────────────────────────
+
+sites:
+  - id: home
+    description: "Home site (10.0.0.0/24 network)"
+    timezone: "America/New_York"
+  - id: shop
+    description: "Shop site (192.168.1.0/24 network)"
+    timezone: "America/New_York"
+
+assets:
+  # ─── Shop Compute ────────────────────────────────────────────
+  - asset_id: SHOP-SERVER-DELL-R730XD-01
+    site: shop
+    domain: compute
+    class: compute.server
+    manufacturer: Dell
+    model: "PowerEdge R730XD"
+    identifiers:
+      service_tag: HSZZD42
+    lifecycle_state: active
+    provenance: machine_verified
+    source_binding: ops/bindings/hardware.inventory.yaml
+    source_path: "machines[pve]"
+    compatibility:
+      rack_slot:
+        form_factor: "2U rackmount"
+        rack_units: 2
+        rack_position: "U17-18"
+      power:
+        wattage: 750
+        connector_type: "C13"
+        ups_protected: true
+      network:
+        interface_type: ethernet
+        speed: "1GbE"
+      storage_interface:
+        controllers:
+          - name: "Dell HBA330 Mini"
+            interface: sas
+            max_drives: 12
+            current_drives: 12
+          - name: "LSI SAS9300-8e"
+            interface: sas
+            max_drives: 24
+            current_drives: 12
+    domain_touchpoints: [infra, media, compute, storage]
+    last_verified: "2026-03-01"
+
+  - asset_id: SHOP-DAS-DELL-MD1400-01
+    site: shop
+    domain: storage
+    class: storage.das_enclosure
+    manufacturer: Dell
+    model: MD1400
+    identifiers:
+      service_tag: HRW2F42
+    lifecycle_state: active
+    provenance: machine_verified
+    source_binding: ops/bindings/hardware.inventory.yaml
+    source_path: "machines[pve].external_shelves[md1400]"
+    compatibility:
+      rack_slot:
+        form_factor: "2U rackmount"
+        rack_units: 2
+        rack_position: "U14-16"
+      storage_interface:
+        interface: sas
+        controller: "LSI SAS9300-8e"
+        max_drives: 12
+        current_drives: 12
+    domain_touchpoints: [storage, media]
+    last_verified: "2026-03-01"
+
+  - asset_id: SHOP-RACK-RITTAL-01
+    site: shop
+    domain: rack
+    class: rack.enclosure
+    manufacturer: Rittal
+    model: "VRIS38 S"
+    identifiers:
+      qa_stamp: "QA 452"
+    lifecycle_state: active
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      rack_slot:
+        form_factor: "full-height rack"
+        rack_units: 38
+    domain_touchpoints: [infra]
+    last_verified: "2026-03-01"
+
+  - asset_id: SHOP-NET-GW-TMOBILE-5G-01
+    site: shop
+    domain: networking
+    class: network.gateway
+    manufacturer: T-Mobile
+    model: "TM0-G4AR"
+    identifiers: {}
+    lifecycle_state: active
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      network:
+        interface_type: ethernet
+        speed: "5G wireless"
+    domain_touchpoints: [network]
+    last_verified: "2026-03-01"
+
+  - asset_id: SHOP-NET-SW-DELL-N2024P-01
+    site: shop
+    domain: networking
+    class: network.switch
+    manufacturer: Dell
+    model: N2024P
+    identifiers: {}
+    lifecycle_state: active
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      network:
+        interface_type: ethernet
+        speed: "1GbE"
+      power:
+        connector_type: "C13"
+    domain_touchpoints: [network, infra]
+    last_verified: "2026-03-01"
+
+  - asset_id: SHOP-POWER-UPS-APC-BACKUPS-900-01
+    site: shop
+    domain: power
+    class: power.ups
+    manufacturer: APC
+    model: "Back-UPS 900"
+    identifiers: {}
+    lifecycle_state: active
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      power:
+        wattage: 900
+        connector_type: "NEMA 5-15P"
+    domain_touchpoints: [infra]
+    last_verified: "2026-03-01"
+
+  - asset_id: SHOP-CABLE-SAS-EXT-0GYK61-01
+    site: shop
+    domain: cabling
+    class: cabling.sas_external
+    manufacturer: Dell
+    model: "0GYK61"
+    identifiers: {}
+    lifecycle_state: active
+    provenance: machine_verified
+    source_binding: ops/bindings/hardware.parts.inventory.yaml
+    source_path: "parts[sas-cable-0gyk61]"
+    compatibility:
+      storage_interface:
+        interface: sas
+        controller: "SFF-8644"
+    domain_touchpoints: [storage]
+    last_verified: "2026-02-23"
+
+  - asset_id: SHOP-EXTRA-SSD-INTEL-DC-S3500-480GB-01
+    site: shop
+    domain: storage
+    class: storage.ssd
+    manufacturer: Intel
+    model: "SSDSC2BB480G4"
+    identifiers: {}
+    lifecycle_state: extra
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      storage_interface:
+        interface: sata
+    domain_touchpoints: [storage]
+    last_verified: "2026-03-01"
+
+  - asset_id: SHOP-EXTRA-CPU-XEON-E5-2628V4-01
+    site: shop
+    domain: compute
+    class: compute.cpu
+    manufacturer: Intel
+    model: "Xeon E5-2628 v4"
+    identifiers: {}
+    lifecycle_state: extra
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      power:
+        wattage: 75
+    domain_touchpoints: [compute]
+    last_verified: "2026-03-01"
+
+  # ─── Home Compute ────────────────────────────────────────────
+  - asset_id: HOME-COMPUTE-BEELINK-SER7-01
+    site: home
+    domain: compute
+    class: compute.mini_pc
+    manufacturer: Beelink
+    model: SER7
+    identifiers:
+      serial_number: A78403BH50349
+    lifecycle_state: active
+    provenance: machine_verified
+    source_binding: ops/bindings/hardware.inventory.yaml
+    source_path: "machines[proxmox-home]"
+    compatibility:
+      power:
+        wattage: 65
+        connector_type: "barrel"
+      network:
+        interface_type: ethernet
+        speed: "2.5GbE"
+    domain_touchpoints: [infra, iot, compute]
+    last_verified: "2026-03-01"
+
+  # ─── Home Storage ────────────────────────────────────────────
+  - asset_id: HOME-NAS-SYNOLOGY-DS918-01
+    site: home
+    domain: storage
+    class: storage.nas
+    manufacturer: Synology
+    model: "DS918+"
+    identifiers:
+      serial_number: "1970PDN058306"
+      mac_addresses: ["00:11:32:BA:AD:CD", "00:11:32:BA:AD:CE"]
+    lifecycle_state: active
+    provenance: machine_verified
+    source_binding: ops/bindings/hardware.inventory.yaml
+    source_path: "machines[nas]"
+    compatibility:
+      storage_interface:
+        interface: sata
+        max_drives: 4
+      network:
+        interface_type: ethernet
+        speed: "1GbE"
+    domain_touchpoints: [storage, infra]
+    last_verified: "2026-03-01"
+
+  - asset_id: HOME-HDD-SEAGATE-IRONWOLF-16TB-01
+    site: home
+    domain: storage
+    class: storage.hdd
+    manufacturer: Seagate
+    model: ST16000NE000
+    identifiers:
+      serial_number: ZVTC9P12
+      wwn: "5000C500E7A307A3"
+    lifecycle_state: active
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      storage_interface:
+        interface: sata
+    domain_touchpoints: [storage]
+    last_verified: "2026-03-01"
+
+  - asset_id: HOME-HDD-WD-RED-3TB-01
+    site: home
+    domain: storage
+    class: storage.hdd
+    manufacturer: "Western Digital"
+    model: "WD30EFRX-68EUZN0"
+    identifiers:
+      serial_number: WCC4N3NKV065
+      wwn: "50014EE2B82F4CAB"
+    lifecycle_state: extra
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      storage_interface:
+        interface: sata
+    domain_touchpoints: [storage]
+    last_verified: "2026-03-01"
+
+  - asset_id: HOME-HDD-WD-RED-3TB-02
+    site: home
+    domain: storage
+    class: storage.hdd
+    manufacturer: "Western Digital"
+    model: "WD30EFRX-68EUZN0"
+    identifiers:
+      serial_number: WCC4N7SXHPLK
+      wwn: "50014EE262D91C6F"
+    lifecycle_state: extra
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      storage_interface:
+        interface: sata
+    domain_touchpoints: [storage]
+    last_verified: "2026-03-01"
+
+  # ─── Home Networking ─────────────────────────────────────────
+  - asset_id: HOME-NET-GW-XFINITY-CGM4981COM-01
+    site: home
+    domain: networking
+    class: network.gateway_modem_router
+    manufacturer: "Comcast / Xfinity"
+    model: CGM4981COM
+    identifiers:
+      cm_mac: "0C:FE:7B:ED:0C:6C"
+      wan_mac: "0C:FE:7B:ED:0C:6D"
+      mta_mac: "0C:FE:7B:ED:0C:6E"
+    lifecycle_state: active
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      network:
+        interface_type: ethernet
+        speed: "DOCSIS 3.1"
+    domain_touchpoints: [network]
+    last_verified: "2026-03-01"
+
+  - asset_id: HOME-NET-GW-UBIQUITI-UDR7-01
+    site: home
+    domain: networking
+    class: network.gateway_router
+    manufacturer: Ubiquiti
+    model: "UDR7-US"
+    identifiers:
+      mac_address: "8C:30:66:B6:24:BD"
+    lifecycle_state: active
+    provenance: machine_verified
+    source_binding: ops/bindings/home.device.registry.yaml
+    source_path: "devices[udr-home]"
+    compatibility:
+      network:
+        interface_type: ethernet
+        speed: "2.5GbE"
+        protocol: wifi
+    domain_touchpoints: [network, iot]
+    last_verified: "2026-03-01"
+
+  - asset_id: HOME-NET-SW-UBIQUITI-USW-LITE-16-POE-01
+    site: home
+    domain: networking
+    class: network.switch
+    manufacturer: Ubiquiti
+    model: "USW-Lite-16-PoE"
+    identifiers:
+      mac_address: "6C:63:F8:98:D4:07"
+    lifecycle_state: active
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      network:
+        interface_type: ethernet
+        speed: "1GbE"
+      power:
+        connector_type: "PoE passthrough"
+    domain_touchpoints: [network]
+    last_verified: "2026-03-01"
+
+  - asset_id: HOME-NET-SW-UBIQUITI-USW-FLEX-2.5G-5-01
+    site: home
+    domain: networking
+    class: network.switch
+    manufacturer: Ubiquiti
+    model: "USW-Flex-2.5G-5"
+    identifiers:
+      mac_address: "94:2A:6F:4C:BB:FF"
+    lifecycle_state: active
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      network:
+        interface_type: ethernet
+        speed: "2.5GbE"
+    domain_touchpoints: [network]
+    last_verified: "2026-03-01"
+
+  - asset_id: HOME-NET-SW-TPLINK-TL-SG105-01
+    site: home
+    domain: networking
+    class: network.switch
+    manufacturer: TP-Link
+    model: "TL-SG105"
+    identifiers:
+      serial_number: "22230T3010816"
+      hw_variant: "TL-SG105(UN) Ver:6.8"
+    lifecycle_state: extra
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      network:
+        interface_type: ethernet
+        speed: "1GbE"
+    domain_touchpoints: [network]
+    last_verified: "2026-03-01"
+
+  # ─── Home IoT Coordinators ──────────────────────────────────
+  - asset_id: HOME-IOT-ZIGBEE-SMLIGHT-SLZB-06-01
+    site: home
+    domain: networking
+    class: iot.zigbee_coordinator
+    manufacturer: SMLIGHT
+    model: "SLZB-06"
+    identifiers:
+      serial_number: "06R162-25033294"
+      mac_address: "20:43:A8:51:15:E3"
+    lifecycle_state: active
+    provenance: machine_verified
+    source_binding: ops/bindings/home.device.registry.yaml
+    source_path: "devices[slzb-06]"
+    compatibility:
+      protocol: zigbee
+      network:
+        interface_type: ethernet
+    domain_touchpoints: [iot]
+    last_verified: "2026-03-01"
+
+  - asset_id: HOME-IOT-ZIGBEE-SMLIGHT-SLZB-06MU-01
+    site: home
+    domain: networking
+    class: iot.zigbee_coordinator
+    manufacturer: SMLIGHT
+    model: "SLZB-06MU"
+    identifiers:
+      serial_number: "06MU-173-2511650"
+      mac_address: "82:B5:4E:97:B0:28"
+    lifecycle_state: active
+    provenance: machine_verified
+    source_binding: ops/bindings/home.device.registry.yaml
+    source_path: "devices[slzb-06mu]"
+    compatibility:
+      protocol: matter
+      network:
+        interface_type: ethernet
+    domain_touchpoints: [iot]
+    last_verified: "2026-03-01"
+
+  # ─── Home Display ───────────────────────────────────────────
+  - asset_id: HOME-DISP-MON-DELL-U4025QW-01
+    site: home
+    domain: hardware
+    class: display.monitor
+    manufacturer: Dell
+    model: U4025QW
+    identifiers:
+      service_tag: DLX2B34
+    lifecycle_state: active
+    provenance: receipt_verified
+    source_binding: null
+    compatibility:
+      power:
+        wattage: 200
+        connector_type: "C13"
+      network:
+        interface_type: "Thunderbolt/USB-C"
+    domain_touchpoints: []
+    last_verified: "2026-03-01"
