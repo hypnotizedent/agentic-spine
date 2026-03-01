@@ -205,6 +205,7 @@ def build_payload(root: Path) -> dict[str, Any]:
     schedule_timezone = str(registry.get("schedule_timezone", "") or contract.get("schedule_timezone", "") or "")
     recency_cfg = contract.get("recency", {}) if isinstance(contract, dict) else {}
     exempt_labels = set(recency_cfg.get("exempt_labels", []) or [])
+    allow_nonzero_exit_labels = set(recency_cfg.get("allow_nonzero_exit_labels", []) or [])
     labels = registry.get("labels", []) if isinstance(registry.get("labels"), list) else []
     runtime_index = load_runtime_job_index(runtime_jobs_path)
 
@@ -240,6 +241,8 @@ def build_payload(root: Path) -> dict[str, Any]:
         status, age_seconds, stale_threshold = classify_status(now, evidence, cadence_seconds)
         if label in exempt_labels and status in {"stale", "failed"}:
             status = "exempt"
+        elif label in allow_nonzero_exit_labels and status == "failed":
+            status = "allowed_nonzero"
 
         rows.append(
             {
@@ -262,6 +265,7 @@ def build_payload(root: Path) -> dict[str, Any]:
     counts = {
         "total": len(rows),
         "ok": sum(1 for r in rows if r["status"] == "ok"),
+        "allowed_nonzero": sum(1 for r in rows if r["status"] == "allowed_nonzero"),
         "stale": sum(1 for r in rows if r["status"] == "stale"),
         "failed": sum(1 for r in rows if r["status"] == "failed"),
         "unknown": sum(1 for r in rows if r["status"] == "unknown"),
@@ -286,6 +290,7 @@ def build_payload(root: Path) -> dict[str, Any]:
             "failed_labels": [r["label"] for r in rows if r["status"] == "failed"],
             "unknown_labels": [r["label"] for r in rows if r["status"] == "unknown"],
             "exempt_labels": [r["label"] for r in rows if r["status"] == "exempt"],
+            "allowed_nonzero_labels": [r["label"] for r in rows if r["status"] == "allowed_nonzero"],
         },
     }
 
@@ -353,9 +358,10 @@ def main() -> int:
         print("launchd.scheduler.health.status")
         print(f"status: {payload.get('status', 'unknown')}")
         print(
-            "summary: total={total} ok={ok} stale={stale} failed={failed} unknown={unknown} exempt={exempt}".format(
+            "summary: total={total} ok={ok} allowed_nonzero={allowed_nonzero} stale={stale} failed={failed} unknown={unknown} exempt={exempt}".format(
                 total=summary.get("total", 0),
                 ok=summary.get("ok", 0),
+                allowed_nonzero=summary.get("allowed_nonzero", 0),
                 stale=summary.get("stale", 0),
                 failed=summary.get("failed", 0),
                 unknown=summary.get("unknown", 0),
