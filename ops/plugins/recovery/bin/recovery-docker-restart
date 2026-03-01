@@ -122,7 +122,19 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 before_running="$(${DOCKER_CMD[@]} compose -f "$FILE" ps --status running --services | wc -l | tr -d " ")"
-${DOCKER_CMD[@]} compose -f "$FILE" up -d "${SERVICES[@]}"
+
+# Use compose restart for deterministic restart semantics. Fall back to up -d
+# when services are not running yet or restart is unsupported in edge cases.
+if [[ "${#SERVICES[@]}" -gt 0 ]]; then
+  if ! ${DOCKER_CMD[@]} compose -f "$FILE" restart "${SERVICES[@]}"; then
+    ${DOCKER_CMD[@]} compose -f "$FILE" up -d "${SERVICES[@]}"
+  fi
+else
+  if ! ${DOCKER_CMD[@]} compose -f "$FILE" restart; then
+    ${DOCKER_CMD[@]} compose -f "$FILE" up -d
+  fi
+fi
+
 sleep 10
 running_services="$(${DOCKER_CMD[@]} compose -f "$FILE" ps --status running --services || true)"
 after_running="$(printf "%s\n" "$running_services" | sed '/^$/d' | wc -l | tr -d " ")"

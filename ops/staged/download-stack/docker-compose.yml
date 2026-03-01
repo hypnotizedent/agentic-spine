@@ -255,6 +255,7 @@ services:
     image: ghcr.io/thijmengthn/swaparr:latest
     container_name: swaparr-radarr
     restart: unless-stopped
+    profiles: ["deprecated"]  # Deprecated 2026-03-01: replaced by arr-native-search scheduler
     environment:
       - TZ=America/New_York
       - BASEURL=http://radarr:7878
@@ -267,6 +268,7 @@ services:
     image: ghcr.io/thijmengthn/swaparr:latest
     container_name: swaparr-sonarr
     restart: unless-stopped
+    profiles: ["deprecated"]  # Deprecated 2026-03-01: replaced by arr-native-search scheduler
     environment:
       - TZ=America/New_York
       - BASEURL=http://sonarr:8989
@@ -279,6 +281,7 @@ services:
     image: ghcr.io/thijmengthn/swaparr:latest
     container_name: swaparr-lidarr
     restart: unless-stopped
+    profiles: ["deprecated"]  # Deprecated 2026-03-01: replaced by arr-native-search scheduler
     environment:
       - TZ=America/New_York
       - BASEURL=http://lidarr:8686
@@ -286,6 +289,33 @@ services:
       - PLATFORM=lidarr
     volumes:
       - /mnt/docker/volumes/swaparr-lidarr/config:/config
+
+  # Huntarr replacement: native scheduled missing-search commands.
+  arr-native-search:
+    image: curlimages/curl:8.17.0
+    container_name: arr-native-search
+    restart: unless-stopped
+    environment:
+      - TZ=America/New_York
+      - ARR_NATIVE_SEARCH_INTERVAL_SECONDS=${ARR_NATIVE_SEARCH_INTERVAL_SECONDS:-21600}
+      - RADARR_API_KEY=${RADARR_API_KEY}
+      - SONARR_API_KEY=${SONARR_API_KEY}
+      - LIDARR_API_KEY=${LIDARR_API_KEY}
+    command:
+      - /bin/sh
+      - -c
+      - |
+          while true; do
+            TS="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "[$$TS] arr-native-search: trigger missing searches"
+            curl -fsS --max-time 30 -H "X-Api-Key: $$RADARR_API_KEY" -H "Content-Type: application/json" \
+              -d '{"name":"MoviesSearch"}' http://radarr:7878/api/v3/command || true
+            curl -fsS --max-time 30 -H "X-Api-Key: $$SONARR_API_KEY" -H "Content-Type: application/json" \
+              -d '{"name":"MissingEpisodeSearch"}' http://sonarr:8989/api/v3/command || true
+            curl -fsS --max-time 30 -H "X-Api-Key: $$LIDARR_API_KEY" -H "Content-Type: application/json" \
+              -d '{"name":"MissingAlbumSearch"}' http://lidarr:8686/api/v1/command || true
+            sleep "$$ARR_NATIVE_SEARCH_INTERVAL_SECONDS"
+          done
 
   # ─── Media Support ──────────────────────────────────────────────────
   trailarr:
@@ -334,6 +364,7 @@ services:
     image: huntarr/huntarr:latest
     container_name: huntarr
     restart: unless-stopped
+    profiles: ["deprecated"]  # Deprecated 2026-03-01 (security); keep definition for emergency rollback only
     ports:
       - "9705:9705"
     environment:

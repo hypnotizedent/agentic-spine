@@ -124,12 +124,21 @@ restart_vm_stack() {
   # Restart
   echo ""
   echo "RESTARTING..."
-  restart_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$TIMEOUT_SEC" "$ssh_ref" "cd $compose_path && docker compose down && docker compose up -d" 2>&1 || true)
-  if echo "$restart_out" | grep -qi "permission denied while trying to connect to the docker api"; then
-    restart_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$TIMEOUT_SEC" "$ssh_ref" "cd $compose_path && sudo -n docker compose down && sudo -n docker compose up -d" 2>&1 || true)
+  set +e
+  restart_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$TIMEOUT_SEC" "$ssh_ref" "cd $compose_path && docker compose down && docker compose up -d" 2>&1)
+  restart_rc=$?
+  set -e
+
+  if [[ $restart_rc -ne 0 ]] || echo "$restart_out" | grep -qi "permission denied"; then
+    set +e
+    restart_out=$(ssh -o BatchMode=yes -o ConnectTimeout="$TIMEOUT_SEC" "$ssh_ref" "cd $compose_path && sudo -n docker compose down && sudo -n docker compose up -d" 2>&1)
+    restart_rc=$?
+    set -e
   fi
-  if echo "$restart_out" | grep -qi "^sudo: "; then
-    echo "FAIL: restart failed on $vm (docker/sudo access unavailable)"
+
+  if [[ $restart_rc -ne 0 ]] || echo "$restart_out" | grep -qi "^sudo: "; then
+    echo "$restart_out"
+    echo "FAIL: restart failed on $vm"
     return 1
   fi
   echo "$restart_out"
