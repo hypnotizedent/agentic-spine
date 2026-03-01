@@ -8,6 +8,7 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
 LAUNCHD_CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
+LAUNCHD_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
 REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
 DOC="$ROOT/docs/product/AOF_V1_1_SURFACE_UNIFICATION.md"
 SKIP_LIVE_LAUNCHCTL="${D148_SKIP_LIVE_LAUNCHCTL:-0}"
@@ -31,6 +32,7 @@ need_cmd jq
 need_cmd plutil
 need_file "$CONTRACT"
 need_file "$LAUNCHD_CONTRACT"
+need_file "$LAUNCHD_REGISTRY"
 need_file "$REGISTRY"
 need_file "$DOC"
 if [[ "$SKIP_LIVE_LAUNCHCTL" != "1" ]]; then
@@ -162,12 +164,17 @@ fi
 # and preserve schedule parity. Live load-state checks are mandatory unless explicitly skipped in tests.
 source_dir="$(yq e -r '.paths.source_dir // ""' "$LAUNCHD_CONTRACT")"
 install_dir="$(yq e -r '.paths.user_launchagents_dir // ""' "$LAUNCHD_CONTRACT")"
+log_root="$(yq e -r '.paths.canonical_log_root // ""' "$LAUNCHD_CONTRACT")"
+required_env_key="$(yq e -r '.required_env[0] // "SPINE_ROOT"' "$LAUNCHD_CONTRACT")"
 
 if [[ -z "$source_dir" ]]; then
   err "launchd.runtime.contract paths.source_dir is required"
 fi
 if [[ -z "$install_dir" ]]; then
   err "launchd.runtime.contract paths.user_launchagents_dir is required"
+fi
+if [[ -z "$log_root" ]]; then
+  err "launchd.runtime.contract paths.canonical_log_root is required"
 fi
 
 mapfile -t required_labels < <(yq e -r '.required_labels[]?' "$LAUNCHD_CONTRACT")
@@ -209,6 +216,25 @@ for label in "${required_labels[@]}"; do
     err "launchagent '$label' schedule drift: installed plist does not match governed template"
   else
     ok "launchagent '$label' schedule matches governed template"
+  fi
+
+  src_out_path="$(plutil -convert json -o - "$src_plist" 2>/dev/null | jq -r '.StandardOutPath // ""')"
+  src_err_path="$(plutil -convert json -o - "$src_plist" 2>/dev/null | jq -r '.StandardErrorPath // ""')"
+  if [[ "$src_out_path" != "$log_root"* ]]; then
+    err "launchagent '$label' StandardOutPath must live under '$log_root' (got '$src_out_path')"
+  fi
+  if [[ "$src_err_path" != "$log_root"* ]]; then
+    err "launchagent '$label' StandardErrorPath must live under '$log_root' (got '$src_err_path')"
+  fi
+
+  src_env_spine="$(plutil -convert json -o - "$src_plist" 2>/dev/null | jq -r ".EnvironmentVariables.${required_env_key} // \"\"")"
+  if [[ "$src_env_spine" != "$ROOT" ]]; then
+    err "launchagent '$label' missing canonical ${required_env_key}=$ROOT in template env"
+  fi
+
+  registry_count="$(yq e ".labels[] | select(.label == \"$label\") | length" "$LAUNCHD_REGISTRY" 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "$registry_count" == "0" ]]; then
+    err "launchagent '$label' missing from launchd.scheduler.registry.yaml"
   fi
 
   if [[ "$SKIP_LIVE_LAUNCHCTL" == "1" ]]; then

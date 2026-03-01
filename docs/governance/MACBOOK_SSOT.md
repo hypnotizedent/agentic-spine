@@ -274,6 +274,10 @@ df -h /
 
 ## Scheduled Tasks (launchd)
 
+> Canonical active launchd label inventory is now maintained in:
+> `ops/bindings/launchd.scheduler.registry.yaml`.
+> The table below is a legacy operator snapshot and may omit newer labels.
+
 **LaunchAgents** (`~/Library/LaunchAgents/`):
 
 | Plist | Schedule | Script | Purpose | Status |
