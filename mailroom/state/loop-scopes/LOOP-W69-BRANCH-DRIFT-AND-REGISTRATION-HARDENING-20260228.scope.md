@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-W69-BRANCH-DRIFT-AND-REGISTRATION-HARDENING-20260228
 created: 2026-02-28
-status: active
+status: closed
 owner: "@ronny"
 scope: w69
 priority: medium

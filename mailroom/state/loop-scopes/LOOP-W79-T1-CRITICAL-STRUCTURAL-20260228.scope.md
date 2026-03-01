@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-W79-T1-CRITICAL-STRUCTURAL-20260228
 created: 2026-02-28
-status: active
+status: closed
 owner: "@ronny"
 scope: w79
 priority: medium

@@ -9,7 +9,7 @@
 # Last verified: 2026-02-22
 
 version: 1
-updated: "2026-03-01T00:13:07Z"
+updated: "2026-03-01T00:17:45Z"
 gaps:
   # ─────────────────────────────────────────────────────────────
   # Discovered during LOOP-INFRA-VM-RESTRUCTURE-20260206
@@ -13080,9 +13080,11 @@ gaps:
     description: |
       Recovery phase in infra-maintenance-window hardcoded to skip home site entirely. Line 493: if SITE==home then return 0. Home site gets no post-power recovery — no NAS check, no LXC verification, no HA supervisor health confirmation.
     severity: critical
-    status: open
-    notes: "Filed via gaps.file at 2026-02-28T02:13:08Z"
+    status: fixed
+    notes: "Fixed: infra-maintenance-window now uses contract-driven SELECTED_SITE_IDS for shutdown/startup/recovery; no site hardcoding path remains. Verified under D181 multisite maintenance transaction lock."
     parent_loop: "LOOP-NETWORK-INFRASTRUCTURE-NORMALIZATION-20260228"
+    fixed_in: D181
+    regression_lock_id: D181
   - id: "GAP-OP-1054"
     title: "No network.speed.test capability exists — zero speed test tooling in the codebase."
     discovered_by: "claude-agent"
@@ -13249,9 +13251,11 @@ gaps:
     description: |
       shutdown_sites() and startup_sites() in infra-maintenance-window use hardcoded case statements (shop/home/both). No dynamic site enumeration from contract. A 3rd site would be silently excluded from shutdown and startup phases.
     severity: critical
-    status: open
-    notes: "Filed via gaps.file at 2026-02-28T02:14:42Z"
+    status: fixed
+    notes: "Fixed: infra-maintenance-window now uses contract-driven SELECTED_SITE_IDS for shutdown/startup/recovery; no site hardcoding path remains. Verified under D181 multisite maintenance transaction lock."
     parent_loop: "LOOP-NETWORK-INFRASTRUCTURE-NORMALIZATION-20260228"
+    fixed_in: D181
+    regression_lock_id: D181
   - id: "GAP-OP-1064"
     title: "enforce_shop_oob_policy() checks SITE_ID \\!= shop literally instead of reading requires_oob_guard from cont..."
     discovered_by: "forensic-sweep"
@@ -13463,9 +13467,11 @@ gaps:
     description: |
       IKEA BILRESA Matter button dead — button_1 last fired 2026-02-18 (10 days ago), button_2 last 2026-02-17. Battery 100%, MYGGSPRAY on same Thread network works fine. Thread sleepy device lost. Fix: factory reset and recommission via iPhone Companion App.
     severity: critical
-    status: open
-    notes: "Filed via gaps.file at 2026-02-28T02:17:35Z"
+    status: accepted
+    notes: "Blocked (manual): requires physical factory reset + recommission of IKEA BILRESA via iPhone Home app; not remotely actionable from this terminal."
     parent_loop: "LOOP-HA-DEVICE-RELIABILITY-NORMALIZATION-20260228"
+    fixed_in: manual-physical-reset-required
+    regression_lock_id: LOCK-MATTER-BUTTON-HEALTH-MANUAL
   - id: "GAP-OP-1079"
     title: "Matter devices marked orphan in ha.device.map.yaml — BILRESA and MYGGSPRAY have orphan=true, orphan_categor..."
     discovered_by: "forensic-audit-20260228"
@@ -13921,9 +13927,11 @@ gaps:
     description: |
       Pi-hole binary missing on LXC 105. Container running, Tailscale connected, HTTP 302, but pihole CLI command not found. Spine says active in vm.lifecycle, services.health, home.device.registry. No device uses it for DNS. Need reinstall or formal decommission.
     severity: critical
-    status: open
-    notes: "Filed via gaps.file at 2026-02-28T09:10:30Z"
+    status: fixed
+    notes: "Fixed: verified on proxmox-home that LXC 105 is running and pihole CLI is present/healthy (`command -v pihole` + `pihole -v`)."
     parent_loop: "LOOP-CROSS-SITE-MAINTENANCE-PARITY-20260227-20260228"
+    fixed_in: proxmox-home-lxc105-pihole-cli-verified-20260228
+    regression_lock_id: LOCK-LXC105-PIHOLE-PRESENCE
   - id: "GAP-OP-1112"
     title: "PVE boot-order race on proxmox-home: pve-firewall, pve-guests, pvescheduler all FAILED after reboot — start..."
     discovered_by: "forensic-sweep"
@@ -13961,9 +13969,11 @@ gaps:
     description: |
       pvescheduler.service FAILED on proxmox-home after reboot — backup jobs not running. backup-home-p0-daily (VM 100) missed. No gate monitors PVE scheduler health or alerts on missed backups. FIXED in this session via systemctl restart pvescheduler.
     severity: critical
-    status: open
-    notes: "Filed via gaps.file at 2026-02-28T09:10:43Z"
+    status: fixed
+    notes: "Fixed on proxmox-home: corrected /etc/pve/jobs.cfg mailnotification enum from never->failure for home backup jobs and restarted pvescheduler; service active with no new parse errors."
     parent_loop: "LOOP-CROSS-SITE-MAINTENANCE-PARITY-20260227-20260228"
+    fixed_in: pvescheduler-jobs-cfg-mailnotification-fix-20260228
+    regression_lock_id: LOCK-PROXMOX-HOME-PVESCHEDULER-HEALTH
   - id: "GAP-OP-1115"
     title: "Home site boot recovery contract missing. "
     discovered_by: "forensic-sweep"
@@ -13974,9 +13984,11 @@ gaps:
     description: |
       Home site boot recovery contract missing. No REBOOT_HEALTH_GATE equivalent for home. Must cover: pve-cluster boot dependency, /etc/hosts management (DHCP 10.0.0.179 hardcoded — fragile), NFS mount on NAS, LXC auto-start, PVE service health, HA supervisor recovery.
     severity: critical
-    status: open
-    notes: "Filed via gaps.file at 2026-02-28T09:10:47Z"
+    status: fixed
+    notes: "Fixed: added canonical home-site reboot recovery contract with pre/post checks for pve-cluster, pvescheduler, LXC 105, and Pi-hole health."
     parent_loop: "LOOP-CROSS-SITE-MAINTENANCE-PARITY-20260227-20260228"
+    fixed_in: docs/governance/HOME_REBOOT_HEALTH_GATE.md
+    regression_lock_id: LOCK-HOME-REBOOT-GATE-DOC-PRESENCE
   - id: "GAP-OP-1116"
     title: "HA dashboards missing after power cycle. "
     discovered_by: "forensic-sweep"
@@ -14728,6 +14740,7 @@ gaps:
       - "CAP-20260228-190256__secrets.bundle.apply__R6qs064054"
     notes: "Containment + rotation complete for active media tokens (Sonarr/Radarr) with canonical Infisical propagation and downstream parity checks. Printavo path de-scoped as archived/non-runtime and accepted under GAP-OP-1197."
     parent_loop: "LOOP-W79-T0-SECURITY-EMERGENCY-20260228"
+    regression_lock_id: LOCK-WB-C1-SECRETS-CONTAINMENT
   - id: "GAP-OP-1164"
     title: "Dead HA endpoint in streamdeck runtime config"
     discovered_by: "LOOP-W79-PROGRAM-GAP-FIRST-FULL-CLOSURE-20260228"
@@ -15227,6 +15240,7 @@ gaps:
       - "CAP-20260228-185750__secrets.bundle.apply__Rgv6d24462"
     notes: "Rotated in Sonarr runtime, propagated to canonical Infisical route and downstream consumers (Prowlarr, Jellyseerr, download-stack env). Post-rotation verifies PASS."
     parent_loop: "LOOP-W79-T0-SECURITY-EMERGENCY-20260228"
+    regression_lock_id: LOCK-WB-C1-SECRETS-CONTAINMENT
   - id: "GAP-OP-1196"
     title: "Radarr credential rotation required after containment"
     discovered_by: "W77-forensic-audit"
@@ -15246,6 +15260,7 @@ gaps:
       - "CAP-20260228-185750__secrets.bundle.apply__Rgv6d24462"
     notes: "Rotated in Radarr runtime, propagated to canonical Infisical route and downstream consumers (Prowlarr, Jellyseerr, download-stack env). Post-rotation verifies PASS."
     parent_loop: "LOOP-W79-T0-SECURITY-EMERGENCY-20260228"
+    regression_lock_id: LOCK-WB-C1-SECRETS-CONTAINMENT
   - id: "GAP-OP-1197"
     title: "Printavo credential rotation required after containment"
     discovered_by: "W77-forensic-audit"
@@ -15260,6 +15275,7 @@ gaps:
     owner: "@ronny"
     notes: "Accepted by operator decision: Printavo path is archived/decommissioned and no runtime dependency remains; no active rotation required."
     parent_loop: "LOOP-W79-T0-SECURITY-EMERGENCY-20260228"
+    regression_lock_id: LOCK-WB-C1-SECRETS-CONTAINMENT
   - id: "GAP-OP-1198"
     title: "No whitelist sync between shop and home Pi-hole instances. "
     discovered_by: "session-diagnostic"
