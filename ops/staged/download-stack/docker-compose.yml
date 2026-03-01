@@ -172,6 +172,12 @@ services:
       - TZ=America/New_York
     volumes:
       - /mnt/docker/volumes/flaresolverr/config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "echo ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ─── VPN + Soulseek Pipeline ───────────────────────────────────────
   gluetun:
@@ -223,6 +229,12 @@ services:
       - /opt/slskd/data:/app/data
       - /mnt/media/downloads/slskd:/downloads
       - /mnt/media/music:/music
+    healthcheck:
+      test: ["CMD-SHELL", "if command -v curl >/dev/null 2>&1; then curl -fsS http://127.0.0.1:5030/health >/dev/null || curl -fsS http://127.0.0.1:5030 >/dev/null; elif command -v wget >/dev/null 2>&1; then wget -q --spider http://127.0.0.1:5030/health || wget -q --spider http://127.0.0.1:5030; else exit 0; fi"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   soularr:
     image: mrusse08/soularr:latest
@@ -330,6 +342,12 @@ services:
       - /mnt/docker/volumes/huntarr/config:/config
     networks:
       - music-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9705/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   tdarr:
     image: ghcr.io/haveagitgat/tdarr:latest
@@ -361,25 +379,54 @@ services:
 
   # ─── Cross-VM Services ──────────────────────────────────────────────
   # autopulse + crosswatch call Jellyfin API on VM 210 via Tailscale IP.
-  # Update JELLYFIN_URL after VM 210 gets its Tailscale IP assigned.
   autopulse:
-    image: ghcr.io/autopulse/autopulse:latest
+    image: ghcr.io/dan-online/autopulse:latest-sqlite
     container_name: autopulse
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:2875:2875"
     environment:
       - TZ=America/New_York
-      - AUTOPULSE_PASSWORD=${AUTOPULSE_PASSWORD}
+      - AUTOPULSE__APP__DATABASE_URL=sqlite://database.db
+      - AUTOPULSE__AUTH__USERNAME=autopulse
+      - AUTOPULSE__AUTH__PASSWORD=${AUTOPULSE_PASSWORD}
+      - AUTOPULSE__TARGETS__JELLYFIN__TYPE=jellyfin
+      - AUTOPULSE__TARGETS__JELLYFIN__URL=${JELLYFIN_BASE_URL:-http://100.123.207.64:8096}
+      - AUTOPULSE__TARGETS__JELLYFIN__TOKEN=${JELLYFIN_API_TOKEN}
+      - AUTOPULSE__TRIGGERS__RADARR__TYPE=radarr
+      - AUTOPULSE__TRIGGERS__RADARR__REWRITE__FROM=/movies
+      - AUTOPULSE__TRIGGERS__RADARR__REWRITE__TO=/media/movies
+      - AUTOPULSE__TRIGGERS__SONARR__TYPE=sonarr
+      - AUTOPULSE__TRIGGERS__SONARR__REWRITE__FROM=/tv
+      - AUTOPULSE__TRIGGERS__SONARR__REWRITE__TO=/media/tv
+      - AUTOPULSE__TRIGGERS__LIDARR__TYPE=lidarr
+      - AUTOPULSE__TRIGGERS__LIDARR__REWRITE__FROM=/music
+      - AUTOPULSE__TRIGGERS__LIDARR__REWRITE__TO=/media/music
     volumes:
-      - /mnt/docker/volumes/autopulse/config:/config
+      - /mnt/docker/volumes/autopulse:/data
+    healthcheck:
+      test: ["CMD-SHELL", "if command -v curl >/dev/null 2>&1; then curl -fsS http://127.0.0.1:2875 >/dev/null; elif command -v wget >/dev/null 2>&1; then wget -q --spider http://127.0.0.1:2875; else exit 0; fi"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   crosswatch:
-    image: ghcr.io/crosswatch-app/crosswatch:latest
+    image: ghcr.io/cenodude/crosswatch:latest
     container_name: crosswatch
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
     environment:
       - TZ=America/New_York
     volumes:
       - /mnt/docker/volumes/crosswatch/config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "if command -v curl >/dev/null 2>&1; then curl -fsS http://127.0.0.1:8787 >/dev/null; elif command -v wget >/dev/null 2>&1; then wget -q --spider http://127.0.0.1:8787; else exit 0; fi"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ─── Security ───────────────────────────────────────────────────────
   crowdsec:
