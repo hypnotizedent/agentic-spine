@@ -12,6 +12,6 @@ echo "[friction-reconcile] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 spine_job_run \
   "friction-reconcile:friction.reconcile" \
-  "$CAP_RUNNER" cap run friction.reconcile -- --loop-id LOOP-AGENT-FRICTION-AUTOPILOT-20260301 --json
+  "$CAP_RUNNER" cap run friction.reconcile --loop-id LOOP-AGENT-FRICTION-AUTOPILOT-20260301 --json
 
 echo "[friction-reconcile] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
