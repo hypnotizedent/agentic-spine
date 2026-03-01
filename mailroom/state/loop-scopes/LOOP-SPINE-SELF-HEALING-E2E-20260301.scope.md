@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SPINE-SELF-HEALING-E2E-20260301
 created: 2026-03-01
-status: active
+status: closed
 owner: "@ronny"
 scope: spine
 priority: high
