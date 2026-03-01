@@ -70,6 +70,8 @@ The media domain uses three distinct identifiers in different contexts:
 | `media.metrics.today` | read-only | auto | media-agent |
 | `media.nfs.verify` | read-only | auto | media-agent |
 | `media.backup.create` | mutating | manual | media-agent |
+| `media.backup.restore` | mutating | manual | media-agent |
+| `homarr.config.generate` | read-only | auto | media-agent |
 | `media.stack.restart` | mutating | manual | media-agent |
 
 ### Extended Capabilities (capabilities.yaml, not yet in routing.dispatch)
@@ -118,3 +120,27 @@ Services in `media.services.yaml` use this health governance model:
 - MCPJungle mirror: `~/code/workbench/infra/compose/mcpjungle/servers/media-stack/`
 - Parity enforced by D66 gate (post-facto detection).
 - Open gap: 5 missing MCP tools (GAP-OP-963), parity hook (GAP-OP-964), secrets pattern (GAP-OP-965).
+
+## 8. Canonical Operator Dashboard (Homarr)
+
+- `homarr` is the canonical operator dashboard for media runtime visibility.
+- Service inventory source of truth remains `ops/bindings/media.services.yaml`.
+- Dashboard data is generated via `homarr.config.generate` to keep UI tiles aligned with governed service inventory and VM split (download-stack vs streaming-stack).
+- Homarr health remains covered by `services.health.yaml` + media/observability verify surfaces.
+
+## 9. Cross-Stack Secret Access Pattern
+
+When a service in one stack needs a secret owned by another stack path (example: `autopulse` on `download-stack` consuming `JELLYFIN_API_TOKEN` from streaming path):
+
+1. Keep canonical ownership in `secrets.namespace.policy.yaml` path overrides.
+2. Annotate governed exception intent in `rules.cross_stack_consumers`.
+3. Ensure compose wiring is explicit in the consuming stack (`AUTOPULSE__TARGETS__JELLYFIN__TOKEN=${JELLYFIN_API_TOKEN}`).
+4. Inject both required secret paths during deploy:
+
+```bash
+infisical run --path /spine/vm-infra/media-stack/download \
+  --path /spine/vm-infra/media-stack/streaming \
+  -- docker compose up -d
+```
+
+5. Verify with D224 to confirm canonical routing + runtime parity.

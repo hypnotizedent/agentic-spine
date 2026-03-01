@@ -133,6 +133,7 @@ freshness_reconciled=0
 gaps_opened=0
 gate_bugs_flagged=0
 gap_candidates=0
+escalations_notified=0
 gap_candidates_file="$(mktemp)"
 cleanup_candidates() { rm -f "$gap_candidates_file"; }
 trap cleanup_candidates EXIT
@@ -167,8 +168,21 @@ if ((${#deterministic_ids[@]} > 0)); then
     [[ -n "$gid" ]] || continue
     recovery_result="$(run_recovery_dispatch "$gid" "deterministic")"
     recovered="$(jq -r '.recovered // false' <<<"$recovery_result")"
+    matched="$(jq -r '.matched // false' <<<"$recovery_result")"
+    escalate="$(jq -r '.escalate // false' <<<"$recovery_result")"
+    action_type="$(jq -r '.action_type // ""' <<<"$recovery_result")"
+    action_id="$(jq -r '.action_id // ""' <<<"$recovery_result")"
+    recovery_message="$(jq -r '.message // ""' <<<"$recovery_result")"
     if [[ "$recovered" == "true" ]]; then
       continue
+    fi
+    if [[ "$matched" == "true" && "$escalate" == "true" ]]; then
+      enqueue_email_intent \
+        "verify-response-loop" \
+        "incident" \
+        "Deterministic gate recovery escalated: ${gid}" \
+        "run_key=${run_key} scope=${scope} gate_id=${gid} action_id=${action_id} action_type=${action_type} message=${recovery_message}"
+      escalations_notified=$((escalations_notified + 1))
     fi
     queue_gap_candidate "$gid" "deterministic" "$gap_candidates_file"
     gap_candidates=$((gap_candidates + 1))
@@ -249,7 +263,15 @@ if (( gate_bugs_flagged > 0 )); then
     "run_key=${run_key} scope=${scope} gate_bugs_flagged=${gate_bugs_flagged} queue_file=${GATE_REVIEW_QUEUE_FILE}."
 fi
 
+if (( escalations_notified > 0 )); then
+  enqueue_email_intent \
+    "verify-response-loop" \
+    "incident" \
+    "Recovery escalations detected in verify-response-loop" \
+    "run_key=${run_key} scope=${scope} escalations_notified=${escalations_notified}."
+fi
+
 "$CAP_RUNNER" cap run gaps.auto.close >/dev/null 2>&1 || true
 
 printf '%s\n' "$fingerprint" > "$CURSOR_FILE"
-echo "${freshness_reconciled} freshness auto-reconciled, ${gaps_opened} gaps opened, ${gate_bugs_flagged} gate bugs flagged"
+echo "${freshness_reconciled} freshness auto-reconciled, ${gaps_opened} gaps opened, ${gate_bugs_flagged} gate bugs flagged, ${escalations_notified} escalations notified"

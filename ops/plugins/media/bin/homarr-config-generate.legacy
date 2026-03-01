@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# homarr.config.generate - Generate media operator dashboard JSON from media.services.yaml.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
+MEDIA_SERVICES="$ROOT/ops/bindings/media.services.yaml"
+VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+
+usage() {
+  cat <<'USAGE'
+homarr.config.generate - Generate media operator dashboard JSON
+
+Args:
+  --output PATH        Optional: write generated JSON to PATH
+  --download-base URL  Optional override for download-stack base URL (default: VM tailscale IP)
+  --streaming-base URL Optional override for streaming-stack base URL (default: VM tailscale IP)
+
+Example:
+  ./bin/ops cap run homarr.config.generate -- --output /tmp/homarr-media-board.json
+USAGE
+}
+
+stop() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+OUTPUT_FILE=""
+DOWNLOAD_BASE=""
+STREAMING_BASE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      ;;
+    --output)
+      OUTPUT_FILE="${2:-}"
+      shift 2
+      ;;
+    --download-base)
+      DOWNLOAD_BASE="${2:-}"
+      shift 2
+      ;;
+    --streaming-base)
+      STREAMING_BASE="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      stop "unknown argument: $1"
+      ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
+[[ -f "$MEDIA_SERVICES" ]] || stop "missing media services binding: $MEDIA_SERVICES"
+[[ -f "$VM_BINDING" ]] || stop "missing VM binding: $VM_BINDING"
+
+resolve_vm_ip() {
+  local vm="$1"
+  yq -r ".vms[] | select(.hostname == \"$vm\") | .tailscale_ip // .lan_ip // \"\"" "$VM_BINDING" | head -n1
+}
+
+if [[ -z "$DOWNLOAD_BASE" ]]; then
+  dl_ip="$(resolve_vm_ip "download-stack")"
+  [[ -n "$dl_ip" ]] || stop "could not resolve download-stack IP"
+  DOWNLOAD_BASE="http://${dl_ip}"
+fi
+
+if [[ -z "$STREAMING_BASE" ]]; then
+  st_ip="$(resolve_vm_ip "streaming-stack")"
+  [[ -n "$st_ip" ]] || stop "could not resolve streaming-stack IP"
+  STREAMING_BASE="http://${st_ip}"
+fi
+
+build_filter='
+to_entries
+| map(select((.value.vm // "") == $vm))
+| map(select((.value.status // "active") == "active"))
+| map(select((.value.port // null) != null))
+| map({
+    id: .key,
+    name: .key,
+    vm: (.value.vm // ""),
+    category: (.value.category // "uncategorized"),
+    description: (.value.description // ""),
+    port: (.value.port | tonumber),
+    health_path: (.value.health // ""),
+    url: ($base + ":" + ((.value.port | tostring)))
+  })
+| sort_by(.category, .name)
+'
+
+build_services_json() {
+  local vm="$1"
+  local base_url="$2"
+  yq e -o=json '.services' "$MEDIA_SERVICES" | jq -c --arg vm "$vm" --arg base "$base_url" "$build_filter"
+}
+
+download_services="$(build_services_json "download-stack" "$DOWNLOAD_BASE")"
+streaming_services="$(build_services_json "streaming-stack" "$STREAMING_BASE")"
+
+dashboard_filter='
+{
+  schema: "spine.homarr.operator-board.v1",
+  generated_at_utc: $generated_at,
+  title: "Media Operator Dashboard",
+  intent: "Single-pane media operations view generated from media.services.yaml",
+  sections: [
+    {
+      id: "download-stack",
+      label: "Download Stack",
+      base_url: $download_base,
+      services: $download_services
+    },
+    {
+      id: "streaming-stack",
+      label: "Streaming Stack",
+      base_url: $streaming_base,
+      services: $streaming_services
+    }
+  ],
+  categories: ([$download_services[], $streaming_services[]] | map(.category) | unique)
+}
+'
+
+generated_json="$(
+  jq -n \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg download_base "$DOWNLOAD_BASE" \
+    --arg streaming_base "$STREAMING_BASE" \
+    --argjson download_services "$download_services" \
+    --argjson streaming_services "$streaming_services" \
+    "$dashboard_filter"
+)"
+
+if [[ -n "$OUTPUT_FILE" ]]; then
+  mkdir -p "$(dirname "$OUTPUT_FILE")"
+  printf '%s\n' "$generated_json" > "$OUTPUT_FILE"
+  echo "homarr.config.generate"
+  echo "output: $OUTPUT_FILE"
+  echo "download_services: $(jq -r '.sections[0].services | length' <<<"$generated_json")"
+  echo "streaming_services: $(jq -r '.sections[1].services | length' <<<"$generated_json")"
+  exit 0
+fi
+
+printf '%s\n' "$generated_json"
