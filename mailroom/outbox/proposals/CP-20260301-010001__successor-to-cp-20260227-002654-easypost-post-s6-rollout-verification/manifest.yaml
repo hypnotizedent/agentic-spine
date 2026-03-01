@@ -1,0 +1,63 @@
+proposal: CP-20260301-010001__successor-to-cp-20260227-002654-easypost-post-s6-rollout-verification
+agent: "ronnyworks@Mac"
+created: 2026-03-01T06:00:01Z
+loop_id: LOOP-EASYPOST-SUCCESSOR-ROLLOUT-20260301-20260301
+supersedes: CP-20260227-002654__easypost-audit-data-refinements
+status: pending
+
+implementation_commits:
+  - hash: 29ccd8d
+    label: "S1: EasyPost carrier integration foundation"
+  - hash: cfe452c
+    label: "S2: Address resolution and validation"
+  - hash: 240c5fd
+    label: "S3: Delta tracking and shipment lifecycle"
+  - hash: c4dcbbc
+    label: "S4: Receipt-chain state transitions"
+  - hash: 371531b
+    label: "S5: Billing boundary and metrics"
+  - hash: 2c56802
+    label: "S6: Event contract emissions"
+
+execution_checklist:
+  - id: EC-1
+    action: "Apply and verify migrations 002/003/004 in target environments"
+    surface: "mint-modules database layer"
+    verification: "Migration status shows all three applied without rollback"
+  - id: EC-2
+    action: "Endpoint smoke tests"
+    endpoints:
+      - "POST /resolve-address"
+      - "POST /deltas"
+      - "GET /deltas/:shipmentId"
+      - "POST /:id/transition"
+    verification: "All endpoints return expected status codes and response shapes"
+  - id: EC-3
+    action: "Validate event contract emissions, delta tracking, and receipt-chain state transitions"
+    verification: "Event payloads match contract schema; delta records created on shipment lifecycle events; state transitions follow defined FSM"
+  - id: EC-4
+    action: "Validate EasyPost billing boundary metrics"
+    verification: "Billing events emitted at correct lifecycle points; cost attribution matches carrier response"
+  - id: EC-5
+    action: "Map and close remaining linked gaps with regression_lock_id"
+    verification: "All linked gaps in operational.gaps.yaml closed with regression_lock_id referencing S1-S6 commits"
+
+acceptance_criteria:
+  - "All 4 endpoints respond correctly under smoke test"
+  - "Migrations 002/003/004 verified applied in target env"
+  - "Event contract emissions match schema for carrier/billing/refund events"
+  - "Delta tracking produces correct records for shipment lifecycle"
+  - "Receipt-chain state transitions follow defined FSM without orphaned states"
+  - "Billing boundary metrics emit at correct lifecycle points"
+  - "All linked gaps closed with regression_lock_id"
+
+rollback_notes: |
+  If any migration fails: revert via down-migration scripts (004 -> 003 -> 002).
+  If endpoint smoke tests fail: check S1-S6 commit chain for regression; 
+  bisect between commits to isolate.
+  If event contracts diverge: compare emitted payloads against 
+  docs/planning/MINT_SHIPPING_CARRIER_INTEGRATION_CONTRACT_STUBS_20260226.md.
+  Billing boundary failures: verify EasyPost webhook configuration and 
+  carrier response parsing in S5 (371531b).
+
+changes: []
