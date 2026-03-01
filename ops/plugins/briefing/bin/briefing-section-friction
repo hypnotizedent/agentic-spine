@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+QUEUE_STATUS="$ROOT/ops/plugins/lifecycle/bin/friction-queue-status"
+
+if [[ ! -x "$QUEUE_STATUS" ]]; then
+  jq -n '{section:"friction",status:"error",summary:"friction queue status surface missing",details:{}}'
+  exit 0
+fi
+
+RAW="$($QUEUE_STATUS --json 2>/dev/null || true)"
+if [[ -z "$RAW" ]] || ! jq -e . >/dev/null 2>&1 <<<"$RAW"; then
+  jq -n '{section:"friction",status:"error",summary:"friction queue status unavailable",details:{}}'
+  exit 0
+fi
+
+TOTAL="$(jq -r '.summary.total // 0' <<<"$RAW")"
+QUEUED="$(jq -r '.summary.queued // 0' <<<"$RAW")"
+STALE="$(jq -r '.summary.stale // 0' <<<"$RAW")"
+FILED="$(jq -r '.summary.filed // 0' <<<"$RAW")"
+MATCHED="$(jq -r '.summary.matched // 0' <<<"$RAW")"
+DEDUPE_RATE="$(jq -r '.summary.dedupe_rate // 0' <<<"$RAW")"
+
+STATUS="ok"
+if [[ "$STALE" -gt 0 ]]; then
+  STATUS="degraded"
+elif [[ "$QUEUED" -gt 0 ]]; then
+  STATUS="degraded"
+fi
+
+SUMMARY="total=${TOTAL} queued=${QUEUED} stale=${STALE} filed=${FILED} matched=${MATCHED} dedupe_rate=${DEDUPE_RATE}"
+jq -n \
+  --arg section "friction" \
+  --arg status "$STATUS" \
+  --arg summary "$SUMMARY" \
+  --argjson total "$TOTAL" \
+  --argjson queued "$QUEUED" \
+  --argjson stale "$STALE" \
+  --argjson filed "$FILED" \
+  --argjson matched "$MATCHED" \
+  --argjson dedupe_rate "$DEDUPE_RATE" \
+  '{section:$section,status:$status,summary:$summary,details:{total:$total,queued:$queued,stale:$stale,filed:$filed,matched:$matched,dedupe_rate:$dedupe_rate}}'

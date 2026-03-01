@@ -510,6 +510,38 @@ def collect_launchd_scheduler_status() -> dict[str, Any]:
     }
 
 
+def collect_friction_queue_status() -> dict[str, Any]:
+    script = ROOT / "ops/plugins/lifecycle/bin/friction-queue-status"
+    if not script.exists():
+        return {
+            "status": "unknown",
+            "summary": {"total": 0, "queued": 0, "stale": 0, "filed": 0, "matched": 0, "invalid_time": 0, "dedupe_rate": 0.0},
+        }
+
+    _, payload = parse_json_output(script, ["--json"])
+    summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    stale = int(summary.get("stale", 0) or 0)
+    queued = int(summary.get("queued", 0) or 0)
+    status = "ok"
+    if stale > 0:
+        status = "error"
+    elif queued > 0:
+        status = "warn"
+
+    return {
+        "status": status,
+        "summary": {
+            "total": int(summary.get("total", 0) or 0),
+            "queued": queued,
+            "stale": stale,
+            "filed": int(summary.get("filed", 0) or 0),
+            "matched": int(summary.get("matched", 0) or 0),
+            "invalid_time": int(summary.get("invalid_time", 0) or 0),
+            "dedupe_rate": float(summary.get("dedupe_rate", 0.0) or 0.0),
+        },
+    }
+
+
 def collect_tick_data(window_hours: int) -> dict[str, Any]:
     loops = collect_open_loops()
     gaps = collect_open_gaps()
@@ -521,6 +553,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
     graph = collect_graph_summary()
     comms_queue = collect_comms_queue_status()
     scheduler = collect_launchd_scheduler_status()
+    friction = collect_friction_queue_status()
 
     summary = {
         "open_loops": len(loops),
@@ -545,6 +578,13 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         "scheduler_stale_jobs": int(scheduler.get("summary", {}).get("stale", 0)),
         "scheduler_unknown_jobs": int(scheduler.get("summary", {}).get("unknown", 0)),
         "scheduler_exempt_jobs": int(scheduler.get("summary", {}).get("exempt", 0)),
+        "friction_status": friction.get("status", "unknown"),
+        "friction_total": int(friction.get("summary", {}).get("total", 0)),
+        "friction_queued": int(friction.get("summary", {}).get("queued", 0)),
+        "friction_stale": int(friction.get("summary", {}).get("stale", 0)),
+        "friction_filed": int(friction.get("summary", {}).get("filed", 0)),
+        "friction_matched": int(friction.get("summary", {}).get("matched", 0)),
+        "friction_dedupe_rate": float(friction.get("summary", {}).get("dedupe_rate", 0.0)),
     }
 
     status = "ok"
@@ -552,6 +592,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         alerts.get("status") == "error"
         or any(g.get("severity") == "critical" for g in gaps)
         or scheduler.get("status") == "error"
+        or friction.get("status") == "error"
     ):
         status = "error"
     elif (
@@ -563,6 +604,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         or str(calendar.get("status", "")).lower() in {"warn", "error"}
         or comms_queue.get("slo_status") == "incident"
         or scheduler.get("status") == "warn"
+        or friction.get("status") == "warn"
     ):
         status = "warn"
 
@@ -584,6 +626,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
             "graph": graph,
             "comms_queue": comms_queue,
             "scheduler": scheduler,
+            "friction": friction,
         },
     }
 
@@ -1177,6 +1220,7 @@ def render_tick_markdown(payload: dict[str, Any]) -> str:
         f"- Graph Nodes: {summary.get('graph_nodes', 0)}",
         f"- Graph Edges: {summary.get('graph_edges', 0)}",
         f"- CommsQueue: {summary.get('comms_queue_slo_status', 'unknown')} (pending={summary.get('comms_queue_pending', 0)} escalations={summary.get('comms_queue_escalations', 0)})",
+        f"- FrictionQueue: {summary.get('friction_status', 'unknown')} (queued={summary.get('friction_queued', 0)} stale={summary.get('friction_stale', 0)} filed={summary.get('friction_filed', 0)} matched={summary.get('friction_matched', 0)} dedupe_rate={summary.get('friction_dedupe_rate', 0.0)})",
         "",
     ]
     loops = data.get("loops", [])
