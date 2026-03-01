@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+# backup.posture.snapshot.build - generated single-surface backup posture projection.
+# Combines inventory + schedule + live backup.status + lane budget telemetry.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+INV="$ROOT/ops/bindings/backup.inventory.yaml"
+SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
+SSH_BIND="$ROOT/ops/bindings/ssh.targets.yaml"
+OUT_DEFAULT="$ROOT/ops/bindings/backup.posture.snapshot.yaml"
+BACKUP_STATUS_BIN="$ROOT/ops/plugins/backup/bin/backup-status.legacy"
+
+OUT="$OUT_DEFAULT"
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+backup.posture.snapshot.build - Build canonical backup posture projection.
+
+Usage:
+  backup-posture-snapshot-build [--output <path>] [--json]
+
+Outputs:
+  - projection file (default: ops/bindings/backup.posture.snapshot.yaml)
+  - summary on stdout
+
+Notes:
+  - Uses backup.inventory.yaml + backup.schedule.yaml as authority sources.
+  - Pulls live backup.status summary and per-lane usage telemetry.
+  - Produces normalized restore coverage rows for every enabled target.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --output) OUT="${2:?--output requires a path}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+for dep in yq jq python3 ssh; do
+  command -v "$dep" >/dev/null 2>&1 || { echo "FAIL: missing dependency: $dep" >&2; exit 1; }
+done
+[[ -f "$INV" ]] || { echo "FAIL: missing $INV" >&2; exit 1; }
+[[ -f "$SCHEDULE" ]] || { echo "FAIL: missing $SCHEDULE" >&2; exit 1; }
+[[ -f "$SSH_BIND" ]] || { echo "FAIL: missing $SSH_BIND" >&2; exit 1; }
+[[ -x "$BACKUP_STATUS_BIN" ]] || { echo "FAIL: missing executable $BACKUP_STATUS_BIN" >&2; exit 1; }
+
+STATUS_TMP="$(mktemp)"
+JSON_TMP="$(mktemp)"
+cleanup() {
+  rm -f "$STATUS_TMP" "$JSON_TMP"
+}
+trap cleanup EXIT INT TERM
+
+STATUS_RC=0
+if ! "$BACKUP_STATUS_BIN" >"$STATUS_TMP" 2>&1; then
+  STATUS_RC=$?
+fi
+
+python3 - "$INV" "$SCHEDULE" "$SSH_BIND" "$STATUS_TMP" "$STATUS_RC" <<'PY' > "$JSON_TMP"
+import json
+import re
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+inv_path = sys.argv[1]
+schedule_path = sys.argv[2]
+ssh_path = sys.argv[3]
+status_path = sys.argv[4]
+status_rc = int(sys.argv[5])
+
+
+def yq_json(path):
+    res = subprocess.run(["yq", "-o", "json", ".", path], capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"yq parse failed for {path}: {res.stderr.strip()}")
+    return json.loads(res.stdout)
+
+
+def ssh_probe(host_cfg, base_path):
+    user = host_cfg.get("user") or "root"
+    host = host_cfg.get("host")
+    port = str(host_cfg.get("port") or 22)
+    timeout = str(host_cfg.get("connect_timeout_sec") or 6)
+    strict = host_cfg.get("strict_host_key_checking") or "no"
+    known_hosts = host_cfg.get("user_known_hosts_file") or "/dev/null"
+    batch_mode = "yes" if bool(host_cfg.get("batch_mode", True)) else "no"
+
+    if not host:
+        return {"status": "error", "reason": "host_missing", "bytes": 0, "files": 0}
+
+    remote_script = (
+        "set -euo pipefail; "
+        "BASE=\"$1\"; "
+        "if [ ! -d \"$BASE\" ]; then echo 'MISSING|0|0'; exit 0; fi; "
+        "B=$(du -sb \"$BASE\" 2>/dev/null | awk '{print $1}' | head -n1); "
+        "F=$(find \"$BASE\" -type f 2>/dev/null | wc -l | tr -d ' '); "
+        "echo \"OK|${B:-0}|${F:-0}\""
+    )
+    remote_cmd = f"bash -lc {shlex.quote(remote_script)} -- {shlex.quote(base_path)}"
+    cmd = [
+        "ssh",
+        "-n",
+        "-o",
+        f"ConnectTimeout={timeout}",
+        "-o",
+        f"BatchMode={batch_mode}",
+        "-o",
+        f"StrictHostKeyChecking={strict}",
+        "-o",
+        f"UserKnownHostsFile={known_hosts}",
+        "-o",
+        "LogLevel=ERROR",
+        "-p",
+        port,
+        f"{user}@{host}",
+        remote_cmd,
+    ]
+    run = subprocess.run(cmd, capture_output=True, text=True)
+    if run.returncode != 0:
+        stderr = (run.stderr or "").strip().lower()
+        reason = "ssh_error"
+        if "timed out" in stderr:
+            reason = "timeout"
+        elif "permission denied" in stderr:
+            reason = "auth_denied"
+        elif "could not resolve" in stderr:
+            reason = "dns_unreachable"
+        return {"status": "error", "reason": reason, "bytes": 0, "files": 0}
+
+    out = (run.stdout or "").strip()
+    parts = out.split("|")
+    if len(parts) != 3:
+        return {"status": "error", "reason": "parse_error", "bytes": 0, "files": 0}
+    state, bytes_raw, files_raw = parts
+    if state == "MISSING":
+        return {"status": "path_missing", "reason": "path_missing", "bytes": 0, "files": 0}
+    try:
+        return {
+            "status": "ok",
+            "reason": "ok",
+            "bytes": int(bytes_raw),
+            "files": int(files_raw),
+        }
+    except ValueError:
+        return {"status": "error", "reason": "parse_error", "bytes": 0, "files": 0}
+
+
+inv = yq_json(inv_path)
+schedule = yq_json(schedule_path)
+ssh_data = yq_json(ssh_path)
+status_text = open(status_path, "r", encoding="utf-8", errors="replace").read()
+
+now_utc = datetime.now(timezone.utc)
+now_str = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+now_date = now_utc.strftime("%Y-%m-%d")
+
+summary_line = ""
+m = re.search(r"^summary:.*$", status_text, flags=re.MULTILINE)
+if m:
+    summary_line = m.group(0)
+
+tot = ok = degraded = None
+m2 = re.search(r"summary:\s*(\d+)\s*targets\s*\|\s*(\d+)\s*ok\s*\|\s*(\d+)\s*degraded", summary_line)
+if m2:
+    tot = int(m2.group(1))
+    ok = int(m2.group(2))
+    degraded = int(m2.group(3))
+
+degraded_rows = []
+for ln in status_text.splitlines():
+    if re.search(r"\b(STALE|ERROR|MISSING)\b", ln):
+        degraded_rows.append(ln)
+
+runtime_units = inv.get("runtime_units", [])
+targets = inv.get("targets", [])
+restore_classes = (inv.get("model", {}) or {}).get("restore_classes", {}) or {}
+
+enabled_targets = [t for t in targets if t.get("enabled") is True]
+
+a_states = {"planned": 0, "production_ready": 0}
+invalid_admission = []
+for unit in runtime_units:
+    st = unit.get("backup_admission_state")
+    if st in a_states:
+        a_states[st] += 1
+    else:
+        invalid_admission.append({"unit_id": unit.get("unit_id"), "value": st})
+
+candidates = {}
+for unit in runtime_units:
+    for tgt in unit.get("inventory_targets", []) or []:
+        candidates.setdefault(tgt, []).append(
+            {
+                "unit_id": unit.get("unit_id"),
+                "kind": unit.get("kind"),
+                "restore_class": unit.get("restore_class"),
+                "backup_admission_state": unit.get("backup_admission_state"),
+            }
+        )
+
+
+def select_candidate(target_name, pool):
+    if target_name.startswith("app-"):
+        pr = {"container-fleet": 0, "vm": 1, "machine": 2}
+    else:
+        pr = {"vm": 0, "machine": 1, "container-fleet": 2}
+    return sorted(pool, key=lambda c: (pr.get(c.get("kind"), 9), c.get("unit_id") or ""))[0]
+
+restore_rows = []
+restore_missing = []
+for tgt in enabled_targets:
+    name = tgt.get("name")
+    pool = candidates.get(name, [])
+    if not pool:
+        restore_missing.append(name)
+        continue
+    chosen = select_candidate(name, pool)
+    restore_class = chosen.get("restore_class")
+    cadence = (restore_classes.get(restore_class) or {}).get("cadence")
+    if not restore_class or not cadence:
+        restore_missing.append(name)
+        continue
+    restore_rows.append(
+        {
+            "target": name,
+            "classification": tgt.get("classification"),
+            "restore_class": restore_class,
+            "drill_cadence": cadence,
+            "source_unit_id": chosen.get("unit_id"),
+            "backup_admission_state": chosen.get("backup_admission_state"),
+        }
+    )
+
+ssh_defaults = ((ssh_data.get("ssh") or {}).get("defaults") or {})
+ssh_targets = ((ssh_data.get("ssh") or {}).get("targets") or [])
+ssh_index = {t.get("id"): t for t in ssh_targets if t.get("id")}
+
+dest_lanes = ((inv.get("model") or {}).get("destination_lanes") or {})
+lane_rows = []
+over_budget = 0
+collect_errors = 0
+
+for lane_id, lane in dest_lanes.items():
+    base_path = lane.get("base_path") or ""
+    hosts = []
+    if lane.get("host"):
+        hosts = [lane.get("host")]
+    elif lane.get("host_group"):
+        hosts = list(lane.get("host_group") or [])
+
+    max_total_gb = lane.get("max_total_gb")
+    max_file_count = lane.get("max_file_count")
+
+    lane_bytes = 0
+    lane_files = 0
+    host_probes = []
+    lane_state = "ok"
+
+    for host_id in hosts:
+        cfg = dict(ssh_defaults)
+        cfg.update(ssh_index.get(host_id, {}))
+        probe = ssh_probe(cfg, base_path)
+        probe_row = {
+            "host": host_id,
+            "probe_state": probe["status"],
+            "reason": probe["reason"],
+            "bytes": probe["bytes"],
+            "files": probe["files"],
+        }
+        host_probes.append(probe_row)
+        if probe["status"] in {"error", "path_missing"}:
+            lane_state = "collect_error"
+            collect_errors += 1
+        lane_bytes += int(probe["bytes"])
+        lane_files += int(probe["files"])
+
+    if lane_state == "ok":
+        if isinstance(max_total_gb, (int, float)) and lane_bytes > int(max_total_gb * 1024 * 1024 * 1024):
+            lane_state = "over_budget"
+        if isinstance(max_file_count, int) and lane_files > max_file_count:
+            lane_state = "over_budget"
+        if lane_state == "over_budget":
+            over_budget += 1
+
+    lane_rows.append(
+        {
+            "lane_id": lane_id,
+            "base_path": base_path,
+            "hosts": hosts,
+            "budget_max_total_gb": max_total_gb,
+            "budget_max_file_count": max_file_count,
+            "current_total_gb": round(lane_bytes / (1024 * 1024 * 1024), 2),
+            "current_file_count": lane_files,
+            "budget_state": lane_state,
+            "host_probes": host_probes,
+        }
+    )
+
+posture = {
+    "status": "generated",
+    "owner": "@ronny",
+    "scope": "backup-posture-snapshot",
+    "version": 1,
+    "updated_at": now_date,
+    "generated_at_utc": now_str,
+    "timezone": "America/New_York",
+    "projection_of": [
+        "ops/bindings/backup.inventory.yaml",
+        "ops/bindings/backup.schedule.yaml",
+        "backup.status",
+    ],
+    "summary": {
+        "backup_status_run_state": "ok" if status_rc == 0 else "degraded",
+        "enabled_targets_total": len(enabled_targets),
+        "backup_status_targets_total": tot,
+        "backup_status_ok_total": ok,
+        "backup_status_degraded_total": degraded,
+        "runtime_units_total": len(runtime_units),
+        "runtime_units_planned": a_states["planned"],
+        "runtime_units_production_ready": a_states["production_ready"],
+        "runtime_units_invalid_admission_total": len(invalid_admission),
+        "restore_coverage_rows_total": len(restore_rows),
+        "restore_coverage_missing_total": len(restore_missing),
+        "lane_over_budget_total": over_budget,
+        "lane_collect_errors_total": collect_errors,
+    },
+    "backup_status": {
+        "summary_line": summary_line,
+        "degraded_rows": degraded_rows,
+    },
+    "runtime_unit_admission": {
+        "allowed_states": ["planned", "production_ready"],
+        "invalid_values": invalid_admission,
+    },
+    "restore_coverage": {
+        "rows": restore_rows,
+        "missing_targets": sorted(restore_missing),
+    },
+    "lane_budgets": {
+        "rows": lane_rows,
+    },
+    "schedule_reference": {
+        "timezone": schedule.get("timezone"),
+        "jobs_count": len(schedule.get("jobs", [])),
+    },
+}
+
+print(json.dumps(posture, indent=2, sort_keys=False))
+PY
+
+yq -P -oy '.' "$JSON_TMP" > "$OUT"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  cat "$OUT"
+fi
+
+enabled_targets="$(yq -r '.summary.enabled_targets_total // 0' "$OUT")"
+missing_restore="$(yq -r '.summary.restore_coverage_missing_total // 0' "$OUT")"
+over_budget="$(yq -r '.summary.lane_over_budget_total // 0' "$OUT")"
+collect_errors="$(yq -r '.summary.lane_collect_errors_total // 0' "$OUT")"
+invalid_admission="$(yq -r '.summary.runtime_units_invalid_admission_total // 0' "$OUT")"
+
+if [[ "$invalid_admission" != "0" ]]; then
+  echo "FAIL: runtime units with invalid backup_admission_state detected ($invalid_admission)" >&2
+  exit 1
+fi
+if [[ "$missing_restore" != "0" ]]; then
+  echo "FAIL: restore coverage missing for $missing_restore enabled targets" >&2
+  exit 1
+fi
+
+echo "backup.posture.snapshot.build"
+echo "output: $OUT"
+echo "enabled_targets: $enabled_targets"
+echo "restore_missing: $missing_restore"
+echo "lane_over_budget: $over_budget"
+echo "lane_collect_errors: $collect_errors"
+echo "status: OK"
