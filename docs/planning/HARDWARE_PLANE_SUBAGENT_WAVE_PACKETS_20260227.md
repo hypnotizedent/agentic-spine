@@ -1,10 +1,15 @@
 ---
-status: draft
+status: superseded
 owner: "@ronny"
 created: 2026-02-27
+superseded_at: 2026-03-01
 scope: hardware-plane-subagent-wave-packets
 authority: LOOP-INFRA-HARDWARE-PLANE-AUDIT-20260227
 ---
+
+> **SUPERSEDED 2026-03-01**: Target gaps 1047/1048/1049 already closed/fixed prior to execution.
+> GAP-OP-1036 moved to LOOP-HOME-INFRA-RECOVERY-20260301 (accepted/blocked).
+> SSOT micro-fix (md1400 zfs_pool reconciliation) applied directly to hardware.inventory.yaml.
 
 # Hardware Plane Subagent Wave Packets (Orchestration Only)
 
