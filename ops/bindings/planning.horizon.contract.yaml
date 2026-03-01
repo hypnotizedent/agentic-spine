@@ -1,0 +1,153 @@
+# Planning Horizon Contract
+#
+# Single authority for horizon-based execution control.
+# Prevents rushed implementation by making now/later/future a canonical
+# execution control plane enforced across loop, proposal, and agent surfaces.
+#
+# Decision: LOOP-PLANNING-HORIZON-CONTROL-PLANE-20260301
+
+version: "1.0"
+updated_at: "2026-03-01"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Horizon Enum
+# ─────────────────────────────────────────────────────────────────────────
+# Every loop scope file MUST declare a horizon value.
+# Default: now (backward-compatible for existing scopes without the field).
+
+horizons:
+  - id: now
+    description: "Active execution band. Agents may auto-select this work."
+    default: true
+
+  - id: later
+    description: "Deferred work with known intent. Not auto-selectable."
+    review_sla_days: 14
+
+  - id: future
+    description: "Aspirational or speculative. Requires explicit promotion."
+    review_sla_days: 30
+
+# ─────────────────────────────────────────────────────────────────────────
+# Execution Readiness Enum
+# ─────────────────────────────────────────────────────────────────────────
+# Derived from loop state. Only runnable+now items are auto-eligible.
+
+readiness:
+  - id: runnable
+    description: "No blockers. Work can begin immediately."
+
+  - id: blocked
+    description: "Has unresolved dependencies or external blockers."
+    requires:
+      - blocked_by   # Must specify what blocks this
+
+# ─────────────────────────────────────────────────────────────────────────
+# Activation Rules
+# ─────────────────────────────────────────────────────────────────────────
+# How a loop transitions from later/future to now.
+
+activation:
+  triggers:
+    - id: manual
+      description: "Operator explicitly promotes via planning.horizon.set"
+
+    - id: date
+      description: "Auto-promoted when not_before_est date is reached"
+      requires:
+        - not_before_est   # EST date (YYYY-MM-DD) when promotion is eligible
+
+    - id: dependency
+      description: "Auto-promoted when blocking loop closes"
+      requires:
+        - depends_on_loop  # Loop ID that must close first
+
+  default_trigger: manual
+
+# ─────────────────────────────────────────────────────────────────────────
+# Transition Rules
+# ─────────────────────────────────────────────────────────────────────────
+
+transitions:
+  # Forward transitions (promotion)
+  - from: future
+    to: later
+    allowed_by: [manual]
+
+  - from: later
+    to: now
+    allowed_by: [manual, date, dependency]
+
+  - from: future
+    to: now
+    allowed_by: [manual]
+
+  # No backward transitions allowed (demote = close + re-file)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Agent Eligibility (auto-selection filter)
+# ─────────────────────────────────────────────────────────────────────────
+# Default behavior: agents only auto-pick items matching ALL criteria.
+# Override: user can explicitly request later/future work.
+
+agent_eligibility:
+  auto_select:
+    horizon: now
+    execution_readiness: runnable
+    loop_status: [active, open, draft]
+  override:
+    description: "User explicitly includes later/future work"
+    requires_explicit_flag: true
+
+# ─────────────────────────────────────────────────────────────────────────
+# Loop Scope Schema Extension
+# ─────────────────────────────────────────────────────────────────────────
+# These fields extend the loop scope frontmatter schema.
+
+scope_fields:
+  horizon:
+    type: enum
+    values: [now, later, future]
+    default: now
+    required: true
+
+  execution_readiness:
+    type: enum
+    values: [runnable, blocked]
+    default: runnable
+    required: true
+
+  activation_trigger:
+    type: enum
+    values: [manual, date, dependency]
+    default: manual
+    required_when: "horizon != now"
+
+  not_before_est:
+    type: date
+    format: "YYYY-MM-DD"
+    required_when: "activation_trigger == date"
+
+  depends_on_loop:
+    type: string
+    format: "LOOP-*"
+    required_when: "activation_trigger == dependency"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Proposal Lifecycle Integration
+# ─────────────────────────────────────────────────────────────────────────
+# Proposals inherit horizon constraints from their parent loop.
+
+proposal_rules:
+  pending_requires:
+    parent_loop_horizon: now
+    parent_loop_readiness: runnable
+    description: "Proposals can only reach pending status when parent loop is horizon=now and execution_readiness=runnable"
+
+  draft_hold_for_deferred:
+    applies_when: "parent_loop.horizon in [later, future]"
+    forced_status: draft_hold
+    required_fields:
+      - review_date
+      - owner
+    description: "Proposals under later/future loops normalize to draft_hold with review schedule"

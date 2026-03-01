@@ -153,6 +153,9 @@ list_loops() {
         execution_mode="$(_fm_field "$scope_file" "execution_mode")"
         active_terminal="$(_fm_field "$scope_file" "active_terminal")"
         blocked_by="$(_fm_field "$scope_file" "blocked_by")"
+        local horizon execution_readiness
+        horizon="$(_fm_field "$scope_file" "horizon")"
+        execution_readiness="$(_fm_field "$scope_file" "execution_readiness")"
 
         # Normalize missing fields
         [[ -z "$status" ]] && status="unknown"
@@ -171,6 +174,13 @@ list_loops() {
         [[ "$execution_mode" == "background" ]] && state_tags="${state_tags} [background]"
         if [[ -n "$blocked_by" && "$blocked_by" != "none" ]]; then
             state_tags="${state_tags} [blocked]"
+        fi
+        # Show horizon tag for non-now items
+        if [[ -n "$horizon" && "$horizon" != "now" ]]; then
+            state_tags="${state_tags} [${horizon}]"
+        fi
+        if [[ -n "$execution_readiness" && "$execution_readiness" == "blocked" ]]; then
+            state_tags="${state_tags} [not-runnable]"
         fi
 
         case "$filter" in

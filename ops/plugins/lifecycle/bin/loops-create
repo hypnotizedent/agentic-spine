@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 TEMPLATE="$ROOT/ops/plugins/lifecycle/templates/loop-scope.template.md"
 
-NAME="" OBJECTIVE="" PRIORITY="medium"
+NAME="" OBJECTIVE="" PRIORITY="medium" HORIZON="now" READINESS="runnable"
 declare -a PHASES=()
 declare -a SUCCESS_CRITERIA=()
 declare -a DOD_ITEMS=()
@@ -24,11 +24,15 @@ while [[ $# -gt 0 ]]; do
     --name)      NAME="${2:?--name requires a value}"; shift 2 ;;
     --objective) OBJECTIVE="${2:?--objective requires a value}"; shift 2 ;;
     --priority)  PRIORITY="${2:?--priority requires a value}"; shift 2 ;;
+    --horizon)   HORIZON="${2:?--horizon requires a value}"; shift 2 ;;
+    --readiness) READINESS="${2:?--readiness requires a value}"; shift 2 ;;
     --phase)     PHASES+=("${2:?--phase requires a value}"); shift 2 ;;
     --success)   SUCCESS_CRITERIA+=("${2:?--success requires a value}"); shift 2 ;;
     --dod)       DOD_ITEMS+=("${2:?--dod requires a value}"); shift 2 ;;
     -h|--help)
-      echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low] [--phase \"Step 1:desc\"]... [--success \"criterion\"]... [--dod \"item\"]..."
+      echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low]"
+      echo "       [--horizon now|later|future] [--readiness runnable|blocked]"
+      echo "       [--phase \"Step 1:desc\"]... [--success \"criterion\"]... [--dod \"item\"]..."
       echo ""
       echo "Creates a new loop scope file from template with optional scaffold sections."
       exit 0 ;;
@@ -42,6 +46,16 @@ done
 case "$PRIORITY" in
   high|medium|low) ;;
   *) echo "FAIL: --priority must be high, medium, or low (got '$PRIORITY')" >&2; exit 2 ;;
+esac
+
+case "$HORIZON" in
+  now|later|future) ;;
+  *) echo "FAIL: --horizon must be now, later, or future (got '$HORIZON')" >&2; exit 2 ;;
+esac
+
+case "$READINESS" in
+  runnable|blocked) ;;
+  *) echo "FAIL: --readiness must be runnable or blocked (got '$READINESS')" >&2; exit 2 ;;
 esac
 
 # Normalize name:
@@ -73,6 +87,7 @@ SCOPE="$(echo "$NORM_NAME" | tr '[:upper:]' '[:lower:]' | cut -d'-' -f1)"
 mkdir -p "$SCOPES_DIR"
 
 # Render template via sed substitution
+# Note: horizon/readiness have literal defaults in template, override if non-default
 sed \
   -e "s|{{LOOP_ID}}|${LOOP_ID}|g" \
   -e "s|{{DATE}}|$(date -u +%Y-%m-%d)|g" \
@@ -80,6 +95,14 @@ sed \
   -e "s|{{OBJECTIVE}}|${OBJECTIVE}|g" \
   -e "s|{{SCOPE}}|${SCOPE}|g" \
   "$TEMPLATE" > "$SCOPE_FILE"
+
+# Override horizon/readiness if non-default values specified
+if [[ "$HORIZON" != "now" ]]; then
+  sed -i '' "s/^horizon: now$/horizon: ${HORIZON}/" "$SCOPE_FILE"
+fi
+if [[ "$READINESS" != "runnable" ]]; then
+  sed -i '' "s/^execution_readiness: runnable$/execution_readiness: ${READINESS}/" "$SCOPE_FILE"
+fi
 
 # Append scaffold sections for consistent loop structure
 {

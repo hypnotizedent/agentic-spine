@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.horizon.promote_due — Auto-promote loops from later->now when eligible
+#
+# Checks:
+#   1. Date-triggered: not_before_est has passed (in EST)
+#   2. Dependency-triggered: depends_on_loop is closed
+#
+# Usage: planning-horizon-promote-due [--dry-run]
+#
+# Authority: ops/bindings/planning.horizon.contract.yaml
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    -h|--help)
+      echo "Usage: planning-horizon-promote-due [--dry-run]"
+      echo "Auto-promote later/future loops to now when date/dependency triggers are met."
+      exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+exec python3 - "$SCOPES_DIR" "$DRY_RUN" "$ROOT" <<'PYTHON'
+import re
+import sys
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+scopes_dir = Path(sys.argv[1])
+dry_run = sys.argv[2] == "True"
+root = Path(sys.argv[3])
+
+FM_RE = re.compile(r"^---\s*$")
+EST = timezone(timedelta(hours=-5))
+
+def parse_fm(path):
+    lines = path.read_text().splitlines()
+    in_fm = False
+    fm = {}
+    for line in lines:
+        if FM_RE.match(line):
+            if in_fm:
+                break
+            in_fm = True
+            continue
+        if in_fm and ":" in line:
+            key, _, val = line.partition(":")
+            fm[key.strip()] = val.strip().strip('"')
+    return fm
+
+def update_fm_field(path, field, value):
+    """Update a frontmatter field in place."""
+    lines = path.read_text().splitlines()
+    new_lines = []
+    in_fm = False
+    fm_count = 0
+    replaced = False
+    for line in lines:
+        if FM_RE.match(line):
+            fm_count += 1
+            if fm_count == 1:
+                in_fm = True
+            elif fm_count == 2:
+                if not replaced:
+                    new_lines.append(f"{field}: {value}")
+                in_fm = False
+            new_lines.append(line)
+            continue
+        if in_fm and line.startswith(f"{field}:"):
+            new_lines.append(f"{field}: {value}")
+            replaced = True
+        else:
+            new_lines.append(line)
+    path.write_text("\n".join(new_lines) + "\n")
+
+def is_loop_closed(loop_id):
+    scope_file = scopes_dir / f"{loop_id}.scope.md"
+    if not scope_file.exists():
+        return False
+    fm = parse_fm(scope_file)
+    return fm.get("status", "") == "closed"
+
+now_est = datetime.now(EST).date()
+promoted = []
+skipped = []
+
+for f in sorted(scopes_dir.glob("*.scope.md")):
+    fm = parse_fm(f)
+    status = fm.get("status", "")
+    if status not in ("active", "draft", "open"):
+        continue
+
+    horizon = fm.get("horizon", "now")
+    if horizon == "now":
+        continue
+
+    trigger = fm.get("activation_trigger", "manual")
+    loop_id = fm.get("loop_id", f.stem)
+
+    if trigger == "date":
+        not_before = fm.get("not_before_est", "")
+        if not not_before:
+            skipped.append(f"{loop_id}: date trigger but no not_before_est")
+            continue
+        try:
+            target_date = datetime.strptime(not_before, "%Y-%m-%d").date()
+        except ValueError:
+            skipped.append(f"{loop_id}: invalid not_before_est '{not_before}'")
+            continue
+
+        if now_est >= target_date:
+            if dry_run:
+                promoted.append(f"{loop_id}: would promote {horizon}->now (date={not_before} reached)")
+            else:
+                update_fm_field(f, "horizon", "now")
+                promoted.append(f"{loop_id}: promoted {horizon}->now (date={not_before} reached)")
+        else:
+            skipped.append(f"{loop_id}: not yet due (not_before={not_before}, today={now_est})")
+
+    elif trigger == "dependency":
+        depends_on = fm.get("depends_on_loop", "")
+        if not depends_on:
+            skipped.append(f"{loop_id}: dependency trigger but no depends_on_loop")
+            continue
+
+        if is_loop_closed(depends_on):
+            if dry_run:
+                promoted.append(f"{loop_id}: would promote {horizon}->now (dependency {depends_on} closed)")
+            else:
+                update_fm_field(f, "horizon", "now")
+                promoted.append(f"{loop_id}: promoted {horizon}->now (dependency {depends_on} closed)")
+        else:
+            skipped.append(f"{loop_id}: waiting on {depends_on}")
+
+    elif trigger == "manual":
+        skipped.append(f"{loop_id}: manual trigger, no auto-promotion")
+
+prefix = "[DRY RUN] " if dry_run else ""
+print(f"{prefix}Planning Horizon Promotion Check")
+print("=" * 60)
+print()
+
+if promoted:
+    print(f"PROMOTED ({len(promoted)}):")
+    for p in promoted:
+        print(f"  + {p}")
+    print()
+
+if skipped:
+    print(f"SKIPPED ({len(skipped)}):")
+    for s in skipped:
+        print(f"  - {s}")
+    print()
+
+if not promoted and not skipped:
+    print("  No later/future loops found.")
+    print()
+
+print(f"Summary: {len(promoted)} promoted, {len(skipped)} skipped")
+PYTHON
