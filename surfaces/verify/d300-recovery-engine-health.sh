@@ -51,6 +51,7 @@ fi
 action_count="$(yq e '.actions | length' "$BINDING_FILE" 2>/dev/null || echo 0)"
 [[ "$action_count" =~ ^[0-9]+$ ]] || action_count=0
 (( action_count > 0 )) || fail "recovery binding has zero actions"
+(( action_count >= 8 )) || fail "recovery binding action coverage too narrow (expected >=8 actions, found=$action_count)"
 
 errors=0
 err() {
