@@ -1,25 +1,22 @@
 #!/usr/bin/env bash
-# media.backup.restore - Restore a media service config from governed backup snapshots.
+# media.backup.restore — restore media config-state from governed backups
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 SERVICES_HEALTH="$ROOT/ops/bindings/services.health.yaml"
+BACKUP_ROOT="/mnt/docker/backups/media-config"
 
 usage() {
   cat <<'USAGE'
-media.backup.restore - Restore media service config from backup
+media.backup.restore - Restore media config-state from backup
 
 Args:
   --vm HOST            Required: download-stack|streaming-stack
-  --service NAME       Required: media service id (for example: radarr, sonarr, jellyfin)
+  --service NAME       Required: media service id (radarr, sonarr, jellyfin, etc.)
   --backup-file PATH   Optional: explicit backup archive path on target VM
-  --retention DAYS     Optional: backup lookup window (default: 7)
+  --retention DAYS     Optional: backup lookup window (default: 14)
   --dry-run            Preview restore plan without mutation
-
-Examples:
-  ./bin/ops cap run media.backup.restore --vm download-stack --service radarr --dry-run
-  ./bin/ops cap run media.backup.restore --vm streaming-stack --service jellyfin
 USAGE
 }
 
@@ -31,7 +28,7 @@ stop() {
 VM=""
 SERVICE=""
 BACKUP_FILE=""
-RETENTION_DAYS=7
+RETENTION_DAYS=14
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -59,21 +56,30 @@ esac
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
-[[ -f "$VM_BINDING" ]] || stop "missing VM binding: $VM_BINDING"
-[[ -f "$SERVICES_HEALTH" ]] || stop "missing services health binding: $SERVICES_HEALTH"
 
-service_config_rel() {
+map_service_paths() {
   local vm="$1"
   local service="$2"
-
   case "$service" in
-    radarr|sonarr|lidarr|prowlarr|sabnzbd|qbittorrent)
+    radarr|sonarr|lidarr|prowlarr|sabnzbd|qbittorrent|trailarr)
       [[ "$vm" == "download-stack" ]] || return 1
-      echo "download-stack/${service}/config"
+      PRIMARY_PATH="/mnt/docker/volumes/${service}/config"
+      APPDATA_PATH="/opt/appdata/${service}"
       ;;
-    jellyfin|navidrome|jellyseerr|bazarr|homarr)
+    jellyfin|jellyseerr|bazarr)
       [[ "$vm" == "streaming-stack" ]] || return 1
-      echo "streaming-stack/${service}/config"
+      PRIMARY_PATH="/mnt/docker/volumes/${service}/config"
+      APPDATA_PATH="/opt/appdata/${service}"
+      ;;
+    navidrome)
+      [[ "$vm" == "streaming-stack" ]] || return 1
+      PRIMARY_PATH="/mnt/docker/volumes/navidrome/data"
+      APPDATA_PATH="/opt/appdata/navidrome"
+      ;;
+    homarr)
+      [[ "$vm" == "streaming-stack" ]] || return 1
+      PRIMARY_PATH="/mnt/docker/volumes/homarr/configs"
+      APPDATA_PATH="/opt/appdata/homarr"
       ;;
     *)
       return 1
@@ -81,20 +87,17 @@ service_config_rel() {
   esac
 }
 
-config_rel="$(service_config_rel "$VM" "$SERVICE" 2>/dev/null || true)"
-[[ -n "$config_rel" ]] || stop "service '$SERVICE' is not restore-mapped for vm '$VM'"
-
+PRIMARY_PATH=""
+APPDATA_PATH=""
+map_service_paths "$VM" "$SERVICE" || stop "service '$SERVICE' is not restore-mapped for vm '$VM'"
 container_name="$SERVICE"
 
 get_vm_ssh_ref() {
   local vm="$1"
   local target user
-
   target="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || true)"
   user="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || true)"
-
   [[ -n "$target" && "$target" != "null" ]] || return 1
-
   if [[ -n "$user" && "$user" != "null" ]]; then
     echo "${user}@${target}"
   else
@@ -105,8 +108,10 @@ get_vm_ssh_ref() {
 ssh_ref="$(get_vm_ssh_ref "$VM" 2>/dev/null || true)"
 [[ -n "$ssh_ref" ]] || stop "no ssh target found for vm '$VM'"
 
-mapfile -t backups < <(ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$ssh_ref" \
-  "find /opt/backups/media-config -maxdepth 1 -type f -name '${VM}-*.tar.gz' -mtime -${RETENTION_DAYS} -print | sort -r" 2>/dev/null || true)
+mapfile -t backups < <(
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$ssh_ref" \
+    "find '$BACKUP_ROOT' -maxdepth 1 -type f -name '${VM}-config-*.tar.gz' -mtime -${RETENTION_DAYS} -print | sort -r" 2>/dev/null || true
+)
 
 if [[ "${#backups[@]}" -eq 0 ]]; then
   stop "no backups found on $VM within ${RETENTION_DAYS} day(s)"
@@ -127,7 +132,8 @@ media.backup.restore
 ====================
 vm: $VM
 service: $SERVICE
-config_path: /opt/stacks/$config_rel
+primary_path: $PRIMARY_PATH
+appdata_path: $APPDATA_PATH
 selected_backup: $selected_backup
 retention_days: $RETENTION_DAYS
 dry_run: $( [[ "$DRY_RUN" -eq 1 ]] && echo true || echo false )
@@ -140,54 +146,65 @@ done
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo
-  echo "DRY_RUN: would stop container '$container_name', restore '$config_rel' from '$selected_backup', and start container."
+  echo "DRY_RUN: would stop '$container_name', restore '$PRIMARY_PATH' (+ optional '$APPDATA_PATH') from '$selected_backup', then restart."
   exit 0
 fi
 
-restore_script=$(cat <<'REMOTE'
+if ! ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no "$ssh_ref" bash -s -- \
+    "$selected_backup" "$container_name" "$PRIMARY_PATH" "$APPDATA_PATH" <<'REMOTE'
 set -euo pipefail
+backup_file="$1"
+container_name="$2"
+primary_path="$3"
+appdata_path="$4"
 
-BACKUP_FILE="$1"
-CONFIG_REL="$2"
-CONTAINER_NAME="$3"
-
-DOCKER_CMD="docker"
+docker_cmd="docker"
 if ! docker ps >/dev/null 2>&1; then
   if command -v sudo >/dev/null 2>&1 && sudo -n docker ps >/dev/null 2>&1; then
-    DOCKER_CMD="sudo -n docker"
-  else
-    echo "docker unavailable" >&2
-    exit 1
+    docker_cmd="sudo -n docker"
   fi
 fi
 
-if ! tar -tzf "$BACKUP_FILE" | grep -q "^${CONFIG_REL}/"; then
-  echo "backup archive does not contain ${CONFIG_REL}/" >&2
-  exit 1
+primary_rel="${primary_path#/}"
+appdata_rel="${appdata_path#/}"
+
+if ! tar -tzf "$backup_file" | grep -q "^${primary_rel}"; then
+  echo "backup archive missing required path: $primary_rel" >&2
+  exit 2
 fi
 
-if $DOCKER_CMD ps --format '{{.Names}}' | grep -Fxq "$CONTAINER_NAME"; then
-  $DOCKER_CMD stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+FS_PREFIX=()
+if [[ -w "$(dirname "$primary_path")" ]]; then
+  :
+elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  FS_PREFIX=(sudo -n)
+else
+  echo "filesystem restore requires sudo and sudo -n is unavailable" >&2
+  exit 3
 fi
 
-rm -rf "/opt/stacks/${CONFIG_REL}"
-mkdir -p "/opt/stacks/$(dirname "$CONFIG_REL")"
-tar -xzf "$BACKUP_FILE" -C /opt/stacks "$CONFIG_REL"
+if $docker_cmd ps --format '{{.Names}}' | grep -Fxq "$container_name"; then
+  $docker_cmd stop "$container_name" >/dev/null 2>&1 || true
+fi
 
-$DOCKER_CMD start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+"${FS_PREFIX[@]}" rm -rf "$primary_path"
+"${FS_PREFIX[@]}" mkdir -p "$(dirname "$primary_path")"
+"${FS_PREFIX[@]}" tar -xzf "$backup_file" -C / "$primary_rel"
 
-printf 'restored=%s\n' "$CONFIG_REL"
+if [[ -n "$appdata_path" ]] && tar -tzf "$backup_file" | grep -q "^${appdata_rel}"; then
+  "${FS_PREFIX[@]}" rm -rf "$appdata_path"
+  "${FS_PREFIX[@]}" mkdir -p "$(dirname "$appdata_path")"
+  "${FS_PREFIX[@]}" tar -xzf "$backup_file" -C / "$appdata_rel"
+fi
+
+$docker_cmd start "$container_name" >/dev/null 2>&1 || true
 REMOTE
-)
-
-if ! ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no "$ssh_ref" \
-  "bash -lc $(printf '%q' "$restore_script") -- $(printf '%q' "$selected_backup") $(printf '%q' "$config_rel") $(printf '%q' "$container_name")"; then
+then
   stop "remote restore failed on $VM"
 fi
 
 endpoint_url="$(yq e -r ".endpoints[] | select(.id == \"$SERVICE\") | .url // \"\"" "$SERVICES_HEALTH" | head -n1)"
 endpoint_expect="$(yq e -r ".endpoints[] | select(.id == \"$SERVICE\") | .expect // 200" "$SERVICES_HEALTH" | head -n1)"
-
 if [[ -n "$endpoint_url" && "$endpoint_url" != "null" ]]; then
   [[ "$endpoint_expect" =~ ^[0-9]+$ ]] || endpoint_expect=200
   health_code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 12 "$endpoint_url" 2>/dev/null || true)"

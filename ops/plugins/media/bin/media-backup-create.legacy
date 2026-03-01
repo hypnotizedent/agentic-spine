@@ -1,70 +1,50 @@
 #!/usr/bin/env bash
-# media.backup.create — Create config volume snapshots for media services
-#
-# Usage:
-#   ./bin/ops cap run media.backup.create
-#   ./bin/ops cap run media.backup.create --vm download-stack
-#   ./bin/ops cap run media.backup.create --dry-run
-#
-# Contract:
-# - Creates tar.gz snapshots of config directories on media VMs
-# - Stores in /opt/backups/media-config/ on each VM
-# - Retention: 7 days (configurable)
-# - Does NOT backup media content (NFS from pve)
-
+# media.backup.create — create media config-state snapshots (non-payload)
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+BACKUP_ROOT="/mnt/docker/backups/media-config"
 
 usage() {
   cat <<'USAGE'
-media.backup.create — Create config volume snapshots for media services
+media.backup.create — Create media config-state snapshots
 
 Args:
   --vm HOST         Backup only this VM (download-stack|streaming-stack)
-  --dry-run         Show what would be done without executing
-  --retention DAYS  Keep backups for N days (default: 7)
+  --dry-run         Show plan without mutation
+  --retention DAYS  Keep snapshots for N days (default: 14)
 
-Examples:
-  ./bin/ops cap run media.backup.create --vm download-stack
-  ./bin/ops cap run media.backup.create --dry-run
+Notes:
+  - Includes: /mnt/docker/volumes + /opt/appdata service config metadata
+  - Excludes: /mnt/media payload and regenerable cache lanes
 USAGE
 }
 
 VM_FILTER=""
-DRY_RUN=false
-RETENTION_DAYS=7
+DRY_RUN=0
+RETENTION_DAYS=14
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --vm)
-      VM_FILTER="${2:-}"; shift 2 ;;
-    --dry-run)
-      DRY_RUN=true; shift ;;
-    --retention)
-      RETENTION_DAYS="${2:-}"; shift 2 ;;
-    -h|--help)
-      usage; exit 0 ;;
-    *)
-      echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+    --vm) VM_FILTER="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --retention) RETENTION_DAYS="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
+[[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || { echo "FAIL: --retention must be numeric" >&2; exit 1; }
+command -v yq >/dev/null 2>&1 || { echo "MISSING_DEP: yq" >&2; exit 2; }
 command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
 
 get_vm_ssh_ref() {
   local vm="$1"
   local target user
-
-  target=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
-  user=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
-
-  if [[ -z "$target" || "$target" == "null" ]]; then
-    echo ""
-    return 1
-  fi
-
+  target="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  user="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  [[ -n "$target" && "$target" != "null" ]] || return 1
   if [[ -n "$user" && "$user" != "null" ]]; then
     echo "${user}@${target}"
   else
@@ -72,77 +52,113 @@ get_vm_ssh_ref() {
   fi
 }
 
-# Config directories to backup (relative to /opt/stacks/)
-DOWNLOAD_CONFIGS=(
-  "download-stack/radarr/config"
-  "download-stack/sonarr/config"
-  "download-stack/lidarr/config"
-  "download-stack/prowlarr/config"
-  "download-stack/sabnzbd/config"
-  "download-stack/qbittorrent/config"
+DOWNLOAD_PATHS=(
+  "/mnt/docker/volumes/radarr/config"
+  "/mnt/docker/volumes/sonarr/config"
+  "/mnt/docker/volumes/lidarr/config"
+  "/mnt/docker/volumes/prowlarr/config"
+  "/mnt/docker/volumes/sabnzbd/config"
+  "/mnt/docker/volumes/qbittorrent/config"
+  "/mnt/docker/volumes/recyclarr/config"
+  "/mnt/docker/volumes/flaresolverr/config"
+  "/mnt/docker/volumes/trailarr/config"
+  "/mnt/docker/volumes/autopulse"
+  "/opt/appdata/radarr"
+  "/opt/appdata/sonarr"
+  "/opt/appdata/lidarr"
+  "/opt/appdata/prowlarr"
+  "/opt/appdata/sabnzbd"
+  "/opt/appdata/qbittorrent"
+  "/opt/appdata/trailarr"
 )
 
-STREAMING_CONFIGS=(
-  "streaming-stack/jellyfin/config"
-  "streaming-stack/navidrome/config"
-  "streaming-stack/jellyseerr/config"
-  "streaming-stack/bazarr/config"
-  "streaming-stack/homarr/config"
+STREAMING_PATHS=(
+  "/mnt/docker/volumes/jellyfin/config"
+  "/mnt/docker/volumes/navidrome/data"
+  "/mnt/docker/volumes/jellyseerr/config"
+  "/mnt/docker/volumes/bazarr/config"
+  "/mnt/docker/volumes/homarr/configs"
+  "/opt/appdata/jellyfin"
+  "/opt/appdata/navidrome"
+  "/opt/appdata/jellyseerr"
+  "/opt/appdata/bazarr"
 )
 
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
 backup_vm_configs() {
   local vm="$1"
   shift
-  local configs=("$@")
-  local ssh_ref
+  local paths=("$@")
+  local ssh_ref backup_file prune_glob
 
   echo ""
   echo "--- $vm ---"
-  ssh_ref=$(get_vm_ssh_ref "$vm" 2>/dev/null || true)
+  ssh_ref="$(get_vm_ssh_ref "$vm" 2>/dev/null || true)"
   if [[ -z "$ssh_ref" ]]; then
     echo "FAIL: no ssh target found for $vm in vm.lifecycle binding"
     return 1
   fi
 
-  if $DRY_RUN; then
-    echo "DRY_RUN: would backup:"
-    for cfg in "${configs[@]}"; do
-      echo "  - /opt/stacks/$cfg"
+  backup_file="${BACKUP_ROOT}/${vm}-config-${TIMESTAMP}.tar.gz"
+  prune_glob="${vm}-config-*.tar.gz"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "DRY_RUN: would include candidate paths:"
+    for p in "${paths[@]}"; do
+      echo "  - $p"
     done
-    echo "to: /opt/backups/media-config/${vm}-${TIMESTAMP}.tar.gz"
+    echo "DRY_RUN: payload exclusions:"
+    echo "  - /mnt/media"
+    echo "  - */cache"
+    echo "  - */tmp"
+    echo "DRY_RUN: output archive: $backup_file"
     return 0
   fi
 
-  # Ensure backup directory exists
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "mkdir -p /opt/backups/media-config" 2>&1 || {
-    echo "FAIL: could not create backup directory on $vm"
-    return 1
-  }
+if ! ssh -o BatchMode=yes -o ConnectTimeout=12 "$ssh_ref" bash -s -- \
+      "$BACKUP_ROOT" "$backup_file" "$RETENTION_DAYS" "$prune_glob" "${paths[@]}" <<'REMOTE'
+set -euo pipefail
+backup_root="$1"
+backup_file="$2"
+retention_days="$3"
+prune_glob="$4"
+shift 4
+paths=("$@")
 
-  # Build tar include list
-  local include_args=()
-  for cfg in "${configs[@]}"; do
-    include_args+=(-C "/opt/stacks" "$cfg")
-  done
+FS_PREFIX=()
+if mkdir -p "$backup_root" 2>/dev/null; then
+  :
+elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  FS_PREFIX=(sudo -n)
+  "${FS_PREFIX[@]}" mkdir -p "$backup_root"
+else
+  echo "cannot create backup root '$backup_root' (no sudo fallback)" >&2
+  exit 2
+fi
 
-  # Create backup
-  local backup_file="/opt/backups/media-config/${vm}-${TIMESTAMP}.tar.gz"
-  echo "creating: $backup_file"
+include_paths=()
+for p in "${paths[@]}"; do
+  if [[ -e "$p" ]]; then
+    include_paths+=("${p#/}")
+  elif [[ "${#FS_PREFIX[@]}" -gt 0 ]] && "${FS_PREFIX[@]}" test -e "$p"; then
+    include_paths+=("${p#/}")
+  fi
+done
 
-  # shellcheck disable=SC2029
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "tar czf $backup_file ${include_args[*]}" 2>&1 || {
+if [[ "${#include_paths[@]}" -eq 0 ]]; then
+  echo "no existing include paths found on host" >&2
+  exit 3
+fi
+
+"${FS_PREFIX[@]}" tar -czf "$backup_file" -C / "${include_paths[@]}"
+"${FS_PREFIX[@]}" find "$backup_root" -maxdepth 1 -type f -name "$prune_glob" -mtime +"$retention_days" -delete || true
+"${FS_PREFIX[@]}" ls -lh "$backup_file"
+REMOTE
+  then
     echo "FAIL: backup creation failed on $vm"
     return 1
-  }
-
-  # Show result
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "ls -lh $backup_file" 2>&1
-
-  # Prune old backups
-  echo "pruning backups older than $RETENTION_DAYS days..."
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_ref" "find /opt/backups/media-config -name '${vm}-*.tar.gz' -mtime +$RETENTION_DAYS -delete" 2>&1 || true
+  fi
 
   return 0
 }
@@ -151,16 +167,17 @@ echo "media.backup.create"
 echo "==================="
 echo "timestamp: $TIMESTAMP"
 echo "retention_days: $RETENTION_DAYS"
-echo "dry_run: $DRY_RUN"
+echo "backup_root: $BACKUP_ROOT"
+echo "dry_run: $([[ "$DRY_RUN" -eq 1 ]] && echo true || echo false)"
 
 ERRORS=0
 
 if [[ -z "$VM_FILTER" || "$VM_FILTER" == "download-stack" ]]; then
-  backup_vm_configs "download-stack" "${DOWNLOAD_CONFIGS[@]}" || ERRORS=$((ERRORS + 1))
+  backup_vm_configs "download-stack" "${DOWNLOAD_PATHS[@]}" || ERRORS=$((ERRORS + 1))
 fi
 
 if [[ -z "$VM_FILTER" || "$VM_FILTER" == "streaming-stack" ]]; then
-  backup_vm_configs "streaming-stack" "${STREAMING_CONFIGS[@]}" || ERRORS=$((ERRORS + 1))
+  backup_vm_configs "streaming-stack" "${STREAMING_PATHS[@]}" || ERRORS=$((ERRORS + 1))
 fi
 
 if [[ $ERRORS -gt 0 ]]; then
@@ -170,5 +187,5 @@ if [[ $ERRORS -gt 0 ]]; then
 fi
 
 echo ""
-echo "OK: config backups created"
+echo "OK: config-state backups created"
 exit 0

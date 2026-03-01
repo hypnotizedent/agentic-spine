@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-BACKUP-CANONICALIZATION-SYSTEMIC-20260301
 created: 2026-03-01
-status: active
+status: closed
 owner: "@ronny"
 scope: backup
 priority: high

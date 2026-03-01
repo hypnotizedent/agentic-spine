@@ -1,8 +1,8 @@
 # Status: authoritative
-# Last verified: 2026-02-26
+# Last verified: 2026-03-01
 
 version: 1
-updated_at: "2026-02-26"
+updated_at: "2026-03-01"
 owner: "@ronny"
 scope: backup-schedule-v1
 timezone: "America/New_York"
@@ -14,6 +14,7 @@ jobs:
     stack: communications-stack
     host: pve
     schedule_cron: "0 2 * * *"
+    schedule_class: daily-primary-est
     inventory_target: vm-214-communications-stack-primary
     vm_lifecycle_backup_target: vm-214-communications-stack-primary
     retention: keep-last=2
@@ -25,6 +26,7 @@ jobs:
     stack: communications-stack
     host: communications-stack
     schedule_cron: "20 2 * * *"
+    schedule_class: daily-primary-est
     container: mail-archiver-db
     database: MailArchiver
     output_dir: /srv/mail-archiver/backups/postgres
@@ -37,6 +39,7 @@ jobs:
     stack: communications-stack
     host: communications-stack
     schedule_cron: "35 2 * * *"
+    schedule_class: daily-primary-est
     source_dir: /srv/mail-archiver/uploads
     output_dir: /srv/mail-archiver/backups/uploads
     file_pattern: mail-archiver-uploads_<YYYYMMDDTHHMMSSZ>.tar.gz
@@ -48,8 +51,57 @@ jobs:
     stack: communications-stack
     host: communications-stack
     schedule_cron: "0 4 1 * *"
+    schedule_class: monthly-drill-est
     procedure_ref: ops/bindings/mail.archiver.backup.contract.yaml
     dry_run: true
+
+  - id: media-config-backup-daily
+    enabled: true
+    kind: filesystem-snapshot
+    stack: media-stack
+    host: spine-control
+    schedule_cron: "45 3 * * *"
+    schedule_class: daily-config-est
+    capability_ref: media.backup.create
+    retention_days: 14
+    inventory_targets:
+      - app-media-config-download-stack
+      - app-media-config-streaming-stack
+    excludes:
+      - /mnt/media
+      - "*/cache"
+
+  - id: backup-monitor-hourly
+    enabled: true
+    kind: health-monitor
+    stack: backup
+    host: spine-control
+    schedule_cron: "15 * * * *"
+    schedule_class: hourly-monitor-est
+    capability_ref: backup.monitor
+    alert_on_degraded: true
+
+  - id: media-config-restore-drill-monthly
+    enabled: true
+    kind: restore-drill
+    stack: media-stack
+    host: download-stack
+    schedule_cron: "30 4 1 * *"
+    schedule_class: monthly-drill-est
+    procedure_ref: ops/plugins/media/bin/media-backup-restore
+    dry_run: true
+    restore_class: media-config-dry-run-monthly
+
+  - id: infisical-restore-drill-quarterly
+    enabled: true
+    kind: restore-drill
+    stack: infra-core
+    host: infra-core
+    schedule_cron: "0 5 1 */3 *"
+    schedule_class: quarterly-drill-est
+    procedure_ref: docs/governance/INFISICAL_RESTORE_DRILL.md
+    dry_run: true
+    restore_class: tier1-small-state-dry-run-quarterly
 
 references:
   contracts:
@@ -58,4 +110,3 @@ references:
     - ops/bindings/mail.archiver.backup.contract.yaml
   closes_gaps:
     - GAP-OP-924
-

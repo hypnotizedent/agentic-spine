@@ -91,6 +91,20 @@ for ((i=0; i<vm_count; i++)); do
     err "VM $vmid ($hostname): no vzdump target in backup.inventory.yaml matching vmid $vmid"
   fi
 
+  # ── Check 4b: systemic backup model metadata ──────────────────────────
+  model_match="$(yq -r "[.runtime_units[]? | select(.kind == \"vm\" and .hostname == \"$hostname\" and (.backup_profile // \"\") != \"\" and (.data_class // \"\") != \"\" and (.destination_lane // \"\") != \"\" and (.schedule_class // \"\") != \"\" and (.restore_class // \"\") != \"\")] | length" "$BACKUP_INV" 2>/dev/null || echo 0)"
+  [[ "$model_match" =~ ^[0-9]+$ ]] || model_match=0
+  if [[ "$model_match" -eq 0 ]]; then
+    err "VM $vmid ($hostname): missing runtime_units backup metadata (backup_profile/data_class/destination_lane/schedule_class/restore_class)"
+  fi
+
+  if [[ "$hostname" == "download-stack" || "$hostname" == "streaming-stack" ]]; then
+    media_exclusions="$(yq -r ".runtime_units[]? | select(.kind == \"vm\" and .hostname == \"$hostname\") | (.exclude_paths // [])[]?" "$BACKUP_INV" 2>/dev/null || true)"
+    if ! printf '%s\n' "$media_exclusions" | grep -Eq '^/mnt/media(/.*)?$'; then
+      err "VM $vmid ($hostname): media runtime unit missing /mnt/media exclusion"
+    fi
+  fi
+
   # ── Check 5: services.health.yaml coverage ────────────────────────────
   # At least one enabled probe must reference this hostname, OR the VM
   # must have has_docker: false (no services to probe).
