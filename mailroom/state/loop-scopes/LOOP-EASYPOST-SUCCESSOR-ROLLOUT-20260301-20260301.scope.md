@@ -34,8 +34,8 @@ Carry forward superseded EasyPost audit scope using shipped S1-S6 implementation
 ## Closure Note
 
 All 5 checklist items executed. EC-1 through EC-4 PASS. EC-5 resolved as NO_ACTION:
-the superseded proposal CP-20260227-002654 referenced gap IDs from wrong domains
-(GAP-OP-1026-1028 = Resend, GAP-OP-1037 = Proxmox LXC) and nonexistent IDs
-(GAP-OP-1030-1032). Zero open shipping/EasyPost gaps exist in operational.gaps.yaml.
+the superseded proposal CP-20260227-002654 referenced stale gap IDs from wrong
+domains (Resend/Proxmox) and additional IDs that do not exist in the current
+gap ledger. Zero open shipping/EasyPost gaps exist in operational.gaps.yaml.
 Implementation baseline: 6 commits (29ccd8d..2c56802) merged to mint-modules main.
 Proposal CP-20260301-010001 marked executed.
