@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""launchd-scheduler-health-status
+
+Summarize monitored scheduled LaunchAgents with runtime recency and last known exit status.
+Sources:
+  - ops/bindings/launchd.scheduler.registry.yaml
+  - ops/runtime/launchd/*.plist (schedule + log paths)
+  - mailroom/logs/runtime-jobs.ndjson (wrapper telemetry)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import plistlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+WEEKDAY_NAMES = {
+    0: "Sun",
+    1: "Mon",
+    2: "Tue",
+    3: "Wed",
+    4: "Thu",
+    5: "Fri",
+    6: "Sat",
+    7: "Sun",
+}
+
+
+@dataclass
+class JobEvidence:
+    timestamp: datetime | None
+    exit_code: int | None
+    source: str
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Launchd scheduler recency and health status")
+    parser.add_argument("--json", action="store_true", help="Emit JSON payload")
+    parser.add_argument(
+        "--calendar-markdown",
+        nargs="?",
+        const="mailroom/outbox/operations/launchd-schedule-calendar.md",
+        help="Write schedule calendar markdown (optional output path relative to repo)",
+    )
+    return parser.parse_args()
+
+
+def parse_iso8601(value: str) -> datetime | None:
+    value = (value or "").strip()
+    if not value:
+        return None
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_runtime_job_index(path: Path) -> dict[str, JobEvidence]:
+    index: dict[str, JobEvidence] = {}
+    if not path.exists():
+        return index
+
+    with path.open("r", encoding="utf-8") as handle:
+        for raw in handle:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            job_name = str(row.get("job_name", "")).strip()
+            if not job_name:
+                continue
+            prefix = job_name.split(":", 1)[0].strip()
+            if not prefix:
+                continue
+            started_at = parse_iso8601(str(row.get("started_at", "")))
+            if not started_at:
+                continue
+            exit_code_val = row.get("exit_code")
+            exit_code: int | None
+            try:
+                exit_code = int(exit_code_val) if exit_code_val is not None else None
+            except (TypeError, ValueError):
+                exit_code = None
+
+            current = index.get(prefix)
+            if current is None or (current.timestamp and started_at > current.timestamp) or current.timestamp is None:
+                index[prefix] = JobEvidence(timestamp=started_at, exit_code=exit_code, source="runtime-jobs")
+    return index
+
+
+def cadence_from_calendar_entry(entry: dict[str, Any]) -> int:
+    if not isinstance(entry, dict):
+        return 24 * 3600
+    if "Weekday" in entry:
+        return 7 * 24 * 3600
+    if "Day" in entry:
+        return 31 * 24 * 3600
+    return 24 * 3600
+
+
+def describe_calendar_entry(entry: dict[str, Any]) -> str:
+    if not isinstance(entry, dict):
+        return "daily"
+    hour = int(entry.get("Hour", 0) or 0)
+    minute = int(entry.get("Minute", 0) or 0)
+    hhmm = f"{hour:02d}:{minute:02d}"
+    if "Weekday" in entry:
+        wd = int(entry.get("Weekday", 0) or 0)
+        return f"weekly {WEEKDAY_NAMES.get(wd, str(wd))} {hhmm}"
+    if "Day" in entry:
+        day = int(entry.get("Day", 1) or 1)
+        return f"monthly day {day} {hhmm}"
+    return f"daily {hhmm}"
+
+
+def cadence_from_plist(plist_payload: dict[str, Any]) -> tuple[int, str]:
+    interval = plist_payload.get("StartInterval")
+    if isinstance(interval, int) and interval > 0:
+        if interval % 3600 == 0:
+            return interval, f"every {interval // 3600}h"
+        if interval % 60 == 0:
+            return interval, f"every {interval // 60}m"
+        return interval, f"every {interval}s"
+
+    cal = plist_payload.get("StartCalendarInterval")
+    if isinstance(cal, dict):
+        return cadence_from_calendar_entry(cal), describe_calendar_entry(cal)
+    if isinstance(cal, list) and cal:
+        entries = [e for e in cal if isinstance(e, dict)]
+        if not entries:
+            return 24 * 3600, "daily"
+        cadence = min(cadence_from_calendar_entry(e) for e in entries)
+        desc = ", ".join(describe_calendar_entry(e) for e in entries)
+        return cadence, desc
+
+    return 24 * 3600, "daily"
+
+
+def load_plist(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("rb") as handle:
+        payload = plistlib.load(handle)
+    return payload if isinstance(payload, dict) else {}
+
+
+def mtime_evidence(paths: list[str]) -> JobEvidence:
+    newest_ts: datetime | None = None
+    for p in paths:
+        if not p:
+            continue
+        candidate = Path(p).expanduser()
+        if not candidate.exists():
+            continue
+        ts = datetime.fromtimestamp(candidate.stat().st_mtime, tz=timezone.utc)
+        if newest_ts is None or ts > newest_ts:
+            newest_ts = ts
+    return JobEvidence(timestamp=newest_ts, exit_code=None, source="log-mtime" if newest_ts else "none")
+
+
+def classify_status(now: datetime, evidence: JobEvidence, cadence_seconds: int) -> tuple[str, int | None, int]:
+    threshold = max(int(cadence_seconds * 2 + 600), 1800)
+    if evidence.timestamp is None:
+        return "unknown", None, threshold
+
+    age_seconds = int((now - evidence.timestamp).total_seconds())
+    if evidence.exit_code is not None and evidence.exit_code != 0:
+        return "failed", age_seconds, threshold
+    if age_seconds > threshold:
+        return "stale", age_seconds, threshold
+    return "ok", age_seconds, threshold
+
+
+def build_payload(root: Path) -> dict[str, Any]:
+    registry_path = root / "ops/bindings/launchd.scheduler.registry.yaml"
+    contract_path = root / "ops/bindings/launchd.runtime.contract.yaml"
+    runtime_jobs_path = root / "mailroom/logs/runtime-jobs.ndjson"
+
+    registry = load_yaml(registry_path)
+    contract = load_yaml(contract_path)
+    recency_cfg = contract.get("recency", {}) if isinstance(contract, dict) else {}
+    exempt_labels = set(recency_cfg.get("exempt_labels", []) or [])
+    labels = registry.get("labels", []) if isinstance(registry.get("labels"), list) else []
+    runtime_index = load_runtime_job_index(runtime_jobs_path)
+
+    now = datetime.now(timezone.utc)
+    rows: list[dict[str, Any]] = []
+
+    for entry in labels:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("state", "")).strip() != "active":
+            continue
+        if str(entry.get("mode", "")).strip() != "scheduled":
+            continue
+        if not bool(entry.get("monitor", False)):
+            continue
+
+        label = str(entry.get("label", "")).strip()
+        template_path = str(entry.get("template_path", "")).strip()
+        plist_path = (root / template_path) if template_path else Path()
+        plist_payload = load_plist(plist_path)
+
+        cadence_seconds, schedule = cadence_from_plist(plist_payload)
+        job_name = label.replace("com.ronny.", "", 1)
+
+        evidence = runtime_index.get(job_name)
+        if evidence is None:
+            log_paths = [
+                str(plist_payload.get("StandardOutPath", "") or ""),
+                str(plist_payload.get("StandardErrorPath", "") or ""),
+            ]
+            evidence = mtime_evidence(log_paths)
+
+        status, age_seconds, stale_threshold = classify_status(now, evidence, cadence_seconds)
+        if label in exempt_labels and status in {"stale", "failed"}:
+            status = "exempt"
+
+        rows.append(
+            {
+                "label": label,
+                "job_name": job_name,
+                "schedule": schedule,
+                "cadence_seconds": cadence_seconds,
+                "last_run_at": evidence.timestamp.strftime("%Y-%m-%dT%H:%M:%SZ") if evidence.timestamp else "",
+                "last_exit_code": evidence.exit_code,
+                "age_seconds": age_seconds,
+                "stale_threshold_seconds": stale_threshold,
+                "status": status,
+                "evidence_source": evidence.source,
+                "template_path": template_path,
+            }
+        )
+
+    rows.sort(key=lambda r: r["label"])
+
+    counts = {
+        "total": len(rows),
+        "ok": sum(1 for r in rows if r["status"] == "ok"),
+        "stale": sum(1 for r in rows if r["status"] == "stale"),
+        "failed": sum(1 for r in rows if r["status"] == "failed"),
+        "unknown": sum(1 for r in rows if r["status"] == "unknown"),
+        "exempt": sum(1 for r in rows if r["status"] == "exempt"),
+    }
+
+    status = "ok"
+    if counts["failed"] > 0:
+        status = "error"
+    elif counts["stale"] > 0:
+        status = "warn"
+
+    return {
+        "capability": "host.launchd.scheduler.health.status",
+        "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "status": status,
+        "data": {
+            "summary": counts,
+            "rows": rows,
+            "stale_labels": [r["label"] for r in rows if r["status"] == "stale"],
+            "failed_labels": [r["label"] for r in rows if r["status"] == "failed"],
+            "unknown_labels": [r["label"] for r in rows if r["status"] == "unknown"],
+            "exempt_labels": [r["label"] for r in rows if r["status"] == "exempt"],
+        },
+    }
+
+
+def write_calendar_markdown(root: Path, payload: dict[str, Any], output_rel: str) -> Path:
+    out_path = (root / output_rel).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows = payload.get("data", {}).get("rows", [])
+    summary = payload.get("data", {}).get("summary", {})
+
+    lines = [
+        "# Launchd Scheduler Calendar",
+        "",
+        f"- Generated: {payload.get('generated_at', '')}",
+        f"- Status: {payload.get('status', '')}",
+        (
+            "- Summary: "
+            f"total={summary.get('total', 0)} "
+            f"ok={summary.get('ok', 0)} "
+            f"stale={summary.get('stale', 0)} "
+            f"failed={summary.get('failed', 0)} "
+            f"unknown={summary.get('unknown', 0)} "
+            f"exempt={summary.get('exempt', 0)}"
+        ),
+        "",
+        "| Label | Schedule | Last Run (UTC) | Status | Evidence |",
+        "|---|---|---|---|---|",
+    ]
+
+    for row in rows:
+        lines.append(
+            "| {label} | {schedule} | {last_run} | {status} | {source} |".format(
+                label=row.get("label", ""),
+                schedule=row.get("schedule", ""),
+                last_run=row.get("last_run_at", "") or "(none)",
+                status=row.get("status", ""),
+                source=row.get("evidence_source", ""),
+            )
+        )
+
+    out_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    return out_path
+
+
+def main() -> int:
+    args = parse_args()
+    root = Path(__file__).resolve().parents[4]
+
+    payload = build_payload(root)
+
+    calendar_path: Path | None = None
+    if args.calendar_markdown is not None:
+        calendar_path = write_calendar_markdown(root, payload, args.calendar_markdown)
+
+    if args.json:
+        if calendar_path:
+            payload = dict(payload)
+            payload["calendar_markdown"] = str(calendar_path)
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        summary = payload.get("data", {}).get("summary", {})
+        print("launchd.scheduler.health.status")
+        print(f"status: {payload.get('status', 'unknown')}")
+        print(
+            "summary: total={total} ok={ok} stale={stale} failed={failed} unknown={unknown} exempt={exempt}".format(
+                total=summary.get("total", 0),
+                ok=summary.get("ok", 0),
+                stale=summary.get("stale", 0),
+                failed=summary.get("failed", 0),
+                unknown=summary.get("unknown", 0),
+                exempt=summary.get("exempt", 0),
+            )
+        )
+        if calendar_path:
+            print(f"calendar_markdown: {calendar_path}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

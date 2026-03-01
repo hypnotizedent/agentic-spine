@@ -63,13 +63,42 @@ if timeout 90 "$ROOT/ops/plugins/observability/bin/automation-stack-latency-stat
   rm -f /tmp/slo-automation-latency-$$
 fi
 
+echo "Collecting launchd scheduler health..."
+SCHEDULER_STATUS="unknown"
+SCHEDULER_TOTAL=0
+SCHEDULER_OK=0
+SCHEDULER_STALE=0
+SCHEDULER_FAILED=0
+SCHEDULER_UNKNOWN=0
+SCHEDULER_EXEMPT=0
+SCHEDULER_STALE_LABELS=""
+SCHEDULER_FAILED_LABELS=""
+if timeout 60 "$ROOT/ops/plugins/host/bin/launchd-scheduler-health-status" --json > /tmp/slo-scheduler-$$ 2>&1; then
+  SCHEDULER_STATUS="$(jq -r '.status // "unknown"' /tmp/slo-scheduler-$$ 2>/dev/null || echo "unknown")"
+  SCHEDULER_TOTAL="$(jq -r '.data.summary.total // 0' /tmp/slo-scheduler-$$ 2>/dev/null || echo "0")"
+  SCHEDULER_OK="$(jq -r '.data.summary.ok // 0' /tmp/slo-scheduler-$$ 2>/dev/null || echo "0")"
+  SCHEDULER_STALE="$(jq -r '.data.summary.stale // 0' /tmp/slo-scheduler-$$ 2>/dev/null || echo "0")"
+  SCHEDULER_FAILED="$(jq -r '.data.summary.failed // 0' /tmp/slo-scheduler-$$ 2>/dev/null || echo "0")"
+  SCHEDULER_UNKNOWN="$(jq -r '.data.summary.unknown // 0' /tmp/slo-scheduler-$$ 2>/dev/null || echo "0")"
+  SCHEDULER_EXEMPT="$(jq -r '.data.summary.exempt // 0' /tmp/slo-scheduler-$$ 2>/dev/null || echo "0")"
+  SCHEDULER_STALE_LABELS="$(jq -r '.data.stale_labels // [] | join(", ")' /tmp/slo-scheduler-$$ 2>/dev/null || echo "")"
+  SCHEDULER_FAILED_LABELS="$(jq -r '.data.failed_labels // [] | join(", ")' /tmp/slo-scheduler-$$ 2>/dev/null || echo "")"
+fi
+rm -f /tmp/slo-scheduler-$$
+
 OPEN_LOOPS=$("$ROOT/bin/ops" loops list --open 2>/dev/null | grep -c "LOOP-" || echo "0")
 OPEN_GAPS=$("$ROOT/bin/ops" status 2>/dev/null | grep -E "gaps:.*open" | grep -oE '[0-9]+' | head -1 || echo "0")
 
 VERIFY_PCT=0
 [[ "$VERIFY_TOTAL" -gt 0 ]] && VERIFY_PCT=$((VERIFY_PASS * 100 / VERIFY_TOTAL))
 SLO_PASS="FAIL"
-[[ "$VERIFY_PCT" -ge 95 ]] && [[ "$VERIFY_FAIL" -eq 0 ]] && [[ "$INCIDENT_COUNT" -eq 0 ]] && [[ "$AUTOMATION_LATENCY_STATUS" != "incident" ]] && SLO_PASS="PASS"
+[[ "$VERIFY_PCT" -ge 95 ]] \
+  && [[ "$VERIFY_FAIL" -eq 0 ]] \
+  && [[ "$INCIDENT_COUNT" -eq 0 ]] \
+  && [[ "$AUTOMATION_LATENCY_STATUS" != "incident" ]] \
+  && [[ "$SCHEDULER_FAILED" -eq 0 ]] \
+  && [[ "$SCHEDULER_STALE" -eq 0 ]] \
+  && SLO_PASS="PASS"
 
 AUTOMATION_LATENCY_ICON="✅"
 if [[ "$AUTOMATION_LATENCY_STATUS" == "incident" ]]; then
@@ -109,6 +138,7 @@ slo_pass: ${SLO_PASS}
 | Warnings | ${WARN_COUNT} | 0 | $([[ "$WARN_COUNT" -eq 0 ]] && echo "✅" || echo "⚠️") |
 | Automation Latency Budget | ${AUTOMATION_LATENCY_STATUS} (p95=${AUTOMATION_LATENCY_P95_MS}ms, p99=${AUTOMATION_LATENCY_P99_MS}ms, n8n=${AUTOMATION_LATENCY_N8N_MS}ms) | non-incident | ${AUTOMATION_LATENCY_ICON} |
 | Automation Latency Samples | total=${AUTOMATION_LATENCY_SAMPLES}, failed=${AUTOMATION_LATENCY_FAILED_SAMPLES} | failed <= budget | ${AUTOMATION_LATENCY_SAMPLE_ICON} |
+| Scheduler Job Health | ${SCHEDULER_STATUS} (ok=${SCHEDULER_OK}/${SCHEDULER_TOTAL}, stale=${SCHEDULER_STALE}, failed=${SCHEDULER_FAILED}, unknown=${SCHEDULER_UNKNOWN}, exempt=${SCHEDULER_EXEMPT}) | stale=0, failed=0 | $([[ "$SCHEDULER_STALE" -eq 0 && "$SCHEDULER_FAILED" -eq 0 ]] && echo "✅" || echo "❌") |
 | Open Loops | ${OPEN_LOOPS} | - | ℹ️ |
 | Open Gaps | ${OPEN_GAPS} | - | ℹ️ |
 
@@ -121,6 +151,11 @@ ${DOMAIN_SUMMARY:-| (none) | (none) |}
 ## Failing Verify Gates
 
 $(if [[ -n "$FAILING_IDS" && "$FAILING_IDS" != "" ]]; then echo "$FAILING_IDS"; else echo "None"; fi)
+
+## Scheduler Exceptions
+
+- Failed labels: $(if [[ -n "$SCHEDULER_FAILED_LABELS" ]]; then echo "$SCHEDULER_FAILED_LABELS"; else echo "None"; fi)
+- Stale labels: $(if [[ -n "$SCHEDULER_STALE_LABELS" ]]; then echo "$SCHEDULER_STALE_LABELS"; else echo "None"; fi)
 
 ## Evidence Trail
 
@@ -139,6 +174,7 @@ echo "Summary:"
 echo "  Snapshot Status: $SNAPSHOT_STATUS"
 echo "  Verify Gates: ${VERIFY_PASS}/${VERIFY_TOTAL} pass (${VERIFY_PCT}%)"
 echo "  Incidents: $INCIDENT_COUNT | Warnings: $WARN_COUNT"
+echo "  Scheduler: status=$SCHEDULER_STATUS ok=${SCHEDULER_OK}/${SCHEDULER_TOTAL} stale=${SCHEDULER_STALE} failed=${SCHEDULER_FAILED} unknown=${SCHEDULER_UNKNOWN} exempt=${SCHEDULER_EXEMPT}"
 echo "  Open Loops: $OPEN_LOOPS | Open Gaps: $OPEN_GAPS"
 echo
 echo "SLO Target: ≥95% verify pass rate, 0 incidents for 7 consecutive days"

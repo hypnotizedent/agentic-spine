@@ -471,6 +471,45 @@ def collect_comms_queue_status() -> dict[str, Any]:
     }
 
 
+def collect_launchd_scheduler_status() -> dict[str, Any]:
+    script = ROOT / "ops/plugins/host/bin/launchd-scheduler-health-status"
+    if not script.exists():
+        return {
+            "status": "error",
+            "summary": {"total": 0, "ok": 0, "stale": 0, "failed": 0, "unknown": 0},
+            "stale_labels": [],
+            "failed_labels": [],
+            "unknown_labels": [],
+            "error": {"message": f"missing script: {script}"},
+        }
+    _, payload = parse_json_output(script, ["--json"])
+    if not payload:
+        return {
+            "status": "error",
+            "summary": {"total": 0, "ok": 0, "stale": 0, "failed": 0, "unknown": 0},
+            "stale_labels": [],
+            "failed_labels": [],
+            "unknown_labels": [],
+            "error": {"message": "launchd scheduler status returned no payload"},
+        }
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    summary = data.get("summary", {}) if isinstance(data, dict) else {}
+    return {
+        "status": str(payload.get("status", "unknown")),
+        "summary": {
+            "total": int(summary.get("total", 0) or 0),
+            "ok": int(summary.get("ok", 0) or 0),
+            "stale": int(summary.get("stale", 0) or 0),
+            "failed": int(summary.get("failed", 0) or 0),
+            "unknown": int(summary.get("unknown", 0) or 0),
+            "exempt": int(summary.get("exempt", 0) or 0),
+        },
+        "stale_labels": data.get("stale_labels", []) if isinstance(data, dict) else [],
+        "failed_labels": data.get("failed_labels", []) if isinstance(data, dict) else [],
+        "unknown_labels": data.get("unknown_labels", []) if isinstance(data, dict) else [],
+    }
+
+
 def collect_tick_data(window_hours: int) -> dict[str, Any]:
     loops = collect_open_loops()
     gaps = collect_open_gaps()
@@ -481,6 +520,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
     timeline = collect_timeline(window_hours)
     graph = collect_graph_summary()
     comms_queue = collect_comms_queue_status()
+    scheduler = collect_launchd_scheduler_status()
 
     summary = {
         "open_loops": len(loops),
@@ -499,10 +539,20 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         "comms_queue_slo_status": comms_queue.get("slo_status", "unknown"),
         "comms_queue_pending": comms_queue.get("queue_pending_count", 0),
         "comms_queue_escalations": comms_queue.get("pending_escalation_task_count", 0),
+        "scheduler_status": scheduler.get("status", "unknown"),
+        "scheduler_total_jobs": int(scheduler.get("summary", {}).get("total", 0)),
+        "scheduler_failed_jobs": int(scheduler.get("summary", {}).get("failed", 0)),
+        "scheduler_stale_jobs": int(scheduler.get("summary", {}).get("stale", 0)),
+        "scheduler_unknown_jobs": int(scheduler.get("summary", {}).get("unknown", 0)),
+        "scheduler_exempt_jobs": int(scheduler.get("summary", {}).get("exempt", 0)),
     }
 
     status = "ok"
-    if alerts.get("status") == "error" or any(g.get("severity") == "critical" for g in gaps):
+    if (
+        alerts.get("status") == "error"
+        or any(g.get("severity") == "critical" for g in gaps)
+        or scheduler.get("status") == "error"
+    ):
         status = "error"
     elif (
         summary["open_loops"] > 0
@@ -512,6 +562,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
         or summary["verify_current_failed_runs"] > 0
         or str(calendar.get("status", "")).lower() in {"warn", "error"}
         or comms_queue.get("slo_status") == "incident"
+        or scheduler.get("status") == "warn"
     ):
         status = "warn"
 
@@ -532,6 +583,7 @@ def collect_tick_data(window_hours: int) -> dict[str, Any]:
             "timeline": timeline,
             "graph": graph,
             "comms_queue": comms_queue,
+            "scheduler": scheduler,
         },
     }
 

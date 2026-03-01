@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+STATUS_SCRIPT="$ROOT/ops/plugins/host/bin/launchd-scheduler-health-status"
+
+if [[ ! -x "$STATUS_SCRIPT" ]]; then
+  jq -n --arg section "scheduler" --arg status "error" --arg summary "scheduler status script missing" '{section:$section,status:$status,summary:$summary,details:{}}'
+  exit 0
+fi
+
+payload="$($STATUS_SCRIPT --json 2>/dev/null || true)"
+if [[ -z "$payload" ]] || ! jq -e '.' >/dev/null 2>&1 <<<"$payload"; then
+  jq -n --arg section "scheduler" --arg status "error" --arg summary "scheduler status unavailable" '{section:$section,status:$status,summary:$summary,details:{}}'
+  exit 0
+fi
+
+status="$(jq -r '.status // "unknown"' <<<"$payload")"
+summary_total="$(jq -r '.data.summary.total // 0' <<<"$payload")"
+summary_ok="$(jq -r '.data.summary.ok // 0' <<<"$payload")"
+summary_stale="$(jq -r '.data.summary.stale // 0' <<<"$payload")"
+summary_failed="$(jq -r '.data.summary.failed // 0' <<<"$payload")"
+summary_unknown="$(jq -r '.data.summary.unknown // 0' <<<"$payload")"
+summary_exempt="$(jq -r '.data.summary.exempt // 0' <<<"$payload")"
+
+section_status="ok"
+case "$status" in
+  error) section_status="error" ;;
+  warn) section_status="degraded" ;;
+  *) section_status="ok" ;;
+esac
+
+summary="scheduler status=$status total=$summary_total ok=$summary_ok stale=$summary_stale failed=$summary_failed unknown=$summary_unknown exempt=$summary_exempt"
+
+jq -n \
+  --arg section "scheduler" \
+  --arg status "$section_status" \
+  --arg summary "$summary" \
+  --arg raw_status "$status" \
+  --argjson total "$summary_total" \
+  --argjson ok "$summary_ok" \
+  --argjson stale "$summary_stale" \
+  --argjson failed "$summary_failed" \
+  --argjson unknown "$summary_unknown" \
+  --argjson exempt "$summary_exempt" \
+  --argjson stale_labels "$(jq -c '.data.stale_labels // []' <<<"$payload")" \
+  --argjson failed_labels "$(jq -c '.data.failed_labels // []' <<<"$payload")" \
+  --argjson unknown_labels "$(jq -c '.data.unknown_labels // []' <<<"$payload")" \
+  '{
+    section:$section,
+    status:$status,
+    summary:$summary,
+    details:{
+      raw_status:$raw_status,
+      total:$total,
+      ok:$ok,
+      stale:$stale,
+      failed:$failed,
+      unknown:$unknown,
+      exempt:$exempt,
+      stale_labels:$stale_labels,
+      failed_labels:$failed_labels,
+      unknown_labels:$unknown_labels
+    }
+  }'
