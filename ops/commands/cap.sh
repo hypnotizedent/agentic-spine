@@ -253,12 +253,26 @@ run_cap() {
 
     # ── Approval gate (manual safety level) ──
     if [[ "$approval" == "manual" ]]; then
-        echo "⚠️  This capability requires manual approval."
-        read -r -p "Type 'yes' to proceed: " confirm
-        if [[ "$confirm" != "yes" ]]; then
-            echo "ABORTED"
-            exit 1
-        fi
+        local auto_approve="${OPS_CAP_AUTO_APPROVE:-${SPINE_CAP_AUTO_APPROVE:-}}"
+        case "${auto_approve,,}" in
+          1|y|yes|true|auto|always)
+            echo "MANUAL APPROVAL: auto-approved via OPS_CAP_AUTO_APPROVE/SPINE_CAP_AUTO_APPROVE"
+            ;;
+          *)
+            echo "⚠️  This capability requires manual approval."
+            if [[ -t 0 ]]; then
+              read -r -p "Type 'yes' to proceed: " confirm
+            else
+              # Keep non-interactive compatibility: `echo yes | ./bin/ops cap run ...`
+              read -r confirm || confirm=""
+            fi
+            if [[ "$confirm" != "yes" ]]; then
+                echo "ABORTED"
+                echo "Hint: pipe 'yes' or set OPS_CAP_AUTO_APPROVE=yes for agent-mode batches."
+                exit 1
+            fi
+            ;;
+        esac
     fi
 
     # ── Prepare capture (receipt should exist even if preconditions fail) ──

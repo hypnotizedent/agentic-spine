@@ -709,7 +709,7 @@ capabilities:
     domain: loop_gap
     plane: fabric
   gaps.close:
-    description: "Close or fix a gap. Atomic: acquires git-lock, validates claim, updates status, commits."
+    description: "Close or fix gap(s). Supports single --id and atomic --batch single-commit mode."
     tags: [loops, gaps]
     command: "./ops/plugins/loops/bin/gaps-close"
     cwd: "$SPINE_CODE"
@@ -719,6 +719,15 @@ capabilities:
     outputs: ["stdout"]
     domain: loop_gap
     plane: fabric
+    flags:
+      - "--id GAP-OP-<n> | --batch /path/to/close.yaml"
+      - "--status fixed|closed"
+      - "--fixed-in <ref>"
+      - "--notes <text>"
+      - "--regression-lock-id <id>"
+    examples:
+      - "./bin/ops cap run gaps.close -- --id GAP-OP-1234 --status fixed --fixed-in abc1234"
+      - "./bin/ops cap run gaps.close -- --batch /tmp/gaps-close.yaml --status fixed --fixed-in wave-20260301"
   # ─────────────────────────────────────────────────────────────────────────
   # LIFECYCLE (gap/loop lifecycle automation)
   # ─────────────────────────────────────────────────────────────────────────
@@ -870,6 +879,61 @@ capabilities:
     cwd: "$SPINE_CODE"
     safety: destructive
     approval: manual
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: loop_gap
+    plane: fabric
+  friction.ingest:
+    description: "Ingest structured friction items into authority queue with 7-day fingerprint dedupe."
+    tags: [lifecycle, friction, loops]
+    command: "./ops/plugins/lifecycle/bin/friction-ingest"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout", "mailroom/state/friction-queue.ndjson"]
+    domain: loop_gap
+    plane: fabric
+  friction.queue.status:
+    description: "Read friction queue counters (queued/stale/filed/matched/dedupe_rate)."
+    tags: [lifecycle, friction, loops]
+    command: "./ops/plugins/lifecycle/bin/friction-queue-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: loop_gap
+    plane: fabric
+  friction.reconcile:
+    description: "Consume queued friction, dedupe against open gaps, and file unmatched items via gaps.file batch."
+    tags: [lifecycle, friction, loops]
+    command: "./ops/plugins/lifecycle/bin/friction-reconcile"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout", "mailroom/state/friction-queue.ndjson", "ops/bindings/operational.gaps.yaml"]
+    domain: loop_gap
+    plane: fabric
+  friction.baseline.capture:
+    description: "Capture stable friction baseline artifact with checksum from verify fast/loop_gap/route outputs."
+    tags: [lifecycle, friction, verify]
+    command: "./ops/plugins/lifecycle/bin/friction-baseline-capture"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout", "mailroom/state/friction-baseline.yaml"]
+    domain: loop_gap
+    plane: fabric
+  friction.baseline.verify:
+    description: "Verify friction baseline artifact schema and checksum against friction baseline contract."
+    tags: [lifecycle, friction, verify]
+    command: "./ops/plugins/lifecycle/bin/friction-baseline-verify"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
     lifecycle: ready
     outputs: ["stdout"]
     domain: loop_gap
@@ -7125,6 +7189,23 @@ capabilities:
     plane: fabric
     domain: none
     outputs: ["stdout"]
+  git.stage.commit.scoped:
+    description: "Path-scoped stage/commit helper: stage explicit allowlist and fail on unrelated staged files."
+    tags: [git, worktree, governance, safety]
+    command: "./ops/plugins/ops/bin/git-stage-commit-scoped"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    lifecycle: ready
+    plane: fabric
+    domain: none
+    outputs: ["stdout"]
+    flags:
+      - "--path <file> (repeatable) | --allowlist-file <path>"
+      - "--message <subject> [--body <text>]"
+      - "--dry-run"
+    examples:
+      - "./bin/ops cap run git.stage.commit.scoped -- --path ops/capabilities.yaml --message \"chore: scoped commit\" --dry-run"
   # ─────────────────────────────────────────────────────────────────────────
   # AOF KERNEL ABSTRACTION (environment contracts + bootstrap)
   # ─────────────────────────────────────────────────────────────────────────

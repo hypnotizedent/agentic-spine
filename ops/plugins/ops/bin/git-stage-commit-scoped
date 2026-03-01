@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+usage() {
+  cat <<'USAGE'
+git-stage-commit-scoped
+
+Usage:
+  git-stage-commit-scoped --path <file> [--path <file> ...] \
+    --message "commit subject" [--body "line"] [--dry-run]
+
+  git-stage-commit-scoped --allowlist-file /path/to/list.txt \
+    --message "commit subject" [--body "line"] [--dry-run]
+
+Rules:
+  - Stages only the explicit allowlist paths.
+  - Hard-fails when any staged file is outside allowlist.
+USAGE
+}
+
+fail() {
+  echo "git.stage.commit.scoped FAIL: $*" >&2
+  exit 1
+}
+
+PATHS=()
+ALLOWLIST_FILE=""
+MESSAGE=""
+BODY=""
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --path)
+      [[ $# -ge 2 ]] || fail "--path requires value"
+      PATHS+=("$2")
+      shift 2
+      ;;
+    --allowlist-file)
+      [[ $# -ge 2 ]] || fail "--allowlist-file requires value"
+      ALLOWLIST_FILE="$2"
+      shift 2
+      ;;
+    --message)
+      [[ $# -ge 2 ]] || fail "--message requires value"
+      MESSAGE="$2"
+      shift 2
+      ;;
+    --body)
+      [[ $# -ge 2 ]] || fail "--body requires value"
+      BODY="$2"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$MESSAGE" ]] || fail "--message required"
+
+if [[ -n "$ALLOWLIST_FILE" ]]; then
+  [[ -f "$ALLOWLIST_FILE" ]] || fail "allowlist file not found: $ALLOWLIST_FILE"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line## }"
+    line="${line%% }"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    PATHS+=("$line")
+  done < "$ALLOWLIST_FILE"
+fi
+
+((${#PATHS[@]} > 0)) || fail "no allowlist paths provided"
+
+cd "$ROOT"
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not a git worktree: $ROOT"
+
+# Stage explicit allowlist only.
+for p in "${PATHS[@]}"; do
+  git add -- "$p"
+done
+
+# Verify staged set is a subset of allowlist.
+mapfile -t STAGED < <(git diff --cached --name-only | awk 'NF')
+((${#STAGED[@]} > 0)) || fail "no staged changes after allowlist stage"
+
+declare -A ALLOWED=()
+for p in "${PATHS[@]}"; do
+  ALLOWED["$p"]=1
+done
+
+OUTSIDE=()
+for s in "${STAGED[@]}"; do
+  if [[ -z "${ALLOWED[$s]:-}" ]]; then
+    OUTSIDE+=("$s")
+  fi
+done
+
+if ((${#OUTSIDE[@]} > 0)); then
+  echo "staged files:" >&2
+  printf '  - %s\n' "${STAGED[@]}" >&2
+  echo "allowlist:" >&2
+  printf '  - %s\n' "${PATHS[@]}" >&2
+  fail "staged file(s) outside allowlist: ${OUTSIDE[*]}"
+fi
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "git.stage.commit.scoped"
+  echo "status: dry-run"
+  echo "staged_count: ${#STAGED[@]}"
+  echo "staged_files:"
+  printf '  - %s\n' "${STAGED[@]}"
+  exit 0
+fi
+
+if [[ -n "$BODY" ]]; then
+  git commit -m "$MESSAGE" -m "$BODY"
+else
+  git commit -m "$MESSAGE"
+fi
+
+echo "git.stage.commit.scoped"
+echo "status: committed"
+echo "staged_count: ${#STAGED[@]}"
+echo "staged_files:"
+printf '  - %s\n' "${STAGED[@]}"

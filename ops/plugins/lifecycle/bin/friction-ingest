@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_QUEUE = ROOT / "mailroom/state/friction-queue.ndjson"
+VALID_SEVERITIES = {"low", "medium", "high", "critical"}
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def utc_iso(ts: datetime | None = None) -> str:
+    return (ts or utc_now()).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_utc(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    txt = str(raw).strip()
+    if not txt:
+        return None
+    try:
+        return datetime.fromisoformat(txt.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def normalize_space(value: str) -> str:
+    return " ".join((value or "").strip().split())
+
+
+def normalize_item(item: dict[str, Any], source: str) -> dict[str, Any]:
+    capability = normalize_space(str(item.get("capability", "")))
+    expected = normalize_space(str(item.get("expected", "")))
+    actual = normalize_space(str(item.get("actual", "")))
+    severity = normalize_space(str(item.get("severity", "medium")).lower())
+    if severity not in VALID_SEVERITIES:
+        severity = "medium"
+
+    if not capability or not expected or not actual:
+        raise ValueError("item requires capability, expected, actual")
+
+    canonical = {
+        "capability": capability,
+        "expected": expected,
+        "actual": actual,
+        "severity": severity,
+        "source": normalize_space(source) or "manual",
+    }
+
+    fp_src = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    fingerprint = hashlib.sha256(fp_src.encode("utf-8")).hexdigest()
+    canonical["fingerprint"] = fingerprint
+    return canonical
+
+
+def load_queue(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows
+
+
+def write_queue(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, sort_keys=True))
+            fh.write("\n")
+
+
+def parse_items(args: argparse.Namespace) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+
+    if args.item_json:
+        for raw in args.item_json:
+            obj = json.loads(raw)
+            if not isinstance(obj, dict):
+                raise ValueError("--item-json payload must be object")
+            items.append(obj)
+
+    if args.input:
+        payload = Path(args.input).read_text(encoding="utf-8", errors="replace")
+        for raw in payload.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if not isinstance(obj, dict):
+                raise ValueError("input JSONL line must be object")
+            items.append(obj)
+
+    if args.stdin_jsonl:
+        for raw in sys.stdin.read().splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if not isinstance(obj, dict):
+                raise ValueError("stdin JSONL line must be object")
+            items.append(obj)
+
+    if not items and args.capability and args.expected and args.actual:
+        items.append(
+            {
+                "capability": args.capability,
+                "expected": args.expected,
+                "actual": args.actual,
+                "severity": args.severity,
+            }
+        )
+
+    return items
+
+
+def ensure_sources(entry: dict[str, Any], source: str, now_iso: str) -> None:
+    existing = entry.get("sources")
+    if not isinstance(existing, list):
+        existing = []
+    src = normalize_space(source) or "manual"
+    if src and src not in existing:
+        existing.append(src)
+    entry["sources"] = existing
+    entry["updated_at_utc"] = now_iso
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Ingest structured friction items into governed queue with fingerprint dedupe")
+    ap.add_argument("--queue", default=str(DEFAULT_QUEUE))
+    ap.add_argument("--source", default="manual")
+    ap.add_argument("--dedupe-window-days", type=int, default=7)
+    ap.add_argument("--item-json", action="append", default=[])
+    ap.add_argument("--input", help="JSONL file of friction items")
+    ap.add_argument("--stdin-jsonl", action="store_true")
+    ap.add_argument("--capability")
+    ap.add_argument("--expected")
+    ap.add_argument("--actual")
+    ap.add_argument("--severity", default="medium")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    queue_path = Path(args.queue).expanduser()
+    items_raw = parse_items(args)
+    if not items_raw:
+        raise SystemExit("friction.ingest FAIL: no friction items supplied")
+
+    now = utc_now()
+    now_iso = utc_iso(now)
+    window = timedelta(days=max(0, args.dedupe_window_days))
+
+    queue = load_queue(queue_path)
+
+    ingested = 0
+    created = 0
+    deduped = 0
+
+    for item_raw in items_raw:
+        item = normalize_item(item_raw, args.source)
+        ingested += 1
+
+        match_idx = -1
+        for idx, existing in enumerate(queue):
+            if str(existing.get("fingerprint", "")) != item["fingerprint"]:
+                continue
+            seen = parse_utc(existing.get("last_seen_utc") or existing.get("first_seen_utc"))
+            if seen is None or (now - seen) <= window:
+                match_idx = idx
+                break
+
+        if match_idx >= 0:
+            entry = queue[match_idx]
+            entry["last_seen_utc"] = now_iso
+            entry["hit_count"] = int(entry.get("hit_count", 0) or 0) + 1
+            ensure_sources(entry, item["source"], now_iso)
+            deduped += 1
+            continue
+
+        friction_id = f"FR-{now.strftime('%Y%m%dT%H%M%SZ')}-{(created + 1):04d}"
+        queue.append(
+            {
+                "friction_id": friction_id,
+                "fingerprint": item["fingerprint"],
+                "capability": item["capability"],
+                "expected": item["expected"],
+                "actual": item["actual"],
+                "severity": item["severity"],
+                "status": "queued",
+                "first_seen_utc": now_iso,
+                "last_seen_utc": now_iso,
+                "updated_at_utc": now_iso,
+                "hit_count": 1,
+                "sources": [item["source"]],
+                "matched_gap_id": None,
+                "filed_gap_id": None,
+            }
+        )
+        created += 1
+
+    queue.sort(key=lambda r: str(r.get("first_seen_utc", "")))
+    write_queue(queue_path, queue)
+
+    payload = {
+        "capability": "friction.ingest",
+        "status": "ok",
+        "queue": str(queue_path),
+        "ingested": ingested,
+        "created": created,
+        "deduped": deduped,
+        "queue_total": len(queue),
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("friction.ingest")
+        print("status: ok")
+        print(f"queue: {queue_path}")
+        print(f"ingested: {ingested}")
+        print(f"created: {created}")
+        print(f"deduped: {deduped}")
+        print(f"queue_total: {len(queue)}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

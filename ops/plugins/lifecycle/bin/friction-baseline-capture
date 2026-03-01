@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[4]
+CONTRACT = ROOT / "ops/bindings/friction.baseline.contract.yaml"
+
+
+def run_cmd(args: list[str]) -> tuple[int, str]:
+    proc = subprocess.run(args, cwd=str(ROOT), text=True, capture_output=True, check=False)
+    text = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+    return proc.returncode, text.strip()
+
+
+def extract_run_key(text: str) -> str:
+    m = re.search(r"Run Key:\s+([^\s]+)", text)
+    return m.group(1) if m else ""
+
+
+def extract_status(text: str) -> str:
+    m = re.search(r"Status:\s+([^\s]+)", text)
+    return m.group(1).strip().lower() if m else "unknown"
+
+
+def extract_failing_ids(text: str) -> list[str]:
+    ids = sorted(set(re.findall(r"^(D\d+) FAIL", text, flags=re.M)))
+    return ids
+
+
+def yq_json(path: Path) -> dict:
+    proc = subprocess.run(["yq", "e", "-o=json", ".", str(path)], text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        return {}
+    try:
+        obj = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Capture friction baseline artifact with stable checksum")
+    ap.add_argument("--contract", default=str(CONTRACT))
+    ap.add_argument("--loop-id", default="LOOP-AGENT-FRICTION-AUTOPILOT-20260301")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    contract = yq_json(Path(args.contract).expanduser())
+    artifact_rel = str(((contract.get("artifact") or {}).get("path") or "mailroom/state/friction-baseline.yaml")).strip()
+    artifact = ROOT / artifact_rel if not artifact_rel.startswith("/") else Path(artifact_rel)
+
+    commands = [
+        "./bin/ops cap run verify.run -- fast",
+        "./bin/ops cap run verify.pack.run loop_gap",
+        "./bin/ops cap run verify.route.recommend",
+    ]
+
+    results = []
+    baseline_ids: list[str] = []
+    for cmd in commands:
+        rc, output = run_cmd(["/bin/bash", "-lc", cmd])
+        failing = extract_failing_ids(output)
+        baseline_ids.extend(failing)
+        results.append(
+            {
+                "command": cmd,
+                "run_key": extract_run_key(output),
+                "status": extract_status(output) if rc == 0 else "failed",
+                "failing_gate_ids": failing,
+            }
+        )
+
+    payload = {
+        "version": "1.0",
+        "contract_id": "friction-baseline-v1",
+        "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timezone_human": "America/New_York",
+        "loop_id": args.loop_id,
+        "commands": results,
+        "baseline_failing_gate_ids": sorted(set(baseline_ids)),
+    }
+    canon = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload["checksum_sha256"] = hashlib.sha256(canon).hexdigest()
+
+    lines = subprocess.run(["yq", "-P", "-"], input=json.dumps(payload), text=True, capture_output=True, check=False)
+    if lines.returncode == 0 and lines.stdout.strip():
+        rendered = lines.stdout
+    else:
+        # fallback plain yaml-ish output
+        rendered = "\n".join([
+            f"version: '{payload['version']}'",
+            f"contract_id: {payload['contract_id']}",
+            f"generated_at_utc: '{payload['generated_at_utc']}'",
+            f"timezone_human: {payload['timezone_human']}",
+            f"loop_id: {payload['loop_id']}",
+            f"commands: {json.dumps(payload['commands'])}",
+            f"baseline_failing_gate_ids: {json.dumps(payload['baseline_failing_gate_ids'])}",
+            f"checksum_sha256: {payload['checksum_sha256']}",
+            "",
+        ])
+
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(rendered, encoding="utf-8")
+
+    if args.json:
+        print(json.dumps({
+            "capability": "friction.baseline.capture",
+            "status": "ok",
+            "artifact": str(artifact),
+            "checksum_sha256": payload["checksum_sha256"],
+            "baseline_failing_gate_ids": payload["baseline_failing_gate_ids"],
+        }, indent=2))
+    else:
+        print("friction.baseline.capture")
+        print("status: ok")
+        print(f"artifact: {artifact}")
+        print(f"checksum_sha256: {payload['checksum_sha256']}")
+        print("baseline_failing_gate_ids: " + (",".join(payload["baseline_failing_gate_ids"]) if payload["baseline_failing_gate_ids"] else "none"))
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_QUEUE = ROOT / "mailroom/state/friction-queue.ndjson"
+GAPS_DEDUPE = ROOT / "ops/plugins/loops/bin/gaps-dedupe"
+GAPS_FILE = ROOT / "ops/plugins/loops/bin/gaps-file"
+
+
+def utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_queue(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows
+
+
+def write_queue(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, sort_keys=True))
+            fh.write("\n")
+
+
+def build_description(item: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "Agent friction intake item:",
+            f"friction_id: {item.get('friction_id', '')}",
+            f"capability: {item.get('capability', '')}",
+            f"expected: {item.get('expected', '')}",
+            f"actual: {item.get('actual', '')}",
+            f"severity: {item.get('severity', 'medium')}",
+            f"fingerprint: {item.get('fingerprint', '')}",
+            f"first_seen_utc: {item.get('first_seen_utc', '')}",
+            f"hit_count: {item.get('hit_count', 1)}",
+        ]
+    )
+
+
+def yaml_quote(value: str) -> str:
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def build_batch_yaml(items: list[dict[str, Any]]) -> str:
+    lines = ["gaps:"]
+    for item in items:
+        lines.append("  - id: auto")
+        lines.append(f"    type: {item['type']}")
+        lines.append(f"    severity: {item['severity']}")
+        lines.append(f"    discovered_by: {yaml_quote(str(item['discovered_by']))}")
+        lines.append(f"    doc: {yaml_quote(str(item['doc']))}")
+        lines.append("    description: |")
+        for row in str(item["description"]).splitlines() or [""]:
+            lines.append(f"      {row}")
+    return "\n".join(lines) + "\n"
+
+
+def run_json(cmd: list[str]) -> dict[str, Any]:
+    proc = subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True, check=False)
+    text = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+
+
+def map_severity(value: str) -> str:
+    sev = str(value or "").strip().lower()
+    if sev in {"low", "medium", "high", "critical"}:
+        return sev
+    return "medium"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Reconcile friction queue into existing gaps surfaces")
+    ap.add_argument("--queue", default=str(DEFAULT_QUEUE))
+    ap.add_argument("--loop-id", required=True)
+    ap.add_argument("--dedupe-threshold", type=float, default=0.85)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    if not GAPS_DEDUPE.exists() or not GAPS_FILE.exists():
+        raise SystemExit("friction.reconcile FAIL: required gaps scripts missing")
+
+    queue_path = Path(args.queue).expanduser()
+    rows = load_queue(queue_path)
+    now = utc_iso()
+
+    queued_items = [r for r in rows if str(r.get("status", "queued")).strip().lower() == "queued"]
+
+    matched_count = 0
+    filed_count = 0
+    pending_batch: list[dict[str, Any]] = []
+    pending_indices: list[int] = []
+
+    for idx, item in enumerate(rows):
+        status = str(item.get("status", "queued")).strip().lower()
+        if status != "queued":
+            continue
+
+        desc = build_description(item)
+        dedupe = run_json(
+            [
+                str(GAPS_DEDUPE),
+                "--description",
+                desc,
+                "--threshold",
+                str(args.dedupe_threshold),
+                "--status",
+                "open",
+                "--json",
+            ]
+        )
+        matches = dedupe.get("matches", []) if isinstance(dedupe, dict) else []
+
+        if matches:
+            top = matches[0]
+            gap_id = str(top.get("id", "")).strip()
+            if gap_id:
+                item["status"] = "matched"
+                item["matched_gap_id"] = gap_id
+                item["matched_at_utc"] = now
+                item["updated_at_utc"] = now
+                matched_count += 1
+                continue
+
+        pending_batch.append(
+            {
+                "id": "auto",
+                "type": "agent-behavior",
+                "severity": map_severity(str(item.get("severity", "medium"))),
+                "discovered_by": args.loop_id,
+                "doc": "mailroom/state/friction-queue.ndjson",
+                "description": desc,
+            }
+        )
+        pending_indices.append(idx)
+
+    filed_ids: list[str] = []
+    if pending_batch and not args.dry_run:
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as tmp:
+            tmp.write(build_batch_yaml(pending_batch))
+            tmp_path = Path(tmp.name)
+
+        proc = subprocess.run(
+            [str(GAPS_FILE), "--batch", str(tmp_path), "--parent-loop", args.loop_id],
+            cwd=str(ROOT),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        tmp_path.unlink(missing_ok=True)
+
+        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("FILED:"):
+                filed_ids.append(line.split(":", 1)[1].strip())
+
+        if proc.returncode != 0:
+            raise SystemExit(f"friction.reconcile FAIL: gaps.file batch failed\n{output.strip()}")
+
+    if args.dry_run:
+        filed_count = len(pending_batch)
+    else:
+        filed_count = min(len(pending_indices), len(filed_ids))
+        for pos, gap_id in enumerate(filed_ids[: len(pending_indices)]):
+            row_index = pending_indices[pos]
+            rows[row_index]["status"] = "filed"
+            rows[row_index]["filed_gap_id"] = gap_id
+            rows[row_index]["filed_at_utc"] = now
+            rows[row_index]["updated_at_utc"] = now
+
+    if not args.dry_run:
+        write_queue(queue_path, rows)
+
+    payload = {
+        "capability": "friction.reconcile",
+        "status": "ok",
+        "queue": str(queue_path),
+        "loop_id": args.loop_id,
+        "queued_before": len(queued_items),
+        "matched": matched_count,
+        "filed": filed_count,
+        "dry_run": args.dry_run,
+        "filed_gap_ids": filed_ids,
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("friction.reconcile")
+        print("status: ok")
+        print(f"queue: {queue_path}")
+        print(f"loop_id: {args.loop_id}")
+        print(f"queued_before: {len(queued_items)}")
+        print(f"matched: {matched_count}")
+        print(f"filed: {filed_count}")
+        print(f"dry_run: {str(args.dry_run).lower()}")
+        if filed_ids:
+            print("filed_gap_ids:")
+            for gid in filed_ids:
+                print(f"  - {gid}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

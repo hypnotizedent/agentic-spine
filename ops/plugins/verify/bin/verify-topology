@@ -986,6 +986,117 @@ is_loop_gap_doc_only_set() {
   [[ "$saw_loop_signal" -eq 1 ]]
 }
 
+load_friction_baseline_payload() {
+  local baseline_file="${VERIFY_FRICTION_BASELINE_FILE:-$ROOT/mailroom/state/friction-baseline.yaml}"
+  python3 - "$baseline_file" <<'PY'
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+payload = {
+    "baseline_file": str(path),
+    "baseline_valid": False,
+    "baseline_reason": "missing",
+    "baseline_failing_gate_ids": [],
+}
+
+if not path.exists():
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+try:
+    raw = subprocess.run(
+        ["yq", "e", "-o=json", ".", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if raw.returncode != 0:
+        payload["baseline_reason"] = "parse_error:yq"
+        print(json.dumps(payload))
+        raise SystemExit(0)
+    data = json.loads(raw.stdout or "{}")
+except Exception as exc:
+    payload["baseline_reason"] = f"parse_error:{exc}"
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+if not isinstance(data, dict):
+    payload["baseline_reason"] = "invalid_shape"
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+required = {"version", "contract_id", "generated_at_utc", "commands", "baseline_failing_gate_ids", "checksum_sha256"}
+missing = sorted(k for k in required if k not in data)
+if missing:
+    payload["baseline_reason"] = f"missing_fields:{','.join(missing)}"
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+declared = str(data.get("checksum_sha256", "")).strip()
+core = dict(data)
+core.pop("checksum_sha256", None)
+canon = json.dumps(core, sort_keys=True, separators=(",", ":")).encode("utf-8")
+actual = hashlib.sha256(canon).hexdigest()
+
+if not declared or declared != actual:
+    payload["baseline_reason"] = "checksum_mismatch"
+    payload["baseline_failing_gate_ids"] = list(core.get("baseline_failing_gate_ids") or [])
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+payload["baseline_valid"] = True
+payload["baseline_reason"] = "ok"
+payload["baseline_failing_gate_ids"] = list(core.get("baseline_failing_gate_ids") or [])
+print(json.dumps(payload))
+PY
+}
+
+collect_recent_failures_for_domains() {
+  local history_file="${VERIFY_FAILURE_HISTORY_FILE:-$ROOT/ops/plugins/verify/state/verify-failure-class-history.ndjson}"
+  local domains_csv="$1"
+  python3 - "$history_file" "$domains_csv" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+history = Path(sys.argv[1]).expanduser()
+domains = [d for d in sys.argv[2].split(",") if d]
+
+latest = {}
+if history.exists():
+    for raw in history.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        scope = str(row.get("scope", ""))
+        if not scope.startswith("domain:"):
+            continue
+        domain = scope.split(":", 1)[1]
+        latest[domain] = row
+
+fail_ids = set()
+for d in domains:
+    row = latest.get(d)
+    if not isinstance(row, dict):
+        continue
+    result = row.get("result", {})
+    if isinstance(result, dict):
+        for gid in (result.get("failing_ids") or []):
+            if gid:
+                fail_ids.add(str(gid))
+
+print(json.dumps(sorted(fail_ids)))
+PY
+}
+
 recommend_route() {
   local json_mode=0
   local -a paths=()
@@ -1062,12 +1173,30 @@ recommend_route() {
     recommended_domains=("loop_gap")
   fi
 
+  local domains_csv recent_failures_json baseline_payload baseline_set_json pre_existing_json wave_local_json
+  local baseline_file baseline_valid baseline_reason
+  domains_csv="$(IFS=,; echo "${recommended_domains[*]}")"
+  recent_failures_json="$(collect_recent_failures_for_domains "$domains_csv")"
+  baseline_payload="$(load_friction_baseline_payload)"
+  baseline_file="$(jq -r '.baseline_file // ""' <<<"$baseline_payload")"
+  baseline_valid="$(jq -r '.baseline_valid // false' <<<"$baseline_payload")"
+  baseline_reason="$(jq -r '.baseline_reason // "unknown"' <<<"$baseline_payload")"
+  baseline_set_json="$(jq -c '.baseline_failing_gate_ids // []' <<<"$baseline_payload")"
+  pre_existing_json="$(jq -cn --argjson failures "$recent_failures_json" --argjson baseline "$baseline_set_json" '[$failures[] | select(. as $id | $baseline | index($id))] | unique')"
+  wave_local_json="$(jq -cn --argjson failures "$recent_failures_json" --argjson baseline "$baseline_set_json" '[$failures[] | select((. as $id | $baseline | index($id)) | not)] | unique')"
+
   if [[ "$json_mode" == "1" ]]; then
     jq -n \
       --argjson domains "$(printf '%s\n' "${recommended_domains[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
       --argjson paths "$(printf '%s\n' "${paths[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
       --argjson capabilities "$(printf '%s\n' "${capabilities[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
-      '{recommended_domains:$domains, input_paths:$paths, input_capabilities:$capabilities}'
+      --arg baseline_file "$baseline_file" \
+      --argjson baseline_valid "$(jq -r '.baseline_valid // false' <<<"$baseline_payload")" \
+      --arg baseline_reason "$baseline_reason" \
+      --argjson observed_failing_gate_ids "$recent_failures_json" \
+      --argjson baseline_pre_existing "$pre_existing_json" \
+      --argjson wave_local "$wave_local_json" \
+      '{recommended_domains:$domains, input_paths:$paths, input_capabilities:$capabilities, failure_attribution:{baseline_file:$baseline_file, baseline_valid:$baseline_valid, baseline_reason:$baseline_reason, observed_failing_gate_ids:$observed_failing_gate_ids, baseline_pre_existing:$baseline_pre_existing, wave_local:$wave_local}}'
   else
     echo "verify.route.recommend"
     if [[ "${#paths[@]}" -gt 0 ]]; then
@@ -1084,6 +1213,13 @@ recommend_route() {
         echo "  - run: ./bin/ops cap run verify.run -- domain $d"
       fi
     done
+    echo "failure_attribution:"
+    echo "  baseline_file: $baseline_file"
+    echo "  baseline_valid: $baseline_valid"
+    echo "  baseline_reason: $baseline_reason"
+    echo "  observed_failing_gate_ids: $(jq -r 'if length == 0 then "none" else join(",") end' <<<"$recent_failures_json")"
+    echo "  baseline_pre_existing: $(jq -r 'if length == 0 then "none" else join(",") end' <<<"$pre_existing_json")"
+    echo "  wave_local: $(jq -r 'if length == 0 then "none" else join(",") end' <<<"$wave_local_json")"
   fi
 }
 

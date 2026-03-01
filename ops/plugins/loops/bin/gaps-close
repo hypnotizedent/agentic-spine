@@ -1,123 +1,336 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# gaps.close — Close or fix a gap (atomic, git-locked)
+# gaps.close — Close or fix one gap, or batch-close multiple gaps in one commit.
 #
-# Usage: gaps-close --id <GAP_ID> --status <fixed|closed> \
-#                   [--fixed-in "reference"] [--notes "description"] \
-#                   [--regression-lock-id "D###|LOCK-ID"]
+# Single:
+#   gaps-close --id <GAP_ID> --status <fixed|closed> \
+#     [--fixed-in "reference"] [--notes "description"] \
+#     [--regression-lock-id "D###|LOCK-ID"]
 #
-# Acquires git-lock, validates claim ownership (if claimed),
-# updates gap status in operational.gaps.yaml, commits, cleans up claim.
+# Batch (single commit):
+#   gaps-close --batch /path/to/close.yaml --status <fixed|closed> \
+#     [--fixed-in "reference"] [--notes "description"] \
+#     [--regression-lock-id "D###|LOCK-ID"]
+#
+# Batch file accepted shapes:
+#   - YAML list of gap IDs
+#   - YAML list of objects: [{id, status?, fixed_in?, notes?, regression_lock_id?}, ...]
+#   - Object with `ids:` list of IDs
+#   - Object with `gaps:` list of objects
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 source "$ROOT/ops/lib/git-lock.sh"
 source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  echo "Usage: gaps-close --id <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"] [--regression-lock-id \"id\"]"
-  exit 0
-fi
+usage() {
+  cat <<'USAGE'
+Usage:
+  gaps-close --id <GAP_ID> --status <fixed|closed> [--fixed-in "ref"] [--notes "desc"] [--regression-lock-id "id"]
+  gaps-close --batch /path/to/close.yaml --status <fixed|closed> [--fixed-in "ref"] [--notes "desc"] [--regression-lock-id "id"]
+USAGE
+}
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
 
 GAP_ID=""
-STATUS="" FIXED_IN="" NOTES=""
+BATCH_FILE=""
+STATUS=""
+FIXED_IN=""
+NOTES=""
 REGRESSION_LOCK_ID=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
-    --id)       GAP_ID="${2:?--id requires a value}"; shift 2 ;;
-    --status)   STATUS="${2:?--status requires a value}"; shift 2 ;;
+    --id) GAP_ID="${2:?--id requires a value}"; shift 2 ;;
+    --batch) BATCH_FILE="${2:?--batch requires a value}"; shift 2 ;;
+    --status) STATUS="${2:?--status requires a value}"; shift 2 ;;
     --fixed-in) FIXED_IN="${2:?--fixed-in requires a value}"; shift 2 ;;
-    --notes)    NOTES="${2:?--notes requires a value}"; shift 2 ;;
+    --notes) NOTES="${2:?--notes requires a value}"; shift 2 ;;
     --regression-lock-id) REGRESSION_LOCK_ID="${2:?--regression-lock-id requires a value}"; shift 2 ;;
-    -h|--help)
-      echo "Usage: gaps-close --id <GAP_ID> --status <fixed|closed> [--fixed-in \"ref\"] [--notes \"desc\"] [--regression-lock-id \"id\"]"
-      exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
-# Validate required fields
-[[ -n "$GAP_ID" ]] || { echo "FAIL: --id required" >&2; exit 2; }
 [[ -n "$STATUS" ]] || { echo "FAIL: --status required (fixed or closed)" >&2; exit 2; }
-
 case "$STATUS" in
   fixed|closed) ;;
   *) echo "FAIL: --status must be 'fixed' or 'closed' (got '$STATUS')" >&2; exit 2 ;;
 esac
 
-# Validate gap exists and is open
-gap_exists "$GAP_ID" || { echo "FAIL: $GAP_ID does not exist in gap registry" >&2; exit 1; }
-gap_is_open "$GAP_ID" || { echo "FAIL: $GAP_ID is not open (current status is not 'open')" >&2; exit 1; }
-
-GAP_SEVERITY="$(yq e -r ".gaps[] | select(.id == \"$GAP_ID\") | .severity // \"\"" "$GAPS_FILE" 2>/dev/null | head -n1)"
-EXISTING_LOCK_ID="$(yq e -r ".gaps[] | select(.id == \"$GAP_ID\") | .regression_lock_id // \"\"" "$GAPS_FILE" 2>/dev/null | head -n1)"
-LOCK_ID_EFFECTIVE="${REGRESSION_LOCK_ID:-$EXISTING_LOCK_ID}"
-
-# Enforce fix-to-lock discipline for high/critical closures.
-if [[ "$GAP_SEVERITY" == "high" || "$GAP_SEVERITY" == "critical" ]]; then
-  if [[ -z "$LOCK_ID_EFFECTIVE" || "$LOCK_ID_EFFECTIVE" == LEGACY-NO-REGRESSION-LOCK-* ]]; then
-    echo "FAIL: $GAP_ID severity=$GAP_SEVERITY requires a non-legacy regression_lock_id" >&2
-    exit 1
-  fi
+if [[ -n "$GAP_ID" && -n "$BATCH_FILE" ]]; then
+  echo "FAIL: --id and --batch are mutually exclusive" >&2
+  exit 2
+fi
+if [[ -z "$GAP_ID" && -z "$BATCH_FILE" ]]; then
+  echo "FAIL: provide either --id or --batch" >&2
+  exit 2
 fi
 
-# Verify claim ownership (no claim = Terminal C direct, allowed)
-verify_claim_ownership "$GAP_ID" || exit 1
+validate_gap_closure() {
+  local id="$1"
+  local status="$2"
+  local lock_override="${3:-}"
+  local severity existing_lock effective_lock
 
-# Acquire git lock
-acquire_git_lock gaps || exit 1
+  gap_exists "$id" || fail "$id does not exist in gap registry"
+  gap_is_open "$id" || fail "$id is not open (current status is not 'open')"
 
-trap 'release_git_lock' EXIT INT TERM
+  severity="$(GAP_ID_ENV="$id" yq e -r '.gaps[] | select(.id == strenv(GAP_ID_ENV)) | .severity // ""' "$GAPS_FILE" 2>/dev/null | head -n1)"
+  existing_lock="$(GAP_ID_ENV="$id" yq e -r '.gaps[] | select(.id == strenv(GAP_ID_ENV)) | .regression_lock_id // ""' "$GAPS_FILE" 2>/dev/null | head -n1)"
+  effective_lock="${lock_override:-$existing_lock}"
 
-TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # Enforce fix-to-lock discipline for high/critical closures.
+  if [[ "$severity" == "high" || "$severity" == "critical" ]]; then
+    if [[ -z "$effective_lock" || "$effective_lock" == LEGACY-NO-REGRESSION-LOCK-* ]]; then
+      fail "$id severity=$severity requires a non-legacy regression_lock_id"
+    fi
+  fi
 
-# Update status
-yq e -i "(.gaps[] | select(.id == \"$GAP_ID\")).status = \"$STATUS\"" "$GAPS_FILE" || {
-  echo "FAIL: yq status update failed" >&2
-  exit 1
+  # Verify claim ownership (no claim = Terminal C direct, allowed).
+  verify_claim_ownership "$id" || exit 1
+
+  # Validate status defensively for per-entry batch overrides.
+  case "$status" in
+    fixed|closed) ;;
+    *) fail "$id has invalid status '$status' (must be fixed|closed)" ;;
+  esac
 }
 
-# Update fixed_in if provided
-if [[ -n "$FIXED_IN" ]]; then
-  yq e -i "(.gaps[] | select(.id == \"$GAP_ID\")).fixed_in = \"$FIXED_IN\"" "$GAPS_FILE"
-fi
+apply_gap_update() {
+  local id="$1"
+  local status="$2"
+  local fixed_in="$3"
+  local notes="$4"
+  local reg_lock="$5"
 
-# Update notes if provided
-if [[ -n "$NOTES" ]]; then
-  yq e -i "(.gaps[] | select(.id == \"$GAP_ID\")).notes = \"$NOTES\"" "$GAPS_FILE"
-fi
+  GAP_ID_ENV="$id" STATUS_ENV="$status" \
+    yq e -i '(.gaps[] | select(.id == strenv(GAP_ID_ENV))).status = strenv(STATUS_ENV)' "$GAPS_FILE" || {
+      fail "yq status update failed for $id"
+    }
 
-# Update regression lock id if provided
-if [[ -n "$REGRESSION_LOCK_ID" ]]; then
-  yq e -i "(.gaps[] | select(.id == \"$GAP_ID\")).regression_lock_id = \"$REGRESSION_LOCK_ID\"" "$GAPS_FILE"
-fi
+  if [[ -n "$fixed_in" ]]; then
+    GAP_ID_ENV="$id" FIXED_IN_ENV="$fixed_in" \
+      yq e -i '(.gaps[] | select(.id == strenv(GAP_ID_ENV))).fixed_in = strenv(FIXED_IN_ENV)' "$GAPS_FILE"
+  fi
 
-# Update file timestamp
-yq e -i ".updated = \"$TIMESTAMP\"" "$GAPS_FILE"
+  if [[ -n "$notes" ]]; then
+    GAP_ID_ENV="$id" NOTES_ENV="$notes" \
+      yq e -i '(.gaps[] | select(.id == strenv(GAP_ID_ENV))).notes = strenv(NOTES_ENV)' "$GAPS_FILE"
+  fi
 
-# Commit
-git -C "$ROOT" add "$GAPS_FILE"
-git -C "$ROOT" commit -m "$(cat <<EOF
-fix($GAP_ID): mark $STATUS via gaps.close
+  if [[ -n "$reg_lock" ]]; then
+    GAP_ID_ENV="$id" LOCK_ENV="$reg_lock" \
+      yq e -i '(.gaps[] | select(.id == strenv(GAP_ID_ENV))).regression_lock_id = strenv(LOCK_ENV)' "$GAPS_FILE"
+  fi
+}
+
+parse_batch_file() {
+  local batch_file="$1"
+  local default_status="$2"
+  local default_fixed_in="$3"
+  local default_notes="$4"
+  local default_reg_lock="$5"
+
+  [[ -f "$batch_file" ]] || fail "--batch file not found: $batch_file"
+  command -v python3 >/dev/null 2>&1 || fail "python3 required for --batch"
+  command -v yq >/dev/null 2>&1 || fail "yq required for --batch"
+
+  python3 - "$batch_file" "$default_status" "$default_fixed_in" "$default_notes" "$default_reg_lock" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+batch_file = Path(sys.argv[1])
+default_status = (sys.argv[2] or "").strip()
+default_fixed_in = sys.argv[3]
+default_notes = sys.argv[4]
+default_reg_lock = sys.argv[5]
+
+raw = subprocess.run(
+    ["yq", "e", "-o=json", ".", str(batch_file)],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+if raw.returncode != 0:
+    raise SystemExit(f"FAIL: unable to parse batch YAML: {raw.stderr.strip()}")
+
+try:
+    data = json.loads(raw.stdout or "null")
+except Exception as exc:
+    raise SystemExit(f"FAIL: invalid batch JSON conversion: {exc}")
+
+if isinstance(data, dict):
+    if isinstance(data.get("gaps"), list):
+        items = data["gaps"]
+    elif isinstance(data.get("ids"), list):
+        items = [{"id": gid} for gid in data["ids"]]
+    else:
+        raise SystemExit("FAIL: batch YAML object must contain `gaps:` or `ids:` list")
+elif isinstance(data, list):
+    items = data
+else:
+    raise SystemExit("FAIL: batch YAML must be a list or an object with list fields")
+
+out = []
+seen = set()
+for idx, item in enumerate(items):
+    if isinstance(item, str):
+        entry = {"id": item}
+    elif isinstance(item, dict):
+        entry = item
+    else:
+        raise SystemExit(f"FAIL: batch entry #{idx + 1} must be string or object")
+
+    gap_id = str(entry.get("id", "")).strip()
+    if not gap_id:
+        raise SystemExit(f"FAIL: batch entry #{idx + 1} missing id")
+    if gap_id in seen:
+        raise SystemExit(f"FAIL: duplicate id in batch: {gap_id}")
+    seen.add(gap_id)
+
+    status = str(entry.get("status", "")).strip() or default_status
+    if status not in {"fixed", "closed"}:
+        raise SystemExit(f"FAIL: batch entry {gap_id} has invalid status '{status}'")
+
+    fixed_in = str(entry.get("fixed_in", "")).strip() or default_fixed_in
+    notes = str(entry.get("notes", "")).strip() or default_notes
+    reg_lock = str(entry.get("regression_lock_id", "")).strip() or default_reg_lock
+
+    out.append(
+        {
+            "id": gap_id,
+            "status": status,
+            "fixed_in": fixed_in,
+            "notes": notes,
+            "regression_lock_id": reg_lock,
+        }
+    )
+
+if not out:
+    raise SystemExit("FAIL: batch contains no entries")
+
+print(json.dumps(out))
+PY
+}
+
+close_single() {
+  local id="$1" status="$2" fixed_in="$3" notes="$4" reg_lock="$5"
+  local timestamp local_claim
+
+  validate_gap_closure "$id" "$status" "$reg_lock"
+  acquire_git_lock gaps || exit 1
+  trap 'release_git_lock' EXIT INT TERM
+
+  apply_gap_update "$id" "$status" "$fixed_in" "$notes" "$reg_lock"
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  yq e -i ".updated = \"$timestamp\"" "$GAPS_FILE"
+
+  git -C "$ROOT" add "$GAPS_FILE"
+  git -C "$ROOT" commit -m "$(cat <<EOF
+fix($id): mark $status via gaps.close
 
 Closed via atomic gaps.close capability.
-${FIXED_IN:+Fixed in: $FIXED_IN}
+${fixed_in:+Fixed in: $fixed_in}
 
 Gap-Mutation: capability
 Gap-Capability: gaps.close
 Gap-Run-Key: ${SPINE_CAP_RUN_KEY:-manual}
-${REGRESSION_LOCK_ID:+Regression-Lock-ID: $REGRESSION_LOCK_ID}
+${reg_lock:+Regression-Lock-ID: $reg_lock}
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 EOF
 )"
 
-# Clean up claim file if it exists
-local_claim=$(claim_file "$GAP_ID")
-if [[ -f "$local_claim" ]]; then
-  rm -f "$local_claim"
-  echo "Claim cleaned up for $GAP_ID"
-fi
+  local_claim="$(claim_file "$id")"
+  if [[ -f "$local_claim" ]]; then
+    rm -f "$local_claim"
+    echo "Claim cleaned up for $id"
+  fi
 
-echo "CLOSED: $GAP_ID (status=$STATUS${FIXED_IN:+, fixed_in=$FIXED_IN})"
+  echo "CLOSED: $id (status=$status${fixed_in:+, fixed_in=$fixed_in})"
+}
+
+close_batch() {
+  local batch_file="$1"
+  local default_status="$2"
+  local default_fixed_in="$3"
+  local default_notes="$4"
+  local default_reg_lock="$5"
+  local entries_json
+  local -a ids=() statuses=() fixed_ins=() notes=() reg_locks=()
+  local timestamp local_claim id_block i count
+
+  command -v jq >/dev/null 2>&1 || fail "jq required for --batch"
+  entries_json="$(parse_batch_file "$batch_file" "$default_status" "$default_fixed_in" "$default_notes" "$default_reg_lock")"
+
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    ids+=("$(jq -r '.id' <<<"$row")")
+    statuses+=("$(jq -r '.status' <<<"$row")")
+    fixed_ins+=("$(jq -r '.fixed_in // ""' <<<"$row")")
+    notes+=("$(jq -r '.notes // ""' <<<"$row")")
+    reg_locks+=("$(jq -r '.regression_lock_id // ""' <<<"$row")")
+  done < <(jq -c '.[]' <<<"$entries_json")
+
+  count="${#ids[@]}"
+  (( count > 0 )) || fail "batch contains no entries"
+
+  # Validate all entries before acquiring lock.
+  for ((i=0; i<count; i++)); do
+    validate_gap_closure "${ids[$i]}" "${statuses[$i]}" "${reg_locks[$i]}"
+  done
+
+  acquire_git_lock gaps || exit 1
+  trap 'release_git_lock' EXIT INT TERM
+
+  for ((i=0; i<count; i++)); do
+    apply_gap_update "${ids[$i]}" "${statuses[$i]}" "${fixed_ins[$i]}" "${notes[$i]}" "${reg_locks[$i]}"
+  done
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  yq e -i ".updated = \"$timestamp\"" "$GAPS_FILE"
+
+  id_block="$(printf '%s\n' "${ids[@]}" | sed 's/^/- /')"
+
+  git -C "$ROOT" add "$GAPS_FILE"
+  git -C "$ROOT" commit -m "$(cat <<EOF
+fix(gaps): batch mark via gaps.close
+
+Closed $count gap(s) via atomic gaps.close --batch.
+Batch file: $batch_file
+${default_fixed_in:+Fixed in (default): $default_fixed_in}
+
+Gap IDs:
+$id_block
+
+Gap-Mutation: capability
+Gap-Capability: gaps.close
+Gap-Run-Key: ${SPINE_CAP_RUN_KEY:-manual}
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+EOF
+)"
+
+  for id in "${ids[@]}"; do
+    local_claim="$(claim_file "$id")"
+    if [[ -f "$local_claim" ]]; then
+      rm -f "$local_claim"
+      echo "Claim cleaned up for $id"
+    fi
+  done
+
+  for ((i=0; i<count; i++)); do
+    echo "CLOSED: ${ids[$i]} (status=${statuses[$i]}${fixed_ins[$i]:+, fixed_in=${fixed_ins[$i]}})"
+  done
+}
+
+if [[ -n "$BATCH_FILE" ]]; then
+  close_batch "$BATCH_FILE" "$STATUS" "$FIXED_IN" "$NOTES" "$REGRESSION_LOCK_ID"
+else
+  close_single "$GAP_ID" "$STATUS" "$FIXED_IN" "$NOTES" "$REGRESSION_LOCK_ID"
+fi

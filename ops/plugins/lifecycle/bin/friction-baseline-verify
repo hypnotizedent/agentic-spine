@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import subprocess
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[4]
+CONTRACT = ROOT / "ops/bindings/friction.baseline.contract.yaml"
+
+
+def fail(msg: str) -> int:
+    print(f"friction.baseline.verify FAIL: {msg}")
+    return 1
+
+
+def yq_json(path: Path) -> dict:
+    proc = subprocess.run(["yq", "e", "-o=json", ".", str(path)], text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"yq failed for {path}")
+    raw = proc.stdout.strip() or "{}"
+    obj = json.loads(raw)
+    if not isinstance(obj, dict):
+        raise RuntimeError(f"invalid root object: {path}")
+    return obj
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Validate friction baseline artifact schema and checksum")
+    ap.add_argument("--contract", default=str(CONTRACT))
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    contract_path = Path(args.contract).expanduser()
+    if not contract_path.exists():
+        return fail(f"missing contract: {contract_path}")
+
+    try:
+        contract = yq_json(contract_path)
+    except Exception as exc:
+        return fail(f"invalid contract: {exc}")
+
+    artifact_rel = str(((contract.get("artifact") or {}).get("path") or "")).strip()
+    if not artifact_rel:
+        return fail("contract missing artifact.path")
+
+    artifact_path = ROOT / artifact_rel if not artifact_rel.startswith("/") else Path(artifact_rel)
+    if not artifact_path.exists():
+        return fail(f"missing artifact: {artifact_path}")
+
+    try:
+        data = yq_json(artifact_path)
+    except Exception as exc:
+        return fail(f"invalid artifact YAML: {exc}")
+
+    req_fields = contract.get("required_fields") or []
+    missing = [f for f in req_fields if f not in data]
+    if missing:
+        return fail(f"artifact missing fields: {','.join(missing)}")
+
+    checksum_field = str(((contract.get("artifact") or {}).get("checksum_field") or "checksum_sha256")).strip()
+    declared = str(data.get(checksum_field, "")).strip()
+    if not declared:
+        return fail(f"missing checksum field: {checksum_field}")
+
+    core = dict(data)
+    core.pop(checksum_field, None)
+    canon = json.dumps(core, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    actual = hashlib.sha256(canon).hexdigest()
+    valid = declared == actual
+    if not valid:
+        return fail("checksum mismatch")
+
+    payload = {
+        "capability": "friction.baseline.verify",
+        "status": "ok",
+        "contract": str(contract_path),
+        "artifact": str(artifact_path),
+        "checksum_sha256": actual,
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("friction.baseline.verify")
+        print("status: ok")
+        print(f"contract: {contract_path}")
+        print(f"artifact: {artifact_path}")
+        print(f"checksum_sha256: {actual}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
