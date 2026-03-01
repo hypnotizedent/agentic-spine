@@ -9,6 +9,7 @@ ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
 LAUNCHD_CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
 LAUNCHD_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
+TENANT_PROFILE="$ROOT/ops/bindings/tenant.profile.yaml"
 REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
 DOC="$ROOT/docs/product/AOF_V1_1_SURFACE_UNIFICATION.md"
 SKIP_LIVE_LAUNCHCTL="${D148_SKIP_LIVE_LAUNCHCTL:-0}"
@@ -33,6 +34,7 @@ need_cmd plutil
 need_file "$CONTRACT"
 need_file "$LAUNCHD_CONTRACT"
 need_file "$LAUNCHD_REGISTRY"
+need_file "$TENANT_PROFILE"
 need_file "$REGISTRY"
 need_file "$DOC"
 if [[ "$SKIP_LIVE_LAUNCHCTL" != "1" ]]; then
@@ -165,7 +167,8 @@ fi
 source_dir="$(yq e -r '.paths.source_dir // ""' "$LAUNCHD_CONTRACT")"
 install_dir="$(yq e -r '.paths.user_launchagents_dir // ""' "$LAUNCHD_CONTRACT")"
 log_root="$(yq e -r '.paths.canonical_log_root // ""' "$LAUNCHD_CONTRACT")"
-required_env_key="$(yq e -r '.required_env[0] // "SPINE_ROOT"' "$LAUNCHD_CONTRACT")"
+ssot_tz="$(yq e -r '.runtime.timezone // "America/New_York"' "$TENANT_PROFILE")"
+mapfile -t required_env_keys < <(yq e -r '.required_env[]?' "$LAUNCHD_CONTRACT")
 
 if [[ -z "$source_dir" ]]; then
   err "launchd.runtime.contract paths.source_dir is required"
@@ -180,6 +183,9 @@ fi
 mapfile -t required_labels < <(yq e -r '.required_labels[]?' "$LAUNCHD_CONTRACT")
 if [[ "${#required_labels[@]}" -eq 0 ]]; then
   err "launchd.runtime.contract required_labels[] must list at least one LaunchAgent label"
+fi
+if [[ "${#required_env_keys[@]}" -eq 0 ]]; then
+  err "launchd.runtime.contract required_env[] must list at least one env key"
 fi
 
 if [[ "$SKIP_LIVE_LAUNCHCTL" != "1" ]]; then
@@ -227,10 +233,36 @@ for label in "${required_labels[@]}"; do
     err "launchagent '$label' StandardErrorPath must live under '$log_root' (got '$src_err_path')"
   fi
 
-  src_env_spine="$(plutil -convert json -o - "$src_plist" 2>/dev/null | jq -r ".EnvironmentVariables.${required_env_key} // \"\"")"
-  if [[ "$src_env_spine" != "$ROOT" ]]; then
-    err "launchagent '$label' missing canonical ${required_env_key}=$ROOT in template env"
-  fi
+  for env_key in "${required_env_keys[@]}"; do
+    [[ -n "$env_key" ]] || continue
+    src_env_val="$(plutil -convert json -o - "$src_plist" 2>/dev/null | jq -r ".EnvironmentVariables.${env_key} // \"\"")"
+    dst_env_val="$(plutil -convert json -o - "$dst_plist" 2>/dev/null | jq -r ".EnvironmentVariables.${env_key} // \"\"")"
+
+    if [[ -z "$src_env_val" ]]; then
+      err "launchagent '$label' missing required env '$env_key' in template env"
+      continue
+    fi
+    if [[ -z "$dst_env_val" ]]; then
+      err "launchagent '$label' missing required env '$env_key' in installed env"
+      continue
+    fi
+    if [[ "$src_env_val" != "$dst_env_val" ]]; then
+      err "launchagent '$label' env drift for '$env_key' (template='$src_env_val' installed='$dst_env_val')"
+    fi
+
+    case "$env_key" in
+      SPINE_ROOT)
+        if [[ "$src_env_val" != "$ROOT" ]]; then
+          err "launchagent '$label' must set SPINE_ROOT=$ROOT in template env"
+        fi
+        ;;
+      TZ|SPINE_OPERATOR_TZ)
+        if [[ "$src_env_val" != "$ssot_tz" ]]; then
+          err "launchagent '$label' must set $env_key=$ssot_tz in template env"
+        fi
+        ;;
+    esac
+  done
 
   registry_count="$(yq e ".labels[] | select(.label == \"$label\") | length" "$LAUNCHD_REGISTRY" 2>/dev/null | wc -l | tr -d ' ')"
   if [[ "$registry_count" == "0" ]]; then

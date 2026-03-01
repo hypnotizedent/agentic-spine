@@ -6,6 +6,7 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 WORKBENCH="${SPINE_WORKBENCH:-$HOME/code/workbench}"
 PROFILE="$ROOT/ops/bindings/tenant.profile.yaml"
+LAUNCHD_CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
 
 fail() {
   echo "D171 FAIL: $*" >&2
@@ -14,6 +15,8 @@ fail() {
 
 [[ -f "$PROFILE" ]] || fail "missing tenant profile: $PROFILE"
 command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
+command -v jq >/dev/null 2>&1 || fail "missing required tool: jq"
+command -v plutil >/dev/null 2>&1 || fail "missing required tool: plutil"
 
 # Read SSOT timezone
 SSOT_TZ="$(yq -r '.runtime.timezone // ""' "$PROFILE")"
@@ -80,6 +83,32 @@ if [[ -f "$f" ]]; then
     echo "D171 MISMATCH: $f contains UTC timezone defaults:" >&2
     echo "$bad_defaults" >&2
     ERRORS=$((ERRORS + 1))
+  fi
+fi
+
+# ── Launchd runtime timezone env parity ──
+
+if [[ -f "$LAUNCHD_CONTRACT" ]]; then
+  launchd_source_dir="$(yq -r '.paths.source_dir // ""' "$LAUNCHD_CONTRACT")"
+  if [[ -n "$launchd_source_dir" && -d "$launchd_source_dir" ]]; then
+    required_env_tz="$(yq -r '.required_env[]?' "$LAUNCHD_CONTRACT" 2>/dev/null | grep -Fx 'TZ' || true)"
+    required_env_operator_tz="$(yq -r '.required_env[]?' "$LAUNCHD_CONTRACT" 2>/dev/null | grep -Fx 'SPINE_OPERATOR_TZ' || true)"
+
+    [[ -n "$required_env_tz" ]] || {
+      echo "D171 MISMATCH: $LAUNCHD_CONTRACT required_env must include TZ" >&2
+      ERRORS=$((ERRORS + 1))
+    }
+    [[ -n "$required_env_operator_tz" ]] || {
+      echo "D171 MISMATCH: $LAUNCHD_CONTRACT required_env must include SPINE_OPERATOR_TZ" >&2
+      ERRORS=$((ERRORS + 1))
+    }
+
+    while IFS= read -r -d '' plist; do
+      tz_val="$(plutil -convert json -o - "$plist" 2>/dev/null | jq -r '.EnvironmentVariables.TZ // ""')"
+      operator_tz_val="$(plutil -convert json -o - "$plist" 2>/dev/null | jq -r '.EnvironmentVariables.SPINE_OPERATOR_TZ // ""')"
+      check "$plist" "EnvironmentVariables.TZ" "$tz_val"
+      check "$plist" "EnvironmentVariables.SPINE_OPERATOR_TZ" "$operator_tz_val"
+    done < <(find "$launchd_source_dir" -maxdepth 1 -type f -name 'com.ronny*.plist' -print0)
   fi
 fi
 

@@ -2,6 +2,9 @@
 set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SPINE_OPERATOR_TZ="${SPINE_OPERATOR_TZ:-America/New_York}"
+export SPINE_OPERATOR_TZ
+export TZ="${SPINE_OPERATOR_TZ}"
 RUNTIME_JOB_LOG="${SPINE_RUNTIME_JOB_LOG:-$SPINE_ROOT/mailroom/logs/runtime-jobs.ndjson}"
 EMAIL_INTENT_DIR="${SPINE_ROOT}/mailroom/outbox/alerts/email-intents"
 

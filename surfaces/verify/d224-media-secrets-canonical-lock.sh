@@ -62,6 +62,20 @@ check_compose_keys() {
 check_compose_keys "$DL_COMPOSE" "download-stack"
 check_compose_keys "$ST_COMPOSE" "streaming-stack"
 
+# Ensure staged download-stack keeps canonical autopulse/crosswatch wiring.
+for required in \
+  'AUTOPULSE__TARGETS__JELLYFIN__TOKEN=${JELLYFIN_API_TOKEN}' \
+  'AUTOPULSE__TARGETS__JELLYFIN__URL=' \
+  'AUTOPULSE__TRIGGERS__RADARR__TYPE=radarr' \
+  'AUTOPULSE__TRIGGERS__SONARR__TYPE=sonarr' \
+  'AUTOPULSE__TRIGGERS__LIDARR__TYPE=lidarr' \
+  '127.0.0.1:8787:8787'
+do
+  if ! grep -Fq "$required" "$DL_COMPOSE"; then
+    err "download-stack: missing required canonical media bridge setting: $required"
+  fi
+done
+
 # ── 2. Canonical paths: active media keys must NOT route to legacy media-stack project ──
 check_canonical_routing() {
   local key="$1" expected_path="$2"
@@ -103,12 +117,14 @@ else
   LIDARR_KEY="$(get_secret LIDARR_API_KEY || true)"
   PROWLARR_KEY="$(get_secret PROWLARR_API_KEY || true)"
   JSEERR_KEY="$(get_secret JELLYSEERR_API_KEY || true)"
+  JFIN_TOKEN="$(get_secret JELLYFIN_API_TOKEN || true)"
 
   [[ -n "$RADARR_KEY" ]] || err "missing RADARR_API_KEY from canonical infrastructure route"
   [[ -n "$SONARR_KEY" ]] || err "missing SONARR_API_KEY from canonical infrastructure route"
   [[ -n "$LIDARR_KEY" ]] || err "missing LIDARR_API_KEY from canonical infrastructure route"
   [[ -n "$PROWLARR_KEY" ]] || err "missing PROWLARR_API_KEY from canonical infrastructure route"
   [[ -n "$JSEERR_KEY" ]] || err "missing JELLYSEERR_API_KEY from canonical infrastructure route"
+  [[ -n "$JFIN_TOKEN" ]] || err "missing JELLYFIN_API_TOKEN from canonical infrastructure route"
 
   RADARR_URL="${RADARR_URL:-http://100.107.36.76:7878}"
   SONARR_URL="${SONARR_URL:-http://100.107.36.76:8989}"
@@ -163,12 +179,15 @@ else
   dl_rad_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^RADARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
   dl_son_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^SONARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
   dl_lid_key="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^LIDARR_API_KEY=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
+  dl_jfin_token="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$dl_host" "sudo sh -lc \"grep '^JELLYFIN_API_TOKEN=' /opt/stacks/download-stack/.env | head -n1 | cut -d= -f2-\"" 2>/dev/null || true)"
   [[ -n "$dl_rad_key" ]] || err "download-stack .env missing RADARR_API_KEY"
   [[ -n "$dl_son_key" ]] || err "download-stack .env missing SONARR_API_KEY"
   [[ -n "$dl_lid_key" ]] || err "download-stack .env missing LIDARR_API_KEY"
+  [[ -n "$dl_jfin_token" ]] || err "download-stack .env missing JELLYFIN_API_TOKEN"
   [[ "$dl_rad_key" == "$RADARR_KEY" ]] || err "download-stack .env RADARR_API_KEY drift from canonical key"
   [[ "$dl_son_key" == "$SONARR_KEY" ]] || err "download-stack .env SONARR_API_KEY drift from canonical key"
   [[ "$dl_lid_key" == "$LIDARR_KEY" ]] || err "download-stack .env LIDARR_API_KEY drift from canonical key"
+  [[ "$dl_jfin_token" == "$JFIN_TOKEN" ]] || err "download-stack .env JELLYFIN_API_TOKEN drift from canonical key"
 fi
 
 # ── 4. Stack defaults must NOT use legacy media-stack project ──────────────
