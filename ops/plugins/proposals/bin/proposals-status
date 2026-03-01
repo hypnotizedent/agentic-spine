@@ -13,10 +13,12 @@ if command -v yq >/dev/null 2>&1 && [[ -f "$LIFECYCLE" ]]; then
   PENDING_MAX=$(yq '.sla.pending_max_age_days // 7' "$LIFECYCLE")
   DRAFT_MAX=$(yq '.sla.draft_max_age_days // 14' "$LIFECYCLE")
   HOLD_REVIEW_MAX=$(yq '.sla.draft_hold_review_max_days // 30' "$LIFECYCLE")
+  STALE_PATH_THRESHOLD=$(yq '.staleness.path_drift_threshold_days // 3' "$LIFECYCLE")
 else
   PENDING_MAX=7
   DRAFT_MAX=14
   HOLD_REVIEW_MAX=30
+  STALE_PATH_THRESHOLD=3
 fi
 
 # Counters
@@ -24,6 +26,7 @@ total=0
 pending=0; applied=0; superseded=0; draft_hold=0; draft=0; readonly=0; invalid=0; other=0
 sla_breaches=0
 malformed=0
+stale_pending=0
 link_valid_pending=0
 link_missing=0
 link_scope_missing=0
@@ -33,6 +36,7 @@ pending_loop_ids=""
 mismatch_lines=""
 mismatch_total=0
 mismatch_printed=0
+stale_pending_lines=""
 
 append_mismatch() {
   local line="$1"
@@ -75,7 +79,7 @@ for dir in "$PROPOSALS_DIR"/CP-*; do
   manifest="$dir/manifest.yaml"
   total=$((total + 1))
 
-  # Determine status
+  # Determine status - executed is treated as alias for applied
   if [[ -f "$dir/.applied" ]]; then
     status="applied"
     applied=$((applied + 1))
@@ -87,6 +91,10 @@ for dir in "$PROPOSALS_DIR"/CP-*; do
   else
     status=$(grep -m1 '^status:' "$manifest" 2>/dev/null | sed 's/^status: *//' | tr -d '"' | tr -d "'" || echo "")
     [[ -z "$status" ]] && status="pending"
+    # Treat executed as applied (alias normalization)
+    if [[ "$status" == "executed" ]]; then
+      status="applied"
+    fi
     # Detect read_only proposals without explicit status field
     if [[ "$status" == "pending" ]]; then
       if grep -q '^read_only: *true' "$manifest" || grep -q '^mode: *read-only' "$manifest"; then
@@ -146,6 +154,13 @@ for dir in "$PROPOSALS_DIR"/CP-*; do
         if [[ "$age_days" -gt "$PENDING_MAX" ]]; then
           SLA_LINES="${SLA_LINES}  SLA BREACH: $bname (pending ${age_days}d, max ${PENDING_MAX}d)\n"
           sla_breaches=$((sla_breaches + 1))
+        fi
+        # Staleness check: pending older than threshold may have path drift
+        if [[ "$age_days" -gt "$STALE_PATH_THRESHOLD" ]]; then
+          stale_pending=$((stale_pending + 1))
+          if [[ "$stale_pending" -le 20 ]]; then
+            stale_pending_lines="${stale_pending_lines}  - $bname (pending ${age_days}d, may have path drift)\n"
+          fi
         fi
       fi
     fi
@@ -248,6 +263,16 @@ if [[ "$open_loop_without_pending" -gt 0 ]]; then
   if [[ "$open_loop_without_pending" -gt 20 ]]; then
     echo "  ... plus $((open_loop_without_pending - 20)) more"
   fi
+fi
+
+if [[ "$stale_pending" -gt 0 ]]; then
+  echo ""
+  echo "Stale Pending Proposals (may have path drift):"
+  printf "$stale_pending_lines"
+  if [[ "$stale_pending" -gt 20 ]]; then
+    echo "  ... plus $((stale_pending - 20)) more"
+  fi
+  echo "  Recommendation: supersede + create successor if paths have drifted"
 fi
 
 echo ""

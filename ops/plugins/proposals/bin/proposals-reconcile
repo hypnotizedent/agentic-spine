@@ -77,6 +77,8 @@ receipt_out = Path(receipt_out_arg) if receipt_out_arg else None
 
 ACTIVE_LOOP_STATUSES = {"active", "planned", "open", "draft"}
 PRESERVE_STATUSES = {"superseded", "read-only", "readonly", "invalid"}
+# Status aliases that normalize to applied
+APPLIED_ALIASES = {"executed", "completed", "done", "finished"}
 TODAY = dt.date.today()
 REVIEW_DATE_DEFAULT = (TODAY + dt.timedelta(days=7)).isoformat()
 
@@ -239,6 +241,11 @@ for proposal_dir in sorted(proposals_dir.glob("CP-*")):
     review_date = clean_scalar(parsed.get("review_date"))
     hold_reason = clean_scalar(parsed.get("hold_reason"))
 
+    # Normalize status aliases to canonical form
+    status_lower = (status or "").lower()
+    if status_lower in APPLIED_ALIASES:
+        status = "applied"
+
     loop_state, loop_detail = parse_loop_scope_status(loop_id)
 
     action.update(
@@ -261,6 +268,10 @@ for proposal_dir in sorted(proposals_dir.glob("CP-*")):
     elif status.lower() in PRESERVE_STATUSES:
         # Preserve superseded/read-only/invalid unless malformed.
         pass
+    elif status_lower in APPLIED_ALIASES:
+        # Normalize alias to applied
+        target_status = "applied"
+        reasons.append(f"status '{status}' is alias for 'applied'; normalized")
     else:
         if not status:
             if loop_state == "valid":

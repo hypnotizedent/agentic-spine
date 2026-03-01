@@ -5,8 +5,8 @@
 #
 # Decision: LOOP-PROPOSAL-LIFECYCLE-HARDENING-20260213
 
-version: "1.2"
-updated_at: "2026-02-17"
+version: "1.3"
+updated_at: "2026-03-01"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Status State Machine
@@ -23,6 +23,9 @@ updated_at: "2026-02-17"
 #   draft_hold: intentionally deferred, not in active flow
 #   read-only: audit/discovery only, never applied
 #   invalid: malformed, cannot be applied
+#
+# Status Aliases (normalized to canonical):
+#   executed, completed, done, finished -> applied
 
 statuses:
   - id: draft
@@ -36,6 +39,11 @@ statuses:
   - id: applied
     description: "Changes committed to repo via proposals.apply"
     terminal: true
+    aliases:
+      - executed
+      - completed
+      - done
+      - finished
 
   - id: superseded
     description: "Obsolete or replaced by later work"
@@ -72,7 +80,9 @@ required_fields:
 
   superseded:
     - superseded_at
-    - superseded_reason
+    - superseded_disposition  # Required: "carry-forward" or terminal reason
+    # Optional: superseded_by (required if disposition is carry-forward)
+    # Optional: superseded_reason (additional context)
 
   draft_hold:
     - owner
@@ -150,6 +160,10 @@ sla:
   draft_hold_review_max_days: 30
   archive_applied_after_days: 3
   archive_superseded_after_days: 3
+
+staleness:
+  path_drift_threshold_days: 3
+  description: "Pending proposals older than threshold may have path drift; recommend supersede + create successor"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Mandatory Admission Controller (proposals.apply)

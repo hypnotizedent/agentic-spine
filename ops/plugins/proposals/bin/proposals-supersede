@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # proposals-supersede: Mark a proposal as superseded
-# Usage: proposals-supersede <CP_NAME> --reason "why"
+# Usage: proposals-supersede <CP_NAME> --superseded-by <CP_ID> | --final-disposition "<reason>"
 set -euo pipefail
 
 SP="${SPINE_CODE:-.}"
@@ -9,26 +9,53 @@ acquire_git_lock proposals
 PROPOSALS_DIR="$SP/mailroom/outbox/proposals"
 
 usage() {
-  echo "Usage: proposals-supersede <CP_NAME> --reason \"why this is superseded\""
-  echo ""
-  echo "Marks a proposal as superseded. Cannot supersede already-applied proposals."
+  cat <<'USAGE'
+Usage: proposals-supersede <CP_NAME> (--superseded-by <CP_ID> | --final-disposition "<reason>")
+
+Marks a proposal as superseded. Cannot supersede already-applied proposals.
+
+Required (one of):
+  --superseded-by <CP_ID>     ID of successor proposal that carries forward this work
+  --final-disposition "<reason>"  Reason why this proposal is intentionally terminal (no successor)
+
+Optional:
+  --reason "<detail>"         Additional context about the supersede
+
+Examples:
+  proposals-supersede CP-20260227-001 --superseded-by CP-20260301-002
+  proposals-supersede CP-20260227-001 --final-disposition "Abandoned: requirements changed"
+USAGE
   exit 1
 }
 
-[[ $# -ge 1 ]] || usage
+[[ $# -ge 2 ]] || usage
 
 CP_NAME="$1"
 shift
 
+SUPERSEDED_BY=""
+FINAL_DISPOSITION=""
 REASON=""
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --superseded-by) SUPERSEDED_BY="$2"; shift 2 ;;
+    --final-disposition) FINAL_DISPOSITION="$2"; shift 2 ;;
     --reason) REASON="$2"; shift 2 ;;
     *) echo "Unknown option: $1"; usage ;;
   esac
 done
 
-[[ -n "$REASON" ]] || { echo "ERROR: --reason is required"; usage; }
+# Require either superseded_by or final_disposition
+if [[ -z "$SUPERSEDED_BY" && -z "$FINAL_DISPOSITION" ]]; then
+  echo "ERROR: Must provide either --superseded-by or --final-disposition" >&2
+  usage
+fi
+
+if [[ -n "$SUPERSEDED_BY" && -n "$FINAL_DISPOSITION" ]]; then
+  echo "ERROR: Cannot provide both --superseded-by and --final-disposition" >&2
+  usage
+fi
 
 # Find proposal directory
 CP_DIR=""
@@ -56,14 +83,47 @@ if grep -q '^status: superseded' "$MANIFEST"; then
   exit 0
 fi
 
+# Validate superseded_by exists if provided
+if [[ -n "$SUPERSEDED_BY" ]]; then
+  SUCCESSOR_DIR=""
+  for dir in "$PROPOSALS_DIR"/"$SUPERSEDED_BY" "$PROPOSALS_DIR"/${SUPERSEDED_BY}__*; do
+    if [[ -d "$dir" ]]; then
+      SUCCESSOR_DIR="$dir"
+      break
+    fi
+  done
+  if [[ -z "$SUCCESSOR_DIR" ]]; then
+    echo "ERROR: Successor proposal not found: $SUPERSEDED_BY" >&2
+    exit 1
+  fi
+fi
+
 # Remove existing status/superseded fields
 sed -i "" '/^status:/d' "$MANIFEST"
 sed -i "" '/^superseded_at:/d' "$MANIFEST"
 sed -i "" '/^superseded_reason:/d' "$MANIFEST"
+sed -i "" '/^superseded_by:/d' "$MANIFEST"
+sed -i "" '/^superseded_disposition:/d' "$MANIFEST"
 
 # Add superseded fields
 DATE=$(date -u +%Y-%m-%d)
-printf '\nstatus: superseded\nsuperseded_at: "%s"\nsuperseded_reason: "%s"\n' "$DATE" "$REASON" >> "$MANIFEST"
+{
+  echo ""
+  echo "status: superseded"
+  echo "superseded_at: \"$DATE\""
+  if [[ -n "$SUPERSEDED_BY" ]]; then
+    echo "superseded_by: \"$SUPERSEDED_BY\""
+    echo "superseded_disposition: \"carry-forward\""
+    [[ -n "$REASON" ]] && echo "superseded_reason: \"$REASON\""
+  else
+    echo "superseded_disposition: \"$FINAL_DISPOSITION\""
+    [[ -n "$REASON" ]] && echo "superseded_reason: \"$REASON\""
+  fi
+} >> "$MANIFEST"
 
 echo "Superseded: $(basename "$CP_DIR")"
-echo "  Reason: $REASON"
+if [[ -n "$SUPERSEDED_BY" ]]; then
+  echo "  Carry-forward to: $SUPERSEDED_BY"
+else
+  echo "  Final disposition: $FINAL_DISPOSITION"
+fi

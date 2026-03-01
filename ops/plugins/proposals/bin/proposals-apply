@@ -1043,6 +1043,22 @@ echo "Applying proposal: $PROPOSAL_NAME"
 [[ -n "${created:-}" ]] && echo "Created: $created"
 echo ""
 
+# Staleness precheck: warn if proposal is old and paths may have drifted
+STALE_THRESHOLD_DAYS=3
+if [[ -n "${created:-}" ]]; then
+  created_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "${created}" +%s 2>/dev/null || echo 0)
+  if [[ "$created_epoch" -gt 0 ]]; then
+    now_epoch=$(date +%s)
+    age_days=$(( (now_epoch - created_epoch) / 86400 ))
+    if [[ "$age_days" -gt "$STALE_THRESHOLD_DAYS" ]]; then
+      echo "WARN: Proposal is ${age_days} days old (threshold: ${STALE_THRESHOLD_DAYS}d)"
+      echo "  Paths may have drifted since creation."
+      echo "  Recommendation: supersede + create successor if changes conflict with recent commits."
+      echo ""
+    fi
+  fi
+fi
+
 changes_tmp="$(mktemp "/tmp/spine-proposal-changes.XXXXXX")"
 trap 'rm -f "$changes_tmp" 2>/dev/null || true' EXIT INT TERM
 
