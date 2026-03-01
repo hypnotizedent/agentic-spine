@@ -64,7 +64,7 @@ for ((i=0; i<term_count; i++)); do
     [[ -d "$SP/$rel_scan_path" ]] || continue
 
     # Use rg for fast search; suppress missing-path noise.
-    matches="$(cd "$SP" && rg --no-messages --files-with-matches --fixed-strings "$pattern" "$rel_scan_path" "${term_exclude_args[@]}" "${global_exclude_args[@]}" || true)"
+    matches="$(cd "$SP" && rg --no-messages --no-ignore --files-with-matches --fixed-strings "$pattern" "$rel_scan_path" "${term_exclude_args[@]}" "${global_exclude_args[@]}" || true)"
     if [[ -n "$matches" ]]; then
       while IFS= read -r file; do
         err "deprecated term '$pattern' found in $file"

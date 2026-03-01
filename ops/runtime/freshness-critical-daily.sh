@@ -7,37 +7,14 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
-EMAIL_INTENT_DIR="${SPINE_ROOT}/mailroom/outbox/alerts/email-intents"
-
-enqueue_email_intent() {
-  local severity="$1"
-  local title="$2"
-  local summary="$3"
-  local intent_id created_at intent_file
-  intent_id="email-intent-$(date -u +%Y%m%dT%H%M%SZ)-${RANDOM}"
-  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  intent_file="${EMAIL_INTENT_DIR}/${intent_id}.yaml"
-  mkdir -p "${EMAIL_INTENT_DIR}"
-  cat >"${intent_file}" <<INTENT
-intent_id: "${intent_id}"
-created_at: "${created_at}"
-domain_id: "freshness-critical"
-severity: "${severity}"
-title: "${title}"
-summary: |-
-$(printf '%s\n' "${summary}" | sed 's/^/  /')
-suggested_recipient: "alerts@spine.ronny.works"
-source_alert: "freshness-critical-daily"
-flush_status: pending
-INTENT
-}
+source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 failures=0
 declare -a failed_caps=()
 
 run_cap() {
   local cap="$1"
-  if "$CAP_RUNNER" cap run "$cap"; then
+  if spine_job_run "freshness-critical-daily:${cap}" "$CAP_RUNNER" cap run "$cap"; then
     return 0
   fi
   local rc=$?
@@ -61,10 +38,12 @@ run_cap cloudflare.inventory.sync
 run_cap verify.freshness.reconcile
 
 if (( failures > 0 )); then
-  enqueue_email_intent \
+  spine_enqueue_email_intent \
+    "freshness-critical" \
     "incident" \
     "freshness-critical-daily had refresh failures" \
-    "failures=${failures}; failed_capabilities=${failed_caps[*]}"
+    "failures=${failures}; failed_capabilities=${failed_caps[*]}" \
+    "freshness-critical-daily"
   echo "[freshness-critical-daily] done with failures=$((${failures})) $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
   exit 1
 fi

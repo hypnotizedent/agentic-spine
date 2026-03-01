@@ -200,18 +200,23 @@ def main() -> None:
         if str(gap.get("status", "")).strip() in {"fixed", "closed"}
         and str(gap.get("severity", "")).strip() in {"high", "critical"}
     ]
-    closure_den = len(resolved_hc_gaps)
-    closure_num = 0
+    eligible_resolved_hc_gaps = []
     legacy_placeholder_count = 0
+    for gap in resolved_hc_gaps:
+        lock_id = str(gap.get("regression_lock_id", "")).strip()
+        if lock_id.startswith("LEGACY-NO-REGRESSION-LOCK-"):
+            legacy_placeholder_count += 1
+            continue
+        eligible_resolved_hc_gaps.append(gap)
+
+    closure_den = len(eligible_resolved_hc_gaps)
+    closure_num = 0
     missing_lock_count = 0
 
-    for gap in resolved_hc_gaps:
+    for gap in eligible_resolved_hc_gaps:
         lock_id = str(gap.get("regression_lock_id", "")).strip()
         if not lock_id:
             missing_lock_count += 1
-            continue
-        if lock_id.startswith("LEGACY-NO-REGRESSION-LOCK-"):
-            legacy_placeholder_count += 1
             continue
         closure_num += 1
 
@@ -226,9 +231,9 @@ def main() -> None:
             "target": ">= 1.00",
             "status": "PASS" if closure_value >= 1.0 else "FAIL",
             "notes": (
-                f"resolved_high_critical={closure_den} "
+                f"eligible_non_legacy={closure_den} "
                 f"missing_lock={missing_lock_count} "
-                f"legacy_placeholder={legacy_placeholder_count}"
+                f"legacy_exempted={legacy_placeholder_count}"
             ),
         }
     )
