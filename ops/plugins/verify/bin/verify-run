@@ -89,15 +89,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+declare -a freshness_keywords=()
 mapfile -t freshness_keywords < <(yq e -r '.freshness_keywords[]' "$CLASS_CONTRACT")
 
-declare -A gate_class_map=()
-declare -A gate_retired_map=()
-while IFS=$'\t' read -r gid gclass retired; do
-  [[ -n "$gid" ]] || continue
-  gate_class_map["$gid"]="$gclass"
-  gate_retired_map["$gid"]="$retired"
-done < <(yq e -r '.gates[] | [.id, (.gate_class // ""), (.retired // false | tostring)] | @tsv' "$REGISTRY")
+gate_class_for_id() {
+  local gid="$1"
+  yq e -r ".gates[] | select(.id == \"$gid\") | .gate_class // \"\"" "$REGISTRY" 2>/dev/null | head -n1
+}
+
+gate_retired_for_id() {
+  local gid="$1"
+  yq e -r ".gates[] | select(.id == \"$gid\") | (.retired // false | tostring)" "$REGISTRY" 2>/dev/null | head -n1
+}
 
 normalize_domain() {
   local raw="${1:-}"
@@ -127,36 +130,43 @@ unique_ids() {
   awk 'NF && !seen[$0]++'
 }
 
+array_to_json() {
+  if [[ "$#" -eq 0 ]]; then
+    printf '[]\n'
+    return 0
+  fi
+  printf '%s\n' "$@" | jq -R -s 'split("\n") | map(select(length > 0))'
+}
+
 collect_domain_candidate_ids() {
   local raw_domain="$1"
   local domain
+  local tmp_ids gid
   domain="$(normalize_domain "$raw_domain")"
 
-  declare -A seen=()
-  local gid
+  tmp_ids="$(mktemp)"
 
   while IFS= read -r gid; do
     [[ -n "$gid" ]] || continue
-    seen["$gid"]=1
+    printf '%s\n' "$gid" >> "$tmp_ids"
   done < <(yq e -r ".gate_assignments[] | select((.primary_domain == \"$domain\") or ((.secondary_domains // []) | index(\"$domain\"))) | .gate_id" "$TOPOLOGY" 2>/dev/null || true)
 
-  if [[ "${#seen[@]}" -eq 0 ]]; then
+  if [[ ! -s "$tmp_ids" ]]; then
     while IFS= read -r gid; do
       [[ -n "$gid" ]] || continue
-      seen["$gid"]=1
+      printf '%s\n' "$gid" >> "$tmp_ids"
     done < <(yq e -r ".domains.\"$raw_domain\".gate_ids[]?" "$DOMAIN_PROFILES" 2>/dev/null || true)
 
     if [[ "$domain" != "$raw_domain" ]]; then
       while IFS= read -r gid; do
         [[ -n "$gid" ]] || continue
-        seen["$gid"]=1
+        printf '%s\n' "$gid" >> "$tmp_ids"
       done < <(yq e -r ".domains.\"$domain\".gate_ids[]?" "$DOMAIN_PROFILES" 2>/dev/null || true)
     fi
   fi
 
-  for gid in "${!seen[@]}"; do
-    printf '%s\n' "$gid"
-  done | sort -V
+  awk 'NF && !seen[$0]++' "$tmp_ids" | sort -V
+  rm -f "$tmp_ids"
 }
 
 collect_ids_for_domain_and_classes() {
@@ -167,10 +177,10 @@ collect_ids_for_domain_and_classes() {
 
   while IFS= read -r gid; do
     [[ -n "$gid" ]] || continue
-    gate_class="${gate_class_map[$gid]:-}"
-    retired="${gate_retired_map[$gid]:-false}"
+    gate_class="$(gate_class_for_id "$gid")"
+    retired="$(gate_retired_for_id "$gid")"
     [[ "$retired" == "true" ]] && continue
-    class_in_set "$gate_class" "${classes[@]}" || continue
+    class_in_set "$gate_class" "${classes[@]-}" || continue
     echo "$gid"
   done < <(collect_domain_candidate_ids "$domain")
 }
@@ -181,10 +191,10 @@ collect_core_ids_by_classes() {
 
   while IFS= read -r gid; do
     [[ -n "$gid" ]] || continue
-    gate_class="${gate_class_map[$gid]:-}"
-    retired="${gate_retired_map[$gid]:-false}"
+    gate_class="$(gate_class_for_id "$gid")"
+    retired="$(gate_retired_for_id "$gid")"
     [[ "$retired" == "true" ]] && continue
-    class_in_set "$gate_class" "${classes[@]}" || continue
+    class_in_set "$gate_class" "${classes[@]-}" || continue
     echo "$gid"
   done < <(yq e -r '.core_mode.core_gate_ids[]?' "$TOPOLOGY")
 }
@@ -228,11 +238,12 @@ classify_failing_ids() {
   local -a deterministic=()
   local -a freshness=()
   local -a gate_bug=()
+  local -a ids=()
 
   mapfile -t ids < <(jq -r '.[]?' <<<"$failing_json")
   local gid script_rel name desc blob kw
 
-  for gid in "${ids[@]}"; do
+  for gid in "${ids[@]-}"; do
     [[ -n "$gid" ]] || continue
 
     script_rel="$(yq e -r ".gates[] | select(.id == \"$gid\") | .check_script // \"\"" "$REGISTRY" 2>/dev/null || true)"
@@ -243,12 +254,12 @@ classify_failing_ids() {
 
     name="$(yq e -r ".gates[] | select(.id == \"$gid\") | .name // \"\"" "$REGISTRY" 2>/dev/null || true)"
     desc="$(yq e -r ".gates[] | select(.id == \"$gid\") | .description // \"\"" "$REGISTRY" 2>/dev/null || true)"
-    blob="${name,,} ${desc,,}"
+    blob="${name} ${desc}"
 
     is_freshness=0
-    for kw in "${freshness_keywords[@]}"; do
+    for kw in "${freshness_keywords[@]-}"; do
       [[ -n "$kw" ]] || continue
-      if [[ "$blob" == *"${kw,,}"* ]]; then
+      if printf '%s\n' "$blob" | grep -Fqi -- "$kw"; then
         is_freshness=1
         break
       fi
@@ -262,9 +273,9 @@ classify_failing_ids() {
   done
 
   jq -n \
-    --argjson deterministic "$(printf '%s\n' "${deterministic[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
-    --argjson freshness "$(printf '%s\n' "${freshness[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
-    --argjson gate_bug "$(printf '%s\n' "${gate_bug[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+    --argjson deterministic "$(array_to_json "${deterministic[@]-}")" \
+    --argjson freshness "$(array_to_json "${freshness[@]-}")" \
+    --argjson gate_bug "$(array_to_json "${gate_bug[@]-}")" \
     '{deterministic:$deterministic, freshness:$freshness, gate_bug:$gate_bug}'
 }
 
@@ -310,17 +321,17 @@ update_gate_pass_streak() {
         [[ -n "$fast_domain" ]] || continue
         IFS=',' read -r -a split <<< "$class_csv"
         classes=()
-        for gid in "${split[@]}"; do
+        for gid in "${split[@]-}"; do
           [[ -n "$gid" ]] && classes+=("$gid")
         done
         if [[ "$(normalize_domain "$fast_domain")" == "core" ]]; then
           while IFS= read -r gid; do
             [[ -n "$gid" ]] && scope_gate_ids+=("$gid")
-          done < <(collect_core_ids_by_classes "${classes[@]}")
+          done < <(collect_core_ids_by_classes "${classes[@]-}")
         else
           while IFS= read -r gid; do
             [[ -n "$gid" ]] && scope_gate_ids+=("$gid")
-          done < <(collect_ids_for_domain_and_classes "$fast_domain" "${classes[@]}")
+          done < <(collect_ids_for_domain_and_classes "$fast_domain" "${classes[@]-}")
         fi
       done < <(yq e -r '.profiles.fast.domains[] | [.domain, (.classes | join(","))] | @tsv' "$PROFILE_CONTRACT")
       ;;
@@ -330,13 +341,13 @@ update_gate_pass_streak() {
         mapfile -t classes < <(yq e -r '.profiles.domain.core_base.classes[]' "$PROFILE_CONTRACT")
         while IFS= read -r gid; do
           [[ -n "$gid" ]] && scope_gate_ids+=("$gid")
-        done < <(collect_core_ids_by_classes "${classes[@]}")
+        done < <(collect_core_ids_by_classes "${classes[@]-}")
       fi
 
       mapfile -t classes < <(yq e -r '.profiles.domain.target.classes[]' "$PROFILE_CONTRACT")
       while IFS= read -r gid; do
         [[ -n "$gid" ]] && scope_gate_ids+=("$gid")
-      done < <(collect_ids_for_domain_and_classes "$domain_label" "${classes[@]}")
+      done < <(collect_ids_for_domain_and_classes "$domain_label" "${classes[@]-}")
       ;;
     release)
       mapfile -t scope_gate_ids < <(yq e -r '.gates[] | select((.retired // false) != true) | .id' "$REGISTRY")
@@ -346,8 +357,8 @@ update_gate_pass_streak() {
       ;;
   esac
 
-  mapfile -t scope_gate_ids < <(printf '%s\n' "${scope_gate_ids[@]}" | unique_ids)
-  scope_ids_json="$(printf '%s\n' "${scope_gate_ids[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+  mapfile -t scope_gate_ids < <(printf '%s\n' "${scope_gate_ids[@]-}" | unique_ids)
+  scope_ids_json="$(printf '%s\n' "${scope_gate_ids[@]-}" | jq -R -s 'split("\n") | map(select(length > 0))')"
 
   failing_ids_json="$(jq -c '.failing_ids // []' <<<"$run_result_json")"
 
@@ -390,23 +401,23 @@ run_wrapper() {
         [[ -n "$fast_domain" ]] || continue
         IFS=',' read -r -a split <<< "$class_csv"
         classes=()
-        for gid in "${split[@]}"; do
+        for gid in "${split[@]-}"; do
           [[ -n "$gid" ]] && classes+=("$gid")
         done
         if [[ "$(normalize_domain "$fast_domain")" == "core" ]]; then
           while IFS= read -r gid; do
             [[ -n "$gid" ]] && gate_ids+=("$gid")
-          done < <(collect_core_ids_by_classes "${classes[@]}")
+          done < <(collect_core_ids_by_classes "${classes[@]-}")
         else
           while IFS= read -r gid; do
             [[ -n "$gid" ]] && gate_ids+=("$gid")
-          done < <(collect_ids_for_domain_and_classes "$fast_domain" "${classes[@]}")
+          done < <(collect_ids_for_domain_and_classes "$fast_domain" "${classes[@]-}")
         fi
       done < <(yq e -r '.profiles.fast.domains[] | [.domain, (.classes | join(","))] | @tsv' "$PROFILE_CONTRACT")
 
-      mapfile -t gate_ids < <(printf '%s\n' "${gate_ids[@]}" | unique_ids)
+      mapfile -t gate_ids < <(printf '%s\n' "${gate_ids[@]-}" | unique_ids)
       ((${#gate_ids[@]} > 0)) || fail "fast profile resolved zero class-driven gates"
-      IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" ids-run "${gate_ids[@]}" --ring "$ring")
+      IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" ids-run "${gate_ids[@]-}" --ring "$ring")
       ;;
     domain)
       ring="$(yq e -r '.profiles.domain.ring // "standard"' "$PROFILE_CONTRACT")"
@@ -416,17 +427,17 @@ run_wrapper() {
         mapfile -t classes < <(yq e -r '.profiles.domain.core_base.classes[]' "$PROFILE_CONTRACT")
         while IFS= read -r gid; do
           [[ -n "$gid" ]] && gate_ids+=("$gid")
-        done < <(collect_core_ids_by_classes "${classes[@]}")
+        done < <(collect_core_ids_by_classes "${classes[@]-}")
       fi
 
       mapfile -t classes < <(yq e -r '.profiles.domain.target.classes[]' "$PROFILE_CONTRACT")
       while IFS= read -r gid; do
         [[ -n "$gid" ]] && gate_ids+=("$gid")
-      done < <(collect_ids_for_domain_and_classes "$domain_label" "${classes[@]}")
+      done < <(collect_ids_for_domain_and_classes "$domain_label" "${classes[@]-}")
 
-      mapfile -t gate_ids < <(printf '%s\n' "${gate_ids[@]}" | unique_ids)
+      mapfile -t gate_ids < <(printf '%s\n' "${gate_ids[@]-}" | unique_ids)
       ((${#gate_ids[@]} > 0)) || fail "domain profile resolved zero class-driven gates for '$domain_label'"
-      IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" ids-run "${gate_ids[@]}" --ring "$ring")
+      IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" ids-run "${gate_ids[@]-}" --ring "$ring")
       ;;
     release)
       IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_json_cmd "$VERIFY_TOPOLOGY" release)
