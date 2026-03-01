@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# TRIAGE: Normalize proposal queue lifecycle (canonical statuses, applied marker parity, loop linkage) and run proposals.reconcile as needed.
 # d306-proposals-lifecycle-integrity.sh - Proposal lifecycle integrity gate
 # Ensures proposal queue conforms to lifecycle contract.
 # Exit: 0 = PASS, 1 = FAIL
