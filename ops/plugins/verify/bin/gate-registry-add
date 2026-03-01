@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 
 usage() {
   cat <<'USAGE'
@@ -16,7 +17,13 @@ Usage:
     --description <text> \
     --severity <low|medium|high|critical> \
     --check-script <surfaces/verify/*.sh> \
-    [--fix-hint <text>] [--inline true|false]
+    [--fix-hint <text>] [--inline true|false] \
+    [--topology-domain <domain>] [--topology-family <family>] [--ring <instant|standard|deep>] \
+    [--no-topology] [--dry-run]
+
+Notes:
+  - By default this updates BOTH gate.registry.yaml and gate.execution.topology.yaml.
+  - Use --no-topology only for exceptional cases.
 USAGE
 }
 
@@ -33,6 +40,7 @@ print_d128_trailers() {
 }
 
 [[ -f "$REGISTRY" ]] || fail "missing registry: $REGISTRY"
+[[ -f "$TOPOLOGY" ]] || fail "missing topology: $TOPOLOGY"
 command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
 
 GATE_ID=""
@@ -43,6 +51,11 @@ SEVERITY="medium"
 CHECK_SCRIPT=""
 FIX_HINT=""
 INLINE="false"
+TOPOLOGY_DOMAIN=""
+TOPOLOGY_FAMILY="process-hygiene"
+RING="standard"
+NO_TOPOLOGY="false"
+DRY_RUN="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,6 +67,11 @@ while [[ $# -gt 0 ]]; do
     --check-script) CHECK_SCRIPT="${2:-}"; shift 2 ;;
     --fix-hint) FIX_HINT="${2:-}"; shift 2 ;;
     --inline) INLINE="${2:-false}"; shift 2 ;;
+    --topology-domain) TOPOLOGY_DOMAIN="${2:-}"; shift 2 ;;
+    --topology-family) TOPOLOGY_FAMILY="${2:-}"; shift 2 ;;
+    --ring) RING="${2:-}"; shift 2 ;;
+    --no-topology) NO_TOPOLOGY="true"; shift ;;
+    --dry-run) DRY_RUN="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -65,21 +83,57 @@ done
 [[ -n "$DESCRIPTION" ]] || fail "--description is required"
 [[ -n "$CHECK_SCRIPT" ]] || fail "--check-script is required"
 
-exists="$(yq e -r ".gates[] | select(.id == \"$GATE_ID\") | .id" "$REGISTRY" | head -n1 || true)"
-[[ -z "$exists" ]] || fail "gate '$GATE_ID' already exists"
+case "$SEVERITY" in low|medium|high|critical) ;; *) fail "invalid --severity: $SEVERITY" ;; esac
+case "$RING" in instant|standard|deep) ;; *) fail "invalid --ring: $RING" ;; esac
+case "$INLINE" in true|false) ;; *) fail "--inline must be true|false" ;; esac
 
-yq -i "
-  .gates += [{
-    \"id\": \"$GATE_ID\",
-    \"name\": \"$NAME\",
-    \"category\": \"$CATEGORY\",
-    \"description\": \"$DESCRIPTION\",
-    \"severity\": \"$SEVERITY\",
-    \"check_script\": \"$CHECK_SCRIPT\",
-    \"fix_hint\": \"$FIX_HINT\",
-    \"inline\": $INLINE
-  }]
-" "$REGISTRY"
+exists_registry="$(yq e -r ".gates[] | select(.id == \"$GATE_ID\") | .id" "$REGISTRY" | head -n1 || true)"
+[[ -z "$exists_registry" ]] || fail "gate '$GATE_ID' already exists in registry"
+
+if [[ "$NO_TOPOLOGY" == "false" ]]; then
+  [[ -n "$TOPOLOGY_DOMAIN" ]] || fail "--topology-domain is required unless --no-topology is set"
+  domain_exists="$(yq e -r ".domain_metadata[] | select(.domain_id == \"$TOPOLOGY_DOMAIN\") | .domain_id" "$TOPOLOGY" | head -n1 || true)"
+  [[ -n "$domain_exists" ]] || fail "topology domain '$TOPOLOGY_DOMAIN' not found in gate.execution.topology.yaml"
+  exists_topology="$(yq e -r ".gate_assignments[] | select(.gate_id == \"$GATE_ID\") | .gate_id" "$TOPOLOGY" | head -n1 || true)"
+  [[ -z "$exists_topology" ]] || fail "gate '$GATE_ID' already exists in topology"
+fi
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "gate.registry.add DRY-RUN:"
+  echo "  gate_id=$GATE_ID"
+  echo "  registry=add"
+  if [[ "$NO_TOPOLOGY" == "false" ]]; then
+    echo "  topology=add domain=$TOPOLOGY_DOMAIN family=$TOPOLOGY_FAMILY"
+  else
+    echo "  topology=skip (--no-topology)"
+  fi
+  print_d128_trailers
+  exit 0
+fi
+
+export GATE_ID NAME CATEGORY DESCRIPTION SEVERITY CHECK_SCRIPT FIX_HINT INLINE RING
+yq -i '.gates += [{
+  "id": env(GATE_ID),
+  "name": env(NAME),
+  "category": env(CATEGORY),
+  "gate_class": "invariant",
+  "description": env(DESCRIPTION),
+  "severity": env(SEVERITY),
+  "ring": env(RING),
+  "check_script": env(CHECK_SCRIPT),
+  "fix_hint": env(FIX_HINT),
+  "inline": (env(INLINE) == "true")
+}]' "$REGISTRY"
+
+if [[ "$NO_TOPOLOGY" == "false" ]]; then
+  export TOPOLOGY_DOMAIN TOPOLOGY_FAMILY
+  yq -i '.gate_assignments += [{
+    "gate_id": env(GATE_ID),
+    "primary_domain": env(TOPOLOGY_DOMAIN),
+    "secondary_domains": [],
+    "family": env(TOPOLOGY_FAMILY)
+  }]' "$TOPOLOGY"
+fi
 
 total="$(yq e '.gates | length' "$REGISTRY")"
 retired="$(yq e '[.gates[] | select((.retired // false) == true)] | length' "$REGISTRY")"
@@ -88,4 +142,7 @@ active=$((total - retired))
 yq -i ".gate_count.total = $total | .gate_count.active = $active | .gate_count.retired = $retired" "$REGISTRY"
 
 echo "gate.registry.add PASS: added $GATE_ID (total=$total active=$active retired=$retired)"
+if [[ "$NO_TOPOLOGY" == "false" ]]; then
+  echo "gate.registry.add PASS: topology assignment added (domain=$TOPOLOGY_DOMAIN family=$TOPOLOGY_FAMILY)"
+fi
 print_d128_trailers

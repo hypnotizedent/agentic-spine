@@ -15,6 +15,9 @@ Usage:
     [--run-key <CAP-...>] \
     [--json]
 
+  gate-mutation-trailers --auto [--run-key <CAP-...>] [--json]
+    Infer capability from staged gate files and emit D128 trailers.
+
 Emits D128-required commit trailers for gate contract mutations.
 USAGE
 }
@@ -32,6 +35,7 @@ CAPABILITY=""
 MUTATION="capability"
 RUN_KEY="${SPINE_CAP_RUN_KEY:-manual}"
 JSON_MODE="false"
+AUTO_MODE="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,12 +43,32 @@ while [[ $# -gt 0 ]]; do
     --mutation) MUTATION="${2:-}"; shift 2 ;;
     --run-key) RUN_KEY="${2:-}"; shift 2 ;;
     --json) JSON_MODE="true"; shift ;;
+    --auto) AUTO_MODE="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
-[[ -n "$CAPABILITY" ]] || fail "--capability is required"
+infer_capability_from_staged() {
+  local staged_files
+  staged_files="$(git -C "$ROOT" diff --cached --name-only 2>/dev/null || true)"
+  if echo "$staged_files" | grep -q "gate\\.registry\\.yaml"; then
+    echo "gate.registry.add"
+    return
+  fi
+  if echo "$staged_files" | grep -q "gate\\.execution\\.topology\\.yaml"; then
+    echo "gate.topology.assign"
+    return
+  fi
+  echo ""
+}
+
+if [[ "$AUTO_MODE" == "true" ]]; then
+  CAPABILITY="$(infer_capability_from_staged)"
+  [[ -n "$CAPABILITY" ]] || fail "--auto could not infer capability from staged gate files"
+fi
+
+[[ -n "$CAPABILITY" ]] || fail "--capability is required (or use --auto)"
 [[ -n "$MUTATION" ]] || fail "--mutation requires a value"
 [[ -n "$RUN_KEY" ]] || fail "--run-key requires a value"
 

@@ -136,11 +136,15 @@ for gap in gaps:
         continue
     gap_id = str(gap.get("id", "<unknown>")).strip() or "<unknown>"
     status = str(gap.get("status", "")).strip().lower()
+    deferred_to_repo = str(gap.get("deferred_to_repo", "")).strip()
     parent_loop = gap.get("parent_loop")
     parent_loop_str = "" if parent_loop is None else str(parent_loop).strip()
 
     if status in required_statuses and not parent_loop_str:
         missing_required.append((gap_id, status))
+
+    if status == "open" and deferred_to_repo:
+        continue
 
     if status == "open" and parent_loop_str and parent_loop_str in closed_loops:
         orphan_open.append((gap_id, parent_loop_str))

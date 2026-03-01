@@ -44,11 +44,8 @@ aof_cap_count="$(grep -c '^  aof\.' "$SP/ops/capabilities.yaml" 2>/dev/null || t
 gate_total="$(yq -r '.gate_count.total // 0' "$SP/ops/bindings/gate.registry.yaml" 2>/dev/null || echo 0)"
 gate_active="$(yq -r '.gate_count.active // 0' "$SP/ops/bindings/gate.registry.yaml" 2>/dev/null || echo 0)"
 open_gaps="$(grep -c 'status: open' "$SP/ops/bindings/operational.gaps.yaml" 2>/dev/null || true)"
-scopes_dir="$SP/mailroom/state/loop-scopes"
-if [[ -d "$scopes_dir" ]]; then
-  set +o pipefail
-  open_loops="$(grep -l '^status: open' "$scopes_dir"/*.scope.md 2>/dev/null | wc -l | tr -d ' ')"
-  set -o pipefail
+if [[ -x "$SP/ops/commands/loops.sh" ]]; then
+  open_loops="$("$SP/ops/commands/loops.sh" summary 2>/dev/null | awk '/Open:[[:space:]]+[0-9]+/ {print $2; exit}')"
   open_loops="${open_loops:-0}"
 else
   open_loops=0
