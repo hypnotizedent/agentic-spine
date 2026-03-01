@@ -67,10 +67,38 @@ fi
 
 # Load VM IPs from vm.lifecycle.yaml
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
+IP_MODE="${MEDIA_HEALTH_IP_MODE:-auto}"  # auto|lan|tailscale
 
 get_vm_ip() {
   local vm="$1"
-  yq -r ".vms[] | select(.hostname == \"$vm\") | .lan_ip // .tailscale_ip" "$VM_BINDING" 2>/dev/null || echo ""
+  local lan_ip tailscale_ip
+  lan_ip="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .lan_ip // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  tailscale_ip="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .tailscale_ip // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+
+  case "$IP_MODE" in
+    lan)
+      [[ -n "$lan_ip" ]] && { echo "$lan_ip"; return 0; }
+      [[ -n "$tailscale_ip" ]] && { echo "$tailscale_ip"; return 0; }
+      ;;
+    tailscale)
+      [[ -n "$tailscale_ip" ]] && { echo "$tailscale_ip"; return 0; }
+      [[ -n "$lan_ip" ]] && { echo "$lan_ip"; return 0; }
+      ;;
+    auto|*)
+      if [[ -n "$lan_ip" ]] && ping -c 1 -W 1000 "$lan_ip" >/dev/null 2>&1; then
+        echo "$lan_ip"
+        return 0
+      fi
+      if [[ -n "$tailscale_ip" ]] && ping -c 1 -W 1000 "$tailscale_ip" >/dev/null 2>&1; then
+        echo "$tailscale_ip"
+        return 0
+      fi
+      [[ -n "$lan_ip" ]] && { echo "$lan_ip"; return 0; }
+      [[ -n "$tailscale_ip" ]] && { echo "$tailscale_ip"; return 0; }
+      ;;
+  esac
+
+  echo ""
 }
 
 # Health check for a single service

@@ -18,6 +18,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
 SERVICES_BINDING="$ROOT/ops/bindings/services.health.yaml"
+VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 
 # Re-exec under secrets injection (single capability receipt; no nested caps).
 if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
@@ -91,6 +92,19 @@ fi
 SONARR_BASE="${SONARR_PING_URL%/ping}"
 SONARR_BASE="${SONARR_BASE%/}"
 
+resolve_tailscale_base() {
+  local base="$1"
+  local vm="$2"
+  local ts_ip port
+  ts_ip="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .tailscale_ip // \"\"" "$VM_BINDING" 2>/dev/null || true)"
+  port="$(printf '%s' "$base" | sed -E 's#^https?://[^:]+:([0-9]+).*$#\1#')"
+  if [[ -n "$ts_ip" && -n "$port" && "$base" != *"$ts_ip"* ]]; then
+    echo "http://${ts_ip}:${port}"
+    return 0
+  fi
+  echo "$base"
+}
+
 if [[ -z "${DATE_STR:-}" ]]; then
   if [[ "$TZ_MODE" == "utc" ]]; then
     DATE_STR="$(date -u +%Y-%m-%d)"
@@ -99,11 +113,16 @@ if [[ -z "${DATE_STR:-}" ]]; then
   fi
 fi
 
-# Quick reachability check (no auth).
-curl -fsS --max-time 5 "${SONARR_BASE}/ping" >/dev/null 2>&1 || {
-  echo "STOP: sonarr ping failed: ${SONARR_BASE}/ping" >&2
-  exit 2
-}
+# Quick reachability check (no auth), with tailscale fallback when LAN is unreachable.
+if ! curl -fsS --max-time 5 "${SONARR_BASE}/ping" >/dev/null 2>&1; then
+  fallback_base="$(resolve_tailscale_base "$SONARR_BASE" "download-stack")"
+  if [[ "$fallback_base" != "$SONARR_BASE" ]] && curl -fsS --max-time 5 "${fallback_base}/ping" >/dev/null 2>&1; then
+    SONARR_BASE="$fallback_base"
+  else
+    echo "STOP: sonarr ping failed: ${SONARR_BASE}/ping" >&2
+    exit 2
+  fi
+fi
 
 python3 - "$SONARR_BASE" "$DATE_STR" "$TZ_MODE" "$SAMPLE_SIZE" <<'PY'
 import datetime as _dt

@@ -30,7 +30,7 @@ if [[ ! -f "$INFISICAL_AGENT" ]]; then
   exit 1
 fi
 
-RADARR_KEY=$(bash "$INFISICAL_AGENT" get media-stack prod RADARR_API_KEY 2>/dev/null || true)
+RADARR_KEY=$(bash "$INFISICAL_AGENT" get infrastructure prod RADARR_API_KEY 2>/dev/null || true)
 if [[ -z "$RADARR_KEY" ]]; then
   echo "D240 SKIP: Cannot fetch RADARR_API_KEY from Infisical (network/auth)"
   exit 0
