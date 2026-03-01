@@ -3,10 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 RECEIPTS_DIR="$ROOT/receipts/sessions"
-ARCHIVE_DIR="$ROOT/receipts/archive/sessions"
 RETENTION_DAYS=""
 EXECUTE=0
 JSON_MODE=0
+DELETED=0
 
 usage() {
   cat <<'USAGE'
@@ -15,7 +15,7 @@ receipts-rotate
 Usage:
   receipts-rotate [--days <n>] [--execute] [--json]
 
-Archives receipt session directories older than retention window.
+Deletes receipt session directories older than retention window.
 Default mode is dry-run.
 USAGE
 }
@@ -50,24 +50,15 @@ if [[ -z "$RETENTION_DAYS" ]]; then
 fi
 
 [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || { echo "FAIL: retention days must be numeric" >&2; exit 2; }
-mkdir -p "$ARCHIVE_DIR"
 
 mapfile -t targets < <(find "$RECEIPTS_DIR" -maxdepth 1 -mindepth 1 -type d -mtime +"$RETENTION_DAYS" 2>/dev/null | sort)
 count="${#targets[@]}"
 
 if [[ "$EXECUTE" -eq 1 ]]; then
-  moved=0
   for dir in "${targets[@]}"; do
-    base="$(basename "$dir")"
-    dest="$ARCHIVE_DIR/$base"
-    if [[ -e "$dest" ]]; then
-      dest="$ARCHIVE_DIR/${base}-$(date +%s)"
-    fi
-    mv "$dir" "$dest"
-    moved=$((moved + 1))
+    rm -rf "$dir"
+    DELETED=$((DELETED + 1))
   done
-else
-  moved=0
 fi
 
 if [[ "$JSON_MODE" -eq 1 ]]; then
@@ -76,9 +67,8 @@ if [[ "$JSON_MODE" -eq 1 ]]; then
     --argjson execute "$EXECUTE" \
     --argjson retention_days "$RETENTION_DAYS" \
     --argjson candidates "$count" \
-    --argjson moved "$moved" \
-    --arg archive_dir "$ARCHIVE_DIR" \
-    '{capability:$capability,execute:($execute==1),retention_days:$retention_days,candidates:$candidates,moved:$moved,archive_dir:$archive_dir}'
+    --argjson deleted "$DELETED" \
+    '{capability:$capability,execute:($execute==1),retention_days:$retention_days,candidates:$candidates,deleted:$deleted}'
   exit 0
 fi
 
@@ -86,8 +76,7 @@ echo "receipts.rotate"
 echo "execute: $EXECUTE"
 echo "retention_days: $RETENTION_DAYS"
 echo "candidates: $count"
-echo "moved: $moved"
-echo "archive_dir: $ARCHIVE_DIR"
+echo "deleted: $DELETED"
 
 if [[ "$EXECUTE" -eq 0 && "$count" -gt 0 ]]; then
   echo "sample_candidates:"

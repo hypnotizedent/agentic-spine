@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MAIL-ARCHIVER-MICROSOFT-DEEP-IMPORT-20260226
 created: 2026-02-26
-status: active
+status: closed
 owner: "@ronny"
 scope: communications
 priority: high

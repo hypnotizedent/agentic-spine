@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-NETWORK-INFRASTRUCTURE-NORMALIZATION-20260228
 created: 2026-02-28
-status: active
+status: closed
 owner: "@ronny"
 scope: network
 priority: medium

@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MD1400-CAPACITY-NORMALIZATION-20260227-20260227
 created: 2026-02-27
-status: active
+status: closed
 owner: "@ronny"
 scope: md1400
 priority: high

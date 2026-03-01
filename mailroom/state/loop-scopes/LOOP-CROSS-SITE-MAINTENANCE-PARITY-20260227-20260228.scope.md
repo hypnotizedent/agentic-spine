@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-CROSS-SITE-MAINTENANCE-PARITY-20260227-20260228
 created: 2026-02-28
-status: active
+status: closed
 owner: "@ronny"
 scope: cross
 priority: medium

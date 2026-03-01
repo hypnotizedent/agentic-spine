@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-HA-AGENT-TOOLING-GAPS-20260228
 created: 2026-02-28
-status: active
+status: closed
 owner: "@ronny"
 scope: ha
 priority: medium
