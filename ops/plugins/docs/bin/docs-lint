@@ -134,9 +134,13 @@ fi
 # ─────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- Check 6: Forbidden patterns ---"
-# Prevent doc-driven regressions back to the legacy runtime root.
+# Prevent doc-driven regressions back to the deprecated legacy runtime root.
 # Allow mentions in explicit quarantine/policy zones only.
-FORBIDDEN="$(rg -n -S '(/Users/ronnyworks/ronny-ops|~/ronny-ops|\\$HOME/ronny-ops|\\.config/ronny-ops)' "$DOCS" \
+LEGACY_REPO_NAME="$(yq -r '.terms[]? | select(.id == "legacy-repo-name") | .term // ""' "$ROOT/ops/bindings/deprecated.terms.yaml" 2>/dev/null || true)"
+[[ -n "$LEGACY_REPO_NAME" && "$LEGACY_REPO_NAME" != "null" ]] || LEGACY_REPO_NAME="legacy-repo"
+LEGACY_ESCAPED="$(printf '%s' "$LEGACY_REPO_NAME" | sed 's/[.[\*^$()+?{}|]/\\&/g')"
+FORBIDDEN_RE="(/Users/ronnyworks/${LEGACY_ESCAPED}|~/${LEGACY_ESCAPED}|\\\\$HOME/${LEGACY_ESCAPED}|\\\\.config/${LEGACY_ESCAPED})"
+FORBIDDEN="$(rg -n -S "$FORBIDDEN_RE" "$DOCS" \
   -g'!**/legacy/**' \
   -g'!**/governance/_audits/**' \
   -g'!**/governance/LEGACY_DEPRECATION.md' \
