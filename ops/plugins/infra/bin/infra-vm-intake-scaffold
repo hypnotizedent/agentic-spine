@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# Scaffold a new VM across lifecycle/ssh/backup/health surfaces in one transaction.
+# Default mode is dry-run; pass --execute to write.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+VM_LIFECYCLE="$ROOT/ops/bindings/vm.lifecycle.yaml"
+SSH_TARGETS="$ROOT/ops/bindings/ssh.targets.yaml"
+BACKUP_INV="$ROOT/ops/bindings/backup.inventory.yaml"
+SERVICES_HEALTH="$ROOT/ops/bindings/services.health.yaml"
+
+EXECUTE=0
+VMID=""
+HOSTNAME=""
+ROLE="general"
+SITE_SCOPE="shop"
+PROXMOX_HOST="pve"
+STATUS="planning"
+OWNER="@ronny"
+SSH_USER="ubuntu"
+LAN_IP=""
+TAILSCALE_IP=""
+BACKUP_CLASSIFICATION="important"
+BACKUP_PROFILE="vm-primary"
+BACKUP_ADMISSION_STATE="planned"
+HAS_DOCKER="true"
+
+usage() {
+  cat <<'USAGE'
+infra.vm.intake.scaffold - register a VM across lifecycle/ssh/backup/health.
+
+Usage:
+  infra-vm-intake-scaffold --vmid <id> --hostname <name> [options] [--execute]
+
+Required:
+  --vmid <id>
+  --hostname <name>
+
+Options:
+  --role <text>                         default: general
+  --site-scope <shop|home>              default: shop
+  --proxmox-host <pve|proxmox-home>     default: pve
+  --status <planning|provisioned|registered|active>  default: planning
+  --owner <@owner>                      default: @ronny
+  --ssh-user <user>                     default: ubuntu
+  --lan-ip <ip>
+  --tailscale-ip <ip>
+  --backup-classification <critical|important|rebuildable> default: important
+  --backup-profile <id>                 default: vm-primary
+  --backup-admission-state <planned|production_ready> default: planned
+  --has-docker <true|false>             default: true
+  --execute                             apply changes (default: dry-run)
+
+Notes:
+  - For WIP/new projects, keep --status planning and --backup-admission-state planned.
+  - This scaffolder creates disabled placeholder health endpoint to satisfy cross-surface registration.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --vmid) VMID="${2:?}"; shift 2 ;;
+    --hostname) HOSTNAME="${2:?}"; shift 2 ;;
+    --role) ROLE="${2:?}"; shift 2 ;;
+    --site-scope) SITE_SCOPE="${2:?}"; shift 2 ;;
+    --proxmox-host) PROXMOX_HOST="${2:?}"; shift 2 ;;
+    --status) STATUS="${2:?}"; shift 2 ;;
+    --owner) OWNER="${2:?}"; shift 2 ;;
+    --ssh-user) SSH_USER="${2:?}"; shift 2 ;;
+    --lan-ip) LAN_IP="${2:?}"; shift 2 ;;
+    --tailscale-ip) TAILSCALE_IP="${2:?}"; shift 2 ;;
+    --backup-classification) BACKUP_CLASSIFICATION="${2:?}"; shift 2 ;;
+    --backup-profile) BACKUP_PROFILE="${2:?}"; shift 2 ;;
+    --backup-admission-state) BACKUP_ADMISSION_STATE="${2:?}"; shift 2 ;;
+    --has-docker) HAS_DOCKER="${2:?}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$VMID" ]] || { echo "FAIL: --vmid required" >&2; exit 2; }
+[[ -n "$HOSTNAME" ]] || { echo "FAIL: --hostname required" >&2; exit 2; }
+[[ "$VMID" =~ ^[0-9]+$ ]] || { echo "FAIL: --vmid must be numeric" >&2; exit 2; }
+[[ "$SITE_SCOPE" =~ ^(shop|home)$ ]] || { echo "FAIL: --site-scope must be shop|home" >&2; exit 2; }
+[[ "$STATUS" =~ ^(planning|provisioned|registered|active)$ ]] || { echo "FAIL: invalid --status" >&2; exit 2; }
+[[ "$BACKUP_CLASSIFICATION" =~ ^(critical|important|rebuildable)$ ]] || { echo "FAIL: invalid --backup-classification" >&2; exit 2; }
+[[ "$BACKUP_ADMISSION_STATE" =~ ^(planned|production_ready)$ ]] || { echo "FAIL: invalid --backup-admission-state" >&2; exit 2; }
+[[ "$HAS_DOCKER" =~ ^(true|false)$ ]] || { echo "FAIL: --has-docker must be true|false" >&2; exit 2; }
+
+for dep in yq; do
+  command -v "$dep" >/dev/null 2>&1 || { echo "FAIL: missing dependency: $dep" >&2; exit 1; }
+done
+
+for f in "$VM_LIFECYCLE" "$SSH_TARGETS" "$BACKUP_INV" "$SERVICES_HEALTH"; do
+  [[ -f "$f" ]] || { echo "FAIL: missing $f" >&2; exit 1; }
+done
+
+if yq -e ".vms[] | select(.id == ${VMID} or .hostname == \"${HOSTNAME}\")" "$VM_LIFECYCLE" >/dev/null 2>&1; then
+  echo "FAIL: vm.lifecycle already contains vmid=$VMID or hostname=$HOSTNAME" >&2
+  exit 1
+fi
+if yq -e ".ssh.targets[] | select(.id == \"${HOSTNAME}\")" "$SSH_TARGETS" >/dev/null 2>&1; then
+  echo "FAIL: ssh target already exists for id=$HOSTNAME" >&2
+  exit 1
+fi
+
+BACKUP_TARGET="vm-${VMID}-${HOSTNAME}-primary"
+HEALTH_ID="${HOSTNAME}-health-placeholder"
+
+if yq -e ".targets[] | select(.name == \"${BACKUP_TARGET}\")" "$BACKUP_INV" >/dev/null 2>&1; then
+  echo "FAIL: backup target already exists: $BACKUP_TARGET" >&2
+  exit 1
+fi
+if yq -e ".endpoints[] | select(.id == \"${HEALTH_ID}\")" "$SERVICES_HEALTH" >/dev/null 2>&1; then
+  echo "FAIL: services.health endpoint id already exists: $HEALTH_ID" >&2
+  exit 1
+fi
+
+if [[ "$PROXMOX_HOST" == "proxmox-home" ]]; then
+  DEST_LANE="nas-offsite-vm"
+else
+  DEST_LANE="pve-vzdump-primary"
+fi
+
+if [[ "$BACKUP_CLASSIFICATION" == "rebuildable" ]]; then
+  STALE_HOURS="168"
+  SCHEDULE_CLASS="weekly-est"
+  RESTORE_CLASS="vm-dry-run-quarterly"
+elif [[ "$BACKUP_CLASSIFICATION" == "critical" ]]; then
+  STALE_HOURS="26"
+  SCHEDULE_CLASS="daily-primary-est"
+  RESTORE_CLASS="tier1-small-state-dry-run-quarterly"
+else
+  STALE_HOURS="48"
+  SCHEDULE_CLASS="daily-primary-est"
+  RESTORE_CLASS="vm-dry-run-quarterly"
+fi
+
+SSH_HOST="$TAILSCALE_IP"
+if [[ -z "$SSH_HOST" ]]; then
+  SSH_HOST="$LAN_IP"
+fi
+[[ -n "$SSH_HOST" ]] || SSH_HOST="PENDING_HOST"
+
+if [[ "$PROXMOX_HOST" == "proxmox-home" ]]; then
+  BACKUP_BASE="/mnt/pve/synology-backups/dump"
+else
+  BACKUP_BASE="/tank/backups/vzdump/dump"
+fi
+
+TARGET_ENABLED="false"
+if [[ "$BACKUP_ADMISSION_STATE" == "production_ready" && "$STATUS" == "active" ]]; then
+  TARGET_ENABLED="true"
+fi
+
+HEALTH_URL="http://${SSH_HOST}:80/health"
+
+if [[ "$EXECUTE" -eq 0 ]]; then
+  echo "infra.vm.intake.scaffold"
+  echo "mode: dry-run"
+  echo "vmid: $VMID"
+  echo "hostname: $HOSTNAME"
+  echo "status: $STATUS"
+  echo "backup_target: $BACKUP_TARGET"
+  echo "backup_admission_state: $BACKUP_ADMISSION_STATE"
+  echo "destination_lane: $DEST_LANE"
+  echo "target_enabled: $TARGET_ENABLED"
+  echo "ssh_host: $SSH_HOST"
+  echo "health_placeholder: $HEALTH_ID -> $HEALTH_URL (enabled=false)"
+  echo "apply: rerun with --execute"
+  exit 0
+fi
+
+export VMID HOSTNAME ROLE SITE_SCOPE PROXMOX_HOST STATUS OWNER SSH_USER LAN_IP TAILSCALE_IP BACKUP_TARGET HAS_DOCKER BACKUP_PROFILE BACKUP_ADMISSION_STATE DEST_LANE STALE_HOURS SCHEDULE_CLASS RESTORE_CLASS BACKUP_BASE BACKUP_CLASSIFICATION TARGET_ENABLED SSH_HOST HEALTH_ID HEALTH_URL
+
+# vm.lifecycle
+now_date="$(date -u +%Y-%m-%d)"
+export NOW_DATE="$now_date"
+yq -i '.vms += [{
+  "id": (env(VMID) | tonumber),
+  "hostname": env(HOSTNAME),
+  "proxmox_host": env(PROXMOX_HOST),
+  "role": env(ROLE),
+  "owner": env(OWNER),
+  "status": env(STATUS),
+  "created_at": env(NOW_DATE),
+  "profile": "spine-ready-v1",
+  "site_scope": env(SITE_SCOPE),
+  "lan_ip": (if env(LAN_IP) == "" then null else env(LAN_IP) end),
+  "tailscale_ip": (if env(TAILSCALE_IP) == "" then null else env(TAILSCALE_IP) end),
+  "ssh_target": env(HOSTNAME),
+  "ssh_user": env(SSH_USER),
+  "os": "ubuntu-24.04",
+  "resources": {"cpu_cores": 2, "memory_mb": 4096, "boot_disk_gb": 40},
+  "storage_tier": "boot-only",
+  "stacks": [],
+  "services": [],
+  "backup_target": env(BACKUP_TARGET),
+  "has_docker": (env(HAS_DOCKER) == "true"),
+  "health_probe_policy": "full",
+  "decommission_policy": "requires_migration_first",
+  "description": "Scaffolded by infra.vm.intake.scaffold; refine before active promotion."
+}]' "$VM_LIFECYCLE"
+
+# ssh.targets
+yq -i '.ssh.targets += [{
+  "id": env(HOSTNAME),
+  "host": env(SSH_HOST),
+  "user": env(SSH_USER),
+  "description": "Scaffolded VM target; verify IP/user before promotion to active.",
+  "tags": ["vm", "scaffold", env(SITE_SCOPE)]
+}]' "$SSH_TARGETS"
+
+# backup runtime unit + target
+yq -i '.runtime_units += [{
+  "unit_id": ("vm-" + env(VMID) + "-" + env(HOSTNAME)),
+  "kind": "vm",
+  "hostname": env(HOSTNAME),
+  "backup_profile": env(BACKUP_PROFILE),
+  "backup_admission_state": env(BACKUP_ADMISSION_STATE),
+  "data_class": (if env(BACKUP_CLASSIFICATION) == "critical" then "tier1_critical" elif env(BACKUP_CLASSIFICATION) == "rebuildable" then "payload_regenerable" else "small_state" end),
+  "include_paths": ["vm-disk"],
+  "exclude_paths": ["payload_regenerable"],
+  "destination_lane": env(DEST_LANE),
+  "schedule_class": env(SCHEDULE_CLASS),
+  "restore_class": env(RESTORE_CLASS),
+  "inventory_targets": [env(BACKUP_TARGET)]
+}] | .targets += [{
+  "name": env(BACKUP_TARGET),
+  "enabled": (env(TARGET_ENABLED) == "true"),
+  "kind": "file_glob",
+  "host": env(PROXMOX_HOST),
+  "base_path": env(BACKUP_BASE),
+  "glob": ("vzdump-qemu-" + env(VMID) + "-*.vma.zst"),
+  "stale_after_hours": (env(STALE_HOURS) | tonumber),
+  "classification": env(BACKUP_CLASSIFICATION),
+  "description": "Scaffold target from infra.vm.intake.scaffold (enable when production_ready + active)."
+}]' "$BACKUP_INV"
+
+# services.health placeholder
+yq -i '.endpoints += [{
+  "id": env(HEALTH_ID),
+  "host": env(HOSTNAME),
+  "url": env(HEALTH_URL),
+  "expect": 200,
+  "enabled": false,
+  "description": "Scaffold placeholder health endpoint. Replace with real service probes before active enforcement."
+}]' "$SERVICES_HEALTH"
+
+echo "infra.vm.intake.scaffold"
+echo "mode: execute"
+echo "vmid: $VMID"
+echo "hostname: $HOSTNAME"
+echo "backup_target: $BACKUP_TARGET"
+echo "target_enabled: $TARGET_ENABLED"
+echo "status: OK"
