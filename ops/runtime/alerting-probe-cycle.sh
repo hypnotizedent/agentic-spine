@@ -9,6 +9,8 @@ SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CAP_RUNNER="${SPINE_ROOT}/bin/ops"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 EMAIL_INTENT_DIR="${SPINE_ROOT}/mailroom/outbox/alerts/email-intents"
+RECOVERY_DISPATCH_BIN="${SPINE_ROOT}/ops/plugins/recovery/bin/recovery-dispatch"
+SNAPSHOT_FILE="/tmp/spine-alerting-probe-latest.json"
 
 enqueue_email_intent() {
   local domain_id="$1"
@@ -73,6 +75,18 @@ if ! "$CAP_RUNNER" cap run alerting.dispatch; then
     "alerting.dispatch failed" \
     "Scheduled alerting dispatch failed; review alerting logs and channel health."
   exit 1
+fi
+
+# Recovery bridge: if snapshot payload includes failing_gates fields, dispatch
+# deterministic recovery attempts for those gates.
+if [[ -x "$RECOVERY_DISPATCH_BIN" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$SNAPSHOT_FILE" ]]; then
+  mapfile -t recovery_gate_ids < <(
+    jq -r '([.failing_gates[]?] + [.domains[]?.failing_gates[]?]) | unique | .[]?' "$SNAPSHOT_FILE" 2>/dev/null || true
+  )
+  for gid in "${recovery_gate_ids[@]}"; do
+    [[ -n "$gid" ]] || continue
+    "$RECOVERY_DISPATCH_BIN" --gate-id "$gid" --failure-class deterministic >/dev/null 2>&1 || true
+  done
 fi
 
 echo "[alerting-probe-cycle] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

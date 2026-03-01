@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+GAPS_FILE="${VERIFY_GAPS_FILE:-$ROOT/ops/bindings/operational.gaps.yaml}"
+REGISTRY_FILE="${VERIFY_GATE_REGISTRY_FILE:-$ROOT/ops/bindings/gate.registry.yaml}"
+STREAK_FILE="${VERIFY_PASS_STREAK_FILE:-$ROOT/ops/plugins/verify/state/gate-pass-streak.json}"
+GAPS_CLOSE_BIN="$ROOT/ops/plugins/loops/bin/gaps-close"
+LOG_FILE="$ROOT/mailroom/logs/gap-auto-close.ndjson"
+DRY_RUN=0
+
+usage() {
+  cat <<'USAGE'
+gaps-auto-close
+
+Usage:
+  gaps-auto-close [--dry-run]
+
+Auto-closes medium-severity verify-response-loop gaps when the recovery gate has
+passed for 2+ consecutive verify runs.
+USAGE
+}
+
+fail() {
+  echo "gaps.auto.close FAIL: $*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -f "$GAPS_FILE" ]] || fail "missing gaps file: $GAPS_FILE"
+[[ -f "$REGISTRY_FILE" ]] || fail "missing gate registry: $REGISTRY_FILE"
+[[ -x "$GAPS_CLOSE_BIN" ]] || fail "missing gaps.close script: $GAPS_CLOSE_BIN"
+command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+command -v jq >/dev/null 2>&1 || fail "missing dependency: jq"
+
+if [[ ! -f "$STREAK_FILE" ]]; then
+  echo "gaps.auto.close"
+  echo "status: no-op"
+  echo "reason: missing pass streak file ($STREAK_FILE)"
+  exit 0
+fi
+
+if ! jq -e . >/dev/null 2>&1 <"$STREAK_FILE"; then
+  fail "invalid streak JSON: $STREAK_FILE"
+fi
+
+mkdir -p "$(dirname "$LOG_FILE")"
+
+total_candidates=0
+closed=0
+skipped=0
+failed=0
+
+while IFS=$'\t' read -r gap_id gate_id severity; do
+  [[ -n "$gap_id" && -n "$gate_id" ]] || continue
+  total_candidates=$((total_candidates + 1))
+
+  streak="$(jq -r --arg gid "$gate_id" '.[$gid].streak // 0' "$STREAK_FILE" 2>/dev/null || echo 0)"
+  [[ "$streak" =~ ^[0-9]+$ ]] || streak=0
+
+  if (( streak < 2 )); then
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  gate_script="$(GID="$gate_id" yq e -r '.gates[] | select(.id == strenv(GID)) | .check_script // ""' "$REGISTRY_FILE" 2>/dev/null | head -n1)"
+  if [[ -z "$gate_script" || "$gate_script" == "null" || ! -x "$ROOT/$gate_script" ]]; then
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  if ! "$ROOT/$gate_script" >/dev/null 2>&1; then
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  fixed_in="auto-close: gate ${gate_id} passing (streak=${streak})"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "WOULD-CLOSE: ${gap_id} (gate=${gate_id}, streak=${streak})"
+    closed=$((closed + 1))
+    jq -cn \
+      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg gap_id "$gap_id" \
+      --arg gate_id "$gate_id" \
+      --argjson streak "$streak" \
+      --arg fixed_in "$fixed_in" \
+      --arg mode "dry-run" \
+      '{timestamp_utc:$ts,gap_id:$gap_id,gate_id:$gate_id,streak:$streak,fixed_in:$fixed_in,mode:$mode,result:"would-close"}' \
+      >> "$LOG_FILE"
+    continue
+  fi
+
+  set +e
+  "$GAPS_CLOSE_BIN" --id "$gap_id" --status fixed --fixed-in "$fixed_in" --notes "Auto-closed by gaps.auto.close after stable verify pass streak" >/dev/null 2>&1
+  rc=$?
+  set -e
+
+  if [[ "$rc" -eq 0 ]]; then
+    closed=$((closed + 1))
+    jq -cn \
+      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg gap_id "$gap_id" \
+      --arg gate_id "$gate_id" \
+      --argjson streak "$streak" \
+      --arg fixed_in "$fixed_in" \
+      --arg mode "execute" \
+      '{timestamp_utc:$ts,gap_id:$gap_id,gate_id:$gate_id,streak:$streak,fixed_in:$fixed_in,mode:$mode,result:"closed"}' \
+      >> "$LOG_FILE"
+  else
+    failed=$((failed + 1))
+    jq -cn \
+      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg gap_id "$gap_id" \
+      --arg gate_id "$gate_id" \
+      --argjson streak "$streak" \
+      --arg mode "execute" \
+      --argjson rc "$rc" \
+      '{timestamp_utc:$ts,gap_id:$gap_id,gate_id:$gate_id,streak:$streak,mode:$mode,result:"failed",exit_code:$rc}' \
+      >> "$LOG_FILE"
+  fi
+
+done < <(
+  yq e -r '.gaps[] | select(.status == "open" and (.discovered_by // "") == "verify-response-loop" and (.severity // "") == "medium" and ((.recovery_gate_id // "") != "")) | [.id, .recovery_gate_id, .severity] | @tsv' "$GAPS_FILE" 2>/dev/null || true
+)
+
+echo "gaps.auto.close"
+echo "dry_run: $DRY_RUN"
+echo "candidates: $total_candidates"
+echo "closed: $closed"
+echo "skipped: $skipped"
+echo "failed: $failed"
+echo "log: $LOG_FILE"
+
+if (( failed > 0 )); then
+  exit 1
+fi

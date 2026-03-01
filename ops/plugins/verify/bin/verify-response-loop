@@ -9,7 +9,8 @@ GAPS_FILE="${VERIFY_GAPS_FILE:-$SPINE_ROOT/ops/bindings/operational.gaps.yaml}"
 CURSOR_FILE="${VERIFY_RESPONSE_CURSOR_FILE:-/tmp/verify-response-loop.cursor}"
 GATE_REVIEW_QUEUE_FILE="${VERIFY_GATE_REVIEW_QUEUE_FILE:-$SPINE_ROOT/mailroom/outbox/alerts/verify-gate-review-queue.ndjson}"
 EMAIL_INTENT_DIR="${VERIFY_RESPONSE_EMAIL_INTENT_DIR:-$SPINE_ROOT/mailroom/outbox/alerts/email-intents}"
-DEFAULT_PARENT_LOOP="${VERIFY_RESPONSE_PARENT_LOOP:-LOOP-W79-T2-HIGH-STRUCTURAL-20260228}"
+DEFAULT_PARENT_LOOP="${VERIFY_RESPONSE_PARENT_LOOP:-LOOP-SPINE-SELF-HEALING-E2E-20260301}"
+RECOVERY_DISPATCH_BIN="${VERIFY_RECOVERY_DISPATCH_BIN:-$SPINE_ROOT/ops/plugins/recovery/bin/recovery-dispatch}"
 
 fail() {
   echo "verify.response.loop FAIL: $*" >&2
@@ -38,6 +39,60 @@ suggested_recipient: "alerts@spine.ronny.works"
 source_alert: "verify-response-loop"
 flush_status: pending
 INTENT
+}
+
+run_recovery_dispatch() {
+  local gate_id="$1"
+  local failure_class="$2"
+  local out
+
+  if [[ ! -x "$RECOVERY_DISPATCH_BIN" ]]; then
+    jq -cn \
+      --arg gid "$gate_id" \
+      --arg fc "$failure_class" \
+      '{gate_id:$gid,failure_class:$fc,matched:false,recovered:false,escalate:false,suppressed:false,attempt:0,message:"recovery-dispatch unavailable"}'
+    return 0
+  fi
+
+  out="$("$RECOVERY_DISPATCH_BIN" --gate-id "$gate_id" --failure-class "$failure_class" --json 2>/dev/null || true)"
+  if jq -e . >/dev/null 2>&1 <<<"$out"; then
+    printf '%s\n' "$out"
+  else
+    jq -cn \
+      --arg gid "$gate_id" \
+      --arg fc "$failure_class" \
+      '{gate_id:$gid,failure_class:$fc,matched:false,recovered:false,escalate:false,suppressed:false,attempt:0,message:"recovery-dispatch returned invalid output"}'
+  fi
+}
+
+queue_gap_candidate() {
+  local gate_id="$1"
+  local failure_class="$2"
+  local target_file="$3"
+  local existing_open gate_name gate_ring gate_doc
+
+  existing_open="$(
+    GID="$gate_id" yq e '[.gaps[] | select(.status == "open" and (.discovered_by // "") == "verify-response-loop" and (.recovery_gate_id // "") == strenv(GID))] | length' "$GAPS_FILE" 2>/dev/null || echo 0
+  )"
+  if [[ "$existing_open" =~ ^[0-9]+$ ]] && (( existing_open > 0 )); then
+    return 0
+  fi
+
+  gate_name="$(
+    GID="$gate_id" yq e -r '.gates[] | select(.id == strenv(GID)) | .name // ""' "$GATE_REGISTRY" 2>/dev/null | head -n1
+  )"
+  gate_ring="$(
+    GID="$gate_id" yq e -r '.gates[] | select(.id == strenv(GID)) | .ring // "standard"' "$GATE_REGISTRY" 2>/dev/null | head -n1
+  )"
+  gate_doc="$(
+    GID="$gate_id" yq e -r '.gates[] | select(.id == strenv(GID)) | .check_script // ""' "$GATE_REGISTRY" 2>/dev/null | head -n1
+  )"
+
+  [[ -n "$gate_doc" ]] || gate_doc="ops/plugins/verify/bin/verify-run"
+  [[ -n "$gate_name" ]] || gate_name="Unknown gate"
+  [[ -n "$gate_ring" ]] || gate_ring="standard"
+
+  printf '%s\t%s\t%s\t%s\t%s\n' "$gate_id" "$failure_class" "$gate_name" "$gate_ring" "$gate_doc" >> "$target_file"
 }
 
 [[ -x "$CAP_RUNNER" ]] || fail "missing cap runner: $CAP_RUNNER"
@@ -77,59 +132,63 @@ mapfile -t gate_bug_ids < <(jq -r '.failure_class.gate_bug[]?' <<<"$latest_line"
 freshness_reconciled=0
 gaps_opened=0
 gate_bugs_flagged=0
+gap_candidates=0
+gap_candidates_file="$(mktemp)"
+cleanup_candidates() { rm -f "$gap_candidates_file"; }
+trap cleanup_candidates EXIT
 
 if ((${#freshness_ids[@]} > 0)); then
   if "$CAP_RUNNER" cap run verify.freshness.reconcile >/dev/null 2>&1; then
     freshness_reconciled="${#freshness_ids[@]}"
   else
     echo "verify.response.loop WARN: verify.freshness.reconcile failed for run_key=$run_key" >&2
+    for gid in "${freshness_ids[@]}"; do
+      [[ -n "$gid" ]] || continue
+      recovery_result="$(run_recovery_dispatch "$gid" "freshness")"
+      recovered="$(jq -r '.recovered // false' <<<"$recovery_result")"
+      if [[ "$recovered" == "true" ]]; then
+        freshness_reconciled=$((freshness_reconciled + 1))
+      else
+        queue_gap_candidate "$gid" "freshness" "$gap_candidates_file"
+        gap_candidates=$((gap_candidates + 1))
+      fi
+    done
+
     enqueue_email_intent \
       "verify-response-loop" \
       "warn" \
       "verify.freshness.reconcile failed in response loop" \
-      "run_key=${run_key} scope=${scope} freshness_gate_count=${#freshness_ids[@]}: scheduled reconcile failed from verify-response-loop."
+      "run_key=${run_key} scope=${scope} freshness_gate_count=${#freshness_ids[@]}: scheduled reconcile failed from verify-response-loop; recovery-dispatch fallback attempted."
   fi
 fi
 
 if ((${#deterministic_ids[@]} > 0)); then
+  for gid in "${deterministic_ids[@]}"; do
+    [[ -n "$gid" ]] || continue
+    recovery_result="$(run_recovery_dispatch "$gid" "deterministic")"
+    recovered="$(jq -r '.recovered // false' <<<"$recovery_result")"
+    if [[ "$recovered" == "true" ]]; then
+      continue
+    fi
+    queue_gap_candidate "$gid" "deterministic" "$gap_candidates_file"
+    gap_candidates=$((gap_candidates + 1))
+  done
+fi
+
+if [[ -s "$gap_candidates_file" ]]; then
   batch_file="$(mktemp)"
-  cleanup_batch() { rm -f "$batch_file"; }
+  cleanup_batch() { rm -f "$batch_file"; cleanup_candidates; }
   trap cleanup_batch EXIT
 
   echo "gaps:" > "$batch_file"
-  for gid in "${deterministic_ids[@]}"; do
+  while IFS=$'\t' read -r gid failure_class gate_name gate_ring gate_doc; do
     [[ -n "$gid" ]] || continue
-    existing_open="$(
-      GID="$gid" yq e '[.gaps[] | select(.status == "open" and ((.description // "") | contains("Auto-opened by verify-response-loop for gate " + strenv(GID) + ".")))] | length' "$GAPS_FILE" 2>/dev/null || echo 0
-    )"
-    if [[ "$existing_open" =~ ^[0-9]+$ ]] && (( existing_open > 0 )); then
-      continue
-    fi
-
-    gate_name="$(
-      GID="$gid" yq e -r '.gates[] | select(.id == strenv(GID)) | .name // ""' "$GATE_REGISTRY" 2>/dev/null | head -n1
-    )"
-    gate_ring="$(
-      GID="$gid" yq e -r '.gates[] | select(.id == strenv(GID)) | .ring // "standard"' "$GATE_REGISTRY" 2>/dev/null | head -n1
-    )"
-    gate_doc="$(
-      GID="$gid" yq e -r '.gates[] | select(.id == strenv(GID)) | .check_script // ""' "$GATE_REGISTRY" 2>/dev/null | head -n1
-    )"
-
-    case "$gate_ring" in
-      instant) gap_severity="critical" ;;
-      deep) gap_severity="medium" ;;
-      *) gap_severity="high" ;;
-    esac
-
-    [[ -n "$gate_doc" ]] || gate_doc="ops/plugins/verify/bin/verify-run"
-    [[ -n "$gate_name" ]] || gate_name="Unknown gate"
-
     cat >> "$batch_file" <<EOF
   - id: auto
     type: runtime-bug
-    severity: $gap_severity
+    severity: medium
     discovered_by: verify-response-loop
+    recovery_gate_id: $gid
     doc: $gate_doc
     description: |
       Auto-opened by verify-response-loop for gate $gid.
@@ -138,11 +197,11 @@ if ((${#deterministic_ids[@]} > 0)); then
       scope: $scope
       gate_name: $gate_name
       gate_ring: $gate_ring
-      failure_class: deterministic
+      failure_class: $failure_class
       source_history: ops/plugins/verify/state/verify-failure-class-history.ndjson
 EOF
     gaps_opened=$((gaps_opened + 1))
-  done
+  done < "$gap_candidates_file"
 
   if (( gaps_opened > 0 )); then
     if ! "$CAP_RUNNER" cap run gaps.file -- --batch "$batch_file" --parent-loop "$DEFAULT_PARENT_LOOP" >/dev/null 2>&1; then
@@ -157,7 +216,6 @@ EOF
   fi
 
   rm -f "$batch_file"
-  trap - EXIT
 fi
 
 if ((${#gate_bug_ids[@]} > 0)); then
@@ -179,7 +237,7 @@ if (( gaps_opened > 0 )); then
   enqueue_email_intent \
     "verify-response-loop" \
     "incident" \
-    "Deterministic verify failures auto-filed as gaps" \
+    "Verify failures auto-filed as gaps" \
     "run_key=${run_key} scope=${scope} gaps_opened=${gaps_opened} parent_loop=${DEFAULT_PARENT_LOOP}."
 fi
 
@@ -190,6 +248,8 @@ if (( gate_bugs_flagged > 0 )); then
     "Gate bug classifications queued for review" \
     "run_key=${run_key} scope=${scope} gate_bugs_flagged=${gate_bugs_flagged} queue_file=${GATE_REVIEW_QUEUE_FILE}."
 fi
+
+"$CAP_RUNNER" cap run gaps.auto.close >/dev/null 2>&1 || true
 
 printf '%s\n' "$fingerprint" > "$CURSOR_FILE"
 echo "${freshness_reconciled} freshness auto-reconciled, ${gaps_opened} gaps opened, ${gate_bugs_flagged} gate bugs flagged"

@@ -4,6 +4,22 @@ set -euo pipefail
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 REGISTRY="${SPINE_ROOT}/ops/bindings/launchd.scheduler.registry.yaml"
 EMAIL_INTENT_DIR="${SPINE_ROOT}/mailroom/outbox/alerts/email-intents"
+CAP_RUNNER="${SPINE_ROOT}/bin/ops"
+AUTO_RESTART=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --auto-restart) AUTO_RESTART=1; shift ;;
+    -h|--help)
+      echo "Usage: launchd-health-check.sh [--auto-restart]"
+      exit 0
+      ;;
+    *)
+      echo "[launchd-health-check] unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
 
 if [[ ! -f "$REGISTRY" ]]; then
   echo "[launchd-health-check] missing registry: $REGISTRY" >&2
@@ -50,17 +66,27 @@ fi
 uid_val="$(id -u)"
 missing=0
 missing_labels=()
+recovered=0
 for label in "${labels[@]}"; do
   if launchctl print "gui/${uid_val}/${label}" >/dev/null 2>&1; then
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] OK ${label}"
   else
+    if [[ "$AUTO_RESTART" -eq 1 ]]; then
+      if "$CAP_RUNNER" cap run recovery.launchd.restart -- --label "$label" >/dev/null 2>&1 && \
+         launchctl print "gui/${uid_val}/${label}" >/dev/null 2>&1; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] RECOVERED ${label} (auto-restart)"
+        recovered=$((recovered + 1))
+        continue
+      fi
+    fi
+
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] MISSING ${label}"
     missing=$((missing + 1))
     missing_labels+=("$label")
   fi
 done
 
-echo "[launchd-health-check] labels=${#labels[@]} missing=${missing}"
+echo "[launchd-health-check] labels=${#labels[@]} missing=${missing} recovered=${recovered} auto_restart=${AUTO_RESTART}"
 if [[ "$missing" -gt 0 ]]; then
   enqueue_email_intent \
     "incident" \

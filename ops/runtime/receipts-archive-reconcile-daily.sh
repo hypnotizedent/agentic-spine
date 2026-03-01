@@ -14,5 +14,7 @@ spine_job_run "receipts-archive-reconcile-daily:receipts-checksum-parity-report"
   "$CHECKSUM"
 spine_job_run "receipts-archive-reconcile-daily:receipts.rotate" \
   "$CAP_RUNNER" cap run receipts.rotate -- --execute
+spine_job_run "receipts-archive-reconcile-daily:mailroom.log.rotate" \
+  "$CAP_RUNNER" cap run mailroom.log.rotate
 
 echo "[receipts-archive-reconcile-daily] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

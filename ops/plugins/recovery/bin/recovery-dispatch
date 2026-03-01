@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BINDING_FILE="${RECOVERY_ACTIONS_FILE:-$SPINE_ROOT/ops/bindings/recovery.actions.yaml}"
+LIB_FILE="$SPINE_ROOT/ops/plugins/recovery/lib/recovery-safety.sh"
+
+usage() {
+  cat <<'USAGE'
+recovery-dispatch
+
+Usage:
+  recovery-dispatch --gate-id <D###> --failure-class <deterministic|freshness> [--dry-run] [--json]
+USAGE
+}
+
+stop() {
+  echo "recovery.dispatch FAIL: $*" >&2
+  exit 1
+}
+
+[[ -f "$LIB_FILE" ]] || stop "missing library: $LIB_FILE"
+# shellcheck disable=SC1090
+source "$LIB_FILE"
+
+GATE_ID=""
+FAILURE_CLASS=""
+DRY_RUN=0
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --gate-id) GATE_ID="${2:-}"; shift 2 ;;
+    --failure-class) FAILURE_CLASS="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$GATE_ID" ]] || stop "--gate-id is required"
+case "$FAILURE_CLASS" in
+  deterministic|freshness) ;;
+  *) stop "--failure-class must be deterministic|freshness" ;;
+esac
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+[[ -f "$BINDING_FILE" ]] || stop "missing binding: $BINDING_FILE"
+
+recovery_init_state
+
+match_index="$(
+  GATE_ID="$GATE_ID" FAILURE_CLASS="$FAILURE_CLASS" yq e -r '
+    .actions
+    | to_entries
+    | map(
+        select(
+          ((.value.trigger.failure_class // "deterministic") == strenv(FAILURE_CLASS)) and
+          (
+            ((.value.trigger.gate_ids // []) | length == 0) or
+            ((.value.trigger.gate_ids // []) | contains([strenv(GATE_ID)]))
+          )
+        )
+      )
+    | .[0].key // ""
+  ' "$BINDING_FILE" 2>/dev/null || true
+)"
+
+emit_result() {
+  local matched="$1"
+  local action_id="$2"
+  local recovered="$3"
+  local escalate="$4"
+  local suppressed="$5"
+  local attempt="$6"
+  local action_type="$7"
+  local message="$8"
+
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -cn \
+      --arg gate_id "$GATE_ID" \
+      --arg failure_class "$FAILURE_CLASS" \
+      --argjson matched "$( [[ "$matched" == "true" ]] && echo true || echo false )" \
+      --arg action_id "$action_id" \
+      --arg action_type "$action_type" \
+      --argjson recovered "$( [[ "$recovered" == "true" ]] && echo true || echo false )" \
+      --argjson escalate "$( [[ "$escalate" == "true" ]] && echo true || echo false )" \
+      --argjson suppressed "$( [[ "$suppressed" == "true" ]] && echo true || echo false )" \
+      --argjson attempt "${attempt:-0}" \
+      --arg message "$message" \
+      '{gate_id:$gate_id,failure_class:$failure_class,matched:$matched,action_id:$action_id,action_type:$action_type,recovered:$recovered,escalate:$escalate,suppressed:$suppressed,attempt:$attempt,message:$message}'
+  else
+    echo "recovery.dispatch"
+    echo "gate_id: $GATE_ID"
+    echo "failure_class: $FAILURE_CLASS"
+    echo "matched: $matched"
+    echo "action_id: $action_id"
+    echo "action_type: $action_type"
+    echo "attempt: ${attempt:-0}"
+    echo "recovered: $recovered"
+    echo "escalate: $escalate"
+    echo "suppressed: $suppressed"
+    echo "message: $message"
+  fi
+}
+
+if [[ -z "$match_index" || "$match_index" == "null" ]]; then
+  emit_result "false" "" "false" "false" "false" 0 "" "no matching recovery action"
+  exit 0
+fi
+
+action_id="$(yq e -r ".actions[$match_index].id // \"action-$match_index\"" "$BINDING_FILE")"
+action_type="$(yq e -r ".actions[$match_index].recovery.type // \"\"" "$BINDING_FILE")"
+[[ -n "$action_type" && "$action_type" != "null" ]] || stop "action '$action_id' missing recovery.type"
+
+max_attempts="$(yq e -r ".actions[$match_index].safety.max_attempts // .actions[$match_index].recovery.max_attempts // .defaults.max_attempts // 2" "$BINDING_FILE")"
+cooldown_seconds="$(yq e -r ".actions[$match_index].safety.cooldown_seconds // .defaults.cooldown_seconds // 0" "$BINDING_FILE")"
+escalate_after="$(yq e -r ".actions[$match_index].safety.escalate_after_failures // .defaults.escalate_after_failures // .actions[$match_index].safety.max_attempts // .defaults.max_attempts // 1" "$BINDING_FILE")"
+
+[[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=2
+[[ "$cooldown_seconds" =~ ^[0-9]+$ ]] || cooldown_seconds=0
+[[ "$escalate_after" =~ ^[0-9]+$ ]] || escalate_after="$max_attempts"
+
+if recovery_check_cooldown "$action_id" "$cooldown_seconds"; then
+  recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" 0 "suppressed" "false" "cooldown active" "true"
+  emit_result "true" "$action_id" "false" "false" "true" 0 "$action_type" "cooldown active"
+  exit 0
+fi
+
+if recovery_check_exhausted "$action_id" "$max_attempts"; then
+  attempt_now="$(recovery_get_attempt "$action_id")"
+  recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" "$attempt_now" "exhausted" "true" "max attempts reached" "false"
+  emit_result "true" "$action_id" "false" "true" "false" "$attempt_now" "$action_type" "max attempts reached"
+  exit 0
+fi
+
+attempt_now="$(recovery_increment_attempt "$action_id")"
+recovery_touch_cooldown "$action_id"
+
+cmd_rc=0
+message=""
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  message="dry-run"
+else
+  case "$action_type" in
+    docker_compose_restart)
+      target="$(yq e -r ".actions[$match_index].recovery.target // \"\"" "$BINDING_FILE")"
+      stack="$(yq e -r ".actions[$match_index].recovery.stack // \"\"" "$BINDING_FILE")"
+      probe_url="$(yq e -r ".actions[$match_index].recovery.probe_url // \"\"" "$BINDING_FILE")"
+      declare -a services=()
+      mapfile -t services < <(yq e -r ".actions[$match_index].recovery.services[]?" "$BINDING_FILE" 2>/dev/null || true)
+
+      [[ -n "$target" ]] || stop "action '$action_id' missing recovery.target"
+      [[ -n "$stack" ]] || stop "action '$action_id' missing recovery.stack"
+
+      cmd=("$SPINE_ROOT/ops/plugins/recovery/bin/recovery-docker-restart" --target "$target" --stack "$stack")
+      for svc in "${services[@]}"; do
+        [[ -n "$svc" ]] && cmd+=(--service "$svc")
+      done
+      if [[ -n "$probe_url" && "$probe_url" != "null" ]]; then
+        cmd+=(--probe-url "$probe_url")
+      fi
+      set +e
+      "${cmd[@]}" >/dev/null 2>&1
+      cmd_rc=$?
+      set -e
+      message="docker_compose_restart rc=$cmd_rc"
+      ;;
+
+    launchd_restart)
+      label="$(yq e -r ".actions[$match_index].recovery.label // \"\"" "$BINDING_FILE")"
+      [[ -n "$label" ]] || stop "action '$action_id' missing recovery.label"
+      set +e
+      "$SPINE_ROOT/ops/plugins/recovery/bin/recovery-launchd-restart" --label "$label" >/dev/null 2>&1
+      cmd_rc=$?
+      set -e
+      message="launchd_restart rc=$cmd_rc"
+      ;;
+
+    capability_retry)
+      capability="$(yq e -r ".actions[$match_index].recovery.capability // \"\"" "$BINDING_FILE")"
+      retry_max="$(yq e -r ".actions[$match_index].recovery.max_attempts // 3" "$BINDING_FILE")"
+      backoff_csv="$(yq e -r ".actions[$match_index].recovery.backoff_seconds // [] | join(\",\")" "$BINDING_FILE")"
+      [[ -n "$capability" ]] || stop "action '$action_id' missing recovery.capability"
+      [[ "$retry_max" =~ ^[0-9]+$ ]] || retry_max=3
+      [[ -n "$backoff_csv" ]] || backoff_csv="60,300,900"
+
+      set +e
+      "$SPINE_ROOT/ops/plugins/recovery/bin/recovery-capability-retry" \
+        --capability "$capability" \
+        --max-attempts "$retry_max" \
+        --backoff-seconds "$backoff_csv" \
+        >/dev/null 2>&1
+      cmd_rc=$?
+      set -e
+      message="capability_retry rc=$cmd_rc"
+      ;;
+
+    *)
+      stop "unsupported recovery type '$action_type'"
+      ;;
+  esac
+fi
+
+if [[ "$DRY_RUN" -eq 1 || "$cmd_rc" -eq 0 ]]; then
+  recovery_clear_state "$action_id"
+  recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" "$attempt_now" "success" "false" "$message" "false"
+  emit_result "true" "$action_id" "true" "false" "false" "$attempt_now" "$action_type" "$message"
+  exit 0
+fi
+
+escalate="false"
+if (( attempt_now >= escalate_after )) || (( attempt_now >= max_attempts )); then
+  escalate="true"
+fi
+
+recovery_log_attempt "$GATE_ID" "$FAILURE_CLASS" "$action_id" "$attempt_now" "failed" "$escalate" "$message" "false"
+emit_result "true" "$action_id" "false" "$escalate" "false" "$attempt_now" "$action_type" "$message"
+exit 0

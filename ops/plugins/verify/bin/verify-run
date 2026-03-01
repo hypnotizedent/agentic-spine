@@ -11,6 +11,7 @@ PROFILE_CONTRACT="$ROOT/ops/bindings/verify.run.profile.contract.yaml"
 CLASS_CONTRACT="$ROOT/ops/bindings/verify.failure.classification.contract.yaml"
 HISTORY_DIR="$ROOT/ops/plugins/verify/state"
 HISTORY_FILE="$HISTORY_DIR/verify-failure-class-history.ndjson"
+PASS_STREAK_FILE="$HISTORY_DIR/gate-pass-streak.json"
 MAPFILE_COMPAT="$ROOT/ops/plugins/verify/bin/bash-mapfile-compat.sh"
 
 # shellcheck disable=SC1090
@@ -283,6 +284,95 @@ append_history() {
     '{timestamp_utc:$ts,scope:$scope,run_key:$run_key,result:$result,failure_class:$failure_class}' >> "$HISTORY_FILE"
 }
 
+update_gate_pass_streak() {
+  local scope_label="$1"
+  local domain_label="$2"
+  local run_result_json="$3"
+  local tmp_file now_utc prev_json scope_ids_json failing_ids_json
+  local include_core
+  local -a scope_gate_ids=()
+  local -a classes=()
+  local -a split=()
+  local gid
+
+  mkdir -p "$HISTORY_DIR"
+  now_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ -f "$PASS_STREAK_FILE" ]] && jq -e . >/dev/null 2>&1 <"$PASS_STREAK_FILE"; then
+    prev_json="$(cat "$PASS_STREAK_FILE")"
+  else
+    prev_json='{}'
+  fi
+
+  case "$scope_label" in
+    fast)
+      while IFS=$'\t' read -r fast_domain class_csv; do
+        [[ -n "$fast_domain" ]] || continue
+        IFS=',' read -r -a split <<< "$class_csv"
+        classes=()
+        for gid in "${split[@]}"; do
+          [[ -n "$gid" ]] && classes+=("$gid")
+        done
+        if [[ "$(normalize_domain "$fast_domain")" == "core" ]]; then
+          while IFS= read -r gid; do
+            [[ -n "$gid" ]] && scope_gate_ids+=("$gid")
+          done < <(collect_core_ids_by_classes "${classes[@]}")
+        else
+          while IFS= read -r gid; do
+            [[ -n "$gid" ]] && scope_gate_ids+=("$gid")
+          done < <(collect_ids_for_domain_and_classes "$fast_domain" "${classes[@]}")
+        fi
+      done < <(yq e -r '.profiles.fast.domains[] | [.domain, (.classes | join(","))] | @tsv' "$PROFILE_CONTRACT")
+      ;;
+    domain)
+      include_core="$(yq e -r '.profiles.domain.include_core_base // true' "$PROFILE_CONTRACT")"
+      if [[ "$include_core" == "true" ]]; then
+        mapfile -t classes < <(yq e -r '.profiles.domain.core_base.classes[]' "$PROFILE_CONTRACT")
+        while IFS= read -r gid; do
+          [[ -n "$gid" ]] && scope_gate_ids+=("$gid")
+        done < <(collect_core_ids_by_classes "${classes[@]}")
+      fi
+
+      mapfile -t classes < <(yq e -r '.profiles.domain.target.classes[]' "$PROFILE_CONTRACT")
+      while IFS= read -r gid; do
+        [[ -n "$gid" ]] && scope_gate_ids+=("$gid")
+      done < <(collect_ids_for_domain_and_classes "$domain_label" "${classes[@]}")
+      ;;
+    release)
+      mapfile -t scope_gate_ids < <(yq e -r '.gates[] | select((.retired // false) != true) | .id' "$REGISTRY")
+      ;;
+    *)
+      scope_gate_ids=()
+      ;;
+  esac
+
+  mapfile -t scope_gate_ids < <(printf '%s\n' "${scope_gate_ids[@]}" | unique_ids)
+  scope_ids_json="$(printf '%s\n' "${scope_gate_ids[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+
+  failing_ids_json="$(jq -c '.failing_ids // []' <<<"$run_result_json")"
+
+  tmp_file="$(mktemp)"
+  jq -cn \
+    --arg now "$now_utc" \
+    --argjson prev "$prev_json" \
+    --argjson scope_ids "$scope_ids_json" \
+    --argjson failing "$failing_ids_json" \
+    '
+      reduce $scope_ids[] as $gid ($prev;
+        .[$gid] = (
+          ($prev[$gid] // {streak: 0, last_pass: null, last_fail: null}) as $p |
+          if ($failing | index($gid)) != null then
+            ($p + {streak: 0, last_fail: $now})
+          else
+            ($p + {streak: (($p.streak // 0) + 1), last_pass: $now})
+          end
+        )
+      )
+    ' > "$tmp_file"
+
+  mv "$tmp_file" "$PASS_STREAK_FILE"
+}
+
 run_wrapper() {
   local scope_label="$1"
   local domain_label="$2"
@@ -397,6 +487,7 @@ if jq -e '.status == "fail" and ((.failing_ids // []) | length == 0)' >/dev/null
   class_json="$(jq '.deterministic += ["RELEASE_SUITE"]' <<<"$class_json")"
 fi
 append_history "${scope}${target_domain:+:$target_domain}" "$wrapper_json" "$class_json"
+update_gate_pass_streak "$scope" "$target_domain" "$wrapper_json"
 
 legacy_rc=0
 legacy_json='{}'

@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+STATE_ROOT="${RECOVERY_STATE_ROOT:-$SPINE_ROOT/ops/plugins/recovery/state}"
+COOLDOWN_DIR="${RECOVERY_COOLDOWN_DIR:-$STATE_ROOT/cooldown}"
+ATTEMPTS_DIR="${RECOVERY_ATTEMPTS_DIR:-$STATE_ROOT/attempts}"
+AUDIT_LOG="${RECOVERY_AUDIT_LOG:-$SPINE_ROOT/mailroom/logs/recovery-dispatch.ndjson}"
+JSON_MODE=0
+
+if [[ "${1:-}" == "--json" ]]; then
+  JSON_MODE=1
+fi
+
+mkdir -p "$COOLDOWN_DIR" "$ATTEMPTS_DIR"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  command -v jq >/dev/null 2>&1 || { echo "recovery.status FAIL: jq required for --json" >&2; exit 1; }
+  jq -cn \
+    --arg state_root "$STATE_ROOT" \
+    --arg cooldown_dir "$COOLDOWN_DIR" \
+    --arg attempts_dir "$ATTEMPTS_DIR" \
+    --arg audit_log "$AUDIT_LOG" \
+    --argjson cooldown_files "$(find "$COOLDOWN_DIR" -type f -maxdepth 1 2>/dev/null | jq -R -s 'split("\n") | map(select(length > 0))')" \
+    --argjson attempts_files "$(find "$ATTEMPTS_DIR" -type f -maxdepth 1 2>/dev/null | jq -R -s 'split("\n") | map(select(length > 0))')" \
+    '{state_root:$state_root,cooldown_dir:$cooldown_dir,attempts_dir:$attempts_dir,audit_log:$audit_log,cooldown_files:$cooldown_files,attempt_files:$attempts_files}'
+  exit 0
+fi
+
+echo "recovery.status"
+echo "state_root: $STATE_ROOT"
+echo "cooldown_dir: $COOLDOWN_DIR"
+echo "attempts_dir: $ATTEMPTS_DIR"
+echo "audit_log: $AUDIT_LOG"
+echo
+
+echo "attempt_counters:"
+if find "$ATTEMPTS_DIR" -type f -maxdepth 1 | grep -q .; then
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    printf '  %s=%s\n' "$(basename "$f")" "$(cat "$f" 2>/dev/null || echo 0)"
+  done < <(find "$ATTEMPTS_DIR" -type f -maxdepth 1 | sort)
+else
+  echo "  (none)"
+fi
+
+echo "cooldowns:"
+if find "$COOLDOWN_DIR" -type f -maxdepth 1 | grep -q .; then
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    printf '  %s=%s\n' "$(basename "$f")" "$(cat "$f" 2>/dev/null || echo 0)"
+  done < <(find "$COOLDOWN_DIR" -type f -maxdepth 1 | sort)
+else
+  echo "  (none)"
+fi
+
+echo "recent_audit:"
+if [[ -f "$AUDIT_LOG" ]]; then
+  tail -n 10 "$AUDIT_LOG"
+else
+  echo "  (no audit log yet)"
+fi

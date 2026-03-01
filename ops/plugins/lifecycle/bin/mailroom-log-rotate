@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+LOG_DIR="${MAILROOM_LOG_DIR:-$ROOT/mailroom/logs}"
+MAX_BYTES="${MAILROOM_LOG_ROTATE_MAX_BYTES:-5242880}"
+KEEP="${MAILROOM_LOG_ROTATE_KEEP:-3}"
+DRY_RUN=0
+
+usage() {
+  cat <<'USAGE'
+mailroom-log-rotate
+
+Usage:
+  mailroom-log-rotate [--max-bytes <n>] [--keep <n>] [--dry-run]
+
+Rotates files in mailroom/logs that exceed max size.
+USAGE
+}
+
+fail() {
+  echo "mailroom.log.rotate FAIL: $*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --max-bytes) MAX_BYTES="${2:-}"; shift 2 ;;
+    --keep) KEEP="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ "$MAX_BYTES" =~ ^[0-9]+$ ]] || fail "--max-bytes must be numeric"
+[[ "$KEEP" =~ ^[0-9]+$ ]] || fail "--keep must be numeric"
+(( KEEP >= 1 )) || fail "--keep must be >= 1"
+[[ -d "$LOG_DIR" ]] || fail "log dir not found: $LOG_DIR"
+
+rotated=0
+scanned=0
+
+for file in "$LOG_DIR"/*; do
+  [[ -f "$file" ]] || continue
+  scanned=$((scanned + 1))
+
+  size="$(wc -c < "$file" | tr -d ' ')"
+  [[ "$size" =~ ^[0-9]+$ ]] || size=0
+  if (( size <= MAX_BYTES )); then
+    continue
+  fi
+
+  rotated=$((rotated + 1))
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "WOULD-ROTATE: $file (size=$size)"
+    continue
+  fi
+
+  for ((i=KEEP; i>=1; i--)); do
+    if [[ -f "$file.$i" ]]; then
+      if (( i == KEEP )); then
+        rm -f "$file.$i"
+      else
+        mv "$file.$i" "$file.$((i + 1))"
+      fi
+    fi
+  done
+
+  mv "$file" "$file.1"
+  : > "$file"
+done
+
+echo "mailroom.log.rotate"
+echo "dry_run: $DRY_RUN"
+echo "log_dir: $LOG_DIR"
+echo "max_bytes: $MAX_BYTES"
+echo "keep: $KEEP"
+echo "scanned: $scanned"
+echo "rotated: $rotated"

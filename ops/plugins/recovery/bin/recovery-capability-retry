@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+CAP_RUNNER="${CAP_RUNNER:-$SPINE_ROOT/bin/ops}"
+
+usage() {
+  cat <<'USAGE'
+recovery-capability-retry
+
+Usage:
+  recovery-capability-retry --capability <cap> [--max-attempts <n>] [--backoff-seconds <csv>] [--dry-run]
+USAGE
+}
+
+stop() {
+  echo "recovery.capability.retry FAIL: $*" >&2
+  exit 1
+}
+
+CAPABILITY=""
+MAX_ATTEMPTS=3
+BACKOFF_CSV="60,300,900"
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --capability) CAPABILITY="${2:-}"; shift 2 ;;
+    --max-attempts) MAX_ATTEMPTS="${2:-}"; shift 2 ;;
+    --backoff-seconds) BACKOFF_CSV="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$CAPABILITY" ]] || stop "--capability is required"
+[[ "$MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || stop "--max-attempts must be numeric"
+(( MAX_ATTEMPTS > 0 )) || stop "--max-attempts must be > 0"
+[[ -x "$CAP_RUNNER" ]] || stop "cap runner missing: $CAP_RUNNER"
+
+IFS=',' read -r -a BACKOFFS <<< "$BACKOFF_CSV"
+for i in "${!BACKOFFS[@]}"; do
+  b="${BACKOFFS[$i]// /}"
+  [[ "$b" =~ ^[0-9]+$ ]] || b=60
+  BACKOFFS[$i]="$b"
+done
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "recovery.capability.retry"
+  echo "capability: $CAPABILITY"
+  echo "max_attempts: $MAX_ATTEMPTS"
+  echo "backoff_seconds: ${BACKOFFS[*]}"
+  echo "result: dry-run"
+  exit 0
+fi
+
+attempt=1
+while (( attempt <= MAX_ATTEMPTS )); do
+  if "$CAP_RUNNER" cap run "$CAPABILITY" >/dev/null 2>&1; then
+    echo "recovery.capability.retry"
+    echo "capability: $CAPABILITY"
+    echo "attempt: $attempt"
+    echo "result: success"
+    exit 0
+  fi
+
+  if (( attempt >= MAX_ATTEMPTS )); then
+    break
+  fi
+
+  idx=$((attempt - 1))
+  last_idx=$(( ${#BACKOFFS[@]} - 1 ))
+  if (( idx < ${#BACKOFFS[@]} )); then
+    backoff="${BACKOFFS[$idx]}"
+  elif (( last_idx >= 0 )); then
+    backoff="${BACKOFFS[$last_idx]}"
+  else
+    backoff="60"
+  fi
+  sleep "$backoff"
+  attempt=$((attempt + 1))
+done
+
+stop "capability '$CAPABILITY' failed after ${MAX_ATTEMPTS} attempts"
