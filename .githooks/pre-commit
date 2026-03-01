@@ -4,8 +4,12 @@ set -euo pipefail
 # Spine pre-commit hook (versioned)
 #
 # Guards:
-# 1. Capability metadata validation (ops/capabilities.yaml staged)
-# 2. Multi-agent commit guard (blocks direct commits when multiple sessions active)
+# 1. Multi-agent commit guard (blocks direct commits when multiple sessions active)
+# 2. Commit signing enforcement (commit_sign_required knob)
+# 3. Multi-agent write policy (multi_agent_writes knob)
+# 4. Hook-fast AOF hygiene checks (staged only)
+# 5. Gate registry projection autopilot (gate.registry.yaml staged)
+# 6. Capability metadata validation (ops/capabilities.yaml staged)
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "${ROOT:-}" ]]; then
@@ -177,7 +181,32 @@ if echo "$staged" | rg -q '^(mailroom/state/loop-scopes/.*\.scope\.md|docs/produ
   "$d145_gate" --staged-only
 fi
 
-# ─── Guard 5: Capability metadata validation ───────────────
+# ─── Guard 5: Gate registry projection autopilot ────────────
+# When gate.registry.yaml is staged, reconcile header metadata and
+# re-sync entry-surface projections so D85/D285 stay green.
+
+if echo "$staged" | grep -qx 'ops/bindings/gate.registry.yaml'; then
+  gen_header="$ROOT/bin/generators/gen-gate-registry-header.sh"
+  if [[ -x "$gen_header" ]]; then
+    "$gen_header" || {
+      echo "STOP: gen-gate-registry-header.sh failed" >&2
+      exit 1
+    }
+    git add ops/bindings/gate.registry.yaml
+  fi
+
+  if [[ -x "$ROOT/ops/plugins/docs/bin/docs-projection-sync" ]]; then
+    "$ROOT/bin/ops" cap run docs.projection.sync >/dev/null 2>&1 || {
+      echo "STOP: docs.projection.sync failed" >&2
+      exit 1
+    }
+    for f in AGENTS.md CLAUDE.md docs/governance/generated/ENTRY_SURFACE_GATE_METADATA.md docs/governance/generated/BOOT_ENTRY_SURFACE.md; do
+      [[ -f "$ROOT/$f" ]] && git add "$f"
+    done
+  fi
+fi
+
+# ─── Guard 6: Capability metadata validation ───────────────
 # Main-branch commits are allowed. Worktrees are optional, not mandatory.
 # Drift gates (spine.verify) catch problems; the pre-commit hook stays lean.
 
