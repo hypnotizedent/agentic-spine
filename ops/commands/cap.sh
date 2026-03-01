@@ -176,6 +176,8 @@ run_cap() {
     post_action="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".post_action")"
     local effective_multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES:-direct}"
     local active_session_count=0
+    local friction_ingest_script="$SPINE_CODE/ops/plugins/lifecycle/bin/friction-ingest"
+    local friction_autocapture="${OPS_CAP_FRICTION_AUTOCAPTURE:-1}"
 
     count_active_sessions() {
       local sessions_dir="$SPINE_STATE/sessions"
@@ -539,6 +541,46 @@ PY
             fi
         fi
         echo "────────────────────────────────────────"
+    fi
+
+    # ── Passive friction capture for failed top-level capability runs ──
+    # Capture is automatic at the cap-run surface so operators do not need
+    # to remember manual closeout prompts for common execution friction.
+    if [[ "$exit_code" -ne 0 && -z "${OPS_CAP_STACK:-}" ]]; then
+        case "${friction_autocapture,,}" in
+          0|false|no|off) ;;
+          *)
+            # Only auto-capture from interactive/operator terminals by default.
+            # This avoids scheduler/background noise; force with
+            # OPS_CAP_FRICTION_AUTOCAPTURE_FORCE=1 when needed.
+            if [[ ! -t 0 && ! -t 1 && "${OPS_CAP_FRICTION_AUTOCAPTURE_FORCE:-0}" != "1" ]]; then
+                :
+            elif [[ -x "$friction_ingest_script" ]]; then
+                case "$name" in
+                  friction.ingest|friction.reconcile|friction.queue.status) ;;
+                  *)
+                    local first_error_line actual expected severity
+                    first_error_line="$(grep -E '^(ERROR:|STOP:|FAIL:|BLOCKED:|D[0-9]+ FAIL:|ops: command )' "$output_file" 2>/dev/null | head -1 || true)"
+                    [[ -z "$first_error_line" ]] && first_error_line="$(tail -n 1 "$output_file" 2>/dev/null || true)"
+                    first_error_line="$(echo "${first_error_line:-unknown_error}" | tr '\r\n' ' ' | sed 's/[[:space:]]\+/ /g' | cut -c1-500)"
+
+                    expected="Capability '$name' should complete successfully (exit 0)."
+                    actual="cap.run failed (exit=$exit_code); ${first_error_line}"
+                    severity="medium"
+                    [[ "$safety" == "destructive" ]] && severity="high"
+
+                    "$friction_ingest_script" \
+                      --source cap-run-auto \
+                      --capability "$name" \
+                      --expected "$expected" \
+                      --actual "$actual" \
+                      --severity "$severity" \
+                      >/dev/null 2>&1 || true
+                    ;;
+                esac
+            fi
+            ;;
+        esac
     fi
 
     # ── Execute post_action if defined and main cap succeeded ──
