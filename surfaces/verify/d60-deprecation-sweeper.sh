@@ -17,33 +17,54 @@ err() { echo "  D60 FAIL: $1" >&2; FAIL=1; }
 command -v yq >/dev/null 2>&1 || { err "yq not found"; exit 1; }
 
 term_count=$(yq '.terms | length' "$BINDING")
-scan_paths=$(yq -r '.scan_paths[]' "$BINDING" | sed "s|^|$SP/|")
-scan_exclude=$(yq -r '.scan_exclude[]' "$BINDING" 2>/dev/null | sed "s|^|$SP/|" || true)
+mapfile -t scan_paths < <(yq -r '.scan_paths[]' "$BINDING" 2>/dev/null || true)
+mapfile -t scan_exclude < <(yq -r '.scan_exclude[]' "$BINDING" 2>/dev/null || true)
+
+normalize_rel_path() {
+  local p="${1:-}"
+  p="${p#./}"
+  echo "$p"
+}
+
+exclude_glob_from_rel_path() {
+  local rel
+  rel="$(normalize_rel_path "${1:-}")"
+  if [[ "$rel" == */ ]]; then
+    # Directory-style entry: exclude all descendants.
+    echo "!${rel}**"
+  else
+    echo "!${rel}"
+  fi
+}
 
 HITS=0
 for ((i=0; i<term_count; i++)); do
   pattern=$(yq -r ".terms[$i].pattern" "$BINDING")
 
-  # Build rg exclude args from per-term exclude_files
-  exclude_count=$(yq ".terms[$i].exclude_files | length" "$BINDING" 2>/dev/null || echo 0)
-  EXCLUDE_ARGS=""
-  for ((j=0; j<exclude_count; j++)); do
-    ef=$(yq -r ".terms[$i].exclude_files[$j]" "$BINDING")
-    EXCLUDE_ARGS="$EXCLUDE_ARGS --glob=!$ef"
+  # Build rg exclude args from per-term exclude_files.
+  term_exclude_args=()
+  mapfile -t term_excludes < <(yq -r ".terms[$i].exclude_files[]?" "$BINDING" 2>/dev/null || true)
+  for ef in "${term_excludes[@]}"; do
+    [[ -n "$ef" ]] || continue
+    term_exclude_args+=(--glob "$(exclude_glob_from_rel_path "$ef")")
   done
 
-  # Build global scan exclude args
-  GLOBAL_EXCLUDE=""
-  for ex in $scan_exclude; do
-    rel="${ex#$SP/}"
-    GLOBAL_EXCLUDE="$GLOBAL_EXCLUDE --glob=!${rel}**"
+  # Build global scan exclude args.
+  global_exclude_args=()
+  for ex in "${scan_exclude[@]}"; do
+    [[ -n "$ex" ]] || continue
+    global_exclude_args+=(--glob "$(exclude_glob_from_rel_path "$ex")")
   done
 
-  # Search across all scan paths
-  for sp in $scan_paths; do
-    [[ -d "$sp" ]] || continue
-    # Use rg for fast search; suppress errors for missing paths
-    matches=$(cd "$SP" && rg --files-with-matches --fixed-strings "$pattern" "${sp#$SP/}" $EXCLUDE_ARGS $GLOBAL_EXCLUDE 2>/dev/null || true)
+  # Search across all scan paths.
+  for scan_path in "${scan_paths[@]}"; do
+    rel_scan_path="$(normalize_rel_path "$scan_path")"
+    rel_scan_path="${rel_scan_path%/}"
+    [[ -n "$rel_scan_path" ]] || continue
+    [[ -d "$SP/$rel_scan_path" ]] || continue
+
+    # Use rg for fast search; suppress missing-path noise.
+    matches="$(cd "$SP" && rg --no-messages --files-with-matches --fixed-strings "$pattern" "$rel_scan_path" "${term_exclude_args[@]}" "${global_exclude_args[@]}" || true)"
     if [[ -n "$matches" ]]; then
       while IFS= read -r file; do
         err "deprecated term '$pattern' found in $file"
