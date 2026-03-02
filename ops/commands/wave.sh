@@ -241,6 +241,73 @@ ensure_wave_exists() {
   fi
 }
 
+wave_lock_guard() {
+  local wave_id="${1:-}"
+  local action="${2:-}"
+  local override_reason="${3:-}"
+  local lock_file
+
+  [[ -n "$wave_id" && -n "$action" ]] || return 0
+  lock_file="$(wave_state_dir "$wave_id")/wave.lock"
+  [[ -f "$lock_file" ]] || return 0
+
+  python3 - "$lock_file" "$action" "$override_reason" <<'PYWAVELOCK'
+import json
+import os
+import sys
+
+lock_file = sys.argv[1]
+action = (sys.argv[2] or "").strip()
+override_reason = (sys.argv[3] or "").strip()
+
+raw = open(lock_file, "r", encoding="utf-8").read().strip()
+if not raw:
+    raise SystemExit(0)
+
+doc = {}
+try:
+    doc = json.loads(raw)
+except Exception:
+    try:
+        import yaml
+        doc = yaml.safe_load(raw) or {}
+    except Exception as exc:
+        print(f"FAIL: unable to parse wave lock file {lock_file}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+if not isinstance(doc, dict):
+    raise SystemExit(0)
+
+enforce = bool(doc.get("enforce", True))
+if not enforce:
+    raise SystemExit(0)
+
+blocked_actions = doc.get("blocked_actions")
+if not isinstance(blocked_actions, list) or not blocked_actions:
+    blocked_actions = ["dispatch", "ack", "close"]
+
+blocked_actions = {str(x).strip() for x in blocked_actions if str(x).strip()}
+if action not in blocked_actions:
+    raise SystemExit(0)
+
+reason = str(doc.get("reason", "")).strip()
+if not override_reason:
+    detail = f" ({reason})" if reason else ""
+    print(
+        f"FAIL: wave lock enforcement blocked action '{action}'{detail}. "
+        f"Retry with --lock-override \"<reason>\" to bypass explicitly.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+print(
+    f"WARNING: wave lock override accepted for action '{action}' "
+    f"reason='{override_reason}'",
+    file=sys.stderr,
+)
+PYWAVELOCK
+}
+
 ts_now() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
@@ -254,11 +321,11 @@ ops wave - Wave orchestration with lane-aware dispatch
 Usage:
   ops wave start <WAVE_ID> --objective "<text>" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths "a,b"] [--worktree auto|off] [--repo <path>]
                                                     Create a new wave (default auto worktree)
-  ops wave dispatch <WAVE_ID> --lane <L> --task "T" [--from-role <R>] [--to-role <R>] [--input-refs "k=v,..."] [--output-refs "k=v,..."]  Dispatch task to a lane
-  ops wave ack <WAVE_ID> --lane <L> --result "text"  Acknowledge task completion
+  ops wave dispatch <WAVE_ID> --lane <L> --task "T" [--from-role <R>] [--to-role <R>] [--input-refs "k=v,..."] [--output-refs "k=v,..."] [--lock-override "<reason>"]  Dispatch task to a lane
+  ops wave ack <WAVE_ID> --lane <L> --result "text" [--lock-override "<reason>"]  Acknowledge task completion
   ops wave collect <WAVE_ID>                         Collect results from lanes
   ops wave status [WAVE_ID]                          Show wave status (or all)
-  ops wave close <WAVE_ID> [--force] [--dod-override "<reason>"]  Close a wave (infra force requires --force, DoD force requires --dod-override)
+  ops wave close <WAVE_ID> [--force] [--dod-override "<reason>"] [--lock-override "<reason>"]  Close a wave (infra force requires --force, DoD force requires --dod-override)
   ops wave preflight <domain>                        Fast non-blocking preflight
   ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
 
@@ -288,6 +355,7 @@ cmd_start() {
   local packet_default_deadline_hours="24"
   local packet_allowed_horizon="now,later,future"
   local packet_allowed_readiness="runnable,blocked"
+  local packet_allowed_roles="researcher,worker,qc,close,librarian"
   local worktree_mode="auto"
   local workspace_repo="$SPINE_REPO"
   local workspace_enabled="false"
@@ -345,6 +413,8 @@ cmd_start() {
     [[ -n "$packet_allowed_horizon" ]] || packet_allowed_horizon="now,later,future"
     packet_allowed_readiness="$(yq e -r '.wave_packet.allowed_readiness[]?' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null | paste -sd, -)"
     [[ -n "$packet_allowed_readiness" ]] || packet_allowed_readiness="runnable,blocked"
+    packet_allowed_roles="$(yq e -r '.runtime_roles.canonical[]?' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null | paste -sd, -)"
+    [[ -n "$packet_allowed_roles" ]] || packet_allowed_roles="researcher,worker,qc,close,librarian"
     if [[ "$current_role_explicit" -eq 0 ]]; then
       default_role="$(yq e -r '.runtime_roles.default_role // "researcher"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo researcher)"
     fi
@@ -500,7 +570,7 @@ print(json.dumps(items))
 PYCLAIMS
 )"
 
-  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" <<'PYSTART'
+  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$packet_allowed_roles" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" <<'PYSTART'
 import json, sys
 import os
 from datetime import datetime, timedelta, timezone
@@ -524,13 +594,16 @@ claimed_paths = json.loads(sys.argv[16]) if len(sys.argv) > 16 and sys.argv[16] 
 required_fields = [x.strip() for x in (sys.argv[17] if len(sys.argv) > 17 else "").split(",") if x.strip()]
 allowed_horizon = {x.strip() for x in (sys.argv[18] if len(sys.argv) > 18 else "now,later,future").split(",") if x.strip()}
 allowed_readiness = {x.strip() for x in (sys.argv[19] if len(sys.argv) > 19 else "runnable,blocked").split(",") if x.strip()}
-path_claims_file = sys.argv[20] if len(sys.argv) > 20 else ""
+allowed_roles = {
+    x.strip() for x in (sys.argv[20] if len(sys.argv) > 20 else "researcher,worker,qc,close,librarian").split(",") if x.strip()
+}
+path_claims_file = sys.argv[21] if len(sys.argv) > 21 else ""
 path_claims_ttl_minutes = 180
 try:
-    path_claims_ttl_minutes = int(sys.argv[21]) if len(sys.argv) > 21 else 180
+    path_claims_ttl_minutes = int(sys.argv[22]) if len(sys.argv) > 22 else 180
 except Exception:
     path_claims_ttl_minutes = 180
-path_claims_non_overlap = (sys.argv[22].lower() == "true") if len(sys.argv) > 22 else True
+path_claims_non_overlap = (sys.argv[23].lower() == "true") if len(sys.argv) > 23 else True
 
 packet = {
     "schema_version": "1.0",
@@ -559,6 +632,14 @@ if packet["execution_readiness"] not in allowed_readiness:
         "FAIL: packet.execution_readiness invalid "
         f"'{packet['execution_readiness']}' (allowed={sorted(allowed_readiness)})"
     )
+    sys.exit(1)
+
+if packet["current_role"] not in allowed_roles:
+    print(f"FAIL: packet.current_role invalid '{packet['current_role']}' (allowed={sorted(allowed_roles)})")
+    sys.exit(1)
+
+if packet["next_role"] not in allowed_roles:
+    print(f"FAIL: packet.next_role invalid '{packet['next_role']}' (allowed={sorted(allowed_roles)})")
     sys.exit(1)
 
 try:
@@ -745,6 +826,7 @@ cmd_dispatch() {
   local input_refs_raw=""
   local output_refs_raw=""
   local transition_gate=""
+  local lock_override_reason=""
   local input_refs_json='{}'
   local output_refs_json='{}'
 
@@ -758,17 +840,26 @@ cmd_dispatch() {
       --input-refs) input_refs_raw="${2:-}"; shift 2 ;;
       --output-refs) output_refs_raw="${2:-}"; shift 2 ;;
       --transition-gate) transition_gate="${2:-}"; shift 2 ;;
+      --lock-override)
+        if [[ $# -lt 2 || -z "${2:-}" ]]; then
+          echo "ERROR: --lock-override requires a non-empty reason" >&2
+          exit 1
+        fi
+        lock_override_reason="${2:-}"
+        shift 2
+        ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
     esac
   done
 
   if [[ -z "$wave_id" || -z "$lane" || -z "$task" ]]; then
-    echo "Usage: ops wave dispatch <WAVE_ID> --lane <lane> --task \"<text>\" [--from-role <role>] [--to-role <role>] [--input-refs \"k=v,...\"] [--output-refs \"k=v,...\"]" >&2
+    echo "Usage: ops wave dispatch <WAVE_ID> --lane <lane> --task \"<text>\" [--from-role <role>] [--to-role <role>] [--input-refs \"k=v,...\"] [--output-refs \"k=v,...\"] [--lock-override \"<reason>\"]" >&2
     exit 1
   fi
 
   ensure_wave_exists "$wave_id"
+  wave_lock_guard "$wave_id" "dispatch" "$lock_override_reason"
   local sf
   sf="$(wave_state_file "$wave_id")"
   local sd
@@ -791,6 +882,7 @@ if not isinstance(packet, dict):
 required = []
 allowed_horizon = {"now", "later", "future"}
 allowed_readiness = {"runnable", "blocked"}
+allowed_roles = {"researcher", "worker", "qc", "close", "librarian"}
 
 try:
     import yaml
@@ -802,6 +894,15 @@ try:
         allowed_readiness = {
             str(x).strip() for x in (wave_packet.get("allowed_readiness") or []) if str(x).strip()
         } or allowed_readiness
+    runtime_roles = contract.get("runtime_roles") if isinstance(contract, dict) else {}
+    if isinstance(runtime_roles, dict):
+        canonical = {
+            str(x).strip()
+            for x in (runtime_roles.get("canonical") or [])
+            if str(x).strip()
+        }
+        if canonical:
+            allowed_roles = canonical
 except Exception:
     pass
 
@@ -830,6 +931,12 @@ if packet.get("horizon") not in allowed_horizon:
 if packet.get("execution_readiness") not in allowed_readiness:
     print(f"FAIL: wave packet execution_readiness invalid at dispatch: {packet.get('execution_readiness')}")
     raise SystemExit(1)
+
+for field in ("current_role", "next_role"):
+    value = str(packet.get(field) or "").strip()
+    if value not in allowed_roles:
+        print(f"FAIL: wave packet {field} invalid at dispatch: {value!r} (allowed={sorted(allowed_roles)})")
+        raise SystemExit(1)
 
 try:
     datetime.fromisoformat(str(packet.get("deadline_utc", "")).replace("Z", "+00:00"))
@@ -923,6 +1030,101 @@ PYROLE
       echo "FAIL: dispatch missing required output refs for gate $transition_gate: $(echo "$missing_outputs" | tr '\n' ',' | sed 's/,$//')" >&2
       exit 1
     fi
+
+    python3 - "$ROLE_RUNTIME_CONTRACT" "$required_inputs_json" "$required_outputs_json" "$input_refs_json" "$output_refs_json" "$transition_gate" <<'PYREFSEM'
+import json
+import os
+import re
+import sys
+
+contract_file = sys.argv[1]
+required_inputs = json.loads(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else []
+required_outputs = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
+input_refs = json.loads(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else {}
+output_refs = json.loads(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else {}
+transition_gate = sys.argv[6] if len(sys.argv) > 6 else ""
+
+if not os.path.exists(contract_file):
+    raise SystemExit(0)
+
+try:
+    import yaml
+except Exception as exc:
+    print(f"FAIL: dispatch semantic handoff validation requires pyyaml: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+contract = yaml.safe_load(open(contract_file, "r", encoding="utf-8")) or {}
+semantics = contract.get("handoff_ref_semantics") if isinstance(contract, dict) else {}
+if not isinstance(semantics, dict):
+    raise SystemExit(0)
+
+default_kind = str(semantics.get("default_kind") or "file_ref").strip() or "file_ref"
+kinds = semantics.get("kinds")
+by_ref_key = semantics.get("by_ref_key")
+if not isinstance(kinds, dict):
+    print("FAIL: handoff_ref_semantics.kinds missing/invalid", file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(by_ref_key, dict):
+    by_ref_key = {}
+
+compiled = {}
+for kind, meta in kinds.items():
+    if not isinstance(meta, dict):
+        continue
+    pattern = str(meta.get("regex") or "").strip()
+    if not pattern:
+        continue
+    try:
+        compiled[str(kind).strip()] = re.compile(pattern)
+    except re.error as exc:
+        print(f"FAIL: invalid handoff_ref_semantics regex for kind '{kind}': {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+if default_kind not in compiled:
+    print(f"FAIL: default handoff ref kind '{default_kind}' has no regex", file=sys.stderr)
+    raise SystemExit(1)
+
+def validate_ref(ref_key: str, ref_value: str, channel: str):
+    kind = str(by_ref_key.get(ref_key) or default_kind).strip() or default_kind
+    regex = compiled.get(kind)
+    if regex is None:
+        return (
+            f"{channel} ref '{ref_key}' mapped to unknown kind '{kind}'"
+        )
+    if not isinstance(ref_value, str) or not regex.match(ref_value):
+        return (
+            f"{channel} ref '{ref_key}' value '{ref_value}' invalid for kind '{kind}'"
+        )
+    return None
+
+errors = []
+for key in required_inputs:
+    name = str(key).strip()
+    if not name:
+        continue
+    value = str(input_refs.get(name, "")).strip()
+    msg = validate_ref(name, value, "input")
+    if msg:
+        errors.append(msg)
+
+for key in required_outputs:
+    name = str(key).strip()
+    if not name:
+        continue
+    value = str(output_refs.get(name, "")).strip()
+    msg = validate_ref(name, value, "output")
+    if msg:
+        errors.append(msg)
+
+if errors:
+    print(
+        f"FAIL: dispatch handoff ref semantics invalid for gate {transition_gate or 'unknown'}",
+        file=sys.stderr,
+    )
+    for err in errors:
+        print(f"  - {err}", file=sys.stderr)
+    raise SystemExit(1)
+PYREFSEM
   fi
 
   python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" <<'PYDISP'
@@ -1479,6 +1681,7 @@ cmd_ack() {
   local result=""
   local run_key=""
   local dispatch_id=""
+  local lock_override_reason=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1487,13 +1690,21 @@ cmd_ack() {
       --result) result="${2:-}"; shift 2 ;;
       --run-key) run_key="${2:-}"; shift 2 ;;
       --dispatch) dispatch_id="${2:-}"; shift 2 ;;
+      --lock-override)
+        if [[ $# -lt 2 || -z "${2:-}" ]]; then
+          echo "ERROR: --lock-override requires a non-empty reason" >&2
+          exit 1
+        fi
+        lock_override_reason="${2:-}"
+        shift 2
+        ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
     esac
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave ack <WAVE_ID> --lane <lane> [--dispatch D<N>] --result \"<text>\" [--run-key <key>]" >&2
+    echo "Usage: ops wave ack <WAVE_ID> --lane <lane> [--dispatch D<N>] --result \"<text>\" [--run-key <key>] [--lock-override \"<reason>\"]" >&2
     exit 1
   fi
   if [[ -z "$lane" && -z "$dispatch_id" ]]; then
@@ -1502,10 +1713,14 @@ cmd_ack() {
   fi
 
   ensure_wave_exists "$wave_id"
+  wave_lock_guard "$wave_id" "ack" "$lock_override_reason"
   local sf
   sf="$(wave_state_file "$wave_id")"
+  local terminal_role_contract="$SPINE_REPO/ops/bindings/terminal.role.contract.yaml"
+  local ack_terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
+  local ack_runtime_role="${SPINE_RUNTIME_ROLE:-}"
 
-  python3 - "$sf" "$lane" "$result" "$run_key" "$dispatch_id" "$ROLE_RUNTIME_CONTRACT" <<'PYACK'
+  python3 - "$sf" "$lane" "$result" "$run_key" "$dispatch_id" "$ROLE_RUNTIME_CONTRACT" "$terminal_role_contract" "$ack_terminal_role" "$ack_runtime_role" <<'PYACK'
 import json, sys, fcntl, os
 from datetime import datetime, timezone
 
@@ -1515,7 +1730,49 @@ result = sys.argv[3] if len(sys.argv) > 3 else ""
 run_key = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None
 dispatch_id = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] else None
 role_contract = sys.argv[6] if len(sys.argv) > 6 else ""
+terminal_role_contract = sys.argv[7] if len(sys.argv) > 7 else ""
+ack_terminal_role = (sys.argv[8] if len(sys.argv) > 8 else "").strip()
+ack_runtime_role = (sys.argv[9] if len(sys.argv) > 9 else "").strip()
 lock_file = sf + ".lock"
+
+
+def _resolve_runtime_role(terminal_role: str, explicit_runtime_role: str, default_role: str) -> str:
+    explicit = (explicit_runtime_role or "").strip()
+    if explicit:
+        return explicit
+
+    terminal = (terminal_role or "").strip()
+    if terminal and terminal_role_contract and os.path.exists(terminal_role_contract):
+        try:
+            import yaml
+            doc = yaml.safe_load(open(terminal_role_contract, "r", encoding="utf-8")) or {}
+            defaults = doc.get("runtime_role_defaults") if isinstance(doc, dict) else {}
+            by_id = defaults.get("by_terminal_id") if isinstance(defaults, dict) else {}
+            by_type = defaults.get("by_terminal_type") if isinstance(defaults, dict) else {}
+            role_type = ""
+
+            if isinstance(by_id, dict):
+                role_value = str(by_id.get(terminal, "")).strip()
+                if role_value and role_value.lower() != "null":
+                    return role_value
+
+            roles = doc.get("roles") if isinstance(doc, dict) else []
+            if isinstance(roles, list):
+                for entry in roles:
+                    if not isinstance(entry, dict):
+                        continue
+                    if str(entry.get("id", "")).strip() == terminal:
+                        role_type = str(entry.get("type", "")).strip()
+                        break
+            if role_type and isinstance(by_type, dict):
+                role_value = str(by_type.get(role_type, "")).strip()
+                if role_value and role_value.lower() != "null":
+                    return role_value
+        except Exception:
+            pass
+
+    return (default_role or "researcher").strip() or "researcher"
+
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
@@ -1536,10 +1793,6 @@ try:
                 if d["status"] != "dispatched":
                     print(f"Dispatch {dispatch_id} is not pending (status={d['status']})")
                     sys.exit(1)
-                d["status"] = "done"
-                d["completed_at"] = now
-                d["result"] = result
-                d["run_key"] = run_key
                 acked_idx = idx
             else:
                 print(f"Dispatch {dispatch_id} out of range (have {len(dispatches)} dispatches)")
@@ -1562,10 +1815,6 @@ try:
             sys.exit(1)
         else:
             idx, d = pending[0]
-            d["status"] = "done"
-            d["completed_at"] = now
-            d["result"] = result
-            d["run_key"] = run_key
             acked_idx = idx
 
     if acked_idx is None:
@@ -1573,20 +1822,42 @@ try:
         sys.exit(1)
 
     d = dispatches[acked_idx]
+    selected_lane = str(d.get("lane", "")).strip()
     from_role = str(d.get("from_role", "")).strip()
     to_role = str(d.get("to_role", "")).strip()
 
     promotion_next = ""
     close_aliases = {"close", "librarian"}
+    allowed_by_lane = {
+        "control": ["worker"],
+        "execution": ["worker"],
+        "audit": ["researcher", "qc"],
+        "watcher": ["researcher"],
+    }
+    default_runtime_role = "researcher"
     if role_contract and os.path.exists(role_contract):
         try:
             import yaml
             contract = yaml.safe_load(open(role_contract, "r", encoding="utf-8")) or {}
             runtime_roles = contract.get("runtime_roles") if isinstance(contract, dict) else {}
             if isinstance(runtime_roles, dict):
+                default_runtime_role = str(runtime_roles.get("default_role", default_runtime_role)).strip() or default_runtime_role
                 aliases = runtime_roles.get("close_role_aliases")
                 if isinstance(aliases, list) and aliases:
                     close_aliases = {str(x).strip() for x in aliases if str(x).strip()} or close_aliases
+            lane_compat = contract.get("lane_role_compatibility") if isinstance(contract, dict) else {}
+            if isinstance(lane_compat, dict):
+                allowed = lane_compat.get("allowed_runtime_roles_by_lane")
+                if isinstance(allowed, dict) and allowed:
+                    parsed_allowed = {}
+                    for lane_id, roles in allowed.items():
+                        if not isinstance(roles, list):
+                            continue
+                        normalized = [str(x).strip() for x in roles if str(x).strip()]
+                        if normalized:
+                            parsed_allowed[str(lane_id).strip()] = normalized
+                    if parsed_allowed:
+                        allowed_by_lane = parsed_allowed
             transitions = contract.get("promotion_gates", {}).get("transitions", [])
             if isinstance(transitions, list):
                 for t in transitions:
@@ -1598,6 +1869,31 @@ try:
                             break
         except Exception:
             pass
+
+    effective_runtime_role = _resolve_runtime_role(
+        ack_terminal_role,
+        ack_runtime_role,
+        default_runtime_role,
+    )
+    allowed_roles = allowed_by_lane.get(selected_lane, [])
+    allowed_roles = [str(x).strip() for x in allowed_roles if str(x).strip()]
+    if not allowed_roles:
+        print(
+            f"Lane-role authorization missing for lane '{selected_lane}' in lane_role_compatibility.allowed_runtime_roles_by_lane"
+        )
+        sys.exit(1)
+    if effective_runtime_role not in allowed_roles:
+        print(
+            f"Lane-role authorization failed: lane={selected_lane} runtime_role={effective_runtime_role} allowed={allowed_roles}"
+        )
+        if ack_terminal_role:
+            print(f"Terminal role context: {ack_terminal_role}")
+        sys.exit(1)
+
+    d["status"] = "done"
+    d["completed_at"] = now
+    d["result"] = result
+    d["run_key"] = run_key
 
     role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
     if to_role:
@@ -1643,6 +1939,7 @@ if run_key:
     print(f"  Run key: {run_key}")
 print(f"  Status: done")
 print(f"  Lifecycle: {state.get('lifecycle_state', 'active')}")
+print(f"  Ack role: terminal={ack_terminal_role or 'unset'} runtime={effective_runtime_role} lane={selected_lane}")
 PYACK
 
   sync_runtime_traffic_index "$sf" "ack"
@@ -2167,7 +2464,7 @@ schema_path = sys.argv[2]
 role_runtime_contract = sys.argv[3] if len(sys.argv) > 3 else ""
 
 errors = []
-run_key_pattern_text = r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"
+run_key_pattern_texts = [r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"]
 commit_ref_pattern = r"^[0-9a-f]{7,40}$"
 allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
 required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
@@ -2178,7 +2475,13 @@ if role_runtime_contract and os.path.exists(role_runtime_contract):
         contract = yaml.safe_load(open(role_runtime_contract, "r", encoding="utf-8")) or {}
         evidence = contract.get("evidence") if isinstance(contract, dict) else {}
         if isinstance(evidence, dict):
-            run_key_pattern_text = str(evidence.get("run_key_regex", run_key_pattern_text))
+            run_key_regexes = evidence.get("run_key_regexes")
+            if isinstance(run_key_regexes, list) and run_key_regexes:
+                parsed = [str(x).strip() for x in run_key_regexes if str(x).strip()]
+                if parsed:
+                    run_key_pattern_texts = parsed
+            elif evidence.get("run_key_regex"):
+                run_key_pattern_texts = [str(evidence.get("run_key_regex")).strip()]
             commit_ref_pattern = str(evidence.get("commit_ref_regex", commit_ref_pattern))
             blockers = evidence.get("blocker_classes")
             if isinstance(blockers, list) and blockers:
@@ -2188,6 +2491,20 @@ if role_runtime_contract and os.path.exists(role_runtime_contract):
                 required_evidence_fields = [str(x).strip() for x in required if str(x).strip()] or required_evidence_fields
     except Exception:
         pass
+
+run_key_patterns = []
+for pattern_text in run_key_pattern_texts:
+    try:
+        run_key_patterns.append(re.compile(pattern_text))
+    except re.error as exc:
+        print(f"FAIL: invalid run key regex in contract: {pattern_text} ({exc})")
+        sys.exit(1)
+
+if not run_key_patterns:
+    run_key_patterns = [re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")]
+
+def run_key_matches(value: str) -> bool:
+    return any(pat.match(value) for pat in run_key_patterns)
 
 # Load receipt
 try:
@@ -2249,12 +2566,11 @@ if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
     errors.append(f"timestamp_utc must match YYYY-MM-DDTHH:MM:SSZ, got '{ts}'")
 
 # Run key pattern validation
-run_key_pattern = re.compile(run_key_pattern_text)
 for i, rk in enumerate(receipt.get("run_keys", [])):
     if not isinstance(rk, str):
         errors.append(f"run_keys[{i}] must be a string")
-    elif not run_key_pattern.match(rk):
-        errors.append(f"run_keys[{i}] '{rk}' does not match CAP-XXXXXXXX-XXXXXX__cap.name__Rxxxx pattern")
+    elif not run_key_matches(rk):
+        errors.append(f"run_keys[{i}] '{rk}' does not match any allowed run_key namespace")
 
 # Conditional: blocked status must have blockers
 if receipt.get("status") == "blocked":
@@ -2297,7 +2613,7 @@ else:
             errors.append("evidence_refs.run_key_refs must be an array")
         else:
             for i, rk in enumerate(run_key_refs):
-                if not isinstance(rk, str) or not run_key_pattern.match(rk):
+                if not isinstance(rk, str) or not run_key_matches(rk):
                     errors.append(f"evidence_refs.run_key_refs[{i}] invalid run key")
 
         if not isinstance(file_refs, list):
@@ -2370,11 +2686,27 @@ cmd_collect_v2() {
 import json, sys, os, re, glob, fcntl
 from datetime import datetime, timezone
 
-run_key_pattern = r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"
+run_key_patterns_text = [r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"]
 commit_ref_pattern = r"^[0-9a-f]{7,40}$"
 allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
 required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
 close_aliases = {"close", "librarian"}
+
+def _compile_run_key_patterns(patterns_text):
+    compiled = []
+    for pattern_text in patterns_text:
+        try:
+            compiled.append(re.compile(str(pattern_text)))
+        except re.error as exc:
+            raise RuntimeError(f"invalid run key regex '{pattern_text}': {exc}")
+    if not compiled:
+        compiled = [re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")]
+    return compiled
+
+def _run_key_matches(value, patterns):
+    return any(pat.match(value) for pat in patterns)
+
+run_key_patterns = _compile_run_key_patterns(run_key_patterns_text)
 
 def _validate_receipt(receipt):
     """Validate receipt dict, return list of error strings."""
@@ -2401,9 +2733,8 @@ def _validate_receipt(receipt):
     ts = receipt.get("timestamp_utc", "")
     if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
         errors.append("bad timestamp format")
-    rk_pat = re.compile(run_key_pattern)
     for rk in receipt.get("run_keys", []):
-        if isinstance(rk, str) and not rk_pat.match(rk):
+        if isinstance(rk, str) and not _run_key_matches(rk, run_key_patterns):
             errors.append(f"bad run_key: {rk}")
     if receipt.get("status") == "blocked" and not receipt.get("blockers"):
         errors.append("blocked needs blockers[]")
@@ -2427,7 +2758,7 @@ def _validate_receipt(receipt):
                 errors.append("evidence_refs.run_key_refs not array")
             else:
                 for rk in run_key_refs:
-                    if not isinstance(rk, str) or not rk_pat.match(rk):
+                    if not isinstance(rk, str) or not _run_key_matches(rk, run_key_patterns):
                         errors.append(f"bad evidence run_key_ref: {rk}")
 
             if not isinstance(file_refs, list):
@@ -2471,7 +2802,13 @@ if role_runtime_contract and os.path.exists(role_runtime_contract):
         contract = yaml.safe_load(open(role_runtime_contract, "r", encoding="utf-8")) or {}
         evidence = contract.get("evidence") if isinstance(contract, dict) else {}
         if isinstance(evidence, dict):
-            run_key_pattern = str(evidence.get("run_key_regex", run_key_pattern))
+            run_key_regexes = evidence.get("run_key_regexes")
+            if isinstance(run_key_regexes, list) and run_key_regexes:
+                parsed = [str(x).strip() for x in run_key_regexes if str(x).strip()]
+                if parsed:
+                    run_key_patterns_text = parsed
+            elif evidence.get("run_key_regex"):
+                run_key_patterns_text = [str(evidence.get("run_key_regex")).strip()]
             commit_ref_pattern = str(evidence.get("commit_ref_regex", commit_ref_pattern))
             blockers = evidence.get("blocker_classes")
             if isinstance(blockers, list) and blockers:
@@ -2486,6 +2823,12 @@ if role_runtime_contract and os.path.exists(role_runtime_contract):
                 close_aliases = {str(x).strip() for x in aliases if str(x).strip()} or close_aliases
     except Exception:
         pass
+
+try:
+    run_key_patterns = _compile_run_key_patterns(run_key_patterns_text)
+except RuntimeError as exc:
+    print(f"FAIL: {exc}", file=sys.stderr)
+    sys.exit(1)
 
 # ── Load state with lock ──
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
@@ -2770,6 +3113,7 @@ cmd_close_v2() {
   local wave_id=""
   local force=false
   local dod_override_reason=""
+  local lock_override_reason=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -2783,23 +3127,32 @@ cmd_close_v2() {
         dod_override_reason="${2:-}"
         shift 2
         ;;
+      --lock-override)
+        if [[ $# -lt 2 || -z "${2:-}" ]]; then
+          echo "ERROR: --lock-override requires a non-empty reason" >&2
+          exit 1
+        fi
+        lock_override_reason="${2:-}"
+        shift 2
+        ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
     esac
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave close <WAVE_ID> [--force] [--dod-override \"<reason>\"]" >&2
+    echo "Usage: ops wave close <WAVE_ID> [--force] [--dod-override \"<reason>\"] [--lock-override \"<reason>\"]" >&2
     exit 1
   fi
 
   ensure_wave_exists "$wave_id"
+  wave_lock_guard "$wave_id" "close" "$lock_override_reason"
   local sf
   sf="$(wave_state_file "$wave_id")"
   local sd
   sd="$(wave_state_dir "$wave_id")"
 
-  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" <<'PYCLOSE2'
+  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" "$lock_override_reason" <<'PYCLOSE2'
 import json, sys, os, re, fcntl
 from datetime import datetime, timezone
 
@@ -2809,10 +3162,11 @@ force = sys.argv[3] == "true"
 spine_repo = sys.argv[4]
 role_runtime_contract = sys.argv[5] if len(sys.argv) > 5 else ""
 dod_override_reason = (sys.argv[6] if len(sys.argv) > 6 else "").strip()
+lock_override_reason = (sys.argv[7] if len(sys.argv) > 7 else "").strip()
 lock_file = sf + ".lock"
 receipts_dir = os.path.join(sd, "receipts")
 
-run_key_pattern = r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"
+run_key_patterns_text = [r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"]
 commit_ref_pattern = r"^[0-9a-f]{7,40}$"
 allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
 required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
@@ -2825,13 +3179,35 @@ state_transitions = {
 }
 close_aliases = {"close", "librarian"}
 
+def _compile_run_key_patterns(patterns_text):
+    compiled = []
+    for pattern_text in patterns_text:
+        try:
+            compiled.append(re.compile(str(pattern_text)))
+        except re.error as exc:
+            raise RuntimeError(f"invalid run key regex '{pattern_text}': {exc}")
+    if not compiled:
+        compiled = [re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")]
+    return compiled
+
+run_key_patterns = _compile_run_key_patterns(run_key_patterns_text)
+
+def _run_key_matches(value):
+    return any(pat.match(value) for pat in run_key_patterns)
+
 if role_runtime_contract and os.path.exists(role_runtime_contract):
     try:
         import yaml
         contract = yaml.safe_load(open(role_runtime_contract, "r", encoding="utf-8")) or {}
         evidence = contract.get("evidence") if isinstance(contract, dict) else {}
         if isinstance(evidence, dict):
-            run_key_pattern = str(evidence.get("run_key_regex", run_key_pattern))
+            run_key_regexes = evidence.get("run_key_regexes")
+            if isinstance(run_key_regexes, list) and run_key_regexes:
+                parsed = [str(x).strip() for x in run_key_regexes if str(x).strip()]
+                if parsed:
+                    run_key_patterns_text = parsed
+            elif evidence.get("run_key_regex"):
+                run_key_patterns_text = [str(evidence.get("run_key_regex")).strip()]
             commit_ref_pattern = str(evidence.get("commit_ref_regex", commit_ref_pattern))
             blockers = evidence.get("blocker_classes")
             if isinstance(blockers, list) and blockers:
@@ -2860,6 +3236,12 @@ if role_runtime_contract and os.path.exists(role_runtime_contract):
                     state_transitions = parsed
     except Exception:
         pass
+
+try:
+    run_key_patterns = _compile_run_key_patterns(run_key_patterns_text)
+except RuntimeError as exc:
+    print(f"FAIL: {exc}")
+    sys.exit(1)
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
@@ -2946,11 +3328,10 @@ try:
         if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
             errors.append("bad timestamp format")
 
-        rk_pat = re.compile(run_key_pattern)
         for rk in receipt.get("run_keys", []):
             if not isinstance(rk, str):
                 errors.append("run_key not string")
-            elif not rk_pat.match(rk):
+            elif not _run_key_matches(rk):
                 errors.append(f"bad run_key: {rk}")
 
         if receipt.get("status") == "blocked" and not receipt.get("blockers"):
@@ -2989,7 +3370,7 @@ try:
                     errors.append("evidence_refs.run_key_refs not array")
                 else:
                     for rk in run_key_refs:
-                        if not isinstance(rk, str) or not rk_pat.match(rk):
+                        if not isinstance(rk, str) or not _run_key_matches(rk):
                             errors.append(f"bad evidence run_key_ref: {rk}")
 
                 if not isinstance(file_refs, list):
@@ -3185,6 +3566,8 @@ try:
     state["force_closed"] = bool(infra_violations)
     state["dod_overridden"] = bool(dod_violations)
     state["dod_override_reason"] = dod_override_reason if dod_violations else ""
+    state["lock_overridden"] = bool(lock_override_reason)
+    state["lock_override_reason"] = lock_override_reason
     state[state_field] = "closed"
     state["lifecycle_state"] = "closed"
     workspace = state.get("workspace")
@@ -3236,6 +3619,8 @@ close_receipt = {
     "force_closed": bool(infra_violations),
     "dod_overridden": bool(dod_violations),
     "dod_override_reason": dod_override_reason if dod_violations else "",
+    "lock_overridden": bool(lock_override_reason),
+    "lock_override_reason": lock_override_reason,
     "dispatches": len(dispatches),
     "dispatches_done": sum(1 for d in dispatches if d["status"] == "done"),
     "dispatches_blocked": sum(1 for d in dispatches if d["status"] == "blocked"),
