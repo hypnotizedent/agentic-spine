@@ -7,6 +7,7 @@ scope: agentic-spine
 priority: medium
 horizon: later
 execution_readiness: blocked
+next_review: "2026-04-01"
 activation_trigger: dependency
 depends_on_loop: LOOP-CAMERA-OUTAGE-20260209
 objective: Stand up a production-grade, spine-governed surveillance platform at the Mint Prints shop with AI-powered detection, role-scoped visibility, and agentic integration.

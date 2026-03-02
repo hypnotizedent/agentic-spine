@@ -7,6 +7,7 @@ scope: execution
 priority: high
 horizon: later
 execution_readiness: blocked
+next_review: "2026-03-09"
 objective: Enforce canonical Vaultwarden lifecycle transaction for evidence retention, stale URL reconciliation, duplicate-truth governance, alias hygiene, and deterministic closeout proof.
 ---
 

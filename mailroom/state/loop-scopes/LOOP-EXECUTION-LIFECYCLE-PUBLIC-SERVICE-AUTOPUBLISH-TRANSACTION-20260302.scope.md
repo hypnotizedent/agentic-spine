@@ -7,6 +7,7 @@ scope: execution
 priority: high
 horizon: later
 execution_readiness: blocked
+next_review: "2026-03-15"
 objective: Enforce canonical public-service lifecycle transaction so bind/transition/deploy must execute cloudflare.service.publish with evidence, rollback semantics, and drift checks.
 ---
 

@@ -7,6 +7,7 @@ scope: cloudflare
 priority: medium
 horizon: later
 execution_readiness: blocked
+next_review: "2026-04-01"
 activation_trigger: dependency
 depends_on_loop: LOOP-CLOUDFLARE-CANONICAL-CONTROL-PLANE-20260302
 blocked_by: LOOP-CLOUDFLARE-CANONICAL-CONTROL-PLANE-20260302

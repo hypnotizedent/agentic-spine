@@ -7,6 +7,7 @@ scope: tailscale
 priority: medium
 horizon: later
 execution_readiness: blocked
+next_review: "2026-04-01"
 activation_trigger: manual
 blocked_by: "no-webhook-receiver-deployed, no-audit-log-destination"
 superseded_by_plan_id: PLAN-TAILSCALE-INTEGRATION-DEFERRED-ACTIONS

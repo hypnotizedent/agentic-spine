@@ -7,6 +7,7 @@ scope: communications
 priority: medium
 horizon: later
 execution_readiness: blocked
+next_review: "2026-03-15"
 objective: Execute governed mail-archiver overlap cleanup only after all provider imports are complete and stable.
 ---
 

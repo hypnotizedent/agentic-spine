@@ -7,6 +7,7 @@ scope: agent
 priority: medium
 horizon: later
 execution_readiness: blocked
+next_review: "2026-03-15"
 objective: Deferred friction backlog: infisical-agent and mail-archiver tooling issues
 ---
 

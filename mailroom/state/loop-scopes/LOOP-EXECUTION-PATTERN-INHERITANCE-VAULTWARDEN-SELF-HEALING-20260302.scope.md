@@ -7,6 +7,7 @@ scope: execution
 priority: high
 horizon: later
 execution_readiness: blocked
+next_review: "2026-03-09"
 objective: Generalize backup-style self-healing plumbing to Vaultwarden surfaces: canonical machine-path stabilization, scheduled runtime smoke, recovery action mappings, and deterministic escalation evidence.
 ---
 

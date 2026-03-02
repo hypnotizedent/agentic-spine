@@ -7,6 +7,7 @@ scope: cloudflare
 priority: medium
 horizon: later
 execution_readiness: blocked
+next_review: "2026-03-15"
 objective: Normalize Cloudflare governance surfaces (bridge allowlist, auth posture, onboarding coverage, authority unknowns, runbook, skill, cloudflared health gate) after runtime defects are fixed
 activation_trigger: dependency
 depends_on_loop: LOOP-CLOUDFLARE-RUNTIME-DEFECT-CLOSURE-20260302
