@@ -1,7 +1,8 @@
 ---
 loop_id: LOOP-TAILSCALE-CONTROL-PLANE-HARDENING-20260302
 created: 2026-03-02
-status: active
+status: closed
+closed_at: "2026-03-02"
 owner: "@ronny"
 scope: tailscale
 priority: high
@@ -52,3 +53,40 @@ LOOP-TAILSCALE-SYSTEMIC-AUDIT-CANONICAL-20260301 (closed)
 - No introduced verify failures.
 - No open tailscale hardening gaps from this wave.
 - Loop status can be moved to closed.
+
+## Closure Evidence
+
+### Commit
+- `0a0a16b` feat(infra): Tailscale control-plane hardening — ACL policy-as-code, enrollment security, DNS/coexistence contracts, D312-D314
+
+### Authority Files Added/Updated
+- `docs/CANONICAL/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml` — extended with acl_policy, enrollment, dns_authority, cloudflare_tailscale_coexistence, control_plane_integration sections
+- `ops/bindings/tailscale.acl.policy.hujson` — NEW canonical ACL policy (HuJSON, grants-based)
+
+### Capabilities Added
+- `tailscale.acl.status` — read current ACL from API + compare with local
+- `tailscale.acl.validate` — validate local HuJSON syntax + API validation
+- `tailscale.acl.apply` — push local policy to tailnet via OAuth (mutating, operator approval)
+- `tailscale.integration.status` — webhook/audit-log integration status + operator actions
+
+### Gates Added
+- D312: tailscale-acl-policy-integrity-lock (HuJSON parse, grants+tagOwners+tests, authority wired)
+- D313: tailscale-enrollment-security-lock (oauth_preferred, all 4 credentials in namespace)
+- D314: tailscale-dns-coexistence-authority-lock (4 resolvers, 3 boundaries, 7 zones matched)
+
+### Operator Actions Pending
+- OP-TS-001: Enable webhook subscriptions (admin console)
+- OP-TS-002: Enable audit log streaming (admin console)
+- OP-TS-003: Apply ACL policy from git (first-time push)
+- OP-TS-004: Apply tags to shop VMs
+- OP-TS-005: Lock admin console ACL editor via D312 drift detection
+- Artifact: `mailroom/state/tailscale-audit/operator-actions-20260302.yaml`
+
+### Verification
+- verify.run fast: 10/10 PASS (run key: CAP-20260301-214813__verify.run__R2uro26592)
+- verify.pack.run infra: 63/68 PASS (5 pre-existing failures: D54, D115, D275, D296, D298)
+- D310: PASS (17 devices)
+- D312: PASS
+- D313: PASS
+- D314: PASS (4 resolvers, 3 boundaries, 7 zones)
+- No introduced failures
