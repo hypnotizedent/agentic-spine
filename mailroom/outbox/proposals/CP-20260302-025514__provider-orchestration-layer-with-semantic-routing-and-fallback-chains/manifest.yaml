@@ -1,0 +1,110 @@
+proposal: CP-20260302-025514__provider-orchestration-layer-with-semantic-routing-and-fallback-chains
+agent: "ronnyworks@Mac"
+created: 2026-03-02T07:55:14Z
+status: pending
+loop_id: LOOP-PROVIDER-ORCHESTRATION-LAYER-20260302
+
+description: |
+  Add provider orchestration layer to enable semantic routing, fallback chains,
+  and provider health monitoring for the agentic spine. This decouples CLI tools
+  from providers and enables graceful degradation when rate limits hit.
+
+research_summary:
+  nvidia_nim:
+    platform: NVIDIA Inference Microservices
+    free_tier: "~40 req/min, no credit card"
+    api_format: OpenAI-compatible
+    key_models: [GLM-5 744B MoE, Kimi-K2.5 1T multimodal MoE]
+    api_base: https://integrate.api.nvidia.com/v1
+    use_case: cost-effective inference, fallback provider, free-tier experimentation
+
+  claude_code_router:
+    project: musistudio/claude-code-router
+    maturity: 27.8k stars, 2.2k forks, production-grade
+    key_features:
+      - Semantic routing with configurable slots
+      - Transformer system for multi-provider API compatibility
+      - Custom router functions for programmatic fallback
+      - Subagent routing via <CCR-SUBAGENT-MODEL> tags
+    integration: "ccr activate sets ANTHROPIC_BASE_URL transparently"
+    sponsorship: Z.ai GLM CODING PLAN
+
+current_state_gaps:
+  - "Hardcoded provider-CLI pairing (Claude Code→Anthropic, Codex→OpenAI, OpenCode→Z.ai)"
+  - "No provider registry as SSOT"
+  - "No role-based provider fallback chains"
+  - "No provider health monitoring or quota tracking"
+  - "Agent context files are CLI-specific and don't survive provider switches"
+
+proposed_phases:
+  - phase: 1
+    name: Provider Registry
+    deliverable: docs/governance/PROVIDER_REGISTRY.yaml
+    description: SSOT for providers, models, quotas, rate limits
+  - phase: 2
+    name: CLI Interface Registry
+    deliverable: docs/governance/CLI_INTERFACE_REGISTRY.yaml
+    description: Registry of CLI tools, API formats, proxy compatibility
+  - phase: 3
+    name: Role Fallback Maps
+    deliverable: docs/governance/ROLE_PROVIDER_MAPS.yaml
+    description: Role-based provider routing with fallback chains
+  - phase: 4
+    name: Proxy Layer Integration
+    deliverable: claude-code-router deployment
+    description: Install, configure, and integrate routing layer
+  - phase: 5
+    name: Provider Health Capability
+    deliverable: providers.status capability + session bootloader integration
+    description: Monitor provider health, warn on degradation
+
+changes:
+  - action: create
+    path: mailroom/state/loop-scopes/LOOP-PROVIDER-ORCHESTRATION-LAYER-20260302.scope.md
+    reason: Loop scope defining the provider orchestration layer project
+  - action: create
+    path: docs/governance/PROVIDER_REGISTRY.yaml
+    reason: Phase 1 - Provider SSOT (to be created during execution)
+  - action: create
+    path: docs/governance/CLI_INTERFACE_REGISTRY.yaml
+    reason: Phase 2 - CLI interface registry (to be created during execution)
+  - action: create
+    path: docs/governance/ROLE_PROVIDER_MAPS.yaml
+    reason: Phase 3 - Role-based routing (to be created during execution)
+
+acceptance_criteria:
+  - "Provider registry exists and is registered in SSOT_REGISTRY.yaml"
+  - "CLI interface registry exists and documents proxy compatibility"
+  - "Role fallback maps exist with at least 3 roles defined"
+  - "claude-code-router is installed and configured"
+  - "ccr activate works and sets ANTHROPIC_BASE_URL correctly"
+  - "providers.status capability reports provider health"
+  - "Session bootloader checks provider health on startup"
+  - "Drift gates detect provider config changes"
+  - "At least one CLI tool successfully routes through proxy"
+  - "Fallback chain works (simulated provider failure triggers fallback)"
+
+constraints:
+  - "No breaking changes to existing workflows during migration"
+  - "Gradual rollout with backward compatibility"
+  - "Continue using Infisical for secrets (no API keys in config)"
+  - "All new artifacts must be governed (SSOT, drift gates, receipts)"
+  - "Maintain ability to bypass proxy and use direct provider access"
+
+dependencies:
+  existing:
+    - Infisical secrets surface
+    - ops/engine/*.sh provider scripts
+  external:
+    - "@musistudio/claude-code-router npm package"
+    - "NVIDIA NIM API access (free tier)"
+  new:
+    - "Provider health monitoring capability"
+    - "Proxy configuration management"
+
+risk_mitigation:
+  - "Proxy layer failure: maintain direct provider access fallback"
+  - "Config drift: drift gates + receipts for all changes"
+  - "Provider API changes: registry-driven updates"
+  - "Rate limit cascades: health monitoring + fallback chains"
+  - "Migration complexity: phased rollout with rollback points"
