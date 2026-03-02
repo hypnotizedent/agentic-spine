@@ -31,6 +31,13 @@ runtime_roles:
     enforce_read_only_mutation_block: true
     override_env: SPINE_ROLE_POLICY_OVERRIDE_REF
     override_reason_env: SPINE_ROLE_POLICY_OVERRIDE_REASON
+  session_role_override_cache:
+    cache_filename: role-override.env
+    ttl_seconds: 14400
+    session_env_var: SPINE_SESSION_ID
+    terminal_role_env_var: OPS_TERMINAL_ROLE
+    require_session_binding: true
+    require_terminal_role_binding: true
 
 lane_role_compatibility:
   lane_source_contract: ops/bindings/terminal.launcher.view.yaml
@@ -70,6 +77,29 @@ handoff_boundaries:
     required_output_refs:
       - closeout_ref
       - linkage_ref
+
+handoff_ref_semantics:
+  default_kind: file_ref
+  kinds:
+    file_ref:
+      regex: "^(/|\\./|\\.\\./)?[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*(#[A-Za-z0-9._:-]+|:[0-9]+(:[0-9]+)?)?$"
+      description: "Repo/absolute file reference with optional #anchor or :line[:col]."
+    run_key_ref:
+      regex: "^(CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"
+      description: "Governed run key namespace (capability or session inline/fixture)."
+    commit_ref:
+      regex: "^[0-9a-f]{7,40}$"
+      description: "Git commit SHA reference."
+  by_ref_key:
+    research_brief_ref: file_ref
+    scope_ref: file_ref
+    execution_plan_ref: file_ref
+    acceptance_criteria_ref: file_ref
+    implementation_ref: file_ref
+    verify_ref: run_key_ref
+    cleanup_ref: file_ref
+    closeout_ref: file_ref
+    linkage_ref: file_ref
 
 promotion_gates:
   enforce: true
@@ -137,7 +167,17 @@ traffic_index:
     - blockers
 
 evidence:
-  run_key_regex: "CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+  run_key_regexes:
+    - "CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+    - "S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+  run_key_regex: "^(CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"
+  run_key_namespaces:
+    capability:
+      regex: "CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+      sources: [capability, wave_receipt, watcher_check, evidence_refs]
+    session_inline:
+      regex: "S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+      sources: [ops_run_inline, fixture, session_receipt, evidence_refs]
   commit_ref_regex: "^[0-9a-f]{7,40}$"
   blocker_classes: [none, deterministic, freshness, dependency, cleanup, policy, external]
   required_ref_fields:
