@@ -5,6 +5,8 @@ status: planned
 owner: "@ronny"
 scope: communications
 priority: medium
+horizon: later
+execution_readiness: blocked
 objective: Execute governed mail-archiver overlap cleanup only after all provider imports are complete and stable.
 ---
 
