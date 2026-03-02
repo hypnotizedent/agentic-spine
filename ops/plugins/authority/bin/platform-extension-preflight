@@ -9,6 +9,7 @@ SERVICE_CONTRACT="$ROOT/ops/bindings/service.onboarding.contract.yaml"
 HEALTH_BINDING="$ROOT/ops/bindings/services.health.yaml"
 COMMITMENTS_CONTRACT="$ROOT/ops/bindings/operator.commitments.contract.yaml"
 BINDING_DEFAULTS="$ROOT/ops/bindings/platform.extension.binding.defaults.yaml"
+ROUTING_REGISTRY="$ROOT/docs/governance/DOMAIN_ROUTING_REGISTRY.yaml"
 
 usage() {
   cat <<'USAGE'
@@ -56,7 +57,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$TX_FILE" ]] || fail "--transaction-file is required"
-for file in "$TX_CONTRACT" "$PRE_CONTRACT" "$LIFECYCLE_CONTRACT" "$SERVICE_CONTRACT" "$HEALTH_BINDING" "$COMMITMENTS_CONTRACT" "$BINDING_DEFAULTS"; do
+for file in "$TX_CONTRACT" "$PRE_CONTRACT" "$LIFECYCLE_CONTRACT" "$SERVICE_CONTRACT" "$HEALTH_BINDING" "$COMMITMENTS_CONTRACT" "$BINDING_DEFAULTS" "$ROUTING_REGISTRY"; do
   [[ -f "$file" ]] || fail "missing required binding: $file"
 done
 
@@ -65,7 +66,7 @@ TX_FILE="$(cd "$(dirname "$TX_FILE")" && pwd)/$(basename "$TX_FILE")"
 
 command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
 
-python3 - "$TX_FILE" "$TX_CONTRACT" "$PRE_CONTRACT" "$LIFECYCLE_CONTRACT" "$SERVICE_CONTRACT" "$HEALTH_BINDING" "$COMMITMENTS_CONTRACT" "$BINDING_DEFAULTS" "$STRICT" <<'PY'
+python3 - "$TX_FILE" "$TX_CONTRACT" "$PRE_CONTRACT" "$LIFECYCLE_CONTRACT" "$SERVICE_CONTRACT" "$HEALTH_BINDING" "$COMMITMENTS_CONTRACT" "$BINDING_DEFAULTS" "$ROUTING_REGISTRY" "$STRICT" <<'PY'
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -84,8 +85,9 @@ import yaml
     health_raw,
     commitments_raw,
     defaults_raw,
+    routing_raw,
     strict_raw,
-) = sys.argv[1:10]
+) = sys.argv[1:11]
 
 
 tx_file = Path(tx_file_raw).expanduser().resolve()
@@ -96,6 +98,7 @@ service_path = Path(service_raw).expanduser().resolve()
 health_path = Path(health_raw).expanduser().resolve()
 commitments_path = Path(commitments_raw).expanduser().resolve()
 defaults_path = Path(defaults_raw).expanduser().resolve()
+routing_path = Path(routing_raw).expanduser().resolve()
 strict_mode = strict_raw == "1"
 
 
@@ -120,6 +123,7 @@ try:
     health_binding = load_yaml(health_path)
     commitments_contract = load_yaml(commitments_path)
     defaults = load_yaml(defaults_path)
+    routing_registry = load_yaml(routing_path)
 except Exception as exc:
     print(f"platform.extension.preflight FAIL: unable to parse input YAML: {exc}", file=sys.stderr)
     raise SystemExit(1)
@@ -188,6 +192,19 @@ service_map = {
     for row in (service_contract.get("services") or [])
     if isinstance(row, dict) and str(row.get("id", "")).strip()
 }
+
+route_hostnames = set()
+for zone in (routing_registry.get("zones") or []):
+    if not isinstance(zone, dict):
+        continue
+    for row in (zone.get("hostnames") or []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("routing_layer", "")).strip() != "cloudflare_tunnel":
+            continue
+        hostname = str(row.get("hostname", "")).strip().lower()
+        if hostname:
+            route_hostnames.add(hostname)
 if tx_type == "service" and target_id and not target_id.startswith("template-"):
     service_row = service_map.get(target_id)
     if service_row is None:
@@ -246,6 +263,55 @@ checks.append(
         "id": "home_binding_parity",
         "status": "fail" if home_issues else "pass",
         "detail": list_join(home_issues),
+    }
+)
+
+exposure_issues: list[str] = []
+if tx_type == "service" and target_id and not target_id.startswith("template-"):
+    service_row = service_map.get(target_id)
+    if isinstance(service_row, dict):
+        exposure_contract = (
+            service_contract.get("exposure_contract")
+            if isinstance(service_contract.get("exposure_contract"), dict)
+            else {}
+        )
+        allowed_intents = {
+            str(x).strip().lower()
+            for x in (exposure_contract.get("intents") or ["private", "internal", "public"])
+            if str(x).strip()
+        }
+        default_intent = str(exposure_contract.get("default_intent", "private")).strip().lower() or "private"
+        intent = str(service_row.get("exposure_intent", "")).strip().lower() or default_intent
+        if intent not in allowed_intents:
+            exposure_issues.append(f"exposure_intent invalid for {target_id}: {intent}")
+        if intent == "public":
+            hostnames = service_row.get("cloudflare_hostnames")
+            zone_name = str(service_row.get("cloudflare_zone", "")).strip()
+            publish_cap = str(service_row.get("publish_via_capability", "")).strip()
+            if not isinstance(hostnames, list) or len(hostnames) == 0:
+                exposure_issues.append(f"{target_id}: cloudflare_hostnames must be non-empty for public intent")
+                hostnames = []
+            if not zone_name:
+                exposure_issues.append(f"{target_id}: cloudflare_zone required for public intent")
+            if publish_cap != "cloudflare.service.publish":
+                exposure_issues.append(
+                    f"{target_id}: publish_via_capability must be cloudflare.service.publish for public intent"
+                )
+            for host in hostnames:
+                hostname = str(host).strip().lower()
+                if not hostname:
+                    exposure_issues.append(f"{target_id}: cloudflare_hostnames contains empty value")
+                    continue
+                if hostname not in route_hostnames:
+                    exposure_issues.append(
+                        f"{target_id}: hostname missing from DOMAIN_ROUTING_REGISTRY cloudflare_tunnel set: {hostname}"
+                    )
+
+checks.append(
+    {
+        "id": "service_exposure_contract",
+        "status": "fail" if exposure_issues else "pass",
+        "detail": list_join(exposure_issues),
     }
 )
 

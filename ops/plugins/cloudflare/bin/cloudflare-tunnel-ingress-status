@@ -10,6 +10,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
 BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
 
 TUNNEL_NAME_DEFAULT="homelab-tunnel"
 TUNNEL_NAME="${TUNNEL_NAME_DEFAULT}"
@@ -52,9 +53,11 @@ if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
   exec "$SECRETS_EXEC" -- "$0" "$@"
 fi
 
+source "$CF_LIB"
+
 CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
 
-[[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || { echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2; exit 2; }
+cf_require_auth || exit $?
 [[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || { echo "STOP: CLOUDFLARE_ACCOUNT_ID missing" >&2; exit 2; }
 
 TUNNEL_ID="${CLOUDFLARE_TUNNEL_ID:-}"
@@ -82,11 +85,11 @@ fi
 [[ -n "${TUNNEL_ID:-}" ]] || { echo "STOP: tunnel id not found (env CLOUDFLARE_TUNNEL_ID unset; binding missing name '$TUNNEL_NAME')" >&2; exit 2; }
 
 URL="${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations"
-curl -fsS \
-  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  "$URL" \
-  | python3 -c '
+CONFIG_JSON="$(cf_api_get "$URL")" || {
+  echo "STOP: failed to fetch tunnel configuration" >&2
+  exit 3
+}
+echo "$CONFIG_JSON" | python3 -c '
 import json, sys
 
 data = json.load(sys.stdin)
@@ -131,3 +134,4 @@ if catch_all:
     for s in catch_all:
         print(f"- (catch-all) -> {s}")
 '
+echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"

@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# cloudflare-service-publish — governed Cloudflare publish transaction:
+# DNS upsert + tunnel ingress set + registry parity checks.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+REGISTRY_FILE="$ROOT/docs/governance/DOMAIN_ROUTING_REGISTRY.yaml"
+
+DNS_SET_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-dns-record-set"
+INGRESS_SET_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-tunnel-ingress-set"
+ROUTING_DIFF_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-domain-routing-diff"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+
+usage() {
+  cat <<'EOF'
+Usage: cloudflare-service-publish --hostname HOST --service URL [OPTIONS]
+
+Required:
+  --hostname HOST             Public hostname to publish (e.g., homarr.ronny.works)
+  --service URL               Tunnel backend target (e.g., http://100.123.207.64:7575)
+
+Optional:
+  --zone-id ID                Cloudflare zone ID
+  --zone NAME                 Cloudflare zone name
+  --dns-type TYPE             DNS record type (default: CNAME)
+  --dns-target TARGET         DNS content target (default: <tunnel-id>.cfargotunnel.com)
+  --proxied                   Enable Cloudflare proxy (default behavior)
+  --no-proxy                  Disable proxy (DNS-only)
+  --tunnel NAME               Tunnel name (default: homelab-tunnel)
+  --allow-unregistered        Skip DOMAIN_ROUTING_REGISTRY parity precheck
+  --json                      Emit JSON output
+  --dry-run                   Preview transaction only
+EOF
+  exit 0
+}
+
+HOSTNAME=""
+SERVICE=""
+ZONE_ID=""
+ZONE_NAME=""
+DNS_TYPE="CNAME"
+DNS_TARGET=""
+TUNNEL_NAME="homelab-tunnel"
+PROXY_FLAG="--proxied"
+ALLOW_UNREGISTERED=0
+JSON_OUT=0
+DRY_RUN=0
+
+while (( $# > 0 )); do
+  case "$1" in
+    --hostname) HOSTNAME="${2:-}"; shift 2 ;;
+    --service) SERVICE="${2:-}"; shift 2 ;;
+    --zone-id) ZONE_ID="${2:-}"; shift 2 ;;
+    --zone) ZONE_NAME="${2:-}"; shift 2 ;;
+    --dns-type) DNS_TYPE="${2:-}"; shift 2 ;;
+    --dns-target) DNS_TARGET="${2:-}"; shift 2 ;;
+    --proxied) PROXY_FLAG="--proxied"; shift ;;
+    --no-proxy) PROXY_FLAG="--no-proxy"; shift ;;
+    --tunnel) TUNNEL_NAME="${2:-}"; shift 2 ;;
+    --allow-unregistered) ALLOW_UNREGISTERED=1; shift ;;
+    --json) JSON_OUT=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage ;;
+    --) shift ;;
+    *) echo "STOP: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -n "$HOSTNAME" ]] || { echo "STOP: --hostname required" >&2; exit 1; }
+[[ -n "$SERVICE" ]] || { echo "STOP: --service required" >&2; exit 1; }
+
+if [[ ! -f "$BINDING_FILE" ]]; then
+  echo "STOP: binding file missing: $BINDING_FILE" >&2
+  exit 2
+fi
+if [[ ! -f "$REGISTRY_FILE" ]]; then
+  echo "STOP: registry file missing: $REGISTRY_FILE" >&2
+  exit 2
+fi
+
+if [[ -z "$ZONE_NAME" ]]; then
+  ZONE_NAME="$(python3 - "$BINDING_FILE" "$HOSTNAME" <<'PY'
+import json, sys
+binding_path, hostname = sys.argv[1], sys.argv[2].strip().lower()
+with open(binding_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+zones = [str(z.get("name", "")).strip().lower() for z in data.get("zones", [])]
+zones = [z for z in zones if z]
+zones.sort(key=len, reverse=True)
+for zone in zones:
+    if hostname == zone or hostname.endswith("." + zone):
+        print(zone)
+        raise SystemExit(0)
+raise SystemExit(0)
+PY
+)"
+fi
+
+if [[ -z "$ZONE_ID" ]]; then
+  ZONE_ID="$(cf_zone_id_resolve "$CF_API" "$BINDING_FILE" "" "$ZONE_NAME" || true)"
+fi
+[[ -n "$ZONE_ID" ]] || { echo "STOP: unable to resolve zone id for hostname=$HOSTNAME zone=${ZONE_NAME:-unset}" >&2; exit 2; }
+
+if [[ "$ALLOW_UNREGISTERED" -eq 0 ]]; then
+  parity="$(python3 - "$REGISTRY_FILE" "$HOSTNAME" "$SERVICE" <<'PY'
+import sys, yaml
+path, hostname, service = sys.argv[1], sys.argv[2].strip().lower(), sys.argv[3].strip()
+with open(path, "r", encoding="utf-8") as f:
+    doc = yaml.safe_load(f) or {}
+matches = []
+for zone in doc.get("zones", []) or []:
+    for row in zone.get("hostnames", []) or []:
+        h = str(row.get("hostname", "")).strip().lower()
+        if h == hostname:
+            matches.append(row)
+if not matches:
+    print("missing")
+    raise SystemExit(0)
+row = matches[0]
+layer = str(row.get("routing_layer", "")).strip()
+declared_service = str(row.get("service", "")).strip()
+if layer != "cloudflare_tunnel":
+    print(f"bad_layer:{layer}")
+elif declared_service and declared_service != service:
+    print(f"service_mismatch:{declared_service}")
+else:
+    print("ok")
+PY
+)"
+  case "$parity" in
+    ok) ;;
+    missing)
+      echo "STOP: hostname '$HOSTNAME' missing from DOMAIN_ROUTING_REGISTRY (use --allow-unregistered to bypass)." >&2
+      exit 3
+      ;;
+    bad_layer:*)
+      echo "STOP: DOMAIN_ROUTING_REGISTRY routing_layer mismatch for '$HOSTNAME' (${parity#bad_layer:})." >&2
+      exit 3
+      ;;
+    service_mismatch:*)
+      echo "STOP: DOMAIN_ROUTING_REGISTRY service mismatch for '$HOSTNAME' (expected '${parity#service_mismatch:}', got '$SERVICE')." >&2
+      exit 3
+      ;;
+    *)
+      echo "STOP: registry parity check failed for '$HOSTNAME' ($parity)." >&2
+      exit 3
+      ;;
+  esac
+fi
+
+if [[ -z "$DNS_TARGET" ]]; then
+  tunnel_id="${CLOUDFLARE_TUNNEL_ID:-}"
+  if [[ -z "$tunnel_id" ]]; then
+    tunnel_id="$(python3 - "$BINDING_FILE" "$TUNNEL_NAME" <<'PY'
+import json, sys
+path, tunnel_name = sys.argv[1], sys.argv[2].strip()
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+for t in data.get("tunnels", []):
+    if str(t.get("name", "")).strip() == tunnel_name:
+        tid = str(t.get("id", "")).strip()
+        if tid:
+            print(tid)
+            raise SystemExit(0)
+raise SystemExit(0)
+PY
+)"
+  fi
+  [[ -n "$tunnel_id" ]] || { echo "STOP: unable to resolve tunnel id for '$TUNNEL_NAME'" >&2; exit 2; }
+  DNS_TARGET="${tunnel_id}.cfargotunnel.com"
+fi
+
+dns_cmd=("$DNS_SET_SCRIPT" --zone-id "$ZONE_ID" --type "$DNS_TYPE" --name "$HOSTNAME" --content "$DNS_TARGET" "$PROXY_FLAG")
+ingress_cmd=("$INGRESS_SET_SCRIPT" --tunnel "$TUNNEL_NAME" --hostname "$HOSTNAME" --service "$SERVICE")
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  dns_cmd+=(--dry-run)
+  ingress_cmd+=(--dry-run)
+fi
+
+dns_out="$("${dns_cmd[@]}" 2>&1)" || {
+  echo "STOP: DNS publish step failed" >&2
+  echo "$dns_out" >&2
+  exit 4
+}
+
+ingress_out="$("${ingress_cmd[@]}" 2>&1)" || {
+  echo "STOP: tunnel ingress publish step failed" >&2
+  echo "$ingress_out" >&2
+  exit 4
+}
+
+diff_out="$("$ROUTING_DIFF_SCRIPT" --tunnel "$TUNNEL_NAME" 2>&1)" || diff_status=$?
+diff_status="${diff_status:-0}"
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  python3 - "$HOSTNAME" "$SERVICE" "$ZONE_ID" "$DNS_TARGET" "$diff_status" \
+    "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" \
+    "$dns_out" "$ingress_out" "$diff_out" <<'PY'
+import json, sys
+host, service, zone_id, dns_target, diff_status, auth_mode, dns_out, ingress_out, diff_out = sys.argv[1:]
+print(json.dumps({
+  "capability": "cloudflare.service.publish",
+  "status": "ok" if diff_status == "0" else "warn",
+  "hostname": host,
+  "service": service,
+  "zone_id": zone_id,
+  "dns_target": dns_target,
+  "auth_mode": auth_mode,
+  "routing_diff_exit_code": int(diff_status),
+  "steps": {
+    "dns_record_set": dns_out,
+    "tunnel_ingress_set": ingress_out,
+    "domain_routing_diff": diff_out,
+  },
+}, indent=2))
+PY
+else
+  echo "cloudflare.service.publish"
+  echo "hostname: $HOSTNAME"
+  echo "service: $SERVICE"
+  echo "zone_id: $ZONE_ID"
+  echo "dns_target: $DNS_TARGET"
+  echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
+  echo
+  echo "[dns_record_set]"
+  echo "$dns_out"
+  echo
+  echo "[tunnel_ingress_set]"
+  echo "$ingress_out"
+  echo
+  echo "[domain_routing_diff]"
+  echo "$diff_out"
+  if [[ "$diff_status" -eq 0 ]]; then
+    echo "status: OK"
+  else
+    echo "status: WARN (routing diff detected)"
+  fi
+fi
+
+if [[ "$diff_status" -ne 0 ]]; then
+  exit 5
+fi

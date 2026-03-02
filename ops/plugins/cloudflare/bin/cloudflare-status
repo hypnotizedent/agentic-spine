@@ -8,6 +8,7 @@ set -euo pipefail
 # Root of repo (this file lives at ops/plugins/cloudflare/bin/)
 ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
 
 # Re-exec ourselves under secrets injection (single capability receipt; no nested caps)
 if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
@@ -15,59 +16,55 @@ if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
   exec "$SECRETS_EXEC" -- "$0" "$@"
 fi
 
-CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+source "$CF_LIB"
 
-# Prefer API token (recommended). Do NOT print token.
-if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
-  echo "STOP: CLOUDFLARE_API_TOKEN not present in injected environment." >&2
-  exit 2
-fi
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
 
 # Fetch zones (names + ids only)
-ZONES_JSON="$(curl -fsS \
-  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  "${CF_API}/zones?per_page=50")" || {
-    echo "STOP: Cloudflare zones request failed (network/auth)." >&2
-    exit 2
-  }
+ZONES_JSON="$(cf_api_get "${CF_API}/zones?per_page=50")" || {
+  echo "STOP: Cloudflare zones request failed (network/auth)." >&2
+  exit 2
+}
 
-# Pass JSON to Python via pipe
-echo "$ZONES_JSON" | python3 -c '
-import json, sys, urllib.request, urllib.error
+TMP_ZONES="$(mktemp)"
+trap 'rm -f "$TMP_ZONES" 2>/dev/null || true' EXIT
+printf '%s\n' "$ZONES_JSON" > "$TMP_ZONES"
 
-data = json.load(sys.stdin)
+zones_tsv="$(python3 - "$TMP_ZONES" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
 if not data.get("success", False):
     print("STOP: Cloudflare API returned success=false for zones.", file=sys.stderr)
-    sys.exit(2)
+    raise SystemExit(2)
+for z in data.get("result", []):
+    print(f"{z.get('id','')}\t{z.get('name','<unknown>')}")
+PY
+)"
 
-zones = data.get("result", [])
-print("cloudflare.status")
-print(f"zones: {len(zones)}")
+echo "cloudflare.status"
+echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
+echo "zones: $(printf '%s\n' "$zones_tsv" | sed '/^$/d' | wc -l | tr -d ' ')"
 
-# Pull env from parent bash
-import os
-api = os.environ.get("CLOUDFLARE_API_BASE", "https://api.cloudflare.com/client/v4").rstrip("/")
-token = os.environ["CLOUDFLARE_API_TOKEN"]
-
-def get(url):
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-for z in zones:
-    zid = z.get("id")
-    name = z.get("name", "<unknown>")
-    # Ask for 1 record but read total_count (no values)
-    url = f"{api}/zones/{zid}/dns_records?per_page=1"
-    try:
-        j = get(url)
-        if not j.get("success", False):
-            print(f"- {name}: STOP (dns_records success=false)")
-            continue
-        total = (j.get("result_info") or {}).get("total_count")
-        print(f"- {name}: dns_records={total}")
-    except (urllib.error.URLError, urllib.error.HTTPError) as e:
-        print(f"- {name}: STOP (dns_records request failed)")
-        continue
-'
+while IFS=$'\t' read -r zid name; do
+  [[ -n "${zid:-}" ]] || continue
+  DNS_JSON="$(cf_api_get "${CF_API}/zones/${zid}/dns_records?per_page=1" || true)"
+  if [[ -z "$DNS_JSON" ]]; then
+    echo "- ${name}: STOP (dns_records request failed)"
+    continue
+  fi
+  total="$(printf '%s\n' "$DNS_JSON" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+if not data.get("success", False):
+    print("")
+else:
+    print((data.get("result_info") or {}).get("total_count", ""))
+')"
+  if [[ -z "$total" ]]; then
+    echo "- ${name}: STOP (dns_records success=false)"
+  else
+    echo "- ${name}: dns_records=${total}"
+  fi
+done <<< "$zones_tsv"

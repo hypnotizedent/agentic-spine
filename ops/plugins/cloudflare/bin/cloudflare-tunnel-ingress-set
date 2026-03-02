@@ -5,12 +5,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
 BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
 
 # Re-exec under secrets injection BEFORE arg parsing (args pass through)
 if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
   export SPINE_SECRETS_INJECTED=1
   exec "$SECRETS_EXEC" -- "$0" "$@"
 fi
+
+source "$CF_LIB"
 
 TUNNEL_NAME_DEFAULT="homelab-tunnel"
 TUNNEL_NAME="${TUNNEL_NAME_DEFAULT}"
@@ -63,7 +66,7 @@ if [[ "$REMOVE" -eq 0 && -z "$SERVICE" ]]; then
 fi
 
 CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
-[[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]  || { echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2; exit 2; }
+cf_require_auth || exit $?
 [[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || { echo "STOP: CLOUDFLARE_ACCOUNT_ID missing" >&2; exit 2; }
 
 # Resolve tunnel ID from binding
@@ -90,10 +93,7 @@ fi
 CONFIG_URL="${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations"
 
 # GET current tunnel configuration
-CURRENT=$(curl -fsS \
-  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  "$CONFIG_URL" 2>&1) || {
+CURRENT="$(cf_api_get "$CONFIG_URL" 2>&1)" || {
   echo "STOP: failed to fetch tunnel config" >&2
   echo "$CURRENT" >&2
   exit 3
@@ -196,11 +196,7 @@ fi
 # PUT the new configuration
 PUT_PAYLOAD=$(echo "$NEW_CONFIG" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['config']))")
 
-RESULT=$(curl -fsS -X PUT \
-  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "$PUT_PAYLOAD" \
-  "$CONFIG_URL" 2>&1) || {
+RESULT="$(cf_api_put "$CONFIG_URL" "$PUT_PAYLOAD" 2>&1)" || {
   echo "STOP: failed to PUT tunnel config" >&2
   echo "$RESULT" >&2
   exit 4
@@ -232,5 +228,6 @@ else
   echo "hostname: $HOSTNAME"
   [[ "$REMOVE" -eq 0 ]] && echo "service: $SERVICE"
   echo "rule_count: $RULE_COUNT"
+  echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
   echo "status: OK"
 fi

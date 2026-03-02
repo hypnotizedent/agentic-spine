@@ -4,24 +4,26 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
 
 if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
   export SPINE_SECRETS_INJECTED=1
   exec "$SECRETS_EXEC" -- "$0" "$@"
 fi
 
+source "$CF_LIB"
+
 CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
-if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
-  echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2
-  exit 2
-fi
+cf_require_auth || exit $?
 
 usage() {
   cat <<'EOF'
-Usage: cloudflare-dns-record-set --zone-id ZONE_ID --type TYPE --name NAME --content CONTENT [OPTIONS]
+Usage: cloudflare-dns-record-set (--zone-id ZONE_ID | --zone ZONE_NAME) --type TYPE --name NAME --content CONTENT [OPTIONS]
 
 Required:
   --zone-id   ID    Cloudflare zone ID
+  --zone      NAME  Cloudflare zone name (auto-resolves to zone ID)
   --type      TYPE  Record type (A, AAAA, CNAME, MX, TXT, SRV, etc.)
   --name      NAME  Record name (FQDN or @ for root)
   --content   VAL   Record value/content
@@ -43,12 +45,13 @@ EOF
 }
 
 # Defaults
-ZONE_ID="" TYPE="" NAME="" CONTENT=""
+ZONE_ID="" ZONE_NAME="" TYPE="" NAME="" CONTENT=""
 TTL=1 PROXIED="" PRIORITY="" COMMENT="" JSON_OUT=0 DRY_RUN=0
 
 while (( $# > 0 )); do
   case "$1" in
     --zone-id)   ZONE_ID="$2"; shift 2 ;;
+    --zone)      ZONE_NAME="$2"; shift 2 ;;
     --type)      TYPE="$2"; shift 2 ;;
     --name)      NAME="$2"; shift 2 ;;
     --content)   CONTENT="$2"; shift 2 ;;
@@ -66,12 +69,20 @@ while (( $# > 0 )); do
 done
 
 # Validate required args
-[[ -z "$ZONE_ID" ]] && { echo "STOP: --zone-id required" >&2; exit 1; }
+if [[ -z "$ZONE_ID" && -z "$ZONE_NAME" ]]; then
+  echo "STOP: --zone-id or --zone required" >&2
+  exit 1
+fi
 [[ -z "$TYPE" ]]    && { echo "STOP: --type required" >&2; exit 1; }
 [[ -z "$NAME" ]]    && { echo "STOP: --name required" >&2; exit 1; }
 [[ -z "$CONTENT" ]] && { echo "STOP: --content required" >&2; exit 1; }
 
 TYPE="$(echo "$TYPE" | tr '[:lower:]' '[:upper:]')"
+
+if [[ -z "$ZONE_ID" ]]; then
+  ZONE_ID="$(cf_zone_id_resolve "$CF_API" "$BINDING_FILE" "" "$ZONE_NAME" || true)"
+fi
+[[ -n "$ZONE_ID" ]] || { echo "STOP: unable to resolve zone id (zone=${ZONE_NAME:-unset})" >&2; exit 2; }
 
 # Build JSON payload
 PAYLOAD=$(python3 -c "
@@ -87,10 +98,7 @@ print(json.dumps(p))
 ")
 
 # Search for existing record (same type + name)
-EXISTING=$(curl -fsS \
-  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  "${CF_API}/zones/${ZONE_ID}/dns_records?type=${TYPE}&name=${NAME}&per_page=100" 2>&1) || {
+EXISTING="$(cf_api_get "${CF_API}/zones/${ZONE_ID}/dns_records?type=${TYPE}&name=${NAME}&per_page=100" 2>&1)" || {
   echo "STOP: failed to query existing records" >&2
   exit 3
 }
@@ -119,10 +127,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     ACTION="create"
   fi
   if [[ "$JSON_OUT" -eq 1 ]]; then
-    echo "{\"dry_run\": true, \"action\": \"$ACTION\", \"type\": \"$TYPE\", \"name\": \"$NAME\", \"record_id\": \"${RECORD_ID:-null}\"}"
+    echo "{\"dry_run\": true, \"action\": \"$ACTION\", \"zone_id\": \"$ZONE_ID\", \"type\": \"$TYPE\", \"name\": \"$NAME\", \"record_id\": \"${RECORD_ID:-null}\"}"
   else
     echo "cloudflare.dns.record.set (dry-run)"
     echo "action: $ACTION"
+    echo "zone_id: $ZONE_ID"
     echo "type: $TYPE"
     echo "name: $NAME"
     echo "content: $CONTENT"
@@ -134,11 +143,7 @@ fi
 
 if [[ -n "$RECORD_ID" ]]; then
   # Update existing record
-  RESULT=$(curl -fsS -X PUT \
-    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$PAYLOAD" \
-    "${CF_API}/zones/${ZONE_ID}/dns_records/${RECORD_ID}" 2>&1) || {
+  RESULT="$(cf_api_put "${CF_API}/zones/${ZONE_ID}/dns_records/${RECORD_ID}" "$PAYLOAD" 2>&1)" || {
     echo "STOP: failed to update record $RECORD_ID" >&2
     echo "$RESULT" >&2
     exit 4
@@ -146,11 +151,7 @@ if [[ -n "$RECORD_ID" ]]; then
   ACTION="updated"
 else
   # Create new record
-  RESULT=$(curl -fsS -X POST \
-    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$PAYLOAD" \
-    "${CF_API}/zones/${ZONE_ID}/dns_records" 2>&1) || {
+  RESULT="$(cf_api_post "${CF_API}/zones/${ZONE_ID}/dns_records" "$PAYLOAD" 2>&1)" || {
     echo "STOP: failed to create record" >&2
     echo "$RESULT" >&2
     exit 5
@@ -184,10 +185,12 @@ print(json.dumps(out, indent=2))
 else
   echo "cloudflare.dns.record.set"
   echo "action: $ACTION"
+  echo "zone_id: $ZONE_ID"
   echo "type: $TYPE"
   echo "name: $NAME"
   echo "content: $CONTENT"
   echo "record_id: $RESULT_ID"
   [[ -n "$PROXIED" ]] && echo "proxied: $PROXIED"
+  echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
   echo "status: OK"
 fi

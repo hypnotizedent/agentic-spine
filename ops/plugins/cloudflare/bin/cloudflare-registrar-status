@@ -7,20 +7,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
 
 if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
   export SPINE_SECRETS_INJECTED=1
   exec "$SECRETS_EXEC" -- "$0" "$@"
 fi
 
+source "$CF_LIB"
+
 CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
 INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
 ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-}"
 
-if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
-  echo "STOP: CLOUDFLARE_API_TOKEN not present in injected environment." >&2
-  exit 2
-fi
+cf_require_auth || exit $?
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -37,13 +37,16 @@ if [[ ! -f "$INVENTORY" ]]; then
   exit 2
 fi
 
-python3 - "$CF_API" "$INVENTORY" "${JSON_OUT:-0}" <<'PYEOF'
+python3 - "$CF_API" "$INVENTORY" "${JSON_OUT:-0}" "${CF_AUTH_MODE_PREFERRED:-unknown}" <<'PYEOF'
 import json, sys, os, urllib.request, urllib.error
 
 api = sys.argv[1]
 inventory = sys.argv[2]
 json_out = sys.argv[3] == "1"
-token = os.environ["CLOUDFLARE_API_TOKEN"]
+preferred_mode = sys.argv[4]
+token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+auth_email = os.environ.get("CLOUDFLARE_AUTH_EMAIL", "")
+global_key = os.environ.get("CLOUDFLARE_GLOBAL_API_KEY", "")
 account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
 
 with open(inventory) as f:
@@ -53,13 +56,54 @@ zones = inv.get("zones", [])
 if not account_id:
     account_id = inv.get("account_id", "")
 
+def headers_for(mode):
+    base = {"Content-Type": "application/json"}
+    if mode == "token":
+        base["Authorization"] = f"Bearer {token}"
+    else:
+        base["X-Auth-Email"] = auth_email
+        base["X-Auth-Key"] = global_key
+    return base
+
 def get(url):
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    })
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    global preferred_mode
+    modes = []
+    if preferred_mode == "token" and token:
+        modes.append("token")
+        if auth_email and global_key:
+            modes.append("global")
+    elif preferred_mode == "global" and auth_email and global_key:
+        modes.append("global")
+        if token:
+            modes.append("token")
+    else:
+        if token:
+            modes.append("token")
+        if auth_email and global_key:
+            modes.append("global")
+    if not modes:
+        raise RuntimeError("missing Cloudflare auth")
+
+    last_exc = None
+    for idx, mode in enumerate(modes):
+        req = urllib.request.Request(url, headers=headers_for(mode))
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                preferred_mode = mode
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            if exc.code in (401, 403) and idx + 1 < len(modes):
+                continue
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if idx + 1 < len(modes):
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Cloudflare request failed")
 
 results = []
 for z in zones:
@@ -93,6 +137,7 @@ if json_out:
     print(json.dumps(results, indent=2))
 else:
     print("cloudflare.registrar.status")
+    print(f"auth_mode: {preferred_mode}")
     print(f"domains: {len(results)}")
     print()
     fmt = "{:<30s} {:<25s} {:<12s} {:<12s} {:<12s}"

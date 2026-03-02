@@ -2,23 +2,26 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
 
 if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
   export SPINE_SECRETS_INJECTED=1
   exec "$SECRETS_EXEC" -- "$0" "$@"
 fi
 
+source "$CF_LIB"
+
 CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
 if [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
   echo "STOP: CLOUDFLARE_ACCOUNT_ID missing" >&2
   exit 2
 fi
-if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
-  echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2
-  exit 2
-fi
+cf_require_auth || exit $?
 
-TUNNELS_JSON=$(curl -fsS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json" "${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/tunnels")
+TUNNELS_JSON="$(cf_api_get "${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/tunnels")" || {
+  echo "STOP: failed to fetch tunnels" >&2
+  exit 2
+}
 echo "$TUNNELS_JSON" | python3 -c '
 import json, sys
 
@@ -35,3 +38,4 @@ for tunnel in tunnels:
     created = tunnel.get("created_at", "unknown")
     print(f"- {name}: id={tunnel_id} created={created}")
 '
+echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"

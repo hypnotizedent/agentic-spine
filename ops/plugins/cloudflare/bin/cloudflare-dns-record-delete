@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# cloudflare-dns-record-delete — delete DNS records in a Cloudflare zone.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+
+usage() {
+  cat <<'EOF'
+Usage: cloudflare-dns-record-delete (--zone-id ZONE_ID | --zone ZONE_NAME) [selector] [OPTIONS]
+
+Selector (one of):
+  --record-id ID                 Delete a specific record by record ID
+  --type TYPE --name NAME        Select record(s) by type+name
+    [--content VALUE]            Further narrow by content for multi-value records
+
+Options:
+  --all-matches                  Allow deleting multiple matched records
+  --json                         Emit JSON output
+  --dry-run                      Preview only; no mutation
+
+Examples:
+  cloudflare-dns-record-delete --zone ronny.works --record-id 1234abcd
+  cloudflare-dns-record-delete --zone-id ZID --type CNAME --name homarr.ronny.works
+  cloudflare-dns-record-delete --zone ronny.works --type TXT --name _dmarc.ronny.works --content "v=DMARC1; p=none;"
+EOF
+  exit 0
+}
+
+ZONE_ID=""
+ZONE_NAME=""
+RECORD_ID=""
+TYPE=""
+NAME=""
+CONTENT=""
+ALL_MATCHES=0
+JSON_OUT=0
+DRY_RUN=0
+
+while (( $# > 0 )); do
+  case "$1" in
+    --zone-id) ZONE_ID="${2:-}"; shift 2 ;;
+    --zone) ZONE_NAME="${2:-}"; shift 2 ;;
+    --record-id) RECORD_ID="${2:-}"; shift 2 ;;
+    --type) TYPE="${2:-}"; shift 2 ;;
+    --name) NAME="${2:-}"; shift 2 ;;
+    --content) CONTENT="${2:-}"; shift 2 ;;
+    --all-matches) ALL_MATCHES=1; shift ;;
+    --json) JSON_OUT=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage ;;
+    --) shift ;;
+    *) echo "STOP: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$ZONE_ID" && -z "$ZONE_NAME" ]]; then
+  echo "STOP: --zone-id or --zone required" >&2
+  exit 1
+fi
+
+if [[ -z "$RECORD_ID" ]]; then
+  [[ -n "$TYPE" ]] || { echo "STOP: --type required when --record-id not provided" >&2; exit 1; }
+  [[ -n "$NAME" ]] || { echo "STOP: --name required when --record-id not provided" >&2; exit 1; }
+fi
+
+TYPE="$(echo "$TYPE" | tr '[:lower:]' '[:upper:]')"
+if [[ -z "$ZONE_ID" ]]; then
+  ZONE_ID="$(cf_zone_id_resolve "$CF_API" "$BINDING_FILE" "" "$ZONE_NAME" || true)"
+fi
+[[ -n "$ZONE_ID" ]] || { echo "STOP: unable to resolve zone id (zone=${ZONE_NAME:-unset})" >&2; exit 2; }
+
+ids=()
+if [[ -n "$RECORD_ID" ]]; then
+  ids+=("$RECORD_ID")
+else
+  query_url="${CF_API}/zones/${ZONE_ID}/dns_records?type=${TYPE}&name=${NAME}&per_page=100"
+  existing="$(cf_api_get "$query_url")" || { echo "STOP: failed to query existing DNS records" >&2; exit 3; }
+  mapfile -t ids < <(echo "$existing" | python3 - "$CONTENT" <<'PY'
+import json, sys
+content = sys.argv[1]
+data = json.load(sys.stdin)
+rows = data.get("result") or []
+if content:
+    rows = [r for r in rows if str(r.get("content", "")) == content]
+for r in rows:
+    rid = str(r.get("id", "")).strip()
+    if rid:
+        print(rid)
+PY
+)
+fi
+
+if [[ "${#ids[@]}" -eq 0 ]]; then
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    echo '{"capability":"cloudflare.dns.record.delete","status":"noop","reason":"no_matching_records"}'
+  else
+    echo "cloudflare.dns.record.delete"
+    echo "status: noop"
+    echo "reason: no matching records"
+  fi
+  exit 0
+fi
+
+if [[ "${#ids[@]}" -gt 1 && "$ALL_MATCHES" -eq 0 ]]; then
+  echo "STOP: selector matched ${#ids[@]} records. Re-run with --all-matches, provide --content, or target --record-id." >&2
+  exit 1
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 - "$ZONE_ID" "${ids[@]}" <<'PY'
+import json, sys
+zone_id = sys.argv[1]
+record_ids = sys.argv[2:]
+print(json.dumps({
+  "capability": "cloudflare.dns.record.delete",
+  "dry_run": True,
+  "zone_id": zone_id,
+  "matched_record_ids": len(record_ids),
+  "record_ids": record_ids,
+}, indent=2))
+PY
+  else
+    echo "cloudflare.dns.record.delete (dry-run)"
+    echo "zone_id: $ZONE_ID"
+    echo "matched_record_ids: ${#ids[@]}"
+    for rid in "${ids[@]}"; do
+      echo "- record_id: $rid"
+    done
+    echo "status: DRY-RUN"
+  fi
+  exit 0
+fi
+
+deleted=0
+for rid in "${ids[@]}"; do
+  cf_api_delete "${CF_API}/zones/${ZONE_ID}/dns_records/${rid}" >/dev/null || {
+    echo "STOP: failed to delete record id=${rid}" >&2
+    exit 4
+  }
+  deleted=$((deleted + 1))
+done
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  python3 - <<PY
+import json
+print(json.dumps({
+  "capability": "cloudflare.dns.record.delete",
+  "status": "ok",
+  "zone_id": "$ZONE_ID",
+  "deleted_records": $deleted,
+  "auth_mode": "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
+}, indent=2))
+PY
+else
+  echo "cloudflare.dns.record.delete"
+  echo "zone_id: $ZONE_ID"
+  echo "deleted_records: $deleted"
+  echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
+  echo "status: OK"
+fi

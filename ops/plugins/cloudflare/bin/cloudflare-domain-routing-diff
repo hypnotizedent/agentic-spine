@@ -8,6 +8,7 @@ ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
 BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
 REGISTRY_FILE="$ROOT/docs/governance/DOMAIN_ROUTING_REGISTRY.yaml"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
 
 TUNNEL_NAME_DEFAULT="homelab-tunnel"
 TUNNEL_NAME="${TUNNEL_NAME_DEFAULT}"
@@ -56,9 +57,11 @@ if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
   exec "$SECRETS_EXEC" -- "$0" "$@"
 fi
 
+source "$CF_LIB"
+
 CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
 
-[[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || { echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2; exit 2; }
+cf_require_auth || exit $?
 [[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || { echo "STOP: CLOUDFLARE_ACCOUNT_ID missing" >&2; exit 2; }
 
 TUNNEL_ID="${CLOUDFLARE_TUNNEL_ID:-}"
@@ -90,11 +93,12 @@ TMP_CF="$(mktemp)"
 TMP_REG="$(mktemp)"
 trap 'rm -f "$TMP_CF" "$TMP_REG" 2>/dev/null || true' EXIT
 
-curl -fsS \
-  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  "$URL" \
-  | python3 -c '
+CF_CONFIG="$(cf_api_get "$URL")" || {
+  echo "STOP: failed to fetch tunnel config" >&2
+  exit 3
+}
+
+echo "$CF_CONFIG" | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
 if not data.get("success", False):
@@ -129,6 +133,7 @@ extra_in_tunnel="$(comm -13 "$TMP_REG" "$TMP_CF" || true)"
 echo "cloudflare.domain_routing.diff"
 echo "tunnel: $TUNNEL_NAME"
 echo "registry: $REGISTRY_FILE"
+echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
 echo "registry_hostnames: $(wc -l <"$TMP_REG" | tr -d ' ')"
 echo "tunnel_hostnames: $(wc -l <"$TMP_CF" | tr -d ' ')"
 echo

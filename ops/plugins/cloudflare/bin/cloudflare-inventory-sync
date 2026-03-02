@@ -2,6 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
 BINDING_FILE="$ROOT/ops/bindings/cloudflare.inventory.yaml"
 export ROOT
 
@@ -10,6 +11,8 @@ if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
   exec "$SECRETS_EXEC" -- "$0" "$@"
 fi
 
+source "$CF_LIB"
+
 if [[ ! -f "$BINDING_FILE" ]]; then
   echo "FAIL: binding file missing" >&2
   exit 1
@@ -17,32 +20,37 @@ fi
 
 export CLOUDFLARE_API_BASE="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
 CF_API="$CLOUDFLARE_API_BASE"
-if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
-  echo "STOP: CLOUDFLARE_API_TOKEN missing" >&2
-  exit 2
-fi
+cf_require_auth || exit $?
 if [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
   echo "STOP: CLOUDFLARE_ACCOUNT_ID missing" >&2
   exit 2
 fi
 
+TMP_ZONES="$(mktemp)"
+TMP_TUNNELS="$(mktemp)"
+trap 'rm -f "$TMP_ZONES" "$TMP_TUNNELS" 2>/dev/null || true' EXIT
+
+cf_api_get "${CF_API}/zones?per_page=50" > "$TMP_ZONES" || {
+  echo "STOP: failed to fetch zones" >&2
+  exit 2
+}
+cf_api_get "${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/tunnels" > "$TMP_TUNNELS" || {
+  echo "STOP: failed to fetch tunnels" >&2
+  exit 2
+}
+
+export TMP_ZONES TMP_TUNNELS
+
 python3 - <<'PY'
-import json, os, subprocess, sys
+import json, os, sys
 root = os.environ["ROOT"]
 with open(os.path.join(root, "ops/bindings/cloudflare.inventory.yaml")) as f:
     binding = json.load(f)
 
-def fetch(url):
-    import urllib.request
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {os.environ['CLOUDFLARE_API_TOKEN']}",
-        "Content-Type": "application/json"
-    })
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode())
-
-data_zones = fetch(f"{os.environ['CLOUDFLARE_API_BASE'].rstrip('/')}/zones?per_page=50")
-data_tunnels = fetch(f"{os.environ['CLOUDFLARE_API_BASE'].rstrip('/')}/accounts/{os.environ['CLOUDFLARE_ACCOUNT_ID']}/tunnels")
+with open(os.environ["TMP_ZONES"], "r", encoding="utf-8") as f:
+    data_zones = json.load(f)
+with open(os.environ["TMP_TUNNELS"], "r", encoding="utf-8") as f:
+    data_tunnels = json.load(f)
 
 live_zones = {z['name'] for z in data_zones.get('result', [])}
 live_tunnels = {t['name'] for t in data_tunnels.get('result', [])}
@@ -68,3 +76,4 @@ if missing_zones or missing_tunnels or extra_zones or extra_tunnels:
     sys.exit(1)
 print("cloudflare.inventory.sync OK")
 PY
+echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
