@@ -42,22 +42,29 @@ def main() -> int:
     ap.add_argument("--queue", default=str(DEFAULT_QUEUE))
     ap.add_argument("--stale-hours", type=int, default=24)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--check", action="store_true", help="Verify invariant: total == queued + filed + matched")
     args = ap.parse_args()
 
     now = datetime.now(timezone.utc)
     queue = Path(args.queue).expanduser()
     rows = load_rows(queue)
 
+    # Count from live NDJSON rows — no caching, no stale state.
     queued = 0
     stale = 0
     filed = 0
     matched = 0
+    unknown_status = 0
     invalid_time = 0
     total_hits = 0
     dedupe_hits = 0
 
+    # Track per-status counts for invariant check
+    status_counts: dict[str, int] = {}
+
     for row in rows:
         status = str(row.get("status", "queued")).strip().lower()
+        status_counts[status] = status_counts.get(status, 0) + 1
         hits = int(row.get("hit_count", 0) or 0)
         total_hits += hits
         if hits > 1:
@@ -67,7 +74,7 @@ def main() -> int:
             filed += 1
         elif status == "matched":
             matched += 1
-        else:
+        elif status == "queued":
             queued += 1
             first_seen = parse_utc(row.get("first_seen_utc"))
             if first_seen is None:
@@ -76,14 +83,21 @@ def main() -> int:
             age_h = (now - first_seen).total_seconds() / 3600
             if age_h > max(0, args.stale_hours):
                 stale += 1
+        else:
+            unknown_status += 1
+            queued += 1  # backward compat: unknown statuses counted as queued
 
     dedupe_rate = 0.0
     if total_hits > 0:
         dedupe_rate = round(dedupe_hits / total_hits, 4)
 
+    # Invariant: total must equal sum of categorized counts
+    categorized = queued + filed + matched
+    invariant_ok = categorized == len(rows)
+
     payload = {
         "capability": "friction.queue.status",
-        "status": "ok",
+        "status": "ok" if invariant_ok else "invariant_violation",
         "queue": str(queue),
         "summary": {
             "total": len(rows),
@@ -91,8 +105,10 @@ def main() -> int:
             "stale": stale,
             "filed": filed,
             "matched": matched,
+            "unknown_status": unknown_status,
             "invalid_time": invalid_time,
             "dedupe_rate": dedupe_rate,
+            "invariant_ok": invariant_ok,
         },
     }
 
@@ -101,13 +117,24 @@ def main() -> int:
     else:
         summary = payload["summary"]
         print("friction.queue.status")
-        print("status: ok")
+        print(f"status: {payload['status']}")
         print(f"queue: {queue}")
         print(
             "summary: "
             f"total={summary['total']} queued={summary['queued']} stale={summary['stale']} "
             f"filed={summary['filed']} matched={summary['matched']} dedupe_rate={summary['dedupe_rate']}"
         )
+        if not invariant_ok:
+            print(f"INVARIANT VIOLATION: total={len(rows)} != queued({queued})+filed({filed})+matched({matched})={categorized}")
+            print(f"raw_status_counts: {json.dumps(status_counts)}")
+
+    if args.check:
+        if invariant_ok:
+            print("CHECK PASS: friction queue counters are self-consistent")
+            return 0
+        else:
+            print(f"CHECK FAIL: invariant violation — total={len(rows)} categorized={categorized}")
+            return 1
 
     return 0
 
