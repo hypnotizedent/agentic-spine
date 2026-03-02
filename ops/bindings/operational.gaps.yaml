@@ -9,7 +9,7 @@
 # Last verified: 2026-02-22
 
 version: 1
-updated: "2026-03-02T08:26:21Z"
+updated: "2026-03-02T08:30:25Z"
 gaps:
   # ─────────────────────────────────────────────────────────────
   # Discovered during LOOP-INFRA-VM-RESTRUCTURE-20260206
@@ -17970,3 +17970,80 @@ gaps:
     status: open
     notes: "Filed via gaps.file at 2026-03-02T08:26:21Z"
     parent_loop: "LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302"
+  - id: "GAP-OP-1329"
+    title: "Role policy currently blocks read-only runtime roles (researcher/qc) from starting governed mutating sessio..."
+    discovered_by: "LOOP-FRICTION-SESSION-ROLE-OVERRIDE-ERGONOMICS-20260302"
+    discovered_at: "2026-03-02"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "ops/plugins/session/bin/session-start"
+    description: |
+      Role policy currently blocks read-only runtime roles (researcher/qc) from starting governed mutating sessions without repetitive override ceremony.
+
+      Expected:
+      - Operators can establish one explicit elevated session boundary (auditable) and then run governed mutating lifecycle ops (session.start, loops.create, gaps.file) without repeating SPINE_ROLE_POLICY_OVERRIDE_REF/SPINE_ROLE_POLICY_OVERRIDE_REASON on every call.
+
+      Actual:
+      - Mutating governance calls are blocked by default role policy per invocation.
+      - Agents repeatedly inject override env vars on every command; this is high-friction and error-prone.
+      - Existing GAP-OP-1299 captures session.start block symptom; this gap captures the broader missing elevated-session model.
+
+      Acceptance:
+      - Introduce an explicit, auditable session elevation mechanism with scope/TTL and clear revocation.
+      - session.start + core governance mutators honor active elevated-session context without per-command env var repetition.
+      - Policy trace records elevation ref/reason in receipts.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:30:25Z"
+    parent_loop: "LOOP-FRICTION-SESSION-ROLE-OVERRIDE-ERGONOMICS-20260302"
+  - id: "GAP-OP-1330"
+    title: "gaps.file is not idempotent across commit-failure retries."
+    discovered_by: "LOOP-FRICTION-CONCURRENT-COMMIT-SAFETY-20260302"
+    discovered_at: "2026-03-02"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "ops/plugins/loops/bin/gaps-file"
+    description: |
+      gaps.file is not idempotent across commit-failure retries.
+
+      Expected:
+      - If YAML write succeeds but commit is rejected by pre-commit policy, a retry should detect equivalent existing open entry and avoid filing a duplicate.
+
+      Actual:
+      - gaps.file can append a second equivalent gap when rerun after commit failure.
+      - Example evidence path: GAP-OP-1323 / GAP-OP-1324 duplicate creation sequence.
+
+      Acceptance:
+      - gaps.file retry path is idempotent by default (fingerprint or semantic equivalence check).
+      - Retries return INFO_ALREADY_FILED (or equivalent) instead of appending duplicate entries.
+      - Existing duplicate-pair cleanup utility/flow documented in capability help.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:30:25Z"
+    parent_loop: "LOOP-FRICTION-CONCURRENT-COMMIT-SAFETY-20260302"
+  - id: "GAP-OP-1331"
+    title: "Terminal role override discoverability is ambiguous because pre-commit resolution favors OPS_TERMINAL_ROLE ..."
+    discovered_by: "LOOP-FRICTION-PRECOMMIT-ROLE-CONTEXT-INHERITANCE-20260302"
+    discovered_at: "2026-03-02"
+    type: agent-behavior
+    classification: agent-behavior
+    doc: ".githooks/pre-commit"
+    description: |
+      Terminal role override discoverability is ambiguous because pre-commit resolution favors OPS_TERMINAL_ROLE over SPINE_TERMINAL_ROLE.
+
+      Expected:
+      - Role override knobs are deterministic and discoverable; agent can reliably perform a one-off terminal-role override with documented env var precedence.
+
+      Actual:
+      - Setting SPINE_TERMINAL_ROLE may have no effect when OPS_TERMINAL_ROLE remains set by session bootstrap.
+      - Agents discover required variable precedence by trial and error.
+      - Related to GAP-OP-1309 but distinct: this gap targets env-var precedence contract + documentation clarity.
+
+      Acceptance:
+      - Pre-commit/cap role resolution precedence is explicit and documented.
+      - Single recommended override variable is enforced or compatibility shim maps legacy vars deterministically.
+      - Error messages point to exact override variable to set.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:30:25Z"
+    parent_loop: "LOOP-FRICTION-PRECOMMIT-ROLE-CONTEXT-INHERITANCE-20260302"
