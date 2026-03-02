@@ -6,7 +6,7 @@
 #
 # Decision: LOOP-PLANNING-HORIZON-CONTROL-PLANE-20260301
 
-version: "1.1"
+version: "1.2"
 updated_at: "2026-03-02"
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -161,3 +161,60 @@ proposal_rules:
       - review_date
       - owner
     description: "Proposals under later/future loops normalize to draft_hold with review schedule"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Mailroom Boundary Model
+# ─────────────────────────────────────────────────────────────────────────
+# Canonical classification of execution vs deferred containers.
+# Decision: LOOP-MAILROOM-BOUNDARY-NORMALIZATION-20260302
+
+boundary_model:
+  loop:
+    description: "Active execution container. Only horizon=now loops may have status=active."
+    valid_active_horizons: [now]
+    deferred_status: planned
+    enforcement: "D308 fails on active+later/future; loops.create blocks it"
+
+  plan:
+    description: "Deferred intent container for later/future work."
+    surface: mailroom/state/plans/index.yaml
+    required_fields: [plan_id, owner, review_date, source_loop_id, horizon]
+    activation_policy: "Promote via planning.horizon.set when ready; creates active loop"
+
+  gap:
+    description: "Defect or work item linked to execution context."
+    active_linkage: "parent_loop must reference active execution loop (status=active)"
+    plan_linkage: "parent_loop references planned loop; gap retains plan_id + owner + review_date"
+    orphan_rule: "Open gap with closed parent_loop is orphaned (D136 enforces)"
+
+  proposal:
+    description: "Implementation packet requiring active execution loop."
+    pending_requires_active_loop: true
+    deferred_loops_force_draft_hold: true
+
+# ─────────────────────────────────────────────────────────────────────────
+# Loop Status Enum (extended)
+# ─────────────────────────────────────────────────────────────────────────
+# planned is the canonical status for deferred-intent loops.
+
+loop_statuses:
+  - id: active
+    open: true
+    description: "Execution in progress. Requires horizon=now."
+
+  - id: draft
+    open: true
+    description: "Not yet started. May be any horizon."
+
+  - id: open
+    open: true
+    description: "Legacy alias for active."
+
+  - id: planned
+    open: false
+    description: "Deferred intent. Requires horizon=later|future. Not auto-selectable."
+    requires: [activation_trigger]
+
+  - id: closed
+    open: false
+    description: "Completed or abandoned."
