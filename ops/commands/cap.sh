@@ -174,6 +174,13 @@ run_cap() {
     desc="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".description")"
     local post_action
     post_action="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".post_action")"
+    local role_runtime_contract="$SPINE_CODE/ops/bindings/role.runtime.control.contract.yaml"
+    local terminal_role_contract="$SPINE_CODE/ops/bindings/terminal.role.contract.yaml"
+    local runtime_role="${SPINE_RUNTIME_ROLE:-}"
+    local role_policy_enforced="false"
+    local role_policy_override_used="false"
+    local role_policy_override_ref="${SPINE_ROLE_POLICY_OVERRIDE_REF:-}"
+    local role_policy_override_reason="${SPINE_ROLE_POLICY_OVERRIDE_REASON:-}"
     local effective_multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES:-direct}"
     local active_session_count=0
     local friction_ingest_script="$SPINE_CODE/ops/plugins/lifecycle/bin/friction-ingest"
@@ -305,6 +312,92 @@ run_cap() {
         echo "Remediation:"
         echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
         exit 1
+      fi
+    fi
+
+    # ── Runtime role execution policy (read-only roles cannot mutate) ──
+    # Enforce in the cap execution path so role policy blocks before command execution.
+    if [[ -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
+      local role_policy_enabled override_env_key override_reason_env_key
+      local read_only_roles_csv mutating_roles_csv role_from_terminal
+
+      role_policy_enabled="true"
+      override_env_key="SPINE_ROLE_POLICY_OVERRIDE_REF"
+      override_reason_env_key="SPINE_ROLE_POLICY_OVERRIDE_REASON"
+      read_only_roles_csv=""
+      mutating_roles_csv=""
+
+      if command -v yq >/dev/null 2>&1 && [[ -f "$role_runtime_contract" ]]; then
+        role_policy_enabled="$(yq e -r '.runtime_roles.execution_policy.enforce_read_only_mutation_block // true' "$role_runtime_contract" 2>/dev/null || echo true)"
+        override_env_key="$(yq e -r '.runtime_roles.execution_policy.override_env // "SPINE_ROLE_POLICY_OVERRIDE_REF"' "$role_runtime_contract" 2>/dev/null || echo SPINE_ROLE_POLICY_OVERRIDE_REF)"
+        override_reason_env_key="$(yq e -r '.runtime_roles.execution_policy.override_reason_env // "SPINE_ROLE_POLICY_OVERRIDE_REASON"' "$role_runtime_contract" 2>/dev/null || echo SPINE_ROLE_POLICY_OVERRIDE_REASON)"
+        read_only_roles_csv="$(yq e -r '.runtime_roles.read_only_roles[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
+        mutating_roles_csv="$(yq e -r '.runtime_roles.mutating_roles[]?' "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
+        [[ -n "$runtime_role" ]] || runtime_role="$(yq e -r '.runtime_roles.default_role // ""' "$role_runtime_contract" 2>/dev/null || true)"
+      fi
+
+      if [[ -z "$runtime_role" && -n "${OPS_TERMINAL_ROLE:-}" ]] && command -v yq >/dev/null 2>&1 && [[ -f "$terminal_role_contract" ]]; then
+        runtime_role="$(yq e -r ".runtime_role_defaults.by_terminal_id.\"${OPS_TERMINAL_ROLE}\" // \"\"" "$terminal_role_contract" 2>/dev/null || true)"
+        if [[ -z "$runtime_role" || "$runtime_role" == "null" ]]; then
+          role_from_terminal="$(yq e -r ".roles[]? | select(.id == \"${OPS_TERMINAL_ROLE}\") | .type" "$terminal_role_contract" 2>/dev/null | head -n1 || true)"
+          if [[ -n "$role_from_terminal" && "$role_from_terminal" != "null" ]]; then
+            runtime_role="$(yq e -r ".runtime_role_defaults.by_terminal_type.\"$role_from_terminal\" // \"\"" "$terminal_role_contract" 2>/dev/null || true)"
+          fi
+        fi
+      fi
+      [[ -n "$runtime_role" && "$runtime_role" != "null" ]] || runtime_role="researcher"
+
+      if [[ -z "$role_policy_override_ref" && -n "$override_env_key" ]]; then
+        role_policy_override_ref="${!override_env_key:-}"
+      fi
+      if [[ -z "$role_policy_override_reason" && -n "$override_reason_env_key" ]]; then
+        role_policy_override_reason="${!override_reason_env_key:-}"
+      fi
+
+      if [[ "$role_policy_enabled" == "true" ]]; then
+        role_policy_enforced="true"
+        local role_is_read_only=0
+        local role_is_mutating=0
+        local rr
+
+        IFS=',' read -r -a _rrs <<< "${read_only_roles_csv:-}"
+        for rr in "${_rrs[@]:-}"; do
+          [[ -n "$rr" ]] || continue
+          if [[ "$runtime_role" == "$rr" ]]; then
+            role_is_read_only=1
+            break
+          fi
+        done
+        IFS=',' read -r -a _mrs <<< "${mutating_roles_csv:-}"
+        for rr in "${_mrs[@]:-}"; do
+          [[ -n "$rr" ]] || continue
+          if [[ "$runtime_role" == "$rr" ]]; then
+            role_is_mutating=1
+            break
+          fi
+        done
+
+        if [[ "$role_is_read_only" -eq 1 || "$role_is_mutating" -eq 0 ]]; then
+          if [[ -z "$role_policy_override_ref" ]]; then
+            echo "BLOCKED: runtime role execution policy"
+            echo "Capability: $name ($safety)"
+            echo "Runtime role: $runtime_role"
+            echo "Mutating/destructive execution requires role in mutating_roles or explicit override reference."
+            echo "Provide: $override_env_key and $override_reason_env_key"
+            blocked_reason="runtime_role_policy_block:$runtime_role"
+            exit_code=4
+          elif [[ -z "$role_policy_override_reason" ]]; then
+            echo "BLOCKED: runtime role execution policy override missing reason"
+            echo "Capability: $name ($safety)"
+            echo "Runtime role: $runtime_role"
+            echo "Override ref provided ($override_env_key), but reason missing ($override_reason_env_key)."
+            blocked_reason="runtime_role_policy_override_reason_missing:$runtime_role"
+            exit_code=4
+          else
+            role_policy_override_used="true"
+            echo "RUNTIME ROLE OVERRIDE: role=$runtime_role ref=$role_policy_override_ref"
+          fi
+        fi
       fi
     fi
 
@@ -618,6 +711,11 @@ PY
 | Generated | $end_time |
 | Model | local (capability) |
 | Context | $safety |
+| Runtime Role | ${runtime_role:-unknown} |
+| Role Policy Enforced | $role_policy_enforced |
+| Role Policy Override Used | $role_policy_override_used |
+| Role Policy Override Ref | ${role_policy_override_ref:-none} |
+| Role Policy Override Reason | ${role_policy_override_reason:-none} |
 
 ## Inputs
 
