@@ -8,7 +8,7 @@
 #
 # Usage:
 #   ops wave start <WAVE_ID> --objective "<text>" [--worktree auto|off] [--repo <path>]
-#   ops wave dispatch <WAVE_ID> --lane <lane> --task "<text>"
+#   ops wave dispatch <WAVE_ID> --lane <lane> --task "<text>" [--from-role <role>] [--to-role <role>] [--input-refs "k=v,..."] [--output-refs "k=v,..."]
 #   ops wave collect <WAVE_ID>
 #   ops wave status [WAVE_ID]
 #   ops wave close <WAVE_ID>
@@ -24,6 +24,7 @@ SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine-mailroom}"
 WAVES_DIR="$RUNTIME_ROOT/waves"
 LANES_STATE="$RUNTIME_ROOT/lanes/state.json"
+ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
 source "$SPINE_REPO/ops/lib/git-lock.sh" 2>/dev/null || true
 
 mkdir -p "$WAVES_DIR"
@@ -61,7 +62,7 @@ ops wave - Wave orchestration with lane-aware dispatch
 Usage:
   ops wave start <WAVE_ID> --objective "<text>" [--worktree auto|off] [--repo <path>]
                                                     Create a new wave (default auto worktree)
-  ops wave dispatch <WAVE_ID> --lane <L> --task "T"  Dispatch task to a lane
+  ops wave dispatch <WAVE_ID> --lane <L> --task "T" [--from-role <R>] [--to-role <R>] [--input-refs "k=v,..."] [--output-refs "k=v,..."]  Dispatch task to a lane
   ops wave ack <WAVE_ID> --lane <L> --result "text"  Acknowledge task completion
   ops wave collect <WAVE_ID>                         Collect results from lanes
   ops wave status [WAVE_ID]                          Show wave status (or all)
@@ -91,6 +92,8 @@ cmd_start() {
   local workspace_branch=""
   local workspace_worktree=""
   local workspace_note=""
+  local default_role="researcher"
+  local default_next_role="worker"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -119,6 +122,17 @@ cmd_start() {
   if [[ -f "$sf" ]]; then
     echo "Wave '$wave_id' already exists." >&2
     exit 1
+  fi
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
+    default_role="$(yq e -r '.runtime_roles.default_role // "researcher"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo researcher)"
+    if [[ -n "$default_role" && "$default_role" != "null" ]]; then
+      local resolved_next
+      resolved_next="$(yq e -r ".promotion_gates.transitions[]? | select(.from == \"$default_role\") | .to" "$ROLE_RUNTIME_CONTRACT" 2>/dev/null | head -n1 || true)"
+      if [[ -n "$resolved_next" && "$resolved_next" != "null" ]]; then
+        default_next_role="$resolved_next"
+      fi
+    fi
   fi
 
   mkdir -p "$sd"
@@ -238,7 +252,7 @@ EOF
     workspace_note="worktree auto-provision disabled (--worktree off)"
   fi
 
-  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" <<'PYSTART'
+  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" <<'PYSTART'
 import json, sys
 from datetime import datetime, timezone
 
@@ -250,6 +264,8 @@ workspace_repo = sys.argv[5] if len(sys.argv) > 5 else ""
 workspace_worktree = sys.argv[6] if len(sys.argv) > 6 else ""
 workspace_branch = sys.argv[7] if len(sys.argv) > 7 else ""
 workspace_note = sys.argv[8] if len(sys.argv) > 8 else ""
+default_role = sys.argv[9] if len(sys.argv) > 9 and sys.argv[9] else "researcher"
+default_next_role = sys.argv[10] if len(sys.argv) > 10 and sys.argv[10] else "worker"
 
 state = {
     "wave_id": wave_id,
@@ -268,6 +284,11 @@ state = {
         "branch": workspace_branch if workspace_enabled else None,
         "lifecycle_state": "active" if workspace_enabled else "disabled",
         "note": workspace_note,
+    },
+    "role_flow": {
+        "current_role": default_role,
+        "next_role": default_next_role,
+        "last_transition": None,
     },
 }
 
@@ -295,19 +316,31 @@ cmd_dispatch() {
   local wave_id=""
   local lane=""
   local task=""
+  local from_role=""
+  local to_role=""
+  local input_refs_raw=""
+  local output_refs_raw=""
+  local transition_gate=""
+  local input_refs_json='{}'
+  local output_refs_json='{}'
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --) shift ;;
       --lane) lane="${2:-}"; shift 2 ;;
       --task) task="${2:-}"; shift 2 ;;
+      --from-role) from_role="${2:-}"; shift 2 ;;
+      --to-role) to_role="${2:-}"; shift 2 ;;
+      --input-refs) input_refs_raw="${2:-}"; shift 2 ;;
+      --output-refs) output_refs_raw="${2:-}"; shift 2 ;;
+      --transition-gate) transition_gate="${2:-}"; shift 2 ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
     esac
   done
 
   if [[ -z "$wave_id" || -z "$lane" || -z "$task" ]]; then
-    echo "Usage: ops wave dispatch <WAVE_ID> --lane <lane> --task \"<text>\"" >&2
+    echo "Usage: ops wave dispatch <WAVE_ID> --lane <lane> --task \"<text>\" [--from-role <role>] [--to-role <role>] [--input-refs \"k=v,...\"] [--output-refs \"k=v,...\"]" >&2
     exit 1
   fi
 
@@ -323,13 +356,93 @@ cmd_dispatch() {
     return
   fi
 
-  python3 - "$sf" "$lane" "$task" <<'PYDISP'
+  input_refs_json="$(python3 - "$input_refs_raw" <<'PYREFS'
+import json, sys
+raw = sys.argv[1] if len(sys.argv) > 1 else ""
+out = {}
+for part in raw.split(","):
+    item = part.strip()
+    if not item or "=" not in item:
+        continue
+    k, v = item.split("=", 1)
+    key = k.strip()
+    val = v.strip()
+    if key:
+        out[key] = val
+print(json.dumps(out))
+PYREFS
+)"
+  output_refs_json="$(python3 - "$output_refs_raw" <<'PYREFS'
+import json, sys
+raw = sys.argv[1] if len(sys.argv) > 1 else ""
+out = {}
+for part in raw.split(","):
+    item = part.strip()
+    if not item or "=" not in item:
+        continue
+    k, v = item.split("=", 1)
+    key = k.strip()
+    val = v.strip()
+    if key:
+        out[key] = val
+print(json.dumps(out))
+PYREFS
+)"
+
+  if [[ -f "$ROLE_RUNTIME_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+    if [[ -z "$from_role" ]]; then
+      from_role="$(python3 - "$sf" <<'PYROLE'
+import json, sys
+state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+print(str(role_flow.get("current_role") or "researcher"))
+PYROLE
+)"
+    fi
+
+    if [[ -z "$to_role" ]]; then
+      case "$lane" in
+        execution) to_role="worker" ;;
+        audit) to_role="qc" ;;
+        control) to_role="close" ;;
+        *) to_role="$from_role" ;;
+      esac
+    fi
+
+    if [[ -z "$transition_gate" ]]; then
+      transition_gate="$(yq -r ".promotion_gates.transitions[]? | select(.from == \"$from_role\" and .to == \"$to_role\") | .gate" "$ROLE_RUNTIME_CONTRACT" 2>/dev/null | head -n1)"
+    fi
+    [[ -n "$transition_gate" && "$transition_gate" != "null" ]] || {
+      echo "FAIL: transition gate not found for role transition $from_role -> $to_role" >&2
+      exit 1
+    }
+
+    required_inputs_json="$(yq -o=json ".handoff_boundaries.\"$transition_gate\".required_input_refs // []" "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo '[]')"
+    required_outputs_json="$(yq -o=json ".handoff_boundaries.\"$transition_gate\".required_output_refs // []" "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo '[]')"
+    missing_inputs="$(jq -r --argjson required "$required_inputs_json" --argjson refs "$input_refs_json" '$required[] | select(($refs[.] // "") == "")' <<<"{}")"
+    missing_outputs="$(jq -r --argjson required "$required_outputs_json" --argjson refs "$output_refs_json" '$required[] | select(($refs[.] // "") == "")' <<<"{}")"
+    if [[ -n "$missing_inputs" ]]; then
+      echo "FAIL: dispatch missing required input refs for gate $transition_gate: $(echo "$missing_inputs" | tr '\n' ',' | sed 's/,$//')" >&2
+      exit 1
+    fi
+    if [[ -n "$missing_outputs" ]]; then
+      echo "FAIL: dispatch missing required output refs for gate $transition_gate: $(echo "$missing_outputs" | tr '\n' ',' | sed 's/,$//')" >&2
+      exit 1
+    fi
+  fi
+
+  python3 - "$sf" "$lane" "$task" "$from_role" "$to_role" "$transition_gate" "$input_refs_json" "$output_refs_json" <<'PYDISP'
 import json, sys, fcntl, os
 from datetime import datetime, timezone
 
 sf = sys.argv[1]
 lane = sys.argv[2]
 task = sys.argv[3]
+from_role = sys.argv[4] if len(sys.argv) > 4 else ""
+to_role = sys.argv[5] if len(sys.argv) > 5 else ""
+transition_gate = sys.argv[6] if len(sys.argv) > 6 else ""
+input_refs = json.loads(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else {}
+expected_output_refs = json.loads(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] else {}
 lock_file = sf + ".lock"
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
@@ -345,6 +458,11 @@ try:
         "task_id": task_id,
         "lane": lane,
         "task": task,
+        "from_role": from_role,
+        "to_role": to_role,
+        "transition_gate": transition_gate,
+        "input_refs": input_refs,
+        "expected_output_refs": expected_output_refs,
         "status": "dispatched",
         "dispatched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "completed_at": None,
@@ -366,6 +484,8 @@ print(f"Dispatched task #{idx} to lane '{lane}':")
 print(f"  Task: {task}")
 print(f"  Dispatch ID: {task_id}")
 print(f"  Status: dispatched")
+if from_role or to_role:
+    print(f"  Role transition: {from_role or '?'} -> {to_role or '?'} (gate={transition_gate or 'none'})")
 if lane == "execution":
     print(f"  NOTE: execution lane is deny-scoped from docs/planning/*")
 elif lane == "audit":

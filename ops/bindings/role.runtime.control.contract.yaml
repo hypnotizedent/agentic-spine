@@ -1,0 +1,137 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-02
+scope: role-runtime-control-plane
+
+version: "1.0"
+updated_at: "2026-03-02"
+
+runtime_roles:
+  canonical: [researcher, worker, qc, close, librarian]
+  default_role: researcher
+  close_role_aliases: [close, librarian]
+  read_only_roles: [researcher, qc, close, librarian]
+  mutating_roles: [worker]
+  execution_policy:
+    enforce_read_only_mutation_block: true
+    override_env: SPINE_ROLE_POLICY_OVERRIDE_REF
+    override_reason_env: SPINE_ROLE_POLICY_OVERRIDE_REASON
+
+handoff_boundaries:
+  researcher_to_worker:
+    from_role: researcher
+    to_role: worker
+    required_input_refs:
+      - research_brief_ref
+      - scope_ref
+    required_output_refs:
+      - execution_plan_ref
+      - acceptance_criteria_ref
+  worker_to_qc:
+    from_role: worker
+    to_role: qc
+    required_input_refs:
+      - execution_plan_ref
+      - acceptance_criteria_ref
+    required_output_refs:
+      - implementation_ref
+      - verify_ref
+      - cleanup_ref
+  qc_to_close:
+    from_role: qc
+    to_role: close
+    required_input_refs:
+      - implementation_ref
+      - verify_ref
+      - cleanup_ref
+    required_output_refs:
+      - closeout_ref
+      - linkage_ref
+
+promotion_gates:
+  enforce: true
+  transitions:
+    - from: researcher
+      to: worker
+      gate: researcher_to_worker
+    - from: worker
+      to: qc
+      gate: worker_to_qc
+    - from: qc
+      to: close
+      gate: qc_to_close
+    - from: qc
+      to: librarian
+      gate: qc_to_close
+
+wave_packet:
+  enforce_at_start: true
+  enforce_at_dispatch: true
+  required_fields:
+    - wave_id
+    - loop_id
+    - owner_terminal
+    - current_role
+    - next_role
+    - deadline_utc
+    - horizon
+    - execution_readiness
+    - claimed_paths
+  allowed_horizon: [now, later, future]
+  allowed_readiness: [runnable, blocked]
+  default_deadline_hours: 24
+
+dod_guard:
+  enforce_on_close: true
+  required_blocks:
+    - verify_results
+    - blocker_classification
+    - cleanup_proof
+    - linkage
+
+horizon_auto_claim:
+  enforce_now_runnable_only: true
+  allowed_horizon: [now]
+  allowed_readiness: [runnable]
+  override_ref_field: horizon_override_ref
+  override_reason_field: horizon_override_reason
+
+path_claims:
+  state_file: mailroom/state/path.claims.yaml
+  default_ttl_minutes: 180
+  require_non_overlapping_active_claims: true
+
+traffic_index:
+  state_file: mailroom/state/traffic.index.yaml
+  required_fields:
+    - wave_id
+    - owner_terminal
+    - current_role
+    - next_role
+    - deadline
+    - status
+    - claimed_paths
+    - blockers
+
+evidence:
+  run_key_regex: "CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+"
+  commit_ref_regex: "^[0-9a-f]{7,40}$"
+  blocker_classes: [none, deterministic, freshness, dependency, cleanup, policy, external]
+  required_ref_fields:
+    - run_key_refs
+    - file_refs
+    - commit_refs
+    - blocker_class
+
+closeout_state_machine:
+  state_field: lifecycle_state
+  states:
+    active:
+      transitions: [implemented]
+    implemented:
+      transitions: [validated]
+    validated:
+      transitions: [closed]
+    closed:
+      transitions: []

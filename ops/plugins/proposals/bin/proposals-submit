@@ -55,6 +55,8 @@ if [[ -z "$DESCRIPTION" ]]; then
 fi
 
 SPINE_CODE="${SPINE_CODE:-.}"
+ROLE_RUNTIME_CONTRACT="$SPINE_CODE/ops/bindings/role.runtime.control.contract.yaml"
+TERMINAL_ROLE_CONTRACT="$SPINE_CODE/ops/bindings/terminal.role.contract.yaml"
 
 PROPOSALS_DIR="$SPINE_CODE/mailroom/outbox/proposals"
 AGENT_ID="${SPINE_AGENT_ID:-${USER:-unknown}@$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)}"
@@ -83,6 +85,30 @@ case "$LOOP_STATUS" in
     exit 1
     ;;
 esac
+
+RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-}"
+if [[ -z "$RUNTIME_ROLE" && -n "${OPS_TERMINAL_ROLE:-}" ]] && command -v yq >/dev/null 2>&1 && [[ -f "$TERMINAL_ROLE_CONTRACT" ]]; then
+  RUNTIME_ROLE="$(yq -r ".runtime_role_defaults.by_terminal_id.\"${OPS_TERMINAL_ROLE}\" // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)"
+  if [[ -z "$RUNTIME_ROLE" || "$RUNTIME_ROLE" == "null" ]]; then
+    role_type="$(yq -r ".roles[]? | select(.id == \"${OPS_TERMINAL_ROLE}\") | .type" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null | head -n1 || true)"
+    if [[ -n "$role_type" && "$role_type" != "null" ]]; then
+      RUNTIME_ROLE="$(yq -r ".runtime_role_defaults.by_terminal_type.\"$role_type\" // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)"
+    fi
+  fi
+fi
+[[ -n "$RUNTIME_ROLE" ]] || RUNTIME_ROLE="researcher"
+
+if [[ -f "$ROLE_RUNTIME_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+  role_enforcement="$(yq -r '.promotion_gates.enforce // true' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo true)"
+  if [[ "$role_enforcement" == "true" && "$RUNTIME_ROLE" != "worker" ]]; then
+    override_ref="${SPINE_ROLE_POLICY_OVERRIDE_REF:-}"
+    if [[ -z "$override_ref" ]]; then
+      echo "ERROR: proposals-submit admission blocked for runtime role '$RUNTIME_ROLE' (worker required)." >&2
+      echo "ERROR: promotion gate required (researcher->worker or explicit override via SPINE_ROLE_POLICY_OVERRIDE_REF)." >&2
+      exit 1
+    fi
+  fi
+fi
 
 # Create timestamp in format YYYYMMDD-HHMMSS
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)

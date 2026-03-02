@@ -48,6 +48,24 @@ handoff_dir="$(yq -r '.storage.directory // "mailroom/state/handoffs"' "$CONFIG"
 file="$(spine_resolve_mailroom_path "$handoff_dir")/$ID.yaml"
 [[ -f "$file" ]] || { echo "FAIL: handoff not found: $ID" >&2; exit 1; }
 
+current_state="$(yq -r '.state // ""' "$file" 2>/dev/null || true)"
+[[ "$current_state" == "active" ]] || {
+  echo "FAIL: handoff must be active before close (id=$ID state=${current_state:-unknown})" >&2
+  exit 1
+}
+
+role_io_enabled="$(yq -r '.role_io.enabled // false' "$CONFIG" 2>/dev/null || echo false)"
+if [[ "$role_io_enabled" == "true" ]]; then
+  while IFS= read -r field; do
+    [[ -n "$field" ]] || continue
+    value="$(yq -r ".$field // \"\"" "$file" 2>/dev/null || true)"
+    [[ -n "$value" && "$value" != "null" ]] || {
+      echo "FAIL: handoff missing role_io field '$field' (id=$ID)" >&2
+      exit 1
+    }
+  done < <(yq -r '.role_io.required_fields[]?' "$CONFIG" 2>/dev/null || true)
+fi
+
 closed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 yq -i '.state = "closed"' "$file"
 CLOSED_AT="$closed_at" yq -i '.closed_at_utc = strenv(CLOSED_AT)' "$file"

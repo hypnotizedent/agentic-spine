@@ -12,6 +12,11 @@ SUMMARY=""
 LOOPS_RAW=""
 ACTIONS_RAW=""
 OWNER="${USER:-unknown}"
+FROM_ROLE=""
+TO_ROLE=""
+INPUT_REFS_RAW=""
+OUTPUT_REFS_RAW=""
+TRANSITION_GATE=""
 JSON_MODE=0
 
 usage() {
@@ -19,7 +24,7 @@ usage() {
 session-handoff-create
 
 Usage:
-  session-handoff-create --summary "..." [--loops "LOOP-A,LOOP-B"] [--actions "task1,task2"] [--owner <name>] [--json]
+  session-handoff-create --summary "..." [--loops "LOOP-A,LOOP-B"] [--actions "task1,task2"] [--owner <name>] [--from-role <role>] [--to-role <role>] [--input-refs "k=v,..."] [--output-refs "k=v,..."] [--json]
 USAGE
 }
 
@@ -39,6 +44,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --owner)
       OWNER="${2:-}"
+      shift 2
+      ;;
+    --from-role)
+      FROM_ROLE="${2:-}"
+      shift 2
+      ;;
+    --to-role)
+      TO_ROLE="${2:-}"
+      shift 2
+      ;;
+    --input-refs)
+      INPUT_REFS_RAW="${2:-}"
+      shift 2
+      ;;
+    --output-refs)
+      OUTPUT_REFS_RAW="${2:-}"
+      shift 2
+      ;;
+    --transition-gate)
+      TRANSITION_GATE="${2:-}"
       shift 2
       ;;
     --json)
@@ -61,6 +86,8 @@ done
 handoff_dir_rel="$(yq -r '.storage.directory // "mailroom/state/handoffs"' "$CONFIG")"
 ttl_hours="$(yq -r '.defaults.ttl_hours // 72' "$CONFIG")"
 max_active="$(yq -r '.defaults.max_active // 20' "$CONFIG")"
+role_io_enabled="$(yq -r '.role_io.enabled // false' "$CONFIG" 2>/dev/null || echo false)"
+role_io_policy_contract="$(yq -r '.role_io.policy_contract // ""' "$CONFIG" 2>/dev/null || true)"
 
 [[ "$ttl_hours" =~ ^[0-9]+$ ]] || ttl_hours=72
 [[ "$max_active" =~ ^[0-9]+$ ]] || max_active=20
@@ -113,19 +140,108 @@ PY
 )"
 fi
 
+input_refs_yaml='{}'
+output_refs_yaml='{}'
+if [[ -n "$INPUT_REFS_RAW" ]]; then
+  input_refs_yaml="$(python3 - "$INPUT_REFS_RAW" <<'PY'
+import json, sys
+
+raw = sys.argv[1]
+out = {}
+for part in raw.split(","):
+    item = part.strip()
+    if not item:
+        continue
+    if "=" not in item:
+        continue
+    k, v = item.split("=", 1)
+    key = k.strip()
+    val = v.strip()
+    if key:
+        out[key] = val
+print(json.dumps(out))
+PY
+)"
+fi
+if [[ -n "$OUTPUT_REFS_RAW" ]]; then
+  output_refs_yaml="$(python3 - "$OUTPUT_REFS_RAW" <<'PY'
+import json, sys
+
+raw = sys.argv[1]
+out = {}
+for part in raw.split(","):
+    item = part.strip()
+    if not item:
+        continue
+    if "=" not in item:
+        continue
+    k, v = item.split("=", 1)
+    key = k.strip()
+    val = v.strip()
+    if key:
+        out[key] = val
+print(json.dumps(out))
+PY
+)"
+fi
+
+if [[ "$role_io_enabled" == "true" ]]; then
+  [[ -n "$FROM_ROLE" ]] || { echo "FAIL: --from-role is required (role_io.enabled=true)" >&2; exit 2; }
+  [[ -n "$TO_ROLE" ]] || { echo "FAIL: --to-role is required (role_io.enabled=true)" >&2; exit 2; }
+  [[ -n "$role_io_policy_contract" && "$role_io_policy_contract" != "null" ]] || {
+    echo "FAIL: handoff role_io policy_contract is missing in $CONFIG" >&2
+    exit 1
+  }
+
+  if [[ "$role_io_policy_contract" != /* ]]; then
+    role_io_policy_contract="$ROOT/$role_io_policy_contract"
+  fi
+  [[ -f "$role_io_policy_contract" ]] || {
+    echo "FAIL: role_io policy contract not found: $role_io_policy_contract" >&2
+    exit 1
+  }
+
+  if [[ -z "$TRANSITION_GATE" ]]; then
+    TRANSITION_GATE="$(yq -r ".promotion_gates.transitions[]? | select(.from == \"$FROM_ROLE\" and .to == \"$TO_ROLE\") | .gate" "$role_io_policy_contract" | head -n1)"
+  fi
+  [[ -n "$TRANSITION_GATE" && "$TRANSITION_GATE" != "null" ]] || {
+    echo "FAIL: transition gate not defined for $FROM_ROLE -> $TO_ROLE" >&2
+    exit 1
+  }
+
+  required_inputs_json="$(yq -o=json ".handoff_boundaries.\"$TRANSITION_GATE\".required_input_refs // []" "$role_io_policy_contract" 2>/dev/null || echo '[]')"
+  required_outputs_json="$(yq -o=json ".handoff_boundaries.\"$TRANSITION_GATE\".required_output_refs // []" "$role_io_policy_contract" 2>/dev/null || echo '[]')"
+
+  missing_inputs="$(jq -r --argjson required "$required_inputs_json" --argjson refs "$input_refs_yaml" '$required[] | select(($refs[.] // "") == "")' <<<"{}")"
+  missing_outputs="$(jq -r --argjson required "$required_outputs_json" --argjson refs "$output_refs_yaml" '$required[] | select(($refs[.] // "") == "")' <<<"{}")"
+  if [[ -n "$missing_inputs" ]]; then
+    echo "FAIL: missing required input_refs for gate $TRANSITION_GATE: $(echo "$missing_inputs" | tr '\n' ',' | sed 's/,$//')" >&2
+    exit 1
+  fi
+  if [[ -n "$missing_outputs" ]]; then
+    echo "FAIL: missing required output_refs for gate $TRANSITION_GATE: $(echo "$missing_outputs" | tr '\n' ',' | sed 's/,$//')" >&2
+    exit 1
+  fi
+fi
+
 jq -n \
   --arg id "$id" \
   --arg owner "$OWNER" \
   --arg summary "$SUMMARY" \
   --arg created_at "$created_at" \
   --arg expires_at "$expires_at" \
+  --arg from_role "$FROM_ROLE" \
+  --arg to_role "$TO_ROLE" \
+  --arg transition_gate "$TRANSITION_GATE" \
   --argjson loops "$loops_yaml" \
   --argjson actions "$actions_yaml" \
-  '{version:"1.0", id:$id, state:"active", owner:$owner, summary:$summary, created_at_utc:$created_at, expires_at_utc:$expires_at, loops:$loops, actions:$actions, notes:[]}' \
+  --argjson input_refs "$input_refs_yaml" \
+  --argjson output_refs "$output_refs_yaml" \
+  '{version:"1.1", id:$id, state:"active", owner:$owner, summary:$summary, created_at_utc:$created_at, expires_at_utc:$expires_at, loops:$loops, actions:$actions, from_role:$from_role, to_role:$to_role, transition_gate:$transition_gate, input_refs:$input_refs, output_refs:$output_refs, notes:[]}' \
   | yq -P '.' >"$file"
 
 if [[ "$JSON_MODE" -eq 1 ]]; then
-  jq -n --arg capability "session.handoff.create" --arg id "$id" --arg file "$file" --arg created_at_utc "$created_at" --arg expires_at_utc "$expires_at" '{capability:$capability,id:$id,file:$file,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc}'
+  jq -n --arg capability "session.handoff.create" --arg id "$id" --arg file "$file" --arg created_at_utc "$created_at" --arg expires_at_utc "$expires_at" --arg from_role "$FROM_ROLE" --arg to_role "$TO_ROLE" --arg transition_gate "$TRANSITION_GATE" '{capability:$capability,id:$id,file:$file,created_at_utc:$created_at_utc,expires_at_utc:$expires_at_utc,from_role:$from_role,to_role:$to_role,transition_gate:$transition_gate}'
   exit 0
 fi
 
@@ -134,3 +250,8 @@ echo "id: $id"
 echo "file: $file"
 echo "created_at_utc: $created_at"
 echo "expires_at_utc: $expires_at"
+if [[ -n "$FROM_ROLE" || -n "$TO_ROLE" ]]; then
+  echo "from_role: ${FROM_ROLE:-}"
+  echo "to_role: ${TO_ROLE:-}"
+  echo "transition_gate: ${TRANSITION_GATE:-}"
+fi
