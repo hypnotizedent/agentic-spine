@@ -54,8 +54,28 @@ vw_proxy_start() {
   command -v python3 >/dev/null 2>&1 || { echo "STOP (2): python3 not found" >&2; return 2; }
   command -v bw >/dev/null 2>&1 || { echo "STOP (2): bw CLI not found" >&2; return 2; }
 
+  # Machine-path fallback: try primary (LAN) target, fall back to Tailscale if unreachable.
+  # Resolution order: LAN IP (services.health) → Tailscale IP (ssh.targets) → fail.
+  local _effective_target="$VW_PROXY_TARGET"
+  if ! curl -sf --connect-timeout 3 "${_effective_target}/alive" >/dev/null 2>&1; then
+    local _ts_ip=""
+    local _ssh_targets="$_VW_SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+    if command -v yq >/dev/null 2>&1 && [[ -f "$_ssh_targets" ]]; then
+      _ts_ip="$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .tailscale_ip // ""' "$_ssh_targets" 2>/dev/null || echo "")"
+    fi
+    if [[ -n "$_ts_ip" ]]; then
+      local _ts_target="http://${_ts_ip}:8081"
+      if curl -sf --connect-timeout 3 "${_ts_target}/alive" >/dev/null 2>&1; then
+        echo "INFO: LAN target unreachable, falling back to Tailscale (${_ts_ip})" >&2
+        _effective_target="$_ts_target"
+      else
+        echo "WARN: both LAN and Tailscale targets unreachable" >&2
+      fi
+    fi
+  fi
+
   _VW_PROXY_OUTPUT="$(mktemp)"
-  python3 "$_VW_PROXY_SCRIPT" --target "$VW_PROXY_TARGET" > "$_VW_PROXY_OUTPUT" 2>/dev/null &
+  python3 "$_VW_PROXY_SCRIPT" --target "$_effective_target" > "$_VW_PROXY_OUTPUT" 2>/dev/null &
   _VW_PROXY_PID=$!
 
   # Wait for proxy ready (up to 5s)
