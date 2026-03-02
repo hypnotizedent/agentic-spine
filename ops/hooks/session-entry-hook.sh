@@ -19,6 +19,25 @@ fi
 # Resolve spine root (relative to this script)
 SPINE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BRANCH=$(git -C "$SPINE_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+TERMINAL_ROLE_CONTRACT="$SPINE_ROOT/ops/bindings/terminal.role.contract.yaml"
+ROLE_RUNTIME_CONTRACT="$SPINE_ROOT/ops/bindings/role.runtime.control.contract.yaml"
+SESSION_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
+SESSION_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-}"
+
+if [[ -z "$SESSION_RUNTIME_ROLE" && -n "$SESSION_TERMINAL_ROLE" ]] && command -v yq >/dev/null 2>&1 && [[ -f "$TERMINAL_ROLE_CONTRACT" ]]; then
+  SESSION_RUNTIME_ROLE="$(yq e -r ".runtime_role_defaults.by_terminal_id.\"${SESSION_TERMINAL_ROLE}\" // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)"
+  if [[ -z "$SESSION_RUNTIME_ROLE" || "$SESSION_RUNTIME_ROLE" == "null" ]]; then
+    SESSION_TERMINAL_TYPE="$(yq e -r ".roles[]? | select(.id == \"${SESSION_TERMINAL_ROLE}\") | .type" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null | head -n1 || true)"
+    if [[ -n "$SESSION_TERMINAL_TYPE" && "$SESSION_TERMINAL_TYPE" != "null" ]]; then
+      SESSION_RUNTIME_ROLE="$(yq e -r ".runtime_role_defaults.by_terminal_type.\"${SESSION_TERMINAL_TYPE}\" // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)"
+    fi
+  fi
+fi
+
+if [[ -z "$SESSION_RUNTIME_ROLE" ]] && command -v yq >/dev/null 2>&1 && [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
+  SESSION_RUNTIME_ROLE="$(yq e -r '.runtime_roles.default_role // ""' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || true)"
+fi
+[[ -n "$SESSION_RUNTIME_ROLE" && "$SESSION_RUNTIME_ROLE" != "null" ]] || SESSION_RUNTIME_ROLE="researcher"
 
 parse_epoch_utc() {
   local ts="${1:-}"
@@ -313,6 +332,7 @@ MSG="## SESSION ENTRY PROTOCOL (governance hook)
 
 You are working inside the agentic-spine repo (\`$SPINE_ROOT\`).
 **Branch:** \`${BRANCH}\` | **Active worktrees:** ${WT_COUNT}/2 | **Active sessions:** ${ACTIVE_SESSIONS}
+**Terminal context:** terminal_role=\`${SESSION_TERMINAL_ROLE:-unset}\` | runtime_role=\`${SESSION_RUNTIME_ROLE}\`
 ${DIRTY_WARNING}${MULTI_AGENT_WARNING}${PROPOSALS_HEALTH}
 
 ### Multi-Agent Write Policy (Default)
