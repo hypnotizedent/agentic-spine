@@ -70,10 +70,16 @@ val_response=$(curl -fsS \
 }
 
 # Check validation errors
+val_tmp=$(mktemp)
+echo "$val_response" > "$val_tmp"
 python3 -c "
 import json, sys
+text = open('$val_tmp').read().strip()
+if not text:
+    print('validate: OK (empty response = no errors)')
+    sys.exit(0)
 try:
-    data = json.loads('''$(echo "$val_response" | sed "s/'/\\\\'/g")''')
+    data = json.loads(text)
     errors = data if isinstance(data, list) else data.get('errors', data.get('message', []))
     if errors and errors != []:
         print('validate: FAIL')
@@ -83,10 +89,11 @@ try:
         else:
             print(f'  - {errors}')
         sys.exit(1)
-except:
+except Exception:
     pass
 print('validate: OK')
-" || exit 1
+" || { rm -f "$val_tmp"; exit 1; }
+rm -f "$val_tmp"
 
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "mode: dry-run (validation only, no apply)"
@@ -94,19 +101,58 @@ if [[ "$DRY_RUN" == "true" ]]; then
   exit 0
 fi
 
-# Apply the policy
-apply_response=$(curl -fsS \
-  -X POST \
+# Fetch current ETag for optimistic concurrency
+etag_header_file=$(mktemp)
+curl -fsS \
   -H "Authorization: Bearer $BEARER" \
-  -H "Content-Type: application/hujson" \
-  -H "If-Match: \"\"" \
-  -d "$policy_content" \
-  "${API_BASE}/tailnet/${TAILNET}/acl" 2>&1) || {
-  echo "apply: FAIL"
-  echo "error: $apply_response"
-  exit 1
-}
+  -H "Accept: application/hujson" \
+  -D "$etag_header_file" \
+  -o /dev/null \
+  "${API_BASE}/tailnet/${TAILNET}/acl" 2>/dev/null || true
 
-echo "apply: OK"
-echo "status: PASS"
-echo "note: ACL policy applied to $TAILNET — verify via tailscale.acl.status"
+ETAG=$(grep -i '^etag:' "$etag_header_file" 2>/dev/null | sed 's/^[Ee][Tt][Aa][Gg]: *//;s/\r$//' || true)
+rm -f "$etag_header_file"
+
+if [[ -n "$ETAG" ]]; then
+  echo "etag: $ETAG"
+else
+  echo "etag: none (first apply or read failed)"
+fi
+
+# Apply the policy — use ETag if available for concurrency safety
+apply_http_code_file=$(mktemp)
+apply_response_file=$(mktemp)
+
+if [[ -n "$ETAG" ]]; then
+  http_code=$(curl -sS -w '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer $BEARER" \
+    -H "Content-Type: application/hujson" \
+    -H "If-Match: $ETAG" \
+    -d "$policy_content" \
+    -o "$apply_response_file" \
+    "${API_BASE}/tailnet/${TAILNET}/acl" 2>&1) || true
+else
+  http_code=$(curl -sS -w '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer $BEARER" \
+    -H "Content-Type: application/hujson" \
+    -d "$policy_content" \
+    -o "$apply_response_file" \
+    "${API_BASE}/tailnet/${TAILNET}/acl" 2>&1) || true
+fi
+
+apply_body=$(cat "$apply_response_file" 2>/dev/null || echo "")
+rm -f "$apply_response_file"
+
+echo "http_code: $http_code"
+
+if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
+  echo "apply: OK"
+  echo "status: PASS"
+  echo "note: ACL policy applied to $TAILNET — verify via tailscale.acl.status"
+else
+  echo "apply: FAIL"
+  echo "error_body: $apply_body"
+  exit 1
+fi

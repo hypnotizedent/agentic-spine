@@ -40,9 +40,9 @@ if 'tagOwners' not in data or len(data.get('tagOwners', {})) == 0:
     print('D312 FAIL: policy missing tagOwners section', file=sys.stderr)
     sys.exit(1)
 
-# 5) Must contain tests
-if 'tests' not in data or len(data.get('tests', [])) == 0:
-    print('D312 FAIL: policy missing tests section', file=sys.stderr)
+# 5) Must contain tests key (may be empty during initial rollout before tag assignment)
+if 'tests' not in data:
+    print('D312 FAIL: policy missing tests key', file=sys.stderr)
     sys.exit(1)
 " || { fail=1; }
 

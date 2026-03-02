@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+TAILNET="${TAILSCALE_TAILNET:-taile9480.ts.net}"
+API_BASE="https://api.tailscale.com/api/v2"
+
+# OAuth required for tag writes
+if [[ -z "${TAILSCALE_OAUTH_CLIENT_ID:-}" ]] || [[ -z "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]]; then
+  echo "STOP: TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET required" >&2
+  exit 2
+fi
+
+# Parse arguments
+DRY_RUN=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    --) shift ;;
+    *) shift ;;
+  esac
+done
+
+echo "tailscale.tag.apply"
+echo "tailnet: $TAILNET"
+echo "dry_run: $DRY_RUN"
+
+# Obtain OAuth bearer token
+token_response=$(curl -fsS \
+  -X POST \
+  -u "${TAILSCALE_OAUTH_CLIENT_ID}:${TAILSCALE_OAUTH_CLIENT_SECRET}" \
+  -d "grant_type=client_credentials" \
+  "https://api.tailscale.com/api/v2/oauth/token" 2>&1) || {
+  echo "oauth: FAIL"
+  exit 1
+}
+
+BEARER=$(echo "$token_response" | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])" 2>/dev/null) || {
+  echo "oauth: FAIL (no access_token)"
+  exit 1
+}
+echo "oauth: OK"
+
+# List all devices to build FQDN → nodeId mapping
+devices_tmp=$(mktemp)
+curl -fsS \
+  -H "Authorization: Bearer $BEARER" \
+  -o "$devices_tmp" \
+  "${API_BASE}/tailnet/${TAILNET}/devices" 2>&1 || {
+  echo "device_list: FAIL"
+  rm -f "$devices_tmp"
+  exit 1
+}
+
+echo "device_list: OK"
+
+# Export vars for Python subprocess
+export BEARER API_BASE DRY_RUN
+
+# Apply tags using Python for JSON handling
+python3 - "$devices_tmp" << 'PYEOF'
+import json, sys, os, subprocess
+
+bearer = os.environ["BEARER"]
+api_base = os.environ["API_BASE"]
+dry_run = os.environ.get("DRY_RUN", "false") == "true"
+
+devices_file = sys.argv[1]
+with open(devices_file) as f:
+    devices_json = json.load(f)
+
+# Tag assignment map: FQDN prefix → list of tags
+TAG_MAP = {
+    # Shop VMs (lan_first) — tag:site-shop + tag:role-server
+    "docker-host":          ["tag:site-shop", "tag:role-server", "tag:role-infra"],
+    "automation-stack":     ["tag:site-shop", "tag:role-server"],
+    "immich":               ["tag:site-shop", "tag:role-server"],
+    "infra-core":           ["tag:site-shop", "tag:role-server", "tag:role-infra"],
+    "observability":        ["tag:site-shop", "tag:role-server"],
+    "dev-tools":            ["tag:site-shop", "tag:role-server"],
+    "ai-consolidation":     ["tag:site-shop", "tag:role-server"],
+    "download-stack":       ["tag:site-shop", "tag:role-server"],
+    "streaming-stack":      ["tag:site-shop", "tag:role-server"],
+    "finance-stack":        ["tag:site-shop", "tag:role-server"],
+    "mint-data":            ["tag:site-shop", "tag:role-server"],
+    "mint-apps":            ["tag:site-shop", "tag:role-server"],
+    "communications-stack": ["tag:site-shop", "tag:role-server"],
+    # Shop hypervisor
+    "pve":                  ["tag:site-shop", "tag:role-infra"],
+    # Home devices
+    "proxmox-home":         ["tag:site-home", "tag:role-infra"],
+    "nas":                  ["tag:site-home", "tag:role-server"],
+    "pihole-home":          ["tag:site-home", "tag:role-infra"],
+    "ha":                   ["tag:site-home", "tag:role-server"],
+}
+
+# Build FQDN-prefix → device ID mapping
+fqdn_to_id = {}
+for dev in devices_json.get("devices", []):
+    name = dev.get("name", "")
+    prefix = name.split(".")[0] if "." in name else name
+    fqdn_to_id[prefix] = {
+        "id": dev.get("id", ""),
+        "nodeId": dev.get("nodeId", ""),
+        "name": name,
+        "current_tags": dev.get("tags", []),
+    }
+
+print(f"devices_found: {len(fqdn_to_id)}")
+print(f"devices_to_tag: {len(TAG_MAP)}")
+print("")
+
+results = []
+for hostname, desired_tags in sorted(TAG_MAP.items()):
+    device = fqdn_to_id.get(hostname)
+    if not device:
+        print(f"  {hostname}: SKIP (not found in tailnet)")
+        results.append({"hostname": hostname, "status": "not_found"})
+        continue
+
+    device_id = device["id"]
+    current = sorted(device.get("current_tags", []))
+    desired = sorted(desired_tags)
+
+    if current == desired:
+        print(f"  {hostname}: SKIP (tags already set: {', '.join(desired)})")
+        results.append({"hostname": hostname, "status": "already_set", "tags": desired})
+        continue
+
+    if dry_run:
+        print(f"  {hostname}: WOULD SET -> {', '.join(desired)}")
+        results.append({"hostname": hostname, "status": "dry_run", "tags": desired})
+        continue
+
+    # Apply tags via API
+    tag_body = json.dumps({"tags": desired_tags})
+    try:
+        result = subprocess.run(
+            ["curl", "-sS", "-w", "%{http_code}",
+             "-X", "POST",
+             "-H", f"Authorization: Bearer {bearer}",
+             "-H", "Content-Type: application/json",
+             "-d", tag_body,
+             "-o", "/dev/null",
+             f"{api_base}/device/{device_id}/tags"],
+            capture_output=True, text=True, timeout=30
+        )
+        http_code = result.stdout.strip()
+        if http_code.startswith("2"):
+            print(f"  {hostname}: OK ({http_code}) -> {', '.join(desired)}")
+            results.append({"hostname": hostname, "status": "applied", "tags": desired, "http": http_code})
+        else:
+            stderr_msg = result.stderr.strip()[:200]
+            print(f"  {hostname}: FAIL ({http_code}) {stderr_msg}")
+            results.append({"hostname": hostname, "status": "failed", "http": http_code, "error": stderr_msg})
+    except Exception as e:
+        print(f"  {hostname}: ERROR ({e})")
+        results.append({"hostname": hostname, "status": "error", "error": str(e)})
+
+print("")
+applied = sum(1 for r in results if r["status"] == "applied")
+already = sum(1 for r in results if r["status"] == "already_set")
+failed = sum(1 for r in results if r["status"] in ("failed", "error", "not_found"))
+print(f"summary: {applied} applied, {already} already set, {failed} failed")
+
+if failed > 0:
+    sys.exit(1)
+PYEOF
+
+rc=$?
+rm -f "$devices_tmp"
+exit $rc

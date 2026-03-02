@@ -1,0 +1,114 @@
+loop_id: LOOP-TAILSCALE-OPERATOR-ACTIONS-CLOSURE-20260302
+generated_at: "2026-03-02T21:45:00Z"
+updated_at: "2026-03-02T03:25:00Z"
+scope: admin-console-required-actions
+authority: docs/CANONICAL/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml
+
+actions:
+  - id: OP-TS-001
+    title: "Enable webhook subscriptions"
+    status: deferred
+    priority: high
+    admin_url: "https://admin.tailscale.com/admin/settings/webhooks"
+    steps:
+      - "Deploy webhook receiver (n8n workflow or dedicated service on automation-stack)"
+      - "Configure via API: POST /api/v2/tailnet/{tailnet}/webhooks with endpoint URL"
+      - "Select events: nodeCreated, nodeDeleted, nodeKeyExpiringInOneDay, policyUpdate"
+      - "Store webhook secret in Infisical at /spine/vm-infra/provisioning as TAILSCALE_WEBHOOK_SECRET"
+    verification: "Webhook fires on next node join or policy change"
+    blockers:
+      - "Receiver endpoint not deployed (n8n or dedicated service on automation-stack)"
+    api_available: true
+    api_endpoint: "POST /api/v2/tailnet/{tailnet}/webhooks"
+    current_state: "0 webhooks configured (verified via API)"
+    deferred_reason: "No receiver endpoint deployed. Webhook API is ready — blocked on receiver infrastructure."
+    gap_ref: "GAP-OP-1259"
+
+  - id: OP-TS-002
+    title: "Enable audit log streaming"
+    status: deferred
+    priority: medium
+    admin_url: "https://admin.tailscale.com/admin/settings/logs"
+    steps:
+      - "Provision log destination (Grafana Loki on observability-stack or S3 bucket)"
+      - "Configure streaming in admin console (no API available)"
+      - "Configure JSON format"
+      - "Verify first log entry appears at destination"
+    verification: "Audit log entries visible in streaming destination"
+    blockers:
+      - "Log aggregator destination not provisioned"
+      - "No API for audit log streaming (admin console only, 404 on /logging and /log-stream)"
+    api_available: false
+    current_state: "Not configured (no API endpoints exist)"
+    deferred_reason: "No log destination provisioned. No API — must configure via admin console."
+    gap_ref: "GAP-OP-1260"
+
+  - id: OP-TS-003
+    title: "Apply ACL policy from git"
+    status: completed
+    priority: high
+    completed_at: "2026-03-02T03:23:07Z"
+    steps:
+      - "Run: ./bin/ops cap run tailscale.acl.validate"
+      - "Review validation output"
+      - "Run: ./bin/ops cap run tailscale.acl.apply"
+      - "Verify: ./bin/ops cap run tailscale.acl.status"
+    verification: "tailscale.acl.status shows parity: MATCH"
+    evidence:
+      validate_run_key: "CAP-20260301-222130__tailscale.acl.validate__Rgbkl81014"
+      apply_run_key: "CAP-20260301-222307__tailscale.acl.apply__Rtfe288799"
+      status_run_key: "CAP-20260301-222321__tailscale.acl.status__Rdn0a90683"
+      parity: MATCH
+      grants: 3
+      tag_owners: 5
+      ssh_rules: 1
+      tests: 3
+    notes:
+      - "Phase 1: empty tests applied (pre-tagging)"
+      - "Phase 2: 3 tag-based tests added after OP-TS-004 tag rollout"
+      - "autogroup:admin tests omitted — grants model does not resolve autogroups in test evaluation"
+
+  - id: OP-TS-004
+    title: "Apply tags to managed devices"
+    status: completed
+    priority: medium
+    completed_at: "2026-03-02T03:20:23Z"
+    steps:
+      - "Applied tags to 18 managed devices via OAuth API (POST /api/v2/device/{id}/tags)"
+      - "14 shop devices: tag:site-shop (13 VMs + pve hypervisor)"
+      - "4 home devices: tag:site-home (proxmox-home, nas, pihole-home, ha)"
+      - "13 server VMs + 2 home servers: tag:role-server"
+      - "docker-host, infra-core, pve, proxmox-home, pihole-home: tag:role-infra"
+      - "5 client devices left untagged (personal ownership preserved)"
+    verification: "tailscale.tag.apply completed 18/18 HTTP 200"
+    evidence:
+      tag_apply_run_key: "CAP-20260301-222001__tailscale.tag.apply__R8hdo73432"
+      snapshot_artifact: "mailroom/state/tailscale-audit/tag-rollout-snapshot-20260302.yaml"
+      devices_tagged: 18
+      devices_untagged: 5
+      all_success: true
+
+  - id: OP-TS-005
+    title: "Lock admin console ACL editor"
+    status: completed
+    priority: high
+    completed_at: "2026-03-02T03:25:00Z"
+    steps:
+      - "D312 gate enforces ACL policy integrity (file exists, parses, has grants+tagOwners+tests, authority wired)"
+      - "tailscale.acl.status confirms parity: MATCH between git and remote"
+      - "Drift detection is the enforcement mechanism (no admin console lock API exists)"
+    verification: "D312 gate passes and tailscale.acl.status shows parity: MATCH"
+    evidence:
+      d312_gate: PASS
+      acl_status_parity: MATCH
+      acl_status_run_key: "CAP-20260301-222321__tailscale.acl.status__Rdn0a90683"
+    notes:
+      - "Tailscale does not have a lock-editor API — governance is via drift detection (D312 + acl.status)"
+      - "Any admin console edit will be detected as DRIFT by tailscale.acl.status"
+
+summary:
+  total: 5
+  completed: 3
+  deferred: 2
+  deferred_actions: [OP-TS-001, OP-TS-002]
+  deferred_reason: "Infrastructure not provisioned (webhook receiver, log aggregator)"

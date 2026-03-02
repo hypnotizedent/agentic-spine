@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+TAILNET="${TAILSCALE_TAILNET:-taile9480.ts.net}"
+API_BASE="https://api.tailscale.com/api/v2"
+ACL_POLICY="$ROOT/ops/bindings/tailscale.acl.policy.hujson"
+
+# OAuth token
+token_response=$(curl -fsS \
+  -X POST \
+  -u "${TAILSCALE_OAUTH_CLIENT_ID}:${TAILSCALE_OAUTH_CLIENT_SECRET}" \
+  -d "grant_type=client_credentials" \
+  "https://api.tailscale.com/api/v2/oauth/token" 2>&1)
+
+BEARER=$(echo "$token_response" | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+
+echo "=== Validate via OAuth bearer ==="
+val_tmp=$(mktemp)
+val_http=$(curl -sS -w '%{http_code}' \
+  -X POST \
+  -H "Authorization: Bearer $BEARER" \
+  -H "Content-Type: application/hujson" \
+  --data-binary "@$ACL_POLICY" \
+  -o "$val_tmp" \
+  "${API_BASE}/tailnet/${TAILNET}/acl/validate" 2>&1)
+echo "http_code: $val_http"
+echo "body:"
+cat "$val_tmp"
+echo ""
+rm -f "$val_tmp"
+
+echo ""
+echo "=== Validate via API key ==="
+val_tmp2=$(mktemp)
+val_http2=$(curl -sS -w '%{http_code}' \
+  -X POST \
+  -u "${TAILSCALE_API_KEY}:" \
+  -H "Content-Type: application/hujson" \
+  --data-binary "@$ACL_POLICY" \
+  -o "$val_tmp2" \
+  "${API_BASE}/tailnet/${TAILNET}/acl/validate" 2>&1)
+echo "http_code: $val_http2"
+echo "body:"
+cat "$val_tmp2"
+echo ""
+rm -f "$val_tmp2"
