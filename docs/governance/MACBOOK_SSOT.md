@@ -165,7 +165,8 @@ Soft-decommissioned history (not active SSH expectations): `download-home`.
 | **Ctrl+Shift+T** | Enqueue a mailroom task (optional prompt) + show watcher status | `~/.hammerspoon/` |
 | **Ctrl+Shift+C** | Launch Codex — DOMAIN-HA-01 (solo) | `~/.hammerspoon/` |
 | **Ctrl+Shift+O** | Launch OpenCode — DEPLOY-MINT-01 (solo) | `~/.hammerspoon/` |
-| **Ctrl+Shift+E** | Closeout prompt → clipboard | `~/.hammerspoon/` |
+| **Ctrl+Shift+E** | Run governed session closeout (includes structured friction intake) | `~/.hammerspoon/` |
+| **Ctrl+Shift+R** | Manual friction.reconcile trigger for current loop | `~/.hammerspoon/` |
 | **Ctrl+Shift+P** | Worker picker v2.1 (group filter, role select, loop-attach) | `~/.hammerspoon/` |
 <!-- END AUTO HOTKEYS -->
 

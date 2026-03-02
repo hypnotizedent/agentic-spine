@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-12
+last_verified: 2026-03-02
 scope: ingress-routing
 ---
 
@@ -81,4 +81,3 @@ When tunnel ingress changes in the dashboard:
 - SSH host inventory: `ops/bindings/ssh.targets.yaml`
 - Live compose directories: `ops/bindings/docker.compose.targets.yaml`
 - Health probes: `ops/bindings/services.health.yaml`
-

@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-11
+last_verified: 2026-03-02
 scope: infisical-restore-drill
 ---
 

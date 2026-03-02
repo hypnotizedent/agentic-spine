@@ -9,6 +9,7 @@ CONTRACT="$ROOT/ops/bindings/planning.horizon.contract.yaml"
 GATE_ID="D308"
 FAIL=0
 MESSAGES=""
+echo "D308 INFO: planning horizon integrity check start" >&2
 
 # Validate contract exists
 if [[ ! -f "$CONTRACT" ]]; then

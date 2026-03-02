@@ -109,11 +109,14 @@ else
   done
 fi
 
-# 4) Binding host must be one of ssh.targets hosts
+# 4) Binding host must be one of ssh.targets host/tailscale_ip values
 runner_host="$(yq -r '.remote.host // ""' "$BINDING")"
 if [[ -n "$runner_host" ]]; then
-  if ! grep -qx "$runner_host" < <(yq -r '.ssh.targets[].host' "$SSH_TARGETS"); then
-    err "binding .remote.host ($runner_host) not present in ssh.targets.yaml"
+  if ! {
+    yq -r '.ssh.targets[].host' "$SSH_TARGETS"
+    yq -r '.ssh.targets[].tailscale_ip' "$SSH_TARGETS"
+  } | grep -Ev '^(null)?$' | grep -qx "$runner_host"; then
+    err "binding .remote.host ($runner_host) not present in ssh.targets host/tailscale_ip"
   fi
 fi
 

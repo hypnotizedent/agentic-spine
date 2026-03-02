@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-12
+last_verified: 2026-03-02
 scope: macbook-bootstrap-contract
 ---
 
