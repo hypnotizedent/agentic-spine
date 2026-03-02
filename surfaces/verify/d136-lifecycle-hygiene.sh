@@ -108,10 +108,22 @@ gaps = gaps_doc.get("gaps", []) if isinstance(gaps_doc, dict) else []
 
 closed_loops: set[str] = set()
 planned_loops: set[str] = set()
+unparseable_open: list[str] = []
 if scopes_dir.is_dir():
     for scope_file in sorted(scopes_dir.glob("*.scope.md")):
         text = scope_file.read_text(encoding="utf-8", errors="ignore")
         if not text.startswith("---"):
+            # No frontmatter — check for top-level status indicators only.
+            # Skip indented lines (code examples) and markdown-formatted lines.
+            import re
+            for raw_line in text.splitlines():
+                stripped = raw_line.strip()
+                # Only match unindented, non-markdown status: lines
+                if raw_line.startswith("status:") or (stripped.startswith("status:") and not raw_line.startswith(" ") and not raw_line.startswith("\t") and not raw_line.startswith(">")):
+                    val = stripped.split(":", 1)[1].strip().strip('"').lower()
+                    if val in ("active", "open", "draft"):
+                        unparseable_open.append(scope_file.name)
+                        break
             continue
         parts = text.split("---", 2)
         if len(parts) < 3:
@@ -190,10 +202,17 @@ if advisory_missing:
         file=sys.stderr,
     )
 
-if missing_required or orphan_open:
+if unparseable_open:
+    for name in unparseable_open:
+        print(
+            f"D136 FAIL: {name}: no parseable YAML frontmatter but contains open status indicator",
+            file=sys.stderr,
+        )
+
+if missing_required or orphan_open or unparseable_open:
     print(
         "D136 FAIL: parent_loop linkage violations "
-        f"(required_missing={len(missing_required)} open_orphans={len(orphan_open)})",
+        f"(required_missing={len(missing_required)} open_orphans={len(orphan_open)} unparseable_open={len(unparseable_open)})",
         file=sys.stderr,
     )
     raise SystemExit(1)

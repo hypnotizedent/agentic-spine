@@ -37,7 +37,29 @@ VALID_TRIGGERS="manual date dependency"
 for scope_file in "$SCOPES_DIR"/*.scope.md; do
   [[ -f "$scope_file" ]] || continue
 
+  # Check for missing/non-parseable frontmatter
+  if ! head -1 "$scope_file" | grep -q '^---$'; then
+    # No frontmatter — check for top-level (unindented) open status indicators only
+    if grep -E '^status:\s*(active|open|draft)' "$scope_file" >/dev/null 2>&1; then
+      FAIL=1
+      base="$(basename "$scope_file")"
+      MESSAGES="${MESSAGES}    ${GATE_ID} FAIL: ${base}: no parseable YAML frontmatter but contains open status indicator\n"
+    fi
+    # Legacy closed scopes without frontmatter: skip silently
+    continue
+  fi
+
   status="$(_fm_field "$scope_file" "status")"
+
+  # Flag scope files with frontmatter but missing status field
+  if [[ -z "$status" ]]; then
+    base="$(basename "$scope_file")"
+    loop_id="$(_fm_field "$scope_file" "loop_id")"
+    FAIL=1
+    MESSAGES="${MESSAGES}    ${GATE_ID} FAIL: ${loop_id:-$base}: has YAML frontmatter but missing status field\n"
+    continue
+  fi
+
   # Only check open loops
   case "$status" in
     active|draft|open) ;;
