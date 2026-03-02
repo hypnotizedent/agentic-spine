@@ -55,7 +55,7 @@ vw_proxy_start() {
   command -v bw >/dev/null 2>&1 || { echo "STOP (2): bw CLI not found" >&2; return 2; }
 
   # Machine-path fallback: try primary (LAN) target, fall back to Tailscale if unreachable.
-  # Resolution order: LAN IP (services.health) → Tailscale IP (ssh.targets) → fail.
+  # Resolution order: LAN IP (services.health) → Tailscale IP (ssh.targets) → BLOCKED.
   local _effective_target="$VW_PROXY_TARGET"
   if ! curl -sf --connect-timeout 3 "${_effective_target}/alive" >/dev/null 2>&1; then
     local _ts_ip=""
@@ -63,14 +63,24 @@ vw_proxy_start() {
     if command -v yq >/dev/null 2>&1 && [[ -f "$_ssh_targets" ]]; then
       _ts_ip="$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .tailscale_ip // ""' "$_ssh_targets" 2>/dev/null || echo "")"
     fi
-    if [[ -n "$_ts_ip" ]]; then
+    if [[ -n "$_ts_ip" && "$_ts_ip" != "null" ]]; then
       local _ts_target="http://${_ts_ip}:8081"
       if curl -sf --connect-timeout 3 "${_ts_target}/alive" >/dev/null 2>&1; then
         echo "INFO: LAN target unreachable, falling back to Tailscale (${_ts_ip})" >&2
         _effective_target="$_ts_target"
       else
-        echo "WARN: both LAN and Tailscale targets unreachable" >&2
+        echo "BLOCKED: infra-core unreachable (LAN=${VW_PROXY_TARGET}, Tailscale=${_ts_ip})" >&2
+        echo "status: blocked" >&2
+        echo "reason: all_paths_unreachable" >&2
+        echo "runbook: verify VM204 is powered on and network-reachable; check Proxmox console" >&2
+        return 2
       fi
+    else
+      echo "BLOCKED: infra-core unreachable (LAN=${VW_PROXY_TARGET}, Tailscale=none)" >&2
+      echo "status: blocked" >&2
+      echo "reason: all_paths_unreachable" >&2
+      echo "runbook: verify VM204 is powered on and network-reachable; check Proxmox console" >&2
+      return 2
     fi
   fi
 

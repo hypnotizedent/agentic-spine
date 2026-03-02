@@ -132,6 +132,15 @@ show_cap() {
 run_cap() {
     local name="$1"
     shift
+
+    # Strip a single leading standalone "--" separator before capability dispatch.
+    # Agents commonly write `cap run name -- --flag val`; the "--" is ergonomic
+    # but must not be forwarded to the capability command (breaks argparse, etc.).
+    # Non-leading "--" tokens are left untouched.
+    if [[ $# -gt 0 && "$1" == "--" ]]; then
+        shift
+    fi
+
     local args=("$@")
 
     # ── Temp file cleanup trap ──

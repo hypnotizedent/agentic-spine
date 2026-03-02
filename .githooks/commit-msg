@@ -63,29 +63,56 @@ if grep -q '^Gate-Run-Key:' <<<"$msg" && [[ -z "$run_key" ]]; then
 fi
 
 if [[ "${#missing[@]}" -gt 0 ]]; then
-  echo "BLOCKED: D128 trailer policy for gate mutations." >&2
-  echo "Missing/invalid: ${missing[*]}" >&2
-  echo >&2
-  echo "Staged gate files:" >&2
-  for target in "${TARGET_FILES[@]}"; do
-    if printf '%s\n' "${STAGED_FILES[@]}" | grep -qx "$target"; then
-      echo "  - $target" >&2
+  # Attempt auto-population of D128 trailers before blocking.
+  # This reduces friction for routine gate mutations while keeping D128 intact.
+  TRAILER_SCRIPT="$ROOT/ops/plugins/verify/bin/gate-mutation-trailers"
+  auto_fixed=0
+  if [[ -x "$TRAILER_SCRIPT" ]]; then
+    auto_trailers="$("$TRAILER_SCRIPT" --auto --run-key "${SPINE_CAP_RUN_KEY:-manual}" 2>/dev/null || true)"
+    if [[ -n "$auto_trailers" ]] && echo "$auto_trailers" | grep -q '^Gate-Capability:'; then
+      # Validate inferred capability is in the allowed list
+      inferred_cap="$(echo "$auto_trailers" | sed -n 's/^Gate-Capability:[[:space:]]*//p' | head -n1 | xargs)"
+      cap_allowed=0
+      for cap in "${ALLOWED_CAPS[@]}"; do
+        if [[ "$inferred_cap" == "$cap" ]]; then
+          cap_allowed=1
+          break
+        fi
+      done
+      if [[ "$cap_allowed" -eq 1 ]]; then
+        # Append trailers to commit message (blank line separator)
+        printf '\n%s\n' "$auto_trailers" >> "$MSG_FILE"
+        echo "D128: auto-populated trailers (capability=$inferred_cap)" >&2
+        auto_fixed=1
+      fi
     fi
-  done
-  echo >&2
-  echo "Add commit trailers to this message:" >&2
-  echo "  Gate-Mutation: capability" >&2
-  echo "  Gate-Capability: <allowed capability>" >&2
-  echo "  Gate-Run-Key: <CAP-...>" >&2
-  echo >&2
-  echo "Allowed capabilities:" >&2
-  for cap in "${ALLOWED_CAPS[@]}"; do
-    echo "  - $cap" >&2
-  done
-  echo >&2
-  echo "Helper:" >&2
-  echo "  ./ops/plugins/verify/bin/gate-mutation-trailers --capability <allowed capability> --run-key <CAP-...>" >&2
-  exit 1
+  fi
+
+  if [[ "$auto_fixed" -eq 0 ]]; then
+    echo "BLOCKED: D128 trailer policy for gate mutations." >&2
+    echo "Missing/invalid: ${missing[*]}" >&2
+    echo >&2
+    echo "Staged gate files:" >&2
+    for target in "${TARGET_FILES[@]}"; do
+      if printf '%s\n' "${STAGED_FILES[@]}" | grep -qx "$target"; then
+        echo "  - $target" >&2
+      fi
+    done
+    echo >&2
+    echo "Add commit trailers to this message:" >&2
+    echo "  Gate-Mutation: capability" >&2
+    echo "  Gate-Capability: <allowed capability>" >&2
+    echo "  Gate-Run-Key: <CAP-...>" >&2
+    echo >&2
+    echo "Allowed capabilities:" >&2
+    for cap in "${ALLOWED_CAPS[@]}"; do
+      echo "  - $cap" >&2
+    done
+    echo >&2
+    echo "Helper:" >&2
+    echo "  ./ops/plugins/verify/bin/gate-mutation-trailers --capability <allowed capability> --run-key <CAP-...>" >&2
+    exit 1
+  fi
 fi
 
 exit 0

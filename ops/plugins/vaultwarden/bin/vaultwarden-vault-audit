@@ -26,25 +26,42 @@ command -v jq  >/dev/null 2>&1 || _stop "missing dependency: jq"
 command -v yq  >/dev/null 2>&1 || _stop "missing dependency: yq"
 [[ -f "$SSH_TARGETS" ]] || _stop "missing binding: $SSH_TARGETS"
 
-# ── Resolve infra-core SSH target ──
+# ── Resolve infra-core SSH target (LAN-first, Tailscale fallback) ──
 VW_HOST=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .host' "$SSH_TARGETS")
+VW_TS_IP=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .tailscale_ip // ""' "$SSH_TARGETS")
 VW_USER=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .user' "$SSH_TARGETS")
+VW_ACCESS=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .access_policy // "lan_first"' "$SSH_TARGETS")
 [[ -n "$VW_HOST" ]] || _stop "infra-core not found in ssh.targets.yaml"
 
-SSH_CMD="ssh -o ConnectTimeout=10 -o BatchMode=yes ${VW_USER}@${VW_HOST}"
 VW_DATA="/opt/stacks/vaultwarden/vw-data"
 
+# Connectivity: try LAN first, then Tailscale per access_policy
+VW_EFFECTIVE_HOST=""
+SSH_CMD=""
+if ssh -o ConnectTimeout=5 -o BatchMode=yes "${VW_USER}@${VW_HOST}" "echo OK" &>/dev/null; then
+    VW_EFFECTIVE_HOST="$VW_HOST"
+elif [[ -n "$VW_TS_IP" && "$VW_TS_IP" != "null" ]]; then
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes "${VW_USER}@${VW_TS_IP}" "echo OK" &>/dev/null; then
+        VW_EFFECTIVE_HOST="$VW_TS_IP"
+        echo "INFO: LAN ($VW_HOST) unreachable, using Tailscale ($VW_TS_IP)"
+    fi
+fi
+
+if [[ -z "$VW_EFFECTIVE_HOST" ]]; then
+    echo "BLOCKED: infra-core unreachable (LAN=$VW_HOST, Tailscale=${VW_TS_IP:-none})"
+    echo "status: blocked"
+    echo "reason: all_paths_unreachable"
+    echo "access_policy: $VW_ACCESS"
+    echo "runbook: verify VM204 is powered on and network-reachable; check Proxmox console"
+    exit 2
+fi
+
+SSH_CMD="ssh -o ConnectTimeout=10 -o BatchMode=yes ${VW_USER}@${VW_EFFECTIVE_HOST}"
+
 echo "vaultwarden.vault.audit"
-echo "host: ${VW_USER}@${VW_HOST}"
+echo "host: ${VW_USER}@${VW_EFFECTIVE_HOST}"
 echo "data: $VW_DATA"
 echo
-
-# ── Connectivity check ──
-if ! $SSH_CMD "echo OK" &>/dev/null; then
-    echo "FAIL: cannot SSH to infra-core ($VW_HOST)"
-    echo "hint: check Tailscale connectivity"
-    exit 1
-fi
 
 # ── Check container health ──
 CONTAINER_STATUS=$($SSH_CMD "sudo docker inspect --format '{{.State.Health.Status}}' vaultwarden 2>/dev/null" | tr -d '[:space:]' || echo "unknown")
