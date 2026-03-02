@@ -1,0 +1,137 @@
+---
+# Vaultwarden Canonical Audit — Evidence Ledger
+# Generated: 2026-03-02T00:40:00-05:00
+# Auditor: T4 (forensic auditor, read-only)
+# Constraint: no mutations, no secrets, no git writes
+
+audit_id: VW-AUDIT-20260302
+audit_date: "2026-03-02"
+audit_type: canonical-forensic-read-only
+
+evidence_sources:
+  phone_export:
+    path: /Users/ronnyworks/Downloads/bitwarden_export_20260301212334.json
+    sha256_prefix: "581931878b0f0130"
+    file_size_bytes: 357038
+    export_date: "2026-03-01T21:23:34"
+    item_count: 456
+    folder_count: 0
+    note: "Phone export — identical to Feb 25 copy (same hash). Newest item revision 2026-02-15. Does NOT include trashed items."
+
+  second_export:
+    path: /Users/ronnyworks/Downloads/bitwarden_export_20260225050456.json
+    sha256_prefix: "581931878b0f0130"
+    file_size_bytes: 357038
+    note: "Byte-identical to Mar 01 export. Different filename, same content. Phone cache not re-synced."
+
+  feb25_audit_receipt:
+    path: docs/governance/_audits/vaultwarden-recovery-promotion-2026-02-25.md
+    live_vault_count: 448
+    note: "Most recent verified live vault count (via bw CLI, not export)."
+
+  feb26_vault_audit:
+    run_key: "CAP-20260226-020813__vaultwarden.vault.audit__R9elc7799"
+    ciphers_trashed: 368
+    trash_ratio: "46%"
+    twofactor_count: 1
+    note: "Last successful live vault audit before VM went unreachable."
+
+  vw_missing_apply_result:
+    path: "NOT FOUND"
+    searched_locations:
+      - ~/code/agentic-spine (recursive)
+      - ~/code/workbench (recursive)
+      - /tmp/
+      - ~/Downloads/
+      - ~/Desktop/
+      - ~/
+      - Spotlight (mdfind)
+    blocker: "File does not exist on filesystem. Backfill event reported but result artifact not preserved."
+
+  bw_cli_cache:
+    path: "~/Library/Application Support/Bitwarden CLI/data.json"
+    size_bytes: 244752
+    user_id: "d8233c7f-ba02-4ae9-a718-498aef4e41c8"
+    state: locked
+    proxy_config_count: 250
+    note: "Cache exists but vault is locked (no decrypted items). 250 proxy server configs = historical scope-proxy usage."
+
+baseline_verification:
+  verify_fast:
+    run_key: "CAP-20260302-001922__verify.run__R51g12906"
+    result: "10/10 PASS"
+
+  verify_backup_pack:
+    run_key: "CAP-20260302-001928__verify.pack.run__R8uwl4225"
+    result: "3/3 PASS (D19, D139, D234)"
+
+  verify_communications_pack:
+    run_key: "CAP-20260302-001932__verify.pack.run__Rwl076132"
+    result: "36/37 (D222 FAIL: n8n workflow fetch, unrelated to VW)"
+
+  infra_core_slo:
+    run_key: "CAP-20260302-002755__infra.core.slo.status__R33ji53941"
+    result: "INCIDENT — 0/5 required services OK (all curl timeout)"
+    affected: [caddy, authentik, vaultwarden, infisical, cloudflared]
+    note: "VM 204 (infra-core) completely unreachable from macOS (LAN + Tailscale)."
+
+  vw_backup_verify:
+    run_key: "CAP-20260302-002336__vaultwarden.backup.verify__Rarsq9723"
+    result: "NAS OK — latest backup 21h old (within 48h threshold), 14 retained, db.sqlite3 present."
+    latest_backup: "vaultwarden-backup-2026-03-01_024501.tar.gz"
+    size: "2.6M"
+    live_check: "SKIP (SSH unreachable)"
+
+  vw_cli_auth_status:
+    run_key: "CAP-20260302-002327__vaultwarden.cli.auth.status__Rq0qx6048"
+    result: "PASS — bw installed, Infisical auth OK, all 4 keys present."
+
+  vw_item_list:
+    run_key: "CAP-20260302-002405__vaultwarden.item.list__R6lux21687"
+    result: "FAIL — bw login failed (VW server unreachable through proxy)."
+
+  vw_vault_audit:
+    run_key: "CAP-20260302-002306__vaultwarden.vault.audit__R9pku94761"
+    result: "FAIL — cannot SSH to infra-core."
+
+  public_route_check:
+    vault_ronny_works_alive:
+      http_code: 302
+      latency: "0.222s"
+      redirect_target: "auth.ronny.works (Authentik SSO)"
+      note: "CF tunnel is alive — Authentik proxy intercepts and redirects to login."
+    vault_ronny_works_follow:
+      final_code: 200
+      latency: "0.727s"
+      final_url: "https://auth.ronny.works/if/flow/default-authentication-flow/"
+      note: "Authentik flow loads successfully. VW behind SSO is inaccessible without login."
+
+  lan_reachability:
+    host: 192.168.1.204
+    ping: "100% packet loss"
+    curl_8081: "timeout (28)"
+    note: "infra-core VM 204 is completely down from macOS LAN perspective."
+
+  dns_resolution:
+    vault_ronny_works:
+      a_records: ["172.67.219.178", "104.21.45.231"]
+      note: "Cloudflare proxied IPs — tunnel routing active."
+
+  cf_tunnel_ingress:
+    vault_ronny_works: "http://127.0.0.1:80"
+    note: "CF tunnel → Caddy (:80) → Vaultwarden (:8081)"
+
+capabilities_discovered:
+  - vaultwarden.backup.verify
+  - vaultwarden.cli.auth.bootstrap
+  - vaultwarden.cli.auth.status
+  - vaultwarden.item.list
+  - vaultwarden.vault.audit
+  - vaultwarden.hygiene.weekly
+  - vaultwarden.uri.audit
+  - vaultwarden.uri.healthcheck
+  - vaultwarden.reconcile.report
+  - vaultwarden.reconcile.apply
+  - home.health.check
+  - infra.core.slo.status
+  - backup.status

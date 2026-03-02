@@ -1,0 +1,120 @@
+---
+# Vaultwarden Canonical Audit — Backup & Restore Readiness
+# W4: Backup and restore readiness audit
+
+audit_id: VW-AUDIT-20260302
+wave: W4
+
+backup_contract:
+  authority_doc: "docs/governance/VAULTWARDEN_BACKUP_RESTORE.md"
+  authority_status: authoritative
+  last_verified: "2026-02-26"
+  owner: "@ronny"
+
+backup_mechanism:
+  type: "tar.gz archive of vw-data/ directory"
+  contents: "SQLite DB (db.sqlite3) + attachments + icon cache + RSA keys"
+  schedule: "Daily at 02:45 EST (cron on infra-core)"
+  local_path: "/tmp/vaultwarden-backup-*.tar.gz → /opt/stacks/vaultwarden/backups/"
+  nas_rsync: "ronadmin@nas:/volume1/backups/apps/vaultwarden/"
+  automation: "Cron-driven (automated)"
+
+backup_inventory:
+  target_id: "app-vaultwarden"
+  enabled: true
+  kind: file_glob
+  host: nas
+  base_path: "/volume1/backups/apps/vaultwarden"
+  glob: "*.tar.gz"
+  stale_after_hours: 26
+  classification: critical
+  included_in_units:
+    - "nas-offsite-critical"
+    - "vm-204-infra-core"
+    - "container-fleet-infra-core"
+
+backup_current_status:
+  run_key: "CAP-20260302-002336__vaultwarden.backup.verify__Rarsq9723"
+  nas_reachable: true
+  latest_backup: "vaultwarden-backup-2026-03-01_024501.tar.gz"
+  backup_age_hours: 21
+  within_threshold: true
+  backup_size: "2.6M"
+  db_sqlite3_present: true
+  backups_retained: 14
+  live_data_check: "SKIP (SSH unreachable)"
+
+backup_health_verdict: PASS
+backup_notes:
+  - "NAS backup is fresh (21h, within 26h SLA)"
+  - "14 backups retained — reasonable retention for daily schedule (~2 weeks)"
+  - "Live data check skipped due to VM unreachability"
+  - "Cannot confirm backup integrity vs live DB without SSH access"
+
+recovery_artifacts:
+  promoted_set:
+    location: "nas:/volume1/backups/apps/vaultwarden/recovery-artifacts"
+    files:
+      - "vaultwarden-export-20260225T034933Z.encrypted.json"
+      - "vault-recovery-codes-20260225T034933Z.pdf.enc"
+      - "recovery-artifacts-20260225T034933Z.sha256"
+    integrity_verified: true
+    encrypted: true
+    password_protected: true
+    kdf: "kdfType=0, kdfIterations=600000"
+    decrypt_smoke_test: "PASS (PDF document, version 1.4, 1 pages)"
+    archive_password_secret: "VAULTWARDEN_RECOVERY_ARCHIVE_PASSWORD"
+    archive_password_infisical_path: "/spine/vm-infra/vaultwarden"
+
+  previous_set:
+    files:
+      - "vaultwarden-export-20260225T034451Z.encrypted.json"
+      - "vault-recovery-codes-20260225T034451Z.pdf.enc"
+      - "recovery-artifacts-20260225T034451Z.sha256"
+    note: "Retained alongside promoted set"
+
+restore_procedure:
+  documented: true
+  authority: "docs/governance/VAULTWARDEN_BACKUP_RESTORE.md"
+  steps_defined: ["stop VW", "backup current data aside", "extract backup", "start VW", "validate"]
+  secrets_recovery: "ADMIN_TOKEN from Infisical at /spine/vm-infra/vaultwarden"
+  break_glass: "Documented — check NAS, restore from vzdump if needed, browser/mobile offline cache"
+
+restore_drill:
+  required_cadence: "Quarterly"
+  last_drill_evidence: "NOT FOUND"
+  drill_status: "UNKNOWN — no explicit restore drill receipt located"
+  note: >
+    The VAULTWARDEN_BACKUP_RESTORE.md requires quarterly restore tests.
+    No explicit restore drill receipt was found in receipts/ or docs/governance/_audits/.
+    The recovery promotion audit (2026-02-25) validated encrypted export
+    decryptability but did NOT perform a full restore drill from tar.gz backup.
+
+retention_assessment:
+  daily_backups_retained: 14
+  retention_days: ~14
+  classification: critical
+  bloat_risk: low
+  note: "14 daily backups of 2.6M each = ~36MB total on NAS. No bloat concern."
+
+vzdump_coverage:
+  vm_204_in_vzdump: true
+  note: "VM-level vzdump provides full VM backup alongside app-level tar.gz."
+
+overall_verdict: PARTIAL
+verdict_details:
+  compliant:
+    - "Backup schedule exists and is automated (daily 02:45)"
+    - "NAS backup is fresh and within SLA"
+    - "Backup classification is 'critical'"
+    - "Recovery artifacts are encrypted and verified"
+    - "Restore procedure is documented"
+    - "Secrets recovery path is documented"
+    - "Retention is sane (14 backups, no bloat)"
+    - "vzdump VM-level backup provides second layer"
+  non_compliant:
+    - "No restore drill receipt found (quarterly requirement)"
+    - "Live data vs backup integrity check skipped (VM down)"
+  unknown:
+    - "Backup cron may not have run if VM was down at 02:45 today"
+    - "Backup integrity (can we actually restore from latest backup?) unverified"

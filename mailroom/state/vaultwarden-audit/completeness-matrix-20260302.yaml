@@ -1,0 +1,110 @@
+---
+# Vaultwarden Canonical Audit — Completeness Matrix
+# W1: Data completeness audit (export vs live vault)
+
+audit_id: VW-AUDIT-20260302
+wave: W1
+
+comparison_methodology:
+  source: "Phone export (bitwarden_export_20260301212334.json)"
+  target: "Live vault (INACCESSIBLE — VM 204 down)"
+  comparison_mode: "source-only with historical cross-reference"
+  historical_reference: "Feb 25 recovery promotion audit (448 live items)"
+  limitation: >
+    Live vault is unreachable. Completeness comparison is approximate,
+    based on the Feb 25 audit baseline (448 items) and the known
+    Mar 1 backfill event (39 items reported created, 0 errors).
+
+source_dataset:
+  total_items: 456
+  active_items: 456
+  trashed_items: 0  # BW export excludes trash
+  item_types:
+    Login: 421
+    SecureNote: 10
+    Card: 23
+    Identity: 2
+  folders: 0  # Flat namespace — no folders in vault
+  date_range:
+    oldest_revision: "2025-11-01T13:50:20"
+    newest_revision: "2026-02-15T21:58:51"
+  username_classification:
+    has_email: 274
+    has_non_email: 138
+    null_username: 9
+    empty_username: 0
+  items_with_uris: 387
+  items_without_uris: 34  # logins only
+  unique_domains: 340
+
+estimated_live_state:
+  pre_backfill_active: 456  # from export
+  backfill_additions: 39  # reported event
+  estimated_post_backfill_active: 495  # 456 + 39
+  estimated_trashed: 368  # from Feb 26 audit
+  estimated_total_ciphers: 863  # active + trashed
+  confidence: low
+  reason: "Cannot verify — VM 204 unreachable."
+
+completeness_counts:
+  matched: "UNKNOWN — live vault inaccessible"
+  missing_in_live: "UNKNOWN"
+  extra_in_live: "UNKNOWN (39 backfill items expected)"
+  uncertain: 456  # All items are uncertain without live comparison
+
+  # Approximate based on historical data:
+  estimated_matched: 448  # Feb 25 audit showed 448 active items
+  estimated_extra_in_export: 8  # 456 export - 448 Feb 25 = 8 items phone had that audit didn't see
+  estimated_extra_in_live: 39  # backfill additions
+
+critical_entries:
+  dash_cloudflare_com:
+    present: true
+    item_id_prefix: "d9563358"
+    username_class: email
+    status: active
+
+  auth_ronny_works:
+    present: true
+    item_id_prefix: "677da708"
+    username_class: email
+    status: active
+
+  vault_ronny_works:
+    present: true
+    item_id_prefix: "ab595c86"
+    name: "Vault login"
+    username_class: email
+    status: active
+    uri_note: "Uses vault.taile9480.ts.net and 192.168.12.150 (stale aliases)"
+
+freshness_check:
+  newest_export_item: "2026-02-15T21:58:51"
+  export_timestamp: "2026-03-01T21:23:34"
+  sync_gap_days: 14  # Phone not synced since Feb 15
+  backfill_date: "2026-03-01"
+  backfill_visible_in_export: false  # Export predates backfill or phone didn't sync
+  note: >
+    The phone export represents vault state as of ~Feb 15 (last sync).
+    The backfill on Mar 1 is NOT reflected in this export. Both export
+    files (Feb 25 and Mar 01 timestamps) are byte-identical, confirming
+    the phone cache was stale.
+
+delta_from_feb25_audit:
+  feb25_live_count: 448
+  export_count: 456
+  delta: +8
+  possible_explanations:
+    - "8 items were in the phone cache but not yet synced to the live vault at Feb 25 audit time"
+    - "Or: 8 items were added to the vault between the phone's last sync and the Feb 25 audit, and the phone synced them"
+    - "Without live access, cannot determine which explanation is correct"
+
+blockers:
+  - id: BLOCKER-1
+    description: "VM 204 (infra-core) is unreachable — all 5 services down"
+    impact: "Cannot query live vault for definitive completeness comparison"
+    required_to_unblock: "Restore infra-core VM connectivity (LAN or Tailscale)"
+  - id: BLOCKER-2
+    description: "vw_missing_apply_result.json not found"
+    impact: "Cannot verify which 39 items the backfill created or detect duplicates"
+    required_to_unblock: "Locate artifact or re-derive from live vault diff"

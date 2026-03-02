@@ -1,0 +1,250 @@
+---
+# Vaultwarden Canonical Audit — Remediation Wave Plan
+# Mutation-ready but NOT implemented (read-only audit constraint)
+
+audit_id: VW-AUDIT-20260302
+
+prerequisite:
+  description: "Restore VM 204 (infra-core) connectivity"
+  blocker: "All remediation waves require live vault access"
+  actions:
+    - "Check Proxmox console for VM 204 status (may be network partition, not VM failure)"
+    - "If VM is down: restore from vzdump backup"
+    - "If network partition: investigate LAN/Tailscale routing"
+    - "Verify: ./bin/ops cap run infra.core.slo.status returns vaultwarden=OK"
+
+waves:
+  - id: WAVE-0
+    name: "Incident Resolution + Live State Capture"
+    priority: P0
+    risk: minimal
+    depends_on: [prerequisite]
+    actions:
+      - action: "Restore VM 204 connectivity"
+        tool: "manual (Proxmox console)"
+        mutating: true
+
+      - action: "Verify all 5 infra-core services healthy"
+        tool: "infra.core.slo.status"
+        mutating: false
+
+      - action: "Capture live vault state"
+        tool: "vaultwarden.item.list -- --mode bw --format csv --include-trashed"
+        mutating: false
+
+      - action: "Run full vault audit"
+        tool: "vaultwarden.vault.audit"
+        mutating: false
+
+      - action: "Verify backup freshness"
+        tool: "vaultwarden.backup.verify"
+        mutating: false
+
+    success_criteria:
+      - "infra.core.slo.status returns 5/5 required OK"
+      - "vaultwarden.item.list returns full CSV with item count"
+      - "vaultwarden.backup.verify returns PASS"
+
+  - id: WAVE-1
+    name: "Backfill Duplicate Forensics"
+    priority: P1
+    risk: minimal
+    depends_on: [WAVE-0]
+    actions:
+      - action: "Diff live vault items against phone export to identify 39 backfill additions"
+        tool: "Python script comparing live CSV vs export JSON by item ID"
+        mutating: false
+
+      - action: "Classify backfill items: unique vs duplicate vs conflict"
+        tool: "Python script using fingerprint analysis"
+        mutating: false
+
+      - action: "Produce backfill-duplicate-report.json with safe-to-trash candidates"
+        tool: "Write to /tmp/"
+        mutating: false
+
+    success_criteria:
+      - "39 backfill items identified and classified"
+      - "Duplicate candidates confirmed with confidence scores"
+
+  - id: WAVE-2
+    name: "Folder Taxonomy Implementation"
+    priority: P2
+    risk: low
+    depends_on: [WAVE-0]
+    actions:
+      - action: "Create 8 required folders in Vaultwarden"
+        tool: "bw CLI or admin API"
+        mutating: true
+        folders: [00-inbox, infrastructure, spine-services, finance, mint-prints, hypnotized, personal, 90-quarantine]
+
+      - action: "Run reconcile.report to classify items into folders"
+        tool: "vaultwarden.reconcile.report -- --format json"
+        mutating: false
+
+      - action: "Apply folder moves (dry-run first)"
+        tool: "vaultwarden.reconcile.apply -- --input <report> --actions folder_move --max-actions 456"
+        mutating: false (dry-run)
+
+      - action: "Apply folder moves (execute)"
+        tool: "vaultwarden.reconcile.apply -- --input <report> --actions folder_move --execute --confirm GO-LIVE-VAULTWARDEN-CLI"
+        mutating: true
+
+    success_criteria:
+      - "All 8 required folders exist"
+      - "0 unfiled items (or all unfiled items explicitly in 00-inbox)"
+      - "vaultwarden.vault.audit shows folder coverage"
+
+  - id: WAVE-3
+    name: "Stale URL Reconciliation"
+    priority: P3
+    risk: low-medium
+    depends_on: [WAVE-0]
+    actions:
+      - action: "Run URI audit to classify stale URLs"
+        tool: "vaultwarden.uri.audit -- --format table"
+        mutating: false
+
+      - action: "Run URI health check to test reachability"
+        tool: "vaultwarden.uri.healthcheck -- --format table --timeout 4"
+        mutating: false
+
+      - action: "Generate reconcile report"
+        tool: "vaultwarden.reconcile.report -- --format json"
+        mutating: false
+
+      - action: "Apply URI updates (dry-run → targeted → execute)"
+        tool: "vaultwarden.reconcile.apply -- --input <report> --actions update_uri --execute --confirm GO-LIVE-VAULTWARDEN-CLI --max-actions 34"
+        mutating: true
+
+    success_criteria:
+      - "0 stale 192.168.12.* URLs"
+      - "0 stale .internal URLs"
+      - "0 stale Tailscale CGNAT URLs"
+      - "vault.ronny.works items use canonical URL only"
+
+  - id: WAVE-4
+    name: "Duplicate Cleanup"
+    priority: P4
+    risk: medium
+    depends_on: [WAVE-1]
+    actions:
+      - action: "Manual owner review of duplicate candidates from Wave 1"
+        tool: "Human review (Ronny)"
+        mutating: false
+
+      - action: "Soft-delete confirmed duplicates via reconcile.apply"
+        tool: "vaultwarden.reconcile.apply -- --item-ids <ids> --actions retire --execute --confirm GO-LIVE-VAULTWARDEN-CLI --allow-retire"
+        mutating: true
+
+    success_criteria:
+      - "All exact duplicate groups resolved (2 groups)"
+      - "High-risk likely duplicate groups resolved (instagram, paypal, reddit, shopify, unifi, usenet-crawler)"
+      - "Trash ratio doesn't exceed 50%"
+
+    manual_review_items:
+      exact_dupes:
+        - "util-730xd (2 items)"
+        - "bitwarden mint (2 items)"
+      high_risk_likely:
+        - "instagram.com (3 items)"
+        - "www.paypal.com (2 items)"
+        - "vault.taile9480.ts.net / Vault login (2 items)"
+        - "10.0.0.1 / Unifi (2 items)"
+        - "www.reddit.com (2 items)"
+        - "accounts.shopify.com / Shopify (2 items)"
+        - "www.usenet-crawler.com (2 items)"
+
+  - id: WAVE-5
+    name: "Trash Disposition + Hygiene"
+    priority: P5
+    risk: low
+    depends_on: [WAVE-4]
+    actions:
+      - action: "Owner review of trashed items (368 as of Feb 26)"
+        tool: "vaultwarden.item.list -- --include-trashed --format csv"
+        mutating: false
+
+      - action: "Permanently delete confirmed stale trash"
+        tool: "Manual (Vaultwarden web UI)"
+        mutating: true
+        note: "Prefer manual deletion for trash — no agent hard-delete allowed."
+
+    success_criteria:
+      - "Trash ratio < 30%"
+      - "No recoverable items permanently deleted"
+
+  - id: WAVE-6
+    name: "Restore Drill + Gate Addition"
+    priority: P6
+    risk: minimal
+    depends_on: [WAVE-0]
+    actions:
+      - action: "Execute quarterly restore drill"
+        tool: "Manual: follow VAULTWARDEN_BACKUP_RESTORE.md restore procedure in scratch env"
+        mutating: true (scratch environment)
+
+      - action: "Record restore drill receipt"
+        tool: "receipts/audits/infra/vaultwarden-restore-drill-20260302/"
+        mutating: false
+
+      - action: "Propose VW hygiene gate (optional)"
+        tool: "proposals.apply or direct gate addition"
+        mutating: true
+        note: "Consider D-series gate for folder compliance, trash ratio, backup freshness"
+
+    success_criteria:
+      - "Restore drill receipt exists with pass/fail"
+      - "VAULTWARDEN_BACKUP_RESTORE.md quarterly cadence met"
+
+proposed_gaps:
+  note: "These gaps are PROPOSED only. Do NOT file until Wave 0 completes and findings are confirmed."
+
+  - proposed_id: "GAP-OP-XXXX"
+    type: missing-entry
+    severity: medium
+    description: "Vaultwarden folder taxonomy defined but not implemented (0/9 folders exist)"
+    parent_loop: "TBD"
+    discovered_by: "T4 forensic audit VW-AUDIT-20260302"
+
+  - proposed_id: "GAP-OP-XXXX"
+    type: agent-behavior
+    severity: medium
+    description: "Backfill apply result artifact (vw_missing_apply_result.json) not preserved — cannot verify 39-item backfill for duplicates"
+    parent_loop: "TBD"
+    discovered_by: "T4 forensic audit VW-AUDIT-20260302"
+
+  - proposed_id: "GAP-OP-XXXX"
+    type: stale-ssot
+    severity: medium
+    description: "34 vault items reference stale URLs (192.168.12.*, .internal, localhost, Tailscale CGNAT)"
+    parent_loop: "TBD"
+    discovered_by: "T4 forensic audit VW-AUDIT-20260302"
+
+  - proposed_id: "GAP-OP-XXXX"
+    type: missing-entry
+    severity: medium
+    description: "No quarterly restore drill receipt found for Vaultwarden (required by VAULTWARDEN_BACKUP_RESTORE.md)"
+    parent_loop: "TBD"
+    discovered_by: "T4 forensic audit VW-AUDIT-20260302"
+
+  - proposed_id: "GAP-OP-XXXX"
+    type: stale-ssot
+    severity: low
+    description: "vault-cli.ronny.works alias in canonical_hosts.yaml may be deprecated (scope proxy uses localhost)"
+    parent_loop: "TBD"
+    discovered_by: "T4 forensic audit VW-AUDIT-20260302"
+
+  - proposed_id: "GAP-OP-XXXX"
+    type: missing-entry
+    severity: low
+    description: "No dedicated VW hygiene drift gate (folder compliance, trash ratio, TOTP coverage)"
+    parent_loop: "TBD"
+    discovered_by: "T4 forensic audit VW-AUDIT-20260302"
+
+  - proposed_id: "GAP-OP-XXXX"
+    type: agent-behavior
+    severity: low
+    description: "Phone export shows identical exports across dates (stale cache) — sync health not monitored"
+    parent_loop: "TBD"
+    discovered_by: "T4 forensic audit VW-AUDIT-20260302"

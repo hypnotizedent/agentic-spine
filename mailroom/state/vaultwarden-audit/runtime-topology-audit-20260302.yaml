@@ -1,0 +1,150 @@
+---
+# Vaultwarden Canonical Audit — Runtime Topology Audit
+# W3: Runtime and auth path audit
+
+audit_id: VW-AUDIT-20260302
+wave: W3
+
+topology:
+  canonical_url: "https://vault.ronny.works"
+  host_vm: "infra-core (VM 204)"
+  host_ip_lan: "192.168.1.204"
+  host_ip_tailscale: "100.92.91.128"
+  container: "vaultwarden"
+  image: "vaultwarden/server:latest"
+  internal_port: 80
+  exposed_port: 8081
+  data_volume: "./vw-data:/data/"
+  database: "SQLite (db.sqlite3)"
+
+routing_chain:
+  public_path:
+    description: "Browser → Cloudflare → CF Tunnel → Caddy → Authentik outpost → Vaultwarden"
+    steps:
+      - layer: DNS
+        record: "vault.ronny.works"
+        resolves_to: ["172.67.219.178", "104.21.45.231"]
+        type: "A (Cloudflare proxied)"
+        status: ACTIVE
+
+      - layer: Cloudflare_Tunnel
+        ingress_rule: "vault.ronny.works -> http://127.0.0.1:80"
+        note: "Tunnel routes to Caddy on infra-core localhost:80"
+        status: ACTIVE
+
+      - layer: Caddy_Reverse_Proxy
+        upstream: "127.0.0.1:80 → Vaultwarden:8081"
+        note: "Caddy on infra-core proxies to VW container port"
+        status: "UNKNOWN (VM down)"
+
+      - layer: Authentik_Outpost
+        behavior: "SSO proxy intercepts — returns 302 to auth.ronny.works login flow"
+        client_id: "cfOpjqAzeka8FRTboPczgNUHV4kV8vQWV1I8e48B"
+        flow: "default-authentication-flow"
+        status: ACTIVE
+
+      - layer: Vaultwarden
+        internal_health: "http://127.0.0.1:80/alive"
+        external_health: "http://192.168.1.204:8081/alive"
+        status: "DOWN (VM unreachable)"
+
+  internal_path:
+    description: "bw CLI → scope-proxy (localhost HTTPS) → Vaultwarden API"
+    steps:
+      - layer: scope_proxy
+        script: "ops/plugins/vaultwarden/lib/scope-proxy.py"
+        behavior: "HTTPS reverse proxy on random localhost port, rewrites scope headers for bw v2026.1.0 compatibility"
+        target_env: VW_PROXY_TARGET
+        target_source: "services.health.yaml → vaultwarden endpoint"
+        status: "PRECONDITIONS OK (auth keys present)"
+
+      - layer: bw_cli
+        version: "2026.1.0"
+        config_server: "Dynamic (set per proxy session)"
+        auth_method: "API key login + master password unlock"
+        status: "FAIL (VW server unreachable through proxy)"
+
+  health_probe_paths:
+    services_health:
+      id: vaultwarden
+      url: "http://192.168.1.204:8081/alive"
+      expect: 200
+      status: "DOWN"
+
+    infra_core_slo:
+      service_id: vaultwarden
+      scope: required
+      status: "FAIL (curl timeout)"
+
+    home_health_check:
+      capability: home.health.check
+      vw_probe: "Tailscale :8080"
+      note: "Separate from infra-core SLO check"
+
+auth_path_audit:
+  sso_integration:
+    provider: Authentik
+    auth_domain: "auth.ronny.works"
+    integration_type: "Forward auth / outpost proxy"
+    behavior: "All unauthenticated requests to vault.ronny.works redirect to Authentik login"
+    risk: low
+    note: "SSO adds authentication layer. VW also has its own master password."
+
+  admin_panel:
+    path: "/admin"
+    auth: "ADMIN_TOKEN from .env (sourced from Infisical)"
+    infisical_path: "/spine/vm-infra/vaultwarden/VAULTWARDEN_ADMIN_TOKEN"
+    risk: low
+    note: "Admin panel protected by both Authentik SSO and ADMIN_TOKEN."
+
+  websocket:
+    env_var: "WEBSOCKET_ENABLED=true"
+    status: "UNKNOWN (VM down)"
+    expected_behavior: "WebSocket notifications via /notifications/hub"
+    risk: medium
+    note: "Cannot verify WebSocket health without VM access."
+
+  signup_policy:
+    env_var: "SIGNUPS_ALLOWED=false"
+    note: "Registration disabled — single-user vault."
+
+legacy_route_drift:
+  findings:
+    - alias: "vault.taile9480.ts.net"
+      status: stale
+      note: "Tailscale MagicDNS alias — still in canonical_hosts.yaml as alias, 2 vault items reference it"
+      risk: low
+
+    - alias: "192.168.12.150"
+      status: stale
+      note: "Old shop LAN IP for VW. Listed as alias in canonical_hosts.yaml. 1 item references it."
+      risk: low
+
+    - alias: "vault-cli.ronny.works"
+      status: stale
+      note: "CLI-specific subdomain listed as alias. Was used for scope-proxy. Current proxy uses localhost."
+      risk: low
+
+    - alias: "100.92.91.128"
+      status: active
+      note: "Current Tailscale IP for infra-core. Used in services.health.yaml and backup contract."
+      risk: none
+
+  legacy_endpoints_found: 3
+  active_endpoints_found: 1
+  legacy_risk: low
+  note: "All stale aliases are documented as aliases in canonical_hosts.yaml. No rogue routes found."
+
+current_incident:
+  status: INCIDENT
+  severity: high
+  description: "infra-core VM 204 is completely unreachable (LAN + Tailscale)"
+  affected_services: [caddy, authentik, vaultwarden, infisical, cloudflared]
+  public_route_status: "CF tunnel alive but Authentik SSO blocks unauthenticated access"
+  vault_access: "DEGRADED — browser clients with existing sessions may still work if VW is actually running behind unreachable LAN"
+  note: >
+    The LAN/Tailscale unreachability from macOS does NOT necessarily mean
+    VM 204 is down. The CF tunnel is alive (302 responses from Authentik).
+    This could be a network partition between macOS and the VM, while the
+    CF tunnel daemon (cloudflared) on the VM maintains its own outbound
+    tunnel to Cloudflare. Further diagnosis requires Proxmox console access.

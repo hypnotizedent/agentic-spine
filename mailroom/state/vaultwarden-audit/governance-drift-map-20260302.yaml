@@ -1,0 +1,228 @@
+---
+# Vaultwarden Canonical Audit — Governance Drift Map
+# W5: Governance alignment audit
+
+audit_id: VW-AUDIT-20260302
+wave: W5
+
+authority_surfaces:
+  # ─── AUTHORITATIVE DOCS ───
+  - id: GOV-VW-01
+    surface: "docs/governance/VAULTWARDEN_BACKUP_RESTORE.md"
+    scope: app-backup-restore
+    status: authoritative
+    last_verified: "2026-02-26"
+    freshness: current
+    drift: none
+
+  - id: GOV-VW-02
+    surface: "docs/governance/VAULTWARDEN_INFISICAL_CONTRACT.md"
+    scope: secrets-boundary
+    status: authoritative
+    last_verified: "2026-02-25"
+    freshness: current
+    drift: none
+
+  - id: GOV-VW-03
+    surface: "docs/governance/VAULTWARDEN_CANONICAL_HYGIENE.md"
+    scope: vaultwarden-canonical-hygiene
+    status: authoritative
+    last_verified: "2026-02-25"
+    freshness: current
+    drift: none
+
+  # ─── BINDINGS ───
+  - id: GOV-VW-04
+    surface: "ops/bindings/services.health.yaml"
+    field: "endpoints[id=vaultwarden]"
+    value: "http://192.168.1.204:8081/alive"
+    drift: none
+    note: "Correct canonical health endpoint."
+
+  - id: GOV-VW-05
+    surface: "ops/bindings/infra.core.slo.yaml"
+    field: "target.required_service_ids"
+    value: "includes vaultwarden"
+    drift: none
+
+  - id: GOV-VW-06
+    surface: "ops/bindings/backup.inventory.yaml"
+    field: "targets[id=app-vaultwarden]"
+    status: enabled
+    classification: critical
+    drift: none
+
+  - id: GOV-VW-07
+    surface: "ops/bindings/secrets.namespace.policy.yaml"
+    keys: [VAULTWARDEN_ADMIN_TOKEN, VAULTWARDEN_ADMIN_TOKEN_PLAINTEXT, VAULTWARDEN_BW_CLIENTID, VAULTWARDEN_BW_CLIENTSECRET, VAULTWARDEN_BW_MASTER_PASSWORD, VAULTWARDEN_BW_SERVER_URL, VAULTWARDEN_RECOVERY_ARCHIVE_PASSWORD]
+    namespace: "/spine/vm-infra/vaultwarden"
+    drift: none
+
+  - id: GOV-VW-08
+    surface: "ops/data/vaultwarden/canonical_hosts.yaml"
+    drift: minor
+    finding: "vault-cli.ronny.works listed as alias but may be deprecated (scope proxy now uses localhost)"
+    severity: low
+
+  - id: GOV-VW-09
+    surface: "ops/data/vaultwarden/folder_taxonomy.yaml"
+    drift: major
+    finding: "9 folders defined (including 00-inbox, 90-quarantine, 99-retired) but live vault has 0 folders. Folder taxonomy is aspirational, not implemented."
+    severity: medium
+
+  - id: GOV-VW-10
+    surface: "docs/governance/DOMAIN_ROUTING_REGISTRY.yaml"
+    field: "routes[hostname=vault.ronny.works]"
+    routing_layer: cloudflare_tunnel
+    target_hint: "127.0.0.1:80 (Caddy on infra-core → Vaultwarden :8081)"
+    drift: none
+
+  # ─── STAGED CONFIG ───
+  - id: GOV-VW-11
+    surface: "ops/staged/vaultwarden/docker-compose.yml"
+    drift: minor
+    finding: "WEBSOCKET_ENABLED in .env.example but compose has no websocket port mapping. VW modern versions handle WS on same port."
+    severity: low
+
+  - id: GOV-VW-12
+    surface: "ops/staged/vaultwarden/README.md"
+    drift: minor
+    finding: "Internal liveness URL lists Tailscale IP 100.92.91.128:8081 which is valid but services.health.yaml uses LAN 192.168.1.204:8081. Dual reference is acceptable."
+    severity: low
+
+  # ─── GATE COVERAGE ───
+  - id: GOV-VW-13
+    surface: "surfaces/verify/d149-infra-core-service-parity-lock.sh"
+    drift: none
+    note: "D149 validates VW in infra-core service parity (SLO + health + registry + capabilities)."
+
+  # ─── CAPABILITY COVERAGE ───
+  - id: GOV-VW-14
+    surface: "ops/capabilities.yaml"
+    drift: none
+    note: "10+ VW capabilities registered: backup.verify, cli.auth.bootstrap/status, item.list, vault.audit, hygiene.weekly, uri.audit, uri.healthcheck, reconcile.report, reconcile.apply"
+
+  # ─── RECOVERY AUDIT ───
+  - id: GOV-VW-15
+    surface: "docs/governance/_audits/vaultwarden-recovery-promotion-2026-02-25.md"
+    drift: none
+    note: "Recovery promotion audit complete with integrity evidence."
+
+  # ─── SERVICE REGISTRY ───
+  - id: GOV-VW-16
+    surface: "docs/governance/SERVICE_REGISTRY.yaml"
+    drift: minor
+    finding: "18 services have vaultwarden_item fields. Coverage looks comprehensive but cannot verify path validity without live vault access."
+    severity: low
+
+  # ─── VM LIFECYCLE ───
+  - id: GOV-VW-17
+    surface: "ops/bindings/vm.lifecycle.yaml"
+    drift: none
+    note: "VW on VM 204 (infra-core) as active service. VM 102 (home VW) correctly decommissioned."
+
+drift_findings:
+  - id: DRIFT-VW-01
+    severity: high
+    surface: "Live vault"
+    finding: "Folder taxonomy not implemented"
+    detail: >
+      folder_taxonomy.yaml defines 9 folders but the vault has 0 folders.
+      All 456 items are unfiled. The Infisical contract recommends folders
+      for domain alignment. This is the largest governance gap.
+    fix_priority: 1
+    proposed_action: "Create folders in VW, run folder-move via reconcile.apply"
+
+  - id: DRIFT-VW-02
+    severity: high
+    surface: "Live vault (estimated)"
+    finding: "Unverified backfill duplication"
+    detail: >
+      39 items were reportedly created by backfill on Mar 1. The apply result
+      artifact (vw_missing_apply_result.json) was not preserved. Cannot verify
+      whether duplicates were created. Risk is concentrated on 9 null-username items.
+    fix_priority: 2
+    proposed_action: "When VM recovers: run vaultwarden.item.list, diff against export, identify and dedupe backfill artifacts."
+
+  - id: DRIFT-VW-03
+    severity: medium
+    surface: "Phone export"
+    finding: "34 items with stale/legacy URLs"
+    detail: >
+      20 items use old 192.168.12.* shop LAN IPs, 5 use Tailscale CGNAT IPs,
+      2 reference vault.taile9480.ts.net, 4 use .internal domains, 2 use localhost.
+      These should be reconciled to canonical hostnames via reconcile.apply.
+    fix_priority: 3
+    proposed_action: "Run vaultwarden.uri.audit + reconcile.report when VM recovers."
+
+  - id: DRIFT-VW-04
+    severity: medium
+    surface: "Backup restore"
+    finding: "No restore drill receipt"
+    detail: >
+      VAULTWARDEN_BACKUP_RESTORE.md requires quarterly restore tests.
+      No explicit restore drill receipt was found. The recovery promotion
+      audit validates encrypted export but not tar.gz restore.
+    fix_priority: 4
+    proposed_action: "Schedule and execute restore drill, produce receipt."
+
+  - id: DRIFT-VW-05
+    severity: medium
+    surface: "Live vault"
+    finding: "46% trash ratio (as of Feb 26)"
+    detail: >
+      368 trashed items vs ~456 active = 46% trash ratio. Policy threshold
+      is 50% for two consecutive audits or 400 trashed items. Currently
+      below both thresholds but close.
+    fix_priority: 5
+    proposed_action: "Schedule owner cleanup session to purge confirmed stale trash."
+
+  - id: DRIFT-VW-06
+    severity: low
+    surface: "ops/data/vaultwarden/canonical_hosts.yaml"
+    finding: "vault-cli.ronny.works alias may be deprecated"
+    detail: "Scope proxy now uses localhost. vault-cli.ronny.works alias may no longer be needed."
+    fix_priority: 6
+    proposed_action: "Verify if vault-cli.ronny.works DNS still exists, remove alias if deprecated."
+
+  - id: DRIFT-VW-07
+    severity: low
+    surface: "ops/staged/vaultwarden/.env.example"
+    finding: "WEBSOCKET_ENABLED listed but modern VW handles WS on same port"
+    detail: "VW v1.29+ serves WebSocket on the same HTTP port. WEBSOCKET_ENABLED may be legacy."
+    fix_priority: 7
+    proposed_action: "Verify VW version and remove WEBSOCKET_ENABLED if not needed."
+
+  - id: DRIFT-VW-08
+    severity: low
+    surface: "Phone export"
+    finding: "34 login items with no URI"
+    detail: "These items have passwords but no associated URL. May be incomplete records or non-web credentials."
+    fix_priority: 8
+    proposed_action: "Review in hygiene cycle — add URIs or move to appropriate folders."
+
+  - id: DRIFT-VW-09
+    severity: info
+    surface: "Live runtime"
+    finding: "No dedicated VW health gate"
+    detail: >
+      Vaultwarden is covered by D149 (infra-core parity) and infra.core.slo.status
+      but has no dedicated drift gate for VW-specific health (backup freshness,
+      folder taxonomy compliance, trash ratio, TOTP coverage).
+    fix_priority: 9
+    proposed_action: "Consider adding a D-series gate for VW hygiene compliance."
+
+split_authority_check:
+  result: "NO SPLIT AUTHORITY FOUND"
+  detail: >
+    All VW governance surfaces are consistent:
+    - VAULTWARDEN_BACKUP_RESTORE.md is single authority for backup/restore
+    - VAULTWARDEN_INFISICAL_CONTRACT.md is single authority for secrets boundary
+    - VAULTWARDEN_CANONICAL_HYGIENE.md is single authority for hygiene policy
+    - VM 102 (home VW) correctly decommissioned in vm.lifecycle.yaml
+    - No competing docs or stale references found
+
+stale_legacy_docs:
+  - surface: "mailroom/state/loop-scopes/_archived/LOOP-VAULTWARDEN-GOVERNANCE-20260209.scope.md"
+    status: "correctly archived"
+    risk: none
