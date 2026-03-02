@@ -181,6 +181,19 @@ run_cap() {
     local role_policy_override_used="false"
     local role_policy_override_ref="${SPINE_ROLE_POLICY_OVERRIDE_REF:-}"
     local role_policy_override_reason="${SPINE_ROLE_POLICY_OVERRIDE_REASON:-}"
+    # Session-scoped override cache: fallback when env vars are not set.
+    # Written by `session.role.override` capability; cleared by --clear or session end.
+    local _role_override_cache="$STATE_DIR/role-override.env"
+    if [[ -z "$role_policy_override_ref" && -f "$_role_override_cache" ]]; then
+      local _cached_ref _cached_reason _cached_at
+      _cached_ref="$(sed -n 's/^ref=//p' "$_role_override_cache" | head -1)"
+      _cached_reason="$(sed -n 's/^reason=//p' "$_role_override_cache" | head -1)"
+      _cached_at="$(sed -n 's/^created_at=//p' "$_role_override_cache" | head -1)"
+      if [[ -n "$_cached_ref" && -n "$_cached_reason" ]]; then
+        role_policy_override_ref="$_cached_ref"
+        role_policy_override_reason="$_cached_reason"
+      fi
+    fi
     local effective_multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES:-direct}"
     local active_session_count=0
     local friction_ingest_script="$SPINE_CODE/ops/plugins/lifecycle/bin/friction-ingest"
@@ -566,9 +579,10 @@ PY
       fi
     fi
 
-    # ── AOF contract acknowledgment (v0.2) ──
+    # ── AOF contract acknowledgment (v0.3) ──
     # When .environment.yaml exists, enforce daily contract read acknowledgment
     # before allowing mutating/destructive capabilities.
+    # Auto-acknowledge when a session role override is active (operator already proved engagement).
     if [[ -z "$blocked_reason" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]] && [[ "$name" != "aof.contract.acknowledge" ]]; then
       local env_contract="${cwd}/.environment.yaml"
       if [[ -f "$env_contract" ]]; then
@@ -578,14 +592,21 @@ PY
         local ack_rc=$?
         set -e
         if [[ "$ack_rc" -eq 2 ]]; then
-          echo "BLOCKED: AOF contract acknowledgment required"
-          echo "Environment contract exists at: $env_contract"
-          echo ""
-          echo "Remediation:"
-          echo "  ./bin/ops cap run aof.contract.status    # view current state"
-          echo "  ./bin/ops cap run aof.contract.acknowledge"
-          blocked_reason="aof_contract_ack_required"
-          exit_code=2
+          # Auto-acknowledge when session role override is active (trusted operator signal)
+          if [[ -f "$_role_override_cache" && -n "$role_policy_override_ref" ]]; then
+            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
+            echo "AOF auto-acknowledged (session role override active: ref=$role_policy_override_ref)"
+          else
+            echo "BLOCKED: AOF contract acknowledgment required"
+            echo "Environment contract exists at: $env_contract"
+            echo ""
+            echo "Remediation:"
+            echo "  ./bin/ops cap run aof.contract.status    # view current state"
+            echo "  ./bin/ops cap run aof.contract.acknowledge"
+            echo "  # Or set a session override first: ./bin/ops cap run session.role.override -- --ref <ref> --reason <reason>"
+            blocked_reason="aof_contract_ack_required"
+            exit_code=2
+          fi
         fi
       fi
     fi

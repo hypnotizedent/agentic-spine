@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# session-role-override — Set or clear session-scoped role policy override.
+#
+# Writes a cache file that cap.sh reads as fallback when
+# SPINE_ROLE_POLICY_OVERRIDE_REF/REASON env vars are not set.
+# This eliminates the need to prefix every mutating cap call.
+#
+# Usage:
+#   session-role-override --ref <ref> --reason <reason>   # set
+#   session-role-override --clear                          # clear
+#   session-role-override --status                         # show current
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+STATE_DIR="$SPINE_STATE"
+
+CACHE_FILE="$STATE_DIR/role-override.env"
+REF=""
+REASON=""
+CLEAR=0
+STATUS=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --ref) REF="${2:-}"; shift 2 ;;
+    --reason) REASON="${2:-}"; shift 2 ;;
+    --clear) CLEAR=1; shift ;;
+    --status) STATUS=1; shift ;;
+    -h|--help)
+      echo "Usage:"
+      echo "  session-role-override --ref <ref> --reason <reason>"
+      echo "  session-role-override --clear"
+      echo "  session-role-override --status"
+      exit 0
+      ;;
+    *) echo "ERROR: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ "$STATUS" -eq 1 ]]; then
+  echo "session.role.override"
+  echo "  cache_file: $CACHE_FILE"
+  if [[ -f "$CACHE_FILE" ]]; then
+    echo "  state: active"
+    sed 's/^/  /' "$CACHE_FILE"
+  else
+    echo "  state: inactive"
+  fi
+  exit 0
+fi
+
+if [[ "$CLEAR" -eq 1 ]]; then
+  rm -f "$CACHE_FILE"
+  echo "session.role.override"
+  echo "  action: cleared"
+  exit 0
+fi
+
+if [[ -z "$REF" ]]; then
+  echo "ERROR: --ref required" >&2
+  exit 1
+fi
+if [[ -z "$REASON" ]]; then
+  echo "ERROR: --reason required" >&2
+  exit 1
+fi
+
+mkdir -p "$STATE_DIR"
+cat > "$CACHE_FILE" <<EOF
+ref=$REF
+reason=$REASON
+created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
+echo "session.role.override"
+echo "  action: set"
+echo "  ref: $REF"
+echo "  reason: $REASON"
+echo "  cache_file: $CACHE_FILE"
