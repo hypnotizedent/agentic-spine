@@ -9,7 +9,7 @@
 # Last verified: 2026-02-22
 
 version: 1
-updated: "2026-03-02T08:20:30Z"
+updated: "2026-03-02T08:26:21Z"
 gaps:
   # ─────────────────────────────────────────────────────────────
   # Discovered during LOOP-INFRA-VM-RESTRUCTURE-20260206
@@ -17865,3 +17865,108 @@ gaps:
     status: closed
     notes: "Duplicate of GAP-OP-1323. Closed at 2026-03-02T08:21Z."
     parent_loop: "LOOP-AGENT-FRICTION-BACKLOG-20260302"
+  - id: "GAP-OP-1325"
+    title: "Off-LAN terminal context cannot reach shop VM LAN hosts (192.168.1.x), but the same targets are reachable v..."
+    discovered_by: "LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302"
+    discovered_at: "2026-03-02"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "mailroom/state/loop-scopes/LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302.scope.md"
+    description: |
+      Off-LAN terminal context cannot reach shop VM LAN hosts (192.168.1.x), but the same targets are reachable via Tailscale IPs.
+      ssh.target.status currently resolves only ssh.targets[].host and does not perform LAN->Tailscale fallback for access_policy=lan_first.
+      This creates false FAIL status for reachable VMs and misclassifies runtime health after Tailscale hardening.
+
+      Required fix:
+      1) Implement fallback resolution in ssh.target.status for lan_first targets:
+         - attempt host first
+         - on connect_timeout/connect_refused/no_route, retry tailscale_ip when present
+         - emit path_used=lan|tailscale in output
+      2) Preserve tailscale_required and lan_only semantics.
+      3) Add deterministic failure classification when both paths fail.
+
+      Acceptance:
+      - For every lan_first target with reachable tailscale_ip, status returns OK via path_used=tailscale when LAN is unreachable.
+      - No regression for communications-stack and existing tailscale_required targets.
+    severity: high
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:26:21Z"
+    parent_loop: "LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302"
+  - id: "GAP-OP-1326"
+    title: "Multiple runtime status capabilities in scope use hardcoded LAN IPs and do not source host resolution from ..."
+    discovered_by: "LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302"
+    discovered_at: "2026-03-02"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "mailroom/state/loop-scopes/LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302.scope.md"
+    description: |
+      Multiple runtime status capabilities in scope use hardcoded LAN IPs and do not source host resolution from ssh.targets policy.
+      This causes false-down reports in off-LAN contexts even when workloads are healthy over Tailscale.
+
+      In-scope capabilities:
+      - media.status
+      - finance.stack.status
+      - observability.stack.status
+      - infra.docker_host.status (and similar host-scoped status probes)
+
+      Required fix:
+      1) Introduce binding-driven host resolution helper that reads ssh.targets and applies lan_first fallback to tailscale_ip.
+      2) Replace hardcoded 192.168.1.x literals in scoped runtime probes with resolved host values.
+      3) Ensure probe output includes resolved_host/path_used for forensic traceability.
+
+      Acceptance:
+      - Scoped status capabilities succeed in off-LAN context when tailscale path is healthy.
+      - No capability in scope retains hardcoded shop-LAN IP literals for target selection.
+    severity: high
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:26:21Z"
+    parent_loop: "LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302"
+  - id: "GAP-OP-1327"
+    title: "There is no canonical shared runtime resolver surface for host path selection (lan_first, tailscale_require..."
+    discovered_by: "LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302"
+    discovered_at: "2026-03-02"
+    type: missing-entry
+    classification: missing-entry
+    doc: "mailroom/state/loop-scopes/LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302.scope.md"
+    description: |
+      There is no canonical shared runtime resolver surface for host path selection (lan_first, tailscale_required, lan_only).
+      Each capability reimplements host resolution ad hoc, causing policy drift and repetitive friction.
+
+      Required fix:
+      - Add a reusable resolver helper under ops/lib or plugin-shared lib with a small stable contract:
+        resolve_target(id) => {primary_host, fallback_host, policy, user, port}
+        probe_target(id) => {status, path_used, reason, latency_ms}
+      - Migrate scoped capabilities in this loop to the shared helper.
+
+      Acceptance:
+      - Scoped capabilities call shared resolver, not bespoke path logic.
+      - Resolver behavior is documented and referenced from loop evidence.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:26:21Z"
+    parent_loop: "LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302"
+  - id: "GAP-OP-1328"
+    title: "No verify gate currently enforces LAN->Tailscale fallback behavior for lan_first targets across runtime sta..."
+    discovered_by: "LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302"
+    discovered_at: "2026-03-02"
+    type: missing-entry
+    classification: missing-entry
+    doc: "mailroom/state/loop-scopes/LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302.scope.md"
+    description: |
+      No verify gate currently enforces LAN->Tailscale fallback behavior for lan_first targets across runtime status capabilities.
+      Regression risk is high: future changes can reintroduce LAN-only hardcoding without detection.
+
+      Required fix:
+      - Add a new verify gate (next available ID) that validates:
+        1) scoped capabilities resolve targets via binding policy (no hardcoded 192.168.1.x target literals)
+        2) fallback path behavior is present for lan_first targets
+        3) gate fails when fallback is removed or host policy drift occurs
+      - Register gate in gate.registry and topology with proper metadata/trailers.
+
+      Acceptance:
+      - Gate fails before normalization and passes after.
+      - verify.run fast remains green post-change.
+    severity: high
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:26:21Z"
+    parent_loop: "LOOP-TAILSCALE-LAN-FIRST-FALLBACK-NORMALIZATION-20260302"
