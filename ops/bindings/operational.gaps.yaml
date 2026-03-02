@@ -17066,15 +17066,36 @@ gaps:
     notes: "Filed via gaps.file at 2026-03-02T05:25:06Z. Reparented from closed LOOP-AGENT-FRICTION-QUEUE-OPERATIONS-20260302."
     parent_loop: "LOOP-AGENT-FRICTION-BACKLOG-20260302"
   - id: "GAP-OP-1282"
-    title: "GAP-OP-1282 open gap"
+    title: "Capability argument protocol not normalized — inconsistent -- separator behavior"
     discovered_by: "LOOP-FRICTION-QUEUE-STATUS-ACCURACY-20260302"
     discovered_at: "2026-03-02"
-    type: agent-behavior
-    classification: agent-behavior
+    type: runtime-bug
+    classification: runtime-bug
     doc: "ops/capabilities.yaml"
     description: |
-      Capability argument protocol ambiguity: no schema-level arg_protocol field exists. cap.sh passes args verbatim including -- separator, which breaks Python argparse commands (friction.queue.status, friction.reconcile, others). Bash case-style scripts handle -- via shift, Python argparse treats it as literal arg. D63 does not enforce arg forwarding semantics. Result: inconsistent invocation patterns across 500+ capabilities, papered over by per-script gotcha notes in AGENTS.md/CLAUDE.md. Fix: add arg_protocol field to capability schema, cap.sh normalizes forwarding per protocol, D63 enforces field presence.
-    severity: medium
+      AOF runtime-bug: capability argument protocol is not normalized, causing inconsistent -- separator behavior across surfaces.
+
+      Observed failure mode:
+      - Python argparse-backed capabilities fail when invoked with `-- --flag` (example: friction.queue.status, friction.reconcile), while many bash/case scripts tolerate it.
+      - cap.sh forwards args verbatim with no protocol awareness.
+      - D63 validates metadata shape but does not enforce runtime argument contract semantics.
+      - Governance docs currently contain mixed invocation styles, which reintroduces drift.
+
+      Impact:
+      - False-negative execution attempts, avoidable friction items, and operator confusion.
+      - Same capability family can behave differently based only on implementation language.
+      - Canonical invocation contract is ambiguous.
+
+      Acceptance Criteria:
+      1. Introduce an explicit capability argument protocol contract field (e.g., arg_protocol or arg_style) with a closed enum and documented semantics.
+      2. Enforce protocol presence/validity in D63 for new or updated capabilities and fail on invalid/unknown protocol values.
+      3. Update cap.sh forwarding to handle separator semantics deterministically per declared protocol.
+      4. Provide regression proof matrix for representative capabilities (argparse + bash/case) showing expected behavior with and without separator.
+      5. Normalize governance command examples to one canonical invocation style and remove contradictory patterns.
+      6. Verify no regressions:
+         - verify.run -- fast PASS
+         - targeted capability checks PASS (including friction.queue.status and friction.reconcile invocation paths).
+    severity: high
     status: open
-    notes: "Filed via gaps.file at 2026-03-02T06:05:02Z"
+    notes: "Filed via gaps.file at 2026-03-02T06:05:02Z. Description upgraded with acceptance criteria."
     parent_loop: "LOOP-AGENT-FRICTION-BACKLOG-20260302"
