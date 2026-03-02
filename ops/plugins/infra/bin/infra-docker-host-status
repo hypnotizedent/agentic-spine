@@ -21,14 +21,19 @@ command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
 [[ -f "$HEALTH_BINDING" ]] || stop "missing binding: $HEALTH_BINDING"
 
-TARGET_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host" "$SSH_BINDING")"
-TARGET_USER="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | (.user // .ssh.defaults.user // \"root\")" "$SSH_BINDING")"
+# Resolve host via binding with LAN→Tailscale fallback
+source "${SPINE_ROOT}/ops/lib/ssh-resolve.sh"
+_LAN_HOST="$(ssh_resolve_host "$TARGET_ID")"
+_resolve_result="$(ssh_resolve_host_with_fallback "$TARGET_ID" 2)" || true
+TARGET_HOST="$(echo "$_resolve_result" | awk '{print $1}')"
+_PATH_USED="$(echo "$_resolve_result" | awk '{print $2}')"
+TARGET_USER="$(ssh_resolve_user "$TARGET_ID" "root")"
 
 [[ -n "${TARGET_HOST:-}" && "$TARGET_HOST" != "null" ]] || stop "ssh target '$TARGET_ID' missing host in $SSH_BINDING"
 [[ -n "${TARGET_USER:-}" && "$TARGET_USER" != "null" ]] || TARGET_USER="root"
 
 echo "infra.docker_host.status"
-echo "target: $TARGET_ID (${TARGET_USER}@${TARGET_HOST})"
+echo "target: $TARGET_ID (${TARGET_USER}@${TARGET_HOST}, path=${_PATH_USED})"
 echo
 
 overall_fail=0
@@ -88,6 +93,10 @@ else
   for i in $(seq 0 $((count - 1))); do
     id="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and (.enabled // true) == true)][$i].id" "$HEALTH_BINDING")"
     url="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and (.enabled // true) == true)][$i].url" "$HEALTH_BINDING")"
+    # Resolve URL host via fallback if LAN IP differs
+    if [[ -n "$_LAN_HOST" && -n "$TARGET_HOST" && "$TARGET_HOST" != "$_LAN_HOST" ]]; then
+      url="${url//$_LAN_HOST/$TARGET_HOST}"
+    fi
     expect="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and (.enabled // true) == true)][$i].expect // 200" "$HEALTH_BINDING")"
 
     code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$url" 2>/dev/null || echo "000")"

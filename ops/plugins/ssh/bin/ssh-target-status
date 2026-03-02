@@ -132,6 +132,27 @@ for i in $(seq 0 $((COUNT-1))); do
 
   checked=$((checked + 1))
 
+  # ── LAN→Tailscale fallback for lan_first targets ──────────────────────
+  access_policy="$(yq -r ".ssh.targets[$i].access_policy // \"lan_first\"" "$BINDING_FILE")"
+  tailscale_ip="$(yq -r ".ssh.targets[$i].tailscale_ip // \"\"" "$BINDING_FILE")"
+  effective_host="$host"
+  path_used="direct"
+
+  if [[ "$access_policy" == "lan_first" && -n "$tailscale_ip" && "$tailscale_ip" != "$host" ]]; then
+    # Try LAN first via quick TCP probe (faster than full SSH)
+    if ! ping -c 1 -W 2 "$host" >/dev/null 2>&1; then
+      # LAN unreachable — try Tailscale
+      if ping -c 1 -W 2 "$tailscale_ip" >/dev/null 2>&1; then
+        effective_host="$tailscale_ip"
+        path_used="tailscale"
+      else
+        path_used="unreachable"
+      fi
+    else
+      path_used="lan"
+    fi
+  fi
+
   # Build SSH options for this target
   ssh_opts=(
     -o "ConnectTimeout=${timeout}"
@@ -152,19 +173,25 @@ for i in $(seq 0 $((COUNT-1))); do
 
   # Capture both stdout and exit code
   set +e
-  out="$(ssh "${ssh_opts[@]}" -p "$port" "${user}@${host}" "$cmd" 2>&1)"
+  out="$(ssh "${ssh_opts[@]}" -p "$port" "${user}@${effective_host}" "$cmd" 2>&1)"
   ssh_exit=$?
   set -e
 
   end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   dur_ms=$((end_ms - start_ms))
 
+  # Build path_used suffix for output
+  path_suffix=""
+  if [[ "$path_used" != "direct" ]]; then
+    path_suffix=" path=${path_used}"
+  fi
+
   # Classify the result
   if echo "$out" | grep -q '^__OK__$'; then
     # Success: extract hostname from second line
     remote_name="$(echo "$out" | grep -A1 '^__OK__$' | tail -1 | tr -d '\r')"
     [[ -z "$remote_name" || "$remote_name" == "__OK__" ]] && remote_name="unknown"
-    echo "- id: $id host: $host user: $user -> OK (${dur_ms}ms) name: ${remote_name}"
+    echo "- id: $id host: $effective_host user: $user -> OK (${dur_ms}ms) name: ${remote_name}${path_suffix}"
   else
     # Failure: classify reason
     timeout_threshold_ms=$((timeout * 1000 - 500))  # within 500ms of timeout = connect issue
@@ -185,10 +212,10 @@ for i in $(seq 0 $((COUNT-1))); do
     fi
 
     if [[ "$optional" == "true" ]]; then
-      echo "- id: $id host: $host user: $user -> WARN (${dur_ms}ms) reason=${reason} optional=true"
+      echo "- id: $id host: $effective_host user: $user -> WARN (${dur_ms}ms) reason=${reason}${path_suffix} optional=true"
       optional_fail=$((optional_fail + 1))
     else
-      echo "- id: $id host: $host user: $user -> FAIL (${dur_ms}ms) reason=${reason}"
+      echo "- id: $id host: $effective_host user: $user -> FAIL (${dur_ms}ms) reason=${reason}${path_suffix}"
       fail=1
     fi
   fi

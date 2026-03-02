@@ -13,6 +13,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
 
+# Resolve host via binding with LAN→Tailscale fallback
+source "${SPINE_ROOT}/ops/lib/ssh-resolve.sh"
+_resolve_result="$(ssh_resolve_host_with_fallback "observability" 2)" || true
+_RESOLVED_IP="$(echo "$_resolve_result" | awk '{print $1}')"
+_PATH_USED="$(echo "$_resolve_result" | awk '{print $2}')"
+_LAN_IP="$(ssh_resolve_host "observability")"
+
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
@@ -25,7 +32,7 @@ DEF_MAX="$(yq -r '.defaults.max_time_sec // 10' "$BINDING")"
 COUNT="$(yq -r '.endpoints | length' "$BINDING" 2>/dev/null || echo 0)"
 
 echo "observability.stack.status"
-echo "host: observability (VM 205)"
+echo "host: observability (VM 205, ${_RESOLVED_IP}, path=${_PATH_USED})"
 echo
 
 pass=0
@@ -38,6 +45,10 @@ for i in $(seq 0 $((COUNT-1))); do
 
   id="$(yq -r ".endpoints[$i].id" "$BINDING")"
   url="$(yq -r ".endpoints[$i].url" "$BINDING")"
+  # Resolve URL host via fallback if LAN IP matches
+  if [[ -n "$_LAN_IP" && -n "$_RESOLVED_IP" && "$_RESOLVED_IP" != "$_LAN_IP" ]]; then
+    url="${url//$_LAN_IP/$_RESOLVED_IP}"
+  fi
   expect="$(yq -r ".endpoints[$i].expect // 200" "$BINDING")"
   enabled="$(yq -r ".endpoints[$i].enabled" "$BINDING")"
   [[ -z "$enabled" || "$enabled" == "null" ]] && enabled="true"

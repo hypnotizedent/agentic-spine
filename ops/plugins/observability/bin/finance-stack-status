@@ -14,7 +14,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 
-HOST_IP="192.168.1.211"
+# Resolve host via binding with LAN→Tailscale fallback
+source "${SPINE_ROOT}/ops/lib/ssh-resolve.sh"
+_resolve_result="$(ssh_resolve_host_with_fallback "finance-stack" 2)" || true
+HOST_IP="$(echo "$_resolve_result" | awk '{print $1}')"
+_PATH_USED="$(echo "$_resolve_result" | awk '{print $2}')"
+[[ -z "$HOST_IP" ]] && HOST_IP="192.168.1.211"
+
 CONNECT_TIMEOUT=5
 MAX_TIME=10
 
@@ -32,13 +38,18 @@ if [[ -x "$INFISICAL_AGENT" ]]; then
   PAPERLESS_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod PAPERLESS_API_TOKEN 2>/dev/null) || PAPERLESS_TOKEN=""
 fi
 
+# Resolve mail-archiver host (on communications-stack VM 214, not finance-stack)
+_ma_result="$(ssh_resolve_host_with_fallback "communications-stack" 2)" || true
+_MA_IP="$(echo "$_ma_result" | awk '{print $1}')"
+[[ -z "$_MA_IP" ]] && _MA_IP="192.168.1.26"
+
 # ── Service definitions ─────────────────────────────────────────────────
-# name|port|health_path|expected_code
+# name|port|health_path|expected_code|host_ip_override
 SERVICES=(
-  "firefly-iii|8080|/api/v1/about|302"
-  "paperless-ngx|8000|/api/|302"
-  "ghostfolio|3333|/|301"
-  "mail-archiver|5100|/|302"
+  "firefly-iii|8080|/api/v1/about|302|"
+  "paperless-ngx|8000|/api/|302|"
+  "ghostfolio|3333|/|301|"
+  "mail-archiver|5100|/|302|${_MA_IP}"
 )
 
 # ── Probe helper ────────────────────────────────────────────────────────
@@ -62,7 +73,7 @@ fetch_json() {
 
 # ── Main output ─────────────────────────────────────────────────────────
 echo "finance.stack.status"
-echo "host: finance-stack (VM 211, ${HOST_IP})"
+echo "host: finance-stack (VM 211, ${HOST_IP}, path=${_PATH_USED})"
 echo
 
 pass=0
@@ -70,8 +81,9 @@ fail=0
 total=${#SERVICES[@]}
 
 for entry in "${SERVICES[@]}"; do
-  IFS='|' read -r name port path expect <<< "$entry"
-  url="http://${HOST_IP}:${port}${path}"
+  IFS='|' read -r name port path expect svc_ip_override <<< "$entry"
+  svc_host="${svc_ip_override:-$HOST_IP}"
+  url="http://${svc_host}:${port}${path}"
   detail=""
 
   # Health probe
@@ -88,14 +100,14 @@ for entry in "${SERVICES[@]}"; do
         fi
       fi
       if [[ -n "$FIREFLY_TOKEN" ]]; then
-        about_json=$(fetch_json "http://${HOST_IP}:${port}/api/v1/about" "Authorization: Bearer ${FIREFLY_TOKEN}")
+        about_json=$(fetch_json "http://${svc_host}:${port}/api/v1/about" "Authorization: Bearer ${FIREFLY_TOKEN}")
         if [[ -n "$about_json" ]]; then
           version=$(echo "$about_json" | jq -r '.data.version // empty' 2>/dev/null)
           if [[ -n "$version" ]]; then
             detail="version ${version}"
           fi
         fi
-        txn_list=$(fetch_json "http://${HOST_IP}:${port}/api/v1/transactions?limit=1" "Authorization: Bearer ${FIREFLY_TOKEN}")
+        txn_list=$(fetch_json "http://${svc_host}:${port}/api/v1/transactions?limit=1" "Authorization: Bearer ${FIREFLY_TOKEN}")
         if [[ -n "$txn_list" ]]; then
           txn_total=$(echo "$txn_list" | jq -r '.meta.pagination.total // empty' 2>/dev/null)
           if [[ -n "$txn_total" ]]; then
@@ -110,7 +122,7 @@ for entry in "${SERVICES[@]}"; do
       ;;
     paperless-ngx)
       if [[ -n "$PAPERLESS_TOKEN" ]]; then
-        doc_json=$(fetch_json "http://${HOST_IP}:${port}/api/documents/?page_size=1" "Authorization: Token ${PAPERLESS_TOKEN}")
+        doc_json=$(fetch_json "http://${svc_host}:${port}/api/documents/?page_size=1" "Authorization: Token ${PAPERLESS_TOKEN}")
         if [[ -n "$doc_json" ]]; then
           doc_count=$(echo "$doc_json" | jq -r '.count // empty' 2>/dev/null)
           if [[ -n "$doc_count" ]]; then

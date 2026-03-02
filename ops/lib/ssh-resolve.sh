@@ -53,5 +53,63 @@ ssh_resolve_access_policy() {
     "$_SSH_RESOLVE_BINDING" 2>/dev/null || echo "lan_first"
 }
 
+# Resolve host with LAN→Tailscale fallback for lan_first targets.
+# Returns: "resolved_ip path_used" (space-separated)
+# path_used: lan | tailscale | direct
+ssh_resolve_host_with_fallback() {
+  local target_id="$1"
+  local timeout="${2:-3}"
+  local host ts_ip policy
+  host="$(ssh_resolve_host "$target_id")"
+  ts_ip="$(ssh_resolve_tailscale_ip "$target_id")"
+  policy="$(ssh_resolve_access_policy "$target_id")"
+
+  if [[ "$policy" != "lan_first" ]]; then
+    # tailscale_required or lan_only: use host as-is
+    printf '%s direct\n' "$host"
+    return 0
+  fi
+
+  # LAN-first: try LAN, fall back to Tailscale
+  if [[ -n "$host" ]] && ping -c 1 -W "$timeout" "$host" >/dev/null 2>&1; then
+    printf '%s lan\n' "$host"
+    return 0
+  fi
+
+  if [[ -n "$ts_ip" && "$ts_ip" != "$host" ]] && ping -c 1 -W "$timeout" "$ts_ip" >/dev/null 2>&1; then
+    printf '%s tailscale\n' "$ts_ip"
+    return 0
+  fi
+
+  # Both unreachable — return host for error reporting
+  printf '%s unreachable\n' "$host"
+  return 1
+}
+
+# Resolve an HTTP URL to use the correct host IP with fallback.
+# Takes a URL with a LAN IP and the target_id, returns URL with resolved IP + path_used.
+# Returns: "resolved_url path_used" (space-separated)
+ssh_resolve_url_with_fallback() {
+  local url="$1"
+  local target_id="$2"
+  local timeout="${3:-3}"
+  local result resolved_ip path_used
+  result="$(ssh_resolve_host_with_fallback "$target_id" "$timeout")" || true
+  resolved_ip="$(echo "$result" | awk '{print $1}')"
+  path_used="$(echo "$result" | awk '{print $2}')"
+
+  if [[ -z "$resolved_ip" || "$path_used" == "unreachable" ]]; then
+    printf '%s unreachable\n' "$url"
+    return 1
+  fi
+
+  # Replace the host portion of the URL
+  local lan_ip
+  lan_ip="$(ssh_resolve_host "$target_id")"
+  local resolved_url="${url//$lan_ip/$resolved_ip}"
+  printf '%s %s\n' "$resolved_url" "$path_used"
+  return 0
+}
+
 # Standard SSH options for non-interactive batch mode
 SSH_BATCH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
