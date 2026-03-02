@@ -18,6 +18,7 @@
 #   --loop <loop_id>        Optional loop to attach
 #   --tool <tool>           Tool to run (claude|codex|opencode|verify)
 #   --terminal <name>       Terminal name (e.g. SPINE-CONTROL-01)
+#   --role <mode>           Launch role mode (solo|control|lane-worker)
 #
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -28,6 +29,8 @@ LANE_PROFILES_YAML="$SPINE_REPO/ops/bindings/lane.profiles.yaml"
 SCOPES_DIR="$SPINE_REPO/mailroom/state/loop-scopes"
 LAUNCHER_SCRIPT="$WORKBENCH_ROOT/scripts/root/spine_terminal_entry.sh"
 LAUNCHER_VIEW_YAML="$SPINE_REPO/ops/bindings/terminal.launcher.view.yaml"
+TERMINAL_ROLE_CONTRACT="$SPINE_REPO/ops/bindings/terminal.role.contract.yaml"
+ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
 
 # ── Output helpers ─────────────────────────────────────────────────────────
 
@@ -45,6 +48,68 @@ json_escape() {
 
 warn() {
     echo "WARNING: $*" >&2
+}
+
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+resolve_terminal_label() {
+    local terminal_id="$1"
+    local label=""
+    if _view_file_exists && command -v yq >/dev/null 2>&1; then
+        label="$(yq e ".terminals.\"${terminal_id}\".label // \"\"" "$LAUNCHER_VIEW_YAML" 2>/dev/null || true)"
+    fi
+    if [[ -z "$label" || "$label" == "null" ]]; then
+        label="$terminal_id"
+    fi
+    printf '%s' "$label"
+}
+
+resolve_runtime_role_for_terminal() {
+    local terminal_id="$1"
+    local runtime_role=""
+    if [[ -f "$TERMINAL_ROLE_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+        runtime_role="$(yq e -r ".runtime_role_defaults.by_terminal_id.\"${terminal_id}\" // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)"
+        if [[ -z "$runtime_role" || "$runtime_role" == "null" ]]; then
+            local terminal_type
+            terminal_type="$(yq e -r ".roles[]? | select(.id == \"${terminal_id}\") | .type" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null | head -n1 || true)"
+            if [[ -n "$terminal_type" && "$terminal_type" != "null" ]]; then
+                runtime_role="$(yq e -r ".runtime_role_defaults.by_terminal_type.\"${terminal_type}\" // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)"
+            fi
+        fi
+    fi
+    if [[ -z "$runtime_role" || "$runtime_role" == "null" ]] && [[ -f "$ROLE_RUNTIME_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+        runtime_role="$(yq e -r '.runtime_roles.default_role // ""' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || true)"
+    fi
+    if [[ -z "$runtime_role" || "$runtime_role" == "null" ]]; then
+        runtime_role="researcher"
+    fi
+    printf '%s' "$runtime_role"
+}
+
+normalize_launch_role() {
+    local requested="$1"
+    case "$requested" in
+        solo|"")
+            printf 'solo|none'
+            ;;
+        control)
+            printf 'orchestrator|none'
+            ;;
+        lane-worker|execution-worker)
+            printf 'worker|none'
+            ;;
+        orchestrator)
+            printf 'orchestrator|legacy-orchestrator'
+            ;;
+        worker)
+            printf 'worker|legacy-worker'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 _view_file_exists() {
@@ -198,7 +263,11 @@ Launch options:
   --loop <loop_id>        Optional loop to attach (required for worker role)
   --tool <tool>           Tool to run (claude|codex|opencode|verify)
   --terminal <name>       Terminal name (e.g. SPINE-CONTROL-01)
-  --role <role>           Role (solo|orchestrator|worker) - auto-derived if not set
+  --role <mode>           Launch role mode (solo|control|lane-worker)
+
+Compatibility aliases:
+  orchestrator -> control
+  worker       -> lane-worker
 
 Examples:
   ops terminal-launch launch --lane control --tool codex --terminal SPINE-CONTROL-01
@@ -376,6 +445,8 @@ cmd_launch() {
     local tool=""
     local terminal_name=""
     local role="solo"
+    local role_input=""
+    local role_alias_warning="none"
     local lane_explicit=0
     local tool_explicit=0
     local terminal_explicit=0
@@ -387,7 +458,7 @@ cmd_launch() {
             --loop) loop_id="${2:-}"; shift 2 ;;
             --tool) tool="${2:-}"; tool_explicit=1; shift 2 ;;
             --terminal) terminal_name="${2:-}"; terminal_explicit=1; shift 2 ;;
-            --role) role="${2:-}"; shift 2 ;;
+            --role) role_input="${2:-}"; shift 2 ;;
             -h|--help) usage; exit 0 ;;
             *) echo "Unknown option: $1" >&2; exit 1 ;;
         esac
@@ -429,9 +500,20 @@ cmd_launch() {
         *) echo "ERROR: invalid tool: $tool" >&2; exit 1 ;;
     esac
     
-    # Derive role from lane + loop
+    # Derive launch role from lane + loop
     if [[ -n "$loop_id" ]]; then
         role="orchestrator"
+    fi
+
+    # Explicit role override (canonical launch modes + legacy compatibility aliases)
+    if [[ -n "$role_input" ]]; then
+        local normalized
+        if ! normalized="$(normalize_launch_role "$role_input")"; then
+            echo "ERROR: invalid --role '$role_input' (expected solo|control|lane-worker)" >&2
+            exit 1
+        fi
+        role="${normalized%%|*}"
+        role_alias_warning="${normalized#*|}"
     fi
     
     # Derive terminal name if not provided
@@ -444,7 +526,18 @@ cmd_launch() {
             *)         terminal_name="SPINE-${lane^^}-01" ;;
         esac
     fi
-    
+
+    local terminal_label runtime_role terminal_title
+    terminal_label="$(resolve_terminal_label "$terminal_name")"
+    runtime_role="$(resolve_runtime_role_for_terminal "$terminal_name")"
+    terminal_title="${terminal_label} [${runtime_role}]"
+
+    if [[ "$role_alias_warning" == "legacy-orchestrator" ]]; then
+        warn "legacy launch alias '--role orchestrator' used; canonical launch mode is '--role control'"
+    elif [[ "$role_alias_warning" == "legacy-worker" ]]; then
+        warn "legacy launch alias '--role worker' used; canonical launch mode is '--role lane-worker'"
+    fi
+
     # Check launcher script exists
     if [[ ! -x "$LAUNCHER_SCRIPT" ]]; then
         echo "ERROR: Launcher script not found: $LAUNCHER_SCRIPT" >&2
@@ -465,10 +558,20 @@ cmd_launch() {
     fi
     
     # Launch via iTerm AppleScript
-    local full_cmd="SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 $LAUNCHER_SCRIPT ${cmd_args[*]}"
+    local full_cmd
+    full_cmd="$(
+        printf 'SPINE_HOTKEY_ORCH_MODE=capability SPINE_HOTKEY_ALLOW_FALLBACK=0 SPINE_TERMINAL_NAME=%s OPS_TERMINAL_ROLE=%s SPINE_TERMINAL_LABEL=%s SPINE_RUNTIME_ROLE=%s SPINE_TERMINAL_TITLE=%s %s %s' \
+            "$(shell_quote "$terminal_name")" \
+            "$(shell_quote "$terminal_name")" \
+            "$(shell_quote "$terminal_label")" \
+            "$(shell_quote "$runtime_role")" \
+            "$(shell_quote "$terminal_title")" \
+            "$(shell_quote "$LAUNCHER_SCRIPT")" \
+            "${cmd_args[*]}"
+    )"
 
     if [[ "${TERMINAL_LAUNCH_DRY_RUN:-0}" == "1" ]]; then
-        echo "DRY_RUN: lane=$lane tool=$tool terminal=$terminal_name loop=${loop_id:-none} role=$role"
+        echo "DRY_RUN: lane=$lane tool=$tool terminal=$terminal_name label=$terminal_label runtime_role=$runtime_role loop=${loop_id:-none} role=$role"
         return
     fi
 
@@ -480,7 +583,7 @@ cmd_launch() {
         end tell
     end tell" 2>/dev/null
 
-    echo "Launched: lane=$lane tool=$tool terminal=$terminal_name loop=${loop_id:-none}"
+    echo "Launched: lane=$lane tool=$tool terminal=$terminal_name label=$terminal_label title=${terminal_title} loop=${loop_id:-none}"
 }
 
 cmd_launch_direct() {

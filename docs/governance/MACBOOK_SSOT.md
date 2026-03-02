@@ -170,6 +170,15 @@ Soft-decommissioned history (not active SSH expectations): `download-home`.
 | **Ctrl+Shift+P** | Worker picker v2.1 (group filter, role select, loop-attach) | `~/.hammerspoon/` |
 <!-- END AUTO HOTKEYS -->
 
+#### Launch Role Vocabulary (Canonical)
+
+- Canonical launch modes: `solo`, `control`, `lane-worker`.
+- Compatibility aliases still accepted for launcher entry:
+  - `orchestrator` -> `control`
+  - `worker` -> `lane-worker`
+- Runtime role naming is separate and authoritative in [`ops/bindings/role.runtime.control.contract.yaml`](/Users/ronnyworks/code/agentic-spine-seam-closure/ops/bindings/role.runtime.control.contract.yaml): `researcher|worker|qc|close|librarian`.
+- Terminal title contract at session entry: `{label} [{runtime_role}]` (label sourced from [`ops/bindings/terminal.launcher.view.yaml`](/Users/ronnyworks/code/agentic-spine-seam-closure/ops/bindings/terminal.launcher.view.yaml)).
+
 #### Raycast
 
 <!-- BEGIN AUTO RAYCAST -->

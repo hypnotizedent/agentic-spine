@@ -26,6 +26,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 # Resolve operator timezone from tenant profile SSOT (scheduling/display only; timestamps stay UTC)
 SPINE_OPERATOR_TZ="$(yq -r '.runtime.timezone // "America/New_York"' "$ROOT/ops/bindings/tenant.profile.yaml" 2>/dev/null || echo "America/New_York")"
 export SPINE_OPERATOR_TZ
+TERMINAL_LAUNCHER_VIEW="$ROOT/ops/bindings/terminal.launcher.view.yaml"
+TERMINAL_ROLE_CONTRACT="$ROOT/ops/bindings/terminal.role.contract.yaml"
+ROLE_RUNTIME_CONTRACT="$ROOT/ops/bindings/role.runtime.control.contract.yaml"
 SESSIONS_DIR="$ROOT/mailroom/state/sessions"
 LOCK_FILE="$ROOT/mailroom/state/apply-owner.lock"
 ARCHIVE_DIR="$SESSIONS_DIR/.archive"
@@ -70,6 +73,61 @@ PY
   local clean_ts="${ts%%Z*}"
   clean_ts="${clean_ts%%+*}"
   date -j -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" "+%s" 2>/dev/null || echo 0
+}
+
+resolve_terminal_context() {
+  local terminal_id label runtime_role role_type
+  terminal_id="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
+  label="${SPINE_TERMINAL_LABEL:-}"
+  runtime_role="${SPINE_RUNTIME_ROLE:-}"
+
+  if [[ -n "$terminal_id" && -z "$label" && -f "$TERMINAL_LAUNCHER_VIEW" ]] && command -v yq >/dev/null 2>&1; then
+    label="$(yq e -r ".terminals.\"${terminal_id}\".label // \"\"" "$TERMINAL_LAUNCHER_VIEW" 2>/dev/null || true)"
+  fi
+  if [[ -z "$label" ]]; then
+    label="$terminal_id"
+  fi
+  if [[ -z "$label" ]]; then
+    label="Spine Session"
+  fi
+
+  if [[ -z "$runtime_role" && -n "$terminal_id" && -f "$TERMINAL_ROLE_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+    runtime_role="$(yq e -r ".runtime_role_defaults.by_terminal_id.\"${terminal_id}\" // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)"
+    if [[ -z "$runtime_role" || "$runtime_role" == "null" ]]; then
+      role_type="$(yq e -r ".roles[]? | select(.id == \"${terminal_id}\") | .type" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null | head -n1 || true)"
+      if [[ -n "$role_type" && "$role_type" != "null" ]]; then
+        runtime_role="$(yq e -r ".runtime_role_defaults.by_terminal_type.\"${role_type}\" // \"\"" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)"
+      fi
+    fi
+  fi
+  if [[ -z "$runtime_role" || "$runtime_role" == "null" ]] && [[ -f "$ROLE_RUNTIME_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+    runtime_role="$(yq e -r '.runtime_roles.default_role // ""' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || true)"
+  fi
+  if [[ -z "$runtime_role" || "$runtime_role" == "null" ]]; then
+    runtime_role="researcher"
+  fi
+
+  printf '%s|%s|%s' "$terminal_id" "$label" "$runtime_role"
+}
+
+emit_terminal_title_contract() {
+  local ctx terminal_id label runtime_role terminal_title
+  ctx="$(resolve_terminal_context)"
+  terminal_id="${ctx%%|*}"
+  ctx="${ctx#*|}"
+  label="${ctx%%|*}"
+  runtime_role="${ctx#*|}"
+  terminal_title="${label} [${runtime_role}]"
+
+  export SPINE_TERMINAL_NAME="${SPINE_TERMINAL_NAME:-$terminal_id}"
+  export OPS_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-$terminal_id}"
+  export SPINE_TERMINAL_LABEL="${SPINE_TERMINAL_LABEL:-$label}"
+  export SPINE_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-$runtime_role}"
+  export SPINE_TERMINAL_TITLE="$terminal_title"
+
+  # OSC title sequence; safe no-op on terminals that do not support title updates.
+  printf '\033]0;%s\007' "$terminal_title" >&2 || true
+  echo "terminal_title: $terminal_title"
 }
 
 usage() {
@@ -407,6 +465,10 @@ if [[ -d "$ARCHIVE_DIR" ]]; then
   echo "  Sessions: $ACTIVE_COUNT active, $ARCHIVED_COUNT archived"
 fi
 
+# Terminal UX contract: stable label + runtime role title without manual prompt hacks.
+echo ""
+emit_terminal_title_contract
+
 # Bootstrap (P2) — capture all outputs
 BOOTSTRAP_LOG="$SESSION_DIR/bootstrap.log"
 {
@@ -459,6 +521,11 @@ export SPINE_SESSION_DIR="$SESSION_DIR"
 export SPINE_ACTIVE_SESSION_COUNT=$ACTIVE_COUNT
 export SPINE_MULTI_AGENT=$MULTI_AGENT
 export SPINE_OPERATOR_TZ="$SPINE_OPERATOR_TZ"
+export SPINE_TERMINAL_NAME="${SPINE_TERMINAL_NAME:-}"
+export OPS_TERMINAL_ROLE="${OPS_TERMINAL_ROLE:-}"
+export SPINE_TERMINAL_LABEL="${SPINE_TERMINAL_LABEL:-}"
+export SPINE_RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-}"
+export SPINE_TERMINAL_TITLE="${SPINE_TERMINAL_TITLE:-}"
 SH
 
 echo ""
