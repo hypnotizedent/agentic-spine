@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# cloudflare.registrar.status — read-only registrar transfer status for all domains
-# Shows: registrar, status, auto_renew, expires_at, locked per domain
-# Requires: CLOUDFLARE_API_TOKEN via secrets injection
+# cloudflare.registrar.status — read-only registrar status by domain
+# Shows registrar/transfer/renewal-related status where available.
 
 ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
 CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
 
 if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
   export SPINE_SECRETS_INJECTED=1
@@ -17,141 +17,233 @@ fi
 source "$CF_LIB"
 
 CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
-INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
-ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-}"
-
 cf_require_auth || exit $?
 
-# Parse args
-while [[ $# -gt 0 ]]; do
+usage() {
+  cat <<'USAGE'
+Usage: cloudflare-registrar-status [--json]
+USAGE
+  exit 0
+}
+
+JSON_OUT=0
+while (( $# > 0 )); do
   case "$1" in
     --json) JSON_OUT=1; shift ;;
+    -h|--help) usage ;;
     --) shift ;;
-    *) shift ;;
+    *) echo "STOP: unknown argument: $1" >&2; exit 1 ;;
   esac
 done
 
-# Read zones from inventory binding
-if [[ ! -f "$INVENTORY" ]]; then
-  echo "STOP: cloudflare.inventory.yaml not found at $INVENTORY" >&2
-  exit 2
-fi
+[[ -f "$INVENTORY" ]] || { echo "STOP: inventory file missing: $INVENTORY" >&2; exit 2; }
+command -v yq >/dev/null 2>&1 || { echo "STOP: missing dependency: yq" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "STOP: missing dependency: python3" >&2; exit 2; }
 
-python3 - "$CF_API" "$INVENTORY" "${JSON_OUT:-0}" "${CF_AUTH_MODE_PREFERRED:-unknown}" <<'PYEOF'
-import json, sys, os, urllib.request, urllib.error
+ACCOUNT_ID="$(cf_account_id_resolve "$INVENTORY" || true)"
+[[ -n "$ACCOUNT_ID" ]] || { echo "STOP: missing CLOUDFLARE_ACCOUNT_ID and inventory account_id" >&2; exit 2; }
 
-api = sys.argv[1]
-inventory = sys.argv[2]
-json_out = sys.argv[3] == "1"
-preferred_mode = sys.argv[4]
-token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
-auth_email = os.environ.get("CLOUDFLARE_AUTH_EMAIL", "")
-global_key = os.environ.get("CLOUDFLARE_GLOBAL_API_KEY", "")
-account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+mapfile -t DOMAINS < <(yq -r '.zones[].name // ""' "$INVENTORY" | sed '/^$/d')
+[[ "${#DOMAINS[@]}" -gt 0 ]] || { echo "STOP: no zones found in inventory" >&2; exit 2; }
 
-with open(inventory) as f:
-    inv = json.load(f)
+extract_error_message() {
+  local body="${1:-}"
+  printf '%s' "$body" | python3 - <<'PY'
+import json
+import sys
 
-zones = inv.get("zones", [])
-if not account_id:
-    account_id = inv.get("account_id", "")
+raw = sys.stdin.read().strip()
+if not raw:
+    print("no_response_body")
+    raise SystemExit(0)
 
-def headers_for(mode):
-    base = {"Content-Type": "application/json"}
-    if mode == "token":
-        base["Authorization"] = f"Bearer {token}"
-    else:
-        base["X-Auth-Email"] = auth_email
-        base["X-Auth-Key"] = global_key
-    return base
+try:
+    data = json.loads(raw)
+except Exception:
+    print(raw.replace("\n", " ")[:240])
+    raise SystemExit(0)
 
-def get(url):
-    global preferred_mode
-    modes = []
-    if preferred_mode == "token" and token:
-        modes.append("token")
-        if auth_email and global_key:
-            modes.append("global")
-    elif preferred_mode == "global" and auth_email and global_key:
-        modes.append("global")
-        if token:
-            modes.append("token")
-    else:
-        if token:
-            modes.append("token")
-        if auth_email and global_key:
-            modes.append("global")
-    if not modes:
-        raise RuntimeError("missing Cloudflare auth")
+errs = data.get("errors") if isinstance(data, dict) else None
+if isinstance(errs, list) and errs:
+    parts = []
+    for e in errs:
+        if isinstance(e, dict):
+            code = str(e.get("code", "")).strip()
+            msg = str(e.get("message", "")).strip()
+            if code and msg:
+                parts.append(f"{code}:{msg}")
+            elif msg:
+                parts.append(msg)
+        elif e:
+            parts.append(str(e))
+    if parts:
+        print("; ".join(parts)[:240])
+        raise SystemExit(0)
 
-    last_exc = None
-    for idx, mode in enumerate(modes):
-        req = urllib.request.Request(url, headers=headers_for(mode))
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                preferred_mode = mode
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            last_exc = exc
-            if exc.code in (401, 403) and idx + 1 < len(modes):
-                continue
-            raise
-        except Exception as exc:
-            last_exc = exc
-            if idx + 1 < len(modes):
-                continue
-            raise
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("Cloudflare request failed")
+print(str(data)[:240])
+PY
+}
 
-results = []
-for z in zones:
-    name = z["name"]
-    try:
-        # Registrar API: GET /accounts/{account_id}/registrar/domains/{domain}
-        url = f"{api}/accounts/{account_id}/registrar/domains/{name}"
-        data = get(url)
-        if not data.get("success", False):
-            results.append({"domain": name, "status": "API_ERROR", "detail": str(data.get("errors", []))})
-            continue
-        r = data.get("result", {})
-        results.append({
-            "domain": name,
-            "registrar": r.get("current_registrar", "unknown"),
-            "status": r.get("registry_statuses", r.get("status", "unknown")),
-            "auto_renew": r.get("auto_renew", None),
-            "expires_at": r.get("expires_at", "unknown"),
-            "locked": r.get("locked", None),
-            "transfer_in": r.get("transfer_in", {}).get("status", None),
-        })
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            results.append({"domain": name, "status": "not_at_cf_registrar"})
-        else:
-            results.append({"domain": name, "status": f"HTTP_{e.code}"})
-    except Exception as e:
-        results.append({"domain": name, "status": f"ERROR: {e}"})
+TMP_ROWS="$(mktemp)"
+trap 'rm -f "$TMP_ROWS" 2>/dev/null || true' EXIT
 
-if json_out:
-    print(json.dumps(results, indent=2))
+for domain in "${DOMAINS[@]}"; do
+  url="${CF_API}/accounts/${ACCOUNT_ID}/registrar/domains/${domain}"
+  if response="$(cf_api_get "$url" 2>/dev/null)"; then
+    row_json="$(printf '%s\n' "$response" | python3 - "$domain" <<'PY'
+import json
+import sys
+
+domain = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception as exc:
+    print(json.dumps({
+        "domain": domain,
+        "status": "parse_error",
+        "detail": f"invalid_json:{exc}",
+    }))
+    raise SystemExit(0)
+
+if not isinstance(data, dict) or not data.get("success", False):
+    errors = data.get("errors") if isinstance(data, dict) else []
+    msg_parts = []
+    if isinstance(errors, list):
+        for e in errors:
+            if isinstance(e, dict):
+                code = str(e.get("code", "")).strip()
+                msg = str(e.get("message", "")).strip()
+                if code and msg:
+                    msg_parts.append(f"{code}:{msg}")
+                elif msg:
+                    msg_parts.append(msg)
+            elif e:
+                msg_parts.append(str(e))
+    detail = "; ".join(msg_parts) if msg_parts else "api_success_false"
+    print(json.dumps({
+        "domain": domain,
+        "status": "api_error",
+        "detail": detail,
+    }))
+    raise SystemExit(0)
+
+result = data.get("result") if isinstance(data.get("result"), dict) else {}
+registry_statuses = result.get("registry_statuses")
+if isinstance(registry_statuses, list):
+    status = ",".join(str(x) for x in registry_statuses if str(x).strip()) or "active"
+elif registry_statuses:
+    status = str(registry_statuses)
 else:
-    print("cloudflare.registrar.status")
-    print(f"auth_mode: {preferred_mode}")
-    print(f"domains: {len(results)}")
-    print()
-    fmt = "{:<30s} {:<25s} {:<12s} {:<12s} {:<12s}"
-    print(fmt.format("DOMAIN", "STATUS", "AUTO_RENEW", "LOCKED", "EXPIRES"))
-    print("-" * 91)
-    for r in results:
-        status = str(r.get("status", "unknown"))
-        if isinstance(status, list):
-            status = ",".join(status) if status else "active"
-        auto = str(r.get("auto_renew", "-"))
-        locked = str(r.get("locked", "-"))
-        expires = str(r.get("expires_at", "-"))[:10]
-        transfer = r.get("transfer_in")
-        if transfer:
-            status = f"{status} (transfer:{transfer})"
-        print(fmt.format(r["domain"], status[:25], auto[:12], locked[:12], expires[:12]))
-PYEOF
+    status = str(result.get("status", "unknown"))
+
+transfer_in = result.get("transfer_in") if isinstance(result.get("transfer_in"), dict) else {}
+print(json.dumps({
+    "domain": domain,
+    "status": status,
+    "registrar": result.get("current_registrar", "unknown"),
+    "auto_renew": result.get("auto_renew", None),
+    "locked": result.get("locked", None),
+    "expires_at": result.get("expires_at", ""),
+    "transfer_in": transfer_in.get("status", ""),
+}))
+PY
+)"
+    printf '%s\n' "$row_json" >> "$TMP_ROWS"
+    continue
+  fi
+
+  http_status="${CF_LAST_HTTP_STATUS:-000}"
+  body="${CF_LAST_BODY:-}"
+  case "$http_status" in
+    404)
+      printf '{"domain":"%s","status":"not_at_cf_registrar"}\n' "$domain" >> "$TMP_ROWS"
+      ;;
+    401|403)
+      detail="$(extract_error_message "$body")"
+      if [[ "$JSON_OUT" -eq 1 ]]; then
+        python3 - "$domain" "$http_status" "$detail" <<'PY'
+import json
+import sys
+print(json.dumps({
+    "capability": "cloudflare.registrar.status",
+    "status": "error",
+    "error_class": "auth_scope",
+    "http_status": int(sys.argv[2]),
+    "domain": sys.argv[1],
+    "detail": sys.argv[3],
+}, indent=2))
+PY
+      else
+        echo "cloudflare.registrar.status"
+        echo "status: error"
+        echo "error_class: auth_scope"
+        echo "http_status: $http_status"
+        echo "domain: $domain"
+        echo "detail: $detail"
+        echo "auth_mode: ${CF_LAST_MODE:-unknown}"
+      fi
+      exit 21
+      ;;
+    *)
+      detail="$(extract_error_message "$body")"
+      printf '{"domain":"%s","status":"http_%s","detail":%s}\n' \
+        "$domain" "$http_status" "$(python3 - <<'PY' "$detail"
+import json, sys
+print(json.dumps(sys.argv[1]))
+PY
+)" >> "$TMP_ROWS"
+      ;;
+  esac
+done
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  python3 - "$TMP_ROWS" "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" <<'PY'
+import json
+import sys
+
+rows = []
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        rows.append(json.loads(line))
+
+print(json.dumps({
+    "capability": "cloudflare.registrar.status",
+    "status": "ok",
+    "auth_mode": sys.argv[2],
+    "domains": rows,
+}, indent=2))
+PY
+else
+  python3 - "$TMP_ROWS" "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" <<'PY'
+import json
+import sys
+
+rows = []
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        rows.append(json.loads(line))
+
+print("cloudflare.registrar.status")
+print(f"auth_mode: {sys.argv[2]}")
+print(f"domains: {len(rows)}")
+print()
+print(f"{'DOMAIN':<30} {'STATUS':<26} {'AUTO_RENEW':<11} {'LOCKED':<8} {'EXPIRES':<10}")
+print("-" * 95)
+for r in rows:
+    domain = str(r.get("domain", ""))
+    status = str(r.get("status", "unknown"))
+    transfer = str(r.get("transfer_in", "")).strip()
+    if transfer:
+        status = f"{status} (transfer:{transfer})"
+    auto = str(r.get("auto_renew", "-"))
+    locked = str(r.get("locked", "-"))
+    expires = str(r.get("expires_at", ""))[:10] or "-"
+    print(f"{domain:<30} {status[:26]:<26} {auto[:11]:<11} {locked[:8]:<8} {expires:<10}")
+PY
+fi

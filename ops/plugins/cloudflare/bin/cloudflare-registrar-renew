@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.registrar.renew — governed registrar renewal request wrapper
+# Endpoint: POST /accounts/{account_id}/registrar/domains/{domain}/renew
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+
+usage() {
+  cat <<'USAGE'
+Usage: cloudflare-registrar-renew --domain DOMAIN [OPTIONS]
+
+Required:
+  --domain DOMAIN             Domain to renew
+
+Optional:
+  --years N                   Renewal years (default: 1)
+  --dry-run                   Validate and preview request payload without mutation
+  --json                      Emit structured JSON output
+USAGE
+  exit 0
+}
+
+DOMAIN=""
+YEARS="1"
+DRY_RUN=0
+JSON_OUT=0
+
+while (( $# > 0 )); do
+  case "$1" in
+    --domain) DOMAIN="${2:-}"; shift 2 ;;
+    --years) YEARS="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON_OUT=1; shift ;;
+    -h|--help) usage ;;
+    --) shift ;;
+    *) echo "STOP: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+emit_error() {
+  local cls="$1"
+  local message="$2"
+  local http_status="${3:-0}"
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 - "$DOMAIN" "$cls" "$message" "$http_status" "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" <<'PY'
+import json
+import sys
+print(json.dumps({
+    "capability": "cloudflare.registrar.renew",
+    "status": "error",
+    "operation": "renew",
+    "domain": sys.argv[1],
+    "error_class": sys.argv[2],
+    "error_message": sys.argv[3],
+    "http_status": int(sys.argv[4]),
+    "auth_mode": sys.argv[5],
+}, indent=2))
+PY
+  else
+    echo "cloudflare.registrar.renew"
+    echo "status: error"
+    echo "operation: renew"
+    echo "domain: $DOMAIN"
+    echo "error_class: $cls"
+    echo "error_message: $message"
+    echo "http_status: $http_status"
+    echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
+  fi
+}
+
+error_exit_code() {
+  case "$1" in
+    auth_scope) echo 21 ;;
+    unsupported_tld) echo 22 ;;
+    api) echo 23 ;;
+    *) echo 1 ;;
+  esac
+}
+
+extract_error_message() {
+  local body="${1:-}"
+  printf '%s' "$body" | python3 - <<'PY'
+import json
+import sys
+
+raw = sys.stdin.read().strip()
+if not raw:
+    print("no_response_body")
+    raise SystemExit(0)
+
+try:
+    data = json.loads(raw)
+except Exception:
+    print(raw.replace("\n", " ")[:300])
+    raise SystemExit(0)
+
+errs = data.get("errors") if isinstance(data, dict) else None
+if isinstance(errs, list) and errs:
+    parts = []
+    for e in errs:
+        if isinstance(e, dict):
+            code = str(e.get("code", "")).strip()
+            msg = str(e.get("message", "")).strip()
+            if code and msg:
+                parts.append(f"{code}:{msg}")
+            elif msg:
+                parts.append(msg)
+        elif e:
+            parts.append(str(e))
+    if parts:
+        print("; ".join(parts)[:300])
+        raise SystemExit(0)
+
+print(str(data)[:300])
+PY
+}
+
+classify_error() {
+  local http_status="$1"
+  local msg_lc="$2"
+  if [[ "$http_status" == "401" || "$http_status" == "403" ]]; then
+    echo "auth_scope"
+    return
+  fi
+  if [[ "$msg_lc" == *"permission"* || "$msg_lc" == *"unauthorized"* || "$msg_lc" == *"forbidden"* ]]; then
+    echo "auth_scope"
+    return
+  fi
+  if [[ "$msg_lc" == *"unsupported"* && "$msg_lc" == *"tld"* ]] || \
+     [[ "$msg_lc" == *"not support"* && "$msg_lc" == *"tld"* ]] || \
+     [[ "$msg_lc" == *"domain extension"* && "$msg_lc" == *"unsupported"* ]]; then
+    echo "unsupported_tld"
+    return
+  fi
+  echo "api"
+}
+
+[[ -n "$DOMAIN" ]] || { emit_error "api" "missing_required_argument: --domain" 0; exit 1; }
+[[ "$DOMAIN" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$ ]] || {
+  emit_error "api" "invalid_domain_format" 0
+  exit 1
+}
+[[ "$YEARS" =~ ^[0-9]+$ ]] || { emit_error "api" "invalid_years_must_be_integer" 0; exit 1; }
+(( YEARS >= 1 && YEARS <= 10 )) || { emit_error "api" "invalid_years_range_1_to_10" 0; exit 1; }
+
+ACCOUNT_ID="$(cf_account_id_resolve "$INVENTORY" || true)"
+[[ -n "$ACCOUNT_ID" ]] || { emit_error "api" "missing_cloudflare_account_id" 0; exit 1; }
+
+payload="$(python3 - "$YEARS" <<'PY'
+import json
+import sys
+print(json.dumps({"years": int(sys.argv[1])}, separators=(",", ":")))
+PY
+)"
+
+url="${CF_API}/accounts/${ACCOUNT_ID}/registrar/domains/${DOMAIN}/renew"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 - "$DOMAIN" "$ACCOUNT_ID" "$YEARS" "$url" <<'PY'
+import json
+import sys
+print(json.dumps({
+    "capability": "cloudflare.registrar.renew",
+    "status": "dry_run",
+    "operation": "renew",
+    "domain": sys.argv[1],
+    "account_id": sys.argv[2],
+    "endpoint": sys.argv[4],
+    "payload_preview": {
+        "years": int(sys.argv[3]),
+    },
+}, indent=2))
+PY
+  else
+    echo "cloudflare.registrar.renew (dry-run)"
+    echo "status: dry_run"
+    echo "operation: renew"
+    echo "domain: $DOMAIN"
+    echo "account_id: $ACCOUNT_ID"
+    echo "years: $YEARS"
+    echo "endpoint: $url"
+  fi
+  exit 0
+fi
+
+if ! response="$(cf_api_post "$url" "$payload" 2>/dev/null)"; then
+  http_status="${CF_LAST_HTTP_STATUS:-000}"
+  message="$(extract_error_message "${CF_LAST_BODY:-}")"
+  class="$(classify_error "$http_status" "$(echo "$message" | tr '[:upper:]' '[:lower:]')")"
+  emit_error "$class" "$message" "$http_status"
+  exit "$(error_exit_code "$class")"
+fi
+
+if ! printf '%s\n' "$response" | python3 - "$DOMAIN" "$ACCOUNT_ID" "$YEARS" "$JSON_OUT" "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" <<'PY'
+import json
+import sys
+
+domain = sys.argv[1]
+account_id = sys.argv[2]
+years = int(sys.argv[3])
+json_out = sys.argv[4] == "1"
+auth_mode = sys.argv[5]
+
+try:
+    data = json.load(sys.stdin)
+except Exception as exc:
+    msg = f"invalid_json_response:{exc}"
+    if json_out:
+        print(json.dumps({
+            "capability": "cloudflare.registrar.renew",
+            "status": "error",
+            "operation": "renew",
+            "domain": domain,
+            "error_class": "api",
+            "error_message": msg,
+            "http_status": 200,
+            "auth_mode": auth_mode,
+        }, indent=2))
+    else:
+        print("cloudflare.registrar.renew")
+        print("status: error")
+        print("operation: renew")
+        print(f"domain: {domain}")
+        print("error_class: api")
+        print(f"error_message: {msg}")
+        print("http_status: 200")
+        print(f"auth_mode: {auth_mode}")
+    raise SystemExit(23)
+
+if not isinstance(data, dict) or not data.get("success", False):
+    errs = data.get("errors") if isinstance(data, dict) else []
+    parts = []
+    for e in errs if isinstance(errs, list) else []:
+        if isinstance(e, dict):
+            code = str(e.get("code", "")).strip()
+            msg = str(e.get("message", "")).strip()
+            if code and msg:
+                parts.append(f"{code}:{msg}")
+            elif msg:
+                parts.append(msg)
+        elif e:
+            parts.append(str(e))
+    message = "; ".join(parts) if parts else "api_success_false"
+    msg_lc = message.lower()
+    if any(x in msg_lc for x in ["permission", "unauthorized", "forbidden"]):
+        err_class = "auth_scope"
+        exit_code = 21
+    elif ("unsupported" in msg_lc and "tld" in msg_lc) or ("not support" in msg_lc and "tld" in msg_lc):
+        err_class = "unsupported_tld"
+        exit_code = 22
+    else:
+        err_class = "api"
+        exit_code = 23
+
+    if json_out:
+        print(json.dumps({
+            "capability": "cloudflare.registrar.renew",
+            "status": "error",
+            "operation": "renew",
+            "domain": domain,
+            "error_class": err_class,
+            "error_message": message,
+            "http_status": 200,
+            "auth_mode": auth_mode,
+        }, indent=2))
+    else:
+        print("cloudflare.registrar.renew")
+        print("status: error")
+        print("operation: renew")
+        print(f"domain: {domain}")
+        print(f"error_class: {err_class}")
+        print(f"error_message: {message}")
+        print("http_status: 200")
+        print(f"auth_mode: {auth_mode}")
+    raise SystemExit(exit_code)
+
+result = data.get("result") if isinstance(data.get("result"), dict) else data.get("result")
+if json_out:
+    print(json.dumps({
+        "capability": "cloudflare.registrar.renew",
+        "status": "ok",
+        "operation": "renew",
+        "domain": domain,
+        "account_id": account_id,
+        "years": years,
+        "auth_mode": auth_mode,
+        "result": result,
+    }, indent=2))
+else:
+    print("cloudflare.registrar.renew")
+    print("status: OK")
+    print("operation: renew")
+    print(f"domain: {domain}")
+    print(f"account_id: {account_id}")
+    print(f"years: {years}")
+    print(f"auth_mode: {auth_mode}")
+    print(f"result: {json.dumps(result, separators=(',', ':'))}")
+PY
+then
+  exit $?
+fi

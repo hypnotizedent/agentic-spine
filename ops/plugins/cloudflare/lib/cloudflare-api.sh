@@ -221,3 +221,23 @@ cf_zone_id_resolve() {
   fi
   printf '%s\n' "$resolved"
 }
+
+cf_account_id_resolve() {
+  local binding_file="${1:-}"
+  if [[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+    printf '%s\n' "${CLOUDFLARE_ACCOUNT_ID}"
+    return 0
+  fi
+
+  if [[ -n "$binding_file" && -f "$binding_file" ]]; then
+    command -v yq >/dev/null 2>&1 || return 1
+    local resolved
+    resolved="$(yq -r '.account_id // ""' "$binding_file" 2>/dev/null || true)"
+    if [[ -n "$resolved" && "$resolved" != "null" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+
+  return 1
+}
