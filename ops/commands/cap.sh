@@ -181,17 +181,77 @@ run_cap() {
     local role_policy_override_used="false"
     local role_policy_override_ref="${SPINE_ROLE_POLICY_OVERRIDE_REF:-}"
     local role_policy_override_reason="${SPINE_ROLE_POLICY_OVERRIDE_REASON:-}"
+    local role_override_cache_filename="role-override.env"
+    local role_override_cache_ttl_seconds="14400"
+    local role_override_cache_session_env="SPINE_SESSION_ID"
+    local role_override_cache_terminal_env="OPS_TERMINAL_ROLE"
+    local role_override_require_session_binding="true"
+    local role_override_require_terminal_binding="true"
+    if command -v yq >/dev/null 2>&1 && [[ -f "$role_runtime_contract" ]]; then
+      role_override_cache_filename="$(yq e -r '.runtime_roles.session_role_override_cache.cache_filename // "role-override.env"' "$role_runtime_contract" 2>/dev/null || echo "$role_override_cache_filename")"
+      role_override_cache_ttl_seconds="$(yq e -r '.runtime_roles.session_role_override_cache.ttl_seconds // 14400' "$role_runtime_contract" 2>/dev/null || echo "$role_override_cache_ttl_seconds")"
+      role_override_cache_session_env="$(yq e -r '.runtime_roles.session_role_override_cache.session_env_var // "SPINE_SESSION_ID"' "$role_runtime_contract" 2>/dev/null || echo "$role_override_cache_session_env")"
+      role_override_cache_terminal_env="$(yq e -r '.runtime_roles.session_role_override_cache.terminal_role_env_var // "OPS_TERMINAL_ROLE"' "$role_runtime_contract" 2>/dev/null || echo "$role_override_cache_terminal_env")"
+      role_override_require_session_binding="$(yq e -r '.runtime_roles.session_role_override_cache.require_session_binding // true' "$role_runtime_contract" 2>/dev/null || echo "$role_override_require_session_binding")"
+      role_override_require_terminal_binding="$(yq e -r '.runtime_roles.session_role_override_cache.require_terminal_role_binding // true' "$role_runtime_contract" 2>/dev/null || echo "$role_override_require_terminal_binding")"
+    fi
+    [[ "$role_override_cache_ttl_seconds" =~ ^[0-9]+$ ]] || role_override_cache_ttl_seconds="14400"
+    local _role_override_cache="$STATE_DIR/$role_override_cache_filename"
+
     # Session-scoped override cache: fallback when env vars are not set.
-    # Written by `session.role.override` capability; cleared by --clear or session end.
-    local _role_override_cache="$STATE_DIR/role-override.env"
+    # Cache entries are TTL-bound and session/terminal-bound by contract.
     if [[ -z "$role_policy_override_ref" && -f "$_role_override_cache" ]]; then
-      local _cached_ref _cached_reason _cached_at
+      local _cached_ref _cached_reason _cached_created_epoch _cached_expires_epoch _cached_session_id _cached_terminal_role
+      local _cache_valid=1
+      local _cache_invalid_reason=""
+      local _now_epoch
+      _now_epoch="$(date +%s)"
       _cached_ref="$(sed -n 's/^ref=//p' "$_role_override_cache" | head -1)"
       _cached_reason="$(sed -n 's/^reason=//p' "$_role_override_cache" | head -1)"
-      _cached_at="$(sed -n 's/^created_at=//p' "$_role_override_cache" | head -1)"
-      if [[ -n "$_cached_ref" && -n "$_cached_reason" ]]; then
+      _cached_created_epoch="$(sed -n 's/^created_epoch=//p' "$_role_override_cache" | head -1)"
+      _cached_expires_epoch="$(sed -n 's/^expires_epoch=//p' "$_role_override_cache" | head -1)"
+      _cached_session_id="$(sed -n 's/^session_id=//p' "$_role_override_cache" | head -1)"
+      _cached_terminal_role="$(sed -n 's/^terminal_role=//p' "$_role_override_cache" | head -1)"
+
+      if [[ -n "$_cached_expires_epoch" && "$_cached_expires_epoch" =~ ^[0-9]+$ ]]; then
+        if (( _now_epoch > _cached_expires_epoch )); then
+          _cache_valid=0
+          _cache_invalid_reason="expired"
+        fi
+      elif [[ -n "$_cached_created_epoch" && "$_cached_created_epoch" =~ ^[0-9]+$ ]]; then
+        if (( _now_epoch - _cached_created_epoch > role_override_cache_ttl_seconds )); then
+          _cache_valid=0
+          _cache_invalid_reason="ttl_elapsed"
+        fi
+      fi
+
+      local _current_session_id="${!role_override_cache_session_env:-}"
+      local _current_terminal_role="${!role_override_cache_terminal_env:-}"
+      if [[ -z "$_current_terminal_role" ]]; then
+        _current_terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
+      fi
+
+      if [[ "$role_override_require_session_binding" == "true" ]]; then
+        if [[ -z "$_current_session_id" || -z "$_cached_session_id" || "$_current_session_id" != "$_cached_session_id" ]]; then
+          _cache_valid=0
+          _cache_invalid_reason="session_mismatch"
+        fi
+      fi
+      if [[ "$role_override_require_terminal_binding" == "true" ]]; then
+        if [[ -z "$_current_terminal_role" || -z "$_cached_terminal_role" || "$_current_terminal_role" != "$_cached_terminal_role" ]]; then
+          _cache_valid=0
+          _cache_invalid_reason="terminal_mismatch"
+        fi
+      fi
+
+      if [[ "$_cache_valid" -eq 1 && -n "$_cached_ref" && -n "$_cached_reason" ]]; then
         role_policy_override_ref="$_cached_ref"
         role_policy_override_reason="$_cached_reason"
+      else
+        rm -f "$_role_override_cache" 2>/dev/null || true
+        if [[ -n "$_cache_invalid_reason" ]]; then
+          echo "RUNTIME ROLE OVERRIDE CACHE CLEARED: $_cache_invalid_reason"
+        fi
       fi
     fi
     local effective_multi_agent_writes="${RESOLVED_MULTI_AGENT_WRITES:-direct}"

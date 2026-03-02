@@ -7,9 +7,10 @@ set -euo pipefail
 # 1. Multi-agent commit guard (blocks direct commits when multiple sessions active)
 # 2. Commit signing enforcement (commit_sign_required knob)
 # 3. Multi-agent write policy (multi_agent_writes knob)
-# 4. Hook-fast AOF hygiene checks (staged only)
-# 5. Gate registry projection autopilot (gate.registry.yaml staged)
-# 6. Capability metadata validation (ops/capabilities.yaml staged)
+# 4. Terminal write-scope enforcement (role-scoped staged paths)
+# 5. Hook-fast AOF hygiene checks (staged only)
+# 6. Gate registry projection autopilot (gate.registry.yaml staged)
+# 7. Capability metadata validation (ops/capabilities.yaml staged)
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "${ROOT:-}" ]]; then
@@ -160,7 +161,63 @@ if [[ "${RESOLVED_MULTI_AGENT_WRITES:-direct}" == "proposal-only" ]]; then
   fi
 fi
 
-# ─── Guard 4: Hook-fast AOF hygiene checks (staged only) ───
+# ─── Guard 4: Terminal write-scope enforcement ──────────────
+# When terminal role context is present, staged files must remain
+# within the role's declared write_scope in terminal.role.contract.yaml.
+
+TERMINAL_ROLE_CONTRACT="$ROOT/ops/bindings/terminal.role.contract.yaml"
+terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
+
+if [[ -n "$terminal_role" ]]; then
+  if [[ ! -f "$TERMINAL_ROLE_CONTRACT" ]]; then
+    echo "BLOCKED: terminal write-scope enforcement contract missing: $TERMINAL_ROLE_CONTRACT" >&2
+    exit 1
+  fi
+  if ! command -v yq >/dev/null 2>&1; then
+    echo "BLOCKED: terminal write-scope enforcement requires yq" >&2
+    exit 1
+  fi
+
+  mapfile -t role_write_scope < <(yq e -r ".roles[]? | select(.id == \"$terminal_role\") | .write_scope[]?" "$TERMINAL_ROLE_CONTRACT" 2>/dev/null || true)
+  if [[ "${#role_write_scope[@]}" -eq 0 ]]; then
+    echo "BLOCKED: terminal role '$terminal_role' has no write_scope in $TERMINAL_ROLE_CONTRACT" >&2
+    exit 1
+  fi
+
+  outside_scope=()
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    allowed=0
+    for scope in "${role_write_scope[@]}"; do
+      [[ -n "$scope" && "$scope" != "null" ]] || continue
+      if [[ "$scope" == */ ]]; then
+        if [[ "$path" == "$scope"* ]]; then
+          allowed=1
+          break
+        fi
+      else
+        if [[ "$path" == "$scope" || "$path" == "$scope/"* ]]; then
+          allowed=1
+          break
+        fi
+      fi
+    done
+    if [[ "$allowed" -eq 0 ]]; then
+      outside_scope+=("$path")
+    fi
+  done <<< "$staged"
+
+  if [[ "${#outside_scope[@]}" -gt 0 ]]; then
+    echo "BLOCKED: staged files outside terminal write scope for role '$terminal_role'" >&2
+    echo "Allowed write_scope:" >&2
+    printf '  - %s\n' "${role_write_scope[@]}" >&2
+    echo "Out-of-scope staged files:" >&2
+    printf '  - %s\n' "${outside_scope[@]}" >&2
+    exit 1
+  fi
+fi
+
+# ─── Guard 5: Hook-fast AOF hygiene checks (staged only) ───
 # Keep pre-commit lightweight while catching common AOF drift early.
 
 if echo "$staged" | rg -q '^ops/bindings/.*\.ya?ml$'; then
@@ -181,7 +238,7 @@ if echo "$staged" | rg -q '^(mailroom/state/loop-scopes/.*\.scope\.md|docs/produ
   "$d145_gate" --staged-only
 fi
 
-# ─── Guard 5: Gate registry projection autopilot ────────────
+# ─── Guard 6: Gate registry projection autopilot ────────────
 # When gate.registry.yaml is staged, reconcile header metadata and
 # re-sync entry-surface projections so D85/D285 stay green.
 
@@ -206,7 +263,7 @@ if echo "$staged" | grep -qx 'ops/bindings/gate.registry.yaml'; then
   fi
 fi
 
-# ─── Guard 6: Capability metadata validation ───────────────
+# ─── Guard 7: Capability metadata validation ───────────────
 # Main-branch commits are allowed. Worktrees are optional, not mandatory.
 # Drift gates (spine.verify) catch problems; the pre-commit hook stays lean.
 

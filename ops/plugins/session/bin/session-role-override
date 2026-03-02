@@ -3,7 +3,6 @@
 #
 # Writes a cache file that cap.sh reads as fallback when
 # SPINE_ROLE_POLICY_OVERRIDE_REF/REASON env vars are not set.
-# This eliminates the need to prefix every mutating cap call.
 #
 # Usage:
 #   session-role-override --ref <ref> --reason <reason>   # set
@@ -15,8 +14,26 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 source "$ROOT/ops/lib/runtime-paths.sh"
 spine_runtime_resolve_paths
 STATE_DIR="$SPINE_STATE"
+ROLE_RUNTIME_CONTRACT="$ROOT/ops/bindings/role.runtime.control.contract.yaml"
 
-CACHE_FILE="$STATE_DIR/role-override.env"
+CACHE_FILENAME="role-override.env"
+CACHE_TTL_SECONDS=14400
+SESSION_ENV_VAR="SPINE_SESSION_ID"
+TERMINAL_ROLE_ENV_VAR="OPS_TERMINAL_ROLE"
+REQUIRE_SESSION_BINDING=true
+REQUIRE_TERMINAL_ROLE_BINDING=true
+
+if command -v yq >/dev/null 2>&1 && [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
+  CACHE_FILENAME="$(yq e -r '.runtime_roles.session_role_override_cache.cache_filename // "role-override.env"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo "$CACHE_FILENAME")"
+  CACHE_TTL_SECONDS="$(yq e -r '.runtime_roles.session_role_override_cache.ttl_seconds // 14400' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo "$CACHE_TTL_SECONDS")"
+  SESSION_ENV_VAR="$(yq e -r '.runtime_roles.session_role_override_cache.session_env_var // "SPINE_SESSION_ID"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo "$SESSION_ENV_VAR")"
+  TERMINAL_ROLE_ENV_VAR="$(yq e -r '.runtime_roles.session_role_override_cache.terminal_role_env_var // "OPS_TERMINAL_ROLE"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo "$TERMINAL_ROLE_ENV_VAR")"
+  REQUIRE_SESSION_BINDING="$(yq e -r '.runtime_roles.session_role_override_cache.require_session_binding // true' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo "$REQUIRE_SESSION_BINDING")"
+  REQUIRE_TERMINAL_ROLE_BINDING="$(yq e -r '.runtime_roles.session_role_override_cache.require_terminal_role_binding // true' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo "$REQUIRE_TERMINAL_ROLE_BINDING")"
+fi
+[[ "$CACHE_TTL_SECONDS" =~ ^[0-9]+$ ]] || CACHE_TTL_SECONDS=14400
+
+CACHE_FILE="$STATE_DIR/$CACHE_FILENAME"
 REF=""
 REASON=""
 CLEAR=0
@@ -40,12 +57,45 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+now_epoch="$(date +%s)"
+now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+current_session_id="${!SESSION_ENV_VAR:-}"
+current_terminal_role="${!TERMINAL_ROLE_ENV_VAR:-}"
+if [[ -z "$current_terminal_role" ]]; then
+  current_terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-}}}}"
+fi
+current_runtime_role="${SPINE_RUNTIME_ROLE:-}"
+
 if [[ "$STATUS" -eq 1 ]]; then
   echo "session.role.override"
   echo "  cache_file: $CACHE_FILE"
   if [[ -f "$CACHE_FILE" ]]; then
-    echo "  state: active"
-    sed 's/^/  /' "$CACHE_FILE"
+    cache_ref="$(sed -n 's/^ref=//p' "$CACHE_FILE" | head -1)"
+    cache_reason="$(sed -n 's/^reason=//p' "$CACHE_FILE" | head -1)"
+    cache_created_at="$(sed -n 's/^created_at=//p' "$CACHE_FILE" | head -1)"
+    cache_expires_at="$(sed -n 's/^expires_at=//p' "$CACHE_FILE" | head -1)"
+    cache_expires_epoch="$(sed -n 's/^expires_epoch=//p' "$CACHE_FILE" | head -1)"
+    cache_session_id="$(sed -n 's/^session_id=//p' "$CACHE_FILE" | head -1)"
+    cache_terminal_role="$(sed -n 's/^terminal_role=//p' "$CACHE_FILE" | head -1)"
+    cache_runtime_role="$(sed -n 's/^runtime_role=//p' "$CACHE_FILE" | head -1)"
+    cache_ttl="$(sed -n 's/^ttl_seconds=//p' "$CACHE_FILE" | head -1)"
+    state="active"
+    if [[ -n "$cache_expires_epoch" && "$cache_expires_epoch" =~ ^[0-9]+$ && "$cache_expires_epoch" -lt "$now_epoch" ]]; then
+      state="expired"
+    elif [[ "$REQUIRE_SESSION_BINDING" == "true" && -n "$current_session_id" && -n "$cache_session_id" && "$cache_session_id" != "$current_session_id" ]]; then
+      state="session_mismatch"
+    elif [[ "$REQUIRE_TERMINAL_ROLE_BINDING" == "true" && -n "$current_terminal_role" && -n "$cache_terminal_role" && "$cache_terminal_role" != "$current_terminal_role" ]]; then
+      state="terminal_mismatch"
+    fi
+    echo "  state: $state"
+    echo "  ref: $cache_ref"
+    echo "  reason: $cache_reason"
+    echo "  created_at: $cache_created_at"
+    echo "  expires_at: $cache_expires_at"
+    echo "  ttl_seconds: ${cache_ttl:-$CACHE_TTL_SECONDS}"
+    echo "  session_id: ${cache_session_id:-unset}"
+    echo "  terminal_role: ${cache_terminal_role:-unset}"
+    echo "  runtime_role: ${cache_runtime_role:-unset}"
   else
     echo "  state: inactive"
   fi
@@ -68,15 +118,48 @@ if [[ -z "$REASON" ]]; then
   exit 1
 fi
 
-mkdir -p "$STATE_DIR"
+if [[ "$REQUIRE_SESSION_BINDING" == "true" && -z "$current_session_id" ]]; then
+  echo "ERROR: session-bound override requires ${SESSION_ENV_VAR} to be set" >&2
+  exit 1
+fi
+if [[ "$REQUIRE_TERMINAL_ROLE_BINDING" == "true" && -z "$current_terminal_role" ]]; then
+  echo "ERROR: terminal-bound override requires ${TERMINAL_ROLE_ENV_VAR} (or canonical terminal role env) to be set" >&2
+  exit 1
+fi
+
+expires_epoch=$((now_epoch + CACHE_TTL_SECONDS))
+expires_iso="$(python3 - "$expires_epoch" <<'PY'
+import sys
+from datetime import datetime, timezone
+
+epoch = int(sys.argv[1])
+print(datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
+
+mkdir -p "$(dirname "$CACHE_FILE")"
 cat > "$CACHE_FILE" <<EOF
 ref=$REF
 reason=$REASON
-created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+created_at=$now_iso
+created_epoch=$now_epoch
+expires_at=$expires_iso
+expires_epoch=$expires_epoch
+session_env_var=$SESSION_ENV_VAR
+session_id=$current_session_id
+terminal_role_env_var=$TERMINAL_ROLE_ENV_VAR
+terminal_role=$current_terminal_role
+runtime_role=$current_runtime_role
+ttl_seconds=$CACHE_TTL_SECONDS
 EOF
 
 echo "session.role.override"
 echo "  action: set"
 echo "  ref: $REF"
 echo "  reason: $REASON"
+echo "  created_at: $now_iso"
+echo "  expires_at: $expires_iso"
+echo "  session_id: ${current_session_id:-unset}"
+echo "  terminal_role: ${current_terminal_role:-unset}"
+echo "  runtime_role: ${current_runtime_role:-unset}"
 echo "  cache_file: $CACHE_FILE"

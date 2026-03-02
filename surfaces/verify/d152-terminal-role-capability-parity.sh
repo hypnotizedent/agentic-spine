@@ -7,6 +7,11 @@ CONTRACT="$ROOT/ops/bindings/terminal.role.contract.yaml"
 CAPS="$ROOT/ops/capabilities.yaml"
 LAUNCHER_VIEW="$ROOT/ops/bindings/terminal.launcher.view.yaml"
 ROLE_RUNTIME_CONTRACT="$ROOT/ops/bindings/role.runtime.control.contract.yaml"
+WAVE_CMD="$ROOT/ops/commands/wave.sh"
+SESSION_OVERRIDE="$ROOT/ops/plugins/session/bin/session-role-override"
+CAP_CMD="$ROOT/ops/commands/cap.sh"
+PRE_COMMIT="$ROOT/.githooks/pre-commit"
+RECEIPT_SCHEMA="$ROOT/ops/bindings/orchestration.exec_receipt.schema.json"
 
 fail() {
   echo "D152 FAIL: $*" >&2
@@ -17,6 +22,11 @@ fail() {
 [[ -f "$CAPS" ]] || fail "missing capabilities.yaml"
 [[ -f "$LAUNCHER_VIEW" ]] || fail "missing terminal.launcher.view.yaml"
 [[ -f "$ROLE_RUNTIME_CONTRACT" ]] || fail "missing role.runtime.control.contract.yaml"
+[[ -f "$WAVE_CMD" ]] || fail "missing wave command: $WAVE_CMD"
+[[ -f "$SESSION_OVERRIDE" ]] || fail "missing session override script: $SESSION_OVERRIDE"
+[[ -f "$CAP_CMD" ]] || fail "missing cap command: $CAP_CMD"
+[[ -f "$PRE_COMMIT" ]] || fail "missing pre-commit hook: $PRE_COMMIT"
+[[ -f "$RECEIPT_SCHEMA" ]] || fail "missing orchestration exec receipt schema: $RECEIPT_SCHEMA"
 command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
 command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
 
@@ -146,6 +156,185 @@ print(f"terminals={checked} lanes={len(observed_lanes)}")
 PY
 )"
 
+runtime_hardening_summary="$(python3 - "$ROLE_RUNTIME_CONTRACT" "$WAVE_CMD" "$SESSION_OVERRIDE" "$CAP_CMD" "$PRE_COMMIT" "$RECEIPT_SCHEMA" <<'PY'
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+role_contract_path = Path(sys.argv[1])
+wave_cmd_path = Path(sys.argv[2])
+session_override_path = Path(sys.argv[3])
+cap_cmd_path = Path(sys.argv[4])
+pre_commit_path = Path(sys.argv[5])
+receipt_schema_path = Path(sys.argv[6])
+
+role_contract = yaml.safe_load(role_contract_path.read_text(encoding="utf-8")) or {}
+if not isinstance(role_contract, dict):
+    raise RuntimeError("role.runtime.control.contract.yaml must be a YAML map")
+
+lane_compat = role_contract.get("lane_role_compatibility")
+if not isinstance(lane_compat, dict):
+    raise RuntimeError("lane_role_compatibility must be an object")
+allowed_by_lane = lane_compat.get("allowed_runtime_roles_by_lane")
+if not isinstance(allowed_by_lane, dict) or not allowed_by_lane:
+    raise RuntimeError("lane_role_compatibility.allowed_runtime_roles_by_lane must be a non-empty object")
+
+semantics = role_contract.get("handoff_ref_semantics")
+if not isinstance(semantics, dict):
+    raise RuntimeError("handoff_ref_semantics must be an object")
+default_kind = str(semantics.get("default_kind", "")).strip()
+if not default_kind:
+    raise RuntimeError("handoff_ref_semantics.default_kind missing")
+kinds = semantics.get("kinds")
+if not isinstance(kinds, dict) or not kinds:
+    raise RuntimeError("handoff_ref_semantics.kinds must be a non-empty object")
+by_ref_key = semantics.get("by_ref_key")
+if not isinstance(by_ref_key, dict):
+    raise RuntimeError("handoff_ref_semantics.by_ref_key must be an object")
+
+for kind, meta in kinds.items():
+    if not isinstance(meta, dict):
+        raise RuntimeError(f"handoff_ref_semantics.kinds.{kind} must be an object")
+    pattern = str(meta.get("regex", "")).strip()
+    if not pattern:
+        raise RuntimeError(f"handoff_ref_semantics.kinds.{kind}.regex missing")
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise RuntimeError(f"handoff_ref_semantics.kinds.{kind}.regex invalid: {exc}")
+
+if default_kind not in kinds:
+    raise RuntimeError(f"default handoff ref kind '{default_kind}' not present in kinds")
+
+handoff_boundaries = role_contract.get("handoff_boundaries")
+if not isinstance(handoff_boundaries, dict) or not handoff_boundaries:
+    raise RuntimeError("handoff_boundaries must be a non-empty object")
+
+required_refs = set()
+for gate_name, gate_meta in handoff_boundaries.items():
+    if not isinstance(gate_meta, dict):
+        raise RuntimeError(f"handoff_boundaries.{gate_name} must be an object")
+    for key in ("required_input_refs", "required_output_refs"):
+        values = gate_meta.get(key)
+        if not isinstance(values, list):
+            raise RuntimeError(f"handoff_boundaries.{gate_name}.{key} must be a list")
+        for ref in values:
+            ref_key = str(ref).strip()
+            if ref_key:
+                required_refs.add(ref_key)
+
+for ref_key in sorted(required_refs):
+    mapped_kind = str(by_ref_key.get(ref_key, "")).strip()
+    if not mapped_kind:
+        raise RuntimeError(f"handoff_ref_semantics.by_ref_key missing required ref mapping: {ref_key}")
+    if mapped_kind not in kinds:
+        raise RuntimeError(
+            f"handoff_ref_semantics.by_ref_key.{ref_key} references unknown kind: {mapped_kind}"
+        )
+
+session_cache = (role_contract.get("runtime_roles") or {}).get("session_role_override_cache")
+if not isinstance(session_cache, dict):
+    raise RuntimeError("runtime_roles.session_role_override_cache must be an object")
+for key in (
+    "cache_filename",
+    "ttl_seconds",
+    "session_env_var",
+    "terminal_role_env_var",
+    "require_session_binding",
+    "require_terminal_role_binding",
+):
+    if key not in session_cache:
+        raise RuntimeError(f"runtime_roles.session_role_override_cache missing field: {key}")
+
+evidence = role_contract.get("evidence")
+if not isinstance(evidence, dict):
+    raise RuntimeError("evidence block missing from role runtime contract")
+run_key_regexes = evidence.get("run_key_regexes")
+if not isinstance(run_key_regexes, list) or len(run_key_regexes) < 2:
+    raise RuntimeError("evidence.run_key_regexes must contain CAP and S namespace patterns")
+compiled_run_key_patterns = []
+for pattern in run_key_regexes:
+    text = str(pattern).strip()
+    if not text:
+        continue
+    try:
+        compiled_run_key_patterns.append(re.compile(text))
+    except re.error as exc:
+        raise RuntimeError(f"invalid evidence.run_key_regexes entry '{text}': {exc}")
+if not compiled_run_key_patterns:
+    raise RuntimeError("evidence.run_key_regexes has no valid regex patterns")
+sample_cap = "CAP-20260302-010203__verify.run__Rabc1"
+sample_s = "S20260302-010203__inline__Rxyz9"
+if not any(p.match(sample_cap) for p in compiled_run_key_patterns):
+    raise RuntimeError("evidence.run_key_regexes does not match CAP namespace sample")
+if not any(p.match(sample_s) for p in compiled_run_key_patterns):
+    raise RuntimeError("evidence.run_key_regexes does not match S namespace sample")
+
+wave_cmd = wave_cmd_path.read_text(encoding="utf-8")
+for needle in (
+    'wave_lock_guard "$wave_id" "dispatch"',
+    'wave_lock_guard "$wave_id" "ack"',
+    'wave_lock_guard "$wave_id" "close"',
+    "wave packet {field} invalid at dispatch",
+    "dispatch handoff ref semantics invalid",
+    "Lane-role authorization failed",
+):
+    if needle not in wave_cmd:
+        raise RuntimeError(f"wave.sh missing expected hardening marker: {needle}")
+
+session_override = session_override_path.read_text(encoding="utf-8")
+for marker in ("expires_epoch=", "session_id=", "terminal_role=", "ttl_seconds="):
+    if marker not in session_override:
+        raise RuntimeError(f"session-role-override missing cache marker: {marker}")
+
+cap_cmd = cap_cmd_path.read_text(encoding="utf-8")
+for marker in ("session_mismatch", "terminal_mismatch", "RUNTIME ROLE OVERRIDE CACHE CLEARED"):
+    if marker not in cap_cmd:
+        raise RuntimeError(f"cap.sh missing override cache enforcement marker: {marker}")
+
+pre_commit = pre_commit_path.read_text(encoding="utf-8")
+for marker in ("Guard 4: Terminal write-scope enforcement", ".write_scope[]?"):
+    if marker not in pre_commit:
+        raise RuntimeError(f".githooks/pre-commit missing write-scope enforcement marker: {marker}")
+
+schema = json.loads(receipt_schema_path.read_text(encoding="utf-8"))
+run_keys_pattern = (
+    schema.get("properties", {})
+    .get("run_keys", {})
+    .get("items", {})
+    .get("pattern", "")
+)
+evidence_pattern = (
+    schema.get("properties", {})
+    .get("evidence_refs", {})
+    .get("properties", {})
+    .get("run_key_refs", {})
+    .get("items", {})
+    .get("pattern", "")
+)
+for label, pattern in (("run_keys", run_keys_pattern), ("evidence_refs.run_key_refs", evidence_pattern)):
+    if not pattern:
+        raise RuntimeError(f"schema missing {label} pattern")
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        raise RuntimeError(f"schema {label} pattern invalid: {exc}")
+    if not compiled.match(sample_cap) or not compiled.match(sample_s):
+        raise RuntimeError(f"schema {label} pattern must accept CAP and S run key namespaces")
+
+print(
+    f"handoff_refs={len(required_refs)} "
+    f"lane_profiles={len(allowed_by_lane)} "
+    f"run_key_namespaces={len(compiled_run_key_patterns)}"
+)
+PY
+)"
+
 total="$(echo "$role_caps" | wc -l | tr -d ' ')"
-echo "D152 PASS: all $total terminal role capabilities exist in capabilities.yaml; lane-role compatibility OK ($lane_runtime_summary)"
+echo "D152 PASS: all $total terminal role capabilities exist in capabilities.yaml; lane-role compatibility OK ($lane_runtime_summary); runtime hardening OK ($runtime_hardening_summary)"
 exit 0
