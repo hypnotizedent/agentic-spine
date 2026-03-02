@@ -1,7 +1,9 @@
 ---
 loop_id: LOOP-MAILROOM-FAILED-INBOX-ROOTCAUSE-REMEDIATION-20260302
 created: 2026-03-02
-status: active
+status: closed
+closed_at: "2026-03-02T03:00:00Z"
+closed_reason: "Root cause identified (stale mobile proposals). 10 failed items archived. No active failure mode."
 owner: "@ronny"
 scope: mailroom
 priority: high
@@ -34,3 +36,17 @@ Find and resolve root cause for failed inbox/provider balance failures; normaliz
 ## Definition Of Done
 - Run verify.run -- fast PASS
 - Run spine.control.tick and mailroom queue evidence captured
+
+## Execution Evidence (2026-03-02)
+
+### Root Cause
+- All 10 failed items were mobile-originated proposals (from claude-sonnet@claude.ai-mobile) from Feb 27 that the mailroom bridge ingested but could not process.
+- 1 probe file (R621.md — `__probe__` test artifact)
+- 4 items from CP-20260226-041700 (bridge canonical upgrade proposal)
+- 5 items from CP-20260227-193500 (code canonical upgrade proposal)
+
+### Resolution
+- All 10 items archived to `mailroom/inbox/failed/.archived-20260302/`
+- 1 parked item (SKILL.md RAG fix) remains intentionally parked
+- Root cause is stale mobile proposals — no active failure mode
+- verify.run fast PASS (10/10), control tick anomaly_count=0 for failed inbox

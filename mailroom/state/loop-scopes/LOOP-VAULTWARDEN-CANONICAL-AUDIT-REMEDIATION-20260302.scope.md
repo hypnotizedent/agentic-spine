@@ -5,7 +5,7 @@ status: active
 owner: "@ronny"
 scope: vaultwarden
 priority: high
-horizon: now
+horizon: later
 execution_readiness: blocked
 objective: Execute VW-AUDIT-20260302 findings end-to-end with canonical Vaultwarden parity, blocker-first runtime recovery, and governed closure evidence.
 ---

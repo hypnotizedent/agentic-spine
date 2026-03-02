@@ -5,7 +5,7 @@ status: active
 owner: "@ronny"
 scope: execution
 priority: high
-horizon: now
+horizon: later
 execution_readiness: blocked
 objective: Enforce canonical Vaultwarden lifecycle transaction for evidence retention, stale URL reconciliation, duplicate-truth governance, alias hygiene, and deterministic closeout proof.
 ---
@@ -45,6 +45,7 @@ Enforce canonical Vaultwarden lifecycle transaction for evidence retention, stal
 - **GAP-OP-1286** (medium): BLOCKED — duplicate-truth remediation requires live vault; forensic analysis complete (29 groups)
 
 ### Blocker
-- VM 204 (infra-core) is unreachable (LAN 100% packet loss, SSH timeout, HTTP 000)
+- VM 204 (infra-core): LAN unreachable (100% packet loss), Tailscale UP (100.92.91.128, 79ms)
 - URI reconciliation and duplicate cleanup require vaultwarden.uri.audit + reconcile.apply with live bw CLI access
-- execution_readiness set to blocked until VM 204 recovered
+- execution_readiness set to blocked — requires operator session for live vault mutations (not overnight-safe)
+- Next review: when operator is available for interactive vault operations

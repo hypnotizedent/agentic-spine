@@ -5,8 +5,8 @@ status: active
 owner: "@ronny"
 scope: execution
 priority: high
-horizon: now
-execution_readiness: runnable
+horizon: later
+execution_readiness: blocked
 objective: Enforce canonical public-service lifecycle transaction so bind/transition/deploy must execute cloudflare.service.publish with evidence, rollback semantics, and drift checks.
 ---
 

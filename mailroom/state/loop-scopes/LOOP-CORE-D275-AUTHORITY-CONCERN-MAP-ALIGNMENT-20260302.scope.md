@@ -1,7 +1,9 @@
 ---
 loop_id: LOOP-CORE-D275-AUTHORITY-CONCERN-MAP-ALIGNMENT-20260302
 created: 2026-03-02
-status: active
+status: closed
+closed_at: "2026-03-02T02:58:00Z"
+closed_reason: "D275 PASS — backup_inventory_surfaces concern added to authority.concerns.yaml, projection marker added to backup.posture.snapshot.yaml."
 owner: "@ronny"
 scope: core
 priority: high

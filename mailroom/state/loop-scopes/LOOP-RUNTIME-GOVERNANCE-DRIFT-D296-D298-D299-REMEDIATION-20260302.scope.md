@@ -1,7 +1,9 @@
 ---
 loop_id: LOOP-RUNTIME-GOVERNANCE-DRIFT-D296-D298-D299-REMEDIATION-20260302
 created: 2026-03-02
-status: active
+status: closed
+closed_at: "2026-03-02T02:58:00Z"
+closed_reason: "D296 PASS, D298 PASS, D299 PASS — all gates verified via verify.run domain infra (51/54 pass, failures in unrelated D115/D236/D238)."
 owner: "@ronny"
 scope: runtime
 priority: high

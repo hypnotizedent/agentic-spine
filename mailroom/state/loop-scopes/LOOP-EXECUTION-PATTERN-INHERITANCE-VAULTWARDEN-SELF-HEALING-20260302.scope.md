@@ -5,7 +5,7 @@ status: active
 owner: "@ronny"
 scope: execution
 priority: high
-horizon: now
+horizon: later
 execution_readiness: blocked
 objective: Generalize backup-style self-healing plumbing to Vaultwarden surfaces: canonical machine-path stabilization, scheduled runtime smoke, recovery action mappings, and deterministic escalation evidence.
 ---
@@ -44,6 +44,7 @@ Generalize backup-style self-healing plumbing to Vaultwarden surfaces: canonical
 - **GAP-OP-1287** (medium): BLOCKED — restore drill requires live VM; D319 advisory tracks freshness
 
 ### Blocker
-- VM 204 (infra-core) is unreachable (LAN 100% packet loss, SSH timeout, HTTP 000)
-- Restore drill cannot execute until VM restored
-- execution_readiness set to blocked until VM 204 recovered
+- VM 204 (infra-core): LAN unreachable (100% packet loss), Tailscale UP (100.92.91.128, 79ms)
+- Restore drill cannot execute without operator supervision — not overnight-safe
+- execution_readiness set to blocked until operator-supervised session
+- Next review: when operator is available for restore drill execution
