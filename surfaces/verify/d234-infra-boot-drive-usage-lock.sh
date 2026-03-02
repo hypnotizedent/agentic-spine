@@ -97,6 +97,11 @@ while IFS=$'\t' read -r hostname ssh_target vmid; do
   SSH_REF="${ssh_user}@${ssh_host}"
   SSH_OPTS="-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
+  if [[ "$ssh_policy" == "lan_first" ]] && is_off_lan_context "$ssh_host"; then
+    skip_context "VM $vmid ($hostname): off-LAN context for lan_first target ($SSH_REF)"
+    continue
+  fi
+
   # Test SSH connectivity
   if ! ssh $SSH_OPTS "$SSH_REF" "true" 2>/dev/null; then
     if [[ "$ssh_policy" == "lan_first" ]] && is_off_lan_context "$ssh_host"; then

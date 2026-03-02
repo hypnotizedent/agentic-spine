@@ -5,6 +5,7 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
 SSH_BINDING="${SSH_TARGETS_FILE:-$ROOT/ops/bindings/ssh.targets.yaml}"
 STATUS_BIN="${MAIL_ARCHIVER_IMPORT_STATUS_BIN:-$ROOT/ops/plugins/communications/bin/communications-mail-archiver-import-status}"
+STATUS_BIN_OVERRIDDEN=0
 
 JSON=0
 WRITE_STATE=1
@@ -18,6 +19,9 @@ need jq
 [[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
 [[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
 [[ -x "$STATUS_BIN" ]] || fail "missing executable status surface: $STATUS_BIN"
+if [[ -n "${MAIL_ARCHIVER_IMPORT_STATUS_BIN:-}" ]]; then
+  STATUS_BIN_OVERRIDDEN=1
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -203,6 +207,15 @@ if [[ "$REQUIRE_NONINTERACTIVE" == "true" && "$TARGET_HOST" =~ ^100\. ]]; then
   fi
   [[ "$JSON" -eq 1 ]] && emit_json "$BLOCKED_STATE" "$BLOCKED_RETRY_ALLOWED" "machine_target_is_tailscale_ip" 0 "BLOCKED_AUTH" || \
     echo "communications.mailarchiver.import.monitor: $BLOCKED_STATE (machine target '$TARGET_ID' resolves to Tailscale IP '$TARGET_HOST')"
+  exit 0
+fi
+
+if [[ "$STATUS_BIN_OVERRIDDEN" -eq 0 ]] && [[ "$TARGET_POLICY" == "lan_first" ]] && is_off_lan_context "$TARGET_HOST"; then
+  if [[ "$WRITE_STATE" -eq 1 ]]; then
+    write_state_yaml "CONTEXT_BLOCKED" true "off_lan_connectivity_context" 0 "BLOCKED_CONTEXT"
+  fi
+  [[ "$JSON" -eq 1 ]] && emit_json "CONTEXT_BLOCKED" true "off_lan_connectivity_context" 0 "BLOCKED_CONTEXT" || \
+    echo "communications.mailarchiver.import.monitor: CONTEXT_BLOCKED (off-LAN lan_first target unreachable: $TARGET_ID/$TARGET_HOST)"
   exit 0
 fi
 

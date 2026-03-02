@@ -116,6 +116,13 @@ _is_same_local_subnet_24() {
   return 1
 }
 
+_is_off_lan_context_host() {
+  local host="$1"
+  _is_private_ipv4 "$host" || return 1
+  _is_same_local_subnet_24 "$host" && return 1
+  return 0
+}
+
 _is_contextual_off_lan_block() {
   local host="$1"
   local reason="$2"
@@ -123,9 +130,7 @@ _is_contextual_off_lan_block() {
     connect_timeout|ssh_unreachable) ;;
     *) return 1 ;;
   esac
-  _is_private_ipv4 "$host" || return 1
-  _is_same_local_subnet_24 "$host" && return 1
-  return 0
+  _is_off_lan_context_host "$host"
 }
 
 echo "backup.status"
@@ -168,6 +173,12 @@ while IFS=$'\t' read -r NAME HOST BASE_PATH GLOB STALE_HOURS SSH_TIMEOUT; do
   [[ -n "$SSH_USER" && "$SSH_USER" != "null" ]] || SSH_USER="$DEF_USER"
   [[ -n "$SSH_PORT" && "$SSH_PORT" != "null" ]] || SSH_PORT="$DEF_PORT"
   [[ -n "$TARGET_POLICY" && "$TARGET_POLICY" != "null" ]] || TARGET_POLICY="lan_first"
+
+  if [[ "$TARGET_POLICY" == "lan_first" ]] && _is_off_lan_context_host "$SSH_HOST"; then
+    printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
+      "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "off_lan_connectivity_context"
+    continue
+  fi
 
   # Passive mode avoids interactive tailscale SSH browser auth popups.
   if [[ "$TAILSCALE_PROBE_MODE" == "passive" && "$SSH_HOST" =~ ^100\. ]]; then

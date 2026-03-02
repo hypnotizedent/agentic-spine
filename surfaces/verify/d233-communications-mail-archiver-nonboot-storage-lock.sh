@@ -86,6 +86,11 @@ ssh_cmd() {
   ssh $SSH_OPTS "$SSH_REF" "$@" 2>/dev/null
 }
 
+if [[ "$COMMS_POLICY" == "lan_first" ]] && is_off_lan_context "$COMMS_IP"; then
+  echo "D233 SKIP: communications-stack off-LAN context for lan_first target ($SSH_REF)"
+  exit 0
+fi
+
 if ! ssh_cmd "true" >/dev/null; then
   if [[ "$COMMS_POLICY" == "lan_first" ]] && is_off_lan_context "$COMMS_IP"; then
     echo "D233 SKIP: communications-stack unreachable from current off-LAN context (lan_first target: $SSH_REF)"

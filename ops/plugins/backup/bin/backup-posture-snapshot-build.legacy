@@ -123,6 +123,7 @@ def is_off_lan_context(host):
 def ssh_probe(host_cfg, base_path):
     user = host_cfg.get("user") or "root"
     host = host_cfg.get("host")
+    policy = host_cfg.get("access_policy") or "lan_first"
     port = str(host_cfg.get("port") or 22)
     timeout = str(host_cfg.get("connect_timeout_sec") or 6)
     strict = host_cfg.get("strict_host_key_checking") or "no"
@@ -131,6 +132,8 @@ def ssh_probe(host_cfg, base_path):
 
     if not host:
         return {"status": "error", "reason": "host_missing", "bytes": 0, "files": 0}
+    if policy == "lan_first" and is_off_lan_context(host):
+        return {"status": "context_blocked", "reason": "off_lan_connectivity_context", "bytes": 0, "files": 0}
 
     remote_script = (
         "set -euo pipefail; "
@@ -169,7 +172,6 @@ def ssh_probe(host_cfg, base_path):
             reason = "auth_denied"
         elif "could not resolve" in stderr:
             reason = "dns_unreachable"
-        policy = host_cfg.get("access_policy") or "lan_first"
         if policy == "lan_first" and reason in {"timeout", "dns_unreachable"} and is_off_lan_context(host):
             return {"status": "context_blocked", "reason": "off_lan_connectivity_context", "bytes": 0, "files": 0}
         return {"status": "error", "reason": reason, "bytes": 0, "files": 0}
