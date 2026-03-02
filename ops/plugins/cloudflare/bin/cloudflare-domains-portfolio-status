@@ -31,7 +31,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 python3 - "$CF_API" "$INVENTORY" "${JSON_OUT:-0}" "${CF_AUTH_MODE_PREFERRED:-unknown}" <<'PYEOF'
-import json, sys, os, urllib.request, urllib.error
+import json, sys, os, time, urllib.request, urllib.error, yaml
 
 api = sys.argv[1]
 inventory = sys.argv[2]
@@ -42,7 +42,7 @@ auth_email = os.environ.get("CLOUDFLARE_AUTH_EMAIL", "")
 global_key = os.environ.get("CLOUDFLARE_GLOBAL_API_KEY", "")
 
 with open(inventory) as f:
-    inv = json.load(f)
+    inv = yaml.safe_load(f) or {}
 account_id = inv.get("account_id", os.environ.get("CLOUDFLARE_ACCOUNT_ID", ""))
 
 def headers_for(mode):
@@ -56,6 +56,7 @@ def headers_for(mode):
 
 def get(url):
     global preferred_mode
+    max_attempts = 3
     modes = []
     if preferred_mode == "token" and token:
         modes.append("token")
@@ -75,21 +76,33 @@ def get(url):
 
     last_exc = None
     for idx, mode in enumerate(modes):
-        req = urllib.request.Request(url, headers=headers_for(mode))
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                preferred_mode = mode
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            last_exc = exc
-            if exc.code in (401, 403) and idx + 1 < len(modes):
-                continue
-            raise
-        except Exception as exc:
-            last_exc = exc
-            if idx + 1 < len(modes):
-                continue
-            raise
+        for attempt in range(max_attempts):
+            req = urllib.request.Request(url, headers=headers_for(mode))
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    preferred_mode = mode
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                last_exc = exc
+                if exc.code == 429 and attempt + 1 < max_attempts:
+                    retry_after = exc.headers.get("Retry-After", "")
+                    try:
+                        delay = max(1, min(int(retry_after), 30))
+                    except Exception:
+                        delay = attempt + 1
+                    time.sleep(delay)
+                    continue
+                if exc.code in (401, 403) and idx + 1 < len(modes):
+                    break
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if attempt + 1 < max_attempts:
+                    time.sleep(attempt + 1)
+                    continue
+                if idx + 1 < len(modes):
+                    break
+                raise
     if last_exc:
         raise last_exc
     raise RuntimeError("Cloudflare request failed")

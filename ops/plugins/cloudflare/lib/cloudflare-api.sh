@@ -165,10 +165,10 @@ cf_zone_id_from_binding() {
   local binding_file="$1"
   local zone_name="$2"
   python3 - "$binding_file" "$zone_name" <<'PY'
-import json, sys
+import sys, yaml
 path, name = sys.argv[1], sys.argv[2].strip().lower()
 with open(path, "r", encoding="utf-8") as f:
-    data = json.load(f)
+    data = yaml.safe_load(f) or {}
 for row in data.get("zones", []):
     if str(row.get("name", "")).strip().lower() == name:
         zid = str(row.get("id", "")).strip()
@@ -184,9 +184,9 @@ cf_zone_id_lookup_live() {
   local zone_name="$2"
   local resp
   resp="$(cf_api_get "${cf_api}/zones?name=${zone_name}&per_page=1")" || return 1
-  printf '%s\n' "$resp" | python3 - <<'PY'
+  python3 - "$resp" <<'PY'
 import json, sys
-data = json.load(sys.stdin)
+data = json.loads(sys.argv[1])
 rows = data.get("result") or []
 if rows:
     print(str(rows[0].get("id", "")).strip())
