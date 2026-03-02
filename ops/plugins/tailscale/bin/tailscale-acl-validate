@@ -59,25 +59,47 @@ response=$(curl -fsS \
   exit 1
 }
 
-# Parse validation response
-python3 -c "
-import json, sys
+# Parse validation response without swallowing JSON/parser errors
+resp_tmp=$(mktemp)
+printf '%s' "$response" > "$resp_tmp"
+python3 - "$resp_tmp" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8").strip()
+if not text:
+    print("api_validate: OK (empty response = no errors)")
+    raise SystemExit(0)
+
 try:
-    data = json.loads('''$response''')
-    errors = data if isinstance(data, list) else data.get('errors', data.get('message', []))
-    if errors:
-        print('api_validate: FAIL')
-        if isinstance(errors, list):
-            for e in errors:
-                print(f'  - {e}')
-        else:
-            print(f'  - {errors}')
-        sys.exit(1)
+    data = json.loads(text)
+except json.JSONDecodeError as exc:
+    print("api_validate: FAIL")
+    print(f"  - non-JSON response: {exc}")
+    raise SystemExit(1)
+
+if isinstance(data, list):
+    errors = data
+elif isinstance(data, dict):
+    errors = data.get("errors")
+    if errors is None:
+        message = data.get("message")
+        errors = [message] if message else []
+else:
+    errors = [str(data)]
+
+if errors:
+    print("api_validate: FAIL")
+    if isinstance(errors, list):
+        for err in errors:
+            print(f"  - {err}")
     else:
-        print('api_validate: OK')
-except Exception as e:
-    # Empty response or non-JSON means success for validate endpoint
-    print('api_validate: OK')
-"
+        print(f"  - {errors}")
+    raise SystemExit(1)
+
+print("api_validate: OK")
+PY
+rm -f "$resp_tmp"
 
 echo "status: PASS"

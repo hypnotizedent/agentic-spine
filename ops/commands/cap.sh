@@ -320,12 +320,15 @@ run_cap() {
     if [[ -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
       local role_policy_enabled override_env_key override_reason_env_key
       local read_only_roles_csv mutating_roles_csv role_from_terminal
+      local role_capability_allowlist_csv role_capability_allowlisted
 
       role_policy_enabled="true"
       override_env_key="SPINE_ROLE_POLICY_OVERRIDE_REF"
       override_reason_env_key="SPINE_ROLE_POLICY_OVERRIDE_REASON"
       read_only_roles_csv=""
       mutating_roles_csv=""
+      role_capability_allowlist_csv=""
+      role_capability_allowlisted="false"
 
       if command -v yq >/dev/null 2>&1 && [[ -f "$role_runtime_contract" ]]; then
         role_policy_enabled="$(yq e -r '.runtime_roles.execution_policy.enforce_read_only_mutation_block // true' "$role_runtime_contract" 2>/dev/null || echo true)"
@@ -377,7 +380,23 @@ run_cap() {
           fi
         done
 
-        if [[ "$role_is_read_only" -eq 1 || "$role_is_mutating" -eq 0 ]]; then
+        if command -v yq >/dev/null 2>&1 && [[ -f "$role_runtime_contract" ]]; then
+          role_capability_allowlist_csv="$(yq e -r ".runtime_roles.mutating_capability_allowlist_by_role.\"$runtime_role\"[]?" "$role_runtime_contract" 2>/dev/null | paste -sd, -)"
+        fi
+        IFS=',' read -r -a _macr <<< "${role_capability_allowlist_csv:-}"
+        for rr in "${_macr[@]:-}"; do
+          [[ -n "$rr" ]] || continue
+          if [[ "$name" == "$rr" ]]; then
+            role_capability_allowlisted="true"
+            role_is_mutating=1
+            break
+          fi
+        done
+        if [[ "$role_capability_allowlisted" == "true" ]]; then
+          echo "RUNTIME ROLE ALLOWLIST: role=$runtime_role capability=$name"
+        fi
+
+        if [[ "$role_is_mutating" -eq 0 ]]; then
           if [[ -z "$role_policy_override_ref" ]]; then
             echo "BLOCKED: runtime role execution policy"
             echo "Capability: $name ($safety)"
