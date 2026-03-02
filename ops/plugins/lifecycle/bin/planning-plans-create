@@ -6,11 +6,12 @@ set -euo pipefail
 # Usage:
 #   planning-plans-create \
 #     --plan-id PLAN-ID \
-#     --source-loop-id LOOP-ID \
+#     --loop-id LOOP-ID \
 #     --owner @owner \
 #     --horizon later|future \
 #     --review-date YYYY-MM-DD \
 #     --description "..." \
+#     [--source-loop-id LOOP-ID] \
 #     [--target-loop-id LOOP-ID] \
 #     [--activation-trigger manual|date|dependency] \
 #     [--depends-on-loop LOOP-ID] \
@@ -29,12 +30,24 @@ DESCRIPTION=""
 ACTIVATION_TRIGGER="manual"
 DEPENDS_ON_LOOP=""
 LINKED_GAPS=""
+USED_SOURCE_LOOP_ALIAS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
     --plan-id) PLAN_ID="${2:-}"; shift 2 ;;
-    --source-loop-id) SOURCE_LOOP_ID="${2:-}"; shift 2 ;;
+    --loop-id) SOURCE_LOOP_ID="${2:-}"; shift 2 ;;
+    --source-loop-id)
+      SOURCE_LOOP_ID="${2:-}"
+      USED_SOURCE_LOOP_ALIAS=1
+      shift 2
+      ;;
+    --source-loop-id=*)
+      SOURCE_LOOP_ID="${1#*=}"
+      USED_SOURCE_LOOP_ALIAS=1
+      shift
+      ;;
+    --loop-id=*) SOURCE_LOOP_ID="${1#*=}"; shift ;;
     --target-loop-id) TARGET_LOOP_ID="${2:-}"; shift 2 ;;
     --owner) OWNER="${2:-}"; shift 2 ;;
     --horizon) HORIZON="${2:-}"; shift 2 ;;
@@ -45,7 +58,13 @@ while [[ $# -gt 0 ]]; do
     --linked-gaps) LINKED_GAPS="${2:-}"; shift 2 ;;
     -h|--help)
       cat <<'EOF'
-Usage: planning-plans-create --plan-id PLAN-ID --source-loop-id LOOP-ID --owner @owner --horizon later|future --review-date YYYY-MM-DD --description "..." [options]
+Usage: planning-plans-create --plan-id PLAN-ID --loop-id LOOP-ID --owner @owner --horizon later|future --review-date YYYY-MM-DD --description "..." [options]
+
+Canonical loop-binding flag:
+  --loop-id LOOP-ID
+
+Compatibility aliases (supported, but non-canonical):
+  --source-loop-id LOOP-ID
 EOF
       exit 0
       ;;
@@ -54,11 +73,15 @@ EOF
 done
 
 [[ -n "$PLAN_ID" ]] || { echo "FAIL: --plan-id required" >&2; exit 2; }
-[[ -n "$SOURCE_LOOP_ID" ]] || { echo "FAIL: --source-loop-id required" >&2; exit 2; }
+[[ -n "$SOURCE_LOOP_ID" ]] || { echo "FAIL: --loop-id required (or --source-loop-id alias)" >&2; exit 2; }
 [[ -n "$OWNER" ]] || { echo "FAIL: --owner required" >&2; exit 2; }
 [[ -n "$HORIZON" ]] || { echo "FAIL: --horizon required" >&2; exit 2; }
 [[ -n "$REVIEW_DATE" ]] || { echo "FAIL: --review-date required" >&2; exit 2; }
 [[ -n "$DESCRIPTION" ]] || { echo "FAIL: --description required" >&2; exit 2; }
+
+if [[ "$USED_SOURCE_LOOP_ALIAS" -eq 1 ]]; then
+  echo "WARN: --source-loop-id is a compatibility alias; prefer canonical --loop-id." >&2
+fi
 
 case "$HORIZON" in
   later|future) ;;
@@ -174,4 +197,3 @@ print(f"source_loop_id: {source_loop_id}")
 print(f"horizon: {horizon}")
 print("status: deferred")
 PY
-

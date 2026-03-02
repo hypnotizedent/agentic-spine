@@ -679,13 +679,15 @@ capabilities:
       - "--type stale-ssot|missing-entry|agent-behavior|unclear-doc|duplicate-truth|runtime-bug"
       - "--severity low|medium|high|critical"
       - "--description <text> | --description-file <path>"
-      - "--parent-loop LOOP-... (required)"
+      - "--loop-id LOOP-... (required canonical)"
+      - "--parent-loop LOOP-... (compatibility alias)"
+      - "--loop LOOP-... (compatibility alias)"
       - "--batch <yaml>"
       - "--wait-seconds <n>"
       - "--no-commit"
     examples:
-      - "./bin/ops cap run gaps.file -- --id auto --type runtime-bug --severity high --description \"Example\" --discovered-by LOOP-EXAMPLE-20260228 --parent-loop LOOP-EXAMPLE-20260228"
-      - "./bin/ops cap run gaps.file -- --batch /tmp/gaps.yaml --parent-loop LOOP-EXAMPLE-20260228"
+      - "./bin/ops cap run gaps.file -- --id auto --type runtime-bug --severity high --description \"Example\" --discovered-by LOOP-EXAMPLE-20260228 --loop-id LOOP-EXAMPLE-20260228"
+      - "./bin/ops cap run gaps.file -- --batch /tmp/gaps.yaml --loop-id LOOP-EXAMPLE-20260228"
   gaps.next_id:
     description: "Return next available GAP-OP ID from committed registry under lock."
     tags: [loops, gaps]
@@ -953,7 +955,7 @@ capabilities:
       - "--json"
       - "--horizon now|later|future"
       - "--owner @owner"
-      - "--status deferred|promoted"
+      - "--status deferred|promoted|retired|canceled"
   planning.plans.create:
     description: "Create a deferred plan entry in mailroom/state/plans/index.yaml."
     tags: [lifecycle, loops, planning]
@@ -967,7 +969,8 @@ capabilities:
     plane: fabric
     flags:
       - "--plan-id PLAN-*"
-      - "--source-loop-id LOOP-*"
+      - "--loop-id LOOP-* (canonical)"
+      - "--source-loop-id LOOP-* (compatibility alias)"
       - "--owner @owner"
       - "--horizon later|future"
       - "--review-date YYYY-MM-DD"
@@ -990,6 +993,34 @@ capabilities:
       - "--plan-id PLAN-*"
       - "--loop-id LOOP-* (optional)"
       - "--readiness runnable|blocked"
+      - "--reason <text>"
+  planning.plans.retire:
+    description: "Retire a deferred/promoted plan without deleting historical intent."
+    tags: [lifecycle, loops, planning]
+    command: "./ops/plugins/lifecycle/bin/planning-plans-retire"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: loop_gap
+    plane: fabric
+    flags:
+      - "--plan-id PLAN-*"
+      - "--reason <text>"
+  planning.plans.cancel:
+    description: "Cancel a deferred/promoted plan without deleting historical intent."
+    tags: [lifecycle, loops, planning]
+    command: "./ops/plugins/lifecycle/bin/planning-plans-cancel"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: loop_gap
+    plane: fabric
+    flags:
+      - "--plan-id PLAN-*"
       - "--reason <text>"
   gaps.batch.close:
     description: "Close all open gaps linked to a loop in one command."
@@ -7313,7 +7344,7 @@ capabilities:
   # PROPOSALS (mailroom-gated writes)
   # ─────────────────────────────────────────────────────────────────────────
   proposals.submit:
-    description: "Create a new change proposal in mailroom/outbox/proposals/"
+    description: "Create a new change proposal in mailroom/outbox/proposals/ with canonical loop binding and post-submit workflow hints."
     command: "./ops/plugins/proposals/bin/proposals-submit"
     cwd: "$SPINE_CODE"
     safety: mutating
@@ -7323,6 +7354,12 @@ capabilities:
     outputs: ["stdout"]
     domain: loop_gap
     plane: fabric
+    flags:
+      - "\"description\" (positional)"
+      - "--loop-id LOOP-* (canonical)"
+      - "--loop LOOP-* (compatibility alias)"
+    examples:
+      - "./bin/ops cap run proposals.submit -- \"normalize seam wiring\" --loop-id LOOP-SPINE-MASTER-SEAM-CLOSURE-20260302"
   proposals.list:
     description: "List all pending change proposals"
     command: "./ops/plugins/proposals/bin/proposals-list"

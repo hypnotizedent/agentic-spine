@@ -116,14 +116,23 @@ if not isinstance(plans, list):
     raise SystemExit("FAIL: plans index key 'plans' must be a list")
 
 found = False
+previous_status = ""
 for row in plans:
     if not isinstance(row, dict):
         continue
     if str(row.get("plan_id", "")).strip() != plan_id:
         continue
     found = True
+    previous_status = str(row.get("status") or "").strip() or "deferred"
+    if previous_status == "cancelled":
+        previous_status = "canceled"
+    if previous_status in {"retired", "canceled"}:
+        raise SystemExit(
+            f"FAIL: cannot promote plan with terminal status '{previous_status}': {plan_id}"
+        )
     row["horizon"] = "now"
     row["status"] = "promoted"
+    row["promoted_from_status"] = previous_status
     row["promoted_loop_id"] = loop_id
     row["promotion_readiness"] = readiness
     row["promoted_reason"] = reason
@@ -144,6 +153,6 @@ print(f"index: {index_path}")
 print(f"plan_id: {plan_id}")
 print(f"loop_id: {loop_id}")
 print(f"readiness: {readiness}")
+print(f"previous_status: {previous_status}")
 print("status: promoted")
 PY
-

@@ -5,11 +5,12 @@ set -euo pipefail
 #
 # Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \
 #                  --description "desc" --discovered-by "source" \
-#                  [--doc "path"] [--parent-loop "LOOP-ID"] [--loop "LOOP-ID"] \
+#                  [--doc "path"] --loop-id "LOOP-ID" \
+#                  [--parent-loop "LOOP-ID"] [--loop "LOOP-ID"] \
 #                  [--description-file path] [--no-commit|--commit]
 #
 # Batch usage:
-#   gaps-file --batch /path/to/gaps.yaml [--parent-loop LOOP-ID] [--no-commit]
+#   gaps-file --batch /path/to/gaps.yaml --loop-id LOOP-ID [--no-commit]
 #
 # Acquires git-lock, appends to operational.gaps.yaml, commits, releases lock.
 # Validates all required fields and rejects duplicates.
@@ -55,7 +56,7 @@ derive_gap_title() {
 validate_parent_loop() {
   local value="$1"
   [[ "$value" =~ ^LOOP-[A-Z0-9-]+$ ]] || {
-    echo "FAIL: invalid --parent-loop '$value' (expected LOOP-...)" >&2
+    echo "FAIL: invalid loop binding '$value' (expected LOOP-...)" >&2
     exit 2
   }
 }
@@ -64,7 +65,7 @@ require_parent_loop() {
   local value="$1"
   local context="$2"
   if [[ -z "$value" ]]; then
-    echo "FAIL: $context missing parent_loop. Policy requires --parent-loop (no-new-unlinked-gap)." >&2
+    echo "FAIL: $context missing parent_loop. Policy requires --loop-id (no-new-unlinked-gap)." >&2
     exit 2
   fi
   validate_parent_loop "$value"
@@ -184,6 +185,8 @@ append_gap_entry() {
 # Parse arguments
 GAP_ID="" TYPE="" SEVERITY="" DESCRIPTION="" DESCRIPTION_FILE="" DISCOVERED_BY="" PARENT_LOOP="" DOC=""
 BATCH_FILE=""
+USED_PARENT_LOOP_ALIAS=0
+USED_LOOP_ALIAS=0
 NO_COMMIT_DEFAULT_RAW="${GAPS_FILE_NO_COMMIT_DEFAULT:-0}"
 case "$NO_COMMIT_DEFAULT_RAW" in
   1|true|TRUE|yes|YES|on|ON) NO_COMMIT=1 ;;
@@ -204,18 +207,29 @@ while [[ $# -gt 0 ]]; do
     --description)   DESCRIPTION="${2:?--description requires a value}"; shift 2 ;;
     --description-file) DESCRIPTION_FILE="${2:?--description-file requires a value}"; shift 2 ;;
     --discovered-by) DISCOVERED_BY="${2:?--discovered-by requires a value}"; shift 2 ;;
-    --parent-loop)   PARENT_LOOP="${2:?--parent-loop requires a value}"; shift 2 ;;
-    --loop)          PARENT_LOOP="${2:?--loop requires a value}"; shift 2 ;;
+    --loop-id)       PARENT_LOOP="${2:?--loop-id requires a value}"; shift 2 ;;
+    --loop-id=*)     PARENT_LOOP="${1#*=}"; shift ;;
+    --parent-loop)
+      PARENT_LOOP="${2:?--parent-loop requires a value}"
+      USED_PARENT_LOOP_ALIAS=1
+      shift 2
+      ;;
+    --loop)
+      PARENT_LOOP="${2:?--loop requires a value}"
+      USED_LOOP_ALIAS=1
+      shift 2
+      ;;
     --doc)           DOC="${2:?--doc requires a value}"; shift 2 ;;
     -h|--help)
       echo "Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \\"
       echo "                 --description \"desc\" --discovered-by \"source\" \\"
-      echo "                 [--doc \"path\"] --parent-loop \"LOOP-ID\" [--loop \"LOOP-ID\"] \\"
+      echo "                 [--doc \"path\"] --loop-id \"LOOP-ID\" [--parent-loop \"LOOP-ID\"] [--loop \"LOOP-ID\"] \\"
       echo "                 [--description-file path] [--no-commit|--commit]"
       echo ""
-      echo "Batch: gaps-file --batch /path/to/gaps.yaml --parent-loop LOOP-ID [--no-commit|--commit]"
+      echo "Batch: gaps-file --batch /path/to/gaps.yaml --loop-id LOOP-ID [--no-commit|--commit]"
       echo ""
-      echo "Policy: parent_loop is required (no-new-unlinked-gap)."
+      echo "Policy: parent_loop is required (canonical flag: --loop-id)."
+      echo "Compatibility aliases: --parent-loop, --loop."
       echo "Env knob: GAPS_FILE_NO_COMMIT_DEFAULT=1 defaults to staging-only mode."
       echo "Ergonomics: auto-retry lock acquisition up to --wait-seconds (default: 15)."
       echo ""
@@ -225,6 +239,13 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ "$USED_PARENT_LOOP_ALIAS" -eq 1 ]]; then
+  echo "WARN: --parent-loop is a compatibility alias; prefer canonical --loop-id." >&2
+fi
+if [[ "$USED_LOOP_ALIAS" -eq 1 ]]; then
+  echo "WARN: --loop is a compatibility alias; prefer canonical --loop-id." >&2
+fi
 
 [[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || { echo "FAIL: --wait-seconds must be an integer >= 0" >&2; exit 2; }
 

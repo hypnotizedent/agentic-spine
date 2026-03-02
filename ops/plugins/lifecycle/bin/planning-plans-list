@@ -4,7 +4,7 @@ set -euo pipefail
 # planning.plans.list — Read deferred-intent plans index.
 #
 # Usage:
-#   planning-plans-list [--json] [--horizon now|later|future] [--owner @id] [--status deferred|promoted]
+#   planning-plans-list [--json] [--horizon now|later|future] [--owner @id] [--status deferred|promoted|retired|canceled]
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
     --status) FILTER_STATUS="${2:-}"; shift 2 ;;
     -h|--help)
       cat <<'EOF'
-Usage: planning-plans-list [--json] [--horizon now|later|future] [--owner @id] [--status deferred|promoted]
+Usage: planning-plans-list [--json] [--horizon now|later|future] [--owner @id] [--status deferred|promoted|retired|canceled]
 EOF
       exit 0
       ;;
@@ -48,6 +48,12 @@ mode = sys.argv[2]
 filter_horizon = (sys.argv[3] or "").strip()
 filter_owner = (sys.argv[4] or "").strip()
 filter_status = (sys.argv[5] or "").strip()
+valid_statuses = {"deferred", "promoted", "retired", "canceled"}
+
+if filter_status and filter_status not in valid_statuses:
+    raise SystemExit(
+        f"FAIL: --status must be one of {', '.join(sorted(valid_statuses))} (got '{filter_status}')"
+    )
 
 doc = yaml.safe_load(index_path.read_text(encoding="utf-8")) or {}
 plans = doc.get("plans") if isinstance(doc, dict) else []
@@ -101,4 +107,3 @@ for row in rows:
         f"status={row['status']} source={row['source_loop_id']}{tgt}{dep}"
     )
 PY
-

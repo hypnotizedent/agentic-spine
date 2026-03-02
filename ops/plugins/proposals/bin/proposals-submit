@@ -9,14 +9,25 @@ Usage: proposals-submit "description" [--loop-id LOOP_ID]
 
 Create a change proposal in mailroom/outbox/proposals/.
 
-Loop binding is mandatory:
-  - pass --loop-id LOOP_ID, or
-  - set SPINE_LOOP_ID in the environment.
+Canonical loop-binding:
+  - pass --loop-id LOOP_ID
+
+Compatibility alias:
+  - --loop LOOP_ID (accepted with warning)
+
+Fallback:
+  - set SPINE_LOOP_ID in the environment
+
+Post-submit workflow:
+  1) Edit manifest.yaml and declare `changes`.
+  2) Put patch payloads under files/ preserving repo path structure.
+  3) Update receipt.md with why/constraints/outcomes.
 EOF
 }
 
 DESCRIPTION=""
 LOOP_ID_ARG=""
+USED_LOOP_ALIAS=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +42,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --loop-id=*)
       LOOP_ID_ARG="${1#*=}"
+      shift
+      ;;
+    --loop)
+      [[ $# -lt 2 ]] && { echo "ERROR: --loop requires a value" >&2; exit 2; }
+      LOOP_ID_ARG="$2"
+      USED_LOOP_ALIAS=1
+      shift 2
+      ;;
+    --loop=*)
+      LOOP_ID_ARG="${1#*=}"
+      USED_LOOP_ALIAS=1
       shift
       ;;
     -*)
@@ -63,6 +85,10 @@ PROPOSALS_DIR="$SPINE_CODE/mailroom/outbox/proposals"
 AGENT_ID="${SPINE_AGENT_ID:-${USER:-unknown}@$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)}"
 LOOP_ID="${LOOP_ID_ARG:-${SPINE_LOOP_ID:-}}"
 LOOP_SCOPE_FILE="$SPINE_CODE/mailroom/state/loop-scopes/${LOOP_ID}.scope.md"
+
+if [[ "$USED_LOOP_ALIAS" -eq 1 ]]; then
+  echo "WARN: --loop is a compatibility alias; prefer canonical --loop-id." >&2
+fi
 
 if [[ -z "${LOOP_ID:-}" || "${LOOP_ID}" == "null" ]]; then
   echo "ERROR: loop binding required. Set SPINE_LOOP_ID or pass --loop-id LOOP_ID." >&2
@@ -212,6 +238,6 @@ RECEIPT
 echo "Proposal created: $PROPOSAL_DIR"
 echo "Next steps:"
 echo "  Loop binding: $LOOP_ID"
-echo "  1. Edit manifest.yaml to list your changes"
-echo "  2. Add files to files/ directory (preserving path structure)"
-echo "  3. Update receipt.md with details"
+echo "  1. Edit $PROPOSAL_DIR/manifest.yaml to list change entries"
+echo "  2. Add payloads under $PROPOSAL_DIR/files/ (preserve repo paths)"
+echo "  3. Update $PROPOSAL_DIR/receipt.md with execution rationale and evidence"

@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="${SPINE_REPO:-$HOME/code/agentic-spine}"
 SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 CONTRACT="$ROOT/ops/bindings/planning.horizon.contract.yaml"
+PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
 
 GATE_ID="D308"
 FAIL=0
@@ -153,6 +154,50 @@ for scope_file in "$SCOPES_DIR"/*.scope.md; do
     fi
   fi
 done
+
+# Validate deferred-intent plans lifecycle statuses and terminal-state audit fields.
+if [[ -f "$PLANS_INDEX" ]]; then
+  if ! command -v yq >/dev/null 2>&1; then
+    FAIL=1
+    MESSAGES="${MESSAGES}    ${GATE_ID} FAIL: yq is required to validate plans lifecycle status in mailroom/state/plans/index.yaml\n"
+  else
+    plan_count="$(yq e '.plans | length' "$PLANS_INDEX" 2>/dev/null || echo 0)"
+    [[ "$plan_count" =~ ^[0-9]+$ ]] || plan_count=0
+    for ((i=0; i<plan_count; i++)); do
+      plan_id="$(yq e -r ".plans[$i].plan_id // \"\"" "$PLANS_INDEX" 2>/dev/null || echo "")"
+      status="$(yq e -r ".plans[$i].status // \"deferred\"" "$PLANS_INDEX" 2>/dev/null || echo "deferred")"
+      [[ "$status" == "cancelled" ]] && status="canceled"
+      [[ -n "$plan_id" ]] || plan_id="plans[$i]"
+
+      case "$status" in
+        deferred|promoted|retired|canceled) ;;
+        *)
+          FAIL=1
+          MESSAGES="${MESSAGES}    ${GATE_ID} FAIL: ${plan_id}: invalid plan status '${status}' (must be deferred|promoted|retired|canceled)\n"
+          continue
+          ;;
+      esac
+
+      if [[ "$status" == "retired" ]]; then
+        retired_at="$(yq e -r ".plans[$i].retired_at_utc // \"\"" "$PLANS_INDEX" 2>/dev/null || echo "")"
+        retired_reason="$(yq e -r ".plans[$i].retired_reason // \"\"" "$PLANS_INDEX" 2>/dev/null || echo "")"
+        if [[ -z "$retired_at" || -z "$retired_reason" ]]; then
+          FAIL=1
+          MESSAGES="${MESSAGES}    ${GATE_ID} FAIL: ${plan_id}: status=retired requires retired_at_utc and retired_reason\n"
+        fi
+      fi
+
+      if [[ "$status" == "canceled" ]]; then
+        canceled_at="$(yq e -r ".plans[$i].canceled_at_utc // \"\"" "$PLANS_INDEX" 2>/dev/null || echo "")"
+        canceled_reason="$(yq e -r ".plans[$i].canceled_reason // \"\"" "$PLANS_INDEX" 2>/dev/null || echo "")"
+        if [[ -z "$canceled_at" || -z "$canceled_reason" ]]; then
+          FAIL=1
+          MESSAGES="${MESSAGES}    ${GATE_ID} FAIL: ${plan_id}: status=canceled requires canceled_at_utc and canceled_reason\n"
+        fi
+      fi
+    done
+  fi
+fi
 
 if [[ "$FAIL" -eq 1 ]]; then
   printf '%b' "$MESSAGES" >&2
