@@ -1,0 +1,59 @@
+contract: HOME_AUTHORITY_CONTRACT_V1
+version: "1.0"
+status: pending
+created: "2026-03-02"
+authority_loop: LOOP-HOME-CANONICAL-REALIGNMENT-20260302
+description: "Authority contract for Home infrastructure domain"
+
+domain:
+  id: home
+  label: "Home Infrastructure"
+  owner: "@ronny"
+  location: home
+  access_model: lan_only
+
+boundaries:
+  network:
+    primary_gateway: "10.0.0.1"
+    ha_host: "10.0.0.100"
+    ha_port: 8123
+    z2m_coordinator: "10.0.0.52"
+    z2m_coordinator_port: 6638
+    tailscale_access: false
+    note: "Home LAN only — no Tailscale access to HA"
+
+  services:
+    - id: home-assistant
+      host: "10.0.0.100"
+      port: 8123
+      protocol: http
+      auth: bearer_token
+      credential_path: "/spine/home/HA_API_TOKEN"
+    - id: zigbee2mqtt
+      host: "10.0.0.100"
+      access_via: home-assistant
+      note: "Z2M accessed through HA integration, not direct API"
+    - id: unifi-controller
+      host: TBD
+      port: TBD
+      note: "To be populated on-site"
+
+  verify_ring:
+    ring_name: home-runtime
+    gates: [D113, D114, D115, D118, D119, D120]
+    skip_condition: "HA unreachable (offsite)"
+    isolation_from: spine-core-fast
+
+inventories:
+  - path: ops/bindings/home.hardware.inventory.yaml
+    scope: physical_devices
+  - path: ops/bindings/home.unifi.network.inventory.yaml
+    scope: network_equipment
+  - path: ops/bindings/home.proxmox.inventory.yaml
+    scope: compute_nodes
+  - path: ops/bindings/home.assistant.catalog.snapshot.yaml
+    scope: ha_integrations
+  - path: ops/bindings/home.automation.registry.yaml
+    scope: ha_automations
+  - path: ops/bindings/home.dashboard.registry.yaml
+    scope: ha_dashboards
