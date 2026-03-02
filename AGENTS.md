@@ -16,11 +16,11 @@ scope: agent-runtime-contract
 <!-- ENTRY_SURFACE_GATE_METADATA_START -->
 # ENTRY SURFACE GATE METADATA (generated)
 source_registry: ops/bindings/gate.registry.yaml
-registry_updated: 2026-03-01
-gate_count_total: 309
-gate_count_active: 308
+registry_updated: 2026-03-02
+gate_count_total: 312
+gate_count_active: 311
 gate_count_retired: 1
-max_gate_id: D311
+max_gate_id: D314
 <!-- ENTRY_SURFACE_GATE_METADATA_END -->
 
 ## Session Entry

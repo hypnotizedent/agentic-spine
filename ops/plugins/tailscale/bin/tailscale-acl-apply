@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+TAILNET="${TAILSCALE_TAILNET:-taile9480.ts.net}"
+API_BASE="https://api.tailscale.com/api/v2"
+ACL_POLICY="$ROOT/ops/bindings/tailscale.acl.policy.hujson"
+
+# OAuth required for ACL writes (API keys are read-only for policy)
+if [[ -z "${TAILSCALE_OAUTH_CLIENT_ID:-}" ]] || [[ -z "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]]; then
+  echo "STOP: TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET required for ACL apply" >&2
+  exit 2
+fi
+
+if [[ ! -f "$ACL_POLICY" ]]; then
+  echo "STOP: local policy file missing: $ACL_POLICY" >&2
+  exit 1
+fi
+
+# Parse arguments
+DRY_RUN=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    --) shift ;;
+    *) shift ;;
+  esac
+done
+
+echo "tailscale.acl.apply"
+echo "tailnet: $TAILNET"
+echo "policy_file: $ACL_POLICY"
+echo "dry_run: $DRY_RUN"
+
+# Obtain OAuth bearer token
+token_response=$(curl -fsS \
+  -X POST \
+  -u "${TAILSCALE_OAUTH_CLIENT_ID}:${TAILSCALE_OAUTH_CLIENT_SECRET}" \
+  -d "grant_type=client_credentials" \
+  "https://api.tailscale.com/api/v2/oauth/token" 2>&1) || {
+  echo "oauth: FAIL"
+  echo "error: $token_response"
+  exit 1
+}
+
+BEARER=$(echo "$token_response" | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])" 2>/dev/null) || {
+  echo "oauth: FAIL (no access_token in response)"
+  exit 1
+}
+echo "oauth: OK"
+
+# Validate first
+policy_content=$(cat "$ACL_POLICY")
+val_response=$(curl -fsS \
+  -X POST \
+  -H "Authorization: Bearer $BEARER" \
+  -H "Content-Type: application/hujson" \
+  -d "$policy_content" \
+  "${API_BASE}/tailnet/${TAILNET}/acl/validate" 2>&1) || {
+  echo "validate: FAIL"
+  echo "error: $val_response"
+  exit 1
+}
+
+# Check validation errors
+python3 -c "
+import json, sys
+try:
+    data = json.loads('''$(echo "$val_response" | sed "s/'/\\\\'/g")''')
+    errors = data if isinstance(data, list) else data.get('errors', data.get('message', []))
+    if errors and errors != []:
+        print('validate: FAIL')
+        if isinstance(errors, list):
+            for e in errors:
+                print(f'  - {e}')
+        else:
+            print(f'  - {errors}')
+        sys.exit(1)
+except:
+    pass
+print('validate: OK')
+" || exit 1
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "mode: dry-run (validation only, no apply)"
+  echo "status: PASS"
+  exit 0
+fi
+
+# Apply the policy
+apply_response=$(curl -fsS \
+  -X POST \
+  -H "Authorization: Bearer $BEARER" \
+  -H "Content-Type: application/hujson" \
+  -H "If-Match: \"\"" \
+  -d "$policy_content" \
+  "${API_BASE}/tailnet/${TAILNET}/acl" 2>&1) || {
+  echo "apply: FAIL"
+  echo "error: $apply_response"
+  exit 1
+}
+
+echo "apply: OK"
+echo "status: PASS"
+echo "note: ACL policy applied to $TAILNET — verify via tailscale.acl.status"

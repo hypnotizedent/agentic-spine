@@ -1,0 +1,71 @@
+// Canonical Tailscale ACL Policy — taile9480.ts.net
+// Authority: ops/bindings/tailscale.acl.policy.hujson
+// Contract: docs/CANONICAL/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml
+// Gate: D312 tailscale-acl-policy-integrity-lock
+//
+// This file is the SSOT for Tailscale network policy.
+// Changes MUST go through git → validate → apply workflow.
+// Direct admin console edits are prohibited once GitOps is active.
+//
+// Apply: ./bin/ops cap run tailscale.acl.apply
+// Validate: ./bin/ops cap run tailscale.acl.validate
+// Status: ./bin/ops cap run tailscale.acl.status
+{
+  // ACL grants (preferred over legacy ACLs per Tailscale guidance)
+  "grants": [
+    {
+      // Shop infrastructure: full access between server nodes
+      "src": ["tag:site-shop"],
+      "dst": ["tag:site-shop"],
+      "ip":  ["*"],
+    },
+    {
+      // Home infrastructure: full access between home nodes
+      "src": ["tag:site-home"],
+      "dst": ["tag:site-home"],
+      "ip":  ["*"],
+    },
+    {
+      // Operator devices: full access to all nodes
+      "src": ["autogroup:admin"],
+      "dst": ["autogroup:self", "tag:site-shop", "tag:site-home"],
+      "ip":  ["*"],
+    },
+  ],
+
+  // Tag ownership: who can assign tags
+  "tagOwners": {
+    "tag:site-shop":    ["autogroup:admin"],
+    "tag:site-home":    ["autogroup:admin"],
+    "tag:role-server":  ["autogroup:admin"],
+    "tag:role-client":  ["autogroup:admin"],
+    "tag:role-infra":   ["autogroup:admin"],
+  },
+
+  // SSH policy: noninteractive access for tagged servers
+  "ssh": [
+    {
+      "action": "accept",
+      "src":    ["autogroup:admin"],
+      "dst":    ["tag:site-shop", "tag:site-home"],
+      "users":  ["autogroup:nonroot", "root"],
+    },
+  ],
+
+  // ACL tests: validate policy behavior
+  "tests": [
+    {
+      "src":    "tag:site-shop",
+      "accept": ["tag:site-shop:*"],
+    },
+    {
+      "src":    "tag:site-home",
+      "accept": ["tag:site-home:*"],
+    },
+  ],
+
+  // DNS configuration reference (informational, actual DNS is Cloudflare/Pi-hole)
+  // MagicDNS is enabled for *.ts.net resolution only
+  // Pi-hole handles LAN DNS at home site
+  // Cloudflare handles public DNS for all zones
+}

@@ -88,12 +88,128 @@ preflight_policy:
   out_of_scope_drift_handling: OBSERVE_ONLY
   cleanup_lane_required_for_ambient_drift: true
 
+acl_policy:
+  canonical_file: "ops/bindings/tailscale.acl.policy.hujson"
+  format: hujson
+  workflow:
+    validate: "tailscale.acl.validate"
+    apply: "tailscale.acl.apply"
+    status: "tailscale.acl.status"
+  policy:
+    - "All ACL changes must go through git → validate → apply workflow."
+    - "Direct admin console ACL edits are prohibited once GitOps is active."
+    - "OAuth client credentials required for apply (API keys are read-only for policy)."
+  gate: D312
+
+enrollment:
+  default_mode: oauth_scoped
+  oauth_preferred: true
+  enrollment_command: "tailscale up --authkey=${AUTH_KEY} --hostname=${HOSTNAME}"
+  paths:
+    primary:
+      name: oauth_scoped_enrollment
+      description: "Mint a short-lived auth key via OAuth client credentials, enroll with --authkey."
+      steps:
+        - "Obtain OAuth bearer token via TAILSCALE_OAUTH_CLIENT_ID + TAILSCALE_OAUTH_CLIENT_SECRET"
+        - "POST /api/v2/tailnet/{tailnet}/keys with capabilities.devices.create.reusable=false"
+        - "Use returned key with tailscale up --authkey"
+      requires:
+        - TAILSCALE_OAUTH_CLIENT_ID
+        - TAILSCALE_OAUTH_CLIENT_SECRET
+      key_lifetime: "short-lived (single use, expires)"
+    emergency_fallback:
+      name: static_reusable_auth_key
+      description: "Use pre-provisioned reusable auth key from Infisical. Emergency only."
+      requires:
+        - TAILSCALE_AUTH_KEY
+      key_lifetime: "reusable (rotate manually)"
+      constraints:
+        - "Only use when OAuth path is unavailable (API outage, credential rotation in progress)."
+        - "Document usage in gap registry when invoked."
+  gate: D313
+
+dns_authority:
+  status: authoritative
+  scope: resolver-ownership
+  resolvers:
+    magicdns:
+      scope: "*.ts.net internal name resolution"
+      authority: tailscale
+      notes:
+        - "MagicDNS resolves device-name.taile9480.ts.net to Tailscale IPs."
+        - "Enabled by default. Used for Tailscale-native FQDN lookups."
+        - "NOT used for public DNS or service discovery."
+    pihole:
+      scope: "Home LAN DNS filtering and ad blocking"
+      authority: self-hosted
+      location: "pihole-home (home site, LAN-only)"
+      notes:
+        - "Primary DNS for home network devices."
+        - "Upstream: Cloudflare 1.1.1.1 (DOH)"
+        - "NOT authoritative for public zones."
+    cloudflare:
+      scope: "Public DNS for all owned zones"
+      authority: cloudflare
+      zones: 7
+      notes:
+        - "Authoritative nameserver for ronny.works, mintprints.com, mintprints.co, hantash.com, hypnotized*.{com,clothing,design}"
+        - "All public DNS records managed via Cloudflare dashboard or cloudflare.dns.record.set capability."
+        - "DNSSEC enabled where supported."
+    public_fallback:
+      scope: "Fallback for non-authoritative queries"
+      resolvers: ["1.1.1.1", "8.8.8.8"]
+      notes:
+        - "Used by VMs for general internet resolution."
+        - "NOT used for zone-authoritative lookups."
+  anti_patterns:
+    - "Never use MagicDNS for public service discovery."
+    - "Never use Pi-hole as authoritative for external zones."
+    - "Never hardcode DNS resolver IPs in application config."
+  gate: D314
+
+cloudflare_tailscale_coexistence:
+  status: authoritative
+  scope: routing-boundary
+  principles:
+    - "Cloudflare owns public ingress: DNS zones, tunnel routes, WAF, TLS termination."
+    - "Tailscale owns private machine access: device-to-device, SSH, internal API calls."
+    - "No service should be reachable via both Cloudflare tunnel AND direct Tailscale IP from the public internet."
+  boundaries:
+    cloudflare_tunnel:
+      purpose: "Public HTTPS ingress for browser-accessible services"
+      routing: "CF DNS CNAME → CF tunnel → cloudflared on infra-core → backend service"
+      examples:
+        - "finances.ronny.works → firefly-iii on finance-stack"
+        - "photos.ronny.works → immich on immich VM"
+        - "jellyfin.ronny.works → jellyfin on streaming-stack"
+      auth: "CF Access service token or native app auth"
+    tailscale_direct:
+      purpose: "Private machine-to-machine access for automation and SSH"
+      routing: "Tailscale IP (100.x.x.x) direct or LAN IP (192.168.1.x) for same-site"
+      examples:
+        - "Gate SSH probes to shop VMs via LAN IP"
+        - "Capability scripts accessing service APIs"
+        - "Scheduler health checks"
+      auth: "SSH key auth via openssh_batch"
+    lan_first:
+      purpose: "Same-site access prefers LAN over Tailscale"
+      routing: "ssh-resolve.sh resolves to LAN IP when access_policy=lan_first"
+      contract: "ops/bindings/tailscale.ssh.lifecycle.contract.yaml"
+  overlap_policy:
+    - "cloudflared uses Tailscale IPs in extra_hosts for backend routing — this is INTERNAL to CF tunnel, not public exposure."
+    - "Services with both CF tunnel and Tailscale access (e.g., HA) are documented in DOMAIN_ROUTING_REGISTRY.yaml."
+    - "New services must declare routing_layer in DOMAIN_ROUTING_REGISTRY.yaml before deployment."
+  gate: D314
+
 lifecycle_bindings:
   ssh_targets: "ops/bindings/ssh.targets.yaml"
   vm_lifecycle: "ops/bindings/vm.lifecycle.yaml"
   service_registry: "docs/governance/SERVICE_REGISTRY.yaml"
   workbench_ssh_contract: "ops/bindings/workbench.ssh.attach.contract.yaml"
   tailnet_snapshot: "ops/bindings/tailscale.tailnet.snapshot.yaml"
+  acl_policy: "ops/bindings/tailscale.acl.policy.hujson"
+  cloudflare_inventory: "ops/bindings/cloudflare.inventory.yaml"
+  domain_routing_registry: "docs/governance/DOMAIN_ROUTING_REGISTRY.yaml"
 
 tombstones:
   - id: TS-LEGACY-001
@@ -110,6 +226,29 @@ tombstones:
     state: tombstoned_for_machine_monitoring
     replacement: "docs/governance/TAILSCALE_SSH_LIFECYCLE_OPERATIONS_RUNBOOK.md"
     note: "Legacy helper can remain for human bootstrap context, but not for machine polling flows."
+
+control_plane_integration:
+  status: planned
+  scope: webhook-and-audit-log-observability
+  capability: tailscale.integration.status
+  webhooks:
+    status: operator_action_required
+    events:
+      - nodeCreated
+      - nodeDeleted
+      - nodeKeyExpiringInOneDay
+      - policyUpdate
+    receiver:
+      endpoint: "TBD — n8n webhook or dedicated receiver on automation-stack"
+      auth: "webhook secret in Infisical"
+    admin_console_action: "Settings → Webhooks → Add endpoint"
+  audit_log:
+    status: operator_action_required
+    streaming:
+      destination: "TBD — log aggregator on observability-stack"
+      format: json
+    admin_console_action: "Settings → Logs → Configure streaming"
+  operator_actions_artifact: "mailroom/state/tailscale-audit/operator-actions-20260302.yaml"
 
 promotion_policy:
   default_gate_mode: enforce

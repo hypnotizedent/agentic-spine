@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+TAILNET="${TAILSCALE_TAILNET:-taile9480.ts.net}"
+API_BASE="https://api.tailscale.com/api/v2"
+
+if [[ -z "${TAILSCALE_API_KEY:-}" ]]; then
+  echo "STOP: TAILSCALE_API_KEY missing" >&2
+  exit 2
+fi
+
+ACL_POLICY="$ROOT/ops/bindings/tailscale.acl.policy.hujson"
+
+echo "tailscale.acl.status"
+echo "tailnet: $TAILNET"
+echo "local_policy: $ACL_POLICY"
+echo "local_exists: $([[ -f "$ACL_POLICY" ]] && echo true || echo false)"
+
+# Fetch current ACL from API
+response=$(curl -fsS \
+  -u "${TAILSCALE_API_KEY}:" \
+  -H "Accept: application/hujson" \
+  "${API_BASE}/tailnet/${TAILNET}/acl" 2>&1) || {
+  echo "api_fetch: FAIL"
+  echo "error: $response"
+  exit 1
+}
+
+echo "api_fetch: OK"
+
+# Count policy elements
+grants=$(echo "$response" | python3 -c "
+import json, sys, re
+# Strip HuJSON comments and trailing commas for parsing
+text = sys.stdin.read()
+text = re.sub(r'//[^\n]*', '', text)
+text = re.sub(r',(\s*[}\]])', r'\1', text)
+try:
+    data = json.loads(text)
+    print(f'grants: {len(data.get(\"grants\", data.get(\"acls\", [])))}')
+    print(f'tag_owners: {len(data.get(\"tagOwners\", {}))}')
+    print(f'ssh_rules: {len(data.get(\"ssh\", []))}')
+    print(f'tests: {len(data.get(\"tests\", []))}')
+except Exception as e:
+    print(f'parse_error: {e}')
+" 2>&1)
+
+echo "$grants"
+
+# Check if local file matches remote (content comparison)
+if [[ -f "$ACL_POLICY" ]]; then
+  local_stripped=$(python3 -c "
+import re, sys
+text = open('$ACL_POLICY').read()
+text = re.sub(r'//[^\n]*', '', text)
+text = re.sub(r',(\s*[}\]])', r'\1', text)
+text = re.sub(r'\s+', '', text)
+print(text)
+" 2>/dev/null || echo "PARSE_ERROR")
+  remote_stripped=$(echo "$response" | python3 -c "
+import re, sys
+text = sys.stdin.read()
+text = re.sub(r'//[^\n]*', '', text)
+text = re.sub(r',(\s*[}\]])', r'\1', text)
+text = re.sub(r'\s+', '', text)
+print(text)
+" 2>/dev/null || echo "PARSE_ERROR")
+  if [[ "$local_stripped" == "$remote_stripped" ]]; then
+    echo "parity: MATCH"
+  else
+    echo "parity: DRIFT"
+    echo "note: local policy differs from remote — run tailscale.acl.apply to sync"
+  fi
+else
+  echo "parity: MISSING_LOCAL"
+fi

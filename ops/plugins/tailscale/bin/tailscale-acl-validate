@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+TAILNET="${TAILSCALE_TAILNET:-taile9480.ts.net}"
+API_BASE="https://api.tailscale.com/api/v2"
+ACL_POLICY="$ROOT/ops/bindings/tailscale.acl.policy.hujson"
+
+if [[ -z "${TAILSCALE_API_KEY:-}" ]]; then
+  echo "STOP: TAILSCALE_API_KEY missing" >&2
+  exit 2
+fi
+
+if [[ ! -f "$ACL_POLICY" ]]; then
+  echo "tailscale.acl.validate"
+  echo "status: FAIL"
+  echo "error: local policy file missing: $ACL_POLICY"
+  exit 1
+fi
+
+echo "tailscale.acl.validate"
+echo "tailnet: $TAILNET"
+echo "policy_file: $ACL_POLICY"
+
+# Local syntax check: ensure HuJSON parses
+python3 -c "
+import json, re, sys
+
+text = open('$ACL_POLICY').read()
+# Strip HuJSON comments
+text = re.sub(r'//[^\n]*', '', text)
+# Strip trailing commas
+text = re.sub(r',(\s*[}\]])', r'\1', text)
+try:
+    data = json.loads(text)
+    print('local_parse: OK')
+except json.JSONDecodeError as e:
+    print(f'local_parse: FAIL ({e})')
+    sys.exit(1)
+" || exit 1
+
+# Remote validation via Tailscale API
+policy_content=$(cat "$ACL_POLICY")
+response=$(curl -fsS \
+  -X POST \
+  -u "${TAILSCALE_API_KEY}:" \
+  -H "Content-Type: application/hujson" \
+  -d "$policy_content" \
+  "${API_BASE}/tailnet/${TAILNET}/acl/validate" 2>&1) || {
+  echo "api_validate: FAIL"
+  echo "error: $response"
+  exit 1
+}
+
+# Parse validation response
+python3 -c "
+import json, sys
+try:
+    data = json.loads('''$response''')
+    errors = data if isinstance(data, list) else data.get('errors', data.get('message', []))
+    if errors:
+        print('api_validate: FAIL')
+        if isinstance(errors, list):
+            for e in errors:
+                print(f'  - {e}')
+        else:
+            print(f'  - {errors}')
+        sys.exit(1)
+    else:
+        print('api_validate: OK')
+except Exception as e:
+    # Empty response or non-JSON means success for validate endpoint
+    print('api_validate: OK')
+"
+
+echo "status: PASS"

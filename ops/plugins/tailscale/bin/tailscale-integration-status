@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+AUTHORITY="$ROOT/docs/CANONICAL/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml"
+OPERATOR_ACTIONS="$ROOT/mailroom/state/tailscale-audit/operator-actions-20260302.yaml"
+
+echo "tailscale.integration.status"
+
+command -v yq >/dev/null 2>&1 || { echo "STOP: yq missing" >&2; exit 2; }
+
+if [[ ! -f "$AUTHORITY" ]]; then
+  echo "status: FAIL"
+  echo "error: authority contract missing"
+  exit 1
+fi
+
+# Read integration status from authority contract
+integration_status=$(yq -r '.control_plane_integration.status // "missing"' "$AUTHORITY" 2>/dev/null || echo "missing")
+webhook_status=$(yq -r '.control_plane_integration.webhooks.status // "missing"' "$AUTHORITY" 2>/dev/null || echo "missing")
+audit_status=$(yq -r '.control_plane_integration.audit_log.status // "missing"' "$AUTHORITY" 2>/dev/null || echo "missing")
+
+echo "integration_status: $integration_status"
+echo "webhooks: $webhook_status"
+echo "audit_log: $audit_status"
+
+# List webhook events
+events=$(yq -r '.control_plane_integration.webhooks.events[]?' "$AUTHORITY" 2>/dev/null || true)
+if [[ -n "$events" ]]; then
+  echo "webhook_events:"
+  while IFS= read -r event; do
+    echo "  - $event"
+  done <<< "$events"
+fi
+
+# Check operator actions artifact
+if [[ -f "$OPERATOR_ACTIONS" ]]; then
+  pending=$(yq -r '[.actions[] | select(.status == "pending")] | length' "$OPERATOR_ACTIONS" 2>/dev/null || echo 0)
+  completed=$(yq -r '[.actions[] | select(.status == "completed")] | length' "$OPERATOR_ACTIONS" 2>/dev/null || echo 0)
+  echo "operator_actions:"
+  echo "  pending: $pending"
+  echo "  completed: $completed"
+  echo "  artifact: $OPERATOR_ACTIONS"
+else
+  echo "operator_actions: no artifact"
+fi
+
+echo "status: OK"
