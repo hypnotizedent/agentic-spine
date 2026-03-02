@@ -7,6 +7,8 @@ scope: communications
 priority: high
 horizon: future
 execution_readiness: blocked
+blocked_by: "Future horizon — requires research validation and operator approval before execution planning"
+next_review: "2026-04-01"
 objective: Plan and design the Inbox Shield system - an AI-powered communication buffer that intercepts inbound communications (calls, SMS, email) and uses fine-tuned models to auto-reply, only escalating to human when necessary.
 ---
 

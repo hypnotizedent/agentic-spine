@@ -8,6 +8,7 @@ priority: high
 horizon: now
 execution_readiness: blocked
 blocked_by: "Overnight intake — requires operator review and approval before execution"
+next_review: "2026-03-09"
 objective: Create credit card benefits tracker to prevent expiring credits - proactive reminders before benefits expire
 ---
 

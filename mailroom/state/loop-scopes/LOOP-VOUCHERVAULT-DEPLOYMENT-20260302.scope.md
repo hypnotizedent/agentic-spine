@@ -6,7 +6,9 @@ owner: "@ronny"
 scope: vouchervault
 priority: medium
 horizon: later
-execution_readiness: runnable
+execution_readiness: blocked
+blocked_by: "Deferred to later horizon — requires operator promotion to horizon=now before execution"
+next_review: "2026-04-01"
 objective: Deploy VoucherVault self-hosted gift card management system with OIDC SSO integration
 ---
 
