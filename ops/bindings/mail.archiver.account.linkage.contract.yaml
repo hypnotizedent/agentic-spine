@@ -1,8 +1,8 @@
 # Status: authoritative
 # Last verified: 2026-03-01
 
-version: 2
-updated_at: "2026-03-01"
+version: 3
+updated_at: "2026-03-02"
 owner: "@ronny"
 scope: mail-archiver-account-linkage
 
@@ -112,6 +112,45 @@ accounts:
           note: "EWS full_access_as_app export of Exchange Online Archive (In-Place Archive)"
       total_imported: 77803
       note: "Both primary mailbox (Graph API) and archive mailbox (EWS) imported. No live IMAP sync — archive-only lane."
+
+onboarding:
+  description: "Turnkey checklist for adding a new email account to mail-archiver."
+  required_fields:
+    - id
+    - provider
+    - mailbox
+    - source_kind
+    - lane_type
+    - connection
+    - sync.state
+  steps:
+    - "1. Decide lane_type: live-sync (IMAP) or import-only (takeout/export)."
+    - "2. Provision credentials in Infisical at /spine/services/mail-archiver/."
+    - "3. Add account entry to this contract with all required_fields."
+    - "4. Configure account in mail-archiver web UI (http://100.115.16.37:5100/)."
+    - "5. For live-sync: set cadence_cron + verify first sync via MailAccounts.LastSync."
+    - "6. For import-only: run import, then write completion artifact to mailroom/state/communications/."
+    - "7. Commit contract update with governed evidence."
+    - "8. Run: ./bin/ops cap run verify.pack.run communications"
+  provider_notes:
+    gmail:
+      auth: "App Password (requires 2FA). Generate at myaccount.google.com/apppasswords."
+      imap: "imap.gmail.com:993 TLS"
+      live_sync_ready: true
+      note: "Enable IMAP in Gmail Settings > Forwarding and POP/IMAP."
+    icloud:
+      auth: "App-Specific Password (requires 2FA). Generate at appleid.apple.com."
+      imap: "imap.mail.me.com:993 TLS"
+      live_sync_ready: true
+    microsoft:
+      auth: "OAuth2 client credentials (basic auth deprecated). Azure AD app registration required."
+      imap: "outlook.office365.com:993 TLS (OAuth2 SASL XOAUTH2 only)"
+      live_sync_ready: false
+      note: "Live-sync blocked by OAuth2 IMAP complexity. Use Graph API delta sync or periodic EWS re-export instead."
+    stalwart:
+      auth: "Password (self-hosted, Infisical-managed)."
+      imap: "100.115.16.37:993 TLS (local Stalwart)"
+      live_sync_ready: true
 
 evidence:
   verify_commands:
