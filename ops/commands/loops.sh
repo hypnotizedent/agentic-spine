@@ -164,7 +164,7 @@ list_loops() {
 
         # Skip non-loop scope files (e.g. status: authoritative)
         case "$status" in
-            active|draft|open|closed) ;;
+            active|draft|open|closed|planned) ;;
             *) continue ;;
         esac
 
@@ -329,6 +329,7 @@ if not scopes_dir.is_dir():
     sys.exit(0)
 
 open_count = 0
+planned_count = 0
 closed_count = 0
 total = 0
 severity_counts = Counter()
@@ -352,7 +353,7 @@ for f in sorted(scopes_dir.glob("*.scope.md")):
             fm[key.strip()] = val.strip().strip('"')
 
     status = fm.get("status", "")
-    if status not in ("active", "draft", "open", "closed"):
+    if status not in ("active", "draft", "open", "closed", "planned"):
         continue
 
     total += 1
@@ -365,13 +366,16 @@ for f in sorted(scopes_dir.glob("*.scope.md")):
         owner_counts[owner] += 1
         if fm.get("execution_mode", "") == "background":
             background_open.append(fm.get("loop_id", f.stem))
+    elif status == "planned":
+        planned_count += 1
     elif status == "closed":
         closed_count += 1
 
 print("By Status:")
-print(f"  Open:   {open_count}")
-print(f"  Closed: {closed_count}")
-print(f"  Total:  {total}")
+print(f"  Open:    {open_count}")
+print(f"  Planned: {planned_count}")
+print(f"  Closed:  {closed_count}")
+print(f"  Total:   {total}")
 print(f"  Background Open: {len(background_open)}")
 print()
 

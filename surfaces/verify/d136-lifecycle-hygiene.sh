@@ -107,6 +107,7 @@ gaps_doc = yq_json(gaps_file, ".") or {}
 gaps = gaps_doc.get("gaps", []) if isinstance(gaps_doc, dict) else []
 
 closed_loops: set[str] = set()
+planned_loops: set[str] = set()
 if scopes_dir.is_dir():
     for scope_file in sorted(scopes_dir.glob("*.scope.md")):
         text = scope_file.read_text(encoding="utf-8", errors="ignore")
@@ -126,6 +127,8 @@ if scopes_dir.is_dir():
                 loop_id = line.split(":", 1)[1].strip().strip('"')
         if status == "closed" and loop_id:
             closed_loops.add(loop_id)
+        elif status == "planned" and loop_id:
+            planned_loops.add(loop_id)
 
 missing_required: list[tuple[str, str]] = []
 orphan_open: list[tuple[str, str]] = []
@@ -146,6 +149,8 @@ for gap in gaps:
     if status == "open" and deferred_to_repo:
         continue
 
+    # Gaps linked to closed loops are orphaned.
+    # Gaps linked to planned loops are deferred (not orphaned).
     if status == "open" and parent_loop_str and parent_loop_str in closed_loops:
         orphan_open.append((gap_id, parent_loop_str))
 

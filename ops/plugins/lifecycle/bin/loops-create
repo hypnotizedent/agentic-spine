@@ -58,6 +58,13 @@ case "$READINESS" in
   *) echo "FAIL: --readiness must be runnable or blocked (got '$READINESS')" >&2; exit 2 ;;
 esac
 
+# Boundary model enforcement: active loops must be horizon=now.
+# Deferred work (later/future) creates with status=planned, not active.
+# See: planning.horizon.contract.yaml boundary_model.loop
+if [[ "$HORIZON" != "now" ]]; then
+  echo "NOTE: horizon=${HORIZON} — loop will be created with status=planned (deferred intent)" >&2
+fi
+
 # Normalize name:
 # - uppercase
 # - collapse separators
@@ -105,6 +112,8 @@ sed \
 # Override horizon/readiness if non-default values specified
 if [[ "$HORIZON" != "now" ]]; then
   sed -i '' "s/^horizon: now$/horizon: ${HORIZON}/" "$SCOPE_FILE"
+  # Boundary model: deferred loops get status=planned, not active
+  sed -i '' "s/^status: active$/status: planned/" "$SCOPE_FILE"
 fi
 if [[ "$READINESS" != "runnable" ]]; then
   sed -i '' "s/^execution_readiness: runnable$/execution_readiness: ${READINESS}/" "$SCOPE_FILE"
