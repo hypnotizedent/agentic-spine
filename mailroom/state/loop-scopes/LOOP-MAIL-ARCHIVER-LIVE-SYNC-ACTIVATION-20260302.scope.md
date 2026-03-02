@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MAIL-ARCHIVER-LIVE-SYNC-ACTIVATION-20260302
 created: 2026-03-02
-status: active
+status: closed
 owner: "@ronny"
 scope: mail
 priority: high

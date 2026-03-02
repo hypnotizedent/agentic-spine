@@ -59,16 +59,23 @@ accounts:
     provider: gmail
     mailbox: hypnotizedent@gmail.com
     source_kind: external
-    lane_type: import-only
+    lane_type: live-sync
     connection:
-      protocol: import
-      import_method: google-takeout-mbox
+      protocol: imap
+      host: imap.gmail.com
+      port: 993
+      security: tls
+      auth_method: app-password
+      username_ref: infisical://spine/services/mail-archiver/GMAIL_PRIMARY_USERNAME
+      password_ref: infisical://spine/services/mail-archiver/GMAIL_PRIMARY_APP_PASSWORD
     sync:
       state: active
-      import_complete: true
-      import_completion_date: "2026-02-26"
-      total_imported: 223631
-      note: "Gmail Takeout MBOX import complete. No live IMAP sync — archive-only lane."
+      cadence_cron: "*/15 * * * *"
+      backfill_enabled: true
+      import_history:
+        takeout_import_date: "2026-02-26"
+        takeout_total_imported: 223631
+        note: "Gmail Takeout MBOX import completed first, then live IMAP sync activated 2026-03-02."
 
   - id: icloud-primary
     db_account_id: 4
@@ -91,27 +98,32 @@ accounts:
 
   - id: microsoft-primary
     db_account_id: 3
-    provider: microsoft-outlook
+    provider: microsoft-m365
     mailbox: ronny@mintprints.com
     source_kind: external
-    lane_type: import-only
+    lane_type: live-sync
     connection:
-      protocol: import
-      import_method: graph-api-mime-export + ews-archive-export
+      protocol: m365-graph-api
+      auth_method: client-credentials-oauth2
+      client_id_ref: infisical://spine/platform/security/AZURE_CLIENT_ID
+      client_secret_ref: infisical://spine/platform/security/AZURE_CLIENT_SECRET
+      tenant_id_ref: infisical://spine/platform/security/AZURE_TENANT_ID
     sync:
       state: active
-      import_complete: true
-      import_lanes:
-        - lane: graph-api-primary
-          completed: "2026-02-26"
-          messages: 9087
-          note: "Graph API /me/messages MIME export of primary mailbox"
-        - lane: ews-archive
-          completed: "2026-03-01"
-          messages: 68716
-          note: "EWS full_access_as_app export of Exchange Online Archive (In-Place Archive)"
-      total_imported: 77803
-      note: "Both primary mailbox (Graph API) and archive mailbox (EWS) imported. No live IMAP sync — archive-only lane."
+      cadence_cron: "*/15 * * * *"
+      backfill_enabled: true
+      import_history:
+        lanes:
+          - lane: graph-api-primary
+            completed: "2026-02-26"
+            messages: 9087
+            note: "Graph API /me/messages MIME export of primary mailbox"
+          - lane: ews-archive
+            completed: "2026-03-01"
+            messages: 68716
+            note: "EWS full_access_as_app export of Exchange Online Archive (In-Place Archive)"
+        total_imported: 77803
+        note: "Both primary mailbox (Graph API) and archive mailbox (EWS) imported first, then M365 Graph live-sync activated 2026-03-02."
 
 onboarding:
   description: "Turnkey checklist for adding a new email account to mail-archiver."
