@@ -40,10 +40,15 @@ preferred_mode = sys.argv[4]
 token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
 auth_email = os.environ.get("CLOUDFLARE_AUTH_EMAIL", "")
 global_key = os.environ.get("CLOUDFLARE_GLOBAL_API_KEY", "")
+rate_limited = False
 
 with open(inventory) as f:
     inv = yaml.safe_load(f) or {}
 account_id = inv.get("account_id", os.environ.get("CLOUDFLARE_ACCOUNT_ID", ""))
+
+class RateLimitExhausted(Exception):
+    """Raised when 429 retries are exhausted."""
+    pass
 
 def headers_for(mode):
     base = {"Content-Type": "application/json"}
@@ -56,7 +61,7 @@ def headers_for(mode):
 
 def get(url):
     global preferred_mode
-    max_attempts = 3
+    max_attempts = 4
     modes = []
     if preferred_mode == "token" and token:
         modes.append("token")
@@ -84,14 +89,17 @@ def get(url):
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 last_exc = exc
-                if exc.code == 429 and attempt + 1 < max_attempts:
-                    retry_after = exc.headers.get("Retry-After", "")
-                    try:
-                        delay = max(1, min(int(retry_after), 30))
-                    except Exception:
-                        delay = attempt + 1
-                    time.sleep(delay)
-                    continue
+                if exc.code == 429:
+                    if attempt + 1 < max_attempts:
+                        retry_after = exc.headers.get("Retry-After", "")
+                        try:
+                            delay = max(2, min(int(retry_after), 30))
+                        except Exception:
+                            delay = 2 ** attempt
+                        time.sleep(delay)
+                        continue
+                    # All retries exhausted for 429
+                    raise RateLimitExhausted(f"429 after {max_attempts} attempts on {url}")
                 if exc.code in (401, 403) and idx + 1 < len(modes):
                     break
                 raise
@@ -110,16 +118,20 @@ def get(url):
 # 1. Fetch all zones
 all_zones = {}
 page = 1
-while True:
-    data = get(f"{api}/zones?per_page=50&page={page}")
-    if not data.get("success"):
-        break
-    for z in data.get("result", []):
-        all_zones[z["name"]] = z
-    info = data.get("result_info", {})
-    if page >= info.get("total_pages", 1):
-        break
-    page += 1
+try:
+    while True:
+        data = get(f"{api}/zones?per_page=50&page={page}")
+        if not data.get("success"):
+            break
+        for z in data.get("result", []):
+            all_zones[z["name"]] = z
+        info = data.get("result_info", {})
+        if page >= info.get("total_pages", 1):
+            break
+        page += 1
+except RateLimitExhausted:
+    print("STOP: rate-limited (HTTP 429) during zone list fetch after retry exhaustion", file=sys.stderr)
+    sys.exit(7)
 
 # 2. Fetch registrar status per domain
 results = []
@@ -139,6 +151,9 @@ for domain_name in sorted(all_zones.keys()):
     try:
         dns = get(f"{api}/zones/{zid}/dns_records?per_page=1")
         entry["dns_records"] = (dns.get("result_info") or {}).get("total_count", 0)
+    except RateLimitExhausted:
+        entry["dns_records"] = "rate_limited"
+        rate_limited = True
     except Exception:
         entry["dns_records"] = "error"
 
@@ -147,6 +162,9 @@ for domain_name in sorted(all_zones.keys()):
         spf = get(f"{api}/zones/{zid}/dns_records?type=TXT&name={domain_name}&per_page=100")
         spf_records = [r for r in spf.get("result", []) if "v=spf1" in r.get("content", "")]
         entry["spf"] = spf_records[0]["content"][:60] if spf_records else "MISSING"
+    except RateLimitExhausted:
+        entry["spf"] = "rate_limited"
+        rate_limited = True
     except Exception:
         entry["spf"] = "error"
 
@@ -155,6 +173,9 @@ for domain_name in sorted(all_zones.keys()):
         dmarc = get(f"{api}/zones/{zid}/dns_records?type=TXT&name=_dmarc.{domain_name}&per_page=10")
         dmarc_records = [r for r in dmarc.get("result", []) if "v=DMARC1" in r.get("content", "")]
         entry["dmarc"] = dmarc_records[0]["content"][:60] if dmarc_records else "MISSING"
+    except RateLimitExhausted:
+        entry["dmarc"] = "rate_limited"
+        rate_limited = True
     except Exception:
         entry["dmarc"] = "error"
 
@@ -174,6 +195,9 @@ for domain_name in sorted(all_zones.keys()):
                 entry["transfer_status"] = ti["status"]
         else:
             entry["registrar"] = "external"
+    except RateLimitExhausted:
+        entry["registrar"] = "rate_limited"
+        rate_limited = True
     except urllib.error.HTTPError as e:
         entry["registrar"] = "external" if e.code == 404 else f"error_{e.code}"
     except Exception:
@@ -181,12 +205,16 @@ for domain_name in sorted(all_zones.keys()):
 
     results.append(entry)
 
+overall_status = "rate_limited" if rate_limited else "ok"
+
 if json_out:
-    print(json.dumps(results, indent=2))
+    print(json.dumps({"status": overall_status, "domains": results}, indent=2))
 else:
     print("domains.portfolio.status")
     print(f"auth_mode: {preferred_mode}")
     print(f"domains: {len(results)}")
+    if rate_limited:
+        print("warning: some requests were rate-limited (HTTP 429) after retry exhaustion")
     print()
     fmt = "{:<28s} {:<10s} {:<12s} {:<8s} {:<10s} {:<8s} {:<8s}"
     print(fmt.format("DOMAIN", "ZONE", "REGISTRAR", "DNS#", "EXPIRES", "SPF", "DMARC"))
@@ -206,4 +234,7 @@ else:
             spf,
             dmarc,
         ))
+
+if rate_limited:
+    sys.exit(7)
 PYEOF

@@ -55,14 +55,23 @@ PORTFOLIO_RAW="$(run_with_secrets "$PORTFOLIO_STATUS_SCRIPT" --json 2>/dev/null)
 python3 - <<'PY' "$PORTFOLIO_RAW" || fail "domains.portfolio.status JSON parse failed or returned empty set"
 import json, re, sys
 raw = sys.argv[1]
-match = re.search(r"(?m)^\s*\[", raw)
+# Support both object-wrapped {"status":..,"domains":[...]} and flat array [...] formats
+match = re.search(r"(?m)^\s*[\[{]", raw)
 if not match:
     raise SystemExit(1)
-start = raw.find("[", match.start())
-if start < 0:
-    raise SystemExit(1)
+# Find the actual [ or { character position (raw_decode doesn't skip whitespace)
+bracket_pos = match.end() - 1
 decoder = json.JSONDecoder()
-rows, _ = decoder.raw_decode(raw[start:])
+doc, _ = decoder.raw_decode(raw[bracket_pos:])
+if isinstance(doc, dict):
+    rows = doc.get("domains", [])
+    if doc.get("status") == "rate_limited":
+        print("D315: portfolio status reports rate_limited", file=sys.stderr)
+        raise SystemExit(1)
+elif isinstance(doc, list):
+    rows = doc
+else:
+    raise SystemExit(1)
 if not isinstance(rows, list) or len(rows) == 0:
     raise SystemExit(1)
 PY
@@ -82,7 +91,7 @@ echo "$SERVICE_PUBLISH_OUT" | grep -q 'cloudflare.service.publish' || fail "unex
 echo "$SERVICE_PUBLISH_OUT" | grep -q 'JSONDecodeError' && fail "service publish emitted JSONDecodeError"
 
 REGISTRAR_RAW="$(run_with_secrets "$REGISTRAR_STATUS_SCRIPT" --json 2>/dev/null)" || fail "cloudflare.registrar.status failed"
-python3 - <<'PY' "$REGISTRAR_RAW" || fail "cloudflare.registrar.status JSON parse failed or returned parse_error entries"
+python3 - <<'PY' "$REGISTRAR_RAW" || fail "cloudflare.registrar.status JSON parse failed or contains degraded row statuses"
 import json, re, sys
 raw = sys.argv[1]
 match = re.search(r"(?m)^\s*\{", raw)
@@ -98,8 +107,15 @@ if not isinstance(doc, dict):
 rows = doc.get("domains")
 if not isinstance(rows, list) or len(rows) == 0:
     raise SystemExit(1)
+# Reject degraded row statuses; allow not_at_cf_registrar as expected non-owner state
+degraded = {"api_non_json", "api_error", "parse_error"}
 for row in rows:
-    if isinstance(row, dict) and str(row.get("status", "")) == "parse_error":
+    if not isinstance(row, dict):
+        continue
+    status = str(row.get("status", ""))
+    if status in degraded or status.startswith("http_"):
+        domain = row.get("domain", "unknown")
+        print(f"D315 degraded registrar row: domain={domain} status={status}", file=sys.stderr)
         raise SystemExit(1)
 PY
 

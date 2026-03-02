@@ -99,23 +99,26 @@ raw = sys.stdin.read()
 try:
     data = json.loads(raw)
 except Exception:
-    snippet = " ".join(raw.split())[:200]
-    detail = f"non_json_response:{snippet}" if snippet else "non_json_response"
+    # Non-JSON response from registrar API on success path means domain is not at CF registrar
+    # (CF returns HTML/redirect for unregistered domains instead of a clean 404)
     print(json.dumps({
         "domain": domain,
-        "status": "api_non_json",
-        "detail": detail,
+        "status": "not_at_cf_registrar",
+        "detail": "non_json_registrar_response",
     }))
     raise SystemExit(0)
 
 if not isinstance(data, dict) or not data.get("success", False):
     errors = data.get("errors") if isinstance(data, dict) else []
     msg_parts = []
+    code_set = set()
     if isinstance(errors, list):
         for e in errors:
             if isinstance(e, dict):
                 code = str(e.get("code", "")).strip()
                 msg = str(e.get("message", "")).strip()
+                if code:
+                    code_set.add(code)
                 if code and msg:
                     msg_parts.append(f"{code}:{msg}")
                 elif msg:
@@ -123,11 +126,19 @@ if not isinstance(data, dict) or not data.get("success", False):
             elif e:
                 msg_parts.append(str(e))
     detail = "; ".join(msg_parts) if msg_parts else "api_success_false"
-    print(json.dumps({
-        "domain": domain,
-        "status": "api_error",
-        "detail": detail,
-    }))
+    # Cloudflare returns 1001 "restricted" for domains not at CF registrar via success path
+    if "1001" in code_set or "not_found" in detail.lower():
+        print(json.dumps({
+            "domain": domain,
+            "status": "not_at_cf_registrar",
+            "detail": detail,
+        }))
+    else:
+        print(json.dumps({
+            "domain": domain,
+            "status": "api_error",
+            "detail": detail,
+        }))
     raise SystemExit(0)
 
 result = data.get("result") if isinstance(data.get("result"), dict) else {}
@@ -212,10 +223,16 @@ with open(sys.argv[1], 'r', encoding='utf-8') as f:
             continue
         rows.append(json.loads(line))
 
+counts = {}
+for r in rows:
+    s = str(r.get("status", "unknown"))
+    counts[s] = counts.get(s, 0) + 1
+
 print(json.dumps({
     "capability": "cloudflare.registrar.status",
     "status": "ok",
     "auth_mode": sys.argv[2],
+    "summary": counts,
     "domains": rows,
 }, indent=2))
 PY
@@ -248,5 +265,15 @@ for r in rows:
     locked = str(r.get("locked", "-"))
     expires = str(r.get("expires_at", ""))[:10] or "-"
     print(f"{domain:<30} {status[:26]:<26} {auto[:11]:<11} {locked[:8]:<8} {expires:<10}")
+
+# Summary counts
+counts = {}
+for r in rows:
+    s = str(r.get("status", "unknown"))
+    counts[s] = counts.get(s, 0) + 1
+print()
+print("summary:")
+for s, c in sorted(counts.items()):
+    print(f"  {s}: {c}")
 PY
 fi

@@ -25,11 +25,15 @@ cf_require_auth || exit $?
 
 usage() {
   cat <<'EOF'
-Usage: cloudflare-service-publish --hostname HOST --service URL [OPTIONS]
+Usage: cloudflare-service-publish --hostname HOST --service-name NAME --service-url URL [OPTIONS]
 
 Required:
   --hostname HOST             Public hostname to publish (e.g., homarr.ronny.works)
-  --service URL               Tunnel backend target (e.g., http://100.123.207.64:7575)
+  --service-name NAME         Logical service name for registry parity (e.g., homarr)
+  --service-url URL           Tunnel backend target URL (e.g., http://100.123.207.64:7575)
+
+Backward-compatible:
+  --service URL               Alias: sets --service-url only (registry parity uses hostname prefix)
 
 Optional:
   --zone-id ID                Cloudflare zone ID
@@ -47,7 +51,8 @@ EOF
 }
 
 HOSTNAME=""
-SERVICE=""
+SERVICE_NAME=""
+SERVICE_URL=""
 ZONE_ID=""
 ZONE_NAME=""
 DNS_TYPE="CNAME"
@@ -61,7 +66,9 @@ DRY_RUN=0
 while (( $# > 0 )); do
   case "$1" in
     --hostname) HOSTNAME="${2:-}"; shift 2 ;;
-    --service) SERVICE="${2:-}"; shift 2 ;;
+    --service-name) SERVICE_NAME="${2:-}"; shift 2 ;;
+    --service-url) SERVICE_URL="${2:-}"; shift 2 ;;
+    --service) SERVICE_URL="${2:-}"; shift 2 ;;
     --zone-id) ZONE_ID="${2:-}"; shift 2 ;;
     --zone) ZONE_NAME="${2:-}"; shift 2 ;;
     --dns-type) DNS_TYPE="${2:-}"; shift 2 ;;
@@ -79,7 +86,12 @@ while (( $# > 0 )); do
 done
 
 [[ -n "$HOSTNAME" ]] || { echo "STOP: --hostname required" >&2; exit 1; }
-[[ -n "$SERVICE" ]] || { echo "STOP: --service required" >&2; exit 1; }
+[[ -n "$SERVICE_URL" ]] || { echo "STOP: --service-url (or --service) required" >&2; exit 1; }
+
+# Infer service_name from hostname prefix if not explicitly provided
+if [[ -z "$SERVICE_NAME" ]]; then
+  SERVICE_NAME="${HOSTNAME%%.*}"
+fi
 
 if [[ ! -f "$BINDING_FILE" ]]; then
   echo "STOP: binding file missing: $BINDING_FILE" >&2
@@ -114,9 +126,9 @@ fi
 [[ -n "$ZONE_ID" ]] || { echo "STOP: unable to resolve zone id for hostname=$HOSTNAME zone=${ZONE_NAME:-unset}" >&2; exit 2; }
 
 if [[ "$ALLOW_UNREGISTERED" -eq 0 ]]; then
-  parity="$(python3 - "$REGISTRY_FILE" "$HOSTNAME" "$SERVICE" <<'PY'
+  parity="$(python3 - "$REGISTRY_FILE" "$HOSTNAME" "$SERVICE_NAME" <<'PY'
 import sys, yaml
-path, hostname, service = sys.argv[1], sys.argv[2].strip().lower(), sys.argv[3].strip()
+path, hostname, service_name = sys.argv[1], sys.argv[2].strip().lower(), sys.argv[3].strip()
 with open(path, "r", encoding="utf-8") as f:
     doc = yaml.safe_load(f) or {}
 matches = []
@@ -133,7 +145,7 @@ layer = str(row.get("routing_layer", "")).strip()
 declared_service = str(row.get("service", "")).strip()
 if layer != "cloudflare_tunnel":
     print(f"bad_layer:{layer}")
-elif declared_service and declared_service != service:
+elif declared_service and declared_service != service_name:
     print(f"service_mismatch:{declared_service}")
 else:
     print("ok")
@@ -150,7 +162,7 @@ PY
       exit 3
       ;;
     service_mismatch:*)
-      echo "STOP: DOMAIN_ROUTING_REGISTRY service mismatch for '$HOSTNAME' (expected '${parity#service_mismatch:}', got '$SERVICE')." >&2
+      echo "STOP: DOMAIN_ROUTING_REGISTRY service mismatch for '$HOSTNAME' (expected '${parity#service_mismatch:}', got '$SERVICE_NAME')." >&2
       exit 3
       ;;
     *)
@@ -183,7 +195,7 @@ PY
 fi
 
 dns_cmd=("$DNS_SET_SCRIPT" --zone-id "$ZONE_ID" --type "$DNS_TYPE" --name "$HOSTNAME" --content "$DNS_TARGET" "$PROXY_FLAG")
-ingress_cmd=("$INGRESS_SET_SCRIPT" --tunnel "$TUNNEL_NAME" --hostname "$HOSTNAME" --service "$SERVICE")
+ingress_cmd=("$INGRESS_SET_SCRIPT" --tunnel "$TUNNEL_NAME" --hostname "$HOSTNAME" --service "$SERVICE_URL")
 if [[ "$DRY_RUN" -eq 1 ]]; then
   dns_cmd+=(--dry-run)
   ingress_cmd+=(--dry-run)
@@ -205,16 +217,17 @@ diff_out="$("$ROUTING_DIFF_SCRIPT" --tunnel "$TUNNEL_NAME" 2>&1)" || diff_status
 diff_status="${diff_status:-0}"
 
 if [[ "$JSON_OUT" -eq 1 ]]; then
-  python3 - "$HOSTNAME" "$SERVICE" "$ZONE_ID" "$DNS_TARGET" "$diff_status" \
+  python3 - "$HOSTNAME" "$SERVICE_NAME" "$SERVICE_URL" "$ZONE_ID" "$DNS_TARGET" "$diff_status" \
     "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" \
     "$dns_out" "$ingress_out" "$diff_out" <<'PY'
 import json, sys
-host, service, zone_id, dns_target, diff_status, auth_mode, dns_out, ingress_out, diff_out = sys.argv[1:]
+host, service_name, service_url, zone_id, dns_target, diff_status, auth_mode, dns_out, ingress_out, diff_out = sys.argv[1:]
 print(json.dumps({
   "capability": "cloudflare.service.publish",
   "status": "ok" if diff_status == "0" else "warn",
   "hostname": host,
-  "service": service,
+  "service_name": service_name,
+  "service_url": service_url,
   "zone_id": zone_id,
   "dns_target": dns_target,
   "auth_mode": auth_mode,
@@ -229,7 +242,8 @@ PY
 else
   echo "cloudflare.service.publish"
   echo "hostname: $HOSTNAME"
-  echo "service: $SERVICE"
+  echo "service_name: $SERVICE_NAME"
+  echo "service_url: $SERVICE_URL"
   echo "zone_id: $ZONE_ID"
   echo "dns_target: $DNS_TARGET"
   echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
