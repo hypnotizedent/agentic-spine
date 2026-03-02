@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-11
+last_verified: 2026-03-02
 scope: vm-lifecycle-governance
 ---
 
@@ -54,6 +54,7 @@ PLAN ──▶ PROVISION ──▶ REGISTER ──▶ VALIDATE ──▶ OPERATE
 - **Role:** Primary workload description (e.g. `finance-stack`, `observability`)
 - **Stacks/services:** What compose stacks and services will run on this VM
 - **Storage tier:** Consult `infra.storage.placement.policy.yaml` — does this VM need a dedicated data disk (ZFS zvol), NFS mount, or boot-only?
+- **Access policy:** `lan_first` (shop same-site), `tailscale_required` (cross-site), or `lan_only` (no Tailscale). Determines `ssh.targets.yaml` routing and gate behavior.
 
 ### SSOT Impact Preview
 
@@ -72,6 +73,7 @@ The following files WILL need updates by the end of REGISTER phase:
 | `ops/bindings/backup.inventory.yaml` | Backup target entry |
 | `ops/bindings/infra.storage.placement.policy.yaml` | Storage tier declaration for this VM |
 | `ops/bindings/secrets.namespace.policy.yaml` | Secret paths (if services need secrets) |
+| `ops/bindings/tailscale.tailnet.snapshot.yaml` | Tailnet device entry with IPs and access_policy |
 
 ---
 
@@ -109,7 +111,16 @@ The following files WILL need updates by the end of REGISTER phase:
    ```
    qm set <VMID> --onboot 1
    ```
-6. **Start VM and wait for cloud-init:**
+6. **Enroll in Tailscale tailnet** (after cloud-init completes):
+   ```
+   ssh <target> 'curl -fsSL https://tailscale.com/install.sh | sh'
+   ssh <target> 'sudo tailscale up --authkey=<TAILSCALE_AUTH_KEY> --hostname=<hostname>'
+   ```
+   - Auth key from Infisical: `infrastructure/prod/TAILSCALE_AUTH_KEY` at `/spine/vm-infra/provisioning`
+   - Verify enrollment: `ssh <target> tailscale status --self`
+   - Record Tailscale IP in `vm.lifecycle.yaml` and `ssh.targets.yaml`
+   - Authority: `docs/canonical/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml`
+7. **Start VM and wait for cloud-init:**
    ```
    qm start <VMID>
    qm guest exec <VMID> -- cloud-init status --wait
@@ -152,6 +163,7 @@ Each update MUST be committed. The order below minimizes drift window:
 | 8 | `ops/bindings/services.health.yaml` | Health probe endpoints for each service | monitoring |
 | 9 | `ops/bindings/backup.inventory.yaml` | Backup target entry for vzdump artifacts | backup coverage |
 | 10 | `ops/bindings/secrets.namespace.policy.yaml` | Secret key paths (if services need Infisical) | secrets |
+| 11 | `ops/bindings/tailscale.tailnet.snapshot.yaml` | Tailnet device entry (IPs, access_policy, FQDN) | tailscale |
 
 ### Validation Gate
 

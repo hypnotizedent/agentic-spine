@@ -43,9 +43,19 @@ for ((i=0; i<vm_count; i++)); do
   [[ -n "$vm_ts_ip" && "$vm_ts_ip" != "null" && "$vm_ts_ip" != "PENDING_TS_IP" ]] || err "$hostname: tailscale_ip must be set before status=$status"
   [[ -n "$ssh_target" && "$ssh_target" != "null" ]] || { err "$hostname: ssh_target missing before status=$status"; continue; }
 
+  vm_lan_ip="$(yq e -r ".vms[$i].lan_ip // \"\"" "$VM_BINDING")"
+
   ssh_host="$(yq e -r ".ssh.targets[] | select(.id == \"$ssh_target\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
+  ssh_ts_ip="$(yq e -r ".ssh.targets[] | select(.id == \"$ssh_target\") | .tailscale_ip // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
   [[ -n "$ssh_host" && "$ssh_host" != "null" ]] || { err "$hostname: ssh_target '$ssh_target' missing in ssh.targets"; continue; }
-  [[ "$ssh_host" == "$vm_ts_ip" ]] || err "$hostname: ssh.targets host mismatch for '$ssh_target' expected=$vm_ts_ip actual=$ssh_host"
+  # LAN-first: ssh.targets.host matches vm.lifecycle.lan_ip
+  if [[ -n "$vm_lan_ip" && "$vm_lan_ip" != "null" ]]; then
+    [[ "$ssh_host" == "$vm_lan_ip" ]] || err "$hostname: ssh.targets host mismatch for '$ssh_target' expected_lan=$vm_lan_ip actual=$ssh_host"
+  fi
+  # Tailscale IP parity
+  if [[ -n "$ssh_ts_ip" && "$ssh_ts_ip" != "null" && -n "$vm_ts_ip" && "$vm_ts_ip" != "null" ]]; then
+    [[ "$ssh_ts_ip" == "$vm_ts_ip" ]] || err "$hostname: ssh.targets tailscale_ip mismatch expected=$vm_ts_ip actual=$ssh_ts_ip"
+  fi
 
   sr_ts_ip="$(yq e -r ".hosts.\"$hostname\".tailscale_ip // \"\"" "$SERVICE_REGISTRY" 2>/dev/null || true)"
   sr_ssh="$(yq e -r ".hosts.\"$hostname\".ssh // \"\"" "$SERVICE_REGISTRY" 2>/dev/null || true)"

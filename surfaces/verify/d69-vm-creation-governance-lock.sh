@@ -41,6 +41,7 @@ for ((i=0; i<vm_count; i++)); do
   vmid=$(yq -r ".vms[$i] | (.id // .vmid)" "$LIFECYCLE")
   hostname=$(yq -r ".vms[$i].hostname" "$LIFECYCLE")
   ts_ip=$(yq -r ".vms[$i].tailscale_ip // \"\"" "$LIFECYCLE")
+  lan_ip=$(yq -r ".vms[$i].lan_ip // \"\"" "$LIFECYCLE")
 
   # Skip non-active, non-shop, templates
   [[ "$status" == "active" ]] || continue
@@ -57,11 +58,18 @@ for ((i=0; i<vm_count; i++)); do
   if [[ -z "$ssh_match" || "$ssh_match" == "null" ]]; then
     err "VM $vmid ($hostname): missing from ssh.targets.yaml"
   else
-    # Verify Tailscale IP parity if both have IPs
-    if [[ -n "$ts_ip" ]]; then
-      ssh_ip=$(yq -r ".ssh.targets[] | select(.id == \"$hostname\") | .host" "$SSH_TARGETS")
-      if [[ "$ssh_ip" != "$ts_ip" && "$ssh_ip" != "null" ]]; then
-        err "VM $vmid ($hostname): Tailscale IP mismatch — lifecycle=$ts_ip, ssh.targets=$ssh_ip"
+    ssh_ip=$(yq -r ".ssh.targets[] | select(.id == \"$hostname\") | .host" "$SSH_TARGETS")
+    ssh_ts_ip=$(yq -r ".ssh.targets[] | select(.id == \"$hostname\") | .tailscale_ip // \"\"" "$SSH_TARGETS")
+    # LAN-first: ssh.targets.host should match vm.lifecycle.lan_ip
+    if [[ -n "$lan_ip" && "$lan_ip" != "null" && "$ssh_ip" != "null" ]]; then
+      if [[ "$ssh_ip" != "$lan_ip" ]]; then
+        err "VM $vmid ($hostname): LAN IP mismatch — lifecycle=$lan_ip, ssh.targets=$ssh_ip"
+      fi
+    fi
+    # Tailscale IP parity: ssh.targets.tailscale_ip should match vm.lifecycle.tailscale_ip
+    if [[ -n "$ts_ip" && -n "$ssh_ts_ip" && "$ssh_ts_ip" != "null" ]]; then
+      if [[ "$ssh_ts_ip" != "$ts_ip" ]]; then
+        err "VM $vmid ($hostname): Tailscale IP mismatch — lifecycle=$ts_ip, ssh.targets.tailscale_ip=$ssh_ts_ip"
       fi
     fi
   fi

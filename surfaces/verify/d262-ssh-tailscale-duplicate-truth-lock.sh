@@ -38,8 +38,12 @@ while IFS=$'\t' read -r host_id sr_ssh sr_ts; do
   [[ -n "$sr_ssh" && "$sr_ssh" != "null" ]] || continue
   [[ "$sr_ssh" == "localhost" ]] && continue
   ssh_host="$(yq e -r ".ssh.targets[] | select(.id == \"$sr_ssh\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
+  ssh_ts_ip="$(yq e -r ".ssh.targets[] | select(.id == \"$sr_ssh\") | .tailscale_ip // \"\"" "$SSH_BINDING" 2>/dev/null || true)"
   [[ -n "$ssh_host" && "$ssh_host" != "null" ]] || { err "$host_id: SERVICE_REGISTRY ssh target '$sr_ssh' missing in ssh.targets"; continue; }
-  [[ "$sr_ts" == "$ssh_host" ]] || err "$host_id: SERVICE_REGISTRY tailscale_ip=$sr_ts but ssh.target($sr_ssh) host=$ssh_host"
+  # SERVICE_REGISTRY.tailscale_ip matches ssh.targets.tailscale_ip (not .host which is LAN-first)
+  if [[ -n "$ssh_ts_ip" && "$ssh_ts_ip" != "null" ]]; then
+    [[ "$sr_ts" == "$ssh_ts_ip" ]] || err "$host_id: SERVICE_REGISTRY tailscale_ip=$sr_ts but ssh.target($sr_ssh) tailscale_ip=$ssh_ts_ip"
+  fi
 done < <(yq e -r '.hosts | to_entries[] | [.key, (.value.ssh // ""), (.value.tailscale_ip // "")] | @tsv' "$SERVICE_REGISTRY")
 
 # 4) Any active VM hostname != ssh_target must be explicitly documented override.
