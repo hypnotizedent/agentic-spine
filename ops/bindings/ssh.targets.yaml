@@ -1,11 +1,12 @@
 # SSH Targets Binding (SSOT)
 # Non-secret. Spine-native. No monolith runtime dependency.
 # Status: authoritative
-# Last verified: 2026-02-13
+# Last verified: 2026-03-01
 #
-# Source: Discovered from ~/code/workbench/dotfiles/ssh/config.d/tailscale.conf
-# Most hosts are Tailscale IPs (100.x.x.x). During VM provisioning/bootstrap, a
-# target may temporarily use a LAN DHCP address until Tailscale is connected.
+# Access policy: LAN-first for same-site (shop) targets.
+# Tailscale reserved for cross-site paths (home, NAS).
+# `host` is the preferred operational IP (what scripts resolve via yq .host).
+# `tailscale_ip` is the Tailscale CGNAT IP for cross-site or fallback use.
 
 ssh:
   defaults:
@@ -18,135 +19,176 @@ ssh:
     user_known_hosts_file: "/dev/null"
 
   targets:
+    # ─── Shop VMs (LAN-first: host=lan_ip) ───
+
     - id: "docker-host"
-      host: "100.92.156.118"
+      host: "192.168.1.200"
+      tailscale_ip: "100.92.156.118"
       user: "docker-host"
+      access_policy: lan_first
       description: "mint-os-prod / docker workloads (canonical host user for compose runtime paths)"
       tags: ["docker", "production", "core"]
 
-    - id: "pve"
-      host: "100.96.211.33"
-      user: "root"
-      description: "Proxmox VE - shop location"
-      tags: ["proxmox", "hypervisor", "core"]
-
-    - id: "proxmox-home"
-      host: "100.103.99.62"
-      user: "root"
-      description: "Proxmox Host (Home) - Beelink Mini"
-      tags: ["proxmox", "backup", "home"]
-
-    - id: "udr-home"
-      host: "10.0.0.1"
-      user: "root"
-      access_method: lan_only
-      probe_via: proxmox-home
-      description: "UDR7 home gateway/router (UniFi console). LAN-only probe via proxmox-home."
-      tags: ["router", "network", "home", "lan-only"]
-
-    - id: "nas"
-      host: "100.102.199.111"
-      user: "ronadmin"
-      description: "Synology NAS 918+"
-      tags: ["storage", "backup", "core"]
-
-    # vault (VM 102): decommissioned 2026-02-16. Superseded by infra-core.
-
     - id: "automation-stack"
-      host: "100.98.70.70"
+      host: "192.168.1.110"
+      tailscale_ip: "100.98.70.70"
       user: "automation"
+      access_policy: lan_first
       description: "n8n, Ollama, Open WebUI (VM 202). Canonical compose owner user."
       tags: ["automation", "ai", "shop"]
 
-    - id: "ha"
-      host: "10.0.0.100"
-      user: "hassio"
-      description: "Home Assistant"
-      tags: ["home-automation", "iot"]
-
-    - id: "pihole-home"
-      host: "100.105.148.96"
-      user: "root"
-      connect_timeout_sec: 20
-      optional: true
-      description: "Pi-hole DNS (home LXC 105) reactivated 2026-02-21 for home-local DNS filtering."
-      tags: ["dns", "network", "home"]
+    - id: "immich"
+      host: "192.168.1.203"
+      tailscale_ip: "100.114.101.50"
+      user: "ronny"
+      access_policy: lan_first
+      description: "Immich photo management (VM 203). Cloud-init user is ronny."
+      tags: ["photos", "docker", "shop"]
 
     - id: "infra-core"
-      host: "100.92.91.128"
+      host: "192.168.1.204"
+      tailscale_ip: "100.92.91.128"
       user: "ubuntu"
+      access_policy: lan_first
       description: "Core infra VM (relocation target, VM 204)"
       tags: ["infrastructure", "core", "shop", "secrets", "security"]
 
     - id: "observability"
-      host: "100.120.163.70"
+      host: "192.168.1.205"
+      tailscale_ip: "100.120.163.70"
       user: "ubuntu"
+      access_policy: lan_first
       description: "Observability VM (Prometheus, Grafana, Loki, Uptime Kuma) - VM 205"
       tags: ["observability", "monitoring", "shop"]
 
     - id: "dev-tools"
-      host: "100.90.167.39"
+      host: "192.168.1.206"
+      tailscale_ip: "100.90.167.39"
       user: "ubuntu"
+      access_policy: lan_first
       description: "Dev tools VM (Gitea, PostgreSQL, Gitea Actions runner) - VM 206"
       tags: ["development", "ci", "shop"]
 
-    # media-stack (VM 201) DECOMMISSIONED 2026-02-10 — split into download-stack (209) + streaming-stack (210)
+    - id: "ai-consolidation"
+      host: "192.168.1.8"
+      tailscale_ip: "100.71.17.29"
+      user: "ubuntu"
+      access_policy: lan_first
+      description: "AI consolidation VM (Qdrant, AnythingLLM) - VM 207. Open WebUI stays on VM 202 (P4 decision). LAN IP is DHCP."
+      tags: ["ai", "docker", "shop"]
 
     - id: "download-stack"
-      host: "100.107.36.76"
+      host: "192.168.1.209"
+      tailscale_ip: "100.107.36.76"
       user: "ubuntu"
+      access_policy: lan_first
       description: "Download stack VM (SABnzbd, *arr, Tdarr) - VM 209"
       tags: ["media", "docker", "shop"]
 
     - id: "streaming-stack"
-      host: "100.123.207.64"
+      host: "192.168.1.210"
+      tailscale_ip: "100.123.207.64"
       user: "ubuntu"
+      access_policy: lan_first
       description: "Streaming stack VM (Jellyfin, Navidrome, Jellyseerr) - VM 210"
       tags: ["media", "docker", "shop"]
 
-    - id: "ai-consolidation"
-      host: "100.71.17.29"
-      user: "ubuntu"
-      description: "AI consolidation VM (Qdrant, AnythingLLM) - VM 207. Open WebUI stays on VM 202 (P4 decision)."
-      tags: ["ai", "docker", "shop"]
-
-    - id: "immich"
-      host: "100.114.101.50"
-      user: "ronny"
-      description: "Immich photo management (VM 203). Cloud-init user is ronny."
-      tags: ["photos", "docker", "shop"]
-
     - id: "finance-stack"
-      host: "100.76.153.100"
+      host: "192.168.1.211"
+      tailscale_ip: "100.76.153.100"
       user: "ubuntu"
+      access_policy: lan_first
       description: "Finance VM (Firefly III, Paperless-ngx, Ghostfolio) - VM 211. Migrated from docker-host (LOOP-FINANCE-VM-SEPARATION-20260211)."
       tags: ["finance", "docker", "shop"]
 
     - id: "mint-data"
-      host: "100.106.72.25"
+      host: "192.168.1.212"
+      tailscale_ip: "100.106.72.25"
       user: "ubuntu"
+      access_policy: lan_first
       description: "Mint fresh-slate data plane VM 212 (PostgreSQL + MinIO + Redis)"
       tags: ["mint", "data", "docker", "shop"]
 
     - id: "mint-apps"
-      host: "100.79.183.14"
+      host: "192.168.1.213"
+      tailscale_ip: "100.79.183.14"
       user: "ubuntu"
+      access_policy: lan_first
       description: "Mint fresh-slate app plane VM 213 (artwork, quote-page, order-intake)"
       tags: ["mint", "apps", "docker", "shop"]
 
     - id: "communications-stack"
-      host: "100.115.16.37"
+      host: "192.168.1.26"
+      tailscale_ip: "100.115.16.37"
       user: "ubuntu"
-      description: "Communications stack VM 214 (Stalwart mail server). DHCP LAN IP 192.168.1.26."
+      access_policy: lan_first
+      description: "Communications stack VM 214 (Stalwart mail server)."
       tags: ["communications", "email", "docker", "shop"]
 
     - id: "communications-stack-lan"
       host: "192.168.1.26"
       user: "ubuntu"
       access_method: lan_only
+      access_policy: lan_only
       description: "Communications stack VM 214 LAN endpoint for non-interactive machine polling."
       tags: ["communications", "email", "docker", "shop", "lan-only"]
 
+    # ─── Cross-site targets (Tailscale required) ───
+
+    - id: "pve"
+      host: "100.96.211.33"
+      tailscale_ip: "100.96.211.33"
+      user: "root"
+      access_policy: tailscale_required
+      description: "Proxmox VE - shop location. No documented LAN IP."
+      tags: ["proxmox", "hypervisor", "core"]
+
+    - id: "proxmox-home"
+      host: "100.103.99.62"
+      tailscale_ip: "100.103.99.62"
+      user: "root"
+      access_policy: tailscale_required
+      description: "Proxmox Host (Home) - Beelink Mini"
+      tags: ["proxmox", "backup", "home"]
+
+    - id: "nas"
+      host: "100.102.199.111"
+      tailscale_ip: "100.102.199.111"
+      user: "ronadmin"
+      access_policy: tailscale_required
+      description: "Synology NAS 918+"
+      tags: ["storage", "backup", "core"]
+
+    - id: "pihole-home"
+      host: "100.105.148.96"
+      tailscale_ip: "100.105.148.96"
+      user: "root"
+      connect_timeout_sec: 20
+      optional: true
+      access_policy: tailscale_required
+      description: "Pi-hole DNS (home LXC 105) reactivated 2026-02-21 for home-local DNS filtering."
+      tags: ["dns", "network", "home"]
+
+    # ─── LAN targets (no Tailscale) ───
+
+    - id: "ha"
+      host: "10.0.0.100"
+      user: "hassio"
+      access_policy: lan_only
+      description: "Home Assistant"
+      tags: ["home-automation", "iot"]
+
+    - id: "udr-home"
+      host: "10.0.0.1"
+      user: "root"
+      access_method: lan_only
+      access_policy: lan_only
+      probe_via: proxmox-home
+      description: "UDR7 home gateway/router (UniFi console). LAN-only probe via proxmox-home."
+      tags: ["router", "network", "home", "lan-only"]
+
+    # vault (VM 102): decommissioned 2026-02-16. Superseded by infra-core.
+    # media-stack (VM 201) DECOMMISSIONED 2026-02-10 — split into download-stack (209) + streaming-stack (210)
     # LXC 103 (download-home) soft-decommissioned 2026-02-21.
 
     # ─── LAN-only devices (no Tailscale, checked via probe_via host) ───
@@ -156,6 +198,7 @@ ssh:
       mac: "f8:b1:56:73:a0:d0"
       user: "admin"
       access_method: lan_only
+      access_policy: lan_only
       probe_via: pve
       description: "Dell N2024P managed switch — shop 9U rack. Re-IP deferred from UDR6 cutover."
       tags: ["network", "shop", "lan-only"]
@@ -165,6 +208,7 @@ ssh:
       mac: "44:a8:42:26:c3:11"
       user: "root"
       access_method: lan_only
+      access_policy: lan_only
       probe_via: pve
       description: "Dell R730XD iDRAC — shop. Re-IP via IPMI attempted, ARP failed, needs BMC cold reset."
       tags: ["management", "shop", "lan-only"]
@@ -174,6 +218,7 @@ ssh:
       mac: "24:0f:9b:30:f1:e7"
       user: "admin"
       access_method: lan_only
+      access_policy: lan_only
       probe_via: pve
       description: "Hikvision NVR — shop. Re-IP via ISAPI from pve. Credentials in Infisical /spine/shop/nvr/."
       tags: ["cameras", "shop", "lan-only"]
@@ -183,6 +228,7 @@ ssh:
       mac: "54:af:97:2f:c6:6e"
       user: "Production"
       access_method: lan_only
+      access_policy: lan_only
       probe_via: pve
       ssh_extra_opts: "-o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa"
       description: "TP-Link EAP225 WiFi AP — shop. Dropbear SSH (ssh-rsa only). Creds in Infisical /spine/shop/wifi/."
@@ -193,6 +239,7 @@ ssh:
       mac: "9c:05:d6:be:5b:4c"
       user: "root"
       access_method: lan_only
+      access_policy: lan_only
       probe_via: pve
       description: "UDR6 shop gateway/router (UniFi console). LAN-only probe via pve."
       tags: ["router", "network", "shop", "lan-only"]
