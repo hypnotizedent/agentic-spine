@@ -5,7 +5,7 @@ status: closed
 owner: "@ronny"
 scope: spine
 priority: high
-objective: Reduce agent friction in cap operations: capability flag discoverability, mode auto-injection patterns, shell compatibility pitfalls, and sequential call overhead for gap filing.
+objective: "Reduce agent friction in cap operations: capability flag discoverability, mode auto-injection patterns, shell compatibility pitfalls, and sequential call overhead for gap filing."
 ---
 
 # Loop Scope: LOOP-SPINE-W61-CAPABILITY-ERGONOMICS-NORMALIZATION-20260228

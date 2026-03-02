@@ -5,7 +5,7 @@ status: closed
 owner: "@ronny"
 scope: spine
 priority: medium
-objective: Canonical Resend expansion: governed inbound/webhook/contacts/broadcast surfaces, MCP coexistence policy, D-gates, acceptance cert
+objective: "Canonical Resend expansion: governed inbound/webhook/contacts/broadcast surfaces, MCP coexistence policy, D-gates, acceptance cert"
 ---
 
 # Loop Scope: LOOP-SPINE-RESEND-CANONICAL-UPGRADE-20260227-20260301-20260227

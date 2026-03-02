@@ -5,7 +5,7 @@ status: closed
 owner: "@ronny"
 scope: cross
 priority: medium
-objective: Normalize maintenance lifecycle governance so all sites (shop, home, future 3rd) are held to the same standard. LXC containers, NAS nodes, and Proxmox hosts must be first-class citizens in the orchestration boundary. Covers 4 gap groups: LXC lifecycle in maintenance scripts, NAS lifecycle governance, home site parity, and script site-abstraction for 3rd-site readiness.
+objective: "Normalize maintenance lifecycle governance so all sites (shop, home, future 3rd) are held to the same standard. LXC containers, NAS nodes, and Proxmox hosts must be first-class citizens in the orchestration boundary. Covers 4 gap groups: LXC lifecycle in maintenance scripts, NAS lifecycle governance, home site parity, and script site-abstraction for 3rd-site readiness."
 ---
 
 # Loop Scope: LOOP-CROSS-SITE-MAINTENANCE-PARITY-20260227-20260228

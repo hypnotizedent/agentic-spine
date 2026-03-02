@@ -5,7 +5,7 @@ status: closed
 owner: "@ronny"
 scope: spine
 priority: medium
-objective: Final closeout sweep: loop closure and branch backlog classification with deterministic receipts
+objective: "Final closeout sweep: loop closure and branch backlog classification with deterministic receipts"
 ---
 
 # Loop Scope: LOOP-SPINE-W74-FINAL-CLOSEOUT-BRANCH-ZERO-20260228-20260228-20260228

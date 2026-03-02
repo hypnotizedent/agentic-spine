@@ -5,7 +5,7 @@ status: closed
 owner: "@ronny"
 scope: spine
 priority: medium
-objective: Complete control-loop automation: freshness mappings, portfolio recommendations, budget reporting, and safe gap throughput
+objective: "Complete control-loop automation: freshness mappings, portfolio recommendations, budget reporting, and safe gap throughput"
 ---
 
 # Loop Scope: LOOP-SPINE-W65-CONTROL-LOOP-COMPLETION-20260228

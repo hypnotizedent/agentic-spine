@@ -5,7 +5,7 @@ status: closed
 owner: "@ronny"
 scope: gaps
 priority: medium
-objective: Eliminate agent friction in gaps.file: add --parent-loop flag, implement single-lock batch mode, add lock queuing instead of immediate fail, add gaps.next-id helper
+objective: "Eliminate agent friction in gaps.file: add --parent-loop flag, implement single-lock batch mode, add lock queuing instead of immediate fail, add gaps.next-id helper"
 ---
 
 # Loop Scope: LOOP-GAPS-FILE-BATCH-AND-LOCK-IMPROVEMENT-20260228

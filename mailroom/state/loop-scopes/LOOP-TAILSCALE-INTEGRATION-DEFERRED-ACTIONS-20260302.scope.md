@@ -1,13 +1,17 @@
 ---
 loop_id: LOOP-TAILSCALE-INTEGRATION-DEFERRED-ACTIONS-20260302
 created: 2026-03-02
-status: active
+status: planned
 owner: "@ronny"
 scope: tailscale
 priority: medium
 horizon: later
 execution_readiness: blocked
-objective: Track deferred operator actions for webhook receiver and audit-log streaming enablement
+activation_trigger: manual
+blocked_by: "no-webhook-receiver-deployed, no-audit-log-destination"
+superseded_by_plan_id: PLAN-TAILSCALE-INTEGRATION-DEFERRED-ACTIONS
+migrated_at_utc: "2026-03-02T00:30:00Z"
+objective: "Track deferred operator actions for webhook receiver and audit-log streaming enablement"
 ---
 
 # Loop Scope: LOOP-TAILSCALE-INTEGRATION-DEFERRED-ACTIONS-20260302

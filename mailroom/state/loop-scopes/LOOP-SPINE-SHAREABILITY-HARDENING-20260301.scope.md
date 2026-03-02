@@ -6,7 +6,7 @@ closed_at: 2026-03-01
 owner: "@ronny"
 scope: spine
 priority: high
-objective: Execute shareability hardening end-to-end: broaden recovery coverage, remove verify-surface ambiguity, add launchd log rotation, and normalize cross-repo agent boundary visibility.
+objective: "Execute shareability hardening end-to-end: broaden recovery coverage, remove verify-surface ambiguity, add launchd log rotation, and normalize cross-repo agent boundary visibility."
 ---
 
 # Loop Scope: LOOP-SPINE-SHAREABILITY-HARDENING-20260301

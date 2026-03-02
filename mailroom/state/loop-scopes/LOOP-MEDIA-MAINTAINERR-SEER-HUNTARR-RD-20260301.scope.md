@@ -7,7 +7,7 @@ scope: media
 priority: medium
 horizon: now
 execution_readiness: runnable
-objective: Execute media-stack remediation: deprecate Huntarr, stabilize ARR request/download pipeline, deploy native replacement search automation, and produce governed receipts/handoff.
+objective: "Execute media-stack remediation: deprecate Huntarr, stabilize ARR request/download pipeline, deploy native replacement search automation, and produce governed receipts/handoff."
 activation_trigger: manual
 ---
 

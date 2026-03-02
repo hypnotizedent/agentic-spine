@@ -7,7 +7,7 @@ scope: tailscale
 priority: medium
 horizon: now
 execution_readiness: runnable
-objective: Complete OP-TS-001..005 end-to-end: ACL apply, tag rollout, webhook/audit-log configuration, and close all pending operator actions.
+objective: "Complete OP-TS-001..005 end-to-end: ACL apply, tag rollout, webhook/audit-log configuration, and close all pending operator actions."
 ---
 
 # Loop Scope: LOOP-TAILSCALE-OPERATOR-ACTIONS-CLOSURE-20260302-20260302

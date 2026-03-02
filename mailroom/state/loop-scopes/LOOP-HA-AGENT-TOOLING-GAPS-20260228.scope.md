@@ -5,7 +5,7 @@ status: closed
 owner: "@ronny"
 scope: ha
 priority: medium
-objective: Close HA agent tooling friction: no addon log cap, Z2M config not in SSOT, snapshot misses advanced config, SLZB API undocumented, no entity state query cap, SSH docker permission broken. These gaps made the HA device reliability audit 3x harder than necessary.
+objective: "Close HA agent tooling friction: no addon log cap, Z2M config not in SSOT, snapshot misses advanced config, SLZB API undocumented, no entity state query cap, SSH docker permission broken. These gaps made the HA device reliability audit 3x harder than necessary."
 ---
 
 # Loop Scope: LOOP-HA-AGENT-TOOLING-GAPS-20260228
