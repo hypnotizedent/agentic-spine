@@ -5,7 +5,7 @@
 set -euo pipefail
 
 source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
-require_tailscale
+require_tailscale_for "download-stack"
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
@@ -19,7 +19,7 @@ ok() { [[ "${DRIFT_VERBOSE:-0}" == "1" ]] && echo "  OK: $*" || true; }
 get_vm_ssh_ref() {
   local vm="$1"
   local target user
-  target=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .tailscale_ip // .lan_ip // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
+  target=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .lan_ip // .tailscale_ip // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
   user=$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || echo "")
   if [[ -z "$target" || "$target" == "null" ]]; then
     echo ""

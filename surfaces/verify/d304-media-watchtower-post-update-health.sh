@@ -3,7 +3,7 @@
 set -euo pipefail
 
 source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
-require_tailscale
+require_tailscale_for "download-stack"
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 SERVICES_FILE="$ROOT/ops/bindings/services.health.yaml"

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
-require_tailscale
+require_tailscale_for "communications-stack"
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
@@ -14,7 +14,7 @@ ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
 ok() { [[ "${DRIFT_VERBOSE:-0}" == "1" ]] && echo "  OK: $*" || true; }
 
-COMMS_IP=$(yq -r '.vms[] | select(.hostname == "communications-stack") | .tailscale_ip // .lan_ip' "$VM_BINDING" 2>/dev/null || echo "")
+COMMS_IP=$(yq -r '.vms[] | select(.hostname == "communications-stack") | .lan_ip // .tailscale_ip' "$VM_BINDING" 2>/dev/null || echo "")
 COMMS_USER=$(yq -r '.vms[] | select(.hostname == "communications-stack") | .ssh_user // "ubuntu"' "$VM_BINDING" 2>/dev/null || echo "ubuntu")
 
 if [[ -z "$COMMS_IP" || "$COMMS_IP" == "null" ]]; then

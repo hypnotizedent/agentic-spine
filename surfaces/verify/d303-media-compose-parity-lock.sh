@@ -3,7 +3,7 @@
 set -euo pipefail
 
 source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
-require_tailscale
+require_tailscale_for "download-stack"
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"

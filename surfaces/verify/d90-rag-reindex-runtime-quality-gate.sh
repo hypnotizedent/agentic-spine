@@ -22,7 +22,7 @@ set -euo pipefail
 
 # Network gate — skip cleanly when Tailscale VPN is disconnected
 source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
-require_tailscale
+require_tailscale_for "ai-consolidation"
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 cd "$ROOT"

@@ -5,7 +5,7 @@
 set -euo pipefail
 
 source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
-require_tailscale
+require_tailscale_for "download-stack"
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
@@ -15,7 +15,7 @@ err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
 ok() { [[ "${DRIFT_VERBOSE:-0}" == "1" ]] && echo "  OK: $*" || true; }
 
 # Resolve SSH target for download-stack
-DS_IP=$(yq -r '.vms[] | select(.hostname == "download-stack") | .tailscale_ip // .lan_ip' "$VM_BINDING" 2>/dev/null || echo "")
+DS_IP=$(yq -r '.vms[] | select(.hostname == "download-stack") | .lan_ip // .tailscale_ip' "$VM_BINDING" 2>/dev/null || echo "")
 DS_USER=$(yq -r '.vms[] | select(.hostname == "download-stack") | .ssh_user // "ubuntu"' "$VM_BINDING" 2>/dev/null || echo "ubuntu")
 
 if [[ -z "$DS_IP" || "$DS_IP" == "null" ]]; then

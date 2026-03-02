@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT_DEFAULT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROOT="${SPINE_CODE:-$ROOT_DEFAULT}"
 source "$ROOT/surfaces/verify/lib/tailscale-guard.sh"
-require_tailscale
+require_tailscale_for "pve"
 
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 GAPS_BINDING="$ROOT/ops/bindings/operational.gaps.yaml"

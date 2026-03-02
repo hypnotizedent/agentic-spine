@@ -6,7 +6,7 @@ set -euo pipefail
 
 # Network gate — skip cleanly when Tailscale VPN is disconnected
 source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
-require_tailscale
+require_tailscale_for "docker-host"
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 BINDING="${INVENTORY_PATH:-$SPINE_ROOT/ops/bindings/services.health.yaml}"

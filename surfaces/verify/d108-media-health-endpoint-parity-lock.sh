@@ -9,7 +9,7 @@ BINDING="$ROOT/ops/bindings/media.services.yaml"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 
 source "${ROOT}/surfaces/verify/lib/tailscale-guard.sh"
-require_tailscale
+require_tailscale_for "download-stack"
 
 TIMEOUT_SEC="${D108_HTTP_TIMEOUT_SEC:-8}"
 RETRIES="${D108_HTTP_RETRIES:-2}"
@@ -23,7 +23,7 @@ command -v curl >/dev/null 2>&1 || { err "curl not installed"; exit 1; }
 
 get_vm_ip() {
   local vm="$1"
-  yq -r ".vms[] | select(.hostname == \"$vm\") | .tailscale_ip // .lan_ip" "$VM_BINDING" 2>/dev/null || echo ""
+  yq -r ".vms[] | select(.hostname == \"$vm\") | .lan_ip // .tailscale_ip" "$VM_BINDING" 2>/dev/null || echo ""
 }
 
 curl_with_retry() {
