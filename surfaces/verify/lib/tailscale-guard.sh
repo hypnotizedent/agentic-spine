@@ -12,7 +12,8 @@
 #
 # Usage:
 #   source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
-#   require_tailscale
+#   require_tailscale            # skip gate if Tailscale offline
+#   require_tailscale_for "nas"  # skip only if target needs Tailscale
 # Optional cache:
 #   VERIFY_TAILSCALE_GUARD_CACHE_FILE=<path>  # populated once by verify runtime
 #
@@ -71,4 +72,20 @@ require_tailscale() {
     echo "SKIP: Tailscale not connected (gate requires Tailscale network)"
     exit 0
   fi
+}
+
+# Conditional guard: only require Tailscale if the given ssh target
+# has access_policy=tailscale_required in ssh.targets.yaml.
+# Gates that SSH to lan_first targets do NOT need this guard.
+require_tailscale_for() {
+  local target_id="$1"
+  local root="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+  local binding="$root/ops/bindings/ssh.targets.yaml"
+  local policy
+  policy="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .access_policy // \"lan_first\"" \
+    "$binding" 2>/dev/null || echo "lan_first")"
+  if [[ "$policy" == "tailscale_required" ]]; then
+    require_tailscale
+  fi
+  # For lan_first or lan_only, no Tailscale guard needed
 }
