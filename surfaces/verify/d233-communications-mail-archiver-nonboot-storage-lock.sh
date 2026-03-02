@@ -3,19 +3,62 @@
 # Enforces: mail-archiver high-write paths are bind-mounted to non-boot storage on communications-stack
 set -euo pipefail
 
-source "${SPINE_ROOT:-$HOME/code/agentic-spine}/surfaces/verify/lib/tailscale-guard.sh"
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+source "$ROOT/surfaces/verify/lib/tailscale-guard.sh"
 require_tailscale_for "communications-stack"
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 COMMS_CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
 
 ERRORS=0
 err() { echo "  FAIL: $*" >&2; ERRORS=$((ERRORS + 1)); }
 ok() { [[ "${DRIFT_VERBOSE:-0}" == "1" ]] && echo "  OK: $*" || true; }
 
+is_private_ipv4() {
+  local ip="$1"
+  [[ "$ip" =~ ^10\. ]] && return 0
+  [[ "$ip" =~ ^192\.168\. ]] && return 0
+  if [[ "$ip" =~ ^172\.([0-9]+)\. ]]; then
+    local o2="${BASH_REMATCH[1]}"
+    [[ "$o2" -ge 16 && "$o2" -le 31 ]] && return 0
+  fi
+  return 1
+}
+
+local_ipv4_prefixes() {
+  {
+    if command -v ifconfig >/dev/null 2>&1; then
+      ifconfig 2>/dev/null | awk '/inet /{print $2}'
+    fi
+    if command -v ip >/dev/null 2>&1; then
+      ip -4 addr show 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1
+    fi
+  } | awk -F. 'NF==4 {print $1 "." $2 "." $3}' | sort -u
+}
+
+is_same_local_subnet_24() {
+  local ip="$1"
+  local prefix local_prefix
+  prefix="$(awk -F. 'NF==4 {print $1 "." $2 "." $3}' <<<"$ip")"
+  [[ -n "$prefix" ]] || return 1
+  while read -r local_prefix; do
+    [[ -n "$local_prefix" ]] || continue
+    [[ "$local_prefix" == "$prefix" ]] && return 0
+  done < <(local_ipv4_prefixes)
+  return 1
+}
+
+is_off_lan_context() {
+  local ip="$1"
+  is_private_ipv4 "$ip" || return 1
+  is_same_local_subnet_24 "$ip" && return 1
+  return 0
+}
+
 COMMS_IP=$(yq -r '.vms[] | select(.hostname == "communications-stack") | .lan_ip // .tailscale_ip' "$VM_BINDING" 2>/dev/null || echo "")
 COMMS_USER=$(yq -r '.vms[] | select(.hostname == "communications-stack") | .ssh_user // "ubuntu"' "$VM_BINDING" 2>/dev/null || echo "ubuntu")
+COMMS_POLICY="$(yq -r '.ssh.targets[] | select(.id == "communications-stack") | .access_policy // "lan_first"' "$SSH_BINDING" 2>/dev/null || echo "lan_first")"
 
 if [[ -z "$COMMS_IP" || "$COMMS_IP" == "null" ]]; then
   err "communications-stack host not found in vm.lifecycle binding"
@@ -44,6 +87,10 @@ ssh_cmd() {
 }
 
 if ! ssh_cmd "true" >/dev/null; then
+  if [[ "$COMMS_POLICY" == "lan_first" ]] && is_off_lan_context "$COMMS_IP"; then
+    echo "D233 SKIP: communications-stack unreachable from current off-LAN context (lan_first target: $SSH_REF)"
+    exit 0
+  fi
   err "ssh reachability failed for communications-stack ($SSH_REF)"
 fi
 

@@ -62,6 +62,7 @@ if ! "$BACKUP_STATUS_BIN" >"$STATUS_TMP" 2>&1; then
 fi
 
 python3 - "$INV" "$SCHEDULE" "$SSH_BIND" "$STATUS_TMP" "$STATUS_RC" <<'PY' > "$JSON_TMP"
+import ipaddress
 import json
 import re
 import shlex
@@ -81,6 +82,42 @@ def yq_json(path):
     if res.returncode != 0:
         raise RuntimeError(f"yq parse failed for {path}: {res.stderr.strip()}")
     return json.loads(res.stdout)
+
+
+def local_ipv4_prefixes():
+    prefixes = set()
+    for cmd in (["ifconfig"], ["ip", "-4", "addr", "show"]):
+        try:
+            run = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:
+            continue
+        if run.returncode != 0:
+            continue
+        for ip in re.findall(r"\binet\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\b", run.stdout or ""):
+            parts = ip.split(".")
+            if len(parts) == 4:
+                prefixes.add(".".join(parts[:3]))
+    return prefixes
+
+
+LOCAL_IPV4_PREFIXES = local_ipv4_prefixes()
+
+
+def is_private_ipv4(host):
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return False
+
+
+def is_off_lan_context(host):
+    if not is_private_ipv4(host):
+        return False
+    parts = host.split(".")
+    if len(parts) != 4:
+        return False
+    prefix = ".".join(parts[:3])
+    return prefix not in LOCAL_IPV4_PREFIXES
 
 
 def ssh_probe(host_cfg, base_path):
@@ -132,6 +169,9 @@ def ssh_probe(host_cfg, base_path):
             reason = "auth_denied"
         elif "could not resolve" in stderr:
             reason = "dns_unreachable"
+        policy = host_cfg.get("access_policy") or "lan_first"
+        if policy == "lan_first" and reason in {"timeout", "dns_unreachable"} and is_off_lan_context(host):
+            return {"status": "context_blocked", "reason": "off_lan_connectivity_context", "bytes": 0, "files": 0}
         return {"status": "error", "reason": reason, "bytes": 0, "files": 0}
 
     out = (run.stdout or "").strip()
@@ -278,6 +318,8 @@ for lane_id, lane in dest_lanes.items():
         if probe["status"] in {"error", "path_missing"}:
             lane_state = "collect_error"
             collect_errors += 1
+        elif probe["status"] == "context_blocked" and lane_state == "ok":
+            lane_state = "context_blocked"
         lane_bytes += int(probe["bytes"])
         lane_files += int(probe["files"])
 
