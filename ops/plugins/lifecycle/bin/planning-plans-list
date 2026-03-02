@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.plans.list — Read deferred-intent plans index.
+#
+# Usage:
+#   planning-plans-list [--json] [--horizon now|later|future] [--owner @id] [--status deferred|promoted]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
+
+MODE="table"
+FILTER_HORIZON=""
+FILTER_OWNER=""
+FILTER_STATUS=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --json) MODE="json"; shift ;;
+    --horizon) FILTER_HORIZON="${2:-}"; shift 2 ;;
+    --owner) FILTER_OWNER="${2:-}"; shift 2 ;;
+    --status) FILTER_STATUS="${2:-}"; shift 2 ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: planning-plans-list [--json] [--horizon now|later|future] [--owner @id] [--status deferred|promoted]
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -f "$PLANS_INDEX" ]] || {
+  echo "FAIL: plans index not found: $PLANS_INDEX" >&2
+  exit 1
+}
+
+python3 - "$PLANS_INDEX" "$MODE" "$FILTER_HORIZON" "$FILTER_OWNER" "$FILTER_STATUS" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+index_path = Path(sys.argv[1])
+mode = sys.argv[2]
+filter_horizon = (sys.argv[3] or "").strip()
+filter_owner = (sys.argv[4] or "").strip()
+filter_status = (sys.argv[5] or "").strip()
+
+doc = yaml.safe_load(index_path.read_text(encoding="utf-8")) or {}
+plans = doc.get("plans") if isinstance(doc, dict) else []
+if not isinstance(plans, list):
+    raise SystemExit(f"FAIL: plans index malformed (plans must be list): {index_path}")
+
+rows = []
+for plan in plans:
+    if not isinstance(plan, dict):
+        continue
+    status = str(plan.get("status") or "").strip() or "deferred"
+    row = {
+        "plan_id": str(plan.get("plan_id") or "").strip(),
+        "source_loop_id": str(plan.get("source_loop_id") or "").strip(),
+        "target_loop_id": str(plan.get("target_loop_id") or "").strip(),
+        "owner": str(plan.get("owner") or "").strip(),
+        "horizon": str(plan.get("horizon") or "").strip(),
+        "status": status,
+        "review_date": str(plan.get("review_date") or "").strip(),
+        "activation_trigger": str(plan.get("activation_trigger") or "").strip(),
+        "depends_on_loop": str(plan.get("depends_on_loop") or "").strip(),
+    }
+
+    if filter_horizon and row["horizon"] != filter_horizon:
+        continue
+    if filter_owner and row["owner"] != filter_owner:
+        continue
+    if filter_status and row["status"] != filter_status:
+        continue
+    rows.append(row)
+
+rows.sort(key=lambda r: r["plan_id"])
+
+if mode == "json":
+    print(json.dumps({
+        "capability": "planning.plans.list",
+        "index": str(index_path),
+        "count": len(rows),
+        "plans": rows,
+    }, indent=2))
+    raise SystemExit(0)
+
+print("planning.plans.list")
+print(f"index: {index_path}")
+print(f"count: {len(rows)}")
+for row in rows:
+    dep = f" depends_on={row['depends_on_loop']}" if row["depends_on_loop"] else ""
+    tgt = f" target={row['target_loop_id']}" if row["target_loop_id"] else ""
+    print(
+        f"- {row['plan_id']} owner={row['owner']} horizon={row['horizon']} "
+        f"status={row['status']} source={row['source_loop_id']}{tgt}{dep}"
+    )
+PY
+

@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.plans.create — Append deferred-intent plan to plans index.
+#
+# Usage:
+#   planning-plans-create \
+#     --plan-id PLAN-ID \
+#     --source-loop-id LOOP-ID \
+#     --owner @owner \
+#     --horizon later|future \
+#     --review-date YYYY-MM-DD \
+#     --description "..." \
+#     [--target-loop-id LOOP-ID] \
+#     [--activation-trigger manual|date|dependency] \
+#     [--depends-on-loop LOOP-ID] \
+#     [--linked-gaps GAP-1,GAP-2]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
+
+PLAN_ID=""
+SOURCE_LOOP_ID=""
+TARGET_LOOP_ID=""
+OWNER=""
+HORIZON=""
+REVIEW_DATE=""
+DESCRIPTION=""
+ACTIVATION_TRIGGER="manual"
+DEPENDS_ON_LOOP=""
+LINKED_GAPS=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --plan-id) PLAN_ID="${2:-}"; shift 2 ;;
+    --source-loop-id) SOURCE_LOOP_ID="${2:-}"; shift 2 ;;
+    --target-loop-id) TARGET_LOOP_ID="${2:-}"; shift 2 ;;
+    --owner) OWNER="${2:-}"; shift 2 ;;
+    --horizon) HORIZON="${2:-}"; shift 2 ;;
+    --review-date) REVIEW_DATE="${2:-}"; shift 2 ;;
+    --description) DESCRIPTION="${2:-}"; shift 2 ;;
+    --activation-trigger) ACTIVATION_TRIGGER="${2:-}"; shift 2 ;;
+    --depends-on-loop) DEPENDS_ON_LOOP="${2:-}"; shift 2 ;;
+    --linked-gaps) LINKED_GAPS="${2:-}"; shift 2 ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: planning-plans-create --plan-id PLAN-ID --source-loop-id LOOP-ID --owner @owner --horizon later|future --review-date YYYY-MM-DD --description "..." [options]
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$PLAN_ID" ]] || { echo "FAIL: --plan-id required" >&2; exit 2; }
+[[ -n "$SOURCE_LOOP_ID" ]] || { echo "FAIL: --source-loop-id required" >&2; exit 2; }
+[[ -n "$OWNER" ]] || { echo "FAIL: --owner required" >&2; exit 2; }
+[[ -n "$HORIZON" ]] || { echo "FAIL: --horizon required" >&2; exit 2; }
+[[ -n "$REVIEW_DATE" ]] || { echo "FAIL: --review-date required" >&2; exit 2; }
+[[ -n "$DESCRIPTION" ]] || { echo "FAIL: --description required" >&2; exit 2; }
+
+case "$HORIZON" in
+  later|future) ;;
+  *) echo "FAIL: --horizon must be later or future for plan creation (got '$HORIZON')" >&2; exit 2 ;;
+esac
+
+case "$ACTIVATION_TRIGGER" in
+  manual|date|dependency) ;;
+  *) echo "FAIL: --activation-trigger must be manual|date|dependency" >&2; exit 2 ;;
+esac
+
+if [[ "$ACTIVATION_TRIGGER" == "dependency" && -z "$DEPENDS_ON_LOOP" ]]; then
+  echo "FAIL: --depends-on-loop required when --activation-trigger=dependency" >&2
+  exit 2
+fi
+
+mkdir -p "$(dirname "$PLANS_INDEX")"
+[[ -f "$PLANS_INDEX" ]] || {
+  cat > "$PLANS_INDEX" <<'YAML'
+version: "1.0"
+updated_at: "1970-01-01"
+plans: []
+YAML
+}
+
+python3 - "$PLANS_INDEX" "$PLAN_ID" "$SOURCE_LOOP_ID" "$TARGET_LOOP_ID" "$OWNER" "$HORIZON" "$REVIEW_DATE" "$DESCRIPTION" "$ACTIVATION_TRIGGER" "$DEPENDS_ON_LOOP" "$LINKED_GAPS" <<'PY'
+from datetime import datetime, timezone
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+index_path = Path(sys.argv[1])
+plan_id = sys.argv[2].strip()
+source_loop_id = sys.argv[3].strip()
+target_loop_id = sys.argv[4].strip()
+owner = sys.argv[5].strip()
+horizon = sys.argv[6].strip()
+review_date = sys.argv[7].strip()
+description = sys.argv[8].strip()
+activation_trigger = sys.argv[9].strip()
+depends_on_loop = sys.argv[10].strip()
+linked_gaps_raw = (sys.argv[11] or "").strip()
+
+if not re.fullmatch(r"PLAN-[A-Z0-9-]+", plan_id):
+    raise SystemExit(f"FAIL: plan_id must match PLAN-[A-Z0-9-]+ (got '{plan_id}')")
+if not re.fullmatch(r"LOOP-[A-Z0-9-]+", source_loop_id):
+    raise SystemExit(f"FAIL: source_loop_id must match LOOP-* (got '{source_loop_id}')")
+if target_loop_id and not re.fullmatch(r"LOOP-[A-Z0-9-]+", target_loop_id):
+    raise SystemExit(f"FAIL: target_loop_id must match LOOP-* (got '{target_loop_id}')")
+if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", review_date):
+    raise SystemExit(f"FAIL: review_date must be YYYY-MM-DD (got '{review_date}')")
+
+doc = yaml.safe_load(index_path.read_text(encoding="utf-8")) or {}
+if not isinstance(doc, dict):
+    raise SystemExit("FAIL: plans index must be a YAML map")
+
+plans = doc.get("plans")
+if plans is None:
+    plans = []
+if not isinstance(plans, list):
+    raise SystemExit("FAIL: plans index key 'plans' must be a list")
+
+for row in plans:
+    if isinstance(row, dict) and str(row.get("plan_id", "")).strip() == plan_id:
+        raise SystemExit(f"FAIL: plan_id already exists: {plan_id}")
+
+linked_gaps = []
+if linked_gaps_raw:
+    for part in linked_gaps_raw.split(","):
+        g = part.strip()
+        if not g:
+            continue
+        if not re.fullmatch(r"GAP-[A-Z0-9-]+", g):
+            raise SystemExit(f"FAIL: linked gap must match GAP-* (got '{g}')")
+        linked_gaps.append(g)
+
+now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+entry = {
+    "plan_id": plan_id,
+    "source_loop_id": source_loop_id,
+    "owner": owner,
+    "horizon": horizon,
+    "activation_trigger": activation_trigger,
+    "review_date": review_date,
+    "description": description,
+    "linked_gaps": linked_gaps,
+    "migrated_at_utc": now_utc,
+    "status": "deferred",
+}
+if target_loop_id:
+    entry["target_loop_id"] = target_loop_id
+if depends_on_loop:
+    entry["depends_on_loop"] = depends_on_loop
+
+plans.append(entry)
+plans.sort(key=lambda item: str(item.get("plan_id", "")))
+doc["plans"] = plans
+doc["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+if "version" not in doc:
+    doc["version"] = "1.0"
+
+index_path.write_text(
+    yaml.safe_dump(doc, sort_keys=False, allow_unicode=False),
+    encoding="utf-8",
+)
+
+print("planning.plans.create")
+print(f"index: {index_path}")
+print(f"plan_id: {plan_id}")
+print(f"source_loop_id: {source_loop_id}")
+print(f"horizon: {horizon}")
+print("status: deferred")
+PY
+

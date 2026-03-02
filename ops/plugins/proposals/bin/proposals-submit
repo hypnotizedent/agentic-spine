@@ -57,6 +57,7 @@ fi
 SPINE_CODE="${SPINE_CODE:-.}"
 ROLE_RUNTIME_CONTRACT="$SPINE_CODE/ops/bindings/role.runtime.control.contract.yaml"
 TERMINAL_ROLE_CONTRACT="$SPINE_CODE/ops/bindings/terminal.role.contract.yaml"
+PROPOSALS_LIFECYCLE_CONTRACT="$SPINE_CODE/ops/bindings/proposals.lifecycle.yaml"
 
 PROPOSALS_DIR="$SPINE_CODE/mailroom/outbox/proposals"
 AGENT_ID="${SPINE_AGENT_ID:-${USER:-unknown}@$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)}"
@@ -74,6 +75,9 @@ if [[ ! -f "$LOOP_SCOPE_FILE" ]]; then
 fi
 
 LOOP_STATUS="$(awk -F': *' '/^status:/{print $2; exit}' "$LOOP_SCOPE_FILE" | tr -d '"' | tr -d "'" || true)"
+LOOP_HORIZON="$(awk -F': *' '/^horizon:/{print $2; exit}' "$LOOP_SCOPE_FILE" | tr -d '"' | tr -d "'" || true)"
+LOOP_READINESS="$(awk -F': *' '/^execution_readiness:/{print $2; exit}' "$LOOP_SCOPE_FILE" | tr -d '"' | tr -d "'" || true)"
+LOOP_OWNER="$(awk -F': *' '/^owner:/{print $2; exit}' "$LOOP_SCOPE_FILE" | tr -d '"' | tr -d "'" || true)"
 case "$LOOP_STATUS" in
   active|draft|open|planned) ;;
   closed)
@@ -85,6 +89,59 @@ case "$LOOP_STATUS" in
     exit 1
     ;;
 esac
+
+[[ -n "$LOOP_HORIZON" ]] || LOOP_HORIZON="now"
+[[ -n "$LOOP_READINESS" ]] || LOOP_READINESS="runnable"
+[[ -n "$LOOP_OWNER" ]] || LOOP_OWNER="@ronny"
+
+PENDING_REQUIRED_HORIZON="now"
+PENDING_REQUIRED_READINESS="runnable"
+DEFERRED_HORIZONS="later future"
+DRAFT_HOLD_REVIEW_MAX_DAYS=30
+if [[ -f "$PROPOSALS_LIFECYCLE_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
+  PENDING_REQUIRED_HORIZON="$(yq e -r '.horizon_rules.pending_requires.parent_loop_horizon // "now"' "$PROPOSALS_LIFECYCLE_CONTRACT" 2>/dev/null || echo now)"
+  PENDING_REQUIRED_READINESS="$(yq e -r '.horizon_rules.pending_requires.parent_loop_readiness // "runnable"' "$PROPOSALS_LIFECYCLE_CONTRACT" 2>/dev/null || echo runnable)"
+  DEFERRED_HORIZONS="$(yq e -r '.horizon_rules.draft_hold_for_deferred.applies_when_horizon[]?' "$PROPOSALS_LIFECYCLE_CONTRACT" 2>/dev/null | tr '\n' ' ')"
+  [[ -n "$DEFERRED_HORIZONS" ]] || DEFERRED_HORIZONS="later future"
+  DRAFT_HOLD_REVIEW_MAX_DAYS="$(yq e -r '.sla.draft_hold_review_max_days // 30' "$PROPOSALS_LIFECYCLE_CONTRACT" 2>/dev/null || echo 30)"
+fi
+
+MANIFEST_STATUS="pending"
+MANIFEST_OWNER_BLOCK=""
+MANIFEST_REVIEW_BLOCK=""
+MANIFEST_HOLD_BLOCK=""
+
+is_deferred=false
+for hz in $DEFERRED_HORIZONS; do
+  if [[ "$LOOP_HORIZON" == "$hz" ]]; then
+    is_deferred=true
+    break
+  fi
+done
+
+if [[ "$is_deferred" == "true" ]]; then
+  review_date="$(python3 - "$DRAFT_HOLD_REVIEW_MAX_DAYS" <<'PY'
+import sys
+from datetime import datetime, timedelta, timezone
+
+days = int(sys.argv[1]) if len(sys.argv) > 1 else 30
+print((datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%d"))
+PY
+)"
+  MANIFEST_STATUS="draft_hold"
+  MANIFEST_OWNER_BLOCK="owner: \"$LOOP_OWNER\""
+  MANIFEST_REVIEW_BLOCK="review_date: \"$review_date\""
+  MANIFEST_HOLD_BLOCK="hold_reason: \"Parent loop is deferred (horizon=$LOOP_HORIZON); promote loop to horizon=$PENDING_REQUIRED_HORIZON and readiness=$PENDING_REQUIRED_READINESS before pending/apply.\""
+elif [[ "$LOOP_HORIZON" == "$PENDING_REQUIRED_HORIZON" && "$LOOP_READINESS" == "$PENDING_REQUIRED_READINESS" ]]; then
+  MANIFEST_STATUS="pending"
+else
+  echo "ERROR: proposals-submit blocked by horizon_rules for loop_id=$LOOP_ID." >&2
+  echo "ERROR: pending requires parent loop horizon=$PENDING_REQUIRED_HORIZON and execution_readiness=$PENDING_REQUIRED_READINESS." >&2
+  echo "ERROR: observed horizon=$LOOP_HORIZON readiness=$LOOP_READINESS." >&2
+  echo "Remediation:" >&2
+  echo "  ./bin/ops cap run planning.horizon.set -- --loop $LOOP_ID --horizon $PENDING_REQUIRED_HORIZON --readiness $PENDING_REQUIRED_READINESS" >&2
+  exit 1
+fi
 
 RUNTIME_ROLE="${SPINE_RUNTIME_ROLE:-}"
 if [[ -z "$RUNTIME_ROLE" && -n "${OPS_TERMINAL_ROLE:-}" ]] && command -v yq >/dev/null 2>&1 && [[ -f "$TERMINAL_ROLE_CONTRACT" ]]; then
@@ -127,7 +184,11 @@ cat > "$PROPOSAL_DIR/manifest.yaml" << MANIFEST
 proposal: $PROPOSAL_NAME
 agent: "$AGENT_ID"
 created: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+status: $MANIFEST_STATUS
 loop_id: $LOOP_ID
+${MANIFEST_OWNER_BLOCK}
+${MANIFEST_REVIEW_BLOCK}
+${MANIFEST_HOLD_BLOCK}
 changes: []
 MANIFEST
 

@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.plans.promote — Promote deferred plan to active execution band.
+#
+# Usage:
+#   planning-plans-promote --plan-id PLAN-ID [--loop-id LOOP-ID] [--readiness runnable|blocked] --reason "..."
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
+HORIZON_SET_BIN="$ROOT/ops/plugins/lifecycle/bin/planning-horizon-set"
+
+PLAN_ID=""
+LOOP_ID=""
+READINESS="runnable"
+REASON=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --plan-id) PLAN_ID="${2:-}"; shift 2 ;;
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --readiness) READINESS="${2:-}"; shift 2 ;;
+    --reason) REASON="${2:-}"; shift 2 ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: planning-plans-promote --plan-id PLAN-ID [--loop-id LOOP-ID] [--readiness runnable|blocked] --reason "..."
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$PLAN_ID" ]] || { echo "FAIL: --plan-id required" >&2; exit 2; }
+[[ -n "$REASON" ]] || { echo "FAIL: --reason required" >&2; exit 2; }
+
+case "$READINESS" in
+  runnable|blocked) ;;
+  *) echo "FAIL: --readiness must be runnable|blocked" >&2; exit 2 ;;
+esac
+
+[[ -f "$PLANS_INDEX" ]] || {
+  echo "FAIL: plans index not found: $PLANS_INDEX" >&2
+  exit 1
+}
+[[ -x "$HORIZON_SET_BIN" ]] || {
+  echo "FAIL: missing planning-horizon-set runner: $HORIZON_SET_BIN" >&2
+  exit 1
+}
+
+resolved_loop_id="$(
+python3 - "$PLANS_INDEX" "$PLAN_ID" "$LOOP_ID" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+index_path = Path(sys.argv[1])
+plan_id = sys.argv[2].strip()
+loop_id_override = sys.argv[3].strip()
+
+if not re.fullmatch(r"PLAN-[A-Z0-9-]+", plan_id):
+    raise SystemExit(f"FAIL: invalid plan_id: {plan_id}")
+
+doc = yaml.safe_load(index_path.read_text(encoding="utf-8")) or {}
+plans = doc.get("plans") if isinstance(doc, dict) else []
+if not isinstance(plans, list):
+    raise SystemExit("FAIL: plans index malformed (plans must be list)")
+
+match = None
+for row in plans:
+    if isinstance(row, dict) and str(row.get("plan_id", "")).strip() == plan_id:
+        match = row
+        break
+
+if match is None:
+    raise SystemExit(f"FAIL: plan not found: {plan_id}")
+
+resolved = loop_id_override or str(match.get("target_loop_id") or "").strip() or str(match.get("source_loop_id") or "").strip()
+if not resolved:
+    raise SystemExit(f"FAIL: unable to resolve loop_id for {plan_id}; pass --loop-id")
+if not re.fullmatch(r"LOOP-[A-Z0-9-]+", resolved):
+    raise SystemExit(f"FAIL: resolved loop_id is invalid: {resolved}")
+
+print(resolved)
+PY
+)"
+
+"$HORIZON_SET_BIN" \
+  --loop "$resolved_loop_id" \
+  --horizon now \
+  --readiness "$READINESS" \
+  --activation-trigger manual
+
+python3 - "$PLANS_INDEX" "$PLAN_ID" "$resolved_loop_id" "$READINESS" "$REASON" <<'PY'
+from datetime import datetime, timezone
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+index_path = Path(sys.argv[1])
+plan_id = sys.argv[2].strip()
+loop_id = sys.argv[3].strip()
+readiness = sys.argv[4].strip()
+reason = sys.argv[5].strip()
+
+doc = yaml.safe_load(index_path.read_text(encoding="utf-8")) or {}
+if not isinstance(doc, dict):
+    raise SystemExit("FAIL: plans index must be YAML map")
+plans = doc.get("plans")
+if not isinstance(plans, list):
+    raise SystemExit("FAIL: plans index key 'plans' must be a list")
+
+found = False
+for row in plans:
+    if not isinstance(row, dict):
+        continue
+    if str(row.get("plan_id", "")).strip() != plan_id:
+        continue
+    found = True
+    row["horizon"] = "now"
+    row["status"] = "promoted"
+    row["promoted_loop_id"] = loop_id
+    row["promotion_readiness"] = readiness
+    row["promoted_reason"] = reason
+    row["promoted_at_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    break
+
+if not found:
+    raise SystemExit(f"FAIL: plan not found during update: {plan_id}")
+
+doc["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+index_path.write_text(
+    yaml.safe_dump(doc, sort_keys=False, allow_unicode=False),
+    encoding="utf-8",
+)
+
+print("planning.plans.promote")
+print(f"index: {index_path}")
+print(f"plan_id: {plan_id}")
+print(f"loop_id: {loop_id}")
+print(f"readiness: {readiness}")
+print("status: promoted")
+PY
+

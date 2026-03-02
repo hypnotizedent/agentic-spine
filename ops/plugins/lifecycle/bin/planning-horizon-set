@@ -80,6 +80,15 @@ fi
 acquire_git_lock gaps || exit 1
 trap 'release_git_lock' EXIT INT TERM
 
+_fm_field() {
+  local file="$1" field="$2"
+  awk '/^---$/{n++; next} n==1{print} n>=2{exit}' "$file" \
+    | { grep "^${field}:" || true; } \
+    | sed "s/^${field}: *//" \
+    | tr -d '"' \
+    | head -1
+}
+
 # Helper: set or update a frontmatter field
 _set_fm_field() {
   local file="$1" field="$2" value="$3"
@@ -125,8 +134,39 @@ _set_fm_field() {
   mv "$tmp_file" "$file"
 }
 
+# Boundary model normalization:
+# - deferred horizons must not remain status=active/open
+# - horizon=now promotes planned -> active
+current_status="$(_fm_field "$SCOPE_FILE" "status")"
+case "$current_status" in
+  closed|done|archived)
+    echo "FAIL: cannot change horizon for closed loop (status=$current_status): $LOOP_ID" >&2
+    exit 1
+    ;;
+esac
+
+normalized_status="$current_status"
+if [[ "$HORIZON" == "now" ]]; then
+  case "$current_status" in
+    planned|"")
+      normalized_status="active"
+      ;;
+  esac
+else
+  normalized_status="planned"
+  if [[ -z "$TRIGGER" ]]; then
+    existing_trigger="$(_fm_field "$SCOPE_FILE" "activation_trigger")"
+    if [[ -n "$existing_trigger" ]]; then
+      TRIGGER="$existing_trigger"
+    else
+      TRIGGER="manual"
+    fi
+  fi
+fi
+
 # Apply horizon
 _set_fm_field "$SCOPE_FILE" "horizon" "$HORIZON"
+_set_fm_field "$SCOPE_FILE" "status" "$normalized_status"
 
 # Apply readiness if specified
 if [[ -n "$READINESS" ]]; then
@@ -149,6 +189,7 @@ if [[ -n "$DEPENDS_ON" ]]; then
 fi
 
 echo "UPDATED: $LOOP_ID"
+echo "  status: $normalized_status"
 echo "  horizon: $HORIZON"
 [[ -n "$READINESS" ]] && echo "  execution_readiness: $READINESS"
 [[ -n "$TRIGGER" ]] && echo "  activation_trigger: $TRIGGER"

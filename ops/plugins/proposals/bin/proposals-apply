@@ -665,6 +665,61 @@ run_loop_gap_linkage_admission() {
   fi
 }
 
+run_proposal_horizon_admission() {
+  local scope_file loop_horizon loop_readiness proposal_status
+  local pending_horizon pending_readiness forced_status
+  local deferred_horizons deferred_hit
+
+  echo "Admission check: proposal horizon rules"
+
+  if [[ -z "${loop_id:-}" ]]; then
+    admission_add_finding "P1" "proposal_horizon" "manifest loop_id is required for horizon_rules enforcement"
+    return
+  fi
+
+  scope_file="$LOOP_SCOPES_DIR/$loop_id.scope.md"
+  if [[ ! -f "$scope_file" ]]; then
+    admission_add_finding "P1" "proposal_horizon" "loop scope file missing for loop_id=$loop_id"
+    return
+  fi
+
+  loop_horizon="$(awk '/^horizon:/{print $2; exit}' "$scope_file" 2>/dev/null | tr -d '"' || true)"
+  loop_readiness="$(awk '/^execution_readiness:/{print $2; exit}' "$scope_file" 2>/dev/null | tr -d '"' || true)"
+  [[ -n "$loop_horizon" ]] || loop_horizon="now"
+  [[ -n "$loop_readiness" ]] || loop_readiness="runnable"
+
+  proposal_status="${manifest_status:-}"
+  [[ -n "$proposal_status" ]] || proposal_status="pending"
+
+  pending_horizon="$(yq e -r '.horizon_rules.pending_requires.parent_loop_horizon // "now"' "$PROPOSALS_LIFECYCLE_CONTRACT" 2>/dev/null || echo now)"
+  pending_readiness="$(yq e -r '.horizon_rules.pending_requires.parent_loop_readiness // "runnable"' "$PROPOSALS_LIFECYCLE_CONTRACT" 2>/dev/null || echo runnable)"
+  forced_status="$(yq e -r '.horizon_rules.draft_hold_for_deferred.forced_status // "draft_hold"' "$PROPOSALS_LIFECYCLE_CONTRACT" 2>/dev/null || echo draft_hold)"
+  deferred_horizons="$(yq e -r '.horizon_rules.draft_hold_for_deferred.applies_when_horizon[]?' "$PROPOSALS_LIFECYCLE_CONTRACT" 2>/dev/null | tr '\n' ' ')"
+  [[ -n "$deferred_horizons" ]] || deferred_horizons="later future"
+
+  deferred_hit=0
+  for hz in $deferred_horizons; do
+    if [[ "$loop_horizon" == "$hz" ]]; then
+      deferred_hit=1
+      break
+    fi
+  done
+
+  if [[ "$deferred_hit" -eq 1 ]]; then
+    if [[ "$proposal_status" != "$forced_status" ]]; then
+      admission_add_finding "P1" "proposal_horizon_status" "loop_id=$loop_id has horizon=$loop_horizon; proposal status must be ${forced_status} (got ${proposal_status}). Remediation: ./bin/ops cap run proposals.reconcile -- --normalize-status"
+    fi
+    admission_add_finding "P1" "proposal_horizon_apply_block" "loop_id=$loop_id is deferred (horizon=$loop_horizon). Promote loop before apply: ./bin/ops cap run planning.horizon.set -- --loop $loop_id --horizon $pending_horizon --readiness $pending_readiness"
+    return
+  fi
+
+  if [[ "$proposal_status" == "pending" ]]; then
+    if [[ "$loop_horizon" != "$pending_horizon" || "$loop_readiness" != "$pending_readiness" ]]; then
+      admission_add_finding "P1" "proposal_horizon_pending" "pending proposal requires loop horizon=$pending_horizon and readiness=$pending_readiness (observed horizon=$loop_horizon readiness=$loop_readiness). Remediation: ./bin/ops cap run planning.horizon.set -- --loop $loop_id --horizon $pending_horizon --readiness $pending_readiness"
+    fi
+  fi
+}
+
 run_gap_id_validity_admission() {
   echo "Admission check: gap ID validity"
 
@@ -972,6 +1027,7 @@ run_admission_controller() {
   start_admission_task "ssot-schema" run_ssot_schema_conventions_admission
   start_admission_task "vertical-integration" run_vertical_integration_admission
   start_admission_task "loop-gap-linkage" run_loop_gap_linkage_admission
+  start_admission_task "proposal-horizon" run_proposal_horizon_admission
   start_admission_task "gap-id-validity" run_gap_id_validity_admission
   start_admission_task "change-intake-policy" run_change_intake_policy_admission
   collect_admission_tasks

@@ -60,9 +60,9 @@ for scope_file in "$SCOPES_DIR"/*.scope.md; do
     continue
   fi
 
-  # Only check open loops
+  # Check execution and deferred loop scopes
   case "$status" in
-    active|draft|open) ;;
+    active|draft|open|planned) ;;
     *) continue ;;
   esac
 
@@ -84,10 +84,18 @@ for scope_file in "$SCOPES_DIR"/*.scope.md; do
     fi
   fi
 
-  # Boundary model: active loops must be horizon=now (later/future requires status=planned)
-  if [[ "$status" == "active" && -n "$horizon" && "$horizon" != "now" ]]; then
+  # Boundary model: active/open loops must be horizon=now.
+  if [[ ( "$status" == "active" || "$status" == "open" ) && -n "$horizon" && "$horizon" != "now" ]]; then
     FAIL=1
-    MESSAGES="${MESSAGES}    ${GATE_ID} FAIL: ${loop_id}: status=active with horizon=${horizon} violates boundary model (use status=planned for deferred work)\n"
+    MESSAGES="${MESSAGES}    ${GATE_ID} FAIL: ${loop_id}: status=${status} with horizon=${horizon} violates boundary model (use status=planned for deferred work)\n"
+  fi
+
+  # Boundary model: planned loops must be deferred (later/future), never now.
+  if [[ "$status" == "planned" ]]; then
+    if [[ -z "$horizon" || "$horizon" == "now" ]]; then
+      FAIL=1
+      MESSAGES="${MESSAGES}    ${GATE_ID} FAIL: ${loop_id}: status=planned requires horizon=later|future\n"
+    fi
   fi
 
   # Readiness: if present, must be valid
@@ -151,5 +159,5 @@ if [[ "$FAIL" -eq 1 ]]; then
   exit 1
 fi
 
-echo "${GATE_ID} PASS: all open loop scopes have valid horizon/readiness fields" >&2
+echo "${GATE_ID} PASS: loop scopes satisfy planning horizon/readiness boundary contract" >&2
 exit 0
