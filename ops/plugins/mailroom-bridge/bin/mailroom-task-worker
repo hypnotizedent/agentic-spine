@@ -29,6 +29,7 @@ RUNTIME_CONTRACT = ROOT / "ops/bindings/mailroom.runtime.contract.yaml"
 WORKER_CONTRACT = Path(
     os.environ.get("MAILROOM_TASK_WORKER_CONTRACT", str(ROOT / "ops/bindings/mailroom.task.worker.contract.yaml"))
 )
+ROLE_RUNTIME_CONTRACT = ROOT / "ops/bindings/role.runtime.control.contract.yaml"
 
 _SHUTDOWN = False
 _CAP_APPROVALS: dict[str, str] | None = None
@@ -237,6 +238,47 @@ def parse_payload(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def parse_scope_frontmatter(path: Path) -> dict[str, Any]:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception:
+        return {}
+    if not content.startswith("---\n"):
+        return {}
+    end = content.find("\n---", 4)
+    if end == -1:
+        return {}
+    raw = content[4:end]
+    try:
+        parsed = yaml.safe_load(raw) or {}
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    # Fallback parser for loop scope frontmatter that is key:value per line but may
+    # contain unquoted ":" in scalar values (common in existing objective fields).
+    fallback: dict[str, str] = {}
+    for line in raw.splitlines():
+        text = line.strip()
+        if not text or text.startswith("#") or ":" not in text:
+            continue
+        key, val = text.split(":", 1)
+        key = key.strip()
+        value = val.strip().strip('"').strip("'")
+        if key:
+            fallback[key] = value
+    return fallback
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value).strip() if value is not None else ""
+        if text:
+            return text
+    return ""
+
+
 def normalize_args(raw: Any) -> list[str]:
     if raw is None:
         return []
@@ -259,6 +301,7 @@ class TaskWorker:
     def __init__(self, *, worker_id: str | None = None, poll_override: int | None = None, max_claims_override: int | None = None) -> None:
         self.runtime_paths = resolve_runtime_paths()
         self.contract = load_yaml(WORKER_CONTRACT, {})
+        self.role_runtime_contract = load_yaml(ROLE_RUNTIME_CONTRACT, {})
         self.runtime_cfg = self.contract.get("runtime", {}) if isinstance(self.contract, dict) else {}
         self.cycle_cfg = self.contract.get("control_cycle", {}) if isinstance(self.contract, dict) else {}
         self.task_cfg = self.contract.get("task_execution", {}) if isinstance(self.contract, dict) else {}
@@ -294,6 +337,23 @@ class TaskWorker:
             if str(x).strip()
         }
         self.manual_caps_require_confirm = bool(self.task_cfg.get("manual_caps_require_confirm", True))
+        auto_claim_cfg = (
+            self.role_runtime_contract.get("horizon_auto_claim", {})
+            if isinstance(self.role_runtime_contract, dict)
+            else {}
+        )
+        self.horizon_enforce = bool(auto_claim_cfg.get("enforce_now_runnable_only", True))
+        self.allowed_horizons = {
+            str(x).strip() for x in auto_claim_cfg.get("allowed_horizon", ["now"]) if str(x).strip()
+        } or {"now"}
+        self.allowed_readiness = {
+            str(x).strip() for x in auto_claim_cfg.get("allowed_readiness", ["runnable"]) if str(x).strip()
+        } or {"runnable"}
+        self.horizon_override_ref_field = str(auto_claim_cfg.get("override_ref_field", "horizon_override_ref"))
+        self.horizon_override_reason_field = str(
+            auto_claim_cfg.get("override_reason_field", "horizon_override_reason")
+        )
+        self.loop_scopes_dir = ROOT / "mailroom/state/loop-scopes"
 
         self._ensure_dirs()
 
@@ -370,10 +430,103 @@ class TaskWorker:
             return [str(x).strip() for x in raw if str(x).strip()]
         return []
 
+    def _resolve_scope_file(self, loop_id: str) -> Path | None:
+        if not loop_id:
+            return None
+        direct = self.loop_scopes_dir / f"{loop_id}.scope.md"
+        if direct.is_file():
+            return direct
+        matches = sorted(self.loop_scopes_dir.glob(f"{loop_id}*.scope.md"))
+        for candidate in matches:
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _horizon_context(self, task: dict[str, Any]) -> dict[str, str]:
+        payload = parse_payload(task.get("payload"))
+        route_payload = payload.get("route_target") if isinstance(payload.get("route_target"), dict) else {}
+        route_resolution = payload.get("route_resolution") if isinstance(payload.get("route_resolution"), dict) else {}
+        resolution_data = route_resolution.get("data") if isinstance(route_resolution.get("data"), dict) else {}
+
+        loop_id = _first_non_empty(
+            task.get("loop_id"),
+            payload.get("loop_id"),
+            route_payload.get("loop_id"),
+            resolution_data.get("loop_id"),
+        )
+        horizon = _first_non_empty(
+            task.get("horizon"),
+            payload.get("horizon"),
+            route_payload.get("horizon"),
+            resolution_data.get("horizon"),
+        )
+        readiness = _first_non_empty(
+            task.get("execution_readiness"),
+            payload.get("execution_readiness"),
+            route_payload.get("execution_readiness"),
+            resolution_data.get("execution_readiness"),
+        )
+        override_ref = _first_non_empty(
+            task.get(self.horizon_override_ref_field),
+            payload.get(self.horizon_override_ref_field),
+            route_payload.get(self.horizon_override_ref_field),
+            os.environ.get("SPINE_HORIZON_OVERRIDE_REF"),
+        )
+        override_reason = _first_non_empty(
+            task.get(self.horizon_override_reason_field),
+            payload.get(self.horizon_override_reason_field),
+            route_payload.get(self.horizon_override_reason_field),
+            os.environ.get("SPINE_HORIZON_OVERRIDE_REASON"),
+        )
+
+        source = "task"
+        if loop_id and (not horizon or not readiness):
+            scope_path = self._resolve_scope_file(loop_id)
+            if scope_path is not None:
+                meta = parse_scope_frontmatter(scope_path)
+                horizon = horizon or _first_non_empty(meta.get("horizon"))
+                readiness = readiness or _first_non_empty(meta.get("execution_readiness"))
+                source = f"scope:{scope_path.name}"
+
+        return {
+            "loop_id": loop_id,
+            "horizon": horizon,
+            "execution_readiness": readiness,
+            "override_ref": override_ref,
+            "override_reason": override_reason,
+            "source": source,
+        }
+
     def _eligible_for_claim(self, task: dict[str, Any]) -> tuple[bool, str]:
         route_target = str(task.get("route_target", "")).strip() or "capability"
         if route_target not in self.execute_route_targets:
             return False, f"unsupported route_target={route_target}"
+
+        if self.horizon_enforce:
+            horizon_ctx = self._horizon_context(task)
+            horizon = horizon_ctx.get("horizon", "")
+            readiness = horizon_ctx.get("execution_readiness", "")
+            override_ref = horizon_ctx.get("override_ref", "")
+            override_reason = horizon_ctx.get("override_reason", "")
+            horizon_ok = horizon in self.allowed_horizons
+            readiness_ok = readiness in self.allowed_readiness
+            if not (horizon_ok and readiness_ok):
+                if not override_ref:
+                    return (
+                        False,
+                        "horizon_block:"
+                        f"horizon={horizon or 'missing'} readiness={readiness or 'missing'} "
+                        f"allowed_horizon={','.join(sorted(self.allowed_horizons))} "
+                        f"allowed_readiness={','.join(sorted(self.allowed_readiness))} "
+                        f"override_ref_field={self.horizon_override_ref_field}",
+                    )
+                if not override_reason:
+                    return (
+                        False,
+                        "horizon_override_reason_missing:"
+                        f"override_ref={override_ref} "
+                        f"override_reason_field={self.horizon_override_reason_field}",
+                    )
 
         required_agents = self._task_required_agents(task)
         if self.claim_all:
