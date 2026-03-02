@@ -9,7 +9,7 @@
 # Last verified: 2026-02-22
 
 version: 1
-updated: "2026-03-02T08:30:25Z"
+updated: "2026-03-02T08:35:23Z"
 gaps:
   # ─────────────────────────────────────────────────────────────
   # Discovered during LOOP-INFRA-VM-RESTRUCTURE-20260206
@@ -18047,3 +18047,111 @@ gaps:
     status: open
     notes: "Filed via gaps.file at 2026-03-02T08:30:25Z"
     parent_loop: "LOOP-FRICTION-PRECOMMIT-ROLE-CONTEXT-INHERITANCE-20260302"
+  - id: "GAP-OP-1332"
+    title: "Cloudflare token failure can be masked by automatic global-key fallback on auth errors, creating auth-mode ..."
+    discovered_by: "LOOP-CLOUDFLARE-AUTH-FALLBACK-STABILITY-NORMALIZATION-20260302"
+    discovered_at: "2026-03-02"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "ops/plugins/cloudflare/lib/cloudflare-api.sh"
+    description: |
+      Cloudflare token failure can be masked by automatic global-key fallback on auth errors, creating auth-mode flapping and delayed detection of invalid token posture.
+
+      Observed evidence:
+      - token-mode calls intermittently fail with Cloudflare auth/rate limits
+      - inventory sync succeeds via auth_mode: global while token path is unstable
+      - D315 and infra verify outcomes become non-deterministic by auth mode
+
+      Required fix:
+      1) Introduce explicit token-health capability/probe surface that runs token-only and reports deterministic classification.
+      2) Make fallback policy explicit and auditable (token_invalid, token_rate_limited, fallback_used flags).
+      3) Prevent silent success masking of broken token state.
+
+      Acceptance:
+      - Token validity can be checked without fallback.
+      - Receipts clearly indicate auth mode and fallback reason.
+      - Invalid token state is surfaced as first-class failure, not hidden by global fallback success.
+    severity: high
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:33:43Z"
+    parent_loop: "LOOP-CLOUDFLARE-AUTH-FALLBACK-STABILITY-NORMALIZATION-20260302"
+  - id: "GAP-OP-1333"
+    title: "Cloudflare read paths exhibit 429 rate-limit instability under repeated calls, causing partial output and v..."
+    discovered_by: "LOOP-CLOUDFLARE-AUTH-FALLBACK-STABILITY-NORMALIZATION-20260302"
+    discovered_at: "2026-03-02"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "ops/plugins/cloudflare/bin/cloudflare-status,ops/plugins/cloudflare/bin/cloudflare-zone-list"
+    description: |
+      Cloudflare read paths exhibit 429 rate-limit instability under repeated calls, causing partial output and verify flaps.
+
+      Required fix:
+      1) Add bounded retry + backoff + jitter to high-frequency read paths.
+      2) Add deterministic terminal classification for rate-limited results.
+      3) Avoid per-zone blast loops that repeatedly hammer API after first rate-limit signal.
+
+      Acceptance:
+      - cloudflare.status and related read paths return deterministic rate_limited classification.
+      - No uncontrolled repeated API calls after 429.
+      - Infra verify path stabilizes under nominal call cadence.
+    severity: high
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:33:43Z"
+    parent_loop: "LOOP-CLOUDFLARE-AUTH-FALLBACK-STABILITY-NORMALIZATION-20260302"
+  - id: "GAP-OP-1334"
+    title: "D315 currently flattens root-cause detail in failure paths, reducing forensic observability when Cloudflare..."
+    discovered_by: "LOOP-CLOUDFLARE-AUTH-FALLBACK-STABILITY-NORMALIZATION-20260302"
+    discovered_at: "2026-03-02"
+    type: missing-entry
+    classification: missing-entry
+    doc: "surfaces/verify/d315-cloudflare-auth-readpath-health-lock.sh"
+    description: |
+      D315 currently flattens root-cause detail in failure paths, reducing forensic observability when Cloudflare auth/rate-limit issues occur.
+
+      Required fix:
+      1) Emit root failure class in D315 output (token_invalid, rate_limited, api_error, parse_error).
+      2) Preserve sufficient stderr/context for operator triage while remaining gate-safe.
+      3) Ensure D315 fails deterministically when auth path is degraded, even if fallback path partially succeeds.
+
+      Acceptance:
+      - D315 output identifies actionable failure class.
+      - Gate behavior is deterministic across token/global mode transitions.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:33:43Z"
+    parent_loop: "LOOP-CLOUDFLARE-AUTH-FALLBACK-STABILITY-NORMALIZATION-20260302"
+  - id: "GAP-OP-1335"
+    title: "Cloudflare API token rotation/validation lacks a canonical operator transaction with proof requirements, le..."
+    discovered_by: "LOOP-CLOUDFLARE-AUTH-FALLBACK-STABILITY-NORMALIZATION-20260302"
+    discovered_at: "2026-03-02"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "ops/bindings/secrets.namespace.policy.yaml"
+    description: |
+      Cloudflare API token rotation/validation lacks a canonical operator transaction with proof requirements, leading to delayed detection of token invalid state.
+
+      Required fix:
+      1) Define and enforce token-rotation + validation runbook transaction for CLOUDFLARE_API_TOKEN.
+      2) Require post-rotation token-only validation receipt before closure.
+      3) Record evidence_refs linking token health checks to loop/gap closure.
+
+      Acceptance:
+      - Operator can execute deterministic rotate+validate flow.
+      - Token-only validation receipt exists and is linked in closure evidence.
+    severity: high
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:33:43Z"
+    parent_loop: "LOOP-CLOUDFLARE-AUTH-FALLBACK-STABILITY-NORMALIZATION-20260302"
+  - id: "GAP-OP-1336"
+    title: "Broad missing elevated-session model: read-only roles (qc, researcher) block session.start and all mutating..."
+    discovered_by: "LOOP-MAILROOM-SUPERVISOR-CLEARANCE-20260303"
+    discovered_at: "2026-03-02"
+    type: agent-behavior
+    classification: agent-behavior
+    doc: "ops/engine/cap.sh,ops/bindings/terminal.role.contract.yaml"
+    description: |
+      Broad missing elevated-session model: read-only roles (qc, researcher) block session.start and all mutating governance ops. Agents must litter SPINE_ROLE_POLICY_OVERRIDE_REF+REASON on every command for the entire session. Beyond the GAP-OP-1299 symptom — the role policy has no concept of a persistent elevated session that survives across cap invocations.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-02T08:35:23Z"
+    parent_loop: "LOOP-FRICTION-SESSION-ROLE-OVERRIDE-ERGONOMICS-20260302"
