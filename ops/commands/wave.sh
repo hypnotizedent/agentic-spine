@@ -31,6 +31,198 @@ mkdir -p "$WAVES_DIR"
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
+RUNTIME_ROLE_CONTROL_LOADED=0
+PATH_CLAIMS_FILE="$SPINE_REPO/mailroom/state/path.claims.yaml"
+PATH_CLAIMS_TTL_MINUTES="180"
+PATH_CLAIMS_NON_OVERLAP="true"
+TRAFFIC_INDEX_FILE="$SPINE_REPO/mailroom/state/traffic.index.yaml"
+
+_repo_abs_path() {
+  local p="${1:-}"
+  if [[ -z "$p" || "$p" == "null" ]]; then
+    echo ""
+    return
+  fi
+  if [[ "$p" = /* ]]; then
+    echo "$p"
+  else
+    echo "$SPINE_REPO/$p"
+  fi
+}
+
+load_runtime_role_control() {
+  if [[ "$RUNTIME_ROLE_CONTROL_LOADED" -eq 1 ]]; then
+    return
+  fi
+  local path_claims_rel="mailroom/state/path.claims.yaml"
+  local traffic_index_rel="mailroom/state/traffic.index.yaml"
+
+  if command -v yq >/dev/null 2>&1 && [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
+    path_claims_rel="$(yq e -r '.path_claims.state_file // "mailroom/state/path.claims.yaml"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo "$path_claims_rel")"
+    PATH_CLAIMS_TTL_MINUTES="$(yq e -r '.path_claims.default_ttl_minutes // 180' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo 180)"
+    PATH_CLAIMS_NON_OVERLAP="$(yq e -r '.path_claims.require_non_overlapping_active_claims // true' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo true)"
+    traffic_index_rel="$(yq e -r '.traffic_index.state_file // "mailroom/state/traffic.index.yaml"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo "$traffic_index_rel")"
+  fi
+
+  [[ "$PATH_CLAIMS_TTL_MINUTES" =~ ^[0-9]+$ ]] || PATH_CLAIMS_TTL_MINUTES="180"
+  PATH_CLAIMS_FILE="$(_repo_abs_path "$path_claims_rel")"
+  TRAFFIC_INDEX_FILE="$(_repo_abs_path "$traffic_index_rel")"
+  [[ -n "$PATH_CLAIMS_FILE" ]] || PATH_CLAIMS_FILE="$SPINE_REPO/mailroom/state/path.claims.yaml"
+  [[ -n "$TRAFFIC_INDEX_FILE" ]] || TRAFFIC_INDEX_FILE="$SPINE_REPO/mailroom/state/traffic.index.yaml"
+  RUNTIME_ROLE_CONTROL_LOADED=1
+}
+
+sync_runtime_traffic_index() {
+  local sf="${1:-}"
+  local mode="${2:-sync}"
+  [[ -n "$sf" && -f "$sf" ]] || return 0
+  load_runtime_role_control
+  python3 - "$sf" "$TRAFFIC_INDEX_FILE" "$mode" <<'PYTRAFFIC'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+state_file = sys.argv[1]
+index_file = sys.argv[2]
+mode = sys.argv[3] if len(sys.argv) > 3 else "sync"
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+with open(state_file, "r", encoding="utf-8") as f:
+    state = json.load(f)
+
+packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+if isinstance(role_flow, dict) and "next_role" in role_flow:
+    next_role = str(role_flow.get("next_role") or "").strip()
+else:
+    next_role = str(packet.get("next_role") or "").strip()
+
+entry = {
+    "wave_id": str(state.get("wave_id", "")).strip(),
+    "owner_terminal": str(packet.get("owner_terminal", "")).strip(),
+    "current_role": str(role_flow.get("current_role") or packet.get("current_role") or "").strip(),
+    "next_role": next_role,
+    "deadline": str(packet.get("deadline_utc", "")).strip(),
+    "status": str(state.get("status", "active")).strip() or "active",
+    "claimed_paths": packet.get("claimed_paths") if isinstance(packet.get("claimed_paths"), list) else [],
+    "blockers": [],
+    "lifecycle_state": str(state.get("lifecycle_state", "")).strip(),
+    "updated_at": now,
+}
+
+for dispatch in state.get("dispatches", []) if isinstance(state.get("dispatches"), list) else []:
+    if not isinstance(dispatch, dict):
+        continue
+    status = str(dispatch.get("status", "")).strip()
+    if status in {"blocked", "failed"}:
+        entry["blockers"].append(
+            {
+                "dispatch_id": str(dispatch.get("task_id", "")).strip(),
+                "status": status,
+            }
+        )
+
+pf = state.get("preflight") if isinstance(state.get("preflight"), dict) else {}
+if str(pf.get("verdict", "")).strip() == "no-go":
+    for b in pf.get("blockers", []) if isinstance(pf.get("blockers"), list) else []:
+        entry["blockers"].append({"source": "preflight", "status": "no-go", "detail": str(b)})
+
+index = {"schema_version": "1.0", "updated_at": now, "items": []}
+if os.path.exists(index_file):
+    raw = open(index_file, "r", encoding="utf-8").read().strip()
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                index.update(loaded)
+        except Exception:
+            try:
+                import yaml
+                loaded = yaml.safe_load(raw) or {}
+                if isinstance(loaded, dict):
+                    index.update(loaded)
+            except Exception:
+                pass
+
+items = index.get("items")
+if not isinstance(items, list):
+    items = []
+
+wave_id = entry["wave_id"]
+items = [i for i in items if not (isinstance(i, dict) and str(i.get("wave_id", "")).strip() == wave_id)]
+items.append(entry)
+items.sort(key=lambda i: str(i.get("wave_id", "")))
+
+index["schema_version"] = "1.0"
+index["updated_at"] = now
+index["last_mode"] = mode
+index["items"] = items
+
+os.makedirs(os.path.dirname(index_file), exist_ok=True)
+with open(index_file, "w", encoding="utf-8") as f:
+    json.dump(index, f, indent=2)
+    f.write("\n")
+PYTRAFFIC
+}
+
+release_wave_path_claims() {
+  local wave_id="${1:-}"
+  local claim_status="${2:-released}"
+  [[ -n "$wave_id" ]] || return 0
+  load_runtime_role_control
+  python3 - "$PATH_CLAIMS_FILE" "$wave_id" "$claim_status" <<'PYPATHRELEASE'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+claims_file = sys.argv[1]
+wave_id = sys.argv[2]
+claim_status = sys.argv[3]
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+doc = {"schema_version": "1.0", "updated_at": now, "claims": []}
+if os.path.exists(claims_file):
+    raw = open(claims_file, "r", encoding="utf-8").read().strip()
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                doc.update(loaded)
+        except Exception:
+            try:
+                import yaml
+                loaded = yaml.safe_load(raw) or {}
+                if isinstance(loaded, dict):
+                    doc.update(loaded)
+            except Exception:
+                pass
+
+claims = doc.get("claims")
+if not isinstance(claims, list):
+    claims = []
+
+for claim in claims:
+    if not isinstance(claim, dict):
+        continue
+    if str(claim.get("wave_id", "")).strip() != wave_id:
+        continue
+    if str(claim.get("status", "")).strip() != "active":
+        continue
+    claim["status"] = claim_status
+    claim["released_at"] = now
+
+doc["schema_version"] = "1.0"
+doc["updated_at"] = now
+doc["claims"] = claims
+os.makedirs(os.path.dirname(claims_file), exist_ok=True)
+with open(claims_file, "w", encoding="utf-8") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+PYPATHRELEASE
+}
+
 wave_state_dir() {
   echo "$WAVES_DIR/${1:?wave_id required}"
 }
@@ -106,6 +298,7 @@ cmd_start() {
   local default_next_role="worker"
   local current_role_explicit=0
   local next_role_explicit=0
+  load_runtime_role_control
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -307,9 +500,10 @@ print(json.dumps(items))
 PYCLAIMS
 )"
 
-  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" <<'PYSTART'
+  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" <<'PYSTART'
 import json, sys
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 
 sf = sys.argv[1]
 wave_id = sys.argv[2]
@@ -330,6 +524,13 @@ claimed_paths = json.loads(sys.argv[16]) if len(sys.argv) > 16 and sys.argv[16] 
 required_fields = [x.strip() for x in (sys.argv[17] if len(sys.argv) > 17 else "").split(",") if x.strip()]
 allowed_horizon = {x.strip() for x in (sys.argv[18] if len(sys.argv) > 18 else "now,later,future").split(",") if x.strip()}
 allowed_readiness = {x.strip() for x in (sys.argv[19] if len(sys.argv) > 19 else "runnable,blocked").split(",") if x.strip()}
+path_claims_file = sys.argv[20] if len(sys.argv) > 20 else ""
+path_claims_ttl_minutes = 180
+try:
+    path_claims_ttl_minutes = int(sys.argv[21]) if len(sys.argv) > 21 else 180
+except Exception:
+    path_claims_ttl_minutes = 180
+path_claims_non_overlap = (sys.argv[22].lower() == "true") if len(sys.argv) > 22 else True
 
 packet = {
     "schema_version": "1.0",
@@ -370,12 +571,125 @@ if not isinstance(packet["claimed_paths"], list) or len(packet["claimed_paths"])
     print("FAIL: packet.claimed_paths must include at least one claimed path")
     sys.exit(1)
 
+def _load_doc(path: str) -> dict:
+    if not path or not os.path.exists(path):
+        return {}
+    raw = open(path, "r", encoding="utf-8").read().strip()
+    if not raw:
+        return {}
+    try:
+        loaded = json.loads(raw)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        try:
+            import yaml
+            loaded = yaml.safe_load(raw) or {}
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+
+def _save_doc(path: str, payload: dict) -> None:
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+
+def _normalize_path(p: str) -> str:
+    text = str(p or "").strip()
+    if not text:
+        return ""
+    if text == ".":
+        return "."
+    while text.startswith("./"):
+        text = text[2:]
+    text = text.rstrip("/")
+    return text or "."
+
+def _paths_overlap(a: str, b: str) -> bool:
+    p1 = _normalize_path(a)
+    p2 = _normalize_path(b)
+    if not p1 or not p2:
+        return False
+    if p1 == "." or p2 == ".":
+        return True
+    return p1 == p2 or p1.startswith(p2 + "/") or p2.startswith(p1 + "/")
+
+now_dt = datetime.now(timezone.utc)
+now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+claims_doc = _load_doc(path_claims_file) if path_claims_file else {}
+claims = claims_doc.get("claims") if isinstance(claims_doc.get("claims"), list) else []
+normalized_claims = []
+conflicts = []
+
+for claim in claims:
+    if not isinstance(claim, dict):
+        continue
+    status = str(claim.get("status", "active")).strip() or "active"
+    expires_at = str(claim.get("expires_at", "")).strip()
+    if status == "active" and expires_at:
+        try:
+            if datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= now_dt:
+                status = "expired"
+                claim["status"] = "expired"
+                claim["expired_at"] = now
+        except Exception:
+            pass
+    if status == "active" and path_claims_non_overlap and str(claim.get("wave_id", "")).strip() != wave_id:
+        other_paths = claim.get("claimed_paths") if isinstance(claim.get("claimed_paths"), list) else []
+        for mine in packet["claimed_paths"]:
+            for other in other_paths:
+                if _paths_overlap(str(mine), str(other)):
+                    conflicts.append(
+                        {
+                            "wave_id": str(claim.get("wave_id", "")).strip(),
+                            "owner_terminal": str(claim.get("owner_terminal", "")).strip(),
+                            "path_a": str(mine),
+                            "path_b": str(other),
+                        }
+                    )
+    normalized_claims.append(claim)
+
+if conflicts:
+    print("FAIL: path claim collision detected (active overlapping claims)")
+    for c in conflicts:
+        print(
+            "  - "
+            f"wave={c['wave_id']} owner={c['owner_terminal']} "
+            f"path={c['path_a']} overlaps={c['path_b']}"
+        )
+    sys.exit(1)
+
+expires_at = (now_dt + timedelta(minutes=max(1, path_claims_ttl_minutes))).strftime("%Y-%m-%dT%H:%M:%SZ")
+normalized_claims.append(
+    {
+        "claim_id": f"CLM-{wave_id}-{now_dt.strftime('%Y%m%dT%H%M%SZ')}",
+        "wave_id": wave_id,
+        "owner_terminal": owner_terminal,
+        "current_role": default_role,
+        "next_role": default_next_role,
+        "status": "active",
+        "claimed_paths": packet["claimed_paths"],
+        "created_at": now,
+        "expires_at": expires_at,
+        "deadline_utc": packet["deadline_utc"],
+    }
+)
+claims_payload = {
+    "schema_version": "1.0",
+    "updated_at": now,
+    "claims": normalized_claims,
+}
+if path_claims_file:
+    _save_doc(path_claims_file, claims_payload)
+
 state = {
     "wave_id": wave_id,
     "status": "active",
     "lifecycle_state": "active",
     "objective": objective,
-    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "created_at": now,
     "closed_at": None,
     "dispatches": [],
     "watcher_checks": [],
@@ -418,6 +732,8 @@ elif workspace_note:
 print(f"  Next: ops wave preflight <domain>")
 print(f"         ops wave dispatch {wave_id} --lane <lane> --task \"...\"")
 PYSTART
+
+  sync_runtime_traffic_index "$sf" "start"
 }
 
 cmd_dispatch() {
@@ -651,6 +967,20 @@ try:
 
     state["dispatches"].append(dispatch)
 
+    role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+    if from_role and not role_flow.get("current_role"):
+        role_flow["current_role"] = from_role
+    if to_role:
+        role_flow["next_role"] = to_role
+    role_flow["pending_transition"] = {
+        "task_id": task_id,
+        "from_role": from_role,
+        "to_role": to_role,
+        "gate": transition_gate,
+        "dispatched_at": dispatch["dispatched_at"],
+    }
+    state["role_flow"] = role_flow
+
     with open(sf, "w") as f:
         json.dump(state, f, indent=2)
         f.write("\n")
@@ -669,6 +999,8 @@ if lane == "execution":
 elif lane == "audit":
     print(f"  NOTE: audit lane is read-only")
 PYDISP
+
+  sync_runtime_traffic_index "$sf" "dispatch"
 }
 
 _dispatch_watcher() {
@@ -1173,7 +1505,7 @@ cmd_ack() {
   local sf
   sf="$(wave_state_file "$wave_id")"
 
-  python3 - "$sf" "$lane" "$result" "$run_key" "$dispatch_id" <<'PYACK'
+  python3 - "$sf" "$lane" "$result" "$run_key" "$dispatch_id" "$ROLE_RUNTIME_CONTRACT" <<'PYACK'
 import json, sys, fcntl, os
 from datetime import datetime, timezone
 
@@ -1182,6 +1514,7 @@ lane = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
 result = sys.argv[3] if len(sys.argv) > 3 else ""
 run_key = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None
 dispatch_id = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] else None
+role_contract = sys.argv[6] if len(sys.argv) > 6 else ""
 lock_file = sf + ".lock"
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
@@ -1239,6 +1572,62 @@ try:
         print("No dispatch acked.")
         sys.exit(1)
 
+    d = dispatches[acked_idx]
+    from_role = str(d.get("from_role", "")).strip()
+    to_role = str(d.get("to_role", "")).strip()
+
+    promotion_next = ""
+    close_aliases = {"close", "librarian"}
+    if role_contract and os.path.exists(role_contract):
+        try:
+            import yaml
+            contract = yaml.safe_load(open(role_contract, "r", encoding="utf-8")) or {}
+            runtime_roles = contract.get("runtime_roles") if isinstance(contract, dict) else {}
+            if isinstance(runtime_roles, dict):
+                aliases = runtime_roles.get("close_role_aliases")
+                if isinstance(aliases, list) and aliases:
+                    close_aliases = {str(x).strip() for x in aliases if str(x).strip()} or close_aliases
+            transitions = contract.get("promotion_gates", {}).get("transitions", [])
+            if isinstance(transitions, list):
+                for t in transitions:
+                    if not isinstance(t, dict):
+                        continue
+                    if str(t.get("from", "")).strip() == to_role:
+                        promotion_next = str(t.get("to", "")).strip()
+                        if promotion_next:
+                            break
+        except Exception:
+            pass
+
+    role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+    if to_role:
+        role_flow["current_role"] = to_role
+    elif from_role and not role_flow.get("current_role"):
+        role_flow["current_role"] = from_role
+    if promotion_next:
+        role_flow["next_role"] = promotion_next
+    elif to_role in close_aliases:
+        role_flow["next_role"] = ""
+    elif to_role and not role_flow.get("next_role"):
+        role_flow["next_role"] = to_role
+    role_flow["last_transition"] = {
+        "task_id": d.get("task_id"),
+        "from_role": from_role,
+        "to_role": to_role,
+        "completed_at": now,
+        "run_key": run_key,
+    }
+    role_flow.pop("pending_transition", None)
+    state["role_flow"] = role_flow
+
+    lifecycle_state = str(state.get("lifecycle_state", "active")).strip() or "active"
+    if lifecycle_state == "active" and to_role == "worker":
+        state["lifecycle_state"] = "implemented"
+    elif lifecycle_state in {"active", "implemented"} and to_role in {"qc"}:
+        state["lifecycle_state"] = "implemented"
+    elif lifecycle_state in {"active", "implemented"} and to_role in close_aliases:
+        state["lifecycle_state"] = "validated"
+
     with open(sf, "w") as f:
         json.dump(state, f, indent=2)
         f.write("\n")
@@ -1253,7 +1642,10 @@ print(f"  Result: {result}")
 if run_key:
     print(f"  Run key: {run_key}")
 print(f"  Status: done")
+print(f"  Lifecycle: {state.get('lifecycle_state', 'active')}")
 PYACK
+
+  sync_runtime_traffic_index "$sf" "ack"
 }
 
 cmd_close() {
@@ -1334,6 +1726,8 @@ try:
     state["status"] = "closed"
     state["closed_at"] = now
     state["force_closed"] = bool(contract_violations)
+    state[state_field] = "closed"
+    state["lifecycle_state"] = "closed"
     workspace = state.get("workspace")
     if isinstance(workspace, dict) and workspace.get("enabled"):
         workspace["lifecycle_state"] = "pending_close"
@@ -1746,6 +2140,7 @@ with open(sf, 'w') as f:
 " 2>/dev/null || true
     echo
     echo "  Preflight attached to active wave."
+    sync_runtime_traffic_index "$active_wave_sf" "preflight"
   fi
 }
 
@@ -1764,13 +2159,35 @@ cmd_receipt_validate() {
 
   local schema_path="$SPINE_REPO/ops/bindings/orchestration.exec_receipt.schema.json"
 
-  python3 - "$receipt_path" "$schema_path" <<'PYVALIDATE'
+  python3 - "$receipt_path" "$schema_path" "$ROLE_RUNTIME_CONTRACT" <<'PYVALIDATE'
 import json, sys, re, os
 
 receipt_path = sys.argv[1]
 schema_path = sys.argv[2]
+role_runtime_contract = sys.argv[3] if len(sys.argv) > 3 else ""
 
 errors = []
+run_key_pattern_text = r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"
+commit_ref_pattern = r"^[0-9a-f]{7,40}$"
+allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
+required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
+
+if role_runtime_contract and os.path.exists(role_runtime_contract):
+    try:
+        import yaml
+        contract = yaml.safe_load(open(role_runtime_contract, "r", encoding="utf-8")) or {}
+        evidence = contract.get("evidence") if isinstance(contract, dict) else {}
+        if isinstance(evidence, dict):
+            run_key_pattern_text = str(evidence.get("run_key_regex", run_key_pattern_text))
+            commit_ref_pattern = str(evidence.get("commit_ref_regex", commit_ref_pattern))
+            blockers = evidence.get("blocker_classes")
+            if isinstance(blockers, list) and blockers:
+                allowed_blocker_classes = {str(x).strip() for x in blockers if str(x).strip()} or allowed_blocker_classes
+            required = evidence.get("required_ref_fields")
+            if isinstance(required, list) and required:
+                required_evidence_fields = [str(x).strip() for x in required if str(x).strip()] or required_evidence_fields
+    except Exception:
+        pass
 
 # Load receipt
 try:
@@ -1832,7 +2249,7 @@ if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
     errors.append(f"timestamp_utc must match YYYY-MM-DDTHH:MM:SSZ, got '{ts}'")
 
 # Run key pattern validation
-run_key_pattern = re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")
+run_key_pattern = re.compile(run_key_pattern_text)
 for i, rk in enumerate(receipt.get("run_keys", [])):
     if not isinstance(rk, str):
         errors.append(f"run_keys[{i}] must be a string")
@@ -1855,12 +2272,56 @@ if "commit_hashes" in receipt:
     if not isinstance(receipt["commit_hashes"], list):
         errors.append("commit_hashes must be an array")
     else:
+        commit_pat = re.compile(commit_ref_pattern)
         for i, h in enumerate(receipt["commit_hashes"]):
-            if not isinstance(h, str) or not re.match(r"^[0-9a-f]{7,40}$", h):
+            if not isinstance(h, str) or not commit_pat.match(h):
                 errors.append(f"commit_hashes[{i}] must be a 7-40 char hex string")
 
+if "evidence_refs" not in receipt:
+    errors.append("Missing required field: evidence_refs")
+else:
+    evidence_refs = receipt["evidence_refs"]
+    if not isinstance(evidence_refs, dict):
+        errors.append("evidence_refs must be an object")
+    else:
+        for key in required_evidence_fields:
+            if key not in evidence_refs:
+                errors.append(f"evidence_refs missing {key}")
+
+        run_key_refs = evidence_refs.get("run_key_refs", [])
+        file_refs = evidence_refs.get("file_refs", [])
+        commit_refs = evidence_refs.get("commit_refs", [])
+        blocker_class = str(evidence_refs.get("blocker_class", "")).strip()
+
+        if not isinstance(run_key_refs, list):
+            errors.append("evidence_refs.run_key_refs must be an array")
+        else:
+            for i, rk in enumerate(run_key_refs):
+                if not isinstance(rk, str) or not run_key_pattern.match(rk):
+                    errors.append(f"evidence_refs.run_key_refs[{i}] invalid run key")
+
+        if not isinstance(file_refs, list):
+            errors.append("evidence_refs.file_refs must be an array")
+        else:
+            for i, ref in enumerate(file_refs):
+                if not isinstance(ref, str) or not ref.strip():
+                    errors.append(f"evidence_refs.file_refs[{i}] must be non-empty string")
+
+        commit_pat = re.compile(commit_ref_pattern)
+        if not isinstance(commit_refs, list):
+            errors.append("evidence_refs.commit_refs must be an array")
+        else:
+            for i, ref in enumerate(commit_refs):
+                if not isinstance(ref, str) or not commit_pat.match(ref):
+                    errors.append(f"evidence_refs.commit_refs[{i}] invalid commit ref")
+
+        if not blocker_class:
+            errors.append("evidence_refs.blocker_class must be non-empty")
+        elif blocker_class not in allowed_blocker_classes:
+            errors.append(f"evidence_refs.blocker_class invalid: {blocker_class}")
+
 # additionalProperties check
-allowed_keys = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids"])
+allowed_keys = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs"])
 for k in receipt.keys():
     if k not in allowed_keys:
         errors.append(f"Unknown field: '{k}' (additionalProperties not allowed)")
@@ -1905,9 +2366,15 @@ cmd_collect_v2() {
   local receipts_dir="$sd/receipts"
   local schema_path="$SPINE_REPO/ops/bindings/orchestration.exec_receipt.schema.json"
 
-  python3 - "$sf" "$sd" "$receipts_dir" "$schema_path" "$sync_roadmap" "$SPINE_REPO" <<'PYCOLLECT2'
+  python3 - "$sf" "$sd" "$receipts_dir" "$schema_path" "$sync_roadmap" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" <<'PYCOLLECT2'
 import json, sys, os, re, glob, fcntl
 from datetime import datetime, timezone
+
+run_key_pattern = r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"
+commit_ref_pattern = r"^[0-9a-f]{7,40}$"
+allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
+required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
+close_aliases = {"close", "librarian"}
 
 def _validate_receipt(receipt):
     """Validate receipt dict, return list of error strings."""
@@ -1934,13 +2401,56 @@ def _validate_receipt(receipt):
     ts = receipt.get("timestamp_utc", "")
     if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
         errors.append("bad timestamp format")
-    rk_pat = re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")
+    rk_pat = re.compile(run_key_pattern)
     for rk in receipt.get("run_keys", []):
         if isinstance(rk, str) and not rk_pat.match(rk):
             errors.append(f"bad run_key: {rk}")
     if receipt.get("status") == "blocked" and not receipt.get("blockers"):
         errors.append("blocked needs blockers[]")
-    allowed = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids"])
+
+    if "evidence_refs" not in receipt:
+        errors.append("missing evidence_refs")
+    else:
+        evidence_refs = receipt["evidence_refs"]
+        if not isinstance(evidence_refs, dict):
+            errors.append("evidence_refs not object")
+        else:
+            for key in required_evidence_fields:
+                if key not in evidence_refs:
+                    errors.append(f"evidence_refs missing {key}")
+            run_key_refs = evidence_refs.get("run_key_refs", [])
+            file_refs = evidence_refs.get("file_refs", [])
+            commit_refs = evidence_refs.get("commit_refs", [])
+            blocker_class = str(evidence_refs.get("blocker_class", "")).strip()
+
+            if not isinstance(run_key_refs, list):
+                errors.append("evidence_refs.run_key_refs not array")
+            else:
+                for rk in run_key_refs:
+                    if not isinstance(rk, str) or not rk_pat.match(rk):
+                        errors.append(f"bad evidence run_key_ref: {rk}")
+
+            if not isinstance(file_refs, list):
+                errors.append("evidence_refs.file_refs not array")
+            else:
+                for ref in file_refs:
+                    if not isinstance(ref, str) or not ref.strip():
+                        errors.append("bad evidence file_ref")
+
+            commit_pat = re.compile(commit_ref_pattern)
+            if not isinstance(commit_refs, list):
+                errors.append("evidence_refs.commit_refs not array")
+            else:
+                for ref in commit_refs:
+                    if not isinstance(ref, str) or not commit_pat.match(ref):
+                        errors.append(f"bad evidence commit_ref: {ref}")
+
+            if not blocker_class:
+                errors.append("evidence_refs.blocker_class missing")
+            elif blocker_class not in allowed_blocker_classes:
+                errors.append(f"bad evidence blocker_class: {blocker_class}")
+
+    allowed = set(required + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs"])
     for k in receipt.keys():
         if k not in allowed:
             errors.append(f"unknown field: {k}")
@@ -1952,7 +2462,30 @@ receipts_dir = sys.argv[3]
 schema_path = sys.argv[4]
 sync_roadmap = sys.argv[5] == "true"
 spine_repo = sys.argv[6]
+role_runtime_contract = sys.argv[7] if len(sys.argv) > 7 else ""
 lock_file = sf + ".lock"
+
+if role_runtime_contract and os.path.exists(role_runtime_contract):
+    try:
+        import yaml
+        contract = yaml.safe_load(open(role_runtime_contract, "r", encoding="utf-8")) or {}
+        evidence = contract.get("evidence") if isinstance(contract, dict) else {}
+        if isinstance(evidence, dict):
+            run_key_pattern = str(evidence.get("run_key_regex", run_key_pattern))
+            commit_ref_pattern = str(evidence.get("commit_ref_regex", commit_ref_pattern))
+            blockers = evidence.get("blocker_classes")
+            if isinstance(blockers, list) and blockers:
+                allowed_blocker_classes = {str(x).strip() for x in blockers if str(x).strip()} or allowed_blocker_classes
+            required = evidence.get("required_ref_fields")
+            if isinstance(required, list) and required:
+                required_evidence_fields = [str(x).strip() for x in required if str(x).strip()] or required_evidence_fields
+        runtime_roles = contract.get("runtime_roles") if isinstance(contract, dict) else {}
+        if isinstance(runtime_roles, dict):
+            aliases = runtime_roles.get("close_role_aliases")
+            if isinstance(aliases, list) and aliases:
+                close_aliases = {str(x).strip() for x in aliases if str(x).strip()} or close_aliases
+    except Exception:
+        pass
 
 # ── Load state with lock ──
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
@@ -2025,6 +2558,54 @@ for i, d in enumerate(dispatches):
         d["receipt_file"] = os.path.basename(receipt_map[task_id].get("_source", ""))
         d["receipt_validated"] = True
         matched += 1
+
+# Promote role/lifecycle state deterministically from completed dispatches.
+role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+lifecycle_state = str(state.get("lifecycle_state", "active")).strip() or "active"
+completed = [d for d in dispatches if isinstance(d, dict) and str(d.get("status", "")).strip() == "done"]
+if completed:
+    def _dispatch_order(dispatch):
+        task_id = str(dispatch.get("task_id", "")).strip()
+        if task_id.startswith("D") and task_id[1:].isdigit():
+            return int(task_id[1:])
+        return 0
+    completed.sort(key=lambda d: (_dispatch_order(d), str(d.get("completed_at") or d.get("dispatched_at") or "")))
+    last_done = completed[-1]
+    last_to_role = str(last_done.get("to_role", "")).strip()
+    last_from_role = str(last_done.get("from_role", "")).strip()
+    if last_to_role:
+        role_flow["current_role"] = last_to_role
+    elif last_from_role and not role_flow.get("current_role"):
+        role_flow["current_role"] = last_from_role
+    role_flow["last_transition"] = {
+        "task_id": last_done.get("task_id"),
+        "from_role": last_from_role,
+        "to_role": last_to_role,
+        "completed_at": last_done.get("completed_at"),
+        "run_key": last_done.get("run_key"),
+    }
+    role_flow.pop("pending_transition", None)
+
+for d in completed:
+    to_role = str(d.get("to_role", "")).strip()
+    if to_role == "worker" and lifecycle_state == "active":
+        lifecycle_state = "implemented"
+    elif to_role == "qc" and lifecycle_state == "active":
+        lifecycle_state = "implemented"
+    elif to_role in close_aliases and lifecycle_state in {"active", "implemented"}:
+        lifecycle_state = "validated"
+
+pending_transitions = [
+    d for d in dispatches if isinstance(d, dict) and str(d.get("status", "")).strip() == "dispatched" and str(d.get("to_role", "")).strip()
+]
+if pending_transitions:
+    pending_transitions.sort(key=lambda d: str(d.get("dispatched_at") or ""))
+    role_flow["next_role"] = str(pending_transitions[0].get("to_role", "")).strip()
+elif str(role_flow.get("current_role", "")).strip() in close_aliases:
+    role_flow["next_role"] = ""
+
+state["role_flow"] = role_flow
+state["lifecycle_state"] = lifecycle_state
 
 # Also collect run keys from all valid receipts
 all_run_keys = []
@@ -2179,6 +2760,8 @@ else:
 print(f"  Summary: {summary_path}")
 print("=" * 72)
 PYCOLLECT2
+
+  sync_runtime_traffic_index "$sf" "collect"
 }
 
 # ── Enhanced close with receipt gating ─────────────────────────────────
@@ -2207,7 +2790,7 @@ cmd_close_v2() {
   local sd
   sd="$(wave_state_dir "$wave_id")"
 
-  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" <<'PYCLOSE2'
+  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" <<'PYCLOSE2'
 import json, sys, os, re, fcntl
 from datetime import datetime, timezone
 
@@ -2215,8 +2798,58 @@ sf = sys.argv[1]
 sd = sys.argv[2]
 force = sys.argv[3] == "true"
 spine_repo = sys.argv[4]
+role_runtime_contract = sys.argv[5] if len(sys.argv) > 5 else ""
 lock_file = sf + ".lock"
 receipts_dir = os.path.join(sd, "receipts")
+
+run_key_pattern = r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"
+commit_ref_pattern = r"^[0-9a-f]{7,40}$"
+allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
+required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
+state_field = "lifecycle_state"
+state_transitions = {
+    "active": {"implemented"},
+    "implemented": {"validated"},
+    "validated": {"closed"},
+    "closed": set(),
+}
+close_aliases = {"close", "librarian"}
+
+if role_runtime_contract and os.path.exists(role_runtime_contract):
+    try:
+        import yaml
+        contract = yaml.safe_load(open(role_runtime_contract, "r", encoding="utf-8")) or {}
+        evidence = contract.get("evidence") if isinstance(contract, dict) else {}
+        if isinstance(evidence, dict):
+            run_key_pattern = str(evidence.get("run_key_regex", run_key_pattern))
+            commit_ref_pattern = str(evidence.get("commit_ref_regex", commit_ref_pattern))
+            blockers = evidence.get("blocker_classes")
+            if isinstance(blockers, list) and blockers:
+                allowed_blocker_classes = {str(x).strip() for x in blockers if str(x).strip()} or allowed_blocker_classes
+            required = evidence.get("required_ref_fields")
+            if isinstance(required, list) and required:
+                required_evidence_fields = [str(x).strip() for x in required if str(x).strip()] or required_evidence_fields
+        runtime_roles = contract.get("runtime_roles") if isinstance(contract, dict) else {}
+        if isinstance(runtime_roles, dict):
+            aliases = runtime_roles.get("close_role_aliases")
+            if isinstance(aliases, list) and aliases:
+                close_aliases = {str(x).strip() for x in aliases if str(x).strip()} or close_aliases
+        sm = contract.get("closeout_state_machine") if isinstance(contract, dict) else {}
+        if isinstance(sm, dict):
+            state_field = str(sm.get("state_field", state_field)).strip() or state_field
+            states = sm.get("states")
+            if isinstance(states, dict) and states:
+                parsed = {}
+                for st, meta in states.items():
+                    if not isinstance(meta, dict):
+                        continue
+                    parsed[str(st).strip()] = {
+                        str(x).strip() for x in (meta.get("transitions") or []) if str(x).strip()
+                    }
+                if parsed:
+                    state_transitions = parsed
+    except Exception:
+        pass
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
 try:
@@ -2302,7 +2935,7 @@ try:
         if ts and not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts):
             errors.append("bad timestamp format")
 
-        rk_pat = re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")
+        rk_pat = re.compile(run_key_pattern)
         for rk in receipt.get("run_keys", []):
             if not isinstance(rk, str):
                 errors.append("run_key not string")
@@ -2321,20 +2954,52 @@ try:
             if not isinstance(receipt["commit_hashes"], list):
                 errors.append("commit_hashes not array")
             else:
+                commit_pat = re.compile(commit_ref_pattern)
                 for h in receipt["commit_hashes"]:
-                    if not isinstance(h, str) or not re.match(r"^[0-9a-f]{7,40}$", h):
+                    if not isinstance(h, str) or not commit_pat.match(h):
                         errors.append(f"bad commit_hash: {h}")
 
-        if "evidence_refs" in receipt:
+        if "evidence_refs" not in receipt:
+            errors.append("missing evidence_refs")
+        else:
             evidence_refs = receipt["evidence_refs"]
             if not isinstance(evidence_refs, dict):
                 errors.append("evidence_refs not object")
             else:
-                if "blocker_class" in evidence_refs and not isinstance(evidence_refs.get("blocker_class"), str):
-                    errors.append("evidence_refs.blocker_class not string")
-                for key in ("run_key_refs", "file_refs", "commit_refs"):
-                    if key in evidence_refs and not isinstance(evidence_refs.get(key), list):
-                        errors.append(f"evidence_refs.{key} not array")
+                for key in required_evidence_fields:
+                    if key not in evidence_refs:
+                        errors.append(f"evidence_refs missing {key}")
+                run_key_refs = evidence_refs.get("run_key_refs", [])
+                file_refs = evidence_refs.get("file_refs", [])
+                commit_refs = evidence_refs.get("commit_refs", [])
+                blocker_class = str(evidence_refs.get("blocker_class", "")).strip()
+
+                if not isinstance(run_key_refs, list):
+                    errors.append("evidence_refs.run_key_refs not array")
+                else:
+                    for rk in run_key_refs:
+                        if not isinstance(rk, str) or not rk_pat.match(rk):
+                            errors.append(f"bad evidence run_key_ref: {rk}")
+
+                if not isinstance(file_refs, list):
+                    errors.append("evidence_refs.file_refs not array")
+                else:
+                    for ref in file_refs:
+                        if not isinstance(ref, str) or not ref.strip():
+                            errors.append("bad evidence file_ref")
+
+                commit_pat = re.compile(commit_ref_pattern)
+                if not isinstance(commit_refs, list):
+                    errors.append("evidence_refs.commit_refs not array")
+                else:
+                    for ref in commit_refs:
+                        if not isinstance(ref, str) or not commit_pat.match(ref):
+                            errors.append(f"bad evidence commit_ref: {ref}")
+
+                if not blocker_class:
+                    errors.append("evidence_refs.blocker_class missing")
+                elif blocker_class not in allowed_blocker_classes:
+                    errors.append(f"bad evidence blocker_class: {blocker_class}")
 
         allowed = set(required_fields + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs"])
         for key in receipt.keys():
@@ -2376,6 +3041,10 @@ try:
             verify_results.append(rk)
     for r in valid_receipts:
         for rk in r.get("run_keys", []):
+            if isinstance(rk, str) and rk:
+                verify_results.append(rk)
+        evidence_refs = r.get("evidence_refs") if isinstance(r.get("evidence_refs"), dict) else {}
+        for rk in evidence_refs.get("run_key_refs", []) if isinstance(evidence_refs.get("run_key_refs"), list) else []:
             if isinstance(rk, str) and rk:
                 verify_results.append(rk)
     if not verify_results:
@@ -2440,6 +3109,21 @@ try:
         },
     }
 
+    lifecycle_state = str(state.get(state_field, state.get("lifecycle_state", "active"))).strip() or "active"
+    if lifecycle_state not in state_transitions:
+        contract_violations.append(f"state machine unknown state '{lifecycle_state}'")
+    else:
+        allowed = state_transitions.get(lifecycle_state, set())
+        if "closed" not in allowed:
+            contract_violations.append(f"state machine blocked: {lifecycle_state} -> closed not allowed")
+
+    role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
+    current_role = str(role_flow.get("current_role", "")).strip()
+    if close_aliases and current_role and current_role not in close_aliases:
+        contract_violations.append(
+            f"role flow blocked close: current_role={current_role} expected one of {sorted(close_aliases)}"
+        )
+
     # ── Gate decision ──
     if contract_violations and not force:
         print("BLOCKED: Wave close contract not met:")
@@ -2466,6 +3150,8 @@ try:
     state["status"] = "closed"
     state["closed_at"] = now
     state["force_closed"] = bool(contract_violations)
+    state[state_field] = "closed"
+    state["lifecycle_state"] = "closed"
     workspace = state.get("workspace")
     if isinstance(workspace, dict) and workspace.get("enabled"):
         workspace["lifecycle_state"] = "pending_close"
@@ -2617,6 +3303,9 @@ print(f"  Close receipt: {close_receipt_path}")
 print(f"  Merge receipt: {receipt_path}")
 print(f"  READY_FOR_ADOPTION={'true' if ready_for_adoption else 'false'}")
 PYCLOSE2
+
+  release_wave_path_claims "$wave_id" "released"
+  sync_runtime_traffic_index "$sf" "close"
 
   # Mark workspace lease as pending_close if the wave had an auto workspace.
   local lease_filename=".spine-lane-lease.yaml"
