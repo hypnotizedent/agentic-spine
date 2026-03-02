@@ -33,7 +33,8 @@ cf_has_token_auth() {
 
 cf_is_fallback_status() {
   local status="${1:-}"
-  [[ "$status" == "401" || "$status" == "403" || "$status" == "429" ]]
+  # Only auth failures trigger mode fallback; 429 is rate limiting, not auth scope.
+  [[ "$status" == "401" || "$status" == "403" ]]
 }
 
 cf__curl_with_mode() {

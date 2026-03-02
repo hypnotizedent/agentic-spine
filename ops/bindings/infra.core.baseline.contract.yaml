@@ -1,0 +1,123 @@
+# Infra-Core Canonical Baseline Contract
+# Defines authority ownership, lifecycle requirements, self-heal expectations,
+# and auth posture for the four infra-core systems.
+# Status: authoritative
+# Last verified: 2026-03-02
+
+version: 1
+updated: "2026-03-02"
+owner: "@ronny"
+scope: infra-core-canonical-baseline
+contract_id: INFRA_CORE_BASELINE_CONTRACT_V1
+
+source_bindings:
+  slo: ops/bindings/infra.core.slo.yaml
+  services_health: ops/bindings/services.health.yaml
+  service_registry: docs/governance/SERVICE_REGISTRY.yaml
+  recovery_actions: ops/bindings/recovery.actions.yaml
+  secrets_binding: ops/bindings/secrets.binding.yaml
+  secrets_namespace: ops/bindings/secrets.namespace.policy.yaml
+  cloudflare_inventory: ops/bindings/cloudflare.inventory.yaml
+
+systems:
+  cloudflare:
+    authority: "@ronny"
+    runtime_type: saas
+    lifecycle_requirements:
+      publish_transaction: "cloudflare.service.publish (DNS upsert + tunnel ingress + routing parity)"
+      onboarding_evidence: "service.onboarding.contract.yaml exposure fields + DOMAIN_ROUTING_REGISTRY entry"
+      smoke_capabilities:
+        - cloudflare.zone.list
+        - cloudflare.tunnel.ingress.status
+        - cloudflare.inventory.sync
+        - domains.portfolio.status
+        - cloudflare.registrar.status
+    self_heal:
+      recovery_action_id: recover-cloudflare-readpath
+      trigger_gate_ids: [D315]
+      failure_class: deterministic
+      recovery_type: capability_rerun
+      smoke_runner: "ops/runtime/infra-core-smoke.sh cloudflare"
+    auth_posture:
+      preferred_mode: token
+      fallback_mode: global
+      fallback_semantics: "log warning + continue (blast radius accepted for read-only)"
+      breakglass: "CLOUDFLARE_GLOBAL_API_KEY env override"
+      contract_rule: "Token-scoped API token preferred; global key fallback accepted for read surfaces only"
+
+  vaultwarden:
+    authority: "@ronny"
+    runtime_type: self_hosted
+    runtime_location: "VM 204 (infra-core)"
+    lifecycle_requirements:
+      publish_transaction: "docker compose up on infra-core"
+      onboarding_evidence: "SERVICE_REGISTRY + services.health endpoint + backup.inventory target"
+      smoke_capabilities:
+        - vaultwarden.vault.audit
+        - vaultwarden.backup.verify
+        - vaultwarden.cli.auth.status
+    self_heal:
+      recovery_action_id: recover-vaultwarden-container
+      trigger_gate_ids: [D149]
+      failure_class: deterministic
+      recovery_type: docker_compose_restart
+      probe_url: "http://192.168.1.204:8081/alive"
+      smoke_runner: "ops/runtime/infra-core-smoke.sh vaultwarden"
+    auth_posture:
+      preferred_mode: "scope-rewriting HTTPS proxy (bw CLI)"
+      machine_path: "LAN 192.168.1.204:8081 → Tailscale fallback"
+      infisical_keys:
+        - VAULTWARDEN_BW_CLIENTID
+        - VAULTWARDEN_BW_CLIENTSECRET
+        - VAULTWARDEN_BW_MASTER_PASSWORD
+        - VAULTWARDEN_BW_SERVER_URL
+      contract_rule: "All CLI operations through scope-rewriting proxy; dry_run default for mutations"
+
+  infisical:
+    authority: "@ronny"
+    runtime_type: self_hosted
+    runtime_location: "VM 204 (infra-core)"
+    lifecycle_requirements:
+      publish_transaction: "docker compose up on infra-core (secrets stack)"
+      onboarding_evidence: "SERVICE_REGISTRY + services.health endpoint + secrets.binding.yaml"
+      smoke_capabilities:
+        - secrets.status
+        - secrets.auth.status
+        - secrets.namespace.status
+    self_heal:
+      recovery_action_id: recover-infisical-stack
+      trigger_gate_ids: [D55]
+      failure_class: deterministic
+      recovery_type: docker_compose_restart
+      smoke_runner: "ops/runtime/infra-core-smoke.sh infisical"
+    auth_posture:
+      preferred_mode: "infisical-agent.sh universal auth"
+      api_url: "https://secrets.ronny.works"
+      internal_bypass: "http://100.92.91.128:8088"
+      enforcement_mode: strict
+      contract_rule: "All secret access via infisical-agent.sh; D112 enforces pattern lock"
+
+  authentik:
+    authority: "@ronny"
+    runtime_type: self_hosted
+    runtime_location: "VM 204 (infra-core)"
+    lifecycle_requirements:
+      publish_transaction: "docker compose up on infra-core (caddy-auth stack)"
+      onboarding_evidence: "SERVICE_REGISTRY + services.health endpoint"
+      smoke_capabilities: []
+    self_heal:
+      recovery_action_id: recover-authentik-stack
+      trigger_gate_ids: []
+      failure_class: deterministic
+      recovery_type: docker_compose_restart
+      smoke_runner: "ops/runtime/infra-core-smoke.sh authentik"
+    auth_posture:
+      preferred_mode: "web UI (admin)"
+      role: "forward auth proxy for Infisical public URL"
+      contract_rule: "No API automation required; managed via web UI"
+
+enforcement:
+  gate_coverage_requirement: "Each system must have at least one invariant gate"
+  recovery_action_requirement: "Each self-hosted system must have a recovery.actions entry"
+  smoke_runner_requirement: "Each system must be exercisable via infra-core-smoke.sh"
+  scheduled_smoke_cadence: "daily (freshness-critical-daily integration)"
