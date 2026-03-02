@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-HOST="${STALWART_TLS_HOST:-100.115.16.37}"
+HOST="${STALWART_TLS_HOST:-192.168.1.26}"
 TIMEOUT=10
 MIN_DAYS=14
 

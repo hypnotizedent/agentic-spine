@@ -12,7 +12,7 @@ Solution: This proxy serves HTTPS on localhost with a self-signed cert,
 Usage:
     python3 scope-proxy.py [--target URL] [--port PORT]
 
-    --target   Vaultwarden endpoint (default: http://100.92.91.128:8081)
+    --target   Vaultwarden endpoint (default: http://192.168.1.204:8081)
     --port     Local listen port (default: 0 = OS-assigned)
 
 Outputs on startup (machine-parseable):
@@ -38,7 +38,7 @@ import urllib.request
 
 
 def parse_args(argv):
-    target = "http://100.92.91.128:8081"
+    target = "http://192.168.1.204:8081"
     port = 0
     i = 1
     while i < len(argv):
