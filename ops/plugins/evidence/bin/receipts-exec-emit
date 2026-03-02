@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SCHEMA_PATH="$ROOT/ops/bindings/orchestration.exec_receipt.schema.json"
+
+usage() {
+  cat <<'USAGE'
+receipts-exec-emit
+
+Emit schema-compatible EXEC_RECEIPT JSON with evidence_refs linkage.
+
+Usage:
+  receipts-exec-emit \
+    --task-id <id> \
+    --terminal-id <TERMINAL-ID> \
+    --lane <control|execution|audit|watcher> \
+    --status <done|failed|blocked> \
+    --files-changed <csv> \
+    --run-keys <csv> \
+    --ready-for-verify <true|false> \
+    [--blockers <csv>] \
+    [--timestamp-utc <YYYY-MM-DDTHH:MM:SSZ>] \
+    [--wave-id <WAVE-ID>] [--commit-hashes <csv>] [--loop-id <LOOP-ID>] [--gap-ids <csv>] \
+    [--evidence-run-keys <csv>] [--evidence-files <csv>] [--evidence-commits <csv>] \
+    [--blocker-class <none|deterministic|freshness|dependency|cleanup|policy|external>] \
+    [--json-out <path>] [--markdown-out <path>] [--no-validate]
+
+Notes:
+  - Always emits `evidence_refs` (defaults to empty refs + blocker_class=none).
+  - Prints JSON to stdout unless --json-out is set.
+  - --markdown-out keeps markdown compatibility during JSON rollout.
+USAGE
+}
+
+TASK_ID=""
+TERMINAL_ID=""
+LANE=""
+STATUS=""
+FILES_CHANGED=""
+RUN_KEYS=""
+BLOCKERS=""
+READY_FOR_VERIFY=""
+TIMESTAMP_UTC=""
+WAVE_ID=""
+COMMIT_HASHES=""
+LOOP_ID=""
+GAP_IDS=""
+EVIDENCE_RUN_KEYS=""
+EVIDENCE_FILES=""
+EVIDENCE_COMMITS=""
+BLOCKER_CLASS="none"
+JSON_OUT=""
+MARKDOWN_OUT=""
+VALIDATE=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --task-id) TASK_ID="${2:-}"; shift 2 ;;
+    --terminal-id) TERMINAL_ID="${2:-}"; shift 2 ;;
+    --lane) LANE="${2:-}"; shift 2 ;;
+    --status) STATUS="${2:-}"; shift 2 ;;
+    --files-changed) FILES_CHANGED="${2:-}"; shift 2 ;;
+    --run-keys) RUN_KEYS="${2:-}"; shift 2 ;;
+    --blockers) BLOCKERS="${2:-}"; shift 2 ;;
+    --ready-for-verify) READY_FOR_VERIFY="${2:-}"; shift 2 ;;
+    --timestamp-utc) TIMESTAMP_UTC="${2:-}"; shift 2 ;;
+    --wave-id) WAVE_ID="${2:-}"; shift 2 ;;
+    --commit-hashes) COMMIT_HASHES="${2:-}"; shift 2 ;;
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --gap-ids) GAP_IDS="${2:-}"; shift 2 ;;
+    --evidence-run-keys) EVIDENCE_RUN_KEYS="${2:-}"; shift 2 ;;
+    --evidence-files) EVIDENCE_FILES="${2:-}"; shift 2 ;;
+    --evidence-commits) EVIDENCE_COMMITS="${2:-}"; shift 2 ;;
+    --blocker-class) BLOCKER_CLASS="${2:-}"; shift 2 ;;
+    --json-out) JSON_OUT="${2:-}"; shift 2 ;;
+    --markdown-out) MARKDOWN_OUT="${2:-}"; shift 2 ;;
+    --no-validate) VALIDATE=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$TASK_ID" ]] || { echo "FAIL: --task-id is required" >&2; exit 2; }
+[[ -n "$TERMINAL_ID" ]] || { echo "FAIL: --terminal-id is required" >&2; exit 2; }
+[[ -n "$LANE" ]] || { echo "FAIL: --lane is required" >&2; exit 2; }
+[[ -n "$STATUS" ]] || { echo "FAIL: --status is required" >&2; exit 2; }
+[[ -n "$RUN_KEYS" ]] || { echo "FAIL: --run-keys is required" >&2; exit 2; }
+[[ -n "$READY_FOR_VERIFY" ]] || { echo "FAIL: --ready-for-verify is required" >&2; exit 2; }
+
+python3 - "$SCHEMA_PATH" "$TASK_ID" "$TERMINAL_ID" "$LANE" "$STATUS" "$FILES_CHANGED" "$RUN_KEYS" "$BLOCKERS" "$READY_FOR_VERIFY" "$TIMESTAMP_UTC" "$WAVE_ID" "$COMMIT_HASHES" "$LOOP_ID" "$GAP_IDS" "$EVIDENCE_RUN_KEYS" "$EVIDENCE_FILES" "$EVIDENCE_COMMITS" "$BLOCKER_CLASS" "$JSON_OUT" "$MARKDOWN_OUT" "$VALIDATE" <<'PY'
+import datetime as dt
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+(
+    schema_path,
+    task_id,
+    terminal_id,
+    lane,
+    status,
+    files_changed_raw,
+    run_keys_raw,
+    blockers_raw,
+    ready_for_verify_raw,
+    timestamp_utc,
+    wave_id,
+    commit_hashes_raw,
+    loop_id,
+    gap_ids_raw,
+    evidence_run_keys_raw,
+    evidence_files_raw,
+    evidence_commits_raw,
+    blocker_class,
+    json_out,
+    markdown_out,
+    validate_raw,
+) = sys.argv[1:22]
+
+validate = validate_raw == "1"
+
+
+def split_csv(value: str):
+    value = (value or "").strip()
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def parse_bool(value: str):
+    value = (value or "").strip().lower()
+    if value in {"true", "1", "yes", "y"}:
+        return True
+    if value in {"false", "0", "no", "n"}:
+        return False
+    raise ValueError("ready_for_verify must be true|false")
+
+
+files_changed = split_csv(files_changed_raw)
+run_keys = split_csv(run_keys_raw)
+blockers = split_csv(blockers_raw)
+commit_hashes = split_csv(commit_hashes_raw)
+gap_ids = split_csv(gap_ids_raw)
+
+# Evidence refs are always emitted (defaults keep compatibility deterministic).
+evidence_run_keys = split_csv(evidence_run_keys_raw) or list(run_keys)
+evidence_files = split_csv(evidence_files_raw) or list(files_changed)
+evidence_commits = split_csv(evidence_commits_raw) or list(commit_hashes)
+
+ready_for_verify = parse_bool(ready_for_verify_raw)
+if not timestamp_utc:
+    timestamp_utc = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+receipt = {
+    "task_id": task_id,
+    "terminal_id": terminal_id,
+    "lane": lane,
+    "status": status,
+    "files_changed": files_changed,
+    "run_keys": run_keys,
+    "blockers": blockers,
+    "ready_for_verify": ready_for_verify,
+    "timestamp_utc": timestamp_utc,
+    "evidence_refs": {
+        "run_key_refs": evidence_run_keys,
+        "file_refs": evidence_files,
+        "commit_refs": evidence_commits,
+        "blocker_class": blocker_class or "none",
+    },
+}
+
+if wave_id:
+    receipt["wave_id"] = wave_id
+if commit_hashes:
+    receipt["commit_hashes"] = commit_hashes
+if loop_id:
+    receipt["loop_id"] = loop_id
+if gap_ids:
+    receipt["gap_ids"] = gap_ids
+
+if validate:
+    if not os.path.isfile(schema_path):
+        raise SystemExit(f"FAIL: schema not found: {schema_path}")
+    schema = json.loads(Path(schema_path).read_text(encoding="utf-8"))
+
+    allowed_lanes = set(schema.get("properties", {}).get("lane", {}).get("enum", []))
+    allowed_statuses = set(schema.get("properties", {}).get("status", {}).get("enum", []))
+    run_key_pattern = schema.get("properties", {}).get("run_keys", {}).get("items", {}).get("pattern")
+    evidence_blocker_enum = (
+        schema.get("properties", {})
+        .get("evidence_refs", {})
+        .get("properties", {})
+        .get("blocker_class", {})
+        .get("enum", [])
+    )
+    commit_pattern = (
+        schema.get("properties", {})
+        .get("commit_hashes", {})
+        .get("items", {})
+        .get("pattern", r"^[0-9a-f]{7,40}$")
+    )
+
+    if allowed_lanes and lane not in allowed_lanes:
+        raise SystemExit(f"FAIL: lane invalid: {lane}")
+    if allowed_statuses and status not in allowed_statuses:
+        raise SystemExit(f"FAIL: status invalid: {status}")
+    if status == "blocked" and not blockers:
+        raise SystemExit("FAIL: blockers required when status=blocked")
+
+    ts_pattern = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+    if not ts_pattern.match(timestamp_utc):
+        raise SystemExit(f"FAIL: timestamp_utc must be UTC second precision (got {timestamp_utc})")
+
+    if run_key_pattern:
+        rk_re = re.compile(run_key_pattern)
+        for rk in run_keys:
+            if not rk_re.match(rk):
+                raise SystemExit(f"FAIL: run key invalid: {rk}")
+        for rk in evidence_run_keys:
+            if not rk_re.match(rk):
+                raise SystemExit(f"FAIL: evidence run key invalid: {rk}")
+
+    commit_re = re.compile(commit_pattern)
+    for c in commit_hashes + evidence_commits:
+        if not commit_re.match(c):
+            raise SystemExit(f"FAIL: commit ref invalid: {c}")
+
+    if evidence_blocker_enum and receipt["evidence_refs"]["blocker_class"] not in set(evidence_blocker_enum):
+        raise SystemExit(
+            f"FAIL: blocker_class invalid: {receipt['evidence_refs']['blocker_class']}"
+        )
+
+payload = json.dumps(receipt, indent=2, sort_keys=False)
+
+if json_out:
+    out_path = Path(json_out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(payload + "\n", encoding="utf-8")
+
+if markdown_out:
+    md_path = Path(markdown_out)
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_lines = [
+        f"# EXEC Receipt — {task_id}",
+        "",
+        f"- terminal_id: {terminal_id}",
+        f"- lane: {lane}",
+        f"- status: {status}",
+        f"- ready_for_verify: {str(ready_for_verify).lower()}",
+        f"- timestamp_utc: {timestamp_utc}",
+        "",
+        "## Files Changed",
+    ]
+    md_lines.extend([f"- {p}" for p in files_changed] or ["- (none)"])
+    md_lines.extend(["", "## Run Keys"])
+    md_lines.extend([f"- {rk}" for rk in run_keys] or ["- (none)"])
+    md_lines.extend(["", "## Evidence Refs"])
+    md_lines.extend([f"- blocker_class: {receipt['evidence_refs']['blocker_class']}"])
+    md_lines.extend([f"- run_key_refs: {len(evidence_run_keys)}"])
+    md_lines.extend([f"- file_refs: {len(evidence_files)}"])
+    md_lines.extend([f"- commit_refs: {len(evidence_commits)}"])
+    if blockers:
+        md_lines.extend(["", "## Blockers"])
+        md_lines.extend([f"- {b}" for b in blockers])
+    md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+if not json_out:
+    print(payload)
+else:
+    print("receipts.exec.emit")
+    print(f"json_out: {json_out}")
+    if markdown_out:
+        print(f"markdown_out: {markdown_out}")
+    print(f"task_id: {task_id}")
+    print(f"status: {status}")
+PY

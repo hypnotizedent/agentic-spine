@@ -16,6 +16,7 @@ Zero copy/paste multi-terminal coordination via artifact-driven receipts.
 | `ops wave start <ID> --objective "..."` | Create wave |
 | `ops wave dispatch <ID> --lane <L> --task "..."` | Dispatch task |
 | `ops wave receipt-validate <path>` | Validate receipt artifact |
+| `./bin/ops cap run receipts.exec.emit -- --task-id ...` | Emit schema-compatible EXEC_RECEIPT (JSON + optional markdown) |
 | `ops wave collect <ID> [--sync-roadmap]` | Ingest receipts + update state |
 | `ops wave close <ID> [--force]` | Close wave (gates on receipts) |
 | `ops board` | Dashboard |
@@ -47,20 +48,17 @@ Each worker writes a receipt to the wave's receipts directory:
 RECEIPTS_DIR="$HOME/code/.runtime/spine-mailroom/waves/WAVE-20260222-01/receipts"
 mkdir -p "$RECEIPTS_DIR"
 
-# Example: worker emits receipt after completing task
-cat > "$RECEIPTS_DIR/D1.json" <<'EOF'
-{
-  "task_id": "D1",
-  "terminal_id": "DEPLOY-MINT-01",
-  "lane": "execution",
-  "status": "done",
-  "files_changed": ["ops/plugins/mint/config.yaml"],
-  "run_keys": ["CAP-20260222-120000__verify.core.run__Rabc12345"],
-  "blockers": [],
-  "ready_for_verify": true,
-  "timestamp_utc": "2026-02-22T12:00:00Z"
-}
-EOF
+# Example: worker emits schema-compatible JSON and markdown companion
+./bin/ops cap run receipts.exec.emit -- \
+  --task-id D1 \
+  --terminal-id DEPLOY-MINT-01 \
+  --lane execution \
+  --status done \
+  --files-changed ops/plugins/mint/config.yaml \
+  --run-keys CAP-20260222-120000__verify.core.run__Rabc12345 \
+  --ready-for-verify true \
+  --json-out "$RECEIPTS_DIR/D1.json" \
+  --markdown-out "$RECEIPTS_DIR/D1.md"
 ```
 
 ### 4. Control collects and validates
@@ -104,12 +102,18 @@ Required fields:
 - `lane` (enum: control/execution/audit/watcher)
 - `status` (enum: done/failed/blocked)
 - `files_changed` (string[]) - Modified file paths
-- `run_keys` (string[]) - Capability run keys (CAP-...__...__R...)
+- `run_keys` (string[]) - Governed run keys (`CAP-...` capability or `S...` session-inline namespace)
 - `blockers` (string[]) - Required when status=blocked
 - `ready_for_verify` (boolean)
 - `timestamp_utc` (string) - ISO 8601 UTC
 
-Optional fields: `wave_id`, `commit_hashes`, `loop_id`, `gap_ids`
+Optional fields: `wave_id`, `commit_hashes`, `loop_id`, `gap_ids`, `evidence_refs`
+
+`evidence_refs` bundle (recommended, canonical):
+- `run_key_refs`
+- `file_refs`
+- `commit_refs`
+- `blocker_class`
 
 ## Close Gate Requirements
 

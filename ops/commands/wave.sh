@@ -1323,9 +1323,9 @@ PYMARK_RUN
   # Extract run key from cap output (matches "Run Key: <key>" line)
   local run_key=""
   run_key="$(grep -m1 'Run Key:' "$log_file" 2>/dev/null | awk '{print $NF}' || true)"
-  # Fallback: try CAP-* pattern with alphanumeric run key suffix
+  # Fallback: CAP/S governed run-key pattern with alphanumeric suffix
   if [[ -z "$run_key" ]]; then
-    run_key="$(grep -oE 'CAP-[0-9]+-[0-9]+__[A-Za-z0-9._-]+__R[A-Za-z0-9]+' "$log_file" 2>/dev/null | head -1 || true)"
+    run_key="$(grep -oE '(CAP-[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S[0-9]{8}-[0-9]{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)' "$log_file" 2>/dev/null | head -1 || true)"
   fi
 
   # Mark as done/failed (with file lock)
@@ -2464,7 +2464,7 @@ schema_path = sys.argv[2]
 role_runtime_contract = sys.argv[3] if len(sys.argv) > 3 else ""
 
 errors = []
-run_key_pattern_texts = [r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"]
+run_key_pattern_texts = [r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"]
 commit_ref_pattern = r"^[0-9a-f]{7,40}$"
 allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
 required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
@@ -2501,7 +2501,7 @@ for pattern_text in run_key_pattern_texts:
         sys.exit(1)
 
 if not run_key_patterns:
-    run_key_patterns = [re.compile(r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$")]
+    run_key_patterns = [re.compile(r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$")]
 
 def run_key_matches(value: str) -> bool:
     return any(pat.match(value) for pat in run_key_patterns)
@@ -2686,7 +2686,7 @@ cmd_collect_v2() {
 import json, sys, os, re, glob, fcntl
 from datetime import datetime, timezone
 
-run_key_patterns_text = [r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"]
+run_key_patterns_text = [r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"]
 commit_ref_pattern = r"^[0-9a-f]{7,40}$"
 allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
 required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]
@@ -3166,7 +3166,7 @@ lock_override_reason = (sys.argv[7] if len(sys.argv) > 7 else "").strip()
 lock_file = sf + ".lock"
 receipts_dir = os.path.join(sd, "receipts")
 
-run_key_patterns_text = [r"^CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+$"]
+run_key_patterns_text = [r"^(CAP-\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+|S\d{8}-\d{6}__[A-Za-z0-9._-]+__R[A-Za-z0-9]+)$"]
 commit_ref_pattern = r"^[0-9a-f]{7,40}$"
 allowed_blocker_classes = {"none", "deterministic", "freshness", "dependency", "cleanup", "policy", "external"}
 required_evidence_fields = ["run_key_refs", "file_refs", "commit_refs", "blocker_class"]

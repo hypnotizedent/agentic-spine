@@ -8,6 +8,7 @@
 #          receipt_header_md "$RUN_ID" "$SESSION_NAME" "$CMD" > receipt.md
 #          # ... append body ...
 #          receipt_finalize_exit_status receipt.md $?
+#          receipt_exec_emit --task-id D1 --terminal-id SPINE-CONTROL-01 ...
 #
 # Stamps included:
 #   - timestamp_utc (ISO 8601)
@@ -146,4 +147,17 @@ receipt_append_section() {
   echo "" >> "$receipt_file"
   echo "## ${section_name}" >> "$receipt_file"
   echo "" >> "$receipt_file"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# receipt_exec_emit - Emit EXEC_RECEIPT JSON/markdown via canonical tool
+# Args: passthrough to ops/plugins/evidence/bin/receipts-exec-emit
+# ─────────────────────────────────────────────────────────────────
+receipt_exec_emit() {
+  local emit_bin="$SCRIPT_DIR/../plugins/evidence/bin/receipts-exec-emit"
+  [[ -x "$emit_bin" ]] || {
+    echo "FAIL: missing executable receipt emitter: $emit_bin" >&2
+    return 1
+  }
+  "$emit_bin" "$@"
 }
