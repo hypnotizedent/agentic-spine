@@ -34,6 +34,7 @@ AGENT_INFO_BIN = os.path.join(SPINE_ROOT, "ops", "plugins", "agent", "bin", "age
 AGENT_TOOLS_BIN = os.path.join(SPINE_ROOT, "ops", "plugins", "agent", "bin", "agent-tools")
 AGENT_ROUTE_BIN = os.path.join(SPINE_ROOT, "ops", "plugins", "agent", "bin", "agent-route")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+RUNTIME_ENV = dict(os.environ)
 
 TOOLS = [
     {
@@ -221,6 +222,7 @@ def run_cmd(
         input=stdin_text,
         capture_output=True,
         text=True,
+        env=RUNTIME_ENV,
         timeout=timeout,
     )
     stdout = sanitize_noise(result.stdout)
@@ -517,6 +519,18 @@ def handle_tools_call(msg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def main() -> int:
+    terminal_role = (
+        RUNTIME_ENV.get("OPS_TERMINAL_ROLE")
+        or RUNTIME_ENV.get("SPINE_TERMINAL_ROLE")
+        or RUNTIME_ENV.get("SPINE_TERMINAL_NAME")
+        or "unset"
+    )
+    runtime_role = RUNTIME_ENV.get("SPINE_RUNTIME_ROLE") or "researcher"
+    print(
+        f"[spine-mcp-serve] terminal_role={terminal_role} runtime_role={runtime_role}",
+        file=sys.stderr,
+    )
+
     while True:
         msg, eof = read_message()
         if eof:
