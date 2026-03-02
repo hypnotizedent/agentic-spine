@@ -1,12 +1,13 @@
 ---
 loop_id: LOOP-EXECUTION-LIFECYCLE-VAULTWARDEN-HYGIENE-CANONICALIZATION-20260302
 created: 2026-03-02
-status: active
+status: planned
 owner: "@ronny"
 scope: execution
 priority: high
 horizon: later
 execution_readiness: blocked
+blocked_by: "VM 204 LAN unreachable — stale URL reconciliation and duplicate-truth remediation require live vault (GAP-OP-1285, GAP-OP-1286)"
 next_review: "2026-03-09"
 objective: Enforce canonical Vaultwarden lifecycle transaction for evidence retention, stale URL reconciliation, duplicate-truth governance, alias hygiene, and deterministic closeout proof.
 ---

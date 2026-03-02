@@ -5,6 +5,7 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+source "${ROOT}/ops/runtime/lib/job-wrapper.sh"
 CAP="$ROOT/bin/ops"
 SYSTEM="${1:-all}"
 FAILURES=0
@@ -75,22 +76,26 @@ smoke_infisical() {
   log "infisical: PASS"
 }
 
-case "$SYSTEM" in
-  cloudflare) smoke_cloudflare ;;
-  vaultwarden) smoke_vaultwarden ;;
-  infisical) smoke_infisical ;;
-  all)
-    smoke_cloudflare
-    smoke_vaultwarden
-    smoke_infisical
-    ;;
-  *)
-    echo "Usage: infra-core-smoke.sh [cloudflare|vaultwarden|infisical|all]" >&2
-    exit 1
-    ;;
-esac
+run_smoke() {
+  case "$SYSTEM" in
+    cloudflare) smoke_cloudflare ;;
+    vaultwarden) smoke_vaultwarden ;;
+    infisical) smoke_infisical ;;
+    all)
+      smoke_cloudflare
+      smoke_vaultwarden
+      smoke_infisical
+      ;;
+    *)
+      echo "Usage: infra-core-smoke.sh [cloudflare|vaultwarden|infisical|all]" >&2
+      exit 1
+      ;;
+  esac
 
-log "summary: failures=$FAILURES skipped=$SKIPPED"
-if [[ "$FAILURES" -gt 0 ]]; then
-  exit 1
-fi
+  log "summary: failures=$FAILURES skipped=$SKIPPED"
+  if [[ "$FAILURES" -gt 0 ]]; then
+    exit 1
+  fi
+}
+
+spine_job_run "infra-core-smoke" run_smoke

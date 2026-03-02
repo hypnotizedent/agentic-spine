@@ -1,12 +1,13 @@
 ---
 loop_id: LOOP-EXECUTION-PATTERN-INHERITANCE-VAULTWARDEN-SELF-HEALING-20260302
 created: 2026-03-02
-status: active
+status: planned
 owner: "@ronny"
 scope: execution
 priority: high
 horizon: later
 execution_readiness: blocked
+blocked_by: "VM 204 LAN unreachable — restore drill requires live VM and operator supervision (GAP-OP-1287)"
 next_review: "2026-03-09"
 objective: Generalize backup-style self-healing plumbing to Vaultwarden surfaces: canonical machine-path stabilization, scheduled runtime smoke, recovery action mappings, and deterministic escalation evidence.
 ---

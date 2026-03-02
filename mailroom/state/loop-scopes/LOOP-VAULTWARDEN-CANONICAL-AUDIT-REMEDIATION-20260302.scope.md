@@ -1,12 +1,13 @@
 ---
 loop_id: LOOP-VAULTWARDEN-CANONICAL-AUDIT-REMEDIATION-20260302
 created: 2026-03-02
-status: active
+status: planned
 owner: "@ronny"
 scope: vaultwarden
 priority: high
 horizon: later
 execution_readiness: blocked
+blocked_by: "VM 204 LAN unreachable — W2/W3/W4 require live Vaultwarden for URI reconciliation, duplicate cleanup, restore drill (GAP-OP-1285/1286/1287)"
 next_review: "2026-03-09"
 objective: Execute VW-AUDIT-20260302 findings end-to-end with canonical Vaultwarden parity, blocker-first runtime recovery, and governed closure evidence.
 ---

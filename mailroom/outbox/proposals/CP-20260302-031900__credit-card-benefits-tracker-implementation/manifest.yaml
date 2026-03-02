@@ -1,0 +1,89 @@
+proposal: CP-20260302-031900__credit-card-benefits-tracker-implementation
+agent: "claude-desktop@spine-control-01"
+created: "2026-03-02T03:19:00Z"
+status: draft_hold
+loop_id: LOOP-CREDIT-CARD-BENEFITS-TRACKER-20260302
+owner: "@ronny"
+review_date: "2026-03-09"
+hold_reason: "Overnight intake, not operator-approved. Requires review before promotion to pending."
+description: |
+  Implementation plan for credit card benefits tracker - proactive reminder system
+  to prevent losing expiring credits (recently lost $600 in FHR credits).
+  
+  Creates Python utility with YAML config, n8n notification workflow, and cron
+  deployment on VM 211 finance stack.
+
+changes:
+  - action: create
+    path: "workbench/agents/finance/tools/cc-tracker/"
+    reason: "New Python utility for tracking credit card benefits with expiration alerts"
+    
+  - action: create
+    path: "workbench/agents/finance/tools/cc-tracker/cards.yaml"
+    reason: "YAML configuration for 7 credit cards and their benefit structures"
+    
+  - action: create
+    path: "workbench/agents/finance/tools/cc-tracker/tracker.py"
+    reason: "Main Python script with expiration logic, date math, and CLI interface"
+    
+  - action: create
+    path: "workbench/agents/finance/tools/cc-tracker/README.md"
+    reason: "Documentation for installation, configuration, and usage"
+    
+  - action: create
+    path: "workbench/infra/compose/n8n/workflows/CC-BENEFITS-ALERT.json"
+    reason: "n8n workflow for Slack notifications (weekly summary + urgent alerts)"
+    
+  - action: modify
+    path: "spine/ops/bindings/finance.stack.cron.yaml"
+    reason: "Add cron entries for weekly summary and daily urgent alerts on VM 211"
+
+no_runtime_change: false
+execution_horizon: now
+execution_readiness: runnable
+
+# Integration points
+integrations:
+  - system: n8n
+    type: webhook
+    purpose: "Trigger Slack notifications for benefit alerts"
+    endpoint: "https://n8n.ronny.works/webhook/cc-benefits"
+    
+  - system: finance-stack
+    type: cron
+    host: "100.76.153.100"
+    purpose: "Scheduled execution of tracker script"
+    
+  - system: communications-agent
+    type: capability
+    purpose: "Optional direct Slack webhook bypass via communications.send.execute"
+
+# Implementation phases
+phases:
+  - id: phase-1
+    name: "YAML Schema Design"
+    deliverable: "cards.yaml with 7 card definitions"
+    estimated_effort: "30 minutes"
+    
+  - id: phase-2
+    name: "Core Script Implementation"
+    deliverable: "tracker.py with CLI, date math, redemption logging"
+    estimated_effort: "2-3 hours"
+    
+  - id: phase-3
+    name: "n8n Notification Workflow"
+    deliverable: "Workflow JSON + Slack integration"
+    estimated_effort: "1 hour"
+    
+  - id: phase-4
+    name: "Deployment & Cron Setup"
+    deliverable: "Cron entries on VM 211, verification"
+    estimated_effort: "30 minutes"
+
+# Success criteria
+acceptance_criteria:
+  - "Weekly summary sent every Sunday at 9am via Slack"
+  - "Urgent alerts sent daily at 9am for benefits expiring within 7 days"
+  - "CLI supports: status, urgent, weekly, redeem, value commands"
+  - "All 7 cards configured with correct benefit reset schedules"
+  - "Redemptions logged to redemptions.yaml with timestamps"
