@@ -258,7 +258,7 @@ Usage:
   ops wave ack <WAVE_ID> --lane <L> --result "text"  Acknowledge task completion
   ops wave collect <WAVE_ID>                         Collect results from lanes
   ops wave status [WAVE_ID]                          Show wave status (or all)
-  ops wave close <WAVE_ID> [--force]                 Close a wave (enforces contract)
+  ops wave close <WAVE_ID> [--force] [--dod-override "<reason>"]  Close a wave (infra force requires --force, DoD force requires --dod-override)
   ops wave preflight <domain>                        Fast non-blocking preflight
   ops wave receipt-validate <path>                   Validate EXEC_RECEIPT JSON
 
@@ -1662,7 +1662,7 @@ cmd_close() {
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave close <WAVE_ID> [--force]" >&2
+    echo "Usage: ops wave close <WAVE_ID> [--force] [--dod-override \"<reason>\"]" >&2
     exit 1
   fi
 
@@ -2769,18 +2769,27 @@ PYCOLLECT2
 cmd_close_v2() {
   local wave_id=""
   local force=false
+  local dod_override_reason=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --) shift ;;
       --force) force=true; shift ;;
+      --dod-override)
+        if [[ $# -lt 2 || -z "${2:-}" ]]; then
+          echo "ERROR: --dod-override requires a non-empty reason" >&2
+          exit 1
+        fi
+        dod_override_reason="${2:-}"
+        shift 2
+        ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
       *) wave_id="$1"; shift ;;
     esac
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave close <WAVE_ID> [--force]" >&2
+    echo "Usage: ops wave close <WAVE_ID> [--force] [--dod-override \"<reason>\"]" >&2
     exit 1
   fi
 
@@ -2790,7 +2799,7 @@ cmd_close_v2() {
   local sd
   sd="$(wave_state_dir "$wave_id")"
 
-  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" <<'PYCLOSE2'
+  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" "$ROLE_RUNTIME_CONTRACT" "$dod_override_reason" <<'PYCLOSE2'
 import json, sys, os, re, fcntl
 from datetime import datetime, timezone
 
@@ -2799,6 +2808,7 @@ sd = sys.argv[2]
 force = sys.argv[3] == "true"
 spine_repo = sys.argv[4]
 role_runtime_contract = sys.argv[5] if len(sys.argv) > 5 else ""
+dod_override_reason = (sys.argv[6] if len(sys.argv) > 6 else "").strip()
 lock_file = sf + ".lock"
 receipts_dir = os.path.join(sd, "receipts")
 
@@ -2866,22 +2876,23 @@ try:
     pf = state.get("preflight")
     dispatches = state.get("dispatches", [])
     packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
-    contract_violations = []
+    infra_violations = []
+    dod_violations = []
 
     # 1. Watcher checks must be done/failed
     running = [c for c in checks if c["status"] in ("queued", "running")]
     if running:
         statuses = "/".join(sorted(set(c["status"] for c in running)))
-        contract_violations.append(f"{len(running)} watcher check(s) still {statuses}")
+        infra_violations.append(f"{len(running)} watcher check(s) still {statuses}")
 
     # 2. Preflight required
     if not pf:
-        contract_violations.append("Preflight has not been run (required by wave.lifecycle contract)")
+        infra_violations.append("Preflight has not been run (required by wave.lifecycle contract)")
 
     # 3. All dispatches must be done or explicitly blocked
     pending = [d for d in dispatches if d["status"] == "dispatched"]
     if pending:
-        contract_violations.append(f"{len(pending)} dispatch(es) still pending (not done/blocked)")
+        infra_violations.append(f"{len(pending)} dispatch(es) still pending (not done/blocked)")
 
     # 4. Canonical packet presence required at close as DoD source-of-truth
     packet_required = [
@@ -2897,7 +2908,7 @@ try:
     ]
     packet_missing = [k for k in packet_required if packet.get(k) in (None, "", [])]
     if packet_missing:
-        contract_violations.append(f"wave packet missing required field(s): {', '.join(packet_missing)}")
+        infra_violations.append(f"wave packet missing required field(s): {', '.join(packet_missing)}")
 
     # 5. Receipt validation: all receipt files must satisfy EXEC_RECEIPT contract
     invalid_receipts = []
@@ -3026,12 +3037,12 @@ try:
                 invalid_receipts.append(f"{fn}: invalid JSON ({e})")
 
     if invalid_receipts:
-        contract_violations.append(f"{len(invalid_receipts)} invalid receipt(s) in receipts/")
+        infra_violations.append(f"{len(invalid_receipts)} invalid receipt(s) in receipts/")
 
     # 6. Verify/preflight checks present
     done_checks = [c for c in checks if c["status"] == "done"]
     if checks and not done_checks:
-        contract_violations.append("No watcher checks completed successfully")
+        infra_violations.append("No watcher checks completed successfully")
 
     # 7. DoD guard completeness
     verify_results = []
@@ -3048,7 +3059,7 @@ try:
             if isinstance(rk, str) and rk:
                 verify_results.append(rk)
     if not verify_results:
-        contract_violations.append("DoD missing verify results (no run keys in watcher checks or receipts)")
+        dod_violations.append("DoD missing verify results (no run keys in watcher checks or receipts)")
 
     blocker_classes = []
     cleanup_proof = []
@@ -3088,15 +3099,15 @@ try:
             cleanup_proof.append(cleanup_ref)
 
     if blocked_or_failed and not blocker_classes:
-        contract_violations.append("DoD missing blocker classification for blocked/failed dispatches")
+        dod_violations.append("DoD missing blocker classification for blocked/failed dispatches")
     elif not blocker_classes:
         blocker_classes.append("none")
 
     if not cleanup_proof:
-        contract_violations.append("DoD missing cleanup proof (no cleanup refs in evidence/output refs)")
+        dod_violations.append("DoD missing cleanup proof (no cleanup refs in evidence/output refs)")
 
     if linkage_errors:
-        contract_violations.append("DoD linkage integrity failed: " + "; ".join(linkage_errors))
+        dod_violations.append("DoD linkage integrity failed: " + "; ".join(linkage_errors))
 
     state["dod"] = {
         "verify_results": sorted(set(verify_results)),
@@ -3111,24 +3122,33 @@ try:
 
     lifecycle_state = str(state.get(state_field, state.get("lifecycle_state", "active"))).strip() or "active"
     if lifecycle_state not in state_transitions:
-        contract_violations.append(f"state machine unknown state '{lifecycle_state}'")
+        infra_violations.append(f"state machine unknown state '{lifecycle_state}'")
     else:
         allowed = state_transitions.get(lifecycle_state, set())
         if "closed" not in allowed:
-            contract_violations.append(f"state machine blocked: {lifecycle_state} -> closed not allowed")
+            infra_violations.append(f"state machine blocked: {lifecycle_state} -> closed not allowed")
 
     role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
     current_role = str(role_flow.get("current_role", "")).strip()
     if close_aliases and current_role and current_role not in close_aliases:
-        contract_violations.append(
+        infra_violations.append(
             f"role flow blocked close: current_role={current_role} expected one of {sorted(close_aliases)}"
         )
 
     # ── Gate decision ──
-    if contract_violations and not force:
+    infra_blocked = bool(infra_violations) and not force
+    dod_blocked = bool(dod_violations) and not dod_override_reason
+
+    if infra_blocked or dod_blocked:
         print("BLOCKED: Wave close contract not met:")
-        for v in contract_violations:
-            print(f"  - {v}")
+        if infra_violations:
+            print("Infra violations:")
+            for v in infra_violations:
+                print(f"  - {v}")
+        if dod_violations:
+            print("DoD violations:")
+            for v in dod_violations:
+                print(f"  - {v}")
         if invalid_receipts:
             print()
             print("Invalid receipts:")
@@ -3137,19 +3157,34 @@ try:
         print()
         print("Options:")
         print(f"  1. Fix issues, then retry: ops wave close {state['wave_id']}")
-        print(f"  2. Force close (skip contract): ops wave close {state['wave_id']} --force")
+        if infra_violations:
+            print(f"  2. Force close (infra only): ops wave close {state['wave_id']} --force")
+        if dod_violations:
+            print(
+                "  3. Override DoD with explicit reason: "
+                f"ops wave close {state['wave_id']} --dod-override \"<reason>\""
+            )
         sys.exit(1)
 
-    if contract_violations and force:
-        print(f"WARNING: Forcing close with {len(contract_violations)} contract violation(s):")
-        for v in contract_violations:
+    if infra_violations and force:
+        print(f"WARNING: Forcing close with {len(infra_violations)} infra violation(s):")
+        for v in infra_violations:
             print(f"  - {v}")
+        print()
+
+    if dod_violations and dod_override_reason:
+        print(f"WARNING: Overriding {len(dod_violations)} DoD violation(s):")
+        for v in dod_violations:
+            print(f"  - {v}")
+        print(f"  DoD override reason: {dod_override_reason}")
         print()
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     state["status"] = "closed"
     state["closed_at"] = now
-    state["force_closed"] = bool(contract_violations)
+    state["force_closed"] = bool(infra_violations)
+    state["dod_overridden"] = bool(dod_violations)
+    state["dod_override_reason"] = dod_override_reason if dod_violations else ""
     state[state_field] = "closed"
     state["lifecycle_state"] = "closed"
     workspace = state.get("workspace")
@@ -3179,8 +3214,10 @@ for r in valid_receipts:
             run_keys.append(rk)
 
 residual_blockers = []
-for v in contract_violations:
-    residual_blockers.append(f"Contract violation (force-closed): {v}")
+for v in infra_violations:
+    residual_blockers.append(f"Infra violation (force-closed): {v}")
+for v in dod_violations:
+    residual_blockers.append(f"DoD violation (override): {v}")
 for c in checks:
     if c["status"] == "failed":
         residual_blockers.append(f"Watcher check failed: {c['cap']} (exit={c.get('exit_code', '?')})")
@@ -3196,7 +3233,9 @@ close_receipt = {
     "objective": state.get("objective", ""),
     "created_at": state["created_at"],
     "closed_at": now,
-    "force_closed": bool(contract_violations),
+    "force_closed": bool(infra_violations),
+    "dod_overridden": bool(dod_violations),
+    "dod_override_reason": dod_override_reason if dod_violations else "",
     "dispatches": len(dispatches),
     "dispatches_done": sum(1 for d in dispatches if d["status"] == "done"),
     "dispatches_blocked": sum(1 for d in dispatches if d["status"] == "blocked"),
