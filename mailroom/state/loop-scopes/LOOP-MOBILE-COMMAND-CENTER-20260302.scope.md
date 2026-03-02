@@ -1,11 +1,11 @@
 ---
 loop_id: LOOP-MOBILE-COMMAND-CENTER-20260302
 created: 2026-03-02
-status: planned
+status: active
 owner: "@ronny"
 scope: agentic-spine
-horizon: later
-execution_readiness: blocked
+horizon: now
+execution_readiness: runnable
 priority: medium
 parent_loop: null
 discovered_by: "SPINE-CONTROL-01-session-20260302"
