@@ -6,7 +6,7 @@ owner: "@ronny"
 scope: execution
 priority: high
 horizon: now
-execution_readiness: runnable
+execution_readiness: blocked
 objective: Generalize backup-style self-healing plumbing to Vaultwarden surfaces: canonical machine-path stabilization, scheduled runtime smoke, recovery action mappings, and deterministic escalation evidence.
 ---
 
@@ -33,3 +33,17 @@ Generalize backup-style self-healing plumbing to Vaultwarden surfaces: canonical
 
 ## Definition Of Done
 - Vaultwarden reliability no longer depends on operator memory
+
+## Execution Evidence (2026-03-02)
+
+### Gaps Resolved
+- **GAP-OP-1283** (high): FIXED — proxy-session.sh LAN→Tailscale fallback + recover-vaultwarden-container recovery action in recovery.actions.yaml
+- **GAP-OP-1288** (low): FIXED — D319 vaultwarden-hygiene-compliance-lock gate created and registered (PASS)
+
+### Gaps Blocked (VM 204 unreachable)
+- **GAP-OP-1287** (medium): BLOCKED — restore drill requires live VM; D319 advisory tracks freshness
+
+### Blocker
+- VM 204 (infra-core) is unreachable (LAN 100% packet loss, SSH timeout, HTTP 000)
+- Restore drill cannot execute until VM restored
+- execution_readiness set to blocked until VM 204 recovered

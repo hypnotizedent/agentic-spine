@@ -6,7 +6,7 @@ owner: "@ronny"
 scope: execution
 priority: high
 horizon: now
-execution_readiness: runnable
+execution_readiness: blocked
 objective: Enforce canonical Vaultwarden lifecycle transaction for evidence retention, stale URL reconciliation, duplicate-truth governance, alias hygiene, and deterministic closeout proof.
 ---
 
@@ -33,3 +33,18 @@ Enforce canonical Vaultwarden lifecycle transaction for evidence retention, stal
 
 ## Definition Of Done
 - No manual reminder required for Vaultwarden lifecycle hygiene
+
+## Execution Evidence (2026-03-02)
+
+### Gaps Resolved
+- **GAP-OP-1284** (medium): FIXED — backfill artifact preserved canonically in vaultwarden-audit evidence tree
+- **GAP-OP-1289** (low): FIXED — vault-cli.ronny.works deprecated in canonical_hosts.yaml (no runtime consumer)
+
+### Gaps Blocked (VM 204 unreachable)
+- **GAP-OP-1285** (medium): BLOCKED — stale URL reconciliation requires live vault; inventory documented (26 items)
+- **GAP-OP-1286** (medium): BLOCKED — duplicate-truth remediation requires live vault; forensic analysis complete (29 groups)
+
+### Blocker
+- VM 204 (infra-core) is unreachable (LAN 100% packet loss, SSH timeout, HTTP 000)
+- URI reconciliation and duplicate cleanup require vaultwarden.uri.audit + reconcile.apply with live bw CLI access
+- execution_readiness set to blocked until VM 204 recovered
