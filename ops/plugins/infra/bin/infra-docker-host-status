@@ -81,7 +81,7 @@ fi
 echo
 
 # ── Health binding probes for docker-host ────────────────────────────────
-count="$(yq -r '[.endpoints[] | select(.host == "docker-host" and (.enabled // true) == true)] | length' "$HEALTH_BINDING" 2>/dev/null || echo 0)"
+count="$(yq -r '[.endpoints[] | select(.host == "docker-host" and ((has("enabled") | not) or .enabled == true))] | length' "$HEALTH_BINDING" 2>/dev/null || echo 0)"
 pass=0
 fail=0
 
@@ -91,13 +91,13 @@ if [[ "$count" == "0" ]]; then
   echo "  none"
 else
   for i in $(seq 0 $((count - 1))); do
-    id="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and (.enabled // true) == true)][$i].id" "$HEALTH_BINDING")"
-    url="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and (.enabled // true) == true)][$i].url" "$HEALTH_BINDING")"
+    id="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and ((has(\"enabled\") | not) or .enabled == true))][$i].id" "$HEALTH_BINDING")"
+    url="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and ((has(\"enabled\") | not) or .enabled == true))][$i].url" "$HEALTH_BINDING")"
     # Resolve URL host via fallback if LAN IP differs
     if [[ -n "$_LAN_HOST" && -n "$TARGET_HOST" && "$TARGET_HOST" != "$_LAN_HOST" ]]; then
       url="${url//$_LAN_HOST/$TARGET_HOST}"
     fi
-    expect="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and (.enabled // true) == true)][$i].expect // 200" "$HEALTH_BINDING")"
+    expect="$(yq -r "[.endpoints[] | select(.host == \"docker-host\" and ((has(\"enabled\") | not) or .enabled == true))][$i].expect // 200" "$HEALTH_BINDING")"
 
     code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$url" 2>/dev/null || echo "000")"
     if [[ "$code" == "$expect" ]]; then
