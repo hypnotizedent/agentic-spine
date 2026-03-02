@@ -7,7 +7,7 @@
 # background watcher for long checks, and unified status view.
 #
 # Usage:
-#   ops wave start <WAVE_ID> --objective "<text>" [--worktree auto|off] [--repo <path>]
+#   ops wave start <WAVE_ID> --objective "<text>" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths "a,b"] [--worktree auto|off] [--repo <path>]
 #   ops wave dispatch <WAVE_ID> --lane <lane> --task "<text>" [--from-role <role>] [--to-role <role>] [--input-refs "k=v,..."] [--output-refs "k=v,..."]
 #   ops wave collect <WAVE_ID>
 #   ops wave status [WAVE_ID]
@@ -60,7 +60,7 @@ usage() {
 ops wave - Wave orchestration with lane-aware dispatch
 
 Usage:
-  ops wave start <WAVE_ID> --objective "<text>" [--worktree auto|off] [--repo <path>]
+  ops wave start <WAVE_ID> --objective "<text>" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths "a,b"] [--worktree auto|off] [--repo <path>]
                                                     Create a new wave (default auto worktree)
   ops wave dispatch <WAVE_ID> --lane <L> --task "T" [--from-role <R>] [--to-role <R>] [--input-refs "k=v,..."] [--output-refs "k=v,..."]  Dispatch task to a lane
   ops wave ack <WAVE_ID> --lane <L> --result "text"  Acknowledge task completion
@@ -86,6 +86,16 @@ EOF
 cmd_start() {
   local wave_id=""
   local objective=""
+  local loop_id=""
+  local deadline_utc=""
+  local horizon="now"
+  local execution_readiness="runnable"
+  local owner_terminal="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ID:-${USER:-unknown}}}"
+  local claimed_paths_raw=""
+  local packet_required_fields="wave_id,loop_id,owner_terminal,current_role,next_role,deadline_utc,horizon,execution_readiness,claimed_paths"
+  local packet_default_deadline_hours="24"
+  local packet_allowed_horizon="now,later,future"
+  local packet_allowed_readiness="runnable,blocked"
   local worktree_mode="auto"
   local workspace_repo="$SPINE_REPO"
   local workspace_enabled="false"
@@ -94,11 +104,21 @@ cmd_start() {
   local workspace_note=""
   local default_role="researcher"
   local default_next_role="worker"
+  local current_role_explicit=0
+  local next_role_explicit=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --) shift ;;
       --objective) objective="${2:-}"; shift 2 ;;
+      --loop-id) loop_id="${2:-}"; shift 2 ;;
+      --deadline-utc) deadline_utc="${2:-}"; shift 2 ;;
+      --horizon) horizon="${2:-}"; shift 2 ;;
+      --execution-readiness) execution_readiness="${2:-}"; shift 2 ;;
+      --owner-terminal) owner_terminal="${2:-}"; shift 2 ;;
+      --claimed-paths) claimed_paths_raw="${2:-}"; shift 2 ;;
+      --current-role) default_role="${2:-}"; current_role_explicit=1; shift 2 ;;
+      --next-role) default_next_role="${2:-}"; next_role_explicit=1; shift 2 ;;
       --worktree) worktree_mode="${2:-}"; shift 2 ;;
       --repo) workspace_repo="${2:-}"; shift 2 ;;
       -*) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -107,7 +127,7 @@ cmd_start() {
   done
 
   if [[ -z "$wave_id" ]]; then
-    echo "Usage: ops wave start <WAVE_ID> --objective \"<text>\" [--worktree auto|off] [--repo <path>]" >&2
+    echo "Usage: ops wave start <WAVE_ID> --objective \"<text>\" [--loop-id <LOOP_ID>] [--deadline-utc <ISO8601>] [--horizon now|later|future] [--execution-readiness runnable|blocked] [--claimed-paths \"a,b\"] [--worktree auto|off] [--repo <path>]" >&2
     exit 1
   fi
   if [[ "$worktree_mode" != "auto" && "$worktree_mode" != "off" ]]; then
@@ -125,15 +145,41 @@ cmd_start() {
   fi
 
   if command -v yq >/dev/null 2>&1 && [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
-    default_role="$(yq e -r '.runtime_roles.default_role // "researcher"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo researcher)"
+    packet_default_deadline_hours="$(yq e -r '.wave_packet.default_deadline_hours // 24' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo 24)"
+    packet_required_fields="$(yq e -r '.wave_packet.required_fields[]?' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null | paste -sd, -)"
+    [[ -n "$packet_required_fields" ]] || packet_required_fields="wave_id,loop_id,owner_terminal,current_role,next_role,deadline_utc,horizon,execution_readiness,claimed_paths"
+    packet_allowed_horizon="$(yq e -r '.wave_packet.allowed_horizon[]?' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null | paste -sd, -)"
+    [[ -n "$packet_allowed_horizon" ]] || packet_allowed_horizon="now,later,future"
+    packet_allowed_readiness="$(yq e -r '.wave_packet.allowed_readiness[]?' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null | paste -sd, -)"
+    [[ -n "$packet_allowed_readiness" ]] || packet_allowed_readiness="runnable,blocked"
+    if [[ "$current_role_explicit" -eq 0 ]]; then
+      default_role="$(yq e -r '.runtime_roles.default_role // "researcher"' "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo researcher)"
+    fi
     if [[ -n "$default_role" && "$default_role" != "null" ]]; then
       local resolved_next
       resolved_next="$(yq e -r ".promotion_gates.transitions[]? | select(.from == \"$default_role\") | .to" "$ROLE_RUNTIME_CONTRACT" 2>/dev/null | head -n1 || true)"
-      if [[ -n "$resolved_next" && "$resolved_next" != "null" ]]; then
+      if [[ "$next_role_explicit" -eq 0 && -n "$resolved_next" && "$resolved_next" != "null" ]]; then
         default_next_role="$resolved_next"
       fi
     fi
   fi
+
+  [[ -n "$loop_id" ]] || loop_id="${SPINE_LOOP_ID:-LOOP-${wave_id}}"
+  [[ -n "$deadline_utc" ]] || deadline_utc="$(python3 - "$packet_default_deadline_hours" <<'PYDEADLINE'
+import datetime as dt
+import sys
+
+hours = 24
+try:
+    hours = int(sys.argv[1])
+except Exception:
+    hours = 24
+deadline = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=max(1, hours))
+print(deadline.strftime("%Y-%m-%dT%H:%M:%SZ"))
+PYDEADLINE
+)"
+  [[ -n "$claimed_paths_raw" ]] || claimed_paths_raw="$(yq e -r ".roles[]? | select(.id == \"${OPS_TERMINAL_ROLE:-}\") | .write_scope[]?" "$SPINE_REPO/ops/bindings/terminal.role.contract.yaml" 2>/dev/null | paste -sd, -)"
+  [[ -n "$claimed_paths_raw" ]] || claimed_paths_raw="."
 
   mkdir -p "$sd"
 
@@ -252,7 +298,16 @@ EOF
     workspace_note="worktree auto-provision disabled (--worktree off)"
   fi
 
-  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" <<'PYSTART'
+  local claimed_paths_json
+  claimed_paths_json="$(python3 - "$claimed_paths_raw" <<'PYCLAIMS'
+import json, sys
+raw = sys.argv[1] if len(sys.argv) > 1 else ""
+items = [x.strip() for x in raw.split(",") if x.strip()]
+print(json.dumps(items))
+PYCLAIMS
+)"
+
+  python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" <<'PYSTART'
 import json, sys
 from datetime import datetime, timezone
 
@@ -266,10 +321,59 @@ workspace_branch = sys.argv[7] if len(sys.argv) > 7 else ""
 workspace_note = sys.argv[8] if len(sys.argv) > 8 else ""
 default_role = sys.argv[9] if len(sys.argv) > 9 and sys.argv[9] else "researcher"
 default_next_role = sys.argv[10] if len(sys.argv) > 10 and sys.argv[10] else "worker"
+loop_id = sys.argv[11] if len(sys.argv) > 11 else ""
+deadline_utc = sys.argv[12] if len(sys.argv) > 12 else ""
+horizon = sys.argv[13] if len(sys.argv) > 13 else ""
+execution_readiness = sys.argv[14] if len(sys.argv) > 14 else ""
+owner_terminal = sys.argv[15] if len(sys.argv) > 15 else ""
+claimed_paths = json.loads(sys.argv[16]) if len(sys.argv) > 16 and sys.argv[16] else []
+required_fields = [x.strip() for x in (sys.argv[17] if len(sys.argv) > 17 else "").split(",") if x.strip()]
+allowed_horizon = {x.strip() for x in (sys.argv[18] if len(sys.argv) > 18 else "now,later,future").split(",") if x.strip()}
+allowed_readiness = {x.strip() for x in (sys.argv[19] if len(sys.argv) > 19 else "runnable,blocked").split(",") if x.strip()}
+
+packet = {
+    "schema_version": "1.0",
+    "wave_id": wave_id,
+    "loop_id": loop_id,
+    "owner_terminal": owner_terminal,
+    "current_role": default_role,
+    "next_role": default_next_role,
+    "deadline_utc": deadline_utc,
+    "horizon": horizon,
+    "execution_readiness": execution_readiness,
+    "claimed_paths": claimed_paths,
+}
+
+missing_fields = [field for field in required_fields if packet.get(field) in (None, "", [])]
+if missing_fields:
+    print(f"FAIL: canonical wave packet missing required fields: {', '.join(missing_fields)}")
+    sys.exit(1)
+
+if packet["horizon"] not in allowed_horizon:
+    print(f"FAIL: packet.horizon invalid '{packet['horizon']}' (allowed={sorted(allowed_horizon)})")
+    sys.exit(1)
+
+if packet["execution_readiness"] not in allowed_readiness:
+    print(
+        "FAIL: packet.execution_readiness invalid "
+        f"'{packet['execution_readiness']}' (allowed={sorted(allowed_readiness)})"
+    )
+    sys.exit(1)
+
+try:
+    datetime.fromisoformat(str(packet["deadline_utc"]).replace("Z", "+00:00"))
+except Exception:
+    print(f"FAIL: packet.deadline_utc must be ISO-8601 UTC, got '{packet['deadline_utc']}'")
+    sys.exit(1)
+
+if not isinstance(packet["claimed_paths"], list) or len(packet["claimed_paths"]) == 0:
+    print("FAIL: packet.claimed_paths must include at least one claimed path")
+    sys.exit(1)
 
 state = {
     "wave_id": wave_id,
     "status": "active",
+    "lifecycle_state": "active",
     "objective": objective,
     "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "closed_at": None,
@@ -290,6 +394,7 @@ state = {
         "next_role": default_next_role,
         "last_transition": None,
     },
+    "packet": packet,
 }
 
 with open(sf, "w") as f:
@@ -300,6 +405,9 @@ print(f"Wave '{wave_id}' created.")
 if objective:
     print(f"  Objective: {objective}")
 print(f"  Status: active")
+print(f"  Packet loop_id: {packet['loop_id']}")
+print(f"  Packet role: {packet['current_role']} -> {packet['next_role']}")
+print(f"  Packet deadline: {packet['deadline_utc']}")
 if workspace_enabled:
     print(f"  Worktree: {workspace_worktree}")
     print(f"  Branch:   {workspace_branch}")
@@ -349,6 +457,76 @@ cmd_dispatch() {
   sf="$(wave_state_file "$wave_id")"
   local sd
   sd="$(wave_state_dir "$wave_id")"
+
+  if [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
+    python3 - "$sf" "$ROLE_RUNTIME_CONTRACT" <<'PYPACKETDISPATCH'
+import json, sys
+from datetime import datetime
+
+state_file = sys.argv[1]
+contract_file = sys.argv[2]
+
+state = json.load(open(state_file, "r", encoding="utf-8"))
+packet = state.get("packet")
+if not isinstance(packet, dict):
+    print("FAIL: wave packet missing from state (start contract not satisfied)")
+    raise SystemExit(1)
+
+required = []
+allowed_horizon = {"now", "later", "future"}
+allowed_readiness = {"runnable", "blocked"}
+
+try:
+    import yaml
+    contract = yaml.safe_load(open(contract_file, "r", encoding="utf-8")) or {}
+    wave_packet = contract.get("wave_packet") if isinstance(contract, dict) else {}
+    if isinstance(wave_packet, dict):
+        required = [str(x).strip() for x in (wave_packet.get("required_fields") or []) if str(x).strip()]
+        allowed_horizon = {str(x).strip() for x in (wave_packet.get("allowed_horizon") or []) if str(x).strip()} or allowed_horizon
+        allowed_readiness = {
+            str(x).strip() for x in (wave_packet.get("allowed_readiness") or []) if str(x).strip()
+        } or allowed_readiness
+except Exception:
+    pass
+
+if not required:
+    required = [
+        "wave_id",
+        "loop_id",
+        "owner_terminal",
+        "current_role",
+        "next_role",
+        "deadline_utc",
+        "horizon",
+        "execution_readiness",
+        "claimed_paths",
+    ]
+
+missing = [field for field in required if packet.get(field) in (None, "", [])]
+if missing:
+    print(f"FAIL: wave packet missing required fields at dispatch: {', '.join(missing)}")
+    raise SystemExit(1)
+
+if packet.get("horizon") not in allowed_horizon:
+    print(f"FAIL: wave packet horizon invalid at dispatch: {packet.get('horizon')}")
+    raise SystemExit(1)
+
+if packet.get("execution_readiness") not in allowed_readiness:
+    print(f"FAIL: wave packet execution_readiness invalid at dispatch: {packet.get('execution_readiness')}")
+    raise SystemExit(1)
+
+try:
+    datetime.fromisoformat(str(packet.get("deadline_utc", "")).replace("Z", "+00:00"))
+except Exception:
+    print(f"FAIL: wave packet deadline_utc invalid at dispatch: {packet.get('deadline_utc')}")
+    raise SystemExit(1)
+
+claimed_paths = packet.get("claimed_paths")
+if not isinstance(claimed_paths, list) or len(claimed_paths) == 0:
+    print("FAIL: wave packet claimed_paths must be a non-empty list at dispatch")
+    raise SystemExit(1)
+PYPACKETDISPATCH
+  fi
 
   # If dispatching to watcher, auto-enqueue background checks
   if [[ "$lane" == "watcher" ]]; then
@@ -2054,6 +2232,7 @@ try:
     checks = state.get("watcher_checks", [])
     pf = state.get("preflight")
     dispatches = state.get("dispatches", [])
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
     contract_violations = []
 
     # 1. Watcher checks must be done/failed
@@ -2071,7 +2250,23 @@ try:
     if pending:
         contract_violations.append(f"{len(pending)} dispatch(es) still pending (not done/blocked)")
 
-    # 4. Receipt validation: all receipt files must satisfy EXEC_RECEIPT contract
+    # 4. Canonical packet presence required at close as DoD source-of-truth
+    packet_required = [
+        "wave_id",
+        "loop_id",
+        "owner_terminal",
+        "current_role",
+        "next_role",
+        "deadline_utc",
+        "horizon",
+        "execution_readiness",
+        "claimed_paths",
+    ]
+    packet_missing = [k for k in packet_required if packet.get(k) in (None, "", [])]
+    if packet_missing:
+        contract_violations.append(f"wave packet missing required field(s): {', '.join(packet_missing)}")
+
+    # 5. Receipt validation: all receipt files must satisfy EXEC_RECEIPT contract
     invalid_receipts = []
     valid_receipt_count = 0
     valid_receipts = []
@@ -2130,7 +2325,18 @@ try:
                     if not isinstance(h, str) or not re.match(r"^[0-9a-f]{7,40}$", h):
                         errors.append(f"bad commit_hash: {h}")
 
-        allowed = set(required_fields + ["wave_id", "commit_hashes", "loop_id", "gap_ids"])
+        if "evidence_refs" in receipt:
+            evidence_refs = receipt["evidence_refs"]
+            if not isinstance(evidence_refs, dict):
+                errors.append("evidence_refs not object")
+            else:
+                if "blocker_class" in evidence_refs and not isinstance(evidence_refs.get("blocker_class"), str):
+                    errors.append("evidence_refs.blocker_class not string")
+                for key in ("run_key_refs", "file_refs", "commit_refs"):
+                    if key in evidence_refs and not isinstance(evidence_refs.get(key), list):
+                        errors.append(f"evidence_refs.{key} not array")
+
+        allowed = set(required_fields + ["wave_id", "commit_hashes", "loop_id", "gap_ids", "evidence_refs"])
         for key in receipt.keys():
             if key not in allowed:
                 errors.append(f"unknown field: {key}")
@@ -2157,10 +2363,82 @@ try:
     if invalid_receipts:
         contract_violations.append(f"{len(invalid_receipts)} invalid receipt(s) in receipts/")
 
-    # 5. Verify/preflight checks present
+    # 6. Verify/preflight checks present
     done_checks = [c for c in checks if c["status"] == "done"]
     if checks and not done_checks:
         contract_violations.append("No watcher checks completed successfully")
+
+    # 7. DoD guard completeness
+    verify_results = []
+    for c in checks:
+        rk = c.get("run_key")
+        if isinstance(rk, str) and rk:
+            verify_results.append(rk)
+    for r in valid_receipts:
+        for rk in r.get("run_keys", []):
+            if isinstance(rk, str) and rk:
+                verify_results.append(rk)
+    if not verify_results:
+        contract_violations.append("DoD missing verify results (no run keys in watcher checks or receipts)")
+
+    blocker_classes = []
+    cleanup_proof = []
+    linkage_errors = []
+    packet_loop_id = str(packet.get("loop_id", "")).strip()
+    blocked_or_failed = [d for d in dispatches if d.get("status") in ("blocked", "failed")]
+
+    if packet_loop_id and packet_loop_id.lower() == "null":
+        packet_loop_id = ""
+    if not packet_loop_id:
+        linkage_errors.append("packet.loop_id missing")
+
+    for r in valid_receipts:
+        evidence_refs = r.get("evidence_refs") if isinstance(r.get("evidence_refs"), dict) else {}
+        blocker_class = str(evidence_refs.get("blocker_class", "")).strip() if evidence_refs else ""
+        if blocker_class:
+            blocker_classes.append(blocker_class)
+
+        for ref in evidence_refs.get("file_refs", []) if isinstance(evidence_refs.get("file_refs"), list) else []:
+            if isinstance(ref, str) and ref and ("cleanup" in ref.lower() or "clean" in ref.lower()):
+                cleanup_proof.append(ref)
+
+        receipt_loop = str(r.get("loop_id", "")).strip()
+        if packet_loop_id and receipt_loop != packet_loop_id:
+            linkage_errors.append(
+                f"receipt task_id={r.get('task_id', '?')} loop_id mismatch (expected {packet_loop_id}, got {receipt_loop or 'missing'})"
+            )
+
+        for gap_id in r.get("gap_ids", []) if isinstance(r.get("gap_ids"), list) else []:
+            if not isinstance(gap_id, str) or not re.match(r"^GAP-[A-Z0-9-]+$", gap_id):
+                linkage_errors.append(f"receipt task_id={r.get('task_id', '?')} has invalid gap_id '{gap_id}'")
+
+    for d in dispatches:
+        expected = d.get("expected_output_refs") if isinstance(d.get("expected_output_refs"), dict) else {}
+        cleanup_ref = str(expected.get("cleanup_ref", "")).strip() if expected else ""
+        if cleanup_ref:
+            cleanup_proof.append(cleanup_ref)
+
+    if blocked_or_failed and not blocker_classes:
+        contract_violations.append("DoD missing blocker classification for blocked/failed dispatches")
+    elif not blocker_classes:
+        blocker_classes.append("none")
+
+    if not cleanup_proof:
+        contract_violations.append("DoD missing cleanup proof (no cleanup refs in evidence/output refs)")
+
+    if linkage_errors:
+        contract_violations.append("DoD linkage integrity failed: " + "; ".join(linkage_errors))
+
+    state["dod"] = {
+        "verify_results": sorted(set(verify_results)),
+        "blocker_classification": sorted(set(blocker_classes)),
+        "cleanup_proof": sorted(set(cleanup_proof)),
+        "linkage": {
+            "packet_loop_id": packet_loop_id,
+            "valid_receipts": valid_receipt_count,
+            "errors": linkage_errors,
+        },
+    }
 
     # ── Gate decision ──
     if contract_violations and not force:
@@ -2243,6 +2521,7 @@ close_receipt = {
     "run_keys": run_keys,
     "residual_blockers": residual_blockers,
     "READY_FOR_ADOPTION": ready_for_adoption,
+    "dod": state.get("dod", {}),
     "workspace": workspace if workspace else None,
 }
 
@@ -2295,6 +2574,21 @@ with open(receipt_path, "w") as rf:
             rf.write(f"- {rk}\n")
     else:
         rf.write("(none collected)\n")
+    rf.write("\n")
+
+    rf.write("## DoD Guard\n\n")
+    dod = state.get("dod", {}) if isinstance(state.get("dod"), dict) else {}
+    verify_rows = dod.get("verify_results") if isinstance(dod.get("verify_results"), list) else []
+    blocker_rows = dod.get("blocker_classification") if isinstance(dod.get("blocker_classification"), list) else []
+    cleanup_rows = dod.get("cleanup_proof") if isinstance(dod.get("cleanup_proof"), list) else []
+    linkage = dod.get("linkage") if isinstance(dod.get("linkage"), dict) else {}
+    rf.write(f"- verify_results: {len(verify_rows)}\n")
+    rf.write(f"- blocker_classification: {', '.join(blocker_rows) if blocker_rows else 'none'}\n")
+    rf.write(f"- cleanup_proof: {len(cleanup_rows)}\n")
+    if linkage:
+        rf.write(f"- linkage.packet_loop_id: {linkage.get('packet_loop_id', '')}\n")
+        link_errors = linkage.get("errors") if isinstance(linkage.get("errors"), list) else []
+        rf.write(f"- linkage.errors: {len(link_errors)}\n")
     rf.write("\n")
 
     rf.write(f"## Residual Blockers\n\n")
