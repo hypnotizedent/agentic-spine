@@ -38,7 +38,21 @@ echo "    state: ${STATE_DIR}"
 echo "    logs: ${LOG_DIR}"
 echo "  token_authority: ${TOKEN_FILE}"
 if [[ "$LEGACY_TOKEN_FILE" != "$TOKEN_FILE" && -f "$LEGACY_TOKEN_FILE" ]]; then
-  echo "  token_legacy: ${LEGACY_TOKEN_FILE} (deprecated)"
+  echo "  token_legacy: ${LEGACY_TOKEN_FILE} (STALE — use token_authority)"
+fi
+# Token parity check: compare canonical token file against plist-embedded token.
+if [[ -f "$TOKEN_FILE" && -f "$PLIST" ]]; then
+  file_token="$(tr -d '\r\n' < "$TOKEN_FILE" 2>/dev/null || true)"
+  plist_token="$(grep -A1 "MAILROOM_BRIDGE_TOKEN" "$PLIST" 2>/dev/null | grep '<string>' | sed 's/.*<string>//;s/<\/string>.*//' || true)"
+  if [[ -n "$file_token" && -n "$plist_token" ]]; then
+    if [[ "$file_token" == "$plist_token" ]]; then
+      echo "  token_parity: OK"
+    else
+      echo "  token_parity: DRIFT (file != plist — restart bridge to resync)"
+    fi
+  elif [[ -z "$file_token" ]]; then
+    echo "  token_parity: WARN (token file empty)"
+  fi
 fi
 echo "  logs:"
 echo "    out: ${LOG_DIR}/mailroom-bridge.out"

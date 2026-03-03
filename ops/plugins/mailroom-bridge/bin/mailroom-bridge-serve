@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import shutil
 from datetime import date, datetime
@@ -300,6 +301,44 @@ class Handler(BaseHTTPRequestHandler):
 
     # Set on server startup.
     config: dict[str, Any] = {}
+
+    # Hot-reload state for cap_rpc_allowlist binding file.
+    _binding_path: str = ""
+    _binding_mtime: float = 0.0
+    _reload_lock = threading.Lock()
+
+    @classmethod
+    def _maybe_reload_allowlist(cls) -> None:
+        """Reload cap_rpc_allowlist from binding YAML if file mtime changed."""
+        if not cls._binding_path:
+            return
+        try:
+            current_mtime = os.path.getmtime(cls._binding_path)
+        except OSError:
+            return
+        if current_mtime == cls._binding_mtime:
+            return
+        with cls._reload_lock:
+            # Double-check after acquiring lock.
+            try:
+                current_mtime = os.path.getmtime(cls._binding_path)
+            except OSError:
+                return
+            if current_mtime == cls._binding_mtime:
+                return
+            try:
+                al_raw = _sh("yq", "-r", ".cap_rpc.allowlist[]?", cls._binding_path)
+                new_allowlist = [s.strip() for s in al_raw.splitlines() if s.strip()]
+            except Exception:
+                return
+            old_allowlist = cls.config.get("cap_rpc_allowlist") or []
+            cls.config["cap_rpc_allowlist"] = new_allowlist
+            cls._binding_mtime = current_mtime
+            if set(new_allowlist) != set(old_allowlist):
+                added = set(new_allowlist) - set(old_allowlist)
+                removed = set(old_allowlist) - set(new_allowlist)
+                print(f"ALLOWLIST_RELOAD: {len(new_allowlist)} caps (added={list(added)}, removed={list(removed)})")
+                sys.stdout.flush()
 
     def _json(self, status: int, obj: Any) -> None:
         body = json.dumps(obj, indent=2, sort_keys=True).encode("utf-8")
@@ -779,6 +818,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_cap_run(self) -> None:
         """POST /cap/run — execute an allowlisted capability via RPC, return receipted result."""
+        self._maybe_reload_allowlist()
         clen = int(self.headers.get("Content-Length", "0") or "0")
         if clen <= 0 or clen > 65536:
             return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid content length"})
@@ -1088,6 +1128,13 @@ def main() -> None:
         "cf_access_aud": cf_access_aud,
         "cf_access_jwt_header": cf_access_jwt_header,
     }
+
+    # Wire hot-reload state for cap_rpc_allowlist.
+    Handler._binding_path = str(binding)
+    try:
+        Handler._binding_mtime = os.path.getmtime(str(binding))
+    except OSError:
+        Handler._binding_mtime = 0.0
 
     roles_summary = {env: ("*" if v == "*" else len(v)) for env, v in cap_rpc_roles.items()}
     httpd = ThreadingHTTPServer((host, port), Handler)

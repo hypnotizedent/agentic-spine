@@ -615,19 +615,32 @@ def collect_media_capacity_runway() -> dict[str, Any]:
     }
 
 
-def collect_tick_data(window_hours: int) -> dict[str, Any]:
+def collect_tick_data(window_hours: int, fast_mode: bool = False) -> dict[str, Any]:
     loops = collect_open_loops()
     gaps = collect_open_gaps()
     proposals = parse_proposals_summary()
-    calendar = collect_calendar_status()
-    alerts = collect_alert_status()
-    handoffs = collect_handoff_status()
-    timeline = collect_timeline(window_hours)
-    graph = collect_graph_summary()
-    comms_queue = collect_comms_queue_status()
-    scheduler = collect_launchd_scheduler_status()
-    friction = collect_friction_queue_status()
-    media_capacity_runway = collect_media_capacity_runway()
+
+    if fast_mode:
+        # Fast path: skip expensive aggregations for mobile UX (<10s)
+        calendar = {"status": "skipped"}
+        alerts = {"status": "skipped", "active_alerts": 0, "active_incident_alerts": 0, "total_alerts": 0}
+        handoffs = collect_handoff_status()
+        timeline = {"event_count": 0, "verify_failed_runs": 0, "verify_current_failed_runs": 0, "core_verify_latest_status": "skipped"}
+        graph = {"status": "skipped", "node_count": 0, "edge_count": 0}
+        comms_queue = {"slo_status": "skipped", "queue_pending_count": 0, "pending_escalation_task_count": 0}
+        scheduler = collect_launchd_scheduler_status()
+        friction = collect_friction_queue_status()
+        media_capacity_runway = collect_media_capacity_runway()
+    else:
+        calendar = collect_calendar_status()
+        alerts = collect_alert_status()
+        handoffs = collect_handoff_status()
+        timeline = collect_timeline(window_hours)
+        graph = collect_graph_summary()
+        comms_queue = collect_comms_queue_status()
+        scheduler = collect_launchd_scheduler_status()
+        friction = collect_friction_queue_status()
+        media_capacity_runway = collect_media_capacity_runway()
 
     summary = {
         "open_loops": len(loops),
@@ -1421,6 +1434,7 @@ def build_parser() -> argparse.ArgumentParser:
     tick = sub.add_parser("tick", help="Aggregate control-plane signals")
     tick.add_argument("--window-hours", type=int, default=24)
     tick.add_argument("--json", action="store_true")
+    tick.add_argument("--fast", action="store_true", help="Skip expensive timeline/graph/alert aggregation for mobile UX (<10s)")
 
     plan = sub.add_parser("plan", help="Build prioritized next-action plan")
     plan.add_argument("--window-hours", type=int, default=24)
@@ -1452,7 +1466,7 @@ def main() -> int:
     args = build_parser().parse_args()
 
     if args.command == "tick":
-        payload = collect_tick_data(args.window_hours)
+        payload = collect_tick_data(args.window_hours, fast_mode=getattr(args, "fast", False))
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
