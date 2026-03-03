@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.workers.deploy — governed Cloudflare Workers deploy with dry-run safety
+# Dry-run by default: shows what would be deployed without making changes.
+# Pass --confirm to actually deploy.
+# Requires: CLOUDFLARE_API_TOKEN via secrets injection
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+
+usage() {
+  cat <<'EOF'
+Usage: cloudflare-workers-deploy --name WORKER_NAME --script-file PATH [OPTIONS]
+
+Required:
+  --name         NAME   Worker script name
+  --script-file  PATH   Path to the JavaScript/TypeScript worker file
+
+Optional:
+  --compatibility-date  DATE  Compatibility date (YYYY-MM-DD, default: today)
+  --confirm                   Actually deploy (default: dry-run only)
+  --json                      Emit JSON output
+  -h|--help                   Show this help
+
+Dry-run semantics:
+  Without --confirm, this capability validates the script file exists,
+  checks auth, resolves the account, and shows what would be deployed
+  without making any API calls to create/update the worker.
+EOF
+  exit 0
+}
+
+# Defaults
+WORKER_NAME=""
+SCRIPT_FILE=""
+COMPAT_DATE=""
+CONFIRM=0
+JSON_OUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name) WORKER_NAME="$2"; shift 2 ;;
+    --script-file) SCRIPT_FILE="$2"; shift 2 ;;
+    --compatibility-date) COMPAT_DATE="$2"; shift 2 ;;
+    --confirm) CONFIRM=1; shift ;;
+    --json) JSON_OUT=1; shift ;;
+    -h|--help) usage ;;
+    --) shift ;;
+    *) echo "STOP: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -n "$WORKER_NAME" ]] || { echo "STOP: --name is required" >&2; exit 1; }
+[[ -n "$SCRIPT_FILE" ]] || { echo "STOP: --script-file is required" >&2; exit 1; }
+[[ -f "$SCRIPT_FILE" ]] || { echo "STOP: script file not found: $SCRIPT_FILE" >&2; exit 1; }
+
+[[ -f "$INVENTORY" ]] || { echo "STOP: inventory file missing: $INVENTORY" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "STOP: missing dependency: python3" >&2; exit 2; }
+
+ACCOUNT_ID="$(cf_account_id_resolve "$INVENTORY" || true)"
+[[ -n "$ACCOUNT_ID" ]] || { echo "STOP: missing CLOUDFLARE_ACCOUNT_ID and inventory account_id" >&2; exit 2; }
+
+if [[ -z "$COMPAT_DATE" ]]; then
+  COMPAT_DATE="$(date -u +%Y-%m-%d)"
+fi
+
+SCRIPT_SIZE="$(wc -c < "$SCRIPT_FILE" | tr -d ' ')"
+
+# ── DRY-RUN ──────────────────────────────────────────────────────────────
+if [[ "$CONFIRM" -eq 0 ]]; then
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 -c "
+import json
+print(json.dumps({
+    'capability': 'cloudflare.workers.deploy',
+    'status': 'dry_run',
+    'auth_mode': '${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}',
+    'worker_name': '${WORKER_NAME}',
+    'script_file': '${SCRIPT_FILE}',
+    'script_size_bytes': ${SCRIPT_SIZE},
+    'compatibility_date': '${COMPAT_DATE}',
+    'account_id': '${ACCOUNT_ID}',
+    'action': 'would_deploy',
+    'confirm_required': True,
+}, indent=2))
+"
+  else
+    echo "cloudflare.workers.deploy [DRY-RUN]"
+    echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
+    echo "worker_name: ${WORKER_NAME}"
+    echo "script_file: ${SCRIPT_FILE}"
+    echo "script_size_bytes: ${SCRIPT_SIZE}"
+    echo "compatibility_date: ${COMPAT_DATE}"
+    echo "account_id: ${ACCOUNT_ID}"
+    echo ""
+    echo "ACTION: would deploy worker '${WORKER_NAME}'"
+    echo "NOTE: pass --confirm to execute the deploy"
+  fi
+  exit 0
+fi
+
+# ── CONFIRMED DEPLOY ─────────────────────────────────────────────────────
+DEPLOY_URL="${CF_API}/accounts/${ACCOUNT_ID}/workers/scripts/${WORKER_NAME}"
+
+# Workers upload uses multipart/form-data with metadata + script content
+TMP_META="$(mktemp)"
+trap 'rm -f "$TMP_META" 2>/dev/null || true' EXIT
+
+python3 -c "
+import json
+print(json.dumps({
+    'compatibility_date': '${COMPAT_DATE}',
+    'main_module': 'worker.js',
+}))
+" > "$TMP_META"
+
+# Multipart upload: metadata JSON + script as named part
+RESPONSE="$(curl -sS -X PUT "${DEPLOY_URL}" \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -F "metadata=@${TMP_META};type=application/json" \
+  -F "worker.js=@${SCRIPT_FILE};type=application/javascript" \
+  -w $'\n%{http_code}')" || {
+  echo "STOP: curl failed for Workers deploy" >&2
+  exit 2
+}
+
+HTTP_STATUS="${RESPONSE##*$'\n'}"
+BODY="${RESPONSE%$'\n'*}"
+
+if [[ ! "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
+  class="$(cf_classify_failure "$HTTP_STATUS")"
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 - "$BODY" "$HTTP_STATUS" "$class" "$WORKER_NAME" <<'PY'
+import json, sys
+body = sys.argv[1]
+try:
+    data = json.loads(body)
+    errors = data.get("errors", [])
+    detail = "; ".join(
+        f"{e.get('code','')}:{e.get('message','')}"
+        for e in errors if isinstance(e, dict)
+    ) if errors else body[:240]
+except Exception:
+    detail = body[:240]
+print(json.dumps({
+    "capability": "cloudflare.workers.deploy",
+    "status": "error",
+    "error_class": sys.argv[3],
+    "http_status": int(sys.argv[2]),
+    "worker_name": sys.argv[4],
+    "detail": detail,
+}, indent=2))
+PY
+  else
+    echo "cloudflare.workers.deploy"
+    echo "status: error"
+    echo "error_class: ${class}"
+    echo "http_status: ${HTTP_STATUS}"
+    echo "worker_name: ${WORKER_NAME}"
+  fi
+  exit 2
+fi
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  python3 - "$BODY" "$WORKER_NAME" "$COMPAT_DATE" "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" <<'PY'
+import json, sys
+body = sys.argv[1]
+try:
+    data = json.loads(body)
+    result = data.get("result", {})
+except Exception:
+    result = {}
+print(json.dumps({
+    "capability": "cloudflare.workers.deploy",
+    "status": "deployed",
+    "auth_mode": sys.argv[4],
+    "worker_name": sys.argv[2],
+    "compatibility_date": sys.argv[3],
+    "etag": result.get("etag", ""),
+    "modified_on": result.get("modified_on", ""),
+}, indent=2))
+PY
+else
+  echo "cloudflare.workers.deploy"
+  echo "status: deployed"
+  echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
+  echo "worker_name: ${WORKER_NAME}"
+  echo "compatibility_date: ${COMPAT_DATE}"
+fi

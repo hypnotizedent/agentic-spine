@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.pages.list — read-only listing of all Cloudflare Pages projects
+# Shows: project name, subdomain, production branch, created_on, domains
+# Requires: CLOUDFLARE_API_TOKEN via secrets injection
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+
+usage() {
+  cat <<'USAGE'
+Usage: cloudflare-pages-list [--json]
+
+Lists all Cloudflare Pages projects in the account.
+
+Options:
+  --json    Emit JSON output
+  -h|--help Show this help
+USAGE
+  exit 0
+}
+
+JSON_OUT=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_OUT=1; shift ;;
+    -h|--help) usage ;;
+    --) shift ;;
+    *) shift ;;
+  esac
+done
+
+[[ -f "$INVENTORY" ]] || { echo "STOP: inventory file missing: $INVENTORY" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "STOP: missing dependency: python3" >&2; exit 2; }
+
+ACCOUNT_ID="$(cf_account_id_resolve "$INVENTORY" || true)"
+[[ -n "$ACCOUNT_ID" ]] || { echo "STOP: missing CLOUDFLARE_ACCOUNT_ID and inventory account_id" >&2; exit 2; }
+
+# Fetch Pages projects
+PAGES_JSON="$(cf_api_get_with_retry "${CF_API}/accounts/${ACCOUNT_ID}/pages/projects")" || {
+  http_status="${CF_LAST_HTTP_STATUS:-000}"
+  class="$(cf_classify_failure "$http_status")"
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 -c "
+import json
+print(json.dumps({
+    'capability': 'cloudflare.pages.list',
+    'status': 'error',
+    'error_class': '${class}',
+    'http_status': ${http_status},
+}, indent=2))
+"
+  else
+    echo "cloudflare.pages.list"
+    echo "status: error"
+    echo "error_class: ${class}"
+    echo "http_status: ${http_status}"
+  fi
+  exit 2
+}
+
+python3 - "$PAGES_JSON" "$JSON_OUT" "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" <<'PYEOF'
+import json, sys
+
+raw = sys.argv[1]
+json_out = sys.argv[2] == "1"
+auth_mode = sys.argv[3]
+
+try:
+    data = json.loads(raw)
+except Exception as e:
+    print(f"STOP: failed to parse Pages API response: {e}", file=sys.stderr)
+    raise SystemExit(2)
+
+if not data.get("success", False):
+    errors = data.get("errors", [])
+    msg = "; ".join(
+        f"{e.get('code', '')}:{e.get('message', '')}"
+        for e in errors if isinstance(e, dict)
+    ) if errors else "success=false"
+    print(f"STOP: Cloudflare Pages API error: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+projects = data.get("result", []) or []
+
+results = []
+for p in projects:
+    source = p.get("source", {}) or {}
+    source_config = source.get("config", {}) or {}
+    latest = p.get("latest_deployment", {}) or {}
+    results.append({
+        "name": p.get("name", ""),
+        "subdomain": p.get("subdomain", ""),
+        "production_branch": source_config.get("production_branch", p.get("production_branch", "")),
+        "created_on": p.get("created_on", ""),
+        "domains": p.get("domains", []),
+        "latest_deployment_id": latest.get("id", ""),
+        "latest_deployment_url": latest.get("url", ""),
+    })
+
+if json_out:
+    print(json.dumps({
+        "capability": "cloudflare.pages.list",
+        "status": "ok",
+        "auth_mode": auth_mode,
+        "projects_count": len(results),
+        "projects": results,
+    }, indent=2))
+else:
+    print("cloudflare.pages.list")
+    print(f"auth_mode: {auth_mode}")
+    print(f"projects: {len(results)}")
+    print()
+    fmt = "{:<25s} {:<35s} {:<18s} {:<12s}"
+    print(fmt.format("PROJECT", "SUBDOMAIN", "PROD_BRANCH", "CREATED"))
+    print("-" * 90)
+    for r in results:
+        domains_str = ", ".join(r["domains"][:3]) if r["domains"] else "-"
+        print(fmt.format(
+            r["name"][:25],
+            r["subdomain"][:35],
+            str(r["production_branch"])[:18],
+            str(r["created_on"])[:10],
+        ))
+        if r["domains"]:
+            print(f"  domains: {domains_str}")
+PYEOF
