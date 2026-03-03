@@ -1,19 +1,14 @@
 ---
-status: authoritative
+status: tombstoned
 owner: "@ronny"
-last_verified: "2026-02-16"
-scope: domain-pointer-index
-spine_pointer_stub: true
-authority_plane: domain_external
-authority_repo: "/Users/ronnyworks/code/workbench"
-authority_path: "agents/home-assistant/docs/HASS_OPERATIONAL_RUNBOOK.md"
-source_path: "docs/governance/HASS_OPERATIONAL_RUNBOOK.md"
+tombstoned_at: "2026-03-03"
+tombstone_reason: "superseded by HOME_ASSISTANT_MASTER_RUNBOOK.md"
+successor: "docs/governance/HOME_ASSISTANT_MASTER_RUNBOOK.md"
+parent_loop: LOOP-HA-E2E-CLEANUP-WAVE-20260303
 ---
 
-# HASS_OPERATIONAL_RUNBOOK.md (Domain Route Stub)
+# HASS_OPERATIONAL_RUNBOOK.md (TOMBSTONED)
 
-Source path in spine:
-"docs/governance/HASS_OPERATIONAL_RUNBOOK.md"
+This pointer stub has been superseded. Use:
 
-Canonical domain content:
-"/Users/ronnyworks/code/workbench/agents/home-assistant/docs/HASS_OPERATIONAL_RUNBOOK.md"
+- Master runbook: `docs/governance/HOME_ASSISTANT_MASTER_RUNBOOK.md`

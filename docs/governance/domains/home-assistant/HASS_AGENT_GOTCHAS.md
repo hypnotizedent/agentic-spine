@@ -1,19 +1,14 @@
 ---
-status: authoritative
+status: tombstoned
 owner: "@ronny"
-last_verified: "2026-02-16"
-scope: domain-pointer-index
-spine_pointer_stub: true
-authority_plane: domain_external
-authority_repo: "/Users/ronnyworks/code/workbench"
-authority_path: "agents/home-assistant/docs/HASS_AGENT_GOTCHAS.md"
-source_path: "docs/governance/HASS_AGENT_GOTCHAS.md"
+tombstoned_at: "2026-03-03"
+tombstone_reason: "gotchas merged into HOME_ASSISTANT_MASTER_RUNBOOK.md section S9"
+successor: "docs/governance/HOME_ASSISTANT_MASTER_RUNBOOK.md"
+parent_loop: LOOP-HA-E2E-CLEANUP-WAVE-20260303
 ---
 
-# HASS_AGENT_GOTCHAS.md (Domain Route Stub)
+# HASS_AGENT_GOTCHAS.md (TOMBSTONED)
 
-Source path in spine:
-"docs/governance/HASS_AGENT_GOTCHAS.md"
+This pointer stub has been superseded. Gotchas are in:
 
-Canonical domain content:
-"/Users/ronnyworks/code/workbench/agents/home-assistant/docs/HASS_AGENT_GOTCHAS.md"
+- Master runbook S9: `docs/governance/HOME_ASSISTANT_MASTER_RUNBOOK.md`

@@ -1,19 +1,14 @@
 ---
-status: authoritative
+status: tombstoned
 owner: "@ronny"
-last_verified: "2026-02-16"
-scope: domain-pointer-index
-spine_pointer_stub: true
-authority_plane: domain_external
-authority_repo: "/Users/ronnyworks/code/workbench"
-authority_path: "agents/home-assistant/docs/HASS_MCP_INTEGRATION.md"
-source_path: "docs/governance/HASS_MCP_INTEGRATION.md"
+tombstoned_at: "2026-03-03"
+tombstone_reason: "MCP section merged into HOME_ASSISTANT_MASTER_RUNBOOK.md section S5"
+successor: "docs/governance/HOME_ASSISTANT_MASTER_RUNBOOK.md"
+parent_loop: LOOP-HA-E2E-CLEANUP-WAVE-20260303
 ---
 
-# HASS_MCP_INTEGRATION.md (Domain Route Stub)
+# HASS_MCP_INTEGRATION.md (TOMBSTONED)
 
-Source path in spine:
-"docs/governance/HASS_MCP_INTEGRATION.md"
+This pointer stub has been superseded. MCP integration is in:
 
-Canonical domain content:
-"/Users/ronnyworks/code/workbench/agents/home-assistant/docs/HASS_MCP_INTEGRATION.md"
+- Master runbook S5: `docs/governance/HOME_ASSISTANT_MASTER_RUNBOOK.md`

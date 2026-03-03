@@ -1,19 +1,14 @@
 ---
-status: authoritative
+status: tombstoned
 owner: "@ronny"
-last_verified: "2026-02-16"
-scope: domain-pointer-index
-spine_pointer_stub: true
-authority_plane: domain_external
-authority_repo: "/Users/ronnyworks/code/workbench"
-authority_path: "agents/home-assistant/docs/HASS_SSOT_BASELINE.md"
-source_path: "docs/governance/HASS_SSOT_BASELINE.md"
+tombstoned_at: "2026-03-03"
+tombstone_reason: "SSOT architecture merged into HOME_ASSISTANT_MASTER_RUNBOOK.md section S4"
+successor: "docs/governance/HOME_ASSISTANT_MASTER_RUNBOOK.md"
+parent_loop: LOOP-HA-E2E-CLEANUP-WAVE-20260303
 ---
 
-# HASS_SSOT_BASELINE.md (Domain Route Stub)
+# HASS_SSOT_BASELINE.md (TOMBSTONED)
 
-Source path in spine:
-"docs/governance/HASS_SSOT_BASELINE.md"
+This pointer stub has been superseded. SSOT architecture is in:
 
-Canonical domain content:
-"/Users/ronnyworks/code/workbench/agents/home-assistant/docs/HASS_SSOT_BASELINE.md"
+- Master runbook S4: `docs/governance/HOME_ASSISTANT_MASTER_RUNBOOK.md`

@@ -1,19 +1,15 @@
 ---
-status: authoritative
+status: tombstoned
 owner: "@ronny"
-last_verified: "2026-02-16"
-scope: domain-pointer-index
-spine_pointer_stub: true
-authority_plane: domain_external
-authority_repo: "/Users/ronnyworks/code/workbench"
-authority_path: "agents/home-assistant/docs/HASS_INDEX.md"
-source_path: "docs/governance/HASS_INDEX.md"
+tombstoned_at: "2026-03-03"
+tombstone_reason: "superseded by HOME_ASSISTANT_SURFACE_INDEX.yaml"
+successor: "docs/governance/HOME_ASSISTANT_SURFACE_INDEX.yaml"
+parent_loop: LOOP-HA-E2E-CLEANUP-WAVE-20260303
 ---
 
-# HASS_INDEX.md (Domain Route Stub)
+# HASS_INDEX.md (TOMBSTONED)
 
-Source path in spine:
-"docs/governance/HASS_INDEX.md"
+This file has been superseded. Use:
 
-Canonical domain content:
-"/Users/ronnyworks/code/workbench/agents/home-assistant/docs/HASS_INDEX.md"
+- Surface index: `docs/governance/HOME_ASSISTANT_SURFACE_INDEX.yaml`
+- Master runbook: `docs/governance/HOME_ASSISTANT_MASTER_RUNBOOK.md`
