@@ -8,6 +8,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
+source "$ROOT/ops/lib/git-lock.sh"
 
 PLAN_ID=""
 REASON=""
@@ -36,6 +37,9 @@ done
 [[ -f "$PLANS_INDEX" ]] || { echo "FAIL: plans index not found: $PLANS_INDEX" >&2; exit 1; }
 
 ACTOR="${SPINE_AGENT_ID:-${USER:-unknown}}"
+
+acquire_git_lock plans || exit 1
+trap 'release_git_lock' EXIT INT TERM
 
 python3 - "$PLANS_INDEX" "$PLAN_ID" "$REASON" "$ACTOR" <<'PY'
 from datetime import datetime, timezone
@@ -71,6 +75,12 @@ for row in plans:
     previous_status = str(row.get("status") or "").strip() or "deferred"
     if previous_status == "cancelled":
         previous_status = "canceled"
+    if previous_status == "active":
+        previous_status = "promoted"
+    if previous_status == "active_blocked":
+        previous_status = "deferred"
+    if previous_status == "completed":
+        previous_status = "retired"
 
     if previous_status == "canceled":
         raise SystemExit(f"FAIL: plan already canceled: {plan_id}")

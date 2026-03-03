@@ -19,6 +19,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
+source "$ROOT/ops/lib/git-lock.sh"
 
 PLAN_ID=""
 SOURCE_LOOP_ID=""
@@ -97,6 +98,9 @@ if [[ "$ACTIVATION_TRIGGER" == "dependency" && -z "$DEPENDS_ON_LOOP" ]]; then
   echo "FAIL: --depends-on-loop required when --activation-trigger=dependency" >&2
   exit 2
 fi
+
+acquire_git_lock plans || exit 1
+trap 'release_git_lock' EXIT INT TERM
 
 mkdir -p "$(dirname "$PLANS_INDEX")"
 [[ -f "$PLANS_INDEX" ]] || {

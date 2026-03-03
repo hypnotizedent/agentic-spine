@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.plans.status — Show lifecycle/projection health for deferred plans.
+#
+# Usage:
+#   planning-plans-status [--json]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+RECONCILE_BIN="$ROOT/ops/plugins/lifecycle/bin/planning-plans-reconcile"
+
+MODE="table"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --json) MODE="json"; shift ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: planning-plans-status [--json]
+EOF
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -x "$RECONCILE_BIN" ]] || {
+  echo "FAIL: missing reconcile runner: $RECONCILE_BIN" >&2
+  exit 1
+}
+
+tmp_out="$(mktemp)"
+set +e
+"$RECONCILE_BIN" --check --json >"$tmp_out" 2>/dev/null
+reconcile_rc=$?
+set -e
+
+python3 - "$tmp_out" "$MODE" "$reconcile_rc" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload_path = Path(sys.argv[1])
+mode = sys.argv[2]
+reconcile_rc = int(sys.argv[3])
+
+try:
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+except Exception as exc:
+    raise SystemExit(f"FAIL: unable to parse planning.plans.reconcile output: {exc}")
+
+summary = payload.get("summary") or {}
+if not isinstance(summary, dict):
+    summary = {}
+
+status = "clean" if reconcile_rc == 0 else "drift_detected"
+out = {
+    "capability": "planning.plans.status",
+    "status": status,
+    "summary": summary,
+    "errors": payload.get("errors") or [],
+    "warnings": payload.get("warnings") or [],
+}
+
+if mode == "json":
+    print(json.dumps(out, indent=2))
+    raise SystemExit(0)
+
+print("planning.plans.status")
+print(f"status: {status}")
+for key in [
+    "plans_total",
+    "projection_docs_total",
+    "noncanonical_status",
+    "legacy_normalized",
+    "missing_terminal_audit",
+    "missing_projection_docs",
+    "orphan_projection_docs",
+    "duplicate_plan_ids",
+    "unfixable_rows",
+]:
+    print(f"{key}: {summary.get(key, 0)}")
+
+errors = out["errors"]
+if errors:
+    print("errors:")
+    for line in errors[:20]:
+        print(f"- {line}")
+    if len(errors) > 20:
+        print(f"- ... plus {len(errors) - 20} more")
+PY
+
+rm -f "$tmp_out"

@@ -9,6 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
 HORIZON_SET_BIN="$ROOT/ops/plugins/lifecycle/bin/planning-horizon-set"
+source "$ROOT/ops/lib/git-lock.sh"
 
 PLAN_ID=""
 LOOP_ID=""
@@ -48,6 +49,9 @@ esac
   echo "FAIL: missing planning-horizon-set runner: $HORIZON_SET_BIN" >&2
   exit 1
 }
+
+acquire_git_lock plans || exit 1
+trap 'release_git_lock' EXIT INT TERM
 
 resolved_loop_id="$(
 python3 - "$PLANS_INDEX" "$PLAN_ID" "$LOOP_ID" <<'PY'
@@ -126,6 +130,12 @@ for row in plans:
     previous_status = str(row.get("status") or "").strip() or "deferred"
     if previous_status == "cancelled":
         previous_status = "canceled"
+    if previous_status == "active":
+        previous_status = "promoted"
+    if previous_status == "active_blocked":
+        previous_status = "deferred"
+    if previous_status == "completed":
+        previous_status = "retired"
     if previous_status in {"retired", "canceled"}:
         raise SystemExit(
             f"FAIL: cannot promote plan with terminal status '{previous_status}': {plan_id}"

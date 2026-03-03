@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.plans.archive — Archive orphan plan projection docs.
+#
+# Usage:
+#   planning-plans-archive [--dry-run] [--json]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+PLANS_DIR="$ROOT/mailroom/state/plans"
+PLANS_INDEX="$PLANS_DIR/index.yaml"
+LIFECYCLE_CONTRACT="$ROOT/ops/bindings/plans.lifecycle.yaml"
+source "$ROOT/ops/lib/git-lock.sh"
+
+DRY_RUN=0
+JSON_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: planning-plans-archive [--dry-run] [--json]
+
+Archives plan projection documents that are not represented in
+mailroom/state/plans/index.yaml into mailroom/state/plans/_orphans/.
+EOF
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  acquire_git_lock plans || exit 1
+  trap 'release_git_lock' EXIT INT TERM
+fi
+
+python3 - "$PLANS_DIR" "$PLANS_INDEX" "$LIFECYCLE_CONTRACT" "$DRY_RUN" "$JSON_MODE" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+import re
+import shutil
+import sys
+from pathlib import Path
+
+import yaml
+
+plans_dir = Path(sys.argv[1])
+index_path = Path(sys.argv[2])
+contract_path = Path(sys.argv[3])
+dry_run = sys.argv[4] == "1"
+json_mode = sys.argv[5] == "1"
+
+
+def load_yaml(path: Path):
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return None
+    return yaml.safe_load(text)
+
+
+def canonical_plan_id_from_doc(path: Path) -> str:
+    stem = path.stem.strip()
+    m = re.match(r"^(PLAN-[A-Z0-9-]+?)(?:-\d{8}(?:-\d{8})?)?$", stem)
+    if m:
+        return m.group(1)
+    return stem
+
+contract = load_yaml(contract_path) or {}
+if not isinstance(contract, dict):
+    contract = {}
+projection_model = contract.get("projection_model") or {}
+if not isinstance(projection_model, dict):
+    projection_model = {}
+archive_rel = projection_model.get("orphan_archive_dir") or "mailroom/state/plans/_orphans"
+repo_root = contract_path.parent.parent.parent
+archive_dir = repo_root / archive_rel
+
+index_doc = load_yaml(index_path) or {}
+if not isinstance(index_doc, dict):
+    raise SystemExit(f"FAIL: plans index must be a YAML map: {index_path}")
+
+plans = index_doc.get("plans") or []
+if not isinstance(plans, list):
+    raise SystemExit("FAIL: plans index key 'plans' must be a list")
+
+index_ids = {
+    str(row.get("plan_id") or "").strip()
+    for row in plans
+    if isinstance(row, dict) and str(row.get("plan_id") or "").strip()
+}
+
+doc_paths = sorted(plans_dir.glob("PLAN-*.md"))
+orphan_docs = [doc for doc in doc_paths if canonical_plan_id_from_doc(doc) not in index_ids]
+
+moved = []
+if orphan_docs and not dry_run:
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    ts_slug = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for doc in orphan_docs:
+        target = archive_dir / f"{ts_slug}__{doc.name}"
+        i = 1
+        while target.exists():
+            target = archive_dir / f"{ts_slug}-{i}__{doc.name}"
+            i += 1
+        shutil.move(str(doc), str(target))
+        moved.append({"from": str(doc), "to": str(target)})
+
+payload = {
+    "capability": "planning.plans.archive",
+    "mode": "dry-run" if dry_run else "apply",
+    "index": str(index_path),
+    "archive_dir": str(archive_dir),
+    "orphan_docs_count": len(orphan_docs),
+    "orphan_docs": [str(path) for path in orphan_docs],
+    "moved": moved,
+}
+
+if json_mode:
+    print(json.dumps(payload, indent=2))
+else:
+    print("planning.plans.archive")
+    print(f"mode: {payload['mode']}")
+    print(f"orphan_docs_count: {payload['orphan_docs_count']}")
+    if orphan_docs:
+        print("orphan_docs:")
+        for path in orphan_docs:
+            print(f"- {path}")
+    if moved:
+        print("moved:")
+        for row in moved:
+            print(f"- {row['from']} -> {row['to']}")
+
+raise SystemExit(0)
+PY

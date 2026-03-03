@@ -19,6 +19,10 @@ GOVERNED_SCRIPTS=(
   "ops/plugins/infra/bin/infra-relocation-service-transition"
   "ops/plugins/infra/bin/infra-relocation-state-transition"
   "ops/plugins/proposals/bin/proposals-supersede"
+  "ops/plugins/lifecycle/bin/planning-plans-create"
+  "ops/plugins/lifecycle/bin/planning-plans-promote"
+  "ops/plugins/lifecycle/bin/planning-plans-retire"
+  "ops/plugins/lifecycle/bin/planning-plans-cancel"
 )
 
 errors=()

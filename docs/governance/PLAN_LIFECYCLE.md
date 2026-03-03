@@ -8,7 +8,8 @@ scope: plan-lifecycle
 # Plan Lifecycle & Mutation Contract
 
 > Canonical reference for deferred-intent plan lifecycle operations.
-> Authority: `ops/bindings/planning.horizon.contract.yaml` (boundary_model.plan)
+> Authority: `ops/bindings/plans.lifecycle.yaml`
+> Boundary integration: `ops/bindings/planning.horizon.contract.yaml` (boundary_model.plan)
 > Registry: `mailroom/state/plans/index.yaml`
 
 ## Overview
@@ -79,6 +80,40 @@ Lists plans with optional filters.
 ./bin/ops cap run planning.plans.list -- --horizon later
 ```
 
+### `planning.plans.status` (read-only, auto)
+
+Shows lifecycle/projection health counters (non-canonical statuses, missing audit
+fields, missing projection docs, orphan docs).
+
+```bash
+./bin/ops cap run planning.plans.status
+./bin/ops cap run planning.plans.status -- --json
+```
+
+### `planning.plans.reconcile` (mutating, auto)
+
+Canonical self-healing command for plans lifecycle drift and dual-surface parity.
+
+```bash
+./bin/ops cap run planning.plans.reconcile -- --check
+./bin/ops cap run planning.plans.reconcile -- --fix
+```
+
+`--fix` behavior:
+1. Normalize legacy statuses (`active_blocked -> deferred`, `completed -> retired`)
+2. Backfill required terminal audit fields
+3. Create missing projection docs for indexed plans
+4. Archive orphan projection docs under `mailroom/state/plans/_orphans/`
+
+### `planning.plans.archive` (mutating, auto)
+
+Archives orphan plan projection docs into the governed orphan archive.
+
+```bash
+./bin/ops cap run planning.plans.archive -- --dry-run
+./bin/ops cap run planning.plans.archive
+```
+
 ### `planning.plans.promote` (mutating, auto)
 
 Promotes a deferred plan to active execution. Sets the source loop's horizon
@@ -141,6 +176,14 @@ Drift gate D308 enforces:
 3. Retired plans must have `retired_at_utc` and `retired_reason`.
 4. Canceled plans must have `canceled_at_utc` and `canceled_reason`.
 
+### D343: Plans Lifecycle Integrity Lock
+
+Dedicated plans lifecycle lock enforces:
+1. Canonical statuses only via `planning.plans.reconcile --check`
+2. Terminal audit field completeness
+3. Index/projection parity (missing docs + orphan docs)
+4. Lock discipline (`acquire_git_lock plans`) on all plan mutators
+
 ### Index Schema
 
 Each plan entry in `mailroom/state/plans/index.yaml`:
@@ -182,4 +225,5 @@ Each plan entry in `mailroom/state/plans/index.yaml`:
 
 - Plan registry: `mailroom/state/plans/index.yaml`
 - Plan documents: `mailroom/state/plans/PLAN-*.md`
+- Plan lifecycle contract: `ops/bindings/plans.lifecycle.yaml`
 - Horizon contract: `ops/bindings/planning.horizon.contract.yaml`
