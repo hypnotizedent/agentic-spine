@@ -56,13 +56,10 @@ fi
 
 # If alerting snapshot exposes failing_gates, opportunistically trigger deterministic recovery.
 if command -v jq >/dev/null 2>&1 && [[ -f "$SNAPSHOT_FILE" ]]; then
-  mapfile -t recovery_gate_ids < <(
-    jq -r '([.failing_gates[]?] + [.domains[]?.failing_gates[]?]) | unique | .[]?' "$SNAPSHOT_FILE" 2>/dev/null || true
-  )
-  for gid in "${recovery_gate_ids[@]}"; do
+  while IFS= read -r gid; do
     [[ -n "$gid" ]] || continue
     "$CAP_RUNNER" cap run recovery.dispatch -- --gate-id "$gid" --failure-class deterministic >/dev/null 2>&1 || true
-  done
+  done < <(jq -r '([.failing_gates[]?] + [.domains[]?.failing_gates[]?]) | unique | .[]?' "$SNAPSHOT_FILE" 2>/dev/null || true)
 fi
 
 echo "[alerting-probe-cycle] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

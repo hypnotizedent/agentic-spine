@@ -44,7 +44,10 @@ check_launchd_health() {
     return 2
   fi
 
-  mapfile -t labels < <(yq -r '.labels[] | select(.state == "active" and .monitor == true) | .label' "$REGISTRY")
+  local -a labels=()
+  while IFS= read -r _lbl; do
+    [[ -n "$_lbl" ]] && labels+=("$_lbl")
+  done < <(yq -r '.labels[] | select(.state == "active" and .monitor == true) | .label' "$REGISTRY")
   if [[ "${#labels[@]}" -eq 0 ]]; then
     echo "[launchd-health-check] no monitorable labels in registry"
     return 0

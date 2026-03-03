@@ -113,7 +113,8 @@ if [[ -x "$FRICTION_INGEST" ]]; then
   echo "Capture structured friction items? (y/N)"
   read -r -p "FRICTION_CAPTURE: " FRICTION_CAPTURE
 
-  while [[ "${FRICTION_CAPTURE,,}" == "y" || "${FRICTION_CAPTURE,,}" == "yes" ]]; do
+  local _fc_lc; _fc_lc="$(printf '%s' "$FRICTION_CAPTURE" | tr '[:upper:]' '[:lower:]')"
+  while [[ "$_fc_lc" == "y" || "$_fc_lc" == "yes" ]]; do
     echo "Capability (required, e.g. verify.pack.run):"
     read -r -p "FRICTION_CAP: " FRICTION_CAP
     echo "Expected behavior (required):"
@@ -148,6 +149,7 @@ if [[ -x "$FRICTION_INGEST" ]]; then
     echo ""
     echo "Capture another friction item? (y/N)"
     read -r -p "FRICTION_CAPTURE: " FRICTION_CAPTURE
+    _fc_lc="$(printf '%s' "$FRICTION_CAPTURE" | tr '[:upper:]' '[:lower:]')"
   done
 fi
 
