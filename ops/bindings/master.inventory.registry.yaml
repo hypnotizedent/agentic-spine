@@ -1,0 +1,159 @@
+# Status: authoritative
+# Last verified: 2026-03-03
+# Scope: universal-master-inventory-registry
+
+version: 1
+updated_at: "2026-03-03"
+owner: "@ronny"
+status: authoritative
+scope: universal-master-inventory-registry
+
+contracts:
+  intake_lifecycle: ops/bindings/intake.lifecycle.contract.yaml
+  intake_envelope_schema: ops/bindings/intake.envelope.schema.yaml
+  projection_contract: ops/bindings/domain.projection.contract.yaml
+  storage_policy: ops/bindings/state.storage.policy.yaml
+
+optional_authorities_not_present:
+  - ops/bindings/hardware.master.yaml
+
+rows:
+  - id: authority.internet_asset.registry
+    domain_id: infra
+    authority:
+      path: ops/bindings/internet.asset.registry.yaml
+      expected_authority_state: authoritative
+      source_capabilities:
+        - internet.asset.registry.build
+        - internet.asset.intake.diff
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs:
+        - mailroom/outbox/intake/ITK-*.yaml
+        - receipts/sessions/package-intake-*.md
+      evidence_required: true
+    evidence_refs:
+      - ops/bindings/hardware.inventory.yaml
+      - ops/bindings/home.device.registry.yaml
+      - receipts/sessions/CAP-*__internet.asset.registry.build__R*/receipt.md
+    projection_refs:
+      - projection.internet_asset.registry.projected
+
+  - id: authority.hardware.inventory
+    domain_id: infra
+    authority:
+      path: ops/bindings/hardware.inventory.yaml
+      expected_authority_state: authoritative
+      source_capabilities:
+        - platform.inventory.intake
+        - domain-inventory-refresh
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs:
+        - mailroom/outbox/intake/ITK-*.yaml
+        - receipts/sessions/package-intake-*.md
+      evidence_required: true
+    evidence_refs:
+      - ops/bindings/hardware.parts.inventory.yaml
+      - receipts/sessions/CAP-*__infra.proxmox.maintenance.precheck__R*/receipt.md
+    projection_refs:
+      - projection.internet_asset.registry.projected
+
+  - id: authority.device_identity.ssot
+    domain_id: core
+    authority:
+      path: docs/governance/DEVICE_IDENTITY_SSOT.md
+      expected_authority_marker: "status: authoritative"
+      source_capabilities:
+        - network.unifi.clients.snapshot
+        - network.home.unifi.clients.snapshot
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs:
+        - receipts/sessions/CAP-*__network.unifi.clients.snapshot__R*/receipt.md
+        - receipts/sessions/CAP-*__network.home.unifi.clients.snapshot__R*/receipt.md
+      evidence_required: true
+    evidence_refs:
+      - ops/bindings/network.unifi.home.clients.observed.yaml
+      - ops/bindings/network.unifi.shop.clients.observed.yaml
+      - ops/bindings/home.device.registry.yaml
+    projection_refs:
+      - projection.network.unifi.home.clients.observed
+      - projection.network.unifi.shop.clients.observed
+      - projection.ha.device.map
+
+  - id: authority.home.device.registry
+    domain_id: home
+    authority:
+      path: ops/bindings/home.device.registry.yaml
+      expected_authority_state: authoritative
+      source_capabilities:
+        - network.home.unifi.clients.snapshot
+        - ha.device.map.build
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs:
+        - mailroom/outbox/intake/ITK-*.yaml
+        - receipts/sessions/CAP-*__network.home.unifi.clients.snapshot__R*/receipt.md
+      evidence_required: true
+    evidence_refs:
+      - ops/bindings/network.unifi.home.clients.observed.yaml
+      - docs/governance/DEVICE_IDENTITY_SSOT.md
+    projection_refs:
+      - projection.ha.device.map
+
+  - id: authority.network.unifi.home.clients.observed
+    domain_id: home
+    authority:
+      path: ops/bindings/network.unifi.home.clients.observed.yaml
+      expected_authority_state: authoritative
+      source_capabilities:
+        - network.home.unifi.clients.snapshot
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs:
+        - receipts/sessions/CAP-*__network.home.unifi.clients.snapshot__R*/receipt.md
+      evidence_required: true
+    evidence_refs:
+      - docs/governance/DEVICE_IDENTITY_SSOT.md
+      - ops/bindings/home.device.registry.yaml
+    projection_refs:
+      - projection.ha.device.map
+
+  - id: authority.network.unifi.shop.clients.observed
+    domain_id: infra
+    authority:
+      path: ops/bindings/network.unifi.shop.clients.observed.yaml
+      expected_authority_state: authoritative
+      source_capabilities:
+        - network.unifi.clients.snapshot
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs:
+        - receipts/sessions/CAP-*__network.unifi.clients.snapshot__R*/receipt.md
+      evidence_required: true
+    evidence_refs:
+      - docs/governance/DEVICE_IDENTITY_SSOT.md
+      - ops/bindings/internet.asset.registry.yaml
+    projection_refs:
+      - projection.ha.device.map
+
+  - id: authority.ha.device.map
+    domain_id: home
+    authority:
+      path: ops/bindings/ha.device.map.yaml
+      expected_generated_marker: "Auto-generated by ha.device.map.build — do not hand-edit."
+      source_capabilities:
+        - ha.device.map.build
+    intake_lineage:
+      envelope_schema_ref: ops/bindings/intake.envelope.schema.yaml
+      accepted_intake_refs:
+        - receipts/sessions/CAP-*__ha.device.map.build__R*/receipt.md
+        - ops/bindings/home.device.registry.yaml
+      evidence_required: true
+    evidence_refs:
+      - ops/bindings/home.device.registry.yaml
+      - ops/bindings/network.unifi.home.clients.observed.yaml
+      - ops/bindings/network.unifi.shop.clients.observed.yaml
+    projection_refs:
+      - projection.ha.inventory.snapshot
