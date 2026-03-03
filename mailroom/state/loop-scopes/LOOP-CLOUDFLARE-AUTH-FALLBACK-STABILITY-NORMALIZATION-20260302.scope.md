@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-CLOUDFLARE-AUTH-FALLBACK-STABILITY-NORMALIZATION-20260302
 created: 2026-03-02
-status: active
+status: complete
 owner: "@ronny"
 scope: cloudflare
 priority: high
