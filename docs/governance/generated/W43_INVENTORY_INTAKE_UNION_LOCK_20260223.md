@@ -1,4 +1,26 @@
-# W43 Inventory Intake Union Lock (2026-02-23)
+---
+status: superseded
+owner: "@ronny"
+last_verified: 2026-03-03
+scope: w43-inventory-intake-union-lock-legacy
+superseded_by:
+  - ops/bindings/intake.lifecycle.contract.yaml
+  - ops/bindings/master.inventory.registry.yaml
+canonical_pointer_index: ops/bindings/master.inventory.registry.yaml
+---
+
+# W43 Inventory Intake Union Lock (2026-02-23) - Legacy
+
+This generated artifact is retained as historical context only.
+Universal intake/master/projection governance now uses:
+
+- `ops/bindings/intake.lifecycle.contract.yaml`
+- `ops/bindings/intake.envelope.schema.yaml`
+- `ops/bindings/master.inventory.registry.yaml`
+- `ops/bindings/domain.projection.contract.yaml`
+- `ops/bindings/state.storage.policy.yaml`
+
+Historical content:
 
 ## Objective
 Standardize physical and business inventory onboarding with one governed path:
