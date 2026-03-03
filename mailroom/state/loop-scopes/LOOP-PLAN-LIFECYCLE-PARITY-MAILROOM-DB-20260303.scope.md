@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-PLAN-LIFECYCLE-PARITY-MAILROOM-DB-20260303
 created: 2026-03-03
-status: active
+status: closed
 owner: "@ronny"
 scope: plan
 priority: high
