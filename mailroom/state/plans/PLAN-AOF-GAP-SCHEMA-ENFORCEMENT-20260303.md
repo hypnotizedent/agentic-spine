@@ -11,6 +11,11 @@ strictly validate gap entries against `ops/bindings/gap.schema.yaml`.
 Result: new concepts can be expressed narratively (reports/loop tables) before
 becoming authoritative structured fields.
 
+Research findings now attached to this plan:
+- Governance surfaces are manually registered and can go dark when unregistered.
+- The current model validates registered artifacts but does not auto-discover new ones.
+- This creates a recurring "Ronny must remember registration" failure mode.
+
 ## Target State
 
 A gap field is valid only if it exists in the authority schema.
@@ -26,6 +31,23 @@ Unknown keys fail pre-commit and drift gate checks.
    - `ops/bindings/gate.registry.yaml`
    - `ops/bindings/gate.execution.topology.yaml`
 6. Fast verify includes and passes D332.
+7. Canonical scanner-family design artifact added for registry completeness:
+   - `gate.scan`
+   - `cap.scan`
+   - `agent.scan`
+   - `launchd.scan`
+   - `binding.scan`
+8. Follow-on implementation loop handoff packet produced (no execution in this loop).
+
+## Registry Surfaces In Scope (Canonicalized)
+
+1. Gate scripts vs gate registry + topology.
+2. Plugin manifests vs capabilities registry.
+3. Agent contracts vs agent registry + routing policy.
+4. Launchd plists vs scheduler registry + backing scripts.
+5. Binding contracts vs active references (gate/cap/script reachability).
+6. Plan files vs plans index completeness.
+7. MCP config coherence across repos vs declared agent/runtime surfaces.
 
 ## Wave Plan
 
@@ -56,15 +78,24 @@ Unknown keys fail pre-commit and drift gate checks.
 - Revert adversarial edit.
 - Close loop/gaps with receipts.
 
+### W6 Growth Hand-off (Design Only)
+- Produce a canonical scan-family spec for the seven registry surfaces.
+- Define admission rule for follow-on loop:
+  - fail when any surface contains unregistered artifacts,
+  - no auto-mutation in first rollout (report-only mode),
+  - promote to enforce after one stabilization cycle.
+
 ## Risks
 
 - Over-strict enforcement may fail on legacy corpus fields not declared yet.
 - Fast verify runtime may increase with D332 in core ring.
+- Registry scanner rollout can produce initial high finding volume.
 
 ## Mitigations
 
 - Keep explicit legacy exception list narrow and documented.
 - If runtime budget tight, start D332 in non-core ring and promote after timing pass.
+- Launch scanner family in report-only mode first; enforce after triage baseline.
 
 ## Blockers (Current)
 
@@ -75,3 +106,8 @@ Unknown keys fail pre-commit and drift gate checks.
 
 - GAP-OP-1411
 - GAP-OP-1412
+
+## Research Evidence Captured
+
+- Core thesis: system detects drift well but does not self-grow registry surfaces.
+- Canonicalization intent: convert memory-driven registration to scanner-backed completeness checks.
