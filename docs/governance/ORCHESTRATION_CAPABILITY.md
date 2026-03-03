@@ -19,9 +19,32 @@ Primary commands:
 - `orchestration.loop.close`
 - `orchestration.status`
 - `orchestration.terminal.entry`
+- `orchestration.wave.kickoff`
 
 Runtime state:
 - `mailroom/state/orchestration/<loop-id>/manifest.yaml`
+- `mailroom/state/orchestration/<loop-id>/packet.yaml`
+- `mailroom/state/orchestration/<loop-id>/locks/*.lock`
+
+## Kickoff (Single Command Bootstrap)
+
+`orchestration.wave.kickoff` is the canonical bootstrap command for `execution_mode: orchestrator_subagents`.
+
+It creates/validates in one command:
+- orchestration manifest + lane tickets
+- deterministic lane branches (`<LOOP_ID>/<lane-lower>`)
+- deterministic lane worktrees (`<repo>/.worktrees/orchestration/<loop-id>/<lane>`)
+- lock claims under `mailroom/state/orchestration/<loop-id>/locks/*.lock`
+- packet artifact at `mailroom/state/orchestration/<loop-id>/packet.yaml`
+- worker prompts under `mailroom/state/orchestration/<loop-id>/prompts/`
+
+Operator usage:
+
+```bash
+./bin/ops cap run orchestration.wave.kickoff -- --loop-id LOOP-... --lanes A,B,C
+```
+
+Then start each worker lane via `orchestration.terminal.entry` (or launcher integration) using the generated prompt preambles.
 
 ## Terminal Entry (Strict)
 
@@ -55,6 +78,25 @@ Exports:
 - `SPINE_ORCH_TARGET_BRANCH`
 - `SPINE_TARGET_REPO`
 - `SPINE_WORKTREE`
+
+Lock contract (`mailroom/state/orchestration/<loop-id>/locks/*.lock`) fields:
+- `loop_id`
+- `role`
+- `lane`
+- `owner`
+- `pid`
+- `session_id`
+- `worktree`
+- `branch`
+- `mode`
+- `status`
+- `created_at`
+
+Mutation guard policy:
+- For loops with `execution_mode: orchestrator_subagents`, mutating capabilities require an active lock claim whose `worktree` + `branch` match the caller checkout.
+- Emergency bypass is allowed only with explicit governed env override:
+  - `SPINE_ORCH_MUTATION_GUARD_BYPASS=1`
+  - `SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON=<ref>`
 
 ## Launcher Policy
 
