@@ -9,6 +9,8 @@ CF_AUTH_MODE_PREFERRED="${CF_AUTH_MODE_PREFERRED:-}"
 CF_LAST_HTTP_STATUS=""
 CF_LAST_MODE=""
 CF_LAST_BODY=""
+CF_FALLBACK_USED="${CF_FALLBACK_USED:-}"
+CF_FALLBACK_REASON="${CF_FALLBACK_REASON:-}"
 
 cf_require_auth() {
   if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
@@ -81,10 +83,40 @@ cf__curl_with_mode() {
   return 1
 }
 
+cf_classify_failure() {
+  local status="${1:-000}"
+  case "$status" in
+    401|403) echo "token_invalid" ;;
+    429)     echo "rate_limited" ;;
+    000)     echo "network_error" ;;
+    5[0-9][0-9]) echo "api_error" ;;
+    *)       echo "http_${status}" ;;
+  esac
+}
+
+cf_token_health() {
+  # Token-only probe: no fallback. Returns 0 if token auth succeeds, 1 otherwise.
+  # Sets CF_TOKEN_HEALTH_STATUS with classification.
+  if ! cf_has_token_auth; then
+    CF_TOKEN_HEALTH_STATUS="no_token"
+    return 1
+  fi
+  local probe_url="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}/user/tokens/verify"
+  if cf__curl_with_mode "token" "GET" "$probe_url" >/dev/null; then
+    CF_TOKEN_HEALTH_STATUS="valid"
+    return 0
+  fi
+  CF_TOKEN_HEALTH_STATUS="$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")"
+  return 1
+}
+
 cf_api_request() {
   local method="$1"
   local url="$2"
   local payload="${3:-}"
+
+  CF_FALLBACK_USED=""
+  CF_FALLBACK_REASON=""
 
   cf_require_auth || return $?
 
@@ -95,13 +127,16 @@ cf_api_request() {
       return 0
     fi
     if cf_is_fallback_status "${CF_LAST_HTTP_STATUS}" && cf_has_global_auth; then
+      CF_FALLBACK_USED="true"
+      CF_FALLBACK_REASON="token_$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")"
+      echo "NOTE: Cloudflare token auth failed (${CF_LAST_HTTP_STATUS}), falling back to global key." >&2
       if cf__curl_with_mode "global" "$method" "$url" "$payload"; then
         CF_AUTH_MODE_PREFERRED="global"
         CF_AUTH_MODE_EFFECTIVE="global"
         return 0
       fi
     fi
-    echo "STOP: Cloudflare API request failed (${method} ${url}) status=${CF_LAST_HTTP_STATUS} mode=${CF_LAST_MODE}" >&2
+    echo "STOP: Cloudflare API request failed (${method} ${url}) status=${CF_LAST_HTTP_STATUS} mode=${CF_LAST_MODE} class=$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")" >&2
     [[ -n "${CF_LAST_BODY:-}" ]] && echo "$CF_LAST_BODY" >&2
     return 1
   fi
@@ -113,13 +148,16 @@ cf_api_request() {
     fi
     # If global key fails auth and token exists, allow a recovery attempt.
     if cf_is_fallback_status "${CF_LAST_HTTP_STATUS}" && cf_has_token_auth; then
+      CF_FALLBACK_USED="true"
+      CF_FALLBACK_REASON="global_$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")"
+      echo "NOTE: Cloudflare global key failed (${CF_LAST_HTTP_STATUS}), falling back to token." >&2
       if cf__curl_with_mode "token" "$method" "$url" "$payload"; then
         CF_AUTH_MODE_PREFERRED="token"
         CF_AUTH_MODE_EFFECTIVE="token"
         return 0
       fi
     fi
-    echo "STOP: Cloudflare API request failed (${method} ${url}) status=${CF_LAST_HTTP_STATUS} mode=${CF_LAST_MODE}" >&2
+    echo "STOP: Cloudflare API request failed (${method} ${url}) status=${CF_LAST_HTTP_STATUS} mode=${CF_LAST_MODE} class=$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")" >&2
     [[ -n "${CF_LAST_BODY:-}" ]] && echo "$CF_LAST_BODY" >&2
     return 1
   fi
@@ -143,6 +181,28 @@ cf_api_request() {
 cf_api_get() {
   local url="$1"
   cf_api_request "GET" "$url"
+}
+
+cf_api_get_with_retry() {
+  # Bounded retry for read paths: 3 attempts with exponential backoff + jitter on 429.
+  local url="$1"
+  local max_retries=3
+  local attempt=0
+  local backoff=2
+  while true; do
+    attempt=$((attempt + 1))
+    if cf_api_get "$url"; then
+      return 0
+    fi
+    if [[ "${CF_LAST_HTTP_STATUS}" != "429" ]] || [[ "$attempt" -ge "$max_retries" ]]; then
+      return 1
+    fi
+    local jitter=$(( (RANDOM % 1000) ))
+    local wait_ms=$(( backoff * 1000 + jitter ))
+    echo "NOTE: Cloudflare 429 rate-limited (attempt ${attempt}/${max_retries}), retrying in ${wait_ms}ms." >&2
+    sleep "$(printf '%.3f' "$(echo "scale=3; $wait_ms / 1000" | bc)")"
+    backoff=$((backoff * 2))
+  done
 }
 
 cf_api_post() {

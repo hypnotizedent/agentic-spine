@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.token.health — Token-only health probe (no fallback).
+# Validates the CLOUDFLARE_API_TOKEN against Cloudflare's /user/tokens/verify endpoint.
+# Returns deterministic classification: valid, token_invalid, rate_limited, network_error, no_token.
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+source "$CF_LIB"
+
+JSON_OUT=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_OUT=1; shift ;;
+    --) shift ;;
+    *) shift ;;
+  esac
+done
+
+cf_token_health
+rc=$?
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  python3 -c "
+import json
+print(json.dumps({
+    'status': '${CF_TOKEN_HEALTH_STATUS}',
+    'healthy': ${rc} == 0,
+    'http_status': '${CF_LAST_HTTP_STATUS:-}',
+    'auth_mode_preferred': '${CF_AUTH_MODE_PREFERRED:-}',
+}, indent=2))
+"
+else
+  echo "cloudflare.token.health"
+  echo "status: ${CF_TOKEN_HEALTH_STATUS}"
+  echo "healthy: $([ "$rc" -eq 0 ] && echo true || echo false)"
+  echo "http_status: ${CF_LAST_HTTP_STATUS:-n/a}"
+  echo "auth_mode_preferred: ${CF_AUTH_MODE_PREFERRED:-unset}"
+fi
+
+exit "$rc"
