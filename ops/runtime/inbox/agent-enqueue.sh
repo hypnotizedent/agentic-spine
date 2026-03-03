@@ -23,7 +23,10 @@ set -euo pipefail
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
-QUEUED="${SPINE_INBOX:-$SPINE/mailroom/inbox}/queued"
+source "$SPINE/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+SPINE="$SPINE_REPO"
+QUEUED="${SPINE_INBOX}/queued"
 SESSION="${SESSION_ID:-S$(date +%Y%m%d-%H%M%S)}"
 SLUG="${1:-task}"
 RID="${2:-R$(printf '%03d' $((RANDOM % 1000)))}"

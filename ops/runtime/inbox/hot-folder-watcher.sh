@@ -38,12 +38,16 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
+SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+source "$SPINE_REPO/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
 # SPINE paths (canonical)
-SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
-INBOX="${SPINE_INBOX:-$SPINE/mailroom/inbox}"
-OUTBOX="${SPINE_OUTBOX:-$SPINE/mailroom/outbox}"
-STATE_DIR="${SPINE_STATE:-$SPINE/mailroom/state}"
-LOG_DIR="${SPINE_LOGS:-$SPINE/mailroom/logs}"
+SPINE="${SPINE_REPO}"
+INBOX="${SPINE_INBOX}"
+OUTBOX="${SPINE_OUTBOX}"
+STATE_DIR="${SPINE_STATE}"
+LOG_DIR="${SPINE_LOGS}"
 
 # Lane folders (prompt lifecycle)
 QUEUED="${INBOX}/queued"
@@ -53,7 +57,7 @@ FAILED="${INBOX}/failed"
 PARKED="${INBOX}/parked"
 
 # Repo paths
-REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+REPO="${SPINE_REPO}"
 BRAIN_RULES="${REPO}/docs/brain/rules.md"
 
 # Model/provider config

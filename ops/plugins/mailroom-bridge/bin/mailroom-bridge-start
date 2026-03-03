@@ -3,9 +3,13 @@ set -euo pipefail
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
 SPINE_CODE="${SPINE_CODE:-$SPINE_REPO}"
+source "$SPINE_CODE/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
 
-STATE_DIR="${SPINE_STATE:-$SPINE_REPO/mailroom/state}"
-LOG_DIR="${SPINE_LOGS:-$SPINE_REPO/mailroom/logs}"
+STATE_DIR="${SPINE_STATE}"
+LOG_DIR="${SPINE_LOGS}"
+INBOX_DIR="${SPINE_INBOX}"
+OUTBOX_DIR="${SPINE_OUTBOX}"
 
 PID_FILE="${STATE_DIR}/mailroom-bridge.pid"
 OUT_LOG="${LOG_DIR}/mailroom-bridge.out"
@@ -73,6 +77,25 @@ fi
 if [[ -n "$token_value" ]]; then
   printf '%s\n' "$token_value" > "$token_file"
   chmod 600 "$token_file" 2>/dev/null || true
+fi
+
+# Canonical token authority is runtime state when runtime_root is active.
+# If legacy repo-state tokens exist, tombstone them so clients cannot drift.
+repo_state_dir="${SPINE_REPO}/mailroom/state"
+if [[ "$STATE_DIR" != "$repo_state_dir" && -d "$repo_state_dir" ]]; then
+  shopt -s nullglob
+  for legacy_token in "$repo_state_dir"/mailroom-bridge*.token; do
+    [[ -f "$legacy_token" ]] || continue
+    tombstone_path="${legacy_token}.deprecated"
+    if [[ -f "$tombstone_path" ]]; then
+      rm -f "$legacy_token"
+    else
+      mv "$legacy_token" "$tombstone_path"
+      chmod 600 "$tombstone_path" 2>/dev/null || true
+    fi
+    echo "TOKEN_SOURCE_DEPRECATED: ${legacy_token} -> ${tombstone_path}"
+  done
+  shopt -u nullglob
 fi
 
 extra_env=""
@@ -181,6 +204,14 @@ cat >"$PLIST" <<EOF
     <dict>
       <key>SPINE_REPO</key>
       <string>${SPINE_REPO}</string>
+      <key>SPINE_INBOX</key>
+      <string>${INBOX_DIR}</string>
+      <key>SPINE_OUTBOX</key>
+      <string>${OUTBOX_DIR}</string>
+      <key>SPINE_STATE</key>
+      <string>${STATE_DIR}</string>
+      <key>SPINE_LOGS</key>
+      <string>${LOG_DIR}</string>
       <key>PYTHONUNBUFFERED</key>
       <string>1</string>
       <key>PATH</key>

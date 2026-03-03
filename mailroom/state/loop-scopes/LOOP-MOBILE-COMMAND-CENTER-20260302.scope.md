@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MOBILE-COMMAND-CENTER-20260302
 created: 2026-03-02
-status: active
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 horizon: now
@@ -9,6 +9,7 @@ execution_readiness: runnable
 priority: medium
 parent_loop: null
 discovered_by: "SPINE-CONTROL-01-session-20260302"
+closed_at: "2026-03-03"
 ---
 
 # Loop Scope: Mobile Command Center
@@ -74,6 +75,73 @@ The highest leverage unlock is **turning mobile from a read-only dashboard into 
 - GAP-OP-1322: No mobile task templates for common operations
 - GAP-OP-1321: Strategic cap allowlist gaps for mobile self-sufficiency
 
-## Receipts
+## Execution Evidence
 
-(To be populated during execution)
+### W0: Baseline
+- Bridge: running (PID 7454), health OK on local/tailnet/public
+- Cap-RPC via bridge: `loops.status` returned done, exit_code=0
+- Run keys: `CAP-20260302-185924__mailroom.bridge.status__Ri31438368`, `CAP-20260302-185925__mailroom.bridge.expose.status__Rhnr538644`
+
+### W1: E2E Mobile Command Flow (GAP-OP-1320) - FIXED
+- **Success test**: Task `TASK-20260303T042243Z-5ca8` → `done/` via `lifecycle.health`
+  - Run key: `CAP-20260302-232554__lifecycle.health__R03k85144`
+  - Receipt: `receipts/sessions/RCAP-20260302-232554__lifecycle.health__R03k85144/receipt.md`
+- **Fail test**: Task `TASK-20260303T042250Z-641f` → `failed/` (capability_not_allowlisted)
+- **Inbox test**: `S20260302-232352__w1-inbox-test__R522` → full lifecycle (enqueue → watcher → process → outbox)
+- Worker contract allows 6 caps: verify.pack.run, verify.core.run, loops.progress, proposals.status, stability.control.snapshot, lifecycle.health
+
+### W2: Template Pack (GAP-OP-1322) - FIXED
+- 3 mobile templates created at `mailroom/templates/mobile/`:
+  - `file-gap.template.json` — file operational gap via inbox
+  - `create-loop.template.json` — create governed loop via inbox
+  - `submit-proposal.template.json` — submit change proposal via inbox
+- Each template includes: endpoint, headers, payload schema, filled example, expected receipt
+
+### W3: Cap Allowlist Expansion (GAP-OP-1321) - FIXED
+- 7 read-only caps added to `mailroom.bridge.consumers.yaml` allowlist:
+  - `loops.list`, `loops.progress`, `gaps.aging`, `receipts.summary`, `receipts.search`, `receipts.trends`, `proposals.list`
+- All added to monitor role for mobile access
+- Consumers sync: OK, D116: 4/4 PASS
+- Bridge restarted to load new allowlist (PID 7454)
+- Total allowlist: 24 → 31 capabilities
+
+### W4: Performance Measurements
+| Capability | Median (3 runs) | Classification |
+|---|---|---|
+| loops.status | 0.64s | Fast |
+| gaps.status | 1.83s | Normal |
+| loops.list | 9.49s | Slow |
+| loops.progress | 0.62s | Fast |
+| gaps.aging | 0.72s | Fast |
+| receipts.summary | 0.70s | Fast |
+| receipts.search | 0.66s | Fast |
+| receipts.trends | 0.70s | Fast |
+| proposals.list | 0.76s | Fast |
+| proposals.status | 2.49s | Normal |
+| surface.mobile.dashboard.status | 106.24s | Heavy (runs spine.control.tick) |
+
+- Recommendation: mobile clients should use specific read caps, not the heavy dashboard
+- No deterministic perf defect to file (dashboard latency is inherent to aggregation scope)
+
+### W5: Closeout
+- verify.run -- fast: 10/10 PASS (run key: `CAP-20260302-233811__verify.run__Rw0ol34410`)
+- All 3 gaps closed: GAP-OP-1320 (fixed), GAP-OP-1321 (fixed), GAP-OP-1322 (fixed)
+- No orphan linkage (all gaps have parent_loop)
+
+## Verify Results
+- `verify.run -- fast`: 10/10 PASS
+- D116 mailroom-bridge-consumers-registry-lock: 4/4 PASS
+
+## Blocker Classification
+- No blockers. All deliverables met.
+- D2 (Mobile Session Hot-Start) was optional and not pursued — deferred as future enhancement.
+
+## Cleanup Proof
+- Bridge restarted with updated allowlist
+- All gap statuses updated in operational.gaps.yaml
+- Loop scope updated with full evidence
+
+## Linkage
+- GAP-OP-1320: fixed (W1 E2E)
+- GAP-OP-1321: fixed (W3 allowlist)
+- GAP-OP-1322: fixed (W2 templates)

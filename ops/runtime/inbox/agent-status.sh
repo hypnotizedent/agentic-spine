@@ -22,13 +22,24 @@ fi
 
 LABEL="com.ronny.agent-inbox"
 SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
-STATE_DIR="${SPINE_STATE:-$SPINE/mailroom/state}"
-INBOX="${SPINE_INBOX:-$SPINE/mailroom/inbox}"
-OUTBOX="${SPINE_OUTBOX:-$SPINE/mailroom/outbox}"
-LOG_DIR="${SPINE_LOGS:-$SPINE/mailroom/logs}"
+source "$SPINE/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+SPINE="$SPINE_REPO"
+STATE_DIR="${SPINE_STATE}"
+INBOX="${SPINE_INBOX}"
+OUTBOX="${SPINE_OUTBOX}"
+LOG_DIR="${SPINE_LOGS}"
 PID_FILE="${STATE_DIR}/agent-inbox.pid"
 LOCK_DIR="${STATE_DIR}/locks/agent-inbox.lock"
 LEDGER="${STATE_DIR}/ledger.csv"
+
+echo "== PATHS =="
+echo "spine: $SPINE"
+echo "inbox: $INBOX"
+echo "outbox: $OUTBOX"
+echo "state: $STATE_DIR"
+echo "logs: $LOG_DIR"
+echo
 
 echo "== LAUNCHD =="
 echo "service: $LABEL"
@@ -89,11 +100,16 @@ fi
 echo
 echo "== QUEUE =="
 for lane in queued running done failed parked; do
-  count="$(find "$INBOX/$lane" -maxdepth 1 -type f \
-    ! -name '.keep' \
-    ! -name '.DS_Store' \
-    ! -name '.*.swp' \
-    2>/dev/null | wc -l | tr -d ' ')"
+  lane_dir="$INBOX/$lane"
+  if [[ -d "$lane_dir" ]]; then
+    count="$(find "$lane_dir" -maxdepth 1 -type f \
+      ! -name '.keep' \
+      ! -name '.DS_Store' \
+      ! -name '.*.swp' \
+      2>/dev/null | wc -l | tr -d ' ')"
+  else
+    count="0"
+  fi
   printf "%-10s %s\n" "$lane:" "$count"
 done
 
