@@ -1,11 +1,11 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-02
+last_verified: 2026-03-03
 scope: role-runtime-control-plane
 
-version: "1.0"
-updated_at: "2026-03-02"
+version: "1.1"
+updated_at: "2026-03-03"
 
 runtime_roles:
   canonical: [researcher, worker, qc, close, librarian]
@@ -15,6 +15,11 @@ runtime_roles:
   mutating_roles: [worker]
   mutating_capability_allowlist_by_role:
     researcher:
+      # Session bootstrap — session.start is the entry gate for every governed
+      # session. Allowlisting it eliminates the need for env var litter on the
+      # first mutating call. The cap itself is self-gating (AOF contract check,
+      # multi-session guard, etc.). Justified by GAP-OP-1329.
+      - session.start
       # Friction ingestion — core researcher function
       - friction.ingest
       - friction.reconcile
@@ -24,6 +29,12 @@ runtime_roles:
       # without requiring full worker promotion for administrative close operations.
       - loops.auto.close
       - gaps.auto.close
+      # Gap/loop lifecycle governance — researchers file findings, claim work,
+      # and create loops as part of normal research flow. These are administrative
+      # governance operations, not domain mutations. Justified by GAP-OP-1329.
+      - gaps.file
+      - gaps.claim
+      - loops.create
       # Session override — allows researcher to set session-scoped role override
       # without needing env vars on the first call (bootstrap problem).
       - session.role.override
