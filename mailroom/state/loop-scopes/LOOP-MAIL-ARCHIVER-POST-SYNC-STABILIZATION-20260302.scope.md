@@ -44,7 +44,7 @@ Consolidate post-sync mail-archiver next-best-leverage work into one canonical e
 
 ## Linked Gaps
 - GAP-OP-1362 — CLOSED: EWS loop metadata contradiction fixed (execution_readiness removed from closed loop)
-- GAP-OP-1363 — CLOSED: canonical continuation container established (this loop, with preconditions + ownership + handoff)
+- GAP-OP-1363 — OPEN: structural fix committed (b5555ac) but high-severity close requires regression_lock_id gate (none exists yet)
 - GAP-OP-1364 — OPEN: overlap cleanup missing governed assets (blocked_by_runtime_access)
 - GAP-OP-1365 — CLOSED: microsoft live_sync_ready updated to true (Graph API active)
 - GAP-OP-1366 — OPEN: overlap cleanup closure semantics need reconciliation (blocked_by_ronny_arch_decision)
@@ -56,6 +56,7 @@ Consolidate post-sync mail-archiver next-best-leverage work into one canonical e
 
 | Gap | Blocker Class | Detail |
 |-----|---------------|--------|
+| GAP-OP-1363 | blocked_by_runtime_access | Structural fix committed (b5555ac: loop container with preconditions, ownership, handoff); gap remains open because high-severity close requires regression_lock_id gate (no communications domain gate exists yet) |
 | GAP-OP-1364 | blocked_by_runtime_access | Missing capabilities (communications.mailarchiver.overlap.plan, .import.eml.remote) and contract (mail.archiver.alias.boundary.contract.yaml) must be authored or reconciled |
 | GAP-OP-1366 | blocked_by_ronny_arch_decision | GAP-OP-1002 closed overlap cleanup while LOOP-MAIL-ARCHIVER-OVERLAP-CLEANUP-20260226 remains planned — reconciliation requires decision on whether overlap work is truly done or deferred |
 | GAP-OP-1367 | blocked_by_ronny_arch_decision | No retention value classification, junk/unsubscribe bucketing, or pruning rules defined — requires domain owner decision |
