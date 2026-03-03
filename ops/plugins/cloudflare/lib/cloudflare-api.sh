@@ -17,6 +17,7 @@ cf_require_auth() {
     CF_AUTH_MODE_PREFERRED="${CF_AUTH_MODE_PREFERRED:-token}"
     return 0
   fi
+  # DEPRECATED: Global API key auth is a fallback only. Prefer scoped API tokens (GAP-OP-1291d).
   if [[ -n "${CLOUDFLARE_AUTH_EMAIL:-}" && -n "${CLOUDFLARE_GLOBAL_API_KEY:-}" ]]; then
     CF_AUTH_MODE_PREFERRED="${CF_AUTH_MODE_PREFERRED:-global}"
     return 0
@@ -97,12 +98,15 @@ cf_classify_failure() {
 cf_token_health() {
   # Token-only probe: no fallback. Returns 0 if token auth succeeds, 1 otherwise.
   # Sets CF_TOKEN_HEALTH_STATUS with classification.
+  # NOTE: stdout is intentionally suppressed — callers read CF_TOKEN_HEALTH_STATUS
+  # and CF_LAST_BODY instead. See GAP-OP-1407.
   if ! cf_has_token_auth; then
     CF_TOKEN_HEALTH_STATUS="no_token"
     return 1
   fi
   local probe_url="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}/user/tokens/verify"
-  if cf__curl_with_mode "token" "GET" "$probe_url" >/dev/null; then
+  local _discard
+  if _discard="$(cf__curl_with_mode "token" "GET" "$probe_url")"; then
     CF_TOKEN_HEALTH_STATUS="valid"
     return 0
   fi
@@ -129,7 +133,7 @@ cf_api_request() {
     if cf_is_fallback_status "${CF_LAST_HTTP_STATUS}" && cf_has_global_auth; then
       CF_FALLBACK_USED="true"
       CF_FALLBACK_REASON="token_$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")"
-      echo "NOTE: Cloudflare token auth failed (${CF_LAST_HTTP_STATUS}), falling back to global key." >&2
+      echo "WARN: Cloudflare token auth failed (${CF_LAST_HTTP_STATUS}), falling back to global key. Global API key fallback is DEPRECATED — fix token permissions instead (GAP-OP-1291d)." >&2
       if cf__curl_with_mode "global" "$method" "$url" "$payload"; then
         CF_AUTH_MODE_PREFERRED="global"
         CF_AUTH_MODE_EFFECTIVE="global"
@@ -147,10 +151,11 @@ cf_api_request() {
       return 0
     fi
     # If global key fails auth and token exists, allow a recovery attempt.
+    # NOTE: global-key-preferred mode is itself deprecated — prefer token auth (GAP-OP-1291d).
     if cf_is_fallback_status "${CF_LAST_HTTP_STATUS}" && cf_has_token_auth; then
       CF_FALLBACK_USED="true"
       CF_FALLBACK_REASON="global_$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")"
-      echo "NOTE: Cloudflare global key failed (${CF_LAST_HTTP_STATUS}), falling back to token." >&2
+      echo "WARN: Cloudflare global key failed (${CF_LAST_HTTP_STATUS}), falling back to token. Global API key auth is DEPRECATED (GAP-OP-1291d)." >&2
       if cf__curl_with_mode "token" "$method" "$url" "$payload"; then
         CF_AUTH_MODE_PREFERRED="token"
         CF_AUTH_MODE_EFFECTIVE="token"
