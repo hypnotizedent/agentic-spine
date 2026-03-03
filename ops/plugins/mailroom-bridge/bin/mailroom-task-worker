@@ -712,7 +712,18 @@ class TaskWorker:
     def run_once(self) -> dict[str, Any]:
         # Keep task-lifecycle responsiveness even when control-cycle calls are slow.
         tasks = self.consume_tasks_once()
-        cycle = self.run_cycle_once()
+        try:
+            cycle = self.run_cycle_once()
+        except Exception as exc:
+            cycle = {
+                "enabled": bool(self.cycle_cfg.get("enabled", True)),
+                "status": "failed",
+                "run_key": "",
+                "receipt": "",
+                "exit_code": 124,
+                "error": safe_reason(str(exc), limit=400),
+            }
+            self.log(f"cycle: exception reason={safe_reason(str(exc), limit=400)}")
         payload = {
             "worker_id": self.worker_id,
             "poll_seconds": self.poll_seconds,
