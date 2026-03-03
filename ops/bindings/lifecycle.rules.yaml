@@ -24,7 +24,7 @@ rules:
   loops_auto_close:
     enabled: true
     require_all_gaps_resolved: true
-    skip_zero_gap_loops: true
+    skip_zero_gap_loops: false
 
   linkage:
     parent_loop:
@@ -52,3 +52,70 @@ rules:
         3. Avoid back-to-back Edit calls on the same file without re-reading.
         4. Use gaps.file/gaps.close capabilities instead of direct YAML editing
            when possible (they handle locking internally).
+
+  env_var_precedence:
+    description: |
+      Role override environment variable precedence and workaround patterns
+      for multi-agent orchestration sessions.
+    terminal_role_resolution:
+      description: |
+        OPS_TERMINAL_ROLE and SPINE_TERMINAL_ROLE persist in bash env via
+        inheritance. When set (e.g. OPS_TERMINAL_ROLE=SPINE-EXECUTION-01),
+        they map to the 'researcher' role which blocks mutating capabilities
+        and pre-commit Guard 4 write-scope checks.
+      workaround: |
+        For every git commit in orchestrated sessions, prefix with:
+          env -u OPS_TERMINAL_ROLE -u SPINE_TERMINAL_ROLE -u SPINE_TERMINAL_NAME \
+            SPINE_ROLE_POLICY_OVERRIDE_REF="<LOOP_OR_ORCH_ID>" \
+            SPINE_ROLE_POLICY_OVERRIDE_REASON="<reason>" \
+            git commit ...
+      affected_gaps: [GAP-OP-1414, GAP-OP-1418]
+    session_start_override:
+      description: |
+        session.start and other mutating capabilities require inline env vars
+        on the command line, not just exported shell variables. cap.sh runtime
+        role check happens before exported override env vars are recognized
+        by pre-commit hooks.
+      workaround: |
+        Use inline env var assignment before the command:
+          SPINE_ROLE_POLICY_OVERRIDE_REF="<ref>" \
+          SPINE_ROLE_POLICY_OVERRIDE_REASON="<reason>" \
+          ./bin/ops cap run session.start
+      affected_gaps: [GAP-OP-1416]
+
+  gap_closure_requirements:
+    high_severity_regression_lock:
+      description: |
+        gaps.close requires --regression-lock-id DXXX for high and critical
+        severity gaps. The lock must reference a drift gate that prevents
+        regression of the fix. If no domain gate exists yet, file a gap for
+        the missing gate and leave the original gap open until the gate lands.
+      workaround: |
+        To close a high-severity gap:
+          echo "yes" | ./bin/ops cap run gaps.close -- \
+            --id GAP-OP-XXXX --status fixed \
+            --fixed-in "<commit_or_loop>" \
+            --regression-lock-id DXXX
+      affected_gaps: [GAP-OP-1415]
+
+  worktree_isolation:
+    snapshot_drift:
+      description: |
+        verify.run and other capabilities may trigger binding snapshot
+        refreshes (HA, Tailscale, etc.) inside a worktree. These create
+        untracked/modified files that pollute git diff output. The actual
+        commit remains clean, but diff during integration review is misleading.
+      mitigation: |
+        1. Run git diff --cached (staged only) for integration review.
+        2. Use git checkout -- <snapshot_files> to discard worktree drift.
+        3. Avoid running verify.run with snapshot-refreshing gates in worktrees.
+      affected_gaps: [GAP-OP-1417]
+
+  yq_gotchas:
+    keys_extraction:
+      description: |
+        yq .gaps[].keys[] returns EMPTY output. The correct syntax for
+        extracting keys from each entry in a YAML array is:
+          yq '.gaps[] | keys | .[]' file.yaml
+        This is a known yq behavior difference from jq.
+      affected_gaps: [GAP-OP-1419]

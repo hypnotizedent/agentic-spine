@@ -27,6 +27,6 @@ aging_warning_days()             { _lc_read '.rules.aging.thresholds.warning_day
 aging_critical_days()            { _lc_read '.rules.aging.thresholds.critical_days' '14'; }
 loops_auto_close_enabled()       { _lc_read '.rules.loops_auto_close.enabled' 'true'; }
 loops_auto_close_require_all()   { _lc_read '.rules.loops_auto_close.require_all_gaps_resolved' 'true'; }
-loops_auto_close_skip_zero()     { _lc_read '.rules.loops_auto_close.skip_zero_gap_loops' 'true'; }
+loops_auto_close_skip_zero()     { _lc_read '.rules.loops_auto_close.skip_zero_gap_loops' 'false'; }
 health_orphan_check()            { _lc_read '.rules.health.orphan_check' 'true'; }
 health_aging_advisory()          { _lc_read '.rules.health.aging_advisory' 'true'; }
