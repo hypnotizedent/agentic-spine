@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MAILROOM-WATCHER-SELF-HOSTED-INFERENCE-CONTRACT-20260303
 created: 2026-03-03
-status: active
+status: closed
 owner: "@ronny"
 scope: mailroom
 priority: medium
