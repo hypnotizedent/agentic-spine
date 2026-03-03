@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 TEMPLATE="$ROOT/ops/plugins/lifecycle/templates/loop-scope.template.md"
 
-NAME="" OBJECTIVE="" PRIORITY="medium" HORIZON="now" READINESS="runnable"
+NAME="" OBJECTIVE="" PRIORITY="medium" HORIZON="now" READINESS="runnable" EXEC_MODE="orchestrator_subagents"
 declare -a PHASES=()
 declare -a SUCCESS_CRITERIA=()
 declare -a DOD_ITEMS=()
@@ -25,13 +25,15 @@ while [[ $# -gt 0 ]]; do
     --objective) OBJECTIVE="${2:?--objective requires a value}"; shift 2 ;;
     --priority)  PRIORITY="${2:?--priority requires a value}"; shift 2 ;;
     --horizon)   HORIZON="${2:?--horizon requires a value}"; shift 2 ;;
-    --readiness) READINESS="${2:?--readiness requires a value}"; shift 2 ;;
-    --phase)     PHASES+=("${2:?--phase requires a value}"); shift 2 ;;
+    --readiness)       READINESS="${2:?--readiness requires a value}"; shift 2 ;;
+    --execution-mode)  EXEC_MODE="${2:?--execution-mode requires a value}"; shift 2 ;;
+    --phase)           PHASES+=("${2:?--phase requires a value}"); shift 2 ;;
     --success)   SUCCESS_CRITERIA+=("${2:?--success requires a value}"); shift 2 ;;
     --dod)       DOD_ITEMS+=("${2:?--dod requires a value}"); shift 2 ;;
     -h|--help)
       echo "Usage: loops-create --name NAME --objective \"desc\" [--priority high|medium|low]"
       echo "       [--horizon now|later|future] [--readiness runnable|blocked]"
+      echo "       [--execution-mode single_worker|orchestrator_subagents]"
       echo "       [--phase \"Step 1:desc\"]... [--success \"criterion\"]... [--dod \"item\"]..."
       echo ""
       echo "Creates a new loop scope file from template with optional scaffold sections."
@@ -56,6 +58,11 @@ esac
 case "$READINESS" in
   runnable|blocked) ;;
   *) echo "FAIL: --readiness must be runnable or blocked (got '$READINESS')" >&2; exit 2 ;;
+esac
+
+case "$EXEC_MODE" in
+  single_worker|orchestrator_subagents) ;;
+  *) echo "FAIL: --execution-mode must be single_worker or orchestrator_subagents (got '$EXEC_MODE')" >&2; exit 2 ;;
 esac
 
 # Boundary model enforcement: active loops must be horizon=now.
@@ -117,6 +124,9 @@ if [[ "$HORIZON" != "now" ]]; then
 fi
 if [[ "$READINESS" != "runnable" ]]; then
   sed -i '' "s/^execution_readiness: runnable$/execution_readiness: ${READINESS}/" "$SCOPE_FILE"
+fi
+if [[ "$EXEC_MODE" != "orchestrator_subagents" ]]; then
+  sed -i '' "s/^execution_mode: orchestrator_subagents$/execution_mode: ${EXEC_MODE}/" "$SCOPE_FILE"
 fi
 
 # Append scaffold sections for consistent loop structure

@@ -7,6 +7,7 @@ scope: {{SCOPE}}
 priority: {{PRIORITY}}
 horizon: now
 execution_readiness: runnable
+execution_mode: orchestrator_subagents
 objective: {{OBJECTIVE}}
 ---
 

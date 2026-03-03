@@ -1,0 +1,131 @@
+# Orchestrator Packet Contract
+#
+# Defines the required artifact schema for multi-agent orchestrator_subagents
+# execution mode. The packet must exist before subagent dispatch begins and
+# must be updated with reconciliation evidence before coordinator closeout.
+#
+# Decision: LOOP-ORCHESTRATOR-SUBAGENT-DEFAULT-ENFORCEMENT-20260303
+
+version: "1.0"
+updated_at: "2026-03-03"
+status: authoritative
+owner: "@ronny"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Packet Location
+# ─────────────────────────────────────────────────────────────────────────
+
+artifact:
+  format: yaml
+  location: "mailroom/state/orchestration/<LOOP_ID>/packet.yaml"
+  template: "mailroom/state/orchestration/TEMPLATE-packet.yaml"
+  artifact_timeline:
+    created_at: "Before first subagent dispatch"
+    updated_at: "After each wave or subagent completion"
+    finalized_at: "Before coordinator closeout push"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Required Fields (pre-dispatch)
+# ─────────────────────────────────────────────────────────────────────────
+
+required_fields:
+  - loop_id
+  - execution_mode
+  - owner_terminal
+  - created_at_utc
+  - wave_plan
+  - subagent_allocation
+  - worktree_mapping
+  - integration_order
+  - verification_sequence
+
+# ─────────────────────────────────────────────────────────────────────────
+# Required Fields (pre-closeout)
+# ─────────────────────────────────────────────────────────────────────────
+
+closeout_fields:
+  - reconciliation_summary
+  - receipt_refs
+  - verify_matrix
+  - finalized_at_utc
+
+# ─────────────────────────────────────────────────────────────────────────
+# Field Schemas
+# ─────────────────────────────────────────────────────────────────────────
+
+field_schemas:
+  wave_plan:
+    type: list
+    items:
+      required: [wave_id, objective, subagents, depends_on]
+    description: "Ordered list of execution waves with objectives and subagent assignments."
+
+  subagent_allocation:
+    type: list
+    items:
+      required: [agent_id, role, assigned_gaps, worktree_branch]
+    description: "Maps each subagent to its role, gap assignments, and isolation branch."
+
+  worktree_mapping:
+    type: list
+    items:
+      required: [agent_id, worktree_path, branch_name]
+    description: "One-to-one mapping of subagent to isolated worktree."
+
+  integration_order:
+    type: list
+    items:
+      required: [step, source_branch, target_branch, merge_strategy]
+    description: "Deterministic merge sequence for reconciling subagent branches."
+    merge_strategies: [fast-forward, rebase, merge-commit]
+
+  verification_sequence:
+    type: list
+    items:
+      required: [step, verify_command, expected_result]
+    description: "Ordered verification steps to run after integration."
+
+  reconciliation_summary:
+    type: object
+    required: [subagents_completed, subagents_failed, merge_conflicts, total_files_changed]
+    description: "Machine-readable summary of subagent execution outcomes."
+
+  receipt_refs:
+    type: list
+    items:
+      required: [agent_id, run_keys, gap_ids, commit_hashes]
+    description: "Per-subagent execution evidence with run keys and commit references."
+
+  verify_matrix:
+    type: list
+    items:
+      required: [gate_id, status, run_key]
+    description: "Gate-level pass/fail results from post-integration verification."
+
+# ─────────────────────────────────────────────────────────────────────────
+# Isolation Contract (subagent/worktree rules)
+# ─────────────────────────────────────────────────────────────────────────
+
+isolation:
+  worktree_rule: one_per_subagent
+  branch_naming: "<LOOP_ID>/<agent_id>"
+  collision_guard:
+    enforce: true
+    description: |
+      No two subagents may share a worktree or branch. The coordinator
+      must verify worktree uniqueness before dispatch. Integration merges
+      follow the deterministic order in integration_order.
+  coordinator_branch: "main"
+  cleanup_policy: "Worktrees removed after successful integration and verify pass."
+
+# ─────────────────────────────────────────────────────────────────────────
+# Enforcement
+# ─────────────────────────────────────────────────────────────────────────
+
+enforcement:
+  pre_dispatch: true
+  pre_closeout: true
+  gate: D331
+  description: |
+    D330 verifies execution_mode declaration consistency.
+    D331 verifies orchestrator packet completeness for orchestrator_subagents loops.

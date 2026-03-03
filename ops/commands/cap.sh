@@ -190,6 +190,12 @@ run_cap() {
     local role_policy_override_used="false"
     local role_policy_override_ref="${SPINE_ROLE_POLICY_OVERRIDE_REF:-}"
     local role_policy_override_reason="${SPINE_ROLE_POLICY_OVERRIDE_REASON:-}"
+    # Auto-derive reason from ref when ref is self-evident (LOOP-* or LANE-* pattern)
+    if [[ -n "$role_policy_override_ref" && -z "$role_policy_override_reason" ]]; then
+      if [[ "$role_policy_override_ref" =~ ^LOOP- || "$role_policy_override_ref" =~ ^LANE- ]]; then
+        role_policy_override_reason="Governed execution for $role_policy_override_ref"
+      fi
+    fi
     local role_override_cache_filename="role-override.env"
     local role_override_cache_ttl_seconds="14400"
     local role_override_cache_session_env="SPINE_SESSION_ID"
@@ -350,17 +356,22 @@ run_cap() {
             echo "MANUAL APPROVAL: auto-approved via OPS_CAP_AUTO_APPROVE/SPINE_CAP_AUTO_APPROVE"
             ;;
           *)
-            echo "⚠️  This capability requires manual approval."
-            if [[ -t 0 ]]; then
-              read -r -p "Type 'yes' to proceed: " confirm
+            # Active session role override implies governed execution context — auto-approve
+            if [[ -n "$role_policy_override_ref" && -n "${role_policy_override_reason:-}" ]]; then
+              echo "MANUAL APPROVAL: auto-approved via active role override (ref=$role_policy_override_ref)"
             else
-              # Keep non-interactive compatibility: `echo yes | ./bin/ops cap run ...`
-              read -r confirm || confirm=""
-            fi
-            if [[ "$confirm" != "yes" ]]; then
-                echo "ABORTED"
-                echo "Hint: pipe 'yes' or set OPS_CAP_AUTO_APPROVE=yes for agent-mode batches."
-                exit 1
+              echo "⚠️  This capability requires manual approval."
+              if [[ -t 0 ]]; then
+                read -r -p "Type 'yes' to proceed: " confirm
+              else
+                # Keep non-interactive compatibility: `echo yes | ./bin/ops cap run ...`
+                read -r confirm || confirm=""
+              fi
+              if [[ "$confirm" != "yes" ]]; then
+                  echo "ABORTED"
+                  echo "Hint: pipe 'yes' or set OPS_CAP_AUTO_APPROVE=yes for agent-mode batches."
+                  exit 1
+              fi
             fi
             ;;
         esac

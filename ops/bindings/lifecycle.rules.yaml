@@ -6,9 +6,8 @@
 # Status: authoritative
 # Last reviewed: 2026-02-17
 
-version: "1.0"
-updated: "2026-02-23"
-updated_at: "2026-02-23"
+version: "1.1"
+updated_at: "2026-03-03"
 owner: "@ronny"
 
 rules:
@@ -35,3 +34,21 @@ rules:
   health:
     orphan_check: true
     aging_advisory: true
+
+  mutation_safety:
+    yaml_edit_race:
+      description: |
+        Pre-commit hooks (Guard 5 schema audit, Guard 6 projection sync) may
+        modify YAML binding files between an agent Read and Edit operation.
+        This causes 'File has been modified since read' failures.
+      mitigation: retry_after_reread
+      affected_files:
+        - ops/bindings/operational.gaps.yaml
+        - ops/bindings/gate.registry.yaml
+      guidance: |
+        When editing affected YAML files, agents should:
+        1. Read the file immediately before the Edit call.
+        2. If Edit fails with modification error, re-read and retry once.
+        3. Avoid back-to-back Edit calls on the same file without re-reading.
+        4. Use gaps.file/gaps.close capabilities instead of direct YAML editing
+           when possible (they handle locking internally).
