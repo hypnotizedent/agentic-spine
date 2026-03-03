@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+# cloudflare-service-lifecycle-publish — lifecycle transaction integration for
+# cloudflare.service.publish across bind/transition/deploy phases.
+#
+# Reads the service onboarding contract to find all active public services,
+# then either audits (default) or executes cloudflare.service.publish for
+# each declared hostname.  Enforces that publication evidence exists before
+# a service transaction can move from approved → executed.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+SERVICE_CONTRACT="$ROOT/ops/bindings/service.onboarding.contract.yaml"
+BINDING_DEFAULTS="$ROOT/ops/bindings/platform.extension.binding.defaults.yaml"
+PUBLISH_SCRIPT="$ROOT/ops/plugins/cloudflare/bin/cloudflare-service-publish"
+CF_INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+# ── secrets injection (re-exec before arg parsing) ──
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+usage() {
+  cat <<'EOF'
+Usage: cloudflare-service-lifecycle-publish [OPTIONS]
+
+Lifecycle transaction integration for cloudflare.service.publish.
+Reads the service onboarding contract and publishes all active public
+services via their declared cloudflare_hostnames.
+
+Modes:
+  --audit            (default) Check which public services need publication
+  --execute          Execute cloudflare.service.publish for each hostname
+  --service-id ID    Limit to a single service ID
+  --phase PHASE      Lifecycle phase context: bind | transition | deploy (default: deploy)
+  --dry-run          Preview actions without executing publish calls
+  --json             Emit JSON output
+  -h, --help         Show this help
+
+Examples:
+  cloudflare-service-lifecycle-publish --audit
+  cloudflare-service-lifecycle-publish --execute --service-id immich
+  cloudflare-service-lifecycle-publish --execute --phase deploy --dry-run
+EOF
+  exit 0
+}
+
+MODE="audit"
+SERVICE_ID=""
+PHASE="deploy"
+DRY_RUN=0
+JSON_OUT=0
+
+while (( $# > 0 )); do
+  case "$1" in
+    --audit)    MODE="audit"; shift ;;
+    --execute)  MODE="execute"; shift ;;
+    --service-id) SERVICE_ID="${2:-}"; shift 2 ;;
+    --phase)    PHASE="${2:-}"; shift 2 ;;
+    --dry-run)  DRY_RUN=1; shift ;;
+    --json)     JSON_OUT=1; shift ;;
+    -h|--help)  usage ;;
+    --)         shift ;;
+    *)          echo "STOP: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+# Validate phase
+case "$PHASE" in
+  bind|transition|deploy) ;;
+  *) echo "STOP: --phase must be bind, transition, or deploy (got: $PHASE)" >&2; exit 1 ;;
+esac
+
+# Validate inputs
+for f in "$SERVICE_CONTRACT" "$BINDING_DEFAULTS" "$PUBLISH_SCRIPT" "$CF_INVENTORY"; do
+  [[ -f "$f" ]] || { echo "STOP: missing required file: $f" >&2; exit 2; }
+done
+command -v python3 >/dev/null 2>&1 || { echo "STOP: python3 required" >&2; exit 2; }
+
+# ── Extract public services and their hostnames from service contract ──
+services_json="$(python3 - "$SERVICE_CONTRACT" "$SERVICE_ID" <<'PY'
+import json, sys, yaml
+
+contract_path, target_service_id = sys.argv[1], sys.argv[2]
+
+with open(contract_path, "r", encoding="utf-8") as f:
+    contract = yaml.safe_load(f) or {}
+
+exposure_contract = contract.get("exposure_contract") or {}
+publish_cap = str(exposure_contract.get("publish_via_capability", "")).strip()
+
+results = []
+for svc in contract.get("services") or []:
+    if not isinstance(svc, dict):
+        continue
+    svc_id = str(svc.get("id", "")).strip()
+    svc_status = str(svc.get("status", "")).strip()
+
+    # Skip non-active services
+    if svc_status not in ("active",):
+        continue
+
+    # Filter to specific service if requested
+    if target_service_id and svc_id != target_service_id:
+        continue
+
+    intent = str(svc.get("exposure_intent", "private")).strip().lower()
+    if intent != "public":
+        continue
+
+    hostnames = svc.get("cloudflare_hostnames") or []
+    if not isinstance(hostnames, list) or len(hostnames) == 0:
+        continue
+
+    zone = str(svc.get("cloudflare_zone", "")).strip()
+    svc_publish_cap = str(svc.get("publish_via_capability", "")).strip()
+
+    results.append({
+        "service_id": svc_id,
+        "status": svc_status,
+        "exposure_intent": intent,
+        "cloudflare_zone": zone,
+        "cloudflare_hostnames": [str(h).strip() for h in hostnames if str(h).strip()],
+        "publish_via_capability": svc_publish_cap or publish_cap,
+        "contract_compliant": bool(svc_publish_cap == "cloudflare.service.publish"),
+    })
+
+print(json.dumps(results))
+PY
+)"
+
+service_count="$(echo "$services_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")"
+
+if [[ "$service_count" -eq 0 ]]; then
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 -c "
+import json
+print(json.dumps({
+    'capability': 'cloudflare.service.lifecycle.publish',
+    'mode': '$MODE',
+    'phase': '$PHASE',
+    'status': 'ok',
+    'service_count': 0,
+    'detail': 'no public services found' + (' matching service_id=$SERVICE_ID' if '$SERVICE_ID' else ''),
+}, indent=2))
+"
+  else
+    echo "cloudflare.service.lifecycle.publish"
+    echo "mode: $MODE"
+    echo "phase: $PHASE"
+    echo "status: ok"
+    echo "service_count: 0"
+    echo "detail: no public services found${SERVICE_ID:+ matching service_id=$SERVICE_ID}"
+  fi
+  exit 0
+fi
+
+# ── Audit mode: report state without executing ──
+if [[ "$MODE" == "audit" ]]; then
+  python3 - "$services_json" "$PHASE" "$JSON_OUT" <<'PY'
+import json, sys
+
+services = json.loads(sys.argv[1])
+phase = sys.argv[2]
+json_out = sys.argv[3] == "1"
+
+total_hostnames = sum(len(s["cloudflare_hostnames"]) for s in services)
+non_compliant = [s for s in services if not s["contract_compliant"]]
+
+if json_out:
+    print(json.dumps({
+        "capability": "cloudflare.service.lifecycle.publish",
+        "mode": "audit",
+        "phase": phase,
+        "status": "warn" if non_compliant else "ok",
+        "service_count": len(services),
+        "total_hostnames": total_hostnames,
+        "non_compliant_count": len(non_compliant),
+        "services": services,
+    }, indent=2))
+else:
+    print("cloudflare.service.lifecycle.publish")
+    print(f"mode: audit")
+    print(f"phase: {phase}")
+    print(f"service_count: {len(services)}")
+    print(f"total_hostnames: {total_hostnames}")
+    print(f"non_compliant_count: {len(non_compliant)}")
+    print()
+    for svc in services:
+        compliant_tag = "OK" if svc["contract_compliant"] else "MISSING_PUBLISH_CAP"
+        print(f"  [{compliant_tag}] {svc['service_id']}: {', '.join(svc['cloudflare_hostnames'])} (zone={svc['cloudflare_zone']})")
+    print()
+    if non_compliant:
+        print(f"status: WARN ({len(non_compliant)} service(s) missing publish_via_capability: cloudflare.service.publish)")
+    else:
+        print(f"status: OK (all {len(services)} public services declare publish_via_capability)")
+
+raise SystemExit(1 if non_compliant else 0)
+PY
+  exit $?
+fi
+
+# ── Execute mode: invoke cloudflare.service.publish for each hostname ──
+results=()
+overall_status="ok"
+hostname_total=0
+hostname_pass=0
+hostname_fail=0
+
+while IFS=$'\t' read -r svc_id zone hostname service_url; do
+  [[ -n "$hostname" ]] || continue
+  hostname_total=$((hostname_total + 1))
+
+  # Build publish command
+  publish_args=(
+    --hostname "$hostname"
+    --service-name "$svc_id"
+    --zone "$zone"
+    --json
+  )
+
+  if [[ -n "${service_url:-}" && "$service_url" != "null" && "$service_url" != "" ]]; then
+    publish_args+=(--service-url "$service_url")
+  else
+    # If no service_url in contract, use allow-unregistered with a placeholder
+    # This will be resolved by the tunnel ingress already configured
+    publish_args+=(--allow-unregistered)
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    publish_args+=(--dry-run)
+  fi
+
+  if [[ "$JSON_OUT" -eq 0 ]]; then
+    echo "[$PHASE] Publishing: $hostname (service=$svc_id, zone=$zone)"
+  fi
+
+  # Execute publish
+  publish_out=""
+  publish_rc=0
+  publish_out="$("$PUBLISH_SCRIPT" "${publish_args[@]}" 2>&1)" || publish_rc=$?
+
+  if [[ "$publish_rc" -eq 0 ]]; then
+    hostname_pass=$((hostname_pass + 1))
+    results+=("{\"hostname\":\"$hostname\",\"service_id\":\"$svc_id\",\"status\":\"ok\",\"exit_code\":$publish_rc}")
+    if [[ "$JSON_OUT" -eq 0 ]]; then
+      echo "  result: OK"
+    fi
+  else
+    hostname_fail=$((hostname_fail + 1))
+    overall_status="fail"
+    results+=("{\"hostname\":\"$hostname\",\"service_id\":\"$svc_id\",\"status\":\"fail\",\"exit_code\":$publish_rc}")
+    if [[ "$JSON_OUT" -eq 0 ]]; then
+      echo "  result: FAIL (exit=$publish_rc)"
+      echo "  output: $publish_out"
+    fi
+  fi
+done < <(echo "$services_json" | python3 -c "
+import json, sys
+services = json.load(sys.stdin)
+for svc in services:
+    for h in svc['cloudflare_hostnames']:
+        print(f\"{svc['service_id']}\t{svc['cloudflare_zone']}\t{h}\tnull\")
+")
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  results_json="[$(IFS=,; echo "${results[*]:-}")]"
+  python3 - "$overall_status" "$PHASE" "$hostname_total" "$hostname_pass" "$hostname_fail" "$DRY_RUN" "$service_count" "$results_json" <<'PY'
+import json, sys
+status, phase, total, passed, failed, dry_run, svc_count, results_raw = sys.argv[1:9]
+results = json.loads(results_raw)
+print(json.dumps({
+    "capability": "cloudflare.service.lifecycle.publish",
+    "mode": "execute",
+    "phase": phase,
+    "dry_run": dry_run == "1",
+    "status": status,
+    "service_count": int(svc_count),
+    "hostname_total": int(total),
+    "hostname_pass": int(passed),
+    "hostname_fail": int(failed),
+    "results": results,
+}, indent=2))
+PY
+else
+  echo
+  echo "cloudflare.service.lifecycle.publish"
+  echo "mode: execute"
+  echo "phase: $PHASE"
+  echo "dry_run: $([[ "$DRY_RUN" -eq 1 ]] && echo true || echo false)"
+  echo "service_count: $service_count"
+  echo "hostname_total: $hostname_total"
+  echo "hostname_pass: $hostname_pass"
+  echo "hostname_fail: $hostname_fail"
+  echo "status: $overall_status"
+fi
+
+if [[ "$overall_status" != "ok" ]]; then
+  exit 4
+fi
