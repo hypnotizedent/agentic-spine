@@ -299,7 +299,7 @@ def load_receipt_index(events: dict):
             "subject_type": "receipt",
             "subject_id": run_id,
             "status": status,
-            "loop_id": first_loop_id(run_id),
+            "loop_id": str(row.get("loop_id") or first_loop_id(run_id)),
             "capability": capability,
             "source_path": str(row.get("receipt_path") or ""),
             "summary": f"{capability} -> {status}" if capability else f"receipt status {status}",
@@ -315,13 +315,14 @@ def load_receipts_scan(events: dict, since_dt: datetime):
     for d in sorted(root.glob("RCAP-*")):
         if not d.is_dir():
             continue
-        receipt = d / "receipt.md"
-        if not receipt.exists():
+        exec_receipt = d / "receipt.exec.json"
+        receipt_md = d / "receipt.md"
+        if not exec_receipt.exists() and not receipt_md.exists():
             continue
+        timestamp_source = exec_receipt if exec_receipt.exists() else receipt_md
         try:
-            if datetime.fromtimestamp(receipt.stat().st_mtime, tz=timezone.utc) < since_dt - timedelta(hours=1):
+            if datetime.fromtimestamp(timestamp_source.stat().st_mtime, tz=timezone.utc) < since_dt - timedelta(hours=1):
                 continue
-            text = receipt.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
 
@@ -329,16 +330,43 @@ def load_receipts_scan(events: dict, since_dt: datetime):
         capability = ""
         status = "unknown"
         generated = ""
+        loop_id = ""
+        source_path = str(timestamp_source)
 
-        for line in text.splitlines():
-            if line.startswith("| Run ID |"):
-                run_id = line.split("|")[2].strip().strip("`")
-            elif line.startswith("| Capability |"):
-                capability = line.split("|")[2].strip().strip("`")
-            elif line.startswith("| Status |"):
-                status = line.split("|")[2].strip().strip("`")
-            elif line.startswith("| Generated |"):
-                generated = line.split("|")[2].strip().strip("`")
+        if exec_receipt.exists():
+            try:
+                payload = json.loads(exec_receipt.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                run_keys = payload.get("run_keys") or []
+                if isinstance(run_keys, list):
+                    for item in run_keys:
+                        item_text = str(item).strip()
+                        if item_text:
+                            run_id = item_text
+                            break
+                capability = str(payload.get("task_id") or "").strip()
+                status = str(payload.get("status") or "unknown").strip() or "unknown"
+                generated = str(payload.get("timestamp_utc") or "").strip()
+                loop_id = str(payload.get("loop_id") or "").strip()
+                source_path = str(exec_receipt)
+
+        if not run_id and receipt_md.exists():
+            try:
+                text = receipt_md.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                text = ""
+            for line in text.splitlines():
+                if line.startswith("| Run ID |"):
+                    run_id = line.split("|")[2].strip().strip("`")
+                elif line.startswith("| Capability |") and not capability:
+                    capability = line.split("|")[2].strip().strip("`")
+                elif line.startswith("| Status |") and (not status or status == "unknown"):
+                    status = line.split("|")[2].strip().strip("`")
+                elif line.startswith("| Generated |") and not generated:
+                    generated = line.split("|")[2].strip().strip("`")
+            source_path = str(receipt_md)
 
         if not run_id:
             continue
@@ -351,9 +379,9 @@ def load_receipts_scan(events: dict, since_dt: datetime):
             "subject_type": "receipt",
             "subject_id": run_id,
             "status": status,
-            "loop_id": first_loop_id(run_id),
+            "loop_id": loop_id or first_loop_id(run_id),
             "capability": capability,
-            "source_path": str(receipt),
+            "source_path": source_path,
             "summary": f"{capability} -> {status}" if capability else f"receipt status {status}",
             "severity": "low" if status.lower() == "done" else "high",
         })

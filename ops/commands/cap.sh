@@ -852,10 +852,59 @@ PY
 _Receipt written by ops cap_
 EOF
 
-    # Copy output to receipt dir, then clean temp
+    # Copy output to receipt dir, then clean temp.
     cp "$output_file" "$receipt_dir/output.txt"
     rm -f "$output_file"
     _cap_tmp=""
+
+    # Emit schema-compatible JSON sidecar for first-class evidence consumers.
+    # Keep markdown receipt as legacy-compatible canonical surface.
+    local exec_receipt_status="failed"
+    local exec_receipt_blockers=""
+    local exec_receipt_ready="false"
+    local exec_receipt_blocker_class="deterministic"
+    if [[ -n "$blocked_reason" ]]; then
+      exec_receipt_status="blocked"
+      exec_receipt_blockers="$blocked_reason"
+      exec_receipt_blocker_class="policy"
+    elif [[ "$exit_code" -eq 0 ]]; then
+      exec_receipt_status="done"
+      exec_receipt_ready="true"
+      exec_receipt_blocker_class="none"
+    elif [[ "$precond_failed" -eq 1 ]]; then
+      exec_receipt_status="blocked"
+      exec_receipt_blockers="precondition:${precond_name}"
+      exec_receipt_blocker_class="dependency"
+    fi
+
+    local terminal_id lane_id
+    terminal_id="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_NAME:-${SPINE_TERMINAL_ID:-unknown-terminal}}}"
+    lane_id="${SPINE_LANE:-execution}"
+    case "$lane_id" in
+      control|execution|audit|watcher) ;;
+      *) lane_id="execution" ;;
+    esac
+
+    if [[ -x "$SPINE_CODE/ops/plugins/evidence/bin/receipts-exec-emit" ]]; then
+      "$SPINE_CODE/ops/plugins/evidence/bin/receipts-exec-emit" \
+        --task-id "$name" \
+        --terminal-id "$terminal_id" \
+        --lane "$lane_id" \
+        --status "$exec_receipt_status" \
+        --files-changed "$receipt_dir/receipt.md,$receipt_dir/output.txt" \
+        --run-keys "$run_key" \
+        --ready-for-verify "$exec_receipt_ready" \
+        --timestamp-utc "$end_time" \
+        --wave-id "${SPINE_WAVE_ID:-}" \
+        --loop-id "${SPINE_LOOP_ID:-}" \
+        --evidence-files "$receipt_dir/receipt.md,$receipt_dir/output.txt" \
+        --blockers "$exec_receipt_blockers" \
+        --blocker-class "$exec_receipt_blocker_class" \
+        --json-out "$receipt_dir/receipt.exec.json" \
+        >/dev/null 2>&1 || echo "WARN: receipt.exec sidecar emit failed for $run_key"
+    else
+      echo "WARN: receipts-exec-emit missing; skipping JSON sidecar for $run_key"
+    fi
 
     # ── Append ledger entry (CSV) ──
     ensure_state_dir

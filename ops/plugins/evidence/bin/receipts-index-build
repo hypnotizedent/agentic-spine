@@ -99,6 +99,11 @@ def parse_iso(text: str):
         return None
 
 
+def first_loop_id(text: str):
+    m = re.search(r"(LOOP-[A-Z0-9-]+-\d{8})", text or "")
+    return m.group(1) if m else ""
+
+
 def run_yq_json(path: Path):
     try:
         out = subprocess.check_output(["yq", "-o=json", ".", str(path)], text=True)
@@ -111,6 +116,53 @@ def extract_field(md: str, field: str):
     pattern = rf"\|\s*{re.escape(field)}\s*\|\s*`?([^`|]+)`?\s*\|"
     m = re.search(pattern, md)
     return m.group(1).strip() if m else ""
+
+
+def parse_markdown_receipt(receipt_path: Path):
+    if not receipt_path.exists():
+        return None
+    try:
+        content = receipt_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    return {
+        "run_id": extract_field(content, "Run ID"),
+        "capability": extract_field(content, "Capability"),
+        "status": extract_field(content, "Status"),
+        "exit_code_raw": extract_field(content, "Exit Code"),
+        "generated": extract_field(content, "Generated"),
+        "source_path": str(receipt_path),
+    }
+
+
+def parse_exec_receipt(json_path: Path):
+    if not json_path.exists():
+        return None
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    run_keys = data.get("run_keys") or []
+    run_id = ""
+    if isinstance(run_keys, list):
+        for key in run_keys:
+            key_text = str(key).strip()
+            if key_text:
+                run_id = key_text
+                break
+
+    return {
+        "run_id": run_id,
+        "capability": str(data.get("task_id") or "").strip(),
+        "status": str(data.get("status") or "").strip(),
+        "generated": str(data.get("timestamp_utc") or "").strip(),
+        "loop_id": str(data.get("loop_id") or "").strip(),
+        "source_path": str(json_path),
+    }
 
 
 def capability_meta():
@@ -176,20 +228,36 @@ if receipts_root.exists():
         if since_dt and mtime <= since_dt:
             continue
 
-        receipt = path / "receipt.md"
-        if not receipt.exists():
+        exec_receipt = parse_exec_receipt(path / "receipt.exec.json")
+        md_receipt = parse_markdown_receipt(path / "receipt.md")
+
+        if not exec_receipt and not md_receipt:
             continue
 
-        try:
-            content = receipt.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
+        run_id = ""
+        capability = ""
+        status = ""
+        generated = ""
+        exit_code_raw = ""
+        loop_id = ""
+        rel_receipt = ""
 
-        run_id = extract_field(content, "Run ID")
-        capability = extract_field(content, "Capability")
-        status = extract_field(content, "Status")
-        exit_code_raw = extract_field(content, "Exit Code")
-        generated = extract_field(content, "Generated")
+        if exec_receipt:
+            run_id = str(exec_receipt.get("run_id") or "")
+            capability = str(exec_receipt.get("capability") or "")
+            status = str(exec_receipt.get("status") or "")
+            generated = str(exec_receipt.get("generated") or "")
+            loop_id = str(exec_receipt.get("loop_id") or "")
+            rel_receipt = str(exec_receipt.get("source_path") or "")
+            if md_receipt:
+                exit_code_raw = str(md_receipt.get("exit_code_raw") or "")
+        elif md_receipt:
+            run_id = str(md_receipt.get("run_id") or "")
+            capability = str(md_receipt.get("capability") or "")
+            status = str(md_receipt.get("status") or "")
+            exit_code_raw = str(md_receipt.get("exit_code_raw") or "")
+            generated = str(md_receipt.get("generated") or "")
+            rel_receipt = str(md_receipt.get("source_path") or "")
 
         if not run_id:
             run_id = path.name.removeprefix("R")
@@ -207,9 +275,15 @@ if receipts_root.exists():
         try:
             exit_code = int(exit_code_raw)
         except Exception:
-            exit_code = -1
+            if status == "done":
+                exit_code = 0
+            elif status == "blocked":
+                exit_code = 2
+            else:
+                exit_code = -1
 
-        rel_receipt = str(receipt)
+        if not loop_id:
+            loop_id = first_loop_id(run_id)
         rel_output = str(path / "output.txt")
 
         entries[run_id] = {
@@ -219,6 +293,7 @@ if receipts_root.exists():
             "exit_code": exit_code,
             "domain": domain,
             "plane": plane,
+            "loop_id": loop_id,
             "generated_at_utc": generated,
             "receipt_path": rel_receipt,
             "output_path": rel_output,
