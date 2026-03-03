@@ -124,6 +124,10 @@ mail_archiver:
   provider_type_enum:
     description: "Valid ProviderType values for mail-archiver MailAccounts.ProviderType column."
     note: "Use exact enum string. 'MICROSOFT' is NOT valid; use 'M365'. Enum is checked by the .NET EF model."
+    critical_warning: "Using an invalid enum value (e.g. 'MICROSOFT' instead of 'M365') crashes the app with an enum parse error that breaks ALL account sync, not just the misconfigured account. Always validate against this list before writing to the DB."
+    gap_ref: "GAP-OP-1270"
+    regression_gate_status: pending
+    regression_gate_note: "Needs a dedicated drift gate to validate ProviderType values in the DB match this enum. Gate creation deferred to orchestrator."
     values:
       - IMAP
       - M365
@@ -132,6 +136,13 @@ mail_archiver:
       imap_generic: "IMAP"
       microsoft_365: "M365"
       gmail: "Gmail"
+    invalid_values_observed:
+      - value: "MICROSOFT"
+        result: "enum parse error, crashes ALL sync"
+      - value: "Google"
+        result: "enum parse error (case-sensitive)"
+      - value: "EWS"
+        result: "unknown — not tested, not in .NET EF model"
   recovery:
     ef_migration_lock:
       description: "Container restart can hang on EF migration lock if prior run was interrupted."

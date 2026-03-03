@@ -129,12 +129,15 @@ ssh_resolve_probe_via() {
 }
 
 # Build SSH command array for a target, with optional ProxyJump.
-# Usage: ssh_build_cmd "communications-stack" -> array of ssh args
-# Falls back through: direct LAN -> direct Tailscale -> ProxyJump via probe_via
-# NOTE: ProxyJump fallback is only attempted when probe_via is configured in
-# ssh.targets.yaml. For targets without probe_via, fallback stops at Tailscale.
-# GAP-OP-1268: Full ProxyJump fallback for all lan_first targets is planned but
-# requires ACL policy changes to allow Tailscale SSH in check mode.
+# Usage: ssh_build_cmd_with_fallback "communications-stack" -> prints ssh command string
+# Fallback chain: direct LAN -> direct Tailscale -> ProxyJump via probe_via target
+#
+# ProxyJump fallback is attempted when probe_via is configured in ssh.targets.yaml.
+# For targets without probe_via, fallback stops at Tailscale.
+# Targets that commonly need probe_via: communications-stack (via pve), lan_only devices.
+#
+# GAP-OP-1268: communications-stack now has probe_via: pve configured.
+# Remaining: blanket ProxyJump for all lan_first targets needs ACL policy changes.
 ssh_build_cmd_with_fallback() {
   local target_id="$1"
   local timeout="${2:-5}"
