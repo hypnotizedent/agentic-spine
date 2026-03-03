@@ -1,0 +1,69 @@
+# Tailscale Webhook Receiver Capability Stub
+# Status: planned (blocked on receiver deployment)
+# Gap: GAP-OP-1259
+# Contract: ops/bindings/tailscale.webhook.receiver.contract.yaml
+# Loop: LOOP-TAILSCALE-INTEGRATION-DEFERRED-ACTIONS-20260302
+
+capability_id: tailscale.webhook.receiver.status
+lifecycle: experimental
+created: "2026-03-03"
+owner: "@ronny"
+
+description: |
+  Health check and status report for the deployed Tailscale webhook
+  receiver endpoint. Reports whether the receiver is deployed, reachable,
+  and accepting webhook deliveries.
+
+  This capability is PLANNED and cannot be implemented until the webhook
+  receiver endpoint is deployed on automation-stack (VM 202).
+
+contract: "ops/bindings/tailscale.webhook.receiver.contract.yaml"
+authority: "docs/CANONICAL/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml"
+
+classification:
+  domain: infra
+  plane: fabric
+  tags: [tailscale, webhook, observability]
+  safety: read-only
+  approval: auto
+
+dependencies:
+  infrastructure:
+    - "automation-stack (VM 202) must be reachable"
+    - "n8n or dedicated receiver must be deployed"
+    - "Webhook subscription must be active (via tailscale.webhook.subscribe)"
+  capabilities:
+    - tailscale.webhook.subscribe
+    - tailscale.integration.status
+
+implementation:
+  script_path: "ops/plugins/tailscale/bin/tailscale-webhook-receiver-status"
+  status: planned
+  expected_outputs:
+    - receiver_deployed (true/false)
+    - receiver_reachable (true/false)
+    - endpoint_url
+    - last_event_received_at
+    - subscription_active (true/false)
+    - subscription_events (list)
+  health_probes:
+    - label: endpoint_health
+      method: "GET https://n8n.ronny.works/webhook/tailscale/health"
+      expected: 200
+    - label: subscription_exists
+      method: "GET /api/v2/tailnet/{tailnet}/webhooks (filter for endpoint URL)"
+      expected: "at least one matching subscription"
+
+activation_trigger: manual
+activation_prerequisites:
+  - "Deploy webhook receiver on VM 202"
+  - "Create webhook subscription via tailscale.webhook.subscribe"
+  - "Store webhook secret in Infisical"
+  - "Implement script at ops/plugins/tailscale/bin/tailscale-webhook-receiver-status"
+  - "Register capability in ops/capabilities.yaml with lifecycle: ready"
+
+related_gaps:
+  - id: GAP-OP-1259
+    title: "Tailscale webhook receiver not deployed"
+    status: open
+    severity: medium
