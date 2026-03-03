@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-FRICTION-ROLE-PRECOMMIT-EXECUTION-NORMALIZATION-20260303
 created: 2026-03-03
-status: active
+status: closed
 owner: "@ronny"
 scope: friction
 priority: medium
