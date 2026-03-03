@@ -550,9 +550,12 @@ run_cap() {
         orchestrator_loop_id="$role_policy_override_ref"
       fi
 
-      # Allow explicit bootstrap capabilities to create lock claims.
+      # Allow bootstrap, orchestration control-plane, and friction capabilities
+      # to bypass orchestrator mutation guard — they either create lock claims
+      # or are administrative operations that don't mutate domain state
+      # (GAP-OP-1484, GAP-OP-1492).
       case "$name" in
-        orchestration.terminal.entry|orchestration.wave.kickoff|loops.create|session.start|aof.contract.acknowledge|session.role.override) orchestrator_loop_id="" ;;
+        orchestration.terminal.entry|orchestration.wave.kickoff|orchestration.wave.start|orchestration.wave.dispatch|orchestration.wave.ack|orchestration.wave.close|loops.create|session.start|aof.contract.acknowledge|session.role.override|friction.ingest|friction.reconcile) orchestrator_loop_id="" ;;
       esac
 
       if [[ -n "$orchestrator_loop_id" ]]; then

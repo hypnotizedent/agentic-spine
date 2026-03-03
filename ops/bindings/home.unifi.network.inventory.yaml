@@ -37,3 +37,115 @@ wan:
   speed_up: TBD
   ip_type: TBD
   note: "Run speed test on-site"
+
+# ════════════════════════════════════════════════════════════════════════════
+# SWITCH PORT MAPPING ADDENDUM
+# ════════════════════════════════════════════════════════════════════════════
+# Added by: LOOP-NETSEC-W1-VLAN-SEGMENTATION-FIREWALL-20260303
+# Linked gap: GAP-OP-1108 (switches/network devices not normalized)
+# Authority: network.vlan.topology.contract.yaml (VLAN definitions)
+# ════════════════════════════════════════════════════════════════════════════
+
+switch_port_mapping:
+  description: >
+    Switch port-to-VLAN assignment plan for the home network.
+    The home site has a US-8-60W (8-port PoE switch). Port assignments
+    will be configured after VLANs are created in the UniFi controller.
+    Actual port numbers will be populated on-site.
+  lifecycle: experimental
+  switch_model: "US-8-60W"
+  total_ports: 8
+  poe_budget_watts: 60
+  uplink_port: 8
+
+  ports:
+    - port: 1
+      assignment: trunk
+      vlan: all
+      poe: false
+      connected_device: "UDR7 gateway uplink"
+      detail: "Trunk port carrying all VLANs between switch and router"
+
+    - port: 2
+      assignment: access
+      vlan: management
+      vlan_id: 1
+      poe: false
+      connected_device: "proxmox-home (Beelink SER7)"
+      detail: "Hypervisor on management VLAN"
+
+    - port: 3
+      assignment: access
+      vlan: management
+      vlan_id: 1
+      poe: false
+      connected_device: "Home Assistant (ODROID)"
+      detail: "HA on management VLAN (will move to servers VLAN if on VM)"
+
+    - port: 4
+      assignment: access
+      vlan: iot
+      vlan_id: 30
+      poe: true
+      connected_device: "SLZB-06 (Zigbee coordinator)"
+      poe_draw_watts: 2
+      detail: "Zigbee coordinator on IoT VLAN, PoE powered"
+
+    - port: 5
+      assignment: access
+      vlan: iot
+      vlan_id: 30
+      poe: true
+      connected_device: "SLZB-06MU (Matter/Thread border router)"
+      poe_draw_watts: 2
+      detail: "Matter border router on IoT VLAN, PoE powered"
+
+    - port: 6
+      assignment: access
+      vlan: iot
+      vlan_id: 30
+      poe: true
+      connected_device: "TubesZB (Z-Wave coordinator)"
+      poe_draw_watts: 2
+      detail: "Z-Wave coordinator on IoT VLAN, PoE powered"
+
+    - port: 7
+      assignment: access
+      vlan: management
+      vlan_id: 1
+      poe: false
+      connected_device: "NAS (Synology 918+)"
+      detail: "NAS on management VLAN for NFS/SMB access"
+
+    - port: 8
+      assignment: access
+      vlan: management
+      vlan_id: 1
+      poe: false
+      connected_device: "Vaultwarden (LXC)"
+      detail: "Password manager on management VLAN"
+
+  poe_summary:
+    total_poe_ports: 3
+    total_draw_watts: 6
+    remaining_budget_watts: 54
+    detail: "Only coordinators use PoE. Substantial budget headroom."
+
+  trunking_policy:
+    description: >
+      Port 1 is the trunk port connecting the switch to the UDR7.
+      It carries all 6 VLANs (tagged) plus the management VLAN (untagged/native).
+      All other ports are access ports assigned to a single VLAN.
+    native_vlan: management
+    tagged_vlans:
+      - servers
+      - trusted
+      - iot
+      - guest
+      - dmz
+
+  migration_detail: >
+    Port assignments above are the PLANNED state after VLAN deployment.
+    Current state: all ports on flat 10.0.0.0/24 (no VLANs). Migration
+    requires physical home site visit. See network.vlan.topology.contract.yaml
+    migration section for phased rollout plan.

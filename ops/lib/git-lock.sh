@@ -6,7 +6,8 @@
 #   type: proposals | orchestration | gaps | infra  (or any custom name)
 #   no argument: uses global git.lock (backward compat)
 #
-# TTL: locks older than GIT_LOCK_TTL seconds with a dead PID are auto-recovered.
+# TTL: locks older than GIT_LOCK_TTL seconds are only auto-recovered when owner
+# PID is missing/dead. Live owners are never reclaimed by TTL.
 #
 set -euo pipefail
 
@@ -44,14 +45,21 @@ acquire_git_lock() {
     age=$(( now_epoch - created_epoch ))
   fi
 
-  local stale=0
-  # PID dead → stale
-  if [[ -n "$old_pid" ]] && ! ps -p "$old_pid" >/dev/null 2>&1; then
-    stale=1
+  local owner_alive=0
+  if [[ -n "$old_pid" && "$old_pid" =~ ^[0-9]+$ ]] && ps -p "$old_pid" >/dev/null 2>&1; then
+    owner_alive=1
   fi
-  # TTL expired → stale (only when timestamp available)
-  if [[ -n "$created_epoch" && "$created_epoch" =~ ^[0-9]+$ ]] && (( age > GIT_LOCK_TTL )); then
-    stale=1
+
+  local stale=0
+  # Reclaim only when owner is not live:
+  # 1) pid is known and dead, OR
+  # 2) pid is missing and lock age exceeds TTL.
+  if (( owner_alive == 0 )); then
+    if [[ -n "$old_pid" ]]; then
+      stale=1
+    elif [[ -n "$created_epoch" && "$created_epoch" =~ ^[0-9]+$ ]] && (( age > GIT_LOCK_TTL )); then
+      stale=1
+    fi
   fi
 
   if (( stale == 1 )); then
@@ -65,7 +73,7 @@ acquire_git_lock() {
     fi
   fi
 
-  if [[ -n "$old_pid" ]] && ps -p "$old_pid" >/dev/null 2>&1; then
+  if (( owner_alive == 1 )); then
     echo "STOP: Another git-mutating ops command is running (lock: ${lock_name} pid=$old_pid age=${age}s)" >&2
     return 1
   fi

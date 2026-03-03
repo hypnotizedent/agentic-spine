@@ -144,26 +144,20 @@ apply_gap_update() {
   local fixed_in="$3"
   local notes="$4"
   local reg_lock="$5"
+  local updated_at="$6"
 
-  GAP_ID_ENV="$id" STATUS_ENV="$status" \
-    yq e -i '(.gaps[] | select(.id == strenv(GAP_ID_ENV))).status = strenv(STATUS_ENV)' "$GAPS_FILE" || {
-      fail "yq status update failed for $id"
+  GAP_ID_ENV="$id" STATUS_ENV="$status" FIXED_IN_ENV="$fixed_in" NOTES_ENV="$notes" LOCK_ENV="$reg_lock" UPDATED_ENV="$updated_at" \
+    yq e -i '
+      (.gaps[] | select(.id == strenv(GAP_ID_ENV))) |= (
+        .status = strenv(STATUS_ENV) |
+        (if strenv(FIXED_IN_ENV) != "" then .fixed_in = strenv(FIXED_IN_ENV) else . end) |
+        (if strenv(NOTES_ENV) != "" then .notes = strenv(NOTES_ENV) else . end) |
+        (if strenv(LOCK_ENV) != "" then .regression_lock_id = strenv(LOCK_ENV) else . end)
+      ) |
+      .updated = strenv(UPDATED_ENV)
+    ' "$GAPS_FILE" || {
+      fail "yq atomic update failed for $id"
     }
-
-  if [[ -n "$fixed_in" ]]; then
-    GAP_ID_ENV="$id" FIXED_IN_ENV="$fixed_in" \
-      yq e -i '(.gaps[] | select(.id == strenv(GAP_ID_ENV))).fixed_in = strenv(FIXED_IN_ENV)' "$GAPS_FILE"
-  fi
-
-  if [[ -n "$notes" ]]; then
-    GAP_ID_ENV="$id" NOTES_ENV="$notes" \
-      yq e -i '(.gaps[] | select(.id == strenv(GAP_ID_ENV))).notes = strenv(NOTES_ENV)' "$GAPS_FILE"
-  fi
-
-  if [[ -n "$reg_lock" ]]; then
-    GAP_ID_ENV="$id" LOCK_ENV="$reg_lock" \
-      yq e -i '(.gaps[] | select(.id == strenv(GAP_ID_ENV))).regression_lock_id = strenv(LOCK_ENV)' "$GAPS_FILE"
-  fi
 }
 
 parse_batch_file() {
@@ -287,13 +281,9 @@ EOF
 )"
 
   set +e
-  apply_gap_update "$id" "$status" "$fixed_in" "$notes" "$reg_lock"
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  apply_gap_update "$id" "$status" "$fixed_in" "$notes" "$reg_lock" "$timestamp"
   rc=$?
-  if [[ "$rc" -eq 0 ]]; then
-    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    yq e -i ".updated = \"$timestamp\"" "$GAPS_FILE"
-    rc=$?
-  fi
   if [[ "$rc" -eq 0 ]]; then
     git -C "$ROOT" add "$GAPS_FILE"
     rc=$?
@@ -368,17 +358,14 @@ close_batch() {
   backup_file="$(mktemp "${GAPS_FILE}.bak.XXXXXX")"
   cp "$GAPS_FILE" "$backup_file"
 
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  rc=0
   set +e
   for i in "${valid_indices[@]}"; do
-    apply_gap_update "${ids[$i]}" "${statuses[$i]}" "${fixed_ins[$i]}" "${notes[$i]}" "${reg_locks[$i]}"
+    apply_gap_update "${ids[$i]}" "${statuses[$i]}" "${fixed_ins[$i]}" "${notes[$i]}" "${reg_locks[$i]}" "$timestamp"
     rc=$?
     [[ "$rc" -eq 0 ]] || break
   done
-  if [[ "${rc:-0}" -eq 0 ]]; then
-    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    yq e -i ".updated = \"$timestamp\"" "$GAPS_FILE"
-    rc=$?
-  fi
 
   local -a closed_ids=()
   for i in "${valid_indices[@]}"; do

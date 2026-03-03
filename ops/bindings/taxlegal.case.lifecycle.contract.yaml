@@ -1,0 +1,200 @@
+# Tax-Legal Case Lifecycle Contract
+# Status: planned (Wave 1 design-only)
+# Gap: GAP-OP-1426
+# Loop: LOOP-TAXLEGAL-W1-BINDINGS-CONTRACT-PACK-20260303
+# Plan: PLAN-TAX-LEGAL-OPS-WORKER-20260303
+
+contract_id: TAXLEGAL_CASE_LIFECYCLE_V1
+version: "1.0"
+lifecycle: experimental
+created: "2026-03-03"
+owner: "@ronny"
+scope: taxlegal-case-lifecycle
+
+description: >
+  Defines the case lifecycle states, transition requirements, and required
+  artifacts for tax-legal compliance operations. Each case moves through
+  a deterministic sequence of states with explicit entry conditions and
+  required evidence at each transition.
+
+authority_references:
+  agent_contract: ops/agents/tax-legal-agent.contract.md
+  boundary_contract: docs/governance/TAX_LEGAL_AGENT_BOUNDARY.md
+  citation_contract: ops/bindings/taxlegal.citation.contract.yaml
+  privacy_contract: ops/bindings/taxlegal.privacy.contract.yaml
+  deadline_contract: ops/bindings/taxlegal.deadline.contract.yaml
+
+# ────────────────────────────────────────────────────────────────────────────
+# CASE PATHING
+# ────────────────────────────────────────────────────────────────────────────
+case_pathing:
+  root: mailroom/state/cases/tax-legal
+  case_id_pattern: "CASE-TAXLEGAL-YYYYMMDD-####"
+  required_directories:
+    - sources/
+    - research/
+    - drafts/
+    - risk/
+  required_files:
+    - intake.md
+    - checklist.yaml
+    - source-registry.lock.yaml
+    - receipt.md
+
+# ────────────────────────────────────────────────────────────────────────────
+# CASE TYPES
+# ────────────────────────────────────────────────────────────────────────────
+case_types:
+  - id: formation
+    description: "LLC/entity formation and initial compliance setup"
+    jurisdiction_required: true
+  - id: address_amendment
+    description: "Address changes, registered agent updates, and amendment sequencing"
+    jurisdiction_required: true
+  - id: local_compliance
+    description: "Home occupation permits, city/county BTR flows, zoning compatibility"
+    jurisdiction_required: true
+  - id: enforcement_remediation
+    description: "Code enforcement or zoning notice response and corrective action"
+    jurisdiction_required: true
+    escalation_contract: ops/bindings/taxlegal.enforcement.response.contract.yaml
+  - id: ongoing_compliance
+    description: "Annual reports, recurring filings, and deadline cadence management"
+    jurisdiction_required: true
+  - id: closure
+    description: "Entity dissolution, account/license/tax closeout"
+    jurisdiction_required: true
+
+# ────────────────────────────────────────────────────────────────────────────
+# LIFECYCLE STATES
+# ────────────────────────────────────────────────────────────────────────────
+states:
+  - id: intake
+    description: "Case created, intake checklist generated, initial triage complete"
+    entry_conditions:
+      - case_type assigned
+      - jurisdiction_profile resolved
+    required_artifacts:
+      - intake.md
+      - checklist.yaml
+    next_states:
+      - sources_pending
+
+  - id: sources_pending
+    description: "Primary sources identified, sync/download in progress"
+    entry_conditions:
+      - intake checklist complete
+      - source_ids listed in checklist
+    required_artifacts:
+      - source-registry.lock.yaml (partial)
+    next_states:
+      - research_in_progress
+      - blocked
+
+  - id: research_in_progress
+    description: "Citation-strict research against versioned primary sources"
+    entry_conditions:
+      - all required sources synced and hashed
+      - source-registry.lock.yaml complete
+    required_artifacts:
+      - research/answers.md (in progress)
+      - research/citations.json (in progress)
+    next_states:
+      - draft_packet_ready
+      - blocked
+
+  - id: draft_packet_ready
+    description: "Filing packet draft assembled with all required evidence"
+    entry_conditions:
+      - research complete with all claims cited or marked unknown
+      - no unresolved `conflicted` claims without escalation
+    required_artifacts:
+      - drafts/filing-packet.md
+      - risk/risk-classification.yaml
+    next_states:
+      - human_review_required
+
+  - id: human_review_required
+    description: "Case requires attorney/CPA review before external action"
+    entry_conditions:
+      - draft packet complete
+      - risk classification assigned
+    required_artifacts:
+      - drafts/attorney-cpa-memo.md
+    next_states:
+      - ready_for_external_filing
+      - blocked
+
+  - id: ready_for_external_filing
+    description: "Human review complete, packet approved for external submission"
+    entry_conditions:
+      - attorney/CPA review sign-off recorded
+      - all open questions resolved or accepted
+      - privacy scan passed
+    required_artifacts:
+      - receipt.md (review evidence)
+    next_states:
+      - closed
+
+  - id: closed
+    description: "Case complete, all evidence archived per retention contract"
+    entry_conditions:
+      - external action completed or explicitly waived
+      - retention policy applied
+    required_artifacts:
+      - receipt.md (final)
+    next_states: []
+
+  - id: blocked
+    description: "Case progression halted due to missing info, conflict, or incident"
+    entry_conditions:
+      - blocker reason documented
+    required_artifacts:
+      - blocker reason in case metadata
+    next_states:
+      - sources_pending
+      - research_in_progress
+      - human_review_required
+
+# ────────────────────────────────────────────────────────────────────────────
+# TRANSITION RULES
+# ────────────────────────────────────────────────────────────────────────────
+transition_rules:
+  - rule: no_skip_states
+    description: "Cases must not skip lifecycle states. Every state must be entered and exited with evidence."
+    enforcement: planned_gate
+
+  - rule: blocked_requires_reason
+    description: "Transition to blocked state requires documented blocker reason."
+    enforcement: planned_gate
+
+  - rule: human_review_required_is_mandatory
+    description: "All cases must pass through human_review_required before ready_for_external_filing."
+    enforcement: planned_gate
+
+  - rule: privacy_scan_before_filing
+    description: "taxlegal.privacy.scan must pass before transition to ready_for_external_filing."
+    enforcement: planned_gate
+
+  - rule: citation_completeness
+    description: "All substantive claims must have citations or explicit unknown markers before draft_packet_ready."
+    enforcement: planned_gate
+
+# ────────────────────────────────────────────────────────────────────────────
+# OUTBOX ROUTING
+# ────────────────────────────────────────────────────────────────────────────
+outbox_routing:
+  finance_deadlines: mailroom/outbox/finance/tax-legal/
+  audit_reports: mailroom/outbox/reports/tax-legal/
+  communications_drafts: mailroom/outbox/communications/
+  detail: "Communications drafts are preview-only in v1 (no direct send)."
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED GATES
+# ────────────────────────────────────────────────────────────────────────────
+planned_gates:
+  - id: D336
+    name: taxlegal-case-lifecycle-lock
+    purpose: "Enforce required artifacts for each case state transition"
+    mode: report
+    promote_after_clean_runs: 3

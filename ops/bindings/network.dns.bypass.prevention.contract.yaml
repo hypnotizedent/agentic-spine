@@ -1,0 +1,199 @@
+# ===============================================================================
+# DNS Bypass Prevention Contract
+# ===============================================================================
+# Standalone contract for DNS bypass prevention firewall rules.
+# Prevents any LAN device from using external DNS servers (bypassing Pi-hole).
+# The authoritative rule details are also embedded in
+# network.dns.authority.contract.yaml; this file provides dedicated
+# gap traceability for GAP-OP-1452.
+#
+# Source plan: PLAN-NETWORK-SECURITY-OPS-WORKER-20260303
+# Parent loop: LOOP-NETSEC-W1-DNS-AUTHORITY-STACK-20260303
+# Linked gap: GAP-OP-1452 (DNS bypass prevention)
+# ===============================================================================
+
+contract_id: NETWORK_DNS_BYPASS_PREVENTION_V1
+version: "1.0"
+lifecycle: experimental
+created: "2026-03-03"
+owner: "@ronny"
+
+description: >
+  Firewall rules that prevent any device on any VLAN from sending DNS
+  queries to any destination other than the local Pi-hole instance.
+  This closes the hardcoded-DNS bypass vector where IoT devices
+  (Chromecast, smart TVs, etc.) ignore DHCP-assigned DNS and use
+  8.8.8.8 or other public resolvers directly.
+
+# ────────────────────────────────────────────────────────────────────────────
+# THREAT MODEL
+# ────────────────────────────────────────────────────────────────────────────
+threat_model:
+  attack_vector: "Device hardcodes external DNS server, bypassing Pi-hole filtering"
+  affected_devices:
+    - "Google Chromecast (hardcodes 8.8.8.8)"
+    - "Amazon Echo (hardcodes 205.251.x.x)"
+    - "Smart TVs (various hardcoded DNS)"
+    - "Any IoT device with non-configurable DNS"
+  impact: >
+    Pi-hole ad/tracker blocking and DNS logging are bypassed entirely.
+    Attacker C2 domains are not filtered. DNS query patterns leak to
+    public upstream providers.
+  protocols_blocked:
+    - protocol: DNS
+      port: 53
+      transport: "UDP and TCP"
+      detail: "Standard plaintext DNS"
+    - protocol: DoT
+      port: 853
+      transport: TCP
+      detail: "DNS-over-TLS encrypted bypass"
+  protocols_not_blocked:
+    - protocol: DoH
+      port: 443
+      transport: TCP
+      detail: >
+        DNS-over-HTTPS cannot be blocked at the port level without
+        breaking all HTTPS traffic. Mitigation: Pi-hole blocklist
+        includes known DoH provider hostnames (dns.google, doh.opendns.com).
+
+# ────────────────────────────────────────────────────────────────────────────
+# FIREWALL RULES
+# ────────────────────────────────────────────────────────────────────────────
+rules:
+  home:
+    pihole_ip: "10.0.0.53"
+    network_cidr: "10.0.0.0/24"
+    entries:
+      - name: "Allow DNS to Pi-hole (home)"
+        type: LAN_IN
+        action: ALLOW
+        protocol: "UDP/TCP"
+        destination_port: 53
+        destination: "10.0.0.53"
+        source: "10.0.0.0/24"
+        priority: 1500
+        description: "Explicitly allow DNS to Pi-hole before block rule"
+
+      - name: "Block DNS bypass (home)"
+        type: LAN_OUT
+        action: DROP
+        protocol: "UDP/TCP"
+        destination_port: 53
+        destination: "!10.0.0.53"
+        source: "10.0.0.0/24"
+        priority: 1510
+        description: "Drop all DNS to anything except Pi-hole"
+
+      - name: "Block DoT bypass (home)"
+        type: LAN_OUT
+        action: DROP
+        protocol: TCP
+        destination_port: 853
+        source: "10.0.0.0/24"
+        priority: 1520
+        description: "Drop DNS-over-TLS to prevent encrypted bypass"
+
+  shop:
+    pihole_ip: "192.168.1.204"
+    network_cidr: "192.168.1.0/24"
+    entries:
+      - name: "Allow DNS to Pi-hole (shop)"
+        type: LAN_IN
+        action: ALLOW
+        protocol: "UDP/TCP"
+        destination_port: 53
+        destination: "192.168.1.204"
+        source: "192.168.1.0/24"
+        priority: 1500
+        description: "Explicitly allow DNS to Pi-hole before block rule"
+
+      - name: "Block DNS bypass (shop)"
+        type: LAN_OUT
+        action: DROP
+        protocol: "UDP/TCP"
+        destination_port: 53
+        destination: "!192.168.1.204"
+        source: "192.168.1.0/24"
+        priority: 1510
+        description: "Drop all DNS to anything except Pi-hole"
+
+      - name: "Block DoT bypass (shop)"
+        type: LAN_OUT
+        action: DROP
+        protocol: TCP
+        destination_port: 853
+        source: "192.168.1.0/24"
+        priority: 1520
+        description: "Drop DNS-over-TLS to prevent encrypted bypass"
+
+# ────────────────────────────────────────────────────────────────────────────
+# POST-VLAN RULES
+# ────────────────────────────────────────────────────────────────────────────
+post_vlan_rules:
+  description: >
+    After VLAN segmentation, each VLAN needs its own DNS bypass rules.
+    The Pi-hole IP per VLAN is defined in network.vlan.topology.contract.yaml.
+    These rules replace the flat-network rules above.
+  detail: >
+    The VLAN firewall baseline (network.vlan.firewall.baseline.yaml)
+    already includes DNS allow rules for IoT→Management and
+    Server→Management. The bypass prevention rules below supplement
+    those by blocking DNS to any non-Pi-hole destination.
+  per_vlan:
+    - vlan: management
+      pihole_ip: "10.0.1.53 (home) / 192.168.1.204 (shop)"
+    - vlan: servers
+      pihole_ip: "10.0.1.53 (home) / 192.168.1.204 (shop)"
+    - vlan: trusted
+      pihole_ip: "10.0.1.53 (home) / 192.168.1.204 (shop)"
+    - vlan: iot
+      pihole_ip: "10.0.1.53 (home) / 192.168.1.204 (shop)"
+    - vlan: guest
+      pihole_ip: "10.0.1.53 (home) / 192.168.1.204 (shop)"
+    - vlan: dmz
+      pihole_ip: "10.0.1.53 (home) / 192.168.1.204 (shop)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# VERIFICATION
+# ────────────────────────────────────────────────────────────────────────────
+verification:
+  tests:
+    - name: "DNS bypass blocked"
+      method: "dig @8.8.8.8 example.com from LAN client"
+      expected: "timeout (query dropped by firewall)"
+
+    - name: "Pi-hole DNS works"
+      method: "dig @10.0.0.53 example.com from LAN client"
+      expected: "NOERROR response"
+
+    - name: "DoT bypass blocked"
+      method: "kdig +tls @1.1.1.1 example.com from LAN client"
+      expected: "timeout (connection dropped)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# AUTHORITY REFERENCES
+# ────────────────────────────────────────────────────────────────────────────
+authority_references:
+  - contract: NETWORK_DNS_AUTHORITY_V1
+    file: ops/bindings/network.dns.authority.contract.yaml
+    relationship: "Bypass prevention rules also embedded in DNS authority contract"
+  - contract: NETWORK_VLAN_FIREWALL_BASELINE_V1
+    file: ops/bindings/network.vlan.firewall.baseline.yaml
+    relationship: "DNS allow rules in inter-VLAN baseline complement bypass prevention"
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED CAPABILITIES
+# ────────────────────────────────────────────────────────────────────────────
+planned_capabilities:
+  - name: network.dns.bypass.test
+    description: "Verify DNS bypass prevention firewall rule is active"
+    safety: read-only
+    approval: auto
+    lifecycle: experimental
+
+  - name: network.dns.bypass.apply
+    description: "Apply DNS bypass prevention rules to UniFi"
+    safety: mutating
+    approval: manual
+    lifecycle: experimental

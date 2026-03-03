@@ -10,7 +10,7 @@ orchestration-wave-kickoff - Bootstrap orchestrator_subagents loop execution
 Usage:
   orchestration-wave-kickoff \
     --loop-id <LOOP_ID> \
-    [--lanes <A,B,C>] \
+    --lanes <A,B,C> \
     [--repo <path>] \
     [--owner-terminal <terminal-id>] \
     [--base-branch <branch>] \
@@ -28,7 +28,7 @@ USAGE
 
 ROOT="$(orchestration_root)"
 LOOP_ID=""
-LANES_CSV="A,B,C"
+LANES_CSV=""
 REPO_PATH="$ROOT"
 OWNER_TERMINAL="${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}"
 BASE_BRANCH="main"
@@ -50,6 +50,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$LOOP_ID" ]] || orchestration_fail "--loop-id is required"
+[[ -n "$LANES_CSV" ]] || orchestration_fail "--lanes is required (e.g. --lanes A,B or --lanes CHAIN,HA)"
 orchestration_assert_id "$LOOP_ID" "loop id"
 [[ "$LOOP_ID" =~ ^LOOP- ]] || orchestration_fail "loop id must start with LOOP-"
 
@@ -295,6 +296,33 @@ while IFS= read -r required_field; do
     orchestration_fail "packet validation failed: missing field '$required_field' in $packet_file"
   fi
 done < <(yq e -r '.required_fields[]?, .closeout_fields[]?' "$packet_contract")
+
+# Auto-materialize wave runtime state for each lane so that
+# orchestration.wave.dispatch can target them without a separate manual
+# wave.start step (GAP-OP-1485).
+wave_script="$ROOT/ops/commands/wave.sh"
+_runtime_root="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine-mailroom}"
+if [[ -x "$wave_script" ]]; then
+  for i in "${!lanes[@]}"; do
+    lane="${lanes[$i]}"
+    _wave_id="W1-$lane"
+    _wave_state="$_runtime_root/waves/$_wave_id/state.json"
+    # Only create if not already materialized.
+    if [[ ! -f "$_wave_state" ]]; then
+      SPINE_REPO="$ROOT" \
+      SPINE_RUNTIME_ROOT="$_runtime_root" \
+      SPINE_LOOP_ID="$LOOP_ID" \
+      OPS_TERMINAL_ROLE="$OWNER_TERMINAL" \
+        "$wave_script" start "$_wave_id" \
+          --objective "Lane $lane execution for $LOOP_ID" \
+          --loop-id "$LOOP_ID" \
+          --worktree off \
+          --current-role researcher \
+          --next-role worker \
+        >/dev/null 2>&1 || echo "WARN: failed to auto-materialize wave $_wave_id (non-fatal)" >&2
+    fi
+  done
+fi
 
 echo "orchestration.wave.kickoff"
 echo "loop_id: $LOOP_ID"

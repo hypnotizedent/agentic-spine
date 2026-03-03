@@ -1,0 +1,11 @@
+export SPINE_SESSION_ID="SES-20260303-120211-scan-be09da"
+export SPINE_LANE="scan"
+export SPINE_SESSION_DIR="/Users/ronnyworks/code/agentic-spine/mailroom/state/sessions/SES-20260303-120211-scan-be09da"
+export SPINE_ACTIVE_SESSION_COUNT=1
+export SPINE_MULTI_AGENT=false
+export SPINE_OPERATOR_TZ="America/New_York"
+export SPINE_TERMINAL_NAME=""
+export OPS_TERMINAL_ROLE=""
+export SPINE_TERMINAL_LABEL="Spine Session"
+export SPINE_RUNTIME_ROLE="researcher"
+export SPINE_TERMINAL_TITLE="Spine Session [researcher]"

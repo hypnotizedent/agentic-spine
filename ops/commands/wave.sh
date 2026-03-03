@@ -416,6 +416,28 @@ cmd_start() {
     exit 1
   fi
 
+  # Track artifacts for rollback on failure (GAP-OP-1491).
+  local _ws_created_branch=""
+  local _ws_created_worktree=""
+  local _ws_created_repo=""
+  local _ws_created_statedir=""
+  _wave_start_cleanup() {
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+      # Rollback transient artifacts left by a failed wave start.
+      if [[ -n "$_ws_created_worktree" && -d "$_ws_created_worktree" && -n "$_ws_created_repo" ]]; then
+        git -C "$_ws_created_repo" worktree remove --force "$_ws_created_worktree" 2>/dev/null || true
+      fi
+      if [[ -n "$_ws_created_branch" && -n "$_ws_created_repo" ]]; then
+        git -C "$_ws_created_repo" branch -D "$_ws_created_branch" 2>/dev/null || true
+      fi
+      if [[ -n "$_ws_created_statedir" && -d "$_ws_created_statedir" ]]; then
+        rm -rf "$_ws_created_statedir" 2>/dev/null || true
+      fi
+    fi
+  }
+  trap _wave_start_cleanup EXIT
+
   local sd
   sd="$(wave_state_dir "$wave_id")"
   local sf="$sd/state.json"
@@ -465,6 +487,7 @@ PYDEADLINE
   [[ -n "$claimed_paths_raw" ]] || claimed_paths_raw="."
 
   mkdir -p "$sd"
+  _ws_created_statedir="$sd"
 
   if [[ "$worktree_mode" == "auto" ]]; then
     workspace_repo="$(git -C "$workspace_repo" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -507,6 +530,8 @@ PYDEADLINE
       else
         git -C "$workspace_repo" branch "$workspace_branch" "$default_branch" >/dev/null
       fi
+      _ws_created_branch="$workspace_branch"
+      _ws_created_repo="$workspace_repo"
     fi
 
     local occupied_worktree=""
@@ -547,6 +572,8 @@ PYOCCUPIED
     if ! git -C "$workspace_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       mkdir -p "$(dirname "$workspace_worktree")"
       git -C "$workspace_repo" worktree add "$workspace_worktree" "$workspace_branch" >/dev/null
+      _ws_created_worktree="$workspace_worktree"
+      _ws_created_repo="$workspace_repo"
       if [[ -z "$workspace_note" ]]; then
         workspace_note="created deterministic wave worktree"
       fi
@@ -745,18 +772,25 @@ for claim in claims:
         except Exception:
             pass
     if status == "active" and path_claims_non_overlap and str(claim.get("wave_id", "")).strip() != wave_id:
-        other_paths = claim.get("claimed_paths") if isinstance(claim.get("claimed_paths"), list) else []
-        for mine in packet["claimed_paths"]:
-            for other in other_paths:
-                if _paths_overlap(str(mine), str(other)):
-                    conflicts.append(
-                        {
-                            "wave_id": str(claim.get("wave_id", "")).strip(),
-                            "owner_terminal": str(claim.get("owner_terminal", "")).strip(),
-                            "path_a": str(mine),
-                            "path_b": str(other),
-                        }
-                    )
+        # Waves sharing the same loop_id are co-located lanes of the same
+        # orchestrated work -- allow path overlap within the same loop
+        # (GAP-OP-1486).
+        other_loop_id = str(claim.get("loop_id", "")).strip()
+        if other_loop_id and other_loop_id == loop_id:
+            pass  # same-loop sibling wave; skip overlap check
+        else:
+            other_paths = claim.get("claimed_paths") if isinstance(claim.get("claimed_paths"), list) else []
+            for mine in packet["claimed_paths"]:
+                for other in other_paths:
+                    if _paths_overlap(str(mine), str(other)):
+                        conflicts.append(
+                            {
+                                "wave_id": str(claim.get("wave_id", "")).strip(),
+                                "owner_terminal": str(claim.get("owner_terminal", "")).strip(),
+                                "path_a": str(mine),
+                                "path_b": str(other),
+                            }
+                        )
     normalized_claims.append(claim)
 
 if conflicts:
@@ -774,6 +808,7 @@ normalized_claims.append(
     {
         "claim_id": f"CLM-{wave_id}-{now_dt.strftime('%Y%m%dT%H%M%SZ')}",
         "wave_id": wave_id,
+        "loop_id": loop_id,
         "owner_terminal": owner_terminal,
         "current_role": default_role,
         "next_role": default_next_role,
@@ -846,6 +881,13 @@ print(f"         ops wave dispatch {wave_id} --lane <lane> --task \"...\"")
 PYSTART
 
   sync_runtime_traffic_index "$sf" "start"
+
+  # Success -- disarm the cleanup trap so artifacts are preserved.
+  _ws_created_branch=""
+  _ws_created_worktree=""
+  _ws_created_repo=""
+  _ws_created_statedir=""
+  trap - EXIT
 }
 
 cmd_dispatch() {
@@ -1037,7 +1079,10 @@ PYROLE
         execution) to_role="worker" ;;
         audit) to_role="qc" ;;
         control) to_role="close" ;;
-        *) to_role="$from_role" ;;
+        # Default unknown lanes to worker (not from_role) to ensure a valid
+        # promotion transition exists. researcher->researcher has no gate
+        # in the contract and fails validation (GAP-OP-1487).
+        *) to_role="worker" ;;
       esac
     fi
 
@@ -1051,14 +1096,59 @@ PYROLE
 
     required_inputs_json="$(yq -o=json ".handoff_boundaries.\"$transition_gate\".required_input_refs // []" "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo '[]')"
     required_outputs_json="$(yq -o=json ".handoff_boundaries.\"$transition_gate\".required_output_refs // []" "$ROLE_RUNTIME_CONTRACT" 2>/dev/null || echo '[]')"
+
+    # Auto-populate required refs from wave packet/scope context when not
+    # explicitly provided.  Orchestrator-generated dispatches should not fail
+    # for refs that can be derived from the loop scope (GAP-OP-1488/1489).
+    input_refs_json="$(python3 - "$sf" "$input_refs_json" "$required_inputs_json" <<'PYAUTOREFS'
+import json, sys
+state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+refs = json.loads(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else {}
+required = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
+packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+loop_id = str(packet.get("loop_id") or state.get("wave_id") or "").strip()
+scope_path = f"mailroom/state/loop-scopes/{loop_id}.scope.md" if loop_id else ""
+auto_map = {
+    "research_brief_ref": scope_path,
+    "scope_ref": scope_path,
+}
+for key in required:
+    k = str(key).strip()
+    if k and not refs.get(k) and k in auto_map and auto_map[k]:
+        refs[k] = auto_map[k]
+print(json.dumps(refs))
+PYAUTOREFS
+)"
+    output_refs_json="$(python3 - "$sf" "$output_refs_json" "$required_outputs_json" <<'PYAUTOOUTREFS'
+import json, sys
+state = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+refs = json.loads(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else {}
+required = json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else []
+packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+loop_id = str(packet.get("loop_id") or state.get("wave_id") or "").strip()
+scope_path = f"mailroom/state/loop-scopes/{loop_id}.scope.md" if loop_id else ""
+auto_map = {
+    "execution_plan_ref": scope_path,
+    "acceptance_criteria_ref": scope_path,
+}
+for key in required:
+    k = str(key).strip()
+    if k and not refs.get(k) and k in auto_map and auto_map[k]:
+        refs[k] = auto_map[k]
+print(json.dumps(refs))
+PYAUTOOUTREFS
+)"
+
     missing_inputs="$(jq -r --argjson required "$required_inputs_json" --argjson refs "$input_refs_json" '$required[] | select(($refs[.] // "") == "")' <<<"{}")"
     missing_outputs="$(jq -r --argjson required "$required_outputs_json" --argjson refs "$output_refs_json" '$required[] | select(($refs[.] // "") == "")' <<<"{}")"
     if [[ -n "$missing_inputs" ]]; then
       echo "FAIL: dispatch missing required input refs for gate $transition_gate: $(echo "$missing_inputs" | tr '\n' ',' | sed 's/,$//')" >&2
+      echo "HINT: pass --input-refs \"$(echo "$missing_inputs" | tr '\n' ',' | sed 's/,$//' | sed 's/\([^,]*\)/\1=<path>/g')\"" >&2
       exit 1
     fi
     if [[ -n "$missing_outputs" ]]; then
       echo "FAIL: dispatch missing required output refs for gate $transition_gate: $(echo "$missing_outputs" | tr '\n' ',' | sed 's/,$//')" >&2
+      echo "HINT: pass --output-refs \"$(echo "$missing_outputs" | tr '\n' ',' | sed 's/,$//' | sed 's/\([^,]*\)/\1=<path>/g')\"" >&2
       exit 1
     fi
 
