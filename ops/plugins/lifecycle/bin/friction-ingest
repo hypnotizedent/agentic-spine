@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_QUEUE = ROOT / "mailroom/state/friction-queue.ndjson"
+FRICTION_RECONCILE = ROOT / "ops/plugins/lifecycle/bin/friction-reconcile"
 VALID_SEVERITIES = {"low", "medium", "high", "critical"}
 
 
@@ -154,6 +156,9 @@ def main() -> int:
     ap.add_argument("--item-json", action="append", default=[])
     ap.add_argument("--input", help="JSONL file of friction items")
     ap.add_argument("--stdin-jsonl", action="store_true")
+    ap.add_argument("--loop-id", help="Parent loop for optional auto-reconcile (falls back to SPINE_LOOP_ID)")
+    ap.add_argument("--auto-reconcile", action="store_true", help="Immediately run friction.reconcile after ingest")
+    ap.add_argument("--reconcile-threshold", type=float, default=0.85, help="Dedup threshold for auto-reconcile")
     ap.add_argument("--capability")
     ap.add_argument("--expected")
     ap.add_argument("--actual")
@@ -221,6 +226,39 @@ def main() -> int:
     queue.sort(key=lambda r: str(r.get("first_seen_utc", "")))
     write_queue(queue_path, queue)
 
+    loop_id = normalize_space(str(args.loop_id or os.environ.get("SPINE_LOOP_ID", "")))
+    reconcile_payload: dict[str, Any] | None = None
+    if args.auto_reconcile:
+        if not loop_id:
+            raise SystemExit("friction.ingest FAIL: --auto-reconcile requires --loop-id or SPINE_LOOP_ID")
+        if not FRICTION_RECONCILE.exists():
+            raise SystemExit(f"friction.ingest FAIL: missing reconcile script: {FRICTION_RECONCILE}")
+        proc = subprocess.run(
+            [
+                str(FRICTION_RECONCILE),
+                "--loop-id",
+                loop_id,
+                "--dedupe-threshold",
+                str(args.reconcile_threshold),
+                "--json",
+            ],
+            cwd=str(ROOT),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()
+            stdout = (proc.stdout or "").strip()
+            detail = stderr or stdout or "unknown reconcile failure"
+            raise SystemExit(f"friction.ingest FAIL: auto-reconcile failed\n{detail}")
+        out = (proc.stdout or "").strip()
+        if out:
+            try:
+                reconcile_payload = json.loads(out)
+            except json.JSONDecodeError:
+                reconcile_payload = {"raw_output": out}
+
     payload = {
         "capability": "friction.ingest",
         "status": "ok",
@@ -229,6 +267,9 @@ def main() -> int:
         "created": created,
         "deduped": deduped,
         "queue_total": len(queue),
+        "auto_reconcile": bool(args.auto_reconcile),
+        "loop_id": loop_id or None,
+        "reconcile": reconcile_payload,
     }
 
     if args.json:

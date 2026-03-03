@@ -36,10 +36,25 @@ infer_parent_loop() {
 derive_gap_title() {
   local description="$1"
   local fallback_id="$2"
-  local first_line sentence
+  local first_line second_line capability_line actual_line sentence
 
   first_line="$(printf '%s\n' "$description" | sed -n '/[^[:space:]]/{s/^[[:space:]]*//;p;q;}')"
   [[ -n "$first_line" ]] || first_line="$fallback_id open gap"
+
+  # Friction descriptions often start with a generic header; derive a
+  # meaningful title from structured lines to avoid false duplicate collapse.
+  if [[ "$first_line" == "Agent friction intake item:" ]]; then
+    second_line="$(printf '%s\n' "$description" | awk 'NF{c++; if(c==2){sub(/^[[:space:]]+/,""); print; exit}}')"
+    capability_line="$(printf '%s\n' "$description" | sed -n 's/^[[:space:]]*capability:[[:space:]]*//p' | head -n1)"
+    actual_line="$(printf '%s\n' "$description" | sed -n 's/^[[:space:]]*actual:[[:space:]]*//p' | head -n1)"
+    if [[ -n "$capability_line" && -n "$actual_line" ]]; then
+      first_line="$capability_line — $actual_line"
+    elif [[ -n "$capability_line" ]]; then
+      first_line="$capability_line friction item"
+    elif [[ -n "$second_line" ]]; then
+      first_line="$second_line"
+    fi
+  fi
 
   # Truncate to 110 chars, appending "..." if longer than 110.
   # Uses two separate sed invocations for BSD/GNU portability (BSD sed

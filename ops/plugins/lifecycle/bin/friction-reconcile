@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_QUEUE = ROOT / "mailroom/state/friction-queue.ndjson"
 GAPS_DEDUPE = ROOT / "ops/plugins/loops/bin/gaps-dedupe"
 GAPS_FILE = ROOT / "ops/plugins/loops/bin/gaps-file"
+OP_GAPS_FILE = ROOT / "ops/bindings/operational.gaps.yaml"
 
 
 def utc_iso() -> str:
@@ -90,6 +92,33 @@ def run_json(cmd: list[str]) -> dict[str, Any]:
         return {}
 
 
+def find_open_gap_by_exact_marker(marker: str) -> str:
+    m = str(marker or "").strip()
+    if not m:
+        return ""
+    m_escaped = m.replace("\\", "\\\\").replace('"', '\\"')
+    proc = subprocess.run(
+        [
+            "yq",
+            "e",
+            "-r",
+            f'.gaps[] | select(.status == "open") | select((.description // "") | contains("{m_escaped}")) | .id',
+            str(OP_GAPS_FILE),
+        ],
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return ""
+    for raw in (proc.stdout or "").splitlines():
+        gid = raw.strip()
+        if gid.startswith("GAP-OP-"):
+            return gid
+    return ""
+
+
 def map_severity(value: str) -> str:
     sev = str(value or "").strip().lower()
     if sev in {"low", "medium", "high", "critical"}:
@@ -102,14 +131,19 @@ def main() -> int:
     argv = [a for a in sys.argv[1:] if a.strip()]
     ap = argparse.ArgumentParser(description="Reconcile friction queue into existing gaps surfaces")
     ap.add_argument("--queue", default=str(DEFAULT_QUEUE))
-    ap.add_argument("--loop-id", required=True, help="Parent loop ID (e.g. LOOP-EXAMPLE-20260303)")
+    ap.add_argument("--loop-id", help="Parent loop ID (e.g. LOOP-EXAMPLE-20260303). Falls back to SPINE_LOOP_ID.")
     ap.add_argument("--dedupe-threshold", type=float, default=0.85)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+    loop_id = str(args.loop_id or os.environ.get("SPINE_LOOP_ID", "")).strip()
+    if not loop_id:
+        raise SystemExit("friction.reconcile FAIL: --loop-id required (or set SPINE_LOOP_ID)")
 
     if not GAPS_DEDUPE.exists() or not GAPS_FILE.exists():
         raise SystemExit("friction.reconcile FAIL: required gaps scripts missing")
+    if not OP_GAPS_FILE.exists():
+        raise SystemExit(f"friction.reconcile FAIL: missing gaps registry: {OP_GAPS_FILE}")
 
     queue_path = Path(args.queue).expanduser()
     rows = load_queue(queue_path)
@@ -125,6 +159,22 @@ def main() -> int:
     for idx, item in enumerate(rows):
         status = str(item.get("status", "queued")).strip().lower()
         if status != "queued":
+            continue
+
+        # Exact marker match first (fingerprint/friction_id), then fuzzy dedupe.
+        exact_gap_id = ""
+        fingerprint = str(item.get("fingerprint", "")).strip()
+        friction_id = str(item.get("friction_id", "")).strip()
+        if fingerprint:
+            exact_gap_id = find_open_gap_by_exact_marker(f"fingerprint: {fingerprint}")
+        if not exact_gap_id and friction_id:
+            exact_gap_id = find_open_gap_by_exact_marker(f"friction_id: {friction_id}")
+        if exact_gap_id:
+            item["status"] = "matched"
+            item["matched_gap_id"] = exact_gap_id
+            item["matched_at_utc"] = now
+            item["updated_at_utc"] = now
+            matched_count += 1
             continue
 
         desc = build_description(item)
@@ -158,7 +208,7 @@ def main() -> int:
                 "id": "auto",
                 "type": "agent-behavior",
                 "severity": map_severity(str(item.get("severity", "medium"))),
-                "discovered_by": args.loop_id,
+                "discovered_by": loop_id,
                 "doc": "mailroom/state/friction-queue.ndjson",
                 "description": desc,
             }
@@ -173,7 +223,7 @@ def main() -> int:
             tmp_path = Path(tmp.name)
 
         proc = subprocess.run(
-            [str(GAPS_FILE), "--batch", str(tmp_path), "--parent-loop", args.loop_id],
+            [str(GAPS_FILE), "--batch", str(tmp_path), "--loop-id", loop_id],
             cwd=str(ROOT),
             text=True,
             capture_output=True,
@@ -222,7 +272,7 @@ def main() -> int:
         "capability": "friction.reconcile",
         "status": "ok",
         "queue": str(queue_path),
-        "loop_id": args.loop_id,
+        "loop_id": loop_id,
         "queued_before": len(queued_items),
         "matched": matched_count,
         "filed": filed_count,
