@@ -256,6 +256,64 @@ for rel in "${CANDIDATES[@]}"; do
   audit_file "$rel"
 done
 
+# --- Schema-bound file enforcement ---
+# For files listed in schema_bound_files, validate that every entry key
+# exists in the referenced schema (required_fields + optional_fields).
+SCHEMA_BOUND_COUNT="$(yq e '.schema_bound_files | length // 0' "$CONTRACT")"
+for ((si=0; si<SCHEMA_BOUND_COUNT; si++)); do
+  SB_FILE="$(yq e -r ".schema_bound_files[$si].file" "$CONTRACT")"
+  SB_SCHEMA="$(yq e -r ".schema_bound_files[$si].schema" "$CONTRACT")"
+  SB_ENFORCEMENT="$(yq e -r ".schema_bound_files[$si].enforcement // \"report\"" "$CONTRACT")"
+  SB_ENTRY_PATH="$(yq e -r ".schema_bound_files[$si].entry_path // \".[]\"" "$CONTRACT")"
+
+  SB_FILE_ABS="$ROOT/$SB_FILE"
+  SB_SCHEMA_ABS="$ROOT/$SB_SCHEMA"
+
+  if [[ ! -f "$SB_FILE_ABS" ]]; then
+    append_unique "$SB_FILE :: schema-bound file missing" "violations"
+    continue
+  fi
+  if [[ ! -f "$SB_SCHEMA_ABS" ]]; then
+    append_unique "$SB_SCHEMA :: schema file missing for $SB_FILE" "violations"
+    continue
+  fi
+
+  # Collect allowed keys from schema (required + optional field names)
+  mapfile -t SB_ALLOWED < <(
+    {
+      yq e -r '.required_fields[].name' "$SB_SCHEMA_ABS" 2>/dev/null
+      yq e -r '.optional_fields[].name' "$SB_SCHEMA_ABS" 2>/dev/null
+    } | awk 'NF && !seen[$0]++'
+  )
+
+  if [[ "${#SB_ALLOWED[@]}" -eq 0 ]]; then
+    append_unique "$SB_SCHEMA :: no fields found in schema" "warnings"
+    continue
+  fi
+
+  # Check each entry for unknown keys
+  ENTRY_COUNT="$(yq e "$SB_ENTRY_PATH | length" "$SB_FILE_ABS" 2>/dev/null | wc -l)"
+  mapfile -t ENTRY_KEYS_ALL < <(yq e -r "$SB_ENTRY_PATH | keys | .[]" "$SB_FILE_ABS" 2>/dev/null | awk '!seen[$0]++')
+
+  SB_UNKNOWN_KEYS=()
+  for ek in "${ENTRY_KEYS_ALL[@]}"; do
+    [[ -n "$ek" ]] || continue
+    if ! contains_in_array "$ek" "${SB_ALLOWED[@]}"; then
+      SB_UNKNOWN_KEYS+=("$ek")
+    fi
+  done
+
+  if [[ "${#SB_UNKNOWN_KEYS[@]}" -gt 0 ]]; then
+    for uk in "${SB_UNKNOWN_KEYS[@]}"; do
+      if [[ "$SB_ENFORCEMENT" == "strict" ]]; then
+        append_unique "$SB_FILE :: unknown key '$uk' not in $SB_SCHEMA (schema-bound strict)" "violations"
+      else
+        append_unique "$SB_FILE :: unknown key '$uk' not in $SB_SCHEMA (schema-bound report)" "warnings"
+      fi
+    done
+  fi
+done
+
 status="pass"
 [[ "${#VIOLATIONS[@]}" -gt 0 ]] && status="fail"
 
