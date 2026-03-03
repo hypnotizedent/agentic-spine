@@ -1,0 +1,198 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# mDNS Governance Contract
+# ═══════════════════════════════════════════════════════════════════════════
+# Governs multicast DNS (mDNS) reflection and cross-VLAN discovery policy
+# for the segmented network topology.
+#
+# Source plan: PLAN-NETWORK-SECURITY-OPS-WORKER-20260303
+# Parent loop: LOOP-NETWORK-SECURITY-OPS-WORKER-SPEC-20260303
+# Linked gap: GAP-OP-1456 (mDNS governance)
+# ═══════════════════════════════════════════════════════════════════════════
+
+contract_id: NETWORK_MDNS_GOVERNANCE_V1
+version: "1.0"
+status: planned
+created: "2026-03-03"
+owner: "@ronny"
+
+description: >
+  mDNS (multicast DNS, port 5353) enables zero-configuration service
+  discovery (AirPlay, Chromecast, printer discovery, Home Assistant
+  integration). In a VLAN-segmented network, mDNS is confined to its
+  broadcast domain by default. This contract defines which VLAN pairs
+  require mDNS reflection and the security implications of each.
+
+# ────────────────────────────────────────────────────────────────────────────
+# MDNS FUNDAMENTALS
+# ────────────────────────────────────────────────────────────────────────────
+mdns_protocol:
+  multicast_address: "224.0.0.251"
+  port: 5353
+  protocol: UDP
+  scope: link-local
+  limitation: >
+    mDNS is link-local by design. Without reflection, devices on different
+    VLANs cannot discover each other via mDNS. UniFi provides built-in
+    mDNS reflection between selected network pairs.
+
+# ────────────────────────────────────────────────────────────────────────────
+# REFLECTION PAIRS
+# ────────────────────────────────────────────────────────────────────────────
+reflection_pairs:
+  description: >
+    Each pair defines two VLANs between which mDNS packets are reflected.
+    Reflection is bidirectional. Only pairs with documented business
+    justification are permitted.
+
+  allowed:
+    - pair: [trusted, iot]
+      justification: >
+        Personal devices need to discover AirPlay speakers, Chromecast
+        devices, and smart home accessories on the IoT VLAN. Home Assistant
+        on server VLAN reaches IoT via IP, but personal devices use mDNS
+        for media casting.
+      services_discovered:
+        - "AirPlay (Apple TV, HomePod)"
+        - "Chromecast"
+        - "Smart speakers"
+        - "Printers"
+      security_note: >
+        This is the highest-risk reflection pair. IoT devices can advertise
+        services visible to trusted devices. Mitigated by firewall rules
+        that block IoT-initiated connections to trusted VLAN (mDNS
+        advertisement != connection ability).
+
+    - pair: [trusted, servers]
+      justification: >
+        Personal devices need to discover services running on server VMs
+        (e.g., Jellyfin DLNA, Home Assistant, NFS shares).
+      services_discovered:
+        - "Jellyfin DLNA"
+        - "Home Assistant"
+        - "NFS/SMB shares"
+      security_note: >
+        Low risk. Both VLANs are high-trust. Trusted devices already have
+        full firewall access to servers.
+
+    - pair: [servers, iot]
+      justification: >
+        Home Assistant (server VLAN) needs to discover IoT devices via
+        mDNS for integration setup and device re-discovery after IP changes.
+      services_discovered:
+        - "ESPHome devices"
+        - "Matter/Thread devices (via mDNS advertisement)"
+        - "Zigbee/Z-Wave coordinator web UIs"
+      security_note: >
+        Medium risk. Server VLAN has explicit firewall allows to IoT.
+        mDNS reflection supplements the firewall-allowed paths.
+
+  denied:
+    - pair: [guest, any]
+      reason: "Guest VLAN is fully isolated. No mDNS reflection permitted."
+    - pair: [dmz, any]
+      reason: "DMZ is untrusted. No service discovery allowed to/from DMZ."
+    - pair: [management, iot]
+      reason: "Management plane must not be discoverable by IoT devices."
+    - pair: [management, guest]
+      reason: "Management plane must not be discoverable by guest devices."
+
+# ────────────────────────────────────────────────────────────────────────────
+# UNIFI MDNS REFLECTION CONFIG
+# ────────────────────────────────────────────────────────────────────────────
+unifi_config:
+  description: >
+    UniFi Dream Router supports mDNS reflection natively. Enable via
+    Settings → Networks → [Network] → mDNS Reflection toggle.
+  setting_path: "Settings > Networks > {network_name} > Advanced > Multicast DNS"
+  detail:
+    - "mDNS reflection is per-network, not per-pair in UniFi"
+    - "Enabling on a network reflects to ALL networks with reflection enabled"
+    - "This means enabling on trusted, servers, and iot creates a 3-way mesh"
+    - "Guest and DMZ must NEVER have mDNS reflection enabled"
+
+  enable_on:
+    - network: trusted
+      vlan_id: 20
+    - network: servers
+      vlan_id: 10
+    - network: iot
+      vlan_id: 30
+
+  disable_on:
+    - network: management
+      vlan_id: 1
+    - network: guest
+      vlan_id: 40
+    - network: dmz
+      vlan_id: 50
+
+# ────────────────────────────────────────────────────────────────────────────
+# AVAHI FALLBACK
+# ────────────────────────────────────────────────────────────────────────────
+avahi_fallback:
+  description: >
+    If UniFi mDNS reflection proves insufficient (e.g., does not support
+    selective per-pair reflection), Avahi reflector can be deployed as an
+    alternative on a Linux host with interfaces in multiple VLANs.
+  status: planned
+  deployment_target: "Pi-hole LXC 105 (if needed)"
+  config:
+    enable_reflector: true
+    reflect_ipv: false
+    allow_interfaces:
+      - "eth0.20"  # trusted VLAN
+      - "eth0.10"  # servers VLAN
+      - "eth0.30"  # iot VLAN
+    deny_interfaces:
+      - "eth0.1"   # management
+      - "eth0.40"  # guest
+      - "eth0.50"  # dmz
+  detail: >
+    Avahi reflector provides per-interface granularity not available in
+    UniFi native mDNS reflection. Only deployed if UniFi mesh reflection
+    is too broad for the security model.
+
+# ────────────────────────────────────────────────────────────────────────────
+# HOME ASSISTANT IMPACT
+# ────────────────────────────────────────────────────────────────────────────
+home_assistant_impact:
+  description: >
+    VLAN segmentation with mDNS reflection directly impacts HA integrations
+    that rely on zero-config discovery.
+  affected_integrations:
+    - integration: "ESPHome"
+      discovery: mDNS
+      impact: "Requires servers→iot mDNS reflection"
+    - integration: "Matter"
+      discovery: "mDNS (DNS-SD)"
+      impact: "Matter commissioning uses mDNS; post-commission uses Thread/IP"
+    - integration: "Chromecast"
+      discovery: mDNS
+      impact: "Requires trusted→iot mDNS reflection for casting"
+    - integration: "Apple TV"
+      discovery: mDNS
+      impact: "AirPlay/HomeKit use mDNS; requires trusted→iot reflection"
+    - integration: "HACS/Zigbee2MQTT"
+      discovery: "Direct IP (no mDNS)"
+      impact: "No mDNS dependency; uses coordinator IP directly"
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED CAPABILITIES
+# ────────────────────────────────────────────────────────────────────────────
+planned_capabilities:
+  - name: network.mdns.status
+    description: "Report mDNS reflection state per network and identify drift"
+    safety: read-only
+    approval: auto
+    status: planned
+
+# ────────────────────────────────────────────────────────────────────────────
+# SECURITY CONSIDERATIONS
+# ────────────────────────────────────────────────────────────────────────────
+security_considerations:
+  - risk: "mDNS reflection enables service advertisement across VLAN boundaries"
+    mitigation: "Firewall rules still control actual connection ability; mDNS only enables discovery"
+  - risk: "Malicious IoT device could advertise spoofed services"
+    mitigation: "Trusted devices should verify service identity; monitoring via Suricata"
+  - risk: "mDNS cache poisoning"
+    mitigation: "mDNS is inherently trust-on-first-use; accept as residual risk in home network context"

@@ -1,0 +1,290 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# VLAN Topology Contract
+# ═══════════════════════════════════════════════════════════════════════════
+# Defines the 6-VLAN segmentation design for home and shop networks.
+# Implementation is blocked on physical home site visit.
+#
+# Source plan: PLAN-NETWORK-SECURITY-OPS-WORKER-20260303
+# Parent loop: LOOP-NETWORK-SECURITY-OPS-WORKER-SPEC-20260303
+# Linked gap: GAP-OP-1454 (VLAN topology contract)
+# Related gap: GAP-OP-1030 (original VLAN gap)
+# ═══════════════════════════════════════════════════════════════════════════
+
+contract_id: NETWORK_VLAN_TOPOLOGY_V1
+version: "1.0"
+status: planned
+created: "2026-03-03"
+owner: "@ronny"
+
+description: >
+  Six-VLAN architecture for traffic isolation across home and shop networks.
+  Each VLAN has a dedicated subnet, VLAN ID, purpose, and device placement
+  policy. The UDR7 (home) and UDR6 (shop) serve as VLAN-aware gateways
+  with inter-VLAN routing controlled by firewall rules.
+
+# ────────────────────────────────────────────────────────────────────────────
+# VLAN DEFINITIONS
+# ────────────────────────────────────────────────────────────────────────────
+vlans:
+  - vlan_id: 1
+    name: management
+    purpose: "Network infrastructure, hypervisors, NAS, management interfaces"
+    home:
+      subnet: "10.0.1.0/24"
+      gateway: "10.0.1.1"
+      dhcp_range: "10.0.1.200-254"
+      dhcp_dns: "10.0.1.53"
+    shop:
+      subnet: "192.168.1.0/24"
+      gateway: "192.168.1.1"
+      dhcp_range: "192.168.1.230-254"
+      dhcp_dns: "192.168.1.204"
+    device_classes:
+      - "UDR gateway"
+      - "Proxmox hypervisors"
+      - "NAS appliances"
+      - "Network switches"
+      - "Access points"
+      - "Pi-hole DNS"
+    security_level: highest
+    internet_access: true
+    detail: >
+      Shop management VLAN retains the existing 192.168.1.0/24 subnet to
+      minimize disruption. Home management migrates from 10.0.0.0/24 to
+      10.0.1.0/24 with DHCP re-addressing.
+
+  - vlan_id: 10
+    name: servers
+    purpose: "VMs running production services (docker hosts, application stacks)"
+    home:
+      subnet: "10.0.10.0/24"
+      gateway: "10.0.10.1"
+      dhcp_range: "10.0.10.200-254"
+      dhcp_dns: "10.0.1.53"
+    shop:
+      subnet: "192.168.10.0/24"
+      gateway: "192.168.10.1"
+      dhcp_range: "192.168.10.200-254"
+      dhcp_dns: "192.168.1.204"
+    device_classes:
+      - "Docker host VMs"
+      - "Application stack VMs"
+      - "Finance VM"
+      - "Communications VM"
+      - "Media VMs"
+      - "Observability VM"
+    security_level: high
+    internet_access: true
+    detail: >
+      Server VLAN hosts all production workload VMs. These VMs need
+      internet for package updates, container pulls, and API access.
+      Inter-VLAN access to management is explicitly allowed for NFS
+      mounts and hypervisor API.
+
+  - vlan_id: 20
+    name: trusted
+    purpose: "Personal workstations, laptops, phones (authenticated users)"
+    home:
+      subnet: "10.0.20.0/24"
+      gateway: "10.0.20.1"
+      dhcp_range: "10.0.20.100-254"
+      dhcp_dns: "10.0.1.53"
+    shop:
+      subnet: "192.168.20.0/24"
+      gateway: "192.168.20.1"
+      dhcp_range: "192.168.20.100-254"
+      dhcp_dns: "192.168.1.204"
+    device_classes:
+      - "MacBook workstations"
+      - "iPhones"
+      - "iPads"
+      - "Personal laptops"
+    security_level: high
+    internet_access: true
+    detail: >
+      Trusted devices get full internet and can reach servers + management
+      via explicit firewall allows. This is the primary user VLAN.
+
+  - vlan_id: 30
+    name: iot
+    purpose: "IoT devices (smart home, sensors, cameras, smart plugs)"
+    home:
+      subnet: "10.0.30.0/24"
+      gateway: "10.0.30.1"
+      dhcp_range: "10.0.30.100-254"
+      dhcp_dns: "10.0.1.53"
+    shop:
+      subnet: "192.168.30.0/24"
+      gateway: "192.168.30.1"
+      dhcp_range: "192.168.30.100-254"
+      dhcp_dns: "192.168.1.204"
+    device_classes:
+      - "Tuya smart bulbs"
+      - "Smart plugs"
+      - "Air purifiers"
+      - "Cameras"
+      - "Sensors"
+      - "Zigbee/Z-Wave coordinators"
+      - "Matter/Thread border router"
+    security_level: restricted
+    internet_access: true
+    detail: >
+      IoT devices get internet (required for cloud-dependent devices like
+      Tuya) but CANNOT reach management, server, or trusted VLANs.
+      Home Assistant on the trusted/server VLAN initiates connections TO
+      IoT devices, not the reverse. Zigbee/Z-Wave coordinators placed here
+      as they are network-attached but only need HA connectivity.
+
+  - vlan_id: 40
+    name: guest
+    purpose: "Guest WiFi devices with internet-only access"
+    home:
+      subnet: "10.0.40.0/24"
+      gateway: "10.0.40.1"
+      dhcp_range: "10.0.40.100-254"
+      dhcp_dns: "10.0.1.53"
+    shop:
+      subnet: "192.168.40.0/24"
+      gateway: "192.168.40.1"
+      dhcp_range: "192.168.40.100-254"
+      dhcp_dns: "192.168.1.204"
+    device_classes:
+      - "Guest phones"
+      - "Guest laptops"
+      - "Temporary devices"
+    security_level: isolated
+    internet_access: true
+    detail: >
+      Full client isolation. Guests get internet only. No access to any
+      other VLAN. No inter-client communication. Captive portal optional.
+
+  - vlan_id: 50
+    name: dmz
+    purpose: "Exposed services, honeypots, externally-reachable endpoints"
+    home:
+      subnet: "10.0.50.0/24"
+      gateway: "10.0.50.1"
+      dhcp_range: "10.0.50.200-254"
+      dhcp_dns: "10.0.1.53"
+    shop:
+      subnet: "192.168.50.0/24"
+      gateway: "192.168.50.1"
+      dhcp_range: "192.168.50.200-254"
+      dhcp_dns: "192.168.1.204"
+    device_classes:
+      - "Cowrie honeypot"
+      - "Public-facing services (if any)"
+    security_level: untrusted
+    internet_access: limited
+    detail: >
+      DMZ devices can reach internet (for threat intel upload) but CANNOT
+      initiate connections to any internal VLAN. Observability stack pulls
+      logs FROM DMZ via explicit allow rule.
+
+# ────────────────────────────────────────────────────────────────────────────
+# WIFI SSID-TO-VLAN MAPPING
+# ────────────────────────────────────────────────────────────────────────────
+wifi_mapping:
+  home:
+    - ssid: "pogodobby"
+      vlan: trusted
+      vlan_id: 20
+      description: "Primary WiFi for personal devices"
+    - ssid: "pogodobby-iot"
+      vlan: iot
+      vlan_id: 30
+      description: "IoT WiFi network"
+    - ssid: "pogodobby-guest"
+      vlan: guest
+      vlan_id: 40
+      description: "Guest WiFi (new SSID)"
+  shop:
+    - ssid: "TBD"
+      vlan: trusted
+      vlan_id: 20
+      description: "Shop trusted WiFi"
+
+# ────────────────────────────────────────────────────────────────────────────
+# SWITCH PORT MAPPING (HOME)
+# ────────────────────────────────────────────────────────────────────────────
+switch_port_policy:
+  description: >
+    Switch ports are assigned to VLANs based on connected device class.
+    Trunk ports carry all VLANs to the UDR and between switches.
+    Access ports are assigned a single VLAN.
+  default_vlan: management
+  trunk_ports:
+    - "UDR uplink"
+    - "Inter-switch links"
+  access_port_rules:
+    - device_class: "Proxmox hypervisor"
+      vlan: management
+      poe: false
+    - device_class: "Zigbee/Z-Wave coordinator"
+      vlan: iot
+      poe: true
+    - device_class: "Camera"
+      vlan: iot
+      poe: true
+    - device_class: "NAS"
+      vlan: management
+      poe: false
+
+# ────────────────────────────────────────────────────────────────────────────
+# MIGRATION PLAN
+# ────────────────────────────────────────────────────────────────────────────
+migration:
+  description: >
+    VLAN deployment requires physical presence for UDR configuration
+    and switch port re-assignment. Phased rollout to minimize downtime.
+  phases:
+    - phase: 1
+      description: "Create VLANs in UniFi controller (no port changes)"
+      risk: low
+      requires_physical: false
+
+    - phase: 2
+      description: "Assign WiFi SSIDs to VLANs"
+      risk: medium
+      requires_physical: false
+      detail: "IoT devices will need to rejoin pogodobby-iot SSID"
+
+    - phase: 3
+      description: "Re-assign switch ports to VLANs"
+      risk: high
+      requires_physical: true
+      detail: "Requires home visit. One device at a time with rollback plan."
+
+    - phase: 4
+      description: "Apply inter-VLAN firewall rules"
+      risk: high
+      requires_physical: false
+      detail: "Must be done AFTER all devices are on correct VLANs"
+
+  blocker: "Home site physical visit required for Phase 3"
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED CAPABILITIES
+# ────────────────────────────────────────────────────────────────────────────
+planned_capabilities:
+  - name: network.vlan.topology.apply
+    description: "Create/update VLAN configuration in UniFi to match this contract"
+    safety: mutating
+    approval: manual
+    status: planned
+
+  - name: network.vlan.status
+    description: "Report VLAN configuration parity against this contract"
+    safety: read-only
+    approval: auto
+    status: planned
+
+# ────────────────────────────────────────────────────────────────────────────
+# PROPOSED GATE
+# ────────────────────────────────────────────────────────────────────────────
+proposed_gates:
+  - id: D342
+    name: netsec-vlan-topology-lock
+    description: "Enforce VLAN parity against this topology contract"
+    mode: report
+    promote_to_enforce_after_clean_runs: 3

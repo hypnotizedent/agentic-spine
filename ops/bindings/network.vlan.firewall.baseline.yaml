@@ -1,0 +1,274 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# VLAN Firewall Baseline
+# ═══════════════════════════════════════════════════════════════════════════
+# Defines inter-VLAN firewall rules, RFC1918 block baseline, and explicit
+# allow rules for the 6-VLAN topology.
+#
+# Source plan: PLAN-NETWORK-SECURITY-OPS-WORKER-20260303
+# Parent loop: LOOP-NETWORK-SECURITY-OPS-WORKER-SPEC-20260303
+# Linked gap: GAP-OP-1455 (firewall baseline)
+# ═══════════════════════════════════════════════════════════════════════════
+
+contract_id: NETWORK_VLAN_FIREWALL_BASELINE_V1
+version: "1.0"
+status: planned
+created: "2026-03-03"
+owner: "@ronny"
+
+description: >
+  Firewall rule baseline for inter-VLAN traffic. Default policy is
+  deny-all between VLANs with explicit allow rules for required
+  communication paths. Rules are ordered by priority (lower number =
+  higher priority). RFC1918 egress blocks prevent internal address
+  leakage to WAN.
+
+# ────────────────────────────────────────────────────────────────────────────
+# DEFAULT POLICY
+# ────────────────────────────────────────────────────────────────────────────
+default_policy:
+  inter_vlan: DENY
+  description: >
+    All inter-VLAN traffic is denied by default. Only explicitly listed
+    allow rules permit cross-VLAN communication. This is the foundational
+    security posture for traffic isolation.
+
+# ────────────────────────────────────────────────────────────────────────────
+# RFC1918 EGRESS BLOCK
+# ────────────────────────────────────────────────────────────────────────────
+rfc1918_block:
+  description: >
+    Prevent any internal (RFC1918) addresses from leaking to WAN.
+    Applied as the first WAN_OUT rules.
+  rules:
+    - priority: 1000
+      description: "Block RFC1918 to WAN (10.0.0.0/8)"
+      type: WAN_OUT
+      action: DROP
+      source: "10.0.0.0/8"
+      destination: "any"
+      protocol: "any"
+      detail: "Prevent 10.x.x.x egress to internet"
+
+    - priority: 1001
+      description: "Block RFC1918 to WAN (172.16.0.0/12)"
+      type: WAN_OUT
+      action: DROP
+      source: "172.16.0.0/12"
+      destination: "any"
+      protocol: "any"
+      detail: "Prevent 172.16-31.x.x egress to internet"
+
+    - priority: 1002
+      description: "Block RFC1918 to WAN (192.168.0.0/16)"
+      type: WAN_OUT
+      action: DROP
+      source: "192.168.0.0/16"
+      destination: "any"
+      protocol: "any"
+      detail: "Prevent 192.168.x.x egress to internet"
+
+# ────────────────────────────────────────────────────────────────────────────
+# INTER-VLAN ALLOW RULES (HOME NETWORK)
+# ────────────────────────────────────────────────────────────────────────────
+inter_vlan_allow_rules:
+  # --- Trusted → Management ---
+  - priority: 2000
+    description: "Trusted to Management (full access)"
+    source_vlan: trusted
+    destination_vlan: management
+    action: ALLOW
+    protocol: "any"
+    destination_port: "any"
+    justification: >
+      Personal workstations need full access to management plane for
+      Proxmox UI, NAS management, switch/AP management, Pi-hole admin.
+
+  # --- Trusted → Servers ---
+  - priority: 2010
+    description: "Trusted to Servers (full access)"
+    source_vlan: trusted
+    destination_vlan: servers
+    action: ALLOW
+    protocol: "any"
+    destination_port: "any"
+    justification: >
+      Personal workstations need access to all services (Jellyfin, Grafana,
+      Home Assistant, Firefly, etc.) running on server VMs.
+
+  # --- Trusted → IoT ---
+  - priority: 2020
+    description: "Trusted to IoT (full access)"
+    source_vlan: trusted
+    destination_vlan: iot
+    action: ALLOW
+    protocol: "any"
+    destination_port: "any"
+    justification: >
+      Personal devices need to reach IoT devices for direct control,
+      AirPlay, Chromecast, and troubleshooting.
+
+  # --- Servers → Management ---
+  - priority: 2100
+    description: "Servers to Management (NFS + SSH)"
+    source_vlan: servers
+    destination_vlan: management
+    action: ALLOW
+    protocol: TCP
+    destination_port: "22,111,2049"
+    justification: >
+      Server VMs need NFS access to NAS (port 2049, portmapper 111)
+      and SSH to hypervisor for management operations.
+
+  - priority: 2101
+    description: "Servers to Management (DNS)"
+    source_vlan: servers
+    destination_vlan: management
+    action: ALLOW
+    protocol: "UDP/TCP"
+    destination_port: "53"
+    justification: >
+      Server VMs use Pi-hole (on management VLAN) for DNS resolution.
+
+  # --- Servers → IoT ---
+  - priority: 2110
+    description: "Servers to IoT (Home Assistant)"
+    source_vlan: servers
+    destination_vlan: iot
+    action: ALLOW
+    protocol: TCP
+    destination_port: "80,443,1883,6638,8080,8081,9442"
+    justification: >
+      Home Assistant needs to reach Zigbee/Z-Wave coordinators (6638),
+      Matter border router (8081), MQTT broker (1883), and IoT device
+      HTTP interfaces for integration.
+
+  # --- IoT → Management (DNS only) ---
+  - priority: 2200
+    description: "IoT to Management (DNS only)"
+    source_vlan: iot
+    destination_vlan: management
+    action: ALLOW
+    protocol: "UDP/TCP"
+    destination_port: "53"
+    justification: >
+      IoT devices need DNS resolution via Pi-hole. No other management
+      access is permitted.
+
+  # --- IoT → Servers (DENY) ---
+  - priority: 2210
+    description: "IoT to Servers (blocked)"
+    source_vlan: iot
+    destination_vlan: servers
+    action: DENY
+    protocol: "any"
+    destination_port: "any"
+    justification: >
+      IoT devices must NOT initiate connections to server VMs. HA
+      initiates connections TO IoT devices, not the reverse.
+
+  # --- IoT → Trusted (DENY) ---
+  - priority: 2220
+    description: "IoT to Trusted (blocked)"
+    source_vlan: iot
+    destination_vlan: trusted
+    action: DENY
+    protocol: "any"
+    destination_port: "any"
+    justification: >
+      IoT devices must NOT reach personal workstations.
+
+  # --- Guest → Any internal (DENY) ---
+  - priority: 2300
+    description: "Guest to All internal VLANs (blocked)"
+    source_vlan: guest
+    destination_vlan: "management,servers,trusted,iot,dmz"
+    action: DENY
+    protocol: "any"
+    destination_port: "any"
+    justification: >
+      Guest devices get internet only. Full client isolation.
+
+  # --- DMZ → Any internal (DENY) ---
+  - priority: 2400
+    description: "DMZ to All internal VLANs (blocked)"
+    source_vlan: dmz
+    destination_vlan: "management,servers,trusted,iot,guest"
+    action: DENY
+    protocol: "any"
+    destination_port: "any"
+    justification: >
+      DMZ is untrusted. Honeypot and exposed services cannot initiate
+      connections to internal infrastructure.
+
+  # --- Servers → DMZ (log pull) ---
+  - priority: 2410
+    description: "Servers to DMZ (observability log pull)"
+    source_vlan: servers
+    destination_vlan: dmz
+    action: ALLOW
+    protocol: TCP
+    destination_port: "514,9100"
+    justification: >
+      Observability stack (Loki, Prometheus) pulls logs and metrics from
+      DMZ services. Syslog (514) and node-exporter (9100).
+
+# ────────────────────────────────────────────────────────────────────────────
+# RULE ORDERING POLICY
+# ────────────────────────────────────────────────────────────────────────────
+rule_ordering:
+  description: >
+    UniFi firewall rules are evaluated in priority order. Lower number =
+    higher priority. The ordering convention below ensures correct evaluation.
+  ranges:
+    - range: "1000-1099"
+      purpose: "RFC1918 egress blocks (WAN_OUT)"
+    - range: "2000-2099"
+      purpose: "Trusted VLAN outbound allows"
+    - range: "2100-2199"
+      purpose: "Server VLAN outbound allows"
+    - range: "2200-2299"
+      purpose: "IoT VLAN explicit denies"
+    - range: "2300-2399"
+      purpose: "Guest VLAN explicit denies"
+    - range: "2400-2499"
+      purpose: "DMZ VLAN explicit denies + server pulls"
+    - range: "9000"
+      purpose: "Default inter-VLAN deny-all (implicit)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# ESTABLISHED/RELATED STATE TRACKING
+# ────────────────────────────────────────────────────────────────────────────
+stateful_policy:
+  description: >
+    UniFi uses stateful packet inspection by default. Return traffic for
+    established connections is automatically allowed. This means a server
+    initiating a connection to IoT (allowed) will receive return packets
+    even though IoT to Server is explicitly denied for NEW connections.
+  established_related: ALLOW
+  invalid_state: DROP
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED CAPABILITIES
+# ────────────────────────────────────────────────────────────────────────────
+planned_capabilities:
+  - id: network.firewall.audit
+    description: "Validate inter-VLAN rules match this baseline contract"
+    safety: read-only
+    approval: auto
+    status: planned
+
+  - id: network.firewall.apply
+    description: "Apply inter-VLAN firewall rules to UniFi from this baseline"
+    safety: mutating
+    approval: manual
+    status: planned
+
+# ────────────────────────────────────────────────────────────────────────────
+# PROPOSED GATE
+# ────────────────────────────────────────────────────────────────────────────
+proposed_gates:
+  - id: D343
+    description: "Enforce inter-VLAN rule presence and RFC1918 block order"
+    gate_id: netsec-firewall-baseline-lock
+    mode: report
+    promote_to_enforce_after_clean_runs: 3

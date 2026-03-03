@@ -1,0 +1,254 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# CrowdSec Deployment Contract
+# ═══════════════════════════════════════════════════════════════════════════
+# Governs CrowdSec agent deployment, bouncer integration, collection
+# selection, and TTP sharing configuration.
+#
+# Source plan: PLAN-NETWORK-SECURITY-OPS-WORKER-20260303
+# Parent loop: LOOP-NETWORK-SECURITY-OPS-WORKER-SPEC-20260303
+# Linked gap: GAP-OP-1458 (CrowdSec deployment)
+# ═══════════════════════════════════════════════════════════════════════════
+
+contract_id: NETWORK_CROWDSEC_V1
+version: "1.0"
+status: planned
+created: "2026-03-03"
+owner: "@ronny"
+
+description: >
+  CrowdSec is a collaborative threat intelligence platform. The Security
+  Engine (agent) parses logs, detects attacks, and makes local ban
+  decisions. Decisions are shared with the CrowdSec Central API for
+  community threat intelligence. Bouncers enforce decisions at network
+  edges (Cloudflare, iptables, etc.).
+
+# ────────────────────────────────────────────────────────────────────────────
+# ARCHITECTURE
+# ────────────────────────────────────────────────────────────────────────────
+architecture:
+  description: >
+    Single CrowdSec Security Engine deployed on infra-core (VM 204) or
+    a dedicated security VM. Parses logs from multiple sources. Decisions
+    enforced by Cloudflare bouncer at edge and optionally by local
+    iptables bouncer on critical hosts.
+
+  components:
+    - component: security_engine
+      description: "CrowdSec agent (log parser + decision engine)"
+      deployment: "Docker container on infra-core or dedicated VM"
+      version: "latest stable"
+
+    - component: local_api
+      description: "CrowdSec LAPI (decision storage + bouncer API)"
+      deployment: "Co-located with security engine"
+      port: 8080
+
+    - component: cloudflare_bouncer
+      description: "Enforces CrowdSec decisions at Cloudflare edge"
+      deployment: "Docker container co-located with engine"
+      integration: "Cloudflare API (IP Access Rules or WAF Custom Rules)"
+
+    - component: central_api
+      description: "CrowdSec community threat intel sharing"
+      connectivity: "Outbound HTTPS to api.crowdsec.net"
+      sharing: "Opt-in (attack signals shared, no PII)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# SECURITY ENGINE CONFIGURATION
+# ────────────────────────────────────────────────────────────────────────────
+security_engine:
+  deployment_target:
+    host: "infra-core (VM 204) or dedicated security VM"
+    install_method: "Docker (crowdsecurity/crowdsec:latest)"
+    persistent_volumes:
+      - "/var/lib/crowdsec/data"
+      - "/etc/crowdsec"
+
+  log_sources:
+    - source: "Stalwart mail logs"
+      type: syslog
+      path: "/var/log/stalwart/*.log"
+      collection: "crowdsecurity/postfix"
+      transport: "Docker volume mount or syslog forward"
+
+    - source: "Cloudflare tunnel access logs"
+      type: syslog
+      collection: "crowdsecurity/cloudflare"
+      transport: "Log forward from tunnel daemon"
+
+    - source: "SSH auth logs"
+      type: file
+      path: "/var/log/auth.log"
+      collection: "crowdsecurity/sshd"
+      transport: "Docker volume mount"
+
+    - source: "Cowrie honeypot logs"
+      type: json
+      path: "/var/log/cowrie/cowrie.json"
+      collection: "custom (cowrie JSON parser)"
+      transport: "Docker volume mount or syslog forward"
+      dependency: "Cowrie deployment (network.honeypot.contract.yaml)"
+
+    - source: "UniFi syslog"
+      type: syslog
+      collection: "crowdsecurity/unifi"
+      transport: "Syslog forward from UDR to CrowdSec host"
+
+  collections:
+    description: >
+      CrowdSec collections bundle parsers + scenarios for specific
+      log sources. Each collection is installed via `cscli collections install`.
+    installed:
+      - name: "crowdsecurity/linux"
+        purpose: "Base Linux log parsing (auth, syslog)"
+      - name: "crowdsecurity/sshd"
+        purpose: "SSH brute-force detection"
+      - name: "crowdsecurity/http-cve"
+        purpose: "HTTP CVE exploit detection"
+      - name: "crowdsecurity/whitelist-good-actors"
+        purpose: "Whitelist known good actors (search bots, monitors)"
+    planned:
+      - name: "crowdsecurity/postfix"
+        purpose: "Mail server abuse detection"
+        dependency: "Stalwart log forwarding"
+      - name: "crowdsecurity/cloudflare"
+        purpose: "Cloudflare access log analysis"
+      - name: "crowdsecurity/unifi"
+        purpose: "UniFi syslog analysis"
+
+  whitelists:
+    - cidr: "10.0.0.0/8"
+      reason: "Internal home network"
+    - cidr: "192.168.0.0/16"
+      reason: "Internal shop network"
+    - cidr: "100.64.0.0/10"
+      reason: "Tailscale CGNAT range"
+    - ip: "TBD"
+      reason: "Uptime Kuma monitoring IPs (if external)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# BOUNCER CONFIGURATION
+# ────────────────────────────────────────────────────────────────────────────
+bouncers:
+  cloudflare:
+    description: >
+      The Cloudflare bouncer pushes CrowdSec ban decisions to Cloudflare
+      as IP Access Rules or WAF Custom Rules. This blocks malicious IPs
+      at the edge before they reach origin infrastructure.
+    deployment: "Docker container (crowdsecurity/cs-cloudflare-bouncer)"
+    config:
+      cloudflare_api_token: "Infisical: /spine/vm-infra/network/CROWDSEC_CF_BOUNCER_TOKEN"
+      update_frequency: "10s"
+      ban_action: "managed_challenge"
+      captcha_action: "managed_challenge"
+    scope: "All Cloudflare zones (ronny.works, mintprints.com)"
+    activation_requires:
+      - "CrowdSec Security Engine operational with soak period complete"
+      - "Whitelist validated (no internal IPs blocked)"
+      - "Manual operator approval"
+
+  local_iptables:
+    description: >
+      Optional local bouncer for hosts not behind Cloudflare.
+      Uses iptables/nftables to block at the host firewall level.
+    status: planned
+    deployment: "cs-firewall-bouncer on critical hosts"
+    activation: "Only if edge bouncing insufficient"
+
+# ────────────────────────────────────────────────────────────────────────────
+# COMMUNITY SHARING (TTP)
+# ────────────────────────────────────────────────────────────────────────────
+community_sharing:
+  description: >
+    CrowdSec Central API enables community threat intelligence.
+    Attack signals (IP + scenario + timestamp) are shared; no PII or
+    log content is transmitted.
+  enrollment:
+    key_location: "Infisical: /spine/vm-infra/network/CROWDSEC_ENROLLMENT_KEY"
+    registration: "cscli capi register"
+  shared_data:
+    - "Attacking IP address"
+    - "Scenario that triggered the detection"
+    - "Timestamp of detection"
+  not_shared:
+    - "Log content"
+    - "Hostnames or internal IPs"
+    - "User data or PII"
+  received_data:
+    - "Community blocklist (consensus-based IP reputation)"
+    - "Updated every 2 hours"
+
+# ────────────────────────────────────────────────────────────────────────────
+# OBSERVABILITY INTEGRATION
+# ────────────────────────────────────────────────────────────────────────────
+observability:
+  metrics:
+    exporter: "CrowdSec Prometheus metrics endpoint"
+    port: 6060
+    path: "/metrics"
+    target: "Prometheus on observability VM (192.168.1.205)"
+    metrics_collected:
+      - "cs_active_decisions"
+      - "cs_alerts_total"
+      - "cs_parsed_lines_total"
+      - "cs_bucket_overflow_total"
+
+  dashboards:
+    - name: "CrowdSec Overview"
+      platform: Grafana
+      panels:
+        - "Active ban count"
+        - "Alert rate (per scenario)"
+        - "Top attacking IPs"
+        - "Bouncer enforcement stats"
+        - "Community blocklist size"
+
+  health_monitoring:
+    - target: "Uptime Kuma"
+      check: "CrowdSec LAPI health endpoint"
+      url: "http://{crowdsec_host}:8080/health"
+      interval: "60s"
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED CAPABILITIES
+# ────────────────────────────────────────────────────────────────────────────
+planned_capabilities:
+  - name: network.crowdsec.deploy
+    description: "Deploy CrowdSec Security Engine and Cloudflare bouncer"
+    safety: mutating
+    approval: manual
+    status: planned
+
+  - name: network.crowdsec.status
+    description: "Report CrowdSec agent/bouncer health and decision stats"
+    safety: read-only
+    approval: auto
+    status: planned
+
+  - name: network.crowdsec.decisions.list
+    description: "List active CrowdSec ban decisions"
+    safety: read-only
+    approval: auto
+    status: planned
+
+# ────────────────────────────────────────────────────────────────────────────
+# CREDENTIAL POLICY
+# ────────────────────────────────────────────────────────────────────────────
+credential_policy:
+  description: "All credentials via Infisical path references only."
+  infisical_paths:
+    - path: "/spine/vm-infra/network"
+      keys:
+        - "CROWDSEC_ENROLLMENT_KEY"
+        - "CROWDSEC_CF_BOUNCER_TOKEN"
+        - "CROWDSEC_LAPI_KEY"
+
+# ────────────────────────────────────────────────────────────────────────────
+# PROPOSED GATE
+# ────────────────────────────────────────────────────────────────────────────
+proposed_gates:
+  - id: D345
+    name: netsec-crowdsec-health-lock
+    description: "Enforce CrowdSec agent + bouncer alive and decision pipeline healthy"
+    mode: report
+    promote_to_enforce_after_clean_runs: 3
