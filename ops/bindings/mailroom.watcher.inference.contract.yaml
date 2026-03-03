@@ -1,0 +1,278 @@
+# Mailroom Watcher Self-Hosted Inference Contract
+# Defines provider selection policy, hardware profile tiers, circuit-breaker semantics,
+# budget guardrails, SLO acceptance criteria, and migration/rollback phases for
+# transitioning the hot-folder watcher from paid APIs to local-first inference.
+# Status: authoritative
+# Last verified: 2026-03-03
+
+version: 1
+updated: "2026-03-03"
+owner: "@ronny"
+scope: mailroom-watcher-inference
+contract_id: MAILROOM_WATCHER_INFERENCE_CONTRACT_V1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Provider Mode Enum
+# ─────────────────────────────────────────────────────────────────────────────
+provider_mode:
+  enum:
+    - local_default
+    - zero_llm
+    - paid_fallback
+  default: local_default
+  description: |
+    local_default: Ollama-compatible local endpoint is the primary dispatch target.
+    zero_llm: No LLM dispatch; watcher classifies prompts by rule-based heuristics only.
+    paid_fallback: Local endpoint is primary; paid provider activates on local failure.
+
+  env_mapping:
+    local_default:
+      SPINE_WATCHER_PROVIDER: local
+      SPINE_WATCHER_ALLOW_PAID_PROVIDER: "0"
+    zero_llm:
+      SPINE_WATCHER_PROVIDER: local
+      SPINE_WATCHER_ALLOW_PAID_PROVIDER: "0"
+      SPINE_WATCHER_ZERO_LLM: "1"
+    paid_fallback:
+      SPINE_WATCHER_PROVIDER: local
+      SPINE_WATCHER_ALLOW_PAID_PROVIDER: "1"
+      SPINE_WATCHER_PAID_FALLBACK_PROVIDER: zai
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paid Provider Circuit Breaker Policy
+# ─────────────────────────────────────────────────────────────────────────────
+paid_provider_circuit_breaker:
+  state_file: "${SPINE_STATE}/watcher-paid-provider.circuit.open"
+  ttl_seconds: 21600
+  triggers:
+    - insufficient_balance
+    - resource_package_exhausted
+    - auth_failure_cascade
+  action_on_trigger: park_prompt
+  park_lane: "${SPINE_INBOX}/parked"
+  recovery: manual_operator_clearance
+  description: |
+    When a paid provider returns a billing exhaustion or auth cascade error,
+    the circuit opens for ttl_seconds. During open state, prompts are parked
+    (not failed) to preserve retry eligibility. Operator must clear the circuit
+    after replenishing balance or fixing auth.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Budget Guardrails
+# ─────────────────────────────────────────────────────────────────────────────
+budget_guardrails:
+  monthly_paid_api_ceiling_usd: 5.00
+  disable_condition: insufficient_balance
+  disable_action: |
+    1. Open paid-provider circuit breaker.
+    2. Fall back to local_default mode.
+    3. Park any in-flight paid-lane prompts.
+  alert_threshold_pct: 80
+  description: |
+    The watcher must never accumulate more than $5/month in paid API spend.
+    When the ceiling is approached (80% alert) or the provider reports
+    insufficient balance, the system disables paid lanes and reverts to local.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime Path Authority
+# ─────────────────────────────────────────────────────────────────────────────
+runtime_paths:
+  inbox: "${SPINE_INBOX}"
+  outbox: "${SPINE_OUTBOX}"
+  state: "${SPINE_STATE}"
+  logs: "${SPINE_LOGS}"
+  ledger: "${SPINE_STATE}/ledger.csv"
+  circuit_state: "${SPINE_STATE}/watcher-paid-provider.circuit.open"
+  pid_file: "${SPINE_STATE}/agent-inbox.pid"
+  lock_dir: "${SPINE_STATE}/locks/agent-inbox.lock"
+  watcher_script: "ops/runtime/inbox/hot-folder-watcher.sh"
+  runtime_paths_lib: "ops/lib/runtime-paths.sh"
+  token_source: infisical
+  description: |
+    All runtime paths resolve via ops/lib/runtime-paths.sh spine_runtime_resolve_paths().
+    Token source is Infisical-only (infisical-agent.sh). No .env file fallback.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Local Provider Specification
+# ─────────────────────────────────────────────────────────────────────────────
+local_provider:
+  runtime_type: ollama_compatible
+  endpoint_default: "http://127.0.0.1:11434"
+  endpoint_env: SPINE_WATCHER_LOCAL_ENDPOINT
+  model_default: "llama3.2:3b"
+  model_env: SPINE_WATCHER_LOCAL_MODEL
+  api_path: "/api/chat"
+  health_check:
+    method: GET
+    path: "/api/tags"
+    success_code: 200
+    timeout_seconds: 5
+  required_capabilities:
+    - chat_completion
+  max_tokens_default: 4096
+  description: |
+    The local provider must expose an Ollama-compatible /api/chat endpoint.
+    Health is verified via GET /api/tags returning 200. The watcher will
+    not start if the local endpoint is unreachable and no paid fallback is enabled.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paid Provider Specification
+# ─────────────────────────────────────────────────────────────────────────────
+paid_providers:
+  zai:
+    endpoint: "https://api.z.ai/api/paas/v4/chat/completions"
+    model_default: "glm-4.7-flash"
+    model_env: ZAI_MODEL
+    api_key_env: ZAI_API_KEY
+    max_retries: 3
+    backoff_strategy: exponential
+    infisical_path: "/spine/vm-infra/infrastructure"
+    infisical_key: Z_AI_API_KEY
+  anthropic:
+    endpoint: "https://api.anthropic.com/v1/messages"
+    model_default: "claude-sonnet-4-20250514"
+    model_env: CLAUDE_MODEL
+    api_key_env: ANTHROPIC_API_KEY
+    explicit_allow_env: SPINE_WATCHER_ALLOW_ANTHROPIC
+    max_retries: 1
+    backoff_strategy: none
+    description: "Anthropic requires double-opt-in: SPINE_WATCHER_ALLOW_PAID_PROVIDER=1 AND SPINE_WATCHER_ALLOW_ANTHROPIC=1."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fallback Order
+# ─────────────────────────────────────────────────────────────────────────────
+fallback_order:
+  primary: local
+  secondary: zai
+  tertiary: anthropic
+  allowed_overrides:
+    - env: SPINE_WATCHER_PROVIDER
+      values: [local, zai, anthropic]
+    - env: SPINE_WATCHER_PAID_FALLBACK_PROVIDER
+      values: [zai, anthropic]
+  description: |
+    Default chain: local -> zai (if paid fallback enabled) -> anthropic (if double-opt-in).
+    The operator can override via SPINE_WATCHER_PROVIDER to start at any tier.
+    Circuit breaker applies to all paid providers independently.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hardware Profile Tiers (Self-Hosted Inference)
+# ─────────────────────────────────────────────────────────────────────────────
+hardware_profiles:
+  description: |
+    Tiered hardware profiles for 24/7 autonomous watcher inference workloads.
+    Selection depends on model size, throughput requirements, and budget.
+  tiers:
+    - id: tier_minimal
+      label: "Minimal (existing Mac Mini)"
+      hardware: "Apple Mac Mini M-series (existing)"
+      vram_gb: "shared unified memory"
+      target_model_class: "1B-3B parameter"
+      example_models: ["llama3.2:1b", "llama3.2:3b", "phi-3-mini"]
+      throughput_target_tps: 15
+      power_draw_watts: 10
+      monthly_cost_usd: 2.50
+      suitability: "light classification, short-form responses, queue triage"
+      procurement: existing
+    - id: tier_dedicated_gpu
+      label: "Dedicated GPU Server"
+      hardware: "Desktop with NVIDIA RTX 3060/4060 (12GB VRAM) or equivalent"
+      vram_gb: 12
+      target_model_class: "7B-13B parameter"
+      example_models: ["llama3.1:8b", "mistral:7b", "codellama:13b"]
+      throughput_target_tps: 30
+      power_draw_watts: 150
+      monthly_cost_usd: 20.00
+      suitability: "full autonomous triage, multi-step reasoning, code review"
+      procurement: planned
+    - id: tier_high_capacity
+      label: "High Capacity Inference"
+      hardware: "NVIDIA RTX 4090 (24GB VRAM) or dual-GPU"
+      vram_gb: 24
+      target_model_class: "30B-70B parameter"
+      example_models: ["llama3.1:70b-q4", "mixtral:8x7b"]
+      throughput_target_tps: 15
+      power_draw_watts: 350
+      monthly_cost_usd: 50.00
+      suitability: "high-fidelity reasoning, complex governance analysis"
+      procurement: future
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SLO Acceptance Criteria
+# ─────────────────────────────────────────────────────────────────────────────
+slo:
+  latency:
+    p50_seconds: 10
+    p95_seconds: 30
+    p99_seconds: 60
+    description: "Prompt-to-result wall-clock time. Local should beat paid API latency."
+  availability:
+    target_pct: 99.0
+    measurement_window_hours: 168
+    description: "Watcher must process queued prompts within measurement window."
+  quality:
+    minimum_useful_response_pct: 90
+    evaluation: manual_spot_check
+    description: "At least 90% of responses must be actionable (manual operator review)."
+  cost:
+    monthly_ceiling_usd: 5.00
+    local_target_usd: 2.50
+    description: "Monthly inference cost target. Local-only should stay under $2.50/mo electricity."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Migration / Rollback Policy
+# ─────────────────────────────────────────────────────────────────────────────
+migration:
+  phases:
+    - id: phase_0_baseline
+      label: "Baseline (current state)"
+      provider_mode: paid_fallback
+      description: "Watcher runs local-first with zai paid fallback. Circuit breaker active."
+      exit_criteria: "Local endpoint stable for 7 days with >90% success rate."
+    - id: phase_1_local_only
+      label: "Local-only cutover"
+      provider_mode: local_default
+      description: "Disable paid fallback. All prompts processed locally. Parked on local failure."
+      exit_criteria: "14 consecutive days with <5% park rate and SLO latency met."
+    - id: phase_2_zero_cost
+      label: "Zero recurring cost"
+      provider_mode: local_default
+      description: "Paid API keys removed from runtime env. Budget guardrail ceiling set to $0."
+      exit_criteria: "30 days stable. Paid provider keys archived but not in runtime path."
+  rollback:
+    trigger_conditions:
+      - "Park rate exceeds 20% over 48 hours."
+      - "SLO latency p95 exceeds 60 seconds for 24 hours."
+      - "Operator determines response quality is unacceptable."
+    procedure:
+      - "Set SPINE_WATCHER_ALLOW_PAID_PROVIDER=1 in launchd plist."
+      - "Set SPINE_WATCHER_PAID_FALLBACK_PROVIDER=zai."
+      - "Reload watcher: launchctl unload/load plist."
+      - "Verify with: ./bin/ops cap run spine.watcher.status"
+      - "File rollback gap with parent loop reference."
+    max_rollback_time_minutes: 5
+    description: |
+      Rollback to paid fallback is a 5-minute operator action via launchd env change.
+      No code changes required. Rollback triggers are automated via park-rate monitoring.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Source Bindings (cross-references)
+# ─────────────────────────────────────────────────────────────────────────────
+source_bindings:
+  watcher_script: ops/runtime/inbox/hot-folder-watcher.sh
+  runtime_contract: ops/bindings/mailroom.runtime.contract.yaml
+  task_worker_contract: ops/bindings/mailroom.task.worker.contract.yaml
+  paid_circuit_gate: D329
+  runtime_path_gate: D328
+  inference_contract_gate: D333
+  launchd_parity_gate: D74
+  runbook: docs/governance/MAILROOM_WATCHER_INFERENCE_RUNBOOK.md
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Governance
+# ─────────────────────────────────────────────────────────────────────────────
+governance:
+  parent_gap: GAP-OP-1376
+  parent_loop: LOOP-MAILROOM-WATCHER-SELF-HOSTED-INFERENCE-CONTRACT-20260303
+  verify_command: "./bin/ops cap run verify.run -- fast"
+  regression_gate: D333

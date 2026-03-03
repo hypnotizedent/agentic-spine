@@ -1,13 +1,13 @@
 ---
 loop_id: LOOP-MAILROOM-WATCHER-SELF-HOSTED-INFERENCE-CONTRACT-20260303
 created: 2026-03-03
-status: planned
+status: active
 owner: "@ronny"
 scope: mailroom
 priority: medium
-horizon: later
-execution_readiness: blocked
-blocked_by: "operator_hardware_decision + self_hosted_inference_contract_authoring"
+horizon: now
+execution_readiness: runnable
+blocked_by: ""
 objective: Define and lock the canonical self-hosted watcher inference contract, procurement profile, and migration/rollback policy for autonomous low-recurring-cost execution.
 ---
 
