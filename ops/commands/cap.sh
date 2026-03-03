@@ -555,7 +555,7 @@ run_cap() {
       # or are administrative operations that don't mutate domain state
       # (GAP-OP-1484, GAP-OP-1492).
       case "$name" in
-        orchestration.terminal.entry|orchestration.wave.kickoff|orchestration.wave.start|orchestration.wave.dispatch|orchestration.wave.ack|orchestration.wave.close|loops.create|session.start|aof.contract.acknowledge|session.role.override|friction.ingest|friction.reconcile) orchestrator_loop_id="" ;;
+        orchestration.terminal.entry|orchestration.wave.kickoff|orchestration.wave.start|orchestration.wave.dispatch|orchestration.wave.ack|orchestration.wave.close|loops.create|session.start|aof.contract.acknowledge|session.role.override|friction.ingest|friction.reconcile|state.shared.reconcile) orchestrator_loop_id="" ;;
       esac
 
       if [[ -n "$orchestrator_loop_id" ]]; then
