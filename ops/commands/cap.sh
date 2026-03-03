@@ -516,7 +516,7 @@ run_cap() {
     # ── Proactive mutation guard (critical domains, snapshot-driven) ──
     # ── Orchestrator-subagent fail-closed guard (loop lock evidence) ──
     if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
-      local orchestrator_loop_id orchestrator_scope_file orchestrator_mode
+      local orchestrator_loop_id orchestrator_scope_file orchestrator_mode orchestrator_scope_status
       local orchestrator_lock_dir orchestrator_lock_match
       local caller_worktree caller_branch
       local orch_bypass orch_bypass_reason
@@ -546,20 +546,21 @@ run_cap() {
           exit_code=5
         else
           scope_frontmatter="$(sed -n '/^---$/,/^---$/p' "$orchestrator_scope_file" 2>/dev/null || true)"
+          orchestrator_scope_status="$(printf '%s\n' "$scope_frontmatter" | sed -n 's/^status:[[:space:]]*//p' | head -1 | tr -d '[:space:]')"
           orchestrator_mode="$(printf '%s\n' "$scope_frontmatter" | sed -n 's/^execution_mode:[[:space:]]*//p' | head -1 | tr -d '[:space:]')"
-
-          if [[ -z "$orchestrator_mode" ]]; then
-            echo "BLOCKED: orchestrator mutation guard"
-            echo "Capability: $name"
-            echo "Loop: $orchestrator_loop_id"
-            echo "Reason: loop scope missing execution_mode"
-            echo ""
-            echo "Remediation:"
-            echo "  Add 'execution_mode: single_worker|orchestrator_subagents' to:"
-            echo "  $orchestrator_scope_file"
-            blocked_reason="orchestrator_guard_execution_mode_missing:$orchestrator_loop_id"
-            exit_code=5
-          elif [[ "$orchestrator_mode" == "orchestrator_subagents" ]]; then
+          if [[ "$orchestrator_scope_status" == "active" || "$orchestrator_scope_status" == "open" || "$orchestrator_scope_status" == "draft" ]]; then
+            if [[ -z "$orchestrator_mode" ]]; then
+              echo "BLOCKED: orchestrator mutation guard"
+              echo "Capability: $name"
+              echo "Loop: $orchestrator_loop_id"
+              echo "Reason: loop scope missing execution_mode"
+              echo ""
+              echo "Remediation:"
+              echo "  Add 'execution_mode: single_worker|orchestrator_subagents' to:"
+              echo "  $orchestrator_scope_file"
+              blocked_reason="orchestrator_guard_execution_mode_missing:$orchestrator_loop_id"
+              exit_code=5
+            elif [[ "$orchestrator_mode" == "orchestrator_subagents" ]]; then
             orch_bypass="${SPINE_ORCH_MUTATION_GUARD_BYPASS:-}"
             orch_bypass_reason="${SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON:-}"
 
@@ -611,6 +612,7 @@ run_cap() {
                 blocked_reason="orchestrator_guard_lock_missing:$orchestrator_loop_id:${caller_branch:-unknown}"
                 exit_code=5
               fi
+            fi
             fi
           fi
         fi
