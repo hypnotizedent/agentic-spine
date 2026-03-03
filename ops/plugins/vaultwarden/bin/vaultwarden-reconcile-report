@@ -22,6 +22,8 @@ TIMEOUT="4"
 CANONICAL_FILE="$CANONICAL_FILE_DEFAULT"
 TAXONOMY_FILE="$TAXONOMY_FILE_DEFAULT"
 RULES_FILE="$RULES_FILE_DEFAULT"
+MAX_WORKERS="32"
+HOST_FAIL_FAST=true
 
 usage() {
   cat <<USAGE
@@ -33,6 +35,8 @@ Options:
   --mode <auto|bw>          Mode for generated audit data (default: auto)
   --include-trashed         Include trashed entries in generated audit data
   --timeout <seconds>       Healthcheck timeout when generated (default: 4)
+  --max-workers <n>         Healthcheck parallelism (default: 32)
+  --no-host-fail-fast       Disable host-level fail-fast cache in healthcheck
   --canonical <path>        canonical_hosts.yaml path
   --taxonomy <path>         folder_taxonomy.yaml path
   --rules <path>            reconcile_rules.yaml path
@@ -55,6 +59,10 @@ while [[ $# -gt 0 ]]; do
       SHOW_TRASHED=true; shift ;;
     --timeout)
       TIMEOUT="${2:?--timeout requires seconds}"; shift 2 ;;
+    --max-workers)
+      MAX_WORKERS="${2:?--max-workers requires integer}"; shift 2 ;;
+    --no-host-fail-fast)
+      HOST_FAIL_FAST=false; shift ;;
     --canonical)
       CANONICAL_FILE="${2:?--canonical requires path}"; shift 2 ;;
     --taxonomy)
@@ -83,6 +91,8 @@ case "$FORMAT" in
 esac
 
 [[ "$TIMEOUT" =~ ^[0-9]+([.][0-9]+)?$ ]] || _stop "--timeout must be numeric"
+[[ "$MAX_WORKERS" =~ ^[0-9]+$ ]] || _stop "--max-workers must be integer"
+(( MAX_WORKERS >= 1 )) || _stop "--max-workers must be >= 1"
 
 command -v python3 >/dev/null 2>&1 || _stop "missing dependency: python3"
 command -v yq >/dev/null 2>&1 || _stop "missing dependency: yq"
@@ -116,7 +126,11 @@ if [[ -n "$HEALTH_INPUT" ]]; then
   [[ -f "$HEALTH_INPUT" ]] || _stop "health input not found: $HEALTH_INPUT"
   cp "$HEALTH_INPUT" "$HEALTH_JSON"
 else
-  "$SCRIPT_DIR/vaultwarden-uri-healthcheck" --input "$AUDIT_JSON" --format json --timeout "$TIMEOUT" --output "$HEALTH_JSON" >/dev/null
+  health_cmd=("$SCRIPT_DIR/vaultwarden-uri-healthcheck" --input "$AUDIT_JSON" --format json --timeout "$TIMEOUT" --max-workers "$MAX_WORKERS" --output "$HEALTH_JSON")
+  if [[ "$HOST_FAIL_FAST" != "true" ]]; then
+    health_cmd+=(--no-host-fail-fast)
+  fi
+  "${health_cmd[@]}" >/dev/null
 fi
 
 yq -o=json '.' "$CANONICAL_FILE" > "$CANONICAL_JSON"

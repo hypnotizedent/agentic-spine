@@ -1,0 +1,556 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="${COMMUNICATIONS_STACK_CONTRACT:-$ROOT/ops/bindings/communications.stack.contract.yaml}"
+SSH_BINDING="${SSH_TARGETS_FILE:-$ROOT/ops/bindings/ssh.targets.yaml}"
+LINKAGE_CONTRACT="${MAIL_ARCHIVER_LINKAGE_CONTRACT:-$ROOT/ops/bindings/mail.archiver.account.linkage.contract.yaml}"
+SSH_STATUS_BIN="$ROOT/ops/plugins/ssh/bin/ssh-target-status"
+
+TARGET_ID=""
+TAIL_LINES=1200
+ATTEMPTS=3
+JSON_MODE=0
+APP_CONTAINER="mail-archiver"
+DB_CONTAINER="mail-archiver-db"
+
+fail() { echo "communications.mailarchiver.sync.status FAIL: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+need yq
+need jq
+need ssh
+need python3
+[[ -x "$SSH_STATUS_BIN" ]] || fail "missing dependency runtime: $SSH_STATUS_BIN"
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+[[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
+[[ -f "$LINKAGE_CONTRACT" ]] || fail "missing linkage contract: $LINKAGE_CONTRACT"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --target|--ssh-id) TARGET_ID="${2:?--target requires a value}"; shift 2 ;;
+    --tail) TAIL_LINES="${2:?--tail requires a value}"; shift 2 ;;
+    --attempts) ATTEMPTS="${2:?--attempts requires a value}"; shift 2 ;;
+    --app-container) APP_CONTAINER="${2:?--app-container requires a value}"; shift 2 ;;
+    --db-container) DB_CONTAINER="${2:?--db-container requires a value}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-mail-archiver-sync-status [--target <ssh-target-id>] [--tail <n>] [--attempts <n>] [--json]
+
+One-call sync read-model for mail-archiver live sync health:
+  - transport contract (LAN/Tailscale/ProxyJump fallback state)
+  - container runtime status
+  - MailAccounts.LastSync + ArchivedEmails counts by account
+  - Gmail LastSync epoch anomaly detection
+  - M365 baseline coverage drift against linkage import history
+  - log-derived slow-label signal hints (best-effort)
+USAGE
+      exit 0
+      ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ "$TAIL_LINES" =~ ^[0-9]+$ ]] || fail "--tail must be an integer"
+(( TAIL_LINES > 0 )) || fail "--tail must be > 0"
+[[ "$ATTEMPTS" =~ ^[0-9]+$ ]] || fail "--attempts must be an integer"
+(( ATTEMPTS > 0 )) || fail "--attempts must be > 0"
+
+if [[ -z "$TARGET_ID" ]]; then
+  TARGET_ID="$(yq e -r '.mail_archiver.monitoring.machine_status_target.ssh_target // ""' "$CONTRACT")"
+  if [[ -z "$TARGET_ID" || "$TARGET_ID" == "null" ]]; then
+    TARGET_ID="$(yq e -r '.pilot.vm_target.hostname // ""' "$CONTRACT")"
+  fi
+fi
+[[ -n "$TARGET_ID" && "$TARGET_ID" != "null" ]] || fail "target id not found (set --target or contract pilot.vm_target.hostname)"
+
+DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_BINDING")"
+DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
+DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
+
+TARGET_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
+TARGET_USER="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+TARGET_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
+TARGET_TO="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .connect_timeout_sec // $DEF_TO" "$SSH_BINDING")"
+TARGET_EXTRA_OPTS="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .ssh_extra_opts // \"\"" "$SSH_BINDING")"
+TARGET_PROBE_VIA="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .probe_via // \"\"" "$SSH_BINDING")"
+
+[[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host"
+[[ -n "$TARGET_USER" && "$TARGET_USER" != "null" ]] || TARGET_USER="$DEF_USER"
+[[ "$TARGET_PORT" =~ ^[0-9]+$ ]] || TARGET_PORT="$DEF_PORT"
+[[ "$TARGET_TO" =~ ^[0-9]+$ ]] || TARGET_TO="$DEF_TO"
+
+# Resolve governed transport contract first (triple-failure handling + fallback state).
+transport_json="$("$SSH_STATUS_BIN" --json --id "$TARGET_ID" --attempts "$ATTEMPTS" 2>/dev/null || true)"
+if [[ -z "$transport_json" ]] || ! jq -e . >/dev/null 2>&1 <<<"$transport_json"; then
+  fail "ssh target contract probe failed for '$TARGET_ID'"
+fi
+
+transport_status="$(jq -r '.status // "fail"' <<<"$transport_json")"
+target_transport="$(jq -c '.targets[0] // {}' <<<"$transport_json")"
+path_used="$(jq -r '.path_used // ""' <<<"$target_transport")"
+effective_host="$(jq -r '.effective_host // ""' <<<"$target_transport")"
+contract_state="$(jq -r '.contract_state // "contract_fail_all_paths"' <<<"$target_transport")"
+transport_reason="$(jq -r '.reason // ""' <<<"$target_transport")"
+
+if [[ "$transport_status" == "fail" || -z "$effective_host" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "communications.mailarchiver.sync.status" \
+      --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg status "FAIL" \
+      --arg target_id "$TARGET_ID" \
+      --arg reason "${transport_reason:-transport_unavailable}" \
+      --argjson transport "$transport_json" \
+      '{capability:$capability,generated_at:$generated_at,status:$status,target_id:$target_id,reason:$reason,transport:$transport}'
+  else
+    echo "communications.mailarchiver.sync.status"
+    echo "status: FAIL"
+    echo "target_id: $TARGET_ID"
+    echo "reason: ${transport_reason:-transport_unavailable}"
+    echo "transport_contract: $contract_state"
+  fi
+  exit 1
+fi
+
+SSH_OPTS=(
+  -p "$TARGET_PORT"
+  -o "ConnectTimeout=$TARGET_TO"
+  -o "BatchMode=$DEF_BATCH"
+  -o "StrictHostKeyChecking=$DEF_STRICT"
+  -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+)
+if [[ -n "$TARGET_EXTRA_OPTS" && "$TARGET_EXTRA_OPTS" != "null" ]]; then
+  # shellcheck disable=SC2206
+  EXTRA_OPTS=( $TARGET_EXTRA_OPTS )
+  SSH_OPTS+=("${EXTRA_OPTS[@]}")
+fi
+
+SSH_TARGET="${TARGET_USER}@${effective_host}"
+JUMP_SPEC=""
+if [[ "$path_used" == "proxyjump" && -n "$TARGET_PROBE_VIA" && "$TARGET_PROBE_VIA" != "null" ]]; then
+  jump_host="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_PROBE_VIA\") | .host // \"\"" "$SSH_BINDING")"
+  jump_user="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_PROBE_VIA\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+  jump_port="$(yq -r ".ssh.targets[] | select(.id == \"$TARGET_PROBE_VIA\") | .port // $DEF_PORT" "$SSH_BINDING")"
+  if [[ -n "$jump_host" && "$jump_host" != "null" ]]; then
+    JUMP_SPEC="${jump_user}@${jump_host}:${jump_port}"
+  fi
+fi
+
+run_remote() {
+  local script="$1"
+  if [[ -n "$JUMP_SPEC" ]]; then
+    ssh "${SSH_OPTS[@]}" -J "$JUMP_SPEC" "$SSH_TARGET" "$script"
+  else
+    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$script"
+  fi
+}
+
+META_RAW=""
+if ! META_RAW="$(run_remote "bash -s -- '$APP_CONTAINER' '$DB_CONTAINER'" <<'EOS'
+set -euo pipefail
+
+APP_CONTAINER="${1:-mail-archiver}"
+DB_CONTAINER="${2:-mail-archiver-db}"
+
+DOCKER=(docker)
+if ! docker info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    DOCKER=(sudo -n docker)
+  else
+    DOCKER=()
+  fi
+fi
+
+container_state() {
+  local name="$1"
+  if [[ "${#DOCKER[@]}" -eq 0 ]]; then
+    echo "docker_unreachable|none|0"
+    return
+  fi
+  "${DOCKER[@]}" inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.RestartCount}}' "$name" 2>/dev/null || echo "missing|none|0"
+}
+
+APP_STATE="$(container_state "$APP_CONTAINER")"
+DB_STATE="$(container_state "$DB_CONTAINER")"
+
+sql_json() {
+  local q="$1"
+  if [[ "${#DOCKER[@]}" -eq 0 ]]; then
+    echo ""
+    return
+  fi
+  "${DOCKER[@]}" exec "$DB_CONTAINER" psql -U mailuser -d MailArchiver -t -A -c "$q" 2>/dev/null | tr -d '\n' || true
+}
+
+QUERY_ACCOUNTS_MAIL_ARCHIVER="$(cat <<'SQL'
+SELECT COALESCE(json_agg(row_to_json(t))::text, '[]')
+FROM (
+  SELECT
+    "Id"::text AS account_id,
+    COALESCE(to_jsonb(ma)->>'ProviderType', to_jsonb(ma)->>'Provider', '') AS provider_type,
+    COALESCE(to_jsonb(ma)->>'Email', to_jsonb(ma)->>'EmailAddress', '') AS email,
+    COALESCE(to_jsonb(ma)->>'LastSync', '') AS last_sync
+  FROM mail_archiver."MailAccounts" ma
+  ORDER BY "Id"
+) t;
+SQL
+)"
+QUERY_ACCOUNTS_PUBLIC="$(cat <<'SQL'
+SELECT COALESCE(json_agg(row_to_json(t))::text, '[]')
+FROM (
+  SELECT
+    "Id"::text AS account_id,
+    COALESCE(to_jsonb(ma)->>'ProviderType', to_jsonb(ma)->>'Provider', '') AS provider_type,
+    COALESCE(to_jsonb(ma)->>'Email', to_jsonb(ma)->>'EmailAddress', '') AS email,
+    COALESCE(to_jsonb(ma)->>'LastSync', '') AS last_sync
+  FROM public."MailAccounts" ma
+  ORDER BY "Id"
+) t;
+SQL
+)"
+QUERY_COUNTS_MAIL_ARCHIVER="$(cat <<'SQL'
+SELECT COALESCE(json_object_agg(account_id, cnt)::text, '{}')
+FROM (
+  SELECT "MailAccountId"::text AS account_id, count(*)::bigint AS cnt
+  FROM mail_archiver."ArchivedEmails"
+  GROUP BY 1
+) t;
+SQL
+)"
+QUERY_COUNTS_PUBLIC="$(cat <<'SQL'
+SELECT COALESCE(json_object_agg(account_id, cnt)::text, '{}')
+FROM (
+  SELECT "MailAccountId"::text AS account_id, count(*)::bigint AS cnt
+  FROM public."ArchivedEmails"
+  GROUP BY 1
+) t;
+SQL
+)"
+QUERY_TOTAL_MAIL_ARCHIVER='SELECT count(*)::text FROM mail_archiver."ArchivedEmails";'
+QUERY_TOTAL_PUBLIC='SELECT count(*)::text FROM public."ArchivedEmails";'
+
+ACCOUNTS_JSON="$(sql_json "$QUERY_ACCOUNTS_MAIL_ARCHIVER")"
+if [[ -z "$ACCOUNTS_JSON" ]]; then
+  ACCOUNTS_JSON="$(sql_json "$QUERY_ACCOUNTS_PUBLIC")"
+fi
+[[ -n "$ACCOUNTS_JSON" ]] || ACCOUNTS_JSON='[]'
+
+COUNTS_JSON="$(sql_json "$QUERY_COUNTS_MAIL_ARCHIVER")"
+if [[ -z "$COUNTS_JSON" ]]; then
+  COUNTS_JSON="$(sql_json "$QUERY_COUNTS_PUBLIC")"
+fi
+[[ -n "$COUNTS_JSON" ]] || COUNTS_JSON='{}'
+
+TOTAL_COUNT="$(sql_json "$QUERY_TOTAL_MAIL_ARCHIVER")"
+if [[ -z "$TOTAL_COUNT" ]]; then
+  TOTAL_COUNT="$(sql_json "$QUERY_TOTAL_PUBLIC")"
+fi
+[[ -n "$TOTAL_COUNT" ]] || TOTAL_COUNT='0'
+
+echo "app_state=$APP_STATE"
+echo "db_state=$DB_STATE"
+echo "total_count=$TOTAL_COUNT"
+echo "accounts_json_b64=$(printf '%s' "$ACCOUNTS_JSON" | base64 | tr -d '\n')"
+echo "counts_json_b64=$(printf '%s' "$COUNTS_JSON" | base64 | tr -d '\n')"
+EOS
+)"; then
+  fail "remote metadata probe failed for target '$TARGET_ID'"
+fi
+
+LOG_TEXT=""
+LOG_TEXT="$(run_remote "bash -s -- '$APP_CONTAINER' '$TAIL_LINES'" <<'EOS'
+set -euo pipefail
+APP_CONTAINER="${1:-mail-archiver}"
+TAIL_LINES="${2:-1200}"
+DOCKER=(docker)
+if ! docker info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    DOCKER=(sudo -n docker)
+  else
+    DOCKER=()
+  fi
+fi
+if [[ "${#DOCKER[@]}" -eq 0 ]]; then
+  exit 0
+fi
+"${DOCKER[@]}" logs "$APP_CONTAINER" --tail "$TAIL_LINES" 2>&1 || true
+EOS
+)" || true
+
+APP_STATE="$(printf '%s\n' "$META_RAW" | sed -n 's/^app_state=//p' | head -1)"
+DB_STATE="$(printf '%s\n' "$META_RAW" | sed -n 's/^db_state=//p' | head -1)"
+TOTAL_COUNT="$(printf '%s\n' "$META_RAW" | sed -n 's/^total_count=//p' | head -1)"
+ACCOUNTS_B64="$(printf '%s\n' "$META_RAW" | sed -n 's/^accounts_json_b64=//p' | head -1)"
+COUNTS_B64="$(printf '%s\n' "$META_RAW" | sed -n 's/^counts_json_b64=//p' | head -1)"
+
+[[ -n "$ACCOUNTS_B64" ]] || ACCOUNTS_B64="W10="
+[[ -n "$COUNTS_B64" ]] || COUNTS_B64="e30="
+
+decode_b64() {
+  local value="$1"
+  printf '%s' "$value" | base64 --decode 2>/dev/null \
+    || printf '%s' "$value" | base64 -D 2>/dev/null \
+    || true
+}
+
+ACCOUNTS_JSON="$(decode_b64 "$ACCOUNTS_B64")"
+COUNTS_JSON="$(decode_b64 "$COUNTS_B64")"
+[[ -n "$ACCOUNTS_JSON" ]] || ACCOUNTS_JSON='[]'
+[[ -n "$COUNTS_JSON" ]] || COUNTS_JSON='{}'
+[[ -n "$TOTAL_COUNT" ]] || TOTAL_COUNT="0"
+
+LINKAGE_JSON="$(yq -o=json '.' "$LINKAGE_CONTRACT")"
+LOG_TMP="$(mktemp)"
+trap 'rm -f "$LOG_TMP"' EXIT INT TERM
+printf '%s\n' "$LOG_TEXT" > "$LOG_TMP"
+
+ANALYSIS_JSON="$(python3 - "$LINKAGE_JSON" "$ACCOUNTS_JSON" "$COUNTS_JSON" "$TOTAL_COUNT" "$LOG_TMP" <<'PY'
+import json
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+linkage = json.loads(sys.argv[1])
+accounts = json.loads(sys.argv[2] or "[]")
+counts = json.loads(sys.argv[3] or "{}")
+total_count_raw = sys.argv[4] or "0"
+logs_text = Path(sys.argv[5]).read_text(encoding="utf-8", errors="replace")
+
+if not isinstance(accounts, list):
+    accounts = []
+if not isinstance(counts, dict):
+    counts = {}
+
+accounts_by_id = {str((row or {}).get("account_id") or ""): (row or {}) for row in accounts}
+count_by_id = {}
+for k, v in counts.items():
+    key = str(k or "")
+    try:
+        count_by_id[key] = int(v)
+    except Exception:
+        count_by_id[key] = 0
+
+live_sync_stale_hours = 1
+try:
+    live_sync_stale_hours = int((((linkage.get("freshness_semantics") or {}).get("live-sync") or {}).get("stale_after_hours") or 1))
+except Exception:
+    live_sync_stale_hours = 1
+
+issues = []
+account_report = []
+now = datetime.now(timezone.utc)
+
+for entry in (linkage.get("accounts") or []):
+    if not isinstance(entry, dict):
+        continue
+    account_id = str(entry.get("db_account_id") or "")
+    contract_id = str(entry.get("id") or "")
+    provider = str(entry.get("provider") or "")
+    mailbox = str(entry.get("mailbox") or "")
+    lane_type = str(entry.get("lane_type") or "")
+
+    db_row = accounts_by_id.get(account_id, {})
+    db_provider = str(db_row.get("provider_type") or "")
+    db_email = str(db_row.get("email") or "")
+    last_sync = str(db_row.get("last_sync") or "")
+    archived_count = int(count_by_id.get(account_id, 0))
+
+    parsed_last_sync = None
+    if last_sync:
+        raw = last_sync
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed_last_sync = datetime.fromisoformat(raw)
+            if parsed_last_sync.tzinfo is None:
+                parsed_last_sync = parsed_last_sync.replace(tzinfo=timezone.utc)
+            parsed_last_sync = parsed_last_sync.astimezone(timezone.utc)
+        except Exception:
+            parsed_last_sync = None
+
+    stale = False
+    if lane_type == "live-sync" and parsed_last_sync is not None:
+        stale = parsed_last_sync < (now - timedelta(hours=live_sync_stale_hours))
+
+    local_issues = []
+    if not db_row:
+        local_issues.append("account_missing_in_db")
+        issues.append({
+            "code": "account_missing_in_db",
+            "severity": "high",
+            "account_contract_id": contract_id,
+            "db_account_id": account_id,
+            "detail": f"Account {contract_id} (db_account_id={account_id}) missing in MailAccounts",
+        })
+
+    if provider == "gmail" and archived_count > 0:
+        year = 0
+        if parsed_last_sync is not None:
+            year = parsed_last_sync.year
+        elif last_sync.startswith("1970"):
+            year = 1970
+        if year <= 1971:
+            local_issues.append("gmail_lastsync_epoch")
+            issues.append({
+                "code": "gmail_lastsync_epoch",
+                "severity": "medium",
+                "account_contract_id": contract_id,
+                "db_account_id": account_id,
+                "detail": f"Gmail account {contract_id} reports LastSync at epoch-like value ({last_sync}) despite archived_count={archived_count}",
+            })
+
+    if "microsoft" in provider:
+        expected_total = int((((entry.get("sync") or {}).get("import_history") or {}).get("total_imported") or 0))
+        if expected_total > 0 and archived_count < expected_total:
+            local_issues.append("m365_baseline_gap")
+            issues.append({
+                "code": "m365_baseline_gap",
+                "severity": "medium",
+                "account_contract_id": contract_id,
+                "db_account_id": account_id,
+                "detail": f"M365 account {contract_id} archived_count={archived_count} < expected_import_baseline={expected_total}",
+            })
+
+    if lane_type == "live-sync":
+        if parsed_last_sync is None:
+            local_issues.append("lastsync_missing_or_unparseable")
+            issues.append({
+                "code": "lastsync_missing_or_unparseable",
+                "severity": "medium",
+                "account_contract_id": contract_id,
+                "db_account_id": account_id,
+                "detail": f"Live-sync account {contract_id} has missing/unparseable LastSync ({last_sync})",
+            })
+        elif stale:
+            local_issues.append("lastsync_stale")
+            issues.append({
+                "code": "lastsync_stale",
+                "severity": "medium",
+                "account_contract_id": contract_id,
+                "db_account_id": account_id,
+                "detail": f"Live-sync account {contract_id} LastSync stale ({last_sync})",
+            })
+
+    account_report.append({
+        "account_contract_id": contract_id,
+        "db_account_id": account_id,
+        "provider_contract": provider,
+        "provider_db": db_provider,
+        "mailbox_contract": mailbox,
+        "mailbox_db": db_email,
+        "lane_type": lane_type,
+        "last_sync": last_sync,
+        "last_sync_stale": stale,
+        "archived_count": archived_count,
+        "issues": local_issues,
+    })
+
+slow_gmail_signal = False
+slow_rate_value = None
+for line in logs_text.splitlines():
+    lower = line.lower()
+    if "important" not in lower:
+        continue
+    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(?:msg|min|messages/min)", lower)
+    if not m:
+        continue
+    try:
+        rate = float(m.group(1))
+    except Exception:
+        continue
+    if rate < 80:
+        slow_gmail_signal = True
+        slow_rate_value = rate
+        break
+
+if slow_gmail_signal:
+    issues.append({
+        "code": "gmail_label_reassign_slow_signal",
+        "severity": "low",
+        "detail": f"Observed low Gmail label throughput signal around {slow_rate_value} msg/min in recent logs",
+    })
+
+status = "OK"
+if issues:
+    status = "WARN"
+
+result = {
+    "status": status,
+    "live_sync_stale_after_hours": live_sync_stale_hours,
+    "accounts": account_report,
+    "issues": issues,
+    "total_archived_emails": int(total_count_raw) if str(total_count_raw).isdigit() else 0,
+}
+print(json.dumps(result))
+PY
+)"
+
+APP_STATUS="${APP_STATE%%|*}"
+DB_STATUS="${DB_STATE%%|*}"
+
+overall_status="$(jq -r '.status // "WARN"' <<<"$ANALYSIS_JSON")"
+if [[ "$APP_STATUS" != "running" || "$DB_STATUS" != "running" ]]; then
+  overall_status="FAIL"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg capability "communications.mailarchiver.sync.status" \
+    --arg schema_version "1.0" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg status "$overall_status" \
+    --arg target_id "$TARGET_ID" \
+    --arg transport_status "$transport_status" \
+    --arg contract_state "$contract_state" \
+    --arg path_used "$path_used" \
+    --arg effective_host "$effective_host" \
+    --arg app_status "$APP_STATUS" \
+    --arg db_status "$DB_STATUS" \
+    --arg total_count "$TOTAL_COUNT" \
+    --argjson transport "$transport_json" \
+    --argjson analysis "$ANALYSIS_JSON" \
+    '{
+      capability:$capability,
+      schema_version:$schema_version,
+      generated_at:$generated_at,
+      status:$status,
+      data:{
+        target_id:$target_id,
+        transport:{
+          status:$transport_status,
+          contract_state:$contract_state,
+          path_used:$path_used,
+          effective_host:$effective_host,
+          probe:$transport
+        },
+        runtime:{
+          app_status:$app_status,
+          db_status:$db_status,
+          total_archived_emails:($total_count|tonumber? // 0)
+        },
+        sync:$analysis
+      }
+    }'
+else
+  issue_count="$(jq -r '.issues | length' <<<"$ANALYSIS_JSON")"
+  echo "communications.mailarchiver.sync.status"
+  echo "status: $overall_status"
+  echo "target_id: $TARGET_ID"
+  echo "transport: $contract_state path=$path_used host=$effective_host"
+  echo "runtime: app=$APP_STATUS db=$DB_STATUS total_archived=${TOTAL_COUNT}"
+  echo "issues: $issue_count"
+  jq -r '.issues[]? | "- [\(.severity)] \(.code): \(.detail)"' <<<"$ANALYSIS_JSON"
+fi
+
+if [[ "$overall_status" == "FAIL" ]]; then
+  exit 1
+fi
+
+exit 0

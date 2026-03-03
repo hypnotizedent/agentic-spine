@@ -14,6 +14,8 @@ LIMIT="0"
 MODE="auto"
 SHOW_TRASHED=false
 OUTPUT=""
+MAX_WORKERS="32"
+HOST_FAIL_FAST=true
 
 usage() {
   cat <<USAGE
@@ -24,6 +26,8 @@ Options:
   --format <table|csv|json>  Output format (default: table)
   --timeout <seconds>   Per-URI timeout (default: 4)
   --limit <n>           Max unique URIs to check (0 = no limit, default)
+  --max-workers <n>     Max parallel URI probes (default: 32)
+  --no-host-fail-fast   Disable host-level fail-fast cache for repeated unreachable endpoints
   --mode <auto|bw>      Mode passed to uri audit when --input is omitted
   --include-trashed     Include trashed rows when generating audit input
   --output <path>       Write output to file (stdout if omitted)
@@ -42,6 +46,10 @@ while [[ $# -gt 0 ]]; do
       TIMEOUT="${2:?--timeout requires seconds}"; shift 2 ;;
     --limit)
       LIMIT="${2:?--limit requires integer}"; shift 2 ;;
+    --max-workers)
+      MAX_WORKERS="${2:?--max-workers requires integer}"; shift 2 ;;
+    --no-host-fail-fast)
+      HOST_FAIL_FAST=false; shift ;;
     --mode)
       MODE="${2:?--mode requires auto|bw}"; shift 2 ;;
     --include-trashed)
@@ -67,6 +75,8 @@ esac
 
 [[ "$TIMEOUT" =~ ^[0-9]+([.][0-9]+)?$ ]] || _stop "--timeout must be numeric"
 [[ "$LIMIT" =~ ^[0-9]+$ ]] || _stop "--limit must be integer"
+[[ "$MAX_WORKERS" =~ ^[0-9]+$ ]] || _stop "--max-workers must be integer"
+(( MAX_WORKERS >= 1 )) || _stop "--max-workers must be >= 1"
 
 command -v python3 >/dev/null 2>&1 || _stop "missing dependency: python3"
 
@@ -88,7 +98,7 @@ else
   "${cmd[@]}" >/dev/null
 fi
 
-python3 - "$AUDIT_JSON" "$RESULT_JSON" "$TIMEOUT" "$LIMIT" <<'PY'
+python3 - "$AUDIT_JSON" "$RESULT_JSON" "$TIMEOUT" "$LIMIT" "$MAX_WORKERS" "$HOST_FAIL_FAST" <<'PY'
 import csv
 import ipaddress
 import json
@@ -97,13 +107,18 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from threading import Lock
 from urllib.parse import urlparse
 
-input_path, output_path, timeout_raw, limit_raw = sys.argv[1:5]
+input_path, output_path, timeout_raw, limit_raw, max_workers_raw, host_fail_fast_raw = sys.argv[1:7]
 timeout = float(timeout_raw)
 limit = int(limit_raw)
+max_workers = int(max_workers_raw)
+host_fail_fast = str(host_fail_fast_raw).strip().lower() == "true"
 
 rows = json.load(open(input_path, "r", encoding="utf-8"))
+host_fail_cache = {}
+host_fail_lock = Lock()
 
 
 def now_iso():
@@ -196,6 +211,14 @@ def check_uri(uri: str):
         result["error"] = "no_uri"
         return result
 
+    if host_fail_fast:
+        with host_fail_lock:
+            cached = host_fail_cache.get(host)
+        if cached:
+            result["error"] = "cached_host_unreachable"
+            result["dns_resolves"] = bool(cached.get("dns_resolves", False))
+            return result
+
     # Avoid a separate blocking DNS resolver call; infer DNS signal from probe outcome.
     result["dns_resolves"] = is_ip(host)
     dns_err = ""
@@ -216,6 +239,9 @@ def check_uri(uri: str):
                 result["latency_ms"] = tcp_meta
             else:
                 result["error"] = err or dns_err or tcp_meta
+                if host_fail_fast:
+                    with host_fail_lock:
+                        host_fail_cache[host] = {"dns_resolves": bool(result["dns_resolves"])}
         else:
             result["tcp_open"] = True
             result["dns_resolves"] = True
@@ -232,6 +258,9 @@ def check_uri(uri: str):
         result["latency_ms"] = tcp_meta
     else:
         result["error"] = dns_err or tcp_meta
+        if host_fail_fast:
+            with host_fail_lock:
+                host_fail_cache[host] = {"dns_resolves": bool(result["dns_resolves"])}
     return result
 
 unique_order = []
@@ -246,7 +275,7 @@ if limit > 0:
     unique_order = unique_order[:limit]
 
 checks = {}
-max_workers = min(24, max(1, len(unique_order)))
+max_workers = min(max_workers, max(1, len(unique_order)))
 with ThreadPoolExecutor(max_workers=max_workers) as exe:
     futures = {exe.submit(check_uri, uri): uri for uri in unique_order}
     for fut in as_completed(futures):

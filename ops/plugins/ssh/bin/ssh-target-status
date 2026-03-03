@@ -5,15 +5,28 @@
 # STOP=2 on preconditions (missing binding, missing yq).
 #
 # Failure reasons:
-#   FAIL_CONNECT  - TCP connect timeout (host down/unreachable)
-#   FAIL_AUTH     - SSH auth denied (wrong user/key)
+#   FAIL_CONNECT  - TCP connect timeout / unreachable
+#   FAIL_AUTH     - SSH auth denied
 #   FAIL_REMOTE   - Connected but remote command failed
 #
 # Usage:
-#   ssh-target-status               # check all targets
-#   ssh-target-status <id>          # check specific target
-#   ssh-target-status --id <id>     # check specific target (explicit form)
-#   ssh-target-status --list        # list target IDs only
+#   ssh-target-status                         # check all targets
+#   ssh-target-status <id>                    # check specific target
+#   ssh-target-status --id <id>               # check specific target (explicit form)
+#   ssh-target-status --list                  # list target IDs only
+#   ssh-target-status --json                  # machine-readable output
+#   ssh-target-status --attempts 3            # per-path retry attempts
+#   ssh-target-status --retry-backoff-sec 2   # sleep between failed attempts
+#
+# Path contract (lan_first targets):
+#   1) LAN host
+#   2) Tailscale host (if declared)
+#   3) ProxyJump via probe_via (if declared)
+#
+# Triple-failure handling:
+#   - Each path is retried N attempts (default 3)
+#   - Success on a fallback path after a failed primary path is surfaced as DEGRADED_FALLBACK
+#   - Total failure across all paths surfaces CONTRACT_FAIL_ALL_PATHS
 
 set -euo pipefail
 
@@ -33,10 +46,23 @@ if ! command -v yq >/dev/null 2>&1; then
   exit 2
 fi
 
+if ! command -v jq >/dev/null 2>&1; then
+  echo "STOP (2): jq is required but not found"
+  echo "Install: brew install jq"
+  exit 2
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "STOP (2): python3 is required but not found"
+  exit 2
+fi
+
 TARGET_FILTER=""
 TARGET_FILTER_FOUND=0
-pending=0
-optional_fail=0
+JSON_MODE=0
+ATTEMPTS="${SSH_TARGET_STATUS_ATTEMPTS:-3}"
+RETRY_BACKOFF_SEC="${SSH_TARGET_STATUS_RETRY_BACKOFF_SEC:-2}"
+ENABLE_PROXYJUMP=1
 
 # Argument parsing
 while [[ $# -gt 0 ]]; do
@@ -57,8 +83,24 @@ while [[ $# -gt 0 ]]; do
       TARGET_FILTER="${2:-}"
       shift 2
       ;;
+    --attempts)
+      ATTEMPTS="${2:?--attempts requires integer}"
+      shift 2
+      ;;
+    --retry-backoff-sec)
+      RETRY_BACKOFF_SEC="${2:?--retry-backoff-sec requires integer}"
+      shift 2
+      ;;
+    --no-proxyjump-fallback)
+      ENABLE_PROXYJUMP=0
+      shift
+      ;;
+    --json)
+      JSON_MODE=1
+      shift
+      ;;
     -h|--help)
-      sed -n '12,20p' "$0" | sed 's/^# //'
+      sed -n '12,33p' "$0" | sed 's/^# //'
       exit 0
       ;;
     *)
@@ -72,6 +114,10 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+[[ "$ATTEMPTS" =~ ^[0-9]+$ ]] || { echo "STOP (2): --attempts must be an integer"; exit 2; }
+[[ "$RETRY_BACKOFF_SEC" =~ ^[0-9]+$ ]] || { echo "STOP (2): --retry-backoff-sec must be an integer"; exit 2; }
+(( ATTEMPTS >= 1 )) || { echo "STOP (2): --attempts must be >= 1"; exit 2; }
 
 # Read defaults
 DEF_USER="$(yq -r '.ssh.defaults.user // "root"' "$BINDING_FILE")"
@@ -87,75 +133,57 @@ if [[ "$COUNT" == "0" ]]; then
   exit 2
 fi
 
+declare -a TARGET_RESULTS=()
 fail=0
 checked=0
+pending=0
+optional_fail=0
 
-echo "ssh.target.status"
-echo "binding: $BINDING_FILE"
-echo "targets: $COUNT"
-echo
+classify_reason() {
+  local output="$1"
+  local dur_ms="$2"
+  local timeout_s="$3"
+  local timeout_threshold_ms
+  timeout_threshold_ms=$((timeout_s * 1000 - 500))
 
-# Iterate targets
-for i in $(seq 0 $((COUNT-1))); do
-  id="$(yq -r ".ssh.targets[$i].id" "$BINDING_FILE")"
-  host="$(yq -r ".ssh.targets[$i].host" "$BINDING_FILE")"
-  user="$(yq -r ".ssh.targets[$i].user // \"${DEF_USER}\"" "$BINDING_FILE")"
-  port="$(yq -r ".ssh.targets[$i].port // ${DEF_PORT}" "$BINDING_FILE")"
-  # Per-target timeout override
-  timeout="$(yq -r ".ssh.targets[$i].connect_timeout_sec // ${DEF_TO}" "$BINDING_FILE")"
-  optional="$(yq -r ".ssh.targets[$i].optional // false" "$BINDING_FILE")"
-
-  # Filter if specific target requested
-  if [[ -n "$TARGET_FILTER" && "$id" != "$TARGET_FILTER" ]]; then
-    continue
+  if [[ "$dur_ms" -ge "$timeout_threshold_ms" ]]; then
+    echo "connect_timeout"
+    return
   fi
-  TARGET_FILTER_FOUND=1
-
-  # Skip LAN-only devices (handled by network.lan.device.status)
-  access_method="$(yq -r ".ssh.targets[$i].access_method // \"ssh\"" "$BINDING_FILE")"
-  if [[ "$access_method" == "lan_only" ]]; then
-    echo "- id: $id host: $host user: $user -> SKIP_LAN_ONLY (use network.lan.device.status)"
-    continue
+  if echo "$output" | grep -qiE "permission denied|authentication failed|no more authentication"; then
+    echo "auth_denied"
+    return
   fi
-
-  if [[ "$id" == "null" ]]; then
-    echo "- id: (invalid) -> FAIL reason=binding_schema"
-    fail=1
-    continue
+  if echo "$output" | grep -qiE "connection refused|connection reset|no route to host|operation timed out|connection timed out|network is unreachable"; then
+    echo "connect_refused"
+    return
   fi
-
-  if [[ "$host" == "null" || -z "$host" ]]; then
-    echo "- id: $id host: null user: $user -> SKIP_PENDING reason=host_unassigned"
-    pending=$((pending + 1))
-    continue
+  if echo "$output" | grep -qiE "host key verification failed"; then
+    echo "host_key_mismatch"
+    return
   fi
-
-  checked=$((checked + 1))
-
-  # ── LAN→Tailscale fallback for lan_first targets ──────────────────────
-  access_policy="$(yq -r ".ssh.targets[$i].access_policy // \"lan_first\"" "$BINDING_FILE")"
-  tailscale_ip="$(yq -r ".ssh.targets[$i].tailscale_ip // \"\"" "$BINDING_FILE")"
-  effective_host="$host"
-  path_used="direct"
-
-  if [[ "$access_policy" == "lan_first" && -n "$tailscale_ip" && "$tailscale_ip" != "$host" ]]; then
-    # Try LAN first via quick TCP probe (faster than full SSH)
-    if ! ping -c 1 -W 2 "$host" >/dev/null 2>&1; then
-      # LAN unreachable — try Tailscale
-      if ping -c 1 -W 2 "$tailscale_ip" >/dev/null 2>&1; then
-        effective_host="$tailscale_ip"
-        path_used="tailscale"
-      else
-        path_used="unreachable"
-      fi
-    else
-      path_used="lan"
-    fi
+  if echo "$output" | grep -qiE "could not resolve hostname|name or service not known"; then
+    echo "dns_resolution_failed"
+    return
   fi
+  echo "unknown"
+}
 
-  # Build SSH options for this target
-  ssh_opts=(
-    -o "ConnectTimeout=${timeout}"
+probe_path() {
+  local id="$1"
+  local user="$2"
+  local host="$3"
+  local port="$4"
+  local timeout_s="$5"
+  local path_label="$6"
+  local jump_spec="$7"
+
+  local cmd
+  cmd='echo "__OK__"; hostname 2>/dev/null || uname -n 2>/dev/null || echo "unknown"'
+
+  local ssh_opts=()
+  ssh_opts+=(
+    -o "ConnectTimeout=${timeout_s}"
     -o "StrictHostKeyChecking=${DEF_STRICT}"
     -o "UserKnownHostsFile=${DEF_KNOWN_HOSTS}"
     -o "NumberOfPasswordPrompts=0"
@@ -165,76 +193,290 @@ for i in $(seq 0 $((COUNT-1))); do
     ssh_opts+=(-o "BatchMode=yes")
   fi
 
-  # Lightweight remote command: just echo + hostname
-  cmd='echo "__OK__"; hostname 2>/dev/null || uname -n 2>/dev/null || echo "unknown"'
+  local out ssh_exit start_ms end_ms dur_ms reason remote_name
+  local attempt=0
+  local attempts_json='[]'
 
-  # Time the connection (use python3 for portable ms timing)
-  start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+  while (( attempt < ATTEMPTS )); do
+    attempt=$((attempt + 1))
+    start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
 
-  # Capture both stdout and exit code
-  set +e
-  out="$(ssh "${ssh_opts[@]}" -p "$port" "${user}@${effective_host}" "$cmd" 2>&1)"
-  ssh_exit=$?
-  set -e
-
-  end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
-  dur_ms=$((end_ms - start_ms))
-
-  # Build path_used suffix for output
-  path_suffix=""
-  if [[ "$path_used" != "direct" ]]; then
-    path_suffix=" path=${path_used}"
-  fi
-
-  # Classify the result
-  if echo "$out" | grep -q '^__OK__$'; then
-    # Success: extract hostname from second line
-    remote_name="$(echo "$out" | grep -A1 '^__OK__$' | tail -1 | tr -d '\r')"
-    [[ -z "$remote_name" || "$remote_name" == "__OK__" ]] && remote_name="unknown"
-    echo "- id: $id host: $effective_host user: $user -> OK (${dur_ms}ms) name: ${remote_name}${path_suffix}"
-  else
-    # Failure: classify reason
-    timeout_threshold_ms=$((timeout * 1000 - 500))  # within 500ms of timeout = connect issue
-
-    if [[ $dur_ms -ge $timeout_threshold_ms ]]; then
-      reason="connect_timeout"
-    elif echo "$out" | grep -qiE "permission denied|authentication failed|no more authentication"; then
-      reason="auth_denied"
-    elif echo "$out" | grep -qiE "connection refused|connection reset|no route"; then
-      reason="connect_refused"
-    elif echo "$out" | grep -qiE "host key verification failed"; then
-      reason="host_key_mismatch"
-    elif [[ $ssh_exit -eq 255 && $dur_ms -lt 2000 ]]; then
-      # Fast failure with exit 255 usually means auth or connect issue
-      reason="auth_or_connect"
+    set +e
+    if [[ -n "$jump_spec" ]]; then
+      out="$(ssh "${ssh_opts[@]}" -J "$jump_spec" -p "$port" "${user}@${host}" "$cmd" 2>&1)"
     else
-      reason="unknown"
+      out="$(ssh "${ssh_opts[@]}" -p "$port" "${user}@${host}" "$cmd" 2>&1)"
+    fi
+    ssh_exit=$?
+    set -e
+
+    end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
+    dur_ms=$((end_ms - start_ms))
+
+    if echo "$out" | grep -q '^__OK__$'; then
+      remote_name="$(echo "$out" | grep -A1 '^__OK__$' | tail -1 | tr -d '\r')"
+      [[ -z "$remote_name" || "$remote_name" == "__OK__" ]] && remote_name="unknown"
+
+      attempts_json="$(jq -cn --argjson base "$attempts_json" --argjson idx "$attempt" --arg result "ok" --argjson duration_ms "$dur_ms" --arg path "$path_label" '$base + [{attempt:$idx,path:$path,result:$result,duration_ms:$duration_ms}]')"
+
+      PROBE_SUCCESS=1
+      PROBE_REASON=""
+      PROBE_DURATION_MS="$dur_ms"
+      PROBE_REMOTE_NAME="$remote_name"
+      PROBE_ATTEMPTS_USED="$attempt"
+      PROBE_ATTEMPTS_JSON="$attempts_json"
+      return 0
     fi
 
+    reason="$(classify_reason "$out" "$dur_ms" "$timeout_s")"
+    attempts_json="$(jq -cn --argjson base "$attempts_json" --argjson idx "$attempt" --arg result "fail" --arg reason "$reason" --argjson duration_ms "$dur_ms" --arg path "$path_label" '$base + [{attempt:$idx,path:$path,result:$result,reason:$reason,duration_ms:$duration_ms}]')"
+
+    if (( attempt < ATTEMPTS )); then
+      sleep "$RETRY_BACKOFF_SEC"
+    fi
+  done
+
+  PROBE_SUCCESS=0
+  PROBE_REASON="$reason"
+  PROBE_DURATION_MS="$dur_ms"
+  PROBE_REMOTE_NAME=""
+  PROBE_ATTEMPTS_USED="$attempt"
+  PROBE_ATTEMPTS_JSON="$attempts_json"
+  return 1
+}
+
+if [[ "$JSON_MODE" -eq 0 ]]; then
+  echo "ssh.target.status"
+  echo "binding: $BINDING_FILE"
+  echo "targets: $COUNT"
+  echo "attempts_per_path: $ATTEMPTS"
+  echo
+fi
+
+for i in $(seq 0 $((COUNT-1))); do
+  id="$(yq -r ".ssh.targets[$i].id" "$BINDING_FILE")"
+  host="$(yq -r ".ssh.targets[$i].host" "$BINDING_FILE")"
+  user="$(yq -r ".ssh.targets[$i].user // \"${DEF_USER}\"" "$BINDING_FILE")"
+  port="$(yq -r ".ssh.targets[$i].port // ${DEF_PORT}" "$BINDING_FILE")"
+  timeout="$(yq -r ".ssh.targets[$i].connect_timeout_sec // ${DEF_TO}" "$BINDING_FILE")"
+  optional="$(yq -r ".ssh.targets[$i].optional // false" "$BINDING_FILE")"
+  access_method="$(yq -r ".ssh.targets[$i].access_method // \"ssh\"" "$BINDING_FILE")"
+  access_policy="$(yq -r ".ssh.targets[$i].access_policy // \"lan_first\"" "$BINDING_FILE")"
+  tailscale_ip="$(yq -r ".ssh.targets[$i].tailscale_ip // \"\"" "$BINDING_FILE")"
+  probe_via="$(yq -r ".ssh.targets[$i].probe_via // \"\"" "$BINDING_FILE")"
+
+  # Filter if specific target requested
+  if [[ -n "$TARGET_FILTER" && "$id" != "$TARGET_FILTER" ]]; then
+    continue
+  fi
+  TARGET_FILTER_FOUND=1
+
+  # Skip LAN-only devices (handled by network.lan.device.status)
+  if [[ "$access_method" == "lan_only" ]]; then
+    [[ "$JSON_MODE" -eq 0 ]] && echo "- id: $id host: $host user: $user -> SKIP_LAN_ONLY (use network.lan.device.status)"
+    TARGET_RESULTS+=("$(jq -cn --arg id "$id" --arg host "$host" --arg user "$user" '{id:$id,host:$host,user:$user,status:"skip_lan_only",contract_state:"n/a"}')")
+    continue
+  fi
+
+  if [[ "$id" == "null" ]]; then
+    [[ "$JSON_MODE" -eq 0 ]] && echo "- id: (invalid) -> FAIL reason=binding_schema"
+    fail=1
+    TARGET_RESULTS+=("$(jq -cn '{id:"(invalid)",status:"fail",reason:"binding_schema",contract_state:"contract_fail_all_paths"}')")
+    continue
+  fi
+
+  if [[ "$host" == "null" || -z "$host" ]]; then
+    [[ "$JSON_MODE" -eq 0 ]] && echo "- id: $id host: null user: $user -> SKIP_PENDING reason=host_unassigned"
+    pending=$((pending + 1))
+    TARGET_RESULTS+=("$(jq -cn --arg id "$id" --arg user "$user" '{id:$id,user:$user,status:"skip_pending",reason:"host_unassigned",contract_state:"n/a"}')")
+    continue
+  fi
+
+  checked=$((checked + 1))
+
+  declare -a candidate_labels=()
+  declare -a candidate_hosts=()
+  declare -a candidate_jumps=()
+
+  if [[ "$access_policy" == "lan_first" ]]; then
+    candidate_labels+=("lan")
+    candidate_hosts+=("$host")
+    candidate_jumps+=("")
+
+    if [[ -n "$tailscale_ip" && "$tailscale_ip" != "null" && "$tailscale_ip" != "$host" ]]; then
+      candidate_labels+=("tailscale")
+      candidate_hosts+=("$tailscale_ip")
+      candidate_jumps+=("")
+    fi
+
+    if [[ "$ENABLE_PROXYJUMP" -eq 1 && -n "$probe_via" && "$probe_via" != "null" ]]; then
+      jump_host="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .host // \"\"" "$BINDING_FILE")"
+      jump_user="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .user // \"$DEF_USER\"" "$BINDING_FILE")"
+      jump_port="$(yq -r ".ssh.targets[] | select(.id == \"$probe_via\") | .port // $DEF_PORT" "$BINDING_FILE")"
+      if [[ -n "$jump_host" && "$jump_host" != "null" ]]; then
+        candidate_labels+=("proxyjump")
+        candidate_hosts+=("$host")
+        candidate_jumps+=("${jump_user}@${jump_host}:${jump_port}")
+      fi
+    fi
+  elif [[ "$access_policy" == "tailscale_required" ]]; then
+    effective_tailscale="$tailscale_ip"
+    if [[ -z "$effective_tailscale" || "$effective_tailscale" == "null" ]]; then
+      effective_tailscale="$host"
+    fi
+    candidate_labels+=("tailscale")
+    candidate_hosts+=("$effective_tailscale")
+    candidate_jumps+=("")
+  else
+    candidate_labels+=("direct")
+    candidate_hosts+=("$host")
+    candidate_jumps+=("")
+  fi
+
+  total_attempts=0
+  primary_path_failures=0
+  path_contract_state="contract_fail_all_paths"
+  target_status="fail"
+  path_used=""
+  effective_host=""
+  remote_name=""
+  final_reason="unknown"
+  attempts_trace='[]'
+
+  for idx in "${!candidate_labels[@]}"; do
+    label="${candidate_labels[$idx]}"
+    cand_host="${candidate_hosts[$idx]}"
+    jump_spec="${candidate_jumps[$idx]}"
+
+    probe_path "$id" "$user" "$cand_host" "$port" "$timeout" "$label" "$jump_spec" || true
+
+    total_attempts=$((total_attempts + PROBE_ATTEMPTS_USED))
+    attempts_trace="$(jq -cn --argjson base "$attempts_trace" --argjson add "$PROBE_ATTEMPTS_JSON" '$base + $add')"
+
+    if [[ "$PROBE_SUCCESS" -eq 1 ]]; then
+      path_used="$label"
+      effective_host="$cand_host"
+      remote_name="$PROBE_REMOTE_NAME"
+      final_reason=""
+      if [[ "$idx" -eq 0 ]]; then
+        target_status="ok"
+        path_contract_state="direct_ok"
+      else
+        target_status="warn"
+        path_contract_state="degraded_fallback"
+      fi
+      break
+    fi
+
+    final_reason="$PROBE_REASON"
+    if [[ "$idx" -eq 0 ]]; then
+      primary_path_failures="$PROBE_ATTEMPTS_USED"
+    fi
+  done
+
+  if [[ -z "$path_used" ]]; then
     if [[ "$optional" == "true" ]]; then
-      echo "- id: $id host: $effective_host user: $user -> WARN (${dur_ms}ms) reason=${reason}${path_suffix} optional=true"
+      target_status="warn"
       optional_fail=$((optional_fail + 1))
     else
-      echo "- id: $id host: $effective_host user: $user -> FAIL (${dur_ms}ms) reason=${reason}${path_suffix}"
+      target_status="fail"
       fail=1
     fi
   fi
-done
 
-echo
+  if [[ "$JSON_MODE" -eq 0 ]]; then
+    if [[ "$target_status" == "ok" ]]; then
+      echo "- id: $id host: $effective_host user: $user -> OK (attempts=${total_attempts}) name: ${remote_name} path=${path_used} contract=${path_contract_state}"
+    elif [[ "$target_status" == "warn" && -n "$path_used" ]]; then
+      echo "- id: $id host: $effective_host user: $user -> WARN (attempts=${total_attempts}) name: ${remote_name} path=${path_used} contract=${path_contract_state}"
+    else
+      echo "- id: $id host: $host user: $user -> ${target_status^^} (attempts=${total_attempts}) reason=${final_reason} contract=${path_contract_state}"
+    fi
+  fi
+
+  TARGET_RESULTS+=("$(jq -cn \
+    --arg id "$id" \
+    --arg user "$user" \
+    --arg host "$host" \
+    --arg effective_host "$effective_host" \
+    --arg status "$target_status" \
+    --arg optional "$optional" \
+    --arg path_used "$path_used" \
+    --arg access_policy "$access_policy" \
+    --arg reason "$final_reason" \
+    --arg contract_state "$path_contract_state" \
+    --argjson attempts_total "$total_attempts" \
+    --argjson attempts_per_path "$ATTEMPTS" \
+    --argjson primary_path_failures "$primary_path_failures" \
+    --argjson attempts_trace "$attempts_trace" \
+    '{
+      id:$id,
+      user:$user,
+      host:$host,
+      effective_host:$effective_host,
+      status:$status,
+      optional:($optional=="true"),
+      access_policy:$access_policy,
+      path_used:$path_used,
+      reason:($reason // ""),
+      contract_state:$contract_state,
+      attempts_total:$attempts_total,
+      attempts_per_path:$attempts_per_path,
+      primary_path_failures:$primary_path_failures,
+      attempts_trace:$attempts_trace
+    }')")
+done
 
 if [[ -n "$TARGET_FILTER" && "$TARGET_FILTER_FOUND" == "0" ]]; then
   echo "STOP (2): target '$TARGET_FILTER' not found in binding"
   exit 2
 fi
 
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  targets_json="$(printf '%s\n' "${TARGET_RESULTS[@]}" | jq -s '.')"
+  overall="ok"
+  if [[ "$fail" == "1" ]]; then
+    overall="fail"
+  elif [[ "$optional_fail" -gt 0 ]]; then
+    overall="warn"
+  fi
+
+  jq -n \
+    --arg capability "ssh.target.status" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg binding "$BINDING_FILE" \
+    --arg status "$overall" \
+    --argjson configured_targets "$COUNT" \
+    --argjson checked_targets "$checked" \
+    --argjson pending_targets "$pending" \
+    --argjson optional_unreachable "$optional_fail" \
+    --argjson attempts_per_path "$ATTEMPTS" \
+    --argjson retry_backoff_sec "$RETRY_BACKOFF_SEC" \
+    --argjson targets "$targets_json" \
+    '{
+      capability:$capability,
+      generated_at:$generated_at,
+      binding:$binding,
+      status:$status,
+      configured_targets:$configured_targets,
+      checked_targets:$checked_targets,
+      pending_targets:$pending_targets,
+      optional_unreachable:$optional_unreachable,
+      attempts_per_path:$attempts_per_path,
+      retry_backoff_sec:$retry_backoff_sec,
+      targets:$targets
+    }'
+  exit $(( fail == 1 ? 1 : 0 ))
+fi
+
+echo
 if [[ "$fail" == "1" ]]; then
   echo "status: FAIL (some targets unreachable)"
   exit 1
 fi
 
 if [[ "$optional_fail" -gt 0 ]]; then
-  echo "status: OK (${optional_fail} optional target(s) unreachable)"
+  echo "status: OK (${optional_fail} optional target(s) unreachable; fallback/optional path active)"
   exit 0
 fi
 
