@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# TRIAGE: Tailscale audit log accessibility status — reports whether audit log streaming is configured.
+# No API exists for audit log streaming (404 on /logging and /log-stream).
+# Configuration requires admin console action + a log destination.
+# Addresses: GAP-OP-1260
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+AUTHORITY="$ROOT/docs/CANONICAL/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml"
+OPERATOR_ACTIONS="$ROOT/mailroom/state/tailscale-audit/operator-actions-20260302.yaml"
+
+echo "tailscale.audit.status"
+
+command -v yq >/dev/null 2>&1 || { echo "STOP: yq missing" >&2; exit 2; }
+
+if [[ ! -f "$AUTHORITY" ]]; then
+  echo "status: FAIL"
+  echo "error: authority contract missing"
+  exit 1
+fi
+
+# Read audit log status from authority contract
+audit_status=$(yq -r '.control_plane_integration.audit_log.status // "missing"' "$AUTHORITY" 2>/dev/null || echo "missing")
+api_available=$(yq -r '.control_plane_integration.audit_log.api_available // "unknown"' "$AUTHORITY" 2>/dev/null || echo "unknown")
+api_note=$(yq -r '.control_plane_integration.audit_log.api_note // "none"' "$AUTHORITY" 2>/dev/null || echo "none")
+streaming_dest=$(yq -r '.control_plane_integration.audit_log.streaming.destination // "not_configured"' "$AUTHORITY" 2>/dev/null || echo "not_configured")
+streaming_format=$(yq -r '.control_plane_integration.audit_log.streaming.format // "unknown"' "$AUTHORITY" 2>/dev/null || echo "unknown")
+gap_ref=$(yq -r '.control_plane_integration.audit_log.gap_ref // "none"' "$AUTHORITY" 2>/dev/null || echo "none")
+blocker=$(yq -r '.control_plane_integration.audit_log.blocker // "none"' "$AUTHORITY" 2>/dev/null || echo "none")
+
+echo "audit_log_status: $audit_status"
+echo "api_available: $api_available"
+echo "api_note: $api_note"
+echo "streaming_destination: $streaming_dest"
+echo "streaming_format: $streaming_format"
+echo "gap_ref: $gap_ref"
+echo "blocker: $blocker"
+
+# Check operator action status for OP-TS-002
+if [[ -f "$OPERATOR_ACTIONS" ]]; then
+  op_ts_002_status=$(yq -r '.actions[] | select(.id == "OP-TS-002") | .status // "unknown"' "$OPERATOR_ACTIONS" 2>/dev/null || echo "unknown")
+  op_ts_002_reason=$(yq -r '.actions[] | select(.id == "OP-TS-002") | .deferred_reason // "none"' "$OPERATOR_ACTIONS" 2>/dev/null || echo "none")
+  echo "op_ts_002_status: $op_ts_002_status"
+  echo "op_ts_002_deferred_reason: $op_ts_002_reason"
+else
+  echo "op_ts_002_status: no_artifact"
+fi
+
+# Deployment prerequisites report
+echo ""
+echo "deployment_prerequisites:"
+echo "  1. Provision log destination on observability-stack (VM 205):"
+echo "     Option A: Grafana Loki (preferred — already on observability-stack)"
+echo "     Option B: S3 bucket (AWS or MinIO)"
+echo "  2. Configure streaming in Tailscale admin console:"
+echo "     URL: https://admin.tailscale.com/admin/settings/logs"
+echo "     Format: JSON"
+echo "  3. Verify first log entry appears at destination"
+echo ""
+echo "api_alternatives_checked:"
+echo "  - GET /api/v2/tailnet/{tailnet}/logging: 404"
+echo "  - GET /api/v2/tailnet/{tailnet}/log-stream: 404"
+echo "  - Conclusion: No programmatic API — admin console configuration only"
+
+# Summary
+if [[ "$audit_status" == "deferred" ]]; then
+  echo ""
+  echo "resolution_path: blocked_external"
+  echo "next_action: Provision log destination, then configure via admin console"
+  echo "status: OK (reporting only — no API to probe)"
+else
+  echo ""
+  echo "status: OK"
+fi

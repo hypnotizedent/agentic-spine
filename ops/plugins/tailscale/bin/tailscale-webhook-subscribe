@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# TRIAGE: Tailscale webhook subscription manager — creates/lists webhook subscriptions via OAuth API.
+# Requires: TAILSCALE_OAUTH_CLIENT_ID, TAILSCALE_OAUTH_CLIENT_SECRET (via secrets-exec)
+# Prerequisite: A deployed webhook receiver endpoint (n8n workflow or dedicated service).
+# Addresses: GAP-OP-1259
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+TAILNET="${TAILSCALE_TAILNET:-taile9480.ts.net}"
+API_BASE="https://api.tailscale.com/api/v2"
+
+# OAuth required for webhook management
+if [[ -z "${TAILSCALE_OAUTH_CLIENT_ID:-}" ]] || [[ -z "${TAILSCALE_OAUTH_CLIENT_SECRET:-}" ]]; then
+  echo "STOP: TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET required" >&2
+  exit 2
+fi
+
+# Parse arguments
+DRY_RUN=false
+ENDPOINT_URL=""
+ACTION="status"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    --endpoint) ENDPOINT_URL="$2"; shift 2 ;;
+    --action) ACTION="$2"; shift 2 ;;
+    --) shift ;;
+    *) shift ;;
+  esac
+done
+
+echo "tailscale.webhook.subscribe"
+echo "tailnet: $TAILNET"
+echo "action: $ACTION"
+echo "dry_run: $DRY_RUN"
+
+# Obtain OAuth bearer token
+token_response=$(curl -fsS \
+  -X POST \
+  -u "${TAILSCALE_OAUTH_CLIENT_ID}:${TAILSCALE_OAUTH_CLIENT_SECRET}" \
+  -d "grant_type=client_credentials" \
+  "https://api.tailscale.com/api/v2/oauth/token" 2>&1) || {
+  echo "oauth: FAIL"
+  echo "error: $token_response"
+  exit 1
+}
+
+BEARER=$(echo "$token_response" | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])" 2>/dev/null) || {
+  echo "oauth: FAIL (no access_token in response)"
+  exit 1
+}
+echo "oauth: OK"
+
+# ── Status: list existing webhooks ──────────────────────────────────────────
+list_webhooks() {
+  local response
+  response=$(curl -sS -w "\n%{http_code}" \
+    -H "Authorization: Bearer $BEARER" \
+    "${API_BASE}/tailnet/${TAILNET}/webhooks" 2>&1) || true
+
+  local body http_code
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
+    echo "webhook_list_http: $http_code"
+    python3 -c "
+import json, sys
+try:
+    data = json.loads('''$body''')
+    webhooks = data.get('webhooks', data) if isinstance(data, dict) else data
+    if isinstance(webhooks, list):
+        print(f'webhook_count: {len(webhooks)}')
+        for wh in webhooks:
+            eid = wh.get('endpointId', wh.get('id', 'unknown'))
+            url = wh.get('endpointUrl', wh.get('url', 'unknown'))
+            subs = wh.get('subscriptions', wh.get('events', []))
+            print(f'  - id: {eid}')
+            print(f'    url: {url}')
+            print(f'    subscriptions: {subs}')
+    else:
+        print(f'webhook_count: 0')
+        print(f'raw: {data}')
+except Exception as e:
+    print(f'parse_error: {e}')
+    print(f'raw_body: {body[:500]}')
+" 2>&1 || echo "parse_error: python3 failed"
+  else
+    echo "webhook_list_http: $http_code"
+    echo "webhook_list: FAIL"
+    echo "body: ${body:0:500}"
+  fi
+}
+
+# ── Create: subscribe a new webhook endpoint ────────────────────────────────
+create_webhook() {
+  if [[ -z "$ENDPOINT_URL" ]]; then
+    echo "create: FAIL"
+    echo "error: --endpoint URL is required for --action create"
+    echo ""
+    echo "deployment_prerequisites:"
+    echo "  1. Deploy a webhook receiver on automation-stack (VM 202)"
+    echo "     Option A: n8n webhook node at https://n8n.ronny.works/webhook/tailscale"
+    echo "     Option B: Dedicated receiver service on automation-stack"
+    echo "  2. Ensure the endpoint is reachable from Tailscale API servers (public HTTPS)"
+    echo "  3. Run: ./bin/ops cap run tailscale.webhook.subscribe -- --action create --endpoint <URL>"
+    echo ""
+    echo "receiver_status: not_deployed"
+    echo "blocker: GAP-OP-1259 — no webhook receiver endpoint deployed"
+    exit 1
+  fi
+
+  # Default event subscriptions per authority contract
+  local events='["nodeCreated","nodeDeleted","nodeKeyExpiringInOneDay","policyUpdate"]'
+  local payload
+  payload=$(python3 -c "
+import json
+print(json.dumps({
+    'endpointUrl': '$ENDPOINT_URL',
+    'providerType': 'slack',
+    'subscriptions': json.loads('$events')
+}))
+" 2>/dev/null)
+
+  echo "endpoint: $ENDPOINT_URL"
+  echo "events: $events"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "mode: dry-run (would create webhook subscription)"
+    echo "payload: $payload"
+    echo "status: PASS (dry-run)"
+    return
+  fi
+
+  local response
+  response=$(curl -sS -w "\n%{http_code}" \
+    -X POST \
+    -H "Authorization: Bearer $BEARER" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    "${API_BASE}/tailnet/${TAILNET}/webhooks" 2>&1) || true
+
+  local body http_code
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | sed '$d')
+
+  echo "create_http: $http_code"
+
+  if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
+    echo "create: OK"
+    python3 -c "
+import json, sys
+try:
+    data = json.loads('''$body''')
+    eid = data.get('endpointId', data.get('id', 'unknown'))
+    secret = data.get('secret', 'NOT_RETURNED')
+    print(f'endpoint_id: {eid}')
+    print(f'webhook_secret: {secret}')
+    print('IMPORTANT: Store the webhook_secret in Infisical at /spine/vm-infra/provisioning as TAILSCALE_WEBHOOK_SECRET')
+except Exception as e:
+    print(f'parse_error: {e}')
+    print(f'raw: {body[:500]}')
+" 2>&1
+    echo "status: PASS"
+    echo "next_step: store webhook secret in Infisical, then verify with --action status"
+  else
+    echo "create: FAIL"
+    echo "error_body: ${body:0:500}"
+    exit 1
+  fi
+}
+
+# ── Dispatch action ─────────────────────────────────────────────────────────
+case "$ACTION" in
+  status)
+    list_webhooks
+    echo "status: OK"
+    ;;
+  create)
+    create_webhook
+    ;;
+  *)
+    echo "error: unknown action '$ACTION' (use: status, create)"
+    exit 1
+    ;;
+esac
