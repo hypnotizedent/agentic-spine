@@ -405,7 +405,10 @@ class TaskWorker:
         if bool(self.cycle_cfg.get("confirm_manual", False)):
             args.append("--confirm-manual")
 
-        result = run_ops_cap("spine.control.cycle", args, confirm=True, timeout=1200)
+        cycle_timeout = int(self.cycle_cfg.get("timeout_seconds", 120))
+        if cycle_timeout < 15:
+            cycle_timeout = 15
+        result = run_ops_cap("spine.control.cycle", args, confirm=True, timeout=cycle_timeout)
         cycle_status = "ok" if result["ok"] else "failed"
         if result["ok"]:
             self.log(
@@ -508,9 +511,11 @@ class TaskWorker:
             readiness = horizon_ctx.get("execution_readiness", "")
             override_ref = horizon_ctx.get("override_ref", "")
             override_reason = horizon_ctx.get("override_reason", "")
+            loop_id = horizon_ctx.get("loop_id", "")
+            has_horizon_context = bool(loop_id or horizon or readiness)
             horizon_ok = horizon in self.allowed_horizons
             readiness_ok = readiness in self.allowed_readiness
-            if not (horizon_ok and readiness_ok):
+            if has_horizon_context and not (horizon_ok and readiness_ok):
                 if not override_ref:
                     return (
                         False,
@@ -705,8 +710,9 @@ class TaskWorker:
         }
 
     def run_once(self) -> dict[str, Any]:
-        cycle = self.run_cycle_once()
+        # Keep task-lifecycle responsiveness even when control-cycle calls are slow.
         tasks = self.consume_tasks_once()
+        cycle = self.run_cycle_once()
         payload = {
             "worker_id": self.worker_id,
             "poll_seconds": self.poll_seconds,
