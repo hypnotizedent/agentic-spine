@@ -1,0 +1,245 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Home Assistant Reliability Contract V1
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Purpose: structured reliability policy for HA device protocols
+#          (Zigbee buttons, Matter/Thread, OTBR, Aqara U100)
+# Status: authoritative
+# Owner: @ronny
+# Created: 2026-03-03
+# Parent loop: LOOP-HA-E2E-CLEANUP-WAVE-20260303
+# ═══════════════════════════════════════════════════════════════════════════
+
+version: 1
+updated_at: "2026-03-03"
+
+# ─────────────────────────────────────────────────────────────────────────
+# SECTION 1: Zigbee Button Reliability Policy
+# ─────────────────────────────────────────────────────────────────────────
+zigbee_button_policy:
+  coordinator:
+    primary: SLZB-06
+    ip: "10.0.0.51"
+    port: 6638
+    protocol: Zigbee
+    firmware_core: "v3.1.6.dev"
+    firmware_radio: "20240710 (CC2652P)"
+    rule: "SLZB-06 is the ONLY active Zigbee coordinator. Never run a second."
+
+  health_thresholds:
+    battery_warn_percent: 20
+    battery_critical_percent: 10
+    staleness_warn_hours: 48
+    staleness_critical_hours: 96
+    link_quality_minimum: 50
+
+  enforcement_gates:
+    - gate: D113
+      check: "Z2M bridge connected to SLZB-06"
+      action_on_fail: "check addon logs, power cycle SLZB-06"
+    - gate: D118
+      check: "all Z2M devices: battery >20%, last_seen <48h"
+      action_on_fail: "replace battery or check device proximity"
+    - gate: D117
+      check: "device naming parity across z2m/ha registries"
+      action_on_fail: "run ha.device.rename + ha.z2m.devices.snapshot"
+    - gate: D119
+      check: "Z2M naming parity (z2m.devices ↔ z2m.naming ↔ ha.device.map)"
+      action_on_fail: "update z2m.naming.yaml"
+
+  automation_guard:
+    rule: "ALL button automation triggers MUST include not_from filter"
+    not_from: ["unavailable", "unknown"]
+    reason: "prevents phantom toggles on HA restart when Z2M reconnects"
+    history: "guard was accidentally removed 3 times — treat as permanent"
+    enforcement: "manual review on automation changes"
+
+  alerting:
+    - trigger: "Z2M battery drops below 20%"
+      automation: "Zigbee: Low Battery Alert"
+      channel: "push notification to Ronny iPhone"
+    - trigger: "Z2M button silent >12h (event-based devices)"
+      automation: "Zigbee: Stale Device Alert (Daily)"
+      channel: "push notification to Ronny iPhone"
+      exception: "laundry_washer_vibration is stale-exempt (event-only sensor)"
+
+  remediation_playbook:
+    button_not_responding:
+      steps:
+        - "Check Z2M dashboard for device status"
+        - "Verify battery level (replace CR2032 if <10%)"
+        - "Check link_quality (move closer to coordinator if <50)"
+        - "Press button 5x rapidly to force re-interview"
+        - "If still dead: remove from Z2M, factory reset device, re-pair"
+    coordinator_unreachable:
+      steps:
+        - "Ping 10.0.0.51 — if unreachable, check PoE switch port"
+        - "Access SLZB-06 Web UI (http://10.0.0.51) — verify Mode: Ethernet ON"
+        - "Power cycle: toggle PoE port in UniFi"
+        - "If Z2M cannot reconnect: docker cp to fix options.json IP"
+    phantom_toggles_on_restart:
+      steps:
+        - "Verify not_from guard on ALL button automations"
+        - "Run ha.automations.snapshot to check current state"
+        - "If guard missing: add not_from and save"
+
+# ─────────────────────────────────────────────────────────────────────────
+# SECTION 2: Matter/Thread Reliability Policy
+# ─────────────────────────────────────────────────────────────────────────
+matter_thread_policy:
+  coordinator:
+    device: SLZB-06MU
+    ip: "10.0.0.52"
+    port: 6638
+    radio_mode: "Thread/RCP"
+    firmware_core: "v3.2.4"
+    integration: OpenThread Border Router
+    rule: "SLZB-06MU is dedicated to Matter/Thread. Never use for Zigbee."
+
+  current_devices:
+    - name: "BILRESA dual button"
+      manufacturer: IKEA
+      protocol: Matter/Thread
+      battery: "100%"
+      status: operational
+      entity_pattern: "event.bilresa_dual_button_*"
+    - name: "MYGGSPRAY motion sensor"
+      manufacturer: IKEA
+      protocol: Matter/Thread
+      battery: "100%"
+      status: operational
+      entity_pattern: "binary_sensor.myggspray_*"
+
+  commissioning_rule:
+    method: "iPhone Companion App (BLE bridge)"
+    reason: "Thread sleepy end devices require BLE for initial commissioning. HA VM has no Bluetooth."
+    forbidden: "matter/commission_on_network (mDNS timeout on sleeping devices)"
+
+  thread_mesh_rule:
+    credential_source: "Apple Home Thread network"
+    sharing_method: "HA Companion App → Settings → Thread → Configure"
+    otbr_state_expected: "router"
+    otbr_state_isolated: "leader"
+    rule: "OTBR must join Apple mesh (router), never form isolated network (leader)"
+
+  known_blockers:
+    - id: "OTBR-REMOTE-COMMISSION"
+      description: "Cannot commission new Thread devices remotely (requires physical BLE proximity)"
+      status: accepted_limitation
+      workaround: "schedule on-site visit for new device additions"
+    - id: "THREAD-CREDENTIAL-DRIFT"
+      description: "Apple Home Thread network may change credentials without HA notification"
+      status: monitored
+      workaround: "re-share credentials via Companion App if Thread devices go offline"
+
+# ─────────────────────────────────────────────────────────────────────────
+# SECTION 3: Aqara U100 Smart Lock (Structured Blocker)
+# ─────────────────────────────────────────────────────────────────────────
+aqara_u100:
+  status: not_deployed
+  protocol: Matter/Thread
+  description: "Aqara U100 smart lock — not yet purchased/installed"
+  blockers:
+    - id: "U100-NO-REMOTE-PAIR"
+      description: "Matter commissioning requires physical BLE proximity (iPhone)"
+      severity: low
+      resolution: "on-site commissioning via iPhone Companion App"
+    - id: "U100-THREAD-MESH-REQUIRED"
+      description: "Lock requires stable Thread mesh via OTBR"
+      severity: medium
+      resolution: "verify OTBR is in router state on Apple mesh before install"
+    - id: "U100-BATTERY-MONITORING"
+      description: "Battery monitoring needs to be wired to alerting"
+      severity: low
+      resolution: "add Matter battery entity to low-battery alert automation"
+  actions_when_ready:
+    - "commission via iPhone Companion App"
+    - "verify entity appears: lock.aqara_u100_*"
+    - "add to home.device.registry.yaml"
+    - "add to ha.device.map.build cycle"
+    - "wire battery alert"
+    - "test lock/unlock via ha.lock.control"
+
+# ─────────────────────────────────────────────────────────────────────────
+# SECTION 4: OTBR Health Policy
+# ─────────────────────────────────────────────────────────────────────────
+otbr_policy:
+  components:
+    - name: "OpenThread Border Router add-on"
+      version: "v2.16.3"
+      status: started
+    - name: "Matter Server add-on"
+      version: "v8.2.2"
+      status: started
+
+  health_checks:
+    - check: "OTBR node state"
+      api: "GET http://core-openthread-border-router:8081/node/state"
+      expected: "router"
+      failure_meaning: "leader = isolated network, disabled/detached = not running"
+    - check: "Matter devices reachable"
+      method: "HA entity state check for BILRESA/MYGGSPRAY"
+      expected: "not unavailable"
+
+  recovery:
+    otbr_isolated:
+      steps:
+        - "disable OTBR node"
+        - "push Apple Thread TLV dataset"
+        - "enable OTBR node"
+        - "verify state = router"
+        - "restart Matter Server"
+    otbr_offline:
+      steps:
+        - "restart OTBR add-on: ha apps restart core_openthread_border_router"
+        - "verify SLZB-06MU reachable at 10.0.0.52"
+        - "check PoE port on UniFi switch"
+
+# ─────────────────────────────────────────────────────────────────────────
+# SECTION 5: Primary Coordinator Rule
+# ─────────────────────────────────────────────────────────────────────────
+coordinator_allocation:
+  rule: "one coordinator per protocol, no overlap"
+  assignments:
+    - coordinator: SLZB-06
+      ip: "10.0.0.51"
+      protocol: Zigbee
+      z2m_integration: true
+      power: PoE
+    - coordinator: SLZB-06MU
+      ip: "10.0.0.52"
+      protocol: Thread/Matter
+      otbr_integration: true
+      power: PoE
+    - coordinator: TubesZB-ZAC93
+      ip: "10.0.0.90"
+      protocol: Z-Wave
+      zwave_js_integration: true
+      power: PoE
+      status: connected_not_started
+
+  forbidden:
+    - "running SLZB-06MU as a second Zigbee coordinator"
+    - "running SLZB-06 in Thread/RCP mode"
+    - "connecting Z-Wave to non-ZAC93 hardware"
+
+# ─────────────────────────────────────────────────────────────────────────
+# SECTION 6: Site Separation
+# ─────────────────────────────────────────────────────────────────────────
+site_governance:
+  model: "shared governance, separate runtimes"
+  sites:
+    home:
+      ha_instance: true
+      vm: 100
+      proxmox_host: proxmox-home
+      network: "10.0.0.0/24"
+      coordinators: [SLZB-06, SLZB-06MU, TubesZB-ZAC93]
+    shop:
+      ha_instance: false
+      note: "shop has no HA instance — infrastructure managed via spine capabilities"
+  governance:
+    authority: "spine repo (agentic-spine)"
+    contracts: "shared across sites"
+    drift_gates: "HA gates skip when offsite (D293 fail-open)"
+    capabilities: "HA capabilities require LAN access to 10.0.0.100"
