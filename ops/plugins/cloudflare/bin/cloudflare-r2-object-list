@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.r2.object.list — read-only listing of objects in an R2 bucket
+# Shows: object key, size, last_modified, etag
+# Requires: CLOUDFLARE_API_TOKEN via secrets injection
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+
+usage() {
+  cat <<'EOF'
+Usage: cloudflare-r2-object-list --bucket BUCKET_NAME [OPTIONS]
+
+Lists objects in an R2 bucket.
+
+Required:
+  --bucket  NAME   R2 bucket name
+
+Optional:
+  --prefix  PATH   Only list objects with this key prefix
+  --limit   NUM    Max objects to return (default: 100, max: 1000)
+  --cursor  TOKEN  Pagination cursor from previous response
+  --json           Emit JSON output
+  -h|--help        Show this help
+EOF
+  exit 0
+}
+
+BUCKET=""
+PREFIX=""
+LIMIT=100
+CURSOR=""
+JSON_OUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bucket) BUCKET="$2"; shift 2 ;;
+    --prefix) PREFIX="$2"; shift 2 ;;
+    --limit) LIMIT="$2"; shift 2 ;;
+    --cursor) CURSOR="$2"; shift 2 ;;
+    --json) JSON_OUT=1; shift ;;
+    -h|--help) usage ;;
+    --) shift ;;
+    *) echo "STOP: unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -n "$BUCKET" ]] || { echo "STOP: --bucket is required" >&2; exit 1; }
+[[ -f "$INVENTORY" ]] || { echo "STOP: inventory file missing: $INVENTORY" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "STOP: missing dependency: python3" >&2; exit 2; }
+
+ACCOUNT_ID="$(cf_account_id_resolve "$INVENTORY" || true)"
+[[ -n "$ACCOUNT_ID" ]] || { echo "STOP: missing CLOUDFLARE_ACCOUNT_ID and inventory account_id" >&2; exit 2; }
+
+# Build query params
+QUERY="per_page=${LIMIT}"
+[[ -n "$PREFIX" ]] && QUERY="${QUERY}&prefix=${PREFIX}"
+[[ -n "$CURSOR" ]] && QUERY="${QUERY}&cursor=${CURSOR}"
+
+# Fetch R2 objects
+OBJECTS_JSON="$(cf_api_get_with_retry "${CF_API}/accounts/${ACCOUNT_ID}/r2/buckets/${BUCKET}/objects?${QUERY}")" || {
+  http_status="${CF_LAST_HTTP_STATUS:-000}"
+  class="$(cf_classify_failure "$http_status")"
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 -c "
+import json
+print(json.dumps({
+    'capability': 'cloudflare.r2.object.list',
+    'status': 'error',
+    'error_class': '${class}',
+    'http_status': ${http_status},
+    'bucket': '${BUCKET}',
+}, indent=2))
+"
+  else
+    echo "cloudflare.r2.object.list"
+    echo "status: error"
+    echo "error_class: ${class}"
+    echo "http_status: ${http_status}"
+    echo "bucket: ${BUCKET}"
+  fi
+  exit 2
+}
+
+python3 - "$OBJECTS_JSON" "$JSON_OUT" "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" "$BUCKET" <<'PYEOF'
+import json, sys
+
+raw = sys.argv[1]
+json_out = sys.argv[2] == "1"
+auth_mode = sys.argv[3]
+bucket = sys.argv[4]
+
+try:
+    data = json.loads(raw)
+except Exception as e:
+    print(f"STOP: failed to parse R2 objects API response: {e}", file=sys.stderr)
+    raise SystemExit(2)
+
+if not data.get("success", False):
+    errors = data.get("errors", [])
+    msg = "; ".join(
+        f"{e.get('code', '')}:{e.get('message', '')}"
+        for e in errors if isinstance(e, dict)
+    ) if errors else "success=false"
+    print(f"STOP: Cloudflare R2 objects API error: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+result = data.get("result", []) or []
+objects = []
+for obj in result:
+    objects.append({
+        "key": obj.get("key", ""),
+        "size": obj.get("size", 0),
+        "last_modified": obj.get("last_modified", obj.get("uploaded", "")),
+        "etag": obj.get("etag", ""),
+    })
+
+# Check for pagination cursor
+result_info = data.get("result_info", {}) or {}
+next_cursor = result_info.get("cursor", "") or ""
+truncated = data.get("result_info", {}).get("truncated", False) if isinstance(data.get("result_info"), dict) else False
+
+def fmt_size(size):
+    """Format size in human-readable form."""
+    if not isinstance(size, (int, float)) or size == 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    i = 0
+    s = float(size)
+    while s >= 1024.0 and i < len(units) - 1:
+        s /= 1024.0
+        i += 1
+    if i == 0:
+        return f"{int(s)} B"
+    return f"{s:.1f} {units[i]}"
+
+if json_out:
+    out = {
+        "capability": "cloudflare.r2.object.list",
+        "status": "ok",
+        "auth_mode": auth_mode,
+        "bucket": bucket,
+        "object_count": len(objects),
+        "truncated": truncated,
+        "objects": objects,
+    }
+    if next_cursor:
+        out["next_cursor"] = next_cursor
+    print(json.dumps(out, indent=2))
+else:
+    print("cloudflare.r2.object.list")
+    print(f"auth_mode: {auth_mode}")
+    print(f"bucket: {bucket}")
+    print(f"objects: {len(objects)}")
+    if truncated:
+        print(f"truncated: true (use --cursor to paginate)")
+    print()
+    fmt = "{:<50s} {:<12s} {:<14s}"
+    print(fmt.format("KEY", "SIZE", "MODIFIED"))
+    print("-" * 76)
+    for o in objects:
+        print(fmt.format(
+            o["key"][:50],
+            fmt_size(o["size"]),
+            str(o["last_modified"])[:10],
+        ))
+PYEOF

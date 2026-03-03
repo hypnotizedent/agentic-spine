@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cloudflare.r2.bucket.list — read-only listing of all R2 buckets in the account
+# Shows: bucket name, creation_date, location
+# Requires: CLOUDFLARE_API_TOKEN via secrets injection
+
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+CF_LIB="$ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+INVENTORY="$ROOT/ops/bindings/cloudflare.inventory.yaml"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+
+usage() {
+  cat <<'USAGE'
+Usage: cloudflare-r2-bucket-list [--json]
+
+Lists all R2 buckets in the Cloudflare account.
+
+Options:
+  --json    Emit JSON output
+  -h|--help Show this help
+USAGE
+  exit 0
+}
+
+JSON_OUT=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_OUT=1; shift ;;
+    -h|--help) usage ;;
+    --) shift ;;
+    *) shift ;;
+  esac
+done
+
+[[ -f "$INVENTORY" ]] || { echo "STOP: inventory file missing: $INVENTORY" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "STOP: missing dependency: python3" >&2; exit 2; }
+
+ACCOUNT_ID="$(cf_account_id_resolve "$INVENTORY" || true)"
+[[ -n "$ACCOUNT_ID" ]] || { echo "STOP: missing CLOUDFLARE_ACCOUNT_ID and inventory account_id" >&2; exit 2; }
+
+# Fetch R2 buckets
+BUCKETS_JSON="$(cf_api_get_with_retry "${CF_API}/accounts/${ACCOUNT_ID}/r2/buckets")" || {
+  http_status="${CF_LAST_HTTP_STATUS:-000}"
+  class="$(cf_classify_failure "$http_status")"
+  if [[ "$JSON_OUT" -eq 1 ]]; then
+    python3 -c "
+import json
+print(json.dumps({
+    'capability': 'cloudflare.r2.bucket.list',
+    'status': 'error',
+    'error_class': '${class}',
+    'http_status': ${http_status},
+}, indent=2))
+"
+  else
+    echo "cloudflare.r2.bucket.list"
+    echo "status: error"
+    echo "error_class: ${class}"
+    echo "http_status: ${http_status}"
+  fi
+  exit 2
+}
+
+python3 - "$BUCKETS_JSON" "$JSON_OUT" "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" <<'PYEOF'
+import json, sys
+
+raw = sys.argv[1]
+json_out = sys.argv[2] == "1"
+auth_mode = sys.argv[3]
+
+try:
+    data = json.loads(raw)
+except Exception as e:
+    print(f"STOP: failed to parse R2 buckets API response: {e}", file=sys.stderr)
+    raise SystemExit(2)
+
+if not data.get("success", False):
+    errors = data.get("errors", [])
+    msg = "; ".join(
+        f"{e.get('code', '')}:{e.get('message', '')}"
+        for e in errors if isinstance(e, dict)
+    ) if errors else "success=false"
+    print(f"STOP: Cloudflare R2 API error: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+buckets = data.get("result", {}).get("buckets", []) if isinstance(data.get("result"), dict) else data.get("result", []) or []
+
+results = []
+for b in buckets:
+    results.append({
+        "name": b.get("name", ""),
+        "creation_date": b.get("creation_date", ""),
+        "location": b.get("location", ""),
+    })
+
+if json_out:
+    print(json.dumps({
+        "capability": "cloudflare.r2.bucket.list",
+        "status": "ok",
+        "auth_mode": auth_mode,
+        "bucket_count": len(results),
+        "buckets": results,
+    }, indent=2))
+else:
+    print("cloudflare.r2.bucket.list")
+    print(f"auth_mode: {auth_mode}")
+    print(f"buckets: {len(results)}")
+    print()
+    fmt = "{:<40s} {:<14s} {:<15s}"
+    print(fmt.format("BUCKET", "CREATED", "LOCATION"))
+    print("-" * 69)
+    for r in results:
+        print(fmt.format(
+            r["name"][:40],
+            str(r["creation_date"])[:10],
+            str(r["location"])[:15],
+        ))
+PYEOF
