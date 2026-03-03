@@ -97,6 +97,16 @@ mail_archiver:
     backup_restore: ops/bindings/mail.archiver.backup.contract.yaml
     retention_lifecycle: ops/bindings/mail.archiver.retention.contract.yaml
     backup_schedule: ops/bindings/backup.schedule.yaml
+  database:
+    engine: postgresql
+    container: mail-archiver-db
+    db_name: "MailArchiver"
+    db_schema: "mail_archiver"
+    db_user: "mailuser"
+    db_password_ref: infisical://spine/services/mail-archiver/MAIL_ARCHIVER_DB_PASSWORD
+    host: localhost
+    port: 5432
+    note: "db_name is case-sensitive (MailArchiver, not mailarchiver). Connect string: Host=mail-archiver-db;Database=MailArchiver;Username=mailuser"
   software_identity:
     image: s1t5/mailarchiver:latest
     runtime_entrypoint: "dotnet MailArchiver.dll"
@@ -111,6 +121,29 @@ mail_archiver:
     file_size_bytes: 189440618235
     locked_at: "2026-02-25T18:59:00Z"
     verification_method: "ssh docker-host + filesystem scan evidence"
+  provider_type_enum:
+    description: "Valid ProviderType values for mail-archiver MailAccounts.ProviderType column."
+    note: "Use exact enum string. 'MICROSOFT' is NOT valid; use 'M365'. Enum is checked by the .NET EF model."
+    values:
+      - IMAP
+      - M365
+      - Gmail
+    examples:
+      imap_generic: "IMAP"
+      microsoft_365: "M365"
+      gmail: "Gmail"
+  recovery:
+    ef_migration_lock:
+      description: "Container restart can hang on EF migration lock if prior run was interrupted."
+      symptoms:
+        - "mail-archiver container starts but hangs during startup with no log output"
+        - "docker logs shows 'Applying migration...' with no completion"
+      procedure:
+        - "1. Stop mail-archiver app container: docker stop mail-archiver"
+        - "2. Restart the database container: docker restart mail-archiver-db"
+        - "3. Wait 10s for PostgreSQL to recover and release advisory locks"
+        - "4. Start app container: docker start mail-archiver"
+      note: "If step 4 still hangs, connect to DB and run: SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'MailArchiver' AND state = 'idle in transaction';"
   storage_invariants:
     nonboot_root: /srv/mail-archiver
     drift_gate: D233
