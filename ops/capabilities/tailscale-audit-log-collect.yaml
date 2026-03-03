@@ -1,0 +1,84 @@
+# Tailscale Audit Log Collection Capability Stub
+# Status: planned (blocked on log destination and absent API)
+# Gap: GAP-OP-1260
+# Contract: ops/bindings/tailscale.audit.log.contract.yaml
+# Loop: LOOP-TAILSCALE-INTEGRATION-DEFERRED-ACTIONS-20260302
+
+capability_id: tailscale.audit.log.freshness
+lifecycle: experimental
+created: "2026-03-03"
+owner: "@ronny"
+
+description: |
+  Check the freshness of Tailscale audit logs arriving at the configured
+  log destination (Grafana Loki). Reports the most recent log entry
+  timestamp and whether the stream is healthy based on freshness thresholds.
+
+  This capability is PLANNED and cannot be implemented until:
+  1. A log destination (Grafana Loki on VM 205) is provisioned for tailscale-audit
+  2. Audit log streaming is configured via the Tailscale admin console
+  The Tailscale audit log API does NOT exist (confirmed 404).
+
+contract: "ops/bindings/tailscale.audit.log.contract.yaml"
+authority: "docs/CANONICAL/TAILSCALE_AUTHORITY_CONTRACT_V1.yaml"
+
+classification:
+  domain: infra
+  plane: fabric
+  tags: [tailscale, audit, observability, logs]
+  safety: read-only
+  approval: auto
+
+dependencies:
+  infrastructure:
+    - "observability-stack (VM 205) must be reachable"
+    - "Grafana Loki must be running and accepting pushes"
+    - "Tailscale audit log streaming must be configured (admin console)"
+  capabilities:
+    - tailscale.audit.status
+    - tailscale.integration.status
+
+implementation:
+  script_path: "ops/plugins/tailscale/bin/tailscale-audit-log-freshness"
+  status: planned
+  expected_outputs:
+    - streaming_configured (true/false)
+    - destination_type (loki/s3/none)
+    - destination_reachable (true/false)
+    - last_event_at (ISO 8601 timestamp or null)
+    - freshness_ok (true/false)
+    - staleness_minutes (integer)
+    - event_count_24h (integer)
+  loki_query:
+    endpoint: "http://192.168.1.115:3100/loki/api/v1/query_range"
+    query: '{job="tailscale-audit"}'
+    lookback: "1h"
+
+sibling_capability:
+  capability_id: tailscale.audit.log.query
+  lifecycle: experimental
+  description: |
+    Query Tailscale audit logs from Loki by time range, actor, or action type.
+    Enables forensic investigation and compliance reporting.
+  status: planned
+  script_path: "ops/plugins/tailscale/bin/tailscale-audit-log-query"
+  expected_flags:
+    - "--since DURATION (e.g., 24h, 7d)"
+    - "--actor USER"
+    - "--action ACTION_TYPE"
+    - "--limit N"
+    - "--format json|table"
+
+activation_trigger: manual
+activation_prerequisites:
+  - "Provision Loki label/tenant for tailscale-audit on observability-stack (VM 205)"
+  - "Configure audit log streaming in Tailscale admin console"
+  - "Verify first log entry arrives at Loki"
+  - "Implement script at ops/plugins/tailscale/bin/tailscale-audit-log-freshness"
+  - "Register capability in ops/capabilities.yaml with lifecycle: ready"
+
+related_gaps:
+  - id: GAP-OP-1260
+    title: "Tailscale audit log streaming not configured"
+    status: open
+    severity: low
