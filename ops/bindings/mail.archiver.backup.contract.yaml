@@ -55,10 +55,21 @@ verification:
     - "./bin/ops cap run communications.stack.status"
     - "./bin/ops cap run verify.pack.run communications"
     - "./bin/ops cap run services.health.status --id mail-archiver-vm214"
+  backup_status_command: "./bin/ops cap run communications.mailarchiver.backup.status"
+
+cron_deploy_template:
+  description: |
+    Crontab entry for communications-stack (VM 214) root user.
+    Deploy with: ssh communications-stack 'sudo crontab -l | grep -v pg_dump; echo "<cron_line>"' | ssh communications-stack 'sudo crontab -'
+    Or manually add via: ssh communications-stack 'sudo crontab -e'
+  pg_dump_cron: "20 2 * * * docker exec mail-archiver-db pg_dump -U mailuser MailArchiver | gzip > /srv/mail-archiver/backups/postgres/mail-archiver-db_$(date +\\%Y\\%m\\%dT\\%H\\%M\\%SZ).sql.gz && find /srv/mail-archiver/backups/postgres -name '*.sql.gz' -mtime +30 -delete"
+  uploads_cron: "35 2 * * * tar -czf /srv/mail-archiver/backups/uploads/mail-archiver-uploads_$(date +\\%Y\\%m\\%dT\\%H\\%M\\%SZ).tar.gz -C /srv/mail-archiver/uploads . && find /srv/mail-archiver/backups/uploads -name '*.tar.gz' -mtime +14 -delete"
+  note: "Cron entries include built-in retention cleanup (30d postgres, 14d uploads) matching backup.schedule.yaml retention_days."
 
 references:
   schedule_binding: ops/bindings/backup.schedule.yaml
   retention_binding: ops/bindings/mail.archiver.retention.contract.yaml
   closes_gaps:
     - GAP-OP-924
+    - GAP-OP-1368
 

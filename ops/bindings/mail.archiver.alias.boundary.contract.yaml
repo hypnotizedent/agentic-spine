@@ -1,0 +1,104 @@
+# Status: authoritative
+# Last verified: 2026-03-03
+
+version: 1
+updated_at: "2026-03-03"
+owner: "@ronny"
+scope: mail-archiver-alias-boundary
+
+purpose: |
+  Define the canonical alias-to-account boundary rules for mail-archiver overlap
+  classification and disaster retrieval routing. Each email alias has a primary
+  account owner and validity window. Cross-account alias overlap is expected and
+  preserved; this contract documents the routing rules for classification and
+  retrieval, not for deduplication.
+
+parent_loop: LOOP-MAIL-ARCHIVER-POST-SYNC-STABILIZATION-20260302
+addresses_gap: GAP-OP-1364
+
+alias_boundaries:
+  - alias: hypnotizedent@gmail.com
+    primary_account_id: 1
+    primary_account_name: gmail-primary
+    provider: gmail
+    validity:
+      start: "2004-01-01"
+      end: null
+    domain_class: shared
+    detail: "Long-lived personal alias. Also received business correspondence in early Mint Prints era."
+
+  - alias: ops@spine.ronny.works
+    primary_account_id: 2
+    primary_account_name: stalwart-ops
+    provider: stalwart
+    validity:
+      start: "2026-02-25"
+      end: null
+    domain_class: infrastructure
+    detail: "Spine operations mailbox. Infrastructure-only."
+
+  - alias: ronny@mintprints.com
+    primary_account_id: 3
+    primary_account_name: microsoft-primary
+    provider: microsoft-m365
+    validity:
+      start: "2018-01-01"
+      end: null
+    domain_class: business
+    detail: "Canonical Mint Prints business mailbox."
+
+  - alias: ronny@hantash.com
+    primary_account_id: 4
+    primary_account_name: icloud-primary
+    provider: icloud
+    validity:
+      start: "2012-01-01"
+      end: null
+    domain_class: personal
+    detail: "Personal iCloud mailbox."
+
+cross_account_overlap_policy:
+  description: |
+    When the same MessageId appears in multiple accounts, both copies are
+    preserved. The primary_account_id for an alias determines retrieval
+    priority in disaster scenarios. Cross-account overlap is an expected
+    artifact of email forwarding and aliasing.
+  action: preserve_all
+  retrieval_order:
+    - "Match by alias primary_account_id first"
+    - "Fall back to account with earliest insertion timestamp"
+    - "If tied, prefer lower MailAccountId"
+
+within_account_dedupe_policy:
+  description: |
+    Within a single account, duplicate rows (same MessageId + same ContentHash)
+    are import artifacts (e.g., APFS case-insensitive collision during EWS export).
+    These are safe to dedupe using lowest-Id-wins rule.
+  action: dedupe_lowest_id_wins
+  precondition: "No active import jobs for the account"
+  approval: manual
+
+retrieval_routing:
+  description: |
+    Disaster retrieval priority by domain class and account boundary.
+  priority_order:
+    - domain_class: business
+      accounts: [3]
+      note: "Mint Prints business correspondence. Search account 3 first."
+    - domain_class: shared
+      accounts: [1]
+      note: "Gmail shared alias. Per-message classification determines business vs personal."
+    - domain_class: personal
+      accounts: [1, 4]
+      note: "Personal mail across Gmail and iCloud. Search by alias timeline."
+    - domain_class: infrastructure
+      accounts: [2]
+      note: "Spine ops. Search account 2 for operational audit."
+
+evidence:
+  closes_gaps:
+    - GAP-OP-1364
+  references:
+    - ops/bindings/mail.archiver.account.linkage.contract.yaml
+    - ops/bindings/mail.archiver.domain.boundary.contract.yaml
+    - docs/governance/domains/communications/MAIL_ARCHIVER_OVERLAP_CLEANUP_PLAYBOOK.md

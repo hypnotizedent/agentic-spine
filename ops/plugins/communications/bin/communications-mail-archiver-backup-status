@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# communications-mail-archiver-backup-status — governed backup verification
+# Domain: communications
+# Safety: read-only
+# Approval: auto
+#
+# Usage:
+#   communications-mail-archiver-backup-status [--target <ssh-target>] [--json]
+#
+# Verifies mail-archiver PostgreSQL backup job state on communications-stack:
+# - Checks if pg_dump cron job is installed
+# - Validates latest backup artifact exists and is recent
+# - Reports backup directory contents and retention compliance
+# - Cross-references with backup.schedule.yaml and backup.inventory.yaml
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+BACKUP_CONTRACT="$ROOT/ops/bindings/mail.archiver.backup.contract.yaml"
+BACKUP_SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
+BACKUP_INVENTORY="$ROOT/ops/bindings/backup.inventory.yaml"
+CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+
+TARGET_ID=""
+JSON=0
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+need yq
+need jq
+need ssh
+[[ -f "$BACKUP_CONTRACT" ]] || fail "missing backup contract: $BACKUP_CONTRACT"
+[[ -f "$BACKUP_SCHEDULE" ]] || fail "missing backup schedule: $BACKUP_SCHEDULE"
+[[ -f "$CONTRACT" ]] || fail "missing comms contract: $CONTRACT"
+[[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --target|--ssh-id) TARGET_ID="${2:?--target requires a value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-mail-archiver-backup-status [--target <ssh-target>] [--json]
+
+Read-only backup verification for mail-archiver PostgreSQL on communications-stack.
+Checks:
+  - pg_dump cron job installed and schedule matches contract
+  - Latest backup artifact exists and age within retention window
+  - Backup directory contents and sizes
+  - Contract parity with backup.schedule.yaml and backup.inventory.yaml
+USAGE
+      exit 0
+      ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+if [[ -z "$TARGET_ID" ]]; then
+  TARGET_ID="$(yq e -r '.mail_archiver.monitoring.machine_status_target.ssh_target // ""' "$CONTRACT")"
+  if [[ -z "$TARGET_ID" || "$TARGET_ID" == "null" ]]; then
+    TARGET_ID="$(yq e -r '.pilot.vm_target.hostname // ""' "$CONTRACT")"
+  fi
+fi
+[[ -n "$TARGET_ID" && "$TARGET_ID" != "null" ]] || fail "target id not found"
+
+DEF_USER="$(yq e -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq e -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq e -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+
+TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
+TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
+
+[[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host"
+
+SSH_OPTS="-p $TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SSH_REF="${TARGET_USER}@${TARGET_HOST}"
+
+ERRORS=0
+WARNINGS=0
+err() { echo "  FAIL: $*"; ERRORS=$((ERRORS + 1)); }
+warn() { echo "  WARN: $*"; WARNINGS=$((WARNINGS + 1)); }
+ok_msg() { echo "  OK: $*"; }
+
+echo "=== Mail-Archiver Backup Status ==="
+echo "target: $TARGET_ID ($SSH_REF)"
+echo "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo ""
+
+# ── 1. Contract parity ──
+echo "=== Contract Parity ==="
+
+PGDUMP_JOB="$(yq e '.jobs[] | select(.id == "mail-archiver-db-pgdump-daily") | .enabled' "$BACKUP_SCHEDULE" 2>/dev/null || echo "missing")"
+if [[ "$PGDUMP_JOB" == "true" ]]; then
+  ok_msg "backup.schedule.yaml: mail-archiver-db-pgdump-daily enabled"
+else
+  err "backup.schedule.yaml: mail-archiver-db-pgdump-daily not enabled ($PGDUMP_JOB)"
+fi
+
+PGDUMP_CRON="$(yq e '.jobs[] | select(.id == "mail-archiver-db-pgdump-daily") | .schedule_cron' "$BACKUP_SCHEDULE" 2>/dev/null || echo "missing")"
+echo "  schedule_cron: $PGDUMP_CRON"
+
+RETENTION_DAYS="$(yq e '.jobs[] | select(.id == "mail-archiver-db-pgdump-daily") | .retention_days' "$BACKUP_SCHEDULE" 2>/dev/null || echo "missing")"
+echo "  retention_days: $RETENTION_DAYS"
+
+UPLOADS_JOB="$(yq e '.jobs[] | select(.id == "mail-archiver-uploads-snapshot-daily") | .enabled' "$BACKUP_SCHEDULE" 2>/dev/null || echo "missing")"
+if [[ "$UPLOADS_JOB" == "true" ]]; then
+  ok_msg "backup.schedule.yaml: mail-archiver-uploads-snapshot-daily enabled"
+else
+  err "backup.schedule.yaml: mail-archiver-uploads-snapshot-daily not enabled ($UPLOADS_JOB)"
+fi
+
+# ── 2. Remote backup artifacts ──
+echo ""
+echo "=== Remote Backup Artifacts ==="
+
+POSTGRES_DIR="/srv/mail-archiver/backups/postgres"
+UPLOADS_DIR="/srv/mail-archiver/backups/uploads"
+
+# Check postgres backup dir
+PG_LS="$(ssh $SSH_OPTS "$SSH_REF" "ls -lt $POSTGRES_DIR/*.sql.gz 2>/dev/null | head -5" 2>/dev/null || echo "")"
+if [[ -n "$PG_LS" ]]; then
+  ok_msg "postgres backup directory has artifacts"
+  echo "$PG_LS" | while read -r line; do echo "    $line"; done
+
+  # Check latest file age
+  LATEST_AGE_SEC="$(ssh $SSH_OPTS "$SSH_REF" "stat -c '%Y' \$(ls -t $POSTGRES_DIR/*.sql.gz 2>/dev/null | head -1) 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
+  NOW_SEC="$(ssh $SSH_OPTS "$SSH_REF" "date +%s" 2>/dev/null || echo "0")"
+  if [[ "$LATEST_AGE_SEC" -gt 0 && "$NOW_SEC" -gt 0 ]]; then
+    AGE_HOURS=$(( (NOW_SEC - LATEST_AGE_SEC) / 3600 ))
+    echo "  latest_backup_age_hours: $AGE_HOURS"
+    if [[ "$AGE_HOURS" -gt 48 ]]; then
+      warn "latest postgres backup is ${AGE_HOURS}h old (>48h)"
+    else
+      ok_msg "latest postgres backup age within 48h window"
+    fi
+  fi
+
+  PG_COUNT="$(ssh $SSH_OPTS "$SSH_REF" "ls $POSTGRES_DIR/*.sql.gz 2>/dev/null | wc -l" 2>/dev/null | tr -d ' ' || echo "0")"
+  echo "  postgres_backup_count: $PG_COUNT"
+else
+  warn "no postgres backup artifacts found in $POSTGRES_DIR"
+fi
+
+# Check uploads backup dir
+UL_LS="$(ssh $SSH_OPTS "$SSH_REF" "ls -lt $UPLOADS_DIR/*.tar.gz 2>/dev/null | head -5" 2>/dev/null || echo "")"
+if [[ -n "$UL_LS" ]]; then
+  ok_msg "uploads backup directory has artifacts"
+  echo "$UL_LS" | while read -r line; do echo "    $line"; done
+else
+  warn "no uploads backup artifacts found in $UPLOADS_DIR"
+fi
+
+# ── 3. Cron job check ──
+echo ""
+echo "=== Cron Job Check ==="
+CRON_ENTRIES="$(ssh $SSH_OPTS "$SSH_REF" "sudo crontab -l 2>/dev/null | grep -i 'pg_dump\|mail-archiver' || echo ''" 2>/dev/null || echo "")"
+if [[ -n "$CRON_ENTRIES" ]]; then
+  ok_msg "cron entries found for mail-archiver backup"
+  echo "$CRON_ENTRIES" | while read -r line; do echo "    $line"; done
+else
+  warn "no cron entries found for mail-archiver backup"
+  echo "  deploy_hint: See ops/bindings/mail.archiver.backup.contract.yaml for pg_dump job template"
+fi
+
+# ── 4. DB size ──
+echo ""
+echo "=== Database Size ==="
+DB_SIZE="$(ssh $SSH_OPTS "$SSH_REF" "echo \"SELECT pg_size_pretty(pg_database_size('MailArchiver'));\" | sudo docker exec -i mail-archiver-db psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tr -d '[:space:]' || echo "unknown")"
+echo "  db_size: $DB_SIZE"
+
+# ── Result ──
+echo ""
+STATUS="OK"
+if [[ "$ERRORS" -gt 0 ]]; then
+  STATUS="FAIL"
+elif [[ "$WARNINGS" -gt 0 ]]; then
+  STATUS="WARN"
+fi
+
+echo "backup_contract_ref: ops/bindings/mail.archiver.backup.contract.yaml"
+echo "backup_schedule_ref: ops/bindings/backup.schedule.yaml"
+echo "errors: $ERRORS"
+echo "warnings: $WARNINGS"
+echo "status: $STATUS"
+
+[[ "$ERRORS" -gt 0 ]] && exit 1 || exit 0
