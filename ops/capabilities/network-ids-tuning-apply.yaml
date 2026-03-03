@@ -1,0 +1,67 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Capability Stub: network.ids.tuning.apply
+# ═══════════════════════════════════════════════════════════════════════════
+# Lifecycle: planned (not yet implemented)
+# Source: PLAN-NETWORK-SECURITY-OPS-WORKER-20260303
+# Contract: ops/bindings/network.ids.tuning.contract.yaml
+# Gap: GAP-OP-1457 (IDS/IPS tuning)
+# ═══════════════════════════════════════════════════════════════════════════
+
+capability:
+  name: network.ids.tuning.apply
+  lifecycle: planned
+  description: >
+    Apply IDS/IPS tuning configuration to UniFi Threat Management.
+    Configures Suricata rule categories (enable/disable), populates
+    suppress list for known false positives, and manages the IDS-to-IPS
+    promotion lifecycle.
+
+  safety: mutating
+  approval: manual
+  domain: network
+  plane: fabric
+
+  contract: ops/bindings/network.ids.tuning.contract.yaml
+
+  implementation:
+    status: not_started
+    script: null
+    language: bash
+    estimated_complexity: medium
+    notes: >
+      Uses UniFi API to configure Threat Management settings. Rule
+      category toggles and suppress list are applied via the controller
+      API. IDS→IPS mode change requires explicit operator confirmation
+      and soak period documentation.
+
+  prerequisites:
+    - "UniFi API credentials in Infisical"
+    - "Contract NETWORK_IDS_TUNING_V1 approved"
+    - "48-hour IDS soak period completed (for IPS promotion)"
+    - "Suppress list populated from soak observations"
+
+  outputs:
+    - "Rule categories configured per contract (enabled/disabled)"
+    - "Suppress list applied"
+    - "Alert routing to observability stack configured"
+    - "IDS/IPS mode set per contract"
+
+  rollback:
+    description: >
+      Revert to IDS mode with default rule categories enabled.
+      No traffic blocking, all rules in detect-only mode.
+    risk: low
+
+  lifecycle_transitions:
+    - from: IDS
+      to: IPS
+      requires:
+        - "48h soak period complete"
+        - "Suppress list validated"
+        - "No legitimate traffic in block candidates"
+        - "Manual operator approval"
+      gate: D344
+
+  related_capabilities:
+    - network.ids.status
+    - network.crowdsec.status

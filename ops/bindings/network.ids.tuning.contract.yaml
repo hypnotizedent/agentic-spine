@@ -1,0 +1,262 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# IDS/IPS Tuning Contract
+# ═══════════════════════════════════════════════════════════════════════════
+# Governs Suricata rule category management, suppress list baseline,
+# soak period policy, and alert threshold configuration for UniFi
+# Threat Management.
+#
+# Source plan: PLAN-NETWORK-SECURITY-OPS-WORKER-20260303
+# Parent loop: LOOP-NETWORK-SECURITY-OPS-WORKER-SPEC-20260303
+# Linked gap: GAP-OP-1457 (IDS/IPS tuning)
+# ═══════════════════════════════════════════════════════════════════════════
+
+contract_id: NETWORK_IDS_TUNING_V1
+version: "1.0"
+status: planned
+created: "2026-03-03"
+owner: "@ronny"
+
+description: >
+  Defines the IDS/IPS tuning strategy for UniFi Threat Management
+  (Suricata-based). The contract covers rule category selection,
+  suppress list for known false positives, a mandatory IDS-only soak
+  period before IPS promotion, and alert routing to the observability
+  stack.
+
+# ────────────────────────────────────────────────────────────────────────────
+# CURRENT STATE
+# ────────────────────────────────────────────────────────────────────────────
+current_state:
+  platform: "UniFi Threat Management"
+  engine: "Suricata (embedded in UDR firmware)"
+  home:
+    device: "UDR7 (10.0.0.1)"
+    status: active
+    mode: "IDS (detect-only, default/untuned)"
+    rule_categories: "default (all enabled, no customization)"
+    suppress_list: "none"
+  shop:
+    device: "UDR6 (192.168.1.1)"
+    status: active
+    mode: "IDS (detect-only, default/untuned)"
+    rule_categories: "default (all enabled, no customization)"
+    suppress_list: "none"
+
+# ────────────────────────────────────────────────────────────────────────────
+# RULE CATEGORY POLICY
+# ────────────────────────────────────────────────────────────────────────────
+rule_categories:
+  description: >
+    UniFi groups Suricata rules into categories. Each category can be
+    enabled or disabled independently. This contract defines the target
+    state for each category.
+
+  enabled:
+    - category: emerging_threats
+      description: "Emerging Threats community rules (ET Open)"
+      priority: high
+      rationale: "Primary threat detection ruleset, community-maintained"
+
+    - category: malware
+      description: "Known malware C2, download, and callback patterns"
+      priority: critical
+      rationale: "Essential for detecting compromised IoT devices"
+
+    - category: exploit
+      description: "Known exploit attempts (CVE-based)"
+      priority: high
+      rationale: "Detect exploitation of known vulnerabilities"
+
+    - category: dos
+      description: "Denial of service attack patterns"
+      priority: medium
+      rationale: "Detect volumetric and application-layer DoS"
+
+    - category: scan
+      description: "Port scanning and reconnaissance patterns"
+      priority: medium
+      rationale: "Detect pre-attack reconnaissance"
+
+    - category: web_attack
+      description: "SQL injection, XSS, path traversal"
+      priority: high
+      rationale: "Protect self-hosted web services"
+
+    - category: dns
+      description: "DNS tunneling, DGA detection, suspicious queries"
+      priority: high
+      rationale: "Complement Pi-hole filtering with network-level DNS analysis"
+
+    - category: policy
+      description: "Policy violations (cleartext auth, insecure protocols)"
+      priority: low
+      rationale: "Useful for hygiene but high false-positive rate"
+
+  disabled:
+    - category: games
+      description: "Online gaming traffic signatures"
+      rationale: "No gaming traffic on managed networks; noise reduction"
+
+    - category: chat
+      description: "Chat/IM protocol detection"
+      rationale: "Legitimate traffic; not a security concern"
+
+    - category: p2p
+      description: "Peer-to-peer protocol detection"
+      rationale: "Download stack uses VPN tunnel; P2P detection on LAN is false positive"
+
+    - category: streaming
+      description: "Streaming media protocol detection"
+      rationale: "Jellyfin and media streaming are legitimate; noise reduction"
+
+# ────────────────────────────────────────────────────────────────────────────
+# SUPPRESS LIST BASELINE
+# ────────────────────────────────────────────────────────────────────────────
+suppress_list:
+  description: >
+    Known false positives and expected traffic patterns that generate
+    noise without security value. Suppressed alerts are still logged
+    but excluded from dashboards and notifications.
+
+  entries:
+    - sid: "TBD"
+      description: "Tailscale DERP traffic (WireGuard-based VPN)"
+      source: "any Tailscale device"
+      rationale: "Tailscale traffic triggers generic VPN/tunnel rules; expected"
+
+    - sid: "TBD"
+      description: "Pi-hole DNS query volume (high query rate)"
+      source: "10.0.0.53, 192.168.1.204"
+      rationale: "Pi-hole legitimately generates high DNS query volume"
+
+    - sid: "TBD"
+      description: "Docker container inter-host communication"
+      source: "172.16.0.0/12"
+      rationale: "Docker bridge networks use RFC1918; not actual internal leakage"
+
+    - sid: "TBD"
+      description: "Home Assistant polling IoT devices"
+      source: "10.0.0.100"
+      rationale: "HA polls IoT devices frequently; triggers scan detection"
+
+    - sid: "TBD"
+      description: "NFS traffic between servers and NAS"
+      source: "server VLAN"
+      destination: "management VLAN NAS"
+      rationale: "High-volume NFS is legitimate; triggers data exfiltration rules"
+
+  population_method: >
+    Suppress list is built iteratively during IDS soak period. Each alert
+    is reviewed manually. Entries added only after confirming the alert is
+    a known false positive with documented rationale.
+
+# ────────────────────────────────────────────────────────────────────────────
+# SOAK PERIOD POLICY
+# ────────────────────────────────────────────────────────────────────────────
+soak_period:
+  description: >
+    Mandatory observation-only period before promoting from IDS (detect)
+    to IPS (block). During soak, all alerts are logged and reviewed but
+    no traffic is blocked.
+
+  duration: "48 hours minimum"
+  mode: IDS
+  review_cadence: "Daily review of alert dashboard"
+
+  promotion_criteria:
+    - "All false positives identified and added to suppress list"
+    - "No legitimate traffic would be blocked by current rules"
+    - "Alert volume is manageable (< 100 unique alerts/day after suppress)"
+    - "At least one full business day of normal traffic observed"
+    - "Manual operator approval required for IDS → IPS promotion"
+
+  rollback_policy: >
+    If IPS blocks legitimate traffic, immediately revert to IDS mode.
+    File a gap for the false positive and add to suppress list before
+    re-promoting.
+
+# ────────────────────────────────────────────────────────────────────────────
+# ALERT THRESHOLDS AND ROUTING
+# ────────────────────────────────────────────────────────────────────────────
+alert_routing:
+  description: >
+    Alert routing from UniFi Threat Management to the observability stack.
+
+  destinations:
+    - target: "Grafana dashboard"
+      method: "UniFi syslog → Loki → Grafana"
+      purpose: "Visual alert dashboard with trend analysis"
+
+    - target: "Uptime Kuma"
+      method: "Push-based heartbeat from alert processor"
+      purpose: "IDS service health monitoring"
+
+  thresholds:
+    - level: info
+      description: "Policy violations, scan attempts"
+      action: "Log only, dashboard visible"
+
+    - level: warning
+      description: "Exploit attempts, suspicious DNS, web attacks"
+      action: "Log + dashboard highlight"
+
+    - level: critical
+      description: "Malware C2 callback, active exploitation"
+      action: "Log + notification (future: push notification)"
+
+  log_retention:
+    duration: "30 days"
+    format: "JSON (Suricata EVE log format)"
+    storage: "Loki on observability VM (192.168.1.205)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# IPS MODE POLICY (POST-SOAK)
+# ────────────────────────────────────────────────────────────────────────────
+ips_mode:
+  description: >
+    After successful soak period, IPS mode actively blocks matching traffic.
+    This is a significant operational change requiring manual approval.
+  activation_requires:
+    - "Soak period complete with documented review"
+    - "Suppress list populated and validated"
+    - "Manual operator approval (human_sign_off: required)"
+    - "Rollback procedure documented and tested"
+  blocking_categories:
+    - malware
+    - exploit
+    - web_attack
+  non_blocking_categories:
+    - scan
+    - policy
+    - dns
+    - dos
+  rationale: >
+    Only high-confidence categories (malware, exploit, web_attack) block
+    traffic. Lower-confidence categories (scan, policy) remain IDS-only
+    to prevent false-positive disruption.
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED CAPABILITIES
+# ────────────────────────────────────────────────────────────────────────────
+planned_capabilities:
+  - name: network.ids.tuning.apply
+    description: "Apply rule category and suppress list configuration to UniFi"
+    safety: mutating
+    approval: manual
+    status: planned
+
+  - name: network.ids.status
+    description: "Report Suricata rule state, suppress list, and alert summary"
+    safety: read-only
+    approval: auto
+    status: planned
+
+# ────────────────────────────────────────────────────────────────────────────
+# PROPOSED GATE
+# ────────────────────────────────────────────────────────────────────────────
+proposed_gates:
+  - id: D344
+    name: netsec-ids-tuning-lock
+    description: "Enforce Suricata rule state matches this tuning contract"
+    mode: report
+    promote_to_enforce_after_clean_runs: 3
