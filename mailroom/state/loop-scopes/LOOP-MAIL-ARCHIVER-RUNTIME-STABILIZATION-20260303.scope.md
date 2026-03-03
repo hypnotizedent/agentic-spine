@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MAIL-ARCHIVER-RUNTIME-STABILIZATION-20260303
 created: 2026-03-03
-status: active
+status: closed
 owner: "@ronny"
 scope: communications
 priority: high

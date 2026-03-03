@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-NETWORK-SECURITY-OPS-WORKER-SPEC-20260303
 created: 2026-03-03
-status: active
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Capture a governed, executable specification for network security hardening across DNS authority, VLAN segmentation, threat detection, and stack discovery — design-only, no runtime implementation.
