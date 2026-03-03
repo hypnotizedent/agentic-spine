@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-FRICTION-PRECOMMIT-ROLE-CONTEXT-INHERITANCE-20260302
 created: 2026-03-02
-status: planned
+status: closed
 owner: "@ronny"
 scope: friction
 priority: high

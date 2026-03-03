@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-MAIL-ARCHIVER-OVERLAP-CLEANUP-20260226
 created: 2026-02-26
-status: planned
+status: closed
 owner: "@ronny"
 scope: communications
 priority: medium
