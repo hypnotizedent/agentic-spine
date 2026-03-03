@@ -6,6 +6,7 @@ owner: "@ronny"
 scope: tailscale
 priority: medium
 horizon: later
+execution_mode: single_worker
 execution_readiness: blocked
 next_review: "2026-04-01"
 activation_trigger: manual

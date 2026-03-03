@@ -514,6 +514,110 @@ run_cap() {
     fi
 
     # ── Proactive mutation guard (critical domains, snapshot-driven) ──
+    # ── Orchestrator-subagent fail-closed guard (loop lock evidence) ──
+    if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
+      local orchestrator_loop_id orchestrator_scope_file orchestrator_mode
+      local orchestrator_lock_dir orchestrator_lock_match
+      local caller_worktree caller_branch
+      local orch_bypass orch_bypass_reason
+      local scope_frontmatter
+
+      orchestrator_loop_id="${SPINE_LOOP_ID:-}"
+      if [[ -z "$orchestrator_loop_id" && "${role_policy_override_ref:-}" =~ ^LOOP-[A-Za-z0-9._-]+$ ]]; then
+        orchestrator_loop_id="$role_policy_override_ref"
+      fi
+
+      # Allow explicit bootstrap capabilities to create lock claims.
+      case "$name" in
+        orchestration.terminal.entry|orchestration.wave.kickoff) orchestrator_loop_id="" ;;
+      esac
+
+      if [[ -n "$orchestrator_loop_id" ]]; then
+        orchestrator_scope_file="$SPINE_CODE/mailroom/state/loop-scopes/${orchestrator_loop_id}.scope.md"
+        if [[ ! -f "$orchestrator_scope_file" ]]; then
+          echo "BLOCKED: orchestrator mutation guard"
+          echo "Capability: $name"
+          echo "Loop: $orchestrator_loop_id"
+          echo "Reason: loop scope not found at $orchestrator_scope_file"
+          echo ""
+          echo "Remediation:"
+          echo "  Create loop scope first (with execution_mode) or set SPINE_LOOP_ID to a valid loop."
+          blocked_reason="orchestrator_guard_scope_missing:$orchestrator_loop_id"
+          exit_code=5
+        else
+          scope_frontmatter="$(sed -n '/^---$/,/^---$/p' "$orchestrator_scope_file" 2>/dev/null || true)"
+          orchestrator_mode="$(printf '%s\n' "$scope_frontmatter" | sed -n 's/^execution_mode:[[:space:]]*//p' | head -1 | tr -d '[:space:]')"
+
+          if [[ -z "$orchestrator_mode" ]]; then
+            echo "BLOCKED: orchestrator mutation guard"
+            echo "Capability: $name"
+            echo "Loop: $orchestrator_loop_id"
+            echo "Reason: loop scope missing execution_mode"
+            echo ""
+            echo "Remediation:"
+            echo "  Add 'execution_mode: single_worker|orchestrator_subagents' to:"
+            echo "  $orchestrator_scope_file"
+            blocked_reason="orchestrator_guard_execution_mode_missing:$orchestrator_loop_id"
+            exit_code=5
+          elif [[ "$orchestrator_mode" == "orchestrator_subagents" ]]; then
+            orch_bypass="${SPINE_ORCH_MUTATION_GUARD_BYPASS:-}"
+            orch_bypass_reason="${SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON:-}"
+
+            if [[ "${orch_bypass,,}" == "1" || "${orch_bypass,,}" == "true" || "${orch_bypass,,}" == "yes" ]]; then
+              if [[ -z "$orch_bypass_reason" ]]; then
+                echo "BLOCKED: orchestrator mutation guard bypass missing reason"
+                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON with a governed reference."
+                blocked_reason="orchestrator_guard_bypass_reason_missing:$orchestrator_loop_id"
+                exit_code=5
+              else
+                echo "WARNING: ORCHESTRATOR MUTATION GUARD BYPASSED (loop=$orchestrator_loop_id reason=$orch_bypass_reason)"
+              fi
+            else
+              caller_worktree="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+              caller_branch="$(git -C "$PWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+              orchestrator_lock_dir="$SPINE_CODE/mailroom/state/orchestration/${orchestrator_loop_id}/locks"
+              orchestrator_lock_match=""
+
+              if [[ -n "$caller_worktree" && -n "$caller_branch" && -d "$orchestrator_lock_dir" ]]; then
+                while IFS= read -r lock_file; do
+                  [[ -f "$lock_file" ]] || continue
+                  lock_loop="$(sed -n 's/^loop_id:[[:space:]]*//p' "$lock_file" | head -1)"
+                  lock_status="$(sed -n 's/^status:[[:space:]]*//p' "$lock_file" | head -1)"
+                  lock_worktree="$(sed -n 's/^worktree:[[:space:]]*//p' "$lock_file" | head -1)"
+                  lock_branch="$(sed -n 's/^branch:[[:space:]]*//p' "$lock_file" | head -1)"
+                  lock_mode="$(sed -n 's/^mode:[[:space:]]*//p' "$lock_file" | head -1)"
+                  [[ "$lock_loop" == "$orchestrator_loop_id" ]] || continue
+                  [[ "$lock_status" == "active" ]] || continue
+                  [[ "$lock_mode" == "capability" || "$lock_mode" == "kickoff" ]] || continue
+                  [[ "$lock_worktree" == "$caller_worktree" ]] || continue
+                  [[ "$lock_branch" == "$caller_branch" ]] || continue
+                  orchestrator_lock_match="$lock_file"
+                  break
+                done < <(find "$orchestrator_lock_dir" -maxdepth 1 -type f -name '*.lock' 2>/dev/null | LC_ALL=C sort)
+              fi
+
+              if [[ -z "$orchestrator_lock_match" ]]; then
+                echo "BLOCKED: orchestrator mutation guard"
+                echo "Capability: $name"
+                echo "Loop: $orchestrator_loop_id (execution_mode=orchestrator_subagents)"
+                echo "Current branch/worktree: ${caller_branch:-unknown} @ ${caller_worktree:-unknown}"
+                echo "Required: active lock evidence from orchestration.terminal.entry contract"
+                echo ""
+                echo "Remediation:"
+                echo "  ./bin/ops cap run orchestration.wave.kickoff -- --loop-id $orchestrator_loop_id --lanes A,B,C"
+                echo "  ./bin/ops cap run orchestration.terminal.entry -- --loop-id $orchestrator_loop_id --role worker --lane <LANE> --session-id <SESSION_ID> --worktree ${caller_worktree:-<worktree>} --branch ${caller_branch:-<branch>}"
+                echo "Emergency bypass (warn-only, governed):"
+                echo "  SPINE_ORCH_MUTATION_GUARD_BYPASS=1 SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON='<ref>' ./bin/ops cap run $name ..."
+                blocked_reason="orchestrator_guard_lock_missing:$orchestrator_loop_id:${caller_branch:-unknown}"
+                exit_code=5
+              fi
+            fi
+          fi
+        fi
+      fi
+    fi
+
+    # ── Proactive mutation guard (critical domains, snapshot-driven) ──
     if [[ -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
       local guard_policy="$SPINE_CODE/ops/bindings/proactive.guard.policy.yaml"
       if [[ -f "$guard_policy" ]]; then

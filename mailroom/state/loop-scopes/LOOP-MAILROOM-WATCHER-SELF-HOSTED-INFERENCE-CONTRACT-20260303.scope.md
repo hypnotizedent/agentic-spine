@@ -6,6 +6,7 @@ owner: "@ronny"
 scope: mailroom
 priority: medium
 horizon: now
+execution_mode: single_worker
 execution_readiness: runnable
 blocked_by: ""
 objective: Define and lock the canonical self-hosted watcher inference contract, procurement profile, and migration/rollback policy for autonomous low-recurring-cost execution.

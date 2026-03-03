@@ -33,14 +33,14 @@ if [[ -f "$TEMPLATE" ]]; then
   grep -q 'execution_mode:' "$TEMPLATE" || fail "loop scope template missing execution_mode field"
 fi
 
-# Check active/open loop scopes for execution_mode consistency
-errors=0
+# Check active/open/draft loop scopes for execution_mode consistency
 checked=0
 missing=0
+missing_scopes=()
 for scope_file in "$SCOPES_DIR"/*.scope.md; do
   [[ -f "$scope_file" ]] || continue
   scope_status="$(sed -n '/^---$/,/^---$/p' "$scope_file" | { grep '^status:' || true; } | head -1 | awk '{print $2}')"
-  # Only check active/open loops — planned/closed loops may predate this field
+  # Only check active/open/draft loops — planned/closed loops may predate this field
   case "$scope_status" in
     active|open|draft) ;;
     *) continue ;;
@@ -50,13 +50,20 @@ for scope_file in "$SCOPES_DIR"/*.scope.md; do
   # Check if execution_mode is declared in frontmatter
   if ! sed -n '/^---$/,/^---$/p' "$scope_file" | { grep -q '^execution_mode:' || false; }; then
     basename_f="$(basename "$scope_file")"
-    echo "D330 REPORT: $basename_f missing execution_mode field (defaults to single_worker fallback)" >&2
+    echo "D330 FAIL-CANDIDATE: $basename_f missing execution_mode field" >&2
     missing=$((missing + 1))
+    missing_scopes+=("$basename_f")
   fi
 done
 
-if [[ "$errors" -gt 0 ]]; then
-  fail "$errors validation errors in active loop scopes"
+if [[ "$missing" -gt 0 ]]; then
+  echo "D330 FAIL: $missing active/open/draft loop scope(s) missing required execution_mode field." >&2
+  echo "Remediation: add frontmatter key 'execution_mode: single_worker|orchestrator_subagents' in each scope." >&2
+  echo "Missing scopes:" >&2
+  for scope in "${missing_scopes[@]}"; do
+    echo "  - mailroom/state/loop-scopes/$scope" >&2
+  done
+  exit 1
 fi
 
 echo "D330 PASS: execution topology contract valid (modes=$modes_count, default=$default_mode, scopes_checked=$checked, missing_field=$missing)"

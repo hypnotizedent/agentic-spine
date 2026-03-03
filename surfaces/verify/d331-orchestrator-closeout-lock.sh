@@ -37,21 +37,43 @@ fi
 # Check any existing orchestration packets for completeness
 packets_checked=0
 packets_incomplete=0
+incomplete_findings=()
 if [[ -d "$ORCH_DIR" ]]; then
   for packet_file in "$ORCH_DIR"/LOOP-*/packet.yaml; do
     [[ -f "$packet_file" ]] || continue
-    packets_checked=$((packets_checked + 1))
+    exec_mode="$(yq e -r '.execution_mode // ""' "$packet_file" 2>/dev/null || echo "")"
+    if [[ "$exec_mode" != "orchestrator_subagents" ]]; then
+      continue
+    fi
 
-    # Check required fields
-    for field in loop_id execution_mode owner_terminal wave_plan subagent_allocation worktree_mapping integration_order verification_sequence; do
+    packets_checked=$((packets_checked + 1))
+    packet_rel="mailroom/state/orchestration/$(basename "$(dirname "$packet_file")")/packet.yaml"
+    packet_missing=0
+
+    # required_fields + closeout_fields must be present for orchestrator packets (fail-closed).
+    while IFS= read -r field; do
+      [[ -n "$field" ]] || continue
       val="$(yq e ".$field" "$packet_file" 2>/dev/null || echo null)"
       if [[ "$val" == "null" || -z "$val" ]]; then
-        echo "D331 REPORT: $(basename "$(dirname "$packet_file")")/packet.yaml missing required field: $field" >&2
-        packets_incomplete=$((packets_incomplete + 1))
-        break
+        incomplete_findings+=("$packet_rel::$field")
+        packet_missing=1
       fi
-    done
+    done < <(yq e -r '.required_fields[]?, .closeout_fields[]?' "$PACKET_CONTRACT")
+
+    if [[ "$packet_missing" -eq 1 ]]; then
+      packets_incomplete=$((packets_incomplete + 1))
+    fi
   done
+fi
+
+if [[ "$packets_incomplete" -gt 0 ]]; then
+  echo "D331 FAIL: $packets_incomplete orchestrator_subagents packet(s) incomplete." >&2
+  echo "Remediation: complete packet fields in mailroom/state/orchestration/<LOOP_ID>/packet.yaml before dispatch/closeout." >&2
+  echo "Missing fields:" >&2
+  for finding in "${incomplete_findings[@]}"; do
+    echo "  - $finding" >&2
+  done
+  exit 1
 fi
 
 echo "D331 PASS: orchestrator packet contract valid (required=$req_count, closeout=$closeout_count, packets_checked=$packets_checked, incomplete=$packets_incomplete)"
