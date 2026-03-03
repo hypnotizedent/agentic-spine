@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_QUEUE = ROOT / "mailroom/state/friction-queue.ndjson"
+DEFAULT_LOCK = ROOT / "mailroom/state/locks/friction-queue.lock"
 GAPS_DEDUPE = ROOT / "ops/plugins/loops/bin/gaps-dedupe"
 GAPS_FILE = ROOT / "ops/plugins/loops/bin/gaps-file"
 OP_GAPS_FILE = ROOT / "ops/bindings/operational.gaps.yaml"
@@ -45,6 +48,17 @@ def write_queue(path: Path, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             fh.write(json.dumps(row, sort_keys=True))
             fh.write("\n")
+
+
+@contextmanager
+def queue_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def build_description(item: dict[str, Any]) -> str:
@@ -131,6 +145,7 @@ def main() -> int:
     argv = [a for a in sys.argv[1:] if a.strip()]
     ap = argparse.ArgumentParser(description="Reconcile friction queue into existing gaps surfaces")
     ap.add_argument("--queue", default=str(DEFAULT_QUEUE))
+    ap.add_argument("--lock-file", default=str(DEFAULT_LOCK))
     ap.add_argument("--loop-id", help="Parent loop ID (e.g. LOOP-EXAMPLE-20260303). Falls back to SPINE_LOOP_ID.")
     ap.add_argument("--dedupe-threshold", type=float, default=0.85)
     ap.add_argument("--dry-run", action="store_true")
@@ -146,127 +161,130 @@ def main() -> int:
         raise SystemExit(f"friction.reconcile FAIL: missing gaps registry: {OP_GAPS_FILE}")
 
     queue_path = Path(args.queue).expanduser()
-    rows = load_queue(queue_path)
-    now = utc_iso()
+    lock_path = Path(args.lock_file).expanduser()
 
-    queued_items = [r for r in rows if str(r.get("status", "queued")).strip().lower() == "queued"]
+    with queue_lock(lock_path):
+        rows = load_queue(queue_path)
+        now = utc_iso()
 
-    matched_count = 0
-    filed_count = 0
-    pending_batch: list[dict[str, Any]] = []
-    pending_indices: list[int] = []
+        queued_items = [r for r in rows if str(r.get("status", "queued")).strip().lower() == "queued"]
 
-    for idx, item in enumerate(rows):
-        status = str(item.get("status", "queued")).strip().lower()
-        if status != "queued":
-            continue
+        matched_count = 0
+        filed_count = 0
+        pending_batch: list[dict[str, Any]] = []
+        pending_indices: list[int] = []
 
-        # Exact marker match first (fingerprint/friction_id), then fuzzy dedupe.
-        exact_gap_id = ""
-        fingerprint = str(item.get("fingerprint", "")).strip()
-        friction_id = str(item.get("friction_id", "")).strip()
-        if fingerprint:
-            exact_gap_id = find_open_gap_by_exact_marker(f"fingerprint: {fingerprint}")
-        if not exact_gap_id and friction_id:
-            exact_gap_id = find_open_gap_by_exact_marker(f"friction_id: {friction_id}")
-        if exact_gap_id:
-            item["status"] = "matched"
-            item["matched_gap_id"] = exact_gap_id
-            item["matched_at_utc"] = now
-            item["updated_at_utc"] = now
-            matched_count += 1
-            continue
+        for idx, item in enumerate(rows):
+            status = str(item.get("status", "queued")).strip().lower()
+            if status != "queued":
+                continue
 
-        desc = build_description(item)
-        dedupe = run_json(
-            [
-                str(GAPS_DEDUPE),
-                "--description",
-                desc,
-                "--threshold",
-                str(args.dedupe_threshold),
-                "--status",
-                "open",
-                "--json",
-            ]
-        )
-        matches = dedupe.get("matches", []) if isinstance(dedupe, dict) else []
-
-        if matches:
-            top = matches[0]
-            gap_id = str(top.get("id", "")).strip()
-            if gap_id:
+            # Exact marker match first (fingerprint/friction_id), then fuzzy dedupe.
+            exact_gap_id = ""
+            fingerprint = str(item.get("fingerprint", "")).strip()
+            friction_id = str(item.get("friction_id", "")).strip()
+            if fingerprint:
+                exact_gap_id = find_open_gap_by_exact_marker(f"fingerprint: {fingerprint}")
+            if not exact_gap_id and friction_id:
+                exact_gap_id = find_open_gap_by_exact_marker(f"friction_id: {friction_id}")
+            if exact_gap_id:
                 item["status"] = "matched"
-                item["matched_gap_id"] = gap_id
+                item["matched_gap_id"] = exact_gap_id
                 item["matched_at_utc"] = now
                 item["updated_at_utc"] = now
                 matched_count += 1
                 continue
 
-        pending_batch.append(
-            {
-                "id": "auto",
-                "type": "agent-behavior",
-                "severity": map_severity(str(item.get("severity", "medium"))),
-                "discovered_by": loop_id,
-                "doc": "mailroom/state/friction-queue.ndjson",
-                "description": desc,
-            }
-        )
-        pending_indices.append(idx)
+            desc = build_description(item)
+            dedupe = run_json(
+                [
+                    str(GAPS_DEDUPE),
+                    "--description",
+                    desc,
+                    "--threshold",
+                    str(args.dedupe_threshold),
+                    "--status",
+                    "open",
+                    "--json",
+                ]
+            )
+            matches = dedupe.get("matches", []) if isinstance(dedupe, dict) else []
 
-    filed_ids: list[str] = []
-    skipped_duplicate_ids: list[str] = []
-    if pending_batch and not args.dry_run:
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as tmp:
-            tmp.write(build_batch_yaml(pending_batch))
-            tmp_path = Path(tmp.name)
+            if matches:
+                top = matches[0]
+                gap_id = str(top.get("id", "")).strip()
+                if gap_id:
+                    item["status"] = "matched"
+                    item["matched_gap_id"] = gap_id
+                    item["matched_at_utc"] = now
+                    item["updated_at_utc"] = now
+                    matched_count += 1
+                    continue
 
-        proc = subprocess.run(
-            [str(GAPS_FILE), "--batch", str(tmp_path), "--loop-id", loop_id],
-            cwd=str(ROOT),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        tmp_path.unlink(missing_ok=True)
+            pending_batch.append(
+                {
+                    "id": "auto",
+                    "type": "agent-behavior",
+                    "severity": map_severity(str(item.get("severity", "medium"))),
+                    "discovered_by": loop_id,
+                    "doc": "mailroom/state/friction-queue.ndjson",
+                    "description": desc,
+                }
+            )
+            pending_indices.append(idx)
 
-        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        for line in output.splitlines():
-            line = line.strip()
-            if line.startswith("FILED:"):
-                filed_ids.append(line.split(":", 1)[1].strip())
-            elif line.startswith("SKIPPED_DUPLICATE:"):
-                skipped_duplicate_ids.append(line.split(":", 1)[1].strip())
+        filed_ids: list[str] = []
+        skipped_duplicate_ids: list[str] = []
+        if pending_batch and not args.dry_run:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as tmp:
+                tmp.write(build_batch_yaml(pending_batch))
+                tmp_path = Path(tmp.name)
 
-        if proc.returncode != 0:
-            raise SystemExit(f"friction.reconcile FAIL: gaps.file batch failed\n{output.strip()}")
+            proc = subprocess.run(
+                [str(GAPS_FILE), "--batch", str(tmp_path), "--loop-id", loop_id],
+                cwd=str(ROOT),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            tmp_path.unlink(missing_ok=True)
 
-    if args.dry_run:
-        filed_count = len(pending_batch)
-    else:
-        filed_count = min(len(pending_indices), len(filed_ids))
-        matched_from_idempotent_skip = 0
-        for pos, gap_id in enumerate(filed_ids[: len(pending_indices)]):
-            row_index = pending_indices[pos]
-            rows[row_index]["status"] = "filed"
-            rows[row_index]["filed_gap_id"] = gap_id
-            rows[row_index]["filed_at_utc"] = now
-            rows[row_index]["updated_at_utc"] = now
-        # gaps-file can idempotently skip semantically-equivalent open gaps.
-        # Treat these as matched so queue entries don't remain permanently queued.
-        offset = filed_count
-        for pos, gap_id in enumerate(skipped_duplicate_ids[: max(0, len(pending_indices) - offset)]):
-            row_index = pending_indices[offset + pos]
-            rows[row_index]["status"] = "matched"
-            rows[row_index]["matched_gap_id"] = gap_id
-            rows[row_index]["matched_at_utc"] = now
-            rows[row_index]["updated_at_utc"] = now
-            matched_from_idempotent_skip += 1
-        matched_count += matched_from_idempotent_skip
+            output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            for line in output.splitlines():
+                line = line.strip()
+                if line.startswith("FILED:"):
+                    filed_ids.append(line.split(":", 1)[1].strip())
+                elif line.startswith("SKIPPED_DUPLICATE:"):
+                    skipped_duplicate_ids.append(line.split(":", 1)[1].strip())
 
-    if not args.dry_run:
-        write_queue(queue_path, rows)
+            if proc.returncode != 0:
+                raise SystemExit(f"friction.reconcile FAIL: gaps.file batch failed\n{output.strip()}")
+
+        if args.dry_run:
+            filed_count = len(pending_batch)
+        else:
+            filed_count = min(len(pending_indices), len(filed_ids))
+            matched_from_idempotent_skip = 0
+            for pos, gap_id in enumerate(filed_ids[: len(pending_indices)]):
+                row_index = pending_indices[pos]
+                rows[row_index]["status"] = "filed"
+                rows[row_index]["filed_gap_id"] = gap_id
+                rows[row_index]["filed_at_utc"] = now
+                rows[row_index]["updated_at_utc"] = now
+            # gaps-file can idempotently skip semantically-equivalent open gaps.
+            # Treat these as matched so queue entries don't remain permanently queued.
+            offset = filed_count
+            for pos, gap_id in enumerate(skipped_duplicate_ids[: max(0, len(pending_indices) - offset)]):
+                row_index = pending_indices[offset + pos]
+                rows[row_index]["status"] = "matched"
+                rows[row_index]["matched_gap_id"] = gap_id
+                rows[row_index]["matched_at_utc"] = now
+                rows[row_index]["updated_at_utc"] = now
+                matched_from_idempotent_skip += 1
+            matched_count += matched_from_idempotent_skip
+
+        if not args.dry_run:
+            write_queue(queue_path, rows)
 
     payload = {
         "capability": "friction.reconcile",

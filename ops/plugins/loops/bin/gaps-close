@@ -261,12 +261,13 @@ close_single() {
   local id="$1" status="$2" fixed_in="$3" notes="$4" reg_lock="$5"
   local timestamp local_claim backup_file commit_msg
 
+  acquire_git_lock gaps || exit 1
+  trap 'release_git_lock' EXIT INT TERM
+
   if ! validate_gap_closure "$id" "$status" "$reg_lock"; then
     echo "SKIPPED: $id (already closed)"
     return 0
   fi
-  acquire_git_lock gaps || exit 1
-  trap 'release_git_lock' EXIT INT TERM
 
   backup_file="$(mktemp "${GAPS_FILE}.bak.XXXXXX")"
   cp "$GAPS_FILE" "$backup_file"
@@ -346,7 +347,10 @@ close_batch() {
   count="${#ids[@]}"
   (( count > 0 )) || fail "batch contains no entries"
 
-  # Validate all entries before acquiring lock. Skip already-closed gaps.
+  acquire_git_lock gaps || exit 1
+  trap 'release_git_lock' EXIT INT TERM
+
+  # Validate under lock to avoid stale read races between concurrent terminals.
   local -a valid_indices=()
   for ((i=0; i<count; i++)); do
     if validate_gap_closure "${ids[$i]}" "${statuses[$i]}" "${reg_locks[$i]}"; then
@@ -360,9 +364,6 @@ close_batch() {
     echo "INFO: all gaps already closed — nothing to do"
     return 0
   fi
-
-  acquire_git_lock gaps || exit 1
-  trap 'release_git_lock' EXIT INT TERM
 
   backup_file="$(mktemp "${GAPS_FILE}.bak.XXXXXX")"
   cp "$GAPS_FILE" "$backup_file"

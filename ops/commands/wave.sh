@@ -81,6 +81,7 @@ sync_runtime_traffic_index() {
 import json
 import os
 import sys
+import fcntl
 from datetime import datetime, timezone
 
 state_file = sys.argv[1]
@@ -128,41 +129,50 @@ if str(pf.get("verdict", "")).strip() == "no-go":
     for b in pf.get("blockers", []) if isinstance(pf.get("blockers"), list) else []:
         entry["blockers"].append({"source": "preflight", "status": "no-go", "detail": str(b)})
 
-index = {"schema_version": "1.0", "updated_at": now, "items": []}
-if os.path.exists(index_file):
-    raw = open(index_file, "r", encoding="utf-8").read().strip()
-    if raw:
-        try:
-            loaded = json.loads(raw)
-            if isinstance(loaded, dict):
-                index.update(loaded)
-        except Exception:
+lock_file = f"{index_file}.lock"
+os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+    index = {"schema_version": "1.0", "updated_at": now, "items": []}
+    if os.path.exists(index_file):
+        raw = open(index_file, "r", encoding="utf-8").read().strip()
+        if raw:
             try:
-                import yaml
-                loaded = yaml.safe_load(raw) or {}
+                loaded = json.loads(raw)
                 if isinstance(loaded, dict):
                     index.update(loaded)
             except Exception:
-                pass
+                try:
+                    import yaml
+                    loaded = yaml.safe_load(raw) or {}
+                    if isinstance(loaded, dict):
+                        index.update(loaded)
+                except Exception:
+                    pass
 
-items = index.get("items")
-if not isinstance(items, list):
-    items = []
+    items = index.get("items")
+    if not isinstance(items, list):
+        items = []
 
-wave_id = entry["wave_id"]
-items = [i for i in items if not (isinstance(i, dict) and str(i.get("wave_id", "")).strip() == wave_id)]
-items.append(entry)
-items.sort(key=lambda i: str(i.get("wave_id", "")))
+    wave_id = entry["wave_id"]
+    items = [i for i in items if not (isinstance(i, dict) and str(i.get("wave_id", "")).strip() == wave_id)]
+    items.append(entry)
+    items.sort(key=lambda i: str(i.get("wave_id", "")))
 
-index["schema_version"] = "1.0"
-index["updated_at"] = now
-index["last_mode"] = mode
-index["items"] = items
+    index["schema_version"] = "1.0"
+    index["updated_at"] = now
+    index["last_mode"] = mode
+    index["items"] = items
 
-os.makedirs(os.path.dirname(index_file), exist_ok=True)
-with open(index_file, "w", encoding="utf-8") as f:
-    json.dump(index, f, indent=2)
-    f.write("\n")
+    os.makedirs(os.path.dirname(index_file), exist_ok=True)
+    with open(index_file, "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2)
+        f.write("\n")
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
 PYTRAFFIC
 }
 
@@ -175,6 +185,7 @@ release_wave_path_claims() {
 import json
 import os
 import sys
+import fcntl
 from datetime import datetime, timezone
 
 claims_file = sys.argv[1]
@@ -182,44 +193,53 @@ wave_id = sys.argv[2]
 claim_status = sys.argv[3]
 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-doc = {"schema_version": "1.0", "updated_at": now, "claims": []}
-if os.path.exists(claims_file):
-    raw = open(claims_file, "r", encoding="utf-8").read().strip()
-    if raw:
-        try:
-            loaded = json.loads(raw)
-            if isinstance(loaded, dict):
-                doc.update(loaded)
-        except Exception:
+lock_file = f"{claims_file}.lock"
+os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+    doc = {"schema_version": "1.0", "updated_at": now, "claims": []}
+    if os.path.exists(claims_file):
+        raw = open(claims_file, "r", encoding="utf-8").read().strip()
+        if raw:
             try:
-                import yaml
-                loaded = yaml.safe_load(raw) or {}
+                loaded = json.loads(raw)
                 if isinstance(loaded, dict):
                     doc.update(loaded)
             except Exception:
-                pass
+                try:
+                    import yaml
+                    loaded = yaml.safe_load(raw) or {}
+                    if isinstance(loaded, dict):
+                        doc.update(loaded)
+                except Exception:
+                    pass
 
-claims = doc.get("claims")
-if not isinstance(claims, list):
-    claims = []
+    claims = doc.get("claims")
+    if not isinstance(claims, list):
+        claims = []
 
-for claim in claims:
-    if not isinstance(claim, dict):
-        continue
-    if str(claim.get("wave_id", "")).strip() != wave_id:
-        continue
-    if str(claim.get("status", "")).strip() != "active":
-        continue
-    claim["status"] = claim_status
-    claim["released_at"] = now
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        if str(claim.get("wave_id", "")).strip() != wave_id:
+            continue
+        if str(claim.get("status", "")).strip() != "active":
+            continue
+        claim["status"] = claim_status
+        claim["released_at"] = now
 
-doc["schema_version"] = "1.0"
-doc["updated_at"] = now
-doc["claims"] = claims
-os.makedirs(os.path.dirname(claims_file), exist_ok=True)
-with open(claims_file, "w", encoding="utf-8") as f:
-    json.dump(doc, f, indent=2)
-    f.write("\n")
+    doc["schema_version"] = "1.0"
+    doc["updated_at"] = now
+    doc["claims"] = claims
+    os.makedirs(os.path.dirname(claims_file), exist_ok=True)
+    with open(claims_file, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2)
+        f.write("\n")
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
 PYPATHRELEASE
 }
 
@@ -573,6 +593,7 @@ PYCLAIMS
   python3 - "$sf" "$wave_id" "$objective" "$workspace_enabled" "$workspace_repo" "$workspace_worktree" "$workspace_branch" "$workspace_note" "$default_role" "$default_next_role" "$loop_id" "$deadline_utc" "$horizon" "$execution_readiness" "$owner_terminal" "$claimed_paths_json" "$packet_required_fields" "$packet_allowed_horizon" "$packet_allowed_readiness" "$packet_allowed_roles" "$PATH_CLAIMS_FILE" "$PATH_CLAIMS_TTL_MINUTES" "$PATH_CLAIMS_NON_OVERLAP" <<'PYSTART'
 import json, sys
 import os
+import fcntl
 from datetime import datetime, timedelta, timezone
 
 sf = sys.argv[1]
@@ -699,6 +720,12 @@ def _paths_overlap(a: str, b: str) -> bool:
 
 now_dt = datetime.now(timezone.utc)
 now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+path_claims_lock_fd = None
+if path_claims_file:
+    lock_file = f"{path_claims_file}.lock"
+    os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+    path_claims_lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(path_claims_lock_fd, fcntl.LOCK_EX)
 claims_doc = _load_doc(path_claims_file) if path_claims_file else {}
 claims = claims_doc.get("claims") if isinstance(claims_doc.get("claims"), list) else []
 normalized_claims = []
@@ -764,6 +791,10 @@ claims_payload = {
 }
 if path_claims_file:
     _save_doc(path_claims_file, claims_payload)
+if path_claims_lock_fd is not None:
+    fcntl.flock(path_claims_lock_fd, fcntl.LOCK_UN)
+    os.close(path_claims_lock_fd)
+    path_claims_lock_fd = None
 
 state = {
     "wave_id": wave_id,
