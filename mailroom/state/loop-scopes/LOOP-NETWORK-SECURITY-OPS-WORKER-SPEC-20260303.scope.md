@@ -1,10 +1,13 @@
 ---
 loop_id: LOOP-NETWORK-SECURITY-OPS-WORKER-SPEC-20260303
 created: 2026-03-03
-status: planned
+status: active
 owner: "@ronny"
 scope: agentic-spine
 objective: Capture a governed, executable specification for network security hardening across DNS authority, VLAN segmentation, threat detection, and stack discovery — design-only, no runtime implementation.
+horizon: now
+execution_readiness: runnable
+execution_mode: orchestrator_subagents
 ---
 
 # Loop Scope: Network Security Ops Worker Spec
@@ -56,9 +59,9 @@ Without this, network security remains ad-hoc UDR configuration, Pi-hole is not 
 
 ## Phases
 
-1. P0 Discovery and topology alignment (completed in-session via conversation + docx analysis).
-2. P1 Spec capture in loop + plan artifacts (this loop).
-3. P2 Deferred promotion to implementation loop(s) after operator approval.
+1. Step 0: Discovery and topology alignment (completed in-session via conversation + docx analysis).
+2. Step 1: Spec capture in loop + plan artifacts (this loop).
+3. Step 2: Deferred promotion to implementation loop(s) after operator approval.
 
 ## Evidence Paths
 

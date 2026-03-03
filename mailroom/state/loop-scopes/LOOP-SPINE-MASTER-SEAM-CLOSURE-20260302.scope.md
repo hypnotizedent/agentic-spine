@@ -1,15 +1,16 @@
 ---
 loop_id: LOOP-SPINE-MASTER-SEAM-CLOSURE-20260302
 created: 2026-03-02
-status: closed
+status: active
 owner: "@ronny"
 scope: agentic-spine
 priority: high
-horizon: later
-execution_readiness: blocked
+horizon: now
+execution_readiness: runnable
+execution_mode: orchestrator_subagents
 next_review: "2026-03-09"
 objective: Close remaining execution seams across terminal UX wiring, receipt format bridge, execution drift-gate backstop, and mailroom ergonomics.
-blocked_by: "Overnight intake. Requires operator approval and scoped wave scheduling before promotion."
+blocked_by: []
 ---
 
 # Loop Scope: Master Spine Seam Closure

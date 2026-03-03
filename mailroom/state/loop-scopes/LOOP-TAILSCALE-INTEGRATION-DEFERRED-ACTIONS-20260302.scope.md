@@ -5,8 +5,8 @@ status: active
 owner: "@ronny"
 scope: tailscale
 priority: medium
-horizon: later
-execution_mode: single_worker
+horizon: now
+execution_mode: orchestrator_subagents
 execution_readiness: blocked
 next_review: "2026-04-01"
 activation_trigger: manual
