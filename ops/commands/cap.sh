@@ -351,7 +351,7 @@ run_cap() {
     # ── Approval gate (manual safety level) ──
     if [[ "$approval" == "manual" ]]; then
         local auto_approve="${OPS_CAP_AUTO_APPROVE:-${SPINE_CAP_AUTO_APPROVE:-}}"
-        case "${auto_approve,,}" in
+        case "$(printf '%s' "$auto_approve" | tr '[:upper:]' '[:lower:]')" in
           1|y|yes|true|auto|always)
             echo "MANUAL APPROVAL: auto-approved via OPS_CAP_AUTO_APPROVE/SPINE_CAP_AUTO_APPROVE"
             ;;
@@ -564,7 +564,8 @@ run_cap() {
             orch_bypass="${SPINE_ORCH_MUTATION_GUARD_BYPASS:-}"
             orch_bypass_reason="${SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON:-}"
 
-            if [[ "${orch_bypass,,}" == "1" || "${orch_bypass,,}" == "true" || "${orch_bypass,,}" == "yes" ]]; then
+            local _orch_bypass_lc; _orch_bypass_lc="$(printf '%s' "$orch_bypass" | tr '[:upper:]' '[:lower:]')"
+            if [[ "$_orch_bypass_lc" == "1" || "$_orch_bypass_lc" == "true" || "$_orch_bypass_lc" == "yes" ]]; then
               if [[ -z "$orch_bypass_reason" ]]; then
                 echo "BLOCKED: orchestrator mutation guard bypass missing reason"
                 echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON with a governed reference."
@@ -866,7 +867,7 @@ PY
     # Capture is automatic at the cap-run surface so operators do not need
     # to remember manual closeout prompts for common execution friction.
     if [[ "$exit_code" -ne 0 && -z "${OPS_CAP_STACK:-}" ]]; then
-        case "${friction_autocapture,,}" in
+        case "$(printf '%s' "$friction_autocapture" | tr '[:upper:]' '[:lower:]')" in
           0|false|no|off) ;;
           *)
             # Only auto-capture from interactive/operator terminals by default.
