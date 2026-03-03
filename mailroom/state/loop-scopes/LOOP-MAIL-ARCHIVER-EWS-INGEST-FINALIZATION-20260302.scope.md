@@ -6,8 +6,8 @@ owner: "@ronny"
 scope: mail
 priority: high
 horizon: now
-execution_readiness: blocked
 objective: Track long-running Microsoft EWS archive ingest completion, reconcile imported counts/sizes/freshness, finalize mail-archiver backup parity, and close or reclassify GAP-OP-973 with receipts once import is complete.
+closed_note: "execution_readiness removed — field is inapplicable for closed loops (was 'blocked', contradicting status:closed). Normalized 2026-03-03."
 ---
 
 # Loop Scope: LOOP-MAIL-ARCHIVER-EWS-INGEST-FINALIZATION-20260302

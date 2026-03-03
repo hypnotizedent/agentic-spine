@@ -43,8 +43,21 @@ Consolidate post-sync mail-archiver next-best-leverage work into one canonical e
 - No runtime/service mutations performed in this loop.
 
 ## Linked Gaps
-- GAP-OP-1362
-- GAP-OP-1363
-- GAP-OP-1364
-- GAP-OP-1365
-- GAP-OP-1366
+- GAP-OP-1362 — CLOSED: EWS loop metadata contradiction fixed (execution_readiness removed from closed loop)
+- GAP-OP-1363 — CLOSED: canonical continuation container established (this loop, with preconditions + ownership + handoff)
+- GAP-OP-1364 — OPEN: overlap cleanup missing governed assets (blocked_by_runtime_access)
+- GAP-OP-1365 — CLOSED: microsoft live_sync_ready updated to true (Graph API active)
+- GAP-OP-1366 — OPEN: overlap cleanup closure semantics need reconciliation (blocked_by_ronny_arch_decision)
+- GAP-OP-1367 — OPEN: email classification/retention contract needs architecture decision (blocked_by_ronny_arch_decision)
+- GAP-OP-1368 — OPEN: 126GB PostgreSQL DB backup not governed (blocked_by_runtime_access)
+- GAP-OP-1369 — OPEN: email domain boundary contract needs architecture decision (blocked_by_ronny_arch_decision)
+
+## Gap Blocker Evidence (2026-03-03)
+
+| Gap | Blocker Class | Detail |
+|-----|---------------|--------|
+| GAP-OP-1364 | blocked_by_runtime_access | Missing capabilities (communications.mailarchiver.overlap.plan, .import.eml.remote) and contract (mail.archiver.alias.boundary.contract.yaml) must be authored or reconciled |
+| GAP-OP-1366 | blocked_by_ronny_arch_decision | GAP-OP-1002 closed overlap cleanup while LOOP-MAIL-ARCHIVER-OVERLAP-CLEANUP-20260226 remains planned — reconciliation requires decision on whether overlap work is truly done or deferred |
+| GAP-OP-1367 | blocked_by_ronny_arch_decision | No retention value classification, junk/unsubscribe bucketing, or pruning rules defined — requires domain owner decision |
+| GAP-OP-1368 | blocked_by_runtime_access | pg_dump job for 126GB MailArchiver PostgreSQL needs VM214 runtime access and backup inventory integration |
+| GAP-OP-1369 | blocked_by_ronny_arch_decision | Email domain boundaries (business vs personal vs infra) and per-domain retention policy need domain owner architecture decision |
