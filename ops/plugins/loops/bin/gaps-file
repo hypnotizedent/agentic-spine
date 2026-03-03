@@ -229,6 +229,8 @@ GAP_ID="" TYPE="" SEVERITY="" DESCRIPTION="" DESCRIPTION_FILE="" DISCOVERED_BY="
 BATCH_FILE=""
 USED_PARENT_LOOP_ALIAS=0
 USED_LOOP_ALIAS=0
+LANE_SAFE=0
+LANE_SAFE_LOOP_ID="${SPINE_LOOP_ID:-}"
 NO_COMMIT_DEFAULT_RAW="${GAPS_FILE_NO_COMMIT_DEFAULT:-0}"
 case "$NO_COMMIT_DEFAULT_RAW" in
   1|true|TRUE|yes|YES|on|ON) NO_COMMIT=1 ;;
@@ -240,6 +242,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
     --batch)         BATCH_FILE="${2:?--batch requires a value}"; shift 2 ;;
+    --lane-safe)     LANE_SAFE=1; shift ;;
+    --lane-safe-loop-id) LANE_SAFE_LOOP_ID="${2:?--lane-safe-loop-id requires a value}"; shift 2 ;;
     --no-commit)     NO_COMMIT=1; shift ;;
     --commit)        NO_COMMIT=0; shift ;;
     --wait-seconds)  WAIT_SECONDS="${2:?--wait-seconds requires a value}"; shift 2 ;;
@@ -266,7 +270,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: gaps-file --id GAP-OP-NNN|auto --type <type> --severity <sev> \\"
       echo "                 --description \"desc\" --discovered-by \"source\" \\"
       echo "                 [--doc \"path\"] --loop-id \"LOOP-ID\" [--parent-loop \"LOOP-ID\"] [--loop \"LOOP-ID\"] \\"
-      echo "                 [--description-file path] [--no-commit|--commit]"
+      echo "                 [--description-file path] [--no-commit|--commit] [--lane-safe [--lane-safe-loop-id LOOP-ID]]"
       echo ""
       echo "Batch: gaps-file --batch /path/to/gaps.yaml --loop-id LOOP-ID [--no-commit|--commit]"
       echo ""
@@ -287,6 +291,37 @@ if [[ "$USED_PARENT_LOOP_ALIAS" -eq 1 ]]; then
 fi
 if [[ "$USED_LOOP_ALIAS" -eq 1 ]]; then
   echo "WARN: --loop is a compatibility alias; prefer canonical --loop-id." >&2
+fi
+
+if [[ "$LANE_SAFE" -eq 1 ]]; then
+  request_loop_id="${LANE_SAFE_LOOP_ID:-${SPINE_LOOP_ID:-${PARENT_LOOP:-}}}"
+  require_parent_loop "$request_loop_id" "--lane-safe"
+  request_dir="$ROOT/mailroom/state/orchestration/${request_loop_id}/shared-authority-mutations"
+  mkdir -p "$request_dir"
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  request_subject="${GAP_ID:-batch}"
+  request_file="$request_dir/${ts}-gaps-file-${request_subject}.yaml"
+  cat > "$request_file" <<YAML
+kind: shared-authority-mutation
+status: queued
+queued_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+queued_by: "${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-unknown}}"
+loop_id: "$request_loop_id"
+mutation:
+  capability: gaps.file
+  id: "$GAP_ID"
+  batch_file: "$BATCH_FILE"
+  type: "$TYPE"
+  severity: "$SEVERITY"
+  discovered_by: "$DISCOVERED_BY"
+  parent_loop: "$PARENT_LOOP"
+  doc: "$DOC"
+  description: "$DESCRIPTION"
+  description_file: "$DESCRIPTION_FILE"
+  no_commit: "$NO_COMMIT"
+YAML
+  echo "gaps.file LANE_SAFE_QUEUED: $request_file"
+  exit 0
 fi
 
 [[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]] || { echo "FAIL: --wait-seconds must be an integer >= 0" >&2; exit 2; }

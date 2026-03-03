@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+source "$ROOT/ops/lib/yaml.sh"
+source "$ROOT/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+REGISTRY_FILE="${GATE_REGISTRY_FILE:-$ROOT/ops/bindings/gate.registry.yaml}"
+RESERVATION_FILE="${GATE_ID_RESERVATION_FILE:-$SPINE_STATE/gate-id-reservations.yaml}"
+LOCK_DIR="${GATE_ID_RESERVATION_LOCK_DIR:-$SPINE_STATE/locks/gate-id-allocator.lock}"
+
+RESERVE=1
+JSON=0
+TTL_SECONDS="${GATE_ID_RESERVATION_TTL_SECONDS:-14400}"
+CLAIMANT="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-${USER:-unknown}}}"
+LOOP_ID="${SPINE_LOOP_ID:-}"
+RELEASE_ID=""
+CONSUME_ID=""
+
+usage() {
+  cat <<'USAGE'
+Usage: gate-id-allocate [options]
+
+Options:
+  --no-reserve                 Allocate next gate id without writing reservation
+  --ttl-seconds <n>            Reservation TTL in seconds (default: 14400)
+  --claimant <id>              Reservation claimant identity
+  --loop-id <LOOP-ID>          Optional loop context for reservation
+  --release <reservation-id>   Mark reservation as released
+  --consume <reservation-id>   Mark reservation as consumed
+  --json                       Emit JSON output
+  -h, --help                   Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --no-reserve) RESERVE=0; shift ;;
+    --ttl-seconds) TTL_SECONDS="${2:?--ttl-seconds requires a value}"; shift 2 ;;
+    --claimant) CLAIMANT="${2:?--claimant requires a value}"; shift 2 ;;
+    --loop-id) LOOP_ID="${2:?--loop-id requires a value}"; shift 2 ;;
+    --release) RELEASE_ID="${2:?--release requires a value}"; shift 2 ;;
+    --consume) CONSUME_ID="${2:?--consume requires a value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "gate.id.allocate FAIL: unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -f "$REGISTRY_FILE" ]] || { echo "gate.id.allocate FAIL: missing gate registry: $REGISTRY_FILE" >&2; exit 1; }
+[[ "$TTL_SECONDS" =~ ^[0-9]+$ ]] || { echo "gate.id.allocate FAIL: --ttl-seconds must be an integer" >&2; exit 2; }
+if [[ -n "$RELEASE_ID" && -n "$CONSUME_ID" ]]; then
+  echo "gate.id.allocate FAIL: --release and --consume are mutually exclusive" >&2
+  exit 2
+fi
+
+mkdir -p "$(dirname "$RESERVATION_FILE")" "$(dirname "$LOCK_DIR")"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "gate.id.allocate FAIL: allocator lock busy: $LOCK_DIR" >&2
+  exit 1
+fi
+cleanup_lock() {
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup_lock EXIT INT TERM
+
+set +e
+PY_OUT="$(python3 - "$REGISTRY_FILE" "$RESERVATION_FILE" "$RESERVE" "$TTL_SECONDS" "$CLAIMANT" "$LOOP_ID" "$RELEASE_ID" "$CONSUME_ID" <<'PY'
+import json
+import random
+import string
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import yaml
+
+registry_path = Path(sys.argv[1])
+reservation_path = Path(sys.argv[2])
+reserve = sys.argv[3] == "1"
+ttl_seconds = int(sys.argv[4])
+claimant = (sys.argv[5] or "unknown").strip() or "unknown"
+loop_id = (sys.argv[6] or "").strip()
+release_id = (sys.argv[7] or "").strip()
+consume_id = (sys.argv[8] or "").strip()
+
+now = datetime.now(timezone.utc)
+
+def iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def parse_iso(raw: str) -> datetime | None:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(value)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+registry = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
+gates = registry.get("gates") or []
+registry_max = 0
+for gate in gates:
+    gid = str((gate or {}).get("id") or "").strip()
+    if gid.startswith("D") and gid[1:].isdigit():
+        registry_max = max(registry_max, int(gid[1:]))
+
+state = {"version": 1, "updated_at": iso(now), "reservations": []}
+if reservation_path.exists():
+    loaded = yaml.safe_load(reservation_path.read_text(encoding="utf-8")) or {}
+    if isinstance(loaded, dict):
+        state.update({k: v for k, v in loaded.items() if k in {"version", "updated_at", "reservations"}})
+reservations = state.get("reservations")
+if not isinstance(reservations, list):
+    reservations = []
+
+cleaned: list[dict] = []
+for entry in reservations:
+    if not isinstance(entry, dict):
+        continue
+    status = str(entry.get("status") or "active").strip() or "active"
+    expires = parse_iso(str(entry.get("expires_at") or ""))
+    if status == "active" and expires is not None and expires < now:
+        entry["status"] = "expired"
+        status = "expired"
+    cleaned.append(entry)
+
+reservations = cleaned
+result: dict[str, object] = {
+    "capability": "gate.id.allocate",
+    "generated_at": iso(now),
+    "registry_max_gate_id": f"D{registry_max}",
+    "reservation_file": str(reservation_path),
+}
+
+if release_id or consume_id:
+    target_id = release_id or consume_id
+    new_status = "released" if release_id else "consumed"
+    updated = False
+    for entry in reservations:
+        if str(entry.get("reservation_id") or "") == target_id:
+            entry["status"] = new_status
+            entry["updated_at"] = iso(now)
+            updated = True
+            result["gate_id"] = str(entry.get("gate_id") or "")
+            break
+    if not updated:
+        result.update({"status": "not_found", "reservation_id": target_id, "error": f"reservation '{target_id}' not found"})
+        print(json.dumps(result))
+        raise SystemExit(3)
+
+    state["reservations"] = reservations
+    state["updated_at"] = iso(now)
+    reservation_path.parent.mkdir(parents=True, exist_ok=True)
+    reservation_path.write_text(yaml.safe_dump(state, sort_keys=False), encoding="utf-8")
+
+    result.update({"status": "updated", "reservation_id": target_id, "reservation_status": new_status})
+    print(json.dumps(result))
+    raise SystemExit(0)
+
+active_max = 0
+for entry in reservations:
+    if str(entry.get("status") or "") != "active":
+        continue
+    gid = str(entry.get("gate_id") or "")
+    if gid.startswith("D") and gid[1:].isdigit():
+        active_max = max(active_max, int(gid[1:]))
+
+next_num = max(registry_max, active_max) + 1
+next_id = f"D{next_num}"
+result["gate_id"] = next_id
+
+if reserve:
+    suffix = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(6))
+    reservation_id = f"RES-{now.strftime('%Y%m%dT%H%M%SZ')}-{suffix}"
+    expires = now + timedelta(seconds=max(60, ttl_seconds))
+    reservations.append(
+        {
+            "reservation_id": reservation_id,
+            "gate_id": next_id,
+            "status": "active",
+            "claimant": claimant,
+            "loop_id": loop_id or None,
+            "created_at": iso(now),
+            "expires_at": iso(expires),
+            "updated_at": iso(now),
+        }
+    )
+    state["reservations"] = reservations
+    state["updated_at"] = iso(now)
+    reservation_path.parent.mkdir(parents=True, exist_ok=True)
+    reservation_path.write_text(yaml.safe_dump(state, sort_keys=False), encoding="utf-8")
+    result.update(
+        {
+            "status": "reserved",
+            "reservation_id": reservation_id,
+            "claimant": claimant,
+            "loop_id": loop_id or None,
+            "expires_at": iso(expires),
+        }
+    )
+else:
+    result["status"] = "allocated"
+
+print(json.dumps(result))
+PY
+)"
+PY_RC=$?
+set -e
+if [[ "$PY_RC" -ne 0 ]]; then
+  if [[ -n "$PY_OUT" ]]; then
+    if [[ "$JSON" -eq 1 ]]; then
+      printf '%s\n' "$PY_OUT"
+    else
+      err_msg="$(printf '%s' "$PY_OUT" | jq -r '.error // empty' 2>/dev/null || true)"
+      [[ -n "$err_msg" ]] && echo "gate.id.allocate FAIL: $err_msg" >&2
+    fi
+  fi
+  exit "$PY_RC"
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  printf '%s\n' "$PY_OUT"
+else
+  gate_id="$(printf '%s' "$PY_OUT" | jq -r '.gate_id // ""')"
+  status="$(printf '%s' "$PY_OUT" | jq -r '.status // ""')"
+  reservation_id="$(printf '%s' "$PY_OUT" | jq -r '.reservation_id // ""')"
+  echo "gate.id.allocate"
+  echo "status: $status"
+  echo "gate_id: $gate_id"
+  [[ -n "$reservation_id" && "$reservation_id" != "null" ]] && echo "reservation_id: $reservation_id"
+  echo "reservation_file: $RESERVATION_FILE"
+fi
