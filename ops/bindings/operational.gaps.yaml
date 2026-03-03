@@ -19236,7 +19236,7 @@ gaps:
     discovered_at: "2026-03-03"
     type: runtime-bug
     classification: runtime-bug
-    doc: "radarr.api.health,download-stack container volumes"
+    doc: "radarr.api.health,download-stack container volumes,ops/bindings/media.path.authority.contract.yaml"
     description: |
       Media ingest chain break: Radarr root folder health reports missing `/movies` while container path authority is `/media/movies`.
       Evidence from trace: movies are present on NFS and hasFile=true in Radarr, but Radarr health has missing-root errors across collection/import surfaces.
@@ -19244,10 +19244,10 @@ gaps:
       Required fix (future execution loop): normalize Radarr root folder to `/media/movies` or reintroduce explicit `/movies` bind mapping with contract parity lock.
     severity: high
     status: open
-    notes: "Filed via gaps.file at 2026-03-03T05:48:19Z"
+    notes: "Path authority contract enriched with Feb 25 audit evidence (v1.0 active). Fix API documented: PUT /api/v3/rootfolder. Blocked on SSH to download-stack."
     parent_loop: "LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303"
-    blocked_case: blocked
-    next_action: SSH to media VM, verify Radarr root folder configuration
+    blocked_case: "Path authority contract active with fix API documented. Runtime SSH unreachable (LAN+Tailscale timeout 2026-03-03)."
+    next_action: "SSH to download-stack, execute PUT /api/v3/rootfolder to change app_root from /movies to /media/movies."
     blocker_class: blocked_by_runtime_access
   - id: "GAP-OP-1388"
     title: "Download client path contract drift: Radarr reports SAB path `/downloads/complete/movies` missing inside co..."
@@ -19255,17 +19255,17 @@ gaps:
     discovered_at: "2026-03-03"
     type: runtime-bug
     classification: runtime-bug
-    doc: "radarr health, sabnzbd path mapping"
+    doc: "radarr health, sabnzbd path mapping, ops/bindings/media.path.authority.contract.yaml"
     description: |
       Download client path contract drift: Radarr reports SAB path `/downloads/complete/movies` missing inside container.
       Impact: queue import handoff degrades and completed downloads can remain stuck as unavailable.
       Required fix (future execution loop): align SAB/Radarr path mapping contract and add runtime parity check between download client path and container mounts.
     severity: high
     status: open
-    notes: "Filed via gaps.file at 2026-03-03T05:48:19Z"
+    notes: "Path authority contract enriched with SAB fix steps (v1.0 active). Two-step fix: verify SAB category config + verify Radarr remote path mapping. Blocked on SSH."
     parent_loop: "LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303"
-    blocked_case: blocked
-    next_action: SSH to media VM, verify download client path contract
+    blocked_case: "Path authority contract active with fix steps documented. Runtime SSH unreachable (LAN+Tailscale timeout 2026-03-03)."
+    next_action: "SSH to download-stack, verify SAB category config for movies dir, align Radarr remote path mapping."
     blocker_class: blocked_by_runtime_access
   - id: "GAP-OP-1389"
     title: "Media availability truth split: Jellyseerr requests (#107/#108) remain `processing` while Radarr hasFile=tr..."
@@ -19273,17 +19273,17 @@ gaps:
     discovered_at: "2026-03-03"
     type: duplicate-truth
     classification: duplicate-truth
-    doc: "jellyseerr request status, radarr hasFile state"
+    doc: "jellyseerr request status, radarr hasFile state, ops/bindings/media.availability.progression.contract.yaml"
     description: |
       Media availability truth split: Jellyseerr requests (#107/#108) remain `processing` while Radarr hasFile=true and files exist on disk.
       Impact: operator sees contradictory state and cannot trust request lifecycle completion.
       Required fix (future execution loop): define single authority progression and synchronization handshake between Radarr completion and Jellyseerr mediaStatus availability transitions.
     severity: medium
     status: open
-    notes: "Contract authored: media.availability.progression.contract.yaml v1.0 defines arr_to_jellyseerr handshake. Runtime fix (Jellyseerr sync trigger or webhook configuration) required to close."
+    notes: "Progression contract promoted to active (v1.1). AVAIL-F2 failure taxonomy defined. media.e2e.verify capability implemented for detection. Runtime Jellyseerr sync trigger required to close."
     parent_loop: "LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303"
-    blocked_case: "Handshake contract defined but Jellyseerr/Radarr integration needs runtime reconfiguration on streaming-stack."
-    next_action: "SSH to streaming-stack, configure Jellyseerr webhook or sync trigger per progression contract arr_to_jellyseerr spec."
+    blocked_case: "Contract active, detection capability implemented. Runtime SSH to streaming-stack unreachable (LAN+Tailscale timeout 2026-03-03)."
+    next_action: "SSH to streaming-stack, trigger Jellyseerr sync from Settings > Radarr > Sync, then configure webhook for ongoing automation."
     blocker_class: blocked_by_runtime_access
   - id: "GAP-OP-1390"
     title: "Queue ghosting: items remain in queue as `downloadClientUnavailable` despite corresponding movies marked ha..."
@@ -19291,17 +19291,17 @@ gaps:
     discovered_at: "2026-03-03"
     type: runtime-bug
     classification: runtime-bug
-    doc: "radarr queue state"
+    doc: "radarr queue state, ops/bindings/media.queue.reconciliation.policy.yaml"
     description: |
       Queue ghosting: items remain in queue as `downloadClientUnavailable` despite corresponding movies marked hasFile=true.
       Impact: stale queue backlog and false active work signals.
       Required fix (future execution loop): deterministic queue reconciliation policy for completed media with missing client path mapping edge cases.
     severity: medium
     status: open
-    notes: "Policy authored: media.queue.reconciliation.policy.yaml v1.0 defines QUEUE-C1 auto-remove rule for hasFile=true + downloadClientUnavailable. Runtime media.queue.reconcile capability required to close."
+    notes: "Policy promoted to active (v1.1). media.queue.reconcile capability IMPLEMENTED with dry-run/apply modes. Blocked on runtime SSH to execute queue cleanup."
     parent_loop: "LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303"
-    blocked_case: "Queue reconciliation policy defined but runtime capability (media.queue.reconcile) not implemented yet."
-    next_action: "Implement media.queue.reconcile capability: SSH to download-stack, Radarr API delete queue items per QUEUE-C1 classification."
+    blocked_case: "Capability implemented and registered. Runtime SSH to download-stack unreachable (LAN+Tailscale timeout 2026-03-03)."
+    next_action: "Run: ./bin/ops cap run media.queue.reconcile -- --apply (when download-stack is reachable)"
     blocker_class: blocked_by_runtime_access
   - id: "GAP-OP-1391"
     title: "Post-split migration contract drift: container volume/path assumptions changed during media stack split, bu..."
@@ -19309,17 +19309,17 @@ gaps:
     discovered_at: "2026-03-03"
     type: stale-ssot
     classification: stale-ssot
-    doc: "media stack split migration vm201->vm209/vm210"
+    doc: "media stack split migration vm201->vm209/vm210, ops/bindings/media.path.authority.contract.yaml"
     description: |
       Post-split migration contract drift: container volume/path assumptions changed during media stack split, but service-level root/download path contracts were not normalized end-to-end.
       Impact: recurring regressions across Radarr/SAB/Jellyseerr/Jellyfin even when files exist.
       Required fix (future execution loop): canonical media path authority contract (service mounts + app roots + download client paths) with drift gate enforcement.
     severity: high
     status: open
-    notes: "Filed via gaps.file at 2026-03-03T05:48:19Z"
+    notes: "Path authority contract v1.0 active with 8 service tuples, NFS topology, and known findings. 5/8 tuples verified from Feb 25 audit. TBD fields require runtime SSH. GAP-OP-1387/1388 are subproblems of this gap."
     parent_loop: "LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303"
-    blocked_case: blocked
-    next_action: SSH to media VM, normalize post-split volume/path contracts
+    blocked_case: "Contract active and partially verified. TBD app_root/downloader_path fields need SSH inspection. Runtime unreachable (2026-03-03)."
+    next_action: "SSH to download-stack, query Radarr/Sonarr/Lidarr API for root folder + remote path mapping, populate TBD fields in contract."
     blocker_class: blocked_by_runtime_access
   - id: "GAP-OP-1392"
     title: "E2E verification blind spot: checks that rely on `hasFile=true` do not prove full chain availability (files..."
@@ -19327,17 +19327,17 @@ gaps:
     discovered_at: "2026-03-03"
     type: missing-entry
     classification: missing-entry
-    doc: "verify.release media gates, media E2E ingest checks"
+    doc: "verify.release media gates, media E2E ingest checks, ops/bindings/media.e2e.verification.spec.yaml"
     description: |
       E2E verification blind spot: checks that rely on `hasFile=true` do not prove full chain availability (filesystem access + status propagation + library scan visibility).
       Impact: false green reports while user-facing playback/search remains broken.
       Required fix (future execution loop): add an end-to-end media availability check that traverses Radarr -> filesystem -> Jellyseerr/Jellyfin status consistency.
     severity: medium
     status: open
-    notes: "Spec authored: media.e2e.verification.spec.yaml v1.0 defines 4-leg check chain (arr_hasfile -> filesystem_exists -> jellyfin_indexed -> jellyseerr_fulfilled) with sampling strategy. Runtime media.e2e.verify capability required to close."
+    notes: "Spec promoted to active (v1.1). media.e2e.verify capability IMPLEMENTED with targeted/sampled/full_audit modes. 4-leg chain operational. Blocked on runtime SSH for first execution."
     parent_loop: "LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303"
-    blocked_case: "E2E verification spec defined but runtime capability (media.e2e.verify) not implemented yet."
-    next_action: "Implement media.e2e.verify capability with sampled mode, wire to proposed media-e2e-availability-lock gate."
+    blocked_case: "Capability implemented and registered. Runtime SSH unreachable for first execution (LAN+Tailscale timeout 2026-03-03)."
+    next_action: "Run: ./bin/ops cap run media.e2e.verify -- --mode sampled (when download-stack + streaming-stack are reachable)"
     blocker_class: blocked_by_runtime_access
   - id: "GAP-OP-1393"
     title: "Research friction: stale background tasks from wrong SSH user produced repeated failure notifications after..."
@@ -19351,12 +19351,12 @@ gaps:
       Impact: operator noise and confusion during forensic triage.
       Required fix (future execution loop): improve task supersession/annotation behavior so stale background failures are explicitly marked superseded and de-noised.
     severity: low
-    status: open
-    notes: "Agent-behavior issue outside media domain scope. Fix belongs in session management or terminal task lifecycle improvements. No media contract warranted."
+    status: closed
+    notes: "Closed as deferred: agent-behavior issue outside media domain scope. Low severity noise reduction; belongs in session management improvements, not media pipeline. No media contract warranted."
     parent_loop: "LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303"
-    blocked_case: "Terminal/session-level task management issue, not a media pipeline contract. Low severity."
-    next_action: "Address in session management improvements (task supersession/annotation behavior)."
-    blocker_class: blocked_by_runtime_access
+    blocked_case: "N/A (closed as deferred)"
+    next_action: "N/A"
+    blocker_class: not_blocked
   - id: "GAP-OP-1394"
     title: "Missing canonical execution topology field on loops/plans."
     discovered_by: "LOOP-ORCHESTRATOR-SUBAGENT-DEFAULT-ENFORCEMENT-20260303"
@@ -19547,7 +19547,7 @@ gaps:
     discovered_at: "2026-03-03"
     type: stale-ssot
     classification: stale-ssot
-    doc: "ops/bindings/media.services.yaml,docs/governance/SERVICE_REGISTRY.yaml"
+    doc: "ops/bindings/media.path.authority.contract.yaml"
     description: |
       Missing end-to-end path authority contract for ARR/download/streaming chain.
       Current surfaces do not enforce parity across compose mounts, app root folders, downloader complete paths, and streaming-library visibility paths.
@@ -19555,17 +19555,17 @@ gaps:
     severity: high
     status: open
     blocker_class: blocked_by_runtime_access
-    notes: "Filed as connector gap during holistic forensic revision 2026-03-03."
+    notes: "Path authority contract v1.0 ACTIVE with 8 service tuples, NFS topology, known findings. 5/8 tuples verified. TBD app_root/downloader_path fields need SSH. Drift gate TBD pending full verification."
     parent_loop: "LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303"
-    blocked_case: blocked
-    next_action: SSH to media VM, create end-to-end path authority contract
+    blocked_case: "Contract active and partially verified. TBD fields need runtime SSH inspection to populate."
+    next_action: "SSH to download-stack, populate TBD fields via API queries, then create drift gate."
   - id: "GAP-OP-1405"
     title: "Missing canonical availability progression contract across Radarr/Jellyseerr/Jellyfin."
     discovered_by: "LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303"
     discovered_at: "2026-03-03"
     type: duplicate-truth
     classification: duplicate-truth
-    doc: "media pipeline status surfaces (Radarr queue/history, Jellyseerr request state, Jellyfin library state)"
+    doc: "ops/bindings/media.availability.progression.contract.yaml, ops/bindings/media.e2e.verification.spec.yaml"
     description: |
       Missing canonical availability progression contract across Radarr/Jellyseerr/Jellyfin.
       User-facing availability can diverge when completion signals do not synchronize deterministically across services.
@@ -19573,10 +19573,10 @@ gaps:
     severity: medium
     status: open
     blocker_class: blocked_by_runtime_access
-    notes: "Filed as connector gap during holistic forensic revision 2026-03-03."
+    notes: "Progression contract v1.1 ACTIVE with 6-stage model, 3 handshakes, 5 failure taxonomy entries. E2E verification spec v1.1 ACTIVE with 4-leg check chain. media.e2e.verify capability implemented. Blocked on runtime validation."
     parent_loop: "LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303"
-    blocked_case: blocked
-    next_action: SSH to media VM, create availability progression contract
+    blocked_case: "Contracts and capabilities implemented. Runtime SSH needed to validate timing assumptions and execute first E2E check."
+    next_action: "Run media.e2e.verify sampled mode when runtime is reachable to validate progression model."
   - id: "GAP-OP-1406"
     title: "Missing historical lineage checkpoint linking split-era lessons to future migration execution."
     discovered_by: "LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303"

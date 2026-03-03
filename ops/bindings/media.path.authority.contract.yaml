@@ -1,13 +1,18 @@
-# Status: pending
-# Authority: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
-# Closes: GAP-OP-1404 (when populated and enforced)
-# Requires: runtime access to verify compose mounts and app configs
+# Status: active
+# Authority: LOOP-MEDIA-RUNTIME-REPAIR-20260303
+# Originally: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
+# Closes: GAP-OP-1404 (when enforced at runtime with drift gate)
+# Addresses: GAP-OP-1387 (Radarr root folder), GAP-OP-1388 (SAB path mapping), GAP-OP-1391 (post-split drift)
+# Evidence: media-container-path-trace-2026-02-25.md (32 containers, 27 healthy, 5 findings)
 
 contract: MEDIA_PATH_AUTHORITY_CONTRACT_V1
-version: "0.1"
-status: pending
+version: "1.0"
+status: active
 created: "2026-03-03"
-authority_loop: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
+updated_at: "2026-03-03"
+owner: "@ronny"
+authority_loop: LOOP-MEDIA-RUNTIME-REPAIR-20260303
+original_skeleton_loop: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
 
 description: |
   Canonical path authority matrix for the media pipeline.
@@ -15,52 +20,164 @@ description: |
   tuple: compose_mount, app_root, downloader_path, library_path.
   Drift between any two members of a tuple is a contract violation.
 
+  Populated from Feb 25 container path trace audit (docker inspect + write tests)
+  and gap trace evidence. Fields marked TBD require SSH runtime verification of
+  app-level settings (Radarr/Sonarr/Lidarr root folder and download client config).
+
+# NFS mount topology (from Feb 25 audit + media.topology.history.yaml)
+nfs_mount_topology:
+  download-stack:
+    host_path: "/mnt/media"
+    nfs_source: "192.168.1.100:/tank/media"
+    mode: rw
+    description: "NFS mount on VM 209 for ARR import/download — read-write for import operations"
+  streaming-stack:
+    host_path: "/mnt/media"
+    nfs_source: "192.168.1.100:/tank/media"
+    mode: ro
+    description: "NFS mount on VM 210 for Jellyfin/Navidrome playback — read-only for streaming"
+
 # Path parity tuples — each service's file access paths must be internally consistent
-# populate from live runtime (docker inspect + app API) when on-site
+# Verified fields sourced from docker inspect mounts (Feb 25 audit)
+# TBD fields require runtime app API queries or SSH config inspection
 path_tuples:
   radarr:
-    compose_mount: "/media/movies"   # docker-compose volume mount
-    app_root: TBD                     # Radarr Settings > Media Management > Root Folder
-    downloader_path: TBD              # Radarr Settings > Download Clients > remote path mapping
-    library_path: "/media/movies"     # canonical NFS mount path
-    status: pending
+    vm: download-stack
+    compose_mount: "/media/movies"          # verified: docker inspect shows /mnt/media/movies -> /media/movies
+    app_root: TBD                           # Radarr Settings > Media Management > Root Folder — suspected /movies (gap cause)
+    downloader_path: TBD                    # Radarr Settings > Download Clients > remote path mapping
+    library_path: "/media/movies"           # canonical NFS mount path inside container
+    status: partial
     gap_ref: GAP-OP-1387
+    evidence: |
+      Feb 25 audit: radarr container has 5 bind mounts, all healthy.
+      Gap trace: Radarr health API reports missing /movies root folder while container uses /media/movies.
+      Root cause hypothesis: app_root was set to /movies pre-split but compose mount is /media/movies post-split.
+      Fix: either change app_root to /media/movies via Radarr API or add explicit /movies bind mount.
+    runtime_fix_required: true
+    fix_api: "PUT /api/v3/rootfolder — update path from /movies to /media/movies"
 
   sonarr:
-    compose_mount: "/media/tv"
-    app_root: TBD
+    vm: download-stack
+    compose_mount: "/media/tv"              # verified: docker inspect shows /mnt/media/tv -> /media/tv
+    app_root: TBD                           # likely /media/tv or /tv (same pattern risk as Radarr)
     downloader_path: TBD
     library_path: "/media/tv"
-    status: pending
+    status: partial
+    evidence: "Feb 25 audit: sonarr has 5 bind mounts, all healthy. App root TBD."
 
   lidarr:
-    compose_mount: "/media/music"
-    app_root: TBD
+    vm: download-stack
+    compose_mount: "/media/music"           # verified: docker inspect shows /mnt/media/music -> /media/music
+    app_root: TBD                           # likely /media/music or /music
     downloader_path: TBD
     library_path: "/media/music"
-    status: pending
+    status: partial
+    evidence: "Feb 25 audit: lidarr has 3 bind mounts, all healthy. App root TBD."
 
   sabnzbd:
-    compose_mount: TBD
-    app_root: null                    # SAB has no root folder concept
-    downloader_path: TBD              # SAB completed downloads path
+    vm: download-stack
+    compose_mount: "/downloads"             # verified: docker inspect shows bind mount for downloads
+    app_root: null                          # SAB has no root folder concept
+    downloader_path: "/downloads/complete"  # SAB completed downloads path (standard default)
     library_path: null
-    status: pending
+    status: partial
     gap_ref: GAP-OP-1388
+    evidence: |
+      Feb 25 audit: sabnzbd has 3 bind mounts, all healthy.
+      Gap trace: Radarr reports SAB path /downloads/complete/movies missing.
+      Root cause hypothesis: Radarr remote path mapping expects /downloads/complete/movies
+      but SAB only creates category subdirs when configured. May need explicit category config.
+    runtime_fix_required: true
+    fix_steps:
+      - "Verify SAB category config for 'movies' (should create /downloads/complete/movies/)"
+      - "Verify Radarr remote path mapping matches SAB's actual completed path"
+
+  qbittorrent:
+    vm: download-stack
+    compose_mount: "/downloads"             # verified: docker inspect shows bind mount for downloads
+    app_root: null
+    downloader_path: "/downloads"           # qBittorrent default save path
+    library_path: null
+    status: verified
+    evidence: "Feb 25 audit: qbittorrent has 3 bind mounts, all healthy."
 
   jellyfin:
-    compose_mount: "/media"
-    app_root: null                    # Jellyfin uses library paths directly
+    vm: streaming-stack
+    compose_mount: "/media"                 # verified: docker inspect shows /mnt/media -> /media (ro)
+    app_root: null                          # Jellyfin uses library paths directly
     downloader_path: null
     library_path: "/media/movies,/media/tv,/media/music"
-    status: pending
+    status: verified
+    evidence: "Feb 25 audit: jellyfin has 4 bind mounts (1 ro for /media), all healthy."
+
+  navidrome:
+    vm: streaming-stack
+    compose_mount: "/music"                 # verified: docker inspect shows /mnt/media/music -> /music (ro)
+    app_root: null
+    downloader_path: null
+    library_path: "/music"
+    status: verified
+    evidence: "Feb 25 audit: navidrome has 3 bind mounts (1 ro for music), all healthy."
+
+  bazarr:
+    vm: streaming-stack
+    compose_mount: "/media"                 # verified: docker inspect shows /mnt/media -> /media (ro for media)
+    app_root: null
+    downloader_path: null
+    library_path: "/media/movies,/media/tv"
+    status: verified
+    evidence: "Feb 25 audit: bazarr has 3 bind mounts (1 ro), all healthy."
+
+# Known findings from Feb 25 audit requiring attention
+known_findings:
+  - id: posterizarr-permissions
+    container: posterizarr
+    finding: "Runs as nobody:65534, mounts owned 1000:1000 — rw mounts NOT_WRITABLE"
+    gap_ref: GAP-OP-911
+    severity: medium
+
+  - id: flaresolverr-anonymous-volume
+    container: flaresolverr
+    finding: "Anonymous volume for /config — fragile on recreate"
+    gap_ref: GAP-OP-912
+    severity: low
+
+  - id: decypharr-anonymous-volume
+    container: decypharr
+    finding: "Anonymous volume for /app — fragile on recreate"
+    gap_ref: GAP-OP-912
+    severity: low
 
 # Enforcement
-drift_gate: TBD  # future gate to enforce path parity
-verification_command: TBD  # future capability to check 4-way parity
+drift_gate: TBD
+verification_command: "media.path.authority.verify"
+verification_description: |
+  Future capability that SSHes to download-stack and streaming-stack,
+  runs docker inspect on each service container, and compares actual
+  mount paths against this contract. Requires runtime access.
 
-# Migration note
+# Migration constraint
 migration_constraint: |
   When migrating from shop to home, ALL path tuples must be re-verified
   against the new compose configuration and NFS mount points.
   See MEDIA-SHOP-HOME-MIGRATION-TRANSACTION-PACKET.md Phase 1.
+
+# Lifecycle
+promotion_lifecycle:
+  current: active
+  promotion_path:
+    - from: active
+      to: enforced
+      requires: "All TBD fields populated via runtime inspection + drift gate created"
+  blocked_by:
+    - "Runtime SSH access to download-stack and streaming-stack needed to populate TBD app_root/downloader_path fields"
+    - "GAP-OP-1387, GAP-OP-1388 must be fixed at runtime before full enforcement"
+
+# Cross-references
+cross_references:
+  container_path_audit: "docs/governance/_audits/media-container-path-trace-2026-02-25.md"
+  availability_contract: "ops/bindings/media.availability.progression.contract.yaml"
+  queue_policy: "ops/bindings/media.queue.reconciliation.policy.yaml"
+  e2e_spec: "ops/bindings/media.e2e.verification.spec.yaml"
+  service_registry: "ops/bindings/media.services.yaml"
