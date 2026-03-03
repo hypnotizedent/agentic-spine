@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  git-merge-safe --abort
+  git-merge-safe --target <ref> [-- <git merge args...>]
+
+Behavior:
+  - --abort runs git merge --abort and verifies merge state is fully cleared.
+  - If stale merge state remains, it retries merge --abort once automatically.
+  - --target performs a normal git merge and emits deterministic recovery guidance
+    when merge state remains after a failed merge.
+USAGE
+}
+
+fail() {
+  echo "git.merge.safe FAIL: $*" >&2
+  exit 1
+}
+
+git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not inside a git worktree: $ROOT"
+
+TARGET_REF=""
+DO_ABORT=0
+EXTRA_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift; EXTRA_ARGS=("$@"); break ;;
+    --abort) DO_ABORT=1; shift ;;
+    --target) TARGET_REF="${2:?--target requires a value}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+if [[ "$DO_ABORT" -eq 1 && -n "$TARGET_REF" ]]; then
+  fail "--abort and --target are mutually exclusive"
+fi
+if [[ "$DO_ABORT" -eq 0 && -z "$TARGET_REF" ]]; then
+  fail "provide either --abort or --target"
+fi
+
+merge_state_present() {
+  if git -C "$ROOT" rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    return 0
+  fi
+  if git -C "$ROOT" diff --name-only --diff-filter=U | grep -q .; then
+    return 0
+  fi
+  return 1
+}
+
+run_abort_once() {
+  set +e
+  git -C "$ROOT" merge --abort >/dev/null 2>&1
+  local rc=$?
+  set -e
+  return "$rc"
+}
+
+if [[ "$DO_ABORT" -eq 1 ]]; then
+  first_rc=0
+  run_abort_once || first_rc=$?
+
+  if merge_state_present; then
+    second_rc=0
+    run_abort_once || second_rc=$?
+    if merge_state_present; then
+      echo "git.merge.safe"
+      echo "status: FAIL"
+      echo "action: abort"
+      echo "first_abort_rc: $first_rc"
+      echo "second_abort_rc: $second_rc"
+      echo "merge_state: uncleared"
+      exit 1
+    fi
+    echo "git.merge.safe"
+    echo "status: PASS"
+    echo "action: abort"
+    echo "first_abort_rc: $first_rc"
+    echo "second_abort_rc: $second_rc"
+    echo "merge_state: cleared_after_retry"
+    exit 0
+  fi
+
+  echo "git.merge.safe"
+  echo "status: PASS"
+  echo "action: abort"
+  echo "first_abort_rc: $first_rc"
+  echo "merge_state: cleared"
+  exit 0
+fi
+
+set +e
+git -C "$ROOT" merge "$TARGET_REF" "${EXTRA_ARGS[@]}"
+merge_rc=$?
+set -e
+
+if [[ "$merge_rc" -eq 0 ]]; then
+  echo "git.merge.safe"
+  echo "status: PASS"
+  echo "action: merge"
+  echo "target: $TARGET_REF"
+  echo "merge_rc: 0"
+  echo "merge_state: clear"
+  exit 0
+fi
+
+if merge_state_present; then
+  echo "git.merge.safe"
+  echo "status: FAIL"
+  echo "action: merge"
+  echo "target: $TARGET_REF"
+  echo "merge_rc: $merge_rc"
+  echo "merge_state: active"
+  echo "recovery: ./bin/ops cap run git.merge.safe -- --abort"
+  exit "$merge_rc"
+fi
+
+echo "git.merge.safe"
+echo "status: FAIL"
+echo "action: merge"
+echo "target: $TARGET_REF"
+echo "merge_rc: $merge_rc"
+echo "merge_state: clear"
+exit "$merge_rc"

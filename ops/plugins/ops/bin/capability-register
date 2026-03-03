@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CAP_FILE="$ROOT/ops/capabilities.yaml"
+MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
+MANIFEST_FILE="$ROOT/ops/plugins/MANIFEST.yaml"
+ROUTING_GEN="$ROOT/bin/generators/gen-routing-dispatch.sh"
+source "$ROOT/ops/lib/git-lock.sh"
+
+CAP_ID=""
+DESCRIPTION=""
+COMMAND=""
+SAFETY=""
+APPROVAL=""
+PLUGIN=""
+SCRIPT=""
+DOMAIN="none"
+PLANE="fabric"
+CWD='"$SPINE_CODE"'
+LIFECYCLE="ready"
+OUTPUTS_CSV="stdout"
+TAGS_CSV=""
+ARG_PROTOCOL=""
+NOTE=""
+DRY_RUN=0
+LANE_SAFE=0
+LOOP_ID="${SPINE_LOOP_ID:-}"
+
+usage() {
+  cat <<'USAGE'
+Usage: capability-register --id <capability> --description <text> --command <cmd> \
+  --safety <read-only|mutating|destructive> --approval <auto|manual|operator> \
+  --plugin <plugin> --script <script> [options]
+
+Options:
+  --domain <domain>                 Default: none
+  --plane <fabric|domain_external>  Default: fabric
+  --cwd <cwd>                       Default: "$SPINE_CODE"
+  --lifecycle <state>               Default: ready
+  --outputs <csv>                   Default: stdout
+  --tags <csv>                      Optional
+  --arg-protocol <passthrough|argparse|positional|none>
+  --note <text>                     Optional capability_map note
+  --dry-run
+  --lane-safe                       Queue shared-authority mutation instead of mutating files
+  --loop-id <LOOP-ID>               Required with --lane-safe when SPINE_LOOP_ID is not set
+USAGE
+}
+
+fail() {
+  echo "capability.register FAIL: $*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --id) CAP_ID="${2:?--id requires a value}"; shift 2 ;;
+    --description) DESCRIPTION="${2:?--description requires a value}"; shift 2 ;;
+    --command) COMMAND="${2:?--command requires a value}"; shift 2 ;;
+    --safety) SAFETY="${2:?--safety requires a value}"; shift 2 ;;
+    --approval) APPROVAL="${2:?--approval requires a value}"; shift 2 ;;
+    --plugin) PLUGIN="${2:?--plugin requires a value}"; shift 2 ;;
+    --script) SCRIPT="${2:?--script requires a value}"; shift 2 ;;
+    --domain) DOMAIN="${2:?--domain requires a value}"; shift 2 ;;
+    --plane) PLANE="${2:?--plane requires a value}"; shift 2 ;;
+    --cwd) CWD="${2:?--cwd requires a value}"; shift 2 ;;
+    --lifecycle) LIFECYCLE="${2:?--lifecycle requires a value}"; shift 2 ;;
+    --outputs) OUTPUTS_CSV="${2:?--outputs requires a value}"; shift 2 ;;
+    --tags) TAGS_CSV="${2:?--tags requires a value}"; shift 2 ;;
+    --arg-protocol) ARG_PROTOCOL="${2:?--arg-protocol requires a value}"; shift 2 ;;
+    --note) NOTE="${2:?--note requires a value}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --lane-safe) LANE_SAFE=1; shift ;;
+    --loop-id) LOOP_ID="${2:?--loop-id requires a value}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
+[[ -f "$CAP_FILE" ]] || fail "missing capabilities registry: $CAP_FILE"
+[[ -f "$MAP_FILE" ]] || fail "missing capability map: $MAP_FILE"
+[[ -f "$MANIFEST_FILE" ]] || fail "missing plugin manifest: $MANIFEST_FILE"
+[[ -x "$ROUTING_GEN" ]] || fail "missing routing generator: $ROUTING_GEN"
+
+[[ -n "$CAP_ID" ]] || fail "--id is required"
+[[ -n "$DESCRIPTION" ]] || fail "--description is required"
+[[ -n "$COMMAND" ]] || fail "--command is required"
+[[ -n "$SAFETY" ]] || fail "--safety is required"
+[[ -n "$APPROVAL" ]] || fail "--approval is required"
+[[ -n "$PLUGIN" ]] || fail "--plugin is required"
+[[ -n "$SCRIPT" ]] || fail "--script is required"
+
+case "$SAFETY" in
+  read-only|mutating|destructive) ;;
+  *) fail "invalid --safety '$SAFETY'" ;;
+esac
+case "$APPROVAL" in
+  auto|manual|operator) ;;
+  *) fail "invalid --approval '$APPROVAL'" ;;
+esac
+case "$PLANE" in
+  fabric|domain_external) ;;
+  *) fail "invalid --plane '$PLANE'" ;;
+esac
+if [[ -n "$ARG_PROTOCOL" ]]; then
+  case "$ARG_PROTOCOL" in
+    passthrough|argparse|positional|none) ;;
+    *) fail "invalid --arg-protocol '$ARG_PROTOCOL'" ;;
+  esac
+fi
+
+if [[ "$LANE_SAFE" -eq 1 ]]; then
+  [[ -n "$LOOP_ID" ]] || fail "--lane-safe requires --loop-id or SPINE_LOOP_ID context"
+  request_dir="$ROOT/mailroom/state/orchestration/${LOOP_ID}/shared-authority-mutations"
+  mkdir -p "$request_dir"
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  request_file="$request_dir/${ts}-capability-register-${CAP_ID}.yaml"
+  cat > "$request_file" <<YAML
+kind: shared-authority-mutation
+status: queued
+queued_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+queued_by: "${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-unknown}}"
+loop_id: "$LOOP_ID"
+mutation:
+  capability: capability.register
+  id: "$CAP_ID"
+  description: "$DESCRIPTION"
+  command: "$COMMAND"
+  safety: "$SAFETY"
+  approval: "$APPROVAL"
+  plugin: "$PLUGIN"
+  script: "$SCRIPT"
+  domain: "$DOMAIN"
+  plane: "$PLANE"
+  cwd: "$CWD"
+  lifecycle: "$LIFECYCLE"
+  outputs_csv: "$OUTPUTS_CSV"
+  tags_csv: "$TAGS_CSV"
+  arg_protocol: "$ARG_PROTOCOL"
+  note: "$NOTE"
+YAML
+  echo "capability.register LANE_SAFE_QUEUED: $request_file"
+  exit 0
+fi
+
+if yq e -e ".capabilities.\"$CAP_ID\"" "$CAP_FILE" >/dev/null 2>&1; then
+  fail "capability already exists: $CAP_ID"
+fi
+if ! yq e -e ".plugins[] | select(.name == \"$PLUGIN\")" "$MANIFEST_FILE" >/dev/null 2>&1; then
+  fail "plugin '$PLUGIN' not found in $MANIFEST_FILE"
+fi
+
+tmp_cap_entry="$(mktemp)"
+tmp_map_entry="$(mktemp)"
+backup_cap="$(mktemp)"
+backup_map="$(mktemp)"
+backup_manifest="$(mktemp)"
+backup_dispatch="$(mktemp)"
+cp "$CAP_FILE" "$backup_cap"
+cp "$MAP_FILE" "$backup_map"
+cp "$MANIFEST_FILE" "$backup_manifest"
+cp "$ROOT/ops/bindings/routing.dispatch.yaml" "$backup_dispatch"
+
+cleanup() {
+  rm -f "$tmp_cap_entry" "$tmp_map_entry"
+}
+rollback() {
+  cp "$backup_cap" "$CAP_FILE"
+  cp "$backup_map" "$MAP_FILE"
+  cp "$backup_manifest" "$MANIFEST_FILE"
+  cp "$backup_dispatch" "$ROOT/ops/bindings/routing.dispatch.yaml"
+}
+finalize() {
+  rm -f "$backup_cap" "$backup_map" "$backup_manifest" "$backup_dispatch"
+}
+trap cleanup EXIT INT TERM
+
+{
+  echo "description: \"${DESCRIPTION//\"/\\\"}\""
+  if [[ -n "$TAGS_CSV" ]]; then
+    echo "tags:"
+    IFS=',' read -r -a _tags <<< "$TAGS_CSV"
+    for t in "${_tags[@]}"; do
+      t="${t## }"; t="${t%% }"
+      [[ -n "$t" ]] && echo "  - \"${t//\"/\\\"}\""
+    done
+  fi
+  echo "command: \"${COMMAND//\"/\\\"}\""
+  echo "cwd: ${CWD}"
+  echo "safety: $SAFETY"
+  echo "approval: $APPROVAL"
+  echo "lifecycle: $LIFECYCLE"
+  echo "outputs:"
+  IFS=',' read -r -a _outputs <<< "$OUTPUTS_CSV"
+  for o in "${_outputs[@]}"; do
+    o="${o## }"; o="${o%% }"
+    [[ -n "$o" ]] && echo "  - \"${o//\"/\\\"}\""
+  done
+  echo "domain: $DOMAIN"
+  echo "plane: $PLANE"
+  if [[ -n "$ARG_PROTOCOL" ]]; then
+    echo "arg_protocol: $ARG_PROTOCOL"
+  fi
+} > "$tmp_cap_entry"
+
+{
+  echo "plugin: $PLUGIN"
+  echo "script: $SCRIPT"
+  echo "safety: $SAFETY"
+  if [[ -n "$ARG_PROTOCOL" ]]; then
+    echo "arg_protocol: $ARG_PROTOCOL"
+  fi
+  if [[ -n "$NOTE" ]]; then
+    echo "note: \"${NOTE//\"/\\\"}\""
+  fi
+} > "$tmp_map_entry"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "capability.register"
+  echo "status: DRY_RUN"
+  echo "would_add: $CAP_ID"
+  echo "files: ops/capabilities.yaml, ops/bindings/capability_map.yaml, ops/bindings/routing.dispatch.yaml, ops/plugins/MANIFEST.yaml"
+  exit 0
+fi
+
+acquire_git_lock capability_register || exit 1
+trap 'release_git_lock; cleanup' EXIT INT TERM
+
+if ! {
+  yq e -i ".capabilities.\"$CAP_ID\" = load(\"$tmp_cap_entry\")" "$CAP_FILE"
+  yq e -i ".capabilities.\"$CAP_ID\" = load(\"$tmp_map_entry\")" "$MAP_FILE"
+  yq e -i "(.plugins[] | select(.name == \"$PLUGIN\") | .scripts) |= ((. + [\"bin/$SCRIPT\"]) | unique)" "$MANIFEST_FILE"
+  yq e -i "(.plugins[] | select(.name == \"$PLUGIN\") | .capabilities) |= ((. + [\"$CAP_ID\"]) | unique)" "$MANIFEST_FILE"
+  "$ROUTING_GEN" >/dev/null
+}; then
+  rollback
+  fail "transaction rolled back (capability triad update failed)"
+fi
+
+finalize
+
+count_cap="$(yq e '.capabilities | length' "$CAP_FILE")"
+count_map="$(yq e '.capabilities | length' "$MAP_FILE")"
+
+echo "capability.register"
+echo "status: PASS"
+echo "capability: $CAP_ID"
+echo "plugin: $PLUGIN"
+echo "counts: capabilities=$count_cap capability_map=$count_map"
+echo "updated: ops/capabilities.yaml"
+echo "updated: ops/bindings/capability_map.yaml"
+echo "updated: ops/bindings/routing.dispatch.yaml"
+echo "updated: ops/plugins/MANIFEST.yaml"
