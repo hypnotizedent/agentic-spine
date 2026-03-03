@@ -133,14 +133,6 @@ run_cap() {
     local name="$1"
     shift
 
-    # Strip a single leading standalone "--" separator before capability dispatch.
-    # Agents commonly write `cap run name -- --flag val`; the "--" is ergonomic
-    # but must not be forwarded to the capability command (breaks argparse, etc.).
-    # Non-leading "--" tokens are left untouched.
-    if [[ $# -gt 0 && "$1" == "--" ]]; then
-        shift
-    fi
-
     local args=("$@")
 
     # ── Temp file cleanup trap ──
@@ -181,6 +173,36 @@ run_cap() {
     approval="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".approval")"
     local desc
     desc="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".description")"
+    local arg_protocol
+    arg_protocol="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".arg_protocol")"
+    if [[ -z "$arg_protocol" || "$arg_protocol" == "null" ]]; then
+      arg_protocol="passthrough"
+    fi
+    case "$arg_protocol" in
+      passthrough|argparse|positional|none) ;;
+      *)
+        echo "ERROR: capability '$name' has invalid arg_protocol '$arg_protocol' (expected passthrough|argparse|positional|none)"
+        exit 1
+        ;;
+    esac
+    # Separator normalization is deterministic and protocol-aware: only a single
+    # leading separator token is stripped by the dispatcher.
+    if [[ "${#args[@]}" -gt 0 && "${args[0]}" == "--" ]]; then
+      args=("${args[@]:1}")
+    fi
+    if [[ "$arg_protocol" == "none" && "${#args[@]}" -gt 0 ]]; then
+      echo "ERROR: capability '$name' declares arg_protocol=none but received args: ${args[*]}"
+      exit 2
+    fi
+    if [[ "$arg_protocol" == "positional" ]]; then
+      local _arg
+      for _arg in "${args[@]:-}"; do
+        if [[ "$_arg" == -* ]]; then
+          echo "ERROR: capability '$name' declares arg_protocol=positional and does not accept flag arg '$_arg'"
+          exit 2
+        fi
+      done
+    fi
     local post_action
     post_action="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".post_action")"
     local role_runtime_contract="$SPINE_CODE/ops/bindings/role.runtime.control.contract.yaml"
@@ -342,6 +364,7 @@ run_cap() {
     echo "Description: $desc"
     echo "Safety:      $safety"
     echo "Approval:    $approval"
+    echo "Arg Protocol:$arg_protocol"
     echo "Run Key:     $run_key"
     echo "Policy:      $RESOLVED_POLICY_PRESET (approval_default=$RESOLVED_APPROVAL_DEFAULT, multi_agent_writes=$effective_multi_agent_writes, active_sessions=$active_session_count)"
     echo "Command:     $cmd ${args[*]:-}"
@@ -529,7 +552,7 @@ run_cap() {
 
       # Allow explicit bootstrap capabilities to create lock claims.
       case "$name" in
-        orchestration.terminal.entry|orchestration.wave.kickoff) orchestrator_loop_id="" ;;
+        orchestration.terminal.entry|orchestration.wave.kickoff|loops.create|session.start|aof.contract.acknowledge|session.role.override) orchestrator_loop_id="" ;;
       esac
 
       if [[ -n "$orchestrator_loop_id" ]]; then
@@ -779,10 +802,10 @@ PY
         local ack_rc=$?
         set -e
         if [[ "$ack_rc" -eq 2 ]]; then
-          # Auto-acknowledge when session role override is active (trusted operator signal)
-          if [[ -f "$_role_override_cache" && -n "$role_policy_override_ref" ]]; then
+          # Auto-acknowledge when a governed role override is active.
+          if [[ -n "$role_policy_override_ref" && -n "$role_policy_override_reason" ]]; then
             CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
-            echo "AOF auto-acknowledged (session role override active: ref=$role_policy_override_ref)"
+            echo "AOF auto-acknowledged (governed role override active: ref=$role_policy_override_ref)"
           else
             echo "BLOCKED: AOF contract acknowledgment required"
             echo "Environment contract exists at: $env_contract"

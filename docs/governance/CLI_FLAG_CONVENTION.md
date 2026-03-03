@@ -21,6 +21,28 @@ scope: cli-flag-convention
 | Double-dash separator | Every script must include `--) shift ;;` in its case block |
 | Help flag | `-h` and `--help` both supported |
 
+## 1.1 Capability Arg Protocol Contract
+
+Capability metadata must declare `arg_protocol` for new or updated entries.
+Valid enum values:
+
+| `arg_protocol` | Semantics |
+|----------------|-----------|
+| `passthrough` | Capability accepts regular shell flags/args; `cap run <cap> --flag value` is canonical. |
+| `argparse` | Python argparse-style flags; a single leading separator token is tolerated and stripped. |
+| `positional` | Capability accepts positional args only; flag-style args are rejected. |
+| `none` | Capability accepts no args; any supplied args are rejected. |
+
+Canonical invocation style is:
+
+```bash
+./bin/ops cap run <capability> --flag value
+```
+
+Compatibility behavior:
+- A single leading `--` separator (for older call sites) is tolerated by `cap.sh`.
+- New docs/runbooks should not include `cap run ... -- --flag` examples.
+
 ## 2. Canonical Binding Flags
 
 These flags carry loop/gap/plan identity across lifecycle boundaries.

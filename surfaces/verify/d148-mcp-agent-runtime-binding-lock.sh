@@ -5,7 +5,7 @@
 # required contract linkage for agent runtime bindings, and required LaunchAgent scheduler parity.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$HOME/code/agentic-spine")}"
 CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
 LAUNCHD_CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
 LAUNCHD_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
@@ -168,6 +168,15 @@ source_dir="$(yq e -r '.paths.source_dir // ""' "$LAUNCHD_CONTRACT")"
 install_dir="$(yq e -r '.paths.user_launchagents_dir // ""' "$LAUNCHD_CONTRACT")"
 log_root="$(yq e -r '.paths.canonical_log_root // ""' "$LAUNCHD_CONTRACT")"
 ssot_tz="$(yq e -r '.runtime.timezone // "America/New_York"' "$TENANT_PROFILE")"
+expected_launchd_spine_root="$(yq e -r '.runtime.spine_root // ""' "$TENANT_PROFILE")"
+if [[ -z "$expected_launchd_spine_root" || "$expected_launchd_spine_root" == "null" ]]; then
+  if [[ "$source_dir" == */ops/runtime/launchd ]]; then
+    expected_launchd_spine_root="${source_dir%/ops/runtime/launchd}"
+  fi
+fi
+if [[ -z "$expected_launchd_spine_root" || "$expected_launchd_spine_root" == "null" ]]; then
+  expected_launchd_spine_root="$ROOT"
+fi
 mapfile -t required_env_keys < <(yq e -r '.required_env[]?' "$LAUNCHD_CONTRACT")
 
 if [[ -z "$source_dir" ]]; then
@@ -252,8 +261,8 @@ for label in "${required_labels[@]}"; do
 
     case "$env_key" in
       SPINE_ROOT)
-        if [[ "$src_env_val" != "$ROOT" ]]; then
-          err "launchagent '$label' must set SPINE_ROOT=$ROOT in template env"
+        if [[ "$src_env_val" != "$expected_launchd_spine_root" ]]; then
+          err "launchagent '$label' must set SPINE_ROOT=$expected_launchd_spine_root in template env"
         fi
         ;;
       TZ|SPINE_OPERATOR_TZ)

@@ -14,6 +14,7 @@ SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 source "$ROOT/ops/lib/git-lock.sh"
 
 LOOP_ID="" HORIZON="" READINESS="" NOT_BEFORE="" TRIGGER="" DEPENDS_ON=""
+PROMOTE_STALE_CLOSED=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -24,6 +25,7 @@ while [[ $# -gt 0 ]]; do
     --not-before-est)     NOT_BEFORE="${2:?--not-before-est requires a value}"; shift 2 ;;
     --activation-trigger) TRIGGER="${2:?--activation-trigger requires a value}"; shift 2 ;;
     --depends-on-loop)    DEPENDS_ON="${2:?--depends-on-loop requires a value}"; shift 2 ;;
+    --promote-stale-closed) PROMOTE_STALE_CLOSED=1; shift ;;
     -h|--help)
       echo "Usage: planning-horizon-set --loop LOOP-ID --horizon now|later|future [options]"
       echo ""
@@ -32,6 +34,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --not-before-est YYYY-MM-DD"
       echo "  --activation-trigger manual|date|dependency"
       echo "  --depends-on-loop LOOP-ID"
+      echo "  --promote-stale-closed (allow stale closed->active promotion when open gaps exist)"
       exit 0 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -138,15 +141,30 @@ _set_fm_field() {
 # - deferred horizons must not remain status=active/open
 # - horizon=now promotes planned -> active
 current_status="$(_fm_field "$SCOPE_FILE" "status")"
+stale_closed_promoted=0
 case "$current_status" in
   closed|done|archived)
-    echo "FAIL: cannot change horizon for closed loop (status=$current_status): $LOOP_ID" >&2
-    exit 1
+    if [[ "$PROMOTE_STALE_CLOSED" -eq 1 && "$HORIZON" == "now" ]]; then
+      open_gap_count="$(LOOP_ID_ENV="$LOOP_ID" yq e -r '[.gaps[] | select((.status // "") == "open" and (.parent_loop // "") == strenv(LOOP_ID_ENV))] | length' "$ROOT/ops/bindings/operational.gaps.yaml" 2>/dev/null || echo 0)"
+      [[ "$open_gap_count" =~ ^[0-9]+$ ]] || open_gap_count=0
+      if (( open_gap_count > 0 )); then
+        stale_closed_promoted=1
+      else
+        echo "FAIL: --promote-stale-closed set but loop has no open linked gaps: $LOOP_ID" >&2
+        exit 1
+      fi
+    else
+      echo "FAIL: cannot change horizon for closed loop (status=$current_status): $LOOP_ID" >&2
+      exit 1
+    fi
     ;;
 esac
 
 normalized_status="$current_status"
 if [[ "$HORIZON" == "now" ]]; then
+  if [[ "$stale_closed_promoted" -eq 1 ]]; then
+    normalized_status="active"
+  fi
   case "$current_status" in
     planned|"")
       normalized_status="active"
@@ -195,4 +213,7 @@ echo "  horizon: $HORIZON"
 [[ -n "$TRIGGER" ]] && echo "  activation_trigger: $TRIGGER"
 [[ -n "$NOT_BEFORE" ]] && echo "  not_before_est: $NOT_BEFORE"
 [[ -n "$DEPENDS_ON" ]] && echo "  depends_on_loop: $DEPENDS_ON"
+if [[ "$stale_closed_promoted" -eq 1 ]]; then
+  echo "  stale_closed_promoted: true"
+fi
 echo "File: $SCOPE_FILE"

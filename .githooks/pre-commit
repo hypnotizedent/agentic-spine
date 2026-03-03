@@ -170,8 +170,23 @@ fi
 _session_override_active=0
 _session_override_ref=""
 _session_override_reason=""
+_env_override_ref="${SPINE_ROLE_POLICY_OVERRIDE_REF:-}"
+_env_override_reason="${SPINE_ROLE_POLICY_OVERRIDE_REASON:-}"
+
+# Honor explicit governed override env vars directly in hook context.
+if [[ -n "$_env_override_ref" && -z "$_env_override_reason" ]]; then
+  if [[ "$_env_override_ref" =~ ^LOOP- || "$_env_override_ref" =~ ^LANE- ]]; then
+    _env_override_reason="Governed execution for $_env_override_ref"
+  fi
+fi
+if [[ -n "$_env_override_ref" && -n "$_env_override_reason" ]]; then
+  _session_override_active=1
+  _session_override_ref="$_env_override_ref"
+  _session_override_reason="$_env_override_reason"
+fi
 
 _resolve_session_override() {
+  [[ "$_session_override_active" -eq 1 ]] && return 0
   local role_runtime_contract="$ROOT/ops/bindings/role.runtime.control.contract.yaml"
   [[ -f "$role_runtime_contract" ]] || return 0
   command -v yq >/dev/null 2>&1 || return 0
@@ -360,20 +375,43 @@ if echo "$staged" | grep -qx 'ops/bindings/gate.registry.yaml'; then
   fi
 
   if [[ -x "$ROOT/ops/plugins/docs/bin/docs-projection-sync" ]]; then
+    projection_allowlist_file="$ROOT/ops/bindings/projection.reconcile.allowlist.txt"
+    projection_allowlist=()
+    if [[ -f "$projection_allowlist_file" ]]; then
+      while IFS= read -r allow_path; do
+        [[ -n "$allow_path" ]] || continue
+        [[ "$allow_path" =~ ^# ]] && continue
+        projection_allowlist+=("$allow_path")
+      done < "$projection_allowlist_file"
+    fi
+    if [[ "${#projection_allowlist[@]}" -eq 0 ]]; then
+      projection_allowlist=(
+        "ops/bindings/gate.registry.yaml"
+        "AGENTS.md"
+        "CLAUDE.md"
+        "docs/governance/generated/ENTRY_SURFACE_GATE_METADATA.md"
+        "docs/governance/generated/BOOT_ENTRY_SURFACE.md"
+      )
+    fi
+
     if [[ "$_session_override_active" -eq 1 ]]; then
       SPINE_ROLE_POLICY_OVERRIDE_REF="$_session_override_ref" \
       SPINE_ROLE_POLICY_OVERRIDE_REASON="$_session_override_reason" \
       "$ROOT/bin/ops" cap run docs.projection.sync >/dev/null 2>&1 || {
-        echo "STOP: docs.projection.sync failed" >&2
+        echo "STOP: docs.projection.sync failed." >&2
+        echo "Remediation: SPINE_ROLE_POLICY_OVERRIDE_REF='$_session_override_ref' SPINE_ROLE_POLICY_OVERRIDE_REASON='$_session_override_reason' ./bin/ops cap run docs.projection.sync && git add \$(cat ops/bindings/projection.reconcile.allowlist.txt | rg -v '^#|^$')" >&2
         exit 1
       }
     else
       "$ROOT/bin/ops" cap run docs.projection.sync >/dev/null 2>&1 || {
-        echo "STOP: docs.projection.sync failed" >&2
+        echo "STOP: docs.projection.sync failed." >&2
+        echo "Remediation: ./bin/ops cap run docs.projection.sync && git add \$(cat ops/bindings/projection.reconcile.allowlist.txt | rg -v '^#|^$')" >&2
         exit 1
       }
     fi
-    for f in AGENTS.md CLAUDE.md docs/governance/generated/ENTRY_SURFACE_GATE_METADATA.md docs/governance/generated/BOOT_ENTRY_SURFACE.md; do
+
+    # Deterministic auto-restage for all projection-authority files.
+    for f in "${projection_allowlist[@]}"; do
       [[ -f "$ROOT/$f" ]] && git add "$f"
     done
   fi

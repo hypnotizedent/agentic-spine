@@ -99,6 +99,55 @@ if not isinstance(caps, dict) or len(caps) == 0:
 cap_names = set(caps.keys())
 valid_safety = {"read-only", "mutating", "destructive"}
 valid_approval = {"auto", "manual", "operator"}
+valid_arg_protocol = {"passthrough", "argparse", "positional", "none"}
+
+
+def load_yaml_from_git(ref: str, rel_path: str):
+    raw = subprocess.run(
+        ["git", "-C", root, "show", f"{ref}:{rel_path}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if raw.returncode != 0:
+        return None
+    try:
+        parsed = json.loads(
+            subprocess.run(
+                ["yq", "-o=json", "."],
+                input=raw.stdout,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )
+    except Exception:
+        return None
+    return parsed
+
+
+baseline_caps = {}
+changed_caps = set()
+merge_base = subprocess.run(
+    ["git", "-C", root, "merge-base", "HEAD", "origin/main"],
+    capture_output=True,
+    text=True,
+    check=False,
+).stdout.strip()
+
+if merge_base:
+    baseline_data = load_yaml_from_git(merge_base, "ops/capabilities.yaml")
+    if isinstance(baseline_data, dict):
+        maybe_caps = baseline_data.get("capabilities")
+        if isinstance(maybe_caps, dict):
+            baseline_caps = maybe_caps
+
+if baseline_caps:
+    sentinel = object()
+    for cap, cfg in caps.items():
+        prev = baseline_caps.get(cap, sentinel)
+        if prev is sentinel or prev != cfg:
+            changed_caps.add(cap)
 
 for cap, cfg in caps.items():
     if not isinstance(cfg, dict):
@@ -122,6 +171,20 @@ for cap, cfg in caps.items():
         fail(f"{cap} invalid safety: '{safety}' (expected read-only|mutating|destructive)")
     if approval not in valid_approval:
         fail(f"{cap} invalid approval: '{approval}' (expected auto|manual|operator)")
+
+    arg_protocol = cfg.get("arg_protocol")
+    if arg_protocol is not None and str(arg_protocol).strip():
+        arg_protocol = str(arg_protocol).strip()
+        if arg_protocol not in valid_arg_protocol:
+            fail(
+                f"{cap} invalid arg_protocol: '{arg_protocol}' "
+                "(expected passthrough|argparse|positional|none)"
+            )
+    elif cap in changed_caps:
+        fail(
+            f"{cap} missing required field: arg_protocol "
+            "(required for new/updated capabilities)"
+        )
 
     outputs = cfg.get("outputs")
     if not isinstance(outputs, list) or len(outputs) == 0:
@@ -159,5 +222,8 @@ for cap, cfg in caps.items():
         if not os.access(abs_path, os.X_OK):
             fail(f"{cap} command target not executable: {first_token} (resolved: {abs_path})")
 
-print("D63 PASS: capabilities metadata valid")
+if changed_caps:
+    print(f"D63 PASS: capabilities metadata valid (changed_caps={len(changed_caps)})")
+else:
+    print("D63 PASS: capabilities metadata valid")
 PY
