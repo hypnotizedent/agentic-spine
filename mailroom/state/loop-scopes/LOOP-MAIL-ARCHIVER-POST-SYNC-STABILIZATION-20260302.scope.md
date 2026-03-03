@@ -44,12 +44,12 @@ Consolidate post-sync mail-archiver next-best-leverage work into one canonical e
 
 ## Linked Gaps
 - GAP-OP-1362 — CLOSED: EWS loop metadata contradiction fixed (execution_readiness removed from closed loop)
-- GAP-OP-1363 — OPEN: structural fix committed (b5555ac) but high-severity close requires regression_lock_id gate (none exists yet)
-- GAP-OP-1364 — OPEN: overlap cleanup missing governed assets (blocked_by_runtime_access)
+- GAP-OP-1363 — FIXED: continuation packet + D333 regression lock gate (31f2ae5)
+- GAP-OP-1364 — FIXED: 2 capability scripts + alias boundary contract restored (31f2ae5)
 - GAP-OP-1365 — CLOSED: microsoft live_sync_ready updated to true (Graph API active)
 - GAP-OP-1366 — OPEN: overlap cleanup closure semantics need reconciliation (blocked_by_ronny_arch_decision)
 - GAP-OP-1367 — OPEN: email classification/retention contract needs architecture decision (blocked_by_ronny_arch_decision)
-- GAP-OP-1368 — OPEN: 126GB PostgreSQL DB backup not governed (blocked_by_runtime_access)
+- GAP-OP-1368 — FIXED: backup status capability + cron template + contract update (31f2ae5)
 - GAP-OP-1369 — OPEN: email domain boundary contract needs architecture decision (blocked_by_ronny_arch_decision)
 
 ## Gap Blocker Evidence (2026-03-03)
