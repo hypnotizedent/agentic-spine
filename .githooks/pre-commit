@@ -11,6 +11,7 @@ set -euo pipefail
 # 5. Hook-fast AOF hygiene checks (staged only)
 # 6. Gate registry projection autopilot (gate.registry.yaml staged)
 # 7. Capability metadata validation (ops/capabilities.yaml staged)
+# 8. D128 trailer hint (gate contract mutation — non-blocking reminder)
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "${ROOT:-}" ]]; then
@@ -382,23 +383,52 @@ fi
 # Main-branch commits are allowed. Worktrees are optional, not mandatory.
 # Drift gates (spine.verify) catch problems; the pre-commit hook stays lean.
 
-if ! echo "$staged" | grep -qx 'ops/capabilities.yaml'; then
-  exit 0
+if echo "$staged" | grep -qx 'ops/capabilities.yaml'; then
+  validator="surfaces/verify/d63-capabilities-metadata-lock.sh"
+  if [[ ! -f "$validator" ]]; then
+    echo "STOP: missing validator: $validator" >&2
+    exit 1
+  fi
+
+  tmp="$(mktemp)"
+  cleanup() { rm -f "$tmp" 2>/dev/null || true; }
+  trap cleanup EXIT INT TERM
+
+  git show :ops/capabilities.yaml >"$tmp" 2>/dev/null || {
+    echo "STOP: could not read staged ops/capabilities.yaml" >&2
+    exit 1
+  }
+
+  bash "$validator" --file "$tmp"
 fi
 
-validator="surfaces/verify/d63-capabilities-metadata-lock.sh"
-if [[ ! -f "$validator" ]]; then
-  echo "STOP: missing validator: $validator" >&2
-  exit 1
+# ─── Guard 8: D128 trailer hint (gate contract mutation) ────
+# When gate contract files are staged, remind the committer about required
+# D128 trailers. This is a non-blocking hint — D128 gate enforces at verify
+# time. The hint prevents wasted commit cycles by surfacing requirements early.
+
+_d128_tracked=0
+if echo "$staged" | grep -qx 'ops/bindings/gate\.registry\.yaml'; then
+  _d128_tracked=1
+fi
+if echo "$staged" | grep -qx 'ops/bindings/gate\.execution\.topology\.yaml'; then
+  _d128_tracked=1
 fi
 
-tmp="$(mktemp)"
-cleanup() { rm -f "$tmp" 2>/dev/null || true; }
-trap cleanup EXIT INT TERM
-
-git show :ops/capabilities.yaml >"$tmp" 2>/dev/null || {
-  echo "STOP: could not read staged ops/capabilities.yaml" >&2
-  exit 1
-}
-
-bash "$validator" --file "$tmp"
+if [[ "$_d128_tracked" -eq 1 ]]; then
+  _d128_cap=""
+  if echo "$staged" | grep -qx 'ops/bindings/gate\.registry\.yaml'; then
+    _d128_cap="gate.registry.update"
+  else
+    _d128_cap="gate.topology.assign"
+  fi
+  echo "" >&2
+  echo "NOTE: D128 gate contract mutation detected in staged files." >&2
+  echo "Required commit trailers (include in commit message):" >&2
+  echo "  Gate-Mutation: capability" >&2
+  echo "  Gate-Capability: $_d128_cap" >&2
+  echo "  Gate-Run-Key: \${CAP-...run-key}" >&2
+  echo "" >&2
+  echo "Generate trailers: ./ops/plugins/verify/bin/gate-mutation-trailers --auto" >&2
+  echo "" >&2
+fi

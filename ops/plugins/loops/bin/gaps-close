@@ -79,7 +79,12 @@ validate_gap_closure() {
   local severity existing_lock effective_lock
 
   gap_exists "$id" || fail "$id does not exist in gap registry"
-  gap_is_open "$id" || fail "$id is not open (current status is not 'open')"
+  if ! gap_is_open "$id"; then
+    local current_status
+    current_status="$(GAP_ID_ENV="$id" yq e -r '.gaps[] | select(.id == strenv(GAP_ID_ENV)) | .status // ""' "$GAPS_FILE" 2>/dev/null | head -n1)"
+    echo "INFO: $id already $current_status — skipping (idempotent)" >&2
+    return 1
+  fi
 
   severity="$(GAP_ID_ENV="$id" yq e -r '.gaps[] | select(.id == strenv(GAP_ID_ENV)) | .severity // ""' "$GAPS_FILE" 2>/dev/null | head -n1)"
   existing_lock="$(GAP_ID_ENV="$id" yq e -r '.gaps[] | select(.id == strenv(GAP_ID_ENV)) | .regression_lock_id // ""' "$GAPS_FILE" 2>/dev/null | head -n1)"
@@ -225,7 +230,10 @@ close_single() {
   local id="$1" status="$2" fixed_in="$3" notes="$4" reg_lock="$5"
   local timestamp local_claim
 
-  validate_gap_closure "$id" "$status" "$reg_lock"
+  if ! validate_gap_closure "$id" "$status" "$reg_lock"; then
+    echo "SKIPPED: $id (already closed)"
+    return 0
+  fi
   acquire_git_lock gaps || exit 1
   trap 'release_git_lock' EXIT INT TERM
 
@@ -282,27 +290,41 @@ close_batch() {
   count="${#ids[@]}"
   (( count > 0 )) || fail "batch contains no entries"
 
-  # Validate all entries before acquiring lock.
+  # Validate all entries before acquiring lock. Skip already-closed gaps.
+  local -a valid_indices=()
   for ((i=0; i<count; i++)); do
-    validate_gap_closure "${ids[$i]}" "${statuses[$i]}" "${reg_locks[$i]}"
+    if validate_gap_closure "${ids[$i]}" "${statuses[$i]}" "${reg_locks[$i]}"; then
+      valid_indices+=("$i")
+    else
+      echo "SKIPPED: ${ids[$i]} (already closed)"
+    fi
   done
+
+  if [[ "${#valid_indices[@]}" -eq 0 ]]; then
+    echo "INFO: all gaps already closed — nothing to do"
+    return 0
+  fi
 
   acquire_git_lock gaps || exit 1
   trap 'release_git_lock' EXIT INT TERM
 
-  for ((i=0; i<count; i++)); do
+  for i in "${valid_indices[@]}"; do
     apply_gap_update "${ids[$i]}" "${statuses[$i]}" "${fixed_ins[$i]}" "${notes[$i]}" "${reg_locks[$i]}"
   done
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   yq e -i ".updated = \"$timestamp\"" "$GAPS_FILE"
 
-  id_block="$(printf '%s\n' "${ids[@]}" | sed 's/^/- /')"
+  local -a closed_ids=()
+  for i in "${valid_indices[@]}"; do
+    closed_ids+=("${ids[$i]}")
+  done
+  id_block="$(printf '%s\n' "${closed_ids[@]}" | sed 's/^/- /')"
 
   git -C "$ROOT" add "$GAPS_FILE"
   git -C "$ROOT" commit -m "$(cat <<EOF
 fix(gaps): batch mark via gaps.close
 
-Closed $count gap(s) via atomic gaps.close --batch.
+Closed ${#valid_indices[@]} gap(s) via atomic gaps.close --batch.
 Batch file: $batch_file
 ${default_fixed_in:+Fixed in (default): $default_fixed_in}
 
@@ -316,7 +338,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 EOF
 )"
 
-  for id in "${ids[@]}"; do
+  for id in "${closed_ids[@]}"; do
     local_claim="$(claim_file "$id")"
     if [[ -f "$local_claim" ]]; then
       rm -f "$local_claim"
@@ -324,7 +346,7 @@ EOF
     fi
   done
 
-  for ((i=0; i<count; i++)); do
+  for i in "${valid_indices[@]}"; do
     echo "CLOSED: ${ids[$i]} (status=${statuses[$i]}${fixed_ins[$i]:+, fixed_in=${fixed_ins[$i]}})"
   done
 }
