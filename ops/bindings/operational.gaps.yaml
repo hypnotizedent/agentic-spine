@@ -9,7 +9,7 @@
 # Last verified: 2026-02-22
 
 version: 1
-updated: "2026-03-03T09:49:00Z"
+updated: "2026-03-03T14:47:34Z"
 gaps:
   # ─────────────────────────────────────────────────────────────
   # Discovered during LOOP-INFRA-VM-RESTRUCTURE-20260206
@@ -18817,10 +18817,12 @@ gaps:
     severity: medium
     status: open
     blocker_class: blocked_by_ronny_arch_decision
-    notes: "Draft contract authored: mail.archiver.email.classification.contract.yaml (6-tier taxonomy with routing/pruning rules). Awaits Ronny review to promote from draft to authoritative."
+    notes: "Draft contract authored: mail.archiver.email.classification.contract.yaml (6-tier taxonomy with routing/pruning rules). Awaits Ronny review to promote from draft to authoritative. Reality-check 2026-03-03: contract content validated against live 4-account topology (gmail/stalwart/m365/icloud), classification tiers are operationally sound, integration refs correct. implementation_state=not-implemented is accurate."
     parent_loop: "LOOP-MAIL-ARCHIVER-POST-SYNC-STABILIZATION-20260302"
     blocked_case: "Draft contract exists but requires Ronny arch review to promote from draft to authoritative."
     next_action: "Ronny reviews email classification contract, approves or revises tiers, then promotes status to authoritative."
+    evidence_run_keys:
+      - "CAP-20260303-093640__communications.mailarchiver.backup.status__R0hkm22990"
   - id: "GAP-OP-1368"
     title: "Agent friction intake item:"
     discovered_by: "LOOP-AGENT-FRICTION-QUEUE-OPERATIONS-20260302"
@@ -18843,6 +18845,9 @@ gaps:
     fixed_in: 31f2ae5
     fixed_at: "2026-03-03"
     regression_lock_id: D335
+    notes: "Reality-check 2026-03-03: backup IS deployed and running. Cron 0 3 * * * active, script at /usr/local/bin/mail-archiver-backup.sh, latest artifact mail-archiver-db-2026-03-03T030001Z.sql.gz (126GB), 3 daily dumps on disk, 7-day retention. Contract had wrong subdirectory paths (backups/postgres/ vs actual flat backups/) — corrected. Backup status capability script also fixed to match real paths."
+    evidence_run_keys:
+      - "CAP-20260303-093640__communications.mailarchiver.backup.status__R0hkm22990"
     parent_loop: "LOOP-MAIL-ARCHIVER-POST-SYNC-STABILIZATION-20260302"
   - id: "GAP-OP-1369"
     title: "Agent friction intake item:"
@@ -18864,10 +18869,12 @@ gaps:
     severity: medium
     status: open
     blocker_class: blocked_by_ronny_arch_decision
-    notes: "Draft contract authored: mail.archiver.domain.boundary.contract.yaml (4 domain classes with per-account assignment and routing rules). Awaits Ronny review to promote from draft to authoritative."
+    notes: "Draft contract authored: mail.archiver.domain.boundary.contract.yaml (4 domain classes with per-account assignment and routing rules). Awaits Ronny review to promote from draft to authoritative. Reality-check 2026-03-03: 4 account→domain assignments cross-verified against account.linkage.contract.yaml (gmail=shared, stalwart=infra, m365=business, icloud=personal). Routing implications and tag taxonomy are internally consistent. implementation_state=not-implemented is accurate."
     parent_loop: "LOOP-MAIL-ARCHIVER-POST-SYNC-STABILIZATION-20260302"
     blocked_case: "Draft contract exists but requires Ronny arch review to promote from draft to authoritative."
     next_action: "Ronny reviews domain boundary contract, approves or revises domain classes, then promotes status to authoritative."
+    evidence_run_keys:
+      - "CAP-20260303-093640__communications.mailarchiver.backup.status__R0hkm22990"
   - id: "GAP-OP-1370"
     title: "Mailroom watcher is financially brittle: provider policy currently enforces z.ai as default lane and no gov..."
     discovered_by: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
@@ -20442,3 +20449,20 @@ gaps:
     status: open
     notes: "Filed via gaps.file at 2026-03-03T09:37:05Z"
     parent_loop: "LOOP-AGENT-FRICTION-BACKLOG-20260302"
+  - id: "GAP-OP-1464"
+    title: "Gmail IMAP sync is actively processing (folder reclassification observed in last 4h) but MailAccounts.LastS..."
+    discovered_by: "codex/wave-mail-postsync-reality-20260303"
+    discovered_at: "2026-03-03"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "ops/bindings/mail.archiver.account.linkage.contract.yaml"
+    description: |
+      Gmail IMAP sync is actively processing (folder reclassification observed in last 4h) but MailAccounts.LastSync for account 1 (hypnotizedent@gmail.com) is stuck at epoch 1970-01-01 00:00:00. All other accounts (Stalwart, M365, iCloud) have valid timestamps. Cadence cycle verified (*/15 cron): no timestamp advance after full cycle wait. Runtime proof: container UP 35h, sync logs show folder updates, DB column remains epoch.
+    severity: medium
+    status: open
+    blocker_class: runtime_investigation_needed
+    notes: "Gmail IMAP sync is processing (folder reclassification in logs) but LastSync stays at epoch. Verified with 2 snapshots 9min apart across a */15 cadence boundary (14:38Z→14:47Z). Container UP 35h, healthy. Other 3 accounts have valid timestamps. Sync activity is real but timestamp is never written."
+    next_action: "Investigate mail-archiver sync code to find why LastSync is not updated for IMAP-only accounts with Takeout import history. May need manual DB fix or app-level investigation."
+    evidence_run_keys:
+      - "CAP-20260303-094117__communications.mailarchiver.backup.status__R10qr85266"
+    parent_loop: "LOOP-MAIL-ARCHIVER-POST-SYNC-STABILIZATION-20260302"

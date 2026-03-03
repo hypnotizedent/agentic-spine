@@ -1,5 +1,5 @@
 # Status: authoritative
-# Last verified: 2026-02-26
+# Last verified: 2026-03-03
 
 version: 1
 updated_at: "2026-02-26"
@@ -28,14 +28,16 @@ backup_coverage:
   app_level:
     - id: postgres-dump
       schedule_id: mail-archiver-db-pgdump-daily
-      storage_path: /srv/mail-archiver/backups/postgres
-      retention_days: 30
-      command_template: "docker exec mail-archiver-db pg_dump -U mailuser MailArchiver | gzip > /srv/mail-archiver/backups/postgres/mail-archiver-db_<timestamp>.sql.gz"
+      storage_path: /srv/mail-archiver/backups
+      file_pattern: "mail-archiver-db-*.sql.gz"
+      retention_days: 7
+      command_template: "docker exec mail-archiver-db pg_dump -U mailuser MailArchiver | gzip > /srv/mail-archiver/backups/mail-archiver-db-<timestamp>.sql.gz"
     - id: uploads-snapshot
       schedule_id: mail-archiver-uploads-snapshot-daily
-      storage_path: /srv/mail-archiver/backups/uploads
-      retention_days: 14
-      command_template: "tar -czf /srv/mail-archiver/backups/uploads/mail-archiver-uploads_<timestamp>.tar.gz -C /srv/mail-archiver/uploads ."
+      storage_path: /srv/mail-archiver/backups
+      file_pattern: "mail-archiver-uploads-*.tar.gz"
+      retention_days: 7
+      command_template: "tar -czf /srv/mail-archiver/backups/mail-archiver-uploads-<timestamp>.tar.gz -C /srv/mail-archiver/uploads ."
 
 restore_sop:
   objective: "Recover mail-archiver service and DB on VM 214 with bounded data loss."
@@ -62,9 +64,8 @@ cron_deploy_template:
     Crontab entry for communications-stack (VM 214) root user.
     Deploy with: ssh communications-stack 'sudo crontab -l | grep -v pg_dump; echo "<cron_line>"' | ssh communications-stack 'sudo crontab -'
     Or manually add via: ssh communications-stack 'sudo crontab -e'
-  pg_dump_cron: "20 2 * * * docker exec mail-archiver-db pg_dump -U mailuser MailArchiver | gzip > /srv/mail-archiver/backups/postgres/mail-archiver-db_$(date +\\%Y\\%m\\%dT\\%H\\%M\\%SZ).sql.gz && find /srv/mail-archiver/backups/postgres -name '*.sql.gz' -mtime +30 -delete"
-  uploads_cron: "35 2 * * * tar -czf /srv/mail-archiver/backups/uploads/mail-archiver-uploads_$(date +\\%Y\\%m\\%dT\\%H\\%M\\%SZ).tar.gz -C /srv/mail-archiver/uploads . && find /srv/mail-archiver/backups/uploads -name '*.tar.gz' -mtime +14 -delete"
-  note: "Cron entries include built-in retention cleanup (30d postgres, 14d uploads) matching backup.schedule.yaml retention_days."
+  actual_cron: "0 3 * * * /usr/local/bin/mail-archiver-backup.sh >> /var/log/mail-archiver-backup.log 2>&1"
+  note: "Single backup script handles pg_dump + uploads tar + 7-day retention. Script deployed at /usr/local/bin/mail-archiver-backup.sh."
 
 references:
   schedule_binding: ops/bindings/backup.schedule.yaml

@@ -116,17 +116,16 @@ fi
 echo ""
 echo "=== Remote Backup Artifacts ==="
 
-POSTGRES_DIR="/srv/mail-archiver/backups/postgres"
-UPLOADS_DIR="/srv/mail-archiver/backups/uploads"
+BACKUP_BASE="/srv/mail-archiver/backups"
 
-# Check postgres backup dir
-PG_LS="$(ssh $SSH_OPTS "$SSH_REF" "ls -lt $POSTGRES_DIR/*.sql.gz 2>/dev/null | head -5" 2>/dev/null || echo "")"
+# Check postgres backup dir (artifacts are in flat backup dir, pattern: mail-archiver-db-*.sql.gz)
+PG_LS="$(ssh $SSH_OPTS "$SSH_REF" "ls -lt $BACKUP_BASE/mail-archiver-db-*.sql.gz 2>/dev/null | head -5" 2>/dev/null || echo "")"
 if [[ -n "$PG_LS" ]]; then
   ok_msg "postgres backup directory has artifacts"
   echo "$PG_LS" | while read -r line; do echo "    $line"; done
 
   # Check latest file age
-  LATEST_AGE_SEC="$(ssh $SSH_OPTS "$SSH_REF" "stat -c '%Y' \$(ls -t $POSTGRES_DIR/*.sql.gz 2>/dev/null | head -1) 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
+  LATEST_AGE_SEC="$(ssh $SSH_OPTS "$SSH_REF" "stat -c '%Y' \$(ls -t $BACKUP_BASE/mail-archiver-db-*.sql.gz 2>/dev/null | head -1) 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
   NOW_SEC="$(ssh $SSH_OPTS "$SSH_REF" "date +%s" 2>/dev/null || echo "0")"
   if [[ "$LATEST_AGE_SEC" -gt 0 && "$NOW_SEC" -gt 0 ]]; then
     AGE_HOURS=$(( (NOW_SEC - LATEST_AGE_SEC) / 3600 ))
@@ -138,25 +137,25 @@ if [[ -n "$PG_LS" ]]; then
     fi
   fi
 
-  PG_COUNT="$(ssh $SSH_OPTS "$SSH_REF" "ls $POSTGRES_DIR/*.sql.gz 2>/dev/null | wc -l" 2>/dev/null | tr -d ' ' || echo "0")"
+  PG_COUNT="$(ssh $SSH_OPTS "$SSH_REF" "ls $BACKUP_BASE/mail-archiver-db-*.sql.gz 2>/dev/null | wc -l" 2>/dev/null | tr -d ' ' || echo "0")"
   echo "  postgres_backup_count: $PG_COUNT"
 else
-  warn "no postgres backup artifacts found in $POSTGRES_DIR"
+  warn "no postgres backup artifacts found in $BACKUP_BASE"
 fi
 
-# Check uploads backup dir
-UL_LS="$(ssh $SSH_OPTS "$SSH_REF" "ls -lt $UPLOADS_DIR/*.tar.gz 2>/dev/null | head -5" 2>/dev/null || echo "")"
+# Check uploads backup dir (artifacts are in flat backup dir, pattern: mail-archiver-uploads-*.tar.gz)
+UL_LS="$(ssh $SSH_OPTS "$SSH_REF" "ls -lt $BACKUP_BASE/mail-archiver-uploads-*.tar.gz 2>/dev/null | head -5" 2>/dev/null || echo "")"
 if [[ -n "$UL_LS" ]]; then
   ok_msg "uploads backup directory has artifacts"
   echo "$UL_LS" | while read -r line; do echo "    $line"; done
 else
-  warn "no uploads backup artifacts found in $UPLOADS_DIR"
+  warn "no uploads backup artifacts found in $BACKUP_BASE"
 fi
 
 # ── 3. Cron job check ──
 echo ""
 echo "=== Cron Job Check ==="
-CRON_ENTRIES="$(ssh $SSH_OPTS "$SSH_REF" "sudo crontab -l 2>/dev/null | grep -i 'pg_dump\|mail-archiver' || echo ''" 2>/dev/null || echo "")"
+CRON_ENTRIES="$(ssh $SSH_OPTS "$SSH_REF" "sudo crontab -l 2>/dev/null | grep -iE 'pg_dump|mail-archiver' || echo ''" 2>/dev/null || echo "")"
 if [[ -n "$CRON_ENTRIES" ]]; then
   ok_msg "cron entries found for mail-archiver backup"
   echo "$CRON_ENTRIES" | while read -r line; do echo "    $line"; done
