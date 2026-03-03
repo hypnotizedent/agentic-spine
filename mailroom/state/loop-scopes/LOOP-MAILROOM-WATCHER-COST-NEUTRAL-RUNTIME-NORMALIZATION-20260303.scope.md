@@ -1,12 +1,12 @@
 ---
 loop_id: LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303
 created: 2026-03-03
-status: active
+status: closed
 owner: "@ronny"
 scope: mailroom
 priority: high
 horizon: now
-execution_readiness: runnable
+execution_readiness: complete
 objective: Eliminate watcher billing lock-in and mailroom runtime disconnects by aligning provider policy, queue authority paths, token source, and launchd/runtime parity.
 ---
 
@@ -41,7 +41,8 @@ Eliminate watcher billing lock-in and mailroom runtime disconnects by aligning p
 - Rollback path documented for provider lane and launchd environment changes.
 
 ## Progress Checkpoint
-- W2 in progress: bridge/watcher/status surfaces now resolve runtime paths via `ops/lib/runtime-paths.sh`.
-- W3 in progress: launchd env parity lock (`D328`) added to prevent runtime-root/token-source drift recurrence.
-- W1/W3 in progress: watcher provider policy normalized to local-first + explicit paid override with circuit-breaker parking lock (`D329`).
-- Remaining: explicit gap closure receipts + final loop closeout once fallback lane is validated in production.
+- W1 complete: watcher provider policy normalized to local-first with explicit paid override + circuit-breaker parking path (`D74`, `D329`).
+- W2 complete: enqueue/watcher/status/bridge authority paths normalized to runtime contract model (`D328`).
+- W3 complete: launchd env and token-source parity normalized and regression locked (`D328`; runtime token authority enforced).
+- Verify evidence: `CAP-20260302-235109__verify.run__Rrnt050332`, `CAP-20260302-235241__mailroom.bridge.status__Rxkqf35623`, `CAP-20260302-235241__spine.watcher.status__Ro9al35620`.
+- Gap closure: `GAP-OP-1370..1375` fixed; remaining self-hosted inference contract work reparented to `LOOP-MAILROOM-WATCHER-SELF-HOSTED-INFERENCE-CONTRACT-20260303` (`GAP-OP-1376`).
