@@ -1,0 +1,193 @@
+# Status: draft
+# Authority: LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303
+# Created by: DOMAIN-MEDIA-01 Lane B (media trace normalization)
+# Addresses: GAP-OP-1390 (queue ghosting / downloadClientUnavailable)
+# Requires: runtime implementation in successor execution loop
+
+contract: MEDIA_QUEUE_RECONCILIATION_POLICY_V1
+version: "1.0"
+status: draft
+created: "2026-03-03"
+updated_at: "2026-03-03"
+owner: "@ronny"
+authority_loop: LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303
+
+description: |
+  Deterministic queue reconciliation policy for media pipeline edge cases.
+  Defines when stale or orphaned queue items should be automatically removed
+  versus when they require operator intervention.
+
+  Primary target: queue entries that remain as `downloadClientUnavailable`
+  while the corresponding movie/episode is already marked hasFile=true
+  in Radarr/Sonarr. These are ghost entries from path mapping drift
+  after the VM 201 -> VM 209/210 split.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Queue Item Classification
+# ─────────────────────────────────────────────────────────────────────────
+
+queue_item_classes:
+  - id: QUEUE-C1
+    queue_status: downloadClientUnavailable
+    hasFile: true
+    description: "Ghost entry: download client lost tracking but file was already imported"
+    reconciliation: auto_remove
+    confidence: high
+    evidence_required: "hasFile=true AND movieFile.path exists on filesystem"
+    risk: none
+    detail: |
+      This is the most common post-split artifact. The download client session
+      was lost (restart, path remap) but Radarr already imported the file.
+      The queue entry is pure noise.
+
+  - id: QUEUE-C2
+    queue_status: downloadClientUnavailable
+    hasFile: false
+    description: "Genuinely broken download: client lost the transfer and file was never imported"
+    reconciliation: manual_review
+    confidence: medium
+    evidence_required: "hasFile=false AND no file at expected library path"
+    risk: data_loss
+    detail: |
+      The download may have partially completed. Removing the queue entry
+      without investigation could lose progress. Operator should check
+      download client history and decide whether to re-grab or remove.
+
+  - id: QUEUE-C3
+    queue_status: warning
+    hasFile: false
+    description: "Stalled download: transfer is slow or paused but not failed"
+    reconciliation: age_threshold
+    confidence: medium
+    evidence_required: "queue age exceeds stale_threshold_hours"
+    risk: low
+    detail: |
+      Some downloads legitimately take time (large files, slow indexers).
+      Only flag as stale after the threshold. Never auto-remove warning
+      items younger than the threshold.
+
+  - id: QUEUE-C4
+    queue_status: completed
+    hasFile: true
+    description: "Import succeeded but queue entry was not cleaned up"
+    reconciliation: auto_remove
+    confidence: high
+    evidence_required: "hasFile=true"
+    risk: none
+    detail: |
+      Normal post-import cleanup that Radarr should have handled.
+      Auto-remove is always safe.
+
+  - id: QUEUE-C5
+    queue_status: completed
+    hasFile: false
+    description: "Download completed but import failed"
+    reconciliation: manual_review
+    confidence: low
+    evidence_required: "hasFile=false AND download marked completed"
+    risk: data_loss
+    detail: |
+      File may exist in download directory but import/rename failed.
+      Check remote path mappings, disk space, and file permissions.
+      Do NOT remove until import is attempted or manually resolved.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Reconciliation Thresholds
+# ─────────────────────────────────────────────────────────────────────────
+
+thresholds:
+  stale_threshold_hours: 72
+  description: |
+    Queue items in warning/stalled state for longer than this threshold
+    are flagged for operator review. Items in downloadClientUnavailable
+    state with hasFile=true are eligible for immediate auto-removal
+    regardless of age.
+
+  batch_size: 50
+  description_batch: |
+    Maximum number of queue items to process in a single reconciliation run.
+    Prevents API rate limiting and allows incremental progress.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Reconciliation Actions
+# ─────────────────────────────────────────────────────────────────────────
+
+actions:
+  auto_remove:
+    description: "Remove queue entry via Radarr API without operator approval"
+    api_endpoint: "DELETE /api/v3/queue/{id}?removeFromClient=false&blocklist=false"
+    preconditions:
+      - "Item matches QUEUE-C1 or QUEUE-C4 classification"
+      - "hasFile=true confirmed via movie API (not just queue record)"
+      - "Filesystem path existence verified (for QUEUE-C1)"
+    audit_trail: "Log removed item ID, movieId, title, reason, timestamp"
+    rollback: "Re-grab title if removal was incorrect (Radarr search command)"
+
+  manual_review:
+    description: "Flag queue entry for operator review; do not auto-remove"
+    preconditions:
+      - "Item matches QUEUE-C2, QUEUE-C3 (over threshold), or QUEUE-C5"
+    output: "Structured report with item details, classification, and recommended action"
+    operator_actions:
+      - "Investigate download client history for partial files"
+      - "Check remote path mapping configuration"
+      - "Decide: re-grab, remove, or ignore"
+
+  age_flag:
+    description: "Flag stale warning items that exceed the age threshold"
+    preconditions:
+      - "Item matches QUEUE-C3 AND age > stale_threshold_hours"
+    output: "Include in reconciliation report as stale candidates"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Automation Boundary
+# ─────────────────────────────────────────────────────────────────────────
+
+automation_boundary:
+  automated:
+    - "QUEUE-C1: auto-remove (hasFile=true + downloadClientUnavailable + filesystem confirmed)"
+    - "QUEUE-C4: auto-remove (hasFile=true + completed)"
+  requires_operator:
+    - "QUEUE-C2: manual review (hasFile=false + downloadClientUnavailable)"
+    - "QUEUE-C3: manual review after age threshold"
+    - "QUEUE-C5: manual review (import failure investigation)"
+  never_automated:
+    - "Bulk queue clear (all items)"
+    - "Blocklist additions (indexer relationship management)"
+    - "Download client restart or reconfiguration"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Implementation Notes (for successor execution loop)
+# ─────────────────────────────────────────────────────────────────────────
+
+implementation:
+  capability_name: "media.queue.reconcile"
+  description: |
+    Future capability that reads the Radarr queue, classifies each item
+    per queue_item_classes, applies auto_remove where safe, and generates
+    a structured report for manual_review items.
+  api_requirements:
+    - "Radarr GET /api/v3/queue?page=1&pageSize=200"
+    - "Radarr GET /api/v3/movie/{id} (for hasFile verification)"
+    - "Radarr DELETE /api/v3/queue/{id} (for auto-remove)"
+    - "SSH stat on download-stack for filesystem verification"
+  integration:
+    - "Output feeds into media E2E verification spec (media.e2e.verification.spec.yaml)"
+    - "Reconciliation results should update progression contract stage tracking"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Lifecycle
+# ─────────────────────────────────────────────────────────────────────────
+
+promotion_lifecycle:
+  current: draft
+  promotion_path:
+    - from: draft
+      to: active
+      requires: "media.queue.reconcile capability implemented and tested"
+    - from: active
+      to: enforced
+      requires: "Drift gate wired to verify pack; scheduled reconciliation via LaunchAgent or cron"
+  blocked_by:
+    - "Runtime implementation deferred to successor execution loop"
+    - "GAP-OP-1390 must be fixed at runtime before enforcement"

@@ -1,0 +1,188 @@
+# Status: draft
+# Last verified: 2026-03-03
+# Draft: requires Ronny arch decision before promotion to authoritative (GAP-OP-1367)
+
+version: 1
+updated_at: "2026-03-03"
+owner: "@ronny"
+scope: mail-archiver-email-classification
+status: draft
+
+parent_loop: LOOP-MAIL-ARCHIVER-POST-SYNC-STABILIZATION-20260302
+addresses_gap: GAP-OP-1367
+
+purpose: |
+  Define a classification taxonomy for emails ingested by mail-archiver so that
+  retention value routing, junk/unsubscribe bucketing, and pruning eligibility
+  can be governed as contracts rather than ad-hoc agent decisions.
+
+integration:
+  retention_contract: ops/bindings/mail.archiver.retention.contract.yaml
+  account_linkage_contract: ops/bindings/mail.archiver.account.linkage.contract.yaml
+  domain_boundary_contract: ops/bindings/mail.archiver.domain.boundary.contract.yaml
+  overlap_playbook: docs/governance/domains/communications/MAIL_ARCHIVER_OVERLAP_CLEANUP_PLAYBOOK.md
+
+classification_tiers:
+  - id: business-critical
+    display_name: Business Critical
+    description: |
+      Legal, financial, contractual, or compliance-relevant email that must be
+      retained indefinitely or per regulatory schedule. Includes invoices, tax
+      correspondence, signed agreements, government notices.
+    retention_policy: indefinite
+    pruning_eligible: false
+    backup_priority: high
+    examples:
+      - "IRS correspondence"
+      - "Signed contracts / purchase agreements"
+      - "Insurance policy documents"
+      - "Bank and brokerage statements"
+      - "Legal notices"
+
+  - id: personal-important
+    display_name: Personal Important
+    description: |
+      Non-business email with lasting personal value. Family correspondence,
+      travel confirmations with sentimental context, medical records, personal
+      financial (non-business).
+    retention_policy: indefinite
+    pruning_eligible: false
+    backup_priority: high
+    examples:
+      - "Family / personal correspondence"
+      - "Medical records and appointment confirmations"
+      - "Personal financial statements"
+      - "Education records"
+
+  - id: transactional
+    display_name: Transactional
+    description: |
+      Order confirmations, shipping notifications, password resets, two-factor
+      codes, service activation emails. Useful for a bounded window but not
+      long-term archival.
+    retention_policy: rolling_365d
+    pruning_eligible: true
+    pruning_after_days: 365
+    backup_priority: standard
+    examples:
+      - "Order confirmation (Amazon, etc.)"
+      - "Shipping / delivery notifications"
+      - "Password reset emails"
+      - "2FA / verification codes"
+      - "Subscription renewal receipts"
+
+  - id: newsletter-informational
+    display_name: Newsletter / Informational
+    description: |
+      Opted-in newsletters, digests, and informational content the user chose
+      to receive. Not junk, but low retention value after reading.
+    retention_policy: rolling_90d
+    pruning_eligible: true
+    pruning_after_days: 90
+    backup_priority: low
+    examples:
+      - "Substack / Beehiiv newsletters"
+      - "Industry digests"
+      - "Product update announcements"
+
+  - id: marketing-promotional
+    display_name: Marketing / Promotional
+    description: |
+      Unsolicited or semi-solicited marketing, sales promotions, coupon blasts.
+      Contains unsubscribe/opt-out signals. Lowest retention value.
+    retention_policy: rolling_30d
+    pruning_eligible: true
+    pruning_after_days: 30
+    backup_priority: none
+    signal_indicators:
+      - "List-Unsubscribe header present"
+      - "Body contains 'unsubscribe' / 'opt out' / 'manage preferences'"
+      - "Sender domain in known bulk-sender list"
+    examples:
+      - "Sale / coupon blasts"
+      - "Product launch promotions"
+      - "Re-engagement campaigns"
+
+  - id: junk-spam
+    display_name: Junk / Spam
+    description: |
+      Unsolicited email that bypassed spam filters. Should be pruned aggressively.
+      Never backed up.
+    retention_policy: rolling_7d
+    pruning_eligible: true
+    pruning_after_days: 7
+    backup_priority: none
+    examples:
+      - "Phishing attempts"
+      - "Unsolicited commercial bulk mail"
+      - "Spoofed sender messages"
+
+routing_rules:
+  description: |
+    How classification tiers map to mail-archiver storage and tagging behavior.
+    These rules are applied post-ingest during classification pass, not at IMAP
+    sync time. Mail-archiver ingests all mail first, then classifies.
+  rules:
+    - tier: business-critical
+      tag: "retention:permanent"
+      folder_hint: "Archive/Business"
+      exclude_from_bulk_prune: true
+    - tier: personal-important
+      tag: "retention:permanent"
+      folder_hint: "Archive/Personal"
+      exclude_from_bulk_prune: true
+    - tier: transactional
+      tag: "retention:1y"
+      folder_hint: "Archive/Transactional"
+      exclude_from_bulk_prune: false
+    - tier: newsletter-informational
+      tag: "retention:90d"
+      folder_hint: "Archive/Newsletters"
+      exclude_from_bulk_prune: false
+    - tier: marketing-promotional
+      tag: "retention:30d"
+      folder_hint: "Prune/Marketing"
+      exclude_from_bulk_prune: false
+    - tier: junk-spam
+      tag: "retention:7d"
+      folder_hint: "Prune/Junk"
+      exclude_from_bulk_prune: false
+
+pruning_policy:
+  description: |
+    Pruning rules govern which classified emails are eligible for automated
+    deletion. Only emails past their tier retention window AND marked
+    pruning_eligible=true are candidates.
+  enforcement_mode: dry-run
+  constraints:
+    - "NEVER prune business-critical or personal-important tiers automatically."
+    - "Pruning runs must produce a manifest (message IDs + classification tier + age) before deletion."
+    - "First 3 prune cycles must be dry-run only with operator review."
+    - "Cross-account duplicates are NEVER pruned (overlap cleanup is a separate lane)."
+    - "Emails with attachments > 5MB require manual review before pruning regardless of tier."
+  integration_with_retention_contract: |
+    The prune_schedule_cron in mail.archiver.retention.contract.yaml governs
+    the pruning execution window (currently 03:15 daily). Classification-based
+    pruning hooks into this same schedule but runs AFTER storage-class retention
+    checks (import staging, temp files, backups).
+
+classification_implementation:
+  implementation_state: not-implemented
+  description: |
+    Classification is a future capability. This contract defines the taxonomy
+    and rules so that when implementation begins, the domain boundaries are
+    pre-decided.
+  proposed_approach:
+    - "Header-based signal detection (List-Unsubscribe, X-Mailer, bulk precedence headers)"
+    - "Sender domain reputation lookup (known bulk senders)"
+    - "Content keyword matching for unsubscribe/opt-out signals"
+    - "Rule-based tier assignment with manual override capability"
+  blockers:
+    - "Requires Ronny arch decision on classification granularity and automation level"
+    - "No mail-archiver API exists for tag/classification mutation (GAP-OP-1364 related)"
+
+evidence:
+  closes_gaps:
+    - GAP-OP-1367
+  draft_review_required: true
+  review_decision_by: "@ronny"

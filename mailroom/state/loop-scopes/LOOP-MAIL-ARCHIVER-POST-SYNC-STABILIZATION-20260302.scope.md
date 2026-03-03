@@ -61,4 +61,25 @@ Consolidate post-sync mail-archiver next-best-leverage work into one canonical e
 | GAP-OP-1366 | blocked_by_ronny_arch_decision | GAP-OP-1002 closed overlap cleanup while LOOP-MAIL-ARCHIVER-OVERLAP-CLEANUP-20260226 remains planned — reconciliation requires decision on whether overlap work is truly done or deferred |
 | GAP-OP-1367 | blocked_by_ronny_arch_decision | No retention value classification, junk/unsubscribe bucketing, or pruning rules defined — requires domain owner decision |
 | GAP-OP-1368 | blocked_by_runtime_access | pg_dump job for 126GB MailArchiver PostgreSQL needs VM214 runtime access and backup inventory integration |
-| GAP-OP-1369 | blocked_by_ronny_arch_decision | Email domain boundaries (business vs personal vs infra) and per-domain retention policy need domain owner architecture decision |
+| GAP-OP-1367 | blocked_by_ronny_arch_decision | Draft contract authored: `mail.archiver.email.classification.contract.yaml` — 6-tier taxonomy with routing/pruning rules. Awaits Ronny review to promote from draft to authoritative. |
+| GAP-OP-1368 | blocked_by_runtime_access | pg_dump job for 126GB MailArchiver PostgreSQL needs VM214 runtime access and backup inventory integration |
+| GAP-OP-1369 | blocked_by_ronny_arch_decision | Draft contract authored: `mail.archiver.domain.boundary.contract.yaml` — 4 domain classes with per-account assignment. Awaits Ronny review to promote from draft to authoritative. |
+
+## Lane A Deliverables (2026-03-03)
+
+Contracts authored during governance-only burndown (no VM214 runtime access).
+
+| # | Deliverable | File | Status |
+|---|-------------|------|--------|
+| D1 | Email Classification Contract | `ops/bindings/mail.archiver.email.classification.contract.yaml` | draft (awaits arch review) |
+| D2 | Domain Boundary Contract | `ops/bindings/mail.archiver.domain.boundary.contract.yaml` | draft (awaits arch review) |
+| D3 | Overlap Cleanup Reconciliation | Analysis below | complete |
+
+### D3: Overlap Cleanup Reconciliation Analysis
+
+GAP-OP-1002 was closed with `governance_debt_archived` — a deferral marker, not completion.
+LOOP-MAIL-ARCHIVER-OVERLAP-CLEANUP-20260226 remains `planned` with TODO execution steps.
+3 of 4 pre-staged capability assets are missing from disk. 1,390 strict dedupe candidates remain uncleaned.
+
+**Recommended path (for Ronny)**: Absorb remaining overlap work into this stabilization loop.
+Mark LOOP-MAIL-ARCHIVER-OVERLAP-CLEANUP-20260226 as `superseded`. Then close GAP-OP-1366.

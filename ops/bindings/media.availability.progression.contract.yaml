@@ -1,13 +1,19 @@
-# Status: pending
-# Authority: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
-# Closes: GAP-OP-1405 (when populated and enforced)
+# Status: draft
+# Authority: LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303
+# Enriched by: DOMAIN-MEDIA-01 Lane B (media trace normalization)
+# Original skeleton: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
+# Closes: GAP-OP-1405 (when enforced at runtime)
+# Addresses: GAP-OP-1389 (availability truth split)
 # Requires: runtime observation to validate state transitions
 
 contract: MEDIA_AVAILABILITY_PROGRESSION_CONTRACT_V1
-version: "0.1"
-status: pending
+version: "1.0"
+status: draft
 created: "2026-03-03"
-authority_loop: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
+updated_at: "2026-03-03"
+owner: "@ronny"
+authority_loop: LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303
+original_skeleton_loop: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
 
 description: |
   Canonical availability progression model for the media pipeline.
@@ -16,81 +22,205 @@ description: |
   Resolves the dual-truth problem where Radarr says hasFile=true but
   Jellyseerr says processing and Jellyfin has no library entry.
 
-# Canonical state progression (single authority)
+  Design principle: at every stage, exactly ONE system is the authority for
+  whether the item has reached that stage. When two systems disagree about
+  availability, the earlier-stage authority wins and the later-stage system
+  must be reconciled to match.
+
+# Canonical state progression (single authority per stage)
 progression_stages:
   - stage: requested
+    order: 1
     authority: jellyseerr
-    field: "request.status"
-    value: "pending"
+    api_endpoint: "/api/v1/request/{id}"
+    field: "status"
+    pass_value: "1 (pending) or 2 (approved)"
     description: "User has requested media; no download initiated"
+    failure_meaning: "Request was declined or does not exist"
 
   - stage: searching
-    authority: radarr/sonarr
-    field: "movie.monitored + no hasFile"
-    value: "monitored=true, hasFile=false"
-    description: "ARR is searching for the title"
+    order: 2
+    authority: radarr
+    api_endpoint: "/api/v3/movie/{id}"
+    field: "monitored + hasFile"
+    pass_value: "monitored=true, hasFile=false"
+    description: "ARR is actively searching for the title via indexers"
+    failure_meaning: "Title is unmonitored or not added to ARR"
 
   - stage: downloading
-    authority: radarr/sonarr
-    field: "queue entry exists"
-    value: "queue.status=downloading"
-    description: "Download is in progress via download client"
+    order: 3
+    authority: radarr
+    api_endpoint: "/api/v3/queue"
+    field: "queue record exists for movieId"
+    pass_value: "status=downloading, trackedDownloadStatus=ok"
+    description: "Download client has an active transfer for this title"
+    failure_meaning: "No queue record or download client unreachable"
+    known_edge_cases:
+      - "downloadClientUnavailable: client path mapping broke after import (see queue reconciliation policy)"
+      - "warning status: download stalled or slow, may self-resolve"
 
-  - stage: importing
-    authority: radarr/sonarr
-    field: "queue entry + file on disk"
-    value: "queue.status=completed or importing"
-    description: "Download complete, import/rename in progress"
-
-  - stage: available_arr
-    authority: radarr/sonarr
+  - stage: import_complete
+    order: 4
+    authority: radarr
+    api_endpoint: "/api/v3/movie/{id}"
     field: "hasFile"
-    value: "hasFile=true"
-    description: "File imported and renamed by ARR"
+    pass_value: "hasFile=true"
+    description: "File has been imported, renamed, and placed at the root folder path"
+    failure_meaning: "Import failed; file may exist in download dir but not moved to library"
+    verification_action: "Confirm file exists at movieFile.path via filesystem check"
 
-  - stage: available_library
+  - stage: library_visible
+    order: 5
     authority: jellyfin
-    field: "library scan complete"
-    value: "item exists in library"
-    description: "Jellyfin has scanned and indexed the file"
+    api_endpoint: "/Items?SearchTerm={title}&IncludeItemTypes=Movie"
+    field: "TotalRecordCount > 0 with matching item"
+    pass_value: "item exists in Jellyfin library with playable media source"
+    description: "Jellyfin has scanned and indexed the file; item is searchable and playable"
+    failure_meaning: "Library scan has not run or file path is not within a configured library root"
+    sync_dependency: "arr_to_jellyfin handshake must complete first"
 
-  - stage: available_request
+  - stage: request_fulfilled
+    order: 6
     authority: jellyseerr
-    field: "request.mediaStatus"
-    value: "available (3) or partially_available (4)"
-    description: "Jellyseerr reflects availability from downstream"
+    api_endpoint: "/api/v1/request/{id}"
+    field: "media.status"
+    pass_value: "3 (available) or 4 (partially_available)"
+    description: "Jellyseerr reflects downstream availability; request lifecycle is complete"
+    failure_meaning: "Jellyseerr webhook/poll has not fired or Radarr integration is misconfigured"
+    sync_dependency: "arr_to_jellyseerr handshake must complete first"
 
-# Synchronization contracts
+# Synchronization handshakes
+# Each handshake defines how a state transition in an upstream system
+# propagates to a downstream system.
 sync_handshakes:
   arr_to_jellyfin:
-    trigger: "hasFile transitions to true"
-    expected_action: "Jellyfin library scan picks up new file"
-    max_delay: "15 minutes (scan interval)"
-    failure_mode: "file exists on disk but not in library"
+    trigger: "Radarr hasFile transitions from false to true (import complete)"
+    mechanism: "Autopulse webhook OR Jellyfin scheduled library scan"
+    expected_action: "Jellyfin library scan picks up new file at NFS mount path"
+    max_expected_delay_minutes: 15
+    max_acceptable_delay_minutes: 30
+    failure_mode: "File exists on disk but not in Jellyfin library"
+    failure_causes:
+      - "Jellyfin library root path does not match NFS mount point"
+      - "Autopulse webhook misconfigured or down"
+      - "Jellyfin scan interval too long or scan skipped due to lock"
+      - "NFS mount on streaming-stack is stale or unmounted"
+    reconciliation: "Trigger manual library scan; if still missing, verify Jellyfin library root includes the file path"
     gap_ref: GAP-OP-1392
 
   arr_to_jellyseerr:
-    trigger: "hasFile transitions to true"
-    expected_action: "Jellyseerr mediaStatus updates to available"
-    max_delay: "varies (webhook or poll interval)"
-    failure_mode: "request remains processing while hasFile=true"
+    trigger: "Radarr hasFile transitions from false to true"
+    mechanism: "Jellyseerr polls Radarr API OR receives Radarr webhook"
+    expected_action: "Jellyseerr updates request.media.status to available (3)"
+    max_expected_delay_minutes: 10
+    max_acceptable_delay_minutes: 60
+    failure_mode: "Request remains status=processing while hasFile=true"
+    failure_causes:
+      - "Jellyseerr Radarr integration webhook not configured"
+      - "Jellyseerr scan interval too long"
+      - "TMDb ID mismatch between Jellyseerr request and Radarr movie"
+      - "Radarr server URL or API key changed without updating Jellyseerr settings"
+    reconciliation: "Trigger Jellyseerr sync from Settings > Radarr > Sync; if still stuck, check TMDb ID parity"
     gap_ref: GAP-OP-1389
 
-  queue_reconciliation:
-    trigger: "hasFile=true for a title with queue entry"
-    expected_action: "queue entry removed or marked completed"
-    max_delay: "next queue refresh"
-    failure_mode: "ghost queue items with downloadClientUnavailable"
+  queue_to_hasfile:
+    trigger: "hasFile=true for a title that still has a queue entry"
+    mechanism: "Radarr queue refresh should clear completed/orphaned entries"
+    expected_action: "Queue entry removed or marked completed"
+    max_expected_delay_minutes: 5
+    max_acceptable_delay_minutes: 15
+    failure_mode: "Ghost queue items remain with downloadClientUnavailable status"
+    failure_causes:
+      - "Download client path mapping changed after import"
+      - "Download client was restarted and lost session tracking"
+      - "Radarr remote path mapping does not match current download client config"
+    reconciliation: "See ops/bindings/media.queue.reconciliation.policy.yaml"
     gap_ref: GAP-OP-1390
 
-# Verification
-e2e_check_description: |
-  An end-to-end availability check must verify the FULL chain:
-  1. Radarr/Sonarr hasFile=true
-  2. File exists on filesystem at expected path
-  3. Jellyfin library contains the item
-  4. Jellyseerr request shows available status
-  Only when all 4 are consistent is the item truly available.
+# Failure taxonomy
+# When stages disagree, classify the disconnect and apply the correct fix.
+failure_taxonomy:
+  - id: AVAIL-F1
+    symptom: "hasFile=true but Jellyfin has no entry"
+    root_cause_class: scan_propagation
+    affected_stages: [import_complete, library_visible]
+    handshake: arr_to_jellyfin
+    operator_action: "Verify filesystem path, trigger Jellyfin scan, check library root config"
 
-drift_gate: TBD  # future gate to enforce progression parity
-verification_command: TBD  # future capability for e2e availability check
+  - id: AVAIL-F2
+    symptom: "hasFile=true but Jellyseerr says processing"
+    root_cause_class: status_propagation
+    affected_stages: [import_complete, request_fulfilled]
+    handshake: arr_to_jellyseerr
+    operator_action: "Trigger Jellyseerr sync, check TMDb ID parity"
+
+  - id: AVAIL-F3
+    symptom: "hasFile=true but queue entry still active"
+    root_cause_class: queue_orphan
+    affected_stages: [import_complete, downloading]
+    handshake: queue_to_hasfile
+    operator_action: "Apply queue reconciliation policy (auto-remove safe for hasFile=true)"
+
+  - id: AVAIL-F4
+    symptom: "Jellyfin has entry but file is missing from disk"
+    root_cause_class: storage_drift
+    affected_stages: [library_visible, import_complete]
+    handshake: null
+    operator_action: "Check NFS mount health, verify file was not moved/deleted, re-download if needed"
+
+  - id: AVAIL-F5
+    symptom: "Jellyseerr says available but Jellyfin has no entry"
+    root_cause_class: stale_status
+    affected_stages: [request_fulfilled, library_visible]
+    handshake: arr_to_jellyfin
+    operator_action: "Jellyseerr status is stale; fix Jellyfin visibility first, then resync Jellyseerr"
+
+# Verification integration
+verification:
+  e2e_check_chain:
+    description: |
+      An end-to-end availability check must verify the FULL chain for a
+      given title. Checking only hasFile=true is insufficient (GAP-OP-1392).
+    legs:
+      - leg: 1
+        check: "Radarr/Sonarr hasFile=true"
+        api: "/api/v3/movie/{id}"
+        pass_if: "hasFile=true"
+      - leg: 2
+        check: "File exists on filesystem at movieFile.path"
+        method: "SSH + stat on download-stack"
+        pass_if: "file exists and size > 0"
+      - leg: 3
+        check: "Jellyfin library contains the item"
+        api: "/Items?SearchTerm={title}&IncludeItemTypes=Movie"
+        pass_if: "TotalRecordCount > 0 with matching provider ID"
+      - leg: 4
+        check: "Jellyseerr request shows available status"
+        api: "/api/v1/request/{id}"
+        pass_if: "media.status in [3, 4]"
+    verdict: "PASS only when all 4 legs pass; any failure reports the specific broken handshake"
+    spec_ref: "ops/bindings/media.e2e.verification.spec.yaml"
+
+  drift_gate: TBD
+  verification_command: TBD
+
+# Cross-references
+cross_references:
+  queue_policy: "ops/bindings/media.queue.reconciliation.policy.yaml"
+  e2e_spec: "ops/bindings/media.e2e.verification.spec.yaml"
+  path_authority: "ops/bindings/media.path.authority.contract.yaml"
+  service_registry: "ops/bindings/media.services.yaml"
+
+# Lifecycle
+promotion_lifecycle:
+  current: draft
+  promotion_path:
+    - from: draft
+      to: active
+      requires: "Runtime validation of all handshake timing assumptions"
+    - from: active
+      to: enforced
+      requires: "Drift gate created and wired to verify pack"
+  blocked_by:
+    - "Runtime mutation intentionally deferred to successor execution loop"
+    - "GAP-OP-1389, GAP-OP-1390, GAP-OP-1392 must be fixed at runtime before enforcement"

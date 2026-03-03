@@ -105,16 +105,84 @@ Current state (updated 2026-03-03):
 - Existing home gates must not regress for on-site runs
 - Planning artifacts can be prepared remotely (W0)
 
-## Gap Blocker Evidence (2026-03-03)
+## Gap Blocker Evidence (2026-03-03, normalized by Lane C)
 
-| Gap | Title (short) | Blocker Class | Evidence |
-|-----|---------------|---------------|----------|
-| GAP-OP-1352 | HA runtime D113/D114/D118/D120 fail | blocked_by_ronny_on_site | HA API unreachable from offsite; requires LAN access at home |
-| GAP-OP-1354 | HA data-quality D115/D119 | blocked_by_ronny_on_site | 199 unavailable entities + Z2M naming drift require live HA/SSH |
-| GAP-OP-1355 | Home agent access model | **CLOSED** | Access model enriched in HOME_AUTHORITY_INDEX.md (commit W2) |
-| GAP-OP-1356 | Zigbee reliability baseline | blocked_by_ronny_on_site | Z2M network map, LQI/SNR capture require physical Z2M access |
-| GAP-OP-1357 | UniFi/Proxmox normalization | blocked_by_ronny_on_site | UniFi device/port/VLAN inventory requires controller access |
-| GAP-OP-1358 | Full hardware inventory | blocked_by_ronny_on_site | Serial number capture requires physical walk-through |
-| GAP-OP-1359 | HA catalog authority | blocked_by_ronny_on_site | Integration/HACS/add-on snapshots require HA API reachability |
-| GAP-OP-1360 | Dashboard/automation registries | blocked_by_ronny_on_site | Dashboard/automation listing requires HA API |
-| GAP-OP-1361 | Verify-ring leakage | blocked_by_ronny_arch_decision | Contract defined in home.authority.contract.yaml verify_ring section; enforcement requires verify tooling changes (ring topology update in verify.release.run). Proposed follow-up: add ring_assignment field to gate.registry.yaml entries for D113-D120, implement conditional skip in verify-release-run based on HA reachability probe |
+| Gap | Title (short) | Blocker Class | Blocked Case | Next Action | ETA |
+|-----|---------------|---------------|--------------|-------------|-----|
+| GAP-OP-1352 | HA runtime D113/D114/D118/D120 fail | blocked_by_ronny_on_site | HA API at 10.0.0.100:8123 unreachable from offsite | Run ha.status, then verify.release.run | next_home_visit |
+| GAP-OP-1354 | HA data-quality D115/D119 | blocked_by_ronny_on_site | D115 (199 unavail entities) + D119 (Z2M naming drift) need live HA/SSH | SSH to hassio, run ha.z2m.devices.snapshot + ha.entity.audit | next_home_visit |
+| GAP-OP-1355 | Home agent access model | **CLOSED** | Fixed in a7e316f | N/A | N/A |
+| GAP-OP-1356 | Zigbee reliability baseline | blocked_by_ronny_on_site | Z2M network map, LQI/SNR require physical Z2M/HA access | Access Z2M web UI, capture network map, export LQI/SNR per device | next_home_visit |
+| GAP-OP-1357 | UniFi/Proxmox normalization | blocked_by_ronny_on_site | UniFi controller + Proxmox-home + WAN speed need LAN | Log into UniFi, SSH to proxmox-home, run speed test | next_home_visit |
+| GAP-OP-1358 | Full hardware inventory | blocked_by_ronny_on_site | Physical walk-through for serial numbers/model/placement | Walk through with phone/camera, photograph labels | next_home_visit |
+| GAP-OP-1359 | HA catalog authority | blocked_by_ronny_on_site | Integration/HACS/add-on snapshots need HA API at LAN | Run HA REST API: integrations, HACS, add-ons | next_home_visit |
+| GAP-OP-1360 | Dashboard/automation registries | blocked_by_ronny_on_site | Dashboard/automation/scene/script/helper listing needs HA API | Run HA REST API: dashboards, automations, scenes, scripts, helpers | next_home_visit |
+| GAP-OP-1361 | Verify-ring leakage | blocked_by_ronny_arch_decision | Ring separation needs arch decision (ring_assignment field, conditional skip, or separate verify) | Decide ring architecture, add ring_assignment to gate.registry.yaml D113-D120 | next_home_visit |
+
+**Blocker distribution**: 7 blocked_by_ronny_on_site, 1 blocked_by_ronny_arch_decision
+
+## Home Visit Execution Checklist
+
+One-pass deterministic execution list for the next on-site day.
+Order: arch decision first (can be done en route), then LAN-dependent tasks grouped by system.
+
+### Step 0: Pre-Arrival (can be done remotely/en route)
+- [ ] **GAP-OP-1361 (arch decision)**: Decide ring separation strategy for home-runtime gates D113-D120. Options: (a) add `ring_assignment` field to gate.registry.yaml, (b) conditional skip in verify.release.run based on HA reachability probe, (c) separate `verify.home.run` command. Record decision.
+
+### Step 1: Arrive and Connect to Home LAN
+- [ ] Connect laptop to home WiFi / Ethernet
+- [ ] Verify LAN connectivity: `ping 10.0.0.100` (HA), `ping 10.0.0.1` (router)
+
+### Step 2: HA API Verification (GAP-OP-1352)
+- [ ] Run `./bin/ops cap run ha.status` -- confirm API UP
+- [ ] Run `./bin/ops cap run verify.release.run` -- validate D113/D114/D118/D120 pass
+- [ ] If any gate still fails, capture error output for diagnosis
+
+### Step 3: HA Data Quality Repair (GAP-OP-1354)
+- [ ] SSH to hassio@ha
+- [ ] Run `./bin/ops cap run ha.z2m.devices.snapshot` -- refresh Z2M bindings
+- [ ] Run `./bin/ops cap run ha.entity.audit` -- triage 199 unavailable entities
+- [ ] Update entity allowlist to get unavailable count below threshold (50)
+- [ ] Fix living_switch_scene Z2M naming parity (6 vs 5 device mismatch)
+- [ ] Verify D115 and D119 pass
+
+### Step 4: Zigbee Reliability Baseline (GAP-OP-1356)
+- [ ] Access Z2M web UI (http://10.0.0.100:8099 or via HA add-on)
+- [ ] Capture network map screenshot -> save to docs/
+- [ ] Export LQI/SNR per device -> populate home.hardware.inventory.yaml zigbee section
+- [ ] Identify dead routers (devices with no child nodes, low LQI)
+- [ ] Document recovery plan for dead routers
+
+### Step 5: HA Catalog Snapshots (GAP-OP-1359)
+- [ ] Run HA REST API: `GET /api/config/config_entries/entry` (integrations)
+- [ ] Capture HACS component inventory (via HACS API or web UI)
+- [ ] Capture add-on inventory: `GET /api/hassio/addons`
+- [ ] Populate `ops/bindings/home.assistant.catalog.snapshot.yaml`
+
+### Step 6: Dashboard/Automation Registries (GAP-OP-1360)
+- [ ] Run HA REST API: list dashboards, automations, scenes, scripts, helpers
+- [ ] Populate `ops/bindings/home.automation.registry.yaml`
+
+### Step 7: UniFi/Proxmox Normalization (GAP-OP-1357)
+- [ ] Log into UniFi controller web UI
+- [ ] Export device list, port assignments, VLAN configuration
+- [ ] SSH to proxmox-home: capture node inventory (VM list, storage, network)
+- [ ] Run home WAN speed test (speedtest-cli or fast.com)
+- [ ] Populate `ops/bindings/home.unifi.network.inventory.yaml`
+
+### Step 8: Hardware Walk-Through (GAP-OP-1358)
+- [ ] Walk through home with phone/camera
+- [ ] Photograph serial number labels on: router, switches, AP, NAS, Proxmox host, IoT hubs
+- [ ] Record model/serial/placement into `ops/bindings/home.hardware.inventory.yaml`
+
+### Step 9: Ring Separation Implementation (GAP-OP-1361)
+- [ ] Implement ring architecture decision from Step 0
+- [ ] Add ring_assignment field to gate.registry.yaml for D113-D120
+- [ ] Update verify.release.run with conditional skip or ring topology
+- [ ] Commit and verify ring separation works
+
+### Step 10: Final Verify + Commit
+- [ ] Run `./bin/ops cap run verify.release.run` -- all home gates PASS
+- [ ] Run `./bin/ops cap run verify.run -- domain home` if available
+- [ ] Commit all artifacts
+- [ ] Close gaps: 1352, 1354, 1356, 1357, 1358, 1359, 1360, 1361
