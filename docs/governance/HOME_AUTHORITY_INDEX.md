@@ -51,11 +51,31 @@ Home gates must be separated from spine-core fast verify ring:
 
 ## Access Model
 
-| Lane | Scope | Credentials |
-|------|-------|-------------|
-| Read | HA API, Z2M API, UniFi controller | HA_API_TOKEN, Z2M via HA |
-| Write | HA config, Z2M naming, device management | Same + SSH to HA host |
-| Audit | All mutations logged | Receipt-based via spine capabilities |
+### Lane Separation
+
+| Lane | Scope | Access Method | Capabilities |
+|------|-------|---------------|--------------|
+| Read | HA state, entities, devices, Z2M devices, areas | HA REST/WS API (bearer token) | ha.status, ha.entity.list, ha.device.map.build, ha.z2m.devices.snapshot |
+| Read | UniFi devices, ports, VLANs | UniFi controller API | TBD (on-site provisioning) |
+| Write | HA device rename, Z2M naming, automation edits | HA WS API + SSH to HA host | ha.device.rename, ha.z2m.device.rename |
+| Write | Z2M device interview, network map | Z2M API via HA integration | TBD (on-site capability) |
+| Audit | All mutations | Receipt-based via spine capabilities | Governed by cap.sh receipt system |
+
+### Service Credential Inventory
+
+| Service | Credential | Infisical Path | Scope | Status |
+|---------|------------|----------------|-------|--------|
+| Home Assistant | HA_API_TOKEN | /spine/home/HA_API_TOKEN | Long-lived access token, full API | active |
+| Zigbee2MQTT | (via HA integration) | N/A | Accessed through HA, no separate credential | active |
+| UniFi Controller | TBD | TBD | Controller admin credentials | pending (on-site) |
+
+### Mutation Audit Path
+
+All home domain mutations follow the spine capability receipt model:
+1. Capability invoked via `./bin/ops cap run <capability>`
+2. Receipt generated at `receipts/sessions/RCAP-<timestamp>__<capability>__<key>/`
+3. Receipt includes: run key, status, output, timestamps
+4. Mutation receipts committed to git for audit trail
 
 ## Execution Loop
 
