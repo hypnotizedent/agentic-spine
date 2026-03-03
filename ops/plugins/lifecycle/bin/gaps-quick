@@ -4,7 +4,7 @@ set -euo pipefail
 # gaps.quick — One-liner gap filing with auto-defaults
 #
 # Usage: gaps-quick (--description "desc" | --description-file path) \
-#                   [--type T] [--severity S] [--loop LOOP-ID] \
+#                   [--type T] [--severity S] [--loop-id LOOP-ID] \
 #                   [--doc path] [--no-commit|--commit]
 #
 # Computes next gap ID automatically, fills defaults from lifecycle.rules.yaml,
@@ -17,6 +17,7 @@ source "$ROOT/ops/plugins/loops/lib/gap-claims.sh"
 
 # Parse arguments
 DESCRIPTION="" DESCRIPTION_FILE="" TYPE="" SEVERITY="" LOOP="" DOC=""
+USED_LOOP_ALIAS=0
 NO_COMMIT_DEFAULT_RAW="${GAPS_QUICK_NO_COMMIT_DEFAULT:-${GAPS_FILE_NO_COMMIT_DEFAULT:-0}}"
 case "$NO_COMMIT_DEFAULT_RAW" in
   1|true|TRUE|yes|YES|on|ON) NO_COMMIT=1 ;;
@@ -30,12 +31,14 @@ while [[ $# -gt 0 ]]; do
     --description-file) DESCRIPTION_FILE="${2:?--description-file requires a value}"; shift 2 ;;
     --type)        TYPE="${2:?--type requires a value}"; shift 2 ;;
     --severity)    SEVERITY="${2:?--severity requires a value}"; shift 2 ;;
-    --loop)        LOOP="${2:?--loop requires a value}"; shift 2 ;;
+    --loop-id)     LOOP="${2:?--loop-id requires a value}"; shift 2 ;;
+    --loop-id=*)   LOOP="${1#*=}"; shift ;;
+    --loop)        LOOP="${2:?--loop requires a value}"; USED_LOOP_ALIAS=1; shift 2 ;;
     --doc)         DOC="${2:?--doc requires a value}"; shift 2 ;;
     --no-commit)   NO_COMMIT=1; shift ;;
     --commit)      NO_COMMIT=0; shift ;;
     -h|--help)
-      echo "Usage: gaps-quick (--description \"desc\" | --description-file path) [--type T] [--severity S] [--loop LOOP-ID] [--doc path] [--no-commit|--commit]"
+      echo "Usage: gaps-quick (--description \"desc\" | --description-file path) [--type T] [--severity S] [--loop-id LOOP-ID] [--doc path] [--no-commit|--commit]"
       echo ""
       echo "Files a new gap with auto-generated ID and defaults from lifecycle.rules.yaml."
       echo "Delegates to gaps.file for atomic commit + policy-driven auto-claim."
@@ -44,6 +47,10 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+if [[ "$USED_LOOP_ALIAS" -eq 1 ]]; then
+  echo "WARN: --loop is a compatibility alias; prefer canonical --loop-id." >&2
+fi
 
 if [[ -n "$DESCRIPTION" && -n "$DESCRIPTION_FILE" ]]; then
   echo "FAIL: cannot specify both --description and --description-file" >&2
@@ -77,7 +84,7 @@ if [[ -n "$DESCRIPTION_FILE" ]]; then
 else
   ARGS+=(--description "$DESCRIPTION")
 fi
-[[ -n "$LOOP" ]] && ARGS+=(--parent-loop "$LOOP")
+[[ -n "$LOOP" ]] && ARGS+=(--loop-id "$LOOP")
 [[ -n "$DOC" ]]  && ARGS+=(--doc "$DOC")
 [[ "$NO_COMMIT" -eq 1 ]] && ARGS+=(--no-commit)
 
