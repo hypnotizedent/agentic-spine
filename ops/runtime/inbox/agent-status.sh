@@ -125,7 +125,35 @@ echo
 echo "== COMMS QUEUE =="
 COMMS_STATUS_BIN="$SPINE/ops/plugins/communications/bin/communications-alerts-runtime-status"
 if [[ -x "$COMMS_STATUS_BIN" ]]; then
-  COMMS_ONELINER="$("$COMMS_STATUS_BIN" --json 2>/dev/null | jq -r '.data.oneliner // "CommsQueue: unavailable"' 2>/dev/null || echo "CommsQueue: unavailable")"
+  run_comms_json() {
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 5 "$COMMS_STATUS_BIN" --json 2>/dev/null || true
+      return
+    fi
+    if command -v gtimeout >/dev/null 2>&1; then
+      gtimeout 5 "$COMMS_STATUS_BIN" --json 2>/dev/null || true
+      return
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+      python3 - "$COMMS_STATUS_BIN" <<'PY' 2>/dev/null || true
+import subprocess
+import sys
+
+cmd = [sys.argv[1], "--json"]
+try:
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+except subprocess.TimeoutExpired:
+    print("{}")
+    raise SystemExit(0)
+print(proc.stdout or "{}")
+PY
+      return
+    fi
+    "$COMMS_STATUS_BIN" --json 2>/dev/null || true
+  }
+
+  COMMS_JSON="$(run_comms_json)"
+  COMMS_ONELINER="$(printf '%s\n' "$COMMS_JSON" | jq -r '.data.oneliner // "CommsQueue: unavailable"' 2>/dev/null || echo "CommsQueue: unavailable")"
   echo "$COMMS_ONELINER"
 else
   echo "CommsQueue: (runtime-status script not found)"

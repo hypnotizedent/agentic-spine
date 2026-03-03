@@ -39,3 +39,9 @@ Eliminate watcher billing lock-in and mailroom runtime disconnects by aligning p
 - Loop has linked gaps with concrete evidence and owner surfaces.
 - Fast verify and touched domain verifies pass with run keys recorded.
 - Rollback path documented for provider lane and launchd environment changes.
+
+## Progress Checkpoint
+- W2 in progress: bridge/watcher/status surfaces now resolve runtime paths via `ops/lib/runtime-paths.sh`.
+- W3 in progress: launchd env parity lock (`D328`) added to prevent runtime-root/token-source drift recurrence.
+- W1/W3 in progress: watcher provider policy normalized to local-first + explicit paid override with circuit-breaker parking lock (`D329`).
+- Remaining: explicit gap closure receipts + final loop closeout once fallback lane is validated in production.

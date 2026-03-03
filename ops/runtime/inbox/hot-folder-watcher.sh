@@ -5,7 +5,7 @@
 #
 # Issue: #643
 # Purpose: Watch mailroom/inbox/queued for prompt files, process through lanes,
-#          dispatch to Claude API, write traced results to outbox.
+#          dispatch through configured provider lane, write traced results to outbox.
 #
 # Usage:
 #   ./hot-folder-watcher.sh              # Run watcher (foreground)
@@ -19,7 +19,8 @@
 # Dependencies:
 #   - fswatch (brew install fswatch)
 #   - jq (brew install jq)
-#   - z.ai key via ZAI_API_KEY or Z_AI_API_KEY (default provider)
+#   - Local provider endpoint (default): Ollama-compatible HTTP API
+#   - Optional paid providers (z.ai / anthropic) via explicit override
 #
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -61,29 +62,47 @@ REPO="${SPINE_REPO}"
 BRAIN_RULES="${REPO}/docs/brain/rules.md"
 
 # Model/provider config
-WATCHER_PROVIDER="${SPINE_WATCHER_PROVIDER:-zai}"  # zai | anthropic
+WATCHER_PROVIDER="${SPINE_WATCHER_PROVIDER:-local}"  # local | zai | anthropic
 WATCHER_ALLOW_ANTHROPIC="${SPINE_WATCHER_ALLOW_ANTHROPIC:-0}"
+WATCHER_ALLOW_PAID_PROVIDER="${SPINE_WATCHER_ALLOW_PAID_PROVIDER:-0}"
+WATCHER_PAID_FALLBACK_PROVIDER="${SPINE_WATCHER_PAID_FALLBACK_PROVIDER:-zai}"
+WATCHER_LOCAL_ENDPOINT="${SPINE_WATCHER_LOCAL_ENDPOINT:-http://127.0.0.1:11434}"
+WATCHER_LOCAL_MODEL="${SPINE_WATCHER_LOCAL_MODEL:-llama3.2:3b}"
+WATCHER_PAID_CIRCUIT_TTL_SECONDS="${SPINE_WATCHER_PAID_CIRCUIT_TTL_SECONDS:-21600}"
+CIRCUIT_OPEN_FILE="${STATE_DIR}/watcher-paid-provider.circuit.open"
 
 case "$WATCHER_PROVIDER" in
-    zai|anthropic) ;;
+    local|zai|anthropic) ;;
     *)
-        echo "ERROR: SPINE_WATCHER_PROVIDER must be 'zai' or 'anthropic' (got: $WATCHER_PROVIDER)"
+        echo "ERROR: SPINE_WATCHER_PROVIDER must be 'local', 'zai', or 'anthropic' (got: $WATCHER_PROVIDER)"
         exit 1
         ;;
 esac
+
+if [[ "$WATCHER_PROVIDER" =~ ^(zai|anthropic)$ ]] && [[ "$WATCHER_ALLOW_PAID_PROVIDER" != "1" ]]; then
+    echo "ERROR: paid watcher provider '$WATCHER_PROVIDER' requires SPINE_WATCHER_ALLOW_PAID_PROVIDER=1."
+    exit 1
+fi
 
 if [[ "$WATCHER_PROVIDER" == "anthropic" && "$WATCHER_ALLOW_ANTHROPIC" != "1" ]]; then
     echo "ERROR: provider=anthropic is blocked by default. Set SPINE_WATCHER_ALLOW_ANTHROPIC=1 to override."
     exit 1
 fi
 
-if [[ "$WATCHER_PROVIDER" == "anthropic" ]]; then
-    MODEL="${CLAUDE_MODEL:-claude-sonnet-4-20250514}"
-    MAX_TOKENS="${CLAUDE_MAX_TOKENS:-4096}"
-else
-    MODEL="${ZAI_MODEL:-glm-4.7-flash}"
-    MAX_TOKENS="${ZAI_MAX_TOKENS:-4096}"
-fi
+case "$WATCHER_PROVIDER" in
+    anthropic)
+        MODEL="${CLAUDE_MODEL:-claude-sonnet-4-20250514}"
+        MAX_TOKENS="${CLAUDE_MAX_TOKENS:-4096}"
+        ;;
+    zai)
+        MODEL="${ZAI_MODEL:-glm-4.7-flash}"
+        MAX_TOKENS="${ZAI_MAX_TOKENS:-4096}"
+        ;;
+    *)
+        MODEL="${WATCHER_LOCAL_MODEL}"
+        MAX_TOKENS="${SPINE_WATCHER_LOCAL_MAX_TOKENS:-4096}"
+        ;;
+esac
 
 # State files
 DIAG_LOG="${LOG_DIR}/hot-folder-watcher.log"
@@ -98,6 +117,10 @@ RAG_CONTEXT=""
 
 # Packet built by build_packet (avoids subshell)
 SUPERVISOR_PACKET=""
+
+# Dispatch failure metadata (used to route failed vs parked lanes).
+DISPATCH_ERROR_CLASS=""
+DISPATCH_ERROR_REASON=""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Lock Management (prevents multiple instances)
@@ -147,6 +170,66 @@ notify() {
     osascript -e "display notification \"$1\" with title \"Agent Pipeline\"" 2>/dev/null || true
 }
 
+is_paid_provider() {
+    [[ "${1:-}" == "zai" || "${1:-}" == "anthropic" ]]
+}
+
+open_paid_provider_circuit() {
+    local provider="$1"
+    local reason="$2"
+    mkdir -p "$(dirname "$CIRCUIT_OPEN_FILE")"
+    {
+        echo "opened_at_epoch=$(date +%s)"
+        echo "opened_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "provider=$provider"
+        echo "reason=$reason"
+    } > "$CIRCUIT_OPEN_FILE"
+    chmod 600 "$CIRCUIT_OPEN_FILE" 2>/dev/null || true
+    log "PAID_PROVIDER_CIRCUIT: OPEN provider=$provider reason=$reason"
+}
+
+clear_paid_provider_circuit() {
+    [[ -f "$CIRCUIT_OPEN_FILE" ]] || return 0
+    rm -f "$CIRCUIT_OPEN_FILE"
+    log "PAID_PROVIDER_CIRCUIT: CLOSED"
+}
+
+paid_provider_circuit_open() {
+    [[ -f "$CIRCUIT_OPEN_FILE" ]] || return 1
+
+    local opened_at_epoch=""
+    opened_at_epoch="$(awk -F= '/^opened_at_epoch=/{print $2; exit}' "$CIRCUIT_OPEN_FILE" 2>/dev/null || true)"
+    if [[ ! "$opened_at_epoch" =~ ^[0-9]+$ ]]; then
+        return 0
+    fi
+
+    local now ttl age
+    now="$(date +%s)"
+    ttl="${WATCHER_PAID_CIRCUIT_TTL_SECONDS}"
+    age=$((now - opened_at_epoch))
+    if (( age >= ttl )); then
+        clear_paid_provider_circuit
+        return 1
+    fi
+    return 0
+}
+
+paid_provider_circuit_reason() {
+    if [[ -f "$CIRCUIT_OPEN_FILE" ]]; then
+        awk -F= '/^reason=/{print $2; exit}' "$CIRCUIT_OPEN_FILE" 2>/dev/null || true
+    fi
+}
+
+is_paid_provider_exhaustion_error() {
+    local raw="${1:-}"
+    local lower
+    lower="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+    [[ "$lower" == *"insufficient balance"* \
+        || "$lower" == *"resource package"* \
+        || "$lower" == *"too many authentication failures"* \
+        || "$lower" == *"invalid access token"* ]]
+}
+
 check_dependencies() {
     local missing=()
     command -v fswatch >/dev/null || missing+=("fswatch")
@@ -157,6 +240,10 @@ check_dependencies() {
         echo "ERROR: Missing dependencies: ${missing[*]}"
         echo "Install with: brew install ${missing[*]}"
         exit 1
+    fi
+
+    if [[ "$WATCHER_PROVIDER" == "local" ]]; then
+        return
     fi
 
     if [[ "$WATCHER_PROVIDER" == "anthropic" ]]; then
@@ -496,8 +583,12 @@ dispatch_to_claude() {
         }" 2>&1)
 
     if echo "$response" | jq -e '.content[0].text' >/dev/null 2>&1; then
+        clear_paid_provider_circuit
         echo "$response" | jq -r '.content[0].text'
     else
+        if is_paid_provider_exhaustion_error "$response"; then
+            open_paid_provider_circuit "anthropic" "billing_exhausted_or_auth_failure"
+        fi
         echo "ERROR: API call failed"
         echo "$response" | jq -r '.error.message // .' 2>>"$DIAG_LOG" || echo "$response"
         return 1
@@ -529,6 +620,7 @@ dispatch_to_zai() {
             }" 2>&1)
 
         if echo "$response" | jq -e '.choices[0].message' >/dev/null 2>&1; then
+            clear_paid_provider_circuit
             echo "$response" | jq -r '(.choices[0].message.content // empty) as $c | if ($c|type=="string" and ($c|length)>0) then $c else (.choices[0].message.reasoning_content // "") end'
             return 0
         fi
@@ -541,19 +633,112 @@ dispatch_to_zai() {
             continue
         fi
 
+        if is_paid_provider_exhaustion_error "$response"; then
+            open_paid_provider_circuit "zai" "billing_exhausted_or_auth_failure"
+        fi
         echo "ERROR: z.ai API call failed"
         echo "$response" | jq -r '.error.message // .' 2>>"$DIAG_LOG" || echo "$response"
         return 1
     done
 }
 
-dispatch_to_model() {
+dispatch_to_local() {
     local packet="$1"
-    if [[ "$WATCHER_PROVIDER" == "anthropic" ]]; then
+    local response
+    local escaped_packet
+    escaped_packet="$(echo "$packet" | jq -Rs .)"
+
+    response="$(curl -sS "${WATCHER_LOCAL_ENDPOINT%/}/api/chat" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"model\": \"${WATCHER_LOCAL_MODEL}\",
+            \"stream\": false,
+            \"messages\": [{
+                \"role\": \"user\",
+                \"content\": ${escaped_packet}
+            }]
+        }" 2>&1)" || {
+        echo "ERROR: local watcher provider call failed (${WATCHER_LOCAL_ENDPOINT})"
+        echo "$response" >>"$DIAG_LOG"
+        return 1
+    }
+
+    if echo "$response" | jq -e '.message.content' >/dev/null 2>&1; then
+        echo "$response" | jq -r '.message.content // ""'
+        return 0
+    fi
+
+    echo "ERROR: local watcher provider response parse failed"
+    echo "$response" >>"$DIAG_LOG"
+    return 1
+}
+
+dispatch_to_paid_fallback() {
+    local packet="$1"
+    local fallback="${WATCHER_PAID_FALLBACK_PROVIDER:-zai}"
+    if ! is_paid_provider "$fallback"; then
+        echo "ERROR: invalid paid fallback provider: $fallback"
+        return 1
+    fi
+    if [[ "$WATCHER_ALLOW_PAID_PROVIDER" != "1" ]]; then
+        echo "ERROR: paid fallback disabled (set SPINE_WATCHER_ALLOW_PAID_PROVIDER=1)"
+        return 1
+    fi
+    if [[ "$fallback" == "anthropic" && "$WATCHER_ALLOW_ANTHROPIC" != "1" ]]; then
+        echo "ERROR: anthropic fallback blocked (set SPINE_WATCHER_ALLOW_ANTHROPIC=1)"
+        return 1
+    fi
+    if [[ "$fallback" == "anthropic" ]]; then
         dispatch_to_claude "$packet"
     else
         dispatch_to_zai "$packet"
     fi
+}
+
+dispatch_to_model() {
+    local packet="$1"
+    local rc=1
+    DISPATCH_ERROR_CLASS=""
+    DISPATCH_ERROR_REASON=""
+
+    if is_paid_provider "$WATCHER_PROVIDER" && paid_provider_circuit_open; then
+        DISPATCH_ERROR_CLASS="paid_provider_circuit_open"
+        DISPATCH_ERROR_REASON="$(paid_provider_circuit_reason)"
+        echo "ERROR: paid provider circuit open (${DISPATCH_ERROR_REASON})"
+        return 1
+    fi
+
+    case "$WATCHER_PROVIDER" in
+        local)
+            if dispatch_to_local "$packet"; then
+                return 0
+            fi
+            if [[ "$WATCHER_ALLOW_PAID_PROVIDER" == "1" ]]; then
+                if dispatch_to_paid_fallback "$packet"; then
+                    return 0
+                fi
+                rc=$?
+            fi
+            ;;
+        anthropic)
+            if dispatch_to_claude "$packet"; then
+                return 0
+            fi
+            rc=$?
+            ;;
+        *)
+            if dispatch_to_zai "$packet"; then
+                return 0
+            fi
+            rc=$?
+            ;;
+    esac
+
+    if paid_provider_circuit_open; then
+        DISPATCH_ERROR_CLASS="paid_provider_circuit_open"
+        DISPATCH_ERROR_REASON="$(paid_provider_circuit_reason)"
+    fi
+    return "$rc"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -654,6 +839,13 @@ process_file() {
         log "SUCCESS: $basename → $(basename "$outfile")"
         notify "✅ Response ready: ${run_id}"
     else
+        local result_status="failed"
+        local target_lane="$FAILED"
+        if [[ "$DISPATCH_ERROR_CLASS" == "paid_provider_circuit_open" ]]; then
+            result_status="parked"
+            target_lane="$PARKED"
+        fi
+
         # Write error result
         {
             echo "# Result: ${run_id}"
@@ -662,9 +854,16 @@ process_file() {
             echo "|-------|-------|"
             echo "| Run ID | \`${run_id}\` |"
             echo "| Source | \`${basename}\` |"
-            echo "| Status | failed |"
+            echo "| Status | ${result_status} |"
             echo "| Generated | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
             echo "| Model | ${MODEL} |"
+            echo ""
+            if [[ -n "$DISPATCH_ERROR_CLASS" ]]; then
+                echo "| Dispatch Error Class | ${DISPATCH_ERROR_CLASS} |"
+            fi
+            if [[ -n "$DISPATCH_ERROR_REASON" ]]; then
+                echo "| Dispatch Error Reason | ${DISPATCH_ERROR_REASON} |"
+            fi
             echo ""
             echo "---"
             echo ""
@@ -675,19 +874,24 @@ process_file() {
             echo "\`\`\`"
         } > "$outfile"
 
-        # Move to failed/
-        mv "$running_file" "${FAILED}/${basename}"
+        # Move to failed/ or parked/
+        mv "$running_file" "${target_lane}/${basename}"
 
-        # Log failure
+        # Log completion
         local error_summary
         error_summary="$(echo "$response" | head -1 | cut -c1-100)"
-        ledger_append "$run_id" "failed" "$basename" "$(basename "$outfile")" "$error_summary" "$context_used"
+        ledger_append "$run_id" "$result_status" "$basename" "$(basename "$outfile")" "$error_summary" "$context_used"
 
         # Write universal receipt
-        write_receipt "$run_key" "$run_id" "failed" "$basename" "$(basename "$outfile")" "$MODEL" "$context_used" "$error_summary"
+        write_receipt "$run_key" "$run_id" "$result_status" "$basename" "$(basename "$outfile")" "$MODEL" "$context_used" "$error_summary"
 
-        log "FAILED: $basename - $error_summary"
-        notify "❌ Dispatch failed: ${run_id}"
+        if [[ "$result_status" == "parked" ]]; then
+            log "PARKED: $basename - $error_summary"
+            notify "⏸️ Dispatch parked: ${run_id}"
+        else
+            log "FAILED: $basename - $error_summary"
+            notify "❌ Dispatch failed: ${run_id}"
+        fi
     fi
 }
 
@@ -764,6 +968,13 @@ show_status() {
     echo "  Done:     $done_count"
     echo "  Failed:   $failed_count"
     echo "  Parked:   $parked_count"
+    echo ""
+    echo "  Provider: $WATCHER_PROVIDER"
+    if paid_provider_circuit_open; then
+        echo "  Paid circuit: OPEN ($(paid_provider_circuit_reason))"
+    else
+        echo "  Paid circuit: closed"
+    fi
     echo ""
 
     # Watcher status
@@ -888,13 +1099,18 @@ main() {
             echo "Lanes: queued/ → running/ → done/ | failed/ | parked/"
             echo ""
             echo "Environment:"
-            echo "  SPINE_WATCHER_PROVIDER  Model provider: zai (default) or anthropic"
-            echo "  ZAI_API_KEY / Z_AI_API_KEY  Required when provider=zai"
+            echo "  SPINE_WATCHER_PROVIDER  Provider: local (default), zai, or anthropic"
+            echo "  SPINE_WATCHER_LOCAL_ENDPOINT  Local provider endpoint (default: http://127.0.0.1:11434)"
+            echo "  SPINE_WATCHER_LOCAL_MODEL  Local provider model (default: llama3.2:3b)"
+            echo "  SPINE_WATCHER_ALLOW_PAID_PROVIDER  Set 1 to allow paid providers"
+            echo "  SPINE_WATCHER_PAID_FALLBACK_PROVIDER  Paid fallback when local fails (default: zai)"
+            echo "  SPINE_WATCHER_PAID_CIRCUIT_TTL_SECONDS  Circuit TTL (default: 21600)"
+            echo "  ZAI_API_KEY / Z_AI_API_KEY  Required when provider=zai or paid fallback=zai"
             echo "  ZAI_MODEL          Override z.ai model (default: glm-4.7-flash)"
             echo "  SPINE_INBOX        Override inbox path (default: $SPINE/mailroom/inbox)"
             echo "  SPINE_OUTBOX       Override outbox path (default: $SPINE/mailroom/outbox)"
             echo "  SPINE_STATE        Override state path (default: $SPINE/mailroom/state)"
-            echo "  CLAUDE_MODEL       Override model when provider=anthropic"
+            echo "  CLAUDE_MODEL       Override model when provider=anthropic or anthropic fallback"
             echo ""
             echo "RAG-lite:"
             echo "  Add 'RAG:ON' to prompt to enable retrieval"

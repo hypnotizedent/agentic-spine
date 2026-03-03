@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# TRIAGE: Check ZAI_MODEL=glm-5 in launchd template and background defaults.
+# TRIAGE: Check local-first watcher lane with explicit paid override controls.
 # D74: Billing/provider lane lock
 # Guardrails:
-# - Background engine defaults to z.ai (no OpenAI default).
-# - Watcher defaults to z.ai and blocks anthropic unless explicit override flag.
-# - Canonical launchd template uses lowercase /code path and z.ai provider lanes.
+# - Background engine remains policy-governed and must support local provider path.
+# - Watcher defaults to local and paid providers require explicit override.
+# - Canonical launchd template uses lowercase /code path and local-first watcher lane.
 
 set -euo pipefail
 
@@ -39,15 +39,24 @@ need_file "$ENGINE_RUN"
 need_file "$WATCHER"
 need_file "$PLIST_TEMPLATE"
 
-rg -q 'provider="\$\{SPINE_ENGINE_PROVIDER:-zai\}"' "$ENGINE_RUN" \
-  || fail "ops/engine/run.sh must default SPINE_ENGINE_PROVIDER to zai"
+rg -q 'provider="\$\{SPINE_ENGINE_PROVIDER:-' "$ENGINE_RUN" \
+  || fail "ops/engine/run.sh must resolve provider from SPINE_ENGINE_PROVIDER override"
+
+rg -q 'local\)' "$ENGINE_RUN" \
+  || fail "ops/engine/run.sh must support local provider lane"
 
 if rg -q 'OpenAI provider failed; falling back to Anthropic' "$ENGINE_RUN"; then
   fail "ops/engine/run.sh must not silently fallback openai->anthropic"
 fi
 
-rg -q 'WATCHER_PROVIDER="\$\{SPINE_WATCHER_PROVIDER:-zai\}"' "$WATCHER" \
-  || fail "watcher must default SPINE_WATCHER_PROVIDER to zai"
+rg -q 'WATCHER_PROVIDER="\$\{SPINE_WATCHER_PROVIDER:-local\}"' "$WATCHER" \
+  || fail "watcher must default SPINE_WATCHER_PROVIDER to local"
+
+rg -q 'WATCHER_ALLOW_PAID_PROVIDER="\$\{SPINE_WATCHER_ALLOW_PAID_PROVIDER:-0\}"' "$WATCHER" \
+  || fail "watcher must define SPINE_WATCHER_ALLOW_PAID_PROVIDER default 0"
+
+rg -q "paid watcher provider '\\\$WATCHER_PROVIDER' requires SPINE_WATCHER_ALLOW_PAID_PROVIDER=1" "$WATCHER" \
+  || fail "watcher must block paid providers unless explicit paid override is enabled"
 
 rg -q 'WATCHER_ALLOW_ANTHROPIC="\$\{SPINE_WATCHER_ALLOW_ANTHROPIC:-0\}"' "$WATCHER" \
   || fail "watcher must define SPINE_WATCHER_ALLOW_ANTHROPIC default 0"
@@ -77,7 +86,7 @@ def req(k, v):
     if actual != v:
         raise SystemExit(f"missing/incorrect {k}: expected {v}, got {actual}")
 
-req("SPINE_WATCHER_PROVIDER", "zai")
+req("SPINE_WATCHER_PROVIDER", "local")
 req("SPINE_ENGINE_PROVIDER", "zai")
 req("SPINE_REPO", "/Users/ronnyworks/code/agentic-spine")
 req("SPINE_INBOX", "/Users/ronnyworks/code/agentic-spine/mailroom/inbox")
@@ -87,4 +96,4 @@ req("SPINE_LOGS", "/Users/ronnyworks/code/agentic-spine/mailroom/logs")
 req("ZAI_MODEL", "glm-5")
 PY
 
-echo "D74 PASS: billing/provider lanes locked (z.ai default background path)"
+echo "D74 PASS: billing/provider lanes locked (local-first watcher with explicit paid override)"

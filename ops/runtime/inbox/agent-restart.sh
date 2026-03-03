@@ -64,6 +64,8 @@ EOF
 
 watcher_provider="${SPINE_WATCHER_PROVIDER:-$(plist_env_value SPINE_WATCHER_PROVIDER)}"
 engine_provider="${SPINE_ENGINE_PROVIDER:-$(plist_env_value SPINE_ENGINE_PROVIDER)}"
+watcher_provider="${watcher_provider:-local}"
+engine_provider="${engine_provider:-zai}"
 zai_model="${ZAI_MODEL:-$(plist_env_value ZAI_MODEL)}"
 operator_tz="${SPINE_OPERATOR_TZ:-$(plist_env_value SPINE_OPERATOR_TZ)}"
 runtime_tz="${TZ:-$(plist_env_value TZ)}"
