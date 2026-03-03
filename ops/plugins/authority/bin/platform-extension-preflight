@@ -371,6 +371,50 @@ checks.append(
     }
 )
 
+# ── Lifecycle publish hook enforcement ──
+# For service transactions with public exposure, verify that the lifecycle
+# contract declares a cloudflare.service.lifecycle.publish hook for the
+# approved→executed transition.
+publish_hook_issues: list[str] = []
+if tx_type == "service" and target_id and not target_id.startswith("template-"):
+    service_row = service_map.get(target_id)
+    if isinstance(service_row, dict):
+        intent = str(service_row.get("exposure_intent", "")).strip().lower()
+        if intent == "public":
+            lifecycle_hooks = lifecycle.get("lifecycle_hooks") if isinstance(lifecycle.get("lifecycle_hooks"), dict) else {}
+            service_hooks = lifecycle_hooks.get("service_type") if isinstance(lifecycle_hooks.get("service_type"), dict) else {}
+            on_transition = service_hooks.get("on_transition") if isinstance(service_hooks.get("on_transition"), dict) else {}
+            approved_to_executed = on_transition.get("approved_to_executed") if isinstance(on_transition.get("approved_to_executed"), list) else []
+
+            has_publish_hook = False
+            for hook in approved_to_executed:
+                if not isinstance(hook, dict):
+                    continue
+                cap = str(hook.get("capability", "")).strip()
+                if cap == "cloudflare.service.lifecycle.publish":
+                    has_publish_hook = True
+                    break
+
+            if not has_publish_hook:
+                publish_hook_issues.append(
+                    f"lifecycle contract missing cloudflare.service.lifecycle.publish hook for approved_to_executed transition (required for public service {target_id})"
+                )
+
+            # Verify publish_via_capability is set on the service
+            publish_cap = str(service_row.get("publish_via_capability", "")).strip()
+            if publish_cap != "cloudflare.service.publish":
+                publish_hook_issues.append(
+                    f"service {target_id}: publish_via_capability must be cloudflare.service.publish (got: {publish_cap or 'unset'})"
+                )
+
+checks.append(
+    {
+        "id": "lifecycle_publish_hook_enforcement",
+        "status": "fail" if publish_hook_issues else "pass",
+        "detail": list_join(publish_hook_issues),
+    }
+)
+
 overall_status = "pass" if all(row["status"] == "pass" for row in checks) else "fail"
 payload = {
     "transaction_id": transaction_id,
