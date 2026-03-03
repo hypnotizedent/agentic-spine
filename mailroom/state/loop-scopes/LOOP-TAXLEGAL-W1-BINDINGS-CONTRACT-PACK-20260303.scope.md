@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-TAXLEGAL-W1-BINDINGS-CONTRACT-PACK-20260303
 created: 2026-03-03
-status: planned
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Define the Wave 1 Tax-Legal binding contract pack for case lifecycle, source registry, citation policy, privacy, retention, and deadlines.

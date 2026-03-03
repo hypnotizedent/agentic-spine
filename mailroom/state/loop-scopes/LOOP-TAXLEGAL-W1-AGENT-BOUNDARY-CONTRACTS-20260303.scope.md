@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-TAXLEGAL-W1-AGENT-BOUNDARY-CONTRACTS-20260303
 created: 2026-03-03
-status: planned
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Produce Wave 1 Tax-Legal agent and boundary contract artifacts that lock non-advisory behavior and human review requirements.

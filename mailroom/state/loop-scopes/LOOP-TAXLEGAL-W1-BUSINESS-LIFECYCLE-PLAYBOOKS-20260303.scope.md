@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-TAXLEGAL-W1-BUSINESS-LIFECYCLE-PLAYBOOKS-20260303
 created: 2026-03-03
-status: planned
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Define Wave 1 business lifecycle and anonymity/privacy playbooks for tax-legal operations (formation through closure) with primary-source verification policy.

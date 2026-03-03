@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-NETSEC-W1-THREAT-DETECTION-OBSERVATION-20260303
 created: 2026-03-03
-status: planned
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Define Wave 1 threat detection and observation contracts covering IDS/IPS tuning (Suricata), CrowdSec collaborative threat intelligence, and Cowrie honeypot on DMZ VLAN.

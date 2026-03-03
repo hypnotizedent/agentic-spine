@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-TAXLEGAL-W1-DOMAIN-ROUTING-INTEGRATION-20260303
 created: 2026-03-03
-status: planned
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Define Wave 1 tax-legal domain governance integration across registry, terminal roles, taxonomy bridge, and domain docs routing.

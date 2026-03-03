@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-NETSEC-W1-VLAN-SEGMENTATION-FIREWALL-20260303
 created: 2026-03-03
-status: planned
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Define Wave 1 VLAN segmentation topology, inter-VLAN firewall rule baseline, mDNS reflection governance, and switch port mapping contract — absorbing GAP-OP-1030 and GAP-OP-1108.

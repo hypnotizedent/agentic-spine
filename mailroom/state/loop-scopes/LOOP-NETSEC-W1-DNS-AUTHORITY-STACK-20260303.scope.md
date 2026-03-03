@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-NETSEC-W1-DNS-AUTHORITY-STACK-20260303
 created: 2026-03-03
-status: planned
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Define Wave 1 DNS authority stack contracts covering Unbound recursive resolver, DoH fallback, local DNS overrides, Pi-hole drift gate, and DNS bypass prevention firewall rule.

@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-TAX-LEGAL-OPS-WORKER-SPEC-20260303
 created: 2026-03-03
-status: planned
+status: closed
 owner: "@ronny"
 scope: agentic-spine
 objective: Capture a governed, executable specification for a citation-strict Tax and Legal Ops worker that accelerates compliance execution without giving legal or tax advice.
