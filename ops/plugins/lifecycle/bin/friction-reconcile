@@ -166,6 +166,7 @@ def main() -> int:
         pending_indices.append(idx)
 
     filed_ids: list[str] = []
+    skipped_duplicate_ids: list[str] = []
     if pending_batch and not args.dry_run:
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as tmp:
             tmp.write(build_batch_yaml(pending_batch))
@@ -185,6 +186,8 @@ def main() -> int:
             line = line.strip()
             if line.startswith("FILED:"):
                 filed_ids.append(line.split(":", 1)[1].strip())
+            elif line.startswith("SKIPPED_DUPLICATE:"):
+                skipped_duplicate_ids.append(line.split(":", 1)[1].strip())
 
         if proc.returncode != 0:
             raise SystemExit(f"friction.reconcile FAIL: gaps.file batch failed\n{output.strip()}")
@@ -193,12 +196,24 @@ def main() -> int:
         filed_count = len(pending_batch)
     else:
         filed_count = min(len(pending_indices), len(filed_ids))
+        matched_from_idempotent_skip = 0
         for pos, gap_id in enumerate(filed_ids[: len(pending_indices)]):
             row_index = pending_indices[pos]
             rows[row_index]["status"] = "filed"
             rows[row_index]["filed_gap_id"] = gap_id
             rows[row_index]["filed_at_utc"] = now
             rows[row_index]["updated_at_utc"] = now
+        # gaps-file can idempotently skip semantically-equivalent open gaps.
+        # Treat these as matched so queue entries don't remain permanently queued.
+        offset = filed_count
+        for pos, gap_id in enumerate(skipped_duplicate_ids[: max(0, len(pending_indices) - offset)]):
+            row_index = pending_indices[offset + pos]
+            rows[row_index]["status"] = "matched"
+            rows[row_index]["matched_gap_id"] = gap_id
+            rows[row_index]["matched_at_utc"] = now
+            rows[row_index]["updated_at_utc"] = now
+            matched_from_idempotent_skip += 1
+        matched_count += matched_from_idempotent_skip
 
     if not args.dry_run:
         write_queue(queue_path, rows)
