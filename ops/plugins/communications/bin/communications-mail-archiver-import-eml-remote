@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# communications-mail-archiver-import-eml-remote — governed remote EML import
+# Domain: communications
+# Safety: mutating (inserts into DB from remote-resident .eml files)
+# Approval: manual
+#
+# Usage:
+#   communications-mail-archiver-import-eml-remote --remote-dir <path> [options]
+#
+# Imports .eml files that already reside on communications-stack (VM 214) into
+# mail-archiver PostgreSQL. Unlike import-eml-upload, no local-to-remote transfer
+# is needed -- files are already on the target host.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+
+TARGET_ID=""
+REMOTE_DIR=""
+ACCOUNT_ID="${MAIL_ACCOUNT_ID:-3}"
+BATCH_SIZE=0
+DISK_THRESHOLD=70
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMPORTER_SCRIPT="$SCRIPT_DIR/../lib/eml_import.py"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+need yq
+need ssh
+need scp
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+[[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
+[[ -f "$IMPORTER_SCRIPT" ]] || fail "missing importer script: $IMPORTER_SCRIPT"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  communications-mail-archiver-import-eml-remote --remote-dir <path> [options]
+
+Options:
+  --remote-dir <path>     Directory on communications-stack containing .eml files (required)
+  --target <ssh-target>   SSH target for communications-stack (default: from contract)
+  --account-id <n>        MailAccount ID for imported messages (default: 3)
+  --batch-size <n>        Max files to process per invocation (0=all)
+  --disk-threshold <n>    Max disk usage % before abort (default: 70)
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --remote-dir) REMOTE_DIR="$2"; shift 2 ;;
+    --target) TARGET_ID="$2"; shift 2 ;;
+    --account-id) ACCOUNT_ID="$2"; shift 2 ;;
+    --batch-size) BATCH_SIZE="$2"; shift 2 ;;
+    --disk-threshold) DISK_THRESHOLD="$2"; shift 2 ;;
+    --) shift; break ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$REMOTE_DIR" ]]; then
+  echo "FAIL: --remote-dir is required" >&2
+  usage >&2
+  exit 1
+fi
+
+if [[ -z "$TARGET_ID" ]]; then
+  TARGET_ID="$(yq e -r '.mail_archiver.monitoring.machine_status_target.ssh_target // ""' "$CONTRACT")"
+  if [[ -z "$TARGET_ID" || "$TARGET_ID" == "null" ]]; then
+    TARGET_ID="$(yq e -r '.pilot.vm_target.hostname // ""' "$CONTRACT")"
+  fi
+fi
+[[ -n "$TARGET_ID" && "$TARGET_ID" != "null" ]] || fail "target id not found"
+
+DEF_USER="$(yq e -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq e -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq e -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+
+TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
+TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
+
+[[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host"
+
+SSH_OPTS="-p $TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SSH_REF="${TARGET_USER}@${TARGET_HOST}"
+
+DB_CONTAINER="mail-archiver-db"
+APP_CONTAINER="mail-archiver"
+
+# --- Pre-checks ---
+echo "=== Pre-checks ==="
+
+# Check remote directory exists
+DIR_EXISTS="$(ssh $SSH_OPTS "$SSH_REF" "test -d '$REMOTE_DIR' && echo yes || echo no" 2>/dev/null)"
+if [[ "$DIR_EXISTS" != "yes" ]]; then
+  echo "FAIL: remote directory does not exist: $REMOTE_DIR" >&2
+  exit 1
+fi
+
+# Count remote .eml files
+EML_COUNT="$(ssh $SSH_OPTS "$SSH_REF" "find '$REMOTE_DIR' -maxdepth 1 -name '*.eml' -type f | wc -l" 2>/dev/null | tr -d ' ')"
+echo "remote_eml_files: $EML_COUNT"
+
+if [[ "$EML_COUNT" -eq 0 ]]; then
+  echo "FAIL: no .eml files found in remote $REMOTE_DIR" >&2
+  exit 1
+fi
+
+# Check disk usage
+DISK_OUTPUT="$(ssh $SSH_OPTS "$SSH_REF" "df /srv/mail-archiver" 2>/dev/null | tail -1)"
+DISK_USED_PCT="$(echo "$DISK_OUTPUT" | awk '{print $5}' | tr -d '%')"
+echo "remote_disk_used_pct: ${DISK_USED_PCT}%"
+
+if [[ "$DISK_USED_PCT" -ge "$DISK_THRESHOLD" ]]; then
+  echo "FAIL: disk usage ${DISK_USED_PCT}% >= threshold ${DISK_THRESHOLD}%" >&2
+  exit 1
+fi
+
+# Container health
+CONTAINER_STATUS="$(ssh $SSH_OPTS "$SSH_REF" "sudo docker inspect --format='{{.State.Status}}' $APP_CONTAINER 2>/dev/null" || echo "unknown")"
+echo "container_status: $CONTAINER_STATUS"
+
+if [[ "$CONTAINER_STATUS" != "running" ]]; then
+  echo "FAIL: $APP_CONTAINER container not running (status: $CONTAINER_STATUS)" >&2
+  exit 1
+fi
+
+# DB counts before
+DB_COUNT_BEFORE="$(ssh $SSH_OPTS "$SSH_REF" "echo \"SELECT count(*) FROM mail_archiver.\\\"ArchivedEmails\\\";\" | sudo docker exec -i $DB_CONTAINER psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tr -d ' ' || echo "0")"
+ACCT_COUNT_BEFORE="$(ssh $SSH_OPTS "$SSH_REF" "echo \"SELECT count(*) FROM mail_archiver.\\\"ArchivedEmails\\\" WHERE \\\"MailAccountId\\\"=$ACCOUNT_ID;\" | sudo docker exec -i $DB_CONTAINER psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tr -d ' ' || echo "0")"
+echo "db_count_before: $DB_COUNT_BEFORE"
+echo "account_count_before: $ACCT_COUNT_BEFORE (account_id=$ACCOUNT_ID)"
+
+# --- Transfer importer script ---
+echo ""
+echo "=== Import ==="
+scp -q $SSH_OPTS "$IMPORTER_SCRIPT" "$SSH_REF:/tmp/eml_import.py"
+
+# Run importer directly on remote .eml files
+echo "running remote EML import from $REMOTE_DIR (account_id=$ACCOUNT_ID)..."
+IMPORT_DIR="$REMOTE_DIR"
+if [[ "$BATCH_SIZE" -gt 0 ]]; then
+  # Create a staging subset
+  STAGING="/tmp/eml-import-staging-remote"
+  ssh $SSH_OPTS "$SSH_REF" "rm -rf $STAGING && mkdir -p $STAGING" 2>/dev/null
+  ssh $SSH_OPTS "$SSH_REF" "find '$REMOTE_DIR' -maxdepth 1 -name '*.eml' -type f | head -n $BATCH_SIZE | while read f; do ln -s \"\$f\" $STAGING/; done" 2>/dev/null
+  IMPORT_DIR="$STAGING"
+fi
+
+ssh $SSH_OPTS "$SSH_REF" "EML_DIR=$IMPORT_DIR MAIL_ACCOUNT_ID=$ACCOUNT_ID python3 /tmp/eml_import.py 2>/dev/null | sudo docker exec -i $DB_CONTAINER psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tail -5
+
+if [[ "$BATCH_SIZE" -gt 0 ]]; then
+  ssh $SSH_OPTS "$SSH_REF" "rm -rf $STAGING" 2>/dev/null
+fi
+
+# --- Final stats ---
+echo ""
+echo "=== Final Stats ==="
+DB_COUNT_AFTER="$(ssh $SSH_OPTS "$SSH_REF" "echo \"SELECT count(*) FROM mail_archiver.\\\"ArchivedEmails\\\";\" | sudo docker exec -i $DB_CONTAINER psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tr -d ' ' || echo "?")"
+ACCT_COUNT_AFTER="$(ssh $SSH_OPTS "$SSH_REF" "echo \"SELECT count(*) FROM mail_archiver.\\\"ArchivedEmails\\\" WHERE \\\"MailAccountId\\\"=$ACCOUNT_ID;\" | sudo docker exec -i $DB_CONTAINER psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tr -d ' ' || echo "?")"
+echo "db_count_after: $DB_COUNT_AFTER"
+echo "db_delta: $((DB_COUNT_AFTER - DB_COUNT_BEFORE))"
+echo "account_count_after: $ACCT_COUNT_AFTER (account_id=$ACCOUNT_ID)"
+echo "account_delta: $((ACCT_COUNT_AFTER - ACCT_COUNT_BEFORE))"
+echo "remote_dir: $REMOTE_DIR"
+echo "status: OK"

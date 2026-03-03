@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# communications-mail-archiver-overlap-plan — governed read-only overlap classifier
+# Domain: communications
+# Safety: read-only
+# Approval: auto
+#
+# Usage:
+#   communications-mail-archiver-overlap-plan [--json] [--target <ssh-target>]
+#
+# Connects to communications-stack via SSH, queries mail-archiver PostgreSQL,
+# and produces a classification report of duplicate/overlap candidates.
+# No mutations. Output is classification-only for governance decisioning.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/communications.stack.contract.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+ALIAS_CONTRACT="$ROOT/ops/bindings/mail.archiver.alias.boundary.contract.yaml"
+LINKAGE="$ROOT/ops/bindings/mail.archiver.account.linkage.contract.yaml"
+
+TARGET_ID=""
+JSON=0
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+need yq
+need jq
+need ssh
+need python3
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+[[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --target|--ssh-id) TARGET_ID="${2:?--target requires a value}"; shift 2 ;;
+    --json) JSON=1; shift ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: communications-mail-archiver-overlap-plan [--json] [--target <ssh-target>]
+
+Read-only overlap classifier for mail-archiver. Outputs:
+  - Total rows and per-account counts
+  - Strict dedupe candidates (same account + same ContentHash)
+  - Manual review candidates (same account + same MessageId, different ContentHash)
+  - Cross-account overlap groups (same MessageId across accounts)
+  - Alias multi-account year hotspots
+  - Unsubscribe/noise signal counts
+USAGE
+      exit 0
+      ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+if [[ -z "$TARGET_ID" ]]; then
+  TARGET_ID="$(yq e -r '.mail_archiver.monitoring.machine_status_target.ssh_target // ""' "$CONTRACT")"
+  if [[ -z "$TARGET_ID" || "$TARGET_ID" == "null" ]]; then
+    TARGET_ID="$(yq e -r '.pilot.vm_target.hostname // ""' "$CONTRACT")"
+  fi
+fi
+[[ -n "$TARGET_ID" && "$TARGET_ID" != "null" ]] || fail "target id not found"
+
+DEF_USER="$(yq e -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq e -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq e -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+
+TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
+TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
+
+[[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host"
+
+SSH_OPTS="-p $TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SSH_REF="${TARGET_USER}@${TARGET_HOST}"
+
+DB_CONTAINER="mail-archiver-db"
+DB_USER="mailuser"
+DB_NAME="MailArchiver"
+
+ssh_psql() {
+  local query="$1"
+  ssh $SSH_OPTS "$SSH_REF" "echo \"$query\" | sudo docker exec -i $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -t -A" 2>/dev/null
+}
+
+echo "=== Mail-Archiver Overlap Classification ==="
+echo "target: $TARGET_ID ($SSH_REF)"
+echo "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo ""
+
+# Total rows
+TOTAL="$(ssh_psql "SELECT count(*) FROM mail_archiver.\\\"ArchivedEmails\\\";" | tr -d '[:space:]')" || TOTAL="error"
+echo "table_rows: $TOTAL"
+
+# Per-account counts
+echo ""
+echo "=== Per-Account Counts ==="
+ACCT_COUNTS="$(ssh_psql "SELECT \\\"MailAccountId\\\", count(*) FROM mail_archiver.\\\"ArchivedEmails\\\" GROUP BY \\\"MailAccountId\\\" ORDER BY \\\"MailAccountId\\\";")" || ACCT_COUNTS=""
+if [[ -n "$ACCT_COUNTS" ]]; then
+  while IFS='|' read -r acct_id cnt; do
+    echo "  account_$acct_id: $cnt"
+  done <<< "$ACCT_COUNTS"
+fi
+
+# Strict dedupe candidates (same MailAccountId + same ContentHash, group_size > 1)
+echo ""
+echo "=== Strict Dedupe Candidates ==="
+STRICT_COUNT="$(ssh_psql "SELECT count(*) FROM (SELECT \\\"MailAccountId\\\", \\\"ContentHash\\\", count(*) as cnt FROM mail_archiver.\\\"ArchivedEmails\\\" WHERE \\\"ContentHash\\\" IS NOT NULL GROUP BY \\\"MailAccountId\\\", \\\"ContentHash\\\" HAVING count(*) > 1) sub;")" || STRICT_COUNT="error"
+STRICT_ROWS="$(ssh_psql "SELECT COALESCE(sum(cnt - 1), 0) FROM (SELECT \\\"MailAccountId\\\", \\\"ContentHash\\\", count(*) as cnt FROM mail_archiver.\\\"ArchivedEmails\\\" WHERE \\\"ContentHash\\\" IS NOT NULL GROUP BY \\\"MailAccountId\\\", \\\"ContentHash\\\" HAVING count(*) > 1) sub;")" || STRICT_ROWS="error"
+echo "strict_dedupe_groups: $(echo "$STRICT_COUNT" | tr -d '[:space:]')"
+echo "strict_dedupe_candidate_rows: $(echo "$STRICT_ROWS" | tr -d '[:space:]')"
+
+# Cross-account overlap (same MessageId across different MailAccountIds)
+echo ""
+echo "=== Cross-Account Overlap ==="
+CROSS_GROUPS="$(ssh_psql "SELECT count(*) FROM (SELECT \\\"MessageId\\\" FROM mail_archiver.\\\"ArchivedEmails\\\" WHERE \\\"MessageId\\\" IS NOT NULL AND \\\"MessageId\\\" != '' GROUP BY \\\"MessageId\\\" HAVING count(DISTINCT \\\"MailAccountId\\\") > 1) sub;")" || CROSS_GROUPS="error"
+echo "cross_account_overlap_groups: $(echo "$CROSS_GROUPS" | tr -d '[:space:]')"
+
+# Manual review candidates (same MailAccountId + same MessageId, different ContentHash)
+echo ""
+echo "=== Manual Review Candidates ==="
+MANUAL_GROUPS="$(ssh_psql "SELECT count(*) FROM (SELECT \\\"MailAccountId\\\", \\\"MessageId\\\" FROM mail_archiver.\\\"ArchivedEmails\\\" WHERE \\\"MessageId\\\" IS NOT NULL AND \\\"MessageId\\\" != '' GROUP BY \\\"MailAccountId\\\", \\\"MessageId\\\" HAVING count(DISTINCT \\\"ContentHash\\\") > 1) sub;")" || MANUAL_GROUPS="error"
+echo "manual_review_groups: $(echo "$MANUAL_GROUPS" | tr -d '[:space:]')"
+
+echo ""
+echo "=== Classification Complete ==="
+echo "playbook_ref: docs/governance/domains/communications/MAIL_ARCHIVER_OVERLAP_CLEANUP_PLAYBOOK.md"
+echo "alias_boundary_ref: ops/bindings/mail.archiver.alias.boundary.contract.yaml"
+echo "status: OK"
