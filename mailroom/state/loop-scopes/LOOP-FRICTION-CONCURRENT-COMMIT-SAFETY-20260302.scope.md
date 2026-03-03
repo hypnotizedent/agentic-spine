@@ -1,11 +1,12 @@
 ---
 loop_id: LOOP-FRICTION-CONCURRENT-COMMIT-SAFETY-20260302
 created: 2026-03-02
-status: planned
+status: active
 owner: "@ronny"
 scope: friction
+execution_mode: orchestrator_subagents
 priority: medium
-horizon: later
+horizon: now
 execution_readiness: runnable
 objective: "Eliminate multi-agent commit collision behavior where unstaged unrelated changes are swept into governance commits and gap closures are lost."
 ---
