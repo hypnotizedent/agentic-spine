@@ -1,0 +1,96 @@
+# Status: pending
+# Authority: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
+# Closes: GAP-OP-1405 (when populated and enforced)
+# Requires: runtime observation to validate state transitions
+
+contract: MEDIA_AVAILABILITY_PROGRESSION_CONTRACT_V1
+version: "0.1"
+status: pending
+created: "2026-03-03"
+authority_loop: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
+
+description: |
+  Canonical availability progression model for the media pipeline.
+  Defines the authoritative state machine for media items as they traverse
+  from request through download to library availability.
+  Resolves the dual-truth problem where Radarr says hasFile=true but
+  Jellyseerr says processing and Jellyfin has no library entry.
+
+# Canonical state progression (single authority)
+progression_stages:
+  - stage: requested
+    authority: jellyseerr
+    field: "request.status"
+    value: "pending"
+    description: "User has requested media; no download initiated"
+
+  - stage: searching
+    authority: radarr/sonarr
+    field: "movie.monitored + no hasFile"
+    value: "monitored=true, hasFile=false"
+    description: "ARR is searching for the title"
+
+  - stage: downloading
+    authority: radarr/sonarr
+    field: "queue entry exists"
+    value: "queue.status=downloading"
+    description: "Download is in progress via download client"
+
+  - stage: importing
+    authority: radarr/sonarr
+    field: "queue entry + file on disk"
+    value: "queue.status=completed or importing"
+    description: "Download complete, import/rename in progress"
+
+  - stage: available_arr
+    authority: radarr/sonarr
+    field: "hasFile"
+    value: "hasFile=true"
+    description: "File imported and renamed by ARR"
+
+  - stage: available_library
+    authority: jellyfin
+    field: "library scan complete"
+    value: "item exists in library"
+    description: "Jellyfin has scanned and indexed the file"
+
+  - stage: available_request
+    authority: jellyseerr
+    field: "request.mediaStatus"
+    value: "available (3) or partially_available (4)"
+    description: "Jellyseerr reflects availability from downstream"
+
+# Synchronization contracts
+sync_handshakes:
+  arr_to_jellyfin:
+    trigger: "hasFile transitions to true"
+    expected_action: "Jellyfin library scan picks up new file"
+    max_delay: "15 minutes (scan interval)"
+    failure_mode: "file exists on disk but not in library"
+    gap_ref: GAP-OP-1392
+
+  arr_to_jellyseerr:
+    trigger: "hasFile transitions to true"
+    expected_action: "Jellyseerr mediaStatus updates to available"
+    max_delay: "varies (webhook or poll interval)"
+    failure_mode: "request remains processing while hasFile=true"
+    gap_ref: GAP-OP-1389
+
+  queue_reconciliation:
+    trigger: "hasFile=true for a title with queue entry"
+    expected_action: "queue entry removed or marked completed"
+    max_delay: "next queue refresh"
+    failure_mode: "ghost queue items with downloadClientUnavailable"
+    gap_ref: GAP-OP-1390
+
+# Verification
+e2e_check_description: |
+  An end-to-end availability check must verify the FULL chain:
+  1. Radarr/Sonarr hasFile=true
+  2. File exists on filesystem at expected path
+  3. Jellyfin library contains the item
+  4. Jellyseerr request shows available status
+  Only when all 4 are consistent is the item truly available.
+
+drift_gate: TBD  # future gate to enforce progression parity
+verification_command: TBD  # future capability for e2e availability check
