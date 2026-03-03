@@ -9,7 +9,7 @@
 # Last verified: 2026-02-22
 
 version: 1
-updated: "2026-03-02T20:38:01Z"
+updated: "2026-03-03T04:33:01Z"
 gaps:
   # ─────────────────────────────────────────────────────────────
   # Discovered during LOOP-INFRA-VM-RESTRUCTURE-20260206
@@ -18737,3 +18737,133 @@ gaps:
     status: open
     notes: "Filed via gaps.file at 2026-03-02T20:38:01Z"
     parent_loop: "LOOP-AGENT-FRICTION-QUEUE-OPERATIONS-20260302"
+  - id: "GAP-OP-1370"
+    title: "Mailroom watcher is financially brittle: provider policy currently enforces z.ai as default lane and no gov..."
+    discovered_by: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+    discovered_at: "2026-03-03"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "surfaces/verify/d74-billing-provider-lane-lock.sh,ops/runtime/inbox/hot-folder-watcher.sh"
+    description: |
+      Mailroom watcher is financially brittle: provider policy currently enforces z.ai as default lane and no governed local/zero-LLM fallback exists.
+      Evidence:
+      - D74 billing/provider gate locks z.ai defaults and launchd invariants.
+      - watcher outbox failures show repeated "Insufficient balance or no resource package. Please recharge." errors in result artifacts.
+      Impact: inbox automation halts when paid API credits are depleted.
+      Required fix: add cost-neutral provider lane (local/self-hosted or no-LLM dispatch mode), and make paid APIs optional fallback rather than hard dependency.
+    severity: high
+    status: open
+    notes: "Filed via gaps.file at 2026-03-03T04:33:01Z"
+    parent_loop: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+  - id: "GAP-OP-1371"
+    title: "Provider abstraction bypass: hot-folder-watcher dispatch path directly calls z.ai HTTP endpoint instead of ..."
+    discovered_by: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+    discovered_at: "2026-03-03"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "ops/runtime/inbox/hot-folder-watcher.sh,ops/engine/run.sh"
+    description: |
+      Provider abstraction bypass: hot-folder-watcher dispatch path directly calls z.ai HTTP endpoint instead of the governed engine multiplexer.
+      Evidence:
+      - watcher contains direct curl to https://api.z.ai/api/paas/v4/chat/completions in dispatch_to_zai.
+      - engine/run.sh already supports provider selection (local|claude|zai|openai) but watcher does not reuse that path.
+      Impact: centralized fallback, budget controls, and provider contract evolution cannot be enforced consistently.
+      Required fix: route watcher dispatch through a single provider contract/multiplexer with deterministic fallback policy.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-03T04:33:01Z"
+    parent_loop: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+  - id: "GAP-OP-1372"
+    title: "Mailroom runtime path split-brain: enqueue and watcher lane resolve repo inbox paths while runtime contract..."
+    discovered_by: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+    discovered_at: "2026-03-03"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "ops/runtime/inbox/agent-enqueue.sh,ops/plugins/mailroom-bridge/bin/mailroom-task-worker,ops/bindings/mailroom.runtime.contract.yaml"
+    description: |
+      Mailroom runtime path split-brain: enqueue and watcher lane resolve repo inbox paths while runtime contract is active and worker task queue resolves runtime-root paths.
+      Evidence:
+      - runtime contract active=true with runtime_root=/Users/ronnyworks/code/.runtime/spine-mailroom.
+      - enqueue writes to ${SPINE_INBOX:-$SPINE/mailroom/inbox}/queued.
+      - task worker status resolves queued_dir under .runtime/spine-mailroom/state/agent-tasks/queued.
+      Impact: diagnostics and lifecycle ownership are non-deterministic across enqueue, watcher, and worker pipelines.
+      Required fix: define and enforce canonical authority mapping per lane (repo vs runtime), with explicit parity checks.
+    severity: high
+    status: open
+    notes: "Filed via gaps.file at 2026-03-03T04:33:01Z"
+    parent_loop: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+  - id: "GAP-OP-1373"
+    title: "Bridge auth token source drift: repo token files and runtime token files diverge, producing contradictory c..."
+    discovered_by: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+    discovered_at: "2026-03-03"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "mailroom/state/mailroom-bridge.token,/Users/ronnyworks/code/.runtime/spine-mailroom/state/mailroom-bridge.token"
+    description: |
+      Bridge auth token source drift: repo token files and runtime token files diverge, producing contradictory client behavior.
+      Evidence from live probe:
+      - mailroom/state/mailroom-bridge.token => HTTP_401
+      - mailroom/state/mailroom-bridge-media.token => HTTP_401
+      - .runtime/spine-mailroom/state/mailroom-bridge.token => HTTP_200
+      Impact: operators and agents cannot infer canonical token source; mobile/automation clients fail if they read repo token paths.
+      Required fix: define single canonical token authority path and deprecate stale aliases with verify enforcement.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-03T04:33:01Z"
+    parent_loop: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+  - id: "GAP-OP-1374"
+    title: "LaunchAgent environment drift from runtime contract: watcher launchd env pins repo mailroom paths and z.ai ..."
+    discovered_by: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+    discovered_at: "2026-03-03"
+    type: stale-ssot
+    classification: stale-ssot
+    doc: "~/Library/LaunchAgents/com.ronny.agent-inbox.plist,~/Library/LaunchAgents/com.ronny.mailroom-bridge.plist,ops/bindings/mailroom.runtime.contract.yaml"
+    description: |
+      LaunchAgent environment drift from runtime contract: watcher launchd env pins repo mailroom paths and z.ai provider assumptions while runtime contract resolves externalized runtime_root.
+      Evidence:
+      - com.ronny.agent-inbox.plist exports SPINE_INBOX/SPINE_OUTBOX/SPINE_STATE/SPINE_LOGS under repo path and SPINE_WATCHER_PROVIDER=zai.
+      - runtime contract active with runtime_root externalization.
+      - bridge plist lacks explicit SPINE_INBOX/SPINE_OUTBOX/SPINE_STATE/SPINE_LOGS authority declarations.
+      Impact: live launchd behavior can diverge from capability/runtime contract assumptions.
+      Required fix: normalize launchd env policy to runtime authority model and enforce template/live parity.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-03T04:33:01Z"
+    parent_loop: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+  - id: "GAP-OP-1375"
+    title: "spine.watcher.status false-fail condition: queue counting exits non-zero when a lane path is missing under ..."
+    discovered_by: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+    discovered_at: "2026-03-03"
+    type: runtime-bug
+    classification: runtime-bug
+    doc: "ops/runtime/inbox/agent-status.sh"
+    description: |
+      spine.watcher.status false-fail condition: queue counting exits non-zero when a lane path is missing under pipefail.
+      Evidence:
+      - capability run CAP-20260302-232457__spine.watcher.status__Rzds776169 fails after printing queue header.
+      - agent-status.sh uses set -euo pipefail and queue count pipeline based on find; missing directories in runtime-resolved inbox path cause early failure.
+      Impact: status surface reports failure even when launchd watcher process is running, reducing operator trust.
+      Required fix: make queue counting robust to absent directories and include explicit path_used diagnostics.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-03T04:33:01Z"
+    parent_loop: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+  - id: "GAP-OP-1376"
+    title: "Self-hosted inference onboarding contract is missing for watcher autonomy roadmap."
+    discovered_by: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
+    discovered_at: "2026-03-03"
+    type: missing-entry
+    classification: missing-entry
+    doc: "ops/bindings/service.onboarding.contract.yaml,ops/runtime/inbox/hot-folder-watcher.sh"
+    description: |
+      Self-hosted inference onboarding contract is missing for watcher autonomy roadmap.
+      Context: operator goal is to replace recurring API spend with one-time dedicated hardware + local models.
+      Missing today:
+      - canonical hardware profile tiers for 24/7 autonomous watcher workload,
+      - local model runtime contract (provider id, health checks, failover semantics),
+      - rollout/rollback policy from paid APIs to local lane.
+      Required fix: add governed self-hosted watcher provider contract, procurement profile, and migration phases with verify locks.
+    severity: medium
+    status: open
+    notes: "Filed via gaps.file at 2026-03-03T04:33:01Z"
+    parent_loop: "LOOP-MAILROOM-WATCHER-COST-NEUTRAL-RUNTIME-NORMALIZATION-20260303"
