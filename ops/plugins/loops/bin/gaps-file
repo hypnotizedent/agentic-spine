@@ -125,6 +125,21 @@ load_description() {
   printf '%s' "$inline_desc"
 }
 
+# Check if an entry with a semantically equivalent title already exists (open status).
+# This catches the retry-after-commit-failure case where YAML was written but commit
+# was rejected, and gaps.file is re-invoked with the same description.
+# Returns 0 if a duplicate is found, 1 otherwise. Prints the existing gap ID on match.
+gap_title_exists_open() {
+  local candidate_title="$1"
+  local existing_id
+  existing_id="$(yq e -r ".gaps[] | select(.status == \"open\") | select(.title == \"$candidate_title\") | .id" "$GAPS_FILE" 2>/dev/null | head -n1)"
+  if [[ -n "$existing_id" && "$existing_id" != "null" ]]; then
+    printf '%s' "$existing_id"
+    return 0
+  fi
+  return 1
+}
+
 append_gap_entry() {
   local gap_id="$1"
   local type="$2"
@@ -146,6 +161,18 @@ append_gap_entry() {
   validate_type "$type"
   validate_severity "$severity"
   gap_exists "$gap_id" && { echo "FAIL: $gap_id already exists in gap registry" >&2; exit 1; }
+
+  # Idempotency guard: check if an open gap with the same derived title already
+  # exists. This catches the retry-after-commit-failure scenario where the YAML
+  # write persisted but the commit was rejected (e.g. by pre-commit hooks).
+  local _pre_title _existing_dup
+  _pre_title="$(derive_gap_title "$description" "$gap_id")"
+  if _existing_dup="$(gap_title_exists_open "$_pre_title")"; then
+    echo "INFO_ALREADY_FILED: skipping $gap_id — semantically equivalent open gap exists as $_existing_dup" >&2
+    # Return the existing ID so callers can reference it
+    IDEMPOTENT_SKIP_IDS+=("$_existing_dup")
+    return 0
+  fi
 
   title="$(derive_gap_title "$description" "$gap_id")"
   classification="$type"
@@ -257,6 +284,7 @@ trap 'release_git_lock' EXIT INT TERM
 TODAY=$(date -u +%Y-%m-%d)
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 declare -a FILED_GAP_IDS=()
+declare -a IDEMPOTENT_SKIP_IDS=()
 
 if [[ -n "$BATCH_FILE" ]]; then
   [[ -f "$BATCH_FILE" ]] || { echo "FAIL: --batch file not found: $BATCH_FILE" >&2; exit 2; }
@@ -317,8 +345,12 @@ if [[ -n "$BATCH_FILE" ]]; then
     fi
     [[ "$item_gap_id" =~ ^GAP-OP-[0-9]+$ ]] || { echo "FAIL: invalid gap id in batch entry $i: '$item_gap_id'" >&2; exit 2; }
 
+    local _skip_count_before=${#IDEMPOTENT_SKIP_IDS[@]}
     append_gap_entry "$item_gap_id" "$item_type" "$item_severity" "$item_description" "$item_discovered_by" "$item_parent_loop" "$item_doc" "$TODAY" "$TIMESTAMP"
-    FILED_GAP_IDS+=("$item_gap_id")
+    # Only add to FILED list if append_gap_entry did not idempotently skip
+    if [[ ${#IDEMPOTENT_SKIP_IDS[@]} -eq $_skip_count_before ]]; then
+      FILED_GAP_IDS+=("$item_gap_id")
+    fi
   done
 else
   [[ -n "$GAP_ID" ]]        || { echo "FAIL: --id required (--id auto supported)" >&2; exit 2; }
@@ -338,8 +370,21 @@ else
   fi
   [[ "$GAP_ID" =~ ^GAP-OP-[0-9]+$ ]] || { echo "FAIL: invalid --id '$GAP_ID' (expected GAP-OP-NNN or auto)" >&2; exit 2; }
 
+  local _skip_count_before=${#IDEMPOTENT_SKIP_IDS[@]}
   append_gap_entry "$GAP_ID" "$TYPE" "$SEVERITY" "$DESCRIPTION" "$DISCOVERED_BY" "$PARENT_LOOP" "$DOC" "$TODAY" "$TIMESTAMP"
-  FILED_GAP_IDS+=("$GAP_ID")
+  # Only add to FILED list if append_gap_entry did not idempotently skip
+  if [[ ${#IDEMPOTENT_SKIP_IDS[@]} -eq $_skip_count_before ]]; then
+    FILED_GAP_IDS+=("$GAP_ID")
+  fi
+fi
+
+# If all entries were idempotently skipped, no YAML mutation occurred — skip commit
+if [[ ${#FILED_GAP_IDS[@]} -eq 0 ]]; then
+  echo "INFO: all entries already filed — nothing to commit"
+  for skip_id in "${IDEMPOTENT_SKIP_IDS[@]}"; do
+    echo "SKIPPED_DUPLICATE: $skip_id"
+  done
+  exit 0
 fi
 
 # Update timestamp once per run
@@ -371,6 +416,10 @@ fi
 
 for filed_id in "${FILED_GAP_IDS[@]}"; do
   echo "FILED: $filed_id"
+done
+
+for skip_id in "${IDEMPOTENT_SKIP_IDS[@]}"; do
+  echo "SKIPPED_DUPLICATE: $skip_id"
 done
 
 # Auto-claim if policy knob says so

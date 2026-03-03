@@ -7,6 +7,11 @@
 
 set -eo pipefail
 
+# Resolve SPINE_ROOT to an absolute path at script entry and export it
+# so subshells (command substitutions, pipes) inherit a stable value.
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+export SPINE_ROOT
+
 # Source credentials if not already set (enables Desktop Commander / non-shell access)
 CREDENTIALS_FILE="${HOME}/.config/infisical/credentials"
 if [[ -z "${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}" && -f "$CREDENTIALS_FILE" ]]; then
@@ -15,7 +20,7 @@ fi
 
 INFISICAL_CLIENT_ID="${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-40b44e76-db5a-4309-afa2-43bd93dddfc1}"
 INFISICAL_CLIENT_SECRET="${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}"
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+SPINE_REPO="${SPINE_REPO:-$SPINE_ROOT}"
 SECRETS_BINDING="${SPINE_REPO}/ops/bindings/secrets.binding.yaml"
 SECRETS_NAMESPACE_POLICY="${SPINE_REPO}/ops/bindings/secrets.namespace.policy.yaml"
 SECRETS_INVENTORY="${SPINE_REPO}/ops/bindings/secrets.inventory.yaml"
@@ -567,6 +572,8 @@ infisical_set_secret() {
 
   if [[ -z "$project" || -z "$env" || -z "$key" ]]; then
     log_error "Usage: set <project> <env> <key> <value>"
+    log_info "Positional order: project env key value (all four required)"
+    log_info "Example: infisical-agent.sh set infrastructure prod MY_KEY \"my-value\""
     exit 1
   fi
 

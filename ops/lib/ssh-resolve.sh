@@ -111,5 +111,74 @@ ssh_resolve_url_with_fallback() {
   return 0
 }
 
+# Resolve SSH extra opts for a target (e.g. legacy key algorithms)
+ssh_resolve_extra_opts() {
+  local target_id="$1"
+  local opts
+  opts="$(yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .ssh_extra_opts // \"\"" \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || true)"
+  printf '%s' "${opts:-}"
+}
+
+# Resolve probe_via (ProxyJump target) for lan_only devices.
+# Returns the probe_via target ID, or empty if none configured.
+ssh_resolve_probe_via() {
+  local target_id="$1"
+  yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .probe_via // \"\"" \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || echo ""
+}
+
+# Build SSH command array for a target, with optional ProxyJump.
+# Usage: ssh_build_cmd "communications-stack" -> array of ssh args
+# Falls back through: direct LAN -> direct Tailscale -> ProxyJump via probe_via
+# NOTE: ProxyJump fallback is only attempted when probe_via is configured in
+# ssh.targets.yaml. For targets without probe_via, fallback stops at Tailscale.
+# GAP-OP-1268: Full ProxyJump fallback for all lan_first targets is planned but
+# requires ACL policy changes to allow Tailscale SSH in check mode.
+ssh_build_cmd_with_fallback() {
+  local target_id="$1"
+  local timeout="${2:-5}"
+  local result resolved_ip path_used
+  result="$(ssh_resolve_host_with_fallback "$target_id" "$timeout")" || true
+  resolved_ip="$(echo "$result" | awk '{print $1}')"
+  path_used="$(echo "$result" | awk '{print $2}')"
+  local user
+  user="$(ssh_resolve_user "$target_id")"
+  local extra_opts
+  extra_opts="$(ssh_resolve_extra_opts "$target_id")"
+
+  local -a cmd=(ssh "${SSH_BATCH_OPTS[@]}")
+  if [[ -n "$extra_opts" ]]; then
+    # shellcheck disable=SC2206
+    cmd+=($extra_opts)
+  fi
+
+  if [[ "$path_used" == "unreachable" ]]; then
+    # Try ProxyJump via probe_via target if configured
+    local proxy_target
+    proxy_target="$(ssh_resolve_probe_via "$target_id")"
+    if [[ -n "$proxy_target" && "$proxy_target" != "null" ]]; then
+      local proxy_ref
+      proxy_ref="$(ssh_resolve_ref "$proxy_target")"
+      if [[ -n "$proxy_ref" ]]; then
+        cmd+=(-o "ProxyJump=${proxy_ref}")
+        local lan_ip
+        lan_ip="$(ssh_resolve_host "$target_id")"
+        cmd+=("${user}@${lan_ip}")
+        printf '%s\n' "${cmd[*]}"
+        return 0
+      fi
+    fi
+    # No fallback available
+    cmd+=("${user}@${resolved_ip}")
+    printf '%s\n' "${cmd[*]}"
+    return 1
+  fi
+
+  cmd+=("${user}@${resolved_ip}")
+  printf '%s\n' "${cmd[*]}"
+  return 0
+}
+
 # Standard SSH options for non-interactive batch mode
 SSH_BATCH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
