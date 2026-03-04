@@ -7,7 +7,6 @@ set -euo pipefail
 #   planning-plans-cancel --plan-id PLAN-ID --reason "..."
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
 source "$ROOT/ops/lib/git-lock.sh"
 
 PLAN_ID=""
@@ -34,22 +33,17 @@ done
 
 [[ -n "$PLAN_ID" ]] || { echo "FAIL: --plan-id required" >&2; exit 2; }
 [[ -n "$REASON" ]] || { echo "FAIL: --reason required" >&2; exit 2; }
-[[ -f "$PLANS_INDEX" ]] || { echo "FAIL: plans index not found: $PLANS_INDEX" >&2; exit 1; }
-
 ACTOR="${SPINE_AGENT_ID:-${USER:-unknown}}"
 
 acquire_git_lock plans || exit 1
 trap 'release_git_lock' EXIT INT TERM
 
-python3 - "$PLANS_INDEX" "$PLAN_ID" "$REASON" "$ACTOR" <<'PY'
-from datetime import datetime, timezone
+python3 - "$ROOT" "$PLAN_ID" "$REASON" "$ACTOR" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-import yaml
-
-index_path = Path(sys.argv[1])
+root = Path(sys.argv[1])
 plan_id = sys.argv[2].strip()
 reason = sys.argv[3].strip()
 actor = sys.argv[4].strip() or "unknown"
@@ -57,57 +51,72 @@ actor = sys.argv[4].strip() or "unknown"
 if not re.fullmatch(r"PLAN-[A-Z0-9-]+", plan_id):
     raise SystemExit(f"FAIL: invalid plan_id: {plan_id}")
 
-doc = yaml.safe_load(index_path.read_text(encoding="utf-8")) or {}
-if not isinstance(doc, dict):
-    raise SystemExit("FAIL: plans index must be YAML map")
-plans = doc.get("plans")
-if not isinstance(plans, list):
-    raise SystemExit("FAIL: plans index key 'plans' must be a list")
-
-found = False
-previous_status = ""
-for row in plans:
-    if not isinstance(row, dict):
-        continue
-    if str(row.get("plan_id", "")).strip() != plan_id:
-        continue
-    found = True
-    previous_status = str(row.get("status") or "").strip() or "deferred"
-    if previous_status == "cancelled":
-        previous_status = "canceled"
-    if previous_status == "active":
-        previous_status = "promoted"
-    if previous_status == "active_blocked":
-        previous_status = "deferred"
-    if previous_status == "completed":
-        previous_status = "retired"
-
-    if previous_status == "canceled":
-        raise SystemExit(f"FAIL: plan already canceled: {plan_id}")
-    if previous_status == "retired":
-        raise SystemExit(f"FAIL: cannot cancel retired plan: {plan_id}")
-    if previous_status not in {"deferred", "promoted"}:
-        raise SystemExit(
-            f"FAIL: unsupported plan status transition {previous_status}->canceled for {plan_id}"
-        )
-
-    row["status"] = "canceled"
-    row["canceled_reason"] = reason
-    row["canceled_by"] = actor
-    row["canceled_from_status"] = previous_status
-    row["canceled_at_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    break
-
-if not found:
-    raise SystemExit(f"FAIL: plan not found: {plan_id}")
-
-doc["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-index_path.write_text(
-    yaml.safe_dump(doc, sort_keys=False, allow_unicode=False),
-    encoding="utf-8",
+sys.path.insert(0, str(root / "ops/plugins/lifecycle/lib"))
+from plans_sql_authority import (  # type: ignore
+    bootstrap_from_index_if_needed,
+    connect,
+    ensure_schema,
+    get_plan,
+    insert_event,
+    project_to_surfaces,
+    resolve_paths,
+    upsert_plan,
+    utc_now_text,
 )
 
+_db_path, index_path, plans_dir = resolve_paths(root)
+conn = connect(_db_path)
+ensure_schema(conn)
+bootstrap_from_index_if_needed(conn, index_path)
+plan = get_plan(conn, plan_id)
+if plan is None:
+    raise SystemExit(f"FAIL: plan not found: {plan_id}")
+
+previous_status = str(plan.get("status") or "").strip() or "deferred"
+if previous_status == "cancelled":
+    previous_status = "canceled"
+if previous_status == "active":
+    previous_status = "promoted"
+if previous_status == "active_blocked":
+    previous_status = "deferred"
+if previous_status == "completed":
+    previous_status = "retired"
+
+if previous_status == "canceled":
+    raise SystemExit(f"FAIL: plan already canceled: {plan_id}")
+if previous_status == "retired":
+    raise SystemExit(f"FAIL: cannot cancel retired plan: {plan_id}")
+if previous_status not in {"deferred", "promoted"}:
+    raise SystemExit(f"FAIL: unsupported plan status transition {previous_status}->canceled for {plan_id}")
+
+plan["status"] = "canceled"
+plan["canceled_reason"] = reason
+plan["canceled_by"] = actor
+plan["canceled_from_status"] = previous_status
+plan["canceled_at_utc"] = utc_now_text()
+
+upsert_plan(conn, plan)
+insert_event(
+    conn,
+    plan_id=plan_id,
+    event_type="canceled",
+    from_status=previous_status,
+    to_status="canceled",
+    reason=reason,
+    actor=actor,
+    payload={"reason": reason},
+)
+project_to_surfaces(
+    conn,
+    index_path=index_path,
+    plans_dir=plans_dir,
+    create_placeholders=True,
+    archive_orphans=False,
+)
+conn.commit()
+
 print("planning.plans.cancel")
+print(f"authority: {_db_path}")
 print(f"index: {index_path}")
 print(f"plan_id: {plan_id}")
 print(f"previous_status: {previous_status}")

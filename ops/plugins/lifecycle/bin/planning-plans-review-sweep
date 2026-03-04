@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.plans.review.sweep — Find due deferred/promoted plans by review_date.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+MODE="table"
+WRITE_ARTIFACT=0
+ARTIFACT_PATH="${PLANS_REVIEW_SWEEP_ARTIFACT:-$ROOT/mailroom/state/plans/review-sweep/latest.yaml}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --json) MODE="json"; shift ;;
+    --write-artifact) WRITE_ARTIFACT=1; shift ;;
+    --artifact-path) ARTIFACT_PATH="${2:-}"; shift 2 ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: planning-plans-review-sweep [--json] [--write-artifact] [--artifact-path <path>]
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+python3 - "$ROOT" "$MODE" "$WRITE_ARTIFACT" "$ARTIFACT_PATH" <<'PY'
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+write_artifact = sys.argv[3] == "1"
+artifact_path = Path(sys.argv[4]).expanduser()
+
+sys.path.insert(0, str(root / "ops/plugins/lifecycle/lib"))
+from plans_sql_authority import bootstrap_from_index_if_needed, connect, ensure_schema, fetch_plans, resolve_paths  # type: ignore
+
+_db_path, index_path, _plans_dir = resolve_paths(root)
+conn = connect(_db_path)
+ensure_schema(conn)
+bootstrap_from_index_if_needed(conn, index_path)
+
+today = date.today().isoformat()
+due = []
+for plan in fetch_plans(conn):
+    status = str(plan.get("status") or "").strip()
+    review_date = str(plan.get("review_date") or "").strip()
+    if status not in {"deferred", "promoted"}:
+        continue
+    if not review_date:
+        continue
+    if review_date <= today:
+        due.append(
+            {
+                "plan_id": str(plan.get("plan_id") or "").strip(),
+                "owner": str(plan.get("owner") or "").strip(),
+                "status": status,
+                "review_date": review_date,
+                "source_loop_id": str(plan.get("source_loop_id") or "").strip(),
+            }
+        )
+
+due.sort(key=lambda item: (item["review_date"], item["plan_id"]))
+payload = {
+    "capability": "planning.plans.review.sweep",
+    "authority_db": str(_db_path),
+    "today": today,
+    "due_count": len(due),
+    "due_plans": due,
+}
+
+if write_artifact:
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact = {
+        "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "authority_db": str(_db_path),
+        "today": today,
+        "due_count": len(due),
+        "due_plans": due,
+    }
+    artifact_path.write_text(yaml.safe_dump(artifact, sort_keys=False, allow_unicode=False), encoding="utf-8")
+    payload["artifact_path"] = str(artifact_path)
+
+if mode == "json":
+    print(json.dumps(payload, indent=2))
+else:
+    print("planning.plans.review.sweep")
+    print(f"authority_db: {_db_path}")
+    print(f"today: {today}")
+    print(f"due_count: {len(due)}")
+    for row in due:
+        print(
+            f"- {row['plan_id']} owner={row['owner']} status={row['status']} "
+            f"review_date={row['review_date']} source={row['source_loop_id']}"
+        )
+    if write_artifact:
+        print(f"artifact_path: {artifact_path}")
+PY

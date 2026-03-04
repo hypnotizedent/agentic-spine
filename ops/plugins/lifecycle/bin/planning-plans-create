@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# planning.plans.create — Append deferred-intent plan to plans index.
+# planning.plans.create — Create deferred-intent plan in SQLite authority.
 #
 # Usage:
 #   planning-plans-create \
@@ -18,7 +18,6 @@ set -euo pipefail
 #     [--linked-gaps GAP-1,GAP-2]
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
 source "$ROOT/ops/lib/git-lock.sh"
 
 PLAN_ID=""
@@ -102,24 +101,13 @@ fi
 acquire_git_lock plans || exit 1
 trap 'release_git_lock' EXIT INT TERM
 
-mkdir -p "$(dirname "$PLANS_INDEX")"
-[[ -f "$PLANS_INDEX" ]] || {
-  cat > "$PLANS_INDEX" <<'YAML'
-version: "1.0"
-updated_at: "1970-01-01"
-plans: []
-YAML
-}
-
-python3 - "$PLANS_INDEX" "$PLAN_ID" "$SOURCE_LOOP_ID" "$TARGET_LOOP_ID" "$OWNER" "$HORIZON" "$REVIEW_DATE" "$DESCRIPTION" "$ACTIVATION_TRIGGER" "$DEPENDS_ON_LOOP" "$LINKED_GAPS" <<'PY'
-from datetime import datetime, timezone
+python3 - "$ROOT" "$PLAN_ID" "$SOURCE_LOOP_ID" "$TARGET_LOOP_ID" "$OWNER" "$HORIZON" "$REVIEW_DATE" "$DESCRIPTION" "$ACTIVATION_TRIGGER" "$DEPENDS_ON_LOOP" "$LINKED_GAPS" <<'PY'
+from datetime import timezone
 import re
 import sys
 from pathlib import Path
 
-import yaml
-
-index_path = Path(sys.argv[1])
+root = Path(sys.argv[1])
 plan_id = sys.argv[2].strip()
 source_loop_id = sys.argv[3].strip()
 target_loop_id = sys.argv[4].strip()
@@ -131,6 +119,19 @@ activation_trigger = sys.argv[9].strip()
 depends_on_loop = sys.argv[10].strip()
 linked_gaps_raw = (sys.argv[11] or "").strip()
 
+sys.path.insert(0, str(root / "ops/plugins/lifecycle/lib"))
+from plans_sql_authority import (  # type: ignore
+    bootstrap_from_index_if_needed,
+    connect,
+    ensure_schema,
+    get_plan,
+    insert_event,
+    project_to_surfaces,
+    resolve_paths,
+    upsert_plan,
+    utc_now_text,
+)
+
 if not re.fullmatch(r"PLAN-[A-Z0-9-]+", plan_id):
     raise SystemExit(f"FAIL: plan_id must match PLAN-[A-Z0-9-]+ (got '{plan_id}')")
 if not re.fullmatch(r"LOOP-[A-Z0-9-]+", source_loop_id):
@@ -140,32 +141,26 @@ if target_loop_id and not re.fullmatch(r"LOOP-[A-Z0-9-]+", target_loop_id):
 if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", review_date):
     raise SystemExit(f"FAIL: review_date must be YYYY-MM-DD (got '{review_date}')")
 
-doc = yaml.safe_load(index_path.read_text(encoding="utf-8")) or {}
-if not isinstance(doc, dict):
-    raise SystemExit("FAIL: plans index must be a YAML map")
-
-plans = doc.get("plans")
-if plans is None:
-    plans = []
-if not isinstance(plans, list):
-    raise SystemExit("FAIL: plans index key 'plans' must be a list")
-
-for row in plans:
-    if isinstance(row, dict) and str(row.get("plan_id", "")).strip() == plan_id:
-        raise SystemExit(f"FAIL: plan_id already exists: {plan_id}")
-
-linked_gaps = []
+linked_gaps: list[str] = []
 if linked_gaps_raw:
     for part in linked_gaps_raw.split(","):
-        g = part.strip()
-        if not g:
+        gap = part.strip()
+        if not gap:
             continue
-        if not re.fullmatch(r"GAP-[A-Z0-9-]+", g):
-            raise SystemExit(f"FAIL: linked gap must match GAP-* (got '{g}')")
-        linked_gaps.append(g)
+        if not re.fullmatch(r"GAP-[A-Z0-9-]+", gap):
+            raise SystemExit(f"FAIL: linked gap must match GAP-* (got '{gap}')")
+        linked_gaps.append(gap)
 
-now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-entry = {
+_db_path, index_path, plans_dir = resolve_paths(root)
+conn = connect(_db_path)
+ensure_schema(conn)
+bootstrap_from_index_if_needed(conn, index_path)
+
+if get_plan(conn, plan_id) is not None:
+    raise SystemExit(f"FAIL: plan_id already exists: {plan_id}")
+
+now = utc_now_text()
+plan = {
     "plan_id": plan_id,
     "source_loop_id": source_loop_id,
     "owner": owner,
@@ -174,27 +169,36 @@ entry = {
     "review_date": review_date,
     "description": description,
     "linked_gaps": linked_gaps,
-    "migrated_at_utc": now_utc,
+    "migrated_at_utc": now,
     "status": "deferred",
 }
 if target_loop_id:
-    entry["target_loop_id"] = target_loop_id
+    plan["target_loop_id"] = target_loop_id
 if depends_on_loop:
-    entry["depends_on_loop"] = depends_on_loop
+    plan["depends_on_loop"] = depends_on_loop
 
-plans.append(entry)
-plans.sort(key=lambda item: str(item.get("plan_id", "")))
-doc["plans"] = plans
-doc["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-if "version" not in doc:
-    doc["version"] = "1.0"
-
-index_path.write_text(
-    yaml.safe_dump(doc, sort_keys=False, allow_unicode=False),
-    encoding="utf-8",
+upsert_plan(conn, plan)
+insert_event(
+    conn,
+    plan_id=plan_id,
+    event_type="created",
+    from_status=None,
+    to_status="deferred",
+    reason="planning.plans.create",
+    actor="planning.plans.create",
+    payload={"source_loop_id": source_loop_id, "owner": owner},
 )
+project_to_surfaces(
+    conn,
+    index_path=index_path,
+    plans_dir=plans_dir,
+    create_placeholders=True,
+    archive_orphans=False,
+)
+conn.commit()
 
 print("planning.plans.create")
+print(f"authority: {_db_path}")
 print(f"index: {index_path}")
 print(f"plan_id: {plan_id}")
 print(f"source_loop_id: {source_loop_id}")

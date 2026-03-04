@@ -9,9 +9,22 @@ owner: "@ronny"
 scope: plans-lifecycle
 
 authority:
-  runtime_surface: mailroom/state/plans/index.yaml
-  runtime_type: yaml_registry
+  runtime_store:
+    type: sqlite
+    file: mailroom/state/shared_authority.db
+    pragmas:
+      journal_mode: WAL
+      busy_timeout_ms: 5000
+      foreign_keys: true
+    tables:
+      - plans
+      - plan_events
+      - plan_docs
+      - plans_projection_watermarks
+      - schema_migrations
+  bootstrap_from_legacy_surface: mailroom/state/plans/index.yaml
   projection_surfaces:
+    - mailroom/state/plans/index.yaml
     - mailroom/state/plans/PLAN-*.md
   mutation_capabilities:
     - planning.plans.create
@@ -20,6 +33,7 @@ authority:
     - planning.plans.cancel
     - planning.plans.reconcile
     - planning.plans.archive
+    - state.shared.reconcile
   write_policy: capability_only
   direct_write_forbidden: true
 
@@ -91,6 +105,7 @@ projection_model:
   orphan_archive_dir: mailroom/state/plans/_orphans
 
 reconcile:
+  capability: state.shared.reconcile
   idempotent: true
   default_mode: check
   fix_mode_writes:
@@ -98,6 +113,12 @@ reconcile:
     - enforce_terminal_audit_fields
     - create_missing_projection_docs
     - archive_orphan_projection_docs
+    - update_projection_watermarks
+  startup_run: true
+  scheduled_run:
+    launchd_label: com.ronny.state-shared-reconcile
+    cadence: hourly
+  rollback_snapshot_dir: mailroom/state/plans/_snapshots
   failure_policy: fail_closed
 
 archive:

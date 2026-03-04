@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# mailroom.scan — Inventory mailroom surfaces by authority/projection/runtime/ephemeral tiers.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+CONTRACT="$ROOT/ops/bindings/mailroom.inventory.contract.yaml"
+MODE="table"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --json) MODE="json"; shift ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: mailroom-scan [--json]
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+python3 - "$ROOT" "$CONTRACT" "$MODE" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+root = Path(sys.argv[1])
+contract_path = Path(sys.argv[2])
+mode = sys.argv[3]
+
+if not contract_path.exists():
+    raise SystemExit(f"FAIL: missing contract: {contract_path}")
+
+contract = yaml.safe_load(contract_path.read_text(encoding="utf-8")) or {}
+if not isinstance(contract, dict):
+    raise SystemExit("FAIL: mailroom inventory contract must be a map")
+
+categories = contract.get("categories") if isinstance(contract.get("categories"), dict) else {}
+summary = {}
+
+for category, payload in categories.items():
+    if not isinstance(payload, dict):
+        continue
+    patterns = payload.get("paths") if isinstance(payload.get("paths"), list) else []
+    hits = set()
+    for pattern in patterns:
+        pat = str(pattern or "").strip()
+        if not pat:
+            continue
+        # Support literal files and glob patterns.
+        if any(token in pat for token in ["*", "?", "["]):
+            for path in root.glob(pat):
+                if path.is_file():
+                    hits.add(str(path.relative_to(root)))
+        else:
+            candidate = root / pat
+            if candidate.is_file():
+                hits.add(str(candidate.relative_to(root)))
+
+    summary[category] = {
+        "count": len(hits),
+        "paths": sorted(hits),
+    }
+
+payload = {
+    "capability": "mailroom.scan",
+    "contract": str(contract_path),
+    "categories": summary,
+}
+
+if mode == "json":
+    print(json.dumps(payload, indent=2))
+    raise SystemExit(0)
+
+print("mailroom.scan")
+print(f"contract: {contract_path}")
+for category in ["authority", "projection", "runtime", "ephemeral"]:
+    data = summary.get(category, {"count": 0, "paths": []})
+    print(f"- {category}: {data['count']}")
+    for p in data["paths"][:8]:
+        print(f"    {p}")
+    if len(data["paths"]) > 8:
+        print(f"    ... plus {len(data['paths']) - 8} more")
+PY

@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# state.shared.reconcile — Shared authority reconcile with integrity check and snapshot rollback.
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+RECONCILE_BIN="$ROOT/ops/plugins/lifecycle/bin/planning-plans-reconcile"
+REVIEW_SWEEP_BIN="$ROOT/ops/plugins/lifecycle/bin/planning-plans-review-sweep"
+
+MODE="check"
+JSON_MODE=0
+MAX_ATTEMPTS=3
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --check) MODE="check"; shift ;;
+    --fix) MODE="fix"; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    --max-attempts) MAX_ATTEMPTS="${2:-3}"; shift 2 ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: state-shared-reconcile [--check|--fix] [--json] [--max-attempts N]
+
+--check: run integrity + parity checks only.
+--fix:   run self-healing reconcile loop with DB snapshot rollback on failure.
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ "$MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || { echo "FAIL: --max-attempts must be integer" >&2; exit 2; }
+
+DB_PATH="${PLANS_DB_PATH:-$ROOT/mailroom/state/shared_authority.db}"
+SNAPSHOT_DIR="$ROOT/mailroom/state/plans/_snapshots"
+mkdir -p "$SNAPSHOT_DIR"
+
+integrity_json="$(python3 - "$ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "ops/plugins/lifecycle/lib"))
+from plans_sql_authority import bootstrap_from_index_if_needed, connect, ensure_schema, integrity_check, resolve_paths  # type: ignore
+
+_db_path, index_path, _plans_dir = resolve_paths(root)
+conn = connect(_db_path)
+ensure_schema(conn)
+bootstrap_from_index_if_needed(conn, index_path)
+ok, msg = integrity_check(conn)
+print(json.dumps({"ok": bool(ok), "message": msg, "db": str(_db_path)}))
+PY
+)"
+
+integrity_ok="$(jq -r '.ok' <<<"$integrity_json")"
+integrity_msg="$(jq -r '.message' <<<"$integrity_json")"
+
+if [[ "$integrity_ok" != "true" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n --arg capability "state.shared.reconcile" --arg mode "$MODE" --arg msg "$integrity_msg" \
+      '{capability:$capability, mode:$mode, status:"failed", sqlite_integrity_ok:false, error:$msg}'
+  else
+    echo "state.shared.reconcile"
+    echo "mode: $MODE"
+    echo "status: failed"
+    echo "sqlite_integrity_ok: false"
+    echo "error: $integrity_msg"
+  fi
+  exit 1
+fi
+
+snapshot_file=""
+if [[ "$MODE" == "fix" && -f "$DB_PATH" ]]; then
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  snapshot_file="$SNAPSHOT_DIR/shared_authority.${ts}.db"
+  cp "$DB_PATH" "$snapshot_file"
+fi
+
+attempt=0
+fix_rc=0
+check_rc=0
+fix_payload="{}"
+check_payload="{}"
+converged=0
+
+run_reconcile() {
+  local submode="$1"
+  set +e
+  local out
+  out="$($RECONCILE_BIN --"$submode" --json 2>/dev/null)"
+  local rc=$?
+  set -e
+  printf '%s\n%s' "$rc" "$out"
+}
+
+if [[ "$MODE" == "check" ]]; then
+  result="$(run_reconcile check)"
+  check_rc="$(head -n 1 <<<"$result")"
+  check_payload="$(tail -n +2 <<<"$result")"
+  if [[ "$check_rc" -eq 0 ]]; then
+    converged=1
+  fi
+else
+  while (( attempt < MAX_ATTEMPTS )); do
+    attempt=$((attempt + 1))
+
+    fix_result="$(run_reconcile fix)"
+    fix_rc="$(head -n 1 <<<"$fix_result")"
+    fix_payload="$(tail -n +2 <<<"$fix_result")"
+    if [[ "$fix_rc" -ne 0 ]]; then
+      if [[ -n "$snapshot_file" && -f "$snapshot_file" ]]; then
+        cp "$snapshot_file" "$DB_PATH"
+      fi
+      break
+    fi
+
+    check_result="$(run_reconcile check)"
+    check_rc="$(head -n 1 <<<"$check_result")"
+    check_payload="$(tail -n +2 <<<"$check_result")"
+    if [[ "$check_rc" -eq 0 ]]; then
+      converged=1
+      break
+    fi
+  done
+fi
+
+# Always refresh due-review artifact on successful convergence.
+review_rc=0
+review_payload="{}"
+if [[ "$converged" -eq 1 ]]; then
+  set +e
+  review_payload="$($REVIEW_SWEEP_BIN --json --write-artifact 2>/dev/null)"
+  review_rc=$?
+  set -e
+fi
+
+status="done"
+if [[ "$converged" -ne 1 || "$review_rc" -ne 0 ]]; then
+  status="failed"
+fi
+
+normalize_json_payload() {
+  local raw="$1"
+  if [[ -z "$raw" ]]; then
+    printf '{}'
+    return 0
+  fi
+  if jq -e . >/dev/null 2>&1 <<<"$raw"; then
+    printf '%s' "$raw"
+  else
+    printf '{}'
+  fi
+}
+
+fix_payload="$(normalize_json_payload "${fix_payload:-}")"
+check_payload="$(normalize_json_payload "${check_payload:-}")"
+review_payload="$(normalize_json_payload "${review_payload:-}")"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg capability "state.shared.reconcile" \
+    --arg mode "$MODE" \
+    --arg status "$status" \
+    --arg db "$DB_PATH" \
+    --arg integrity_msg "$integrity_msg" \
+    --arg snapshot_file "$snapshot_file" \
+    --argjson converged "$converged" \
+    --argjson attempts "$attempt" \
+    --argjson fix_rc "$fix_rc" \
+    --argjson check_rc "$check_rc" \
+    --argjson review_rc "$review_rc" \
+    --argjson fix_payload "$fix_payload" \
+    --argjson check_payload "$check_payload" \
+    --argjson review_payload "$review_payload" \
+    '{
+      capability:$capability,
+      mode:$mode,
+      status:$status,
+      authority_db:$db,
+      sqlite_integrity_ok:true,
+      sqlite_integrity_message:$integrity_msg,
+      snapshot_file: (if $snapshot_file == "" then null else $snapshot_file end),
+      attempts:$attempts,
+      converged: ($converged == 1),
+      fix_rc:$fix_rc,
+      check_rc:$check_rc,
+      review_rc:$review_rc,
+      fix: $fix_payload,
+      check: $check_payload,
+      review_sweep: $review_payload
+    }'
+else
+  echo "state.shared.reconcile"
+  echo "mode: $MODE"
+  echo "status: $status"
+  echo "authority_db: $DB_PATH"
+  echo "sqlite_integrity_ok: true"
+  echo "sqlite_integrity_message: $integrity_msg"
+  [[ -n "$snapshot_file" ]] && echo "snapshot_file: $snapshot_file"
+  echo "attempts: $attempt"
+  echo "converged: $converged"
+  echo "fix_rc: $fix_rc"
+  echo "check_rc: $check_rc"
+  echo "review_rc: $review_rc"
+fi
+
+if [[ "$status" != "done" ]]; then
+  exit 1
+fi
