@@ -1,151 +1,214 @@
 inventory: HOME_UNIFI_NETWORK_INVENTORY_V1
-version: "1.0"
-status: pending
+version: "1.1"
+status: authoritative
 created: "2026-03-02"
+updated: "2026-03-04"
 authority: HOME_AUTHORITY_CONTRACT_V1
-note: "Populate on-site during LOOP-HOME-CANONICAL-REALIGNMENT W2"
+note: "Runtime-authoritative Home UniFi inventory from UDR API via proxmox-home relay."
+
+evidence:
+  run_keys:
+    - CAP-20260304-150806__network.home.unifi.clients.snapshot__Rawl225928
+    - CAP-20260304-174116__home.vm.status__Rmeti53193
+  probes:
+    - "UDR API /proxy/network/api/s/default/stat/device"
+    - "UDR API /proxy/network/api/s/default/rest/networkconf"
+    - "UDR API /proxy/network/api/s/default/rest/wlanconf"
+  generated_from:
+    - ops/bindings/network.unifi.home.clients.observed.yaml
+    - ops/bindings/ha.entity.state.baseline.yaml
 
 controller:
-  host: TBD
-  port: TBD
-  firmware: TBD
-  model: TBD
-  note: "UniFi controller access details — populate on-site"
+  host: "10.0.0.1"
+  lan_subnet: "10.0.0.0/24"
+  name: "UDR7"
+  model: "UDMA67A"
+  serial: "8C3066B624BD"
+  firmware: "4.4.11.28072"
+  managed_site: "default"
+  access_path: "Proxied via proxmox-home (100.103.99.62)"
 
-devices: []
-  # To be populated with:
-  # - Router/gateway
-  # - Switches (model, port count, PoE)
-  # - Access points (model, location, channel)
-  # - Any other UniFi managed devices
+devices:
+  - id: udr-home
+    type: gateway
+    model: UDMA67A
+    serial: "8C3066B624BD"
+    mac: "8c:30:66:b6:24:bd"
+    lan_ip: "10.0.0.1"
+    wan_ip: "174.176.168.36"
+    firmware: "4.4.11.28072"
+    uplink: "ISP modem (Xfinity CGM4981COM)"
 
-vlans: []
-  # To be populated with:
-  # - VLAN ID, name, subnet, purpose
-  # - IoT isolation VLAN (if configured)
-  # - Guest network VLAN (if configured)
+  - id: usw-flex-2-5g-5
+    type: switch
+    model: USWED35
+    serial: "942A6F4CBBFF"
+    mac: "94:2a:6f:4c:bb:ff"
+    lan_ip: "10.0.0.102"
+    firmware: "2.1.8.971"
+    port_count: 5
+    uplink_device: udr-home
+    uplink_port: 1
 
-port_profiles: []
-  # To be populated with:
-  # - Port-to-VLAN assignments
-  # - PoE settings per port
+  - id: usw-lite-16-poe
+    type: switch
+    model: USL16LPB
+    serial: "6C63F898D407"
+    mac: "6c:63:f8:98:d4:07"
+    lan_ip: "10.0.0.211"
+    firmware: "7.2.123.16565"
+    port_count: 16
+    poe_ports: 8
+    uplink_device: usw-flex-2-5g-5
+    uplink_port: 4
 
-wan:
-  provider: TBD
-  type: TBD
-  speed_down: TBD
-  speed_up: TBD
-  ip_type: TBD
-  note: "Run speed test on-site"
+wireless_networks:
+  - name: pogodobby
+    band: both
+    security: wpapsk
+    enabled: true
+    guest: false
+  - name: pogodobby-iot
+    band: 2g
+    security: wpapsk
+    enabled: true
+    guest: false
 
-# ════════════════════════════════════════════════════════════════════════════
-# SWITCH PORT MAPPING ADDENDUM
-# ════════════════════════════════════════════════════════════════════════════
-# Added by: LOOP-NETSEC-W1-VLAN-SEGMENTATION-FIREWALL-20260303
-# Linked gap: GAP-OP-1108 (switches/network devices not normalized)
-# Authority: network.vlan.topology.contract.yaml (VLAN definitions)
-# ════════════════════════════════════════════════════════════════════════════
+vlans:
+  - name: Default
+    purpose: corporate
+    subnet: "10.0.0.1/24"
+    vlan_enabled: false
+    vlan_id: null
+    dhcp_enabled: true
+  - name: One-Click VPN
+    purpose: remote-user-vpn
+    subnet: "192.168.5.1/24"
+    vlan_enabled: false
+    vlan_id: null
+    dhcp_enabled: false
 
 switch_port_mapping:
-  description: >
-    Switch port-to-VLAN assignment plan for the home network.
-    The home site has a US-8-60W (8-port PoE switch). Port assignments
-    will be configured after VLANs are created in the UniFi controller.
-    Actual port numbers will be populated on-site.
-  lifecycle: experimental
-  switch_model: "US-8-60W"
-  total_ports: 8
-  poe_budget_watts: 60
-  uplink_port: 8
-
+  switch_id: usw-lite-16-poe
+  observed_at: "2026-03-04"
+  source: "UDR stat/device port_table"
   ports:
     - port: 1
-      assignment: trunk
-      vlan: all
-      poe: false
-      connected_device: "UDR7 gateway uplink"
-      detail: "Trunk port carrying all VLANs between switch and router"
-
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: 0.00
+      observed_device: null
     - port: 2
-      assignment: access
-      vlan: management
-      vlan_id: 1
-      poe: false
-      connected_device: "proxmox-home (Beelink SER7)"
-      detail: "Hypervisor on management VLAN"
-
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: 0.00
+      observed_device: null
     - port: 3
-      assignment: access
-      vlan: management
-      vlan_id: 1
-      poe: false
-      connected_device: "Home Assistant (ODROID)"
-      detail: "HA on management VLAN (will move to servers VLAN if on VM)"
-
+      link_up: true
+      speed_mbps: 100
+      poe_enabled: true
+      poe_power_watts: 1.08
+      observed_device: "PoE IoT node (likely coordinator)"
     - port: 4
-      assignment: access
-      vlan: iot
-      vlan_id: 30
-      poe: true
-      connected_device: "SLZB-06 (Zigbee coordinator)"
-      poe_draw_watts: 2
-      detail: "Zigbee coordinator on IoT VLAN, PoE powered"
-
+      link_up: true
+      speed_mbps: 100
+      poe_enabled: true
+      poe_power_watts: 1.14
+      observed_device: "PoE IoT node (likely coordinator)"
     - port: 5
-      assignment: access
-      vlan: iot
-      vlan_id: 30
-      poe: true
-      connected_device: "SLZB-06MU (Matter/Thread border router)"
-      poe_draw_watts: 2
-      detail: "Matter border router on IoT VLAN, PoE powered"
-
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: 0.00
+      observed_device: null
     - port: 6
-      assignment: access
-      vlan: iot
-      vlan_id: 30
-      poe: true
-      connected_device: "TubesZB (Z-Wave coordinator)"
-      poe_draw_watts: 2
-      detail: "Z-Wave coordinator on IoT VLAN, PoE powered"
-
+      link_up: true
+      speed_mbps: 100
+      poe_enabled: true
+      poe_power_watts: 1.57
+      observed_device: "PoE IoT node (likely coordinator)"
     - port: 7
-      assignment: access
-      vlan: management
-      vlan_id: 1
-      poe: false
-      connected_device: "NAS (Synology 918+)"
-      detail: "NAS on management VLAN for NFS/SMB access"
-
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: 0.00
+      observed_device: null
     - port: 8
-      assignment: access
-      vlan: management
-      vlan_id: 1
-      poe: false
-      connected_device: "Vaultwarden (LXC)"
-      detail: "Password manager on management VLAN"
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: 0.00
+      observed_device: null
+    - port: 9
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: null
+      observed_device: null
+    - port: 10
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: null
+      observed_device: null
+    - port: 11
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: null
+      observed_device: null
+    - port: 12
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: null
+      observed_device: null
+    - port: 13
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: null
+      observed_device: null
+    - port: 14
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: null
+      observed_device: null
+    - port: 15
+      link_up: false
+      speed_mbps: 0
+      poe_enabled: false
+      poe_power_watts: null
+      observed_device: null
+    - port: 16
+      link_up: true
+      speed_mbps: 1000
+      poe_enabled: false
+      poe_power_watts: null
+      observed_device: "Uplink to USW Flex 2.5G 5"
 
-  poe_summary:
-    total_poe_ports: 3
-    total_draw_watts: 6
-    remaining_budget_watts: 54
-    detail: "Only coordinators use PoE. Substantial budget headroom."
+wan:
+  provider: "Xfinity"
+  upstream_modem: "CGM4981COM"
+  type: "DOCSIS"
+  public_ip: "174.176.168.36"
+  latency_probes_ms:
+    cloudflare: 17
+    google: 22
+    source: "sensor.udr7_cloudflare_wan_latency / sensor.udr7_google_wan_latency"
+  speed_test:
+    method: "macOS networkQuality (client on home LAN)"
+    client_ip: "10.0.0.194"
+    sampled_at: "2026-03-04"
+    downlink_mbps: 336.559
+    uplink_mbps: 244.572
+    idle_latency_ms: 29.210
+    responsiveness:
+      downlink_ms: 164.964
+      uplink_ms: 135.958
 
-  trunking_policy:
-    description: >
-      Port 1 is the trunk port connecting the switch to the UDR7.
-      It carries all 6 VLANs (tagged) plus the management VLAN (untagged/native).
-      All other ports are access ports assigned to a single VLAN.
-    native_vlan: management
-    tagged_vlans:
-      - servers
-      - trusted
-      - iot
-      - guest
-      - dmz
-
-  migration_detail: >
-    Port assignments above are the PLANNED state after VLAN deployment.
-    Current state: all ports on flat 10.0.0.0/24 (no VLANs). Migration
-    requires physical home site visit. See network.vlan.topology.contract.yaml
-    migration section for phased rollout plan.
+open_items:
+  - "Per-port endpoint identity for ports 3/4/6 still inferred from PoE draw + active coordinator set; resolve with physical patch trace during next on-site walk-through."

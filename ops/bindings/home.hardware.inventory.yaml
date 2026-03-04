@@ -1,48 +1,138 @@
 inventory: HOME_HARDWARE_INVENTORY_V1
-version: "1.0"
-status: pending
+version: "1.1"
+status: authoritative
 created: "2026-03-02"
+updated: "2026-03-04"
 authority: HOME_AUTHORITY_CONTRACT_V1
-note: "Populate on-site during LOOP-HOME-CANONICAL-REALIGNMENT W2"
+note: "Canonical home hardware inventory reconciled from live network probes + asset registry + HA runtime."
+
+completeness:
+  scope: "Core home infrastructure and coordinators"
+  serial_coverage:
+    known_serials: 7
+    unknown_serials: 1
+    unknown_devices:
+      - tubeszb-2026-zw
+  deferred_scope:
+    - "Consumer endpoints without durable hardware identifiers stay in home.device.registry.yaml + network.unifi.home.clients.observed.yaml"
+
+evidence:
+  run_keys:
+    - CAP-20260304-150806__network.home.unifi.clients.snapshot__Rawl225928
+    - CAP-20260304-174116__home.vm.status__Rmeti53193
+    - CAP-20260304-132919__ha.z2m.devices.snapshot__Rh2yo26661
+  source_bindings:
+    - ops/bindings/internet.asset.registry.yaml
+    - ops/bindings/home.device.registry.yaml
+    - ops/bindings/network.unifi.home.clients.observed.yaml
 
 devices:
-  # --- Network Infrastructure ---
-  - id: home-router
-    type: router
-    make: TBD
-    model: TBD
-    ip: "10.0.0.1"
+  - id: udr-home
+    class: network.gateway_router
+    manufacturer: Ubiquiti
+    model: UDMA67A
+    serial: "8C3066B624BD"
+    mac: "8c:30:66:b6:24:bd"
+    lan_ip: "10.0.0.1"
     location: home
-    serial: TBD
-    note: "Primary home gateway"
+    role: "Primary home gateway / UniFi controller"
 
-  # --- Home Assistant ---
-  - id: home-assistant-host
-    type: server
-    make: TBD
-    model: TBD
-    ip: "10.0.0.100"
+  - id: usw-lite-16-poe
+    class: network.switch
+    manufacturer: Ubiquiti
+    model: USL16LPB
+    serial: "6C63F898D407"
+    mac: "6c:63:f8:98:d4:07"
+    lan_ip: "10.0.0.211"
     location: home
-    serial: TBD
-    os: "Home Assistant OS"
-    note: "Runs HA + Z2M + add-ons"
+    role: "Primary access switch (16-port, PoE on ports 1-8)"
 
-  # --- Zigbee/Thread Coordinator ---
+  - id: usw-flex-2-5g-5
+    class: network.switch
+    manufacturer: Ubiquiti
+    model: USWED35
+    serial: "942A6F4CBBFF"
+    mac: "94:2a:6f:4c:bb:ff"
+    lan_ip: "10.0.0.102"
+    location: home
+    role: "Aggregation/uplink switch (2.5G)"
+
+  - id: proxmox-home
+    class: compute.hypervisor
+    manufacturer: Beelink
+    model: SER7
+    serial: "A78403BH50349"
+    lan_ip: "10.0.0.179"
+    tailscale_ip: "100.103.99.62"
+    location: home
+    role: "Proxmox VE host"
+
+  - id: homeassistant-vm
+    class: compute.vm
+    manufacturer: Proxmox
+    model: "VM 100"
+    serial: null
+    lan_ip: "10.0.0.100"
+    location: home
+    role: "Home Assistant OS"
+    note: "Runs on proxmox-home; VM identity is vm_id-based rather than hardware serial."
+
+  - id: nas
+    class: storage.nas
+    manufacturer: Synology
+    model: "DS918+"
+    serial: "1970PDN058306"
+    macs:
+      - "00:11:32:BA:AD:CD"
+      - "00:11:32:BA:AD:CE"
+    lan_ip: "10.0.0.150"
+    tailscale_ip: "100.102.199.111"
+    location: home
+    role: "NAS / backup target"
+
+  - id: slzb-06
+    class: iot.zigbee_coordinator
+    manufacturer: SMLIGHT
+    model: "SLZB-06"
+    serial: "06R162-25033294"
+    mac: "20:43:a8:51:15:e3"
+    lan_ip: "10.0.0.51"
+    location: home
+    role: "Primary Zigbee coordinator"
+
   - id: slzb-06mu
-    type: zigbee_coordinator
-    make: SMLIGHT
-    model: SLZB-06MU
-    ip: "10.0.0.52"
-    port: 6638
+    class: iot.thread_coordinator
+    manufacturer: SMLIGHT
+    model: "SLZB-06MU"
+    serial: "06MU-173-2511650"
+    mac: "82:b5:4e:97:b0:28"
+    lan_ip: "10.0.0.52"
     location: home
-    serial: TBD
-    firmware: TBD
-    protocols: [zigbee, thread]
-    note: "OTBR coordinator radio, Ethernet-connected"
+    role: "Matter/Thread coordinator"
 
-  # --- Z2M End Devices ---
-  # To be populated from z2m.devices.yaml + on-site walk-through
-  # Expected: 5-6 devices (naming parity drift to resolve)
+  - id: tubeszb-2026-zw
+    class: iot.zwave_coordinator
+    manufacturer: TubeZB
+    model: "Z-Wave coordinator (ZAC93)"
+    serial: null
+    mac: "34:5f:45:37:07:a3"
+    lan_ip: "10.0.0.90"
+    location: home
+    role: "Primary Z-Wave coordinator"
+    note: "MAC and runtime identity confirmed; vendor serial not exposed via current API surfaces."
 
-  # --- Additional Hardware ---
-  # To be discovered on-site: switches, APs, IoT devices not in Z2M
+  - id: xfinity-gateway
+    class: network.gateway_modem_router
+    manufacturer: Comcast/Xfinity
+    model: CGM4981COM
+    serial: null
+    cm_mac: "0C:FE:7B:ED:0C:6C"
+    wan_mac: "0C:FE:7B:ED:0C:6D"
+    mta_mac: "0C:FE:7B:ED:0C:6E"
+    location: home
+    role: "ISP modem/gateway upstream of UDR"
+
+references:
+  device_registry: ops/bindings/home.device.registry.yaml
+  unifi_clients_observed: ops/bindings/network.unifi.home.clients.observed.yaml
+  infra_asset_registry: ops/bindings/internet.asset.registry.yaml

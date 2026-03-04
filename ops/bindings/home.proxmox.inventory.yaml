@@ -1,23 +1,70 @@
 inventory: HOME_PROXMOX_INVENTORY_V1
-version: "1.0"
-status: pending
+version: "1.1"
+status: authoritative
 created: "2026-03-02"
+updated: "2026-03-04"
 authority: HOME_AUTHORITY_CONTRACT_V1
-note: "Populate on-site during LOOP-HOME-CANONICAL-REALIGNMENT W2. If no Proxmox at home, mark status=not_applicable."
+note: "Home Proxmox inventory from live SSH/runtime probes."
 
-nodes: []
-  # To be populated with:
-  # - Node name, IP, hardware specs
-  # - VM inventory per node
-  # - Storage configuration
+presence_status: active
 
-presence_status: TBD
-  # Options:
-  # - active: Proxmox node(s) running at home
-  # - not_applicable: No Proxmox at home location (all Proxmox at shop)
-  # - planned: Proxmox planned for home but not deployed
+evidence:
+  run_keys:
+    - CAP-20260304-174116__home.vm.status__Rmeti53193
+    - CAP-20260304-174116__home.health.check__Rdmns53218
+  source_bindings:
+    - ops/bindings/hardware.inventory.yaml
+    - ops/bindings/home.device.registry.yaml
 
-note: |
-  Shop Proxmox (pve.ronny.works) hosts all production VMs (200+).
-  Home may or may not have a separate Proxmox node.
-  Determine on-site and update accordingly.
+nodes:
+  - node_id: proxmox-home
+    hostname: proxmox-home
+    site: home
+    model: "Beelink SER7"
+    serial: "A78403BH50349"
+    cpu: "AMD Ryzen 7 7840HS"
+    ram: "32GB DDR5"
+    hypervisor: "Proxmox VE"
+    tailscale_ip: "100.103.99.62"
+    lan_ip: "10.0.0.179"
+    role: "Home hypervisor"
+
+    services:
+      - id: vm-100-homeassistant
+        type: vm
+        vm_id: 100
+        name: homeassistant
+        status: running
+        memory_mb: 4096
+        bootdisk_gb: 32
+        purpose: "Home Assistant OS runtime"
+      - id: vm-102-vaultwarden
+        type: vm
+        vm_id: 102
+        name: vaultwarden
+        status: stopped
+        memory_mb: 2048
+        bootdisk_gb: 16
+        decommissioned_on: "2026-02-16"
+        purpose: "Legacy Vaultwarden (superseded by infra-core)"
+      - id: lxc-105-pihole-home
+        type: lxc
+        vm_id: 105
+        name: pihole-home
+        status: running
+        purpose: "Home DNS filtering"
+
+    decommissioned_services:
+      - id: vm-101-immich-home
+        status: stopped
+      - id: lxc-103-download-home
+        status: stopped
+
+    storage:
+      boot: "local NVMe"
+      note: "NAS-backed backup surfaces handled by Synology DS918+ (nas)."
+
+    operational_checks:
+      ssh_reachable: true
+      vm_list_retrievable: true
+      lxc_list_retrievable: true

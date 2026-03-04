@@ -1,7 +1,8 @@
 contract: HOME_AUTHORITY_CONTRACT_V1
-version: "1.0"
-status: pending
+version: "1.1"
+status: active
 created: "2026-03-02"
+updated: "2026-03-04"
 authority_loop: LOOP-HOME-CANONICAL-REALIGNMENT-20260302
 description: "Authority contract for Home infrastructure domain"
 
@@ -10,17 +11,17 @@ domain:
   label: "Home Infrastructure"
   owner: "@ronny"
   location: home
-  access_model: lan_only
+  access_model: "remote_via_tailscale_and_proxmox_proxy"
 
 boundaries:
   network:
     primary_gateway: "10.0.0.1"
     ha_host: "10.0.0.100"
     ha_port: 8123
-    z2m_coordinator: "10.0.0.52"
+    z2m_coordinator: "10.0.0.51"
     z2m_coordinator_port: 6638
-    tailscale_access: false
-    note: "Home LAN only — no Tailscale access to HA"
+    tailscale_access: true
+    note: "Home runtime is reachable via Tailscale + proxmox-home relay for UniFi LAN APIs."
 
   services:
     - id: home-assistant
@@ -32,16 +33,17 @@ boundaries:
     - id: zigbee2mqtt
       host: "10.0.0.100"
       access_via: home-assistant
-      note: "Z2M accessed through HA integration, not direct API"
+      note: "Z2M accessed through HA integration + add-on runtime."
     - id: unifi-controller
-      host: TBD
-      port: TBD
-      note: "To be populated on-site"
+      host: "10.0.0.1"
+      port: 443
+      access_via: proxmox-home
+      note: "UDR7 controller API proxied through proxmox-home."
 
   verify_ring:
     ring_name: home-runtime
     gates: [D113, D114, D115, D118, D119, D120]
-    skip_condition: "HA unreachable (offsite)"
+    skip_condition: "HA unreachable"
     isolation_from: spine-core-fast
 
 inventories:
@@ -51,6 +53,8 @@ inventories:
     scope: network_equipment
   - path: ops/bindings/home.proxmox.inventory.yaml
     scope: compute_nodes
+  - path: ops/bindings/home.zigbee.reliability.baseline.yaml
+    scope: zigbee_reliability
   - path: ops/bindings/home.assistant.catalog.snapshot.yaml
     scope: ha_integrations
   - path: ops/bindings/home.automation.registry.yaml
