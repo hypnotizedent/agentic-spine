@@ -9,14 +9,14 @@
 
 | # | Prerequisite | Gate/Evidence | Status |
 |---|-------------|---------------|--------|
-| P1 | Home target topology finalized in contract | GAP-OP-1403 | blocked_by_ronny_arch_decision |
+| P1 | Home target topology finalized in contract | ops/bindings/home.media.readiness.baseline.yaml | partial (blocked on /mnt/media) |
 | P2 | Path authority contract enforced (4-way parity) | GAP-OP-1404 | open |
 | P3 | Status progression contract defined | GAP-OP-1405 | open |
-| P4 | Home network throughput validated (NFS/SMB perf) | GAP-OP-1403 | blocked |
-| P5 | Home storage capacity confirmed (tank/NFS) | infra.storage.placement.policy.yaml | blocked |
-| P6 | Backup posture verified for home target | backup.inventory.yaml | blocked |
+| P4 | Home network throughput validated (NFS/SMB perf) | ops/bindings/home.media.readiness.baseline.yaml | pass |
+| P5 | Home storage capacity confirmed (tank/NFS) | ops/bindings/home.media.readiness.baseline.yaml | pass |
+| P6 | Backup posture verified for home target | ops/bindings/home.media.readiness.baseline.yaml | pass (active targets) |
 | P7 | All disconnect-trace gaps resolved | GAP-OP-1387..1393 | open |
-| P8 | Lineage checkpoint reviewed | GAP-OP-1406 | open |
+| P8 | Lineage checkpoint reviewed | GAP-OP-1406 | pass |
 
 ## Preflight Phase
 
