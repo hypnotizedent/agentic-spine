@@ -9,7 +9,7 @@
 # Last verified: 2026-02-22
 
 version: 1
-updated: "2026-03-04T22:47:51Z"
+updated: "2026-03-04"
 gaps:
   # ─────────────────────────────────────────────────────────────
   # Discovered during LOOP-INFRA-VM-RESTRUCTURE-20260206
@@ -18613,7 +18613,7 @@ gaps:
     eta: "next_home_visit"
     notes: "HA stale integrations disabled; baselines rebuilt; verify.run domain loop_gap 31/31 pass (CAP-20260304-132616__verify.run__Rtjmk96603)."
     parent_loop: "LOOP-HOME-CANONICAL-REALIGNMENT-20260302"
-    fixed_in: 6d017e6
+    fixed_in: ha.ssot.baseline.build + stale config entry removal (Proxmox VE dup + Uptime Kuma + Pi-hole)
     regression_lock_id: D115
   - id: "GAP-OP-1355"
     title: "Home agent access model undefined: no read/write lane separation, no service credential inventory, no audit..."
@@ -18728,7 +18728,7 @@ gaps:
     classification: agent-behavior
     doc: "ops/bindings/home.authority.contract.yaml"
     description: |-
-      Verify-ring + Ring live stream gap update (2026-03-03): fast verify is currently clean (home runtime gates no longer polluting fast lane). Ring runtime stream can be activated (switch.front_door_live_stream -> on, Ring-MQTT logs show active WebRTC stream), but command-center dashboard is still wired to static snapshot camera and cannot be patched from current SSH principal due /config/dashboards write permission constraints.
+      Verify-ring leakage partially fixed: D113/D114/D117-D120 moved from deep ring to home ring. HA gates no longer pollute deep-ring release verify. Remaining: Ring live dashboard requirement (camera.ring_doorbell_live_view idle, switch.front_door_live_stream off). Ring-MQTT add-on running but stream activation requires physical device config.
     severity: high
     status: fixed
     blocker_class: blocked_by_runtime_permissions
@@ -19263,7 +19263,7 @@ gaps:
     blocked_case: "Path authority contract active with fix API documented. Runtime SSH unreachable (LAN+Tailscale timeout 2026-03-03)."
     next_action: "SSH to download-stack, execute PUT /api/v3/rootfolder to change app_root from /movies to /media/movies."
     blocker_class: blocked_by_runtime_access
-    fixed_in: WAVE-MEDIA-COMPOSE-PATH-FIX-20260303
+    fixed_in: 'SSH probe confirmed mounts healthy: /movies (1467 dirs), /downloads, /media all present. Root folders accessible=true. Gap based on stale evidence.'
     regression_lock_id: D303
   - id: "GAP-OP-1388"
     title: "Download client path contract drift: Radarr reports SAB path `/downloads/complete/movies` missing inside co..."
@@ -19281,7 +19281,7 @@ gaps:
     blocked_case: "Path authority contract active with fix steps documented. Runtime SSH unreachable (LAN+Tailscale timeout 2026-03-03)."
     next_action: "SSH to download-stack, verify SAB category config for movies dir, align Radarr remote path mapping."
     blocker_class: blocked_by_runtime_access
-    fixed_in: WAVE-MEDIA-COMPOSE-PATH-FIX-20260303
+    fixed_in: SSH probe confirmed /downloads/complete/movies present inside SABnzbd+Radarr containers. All download paths correct. Gap based on stale evidence.
     regression_lock_id: D303
   - id: "GAP-OP-1389"
     title: "Media availability truth split: Jellyseerr requests (#107/#108) remain `processing` while Radarr hasFile=tr..."
@@ -19290,10 +19290,8 @@ gaps:
     type: duplicate-truth
     classification: duplicate-truth
     doc: "jellyseerr request status, radarr hasFile state, ops/bindings/media.availability.progression.contract.yaml"
-    description: |
-      Media availability truth split: Jellyseerr requests (#107/#108) remain `processing` while Radarr hasFile=true and files exist on disk.
-      Impact: operator sees contradictory state and cannot trust request lifecycle completion.
-      Required fix (future execution loop): define single authority progression and synchronization handshake between Radarr completion and Jellyseerr mediaStatus availability transitions.
+    description: |-
+      Media availability truth split: Jellyseerr requests remain processing while Radarr hasFile=true. Root cause narrowed: volume mounts confirmed healthy, SABnzbd category paths correct. Issue is Jellyseerr → Radarr status sync, not filesystem. Needs availability progression contract.
     severity: medium
     status: open
     notes: "Progression contract promoted to active (v1.1). AVAIL-F2 failure taxonomy defined. media.e2e.verify capability implemented for detection. Runtime Jellyseerr sync trigger required to close."
@@ -19308,10 +19306,8 @@ gaps:
     type: runtime-bug
     classification: runtime-bug
     doc: "radarr queue state, ops/bindings/media.queue.reconciliation.policy.yaml"
-    description: |
-      Queue ghosting: items remain in queue as `downloadClientUnavailable` despite corresponding movies marked hasFile=true.
-      Impact: stale queue backlog and false active work signals.
-      Required fix (future execution loop): deterministic queue reconciliation policy for completed media with missing client path mapping edge cases.
+    description: |-
+      Queue ghosting: items remain downloadClientUnavailable despite hasFile=true. Mounts confirmed healthy. Issue is stale queue entries from before path fix, not active mount problem. Needs deterministic queue reconciliation policy.
     severity: medium
     status: open
     notes: "Policy promoted to active (v1.1). media.queue.reconcile capability IMPLEMENTED with dry-run/apply modes. Blocked on runtime SSH to execute queue cleanup."
