@@ -3,7 +3,7 @@
 # D343: plans lifecycle integrity lock
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 RECONCILE_BIN="$ROOT/ops/plugins/lifecycle/bin/planning-plans-reconcile"
 CONTRACT="$ROOT/ops/bindings/plans.lifecycle.yaml"
 
