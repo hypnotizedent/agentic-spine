@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SPINE-STATE-AUTHORITY-FRAMEWORK-20260304
 created: 2026-03-04
-status: active
+status: closed
 owner: "@ronny"
 scope: spine
 priority: high
