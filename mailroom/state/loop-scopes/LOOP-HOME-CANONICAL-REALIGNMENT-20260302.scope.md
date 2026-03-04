@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-HOME-CANONICAL-REALIGNMENT-20260302
 created: 2026-03-02
-status: planned
+status: closed
 owner: "@ronny"
 scope: home
 priority: high
