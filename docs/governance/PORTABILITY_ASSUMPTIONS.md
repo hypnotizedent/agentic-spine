@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-24
+last_verified: 2026-03-04
 scope: portability-assumptions
 ---
 
@@ -10,6 +10,12 @@ scope: portability-assumptions
 Purpose: make the spine portable by documenting the environment assumptions it makes about the controller machine, filesystem layout, tools, and network access.
 
 This doc exists so failures look like "assumption violated" instead of "mystery breakage".
+
+## Canonical Bootstrap Bindings
+
+- Runtime bootstrap contract: `ops/bindings/runtime.bootstrap.contract.yaml`
+- Machine-path inventory freeze: `ops/bindings/runtime.path.inventory.baseline.yaml`
+- Runtime profile authority: `ops/bindings/tenant.profile.yaml`
 
 ## Invariants (Spine Runtime)
 
@@ -85,4 +91,3 @@ The controller machine (MacBook) is assumed to have:
 - **Manual-approval capabilities prompt for stdin** (`read -p`). If running non-interactively, pipe `yes` explicitly.
 - **Worktrees:** `SPINE_REPO` must remain the canonical runtime root. Only `SPINE_CODE` is allowed to vary via git worktrees (D48).
 - **Secrets:** never print env values; run secret-bearing commands via `secrets.exec` so receipts stay safe.
-
