@@ -18604,14 +18604,14 @@ gaps:
     classification: stale-ssot
     doc: "receipts/sessions/RCAP-20260302-140709__verify.release.run__Rs7lt84863/output.txt"
     description: |-
-      HA data-quality blocker: D115 fails with 527 unexpected unavailable entities (threshold 50). D119 fails: living_switch_scene not in z2m.devices.yaml. HA API is reachable (D113/D114 PASS). Fix requires entity audit + z2m device registration.
+      HA data-quality blocker update (2026-03-03): D119 naming parity is now fixed after live Z2M snapshot and naming contract reconciliation (5/5 parity). D115 still fails hard with 531 unexpected unavailable entities (threshold 50) after fresh HA baseline rebuild.
     severity: high
     status: open
     blocker_class: blocked_by_runtime_fix
-    blocked_case: "D115 (199 unavailable entities, threshold 50) and D119 (Z2M naming parity mismatch for living_switch_scene) require live HA API and SSH to hassio@ha. Unblock: connect to home LAN."
-    next_action: "Connect to home LAN, SSH to hassio@ha, run ha.z2m.devices.snapshot to refresh Z2M bindings, then run ha.entity.audit to triage unavailable entities and update allowlist."
+    blocked_case: "D115 remains red because HA has 676 unavailable entities (531 unexpected). This is now a real entity-hygiene/runtime cleanup problem, not stale snapshot drift."
+    next_action: "Run HA unavailable-entity triage by domain/integration, disable/remove stale entities or intentionally classify expected unavailable surfaces, then rebuild ha.entity.state.baseline + ha.ssot.baseline and re-run D115."
     eta: "next_home_visit"
-    notes: "Reparented to LOOP-HOME-CANONICAL-REALIGNMENT-20260302. D115 shows 199 unavailable entities (threshold 50). D119 Z2M naming parity mismatch: living_switch_scene device count 6 vs 5."
+    notes: "Evidence: CAP-20260303-223209__ha.device.map.build__R30qq54281, CAP-20260303-222932__ha.ssot.baseline.build__R1cyi75956. D119 PASS in worktree context after z2m.naming parity fix; D115 still FAIL (531 unexpected unavailable)."
     parent_loop: "LOOP-HOME-CANONICAL-REALIGNMENT-20260302"
   - id: "GAP-OP-1355"
     title: "Home agent access model undefined: no read/write lane separation, no service credential inventory, no audit..."
@@ -18635,14 +18635,14 @@ gaps:
     classification: runtime-bug
     doc: "ops/bindings/home.hardware.inventory.yaml"
     description: |-
-      Zigbee reliability baseline: Z2M has 14 entities, 6 devices, bridge connected (D118 PASS). Missing: LQI/SNR mesh map, dead-router recovery plan, naming parity fix for living_switch_scene.
+      Zigbee reliability baseline: Z2M parity portion is now corrected (5-device naming parity fixed). Remaining gap is reliability instrumentation: no LQI/SNR mesh map, no dead-router recovery baseline, no periodic health capture.
     severity: high
     status: open
     blocker_class: blocked_by_runtime_fix
-    blocked_case: "Z2M network map, LQI/SNR capture, and dead-router identification require physical Z2M/HA access on home LAN. Naming parity drift (6 vs 5 devices) needs live Z2M API."
-    next_action: "Connect to home LAN, access Z2M web UI, capture network map screenshot, export LQI/SNR per device, identify dead routers, fix living_switch_scene naming parity."
+    blocked_case: "Z2M network map and LQI/SNR capture still require direct Z2M instrumentation path; naming parity drift is no longer the blocker."
+    next_action: "Capture Z2M network map and per-device LQI/SNR baseline, define dead-router detection threshold and recovery SOP, then codify in home HA reliability contract."
     eta: "next_home_visit"
-    notes: "Z2M naming parity drift: 6 devices in z2m.devices.yaml vs 5 in ha.device.map.yaml. Network map and signal quality baseline never captured."
+    notes: "Parity fix evidence: z2m.naming.yaml reduced to 5 live devices and D119 parity gate now passes in worktree context. Remaining reliability instrumentation still open."
     parent_loop: "LOOP-HOME-CANONICAL-REALIGNMENT-20260302"
   - id: "GAP-OP-1357"
     title: "UniFi and Proxmox-home normalization missing: no UniFi device/port/VLAN inventory, no Proxmox-home node con..."
@@ -18722,14 +18722,14 @@ gaps:
     classification: agent-behavior
     doc: "ops/bindings/home.authority.contract.yaml"
     description: |-
-      Verify-ring leakage: Home runtime gates D113/D114/D115/D118/D119/D120 in same ring as spine-core gates. HA unreachability pollutes release verify. Expanded scope: includes Ring live dashboard requirement — camera.ring_doorbell_live_view is idle (video_url:null), switch.front_door_live_stream is off, Ring-MQTT add-on running. Needs stream activation + live rendering wiring, not just ring split.
+      Verify-ring + Ring live stream gap update (2026-03-03): fast verify is currently clean (home runtime gates no longer polluting fast lane). Ring runtime stream can be activated (switch.front_door_live_stream -> on, Ring-MQTT logs show active WebRTC stream), but command-center dashboard is still wired to static snapshot camera and cannot be patched from current SSH principal due /config/dashboards write permission constraints.
     severity: high
     status: open
-    blocker_class: blocked_by_runtime_access
-    blocked_case: "Ring separation requires architecture decision on how to partition home-runtime gates (D113-D120) from spine-core fast verify. Options: ring_assignment field in gate.registry.yaml, conditional skip based on HA reachability probe, or separate verify command."
-    next_action: "Decide ring separation architecture: add ring_assignment field to gate.registry.yaml for D113-D120, implement conditional skip in verify.release.run based on HA reachability probe, update verify tooling."
+    blocker_class: blocked_by_runtime_permissions
+    blocked_case: "Live stream runtime is healthy, but dashboard deployment is blocked: hassio@ha (uid 1000) lacks write permission to /config/dashboards/command-center.yaml (owned by uid 501)."
+    next_action: "Apply command-center dashboard patch with a write-capable principal (owner/root/samba path): replace snapshot card with custom:webrtc-camera rtsp://03cabcc9-ring-mqtt:8554/9c761372553e_live, then validate live render in command-center."
     eta: "next_home_visit"
-    notes: "Contract defined in home.authority.contract.yaml verify_ring section but enforcement not yet wired. D113/D114/D115/D118/D119/D120 currently pollute spine-core fast verify when HA is unreachable."
+    notes: "Evidence: CAP-20260303-223233__verify.run__Rbteq77766 (fast 16/16), CAP-20260303-223012__ha.service.call__R8gqd21804 (switch turn_on), CAP-20260303-223024__ha.entity.status__Rz5se31294 (live_stream switch on), Ring-MQTT logs show live stream status active."
     parent_loop: "LOOP-HOME-CANONICAL-REALIGNMENT-20260302"
   - id: "GAP-OP-1362"
     title: "Mail-archiver EWS ingest finalization loop metadata is contradictory (status: closed while execution_readine..."
