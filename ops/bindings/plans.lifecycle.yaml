@@ -1,0 +1,126 @@
+# Plans Lifecycle Contract
+#
+# Canonical lifecycle and authority/projection model for deferred-intent plans.
+# Decision: LOOP-MAILROOM-2-0-PLANS-LIFECYCLE-CANONICAL-FIX-20260303
+
+version: "1.0"
+updated_at: "2026-03-03"
+owner: "@ronny"
+scope: plans-lifecycle
+
+authority:
+  runtime_store:
+    type: sqlite
+    file: mailroom/state/shared_authority.db
+    pragmas:
+      journal_mode: WAL
+      busy_timeout_ms: 5000
+      foreign_keys: true
+    tables:
+      - plans
+      - plan_events
+      - plan_docs
+      - plans_projection_watermarks
+      - schema_migrations
+  bootstrap_from_legacy_surface: mailroom/state/plans/index.yaml
+  projection_surfaces:
+    - mailroom/state/plans/index.yaml
+    - mailroom/state/plans/PLAN-*.md
+  mutation_capabilities:
+    - planning.plans.create
+    - planning.plans.promote
+    - planning.plans.retire
+    - planning.plans.cancel
+    - planning.plans.reconcile
+    - planning.plans.archive
+    - state.shared.reconcile
+  write_policy: capability_only
+  direct_write_forbidden: true
+
+statuses:
+  - id: deferred
+    description: Deferred intent captured; not active execution.
+    terminal: false
+  - id: promoted
+    description: Plan intent promoted to active loop execution.
+    terminal: false
+  - id: retired
+    description: Historical intent preserved with explicit retirement reason.
+    terminal: true
+  - id: canceled
+    description: Intent intentionally abandoned with explicit cancel reason.
+    terminal: true
+
+status_aliases:
+  cancelled: canceled
+
+legacy_tombstones:
+  - legacy_status: active_blocked
+    canonical_status: deferred
+    preserve_fields:
+      - blocker_class
+      - blocked_by
+      - blocked_reason
+      - completed_note
+    note: Preserve blocker evidence while normalizing lifecycle status.
+  - legacy_status: completed
+    canonical_status: retired
+    retired_reason_from:
+      - completed_note
+      - retired_reason
+    default_retired_reason: Legacy completed status normalized to retired by plans lifecycle reconcile.
+
+transitions:
+  deferred: [promoted, retired, canceled]
+  promoted: [retired, canceled]
+  retired: []
+  canceled: []
+
+required_fields:
+  all:
+    - plan_id
+    - source_loop_id
+    - owner
+    - horizon
+    - review_date
+    - status
+  retired:
+    - retired_at_utc
+    - retired_reason
+  canceled:
+    - canceled_at_utc
+    - canceled_reason
+  promoted:
+    - promoted_at_utc
+
+projection_model:
+  docs_are_projection: true
+  docs_required_for_index_entries: true
+  missing_doc_action:
+    check: report
+    fix: create_placeholder
+  orphan_doc_action:
+    check: report
+    fix: archive
+  orphan_archive_dir: mailroom/state/plans/_orphans
+
+reconcile:
+  capability: state.shared.reconcile
+  idempotent: true
+  default_mode: check
+  fix_mode_writes:
+    - normalize_statuses
+    - enforce_terminal_audit_fields
+    - create_missing_projection_docs
+    - archive_orphan_projection_docs
+    - update_projection_watermarks
+  startup_run: true
+  scheduled_run:
+    launchd_label: com.ronny.state-shared-reconcile
+    cadence: hourly
+  rollback_snapshot_dir: mailroom/state/plans/_snapshots
+  failure_policy: fail_closed
+
+archive:
+  orphan_docs_target: mailroom/state/plans/_orphans
+  retention_days: 30

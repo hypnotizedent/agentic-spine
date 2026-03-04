@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.plans.reconcile — Detect and repair plans lifecycle/projection drift.
+#
+# Usage:
+#   planning-plans-reconcile [--check|--fix] [--json] [--no-archive-orphans] [--no-create-placeholders]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+LIFECYCLE_CONTRACT="$ROOT/ops/bindings/plans.lifecycle.yaml"
+source "$ROOT/ops/lib/git-lock.sh"
+
+MODE="check"
+JSON_MODE=0
+ARCHIVE_ORPHANS=1
+CREATE_PLACEHOLDERS=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --check) MODE="check"; shift ;;
+    --fix) MODE="fix"; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    --no-archive-orphans) ARCHIVE_ORPHANS=0; shift ;;
+    --no-create-placeholders) CREATE_PLACEHOLDERS=0; shift ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: planning-plans-reconcile [--check|--fix] [--json] [--no-archive-orphans] [--no-create-placeholders]
+
+Modes:
+  --check  Report lifecycle/projection drift and exit non-zero when drift is present.
+  --fix    Normalize legacy statuses, enforce terminal audit fields, and regenerate
+           YAML/PLAN projection surfaces from SQLite authority.
+EOF
+      exit 0
+      ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -f "$LIFECYCLE_CONTRACT" ]] || {
+  echo "FAIL: plans lifecycle contract not found: $LIFECYCLE_CONTRACT" >&2
+  exit 1
+}
+
+if [[ "$MODE" == "fix" ]]; then
+  acquire_git_lock plans || exit 1
+  trap 'release_git_lock' EXIT INT TERM
+fi
+
+python3 - "$ROOT" "$MODE" "$JSON_MODE" "$ARCHIVE_ORPHANS" "$CREATE_PLACEHOLDERS" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+json_mode = sys.argv[3] == "1"
+archive_orphans = sys.argv[4] == "1"
+create_placeholders = sys.argv[5] == "1"
+fix_mode = mode == "fix"
+
+sys.path.insert(0, str(root / "ops/plugins/lifecycle/lib"))
+from plans_sql_authority import (  # type: ignore
+    bootstrap_from_index_if_needed,
+    canonical_status_sets,
+    connect,
+    db_parity_snapshot,
+    ensure_schema,
+    fetch_plans,
+    get_plan,
+    insert_event,
+    integrity_check,
+    load_lifecycle_contract,
+    project_to_surfaces,
+    resolve_paths,
+    upsert_plan,
+    utc_now_text,
+)
+
+contract = load_lifecycle_contract(root)
+canonical_statuses, alias_map, legacy_map = canonical_status_sets(contract)
+required_fields = contract.get("required_fields") if isinstance(contract.get("required_fields"), dict) else {}
+required_all = required_fields.get("all") if isinstance(required_fields.get("all"), list) else []
+
+_db_path, index_path, plans_dir = resolve_paths(root)
+conn = connect(_db_path)
+ensure_schema(conn)
+bootstrap_imported = bootstrap_from_index_if_needed(conn, index_path)
+
+integrity_ok, integrity_msg = integrity_check(conn)
+
+errors: list[str] = []
+warnings: list[str] = []
+actions: list[str] = []
+
+noncanonical_status = 0
+legacy_normalized = 0
+missing_terminal_audit = 0
+updated_rows = 0
+
+for plan in fetch_plans(conn):
+    plan_id = str(plan.get("plan_id") or "").strip()
+    if not plan_id:
+        errors.append("plan row missing plan_id")
+        continue
+
+    for field in required_all:
+        fname = str(field or "").strip()
+        if not fname:
+            continue
+        if not str(plan.get(fname) or "").strip():
+            warnings.append(f"{plan_id}: missing required field '{fname}'")
+
+    source_status = str(plan.get("status") or "").strip() or "deferred"
+    status = source_status
+
+    if status in alias_map:
+        status = alias_map[status]
+
+    if status in legacy_map:
+        legacy_normalized += 1
+        canonical = str(legacy_map[status].get("canonical_status") or "").strip() or status
+        if fix_mode:
+            plan["legacy_status_tombstoned_from"] = source_status
+            plan["status"] = canonical
+            upsert_plan(conn, plan)
+            insert_event(
+                conn,
+                plan_id=plan_id,
+                event_type="status_normalized",
+                from_status=source_status,
+                to_status=canonical,
+                reason="legacy tombstone normalization",
+                actor="planning.plans.reconcile",
+                payload={"legacy_status": source_status, "canonical_status": canonical},
+            )
+            updated_rows += 1
+            actions.append(f"{plan_id}: normalized legacy status {source_status}->{canonical}")
+            status = canonical
+        else:
+            status = canonical
+
+    if status not in canonical_statuses:
+        noncanonical_status += 1
+        errors.append(
+            f"{plan_id}: non-canonical status '{source_status}' (allowed: {', '.join(sorted(canonical_statuses))})"
+        )
+        continue
+
+    if status != source_status and status not in legacy_map and fix_mode:
+        plan["status"] = status
+        upsert_plan(conn, plan)
+        insert_event(
+            conn,
+            plan_id=plan_id,
+            event_type="status_alias_normalized",
+            from_status=source_status,
+            to_status=status,
+            reason="status alias normalization",
+            actor="planning.plans.reconcile",
+            payload={"source_status": source_status, "canonical_status": status},
+        )
+        updated_rows += 1
+        actions.append(f"{plan_id}: normalized status alias {source_status}->{status}")
+
+    required_for_status = required_fields.get(status) if isinstance(required_fields.get(status), list) else []
+    missing = []
+    for field in required_for_status:
+        fname = str(field or "").strip()
+        if not fname:
+            continue
+        if not str(plan.get(fname) or "").strip():
+            missing.append(fname)
+
+    if missing:
+        missing_terminal_audit += 1
+        if fix_mode:
+            changed = []
+            if status == "retired":
+                reason = str(plan.get("retired_reason") or "").strip()
+                if not reason:
+                    reason = str(plan.get("completed_note") or "").strip()
+                if not reason:
+                    legacy = legacy_map.get(source_status) or {}
+                    reason = str(legacy.get("default_retired_reason") or "").strip() or "Retired by lifecycle reconcile (backfill)."
+                if not str(plan.get("retired_reason") or "").strip():
+                    plan["retired_reason"] = reason
+                    changed.append("retired_reason")
+                if not str(plan.get("retired_at_utc") or "").strip():
+                    plan["retired_at_utc"] = utc_now_text()
+                    changed.append("retired_at_utc")
+                if not str(plan.get("retired_from_status") or "").strip() and source_status != "retired":
+                    plan["retired_from_status"] = source_status
+                    changed.append("retired_from_status")
+            if status == "canceled":
+                if not str(plan.get("canceled_reason") or "").strip():
+                    plan["canceled_reason"] = "Canceled by lifecycle reconcile (backfill)."
+                    changed.append("canceled_reason")
+                if not str(plan.get("canceled_at_utc") or "").strip():
+                    plan["canceled_at_utc"] = utc_now_text()
+                    changed.append("canceled_at_utc")
+            if status == "promoted":
+                if not str(plan.get("promoted_at_utc") or "").strip():
+                    plan["promoted_at_utc"] = utc_now_text()
+                    changed.append("promoted_at_utc")
+
+            if changed:
+                upsert_plan(conn, plan)
+                insert_event(
+                    conn,
+                    plan_id=plan_id,
+                    event_type="audit_backfill",
+                    from_status=status,
+                    to_status=status,
+                    reason="terminal audit fields backfill",
+                    actor="planning.plans.reconcile",
+                    payload={"fields": changed},
+                )
+                updated_rows += 1
+                actions.append(f"{plan_id}: backfilled {', '.join(changed)}")
+
+            # re-check
+            missing = [f for f in required_for_status if not str(plan.get(str(f) or "") or "").strip()]
+
+        if missing:
+            errors.append(f"{plan_id}: status={status} missing required fields: {', '.join(missing)}")
+
+projection_result = {
+    "plans_total": len(fetch_plans(conn)),
+    "created_docs": 0,
+    "archived_docs": 0,
+    "index_hash": "",
+    "docs_hash": "",
+}
+
+if fix_mode:
+    projection_result = project_to_surfaces(
+        conn,
+        index_path=index_path,
+        plans_dir=plans_dir,
+        create_placeholders=create_placeholders,
+        archive_orphans=archive_orphans,
+    )
+
+parity = db_parity_snapshot(conn, index_path, plans_dir)
+missing_projection_docs = len(parity.get("missing_docs") or [])
+orphan_projection_docs = len(parity.get("orphan_docs") or [])
+projection_parity_mismatch = 0 if parity.get("plans_match") else 1
+watermark_mismatch = 0
+watermark_hash = parity.get("watermark_index_hash")
+if watermark_hash is None:
+    if fix_mode:
+        watermark_mismatch = 1
+    else:
+        warnings.append("projection watermark missing; run planning.plans.reconcile --fix to initialize")
+elif watermark_hash != parity.get("index_file_hash"):
+    watermark_mismatch = 1
+
+if projection_parity_mismatch:
+    errors.append("plans DB authority and YAML projection index differ")
+if missing_projection_docs:
+    errors.append(f"missing plan projection docs: {missing_projection_docs}")
+if orphan_projection_docs:
+    errors.append(f"orphan plan projection docs: {orphan_projection_docs}")
+if watermark_mismatch:
+    errors.append("projection watermark hash mismatch or missing")
+if not integrity_ok:
+    errors.append(f"sqlite integrity_check failed: {integrity_msg}")
+
+summary = {
+    "mode": mode,
+    "authority_db": str(_db_path),
+    "projection_index": str(index_path),
+    "bootstrap_imported": bootstrap_imported,
+    "plans_total": projection_result["plans_total"],
+    "noncanonical_status": noncanonical_status,
+    "legacy_normalized": legacy_normalized,
+    "missing_terminal_audit": missing_terminal_audit,
+    "missing_projection_docs": missing_projection_docs,
+    "orphan_projection_docs": orphan_projection_docs,
+    "projection_parity_mismatch": projection_parity_mismatch,
+    "watermark_mismatch": watermark_mismatch,
+    "sqlite_integrity_ok": 1 if integrity_ok else 0,
+    "expected_plans_hash": str(parity.get("expected_plans_hash") or ""),
+    "actual_plans_hash": str(parity.get("actual_plans_hash") or ""),
+    "index_file_hash": str(parity.get("index_file_hash") or ""),
+    "watermark_index_hash": str(parity.get("watermark_index_hash") or ""),
+    "updated_rows": updated_rows,
+    "actions_applied": len(actions),
+    "created_docs": projection_result["created_docs"],
+    "archived_docs": projection_result["archived_docs"],
+    "index_hash": projection_result["index_hash"] if fix_mode else str(parity.get("index_file_hash") or ""),
+    "docs_hash": projection_result["docs_hash"] if fix_mode else "",
+}
+
+payload = {
+    "capability": "planning.plans.reconcile",
+    "summary": summary,
+    "errors": errors,
+    "warnings": warnings,
+    "actions": actions,
+}
+
+if json_mode:
+    print(json.dumps(payload, indent=2))
+else:
+    print("planning.plans.reconcile")
+    for key in [
+        "mode",
+        "authority_db",
+        "projection_index",
+        "bootstrap_imported",
+        "plans_total",
+        "noncanonical_status",
+        "legacy_normalized",
+        "missing_terminal_audit",
+        "missing_projection_docs",
+        "orphan_projection_docs",
+        "projection_parity_mismatch",
+        "watermark_mismatch",
+        "sqlite_integrity_ok",
+        "expected_plans_hash",
+        "actual_plans_hash",
+        "index_file_hash",
+        "watermark_index_hash",
+        "updated_rows",
+        "actions_applied",
+        "created_docs",
+        "archived_docs",
+    ]:
+        print(f"{key}: {summary[key]}")
+    if warnings:
+        print("warnings:")
+        for line in warnings:
+            print(f"- {line}")
+    if errors:
+        print("errors:")
+        for line in errors:
+            print(f"- {line}")
+    if actions:
+        print("actions:")
+        for line in actions:
+            print(f"- {line}")
+
+drift_present = any(
+    summary[k] > 0
+    for k in [
+        "noncanonical_status",
+        "missing_terminal_audit",
+        "missing_projection_docs",
+        "orphan_projection_docs",
+        "projection_parity_mismatch",
+        "watermark_mismatch",
+    ]
+)
+
+if mode == "check":
+    raise SystemExit(1 if (drift_present or errors) else 0)
+
+raise SystemExit(1 if errors else 0)
+PY

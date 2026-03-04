@@ -839,6 +839,20 @@ capabilities:
     outputs: ["stdout"]
     domain: infra
     plane: fabric
+  mailroom.scan:
+    description: "Classify mailroom paths into authority/projection/runtime/ephemeral inventory tiers."
+    tags: [lifecycle, mailroom, governance]
+    command: "./ops/plugins/lifecycle/bin/mailroom-scan"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: loop_gap
+    plane: fabric
+    arg_protocol: passthrough
+    flags:
+      - "--json"
   launchd.log.rotate:
     description: "Rotate LaunchAgent stdout/stderr logs exceeding size threshold."
     tags: [lifecycle, logs, launchd]
@@ -950,7 +964,7 @@ capabilities:
     flags:
       - "--dry-run"
   planning.plans.list:
-    description: "List deferred intent plans from mailroom/state/plans/index.yaml with optional filters."
+    description: "List deferred intent plans from SQLite shared authority with optional filters."
     tags: [lifecycle, loops, planning]
     command: "./ops/plugins/lifecycle/bin/planning-plans-list"
     cwd: "$SPINE_CODE"
@@ -960,13 +974,77 @@ capabilities:
     outputs: ["stdout"]
     domain: loop_gap
     plane: fabric
+    arg_protocol: passthrough
     flags:
       - "--json"
       - "--horizon now|later|future"
       - "--owner @owner"
       - "--status deferred|promoted|retired|canceled"
+  planning.plans.status:
+    description: "Show plans lifecycle/projection health summary and drift counters."
+    tags: [lifecycle, loops, planning]
+    command: "./ops/plugins/lifecycle/bin/planning-plans-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: loop_gap
+    plane: fabric
+    arg_protocol: passthrough
+    flags:
+      - "--json"
+  planning.plans.reconcile:
+    description: "Detect/fix plans lifecycle drift, legacy status tombstones, and index<->projection parity."
+    tags: [lifecycle, loops, planning]
+    command: "./ops/plugins/lifecycle/bin/planning-plans-reconcile"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout", "mailroom/state/plans/index.yaml", "mailroom/state/plans/_orphans/"]
+    domain: loop_gap
+    plane: fabric
+    arg_protocol: passthrough
+    flags:
+      - "--check (default)"
+      - "--fix"
+      - "--no-archive-orphans"
+      - "--no-create-placeholders"
+      - "--json"
+  planning.plans.archive:
+    description: "Archive orphan plan projection docs under mailroom/state/plans/_orphans."
+    tags: [lifecycle, loops, planning]
+    command: "./ops/plugins/lifecycle/bin/planning-plans-archive"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout", "mailroom/state/plans/_orphans/"]
+    domain: loop_gap
+    plane: fabric
+    arg_protocol: passthrough
+    flags:
+      - "--dry-run"
+      - "--json"
+  planning.plans.review.sweep:
+    description: "List due plan reviews and optionally write a review-sweep projection artifact."
+    tags: [lifecycle, loops, planning, automation]
+    command: "./ops/plugins/lifecycle/bin/planning-plans-review-sweep"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout", "mailroom/state/plans/review-sweep/latest.yaml"]
+    domain: loop_gap
+    plane: fabric
+    arg_protocol: passthrough
+    flags:
+      - "--json"
+      - "--write-artifact"
+      - "--artifact-path <path>"
   planning.plans.create:
-    description: "Create a deferred plan entry in mailroom/state/plans/index.yaml."
+    description: "Create a deferred plan entry in SQLite shared authority and project to YAML/docs."
     tags: [lifecycle, loops, planning]
     command: "./ops/plugins/lifecycle/bin/planning-plans-create"
     cwd: "$SPINE_CODE"
@@ -976,6 +1054,7 @@ capabilities:
     outputs: ["stdout"]
     domain: loop_gap
     plane: fabric
+    arg_protocol: passthrough
     flags:
       - "--plan-id PLAN-*"
       - "--loop-id LOOP-* (canonical)"
@@ -998,6 +1077,7 @@ capabilities:
     outputs: ["stdout"]
     domain: loop_gap
     plane: fabric
+    arg_protocol: passthrough
     flags:
       - "--plan-id PLAN-*"
       - "--loop-id LOOP-* (optional)"
@@ -1014,6 +1094,7 @@ capabilities:
     outputs: ["stdout"]
     domain: loop_gap
     plane: fabric
+    arg_protocol: passthrough
     flags:
       - "--plan-id PLAN-*"
       - "--reason <text>"
@@ -1028,9 +1109,27 @@ capabilities:
     outputs: ["stdout"]
     domain: loop_gap
     plane: fabric
+    arg_protocol: passthrough
     flags:
       - "--plan-id PLAN-*"
       - "--reason <text>"
+  state.shared.reconcile:
+    description: "Run SQLite shared-authority integrity + projection self-heal loop with snapshot rollback."
+    tags: [lifecycle, loops, planning, automation]
+    command: "./ops/plugins/lifecycle/bin/state-shared-reconcile"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: auto
+    lifecycle: ready
+    outputs: ["stdout", "mailroom/state/plans/_snapshots/", "mailroom/state/plans/review-sweep/latest.yaml"]
+    domain: loop_gap
+    plane: fabric
+    arg_protocol: passthrough
+    flags:
+      - "--check (default)"
+      - "--fix"
+      - "--json"
+      - "--max-attempts N"
   gaps.batch.close:
     description: "Close all open gaps linked to a loop in one command."
     tags: [lifecycle, gaps]

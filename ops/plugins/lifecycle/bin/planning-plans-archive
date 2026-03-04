@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# planning.plans.archive — Archive and optionally purge orphan plan projection docs.
+#
+# Usage:
+#   planning-plans-archive [--dry-run] [--json] [--purge-days N]
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+source "$ROOT/ops/lib/git-lock.sh"
+
+DRY_RUN=0
+JSON_MODE=0
+PURGE_DAYS=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    --purge-days) PURGE_DAYS="${2:-}"; shift 2 ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: planning-plans-archive [--dry-run] [--json] [--purge-days N]
+
+Archives projection docs not represented in SQLite plans authority into
+mailroom/state/plans/_orphans/.
+
+--purge-days N additionally removes archived files older than N days.
+EOF
+      exit 0
+      ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ -n "$PURGE_DAYS" ]] && ! [[ "$PURGE_DAYS" =~ ^[0-9]+$ ]]; then
+  echo "FAIL: --purge-days must be integer" >&2
+  exit 2
+fi
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  acquire_git_lock plans || exit 1
+  trap 'release_git_lock' EXIT INT TERM
+fi
+
+python3 - "$ROOT" "$DRY_RUN" "$JSON_MODE" "$PURGE_DAYS" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+dry_run = sys.argv[2] == "1"
+json_mode = sys.argv[3] == "1"
+purge_days_raw = (sys.argv[4] or "").strip()
+purge_days = int(purge_days_raw) if purge_days_raw else None
+
+sys.path.insert(0, str(root / "ops/plugins/lifecycle/lib"))
+from plans_sql_authority import (  # type: ignore
+    bootstrap_from_index_if_needed,
+    canonical_doc_plan_id,
+    connect,
+    ensure_schema,
+    fetch_plans,
+    resolve_paths,
+    utc_now,
+)
+
+_db_path, index_path, plans_dir = resolve_paths(root)
+archive_dir = plans_dir / "_orphans"
+archive_dir.mkdir(parents=True, exist_ok=True)
+
+conn = connect(_db_path)
+ensure_schema(conn)
+bootstrap_from_index_if_needed(conn, index_path)
+
+plan_set = {
+    str(plan.get("plan_id") or "").strip()
+    for plan in fetch_plans(conn)
+    if isinstance(plan, dict) and str(plan.get("plan_id") or "").strip()
+}
+
+orphans = []
+for doc in sorted(plans_dir.glob("PLAN-*.md")):
+    pid = canonical_doc_plan_id(doc)
+    if pid not in plan_set:
+        orphans.append(doc)
+
+moved = []
+if not dry_run:
+    ts = utc_now().strftime("%Y%m%dT%H%M%SZ")
+    for doc in orphans:
+        target = archive_dir / f"{ts}__{doc.name}"
+        i = 1
+        while target.exists():
+            target = archive_dir / f"{ts}-{i}__{doc.name}"
+            i += 1
+        shutil.move(str(doc), str(target))
+        moved.append({"from": str(doc), "to": str(target)})
+
+purged = []
+if purge_days is not None:
+    now_epoch = datetime.now(timezone.utc).timestamp()
+    for doc in sorted(archive_dir.glob("*.md")):
+        age_days = int((now_epoch - doc.stat().st_mtime) // 86400)
+        if age_days < purge_days:
+            continue
+        if dry_run:
+            purged.append({"path": str(doc), "age_days": age_days, "mode": "would_purge"})
+        else:
+            doc.unlink(missing_ok=True)
+            purged.append({"path": str(doc), "age_days": age_days, "mode": "purged"})
+
+payload = {
+    "capability": "planning.plans.archive",
+    "mode": "dry-run" if dry_run else "apply",
+    "authority_db": str(_db_path),
+    "archive_dir": str(archive_dir),
+    "orphan_docs_count": len(orphans),
+    "orphan_docs": [str(p) for p in orphans],
+    "moved": moved,
+    "purge_days": purge_days,
+    "purged": purged,
+}
+
+if json_mode:
+    print(json.dumps(payload, indent=2))
+else:
+    print("planning.plans.archive")
+    print(f"mode: {payload['mode']}")
+    print(f"authority_db: {_db_path}")
+    print(f"orphan_docs_count: {payload['orphan_docs_count']}")
+    if orphans:
+        print("orphan_docs:")
+        for path in orphans:
+            print(f"- {path}")
+    if moved:
+        print("moved:")
+        for row in moved:
+            print(f"- {row['from']} -> {row['to']}")
+    if purged:
+        print("purged:")
+        for row in purged:
+            print(f"- {row['path']} ({row['age_days']}d, {row['mode']})")
+
+raise SystemExit(0)
+PY
