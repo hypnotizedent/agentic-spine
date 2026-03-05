@@ -12,6 +12,7 @@ MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
 CLOSEOUT_SCRIPT="$ROOT/ops/plugins/ops/bin/coordinator-lane-closeout"
 CLOSEOUT_CAP="coordinator.lane.closeout"
 WAVE_CMD="$ROOT/ops/commands/wave.sh"
+REGRESSION_SCRIPT="$ROOT/surfaces/verify/lib/wave_hardening_regression.py"
 
 fail() {
   echo "D331 FAIL: $*" >&2
@@ -25,6 +26,7 @@ fail() {
 [[ -f "$MANIFEST" ]] || fail "missing plugin manifest: $MANIFEST"
 [[ -x "$CLOSEOUT_SCRIPT" ]] || fail "missing closeout script: $CLOSEOUT_SCRIPT"
 [[ -f "$WAVE_CMD" ]] || fail "missing wave command: $WAVE_CMD"
+[[ -f "$REGRESSION_SCRIPT" ]] || fail "missing wave regression harness: $REGRESSION_SCRIPT"
 command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 command -v rg >/dev/null 2>&1 || fail "missing dependency: rg"
 command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
@@ -188,3 +190,5 @@ print(
     f"(required={len(required_fields)} closeout={len(closeout_fields)} packets_checked={packets_checked} capability=coordinator.lane.closeout)"
 )
 PY
+
+python3 "$REGRESSION_SCRIPT" "$ROOT" || fail "wave.sh regression harness failed"

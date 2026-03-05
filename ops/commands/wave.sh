@@ -3724,10 +3724,53 @@ try:
     if not pf:
         infra_violations.append("Preflight has not been run (required by wave.lifecycle contract)")
 
-    # 3. All dispatches must be done or explicitly blocked
-    pending = [d for d in dispatches if d["status"] == "dispatched"]
-    if pending:
-        infra_violations.append(f"{len(pending)} dispatch(es) still pending (not done/blocked)")
+    # 3. Pending dispatch force-close guard.
+    # Force-close is only allowed with explicit BLOCKED lane_outcomes + valid stub evidence.
+    lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+
+    def _stub_exists(ref: str) -> bool:
+        text = str(ref or "").strip()
+        if not text:
+            return False
+        if os.path.isabs(text):
+            return os.path.exists(text)
+        if spine_repo:
+            return os.path.exists(os.path.join(spine_repo, text))
+        return os.path.exists(text)
+
+    def _lane_outcome(lane_id: str) -> dict:
+        for row in lane_outcomes:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("lane_id", "")).strip() == lane_id:
+                return row
+        return {}
+
+    pending_dispatches = [
+        d for d in dispatches
+        if isinstance(d, dict) and str(d.get("status", "")).strip() in {"dispatched", "running"}
+    ]
+    pending_without_stub = []
+    for d in pending_dispatches:
+        lane = str(d.get("lane", "")).strip()
+        outcome = _lane_outcome(lane)
+        lane_status = str(outcome.get("lane_status", "")).strip().lower()
+        stub_ref = str(outcome.get("stub_evidence_ref", "")).strip()
+        blocked_with_stub = lane_status in {"blocked", "stubbed_blocked", "blocked_stubbed"} and _stub_exists(stub_ref)
+        if not blocked_with_stub:
+            pending_without_stub.append(lane or "unknown")
+
+    if pending_without_stub:
+        pending_msg = (
+            "dispatch pending without explicit blocked+stub evidence for lane(s): "
+            + ", ".join(sorted(set(pending_without_stub)))
+        )
+        if force:
+            print("BLOCKED: force-close denied while dispatches are pending without stub evidence.")
+            print(f"  - {pending_msg}")
+            print("Remediation: mark lane_outcomes as BLOCKED with valid stub_evidence_ref before retrying --force.")
+            sys.exit(1)
+        infra_violations.append(pending_msg)
 
     # 4. Canonical packet presence required at close as DoD source-of-truth
     packet_required = [
