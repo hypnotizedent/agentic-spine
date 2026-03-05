@@ -47,5 +47,5 @@ check "service-onboarding" \
   "inbox-shield not in service.onboarding.contract.yaml"
 
 echo ""
-echo "D377: $PASS/$TOTAL PASS"
+echo "D378: $PASS/$TOTAL PASS"
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
