@@ -5,6 +5,10 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
 VM_BINDING="$ROOT/ops/bindings/vm.lifecycle.yaml"
 BACKUP_ROOT="/mnt/docker/backups/media-config"
+SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
+
+# shellcheck source=ops/lib/ssh-resolve.sh
+source "$SSH_RESOLVE" 2>/dev/null || true
 
 usage() {
   cat <<'USAGE'
@@ -41,14 +45,25 @@ command -v ssh >/dev/null 2>&1 || { echo "MISSING_DEP: ssh" >&2; exit 2; }
 
 get_vm_ssh_ref() {
   local vm="$1"
-  local target user
+  local target user resolved_host
   target="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_target // .hostname // \"\"" "$VM_BINDING" 2>/dev/null || true)"
   user="$(yq -r ".vms[] | select(.hostname == \"$vm\") | .ssh_user // \"\"" "$VM_BINDING" 2>/dev/null || true)"
   [[ -n "$target" && "$target" != "null" ]] || return 1
+
+  resolved_host="$target"
+  if type ssh_resolve_host_with_fallback &>/dev/null; then
+    local resolution
+    resolution="$(ssh_resolve_host_with_fallback "$target" 2>/dev/null || true)"
+    if [[ -n "$resolution" ]]; then
+      resolved_host="$(awk '{print $1}' <<<"$resolution")"
+    fi
+  fi
+
+  [[ -n "$resolved_host" ]] || return 1
   if [[ -n "$user" && "$user" != "null" ]]; then
-    echo "${user}@${target}"
+    echo "${user}@${resolved_host}"
   else
-    echo "$target"
+    echo "$resolved_host"
   fi
 }
 
