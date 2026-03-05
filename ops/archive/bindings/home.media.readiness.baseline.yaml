@@ -1,0 +1,105 @@
+inventory: HOME_MEDIA_READINESS_BASELINE_V1
+version: "1.0"
+status: authoritative
+created: "2026-03-04"
+authority: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
+purpose: "Machine-checkable home-target preflight bundle for shop-to-home media relocation."
+
+evidence:
+  run_keys:
+    - CAP-20260304-181843__home.vm.status__Rytlj25075
+    - CAP-20260304-181843__home.backup.status__Rthbj25082
+    - CAP-20260304-181843__network.home.unifi.clients.snapshot__Rqcfr25098
+    - CAP-20260304-181843__home.health.check__R0xd225096
+  command_probes:
+    - "ssh root@100.103.99.62 'df -h / /mnt/pve/synology-backups'"
+    - "ssh root@100.103.99.62 '/usr/bin/time -f write_seconds=%e dd if=/dev/zero of=/mnt/pve/synology-backups/readiness-probe-*.bin bs=4M count=128 conv=fdatasync status=none'"
+    - "ssh root@100.103.99.62 'mount | egrep \"synology-backups|/mnt/media\"'"
+
+thresholds:
+  proxmox_home_boot_usage_warn_pct: 80
+  backup_share_min_free_tb: 2
+  backup_write_probe_min_mib_per_s: 80
+  home_media_mount_required_path: "/mnt/media"
+  home_wan_min_downlink_mbps: 200
+  home_wan_min_uplink_mbps: 100
+  vm_backup_freshness_hours: 26
+
+checks:
+  - id: PROXMOX_HOME_BOOT_USAGE
+    class: capacity
+    source: "ssh root@100.103.99.62 df -h /"
+    observed:
+      filesystem: "/dev/mapper/pve-root"
+      used_pct: 13
+      available_gb: 79
+    threshold: "used_pct <= 80"
+    pass: true
+
+  - id: HOME_BACKUP_SHARE_CAPACITY
+    class: capacity
+    source: "ssh root@100.103.99.62 df -h /mnt/pve/synology-backups"
+    observed:
+      mount: "/mnt/pve/synology-backups"
+      source: "10.0.0.150:/volume1/backups/proxmox_backups"
+      total_tb: 20
+      used_tb: 8.1
+      free_tb: 12
+      used_pct: 42
+    threshold: "free_tb >= 2"
+    pass: true
+
+  - id: HOME_BACKUP_SHARE_WRITE_PROBE
+    class: throughput
+    source: "ssh root@100.103.99.62 dd write probe to /mnt/pve/synology-backups"
+    observed:
+      bytes_written: 536870912
+      write_seconds: 4.81
+      write_mib_per_s: 106.44
+    threshold: "write_mib_per_s >= 80"
+    pass: true
+
+  - id: HOME_MEDIA_MOUNT_SEMANTICS
+    class: mount_semantics
+    source: "ssh root@100.103.99.62 mount + path check"
+    observed:
+      required_path: "/mnt/media"
+      path_exists: false
+      mount_present: false
+      mode: "unknown"
+    threshold: "/mnt/media exists and is mounted rw to home media target"
+    pass: false
+    blocker_code: HOME_MEDIA_MOUNT_MISSING
+
+  - id: HOME_WAN_THROUGHPUT_SAMPLE
+    class: network
+    source: "ops/bindings/home.unifi.network.inventory.yaml"
+    observed:
+      sampled_at: "2026-03-04"
+      downlink_mbps: 336.559
+      uplink_mbps: 244.572
+      idle_latency_ms: 29.210
+    threshold: "downlink_mbps >= 200 and uplink_mbps >= 100"
+    pass: true
+
+  - id: HOME_BACKUP_FRESHNESS
+    class: backup_posture
+    source: CAP-20260304-181843__home.backup.status__Rthbj25082
+    observed:
+      vm_100_age_hours: 15
+      vm_102_age_hours: 423
+      lxc_105_age_hours: 86
+      lxc_103_age_hours: 303
+    threshold: "active relocation targets must have backup age <= 26h"
+    pass: true
+
+overall:
+  readiness_state: blocked
+  blocking_checks:
+    - HOME_MEDIA_MOUNT_SEMANTICS
+  non_blocking_findings:
+    - "Legacy/decommissioned workloads have stale backups (vm102/lxc103)."
+  next_actions:
+    - "Provision canonical home media mount path (/mnt/media) on proxmox-home and verify rw semantics."
+    - "Declare home media target storage tier in infra.storage.placement.policy.yaml once mount target is finalized."
+    - "Re-run home media readiness baseline after mount provisioning."

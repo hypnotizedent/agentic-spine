@@ -1,0 +1,202 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# DNS Local Name Registry (.mint.local)
+# ═══════════════════════════════════════════════════════════════════════════
+# Defines the .mint.local naming convention for internal services and
+# governs how Pi-hole Local DNS entries are populated and maintained.
+#
+# Source plan: PLAN-NETWORK-SECURITY-OPS-WORKER-20260303
+# Parent loop: LOOP-NETSEC-W1-DNS-AUTHORITY-STACK-20260303
+# Linked gap: GAP-OP-1451 (.mint.local naming)
+# ═══════════════════════════════════════════════════════════════════════════
+
+contract_id: NETWORK_DNS_LOCAL_REGISTRY_V1
+version: "1.0"
+status: planned
+created: "2026-03-03"
+owner: "@ronny"
+
+description: >
+  The .mint.local domain is the internal naming convention for all
+  self-hosted services accessible on the LAN. Pi-hole Local DNS is
+  the authoritative source for these records. This registry defines
+  the naming convention, service-to-hostname mapping, and population
+  rules for maintaining the local DNS zone.
+
+# ────────────────────────────────────────────────────────────────────────────
+# NAMING CONVENTION
+# ────────────────────────────────────────────────────────────────────────────
+naming_convention:
+  domain_suffix: ".mint.local"
+  format: "<service-name>.mint.local"
+  rules:
+    - "Service names use lowercase kebab-case"
+    - "Names match the docker compose service name or VM hostname where possible"
+    - "Multi-instance services append site suffix: <service>-home.mint.local, <service>-shop.mint.local"
+    - "Infrastructure services use role name: pihole-home.mint.local, pve-shop.mint.local"
+    - "Coordinator devices use device ID: slzb-06.mint.local"
+    - "No underscores, no camelCase, no numeric-only prefixes"
+
+  reserved_prefixes:
+    - prefix: "gw-"
+      purpose: "Gateway devices (gw-home.mint.local, gw-shop.mint.local)"
+    - prefix: "pve-"
+      purpose: "Proxmox hypervisors (pve-home.mint.local, pve-shop.mint.local)"
+    - prefix: "pihole-"
+      purpose: "Pi-hole instances (pihole-home.mint.local, pihole-shop.mint.local)"
+    - prefix: "nas-"
+      purpose: "Storage appliances (nas-shop.mint.local)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# SERVICE REGISTRY (HOME NETWORK — 10.0.0.0/24)
+# ────────────────────────────────────────────────────────────────────────────
+home_entries:
+  infrastructure:
+    - hostname: gw-home.mint.local
+      ip: "10.0.0.1"
+      description: "UDR7 gateway"
+      source: network.home.baseline.yaml
+
+    - hostname: pve-home.mint.local
+      ip: "10.0.0.179"
+      description: "Proxmox home hypervisor (Beelink SER7)"
+      source: ssh.targets.yaml
+
+    - hostname: pihole-home.mint.local
+      ip: "10.0.0.53"
+      description: "Pi-hole DNS (LXC 105)"
+      source: network.home.baseline.yaml
+
+    - hostname: ha.mint.local
+      ip: "10.0.0.100"
+      description: "Home Assistant"
+      source: ssh.targets.yaml
+
+  coordinators:
+    - hostname: slzb-06.mint.local
+      ip: "10.0.0.51"
+      description: "SLZB-06 Zigbee coordinator"
+      source: network.home.baseline.yaml
+
+    - hostname: slzb-06mu.mint.local
+      ip: "10.0.0.52"
+      description: "SLZB-06MU Matter/Thread border router"
+      source: network.home.baseline.yaml
+
+    - hostname: tubeszb.mint.local
+      ip: "10.0.0.90"
+      description: "TubesZB Z-Wave coordinator"
+      source: network.home.baseline.yaml
+
+# ────────────────────────────────────────────────────────────────────────────
+# SERVICE REGISTRY (SHOP NETWORK — 192.168.1.0/24)
+# ────────────────────────────────────────────────────────────────────────────
+shop_entries:
+  infrastructure:
+    - hostname: gw-shop.mint.local
+      ip: "192.168.1.1"
+      description: "UDR6 gateway"
+      source: network.inventory.snapshot.yaml
+
+    - hostname: pve-shop.mint.local
+      ip: "192.168.1.200"
+      description: "Proxmox shop hypervisor (R730XD)"
+      source: ssh.targets.yaml
+
+    - hostname: pihole-shop.mint.local
+      ip: "192.168.1.204"
+      description: "Pi-hole DNS (VM 204 infra-core)"
+      source: ssh.targets.yaml
+
+    - hostname: nas-shop.mint.local
+      ip: "192.168.1.202"
+      description: "Synology NAS"
+      source: ssh.targets.yaml
+
+  services:
+    - hostname: observability.mint.local
+      ip: "192.168.1.205"
+      description: "Grafana/Prometheus/Loki (VM 205)"
+      source: ssh.targets.yaml
+
+    - hostname: media.mint.local
+      ip: "192.168.1.206"
+      description: "Jellyfin/Sonarr/Radarr (VM 206)"
+      source: ssh.targets.yaml
+
+    - hostname: download.mint.local
+      ip: "192.168.1.209"
+      description: "Download stack (VM 209)"
+      source: ssh.targets.yaml
+
+    - hostname: communications.mint.local
+      ip: "192.168.1.214"
+      description: "Stalwart mail (VM 214)"
+      source: ssh.targets.yaml
+
+    - hostname: finance.mint.local
+      ip: "192.168.1.211"
+      description: "Firefly III / SimpleFIN (VM 211)"
+      source: ssh.targets.yaml
+
+    - hostname: mint-modules.mint.local
+      ip: "192.168.1.213"
+      description: "Mint application stack (VM 213)"
+      source: ssh.targets.yaml
+
+    - hostname: docker-host.mint.local
+      ip: "192.168.1.200"
+      description: "Docker host (VM 200)"
+      source: ssh.targets.yaml
+
+# ────────────────────────────────────────────────────────────────────────────
+# POPULATION RULES
+# ────────────────────────────────────────────────────────────────────────────
+population_rules:
+  description: >
+    Rules governing how and when Pi-hole Local DNS entries are created,
+    updated, and removed.
+
+  source_of_truth: "This registry file (network.dns.local.registry.yaml)"
+  target: "Pi-hole Local DNS records (both home and shop instances)"
+
+  sync_policy:
+    method: "Capability-driven sync (network.dns.local.populate)"
+    direction: "Registry → Pi-hole (one-way push)"
+    conflict_resolution: "Registry wins; Pi-hole manual entries flagged as drift"
+    frequency: "On-demand via capability; drift gate checks daily"
+
+  entry_lifecycle:
+    add: "Add hostname to this registry, then run sync capability"
+    update: "Update IP in this registry, then run sync capability"
+    remove: "Remove from this registry, then run sync to prune Pi-hole"
+    verify: "Drift gate compares Pi-hole Local DNS against this registry"
+
+  exclusions:
+    - "Tailscale MagicDNS names (*.ts.net) are NOT registered in Pi-hole"
+    - "Public DNS names (*.ronny.works, *.mintprints.com) are NOT registered here"
+    - "DHCP dynamic clients are NOT registered (pool range 200-254)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED CAPABILITIES
+# ────────────────────────────────────────────────────────────────────────────
+planned_capabilities:
+  - name: network.dns.local.populate
+    description: "Sync .mint.local entries from this registry to Pi-hole Local DNS"
+    safety: mutating
+    approval: manual
+    status: planned
+
+  - name: network.dns.local.status
+    description: "Report parity between this registry and Pi-hole Local DNS"
+    safety: read-only
+    approval: auto
+    status: planned
+
+# ────────────────────────────────────────────────────────────────────────────
+# PROPOSED GATE
+# ────────────────────────────────────────────────────────────────────────────
+proposed_gates:
+  - id: D341
+    name: netsec-pihole-drift-lock
+    description: "Enforce Pi-hole Local DNS parity with this registry, upstream DNS config, DHCP DNS handout"
+    mode: report

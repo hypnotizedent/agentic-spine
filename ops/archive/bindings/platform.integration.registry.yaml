@@ -1,0 +1,122 @@
+# Status: authoritative
+# Last verified: 2026-02-24
+# Scope: platform-integration-registry-v1
+#
+# Purpose:
+#   SSOT for external platform integrations that connect to mint-modules.
+#   Defines each platform's role, integration status, and what agents
+#   should know before touching any integration surface.
+#
+#   KEY DISTINCTION: These are INBOUND channels where external customers
+#   route work to Mint as their production partner. Mint does NOT operate
+#   storefronts on these platforms — customers do.
+#
+# Model:
+#   Mint = production partner (prints, fulfills, ships)
+#   Customer = sells on Shopify/Etsy/etc, routes orders to Mint
+#   Comparable to: Printful, Printify, Gooten, SPOD
+
+version: 1
+updated_at: "2026-02-24"
+owner: "@ronny"
+
+integrations:
+  shopify:
+    role: inbound-order-channel
+    status: planned
+    description: >
+      Customers who sell on Shopify connect their store to Mint.
+      When a customer receives an order that requires production,
+      it flows to mint-modules for quoting, artwork processing,
+      production scheduling, and fulfillment.
+    business_model: "production-partner (like Printful/Printify)"
+    direction: inbound
+    data_flow:
+      inbound:
+        - "orders (customer -> mint)"
+        - "product catalog sync (customer -> mint)"
+        - "artwork/design files (customer -> mint)"
+      outbound:
+        - "fulfillment status (mint -> customer store)"
+        - "tracking numbers (mint -> customer store)"
+        - "shipping updates (mint -> customer store)"
+    legacy:
+      store: "mintprintsfl.myshopify.com"
+      oauth_client_id: "99542dd9cbf4f2da582bdcc82ffcb0c1"
+      oauth_scopes: "read_content,write_content"
+      code_location: "mint-os/apps/api/routes/shopify.cjs (legacy, NOT in mint-modules)"
+      token_script: "workbench/scripts/root/shopify-get-token.sh"
+      ssot_doc: "workbench/docs/legacy/infrastructure/reference/shopify/SHOPIFY_SSOT.md"
+      credentials: "Infisical infrastructure/prod (SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET)"
+      note: "Legacy OAuth flow works but is mint-os only. Needs extraction to mint-modules."
+    mint_modules:
+      integration_built: false
+      target_module: "order-intake"
+      required_capabilities:
+        - "Shopify webhook receiver (orders/create, orders/updated)"
+        - "Shopify OAuth app install flow"
+        - "Order mapping: Shopify line items -> mint seed/contract format"
+        - "Fulfillment callback: mint production complete -> Shopify fulfillment API"
+        - "Tracking push: EasyPost tracking -> Shopify order tracking"
+      mcp_server:
+        built: false
+        planned_location: "mint-modules/agents/mcp-server (extend existing)"
+        planned_tools:
+          - "shopify_list_connected_stores"
+          - "shopify_sync_orders"
+          - "shopify_push_fulfillment"
+          - "shopify_check_webhook_health"
+    secrets:
+      provider: infisical
+      path: "infrastructure/prod"
+      keys: [SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET]
+    domains:
+      - store: "mintprintsfl.myshopify.com"
+        purpose: "legacy dev/test store"
+        operational: false
+      - store: "hypnotized-2.myshopify.com"
+        purpose: "dormant Hypnotized brand (not a customer integration)"
+        operational: false
+    note: >
+      DO NOT confuse Shopify with "our storefront". Mint does not sell on Shopify.
+      Mint's customers sell on Shopify and use Mint as their production backend.
+      The mintprints.com website is self-hosted (quote-page via CF tunnel since W56).
+
+  etsy:
+    role: inbound-order-channel
+    status: future
+    description: "Potential future channel. Same model as Shopify — customers on Etsy route production to Mint."
+    mint_modules:
+      integration_built: false
+    note: "No code, no credentials, no timeline. Placeholder for ecosystem completeness."
+
+  woocommerce:
+    role: inbound-order-channel
+    status: future
+    description: "Potential future channel. Same model — WooCommerce store owners route production to Mint."
+    mint_modules:
+      integration_built: false
+    note: "No code, no credentials, no timeline. Placeholder for ecosystem completeness."
+
+# Direct channels (not third-party platforms)
+direct_channels:
+  quote_page:
+    role: direct-intake
+    status: live
+    url: "https://mintprints.com"
+    service: "quote-page:3341"
+    routing: "cloudflare-tunnel"
+    description: >
+      Primary intake channel. Customers submit quote requests directly
+      via mintprints.com. No third-party platform dependency.
+    module: "quote-page"
+    note: "Self-hosted since W56 cutover (2026-02-24). Was Shopify storefront before."
+
+  customer_portal:
+    role: direct-intake
+    status: live
+    url: "https://customer.mintprints.com"
+    service: "quote-page:3341"
+    routing: "cloudflare-tunnel"
+    description: "Customer-facing portal for order tracking, approvals, and communication."
+    module: "quote-page"

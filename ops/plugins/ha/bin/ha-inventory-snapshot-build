@@ -1,23 +1,218 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-SCRIPT_NAME="$(basename "$0")"
-PROJECT_ROOT="${HA_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/agents/home-assistant/docs/spine-plugin-ha/bin}"
-PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
-LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
-FORCE_LOCAL="${SPINE_SNAPSHOT_FORCE_LOCAL:-1}"
+# ha-inventory-snapshot-build
+# Builds a unified HA inventory snapshot from governed HA bindings.
 
-# Snapshot hardening contract: default to repo-local writer so read-mode
-# no-write guards are always enforced in this checkout.
-if [[ "$FORCE_LOCAL" == "1" ]]; then
-  exec env SPINE_ROOT="$SPINE_ROOT" "$LEGACY_SCRIPT" "$@"
+ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+TRACKED_OUTPUT="$ROOT/ops/bindings/ha.inventory.snapshot.yaml"
+RUNTIME_OUTPUT_DEFAULT="$ROOT/runtime/domain-state/snapshots/ha.inventory.snapshot.yaml"
+OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
+MODE="check"
+
+usage() {
+  cat <<'USAGE'
+ha-inventory-snapshot-build
+
+Usage:
+  ./bin/ops cap run ha-inventory-snapshot-build
+  ./bin/ops cap run ha-inventory-snapshot-build -- --apply
+
+Flags:
+  --apply               Write tracked projection binding.
+  --check               Read-only mode (default): write runtime state only.
+  --state-path <path>   Override output path (defaults to runtime state path).
+USAGE
+}
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
 fi
 
-if [[ -x "$PROJECT_SCRIPT" ]]; then
-  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply)
+      MODE="apply"
+      OUTPUT="$TRACKED_OUTPUT"
+      shift
+      ;;
+    --check)
+      MODE="check"
+      OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
+      shift
+      ;;
+    --state-path|--output)
+      OUTPUT="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ha-inventory-snapshot-build FAIL: unknown arg '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$OUTPUT" ]]; then
+  echo "ha-inventory-snapshot-build FAIL: output path cannot be empty" >&2
+  exit 1
 fi
 
-echo "WARN: ha plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
-exec "$LEGACY_SCRIPT" "$@"
+file_hash() {
+  local path="$1"
+  if [[ -f "$path" ]]; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return
+  fi
+  echo "missing"
+}
+
+tracked_hash_before="$(file_hash "$TRACKED_OUTPUT")"
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "STOP (2): missing dependency python3" >&2
+  exit 2
+}
+
+python3 - "$ROOT" "$OUTPUT" <<'PY'
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+import yaml
+
+root = Path(sys.argv[1]).expanduser().resolve()
+output_path = Path(sys.argv[2]).expanduser().resolve()
+
+
+SECTION_SOURCES: dict[str, tuple[str, str]] = {
+    "devices": ("ops/bindings/ha.device.map.yaml", "devices"),
+    "entities": ("ops/bindings/ha.entity.state.baseline.yaml", "entities"),
+    "scenes": ("ops/bindings/ha.scenes.yaml", "scenes"),
+    "dashboards": ("ops/bindings/ha.dashboards.yaml", "dashboards"),
+    "automations": ("ops/bindings/ha.automations.yaml", "automations"),
+    "addons": ("ops/bindings/ha.addons.yaml", "addons"),
+    "integrations": ("ops/bindings/ha.integrations.yaml", "integrations"),
+    "hacs_addons": ("ops/bindings/ha.hacs.yaml", "repositories"),
+}
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_iso() -> str:
+    return now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today_iso() -> str:
+    return now_utc().strftime("%Y-%m-%d")
+
+
+def load_yaml(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"expected mapping at YAML root: {path}")
+    return data
+
+
+def list_from(doc: dict, key: str) -> list:
+    values = doc.get(key)
+    if isinstance(values, list):
+        return values
+    return []
+
+
+missing: list[str] = []
+section_values: dict[str, list] = {}
+section_counts: dict[str, int] = {}
+source_metadata: dict[str, dict] = {}
+
+for section, (relative_path, key) in SECTION_SOURCES.items():
+    source_path = root / relative_path
+    if not source_path.is_file():
+        missing.append(relative_path)
+        section_values[section] = []
+        section_counts[section] = 0
+        source_metadata[section] = {
+            "binding": relative_path,
+            "missing": True,
+        }
+        continue
+
+    doc = load_yaml(source_path)
+    values = list_from(doc, key)
+    section_values[section] = values
+    section_counts[section] = len(values)
+    source_metadata[section] = {
+        "binding": relative_path,
+        "generated": str(doc.get("generated_at") or doc.get("generated") or doc.get("updated_at") or ""),
+    }
+
+if missing:
+    print("ha-inventory-snapshot-build FAIL: missing source bindings", file=sys.stderr)
+    for item in missing:
+        print(f"  - {item}", file=sys.stderr)
+    raise SystemExit(1)
+
+stamp = now_iso()
+snapshot_doc = {
+    "status": "authoritative",
+    "owner": "@ronny",
+    "last_verified": today_iso(),
+    "scope": "ha-inventory-unified-snapshot",
+    "version": 1,
+    "updated_at": today_iso(),
+    "generated_at": stamp,
+    "freshness_policy": {
+        "max_age_hours": 24,
+        "freshness_field": "generated_at",
+    },
+    "source_capability": "ha-inventory-snapshot-build",
+    "source_bindings": source_metadata,
+    "summary": section_counts,
+    "devices": section_values["devices"],
+    "entities": section_values["entities"],
+    "scenes": section_values["scenes"],
+    "dashboards": section_values["dashboards"],
+    "automations": section_values["automations"],
+    "addons": section_values["addons"],
+    "integrations": section_values["integrations"],
+    "hacs_addons": section_values["hacs_addons"],
+}
+
+output_path.parent.mkdir(parents=True, exist_ok=True)
+output_path.write_text(yaml.safe_dump(snapshot_doc, sort_keys=False), encoding="utf-8")
+
+print("ha-inventory-snapshot-build")
+print(f"output: {output_path}")
+for section in (
+    "devices",
+    "entities",
+    "scenes",
+    "dashboards",
+    "automations",
+    "addons",
+    "integrations",
+    "hacs_addons",
+):
+    print(f"{section}: {section_counts[section]}")
+PY
+
+if [[ "$MODE" == "check" ]]; then
+  tracked_hash_after="$(file_hash "$TRACKED_OUTPUT")"
+  if [[ "$tracked_hash_before" != "$tracked_hash_after" ]]; then
+    echo "ha-inventory-snapshot-build FAIL: tracked binding mutated in check mode: $TRACKED_OUTPUT" >&2
+    exit 1
+  fi
+fi
+
+echo "mode: $MODE"
+echo "tracked_binding: $TRACKED_OUTPUT"

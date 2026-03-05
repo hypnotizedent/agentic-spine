@@ -1,0 +1,318 @@
+# HA Orphan Device Classification
+# Status: authoritative
+# Last verified: 2026-02-17
+# Consumed by: ha-device-map-build (name-based lookup, case-insensitive)
+#
+# Classifies orphan devices in ha.device.map.yaml — devices with no match
+# to home.device.registry.yaml (by MAC/name) or z2m.devices.yaml (by IEEE).
+#
+# Categories:
+#   native-integration — Built-in HA integration (weather, sun, prayer times)
+#   system-internal    — HA core component (backup, HACS, Z2M bridge)
+#   mobile-app         — Phone/watch via Companion App (no fixed area)
+#   nas-subsystem      — NAS drives/volumes/caches (children of synology918)
+#   media-device       — TVs, speakers, streaming boxes (matched by integration)
+#   smart-appliance    — Vacuums, purifiers, curtain robots, feeders
+#   smart-plug         — TP-Link/Kasa plugs and energy monitors
+#   smart-bulb         — WiFi bulbs controlled via Local Tuya or native integration
+#   uptime-kuma-probe  — Uptime Kuma monitoring probes (virtual, no physical location)
+#   proxmox-subsystem  — Proxmox VMs, LXCs, disks, storage, ZFS pools, nodes
+#   media-service      — VM-hosted media apps (Radarr, Sonarr, etc.)
+#   network-service    — Network infrastructure services and integrations
+#   zwave-module       — Z-Wave controller modules and GPIO adapters
+#   needs-registry     — Physical device NOT in device registry (action item)
+#
+# "needs-registry" devices require: area assignment + home.device.registry.yaml entry.
+# All other categories are informational — no action needed.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# Canonical Triage Classes (GAP-OP-654)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# All classification categories map to exactly one triage class:
+#
+#   hacs_pseudo_devices:
+#     Action: hide/ignore — HACS plugins create virtual "devices" with no
+#     physical counterpart. Leave unassigned to any area.
+#     Categories: system-internal (HACS entry only)
+#     Count: ~34 HACS plugin pseudo-devices
+#
+#   non_physical_service_entities:
+#     Action: none — virtual/cloud/software entities with no physical location.
+#     Categories: native-integration, uptime-kuma-probe, proxmox-subsystem,
+#                 media-service, network-service, zwave-module, nas-subsystem
+#     Owner: spine (auto-classified, no manual triage)
+#
+#   actionable_unassigned_physical_devices:
+#     Action: assign area + rename per naming convention — physical devices
+#     that exist on the network but have no area assignment in HA.
+#     Categories: smart-appliance, smart-plug, smart-bulb, media-device,
+#                 matter-device, mobile-app, needs-registry
+#     Owner: operator (room-by-room confirmation required)
+#
+#   unknown_manual_triage:
+#     Action: investigate — devices visible in HA or on the network whose
+#     identity, purpose, or ownership is not yet confirmed.
+#     Categories: needs-registry (subset where identity is unknown)
+#     Owner: operator (manual investigation required)
+#
+# Classification criteria (deterministic):
+#   1. If device has no entities or only "update" entities → hacs_pseudo_devices
+#   2. If integration is proxmoxve, synology_dsm, uptime_kuma, speedtestdotnet,
+#      sun, islamic_prayer_times → non_physical_service_entities
+#   3. If device has a MAC in home.device.registry.yaml → actionable (assign area)
+#   4. If device has no MAC and no registry match → unknown_manual_triage
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+schema_version: '1.1'
+
+classifications:
+
+  native-integration:
+    description: "Built-in HA integrations — virtual/cloud, no physical location"
+    action: none
+    devices:
+      - name: "Sun"
+      - name: "Forecast"
+      - name: "Islamic Prayer Times"
+
+  system-internal:
+    description: "HA core components — internal software, no physical location"
+    action: none
+    devices:
+      - name: "Backup"
+      - name: "HACS"
+      - name: "Zigbee2MQTT Bridge"
+
+  mobile-app:
+    description: "Phones via Companion App — personal devices, no fixed area"
+    action: none
+    devices:
+      - name: "Empress"
+      - name: "Boca's iPhone (2)"
+
+  nas-subsystem:
+    description: "Synology NAS sub-devices — drives, caches, volumes, USB partitions"
+    action: none
+    devices:
+      - name: "synology918"
+      - name: "synology918 (Cache device 1)"
+      - name: "synology918 (Cache device 2)"
+      - name: "synology918 (Drive 1)"
+      - name: "synology918 (Drive 2)"
+      - name: "synology918 (Drive 3)"
+      - name: "synology918 (Drive 4)"
+      - name: "synology918 (USB Disk 1 Partition 1)"
+      - name: "synology918 (USB Disk 1 Partition 2)"
+      - name: "synology918 (USB Disk 1)"
+      - name: "synology918 (Volume 1)"
+
+  media-device:
+    description: "TVs, speakers, streaming — have areas in HA but not in network device registry"
+    action: none
+    devices:
+      - name: "LG Guest Room"
+      - name: "LG Living Room"
+      - name: "SONY"
+      - name: "Living Room"
+      - name: "Front Door"
+      - name: "Bedroom TV"
+      - name: "Guest Room TV"
+      - name: "Living Room TV"
+      - name: "SONY (AirPlay)"
+      - name: "[LG] webOS TV UP7000PUA (AirPlay)"
+
+  smart-appliance:
+    description: "WiFi appliances — vacuums, purifiers, curtain robots, pet feeders"
+    action: none
+    devices:
+      - name: "Living Room Vacuum Q8"
+      - name: "Living Room Vacuum Q8 Dock"
+      - name: "Roborock QX Revo Arc"
+      - name: "Roborock QX Revo Arc Dock"
+      - name: "Bedroom Purifier"
+      - name: "Office Purifier"
+      - name: "Living Room Purifier"
+      - name: "Guest Room Purifier"
+      - name: "WiFi smart curtain robot"
+      - name: "ROJECO 2L Pet Feeder"
+
+  smart-plug:
+    description: "Smart plugs and energy monitors"
+    action: none
+    devices:
+      - name: "Bedroom Plug Empress"
+
+  smart-bulb:
+    description: "WiFi smart bulbs via Local Tuya or native integration"
+    action: none
+    devices:
+      - name: "Guest Room Smart Bulb"
+      - name: "Office desk smart bulb"
+      - name: "Bedroom Bulb King"
+      - name: "Bedroom Bulb Empress"
+
+  matter-device:
+    description: "Matter/Thread devices — routed via Apple TV border router, no LAN IP"
+    action: none
+    devices:
+      - name: "BILRESA dual button"
+      - name: "MYGGSPRAY wrlss mtn sensor"
+
+  uptime-kuma-probe:
+    description: "Uptime Kuma monitoring probes — virtual service monitors, no physical device"
+    action: none
+    devices:
+      - name: "100.120.163.70"
+      - name: "spine: anythingllm (ai-consolidation)"
+      - name: "spine: authentik (infra-core)"
+      - name: "spine: bazarr (streaming-stack)"
+      - name: "spine: caddy (infra-core)"
+      - name: "spine: dashy (docker-host)"
+      - name: "spine: download-node-exporter (download-stack)"
+      - name: "spine: files-api (docker-host)"
+      - name: "spine: files-api-v2 (mint-apps)"
+      - name: "spine: firefly-iii-vm211 (finance-stack)"
+      - name: "spine: flaresolverr (download-stack)"
+      - name: "spine: ghostfolio-vm211 (finance-stack)"
+      - name: "spine: gitea (dev-tools)"
+      - name: "spine: grafana (observability)"
+      - name: "spine: homarr (streaming-stack)"
+      - name: "spine: home-assistant (ha)"
+      - name: "spine: immich (immich)"
+      - name: "spine: infisical (infra-core)"
+      - name: "spine: jellyfin (streaming-stack)"
+      - name: "spine: jellyseerr (streaming-stack)"
+      - name: "spine: lidarr (download-stack)"
+      - name: "spine: loki (observability)"
+      - name: "spine: mail-archiver-vm211 (finance-stack)"
+      - name: "spine: mcpjungle (automation-stack)"
+      - name: "spine: minio (docker-host)"
+      - name: "spine: mint-modules-minio (mint-data)"
+      - name: "spine: n8n (automation-stack)"
+      - name: "spine: navidrome (streaming-stack)"
+      - name: "spine: node-exporter (observability)"
+      - name: "spine: ollama (automation-stack)"
+      - name: "spine: open-webui (automation-stack)"
+      - name: "spine: order-intake-v2 (mint-apps)"
+      - name: "spine: paperless-ngx-vm211 (finance-stack)"
+      - name: "spine: pihole (infra-core)"
+      - name: "spine: prometheus (observability)"
+      - name: "spine: prowlarr (download-stack)"
+      - name: "spine: qdrant (ai-consolidation)"
+      - name: "spine: quote-page (docker-host)"
+      - name: "spine: quote-page-v2 (mint-apps)"
+      - name: "spine: radarr (download-stack)"
+      - name: "spine: sabnzbd (download-stack)"
+      - name: "spine: sonarr (download-stack)"
+      - name: "spine: spotisub (streaming-stack)"
+      - name: "spine: streaming-node-exporter (streaming-stack)"
+      - name: "spine: uptime-kuma (observability)"
+      - name: "spine: vaultwarden (infra-core)"
+      - name: "spine: vaultwarden-home (vaultwarden-home)"
+
+  proxmox-subsystem:
+    description: "Proxmox VE sub-entities — VMs, LXCs, disks, storage pools, ZFS, nodes"
+    action: none
+    devices:
+      - name: "Node pve"
+      - name: "QEMU ai-consolidation (207)"
+      - name: "QEMU automation-stack (202)"
+      - name: "QEMU dev-tools (206)"
+      - name: "QEMU docker-host (200)"
+      - name: "QEMU download-stack (209)"
+      - name: "QEMU finance-stack (211)"
+      - name: "QEMU homeassistant (100)"
+      - name: "QEMU immich (101)"
+      - name: "QEMU immich (203)"
+      - name: "QEMU infra-core (204)"
+      - name: "QEMU mint-apps (213)"
+      - name: "QEMU mint-data (212)"
+      - name: "QEMU observability (205)"
+      - name: "QEMU streaming-stack (210)"
+      - name: "QEMU vaultwarden (102)"  # decommissioned 2026-02-16, ghost in Proxmox integration
+      - name: "LXC download-home (103)"
+      - name: "LXC pihole-home (105)"
+      - name: "Storage pve/local"
+      - name: "Storage pve/local-lvm"
+      - name: "Storage pve/media-storage"
+      - name: "Storage pve/synology-backups"
+      - name: "Storage pve/tank-vms"
+      - name: "ZFS pve: ZFS Pool media"
+      - name: "ZFS pve: ZFS Pool tank"
+      - name: "Disk pve: CT1000P3PSSD8"
+      - name: "Disk pve: ST4000NM0063"
+      - name: "Disk pve: ST8000AS0002-1NA17Z"
+      - name: "Disk pve: ST9500620SS"
+
+  media-service:
+    description: "VM-hosted media applications — software services, not physical devices"
+    action: none
+    devices:
+      - name: "Radarr"
+      - name: "Sonarr"
+      - name: "Lidarr"
+      - name: "Jellyseerr"
+      - name: "qBittorrent"
+      - name: "c4c376c45905"
+      - name: "192_168_1_209"
+
+  network-service:
+    description: "Network infrastructure services and integrations — virtual entities"
+    action: none
+    devices:
+      - name: "Pi-hole"
+      - name: "SpeedTest"
+      - name: "pogodobby"
+      - name: "pogodobby-iot"
+
+  zwave-module:
+    description: "Z-Wave controller modules and GPIO adapters"
+    action: none
+    devices:
+      - name: "800 Series Long Range GPIO Module"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Triage Class Mapping
+# ═══════════════════════════════════════════════════════════════════════════
+
+triage_classes:
+  hacs_pseudo_devices:
+    action: hide_ignore
+    description: "HACS plugin pseudo-devices — no physical counterpart, leave unassigned"
+    source_categories:
+      - system-internal  # HACS entry only
+    next_action_owner: none
+
+  non_physical_service_entities:
+    action: none
+    description: "Virtual/cloud/software entities with no physical location"
+    source_categories:
+      - native-integration
+      - uptime-kuma-probe
+      - proxmox-subsystem
+      - media-service
+      - network-service
+      - zwave-module
+      - nas-subsystem
+    next_action_owner: spine_auto
+
+  actionable_unassigned_physical_devices:
+    action: assign_area_and_rename
+    description: "Physical devices needing area assignment + naming convention compliance"
+    source_categories:
+      - smart-appliance
+      - smart-plug
+      - smart-bulb
+      - media-device
+      - matter-device
+      - mobile-app
+    next_action_owner: operator
+
+  unknown_manual_triage:
+    action: investigate
+    description: "Devices whose identity, purpose, or ownership is not confirmed"
+    source_categories:
+      - needs-registry
+    next_action_owner: operator

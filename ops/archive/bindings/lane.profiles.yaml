@@ -1,0 +1,117 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-02-22
+scope: lane-orchestration-profiles
+version: 1
+
+# Lane Profile Definitions
+# Each profile defines what a terminal is allowed to do.
+# Enforcement: ops/commands/lane.sh (lane check), ops/commands/wave.sh (dispatch)
+
+profiles:
+  control:
+    description: "Writer for planning docs, governance surfaces, and roadmap patches"
+    mode: read-write
+    can_merge: true
+    can_dispatch: true
+    write_surfaces:
+      - "docs/planning/*"
+      - "docs/governance/*"
+      - "mailroom/state/*"
+      - "mailroom/state/loop-scopes/*"
+    deny_surfaces: []
+    allowed_caps:
+      - "orchestration.*"
+      - "proposals.submit"
+      - "proposals.apply"
+      - "gaps.*"
+      - "loops.*"
+      - "docs.*"
+    denied_caps: []
+
+  execution:
+    description: "Writer for domain repos (plugins, surfaces), no roadmap edits"
+    mode: read-write
+    can_merge: false
+    can_dispatch: false
+    write_surfaces:
+      - "ops/plugins/*"
+      - "surfaces/*"
+      - "ops/agents/*"
+    deny_surfaces:
+      - "docs/planning/*"
+      - "docs/governance/*"
+      - "ops/bindings/*"
+    allowed_caps:
+      - "verify.*"
+      - "proposals.submit"
+    denied_caps:
+      - "proposals.apply"
+      - "orchestration.wave.close"
+
+  audit:
+    description: "Read-only evidence collection, receipt inspection"
+    mode: read-only
+    can_merge: false
+    can_dispatch: false
+    write_surfaces: []
+    deny_surfaces:
+      - "*"
+    allowed_caps:
+      - "verify.*"
+      - "stability.*"
+      - "rag.*"
+    denied_caps:
+      - "proposals.*"
+      - "gaps.*"
+      - "loops.*"
+
+  watcher:
+    description: "Read-only long-running background checks"
+    mode: read-only
+    can_merge: false
+    can_dispatch: false
+    write_surfaces: []
+    deny_surfaces:
+      - "*"
+    allowed_caps:
+      - "stability.control.snapshot"
+      - "verify.core.run"
+      - "verify.pack.run"
+      - "verify.release.run"
+    denied_caps:
+      - "proposals.*"
+      - "gaps.*"
+
+# Surface lock contract
+# When multiple lanes are open, surface locks prevent collision.
+surface_locks:
+  ROUTES:
+    owner_lane: execution
+    surfaces: ["ops/plugins/*/routes/*", "surfaces/verify/*"]
+    conflict_lanes: [control]
+  SECRETS:
+    owner_lane: control
+    surfaces: ["ops/bindings/secrets.*", "ops/tools/infisical-*"]
+    conflict_lanes: [execution]
+  DOCS:
+    owner_lane: control
+    surfaces: ["docs/planning/*", "docs/governance/*", "docs/product/*"]
+    conflict_lanes: [execution, audit, watcher]
+
+# Handoff schema (required fields for wave dispatch/collect)
+handoff_schema:
+  required_fields:
+    - lane
+    - task
+    - wave_id
+  optional_fields:
+    - priority
+    - depends_on
+    - deadline
+  ack_fields:
+    - status
+    - result
+    - run_key
+    - completed_at

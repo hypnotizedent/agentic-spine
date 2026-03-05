@@ -12,8 +12,8 @@ source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 echo "[media-config-backup-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 spine_job_run \
-  "media-config-backup-daily:media.backup.create.legacy" \
-  "${SPINE_ROOT}/ops/plugins/media/bin/media-backup-create.legacy" \
+  "media-config-backup-daily:media.backup.create" \
+  "$CAP_RUNNER" cap run media.backup.create \
   --retention 14
 
 spine_job_run \

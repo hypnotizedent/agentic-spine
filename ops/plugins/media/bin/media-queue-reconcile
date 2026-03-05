@@ -1,16 +1,269 @@
 #!/usr/bin/env bash
+# media.queue.reconcile — Deterministic queue reconciliation for media pipeline
+#
+# Usage (via spine):
+#   ./bin/ops cap run media.queue.reconcile
+#   ./bin/ops cap run media.queue.reconcile -- --dry-run
+#   ./bin/ops cap run media.queue.reconcile -- --json
+#
+# Contract:
+# - Implements MEDIA_QUEUE_RECONCILIATION_POLICY_V1
+# - Reads Radarr queue via API, classifies items per policy
+# - Auto-removes QUEUE-C1 and QUEUE-C4 items (safe: hasFile=true)
+# - Reports QUEUE-C2, QUEUE-C3, QUEUE-C5 items for manual review
+# - Default: dry-run mode (no deletions without --apply)
+#
+# Policy ref: ops/bindings/media.queue.reconciliation.policy.yaml
+
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-SCRIPT_NAME="$(basename "$0")"
-PROJECT_ROOT="${MEDIA_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/agents/media/tools/src/spine-plugin-media/bin}"
-PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
-LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
+ROOT="$(cd "$(dirname "$0")/../../../../" && pwd)"
+SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
+SSH_RESOLVE="$ROOT/ops/lib/ssh-resolve.sh"
+POLICY="$ROOT/ops/bindings/media.queue.reconciliation.policy.yaml"
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-if [[ -x "$PROJECT_SCRIPT" ]]; then
-  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
+# Re-exec under secrets injection
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
 fi
 
-echo "WARN: media plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
-exec "$LEGACY_SCRIPT" "$@"
+# shellcheck source=ops/lib/ssh-resolve.sh
+source "$SSH_RESOLVE" 2>/dev/null || true
+
+usage() {
+  cat <<'USAGE'
+media.queue.reconcile — Deterministic queue reconciliation
+
+Args:
+  --dry-run    Show what would be removed (default)
+  --apply      Actually remove safe queue items (QUEUE-C1, QUEUE-C4)
+  --json       Output JSON format
+  --batch N    Max items per run (default: 50)
+
+Examples:
+  ./bin/ops cap run media.queue.reconcile
+  ./bin/ops cap run media.queue.reconcile -- --apply
+  ./bin/ops cap run media.queue.reconcile -- --json --dry-run
+USAGE
+}
+
+DRY_RUN=true
+OUTPUT_JSON=false
+BATCH_SIZE=50
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)    DRY_RUN=true; shift ;;
+    --apply)      DRY_RUN=false; shift ;;
+    --json)       OUTPUT_JSON=true; shift ;;
+    --batch)      BATCH_SIZE="${2:-50}"; shift 2 ;;
+    -h|--help)    usage; exit 0 ;;
+    --)           shift ;;
+    *)            echo "FAIL: unknown arg: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || { echo "MISSING_DEP: jq" >&2; exit 2; }
+command -v curl >/dev/null 2>&1 || { echo "MISSING_DEP: curl" >&2; exit 2; }
+
+# Resolve Radarr endpoint
+RADARR_HOST="${RADARR_HOST:-}"
+if [[ -z "$RADARR_HOST" ]]; then
+  if type ssh_resolve_host_with_fallback &>/dev/null; then
+    RADARR_HOST="$(ssh_resolve_host_with_fallback download-stack 2>/dev/null | awk '{print $1}')"
+    [[ -z "$RADARR_HOST" ]] && RADARR_HOST="192.168.1.209"
+  else
+    RADARR_HOST="192.168.1.209"
+  fi
+fi
+RADARR_PORT="${RADARR_PORT:-7878}"
+RADARR_URL="http://${RADARR_HOST}:${RADARR_PORT}"
+
+# API key from secrets injection
+RADARR_API_KEY="${RADARR_API_KEY:-}"
+if [[ -z "$RADARR_API_KEY" ]]; then
+  echo "STOP: RADARR_API_KEY not available (secrets injection may have failed)" >&2
+  exit 2
+fi
+
+# Fetch queue
+fetch_queue() {
+  curl -sf --max-time 15 \
+    -H "X-Api-Key: ${RADARR_API_KEY}" \
+    "${RADARR_URL}/api/v3/queue?page=1&pageSize=200&includeMovie=true" 2>/dev/null
+}
+
+# Fetch movie by ID
+fetch_movie() {
+  local movie_id="$1"
+  curl -sf --max-time 10 \
+    -H "X-Api-Key: ${RADARR_API_KEY}" \
+    "${RADARR_URL}/api/v3/movie/${movie_id}" 2>/dev/null
+}
+
+# Delete queue item
+delete_queue_item() {
+  local queue_id="$1"
+  if $DRY_RUN; then
+    echo "DRY-RUN: would DELETE /api/v3/queue/${queue_id}" >&2
+    return 0
+  fi
+  curl -sf --max-time 10 -X DELETE \
+    -H "X-Api-Key: ${RADARR_API_KEY}" \
+    "${RADARR_URL}/api/v3/queue/${queue_id}?removeFromClient=false&blocklist=false" 2>/dev/null
+}
+
+# Main reconciliation logic
+QUEUE_JSON="$(fetch_queue)" || {
+  echo "FAIL: cannot reach Radarr queue API at ${RADARR_URL}" >&2
+  if $OUTPUT_JSON; then
+    jq -n --arg ts "$GENERATED_AT" '{capability: "media.queue.reconcile", generated_at: $ts, status: "unreachable", error: "Cannot reach Radarr queue API"}'
+  fi
+  exit 1
+}
+
+TOTAL_RECORDS="$(echo "$QUEUE_JSON" | jq '.totalRecords // 0')"
+if [[ "$TOTAL_RECORDS" -eq 0 ]]; then
+  if $OUTPUT_JSON; then
+    jq -n --arg ts "$GENERATED_AT" '{capability: "media.queue.reconcile", generated_at: $ts, status: "clean", total_queue_items: 0, classifications: {}, actions: []}'
+  else
+    echo "media.queue.reconcile"
+    echo "====================="
+    echo "status: clean"
+    echo "total_queue_items: 0"
+    echo "generated_at: $GENERATED_AT"
+  fi
+  exit 0
+fi
+
+# Classify each queue item per policy
+CLASSIFICATIONS="$(echo "$QUEUE_JSON" | jq --argjson batch "$BATCH_SIZE" '
+  [.records[:$batch][] | {
+    queue_id: .id,
+    movie_id: (.movieId // null),
+    title: (.title // .movie.title // "unknown"),
+    status: (.status // "unknown"),
+    tracked_status: (.trackedDownloadStatus // "unknown"),
+    tracked_state: (.trackedDownloadState // "unknown"),
+    has_file: (.movie.hasFile // false),
+    error_message: (.errorMessage // null),
+    classification: (
+      if (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == true) then "QUEUE-C1"
+      elif (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == false) then "QUEUE-C2"
+      elif (.status == "warning" or .trackedDownloadStatus == "warning") and (.movie.hasFile == false) then "QUEUE-C3"
+      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == true) then "QUEUE-C4"
+      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == false) then "QUEUE-C5"
+      else "UNCLASSIFIED"
+      end
+    ),
+    action: (
+      if (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == true) then "auto_remove"
+      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == true) then "auto_remove"
+      elif (.status == "downloadClientUnavailable" or .trackedDownloadStatus == "downloadClientUnavailable") and (.movie.hasFile == false) then "manual_review"
+      elif (.status == "warning" or .trackedDownloadStatus == "warning") and (.movie.hasFile == false) then "age_flag"
+      elif (.status == "completed" or .trackedDownloadState == "importPending") and (.movie.hasFile == false) then "manual_review"
+      else "skip"
+      end
+    )
+  }]
+')"
+
+# Count classifications
+C1_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "QUEUE-C1")] | length')"
+C2_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "QUEUE-C2")] | length')"
+C3_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "QUEUE-C3")] | length')"
+C4_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "QUEUE-C4")] | length')"
+C5_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "QUEUE-C5")] | length')"
+UNCLASSIFIED_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.classification == "UNCLASSIFIED")] | length')"
+AUTO_REMOVE_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.action == "auto_remove")] | length')"
+MANUAL_REVIEW_COUNT="$(echo "$CLASSIFICATIONS" | jq '[.[] | select(.action == "manual_review")] | length')"
+
+# Execute auto-remove actions
+REMOVED=0
+REMOVE_ERRORS=0
+if [[ "$AUTO_REMOVE_COUNT" -gt 0 ]]; then
+  while IFS= read -r queue_id; do
+    if delete_queue_item "$queue_id"; then
+      REMOVED=$((REMOVED + 1))
+    else
+      REMOVE_ERRORS=$((REMOVE_ERRORS + 1))
+    fi
+  done < <(echo "$CLASSIFICATIONS" | jq -r '.[] | select(.action == "auto_remove") | .queue_id')
+fi
+
+MODE="dry-run"
+if ! $DRY_RUN; then
+  MODE="apply"
+fi
+
+if $OUTPUT_JSON; then
+  echo "$CLASSIFICATIONS" | jq \
+    --arg ts "$GENERATED_AT" \
+    --arg mode "$MODE" \
+    --argjson total "$TOTAL_RECORDS" \
+    --argjson c1 "$C1_COUNT" \
+    --argjson c2 "$C2_COUNT" \
+    --argjson c3 "$C3_COUNT" \
+    --argjson c4 "$C4_COUNT" \
+    --argjson c5 "$C5_COUNT" \
+    --argjson unclassified "$UNCLASSIFIED_COUNT" \
+    --argjson removed "$REMOVED" \
+    --argjson errors "$REMOVE_ERRORS" \
+    '{
+      capability: "media.queue.reconcile",
+      generated_at: $ts,
+      mode: $mode,
+      status: (if $errors > 0 then "partial" elif $removed > 0 then "cleaned" else "report_only" end),
+      total_queue_items: $total,
+      batch_processed: (. | length),
+      classifications: {
+        "QUEUE-C1_ghost_hasfile": $c1,
+        "QUEUE-C2_broken_nofile": $c2,
+        "QUEUE-C3_stalled": $c3,
+        "QUEUE-C4_completed_hasfile": $c4,
+        "QUEUE-C5_completed_nofile": $c5,
+        "UNCLASSIFIED": $unclassified
+      },
+      actions: {
+        auto_removable: ($c1 + $c4),
+        manual_review: ($c2 + $c5),
+        age_flag: $c3,
+        removed: $removed,
+        remove_errors: $errors
+      },
+      items: .
+    }'
+else
+  echo "media.queue.reconcile"
+  echo "====================="
+  echo "mode: $MODE"
+  echo "generated_at: $GENERATED_AT"
+  echo "total_queue_items: $TOTAL_RECORDS"
+  echo ""
+  echo "Classifications:"
+  echo "  QUEUE-C1 (ghost, hasFile=true):     $C1_COUNT"
+  echo "  QUEUE-C2 (broken, hasFile=false):   $C2_COUNT"
+  echo "  QUEUE-C3 (stalled/warning):         $C3_COUNT"
+  echo "  QUEUE-C4 (completed, hasFile=true): $C4_COUNT"
+  echo "  QUEUE-C5 (completed, no import):    $C5_COUNT"
+  echo "  UNCLASSIFIED:                       $UNCLASSIFIED_COUNT"
+  echo ""
+  echo "Actions:"
+  echo "  auto_removable: $((C1_COUNT + C4_COUNT))"
+  echo "  manual_review:  $((C2_COUNT + C5_COUNT))"
+  echo "  removed:        $REMOVED"
+  echo "  errors:         $REMOVE_ERRORS"
+
+  if [[ "$MANUAL_REVIEW_COUNT" -gt 0 ]]; then
+    echo ""
+    echo "Manual Review Items:"
+    echo "$CLASSIFICATIONS" | jq -r '.[] | select(.action == "manual_review") | "  - \(.title) [\(.classification)] status=\(.status) hasFile=\(.has_file)"'
+  fi
+fi
+
+if [[ "$REMOVE_ERRORS" -gt 0 ]]; then
+  exit 1
+fi
+exit 0

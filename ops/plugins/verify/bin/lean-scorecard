@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CHECKER="$ROOT/ops/plugins/verify/bin/lean-budget-check"
+
+[[ -x "$CHECKER" ]] || { echo "lean-scorecard: missing checker: $CHECKER" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "lean-scorecard: missing command jq" >&2; exit 2; }
+
+json="$($CHECKER --json --report-only)"
+
+echo "# Spine Lean Scorecard"
+echo
+echo "## Metrics"
+jq -r '.metrics | to_entries[] | "- " + .key + ": " + (.value|tostring)' <<<"$json"
+echo
+echo "## Thresholds"
+jq -r '.thresholds | to_entries[] | "- " + .key + ": " + (.value|tostring)' <<<"$json"
+echo
+echo "## Change Budget"
+jq -r '.change_budget[] | "- " + .class + ": added=" + (.added|tostring) + ", removed=" + (.removed|tostring) + ", net_new=" + (.net_new|tostring)' <<<"$json"
+echo
+echo "## Gate Add/Retire Ratio"
+jq -r '"- new_active_gates: " + (.gate_add_retire_ratio.new_active_gates|tostring)' <<<"$json"
+jq -r '"- newly_retired: " + (.gate_add_retire_ratio.newly_retired|tostring)' <<<"$json"
+jq -r '"- required_retired: " + (.gate_add_retire_ratio.required_retired|tostring)' <<<"$json"
+jq -r '"- ok: " + (.gate_add_retire_ratio.ok|tostring)' <<<"$json"
+echo
+echo "## Violations"
+if [[ "$(jq -r '.violations | length' <<<"$json")" -eq 0 ]]; then
+  echo "- none"
+else
+  jq -r '.violations[] | "- " + .' <<<"$json"
+fi
+
+echo
+echo "## Warnings"
+if [[ "$(jq -r '.warnings | length' <<<"$json")" -eq 0 ]]; then
+  echo "- none"
+else
+  jq -r '.warnings[] | "- " + .' <<<"$json"
+fi

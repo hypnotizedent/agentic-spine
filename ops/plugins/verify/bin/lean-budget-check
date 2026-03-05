@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="${ROOT}/ops/bindings/lean.budget.contract.yaml"
+REGISTRY="${ROOT}/ops/bindings/gate.registry.yaml"
+TOPOLOGY="${ROOT}/ops/bindings/gate.execution.topology.yaml"
+
+json_mode=0
+report_only=0
+base_ref="origin/main"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) json_mode=1 ;;
+    --report-only) report_only=1 ;;
+    --base-ref)
+      shift
+      [[ $# -gt 0 ]] || { echo "lean-budget-check: --base-ref requires value" >&2; exit 2; }
+      base_ref="$1"
+      ;;
+    -h|--help)
+      cat <<'USAGE'
+lean-budget-check [--json] [--report-only] [--base-ref <git-ref>]
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "lean-budget-check: unknown arg: $1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "lean-budget-check: missing command $1" >&2; exit 2; }; }
+need_file() { [[ -f "$1" ]] || { echo "lean-budget-check: missing file $1" >&2; exit 2; }; }
+
+need_cmd yq
+need_cmd jq
+need_cmd git
+need_file "$CONTRACT"
+need_file "$REGISTRY"
+need_file "$TOPOLOGY"
+
+active_gates_max="$(yq e -r '.thresholds.active_gates_max' "$CONTRACT")"
+blocking_fast_max="$(yq e -r '.thresholds.blocking_fast_gates_max' "$CONTRACT")"
+verify_files_max="$(yq e -r '.thresholds.verify_files_max' "$CONTRACT")"
+bindings_files_max="$(yq e -r '.thresholds.bindings_files_max' "$CONTRACT")"
+gov_docs_max="$(yq e -r '.thresholds.governance_docs_max' "$CONTRACT")"
+legacy_max="$(yq e -r '.thresholds.legacy_scripts_max' "$CONTRACT")"
+
+active_gates="$(yq e '[.gates[] | select((.retired // false) == false)] | length' "$REGISTRY")"
+
+mapfile -t core_ids < <(yq e -r '.core_mode.core_gate_ids[]?' "$TOPOLOGY" 2>/dev/null || true)
+blocking_fast=0
+for gid in "${core_ids[@]:-}"; do
+  [[ -n "$gid" ]] || continue
+  retired="$(yq e -r ".gates[] | select(.id == \"$gid\") | (.retired // false | tostring)" "$REGISTRY" | head -n1)"
+  mode="$(yq e -r ".gates[] | select(.id == \"$gid\") | (.mode // \"enforce\")" "$REGISTRY" | head -n1)"
+  warn_only="$(yq e -r ".gates[] | select(.id == \"$gid\") | (.warn_only // false | tostring)" "$REGISTRY" | head -n1)"
+  [[ "$retired" == "true" ]] && continue
+  if [[ "$mode" != "report" && "$warn_only" != "true" ]]; then
+    blocking_fast=$((blocking_fast + 1))
+  fi
+done
+
+verify_files="$(find "${ROOT}/surfaces/verify" -type f 2>/dev/null | wc -l | tr -d ' ')"
+bindings_files="$(find "${ROOT}/ops/bindings" -type f 2>/dev/null | wc -l | tr -d ' ')"
+gov_docs="$(find "${ROOT}/docs/governance" -type f 2>/dev/null | wc -l | tr -d ' ')"
+legacy_files="$(find "${ROOT}/ops/plugins" -type f -name '*.legacy' 2>/dev/null | wc -l | tr -d ' ')"
+
+violations=()
+warnings=()
+
+[[ "$active_gates" -le "$active_gates_max" ]] || violations+=("active_gates:${active_gates}>${active_gates_max}")
+[[ "$blocking_fast" -le "$blocking_fast_max" ]] || violations+=("blocking_fast_gates:${blocking_fast}>${blocking_fast_max}")
+[[ "$verify_files" -le "$verify_files_max" ]] || violations+=("verify_files:${verify_files}>${verify_files_max}")
+[[ "$bindings_files" -le "$bindings_files_max" ]] || violations+=("bindings_files:${bindings_files}>${bindings_files_max}")
+[[ "$gov_docs" -le "$gov_docs_max" ]] || violations+=("governance_docs:${gov_docs}>${gov_docs_max}")
+[[ "$legacy_files" -le "$legacy_max" ]] || violations+=("legacy_scripts:${legacy_files}>${legacy_max}")
+
+root_doc="$(yq e -r '.canonical_docs.root' "$CONTRACT")"
+[[ -f "${ROOT}/${root_doc}" ]] || violations+=("missing_root_doc:${root_doc}")
+
+mapfile -t domains < <(yq e -r '.canonical_docs.required_domains[]' "$CONTRACT")
+for d in "${domains[@]:-}"; do
+  [[ -n "$d" ]] || continue
+  doc="docs/governance/domains/${d}.md"
+  bundle="ops/bindings/domains/${d}.bundle.yaml"
+  [[ -f "${ROOT}/${doc}" ]] || violations+=("missing_domain_doc:${doc}")
+  [[ -f "${ROOT}/${bundle}" ]] || violations+=("missing_domain_bundle:${bundle}")
+done
+
+# One-in-one-out file growth policy and gate add/retire ratio (best-effort when base ref exists)
+change_json='[]'
+ratio_status='{"new_active_gates":0,"newly_retired":0,"required_retired":0,"ok":true}'
+if git -C "$ROOT" rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+  diff_file="$(mktemp)"
+  git -C "$ROOT" diff --name-status --find-renames "$base_ref"...HEAD > "$diff_file"
+
+  classes_json='[]'
+  while IFS=$'\t' read -r status path_a path_b; do
+    [[ -n "${status:-}" ]] || continue
+    class=""
+    add=0
+    del=0
+
+    case "$status" in
+      A*) add=1; path="$path_a" ;;
+      D*) del=1; path="$path_a" ;;
+      R*) add=1; del=1; path="$path_b" ;;
+      C*) add=1; path="$path_b" ;;
+      *) path="$path_a" ;;
+    esac
+
+    if [[ "$path" == surfaces/verify/* ]]; then
+      class="verify"
+    elif [[ "$path" == docs/governance/* ]]; then
+      class="governance"
+    elif [[ "$path" == ops/bindings/* ]]; then
+      class="bindings"
+    else
+      continue
+    fi
+
+    classes_json="$(jq -c --arg class "$class" --arg path "$path" --argjson add "$add" --argjson del "$del" '. + [{"class":$class,"path":$path,"add":$add,"del":$del}]' <<<"$classes_json")"
+  done < "$diff_file"
+  rm -f "$diff_file"
+
+  change_json="$(jq -c '
+    ["verify","governance","bindings"] as $classes |
+    [ $classes[] as $c |
+      {
+        class: $c,
+        added: ([.[] | select(.class == $c) | .add] | add // 0),
+        removed: ([.[] | select(.class == $c) | .del] | add // 0)
+      } |
+      . + { net_new: (.added - .removed), max_net_new: 0, ok: ((.added - .removed) <= 0) }
+    ]
+  ' <<<"$classes_json")"
+
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    ok="$(jq -r '.ok' <<<"$row")"
+    cls="$(jq -r '.class' <<<"$row")"
+    net="$(jq -r '.net_new' <<<"$row")"
+    [[ "$ok" == "true" ]] || violations+=("one_in_one_out:${cls}:net_new=${net}")
+  done < <(jq -c '.[]' <<<"$change_json")
+
+  base_reg="$(mktemp)"
+  if git -C "$ROOT" show "$base_ref:ops/bindings/gate.registry.yaml" > "$base_reg" 2>/dev/null; then
+    new_active_ids="$(mktemp)"
+    base_ids="$(mktemp)"
+    base_active_ids="$(mktemp)"
+    head_retired_ids="$(mktemp)"
+
+    yq e -r '.gates[].id' "$base_reg" | sort -u > "$base_ids"
+    yq e -r '.gates[] | select((.retired // false) == false) | .id' "$base_reg" | sort -u > "$base_active_ids"
+    yq e -r '.gates[] | select((.retired // false) == false) | .id' "$REGISTRY" | sort -u > "$new_active_ids"
+    yq e -r '.gates[] | select((.retired // false) == true) | .id' "$REGISTRY" | sort -u > "$head_retired_ids"
+
+    new_active_count="$(comm -23 "$new_active_ids" "$base_ids" | wc -l | tr -d ' ')"
+    newly_retired_count="$(comm -12 "$base_active_ids" "$head_retired_ids" | wc -l | tr -d ' ')"
+    ratio_required=$(( new_active_count * $(yq e -r '.change_budget.gate_add_requires_retire_ratio' "$CONTRACT") ))
+    ratio_ok=true
+    if [[ "$new_active_count" -gt 0 && "$newly_retired_count" -lt "$ratio_required" ]]; then
+      ratio_ok=false
+      violations+=("gate_add_retire_ratio:new_active=${new_active_count},retired=${newly_retired_count},required=${ratio_required}")
+    fi
+
+    ratio_status="$(jq -cn --argjson n "$new_active_count" --argjson r "$newly_retired_count" --argjson req "$ratio_required" --arg ok "$ratio_ok" '{new_active_gates:$n,newly_retired:$r,required_retired:$req,ok:($ok=="true")}')"
+
+    rm -f "$new_active_ids" "$base_ids" "$base_active_ids" "$head_retired_ids"
+  else
+    warnings+=("missing_base_registry:${base_ref}:ops/bindings/gate.registry.yaml")
+  fi
+  rm -f "$base_reg"
+else
+  warnings+=("missing_base_ref:${base_ref}")
+fi
+
+violations_json='[]'
+warnings_json='[]'
+if [[ "${#violations[@]}" -gt 0 ]]; then
+  violations_json="$(printf '%s\n' "${violations[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+fi
+if [[ "${#warnings[@]}" -gt 0 ]]; then
+  warnings_json="$(printf '%s\n' "${warnings[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
+fi
+
+result_json="$(jq -cn \
+  --argjson active_gates "$active_gates" \
+  --argjson blocking_fast "$blocking_fast" \
+  --argjson verify_files "$verify_files" \
+  --argjson bindings_files "$bindings_files" \
+  --argjson governance_docs "$gov_docs" \
+  --argjson legacy_files "$legacy_files" \
+  --argjson thresholds "$(yq e -o=json '.thresholds' "$CONTRACT")" \
+  --argjson change_budget "$change_json" \
+  --argjson gate_ratio "$ratio_status" \
+  --argjson violations "$violations_json" \
+  --argjson warnings "$warnings_json" \
+  '{
+    metrics: {
+      active_gates: $active_gates,
+      blocking_fast_gates: $blocking_fast,
+      verify_files: $verify_files,
+      bindings_files: $bindings_files,
+      governance_docs: $governance_docs,
+      legacy_scripts: $legacy_files
+    },
+    thresholds: $thresholds,
+    change_budget: $change_budget,
+    gate_add_retire_ratio: $gate_ratio,
+    violations: $violations,
+    warnings: $warnings,
+    pass: (($violations | length) == 0)
+  }'
+)"
+
+if [[ "$json_mode" == "1" ]]; then
+  echo "$result_json"
+else
+  echo "lean-budget-check"
+  echo "metrics:"
+  jq -r '.metrics | to_entries[] | "  - \(.key)=\(.value)"' <<<"$result_json"
+  echo "thresholds:"
+  jq -r '.thresholds | to_entries[] | "  - \(.key)=\(.value)"' <<<"$result_json"
+  echo "change_budget:"
+  jq -r '.change_budget[] | "  - \(.class): added=\(.added) removed=\(.removed) net_new=\(.net_new)"' <<<"$result_json"
+  echo "gate_add_retire_ratio:"
+  jq -r '"  - new_active=\(.gate_add_retire_ratio.new_active_gates) newly_retired=\(.gate_add_retire_ratio.newly_retired) required=\(.gate_add_retire_ratio.required_retired) ok=\(.gate_add_retire_ratio.ok)"' <<<"$result_json"
+
+  if [[ "$(jq -r '.warnings | length' <<<"$result_json")" -gt 0 ]]; then
+    echo "warnings:"
+    jq -r '.warnings[] | "  - " + .' <<<"$result_json"
+  fi
+
+  if [[ "$(jq -r '.violations | length' <<<"$result_json")" -gt 0 ]]; then
+    echo "violations:"
+    jq -r '.violations[] | "  - " + .' <<<"$result_json"
+  else
+    echo "violations: none"
+  fi
+fi
+
+if [[ "$report_only" == "1" ]]; then
+  exit 0
+fi
+
+if [[ "$(jq -r '.pass' <<<"$result_json")" == "true" ]]; then
+  exit 0
+fi
+
+exit 1

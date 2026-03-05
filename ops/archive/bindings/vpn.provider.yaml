@@ -1,0 +1,88 @@
+# Status: authoritative
+# Last verified: 2026-02-25
+# Scope: vpn-provider-routing-contract
+
+version: 1
+updated_at: "2026-02-25"
+owner: "@ronny"
+scope: "media-p2p-vpn"
+
+provider:
+  id: privado
+  display_name: "Privado VPN"
+  account_email: "hypnotizedent@gmail.com"
+  protocol: openvpn
+  default_region: "Netherlands"
+  tunnel_service: gluetun
+  tunnel_image: "qmcgaw/gluetun:latest"
+
+secrets:
+  provider: infisical
+  project: infrastructure
+  environment: prod
+  path: /spine/vm-infra/media-stack/download
+  keys:
+    username: PRIVADO_VPN_USER
+    password: PRIVADO_VPN_PASS
+
+features:
+  socks5_available: true
+  dns_over_https_available: true
+  dns_over_tls_available: true
+  email_relay_available: true
+
+dns_policy:
+  pihole_upstream: "cloudflare"
+  pihole_unchanged: true
+  gluetun_dot: "off"
+  note: "Privado DNS features are available but not used for LAN-wide DNS. Tunnel DNS remains isolated to gluetun."
+
+routing:
+  default_route_mode: direct
+  route_modes:
+    - direct
+    - via_tunnel
+  services:
+    gluetun:
+      route_mode: direct
+      role: tunnel
+      required: true
+      vm: download-stack
+    slskd:
+      route_mode: via_tunnel
+      tunnel_service: gluetun
+      required: true
+      vm: download-stack
+      rationale: "Soulseek P2P traffic must stay VPN-tunneled."
+    qbittorrent:
+      route_mode: direct
+      tunnel_service: gluetun
+      required: false
+      vm: download-stack
+      decision_gate: "QB-VPN-ROUTE-001"
+      rationale: "Most torrent traffic is Real-Debrid mediated; keep direct until policy trigger."
+      migration_ref: "docs/runbooks/privado-vpn-setup.md#route-qbittorrent-through-vpn-optional"
+    sabnzbd:
+      route_mode: direct
+      required: true
+      vm: download-stack
+      rationale: "Usenet transport is already provider-encrypted; VPN not required."
+
+decision_gates:
+  QB-VPN-ROUTE-001:
+    current_decision: direct
+    reevaluate_if:
+      - "ISP warning or DMCA notice linked to direct BitTorrent traffic"
+      - "qBittorrent direct downloads become a sustained majority of traffic"
+      - "operator requests strict all-P2P-through-VPN posture"
+    owner: "@ronny"
+
+validation:
+  verify_gate: D223
+  required_containers:
+    - gluetun
+    - slskd
+    - qbittorrent
+  required_bindings:
+    - ops/bindings/secrets.namespace.policy.yaml
+    - ops/bindings/media.services.yaml

@@ -1,0 +1,274 @@
+# Planning Horizon Contract
+#
+# Single authority for horizon-based execution control.
+# Prevents rushed implementation by making now/later/future a canonical
+# execution control plane enforced across loop, proposal, and agent surfaces.
+#
+# Decision: LOOP-PLANNING-HORIZON-CONTROL-PLANE-20260301
+
+version: "1.3"
+updated_at: "2026-03-03"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Horizon Enum
+# ─────────────────────────────────────────────────────────────────────────
+# Every loop scope file MUST declare a horizon value.
+# Default: now (backward-compatible for existing scopes without the field).
+
+horizons:
+  - id: now
+    description: "Active execution band. Agents may auto-select this work."
+    default: true
+
+  - id: later
+    description: "Deferred work with known intent. Not auto-selectable."
+    review_sla_days: 14
+
+  - id: future
+    description: "Aspirational or speculative. Requires explicit promotion."
+    review_sla_days: 30
+
+# ─────────────────────────────────────────────────────────────────────────
+# Execution Readiness Enum
+# ─────────────────────────────────────────────────────────────────────────
+# Derived from loop state. Only runnable+now items are auto-eligible.
+
+readiness:
+  - id: runnable
+    description: "No blockers. Work can begin immediately."
+
+  - id: blocked
+    description: "Has unresolved dependencies or external blockers."
+    requires:
+      - blocked_by   # Must specify what blocks this
+
+# ─────────────────────────────────────────────────────────────────────────
+# Activation Rules
+# ─────────────────────────────────────────────────────────────────────────
+# How a loop transitions from later/future to now.
+
+activation:
+  triggers:
+    - id: manual
+      description: "Operator explicitly promotes via planning.horizon.set"
+
+    - id: date
+      description: "Auto-promoted when not_before_est date is reached"
+      requires:
+        - not_before_est   # EST date (YYYY-MM-DD) when promotion is eligible
+
+    - id: dependency
+      description: "Auto-promoted when blocking loop closes"
+      requires:
+        - depends_on_loop  # Loop ID that must close first
+
+  default_trigger: manual
+
+# ─────────────────────────────────────────────────────────────────────────
+# Transition Rules
+# ─────────────────────────────────────────────────────────────────────────
+
+transitions:
+  # Forward transitions (promotion)
+  - from: future
+    to: later
+    allowed_by: [manual]
+
+  - from: later
+    to: now
+    allowed_by: [manual, date, dependency]
+
+  - from: future
+    to: now
+    allowed_by: [manual]
+
+  # No backward transitions allowed (demote = close + re-file)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Execution Mode Enum
+# ─────────────────────────────────────────────────────────────────────────
+# Every execution loop SHOULD declare an execution_mode.
+# Default: orchestrator_subagents (multi-agent with worktree isolation).
+# Decision: LOOP-ORCHESTRATOR-SUBAGENT-DEFAULT-ENFORCEMENT-20260303
+
+execution_modes:
+  - id: single_worker
+    description: "Single agent executes all work in the primary worktree."
+    worktree_requirement: none
+    packet_required: false
+
+  - id: orchestrator_subagents
+    description: "Coordinator dispatches to isolated subagents with dedicated worktrees."
+    worktree_requirement: one_per_subagent
+    packet_required: true
+    packet_contract: ops/bindings/orchestration.packet.contract.yaml
+
+default_execution_mode: orchestrator_subagents
+
+execution_mode_policy:
+  new_loop_default: orchestrator_subagents
+  fallback_when_missing: single_worker
+  enforcement: report
+  description: |
+    New execution loops default to orchestrator_subagents.
+    Loops created without an explicit execution_mode fall back to
+    single_worker for backward compatibility. D330 reports mismatches
+    between declared mode and observed execution receipts.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Agent Eligibility (auto-selection filter)
+# ─────────────────────────────────────────────────────────────────────────
+# Default behavior: agents only auto-pick items matching ALL criteria.
+# Override: user can explicitly request later/future work.
+
+agent_eligibility:
+  auto_select:
+    horizon: now
+    execution_readiness: runnable
+    loop_status: [active, open, draft]
+  override:
+    description: "User explicitly includes later/future work"
+    requires_explicit_flag: true
+
+auto_claim:
+  enforce_now_runnable_only: true
+  applies_to:
+    - mailroom.task.worker
+  explicit_override:
+    required: true
+    ref_field: horizon_override_ref
+    reason_field: horizon_override_reason
+    description: "Deferred loop claims require explicit override evidence."
+
+# ─────────────────────────────────────────────────────────────────────────
+# Loop Scope Schema Extension
+# ─────────────────────────────────────────────────────────────────────────
+# These fields extend the loop scope frontmatter schema.
+
+scope_fields:
+  horizon:
+    type: enum
+    values: [now, later, future]
+    default: now
+    required: true
+
+  execution_readiness:
+    type: enum
+    values: [runnable, blocked]
+    default: runnable
+    required: true
+
+  activation_trigger:
+    type: enum
+    values: [manual, date, dependency]
+    default: manual
+    required_when: "horizon != now"
+
+  not_before_est:
+    type: date
+    format: "YYYY-MM-DD"
+    required_when: "activation_trigger == date"
+
+  depends_on_loop:
+    type: string
+    format: "LOOP-*"
+    required_when: "activation_trigger == dependency"
+
+  execution_mode:
+    type: enum
+    values: [single_worker, orchestrator_subagents]
+    default: orchestrator_subagents
+    required: false
+    description: "Execution topology for this loop. Defaults per execution_mode_policy."
+
+# ─────────────────────────────────────────────────────────────────────────
+# Proposal Lifecycle Integration
+# ─────────────────────────────────────────────────────────────────────────
+# Proposals inherit horizon constraints from their parent loop.
+
+proposal_rules:
+  pending_requires:
+    parent_loop_horizon: now
+    parent_loop_readiness: runnable
+    description: "Proposals can only reach pending status when parent loop is horizon=now and execution_readiness=runnable"
+
+  draft_hold_for_deferred:
+    applies_when: "parent_loop.horizon in [later, future]"
+    forced_status: draft_hold
+    required_fields:
+      - review_date
+      - owner
+    description: "Proposals under later/future loops normalize to draft_hold with review schedule"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Mailroom Boundary Model
+# ─────────────────────────────────────────────────────────────────────────
+# Canonical classification of execution vs deferred containers.
+# Decision: LOOP-MAILROOM-BOUNDARY-NORMALIZATION-20260302
+
+boundary_model:
+  loop:
+    description: "Active execution container. Only horizon=now loops may have status=active."
+    valid_active_horizons: [now]
+    deferred_status: planned
+    enforcement: "D308 fails on active+later/future; loops.create blocks it"
+
+  plan:
+    description: "Deferred intent container for later/future work."
+    surface: mailroom/state/plans/index.yaml
+    lifecycle_contract: ops/bindings/plans.lifecycle.yaml
+    required_fields: [plan_id, owner, review_date, source_loop_id, horizon]
+    status_field: status
+    default_status: deferred
+    lifecycle_statuses: [deferred, promoted, retired, canceled]
+    legacy_status_tombstones:
+      active_blocked: deferred
+      completed: retired
+    transition_rules:
+      deferred: [promoted, retired, canceled]
+      promoted: [retired, canceled]
+      retired: []
+      canceled: []
+    audit_fields:
+      promoted: [promoted_at_utc, promoted_reason]
+      retired: [retired_at_utc, retired_reason]
+      canceled: [canceled_at_utc, canceled_reason]
+    activation_policy: "Promote via planning.horizon.set when ready; creates active loop"
+
+  gap:
+    description: "Defect or work item linked to execution context."
+    active_linkage: "parent_loop must reference active execution loop (status=active)"
+    plan_linkage: "parent_loop references planned loop; gap retains plan_id + owner + review_date"
+    orphan_rule: "Open gap with closed parent_loop is orphaned (D136 enforces)"
+
+  proposal:
+    description: "Implementation packet requiring active execution loop."
+    pending_requires_active_loop: true
+    deferred_loops_force_draft_hold: true
+
+# ─────────────────────────────────────────────────────────────────────────
+# Loop Status Enum (extended)
+# ─────────────────────────────────────────────────────────────────────────
+# planned is the canonical status for deferred-intent loops.
+
+loop_statuses:
+  - id: active
+    open: true
+    description: "Execution in progress. Requires horizon=now."
+
+  - id: draft
+    open: true
+    description: "Not yet started. May be any horizon."
+
+  - id: open
+    open: true
+    description: "Legacy alias for active."
+
+  - id: planned
+    open: false
+    description: "Deferred intent. Requires horizon=later|future. Not auto-selectable."
+    requires: [activation_trigger]
+
+  - id: closed
+    open: false
+    description: "Completed or abandoned."

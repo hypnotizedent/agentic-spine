@@ -1,0 +1,128 @@
+# Status: authoritative
+# Last verified: 2026-02-26
+
+version: 1
+updated_at: "2026-02-26"
+owner: "@ronny"
+scope: spine-governance-normalization-sequence
+loop: LOOP-SPINE-GOVERNANCE-NORMALIZATION-SEQUENCE-20260226-20260226
+
+purpose:
+  statement: >
+    Canonical sequence contract that binds VM, stack, service, ingress, health,
+    queue, and deprecation governance into one deterministic flow for agents.
+  non_goal: >
+    This contract does not mutate runtime by itself. Runtime changes are executed
+    only through governed capabilities with receipts.
+
+authorities:
+  vm_lifecycle:
+    - ops/bindings/vm.lifecycle.contract.yaml
+    - ops/bindings/vm.lifecycle.yaml
+  stack_runtime:
+    - docs/governance/STACK_REGISTRY.yaml
+    - ops/bindings/docker.compose.targets.yaml
+  service_runtime:
+    - docs/governance/SERVICE_REGISTRY.yaml
+    - ops/bindings/services.health.yaml
+  routing_ingress:
+    - docs/governance/DOMAIN_ROUTING_REGISTRY.yaml
+    - docs/governance/INGRESS_AUTHORITY.md
+  communications_queue:
+    - ops/bindings/communications.alerts.queue.contract.yaml
+    - ops/bindings/communications.alerts.escalation.contract.yaml
+  deprecation:
+    - docs/governance/LEGACY_DEPRECATION.md
+    - ops/bindings/docker-host.deprecation.contract.yaml
+
+sequence:
+  - id: S1
+    name: vm-state-authority
+    objective: "Confirm VM existence, role, status, and lifecycle stage."
+    required_sources:
+      - ops/bindings/vm.lifecycle.yaml
+    outputs:
+      - vm_inventory_snapshot
+      - decommission_blockers
+
+  - id: S2
+    name: stack-path-authority
+    objective: "Resolve authoritative compose/runtime paths for each active stack."
+    required_sources:
+      - docs/governance/STACK_REGISTRY.yaml
+      - ops/bindings/docker.compose.targets.yaml
+    outputs:
+      - host_to_stack_path_map
+      - legacy_only_stack_flags
+
+  - id: S3
+    name: service-authority
+    objective: "Map service -> host/container/port and active lifecycle status."
+    required_sources:
+      - docs/governance/SERVICE_REGISTRY.yaml
+    outputs:
+      - service_inventory_snapshot
+      - deprecated_service_candidates
+
+  - id: S4
+    name: ingress-authority
+    objective: "Map hostname -> routing layer -> service target."
+    required_sources:
+      - docs/governance/DOMAIN_ROUTING_REGISTRY.yaml
+      - docs/governance/INGRESS_AUTHORITY.md
+    outputs:
+      - route_inventory_snapshot
+      - drift_candidates
+
+  - id: S5
+    name: health-authority
+    objective: "Verify that health probes align with active service authority."
+    required_sources:
+      - ops/bindings/services.health.yaml
+    outputs:
+      - probe_coverage_report
+      - disabled_probe_justification
+
+  - id: S6
+    name: communications-queue-authority
+    objective: "Keep alerts pipeline autonomous with bounded retries and DLQ."
+    required_sources:
+      - ops/bindings/communications.alerts.queue.contract.yaml
+      - ops/bindings/communications.alerts.escalation.contract.yaml
+    outputs:
+      - pending_age_and_volume_status
+      - dispatcher_health_status
+
+  - id: S7
+    name: deprecation-authority
+    objective: "Classify legacy fragments into safe cleanup, verify-first, or defer."
+    required_sources:
+      - ops/bindings/docker-host.deprecation.contract.yaml
+      - docs/governance/LEGACY_DEPRECATION.md
+    outputs:
+      - approved_safe_actions
+      - deferred_action_list
+
+  - id: S8
+    name: verify-closeout
+    objective: "Run verify route/pack and close linked gaps with fixed receipts."
+    required_sources:
+      - docs/governance/ONBOARDING_PLAYBOOK.md
+    outputs:
+      - verify_receipts
+      - gap_closeout_receipts
+
+agent_simple_flow:
+  - "1) Run status: vm lifecycle, stack targets, services, queue."
+  - "2) Fix one bounded governance issue at a time."
+  - "3) Verify with scoped pack."
+  - "4) Close/record gap with strict receipt linkage."
+
+policy_guards:
+  mint_os_runtime_decommission:
+    allowed_here: false
+    reason: "Handled in dedicated Mint loop lane. This sequence is a stepping-stool contract."
+  manual_alert_flush:
+    allowed: true
+    mode: "break-glass-only"
+    preferred_mode: "always-on dispatcher worker"

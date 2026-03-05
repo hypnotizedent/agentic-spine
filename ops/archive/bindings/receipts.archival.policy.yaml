@@ -1,0 +1,65 @@
+version: "1.0"
+updated: "2026-02-23"
+owner: "@ronny"
+scope: receipts-archival-and-freshness-policy
+
+retention_classes:
+  hot:
+    description: "Actively written receipts that remain in the live sessions lane."
+    age_activity_thresholds:
+      max_age_days: 14
+      min_activity_events_per_30d: 4
+    archive_eligible: false
+    source_patterns:
+      - receipts/sessions/RCAP-*
+
+  warm:
+    description: "Recent receipts with reduced access frequency."
+    age_activity_thresholds:
+      min_age_days: 15
+      max_age_days: 90
+      min_activity_events_per_30d: 1
+    archive_eligible: true
+    source_patterns:
+      - receipts/sessions/RCAP-*
+
+  cold:
+    description: "Long-lived receipt evidence kept for historical reconstruction."
+    age_activity_thresholds:
+      min_age_days: 91
+      max_age_days: null
+      activity_state: inactive_or_closed
+    archive_eligible: true
+    source_patterns:
+      - receipts/sessions/RCAP-*
+
+exempt_classes:
+  - compliance-critical
+  - release-cert
+
+archive_target_layout:
+  root: receipts/archive
+  path_pattern: receipts/archive/<retention_class>/<YYYY>/<MM>/
+  preserve_filename: true
+  preserve_content: true
+
+defaults:
+  mode: non_destructive
+  prune_active_receipts: false
+
+execution_requirements:
+  approval_required: true
+  approval_reference_required: true
+  receipt_emission_required: true
+  receipt_path_pattern: receipts/audits/migration/H*_*.yaml
+
+coverage_thresholds:
+  minimum_coverage_percent:
+    warn_below: 75.0
+    fail_below: 50.0
+  watermark_age_hours:
+    warn_above: 24.0
+    fail_above: 168.0
+  missing_entries:
+    warn_above: 5000
+    fail_above: 15000

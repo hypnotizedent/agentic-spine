@@ -1,20 +1,46 @@
 #!/usr/bin/env bash
+# microsoft-cap-exec — governed Microsoft capability wrapper
+# Domain: mint-modules (mintprints.com M365 tenant) — NOT spine infrastructure
+# Route: microsoft.* capability -> secrets-exec -> microsoft-token-exec -> microsoft_tools.py
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-SCRIPT_NAME="$(basename "$0")"
-PROJECT_ROOT="${MICROSOFT_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/agents/microsoft/tools/spine-plugin-microsoft/bin}"
-PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
-LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
+SPINE_CODE="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+SECRETS_EXEC="$SPINE_CODE/ops/plugins/secrets/bin/secrets-exec"
+TOKEN_EXEC="$SPINE_CODE/ops/plugins/microsoft/bin/microsoft-token-exec"
+TOOLS_PY="/Users/ronnyworks/code/workbench/agents/microsoft/tools/microsoft_tools.py"
 
-if [[ -x "$PROJECT_SCRIPT" && "${MICROSOFT_PLUGIN_DELEGATED:-0}" != "1" ]]; then
-  exec env SPINE_ROOT="$SPINE_ROOT" MICROSOFT_PLUGIN_DELEGATED=1 "$PROJECT_SCRIPT" "$@"
+usage() {
+  cat <<'EOF'
+Usage:
+  microsoft-cap-exec <operation> [args...]
+
+Operations:
+  mail_list_all | mail_export_mime
+  mail_search | mail_get | mail_send | draft_create | draft_update
+  calendar_list | calendar_get | calendar_create | calendar_update | calendar_rsvp
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+  usage >&2
+  exit 1
 fi
 
-if [[ "${MICROSOFT_PLUGIN_DELEGATED:-0}" == "1" ]]; then
-  echo "WARN: microsoft plugin fallback active; delegation loop guard engaged for $PROJECT_SCRIPT" >&2
-else
-  echo "WARN: microsoft plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
-fi
-exec "$LEGACY_SCRIPT" "$@"
+op="$1"
+shift
+
+case "$op" in
+  mail_list_all|mail_export_mime|mail_search|mail_get|mail_send|draft_create|draft_update|calendar_list|calendar_get|calendar_create|calendar_update|calendar_rsvp)
+    ;;
+  *)
+    echo "FAIL: unknown microsoft operation: $op" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
+
+[[ -x "$SECRETS_EXEC" ]] || { echo "FAIL: missing executable $SECRETS_EXEC" >&2; exit 1; }
+[[ -x "$TOKEN_EXEC" ]] || { echo "FAIL: missing executable $TOKEN_EXEC" >&2; exit 1; }
+[[ -f "$TOOLS_PY" ]] || { echo "FAIL: missing tool script $TOOLS_PY" >&2; exit 1; }
+
+exec "$SECRETS_EXEC" -- "$TOKEN_EXEC" python3 "$TOOLS_PY" "$op" "$@"

@@ -288,20 +288,28 @@ run_gate_ids() {
   declare -A gate_script=()
   declare -A gate_inline=()
   declare -A gate_retired=()
-  while IFS=$'\t' read -r _gid _script _inline _retired; do
+  declare -A gate_config_mode=()
+  declare -A gate_config_warn_only=()
+  while IFS=$'\t' read -r _gid _script _inline _retired _mode _warn_only; do
     [[ -n "$_gid" ]] || continue
     gate_script["$_gid"]="$_script"
     gate_inline["$_gid"]="$_inline"
     gate_retired["$_gid"]="$_retired"
-  done < <(yq e -r '.gates[] | [.id, (.check_script // ""), (.inline // false | tostring), (.retired // false | tostring)] | @tsv' "$REGISTRY" 2>/dev/null || true)
+    gate_config_mode["$_gid"]="$_mode"
+    gate_config_warn_only["$_gid"]="$_warn_only"
+  done < <(yq e -r '.gates[] | [.id, (.check_script // ""), (.inline // false | tostring), (.retired // false | tostring), (.mode // "enforce"), (.warn_only // false | tostring)] | @tsv' "$REGISTRY" 2>/dev/null || true)
 
   local pass_count=0
   local fail_count=0
+  local warn_count=0
   local skipped_inline=0
   local skipped_retired=0
   local skipped_network=0
   local receipt_integrity_warnings=0
   local -a failing_ids=()
+  local -a warning_ids=()
+  local -a blocking_fail_ids=()
+  local -a non_blocking_fail_ids=()
   local receipt_integrity_mode="${VERIFY_RECEIPT_INTEGRITY_MODE:-warn}"
   case "$receipt_integrity_mode" in
     off|warn|fail) ;;
@@ -318,12 +326,21 @@ run_gate_ids() {
   declare -A gate_script_abs=()
   declare -A gate_meta_fail_msg=()
   declare -A gate_script_kind=()
+  declare -A gate_blocking=()
   local tailscale_guard_needed=0
-  local gid script_rel inline retired script_abs
+  local gid script_rel inline retired script_abs mode warn_only
   for gid in "${gate_ids[@]}"; do
     script_rel="${gate_script[$gid]:-}"
     inline="${gate_inline[$gid]:-false}"
     retired="${gate_retired[$gid]:-false}"
+    mode="${gate_config_mode[$gid]:-enforce}"
+    warn_only="${gate_config_warn_only[$gid]:-false}"
+
+    if [[ "$mode" == "report" || "$warn_only" == "true" ]]; then
+      gate_blocking["$gid"]="false"
+    else
+      gate_blocking["$gid"]="true"
+    fi
 
     if [[ -z "$script_rel" || "$script_rel" == "null" ]]; then
       gate_mode["$gid"]="meta_fail"
@@ -438,9 +455,17 @@ run_gate_ids() {
         [[ "$json_mode" == "0" ]] && echo "$gid SKIP network-gate"
         ;;
       meta_fail)
-        fail_count=$((fail_count + 1))
-        failing_ids+=("$gid")
-        [[ "$json_mode" == "0" ]] && echo "$gid FAIL ${gate_meta_fail_msg[$gid]}"
+        if [[ "${gate_blocking[$gid]:-true}" == "true" ]]; then
+          fail_count=$((fail_count + 1))
+          failing_ids+=("$gid")
+          blocking_fail_ids+=("$gid")
+          [[ "$json_mode" == "0" ]] && echo "$gid FAIL ${gate_meta_fail_msg[$gid]}"
+        else
+          warn_count=$((warn_count + 1))
+          warning_ids+=("$gid")
+          non_blocking_fail_ids+=("$gid")
+          [[ "$json_mode" == "0" ]] && echo "$gid WARN ${gate_meta_fail_msg[$gid]}"
+        fi
         ;;
       run)
         out_file="$tmp_dir/${gid}.out"
@@ -448,11 +473,22 @@ run_gate_ids() {
         if [[ "$rc" -eq 0 ]]; then
           if [[ "$receipt_integrity_mode" != "off" ]] && receipt_output_has_mixed_status "$out_file"; then
             if [[ "$receipt_integrity_mode" == "fail" ]]; then
-              fail_count=$((fail_count + 1))
-              failing_ids+=("$gid")
-              if [[ "$json_mode" == "0" ]]; then
-                echo "$gid FAIL receipt-integrity-mixed-status"
-                print_receipt_mixed_status_excerpt "$out_file"
+              if [[ "${gate_blocking[$gid]:-true}" == "true" ]]; then
+                fail_count=$((fail_count + 1))
+                failing_ids+=("$gid")
+                blocking_fail_ids+=("$gid")
+                if [[ "$json_mode" == "0" ]]; then
+                  echo "$gid FAIL receipt-integrity-mixed-status"
+                  print_receipt_mixed_status_excerpt "$out_file"
+                fi
+              else
+                warn_count=$((warn_count + 1))
+                warning_ids+=("$gid")
+                non_blocking_fail_ids+=("$gid")
+                if [[ "$json_mode" == "0" ]]; then
+                  echo "$gid WARN receipt-integrity-mixed-status"
+                  print_receipt_mixed_status_excerpt "$out_file"
+                fi
               fi
             else
               pass_count=$((pass_count + 1))
@@ -467,11 +503,22 @@ run_gate_ids() {
             [[ "$json_mode" == "0" ]] && echo "$gid PASS"
           fi
         else
-          fail_count=$((fail_count + 1))
-          failing_ids+=("$gid")
-          if [[ "$json_mode" == "0" ]]; then
-            echo "$gid FAIL (rc=$rc)"
-            sed -n '1,60p' "$out_file" | sed 's/^/  /' || true
+          if [[ "${gate_blocking[$gid]:-true}" == "true" ]]; then
+            fail_count=$((fail_count + 1))
+            failing_ids+=("$gid")
+            blocking_fail_ids+=("$gid")
+            if [[ "$json_mode" == "0" ]]; then
+              echo "$gid FAIL (rc=$rc)"
+              sed -n '1,60p' "$out_file" | sed 's/^/  /' || true
+            fi
+          else
+            warn_count=$((warn_count + 1))
+            warning_ids+=("$gid")
+            non_blocking_fail_ids+=("$gid")
+            if [[ "$json_mode" == "0" ]]; then
+              echo "$gid WARN (rc=$rc)"
+              sed -n '1,60p' "$out_file" | sed 's/^/  /' || true
+            fi
           fi
         fi
         ;;
@@ -494,15 +541,19 @@ run_gate_ids() {
       --argjson total "${#gate_ids[@]}" \
       --argjson pass "$pass_count" \
       --argjson fail "$fail_count" \
+      --argjson warn "$warn_count" \
       --argjson skipped_inline "$skipped_inline" \
       --argjson skipped_retired "$skipped_retired" \
       --argjson skipped_network "$skipped_network" \
       --argjson receipt_integrity_warnings "$receipt_integrity_warnings" \
       --argjson failing_ids "$failing_json" \
-      '{total:$total, pass:$pass, fail:$fail, skipped_inline:$skipped_inline, skipped_retired:$skipped_retired, skipped_network:$skipped_network, receipt_integrity_warnings:$receipt_integrity_warnings, failing_ids:$failing_ids}'
+      --argjson warning_ids "$(printf '%s\n' "${warning_ids[@]-}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+      --argjson blocking_fail_ids "$(printf '%s\n' "${blocking_fail_ids[@]-}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+      --argjson non_blocking_fail_ids "$(printf '%s\n' "${non_blocking_fail_ids[@]-}" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+      '{total:$total, pass:$pass, fail:$fail, warn:$warn, skipped_inline:$skipped_inline, skipped_retired:$skipped_retired, skipped_network:$skipped_network, receipt_integrity_warnings:$receipt_integrity_warnings, failing_ids:$failing_ids, warning_ids:$warning_ids, blocking_fail_ids:$blocking_fail_ids, non_blocking_fail_ids:$non_blocking_fail_ids}'
   else
     echo
-    echo "summary: pass=$pass_count fail=$fail_count skipped_inline=$skipped_inline skipped_retired=$skipped_retired skipped_network=$skipped_network"
+    echo "summary: pass=$pass_count fail=$fail_count warn=$warn_count skipped_inline=$skipped_inline skipped_retired=$skipped_retired skipped_network=$skipped_network"
     if [[ "$receipt_integrity_warnings" -gt 0 ]]; then
       echo "receipt_integrity_warnings: $receipt_integrity_warnings"
     fi

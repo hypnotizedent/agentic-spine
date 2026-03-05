@@ -11,6 +11,10 @@ SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 BINDING="$SPINE_ROOT/ops/bindings/docker.compose.targets.yaml"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
 
+# Source shared SSH resolver for LAN→Tailscale fallback.
+# shellcheck source=../../../lib/ssh-resolve.sh
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
@@ -55,13 +59,12 @@ DEF_BATCH="$(yq -r '.ssh.defaults.batch_mode // true' "$SSH_BINDING")"
 DEF_STRICT="$(yq -r '.ssh.defaults.strict_host_key_checking // "no"' "$SSH_BINDING")"
 DEF_KNOWN_HOSTS="$(yq -r '.ssh.defaults.user_known_hosts_file // "/dev/null"' "$SSH_BINDING")"
 
-ssh_host="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .host // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
-ssh_user="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .user // \"\"" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
+ssh_host_raw="$(ssh_resolve_host "$ssh_target_id")"
+ssh_user="$(ssh_resolve_user "$ssh_target_id" "$DEF_USER")"
 ssh_port="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .port // ${DEF_PORT}" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
 ssh_to="$(yq -r ".ssh.targets[] | select(.id == \"$ssh_target_id\") | .connect_timeout_sec // ${DEF_TO}" "$SSH_BINDING" 2>/dev/null | head -n1 || true)"
 
-[[ -n "$ssh_host" && "$ssh_host" != "null" ]] || stop "ssh target '$ssh_target_id' missing in $SSH_BINDING (or host unset)"
-[[ -n "$ssh_user" && "$ssh_user" != "null" ]] || ssh_user="$DEF_USER"
+[[ -n "$ssh_host_raw" && "$ssh_host_raw" != "null" ]] || stop "ssh target '$ssh_target_id' missing in $SSH_BINDING (or host unset)"
 [[ -n "$ssh_port" && "$ssh_port" != "null" ]] || ssh_port="$DEF_PORT"
 [[ -n "$ssh_to" && "$ssh_to" != "null" ]] || ssh_to="$DEF_TO"
 
@@ -69,6 +72,12 @@ timeout_sec="$(yq -r ".targets.\"$TARGET\".connect_timeout_sec // \"\"" "$BINDIN
 if [[ -z "$timeout_sec" || "$timeout_sec" == "null" ]]; then
   timeout_sec="$ssh_to"
 fi
+
+resolve_result="$(ssh_resolve_host_with_fallback "$ssh_target_id" "$timeout_sec")" || true
+ssh_host="$(echo "$resolve_result" | awk '{print $1}')"
+path_used="$(echo "$resolve_result" | awk '{print $2}')"
+[[ -n "$ssh_host" ]] || ssh_host="$ssh_host_raw"
+[[ -n "$path_used" ]] || path_used="unknown"
 
 ssh_opts=(
   -o "ConnectTimeout=$timeout_sec"
@@ -80,9 +89,20 @@ ssh_opts=(
 if [[ "$DEF_BATCH" == "true" ]]; then
   ssh_opts+=(-o "BatchMode=yes")
 fi
+if [[ "$path_used" == "unreachable" ]]; then
+  proxy_target="$(ssh_resolve_probe_via "$ssh_target_id")"
+  if [[ -n "$proxy_target" && "$proxy_target" != "null" ]]; then
+    proxy_ref="$(ssh_resolve_ref "$proxy_target")"
+    if [[ -n "$proxy_ref" ]]; then
+      ssh_opts+=(-o "ProxyJump=${proxy_ref}")
+      ssh_host="$ssh_host_raw"
+      path_used="proxyjump"
+    fi
+  fi
+fi
 
 echo "docker.compose.down"
-echo "target:  $TARGET (ssh_target=$ssh_target_id ${ssh_user}@${ssh_host}:${ssh_port})"
+echo "target:  $TARGET (ssh_target=$ssh_target_id ${ssh_user}@${ssh_host}:${ssh_port} path=${path_used})"
 echo "stack:   $STACK"
 echo "path:    $stack_path"
 echo
@@ -131,4 +151,3 @@ EOS
 
 ssh "${ssh_opts[@]}" -p "$ssh_port" "${ssh_user}@${ssh_host}" \
   "bash -lc $(printf "%q" "$REMOTE_SCRIPT") -- $(printf "%q" "$stack_path")"
-

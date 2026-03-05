@@ -208,7 +208,7 @@ run_json_cmd() {
   set -e
 
   if [[ -z "$out" ]] || ! jq -e . >/dev/null 2>&1 <<<"$out"; then
-    out='{"total":0,"pass":0,"fail":1,"skipped_inline":0,"skipped_retired":0,"skipped_network":0,"receipt_integrity_warnings":0,"failing_ids":[]}'
+    out='{"total":0,"pass":0,"fail":1,"warn":0,"skipped_inline":0,"skipped_retired":0,"skipped_network":0,"receipt_integrity_warnings":0,"failing_ids":[],"warning_ids":[],"blocking_fail_ids":[],"non_blocking_fail_ids":[]}'
     rc=1
   else
     out="$(jq -c . <<<"$out")"
@@ -225,11 +225,15 @@ merge_json_results() {
       total: (($a.total // 0) + ($b.total // 0)),
       pass: (($a.pass // 0) + ($b.pass // 0)),
       fail: (($a.fail // 0) + ($b.fail // 0)),
+      warn: (($a.warn // 0) + ($b.warn // 0)),
       skipped_inline: (($a.skipped_inline // 0) + ($b.skipped_inline // 0)),
       skipped_retired: (($a.skipped_retired // 0) + ($b.skipped_retired // 0)),
       skipped_network: (($a.skipped_network // 0) + ($b.skipped_network // 0)),
       receipt_integrity_warnings: (($a.receipt_integrity_warnings // 0) + ($b.receipt_integrity_warnings // 0)),
-      failing_ids: ((($a.failing_ids // []) + ($b.failing_ids // [])) | unique)
+      failing_ids: ((($a.failing_ids // []) + ($b.failing_ids // [])) | unique),
+      warning_ids: ((($a.warning_ids // []) + ($b.warning_ids // [])) | unique),
+      blocking_fail_ids: ((($a.blocking_fail_ids // []) + ($b.blocking_fail_ids // [])) | unique),
+      non_blocking_fail_ids: ((($a.non_blocking_fail_ids // []) + ($b.non_blocking_fail_ids // [])) | unique)
     }
   '
 }
@@ -529,14 +533,18 @@ if [[ "$json_mode" -eq 1 ]]; then
     --argjson parity_diff "$diff_json" \
     --argjson failure_class "$class_json" \
     --argjson failing_gate_ids "$(jq -c '.failing_ids // []' <<<"$wrapper_json")" \
+    --argjson warning_gate_ids "$(jq -c '.warning_ids // []' <<<"$wrapper_json")" \
+    --argjson blocking_fail_ids "$(jq -c '.blocking_fail_ids // []' <<<"$wrapper_json")" \
+    --argjson non_blocking_fail_ids "$(jq -c '.non_blocking_fail_ids // []' <<<"$wrapper_json")" \
     --arg history_file "$HISTORY_FILE" \
-    '{scope:$scope,domain:$domain,wrapper_rc:$wrapper_rc,wrapper:$wrapper,failing_gate_ids:$failing_gate_ids,shadow_mode:$shadow,legacy_rc:$legacy_rc,legacy:$legacy,parity_diff:$parity_diff,failure_class:$failure_class,history_file:$history_file}'
+    '{scope:$scope,domain:$domain,wrapper_rc:$wrapper_rc,wrapper:$wrapper,failing_gate_ids:$failing_gate_ids,warning_gate_ids:$warning_gate_ids,blocking_fail_ids:$blocking_fail_ids,non_blocking_fail_ids:$non_blocking_fail_ids,shadow_mode:$shadow,legacy_rc:$legacy_rc,legacy:$legacy,parity_diff:$parity_diff,failure_class:$failure_class,history_file:$history_file}'
 else
   echo "verify.run"
   echo "scope: $scope"
   [[ -n "$target_domain" ]] && echo "domain: $target_domain"
-  echo "wrapper: total=$(jq -r '.total // 0' <<<"$wrapper_json") pass=$(jq -r '.pass // 0' <<<"$wrapper_json") fail=$(jq -r '.fail // 0' <<<"$wrapper_json")"
-  echo "failing_gate_ids: $(jq -r '(.failing_ids // []) | if length == 0 then "none" else join(",") end' <<<"$wrapper_json")"
+  echo "wrapper: total=$(jq -r '.total // 0' <<<"$wrapper_json") pass=$(jq -r '.pass // 0' <<<"$wrapper_json") fail=$(jq -r '.fail // 0' <<<"$wrapper_json") warn=$(jq -r '.warn // 0' <<<"$wrapper_json")"
+  echo "blocking_fail_gate_ids: $(jq -r '(.blocking_fail_ids // .failing_ids // []) | if length == 0 then "none" else join(",") end' <<<"$wrapper_json")"
+  echo "warning_gate_ids: $(jq -r '(.warning_ids // []) | if length == 0 then "none" else join(",") end' <<<"$wrapper_json")"
   echo "failure_class: deterministic=$(jq -r '.deterministic | length' <<<"$class_json") freshness=$(jq -r '.freshness | length' <<<"$class_json") gate_bug=$(jq -r '.gate_bug | length' <<<"$class_json")"
   if [[ "$shadow_mode" -eq 1 ]]; then
     echo "shadow_legacy: total=$(jq -r '.total // 0' <<<"$legacy_json") pass=$(jq -r '.pass // 0' <<<"$legacy_json") fail=$(jq -r '.fail // 0' <<<"$legacy_json")"

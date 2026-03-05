@@ -1,0 +1,59 @@
+# Status: authoritative
+# Last verified: 2026-02-26
+
+version: 1
+updated_at: "2026-02-26"
+owner: "@ronny"
+scope: mail-archiver-retention-lifecycle
+
+runtime:
+  host: communications-stack
+  vm_id: "214"
+  data_root: /srv/mail-archiver
+  mount_invariant_gate: D233
+
+storage_quota:
+  governed_capacity_gib: 984
+  warning_threshold_percent: 70
+  incident_threshold_percent: 85
+  hard_stop_threshold_percent: 92
+
+retention_classes:
+  import_staging_mbox:
+    path: /srv/mail-archiver/uploads/mbox
+    retention_days: 14
+    purge_condition: "import_state in [completed, failed]"
+  failed_chunk_temp:
+    path: /srv/mail-archiver/tmp
+    retention_days: 7
+    purge_condition: "orphaned temp artifacts only"
+  postgres_backups:
+    path: /srv/mail-archiver/backups/postgres
+    retention_days: 30
+    purge_condition: "rolling retention"
+  uploads_snapshots:
+    path: /srv/mail-archiver/backups/uploads
+    retention_days: 14
+    purge_condition: "rolling retention"
+  source_takeout_hold:
+    path: /mnt/docker/mail-archive-import
+    retention_days: 365
+    purge_condition: "only after GAP-OP-922 import attestation and checksum archive"
+
+lifecycle_controls:
+  prune_schedule_cron: "15 3 * * *"
+  pre_bulk_import_required:
+    - "D233 must pass for non-boot storage invariants."
+    - "backup.schedule.yaml must include vm-level + app-level jobs."
+    - "mail.archiver.backup.contract.yaml restore_sop must be current."
+  import_safety_mode:
+    block_new_import_when_above_percent: 85
+    require_operator_override_when_above_percent: 80
+
+references:
+  schedule_binding: ops/bindings/backup.schedule.yaml
+  communications_stack_binding: ops/bindings/communications.stack.contract.yaml
+  source_gap: GAP-OP-922
+  closes_gaps:
+    - GAP-OP-925
+

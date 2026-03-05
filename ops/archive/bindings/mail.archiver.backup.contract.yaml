@@ -1,0 +1,76 @@
+# Status: authoritative
+# Last verified: 2026-03-03
+
+version: 1
+updated_at: "2026-02-26"
+owner: "@ronny"
+scope: mail-archiver-backup-restore
+
+runtime:
+  vm:
+    id: "214"
+    hostname: communications-stack
+    tailscale_ip: 100.115.16.37
+  stack: communications-stack
+  containers:
+    app: mail-archiver
+    db: mail-archiver-db
+
+backup_coverage:
+  vm_level:
+    enabled: true
+    schedule_id: vm-214-vzdump-daily
+    inventory_target: vm-214-communications-stack-primary
+    vm_lifecycle_backup_target: vm-214-communications-stack-primary
+    source_bindings:
+      - ops/bindings/backup.inventory.yaml
+      - ops/bindings/vm.lifecycle.yaml
+  app_level:
+    - id: postgres-dump
+      schedule_id: mail-archiver-db-pgdump-daily
+      storage_path: /srv/mail-archiver/backups
+      file_pattern: "mail-archiver-db-*.sql.gz"
+      retention_days: 7
+      command_template: "docker exec mail-archiver-db pg_dump -U mailuser MailArchiver | gzip > /srv/mail-archiver/backups/mail-archiver-db-<timestamp>.sql.gz"
+    - id: uploads-snapshot
+      schedule_id: mail-archiver-uploads-snapshot-daily
+      storage_path: /srv/mail-archiver/backups
+      file_pattern: "mail-archiver-uploads-*.tar.gz"
+      retention_days: 7
+      command_template: "tar -czf /srv/mail-archiver/backups/mail-archiver-uploads-<timestamp>.tar.gz -C /srv/mail-archiver/uploads ."
+
+restore_sop:
+  objective: "Recover mail-archiver service and DB on VM 214 with bounded data loss."
+  rpo_hours: 24
+  rto_hours: 4
+  ordered_steps:
+    - "Validate latest vm-214 vzdump artifact exists and is recent."
+    - "Restore VM 214 snapshot if full host failure is involved."
+    - "Stop mail-archiver and mail-archiver-db containers."
+    - "Restore latest mail-archiver-db pg_dump into MailArchiver database."
+    - "Restore uploads snapshot to /srv/mail-archiver/uploads when required."
+    - "Start containers and verify health endpoint plus login."
+    - "Run governed validation checks and capture receipts."
+
+verification:
+  post_restore_commands:
+    - "./bin/ops cap run communications.stack.status"
+    - "./bin/ops cap run verify.pack.run communications"
+    - "./bin/ops cap run services.health.status --id mail-archiver-vm214"
+  backup_status_command: "./bin/ops cap run communications.mailarchiver.backup.status"
+
+cron_deploy_template:
+  description: |
+    Crontab entry for communications-stack (VM 214) root user.
+    Deploy with: ssh communications-stack 'sudo crontab -l | grep -v pg_dump; echo "<cron_line>"' | ssh communications-stack 'sudo crontab -'
+    Or manually add via: ssh communications-stack 'sudo crontab -e'
+  actual_cron: "0 3 * * * /usr/local/bin/mail-archiver-backup.sh >> /var/log/mail-archiver-backup.log 2>&1"
+  note: "Single backup script handles pg_dump + uploads tar + 7-day retention. Script deployed at /usr/local/bin/mail-archiver-backup.sh."
+
+references:
+  schedule_binding: ops/bindings/backup.schedule.yaml
+  retention_binding: ops/bindings/mail.archiver.retention.contract.yaml
+  closes_gaps:
+    - GAP-OP-924
+    - GAP-OP-1368
+

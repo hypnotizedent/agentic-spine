@@ -1,0 +1,86 @@
+# Alerting Rules Contract
+# Status: authoritative
+# Last verified: 2026-02-22
+# Scope: alerting dispatch thresholds and channels
+
+version: "1.1"
+updated_at: "2026-02-22"
+owner: "@ronny"
+scope: alerting-rules
+
+defaults:
+  snapshot_path: /tmp/spine-alerting-probe-latest.json
+  alert_outbox_dir: mailroom/outbox/alerts
+  cooldown_seconds: 1800
+  trigger_statuses:
+    - warn
+    - incident
+  channels:
+    - ha
+    - bridge-push
+
+channels:
+  ha:
+    enabled: true
+    endpoint_env: ALERTING_HA_URL
+    token_env: ALERTING_HA_TOKEN
+    service_path: /api/services/persistent_notification/create
+  bridge-push:
+    enabled: true
+    outbox_file: mailroom/outbox/alerts/bridge-push.log
+  email:
+    enabled: true
+    mode: intent-flush
+    # Auto dispatch writes structured intent artifacts to
+    # mailroom/outbox/alerts/email-intents/*.yaml (no direct provider call).
+    # Flush via manual capability: communications.alerts.flush
+    # which runs communications.send.preview + communications.send.execute
+    # per intent, preserving the manual approval boundary for real sends.
+    intent_dir: mailroom/outbox/alerts/email-intents
+    flush_capability: communications.alerts.flush
+
+rules:
+  - domain_id: automation-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 900
+    channels: [ha, bridge-push, email]
+
+  - domain_id: finance-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 900
+    channels: [ha, bridge-push, email]
+
+  - domain_id: z2m-bridge
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 1800
+    channels: [ha, bridge-push, email]
+
+  - domain_id: immich-stack
+    trigger_statuses: [incident]
+    cooldown_seconds: 1800
+    channels: [ha, bridge-push, email]
+
+  - domain_id: infra-core-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 900
+    channels: [ha, bridge-push, email]
+
+  - domain_id: observability-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 1800
+    channels: [ha, bridge-push, email]
+
+  - domain_id: dev-tools-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 900
+    channels: [ha, bridge-push, email]
+
+  - domain_id: mint-stack
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 1800
+    channels: [ha, bridge-push, email]
+
+  - domain_id: mcp-runtime-anti-drift
+    trigger_statuses: [warn, incident]
+    cooldown_seconds: 900
+    channels: [ha, bridge-push, email]

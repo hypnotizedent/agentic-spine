@@ -1,0 +1,62 @@
+version: 1
+updated_at: "2026-02-25"
+owner: "@ronny"
+scope: mint-probe-targets
+
+targets:
+  app_plane:
+    ssh_target: mint-apps
+    vm_id: 213
+    http_checks:
+      - id: files-api
+        port: 3500
+        health_path: /health
+      - id: quote-page
+        port: 3341
+        health_path: /health
+      - id: order-intake
+        port: 3400
+        health_path: /health
+      - id: finance-adapter
+        port: 3600
+        health_path: /health
+      - id: pricing
+        port: 3700
+        health_path: /health
+      - id: suppliers
+        port: 3800
+        health_path: /health
+      - id: shipping
+        port: 3900
+        health_path: /health
+      - id: payment
+        port: 4000
+        health_path: /health
+  data_plane:
+    ssh_target: mint-data
+    vm_id: 212
+    http_checks:
+      - id: minio
+        port: 9000
+        health_path: /minio/health/live
+    ssh_checks:
+      - id: postgres
+        command: docker exec mint-modules-postgres pg_isready -U postgres -q
+      - id: redis
+        command: docker exec mint-modules-redis redis-cli ping | grep -q PONG
+
+proof_routes:
+  shipping_shop_address_path: /api/v1/shipping/shop-address
+  suppliers_search_path: /api/v1/suppliers/search
+  suppliers_stock_path_template: /api/v1/suppliers/{code}/products/{sku}/stock
+  artwork_upload_prepare_path: /api/v1/files/upload/prepare
+
+claim_policy:
+  trusted_baseline: "quote form submit -> Ronny email received -> files visible in MinIO"
+  allowed_claim_states:
+    - APPROVED_BY_RONNY
+    - BUILT_NOT_STAMPED
+    - CONTRACT_ONLY
+    - LEGACY_ONLY
+    - NOT_BUILT
+  live_claim_rule: "No module or flow is live unless APPROVED_BY_RONNY with run-key evidence."

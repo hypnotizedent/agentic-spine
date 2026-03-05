@@ -1,0 +1,322 @@
+# Status: authoritative
+# Last verified: 2026-02-23
+# Scope: domain-portfolio-ssot-v1
+#
+# Purpose:
+#   Machine-readable SSOT for canonical domain portfolio.
+#   Only domains listed in domain.canonical.roots.yaml may appear here.
+#   D200 gate enforces this constraint.
+#
+# Cross-references:
+#   - ops/bindings/domain.canonical.roots.yaml (canonical roots — D200 gate)
+#   - docs/governance/DOMAIN_ROUTING_REGISTRY.yaml (hostname-level routing)
+#   - docs/governance/SERVICE_REGISTRY.yaml (service-level inventory)
+#   - ops/bindings/cloudflare.inventory.yaml (Cloudflare zone/tunnel IDs)
+#   - ops/bindings/communications.stack.contract.yaml (email routing)
+#   - ops/bindings/communications.providers.contract.yaml (transactional email)
+#
+# Non-canonical domains (brand protection, parked, legacy) are tracked in
+#   workbench:docs/legacy/infrastructure/reference/domains/DOMAIN_REGISTRY.md only.
+#
+# Update procedure (docs-only):
+#   1) Verify registrar state via Namecheap dashboard (read-only).
+#   2) Verify DNS state via Cloudflare dashboard or API (read-only).
+#   3) Update this file with any changes.
+#   4) Run: ./bin/ops cap run verify.route.recommend
+
+version: 1
+updated_at: "2026-02-24"
+owner: "@ronny"
+
+# Canonical roots only. DNS authority delegated to Cloudflare for all 7 domains.
+# Migration target: Cloudflare Registrar for all domains.
+
+domains:
+  - domain: mintprints.com
+    business_zone: mintprints
+    registrar: namecheap
+    dns_authority: cloudflare  # NS switched to Cloudflare 2026-02-24
+    nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]
+    cloudflare_zone_id: "3188b91150231e1caf44514c8ad221da"
+    transfer_ready: true  # DNS at Cloudflare, ready for registrar transfer
+    email_authority:
+      provider: microsoft-365
+      mx_target: "mintprints-com.mail.protection.outlook.com"
+      spf: "v=spf1 include:spf.protection.outlook.com -all"
+      dkim: "selector1/selector2 CNAME + default TXT key (verified in CF zone 2026-02-24)"
+      dmarc: "v=DMARC1; p=none;"
+    web_authority:
+      origin: "cloudflare-tunnel (homelab-tunnel) -> quote-page:3341"
+      proxy: cloudflare
+      note: "W56 cutover 2026-02-24. Apex/www self-hosted via CF tunnel (quote-page)."
+    services:
+      - microsoft-365-email
+      - quote-page
+    criticality: P0
+    migration_wave: W3
+    rollback_owner: "@ronny"
+    expiry: "10/30/2026"  # Source: Namecheap API 2026-02-24
+    auto_renew: true
+    description: >
+      Primary business domain. Microsoft 365 email is the highest-risk dependency.
+      W56 cutover 2026-02-24: apex/www now self-hosted quote-page via CF tunnel.
+      DNS at Cloudflare. DKIM selector1/selector2 CNAMEs + default TXT key verified.
+      Registrar transfer to Cloudflare pending.
+
+  - domain: mintprints.co
+    business_zone: mintprints
+    registrar: namecheap
+    dns_authority: cloudflare
+    nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]
+    cloudflare_zone_id: "8455a1754ffe2f296d74e985a89069f3"
+    email_authority:
+      provider: resend
+      mx_target: "inbound-smtp.us-east-1.amazonaws.com"
+      spf: "v=spf1 include:_spf.resend.com ~all"
+      dkim: "resend._domainkey (RSA key configured)"
+      dmarc: "v=DMARC1; p=none;"
+    web_authority:
+      origin: "cloudflare-tunnel (homelab-tunnel)"
+      proxy: cloudflare
+      note: "16 subdomains via CF tunnel. artwork via CF Pages."
+    services:
+      - mint-os-admin
+      - mint-os-production
+      - mint-os-kanban
+      - quote-page
+      - files-api
+      - pricing
+      - shipping
+      - suppliers
+      - estimator
+      - mcp
+      - minio
+      - stock-dst
+      - artwork-browser
+      - resend-transactional-email
+    criticality: P1
+    migration_wave: W2
+    rollback_owner: "@ronny"
+    transfer_ready: true  # DNS at Cloudflare, registrar lock needs enabling
+    expiry: "04/26/2026"  # Source: Namecheap API 2026-02-24
+    auto_renew: false  # Source: Namecheap API — consider enabling
+    description: >
+      Operational business domain. All mint-os and mint-apps services route through
+      Cloudflare tunnel. Transactional email via Resend. DNS fully managed by Cloudflare.
+      Active customer-facing subdomains (customer, estimator, pricing).
+      NOTE: Registrar lock is currently OFF — should be enabled for security.
+
+  - domain: ronny.works
+    business_zone: ronny
+    registrar: namecheap
+    dns_authority: cloudflare
+    nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]  # Source: Namecheap API 2026-02-24
+    cloudflare_zone_id: "6d3f8f903534aafb27fe1ea2b1bd7269"
+    email_authority:
+      provider: none  # No active email on @ronny.works (Namecheap forwarding was never used)
+      mx_target: "eforward1-5.registrar-servers.com"  # Legacy default, not in use
+      spf: "v=spf1 include:spf.efwd.registrar-servers.com ~all"  # Legacy default
+      dkim: none
+      dmarc: none
+    web_authority:
+      origin: "cloudflare-tunnel (homelab-tunnel)"
+      proxy: cloudflare
+      note: "25+ subdomains via CF tunnel. Root A record at 173.203.204.123."
+    services:
+      - home-assistant
+      - immich
+      - jellyfin
+      - navidrome
+      - grafana
+      - n8n
+      - open-webui
+      - gitea
+      - firefly-iii
+      - ghostfolio
+      - paperless-ngx
+      - vaultwarden
+      - infisical
+      - authentik
+      - pihole
+      - dashy
+      - jellyseerr
+      - homarr
+      - spotisub
+      - mail-archiver
+      - spine-mailroom-bridge
+    criticality: P1
+    migration_wave: null  # W1 cancelled — .works TLD unsupported by CF Registrar
+    rollback_owner: "@ronny"
+    transfer_ready: false  # Cloudflare Registrar does not support .works TLD
+    expiry: "12/31/2026"  # Source: Namecheap API 2026-02-24
+    auto_renew: true
+    description: >
+      Personal/home/media domain. 25+ self-hosted services via CF tunnel.
+      Cloudflare Registrar does not support .works TLD — stays at Namecheap.
+      DNS at Cloudflare, no service impact from registrar location.
+      No active email on @ronny.works (legacy MX records are unused defaults).
+      spine.ronny.works runs Stalwart (VM 214) for ops email.
+
+  - domain: hantash.com
+    business_zone: ronny
+    registrar: cloudflare
+    dns_authority: cloudflare
+    nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]
+    cloudflare_zone_id: "676743ef3912f4aeb8da0ae54b7c3741"
+    email_authority:
+      provider: icloud
+      mx_target: "mx01.mail.icloud.com"
+      spf: "v=spf1 include:icloud.com ~all"
+      dkim: "CNAME sig1.dkim.hantash.com.at.icloudmailadmin.com (iCloud managed)"
+      dmarc: none
+    web_authority:
+      origin: none
+      proxy: none
+      note: "Email-only domain. No web services."
+    services:
+      - icloud-email
+    criticality: P2
+    migration_wave: W4
+    rollback_owner: "@ronny"
+    transfer_ready: true
+    expiry: null
+    auto_renew: true
+    description: >
+      Personal/family email domain via iCloud custom domain.
+      Transferred to Cloudflare Registrar. DNS at Cloudflare.
+      DKIM CNAME records must be preserved exactly for iCloud email delivery.
+
+  - domain: hypnotizedclothing.com
+    business_zone: hypno
+    registrar: namecheap
+    dns_authority: cloudflare
+    nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]
+    cloudflare_zone_id: "9344e973f144aee5fa3ad36ccecfe619"
+    email_authority:
+      provider: none
+      mx_target: none
+      spf: none
+      dkim: none
+      dmarc: none
+    web_authority:
+      origin: "parked (legacy DNS to hypnotized-2.myshopify.com)"
+      proxy: none
+      note: "Dormant venture. Legacy Shopify DNS still in place — not operational."
+    services:
+      - none
+    criticality: P2
+    migration_wave: W4
+    rollback_owner: "@ronny"
+    transfer_ready: true
+    expiry: null
+    auto_renew: true
+    description: >
+      Primary Hypnotized brand domain. Venture dormant until mint-modules stable.
+      Legacy DNS points to hypnotized-2.myshopify.com — not operational.
+      Transfer to Cloudflare Registrar pending.
+
+  - domain: hypnotized.clothing
+    business_zone: hypno
+    registrar: namecheap
+    dns_authority: cloudflare
+    nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]
+    cloudflare_zone_id: "ea67b4b2d860aa4ba15436d3afbd1d30"
+    email_authority:
+      provider: none
+      mx_target: none
+      spf: none
+      dkim: none
+      dmarc: none
+    web_authority:
+      origin: "parked (legacy DNS to hypnotized-2.myshopify.com)"
+      proxy: none
+      note: "Dormant venture. Legacy Shopify DNS still in place — not operational."
+    services:
+      - none
+    criticality: P2
+    migration_wave: W4
+    rollback_owner: "@ronny"
+    transfer_ready: true
+    expiry: null
+    auto_renew: true
+    description: >
+      Brand-aligned TLD for Hypnotized venture. Dormant until mint-modules stable.
+      Legacy DNS points to hypnotized-2.myshopify.com — not operational.
+      Transfer to Cloudflare Registrar pending.
+
+  - domain: hypnotized.design
+    business_zone: hypno
+    registrar: namecheap
+    dns_authority: cloudflare
+    nameservers: [nile.ns.cloudflare.com, rosemary.ns.cloudflare.com]
+    cloudflare_zone_id: "72907ed4214c23a0649ff273841420dd"
+    email_authority:
+      provider: none
+      mx_target: none
+      spf: none
+      dkim: none
+      dmarc: none
+    web_authority:
+      origin: "parked (legacy DNS to hypnotized-2.myshopify.com)"
+      proxy: none
+      note: "Dormant venture. Legacy Shopify DNS still in place — not operational."
+    services:
+      - none
+    criticality: P2
+    migration_wave: W4
+    rollback_owner: "@ronny"
+    transfer_ready: true
+    expiry: null
+    auto_renew: true
+    description: >
+      Brand-aligned TLD for Hypnotized venture. Dormant until mint-modules stable.
+      Legacy DNS points to hypnotized-2.myshopify.com — not operational.
+      Transfer to Cloudflare Registrar pending.
+
+# Migration wave definitions (canonical roots only)
+waves:
+  W1:
+    label: "CANCELLED — .works TLD unsupported by Cloudflare Registrar"
+    domains: [ronny.works]
+    status: abandoned
+    reason: "Cloudflare Registrar does not support .works TLD"
+
+  W2:
+    label: "Business operations"
+    domains: [mintprints.co]
+    risk: medium
+    email_impact: "Resend transactional email (DNS already at CF — no email disruption expected)"
+    service_impact: "16 tunnel-routed business services"
+    estimated_domains: 1
+    prerequisite: "customer-facing service health confirmed"
+
+  W3:
+    label: "Business primary"
+    domains: [mintprints.com]
+    risk: high
+    email_impact: "Microsoft 365 email — MUST preserve MX/SPF/DKIM/DMARC parity"
+    service_impact: "self-hosted quote-page (W56 cutover complete)"
+    estimated_domains: 1
+    prerequisite: "mintprints.co transfer validated, email parity gate passed"
+
+  W4:
+    label: "Hypnotized venture bundle + hantash personal"
+    domains: [hantash.com, hypnotizedclothing.com, hypnotized.clothing, hypnotized.design]
+    status: active
+    risk: low
+    email_impact: "hantash.com iCloud email (DKIM CNAME must transfer exactly)"
+    service_impact: "3 dormant domains (Hypnotized brand, legacy DNS to Shopify)"
+    estimated_domains: 4
+    prerequisite: "zones active in Cloudflare, NS switched"
+
+# Summary
+summary:
+  total_domains: 7
+  canonical_roots_binding: "ops/bindings/domain.canonical.roots.yaml"
+  registrar: mixed  # namecheap (5), cloudflare (1 — hantash.com), pending transfer (3 — hypno bundle)
+  target_registrar: cloudflare
+  dns_authority: cloudflare  # all 7 domains now on Cloudflare DNS
+  waves: 4
+  p0_domains: 1  # mintprints.com
+  p1_domains: 2  # mintprints.co, ronny.works
+  p2_domains: 4  # hantash.com, hypnotizedclothing.com, hypnotized.clothing, hypnotized.design

@@ -44,10 +44,11 @@ capabilities:
   spine.verify:
     description: "Run drift gates to verify spine health"
     tags: [spine, verify]
-    command: "./surfaces/verify/spine-verify.sh"
+    command: "./ops/plugins/verify/bin/verify-run fast"
     cwd: "$SPINE_CODE"
     safety: read-only
     approval: auto
+    arg_protocol: passthrough
     lifecycle: ready
     outputs: ["stdout"]
     domain: none
@@ -55,10 +56,11 @@ capabilities:
   spine.replay:
     description: "Run replay test to verify determinism"
     tags: [spine, verify]
-    command: "./surfaces/verify/replay-test.sh --compare"
+    command: "./ops/plugins/verify/bin/verify-run fast --shadow"
     cwd: "$SPINE_CODE"
     safety: read-only
     approval: auto
+    arg_protocol: passthrough
     lifecycle: ready
     outputs: ["stdout"]
     domain: none
@@ -236,10 +238,11 @@ capabilities:
   codex.worktree.status:
     description: "Run D48 lifecycle-aware worktree hygiene gate (non-destructive classification + fail on lifecycle violations)."
     tags: [spine]
-    command: "./surfaces/verify/d48-codex-worktree-hygiene.sh"
+    command: "./ops/plugins/ops/bin/worktree-lifecycle-reconcile --gate"
     cwd: "$SPINE_CODE"
     safety: read-only
     approval: auto
+    arg_protocol: passthrough
     lifecycle: ready
     outputs: ["stdout"]
     domain: none
@@ -2379,6 +2382,37 @@ capabilities:
       - "./bin/ops cap run verify.run -- fast --shadow"
       - "./bin/ops cap run verify.run -- domain communications --shadow"
       - "./bin/ops cap run verify.run -- release --json"
+  lean.budget.check:
+    description: "Enforce lean-reset budgets, one-in-one-out file policy, and gate add/retire ratio."
+    tags: [verify, governance, lean]
+    command: "./ops/plugins/verify/bin/lean-budget-check"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: none
+    plane: fabric
+    flags:
+      - "--json"
+      - "--report-only"
+      - "--base-ref <git-ref>"
+    examples:
+      - "./bin/ops cap run lean.budget.check"
+      - "./bin/ops cap run lean.budget.check -- --json --base-ref origin/main"
+  lean.scorecard:
+    description: "Render markdown scorecard from lean budget metrics."
+    tags: [verify, governance, lean]
+    command: "./ops/plugins/verify/bin/lean-scorecard"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: none
+    plane: fabric
   verify.gate_quality.scorecard:
     description: "Generate per-gate quality scorecard from verify failure-class history telemetry."
     tags: [verify, governance, telemetry]
