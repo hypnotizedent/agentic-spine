@@ -1,0 +1,205 @@
+# Inbox Shield Capability Contracts
+# Version: 1.0-draft
+# Status: planning
+
+version: "1.0"
+updated_at: "2026-03-02"
+owner: "@ronny"
+scope: inbox-shield
+domain: communications
+
+capabilities:
+  inbox-shield.status:
+    description: "Read-only status of inbox shield system (active modes, queue depth, recent activity)"
+    safety: read-only
+    approval: auto
+    plane: fabric
+    tags: [inbox-shield, communications, status]
+
+  inbox-shield.sms.webhook:
+    description: "Handle inbound SMS webhook from Twilio, classify, and route to action"
+    safety: mutating
+    approval: auto
+    plane: runtime
+    tags: [inbox-shield, sms, webhook, twilio]
+    requires:
+      - "Twilio signature validation"
+      - "Rate limiting per sender"
+
+  inbox-shield.voice.webhook:
+    description: "Handle inbound voice call webhook from Twilio, play voicemail prompt, handle transcription"
+    safety: mutating
+    approval: auto
+    plane: runtime
+    tags: [inbox-shield, voice, webhook, twilio]
+    requires:
+      - "Twilio signature validation"
+
+  inbox-shield.email.triage:
+    description: "Classify inbound email and route to appropriate action queue"
+    safety: read-only
+    approval: auto
+    plane: fabric
+    tags: [inbox-shield, email, classification]
+    depends_on:
+      - "communications.mail.search"
+
+  inbox-shield.classify.intent:
+    description: "Classify message intent using fine-tuned model + rules"
+    safety: read-only
+    approval: auto
+    plane: fabric
+    tags: [inbox-shield, classification, ai]
+    returns:
+      - intent: string
+      - confidence: float
+      - suggested_action: string
+
+  inbox-shield.reply.auto:
+    description: "Generate and send automated response for classified message"
+    safety: mutating
+    approval: auto
+    plane: runtime
+    tags: [inbox-shield, reply, automation]
+    depends_on:
+      - "communications.send.execute"
+    requires:
+      - "Preview linkage for audit"
+
+  inbox-shield.escalate:
+    description: "Escalate message to human attention via push notification"
+    safety: mutating
+    approval: auto
+    plane: runtime
+    tags: [inbox-shield, escalation, alerts]
+    depends_on:
+      - "alerts.dispatch"
+
+  inbox-shield.queue.list:
+    description: "List messages queued for later review"
+    safety: read-only
+    approval: auto
+    plane: fabric
+    tags: [inbox-shield, queue]
+
+  inbox-shield.queue.process:
+    description: "Process queued messages (approve auto-response, manually reply, or escalate)"
+    safety: mutating
+    approval: manual
+    plane: runtime
+    tags: [inbox-shield, queue]
+
+  inbox-shield.whitelist.list:
+    description: "List whitelisted senders (always escalate)"
+    safety: read-only
+    approval: auto
+    plane: fabric
+    tags: [inbox-shield, whitelist]
+
+  inbox-shield.whitelist.add:
+    description: "Add sender to whitelist"
+    safety: mutating
+    approval: manual
+    plane: fabric
+    tags: [inbox-shield, whitelist]
+
+  inbox-shield.whitelist.remove:
+    description: "Remove sender from whitelist"
+    safety: mutating
+    approval: manual
+    plane: fabric
+    tags: [inbox-shield, whitelist]
+
+  inbox-shield.threshold.get:
+    description: "Get current escalation/classification thresholds"
+    safety: read-only
+    approval: auto
+    plane: fabric
+    tags: [inbox-shield, config]
+
+  inbox-shield.threshold.set:
+    description: "Modify escalation/classification thresholds"
+    safety: mutating
+    approval: manual
+    plane: fabric
+    tags: [inbox-shield, config]
+
+  inbox-shield.metrics.summary:
+    description: "Get performance metrics (response rate, escalation rate, latency)"
+    safety: read-only
+    approval: auto
+    plane: fabric
+    tags: [inbox-shield, metrics]
+
+contracts:
+  inbox-shield.routing:
+    version: "1.0"
+    description: "Routing configuration for inbox shield"
+    schema:
+      phone_forwarding:
+        carrier: string
+        from_number: string
+        to_twilio_number: string
+      sms_webhook:
+        url: string
+        method: string
+      voice_webhook:
+        url: string
+        method: string
+
+  inbox-shield.classification:
+    version: "1.0"
+    description: "Classification thresholds and rules"
+    schema:
+      intents:
+        - name: string
+          description: string
+      thresholds:
+        auto_reply_min_confidence: float
+        escalate_max_confidence: float
+      rules:
+        always_escalate_keywords: [string]
+        never_escalate_senders: [string]
+
+  inbox-shield.templates:
+    version: "1.0"
+    description: "Response templates by intent and channel"
+    schema:
+      templates:
+        - intent: string
+          channel: string
+          template: string
+
+  inbox-shield.escalation:
+    version: "1.0"
+    description: "Escalation channels and rules"
+    schema:
+      channels:
+        push_notification:
+          enabled: boolean
+          provider: string
+        sms_backup:
+          enabled: boolean
+      rules:
+        always_escalate: [string]
+        business_hours_escalate_minutes: integer
+        off_hours_escalate_minutes: integer
+
+gates:
+  D-INBOX-SHIELD-001:
+    name: "inbox-shield-webhook-auth-lock"
+    description: "All inbox-shield webhooks must validate Twilio signatures"
+    severity: critical
+    scope: runtime
+
+  D-INBOX-SHIELD-002:
+    name: "inbox-shield-rate-limit-lock"
+    description: "Per-sender rate limiting enforced on all inbound channels"
+    severity: high
+    scope: runtime
+
+  D-INBOX-SHIELD-003:
+    name: "inbox-shield-audit-trail-lock"
+    description: "All classification and response actions must generate receipts"
+    severity: medium
+    scope: fabric
