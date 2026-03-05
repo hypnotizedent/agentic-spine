@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTRACT="$ROOT/ops/bindings/nightly.closeout.contract.yaml"
 MODE=""
+JSON_MODE=0
 
 usage() {
   cat <<'USAGE'
@@ -12,6 +13,7 @@ Usage: nightly-closeout.sh [--mode dry-run|apply]
 Modes:
   --mode dry-run   Classify only, no destructive changes.
   --mode apply     Snapshot first, then prune only non-protected candidates.
+  --json           Emit machine-readable JSON summary (plus artifact paths).
 USAGE
 }
 
@@ -19,6 +21,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
     --mode) MODE="${2:-}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -57,7 +60,9 @@ for remote_name in origin github; do
     echo "[prune] SKIP: remote '$remote_name' not configured" >> "$PRUNE_LOG"
   fi
 done
-echo "remote_prune.log=$PRUNE_LOG"
+if [[ "$JSON_MODE" -eq 0 ]]; then
+  echo "remote_prune.log=$PRUNE_LOG"
+fi
 
 if [[ "$MODE" == "apply" && "$REQUIRE_DRY_RUN_BEFORE_APPLY" == "true" ]]; then
   found_dry_run=0
@@ -560,9 +565,11 @@ echo "$?" > "$ARTIFACT_DIR/gaps_status.rc"
 echo "$?" > "$ARTIFACT_DIR/worktree_lifecycle.rc"
 set -e
 
-cat "$ARTIFACT_DIR/loops_status.log"
-cat "$ARTIFACT_DIR/gaps_status.log"
-cat "$ARTIFACT_DIR/worktree_lifecycle.log"
+if [[ "$JSON_MODE" -eq 0 ]]; then
+  cat "$ARTIFACT_DIR/loops_status.log"
+  cat "$ARTIFACT_DIR/gaps_status.log"
+  cat "$ARTIFACT_DIR/worktree_lifecycle.log"
+fi
 
 LOOPS_RUN_KEY="direct:ops/plugins/loops/bin/loops-status"
 GAPS_RUN_KEY="direct:ops/plugins/loops/bin/gaps-status"
@@ -656,14 +663,91 @@ GITHUB_CODEX_COUNT_AFTER="$(git -C "$ROOT" for-each-ref refs/remotes/github/code
   echo "auto_apply_safe=$( (( ${#LOCAL_BRANCH_HELD[@]} + ${#WORKTREE_HELD[@]} + ${#REMOTE_ORIGIN_HELD[@]} + ${#REMOTE_GITHUB_HELD[@]} == 0 )) && echo "true" || echo "false" )"
 } > "$SUMMARY_ENV"
 
-echo "nightly.closeout mode=$MODE run_id=$RUN_ID"
-echo "artifact.summary=$SUMMARY_MD"
-echo "artifact.inventory=$INVENTORY_MD"
-echo "artifact.classification=$CLASSIFICATION_MD"
-echo "artifact.actions=$ACTIONS_LOG"
-echo "artifact.summary_env=$SUMMARY_ENV"
-echo "run_key.loops_status=${LOOPS_RUN_KEY:-none}"
-echo "run_key.gaps_status=${GAPS_RUN_KEY:-none}"
-echo "run_key.worktree_lifecycle=${WORKTREE_RECONCILE_RUN_KEY:-none}"
-echo "snapshot.bundle=${SNAPSHOT_BUNDLE:-none}"
-echo "snapshot.refs=${SNAPSHOT_REFS:-none}"
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  command -v jq >/dev/null 2>&1 || fail "missing dependency: jq (required for --json)"
+  jq -n \
+    --arg mode "$MODE" \
+    --arg run_id "$RUN_ID" \
+    --arg run_utc "$RUN_UTC" \
+    --arg repo "$ROOT" \
+    --arg summary_md "$SUMMARY_MD" \
+    --arg inventory_md "$INVENTORY_MD" \
+    --arg classification_md "$CLASSIFICATION_MD" \
+    --arg actions_log "$ACTIONS_LOG" \
+    --arg summary_env "$SUMMARY_ENV" \
+    --arg loops_run_key "${LOOPS_RUN_KEY:-none}" \
+    --arg gaps_run_key "${GAPS_RUN_KEY:-none}" \
+    --arg worktree_reconcile_run_key "${WORKTREE_RECONCILE_RUN_KEY:-none}" \
+    --arg snapshot_bundle "${SNAPSHOT_BUNDLE:-none}" \
+    --arg snapshot_refs "${SNAPSHOT_REFS:-none}" \
+    --arg loops_open "$LOOPS_OPEN" \
+    --arg gaps_open "$GAPS_OPEN" \
+    --arg orphaned_gaps "$ORPHANED_GAPS" \
+    --arg local_branches_before "$LOCAL_BRANCH_COUNT_BEFORE" \
+    --arg local_branches_after "$LOCAL_BRANCH_COUNT_AFTER" \
+    --arg worktrees_before "$ROOT_WORKTREE_COUNT" \
+    --arg worktrees_after "$WORKTREE_COUNT_AFTER" \
+    --arg held_local_branches "${#LOCAL_BRANCH_HELD[@]}" \
+    --arg held_worktrees "${#WORKTREE_HELD[@]}" \
+    --arg held_remote_origin "${#REMOTE_ORIGIN_HELD[@]}" \
+    --arg held_remote_github "${#REMOTE_GITHUB_HELD[@]}" \
+    --arg branch_candidates "${#LOCAL_BRANCH_CANDIDATES[@]}" \
+    --arg worktree_candidates "${#WORKTREE_CANDIDATES[@]}" \
+    --arg stale_path_candidates "${#STALE_PATHS_CANDIDATES[@]}" \
+    --arg remote_origin_candidates "${#REMOTE_ORIGIN_CANDIDATES[@]}" \
+    --arg remote_github_candidates "${#REMOTE_GITHUB_CANDIDATES[@]}" \
+    --arg auto_apply_safe "$( (( ${#LOCAL_BRANCH_HELD[@]} + ${#WORKTREE_HELD[@]} + ${#REMOTE_ORIGIN_HELD[@]} + ${#REMOTE_GITHUB_HELD[@]} == 0 )) && echo "true" || echo "false" )" \
+    '{
+      mode: $mode,
+      run_id: $run_id,
+      run_utc: $run_utc,
+      repo: $repo,
+      artifacts: {
+        summary_md: $summary_md,
+        inventory_md: $inventory_md,
+        classification_md: $classification_md,
+        actions_log: $actions_log,
+        summary_env: $summary_env
+      },
+      run_keys: {
+        loops_status: $loops_run_key,
+        gaps_status: $gaps_run_key,
+        worktree_lifecycle_reconcile: $worktree_reconcile_run_key
+      },
+      snapshot: {
+        bundle: $snapshot_bundle,
+        refs: $snapshot_refs
+      },
+      summary: {
+        loops_open: $loops_open,
+        gaps_open: $gaps_open,
+        orphaned_gaps: $orphaned_gaps,
+        local_branches_before: ($local_branches_before | tonumber? // $local_branches_before),
+        local_branches_after: ($local_branches_after | tonumber? // $local_branches_after),
+        worktrees_before: ($worktrees_before | tonumber? // $worktrees_before),
+        worktrees_after: ($worktrees_after | tonumber? // $worktrees_after),
+        held_local_branches: ($held_local_branches | tonumber? // $held_local_branches),
+        held_worktrees: ($held_worktrees | tonumber? // $held_worktrees),
+        held_remote_origin: ($held_remote_origin | tonumber? // $held_remote_origin),
+        held_remote_github: ($held_remote_github | tonumber? // $held_remote_github),
+        branch_candidates: ($branch_candidates | tonumber? // $branch_candidates),
+        worktree_candidates: ($worktree_candidates | tonumber? // $worktree_candidates),
+        stale_path_candidates: ($stale_path_candidates | tonumber? // $stale_path_candidates),
+        remote_origin_candidates: ($remote_origin_candidates | tonumber? // $remote_origin_candidates),
+        remote_github_candidates: ($remote_github_candidates | tonumber? // $remote_github_candidates),
+        auto_apply_safe: ($auto_apply_safe == "true")
+      }
+    }'
+else
+  echo "nightly.closeout mode=$MODE run_id=$RUN_ID"
+  echo "artifact.summary=$SUMMARY_MD"
+  echo "artifact.inventory=$INVENTORY_MD"
+  echo "artifact.classification=$CLASSIFICATION_MD"
+  echo "artifact.actions=$ACTIONS_LOG"
+  echo "artifact.summary_env=$SUMMARY_ENV"
+  echo "run_key.loops_status=${LOOPS_RUN_KEY:-none}"
+  echo "run_key.gaps_status=${GAPS_RUN_KEY:-none}"
+  echo "run_key.worktree_lifecycle=${WORKTREE_RECONCILE_RUN_KEY:-none}"
+  echo "snapshot.bundle=${SNAPSHOT_BUNDLE:-none}"
+  echo "snapshot.refs=${SNAPSHOT_REFS:-none}"
+fi

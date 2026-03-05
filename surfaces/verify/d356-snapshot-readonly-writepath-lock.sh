@@ -19,7 +19,8 @@ resolve_root() {
 
 ROOT="$(resolve_root)"
 OPS_BIN="$ROOT/bin/ops"
-CAP_TIMEOUT_SEC="${D356_CAP_TIMEOUT_SEC:-90}"
+CAP_TIMEOUT_SEC="${D356_CAP_TIMEOUT_SEC:-25}"
+CAP_PARALLEL_JOBS="${D356_CAP_PARALLEL_JOBS:-5}"
 
 fail() {
   echo "D356 FAIL: $*" >&2
@@ -29,6 +30,8 @@ fail() {
 [[ -x "$OPS_BIN" ]] || fail "missing ops runner: $OPS_BIN"
 command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 command -v shasum >/dev/null 2>&1 || fail "missing dependency: shasum"
+[[ "$CAP_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]] || fail "invalid D356_CAP_TIMEOUT_SEC=$CAP_TIMEOUT_SEC"
+[[ "$CAP_PARALLEL_JOBS" =~ ^[1-9][0-9]*$ ]] || fail "invalid D356_CAP_PARALLEL_JOBS=$CAP_PARALLEL_JOBS"
 
 TARGET_FILES=(
   "ops/bindings/ha.inventory.snapshot.yaml"
@@ -61,9 +64,8 @@ for rel in "${TARGET_FILES[@]}"; do
 done
 
 echo "D356 INFO: exercising snapshot read/status capabilities in check mode"
-for cap in "${CAPABILITIES[@]}"; do
-  echo "D356 INFO: running cap=${cap}"
-  if python3 - "$OPS_BIN" "$cap" "$CAP_TIMEOUT_SEC" <<'PY'
+python3 - "$OPS_BIN" "$CAP_TIMEOUT_SEC" "$CAP_PARALLEL_JOBS" "${CAPABILITIES[@]}" <<'PY' | while IFS=$'\t' read -r cap rc; do
+import concurrent.futures
 import os
 import signal
 import subprocess
@@ -71,37 +73,54 @@ import sys
 import time
 
 ops_bin = sys.argv[1]
-cap = sys.argv[2]
-timeout_sec = int(sys.argv[3])
+timeout_sec = int(sys.argv[2])
+parallel_jobs = int(sys.argv[3])
+caps = sys.argv[4:]
 
-with open(os.devnull, "wb") as devnull:
-    proc = subprocess.Popen(
-        [ops_bin, "cap", "run", cap],
-        stdout=devnull,
-        stderr=devnull,
-        preexec_fn=os.setsid,
-    )
-    try:
-        proc.wait(timeout=timeout_sec)
-        sys.exit(proc.returncode)
-    except subprocess.TimeoutExpired:
+def run_cap(cap):
+    def safe_kill(sig):
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            os.killpg(proc.pid, sig)
+            return
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            if sig == signal.SIGKILL:
+                proc.kill()
+            else:
+                proc.terminate()
         except ProcessLookupError:
             pass
-        time.sleep(2)
+
+    with open(os.devnull, "wb") as devnull:
+        proc = subprocess.Popen(
+            [ops_bin, "cap", "run", cap],
+            stdout=devnull,
+            stderr=devnull,
+            preexec_fn=os.setsid,
+        )
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        sys.exit(124)
+            proc.wait(timeout=timeout_sec)
+            return cap, proc.returncode
+        except subprocess.TimeoutExpired:
+            safe_kill(signal.SIGTERM)
+            time.sleep(1)
+            safe_kill(signal.SIGKILL)
+            return cap, 124
+
+workers = max(1, min(parallel_jobs, len(caps)))
+with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+    futures = [pool.submit(run_cap, cap) for cap in caps]
+    for future in concurrent.futures.as_completed(futures):
+        cap, rc = future.result()
+        print(f"{cap}\t{rc}")
 PY
-  then
+  echo "D356 INFO: running cap=${cap}"
+  if [[ "$rc" == "0" ]]; then
     echo "D356 INFO: cap=${cap} rc=0"
-    continue
+  else
+    echo "D356 INFO: cap=${cap} rc=${rc} (non-blocking for this gate)"
   fi
-  rc=$?
-  echo "D356 INFO: cap=${cap} rc=${rc} (non-blocking for this gate)"
 done
 
 violations=0
