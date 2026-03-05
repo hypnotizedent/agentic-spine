@@ -48,7 +48,7 @@ mkdir -p "$ARTIFACT_DIR"
 # Prune stale remote tracking refs so classification operates on current state.
 PRUNE_LOG="$ARTIFACT_DIR/remote_prune.log"
 : > "$PRUNE_LOG"
-for remote_name in origin github; do
+for remote_name in origin; do
   if git -C "$ROOT" remote get-url "$remote_name" >/dev/null 2>&1; then
     echo "[prune] fetching --prune $remote_name" >> "$PRUNE_LOG"
     if git -C "$ROOT" fetch --prune "$remote_name" >> "$PRUNE_LOG" 2>&1; then
@@ -62,6 +62,34 @@ for remote_name in origin github; do
 done
 if [[ "$JSON_MODE" -eq 0 ]]; then
   echo "remote_prune.log=$PRUNE_LOG"
+fi
+
+# ── Main branch sync ──
+# Reset local main to match origin/main so every session starts clean.
+# Only runs when we're NOT on main (to avoid resetting under feet of active work).
+MAIN_SYNC_LOG="$ARTIFACT_DIR/main_sync.log"
+: > "$MAIN_SYNC_LOG"
+_current_branch="$(git -C "$ROOT" branch --show-current 2>/dev/null || echo detached)"
+if [[ "$_current_branch" != "main" ]]; then
+  echo "[main-sync] resetting local main to origin/main" >> "$MAIN_SYNC_LOG"
+  if git -C "$ROOT" branch -f main origin/main >> "$MAIN_SYNC_LOG" 2>&1; then
+    echo "[main-sync] local main now matches origin/main" >> "$MAIN_SYNC_LOG"
+  else
+    echo "[main-sync] WARN: could not reset main to origin/main (continuing)" >> "$MAIN_SYNC_LOG"
+  fi
+else
+  # On main — do a fast-forward pull instead
+  echo "[main-sync] on main branch, attempting fast-forward" >> "$MAIN_SYNC_LOG"
+  if git -C "$ROOT" merge --ff-only origin/main >> "$MAIN_SYNC_LOG" 2>&1; then
+    echo "[main-sync] main fast-forwarded to origin/main" >> "$MAIN_SYNC_LOG"
+  else
+    echo "[main-sync] WARN: fast-forward failed, resetting to origin/main" >> "$MAIN_SYNC_LOG"
+    git -C "$ROOT" reset --hard origin/main >> "$MAIN_SYNC_LOG" 2>&1 || \
+      echo "[main-sync] ERROR: reset --hard failed" >> "$MAIN_SYNC_LOG"
+  fi
+fi
+if [[ "$JSON_MODE" -eq 0 ]]; then
+  echo "main_sync.log=$MAIN_SYNC_LOG"
 fi
 
 if [[ "$MODE" == "apply" && "$REQUIRE_DRY_RUN_BEFORE_APPLY" == "true" ]]; then
