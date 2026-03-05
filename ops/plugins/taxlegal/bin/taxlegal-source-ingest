@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# taxlegal-source-ingest — Ingest a document into Paperless-NGX and record in case source lock
+# Safety: mutating (uploads to Paperless, writes source-registry.lock.yaml)
+# Approval: manual
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+INFISICAL_AGENT="${ROOT}/ops/tools/infisical-agent.sh"
+
+# ── Source LAN-first SSH resolver ─────────────────────────────────────────
+source "${ROOT}/ops/lib/ssh-resolve.sh"
+
+CASE_ID=""
+FILE_PATH=""
+SOURCE_CLASS="florida_cfo_wc"
+DOC_TYPE="form"
+REMOVE_SOURCE=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --case-id) CASE_ID="$2"; shift 2 ;;
+    --file) FILE_PATH="$2"; shift 2 ;;
+    --source-class) SOURCE_CLASS="$2"; shift 2 ;;
+    --doc-type) DOC_TYPE="$2"; shift 2 ;;
+    --remove-source) REMOVE_SOURCE=true; shift ;;
+    --) shift ;;
+    *) echo "error: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ── Validate inputs ──────────────────────────────────────────────────────
+if [[ -z "$CASE_ID" ]]; then
+  echo "error: --case-id is required" >&2
+  exit 1
+fi
+
+if [[ -z "$FILE_PATH" ]]; then
+  echo "error: --file is required (absolute path to PDF)" >&2
+  exit 1
+fi
+
+if [[ ! -f "$FILE_PATH" ]]; then
+  echo "error: file not found: $FILE_PATH" >&2
+  exit 1
+fi
+
+# Validate PDF
+FILE_EXT="${FILE_PATH##*.}"
+if [[ "${FILE_EXT,,}" != "pdf" ]]; then
+  echo "error: only PDF files accepted, got: .$FILE_EXT" >&2
+  exit 1
+fi
+
+CASE_DIR="${ROOT}/mailroom/state/cases/tax-legal/${CASE_ID}"
+if [[ ! -d "$CASE_DIR" ]]; then
+  echo "error: case directory not found: $CASE_DIR" >&2
+  echo "hint: run taxlegal.case.intake first" >&2
+  exit 1
+fi
+
+SOURCE_LOCK="${CASE_DIR}/source-registry.lock.yaml"
+if [[ ! -f "$SOURCE_LOCK" ]]; then
+  echo "error: source-registry.lock.yaml not found in case directory" >&2
+  exit 1
+fi
+
+# ── Compute SHA-256 ──────────────────────────────────────────────────────
+CONTENT_SHA256="$(shasum -a 256 "$FILE_PATH" | awk '{print $1}')"
+FILENAME="$(basename "$FILE_PATH")"
+
+# ── Duplicate check ──────────────────────────────────────────────────────
+if command -v yq &>/dev/null; then
+  EXISTING_HASH="$(yq -r ".sources[]? | select(.content_sha256 == \"$CONTENT_SHA256\") | .content_sha256 // \"\"" "$SOURCE_LOCK" 2>/dev/null || echo "")"
+  if [[ -n "$EXISTING_HASH" ]]; then
+    echo "status: duplicate"
+    echo "reason: file with sha256=$CONTENT_SHA256 already ingested for case $CASE_ID"
+    exit 0
+  fi
+fi
+
+# ── Resolve Paperless host ───────────────────────────────────────────────
+_resolve_result="$(ssh_resolve_host_with_fallback "finance-stack" 2)" || true
+PAPERLESS_HOST="$(echo "$_resolve_result" | awk '{print $1}')"
+PATH_USED="$(echo "$_resolve_result" | awk '{print $2}')"
+[[ -z "$PAPERLESS_HOST" ]] && PAPERLESS_HOST="192.168.1.211"
+[[ -z "$PATH_USED" ]] && PATH_USED="fallback"
+
+PAPERLESS_API="http://${PAPERLESS_HOST}:8000/api"
+
+# ── Fetch Paperless API token ────────────────────────────────────────────
+PAPERLESS_TOKEN=""
+if [[ -x "$INFISICAL_AGENT" ]]; then
+  PAPERLESS_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod PAPERLESS_API_TOKEN 2>/dev/null) || true
+fi
+
+if [[ -z "$PAPERLESS_TOKEN" ]]; then
+  echo "status: STOP"
+  echo "reason: cannot retrieve PAPERLESS_API_TOKEN from Infisical"
+  echo "unblock: ensure infisical-agent.sh is configured and /spine/services/paperless/PAPERLESS_API_TOKEN exists"
+  exit 2
+fi
+
+# ── Ensure tags exist in Paperless ───────────────────────────────────────
+JURISDICTION_ZIP="33441"
+TAG_NAMES=("domain:tax-legal" "case:${CASE_ID}" "jurisdiction:${JURISDICTION_ZIP}" "source_class:${SOURCE_CLASS}")
+TAG_IDS=()
+
+for tag_name in "${TAG_NAMES[@]}"; do
+  # Check if tag exists
+  existing_id=$(curl -s --connect-timeout 5 --max-time 10 \
+    -H "Authorization: Token ${PAPERLESS_TOKEN}" \
+    "${PAPERLESS_API}/tags/?name__iexact=$(printf '%s' "$tag_name" | sed 's/:/%3A/g; s/ /%20/g')" \
+    2>/dev/null | jq -r '.results[0].id // empty' 2>/dev/null || echo "")
+
+  if [[ -n "$existing_id" ]]; then
+    TAG_IDS+=("$existing_id")
+  else
+    # Create tag
+    new_id=$(curl -s --connect-timeout 5 --max-time 10 \
+      -X POST \
+      -H "Authorization: Token ${PAPERLESS_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "{\"name\": \"${tag_name}\"}" \
+      "${PAPERLESS_API}/tags/" \
+      2>/dev/null | jq -r '.id // empty' 2>/dev/null || echo "")
+
+    if [[ -n "$new_id" ]]; then
+      TAG_IDS+=("$new_id")
+    else
+      echo "warning: failed to create tag: $tag_name" >&2
+    fi
+  fi
+done
+
+# ── Upload document to Paperless ─────────────────────────────────────────
+TITLE="${CASE_ID} - ${DOC_TYPE} - ${FILENAME}"
+
+# Build tag args for multipart form
+TAG_ARGS=""
+for tid in "${TAG_IDS[@]}"; do
+  TAG_ARGS="$TAG_ARGS -F tags=$tid"
+done
+
+UPLOAD_RESPONSE=$(curl -s --connect-timeout 10 --max-time 60 \
+  -X POST \
+  -H "Authorization: Token ${PAPERLESS_TOKEN}" \
+  -F "document=@${FILE_PATH}" \
+  -F "title=${TITLE}" \
+  $TAG_ARGS \
+  "${PAPERLESS_API}/documents/post_document/" 2>/dev/null)
+
+# Paperless returns a task ID (UUID string) on success
+TASK_ID="$(echo "$UPLOAD_RESPONSE" | tr -d '"' | tr -d ' ')"
+
+if [[ -z "$TASK_ID" || "$TASK_ID" == "null" ]]; then
+  echo "status: FAIL"
+  echo "reason: Paperless upload failed"
+  echo "response: $UPLOAD_RESPONSE"
+  exit 1
+fi
+
+# ── Poll for task completion to get document ID ──────────────────────────
+DOCUMENT_ID=""
+for i in $(seq 1 30); do
+  sleep 2
+  TASK_STATUS=$(curl -s --connect-timeout 5 --max-time 10 \
+    -H "Authorization: Token ${PAPERLESS_TOKEN}" \
+    "${PAPERLESS_API}/tasks/?task_id=${TASK_ID}" 2>/dev/null)
+
+  STATUS="$(echo "$TASK_STATUS" | jq -r '.[0].status // empty' 2>/dev/null || echo "")"
+
+  if [[ "$STATUS" == "SUCCESS" ]]; then
+    DOCUMENT_ID="$(echo "$TASK_STATUS" | jq -r '.[0].related_document // empty' 2>/dev/null || echo "")"
+    break
+  elif [[ "$STATUS" == "FAILURE" ]]; then
+    FAIL_RESULT="$(echo "$TASK_STATUS" | jq -r '.[0].result // "unknown"' 2>/dev/null)"
+    echo "status: FAIL"
+    echo "reason: Paperless task failed: $FAIL_RESULT"
+    exit 1
+  fi
+  # Still pending, continue polling
+done
+
+if [[ -z "$DOCUMENT_ID" || "$DOCUMENT_ID" == "null" ]]; then
+  echo "status: FAIL"
+  echo "reason: Paperless task did not complete within 60s"
+  echo "task_id: $TASK_ID"
+  echo "hint: check Paperless UI for task status"
+  exit 1
+fi
+
+# ── Record in source-registry.lock.yaml ──────────────────────────────────
+INGESTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SOURCE_ID="PLSS-${CASE_ID}-$(date -u +%Y%m%d%H%M%S)"
+
+if command -v yq &>/dev/null; then
+  yq -i ".sources += [{
+    \"source_id\": \"${SOURCE_ID}\",
+    \"paperless_document_id\": ${DOCUMENT_ID},
+    \"content_sha256\": \"${CONTENT_SHA256}\",
+    \"source_file\": \"${FILENAME}\",
+    \"doc_type\": \"${DOC_TYPE}\",
+    \"source_class\": \"${SOURCE_CLASS}\",
+    \"ingested_at\": \"${INGESTED_AT}\",
+    \"retention_class\": \"final_reviewed_packets\",
+    \"title\": \"${TITLE}\",
+    \"paperless_host\": \"${PAPERLESS_HOST}\",
+    \"path_used\": \"${PATH_USED}\"
+  }]" "$SOURCE_LOCK"
+
+  yq -i ".locked_at = \"${INGESTED_AT}\"" "$SOURCE_LOCK"
+fi
+
+# ── Handle source file removal ───────────────────────────────────────────
+REMOVED="false"
+if [[ "$REMOVE_SOURCE" == "true" ]]; then
+  rm -f "$FILE_PATH"
+  REMOVED="true"
+fi
+
+# ── Output receipt ───────────────────────────────────────────────────────
+echo "status: ok"
+echo "case_id: $CASE_ID"
+echo "source_id: $SOURCE_ID"
+echo "paperless_document_id: $DOCUMENT_ID"
+echo "paperless_task_id: $TASK_ID"
+echo "content_sha256: $CONTENT_SHA256"
+echo "source_file: $FILENAME"
+echo "doc_type: $DOC_TYPE"
+echo "source_class: $SOURCE_CLASS"
+echo "ingested_at: $INGESTED_AT"
+echo "retention_class: final_reviewed_packets"
+echo "tags: ${TAG_NAMES[*]}"
+echo "tag_ids: ${TAG_IDS[*]}"
+echo "paperless_host: $PAPERLESS_HOST"
+echo "path_used: $PATH_USED"
+echo "source_removed: $REMOVED"
+exit 0

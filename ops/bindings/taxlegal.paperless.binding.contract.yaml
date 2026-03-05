@@ -1,0 +1,112 @@
+# Tax-Legal Paperless-NGX Binding Contract
+# Status: active
+# Gap: GAP-OP-1426
+# Loop: LOOP-TAXLEGAL-PAPERLESS-BINDING-20260305
+
+contract_id: TAXLEGAL_PAPERLESS_BINDING_V1
+version: "1.0"
+lifecycle: experimental
+created: "2026-03-05"
+owner: "@ronny"
+scope: taxlegal-paperless-binding
+
+description: >
+  Binds tax-legal document ingestion to Paperless-NGX (finance stack, VM 211)
+  as the canonical document home. Desktop files are transient ingress only.
+  All ingested documents receive canonical tags, metadata, and a traceable
+  paperless_document_id recorded in the case source-registry.lock.yaml.
+
+authority_references:
+  agent_contract: ops/agents/tax-legal-agent.contract.md
+  case_lifecycle: ops/bindings/taxlegal.case.lifecycle.contract.yaml
+  sources_registry: ops/bindings/taxlegal.sources.registry.yaml
+  paperless_agent: ops/agents/paperless-agent.contract.md
+  secrets_namespace: ops/bindings/secrets.namespace.policy.yaml
+
+# ────────────────────────────────────────────────────────────────────────────
+# CANONICAL DOCUMENT HOME
+# ────────────────────────────────────────────────────────────────────────────
+document_home:
+  system: paperless-ngx
+  host: finance-stack
+  vm_id: 211
+  api_base: "http://192.168.1.211:8000/api"
+  secret_path: "/spine/services/paperless"
+  secret_key: PAPERLESS_API_TOKEN
+  auth_header: "Token"
+
+# ────────────────────────────────────────────────────────────────────────────
+# REQUIRED TAGS (applied on ingest)
+# ────────────────────────────────────────────────────────────────────────────
+required_tags:
+  - name: "domain:tax-legal"
+    description: "Domain classifier — all tax-legal documents"
+  - name: "case:{case_id}"
+    description: "Case binding — links document to specific case envelope"
+  - name: "jurisdiction:{zip}"
+    description: "Jurisdiction classifier — ZIP code of applicable jurisdiction"
+  - name: "source_class:{class}"
+    description: "Source classification from taxlegal.sources.registry.yaml"
+
+# ────────────────────────────────────────────────────────────────────────────
+# REQUIRED METADATA (recorded in source-registry.lock.yaml)
+# ────────────────────────────────────────────────────────────────────────────
+required_metadata:
+  - field: content_sha256
+    type: string
+    description: "SHA-256 hash of the ingested file computed before upload"
+  - field: paperless_document_id
+    type: integer
+    description: "Paperless-NGX document ID returned after successful upload"
+  - field: ingested_at
+    type: string
+    format: "YYYY-MM-DDTHH:MM:SSZ"
+    description: "UTC timestamp of successful ingestion"
+  - field: retention_class
+    type: string
+    enum: [final_reviewed_packets, source_citation_lockfiles, draft_packet_artifacts]
+    description: "Retention tier from taxlegal.retention.contract.yaml"
+  - field: doc_type
+    type: string
+    description: "Document type classification"
+  - field: source_file
+    type: string
+    description: "Original filename of the ingested document"
+
+# ────────────────────────────────────────────────────────────────────────────
+# INGESTION RULES
+# ────────────────────────────────────────────────────────────────────────────
+ingestion_rules:
+  accepted_formats: [pdf]
+  max_file_size_mb: 50
+  sha256_verification: true
+  duplicate_check: "content_sha256 match in source-registry.lock.yaml"
+  source_file_policy:
+    default: keep
+    remove_on_flag: "--remove-source"
+    remove_requires: "verified upload (HTTP 200 + document_id returned)"
+
+# ────────────────────────────────────────────────────────────────────────────
+# RECALL PATH
+# ────────────────────────────────────────────────────────────────────────────
+recall:
+  method: "Paperless API lookup by document_id or case tag"
+  capability: taxlegal.source.recall
+  lookup_fields:
+    - paperless_document_id
+    - case_id
+    - source_id
+  returns:
+    - download_url
+    - document_metadata
+    - tag_list
+
+# ────────────────────────────────────────────────────────────────────────────
+# PLANNED GATE
+# ────────────────────────────────────────────────────────────────────────────
+planned_gates:
+  - id: D379
+    name: taxlegal-paperless-binding-parity
+    purpose: "Enforce ingest capability + contract wiring + source lock integrity"
+    mode: report
+    promote_after_clean_runs: 3

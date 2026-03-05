@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# taxlegal-source-recall — Look up ingested documents from Paperless-NGX via case source lock
+# Safety: read-only
+# Approval: auto
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+INFISICAL_AGENT="${ROOT}/ops/tools/infisical-agent.sh"
+
+# ── Source LAN-first SSH resolver ─────────────────────────────────────────
+source "${ROOT}/ops/lib/ssh-resolve.sh"
+
+CASE_ID=""
+SOURCE_ID=""
+PAPERLESS_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --case-id) CASE_ID="$2"; shift 2 ;;
+    --source-id) SOURCE_ID="$2"; shift 2 ;;
+    --paperless-id) PAPERLESS_ID="$2"; shift 2 ;;
+    --) shift ;;
+    *) echo "error: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ── Validate inputs ──────────────────────────────────────────────────────
+if [[ -z "$CASE_ID" ]]; then
+  echo "error: --case-id is required" >&2
+  exit 1
+fi
+
+CASE_DIR="${ROOT}/mailroom/state/cases/tax-legal/${CASE_ID}"
+if [[ ! -d "$CASE_DIR" ]]; then
+  echo "error: case directory not found: $CASE_DIR" >&2
+  exit 1
+fi
+
+SOURCE_LOCK="${CASE_DIR}/source-registry.lock.yaml"
+if [[ ! -f "$SOURCE_LOCK" ]]; then
+  echo "error: source-registry.lock.yaml not found in case directory" >&2
+  exit 1
+fi
+
+if ! command -v yq &>/dev/null; then
+  echo "status: STOP"
+  echo "reason: yq not found in PATH"
+  exit 2
+fi
+
+# ── Look up source entry ─────────────────────────────────────────────────
+if [[ -n "$SOURCE_ID" ]]; then
+  ENTRY="$(yq -r ".sources[]? | select(.source_id == \"$SOURCE_ID\")" "$SOURCE_LOCK" 2>/dev/null)"
+elif [[ -n "$PAPERLESS_ID" ]]; then
+  ENTRY="$(yq -r ".sources[]? | select(.paperless_document_id == $PAPERLESS_ID)" "$SOURCE_LOCK" 2>/dev/null)"
+else
+  # List all sources for this case
+  SOURCE_COUNT="$(yq -r '.sources | length' "$SOURCE_LOCK" 2>/dev/null || echo "0")"
+  echo "status: ok"
+  echo "case_id: $CASE_ID"
+  echo "source_count: $SOURCE_COUNT"
+  echo "---"
+
+  if [[ "$SOURCE_COUNT" -gt 0 ]]; then
+    printf "%-40s %-12s %-20s %-30s %s\n" "SOURCE_ID" "PLSS_DOC_ID" "DOC_TYPE" "SOURCE_FILE" "INGESTED_AT"
+    printf "%-40s %-12s %-20s %-30s %s\n" "----------------------------------------" "------------" "--------------------" "------------------------------" "--------------------"
+    yq -r '.sources[]? | [.source_id, (.paperless_document_id | tostring), .doc_type, .source_file, .ingested_at] | @tsv' "$SOURCE_LOCK" 2>/dev/null | \
+      while IFS=$'\t' read -r sid pid dt sf ia; do
+        printf "%-40s %-12s %-20s %-30s %s\n" "$sid" "$pid" "$dt" "$sf" "$ia"
+      done
+  else
+    echo "(no sources ingested)"
+  fi
+  exit 0
+fi
+
+if [[ -z "$ENTRY" ]]; then
+  echo "status: not_found"
+  echo "case_id: $CASE_ID"
+  if [[ -n "$SOURCE_ID" ]]; then
+    echo "source_id: $SOURCE_ID"
+  else
+    echo "paperless_id: $PAPERLESS_ID"
+  fi
+  exit 0
+fi
+
+# ── Extract fields from entry ────────────────────────────────────────────
+E_SOURCE_ID="$(echo "$ENTRY" | yq -r '.source_id // ""')"
+E_PAPERLESS_ID="$(echo "$ENTRY" | yq -r '.paperless_document_id // ""')"
+E_SHA256="$(echo "$ENTRY" | yq -r '.content_sha256 // ""')"
+E_FILE="$(echo "$ENTRY" | yq -r '.source_file // ""')"
+E_DOC_TYPE="$(echo "$ENTRY" | yq -r '.doc_type // ""')"
+E_SOURCE_CLASS="$(echo "$ENTRY" | yq -r '.source_class // ""')"
+E_INGESTED="$(echo "$ENTRY" | yq -r '.ingested_at // ""')"
+E_RETENTION="$(echo "$ENTRY" | yq -r '.retention_class // ""')"
+E_TITLE="$(echo "$ENTRY" | yq -r '.title // ""')"
+
+# ── Resolve Paperless host for retrieval URL ─────────────────────────────
+_resolve_result="$(ssh_resolve_host_with_fallback "finance-stack" 2)" || true
+PAPERLESS_HOST="$(echo "$_resolve_result" | awk '{print $1}')"
+PATH_USED="$(echo "$_resolve_result" | awk '{print $2}')"
+[[ -z "$PAPERLESS_HOST" ]] && PAPERLESS_HOST="192.168.1.211"
+[[ -z "$PATH_USED" ]] && PATH_USED="fallback"
+
+# ── Verify document exists in Paperless (best-effort) ────────────────────
+PAPERLESS_TOKEN=""
+PAPERLESS_STATUS="unknown"
+PAPERLESS_TITLE=""
+
+if [[ -x "$INFISICAL_AGENT" && -n "$E_PAPERLESS_ID" ]]; then
+  PAPERLESS_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod PAPERLESS_API_TOKEN 2>/dev/null) || true
+fi
+
+if [[ -n "$PAPERLESS_TOKEN" && -n "$E_PAPERLESS_ID" ]]; then
+  DOC_RESPONSE=$(curl -s --connect-timeout 5 --max-time 10 \
+    -H "Authorization: Token ${PAPERLESS_TOKEN}" \
+    "http://${PAPERLESS_HOST}:8000/api/documents/${E_PAPERLESS_ID}/" 2>/dev/null || echo "")
+
+  if [[ -n "$DOC_RESPONSE" ]]; then
+    PAPERLESS_TITLE="$(echo "$DOC_RESPONSE" | jq -r '.title // ""' 2>/dev/null || echo "")"
+    if [[ -n "$PAPERLESS_TITLE" ]]; then
+      PAPERLESS_STATUS="verified"
+    else
+      PAPERLESS_STATUS="not_found_in_paperless"
+    fi
+  else
+    PAPERLESS_STATUS="unreachable"
+  fi
+fi
+
+# ── Output ───────────────────────────────────────────────────────────────
+echo "status: ok"
+echo "case_id: $CASE_ID"
+echo "source_id: $E_SOURCE_ID"
+echo "paperless_document_id: $E_PAPERLESS_ID"
+echo "paperless_status: $PAPERLESS_STATUS"
+echo "paperless_title: $PAPERLESS_TITLE"
+echo "content_sha256: $E_SHA256"
+echo "source_file: $E_FILE"
+echo "doc_type: $E_DOC_TYPE"
+echo "source_class: $E_SOURCE_CLASS"
+echo "ingested_at: $E_INGESTED"
+echo "retention_class: $E_RETENTION"
+echo "download_url: http://${PAPERLESS_HOST}:8000/api/documents/${E_PAPERLESS_ID}/download/"
+echo "preview_url: http://${PAPERLESS_HOST}:8000/api/documents/${E_PAPERLESS_ID}/preview/"
+echo "paperless_host: $PAPERLESS_HOST"
+echo "path_used: $PATH_USED"
+exit 0
