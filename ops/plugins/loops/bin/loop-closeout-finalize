@@ -16,7 +16,8 @@ Usage:
   loop-closeout-finalize --loop-id LOOP-... --acceptance-matrix <path> \
     [--regression-lock-id D###-...] [--evidence <ref>] [--owner <owner>] \
     [--expiry-check <date-or-cadence>] [--root-cause <text>] \
-    [--receipt-path <path>] [--no-close-linked-gaps]
+    [--receipt-path <path>] [--no-close-linked-gaps] \
+    [--cleanup-branch <branch-name>]
 
 Validation:
   - acceptance matrix has PASS state with no FAIL rows/placeholders
@@ -29,6 +30,8 @@ Behavior:
   - closes linked open gaps (status=fixed) unless --no-close-linked-gaps
   - enforces fix-to-lock for linked high/critical gaps
   - emits a single closeout receipt markdown file
+  - if --cleanup-branch is specified: deletes local and remote branch refs
+    (only if merged into main and not protected; skips with reason otherwise)
 USAGE
 }
 
@@ -42,6 +45,7 @@ EXPIRY_CHECK=""
 ROOT_CAUSE=""
 RECEIPT_PATH=""
 CLOSE_LINKED_GAPS=1
+CLEANUP_BRANCH=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -87,6 +91,10 @@ while [[ $# -gt 0 ]]; do
     --no-close-linked-gaps)
       CLOSE_LINKED_GAPS=0
       shift
+      ;;
+    --cleanup-branch)
+      CLEANUP_BRANCH="${2:-}"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -406,9 +414,87 @@ EOF
 release_git_lock
 trap - EXIT INT TERM
 
+# ── Inline branch cleanup (post-close) ──
+BRANCH_CLEANUP_STATUS="skipped"
+BRANCH_CLEANUP_REASON="not requested"
+if [[ -n "$CLEANUP_BRANCH" ]]; then
+  CURRENT_BRANCH="$(git -C "$ROOT" branch --show-current 2>/dev/null || true)"
+
+  # Load protected branch regexes from nightly closeout contract
+  NIGHTLY_CONTRACT="$ROOT/ops/bindings/nightly.closeout.contract.yaml"
+  PROTECTED_BRANCH_REGEXES=("^main$")
+  if command -v yq >/dev/null 2>&1 && [[ -f "$NIGHTLY_CONTRACT" ]]; then
+    while IFS= read -r rx; do
+      [[ -n "$rx" && "$rx" != "null" ]] && PROTECTED_BRANCH_REGEXES+=("$rx")
+    done < <(yq e -r '.protected_scope.branch_regexes[]?' "$NIGHTLY_CONTRACT" 2>/dev/null || true)
+  fi
+
+  # Guard 1: not protected
+  is_cleanup_protected=0
+  for rx in "${PROTECTED_BRANCH_REGEXES[@]}"; do
+    if [[ "$CLEANUP_BRANCH" =~ $rx ]]; then
+      is_cleanup_protected=1
+      break
+    fi
+  done
+
+  if [[ "$is_cleanup_protected" -eq 1 ]]; then
+    BRANCH_CLEANUP_STATUS="skipped"
+    BRANCH_CLEANUP_REASON="branch matches protected regex"
+    echo "loop.closeout.finalize WARN: branch cleanup skipped: $CLEANUP_BRANCH ($BRANCH_CLEANUP_REASON)"
+  elif [[ "$CLEANUP_BRANCH" == "$CURRENT_BRANCH" ]]; then
+    BRANCH_CLEANUP_STATUS="skipped"
+    BRANCH_CLEANUP_REASON="branch is currently checked out"
+    echo "loop.closeout.finalize WARN: branch cleanup skipped: $CLEANUP_BRANCH ($BRANCH_CLEANUP_REASON)"
+  elif ! git -C "$ROOT" rev-parse --verify "$CLEANUP_BRANCH" >/dev/null 2>&1; then
+    BRANCH_CLEANUP_STATUS="skipped"
+    BRANCH_CLEANUP_REASON="branch does not exist locally"
+    echo "loop.closeout.finalize WARN: branch cleanup skipped: $CLEANUP_BRANCH ($BRANCH_CLEANUP_REASON)"
+  elif ! git -C "$ROOT" merge-base --is-ancestor "$CLEANUP_BRANCH" main >/dev/null 2>&1; then
+    # Guard 2: must be merged into main
+    BRANCH_CLEANUP_STATUS="skipped"
+    BRANCH_CLEANUP_REASON="branch is not merged into main (merge-base check failed)"
+    echo "loop.closeout.finalize WARN: branch cleanup skipped: $CLEANUP_BRANCH ($BRANCH_CLEANUP_REASON)"
+  else
+    # All preconditions passed - safe to delete
+    BRANCH_CLEANUP_STATUS="attempted"
+    local_ok=0
+    if git -C "$ROOT" branch -d "$CLEANUP_BRANCH" >/dev/null 2>&1; then
+      local_ok=1
+      echo "loop.closeout.finalize: deleted local branch $CLEANUP_BRANCH"
+    else
+      echo "loop.closeout.finalize WARN: failed to delete local branch $CLEANUP_BRANCH"
+    fi
+
+    # Remote cleanup (best-effort for each configured remote)
+    for remote_name in origin github; do
+      if git -C "$ROOT" remote get-url "$remote_name" >/dev/null 2>&1; then
+        if git -C "$ROOT" ls-remote --exit-code "$remote_name" "refs/heads/$CLEANUP_BRANCH" >/dev/null 2>&1; then
+          if git -C "$ROOT" push "$remote_name" --delete "$CLEANUP_BRANCH" >/dev/null 2>&1; then
+            echo "loop.closeout.finalize: deleted $remote_name/$CLEANUP_BRANCH"
+          else
+            echo "loop.closeout.finalize WARN: failed to delete $remote_name/$CLEANUP_BRANCH"
+          fi
+        fi
+      fi
+    done
+
+    if [[ "$local_ok" -eq 1 ]]; then
+      BRANCH_CLEANUP_STATUS="completed"
+      BRANCH_CLEANUP_REASON="branch deleted (merged, not protected)"
+    else
+      BRANCH_CLEANUP_STATUS="partial"
+      BRANCH_CLEANUP_REASON="local delete failed, remote may have succeeded"
+    fi
+  fi
+fi
+
 echo "loop.closeout.finalize"
 echo "loop_id=$LOOP_ID"
 echo "acceptance_matrix=$ACCEPTANCE_MATRIX"
 echo "linked_open_gaps_before=$linked_open_count"
 echo "linked_gaps_closed=$closed_gap_count"
 echo "receipt=$RECEIPT_PATH"
+echo "branch_cleanup_status=$BRANCH_CLEANUP_STATUS"
+echo "branch_cleanup_branch=${CLEANUP_BRANCH:-none}"
+echo "branch_cleanup_reason=$BRANCH_CLEANUP_REASON"

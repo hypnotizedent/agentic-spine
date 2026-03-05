@@ -6,6 +6,7 @@ set -euo pipefail
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CLOSEOUT_CMD="${SPINE_ROOT}/ops/commands/nightly-closeout.sh"
+CONTRACT="${SPINE_ROOT}/ops/bindings/nightly.closeout.contract.yaml"
 RECEIPT_ROOT="${SPINE_ROOT}/receipts/nightly-closeout"
 source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
@@ -80,6 +81,54 @@ run_nightly_closeout_dry_run() {
       "nightly-closeout dry-run found actionable items" \
       "loops_open=${loops_open:-unknown} gaps_open=${gaps_open:-unknown} orphaned_gaps=${orphaned_gaps:-unknown} branch_candidates=${branch_candidates:-unknown} worktree_candidates=${worktree_candidates:-unknown} stale_path_candidates=${stale_candidates:-unknown} summary_env=${summary_env}" \
       "nightly-closeout-daily"
+  fi
+
+  # ── Auto-apply decision ──
+  # When auto_apply.enabled is true in contract AND the dry-run classification
+  # contains only safe classes (no HOLD/AMBIGUOUS/BLOCKED items), run apply
+  # automatically. Otherwise, leave for manual operator review.
+  local auto_apply_enabled="false"
+  if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
+    auto_apply_enabled="$(yq e -r '.auto_apply.enabled // false' "$CONTRACT" 2>/dev/null || echo "false")"
+  fi
+
+  local auto_apply_safe
+  auto_apply_safe="$(sed -nE 's/^auto_apply_safe=(.*)$/\1/p' "$summary_env" | head -1)"
+
+  local total_candidates=$(( branch_n + worktree_n + stale_n ))
+
+  if [[ "$auto_apply_enabled" == "true" ]]; then
+    if [[ "$auto_apply_safe" == "true" && "$total_candidates" -gt 0 ]]; then
+      echo "[nightly-closeout-daily] AUTO-APPLY: classification is safe (0 held/ambiguous), $total_candidates candidates"
+      echo "[nightly-closeout-daily] AUTO-APPLY: executing apply mode"
+      set +e
+      "$CLOSEOUT_CMD" --mode apply
+      local apply_rc=$?
+      set -e
+      if [[ "$apply_rc" -eq 0 ]]; then
+        echo "[nightly-closeout-daily] AUTO-APPLY: apply completed successfully"
+        spine_enqueue_email_intent \
+          "nightly-closeout" \
+          "info" \
+          "nightly-closeout auto-apply completed" \
+          "branch_candidates=${branch_candidates:-0} worktree_candidates=${worktree_candidates:-0} stale_path_candidates=${stale_candidates:-0} summary_env=${summary_env}" \
+          "nightly-closeout-daily"
+      else
+        echo "[nightly-closeout-daily] AUTO-APPLY: apply failed (rc=$apply_rc), leaving for manual review"
+        spine_enqueue_email_intent \
+          "nightly-closeout" \
+          "error" \
+          "nightly-closeout auto-apply FAILED" \
+          "rc=$apply_rc summary_env=${summary_env}" \
+          "nightly-closeout-daily"
+      fi
+    elif [[ "$auto_apply_safe" != "true" ]]; then
+      echo "[nightly-closeout-daily] AUTO-APPLY: SKIPPED (held/ambiguous items present, requires manual review)"
+    else
+      echo "[nightly-closeout-daily] AUTO-APPLY: SKIPPED (0 candidates to clean up)"
+    fi
+  else
+    echo "[nightly-closeout-daily] AUTO-APPLY: disabled in contract (auto_apply.enabled=false)"
   fi
 
   return 0

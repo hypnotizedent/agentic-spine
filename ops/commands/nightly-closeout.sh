@@ -41,6 +41,24 @@ RUN_ID="NIGHTLY-CLOSEOUT-${RUN_UTC}-${$}"
 ARTIFACT_DIR="$ROOT/receipts/nightly-closeout/$RUN_ID"
 mkdir -p "$ARTIFACT_DIR"
 
+# ── Remote prune before classification ──
+# Prune stale remote tracking refs so classification operates on current state.
+PRUNE_LOG="$ARTIFACT_DIR/remote_prune.log"
+: > "$PRUNE_LOG"
+for remote_name in origin github; do
+  if git -C "$ROOT" remote get-url "$remote_name" >/dev/null 2>&1; then
+    echo "[prune] fetching --prune $remote_name" >> "$PRUNE_LOG"
+    if git -C "$ROOT" fetch --prune "$remote_name" >> "$PRUNE_LOG" 2>&1; then
+      echo "[prune] $remote_name pruned successfully" >> "$PRUNE_LOG"
+    else
+      echo "[prune] WARN: $remote_name prune failed (continuing)" >> "$PRUNE_LOG"
+    fi
+  else
+    echo "[prune] SKIP: remote '$remote_name' not configured" >> "$PRUNE_LOG"
+  fi
+done
+echo "remote_prune.log=$PRUNE_LOG"
+
 if [[ "$MODE" == "apply" && "$REQUIRE_DRY_RUN_BEFORE_APPLY" == "true" ]]; then
   found_dry_run=0
   if [[ -d "$ROOT/receipts/nightly-closeout" ]]; then
@@ -626,6 +644,16 @@ GITHUB_CODEX_COUNT_AFTER="$(git -C "$ROOT" for-each-ref refs/remotes/github/code
   echo "remote_codex_origin_after=$ORIGIN_CODEX_COUNT_AFTER"
   echo "remote_codex_github_before=$GITHUB_CODEX_COUNT_BEFORE"
   echo "remote_codex_github_after=$GITHUB_CODEX_COUNT_AFTER"
+  echo "branch_candidates=${#LOCAL_BRANCH_CANDIDATES[@]}"
+  echo "worktree_candidates=${#WORKTREE_CANDIDATES[@]}"
+  echo "stale_path_candidates=${#STALE_PATHS_CANDIDATES[@]}"
+  echo "held_local_branches=${#LOCAL_BRANCH_HELD[@]}"
+  echo "held_worktrees=${#WORKTREE_HELD[@]}"
+  echo "held_remote_origin=${#REMOTE_ORIGIN_HELD[@]}"
+  echo "held_remote_github=${#REMOTE_GITHUB_HELD[@]}"
+  echo "remote_origin_candidates=${#REMOTE_ORIGIN_CANDIDATES[@]}"
+  echo "remote_github_candidates=${#REMOTE_GITHUB_CANDIDATES[@]}"
+  echo "auto_apply_safe=$( (( ${#LOCAL_BRANCH_HELD[@]} + ${#WORKTREE_HELD[@]} + ${#REMOTE_ORIGIN_HELD[@]} + ${#REMOTE_GITHUB_HELD[@]} == 0 )) && echo "true" || echo "false" )"
 } > "$SUMMARY_ENV"
 
 echo "nightly.closeout mode=$MODE run_id=$RUN_ID"
