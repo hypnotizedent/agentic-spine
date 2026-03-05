@@ -438,6 +438,8 @@ run_cap() {
             # Active session role override implies governed execution context — auto-approve
             if [[ -n "$role_policy_override_ref" && -n "${role_policy_override_reason:-}" ]]; then
               echo "MANUAL APPROVAL: auto-approved via active role override (ref=$role_policy_override_ref)"
+            elif [[ "$governed_override_active" -eq 1 ]]; then
+              echo "MANUAL APPROVAL: auto-approved via OPS_GOVERNED_MAIN_OVERRIDE=1"
             else
               echo "⚠️  This capability requires manual approval."
               if [[ -t 0 ]]; then
@@ -469,23 +471,31 @@ run_cap() {
     if [[ -z "${OPS_CAP_STACK:-}" && "$safety" == "mutating" ]]; then
       # proposal_required: strict preset forces proposal flow for mutating caps
       if [[ "${RESOLVED_PROPOSAL_REQUIRED:-false}" == "true" ]]; then
-        echo "BLOCKED: proposal_required=true (policy: $RESOLVED_POLICY_PRESET)"
-        echo "Mutating capability '$name' requires proposal flow under current policy."
-        echo ""
-        echo "Remediation:"
-        echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
-        blocked_reason="proposal_required_block:${name}"
-        exit_code=1
+        if [[ "$governed_override_active" -eq 1 ]]; then
+          echo "POLICY OVERRIDE: proposal_required bypassed via OPS_GOVERNED_MAIN_OVERRIDE=1"
+        else
+          echo "BLOCKED: proposal_required=true (policy: $RESOLVED_POLICY_PRESET)"
+          echo "Mutating capability '$name' requires proposal flow under current policy."
+          echo ""
+          echo "Remediation:"
+          echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
+          blocked_reason="proposal_required_block:${name}"
+          exit_code=1
+        fi
       fi
       # multi_agent_writes: proposal-only blocks direct mutating caps
       if [[ -z "$blocked_reason" && "$effective_multi_agent_writes" == "proposal-only" ]]; then
-        echo "BLOCKED: multi_agent_writes=proposal-only (policy: $RESOLVED_POLICY_PRESET, active_sessions=$active_session_count)"
-        echo "Direct mutating capability '$name' blocked. Use proposal flow."
-        echo ""
-        echo "Remediation:"
-        echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
-        blocked_reason="multi_agent_writes_proposal_only:${name}"
-        exit_code=1
+        if [[ "$governed_override_active" -eq 1 ]]; then
+          echo "POLICY OVERRIDE: multi_agent_writes=proposal-only bypassed via OPS_GOVERNED_MAIN_OVERRIDE=1"
+        else
+          echo "BLOCKED: multi_agent_writes=proposal-only (policy: $RESOLVED_POLICY_PRESET, active_sessions=$active_session_count)"
+          echo "Direct mutating capability '$name' blocked. Use proposal flow."
+          echo ""
+          echo "Remediation:"
+          echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
+          blocked_reason="multi_agent_writes_proposal_only:${name}"
+          exit_code=1
+        fi
       fi
     fi
 
@@ -733,6 +743,9 @@ run_cap() {
     # ── Proactive mutation guard (critical domains, snapshot-driven) ──
     # ── Orchestrator-subagent fail-closed guard (loop lock evidence) ──
     if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
+      if [[ "$governed_override_active" -eq 1 ]]; then
+        echo "ORCHESTRATOR GUARD OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
+      else
       local orchestrator_loop_id orchestrator_scope_file orchestrator_mode orchestrator_scope_status
       local orchestrator_lock_dir orchestrator_lock_match
       local caller_worktree caller_branch
@@ -853,10 +866,14 @@ run_cap() {
           fi
         fi
       fi
+      fi
     fi
 
     # ── Proactive mutation guard (critical domains, snapshot-driven) ──
     if [[ -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
+      if [[ "$governed_override_active" -eq 1 ]]; then
+        echo "PROACTIVE GUARD OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
+      else
       local guard_policy="$SPINE_CODE/ops/bindings/proactive.guard.policy.yaml"
       if [[ -f "$guard_policy" ]]; then
         local guard_enabled
@@ -999,6 +1016,7 @@ PY
           fi
         fi
       fi
+      fi
     fi
 
     # ── AOF contract acknowledgment (v0.3) ──
@@ -1015,7 +1033,10 @@ PY
         set -e
         if [[ "$ack_rc" -eq 2 ]]; then
           # Auto-acknowledge when a governed role override is active.
-          if [[ -n "$role_policy_override_ref" && -n "$role_policy_override_reason" ]]; then
+          if [[ "$governed_override_active" -eq 1 ]]; then
+            CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
+            echo "AOF auto-acknowledged via OPS_GOVERNED_MAIN_OVERRIDE=1"
+          elif [[ -n "$role_policy_override_ref" && -n "$role_policy_override_reason" ]]; then
             CONTRACT_FILE="$env_contract" bash "$SPINE_CODE/ops/plugins/aof/bin/contract-read-check.sh" --ack >/dev/null 2>&1 || true
             echo "AOF auto-acknowledged (governed role override active: ref=$role_policy_override_ref)"
           else
