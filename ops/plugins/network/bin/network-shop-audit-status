@@ -4,8 +4,8 @@
 # Checks (no SSH/ping; pure SSOT + bindings):
 #  1) Duplicate IPs in ssh.targets.yaml (IPv4 only)
 #  2) ssh.targets.yaml ↔ DEVICE_IDENTITY_SSOT.md parity (Shop LAN endpoints)
-#  3) ssh.targets.yaml ↔ SHOP_SERVER_SSOT.md parity (shop managed device rows)
-#  4) Cross-SSOT parity (DEVICE_IDENTITY_SSOT ↔ SHOP_SERVER_SSOT)
+#  3) ssh.targets.yaml ↔ SHOP_SERVER_SSOT.md parity (shop managed device rows, when present)
+#  4) Cross-SSOT parity (DEVICE_IDENTITY_SSOT ↔ SHOP_SERVER_SSOT, when present)
 #  5) Coverage: Shop LAN endpoints in DEVICE_IDENTITY_SSOT must exist in ssh.targets.yaml
 #
 # Exit:
@@ -28,7 +28,10 @@ command -v yq >/dev/null 2>&1 || stop "missing dependency: yq (brew install yq)"
 command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
 [[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
 [[ -f "$SSOT_DEVICE" ]] || stop "missing SSOT: $SSOT_DEVICE"
-[[ -f "$SSOT_SHOP" ]] || stop "missing SSOT: $SSOT_SHOP"
+shop_ssot_available=1
+if [[ ! -f "$SSOT_SHOP" ]]; then
+  shop_ssot_available=0
+fi
 
 tmpdir="$(mktemp -d /tmp/network-shop-audit.XXXXXX)"
 cleanup(){ rm -rf "$tmpdir" 2>/dev/null || true; }
@@ -39,7 +42,11 @@ findings=0
 echo "network.shop.audit.status"
 echo "binding: $BINDING"
 echo "ssot-device: $SSOT_DEVICE"
-echo "ssot-shop: $SSOT_SHOP"
+if [[ "$shop_ssot_available" -eq 1 ]]; then
+  echo "ssot-shop: $SSOT_SHOP"
+else
+  echo "ssot-shop: missing (skipping SHOP_SERVER parity checks; consolidated SSOT path)"
+fi
 echo
 
 # ── Extract bindings: id -> host (IPv4 only) ───────────────────────────────
@@ -71,6 +78,7 @@ PY
 
 # ── Extract SHOP_SERVER "Devices" table: id -> ip (best-effort) ────────────
 shop_tsv="$tmpdir/shop.tsv"
+if [[ "$shop_ssot_available" -eq 1 ]]; then
 python3 - "$SSOT_SHOP" >"$shop_tsv" <<'PY'
 import re,sys
 path=sys.argv[1]
@@ -91,6 +99,9 @@ for line in open(path,'r',encoding='utf-8',errors='ignore'):
 for dev,ip in rows:
     print(f"{dev}\t{ip}")
 PY
+else
+  : > "$shop_tsv"
+fi
 
 echo -n "check 1: duplicate IPs in bindings... "
 dup_report="$tmpdir/dup.txt"
@@ -137,6 +148,7 @@ else
 fi
 
 echo -n "check 3: binding ↔ SHOP_SERVER parity... "
+if [[ "$shop_ssot_available" -eq 1 ]]; then
 par3="$tmpdir/par3.txt"
 python3 - "$bindings_tsv" "$shop_tsv" >"$par3" <<'PY'
 import sys
@@ -165,8 +177,12 @@ if [[ -s "$par3" ]]; then
 else
   echo "OK"
 fi
+else
+  echo "SKIP (SHOP_SERVER_SSOT.md missing)"
+fi
 
 echo -n "check 4: cross-SSOT parity (DEVICE_IDENTITY ↔ SHOP_SERVER)... "
+if [[ "$shop_ssot_available" -eq 1 ]]; then
 par4="$tmpdir/par4.txt"
 python3 - "$device_tsv" "$shop_tsv" >"$par4" <<'PY'
 import sys
@@ -194,6 +210,9 @@ if [[ -s "$par4" ]]; then
   findings=$((findings + $(wc -l <"$par4" | tr -d ' ')))
 else
   echo "OK"
+fi
+else
+  echo "SKIP (SHOP_SERVER_SSOT.md missing)"
 fi
 
 echo -n "check 5: coverage (SSOT devices → bindings)... "
@@ -232,4 +251,3 @@ if [[ "$findings" -eq 0 ]]; then
 fi
 echo "result: FAIL (${findings} drift finding(s))"
 exit 1
-
