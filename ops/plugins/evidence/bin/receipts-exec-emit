@@ -24,6 +24,9 @@ Usage:
     [--wave-id <WAVE-ID>] [--commit-hashes <csv>] [--loop-id <LOOP-ID>] [--gap-ids <csv>] \
     [--evidence-run-keys <csv>] [--evidence-files <csv>] [--evidence-commits <csv>] \
     [--blocker-class <none|deterministic|freshness|dependency|cleanup|policy|external>] \
+    [--prompt-set-id <id>] [--prompt-version <version>] [--prompt-source-refs <csv>] \
+    [--prompt-source-hash <sha256|none>] [--prompt-source-hashes <ref=sha|missing,csv>] \
+    [--prompt-registry-path <path>] [--prompt-resolution <capability_override|defaults|missing_registry|invalid_registry>] \
     [--json-out <path>] [--markdown-out <path>] [--no-validate]
 
 Notes:
@@ -50,6 +53,13 @@ EVIDENCE_RUN_KEYS=""
 EVIDENCE_FILES=""
 EVIDENCE_COMMITS=""
 BLOCKER_CLASS="none"
+PROMPT_SET_ID="unregistered"
+PROMPT_VERSION="none"
+PROMPT_SOURCE_REFS=""
+PROMPT_SOURCE_HASH="none"
+PROMPT_SOURCE_HASHES=""
+PROMPT_REGISTRY_PATH="ops/bindings/prompt.registry.yaml"
+PROMPT_RESOLUTION="missing_registry"
 JSON_OUT=""
 MARKDOWN_OUT=""
 VALIDATE=1
@@ -74,6 +84,13 @@ while [[ $# -gt 0 ]]; do
     --evidence-files) EVIDENCE_FILES="${2:-}"; shift 2 ;;
     --evidence-commits) EVIDENCE_COMMITS="${2:-}"; shift 2 ;;
     --blocker-class) BLOCKER_CLASS="${2:-}"; shift 2 ;;
+    --prompt-set-id) PROMPT_SET_ID="${2:-}"; shift 2 ;;
+    --prompt-version) PROMPT_VERSION="${2:-}"; shift 2 ;;
+    --prompt-source-refs) PROMPT_SOURCE_REFS="${2:-}"; shift 2 ;;
+    --prompt-source-hash) PROMPT_SOURCE_HASH="${2:-}"; shift 2 ;;
+    --prompt-source-hashes) PROMPT_SOURCE_HASHES="${2:-}"; shift 2 ;;
+    --prompt-registry-path) PROMPT_REGISTRY_PATH="${2:-}"; shift 2 ;;
+    --prompt-resolution) PROMPT_RESOLUTION="${2:-}"; shift 2 ;;
     --json-out) JSON_OUT="${2:-}"; shift 2 ;;
     --markdown-out) MARKDOWN_OUT="${2:-}"; shift 2 ;;
     --no-validate) VALIDATE=0; shift ;;
@@ -89,7 +106,7 @@ done
 [[ -n "$RUN_KEYS" ]] || { echo "FAIL: --run-keys is required" >&2; exit 2; }
 [[ -n "$READY_FOR_VERIFY" ]] || { echo "FAIL: --ready-for-verify is required" >&2; exit 2; }
 
-python3 - "$SCHEMA_PATH" "$TASK_ID" "$TERMINAL_ID" "$LANE" "$STATUS" "$FILES_CHANGED" "$RUN_KEYS" "$BLOCKERS" "$READY_FOR_VERIFY" "$TIMESTAMP_UTC" "$WAVE_ID" "$COMMIT_HASHES" "$LOOP_ID" "$GAP_IDS" "$EVIDENCE_RUN_KEYS" "$EVIDENCE_FILES" "$EVIDENCE_COMMITS" "$BLOCKER_CLASS" "$JSON_OUT" "$MARKDOWN_OUT" "$VALIDATE" <<'PY'
+python3 - "$SCHEMA_PATH" "$TASK_ID" "$TERMINAL_ID" "$LANE" "$STATUS" "$FILES_CHANGED" "$RUN_KEYS" "$BLOCKERS" "$READY_FOR_VERIFY" "$TIMESTAMP_UTC" "$WAVE_ID" "$COMMIT_HASHES" "$LOOP_ID" "$GAP_IDS" "$EVIDENCE_RUN_KEYS" "$EVIDENCE_FILES" "$EVIDENCE_COMMITS" "$BLOCKER_CLASS" "$PROMPT_SET_ID" "$PROMPT_VERSION" "$PROMPT_SOURCE_REFS" "$PROMPT_SOURCE_HASH" "$PROMPT_SOURCE_HASHES" "$PROMPT_REGISTRY_PATH" "$PROMPT_RESOLUTION" "$JSON_OUT" "$MARKDOWN_OUT" "$VALIDATE" <<'PY'
 import datetime as dt
 import json
 import os
@@ -116,10 +133,17 @@ from pathlib import Path
     evidence_files_raw,
     evidence_commits_raw,
     blocker_class,
+    prompt_set_id_raw,
+    prompt_version_raw,
+    prompt_source_refs_raw,
+    prompt_source_hash_raw,
+    prompt_source_hashes_raw,
+    prompt_registry_path_raw,
+    prompt_resolution_raw,
     json_out,
     markdown_out,
     validate_raw,
-) = sys.argv[1:22]
+) = sys.argv[1:29]
 
 validate = validate_raw == "1"
 
@@ -129,6 +153,25 @@ def split_csv(value: str):
     if not value:
         return []
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def split_csv_pairs(value: str):
+    value = (value or "").strip()
+    pairs = {}
+    if not value:
+        return pairs
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            continue
+        key, raw_val = part.split("=", 1)
+        key = key.strip()
+        raw_val = raw_val.strip()
+        if key:
+            pairs[key] = raw_val or "missing"
+    return pairs
 
 
 def parse_bool(value: str):
@@ -150,6 +193,15 @@ gap_ids = split_csv(gap_ids_raw)
 evidence_run_keys = split_csv(evidence_run_keys_raw) or list(run_keys)
 evidence_files = split_csv(evidence_files_raw) or list(files_changed)
 evidence_commits = split_csv(evidence_commits_raw) or list(commit_hashes)
+prompt_source_refs = split_csv(prompt_source_refs_raw)
+prompt_source_hashes = split_csv_pairs(prompt_source_hashes_raw)
+prompt_set_id = (prompt_set_id_raw or "").strip() or "unregistered"
+prompt_version = (prompt_version_raw or "").strip() or "none"
+prompt_source_hash = (prompt_source_hash_raw or "").strip() or "none"
+prompt_registry_path = (prompt_registry_path_raw or "").strip() or "ops/bindings/prompt.registry.yaml"
+prompt_resolution = (prompt_resolution_raw or "").strip() or "missing_registry"
+for ref in prompt_source_refs:
+    prompt_source_hashes.setdefault(ref, "missing")
 
 ready_for_verify = parse_bool(ready_for_verify_raw)
 if not timestamp_utc:
@@ -170,6 +222,15 @@ receipt = {
         "file_refs": evidence_files,
         "commit_refs": evidence_commits,
         "blocker_class": blocker_class or "none",
+    },
+    "prompt_lineage": {
+        "prompt_set_id": prompt_set_id,
+        "version": prompt_version,
+        "source_refs": prompt_source_refs,
+        "source_hash": prompt_source_hash,
+        "source_hashes": prompt_source_hashes,
+        "registry_path": prompt_registry_path,
+        "resolution": prompt_resolution,
     },
 }
 
@@ -196,6 +257,20 @@ if validate:
         .get("properties", {})
         .get("blocker_class", {})
         .get("enum", [])
+    )
+    prompt_resolution_enum = (
+        schema.get("properties", {})
+        .get("prompt_lineage", {})
+        .get("properties", {})
+        .get("resolution", {})
+        .get("enum", [])
+    )
+    prompt_hash_pattern = (
+        schema.get("properties", {})
+        .get("prompt_lineage", {})
+        .get("properties", {})
+        .get("source_hash", {})
+        .get("pattern", r"^([0-9a-f]{64}|none)$")
     )
     commit_pattern = (
         schema.get("properties", {})
@@ -234,6 +309,14 @@ if validate:
             f"FAIL: blocker_class invalid: {receipt['evidence_refs']['blocker_class']}"
         )
 
+    prompt_hash_re = re.compile(prompt_hash_pattern)
+    if not prompt_hash_re.match(receipt["prompt_lineage"]["source_hash"]):
+        raise SystemExit(f"FAIL: prompt source_hash invalid: {receipt['prompt_lineage']['source_hash']}")
+    if prompt_resolution_enum and receipt["prompt_lineage"]["resolution"] not in set(prompt_resolution_enum):
+        raise SystemExit(
+            f"FAIL: prompt resolution invalid: {receipt['prompt_lineage']['resolution']}"
+        )
+
 payload = json.dumps(receipt, indent=2, sort_keys=False)
 
 if json_out:
@@ -263,6 +346,12 @@ if markdown_out:
     md_lines.extend([f"- run_key_refs: {len(evidence_run_keys)}"])
     md_lines.extend([f"- file_refs: {len(evidence_files)}"])
     md_lines.extend([f"- commit_refs: {len(evidence_commits)}"])
+    md_lines.extend(["", "## Prompt Lineage"])
+    md_lines.extend([f"- prompt_set_id: {receipt['prompt_lineage']['prompt_set_id']}"])
+    md_lines.extend([f"- version: {receipt['prompt_lineage']['version']}"])
+    md_lines.extend([f"- source_hash: {receipt['prompt_lineage']['source_hash']}"])
+    md_lines.extend([f"- resolution: {receipt['prompt_lineage']['resolution']}"])
+    md_lines.extend([f"- source_refs: {len(receipt['prompt_lineage']['source_refs'])}"])
     if blockers:
         md_lines.extend(["", "## Blockers"])
         md_lines.extend([f"- {b}" for b in blockers])

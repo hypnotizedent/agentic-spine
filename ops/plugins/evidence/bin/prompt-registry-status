@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# prompt.registry.status - resolve prompt lineage for a capability from prompt.registry.yaml
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+REGISTRY="$ROOT/ops/bindings/prompt.registry.yaml"
+CAPABILITY=""
+JSON_MODE=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  prompt-registry-status [--capability <id>] [--json]
+
+Examples:
+  ./ops/plugins/evidence/bin/prompt-registry-status
+  ./ops/plugins/evidence/bin/prompt-registry-status --capability spine.init --json
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --capability) CAPABILITY="${2:-}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || { echo "ERROR: yq missing" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 missing" >&2; exit 1; }
+
+if [[ ! -f "$REGISTRY" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "${CAPABILITY:-}" \
+      --arg registry_path "ops/bindings/prompt.registry.yaml" \
+      '{capability: $capability, registry_path: $registry_path, summary: {status: "fail", reason: "missing_registry"}}'
+  else
+    echo "FAIL: missing registry: ops/bindings/prompt.registry.yaml" >&2
+  fi
+  exit 1
+fi
+
+registry_json="$(yq -o=json '.' "$REGISTRY")"
+
+python3 - "$ROOT" "$REGISTRY" "$CAPABILITY" "$JSON_MODE" "$registry_json" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+registry_abs = Path(sys.argv[2])
+capability = (sys.argv[3] or "").strip()
+json_mode = sys.argv[4] == "1"
+registry_raw = sys.argv[5] if len(sys.argv) > 5 else "{}"
+
+try:
+    registry = json.loads(registry_raw or "{}")
+except Exception:
+    registry = {}
+
+defaults = registry.get("defaults") if isinstance(registry, dict) else {}
+if not isinstance(defaults, dict):
+    defaults = {}
+overrides = registry.get("capability_overrides") if isinstance(registry, dict) else {}
+if not isinstance(overrides, dict):
+    overrides = {}
+
+override = overrides.get(capability, {}) if capability else {}
+if not isinstance(override, dict):
+    override = {}
+
+resolution = "capability_override" if capability and override else "defaults"
+prompt_set_id = str(override.get("prompt_set_id") or defaults.get("prompt_set_id") or "").strip()
+version = str(override.get("version") or defaults.get("version") or "").strip()
+
+source_refs_raw = override.get("source_refs")
+if source_refs_raw is None:
+    source_refs_raw = defaults.get("source_refs")
+if not isinstance(source_refs_raw, list):
+    source_refs_raw = []
+source_refs = [str(item).strip() for item in source_refs_raw if str(item).strip()]
+
+source_hashes = {}
+hash_lines = []
+missing_refs = []
+for rel in source_refs:
+    abs_path = root / rel
+    if abs_path.is_file():
+        digest = hashlib.sha256(abs_path.read_bytes()).hexdigest()
+        source_hashes[rel] = digest
+        hash_lines.append(f"{rel}:{digest}")
+    else:
+        source_hashes[rel] = "missing"
+        missing_refs.append(rel)
+        hash_lines.append(f"{rel}:missing")
+
+source_hash = "none"
+if hash_lines:
+    source_hash = hashlib.sha256("\n".join(hash_lines).encode("utf-8")).hexdigest()
+
+errors = []
+if not prompt_set_id:
+    errors.append("missing prompt_set_id")
+if not version:
+    errors.append("missing version")
+require_refs = bool((registry.get("resolution") or {}).get("require_source_refs", True))
+if require_refs and not source_refs:
+    errors.append("missing source_refs")
+
+summary_status = "ok" if not errors else "fail"
+
+payload = {
+    "capability": capability or None,
+    "registry_path": str(registry_abs.relative_to(root)),
+    "prompt_lineage": {
+        "prompt_set_id": prompt_set_id or "unregistered",
+        "version": version or "none",
+        "source_refs": source_refs,
+        "source_hash": source_hash,
+        "source_hashes": source_hashes,
+        "resolution": resolution if summary_status == "ok" else "invalid_registry",
+    },
+    "summary": {
+        "status": summary_status,
+        "missing_source_refs": missing_refs,
+        "errors": errors,
+    },
+}
+
+if json_mode:
+    print(json.dumps(payload, indent=2))
+else:
+    print("prompt.registry.status")
+    print(f"registry: {payload['registry_path']}")
+    print(f"capability: {capability or '(defaults)'}")
+    lineage = payload["prompt_lineage"]
+    print(f"prompt_set_id: {lineage['prompt_set_id']}")
+    print(f"version: {lineage['version']}")
+    print(f"resolution: {lineage['resolution']}")
+    print(f"source_hash: {lineage['source_hash']}")
+    print("source_refs:")
+    for ref in lineage["source_refs"]:
+        print(f"  - {ref}: {lineage['source_hashes'].get(ref, 'missing')}")
+    if payload["summary"]["errors"]:
+        print("errors:")
+        for err in payload["summary"]["errors"]:
+            print(f"  - {err}")
+
+if summary_status != "ok":
+    raise SystemExit(1)
+PY

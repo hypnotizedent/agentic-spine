@@ -205,6 +205,55 @@ run_cap() {
     fi
     local post_action
     post_action="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".post_action")"
+    local prompt_registry="$SPINE_CODE/ops/bindings/prompt.registry.yaml"
+    local prompt_lineage_set="unregistered"
+    local prompt_lineage_version="none"
+    local prompt_lineage_hash="none"
+    local prompt_lineage_resolution="missing_registry"
+    local prompt_lineage_registry_rel="ops/bindings/prompt.registry.yaml"
+    local prompt_lineage_source_refs_csv=""
+    local prompt_lineage_source_hashes_csv=""
+    declare -a prompt_lineage_source_refs=()
+    declare -a prompt_lineage_source_hash_lines=()
+    declare -a prompt_lineage_source_hash_pairs=()
+
+    if command -v yq >/dev/null 2>&1 && [[ -f "$prompt_registry" ]]; then
+      local prompt_override_exists
+      prompt_override_exists="$(yq e -r ".capability_overrides.\"$name\" != null" "$prompt_registry" 2>/dev/null || echo "false")"
+      if [[ "$prompt_override_exists" == "true" ]]; then
+        prompt_lineage_resolution="capability_override"
+      else
+        prompt_lineage_resolution="defaults"
+      fi
+
+      prompt_lineage_set="$(yq e -r ".capability_overrides.\"$name\".prompt_set_id // .defaults.prompt_set_id // \"unregistered\"" "$prompt_registry" 2>/dev/null || echo "unregistered")"
+      prompt_lineage_version="$(yq e -r ".capability_overrides.\"$name\".version // .defaults.version // \"none\"" "$prompt_registry" 2>/dev/null || echo "none")"
+
+      while IFS= read -r prompt_ref; do
+        [[ -z "${prompt_ref:-}" || "${prompt_ref:-}" == "null" ]] && continue
+        prompt_lineage_source_refs+=("$prompt_ref")
+        local prompt_abs prompt_ref_hash
+        prompt_abs="$SPINE_CODE/$prompt_ref"
+        if [[ -f "$prompt_abs" ]]; then
+          prompt_ref_hash="$(shasum -a 256 "$prompt_abs" | awk '{print $1}')"
+          prompt_lineage_source_hash_lines+=("$prompt_ref:$prompt_ref_hash")
+          prompt_lineage_source_hash_pairs+=("$prompt_ref=$prompt_ref_hash")
+        else
+          prompt_lineage_source_hash_lines+=("$prompt_ref:missing")
+          prompt_lineage_source_hash_pairs+=("$prompt_ref=missing")
+        fi
+      done < <(yq e -r "(.capability_overrides.\"$name\".source_refs // .defaults.source_refs // [])[]?" "$prompt_registry" 2>/dev/null || true)
+
+      if (( ${#prompt_lineage_source_hash_lines[@]} > 0 )); then
+        prompt_lineage_hash="$(printf '%s\n' "${prompt_lineage_source_hash_lines[@]}" | shasum -a 256 | awk '{print $1}')"
+      fi
+      if (( ${#prompt_lineage_source_refs[@]} > 0 )); then
+        prompt_lineage_source_refs_csv="$(IFS=,; echo "${prompt_lineage_source_refs[*]}")"
+      fi
+      if (( ${#prompt_lineage_source_hash_pairs[@]} > 0 )); then
+        prompt_lineage_source_hashes_csv="$(IFS=,; echo "${prompt_lineage_source_hash_pairs[*]}")"
+      fi
+    fi
     local role_runtime_contract="$SPINE_CODE/ops/bindings/role.runtime.control.contract.yaml"
     local terminal_role_contract="$SPINE_CODE/ops/bindings/terminal.role.contract.yaml"
     local runtime_role="${SPINE_RUNTIME_ROLE:-}"
@@ -969,6 +1018,11 @@ PY
 | Role Policy Override Used | $role_policy_override_used |
 | Role Policy Override Ref | ${role_policy_override_ref:-none} |
 | Role Policy Override Reason | ${role_policy_override_reason:-none} |
+| Prompt Set ID | ${prompt_lineage_set:-unregistered} |
+| Prompt Version | ${prompt_lineage_version:-none} |
+| Prompt Source Hash | ${prompt_lineage_hash:-none} |
+| Prompt Resolution | ${prompt_lineage_resolution:-missing_registry} |
+| Prompt Registry | ${prompt_lineage_registry_rel:-none} |
 
 ## Inputs
 
@@ -977,6 +1031,7 @@ PY
 | Command | \`$cmd ${args[*]:-}\` |
 | CWD | \`$cwd\` |
 | Args | \`${args[*]:-none}\` |
+| Prompt Sources | \`${prompt_lineage_source_refs_csv:-none}\` |
 
 ## Outputs
 
@@ -1044,6 +1099,13 @@ EOF
         --evidence-files "$receipt_dir/receipt.md,$receipt_dir/output.txt" \
         --blockers "$exec_receipt_blockers" \
         --blocker-class "$exec_receipt_blocker_class" \
+        --prompt-set-id "${prompt_lineage_set:-unregistered}" \
+        --prompt-version "${prompt_lineage_version:-none}" \
+        --prompt-source-refs "${prompt_lineage_source_refs_csv:-}" \
+        --prompt-source-hash "${prompt_lineage_hash:-none}" \
+        --prompt-source-hashes "${prompt_lineage_source_hashes_csv:-}" \
+        --prompt-registry-path "${prompt_lineage_registry_rel:-ops/bindings/prompt.registry.yaml}" \
+        --prompt-resolution "${prompt_lineage_resolution:-missing_registry}" \
         --json-out "$receipt_dir/receipt.exec.json" \
         >/dev/null 2>&1 || echo "WARN: receipt.exec sidecar emit failed for $run_key"
     else
