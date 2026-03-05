@@ -20,8 +20,6 @@ set -euo pipefail
 #   - Counts active peer sessions
 #   - Exports SPINE_ACTIVE_SESSION_COUNT and SPINE_MULTI_AGENT
 #
-# The 'apply' lane acquires apply-owner.lock — only one terminal can apply.
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 # Resolve operator timezone from tenant profile SSOT (scheduling/display only; timestamps stay UTC)
 SPINE_OPERATOR_TZ="$(yq -r '.runtime.timezone // "America/New_York"' "$ROOT/ops/bindings/tenant.profile.yaml" 2>/dev/null || echo "America/New_York")"
@@ -30,7 +28,6 @@ TERMINAL_LAUNCHER_VIEW="$ROOT/ops/bindings/terminal.launcher.view.yaml"
 TERMINAL_ROLE_CONTRACT="$ROOT/ops/bindings/terminal.role.contract.yaml"
 ROLE_RUNTIME_CONTRACT="$ROOT/ops/bindings/role.runtime.control.contract.yaml"
 SESSIONS_DIR="$ROOT/mailroom/state/sessions"
-LOCK_FILE="$ROOT/mailroom/state/apply-owner.lock"
 ARCHIVE_DIR="$SESSIONS_DIR/.archive"
 SESSION_TTL=${SPINE_SESSION_TTL:-14400}  # 4 hours default
 
@@ -419,19 +416,6 @@ hostname: "$(hostname -s)"
 pid: $$
 YAML
 
-# Apply-owner lock (P4)
-if [[ "$LANE" == "apply" ]]; then
-  if [[ -f "$LOCK_FILE" ]]; then
-    existing=$(cat "$LOCK_FILE")
-    echo "WARNING: apply-owner.lock already held by: $existing"
-    echo "Only one terminal can hold apply rights."
-    echo "To force: rm $LOCK_FILE"
-    exit 1
-  fi
-  echo "$SESSION_ID" > "$LOCK_FILE"
-  echo "Apply-owner lock acquired: $SESSION_ID"
-fi
-
 # ─── Multi-agent awareness ──────────────────────────────────
 
 # Count includes the session we just created
@@ -454,7 +438,6 @@ if [[ "$MULTI_AGENT" == "true" ]]; then
   echo "║  MULTI-AGENT MODE ACTIVE ($ACTIVE_COUNT sessions)                  ║"
   echo "║  Proposal flow required; avoid direct commit.            ║"
   echo "║  Use: proposals.submit / proposals.apply                 ║"
-  echo "║  Or take apply-owner lock: session-start apply           ║"
   echo "╚═══════════════════════════════════════════════════════════╝"
 fi
 
