@@ -10,7 +10,7 @@ execution_mode: orchestrator_subagents
 execution_readiness: blocked
 next_review: "2026-04-01"
 activation_trigger: manual
-blocked_by: "no-webhook-receiver-deployed, no-audit-log-destination"
+blocked_by: "no-audit-log-destination"
 superseded_by_plan_id: PLAN-TAILSCALE-INTEGRATION-DEFERRED-ACTIONS
 migrated_at_utc: "2026-03-02T00:30:00Z"
 objective: "Track deferred operator actions for webhook receiver and audit-log streaming enablement"
@@ -42,13 +42,14 @@ Track deferred operator actions for webhook receiver and audit-log streaming ena
 
 ## Current State (2026-03-03)
 
-### GAP-OP-1259: Webhook receiver not deployed
-- **Status**: stub_ready (capability created, blocked on receiver deployment)
-- **Capability**: `tailscale.webhook.subscribe` (--action status works now; --action create needs --endpoint)
+### GAP-OP-1259: Webhook receiver deployment + subscription
+- **Status**: completed (closed as fixed)
+- **Capability**: `tailscale.webhook.subscribe`
 - **API confirmed**: POST /api/v2/tailnet/{tailnet}/webhooks exists and is accessible via OAuth
 - **Events to subscribe**: nodeCreated, nodeDeleted, nodeKeyExpiringInOneDay, policyUpdate
-- **Blocker**: No webhook receiver deployed. n8n on automation-stack (VM 202, 192.168.1.110) is currently unreachable.
-- **Next runnable**: Deploy n8n webhook workflow or dedicated receiver, then run `tailscale.webhook.subscribe -- --action create --endpoint <URL>`
+- **Receiver**: `https://tailscale-webhook.ronny.works/tailscale` (dedicated receiver on automation-stack)
+- **Subscription**: active (`webhook_count=1`, endpoint_id `wNcKgtrx2S11CNTRL`)
+- **Evidence**: `mailroom/state/tailscale-audit/webhook-receiver-deploy-20260305.yaml`
 
 ### GAP-OP-1260: Audit log streaming not configured
 - **Status**: stub_ready (capability created, blocked on external dependency)
