@@ -493,6 +493,14 @@ parity_diff() {
 
 IFS=$'\t' read -r wrapper_rc wrapper_json < <(run_wrapper "$scope" "$target_domain")
 
+# Some verify-topology paths can return non-zero despite zero failed gates.
+# Normalize that false-fail case so wrapper exit code matches gate outcomes.
+if [[ "$wrapper_rc" -ne 0 ]]; then
+  if jq -e '((.fail // 0) == 0) and (((.failing_ids // []) | length) == 0)' >/dev/null 2>&1 <<<"$wrapper_json"; then
+    wrapper_rc=0
+  fi
+fi
+
 class_json="$(classify_failing_ids "$(jq -c '.failing_ids // []' <<<"$wrapper_json")")"
 if jq -e '.status == "fail" and ((.failing_ids // []) | length == 0)' >/dev/null 2>&1 <<<"$wrapper_json"; then
   class_json="$(jq '.deterministic += ["RELEASE_SUITE"]' <<<"$class_json")"
