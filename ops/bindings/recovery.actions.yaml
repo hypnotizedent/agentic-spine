@@ -275,6 +275,8 @@ actions:
     recovery:
       type: capability_retry
       capability: spine.experiment.compare
+      max_attempts: 2
+      backoff_seconds: [60, 300]
     safety:
       max_attempts: 2
       cooldown_seconds: 1800
@@ -300,12 +302,41 @@ actions:
       gate_ids: [D315]
       failure_class: deterministic
     recovery:
-      type: capability_rerun
-      capabilities:
-        - cloudflare.zone.list
-        - cloudflare.inventory.sync
-        - domains.portfolio.status
-      detail: "Rerun Cloudflare read surfaces; 429 has bounded retry built in"
+      type: capability_retry
+      capability: cloudflare.zone.list
+      max_attempts: 2
+      backoff_seconds: [60, 300]
+      detail: "Retry Cloudflare zone read surface; 429 has bounded retry built in"
+    safety:
+      max_attempts: 2
+      cooldown_seconds: 1800
+      escalate_after_failures: 2
+
+  - id: recover-cloudflare-readpath-inventory-sync
+    trigger:
+      gate_ids: [D315]
+      failure_class: deterministic
+    recovery:
+      type: capability_retry
+      capability: cloudflare.inventory.sync
+      max_attempts: 2
+      backoff_seconds: [60, 300]
+      detail: "Retry Cloudflare inventory sync after auth/readpath transient failure"
+    safety:
+      max_attempts: 2
+      cooldown_seconds: 1800
+      escalate_after_failures: 2
+
+  - id: recover-cloudflare-readpath-portfolio-status
+    trigger:
+      gate_ids: [D315]
+      failure_class: deterministic
+    recovery:
+      type: capability_retry
+      capability: domains.portfolio.status
+      max_attempts: 2
+      backoff_seconds: [60, 300]
+      detail: "Retry domain portfolio status read surface after Cloudflare auth/readpath failure"
     safety:
       max_attempts: 2
       cooldown_seconds: 1800
