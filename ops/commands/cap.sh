@@ -267,6 +267,13 @@ run_cap() {
         role_policy_override_reason="Governed execution for $role_policy_override_ref"
       fi
     fi
+    local governed_override="${OPS_GOVERNED_MAIN_OVERRIDE:-}"
+    local governed_override_lc governed_override_active
+    governed_override_lc="$(printf '%s' "$governed_override" | tr '[:upper:]' '[:lower:]')"
+    governed_override_active=0
+    if [[ "$governed_override_lc" == "1" || "$governed_override_lc" == "true" || "$governed_override_lc" == "yes" ]]; then
+      governed_override_active=1
+    fi
     local role_override_cache_filename="role-override.env"
     local role_override_cache_ttl_seconds="14400"
     local role_override_cache_session_env="SPINE_SESSION_ID"
@@ -520,7 +527,9 @@ run_cap() {
       if [[ "$context_guard_exempt" -eq 1 ]]; then
         echo "MUTATION CONTEXT GUARD: allowlisted bootstrap/control-plane capability '$name'"
       elif [[ "$caller_branch" == "main" ]]; then
-        if [[ -n "$main_override_ref" && -n "$main_override_reason" ]]; then
+        if [[ "$governed_override_active" -eq 1 ]]; then
+          echo "MAIN MUTATION OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
+        elif [[ -n "$main_override_ref" && -n "$main_override_reason" ]]; then
           echo "MAIN MUTATION OVERRIDE: ref=$main_override_ref reason=$main_override_reason"
         elif [[ -n "$main_override_ref" ]]; then
           echo "BLOCKED: main mutation override missing reason"
@@ -543,13 +552,16 @@ run_cap() {
           echo "Reason: mutating/destructive capability execution on '$caller_branch' is denied by default."
           echo ""
           echo "Remediation:"
-          echo "  Use an isolated worktree lane branch (recommended), or provide governed override:"
-          echo "  OPS_MAIN_MUTATION_OVERRIDE_REF='<loop|wave|ticket>' OPS_MAIN_MUTATION_OVERRIDE_REASON='<why>' ./bin/ops cap run $name ..."
+          echo "  Use an isolated worktree lane branch (recommended), or set single governed override:"
+          echo "  OPS_GOVERNED_MAIN_OVERRIDE=1 ./bin/ops cap run $name ..."
+          echo "  (Legacy explicit override still supported: OPS_MAIN_MUTATION_OVERRIDE_REF + OPS_MAIN_MUTATION_OVERRIDE_REASON)"
           blocked_reason="main_branch_mutation_block:${name}"
           exit_code=6
         fi
       else
-        if [[ "$wt_bypass_lc" == "1" || "$wt_bypass_lc" == "true" || "$wt_bypass_lc" == "yes" ]]; then
+        if [[ "$governed_override_active" -eq 1 ]]; then
+          echo "WORKTREE ISOLATION OVERRIDE: OPS_GOVERNED_MAIN_OVERRIDE=1"
+        elif [[ "$wt_bypass_lc" == "1" || "$wt_bypass_lc" == "true" || "$wt_bypass_lc" == "yes" ]]; then
           if [[ -z "$wt_bypass_ref" && -z "$wt_bypass_friction_ref" && -z "$wt_bypass_reason" ]]; then
             echo "BLOCKED: worktree isolation bypass missing packet ref, friction ref, and reason"
             echo "Capability: $name"
@@ -583,7 +595,7 @@ run_cap() {
           fi
         fi
 
-        if [[ -z "$blocked_reason" ]]; then
+        if [[ -z "$blocked_reason" && "$governed_override_active" -ne 1 ]]; then
           wt_status_script="$SPINE_CODE/ops/plugins/ops/bin/worktree-session-status"
           if [[ ! -x "$wt_status_script" ]]; then
             echo "BLOCKED: worktree isolation guard unavailable"
@@ -597,6 +609,8 @@ run_cap() {
             echo "Guard output: $wt_status_out"
             echo ""
             echo "Remediation:"
+            echo "  OPS_GOVERNED_MAIN_OVERRIDE=1 ./bin/ops cap run $name ..."
+            echo "  or"
             echo "  ./bin/ops wave start <WAVE_ID> --objective \"...\""
             echo "  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch $caller_branch --lane <lane>"
             echo "  export OPS_WORKTREE_IDENTITY=<LOOP_ID|WAVE_ID>"
@@ -689,12 +703,16 @@ run_cap() {
         fi
 
         if [[ "$role_is_mutating" -eq 0 ]]; then
-          if [[ -z "$role_policy_override_ref" ]]; then
+          if [[ "$governed_override_active" -eq 1 ]]; then
+            role_policy_override_used="true"
+            echo "RUNTIME ROLE OVERRIDE: role=$runtime_role via OPS_GOVERNED_MAIN_OVERRIDE=1"
+          elif [[ -z "$role_policy_override_ref" ]]; then
             echo "BLOCKED: runtime role execution policy"
             echo "Capability: $name ($safety)"
             echo "Runtime role: $runtime_role"
-            echo "Mutating/destructive execution requires role in mutating_roles or explicit override reference."
-            echo "Provide: $override_env_key and $override_reason_env_key"
+            echo "Mutating/destructive execution requires role in mutating_roles or governed override."
+            echo "Provide: OPS_GOVERNED_MAIN_OVERRIDE=1"
+            echo "Legacy explicit override: $override_env_key and $override_reason_env_key"
             blocked_reason="runtime_role_policy_block:$runtime_role"
             exit_code=4
           elif [[ -z "$role_policy_override_reason" ]]; then
