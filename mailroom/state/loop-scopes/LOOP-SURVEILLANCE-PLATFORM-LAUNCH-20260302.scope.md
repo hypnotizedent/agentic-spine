@@ -7,6 +7,7 @@ scope: agentic-spine
 priority: medium
 horizon: now
 execution_readiness: runnable
+execution_mode: single_worker
 next_review: "2026-03-15"
 activation_trigger: dependency
 depends_on_loop: LOOP-CAMERA-OUTAGE-20260209
