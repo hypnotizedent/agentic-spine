@@ -6,8 +6,8 @@ owner: "@ronny"
 scope: home
 priority: high
 horizon: later
-execution_readiness: blocked
-blocked_by: "Offsite — requires physical presence at home for HA/Zigbee/UniFi/Proxmox access and live verification"
+execution_readiness: runnable
+blocked_by: []
 next_review: "2026-03-09"
 objective: Carve Home infrastructure into a first-class canonical program with dedicated authority contracts, machine inventories, and verify-ring isolation.
 ---

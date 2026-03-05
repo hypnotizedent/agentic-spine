@@ -6,8 +6,8 @@ owner: "@ronny"
 scope: execution
 priority: high
 horizon: later
-execution_readiness: blocked
-blocked_by: "Requires cloudflare.service.publish lifecycle integration — no active execution path until public service onboarding is scheduled"
+execution_readiness: runnable
+blocked_by: []
 next_review: "2026-03-15"
 objective: Enforce canonical public-service lifecycle transaction so bind/transition/deploy must execute cloudflare.service.publish with evidence, rollback semantics, and drift checks.
 ---

@@ -6,7 +6,7 @@ owner: "@ronny"
 scope: agentic-spine
 priority: medium
 horizon: future
-execution_readiness: blocked
+execution_readiness: runnable
 next_review: "2026-04-01"
 objective: Add provider orchestration layer with semantic routing, fallback chains, and provider health monitoring
 ---

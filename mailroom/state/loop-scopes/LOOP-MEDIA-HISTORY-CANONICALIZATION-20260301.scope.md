@@ -6,7 +6,7 @@ owner: "@ronny"
 scope: media
 priority: medium
 horizon: later
-execution_readiness: blocked
+execution_readiness: runnable
 objective: Historical reconstruction and canonical contract updates for media topology, storage tiering, and transfer workflow
 ---
 

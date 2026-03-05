@@ -1,17 +1,14 @@
 ---
 loop_id: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303
 created: 2026-03-03
-status: planned
+status: closed
 owner: "@ronny"
 scope: media
 priority: high
-horizon: later
-execution_readiness: blocked
+horizon: now
+execution_readiness: runnable
 objective: Define a canonical, execution-ready migration connector from shop media stack to home target topology (planning-only, no runtime mutation)
-blocked_by:
-  - "Home maintenance window not scheduled"
-  - "Home target topology not finalized in canonical contract"
-  - "Path/status parity gaps from forensic trace remain open"
+blocked_by: []
 next_review: "2026-03-19"
 ---
 

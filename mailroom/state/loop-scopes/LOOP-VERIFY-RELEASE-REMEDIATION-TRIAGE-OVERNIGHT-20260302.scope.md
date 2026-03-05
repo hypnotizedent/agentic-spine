@@ -6,8 +6,8 @@ owner: "@ronny"
 scope: verify
 priority: high
 horizon: now
-execution_readiness: blocked
-blocked_by: "GAP-OP-1352,GAP-OP-1354"
+execution_readiness: runnable
+blocked_by: []
 next_review: "2026-03-03"
 objective: Remediate deterministic release verify failures and classify HA-runtime blockers with governed evidence.
 ---

@@ -7,10 +7,10 @@ scope: tailscale
 priority: medium
 horizon: now
 execution_mode: orchestrator_subagents
-execution_readiness: blocked
+execution_readiness: runnable
 next_review: "2026-04-01"
 activation_trigger: manual
-blocked_by: "no-audit-log-destination"
+blocked_by: []
 superseded_by_plan_id: PLAN-TAILSCALE-INTEGRATION-DEFERRED-ACTIONS
 migrated_at_utc: "2026-03-02T00:30:00Z"
 objective: "Track deferred operator actions for webhook receiver and audit-log streaming enablement"

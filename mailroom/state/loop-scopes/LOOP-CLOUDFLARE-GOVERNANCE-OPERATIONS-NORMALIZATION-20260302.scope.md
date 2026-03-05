@@ -6,7 +6,7 @@ owner: "@ronny"
 scope: cloudflare
 priority: medium
 horizon: later
-execution_readiness: blocked
+execution_readiness: runnable
 next_review: "2026-03-15"
 objective: Normalize Cloudflare governance surfaces (bridge allowlist, auth posture, onboarding coverage, authority unknowns, runbook, skill, cloudflared health gate) after runtime defects are fixed
 activation_trigger: dependency

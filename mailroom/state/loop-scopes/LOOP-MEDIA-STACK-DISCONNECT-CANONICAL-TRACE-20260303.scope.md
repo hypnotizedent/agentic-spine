@@ -1,16 +1,14 @@
 ---
 loop_id: LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303
 created: 2026-03-03
-status: planned
+status: closed
 owner: "@ronny"
 scope: media
 priority: high
-horizon: later
-execution_readiness: blocked
+horizon: now
+execution_readiness: runnable
 objective: Holistic forensic trace of media-stack disconnects mapped to migration history and shop-to-home successor planning (capture-only)
-blocked_by:
-  - "Runtime mutation intentionally out of scope for this forensic loop"
-  - "Shop-to-home migration execution will run in successor loop after operator approval"
+blocked_by: []
 next_review: "2026-03-19"
 ---
 
