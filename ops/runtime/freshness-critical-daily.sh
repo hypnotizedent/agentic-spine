@@ -32,11 +32,7 @@ echo "[freshness-critical-daily] control_root=${CONTROL_ROOT}"
 echo "[freshness-critical-daily] runtime_root=${RUNTIME_ROOT}"
 echo "[freshness-critical-daily] worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
 
-run_cap media-content-snapshot-refresh -- --apply
-run_cap ha-inventory-snapshot-build -- --apply
-run_cap network-inventory-snapshot-build -- --apply
-run_cap ha.z2m.devices.snapshot -- --apply
-run_cap network.home.dhcp.audit -- --apply
+run_cap snapshot.projection.apply -- --all
 run_cap calendar.external.ingest.refresh
 run_cap calendar.ha.ingest.refresh
 run_cap infra.storage.audit.snapshot

@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# TRIAGE: centralized mutating promoter for tracked snapshot bindings.
+# This is the ONLY authorized write-path for tracked snapshot surfaces.
+# All snapshot/status capabilities MUST use --check (runtime-only) by default.
+# Only this capability may invoke --apply to write tracked bindings.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+OPS_BIN="$ROOT/bin/ops"
+
+TRACKED_TARGETS=(
+  "ha.inventory.snapshot.yaml"
+  "home.dhcp.audit.yaml"
+  "media.content.snapshot.yaml"
+  "network.inventory.snapshot.yaml"
+  "z2m.devices.yaml"
+)
+
+CAPABILITY_MAP=(
+  "ha-inventory-snapshot-build"
+  "network.home.dhcp.audit"
+  "media-content-snapshot-refresh"
+  "network-inventory-snapshot-build"
+  "ha.z2m.devices.snapshot"
+)
+
+DRY_RUN=0
+TARGETS=()
+ALL=0
+
+usage() {
+  cat <<'USAGE'
+snapshot-projection-apply — centralized tracked snapshot promoter
+
+Usage:
+  ./bin/ops cap run snapshot.projection.apply -- --all
+  ./bin/ops cap run snapshot.projection.apply -- --target ha.inventory.snapshot.yaml
+  ./bin/ops cap run snapshot.projection.apply -- --all --dry-run
+
+Flags:
+  --all                 Promote all 5 tracked snapshot surfaces.
+  --target <file>       Promote a single snapshot surface (base filename).
+  --dry-run             Show what would be promoted without writing.
+  -h|--help             Show this help.
+
+Safety:
+  This capability requires manual approval (safety=mutating, approval=manual).
+  It invokes each underlying snapshot capability with --apply to write the
+  tracked binding in ops/bindings/. All other snapshot invocations default to
+  --check mode which writes only to mailroom/state/runtime-snapshots/.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all) ALL=1; shift ;;
+    --target)
+      TARGETS+=("${2:-}")
+      shift 2
+      ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift ;;
+    *)
+      echo "snapshot-projection-apply FAIL: unknown arg '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "$ALL" -eq 1 ]]; then
+  TARGETS=("${TRACKED_TARGETS[@]}")
+fi
+
+if [[ "${#TARGETS[@]}" -eq 0 ]]; then
+  echo "snapshot-projection-apply FAIL: specify --all or --target <file>" >&2
+  usage >&2
+  exit 1
+fi
+
+resolve_cap() {
+  local target="$1"
+  local idx=0
+  for tracked in "${TRACKED_TARGETS[@]}"; do
+    if [[ "$tracked" == "$target" ]]; then
+      echo "${CAPABILITY_MAP[$idx]}"
+      return 0
+    fi
+    idx=$((idx + 1))
+  done
+  return 1
+}
+
+PASS=0
+FAIL=0
+SKIP=0
+
+for target in "${TARGETS[@]}"; do
+  cap=$(resolve_cap "$target" 2>/dev/null) || {
+    echo "SKIP: unknown target '$target' (not in tracked targets list)"
+    SKIP=$((SKIP + 1))
+    continue
+  }
+  tracked_path="$ROOT/ops/bindings/$target"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "DRY-RUN: would run '$cap --apply' -> $tracked_path"
+    continue
+  fi
+
+  echo "PROMOTE: running $cap --apply -> $tracked_path"
+  before_hash="missing"
+  if [[ -f "$tracked_path" ]]; then
+    before_hash=$(shasum -a 256 "$tracked_path" | awk '{print $1}')
+  fi
+
+  if "$OPS_BIN" cap run "$cap" -- --apply 2>&1; then
+    after_hash="missing"
+    if [[ -f "$tracked_path" ]]; then
+      after_hash=$(shasum -a 256 "$tracked_path" | awk '{print $1}')
+    fi
+    if [[ "$before_hash" == "$after_hash" ]]; then
+      echo "  result=no-change (tracked file unchanged)"
+    else
+      echo "  result=promoted (hash changed)"
+    fi
+    PASS=$((PASS + 1))
+  else
+    rc=$?
+    echo "  result=FAIL (rc=$rc)"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo ""
+echo "snapshot-projection-apply summary: pass=$PASS fail=$FAIL skip=$SKIP dry_run=$DRY_RUN"
+
+if [[ "$FAIL" -gt 0 ]]; then
+  exit 1
+fi
