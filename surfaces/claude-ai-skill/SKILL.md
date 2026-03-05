@@ -68,7 +68,7 @@ Hosted runtime egress allowlist:
    - `GET <base>/loops/open` (with auth header)
 6. Ask governance questions:
    - `POST <base>/rag/ask`
-   - JSON body: `{"query":"<question>"}`
+   - JSON body: `{"question":"<question>"}`
 7. Run allowlisted read-only caps:
    - `POST <base>/cap/run`
    - JSON body: `{"capability":"gaps.status"}`
