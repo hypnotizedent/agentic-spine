@@ -41,7 +41,7 @@ if provider != "microsoft":
     violations.append(f"runtime.provider must remain 'microsoft' (actual={provider!r})")
 
 local_path = doc.get("local_calendar_store", {}).get("path")
-expected_local_path = "mailroom/state/calendar-sync/writable"
+expected_local_path = "runtime/domain-state/calendar/writable"
 if local_path != expected_local_path:
     violations.append(
         f"local_calendar_store.path must be '{expected_local_path}' (actual={local_path!r})"

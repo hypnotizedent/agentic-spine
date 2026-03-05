@@ -18,7 +18,7 @@ plan: PLAN-TAX-LEGAL-OPS-WORKER-20260303
 ## 1. Case Directory Structure (All Types)
 
 ```text
-mailroom/state/cases/tax-legal/
+runtime/domain-state/taxlegal/cases/
   CASE-TAXLEGAL-YYYYMMDD-####/
     intake.md                       # Case intake summary and triage
     checklist.yaml                  # Required actions checklist

@@ -73,7 +73,11 @@ spine_runtime_resolve_paths() {
   [[ -n "$state" ]] || state="$state_default"
   [[ -n "$logs" ]] || logs="$logs_default"
 
-  export SPINE_REPO SPINE_CODE SPINE_INBOX="$inbox" SPINE_OUTBOX="$outbox" SPINE_STATE="$state" SPINE_LOGS="$logs"
+  # Domain-specific runtime state — NOT governance. Lives outside mailroom.
+  local domain_state="${SPINE_DOMAIN_STATE:-}"
+  [[ -n "$domain_state" ]] || domain_state="$SPINE_REPO/runtime/domain-state"
+
+  export SPINE_REPO SPINE_CODE SPINE_INBOX="$inbox" SPINE_OUTBOX="$outbox" SPINE_STATE="$state" SPINE_LOGS="$logs" SPINE_DOMAIN_STATE="$domain_state"
 }
 
 spine_resolve_mailroom_path() {
@@ -96,4 +100,15 @@ spine_resolve_mailroom_path() {
       printf '%s\n' "$repo/$path"
       ;;
   esac
+}
+
+spine_resolve_domain_state() {
+  # Resolve a domain-state path. Usage: spine_resolve_domain_state "taxlegal/cases"
+  # Returns: $SPINE_DOMAIN_STATE/taxlegal/cases (creates parent dir if needed)
+  local subpath="${1:-}"
+  local domain_state="${SPINE_DOMAIN_STATE:-${SPINE_REPO:-$HOME/code/agentic-spine}/runtime/domain-state}"
+  local full_path="$domain_state"
+  [[ -z "$subpath" ]] || full_path="$domain_state/$subpath"
+  mkdir -p "$(dirname "$full_path")" 2>/dev/null || true
+  printf '%s\n' "$full_path"
 }

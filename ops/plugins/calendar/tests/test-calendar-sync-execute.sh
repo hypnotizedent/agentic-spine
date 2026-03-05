@@ -25,7 +25,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 BINDING="$TMP/calendar.global.yaml"
 RUNTIME="$TMP/runtime"
-STATE="$RUNTIME/mailroom/state/calendar-sync/state.json"
+STATE="$RUNTIME/runtime/domain-state/calendar/state.json"
 MICROSOFT_DB="$TMP/mock-microsoft-db.json"
 MOCK_MICROSOFT="$TMP/mock-microsoft-cap-exec"
 
@@ -271,7 +271,7 @@ echo "T1: dry-run envelope includes summary/actions/conflicts/errors/state_path"
     (.data.actions | length >= 6) and
     (.data.conflicts | type == "array") and
     (.data.errors | type == "array") and
-    (.data.state_path | contains("mailroom/state/calendar-sync/state.json"))
+    (.data.state_path | contains("runtime/domain-state/calendar/state.json"))
   ' >/dev/null
 ) && pass "dry-run output contract" || fail "dry-run output contract"
 

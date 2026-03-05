@@ -25,7 +25,7 @@ Procedure:
    `./ops/plugins/communications/bin/communications-mail-archiver-import-monitor --json`
 2. If `lane_state=BLOCKED_AUTH`, stop automated retries immediately.
 3. Confirm state artifact:
-   `mailroom/state/communications/mail-archiver-import-monitor.state.yaml`
+   `runtime/domain-state/communications/mail-archiver-import-monitor.state.yaml`
 4. Human operator performs interactive remediation outside machine monitor path:
    - inspect node auth state in Tailscale admin console
    - resolve auth challenge manually
@@ -68,7 +68,7 @@ Canonical monitor:
 - `ops/plugins/communications/bin/communications-mail-archiver-import-monitor`
 
 State and lock artifacts:
-- state: `mailroom/state/communications/mail-archiver-import-monitor.state.yaml`
+- state: `runtime/domain-state/communications/mail-archiver-import-monitor.state.yaml`
 - lock: `mailroom/state/locks/mail-archiver-import-monitor.lock`
 
 Expected policy:

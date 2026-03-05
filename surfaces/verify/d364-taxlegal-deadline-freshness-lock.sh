@@ -10,7 +10,14 @@ err() {
   HITS=$((HITS + 1))
 }
 
-CASE_BASE="$ROOT/mailroom/state/cases/tax-legal"
+CASE_CONTRACT="$ROOT/ops/bindings/taxlegal.case.lifecycle.contract.yaml"
+CASE_BASE="$ROOT/runtime/domain-state/taxlegal/cases"
+if command -v yq >/dev/null 2>&1 && [[ -f "$CASE_CONTRACT" ]]; then
+  case_root="$(yq -r '.case_pathing.root // ""' "$CASE_CONTRACT" 2>/dev/null || true)"
+  if [[ -n "$case_root" && "$case_root" != "null" ]]; then
+    CASE_BASE="$ROOT/$case_root"
+  fi
+fi
 DEADLINES_FILE="$CASE_BASE/deadlines.yaml"
 
 # If no case directories exist, nothing to check
