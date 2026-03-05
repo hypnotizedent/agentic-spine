@@ -96,49 +96,37 @@ done
 change_json='[]'
 ratio_status='{"new_active_gates":0,"newly_retired":0,"required_retired":0,"ok":true}'
 if git -C "$ROOT" rev-parse --verify "$base_ref" >/dev/null 2>&1; then
-  diff_file="$(mktemp)"
-  git -C "$ROOT" diff --name-status --find-renames "$base_ref"...HEAD > "$diff_file"
-
-  classes_json='[]'
-  while IFS=$'\t' read -r status path_a path_b; do
-    [[ -n "${status:-}" ]] || continue
-    class=""
-    add=0
-    del=0
-
-    case "$status" in
-      A*) add=1; path="$path_a" ;;
-      D*) del=1; path="$path_a" ;;
-      R*) add=1; del=1; path="$path_b" ;;
-      C*) add=1; path="$path_b" ;;
-      *) path="$path_a" ;;
-    esac
-
-    if [[ "$path" == surfaces/verify/* ]]; then
-      class="verify"
-    elif [[ "$path" == docs/governance/* ]]; then
-      class="governance"
-    elif [[ "$path" == ops/bindings/* ]]; then
-      class="bindings"
+  class_count_delta() {
+    local prefix="$1"
+    local base_count current_count net_new
+    base_count="$(git -C "$ROOT" ls-tree -r --name-only "$base_ref" -- "$prefix" | wc -l | tr -d ' ')"
+    current_count="$(find "${ROOT}/${prefix}" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    net_new=$(( current_count - base_count ))
+    if [[ "$net_new" -ge 0 ]]; then
+      echo "$base_count $current_count $net_new $net_new 0"
     else
-      continue
+      echo "$base_count $current_count $net_new 0 $(( -net_new ))"
     fi
+  }
 
-    classes_json="$(jq -c --arg class "$class" --arg path "$path" --argjson add "$add" --argjson del "$del" '. + [{"class":$class,"path":$path,"add":$add,"del":$del}]' <<<"$classes_json")"
-  done < "$diff_file"
-  rm -f "$diff_file"
+  read -r _ _ verify_net verify_added verify_removed < <(class_count_delta "surfaces/verify")
+  read -r _ _ gov_net gov_added gov_removed < <(class_count_delta "docs/governance")
+  read -r _ _ bindings_net bindings_added bindings_removed < <(class_count_delta "ops/bindings")
 
-  change_json="$(jq -c '
-    ["verify","governance","bindings"] as $classes |
-    [ $classes[] as $c |
-      {
-        class: $c,
-        added: ([.[] | select(.class == $c) | .add] | add // 0),
-        removed: ([.[] | select(.class == $c) | .del] | add // 0)
-      } |
-      . + { net_new: (.added - .removed), max_net_new: 0, ok: ((.added - .removed) <= 0) }
-    ]
-  ' <<<"$classes_json")"
+  verify_max_net="$(yq e -r '.change_budget.file_classes[] | select(.class == "verify") | (.max_net_new // 0)' "$CONTRACT")"
+  gov_max_net="$(yq e -r '.change_budget.file_classes[] | select(.class == "governance") | (.max_net_new // 0)' "$CONTRACT")"
+  bindings_max_net="$(yq e -r '.change_budget.file_classes[] | select(.class == "bindings") | (.max_net_new // 0)' "$CONTRACT")"
+
+  change_json="$(jq -cn \
+    --argjson va "$verify_added" --argjson vr "$verify_removed" --argjson vn "$verify_net" --argjson vm "$verify_max_net" \
+    --argjson ga "$gov_added" --argjson gr "$gov_removed" --argjson gn "$gov_net" --argjson gm "$gov_max_net" \
+    --argjson ba "$bindings_added" --argjson br "$bindings_removed" --argjson bn "$bindings_net" --argjson bm "$bindings_max_net" \
+    '[
+      {class:"verify",added:$va,removed:$vr,net_new:$vn,max_net_new:$vm,ok:($vn <= $vm)},
+      {class:"governance",added:$ga,removed:$gr,net_new:$gn,max_net_new:$gm,ok:($gn <= $gm)},
+      {class:"bindings",added:$ba,removed:$br,net_new:$bn,max_net_new:$bm,ok:($bn <= $bm)}
+    ]'
+  )"
 
   while IFS= read -r row; do
     [[ -n "$row" ]] || continue
