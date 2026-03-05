@@ -282,7 +282,7 @@ All loop scope files in `mailroom/state/loop-scopes/` MUST use one of these thre
   - D34 loop ledger integrity (catches loop state inconsistencies).
   - D10/D31 logs/output sink locks (keeps output under mailroom, prevents home-root sinks).
   - D61 session-loop traceability freshness (forces periodic closeout discipline via `agent.session.closeout`).
-  - D62 git remote parity (prevents origin/github "split brain" histories).
+  - D62 git remote authority (origin canonical; mirror drift is non-blocking).
 
 ## Proposal Queue Hygiene
 
@@ -315,7 +315,7 @@ Every open gap in `operational.gaps.yaml` must be linked to an active loop (`par
 
 - Work started without any loop anchor. Worktrees are optional (committing directly to main is fine), but every non-trivial change should have a loop scope for traceability. Without one you get "floating WIP": no scope anchor and no session log.
 - Multiple terminals mutating git concurrently (branches/worktrees/merges in parallel). This creates stale worktrees, branch confusion, and occasional unexpected commits. The coarse git lock in ops commands helps, but ad-hoc git in multiple terminals can still bypass it. **Default rule:** if multiple terminals/agents may be active, treat the repo as read-only and use mailroom-gated writes (change proposals).
-- Remote split brain (origin vs github not aligned). Agents base branches off different tips, so "truth" diverges and merges become messy. D62 is specifically to stop that.
+- Optional mirror drift (`origin` vs `github`) during non-release work. Canonical authority remains `origin`; mirror drift is tolerated and repaired only for explicit release publishing.
 - Loop closeout not consistently done. Without updating the loop scope with receipts and closing it, the next agent can't tell what's already proven and repeats work. D61 + `agent.session.closeout` is the mechanism meant to prevent this.
 - Two repos, two contracts (`agentic-spine` vs `workbench`). If workbench changes aren't tied back to a spine loop (or vice versa), you get coordination gaps even when each repo is individually clean. Use `RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md` to declare write ownership and repo sequence up front.
 

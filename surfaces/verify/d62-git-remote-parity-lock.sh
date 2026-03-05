@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Push to both origin (Gitea) and github: git push origin main && git push github main.
+# TRIAGE: Canonical push is origin only. Repair github mirror only during explicit release publishing.
 # D62: Git remote authority lock (Gitea canonical, GitHub mirror-only)
 #
 # Purpose:

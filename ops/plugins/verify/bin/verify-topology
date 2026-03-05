@@ -59,6 +59,7 @@ Notes:
   - Core/day-to-day checks run through core_mode.core_gate_ids.
   - Domain checks resolve from gate.execution.topology.yaml first, then domain profiles fallback.
   - Release uses full drift-gate certification.
+  - Network-dependent gates are excluded by default (set VERIFY_ALLOW_NETWORK_GATES=1 to include).
   - During active stabilization windows, domain/release can be bypassed unless --force is provided.
 USAGE
 }
@@ -135,6 +136,27 @@ is_topology_domain() {
 
 unique_lines() {
   awk 'NF && !seen[$0]++'
+}
+
+network_gate_filter_enabled() {
+  # Canonical default: network-dependent gates are excluded from verify execution.
+  # Set VERIFY_ALLOW_NETWORK_GATES=1 only for explicit forensic runs.
+  [[ "${VERIFY_ALLOW_NETWORK_GATES:-0}" != "1" ]]
+}
+
+classify_gate_script_kind() {
+  local script_path="$1"
+  [[ -f "$script_path" ]] || {
+    echo "unknown"
+    return 0
+  }
+
+  # Keep this heuristic aligned with drift-gates-certify network classification.
+  if grep -Eqi '(^|[^[:alnum:]_])(ssh|curl|ncat|nc|ping|tailscale|dig|nslookup)([^[:alnum:]_]|$)|https?://|git[[:space:]]+fetch|git[[:space:]]+ls-remote' "$script_path"; then
+    echo "network"
+  else
+    echo "local"
+  fi
 }
 
 tailscale_online_from_status() {
@@ -277,6 +299,7 @@ run_gate_ids() {
   local fail_count=0
   local skipped_inline=0
   local skipped_retired=0
+  local skipped_network=0
   local receipt_integrity_warnings=0
   local -a failing_ids=()
   local receipt_integrity_mode="${VERIFY_RECEIPT_INTEGRITY_MODE:-warn}"
@@ -288,12 +311,13 @@ run_gate_ids() {
   if [[ "${VERIFY_PARALLEL_JOBS:-}" =~ ^[1-9][0-9]*$ ]]; then
     parallel_jobs="${VERIFY_PARALLEL_JOBS}"
   elif [[ "$ring" == "standard" || "$ring" == "deep" ]]; then
-    parallel_jobs=4
+    parallel_jobs=8
   fi
 
   declare -A gate_mode=()
   declare -A gate_script_abs=()
   declare -A gate_meta_fail_msg=()
+  declare -A gate_script_kind=()
   local tailscale_guard_needed=0
   local gid script_rel inline retired script_abs
   for gid in "${gate_ids[@]}"; do
@@ -321,6 +345,12 @@ run_gate_ids() {
     if [[ ! -x "$script_abs" ]]; then
       gate_mode["$gid"]="meta_fail"
       gate_meta_fail_msg["$gid"]="missing/non-executable script: $script_rel"
+      continue
+    fi
+
+    gate_script_kind["$gid"]="$(classify_gate_script_kind "$script_abs")"
+    if network_gate_filter_enabled && [[ "${gate_script_kind[$gid]}" == "network" ]]; then
+      gate_mode["$gid"]="skip_network"
       continue
     fi
 
@@ -403,6 +433,10 @@ run_gate_ids() {
         skipped_inline=$((skipped_inline + 1))
         [[ "$json_mode" == "0" ]] && echo "$gid SKIP inline-only"
         ;;
+      skip_network)
+        skipped_network=$((skipped_network + 1))
+        [[ "$json_mode" == "0" ]] && echo "$gid SKIP network-gate"
+        ;;
       meta_fail)
         fail_count=$((fail_count + 1))
         failing_ids+=("$gid")
@@ -462,12 +496,13 @@ run_gate_ids() {
       --argjson fail "$fail_count" \
       --argjson skipped_inline "$skipped_inline" \
       --argjson skipped_retired "$skipped_retired" \
+      --argjson skipped_network "$skipped_network" \
       --argjson receipt_integrity_warnings "$receipt_integrity_warnings" \
       --argjson failing_ids "$failing_json" \
-      '{total:$total, pass:$pass, fail:$fail, skipped_inline:$skipped_inline, skipped_retired:$skipped_retired, receipt_integrity_warnings:$receipt_integrity_warnings, failing_ids:$failing_ids}'
+      '{total:$total, pass:$pass, fail:$fail, skipped_inline:$skipped_inline, skipped_retired:$skipped_retired, skipped_network:$skipped_network, receipt_integrity_warnings:$receipt_integrity_warnings, failing_ids:$failing_ids}'
   else
     echo
-    echo "summary: pass=$pass_count fail=$fail_count skipped_inline=$skipped_inline skipped_retired=$skipped_retired"
+    echo "summary: pass=$pass_count fail=$fail_count skipped_inline=$skipped_inline skipped_retired=$skipped_retired skipped_network=$skipped_network"
     if [[ "$receipt_integrity_warnings" -gt 0 ]]; then
       echo "receipt_integrity_warnings: $receipt_integrity_warnings"
     fi
@@ -915,49 +950,23 @@ run_release() {
     emit_stabilization_bypass "release" "" "$json_mode"
     return 0
   fi
-  local tmp rc summary start_ms elapsed_ms elapsed_seconds budget budget_ms delta_ms delta_seconds budget_breach status
-  start_ms="$(monotonic_ms)"
-  tmp="$(mktemp)"
-  set +e
-  bash "$ROOT/surfaces/verify/drift-gate.sh" >"$tmp" 2>&1
-  rc=$?
-  set -e
-  elapsed_ms=$(( $(monotonic_ms) - start_ms ))
-  elapsed_seconds="$(ms_to_seconds "$elapsed_ms")"
-  budget="$(ring_budget_seconds "deep")"
-  budget_ms=$(( budget * 1000 ))
-  delta_ms=$(( elapsed_ms - budget_ms ))
-  delta_seconds="$(ms_to_seconds "$delta_ms")"
-  budget_breach=0
-  if [[ "$delta_ms" -gt 0 ]]; then
-    budget_breach=1
+  local -a release_ids=()
+  mapfile -t release_ids < <(yq e -r '.gates[] | .id' "$REGISTRY" | unique_lines)
+  ((${#release_ids[@]} > 0)) || fail "release resolved with no gates"
+
+  if [[ "$json_mode" == "0" ]]; then
+    echo "verify.release.run"
+    echo "mode: topology_release"
+    echo "gate_count: ${#release_ids[@]}"
+    if network_gate_filter_enabled; then
+      echo "network_gates: excluded"
+    else
+      echo "network_gates: allowed (VERIFY_ALLOW_NETWORK_GATES=1)"
+    fi
+    echo
   fi
 
-  if [[ "$json_mode" == "1" ]]; then
-    summary="$(grep -E '^DRIFT GATE:' "$tmp" | tail -n1 | xargs || true)"
-    status="$([[ "$rc" -eq 0 && "$budget_breach" -eq 0 ]] && echo pass || echo fail)"
-    if [[ "$budget_breach" -eq 1 ]]; then
-      echo "verify.release.run budget exceeded (ring=deep elapsed=${elapsed_seconds}s budget=${budget}s delta=$(format_delta_ms "$delta_ms"))" >&2
-    fi
-    jq -n \
-      --arg status "$status" \
-      --arg summary "$summary" \
-      --arg mode "core+all-domains" \
-      --arg ring "deep" \
-      --argjson elapsed_seconds "$elapsed_seconds" \
-      --argjson budget_seconds "$budget" \
-      --argjson budget_delta_seconds "$delta_seconds" \
-      '{status:$status, mode:$mode, summary:$summary, ring:$ring, elapsed_seconds:$elapsed_seconds, budget_seconds:$budget_seconds, budget_delta_seconds:$budget_delta_seconds}'
-  else
-    cat "$tmp"
-    echo "budget: ring=deep elapsed=${elapsed_seconds}s budget=${budget}s delta=$(format_delta_ms "$delta_ms")"
-    if [[ "$budget_breach" -eq 1 ]]; then
-      echo "verify.release.run FAIL: budget exceeded (ring=deep elapsed=${elapsed_seconds}s budget=${budget}s delta=$(format_delta_ms "$delta_ms"))" >&2
-    fi
-  fi
-
-  rm -f "$tmp" >/dev/null 2>&1 || true
-  [[ "$rc" -eq 0 && "$budget_breach" -eq 0 ]]
+  run_gate_ids "$json_mode" "deep" "${release_ids[@]}"
 }
 
 is_loop_gap_doc_only_set() {

@@ -1,17 +1,17 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-24
+last_verified: 2026-03-05
 scope: git-authority
 ---
 
-# Git Remote Authority (Gitea Canonical, GitHub Mirror)
+# Git Remote Authority (Origin-Only Daily Flow)
 
 ## Authority Statement
 
-- **Canonical primary:** `origin` (Gitea) is the source of truth.
+- **Canonical primary:** `origin` (Gitea) is the source of truth and only required remote for daily work.
   - Current origin remote: `ssh://git@100.90.167.39:2222/ronny/agentic-spine.git`
-- **Mirror only:** `github` (GitHub) is a push mirror for parity, backup, and visibility.
+- **Optional mirror:** `github` is release-only. It is not part of day-to-day workflow and must never block canonical progress.
 
 ## PR Rule (Canonical)
 
@@ -20,21 +20,20 @@ scope: git-authority
 
 ## Branch Push Rule
 
-- Push feature branches to **origin** only.
-- Let the Gitea mirror populate GitHub.
-- GitHub is mirror-only and must not be required for canonical work.
-- If the GitHub mirror is down or diverged, fix it later; do not block the spine.
+- Push all branches to **origin** only.
+- Do not require `github` or `share` remotes in normal sessions.
+- If GitHub publishing is needed, run an explicit release-time push from canonical `origin/main`.
 
-## Split-Brain Recovery (Origin vs GitHub)
+## Release-Time Mirror Recovery (Optional)
 
-1. Run:
+1. For a planned release mirror push, run:
 
 ```bash
 ./bin/ops preflight
 ./bin/ops cap run spine.verify
 ```
 
-2. If D62 fails (origin/main != github/main):
+2. If mirror parity checks warn (`origin/main != github/main`):
    - Fetch both:
 
 ```bash
@@ -53,7 +52,7 @@ git rev-parse github/main
      - If `origin/main` is ahead, update GitHub mirror by pushing the canonical tip (or repair mirror if automation is broken).
      - If GitHub is ahead due to an accidental GitHub merge, pull the GitHub tip, review, then push to origin to restore canonical history.
 
-3. Re-run:
+3. Re-run verification after mirror repair:
 
 ```bash
 ./bin/ops cap run spine.verify
@@ -61,11 +60,9 @@ git rev-parse github/main
 
 ## Share Channel Rule
 
-- A **share** remote may exist for curated one-way publishing to a private GitHub repository.
-- The share channel is NOT canonical — Gitea (`origin`) remains the single source of truth.
-- Share publishes are governed by `docs/governance/WORKBENCH_SHARE_PROTOCOL.md` and enforced by D82.
-- The share remote is manual-push only (no automation, dry-run default).
-- Do not pull from or merge into the share remote.
+- A **share** remote may exist for curated release publishing.
+- The share channel is NOT canonical and should be absent from normal development sessions.
+- Use share only during explicit publishing windows.
 
 ## Issue Policy
 
