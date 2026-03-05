@@ -93,6 +93,12 @@ resolve_net_id() {
     management)
       echo "$default_id"
       ;;
+    iot)
+      echo "$nets_json" | jq -r '.data[] | select(.name == "IoT") | ._id' 2>/dev/null | head -1
+      ;;
+    dmz)
+      echo "$nets_json" | jq -r '.data[] | select(.name == "DMZ") | ._id' 2>/dev/null | head -1
+      ;;
     *)
       # Capitalize first letter for UniFi name lookup
       local display_name
