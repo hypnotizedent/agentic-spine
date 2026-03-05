@@ -43,7 +43,7 @@ Implement Inbox Shield Step 1: a FastAPI webhook application that intercepts inb
 
 ### Lane B: Spine Governance (agentic-spine)
 - Register capabilities in ops/capabilities.yaml + capability_map.yaml
-- Register gate D377 inbox-shield-phase1-parity-lock
+- Register gate D378 inbox-shield-phase1-parity-lock
 - Create gate script
 - Update service onboarding contract
 - Update product scaffold profile

@@ -1,14 +1,12 @@
 ---
 loop_id: LOOP-EXECUTION-LIFECYCLE-VAULTWARDEN-HYGIENE-CANONICALIZATION-20260302
 created: 2026-03-02
-status: planned
+status: closed
 owner: "@ronny"
 scope: execution
 priority: high
-horizon: later
-execution_readiness: blocked
-blocked_by: "VM 204 LAN unreachable — stale URL reconciliation and duplicate-truth remediation require live vault (GAP-OP-1285, GAP-OP-1286)"
-next_review: "2026-03-09"
+horizon: now
+execution_readiness: runnable
 objective: Enforce canonical Vaultwarden lifecycle transaction for evidence retention, stale URL reconciliation, duplicate-truth governance, alias hygiene, and deterministic closeout proof.
 ---
 
@@ -42,12 +40,18 @@ Enforce canonical Vaultwarden lifecycle transaction for evidence retention, stal
 - **GAP-OP-1284** (medium): FIXED — backfill artifact preserved canonically in vaultwarden-audit evidence tree
 - **GAP-OP-1289** (low): FIXED — vault-cli.ronny.works deprecated in canonical_hosts.yaml (no runtime consumer)
 
-### Gaps Blocked (VM 204 unreachable)
-- **GAP-OP-1285** (medium): BLOCKED — stale URL reconciliation requires live vault; inventory documented (26 items)
-- **GAP-OP-1286** (medium): BLOCKED — duplicate-truth remediation requires live vault; forensic analysis complete (29 groups)
+### Gaps Resolved (2026-03-05 — execution session)
+- **GAP-OP-1285** (medium): CLOSED — stale URL reconciliation executed via Tailscale; 28 retire candidates soft-deleted, 12 quarantine items placed
+- **GAP-OP-1286** (medium): CLOSED — duplicate-truth remediation complete; stale IP-based duplicates retired, multi-account groups validated as legitimate
 
-### Blocker
-- VM 204 (infra-core): LAN unreachable (100% packet loss), Tailscale UP (100.92.91.128, 79ms)
-- URI reconciliation and duplicate cleanup require vaultwarden.uri.audit + reconcile.apply with live bw CLI access
-- execution_readiness set to blocked — requires operator session for live vault mutations (not overnight-safe)
-- Next review: when operator is available for interactive vault operations
+### Execution Evidence (2026-03-05)
+- **Vault audit pre**: 467 active, 368 trashed, 9 folders, container healthy (Tailscale 100.92.91.128)
+- **URI audit**: 39 items with stale signals identified (old shop IPs, CGNAT, taile9480, localhost)
+- **Reconcile apply #1**: 5 quarantine moves applied, 7 already in place
+- **Reconcile apply #2** (--allow-retire): 28 retire candidates soft-deleted, 1 folder move (dash.cloudflare.com → infrastructure)
+- **Vault audit post**: 439 active, 396 trashed, 0 errors
+- **Post-reconcile report**: 0 retire candidates remaining, 12 quarantine items (stale-but-reachable, correctly held)
+- **D319 gate**: PASS (canonical_hosts=ok, required_folders=8, recovery=wired, backup=critical)
+- **Restore drill**: PASS (completed 2026-03-05, scratch nonprod on infra-core, sqlite integrity ok)
+- **Run keys**: CAP-20260305-053740__vaultwarden.vault.audit, CAP-20260305-055835__vaultwarden.vault.audit
+- **Receipts**: vaultwarden-reconcile-apply-20260305T104644Z.json, vaultwarden-reconcile-apply-20260305T105219Z.json

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# d377-inbox-shield-phase1-parity-lock.sh
+# d378-inbox-shield-phase1-parity-lock.sh
 # TRIAGE: inbox-shield Phase 1 governance parity
 set -euo pipefail
 
@@ -19,7 +19,7 @@ check() {
   fi
 }
 
-echo "D377 inbox-shield-phase1-parity-lock"
+echo "D378 inbox-shield-phase1-parity-lock"
 
 # 1. Capability registered in capabilities.yaml
 check "cap-registered" \

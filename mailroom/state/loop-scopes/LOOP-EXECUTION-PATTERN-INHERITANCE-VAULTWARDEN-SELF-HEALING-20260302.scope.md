@@ -1,14 +1,12 @@
 ---
 loop_id: LOOP-EXECUTION-PATTERN-INHERITANCE-VAULTWARDEN-SELF-HEALING-20260302
 created: 2026-03-02
-status: planned
+status: closed
 owner: "@ronny"
 scope: execution
 priority: high
-horizon: later
-execution_readiness: blocked
-blocked_by: "VM 204 LAN unreachable — restore drill requires live VM and operator supervision (GAP-OP-1287)"
-next_review: "2026-03-09"
+horizon: now
+execution_readiness: runnable
 objective: Generalize backup-style self-healing plumbing to Vaultwarden surfaces: canonical machine-path stabilization, scheduled runtime smoke, recovery action mappings, and deterministic escalation evidence.
 ---
 
@@ -42,11 +40,12 @@ Generalize backup-style self-healing plumbing to Vaultwarden surfaces: canonical
 - **GAP-OP-1283** (high): FIXED — proxy-session.sh LAN→Tailscale fallback + recover-vaultwarden-container recovery action in recovery.actions.yaml
 - **GAP-OP-1288** (low): FIXED — D319 vaultwarden-hygiene-compliance-lock gate created and registered (PASS)
 
-### Gaps Blocked (VM 204 unreachable)
-- **GAP-OP-1287** (medium): BLOCKED — restore drill requires live VM; D319 advisory tracks freshness
+### Gaps Resolved (2026-03-05 — execution session)
+- **GAP-OP-1287** (medium): FIXED — quarterly restore drill executed on VM 204 (Tailscale), scratch nonprod, sqlite integrity ok, PASS
 
-### Blocker
-- VM 204 (infra-core): LAN unreachable (100% packet loss), Tailscale UP (100.92.91.128, 79ms)
-- Restore drill cannot execute without operator supervision — not overnight-safe
-- execution_readiness set to blocked until operator-supervised session
-- Next review: when operator is available for restore drill execution
+### Closure Evidence (2026-03-05)
+- All 3 gaps (1283, 1287, 1288) now fixed
+- W1: proxy-session.sh LAN→Tailscale fallback operational (confirmed via vault audit)
+- W2: recover-vaultwarden-container recovery action wired in recovery.actions.yaml
+- W3: D319 vaultwarden-hygiene-compliance-lock PASS, restore-drill evidence fresh (2026-03-05)
+- Verify: 18/20 (D126/D127 pre-existing, unrelated to vaultwarden domain)

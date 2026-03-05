@@ -12,9 +12,11 @@
 set -euo pipefail
 
 SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
-INBOX="${SPINE_INBOX:-$SPINE/mailroom/inbox}"
-OUTBOX="${SPINE_OUTBOX:-$SPINE/mailroom/outbox}"
-STATE_DIR="${SPINE_STATE:-$SPINE/mailroom/state}"
+source "$SPINE/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+INBOX="${SPINE_INBOX}"
+OUTBOX="${SPINE_OUTBOX}"
+STATE_DIR="${SPINE_STATE}"
 
 QUEUED="${INBOX}/queued"
 RUNNING="${INBOX}/running"

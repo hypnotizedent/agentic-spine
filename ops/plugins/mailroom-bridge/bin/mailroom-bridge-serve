@@ -3,7 +3,7 @@
 mailroom.bridge.serve - minimal HTTP bridge to the spine mailroom.
 
 Contract:
-- Reads from canonical runtime root (SPINE_REPO).
+- Reads from canonical runtime root resolved from mailroom.runtime.contract.yaml.
 - Writes prompts via ops/runtime/inbox/agent-enqueue.sh (mailroom/inbox/queued).
 - Token auth enforced by binding (`auth.require_token` + `auth.token_env`).
 """
@@ -51,6 +51,34 @@ def _yq(binding: Path, expr: str, default: str) -> str:
     if out in ("", "null"):
         return default
     return out
+
+
+def _resolve_runtime_paths(spine_repo: Path) -> dict[str, str]:
+    runtime_contract = spine_repo / "ops/bindings/mailroom.runtime.contract.yaml"
+    runtime_active = _yq(runtime_contract, ".active // false", "false").lower() == "true"
+    runtime_root = _yq(runtime_contract, '.runtime_root // ""', "")
+
+    if runtime_active and runtime_root:
+        defaults = {
+            "inbox": f"{runtime_root}/inbox",
+            "outbox": f"{runtime_root}/outbox",
+            "state": f"{runtime_root}/state",
+            "logs": f"{runtime_root}/logs",
+        }
+    else:
+        defaults = {
+            "inbox": str(spine_repo / "mailroom" / "inbox"),
+            "outbox": str(spine_repo / "mailroom" / "outbox"),
+            "state": str(spine_repo / "mailroom" / "state"),
+            "logs": str(spine_repo / "mailroom" / "logs"),
+        }
+
+    return {
+        "inbox": os.environ.get("SPINE_INBOX") or defaults["inbox"],
+        "outbox": os.environ.get("SPINE_OUTBOX") or defaults["outbox"],
+        "state": os.environ.get("SPINE_STATE") or defaults["state"],
+        "logs": os.environ.get("SPINE_LOGS") or defaults["logs"],
+    }
 
 
 def _safe_child(root: Path, rel: str) -> Path:
@@ -1182,10 +1210,11 @@ def main() -> None:
             f"({token_env} or {token_file_env})"
         )
 
-    spine_inbox = os.environ.get("SPINE_INBOX") or str(spine_repo / "mailroom" / "inbox")
-    spine_outbox = os.environ.get("SPINE_OUTBOX") or str(spine_repo / "mailroom" / "outbox")
-    spine_state = os.environ.get("SPINE_STATE") or str(spine_repo / "mailroom" / "state")
-    spine_logs = os.environ.get("SPINE_LOGS") or str(spine_repo / "mailroom" / "logs")
+    runtime_paths = _resolve_runtime_paths(spine_repo)
+    spine_inbox = runtime_paths["inbox"]
+    spine_outbox = runtime_paths["outbox"]
+    spine_state = runtime_paths["state"]
+    spine_logs = runtime_paths["logs"]
 
     # Load cap-RPC allowlist from binding
     cap_rpc_allowlist: list[str] = []

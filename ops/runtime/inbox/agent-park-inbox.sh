@@ -21,8 +21,10 @@ fi
 
 # SPINE paths (canonical)
 SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
-INBOX="${SPINE_INBOX:-$SPINE/mailroom/inbox}"
-PARK_BASE="${SPINE_STATE:-$SPINE/mailroom/state}/backups/inbox-parked"
+source "$SPINE/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+INBOX="${SPINE_INBOX}"
+PARK_BASE="${SPINE_STATE}/backups/inbox-parked"
 TS="$(date +%Y%m%d-%H%M%S)"
 PARK_DIR="$PARK_BASE/$TS"
 
