@@ -38,7 +38,9 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 DATE=$(date +%Y-%m-%d)
 TIME=$(date +%H:%M:%S)
 
-INBOX="${SPINE_INBOX:-$REPO/mailroom/inbox}"
+source "$REPO/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+INBOX="${SPINE_INBOX}"
 FRICTION_INGEST="$REPO/ops/plugins/lifecycle/bin/friction-ingest"
 FRICTION_STATUS="$REPO/ops/plugins/lifecycle/bin/friction-queue-status"
 
@@ -255,7 +257,7 @@ HEADER
 fi
 
 # Get latest outbox result
-OUTBOX="${SPINE_OUTBOX:-$REPO/mailroom/outbox}"
+OUTBOX="${SPINE_OUTBOX}"
 LATEST_RESULT=$(ls -1t "$OUTBOX"/*_RESULT.md 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "(none)")
 
 # Append row

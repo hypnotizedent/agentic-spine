@@ -72,6 +72,11 @@ check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-enqueue.sh" "agent-enq
 check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-status.sh" "agent-status.sh"
 check_script_runtime_paths "$ROOT/ops/runtime/inbox/hot-folder-watcher.sh" "hot-folder-watcher.sh"
 check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-restart.sh" "agent-restart.sh"
+check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-latest.sh" "agent-latest.sh"
+check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-park-inbox.sh" "agent-park-inbox.sh"
+check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-summary.sh" "agent-summary.sh"
+check_script_runtime_paths "$ROOT/ops/runtime/inbox/agent-watchdog.sh" "agent-watchdog.sh"
+check_script_runtime_paths "$ROOT/ops/runtime/inbox/close-session.sh" "close-session.sh"
 
 if grep -q 'env\["SPINE_INBOX"\]' "$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve" \
    && grep -q 'env\["SPINE_STATE"\]' "$ROOT/ops/plugins/mailroom-bridge/bin/mailroom-bridge-serve"; then

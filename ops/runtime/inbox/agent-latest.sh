@@ -14,7 +14,9 @@
 set -euo pipefail
 
 SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
-OUTBOX="${SPINE_OUTBOX:-$SPINE/mailroom/outbox}"
+source "$SPINE/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+OUTBOX="${AGENT_OUTBOX:-${SPINE_OUTBOX}}"
 LINES="${AGENT_LATEST_LINES:-80}"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -52,7 +54,7 @@ case "${1:-}" in
         echo "  --path     Print only path (for scripting)"
         echo ""
         echo "Environment:"
-        echo "  AGENT_OUTBOX        Override outbox path (default: \$SPINE/mailroom/outbox)"
+        echo "  AGENT_OUTBOX        Override outbox path (default: runtime contract)"
         echo "  AGENT_LATEST_LINES  Lines to show (default: 80)"
         exit 0
         ;;

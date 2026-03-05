@@ -19,13 +19,16 @@ fi
 
 # SPINE paths (canonical)
 SPINE="${SPINE_REPO:-$HOME/code/agentic-spine}"
-OUTBOX="${SPINE_OUTBOX:-$SPINE/mailroom/outbox}"
-LOG="${SPINE_LOGS:-$SPINE/mailroom/logs}/watchdog.out"
+source "$SPINE/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+OUTBOX="${SPINE_OUTBOX}"
+LOG="${SPINE_LOGS}/watchdog.out"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+INBOX_BASENAME="$(basename "${SPINE_INBOX}")"
 
 mkdir -p "$(dirname "$LOG")" "$OUTBOX"
 
-fswatch_count="$(ps aux | grep "fswatch.*mailroom/inbox" | grep -cv grep || true)"
+fswatch_count="$(ps aux | grep "fswatch.*${INBOX_BASENAME}" | grep -cv grep || true)"
 watcher_count="$(ps aux | grep "hot-folder-watcher\.sh" | grep -cv grep || true)"
 
 status="OK"
@@ -51,8 +54,8 @@ Reason: $reason
 
 Suggested checks:
 - ps aux | rg -n "hot-folder-watcher\\.sh|fswatch"
-- tail -n 80 $SPINE/logs/agent-inbox.out
-- tail -n 80 $SPINE/mailroom/state/ledger.csv
+- tail -n 80 $SPINE_LOGS/agent-inbox.out
+- tail -n 80 $SPINE_STATE/ledger.csv
 EOF
   echo "Wrote alert: $ALERT"
 fi
