@@ -10,6 +10,7 @@ execution_readiness: blocked
 execution_mode: orchestrator_subagents
 objective: Keep vouchervault in canonical deferred execution state until deploy stack and runtime placement are approved.
 activation_trigger: manual
+next_review: "2026-03-19"
 blocked_by:
   - blocker_id: vouchervault-deploy-stack-placement
     blocker_class: blocked_operator

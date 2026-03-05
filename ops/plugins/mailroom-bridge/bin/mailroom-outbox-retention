@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# mailroom-outbox-retention
+# Enforce outbox hygiene by archiving stale artifacts to outbox/archived/.
+set -euo pipefail
+
+resolve_repo_root() {
+  if [[ -n "${SPINE_REPO:-}" && -f "${SPINE_REPO}/ops/capabilities.yaml" ]]; then
+    printf '%s\n' "$SPINE_REPO"
+    return 0
+  fi
+  if [[ -n "${SPINE_ROOT:-}" && -f "${SPINE_ROOT}/ops/capabilities.yaml" ]]; then
+    printf '%s\n' "$SPINE_ROOT"
+    return 0
+  fi
+  local script_dir repo
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  repo="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$repo" && -f "$repo/ops/capabilities.yaml" ]]; then
+    printf '%s\n' "$repo"
+    return 0
+  fi
+  printf '%s\n' "$HOME/code/agentic-spine"
+}
+
+SPINE_REPO="$(resolve_repo_root)"
+SPINE_CODE="${SPINE_CODE:-$SPINE_REPO}"
+source "$SPINE_CODE/ops/lib/runtime-paths.sh"
+spine_runtime_resolve_paths
+
+CONTRACT="${SPINE_REPO}/ops/bindings/mailroom.runtime.contract.yaml"
+OUTBOX="${SPINE_OUTBOX}"
+ARCHIVE_ROOT="${OUTBOX}/archived"
+
+MODE="check"
+case "${1:---check}" in
+  --check) MODE="check" ;;
+  --execute) MODE="execute" ;;
+  *)
+    echo "Usage: mailroom-outbox-retention [--check|--execute]" >&2
+    exit 2
+    ;;
+esac
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || { echo "FAIL: missing dependency: $1" >&2; exit 2; }
+}
+
+need_cmd find
+
+alerts_days=14
+results_days=14
+proposal_days=30
+if command -v yq >/dev/null 2>&1 && [[ -f "$CONTRACT" ]]; then
+  alerts_days="$(yq -r '.retention_days.outbox_alerts // 14' "$CONTRACT" 2>/dev/null || echo 14)"
+  results_days="$(yq -r '.retention_days.outbox_results // .retention_days.queue_artifacts // 14' "$CONTRACT" 2>/dev/null || echo 14)"
+  proposal_days="$(yq -r '.retention_days.proposals_archived // 30' "$CONTRACT" 2>/dev/null || echo 30)"
+fi
+
+mkdir -p "$ARCHIVE_ROOT"
+
+stale_count=0
+moved_count=0
+
+record_stale() {
+  local rel="$1"
+  stale_count=$((stale_count + 1))
+  echo "STALE: $rel"
+}
+
+archive_file() {
+  local file="$1"
+  local rel="${file#$OUTBOX/}"
+  local dst="${ARCHIVE_ROOT}/${rel}"
+  record_stale "$rel"
+  if [[ "$MODE" == "execute" ]]; then
+    mkdir -p "$(dirname "$dst")"
+    mv "$file" "$dst"
+    moved_count=$((moved_count + 1))
+    echo "MOVED: $rel -> ${dst#$OUTBOX/}"
+  fi
+}
+
+archive_dir() {
+  local dir="$1"
+  local rel="${dir#$OUTBOX/}"
+  local dst="${ARCHIVE_ROOT}/${rel}"
+  record_stale "$rel/"
+  if [[ "$MODE" == "execute" ]]; then
+    mkdir -p "$(dirname "$dst")"
+    mv "$dir" "$dst"
+    moved_count=$((moved_count + 1))
+    echo "MOVED: $rel/ -> ${dst#$OUTBOX/}/"
+  fi
+}
+
+if [[ ! -d "$OUTBOX" ]]; then
+  echo "OK: outbox path missing ($OUTBOX)"
+  exit 0
+fi
+
+alerts_cutoff=$((alerts_days - 1))
+results_cutoff=$((results_days - 1))
+proposal_cutoff=$((proposal_days - 1))
+((alerts_cutoff < 0)) && alerts_cutoff=0
+((results_cutoff < 0)) && results_cutoff=0
+((proposal_cutoff < 0)) && proposal_cutoff=0
+
+# 1) Alert payloads older than threshold.
+if [[ -d "$OUTBOX/alerts" ]]; then
+  while IFS= read -r -d '' f; do
+    archive_file "$f"
+  done < <(find "$OUTBOX/alerts" -type f -mtime +"$alerts_cutoff" -print0 2>/dev/null || true)
+fi
+
+# 2) Queue result payloads older than threshold.
+while IFS= read -r -d '' f; do
+  archive_file "$f"
+done < <(
+  find "$OUTBOX" -type f -name '*__RESULT.md' -mtime +"$results_cutoff" \
+    ! -path "$ARCHIVE_ROOT/*" -print0 2>/dev/null || true
+)
+
+# 3) Terminal proposal packets older than threshold.
+if [[ -d "$OUTBOX/proposals" ]]; then
+  while IFS= read -r -d '' cp_dir; do
+    [[ -d "$cp_dir" ]] || continue
+    terminal=0
+    [[ -f "$cp_dir/.applied" ]] && terminal=1
+    if [[ "$terminal" -eq 0 && -f "$cp_dir/manifest.yaml" && "$(command -v yq || true)" != "" ]]; then
+      status="$(yq -r '.status // ""' "$cp_dir/manifest.yaml" 2>/dev/null || echo "")"
+      [[ "$status" == "applied" || "$status" == "superseded" ]] && terminal=1
+    fi
+    [[ "$terminal" -eq 1 ]] || continue
+    archive_dir "$cp_dir"
+  done < <(
+    find "$OUTBOX/proposals" -mindepth 1 -maxdepth 1 -type d -name 'CP-*' \
+      -mtime +"$proposal_cutoff" ! -path "$ARCHIVE_ROOT/*" -print0 2>/dev/null || true
+  )
+fi
+
+echo "summary: mode=${MODE} stale=${stale_count} moved=${moved_count} outbox=${OUTBOX}"
+if [[ "$MODE" == "check" && "$stale_count" -gt 0 ]]; then
+  exit 1
+fi
+
+exit 0

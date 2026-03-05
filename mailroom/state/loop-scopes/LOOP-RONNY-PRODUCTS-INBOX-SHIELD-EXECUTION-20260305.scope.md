@@ -10,6 +10,7 @@ execution_readiness: blocked
 execution_mode: orchestrator_subagents
 objective: Keep inbox-shield execution blocked until research and security approvals are explicitly granted.
 activation_trigger: manual
+next_review: "2026-03-19"
 blocked_by:
   - blocker_id: inbox-shield-research-security-approvals
     blocker_class: blocked_operator

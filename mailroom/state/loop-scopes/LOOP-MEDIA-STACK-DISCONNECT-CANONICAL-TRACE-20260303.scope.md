@@ -11,6 +11,7 @@ objective: Holistic forensic trace of media-stack disconnects mapped to migratio
 blocked_by:
   - "Runtime mutation intentionally out of scope for this forensic loop"
   - "Shop-to-home migration execution will run in successor loop after operator approval"
+next_review: "2026-03-19"
 ---
 
 # Loop Scope: LOOP-MEDIA-STACK-DISCONNECT-CANONICAL-TRACE-20260303

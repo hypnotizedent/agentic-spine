@@ -53,7 +53,8 @@ Token behavior is controlled by `ops/bindings/mailroom.bridge.yaml`:
 - `auth.require_token: true` enforces token-gated access for all non-health endpoints.
 - Token source order:
   - environment variable from `auth.token_env` (default `MAILROOM_BRIDGE_TOKEN`)
-  - persisted token file: `mailroom/state/mailroom-bridge.token` (created/maintained by `mailroom.bridge.start`)
+  - file path from `auth.token_file_env` (default `MAILROOM_BRIDGE_TOKEN_FILE`) pointing to persisted token file
+    (created/maintained by `mailroom.bridge.start`)
 
 RBAC role tokens (optional):
 - Each role declares `cap_rpc.roles.<role>.token_env`.
@@ -137,10 +138,10 @@ Capabilities:
 - `printf 'yes\n' | ./bin/ops cap run mailroom.bridge.expose.disable`
 
 Runtime artifacts:
-- PID: `mailroom/state/mailroom-bridge.pid`
+- PID: `~/.runtime/spine-mailroom/state/mailroom-bridge.pid`
 - Logs:
-  - `mailroom/logs/mailroom-bridge.out`
-  - `mailroom/logs/mailroom-bridge.err`
+  - `~/.runtime/spine-mailroom/logs/mailroom-bridge.out`
+  - `~/.runtime/spine-mailroom/logs/mailroom-bridge.err`
 
 ---
 
@@ -165,6 +166,11 @@ Lists files/dirs under `mailroom/outbox/<rel>`.
 
 Reads a file under `mailroom/outbox/<rel>` (size-limited).
 
+### `GET /outbox/result/<run_id>` (auth required)
+
+Reads the canonical result file for a run key:
+- target: `mailroom/outbox/<run_id>__RESULT.md`
+
 ### `GET /receipts/read?path=<rel>` (auth required)
 
 Reads a file under `receipts/sessions/<rel>` (size-limited).
@@ -183,6 +189,25 @@ Body (JSON):
 
 Effect:
 - enqueues a prompt into `mailroom/inbox/queued/` via `ops/runtime/inbox/agent-enqueue.sh`
+- response includes canonical `run_id` (derived queue stem) for polling
+
+### `GET /inbox/status/<run_id>` (auth required)
+
+Returns run state for `queued|running|done|failed|parked` by checking:
+- inbox lanes (`mailroom/inbox/<lane>/<run_id>.md`)
+- outbox result (`mailroom/outbox/<run_id>__RESULT.md`)
+- state ledger fallback (`mailroom/state/ledger.csv`)
+
+Example response:
+```json
+{
+  "run_id": "S20260305-090000__task__R123",
+  "state": "done",
+  "prompt_path": "done/S20260305-090000__task__R123.md",
+  "result_path": "S20260305-090000__task__R123__RESULT.md",
+  "updated_at_epoch": 1762249200
+}
+```
 
 ### `POST /cap/run` (auth required)
 
@@ -385,9 +410,10 @@ Use an n8n “HTTP Request” node:
   - `X-Spine-Token: <token>`
 - JSON body: the payload above
 
-To read results:
-- `GET /outbox/list?path=`
-- `GET /outbox/read?path=<file>`
+Async polling flow:
+1. `POST /inbox/enqueue` and capture returned `run_id`.
+2. Poll `GET /inbox/status/<run_id>` until `state` is `done|failed|parked`.
+3. Fetch final payload via `GET /outbox/result/<run_id>`.
 
 Template workflow export (import into n8n):
 - `/Users/ronnyworks/code/workbench/infra/compose/n8n/workflows/Spine_-_Mailroom_Enqueue.json`

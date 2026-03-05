@@ -12,6 +12,7 @@ blocked_by:
   - "Home maintenance window not scheduled"
   - "Home target topology not finalized in canonical contract"
   - "Path/status parity gaps from forensic trace remain open"
+next_review: "2026-03-19"
 ---
 
 # Loop Scope: LOOP-MEDIA-SHOP-HOME-MIGRATION-CONNECTOR-20260303

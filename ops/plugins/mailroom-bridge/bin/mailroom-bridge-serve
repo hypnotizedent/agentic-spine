@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -296,6 +297,76 @@ def _calendar_today_summary(index_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]+$")
+
+
+def _valid_run_id(value: str) -> bool:
+    return bool(_RUN_ID_PATTERN.fullmatch(value or ""))
+
+
+def _find_run_state(inbox_root: Path, outbox_root: Path, state_root: Path, run_id: str) -> dict[str, Any] | None:
+    lane_to_status = {
+        "queued": "queued",
+        "running": "running",
+        "done": "done",
+        "failed": "failed",
+        "parked": "parked",
+    }
+
+    prompt_path: Path | None = None
+    state = "unknown"
+    mtime = 0
+
+    for lane, status in lane_to_status.items():
+        candidate = inbox_root / lane / f"{run_id}.md"
+        if candidate.exists() and candidate.is_file():
+            prompt_path = candidate
+            state = status
+            mtime = int(candidate.stat().st_mtime)
+            break
+
+    result_path = outbox_root / f"{run_id}__RESULT.md"
+    if result_path.exists() and result_path.is_file():
+        result_mtime = int(result_path.stat().st_mtime)
+        mtime = max(mtime, result_mtime)
+        if state == "unknown":
+            # Result exists but prompt lane has rotated/cleaned.
+            state = "done"
+
+    # Fallback to ledger CSV when prompt artifacts are rotated away.
+    if state == "unknown":
+        ledger = state_root / "ledger.csv"
+        if ledger.exists() and ledger.is_file():
+            try:
+                lines = ledger.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                lines = []
+            for row in reversed(lines):
+                cols = row.split(",", 8)
+                if len(cols) < 5:
+                    continue
+                if cols[0].strip() != run_id:
+                    continue
+                lane_status = cols[4].strip().lower()
+                if lane_status in {"queued", "running", "done", "failed", "parked"}:
+                    state = lane_status
+                    break
+
+    if state == "unknown":
+        return None
+
+    payload: dict[str, Any] = {
+        "run_id": run_id,
+        "state": state,
+        "updated_at_epoch": mtime or None,
+    }
+    if prompt_path is not None:
+        payload["prompt_path"] = str(prompt_path.relative_to(inbox_root.parent))
+    if result_path.exists() and result_path.is_file():
+        payload["result_path"] = str(result_path.relative_to(outbox_root))
+    return payload
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "spine-mailroom-bridge/0.1"
 
@@ -490,9 +561,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         spine_repo = Path(self.config["spine_repo"])
-        outbox_root = spine_repo / "mailroom/outbox"
+        inbox_root = Path(self.config.get("spine_inbox") or str(spine_repo / "mailroom" / "inbox"))
+        outbox_root = Path(self.config.get("spine_outbox") or str(spine_repo / "mailroom" / "outbox"))
+        state_root = Path(self.config.get("spine_state") or str(spine_repo / "mailroom" / "state"))
         receipts_root = spine_repo / "receipts/sessions"
-        scopes_dir = spine_repo / "mailroom/state/loop-scopes"
+        scopes_dir = state_root / "loop-scopes"
         max_read = int(self.config.get("max_read_bytes") or 262144)
 
         if path == "/loops/open":
@@ -507,6 +580,28 @@ class Handler(BaseHTTPRequestHandler):
                 )
             )
             return self._json(HTTPStatus.OK, {"open_loops": loops, "count": len(loops)})
+
+        if path.startswith("/inbox/status/"):
+            run_id = path.split("/inbox/status/", 1)[1].strip()
+            if not _valid_run_id(run_id):
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid run_id"})
+            state_payload = _find_run_state(inbox_root, outbox_root, state_root, run_id)
+            if state_payload is None:
+                return self._json(HTTPStatus.NOT_FOUND, {"error": "run_id not found", "run_id": run_id})
+            return self._json(HTTPStatus.OK, state_payload)
+
+        if path.startswith("/outbox/result/"):
+            run_id = path.split("/outbox/result/", 1)[1].strip()
+            if not _valid_run_id(run_id):
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid run_id"})
+            p = outbox_root / f"{run_id}__RESULT.md"
+            if not p.exists() or not p.is_file():
+                return self._json(HTTPStatus.NOT_FOUND, {"error": "result not found", "run_id": run_id})
+            try:
+                data = _read_limited(p, max_read)
+            except ValueError as e:
+                return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": str(e)})
+            return self._text(HTTPStatus.OK, data.decode("utf-8", errors="replace"))
 
         if path == "/outbox/list":
             rel = (qs.get("path") or [""])[0]
@@ -1028,8 +1123,21 @@ class Handler(BaseHTTPRequestHandler):
             if line.startswith("ENQUEUED:"):
                 enq_path = line.split("ENQUEUED:", 1)[1].strip()
                 break
+        canonical_run_id = ""
+        if enq_path:
+            try:
+                canonical_run_id = Path(enq_path).stem
+            except Exception:
+                canonical_run_id = ""
 
-        return self._json(HTTPStatus.OK, {"status": "enqueued", "path": enq_path or None})
+        return self._json(
+            HTTPStatus.OK,
+            {
+                "status": "enqueued",
+                "path": enq_path or None,
+                "run_id": canonical_run_id or run_id or None,
+            },
+        )
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D401
         # Route request logs to stderr (captured by mailroom-bridge.log when started via capability).
@@ -1052,6 +1160,7 @@ def main() -> None:
     host = _yq(binding, ".listen.host // \"127.0.0.1\"", "127.0.0.1")
     port = int(_yq(binding, ".listen.port // 8799", "8799"))
     token_env = _yq(binding, ".auth.token_env // \"MAILROOM_BRIDGE_TOKEN\"", "MAILROOM_BRIDGE_TOKEN")
+    token_file_env = _yq(binding, ".auth.token_file_env // \"MAILROOM_BRIDGE_TOKEN_FILE\"", "MAILROOM_BRIDGE_TOKEN_FILE")
     require_token = _yq(binding, ".auth.require_token // false", "false").lower() == "true"
     max_read = int(_yq(binding, ".limits.max_read_bytes // 262144", "262144"))
 
@@ -1061,8 +1170,17 @@ def main() -> None:
     cf_access_jwt_header = _yq(binding, '.auth.cf_access.jwt_header // "Cf-Access-Jwt-Assertion"', "Cf-Access-Jwt-Assertion")
 
     token = os.environ.get(token_env, "") or ""
+    token_file = os.environ.get(token_file_env, "") or ""
+    if not token and token_file:
+        try:
+            token = Path(token_file).read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            token = ""
     if require_token and not token:
-        _stop(f"token required by binding, but env var not set: {token_env}")
+        _stop(
+            "token required by binding, but no token source is available "
+            f"({token_env} or {token_file_env})"
+        )
 
     spine_inbox = os.environ.get("SPINE_INBOX") or str(spine_repo / "mailroom" / "inbox")
     spine_outbox = os.environ.get("SPINE_OUTBOX") or str(spine_repo / "mailroom" / "outbox")
@@ -1115,6 +1233,7 @@ def main() -> None:
         "host": host,
         "port": port,
         "token_env": token_env,
+        "token_file_env": token_file_env,
         "token": token,
         "spine_inbox": spine_inbox,
         "spine_outbox": spine_outbox,
@@ -1143,6 +1262,7 @@ def main() -> None:
     print(f"listen: {host}:{port}")
     print(f"token_required: {bool(token)}")
     print(f"token_env: {token_env}")
+    print(f"token_file_env: {token_file_env}")
     print(f"spine_inbox: {spine_inbox}")
     print(f"spine_outbox: {spine_outbox}")
     print(f"spine_state: {spine_state}")

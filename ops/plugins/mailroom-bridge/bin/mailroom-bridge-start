@@ -35,6 +35,7 @@ fi
 host="127.0.0.1"
 port="8799"
 token_env="MAILROOM_BRIDGE_TOKEN"
+token_file_env="MAILROOM_BRIDGE_TOKEN_FILE"
 require_token="false"
 bridge_runtime_role=""
 bridge_lane=""
@@ -43,6 +44,7 @@ if command -v yq >/dev/null 2>&1; then
   host="$(yq -r '.listen.host // "127.0.0.1"' "$BINDING" 2>/dev/null || echo "127.0.0.1")"
   port="$(yq -r '.listen.port // 8799' "$BINDING" 2>/dev/null || echo "8799")"
   token_env="$(yq -r '.auth.token_env // "MAILROOM_BRIDGE_TOKEN"' "$BINDING" 2>/dev/null || echo "MAILROOM_BRIDGE_TOKEN")"
+  token_file_env="$(yq -r '.auth.token_file_env // "MAILROOM_BRIDGE_TOKEN_FILE"' "$BINDING" 2>/dev/null || echo "MAILROOM_BRIDGE_TOKEN_FILE")"
   require_token="$(yq -r '.auth.require_token // false' "$BINDING" 2>/dev/null || echo "false")"
   bridge_runtime_role="$(yq -r '.runtime.cap_run_runtime_role // ""' "$BINDING" 2>/dev/null || echo "")"
   bridge_lane="$(yq -r '.runtime.lane // ""' "$BINDING" 2>/dev/null || echo "")"
@@ -98,14 +100,11 @@ if [[ "$STATE_DIR" != "$repo_state_dir" && -d "$repo_state_dir" ]]; then
   shopt -u nullglob
 fi
 
-extra_env=""
-if [[ -n "$token_value" ]]; then
-  extra_env=$(cat <<EOF
-      <key>${token_env}</key>
-      <string>${token_value}</string>
+extra_env=$(cat <<EOF
+      <key>${token_file_env}</key>
+      <string>${token_file}</string>
 EOF
 )
-fi
 if [[ -n "$bridge_runtime_role" ]]; then
   extra_env+=$(cat <<EOF
 

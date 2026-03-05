@@ -10,6 +10,7 @@ execution_readiness: blocked
 activation_trigger: manual
 blocked_by:
   - "Wave 2 implementation pending commit + verify evidence"
+next_review: "2026-03-19"
 objective: Eliminate plans lifecycle drift, add canonical contract/control-plane, and enforce index/projection parity with lock discipline.
 ---
 
