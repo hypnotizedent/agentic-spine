@@ -5,8 +5,8 @@ status: planned
 owner: "@ronny"
 scope: ronny
 priority: medium
-horizon: now
-execution_readiness: deferred
+horizon: later
+execution_readiness: blocked
 execution_mode: orchestrator_subagents
 objective: Keep vouchervault in canonical deferred execution state until deploy stack and runtime placement are approved.
 activation_trigger: manual

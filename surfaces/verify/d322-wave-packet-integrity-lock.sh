@@ -63,6 +63,7 @@ if r_packet.get("enforce_at_dispatch") is not True:
     errors.append("role.runtime wave_packet.enforce_at_dispatch must be true")
 
 active_count = 0
+legacy_alias_count = 0
 if runtime_waves_dir.exists():
     for state_file in sorted(runtime_waves_dir.glob("WAVE-*/state.json")):
         try:
@@ -78,7 +79,12 @@ if runtime_waves_dir.exists():
 
         packet = state.get("wave_packet")
         if not isinstance(packet, dict):
-            errors.append(f"{state_file.name}: active wave missing wave_packet object")
+            # Backward compatibility: earlier runtime writes used `packet`.
+            packet = state.get("packet")
+            if isinstance(packet, dict):
+                legacy_alias_count += 1
+        if not isinstance(packet, dict):
+            errors.append(f"{state_file.parent.name}/state.json: active wave missing wave_packet|packet object")
             continue
 
         missing = [
@@ -86,12 +92,15 @@ if runtime_waves_dir.exists():
             if field not in packet or packet.get(field) in (None, "", [])
         ]
         if missing:
-            errors.append(f"{state_file.name}: wave_packet missing required fields: {', '.join(missing)}")
+            errors.append(f"{state_file.parent.name}/state.json: wave packet missing required fields: {', '.join(missing)}")
 
 if errors:
     for err in errors:
         print(f"D322 FAIL: {err}", file=sys.stderr)
     raise SystemExit(1)
 
-print(f"D322 PASS: wave packet contracts aligned (required_fields={len(l_required)}, active_waves_checked={active_count})")
+print(
+    "D322 PASS: wave packet contracts aligned "
+    f"(required_fields={len(l_required)}, active_waves_checked={active_count}, legacy_packet_alias={legacy_alias_count})"
+)
 PY

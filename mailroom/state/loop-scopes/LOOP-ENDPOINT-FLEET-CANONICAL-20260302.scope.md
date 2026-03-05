@@ -9,6 +9,7 @@ priority: medium
 horizon: later
 execution_readiness: blocked
 next_review: "2026-04-01"
+blocked_by: "Operator prioritization pending for endpoint fleet execution window"
 ---
 
 # LOOP-ENDPOINT-FLEET-CANONICAL-20260302

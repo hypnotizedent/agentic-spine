@@ -5,7 +5,7 @@ status: planned
 owner: "@ronny"
 scope: ronny
 priority: medium
-horizon: now
+horizon: later
 execution_readiness: blocked
 execution_mode: orchestrator_subagents
 objective: Keep inbox-shield execution blocked until research and security approvals are explicitly granted.

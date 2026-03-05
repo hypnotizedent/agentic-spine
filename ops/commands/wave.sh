@@ -885,6 +885,8 @@ state = {
         "last_transition": None,
     },
     "packet": packet,
+    # Compatibility alias: governance contracts use wave_packet naming.
+    "wave_packet": packet,
 }
 
 with open(sf, "w") as f:
@@ -1069,6 +1071,7 @@ if errors:
     }
 
     state["packet"] = packet
+    state["wave_packet"] = packet
     with open(sf, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
         f.write("\n")
@@ -1081,6 +1084,7 @@ if errors:
     raise SystemExit(1)
 
 state["packet"] = packet
+state["wave_packet"] = packet
 with open(sf, "w", encoding="utf-8") as f:
     json.dump(state, f, indent=2)
     f.write("\n")
@@ -1515,6 +1519,7 @@ try:
         )
     packet["lane_outcomes"] = lane_outcomes
     state["packet"] = packet
+    state["wave_packet"] = packet
 
     role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
     if from_role and not role_flow.get("current_role"):
@@ -2319,6 +2324,7 @@ try:
     role_flow.pop("pending_transition", None)
     state["role_flow"] = role_flow
     state["packet"] = packet
+    state["wave_packet"] = packet
 
     lifecycle_state = str(state.get("lifecycle_state", "active")).strip() or "active"
     if lifecycle_state == "active" and to_role == "worker":

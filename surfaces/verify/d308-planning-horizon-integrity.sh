@@ -2,7 +2,7 @@
 # TRIAGE: Ensure all open loop scopes have valid horizon/readiness fields per planning.horizon.contract.yaml. Fix by running planning.horizon.set for loops with missing or invalid values.
 set -euo pipefail
 
-ROOT="${SPINE_REPO:-$HOME/code/agentic-spine}"
+ROOT="${SPINE_ROOT:-${SPINE_REPO:-$HOME/code/agentic-spine}}"
 SCOPES_DIR="$ROOT/mailroom/state/loop-scopes"
 CONTRACT="$ROOT/ops/bindings/planning.horizon.contract.yaml"
 PLANS_INDEX="$ROOT/mailroom/state/plans/index.yaml"
@@ -30,6 +30,35 @@ _fm_field() {
     | sed "s/^${field}: *//" \
     | tr -d '"' \
     | head -1
+}
+
+_fm_blocked_by_present() {
+  local file="$1"
+  local fm header inline block
+  fm="$(awk '/^---$/{n++; next} n==1{print} n>=2{exit}' "$file")"
+
+  header="$(printf '%s\n' "$fm" | grep '^blocked_by:' | head -1 || true)"
+  [[ -n "$header" ]] || return 1
+
+  inline="$(printf '%s' "$header" | sed 's/^blocked_by:[[:space:]]*//' | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [[ -n "$inline" ]]; then
+    case "$inline" in
+      none|[]|{}|null)
+        return 1
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  fi
+
+  # `blocked_by:` with list/map payload on following indented lines.
+  block="$(printf '%s\n' "$fm" | awk '
+    /^blocked_by:[[:space:]]*$/ {capture=1; next}
+    capture && /^[^[:space:]][^:]*:[[:space:]]*/ {capture=0}
+    capture {print}
+  ')"
+  [[ -n "${block//[[:space:]]/}" ]]
 }
 
 VALID_HORIZONS="now later future"
@@ -147,8 +176,7 @@ for scope_file in "$SCOPES_DIR"/*.scope.md; do
 
   # Proposal eligibility: if readiness=blocked, must have blocked_by
   if [[ "$readiness" == "blocked" ]]; then
-    blocked_by="$(_fm_field "$scope_file" "blocked_by")"
-    if [[ -z "$blocked_by" || "$blocked_by" == "none" ]]; then
+    if ! _fm_blocked_by_present "$scope_file"; then
       FAIL=1
       MESSAGES="${MESSAGES}    ${GATE_ID} FAIL: ${loop_id}: execution_readiness=blocked but no blocked_by set\n"
     fi
