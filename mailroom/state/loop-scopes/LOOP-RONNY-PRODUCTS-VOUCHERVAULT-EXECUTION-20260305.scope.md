@@ -1,23 +1,16 @@
 ---
 loop_id: LOOP-RONNY-PRODUCTS-VOUCHERVAULT-EXECUTION-20260305
 created: 2026-03-05
-status: planned
+status: closed
 owner: "@ronny"
 scope: ronny
 priority: medium
-horizon: later
-execution_readiness: blocked
+horizon: now
+execution_readiness: runnable
 execution_mode: orchestrator_subagents
-objective: Keep vouchervault in canonical deferred execution state until deploy stack and runtime placement are approved.
+objective: Deploy vouchervault as a governed, private runtime on finance-stack (VM 211) with health coverage and spine onboarding parity.
 activation_trigger: manual
-next_review: "2026-03-19"
-blocked_by:
-  - blocker_id: vouchervault-deploy-stack-placement
-    blocker_class: blocked_operator
-    owner: "@ronny"
-    reason: deploy_stack_id is still TBD and runtime placement decision is unresolved.
-    unblock_command: ./bin/ops cap run planning.horizon.set -- --loop-id LOOP-RONNY-PRODUCTS-VOUCHERVAULT-EXECUTION-20260305 --horizon now --execution-readiness runnable --reason "deploy_stack_id + runtime placement approved"
-    evidence_ref: ops/bindings/service.onboarding.contract.yaml#services[id=vouchervault].deploy_stack_id
+blocked_by: []
 contracts:
   scaffold_contract_ref: ops/bindings/ronny.products.scaffold.contract.yaml#registered_products[id=vouchervault]
   service_onboarding_ref: ops/bindings/service.onboarding.contract.yaml#services[id=vouchervault]
@@ -28,7 +21,7 @@ contracts:
 
 ## Objective
 
-Keep vouchervault in canonical deferred execution state until deploy stack and runtime placement are approved.
+Deploy vouchervault as a governed, private runtime on finance-stack (VM 211) with health coverage and spine onboarding parity.
 
 ## Guard Commands
 
@@ -37,7 +30,13 @@ Keep vouchervault in canonical deferred execution state until deploy stack and r
 
 ## Readiness
 
-- `status=planned`
-- `execution_readiness=deferred`
+- `status=closed`
+- `execution_readiness=runnable`
 - `execution_mode=orchestrator_subagents`
-- Runtime/deploy remains out of scope for this normalization wave.
+- Runtime deployed at `http://100.76.153.100:8092` with health endpoint `GET /en/ping/` returning `204`.
+
+## Execution Evidence
+
+- `CAP-20260305-060031__docker.compose.status__Rbl9r45610`
+- `CAP-20260305-060031__services.health.status__Ry3t145609`
+- `CAP-20260305-060059__verify.run__R34id55058`
