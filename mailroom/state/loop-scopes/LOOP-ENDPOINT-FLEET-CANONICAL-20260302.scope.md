@@ -1,15 +1,15 @@
 ---
 loop_id: LOOP-ENDPOINT-FLEET-CANONICAL-20260302
 created: 2026-03-02
-status: planned
+status: closed
 owner: "@ronny"
 scope: agentic-spine
-objective: Define canonical 3-tier endpoint fleet model (T1/T2/T3) with lifecycle governance and agentic integration for multi-location replication
+objective: Define canonical 4-tier endpoint fleet model (T1/T2/T3/T4) with lifecycle governance and agentic integration for multi-location replication
 priority: medium
-horizon: later
-execution_readiness: blocked
+horizon: now
+execution_readiness: runnable
 next_review: "2026-04-01"
-blocked_by: "Operator prioritization pending for endpoint fleet execution window"
+blocked_by: []
 ---
 
 # LOOP-ENDPOINT-FLEET-CANONICAL-20260302
