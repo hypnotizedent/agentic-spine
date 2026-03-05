@@ -31,6 +31,16 @@ unreachable=0
 printf 'mcp.health.probe\n'
 printf 'contract: %s\n\n' "$CONTRACT"
 
+# Resolve tilde paths to absolute paths
+resolve_tilde() {
+  local path="$1"
+  if [[ "$path" == "~/"* ]]; then
+    printf '%s' "${HOME}${path#\~}"
+  else
+    printf '%s' "$path"
+  fi
+}
+
 # Probe gateway server (primary MCP endpoint)
 gw_name="$(yq e -r '.gateway.server_name // ""' "$CONTRACT" 2>/dev/null || true)"
 gw_command="$(yq e -r '.gateway.command // ""' "$CONTRACT" 2>/dev/null || true)"
@@ -71,16 +81,43 @@ probe_config_servers() {
   for name in "${servers[@]}"; do
     total=$((total + 1))
 
-    # Extract command from mcpServers or mcp config
+    # Extract command — handle both string and array formats.
+    # Claude Desktop / Codex: { "command": "node", "args": [...] }
+    # OpenCode:               { "command": ["node", "arg1", ...] }
     local cmd=""
-    cmd="$(jq -r --arg n "$name" '.mcpServers[$n].command // .mcp[$n].command // ""' "$config_path" 2>/dev/null || true)"
+    local cmd_type=""
+    cmd_type="$(jq -r --arg n "$name" '
+      (.mcpServers[$n].command // .mcp[$n].command // null) |
+      if . == null then "null"
+      elif type == "array" then "array"
+      else "string"
+      end
+    ' "$config_path" 2>/dev/null || echo "null")"
+
+    case "$cmd_type" in
+      array)
+        # Extract first element of the array as the binary to check
+        cmd="$(jq -r --arg n "$name" '(.mcpServers[$n].command // .mcp[$n].command)[0] // ""' "$config_path" 2>/dev/null || true)"
+        ;;
+      string)
+        cmd="$(jq -r --arg n "$name" '.mcpServers[$n].command // .mcp[$n].command // ""' "$config_path" 2>/dev/null || true)"
+        ;;
+      *)
+        # No command field — server may use URL or other transport
+        printf '  %-30s REACHABLE (registered in %s, no local command)\n' "$name" "$surface"
+        reachable=$((reachable + 1))
+        continue
+        ;;
+    esac
 
     if [[ -z "$cmd" ]]; then
-      # Server registered but no command (may use URL or other transport)
       printf '  %-30s REACHABLE (registered in %s, no local command)\n' "$name" "$surface"
       reachable=$((reachable + 1))
       continue
     fi
+
+    # Resolve tilde paths (common in codex .mcp.json)
+    cmd="$(resolve_tilde "$cmd")"
 
     # Resolve command — check if binary exists
     local resolved=""

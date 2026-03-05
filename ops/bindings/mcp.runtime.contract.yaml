@@ -1,9 +1,9 @@
 # MCP Runtime Contract
 # Status: authoritative
-# Last verified: 2026-02-21
+# Last verified: 2026-03-05
 
-version: 2
-updated_at: "2026-02-21"
+version: 3
+updated_at: "2026-03-05"
 owner: "@ronny"
 scope: mcp-runtime-parity
 
@@ -57,11 +57,37 @@ optional_servers:
     - playwright
   claude_desktop:
     - MCP_DOCKER
+    - docker
+    - filesystem
     - finance-agent
+    - github
     - media-agent
   opencode:
     - media-agent
     - playwright
+
+# Supplemental server definitions for standalone MCP servers not backed by agents.registry.yaml.
+# These are third-party or infrastructure servers that exist in Claude Desktop config
+# but are not part of the spine agent framework. Governed here for health probe + drift detection.
+supplemental_server_definitions:
+  filesystem:
+    description: "Local filesystem MCP server for workbench and Desktop paths"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem"]
+    surfaces: [claude_desktop]
+    health_check: binary_exists
+  github:
+    description: "GitHub MCP server via Docker container (OAuth PAT auth)"
+    command: "docker"
+    args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"]
+    surfaces: [claude_desktop]
+    health_check: binary_exists
+  docker:
+    description: "Docker MCP server via uvx (DOCKER_HOST tcp)"
+    command: "/Users/ronnyworks/.local/bin/uvx"
+    args: ["docker-mcp"]
+    surfaces: [claude_desktop]
+    health_check: binary_exists
 
 runtime_checks:
   - required_registered

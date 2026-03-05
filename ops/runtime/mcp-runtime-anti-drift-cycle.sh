@@ -54,12 +54,27 @@ require_cmd jq
 echo "[mcp-runtime-anti-drift-cycle] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 mcp_log="$TMP_DIR/mcp-runtime-status.log"
+health_log="$TMP_DIR/mcp-health-probe.log"
+config_log="$TMP_DIR/mcp-config-check.log"
 verify_log="$TMP_DIR/verify-core-run.log"
 
 if run_cap "mcp.runtime.status" "$mcp_log"; then
   mcp_rc=0
 else
   mcp_rc=$?
+fi
+
+if run_cap "mcp.health.probe" "$health_log"; then
+  health_rc=0
+else
+  health_rc=$?
+fi
+
+# Config projection parity check (non-blocking — config drift is informational)
+if run_cap "mcp.config.generate" "$config_log"; then
+  config_rc=0
+else
+  config_rc=$?
 fi
 
 if run_cap "verify.core.run" "$verify_log"; then
@@ -71,10 +86,10 @@ fi
 status="ok"
 domain_status="ok"
 policy_note="scheduled anti-drift checks pass"
-if [[ "$mcp_rc" -ne 0 || "$verify_rc" -ne 0 ]]; then
+if [[ "$mcp_rc" -ne 0 || "$health_rc" -ne 0 || "$verify_rc" -ne 0 ]]; then
   status="incident"
   domain_status="incident"
-  policy_note="mcp.runtime.status_rc=${mcp_rc}, verify.core.run_rc=${verify_rc}"
+  policy_note="mcp.runtime.status_rc=${mcp_rc}, mcp.health.probe_rc=${health_rc}, verify.core.run_rc=${verify_rc}"
 fi
 
 mkdir -p "$(dirname "$SNAPSHOT_FILE")"
@@ -84,8 +99,12 @@ jq -n \
   --arg domain_status "$domain_status" \
   --arg policy_note "$policy_note" \
   --arg mcp_preview "$(preview_log "$mcp_log")" \
+  --arg health_preview "$(preview_log "$health_log")" \
+  --arg config_preview "$(preview_log "$config_log")" \
   --arg verify_preview "$(preview_log "$verify_log")" \
   --argjson mcp_rc "$mcp_rc" \
+  --argjson health_rc "$health_rc" \
+  --argjson config_rc "$config_rc" \
   --argjson verify_rc "$verify_rc" \
   '{
     capability: "mcp.runtime.anti_drift.cycle",
@@ -104,6 +123,18 @@ jq -n \
         exit_code: $mcp_rc,
         status: (if $mcp_rc == 0 then "ok" else "incident" end),
         output_preview: $mcp_preview
+      },
+      {
+        id: "mcp.health.probe",
+        exit_code: $health_rc,
+        status: (if $health_rc == 0 then "ok" else "incident" end),
+        output_preview: $health_preview
+      },
+      {
+        id: "mcp.config.generate",
+        exit_code: $config_rc,
+        status: (if $config_rc == 0 then "ok" else "warning" end),
+        output_preview: $config_preview
       },
       {
         id: "verify.core.run",

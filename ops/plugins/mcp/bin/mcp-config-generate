@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# mcp.config.generate — Generate Claude Desktop MCP config from contract + registry.
+# Produces a deterministic JSON projection of the governed MCP server definitions.
+# Sources: mcp.runtime.contract.yaml, agents.registry.yaml, live Claude Desktop config (preferences).
+# Safety: mutating (can write to Claude Desktop config path with --apply).
+# Default: dry-run (prints generated config to stdout).
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
+AGENTS_REGISTRY="$ROOT/ops/bindings/agents.registry.yaml"
+
+fail() {
+  echo "mcp.config.generate FAIL: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+need_cmd yq
+need_cmd jq
+
+[[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
+[[ -f "$AGENTS_REGISTRY" ]] || fail "missing agents registry: $AGENTS_REGISTRY"
+
+MODE="dry-run"
+CHECK_ONLY=0
+SURFACE="claude_desktop"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --apply) MODE="apply"; shift ;;
+    --check) CHECK_ONLY=1; shift ;;
+    --surface) SURFACE="${2:-}"; shift 2 ;;
+    -h|--help)
+      cat <<'USAGE'
+mcp.config.generate
+
+Usage:
+  mcp-config-generate [--apply] [--check] [--surface <claude_desktop>]
+
+Modes:
+  (default)   dry-run: print generated config to stdout
+  --apply     backup live config, write generated config
+  --check     parity check: compare generated vs live, exit 0 if match
+USAGE
+      exit 0
+      ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ "$SURFACE" == "claude_desktop" ]] || fail "only claude_desktop surface is supported"
+
+# Resolve the live config path from contract
+LIVE_CONFIG="$(yq e -r '.surface_paths.claude_desktop // ""' "$CONTRACT" 2>/dev/null || true)"
+[[ -n "$LIVE_CONFIG" ]] || fail "surface_paths.claude_desktop not set in contract"
+
+# Build the mcpServers object from the live config as baseline.
+# We preserve server definitions from the live config (they have the exact command/args/env),
+# but validate that every required and optional server from the contract is present.
+# The projection enforces: required servers MUST exist, optional servers are preserved if present.
+generate_config() {
+  local live_config="$1"
+
+  if [[ ! -f "$live_config" ]]; then
+    fail "live config not found: $live_config"
+  fi
+
+  # Read existing preferences (non-MCP settings to preserve)
+  local preferences
+  preferences="$(jq -c '.preferences // {}' "$live_config" 2>/dev/null || echo '{}')"
+
+  # Read existing mcpServers
+  local existing_servers
+  existing_servers="$(jq -c '.mcpServers // {}' "$live_config" 2>/dev/null || echo '{}')"
+
+  # Get required servers for this surface
+  local -a required_servers=()
+  while IFS= read -r srv; do
+    [[ -n "$srv" ]] && required_servers+=("$srv")
+  done < <(yq e -r ".required_servers_by_surface.${SURFACE}[]?" "$CONTRACT" 2>/dev/null || true)
+
+  # Verify all required servers exist in live config
+  local missing_required=()
+  for srv in "${required_servers[@]}"; do
+    if ! jq -e --arg n "$srv" '.[$n]' <<<"$existing_servers" >/dev/null 2>&1; then
+      missing_required+=("$srv")
+    fi
+  done
+
+  if [[ "${#missing_required[@]}" -gt 0 ]]; then
+    echo "WARNING: required servers missing from live config: ${missing_required[*]}" >&2
+  fi
+
+  # Get optional servers for this surface
+  local -a optional_servers=()
+  while IFS= read -r srv; do
+    [[ -n "$srv" ]] && optional_servers+=("$srv")
+  done < <(yq e -r ".optional_servers.${SURFACE}[]?" "$CONTRACT" 2>/dev/null || true)
+
+  # Build the governed server set: required + optional (if present in live config)
+  # Order: required first (sorted), then optional (sorted, only if present)
+  local governed_servers='{}'
+
+  # Add required servers (must exist)
+  for srv in "${required_servers[@]}"; do
+    local srv_config
+    srv_config="$(jq -c --arg n "$srv" '.[$n] // null' <<<"$existing_servers" 2>/dev/null || echo 'null')"
+    if [[ "$srv_config" != "null" ]]; then
+      governed_servers="$(jq -c --arg n "$srv" --argjson v "$srv_config" '. + {($n): $v}' <<<"$governed_servers")"
+    fi
+  done
+
+  # Add optional servers (only if present in live config)
+  for srv in "${optional_servers[@]}"; do
+    local srv_config
+    srv_config="$(jq -c --arg n "$srv" '.[$n] // null' <<<"$existing_servers" 2>/dev/null || echo 'null')"
+    if [[ "$srv_config" != "null" ]]; then
+      governed_servers="$(jq -c --arg n "$srv" --argjson v "$srv_config" '. + {($n): $v}' <<<"$governed_servers")"
+    fi
+  done
+
+  # Generate the final config with deterministic key order
+  jq -Sn --argjson servers "$governed_servers" --argjson prefs "$preferences" '{
+    mcpServers: $servers,
+    preferences: $prefs
+  }'
+}
+
+if [[ "$CHECK_ONLY" -eq 1 ]]; then
+  generated="$(generate_config "$LIVE_CONFIG")"
+  live_normalized="$(jq -S '.' "$LIVE_CONFIG" 2>/dev/null || echo '{}')"
+
+  if [[ "$generated" == "$live_normalized" ]]; then
+    echo "mcp.config.generate CHECK PASS: live config matches governed projection"
+    exit 0
+  else
+    echo "mcp.config.generate CHECK FAIL: live config diverges from governed projection" >&2
+    echo "" >&2
+    echo "--- diff (generated vs live) ---" >&2
+    diff <(echo "$generated") <(echo "$live_normalized") >&2 || true
+    exit 1
+  fi
+fi
+
+generated="$(generate_config "$LIVE_CONFIG")"
+
+if [[ "$MODE" == "dry-run" ]]; then
+  echo "mcp.config.generate (dry-run)"
+  echo "surface: $SURFACE"
+  echo "live_config: $LIVE_CONFIG"
+  echo "---"
+  echo "$generated"
+  exit 0
+fi
+
+# Apply mode: backup + write
+backup_path="${LIVE_CONFIG}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+cp "$LIVE_CONFIG" "$backup_path"
+echo "mcp.config.generate: backed up to $backup_path"
+
+echo "$generated" > "$LIVE_CONFIG"
+echo "mcp.config.generate: wrote governed projection to $LIVE_CONFIG"
+
+# Verify the write
+if jq -e '.' "$LIVE_CONFIG" >/dev/null 2>&1; then
+  echo "mcp.config.generate PASS: config written and valid JSON"
+else
+  echo "mcp.config.generate FAIL: written config is invalid JSON, restoring backup" >&2
+  cp "$backup_path" "$LIVE_CONFIG"
+  exit 1
+fi

@@ -5,7 +5,7 @@
 # required contract linkage for agent runtime bindings, and required LaunchAgent scheduler parity.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$HOME/code/agentic-spine")}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/mcp.runtime.contract.yaml"
 LAUNCHD_CONTRACT="$ROOT/ops/bindings/launchd.runtime.contract.yaml"
 LAUNCHD_REGISTRY="$ROOT/ops/bindings/launchd.scheduler.registry.yaml"
@@ -52,13 +52,13 @@ plist_schedule_fingerprint() {
     | jq -c '{
         StartInterval: (.StartInterval // null),
         StartCalendarInterval: (.StartCalendarInterval // null)
-      }'
+      }' 2>/dev/null || echo '{"StartInterval":null,"StartCalendarInterval":null}'
 }
 
 plist_label() {
   local plist_path="$1"
   plutil -convert json -o - "$plist_path" 2>/dev/null \
-    | jq -r '.Label // ""'
+    | jq -r '.Label // ""' 2>/dev/null || echo ""
 }
 
 # 1) Canonical Claude Desktop config path linkage in runtime contract.
@@ -289,6 +289,47 @@ for label in "${required_labels[@]}"; do
     ok "launchagent '$label' is loaded in launchctl"
   fi
 done
+
+# 5) All MCP servers discovered in Claude Desktop config must be registered
+# in the contract as required, optional, or absorbed — no unmanaged entries.
+_claude_desktop_config="$(yq e -r '.surface_paths.claude_desktop // ""' "$CONTRACT")"
+if [[ -n "$_claude_desktop_config" && -f "$_claude_desktop_config" ]]; then
+  mapfile -t _discovered_servers < <(jq -r '.mcpServers // {} | keys[]' "$_claude_desktop_config" 2>/dev/null || true)
+  for _srv in "${_discovered_servers[@]}"; do
+    [[ -n "$_srv" ]] || continue
+    _found_in_contract=0
+    # Check required servers
+    if echo "$_cached_required_servers" | grep -Fq "claude_desktop/$_srv"; then
+      _found_in_contract=1
+    fi
+    # Check optional servers
+    if [[ "$_found_in_contract" -eq 0 ]] && echo "$_cached_optional_servers" | grep -Fq "claude_desktop/$_srv"; then
+      _found_in_contract=1
+    fi
+    # Check gateway absorbs
+    if [[ "$_found_in_contract" -eq 0 ]]; then
+      _absorbs_count="$(yq e -r ".gateway.absorbs[]? // \"\"" "$CONTRACT" | grep -Fxc "$_srv" || true)"
+      if [[ "${_absorbs_count:-0}" -gt 0 ]]; then
+        _found_in_contract=1
+      fi
+    fi
+    # Check aliases (server might be a known alias for a registered name)
+    if [[ "$_found_in_contract" -eq 0 ]]; then
+      _alias_match="$(yq e -r ".aliases.\"$_srv\"[]?" "$CONTRACT" 2>/dev/null | head -n1 || true)"
+      if [[ -n "$_alias_match" ]]; then
+        if echo "$_cached_required_servers" | grep -Fq "claude_desktop/$_alias_match" || \
+           echo "$_cached_optional_servers" | grep -Fq "claude_desktop/$_alias_match"; then
+          _found_in_contract=1
+        fi
+      fi
+    fi
+    if [[ "$_found_in_contract" -eq 0 ]]; then
+      err "Claude Desktop MCP server '$_srv' is not registered in mcp.runtime.contract.yaml (required, optional, or absorbed)"
+    else
+      ok "Claude Desktop MCP server '$_srv' is governed by contract"
+    fi
+  done
+fi
 
 if [[ "$ERRORS" -gt 0 ]]; then
   echo "D148 FAIL: $ERRORS check(s) failed"
