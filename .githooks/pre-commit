@@ -4,6 +4,7 @@ set -euo pipefail
 # Spine pre-commit hook (versioned)
 #
 # Guards:
+# 0. Hard-default branch/worktree governance (main blocked by default, non-main isolation required)
 # 1. Multi-agent commit guard (blocks direct commits when multiple sessions active)
 # 2. Commit signing enforcement (commit_sign_required knob)
 # 3. Multi-agent write policy (multi_agent_writes knob)
@@ -27,6 +28,55 @@ fi
 current_branch="$(git branch --show-current 2>/dev/null || echo detached)"
 
 staged="$(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null || true)"
+
+# ─── Guard 0: Hard-default branch/worktree governance ──────
+# MARKER: hard-default-main-commit-guard
+# MARKER: hard-default-worktree-identity-guard
+# Mainline commits are blocked unless an explicit governed override token with
+# reference+reason is present. Non-main commits require D140 worktree identity.
+if [[ -n "${staged:-}" ]]; then
+  MAIN_OVERRIDE_TOKEN="${OPS_GOVERNED_MAIN_OVERRIDE:-}"
+  MAIN_OVERRIDE_REF="${OPS_GOVERNED_MAIN_OVERRIDE_REF:-}"
+  MAIN_OVERRIDE_REASON="${OPS_GOVERNED_MAIN_OVERRIDE_REASON:-}"
+  MAIN_OVERRIDE_TOKEN_LC="$(printf '%s' "$MAIN_OVERRIDE_TOKEN" | tr '[:upper:]' '[:lower:]')"
+  WORKTREE_STATUS_SCRIPT="$ROOT/ops/plugins/ops/bin/worktree-session-status"
+
+  if [[ "$current_branch" == "main" || "$current_branch" == "master" ]]; then
+    if [[ "$MAIN_OVERRIDE_TOKEN_LC" == "1" || "$MAIN_OVERRIDE_TOKEN_LC" == "true" || "$MAIN_OVERRIDE_TOKEN_LC" == "yes" ]]; then
+      if [[ -z "$MAIN_OVERRIDE_REF" || -z "$MAIN_OVERRIDE_REASON" ]]; then
+        echo "BLOCKED: governed main override token requires ref + reason." >&2
+        echo "" >&2
+        echo "Coordinator override syntax:" >&2
+        echo "  OPS_GOVERNED_MAIN_OVERRIDE=1 OPS_GOVERNED_MAIN_OVERRIDE_REF=<LOOP|WAVE|INCIDENT> OPS_GOVERNED_MAIN_OVERRIDE_REASON=\"<justification>\" git commit ..." >&2
+        exit 1
+      fi
+      echo "NOTICE: main commit override accepted (ref=$MAIN_OVERRIDE_REF)." >&2
+    else
+      echo "BLOCKED: direct commits on '$current_branch' are fail-closed by default." >&2
+      echo "" >&2
+      echo "Remediation:" >&2
+      echo "  1. Start an isolated lane/worktree: ./bin/ops wave start <WAVE_ID> --objective \"...\"" >&2
+      echo "  2. Rehydrate existing branch into managed worktree: ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch <branch> --lane <lane>" >&2
+      echo "  3. Coordinator override (exception path): OPS_GOVERNED_MAIN_OVERRIDE=1 OPS_GOVERNED_MAIN_OVERRIDE_REF=<ref> OPS_GOVERNED_MAIN_OVERRIDE_REASON=\"<reason>\" git commit ..." >&2
+      exit 1
+    fi
+  else
+    if [[ ! -x "$WORKTREE_STATUS_SCRIPT" ]]; then
+      echo "BLOCKED: missing worktree isolation checker: $WORKTREE_STATUS_SCRIPT" >&2
+      exit 1
+    fi
+    if ! wt_out="$("$WORKTREE_STATUS_SCRIPT" --enforce --brief 2>&1)"; then
+      echo "BLOCKED: non-main commits require isolated worktree identity." >&2
+      echo "Guard output: $wt_out" >&2
+      echo "" >&2
+      echo "Remediation:" >&2
+      echo "  1. Kick off governed lanes: ./bin/ops cap run orchestration.wave.kickoff -- --loop-id <LOOP_ID> --lanes A,B,C" >&2
+      echo "  2. Export identity: export OPS_WORKTREE_IDENTITY=<LOOP_ID|WAVE_ID>" >&2
+      echo "  3. If branch path is unmanaged: ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch $current_branch --lane <lane>" >&2
+      exit 1
+    fi
+  fi
+fi
 
 # ─── Guard 1: Multi-agent commit guard ─────────────────────
 # If multiple sessions are active within TTL, block direct commits
@@ -418,8 +468,8 @@ if echo "$staged" | grep -qx 'ops/bindings/gate.registry.yaml'; then
 fi
 
 # ─── Guard 7: Capability metadata validation ───────────────
-# Main-branch commits are allowed. Worktrees are optional, not mandatory.
-# Drift gates (spine.verify) catch problems; the pre-commit hook stays lean.
+# Mainline is fail-closed by Guard 0 unless explicit governed override is set.
+# Drift gates (spine.verify) still provide contract-level safety.
 
 if echo "$staged" | grep -qx 'ops/capabilities.yaml'; then
   validator="surfaces/verify/d63-capabilities-metadata-lock.sh"

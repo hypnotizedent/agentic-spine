@@ -293,12 +293,26 @@ for marker in ("expires_epoch=", "session_id=", "terminal_role=", "ttl_seconds="
         raise RuntimeError(f"session-role-override missing cache marker: {marker}")
 
 cap_cmd = cap_cmd_path.read_text(encoding="utf-8")
-for marker in ("session_mismatch", "terminal_mismatch", "RUNTIME ROLE OVERRIDE CACHE CLEARED"):
+for marker in (
+    "session_mismatch",
+    "terminal_mismatch",
+    "RUNTIME ROLE OVERRIDE CACHE CLEARED",
+    "OPS_MAIN_MUTATION_OVERRIDE_REF",
+    "OPS_MAIN_MUTATION_OVERRIDE_REASON",
+    "worktree_session_isolation_failed",
+):
     if marker not in cap_cmd:
         raise RuntimeError(f"cap.sh missing override cache enforcement marker: {marker}")
 
 pre_commit = pre_commit_path.read_text(encoding="utf-8")
-for marker in ("Guard 4: Terminal write-scope enforcement", ".write_scope[]?"):
+for marker in (
+    "Guard 4: Terminal write-scope enforcement",
+    ".write_scope[]?",
+    "hard-default-main-commit-guard",
+    "hard-default-worktree-identity-guard",
+    "OPS_GOVERNED_MAIN_OVERRIDE_REF",
+    "OPS_GOVERNED_MAIN_OVERRIDE_REASON",
+):
     if marker not in pre_commit:
         raise RuntimeError(f".githooks/pre-commit missing write-scope enforcement marker: {marker}")
 
