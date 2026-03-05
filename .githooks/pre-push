@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "${ROOT:-}" ]] || exit 0
+cd "$ROOT"
+
+REMOTE_NAME="${1:-unknown-remote}"
+REMOTE_URL="${2:-unknown-url}"
+
+targets_main=0
+while IFS=' ' read -r _local_ref _local_sha remote_ref _remote_sha; do
+  [[ -n "${remote_ref:-}" ]] || continue
+  if [[ "$remote_ref" == "refs/heads/main" ]]; then
+    targets_main=1
+    break
+  fi
+done
+
+[[ "$targets_main" -eq 1 ]] || exit 0
+
+terminal_role="${OPS_TERMINAL_ROLE:-${SPINE_TERMINAL_ROLE:-}}"
+runtime_role="${SPINE_RUNTIME_ROLE:-}"
+identity_ref="${OPS_WORKTREE_IDENTITY:-}"
+
+# Governed override + evidence references.
+override_ref="${OPS_MAIN_MUTATION_OVERRIDE_REF:-${OPS_GOVERNED_MAIN_OVERRIDE_REF:-}}"
+override_reason="${OPS_MAIN_MUTATION_OVERRIDE_REASON:-${OPS_GOVERNED_MAIN_OVERRIDE_REASON:-}}"
+packet_ref="${OPS_MAIN_MUTATION_OVERRIDE_PACKET_REF:-${OPS_WORKTREE_ISOLATION_BYPASS_REF:-${SPINE_ORCH_MUTATION_GUARD_BYPASS_REF:-}}}"
+friction_ref="${OPS_MAIN_MUTATION_OVERRIDE_FRICTION_REF:-${OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF:-${SPINE_ORCH_MUTATION_GUARD_BYPASS_FRICTION_REF:-}}}"
+
+# Best-effort runtime role inference from terminal role contract.
+if [[ -z "$runtime_role" && -n "$terminal_role" && -f "$ROOT/ops/bindings/terminal.role.contract.yaml" ]] && command -v yq >/dev/null 2>&1; then
+  runtime_role="$(yq e -r ".runtime_role_defaults.by_terminal_id.\"${terminal_role}\" // \"\"" "$ROOT/ops/bindings/terminal.role.contract.yaml" 2>/dev/null || true)"
+  if [[ -z "$runtime_role" || "$runtime_role" == "null" ]]; then
+    terminal_type="$(yq e -r ".roles[]? | select(.id == \"${terminal_role}\") | .type // \"\"" "$ROOT/ops/bindings/terminal.role.contract.yaml" 2>/dev/null | head -n1 || true)"
+    if [[ -n "$terminal_type" && "$terminal_type" != "null" ]]; then
+      runtime_role="$(yq e -r ".runtime_role_defaults.by_terminal_type.\"${terminal_type}\" // \"\"" "$ROOT/ops/bindings/terminal.role.contract.yaml" 2>/dev/null || true)"
+    fi
+  fi
+fi
+
+declare -a issues=()
+
+if [[ "$terminal_role" != "SPINE-CONTROL-01" ]]; then
+  issues+=("coordinator terminal identity missing (expected OPS_TERMINAL_ROLE/SPINE_TERMINAL_ROLE=SPINE-CONTROL-01)")
+fi
+if [[ -z "$runtime_role" || ( "$runtime_role" != "worker" && "$runtime_role" != "coordinator" ) ]]; then
+  issues+=("coordinator runtime role missing (expected SPINE_RUNTIME_ROLE=worker|coordinator)")
+fi
+if [[ -z "$identity_ref" ]]; then
+  issues+=("coordinator identity missing (OPS_WORKTREE_IDENTITY)")
+fi
+if [[ -z "$override_ref" ]]; then
+  issues+=("governed override reference missing (OPS_MAIN_MUTATION_OVERRIDE_REF)")
+fi
+if [[ -z "$override_reason" ]]; then
+  issues+=("governed override reason missing (OPS_MAIN_MUTATION_OVERRIDE_REASON)")
+fi
+if [[ -z "$packet_ref" ]]; then
+  issues+=("packet evidence reference missing (OPS_MAIN_MUTATION_OVERRIDE_PACKET_REF)")
+fi
+if [[ -z "$friction_ref" ]]; then
+  issues+=("friction linkage reference missing (OPS_MAIN_MUTATION_OVERRIDE_FRICTION_REF)")
+fi
+
+if (( ${#issues[@]} > 0 )); then
+  echo "BLOCKED: push to 'main' is coordinator-only and fail-closed." >&2
+  echo "remote: $REMOTE_NAME ($REMOTE_URL)" >&2
+  for issue in "${issues[@]}"; do
+    echo "  - $issue" >&2
+  done
+  echo "" >&2
+  echo "Worker remediation: push lane branch only (never main)." >&2
+  echo "  git push $REMOTE_NAME <lane-branch>" >&2
+  echo "" >&2
+  echo "Coordinator governed override path (all refs required):" >&2
+  echo "  OPS_TERMINAL_ROLE=SPINE-CONTROL-01 SPINE_RUNTIME_ROLE=worker OPS_WORKTREE_IDENTITY=<WAVE_ID|LOOP_ID> \\" >&2
+  echo "  OPS_MAIN_MUTATION_OVERRIDE_REF=<LOOP|WAVE|INCIDENT> OPS_MAIN_MUTATION_OVERRIDE_REASON=\"<reason>\" \\" >&2
+  echo "  OPS_MAIN_MUTATION_OVERRIDE_PACKET_REF=<packet-evidence-ref> OPS_MAIN_MUTATION_OVERRIDE_FRICTION_REF=<friction-ref> \\" >&2
+  echo "  git push $REMOTE_NAME main" >&2
+  exit 1
+fi
+
+echo "NOTICE: governed coordinator push to main allowed (override_ref=$override_ref packet_ref=$packet_ref friction_ref=$friction_ref identity=$identity_ref)." >&2
+exit 0
