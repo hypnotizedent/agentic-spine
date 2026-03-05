@@ -25,7 +25,7 @@ RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine-mailroom}"
 WAVES_DIR="$RUNTIME_ROOT/waves"
 LANES_STATE="$RUNTIME_ROOT/lanes/state.json"
 ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
-ENFORCED_WAVE_WORKTREE_PREFIX="/Users/ronnyworks/code/.wt/agentic-spine/"
+ENFORCED_WAVE_WORKTREE_PREFIX="${HOME}/code/.wt/agentic-spine/"
 source "$SPINE_REPO/ops/lib/git-lock.sh" 2>/dev/null || true
 
 mkdir -p "$WAVES_DIR"
@@ -339,8 +339,8 @@ wave_path_policy_block() {
 WORKTREE PATH POLICY BLOCK: $detail
 Allowed wave worktree path: ${ENFORCED_WAVE_WORKTREE_PREFIX}<WAVE_ID>
 Remediation:
-  ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo /Users/ronnyworks/code/agentic-spine
-  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo /Users/ronnyworks/code/agentic-spine
+  ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo ~/code/agentic-spine
+  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo ~/code/agentic-spine
 EOF
   exit 1
 }
