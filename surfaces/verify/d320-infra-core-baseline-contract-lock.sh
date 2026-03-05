@@ -35,6 +35,10 @@ if [[ "$ERRORS" -gt 0 ]]; then
   exit 1
 fi
 
+if grep -q "capability_rerun" "$CONTRACT" "$RECOVERY"; then
+  err "unsupported legacy recovery type 'capability_rerun' found in contract/binding"
+fi
+
 [[ -x "$SMOKE_RUNNER" ]] || err "smoke runner not executable: $SMOKE_RUNNER"
 
 # ── Check 1: All four systems defined in contract ──
@@ -48,14 +52,52 @@ done
 # ── Check 2: Each system has self_heal.recovery_action_id ──
 for system in cloudflare vaultwarden infisical authentik; do
   recovery_id="$(yq -r ".systems.$system.self_heal.recovery_action_id // \"\"" "$CONTRACT")"
+  contract_recovery_type="$(yq -r ".systems.$system.self_heal.recovery_type // \"\"" "$CONTRACT")"
   if [[ -z "$recovery_id" || "$recovery_id" == "null" ]]; then
     err "contract system $system missing self_heal.recovery_action_id"
     continue
   fi
+
+  if [[ -z "$contract_recovery_type" || "$contract_recovery_type" == "null" ]]; then
+    err "contract system $system missing self_heal.recovery_type"
+    continue
+  fi
+  case "$contract_recovery_type" in
+    docker_compose_restart|launchd_restart|capability_retry|capability_commit|alert_only) ;;
+    *)
+      err "contract system $system uses unsupported self_heal.recovery_type '$contract_recovery_type'"
+      continue
+      ;;
+  esac
+
   # Verify the recovery action exists in recovery.actions.yaml
   found="$(yq -r ".actions[] | select(.id == \"$recovery_id\") | .id // \"\"" "$RECOVERY")"
   if [[ "$found" != "$recovery_id" ]]; then
     err "recovery action '$recovery_id' (system: $system) not found in recovery.actions.yaml"
+    continue
+  fi
+
+  action_recovery_type="$(yq -r ".actions[] | select(.id == \"$recovery_id\") | .recovery.type // \"\"" "$RECOVERY")"
+  if [[ "$action_recovery_type" != "$contract_recovery_type" ]]; then
+    err "contract/binding recovery type mismatch for '$system' action '$recovery_id' (contract='$contract_recovery_type' binding='$action_recovery_type')"
+  fi
+
+  if [[ "$action_recovery_type" == "capability_retry" ]]; then
+    retry_capability="$(yq -r ".actions[] | select(.id == \"$recovery_id\") | .recovery.capability // \"\"" "$RECOVERY")"
+    retry_max_attempts="$(yq -r ".actions[] | select(.id == \"$recovery_id\") | .recovery.max_attempts // \"\"" "$RECOVERY")"
+    retry_backoff_count="$(yq -r ".actions[] | select(.id == \"$recovery_id\") | (.recovery.backoff_seconds // []) | length" "$RECOVERY" 2>/dev/null || echo 0)"
+
+    if [[ -z "$retry_capability" || "$retry_capability" == "null" ]]; then
+      err "capability_retry action '$recovery_id' missing recovery.capability"
+    fi
+
+    if [[ ! "$retry_max_attempts" =~ ^[0-9]+$ ]] || [[ "$retry_max_attempts" -lt 1 ]]; then
+      err "capability_retry action '$recovery_id' must define recovery.max_attempts >= 1"
+    fi
+
+    if [[ ! "$retry_backoff_count" =~ ^[0-9]+$ ]] || [[ "$retry_backoff_count" -lt 1 ]]; then
+      err "capability_retry action '$recovery_id' missing recovery.backoff_seconds"
+    fi
   fi
 done
 
@@ -79,4 +121,4 @@ if [[ "$ERRORS" -gt 0 ]]; then
   exit 1
 fi
 
-echo "D320 PASS: infra-core baseline contract enforced (4 systems, recovery actions wired, smoke runner present, SLO $slo_count services)"
+echo "D320 PASS: infra-core baseline contract enforced (4 systems, recovery actions wired with type parity, smoke runner present, SLO $slo_count services)"
