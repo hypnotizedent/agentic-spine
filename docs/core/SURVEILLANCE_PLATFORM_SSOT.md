@@ -23,6 +23,7 @@ Primary dependencies:
 1. Single Home Assistant instance (existing home HA) is authoritative.
 2. Frigate/go2rtc deploy path is CPU-first and must be runnable without external GPU.
 3. VM IDs are allocated by governed intake; planning docs must not hardcode IDs.
+4. Home Assistant reaches Frigate directly over Tailscale; relay proxies are not part of canonical runtime.
 
 ## Runtime Topology (v1)
 
@@ -63,9 +64,11 @@ Primary dependencies:
 ## HA Integration Authority
 
 - Single HA instance: existing home HA (VM 100, proxmox-home)
-- Integration method: Frigate MQTT (via Mosquitto broker)
+- Direct Tailscale path: HA `100.67.120.1` -> Frigate `100.89.1.111:5000`
+- Integration method: Frigate MQTT via home HA broker at `100.67.120.1:1883`
 - Automations: person/vehicle/after-hours detection in home HA
 - Dashboard: Frigate card in home HA Lovelace
+- Ring doorbell live-view entity is present as `camera.ring_doorbell_live_view` and may be `idle` when no active stream is open.
 - Capability: `ha.surveillance.status` reports integration health
 - Authority: `ops/bindings/surveillance.topology.contract.yaml`
 
