@@ -17,6 +17,7 @@ _SP_LIB_DIR="${BASH_SOURCE%/*}"
 [[ "$_SP_LIB_DIR" == "${BASH_SOURCE}" ]] && _SP_LIB_DIR="$(pwd)"
 source "$_SP_LIB_DIR/../lib/yaml.sh"
 source "$_SP_LIB_DIR/../lib/runtime-paths.sh"
+source "$_SP_LIB_DIR/../lib/spine-log.sh"
 spine_runtime_resolve_paths
 export SPINE_INBOX SPINE_OUTBOX SPINE_STATE SPINE_LOGS
 
@@ -71,6 +72,48 @@ updated_at_utc: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 source_root: "$RECEIPTS"
 entries: []
 EOF
+    fi
+}
+
+maybe_rotate_receipts() {
+    local cap_name="${1:-}"
+    [[ -z "${OPS_CAP_STACK:-}" ]] || return 0
+    [[ "$cap_name" != "receipts.rotate" ]] || return 0
+
+    local rotate_every="${SPINE_RECEIPTS_ROTATE_EVERY:-100}"
+    local retention_days="${SPINE_RECEIPTS_ROTATE_DAYS:-30}"
+    local counter_file="$STATE_DIR/cap-run-counter"
+    local rotate_bin="$SPINE_CODE/ops/plugins/evidence/bin/receipts-rotate"
+    local counter=0
+
+    [[ "$rotate_every" =~ ^[0-9]+$ ]] || rotate_every=100
+    (( rotate_every > 0 )) || rotate_every=100
+    [[ "$retention_days" =~ ^[0-9]+$ ]] || retention_days=30
+
+    if [[ -f "$counter_file" ]]; then
+      counter="$(tr -dc '0-9' < "$counter_file" 2>/dev/null || echo 0)"
+      [[ "$counter" =~ ^[0-9]+$ ]] || counter=0
+    fi
+    counter=$((counter + 1))
+    printf '%s\n' "$counter" > "$counter_file"
+
+    if (( counter % rotate_every != 0 )); then
+      return 0
+    fi
+    [[ -x "$rotate_bin" ]] || return 0
+
+    local rotate_json
+    rotate_json="$("$rotate_bin" --days "$retention_days" --execute --json 2>/dev/null || true)"
+    if [[ -n "$rotate_json" ]] && command -v jq >/dev/null 2>&1; then
+      local deleted candidates
+      deleted="$(printf '%s' "$rotate_json" | jq -r '.deleted // 0' 2>/dev/null || echo 0)"
+      candidates="$(printf '%s' "$rotate_json" | jq -r '.candidates // 0' 2>/dev/null || echo 0)"
+      spine_log_event \
+        --event-type "receipts.rotate" \
+        --domain "core" \
+        --status "done" \
+        --message "auto-rotation completed (candidates=$candidates deleted=$deleted days=$retention_days)" \
+        --meta-json "$rotate_json" || true
     fi
 }
 
@@ -173,6 +216,9 @@ run_cap() {
     approval="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".approval")"
     local desc
     desc="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".description")"
+    local cap_domain
+    cap_domain="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".domain" 2>/dev/null || echo none)"
+    [[ -n "$cap_domain" && "$cap_domain" != "null" ]] || cap_domain="none"
     local arg_protocol
     arg_protocol="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".arg_protocol")"
     if [[ -z "$arg_protocol" || "$arg_protocol" == "null" ]]; then
@@ -855,8 +901,6 @@ run_cap() {
         local guard_enabled
         guard_enabled="$(yaml_query "$guard_policy" '.enabled' 2>/dev/null || echo false)"
         if [[ "$guard_enabled" == "true" ]]; then
-          local cap_domain
-          cap_domain="$(yaml_query "$CAP_FILE" ".capabilities.\"$name\".domain" 2>/dev/null || echo none)"
           [[ "$cap_domain" == "null" ]] && cap_domain="none"
 
           # Fallback domain resolution from topology capability prefixes.
@@ -1281,6 +1325,22 @@ EOF
     # ── Append ledger entry (CSV) ──
     ensure_state_dir
     echo "$run_key,$end_time,$start_time,$end_time,$([ $exit_code -eq 0 ] && echo "done" || echo "failed"),$name,receipt.md,,capability" >> "$LEDGER"
+
+    # ── Structured telemetry + automatic receipt retention sweep ──
+    local cap_status="failed"
+    [[ "$receipt_status" == "done" ]] && cap_status="done"
+    [[ "$receipt_status" == "blocked" ]] && cap_status="blocked"
+    spine_log_event \
+      --event-type "cap.run" \
+      --domain "$cap_domain" \
+      --gate-id "" \
+      --status "$cap_status" \
+      --message "capability=$name exit_code=$exit_code blocker=${blocked_reason:-none}" \
+      --run-key "$run_key" \
+      --source "ops/commands/cap.sh" \
+      --meta-json "{\"capability\":\"$name\",\"receipt_status\":\"$receipt_status\",\"exit_code\":$exit_code}" || true
+
+    maybe_rotate_receipts "$name" || true
 
     echo ""
     echo "════════════════════════════════════════"
