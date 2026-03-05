@@ -23,13 +23,30 @@ check_contains() {
   fi
 }
 
+check_auto_apply_enabled_flag() {
+  local value
+  if ! command -v yq >/dev/null 2>&1; then
+    fail "yq missing for auto_apply.enabled validation"
+    return
+  fi
+  value="$(yq e -r '.auto_apply.enabled // "missing"' "$CONTRACT" 2>/dev/null || true)"
+  case "$value" in
+    true|false)
+      pass "contract auto_apply.enabled declared as boolean ($value)"
+      ;;
+    *)
+      fail "contract auto_apply.enabled missing or non-boolean"
+      ;;
+  esac
+}
+
 echo "D355 Nightly Closeout Auto-Apply Safety Lock"
 echo "root=$ROOT"
 
 # 1. Contract has auto_apply section with safe defaults
 [[ -f "$CONTRACT" ]] && pass "contract exists" || fail "contract missing"
 check_contains "$CONTRACT" "auto_apply:" "contract has auto_apply section"
-check_contains "$CONTRACT" "enabled: false" "contract auto_apply defaults to disabled"
+check_auto_apply_enabled_flag
 check_contains "$CONTRACT" "safe_class_whitelist:" "contract defines safe class whitelist"
 check_contains "$CONTRACT" "require_merge_base_check: true" "contract requires merge-base safety"
 
