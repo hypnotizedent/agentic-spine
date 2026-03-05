@@ -109,7 +109,7 @@ fi
 
 # ── 4. Docs discoverability ──
 DOCS_README="$ROOT/docs/README.md"
-GOV_INDEX="$ROOT/docs/governance/GOVERNANCE_INDEX.md"
+# GOV_INDEX removed — consolidated in lean-reset
 
 if [[ -f "$DOCS_README" ]]; then
   if grep -q 'product/' "$DOCS_README" 2>/dev/null; then
