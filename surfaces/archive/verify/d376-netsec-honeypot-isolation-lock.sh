@@ -73,7 +73,7 @@ if ! ssh $SSH_OPTS root@"$PVE_HOME_HOST" 'echo ok' >/dev/null 2>&1; then
 else
   UNIFI_KEY=""
   if [[ -f "$ROOT/ops/tools/infisical-agent.sh" ]]; then
-    UNIFI_KEY="$("$ROOT/ops/tools/infisical-agent.sh" get-cached home-assistant prod UNIFI_HOME_API_KEY 2>/dev/null || true)"
+    UNIFI_KEY="$("$ROOT/ops/tools/infisical-agent.sh" get-cached infrastructure prod UNIFI_HOME_API_KEY 2>/dev/null || true)"
   fi
   if [[ -n "$UNIFI_KEY" ]]; then
     IPS_JSON="$(ssh $SSH_OPTS root@"$PVE_HOME_HOST" "curl -sk 'https://${UDR_ADDR}/proxy/network/api/s/default/rest/setting/ips/${IPS_OBJ_ID}' -H 'X-API-KEY: ${UNIFI_KEY}'" 2>/dev/null || true)"

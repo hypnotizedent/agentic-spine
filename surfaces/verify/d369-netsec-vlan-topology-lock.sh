@@ -32,7 +32,7 @@ fi
 # ── Resolve API key ──
 UNIFI_HOME_API_KEY="${UNIFI_HOME_API_KEY:-}"
 if [[ -z "$UNIFI_HOME_API_KEY" && -f "$INFISICAL_AGENT" ]]; then
-  UNIFI_HOME_API_KEY="$("$INFISICAL_AGENT" get-cached home-assistant prod UNIFI_HOME_API_KEY 2>/dev/null || true)"
+  UNIFI_HOME_API_KEY="$("$INFISICAL_AGENT" get-cached infrastructure prod UNIFI_HOME_API_KEY 2>/dev/null || true)"
 fi
 if [[ -z "$UNIFI_HOME_API_KEY" ]]; then
   echo "${GATE_ID} SKIP: UNIFI_HOME_API_KEY not available (offline)" >&2

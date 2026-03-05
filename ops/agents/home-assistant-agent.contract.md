@@ -35,7 +35,7 @@
 | SSOT auto-grade | `ha.ssot.propose` / `ha.ssot.apply` capabilities |
 | Stack deployment | `ops/bindings/docker.compose.targets.yaml` |
 | Health probes | `ops/bindings/services.health.yaml` |
-| Secrets | Infisical `home-assistant/prod/HA_API_TOKEN` |
+| Secrets | Infisical `infrastructure/prod/HA_API_TOKEN` (path: /spine/home/ha) |
 | Backups | `backup.*` capabilities |
 | Event-driven sync | `ha.sync.start` / `ha.sync.stop` / `ha.sync.status` capabilities |
 

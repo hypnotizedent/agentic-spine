@@ -18,7 +18,7 @@ if [[ ! -x "$INFISICAL_AGENT" ]]; then
   precondition_fail "infisical-agent.sh not found (secrets precondition unavailable)"
 fi
 
-HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+HA_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod HA_API_TOKEN 2>/dev/null) || true
 if [[ -z "${HA_TOKEN:-}" ]]; then
   precondition_fail "could not retrieve HA_API_TOKEN from Infisical"
 fi

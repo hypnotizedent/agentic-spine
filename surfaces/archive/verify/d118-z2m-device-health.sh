@@ -32,7 +32,7 @@ command -v jq >/dev/null 2>&1  || precondition_fail "jq not available"
 command -v yq >/dev/null 2>&1  || precondition_fail "yq not available"
 command -v python3 >/dev/null 2>&1 || precondition_fail "python3 not available"
 
-HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+HA_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod HA_API_TOKEN 2>/dev/null) || true
 if [[ -z "${HA_TOKEN:-}" ]]; then
   precondition_fail "HA token unavailable"
 fi

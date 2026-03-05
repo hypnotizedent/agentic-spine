@@ -14,7 +14,7 @@ if [[ ! -x "$INFISICAL_AGENT" ]]; then
   exit 0
 fi
 
-HA_TOKEN=$("$INFISICAL_AGENT" get home-assistant prod HA_API_TOKEN 2>/dev/null) || true
+HA_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod HA_API_TOKEN 2>/dev/null) || true
 
 if [[ -z "$HA_TOKEN" ]]; then
   echo "D99 FAIL: could not retrieve HA_API_TOKEN from Infisical"
