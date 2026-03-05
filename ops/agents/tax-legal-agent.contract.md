@@ -1,6 +1,6 @@
 # tax-legal-agent Contract
 
-> **Status:** planned
+> **Status:** experimental
 > **Domain:** tax-legal-ops
 > **Owner:** @ronny
 > **Created:** 2026-03-03
@@ -14,8 +14,8 @@
 
 - **Agent ID:** tax-legal-agent
 - **Domain:** tax-legal-ops (compliance coordination, citation-strict research, business lifecycle operations)
-- **Implementation:** planned (no runtime code in Wave 1)
-- **Registry:** `ops/bindings/agents.registry.yaml` (planned entry)
+- **Implementation:** experimental (Wave 2 runtime — 6 capabilities active)
+- **Registry:** `ops/bindings/agents.registry.yaml` (active entry)
 
 ## Role Definition
 

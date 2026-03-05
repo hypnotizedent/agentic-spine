@@ -10,10 +10,10 @@
 # ENTRY SURFACE GATE METADATA (generated)
 source_registry: ops/bindings/gate.registry.yaml
 registry_updated: 2026-03-05
-gate_count_total: 356
-gate_count_active: 355
+gate_count_total: 360
+gate_count_active: 359
 gate_count_retired: 1
-max_gate_id: D360
+max_gate_id: D364
 <!-- ENTRY_SURFACE_GATE_METADATA_END -->
 
 ## Session Entry

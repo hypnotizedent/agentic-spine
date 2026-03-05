@@ -137,13 +137,14 @@ When user-provided chat transcripts or AI-generated content is ingested:
 
 ## 6. Contract Enforcement
 
-### 6.1 Planned Drift Gates
+### 6.1 Active Drift Gates
 
 | Gate ID | Name | Purpose |
 |---------|------|---------|
-| `D333` | taxlegal-boundary-lock | Detect forbidden legal/tax-advice language patterns in generated templates |
-| `D335` | taxlegal-citation-strictness-lock | Ensure response templates require citation anchors or explicit unknown |
-| `D337` | taxlegal-privacy-redaction-lock | Ensure no direct SSN/EIN-like tokens in case artifacts |
+| `D359` | taxlegal-boundary-lock | Detect forbidden legal/tax-advice language patterns in generated templates |
+| `D360` | taxlegal-citation-strictness-lock | Ensure response templates require citation anchors or explicit unknown |
+| `D361` | taxlegal-privacy-redaction-lock | Ensure no direct SSN/EIN-like tokens in case artifacts |
+| `D362` | taxlegal-deadline-freshness-lock | Ensure deadline snapshots are refreshed within policy TTL |
 
 ### 6.2 Violation Response
 

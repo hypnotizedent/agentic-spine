@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# taxlegal-deadlines-status — Read-only view of upcoming deadlines with risk levels.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+DAYS_WINDOW=90
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --days) DAYS_WINDOW="$2"; shift 2 ;;
+    --) shift ;;
+    *) echo "error: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ── Check dependencies ───────────────────────────────────────────────────────
+if ! command -v yq &>/dev/null; then
+  echo "status: STOP"
+  echo "reason: yq not found in PATH"
+  exit 2
+fi
+
+CASES_ROOT="$ROOT/mailroom/state/cases/tax-legal"
+DEADLINES_FILE="$CASES_ROOT/deadlines.yaml"
+
+if [[ ! -f "$DEADLINES_FILE" ]]; then
+  echo "status: ok"
+  echo "deadlines_in_window: 0"
+  echo "window_days: $DAYS_WINDOW"
+  echo "detail: no deadlines file found at $DEADLINES_FILE"
+  exit 0
+fi
+
+# ── Read and check freshness ─────────────────────────────────────────────────
+REFRESHED_AT="$(yq -r '.refreshed_at // "never"' "$DEADLINES_FILE")"
+TOTAL_COUNT="$(yq -r '.deadlines | length' "$DEADLINES_FILE" 2>/dev/null || echo "0")"
+
+if [[ "$TOTAL_COUNT" -eq 0 ]]; then
+  echo "status: ok"
+  echo "deadlines_in_window: 0"
+  echo "window_days: $DAYS_WINDOW"
+  echo "refreshed_at: $REFRESHED_AT"
+  echo "detail: no deadlines registered"
+  exit 0
+fi
+
+# ── Risk prefix helper ────────────────────────────────────────────────────────
+risk_prefix() {
+  case "$1" in
+    critical) echo "[CRIT]" ;;
+    high)     echo "[HIGH]" ;;
+    medium)   echo "[MED]"  ;;
+    low)      echo "[LOW]"  ;;
+    *)        echo "[---]"  ;;
+  esac
+}
+
+# ── Filter and sort deadlines within window ───────────────────────────────────
+echo "status: ok"
+echo "window_days: $DAYS_WINDOW"
+echo "refreshed_at: $REFRESHED_AT"
+echo ""
+printf "%-8s  %-26s  %-28s  %-28s  %-12s  %5s  %-8s  %s\n" \
+  "RISK" "DEADLINE_ID" "CASE_ID" "FILING" "DUE_DATE" "DAYS" "LEVEL" "TIER"
+printf "%-8s  %-26s  %-28s  %-28s  %-12s  %5s  %-8s  %s\n" \
+  "--------" "--------------------------" "----------------------------" "----------------------------" "------------" "-----" "--------" "---------------"
+
+SHOWN=0
+
+# Extract deadlines, filter by window, sort by due_date
+yq -r ".deadlines[] | select(.days_remaining != null and .days_remaining <= $DAYS_WINDOW) | [.due_date, .deadline_id, .case_id, .filing_requirement, .days_remaining, .risk_level, .escalation_state] | @tsv" "$DEADLINES_FILE" 2>/dev/null \
+  | sort -t$'\t' -k1,1 \
+  | while IFS=$'\t' read -r due_date deadline_id case_id filing days_rem risk_level esc_tier; do
+    [[ -n "$due_date" ]] || continue
+    prefix="$(risk_prefix "$risk_level")"
+
+    # Truncate filing for display
+    if [[ ${#filing} -gt 28 ]]; then
+      filing="${filing:0:25}..."
+    fi
+
+    printf "%-8s  %-26s  %-28s  %-28s  %-12s  %5s  %-8s  %s\n" \
+      "$prefix" "$deadline_id" "$case_id" "$filing" "$due_date" "$days_rem" "$risk_level" "$esc_tier"
+    SHOWN=$((SHOWN + 1))
+    # Echo count to fd 3 for capture
+  done
+
+echo ""
+echo "deadlines_in_window: $(yq -r "[.deadlines[] | select(.days_remaining != null and .days_remaining <= $DAYS_WINDOW)] | length" "$DEADLINES_FILE" 2>/dev/null || echo "0")"
+echo "deadlines_total: $TOTAL_COUNT"
+exit 0

@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# taxlegal-packet-generate — Generate a draft filing packet for a case.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+CASE_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id) CASE_ID="$2"; shift 2 ;;
+    --) shift ;;
+    *) echo "error: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ── Validate inputs ──────────────────────────────────────────────────────────
+if [[ -z "$CASE_ID" ]]; then
+  echo "error: --id is required" >&2
+  exit 1
+fi
+
+# ── Check dependencies ───────────────────────────────────────────────────────
+if ! command -v yq &>/dev/null; then
+  echo "status: STOP"
+  echo "reason: yq not found in PATH"
+  exit 2
+fi
+
+CASES_ROOT="$ROOT/mailroom/state/cases/tax-legal"
+CASE_DIR="$CASES_ROOT/$CASE_ID"
+INTAKE="$CASE_DIR/intake.md"
+
+if [[ ! -d "$CASE_DIR" ]]; then
+  echo "status: FAIL"
+  echo "reason: case not found: $CASE_ID"
+  exit 1
+fi
+
+if [[ ! -f "$INTAKE" ]]; then
+  echo "status: FAIL"
+  echo "reason: intake.md not found for $CASE_ID"
+  exit 1
+fi
+
+# ── Extract case metadata from intake.md ──────────────────────────────────────
+extract_field() {
+  local file="$1" field="$2"
+  grep "| ${field}" "$file" 2>/dev/null | sed 's/.*|[^|]*|[[:space:]]*//' | sed 's/[[:space:]]*$//' || echo ""
+}
+
+c_type="$(extract_field "$INTAKE" "case_type")"
+c_state="$(extract_field "$INTAKE" "state")"
+c_subject="$(extract_field "$INTAKE" "subject")"
+c_jurisdiction="$(extract_field "$INTAKE" "jurisdiction")"
+c_created="$(extract_field "$INTAKE" "created")"
+
+# ── Validate case state ──────────────────────────────────────────────────────
+# Allowed states for packet generation: research_in_progress, draft_packet_ready,
+# human_review_required, ready_for_external_filing (or later)
+ALLOWED_STATES="research_in_progress draft_packet_ready human_review_required ready_for_external_filing closed"
+if ! echo "$ALLOWED_STATES" | tr ' ' '\n' | grep -qx "$c_state"; then
+  echo "status: FAIL"
+  echo "reason: case state '$c_state' is too early for packet generation"
+  echo "detail: case must be in research_in_progress or later (current: $c_state)"
+  echo "hint: complete intake and source gathering before generating a packet"
+  exit 1
+fi
+
+# ── Collect checklist items ───────────────────────────────────────────────────
+CHECKLIST="$CASE_DIR/checklist.yaml"
+CHECKLIST_SECTION=""
+if [[ -f "$CHECKLIST" ]]; then
+  item_count="$(yq -r '.items | length' "$CHECKLIST" 2>/dev/null || echo "0")"
+  if [[ "$item_count" -gt 0 ]]; then
+    CHECKLIST_SECTION="$(yq -r '.items[] | "- [ ] " + (.name // .step // "unnamed item") + (if .due_date then " (due: " + .due_date + ")" else "" end)' "$CHECKLIST" 2>/dev/null || echo "- [ ] (checklist parse error)")"
+  else
+    CHECKLIST_SECTION="- [ ] No checklist items defined yet"
+  fi
+else
+  CHECKLIST_SECTION="- [ ] checklist.yaml not found"
+fi
+
+# ── Collect deadline summary ──────────────────────────────────────────────────
+DEADLINES_FILE="$CASES_ROOT/deadlines.yaml"
+DEADLINE_SECTION=""
+if [[ -f "$DEADLINES_FILE" ]]; then
+  dl_count="$(yq -r "[.deadlines[] | select(.case_id == \"$CASE_ID\")] | length" "$DEADLINES_FILE" 2>/dev/null || echo "0")"
+  if [[ "$dl_count" -gt 0 ]]; then
+    DEADLINE_SECTION="$(yq -r ".deadlines[] | select(.case_id == \"$CASE_ID\") | \"| \" + .deadline_id + \" | \" + .filing_requirement + \" | \" + .due_date + \" | \" + (.days_remaining | tostring) + \"d | \" + .risk_level + \" | \" + .escalation_state + \" |\"" "$DEADLINES_FILE" 2>/dev/null || echo "| (parse error) |")"
+    DEADLINE_SECTION="| Deadline ID | Filing | Due Date | Days Left | Risk | Tier |
+|-------------|--------|----------|-----------|------|------|
+${DEADLINE_SECTION}"
+  else
+    DEADLINE_SECTION="No deadlines linked to this case."
+  fi
+else
+  DEADLINE_SECTION="No deadlines file found."
+fi
+
+# ── Collect source citations ──────────────────────────────────────────────────
+CITATIONS_FILE="$CASE_DIR/research/citations.json"
+CITATION_SECTION=""
+if [[ -f "$CITATIONS_FILE" ]] && command -v jq &>/dev/null; then
+  cite_count="$(jq 'length' "$CITATIONS_FILE" 2>/dev/null || echo "0")"
+  if [[ "$cite_count" -gt 0 ]]; then
+    CITATION_SECTION="$(jq -r '.[] | "- **" + .source_id + "** — " + .citation_anchor + " (retrieved: " + .retrieved_at + ")"' "$CITATIONS_FILE" 2>/dev/null || echo "- (citation parse error)")"
+  else
+    CITATION_SECTION="No citations recorded."
+  fi
+else
+  CITATION_SECTION="No citations.json found. Research citations should be added before filing."
+fi
+
+# ── Generate filing packet ────────────────────────────────────────────────────
+GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+PACKET_PATH="$CASE_DIR/drafts/filing-packet.md"
+mkdir -p "$CASE_DIR/drafts"
+
+cat > "$PACKET_PATH" <<EOF
+# Filing Packet: $CASE_ID
+
+Generated: $GENERATED_AT
+Status: DRAFT - Requires human professional review
+
+---
+
+## Case Header
+
+| Field         | Value                          |
+|---------------|--------------------------------|
+| case_id       | $CASE_ID                       |
+| case_type     | $c_type                        |
+| jurisdiction  | $c_jurisdiction                |
+| subject       | $c_subject                     |
+| created       | $c_created                     |
+| packet_state  | draft                          |
+
+---
+
+## Required Actions Checklist
+
+$CHECKLIST_SECTION
+
+---
+
+## Deadline Summary
+
+$DEADLINE_SECTION
+
+---
+
+## Source Citations
+
+$CITATION_SECTION
+
+---
+
+## Risk Classification
+
+See: risk/risk-classification.yaml
+
+Risk classification is generated alongside this packet. All cases default to
+"yellow" (requires human review) until a qualified professional upgrades or
+downgrades the classification.
+
+---
+
+## Human Review
+
+**THIS PACKET REQUIRES PROFESSIONAL REVIEW BEFORE ANY EXTERNAL ACTION.**
+
+- [ ] Reviewed by qualified attorney or CPA
+- [ ] All checklist items verified against primary sources
+- [ ] All citations confirmed current and accurate
+- [ ] Risk classification assessed and signed off
+- [ ] Privacy scan completed (no PII/sensitive data in filing artifacts)
+- [ ] Reviewer name: ___________________________
+- [ ] Review date: ___________________________
+- [ ] Disposition: [ ] Approved for filing  [ ] Revisions required  [ ] Rejected
+
+---
+
+*This is a case management artifact. Not legal or tax advice.
+All substantive decisions require review by a qualified professional.*
+EOF
+
+# ── Generate risk classification ──────────────────────────────────────────────
+RISK_PATH="$CASE_DIR/risk/risk-classification.yaml"
+mkdir -p "$CASE_DIR/risk"
+
+cat > "$RISK_PATH" <<EOF
+# Risk Classification: $CASE_ID
+# Auto-generated by taxlegal-packet-generate
+# Default: yellow (requires human review)
+
+case_id: "$CASE_ID"
+generated_at: "$GENERATED_AT"
+risk_color: "yellow"
+risk_label: "requires_human_review"
+classification_reason: "Auto-generated default. All cases require professional review before risk can be upgraded or downgraded."
+reviewed_by: null
+reviewed_at: null
+final_risk_color: null
+final_risk_label: null
+EOF
+
+# ── Output ───────────────────────────────────────────────────────────────────
+echo "status: ok"
+echo "case_id: $CASE_ID"
+echo "packet_path: $PACKET_PATH"
+echo "risk_path: $RISK_PATH"
+echo "generated_at: $GENERATED_AT"
+echo "risk_color: yellow"
+echo "risk_label: requires_human_review"
+echo "detail: filing packet and risk classification generated as drafts"
+echo "next_step: human professional review required before any external action"
+exit 0

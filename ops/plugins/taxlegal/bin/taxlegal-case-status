@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# taxlegal-case-status — Read case progress for a given case or all open cases.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+CASE_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id) CASE_ID="$2"; shift 2 ;;
+    --) shift ;;
+    *) echo "error: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+CASES_ROOT="$ROOT/mailroom/state/cases/tax-legal"
+
+if [[ ! -d "$CASES_ROOT" ]]; then
+  echo "status: ok"
+  echo "cases_found: 0"
+  echo "detail: no cases directory at $CASES_ROOT"
+  exit 0
+fi
+
+# ── Helper: extract field from intake.md table ────────────────────────────────
+extract_field() {
+  local file="$1" field="$2"
+  grep "| ${field}" "$file" 2>/dev/null | sed 's/.*|[^|]*|[[:space:]]*//' | sed 's/[[:space:]]*$//' || echo ""
+}
+
+# ── Single case detail view ──────────────────────────────────────────────────
+if [[ -n "$CASE_ID" ]]; then
+  CASE_DIR="$CASES_ROOT/$CASE_ID"
+  INTAKE="$CASE_DIR/intake.md"
+
+  if [[ ! -f "$INTAKE" ]]; then
+    echo "status: FAIL"
+    echo "reason: case not found: $CASE_ID"
+    exit 1
+  fi
+
+  c_type="$(extract_field "$INTAKE" "case_type")"
+  c_state="$(extract_field "$INTAKE" "state")"
+  c_subject="$(extract_field "$INTAKE" "subject")"
+  c_created="$(extract_field "$INTAKE" "created")"
+  c_jurisdiction="$(extract_field "$INTAKE" "jurisdiction")"
+
+  echo "status: ok"
+  echo "case_id: $CASE_ID"
+  echo "case_type: $c_type"
+  echo "state: $c_state"
+  echo "subject: $c_subject"
+  echo "created: $c_created"
+  echo "jurisdiction: $c_jurisdiction"
+  echo "path: $CASE_DIR"
+  echo ""
+
+  # Artifacts inventory
+  echo "artifacts:"
+  for f in intake.md checklist.yaml source-registry.lock.yaml; do
+    if [[ -f "$CASE_DIR/$f" ]]; then
+      echo "  $f: present"
+    else
+      echo "  $f: missing"
+    fi
+  done
+
+  # Subdirectory contents
+  for d in sources research drafts risk; do
+    dir_path="$CASE_DIR/$d"
+    if [[ -d "$dir_path" ]]; then
+      count="$(find "$dir_path" -type f 2>/dev/null | wc -l | tr -d ' ')"
+      echo "  $d/: $count files"
+    else
+      echo "  $d/: missing"
+    fi
+  done
+
+  # Deadlines (if any)
+  DEADLINES_FILE="$CASES_ROOT/deadlines.yaml"
+  if [[ -f "$DEADLINES_FILE" ]] && command -v yq &>/dev/null; then
+    deadline_count="$(yq -r "[.deadlines[] | select(.case_id == \"$CASE_ID\")] | length" "$DEADLINES_FILE" 2>/dev/null || echo "0")"
+    echo ""
+    echo "deadlines_linked: $deadline_count"
+    if [[ "$deadline_count" -gt 0 ]]; then
+      yq -r ".deadlines[] | select(.case_id == \"$CASE_ID\") | \"  \" + .deadline_id + \" | \" + .filing_requirement + \" | due: \" + .due_date + \" | \" + (.escalation_state // \"none\")" "$DEADLINES_FILE" 2>/dev/null || true
+    fi
+  fi
+
+  exit 0
+fi
+
+# ── All cases summary view ───────────────────────────────────────────────────
+case_count=0
+echo "status: ok"
+echo ""
+printf "%-32s  %-24s  %-22s  %s\n" "CASE_ID" "TYPE" "STATE" "SUBJECT"
+printf "%-32s  %-24s  %-22s  %s\n" "-------------------------------" "------------------------" "----------------------" "-------"
+
+for case_dir in "$CASES_ROOT"/CASE-TAXLEGAL-*/; do
+  [[ -d "$case_dir" ]] || continue
+  intake_file="$case_dir/intake.md"
+  [[ -f "$intake_file" ]] || continue
+
+  cid="$(basename "$case_dir")"
+  c_type="$(extract_field "$intake_file" "case_type")"
+  c_state="$(extract_field "$intake_file" "state")"
+  c_subject="$(extract_field "$intake_file" "subject")"
+
+  printf "%-32s  %-24s  %-22s  %s\n" "$cid" "$c_type" "$c_state" "$c_subject"
+  case_count=$((case_count + 1))
+done
+
+echo ""
+echo "cases_found: $case_count"
+exit 0

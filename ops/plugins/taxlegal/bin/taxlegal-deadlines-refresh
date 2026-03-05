@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# taxlegal-deadlines-refresh — Recompute deadline escalation states.
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+CASE_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id) CASE_ID="$2"; shift 2 ;;
+    --) shift ;;
+    *) echo "error: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ── Check dependencies ───────────────────────────────────────────────────────
+if ! command -v yq &>/dev/null; then
+  echo "status: STOP"
+  echo "reason: yq not found in PATH"
+  exit 2
+fi
+
+DEADLINE_CONTRACT="$ROOT/ops/bindings/taxlegal.deadline.contract.yaml"
+if [[ ! -f "$DEADLINE_CONTRACT" ]]; then
+  echo "status: STOP"
+  echo "reason: deadline contract not found at $DEADLINE_CONTRACT"
+  exit 2
+fi
+
+CASES_ROOT="$ROOT/mailroom/state/cases/tax-legal"
+DEADLINES_FILE="$CASES_ROOT/deadlines.yaml"
+
+if [[ ! -d "$CASES_ROOT" ]]; then
+  echo "status: ok"
+  echo "deadlines_refreshed: 0"
+  echo "detail: no cases directory"
+  exit 0
+fi
+
+# ── Read escalation tier thresholds from contract ─────────────────────────────
+# tiers: early_warning=30, active_warning=14, urgent=7, critical=3, overdue=0
+T_EARLY=$(yq -r '.escalation_windows.tiers[] | select(.tier == "early_warning") | .days_before_deadline' "$DEADLINE_CONTRACT")
+T_ACTIVE=$(yq -r '.escalation_windows.tiers[] | select(.tier == "active_warning") | .days_before_deadline' "$DEADLINE_CONTRACT")
+T_URGENT=$(yq -r '.escalation_windows.tiers[] | select(.tier == "urgent") | .days_before_deadline' "$DEADLINE_CONTRACT")
+T_CRITICAL=$(yq -r '.escalation_windows.tiers[] | select(.tier == "critical") | .days_before_deadline' "$DEADLINE_CONTRACT")
+
+# ── Helper: compute days remaining (macOS-compatible) ─────────────────────────
+days_remaining() {
+  local due_date="$1"
+  local today_epoch due_epoch
+  today_epoch="$(date -j -f "%Y-%m-%d" "$(date -u +%Y-%m-%d)" "+%s" 2>/dev/null || date -d "$(date -u +%Y-%m-%d)" "+%s")"
+  due_epoch="$(date -j -f "%Y-%m-%d" "$due_date" "+%s" 2>/dev/null || date -d "$due_date" "+%s")"
+  echo $(( (due_epoch - today_epoch) / 86400 ))
+}
+
+# ── Helper: map days to escalation tier ───────────────────────────────────────
+escalation_tier() {
+  local days="$1"
+  if [[ "$days" -le 0 ]]; then
+    echo "overdue"
+  elif [[ "$days" -le "$T_CRITICAL" ]]; then
+    echo "critical"
+  elif [[ "$days" -le "$T_URGENT" ]]; then
+    echo "urgent"
+  elif [[ "$days" -le "$T_ACTIVE" ]]; then
+    echo "active_warning"
+  elif [[ "$days" -le "$T_EARLY" ]]; then
+    echo "early_warning"
+  else
+    echo "none"
+  fi
+}
+
+# ── Helper: map tier to risk level ────────────────────────────────────────────
+risk_for_tier() {
+  local tier="$1"
+  case "$tier" in
+    overdue)        echo "critical" ;;
+    critical)       echo "high" ;;
+    urgent)         echo "high" ;;
+    active_warning) echo "medium" ;;
+    early_warning)  echo "low" ;;
+    *)              echo "low" ;;
+  esac
+}
+
+# ── Initialize deadlines file if missing ──────────────────────────────────────
+if [[ ! -f "$DEADLINES_FILE" ]]; then
+  cat > "$DEADLINES_FILE" <<EOF
+# Tax-Legal Deadlines Registry
+# Auto-managed by taxlegal-deadlines-refresh
+refreshed_at: null
+deadlines: []
+EOF
+fi
+
+# ── Collect deadlines from case checklists ────────────────────────────────────
+REFRESHED=0
+TEMP_DEADLINES="$(mktemp)"
+trap 'rm -f "$TEMP_DEADLINES"' EXIT
+
+# Start building new deadlines array
+echo "deadlines:" > "$TEMP_DEADLINES"
+
+# Process deadlines from the global deadlines.yaml
+EXISTING_COUNT="$(yq -r '.deadlines | length' "$DEADLINES_FILE" 2>/dev/null || echo "0")"
+
+if [[ "$EXISTING_COUNT" -gt 0 ]]; then
+  # Re-evaluate each existing deadline
+  while IFS= read -r line; do
+    d_id="$(echo "$line" | yq -r '.deadline_id')"
+    d_case="$(echo "$line" | yq -r '.case_id')"
+    d_due="$(echo "$line" | yq -r '.due_date')"
+    d_filing="$(echo "$line" | yq -r '.filing_requirement')"
+    d_jurisdiction="$(echo "$line" | yq -r '.jurisdiction // "unknown"')"
+    d_agency="$(echo "$line" | yq -r '.agency // "unknown"')"
+    d_type="$(echo "$line" | yq -r '.deadline_type // "one_time_filing"')"
+
+    # Filter by case if --id specified
+    if [[ -n "$CASE_ID" && "$d_case" != "$CASE_ID" ]]; then
+      # Preserve this deadline unchanged
+      echo "$line" | yq -r '["  - " + (. | to_yaml | ltrimstr("---\n"))][]' >> "$TEMP_DEADLINES" 2>/dev/null || true
+      continue
+    fi
+
+    days="$(days_remaining "$d_due")"
+    tier="$(escalation_tier "$days")"
+    risk="$(risk_for_tier "$tier")"
+
+    cat >> "$TEMP_DEADLINES" <<EOF
+  - deadline_id: "$d_id"
+    case_id: "$d_case"
+    deadline_type: "$d_type"
+    due_date: "$d_due"
+    filing_requirement: "$d_filing"
+    jurisdiction: "$d_jurisdiction"
+    agency: "$d_agency"
+    days_remaining: $days
+    escalation_state: "$tier"
+    risk_level: "$risk"
+EOF
+    REFRESHED=$((REFRESHED + 1))
+  done < <(yq -c '.deadlines[]' "$DEADLINES_FILE" 2>/dev/null)
+fi
+
+# Also scan case checklist.yaml files for deadline entries
+for case_dir in "$CASES_ROOT"/CASE-TAXLEGAL-*/; do
+  [[ -d "$case_dir" ]] || continue
+  cid="$(basename "$case_dir")"
+
+  # Filter by case if --id specified
+  if [[ -n "$CASE_ID" && "$cid" != "$CASE_ID" ]]; then
+    continue
+  fi
+
+  checklist="$case_dir/checklist.yaml"
+  [[ -f "$checklist" ]] || continue
+
+  # Check if checklist has items with due_date fields
+  item_count="$(yq -r '[.items[] | select(.due_date != null)] | length' "$checklist" 2>/dev/null || echo "0")"
+  [[ "$item_count" -gt 0 ]] || continue
+
+  while IFS= read -r item_line; do
+    i_name="$(echo "$item_line" | yq -r '.name // .step // "unknown"')"
+    i_due="$(echo "$item_line" | yq -r '.due_date')"
+    i_id="$(echo "$item_line" | yq -r '.deadline_id // empty')"
+
+    [[ -n "$i_due" && "$i_due" != "null" ]] || continue
+
+    # Skip if this deadline_id already exists in the global file
+    if [[ -n "$i_id" ]] && grep -q "deadline_id: \"$i_id\"" "$TEMP_DEADLINES" 2>/dev/null; then
+      continue
+    fi
+
+    # Generate deadline_id if missing
+    if [[ -z "$i_id" || "$i_id" == "null" ]]; then
+      i_id="DL-${cid}-$(echo "$i_name" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | head -c 30)"
+    fi
+
+    days="$(days_remaining "$i_due")"
+    tier="$(escalation_tier "$days")"
+    risk="$(risk_for_tier "$tier")"
+
+    cat >> "$TEMP_DEADLINES" <<EOF
+  - deadline_id: "$i_id"
+    case_id: "$cid"
+    deadline_type: "one_time_filing"
+    due_date: "$i_due"
+    filing_requirement: "$i_name"
+    jurisdiction: "unknown"
+    agency: "unknown"
+    days_remaining: $days
+    escalation_state: "$tier"
+    risk_level: "$risk"
+EOF
+    REFRESHED=$((REFRESHED + 1))
+  done < <(yq -c '[.items[] | select(.due_date != null)][]' "$checklist" 2>/dev/null)
+done
+
+# ── Write updated deadlines file ─────────────────────────────────────────────
+REFRESHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+{
+  echo "# Tax-Legal Deadlines Registry"
+  echo "# Auto-managed by taxlegal-deadlines-refresh"
+  echo "refreshed_at: \"$REFRESHED_AT\""
+  cat "$TEMP_DEADLINES"
+} > "$DEADLINES_FILE"
+
+# ── Output ───────────────────────────────────────────────────────────────────
+echo "status: ok"
+echo "refreshed_at: $REFRESHED_AT"
+echo "deadlines_refreshed: $REFRESHED"
+if [[ -n "$CASE_ID" ]]; then
+  echo "scope: $CASE_ID"
+else
+  echo "scope: all"
+fi
+echo "deadlines_file: $DEADLINES_FILE"
+exit 0

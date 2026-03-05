@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# taxlegal-case-intake — Create a new case envelope in mailroom/state/cases/tax-legal/
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+CASE_TYPE=""
+SUBJECT=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --type) CASE_TYPE="$2"; shift 2 ;;
+    --subject) SUBJECT="$2"; shift 2 ;;
+    --) shift ;;
+    *) echo "error: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ── Validate inputs ──────────────────────────────────────────────────────────
+if [[ -z "$CASE_TYPE" ]]; then
+  echo "error: --type is required" >&2
+  echo "valid types: formation, address_amendment, local_compliance, enforcement_remediation, ongoing_compliance, closure" >&2
+  exit 1
+fi
+
+if [[ -z "$SUBJECT" ]]; then
+  echo "error: --subject is required" >&2
+  exit 1
+fi
+
+VALID_TYPES="formation address_amendment local_compliance enforcement_remediation ongoing_compliance closure"
+if ! echo "$VALID_TYPES" | tr ' ' '\n' | grep -qx "$CASE_TYPE"; then
+  echo "error: invalid case type: $CASE_TYPE" >&2
+  echo "valid types: $VALID_TYPES" >&2
+  exit 1
+fi
+
+# ── Check dependencies ───────────────────────────────────────────────────────
+JURISDICTION_PROFILE="$ROOT/ops/bindings/taxlegal.jurisdiction.profile.33441.yaml"
+if [[ ! -f "$JURISDICTION_PROFILE" ]]; then
+  echo "status: STOP"
+  echo "reason: jurisdiction profile not found at $JURISDICTION_PROFILE"
+  exit 2
+fi
+
+if ! command -v yq &>/dev/null; then
+  echo "status: STOP"
+  echo "reason: yq not found in PATH"
+  exit 2
+fi
+
+# ── Generate case ID ─────────────────────────────────────────────────────────
+CASES_ROOT="$ROOT/mailroom/state/cases/tax-legal"
+mkdir -p "$CASES_ROOT"
+
+TODAY="$(date -u +%Y%m%d)"
+EXISTING_COUNT=0
+for d in "$CASES_ROOT"/CASE-TAXLEGAL-*/; do
+  [[ -d "$d" ]] && EXISTING_COUNT=$((EXISTING_COUNT + 1))
+done
+SEQ=$(printf "%04d" $((EXISTING_COUNT + 1)))
+CASE_ID="CASE-TAXLEGAL-${TODAY}-${SEQ}"
+
+# ── Create case directory structure ──────────────────────────────────────────
+CASE_DIR="$CASES_ROOT/$CASE_ID"
+mkdir -p "$CASE_DIR"/{sources,research,drafts,risk}
+
+# ── Resolve jurisdiction ─────────────────────────────────────────────────────
+JURISDICTION_CITY="$(yq -r '.profile.city // "unknown"' "$JURISDICTION_PROFILE")"
+JURISDICTION_COUNTY="$(yq -r '.profile.county // "unknown"' "$JURISDICTION_PROFILE")"
+JURISDICTION_STATE="$(yq -r '.profile.state_abbreviation // "unknown"' "$JURISDICTION_PROFILE")"
+JURISDICTION_ZIP="$(yq -r '.profile.zip_code // "unknown"' "$JURISDICTION_PROFILE")"
+JURISDICTION_LABEL="${JURISDICTION_CITY}, ${JURISDICTION_COUNTY} County, ${JURISDICTION_STATE} ${JURISDICTION_ZIP}"
+
+CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# ── Create intake.md ─────────────────────────────────────────────────────────
+cat > "$CASE_DIR/intake.md" <<EOF
+# Case Intake: $CASE_ID
+
+| Field         | Value                          |
+|---------------|--------------------------------|
+| case_id       | $CASE_ID                       |
+| case_type     | $CASE_TYPE                     |
+| subject       | $SUBJECT                       |
+| jurisdiction  | $JURISDICTION_LABEL            |
+| created       | $CREATED_AT                    |
+| state         | intake                         |
+
+## Intake Notes
+
+- Jurisdiction profile: 33441 (${JURISDICTION_CITY}, ${JURISDICTION_STATE})
+- Case type: $CASE_TYPE
+- Created by: taxlegal-case-intake capability
+
+## Next Steps
+
+1. Populate checklist.yaml with required actions for this case type
+2. Identify primary sources and add to source-registry.lock.yaml
+3. Transition to sources_pending when ready
+
+---
+*This is a case management artifact. Not legal or tax advice.*
+EOF
+
+# ── Create checklist.yaml ────────────────────────────────────────────────────
+cat > "$CASE_DIR/checklist.yaml" <<EOF
+# Case Checklist: $CASE_ID
+case_id: "$CASE_ID"
+case_type: "$CASE_TYPE"
+created: "$CREATED_AT"
+items: []
+EOF
+
+# ── Create source-registry.lock.yaml ─────────────────────────────────────────
+cat > "$CASE_DIR/source-registry.lock.yaml" <<EOF
+# Source Registry Lock: $CASE_ID
+case_id: "$CASE_ID"
+locked_at: null
+sources: []
+EOF
+
+# ── Output ───────────────────────────────────────────────────────────────────
+echo "status: ok"
+echo "case_id: $CASE_ID"
+echo "case_type: $CASE_TYPE"
+echo "subject: $SUBJECT"
+echo "jurisdiction: $JURISDICTION_LABEL"
+echo "created: $CREATED_AT"
+echo "state: intake"
+echo "path: $CASE_DIR"
+echo "artifacts: intake.md, checklist.yaml, source-registry.lock.yaml"
+echo "directories: sources/, research/, drafts/, risk/"
+exit 0

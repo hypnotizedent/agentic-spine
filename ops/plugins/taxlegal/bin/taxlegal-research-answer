@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# taxlegal-research-answer — Citation-strict research lookup (read-only).
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+CASE_ID=""
+QUERY=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --id) CASE_ID="$2"; shift 2 ;;
+    --query) QUERY="$2"; shift 2 ;;
+    --) shift ;;
+    *) echo "error: unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ── Validate inputs ──────────────────────────────────────────────────────────
+if [[ -z "$CASE_ID" ]]; then
+  echo "error: --id is required" >&2
+  exit 1
+fi
+
+if [[ -z "$QUERY" ]]; then
+  echo "error: --query is required" >&2
+  exit 1
+fi
+
+# ── Check dependencies ───────────────────────────────────────────────────────
+CITATION_CONTRACT="$ROOT/ops/bindings/taxlegal.citation.contract.yaml"
+if [[ ! -f "$CITATION_CONTRACT" ]]; then
+  echo "status: STOP"
+  echo "reason: citation contract not found at $CITATION_CONTRACT"
+  exit 2
+fi
+
+CASES_ROOT="$ROOT/mailroom/state/cases/tax-legal"
+CASE_DIR="$CASES_ROOT/$CASE_ID"
+
+if [[ ! -d "$CASE_DIR" ]]; then
+  echo "status: FAIL"
+  echo "reason: case not found: $CASE_ID"
+  exit 1
+fi
+
+# ── Boundary notice (always printed) ─────────────────────────────────────────
+BOUNDARY_NOTICE="This is research output only. Not legal or tax advice. Human professional review required."
+
+RESEARCH_DIR="$CASE_DIR/research"
+ANSWERS_FILE="$RESEARCH_DIR/answers.md"
+CITATIONS_FILE="$RESEARCH_DIR/citations.json"
+
+# ── Search for matching research ──────────────────────────────────────────────
+if [[ -f "$ANSWERS_FILE" ]]; then
+  # Case-insensitive grep for query terms in answers.md
+  # Extract matching sections (delimited by ## headers)
+  MATCHES=""
+  MATCH_COUNT=0
+
+  # Search for lines matching the query
+  MATCHING_LINES="$(grep -in "$QUERY" "$ANSWERS_FILE" 2>/dev/null || true)"
+
+  if [[ -n "$MATCHING_LINES" ]]; then
+    # For each match, extract the surrounding section (from ## to next ##)
+    SEEN_SECTIONS=""
+    while IFS= read -r match_line; do
+      line_num="$(echo "$match_line" | cut -d: -f1)"
+
+      # Find the section header above this line
+      section_header=""
+      search_line="$line_num"
+      while [[ "$search_line" -gt 0 ]]; do
+        header_check="$(sed -n "${search_line}p" "$ANSWERS_FILE")"
+        if [[ "$header_check" == "##"* ]]; then
+          section_header="$header_check"
+          break
+        fi
+        search_line=$((search_line - 1))
+      done
+
+      # Skip if we already showed this section
+      if [[ -n "$section_header" ]] && echo "$SEEN_SECTIONS" | grep -qF "$section_header" 2>/dev/null; then
+        continue
+      fi
+      SEEN_SECTIONS="${SEEN_SECTIONS}${section_header}"$'\n'
+
+      # Find the end of this section (next ## or EOF)
+      total_lines="$(wc -l < "$ANSWERS_FILE" | tr -d ' ')"
+      section_end="$total_lines"
+      scan_line=$((search_line + 1))
+      while [[ "$scan_line" -le "$total_lines" ]]; do
+        next_check="$(sed -n "${scan_line}p" "$ANSWERS_FILE")"
+        if [[ "$next_check" == "##"* ]]; then
+          section_end=$((scan_line - 1))
+          break
+        fi
+        scan_line=$((scan_line + 1))
+      done
+
+      # Extract the section
+      section_text="$(sed -n "${search_line},${section_end}p" "$ANSWERS_FILE")"
+      MATCHES="${MATCHES}${section_text}"$'\n\n'
+      MATCH_COUNT=$((MATCH_COUNT + 1))
+    done <<< "$MATCHING_LINES"
+
+    # ── Output matched results ────────────────────────────────────────────
+    echo "status: ok"
+    echo "case_id: $CASE_ID"
+    echo "query: $QUERY"
+    echo "matches_found: $MATCH_COUNT"
+    echo ""
+
+    echo "--- RESEARCH RESULTS ---"
+    echo "$MATCHES"
+
+    # Include citations if available
+    if [[ -f "$CITATIONS_FILE" ]]; then
+      echo "--- CITATIONS ---"
+      # Try to extract citations related to the query
+      if command -v jq &>/dev/null; then
+        jq -r ".[] | select(.claim_text | test(\"$QUERY\"; \"i\")) | \"source: \" + .source_id + \" | anchor: \" + .citation_anchor + \" | retrieved: \" + .retrieved_at" "$CITATIONS_FILE" 2>/dev/null || echo "  (citation parse error or no matching citations)"
+      else
+        echo "  (jq not available for citation extraction)"
+      fi
+      echo ""
+    fi
+
+    echo "--- BOUNDARY ---"
+    echo "$BOUNDARY_NOTICE"
+    exit 0
+  fi
+fi
+
+# ── No match or no research exists ────────────────────────────────────────────
+# Per citation contract unknown_state: output required unknown fields
+
+# Read the required unknown fields from contract
+UNKNOWN_LABEL="$(yq -r '.unknown_state.required_label // "unknown"' "$CITATION_CONTRACT" 2>/dev/null || echo "unknown")"
+
+echo "status: ok"
+echo "case_id: $CASE_ID"
+echo "query: $QUERY"
+echo "matches_found: 0"
+echo "result: $UNKNOWN_LABEL"
+echo ""
+echo "claim_text: $QUERY"
+if [[ -f "$ANSWERS_FILE" ]]; then
+  echo "reason_for_unknown: query term not found in existing research"
+else
+  echo "reason_for_unknown: no research artifacts exist for this case"
+fi
+echo "suggested_sources: check ops/bindings/taxlegal.sources.registry.yaml for applicable primary sources"
+echo "escalation_action: populate research/answers.md with citation-backed findings before querying"
+echo ""
+echo "--- BOUNDARY ---"
+echo "$BOUNDARY_NOTICE"
+exit 0
