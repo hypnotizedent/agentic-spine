@@ -63,6 +63,34 @@ now_epoch="$(date +%s)"
 for ((i=0; i<action_count; i++)); do
   action_id="$(yq e -r ".actions[$i].id // \"\"" "$BINDING_FILE")"
   [[ -n "$action_id" ]] || { err "action[$i] missing id"; continue; }
+  action_type="$(yq e -r ".actions[$i].recovery.type // \"\"" "$BINDING_FILE")"
+  [[ -n "$action_type" && "$action_type" != "null" ]] || { err "action '$action_id' missing recovery.type"; continue; }
+  case "$action_type" in
+    docker_compose_restart|launchd_restart|capability_retry|capability_commit|alert_only) ;;
+    *) err "action '$action_id' uses unsupported recovery.type '$action_type'"; continue ;;
+  esac
+
+  if [[ "$action_type" == "capability_retry" ]]; then
+    retry_capability="$(yq e -r ".actions[$i].recovery.capability // \"\"" "$BINDING_FILE")"
+    [[ -n "$retry_capability" && "$retry_capability" != "null" ]] || err "action '$action_id' capability_retry missing recovery.capability"
+
+    retry_max_attempts="$(yq e -r ".actions[$i].recovery.max_attempts // \"\"" "$BINDING_FILE")"
+    if [[ ! "$retry_max_attempts" =~ ^[0-9]+$ ]] || (( retry_max_attempts < 1 )); then
+      err "action '$action_id' capability_retry must define recovery.max_attempts >= 1"
+    fi
+
+    mapfile -t backoff_values < <(yq e -r ".actions[$i].recovery.backoff_seconds[]?" "$BINDING_FILE" 2>/dev/null || true)
+    if [[ "${#backoff_values[@]}" -eq 0 ]]; then
+      err "action '$action_id' capability_retry missing recovery.backoff_seconds"
+    else
+      for backoff in "${backoff_values[@]}"; do
+        if [[ ! "$backoff" =~ ^[0-9]+$ ]] || (( backoff < 1 )); then
+          err "action '$action_id' capability_retry has invalid backoff_seconds value '$backoff'"
+          break
+        fi
+      done
+    fi
+  fi
 
   max_attempts="$(yq e -r ".actions[$i].safety.max_attempts // .actions[$i].recovery.max_attempts // .defaults.max_attempts // 2" "$BINDING_FILE")"
   [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=2

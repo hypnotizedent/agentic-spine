@@ -91,6 +91,9 @@ fi
 RADARR_PORT="${RADARR_PORT:-7878}"
 JELLYFIN_PORT="${JELLYFIN_PORT:-8096}"
 JELLYSEERR_PORT="${JELLYSEERR_PORT:-5055}"
+CURL_CONNECT_TIMEOUT="${MEDIA_E2E_CONNECT_TIMEOUT:-5}"
+CURL_MAX_TIME="${MEDIA_E2E_CURL_TIMEOUT:-30}"
+RADARR_LIST_TIMEOUT="${MEDIA_E2E_RADARR_LIST_TIMEOUT:-120}"
 
 RADARR_URL="http://${DOWNLOAD_HOST}:${RADARR_PORT}"
 JELLYFIN_URL="http://${STREAMING_HOST}:${JELLYFIN_PORT}"
@@ -110,7 +113,7 @@ fi
 check_arr_hasfile() {
   local movie_id="$1"
   local result
-  result="$(curl -sf --max-time 10 \
+  result="$(curl -sf --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
     -H "X-Api-Key: ${RADARR_API_KEY}" \
     "${RADARR_URL}/api/v3/movie/${movie_id}" 2>/dev/null)" || {
     echo '{"leg":"arr_hasfile","pass":false,"reason":"api_unreachable"}'
@@ -164,7 +167,7 @@ check_jellyfin_indexed() {
   encoded_title="$(python3 -c "import urllib.parse; print(urllib.parse.quote('$title'))" 2>/dev/null || echo "$title")"
 
   local result
-  result="$(curl -sf --max-time 10 \
+  result="$(curl -sf --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
     -H "X-Emby-Token: ${JELLYFIN_API_KEY}" \
     "${JELLYFIN_URL}/Items?SearchTerm=${encoded_title}&IncludeItemTypes=Movie&Recursive=true&Fields=MediaSources,ProviderIds" 2>/dev/null)" || {
     echo '{"leg":"jellyfin_indexed","pass":false,"reason":"api_unreachable"}'
@@ -202,7 +205,7 @@ check_jellyseerr_fulfilled() {
 
   # Search for request by TMDb ID
   local result
-  result="$(curl -sf --max-time 10 \
+  result="$(curl -sf --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
     -H "X-Api-Key: ${JELLYSEERR_API_KEY}" \
     "${JELLYSEERR_URL}/api/v1/request?take=20&skip=0" 2>/dev/null)" || {
     echo '{"leg":"jellyseerr_fulfilled","pass":true,"skip":true,"reason":"api_unreachable"}'
@@ -264,7 +267,7 @@ get_movie_ids() {
     sampled)
       # Get random sample of movies with hasFile=true
       local movies
-      movies="$(curl -sf --max-time 30 \
+      movies="$(curl -sf --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$RADARR_LIST_TIMEOUT" \
         -H "X-Api-Key: ${RADARR_API_KEY}" \
         "${RADARR_URL}/api/v3/movie" 2>/dev/null)" || {
         echo "FAIL: cannot reach Radarr API" >&2
@@ -275,7 +278,7 @@ get_movie_ids() {
       ;;
     full_audit)
       local movies
-      movies="$(curl -sf --max-time 60 \
+      movies="$(curl -sf --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$RADARR_LIST_TIMEOUT" \
         -H "X-Api-Key: ${RADARR_API_KEY}" \
         "${RADARR_URL}/api/v3/movie" 2>/dev/null)" || {
         echo "FAIL: cannot reach Radarr API" >&2

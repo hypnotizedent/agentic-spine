@@ -51,6 +51,27 @@ command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
 [[ -f "$BINDING_FILE" ]] || stop "missing binding: $BINDING_FILE"
 
+validate_action_types() {
+  local recovery_type
+  local -a invalid_types=()
+
+  while IFS= read -r recovery_type; do
+    [[ -n "$recovery_type" && "$recovery_type" != "null" ]] || continue
+    case "$recovery_type" in
+      docker_compose_restart|launchd_restart|capability_retry|capability_commit|alert_only) ;;
+      *) invalid_types+=("$recovery_type") ;;
+    esac
+  done < <(yq e -r '.actions[].recovery.type // ""' "$BINDING_FILE" 2>/dev/null || true)
+
+  if [[ "${#invalid_types[@]}" -gt 0 ]]; then
+    local unique_invalid
+    unique_invalid="$(printf '%s\n' "${invalid_types[@]}" | sort -u | paste -sd',' -)"
+    stop "unsupported recovery type(s) in binding: $unique_invalid"
+  fi
+}
+
+validate_action_types
+
 recovery_init_state
 
 mapfile -t match_indices < <(
