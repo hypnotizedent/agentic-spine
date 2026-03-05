@@ -173,8 +173,11 @@ def canonical_status_sets(contract: dict[str, Any]) -> tuple[set[str], dict[str,
     return canonical, alias_map, legacy_map
 
 
-def canonical_doc_plan_id(path: Path) -> str:
+def canonical_doc_plan_id(path: Path, known_plan_ids: set[str] | None = None) -> str:
     stem = path.stem.strip()
+    # Prefer exact matches from authority to avoid stripping legitimate date-suffixed IDs.
+    if known_plan_ids and stem in known_plan_ids:
+        return stem
     match = re.match(r"^(PLAN-[A-Z0-9-]+?)(?:-\d{8}(?:-\d{8})?)?$", stem)
     if match:
         return match.group(1)
@@ -431,7 +434,7 @@ def project_to_surfaces(
     by_id: dict[str, Path] = {}
     duplicates: list[Path] = []
     for doc in doc_paths:
-        cid = canonical_doc_plan_id(doc)
+        cid = canonical_doc_plan_id(doc, plan_set)
         if cid in by_id:
             duplicates.append(doc)
             continue
@@ -517,7 +520,7 @@ def db_parity_snapshot(conn: sqlite3.Connection, index_path: Path, plans_dir: Pa
     }
 
     doc_paths = sorted(plans_dir.glob("PLAN-*.md"))
-    doc_ids = {canonical_doc_plan_id(doc) for doc in doc_paths}
+    doc_ids = {canonical_doc_plan_id(doc, plan_set) for doc in doc_paths}
 
     missing_docs = sorted(plan_set - doc_ids)
     orphan_docs = sorted(doc_ids - plan_set)
