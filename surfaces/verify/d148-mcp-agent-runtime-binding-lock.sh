@@ -164,13 +164,22 @@ fi
 
 # 4) Required LaunchAgents must exist in governed source templates, be installed in user launchd,
 # and preserve schedule parity. Live load-state checks are mandatory unless explicitly skipped in tests.
-source_dir="$(yq e -r '.paths.source_dir // ""' "$LAUNCHD_CONTRACT")"
+contract_source_dir="$(yq e -r '.paths.source_dir // ""' "$LAUNCHD_CONTRACT")"
+source_dir="$contract_source_dir"
+# Use the current repo checkout for template comparisons to avoid cross-worktree
+# false drift when contract paths point at the canonical machine checkout.
+worktree_source_dir="$ROOT/ops/runtime/launchd"
+if [[ -d "$worktree_source_dir" ]]; then
+  source_dir="$worktree_source_dir"
+fi
 install_dir="$(yq e -r '.paths.user_launchagents_dir // ""' "$LAUNCHD_CONTRACT")"
 log_root="$(yq e -r '.paths.canonical_log_root // ""' "$LAUNCHD_CONTRACT")"
 ssot_tz="$(yq e -r '.runtime.timezone // "America/New_York"' "$TENANT_PROFILE")"
 expected_launchd_spine_root="$(yq e -r '.runtime.spine_root // ""' "$TENANT_PROFILE")"
 if [[ -z "$expected_launchd_spine_root" || "$expected_launchd_spine_root" == "null" ]]; then
-  if [[ "$source_dir" == */ops/runtime/launchd ]]; then
+  if [[ "$contract_source_dir" == */ops/runtime/launchd ]]; then
+    expected_launchd_spine_root="${contract_source_dir%/ops/runtime/launchd}"
+  elif [[ "$source_dir" == */ops/runtime/launchd ]]; then
     expected_launchd_spine_root="${source_dir%/ops/runtime/launchd}"
   fi
 fi
