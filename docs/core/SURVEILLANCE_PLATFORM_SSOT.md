@@ -16,6 +16,7 @@ Primary dependencies:
 - `ops/bindings/vm.lifecycle.yaml`
 - `ops/bindings/infra.placement.policy.yaml`
 - `ops/bindings/infra.storage.placement.policy.yaml`
+- `ops/bindings/surveillance.topology.contract.yaml`
 
 ## Canonical Decisions
 
@@ -49,6 +50,24 @@ Primary dependencies:
 
 - `ha.surveillance.status` (read-only)
   - home HA integration health for surveillance entities/automations
+
+## Storage & Retention Policy
+
+- Storage tier: `tank-vms` (ZFS zvol, dedicated non-boot disk)
+- Data mount: `/mnt/data`
+- Recordings: 14-day retention, auto-cleanup at 85% threshold
+- Clips/Snapshots: 30-day retention
+- Frigate DB + recordings on dedicated data disk, never on boot volume.
+- Authority: `ops/bindings/surveillance.topology.contract.yaml`
+
+## HA Integration Authority
+
+- Single HA instance: existing home HA (VM 100, proxmox-home)
+- Integration method: Frigate MQTT (via Mosquitto broker)
+- Automations: person/vehicle/after-hours detection in home HA
+- Dashboard: Frigate card in home HA Lovelace
+- Capability: `ha.surveillance.status` reports integration health
+- Authority: `ops/bindings/surveillance.topology.contract.yaml`
 
 ## Non-Blocking Future Enhancements
 

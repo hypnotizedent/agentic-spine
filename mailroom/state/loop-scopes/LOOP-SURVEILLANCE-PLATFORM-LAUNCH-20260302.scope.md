@@ -101,15 +101,17 @@ The shop currently has a raw Hikvision NVR-only camera access system that is:
 
 ## Gaps
 
-To be filed during execution:
-- GAP-OP-NNN: Missing surveillance capabilities in registry
-- GAP-OP-NNN: VM intake/provision mismatch for surveillance target
+Filed during execution wave:
+- Surveillance capability gaps: to be filed via `gaps.file --id auto` during Lane B execution
+- VM provisioning gaps: to be filed via `gaps.file --id auto` during Lane C execution
+- Camera outage: tracked under LOOP-CAMERA-OUTAGE-20260209 (GAP-OP-031)
 
 ## Evidence Paths
 
 - `docs/governance/CAMERA_SSOT.md`
 - `docs/governance/loops/LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.md`
 - `mailroom/outbox/proposals/CP-20260302-075509__surveillance-platform-launch/`
+- `ops/bindings/surveillance.topology.contract.yaml`
 
 ## Related Documents
 

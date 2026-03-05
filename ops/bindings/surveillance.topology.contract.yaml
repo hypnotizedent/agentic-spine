@@ -1,0 +1,125 @@
+# Surveillance Topology Contract v1.0
+# Authority: LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302
+# Scope: Runtime topology, storage/retention, HA integration authority
+
+contract_id: SURVEILLANCE_TOPOLOGY_CONTRACT_V1
+version: "1.0"
+status: planned
+owner: "@ronny"
+created: "2026-03-04"
+last_verified: "2026-03-04"
+parent_loop: LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302
+
+# ─── Canonical Decisions ─────────────────────────────────────────────
+canonical_decisions:
+  ha_instance_policy: single
+  ha_instance_target: home
+  ha_instance_note: "Existing home HA instance (VM 100, proxmox-home) is the sole automation authority. No separate shop-ha VM."
+  deployment_baseline: cpu_first
+  gpu_policy: optional_future
+  gpu_note: "GPU acceleration (Tesla P40, Intel QSV, etc.) is documented as optional future optimization. Never a deployment blocker."
+  vmid_policy: governed_intake
+  vmid_note: "VM IDs allocated exclusively through infra.vm.intake.scaffold + vm.lifecycle.yaml. No hardcoded IDs in planning."
+
+# ─── Runtime Topology ────────────────────────────────────────────────
+runtime:
+  surveillance_stack:
+    hostname: surveillance-stack
+    vm_id: null  # Allocated by intake scaffold
+    lan_ip: null  # Assigned during provisioning
+    tailscale_ip: null  # Enrolled post-provision
+    proxmox_host: pve
+    access_policy: lan_first
+    os: ubuntu-24.04
+    profile: spine-ready-v1
+    services:
+      - name: frigate
+        image: ghcr.io/blakeblackshear/frigate:stable
+        purpose: "NVR replacement + object detection (CPU baseline)"
+        ports:
+          web_ui: 5000
+          rtsp: 8554
+          webrtc: 8555
+        detector: cpu
+        detector_note: "OpenCV CPU detector. GPU passthrough optional future enhancement."
+      - name: go2rtc
+        image: alexxit/go2rtc:latest
+        purpose: "WebRTC/RTSP proxy for low-latency camera viewing"
+        ports:
+          api: 1984
+          rtsp: 8554
+          webrtc: 8555
+        note: "Bundled with Frigate; standalone instance optional for dedicated display feeds."
+
+  home_assistant:
+    hostname: homeassistant
+    vm_id: 100
+    proxmox_host: proxmox-home
+    lan_ip: "10.0.0.100"
+    integration_type: frigate_mqtt
+    integration_note: "Frigate MQTT integration sends events to home HA. Mosquitto broker required."
+
+# ─── Camera Source ───────────────────────────────────────────────────
+camera_source:
+  nvr_model: "Hikvision ERI-K216-P16"
+  nvr_ip: "192.168.1.216"
+  nvr_ssh_target: nvr-shop
+  channels_configured: 12
+  channels_online: 0  # Camera outage active (LOOP-CAMERA-OUTAGE-20260209)
+  rtsp_port: 554
+  credential_path: "infrastructure/prod:/spine/shop/nvr/*"
+  blocker: "LOOP-CAMERA-OUTAGE-20260209 — all channels dark since 2026-02-09"
+
+# ─── Storage & Retention ────────────────────────────────────────────
+storage:
+  tier: tank-vms
+  tier_note: "ZFS zvol attached as virtio disk. Recordings and Frigate DB on dedicated non-boot storage."
+  boot_disk_gb: 50
+  data_disk_gb: 100
+  data_mount: /mnt/data
+  frigate_db_path: /mnt/data/frigate/frigate.db
+  recordings_path: /mnt/data/frigate/recordings
+  clips_path: /mnt/data/frigate/clips
+  snapshots_path: /mnt/data/frigate/snapshots
+
+retention:
+  recordings_days: 14
+  clips_days: 30
+  snapshots_days: 30
+  cleanup_policy: automatic
+  cleanup_note: "Frigate built-in retention management. Oldest recordings auto-deleted when storage threshold reached."
+  storage_warning_threshold_pct: 85
+
+# ─── Capabilities ───────────────────────────────────────────────────
+capabilities:
+  - id: surveillance.stack.status
+    safety: read-only
+    purpose: "Frigate health, camera online/offline counts, detector pipeline (CPU), disk pressure"
+  - id: surveillance.event.query
+    safety: read-only
+    purpose: "Query Frigate events by camera/label/time range; return counts + latest matches"
+  - id: ha.surveillance.status
+    safety: read-only
+    purpose: "Home HA integration health for surveillance entities/automations"
+
+# ─── Drift Rules ────────────────────────────────────────────────────
+drift_rules:
+  forbidden_required_references:
+    - "shop-ha"
+    - "VM 211"
+    - "VM 212"
+    - "Tesla P40 required"
+  allowed_historical_only:
+    - pattern: "shop-ha"
+      context: "May appear in historical notes if explicitly marked deprecated/non-authoritative"
+    - pattern: "GPU"
+      context: "May appear as optional future enhancement, never as required dependency"
+
+# ─── Evidence ───────────────────────────────────────────────────────
+evidence:
+  - date: "2026-03-04"
+    source: "drift-normalization commit fd719fb"
+    summary: "Removed shop-ha/GPU blockers, aligned to single-HA + CPU-first contract"
+  - date: "2026-03-02"
+    source: "proposal CP-20260302-075509"
+    summary: "Initial planning artifacts created with normalized assumptions"

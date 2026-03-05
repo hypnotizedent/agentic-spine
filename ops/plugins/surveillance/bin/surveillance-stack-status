@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# surveillance-stack-status - Frigate/go2rtc health check for surveillance-stack VM
+#
+# Probes: Frigate API health, camera online/offline counts, detector pipeline,
+#         recording disk pressure.
+#
+# Usage:
+#   surveillance-stack-status
+#
+# Requires: surveillance-stack VM provisioned + Frigate running
+# Contract: ops/bindings/surveillance.topology.contract.yaml
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+CONTRACT="$SPINE_ROOT/ops/bindings/surveillance.topology.contract.yaml"
+
+# Resolve host via binding with LAN→Tailscale fallback
+source "${SPINE_ROOT}/ops/lib/ssh-resolve.sh"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+[[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+
+# Read VM hostname from contract
+VM_HOST="$(yq -r '.runtime.surveillance_stack.hostname // "surveillance-stack"' "$CONTRACT")"
+FRIGATE_PORT="$(yq -r '.runtime.surveillance_stack.services[] | select(.name == "frigate") | .ports.web_ui // 5000' "$CONTRACT")"
+
+# Resolve SSH target
+_resolve_result="$(ssh_resolve_host_with_fallback "$VM_HOST" 2)" || {
+  echo "surveillance.stack.status"
+  echo "host: $VM_HOST (UNREACHABLE)"
+  echo
+  echo "result: BLOCKED"
+  echo "reason: surveillance-stack VM not provisioned or not reachable"
+  echo "blocker: LOOP-CAMERA-OUTAGE-20260209 + VM intake pending"
+  echo "next_action: run infra.vm.intake.scaffold for surveillance-stack"
+  exit 0
+}
+_RESOLVED_IP="$(echo "$_resolve_result" | awk '{print $1}')"
+_PATH_USED="$(echo "$_resolve_result" | awk '{print $2}')"
+
+FRIGATE_URL="http://${_RESOLVED_IP}:${FRIGATE_PORT}"
+
+echo "surveillance.stack.status"
+echo "host: $VM_HOST (${_RESOLVED_IP}, path=${_PATH_USED})"
+echo
+
+pass=0
+fail=0
+
+# Probe 1: Frigate API health
+http_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "${FRIGATE_URL}/api/version" 2>/dev/null || echo "000")"
+if [[ "$http_code" == "200" ]]; then
+  version="$(curl -s --connect-timeout 5 --max-time 10 "${FRIGATE_URL}/api/version" 2>/dev/null || echo "unknown")"
+  printf "  %-25s PASS (v%s)\n" "frigate_api" "$version"
+  pass=$((pass+1))
+else
+  printf "  %-25s FAIL (HTTP %s)\n" "frigate_api" "$http_code"
+  fail=$((fail+1))
+fi
+
+# Probe 2: Camera stats
+stats_json="$(curl -s --connect-timeout 5 --max-time 10 "${FRIGATE_URL}/api/stats" 2>/dev/null || echo "{}")"
+if echo "$stats_json" | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null; then
+  cam_count="$(echo "$stats_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('cameras',{})))" 2>/dev/null || echo "0")"
+  detector_inference="$(echo "$stats_json" | python3 -c "import json,sys; d=json.load(sys.stdin); dets=d.get('detectors',{}); print(next((str(round(v.get('inference_speed',0),1)) for v in dets.values()), 'n/a'))" 2>/dev/null || echo "n/a")"
+  printf "  %-25s PASS (cameras=%s, detector_ms=%s)\n" "camera_stats" "$cam_count" "$detector_inference"
+  pass=$((pass+1))
+else
+  printf "  %-25s FAIL (stats unreachable)\n" "camera_stats"
+  fail=$((fail+1))
+fi
+
+# Probe 3: Disk usage (via SSH)
+disk_pct="$(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no "ubuntu@${_RESOLVED_IP}" \
+  "df /mnt/data 2>/dev/null | tail -1 | awk '{print \$5}' | tr -d '%'" 2>/dev/null || echo "unknown")"
+if [[ "$disk_pct" =~ ^[0-9]+$ ]]; then
+  if [[ "$disk_pct" -lt 85 ]]; then
+    printf "  %-25s PASS (%s%%)\n" "recording_disk" "$disk_pct"
+    pass=$((pass+1))
+  else
+    printf "  %-25s WARN (%s%% >= 85%%)\n" "recording_disk" "$disk_pct"
+    fail=$((fail+1))
+  fi
+else
+  printf "  %-25s SKIP (SSH unreachable or /mnt/data not mounted)\n" "recording_disk"
+fi
+
+# Probe 4: go2rtc health
+go2rtc_port="$(yq -r '.runtime.surveillance_stack.services[] | select(.name == "go2rtc") | .ports.api // 1984' "$CONTRACT")"
+go2rtc_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "http://${_RESOLVED_IP}:${go2rtc_port}/api/streams" 2>/dev/null || echo "000")"
+if [[ "$go2rtc_code" == "200" ]]; then
+  printf "  %-25s PASS\n" "go2rtc_api"
+  pass=$((pass+1))
+else
+  printf "  %-25s FAIL (HTTP %s)\n" "go2rtc_api" "$go2rtc_code"
+  fail=$((fail+1))
+fi
+
+echo
+total=$((pass+fail))
+echo "summary: pass=$pass fail=$fail total=$total"
+if [[ "$fail" -gt 0 ]]; then
+  echo "result: DEGRADED"
+else
+  echo "result: HEALTHY"
+fi

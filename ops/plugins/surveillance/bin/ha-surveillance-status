@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# ha-surveillance-status - Home HA integration health for surveillance entities/automations
+#
+# Checks: Frigate integration loaded, surveillance entities present, automations enabled
+#
+# Usage:
+#   ha-surveillance-status
+#
+# Requires: Home HA accessible, Frigate integration configured
+# Contract: ops/bindings/surveillance.topology.contract.yaml
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+CONTRACT="$SPINE_ROOT/ops/bindings/surveillance.topology.contract.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+
+# HA connection
+HA_HOST="${HA_HOST:-10.0.0.100}"
+HA_PORT="${HA_PORT:-8123}"
+HA_BASE="http://${HA_HOST}:${HA_PORT}"
+
+# Get HA token from Infisical
+if [[ -f "${SPINE_ROOT}/ops/tools/infisical-agent.sh" ]]; then
+  HA_TOKEN="$(bash "${SPINE_ROOT}/ops/tools/infisical-agent.sh" auth-token \
+    --project-id "5df75515-7259-4c14-98b8-5adda379aade" \
+    --env prod --secret-name HA_API_TOKEN 2>/dev/null || echo "")"
+fi
+
+if [[ -z "${HA_TOKEN:-}" ]]; then
+  echo "ha.surveillance.status"
+  echo "result: SKIP"
+  echo "reason: HA_API_TOKEN not available"
+  exit 0
+fi
+
+echo "ha.surveillance.status"
+echo "host: homeassistant (${HA_HOST})"
+echo
+
+pass=0
+fail=0
+skip=0
+
+# Check 1: HA API reachable
+ha_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 \
+  -H "Authorization: Bearer ${HA_TOKEN}" "${HA_BASE}/api/" 2>/dev/null || echo "000")"
+if [[ "$ha_code" == "200" ]]; then
+  printf "  %-30s PASS\n" "ha_api_health"
+  pass=$((pass+1))
+else
+  printf "  %-30s FAIL (HTTP %s)\n" "ha_api_health" "$ha_code"
+  fail=$((fail+1))
+  echo
+  echo "summary: pass=$pass fail=$fail skip=$skip"
+  echo "result: UNREACHABLE"
+  exit 0
+fi
+
+# Check 2: Frigate integration loaded
+integrations="$(curl -s --connect-timeout 5 --max-time 10 \
+  -H "Authorization: Bearer ${HA_TOKEN}" \
+  "${HA_BASE}/api/config" 2>/dev/null || echo "{}")"
+has_frigate="$(echo "$integrations" | python3 -c "
+import json, sys
+config = json.load(sys.stdin)
+components = config.get('components', [])
+print('yes' if any('frigate' in c for c in components) else 'no')
+" 2>/dev/null || echo "unknown")"
+
+if [[ "$has_frigate" == "yes" ]]; then
+  printf "  %-30s PASS\n" "frigate_integration"
+  pass=$((pass+1))
+else
+  printf "  %-30s SKIP (not yet configured)\n" "frigate_integration"
+  skip=$((skip+1))
+fi
+
+# Check 3: Surveillance camera entities
+cam_entities="$(curl -s --connect-timeout 5 --max-time 10 \
+  -H "Authorization: Bearer ${HA_TOKEN}" \
+  "${HA_BASE}/api/states" 2>/dev/null | python3 -c "
+import json, sys
+states = json.load(sys.stdin)
+cams = [s for s in states if s['entity_id'].startswith('camera.') and 'frigate' in s['entity_id'].lower()]
+print(len(cams))
+" 2>/dev/null || echo "0")"
+
+if [[ "$cam_entities" -gt 0 ]]; then
+  printf "  %-30s PASS (count=%s)\n" "frigate_camera_entities" "$cam_entities"
+  pass=$((pass+1))
+else
+  printf "  %-30s SKIP (no frigate cameras registered)\n" "frigate_camera_entities"
+  skip=$((skip+1))
+fi
+
+# Check 4: Surveillance automations
+surv_automations="$(curl -s --connect-timeout 5 --max-time 10 \
+  -H "Authorization: Bearer ${HA_TOKEN}" \
+  "${HA_BASE}/api/states" 2>/dev/null | python3 -c "
+import json, sys
+states = json.load(sys.stdin)
+autos = [s for s in states if s['entity_id'].startswith('automation.') and 'surveillance' in s.get('attributes',{}).get('friendly_name','').lower()]
+print(len(autos))
+" 2>/dev/null || echo "0")"
+
+if [[ "$surv_automations" -gt 0 ]]; then
+  printf "  %-30s PASS (count=%s)\n" "surveillance_automations" "$surv_automations"
+  pass=$((pass+1))
+else
+  printf "  %-30s SKIP (no surveillance automations yet)\n" "surveillance_automations"
+  skip=$((skip+1))
+fi
+
+# Check 5: go2rtc integration
+has_go2rtc="$(echo "$integrations" | python3 -c "
+import json, sys
+config = json.load(sys.stdin)
+components = config.get('components', [])
+print('yes' if any('go2rtc' in c for c in components) else 'no')
+" 2>/dev/null || echo "unknown")"
+
+if [[ "$has_go2rtc" == "yes" ]]; then
+  printf "  %-30s PASS\n" "go2rtc_integration"
+  pass=$((pass+1))
+else
+  printf "  %-30s SKIP (not yet configured)\n" "go2rtc_integration"
+  skip=$((skip+1))
+fi
+
+echo
+total=$((pass+fail+skip))
+echo "summary: pass=$pass fail=$fail skip=$skip total=$total"
+if [[ "$fail" -gt 0 ]]; then
+  echo "result: DEGRADED"
+elif [[ "$skip" -gt 2 ]]; then
+  echo "result: PENDING_SETUP"
+else
+  echo "result: HEALTHY"
+fi

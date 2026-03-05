@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# surveillance-event-query - Query Frigate events by camera/label/time range
+#
+# Usage:
+#   surveillance-event-query [--camera NAME] [--label NAME] [--after TIMESTAMP] [--before TIMESTAMP] [--limit N]
+#
+# Requires: surveillance-stack VM provisioned + Frigate running
+# Contract: ops/bindings/surveillance.topology.contract.yaml
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+CONTRACT="$SPINE_ROOT/ops/bindings/surveillance.topology.contract.yaml"
+
+source "${SPINE_ROOT}/ops/lib/ssh-resolve.sh"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+[[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+
+# Parse args
+CAMERA=""
+LABEL=""
+AFTER=""
+BEFORE=""
+LIMIT="20"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --camera) CAMERA="$2"; shift 2 ;;
+    --label) LABEL="$2"; shift 2 ;;
+    --after) AFTER="$2"; shift 2 ;;
+    --before) BEFORE="$2"; shift 2 ;;
+    --limit) LIMIT="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+
+VM_HOST="$(yq -r '.runtime.surveillance_stack.hostname // "surveillance-stack"' "$CONTRACT")"
+FRIGATE_PORT="$(yq -r '.runtime.surveillance_stack.services[] | select(.name == "frigate") | .ports.web_ui // 5000' "$CONTRACT")"
+
+_resolve_result="$(ssh_resolve_host_with_fallback "$VM_HOST" 2)" || {
+  echo "surveillance.event.query"
+  echo "result: BLOCKED"
+  echo "reason: surveillance-stack VM not reachable"
+  exit 0
+}
+_RESOLVED_IP="$(echo "$_resolve_result" | awk '{print $1}')"
+
+FRIGATE_URL="http://${_RESOLVED_IP}:${FRIGATE_PORT}"
+
+# Build query params
+PARAMS="limit=${LIMIT}"
+[[ -n "$CAMERA" ]] && PARAMS="${PARAMS}&camera=${CAMERA}"
+[[ -n "$LABEL" ]] && PARAMS="${PARAMS}&label=${LABEL}"
+[[ -n "$AFTER" ]] && PARAMS="${PARAMS}&after=${AFTER}"
+[[ -n "$BEFORE" ]] && PARAMS="${PARAMS}&before=${BEFORE}"
+
+echo "surveillance.event.query"
+echo "host: $VM_HOST (${_RESOLVED_IP})"
+echo "params: $PARAMS"
+echo
+
+events_json="$(curl -s --connect-timeout 5 --max-time 15 "${FRIGATE_URL}/api/events?${PARAMS}" 2>/dev/null || echo "[]")"
+
+if echo "$events_json" | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null; then
+  count="$(echo "$events_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")"
+  echo "events_returned: $count"
+  echo
+
+  if [[ "$count" -gt 0 ]]; then
+    echo "$events_json" | python3 -c "
+import json, sys
+from datetime import datetime
+events = json.load(sys.stdin)
+for e in events[:10]:
+    cam = e.get('camera', 'unknown')
+    label = e.get('label', 'unknown')
+    score = round(e.get('top_score', 0) * 100, 1)
+    ts = datetime.fromtimestamp(e.get('start_time', 0)).strftime('%Y-%m-%d %H:%M:%S')
+    has_clip = 'yes' if e.get('has_clip') else 'no'
+    has_snap = 'yes' if e.get('has_snapshot') else 'no'
+    print(f'  {ts}  {cam:<20s} {label:<12s} {score:>5.1f}%  clip={has_clip} snap={has_snap}')
+" 2>/dev/null || echo "  (parse error)"
+  fi
+else
+  echo "events_returned: 0"
+  echo "note: Frigate events API not available"
+fi
