@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-SPINE-PORTABILITY-BOOTSTRAP-CANONICAL-UPGRADE-20260304
 created: 2026-03-05
-status: active
+status: closed
 owner: "@ronny"
 scope: spine
 priority: high
