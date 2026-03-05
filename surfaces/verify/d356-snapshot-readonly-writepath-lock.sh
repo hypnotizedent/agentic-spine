@@ -18,8 +18,7 @@ resolve_root() {
 }
 
 ROOT="$(resolve_root)"
-OPS_BIN="$ROOT/bin/ops"
-CAP_TIMEOUT_SEC="${D356_CAP_TIMEOUT_SEC:-25}"
+CAP_TIMEOUT_SEC="${D356_CAP_TIMEOUT_SEC:-8}"
 CAP_PARALLEL_JOBS="${D356_CAP_PARALLEL_JOBS:-5}"
 
 fail() {
@@ -27,7 +26,6 @@ fail() {
   exit 1
 }
 
-[[ -x "$OPS_BIN" ]] || fail "missing ops runner: $OPS_BIN"
 command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
 command -v shasum >/dev/null 2>&1 || fail "missing dependency: shasum"
 [[ "$CAP_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]] || fail "invalid D356_CAP_TIMEOUT_SEC=$CAP_TIMEOUT_SEC"
@@ -41,13 +39,25 @@ TARGET_FILES=(
   "ops/bindings/z2m.devices.yaml"
 )
 
-CAPABILITIES=(
+PROBE_IDS=(
   "ha-inventory-snapshot-build"
   "network.home.dhcp.audit"
   "media-content-snapshot-refresh"
   "network-inventory-snapshot-build"
   "ha.z2m.devices.snapshot"
 )
+
+PROBE_SCRIPTS=(
+  "$ROOT/ops/plugins/ha/bin/ha-inventory-snapshot-build"
+  "$ROOT/ops/plugins/network/bin/network-home-dhcp-audit"
+  "$ROOT/ops/plugins/media/bin/media-content-snapshot-refresh"
+  "$ROOT/ops/plugins/network/bin/network-inventory-snapshot-build"
+  "$ROOT/ops/plugins/ha/bin/ha-z2m-devices-snapshot"
+)
+
+for probe in "${PROBE_SCRIPTS[@]}"; do
+  [[ -x "$probe" ]] || fail "missing snapshot probe: $probe"
+done
 
 file_hash() {
   local path="$1"
@@ -64,7 +74,12 @@ for rel in "${TARGET_FILES[@]}"; do
 done
 
 echo "D356 INFO: exercising snapshot read/status capabilities in check mode"
-python3 - "$OPS_BIN" "$CAP_TIMEOUT_SEC" "$CAP_PARALLEL_JOBS" "${CAPABILITIES[@]}" <<'PY' | while IFS=$'\t' read -r cap rc; do
+python3 - "$CAP_TIMEOUT_SEC" "$CAP_PARALLEL_JOBS" \
+  "${PROBE_IDS[0]}" "${PROBE_SCRIPTS[0]}" \
+  "${PROBE_IDS[1]}" "${PROBE_SCRIPTS[1]}" \
+  "${PROBE_IDS[2]}" "${PROBE_SCRIPTS[2]}" \
+  "${PROBE_IDS[3]}" "${PROBE_SCRIPTS[3]}" \
+  "${PROBE_IDS[4]}" "${PROBE_SCRIPTS[4]}" <<'PY' | while IFS=$'\t' read -r cap rc; do
 import concurrent.futures
 import os
 import signal
@@ -72,12 +87,19 @@ import subprocess
 import sys
 import time
 
-ops_bin = sys.argv[1]
-timeout_sec = int(sys.argv[2])
-parallel_jobs = int(sys.argv[3])
-caps = sys.argv[4:]
+timeout_sec = int(sys.argv[1])
+parallel_jobs = int(sys.argv[2])
+raw = sys.argv[3:]
 
-def run_cap(cap):
+if len(raw) % 2 != 0:
+    raise SystemExit("probe args must be <id> <script> pairs")
+
+probes = []
+for idx in range(0, len(raw), 2):
+    probes.append((raw[idx], raw[idx + 1]))
+
+def run_cap(probe):
+    cap_id, script_path = probe
     def safe_kill(sig):
         try:
             os.killpg(proc.pid, sig)
@@ -94,23 +116,23 @@ def run_cap(cap):
 
     with open(os.devnull, "wb") as devnull:
         proc = subprocess.Popen(
-            [ops_bin, "cap", "run", cap],
+            [script_path, "--check"],
             stdout=devnull,
             stderr=devnull,
             preexec_fn=os.setsid,
         )
         try:
             proc.wait(timeout=timeout_sec)
-            return cap, proc.returncode
+            return cap_id, proc.returncode
         except subprocess.TimeoutExpired:
             safe_kill(signal.SIGTERM)
             time.sleep(1)
             safe_kill(signal.SIGKILL)
-            return cap, 124
+            return cap_id, 124
 
-workers = max(1, min(parallel_jobs, len(caps)))
+workers = max(1, min(parallel_jobs, len(probes)))
 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-    futures = [pool.submit(run_cap, cap) for cap in caps]
+    futures = [pool.submit(run_cap, probe) for probe in probes]
     for future in concurrent.futures.as_completed(futures):
         cap, rc = future.result()
         print(f"{cap}\t{rc}")
