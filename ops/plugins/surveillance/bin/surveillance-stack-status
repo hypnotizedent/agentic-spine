@@ -90,9 +90,14 @@ else
   printf "  %-25s SKIP (SSH unreachable or /mnt/data not mounted)\n" "recording_disk"
 fi
 
-# Probe 4: go2rtc health
-go2rtc_port="$(yq -r '.runtime.surveillance_stack.services[] | select(.name == "go2rtc") | .ports.api // 1984' "$CONTRACT")"
-go2rtc_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "http://${_RESOLVED_IP}:${go2rtc_port}/api/streams" 2>/dev/null || echo "000")"
+# Probe 4: go2rtc health (bundled inside Frigate or standalone)
+# Frigate 0.17+ bundles go2rtc — try proxied API first
+go2rtc_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "${FRIGATE_URL}/api/go2rtc/api/streams" 2>/dev/null || echo "000")"
+if [[ "$go2rtc_code" != "200" ]]; then
+  # Fall back to standalone go2rtc (if configured separately)
+  go2rtc_port="$(yq -r '.runtime.surveillance_stack.services[] | select(.name == "go2rtc") | .ports.api // 1984' "$CONTRACT")"
+  go2rtc_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "http://${_RESOLVED_IP}:${go2rtc_port}/api/streams" 2>/dev/null || echo "000")"
+fi
 if [[ "$go2rtc_code" == "200" ]]; then
   printf "  %-25s PASS\n" "go2rtc_api"
   pass=$((pass+1))
