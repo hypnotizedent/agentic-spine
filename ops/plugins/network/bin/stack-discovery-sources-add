@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# stack.discovery.sources.add
+# Add a new source to the stack discovery sources registry.
+# Appends to stack.discovery.sources.yaml using yq.
+#
+# Safety: mutating (modifies YAML registry file)
+# Approval: manual
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+SOURCES_FILE="$SPINE_ROOT/ops/bindings/stack.discovery.sources.yaml"
+
+# ── dependency checks ────────────────────────────────────────────────────────
+command -v yq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: yq" >&2; exit 2; }
+[[ -f "$SOURCES_FILE" ]] || { echo "FAIL: sources registry not found: $SOURCES_FILE" >&2; exit 1; }
+
+# ── argument parsing ─────────────────────────────────────────────────────────
+SRC_NAME=""
+SRC_URL=""
+SRC_TYPE=""
+SRC_ID=""
+SRC_FORMAT=""
+SRC_FRESHNESS="weekly"
+SRC_PRIORITY="tertiary"
+SRC_DETAIL=""
+
+usage() {
+  cat <<'EOF'
+stack-discovery-sources-add
+
+Usage:
+  stack-discovery-sources-add --name "Source Name" --url "https://..." --type <type> [options]
+
+Required:
+  --name       Display name of the source
+  --url        URL to fetch
+  --type       Source type: github_repo | rest_api | website | local_file
+
+Optional:
+  --id         Source ID (default: derived from name, lowercase, hyphens)
+  --format     Data format: markdown | json | html | yaml (default: inferred from type)
+  --freshness  Refresh cadence: weekly | monthly | real-time (default: weekly)
+  --priority   Priority: primary | secondary | tertiary (default: tertiary)
+  --detail     Description/notes about this source
+
+Examples:
+  stack-discovery-sources-add --name "Awesome Docker" --url "https://github.com/veggiemonk/awesome-docker" --type github_repo
+  stack-discovery-sources-add --name "Noted API" --url "https://api.noted.lol/v1/apps" --type rest_api --format json
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name)      SRC_NAME="${2:?--name requires a value}"; shift 2 ;;
+    --url)       SRC_URL="${2:?--url requires a value}"; shift 2 ;;
+    --type)      SRC_TYPE="${2:?--type requires a value}"; shift 2 ;;
+    --id)        SRC_ID="${2:?--id requires a value}"; shift 2 ;;
+    --format)    SRC_FORMAT="${2:?--format requires a value}"; shift 2 ;;
+    --freshness) SRC_FRESHNESS="${2:?--freshness requires a value}"; shift 2 ;;
+    --priority)  SRC_PRIORITY="${2:?--priority requires a value}"; shift 2 ;;
+    --detail)    SRC_DETAIL="${2:?--detail requires a value}"; shift 2 ;;
+    -h|--help)   usage; exit 0 ;;
+    --)          shift; break ;;
+    *)           echo "FAIL: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+# ── validation ───────────────────────────────────────────────────────────────
+[[ -n "$SRC_NAME" ]] || { echo "FAIL: --name is required" >&2; usage >&2; exit 2; }
+[[ -n "$SRC_URL" ]]  || { echo "FAIL: --url is required"  >&2; usage >&2; exit 2; }
+[[ -n "$SRC_TYPE" ]] || { echo "FAIL: --type is required" >&2; usage >&2; exit 2; }
+
+case "$SRC_TYPE" in
+  github_repo|rest_api|website|local_file) ;;
+  *) echo "FAIL: --type must be github_repo, rest_api, website, or local_file" >&2; exit 2 ;;
+esac
+
+case "$SRC_PRIORITY" in
+  primary|secondary|tertiary) ;;
+  *) echo "FAIL: --priority must be primary, secondary, or tertiary" >&2; exit 2 ;;
+esac
+
+case "$SRC_FRESHNESS" in
+  weekly|monthly|real-time) ;;
+  *) echo "FAIL: --freshness must be weekly, monthly, or real-time" >&2; exit 2 ;;
+esac
+
+# ── derive defaults ──────────────────────────────────────────────────────────
+if [[ -z "$SRC_ID" ]]; then
+  # Derive ID from name: lowercase, replace spaces/special chars with hyphens
+  SRC_ID="$(echo "$SRC_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+fi
+
+if [[ -z "$SRC_FORMAT" ]]; then
+  case "$SRC_TYPE" in
+    github_repo) SRC_FORMAT="markdown" ;;
+    rest_api)    SRC_FORMAT="json" ;;
+    website)     SRC_FORMAT="html" ;;
+    local_file)  SRC_FORMAT="yaml" ;;
+  esac
+fi
+
+# Derive fetch_method
+case "$SRC_TYPE" in
+  github_repo) FETCH_METHOD="git clone --depth 1 / git pull" ;;
+  rest_api)    FETCH_METHOD="HTTP GET (JSON response)" ;;
+  website)     FETCH_METHOD="HTTP scrape (HTML parsing)" ;;
+  local_file)  FETCH_METHOD="Read local file" ;;
+esac
+
+# ── check for duplicate ─────────────────────────────────────────────────────
+EXISTING="$(yq ".sources[] | select(.id == \"$SRC_ID\") | .id" "$SOURCES_FILE" 2>/dev/null || true)"
+if [[ -n "$EXISTING" ]]; then
+  echo "FAIL: source with id '$SRC_ID' already exists in registry" >&2
+  exit 1
+fi
+
+# ── append entry ─────────────────────────────────────────────────────────────
+echo "stack.discovery.sources.add"
+echo "  id: $SRC_ID"
+echo "  name: $SRC_NAME"
+echo "  url: $SRC_URL"
+echo "  type: $SRC_TYPE"
+echo "  format: $SRC_FORMAT"
+echo "  freshness: $SRC_FRESHNESS"
+echo "  priority: $SRC_PRIORITY"
+echo
+
+DETAIL_EXPR=""
+if [[ -n "$SRC_DETAIL" ]]; then
+  DETAIL_EXPR=", \"detail\": \"$SRC_DETAIL\""
+fi
+
+yq -i ".sources += [{
+  \"id\": \"$SRC_ID\",
+  \"name\": \"$SRC_NAME\",
+  \"url\": \"$SRC_URL\",
+  \"type\": \"$SRC_TYPE\",
+  \"fetch_method\": \"$FETCH_METHOD\",
+  \"format\": \"$SRC_FORMAT\",
+  \"freshness\": \"$SRC_FRESHNESS\",
+  \"priority\": \"$SRC_PRIORITY\",
+  \"auth_required\": false${DETAIL_EXPR}
+}]" "$SOURCES_FILE"
+
+echo "DONE: source '$SRC_NAME' added to registry."
+echo "Run stack.discovery.refresh to include this source in the next pipeline run."

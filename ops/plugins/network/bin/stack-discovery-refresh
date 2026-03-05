@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# stack.discovery.refresh
+# Fetch, normalize, and index external self-hosted tool catalogs into a local
+# SQLite knowledge base. Reads sources from stack.discovery.sources.yaml,
+# fetches each one, parses tool entries, and stores them in a queryable DB.
+#
+# Safety: mutating (writes to ops/runtime/stack-discovery.db)
+# Approval: auto
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+DB_DIR="$SPINE_ROOT/ops/runtime"
+DB_PATH="$DB_DIR/stack-discovery.db"
+SOURCES_FILE="$SPINE_ROOT/ops/bindings/stack.discovery.sources.yaml"
+STAGING_DIR="$SPINE_ROOT/ops/runtime/stack-discovery/staging"
+SERVICE_REGISTRY="$SPINE_ROOT/docs/governance/SERVICE_REGISTRY.yaml"
+FETCH_TIMEOUT=30
+REFRESH_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+# ── dependency checks ────────────────────────────────────────────────────────
+command -v sqlite3 >/dev/null 2>&1 || { echo "STOP (2): missing dependency: sqlite3" >&2; exit 2; }
+command -v curl    >/dev/null 2>&1 || { echo "STOP (2): missing dependency: curl"    >&2; exit 2; }
+command -v yq      >/dev/null 2>&1 || { echo "STOP (2): missing dependency: yq"      >&2; exit 2; }
+
+[[ -f "$SOURCES_FILE" ]] || { echo "FAIL: sources registry not found: $SOURCES_FILE" >&2; exit 1; }
+
+# ── ensure directories ───────────────────────────────────────────────────────
+mkdir -p "$DB_DIR" "$STAGING_DIR"
+
+# ── init SQLite schema ───────────────────────────────────────────────────────
+sqlite3 "$DB_PATH" <<'SQL'
+CREATE TABLE IF NOT EXISTS tools (
+  name        TEXT NOT NULL,
+  description TEXT,
+  category    TEXT,
+  source      TEXT NOT NULL,
+  url         TEXT,
+  fetched_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS refresh_log (
+  source_id      TEXT NOT NULL,
+  status         TEXT NOT NULL,
+  tools_found    INTEGER DEFAULT 0,
+  error_message  TEXT,
+  refreshed_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tools_name     ON tools(name);
+CREATE INDEX IF NOT EXISTS idx_tools_category ON tools(category);
+CREATE INDEX IF NOT EXISTS idx_tools_source   ON tools(source);
+SQL
+
+# ── counters ─────────────────────────────────────────────────────────────────
+SOURCES_ATTEMPTED=0
+SOURCES_OK=0
+SOURCES_FAILED=0
+TOOLS_INDEXED=0
+
+# ── helper: insert tool into DB ──────────────────────────────────────────────
+insert_tool() {
+  local name="$1" desc="$2" category="$3" source="$4" url="$5"
+  # Escape single quotes for SQLite
+  name="${name//\'/\'\'}"
+  desc="${desc//\'/\'\'}"
+  category="${category//\'/\'\'}"
+  source="${source//\'/\'\'}"
+  url="${url//\'/\'\'}"
+  sqlite3 "$DB_PATH" "INSERT INTO tools (name, description, category, source, url, fetched_at) VALUES ('$name', '$desc', '$category', '$source', '$url', '$REFRESH_TS');"
+  TOOLS_INDEXED=$((TOOLS_INDEXED + 1))
+}
+
+# ── helper: log refresh result ───────────────────────────────────────────────
+log_refresh() {
+  local source_id="$1" status="$2" tools_found="$3" error_msg="${4:-}"
+  source_id="${source_id//\'/\'\'}"
+  error_msg="${error_msg//\'/\'\'}"
+  sqlite3 "$DB_PATH" "INSERT INTO refresh_log (source_id, status, tools_found, error_message, refreshed_at) VALUES ('$source_id', '$status', $tools_found, '$error_msg', '$REFRESH_TS');"
+}
+
+# ── clear stale data (full rebuild each run) ─────────────────────────────────
+sqlite3 "$DB_PATH" "DELETE FROM tools;"
+
+echo "stack.discovery.refresh"
+echo "timestamp: $REFRESH_TS"
+echo "sources_file: $SOURCES_FILE"
+echo "database: $DB_PATH"
+echo
+
+# ── read source count ────────────────────────────────────────────────────────
+SOURCE_COUNT="$(yq '.sources | length' "$SOURCES_FILE")"
+echo "sources_registered: $SOURCE_COUNT"
+echo
+
+# ── process each source ──────────────────────────────────────────────────────
+for idx in $(seq 0 $((SOURCE_COUNT - 1))); do
+  SRC_ID="$(yq ".sources[$idx].id" "$SOURCES_FILE")"
+  SRC_NAME="$(yq ".sources[$idx].name" "$SOURCES_FILE")"
+  SRC_URL="$(yq ".sources[$idx].url" "$SOURCES_FILE")"
+  SRC_TYPE="$(yq ".sources[$idx].type" "$SOURCES_FILE")"
+
+  SOURCES_ATTEMPTED=$((SOURCES_ATTEMPTED + 1))
+  echo "-- source: $SRC_NAME ($SRC_ID) --"
+  echo "   type: $SRC_TYPE"
+  echo "   url: $SRC_URL"
+
+  TOOLS_BEFORE=$TOOLS_INDEXED
+
+  # ── dispatch by source type ──────────────────────────────────────────────
+  case "$SRC_TYPE" in
+
+    # ── GitHub repo (awesome-* markdown lists) ─────────────────────────────
+    github_repo)
+      CLONE_DIR="$STAGING_DIR/$SRC_ID"
+      set +e
+      if [[ -d "$CLONE_DIR/.git" ]]; then
+        git -C "$CLONE_DIR" pull --quiet 2>/dev/null
+        git_rc=$?
+      else
+        rm -rf "$CLONE_DIR"
+        git clone --depth 1 --quiet "$SRC_URL" "$CLONE_DIR" 2>/dev/null
+        git_rc=$?
+      fi
+      set -e
+
+      if [[ $git_rc -ne 0 ]]; then
+        echo "   WARN: git fetch failed (rc=$git_rc), skipping"
+        SOURCES_FAILED=$((SOURCES_FAILED + 1))
+        log_refresh "$SRC_ID" "failed" 0 "git clone/pull failed rc=$git_rc"
+        echo
+        continue
+      fi
+
+      # Parse awesome-* markdown: lines like "- [Name](url) - Description"
+      # or "- [Name](url) `License` `Language` - Description"
+      README="$CLONE_DIR/README.md"
+      [[ -f "$README" ]] || README="$CLONE_DIR/readme.md"
+      if [[ ! -f "$README" ]]; then
+        echo "   WARN: no README.md found in $CLONE_DIR"
+        SOURCES_FAILED=$((SOURCES_FAILED + 1))
+        log_refresh "$SRC_ID" "failed" 0 "no README.md found"
+        echo
+        continue
+      fi
+
+      CURRENT_CATEGORY=""
+      while IFS= read -r line; do
+        # Detect category headers (## or ### level)
+        if [[ "$line" =~ ^##[[:space:]]+(.*) ]]; then
+          CURRENT_CATEGORY="${BASH_REMATCH[1]}"
+          # Strip trailing anchors and whitespace
+          CURRENT_CATEGORY="${CURRENT_CATEGORY%%<*}"
+          CURRENT_CATEGORY="${CURRENT_CATEGORY%% }"
+          continue
+        fi
+        if [[ "$line" =~ ^###[[:space:]]+(.*) ]]; then
+          CURRENT_CATEGORY="${BASH_REMATCH[1]}"
+          CURRENT_CATEGORY="${CURRENT_CATEGORY%%<*}"
+          CURRENT_CATEGORY="${CURRENT_CATEGORY%% }"
+          continue
+        fi
+
+        # Parse tool entries: "- [Name](URL) - Description" or with backtick metadata
+        if [[ "$line" =~ ^[[:space:]]*-[[:space:]]+\[([^\]]+)\]\(([^\)]+)\)[[:space:]]*(.*) ]]; then
+          TOOL_NAME="${BASH_REMATCH[1]}"
+          TOOL_URL="${BASH_REMATCH[2]}"
+          TOOL_REST="${BASH_REMATCH[3]}"
+
+          # Strip leading "- " or backtick blocks from description
+          TOOL_DESC="$TOOL_REST"
+          TOOL_DESC="$(echo "$TOOL_DESC" | sed 's/^`[^`]*`[[:space:]]*//g; s/^-[[:space:]]*//')"
+          # Trim to 500 chars
+          TOOL_DESC="${TOOL_DESC:0:500}"
+
+          [[ -n "$TOOL_NAME" ]] && insert_tool "$TOOL_NAME" "$TOOL_DESC" "$CURRENT_CATEGORY" "$SRC_ID" "$TOOL_URL"
+        fi
+      done < "$README"
+
+      TOOLS_THIS=$((TOOLS_INDEXED - TOOLS_BEFORE))
+      echo "   tools_parsed: $TOOLS_THIS"
+      SOURCES_OK=$((SOURCES_OK + 1))
+      log_refresh "$SRC_ID" "ok" "$TOOLS_THIS" ""
+      ;;
+
+    # ── REST API (JSON response) ───────────────────────────────────────────
+    rest_api)
+      RESPONSE_FILE="$STAGING_DIR/${SRC_ID}.json"
+      set +e
+      HTTP_CODE="$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
+        --connect-timeout "$FETCH_TIMEOUT" \
+        --max-time 60 \
+        "$SRC_URL" 2>/dev/null)"
+      curl_rc=$?
+      set -e
+
+      if [[ $curl_rc -ne 0 || "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 400 ]]; then
+        echo "   WARN: HTTP fetch failed (rc=$curl_rc, http=$HTTP_CODE), skipping"
+        SOURCES_FAILED=$((SOURCES_FAILED + 1))
+        log_refresh "$SRC_ID" "failed" 0 "HTTP fetch failed rc=$curl_rc http=$HTTP_CODE"
+        echo
+        continue
+      fi
+
+      # LinuxServer Fleet API: JSON with image objects
+      if [[ "$SRC_ID" == "linuxserver-fleet" ]]; then
+        if command -v jq >/dev/null 2>&1 && [[ -s "$RESPONSE_FILE" ]]; then
+          TOOL_COUNT="$(jq 'if type == "array" then length elif type == "object" and has("images") then (.images | length) else 0 end' "$RESPONSE_FILE" 2>/dev/null || echo 0)"
+
+          # Handle both array and object-with-images formats
+          JQ_EXPR='
+            (if type == "array" then . elif type == "object" and has("images") then .images else [] end)
+            | .[]
+            | {
+                name: (.name // .Name // "unknown"),
+                description: (.description // .Description // ""),
+                category: (.category // .Category // "container-image")
+              }'
+
+          while IFS=$'\t' read -r tname tdesc tcat; do
+            [[ -z "$tname" || "$tname" == "null" ]] && continue
+            insert_tool "$tname" "${tdesc:0:500}" "${tcat:-container-image}" "$SRC_ID" "https://fleet.linuxserver.io/image?name=$tname"
+          done < <(jq -r "($JQ_EXPR) | [.name, .description, .category] | @tsv" "$RESPONSE_FILE" 2>/dev/null || true)
+        fi
+      else
+        # Generic JSON: attempt to parse as array of objects with name+description
+        if command -v jq >/dev/null 2>&1 && [[ -s "$RESPONSE_FILE" ]]; then
+          while IFS=$'\t' read -r tname tdesc tcat; do
+            [[ -z "$tname" || "$tname" == "null" ]] && continue
+            insert_tool "$tname" "${tdesc:0:500}" "${tcat:-uncategorized}" "$SRC_ID" "$SRC_URL"
+          done < <(jq -r '.[] | [(.name // "unknown"), (.description // ""), (.category // "uncategorized")] | @tsv' "$RESPONSE_FILE" 2>/dev/null || true)
+        fi
+      fi
+
+      TOOLS_THIS=$((TOOLS_INDEXED - TOOLS_BEFORE))
+      echo "   tools_parsed: $TOOLS_THIS"
+      SOURCES_OK=$((SOURCES_OK + 1))
+      log_refresh "$SRC_ID" "ok" "$TOOLS_THIS" ""
+      ;;
+
+    # ── Website (HTML scrape — best-effort text extraction) ────────────────
+    website)
+      RESPONSE_FILE="$STAGING_DIR/${SRC_ID}.html"
+      set +e
+      HTTP_CODE="$(curl -sL -o "$RESPONSE_FILE" -w "%{http_code}" \
+        --connect-timeout "$FETCH_TIMEOUT" \
+        --max-time 90 \
+        -H "User-Agent: Mozilla/5.0 (compatible; spine-stack-discovery/1.0)" \
+        "$SRC_URL" 2>/dev/null)"
+      curl_rc=$?
+      set -e
+
+      if [[ $curl_rc -ne 0 || "$HTTP_CODE" -lt 200 || "$HTTP_CODE" -ge 400 ]]; then
+        echo "   WARN: HTTP fetch failed (rc=$curl_rc, http=$HTTP_CODE), skipping"
+        SOURCES_FAILED=$((SOURCES_FAILED + 1))
+        log_refresh "$SRC_ID" "failed" 0 "HTTP fetch failed rc=$curl_rc http=$HTTP_CODE"
+        echo
+        continue
+      fi
+
+      # Best-effort HTML parsing: extract text from common patterns
+      # selfh.st uses structured div/card layouts; alternativeto uses listing cards
+      # Strip HTML tags, look for tool-like patterns
+      if [[ -s "$RESPONSE_FILE" ]]; then
+        # Extract text content, deduplicate, and look for structured entries
+        # This is intentionally simple — real HTML parsing would use python/bs4
+        # We extract title-like text from heading tags and structured elements
+        while IFS= read -r tname; do
+          [[ -z "$tname" ]] && continue
+          # Clean up the name
+          tname="$(echo "$tname" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          [[ ${#tname} -lt 2 || ${#tname} -gt 100 ]] && continue
+          insert_tool "$tname" "" "web-scraped" "$SRC_ID" "$SRC_URL"
+        done < <(
+          sed -n 's/.*<h[23][^>]*>\([^<]*\)<.*/\1/p' "$RESPONSE_FILE" 2>/dev/null \
+          | sort -u \
+          | head -500
+        )
+      fi
+
+      TOOLS_THIS=$((TOOLS_INDEXED - TOOLS_BEFORE))
+      echo "   tools_parsed: $TOOLS_THIS"
+      SOURCES_OK=$((SOURCES_OK + 1))
+      log_refresh "$SRC_ID" "ok" "$TOOLS_THIS" ""
+      ;;
+
+    # ── Local file (SERVICE_REGISTRY cross-reference) ──────────────────────
+    local_file)
+      if [[ ! -f "$SERVICE_REGISTRY" ]]; then
+        echo "   WARN: SERVICE_REGISTRY not found at $SERVICE_REGISTRY, skipping"
+        SOURCES_FAILED=$((SOURCES_FAILED + 1))
+        log_refresh "$SRC_ID" "failed" 0 "SERVICE_REGISTRY not found"
+        echo
+        continue
+      fi
+
+      # Extract services from the registry YAML
+      # The registry has services with name, vm, status, domain, health_url
+      set +e
+      SVC_COUNT="$(yq '.services | length' "$SERVICE_REGISTRY" 2>/dev/null || echo 0)"
+      set -e
+
+      if [[ "$SVC_COUNT" -gt 0 ]]; then
+        for sidx in $(seq 0 $((SVC_COUNT - 1))); do
+          SVC_NAME="$(yq ".services[$sidx].name" "$SERVICE_REGISTRY" 2>/dev/null || true)"
+          SVC_STATUS="$(yq ".services[$sidx].status // \"unknown\"" "$SERVICE_REGISTRY" 2>/dev/null || true)"
+          SVC_DOMAIN="$(yq ".services[$sidx].domain // \"unknown\"" "$SERVICE_REGISTRY" 2>/dev/null || true)"
+          SVC_URL="$(yq ".services[$sidx].health_url // \"\"" "$SERVICE_REGISTRY" 2>/dev/null || true)"
+
+          [[ -z "$SVC_NAME" || "$SVC_NAME" == "null" ]] && continue
+          insert_tool "$SVC_NAME" "status=$SVC_STATUS domain=$SVC_DOMAIN (deployed)" "$SVC_DOMAIN" "$SRC_ID" "$SVC_URL"
+        done
+      fi
+
+      TOOLS_THIS=$((TOOLS_INDEXED - TOOLS_BEFORE))
+      echo "   tools_parsed: $TOOLS_THIS"
+      SOURCES_OK=$((SOURCES_OK + 1))
+      log_refresh "$SRC_ID" "ok" "$TOOLS_THIS" ""
+      ;;
+
+    # ── Unknown type ───────────────────────────────────────────────────────
+    *)
+      echo "   WARN: unsupported source type: $SRC_TYPE, skipping"
+      SOURCES_FAILED=$((SOURCES_FAILED + 1))
+      log_refresh "$SRC_ID" "skipped" 0 "unsupported source type: $SRC_TYPE"
+      ;;
+  esac
+
+  echo
+done
+
+# ── summary ──────────────────────────────────────────────────────────────────
+echo "== summary =="
+echo "sources_attempted: $SOURCES_ATTEMPTED"
+echo "sources_ok: $SOURCES_OK"
+echo "sources_failed: $SOURCES_FAILED"
+echo "tools_indexed: $TOOLS_INDEXED"
+echo "database: $DB_PATH"
+echo "timestamp: $REFRESH_TS"
+
+# Success threshold: 80% of sources must succeed
+if [[ $SOURCES_ATTEMPTED -gt 0 ]]; then
+  SUCCESS_PCT=$(( (SOURCES_OK * 100) / SOURCES_ATTEMPTED ))
+  echo "success_rate: ${SUCCESS_PCT}%"
+  if [[ $SUCCESS_PCT -lt 80 ]]; then
+    echo "WARN: success rate below 80% threshold" >&2
+  fi
+fi
+
+echo
+echo "DONE: stack discovery refresh complete."

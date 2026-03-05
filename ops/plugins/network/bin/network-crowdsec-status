@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# network.crowdsec.status
+# Read-only: verify CrowdSec Security Engine health on infra-core (VM 204).
+# Checks container running, LAPI health, collections installed, and metrics endpoint.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+CROWDSEC_HOST="${CROWDSEC_HOST:-100.92.91.128}"
+SSH_OPTS="-o ConnectTimeout=15 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+pass=0
+fail=0
+total=0
+
+check() {
+  local label="$1"
+  local result="$2"
+  total=$((total + 1))
+  if [[ "$result" == "PASS" ]]; then
+    echo "  PASS: $label"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: $label — $3"
+    fail=$((fail + 1))
+  fi
+}
+
+echo "network.crowdsec.status"
+echo "target: infra-core ($CROWDSEC_HOST)"
+echo
+
+# ── 0. SSH reachability ──────────────────────────────────────────────────
+if ! ssh $SSH_OPTS ubuntu@"$CROWDSEC_HOST" 'echo ok' >/dev/null 2>&1; then
+  echo "  FAIL: infra-core ($CROWDSEC_HOST) unreachable via SSH"
+  echo
+  echo "summary: 0/1 checks passed (SSH unreachable)"
+  echo "status: FAIL"
+  exit 1
+fi
+
+# ── 1. CrowdSec container running ───────────────────────────────────────
+CS_STATUS="$(ssh $SSH_OPTS ubuntu@"$CROWDSEC_HOST" 'docker inspect crowdsec --format "{{.State.Status}}" 2>/dev/null' || echo 'not_found')"
+if [[ "$CS_STATUS" == "running" ]]; then
+  check "crowdsec container running" "PASS" ""
+else
+  check "crowdsec container running" "FAIL" "status=$CS_STATUS"
+fi
+
+# ── 2. CrowdSec container healthy ───────────────────────────────────────
+CS_HEALTH="$(ssh $SSH_OPTS ubuntu@"$CROWDSEC_HOST" 'docker inspect crowdsec --format "{{.State.Health.Status}}" 2>/dev/null' || echo 'unknown')"
+if [[ "$CS_HEALTH" == "healthy" ]]; then
+  check "crowdsec health check healthy" "PASS" ""
+else
+  check "crowdsec health check healthy" "FAIL" "health=$CS_HEALTH"
+fi
+
+# ── 3. LAPI responding ──────────────────────────────────────────────────
+LAPI_STATUS="$(ssh $SSH_OPTS ubuntu@"$CROWDSEC_HOST" 'curl -sk http://127.0.0.1:8080/health 2>/dev/null' || true)"
+if echo "$LAPI_STATUS" | grep -q '"status"'; then
+  LAPI_UP="$(echo "$LAPI_STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo 'unknown')"
+  if [[ "$LAPI_UP" == "up" ]]; then
+    check "LAPI health endpoint responding (status=up)" "PASS" ""
+  else
+    check "LAPI health endpoint responding" "FAIL" "status=$LAPI_UP"
+  fi
+else
+  check "LAPI health endpoint responding" "FAIL" "no valid response"
+fi
+
+# ── 4. Required collections installed ────────────────────────────────────
+REQUIRED_COLLECTIONS="crowdsecurity/linux crowdsecurity/sshd crowdsecurity/http-cve crowdsecurity/whitelist-good-actors"
+COLLECTIONS_RAW="$(ssh $SSH_OPTS ubuntu@"$CROWDSEC_HOST" 'docker exec crowdsec cscli collections list -o raw 2>/dev/null' || true)"
+
+MISSING_COLLECTIONS=""
+for col in $REQUIRED_COLLECTIONS; do
+  if ! echo "$COLLECTIONS_RAW" | grep -q "^${col},enabled"; then
+    MISSING_COLLECTIONS="${MISSING_COLLECTIONS} ${col}"
+  fi
+done
+
+if [[ -z "$MISSING_COLLECTIONS" ]]; then
+  check "required collections installed (4/4)" "PASS" ""
+else
+  check "required collections installed" "FAIL" "missing:$MISSING_COLLECTIONS"
+fi
+
+# ── 5. Auth.log acquisition configured ───────────────────────────────────
+ACQUIS_CHECK="$(ssh $SSH_OPTS ubuntu@"$CROWDSEC_HOST" 'docker exec crowdsec test -f /etc/crowdsec/acquis.d/host-auth.yaml && echo exists || echo missing' 2>/dev/null || echo 'unknown')"
+if [[ "$ACQUIS_CHECK" == "exists" ]]; then
+  check "auth.log acquisition configured" "PASS" ""
+else
+  check "auth.log acquisition configured" "FAIL" "acquis file $ACQUIS_CHECK"
+fi
+
+# ── 6. Internal network whitelist configured ─────────────────────────────
+WL_CHECK="$(ssh $SSH_OPTS ubuntu@"$CROWDSEC_HOST" 'docker exec crowdsec test -f /etc/crowdsec/parsers/s02-enrich/internal-whitelist.yaml && echo exists || echo missing' 2>/dev/null || echo 'unknown')"
+if [[ "$WL_CHECK" == "exists" ]]; then
+  check "internal network whitelist configured" "PASS" ""
+else
+  check "internal network whitelist configured" "FAIL" "whitelist file $WL_CHECK"
+fi
+
+# ── 7. Prometheus metrics endpoint ───────────────────────────────────────
+METRICS_CHECK="$(ssh $SSH_OPTS ubuntu@"$CROWDSEC_HOST" 'curl -sk http://127.0.0.1:6060/metrics 2>/dev/null | head -5' || true)"
+if echo "$METRICS_CHECK" | grep -q 'cs_'; then
+  check "Prometheus metrics endpoint responding" "PASS" ""
+else
+  check "Prometheus metrics endpoint responding" "FAIL" "no cs_ metrics found"
+fi
+
+# ── 8. Contract exists and is active ─────────────────────────────────────
+CONTRACT="$SPINE_ROOT/ops/bindings/network.crowdsec.contract.yaml"
+if [[ -f "$CONTRACT" ]]; then
+  CONTRACT_STATUS="$(grep '^status:' "$CONTRACT" 2>/dev/null | awk '{print $2}' || true)"
+  if [[ "$CONTRACT_STATUS" == "active" ]]; then
+    check "CrowdSec contract exists and status=active" "PASS" ""
+  else
+    check "CrowdSec contract exists and status=active" "FAIL" "status=$CONTRACT_STATUS"
+  fi
+else
+  check "CrowdSec contract exists and status=active" "FAIL" "file not found"
+fi
+
+echo
+echo "summary: ${pass}/${total} checks passed"
+if [[ $fail -gt 0 ]]; then
+  echo "status: FAIL"
+  exit 1
+fi
+echo "status: PASS"

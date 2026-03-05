@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# stack.discovery.query
+# Search the stack discovery SQLite knowledge base for tools matching a query.
+# Uses LIKE matching against name, description, and category fields.
+#
+# Safety: read-only
+# Approval: auto
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+DB_PATH="$SPINE_ROOT/ops/runtime/stack-discovery.db"
+
+# ── dependency checks ────────────────────────────────────────────────────────
+command -v sqlite3 >/dev/null 2>&1 || { echo "STOP (2): missing dependency: sqlite3" >&2; exit 2; }
+
+# ── argument parsing ─────────────────────────────────────────────────────────
+QUERY=""
+FORMAT="table"
+LIMIT=25
+
+usage() {
+  cat <<'EOF'
+stack-discovery-query
+
+Usage:
+  stack-discovery-query --query "search term" [--format table|json|tsv] [--limit N]
+
+Options:
+  --query    Search term (required). Matches against name, description, category.
+  --format   Output format: table (default), json, tsv.
+  --limit    Max results to return (default: 25).
+
+Examples:
+  stack-discovery-query --query "media server"
+  stack-discovery-query --query "monitoring" --format json
+  stack-discovery-query --query "password" --limit 10
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --query)   QUERY="${2:?--query requires a value}"; shift 2 ;;
+    --format)  FORMAT="${2:?--format requires a value}"; shift 2 ;;
+    --limit)   LIMIT="${2:?--limit requires a value}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    --)        shift; break ;;
+    *)         echo "FAIL: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+[[ -n "$QUERY" ]] || { echo "FAIL: --query is required" >&2; usage >&2; exit 2; }
+[[ -f "$DB_PATH" ]] || { echo "FAIL: knowledge base not found at $DB_PATH — run stack.discovery.refresh first" >&2; exit 1; }
+
+# ── build search ─────────────────────────────────────────────────────────────
+# Escape single quotes in query
+SAFE_QUERY="${QUERY//\'/\'\'}"
+
+# Split query into words for multi-term matching
+SEARCH_CLAUSES=""
+for word in $SAFE_QUERY; do
+  word="${word//\'/\'\'}"
+  if [[ -z "$SEARCH_CLAUSES" ]]; then
+    SEARCH_CLAUSES="(name LIKE '%${word}%' OR description LIKE '%${word}%' OR category LIKE '%${word}%')"
+  else
+    SEARCH_CLAUSES="$SEARCH_CLAUSES AND (name LIKE '%${word}%' OR description LIKE '%${word}%' OR category LIKE '%${word}%')"
+  fi
+done
+
+# ── execute query ────────────────────────────────────────────────────────────
+case "$FORMAT" in
+  json)
+    sqlite3 -json "$DB_PATH" "SELECT DISTINCT name, description, category, source, url, fetched_at FROM tools WHERE $SEARCH_CLAUSES ORDER BY name LIMIT $LIMIT;" 2>/dev/null || \
+    sqlite3 "$DB_PATH" <<EOSQL
+.mode json
+SELECT DISTINCT name, description, category, source, url, fetched_at
+FROM tools
+WHERE $SEARCH_CLAUSES
+ORDER BY name
+LIMIT $LIMIT;
+EOSQL
+    ;;
+
+  tsv)
+    sqlite3 -separator "	" "$DB_PATH" "SELECT DISTINCT name, description, category, source, url FROM tools WHERE $SEARCH_CLAUSES ORDER BY name LIMIT $LIMIT;"
+    ;;
+
+  table|*)
+    echo "stack.discovery.query"
+    echo "query: \"$QUERY\""
+    echo
+
+    RESULT_COUNT="$(sqlite3 "$DB_PATH" "SELECT COUNT(DISTINCT name) FROM tools WHERE $SEARCH_CLAUSES;")"
+    echo "results: $RESULT_COUNT (showing up to $LIMIT)"
+    echo
+
+    if [[ "$RESULT_COUNT" -eq 0 ]]; then
+      echo "No tools found matching \"$QUERY\"."
+      echo "Tip: try broader search terms or run stack.discovery.refresh to update the index."
+      exit 0
+    fi
+
+    sqlite3 -header -column "$DB_PATH" "SELECT DISTINCT name, substr(description, 1, 80) AS description, category, source FROM tools WHERE $SEARCH_CLAUSES ORDER BY name LIMIT $LIMIT;"
+    ;;
+esac

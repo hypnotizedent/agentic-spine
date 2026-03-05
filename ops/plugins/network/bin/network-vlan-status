@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# network-vlan-status — Report VLAN configuration parity against topology contract
+# TRIAGE: If a VLAN is missing or misconfigured on the UDR, use the UniFi UI or API to create/fix it, then re-run.
+#
+# Queries the UDR7 UniFi controller API through proxmox-home (LAN-only device)
+# and compares the live VLAN configuration against the authoritative topology
+# contract at ops/bindings/network.vlan.topology.contract.yaml.
+#
+# Output: PASS/FAIL per VLAN with details on mismatches.
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+CONTRACT="$ROOT/ops/bindings/network.vlan.topology.contract.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+INFISICAL_AGENT="$ROOT/ops/tools/infisical-agent.sh"
+
+PASS_COUNT=0
+FAIL_COUNT=0
+WARN_COUNT=0
+
+pass() { echo "PASS: $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
+fail() { echo "FAIL: $*"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
+warn() { echo "WARN: $*"; WARN_COUNT=$((WARN_COUNT + 1)); }
+
+# ── Validate dependencies ──
+command -v yq >/dev/null 2>&1 || { echo "STOP: missing dependency: yq" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "STOP: missing dependency: jq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "STOP: missing dependency: ssh" >&2; exit 2; }
+[[ -f "$CONTRACT" ]] || { echo "STOP: missing contract: $CONTRACT" >&2; exit 2; }
+[[ -f "$SSH_BINDING" ]] || { echo "STOP: missing binding: $SSH_BINDING" >&2; exit 2; }
+
+# ── Resolve API key ──
+UNIFI_HOME_API_KEY="${UNIFI_HOME_API_KEY:-}"
+if [[ -z "$UNIFI_HOME_API_KEY" && -f "$INFISICAL_AGENT" ]]; then
+  UNIFI_HOME_API_KEY="$("$INFISICAL_AGENT" get-cached home-assistant prod UNIFI_HOME_API_KEY 2>/dev/null || true)"
+fi
+[[ -n "$UNIFI_HOME_API_KEY" ]] || { echo "STOP: UNIFI_HOME_API_KEY not available" >&2; exit 2; }
+
+# ── Resolve SSH proxy ──
+UDR_HOST="$(yq -r '.ssh.targets[] | select(.id == "udr-home") | .host' "$SSH_BINDING")"
+PROXY_HOST="$(yq -r '.ssh.targets[] | select(.id == "proxmox-home") | .host' "$SSH_BINDING")"
+PROXY_USER="$(yq -r '.ssh.targets[] | select(.id == "proxmox-home") | .user // "root"' "$SSH_BINDING")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+
+ssh_opts=(
+  -o "ConnectTimeout=${DEF_TO}"
+  -o "StrictHostKeyChecking=no"
+  -o "UserKnownHostsFile=/dev/null"
+  -o "BatchMode=yes"
+  -o "LogLevel=ERROR"
+)
+
+# ── Query live VLANs from UDR ──
+api_b64="$(printf '%s' "$UNIFI_HOME_API_KEY" | base64)"
+live_json="$(
+  ssh "${ssh_opts[@]}" "${PROXY_USER}@${PROXY_HOST}" "bash -s" <<EOF
+api_key="\$(echo '$api_b64' | base64 -d)"
+curl -sk -H "X-API-KEY: \$api_key" "https://${UDR_HOST}/proxy/network/api/s/default/rest/networkconf" 2>/dev/null
+EOF
+)" || {
+  echo "STOP: failed to query UniFi API via proxmox-home" >&2
+  exit 2
+}
+
+echo "network-vlan-status: checking VLAN parity against contract"
+echo "host: $UDR_HOST (via proxmox-home $PROXY_HOST)"
+echo
+
+# ── Extract contract VLANs ──
+vlan_count="$(yq -r '.vlans | length' "$CONTRACT")"
+
+for i in $(seq 0 $((vlan_count - 1))); do
+  vlan_id="$(yq -r ".vlans[$i].vlan_id" "$CONTRACT")"
+  vlan_name="$(yq -r ".vlans[$i].name" "$CONTRACT")"
+  expected_subnet="$(yq -r ".vlans[$i].home.subnet" "$CONTRACT")"
+  expected_gateway="$(yq -r ".vlans[$i].home.gateway" "$CONTRACT")"
+  expected_dhcp_start="$(yq -r ".vlans[$i].home.dhcp_range" "$CONTRACT" | cut -d'-' -f1 | sed "s/^/${expected_gateway%.*}./")"
+  expected_dhcp_end="$(yq -r ".vlans[$i].home.dhcp_range" "$CONTRACT" | cut -d'-' -f2)"
+
+  # Parse expected DHCP range properly
+  range_raw="$(yq -r ".vlans[$i].home.dhcp_range" "$CONTRACT")"
+  # Range is like "10.0.10.200-254"
+  dhcp_start="$(echo "$range_raw" | cut -d'-' -f1)"
+  dhcp_end_last="$(echo "$range_raw" | cut -d'-' -f2)"
+  # Construct full end IP from the start IP prefix
+  dhcp_end_prefix="${dhcp_start%.*}"
+  expected_dhcp_start="$dhcp_start"
+  expected_dhcp_stop="${dhcp_end_prefix}.${dhcp_end_last}"
+
+  # Check if VLAN exists in live config
+  if [[ "$vlan_id" == "1" ]]; then
+    # VLAN 1 is the default network (no vlan_enabled flag)
+    # Skip VLAN 1 check since we don't modify the default network
+    warn "VLAN ${vlan_id} (${vlan_name}): skipped (default network, not managed by VLAN topology)"
+    continue
+  fi
+
+  # Find matching network by VLAN ID
+  live_match="$(echo "$live_json" | jq -r ".data[] | select(.vlan == ${vlan_id} and .vlan_enabled == true)" 2>/dev/null)"
+
+  if [[ -z "$live_match" || "$live_match" == "null" ]]; then
+    fail "VLAN ${vlan_id} (${vlan_name}): NOT FOUND on UDR"
+    continue
+  fi
+
+  live_name="$(echo "$live_match" | jq -r '.name')"
+  live_subnet="$(echo "$live_match" | jq -r '.ip_subnet')"
+  live_dhcp="$(echo "$live_match" | jq -r '.dhcpd_enabled')"
+  live_dhcp_start="$(echo "$live_match" | jq -r '.dhcpd_start')"
+  live_dhcp_stop="$(echo "$live_match" | jq -r '.dhcpd_stop')"
+  live_mdns="$(echo "$live_match" | jq -r '.mdns_enabled // false')"
+
+  # Verify subnet (UniFi uses gateway/mask format: 10.0.10.1/24)
+  expected_subnet_unifi="${expected_gateway}/$(echo "$expected_subnet" | cut -d'/' -f2)"
+  errors=""
+
+  if [[ "$live_subnet" != "$expected_subnet_unifi" ]]; then
+    errors="${errors}  subnet: expected=${expected_subnet_unifi} got=${live_subnet}\n"
+  fi
+
+  if [[ "$live_dhcp" != "true" ]]; then
+    errors="${errors}  dhcp: expected=true got=${live_dhcp}\n"
+  fi
+
+  if [[ "$live_dhcp_start" != "$expected_dhcp_start" ]]; then
+    errors="${errors}  dhcp_start: expected=${expected_dhcp_start} got=${live_dhcp_start}\n"
+  fi
+
+  if [[ "$live_dhcp_stop" != "$expected_dhcp_stop" ]]; then
+    errors="${errors}  dhcp_stop: expected=${expected_dhcp_stop} got=${live_dhcp_stop}\n"
+  fi
+
+  if [[ -n "$errors" ]]; then
+    fail "VLAN ${vlan_id} (${vlan_name}): parity mismatch"
+    printf "%b" "$errors"
+  else
+    pass "VLAN ${vlan_id} (${vlan_name}): subnet=${live_subnet} dhcp=${live_dhcp_start}-${live_dhcp_stop} mdns=${live_mdns}"
+  fi
+done
+
+echo
+echo "--- Summary ---"
+echo "PASS: $PASS_COUNT  FAIL: $FAIL_COUNT  WARN: $WARN_COUNT"
+
+if [[ "$FAIL_COUNT" -gt 0 ]]; then
+  exit 1
+fi
+exit 0

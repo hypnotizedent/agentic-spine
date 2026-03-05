@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# network.dns.bypass.test
+# Read-only: verify DNS bypass prevention firewall rules exist in UniFi.
+# Checks that port 53 and 853 traffic is blocked to non-Pi-hole destinations.
+#
+# This is a read-only probe — it only verifies the rules are present in the
+# contract authority file and that Pi-hole is reachable. Actual firewall rule
+# verification requires UniFi controller API access (checked separately).
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+
+PIHOLE_HOST="${PIHOLE_HOME_HOST:-100.105.148.96}"
+SSH_OPTS="-o ConnectTimeout=15 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+BYPASS_CONTRACT="$SPINE_ROOT/ops/bindings/network.dns.bypass.prevention.contract.yaml"
+AUTHORITY_CONTRACT="$SPINE_ROOT/ops/bindings/network.dns.authority.contract.yaml"
+
+pass=0
+fail=0
+total=0
+
+check() {
+  local label="$1"
+  local result="$2"
+  total=$((total + 1))
+  if [[ "$result" == "PASS" ]]; then
+    echo "  PASS: $label"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: $label — ${3:-}"
+    fail=$((fail + 1))
+  fi
+}
+
+echo "network.dns.bypass.test"
+echo
+
+# ── 1. Bypass prevention contract exists ─────────────────────────────────
+if [[ -f "$BYPASS_CONTRACT" ]]; then
+  check "bypass prevention contract exists" "PASS"
+else
+  check "bypass prevention contract exists" "FAIL" "missing $BYPASS_CONTRACT"
+fi
+
+# ── 2. Contract defines home DNS bypass rule ─────────────────────────────
+if command -v yq >/dev/null 2>&1; then
+  HOME_BLOCK="$(yq -r '.rules.home.entries[] | select(.name == "Block DNS bypass (home)") | .action' "$BYPASS_CONTRACT" 2>/dev/null || true)"
+  if [[ "$HOME_BLOCK" == "DROP" ]]; then
+    check "home DNS bypass rule defined (DROP)" "PASS"
+  else
+    check "home DNS bypass rule defined (DROP)" "FAIL" "action=$HOME_BLOCK"
+  fi
+
+  # ── 3. Contract defines home DoT bypass rule ─────────────────────────────
+  HOME_DOT="$(yq -r '.rules.home.entries[] | select(.name == "Block DoT bypass (home)") | .action' "$BYPASS_CONTRACT" 2>/dev/null || true)"
+  if [[ "$HOME_DOT" == "DROP" ]]; then
+    check "home DoT bypass rule defined (DROP)" "PASS"
+  else
+    check "home DoT bypass rule defined (DROP)" "FAIL" "action=$HOME_DOT"
+  fi
+
+  # ── 4. Contract defines shop DNS bypass rule ────────────────────────────
+  SHOP_BLOCK="$(yq -r '.rules.shop.entries[] | select(.name == "Block DNS bypass (shop)") | .action' "$BYPASS_CONTRACT" 2>/dev/null || true)"
+  if [[ "$SHOP_BLOCK" == "DROP" ]]; then
+    check "shop DNS bypass rule defined (DROP)" "PASS"
+  else
+    check "shop DNS bypass rule defined (DROP)" "FAIL" "action=$SHOP_BLOCK"
+  fi
+
+  # ── 5. Contract defines shop DoT bypass rule ────────────────────────────
+  SHOP_DOT="$(yq -r '.rules.shop.entries[] | select(.name == "Block DoT bypass (shop)") | .action' "$BYPASS_CONTRACT" 2>/dev/null || true)"
+  if [[ "$SHOP_DOT" == "DROP" ]]; then
+    check "shop DoT bypass rule defined (DROP)" "PASS"
+  else
+    check "shop DoT bypass rule defined (DROP)" "FAIL" "action=$SHOP_DOT"
+  fi
+else
+  echo "  WARN: yq not available — skipping contract rule validation"
+  total=$((total + 4))
+  fail=$((fail + 4))
+fi
+
+# ── 6. Pi-hole is reachable (DNS authority must be live for bypass to matter) ──
+if ssh $SSH_OPTS root@"$PIHOLE_HOST" 'systemctl is-active pihole-FTL >/dev/null 2>&1'; then
+  check "Pi-hole FTL reachable and active" "PASS"
+else
+  check "Pi-hole FTL reachable and active" "FAIL" "SSH or pihole-FTL failed"
+fi
+
+# ── 7. Authority contract references bypass prevention ───────────────────
+if [[ -f "$AUTHORITY_CONTRACT" ]]; then
+  if grep -q 'bypass_prevention' "$AUTHORITY_CONTRACT" 2>/dev/null; then
+    check "authority contract includes bypass_prevention section" "PASS"
+  else
+    check "authority contract includes bypass_prevention section" "FAIL" "missing bypass_prevention"
+  fi
+else
+  check "authority contract includes bypass_prevention section" "FAIL" "missing $AUTHORITY_CONTRACT"
+fi
+
+echo
+echo "summary: ${pass}/${total} checks passed"
+if [[ $fail -gt 0 ]]; then
+  echo "status: FAIL"
+  exit 1
+fi
+echo "status: PASS"

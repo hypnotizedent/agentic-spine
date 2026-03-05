@@ -13,7 +13,7 @@
 
 contract_id: NETWORK_DNS_AUTHORITY_V1
 version: "1.0"
-status: planned
+status: active
 created: "2026-03-03"
 owner: "@ronny"
 
@@ -66,7 +66,9 @@ unbound:
     home:
       host: "Pi-hole LXC 105 (proxmox-home)"
       ip: "10.0.0.53"
-      install_method: "apt (unbound package)"
+      tailscale_ip: "100.105.148.96"
+      install_method: "apt (unbound + dns-root-data packages)"
+      deployed: "2026-03-05"
     shop:
       host: "VM 204 infra-core"
       ip: "192.168.1.204"
@@ -119,11 +121,19 @@ cloudflared:
     home:
       host: "Pi-hole LXC 105 (proxmox-home)"
       ip: "10.0.0.53"
-      install_method: "deb package (cloudflare apt repo)"
+      tailscale_ip: "100.105.148.96"
+      install_method: "deb package (GitHub release, pinned to 2025.11.1)"
+      deployed: "2026-03-05"
     shop:
       host: "VM 204 infra-core"
       ip: "192.168.1.204"
-      install_method: "deb package (cloudflare apt repo)"
+      install_method: "deb package (GitHub release)"
+
+  version_pin:
+    version: "2025.11.1"
+    reason: "proxy-dns feature removed in cloudflared 2026.2.0; pinned to last supporting version"
+    systemd_unit: "cloudflared-dns.service"
+    exec_start: "/usr/bin/cloudflared proxy-dns --port 5053 --upstream https://1.1.1.1/dns-query --upstream https://1.0.0.1/dns-query"
 
   config:
     proxy_dns: true
@@ -228,9 +238,9 @@ tailscale_coexistence:
   related_gate: D314
 
 # ────────────────────────────────────────────────────────────────────────────
-# PLANNED CAPABILITIES
+# CAPABILITIES
 # ────────────────────────────────────────────────────────────────────────────
-planned_capabilities:
+capabilities:
   - name: network.dns.authority.deploy
     description: "Deploy and configure Unbound + cloudflared on target host"
     safety: mutating
@@ -241,25 +251,25 @@ planned_capabilities:
     description: "Verify Unbound reachable, DNSSEC valid, Pi-hole upstream correct"
     safety: read-only
     approval: auto
-    status: planned
+    status: active
 
   - name: network.dns.bypass.test
     description: "Verify DNS bypass prevention firewall rule is active"
     safety: read-only
     approval: auto
-    status: planned
+    status: active
 
 # ────────────────────────────────────────────────────────────────────────────
-# PROPOSED GATES
+# GATES
 # ────────────────────────────────────────────────────────────────────────────
-proposed_gates:
-  - id: D340
+gates:
+  - id: D359
     name: netsec-dns-authority-lock
-    description: "Fail if Pi-hole upstream is not Unbound, DNSSEC invalid, or bypass prevention absent"
+    description: "Fail if Pi-hole upstream is not Unbound, DNSSEC invalid, or cloudflared not running"
     mode: report
     promote_to_enforce_after_clean_runs: 3
 
-  - id: D341
+  - id: D360
     name: netsec-pihole-drift-lock
     description: "Enforce Pi-hole blocklist policy, upstream DNS, and DHCP DNS handout"
     mode: report

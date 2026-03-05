@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# network-firewall-audit — Validate inter-VLAN firewall rules match baseline contract
+# TRIAGE: If rules are missing or out of order, create them via UniFi API or UI using the baseline contract as reference.
+#
+# Queries the UDR7 UniFi controller traffic rules API through proxmox-home
+# and validates that the inter-VLAN rules defined in
+# ops/bindings/network.vlan.firewall.baseline.yaml are present.
+#
+# Checks:
+#   1. All BLOCK rules exist (IoT/Guest/DMZ isolation)
+#   2. All ALLOW rules exist (Trusted/Servers access)
+#   3. No stale or unknown rules present
+#
+# Note: The UniFi v2 traffic rules API does not support port-level
+# granularity. Port-specific rules are documented in the baseline
+# contract but enforced at a coarser network-to-network level via
+# the traffic rules API. Port-level enforcement requires the newer
+# zone-based firewall-policies API or manual UI configuration.
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+BASELINE="$ROOT/ops/bindings/network.vlan.firewall.baseline.yaml"
+TOPOLOGY="$ROOT/ops/bindings/network.vlan.topology.contract.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+INFISICAL_AGENT="$ROOT/ops/tools/infisical-agent.sh"
+
+PASS_COUNT=0
+FAIL_COUNT=0
+WARN_COUNT=0
+
+pass() { echo "PASS: $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
+fail() { echo "FAIL: $*"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
+warn() { echo "WARN: $*"; WARN_COUNT=$((WARN_COUNT + 1)); }
+
+# ── Validate dependencies ──
+command -v yq >/dev/null 2>&1 || { echo "STOP: missing dependency: yq" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "STOP: missing dependency: jq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "STOP: missing dependency: ssh" >&2; exit 2; }
+[[ -f "$BASELINE" ]] || { echo "STOP: missing baseline: $BASELINE" >&2; exit 2; }
+[[ -f "$SSH_BINDING" ]] || { echo "STOP: missing binding: $SSH_BINDING" >&2; exit 2; }
+
+# ── Resolve API key ──
+UNIFI_HOME_API_KEY="${UNIFI_HOME_API_KEY:-}"
+if [[ -z "$UNIFI_HOME_API_KEY" && -f "$INFISICAL_AGENT" ]]; then
+  UNIFI_HOME_API_KEY="$("$INFISICAL_AGENT" get-cached home-assistant prod UNIFI_HOME_API_KEY 2>/dev/null || true)"
+fi
+[[ -n "$UNIFI_HOME_API_KEY" ]] || { echo "STOP: UNIFI_HOME_API_KEY not available" >&2; exit 2; }
+
+# ── Resolve SSH proxy ──
+UDR_HOST="$(yq -r '.ssh.targets[] | select(.id == "udr-home") | .host' "$SSH_BINDING")"
+PROXY_HOST="$(yq -r '.ssh.targets[] | select(.id == "proxmox-home") | .host' "$SSH_BINDING")"
+PROXY_USER="$(yq -r '.ssh.targets[] | select(.id == "proxmox-home") | .user // "root"' "$SSH_BINDING")"
+DEF_TO="$(yq -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+
+ssh_opts=(
+  -o "ConnectTimeout=${DEF_TO}"
+  -o "StrictHostKeyChecking=no"
+  -o "UserKnownHostsFile=/dev/null"
+  -o "BatchMode=yes"
+  -o "LogLevel=ERROR"
+)
+
+api_b64="$(printf '%s' "$UNIFI_HOME_API_KEY" | base64)"
+
+# ── Query live networks (for VLAN name → network ID mapping) ──
+nets_json="$(
+  ssh "${ssh_opts[@]}" "${PROXY_USER}@${PROXY_HOST}" "bash -s" <<EOF
+api_key="\$(echo '$api_b64' | base64 -d)"
+curl -sk -H "X-API-KEY: \$api_key" "https://${UDR_HOST}/proxy/network/api/s/default/rest/networkconf" 2>/dev/null
+EOF
+)" || { echo "STOP: failed to query UniFi networks" >&2; exit 2; }
+
+# ── Query live traffic rules ──
+rules_json="$(
+  ssh "${ssh_opts[@]}" "${PROXY_USER}@${PROXY_HOST}" "bash -s" <<EOF
+api_key="\$(echo '$api_b64' | base64 -d)"
+curl -sk -H "X-API-KEY: \$api_key" "https://${UDR_HOST}/proxy/network/v2/api/site/default/trafficrules" 2>/dev/null
+EOF
+)" || { echo "STOP: failed to query UniFi traffic rules" >&2; exit 2; }
+
+echo "network-firewall-audit: checking inter-VLAN rules against baseline"
+echo "host: $UDR_HOST (via proxmox-home $PROXY_HOST)"
+echo
+
+# ── Build VLAN name → network ID mapping ──
+declare -A NET_ID_MAP
+while IFS=$'\t' read -r vname vid; do
+  NET_ID_MAP["$vname"]="$vid"
+done < <(echo "$nets_json" | jq -r '.data[] | select(.purpose == "corporate" or .purpose == "guest") | "\(.name)\t\(._id)"' 2>/dev/null)
+
+# The default/management network
+DEFAULT_NET_ID="$(echo "$nets_json" | jq -r '.data[] | select(.purpose == "corporate" and (.vlan_enabled | not)) | ._id' 2>/dev/null | head -1)"
+NET_ID_MAP["Default"]="$DEFAULT_NET_ID"
+NET_ID_MAP["management"]="$DEFAULT_NET_ID"
+
+# Map VLAN names from contract to UniFi network names
+vlan_to_netname() {
+  case "$1" in
+    management) echo "Default" ;;
+    servers) echo "Servers" ;;
+    trusted) echo "Trusted" ;;
+    iot) echo "IoT" ;;
+    guest) echo "Guest" ;;
+    dmz) echo "DMZ" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# ── Check expected rules from baseline ──
+echo "--- Block Rules ---"
+
+# Expected block rules: IoT→Servers, IoT→Trusted, IoT→Management, Guest→all, DMZ→all
+expected_blocks=(
+  "IoT:Servers:Block-IoT-to-Servers"
+  "IoT:Trusted:Block-IoT-to-Trusted"
+  "IoT:Default:Block-IoT-to-Management"
+  "Guest:Default:Block-Guest-to-Management"
+  "Guest:Servers:Block-Guest-to-Servers"
+  "Guest:Trusted:Block-Guest-to-Trusted"
+  "Guest:IoT:Block-Guest-to-IoT"
+  "Guest:DMZ:Block-Guest-to-DMZ"
+  "DMZ:Default:Block-DMZ-to-Management"
+  "DMZ:Servers:Block-DMZ-to-Servers"
+  "DMZ:Trusted:Block-DMZ-to-Trusted"
+  "DMZ:IoT:Block-DMZ-to-IoT"
+  "DMZ:Guest:Block-DMZ-to-Guest"
+)
+
+for entry in "${expected_blocks[@]}"; do
+  src_name="$(echo "$entry" | cut -d: -f1)"
+  dst_name="$(echo "$entry" | cut -d: -f2)"
+  rule_desc="$(echo "$entry" | cut -d: -f3)"
+  src_id="${NET_ID_MAP[$src_name]:-}"
+  dst_id="${NET_ID_MAP[$dst_name]:-}"
+
+  if [[ -z "$src_id" || -z "$dst_id" ]]; then
+    warn "$rule_desc: network ID not resolved (src=$src_name dst=$dst_name)"
+    continue
+  fi
+
+  # Check if a BLOCK rule exists with matching source and destination
+  found="$(echo "$rules_json" | jq -r --arg src "$src_id" --arg dst "$dst_id" \
+    '[.[] | select(.action == "BLOCK" and .enabled == true and (.target_devices[]?.network_id == $src) and (.network_ids[]? == $dst))] | length' 2>/dev/null || echo "0")"
+
+  if [[ "$found" -gt 0 ]]; then
+    pass "$rule_desc (${src_name} -> ${dst_name})"
+  else
+    fail "$rule_desc: BLOCK rule missing (${src_name} -> ${dst_name})"
+  fi
+done
+
+echo
+echo "--- Allow Rules ---"
+
+expected_allows=(
+  "Trusted:Default:Allow-Trusted-to-Management"
+  "Trusted:Servers:Allow-Trusted-to-Servers"
+  "Trusted:IoT:Allow-Trusted-to-IoT"
+  "Servers:Default:Allow-Servers-to-Management"
+  "Servers:IoT:Allow-Servers-to-IoT"
+  "Servers:DMZ:Allow-Servers-to-DMZ"
+)
+
+for entry in "${expected_allows[@]}"; do
+  src_name="$(echo "$entry" | cut -d: -f1)"
+  dst_name="$(echo "$entry" | cut -d: -f2)"
+  rule_desc="$(echo "$entry" | cut -d: -f3)"
+  src_id="${NET_ID_MAP[$src_name]:-}"
+  dst_id="${NET_ID_MAP[$dst_name]:-}"
+
+  if [[ -z "$src_id" || -z "$dst_id" ]]; then
+    warn "$rule_desc: network ID not resolved (src=$src_name dst=$dst_name)"
+    continue
+  fi
+
+  found="$(echo "$rules_json" | jq -r --arg src "$src_id" --arg dst "$dst_id" \
+    '[.[] | select(.action == "ALLOW" and .enabled == true and (.target_devices[]?.network_id == $src) and (.network_ids[]? == $dst))] | length' 2>/dev/null || echo "0")"
+
+  if [[ "$found" -gt 0 ]]; then
+    pass "$rule_desc (${src_name} -> ${dst_name})"
+  else
+    fail "$rule_desc: ALLOW rule missing (${src_name} -> ${dst_name})"
+  fi
+done
+
+echo
+echo "--- Port-Level Rules ---"
+warn "Port-level rules (NFS 2049, DNS 53, HA IoT ports) are in the baseline contract but cannot be verified via the v2 traffic rules API. These require zone-based firewall-policies or manual UI verification."
+
+echo
+echo "--- Summary ---"
+echo "PASS: $PASS_COUNT  FAIL: $FAIL_COUNT  WARN: $WARN_COUNT"
+
+if [[ "$FAIL_COUNT" -gt 0 ]]; then
+  exit 1
+fi
+exit 0
