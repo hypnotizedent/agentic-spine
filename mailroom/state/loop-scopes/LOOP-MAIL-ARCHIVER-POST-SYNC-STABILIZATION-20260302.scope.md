@@ -1,15 +1,13 @@
 ---
 loop_id: LOOP-MAIL-ARCHIVER-POST-SYNC-STABILIZATION-20260302
 created: 2026-03-02
-status: planned
+status: closed
 owner: "@ronny"
 scope: communications
 priority: high
-horizon: later
-execution_readiness: blocked
-next_review: "2026-03-09"
+horizon: now
+execution_readiness: runnable
 objective: Consolidate post-sync mail-archiver next-best-leverage work into one canonical execution lane after live ingest stabilizes.
-blocked_by: "Active live sync/import window on VM214; execute only after stable checkpoints are captured."
 ---
 
 # Loop Scope: LOOP-MAIL-ARCHIVER-POST-SYNC-STABILIZATION-20260302
@@ -43,14 +41,14 @@ Consolidate post-sync mail-archiver next-best-leverage work into one canonical e
 - No runtime/service mutations performed in this loop.
 
 ## Linked Gaps
-- GAP-OP-1362 — CLOSED: EWS loop metadata contradiction fixed (execution_readiness removed from closed loop)
+- GAP-OP-1362 — FIXED: EWS loop metadata contradiction fixed (execution_readiness removed from closed loop)
 - GAP-OP-1363 — FIXED: continuation packet + D335 regression lock gate (31f2ae5)
 - GAP-OP-1364 — FIXED: 2 capability scripts + alias boundary contract restored (31f2ae5)
-- GAP-OP-1365 — CLOSED: microsoft live_sync_ready updated to true (Graph API active)
-- GAP-OP-1366 — OPEN: overlap cleanup closure semantics need reconciliation (blocked_by_ronny_arch_decision)
-- GAP-OP-1367 — OPEN: email classification/retention contract needs architecture decision (blocked_by_ronny_arch_decision)
+- GAP-OP-1365 — FIXED: microsoft live_sync_ready updated to true (Graph API active)
+- GAP-OP-1366 — CLOSED: overlap cleanup semantics reconciled (strict exact-overlap dedup strategy decided)
+- GAP-OP-1367 — FIXED: email classification contract promoted to authoritative (439e3b8)
 - GAP-OP-1368 — FIXED: backup status capability + cron template + contract update (31f2ae5)
-- GAP-OP-1369 — OPEN: email domain boundary contract needs architecture decision (blocked_by_ronny_arch_decision)
+- GAP-OP-1369 — FIXED: domain boundary contract promoted to authoritative
 
 ## Gap Blocker Evidence (2026-03-03)
 
@@ -71,8 +69,8 @@ Contracts authored during governance-only burndown (no VM214 runtime access).
 
 | # | Deliverable | File | Status |
 |---|-------------|------|--------|
-| D1 | Email Classification Contract | `ops/bindings/mail.archiver.email.classification.contract.yaml` | draft (awaits arch review) |
-| D2 | Domain Boundary Contract | `ops/bindings/mail.archiver.domain.boundary.contract.yaml` | draft (awaits arch review) |
+| D1 | Email Classification Contract | `ops/bindings/mail.archiver.email.classification.contract.yaml` | authoritative |
+| D2 | Domain Boundary Contract | `ops/bindings/mail.archiver.domain.boundary.contract.yaml` | authoritative |
 | D3 | Overlap Cleanup Reconciliation | Analysis below | complete |
 
 ### D3: Overlap Cleanup Reconciliation Analysis
@@ -83,3 +81,12 @@ LOOP-MAIL-ARCHIVER-OVERLAP-CLEANUP-20260226 remains `planned` with TODO executio
 
 **Recommended path (for Ronny)**: Absorb remaining overlap work into this stabilization loop.
 Mark LOOP-MAIL-ARCHIVER-OVERLAP-CLEANUP-20260226 as `superseded`. Then close GAP-OP-1366.
+
+## Closure Evidence (2026-03-05)
+
+All 8 linked gaps (1362-1369) are fixed/closed.
+- VM214 runtime stable: mail-archiver up 3 days, mail-archiver-db healthy, stalwart-mail up 4 days
+- Contracts promoted: email classification (6-tier taxonomy) + domain boundary (4 domain classes) — both authoritative
+- Overlap cleanup: arch decision made (strict exact-overlap dedup strategy)
+- Backup: pg_dump cron active (daily 03:00, 126GB, 7-day retention)
+- D335 regression lock gate in place for continuation packet
