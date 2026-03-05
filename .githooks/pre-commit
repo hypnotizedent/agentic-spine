@@ -6,7 +6,7 @@ set -euo pipefail
 # Guards:
 # 0. Main branch protection (OPS_GOVERNED_MAIN_OVERRIDE=1 to commit on main)
 # 5. Hook-fast AOF hygiene checks (staged only)
-# 6. Gate registry projection autopilot (gate.registry.yaml staged)
+# 6. Gate registry projection advisory (gate.registry.yaml staged)
 #
 # Guards 1-4,7-8 removed — governance ceremony overhead reduction.
 # Guard 0 simplified to single-var override (matching pre-push).
@@ -66,63 +66,12 @@ if echo "$staged" | rg -q '^(mailroom/state/loop-scopes/.*\.scope\.md|docs/produ
   "$d145_gate" --staged-only
 fi
 
-# ─── Guard 6: Gate registry projection autopilot ────────────
-# When gate.registry.yaml is staged, reconcile header metadata and
-# re-sync entry-surface projections so D85/D285 stay green.
+# ─── Guard 6: Gate registry projection advisory (read-only) ──
+# Do not mutate files or run policy-gated capabilities inside pre-commit.
+# Projection/autofix runs are explicit commands outside hook execution.
 
 if echo "$staged" | grep -qx 'ops/bindings/gate.registry.yaml'; then
-  gen_header="$ROOT/bin/generators/gen-gate-registry-header.sh"
-  if [[ -x "$gen_header" ]]; then
-    "$gen_header" || {
-      echo "STOP: gen-gate-registry-header.sh failed" >&2
-      exit 1
-    }
-    git add ops/bindings/gate.registry.yaml
-  fi
-
-  projection_allowlist_file="$ROOT/ops/bindings/projection.reconcile.allowlist.txt"
-  projection_allowlist=()
-  if [[ -f "$projection_allowlist_file" ]]; then
-    while IFS= read -r allow_path; do
-      [[ -n "$allow_path" ]] || continue
-      [[ "$allow_path" =~ ^# ]] && continue
-      projection_allowlist+=("$allow_path")
-    done < "$projection_allowlist_file"
-  fi
-  if [[ "${#projection_allowlist[@]}" -eq 0 ]]; then
-    projection_allowlist=(
-      "ops/bindings/gate.registry.yaml"
-      "AGENTS.md"
-      "CLAUDE.md"
-      "docs/governance/generated/ENTRY_SURFACE_GATE_METADATA.md"
-      "docs/governance/generated/BOOT_ENTRY_SURFACE.md"
-    )
-  fi
-
-  # Run projection sync without capability/role policy friction in git hooks.
-  projection_sync_ok=0
-  if [[ -x "$ROOT/ops/plugins/docs/bin/docs-projection-sync" ]]; then
-    if "$ROOT/ops/plugins/docs/bin/docs-projection-sync" >/dev/null 2>&1; then
-      projection_sync_ok=1
-    fi
-  fi
-  if [[ "$projection_sync_ok" -eq 0 ]]; then
-    gen_entry="$ROOT/bin/generators/gen-entry-surface-gate-metadata.sh"
-    gen_boot="$ROOT/bin/generators/gen-boot-entry-surface.sh"
-    if [[ -x "$gen_entry" && -x "$gen_boot" ]] \
-      && "$gen_entry" --write-surfaces >/dev/null 2>&1 \
-      && "$gen_boot" --write-surfaces >/dev/null 2>&1; then
-      projection_sync_ok=1
-    fi
-  fi
-  if [[ "$projection_sync_ok" -eq 0 ]]; then
-    echo "STOP: docs projection sync failed." >&2
-    echo "Remediation: run ./ops/plugins/docs/bin/docs-projection-sync and stage projection files." >&2
-    exit 1
-  fi
-
-  # Deterministic auto-restage for all projection-authority files.
-  for f in "${projection_allowlist[@]}"; do
-    [[ -f "$ROOT/$f" ]] && git add "$f"
-  done
+  echo "NOTICE: gate.registry.yaml staged." >&2
+  echo "NOTICE: projection sync is explicit (not run by pre-commit)." >&2
+  echo "NOTICE: run './ops/plugins/docs/bin/docs-projection-sync' and stage projection files before push." >&2
 fi
