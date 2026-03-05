@@ -514,7 +514,6 @@ run_cap() {
       local caller_branch
       local main_override_ref main_override_reason
       local wt_bypass wt_bypass_ref wt_bypass_friction_ref wt_bypass_reason wt_bypass_lc
-      local wt_status_script wt_status_out
       local context_guard_exempt=0
 
       main_override_ref="${OPS_MAIN_MUTATION_OVERRIDE_REF:-}"
@@ -605,29 +604,6 @@ run_cap() {
           fi
         fi
 
-        if [[ -z "$blocked_reason" && "$governed_override_active" -ne 1 ]]; then
-          wt_status_script="$SPINE_CODE/ops/plugins/ops/bin/worktree-session-status"
-          if [[ ! -x "$wt_status_script" ]]; then
-            echo "BLOCKED: worktree isolation guard unavailable"
-            echo "Missing script: $wt_status_script"
-            blocked_reason="worktree_session_status_script_missing"
-            exit_code=6
-          elif ! wt_status_out="$(SPINE_ROOT="$SPINE_CODE" "$wt_status_script" --enforce --brief 2>&1)"; then
-            echo "BLOCKED: worktree session isolation guard"
-            echo "Capability: $name"
-            echo "Branch: $caller_branch"
-            echo "Guard output: $wt_status_out"
-            echo ""
-            echo "Remediation:"
-            echo "  OPS_GOVERNED_MAIN_OVERRIDE=1 ./bin/ops cap run $name ..."
-            echo "  or"
-            echo "  ./bin/ops wave start <WAVE_ID> --objective \"...\""
-            echo "  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch $caller_branch --lane <lane>"
-            echo "  export OPS_WORKTREE_IDENTITY=<LOOP_ID|WAVE_ID>"
-            blocked_reason="worktree_session_isolation_failed:${caller_branch}"
-            exit_code=6
-          fi
-        fi
       fi
     fi
 
