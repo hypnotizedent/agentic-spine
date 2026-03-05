@@ -17,6 +17,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+
+# Source shared SSH resolver for LAN→Tailscale fallback
+# shellcheck source=../../../lib/ssh-resolve.sh
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
@@ -77,9 +82,10 @@ COUNT="$(yq -r '.endpoints | length' "$BINDING" 2>/dev/null || echo 0)"
 
 echo "services.health.status"
 echo "binding: $BINDING"
+echo "ssh_binding: $SSH_BINDING"
 echo "endpoints: $COUNT"
 echo
-printf "%-16s %-16s %-8s %-10s %s\n" "ID" "HOST" "STATUS" "TIME" "NOTE"
+printf "%-16s %-16s %-8s %-10s %-10s %s\n" "ID" "HOST" "STATUS" "TIME" "PATH" "NOTE"
 
 fail=0
 checked=0
@@ -103,8 +109,22 @@ for i in $(seq 0 $((COUNT-1))); do
   checked=$((checked + 1))
 
   if [[ "$enabled" != "true" ]]; then
-    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "SKIP" "-" "disabled"
+    printf "%-16s %-16s %-8s %-10s %-10s %s\n" "$id" "$host" "SKIP" "-" "-" "disabled"
     continue
+  fi
+
+  # Resolve URL through LAN→Tailscale fallback if host maps to an SSH target
+  resolved_url="$url"
+  path_used="-"
+  if [[ -n "$host" && "$host" != "null" ]] && \
+     yq -e ".ssh.targets[] | select(.id == \"$host\")" "$SSH_BINDING" >/dev/null 2>&1; then
+    resolve_result="$(ssh_resolve_url_with_fallback "$url" "$host" "$DEF_CONNECT")" || true
+    if [[ -n "$resolve_result" ]]; then
+      resolved_url="$(echo "$resolve_result" | awk '{print $1}')"
+      path_used="$(echo "$resolve_result" | awk '{print $2}')"
+    fi
+  else
+    path_used="unmapped"
   fi
 
   # Time the request (ms)
@@ -114,7 +134,7 @@ for i in $(seq 0 $((COUNT-1))); do
   http_code="$(curl -sS -o /dev/null -w "%{http_code}" \
     --connect-timeout "$DEF_CONNECT" \
     --max-time "$DEF_MAX" \
-    "$url" 2>/dev/null)"
+    "$resolved_url" 2>/dev/null)"
   curl_exit=$?
   set -e
 
@@ -135,18 +155,18 @@ for i in $(seq 0 $((COUNT-1))); do
 
   # Check HTTP code first (even if curl reported non-zero exit for HTTP errors)
   if [[ "$code_ok" -eq 1 ]]; then
-    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "OK" "${dur_ms}ms" ""
+    printf "%-16s %-16s %-8s %-10s %-10s %s\n" "$id" "$host" "OK" "${dur_ms}ms" "$path_used" ""
   elif [[ "$curl_exit" -eq 0 ]]; then
-    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "DEGRADED" "${dur_ms}ms" "http=$http_code expected=$expect_normalized"
+    printf "%-16s %-16s %-8s %-10s %-10s %s\n" "$id" "$host" "DEGRADED" "${dur_ms}ms" "$path_used" "http=$http_code expected=$expect_normalized"
     fail=1
   elif [[ "$curl_exit" -eq 28 ]]; then
-    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "TIMEOUT" "${dur_ms}ms" "connect/max timeout"
+    printf "%-16s %-16s %-8s %-10s %-10s %s\n" "$id" "$host" "TIMEOUT" "${dur_ms}ms" "$path_used" "connect/max timeout"
     fail=1
   elif [[ "$curl_exit" -eq 7 ]]; then
-    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "REFUSED" "${dur_ms}ms" "connection refused"
+    printf "%-16s %-16s %-8s %-10s %-10s %s\n" "$id" "$host" "REFUSED" "${dur_ms}ms" "$path_used" "connection refused"
     fail=1
   else
-    printf "%-16s %-16s %-8s %-10s %s\n" "$id" "$host" "FAIL" "${dur_ms}ms" "http=$http_code curl_exit=$curl_exit"
+    printf "%-16s %-16s %-8s %-10s %-10s %s\n" "$id" "$host" "FAIL" "${dur_ms}ms" "$path_used" "http=$http_code curl_exit=$curl_exit"
     fail=1
   fi
 done

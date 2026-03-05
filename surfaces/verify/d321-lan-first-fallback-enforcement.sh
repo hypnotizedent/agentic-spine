@@ -46,6 +46,8 @@ SCOPED_SCRIPTS=(
   "$SPINE_ROOT/ops/plugins/observability/bin/finance-stack-status"
   "$SPINE_ROOT/ops/plugins/observability/bin/observability-stack-status"
   "$SPINE_ROOT/ops/plugins/infra/bin/infra-docker-host-status"
+  "$SPINE_ROOT/ops/plugins/docker/bin/docker-compose-status"
+  "$SPINE_ROOT/ops/plugins/services/bin/services-health-status"
   "$WORKBENCH_ROOT/agents/media/tools/src/spine-plugin-media/bin/media-status"
 )
 
