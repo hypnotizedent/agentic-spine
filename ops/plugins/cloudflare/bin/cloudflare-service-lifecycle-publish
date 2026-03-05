@@ -46,6 +46,29 @@ EOF
   exit 0
 }
 
+capture_command_streams() {
+  local stdout_var="$1"
+  local stderr_var="$2"
+  local rc_var="$3"
+  shift 3
+
+  local stdout_file stderr_file rc stdout_text stderr_text
+  stdout_file="$(mktemp "${TMPDIR:-/tmp}/cloudflare-lifecycle.stdout.XXXXXX")"
+  stderr_file="$(mktemp "${TMPDIR:-/tmp}/cloudflare-lifecycle.stderr.XXXXXX")"
+  if "$@" >"$stdout_file" 2>"$stderr_file"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  stdout_text="$(cat "$stdout_file")"
+  stderr_text="$(cat "$stderr_file")"
+  rm -f "$stdout_file" "$stderr_file"
+
+  printf -v "$stdout_var" '%s' "$stdout_text"
+  printf -v "$stderr_var" '%s' "$stderr_text"
+  printf -v "$rc_var" '%s' "$rc"
+}
+
 MODE="audit"
 SERVICE_ID=""
 PHASE="deploy"
@@ -238,22 +261,58 @@ while IFS=$'\t' read -r svc_id zone hostname service_url; do
 
   # Execute publish
   publish_out=""
+  publish_err=""
   publish_rc=0
-  publish_out="$("$PUBLISH_SCRIPT" "${publish_args[@]}" 2>&1)" || publish_rc=$?
+  capture_command_streams publish_out publish_err publish_rc "$PUBLISH_SCRIPT" "${publish_args[@]}"
 
   if [[ "$publish_rc" -eq 0 ]]; then
     hostname_pass=$((hostname_pass + 1))
-    results+=("{\"hostname\":\"$hostname\",\"service_id\":\"$svc_id\",\"status\":\"ok\",\"exit_code\":$publish_rc}")
+    results+=("$(python3 - "$hostname" "$svc_id" "$publish_rc" "$publish_out" "$publish_err" <<'PY'
+import json, sys
+hostname, service_id, exit_code, stdout_text, stderr_text = sys.argv[1:]
+print(json.dumps({
+    "hostname": hostname,
+    "service_id": service_id,
+    "status": "ok",
+    "exit_code": int(exit_code),
+    "stdout": stdout_text,
+    "stderr": stderr_text,
+}))
+PY
+)")
     if [[ "$JSON_OUT" -eq 0 ]]; then
       echo "  result: OK"
+      if [[ -n "$publish_err" ]]; then
+        echo "  stderr:"
+        echo "$publish_err"
+      fi
     fi
   else
     hostname_fail=$((hostname_fail + 1))
     overall_status="fail"
-    results+=("{\"hostname\":\"$hostname\",\"service_id\":\"$svc_id\",\"status\":\"fail\",\"exit_code\":$publish_rc}")
+    results+=("$(python3 - "$hostname" "$svc_id" "$publish_rc" "$publish_out" "$publish_err" <<'PY'
+import json, sys
+hostname, service_id, exit_code, stdout_text, stderr_text = sys.argv[1:]
+print(json.dumps({
+    "hostname": hostname,
+    "service_id": service_id,
+    "status": "fail",
+    "exit_code": int(exit_code),
+    "stdout": stdout_text,
+    "stderr": stderr_text,
+}))
+PY
+)")
     if [[ "$JSON_OUT" -eq 0 ]]; then
       echo "  result: FAIL (exit=$publish_rc)"
-      echo "  output: $publish_out"
+      if [[ -n "$publish_err" ]]; then
+        echo "  stderr:"
+        echo "$publish_err"
+      fi
+      if [[ -n "$publish_out" ]]; then
+        echo "  stdout:"
+        echo "$publish_out"
+      fi
     fi
   fi
 done < <(echo "$services_json" | python3 -c "

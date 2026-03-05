@@ -9,6 +9,7 @@ CF_AUTH_MODE_PREFERRED="${CF_AUTH_MODE_PREFERRED:-}"
 CF_LAST_HTTP_STATUS=""
 CF_LAST_MODE=""
 CF_LAST_BODY=""
+CF_LAST_STDERR=""
 CF_FALLBACK_USED="${CF_FALLBACK_USED:-}"
 CF_FALLBACK_REASON="${CF_FALLBACK_REASON:-}"
 
@@ -62,26 +63,54 @@ cf__curl_with_mode() {
   fi
   curl_cmd+=("$url" -w $'\n%{http_code}')
 
-  local response body status
-  if ! response="$("${curl_cmd[@]}" 2>&1)"; then
+  local stdout_file stderr_file response body status stderr_text curl_rc
+  stdout_file="$(mktemp "${TMPDIR:-/tmp}/cloudflare-api.stdout.XXXXXX")"
+  stderr_file="$(mktemp "${TMPDIR:-/tmp}/cloudflare-api.stderr.XXXXXX")"
+  if "${curl_cmd[@]}" >"$stdout_file" 2>"$stderr_file"; then
+    curl_rc=0
+  else
+    curl_rc=$?
+  fi
+  response="$(cat "$stdout_file")"
+  stderr_text="$(cat "$stderr_file")"
+  rm -f "$stdout_file" "$stderr_file"
+
+  if [[ "$curl_rc" -ne 0 ]]; then
     CF_LAST_MODE="$mode"
     CF_LAST_HTTP_STATUS="000"
-    CF_LAST_BODY="$response"
+    CF_LAST_BODY=""
+    CF_LAST_STDERR="$stderr_text"
     return 1
   fi
 
   status="${response##*$'\n'}"
   body="${response%$'\n'*}"
+  if [[ "$status" == "$response" ]]; then
+    status="000"
+    body="$response"
+  fi
 
   CF_LAST_MODE="$mode"
   CF_LAST_HTTP_STATUS="$status"
   CF_LAST_BODY="$body"
+  CF_LAST_STDERR="$stderr_text"
 
   if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
     printf '%s\n' "$body"
     return 0
   fi
   return 1
+}
+
+cf_log_last_failure_details() {
+  if [[ -n "${CF_LAST_BODY:-}" ]]; then
+    echo "response_body:" >&2
+    echo "$CF_LAST_BODY" >&2
+  fi
+  if [[ -n "${CF_LAST_STDERR:-}" ]]; then
+    echo "stderr:" >&2
+    echo "$CF_LAST_STDERR" >&2
+  fi
 }
 
 cf_classify_failure() {
@@ -121,6 +150,7 @@ cf_api_request() {
 
   CF_FALLBACK_USED=""
   CF_FALLBACK_REASON=""
+  CF_LAST_STDERR=""
 
   cf_require_auth || return $?
 
@@ -141,7 +171,7 @@ cf_api_request() {
       fi
     fi
     echo "STOP: Cloudflare API request failed (${method} ${url}) status=${CF_LAST_HTTP_STATUS} mode=${CF_LAST_MODE} class=$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")" >&2
-    [[ -n "${CF_LAST_BODY:-}" ]] && echo "$CF_LAST_BODY" >&2
+    cf_log_last_failure_details
     return 1
   fi
 
@@ -163,7 +193,7 @@ cf_api_request() {
       fi
     fi
     echo "STOP: Cloudflare API request failed (${method} ${url}) status=${CF_LAST_HTTP_STATUS} mode=${CF_LAST_MODE} class=$(cf_classify_failure "${CF_LAST_HTTP_STATUS}")" >&2
-    [[ -n "${CF_LAST_BODY:-}" ]] && echo "$CF_LAST_BODY" >&2
+    cf_log_last_failure_details
     return 1
   fi
 

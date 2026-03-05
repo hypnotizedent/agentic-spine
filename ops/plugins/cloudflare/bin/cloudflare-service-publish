@@ -26,6 +26,29 @@ source "$CF_LIB"
 CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
 cf_require_auth || exit $?
 
+capture_command_streams() {
+  local stdout_var="$1"
+  local stderr_var="$2"
+  local rc_var="$3"
+  shift 3
+
+  local stdout_file stderr_file rc stdout_text stderr_text
+  stdout_file="$(mktemp "${TMPDIR:-/tmp}/cloudflare-publish.stdout.XXXXXX")"
+  stderr_file="$(mktemp "${TMPDIR:-/tmp}/cloudflare-publish.stderr.XXXXXX")"
+  if "$@" >"$stdout_file" 2>"$stderr_file"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  stdout_text="$(cat "$stdout_file")"
+  stderr_text="$(cat "$stderr_file")"
+  rm -f "$stdout_file" "$stderr_file"
+
+  printf -v "$stdout_var" '%s' "$stdout_text"
+  printf -v "$stderr_var" '%s' "$stderr_text"
+  printf -v "$rc_var" '%s' "$rc"
+}
+
 usage() {
   cat <<'EOF'
 Usage: cloudflare-service-publish --hostname HOST --service-name NAME --service-url URL [OPTIONS]
@@ -204,27 +227,39 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   ingress_cmd+=(--dry-run)
 fi
 
-dns_out="$("${dns_cmd[@]}" 2>&1)" || {
+dns_out=""
+dns_err=""
+dns_rc=0
+capture_command_streams dns_out dns_err dns_rc "${dns_cmd[@]}"
+if [[ "$dns_rc" -ne 0 ]]; then
   echo "STOP: DNS publish step failed" >&2
-  echo "$dns_out" >&2
+  [[ -n "$dns_err" ]] && echo "$dns_err" >&2
+  [[ -n "$dns_out" ]] && echo "$dns_out" >&2
   exit 4
-}
+fi
 
-ingress_out="$("${ingress_cmd[@]}" 2>&1)" || {
+ingress_out=""
+ingress_err=""
+ingress_rc=0
+capture_command_streams ingress_out ingress_err ingress_rc "${ingress_cmd[@]}"
+if [[ "$ingress_rc" -ne 0 ]]; then
   echo "STOP: tunnel ingress publish step failed" >&2
-  echo "$ingress_out" >&2
+  [[ -n "$ingress_err" ]] && echo "$ingress_err" >&2
+  [[ -n "$ingress_out" ]] && echo "$ingress_out" >&2
   exit 4
-}
+fi
 
-diff_out="$("$ROUTING_DIFF_SCRIPT" --tunnel "$TUNNEL_NAME" 2>&1)" || diff_status=$?
-diff_status="${diff_status:-0}"
+diff_out=""
+diff_err=""
+diff_status=0
+capture_command_streams diff_out diff_err diff_status "$ROUTING_DIFF_SCRIPT" --tunnel "$TUNNEL_NAME"
 
 if [[ "$JSON_OUT" -eq 1 ]]; then
   python3 - "$HOSTNAME" "$SERVICE_NAME" "$SERVICE_URL" "$ZONE_ID" "$DNS_TARGET" "$diff_status" \
     "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" \
-    "$dns_out" "$ingress_out" "$diff_out" <<'PY'
+    "$dns_out" "$dns_err" "$ingress_out" "$ingress_err" "$diff_out" "$diff_err" <<'PY'
 import json, sys
-host, service_name, service_url, zone_id, dns_target, diff_status, auth_mode, dns_out, ingress_out, diff_out = sys.argv[1:]
+host, service_name, service_url, zone_id, dns_target, diff_status, auth_mode, dns_out, dns_err, ingress_out, ingress_err, diff_out, diff_err = sys.argv[1:]
 print(json.dumps({
   "capability": "cloudflare.service.publish",
   "status": "ok" if diff_status == "0" else "warn",
@@ -236,9 +271,9 @@ print(json.dumps({
   "auth_mode": auth_mode,
   "routing_diff_exit_code": int(diff_status),
   "steps": {
-    "dns_record_set": dns_out,
-    "tunnel_ingress_set": ingress_out,
-    "domain_routing_diff": diff_out,
+    "dns_record_set": {"stdout": dns_out, "stderr": dns_err},
+    "tunnel_ingress_set": {"stdout": ingress_out, "stderr": ingress_err},
+    "domain_routing_diff": {"stdout": diff_out, "stderr": diff_err},
   },
 }, indent=2))
 PY
@@ -251,14 +286,29 @@ else
   echo "dns_target: $DNS_TARGET"
   echo "auth_mode: ${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}"
   echo
-  echo "[dns_record_set]"
+  echo "[dns_record_set.stdout]"
   echo "$dns_out"
+  if [[ -n "$dns_err" ]]; then
+    echo
+    echo "[dns_record_set.stderr]"
+    echo "$dns_err"
+  fi
   echo
-  echo "[tunnel_ingress_set]"
+  echo "[tunnel_ingress_set.stdout]"
   echo "$ingress_out"
+  if [[ -n "$ingress_err" ]]; then
+    echo
+    echo "[tunnel_ingress_set.stderr]"
+    echo "$ingress_err"
+  fi
   echo
-  echo "[domain_routing_diff]"
+  echo "[domain_routing_diff.stdout]"
   echo "$diff_out"
+  if [[ -n "$diff_err" ]]; then
+    echo
+    echo "[domain_routing_diff.stderr]"
+    echo "$diff_err"
+  fi
   if [[ "$diff_status" -eq 0 ]]; then
     echo "status: OK"
   else
