@@ -101,7 +101,8 @@ WSI_IDENTITY_PATTERNS=()
 if [[ -f "$WORKTREE_ISO_CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   WSI_ENABLED="$(yq e -r '.policy.enabled // true' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo true)"
   WSI_MAIN_BRANCH="$(yq e -r '.policy.main_branch // "main"' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo main)"
-  WSI_MANAGED_PREFIX="$(yq e -r '.policy.managed_worktree_prefix // "/Users/ronnyworks/code/.wt/agentic-spine/"' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo '/Users/ronnyworks/code/.wt/agentic-spine/')"
+  WSI_MANAGED_PREFIX="$(yq e -r '.policy.managed_worktree_prefix // ""' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo "${HOME}/code/.wt/agentic-spine/")"
+  [[ -n "$WSI_MANAGED_PREFIX" && "$WSI_MANAGED_PREFIX" != "null" ]] || WSI_MANAGED_PREFIX="${HOME}/code/.wt/agentic-spine/"
   WSI_REQUIRE_NON_MAIN_IN_MANAGED="$(yq e -r '.policy.require_non_main_in_managed_worktree // true' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo true)"
   WSI_REQUIRE_IDENTITY="$(yq e -r '.policy.require_explicit_identity_on_non_main // true' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo true)"
   WSI_IDENTITY_ENV_VAR="$(yq e -r '.policy.identity_env_var // "OPS_WORKTREE_IDENTITY"' "$WORKTREE_ISO_CONTRACT" 2>/dev/null || echo OPS_WORKTREE_IDENTITY)"
