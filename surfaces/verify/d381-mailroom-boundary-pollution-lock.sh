@@ -23,6 +23,7 @@ FORBIDDEN_DIRS=(
   "mailroom/state/capacity"
   "mailroom/state/runtime-snapshots"
   "mailroom/state/cloudflare-control-plane"
+  "mailroom/state/finance"
 )
 
 declare -a violations=()
@@ -71,6 +72,7 @@ echo "  Snapshots → runtime/domain-state/snapshots/" >&2
 echo "  Capacity → runtime/domain-state/capacity/" >&2
 echo "  Communications → runtime/domain-state/communications/" >&2
 echo "  Cloudflare → runtime/domain-state/cloudflare/" >&2
+echo "  Finance → runtime/domain-state/finance/" >&2
 
 if [[ "$STRICT" == "1" ]]; then
   echo "" >&2

@@ -27,5 +27,5 @@ RONNY_PRODUCTS_ROOT=/Users/ronnyworks/code/ronny-products \
 ## Expected Success Evidence
 
 - `finance.cc_benefits.refresh` status `done`
-- `mailroom/state/finance/cc-benefits-tracker/status-report.json` exists
-- `mailroom/state/finance/cc-benefits-tracker/reminder-queue.json` exists
+- `runtime/domain-state/finance/cc-benefits-tracker/status-report.json` exists
+- `runtime/domain-state/finance/cc-benefits-tracker/reminder-queue.json` exists
