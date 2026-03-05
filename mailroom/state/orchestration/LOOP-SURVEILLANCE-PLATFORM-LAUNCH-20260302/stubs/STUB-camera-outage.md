@@ -1,40 +1,36 @@
 ---
 stub_id: STUB-camera-outage
 loop_id: LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302
-blocker_class: blocked_physical
-status: parked
+blocker_class: resolved
+status: cleared
 created: "2026-03-04"
+cleared_at: "2026-03-05"
+cleared_by: "WAVE-SURVEILLANCE-VM-E2E-EXEC-20260305"
 owner: "@ronny"
 depends_on: LOOP-CAMERA-OUTAGE-20260209
 ---
 
 # STUB: Camera Outage Resolution
 
-## What is blocked
+## Resolution
 
-All 12 NVR channels are dark since 2026-02-09. Frigate cannot ingest streams
-until at least the 8 previously-online channels are restored.
+The 2026-02-09 outage (0/12 channels showing video after NVR power cycle) has
+self-resolved. As of 2026-03-05 ISAPI channel status query confirms **8/12
+channels online** — matching the pre-outage baseline.
+
+- ch1 (FRONT DRIVE): online
+- ch2-5 (ALLY WAY, OFFICE, IPCamera 04/05): offline (pre-existing physical issue, GAP-OP-031)
+- ch6-12: online
 
 ## Evidence
 
-- CAMERA_SSOT.md: 0/12 channels showing live video (2026-02-09)
-- ISAPI query (2026-02-08): 8 channels online, 4 offline
-- NVR web UI (2026-02-09): 0 feeds rendering after power cycle + DHCP fix
-- GAP-OP-031: ch2-4 offline (notExist) — physical PoE switch issue
+- ISAPI channel status query via PVE SSH (2026-03-05): 8/12 online
+- NVR ping: 0% packet loss, 0.2ms avg RTT
+- NVR HTTP: 200 OK
+- NVR firmware: V4.30.216 (matches CAMERA_SSOT)
+- CAMERA_SSOT.md updated with 2026-03-05 status
 
-## Required Operator Action
+## Remaining
 
-1. Physical visit to shop upstairs 9U rack
-2. Check Netgear PoE switch power and uplink to NVR
-3. Verify camera power LEDs on PoE switch
-4. Try NVR web UI from shop LAN workstation (browser plugin may be needed)
-5. Re-run ISAPI channel detect query
-6. Update CAMERA_SSOT.md with results
-
-## Next Action Owner
-
-@ronny (requires physical shop visit)
-
-## ETA
-
-Depends on physical visit scheduling — no remote resolution possible.
+- Channels 2-5 remain offline (physical PoE/cabling — GAP-OP-031, separate loop)
+- Physical location survey still pending for all channels

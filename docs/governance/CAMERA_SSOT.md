@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-03-02
+last_verified: 2026-03-05
 verification_method: live-isapi-query + receipt
 scope: camera-infrastructure
 parent_receipts:
@@ -31,7 +31,7 @@ parent_receipts:
 |------|-------|
 | NVR IP (Shop LAN) | `192.168.1.216` (`nvr-shop`) |
 | NVR Model | Hikvision ERI-K216-P16 |
-| Total Channels | 16 (12 configured, **0 showing video** as of 2026-02-09) |
+| Total Channels | 16 (12 configured, **8 online** as of 2026-03-05) |
 | Camera VLAN | `192.168.254.0/24` (NVR internal PoE network) |
 | Credentials (Infisical) | `infrastructure/prod:/spine/shop/nvr/*` (stored; verified 2026-02-11) |
 | Loops | LOOP-CAMERA-BASELINE-20260208, **LOOP-CAMERA-OUTAGE-20260209** |
@@ -93,24 +93,24 @@ Shop LAN (192.168.1.0/24)
 
 ## Channel Registry
 
-Last ISAPI query: 2026-02-08. Web UI observation: 2026-02-09 (0 feeds rendering after NVR power cycle).
+Last ISAPI query: **2026-03-05** (via SSH to PVE, WAVE-SURVEILLANCE-VM-E2E-EXEC-20260305).
 
-| Channel | NVR Name | Internal IP | Online (2026-02-08) | Detect Result | Physical Location | Model |
-|---------|----------|-------------|---------------------|---------------|-------------------|-------|
-| 1 | FRONT DRIVE | 192.168.254.9 | Yes | connect | pending-survey | pending-survey |
-| 2 | ALLY WAY | 192.168.254.3 | **No** | notExist | pending-survey | pending-survey |
-| 3 | OFFICE | 192.168.254.4 | **No** | notExist | pending-survey | pending-survey |
-| 4 | IPCamera 04 | 192.168.254.7 | **No** | notExist | pending-survey | pending-survey |
-| 5 | IPCamera 05 | 192.168.254.5 | **No** | netUnreachable | pending-survey | pending-survey |
-| 6 | BAY 5 BACK | 192.168.254.16 | Yes | connect | pending-survey | pending-survey |
-| 7 | FRONT EXIT | 192.168.254.12 | Yes | connect | pending-survey | pending-survey |
-| 8 | STICKER | 192.168.254.10 | Yes | connect | pending-survey | pending-survey |
-| 9 | EMB | 192.168.254.6 | Yes | connect | pending-survey | pending-survey |
-| 10 | DTG | 192.168.254.17 | Yes | connect | pending-survey | pending-survey |
-| 11 | SCREEN ROOM | 192.168.254.13 | Yes | connect | pending-survey | pending-survey |
-| 12 | DARK ROOM | 192.168.254.8 | Yes | connect | pending-survey | pending-survey |
+| Channel | NVR Name | Internal IP | Online (2026-03-05) | Physical Location | Model |
+|---------|----------|-------------|---------------------|-------------------|-------|
+| 1 | FRONT DRIVE | 192.168.254.9 | **Yes** | pending-survey | pending-survey |
+| 2 | ALLY WAY | 192.168.254.3 | No | pending-survey | pending-survey |
+| 3 | OFFICE | 192.168.254.4 | No | pending-survey | pending-survey |
+| 4 | IPCamera 04 | 192.168.254.7 | No | pending-survey | pending-survey |
+| 5 | IPCamera 05 | 192.168.254.5 | No | pending-survey | pending-survey |
+| 6 | BAY 5 BACK | 192.168.254.16 | **Yes** | pending-survey | pending-survey |
+| 7 | FRONT EXIT | 192.168.254.12 | **Yes** | pending-survey | pending-survey |
+| 8 | STICKER | 192.168.254.10 | **Yes** | pending-survey | pending-survey |
+| 9 | EMB | 192.168.254.6 | **Yes** | pending-survey | pending-survey |
+| 10 | DTG | 192.168.254.17 | **Yes** | pending-survey | pending-survey |
+| 11 | SCREEN ROOM | 192.168.254.13 | **Yes** | pending-survey | pending-survey |
+| 12 | DARK ROOM | 192.168.254.8 | **Yes** | pending-survey | pending-survey |
 
-> **2026-02-09 outage:** All 12 channels show no live video in web UI after NVR power cycle + DHCP reservation fix. See **LOOP-CAMERA-OUTAGE-20260209** for triage. ISAPI re-query needed once NVR creds are stored in Infisical.
+> **2026-02-09 outage resolved:** As of 2026-03-05, 8/12 channels are back online (same 8 as pre-outage baseline). The 2026-02-09 outage (0/12 after NVR power cycle) has self-resolved. Channels 2-5 remain offline (physical PoE/cabling issue, GAP-OP-031).
 
 **Notes:**
 - Channels 13-16 are not configured (no cameras assigned)
@@ -136,7 +136,7 @@ Everything an agent needs to generate a Frigate configuration for this NVR:
 | **SDK Port** | 8000 |
 | **ONVIF Port** | Typically 80 (verify per-camera) |
 | **Authentication** | Digest (RTSP), Digest (ISAPI) |
-| **Online Channels** | 1, 6, 7, 8, 9, 10, 11, 12 (8 total) |
+| **Online Channels** | 1, 6, 7, 8, 9, 10, 11, 12 (8 total, verified 2026-03-05) |
 | **Credentials** | Infisical: `infrastructure/prod:/spine/shop/nvr/*` |
 
 **Channel numbering in RTSP URLs:**
@@ -218,6 +218,7 @@ curl -s --digest -u "{user}:{pass}" \
 | 2026-02-09 | NVR IP drift fixed | NVR had reverted to DHCP .104; UDR6 reservation created for MAC→.216; power cycled; HTTP 200 confirmed |
 | 2026-02-09 | Web UI screenshot | 12 channels listed with names, 0 live video feeds. LOOP-CAMERA-OUTAGE-20260209 opened |
 | 2026-02-11 | secrets.namespace.status receipt | NVR credentials confirmed stored at `/spine/shop/nvr/*` (2 keys: NVR_ADMIN_USER, NVR_ADMIN_PASSWORD). Receipt: RCAP-20260211-091452 |
+| 2026-03-05 | ISAPI channel status via PVE SSH | 8/12 channels online (ch1,6-12). 2026-02-09 outage self-resolved. NVR firmware V4.30.216 confirmed. Wave: WAVE-SURVEILLANCE-VM-E2E-EXEC-20260305 |
 
 ---
 

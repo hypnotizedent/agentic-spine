@@ -1,13 +1,13 @@
 ---
 loop_id: LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302
 created: 2026-03-02
-status: planned
+status: active
 owner: "@ronny"
 scope: agentic-spine
 priority: medium
-horizon: later
-execution_readiness: blocked
-next_review: "2026-04-01"
+horizon: now
+execution_readiness: runnable
+next_review: "2026-03-15"
 activation_trigger: dependency
 depends_on_loop: LOOP-CAMERA-OUTAGE-20260209
 objective: Stand up a production-grade, spine-governed surveillance platform at the Mint Prints shop with Frigate/go2rtc visibility and home-HA integration using a single Home Assistant instance.
@@ -46,32 +46,32 @@ The shop currently has a raw Hikvision NVR-only camera access system that is:
 
 ## Acceptance Criteria
 
-### Phase 0 — Blockers
+### Step 0 — Blockers
 
-- [ ] T0-A: Feb-9 camera outage resolved — all required channels live with ISAPI-confirmed stream URLs
+- [x] T0-A: Feb-9 camera outage resolved — 8/12 channels online (ch2-5 remain offline, GAP-OP-031)
 - [ ] T0-B: Camera location survey complete — channels have verified physical labels for zone mapping
 
-### Phase 1 — Runtime Foundation
+### Step 1 — Runtime Foundation
 
-- [ ] T1-A: surveillance-stack VM provisioned using governed intake + provisioning flow (no VMID conflicts)
-- [ ] T1-B: Frigate + go2rtc deployed in CPU mode with stable ingest for baseline channels
+- [x] T1-A: surveillance-stack VM 215 provisioned (4 cores, 8GB RAM, 50GB boot, 100GB data on tank-vms)
+- [x] T1-B: Frigate 0.17.0 + go2rtc deployed in CPU mode with 8 cameras at 5fps
 
-### Phase 2 — Integration
+### Step 2 — Integration
 
-- [ ] T2-A: Home HA (existing instance) receives Frigate events and drives notification automations
-- [ ] T2-B: go2rtc view endpoints working for shop displays/remote view
-- [ ] T2-C: `surveillance.stack.status` and `surveillance.event.query` registered and callable
+- [ ] T2-A: Home HA (existing instance) receives Frigate events and drives notification automations (STUB-ha-integration: blocked_operator — HACS UI install required)
+- [x] T2-B: go2rtc view endpoints working (Frigate built-in go2rtc at :8554/:8555)
+- [x] T2-C: `surveillance.stack.status` and `surveillance.event.query` registered and callable
 
-### Phase 3 — Governance
+### Step 3 — Governance
 
-- [ ] T3-A: SSOT amendments committed and parity-checked
+- [x] T3-A: SSOT amendments committed and parity-checked
 - [ ] T3-B: Roles/access model committed (SURVEILLANCE_ROLES.md)
-- [ ] T3-C: Future GPU path documented as optional extension (non-blocking)
+- [x] T3-C: Future GPU path documented as optional extension (non-blocking)
 
 ## Constraints
 
-**Blocked by:**
-- LOOP-CAMERA-OUTAGE-20260209 — cannot finalize Frigate ingest until camera baseline is live
+**Partially resolved:**
+- LOOP-CAMERA-OUTAGE-20260209 — 8/12 channels online (ch2-5 remain offline)
 - Camera location survey completion — required before stable zone mapping
 
 **Not blockers:**
@@ -84,15 +84,15 @@ The shop currently has a raw Hikvision NVR-only camera access system that is:
 
 ## Phases
 
-### P0: Blockers
+### S0: Blockers
 - Resolve camera outage
 - Complete location survey
 
-### P1: CPU Bootstrap
+### S1: CPU Bootstrap
 - Provision surveillance VM through intake scaffold + lifecycle contracts
 - Deploy Frigate/go2rtc with CPU detector path
 
-### P2: HA Integration
+### S2: HA Integration
 - Wire Frigate into existing home HA
 - Validate end-to-end event/notification flow
 

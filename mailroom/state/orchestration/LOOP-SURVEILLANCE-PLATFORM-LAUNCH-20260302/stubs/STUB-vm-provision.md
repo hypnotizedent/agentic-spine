@@ -1,42 +1,32 @@
 ---
 stub_id: STUB-vm-provision
 loop_id: LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302
-blocker_class: blocked_runtime_access
-status: parked
+blocker_class: resolved
+status: cleared
 created: "2026-03-04"
+cleared_at: "2026-03-05"
+cleared_by: "WAVE-SURVEILLANCE-VM-E2E-EXEC-20260305"
 owner: "@ronny"
 ---
 
 # STUB: VM Provisioning for surveillance-stack
 
-## What is blocked
+## Resolution
 
-VM 215 (surveillance-stack) exists in lifecycle bindings as `status: planning` but has not been
-provisioned on PVE (Proxmox). The `infra.vm.provision --execute` and `infra.vm.bootstrap --execute`
-capabilities require SSH access to PVE hypervisor which was not reachable during this wave.
+VM 215 (surveillance-stack) provisioned and running on PVE.
+
+- Template 9000 cloned to VM 215 on `tank-vms` storage
+- 4 cores, 8192MB RAM
+- Boot disk: 50GB (scsi0 on tank-vms)
+- Data disk: 100GB (virtio1 on tank-vms)
+- Static IP: 192.168.1.215/24, GW 192.168.1.1
+- SSH keys: PVE root + operator ed25519
+- Cloud-init hostname: surveillance-stack
+- SSH via PVE jump host: confirmed working
 
 ## Evidence
 
-- `infra.vm.intake.scaffold` dry-run succeeded (VMID 215, 192.168.1.215)
-- `infra.vm.intake.scaffold --execute` failed with yq expression error (pre-existing bug, manual entries added)
-- VM lifecycle entry added manually to `ops/bindings/vm.lifecycle.yaml`
-- SSH target added to `ops/bindings/ssh.targets.yaml`
-- Backup target added (disabled) to `ops/bindings/backup.inventory.yaml`
-
-## Required Operator Action
-
-1. SSH to PVE: `ssh root@100.96.211.33`
-2. Clone template: `qm clone 9000 215 --name surveillance-stack --full`
-3. Configure resources: 4 cores, 8GB RAM, 50GB boot disk
-4. Add data disk: `pvesm alloc tank 215 vm-215-data 100G` + attach as virtio1
-5. Start VM: `qm start 215`
-6. Bootstrap: `./bin/ops cap run infra.vm.bootstrap -- --vmid 215 --execute`
-7. Update lifecycle status to `provisioned` then `active`
-
-## Next Action Owner
-
-@ronny (requires PVE console access)
-
-## ETA
-
-When camera outage (LOOP-CAMERA-OUTAGE-20260209) is resolved and PVE is reachable.
+- `qm status 215`: running
+- `hostname`: surveillance-stack
+- `lsblk`: sda=50GB (boot), vda=100GB (data)
+- `df -h /`: 48GB total, 2.1GB used, 46GB available
