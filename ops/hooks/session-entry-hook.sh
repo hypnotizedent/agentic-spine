@@ -84,7 +84,7 @@ PY
 WORKTREE_ISO_CONTRACT="$SPINE_ROOT/ops/bindings/worktree.session.isolation.yaml"
 WSI_ENABLED=true
 WSI_MAIN_BRANCH="main"
-WSI_MANAGED_PREFIX="/Users/ronnyworks/code/.wt/agentic-spine/"
+WSI_MANAGED_PREFIX="${HOME}/code/.wt/agentic-spine/"
 WSI_REQUIRE_NON_MAIN_IN_MANAGED=true
 WSI_REQUIRE_IDENTITY=true
 WSI_IDENTITY_ENV_VAR="OPS_WORKTREE_IDENTITY"
