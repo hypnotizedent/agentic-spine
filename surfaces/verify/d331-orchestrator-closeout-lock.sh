@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# TRIAGE: verify orchestrator packet contract exists and that closeout packets have required reconciliation evidence.
+# TRIAGE: verify orchestrator packet contract exists and that coordinator closeout
+# chain remains fail-closed (integration -> verify.fast -> friction.reconcile -> status pack -> cleanup).
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 PACKET_CONTRACT="$ROOT/ops/bindings/orchestration.packet.contract.yaml"
 ORCH_DIR="$ROOT/mailroom/state/orchestration"
+CAPS="$ROOT/ops/capabilities.yaml"
+MAP="$ROOT/ops/bindings/capability_map.yaml"
+DISPATCH="$ROOT/ops/bindings/routing.dispatch.yaml"
+MANIFEST="$ROOT/ops/plugins/MANIFEST.yaml"
+CLOSEOUT_SCRIPT="$ROOT/ops/plugins/ops/bin/coordinator-lane-closeout"
+CLOSEOUT_CAP="coordinator.lane.closeout"
 
 fail() {
   echo "D331 FAIL: $*" >&2
@@ -12,7 +19,35 @@ fail() {
 }
 
 [[ -f "$PACKET_CONTRACT" ]] || fail "missing contract: ops/bindings/orchestration.packet.contract.yaml"
+[[ -f "$CAPS" ]] || fail "missing capabilities registry: $CAPS"
+[[ -f "$MAP" ]] || fail "missing capability map: $MAP"
+[[ -f "$DISPATCH" ]] || fail "missing routing dispatch: $DISPATCH"
+[[ -f "$MANIFEST" ]] || fail "missing plugin manifest: $MANIFEST"
+[[ -x "$CLOSEOUT_SCRIPT" ]] || fail "missing closeout script: $CLOSEOUT_SCRIPT"
 command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+command -v rg >/dev/null 2>&1 || fail "missing dependency: rg"
+
+# Coordinator closeout capability wiring must stay in parity.
+rg -n "^[[:space:]]*${CLOSEOUT_CAP}:" "$CAPS" >/dev/null 2>&1 || fail "capabilities.yaml missing $CLOSEOUT_CAP"
+rg -n "^[[:space:]]*${CLOSEOUT_CAP}:" "$MAP" >/dev/null 2>&1 || fail "capability_map.yaml missing $CLOSEOUT_CAP"
+rg -n "^[[:space:]]*${CLOSEOUT_CAP}:" "$DISPATCH" >/dev/null 2>&1 || fail "routing.dispatch.yaml missing $CLOSEOUT_CAP"
+rg -n "${CLOSEOUT_CAP}" "$MANIFEST" >/dev/null 2>&1 || fail "plugins manifest missing $CLOSEOUT_CAP"
+
+# Chain markers: closeout must include friction reconcile after verify fast and
+# status pack + cleanup path to remain deterministic/idempotent.
+for marker in \
+  "verify_fast" \
+  "friction_reconcile" \
+  "loops_status" \
+  "gaps_status" \
+  "proposals_status" \
+  "friction_queue_status" \
+  "worktree_cleanup" \
+  "friction.reconcile -- --loop-id" \
+  "verify.run -- fast" \
+  "worktree.lifecycle.cleanup -- --mode"; do
+  grep -qF "$marker" "$CLOSEOUT_SCRIPT" || fail "closeout script missing required chain marker: $marker"
+done
 
 # Verify contract has required_fields and closeout_fields
 req_count="$(yq e '.required_fields | length' "$PACKET_CONTRACT" 2>/dev/null || echo 0)"
@@ -76,4 +111,4 @@ if [[ "$packets_incomplete" -gt 0 ]]; then
   exit 1
 fi
 
-echo "D331 PASS: orchestrator packet contract valid (required=$req_count, closeout=$closeout_count, packets_checked=$packets_checked, incomplete=$packets_incomplete)"
+echo "D331 PASS: orchestrator packet + coordinator closeout lock valid (required=$req_count, closeout=$closeout_count, packets_checked=$packets_checked, incomplete=$packets_incomplete, capability=$CLOSEOUT_CAP)"

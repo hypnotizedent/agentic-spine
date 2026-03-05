@@ -1,66 +1,281 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+OPS="$ROOT/bin/ops"
+
+LOOP_ID=""
+LANE_BRANCH=""
+TARGET_BRANCH="main"
+REMOTE="origin"
+CLEANUP_MODE="report-only"
+DRY_RUN=0
+NO_PUSH=0
+JSON_MODE=0
 
 usage() {
-  cat <<'EOF'
+  cat <<'USAGE'
 coordinator-lane-closeout
 
 Usage:
-  coordinator-lane-closeout [--skip-verify] [--skip-friction] [--skip-status] [--json]
+  coordinator-lane-closeout --loop-id LOOP-... [options]
 
-Runs a deterministic coordinator closeout chain:
-  1) verify.run -- fast
-  2) friction.reconcile
-  3) status pack (friction.queue.status, gaps.status --open-only, loops.status, proposals.status)
-EOF
+Options:
+  --loop-id <LOOP-ID>                Required parent loop id (used for friction.reconcile).
+  --lane-branch <branch>             Source lane branch (default: current branch).
+  --target-branch <branch>           Integration target branch (default: main).
+  --remote <name>                    Remote for push parity checks (default: origin).
+  --cleanup-mode <mode>              worktree.lifecycle.cleanup mode (default: report-only).
+  --dry-run                          Validate + print planned chain without mutations.
+  --no-push                          Skip pushing target branch after integration.
+  --json                             Emit JSON envelope.
+USAGE
 }
 
-SKIP_VERIFY=0
-SKIP_FRICTION=0
-SKIP_STATUS=0
-JSON=0
+fail() {
+  echo "coordinator.lane.closeout FAIL: $*" >&2
+  exit 1
+}
+
+[[ -x "$OPS" ]] || fail "missing ops entrypoint: $OPS"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --skip-verify) SKIP_VERIFY=1; shift ;;
-    --skip-friction) SKIP_FRICTION=1; shift ;;
-    --skip-status) SKIP_STATUS=1; shift ;;
-    --json) JSON=1; shift ;;
+    --) shift ;;
+    --loop-id) LOOP_ID="${2:-}"; shift 2 ;;
+    --lane-branch) LANE_BRANCH="${2:-}"; shift 2 ;;
+    --target-branch) TARGET_BRANCH="${2:-}"; shift 2 ;;
+    --remote) REMOTE="${2:-}"; shift 2 ;;
+    --cleanup-mode) CLEANUP_MODE="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --no-push) NO_PUSH=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
+    *) fail "unknown arg: $1" ;;
   esac
 done
 
-run() {
-  local cmd="$1"
-  if [[ "$JSON" -eq 1 ]]; then
-    echo "{\"step\":\"$cmd\",\"status\":\"running\"}"
-  else
-    echo "==> $cmd"
+[[ -n "$LOOP_ID" ]] || fail "--loop-id is required"
+[[ "$LOOP_ID" =~ ^LOOP-[A-Za-z0-9._-]+$ ]] || fail "invalid --loop-id: $LOOP_ID"
+case "$CLEANUP_MODE" in
+  report-only|archive-only|delete) ;;
+  *) fail "--cleanup-mode must be report-only|archive-only|delete" ;;
+esac
+
+git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "not a git repository: $ROOT"
+
+ORIGINAL_BRANCH="$(git -C "$ROOT" branch --show-current 2>/dev/null || true)"
+[[ -n "$ORIGINAL_BRANCH" ]] || ORIGINAL_BRANCH="detached"
+if [[ -z "$LANE_BRANCH" ]]; then
+  LANE_BRANCH="$ORIGINAL_BRANCH"
+fi
+[[ "$LANE_BRANCH" != "detached" ]] || fail "lane branch cannot be detached"
+[[ "$LANE_BRANCH" != "$TARGET_BRANCH" ]] || fail "lane branch and target branch must differ"
+
+cleanup_branch_restore() {
+  if [[ "$ORIGINAL_BRANCH" != "detached" ]]; then
+    git -C "$ROOT" checkout "$ORIGINAL_BRANCH" >/dev/null 2>&1 || true
   fi
-  (cd "$ROOT" && eval "$cmd")
+}
+trap cleanup_branch_restore EXIT INT TERM
+
+if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
+  fail "lane worktree must be clean before closeout"
+fi
+
+git -C "$ROOT" rev-parse --verify "$LANE_BRANCH" >/dev/null 2>&1 || fail "missing lane branch: $LANE_BRANCH"
+git -C "$ROOT" rev-parse --verify "$TARGET_BRANCH" >/dev/null 2>&1 || fail "missing target branch: $TARGET_BRANCH"
+
+if ! git -C "$ROOT" fetch "$REMOTE" "$LANE_BRANCH" "$TARGET_BRANCH" >/dev/null 2>&1; then
+  fail "failed to fetch $REMOTE for $LANE_BRANCH/$TARGET_BRANCH"
+fi
+
+lane_head="$(git -C "$ROOT" rev-parse "$LANE_BRANCH")"
+target_head_before="$(git -C "$ROOT" rev-parse "$TARGET_BRANCH")"
+remote_lane_ref="refs/remotes/${REMOTE}/${LANE_BRANCH}"
+remote_target_ref="refs/remotes/${REMOTE}/${TARGET_BRANCH}"
+remote_lane_head="$(git -C "$ROOT" rev-parse "$remote_lane_ref" 2>/dev/null || true)"
+remote_target_head_before="$(git -C "$ROOT" rev-parse "$remote_target_ref" 2>/dev/null || true)"
+
+[[ -n "$remote_lane_head" ]] || fail "lane branch is not pushed to $REMOTE/$LANE_BRANCH"
+if [[ "$lane_head" != "$remote_lane_head" ]]; then
+  fail "lane branch head is not pushed (local=$lane_head remote=$remote_lane_head)"
+fi
+
+declare -a STEP_ROWS=()
+step_failures=0
+
+run_cap() {
+  local step="$1"
+  shift
+  local output rc run_key
+
+  set +e
+  output="$(OPS_CAP_AUTO_APPROVE=yes "$OPS" cap run "$@" 2>&1)"
+  rc=$?
+  set -e
+
+  printf '%s\n' "$output"
+  run_key="$(printf '%s\n' "$output" | sed -n 's/^Run Key:[[:space:]]*//p' | head -1 | xargs || true)"
+  [[ -n "$run_key" ]] || run_key="none"
+  STEP_ROWS+=("${step}|${run_key}|${rc}")
+  if [[ "$rc" -ne 0 ]]; then
+    step_failures=$((step_failures + 1))
+  fi
 }
 
-if [[ "$SKIP_VERIFY" -eq 0 ]]; then
-  run "./bin/ops cap run verify.run -- fast"
-fi
+integration_status="already_integrated"
+target_head_after="$target_head_before"
+did_push=0
+integration_worktree=""
 
-if [[ "$SKIP_FRICTION" -eq 0 ]]; then
-  # Reconcile is idempotent and safe to run at coordinator closeout.
-  run "./bin/ops cap run friction.reconcile"
-fi
+cleanup_integration_worktree() {
+  [[ -n "$integration_worktree" ]] || return 0
+  git -C "$ROOT" worktree remove --force "$integration_worktree" >/dev/null 2>&1 || true
+  rmdir "$integration_worktree" >/dev/null 2>&1 || true
+}
+trap 'cleanup_integration_worktree; cleanup_branch_restore' EXIT INT TERM
 
-if [[ "$SKIP_STATUS" -eq 0 ]]; then
-  run "./bin/ops cap run friction.queue.status"
-  run "./bin/ops cap run gaps.status --open-only"
-  run "./bin/ops cap run loops.status"
-  run "./bin/ops cap run proposals.status"
-fi
-
-if [[ "$JSON" -eq 1 ]]; then
-  echo '{"status":"ok","capability":"coordinator.lane.closeout"}'
+if git -C "$ROOT" merge-base --is-ancestor "$lane_head" "$target_head_before" >/dev/null 2>&1; then
+  integration_status="already_integrated"
+elif [[ "$DRY_RUN" -eq 1 ]]; then
+  integration_status="planned"
 else
-  echo "coordinator.lane.closeout: complete"
+  integration_status="integrated"
+  integration_worktree="$(mktemp -d "${TMPDIR:-/tmp}/spine-closeout-${TARGET_BRANCH//\//-}.XXXXXX")"
+  git -C "$ROOT" worktree add --force "$integration_worktree" "$TARGET_BRANCH" >/dev/null 2>&1 || fail "failed to open integration worktree for $TARGET_BRANCH"
+  git -C "$integration_worktree" merge --ff-only "$LANE_BRANCH" >/dev/null 2>&1 || fail "ff-only integration failed ($LANE_BRANCH -> $TARGET_BRANCH)"
+  target_head_after="$(git -C "$integration_worktree" rev-parse "$TARGET_BRANCH")"
+  if [[ "$NO_PUSH" -eq 0 ]]; then
+    git -C "$integration_worktree" push "$REMOTE" "$TARGET_BRANCH" >/dev/null 2>&1 || fail "push failed: $REMOTE/$TARGET_BRANCH"
+    did_push=1
+  fi
+  cleanup_integration_worktree
+  integration_worktree=""
+fi
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  run_cap "verify_fast" verify.run -- fast
+  run_cap "friction_reconcile" friction.reconcile -- --loop-id "$LOOP_ID"
+  run_cap "loops_status" loops.status --json
+  run_cap "gaps_status" gaps.status --json
+  run_cap "proposals_status" proposals.status --json
+  run_cap "friction_queue_status" friction.queue.status --json
+  run_cap "worktree_cleanup" worktree.lifecycle.cleanup -- --mode "$CLEANUP_MODE" --json
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    jq -n \
+      --arg capability "coordinator.lane.closeout" \
+      --arg status "dry-run" \
+      --arg loop_id "$LOOP_ID" \
+      --arg lane_branch "$LANE_BRANCH" \
+      --arg target_branch "$TARGET_BRANCH" \
+      --arg remote "$REMOTE" \
+      --arg lane_head "$lane_head" \
+      --arg target_head_before "$target_head_before" \
+      --arg integration_status "$integration_status" \
+      --arg cleanup_mode "$CLEANUP_MODE" \
+      '{
+        capability: $capability,
+        status: $status,
+        loop_id: $loop_id,
+        lane_branch: $lane_branch,
+        target_branch: $target_branch,
+        remote: $remote,
+        lane_head: $lane_head,
+        target_head_before: $target_head_before,
+        integration_status: $integration_status,
+        cleanup_mode: $cleanup_mode
+      }'
+  else
+    echo "coordinator.lane.closeout"
+    echo "status: dry-run"
+    echo "loop_id: $LOOP_ID"
+    echo "lane_branch: $LANE_BRANCH"
+    echo "target_branch: $TARGET_BRANCH"
+    echo "remote: $REMOTE"
+    echo "lane_head: $lane_head"
+    echo "target_head_before: $target_head_before"
+    echo "remote_target_head_before: ${remote_target_head_before:-missing}"
+    echo "integration_status: $integration_status"
+    echo "cleanup_mode: $CLEANUP_MODE"
+  fi
+  exit 0
+fi
+
+steps_json="$(printf '%s\n' "${STEP_ROWS[@]}" | jq -R -s '
+  split("\n")
+  | map(select(length > 0))
+  | map(split("|"))
+  | map({
+      step: .[0],
+      run_key: .[1],
+      exit_code: (.[2] | tonumber)
+    })
+')"
+
+final_status="ok"
+if [[ "$step_failures" -gt 0 ]]; then
+  final_status="failed"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg capability "coordinator.lane.closeout" \
+    --arg status "$final_status" \
+    --arg loop_id "$LOOP_ID" \
+    --arg lane_branch "$LANE_BRANCH" \
+    --arg target_branch "$TARGET_BRANCH" \
+    --arg remote "$REMOTE" \
+    --arg lane_head "$lane_head" \
+    --arg target_head_before "$target_head_before" \
+    --arg target_head_after "$target_head_after" \
+    --arg integration_status "$integration_status" \
+    --arg cleanup_mode "$CLEANUP_MODE" \
+    --argjson pushed "$did_push" \
+    --argjson step_failures "$step_failures" \
+    --argjson steps "$steps_json" \
+    '{
+      capability: $capability,
+      status: $status,
+      loop_id: $loop_id,
+      lane_branch: $lane_branch,
+      target_branch: $target_branch,
+      remote: $remote,
+      lane_head: $lane_head,
+      target_head_before: $target_head_before,
+      target_head_after: $target_head_after,
+      integration_status: $integration_status,
+      cleanup_mode: $cleanup_mode,
+      pushed: ($pushed == 1),
+      step_failures: $step_failures,
+      steps: $steps
+    }'
+else
+  echo "coordinator.lane.closeout"
+  echo "status: $final_status"
+  echo "loop_id: $LOOP_ID"
+  echo "lane_branch: $LANE_BRANCH"
+  echo "target_branch: $TARGET_BRANCH"
+  echo "remote: $REMOTE"
+  echo "lane_head: $lane_head"
+  echo "target_head_before: $target_head_before"
+  echo "target_head_after: $target_head_after"
+  echo "integration_status: $integration_status"
+  echo "cleanup_mode: $CLEANUP_MODE"
+  echo "pushed: $did_push"
+  echo "step_failures: $step_failures"
+  echo "steps:"
+  for row in "${STEP_ROWS[@]}"; do
+    step="$(printf '%s' "$row" | cut -d'|' -f1)"
+    run_key="$(printf '%s' "$row" | cut -d'|' -f2)"
+    rc="$(printf '%s' "$row" | cut -d'|' -f3)"
+    echo "  - $step: run_key=$run_key exit_code=$rc"
+  done
+fi
+
+if [[ "$step_failures" -gt 0 ]]; then
+  fail "one or more closeout steps failed (step_failures=$step_failures)"
 fi
