@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+ACTIVE_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -n "$ACTIVE_ROOT" && -f "$ACTIVE_ROOT/ops/capabilities.yaml" ]]; then
+  ROOT="$ACTIVE_ROOT"
+else
+  ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+fi
 CONTRACT="$ROOT/ops/bindings/worktree.session.isolation.yaml"
 
 ENFORCE=0
@@ -23,6 +28,8 @@ require_identity=true
 identity_env_var="OPS_WORKTREE_IDENTITY"
 bypass_env_var="OPS_WORKTREE_ISOLATION_BYPASS"
 bypass_allowed_value="1"
+bypass_ref_env_var="OPS_WORKTREE_ISOLATION_BYPASS_REF"
+bypass_reason_env_var="OPS_WORKTREE_ISOLATION_BYPASS_REASON"
 allow_detached=false
 remediation="Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>."
 bypass_warning="Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1"
@@ -39,6 +46,8 @@ if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   identity_env_var="$(yq e -r '.policy.identity_env_var // "OPS_WORKTREE_IDENTITY"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_IDENTITY)"
   bypass_env_var="$(yq e -r '.policy.bypass_env_var // "OPS_WORKTREE_ISOLATION_BYPASS"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS)"
   bypass_allowed_value="$(yq e -r '.policy.bypass_allowed_value // "1"' "$CONTRACT" 2>/dev/null || echo 1)"
+  bypass_ref_env_var="$(yq e -r '.policy.bypass_ref_env_var // "OPS_WORKTREE_ISOLATION_BYPASS_REF"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS_REF)"
+  bypass_reason_env_var="$(yq e -r '.policy.bypass_reason_env_var // "OPS_WORKTREE_ISOLATION_BYPASS_REASON"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS_REASON)"
   allow_detached="$(yq e -r '.policy.allow_detached_head // false' "$CONTRACT" 2>/dev/null || echo false)"
   remediation="$(yq e -r '.messages.remediation // "Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>."' "$CONTRACT" 2>/dev/null || echo "Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>.")"
   bypass_warning="$(yq e -r '.messages.bypass_warning // "Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1"' "$CONTRACT" 2>/dev/null || echo "Emergency bypass only: export OPS_WORKTREE_ISOLATION_BYPASS=1")"
@@ -47,14 +56,24 @@ if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   done < <(yq e -r '.policy.identity_patterns[]?' "$CONTRACT" 2>/dev/null || true)
 fi
 
-if [[ "$managed_prefix" == "~/"* ]]; then
-  managed_prefix="$HOME/${managed_prefix#~/}"
-fi
+expand_home_prefix() {
+  local raw="${1:-}"
+  case "$raw" in
+    "~") printf '%s\n' "$HOME" ;;
+    "~/"*) printf '%s\n' "$HOME/${raw#"~/"}" ;;
+    *) printf '%s\n' "$raw" ;;
+  esac
+}
+
+managed_prefix="$(expand_home_prefix "$managed_prefix")"
+managed_prefix="${managed_prefix%/}/"
 
 repo_root="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
 branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 
 bypass_value="${!bypass_env_var-}"
+bypass_ref_value="${!bypass_ref_env_var-}"
+bypass_reason_value="${!bypass_reason_env_var-}"
 identity_value="${!identity_env_var-}"
 
 issues=()
@@ -70,6 +89,13 @@ fi
 
 if [[ "$enabled" == "true" && "$branch" != "$main_branch" && "$branch" != "unknown" ]]; then
   if [[ -n "$bypass_value" && "$bypass_value" == "$bypass_allowed_value" ]]; then
+    if [[ -z "$bypass_ref_value" && -z "$bypass_reason_value" ]]; then
+      issues+=("bypass '$bypass_env_var=$bypass_value' requires both '$bypass_ref_env_var' and '$bypass_reason_env_var'")
+    elif [[ -z "$bypass_ref_value" ]]; then
+      issues+=("bypass '$bypass_env_var=$bypass_value' missing '$bypass_ref_env_var'")
+    elif [[ -z "$bypass_reason_value" ]]; then
+      issues+=("bypass '$bypass_env_var=$bypass_value' missing '$bypass_reason_env_var'")
+    fi
     warnings+=("bypass active via $bypass_env_var=$bypass_value")
   else
     if [[ "$require_non_main_in_managed" == "true" ]]; then
@@ -122,13 +148,17 @@ echo "identity_env_var: $identity_env_var"
 echo "identity_value: ${identity_value:-<unset>}"
 echo "bypass_env_var: $bypass_env_var"
 echo "bypass_value: ${bypass_value:-<unset>}"
+echo "bypass_ref_env_var: $bypass_ref_env_var"
+echo "bypass_ref_value: ${bypass_ref_value:-<unset>}"
+echo "bypass_reason_env_var: $bypass_reason_env_var"
+echo "bypass_reason_value: ${bypass_reason_value:-<unset>}"
 
 echo "worktrees:"
 git -C "$ROOT" worktree list | sed 's/^/  - /'
 
 if [[ -d "$ROOT/mailroom/state/sessions" ]]; then
   echo "sessions:"
-  ls -1 "$ROOT/mailroom/state/sessions" 2>/dev/null | sed 's/^/  - /' || true
+  ls -1 "$ROOT/mailroom/state/sessions" 2>/dev/null | LC_ALL=C sort | sed 's/^/  - /' || true
 fi
 
 if [[ ${#warnings[@]} -gt 0 ]]; then

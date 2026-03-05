@@ -458,7 +458,7 @@ run_cap() {
     local blocked_reason=""
 
     # ── Policy enforcement: proposal_required + multi_agent_writes ──
-    # Skip enforcement for precondition runs, read-only caps, and governance caps
+    # Skip enforcement for precondition runs, read-only caps, and governance caps.
     if [[ -z "${OPS_CAP_STACK:-}" && "$safety" == "mutating" ]]; then
       # proposal_required: strict preset forces proposal flow for mutating caps
       if [[ "${RESOLVED_PROPOSAL_REQUIRED:-false}" == "true" ]]; then
@@ -467,22 +467,141 @@ run_cap() {
         echo ""
         echo "Remediation:"
         echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
-        exit 1
+        blocked_reason="proposal_required_block:${name}"
+        exit_code=1
       fi
       # multi_agent_writes: proposal-only blocks direct mutating caps
-      if [[ "$effective_multi_agent_writes" == "proposal-only" ]]; then
+      if [[ -z "$blocked_reason" && "$effective_multi_agent_writes" == "proposal-only" ]]; then
         echo "BLOCKED: multi_agent_writes=proposal-only (policy: $RESOLVED_POLICY_PRESET, active_sessions=$active_session_count)"
         echo "Direct mutating capability '$name' blocked. Use proposal flow."
         echo ""
         echo "Remediation:"
         echo "  ./bin/ops cap run proposals.submit \"$name: $desc\""
-        exit 1
+        blocked_reason="multi_agent_writes_proposal_only:${name}"
+        exit_code=1
+      fi
+    fi
+
+    # ── Hard-default mutation context guard (main + isolation) ──
+    # Fail closed for mutating/destructive capabilities unless the execution
+    # context is explicitly governed. Bootstrap/control-plane allowlist is
+    # intentionally narrow:
+    #   - session.start
+    #   - session.role.override
+    #   - aof.contract.acknowledge
+    #   - orchestration.wave.start
+    #   - orchestration.wave.kickoff
+    #   - orchestration.terminal.entry
+    #   - worktree.lifecycle.rehydrate
+    if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
+      local caller_branch
+      local main_override_ref main_override_reason
+      local wt_bypass wt_bypass_ref wt_bypass_reason wt_bypass_lc
+      local wt_status_script wt_status_out
+      local context_guard_exempt=0
+
+      main_override_ref="${OPS_MAIN_MUTATION_OVERRIDE_REF:-}"
+      main_override_reason="${OPS_MAIN_MUTATION_OVERRIDE_REASON:-}"
+      wt_bypass="${OPS_WORKTREE_ISOLATION_BYPASS:-}"
+      wt_bypass_ref="${OPS_WORKTREE_ISOLATION_BYPASS_REF:-}"
+      wt_bypass_reason="${OPS_WORKTREE_ISOLATION_BYPASS_REASON:-}"
+      wt_bypass_lc="$(printf '%s' "$wt_bypass" | tr '[:upper:]' '[:lower:]')"
+
+      case "$name" in
+        session.start|session.role.override|aof.contract.acknowledge|orchestration.wave.start|orchestration.wave.kickoff|orchestration.terminal.entry|worktree.lifecycle.rehydrate)
+          context_guard_exempt=1
+          ;;
+      esac
+
+      caller_branch="$(git -C "$PWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+      [[ -n "$caller_branch" ]] || caller_branch="unknown"
+
+      if [[ "$context_guard_exempt" -eq 1 ]]; then
+        echo "MUTATION CONTEXT GUARD: allowlisted bootstrap/control-plane capability '$name'"
+      elif [[ "$caller_branch" == "main" ]]; then
+        if [[ -n "$main_override_ref" && -n "$main_override_reason" ]]; then
+          echo "MAIN MUTATION OVERRIDE: ref=$main_override_ref reason=$main_override_reason"
+        elif [[ -n "$main_override_ref" ]]; then
+          echo "BLOCKED: main mutation override missing reason"
+          echo "Capability: $name"
+          echo "Branch: $caller_branch"
+          echo "Provide: OPS_MAIN_MUTATION_OVERRIDE_REASON"
+          blocked_reason="main_branch_override_reason_missing:${name}"
+          exit_code=6
+        elif [[ -n "$main_override_reason" ]]; then
+          echo "BLOCKED: main mutation override missing reference"
+          echo "Capability: $name"
+          echo "Branch: $caller_branch"
+          echo "Provide: OPS_MAIN_MUTATION_OVERRIDE_REF"
+          blocked_reason="main_branch_override_ref_missing:${name}"
+          exit_code=6
+        else
+          echo "BLOCKED: main branch mutation guard"
+          echo "Capability: $name"
+          echo "Branch: $caller_branch"
+          echo "Reason: mutating/destructive capability execution on '$caller_branch' is denied by default."
+          echo ""
+          echo "Remediation:"
+          echo "  Use an isolated worktree lane branch (recommended), or provide governed override:"
+          echo "  OPS_MAIN_MUTATION_OVERRIDE_REF='<loop|wave|ticket>' OPS_MAIN_MUTATION_OVERRIDE_REASON='<why>' ./bin/ops cap run $name ..."
+          blocked_reason="main_branch_mutation_block:${name}"
+          exit_code=6
+        fi
+      else
+        if [[ "$wt_bypass_lc" == "1" || "$wt_bypass_lc" == "true" || "$wt_bypass_lc" == "yes" ]]; then
+          if [[ -z "$wt_bypass_ref" && -z "$wt_bypass_reason" ]]; then
+            echo "BLOCKED: worktree isolation bypass missing ref and reason"
+            echo "Capability: $name"
+            echo "Branch: $caller_branch"
+            echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_REF and OPS_WORKTREE_ISOLATION_BYPASS_REASON"
+            blocked_reason="worktree_isolation_bypass_ref_reason_missing:${caller_branch}"
+            exit_code=6
+          elif [[ -z "$wt_bypass_ref" ]]; then
+            echo "BLOCKED: worktree isolation bypass missing reference"
+            echo "Capability: $name"
+            echo "Branch: $caller_branch"
+            echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_REF"
+            blocked_reason="worktree_isolation_bypass_ref_missing:${caller_branch}"
+            exit_code=6
+          elif [[ -z "$wt_bypass_reason" ]]; then
+            echo "BLOCKED: worktree isolation bypass missing reason"
+            echo "Capability: $name"
+            echo "Branch: $caller_branch"
+            echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_REASON"
+            blocked_reason="worktree_isolation_bypass_reason_missing:${caller_branch}"
+            exit_code=6
+          else
+            echo "WARNING: WORKTREE ISOLATION BYPASS ACTIVE (ref=$wt_bypass_ref reason=$wt_bypass_reason)"
+          fi
+        fi
+
+        if [[ -z "$blocked_reason" ]]; then
+          wt_status_script="$SPINE_CODE/ops/plugins/ops/bin/worktree-session-status"
+          if [[ ! -x "$wt_status_script" ]]; then
+            echo "BLOCKED: worktree isolation guard unavailable"
+            echo "Missing script: $wt_status_script"
+            blocked_reason="worktree_session_status_script_missing"
+            exit_code=6
+          elif ! wt_status_out="$(SPINE_ROOT="$SPINE_CODE" "$wt_status_script" --enforce --brief 2>&1)"; then
+            echo "BLOCKED: worktree session isolation guard"
+            echo "Capability: $name"
+            echo "Branch: $caller_branch"
+            echo "Guard output: $wt_status_out"
+            echo ""
+            echo "Remediation:"
+            echo "  ./bin/ops wave start <WAVE_ID> --objective \"...\""
+            echo "  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch $caller_branch --lane <lane>"
+            echo "  export OPS_WORKTREE_IDENTITY=<LOOP_ID|WAVE_ID>"
+            blocked_reason="worktree_session_isolation_failed:${caller_branch}"
+            exit_code=6
+          fi
+        fi
       fi
     fi
 
     # ── Runtime role execution policy (read-only roles cannot mutate) ──
     # Enforce in the cap execution path so role policy blocks before command execution.
-    if [[ -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
+    if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
       local role_policy_enabled override_env_key override_reason_env_key
       local read_only_roles_csv mutating_roles_csv role_from_terminal
       local role_capability_allowlist_csv role_capability_allowlisted
@@ -591,20 +710,18 @@ run_cap() {
       local orchestrator_loop_id orchestrator_scope_file orchestrator_mode orchestrator_scope_status
       local orchestrator_lock_dir orchestrator_lock_match
       local caller_worktree caller_branch
-      local orch_bypass orch_bypass_reason
+      local orch_bypass orch_bypass_ref orch_bypass_reason
       local scope_frontmatter
 
-      orchestrator_loop_id="${SPINE_LOOP_ID:-}"
+      orchestrator_loop_id="${SPINE_LOOP_ID:-${SPINE_ORCH_LOOP_ID:-}}"
       if [[ -z "$orchestrator_loop_id" && "${role_policy_override_ref:-}" =~ ^LOOP-[A-Za-z0-9._-]+$ ]]; then
         orchestrator_loop_id="$role_policy_override_ref"
       fi
 
-      # Allow bootstrap, orchestration control-plane, and friction capabilities
-      # to bypass orchestrator mutation guard — they either create lock claims
-      # or are administrative operations that don't mutate domain state
-      # (GAP-OP-1484, GAP-OP-1492).
+      # Allow bootstrap and orchestration control-plane capabilities to bypass
+      # lock evidence checks when they are establishing lock claims.
       case "$name" in
-        orchestration.terminal.entry|orchestration.wave.kickoff|orchestration.wave.start|orchestration.wave.dispatch|orchestration.wave.ack|orchestration.wave.close|loops.create|session.start|aof.contract.acknowledge|session.role.override|friction.ingest|friction.reconcile|state.shared.reconcile) orchestrator_loop_id="" ;;
+        orchestration.terminal.entry|orchestration.wave.kickoff|orchestration.wave.start|orchestration.wave.dispatch|orchestration.wave.ack|orchestration.wave.close|loops.create|session.start|aof.contract.acknowledge|session.role.override|state.shared.reconcile) orchestrator_loop_id="" ;;
       esac
 
       if [[ -n "$orchestrator_loop_id" ]]; then
@@ -637,17 +754,28 @@ run_cap() {
               exit_code=5
             elif [[ "$orchestrator_mode" == "orchestrator_subagents" ]]; then
             orch_bypass="${SPINE_ORCH_MUTATION_GUARD_BYPASS:-}"
+            orch_bypass_ref="${SPINE_ORCH_MUTATION_GUARD_BYPASS_REF:-}"
             orch_bypass_reason="${SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON:-}"
 
             local _orch_bypass_lc; _orch_bypass_lc="$(printf '%s' "$orch_bypass" | tr '[:upper:]' '[:lower:]')"
             if [[ "$_orch_bypass_lc" == "1" || "$_orch_bypass_lc" == "true" || "$_orch_bypass_lc" == "yes" ]]; then
-              if [[ -z "$orch_bypass_reason" ]]; then
+              if [[ -z "$orch_bypass_ref" && -z "$orch_bypass_reason" ]]; then
+                echo "BLOCKED: orchestrator mutation guard bypass missing ref and reason"
+                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REF and SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON with governed evidence."
+                blocked_reason="orchestrator_guard_bypass_ref_reason_missing:$orchestrator_loop_id"
+                exit_code=5
+              elif [[ -z "$orch_bypass_ref" ]]; then
+                echo "BLOCKED: orchestrator mutation guard bypass missing reference"
+                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REF with a governed reference."
+                blocked_reason="orchestrator_guard_bypass_ref_missing:$orchestrator_loop_id"
+                exit_code=5
+              elif [[ -z "$orch_bypass_reason" ]]; then
                 echo "BLOCKED: orchestrator mutation guard bypass missing reason"
-                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON with a governed reference."
+                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON with a governed explanation."
                 blocked_reason="orchestrator_guard_bypass_reason_missing:$orchestrator_loop_id"
                 exit_code=5
               else
-                echo "WARNING: ORCHESTRATOR MUTATION GUARD BYPASSED (loop=$orchestrator_loop_id reason=$orch_bypass_reason)"
+                echo "WARNING: ORCHESTRATOR MUTATION GUARD BYPASSED (loop=$orchestrator_loop_id ref=$orch_bypass_ref reason=$orch_bypass_reason)"
               fi
             else
               caller_worktree="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -684,7 +812,7 @@ run_cap() {
                 echo "  ./bin/ops cap run orchestration.wave.kickoff -- --loop-id $orchestrator_loop_id --lanes A,B,C"
                 echo "  ./bin/ops cap run orchestration.terminal.entry -- --loop-id $orchestrator_loop_id --role worker --lane <LANE> --session-id <SESSION_ID> --worktree ${caller_worktree:-<worktree>} --branch ${caller_branch:-<branch>}"
                 echo "Emergency bypass (warn-only, governed):"
-                echo "  SPINE_ORCH_MUTATION_GUARD_BYPASS=1 SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON='<ref>' ./bin/ops cap run $name ..."
+                echo "  SPINE_ORCH_MUTATION_GUARD_BYPASS=1 SPINE_ORCH_MUTATION_GUARD_BYPASS_REF='<ref>' SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON='<reason>' ./bin/ops cap run $name ..."
                 blocked_reason="orchestrator_guard_lock_missing:$orchestrator_loop_id:${caller_branch:-unknown}"
                 exit_code=5
               fi
@@ -1000,6 +1128,14 @@ PY
 
     local output_hash
     output_hash="$(shasum -a 256 "$output_file" 2>/dev/null | cut -d' ' -f1 || echo "n/a")"
+    local receipt_status
+    if [[ -n "$blocked_reason" ]]; then
+      receipt_status="blocked"
+    elif [[ "$exit_code" -eq 0 ]]; then
+      receipt_status="done"
+    else
+      receipt_status="failed"
+    fi
 
     cat > "$receipt_dir/receipt.md" <<EOF
 # Receipt: $run_key
@@ -1008,11 +1144,12 @@ PY
 |-------|-------|
 | Run ID | \`$run_key\` |
 | Capability | \`$name\` |
-| Status | $([ $exit_code -eq 0 ] && echo "done" || echo "failed") |
+| Status | $receipt_status |
 | Exit Code | $exit_code |
 | Generated | $end_time |
 | Model | local (capability) |
 | Context | $safety |
+| Blocker Reason | ${blocked_reason:-none} |
 | Runtime Role | ${runtime_role:-unknown} |
 | Role Policy Enforced | $role_policy_enforced |
 | Role Policy Override Used | $role_policy_override_used |
@@ -1121,7 +1258,7 @@ EOF
     echo "DONE"
     echo "════════════════════════════════════════"
     echo "Run Key:  $run_key"
-    echo "Status:   $([ $exit_code -eq 0 ] && echo "done" || echo "failed")"
+    echo "Status:   $receipt_status"
     echo "Receipt:  $receipt_dir/receipt.md"
     echo "Output:   $receipt_dir/output.txt"
 
