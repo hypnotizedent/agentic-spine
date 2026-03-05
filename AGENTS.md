@@ -25,7 +25,7 @@ cd ~/code/agentic-spine
 source_registry: ops/bindings/gate.registry.yaml
 registry_updated: 2026-03-05
 gate_count_total: 377
-gate_count_active: 339
-gate_count_retired: 38
+gate_count_active: 73
+gate_count_retired: 304
 max_gate_id: D381
 <!-- ENTRY_SURFACE_GATE_METADATA_END -->
