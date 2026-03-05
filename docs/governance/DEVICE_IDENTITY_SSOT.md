@@ -225,7 +225,7 @@ curl -s http://automation-stack:5678/healthz
 
 | Dashboard | URL | Purpose |
 |-----------|-----|---------|
-| Mint OS Admin | https://admin.mintprints.com | Business operations |
+| Mint OS Admin (legacy) | https://admin.mintprints.co | Legacy business operations |
 | Grafana | https://grafana.ronny.works | Monitoring |
 | n8n | https://n8n.ronny.works | Automation workflows |
 | Proxmox (Shop) | https://pve:8006 | VM management |
@@ -523,7 +523,7 @@ QUICK CHECKS:
   ssh proxmox-home pct list    # Home LXCs
 
 DASHBOARDS:
-  https://admin.mintprints.com  # Mint OS
+  https://admin.mintprints.co   # Mint OS (legacy)
   https://grafana.ronny.works  # Monitoring
   https://n8n.ronny.works      # Automation
   https://secrets.ronny.works  # Infisical
