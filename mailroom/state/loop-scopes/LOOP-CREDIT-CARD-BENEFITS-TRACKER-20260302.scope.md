@@ -1,13 +1,14 @@
 ---
 loop_id: LOOP-CREDIT-CARD-BENEFITS-TRACKER-20260302
 created: 2026-03-02
-status: planned
+status: active
 owner: "@ronny"
 scope: credit
 priority: high
-horizon: later
-execution_readiness: blocked
-blocked_by: "Overnight intake — requires operator review and approval before execution"
+horizon: now
+execution_readiness: runnable
+execution_mode: orchestrator_subagents
+blocked_by: []
 next_review: "2026-03-09"
 objective: Create credit card benefits tracker to prevent expiring credits - proactive reminders before benefits expire
 activation_trigger: manual
@@ -25,11 +26,11 @@ Create credit card benefits tracker to prevent expiring credits - proactive remi
 - **Verify**: `./bin/ops cap run verify.run -- fast`
 - **Handoff**: `./bin/ops cap run session.handoff.create --summary "checkpoint" --loops LOOP-CREDIT-CARD-BENEFITS-TRACKER-20260302`
 
-## Phases
-- Phase 1:  Research and design YAML schema for card/benefit tracking
-- Phase 2:  Implement Python tracker script with expiration logic
-- Phase 3:  Create n8n workflow for Slack/email notifications
-- Phase 4:  Deploy to finance stack VM with cron scheduling
+## Steps
+- Step 1:  Research and design YAML schema for card/benefit tracking
+- Step 2:  Implement Python tracker script with expiration logic
+- Step 3:  Create n8n workflow for Slack/email notifications
+- Step 4:  Deploy to finance stack VM with cron scheduling
 
 ## Success Criteria
 - User receives weekly summary of all benefit status

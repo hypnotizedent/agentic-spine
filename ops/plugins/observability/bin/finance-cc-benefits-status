@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+RONNY_PRODUCTS_ROOT="${RONNY_PRODUCTS_ROOT:-$HOME/code/ronny-products}"
+APP_ROOT="$RONNY_PRODUCTS_ROOT/cc-benefits-tracker"
+TRACKER="$APP_ROOT/scripts/run-tracker.sh"
+
+CARDS_PATH="$APP_ROOT/schema/cards.catalog.json"
+STATE_PATH="$APP_ROOT/schema/state.sample.json"
+AS_OF=""
+QUIET=0
+
+usage() {
+  cat <<'USAGE'
+finance-cc-benefits-status
+
+Usage:
+  finance-cc-benefits-status [--cards <path>] [--state <path>] [--as-of YYYY-MM-DD] [--quiet]
+
+Reads the cc-benefits-tracker catalog/state and prints deterministic status JSON.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cards) CARDS_PATH="${2:?--cards requires value}"; shift 2 ;;
+    --state) STATE_PATH="${2:?--state requires value}"; shift 2 ;;
+    --as-of) AS_OF="${2:?--as-of requires value}"; shift 2 ;;
+    --quiet) QUIET=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+[[ -x "$TRACKER" ]] || { echo "ERROR: tracker entrypoint not found: $TRACKER" >&2; exit 1; }
+[[ -f "$CARDS_PATH" ]] || { echo "ERROR: cards catalog missing: $CARDS_PATH" >&2; exit 1; }
+
+cmd=("$TRACKER" --cards "$CARDS_PATH" --mode dry-run)
+if [[ -f "$STATE_PATH" ]]; then
+  cmd+=(--state "$STATE_PATH")
+fi
+if [[ -n "$AS_OF" ]]; then
+  cmd+=(--as-of "$AS_OF")
+fi
+if [[ "$QUIET" -eq 1 ]]; then
+  cmd+=(--quiet)
+fi
+
+"${cmd[@]}"

@@ -1,0 +1,52 @@
+---
+status: authoritative
+owner: "@ronny"
+updated_at: "2026-03-05"
+scope: finance-cc-benefits-runtime-contract
+version: "1.0"
+
+product:
+  repo_root: "~/code/ronny-products"
+  app_path: "cc-benefits-tracker"
+  schema_catalog_path: "cc-benefits-tracker/schema/cards.catalog.json"
+  state_seed_path: "cc-benefits-tracker/schema/state.sample.json"
+  entrypoint_path: "cc-benefits-tracker/scripts/run-tracker.sh"
+  schema_version: "1.0"
+  supported_modes:
+    - dry-run
+    - apply
+
+spine_runtime:
+  state_root: "mailroom/state/finance/cc-benefits-tracker"
+  status_report_path: "mailroom/state/finance/cc-benefits-tracker/status-report.json"
+  reminder_queue_path: "mailroom/state/finance/cc-benefits-tracker/reminder-queue.json"
+  dispatch_index_path: "mailroom/state/finance/cc-benefits-tracker/dispatched-reminders.json"
+  dispatch_log_path: "mailroom/outbox/finance/cc-benefits-reminder-dispatch.ndjson"
+
+capabilities:
+  plugin: observability
+  required:
+    - finance.cc_benefits.status
+    - finance.cc_benefits.refresh
+    - finance.cc_benefits.queue.status
+    - finance.cc_benefits.reminder.dispatch
+  script_map:
+    finance.cc_benefits.status: finance-cc-benefits-status
+    finance.cc_benefits.refresh: finance-cc-benefits-refresh
+    finance.cc_benefits.queue.status: finance-cc-benefits-queue-status
+    finance.cc_benefits.reminder.dispatch: finance-cc-benefits-reminder-dispatch
+
+scheduler:
+  required_labels:
+    - com.ronny.cc-benefits-refresh-daily
+    - com.ronny.cc-benefits-reminder-dispatch-daily
+  label_to_runtime_script:
+    com.ronny.cc-benefits-refresh-daily: ops/runtime/cc-benefits-refresh-daily.sh
+    com.ronny.cc-benefits-reminder-dispatch-daily: ops/runtime/cc-benefits-reminder-dispatch-daily.sh
+  label_to_template:
+    com.ronny.cc-benefits-refresh-daily: ops/runtime/launchd/com.ronny.cc-benefits-refresh-daily.plist
+    com.ronny.cc-benefits-reminder-dispatch-daily: ops/runtime/launchd/com.ronny.cc-benefits-reminder-dispatch-daily.plist
+
+verification:
+  gate_id: D380
+  gate_script: surfaces/verify/d380-cc-benefits-runtime-parity-lock.sh

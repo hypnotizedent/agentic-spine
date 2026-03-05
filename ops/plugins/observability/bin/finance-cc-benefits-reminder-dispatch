@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+OUTPUT_ROOT="$SPINE_ROOT/mailroom/state/finance/cc-benefits-tracker"
+QUEUE_PATH="$OUTPUT_ROOT/reminder-queue.json"
+DISPATCH_INDEX_PATH="$OUTPUT_ROOT/dispatched-reminders.json"
+DISPATCH_LOG_PATH="$SPINE_ROOT/mailroom/outbox/finance/cc-benefits-reminder-dispatch.ndjson"
+EXECUTE=0
+MAX_ACTIONS=0
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+finance-cc-benefits-reminder-dispatch
+
+Usage:
+  finance-cc-benefits-reminder-dispatch [--queue <path>] [--dispatch-index <path>] [--dispatch-log <path>] [--max-actions N] [--execute] [--json]
+
+Default mode is preview-only. Use --execute to persist dispatch ledger and consume queue entries.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --queue) QUEUE_PATH="${2:?--queue requires value}"; shift 2 ;;
+    --dispatch-index) DISPATCH_INDEX_PATH="${2:?--dispatch-index requires value}"; shift 2 ;;
+    --dispatch-log) DISPATCH_LOG_PATH="${2:?--dispatch-log requires value}"; shift 2 ;;
+    --max-actions) MAX_ACTIONS="${2:?--max-actions requires value}"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+python3 - "$QUEUE_PATH" "$DISPATCH_INDEX_PATH" "$DISPATCH_LOG_PATH" "$EXECUTE" "$MAX_ACTIONS" "$JSON_MODE" <<'PY'
+from __future__ import annotations
+
+import datetime as dt
+import json
+import pathlib
+import sys
+from typing import Any
+
+queue_path = pathlib.Path(sys.argv[1])
+index_path = pathlib.Path(sys.argv[2])
+log_path = pathlib.Path(sys.argv[3])
+execute = bool(int(sys.argv[4]))
+max_actions = int(sys.argv[5])
+json_mode = bool(int(sys.argv[6]))
+
+
+def load_json(path: pathlib.Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return default
+
+queue = load_json(queue_path, {"schema_version": "1.0", "as_of": "", "action_count": 0, "actions": []})
+actions = queue.get("actions") if isinstance(queue, dict) else []
+if not isinstance(actions, list):
+    actions = []
+actions = sorted([a for a in actions if isinstance(a, dict)], key=lambda row: str(row.get("reminder_id", "")))
+
+index = load_json(index_path, {"schema_version": "1.0", "dispatched_ids": []})
+dispatched_ids = set(index.get("dispatched_ids", [])) if isinstance(index, dict) else set()
+
+deduped = [a for a in actions if str(a.get("reminder_id", "")) not in dispatched_ids]
+if max_actions > 0:
+    deduped = deduped[:max_actions]
+
+result = {
+    "capability": "finance.cc_benefits.reminder.dispatch",
+    "mode": "execute" if execute else "preview",
+    "queue_path": str(queue_path),
+    "dispatch_index_path": str(index_path),
+    "dispatch_log_path": str(log_path),
+    "pending_actions": len(deduped),
+    "processed_actions": 0,
+    "already_dispatched": len(actions) - len(deduped),
+    "processed_ids": [str(a.get("reminder_id", "")) for a in deduped],
+}
+
+if execute:
+    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        for action in deduped:
+            reminder_id = str(action.get("reminder_id", "")).strip()
+            dispatched_ids.add(reminder_id)
+            row = {
+                "dispatched_at_utc": now,
+                "reminder_id": reminder_id,
+                "as_of": queue.get("as_of", ""),
+                "card_id": action.get("card_id", ""),
+                "benefit_id": action.get("benefit_id", ""),
+                "window_end": action.get("window_end", ""),
+                "remaining_amount": action.get("remaining_amount", 0),
+                "currency": action.get("currency", ""),
+                "message": action.get("message", ""),
+            }
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+    remaining = [a for a in actions if str(a.get("reminder_id", "")) not in dispatched_ids]
+    queue["actions"] = remaining
+    queue["action_count"] = len(remaining)
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    queue_path.write_text(json.dumps(queue, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    dispatched_doc = {
+        "schema_version": "1.0",
+        "updated_at_utc": now,
+        "dispatched_ids": sorted(x for x in dispatched_ids if x),
+    }
+    index_path.write_text(json.dumps(dispatched_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    result["processed_actions"] = len(deduped)
+
+if json_mode:
+    print(json.dumps(result, indent=2, sort_keys=True))
+else:
+    print("finance.cc_benefits.reminder.dispatch")
+    print(f"mode: {result['mode']}")
+    print(f"queue_path: {result['queue_path']}")
+    print(f"pending_actions: {result['pending_actions']}")
+    print(f"already_dispatched: {result['already_dispatched']}")
+    print(f"processed_actions: {result['processed_actions']}")
+PY

@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+OUTPUT_ROOT="$SPINE_ROOT/mailroom/state/finance/cc-benefits-tracker"
+QUEUE_PATH="$OUTPUT_ROOT/reminder-queue.json"
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+finance-cc-benefits-queue-status
+
+Usage:
+  finance-cc-benefits-queue-status [--queue <path>] [--json]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --queue) QUEUE_PATH="${2:?--queue requires value}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+python3 - "$QUEUE_PATH" "$JSON_MODE" <<'PY'
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+queue_path = pathlib.Path(sys.argv[1])
+json_mode = bool(int(sys.argv[2]))
+
+payload = {
+    "capability": "finance.cc_benefits.queue.status",
+    "status": "empty",
+    "queue_path": str(queue_path),
+    "action_count": 0,
+    "actions": [],
+}
+
+if queue_path.exists():
+    try:
+        data = json.loads(queue_path.read_text(encoding="utf-8"))
+        actions = data.get("actions") if isinstance(data, dict) else []
+        if not isinstance(actions, list):
+            actions = []
+        actions = sorted(actions, key=lambda row: str((row or {}).get("reminder_id", "")))
+        payload.update(
+            {
+                "status": "ok",
+                "schema_version": str(data.get("schema_version", "")) if isinstance(data, dict) else "",
+                "as_of": str(data.get("as_of", "")) if isinstance(data, dict) else "",
+                "action_count": len(actions),
+                "actions": actions,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        payload.update({"status": "error", "error": str(exc)})
+
+if json_mode:
+    print(json.dumps(payload, indent=2, sort_keys=True))
+else:
+    print("finance.cc_benefits.queue.status")
+    print(f"status: {payload['status']}")
+    print(f"queue_path: {payload['queue_path']}")
+    print(f"action_count: {payload['action_count']}")
+    if payload.get("as_of"):
+        print(f"as_of: {payload['as_of']}")
+PY
