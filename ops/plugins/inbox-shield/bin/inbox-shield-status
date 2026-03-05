@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# inbox-shield-status — Report inbox shield system health
+# TRIAGE: communications domain, inbox-shield product, health probe
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+# Read deployment target from service onboarding
+SHIELD_HOST="${INBOX_SHIELD_HOST:-192.168.1.214}"
+SHIELD_PORT="${INBOX_SHIELD_PORT:-8000}"
+SHIELD_URL="http://${SHIELD_HOST}:${SHIELD_PORT}"
+
+# Source SSH resolver for LAN/Tailscale fallback
+if [[ -f "$ROOT/ops/lib/ssh-resolve.sh" ]]; then
+  source "$ROOT/ops/lib/ssh-resolve.sh"
+  resolved_url="$(ssh_resolve_url_with_fallback "$SHIELD_URL" "communications-stack" 2>/dev/null || echo "$SHIELD_URL")"
+  SHIELD_URL="$resolved_url"
+fi
+
+echo "inbox-shield.status"
+
+# Health check
+health_json="$(curl -sf --connect-timeout 5 --max-time 10 "${SHIELD_URL}/health" 2>/dev/null || echo '{"status":"unreachable"}')"
+health_status="$(echo "$health_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")"
+
+# Status check
+status_json="$(curl -sf --connect-timeout 5 --max-time 10 "${SHIELD_URL}/status" 2>/dev/null || echo '{}')"
+
+if [[ "$health_status" == "healthy" ]]; then
+  queue_depth="$(echo "$status_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('queue_depth',0))" 2>/dev/null || echo "?")"
+  messages_today="$(echo "$status_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('messages_today',0))" 2>/dev/null || echo "?")"
+  auto_reply_rate="$(echo "$status_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('auto_reply_rate','?'))" 2>/dev/null || echo "?")"
+  echo "health: HEALTHY"
+  echo "queue_depth: $queue_depth"
+  echo "messages_today: $messages_today"
+  echo "auto_reply_rate: $auto_reply_rate"
+else
+  echo "health: $health_status"
+  echo "detail: inbox-shield application unreachable at $SHIELD_URL"
+fi
