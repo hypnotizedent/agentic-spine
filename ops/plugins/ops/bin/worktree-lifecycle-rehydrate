@@ -3,12 +3,25 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 CONTRACT="$ROOT/ops/bindings/worktree.lifecycle.contract.yaml"
+ENFORCED_PREFIX="/Users/ronnyworks/code/.wt/agentic-spine/"
 
 REPO_PATH="$ROOT"
 BRANCH=""
 LANE=""
 OWNER="${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}"
 FORCE=0
+
+path_policy_block() {
+  local detail="${1:-unknown path policy violation}"
+  cat >&2 <<EOF
+WORKTREE PATH POLICY BLOCK: $detail
+Allowed worktree path: ${ENFORCED_PREFIX}<WAVE_ID>
+Remediation:
+  ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo /Users/ronnyworks/code/agentic-spine
+  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo /Users/ronnyworks/code/agentic-spine
+EOF
+  exit 1
+}
 
 usage() {
   cat <<'USAGE'
@@ -70,9 +83,18 @@ if [[ -z "$LANE" ]]; then
   fi
 fi
 
+if [[ "${LANE^^}" == WAVE-* ]]; then
+  LANE="${LANE^^}"
+fi
+[[ "$LANE" =~ ^WAVE-[A-Z0-9._-]+$ ]] || path_policy_block "lane '$LANE' must be an explicit WAVE_ID (WAVE-...)"
+
 REPO_NAME="$(basename "$REPO_ROOT")"
 TARGET_WT="$CANONICAL_ROOT/$REPO_NAME/$LANE"
 NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+[[ "$TARGET_WT" != *"/.worktrees/"* ]] || path_policy_block "legacy .worktrees target denied: $TARGET_WT"
+[[ "$TARGET_WT" != "$REPO_ROOT" && "$TARGET_WT" != "$REPO_ROOT/"* ]] || path_policy_block "main checkout path denied: $TARGET_WT"
+[[ "$TARGET_WT" == "${ENFORCED_PREFIX}"* ]] || path_policy_block "target '$TARGET_WT' is outside enforced prefix '$ENFORCED_PREFIX'"
 
 # Ensure branch exists locally, or materialize from origin if present.
 if ! git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then

@@ -4,6 +4,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_orchestration-common"
 source "$(orchestration_root)/ops/lib/git-lock.sh"
 acquire_git_lock orchestration
+ENFORCED_PREFIX="/Users/ronnyworks/code/.wt/agentic-spine/"
 
 usage() {
   cat <<'USAGE'
@@ -19,6 +20,18 @@ Usage:
     [--lane <lane>] \
     [--force]
 USAGE
+}
+
+entry_path_block() {
+  local detail="${1:-unknown path policy violation}"
+  cat >&2 <<EOF
+ERROR: WORKTREE PATH POLICY BLOCK: $detail
+Allowed worktree path: ${ENFORCED_PREFIX}<WAVE_ID>
+Remediation:
+  ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo /Users/ronnyworks/code/agentic-spine
+  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo /Users/ronnyworks/code/agentic-spine
+EOF
+  exit 1
 }
 
 emit_export() {
@@ -137,6 +150,11 @@ else
 fi
 
 [[ -d "$CALLER_WORKTREE" ]] || orchestration_fail "caller worktree does not exist: $CALLER_WORKTREE"
+caller_real="$(cd "$CALLER_WORKTREE" && pwd -P)"
+[[ "$caller_real" != *"/.worktrees/"* ]] || entry_path_block "legacy .worktrees caller denied: $caller_real"
+[[ "$caller_real" == "${ENFORCED_PREFIX}"* ]] || entry_path_block "caller path '$caller_real' is outside enforced prefix '$ENFORCED_PREFIX'"
+caller_wave_id="$(basename "$caller_real")"
+[[ "$caller_wave_id" =~ ^WAVE-[A-Z0-9._-]+$ ]] || entry_path_block "caller path leaf '$caller_wave_id' must be explicit WAVE_ID (WAVE-...)"
 
 orchestration_need yq
 orchestration_need git
@@ -166,25 +184,31 @@ if [[ "$ROLE" == "worker" ]]; then
     || orchestration_fail "lane branch mismatch: lane '$LANE' requires '$target_branch' got '$CLAIMED_BRANCH'"
 else
   target_branch="$CLAIMED_BRANCH"
-  if [[ "$target_branch" != "main" && "$FORCE" -ne 1 ]]; then
-    orchestration_fail "role C must launch from branch 'main' (use --force to override)"
+  if [[ "$target_branch" != "main" && "$target_branch" != codex/* && "$FORCE" -ne 1 ]]; then
+    orchestration_fail "role C must launch from branch 'main' or codex/* (use --force to override)"
   fi
 fi
 
 ensure_local_branch "$repo" "$target_branch"
 
-worktree_base="$repo/.worktrees/orchestration/$LOOP_ID"
-target_worktree="$worktree_base/$LANE"
-mkdir -p "$worktree_base"
+lane_suffix="$(printf '%s' "$LANE" | tr '[:upper:]' '[:lower:]')"
+target_worktree="${ENFORCED_PREFIX}${caller_wave_id}-${lane_suffix}"
+[[ "$target_worktree" != *"/.worktrees/"* ]] || entry_path_block "legacy .worktrees target denied: $target_worktree"
+[[ "$target_worktree" == "${ENFORCED_PREFIX}"* ]] || entry_path_block "target path '$target_worktree' is outside enforced prefix '$ENFORCED_PREFIX'"
+mkdir -p "$(dirname "$target_worktree")"
 
 # Remove stale registry entries before checking occupancy.
 git -C "$repo" worktree prune >/dev/null 2>&1 || true
 
 occupied_wt="$(find_branch_worktree "$repo" "$target_branch" || true)"
 if [[ -n "$occupied_wt" && "$occupied_wt" != "$target_worktree" ]]; then
-  if [[ "$FORCE" -eq 1 ]]; then
-    echo "WARN: forcing legacy worktree reuse for branch '$target_branch' at '$occupied_wt'" >&2
+  if [[ "$occupied_wt" == *"/.worktrees/"* || "$occupied_wt" == "$repo" ]]; then
+    entry_path_block "branch '$target_branch' already checked out at non-compliant path '$occupied_wt'"
+  fi
+  if [[ "$occupied_wt" == "${ENFORCED_PREFIX}"* ]]; then
     target_worktree="$occupied_wt"
+  elif [[ "$FORCE" -eq 1 ]]; then
+    entry_path_block "force cannot reuse non-compliant occupied worktree '$occupied_wt'"
   else
     orchestration_fail "branch '$target_branch' already checked out at '$occupied_wt' (expected '$target_worktree')"
   fi
@@ -200,7 +224,11 @@ else
       orchestration_fail "deterministic worktree path exists but is not a git checkout: $target_worktree"
     fi
   fi
-  git -C "$repo" worktree add "$target_worktree" "$target_branch" >/dev/null
+  if [[ "$FORCE" -eq 1 ]]; then
+    git -C "$repo" worktree add --force "$target_worktree" "$target_branch" >/dev/null
+  else
+    git -C "$repo" worktree add "$target_worktree" "$target_branch" >/dev/null
+  fi
 fi
 
 wt_branch="$(git -C "$target_worktree" rev-parse --abbrev-ref HEAD)"

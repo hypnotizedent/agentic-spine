@@ -22,13 +22,14 @@ done
 
 enabled=true
 main_branch="main"
-managed_prefix="$HOME/.wt/agentic-spine/"
+managed_prefix="/Users/ronnyworks/code/.wt/agentic-spine/"
 require_non_main_in_managed=true
 require_identity=true
 identity_env_var="OPS_WORKTREE_IDENTITY"
 bypass_env_var="OPS_WORKTREE_ISOLATION_BYPASS"
 bypass_allowed_value="1"
 bypass_ref_env_var="OPS_WORKTREE_ISOLATION_BYPASS_REF"
+bypass_friction_ref_env_var="OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF"
 bypass_reason_env_var="OPS_WORKTREE_ISOLATION_BYPASS_REASON"
 allow_detached=false
 remediation="Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>."
@@ -40,13 +41,14 @@ if [[ -f "$CONTRACT" ]] && command -v yq >/dev/null 2>&1; then
   contract_loaded=true
   enabled="$(yq e -r '.policy.enabled // true' "$CONTRACT" 2>/dev/null || echo true)"
   main_branch="$(yq e -r '.policy.main_branch // "main"' "$CONTRACT" 2>/dev/null || echo main)"
-  managed_prefix="$(yq e -r '.policy.managed_worktree_prefix // "~/.wt/agentic-spine/"' "$CONTRACT" 2>/dev/null || echo '~/.wt/agentic-spine/')"
+  managed_prefix="$(yq e -r '.policy.managed_worktree_prefix // "/Users/ronnyworks/code/.wt/agentic-spine/"' "$CONTRACT" 2>/dev/null || echo '/Users/ronnyworks/code/.wt/agentic-spine/')"
   require_non_main_in_managed="$(yq e -r '.policy.require_non_main_in_managed_worktree // true' "$CONTRACT" 2>/dev/null || echo true)"
   require_identity="$(yq e -r '.policy.require_explicit_identity_on_non_main // true' "$CONTRACT" 2>/dev/null || echo true)"
   identity_env_var="$(yq e -r '.policy.identity_env_var // "OPS_WORKTREE_IDENTITY"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_IDENTITY)"
   bypass_env_var="$(yq e -r '.policy.bypass_env_var // "OPS_WORKTREE_ISOLATION_BYPASS"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS)"
   bypass_allowed_value="$(yq e -r '.policy.bypass_allowed_value // "1"' "$CONTRACT" 2>/dev/null || echo 1)"
   bypass_ref_env_var="$(yq e -r '.policy.bypass_ref_env_var // "OPS_WORKTREE_ISOLATION_BYPASS_REF"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS_REF)"
+  bypass_friction_ref_env_var="$(yq e -r '.policy.bypass_friction_ref_env_var // "OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF)"
   bypass_reason_env_var="$(yq e -r '.policy.bypass_reason_env_var // "OPS_WORKTREE_ISOLATION_BYPASS_REASON"' "$CONTRACT" 2>/dev/null || echo OPS_WORKTREE_ISOLATION_BYPASS_REASON)"
   allow_detached="$(yq e -r '.policy.allow_detached_head // false' "$CONTRACT" 2>/dev/null || echo false)"
   remediation="$(yq e -r '.messages.remediation // "Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>."' "$CONTRACT" 2>/dev/null || echo "Run ./bin/ops start loop <LOOP_ID> and export OPS_WORKTREE_IDENTITY=<LOOP_ID>.")"
@@ -73,6 +75,7 @@ branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown
 
 bypass_value="${!bypass_env_var-}"
 bypass_ref_value="${!bypass_ref_env_var-}"
+bypass_friction_ref_value="${!bypass_friction_ref_env_var-}"
 bypass_reason_value="${!bypass_reason_env_var-}"
 identity_value="${!identity_env_var-}"
 
@@ -89,10 +92,12 @@ fi
 
 if [[ "$enabled" == "true" && "$branch" != "$main_branch" && "$branch" != "unknown" ]]; then
   if [[ -n "$bypass_value" && "$bypass_value" == "$bypass_allowed_value" ]]; then
-    if [[ -z "$bypass_ref_value" && -z "$bypass_reason_value" ]]; then
-      issues+=("bypass '$bypass_env_var=$bypass_value' requires both '$bypass_ref_env_var' and '$bypass_reason_env_var'")
+    if [[ -z "$bypass_ref_value" && -z "$bypass_friction_ref_value" && -z "$bypass_reason_value" ]]; then
+      issues+=("bypass '$bypass_env_var=$bypass_value' requires '$bypass_ref_env_var', '$bypass_friction_ref_env_var', and '$bypass_reason_env_var'")
     elif [[ -z "$bypass_ref_value" ]]; then
       issues+=("bypass '$bypass_env_var=$bypass_value' missing '$bypass_ref_env_var'")
+    elif [[ -z "$bypass_friction_ref_value" ]]; then
+      issues+=("bypass '$bypass_env_var=$bypass_value' missing '$bypass_friction_ref_env_var'")
     elif [[ -z "$bypass_reason_value" ]]; then
       issues+=("bypass '$bypass_env_var=$bypass_value' missing '$bypass_reason_env_var'")
     fi
@@ -150,6 +155,8 @@ echo "bypass_env_var: $bypass_env_var"
 echo "bypass_value: ${bypass_value:-<unset>}"
 echo "bypass_ref_env_var: $bypass_ref_env_var"
 echo "bypass_ref_value: ${bypass_ref_value:-<unset>}"
+echo "bypass_friction_ref_env_var: $bypass_friction_ref_env_var"
+echo "bypass_friction_ref_value: ${bypass_friction_ref_value:-<unset>}"
 echo "bypass_reason_env_var: $bypass_reason_env_var"
 echo "bypass_reason_value: ${bypass_reason_value:-<unset>}"
 

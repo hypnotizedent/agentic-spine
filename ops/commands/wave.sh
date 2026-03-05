@@ -25,6 +25,7 @@ RUNTIME_ROOT="${SPINE_RUNTIME_ROOT:-$HOME/code/.runtime/spine-mailroom}"
 WAVES_DIR="$RUNTIME_ROOT/waves"
 LANES_STATE="$RUNTIME_ROOT/lanes/state.json"
 ROLE_RUNTIME_CONTRACT="$SPINE_REPO/ops/bindings/role.runtime.control.contract.yaml"
+ENFORCED_WAVE_WORKTREE_PREFIX="/Users/ronnyworks/code/.wt/agentic-spine/"
 source "$SPINE_REPO/ops/lib/git-lock.sh" 2>/dev/null || true
 
 mkdir -p "$WAVES_DIR"
@@ -332,6 +333,18 @@ ts_now() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
+wave_path_policy_block() {
+  local detail="${1:-unknown path policy violation}"
+  cat >&2 <<EOF
+WORKTREE PATH POLICY BLOCK: $detail
+Allowed wave worktree path: ${ENFORCED_WAVE_WORKTREE_PREFIX}<WAVE_ID>
+Remediation:
+  ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo /Users/ronnyworks/code/agentic-spine
+  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo /Users/ronnyworks/code/agentic-spine
+EOF
+  exit 1
+}
+
 # ── Subcommands ──────────────────────────────────────────────────────────
 
 usage() {
@@ -523,6 +536,10 @@ PYDEADLINE
     local repo_name
     repo_name="$(basename "$workspace_repo")"
     workspace_worktree="$canonical_root/$repo_name/${wave_id}"
+    [[ "$workspace_worktree" != *"/.worktrees/"* ]] || wave_path_policy_block "legacy .worktrees target denied: $workspace_worktree"
+    [[ "$workspace_worktree" != "$workspace_repo" && "$workspace_worktree" != "$workspace_repo/"* ]] || wave_path_policy_block "main checkout target denied: $workspace_worktree"
+    [[ "$workspace_worktree" == "${ENFORCED_WAVE_WORKTREE_PREFIX}"* ]] || wave_path_policy_block "target '$workspace_worktree' is outside enforced prefix '$ENFORCED_WAVE_WORKTREE_PREFIX'"
+    [[ "$(basename "$workspace_worktree")" =~ ^WAVE-[A-Z0-9._-]+$ ]] || wave_path_policy_block "wave id '$wave_id' must match WAVE-... for managed worktree path"
 
     if ! git -C "$workspace_repo" show-ref --verify --quiet "refs/heads/$workspace_branch"; then
       if git -C "$workspace_repo" show-ref --verify --quiet "refs/remotes/origin/$default_branch"; then
@@ -652,6 +669,7 @@ try:
 except Exception:
     path_claims_ttl_minutes = 180
 path_claims_non_overlap = (sys.argv[23].lower() == "true") if len(sys.argv) > 23 else True
+single_terminal_mode = str(owner_terminal or "").strip() == "SPINE-CONTROL-01"
 
 packet = {
     "schema_version": "1.0",
@@ -664,6 +682,17 @@ packet = {
     "horizon": horizon,
     "execution_readiness": execution_readiness,
     "claimed_paths": claimed_paths,
+    "single_terminal_mode": single_terminal_mode,
+    "lane_outcomes": [],
+    "stub_matrix": [],
+    "cross_repo_pushability_gate": {
+        "status": "PENDING",
+        "checked_at_utc": "PENDING_CLOSEOUT",
+        "repo": workspace_repo if workspace_enabled else "",
+        "branch": workspace_branch if workspace_enabled else "",
+        "remote": "origin",
+        "failure": "",
+    },
 }
 
 missing_fields = [field for field in required_fields if packet.get(field) in (None, "", [])]
@@ -890,6 +919,176 @@ PYSTART
   trap - EXIT
 }
 
+dispatch_pushability_preflight() {
+  local sf="${1:?state file required}"
+  local lane="${2:?lane required}"
+
+  python3 - "$sf" "$SPINE_REPO" "$lane" <<'PYPUSHGATE'
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+sf = sys.argv[1]
+spine_repo = sys.argv[2]
+lane = sys.argv[3]
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def run(cmd):
+    proc = subprocess.run(cmd, text=True, capture_output=True)
+    return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+
+state = json.load(open(sf, "r", encoding="utf-8"))
+workspace = state.get("workspace") if isinstance(state.get("workspace"), dict) else {}
+packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+repo = str(workspace.get("repo") or "").strip()
+branch = str(workspace.get("branch") or "").strip()
+wave_id = str(state.get("wave_id") or "").strip()
+loop_id = str(packet.get("loop_id") or "").strip()
+owner_terminal = str(packet.get("owner_terminal") or "SPINE-CONTROL-01").strip()
+remote = "origin"
+remote_url = ""
+errors = []
+
+if not repo:
+    errors.append("workspace.repo missing")
+elif not os.path.isdir(repo):
+    errors.append(f"workspace.repo not found: {repo}")
+
+if not branch:
+    errors.append("workspace.branch missing")
+
+if not errors:
+    rc, out, err = run(["git", "-C", repo, "remote", "get-url", remote])
+    if rc != 0 or not out:
+        errors.append(f"remote '{remote}' is not configured for repo '{repo}'")
+    else:
+        remote_url = out
+
+if not errors:
+    rc, out, err = run(["git", "-C", repo, "push", "--dry-run", remote, f"{branch}:{branch}"])
+    if rc != 0:
+        detail = err or out or "dry-run push failed"
+        errors.append(f"push dry-run failed for {remote}/{branch}: {detail}")
+
+push_gate = {
+    "status": "PASS" if not errors else "FAIL",
+    "checked_at_utc": now,
+    "repo": repo,
+    "branch": branch,
+    "remote": remote,
+    "remote_url": remote_url,
+    "failure": " | ".join(errors) if errors else "",
+}
+packet["cross_repo_pushability_gate"] = push_gate
+
+if errors:
+    stub_rel = ""
+    stub_id = f"STUB-cross-repo-pushability-{wave_id.lower()}-{lane.lower()}"
+    if loop_id:
+        stub_dir = os.path.join(spine_repo, "mailroom", "state", "orchestration", loop_id, "stubs")
+        os.makedirs(stub_dir, exist_ok=True)
+        stub_path = os.path.join(stub_dir, f"{stub_id}.md")
+        unblock_cmd = f"git -C {repo} push --dry-run {remote} {branch}:{branch}" if repo and branch else "git remote -v"
+        with open(stub_path, "w", encoding="utf-8") as f:
+            f.write("---\n")
+            f.write(f"stub_id: {stub_id}\n")
+            f.write("status: open\n")
+            f.write(f"owner_terminal: {owner_terminal or 'SPINE-CONTROL-01'}\n")
+            f.write("blocker_class: pushability_gate\n")
+            f.write(f"created_at_utc: {now}\n")
+            f.write("---\n\n")
+            f.write("# Pushability Blocker Stub\n\n")
+            f.write(f"- wave_id: `{wave_id}`\n")
+            f.write(f"- lane: `{lane}`\n")
+            f.write(f"- repo: `{repo}`\n")
+            f.write(f"- branch: `{branch}`\n")
+            f.write(f"- remote: `{remote}`\n")
+            f.write(f"- failures: {'; '.join(errors)}\n\n")
+            f.write("## Unblock Command\n\n")
+            f.write("```bash\n")
+            f.write(f"{unblock_cmd}\n")
+            f.write("```\n")
+        stub_rel = os.path.relpath(stub_path, spine_repo)
+
+    stub_matrix = packet.get("stub_matrix") if isinstance(packet.get("stub_matrix"), list) else []
+    stub_matrix = [row for row in stub_matrix if not (isinstance(row, dict) and str(row.get("id", "")).strip() == stub_id)]
+    stub_matrix.append(
+        {
+            "id": stub_id,
+            "path": stub_rel,
+            "blocker_class": "pushability_gate",
+            "state": "open",
+        }
+    )
+    packet["stub_matrix"] = stub_matrix
+
+    lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+    updated = False
+    for row in lane_outcomes:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("lane_id", "")).strip() != lane:
+            continue
+        row["lane_status"] = "BLOCKED"
+        row["owner_terminal"] = owner_terminal
+        row["blocker"] = "cross_repo_pushability_gate_failed"
+        row["stub_evidence_ref"] = stub_rel
+        row["updated_at_utc"] = now
+        updated = True
+        break
+    if not updated:
+        lane_outcomes.append(
+            {
+                "lane_id": lane,
+                "owner_terminal": owner_terminal,
+                "lane_status": "BLOCKED",
+                "blocker": "cross_repo_pushability_gate_failed",
+                "stub_evidence_ref": stub_rel,
+                "updated_at_utc": now,
+            }
+        )
+    packet["lane_outcomes"] = lane_outcomes
+
+    blockers = []
+    preflight = state.get("preflight")
+    if isinstance(preflight, dict):
+        existing = preflight.get("blockers")
+        if isinstance(existing, list):
+            blockers.extend(str(x) for x in existing if str(x).strip())
+    blockers.append(f"cross_repo_pushability_gate failed for lane={lane}: {'; '.join(errors)}")
+    state["preflight"] = {
+        "domain": "dispatch-pushability",
+        "started_at": now,
+        "finished_at": now,
+        "duration_s": 0,
+        "verdict": "no-go",
+        "blockers": blockers,
+        "next_action": "Configure remote + pushability, then retry dispatch.",
+    }
+
+    state["packet"] = packet
+    with open(sf, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+
+    print("BLOCKED: dispatch pushability preflight failed")
+    for msg in errors:
+        print(f"  - {msg}")
+    if stub_rel:
+        print(f"  blocker_stub: {stub_rel}")
+    raise SystemExit(1)
+
+state["packet"] = packet
+with open(sf, "w", encoding="utf-8") as f:
+    json.dump(state, f, indent=2)
+    f.write("\n")
+
+print(f"dispatch pushability preflight: PASS repo={repo} branch={branch} remote={remote}")
+PYPUSHGATE
+}
+
 cmd_dispatch() {
   local wave_id=""
   local lane=""
@@ -937,6 +1136,7 @@ cmd_dispatch() {
   sf="$(wave_state_file "$wave_id")"
   local sd
   sd="$(wave_state_dir "$wave_id")"
+  dispatch_pushability_preflight "$sf" "$lane"
 
   if [[ -f "$ROLE_RUNTIME_CONTRACT" ]]; then
     python3 - "$sf" "$ROLE_RUNTIME_CONTRACT" <<'PYPACKETDISPATCH'
@@ -1267,6 +1467,7 @@ try:
     fcntl.flock(fd, fcntl.LOCK_EX)
     with open(sf) as f:
         state = json.load(f)
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 
     idx = len(state["dispatches"]) + 1
     task_id = f"D{idx}"
@@ -1289,6 +1490,31 @@ try:
     }
 
     state["dispatches"].append(dispatch)
+
+    lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+    lane_updated = False
+    for row in lane_outcomes:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("lane_id", "")).strip() != lane:
+            continue
+        row["lane_status"] = "DISPATCHED"
+        row["owner_terminal"] = str(row.get("owner_terminal") or packet.get("owner_terminal") or "").strip()
+        row["updated_at_utc"] = dispatch["dispatched_at"]
+        lane_updated = True
+        break
+    if not lane_updated:
+        lane_outcomes.append(
+            {
+                "lane_id": lane,
+                "lane_status": "DISPATCHED",
+                "owner_terminal": str(packet.get("owner_terminal") or "").strip(),
+                "stub_evidence_ref": "",
+                "updated_at_utc": dispatch["dispatched_at"],
+            }
+        )
+    packet["lane_outcomes"] = lane_outcomes
+    state["packet"] = packet
 
     role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
     if from_role and not role_flow.get("current_role"):
@@ -1900,6 +2126,7 @@ try:
     fcntl.flock(fd, fcntl.LOCK_EX)
     with open(sf) as f:
         state = json.load(f)
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     dispatches = state.get("dispatches", [])
@@ -2003,18 +2230,73 @@ try:
             f"Lane-role authorization missing for lane '{selected_lane}' in lane_role_compatibility.allowed_runtime_roles_by_lane"
         )
         sys.exit(1)
-    if effective_runtime_role not in allowed_roles:
+
+    single_terminal_mode = bool(packet.get("single_terminal_mode"))
+    if not single_terminal_mode:
+        single_terminal_mode = str(packet.get("owner_terminal", "")).strip() == "SPINE-CONTROL-01"
+    lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+    lane_owner_terminal = ""
+    for row in lane_outcomes:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("lane_id", "")).strip() != selected_lane:
+            continue
+        lane_owner_terminal = str(row.get("owner_terminal", "")).strip()
+        if lane_owner_terminal:
+            break
+    if not lane_owner_terminal and single_terminal_mode:
+        lane_owner_terminal = str(packet.get("owner_terminal", "")).strip()
+
+    control_lane_override = (
+        single_terminal_mode
+        and ack_terminal_role == "SPINE-CONTROL-01"
+        and lane_owner_terminal == "SPINE-CONTROL-01"
+    )
+
+    if not control_lane_override and effective_runtime_role not in allowed_roles:
         print(
             f"Lane-role authorization failed: lane={selected_lane} runtime_role={effective_runtime_role} allowed={allowed_roles}"
         )
         if ack_terminal_role:
             print(f"Terminal role context: {ack_terminal_role}")
         sys.exit(1)
+    if control_lane_override:
+        print(
+            f"Lane-role override: terminal={ack_terminal_role} acknowledged owned lane '{selected_lane}' in single-terminal mode"
+        )
 
     d["status"] = "done"
     d["completed_at"] = now
     d["result"] = result
     d["run_key"] = run_key
+
+    lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+    lane_updated = False
+    for row in lane_outcomes:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("lane_id", "")).strip() != selected_lane:
+            continue
+        row["lane_status"] = "DONE"
+        row["owner_terminal"] = lane_owner_terminal or ack_terminal_role or packet.get("owner_terminal", "")
+        row["stub_evidence_ref"] = str(row.get("stub_evidence_ref", "") or "")
+        row["updated_at_utc"] = now
+        if run_key:
+            row["run_key"] = run_key
+        lane_updated = True
+        break
+    if not lane_updated:
+        entry = {
+            "lane_id": selected_lane,
+            "lane_status": "DONE",
+            "owner_terminal": lane_owner_terminal or ack_terminal_role or packet.get("owner_terminal", ""),
+            "stub_evidence_ref": "",
+            "updated_at_utc": now,
+        }
+        if run_key:
+            entry["run_key"] = run_key
+        lane_outcomes.append(entry)
+    packet["lane_outcomes"] = lane_outcomes
 
     role_flow = state.get("role_flow") if isinstance(state.get("role_flow"), dict) else {}
     if to_role:
@@ -2036,6 +2318,7 @@ try:
     }
     role_flow.pop("pending_transition", None)
     state["role_flow"] = role_flow
+    state["packet"] = packet
 
     lifecycle_state = str(state.get("lifecycle_state", "active")).strip() or "active"
     if lifecycle_state == "active" and to_role == "worker":
@@ -2090,13 +2373,14 @@ cmd_close() {
   local sd
   sd="$(wave_state_dir "$wave_id")"
 
-  python3 - "$sf" "$sd" "$force" <<'PYCLOSE'
+  python3 - "$sf" "$sd" "$force" "$SPINE_REPO" <<'PYCLOSE'
 import json, sys, os, fcntl
 from datetime import datetime, timezone
 
 sf = sys.argv[1]
 sd = sys.argv[2]
 force = sys.argv[3] == "true"
+spine_repo = sys.argv[4] if len(sys.argv) > 4 else ""
 lock_file = sf + ".lock"
 
 fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
@@ -2124,6 +2408,54 @@ try:
     if not pf:
         contract_violations.append("Preflight has not been run (required by wave.lifecycle contract)")
 
+    dispatches = state.get("dispatches", []) if isinstance(state.get("dispatches"), list) else []
+    pending_dispatches = [
+        d for d in dispatches
+        if isinstance(d, dict) and str(d.get("status", "")).strip() in {"dispatched", "running"}
+    ]
+    packet = state.get("packet") if isinstance(state.get("packet"), dict) else {}
+    lane_outcomes = packet.get("lane_outcomes") if isinstance(packet.get("lane_outcomes"), list) else []
+
+    def _stub_exists(ref: str) -> bool:
+        text = str(ref or "").strip()
+        if not text:
+            return False
+        if os.path.isabs(text):
+            return os.path.exists(text)
+        if spine_repo:
+            return os.path.exists(os.path.join(spine_repo, text))
+        return os.path.exists(text)
+
+    def _lane_outcome(lane_id: str) -> dict:
+        for row in lane_outcomes:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("lane_id", "")).strip() == lane_id:
+                return row
+        return {}
+
+    pending_without_stub = []
+    for d in pending_dispatches:
+        lane = str(d.get("lane", "")).strip()
+        outcome = _lane_outcome(lane)
+        lane_status = str(outcome.get("lane_status", "")).strip().lower()
+        stub_ref = str(outcome.get("stub_evidence_ref", "")).strip()
+        blocked_with_stub = lane_status in {"blocked", "stubbed_blocked", "blocked_stubbed"} and _stub_exists(stub_ref)
+        if not blocked_with_stub:
+            pending_without_stub.append(lane or "unknown")
+
+    if pending_without_stub:
+        pending_msg = (
+            "dispatch pending without explicit blocked+stub evidence for lane(s): "
+            + ", ".join(sorted(set(pending_without_stub)))
+        )
+        if force:
+            print("BLOCKED: force-close denied while dispatches are pending without stub evidence.")
+            print(f"  - {pending_msg}")
+            print("Remediation: mark lane_outcomes as BLOCKED with valid stub_evidence_ref before retrying --force.")
+            sys.exit(1)
+        contract_violations.append(pending_msg)
+
     if contract_violations and not force:
         print("BLOCKED: Wave close contract not met:")
         for v in contract_violations:
@@ -2141,6 +2473,7 @@ try:
         print()
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state_field = "lifecycle_state"
     state["status"] = "closed"
     state["closed_at"] = now
     state["force_closed"] = bool(contract_violations)
@@ -2161,7 +2494,6 @@ finally:
     os.close(fd)
 
 # ── Generate merge receipt ──────────────────────────────────────────
-dispatches = state.get("dispatches", [])
 done_checks = sum(1 for c in checks if c["status"] == "done")
 failed_checks = sum(1 for c in checks if c["status"] == "failed")
 run_keys = [c["run_key"] for c in checks if c.get("run_key")]

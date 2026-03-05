@@ -496,7 +496,7 @@ run_cap() {
     if [[ -z "$blocked_reason" && -z "${OPS_CAP_STACK:-}" && ( "$safety" == "mutating" || "$safety" == "destructive" ) ]]; then
       local caller_branch
       local main_override_ref main_override_reason
-      local wt_bypass wt_bypass_ref wt_bypass_reason wt_bypass_lc
+      local wt_bypass wt_bypass_ref wt_bypass_friction_ref wt_bypass_reason wt_bypass_lc
       local wt_status_script wt_status_out
       local context_guard_exempt=0
 
@@ -504,6 +504,7 @@ run_cap() {
       main_override_reason="${OPS_MAIN_MUTATION_OVERRIDE_REASON:-}"
       wt_bypass="${OPS_WORKTREE_ISOLATION_BYPASS:-}"
       wt_bypass_ref="${OPS_WORKTREE_ISOLATION_BYPASS_REF:-}"
+      wt_bypass_friction_ref="${OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF:-}"
       wt_bypass_reason="${OPS_WORKTREE_ISOLATION_BYPASS_REASON:-}"
       wt_bypass_lc="$(printf '%s' "$wt_bypass" | tr '[:upper:]' '[:lower:]')"
 
@@ -549,19 +550,26 @@ run_cap() {
         fi
       else
         if [[ "$wt_bypass_lc" == "1" || "$wt_bypass_lc" == "true" || "$wt_bypass_lc" == "yes" ]]; then
-          if [[ -z "$wt_bypass_ref" && -z "$wt_bypass_reason" ]]; then
-            echo "BLOCKED: worktree isolation bypass missing ref and reason"
+          if [[ -z "$wt_bypass_ref" && -z "$wt_bypass_friction_ref" && -z "$wt_bypass_reason" ]]; then
+            echo "BLOCKED: worktree isolation bypass missing packet ref, friction ref, and reason"
             echo "Capability: $name"
             echo "Branch: $caller_branch"
-            echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_REF and OPS_WORKTREE_ISOLATION_BYPASS_REASON"
-            blocked_reason="worktree_isolation_bypass_ref_reason_missing:${caller_branch}"
+            echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_REF, OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF, and OPS_WORKTREE_ISOLATION_BYPASS_REASON"
+            blocked_reason="worktree_isolation_bypass_packet_friction_reason_missing:${caller_branch}"
             exit_code=6
           elif [[ -z "$wt_bypass_ref" ]]; then
-            echo "BLOCKED: worktree isolation bypass missing reference"
+            echo "BLOCKED: worktree isolation bypass missing packet evidence reference"
             echo "Capability: $name"
             echo "Branch: $caller_branch"
             echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_REF"
-            blocked_reason="worktree_isolation_bypass_ref_missing:${caller_branch}"
+            blocked_reason="worktree_isolation_bypass_packet_ref_missing:${caller_branch}"
+            exit_code=6
+          elif [[ -z "$wt_bypass_friction_ref" ]]; then
+            echo "BLOCKED: worktree isolation bypass missing friction linkage"
+            echo "Capability: $name"
+            echo "Branch: $caller_branch"
+            echo "Provide: OPS_WORKTREE_ISOLATION_BYPASS_FRICTION_REF"
+            blocked_reason="worktree_isolation_bypass_friction_ref_missing:${caller_branch}"
             exit_code=6
           elif [[ -z "$wt_bypass_reason" ]]; then
             echo "BLOCKED: worktree isolation bypass missing reason"
@@ -571,7 +579,7 @@ run_cap() {
             blocked_reason="worktree_isolation_bypass_reason_missing:${caller_branch}"
             exit_code=6
           else
-            echo "WARNING: WORKTREE ISOLATION BYPASS ACTIVE (ref=$wt_bypass_ref reason=$wt_bypass_reason)"
+            echo "WARNING: WORKTREE ISOLATION BYPASS ACTIVE (packet_ref=$wt_bypass_ref friction_ref=$wt_bypass_friction_ref reason=$wt_bypass_reason)"
           fi
         fi
 
@@ -710,7 +718,7 @@ run_cap() {
       local orchestrator_loop_id orchestrator_scope_file orchestrator_mode orchestrator_scope_status
       local orchestrator_lock_dir orchestrator_lock_match
       local caller_worktree caller_branch
-      local orch_bypass orch_bypass_ref orch_bypass_reason
+      local orch_bypass orch_bypass_ref orch_bypass_friction_ref orch_bypass_reason
       local scope_frontmatter
 
       orchestrator_loop_id="${SPINE_LOOP_ID:-${SPINE_ORCH_LOOP_ID:-}}"
@@ -755,19 +763,25 @@ run_cap() {
             elif [[ "$orchestrator_mode" == "orchestrator_subagents" ]]; then
             orch_bypass="${SPINE_ORCH_MUTATION_GUARD_BYPASS:-}"
             orch_bypass_ref="${SPINE_ORCH_MUTATION_GUARD_BYPASS_REF:-}"
+            orch_bypass_friction_ref="${SPINE_ORCH_MUTATION_GUARD_BYPASS_FRICTION_REF:-}"
             orch_bypass_reason="${SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON:-}"
 
             local _orch_bypass_lc; _orch_bypass_lc="$(printf '%s' "$orch_bypass" | tr '[:upper:]' '[:lower:]')"
             if [[ "$_orch_bypass_lc" == "1" || "$_orch_bypass_lc" == "true" || "$_orch_bypass_lc" == "yes" ]]; then
-              if [[ -z "$orch_bypass_ref" && -z "$orch_bypass_reason" ]]; then
-                echo "BLOCKED: orchestrator mutation guard bypass missing ref and reason"
-                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REF and SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON with governed evidence."
-                blocked_reason="orchestrator_guard_bypass_ref_reason_missing:$orchestrator_loop_id"
+              if [[ -z "$orch_bypass_ref" && -z "$orch_bypass_friction_ref" && -z "$orch_bypass_reason" ]]; then
+                echo "BLOCKED: orchestrator mutation guard bypass missing packet ref, friction ref, and reason"
+                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REF, SPINE_ORCH_MUTATION_GUARD_BYPASS_FRICTION_REF, and SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON with governed evidence."
+                blocked_reason="orchestrator_guard_bypass_packet_friction_reason_missing:$orchestrator_loop_id"
                 exit_code=5
               elif [[ -z "$orch_bypass_ref" ]]; then
-                echo "BLOCKED: orchestrator mutation guard bypass missing reference"
-                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REF with a governed reference."
-                blocked_reason="orchestrator_guard_bypass_ref_missing:$orchestrator_loop_id"
+                echo "BLOCKED: orchestrator mutation guard bypass missing packet evidence reference"
+                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_REF with a governed packet evidence reference."
+                blocked_reason="orchestrator_guard_bypass_packet_ref_missing:$orchestrator_loop_id"
+                exit_code=5
+              elif [[ -z "$orch_bypass_friction_ref" ]]; then
+                echo "BLOCKED: orchestrator mutation guard bypass missing friction linkage"
+                echo "Set SPINE_ORCH_MUTATION_GUARD_BYPASS_FRICTION_REF with a governed friction entry reference."
+                blocked_reason="orchestrator_guard_bypass_friction_ref_missing:$orchestrator_loop_id"
                 exit_code=5
               elif [[ -z "$orch_bypass_reason" ]]; then
                 echo "BLOCKED: orchestrator mutation guard bypass missing reason"
@@ -775,7 +789,7 @@ run_cap() {
                 blocked_reason="orchestrator_guard_bypass_reason_missing:$orchestrator_loop_id"
                 exit_code=5
               else
-                echo "WARNING: ORCHESTRATOR MUTATION GUARD BYPASSED (loop=$orchestrator_loop_id ref=$orch_bypass_ref reason=$orch_bypass_reason)"
+                echo "WARNING: ORCHESTRATOR MUTATION GUARD BYPASSED (loop=$orchestrator_loop_id packet_ref=$orch_bypass_ref friction_ref=$orch_bypass_friction_ref reason=$orch_bypass_reason)"
               fi
             else
               caller_worktree="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -812,7 +826,7 @@ run_cap() {
                 echo "  ./bin/ops cap run orchestration.wave.kickoff -- --loop-id $orchestrator_loop_id --lanes A,B,C"
                 echo "  ./bin/ops cap run orchestration.terminal.entry -- --loop-id $orchestrator_loop_id --role worker --lane <LANE> --session-id <SESSION_ID> --worktree ${caller_worktree:-<worktree>} --branch ${caller_branch:-<branch>}"
                 echo "Emergency bypass (warn-only, governed):"
-                echo "  SPINE_ORCH_MUTATION_GUARD_BYPASS=1 SPINE_ORCH_MUTATION_GUARD_BYPASS_REF='<ref>' SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON='<reason>' ./bin/ops cap run $name ..."
+                echo "  SPINE_ORCH_MUTATION_GUARD_BYPASS=1 SPINE_ORCH_MUTATION_GUARD_BYPASS_REF='<packet-ref>' SPINE_ORCH_MUTATION_GUARD_BYPASS_FRICTION_REF='<friction-id>' SPINE_ORCH_MUTATION_GUARD_BYPASS_REASON='<reason>' ./bin/ops cap run $name ..."
                 blocked_reason="orchestrator_guard_lock_missing:$orchestrator_loop_id:${caller_branch:-unknown}"
                 exit_code=5
               fi

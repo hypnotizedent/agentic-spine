@@ -6,8 +6,8 @@
 #
 # Decision: LOOP-ORCHESTRATOR-SUBAGENT-DEFAULT-ENFORCEMENT-20260303
 
-version: "1.0"
-updated_at: "2026-03-03"
+version: "1.1"
+updated_at: "2026-03-05"
 status: authoritative
 owner: "@ronny"
 
@@ -38,6 +38,10 @@ required_fields:
   - worktree_mapping
   - integration_order
   - verification_sequence
+  - cross_repo_pushability_gate
+  - lane_outcomes
+  - stub_matrix
+  - plan_transition
 
 # ─────────────────────────────────────────────────────────────────────────
 # Required Fields (pre-closeout)
@@ -82,8 +86,33 @@ field_schemas:
   verification_sequence:
     type: list
     items:
-      required: [step, verify_command, expected_result]
-    description: "Ordered verification steps to run after integration."
+      required: [step, verify_command, expected_result, run_key]
+    description: "Ordered verification steps to run after integration with governed run_key evidence for each step."
+
+  cross_repo_pushability_gate:
+    type: object
+    required: [status, checked_at_utc, repo, branch, remote, failure]
+    statuses: [PENDING, PASS, FAIL]
+    description: "Hard gate evidence showing remote presence and push --dry-run outcome for the target branch before lane dispatch."
+
+  lane_outcomes:
+    type: list
+    items:
+      required: [lane_id, owner_terminal, lane_status, updated_at_utc]
+    forbidden_statuses: [PENDING_CLOSEOUT]
+    description: "Per-lane closeout outcomes. lane_status must never remain PENDING_CLOSEOUT."
+
+  stub_matrix:
+    type: list
+    items:
+      required: [id, path, blocker_class, state]
+    description: "Blocker stubs created when hard gates fail before or during dispatch."
+
+  plan_transition:
+    type: object
+    required: [status, updated_at_utc]
+    statuses: [pending, completed, blocked]
+    description: "Lifecycle transition state for the orchestrator plan, including run_key evidence when completed."
 
   reconciliation_summary:
     type: object
@@ -132,4 +161,6 @@ enforcement:
   gate: D331
   description: |
     D330 verifies execution_mode declaration consistency.
-    D331 verifies orchestrator packet completeness for orchestrator_subagents loops.
+    D331 verifies orchestrator packet completeness for orchestrator_subagents loops,
+    enforces verify step run_key evidence, and fails if any lane_outcomes entry
+    remains PENDING_CLOSEOUT.

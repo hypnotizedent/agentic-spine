@@ -27,6 +27,7 @@ USAGE
 }
 
 ROOT="$(orchestration_root)"
+ENFORCED_PREFIX="/Users/ronnyworks/code/.wt/agentic-spine/"
 LOOP_ID=""
 LANES_CSV=""
 REPO_PATH="$ROOT"
@@ -34,6 +35,18 @@ OWNER_TERMINAL="${OPS_TERMINAL_ROLE:-SPINE-CONTROL-01}"
 BASE_BRANCH="main"
 SESSION_ID=""
 FORCE=0
+
+kickoff_path_block() {
+  local detail="${1:-unknown path policy violation}"
+  cat >&2 <<EOF
+ERROR: WORKTREE PATH POLICY BLOCK: $detail
+Allowed kickoff repo path: ${ENFORCED_PREFIX}<WAVE_ID>
+Remediation:
+  ./bin/ops wave start <WAVE_ID> --objective "<objective>" --repo /Users/ronnyworks/code/agentic-spine
+  ./bin/ops cap run worktree.lifecycle.rehydrate -- --branch codex/<WAVE_ID> --lane <WAVE_ID> --repo /Users/ronnyworks/code/agentic-spine
+EOF
+  exit 1
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -62,6 +75,16 @@ fi
 orchestration_need yq
 orchestration_need git
 orchestration_assert_git_repo "$REPO_PATH"
+repo_real="$(cd "$REPO_PATH" && pwd -P)"
+primary_checkout="$(git -C "$REPO_PATH" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+[[ "$repo_real" != *"/.worktrees/"* ]] || kickoff_path_block "legacy .worktrees path denied: $repo_real"
+if [[ -n "$primary_checkout" ]]; then
+  primary_checkout="$(cd "$primary_checkout" && pwd -P)"
+  [[ "$repo_real" != "$primary_checkout" ]] || kickoff_path_block "main checkout path denied: $repo_real"
+fi
+[[ "$repo_real" == "${ENFORCED_PREFIX}"* ]] || kickoff_path_block "repo path '$repo_real' is outside enforced prefix '$ENFORCED_PREFIX'"
+wave_leaf="$(basename "$repo_real")"
+[[ "$wave_leaf" =~ ^WAVE-[A-Z0-9._-]+$ ]] || kickoff_path_block "repo path leaf '$wave_leaf' must be explicit WAVE_ID (WAVE-...)"
 
 scope_file="$ROOT/mailroom/state/loop-scopes/${LOOP_ID}.scope.md"
 [[ -f "$scope_file" ]] || orchestration_fail "loop scope missing: $scope_file"
@@ -119,7 +142,7 @@ for lane in "${lanes[@]}"; do
   lane_lower="$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')"
   branch="$LOOP_ID/$lane_lower"
   lane_agent="lane-$lane_lower"
-  worktree="$REPO_PATH/.worktrees/orchestration/$LOOP_ID/$lane"
+  worktree="${ENFORCED_PREFIX}${wave_leaf}-${lane}"
 
   if ! git -C "$REPO_PATH" show-ref --verify --quiet "refs/heads/$branch"; then
     git -C "$REPO_PATH" branch "$branch" "$BASE_BRANCH"
@@ -233,12 +256,45 @@ for i in "${!lanes[@]}"; do
 YAML
 done
 
-cat >> "$packet_file" <<'YAML'
+cat >> "$packet_file" <<YAML
 
 verification_sequence:
   - step: 1
     verify_command: "./bin/ops cap run verify.run -- fast"
     expected_result: PASS
+    run_key: "PENDING_CLOSEOUT"
+
+cross_repo_pushability_gate:
+  status: PENDING
+  checked_at_utc: "PENDING_CLOSEOUT"
+  repo: "$REPO_PATH"
+  branch: "$BASE_BRANCH"
+  remote: origin
+  failure: ""
+
+lane_outcomes:
+YAML
+
+for i in "${!lanes[@]}"; do
+  lane="${lanes[$i]}"
+  cat >> "$packet_file" <<YAML
+  - lane_id: "$lane"
+    owner_terminal: "$OWNER_TERMINAL"
+    lane_status: DISPATCHED
+    stub_evidence_ref: ""
+    updated_at_utc: "$created_at"
+YAML
+done
+
+cat >> "$packet_file" <<'YAML'
+
+stub_matrix: []
+
+plan_transition:
+  status: pending
+  updated_at_utc: "PENDING_CLOSEOUT"
+  run_key: "PENDING_CLOSEOUT"
+  evidence_ref: ""
 
 reconciliation_summary:
   subagents_completed: 0
