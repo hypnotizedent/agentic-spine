@@ -5,16 +5,19 @@ set -euo pipefail
 # Covers gates: D192, D193, D194, D205, D208 (+ D104 freshness support).
 # LaunchAgent: com.ronny.freshness-critical-daily
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-CAP_RUNNER="${SPINE_ROOT}/bin/ops"
-source "${SPINE_ROOT}/ops/runtime/lib/job-wrapper.sh"
+CONTROL_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+source "${CONTROL_ROOT}/ops/runtime/lib/runtime-managed-worktree.sh"
+RUNTIME_ROOT="$(spine_runtime_prepare_managed_worktree "$CONTROL_ROOT")"
+CAP_RUNNER="${RUNTIME_ROOT}/bin/ops"
+source "${RUNTIME_ROOT}/ops/runtime/lib/job-wrapper.sh"
 
 failures=0
 declare -a failed_caps=()
 
 run_cap() {
   local cap="$1"
-  if spine_job_run "freshness-critical-daily:${cap}" "$CAP_RUNNER" cap run "$cap"; then
+  shift || true
+  if spine_job_run "freshness-critical-daily:${cap}" "$CAP_RUNNER" cap run "$cap" "$@"; then
     return 0
   fi
   local rc=$?
@@ -25,12 +28,15 @@ run_cap() {
 }
 
 echo "[freshness-critical-daily] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "[freshness-critical-daily] control_root=${CONTROL_ROOT}"
+echo "[freshness-critical-daily] runtime_root=${RUNTIME_ROOT}"
+echo "[freshness-critical-daily] worktree_identity=${OPS_WORKTREE_IDENTITY:-unset}"
 
-run_cap media-content-snapshot-refresh
-run_cap ha-inventory-snapshot-build
-run_cap network-inventory-snapshot-build
-run_cap ha.z2m.devices.snapshot
-run_cap network.home.dhcp.audit
+run_cap media-content-snapshot-refresh -- --apply
+run_cap ha-inventory-snapshot-build -- --apply
+run_cap network-inventory-snapshot-build -- --apply
+run_cap ha.z2m.devices.snapshot -- --apply
+run_cap network.home.dhcp.audit -- --apply
 run_cap calendar.external.ingest.refresh
 run_cap calendar.ha.ingest.refresh
 run_cap infra.storage.audit.snapshot

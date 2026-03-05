@@ -6,7 +6,10 @@ set -euo pipefail
 # movie/tv/music item-level IDs for ledger parity enforcement.
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$ROOT/ops/bindings/media.content.snapshot.yaml"
+TRACKED_OUTPUT="$ROOT/ops/bindings/media.content.snapshot.yaml"
+RUNTIME_OUTPUT_DEFAULT="$ROOT/mailroom/state/runtime-snapshots/media.content.snapshot.yaml"
+OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
+MODE="check"
 SERVICES="$ROOT/ops/bindings/services.health.yaml"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
 STRICT=0
@@ -17,9 +20,13 @@ media-content-snapshot-refresh
 
 Usage:
   ./bin/ops cap run media-content-snapshot-refresh
+  ./bin/ops cap run media-content-snapshot-refresh -- --apply
   ./bin/ops cap run media-content-snapshot-refresh -- --strict
 
 Flags:
+  --apply    Write tracked projection binding.
+  --check    Read-only mode (default): write runtime state only.
+  --state-path <path>   Override output path (defaults to runtime state path).
   --strict   fail if a source API call cannot be completed.
 USAGE
 }
@@ -31,6 +38,20 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --apply)
+      MODE="apply"
+      OUTPUT="$TRACKED_OUTPUT"
+      shift
+      ;;
+    --check)
+      MODE="check"
+      OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
+      shift
+      ;;
+    --state-path|--output)
+      OUTPUT="${2:-}"
+      shift 2
+      ;;
     --strict)
       STRICT=1
       shift
@@ -46,6 +67,22 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -z "$OUTPUT" ]]; then
+  echo "media-content-snapshot-refresh FAIL: output path cannot be empty" >&2
+  exit 1
+fi
+
+file_hash() {
+  local path="$1"
+  if [[ -f "$path" ]]; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return
+  fi
+  echo "missing"
+}
+
+tracked_hash_before="$(file_hash "$TRACKED_OUTPUT")"
 
 command -v python3 >/dev/null 2>&1 || {
   echo "STOP (2): missing dependency python3" >&2
@@ -405,3 +442,14 @@ if errors:
     for msg in errors:
         print(f"WARN: {msg}", file=sys.stderr)
 PY
+
+if [[ "$MODE" == "check" ]]; then
+  tracked_hash_after="$(file_hash "$TRACKED_OUTPUT")"
+  if [[ "$tracked_hash_before" != "$tracked_hash_after" ]]; then
+    echo "media-content-snapshot-refresh FAIL: tracked binding mutated in check mode: $TRACKED_OUTPUT" >&2
+    exit 1
+  fi
+fi
+
+echo "mode: $MODE"
+echo "tracked_binding: $TRACKED_OUTPUT"

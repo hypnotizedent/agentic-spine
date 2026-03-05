@@ -6,6 +6,7 @@ OPS_BIN="$ROOT/bin/ops"
 MODE=""
 INTERVAL_MIN=30
 CAP_TIMEOUT_SEC="${CAP_TIMEOUT_SEC:-180}"
+APPLY=0
 
 usage() {
   cat <<'USAGE'
@@ -13,11 +14,14 @@ domain-inventory-refresh
 
 Usage:
   ./bin/ops cap run domain-inventory-refresh -- --once
+  ./bin/ops cap run domain-inventory-refresh -- --once --apply
   ./bin/ops cap run domain-inventory-refresh -- --loop --interval-min 30
 
 Flags:
   --once                Run one refresh cycle and exit.
   --loop                Run refresh cycles forever.
+  --apply               Run snapshot builders in apply mode (tracked projection writes).
+  --check               Run snapshot builders in check mode (default; runtime-state writes only).
   --interval-min <n>    Loop interval in minutes (default: 30, min: 1).
 USAGE
 }
@@ -34,6 +38,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --loop)
       MODE="loop"
+      shift
+      ;;
+    --apply)
+      APPLY=1
+      shift
+      ;;
+    --check)
+      APPLY=0
       shift
       ;;
     --interval-min)
@@ -150,14 +162,25 @@ run_cap_or_fresh() {
   return 1
 }
 
+run_snapshot_cap_or_fresh() {
+  local cap_name="$1"
+  local fallback_binding="$2"
+  if [[ "$APPLY" -eq 1 ]]; then
+    run_cap_or_fresh "$cap_name" "$fallback_binding" -- --apply
+    return
+  fi
+  run_cap_or_fresh "$cap_name" "$fallback_binding"
+}
+
 run_once_cycle() {
   echo "[domain-inventory-refresh] cycle_start: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "[domain-inventory-refresh] mode: $([[ "$APPLY" -eq 1 ]] && echo apply || echo check)"
 
   run_cap_or_fresh network.home.unifi.clients.snapshot "$ROOT/ops/bindings/network.unifi.home.clients.observed.yaml"
   run_cap_or_fresh network.unifi.clients.snapshot "$ROOT/ops/bindings/network.unifi.shop.clients.observed.yaml"
-  run_cap_or_fresh media-content-snapshot-refresh "$ROOT/ops/bindings/media.content.snapshot.yaml"
-  run_cap_or_fresh ha-inventory-snapshot-build "$ROOT/ops/bindings/ha.inventory.snapshot.yaml"
-  run_cap_or_fresh network-inventory-snapshot-build "$ROOT/ops/bindings/network.inventory.snapshot.yaml"
+  run_snapshot_cap_or_fresh media-content-snapshot-refresh "$ROOT/ops/bindings/media.content.snapshot.yaml"
+  run_snapshot_cap_or_fresh ha-inventory-snapshot-build "$ROOT/ops/bindings/ha.inventory.snapshot.yaml"
+  run_snapshot_cap_or_fresh network-inventory-snapshot-build "$ROOT/ops/bindings/network.inventory.snapshot.yaml"
 
   run_cap platform.inventory.intake -- reconcile --domain media
   run_cap platform.inventory.intake -- reconcile --domain ha

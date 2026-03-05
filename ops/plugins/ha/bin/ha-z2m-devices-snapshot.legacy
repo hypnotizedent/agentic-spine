@@ -5,7 +5,10 @@ set -euo pipefail
 # Reads Z2M database.db via SSH + docker exec, parses to YAML binding.
 
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$SPINE_ROOT/ops/bindings/z2m.devices.yaml"
+TRACKED_OUTPUT="$SPINE_ROOT/ops/bindings/z2m.devices.yaml"
+RUNTIME_OUTPUT_DEFAULT="$SPINE_ROOT/mailroom/state/runtime-snapshots/z2m.devices.yaml"
+OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
+MODE="check"
 SSH_TARGET="hassio@ha"
 Z2M_CONTAINER_DEFAULT="addon_45df7312_zigbee2mqtt"
 Z2M_DB_PATH="/config/zigbee2mqtt/database.db"
@@ -14,6 +17,69 @@ Z2M_STATE_PATH="/config/zigbee2mqtt/state.json"
 SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 TMPDIR_WORK=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_WORK"' EXIT
+
+usage() {
+  cat <<'USAGE'
+ha-z2m-devices-snapshot
+
+Usage:
+  ./bin/ops cap run ha.z2m.devices.snapshot
+  ./bin/ops cap run ha.z2m.devices.snapshot -- --apply
+
+Flags:
+  --apply               Write tracked projection binding.
+  --check               Read-only mode (default): write runtime state only.
+  --state-path <path>   Override output path (defaults to runtime state path).
+USAGE
+}
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply)
+      MODE="apply"
+      OUTPUT="$TRACKED_OUTPUT"
+      shift
+      ;;
+    --check)
+      MODE="check"
+      OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
+      shift
+      ;;
+    --state-path|--output)
+      OUTPUT="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ha-z2m-devices-snapshot FAIL: unknown arg '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$OUTPUT" ]]; then
+  echo "ha-z2m-devices-snapshot FAIL: output path cannot be empty" >&2
+  exit 1
+fi
+
+file_hash() {
+  local path="$1"
+  if [[ -f "$path" ]]; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return
+  fi
+  echo "missing"
+}
+
+tracked_hash_before="$(file_hash "$TRACKED_OUTPUT")"
 
 echo "ha.z2m.devices.snapshot"
 echo
@@ -57,6 +123,7 @@ if [[ ! -s "$TMPDIR_WORK/database.db" ]]; then
 fi
 
 # Parse JSONL database + config into YAML binding
+mkdir -p "$(dirname "$OUTPUT")"
 python3 - "$TMPDIR_WORK/database.db" "$TMPDIR_WORK/config.yaml" "$TMPDIR_WORK/state.json" "$OUTPUT" << 'PYEOF'
 import json, sys, datetime, os
 try:
@@ -177,3 +244,14 @@ DEVICE_COUNT=$(grep 'device_count:' "$OUTPUT" | head -1 | awk '{print $2}')
 echo "Wrote $OUTPUT ($DEVICE_COUNT devices)"
 echo
 echo "sha256: $(shasum -a 256 "$OUTPUT" | cut -d' ' -f1)"
+
+if [[ "$MODE" == "check" ]]; then
+  tracked_hash_after="$(file_hash "$TRACKED_OUTPUT")"
+  if [[ "$tracked_hash_before" != "$tracked_hash_after" ]]; then
+    echo "ha-z2m-devices-snapshot FAIL: tracked binding mutated in check mode: $TRACKED_OUTPUT" >&2
+    exit 1
+  fi
+fi
+
+echo "mode: $MODE"
+echo "tracked_binding: $TRACKED_OUTPUT"

@@ -5,7 +5,73 @@ set -euo pipefail
 # Builds a unified network + hardware inventory snapshot.
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-OUTPUT="$ROOT/ops/bindings/network.inventory.snapshot.yaml"
+TRACKED_OUTPUT="$ROOT/ops/bindings/network.inventory.snapshot.yaml"
+RUNTIME_OUTPUT_DEFAULT="$ROOT/mailroom/state/runtime-snapshots/network.inventory.snapshot.yaml"
+OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
+MODE="check"
+
+usage() {
+  cat <<'USAGE'
+network-inventory-snapshot-build
+
+Usage:
+  ./bin/ops cap run network-inventory-snapshot-build
+  ./bin/ops cap run network-inventory-snapshot-build -- --apply
+
+Flags:
+  --apply               Write tracked projection binding.
+  --check               Read-only mode (default): write runtime state only.
+  --state-path <path>   Override output path (defaults to runtime state path).
+USAGE
+}
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply)
+      MODE="apply"
+      OUTPUT="$TRACKED_OUTPUT"
+      shift
+      ;;
+    --check)
+      MODE="check"
+      OUTPUT="$RUNTIME_OUTPUT_DEFAULT"
+      shift
+      ;;
+    --state-path|--output)
+      OUTPUT="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "network-inventory-snapshot-build FAIL: unknown arg '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$OUTPUT" ]]; then
+  echo "network-inventory-snapshot-build FAIL: output path cannot be empty" >&2
+  exit 1
+fi
+
+file_hash() {
+  local path="$1"
+  if [[ -f "$path" ]]; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return
+  fi
+  echo "missing"
+}
+
+tracked_hash_before="$(file_hash "$TRACKED_OUTPUT")"
 
 command -v python3 >/dev/null 2>&1 || {
   echo "STOP (2): missing dependency python3" >&2
@@ -214,3 +280,14 @@ print(f"shop_devices: {len(shop_devices)}")
 print(f"hardware_assets: {len(hardware_assets)}")
 print(f"upgrade_candidates: {len(upgrade_candidates)}")
 PY
+
+if [[ "$MODE" == "check" ]]; then
+  tracked_hash_after="$(file_hash "$TRACKED_OUTPUT")"
+  if [[ "$tracked_hash_before" != "$tracked_hash_after" ]]; then
+    echo "network-inventory-snapshot-build FAIL: tracked binding mutated in check mode: $TRACKED_OUTPUT" >&2
+    exit 1
+  fi
+fi
+
+echo "mode: $MODE"
+echo "tracked_binding: $TRACKED_OUTPUT"
