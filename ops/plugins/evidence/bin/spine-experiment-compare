@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# spine.experiment.compare - compare baseline and candidate windows across receipts + verify history.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+RECEIPTS_ROOT="$ROOT/receipts/sessions"
+VERIFY_HISTORY="$ROOT/ops/plugins/verify/state/verify-failure-class-history.ndjson"
+
+BASELINE_START=""
+BASELINE_END=""
+CANDIDATE_START=""
+CANDIDATE_END=""
+PROMPT_SET_ID=""
+JSON_MODE=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  spine-experiment-compare \
+    [--baseline-start <ISO8601Z>] \
+    [--baseline-end <ISO8601Z>] \
+    [--candidate-start <ISO8601Z>] \
+    [--candidate-end <ISO8601Z>] \
+    [--prompt-set-id <id>] \
+    [--json]
+
+If ranges are omitted, defaults to:
+  - baseline: previous 24h window before candidate
+  - candidate: last 24h window ending now (UTC)
+
+Examples:
+  ./ops/plugins/evidence/bin/spine-experiment-compare \
+    --baseline-start 2026-03-01T00:00:00Z --baseline-end 2026-03-02T00:00:00Z \
+    --candidate-start 2026-03-04T00:00:00Z --candidate-end 2026-03-05T00:00:00Z --json
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --baseline-start) BASELINE_START="${2:-}"; shift 2 ;;
+    --baseline-end) BASELINE_END="${2:-}"; shift 2 ;;
+    --candidate-start) CANDIDATE_START="${2:-}"; shift 2 ;;
+    --candidate-end) CANDIDATE_END="${2:-}"; shift 2 ;;
+    --prompt-set-id) PROMPT_SET_ID="${2:-}"; shift 2 ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 missing" >&2; exit 1; }
+
+if [[ -z "$BASELINE_START" || -z "$BASELINE_END" || -z "$CANDIDATE_START" || -z "$CANDIDATE_END" ]]; then
+  read -r BASELINE_START BASELINE_END CANDIDATE_START CANDIDATE_END < <(
+    python3 - <<'PY'
+import datetime as dt
+now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+candidate_end = now
+candidate_start = candidate_end - dt.timedelta(hours=24)
+baseline_end = candidate_start
+baseline_start = baseline_end - dt.timedelta(hours=24)
+print(
+    baseline_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    baseline_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    candidate_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    candidate_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+)
+PY
+  )
+fi
+
+python3 - "$RECEIPTS_ROOT" "$VERIFY_HISTORY" "$BASELINE_START" "$BASELINE_END" "$CANDIDATE_START" "$CANDIDATE_END" "$PROMPT_SET_ID" "$JSON_MODE" <<'PY'
+import datetime as dt
+import json
+import math
+import sys
+from collections import Counter
+from pathlib import Path
+
+(
+    receipts_root_raw,
+    verify_history_raw,
+    baseline_start_raw,
+    baseline_end_raw,
+    candidate_start_raw,
+    candidate_end_raw,
+    prompt_set_filter,
+    json_mode_raw,
+) = sys.argv[1:9]
+
+json_mode = json_mode_raw == "1"
+receipts_root = Path(receipts_root_raw)
+verify_history = Path(verify_history_raw)
+
+
+def parse_utc(ts: str) -> dt.datetime:
+    raw = (ts or "").strip()
+    if not raw:
+        raise ValueError("timestamp is empty")
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid timestamp '{ts}'") from exc
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def in_window(ts: dt.datetime, start: dt.datetime, end: dt.datetime) -> bool:
+    return start <= ts < end
+
+
+def safe_rate(num: int, den: int):
+    if den <= 0:
+        return None
+    return round(num / den, 6)
+
+
+def numeric_delta(candidate, baseline):
+    if candidate is None or baseline is None:
+        return None
+    return round(candidate - baseline, 6)
+
+
+def load_receipts():
+    rows = []
+    if not receipts_root.exists():
+        return rows
+    for run_dir in sorted(receipts_root.glob("RCAP-*")):
+        if not run_dir.is_dir():
+            continue
+        receipt_path = run_dir / "receipt.exec.json"
+        if not receipt_path.exists():
+            continue
+        try:
+            payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        ts_raw = str(payload.get("timestamp_utc") or "").strip()
+        if not ts_raw:
+            continue
+        try:
+            ts = parse_utc(ts_raw)
+        except ValueError:
+            continue
+        prompt = payload.get("prompt_lineage") if isinstance(payload.get("prompt_lineage"), dict) else {}
+        rows.append(
+            {
+                "timestamp": ts,
+                "status": str(payload.get("status") or "").strip().lower(),
+                "capability": str(payload.get("task_id") or "").strip(),
+                "prompt_set_id": str(prompt.get("prompt_set_id") or "").strip(),
+                "prompt_version": str(prompt.get("version") or "none").strip() or "none",
+            }
+        )
+    return rows
+
+
+def load_verify_history():
+    rows = []
+    if not verify_history.exists():
+        return rows
+    for line in verify_history.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        ts_raw = str(payload.get("timestamp_utc") or "").strip()
+        if not ts_raw:
+            continue
+        try:
+            ts = parse_utc(ts_raw)
+        except ValueError:
+            continue
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        failure_class = payload.get("failure_class") if isinstance(payload.get("failure_class"), dict) else {}
+        rows.append(
+            {
+                "timestamp": ts,
+                "total": int(result.get("total") or 0),
+                "pass": int(result.get("pass") or 0),
+                "fail": int(result.get("fail") or 0),
+                "deterministic": len(failure_class.get("deterministic") or []),
+                "freshness": len(failure_class.get("freshness") or []),
+                "gate_bug": len(failure_class.get("gate_bug") or []),
+            }
+        )
+    return rows
+
+
+def summarize_window(start: dt.datetime, end: dt.datetime, receipts, verify_rows, prompt_filter: str):
+    window_receipts = [row for row in receipts if in_window(row["timestamp"], start, end)]
+    total_runs = len(window_receipts)
+    done_runs = sum(1 for row in window_receipts if row["status"] == "done")
+    failed_runs = sum(1 for row in window_receipts if row["status"] == "failed")
+    blocked_runs = sum(1 for row in window_receipts if row["status"] == "blocked")
+
+    success_rate = safe_rate(done_runs, total_runs)
+    blocked_rate = safe_rate(blocked_runs, total_runs)
+
+    window_verify = [row for row in verify_rows if in_window(row["timestamp"], start, end)]
+    verify_runs = len(window_verify)
+    gate_total = sum(row["total"] for row in window_verify)
+    gate_pass = sum(row["pass"] for row in window_verify)
+    gate_fail = sum(row["fail"] for row in window_verify)
+    gate_pass_rate = safe_rate(gate_pass, gate_total)
+    deterministic_failures = sum(row["deterministic"] for row in window_verify)
+    freshness_failures = sum(row["freshness"] for row in window_verify)
+    gate_bug_failures = sum(row["gate_bug"] for row in window_verify)
+
+    if prompt_filter:
+        prompt_rows = [row for row in window_receipts if row["prompt_set_id"] == prompt_filter]
+    else:
+        prompt_rows = [row for row in window_receipts if row["prompt_set_id"]]
+    versions = Counter(row["prompt_version"] or "none" for row in prompt_rows)
+
+    return {
+        "range": {
+            "start": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        "summary": {
+            "total_runs": total_runs,
+            "done_runs": done_runs,
+            "failed_runs": failed_runs,
+            "blocked_runs": blocked_runs,
+            "success_rate": success_rate,
+            "blocked_rate": blocked_rate,
+        },
+        "verify": {
+            "verify_runs": verify_runs,
+            "gate_total": gate_total,
+            "gate_pass": gate_pass,
+            "gate_fail": gate_fail,
+            "gate_pass_rate": gate_pass_rate,
+            "deterministic_failures": deterministic_failures,
+            "freshness_failures": freshness_failures,
+            "gate_bug_failures": gate_bug_failures,
+        },
+        "prompt_lineage": {
+            "prompt_set_filter": prompt_filter or None,
+            "considered_runs": len(prompt_rows),
+            "versions": dict(sorted(versions.items())),
+        },
+    }
+
+
+baseline_start = parse_utc(baseline_start_raw)
+baseline_end = parse_utc(baseline_end_raw)
+candidate_start = parse_utc(candidate_start_raw)
+candidate_end = parse_utc(candidate_end_raw)
+
+if baseline_end <= baseline_start:
+    raise SystemExit("ERROR: baseline range must satisfy end > start")
+if candidate_end <= candidate_start:
+    raise SystemExit("ERROR: candidate range must satisfy end > start")
+
+receipt_rows = load_receipts()
+verify_rows = load_verify_history()
+
+baseline = summarize_window(baseline_start, baseline_end, receipt_rows, verify_rows, prompt_set_filter.strip())
+candidate = summarize_window(candidate_start, candidate_end, receipt_rows, verify_rows, prompt_set_filter.strip())
+
+result = {
+    "capability": "spine.experiment.compare",
+    "windows": {
+        "baseline": baseline,
+        "candidate": candidate,
+    },
+    "delta": {
+        "success_rate_delta": numeric_delta(
+            candidate["summary"]["success_rate"], baseline["summary"]["success_rate"]
+        ),
+        "blocked_rate_delta": numeric_delta(
+            candidate["summary"]["blocked_rate"], baseline["summary"]["blocked_rate"]
+        ),
+        "gate_pass_rate_delta": numeric_delta(
+            candidate["verify"]["gate_pass_rate"], baseline["verify"]["gate_pass_rate"]
+        ),
+        "deterministic_failures_delta": (
+            candidate["verify"]["deterministic_failures"] - baseline["verify"]["deterministic_failures"]
+        ),
+    },
+}
+
+if json_mode:
+    print(json.dumps(result, indent=2))
+else:
+    b = result["windows"]["baseline"]
+    c = result["windows"]["candidate"]
+    d = result["delta"]
+    print("spine.experiment.compare")
+    print(
+        f"baseline: runs={b['summary']['total_runs']} success_rate={b['summary']['success_rate']} gate_pass_rate={b['verify']['gate_pass_rate']}"
+    )
+    print(
+        f"candidate: runs={c['summary']['total_runs']} success_rate={c['summary']['success_rate']} gate_pass_rate={c['verify']['gate_pass_rate']}"
+    )
+    print(
+        f"delta: success_rate={d['success_rate_delta']} blocked_rate={d['blocked_rate_delta']} gate_pass_rate={d['gate_pass_rate_delta']} deterministic_failures={d['deterministic_failures_delta']}"
+    )
+PY

@@ -151,6 +151,88 @@ capabilities:
     outputs: ["stdout"]
     domain: none
     plane: fabric
+  spine.init:
+    description: "Canonical bootstrap entrypoint: validates tenant profile, bootstraps environment/identity contracts, acknowledges AOF contract, and optionally runs fast verify."
+    tags: [spine, bootstrap, portability]
+    command: "./ops/plugins/session/bin/spine-init"
+    cwd: "$SPINE_CODE"
+    safety: mutating
+    approval: manual
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs: ["stdout", ".environment.yaml", ".identity.yaml"]
+    domain: none
+    plane: fabric
+    args:
+      - "--environment-name <name> (optional; defaults from runtime context)"
+      - "--profile <minimal|product|production> (default: product)"
+      - "--force (rebuild environment/identity contracts)"
+      - "--dry-run (no mutations)"
+      - "--skip-verify (skip verify.run fast)"
+      - "--skip-ack (skip AOF contract acknowledgement)"
+      - "--json"
+    examples:
+      - "./bin/ops cap run spine.init"
+      - "./bin/ops cap run spine.init -- --environment-name spine-lab --profile minimal"
+      - "./bin/ops cap run spine.init -- --dry-run --json"
+  spine.doctor:
+    description: "Read-only bootstrap diagnostics: preconditions, tenant/environment validation, contract acknowledgement state, and optional fast verify."
+    tags: [spine, bootstrap, diagnostics, portability]
+    command: "./ops/plugins/session/bin/spine-doctor"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: none
+    plane: fabric
+    args:
+      - "--verify-fast (run verify fast as part of diagnostic)"
+      - "--strict (warnings fail exit code)"
+      - "--json"
+    examples:
+      - "./bin/ops cap run spine.doctor"
+      - "./bin/ops cap run spine.doctor -- --verify-fast --json"
+  spine.experiment.compare:
+    description: "Compare baseline and candidate runtime windows across receipt health, verify gate pass rate, and prompt lineage versions."
+    tags: [spine, experiment, evidence, prompts]
+    command: "./ops/plugins/evidence/bin/spine-experiment-compare"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: none
+    plane: fabric
+    args:
+      - "--baseline-start <ISO8601Z> (optional; default previous-day baseline)"
+      - "--baseline-end <ISO8601Z> (optional)"
+      - "--candidate-start <ISO8601Z> (optional; default last 24h)"
+      - "--candidate-end <ISO8601Z> (optional)"
+      - "--prompt-set-id <id> (optional)"
+      - "--json"
+    examples:
+      - "./bin/ops cap run spine.experiment.compare -- --baseline-start 2026-03-01T00:00:00Z --baseline-end 2026-03-02T00:00:00Z --candidate-start 2026-03-04T00:00:00Z --candidate-end 2026-03-05T00:00:00Z --json"
+  prompt.registry.status:
+    description: "Resolve prompt lineage defaults/overrides for a capability and return deterministic source hashes."
+    tags: [spine, prompts, governance]
+    command: "./ops/plugins/evidence/bin/prompt-registry-status"
+    cwd: "$SPINE_CODE"
+    safety: read-only
+    approval: auto
+    arg_protocol: passthrough
+    lifecycle: ready
+    outputs: ["stdout"]
+    domain: none
+    plane: fabric
+    args:
+      - "--capability <id> (optional; defaults to registry defaults)"
+      - "--json"
+    examples:
+      - "./bin/ops cap run prompt.registry.status"
+      - "./bin/ops cap run prompt.registry.status -- --capability spine.init --json"
   codex.worktree.status:
     description: "Run D48 lifecycle-aware worktree hygiene gate (non-destructive classification + fail on lifecycle violations)."
     tags: [spine]

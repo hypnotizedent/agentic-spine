@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# spine.init - canonical bootstrap entrypoint for governed local runtime bring-up.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+BOOTSTRAP_CONTRACT="$ROOT/ops/bindings/runtime.bootstrap.contract.yaml"
+TENANT_PROFILE="$ROOT/ops/bindings/tenant.profile.yaml"
+ENV_FILE="$ROOT/.environment.yaml"
+IDENTITY_FILE="$ROOT/.identity.yaml"
+
+ENV_NAME=""
+PROFILE="product"
+FORCE=0
+DRY_RUN=0
+SKIP_VERIFY=0
+SKIP_ACK=0
+JSON_MODE=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  spine-init [--environment-name <name>] [--profile <minimal|product|production>] [--force] [--dry-run] [--skip-verify] [--skip-ack] [--json]
+
+Examples:
+  spine-init
+  spine-init --environment-name spine-lab --profile minimal
+  spine-init --force --skip-verify
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --environment-name|--env-name) ENV_NAME="${2:-}"; shift 2 ;;
+    --profile) PROFILE="${2:-}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --skip-verify) SKIP_VERIFY=1; shift ;;
+    --skip-ack) SKIP_ACK=1; shift ;;
+    --json) JSON_MODE=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+case "$PROFILE" in
+  minimal|product|production) ;;
+  *) echo "ERROR: invalid --profile '$PROFILE' (expected minimal|product|production)" >&2; exit 2 ;;
+esac
+
+need_tool() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "ERROR: required tool missing: $1" >&2
+    exit 1
+  }
+}
+
+need_file() {
+  [[ -f "$1" ]] || {
+    echo "ERROR: required file missing: $1" >&2
+    exit 1
+  }
+}
+
+need_tool jq
+need_tool yq
+need_file "$BOOTSTRAP_CONTRACT"
+need_file "$TENANT_PROFILE"
+
+cd "$ROOT"
+
+if [[ -z "$ENV_NAME" ]]; then
+  if [[ -f "$ENV_FILE" ]]; then
+    ENV_NAME="$(yq -r '.environment.name // ""' "$ENV_FILE")"
+  fi
+fi
+if [[ -z "$ENV_NAME" ]]; then
+  ENV_NAME="$(yq -r '.identity.tenant_id // ""' "$TENANT_PROFILE")"
+fi
+if [[ -z "$ENV_NAME" ]]; then
+  ENV_NAME="$(basename "$ROOT" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+fi
+if [[ ! "$ENV_NAME" =~ ^[a-z0-9-]+$ ]]; then
+  echo "ERROR: resolved environment name is invalid: $ENV_NAME" >&2
+  exit 2
+fi
+
+bootstrap_action="skipped"
+if [[ "$FORCE" -eq 1 ]]; then
+  bootstrap_action="force_rebuild"
+elif [[ -f "$ENV_FILE" && -f "$IDENTITY_FILE" ]]; then
+  bootstrap_action="reuse_existing"
+elif [[ ! -f "$ENV_FILE" && ! -f "$IDENTITY_FILE" ]]; then
+  bootstrap_action="bootstrap_missing"
+else
+  echo "ERROR: partial bootstrap state detected (.environment/.identity mismatch); rerun with --force" >&2
+  exit 1
+fi
+
+if [[ "$DRY_RUN" -eq 0 && "$bootstrap_action" != "reuse_existing" ]]; then
+  cmd=(
+    "$ROOT/ops/plugins/aof/bin/bootstrap-spine.sh"
+    --environment-name "$ENV_NAME"
+    --profile "$PROFILE"
+    --target "$ROOT"
+  )
+  if [[ "$FORCE" -eq 1 ]]; then
+    cmd+=(--force)
+  fi
+  "${cmd[@]}"
+fi
+
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  "$ROOT/ops/plugins/tenant/bin/tenant-profile-validate" --profile "$TENANT_PROFILE" >/dev/null
+  "$ROOT/ops/plugins/aof/bin/validate-environment.sh" \
+    --environment-file "$ENV_FILE" \
+    --identity-file "$IDENTITY_FILE" \
+    >/dev/null
+fi
+
+ack_state="skipped"
+today_marker=".contract_read_$(date +%Y%m%d)"
+if [[ "$SKIP_ACK" -eq 1 ]]; then
+  ack_state="skipped_by_flag"
+elif [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ -f "$today_marker" ]]; then
+    ack_state="current"
+  else
+    ack_state="would_ack"
+  fi
+elif [[ -f "$today_marker" ]]; then
+  ack_state="current"
+else
+  "$ROOT/ops/plugins/aof/bin/contract-read-check.sh" --ack >/dev/null
+  ack_state="acknowledged"
+fi
+
+verify_status="skipped"
+if [[ "$SKIP_VERIFY" -eq 1 ]]; then
+  verify_status="skipped_by_flag"
+elif [[ "$DRY_RUN" -eq 1 ]]; then
+  verify_status="would_run_fast"
+else
+  "$ROOT/ops/plugins/verify/bin/verify-run" fast >/dev/null
+  verify_status="fast_pass"
+fi
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -n \
+    --arg capability "spine.init" \
+    --arg status "ok" \
+    --arg root "$ROOT" \
+    --arg environment_name "$ENV_NAME" \
+    --arg profile "$PROFILE" \
+    --arg bootstrap_action "$bootstrap_action" \
+    --arg ack_state "$ack_state" \
+    --arg verify_status "$verify_status" \
+    --arg environment_file "$ENV_FILE" \
+    --arg identity_file "$IDENTITY_FILE" \
+    --arg contract "$BOOTSTRAP_CONTRACT" \
+    --arg tenant_profile "$TENANT_PROFILE" \
+    --argjson dry_run "$DRY_RUN" \
+    '{
+      capability: $capability,
+      status: $status,
+      root: $root,
+      dry_run: ($dry_run == 1),
+      contract: $contract,
+      tenant_profile: $tenant_profile,
+      environment_name: $environment_name,
+      profile: $profile,
+      bootstrap_action: $bootstrap_action,
+      ack_state: $ack_state,
+      verify_status: $verify_status,
+      environment_file: $environment_file,
+      identity_file: $identity_file
+    }'
+  exit 0
+fi
+
+echo "spine.init"
+echo "root: $ROOT"
+echo "environment_name: $ENV_NAME"
+echo "profile: $PROFILE"
+echo "bootstrap_action: $bootstrap_action"
+echo "ack_state: $ack_state"
+echo "verify_status: $verify_status"
+echo "environment_file: $ENV_FILE"
+echo "identity_file: $IDENTITY_FILE"

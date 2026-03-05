@@ -1,0 +1,113 @@
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-04
+scope: runtime-bootstrap-contract
+
+version: 1
+updated_at: "2026-03-04"
+decision_loop_id: "LOOP-SPINE-PORTABILITY-BOOTSTRAP-CANONICAL-UPGRADE-20260304"
+
+authority:
+  canonical_runtime_profile: ops/bindings/tenant.profile.yaml
+  canonical_boot_surface: ops/bindings/entry.boot.surface.contract.yaml
+  runtime_role_control: ops/bindings/role.runtime.control.contract.yaml
+  runtime_storage_policy: ops/bindings/state.storage.policy.yaml
+  portability_assumptions: docs/governance/PORTABILITY_ASSUMPTIONS.md
+  path_inventory_baseline: ops/bindings/runtime.path.inventory.baseline.yaml
+
+canonical_entrypoints:
+  bootstrap:
+    capability: spine.init
+    command: ./bin/ops cap run spine.init
+    mode: mutating
+  diagnostics:
+    capability: spine.doctor
+    command: ./bin/ops cap run spine.doctor
+    mode: read-only
+
+path_roots:
+  spine_root:
+    source: tenant.profile.runtime.spine_root
+    required: true
+    must_be_absolute: true
+    must_contain:
+      - bin/ops
+      - ops/bindings/gate.registry.yaml
+      - mailroom/state/shared_authority.db
+  workbench_root:
+    source: tenant.profile.runtime.workbench_root
+    required: false
+    must_be_absolute: true
+  code_root:
+    derived_from: dirname(spine_root)
+    required: true
+    expected_suffix: /code
+  runtime_root:
+    source: spine.boundary.baseline.runtime_root
+    required: true
+  home_root:
+    source: "$HOME"
+    required: true
+
+bootstrap_preconditions:
+  required_tools:
+    - bash
+    - git
+    - jq
+    - yq
+    - python3
+    - rg
+  required_contracts:
+    - ops/bindings/tenant.profile.yaml
+    - ops/bindings/tenant.profile.schema.yaml
+    - ops/bindings/entry.boot.surface.contract.yaml
+    - ops/bindings/role.runtime.control.contract.yaml
+    - ops/bindings/gate.registry.yaml
+    - ops/bindings/state.storage.policy.yaml
+  required_runtime_state:
+    - mailroom/state/shared_authority.db
+    - mailroom/state/plans/index.yaml
+  block_if_missing:
+    - aof_contract_ack
+    - runtime_role_override_for_mutating_capabilities
+
+canonical_bootstrap_sequence:
+  - step_id: S1
+    command: ./bin/ops cap run aof.contract.status
+    purpose: establish_ack_state
+  - step_id: S2
+    command: ./bin/ops cap run aof.contract.acknowledge
+    purpose: satisfy_mutation_guard
+  - step_id: S3
+    command: ./bin/ops cap run session.start
+    purpose: start_governed_session
+  - step_id: S4
+    command: ./bin/ops cap run verify.run -- fast
+    purpose: baseline_invariant_gate_check
+  - step_id: S5
+    command: ./bin/ops cap run verify.run -- domain loop_gap
+    purpose: domain_health_gate_check
+
+path_abstraction_policy:
+  runtime_path_tokens:
+    - "$SPINE_ROOT"
+    - "$SPINE_CODE"
+    - "$HOME/code/agentic-spine"
+    - "$HOME/code/workbench"
+  direct_absolute_path_exceptions:
+    - ops/bindings/tenant.profile.yaml
+    - ops/bindings/host.audit.allowlist.yaml
+    - ops/bindings/spine.boundary.baseline.yaml
+    - ops/bindings/workbench.deploy.method.surface.contract.yaml
+    - ops/bindings/workbench.operator.surface.contract.yaml
+  prohibited_literals_for_new_runtime_writes:
+    - /Users/ronnyworks/code/agentic-spine
+    - /Users/ronnyworks/code/workbench
+    - /Users/ronnyworks/code/mint-modules
+  inventory_baseline_ref: ops/bindings/runtime.path.inventory.baseline.yaml
+
+evidence:
+  baseline_run_keys:
+    session_start: CAP-20260304-184212__session.start__R8nfk17187
+    verify_fast: CAP-20260304-184219__verify.run__Rtagf15776
+  reconcile_entrypoint: ./bin/ops cap run projection.reconcile
