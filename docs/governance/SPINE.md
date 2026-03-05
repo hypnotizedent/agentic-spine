@@ -54,7 +54,7 @@ Domain runtime data must live in domain runtime roots/services, not in `mailroom
 source_registry: ops/bindings/gate.registry.yaml
 registry_updated: 2026-03-05
 gate_count_total: 377
-gate_count_active: 361
-gate_count_retired: 16
+gate_count_active: 73
+gate_count_retired: 304
 max_gate_id: D381
 <!-- ENTRY_SURFACE_GATE_METADATA_END -->
