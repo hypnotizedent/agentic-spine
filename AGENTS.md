@@ -62,6 +62,10 @@ Full governance contract: [`docs/governance/AGENT_GOVERNANCE_BRIEF.md`](docs/gov
 <!-- Canonical source: docs/governance/AGENT_GOVERNANCE_BRIEF.md (D65) -->
 <!-- /GOVERNANCE_BRIEF -->
 
+## Mailroom Boundary Rule
+
+`mailroom/state/` is for **governance artifacts only**: loops, plans, proposals, sessions, orchestration, alerts, gaps, friction, locks, and verify evidence. Domain-specific operational data (case files, calendar sync state, media capacity metrics, infrastructure snapshots, email archiver state, DNS baselines) MUST NOT be written to `mailroom/state/`. Domain data belongs in its target service (Paperless, Home Assistant, Ghostfolio) or in `runtime/domain-state/` if local ephemeral state is truly needed.
+
 ## Canonical Terminal Roles
 
 | ID | Type | Status | Scope |
