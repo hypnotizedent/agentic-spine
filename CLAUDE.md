@@ -1,27 +1,8 @@
-# Claude Code / Claude Desktop Instructions
+# Claude Entry Stub
 
-> Project-level instruction surface for the agentic-spine repo.
-> Loaded automatically by Claude Code and Claude Desktop.
-> Governance brief source: `docs/governance/AGENT_GOVERNANCE_BRIEF.md`
-> canonical_boot_surface: `docs/governance/generated/BOOT_ENTRY_SURFACE.md`
-> entry_surface_gate_metadata: projection
-> projection_of: `ops/bindings/gate.registry.yaml`
-<!-- ENTRY_SURFACE_GATE_METADATA_START -->
-# ENTRY SURFACE GATE METADATA (generated)
-source_registry: ops/bindings/gate.registry.yaml
-registry_updated: 2026-03-05
-gate_count_total: 377
-gate_count_active: 361
-gate_count_retired: 16
-max_gate_id: D381
-<!-- ENTRY_SURFACE_GATE_METADATA_END -->
+Canonical contract: [`docs/governance/SPINE.md`](docs/governance/SPINE.md)
 
-## Session Entry
-
-1. Read `AGENTS.md` for the full runtime contract.
-2. Run the Mandatory Startup Block below (fast startup by default).
-3. Run `./bin/ops cap show <capability>` when syntax/flags are uncertain.
-4. Run `./bin/ops cap list` only when you need to discover a specific capability.
+Keep this file minimal. Detailed governance and workflow rules live in SPINE.md.
 
 <!-- SPINE_STARTUP_BLOCK -->
 ## Mandatory Startup Block
@@ -32,39 +13,12 @@ cd ~/code/agentic-spine
 ```
 <!-- /SPINE_STARTUP_BLOCK -->
 
-## Post-Work Verify (run after domain changes, before commit)
-
-```bash
-./bin/ops cap run verify.run -- fast                # canonical quick verify entry
-./bin/ops cap run verify.run -- domain <domain>     # canonical domain verify entry
-```
-
-## Release Certification (nightly / release only)
-
-```bash
-./bin/ops cap run verify.release.run              # full release certification suite (requires Tailscale)
-```
-
-## Identity
-
-- User: Ronny
-- GitHub: hypnotizedent
-
-## Governance
-
-Full governance contract: [`docs/governance/AGENT_GOVERNANCE_BRIEF.md`](docs/governance/AGENT_GOVERNANCE_BRIEF.md)
-
-<!-- GOVERNANCE_BRIEF -->
-<!-- Canonical source: docs/governance/AGENT_GOVERNANCE_BRIEF.md (D65) -->
-<!-- /GOVERNANCE_BRIEF -->
-
-## Mailroom Boundary Rule
-
-`mailroom/state/` is for **governance artifacts only**: loops, plans, proposals, sessions, orchestration, alerts, gaps, friction, locks, and verify evidence. Domain-specific operational data (case files, calendar sync state, media capacity metrics, infrastructure snapshots, email archiver state, DNS baselines) MUST NOT be written to `mailroom/state/`. Domain data belongs in its target service (Paperless, Home Assistant, Ghostfolio) or in `runtime/domain-state/` if local ephemeral state is truly needed. If you are writing a new capability that needs persistent state, do not default to `mailroom/state/`.
-
-## Quick Reference
-
-- Runtime Repo: `~/code/agentic-spine`
-- Workbench Repo: `~/code/workbench`
-- Query first: direct file read → `./bin/ops cap run rag.anythingllm.ask` → optional `rag_query` MCP → `rg` fallback.
-- Docker context: check with `docker context show`
+<!-- ENTRY_SURFACE_GATE_METADATA_START -->
+# ENTRY SURFACE GATE METADATA (generated)
+source_registry: ops/bindings/gate.registry.yaml
+registry_updated: 2026-03-05
+gate_count_total: 377
+gate_count_active: 339
+gate_count_retired: 38
+max_gate_id: D381
+<!-- ENTRY_SURFACE_GATE_METADATA_END -->

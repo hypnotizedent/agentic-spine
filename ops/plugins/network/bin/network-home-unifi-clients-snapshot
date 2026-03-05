@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-SCRIPT_NAME="$(basename "$0")"
-PROJECT_ROOT="${NETWORK_PLUGIN_PROJECT_ROOT:-/Users/ronnyworks/code/workbench/docs/infrastructure/domains/network/spine-plugin-network/bin}"
-PROJECT_SCRIPT="$PROJECT_ROOT/$SCRIPT_NAME"
-LEGACY_SCRIPT="$SCRIPT_DIR/${SCRIPT_NAME}.legacy"
+# network.home.unifi.clients.snapshot — wrapper for unifi-home-agent.sh clients
+# Mirrors network-unifi-clients-snapshot (shop) for home network.
 
-if [[ -x "$PROJECT_SCRIPT" ]]; then
-  exec env SPINE_ROOT="$SPINE_ROOT" "$PROJECT_SCRIPT" "$@"
-fi
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+AGENT="$SPINE_ROOT/ops/tools/unifi-home-agent.sh"
+OBSERVED_BINDING="$SPINE_ROOT/ops/bindings/network.unifi.home.clients.observed.yaml"
 
-echo "WARN: network plugin fallback active; delegated project command missing at $PROJECT_SCRIPT" >&2
-exec "$LEGACY_SCRIPT" "$@"
+[[ -x "$AGENT" ]] || { echo "STOP (2): missing unifi-home-agent.sh"; exit 2; }
+[[ -f "$OBSERVED_BINDING" ]] || { echo "STOP (2): missing observed binding: $OBSERVED_BINDING"; exit 2; }
+command -v yq >/dev/null 2>&1 || { echo "STOP (2): missing dependency: yq"; exit 2; }
+
+echo "network.home.unifi.clients.snapshot"
+echo
+
+"$AGENT" clients "$@"
+
+NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TODAY_UTC="$(date -u +%Y-%m-%d)"
+yq -i \
+  ".generated_at = \"$NOW_UTC\" | .updated_at = \"$TODAY_UTC\" | .last_verified = \"$TODAY_UTC\"" \
+  "$OBSERVED_BINDING"
