@@ -1,11 +1,11 @@
-# infra Runbook
+# hygiene-weekly Runbook
 
 ## Scope
-Primary recovery flow for domain `infra`.
+Primary recovery flow for domain `hygiene-weekly`.
 
 ## Detect
-1. `./bin/ops cap run spine.log.query -- --since-hours 24 --domain infra --status failed`
-2. `./bin/ops cap run verify.run -- domain infra`
+1. `./bin/ops cap run spine.log.query -- --since-hours 24 --domain hygiene-weekly --status failed`
+2. `./bin/ops cap run verify.run -- domain hygiene-weekly`
 
 ## Diagnose
 1. Review latest failing run key receipt in `receipts/sessions/`.
