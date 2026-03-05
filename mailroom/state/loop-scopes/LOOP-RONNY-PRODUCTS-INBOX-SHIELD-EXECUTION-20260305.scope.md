@@ -1,7 +1,8 @@
 ---
 loop_id: LOOP-RONNY-PRODUCTS-INBOX-SHIELD-EXECUTION-20260305
 created: 2026-03-05
-status: active
+status: closed
+closed_at: "2026-03-05"
 owner: "@ronny"
 scope: communications
 priority: high
@@ -56,10 +57,32 @@ Implement Inbox Shield Step 1: a FastAPI webhook application that intercepts inb
 ## Definition of Done
 
 - [x] Approvals granted (governance, security, integration)
-- [ ] FastAPI application built with SMS + voice webhook handlers
-- [ ] Classification engine operational (rules + API fallback)
-- [ ] Template response system working
-- [ ] Docker deployment ready
-- [ ] Spine capabilities registered
-- [ ] Gate D377 passing
-- [ ] Verify fast PASS
+- [x] FastAPI application built with SMS + voice webhook handlers
+- [x] Classification engine operational (rules + API fallback)
+- [x] Template response system working
+- [x] Docker deployment ready
+- [x] Spine capabilities registered
+- [x] Gate D378 passing (renumbered from D377 — collision with mailroom split-brain lock)
+- [x] Verify fast 20/20 PASS
+
+## Close Summary
+
+**Execution mode**: orchestrator_subagents (2 lanes)
+
+### Lane A: Application Core (ronny-products, commit 012419f)
+- 26 files, 1250 insertions
+- Complete FastAPI webhook app: SMS + voice handlers, classification engine (rules + OpenAI API), template responses, ntfy escalation, SQLite store
+- Docker compose + Dockerfile ready for VM 214 deployment
+- All pre-commit guards passed (shape-check, content-check)
+
+### Lane B: Spine Governance (agentic-spine, commit 0e98ce2c → merged)
+- 12 files, 215 insertions
+- inbox-shield.status capability registered (capabilities.yaml + capability_map.yaml)
+- Gate D378 inbox-shield-phase1-parity-lock: 5/5 PASS
+- Service onboarding: planned→active, deployment target wired
+- Product scaffold: research-phase→standalone-app
+
+### Orchestrator Closeout
+- D377 gate ID collision resolved (mailroom split-brain took D377, renumbered to D378)
+- D126/D127 parity wired (execution topology, domain metadata, workbench reference)
+- Verify fast: 20/20 PASS
