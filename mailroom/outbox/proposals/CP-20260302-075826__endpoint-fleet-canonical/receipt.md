@@ -101,7 +101,7 @@ Define canonical 3-tier endpoint fleet model with:
 ### Surveillance Platform (CP-20260228-155050)
 - T2 Pis display go2rtc multi-view URLs (12-up grid, exterior feeds)
 - T1 Chromium tabs show go2rtc role-scoped views
-- Dependency: Surveillance VM 211 must be operational before T1/T2 provisioning
+- Dependency: Surveillance stack runtime must be operational before T1/T2 provisioning
 
 ### Device Identity (DEVICE_IDENTITY_SSOT.md)
 - Asset ID schema follows: `EP-{TIER}-{LOCATION}-{SEQ}`
@@ -110,7 +110,7 @@ Define canonical 3-tier endpoint fleet model with:
 
 ### Observability (VM 205)
 - Netdata agents report to observability VM
-- Alerting rules fire to shop-ha (VM 212)
+- Alerting rules fire to existing home HA surveillance automation surface
 - Metrics API for spine capabilities
 
 ### Secrets (Infisical)

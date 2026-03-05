@@ -10,119 +10,106 @@ execution_readiness: blocked
 next_review: "2026-04-01"
 activation_trigger: dependency
 depends_on_loop: LOOP-CAMERA-OUTAGE-20260209
-objective: Stand up a production-grade, spine-governed surveillance platform at the Mint Prints shop with AI-powered detection, role-scoped visibility, and agentic integration.
+objective: Stand up a production-grade, spine-governed surveillance platform at the Mint Prints shop with Frigate/go2rtc visibility and home-HA integration using a single Home Assistant instance.
 ---
 
 # Loop Scope: Mint Visibility Platform — Full Surveillance Stack Launch
 
+## Drift Decision (Authoritative)
+
+This loop is explicitly normalized to:
+
+1. **Single Home Assistant instance** (existing home HA only). No second shop-HA VM.
+2. **CPU-first Frigate baseline**. GPU acceleration is optional future enhancement, not a blocker.
+3. **No VMID pre-assignment in planning docs**. VM IDs are allocated only through intake scaffold + lifecycle bindings.
+
+These rules override older draft assumptions that referenced `shop-ha` and Tesla P40 as required.
+
 ## Problem Statement
 
 The shop currently has a raw Hikvision NVR-only camera access system that is:
+
 1. **Currently offline** — All 12 channels are dark due to the Feb 9 outage (LOOP-CAMERA-OUTAGE-20260209)
 2. **Non-governed** — No role-based access control, no integration with spine capabilities
-3. **Non-automated** — No AI detection, no event-driven notifications, no agentic layer
-4. **Unlabeled** — All 12 channels have `pending-survey` location labels, blocking zone-based detection
-
-The operator needs a comprehensive physical visibility system that integrates with the spine governance model, enables AI-powered detection and notifications, and establishes a multi-location deployment pattern for future sites.
+3. **Non-automated** — No governed event flow, no standardized alert routing
+4. **Unlabeled** — Channel physical labels are incomplete, blocking zone-based detection consistency
 
 ## Deliverables
 
-1. **SURVEILLANCE_PLATFORM_SSOT.md** — Canonical SSOT covering surveillance-stack VM, Tesla P40 detector hardware, camera categories, display endpoints, and multi-location template
+1. **SURVEILLANCE_PLATFORM_SSOT.md** — Canonical SSOT for Frigate/go2rtc stack, camera categories, CPU-first runtime baseline, and future GPU extension point
 2. **SURVEILLANCE_ROLES.md** — Governance doc defining role-based access boundaries
-3. **CAMERA_SSOT.md amendment** — Rename to shop-scoped, add doorbell channel assignments (ch13-14), add ESP32 press arm camera section
-4. **SHOP_VM_ARCHITECTURE.md amendment** — Add surveillance-stack VM 211 and shop-ha VM 212
-5. **SHOP_SERVER_SSOT.md amendment** — Record Tesla P40 GPU spec and PCIe slot assignment
-6. **surveillance.stack.status capability** — Check Frigate health, detection FPS, camera online count
-7. **surveillance.event.query capability** — Read-only query to Frigate event database
-8. **shop.ha.status capability** — Check shop-ha VM and HA integration health
+3. **CAMERA_SSOT.md amendment** — Shop channel registry normalized for Frigate ingest
+4. **SHOP_VM_ARCHITECTURE.md amendment** — Add surveillance-stack VM using conflict-free VMID assigned by intake
+5. **surveillance.stack.status capability** — Frigate health, camera online count, detection pipeline status
+6. **surveillance.event.query capability** — Read-only query of Frigate events
+7. **ha.surveillance.status capability** — Home-HA integration health for surveillance entities/automations
 
 ## Acceptance Criteria
 
-### Phase 0 — Blockers (Must Clear Before T2+)
+### Phase 0 — Blockers
 
-- [ ] T0-A: Feb-9 camera outage resolved — all 12 channels live with ISAPI-confirmed stream URLs
-- [ ] T0-B: Camera location survey complete — all 12 channels have verified physical labels
+- [ ] T0-A: Feb-9 camera outage resolved — all required channels live with ISAPI-confirmed stream URLs
+- [ ] T0-B: Camera location survey complete — channels have verified physical labels for zone mapping
 
-### Phase 1 — Hardware
+### Phase 1 — Runtime Foundation
 
-- [ ] T1-A: Tesla P40 installed in R730XD PCIe slot with IOMMU passthrough configured
-- [ ] T1-B: 12x ESP32-CAM press arm units procured, flashed with ESPHome, and streaming
-- [ ] T1-C: 2x Raspberry Pi 4 kiosk displays procured and configured
+- [ ] T1-A: surveillance-stack VM provisioned using governed intake + provisioning flow (no VMID conflicts)
+- [ ] T1-B: Frigate + go2rtc deployed in CPU mode with stable ingest for baseline channels
 
-### Phase 2 — VMs
+### Phase 2 — Integration
 
-- [ ] T2-A: surveillance-stack VM 211 provisioned with Frigate + go2rtc
-- [ ] T2-B: shop-ha VM 212 provisioned with HAOS + Frigate integration
+- [ ] T2-A: Home HA (existing instance) receives Frigate events and drives notification automations
+- [ ] T2-B: go2rtc view endpoints working for shop displays/remote view
+- [ ] T2-C: `surveillance.stack.status` and `surveillance.event.query` registered and callable
 
-### Phase 3 — Integration
+### Phase 3 — Governance
 
-- [ ] T3-A: All 12 Hikvision cameras connected to Frigate with verified zone labels
-- [ ] T3-B: go2rtc multi-view streams serving press operator TV, production TV, and Ronny remote
-- [ ] T4-A: shop-ha automations firing push notifications for person/vehicle/delivery/after-hours events
-- [ ] T5-A: surveillance.stack.status and surveillance.event.query capabilities registered
-
-### Phase 4 — Governance
-
-- [ ] T6-A: All SSOT amendments applied and committed
-- [ ] T6-B: SURVEILLANCE_ROLES.md defines access boundaries and notification routing
-- [ ] T6-C: Multi-location template documented for future site deployments
+- [ ] T3-A: SSOT amendments committed and parity-checked
+- [ ] T3-B: Roles/access model committed (SURVEILLANCE_ROLES.md)
+- [ ] T3-C: Future GPU path documented as optional extension (non-blocking)
 
 ## Constraints
 
 **Blocked by:**
-- LOOP-CAMERA-OUTAGE-20260209 — Cannot configure Frigate until baseline camera streams are live
-- Camera location survey — Cannot define detection zones until physical labels exist
-- Tesla P40 procurement — Physical hardware must be acquired before installation
+- LOOP-CAMERA-OUTAGE-20260209 — cannot finalize Frigate ingest until camera baseline is live
+- Camera location survey completion — required before stable zone mapping
 
-**Out of scope for initial launch:**
-- Home surveillance integration (separate location, separate SSOT)
-- Frigate+ paid tier (optional enhancement, can add later)
-- Zigbee/Matter coordinator at shop (future expansion)
-- Semantic search natural language queries (Frigate+ feature)
+**Not blockers:**
+- Tesla P40 or any external GPU
+- Separate shop Home Assistant instance
 
 **Boundary:**
-- This loop governs spine-side planning artifacts and capability registration
-- Domain implementation (VM provisioning, Docker compose, HA config) requires workbench execution
-- Hardware procurement is operator-owned action
+- This loop governs planning artifacts, contracts, and capability registration
+- Runtime provisioning/deploy work executes via governed capabilities and workbench implementation surfaces
 
 ## Phases
 
-### P0: Blockers (now)
+### P0: Blockers
 - Resolve camera outage
-- Complete camera location survey
-- Procure Tesla P40
+- Complete location survey
 
-### P1: Hardware (parallel with P0)
-- Install Tesla P40
-- Procure and flash ESP32 units
-- Procure Pi kiosk units
+### P1: CPU Bootstrap
+- Provision surveillance VM through intake scaffold + lifecycle contracts
+- Deploy Frigate/go2rtc with CPU detector path
 
-### P2: VMs
-- Provision surveillance-stack VM 211
-- Provision shop-ha VM 212
+### P2: HA Integration
+- Wire Frigate into existing home HA
+- Validate end-to-end event/notification flow
 
-### P3: Integration
-- Frigate configuration
-- go2rtc multi-view setup
-- HA automations
-- Capability registration
-
-### P4: Governance
-- SSOT amendments
-- Role documentation
-- Multi-location template
+### P3: Governance Closure
+- Finalize SSOTs, capability docs, and role boundaries
 
 ## Gaps
 
 To be filed during execution:
-- GAP-OP-NNN: Missing NVR credentials in Infisical (if not resolved by camera outage loop)
-- GAP-OP-NNN: Missing surveillance capabilities in ops registry
+- GAP-OP-NNN: Missing surveillance capabilities in registry
+- GAP-OP-NNN: VM intake/provision mismatch for surveillance target
 
 ## Evidence Paths
 
-- `docs/governance/CAMERA_SSOT.md` — Camera channel registry
-- `docs/governance/loops/LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.md` — Extended loop scope (governing document)
-- `mailroom/outbox/proposals/CP-20260302-075509__surveillance-platform-launch/` — Change proposal with SSOT drafts
+- `docs/governance/CAMERA_SSOT.md`
+- `docs/governance/loops/LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.md`
+- `mailroom/outbox/proposals/CP-20260302-075509__surveillance-platform-launch/`
 
 ## Related Documents
 

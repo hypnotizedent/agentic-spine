@@ -2,62 +2,53 @@
 
 ## What was done
 
-Drafted canonical planning artifacts for the Mint Visibility Platform surveillance stack:
+Drafted and then normalized canonical planning artifacts for the Mint Visibility Platform surveillance stack.
 
 1. **Loop Scope** — `mailroom/state/loop-scopes/LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.scope.md`
-   - Status: `planned` (deferred intent)
-   - Horizon: `later` (not immediate execution)
+   - Status: `planned`
+   - Horizon: `later`
    - Execution readiness: `blocked` (depends on LOOP-CAMERA-OUTAGE-20260209)
-   - Phased approach: P0 (blockers) → P1 (hardware) → P2 (VMs) → P3 (integration) → P4 (governance)
+   - Drift-normalized assumptions:
+     - single HA instance (existing home HA only)
+     - CPU-first Frigate bootstrap
+     - no hardcoded VMID assignment in planning docs
 
-2. **SURVEILLANCE_PLATFORM_SSOT.md** — Full technical specification including:
-   - surveillance-stack VM 211 (Frigate + go2rtc + TensorRT detection)
-   - shop-ha VM 212 (Home Assistant OS + MQTT + automations)
-   - Tesla P40 detector hardware with caveats (compute-only, no NVDEC/NVENC)
-   - Camera categories: Hikvision NVR channels (12) + ESP32 press arms (12)
-   - Display endpoints: kiosk-press, kiosk-production
-   - Multi-location deployment template
+2. **SURVEILLANCE_PLATFORM_SSOT.md** — Canonical platform SSOT:
+   - surveillance VM runtime (Frigate + go2rtc)
+   - existing home HA as integration authority
+   - capability targets and drift rules
 
-3. **SURVEILLANCE_ROLES.md** — Governance boundary document including:
-   - Role definitions: owner, production-staff, press-operator, kiosk-display
-   - Stream URL map with network-scoped access
-   - Notification routing matrix
-   - Multi-location access extension pattern
-   - Prohibited uses policy
+3. **SURVEILLANCE_ROLES.md** — Governance boundary document:
+   - role definitions and access boundaries
+   - secrets + evidence discipline
 
 ## Why
 
-The operator needs a governed planning surface for the surveillance platform that:
+The operator needs a governed surveillance planning surface that is aligned with current repo truth and avoids drift:
 
-1. Integrates with the spine governance model (loops, gaps, proposals, capabilities)
-2. Establishes the multi-location deployment pattern for future sites
-3. Documents the dependency on resolving the Feb-9 camera outage first
-4. Provides a complete technical blueprint for desktop/execution agents to implement
+1. Existing VM IDs 211/212 are already allocated to finance-stack/mint-data.
+2. A second shop-HA instance conflicts with the single-HA decision.
+3. GPU procurement should not block initial surveillance deployment.
 
 ## Constraints
 
-- **Desktop-only execution:** This proposal creates planning artifacts only. No VM provisioning, no Docker deployment, no hardware installation.
-- **Blocked by camera outage:** P2+ work cannot begin until LOOP-CAMERA-OUTAGE-20260209 is resolved and all 12 channels are live.
-- **Procurement required:** Tesla P40, ESP32-CAM units, and Pi kiosk hardware must be acquired before hardware phases.
-- **No secrets in repo:** All RTSP URLs and credentials reference Infisical paths, never embedded values.
+- **Planning artifacts only:** no runtime provisioning in this proposal.
+- **Blocked by camera outage:** LOOP-CAMERA-OUTAGE-20260209 must clear before execution.
+- **No secrets in repo:** credentials remain in Infisical only.
 
 ## Expected outcomes
 
-When the operator applies this proposal:
+When applied:
 
-1. `docs/governance/loops/LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.md` — Extended loop scope
-2. `docs/core/SURVEILLANCE_PLATFORM_SSOT.md` — Canonical SSOT
-3. `docs/governance/SURVEILLANCE_ROLES.md` — Access boundary document
-4. `mailroom/state/loop-scopes/LOOP-SURVEILLANCE-PLATFORM-LAUNCH-20260302.scope.md` — Loop scope entry
-
-The loop will remain in `planned` status with `horizon: later` until the camera outage blocker is resolved.
+1. Surveillance planning surfaces are aligned to current canonical state.
+2. No references remain that require shop-ha VM or mandatory Tesla P40.
+3. Execution waves can proceed with intake-allocated VM IDs and CPU baseline.
 
 ## Evidence
 
-- CAMERA_SSOT.md confirms 12 channels configured, 0 showing video (Feb-9 outage)
-- SHOP_VM_ARCHITECTURE.md confirms VM 211-212 available for allocation
-- SHOP_SERVER_SSOT.md confirms R730XD has PCIe slots available for Tesla P40
-- planning.horizon.contract.yaml confirms `planned` status for deferred-intent loops
+- CAMERA_SSOT confirms camera baseline/outage dependency.
+- DEVICE_IDENTITY_SSOT + vm.lifecycle confirm VM 211/212 occupied.
+- Surveillance loop scope + extended loop doc updated to normalized decisions.
 
 ## Run keys
 
