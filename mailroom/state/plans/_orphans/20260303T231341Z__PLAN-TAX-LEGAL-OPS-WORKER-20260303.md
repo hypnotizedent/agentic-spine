@@ -178,7 +178,7 @@ All names below are proposed and not implemented.
 ### 5.1 Canonical Case Pathing (Proposed)
 
 ```text
-mailroom/state/cases/tax-legal/
+runtime/domain-state/taxlegal/cases/
   CASE-TAXLEGAL-YYYYMMDD-####/
     intake.md
     checklist.yaml
