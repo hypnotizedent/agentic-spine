@@ -334,16 +334,31 @@ def insert_event(
 
 
 def bootstrap_from_index_if_needed(conn: sqlite3.Connection, index_path: Path) -> int:
-    count = int(conn.execute("SELECT COUNT(*) AS c FROM plans").fetchone()["c"])
-    if count > 0:
-        return 0
-
     doc = load_yaml(index_path) or {}
     if not isinstance(doc, dict):
         return 0
     plans = doc.get("plans") or []
     if not isinstance(plans, list):
         return 0
+
+    # Compute current YAML hash to compare against watermark.
+    yaml_text = dump_yaml(doc)
+    yaml_hash = sha256_text(yaml_text)
+
+    count = int(conn.execute("SELECT COUNT(*) AS c FROM plans").fetchone()["c"])
+    if count > 0:
+        # DB has rows — check if YAML has changed since last projection.
+        wm_row = conn.execute(
+            "SELECT sha256 FROM plans_projection_watermarks WHERE surface = 'plans.index'"
+        ).fetchone()
+        if wm_row is not None and wm_row["sha256"] == yaml_hash:
+            return 0  # DB and YAML are in sync.
+        # YAML changed (git pull/restore/revert) — re-sync DB from YAML.
+        conn.execute("DELETE FROM plans")
+        conn.execute("DELETE FROM plan_events")
+        conn.execute("DELETE FROM plan_docs")
+        conn.execute("DELETE FROM plans_projection_watermarks")
+        conn.commit()
 
     imported = 0
     for row in plans:
@@ -359,11 +374,30 @@ def bootstrap_from_index_if_needed(conn: sqlite3.Connection, index_path: Path) -
             event_type="bootstrap_import",
             from_status=None,
             to_status=str(row.get("status") or "deferred"),
-            reason="Imported legacy YAML authority row during SQLite authority bootstrap.",
+            reason="Imported YAML authority row during SQLite authority bootstrap.",
             actor="planning.plans.reconcile",
             payload={"source": str(index_path)},
         )
         imported += 1
+
+    # Set watermarks so subsequent reads skip re-import.
+    update_watermark(conn, "plans.index", yaml_hash)
+
+    # Compute and set docs watermark.
+    plans_dir = index_path.parent
+    plan_ids = sorted(
+        str(p.get("plan_id") or "").strip()
+        for p in plans
+        if isinstance(p, dict) and str(p.get("plan_id") or "").strip()
+    )
+    docs_hash_parts: list[str] = []
+    for pid in plan_ids:
+        doc_path = plans_dir / f"{pid}.md"
+        if doc_path.exists():
+            h = sha256_text(doc_path.read_text(encoding="utf-8"))
+            docs_hash_parts.append(f"{pid}:{h}")
+    docs_hash = sha256_text("\n".join(docs_hash_parts))
+    update_watermark(conn, "plans.docs", docs_hash)
 
     conn.commit()
     return imported
