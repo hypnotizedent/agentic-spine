@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+
+usage() {
+  cat <<'EOF'
+coordinator-lane-closeout
+
+Usage:
+  coordinator-lane-closeout [--skip-verify] [--skip-friction] [--skip-status] [--json]
+
+Runs a deterministic coordinator closeout chain:
+  1) verify.run -- fast
+  2) friction.reconcile
+  3) status pack (friction.queue.status, gaps.status --open-only, loops.status, proposals.status)
+EOF
+}
+
+SKIP_VERIFY=0
+SKIP_FRICTION=0
+SKIP_STATUS=0
+JSON=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-verify) SKIP_VERIFY=1; shift ;;
+    --skip-friction) SKIP_FRICTION=1; shift ;;
+    --skip-status) SKIP_STATUS=1; shift ;;
+    --json) JSON=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+run() {
+  local cmd="$1"
+  if [[ "$JSON" -eq 1 ]]; then
+    echo "{\"step\":\"$cmd\",\"status\":\"running\"}"
+  else
+    echo "==> $cmd"
+  fi
+  (cd "$ROOT" && eval "$cmd")
+}
+
+if [[ "$SKIP_VERIFY" -eq 0 ]]; then
+  run "./bin/ops cap run verify.run -- fast"
+fi
+
+if [[ "$SKIP_FRICTION" -eq 0 ]]; then
+  # Reconcile is idempotent and safe to run at coordinator closeout.
+  run "./bin/ops cap run friction.reconcile"
+fi
+
+if [[ "$SKIP_STATUS" -eq 0 ]]; then
+  run "./bin/ops cap run friction.queue.status"
+  run "./bin/ops cap run gaps.status --open-only"
+  run "./bin/ops cap run loops.status"
+  run "./bin/ops cap run proposals.status"
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  echo '{"status":"ok","capability":"coordinator.lane.closeout"}'
+else
+  echo "coordinator.lane.closeout: complete"
+fi
