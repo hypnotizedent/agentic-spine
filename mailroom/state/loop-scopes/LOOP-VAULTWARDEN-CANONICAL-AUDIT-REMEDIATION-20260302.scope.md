@@ -5,10 +5,8 @@ status: closed
 owner: "@ronny"
 scope: vaultwarden
 priority: high
-horizon: later
-execution_readiness: blocked
-blocked_by: "VM 204 LAN unreachable — W2/W3/W4 require live Vaultwarden for URI reconciliation, duplicate cleanup, restore drill (GAP-OP-1285/1286/1287)"
-next_review: "2026-03-09"
+horizon: now
+execution_readiness: runnable
 objective: Execute VW-AUDIT-20260302 findings end-to-end with canonical Vaultwarden parity, blocker-first runtime recovery, and governed closure evidence.
 ---
 
@@ -63,3 +61,28 @@ Execute VW-AUDIT-20260302 findings end-to-end with canonical Vaultwarden parity,
 - `CAP-20260302-011554__gaps.status__Rxj9l78604`
 - `CAP-20260302-011718__loops.create__Rou2r88546`
 - `CAP-20260302-011815__gaps.file__Ro6ex7956`
+
+## Closure Evidence (2026-03-05)
+
+All 7 linked gaps are now fixed/closed. Blocker (VM 204 LAN unreachable) bypassed via Tailscale fallback.
+
+### Gap Final Status
+- **GAP-OP-1283** (high): FIXED — proxy-session.sh LAN→Tailscale fallback
+- **GAP-OP-1284** (medium): FIXED — backfill artifact preserved in vaultwarden-audit/
+- **GAP-OP-1285** (medium): CLOSED — stale URL reconciliation executed (28 retired, 12 quarantined)
+- **GAP-OP-1286** (medium): CLOSED — duplicate-truth remediation complete (stale IPs retired, multi-account validated)
+- **GAP-OP-1287** (medium): FIXED — restore drill PASS (2026-03-05, scratch nonprod, sqlite integrity ok)
+- **GAP-OP-1288** (low): FIXED — D319 vaultwarden-hygiene-compliance-lock gate PASS
+- **GAP-OP-1289** (low): FIXED — vault-cli.ronny.works deprecated in canonical_hosts.yaml
+
+### Phase Completion
+- W0: incident resolution complete (proxy fallback, recovery action)
+- W1: backfill forensics + parity ledger (13 artifacts committed)
+- W2: stale URL reconciliation (28 soft-deleted, 0 errors)
+- W3: duplicate cleanup (stale IPs retired, multi-account groups validated as legitimate)
+- W4: restore drill PASS, D319 hygiene gate PASS
+
+### Receipts
+- vaultwarden-reconcile-apply-20260305T104644Z.json
+- vaultwarden-reconcile-apply-20260305T105219Z.json
+- restore-drill-20260305.yaml
