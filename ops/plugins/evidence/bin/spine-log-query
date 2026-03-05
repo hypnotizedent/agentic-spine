@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+source "${SPINE_ROOT}/ops/lib/spine-paths.sh"
+spine_paths_init
+
+LOG_FILE="${SPINE_STRUCTURED_LOG:-${SPINE_LOGS}/spine-events.jsonl}"
+SINCE_HOURS=24
+DOMAIN=""
+STATUS=""
+GATE_ID=""
+LIMIT=200
+JSON_MODE=0
+
+usage() {
+  cat <<'USAGE'
+spine-log-query
+
+Usage:
+  spine-log-query [--since-hours <n>] [--domain <id>] [--status <value>] [--gate-id <id>] [--limit <n>] [--json]
+USAGE
+}
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --since-hours) shift; SINCE_HOURS="${1:-24}" ;;
+    --domain) shift; DOMAIN="${1:-}" ;;
+    --status) shift; STATUS="${1:-}" ;;
+    --gate-id) shift; GATE_ID="${1:-}" ;;
+    --limit) shift; LIMIT="${1:-200}" ;;
+    --json) JSON_MODE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+  shift
+done
+
+[[ "$SINCE_HOURS" =~ ^[0-9]+$ ]] || fail "--since-hours must be numeric"
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || fail "--limit must be numeric"
+command -v jq >/dev/null 2>&1 || fail "jq is required"
+
+if [[ ! -f "$LOG_FILE" ]]; then
+  if [[ "$JSON_MODE" -eq 1 ]]; then
+    echo '{"events":[],"count":0}'
+  else
+    echo "spine.log.query"
+    echo "log_file: $LOG_FILE"
+    echo "count: 0"
+  fi
+  exit 0
+fi
+
+query='
+  split("\n")
+  | map(select(length > 0) | (try fromjson catch empty))
+  | map(
+      select(
+        ((.timestamp_utc | fromdateiso8601?) // 0) >= (now - ($since_hours * 3600))
+        and ($domain == "" or .domain == $domain)
+        and ($status == "" or .status == $status)
+        and ($gate_id == "" or .gate_id == $gate_id)
+      )
+    )
+  | sort_by(.timestamp_utc)
+  | .[-$limit:]
+'
+
+events_json="$(
+  jq -Rsc \
+    --argjson since_hours "$SINCE_HOURS" \
+    --arg domain "$DOMAIN" \
+    --arg status "$STATUS" \
+    --arg gate_id "$GATE_ID" \
+    --argjson limit "$LIMIT" \
+    "$query" "$LOG_FILE"
+)"
+
+if [[ "$JSON_MODE" -eq 1 ]]; then
+  jq -cn --arg log_file "$LOG_FILE" --argjson events "$events_json" '{log_file:$log_file,count:($events|length),events:$events}'
+  exit 0
+fi
+
+count="$(jq -r 'length' <<<"$events_json")"
+echo "spine.log.query"
+echo "log_file: $LOG_FILE"
+echo "count: $count"
+if [[ "$count" -gt 0 ]]; then
+  jq -r '.[] | "- \(.timestamp_utc) [\(.status)] \(.event_type) domain=\(.domain) gate=\(.gate_id // "-") :: \(.message)"' <<<"$events_json"
+fi
+

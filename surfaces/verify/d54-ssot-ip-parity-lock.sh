@@ -17,11 +17,11 @@ if [[ ! -x "$AUDIT" ]]; then
 fi
 
 echo "D54: checking shop network IP/SSOT parity via $AUDIT"
-echo "  SSOTs: ops/bindings/shop-servers.yaml, docs/ssot/SHOP_SERVER_SSOT.md"
+echo "  SSOTs: ops/bindings/spine.boundary.baseline.yaml"
 
 if ! "$AUDIT" 2>&1; then
   echo "D54 FAIL: IP parity mismatch detected"
-  echo "  Hint: check ops/bindings/shop-servers.yaml and docs/ssot/SHOP_SERVER_SSOT.md for stale IPs"
+  echo "  Hint: check ops/bindings/spine.boundary.baseline.yaml for stale IPs"
   exit 1
 fi
 

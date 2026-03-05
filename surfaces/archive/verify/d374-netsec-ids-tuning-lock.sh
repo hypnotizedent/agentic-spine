@@ -41,7 +41,7 @@ fi
 # ── Get API key ──────────────────────────────────────────────────────────
 UNIFI_KEY=""
 if [[ -f "$ROOT/ops/tools/infisical-agent.sh" ]]; then
-  UNIFI_KEY="$("$ROOT/ops/tools/infisical-agent.sh" get-cached home-assistant prod UNIFI_HOME_API_KEY 2>/dev/null || true)"
+  UNIFI_KEY="$("$ROOT/ops/tools/infisical-agent.sh" get-cached infrastructure prod UNIFI_HOME_API_KEY 2>/dev/null || true)"
 fi
 if [[ -z "$UNIFI_KEY" ]]; then
   echo "  SKIP: UNIFI_HOME_API_KEY not available"

@@ -811,10 +811,10 @@ Active Projects:
   n8n               (automation)
   media-stack       (media management)
   immich            (photo management)
-  home-assistant    (smart home)
   ai-services       (AI API keys)
 
 Deprecated Projects (reads blocked by default, writes blocked):
+  home-assistant    (use infrastructure /spine/home/*)
   finance-stack     (use infrastructure /spine/services/finance)
   mint-os-vault     (consolidation candidate)
 

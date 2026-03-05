@@ -66,6 +66,29 @@ if echo "$staged" | rg -q '^(mailroom/state/loop-scopes/.*\.scope\.md|docs/produ
   "$d145_gate" --staged-only
 fi
 
+# ─── Guard 5b: New shell scripts must use canonical path resolver ───────
+added_scripts="$(git diff --cached --name-only --diff-filter=A 2>/dev/null | rg '^(ops/plugins|ops/runtime)/.*\.sh$' || true)"
+if [[ -n "${added_scripts:-}" ]]; then
+  missing_paths=()
+  while IFS= read -r script_path; do
+    [[ -n "$script_path" ]] || continue
+    staged_content="$(git show ":$script_path" 2>/dev/null || true)"
+    if ! printf '%s\n' "$staged_content" | rg -q 'ops/lib/spine-paths\.sh'; then
+      missing_paths+=("$script_path")
+    fi
+  done <<<"$added_scripts"
+
+  if (( ${#missing_paths[@]} > 0 )); then
+    echo "BLOCKED: new shell scripts must source ops/lib/spine-paths.sh" >&2
+    printf '  - %s\n' "${missing_paths[@]}" >&2
+    echo "" >&2
+    echo "Remediation:" >&2
+    echo "  source \"\${SPINE_ROOT}/ops/lib/spine-paths.sh\"" >&2
+    echo "  spine_paths_init" >&2
+    exit 1
+  fi
+fi
+
 # ─── Guard 6: Gate registry projection advisory (read-only) ──
 # Do not mutate files or run policy-gated capabilities inside pre-commit.
 # Projection/autofix runs are explicit commands outside hook execution.
