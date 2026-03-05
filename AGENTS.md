@@ -18,8 +18,8 @@ scope: agent-runtime-contract
 source_registry: ops/bindings/gate.registry.yaml
 registry_updated: 2026-03-05
 gate_count_total: 373
-gate_count_active: 372
-gate_count_retired: 1
+gate_count_active: 371
+gate_count_retired: 2
 max_gate_id: D377
 <!-- ENTRY_SURFACE_GATE_METADATA_END -->
 
