@@ -115,6 +115,10 @@ control_surface_git_transport_target() {
   control_surface_field "$1" "git_transport.ssh_target"
 }
 
+control_surface_git_transport_alias() {
+  control_surface_field "$1" "git_transport.host_alias"
+}
+
 control_surface_git_transport_host_mode() {
   control_surface_field "$1" "git_transport.host_mode"
 }
@@ -131,9 +135,16 @@ control_surface_git_transport_port() {
 
 control_surface_git_transport_host() {
   local service_id="$1"
-  local target_id host_mode
+  local target_id host_mode host_alias
   target_id="$(control_surface_git_transport_target "$service_id")"
+  host_alias="$(control_surface_git_transport_alias "$service_id")"
   host_mode="$(control_surface_git_transport_host_mode "$service_id")"
+
+  if [[ -n "$host_alias" ]]; then
+    printf '%s\n' "$host_alias"
+    return 0
+  fi
+
   [[ -n "$target_id" ]] || return 1
 
   case "$host_mode" in
