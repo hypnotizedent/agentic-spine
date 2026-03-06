@@ -217,6 +217,35 @@ capture_counts() {
   printf '{"active":%s,"trashed":%s,"total":%s}' "$active" "$trash" "$total"
 }
 
+establish_session() {
+  local attempt session_candidate
+  for attempt in 1 2 3; do
+    vw_bw logout >/dev/null 2>&1 || true
+    if ! BW_CLIENTID="$CLIENT_ID" BW_CLIENTSECRET="$CLIENT_SECRET" vw_bw login --apikey >/dev/null 2>&1; then
+      sleep "$attempt"
+      continue
+    fi
+    session_candidate="$(BW_PASSWORD="$MASTER_PASSWORD" vw_bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
+    if [[ -n "$session_candidate" ]]; then
+      SESSION="$session_candidate"
+      return 0
+    fi
+    sleep "$attempt"
+  done
+  return 1
+}
+
+start_proxy_with_retry() {
+  local attempt
+  for attempt in 1 2 3; do
+    if vw_proxy_start; then
+      return 0
+    fi
+    sleep "$attempt"
+  done
+  return 1
+}
+
 record_ready() {
   local action="$1" item_id="$2" name="$3" source="$4"
   jq -nc --arg action "$action" --arg item_id "$item_id" --arg name "$name" --arg source "$source" \
@@ -259,11 +288,8 @@ if [[ "$EXECUTE" == "true" ]]; then
   fi
 fi
 
-vw_proxy_start || stop "could not start scope-rewriting proxy"
-vw_bw logout >/dev/null 2>&1 || true
-BW_CLIENTID="$CLIENT_ID" BW_CLIENTSECRET="$CLIENT_SECRET" vw_bw login --apikey >/dev/null 2>&1 || stop "bw login failed"
-SESSION="$(BW_PASSWORD="$MASTER_PASSWORD" vw_bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
-[[ -n "$SESSION" ]] || stop "bw unlock failed"
+start_proxy_with_retry || stop "could not start scope-rewriting proxy"
+establish_session || stop "bw unlock failed"
 
 refresh_state
 BEFORE_COUNTS="$(capture_counts)"
