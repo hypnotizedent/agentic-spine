@@ -1,12 +1,9 @@
-# Receipt — CP-20260302-075826 endpoint fleet normalization
+# Receipt — CP-20260302-075826 endpoint fleet set read-only
 
-- Added canonical manifest for previously malformed endpoint-fleet packet.
-- Preserved packet as `draft_hold` so the endpoint model does not drift or disappear.
-- Scope is now explicit:
-  - keep endpoint model/docs only
-  - no active provisioning or hardware execution
-  - revisit when mint-modules physical hardware work is activated
+- Normalized canonical endpoint-fleet packet from `draft_hold` to terminal `read-only`.
+- Preserved endpoint model and design documents without implying active execution.
+- Explicitly scoped future implementation to a later `mint-modules` hardware/provisioning wave.
 
 ## Disposition
 
-Parked intentionally as design authority for later execution.
+Read-only reference. This proposal remains available as design authority but is not queue work.

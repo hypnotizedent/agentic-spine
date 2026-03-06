@@ -1,12 +1,19 @@
-# Receipt — CP-20260302-025514 provider orchestration normalization
+# Receipt — CP-20260302-025514 provider orchestration applied
 
-- Added canonical manifest for previously malformed future-lane packet.
-- Preserved packet as `draft_hold` rather than tombstoning it.
-- Deliverable intent is now explicit:
-  - provider registry / docs
+- Normalized canonical provider orchestration packet from `draft_hold` to `applied`.
+- Captured shipped evidence across spine and workbench.
+- End state now reflects the real implementation rather than a parked future lane.
+
+## Applied Evidence
+
+- `agentic-spine` `origin/main` landed provider orchestration in `7929b48f`.
+- `workbench` `main` landed launcher/config integration in `e4028e6` and fallback-safe local behavior in `a343fcf`.
+- Canonical scope delivered:
+  - provider registry / contract bundle
   - provider health / status capability
-  - canonical runtime fallback and proxy switching across governed LLM surfaces
+  - managed config sync
+  - end-to-end runtime fallback switching for governed surfaces
 
 ## Disposition
 
-Parked intentionally. This is a real future lane, not active execution work.
+Applied. This proposal is no longer queue work.
