@@ -47,6 +47,12 @@ ssh_resolve_tailscale_ip() {
     "$_SSH_RESOLVE_BINDING" 2>/dev/null || echo ""
 }
 
+ssh_resolve_primary_alias() {
+  local target_id="$1"
+  yq -r ".ssh.targets[] | select(.id == \"$target_id\") | (.aliases // [])[0] // \"\"" \
+    "$_SSH_RESOLVE_BINDING" 2>/dev/null || echo ""
+}
+
 ssh_resolve_access_policy() {
   local target_id="$1"
   yq -r ".ssh.targets[] | select(.id == \"$target_id\") | .access_policy // \"lan_first\"" \

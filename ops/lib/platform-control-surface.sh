@@ -116,7 +116,20 @@ control_surface_git_transport_target() {
 }
 
 control_surface_git_transport_alias() {
-  control_surface_field "$1" "git_transport.host_alias"
+  local service_id="$1"
+  local target_id explicit_alias primary_alias
+  explicit_alias="$(control_surface_field "$service_id" "git_transport.host_alias")"
+  target_id="$(control_surface_git_transport_target "$service_id")"
+
+  if [[ -n "$target_id" ]]; then
+    primary_alias="$(ssh_resolve_primary_alias "$target_id")"
+    if [[ -n "$primary_alias" ]]; then
+      printf '%s\n' "$primary_alias"
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "$explicit_alias"
 }
 
 control_surface_git_transport_host_mode() {

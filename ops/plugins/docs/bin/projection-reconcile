@@ -3,10 +3,11 @@ set -euo pipefail
 
 # projection-reconcile
 #
-# Unified reconciliation of all gate registry projections:
+# Unified reconciliation of tracked projections:
 #   1. gen-gate-registry-header.sh — gate_count + description in gate.registry.yaml
 #   2. docs-projection-sync         — entry-surface metadata in AGENTS.md, CLAUDE.md, generated/
-#   3. docs-projection-verify       — deterministic verification of all projections
+#   3. platform-control-surface-reconcile — git transport alias parity against ssh.targets
+#   4. docs-projection-verify       — deterministic verification of docs projections
 #
 # Default: no-commit (projection.reconcile only writes; commit is recovery's job).
 # Supports --dry-run to show what would change without writing.
@@ -34,10 +35,12 @@ fail() { echo "projection.reconcile FAIL: $*" >&2; exit 1; }
 
 GEN_HEADER="$ROOT/bin/generators/gen-gate-registry-header.sh"
 SYNC="$ROOT/ops/plugins/docs/bin/docs-projection-sync"
+CONTROL_SYNC="$ROOT/ops/plugins/authority/bin/platform-control-surface-reconcile"
 VERIFY="$ROOT/ops/plugins/docs/bin/docs-projection-verify"
 
 [[ -x "$GEN_HEADER" ]] || fail "missing: $GEN_HEADER"
 [[ -x "$SYNC" ]]       || fail "missing: $SYNC"
+[[ -x "$CONTROL_SYNC" ]] || fail "missing: $CONTROL_SYNC"
 [[ -x "$VERIFY" ]]     || fail "missing: $VERIFY"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -46,10 +49,13 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   header_rc=0
   "$GEN_HEADER" --check >/dev/null 2>&1 || header_rc=$?
 
+  control_rc=0
+  "$CONTROL_SYNC" --check >/dev/null 2>&1 || control_rc=$?
+
   verify_rc=0
   "$VERIFY" >/dev/null 2>&1 || verify_rc=$?
 
-  if [[ "$header_rc" -eq 0 && "$verify_rc" -eq 0 ]]; then
+  if [[ "$header_rc" -eq 0 && "$control_rc" -eq 0 && "$verify_rc" -eq 0 ]]; then
     echo "projection.reconcile"
     echo "status: OK"
     echo "drift: none"
@@ -59,6 +65,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "projection.reconcile"
   echo "status: DRIFT_DETECTED"
   [[ "$header_rc" -ne 0 ]] && echo "  header: stale"
+  [[ "$control_rc" -ne 0 ]] && echo "  platform_control: stale"
   [[ "$verify_rc" -ne 0 ]] && echo "  surfaces: stale"
   exit 0
 fi
@@ -71,7 +78,11 @@ echo "[projection.reconcile] reconciling gate registry header..."
 echo "[projection.reconcile] syncing entry-surface projections..."
 "$SYNC" || fail "docs-projection-sync failed"
 
-# ── Step 3: verify everything is deterministic ──
+# ── Step 3: reconcile platform control projection ──
+echo "[projection.reconcile] reconciling platform-control surfaces..."
+"$CONTROL_SYNC" --write || fail "platform-control-surface-reconcile failed"
+
+# ── Step 4: verify everything is deterministic ──
 echo "[projection.reconcile] verifying projections..."
 "$VERIFY" || fail "docs-projection-verify failed (post-sync)"
 

@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+CONTROL_BINDING="$ROOT/ops/bindings/platform.control.surfaces.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+
+# shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/git-lock.sh
+source "$ROOT/ops/lib/git-lock.sh"
+
+usage() {
+  cat <<'EOF'
+platform.control.surface.reconcile - Reconcile platform control git transport aliases against ssh.targets
+
+Usage:
+  platform-control-surface-reconcile [--check|--write] [--json]
+
+Options:
+  --check     Report drift only (default)
+  --write     Apply alias updates to ops/bindings/platform.control.surfaces.yaml
+  --json      Emit JSON summary
+  -h, --help  Show help
+EOF
+}
+
+fail() {
+  echo "platform.control.surface.reconcile FAIL: $*" >&2
+  exit 1
+}
+
+MODE="check"
+JSON_OUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) MODE="check"; shift ;;
+    --write) MODE="write"; shift ;;
+    --json) JSON_OUT=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+command -v python3 >/dev/null 2>&1 || fail "missing dependency: python3"
+command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
+[[ -f "$CONTROL_BINDING" ]] || fail "missing control binding: $CONTROL_BINDING"
+[[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
+
+plan_file="$(mktemp)"
+backup_file=""
+
+cleanup() {
+  release_git_lock || true
+  rm -f "$plan_file"
+  if [[ -n "$backup_file" ]]; then
+    rm -f "$backup_file"
+  fi
+  return 0
+}
+trap cleanup EXIT INT TERM
+
+summary_json="$(
+python3 - "$CONTROL_BINDING" "$SSH_BINDING" "$plan_file" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+control_path = Path(sys.argv[1])
+ssh_path = Path(sys.argv[2])
+plan_path = Path(sys.argv[3])
+
+
+def load_yaml(path: Path, required_key: str | None = None) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        docs = [doc for doc in yaml.safe_load_all(handle) if isinstance(doc, dict)]
+    if not docs:
+        raise SystemExit(f"expected mapping document in YAML stream: {path}")
+    if required_key is None:
+        return docs[-1]
+    for doc in docs:
+        if required_key in doc:
+            return doc
+    raise SystemExit(f"expected YAML document containing '{required_key}': {path}")
+
+
+control_doc = load_yaml(control_path, "services")
+ssh_doc = load_yaml(ssh_path, "ssh")
+
+ssh_targets = {}
+for row in ((ssh_doc.get("ssh") or {}).get("targets") or []):
+    if not isinstance(row, dict):
+        continue
+    target_id = str(row.get("id") or "").strip()
+    if not target_id:
+        continue
+    aliases = []
+    for alias in (row.get("aliases") or []):
+        alias_text = str(alias).strip()
+        if alias_text:
+            aliases.append(alias_text)
+    ssh_targets[target_id] = {
+        "primary_alias": aliases[0] if aliases else "",
+        "aliases": aliases,
+    }
+
+services = control_doc.get("services") or {}
+evaluated = 0
+changes = []
+warnings = []
+errors = []
+
+for service_id, service_doc in services.items():
+    if not isinstance(service_doc, dict):
+        continue
+    git_transport = service_doc.get("git_transport") or {}
+    if not isinstance(git_transport, dict):
+        continue
+    target_id = str(git_transport.get("ssh_target") or "").strip()
+    if not target_id:
+        continue
+    evaluated += 1
+
+    target = ssh_targets.get(target_id)
+    if target is None:
+        errors.append(
+            {
+                "service_id": service_id,
+                "target_id": target_id,
+                "reason": "missing ssh target",
+            }
+        )
+        continue
+
+    current_alias = str(git_transport.get("host_alias") or "").strip()
+    expected_alias = str(target.get("primary_alias") or "").strip()
+
+    if not expected_alias:
+        warnings.append(
+            {
+                "service_id": service_id,
+                "target_id": target_id,
+                "reason": "ssh target has no primary alias; explicit host_alias retained",
+                "current_host_alias": current_alias or None,
+            }
+        )
+        continue
+
+    if current_alias != expected_alias:
+        changes.append(
+            {
+                "service_id": service_id,
+                "target_id": target_id,
+                "current_host_alias": current_alias or None,
+                "expected_host_alias": expected_alias,
+            }
+        )
+
+with plan_path.open("w", encoding="utf-8") as handle:
+    for change in changes:
+        handle.write(
+            "\t".join(
+                [
+                    change["service_id"],
+                    change["target_id"],
+                    change["current_host_alias"] or "",
+                    change["expected_host_alias"],
+                ]
+            )
+            + "\n"
+        )
+
+payload = {
+    "binding": str(control_path),
+    "ssh_binding": str(ssh_path),
+    "evaluated_services": evaluated,
+    "change_count": len(changes),
+    "changes": changes,
+    "warning_count": len(warnings),
+    "warnings": warnings,
+    "error_count": len(errors),
+    "errors": errors,
+}
+print(json.dumps(payload, indent=2, sort_keys=True))
+PY
+)" || fail "unable to build reconcile plan"
+
+change_count="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["change_count"])' <<<"$summary_json")"
+warning_count="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["warning_count"])' <<<"$summary_json")"
+error_count="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["error_count"])' <<<"$summary_json")"
+evaluated_services="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["evaluated_services"])' <<<"$summary_json")"
+
+if [[ "$MODE" == "write" && "$error_count" -gt 0 ]]; then
+  [[ "$JSON_OUT" -eq 1 ]] && echo "$summary_json"
+  fail "cannot write with unresolved control-surface errors"
+fi
+
+if [[ "$MODE" == "write" && "$change_count" -gt 0 ]]; then
+  backup_file="$(mktemp)"
+  cp "$CONTROL_BINDING" "$backup_file"
+  acquire_git_lock platform_control_projection || exit 1
+
+  if ! while IFS=$'\t' read -r service_id _target_id _current_alias expected_alias; do
+    [[ -n "$service_id" ]] || continue
+    SERVICE_ID="$service_id" EXPECTED_ALIAS="$expected_alias" \
+      yq -i '(.services[strenv(SERVICE_ID)].git_transport.host_alias) = strenv(EXPECTED_ALIAS)' "$CONTROL_BINDING"
+  done <"$plan_file"; then
+    cp "$backup_file" "$CONTROL_BINDING"
+    fail "write transaction rolled back"
+  fi
+fi
+
+status="OK"
+exit_code=0
+if [[ "$error_count" -gt 0 ]]; then
+  status="ERROR"
+  exit_code=1
+elif [[ "$change_count" -gt 0 ]]; then
+  if [[ "$MODE" == "write" ]]; then
+    status="UPDATED"
+  else
+    status="DRIFT"
+    exit_code=1
+  fi
+fi
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  python3 - "$summary_json" "$MODE" "$status" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+payload["mode"] = sys.argv[2]
+payload["status"] = sys.argv[3]
+print(json.dumps(payload, indent=2, sort_keys=True))
+PY
+  exit "$exit_code"
+fi
+
+echo "platform.control.surface.reconcile"
+echo "mode: $MODE"
+echo "status: $status"
+echo "evaluated_services: $evaluated_services"
+echo "change_count: $change_count"
+echo "warning_count: $warning_count"
+echo "error_count: $error_count"
+if [[ "$change_count" -gt 0 ]]; then
+  while IFS=$'\t' read -r service_id target_id current_alias expected_alias; do
+    [[ -n "$service_id" ]] || continue
+    echo "change: ${service_id} target=${target_id} current=${current_alias:-<empty>} expected=${expected_alias}"
+  done <"$plan_file"
+fi
+
+exit "$exit_code"
