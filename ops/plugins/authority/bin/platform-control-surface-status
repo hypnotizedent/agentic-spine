@@ -43,7 +43,7 @@ if [[ -n "$SERVICE_FILTER" ]]; then
   control_surface_has_service "$SERVICE_FILTER" || stop "unknown service: $SERVICE_FILTER"
   SERVICES=("$SERVICE_FILTER")
 else
-  mapfile -t SERVICES < <(yq -r '.services | keys[]' "$(control_surface_binding_path)")
+  mapfile -t SERVICES < <(yq -r 'select(has("services")) | .services | keys[]' "$(control_surface_binding_path)")
 fi
 
 rows_file="$(mktemp)"
@@ -126,6 +126,12 @@ for service_id in "${SERVICES[@]}"; do
   echo "secret_path: ${secret_path:-n/a}"
   echo "mutation_mode: ${mutation_mode:-n/a}"
   echo "mutation_surface: $(control_surface_mutation_surface "$service_id")"
+  git_transport_host="$(control_surface_git_transport_host "$service_id" 2>/dev/null || true)"
+  git_transport_port="$(control_surface_git_transport_port "$service_id" 2>/dev/null || true)"
+  git_transport_user="$(control_surface_git_transport_user "$service_id" 2>/dev/null || true)"
+  if [[ -n "$git_transport_host" && -n "$git_transport_port" && -n "$git_transport_user" ]]; then
+    echo "git_origin_template: ssh://${git_transport_user}@${git_transport_host}:${git_transport_port}/<owner>/<repo>.git"
+  fi
   runtime_wrapper="$(control_surface_runtime_wrapper "$service_id")"
   if [[ -n "$runtime_wrapper" ]]; then
     echo "runtime_wrapper: $runtime_wrapper"

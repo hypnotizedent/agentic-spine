@@ -1,26 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# n8n-workflows — spine wrapper for workbench n8n workflow CLI
-#
-# Goals:
-# - Keep n8n workflow governance actions receipted via spine capabilities.
-# - Avoid hardcoded secrets providers/IDs in the execution path (use secrets.exec to inject N8N_API_KEY).
-# - Prevent accidental fallback to legacy/incorrect secret fetching paths inside workbench scripts.
-#
-# Expected usage (via capability):
-#   ./bin/ops cap run n8n.workflows.list
-#   ./bin/ops cap run n8n.workflows.get <workflow_id>
-#   ./bin/ops cap run n8n.workflows.export <workflow_id> <output.json>
-#
-
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
-WORKFLOWS_CLI="${WORKBENCH_ROOT}/infra/compose/n8n/n8n-workflows.sh"
-SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
+WORKFLOW_AUTHORITY_ROOT="${WORKBENCH_ROOT}/infra/compose/n8n/workflows"
+
+# shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/platform-control-surface.sh
+source "$ROOT/ops/lib/platform-control-surface.sh"
 
 usage() {
   cat <<'EOF'
-n8n-workflows (spine wrapper)
+n8n-workflows - Governed n8n workflow wrapper
 
 Usage:
   n8n-workflows <command> [args]
@@ -29,7 +19,7 @@ Commands:
   list
   get <id>
   export <id> [file]
-  export-all [dir]         Export all workflows to directory (default: fixtures/n8n/snapshots/<date>/)
+  export-all [dir]         Export all workflows (default: workbench authority snapshots dir)
   import <file.json>
   activate <id>
   deactivate <id>
@@ -38,64 +28,226 @@ Commands:
 
 Environment:
   N8N_API_KEY   Required. Prefer running via spine capability which injects this via secrets.exec.
-  N8N_API_URL   Optional. Defaults to https://n8n.ronny.works (workbench script appends /api/v1).
+  N8N_API_URL   Optional override for the canonical admin URL.
 EOF
 }
 
-if [[ $# -lt 1 ]]; then
-  usage >&2
-  exit 2
-fi
+stop() { echo "STOP: $*" >&2; exit 2; }
 
-cmd="$1"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+
+[[ $# -ge 1 ]] || { usage >&2; exit 2; }
+[[ -n "${N8N_API_KEY:-}" ]] || stop "N8N_API_KEY is not set. Run via spine capability or inject the key explicitly."
+
+CMD="$1"
 shift || true
 
-# Hard requirement: force callers to supply the API key via env injection
-# (so we don't silently fall back to any embedded Infisical logic in workbench scripts).
-if [[ -z "${N8N_API_KEY:-}" ]]; then
-  echo "STOP: N8N_API_KEY is not set." >&2
-  echo "hint: run via spine capability (it injects secrets) or export N8N_API_KEY in your environment." >&2
-  exit 2
+PRIMARY_API_BASE="${N8N_API_URL:-$(control_surface_admin_url n8n)}"
+DIRECT_RESOLVED=""
+DIRECT_API_BASE=""
+DIRECT_PATH_USED=""
+if DIRECT_RESOLVED="$(control_surface_backend_resolved_url n8n 2 2>/dev/null)"; then
+  DIRECT_API_BASE="$(awk '{print $1}' <<<"$DIRECT_RESOLVED")"
+  DIRECT_PATH_USED="$(awk '{print $2}' <<<"$DIRECT_RESOLVED")"
 fi
 
-# export-all is handled inline (not delegated to workbench)
-if [[ "$cmd" == "export-all" ]]; then
-  N8N_API_URL="${N8N_API_URL:-https://n8n.ronny.works}"
-  out_dir="${1:-$SPINE_REPO/fixtures/n8n/snapshots/$(date +%Y%m%d-%H%M%S)}"
-  mkdir -p "$out_dir"
+REQUEST_BODY=""
+REQUEST_HTTP_CODE="000"
+REQUEST_ERR=""
+REQUEST_BASE=""
 
-  # Fetch all workflow IDs
-  ids_json=$(curl -s -X GET "${N8N_API_URL}/api/v1/workflows" \
-    -H "X-N8N-API-KEY: $N8N_API_KEY")
+workflow_authority_snapshot_dir() {
+  printf '%s/snapshots/%s\n' "$WORKFLOW_AUTHORITY_ROOT" "$(date +%Y%m%d-%H%M%S)"
+}
 
-  ids=$(echo "$ids_json" | jq -r '.data[].id')
-  if [[ -z "$ids" ]]; then
-    echo "WARN: no workflows found or API error" >&2
-    echo "$ids_json" | jq '.' >&2
-    exit 1
+request_once() {
+  local method="$1"
+  local base_url="$2"
+  local endpoint="$3"
+  local data="${4:-}"
+  local body_file err_file curl_rc
+  body_file="$(mktemp)"
+  err_file="$(mktemp)"
+
+  if [[ -n "$data" ]]; then
+    REQUEST_HTTP_CODE="$(curl -sS -o "$body_file" -w '%{http_code}' \
+      --connect-timeout 8 --max-time 20 \
+      -X "$method" \
+      -H "X-N8N-API-KEY: ${N8N_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d "$data" \
+      "${base_url}/api/v1${endpoint}" 2>"$err_file")"
+    curl_rc=$?
+  else
+    REQUEST_HTTP_CODE="$(curl -sS -o "$body_file" -w '%{http_code}' \
+      --connect-timeout 8 --max-time 20 \
+      -X "$method" \
+      -H "X-N8N-API-KEY: ${N8N_API_KEY}" \
+      "${base_url}/api/v1${endpoint}" 2>"$err_file")"
+    curl_rc=$?
   fi
 
-  count=0
-  for wf_id in $ids; do
-    wf_json=$(curl -s -X GET "${N8N_API_URL}/api/v1/workflows/${wf_id}" \
-      -H "X-N8N-API-KEY: $N8N_API_KEY")
-    wf_name=$(echo "$wf_json" | jq -r '.name // "unnamed"' | tr ' ' '_' | tr -cd 'A-Za-z0-9_-')
-    # Export clean JSON (strip credentials, keep structure)
-    echo "$wf_json" | jq '{id, name, active, nodes, connections, settings}' \
-      > "${out_dir}/${wf_id}__${wf_name}.json"
+  REQUEST_BODY="$(cat "$body_file")"
+  REQUEST_ERR="$(tr '\n' ' ' <"$err_file" | sed 's/[[:space:]]\+/ /g' | cut -c1-240)"
+  REQUEST_BASE="$base_url"
+  rm -f "$body_file" "$err_file"
+  return "$curl_rc"
+}
+
+request_is_success() {
+  [[ "$REQUEST_HTTP_CODE" =~ ^2[0-9][0-9]$ ]]
+}
+
+request_is_retryable() {
+  [[ "$REQUEST_HTTP_CODE" == "000" || "$REQUEST_HTTP_CODE" == "502" || "$REQUEST_HTTP_CODE" == "503" || "$REQUEST_HTTP_CODE" == "504" ]] ||
+    grep -qiE 'bad gateway|error code: 502' <<<"$REQUEST_BODY"
+}
+
+api_request() {
+  local method="$1"
+  local endpoint="$2"
+  local data="${3:-}"
+
+  request_once "$method" "$PRIMARY_API_BASE" "$endpoint" "$data" || true
+  if request_is_success; then
+    return 0
+  fi
+
+  if request_is_retryable && [[ -n "$DIRECT_API_BASE" && "$DIRECT_API_BASE" != "$PRIMARY_API_BASE" ]]; then
+    request_once "$method" "$DIRECT_API_BASE" "$endpoint" "$data" || true
+    if request_is_success; then
+      echo "WARN: n8n primary ingress failed; used direct ${DIRECT_PATH_USED:-backend} path." >&2
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+print_request_error() {
+  local action="$1"
+  echo "FAIL: n8n ${action} via ${REQUEST_BASE} returned HTTP ${REQUEST_HTTP_CODE}" >&2
+  [[ -n "$REQUEST_ERR" ]] && echo "detail: ${REQUEST_ERR}" >&2
+  if [[ -n "$REQUEST_BODY" ]]; then
+    if jq -e . >/dev/null 2>&1 <<<"$REQUEST_BODY"; then
+      jq . <<<"$REQUEST_BODY" >&2
+    else
+      printf '%s\n' "$REQUEST_BODY" >&2
+    fi
+  fi
+}
+
+cmd_list() {
+  api_request GET "/workflows" || { print_request_error "list"; return 1; }
+  echo "$REQUEST_BODY" | jq -r '.data[]? | "\(.active | if . then "active" else "inactive" end)\t\(.id)\t\(.name)"'
+}
+
+cmd_get() {
+  local workflow_id="${1:-}"
+  [[ -n "$workflow_id" ]] || stop "workflow ID required"
+  api_request GET "/workflows/${workflow_id}" || { print_request_error "get"; return 1; }
+  jq . <<<"$REQUEST_BODY"
+}
+
+cmd_import() {
+  local file="${1:-}"
+  [[ -n "$file" ]] || stop "JSON file path required"
+  [[ -f "$file" ]] || stop "file not found: $file"
+
+  local payload
+  payload="$(jq '{name, nodes, connections, settings}' "$file")"
+  api_request POST "/workflows" "$payload" || { print_request_error "import"; return 1; }
+  jq '{id, name, active}' <<<"$REQUEST_BODY"
+}
+
+cmd_export() {
+  local workflow_id="${1:-}"
+  local file="${2:-}"
+  [[ -n "$workflow_id" ]] || stop "workflow ID required"
+
+  api_request GET "/workflows/${workflow_id}" || { print_request_error "export"; return 1; }
+  local export_data
+  export_data="$(jq '{name, active, nodes, connections, settings, meta: {notes: ""}}' <<<"$REQUEST_BODY")"
+  if [[ -n "$file" ]]; then
+    printf '%s\n' "$export_data" >"$file"
+    echo "OK: exported workflow ${workflow_id} to ${file}"
+    return 0
+  fi
+  jq . <<<"$export_data"
+}
+
+cmd_export_all() {
+  local out_dir="${1:-$(workflow_authority_snapshot_dir)}"
+  mkdir -p "$out_dir"
+
+  api_request GET "/workflows" || { print_request_error "export-all list"; return 1; }
+  mapfile -t workflow_ids < <(jq -r '.data[]?.id' <<<"$REQUEST_BODY")
+  [[ "${#workflow_ids[@]}" -gt 0 ]] || stop "no workflows returned by n8n API"
+
+  local count=0
+  local workflow_id workflow_name workflow_json export_file
+  for workflow_id in "${workflow_ids[@]}"; do
+    api_request GET "/workflows/${workflow_id}" || { print_request_error "export-all get"; return 1; }
+    workflow_name="$(jq -r '.name // "unnamed"' <<<"$REQUEST_BODY" | tr ' ' '_' | tr -cd 'A-Za-z0-9_-')"
+    workflow_json="$(jq '{id, name, active, nodes, connections, settings}' <<<"$REQUEST_BODY")"
+    export_file="${out_dir}/${workflow_id}__${workflow_name}.json"
+    printf '%s\n' "$workflow_json" >"$export_file"
     count=$((count + 1))
   done
 
-  echo "OK: exported $count workflows to $out_dir"
-  ls -la "$out_dir"
-  exit 0
-fi
+  echo "OK: exported ${count} workflows to ${out_dir}"
+}
 
-if [[ ! -x "$WORKFLOWS_CLI" ]]; then
-  echo "STOP: missing or not executable: $WORKFLOWS_CLI" >&2
-  echo "hint: expected workbench at: $WORKBENCH_ROOT" >&2
-  exit 2
-fi
+cmd_activate() {
+  local workflow_id="${1:-}"
+  [[ -n "$workflow_id" ]] || stop "workflow ID required"
+  api_request POST "/workflows/${workflow_id}/activate" || { print_request_error "activate"; return 1; }
+  jq '{id, name, active}' <<<"$REQUEST_BODY"
+}
 
-exec "$WORKFLOWS_CLI" "$cmd" "$@"
+cmd_deactivate() {
+  local workflow_id="${1:-}"
+  [[ -n "$workflow_id" ]] || stop "workflow ID required"
+  api_request POST "/workflows/${workflow_id}/deactivate" || { print_request_error "deactivate"; return 1; }
+  jq '{id, name, active}' <<<"$REQUEST_BODY"
+}
 
+cmd_update() {
+  local workflow_id="${1:-}"
+  local file="${2:-}"
+  [[ -n "$workflow_id" && -n "$file" ]] || stop "workflow ID and JSON file required"
+  [[ -f "$file" ]] || stop "file not found: $file"
+
+  local payload
+  payload="$(jq '{name, nodes, connections, settings}' "$file")"
+  api_request PUT "/workflows/${workflow_id}" "$payload" || { print_request_error "update"; return 1; }
+  jq '{id, name, active}' <<<"$REQUEST_BODY"
+}
+
+cmd_delete() {
+  local workflow_id="${1:-}"
+  [[ -n "$workflow_id" ]] || stop "workflow ID required"
+
+  api_request DELETE "/workflows/${workflow_id}" || { print_request_error "delete"; return 1; }
+  if [[ "$REQUEST_HTTP_CODE" == "204" || -z "$REQUEST_BODY" ]]; then
+    echo "OK: deleted workflow ${workflow_id}"
+    return 0
+  fi
+  jq . <<<"$REQUEST_BODY"
+}
+
+case "$CMD" in
+  list) cmd_list "$@" ;;
+  get) cmd_get "$@" ;;
+  export) cmd_export "$@" ;;
+  export-all) cmd_export_all "$@" ;;
+  import) cmd_import "$@" ;;
+  activate) cmd_activate "$@" ;;
+  deactivate) cmd_deactivate "$@" ;;
+  update) cmd_update "$@" ;;
+  delete) cmd_delete "$@" ;;
+  help|--help|-h) usage ;;
+  *) stop "unknown command: ${CMD}" ;;
+esac

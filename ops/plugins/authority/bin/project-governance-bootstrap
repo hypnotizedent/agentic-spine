@@ -5,6 +5,11 @@ set -euo pipefail
 # Mutating (manual): seed/align governance scaffolding for a new product repo.
 # Default mode is dry-run. Use --execute to mutate.
 
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+
+# shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/platform-control-surface.sh
+source "$SPINE_ROOT/ops/lib/platform-control-surface.sh"
+
 usage() {
   cat <<'EOF'
 authority.project.bootstrap - Bootstrap a product repo to spine governance baseline
@@ -15,9 +20,9 @@ Usage:
 Options:
   --repo-name <name>         Repo slug (default: basename of --repo-path)
   --product-name <name>      Product display name for docs (default: repo name)
-  --gitea-host <host>        Gitea host (default: 192.168.1.206)
-  --gitea-port <port>        Gitea SSH port (default: 2222)
-  --gitea-api-url <url>      Gitea API base URL (default: http://<host>:3000)
+  --gitea-host <host>        Gitea SSH host/alias (default: canonical alias from platform control surface)
+  --gitea-port <port>        Gitea SSH port (default: canonical port from platform control surface)
+  --gitea-api-url <url>      Gitea API base URL (default: resolved direct backend URL from platform control surface)
   --gitea-owner <owner>      Gitea owner/org (default: ronny)
   --github-org <org>         GitHub org for mirror remote (optional)
   --ensure-gitea-repo        Ensure canonical Gitea repo exists (API token required)
@@ -46,8 +51,8 @@ stop() { echo "STOP: $*" >&2; exit 2; }
 REPO_PATH=""
 REPO_NAME=""
 PRODUCT_NAME=""
-GITEA_HOST="${SPINE_GITEA_HOST:-192.168.1.206}"
-GITEA_PORT="${SPINE_GITEA_PORT:-2222}"
+GITEA_HOST="${SPINE_GITEA_HOST:-$(control_surface_git_transport_host gitea)}"
+GITEA_PORT="${SPINE_GITEA_PORT:-$(control_surface_git_transport_port gitea)}"
 GITEA_API_URL="${SPINE_GITEA_API_URL:-}"
 GITEA_OWNER="${SPINE_GITEA_OWNER:-ronny}"
 GITHUB_ORG="${SPINE_GITHUB_ORG:-}"
@@ -78,6 +83,7 @@ done
 [[ -n "$REPO_PATH" ]] || stop "--repo-path is required"
 command -v git >/dev/null 2>&1 || stop "missing dependency: git"
 command -v rg >/dev/null 2>&1 || stop "missing dependency: rg"
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 
 REPO_PATH="$(cd "$REPO_PATH" 2>/dev/null && pwd)" || stop "repo path not found: $REPO_PATH"
 git -C "$REPO_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || stop "not a git repo: $REPO_PATH"
@@ -89,7 +95,11 @@ if [[ -z "$PRODUCT_NAME" ]]; then
   PRODUCT_NAME="$REPO_NAME"
 fi
 if [[ -z "$GITEA_API_URL" ]]; then
-  GITEA_API_URL="http://${GITEA_HOST}:3000"
+  if resolved_backend="$(control_surface_backend_resolved_url gitea 2 2>/dev/null)"; then
+    GITEA_API_URL="$(awk '{print $1}' <<<"$resolved_backend")"
+  else
+    GITEA_API_URL="$(control_surface_backend_url gitea)"
+  fi
 fi
 
 EXPECTED_ORIGIN="ssh://git@${GITEA_HOST}:${GITEA_PORT}/${GITEA_OWNER}/${REPO_NAME}.git"

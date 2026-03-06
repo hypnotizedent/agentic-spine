@@ -18,7 +18,7 @@ control_surface_binding_path() {
 control_surface_field() {
   local service_id="$1"
   local field_path="$2"
-  yq -r ".services.${service_id}.${field_path} // \"\"" "$_PLATFORM_CONTROL_BINDING"
+  yq -r "select(has(\"services\")) | .services.${service_id}.${field_path} // \"\"" "$_PLATFORM_CONTROL_BINDING" | tail -n1
 }
 
 control_surface_has_service() {

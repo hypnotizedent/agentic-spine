@@ -4,6 +4,11 @@ set -euo pipefail
 # project-governance-status
 # Read-only: verify a product repo is aligned to spine governance bootstrap rules.
 
+SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+
+# shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/platform-control-surface.sh
+source "$SPINE_ROOT/ops/lib/platform-control-surface.sh"
+
 usage() {
   cat <<'EOF'
 authority.project.status - Check governance bootstrap alignment for a product repo
@@ -13,8 +18,8 @@ Usage:
 
 Options:
   --repo-name <name>        Repo slug (default: basename of --repo-path)
-  --gitea-host <host>       Gitea host (default: 192.168.1.206)
-  --gitea-port <port>       Gitea SSH port (default: 2222)
+  --gitea-host <host>       Gitea SSH host/alias (default: canonical alias from platform control surface)
+  --gitea-port <port>       Gitea SSH port (default: canonical port from platform control surface)
   --gitea-owner <owner>     Gitea owner/org (default: ronny)
   --github-org <org>        Expected GitHub org for mirror remote (optional)
   --origin-remote <name>    Canonical remote name (default: origin)
@@ -27,8 +32,8 @@ stop() { echo "STOP: $*" >&2; exit 2; }
 
 REPO_PATH=""
 REPO_NAME=""
-GITEA_HOST="${SPINE_GITEA_HOST:-192.168.1.206}"
-GITEA_PORT="${SPINE_GITEA_PORT:-2222}"
+GITEA_HOST="${SPINE_GITEA_HOST:-$(control_surface_git_transport_host gitea)}"
+GITEA_PORT="${SPINE_GITEA_PORT:-$(control_surface_git_transport_port gitea)}"
 GITEA_OWNER="${SPINE_GITEA_OWNER:-ronny}"
 GITHUB_ORG="${SPINE_GITHUB_ORG:-}"
 ORIGIN_REMOTE="origin"
@@ -51,6 +56,7 @@ done
 
 [[ -n "$REPO_PATH" ]] || stop "--repo-path is required"
 command -v git >/dev/null 2>&1 || stop "missing dependency: git"
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 
 REPO_PATH="$(cd "$REPO_PATH" 2>/dev/null && pwd)" || stop "repo path not found: $REPO_PATH"
 git -C "$REPO_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || stop "not a git repo: $REPO_PATH"
@@ -60,7 +66,6 @@ if [[ -z "$REPO_NAME" ]]; then
 fi
 
 # ── Check exemption list ─────────────────────────────────────────────────
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 EXEMPT_FILE="$SPINE_ROOT/ops/bindings/authority.exemptions.yaml"
 
 if [[ -f "$EXEMPT_FILE" ]] && command -v yq >/dev/null 2>&1; then

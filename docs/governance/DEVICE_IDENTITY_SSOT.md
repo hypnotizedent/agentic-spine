@@ -218,7 +218,7 @@ done
 # Service endpoints
 curl -s https://mintprints-api.ronny.works/health
 curl -s https://secrets.ronny.works/api/status
-curl -s http://automation-stack:5678/healthz
+curl -s https://n8n.ronny.works/healthz
 ```
 
 ### Dashboards
@@ -252,8 +252,8 @@ curl -s http://automation-stack:5678/healthz
 
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
 |--------|-------------------|--------------|------|----------|--------------|
-| automation-stack VM | `automation-stack` | 100.98.70.70 | n8n + Ollama | Shop | `curl -s http://automation-stack:5678/healthz` |
-| dev-tools VM | `dev-tools` | 100.90.167.39 | Gitea + runner | Shop | `curl -s http://100.90.167.39:3000/api/healthz` |
+| automation-stack VM | `automation-stack` | 100.98.70.70 | n8n + Ollama | Shop | `curl -s https://n8n.ronny.works/healthz` |
+| dev-tools VM | `dev-tools` | 100.90.167.39 | Gitea + runner | Shop | `curl -s https://git.ronny.works/api/healthz` |
 | ai-consolidation VM | `ai-consolidation` | 100.71.17.29 | Qdrant + AnythingLLM (VM 207) | Shop | `curl -s http://100.71.17.29:3002/api/ping` |
 
 ### Tier 2: Production Services (Media)

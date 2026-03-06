@@ -19,9 +19,10 @@ Purpose: define the mandatory baseline for any new product repository under
 ## 2. Remote Policy (Required)
 
 - `origin` must be Gitea canonical:
-  - `ssh://git@100.90.167.39:2222/<owner>/<repo>.git`
+  - `ssh://git@gitea:2222/<owner>/<repo>.git`
 - `github` is mirror-only (optional but recommended).
 - New project repos must not treat GitHub as canonical.
+- The `gitea` host alias is projected from `ops/bindings/ssh.targets.yaml`; repo tooling must not hardcode a raw IP remote.
 
 ### Repo Creation Guardrail
 

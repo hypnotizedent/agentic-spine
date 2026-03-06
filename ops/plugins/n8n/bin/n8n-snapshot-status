@@ -7,18 +7,20 @@ set -euo pipefail
 #
 
 SPINE_REPO="${SPINE_REPO:-$HOME/code/agentic-spine}"
-SSH_TARGET_FILE="$SPINE_REPO/ops/bindings/ssh.targets.yaml"
 BACKUP_INVENTORY_FILE="$SPINE_REPO/ops/bindings/backup.inventory.yaml"
 BACKUP_TARGET_NAME="${N8N_SNAPSHOT_BACKUP_TARGET:-app-n8n-workflows}"
 
-# Resolve automation-stack SSH target
-if command -v yq >/dev/null 2>&1 && [[ -f "$SSH_TARGET_FILE" ]]; then
-  SSH_HOST=$(yq -r '.ssh.targets[] | select(.id == "automation-stack") | .host' "$SSH_TARGET_FILE")
-  SSH_USER=$(yq -r '.ssh.targets[] | select(.id == "automation-stack") | .user' "$SSH_TARGET_FILE")
-else
-  SSH_HOST="100.98.70.70"
-  SSH_USER="automation"
-fi
+# shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/ssh-resolve.sh
+source "$SPINE_REPO/ops/lib/ssh-resolve.sh"
+
+SSH_USER="$(ssh_resolve_user automation-stack automation)"
+host_result="$(ssh_resolve_host_with_fallback automation-stack 2)" || true
+SSH_HOST="$(awk '{print $1}' <<<"$host_result")"
+PATH_USED="$(awk '{print $2}' <<<"$host_result")"
+[[ -n "$SSH_HOST" && "$PATH_USED" != "unreachable" ]] || {
+  SSH_HOST="$(ssh_resolve_tailscale_ip automation-stack)"
+  PATH_USED="tailscale"
+}
 
 if command -v yq >/dev/null 2>&1 && [[ -f "$BACKUP_INVENTORY_FILE" ]]; then
   BACKUP_DIR="$(yq -r ".targets[] | select(.name == \"$BACKUP_TARGET_NAME\") | .base_path" "$BACKUP_INVENTORY_FILE" | head -n1)"
@@ -30,6 +32,7 @@ fi
 
 echo "=== n8n workflow snapshot status ==="
 echo "host: ${SSH_USER}@${SSH_HOST}"
+echo "path_used: ${PATH_USED}"
 echo "path: $BACKUP_DIR"
 echo
 
