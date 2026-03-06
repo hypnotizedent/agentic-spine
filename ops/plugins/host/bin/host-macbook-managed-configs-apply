@@ -44,18 +44,27 @@ echo "spine:     $SPINE"
 echo "workbench: $WORKBENCH"
 echo ""
 
-echo "[1] Enforce managed symlinks..."
+echo "[1] Sync provider-aware managed configs..."
+if [[ -x "$SPINE/ops/plugins/providers/bin/providers-sync-managed-configs" ]]; then
+  WORKBENCH_REPO="$WORKBENCH" "$SPINE/ops/plugins/providers/bin/providers-sync-managed-configs"
+  echo "OK  provider-aware configs synced"
+else
+  echo "SKIP providers sync script missing"
+fi
+echo ""
+
+echo "[2] Enforce managed symlinks..."
 want_link "$HOME/.hammerspoon" "$WORKBENCH/dotfiles/hammerspoon/.hammerspoon"
 want_link "$HOME/.raycast-scripts" "$WORKBENCH/dotfiles/raycast"
 want_link "$HOME/.codex/config.toml" "$WORKBENCH/dotfiles/codex/config.toml"
 want_link "$HOME/.config/opencode/opencode.json" "$WORKBENCH/dotfiles/opencode/opencode.json"
 echo ""
 
-echo "[2] Canonicalize Claude entrypoint surfaces..."
+echo "[3] Canonicalize Claude entrypoint surfaces..."
 "$SPINE/ops/plugins/host/bin/host-claude-entrypoint-lock" --execute
 echo ""
 
-echo "[3] Reload Hammerspoon (best-effort)..."
+echo "[4] Reload Hammerspoon (best-effort)..."
 if command -v hs >/dev/null 2>&1; then
   nohup hs -c "hs.reload()" >/dev/null 2>&1 &
   echo "OK  hs.reload dispatched"
@@ -64,7 +73,7 @@ else
 fi
 echo ""
 
-echo "[4] Regenerate AUTO docs blocks (best-effort)..."
+echo "[5] Regenerate AUTO docs blocks (best-effort)..."
 if [[ -x "$WORKBENCH/scripts/root/sync_laptop_hotkeys_docs.sh" ]]; then
   bash "$WORKBENCH/scripts/root/sync_laptop_hotkeys_docs.sh" --quiet || true
   echo "OK  docs sync complete"
@@ -73,10 +82,9 @@ else
 fi
 echo ""
 
-echo "[5] Verify invariants..."
+echo "[6] Verify invariants..."
 cd "$WORKBENCH"
 bash scripts/root/verify_laptop_hotkeys.sh
 echo ""
 
 echo "DONE: macbook managed configs applied"
-

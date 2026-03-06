@@ -8,10 +8,8 @@ usage() {
   cat <<EOF
 Usage: openai.sh <RUN_ID>
 
-Calls the OpenAI chat completions API with model from SPINE_ENGINE_MODEL env var,
-temperature 0, and max_tokens 200. The request text comes from
-runs/<RUN_ID>/request.txt. It prints RESULT=<path> plus optional USAGE_*
-lines to let the caller track token usage.
+Calls an OpenAI-compatible chat completions endpoint using the active provider
+selection from provider orchestration.
 EOF
   exit 1
 }
@@ -22,40 +20,64 @@ run_id="${1:-}"
 run_dir="${RUNS}/${run_id}"
 request_file="${run_dir}/request.txt"
 result_file="${run_dir}/result.txt"
-response_file="${run_dir}/openai_response.json"
+response_file="${run_dir}/provider_response.json"
 
 [[ -f "${request_file}" ]] || { echo "FAIL: missing request file: ${request_file}" >&2; exit 1; }
 
 key="${OPENAI_API_KEY:-}"
-[[ -n "${key}" ]] || { echo "FAIL: OPENAI_API_KEY is not set" >&2; exit 1; }
+allow_anon="${SPINE_PROVIDER_ALLOW_ANON:-0}"
+[[ -n "${key}" || "${allow_anon}" == "1" ]] || { echo "FAIL: OPENAI_API_KEY is not set" >&2; exit 1; }
 
 base="${OPENAI_BASE_URL:-${OPENAI_API_BASE:-https://api.openai.com/v1}}"
-endpoint="${base%/}/chat/completions"
+chat_path="${SPINE_PROVIDER_CHAT_PATH:-/chat/completions}"
+endpoint="${base%/}${chat_path}"
+model="${SPINE_PROVIDER_MODEL:-${SPINE_ENGINE_MODEL:-gpt-4.1-mini}}"
+max_tokens="${SPINE_ENGINE_MAX_TOKENS:-200}"
 
-payload="$(python3 - "${request_file}" <<'PY'
-import json, sys
+payload="$(SPINE_PROVIDER_MODEL="$model" SPINE_ENGINE_MAX_TOKENS="$max_tokens" python3 - "${request_file}" <<'PY'
+import json, os, sys
 
 path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as fh:
     request = fh.read().strip()
 
+try:
+    max_tokens = int(os.environ.get("SPINE_ENGINE_MAX_TOKENS", "200"))
+except ValueError:
+    max_tokens = 200
+
 data = {
-    "model": os.environ.get("SPINE_ENGINE_MODEL", "glm-4.7-flash"),
+    "model": os.environ.get("SPINE_PROVIDER_MODEL", "gpt-4.1-mini"),
     "temperature": 0,
-    "max_tokens": 200,
+    "max_tokens": max_tokens,
     "messages": [
-        {"role": "system", "content": "You are a concise assistant that obeys instructions literally."},
-        {"role": "user", "content": request}
+        {"role": "system", "content": "You are a concise, deterministic assistant."},
+        {"role": "user", "content": request},
     ],
 }
 print(json.dumps(data))
 PY
 )"
 
+declare -a header_args
+header_args=(-H "Content-Type: application/json")
+if [[ -n "${key}" ]]; then
+  header_args+=(-H "Authorization: Bearer ${key}")
+fi
+if [[ -n "${SPINE_PROVIDER_EXTRA_HEADERS_JSON:-}" ]]; then
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] && header_args+=(-H "$line")
+  done < <(python3 - <<'PY'
+import json, os
+for key, value in json.loads(os.environ.get("SPINE_PROVIDER_EXTRA_HEADERS_JSON", "{}") or "{}").items():
+    print(f"{key}: {value}")
+PY
+)
+fi
+
 http_code="$(
   curl -sS -o "${response_file}" -w "%{http_code}" \
-    -H "Authorization: Bearer ${key}" \
-    -H "Content-Type: application/json" \
+    "${header_args[@]}" \
     --data-binary "${payload}" \
     "${endpoint}" || true
 )"
@@ -63,13 +85,11 @@ http_code="$(
 if [[ "${http_code}" != "200" ]]; then
   err_msg="$(python3 - "${response_file}" <<'PY'
 import json, sys
-
 path = sys.argv[1]
 try:
     payload = json.load(open(path, "r", encoding="utf-8"))
 except Exception as exc:
     raise SystemExit(f"<non-JSON: {exc}>")
-
 msg = payload.get("error", {}).get("message")
 if msg:
     print(msg)
@@ -77,7 +97,7 @@ else:
     print("<non-200 HTTP response>")
 PY
 )"
-  echo "FAIL: openai returned HTTP ${http_code}: ${err_msg}" >&2
+  echo "FAIL: provider returned HTTP ${http_code}: ${err_msg}" >&2
   exit 1
 fi
 
@@ -90,11 +110,19 @@ with open(resp_path, "r", encoding="utf-8") as fh:
 
 choices = data.get("choices", [])
 if not choices:
-    raise SystemExit("FAIL: openai response missing choices")
+    raise SystemExit("FAIL: response missing choices")
 
-content = choices[0].get("message", {}).get("content", "")
+message = choices[0].get("message", {}) or {}
+content = message.get("content", "")
+if isinstance(content, list):
+    parts = []
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text":
+            parts.append(str(item.get("text", "")))
+    content = "\n".join(parts)
+
 with open(out_path, "w", encoding="utf-8") as out_f:
-    out_f.write(content.strip() + "\n")
+    out_f.write(str(content).strip() + "\n")
 
 usage = data.get("usage", {}) or {}
 def emit(name, value):

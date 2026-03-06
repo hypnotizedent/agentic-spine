@@ -135,10 +135,11 @@ run something that touches secrets or external APIs:
    writing them to disk.
 
 No API keys are stored in this repo. The credentials file exports values such as
-`ZAI_API_KEY` / `Z_AI_API_KEY`, `INFISICAL_TOKEN`, and other provider tokens as env vars; utility
+`ZAI_API_KEY` / `Z_AI_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`,
+`NVIDIA_NIM_API_KEY`, `ANTHROPIC_API_KEY`, and `INFISICAL_TOKEN`; utility
 scripts read them via `secrets.exec`, never via a checked-in file. Set
-`SPINE_ENGINE_PROVIDER=zai` (or another provider) in the same shell before you
-invoke `./bin/ops run`. Default provider is `zai`.
+`SPINE_ENGINE_PROVIDER=auto` (or a specific provider) in the same shell before you
+invoke `./bin/ops run`. Default provider is `auto`.
 
 ## Engine Providers
 
@@ -146,9 +147,13 @@ Set `SPINE_ENGINE_PROVIDER` to select the AI engine for `ops run`:
 
 | Provider | File | Model | Notes |
 |----------|------|-------|-------|
-| `zai` (default) | `ops/engine/zai.sh` | `glm-4.7-flash` (`ZAI_MODEL` override) | z.ai completion, `max_tokens=200`, `temperature=0` |
-| `claude` | `ops/engine/claude.sh` | Anthropic Claude | Requires `ANTHROPIC_API_KEY` via secrets surface |
-| `openai` | `ops/engine/openai.sh` | OpenAI | Requires `OPENAI_API_KEY` via secrets surface |
+| `auto` (default) | `ops/engine/run.sh` | contract-driven | Uses the provider chain from `ops/bindings/provider.orchestration.bundle.yaml` and falls through on runtime failures |
+| `zai` | `ops/engine/openai.sh` | `glm-5` | OpenAI-compatible routing using the z.ai endpoint |
+| `anthropic` / `claude` | `ops/engine/claude.sh` | `claude-sonnet-4-5-20250929` | Uses the Anthropic Messages API |
+| `openai` | `ops/engine/openai.sh` | `gpt-4.1-mini` | OpenAI-compatible routing using OpenAI |
+| `openrouter` | `ops/engine/openai.sh` | `openai/gpt-4.1-mini` | OpenAI-compatible routing using OpenRouter |
+| `nvidia_nim` | `ops/engine/openai.sh` | `moonshotai/kimi-k2.5` | OpenAI-compatible routing using NVIDIA NIM |
+| `local_lmstudio` | `ops/engine/openai.sh` | `qwen3-coder-30b-a3b-instruct` | Local LM Studio server on `127.0.0.1:1234` |
 | `local_echo` | `ops/engine/local_echo.sh` | — | Echo-back stub for testing (no API call) |
 
-Receipts include API usage for token spend monitoring.
+See `ops/plugins/providers/README.md` for the managed surface matrix (`codex`, `opencode`, `claude_code`, `claude_desktop`) and sync/status commands.
