@@ -43,3 +43,5 @@ Make tracked projections self-stabilizing so capability and control-surface chan
 ## Implementation Notes
 - Added a dedicated reconcile path so platform control transport aliases are projected from `ssh.targets.yaml` instead of being maintained as a second independent truth.
 - Added platform control reconciliation to the shared `projection-reconcile` pass so this drift surface is handled with the rest of the tracked projections.
+- Wired the VM intake mutator to back up tracked surfaces, write scaffold entries through deterministic `load()` fragments, regenerate `vm.lifecycle.derived.yaml`, re-run platform control reconcile, and roll back the full change pack on scoped parity failure.
+- Scoped `vm-lifecycle-derived-check` so onboarding flows can validate the mutated VM without being blocked by unrelated historical entries elsewhere in `vm.lifecycle.yaml`.
