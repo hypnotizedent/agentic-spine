@@ -70,6 +70,37 @@ def codex_login_probe() -> dict[str, Any]:
     }
 
 
+def claude_native_probe() -> dict[str, Any]:
+    claude_bin = shutil_which("claude")
+    if claude_bin is None:
+        return {
+            "installed": False,
+            "token_setup_available": False,
+            "detail": "claude cli not installed",
+        }
+
+    try:
+        proc = subprocess.run(
+            [claude_bin, "setup-token", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "installed": True,
+            "token_setup_available": False,
+            "detail": str(exc),
+        }
+
+    detail = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return {
+        "installed": True,
+        "token_setup_available": proc.returncode == 0,
+        "detail": detail or "claude setup-token available",
+    }
+
+
 def load_contract(path: Path | None = None) -> dict[str, Any]:
     contract_path = path or DEFAULT_CONTRACT
     data = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
@@ -163,6 +194,10 @@ def provider_status(contract: dict[str, Any], provider_id: str) -> dict[str, Any
         local_probe = codex_login_probe()
         ready = bool(local_probe.get("installed", False))
         missing_env = []
+    elif provider_id == "claude_native":
+        local_probe = claude_native_probe()
+        ready = bool(local_probe.get("installed", False))
+        missing_env = []
     elif provider_id == "local_lmstudio":
         local_probe = local_endpoint_status(
             str(endpoint.get("base_url", "http://127.0.0.1:1234/v1")),
@@ -220,6 +255,8 @@ def provider_surface_status(contract: dict[str, Any], provider_id: str, surface:
     elif not base["ready"]:
         if provider_id == "codex_native":
             status["reason"] = "codex cli unavailable"
+        elif provider_id == "claude_native":
+            status["reason"] = "claude cli unavailable"
         else:
             status["reason"] = "credentials or endpoint unavailable"
     return status
@@ -385,7 +422,11 @@ def launch_env(contract: dict[str, Any], tool: str, requested: str | None = None
             exports["ANTHROPIC_BASE_URL"] = base_url
         exports["SPINE_CLAUDE_MODEL"] = model
     elif provider.get("engine_backend") == "native_account":
-        exports["CODEX_NATIVE_AUTH"] = "1"
+        if provider_id == "codex_native":
+            exports["CODEX_NATIVE_AUTH"] = "1"
+        elif provider_id == "claude_native":
+            exports["CLAUDE_NATIVE_AUTH"] = "1"
+            exports["SPINE_CLAUDE_MODEL"] = model
     elif provider.get("engine_backend") == "local_echo":
         exports["SPINE_PROVIDER_ALLOW_ANON"] = "1"
 

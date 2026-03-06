@@ -24,6 +24,12 @@ echo "$status_json" | jq -e '.candidates | length > 0' >/dev/null || fail "statu
 env_json="$($ENV_BIN --tool codex --json)"
 echo "$env_json" | jq -e '.SPINE_PROVIDER_BACKEND == "native_account"' >/dev/null || fail "codex native backend missing"
 echo "$env_json" | jq -e '.CODEX_NATIVE_AUTH == "1"' >/dev/null || fail "codex native auth env missing"
+echo "$env_json" | jq -e 'has("OPENAI_API_KEY") | not' >/dev/null || fail "codex should not export OPENAI_API_KEY by default"
+
+claude_env_json="$($ENV_BIN --tool claude --json)"
+echo "$claude_env_json" | jq -e '.SPINE_PROVIDER_BACKEND == "native_account"' >/dev/null || fail "claude native backend missing"
+echo "$claude_env_json" | jq -e '.CLAUDE_NATIVE_AUTH == "1"' >/dev/null || fail "claude native auth env missing"
+echo "$claude_env_json" | jq -e 'has("ANTHROPIC_API_KEY") | not' >/dev/null || fail "claude should not export ANTHROPIC_API_KEY by default"
 
 workbench_tmp="$(mktemp -d)"
 mkdir -p "$workbench_tmp/dotfiles/opencode" "$workbench_tmp/dotfiles/codex"
