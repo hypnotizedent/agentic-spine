@@ -20,10 +20,26 @@ Canonical operator procedure for rotating CLOUDFLARE_API_TOKEN with validation p
 
 ## Rotation Steps
 
-1. **Generate new token** in Cloudflare dashboard:
-   - Cloudflare Dashboard > My Profile > API Tokens > Create Token
-   - Use "Edit zone DNS" template or match existing scopes
-   - Required permissions: Zone:Read, DNS:Edit, Tunnel:Read, Registrar:Read
+1. **Generate new runtime token**:
+   - Preferred bootstrap paths:
+     - Cloudflare API using global key auth, or
+     - a dedicated bootstrap token with `API Tokens Write`
+   - Dashboard fallback:
+     - Cloudflare Dashboard > My Profile > API Tokens > Create Token
+   - Required active-runtime permissions:
+     - `Zone Read`
+     - `DNS Read`
+     - `DNS Write`
+     - `Cloudflare Tunnel Read`
+     - `Cloudflare Tunnel Write`
+     - `Registrar Domains Read`
+     - `Pages Read`
+     - `Workers Scripts Read`
+     - `Workers Scripts Write`
+     - `Workers R2 Storage Read`
+   - Notes:
+     - `Workers R2 Storage Read` is required by the active `cloudflare.r2.bucket.list` / `cloudflare.r2.object.list` surface, but the API can still return feature-state errors if R2 is not enabled on the account.
+     - `Access` / `WAF` / mutating `Pages` / mutating `R2` scopes remain out of band until those capability waves are activated.
 
 2. **Update Infisical**:
    - Path: `/spine/network/edge`
@@ -41,11 +57,19 @@ Canonical operator procedure for rotating CLOUDFLARE_API_TOKEN with validation p
    ```bash
    ./bin/ops cap run cloudflare.status
    ./bin/ops cap run cloudflare.zone.list
+   ./bin/ops cap run cloudflare.tunnel.ingress.status
+   ./bin/ops cap run cloudflare.pages.list
+   ./bin/ops cap run cloudflare.workers.list
    ```
    - Confirm `auth_mode: token` (not global fallback)
    - Confirm no `fallback_used` line in output
 
-5. **Run D315 gate**:
+5. **Run idempotent write proof**:
+   - Re-apply an existing DNS record with the same value via `cloudflare-dns-record-set`
+   - Re-apply an existing tunnel ingress rule with the same service via `cloudflare-tunnel-ingress-set`
+   - Both must succeed with global fallback disabled
+
+6. **Run D315 gate**:
    ```bash
    bash surfaces/verify/d315-cloudflare-auth-readpath-health-lock.sh
    ```
@@ -55,7 +79,7 @@ Canonical operator procedure for rotating CLOUDFLARE_API_TOKEN with validation p
 
 - Record evidence_refs in gap/loop closure:
   - Token health run key (step 3)
-  - D315 run result (step 5)
+  - D315 run result (step 6)
 - Revoke old token in Cloudflare dashboard
 
 ## Failure Recovery

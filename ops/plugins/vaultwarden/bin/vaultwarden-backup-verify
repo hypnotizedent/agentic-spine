@@ -19,11 +19,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 
 SSH_TARGETS="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SSH_RESOLVE_LIB="$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
 _stop() { echo "STOP (2): $*" >&2; exit 2; }
 
 command -v yq >/dev/null 2>&1 || _stop "missing dependency: yq"
 [[ -f "$SSH_TARGETS" ]] || _stop "missing binding: $SSH_TARGETS"
+[[ -f "$SSH_RESOLVE_LIB" ]] || _stop "missing library: $SSH_RESOLVE_LIB"
+
+# shellcheck source=../../../lib/ssh-resolve.sh
+source "$SSH_RESOLVE_LIB"
 
 # ── Configuration ──
 NAS_HOST="nas"
@@ -31,14 +36,29 @@ NAS_BACKUP_PATH="/volume1/backups/apps/vaultwarden"
 MAX_AGE_HOURS="${VW_BACKUP_MAX_AGE_HOURS:-48}"
 MIN_SIZE_KB=100
 
-VW_HOST=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .host' "$SSH_TARGETS")
-VW_USER=$(yq -r '.ssh.targets[] | select(.id == "infra-core") | .user' "$SSH_TARGETS")
-SSH_VW="ssh -o ConnectTimeout=10 -o BatchMode=yes ${VW_USER}@${VW_HOST}"
+VW_TARGET_ID="infra-core"
+VW_USER="$(ssh_resolve_user "$VW_TARGET_ID")"
+VW_HOST_LAN="$(ssh_resolve_host "$VW_TARGET_ID")"
+VW_HOST_TS="$(ssh_resolve_tailscale_ip "$VW_TARGET_ID")"
+VW_HOST="$VW_HOST_LAN"
+VW_PATH="unreachable"
+SSH_VW=(ssh "${SSH_BATCH_OPTS[@]}" "${VW_USER}@${VW_HOST}")
+
+if ssh "${SSH_BATCH_OPTS[@]}" "${VW_USER}@${VW_HOST_LAN}" "echo OK" &>/dev/null; then
+    VW_HOST="$VW_HOST_LAN"
+    VW_PATH="lan"
+    SSH_VW=(ssh "${SSH_BATCH_OPTS[@]}" "${VW_USER}@${VW_HOST}")
+elif [[ -n "$VW_HOST_TS" && "$VW_HOST_TS" != "$VW_HOST_LAN" ]] && \
+     ssh "${SSH_BATCH_OPTS[@]}" "${VW_USER}@${VW_HOST_TS}" "echo OK" &>/dev/null; then
+    VW_HOST="$VW_HOST_TS"
+    VW_PATH="tailscale"
+    SSH_VW=(ssh "${SSH_BATCH_OPTS[@]}" "${VW_USER}@${VW_HOST}")
+fi
 SSH_NAS="ssh -o ConnectTimeout=10 -o BatchMode=yes ${NAS_HOST}"
 
 echo "vaultwarden.backup.verify"
 echo "nas: $NAS_HOST:$NAS_BACKUP_PATH"
-echo "source: ${VW_USER}@${VW_HOST}"
+echo "source: ${VW_USER}@${VW_HOST} (path: ${VW_PATH:-unknown})"
 echo "threshold: ${MAX_AGE_HOURS}h"
 echo
 
@@ -114,17 +134,17 @@ echo
 
 # ── Check 8: Live data directory health ──
 echo "=== Live Data Check ==="
-if $SSH_VW "echo OK" &>/dev/null; then
-    if $SSH_VW "test -f '/opt/stacks/vaultwarden/vw-data/db.sqlite3'"; then
+if "${SSH_VW[@]}" "echo OK" &>/dev/null; then
+    if "${SSH_VW[@]}" "test -f '/opt/stacks/vaultwarden/vw-data/db.sqlite3'"; then
         echo "OK: live db.sqlite3 exists"
-        LIVE_SIZE=$($SSH_VW "du -h '/opt/stacks/vaultwarden/vw-data/db.sqlite3'" | cut -f1)
+        LIVE_SIZE=$("${SSH_VW[@]}" "du -h '/opt/stacks/vaultwarden/vw-data/db.sqlite3'" | cut -f1)
         echo "INFO: live DB size: $LIVE_SIZE"
     else
         echo "FAIL: live db.sqlite3 not found at /opt/stacks/vaultwarden/vw-data/"
         ((FAILURES++))
     fi
 else
-    echo "SKIP: cannot SSH to infra-core (Tailscale down?)"
+    echo "SKIP: cannot SSH to infra-core (resolved path: ${VW_PATH:-unknown})"
     ((WARNINGS++))
 fi
 
