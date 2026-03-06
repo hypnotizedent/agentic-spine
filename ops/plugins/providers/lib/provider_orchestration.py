@@ -39,6 +39,37 @@ def router_available() -> bool:
     return shutil_which("ccr") is not None
 
 
+def codex_login_probe() -> dict[str, Any]:
+    codex_bin = shutil_which("codex")
+    if codex_bin is None:
+        return {
+            "installed": False,
+            "logged_in": False,
+            "detail": "codex cli not installed",
+        }
+
+    try:
+        proc = subprocess.run(
+            [codex_bin, "login", "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "installed": True,
+            "logged_in": False,
+            "detail": str(exc),
+        }
+
+    detail = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return {
+        "installed": True,
+        "logged_in": proc.returncode == 0,
+        "detail": detail,
+    }
+
+
 def load_contract(path: Path | None = None) -> dict[str, Any]:
     contract_path = path or DEFAULT_CONTRACT
     data = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
@@ -128,7 +159,11 @@ def provider_status(contract: dict[str, Any], provider_id: str) -> dict[str, Any
 
     endpoint = provider.get("endpoint", {}) if isinstance(provider.get("endpoint"), dict) else {}
     local_probe = None
-    if provider_id == "local_lmstudio":
+    if provider_id == "codex_native":
+        local_probe = codex_login_probe()
+        ready = bool(local_probe.get("installed", False))
+        missing_env = []
+    elif provider_id == "local_lmstudio":
         local_probe = local_endpoint_status(
             str(endpoint.get("base_url", "http://127.0.0.1:1234/v1")),
             str(endpoint.get("models_path", "/models")),
@@ -183,7 +218,10 @@ def provider_surface_status(contract: dict[str, Any], provider_id: str, surface:
     elif not supported:
         status["reason"] = f"provider not supported on surface={surface}"
     elif not base["ready"]:
-        status["reason"] = "credentials or endpoint unavailable"
+        if provider_id == "codex_native":
+            status["reason"] = "codex cli unavailable"
+        else:
+            status["reason"] = "credentials or endpoint unavailable"
     return status
 
 
@@ -346,6 +384,8 @@ def launch_env(contract: dict[str, Any], tool: str, requested: str | None = None
         if base_url:
             exports["ANTHROPIC_BASE_URL"] = base_url
         exports["SPINE_CLAUDE_MODEL"] = model
+    elif provider.get("engine_backend") == "native_account":
+        exports["CODEX_NATIVE_AUTH"] = "1"
     elif provider.get("engine_backend") == "local_echo":
         exports["SPINE_PROVIDER_ALLOW_ANON"] = "1"
 

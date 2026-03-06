@@ -21,8 +21,9 @@ status_json="$($STATUS --surface opencode --json)"
 echo "$status_json" | jq -e '.surface == "opencode"' >/dev/null || fail "status surface mismatch"
 echo "$status_json" | jq -e '.candidates | length > 0' >/dev/null || fail "status candidates missing"
 
-env_json="$(OPENAI_API_KEY=dummy $ENV_BIN --tool codex --provider openai --json)"
-echo "$env_json" | jq -e '.CODEX_MODEL_PROVIDER == "spine_openai"' >/dev/null || fail "codex provider env missing"
+env_json="$($ENV_BIN --tool codex --json)"
+echo "$env_json" | jq -e '.SPINE_PROVIDER_BACKEND == "native_account"' >/dev/null || fail "codex native backend missing"
+echo "$env_json" | jq -e '.CODEX_NATIVE_AUTH == "1"' >/dev/null || fail "codex native auth env missing"
 
 workbench_tmp="$(mktemp -d)"
 mkdir -p "$workbench_tmp/dotfiles/opencode" "$workbench_tmp/dotfiles/codex"
@@ -49,6 +50,7 @@ assert opencode["provider"]["openai"]["options"]["apiKey"] == "{env:OPENAI_API_K
 assert opencode["provider"]["openai"]["options"]["baseURL"] == "https://openrouter.ai/api/v1"
 assert opencode["agent"]["default"]["model"].startswith("openai/")
 assert ohmy["agents"]["build"]["model"].startswith("openai/")
-assert "[model_providers.spine_openai]" in codex
+assert 'model_provider =' not in codex
+assert "[model_providers.spine_openai]" not in codex
 print("providers-smoke PASS")
 PY

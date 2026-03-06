@@ -57,17 +57,9 @@ def selected_provider(contract: dict, surface: str, requested: str | None = None
 
 def build_codex_config(contract: dict) -> str:
     defaults = contract.get("defaults", {})
-    providers = contract.get("providers", {})
-    remote_provider_ids = [
-        provider_id
-        for provider_id, provider in providers.items()
-        if provider_id not in {"local_lmstudio", "local_echo", "anthropic"}
-        and "codex" in set(provider.get("surface_support", []))
-    ]
     lines = [
         '# Codex CLI Configuration',
-        f'model = "{provider_model(contract, "openai", "codex")}"',
-        'model_provider = "spine_openai"',
+        f'model = "{provider_model(contract, "codex_native", "codex")}"',
         'sandbox = "danger-full-access"',
         'model_reasoning_effort = "xhigh"',
         'personality = "pragmatic"',
@@ -82,33 +74,15 @@ def build_codex_config(contract: dict) -> str:
         '"gpt-5.1-codex-mini" = "gpt-5.2-codex"',
         '"gpt-5.2" = "gpt-5.2-codex"',
         '',
+        '[projects."/Users/ronnyworks"]',
+        'trust_level = "trusted"',
+        '',
+        '# Native Codex account auth is the default path.',
+        '# Run `codex login` to attach your subscription-backed account.',
+        '# Local OSS fallback is launcher-driven via `--oss --local-provider`.',
+        f'# Default local provider: {defaults.get("codex_local_provider", "lmstudio")}',
+        '',
     ]
-
-    for provider_id in remote_provider_ids:
-        provider = providers[provider_id]
-        codex_block = provider.get("codex", {}) if isinstance(provider.get("codex"), dict) else {}
-        provider_name = str(codex_block.get("provider_id", f"spine_{provider_id}"))
-        lines.extend(
-            [
-                f'[model_providers.{provider_name}]',
-                f'name = "{provider.get("display_name", provider_id)}"',
-                f'base_url = "{provider.get("endpoint", {}).get("base_url", "")}"',
-                'env_key = "OPENAI_API_KEY"',
-                f'wire_api = "{codex_block.get("wire_api", "chat")}"',
-                '',
-            ]
-        )
-
-    lines.extend(
-        [
-            '[projects."/Users/ronnyworks"]',
-            'trust_level = "trusted"',
-            '',
-            '# Local OSS fallback is launcher-driven via `--oss --local-provider`.',
-            f'# Default local provider: {defaults.get("codex_local_provider", "lmstudio")}',
-            '',
-        ]
-    )
     return "\n".join(lines)
 
 
