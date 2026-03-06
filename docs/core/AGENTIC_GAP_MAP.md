@@ -12,16 +12,16 @@
 ## Extraction Status: Workbench SSOT → Spine
 
 > All workbench references below are external and read-only. Consult
-> `docs/governance/WORKBENCH_TOOLING_INDEX.md` for allowed tooling paths.
+> `docs/governance/SPINE.md` for active authority surfaces, then query `~/code/workbench` directly when needed.
 
 | Workbench SSOT (external) | Spine Equivalent | Status |
 |---------------------------|------------------|--------|
 | Workbench service registry | `docs/governance/SERVICE_REGISTRY.yaml` | EXTRACTED |
-| Workbench authority index | `docs/governance/GOVERNANCE_INDEX.md` | EXTRACTED (surgical — spine-scoped subset) |
+| Workbench authority index | `docs/governance/SPINE.md` | EXTRACTED (lean spine contract) |
 | Workbench agent context pack | `docs/core/CORE_LOCK.md` + `CAPABILITIES_OVERVIEW.md` | EXTRACTED |
 | Workbench labels registry | `.github/labels.yml` | EXTRACTED |
 | Workbench hardware registry | `docs/governance/DEVICE_IDENTITY_SSOT.md` | EXTRACTED (identity only, not full hardware) |
-| Workbench SSOT registry | `docs/governance/SSOT_REGISTRY.yaml` | EXTRACTED |
+| Workbench SSOT registry | `docs/governance/SPINE.md` + domain docs | EXTRACTED (consolidated) |
 | Workbench repo structure authority | `docs/governance/REPO_STRUCTURE_AUTHORITY.md` | EXTRACTED |
 | Workbench compose authority | `docs/governance/COMPOSE_AUTHORITY.md` | EXTRACTED |
 | Workbench portability assumptions | `docs/governance/PORTABILITY_ASSUMPTIONS.md` | EXTRACTED |
@@ -127,9 +127,8 @@ pattern with governed, receipt-producing capabilities.
 
 ### 8 Entries Archived (ronny-ops/workbench-scoped)
 
-These entries were removed from `docs/governance/SSOT_REGISTRY.yaml` because they
-reference workbench-specific artifacts, not spine governance. Each removal is
-documented in the registry's `REMOVED ENTRIES` comment section.
+These entries were removed from the old multi-doc registry model because they
+reference workbench-specific artifacts, not spine governance.
 
 | Removed Entry | Reason |
 |---------------|--------|
@@ -165,4 +164,4 @@ pointed to nonexistent paths:
 | `docs/core/EXTRACTION_PROTOCOL.md` | How extractions are done |
 | `docs/governance/STACK_REGISTRY.yaml` | Primary extraction target for stack data |
 | `docs/core/CAPABILITIES_OVERVIEW.md` | What capabilities replace legacy scripts |
-| `docs/governance/GOVERNANCE_INDEX.md` | Governance entry point (partial extraction) |
+| `docs/governance/SPINE.md` | Governance entry point |

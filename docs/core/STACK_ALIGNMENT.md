@@ -89,12 +89,10 @@ the `stack_id` in STACK_REGISTRY.yaml is the durable key.
 
 > **External Reference (Read-Only)**
 >
-> Workbench infrastructure docs are **not spine-governed**. For a centralized
-> list of workbench entry points, see:
+> Workbench infrastructure docs are not spine-governed. Query workbench
+> directly instead of relying on a duplicated spine index:
 >
-> → **[WORKBENCH_TOOLING_INDEX.md](../governance/WORKBENCH_TOOLING_INDEX.md)**
->
-> Or query directly (no RAG): `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
+> `cd ~/code/workbench && rg -n "<question>" docs infra scripts`
 
 ---
 
@@ -106,4 +104,3 @@ the `stack_id` in STACK_REGISTRY.yaml is the durable key.
 | `ops/capabilities.yaml` (`docker.compose.status`) | Runtime compose health per stack |
 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device/VM identity (where stacks run) |
 | `docs/core/AGENTIC_GAP_MAP.md` | Extraction coverage tracking (23 asset groups) |
-| `docs/governance/WORKBENCH_TOOLING_INDEX.md` | External tooling references (read-only) |

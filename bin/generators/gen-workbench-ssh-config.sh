@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 BINDING="${ROOT}/ops/bindings/ssh.targets.yaml"
-DEFAULT_OUTPUT="/Users/ronnyworks/code/workbench/dotfiles/ssh/config.d/tailscale.conf"
+WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
+DEFAULT_OUTPUT="${WORKBENCH_ROOT}/dotfiles/ssh/config.d/tailscale.conf"
 
 fail() {
   echo "gen.workbench.ssh FAIL: $*" >&2

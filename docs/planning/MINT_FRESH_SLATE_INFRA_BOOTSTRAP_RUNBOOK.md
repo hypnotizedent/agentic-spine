@@ -301,7 +301,7 @@ Every file below MUST be updated before running spine.verify. Order matters to m
 | 2 | `ops/bindings/ssh.targets.yaml` | modify | Add two targets: `mint-data` and `mint-apps` |
 | 3 | `ops/bindings/docker.compose.targets.yaml` | modify | Add two targets with stack paths |
 | 4 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | modify | Add two device rows |
-| 5 | `docs/governance/SHOP_SERVER_SSOT.md` | modify | Add two VM inventory rows |
+| 5 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | modify | Add two VM identity rows |
 | 6 | `docs/governance/SERVICE_REGISTRY.yaml` | modify | Add section with 6 service entries (3 data + 3 app) |
 | 7 | `docs/governance/STACK_REGISTRY.yaml` | modify | Add two stack entries (mint-data, mint-apps) |
 | 8 | `ops/bindings/services.health.yaml` | modify | Add 5 health probes (postgres excluded — TCP-only) |

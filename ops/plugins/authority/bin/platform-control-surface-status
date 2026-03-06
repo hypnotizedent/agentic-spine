@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+
+# shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/platform-control-surface.sh
+source "$ROOT/ops/lib/platform-control-surface.sh"
+
+usage() {
+  cat <<'EOF'
+platform.control.surface.status - Summarize canonical control surfaces for core platform services
+
+Usage:
+  platform-control-surface-status [--service <id>] [--json]
+
+Options:
+  --service <id>   Filter to one service (n8n, gitea, authentik)
+  --json           Emit JSON
+  -h, --help       Show help
+EOF
+}
+
+stop() { echo "STOP: $*" >&2; exit 2; }
+
+SERVICE_FILTER=""
+JSON_OUT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --service) SERVICE_FILTER="${2:-}"; shift 2 ;;
+    --json) JSON_OUT=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+[[ -f "$(control_surface_binding_path)" ]] || stop "missing control surface contract"
+
+declare -a SERVICES
+if [[ -n "$SERVICE_FILTER" ]]; then
+  control_surface_has_service "$SERVICE_FILTER" || stop "unknown service: $SERVICE_FILTER"
+  SERVICES=("$SERVICE_FILTER")
+else
+  mapfile -t SERVICES < <(yq -r '.services | keys[]' "$(control_surface_binding_path)")
+fi
+
+rows_file="$(mktemp)"
+trap 'rm -f "$rows_file"' EXIT
+
+for service_id in "${SERVICES[@]}"; do
+  admin_url="$(control_surface_admin_url "$service_id")"
+  probe_url="$(control_surface_probe_url "$service_id")"
+  backend_target="$(control_surface_backend_target "$service_id")"
+  backend_resolved=""
+  path_used=""
+  if resolved_result="$(control_surface_backend_resolved_url "$service_id" 2 2>/dev/null)"; then
+    backend_resolved="$(awk '{print $1}' <<<"$resolved_result")"
+    path_used="$(awk '{print $2}' <<<"$resolved_result")"
+  fi
+
+  http_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "$probe_url" || echo 000)"
+  probe_status="fail"
+  if [[ "$http_code" =~ ^2[0-9][0-9]$ || "$http_code" =~ ^3[0-9][0-9]$ ]]; then
+    probe_status="pass"
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$service_id" \
+    "$admin_url" \
+    "$probe_url" \
+    "$http_code" \
+    "$probe_status" \
+    "$backend_target" \
+    "$backend_resolved" \
+    "$path_used" \
+    "$(control_surface_secret_project "$service_id")" \
+    "$(control_surface_secret_path "$service_id")" \
+    "$(control_surface_mutation_mode "$service_id")" >>"$rows_file"
+done
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  python3 - "$rows_file" <<'PY'
+import json, sys
+rows = []
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    for line in handle:
+        parts = line.rstrip("\n").split("\t")
+        rows.append({
+            "service_id": parts[0],
+            "admin_url": parts[1],
+            "probe_url": parts[2],
+            "http_code": int(parts[3]) if parts[3].isdigit() else parts[3],
+            "probe_status": parts[4],
+            "backend_target": parts[5] or None,
+            "backend_resolved_url": parts[6] or None,
+            "backend_path_used": parts[7] or None,
+            "secret_project": parts[8] or None,
+            "secret_path": parts[9] or None,
+            "mutation_mode": parts[10] or None,
+        })
+print(json.dumps({
+    "status": "ok",
+    "services": rows,
+}, indent=2))
+PY
+  exit 0
+fi
+
+echo "platform.control.surface.status"
+for service_id in "${SERVICES[@]}"; do
+  row="$(grep "^${service_id}" "$rows_file" || true)"
+  [[ -n "$row" ]] || continue
+  IFS=$'\t' read -r _ admin_url probe_url http_code probe_status backend_target backend_resolved path_used secret_project secret_path mutation_mode <<<"$row"
+  echo
+  echo "service: $service_id"
+  echo "admin_url: $admin_url"
+  echo "probe_url: $probe_url"
+  echo "probe_http_code: $http_code"
+  echo "probe_status: $probe_status"
+  echo "backend_target: ${backend_target:-n/a}"
+  echo "backend_resolved_url: ${backend_resolved:-n/a}"
+  echo "backend_path_used: ${path_used:-n/a}"
+  echo "secret_project: ${secret_project:-n/a}"
+  echo "secret_path: ${secret_path:-n/a}"
+  echo "mutation_mode: ${mutation_mode:-n/a}"
+  echo "mutation_surface: $(control_surface_mutation_surface "$service_id")"
+  runtime_wrapper="$(control_surface_runtime_wrapper "$service_id")"
+  if [[ -n "$runtime_wrapper" ]]; then
+    echo "runtime_wrapper: $runtime_wrapper"
+  fi
+done

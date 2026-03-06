@@ -11,4 +11,4 @@ scope: deprecated-claude-command
 This command has been archived. The `mint ask` RAG query path is deprecated.
 
 **Replacement:** Use SSOT docs (`docs/governance/`, `docs/core/`) + `rg` search for codebase queries.
-See: `docs/governance/GOVERNANCE_INDEX.md` for navigation.
+See: `docs/governance/SPINE.md` for navigation.

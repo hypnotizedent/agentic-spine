@@ -7,8 +7,8 @@ scope: docs-contributing-rules
 
 # Docs Contributing Rules
 
-> Every doc must live in the right folder, carry a metadata header, and
-> appear in `docs/README.md`. No exceptions.
+> Every doc must live in the right folder, carry a metadata header, and fit the
+> lean docs layout. Do not create new root-level governance sprawl.
 
 ---
 
@@ -16,8 +16,9 @@ scope: docs-contributing-rules
 
 | Folder | What Goes Here | Examples |
 |--------|---------------|---------|
-| `docs/core/` | Spine invariants — contracts, bindings, locks, gap map | `AGENT_CONTRACT.md`, `CORE_LOCK.md`, `SECRETS_BINDING.md` |
-| `docs/governance/` | SSOTs, authority pages, registries, audits | `GOVERNANCE_INDEX.md`, `STACK_REGISTRY.yaml`, `SCRIPTS_AUTHORITY.md` |
+| `docs/core/` | Spine invariants — contracts, bindings, locks, gap map | `AGENT_CONTRACT.md`, `CORE_LOCK.md`, `RECEIPTS_CONTRACT.md` |
+| `docs/governance/` | Canonical governance, SSOTs, and narrow infra summaries | `SPINE.md`, `SESSION_PROTOCOL.md`, `STACK_REGISTRY.yaml` |
+| `docs/governance/domains/` | One canonical doc per domain | `finance.md`, `loop_gap.md`, `media.md` |
 | `docs/brain/` | Agent memory, context injection, imported commands | `README.md`, `rules.md` |
 | `docs/pillars/` | Domain pillar docs and domain-level operating references | `finance/` |
 | `docs/planning/` | Planning, roadmaps, and scoped execution plans | `README.md`, `ROADMAP.md` |
@@ -54,10 +55,13 @@ Valid status values: `authoritative`, `draft`, `archived`, `deprecated`
 
 ---
 
-## README.md Registration
+## Discoverability Rules
 
-After creating or moving a doc, add it to `docs/README.md` in the appropriate
-section table. An unregistered doc is invisible to agents.
+Do not add a new doc if an existing canonical surface can absorb the content.
+
+- Daily governance belongs in `docs/governance/SPINE.md` or a domain doc.
+- Domain guidance belongs in exactly one file under `docs/governance/domains/`.
+- Only root-level entry surfaces belong in `docs/README.md`.
 
 ---
 

@@ -11,7 +11,7 @@ scope: vm-lifecycle-governance
 > operating, and decommissioning a Proxmox VM under spine governance.
 >
 > **Authority boundary:**
-> - This contract defines the *process*. Hardware/topology facts live in SHOP_SERVER_SSOT.md.
+> - This contract defines the process. Hardware/topology facts live in `docs/governance/DEVICE_IDENTITY_SSOT.md` and `docs/governance/STACK_REGISTRY.yaml`.
 > - Service placement rules live in `ops/bindings/infra.placement.policy.yaml`.
 > - Storage tier placement lives in `ops/bindings/infra.storage.placement.policy.yaml`.
 > - Per-VM state lives in `ops/bindings/vm.lifecycle.yaml` (the lifecycle binding).
@@ -63,7 +63,7 @@ The following files WILL need updates by the end of REGISTER phase:
 | File | Update Required |
 |------|----------------|
 | `ops/bindings/vm.lifecycle.yaml` | New entry (this phase) |
-| `docs/governance/SHOP_SERVER_SSOT.md` | VM inventory table row |
+| `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device entry with host and IP identity |
 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device entry with IPs |
 | `docs/governance/SERVICE_REGISTRY.yaml` | Service entries for hosted services |
 | `docs/governance/STACK_REGISTRY.yaml` | Stack entry |
@@ -157,7 +157,7 @@ Each update MUST be committed. The order below minimizes drift window:
 | 2 | `ops/bindings/ssh.targets.yaml` | SSH target entry (id, host, user, tags) | connectivity |
 | 3 | `ops/bindings/docker.compose.targets.yaml` | Compose target with stack paths | stack discovery |
 | 4 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device row (hostname, LAN IP, TS IP, VMID) | identity |
-| 5 | `docs/governance/SHOP_SERVER_SSOT.md` | VM inventory table row | hardware SSOT |
+| 5 | `docs/governance/DEVICE_IDENTITY_SSOT.md` | Device identity row | host identity |
 | 6 | `docs/governance/SERVICE_REGISTRY.yaml` | Service entries (host, port, health, container) | service truth |
 | 7 | `docs/governance/STACK_REGISTRY.yaml` | Stack entry (stack_id, path, deploy_method) | stack truth |
 | 8 | `ops/bindings/services.health.yaml` | Health probe endpoints for each service | monitoring |
@@ -312,6 +312,6 @@ Every rollback must produce:
 | `ops/bindings/infra.placement.policy.yaml` | Where VMs are allowed to be placed |
 | `ops/bindings/infra.storage.placement.policy.yaml` | What storage tier each VM should use |
 | `docs/governance/INFRA_RELOCATION_PROTOCOL.md` | Protocol for moving services between VMs |
-| `docs/governance/SHOP_SERVER_SSOT.md` | Hardware-level VM inventory |
+| `docs/governance/DEVICE_IDENTITY_SSOT.md` | Hardware-level VM identity |
 | `docs/governance/SERVICE_REGISTRY.yaml` | Service-to-host mapping |
 | `docs/core/STACK_LIFECYCLE.md` | Stack-level operations within a VM |

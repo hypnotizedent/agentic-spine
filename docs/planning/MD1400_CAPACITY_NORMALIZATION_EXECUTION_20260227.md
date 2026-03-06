@@ -51,11 +51,11 @@ loop_id: LOOP-MD1400-CAPACITY-NORMALIZATION-20260227-20260227
 ## Wave 2 Evidence Pack (Read-Only)
 
 - `CAP-20260226-225541__infra.storage.audit.snapshot__R6d9q93895`
-- Artifact bundle: [`docs/planning/_artifacts/md1400-normalization-20260227/`](docs/planning/_artifacts/md1400-normalization-20260227/)
-  - [`01-zpool-list.txt`](docs/planning/_artifacts/md1400-normalization-20260227/01-zpool-list.txt)
-  - [`02-lsblk-st4000nm0063.txt`](docs/planning/_artifacts/md1400-normalization-20260227/02-lsblk-st4000nm0063.txt)
-  - [`03-md1400-target-wipefs-smart.txt`](docs/planning/_artifacts/md1400-normalization-20260227/03-md1400-target-wipefs-smart.txt)
-  - [`04-zfs-list-media.txt`](docs/planning/_artifacts/md1400-normalization-20260227/04-zfs-list-media.txt)
+- Artifact bundle: [`_artifacts/md1400-normalization-20260227/`](_artifacts/md1400-normalization-20260227/)
+  - `01-zpool-list.txt` (artifact not retained)
+  - `02-lsblk-st4000nm0063.txt` (artifact not retained)
+  - `03-md1400-target-wipefs-smart.txt` (artifact not retained)
+  - `04-zfs-list-media.txt` (artifact not retained)
 
 Wave 2 key observations:
 
@@ -70,7 +70,7 @@ Wave 2 key observations:
 - `CAP-20260226-225711__domain-inventory-refresh__Rda9997576`
 - `CAP-20260226-225824__verify.pack.run__R4qtk1777` (`infra` 41/41 PASS; D188 PASS)
 - Host drift cleanup artifact:
-  - [`05-pm80xx-post-cleanup.txt`](docs/planning/_artifacts/md1400-normalization-20260227/05-pm80xx-post-cleanup.txt)
+  - [`05-pm80xx-post-cleanup.txt`](_artifacts/md1400-normalization-20260227/05-pm80xx-post-cleanup.txt)
 
 Wave 3 key observations:
 
@@ -108,14 +108,14 @@ Post-wave verification receipts:
 
 Wave 4 artifact additions:
 
-- [`06-wave4-preflight-zpool-status-P.txt`](docs/planning/_artifacts/md1400-normalization-20260227/06-wave4-preflight-zpool-status-P.txt)
-- [`07-wave4-preflight-wwn-paths.txt`](docs/planning/_artifacts/md1400-normalization-20260227/07-wave4-preflight-wwn-paths.txt)
-- [`08-wave4-preflight-collision-check.txt`](docs/planning/_artifacts/md1400-normalization-20260227/08-wave4-preflight-collision-check.txt)
-- [`09-wave4-precreate-wipefs.txt`](docs/planning/_artifacts/md1400-normalization-20260227/09-wave4-precreate-wipefs.txt)
-- [`10-wave4-post-zpool-list.txt`](docs/planning/_artifacts/md1400-normalization-20260227/10-wave4-post-zpool-list.txt)
-- [`11-wave4-post-zpool-status-md1400.txt`](docs/planning/_artifacts/md1400-normalization-20260227/11-wave4-post-zpool-status-md1400.txt)
-- [`12-wave4-post-zfs-list-md1400.txt`](docs/planning/_artifacts/md1400-normalization-20260227/12-wave4-post-zfs-list-md1400.txt)
-- [`13-wave4-post-wipefs-targets.txt`](docs/planning/_artifacts/md1400-normalization-20260227/13-wave4-post-wipefs-targets.txt)
+- `06-wave4-preflight-zpool-status-P.txt` (artifact not retained)
+- `07-wave4-preflight-wwn-paths.txt` (artifact not retained)
+- `08-wave4-preflight-collision-check.txt` (artifact not retained)
+- `09-wave4-precreate-wipefs.txt` (artifact not retained)
+- `10-wave4-post-zpool-list.txt` (artifact not retained)
+- `11-wave4-post-zpool-status-md1400.txt` (artifact not retained)
+- `12-wave4-post-zfs-list-md1400.txt` (artifact not retained)
+- `13-wave4-post-wipefs-targets.txt` (artifact not retained)
 
 Wave 4 key observations:
 
@@ -148,27 +148,27 @@ Wave 4 follow-up gap status:
 - Forensic source snapshot:
   - snapshot name: `forensic-20260226-2325`
   - artifacts:
-    - [`14-wave5-snapshot-name.txt`](docs/planning/_artifacts/md1400-normalization-20260227/14-wave5-snapshot-name.txt)
-    - [`15-wave5-snapshot-tail.txt`](docs/planning/_artifacts/md1400-normalization-20260227/15-wave5-snapshot-tail.txt)
+    - `14-wave5-snapshot-name.txt` (artifact not retained)
+    - `15-wave5-snapshot-tail.txt` (artifact not retained)
 - Dry-run copy baseline:
-  - artifact: [`16-wave5-rsync-dryrun-stats.txt`](docs/planning/_artifacts/md1400-normalization-20260227/16-wave5-rsync-dryrun-stats.txt)
+  - artifact: `16-wave5-rsync-dryrun-stats.txt` (artifact not retained)
   - summary:
     - files: `6,207` (`5,044` regular, `1,163` dirs)
     - total size: `2,737,447,548,582` bytes
     - deletions: `0`
 - Full copy execution (non-destructive):
   - started in background on `pve`:
-    - artifact: [`17-wave5-rsync-start.txt`](docs/planning/_artifacts/md1400-normalization-20260227/17-wave5-rsync-start.txt)
+    - artifact: `17-wave5-rsync-start.txt` (artifact not retained)
     - supervisor pid: `1713927`
     - rsync pid: `1713932`
   - live state/progress artifacts:
-    - [`18-wave5-rsync-process.txt`](docs/planning/_artifacts/md1400-normalization-20260227/18-wave5-rsync-process.txt)
-    - [`19-wave5-rsync-progress-tail.txt`](docs/planning/_artifacts/md1400-normalization-20260227/19-wave5-rsync-progress-tail.txt)
+    - `18-wave5-rsync-process.txt` (artifact not retained)
+    - `19-wave5-rsync-progress-tail.txt` (artifact not retained)
   - latest observed progress at capture time: `~6%` (log tail, transfer active)
 - Closeout watcher attempt recorded:
   - artifacts:
-    - [`23-wave5-closeout-watcher.pid`](docs/planning/_artifacts/md1400-normalization-20260227/23-wave5-closeout-watcher.pid)
-    - [`23-wave5-closeout-watcher.log`](docs/planning/_artifacts/md1400-normalization-20260227/23-wave5-closeout-watcher.log)
+    - `23-wave5-closeout-watcher.pid` (artifact not retained)
+    - [`23-wave5-closeout-watcher.log`](_artifacts/md1400-normalization-20260227/23-wave5-closeout-watcher.log)
   - status: local watcher process did not remain active; closeout block `20`-`22` and `24`-`27` remains pending until rsync completion is detected in-session.
 - Source deletion status in Wave 5 so far:
   - none (copy-first only; no `--delete`)

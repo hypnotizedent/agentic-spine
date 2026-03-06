@@ -71,7 +71,7 @@ Before marking any extraction complete, run the trace gate:
    rg -n "(ronny-ops|~/code/workbench|workbench|infrastructure/docs)" docs ops surfaces bin \
      -g'!receipts/**' -g'!mailroom/outbox/**'
    ```
-   - **Allowed:** WORKBENCH_TOOLING_INDEX.md
+   - **Allowed:** direct `~/code/workbench` references in extraction tracking and archived audit surfaces
    - **Historical:** docs/legacy/**, docs/governance/_audits/**
    - **Conflict:** any other location (must resolve)
 
@@ -83,7 +83,7 @@ Before marking any extraction complete, run the trace gate:
 
 3. **Document in mailroom** — if the extraction touches governance docs, create a mailroom item with the trace matrix.
 
-Workbench paths live only in WORKBENCH_TOOLING_INDEX.md. All other references are conflicts.
+Workbench paths should stay isolated to extraction tracking, archived audits, and explicit external-reference notes. All other references are conflicts.
 
 ## Drift Gate Pattern
 

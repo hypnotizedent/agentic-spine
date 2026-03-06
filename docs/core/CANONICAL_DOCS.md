@@ -11,7 +11,7 @@ This repository has a single canonical documentation surface:
 ## Conflict Rule
 
 If any document outside `docs/core` or `docs/governance` conflicts with them, **core/governance wins**.
-If `docs/core` and `docs/governance` conflict, follow `docs/governance/SSOT_REGISTRY.yaml`.
+If `docs/core` and `docs/governance` conflict, follow `docs/governance/SPINE.md`.
 
 ## Agent Behavior
 

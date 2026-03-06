@@ -11,4 +11,4 @@ scope: deprecated-claude-command
 This command has been archived. The `mint ask` incident lookup path is deprecated.
 
 **Replacement:** Use workbench incident history or `rg` search for incident data.
-See: `docs/governance/GOVERNANCE_INDEX.md` for navigation.
+See: `docs/governance/SPINE.md` for navigation.

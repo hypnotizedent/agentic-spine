@@ -1,0 +1,69 @@
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-05
+scope: platform-control-surfaces
+---
+
+version: 1
+updated: "2026-03-05T00:00:00Z"
+
+services:
+  n8n:
+    service_registry_id: n8n
+    admin_url: "https://n8n.ronny.works"
+    health_path: "/healthz"
+    backend:
+      ssh_target: automation-stack
+      scheme: http
+      port: 5678
+    secrets:
+      project: infrastructure
+      path: /spine/services/n8n
+      required_keys:
+        - N8N_API_KEY
+    control:
+      mutation_mode: capability_only
+      mutation_surface: "./bin/ops cap run n8n.workflows.<action>"
+      runtime_wrapper: "./ops/plugins/n8n/bin/n8n-workflows"
+
+  gitea:
+    service_registry_id: gitea
+    admin_url: "https://git.ronny.works"
+    health_path: "/api/healthz"
+    backend:
+      ssh_target: dev-tools
+      scheme: http
+      port: 3000
+    git_transport:
+      ssh_target: dev-tools
+      host_mode: tailscale_ip
+      ssh_user: git
+      port: 2222
+    secrets:
+      project: infrastructure
+      path: /spine/vm-infra/gitea
+      required_keys:
+        - GITEA_API_TOKEN
+    control:
+      mutation_mode: git_or_browser_only
+      mutation_surface: "Use Gitea SSH origin for repo content and browser admin for service settings."
+      runtime_wrapper: ""
+
+  authentik:
+    service_registry_id: authentik
+    admin_url: "https://auth.ronny.works"
+    health_path: "/if/flow/initial-setup/"
+    backend:
+      ssh_target: infra-core
+      scheme: http
+      port: 9000
+    secrets:
+      project: infrastructure
+      path: /spine/vm-infra/caddy-auth
+      required_keys:
+        - AUTHENTIK_API_TOKEN
+    control:
+      mutation_mode: browser_only
+      mutation_surface: "Use the Authentik browser admin surface."
+      runtime_wrapper: ""

@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-WATCHDOG="/Users/ronnyworks/code/workbench/agents/immich/tools/immich_ingest_watchdog.py"
+WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME/code/workbench}"
+WATCHDOG="${WORKBENCH_ROOT}/agents/immich/tools/immich_ingest_watchdog.py"
 
 PASS=0
 FAIL=0

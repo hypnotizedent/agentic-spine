@@ -173,8 +173,9 @@ def render_queue(cadence: str, period_start: dt.date, period_end: dt.date, trans
             source_tool="finance.ronny.action.queue",
             action_type="data-import",
             instructions=(
-                "Download CSV exports from Chase/AmEx/TD and import via Firefly Data Importer. "
-                "Downstream reconciliation/tax tasks remain blocked until transactions are present."
+                "Run finance.simplefin.sync.status first. If the automated sync is healthy but the period is still "
+                "missing or the account is not covered by SimpleFIN, import the missing statement CSVs through "
+                "Firefly Data Importer. Downstream reconciliation stays blocked until transactions are present."
             ),
             evidence_required=["Transaction count > 0 in Firefly III for the selected period"],
             due_at=period_end.isoformat(),
@@ -196,7 +197,8 @@ def render_queue(cadence: str, period_start: dt.date, period_end: dt.date, trans
                 action_type="data-import",
                 instructions=(
                     f"Latest transaction is {stale_days} days old ({latest_txn}). "
-                    "Import current bank CSV data to return to weekly freshness."
+                    "Run finance.simplefin.sync.status first, then use CSV import only as fallback if the "
+                    "automated sync is healthy but the missing period still has not arrived in Firefly."
                 ),
                 evidence_required=["Latest transaction <= 7 days old"],
                 due_at=period_end.isoformat(),
@@ -346,8 +348,8 @@ def main() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    firefly_url = os.environ.get("FIREFLY_URL", "http://192.168.1.211:8080")
-    firefly_pat = os.environ.get("FIREFLY_ACCESS_TOKEN", "")
+    firefly_url = os.environ.get("FIREFLY_URL", "http://100.76.153.100:8080")
+    firefly_pat = os.environ.get("FIREFLY_PAT") or os.environ.get("FIREFLY_ACCESS_TOKEN", "")
 
     transactions, pipeline_error = firefly_transactions(firefly_url, firefly_pat, period_start, period_end)
 

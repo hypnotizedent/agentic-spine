@@ -1,243 +1,45 @@
-# Agentic Spine — Docs Index
-
-> **Purpose:** Single landing page for every agent. Points to canonical contracts,
-> governance SSOTs, extraction guides, and the gap map. Start here, reach any
-> doc in two hops, never leave `/code`.
->
-> **Status:** authoritative
-> **Last verified:** 2026-02-15
-
+---
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-05
+scope: docs-entrypoint
 ---
 
-## Core Contracts
+# Agentic Spine Docs
 
-The invariants. If a drift gate fails, one of these was violated.
+Minimal landing page for live docs after the lean reset.
 
-| Doc | What It Governs |
-|-----|----------------|
-| [AGENT_CONTRACT.md](core/AGENT_CONTRACT.md) | Allowable agent behavior — the rules every agent follows |
-| [AGENT_OUTPUT_CONTRACT.md](core/AGENT_OUTPUT_CONTRACT.md) | Required output block structure |
-| [RECEIPTS_CONTRACT.md](core/RECEIPTS_CONTRACT.md) | Receipt format, proof rules, ledger entries |
-| [CORE_LOCK.md](core/CORE_LOCK.md) | Spine health invariants + drift gate definitions (D1-D84) |
-| [SPINE.md](core/SPINE.md) | Spine architecture and design principles |
-| [SPINE_SESSION_HEADER.md](core/SPINE_SESSION_HEADER.md) | Session header format for agent context |
-| [SPINE_STATE.md](core/SPINE_STATE.md) | Canonical spine state — what lives here, no legacy deps |
-| [STACK_LIFECYCLE.md](core/STACK_LIFECYCLE.md) | Stack discovery + lifecycle operations (no compose guessing) |
-| [PROJECT_GOVERNANCE_CONTRACT.md](core/PROJECT_GOVERNANCE_CONTRACT.md) | Mandatory baseline for all new product repositories under `~/code` |
-| [SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) | Spine-native session protocol (entry point) |
+## Read First
 
----
+- [governance/SPINE.md](governance/SPINE.md) - single canonical governance contract
+- [governance/SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) - session entry and closeout rules
+- [core/SPINE_STATE.md](core/SPINE_STATE.md) - what belongs in the repo and what does not
 
-## Product (AOF v0.1)
+## Canonical Governance
 
-Productization artifacts for the Agentic Operations Framework.
+- [governance/AGENT_GOVERNANCE_BRIEF.md](governance/AGENT_GOVERNANCE_BRIEF.md)
+- [governance/STACK_REGISTRY.yaml](governance/STACK_REGISTRY.yaml)
+- [governance/SERVICE_REGISTRY.yaml](governance/SERVICE_REGISTRY.yaml)
+- [governance/DEVICE_IDENTITY_SSOT.md](governance/DEVICE_IDENTITY_SSOT.md)
+- [governance/MINILAB_SSOT.md](governance/MINILAB_SSOT.md)
 
-| Doc | What It Covers |
-|-----|---------------|
-| [AOF_PRODUCT_CONTRACT.md](product/AOF_PRODUCT_CONTRACT.md) | Product boundary, versioning, tenant/policy model |
-| [AOF_ACCEPTANCE_GATES.md](product/AOF_ACCEPTANCE_GATES.md) | Gate categories and minimum viable acceptance criteria |
-| [AOF_DEPLOYMENT_PLAYBOOK.md](product/AOF_DEPLOYMENT_PLAYBOOK.md) | Step-by-step deployment guide |
-| [AOF_SUPPORT_SLO.md](product/AOF_SUPPORT_SLO.md) | Severity-based response/resolution targets |
+## Domain Docs
 
----
+Domain authority is one file per domain under [`docs/governance/domains/`](governance/domains/).
+Keep additions there instead of creating new governance roots.
 
-## Bindings (Non-Secret Configuration)
+## Supporting Surfaces
 
-| Doc | What It Binds |
-|-----|--------------|
-| [SECRETS_BINDING.md](core/SECRETS_BINDING.md) | Infisical provider binding (no secrets, just structure) |
-| [CLOUD_FLARE_BINDING.md](core/CLOUD_FLARE_BINDING.md) | Cloudflare zone/tunnel binding |
-| [INFISICAL_PROJECTS.md](core/INFISICAL_PROJECTS.md) | Infisical project inventory (names + counts) |
-| [DEVICE_IDENTITY_SSOT.md](governance/DEVICE_IDENTITY_SSOT.md) | Device/VM identity (hostnames, Tailscale IPs) |
-| [SHOP_SERVER_SSOT.md](governance/SHOP_SERVER_SSOT.md) | Shop rack infrastructure (R730XD, VMs, storage, cameras) |
-| [MACBOOK_SSOT.md](governance/MACBOOK_SSOT.md) | Workstation infrastructure (RAG stack, dev tooling) |
-| [MINILAB_SSOT.md](governance/MINILAB_SSOT.md) | Home minilab (Beelink, NAS, home VMs/LXCs) |
+- [brain/README.md](brain/README.md) - context-loading and memory rules
+- [core/AGENTIC_GAP_MAP.md](core/AGENTIC_GAP_MAP.md) - extraction and boundary tracking
+- [core/STACK_ALIGNMENT.md](core/STACK_ALIGNMENT.md) - stack inventory alignment notes
+- [CONTRIBUTING.md](CONTRIBUTING.md) - doc placement and minimality rules
 
----
+## Directory Map
 
-## Governance / SSOTs
-
-The authority chain. When in doubt, these are the source of truth.
-
-| Doc | Scope |
-|-----|-------|
-| [GOVERNANCE_INDEX.md](governance/GOVERNANCE_INDEX.md) | Entry point — rules, authority chain, general governance |
-| [SESSION_PROTOCOL.md](governance/SESSION_PROTOCOL.md) | Entry point for every agent inside the spine |
-| [ORCHESTRATION_CAPABILITY.md](governance/ORCHESTRATION_CAPABILITY.md) | Strict orchestration terminal entry and lane isolation contract |
-| [OPENCODE_GOVERNED_ENTRY.md](governance/OPENCODE_GOVERNED_ENTRY.md) | Governed OpenCode entry/model/provider contract |
-| [WORKER_LANE_TEMPLATE_PACK.md](governance/WORKER_LANE_TEMPLATE_PACK.md) | Canonical worker-lane prompt and handoff templates |
-| [STACK_REGISTRY.yaml](governance/STACK_REGISTRY.yaml) | What stacks exist, where they run |
-| [SERVICE_REGISTRY.yaml](governance/SERVICE_REGISTRY.yaml) | Service-level inventory (ports, health URLs) |
-| [SSOT_REGISTRY.yaml](governance/SSOT_REGISTRY.yaml) | Priority list of truth sources agents follow |
-| [REPO_STRUCTURE_AUTHORITY.md](governance/REPO_STRUCTURE_AUTHORITY.md) | Where files and directories belong |
-| [COMPOSE_AUTHORITY.md](governance/COMPOSE_AUTHORITY.md) | Where compose stacks belong + authority rules |
-| [SCRIPTS_AUTHORITY.md](governance/SCRIPTS_AUTHORITY.md) | What scripts exist and are safe to run |
-| [INFRASTRUCTURE_MAP.md](governance/INFRASTRUCTURE_MAP.md) | Historical infrastructure schema capture (workbench-owned) |
-| [WORKBENCH_TOOLING_INDEX.md](governance/WORKBENCH_TOOLING_INDEX.md) | Centralized workbench entry points (read-only reference) |
-| [CORE_AGENTIC_SCOPE.md](governance/CORE_AGENTIC_SCOPE.md) | What's in-scope for the spine vs external |
-| [DOMAIN_ROUTING_REGISTRY.yaml](governance/DOMAIN_ROUTING_REGISTRY.yaml) | Domain routing rules |
-| [AGENT_BOUNDARIES.md](governance/AGENT_BOUNDARIES.md) | Agent boundary constraints |
-| [AGENT_GOVERNANCE_BRIEF.md](governance/AGENT_GOVERNANCE_BRIEF.md) | Canonical governance brief mirrored into agent entry surfaces |
-| [AGENTS_GOVERNANCE.md](governance/AGENTS_GOVERNANCE.md) | Agent lifecycle and verification contract |
-| [GAP_LIFECYCLE.md](governance/GAP_LIFECYCLE.md) | Gap registry lifecycle, claim semantics, D75 lock |
-| [RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md](governance/RUNWAY_TOOLING_PRODUCT_OPERATING_CONTRACT_V1.md) | Cross-repo contract for stable parallel execution across runway/tooling/product |
-| [MINT_PRODUCT_GOVERNANCE.md](governance/MINT_PRODUCT_GOVERNANCE.md) | Product governance for Mint project |
-| [CLAUDE_ENTRYPOINT_SHIM.md](governance/CLAUDE_ENTRYPOINT_SHIM.md) | Claude home instruction shim contract |
-| [AGENTS_LOCATION.md](governance/AGENTS_LOCATION.md) | Where agent scripts live |
-| [AUDIT_VERIFICATION.md](governance/AUDIT_VERIFICATION.md) | Legacy import verification audit |
-| [CANONICAL.md](governance/CANONICAL.md) | Canonical doc definitions |
-| [EXCLUDED_SURFACES.md](governance/EXCLUDED_SURFACES.md) | Explicitly excluded from spine scope |
-| [ISSUE_CLOSURE_SOP.md](governance/ISSUE_CLOSURE_SOP.md) | When and how to close GitHub issues |
-| [LEGACY_DEPRECATION.md](governance/LEGACY_DEPRECATION.md) | Rules for legacy/external repository references |
-| [MAILROOM_RUNBOOK.md](governance/MAILROOM_RUNBOOK.md) | Mailroom queue operations, ledger, logs, health checks |
-| [MAILROOM_BRIDGE.md](governance/MAILROOM_BRIDGE.md) | Governed remote bridge for mailroom processing |
-| [RAG_INDEXING_RULES.md](governance/RAG_INDEXING_RULES.md) | What gets indexed to RAG knowledge base |
-| [SEARCH_EXCLUSIONS.md](governance/SEARCH_EXCLUSIONS.md) | What directories/files are excluded from search |
-| [SECRETS_POLICY.md](governance/SECRETS_POLICY.md) | Governance-grade secrets management rules |
-| [HOST_DRIFT_POLICY.md](governance/HOST_DRIFT_POLICY.md) | Host-level drift policy for home/config/runtime stabilization |
-| [GIT_REMOTE_AUTHORITY.md](governance/GIT_REMOTE_AUTHORITY.md) | Canonical rule: Gitea as source of truth for remotes/merges |
-| [SSOT_UPDATE_TEMPLATE.md](governance/SSOT_UPDATE_TEMPLATE.md) | Receipt-driven SSOT update workflow |
-| [BACKUP_GOVERNANCE.md](governance/BACKUP_GOVERNANCE.md) | Backup strategy, verification, freshness rules |
-| [REBOOT_HEALTH_GATE.md](governance/REBOOT_HEALTH_GATE.md) | Safe reboot procedures and health gates |
-| [INFRASTRUCTURE_AUTHORITY.md](governance/INFRASTRUCTURE_AUTHORITY.md) | Infrastructure authority rules |
-| [INFRA_RELOCATION_PROTOCOL.md](governance/INFRA_RELOCATION_PROTOCOL.md) | Transactional VM/service relocation workflow + D35/D37 guardrail contracts |
-| [PHASE4_OBSERVABILITY_RUNBOOK.md](governance/PHASE4_OBSERVABILITY_RUNBOOK.md) | Strict execution runbook for observability VM rollout (phase-gated) |
-| [INGRESS_AUTHORITY.md](governance/INGRESS_AUTHORITY.md) | Ingress/routing authority |
-| [OPS_PATCH_HISTORY.md](governance/OPS_PATCH_HISTORY.md) | Critical ops path hardening log |
-| [SCRIPTS_REGISTRY.md](governance/SCRIPTS_REGISTRY.md) | Script inventory and locations |
-| [SPINE_INDEX.md](governance/SPINE_INDEX.md) | Spine documentation index |
-| [STACK_AUTHORITY.md](governance/STACK_AUTHORITY.md) | Stack authority rules |
-| [MAKER_TOOLS_GOVERNANCE.md](governance/MAKER_TOOLS_GOVERNANCE.md) | Maker tools plugin governance (digital-to-physical toolkit) |
-
----
-
-## Policies, Runbooks, Templates
-
-| Doc | Scope |
-|-----|-------|
-| [PATCH_CADENCE.md](governance/PATCH_CADENCE.md) | Patch cadence and maintenance expectations |
-| [PORTABILITY_ASSUMPTIONS.md](governance/PORTABILITY_ASSUMPTIONS.md) | What this system assumes about hosts and portability |
-| [RTO_RPO.md](governance/RTO_RPO.md) | Recovery objectives (RTO/RPO) for critical services |
-| [SECURITY_POLICIES.md](governance/SECURITY_POLICIES.md) | Security posture, minimum requirements, and prohibitions |
-| [NETWORK_POLICIES.md](governance/NETWORK_POLICIES.md) | Network policy set (routing, DHCP/DNS expectations, drift rules) |
-| [NETWORK_RUNBOOK.md](governance/NETWORK_RUNBOOK.md) | Network operations runbook (audit, change, rollback) |
-| [DR_RUNBOOK.md](governance/DR_RUNBOOK.md) | Disaster recovery runbook |
-| [SHOP_VM_ARCHITECTURE.md](governance/SHOP_VM_ARCHITECTURE.md) | Shop VM layout and lifecycle rules |
-| [SHOP_NETWORK_NORMALIZATION.md](governance/SHOP_NETWORK_NORMALIZATION.md) | Shop network normalization checklist and rules |
-| [SHOP_NETWORK_DEVICE_ONBOARDING.md](governance/SHOP_NETWORK_DEVICE_ONBOARDING.md) | Shop network onboarding procedure |
-| [BACKUP_CALENDAR.md](governance/BACKUP_CALENDAR.md) | Calendar of governed backup schedules and rotations |
-| [SHOP_NETWORK_AUDIT_RUNBOOK.md](governance/SHOP_NETWORK_AUDIT_RUNBOOK.md) | Shop network audit procedures and expected outputs |
-| [HOME_NETWORK_AUDIT_RUNBOOK.md](governance/HOME_NETWORK_AUDIT_RUNBOOK.md) | Home site network audit procedure |
-| [HOME_NETWORK_DEVICE_ONBOARDING.md](governance/HOME_NETWORK_DEVICE_ONBOARDING.md) | Home site device onboarding |
-| [N8N_RECOVERY_RUNBOOK.md](governance/N8N_RECOVERY_RUNBOOK.md) | n8n recovery and restoration procedure |
-| [TERMINAL_C_DAILY_RUNBOOK.md](governance/TERMINAL_C_DAILY_RUNBOOK.md) | Control-plane orchestration runbook for lane fan-out/fan-in |
-| [CHANGE_PACK_TEMPLATE.md](governance/CHANGE_PACK_TEMPLATE.md) | Change pack template for governed infrastructure work |
-| [CAMERA_SSOT.md](governance/CAMERA_SSOT.md) | Camera inventory SSOT (IDs, channels, expected coverage) |
-| [AUTHENTIK_BACKUP_RESTORE.md](governance/AUTHENTIK_BACKUP_RESTORE.md) | Authentik backup/restore runbook |
-| [GITEA_BACKUP_RESTORE.md](governance/GITEA_BACKUP_RESTORE.md) | Gitea backup/restore runbook |
-| [INFISICAL_BACKUP_RESTORE.md](governance/INFISICAL_BACKUP_RESTORE.md) | Infisical backup/restore runbook |
-| [INFISICAL_RESTORE_DRILL.md](governance/INFISICAL_RESTORE_DRILL.md) | Quarterly Infisical restore drill execution procedure |
-| [VAULTWARDEN_BACKUP_RESTORE.md](governance/VAULTWARDEN_BACKUP_RESTORE.md) | Vaultwarden backup/restore runbook |
-| [RELEASE_PROTOCOL.md](governance/RELEASE_PROTOCOL.md) | Release/ship protocol for governed changes |
-
----
-
-## Audits
-
-Gap scans, runtime audits, and triage reports.
-
-| Doc | What It Covers |
-|-----|---------------|
-| [AGENT_DISPATCH_PIPELINE_GAP_SCAN.md](governance/_audits/AGENT_DISPATCH_PIPELINE_GAP_SCAN.md) | Agent dispatch pipeline gap analysis |
-| [AGENT_RUNTIME_AUDIT.md](governance/_audits/AGENT_RUNTIME_AUDIT.md) | Agent runtime behavior audit |
-| [AUTHORITY_CLAIMS_TRIAGE.md](governance/_audits/AUTHORITY_CLAIMS_TRIAGE.md) | Authority claims triage and resolution |
-| [CODE_AUDIT_20260208.md](governance/_audits/CODE_AUDIT_20260208.md) | Spine + workbench code audit (bindings, secrets, ingress, alignment) |
-| [GLM47_DEEP_AUDIT_VERIFICATION_20260209.md](governance/_audits/GLM47_DEEP_AUDIT_VERIFICATION_20260209.md) | Verify external deep audit claims against live spine/workbench state |
-| [RAG_INTEGRATION_RATIONALE.md](governance/_audits/RAG_INTEGRATION_RATIONALE.md) | RAG integration design rationale |
-| [STATE_OF_THE_UNION_SUMMARY.md](governance/_audits/STATE_OF_THE_UNION_SUMMARY.md) | Overall spine state summary |
-
----
-
-## Verify Surface
-
-| Doc | What It Covers |
-|-----|---------------|
-| [VERIFY_SURFACE_INDEX.md](governance/VERIFY_SURFACE_INDEX.md) | Catalog of all verify scripts in `surfaces/verify/` (including composite drift gates) |
-
----
-
-## Capabilities & Agents
-
-| Doc | What It Covers |
-|-----|---------------|
-| [CAPABILITIES_OVERVIEW.md](core/CAPABILITIES_OVERVIEW.md) | What capabilities replace legacy scripts |
-| [GOVERNANCE_MINIMUM.md](core/GOVERNANCE_MINIMUM.md) | Minimum governance every capability must satisfy |
-| [CANONICAL_DOCS.md](core/CANONICAL_DOCS.md) | Which docs are canonical vs derived |
-| [PLAN_SCHEMA.md](core/PLAN_SCHEMA.md) | Plan file format for structured work |
-
----
-
-## Extraction & Alignment
-
-How assets move from the workbench monolith into the spine.
-
-| Doc | What It Tracks |
-|-----|---------------|
-| [AGENTIC_GAP_MAP.md](core/AGENTIC_GAP_MAP.md) | What has moved, what remains — 23 asset groups at 100% coverage |
-| [EXTRACTION_PROTOCOL.md](core/EXTRACTION_PROTOCOL.md) | Step-by-step extraction procedure + drift gate expectations |
-| [STACK_ALIGNMENT.md](core/STACK_ALIGNMENT.md) | Stack docs mapped to spine references + workbench infrastructure index |
-
----
-
-## Operational Helpers
-
-| Doc | Purpose |
-|-----|---------|
-| [OPERATOR_CHEAT_SHEET.md](OPERATOR_CHEAT_SHEET.md) | Quick commands and governance rituals |
-| [brain/README.md](brain/README.md) | Agent memory, context injection, hotkey reference |
-| [core/REPLAY_FIXTURES.md](core/REPLAY_FIXTURES.md) | Replay fixtures guide for deterministic tests |
-
----
-
-## Subdirectory Map
-
-| Directory | Contents |
-|-----------|----------|
-| `docs/core/` | Spine invariants — contracts, locks, bindings, gap map |
-| `docs/governance/` | SSOTs, authority pages, audits, canonical indexes |
-| `docs/brain/` | Agent memory system + imported context |
-| `docs/sessions/` | Ephemeral session logs (loop/issue scoped), non-canonical |
-| `docs/legacy/` | Archived legacy imports (quarantined by D16/D17, reference only) |
-| `docs/pillars/` | Domain pillar documentation |
-| `docs/planning/` | Planning and roadmap surfaces |
-
----
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for rules on folder placement, metadata
-headers, and README registration. New docs must live in a named folder and
-appear in this index.
-
----
-
-## Proof of Health
-
-After editing any doc in this tree:
-
-```bash
-# Lint: folder placement, metadata headers, README registration, legacy isolation
-./bin/ops cap run docs.lint
-
-# Verify drift gates still pass (D1-D84)
-./bin/ops cap run spine.verify
-
-# Verify workbench infrastructure docs intact (120 files, 19 dirs)
-./bin/ops cap run docs.status
-
-# Verify extraction coverage (23 asset groups)
-./bin/ops cap run infra.extraction.status
-```
-
-Each command produces a receipt under `receipts/sessions/` so agents can prove
-the doc snapshot they operated against.
+- `docs/core/` - core contracts and state summaries
+- `docs/governance/` - live governance and SSOTs
+- `docs/governance/domains/` - one canonical doc per domain
+- `docs/brain/` - agent context helpers
+- `docs/planning/` - scoped plans and execution notes
+- `docs/runbooks/` - operational runbooks

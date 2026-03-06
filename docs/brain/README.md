@@ -8,7 +8,7 @@ Reference surface for session context generation and operating rules.
 ## Routing
 
 - Governance entrypoint: [`../governance/SESSION_PROTOCOL.md`](../governance/SESSION_PROTOCOL.md)
-- Governance index: [`../governance/GOVERNANCE_INDEX.md`](../governance/GOVERNANCE_INDEX.md)
+- Canonical governance contract: [`../governance/SPINE.md`](../governance/SPINE.md)
 
 ## Runtime Contract
 
@@ -47,6 +47,6 @@ Brain lessons follow a governed lifecycle:
 ## Common Use
 
 ```bash
-cd /Users/ronnyworks/code/agentic-spine
+cd ~/code/agentic-spine
 docs/brain/generate-context.sh
 ```

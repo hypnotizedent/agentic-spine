@@ -31,7 +31,7 @@ This document establishes:
 
 **Related Documents:**
 - `docs/governance/SERVICE_REGISTRY.yaml` - Service-level endpoints and health checks
-- `docs/governance/WORKBENCH_TOOLING_INDEX.md` - External infra tooling (read-only)
+- `docs/governance/SPINE.md` - Daily authority chain and operator workflow
 
 ---
 
@@ -131,11 +131,11 @@ ssh pve "qm list"
 ## Foundational Host SSOTs
 
 This SSOT is intentionally small: **names + identity + high-level network**.
-Deep, mutable infra detail lives in the per-location SSOT docs:
+Deep, mutable infra detail lives in the surviving live summaries:
 
-- [MACBOOK_SSOT.md](MACBOOK_SSOT.md) - Workstation baseline (hardware + local services)
-- [MINILAB_SSOT.md](MINILAB_SSOT.md) - Home minilab baseline (Beelink + NAS + home VMs/LXCs)
-- [SHOP_SERVER_SSOT.md](SHOP_SERVER_SSOT.md) - Shop rack baseline (R730XD + switch + NVR + UPS)
+- [MINILAB_SSOT.md](MINILAB_SSOT.md) - Home minilab baseline
+- [STACK_REGISTRY.yaml](STACK_REGISTRY.yaml) - Stack-to-host inventory
+- [SERVICE_REGISTRY.yaml](SERVICE_REGISTRY.yaml) - Service endpoints and health routes
 
 ## Canonical Network Summary
 
@@ -467,7 +467,7 @@ Use the loop ledger instead:
 | `docs/governance/REBOOT_HEALTH_GATE.md` | Pre/post reboot validation | `scripts/infra/reboot_gate.sh` |
 | `docs/governance/BACKUP_GOVERNANCE.md` | Backup what/where/how/verify | `scripts/infra/backup_verify.sh` |
 | `docs/governance/NETWORK_RUNBOOK.md` | Network change procedures | - |
-| External recovery runbook | Cold start recovery (workbench tooling; see WORKBENCH_TOOLING_INDEX.md) | - |
+| External recovery runbook | Cold start recovery lives in workbench docs; query `~/code/workbench` directly | - |
 
 ### Latest Audit
 

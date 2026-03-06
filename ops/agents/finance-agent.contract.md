@@ -98,11 +98,12 @@ Superseded config-only MCP servers (`firefly.json`, `paperless.json`) are deacti
 
 ## Spine Capabilities (Observability Layer)
 
-The spine exposes 3 read-only capabilities for finance observability. These are NOT the MCP tools above — they are independent spine scripts invoked via `./bin/ops cap run`:
+The spine exposes 4 read-only capabilities for finance observability. These are NOT the MCP tools above — they are independent spine scripts invoked via `./bin/ops cap run`:
 
 | Capability | Description |
 |------------|-------------|
 | `finance.stack.status` | Health probe for all 4 services on VM 211 |
+| `finance.simplefin.sync.status` | Verify SimpleFIN/Firefly ingest path: cron, importer reachability, log evidence, and transaction freshness |
 | `finance.ronny.action.queue` | Deterministic operator task queue (monthly/quarterly/annual) |
 | `ghostfolio.portfolio.status` | Ghostfolio holdings, accounts, portfolio value |
 
@@ -110,7 +111,7 @@ The 21 MCP tools above live in `workbench/agents/finance/tools/` and are workben
 
 ## Deployment
 
-MCP server is live. SimpleFIN daily sync active (cron `0 6 * * *` on VM 211).
+MCP server is live. SimpleFIN daily sync is configured on VM 211 (cron `0 6 * * *`); use `finance.simplefin.sync.status` to verify live execution.
 
 ```bash
 # Build (after changes)

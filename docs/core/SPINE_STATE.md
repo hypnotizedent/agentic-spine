@@ -19,10 +19,10 @@ The spine's authority chain and contract surface:
 | Asset | Path |
 |-------|------|
 | Invariant lock + drift gates (D1–D57) | [CORE_LOCK.md](CORE_LOCK.md) |
-| Governance entry point | [GOVERNANCE_INDEX.md](../governance/GOVERNANCE_INDEX.md) |
-| Machine-readable SSOT registry | [SSOT_REGISTRY.yaml](../governance/SSOT_REGISTRY.yaml) |
+| Governance entry point | [SPINE.md](../governance/SPINE.md) |
+| Session operating contract | [SESSION_PROTOCOL.md](../governance/SESSION_PROTOCOL.md) |
 | Agent contract | [AGENT_CONTRACT.md](AGENT_CONTRACT.md) |
-| Scope boundary | [CORE_AGENTIC_SCOPE.md](../governance/CORE_AGENTIC_SCOPE.md) |
+| Operator brief | [AGENT_GOVERNANCE_BRIEF.md](../governance/AGENT_GOVERNANCE_BRIEF.md) |
 
 ---
 

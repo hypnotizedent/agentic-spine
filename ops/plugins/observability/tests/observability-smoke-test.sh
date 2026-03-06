@@ -26,12 +26,17 @@ EXPECTED_SCRIPTS=(
   "immich-status"
   "immich-ingest-watch"
   "finance-stack-status"
+  "finance-simplefin-sync-status"
   "finance-ronny-action-queue"
   "idrac-health-status"
   "switch-health-status"
   "stability-control-snapshot"
   "infra-core-slo-status"
   "stability-control-reconcile"
+  "finance-cc-benefits-status"
+  "finance-cc-benefits-refresh"
+  "finance-cc-benefits-queue-status"
+  "finance-cc-benefits-reminder-dispatch"
 )
 
 echo "observability-smoke-test"

@@ -1,0 +1,428 @@
+#!/usr/bin/env python3
+"""finance-simplefin-sync-status
+
+Read-only ingest health probe for the SimpleFIN -> Firefly III path on
+finance-stack (VM 211). Reports cron configuration, importer reachability,
+log evidence, and Firefly freshness so operators can distinguish between:
+
+- ingestion configured + healthy
+- ingestion configured but stale/drifting
+- ingestion blocked at the scheduler/importer/runtime layer
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+def shell_read(script: str) -> str:
+    result = subprocess.run(
+        ["bash", "-lc", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def resolve_runtime() -> tuple[pathlib.Path, str, str, str]:
+    script_dir = pathlib.Path(__file__).resolve().parent
+    spine_root = pathlib.Path(os.environ.get("SPINE_ROOT", script_dir.parents[3]))
+    resolve_script = spine_root / "ops/lib/ssh-resolve.sh"
+
+    resolved = shell_read(
+        f'source "{resolve_script}" && ssh_resolve_host_with_fallback "finance-stack" 2 || true'
+    )
+    host = ""
+    path_used = "unreachable"
+    if resolved:
+        parts = resolved.split()
+        if parts:
+            host = parts[0]
+        if len(parts) > 1:
+            path_used = parts[1]
+
+    user = shell_read(f'source "{resolve_script}" && ssh_resolve_user "finance-stack"')
+    if not user:
+        user = "ubuntu"
+
+    return spine_root, host, path_used, user
+
+
+def resolve_secret(infisical_agent: pathlib.Path, *keys: str) -> str:
+    if not infisical_agent.exists():
+        return ""
+
+    for key in keys:
+        result = subprocess.run(
+            [str(infisical_agent), "get", "infrastructure", "prod", key],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        value = result.stdout.strip()
+        if result.returncode == 0 and value:
+            return value
+    return ""
+
+
+def remote_probe(host: str, user: str) -> tuple[dict | None, str | None]:
+    if not host:
+        return None, "finance-stack host did not resolve"
+
+    remote_script = r"""python3 - <<'PY'
+import json
+import pathlib
+import re
+import subprocess
+
+result = {
+    "cron": {
+        "configured": False,
+        "schedule": None,
+        "mode": None,
+        "command": None,
+        "log_path": None,
+    },
+    "cron_service_state": "unknown",
+    "importer": {
+        "http_code": "000",
+        "reachable": False,
+    },
+    "logs": {},
+}
+
+cron_text = subprocess.run(["crontab", "-l"], capture_output=True, text=True, check=False).stdout
+line = ""
+for raw in cron_text.splitlines():
+    text = raw.strip()
+    if not text or text.startswith("#"):
+        continue
+    if "/autoimport" in text or "simplefin" in text.lower():
+        line = text
+        break
+
+if line:
+    result["cron"]["configured"] = True
+    fields = line.split()
+    if len(fields) >= 6:
+        result["cron"]["schedule"] = " ".join(fields[:5])
+        command_text = " ".join(fields[5:])
+    else:
+        command_text = line
+    command_text = re.sub(r"(secret=)[^&\"' ]+", r"\1<redacted>", command_text)
+    result["cron"]["command"] = command_text
+    if "/autoimport" in line:
+        result["cron"]["mode"] = "firefly-importer-autoimport"
+    else:
+        result["cron"]["mode"] = "simplefin-script"
+    log_match = re.search(r">>\s*([^\s]+)", line)
+    if log_match:
+        result["cron"]["log_path"] = log_match.group(1)
+
+for unit in ("cron", "crond"):
+    proc = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, check=False)
+    state = proc.stdout.strip()
+    if state:
+        result["cron_service_state"] = state
+        break
+
+curl_proc = subprocess.run(
+    ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://127.0.0.1:8091/"],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+http_code = (curl_proc.stdout or "").strip() or "000"
+result["importer"]["http_code"] = http_code
+result["importer"]["reachable"] = http_code != "000"
+
+log_candidates = []
+if result["cron"]["log_path"]:
+    log_candidates.append(("configured_log", result["cron"]["log_path"]))
+for key, path in (
+    ("simplefin_sync_log", "/var/log/simplefin-sync.log"),
+    ("legacy_simplefin_import_log", "/var/log/simplefin-import.log"),
+):
+    if not any(existing_path == path for _, existing_path in log_candidates):
+        log_candidates.append((key, path))
+
+for label, path in log_candidates:
+    entry = {"path": path, "exists": False, "size_bytes": None, "mtime": None}
+    p = pathlib.Path(path)
+    if p.exists():
+        stat = p.stat()
+        entry["exists"] = True
+        entry["size_bytes"] = stat.st_size
+        entry["mtime"] = int(stat.st_mtime)
+    result["logs"][label] = entry
+
+print(json.dumps(result))
+PY"""
+
+    ssh_cmd = [
+        "ssh",
+        "-o",
+        "ConnectTimeout=8",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        f"{user}@{host}",
+        remote_script,
+    ]
+
+    result = subprocess.run(ssh_cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        return None, err or f"ssh exit {result.returncode}"
+
+    try:
+        return json.loads(result.stdout), None
+    except json.JSONDecodeError:
+        return None, "remote probe returned invalid json"
+
+
+def firefly_transactions(base_url: str, token: str, window_days: int) -> tuple[list[dict], str | None]:
+    if not token:
+        return [], "missing FIREFLY_PAT token"
+
+    today = dt.date.today()
+    start = today - dt.timedelta(days=window_days)
+    page = 1
+    total_pages = 1
+    rows: list[dict] = []
+
+    while page <= total_pages:
+        query = urllib.parse.urlencode(
+            {
+                "start": start.isoformat(),
+                "end": today.isoformat(),
+                "type": "all",
+                "limit": 50,
+                "page": page,
+            }
+        )
+        url = f"{base_url.rstrip('/')}/api/v1/transactions?{query}"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", "application/json")
+
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return [], f"firefly http error: {exc.code}"
+        except urllib.error.URLError as exc:
+            return [], f"firefly network error: {exc.reason}"
+        except TimeoutError:
+            return [], "firefly request timeout"
+        except json.JSONDecodeError:
+            return [], "firefly invalid json response"
+
+        page_rows = payload.get("data") or []
+        if isinstance(page_rows, list):
+            rows.extend(page_rows)
+
+        pagination = (payload.get("meta") or {}).get("pagination") or {}
+        try:
+            total_pages = int(pagination.get("total_pages") or 1)
+        except (TypeError, ValueError):
+            total_pages = 1
+        page += 1
+
+    return rows, None
+
+
+def summarize_firefly(rows: list[dict]) -> dict:
+    latest_txn = ""
+    for row in rows:
+        attrs = row.get("attributes") or {}
+        splits = attrs.get("transactions") or []
+        split = splits[0] if splits else {}
+        raw_date = str(split.get("date") or "")
+        txn_date = raw_date.split("T")[0] if raw_date else ""
+        if txn_date and txn_date > latest_txn:
+            latest_txn = txn_date
+
+    stale_days = None
+    if latest_txn:
+        stale_days = (dt.date.today() - dt.date.fromisoformat(latest_txn)).days
+
+    return {
+        "transactions_in_window": len(rows),
+        "latest_transaction_at": latest_txn or None,
+        "stale_days": stale_days,
+    }
+
+
+def classify(remote: dict | None, firefly_summary: dict, firefly_error: str | None) -> tuple[str, list[str], str]:
+    reasons: list[str] = []
+    status = "healthy"
+
+    if not remote:
+        return (
+            "blocked",
+            ["Unable to read finance-stack SimpleFIN runtime state."],
+            "Restore SSH/runtime access to finance-stack, then re-run this capability.",
+        )
+
+    cron = remote.get("cron") or {}
+    importer = remote.get("importer") or {}
+    logs = remote.get("logs") or {}
+
+    if not cron.get("configured"):
+        reasons.append("No SimpleFIN/autoimport cron entry is configured on finance-stack.")
+        status = "blocked"
+
+    cron_service_state = remote.get("cron_service_state")
+    if cron_service_state not in {"active", "unknown"}:
+        reasons.append(f"Cron service is not active ({cron_service_state}).")
+        status = "blocked"
+
+    if not importer.get("reachable"):
+        reasons.append("Firefly importer is not reachable on 127.0.0.1:8091.")
+        status = "blocked"
+
+    configured_log = logs.get("configured_log") or {}
+    if cron.get("configured") and not configured_log.get("exists"):
+        reasons.append(
+            f"Configured sync log is missing ({configured_log.get('path') or cron.get('log_path') or '/var/log/simplefin-sync.log'})."
+        )
+        if status != "blocked":
+            status = "degraded"
+
+    if firefly_error:
+        reasons.append(f"Firefly freshness probe failed: {firefly_error}.")
+        if status != "blocked":
+            status = "degraded"
+    else:
+        transactions_in_window = int(firefly_summary.get("transactions_in_window") or 0)
+        stale_days = firefly_summary.get("stale_days")
+        if transactions_in_window == 0:
+            reasons.append("Zero Firefly transactions were found in the review window.")
+            if status != "blocked":
+                status = "degraded"
+        elif stale_days is not None and stale_days > 7:
+            reasons.append(
+                f"Latest Firefly transaction is {stale_days} days old ({firefly_summary.get('latest_transaction_at')})."
+            )
+            if status != "blocked":
+                status = "degraded"
+
+    if status == "healthy":
+        next_action = "Ingestion looks healthy. Use finance.ronny.action.queue for categorization and monthly reconciliation."
+    elif status == "blocked":
+        next_action = "Fix the scheduler/importer runtime on finance-stack before relying on the reconciliation queue."
+    else:
+        next_action = (
+            "Check the finance-stack cron/importer runtime first. If this period or account is still missing after that, "
+            "use Firefly CSV import as fallback to unblock categorization and reconciliation."
+        )
+
+    return status, reasons, next_action
+
+
+def render_text(result: dict) -> str:
+    remote = result.get("remote") or {}
+    cron = remote.get("cron") or {}
+    importer = remote.get("importer") or {}
+    firefly = result.get("firefly") or {}
+
+    lines = [
+        "finance.simplefin.sync.status",
+        f"host: finance-stack (VM 211, {result.get('host')}, path={result.get('path_used')})",
+        f"cron: {'present' if cron.get('configured') else 'missing'}"
+        + (f" ({cron.get('schedule')})" if cron.get("schedule") else ""),
+        f"cron_service: {remote.get('cron_service_state')}",
+        f"importer: HTTP {importer.get('http_code')}",
+        f"log: {cron.get('log_path') or '/var/log/simplefin-sync.log'}"
+        + (" present" if (remote.get("logs") or {}).get("configured_log", {}).get("exists") else " missing"),
+        f"firefly_window_days: {result.get('window_days')}",
+        f"firefly_transactions_in_window: {firefly.get('transactions_in_window')}",
+        f"firefly_latest_transaction: {firefly.get('latest_transaction_at') or 'none'}",
+        f"firefly_stale_days: {firefly.get('stale_days') if firefly.get('stale_days') is not None else 'n/a'}",
+    ]
+
+    if result.get("reasons"):
+        lines.append("reasons:")
+        for reason in result["reasons"]:
+            lines.append(f"  - {reason}")
+
+    lines.append(f"next_action: {result.get('next_action')}")
+    lines.append(f"status: {result.get('status').upper()}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Read-only SimpleFIN -> Firefly ingest health probe")
+    parser.add_argument("--json", action="store_true", help="Output structured JSON")
+    parser.add_argument(
+        "--window-days",
+        type=int,
+        default=30,
+        help="Firefly freshness review window in days (default: 30)",
+    )
+    args = parser.parse_args()
+
+    spine_root, host, path_used, user = resolve_runtime()
+    infisical_agent = spine_root / "ops/tools/infisical-agent.sh"
+
+    remote, remote_error = remote_probe(host, user) if host else (None, "finance-stack unreachable")
+
+    firefly_token = os.environ.get("FIREFLY_PAT") or os.environ.get("FIREFLY_ACCESS_TOKEN") or resolve_secret(
+        infisical_agent, "FIREFLY_PAT", "FIREFLY_ACCESS_TOKEN"
+    )
+    firefly_url = os.environ.get("FIREFLY_URL") or f"http://{host}:8080"
+
+    firefly_rows: list[dict] = []
+    firefly_error = None
+    if host:
+        firefly_rows, firefly_error = firefly_transactions(firefly_url, firefly_token, args.window_days)
+    else:
+        firefly_error = "finance-stack host unresolved"
+    firefly_summary = summarize_firefly(firefly_rows) if not firefly_error else {
+        "transactions_in_window": 0,
+        "latest_transaction_at": None,
+        "stale_days": None,
+    }
+
+    status, reasons, next_action = classify(remote, firefly_summary, firefly_error or remote_error)
+    if remote_error:
+        reasons = [remote_error] + [reason for reason in reasons if reason != remote_error]
+
+    result = {
+        "tool": "finance.simplefin.sync.status",
+        "host": host,
+        "path_used": path_used,
+        "window_days": args.window_days,
+        "remote": remote,
+        "firefly": firefly_summary,
+        "status": status,
+        "reasons": reasons,
+        "next_action": next_action,
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(render_text(result))
+
+    return 0 if status == "healthy" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

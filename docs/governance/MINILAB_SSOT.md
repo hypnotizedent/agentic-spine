@@ -279,7 +279,7 @@ nfs: synology-backups
 ### Proxmox vzdump
 
 > **Backups ENABLED as of 2026-02-11.** 2 jobs enabled, 1 job intentionally disabled for stopped LXC 103.
-> See: [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) for full strategy.
+> See: [domains/backup.md](domains/backup.md) for the current backup policy surface.
 
 | Job | Tier | Target | Schedule | Retention | Storage | Enabled |
 |-----|------|--------|----------|-----------|---------|---------|
@@ -293,7 +293,7 @@ nfs: synology-backups
 
 ### NAS Backups (Hyper Backup)
 
-**No Hyper Backup tasks configured.** Package is installed and enabled but the task database is empty. NAS-to-offsite DR is deferred (see HOME_BACKUP_STRATEGY.md).
+**No Hyper Backup tasks configured.** Package is installed and enabled but the task database is empty. NAS-to-offsite DR is deferred (see `docs/governance/domains/backup.md`).
 
 ### NAS Backup Targets (vzdump destinations)
 
@@ -467,9 +467,8 @@ No open baseline loops. `OL_HOME_BASELINE_FINISH` closed 2026-02-07.
 
 | Document | Purpose |
 |----------|---------|
-| [HOME_BACKUP_STRATEGY.md](HOME_BACKUP_STRATEGY.md) | Home backup strategy |
-| [BACKUP_GOVERNANCE.md](BACKUP_GOVERNANCE.md) | Backup governance |
+| [domains/backup.md](domains/backup.md) | Backup policy and retained coverage |
+| [domains/home.md](domains/home.md) | Home-domain governance overview |
 | [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md) | Device naming, Tailscale IPs |
-| [SHOP_SERVER_SSOT.md](SHOP_SERVER_SSOT.md) | Shop infrastructure |
-| [MACBOOK_SSOT.md](MACBOOK_SSOT.md) | Workstation (connects to minilab) |
-| [SSOT_UPDATE_TEMPLATE.md](SSOT_UPDATE_TEMPLATE.md) | How to update this document |
+| [STACK_REGISTRY.yaml](STACK_REGISTRY.yaml) | Stack placement and host inventory |
+| [SPINE.md](SPINE.md) | Daily governance contract and update path |

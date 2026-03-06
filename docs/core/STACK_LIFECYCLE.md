@@ -17,7 +17,7 @@ When you need to know **what is deployed** and **where it lives**:
 - SSH reachability/user/ports are declared in `ops/bindings/ssh.targets.yaml`
 - Health probes are declared in `ops/bindings/services.health.yaml`
 - VM-infra compose SSOT (sanitized) lives under `ops/staged/**` (see `docs/governance/COMPOSE_AUTHORITY.md`)
-- Workbench compose is **supporting/reference only** (never a runtime dependency). See `docs/governance/WORKBENCH_TOOLING_INDEX.md` for the only approved external reference paths.
+- Workbench compose is supporting/reference only (never a runtime dependency). Query `~/code/workbench` directly when an external reference is required.
 
 ## Allowed Operations (Receipt-Producing)
 
