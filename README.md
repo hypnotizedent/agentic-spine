@@ -105,7 +105,7 @@ Boundary:
 
 Domain capability catalogs:
 
-- `/Users/ronnyworks/code/agentic-spine/docs/governance/domains/CAPABILITIES_INDEX.md`
+- Flat canonical domain docs under `/Users/ronnyworks/code/agentic-spine/docs/governance/domains/*.md`
 
 ## Secrets: the gating layer
 

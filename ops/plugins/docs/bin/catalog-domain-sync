@@ -4,110 +4,305 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 CAP_FILE="$ROOT/ops/capabilities.yaml"
 CATALOG_BINDING="$ROOT/ops/bindings/capability.domain.catalog.yaml"
+DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
+BUNDLES_ROOT="$ROOT/ops/bindings/domains"
 OUT_ROOT="$ROOT/docs/governance/domains"
+MODE="write"
 STAMP="$(date +%Y-%m-%d)"
+MANIFEST_FILE=""
+TMP_DIR=""
+LOCK_HELD=0
+
+DOC_MARKER_START="<!-- DOMAIN_CAPABILITY_CATALOG_START -->"
+DOC_MARKER_END="<!-- DOMAIN_CAPABILITY_CATALOG_END -->"
+
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
+
+usage() {
+  cat <<'USAGE'
+catalog-domain-sync
+
+Usage:
+  catalog-domain-sync [--check]
+
+Options:
+  --check    Report drift without writing files.
+USAGE
+}
 
 fail() {
   echo "catalog.domain.sync FAIL: $*" >&2
   exit 1
 }
 
-command -v yq >/dev/null 2>&1 || fail "yq is required"
-command -v jq >/dev/null 2>&1 || fail "jq is required"
+cleanup() {
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
+    rm -rf "$TMP_DIR"
+  fi
+  return 0
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) MODE="check"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [[ -f "$CAP_FILE" ]] || fail "missing capabilities.yaml"
 [[ -f "$CATALOG_BINDING" ]] || fail "missing catalog binding"
+[[ -f "$DOMAIN_PROFILES" ]] || fail "missing domain profiles"
+[[ -d "$BUNDLES_ROOT" ]] || fail "missing domain bundles root"
 mkdir -p "$OUT_ROOT"
 
-records_json="$(mktemp)"
-trap 'rm -f "$records_json" "$index_tmp"' EXIT
+TMP_DIR="$(mktemp -d)"
+MANIFEST_FILE="$TMP_DIR/manifest.json"
+trap cleanup EXIT INT TERM
 
-index_tmp="$(mktemp)"
+python3 - "$ROOT" "$CAP_FILE" "$CATALOG_BINDING" "$DOMAIN_PROFILES" "$BUNDLES_ROOT" "$OUT_ROOT" "$STAMP" "$TMP_DIR" "$MANIFEST_FILE" "$DOC_MARKER_START" "$DOC_MARKER_END" <<'PY'
+from __future__ import annotations
 
-yq -o=json '.capabilities' "$CAP_FILE" \
-  | jq '
-      to_entries
-      | map(
-          select(.value.plane == "domain_external")
-          | {
-              capability: .key,
-              domain: (.value.domain // "unknown"),
-              safety: (.value.safety // "unknown"),
-              approval: (.value.approval // "auto"),
-              implementation_repo: (.value.implementation_repo // ""),
-              implementation_path: (.value.implementation_path // ""),
-              command: (.value.command // "")
-            }
+import copy
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+
+root = Path(sys.argv[1])
+cap_file = Path(sys.argv[2])
+catalog_binding = Path(sys.argv[3])
+domain_profiles = Path(sys.argv[4])
+bundles_root = Path(sys.argv[5])
+out_root = Path(sys.argv[6])
+stamp = sys.argv[7]
+tmp_dir = Path(sys.argv[8])
+manifest_file = Path(sys.argv[9])
+marker_start = sys.argv[10]
+marker_end = sys.argv[11]
+
+
+def load_yaml(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise SystemExit(f"expected mapping YAML: {path}")
+    return data
+
+
+def replace_or_append_block(existing: str, block: str) -> str:
+    if marker_start in existing and marker_end in existing:
+        prefix, remainder = existing.split(marker_start, 1)
+        _, suffix = remainder.split(marker_end, 1)
+        updated = prefix.rstrip() + "\n\n" + marker_start + "\n" + block.rstrip() + "\n" + marker_end + suffix
+        return updated.rstrip() + "\n"
+    trimmed = existing.rstrip()
+    if trimmed:
+        trimmed += "\n\n"
+    return trimmed + marker_start + "\n" + block.rstrip() + "\n" + marker_end + "\n"
+
+
+def infer_prefixes(domain: str, capabilities: list[str]) -> list[str]:
+    prefixes = sorted({cap.split(".", 1)[0] + "." for cap in capabilities if "." in cap})
+    if not prefixes and domain:
+        prefixes = [f"{domain}."]
+    return prefixes
+
+
+def render_doc_scaffold(domain: str) -> str:
+    return (
+        f"# {domain}\n\n"
+        f"Canonical domain policy for `{domain}`.\n\n"
+        f"- Authority: `docs/governance/SPINE.md`\n"
+        f"- Runtime contracts: `ops/bindings/domains/{domain}.bundle.yaml`\n"
+        f"- Verify entrypoint: `./bin/ops cap run verify.run -- domain {domain}`\n"
+    )
+
+
+def render_catalog_block(domain: str, capabilities: list[str]) -> str:
+    lines = [
+        "## Capability Catalog",
+        "Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.",
+        "",
+    ]
+    if capabilities:
+        lines.extend(
+            [
+                "| Capability |",
+                "|---|",
+            ]
         )
-    ' > "$records_json"
+        lines.extend(f"| `{cap}` |" for cap in capabilities)
+    else:
+        lines.append(f"_No domain-external capabilities currently map to `{domain}`._")
+    return "\n".join(lines)
 
-mapfile -t capability_domains < <(jq -r '.[].domain' "$records_json" | sort -u)
-mapfile -t catalog_domains < <(yq -r '.domains[].domain_id' "$CATALOG_BINDING" | sort -u)
 
-declare -A seen_domains=()
-domains=()
-for domain in "${capability_domains[@]}" "${catalog_domains[@]}"; do
-  [[ -z "${domain:-}" || "$domain" == "null" ]] && continue
-  if [[ -z "${seen_domains[$domain]+x}" ]]; then
-    seen_domains[$domain]=1
-    domains+=("$domain")
-  fi
+cap_data = load_yaml(cap_file)
+catalog_data = load_yaml(catalog_binding)
+profile_data = load_yaml(domain_profiles)
+
+capabilities = cap_data.get("capabilities") or {}
+if not isinstance(capabilities, dict):
+    raise SystemExit("ops/capabilities.yaml missing capabilities map")
+
+profiles = profile_data.get("domains") or {}
+if not isinstance(profiles, dict):
+    raise SystemExit("gate.domain.profiles.yaml missing domains map")
+
+catalog_entries = catalog_data.get("domains") or []
+if not isinstance(catalog_entries, list):
+    raise SystemExit("capability.domain.catalog.yaml missing domains list")
+
+existing_by_domain: dict[str, dict] = {}
+for entry in catalog_entries:
+    if not isinstance(entry, dict):
+        continue
+    domain_id = str(entry.get("domain_id") or "").strip()
+    if not domain_id:
+        continue
+    existing_by_domain[domain_id] = copy.deepcopy(entry)
+
+capabilities_by_domain: dict[str, list[str]] = {}
+for capability_id, cfg in capabilities.items():
+    if not isinstance(cfg, dict):
+        continue
+    if cfg.get("plane") != "domain_external":
+        continue
+    domain_id = str(cfg.get("domain") or "").strip()
+    if not domain_id or domain_id == "none":
+        continue
+    capabilities_by_domain.setdefault(domain_id, []).append(capability_id)
+
+for domain_caps in capabilities_by_domain.values():
+    domain_caps.sort()
+
+canonical_domains = sorted(
+    path.name[:-12]
+    for path in bundles_root.glob("*.bundle.yaml")
+    if path.name.endswith(".bundle.yaml")
+)
+
+all_domains = sorted(set(existing_by_domain) | set(capabilities_by_domain) | set(canonical_domains))
+
+new_entries: list[dict] = []
+for domain_id in all_domains:
+    existing = copy.deepcopy(existing_by_domain.get(domain_id, {}))
+    profile = profiles.get(domain_id) or {}
+    caps = capabilities_by_domain.get(domain_id, [])
+
+    prefixes = existing.get("prefixes") or profile.get("capability_prefixes") or infer_prefixes(domain_id, caps)
+    owner_repo = existing.get("owner_repo") or str(root)
+    owner_path = existing.get("owner_path") or "ops/plugins/"
+
+    entry = {
+        "domain_id": domain_id,
+        "prefixes": prefixes,
+        "owner_repo": owner_repo,
+        "owner_path": owner_path,
+        "capabilities": caps,
+        "last_synced": stamp,
+    }
+    new_entries.append(entry)
+
+rendered_catalog = copy.deepcopy(catalog_data)
+rendered_catalog["updated_at"] = stamp
+rendered_catalog["domains"] = new_entries
+
+binding_out = tmp_dir / "capability.domain.catalog.yaml"
+binding_out.write_text(
+    yaml.safe_dump(rendered_catalog, sort_keys=False, allow_unicode=False),
+    encoding="utf-8",
+)
+
+docs = []
+for domain_id in canonical_domains:
+    doc_path = out_root / f"{domain_id}.md"
+    existing_text = doc_path.read_text(encoding="utf-8") if doc_path.exists() else render_doc_scaffold(domain_id)
+    rendered = replace_or_append_block(
+        existing_text,
+        render_catalog_block(domain_id, capabilities_by_domain.get(domain_id, [])),
+    )
+    out_path = tmp_dir / f"{domain_id}.md"
+    out_path.write_text(rendered, encoding="utf-8")
+    docs.append(
+        {
+            "domain": domain_id,
+            "path": str(doc_path),
+            "rendered_path": str(out_path),
+        }
+    )
+
+manifest = {
+    "binding_path": str(catalog_binding),
+    "binding_rendered_path": str(binding_out),
+    "canonical_domains": canonical_domains,
+    "docs": docs,
+}
+manifest_file.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+PY
+
+binding_rendered_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["binding_rendered_path"])' "$MANIFEST_FILE")"
+mapfile -t doc_pairs < <(python3 - "$MANIFEST_FILE" <<'PY'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1]))
+for row in manifest["docs"]:
+    print(f'{row["path"]}\t{row["rendered_path"]}')
+PY
+)
+canonical_count="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["canonical_domains"]))' "$MANIFEST_FILE")"
+
+if [[ "$MODE" == "check" ]]; then
+  diff -u "$CATALOG_BINDING" "$binding_rendered_path" >/dev/null 2>&1 || fail "capability domain catalog drift detected"
+  for pair in "${doc_pairs[@]}"; do
+    live_path="${pair%%$'\t'*}"
+    rendered_path="${pair#*$'\t'}"
+    if [[ -f "$live_path" ]]; then
+      diff -u "$live_path" "$rendered_path" >/dev/null 2>&1 || fail "domain doc drift detected: $live_path"
+    else
+      fail "domain doc missing: $live_path"
+    fi
+  done
+  echo "catalog.domain.sync"
+  echo "status: OK"
+  echo "domains: $canonical_count"
+  exit 0
+fi
+
+if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+  acquire_git_lock catalog_domain_sync || exit 1
+  LOCK_HELD=1
+fi
+
+spine_tx_init
+spine_tx_track "$CATALOG_BINDING"
+for pair in "${doc_pairs[@]}"; do
+  spine_tx_track "${pair%%$'\t'*}"
 done
 
-[[ ${#domains[@]} -gt 0 ]] || fail "no domains found from capabilities or catalog binding"
-
-for domain in "${domains[@]}"; do
-  out_dir="$OUT_ROOT/$domain"
-  out_file="$out_dir/CAPABILITIES.md"
-  mkdir -p "$out_dir"
-
-  {
-    echo "---"
-    echo "status: authoritative"
-    echo "owner: \"@ronny\""
-    echo "last_verified: $STAMP"
-    echo "scope: domain-capability-catalog"
-    echo "domain: $domain"
-    echo "---"
-    echo
-    echo "# $domain Capability Catalog"
-    echo
-    echo "Generated from \`ops/capabilities.yaml\` by \`catalog-domain-sync\`."
-    echo
-    echo "| Capability | Safety | Approval | Implementation |"
-    echo "|---|---|---|---|"
-    jq -r --arg d "$domain" '
-      map(select(.domain == $d))
-      | sort_by(.capability)
-      | .[]
-      | "| `\(.capability)` | `\(.safety)` | `\(.approval)` | `\(.implementation_path)` |"
-    ' "$records_json"
-  } > "$out_file"
-
-  cap_count="$(jq -r --arg d "$domain" 'map(select(.domain == $d)) | length' "$records_json")"
-  echo "| \`$domain\` | $cap_count | \`docs/governance/domains/$domain/CAPABILITIES.md\` |" >> "$index_tmp"
-
-done
-
-index_file="$OUT_ROOT/CAPABILITIES_INDEX.md"
-{
-  echo "# Domain Capability Catalog Index"
-  echo
-  echo "Generated from \`ops/capabilities.yaml\` (domain_external plane)."
-  echo
-  echo "| Domain | Capabilities | Catalog |"
-  echo "|---|---:|---|"
-  sort "$index_tmp"
-} > "$index_file"
-
-while IFS= read -r domain; do
-  [[ -z "$domain" ]] && continue
-  caps_json="$(jq -cr --arg d "$domain" 'map(select(.domain == $d) | .capability)' "$records_json")"
-  yq -i "(.domains[] | select(.domain_id == \"$domain\") | .capabilities) = $caps_json" "$CATALOG_BINDING"
-  yq -i "(.domains[] | select(.domain_id == \"$domain\") | .last_synced) = \"$STAMP\"" "$CATALOG_BINDING"
-done < <(printf '%s\n' "${domains[@]}")
-
-yq -i ".updated = \"$STAMP\"" "$CATALOG_BINDING"
+if ! {
+  cp "$binding_rendered_path" "$CATALOG_BINDING"
+  for pair in "${doc_pairs[@]}"; do
+    live_path="${pair%%$'\t'*}"
+    rendered_path="${pair#*$'\t'}"
+    cp "$rendered_path" "$live_path"
+  done
+}; then
+  spine_tx_rollback
+  fail "write transaction rolled back"
+fi
 
 echo "catalog.domain.sync"
-echo "domains: ${#domains[@]}"
-echo "index: docs/governance/domains/CAPABILITIES_INDEX.md"
+echo "status: OK"
+echo "domains: $canonical_count"
+echo "binding: ops/bindings/capability.domain.catalog.yaml"

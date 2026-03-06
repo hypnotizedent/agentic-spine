@@ -4,7 +4,14 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
+CATALOG_BINDING="$ROOT/ops/bindings/capability.domain.catalog.yaml"
 DOCS_ROOT="$ROOT/docs/governance/domains"
+DOMAIN_BUNDLES_ROOT="$ROOT/ops/bindings/domains"
+TOPOLOGY_VALIDATE="$ROOT/ops/plugins/verify/bin/gate-topology-validate"
+DOC_MARKER_START="<!-- DOMAIN_CAPABILITY_CATALOG_START -->"
+DOC_MARKER_END="<!-- DOMAIN_CAPABILITY_CATALOG_END -->"
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
 
 usage() {
   cat <<'USAGE'
@@ -40,8 +47,16 @@ need_file() {
 
 need_file "$TOPOLOGY"
 need_file "$DOMAIN_PROFILES"
+need_file "$CATALOG_BINDING"
 command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
 command -v jq >/dev/null 2>&1 || fail "missing required tool: jq"
+[[ -x "$TOPOLOGY_VALIDATE" ]] || fail "missing validator: $TOPOLOGY_VALIDATE"
+
+cleanup() {
+  release_git_lock || true
+  spine_tx_cleanup
+  return 0
+}
 
 DOMAIN_ID=""
 DESCRIPTION=""
@@ -79,57 +94,112 @@ if yq e -r ".domains.\"$DOMAIN_ID\"" "$DOMAIN_PROFILES" 2>/dev/null | grep -qv '
   fail "domain '$DOMAIN_ID' already exists in domain profiles"
 fi
 
+if yq e -r ".domains[] | select(.domain_id == \"$DOMAIN_ID\") | .domain_id" "$CATALOG_BINDING" 2>/dev/null | grep -q "$DOMAIN_ID"; then
+  fail "domain '$DOMAIN_ID' already exists in capability domain catalog"
+fi
+
+DOC_FILE="$DOCS_ROOT/$DOMAIN_ID.md"
+BUNDLE_FILE="$DOMAIN_BUNDLES_ROOT/$DOMAIN_ID.bundle.yaml"
+[[ ! -e "$DOC_FILE" ]] || fail "domain doc already exists: $DOC_FILE"
+[[ ! -e "$BUNDLE_FILE" ]] || fail "domain bundle already exists: $BUNDLE_FILE"
+
 DEPENDS_JSON="$(printf '%s' "$DEPENDS_ON" | jq -R 'split(",") | map(gsub("^ +| +$";"")) | map(select(length>0)) | unique')"
 PREFIX_JSON="$(printf '%s' "$CAPABILITY_PREFIXES" | jq -R 'split(",") | map(gsub("^ +| +$";"")) | map(select(length>0)) | unique')"
 TRIGGERS_JSON="$(printf '%s' "$PATH_TRIGGERS" | jq -R 'split(",") | map(gsub("^ +| +$";"")) | map(select(length>0)) | unique')"
 ADDED_DATE="$(date +%Y-%m-%d)"
+ROOT_PATH="$ROOT"
 
-DOMAIN_ID="$DOMAIN_ID" DESCRIPTION="$DESCRIPTION" CRITICALITY="$CRITICALITY" DEPENDS_JSON="$DEPENDS_JSON" PREFIX_JSON="$PREFIX_JSON" TRIGGERS_JSON="$TRIGGERS_JSON" RUNTIME_SENTINEL="$RUNTIME_SENTINEL" ADDED_DATE="$ADDED_DATE" yq -i '
-  .domain_metadata += [{
-    "domain_id": strenv(DOMAIN_ID),
-    "description": strenv(DESCRIPTION),
-    "criticality": strenv(CRITICALITY),
-    "depends_on": (strenv(DEPENDS_JSON) | fromjson),
-    "capability_prefixes": (strenv(PREFIX_JSON) | fromjson),
-    "path_triggers": (strenv(TRIGGERS_JSON) | fromjson),
-    "requires_runtime_sentinel": (strenv(RUNTIME_SENTINEL) == "true"),
-    "added_date": strenv(ADDED_DATE)
-  }] |
-  .release_sequence += [strenv(DOMAIN_ID)]
-' "$TOPOLOGY"
+acquire_git_lock domain_onboard || exit 1
+trap cleanup EXIT INT TERM
+spine_tx_init
+spine_tx_track "$TOPOLOGY"
+spine_tx_track "$DOMAIN_PROFILES"
+spine_tx_track "$CATALOG_BINDING"
+spine_tx_track "$DOC_FILE"
+spine_tx_track "$BUNDLE_FILE"
 
-DOMAIN_ID="$DOMAIN_ID" DESCRIPTION="$DESCRIPTION" PREFIX_JSON="$PREFIX_JSON" TRIGGERS_JSON="$TRIGGERS_JSON" yq -i '
-  .domains[strenv(DOMAIN_ID)] = {
-    "description": strenv(DESCRIPTION),
-    "gate_ids": [],
-    "capability_prefixes": (strenv(PREFIX_JSON) | fromjson),
-    "path_triggers": (strenv(TRIGGERS_JSON) | fromjson)
-  }
-' "$DOMAIN_PROFILES"
+if ! {
+  DOMAIN_ID="$DOMAIN_ID" DESCRIPTION="$DESCRIPTION" CRITICALITY="$CRITICALITY" DEPENDS_JSON="$DEPENDS_JSON" PREFIX_JSON="$PREFIX_JSON" TRIGGERS_JSON="$TRIGGERS_JSON" RUNTIME_SENTINEL="$RUNTIME_SENTINEL" ADDED_DATE="$ADDED_DATE" yq -i '
+    .domain_metadata += [{
+      "domain_id": strenv(DOMAIN_ID),
+      "description": strenv(DESCRIPTION),
+      "criticality": strenv(CRITICALITY),
+      "depends_on": (strenv(DEPENDS_JSON) | fromjson),
+      "capability_prefixes": (strenv(PREFIX_JSON) | fromjson),
+      "path_triggers": (strenv(TRIGGERS_JSON) | fromjson),
+      "requires_runtime_sentinel": (strenv(RUNTIME_SENTINEL) == "true"),
+      "added_date": strenv(ADDED_DATE),
+      "gate_count": 0
+    }] |
+    .release_sequence += [strenv(DOMAIN_ID)]
+  ' "$TOPOLOGY"
+  yq -i ".updated = \"$ADDED_DATE\"" "$TOPOLOGY"
 
-mkdir -p "$DOCS_ROOT/$DOMAIN_ID"
-if [[ ! -f "$DOCS_ROOT/$DOMAIN_ID/README.md" ]]; then
-  cat > "$DOCS_ROOT/$DOMAIN_ID/README.md" <<DOC
-# ${DOMAIN_ID} Domain
+  DOMAIN_ID="$DOMAIN_ID" DESCRIPTION="$DESCRIPTION" PREFIX_JSON="$PREFIX_JSON" TRIGGERS_JSON="$TRIGGERS_JSON" yq -i '
+    .domains[strenv(DOMAIN_ID)] = {
+      "description": strenv(DESCRIPTION),
+      "gate_ids": [],
+      "capability_prefixes": (strenv(PREFIX_JSON) | fromjson),
+      "path_triggers": (strenv(TRIGGERS_JSON) | fromjson)
+    }
+  ' "$DOMAIN_PROFILES"
+  yq -i ".updated_at = \"${ADDED_DATE}T00:00:00Z\"" "$DOMAIN_PROFILES"
 
-- Owner: @ronny
-- Criticality: ${CRITICALITY}
-- Added: ${ADDED_DATE}
+  DOMAIN_ID="$DOMAIN_ID" PREFIX_JSON="$PREFIX_JSON" ROOT_PATH="$ROOT_PATH" ADDED_DATE="$ADDED_DATE" yq -i '
+    .domains += [{
+      "domain_id": strenv(DOMAIN_ID),
+      "prefixes": (strenv(PREFIX_JSON) | fromjson),
+      "owner_repo": strenv(ROOT_PATH),
+      "owner_path": "ops/plugins/",
+      "capabilities": [],
+      "last_synced": strenv(ADDED_DATE)
+    }]
+  ' "$CATALOG_BINDING"
+  yq -i ".updated_at = \"$ADDED_DATE\"" "$CATALOG_BINDING"
+
+  mkdir -p "$DOCS_ROOT" "$DOMAIN_BUNDLES_ROOT"
+  cat > "$DOC_FILE" <<DOC
+# ${DOMAIN_ID}
+
+Canonical domain policy for \`${DOMAIN_ID}\`.
+
+- Authority: \`docs/governance/SPINE.md\`
+- Runtime contracts: \`ops/bindings/domains/${DOMAIN_ID}.bundle.yaml\`
+- Verify entrypoint: \`./bin/ops cap run verify.run -- domain ${DOMAIN_ID}\`
 
 ## Scope
 ${DESCRIPTION}
 
-## Verify Lane
-- Core preflight: \`./bin/ops cap run verify.core.run\`
-- Domain pack: \`./bin/ops cap run verify.domain.run ${DOMAIN_ID}\`
-- Release cert: \`./bin/ops cap run spine.verify\`
-DOC
-fi
+${DOC_MARKER_START}
+## Capability Catalog
+Generated from \`ops/capabilities.yaml\` by \`catalog-domain-sync\`.
 
-"$ROOT/ops/plugins/verify/bin/gate-topology-validate" >/dev/null
+_No domain-external capabilities currently map to \`${DOMAIN_ID}\`._
+${DOC_MARKER_END}
+DOC
+
+  cat > "$BUNDLE_FILE" <<BUNDLE
+version: 1
+domain: ${DOMAIN_ID}
+owner: '@ronny'
+status: canonical
+contract_bundle:
+  policy:
+    source_of_truth: docs/governance/domains/${DOMAIN_ID}.md
+  verify:
+    command: ./bin/ops cap run verify.run -- domain ${DOMAIN_ID}
+BUNDLE
+
+  "$TOPOLOGY_VALIDATE" >/dev/null
+}; then
+  spine_tx_rollback
+  fail "write transaction rolled back"
+fi
 
 echo "domain.onboard.new PASS: onboarded domain '$DOMAIN_ID'"
 echo "  topology: $TOPOLOGY"
 echo "  profiles: $DOMAIN_PROFILES"
-echo "  docs: $DOCS_ROOT/$DOMAIN_ID/README.md"
+echo "  catalog: $CATALOG_BINDING"
+echo "  docs: $DOC_FILE"
+echo "  bundle: $BUNDLE_FILE"
 print_d128_trailers
