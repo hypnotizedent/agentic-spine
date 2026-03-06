@@ -1,7 +1,8 @@
 # Receipt — CP-VOUCHERVAULT-DEPLOYMENT-20260302 supersede normalization
 
 - Normalized malformed proposal into canonical lifecycle surface (`manifest.yaml`).
-- Marked proposal as `superseded` in favor of `CP-20260302-031644__vouchervault-deployment-plan`.
+- Marked proposal as `superseded` after canonical execution closed under `LOOP-RONNY-PRODUCTS-VOUCHERVAULT-EXECUTION-20260305`.
+- Retired malformed duplicate packet `CP-20260302-031644__vouchervault-deployment-plan` separately.
 - Carry-forward execution evidence already exists under `LOOP-RONNY-PRODUCTS-VOUCHERVAULT-EXECUTION-20260305`.
 
 ## Evidence
