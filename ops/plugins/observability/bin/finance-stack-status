@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # finance-stack-status - Health + API status for all finance services on VM 211
 #
-# Probes: Firefly III, Paperless-ngx, Ghostfolio, Mail Archiver
+# Probes: Firefly III, Paperless-ngx, Ghostfolio (optional), Mail Archiver
 # Host: finance-stack (VM 211, Tailscale 192.168.1.211)
-# Secrets: FIREFLY_ACCESS_TOKEN, PAPERLESS_API_TOKEN via infisical-agent.sh
+# Secrets: FIREFLY_PAT (legacy FIREFLY_ACCESS_TOKEN accepted), PAPERLESS_API_TOKEN, GHOSTFOLIO_ACCESS_TOKEN via infisical-agent.sh
 #
 # Usage:
 #   finance-stack-status
@@ -32,10 +32,29 @@ command -v jq >/dev/null 2>&1  || stop "missing dependency: jq"
 # ── Fetch auth tokens (best-effort, non-fatal) ──────────────────────────
 FIREFLY_TOKEN=""
 PAPERLESS_TOKEN=""
+GHOSTFOLIO_TOKEN=""
+
+resolve_secret() {
+  local project="$1"
+  local env="$2"
+  shift 2
+  local key value
+
+  for key in "$@"; do
+    value=$("$INFISICAL_AGENT" get "$project" "$env" "$key" 2>/dev/null) || value=""
+    if [[ -n "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+  done
+
+  return 1
+}
 
 if [[ -x "$INFISICAL_AGENT" ]]; then
-  FIREFLY_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod FIREFLY_ACCESS_TOKEN 2>/dev/null) || FIREFLY_TOKEN=""
+  FIREFLY_TOKEN=$(resolve_secret infrastructure prod FIREFLY_PAT FIREFLY_ACCESS_TOKEN) || FIREFLY_TOKEN=""
   PAPERLESS_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod PAPERLESS_API_TOKEN 2>/dev/null) || PAPERLESS_TOKEN=""
+  GHOSTFOLIO_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod GHOSTFOLIO_ACCESS_TOKEN 2>/dev/null) || GHOSTFOLIO_TOKEN=""
 fi
 
 # Resolve mail-archiver host (on communications-stack VM 214, not finance-stack)
@@ -44,12 +63,12 @@ _MA_IP="$(echo "$_ma_result" | awk '{print $1}')"
 [[ -z "$_MA_IP" ]] && _MA_IP="192.168.1.26"
 
 # ── Service definitions ─────────────────────────────────────────────────
-# name|port|health_path|expected_code|host_ip_override
+# name|port|health_path|expected_code|host_ip_override|service_tier
 SERVICES=(
-  "firefly-iii|8080|/api/v1/about|302|"
-  "paperless-ngx|8000|/api/|302|"
-  "ghostfolio|3333|/|301|"
-  "mail-archiver|5100|/|302|${_MA_IP}"
+  "firefly-iii|8080|/api/v1/about|302||required"
+  "paperless-ngx|8000|/api/|302||required"
+  "ghostfolio|3333|/|301||optional"
+  "mail-archiver|5100|/|302|${_MA_IP}|required"
 )
 
 # ── Probe helper ────────────────────────────────────────────────────────
@@ -78,13 +97,19 @@ echo
 
 pass=0
 fail=0
-total=${#SERVICES[@]}
+warn=0
+required_total=0
 
 for entry in "${SERVICES[@]}"; do
-  IFS='|' read -r name port path expect svc_ip_override <<< "$entry"
+  IFS='|' read -r name port path expect svc_ip_override service_tier <<< "$entry"
   svc_host="${svc_ip_override:-$HOST_IP}"
   url="http://${svc_host}:${port}${path}"
   detail=""
+  status_kind="healthy"
+
+  if [[ "$service_tier" == "required" ]]; then
+    required_total=$((required_total + 1))
+  fi
 
   # Health probe
   http_code=$(probe_http "$url")
@@ -131,6 +156,24 @@ for entry in "${SERVICES[@]}"; do
         fi
       fi
       ;;
+    ghostfolio)
+      if [[ -n "$GHOSTFOLIO_TOKEN" ]]; then
+        jwt_response=$(curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+          -X POST "http://${svc_host}:${port}/api/v1/auth/anonymous" \
+          -H "Content-Type: application/json" \
+          -d "{\"accessToken\":\"${GHOSTFOLIO_TOKEN}\"}" 2>/dev/null) || jwt_response=""
+        ghostfolio_jwt=$(echo "$jwt_response" | jq -r '.authToken // empty' 2>/dev/null)
+        if [[ -n "$ghostfolio_jwt" ]]; then
+          detail="optional investment tracking, auth ok"
+        else
+          detail="optional investment tracking, auth failed"
+          status_kind="warn"
+        fi
+      else
+        detail="optional investment tracking, token unavailable"
+        status_kind="warn"
+      fi
+      ;;
   esac
 
   # Determine health: expected code or 200 (authenticated upgrade)
@@ -144,7 +187,14 @@ for entry in "${SERVICES[@]}"; do
     status_parts="${status_parts}, ${detail}"
   fi
 
-  if [[ "$is_healthy" == "true" ]]; then
+  if [[ "$service_tier" == "optional" ]]; then
+    if [[ "$is_healthy" == "true" && "$status_kind" == "healthy" ]]; then
+      printf "  %-20s ~ OPT  (%s)\n" "$name" "$status_parts"
+    else
+      printf "  %-20s ! WARN (%s)\n" "$name" "$status_parts"
+      warn=$((warn + 1))
+    fi
+  elif [[ "$is_healthy" == "true" ]]; then
     printf "  %-20s ✓ UP   (%s)\n" "$name" "$status_parts"
     pass=$((pass + 1))
   else
@@ -154,7 +204,7 @@ for entry in "${SERVICES[@]}"; do
 done
 
 echo
-echo "summary: ${pass}/${total} healthy"
+echo "summary: core=${pass}/${required_total} healthy, optional_warn=${warn}"
 
 if [[ $fail -gt 0 ]]; then
   echo "status: DEGRADED"

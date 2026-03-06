@@ -22,7 +22,7 @@
 | Transaction queries, categorization, reconciliation | Firefly III API |
 | Account/budget views and balance monitoring | Firefly III API |
 | Document search, receipt management, W-9 retrieval | Paperless-ngx API |
-| Investment tracking (when configured) | Ghostfolio API |
+| Investment tracking (optional, when configured) | Ghostfolio API |
 | Contractor payment aggregation (1099 prep) | Firefly III API |
 | FL sales tax calculation (DR-15 prep) | Mint OS revenue + Firefly III |
 | Tax calendar and compliance deadline tracking | Agent config |
@@ -46,9 +46,9 @@ If a finance-agent finding requires an infrastructure change, file it to the spi
 
 ## Governed Tools
 
-V1.1 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with 21 tools:
+V1.1 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with 22 tools:
 
-### Firefly III (8 tools)
+### Firefly III (9 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -59,6 +59,7 @@ V1.1 implements a TypeScript MCP server (`workbench/agents/finance/tools/`) with
 | `search_transactions` | Search transactions by keyword across description, notes, and text fields |
 | `list_categories` | List transaction categories with current-month spending totals |
 | `list_budgets` | List budgets with period amounts and spending progress |
+| `finance_expense_category_summary` | Summarize expenses by source account and category for a date range, surfacing uncategorized spend |
 | `list_bills` | List recurring bills with amounts, frequency, and next expected date |
 
 ### Paperless-ngx (5 tools)
@@ -107,7 +108,7 @@ The spine exposes 4 read-only capabilities for finance observability. These are 
 | `finance.ronny.action.queue` | Deterministic operator task queue (monthly/quarterly/annual) |
 | `ghostfolio.portfolio.status` | Ghostfolio holdings, accounts, portfolio value |
 
-The 21 MCP tools above live in `workbench/agents/finance/tools/` and are workbench-only.
+The 22 MCP tools above live in `workbench/agents/finance/tools/` and are workbench-only.
 
 ## Deployment
 
@@ -119,7 +120,7 @@ cd ~/code/workbench/agents/finance/tools
 npm install && npm run build
 
 # Secrets (Infisical infrastructure/prod at /spine/services/finance)
-# FIREFLY_ACCESS_TOKEN, GHOSTFOLIO_ACCESS_TOKEN, FINANCE_ADAPTER_API_KEY, SIMPLEFIN_TOKEN
+# FIREFLY_PAT, GHOSTFOLIO_ACCESS_TOKEN, FINANCE_ADAPTER_API_KEY, SIMPLEFIN_TOKEN
 # Paperless: PAPERLESS_API_TOKEN at /spine/services/paperless
 # FIREFLY_URL=http://100.76.153.100:8080
 # PAPERLESS_URL=http://100.76.153.100:8000
