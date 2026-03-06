@@ -11,6 +11,10 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
 MODE="write"
+LOCK_HELD=0
+
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,6 +29,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 fail() { echo "gen-gate-registry-header FAIL: $*" >&2; exit 1; }
+
+cleanup() {
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  return 0
+}
+
+trap cleanup EXIT INT TERM
 
 command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 [[ -f "$REGISTRY" ]] || fail "missing registry: $REGISTRY"
@@ -95,18 +109,31 @@ if [[ "$drift" -eq 0 ]]; then
   exit 0
 fi
 
-# Update gate_count fields
-yq e -i ".gate_count.total = $total" "$REGISTRY"
-yq e -i ".gate_count.active = $active" "$REGISTRY"
-yq e -i ".gate_count.retired = $retired" "$REGISTRY"
-yq e -i ".gate_count.active_blocking = $active_blocking" "$REGISTRY"
-yq e -i ".gate_count.active_report = $active_report" "$REGISTRY"
+if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+  acquire_git_lock gate_registry_header || exit 1
+  LOCK_HELD=1
+  export SPINE_GIT_LOCK_HELD=1
+fi
 
-# Update the description D1-DXXX range
-cur_desc="$(yq e -r '.description' "$REGISTRY")"
-new_desc="$(echo "$cur_desc" | sed "s/D1-D[0-9]*/D1-D${max_gate}/")"
-if [[ "$cur_desc" != "$new_desc" ]]; then
-  yq e -i ".description = \"$(printf '%s' "$new_desc" | sed 's/"/\\"/g')\"" "$REGISTRY"
+spine_tx_init
+spine_tx_track "$REGISTRY"
+
+# Update gate_count fields
+if ! {
+  yq e -i ".gate_count.total = $total" "$REGISTRY"
+  yq e -i ".gate_count.active = $active" "$REGISTRY"
+  yq e -i ".gate_count.retired = $retired" "$REGISTRY"
+  yq e -i ".gate_count.active_blocking = $active_blocking" "$REGISTRY"
+  yq e -i ".gate_count.active_report = $active_report" "$REGISTRY"
+
+  cur_desc="$(yq e -r '.description' "$REGISTRY")"
+  new_desc="$(echo "$cur_desc" | sed "s/D1-D[0-9]*/D1-D${max_gate}/")"
+  if [[ "$cur_desc" != "$new_desc" ]]; then
+    yq e -i ".description = \"$(printf '%s' "$new_desc" | sed 's/\"/\\\\\"/g')\"" "$REGISTRY"
+  fi
+}; then
+  spine_tx_rollback
+  fail "write transaction rolled back"
 fi
 
 echo "gen-gate-registry-header PASS: header updated (total=$total active=$active retired=$retired blocking=$active_blocking report=$active_report max=D$max_gate)"

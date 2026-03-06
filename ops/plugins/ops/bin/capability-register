@@ -6,7 +6,13 @@ CAP_FILE="$ROOT/ops/capabilities.yaml"
 MAP_FILE="$ROOT/ops/bindings/capability_map.yaml"
 MANIFEST_FILE="$ROOT/ops/plugins/MANIFEST.yaml"
 ROUTING_GEN="$ROOT/bin/generators/gen-routing-dispatch.sh"
+ROUTING_FILE="$ROOT/ops/bindings/routing.dispatch.yaml"
 source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
+
+LOCK_HELD=0
+tmp_cap_entry=""
+tmp_map_entry=""
 
 CAP_ID=""
 DESCRIPTION=""
@@ -53,6 +59,15 @@ fail() {
   exit 1
 }
 
+cleanup() {
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  rm -f "${tmp_cap_entry:-}" "${tmp_map_entry:-}"
+  return 0
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --) shift ;;
@@ -84,6 +99,7 @@ command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
 [[ -f "$MAP_FILE" ]] || fail "missing capability map: $MAP_FILE"
 [[ -f "$MANIFEST_FILE" ]] || fail "missing plugin manifest: $MANIFEST_FILE"
 [[ -x "$ROUTING_GEN" ]] || fail "missing routing generator: $ROUTING_GEN"
+[[ -f "$ROUTING_FILE" ]] || fail "missing routing dispatch: $ROUTING_FILE"
 
 [[ -n "$CAP_ID" ]] || fail "--id is required"
 [[ -n "$DESCRIPTION" ]] || fail "--description is required"
@@ -155,27 +171,6 @@ fi
 
 tmp_cap_entry="$(mktemp)"
 tmp_map_entry="$(mktemp)"
-backup_cap="$(mktemp)"
-backup_map="$(mktemp)"
-backup_manifest="$(mktemp)"
-backup_dispatch="$(mktemp)"
-cp "$CAP_FILE" "$backup_cap"
-cp "$MAP_FILE" "$backup_map"
-cp "$MANIFEST_FILE" "$backup_manifest"
-cp "$ROOT/ops/bindings/routing.dispatch.yaml" "$backup_dispatch"
-
-cleanup() {
-  rm -f "$tmp_cap_entry" "$tmp_map_entry"
-}
-rollback() {
-  cp "$backup_cap" "$CAP_FILE"
-  cp "$backup_map" "$MAP_FILE"
-  cp "$backup_manifest" "$MANIFEST_FILE"
-  cp "$backup_dispatch" "$ROOT/ops/bindings/routing.dispatch.yaml"
-}
-finalize() {
-  rm -f "$backup_cap" "$backup_map" "$backup_manifest" "$backup_dispatch"
-}
 trap cleanup EXIT INT TERM
 
 {
@@ -226,8 +221,16 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-acquire_git_lock capability_register || exit 1
-trap 'release_git_lock; cleanup' EXIT INT TERM
+if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+  acquire_git_lock capability_register || exit 1
+  LOCK_HELD=1
+  export SPINE_GIT_LOCK_HELD=1
+fi
+spine_tx_init
+spine_tx_track "$CAP_FILE"
+spine_tx_track "$MAP_FILE"
+spine_tx_track "$MANIFEST_FILE"
+spine_tx_track "$ROUTING_FILE"
 
 if ! {
   yq e -i ".capabilities.\"$CAP_ID\" = load(\"$tmp_cap_entry\")" "$CAP_FILE"
@@ -235,12 +238,14 @@ if ! {
   yq e -i "(.plugins[] | select(.name == \"$PLUGIN\") | .scripts) |= ((. + [\"bin/$SCRIPT\"]) | unique)" "$MANIFEST_FILE"
   yq e -i "(.plugins[] | select(.name == \"$PLUGIN\") | .capabilities) |= ((. + [\"$CAP_ID\"]) | unique)" "$MANIFEST_FILE"
   "$ROUTING_GEN" >/dev/null
+  yq e '.' "$CAP_FILE" >/dev/null
+  yq e '.' "$MAP_FILE" >/dev/null
+  yq e '.' "$MANIFEST_FILE" >/dev/null
+  yq e '.' "$ROUTING_FILE" >/dev/null
 }; then
-  rollback
+  spine_tx_rollback
   fail "transaction rolled back (capability triad update failed)"
 fi
-
-finalize
 
 count_cap="$(yq e '.capabilities | length' "$CAP_FILE")"
 count_map="$(yq e '.capabilities | length' "$MAP_FILE")"

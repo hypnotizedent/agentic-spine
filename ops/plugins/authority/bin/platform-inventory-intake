@@ -2,9 +2,66 @@
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+LOCK_HELD=0
+TX_ACTIVE=0
+
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
 
 if [[ "${1:-}" == "--" ]]; then
   shift
+fi
+
+cleanup() {
+  local rc=$?
+  if [[ "$TX_ACTIVE" -eq 1 && "$rc" -ne 0 ]]; then
+    spine_tx_rollback || true
+  fi
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  return 0
+}
+
+trap cleanup EXIT INT TERM
+
+command_name="${1:-}"
+item_class=""
+if [[ "$command_name" =~ ^(receive|issue|move|count)$ ]]; then
+  args=("$@")
+  for ((i=1; i<${#args[@]}; i++)); do
+    case "${args[$i]}" in
+      --class)
+        if (( i + 1 < ${#args[@]} )); then
+          item_class="${args[$((i + 1))]}"
+        fi
+        break
+        ;;
+    esac
+  done
+
+  [[ -n "$item_class" ]] || {
+    echo "platform.inventory.intake FAIL: --class is required for $command_name" >&2
+    exit 1
+  }
+
+  inventory_doc="$ROOT/ops/bindings/business.inventory.catalog.yaml"
+  if [[ "$item_class" == "part" ]]; then
+    inventory_doc="$ROOT/ops/bindings/hardware.parts.inventory.yaml"
+  fi
+  ledger_doc="$ROOT/ops/bindings/inventory.transaction.ledger.yaml"
+
+  if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+    acquire_git_lock platform_inventory || exit 1
+    LOCK_HELD=1
+    export SPINE_GIT_LOCK_HELD=1
+  fi
+
+  spine_tx_init
+  spine_tx_track "$inventory_doc"
+  spine_tx_track "$ledger_doc"
+  TX_ACTIVE=1
 fi
 
 python3 - "$ROOT" "$@" <<'PY'

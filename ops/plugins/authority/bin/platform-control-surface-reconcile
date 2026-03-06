@@ -4,9 +4,11 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 CONTROL_BINDING="$ROOT/ops/bindings/platform.control.surfaces.yaml"
 SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+LOCK_HELD=0
 
 # shellcheck source=/Users/ronnyworks/code/agentic-spine/ops/lib/git-lock.sh
 source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
 
 usage() {
   cat <<'EOF'
@@ -47,14 +49,13 @@ command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 [[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
 
 plan_file="$(mktemp)"
-backup_file=""
 
 cleanup() {
-  release_git_lock || true
-  rm -f "$plan_file"
-  if [[ -n "$backup_file" ]]; then
-    rm -f "$backup_file"
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
   fi
+  spine_tx_cleanup
+  rm -f "$plan_file"
   return 0
 }
 trap cleanup EXIT INT TERM
@@ -199,16 +200,21 @@ if [[ "$MODE" == "write" && "$error_count" -gt 0 ]]; then
 fi
 
 if [[ "$MODE" == "write" && "$change_count" -gt 0 ]]; then
-  backup_file="$(mktemp)"
-  cp "$CONTROL_BINDING" "$backup_file"
-  acquire_git_lock platform_control_projection || exit 1
+  if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+    acquire_git_lock platform_control_projection || exit 1
+    LOCK_HELD=1
+    export SPINE_GIT_LOCK_HELD=1
+  fi
+
+  spine_tx_init
+  spine_tx_track "$CONTROL_BINDING"
 
   if ! while IFS=$'\t' read -r service_id _target_id _current_alias expected_alias; do
     [[ -n "$service_id" ]] || continue
     SERVICE_ID="$service_id" EXPECTED_ALIAS="$expected_alias" \
       yq -i '(.services[strenv(SERVICE_ID)].git_transport.host_alias) = strenv(EXPECTED_ALIAS)' "$CONTROL_BINDING"
   done <"$plan_file"; then
-    cp "$backup_file" "$CONTROL_BINDING"
+    spine_tx_rollback
     fail "write transaction rolled back"
   fi
 fi

@@ -45,3 +45,6 @@ Make tracked projections self-stabilizing so capability and control-surface chan
 - Added platform control reconciliation to the shared `projection-reconcile` pass so this drift surface is handled with the rest of the tracked projections.
 - Wired the VM intake mutator to back up tracked surfaces, write scaffold entries through deterministic `load()` fragments, regenerate `vm.lifecycle.derived.yaml`, re-run platform control reconcile, and roll back the full change pack on scoped parity failure.
 - Scoped `vm-lifecycle-derived-check` so onboarding flows can validate the mutated VM without being blocked by unrelated historical entries elsewhere in `vm.lifecycle.yaml`.
+- Pulled the remaining direct tracked mutators in this lane under the same outer transaction pattern: gate registry header sync, stack discovery source registration, capability registration, and inventory ledger mutations.
+- Made the canonical terminal-worker generator entrypoints transactional so routing dispatch, launcher view, worker catalog, and worker-usage doc generation roll back cleanly instead of leaving partial generated surfaces behind.
+- Reconciled live `routing.dispatch.yaml` to current capability metadata so generator checks return clean after the atomic writer changes.
