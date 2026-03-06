@@ -71,29 +71,45 @@ QUERY="per_page=${LIMIT}"
 [[ -n "$CURSOR" ]] && QUERY="${QUERY}&cursor=${CURSOR}"
 
 # Fetch R2 objects
-OBJECTS_JSON="$(cf_api_get_with_retry "${CF_API}/accounts/${ACCOUNT_ID}/r2/buckets/${BUCKET}/objects?${QUERY}")" || {
+OBJECTS_JSON=""
+if ! cf_api_get_with_retry_into_var OBJECTS_JSON "${CF_API}/accounts/${ACCOUNT_ID}/r2/buckets/${BUCKET}/objects?${QUERY}"; then
   http_status="${CF_LAST_HTTP_STATUS:-000}"
   class="$(cf_classify_failure "$http_status")"
+  error_code="$(cf_last_error_code || true)"
+  error_message="$(cf_last_error_message || true)"
+  error_hint="$(cf_last_error_hint || true)"
   if [[ "$JSON_OUT" -eq 1 ]]; then
-    python3 -c "
-import json
-print(json.dumps({
-    'capability': 'cloudflare.r2.object.list',
-    'status': 'error',
-    'error_class': '${class}',
-    'http_status': ${http_status},
-    'bucket': '${BUCKET}',
-}, indent=2))
-"
+    python3 - "$http_status" "$class" "$BUCKET" "$error_code" "$error_message" "$error_hint" <<'PY'
+import json, sys
+
+http_status, error_class, bucket, error_code, error_message, error_hint = sys.argv[1:7]
+doc = {
+    "capability": "cloudflare.r2.object.list",
+    "status": "error",
+    "error_class": error_class,
+    "http_status": int(http_status),
+    "bucket": bucket,
+}
+if error_code:
+    doc["error_code"] = error_code
+if error_message:
+    doc["error_message"] = error_message
+if error_hint:
+    doc["hint"] = error_hint
+print(json.dumps(doc, indent=2))
+PY
   else
     echo "cloudflare.r2.object.list"
     echo "status: error"
     echo "error_class: ${class}"
     echo "http_status: ${http_status}"
     echo "bucket: ${BUCKET}"
+    [[ -n "$error_code" ]] && echo "error_code: ${error_code}"
+    [[ -n "$error_message" ]] && echo "error_message: ${error_message}"
+    [[ -n "$error_hint" ]] && echo "hint: ${error_hint}"
   fi
   exit 2
-}
+fi
 
 python3 - "$OBJECTS_JSON" "$JSON_OUT" "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" "$BUCKET" <<'PYEOF'
 import json, sys

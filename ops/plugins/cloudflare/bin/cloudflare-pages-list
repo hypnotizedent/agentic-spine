@@ -50,27 +50,39 @@ ACCOUNT_ID="$(cf_account_id_resolve "$INVENTORY" || true)"
 [[ -n "$ACCOUNT_ID" ]] || { echo "STOP: missing CLOUDFLARE_ACCOUNT_ID and inventory account_id" >&2; exit 2; }
 
 # Fetch Pages projects
-PAGES_JSON="$(cf_api_get_with_retry "${CF_API}/accounts/${ACCOUNT_ID}/pages/projects")" || {
+PAGES_JSON=""
+if ! cf_api_get_with_retry_into_var PAGES_JSON "${CF_API}/accounts/${ACCOUNT_ID}/pages/projects"; then
   http_status="${CF_LAST_HTTP_STATUS:-000}"
   class="$(cf_classify_failure "$http_status")"
+  error_code="$(cf_last_error_code || true)"
+  error_message="$(cf_last_error_message || true)"
   if [[ "$JSON_OUT" -eq 1 ]]; then
-    python3 -c "
-import json
-print(json.dumps({
-    'capability': 'cloudflare.pages.list',
-    'status': 'error',
-    'error_class': '${class}',
-    'http_status': ${http_status},
-}, indent=2))
-"
+    python3 - "$http_status" "$class" "$error_code" "$error_message" <<'PY'
+import json, sys
+
+http_status, error_class, error_code, error_message = sys.argv[1:5]
+doc = {
+    "capability": "cloudflare.pages.list",
+    "status": "error",
+    "error_class": error_class,
+    "http_status": int(http_status),
+}
+if error_code:
+    doc["error_code"] = error_code
+if error_message:
+    doc["error_message"] = error_message
+print(json.dumps(doc, indent=2))
+PY
   else
     echo "cloudflare.pages.list"
     echo "status: error"
     echo "error_class: ${class}"
     echo "http_status: ${http_status}"
+    [[ -n "$error_code" ]] && echo "error_code: ${error_code}"
+    [[ -n "$error_message" ]] && echo "error_message: ${error_message}"
   fi
   exit 2
-}
+fi
 
 python3 - "$PAGES_JSON" "$JSON_OUT" "${CF_AUTH_MODE_EFFECTIVE:-${CF_AUTH_MODE_PREFERRED:-unknown}}" <<'PYEOF'
 import json, sys

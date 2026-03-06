@@ -22,10 +22,11 @@ CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
 cf_require_auth || exit $?
 
 # Fetch zones (names + ids only) with bounded retry on 429
-ZONES_JSON="$(cf_api_get_with_retry "${CF_API}/zones?per_page=50")" || {
+ZONES_JSON=""
+if ! cf_api_get_with_retry_into_var ZONES_JSON "${CF_API}/zones?per_page=50"; then
   echo "STOP: Cloudflare zones request failed (class=$(cf_classify_failure "${CF_LAST_HTTP_STATUS}"))." >&2
   exit 2
-}
+fi
 
 TMP_ZONES="$(mktemp)"
 trap 'rm -f "$TMP_ZONES" 2>/dev/null || true' EXIT
@@ -55,8 +56,8 @@ while IFS=$'\t' read -r zid name; do
     echo "- ${name}: SKIP (rate_limited — halted further API calls)"
     continue
   fi
-  DNS_JSON="$(cf_api_get_with_retry "${CF_API}/zones/${zid}/dns_records?per_page=1" || true)"
-  if [[ -z "$DNS_JSON" ]]; then
+  DNS_JSON=""
+  if ! cf_api_get_with_retry_into_var DNS_JSON "${CF_API}/zones/${zid}/dns_records?per_page=1"; then
     if [[ "${CF_LAST_HTTP_STATUS:-}" == "429" ]]; then
       _rate_limited=1
       echo "- ${name}: rate_limited (429 — halting per-zone loop)"

@@ -35,10 +35,52 @@ cf_has_token_auth() {
   [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]
 }
 
+cf_last_error_code() {
+  local body="${CF_LAST_BODY:-}"
+  [[ "$body" =~ \"code\"[[:space:]]*:[[:space:]]*([0-9]+) ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+cf_last_error_message() {
+  local body="${CF_LAST_BODY:-}"
+  [[ "$body" =~ \"message\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+cf_last_error_hint() {
+  local code message
+  code="$(cf_last_error_code || true)"
+  message="$(cf_last_error_message || true)"
+
+  if [[ "$code" == "10042" ]] || [[ "$message" == "Please enable R2 through the Cloudflare Dashboard." ]]; then
+    echo "Enable R2 in Cloudflare Dashboard > Storage & databases > R2 > Overview."
+    return 0
+  fi
+
+  return 1
+}
+
+cf_is_feature_state_failure() {
+  local status="${1:-${CF_LAST_HTTP_STATUS:-000}}"
+  local code message
+
+  [[ "$status" == "403" ]] || return 1
+
+  code="$(cf_last_error_code || true)"
+  message="$(cf_last_error_message || true)"
+  [[ "$code" == "10042" ]] || [[ "$message" == "Please enable R2 through the Cloudflare Dashboard." ]]
+}
+
 cf_is_fallback_status() {
   local status="${1:-}"
-  # Only auth failures trigger mode fallback; 429 is rate limiting, not auth scope.
-  [[ "$status" == "401" || "$status" == "403" ]]
+  # Only auth failures trigger mode fallback; feature-state failures should surface directly.
+  if [[ "$status" == "401" ]]; then
+    return 0
+  fi
+  if [[ "$status" == "403" ]] && ! cf_is_feature_state_failure "$status"; then
+    return 0
+  fi
+  return 1
 }
 
 cf__curl_with_mode() {
@@ -114,7 +156,11 @@ cf_log_last_failure_details() {
 }
 
 cf_classify_failure() {
-  local status="${1:-000}"
+  local status="${1:-${CF_LAST_HTTP_STATUS:-000}}"
+  if cf_is_feature_state_failure "$status"; then
+    echo "feature_not_enabled"
+    return 0
+  fi
   case "$status" in
     401|403) echo "token_invalid" ;;
     429)     echo "rate_limited" ;;
@@ -218,6 +264,28 @@ cf_api_get() {
   cf_api_request "GET" "$url"
 }
 
+cf_api_capture_into_var() {
+  local var_name="$1"
+  shift
+
+  local tmp_file body
+  tmp_file="$(mktemp "${TMPDIR:-/tmp}/cloudflare-api.capture.XXXXXX")"
+  if "$@" >"$tmp_file"; then
+    body="$(<"$tmp_file")"
+    printf -v "$var_name" '%s' "$body"
+    rm -f "$tmp_file"
+    return 0
+  fi
+  rm -f "$tmp_file"
+  return 1
+}
+
+cf_api_get_into_var() {
+  local var_name="$1"
+  local url="$2"
+  cf_api_capture_into_var "$var_name" cf_api_get "$url"
+}
+
 cf_api_get_with_retry() {
   # Bounded retry for read paths: 3 attempts with exponential backoff + jitter on 429.
   local url="$1"
@@ -238,6 +306,12 @@ cf_api_get_with_retry() {
     sleep "$(printf '%.3f' "$(echo "scale=3; $wait_ms / 1000" | bc)")"
     backoff=$((backoff * 2))
   done
+}
+
+cf_api_get_with_retry_into_var() {
+  local var_name="$1"
+  local url="$2"
+  cf_api_capture_into_var "$var_name" cf_api_get_with_retry "$url"
 }
 
 cf_api_post() {
