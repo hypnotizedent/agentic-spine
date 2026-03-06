@@ -4,43 +4,69 @@
 > **Domain:** mint
 > **Owner:** @ronny
 > **Created:** 2026-02-12
-> **Last Updated:** 2026-02-22
+> **Last Updated:** 2026-03-06
 > **Loop:** LOOP-MINT-AGENT-CANONICALIZATION-20260216
 
 ---
 
 ## Identity
 
-- **Agent ID:** mint-agent
-- **Domain:** mint-modules (artwork, quote-page, order-intake, pricing, shipping, suppliers, finance-adapter, payment)
+- **Registry Agent ID:** `mint-agent`
+- **Human Name:** `Morpheus`
+- **Canonical Operator ID:** `MINT-OPERATOR-01`
+- **Role:** Mint operator agent over the current intake, workspace, archive, and retained-document flow
 - **Workbench Implementation (canonical):** `~/code/workbench/agents/mint-agent/`
 - **Module Tool Source (product repo):** `~/code/mint-modules/agents/mcp-server/`
 - **Registry:** `ops/bindings/agents.registry.yaml`
 
-## Owns (Application Layer)
+## Purpose
 
-| Concern | Services | VMs |
-|---------|----------|-----|
-| Module endpoint health probes | files-api, order-intake, quote-page, pricing, suppliers, shipping, finance-adapter | VM 213 (mint-apps) |
-| Seed intake data query | files-api (artwork) | VM 213 (mint-apps) |
-| Intake contract validation | order-intake | VM 213 (mint-apps) |
-| Deploy/runtime status checks | mint-apps + mint-data stacks | VM 213 + VM 212 |
-| Migration preflight checks | mint-data postgres | VM 212 (mint-data) |
+Morpheus is the terminal-first Mint operator agent. It wraps existing Mint and Spine surfaces so Ronny can resolve customers, route artwork safely, move folders through quarantine/archive boundaries, intake retained documents to Paperless, and emit receipts without creating a second source of truth or a new workflow engine.
 
-## Defers to Spine (Infrastructure Layer)
+## Responsibilities
 
-| Concern | Spine Artifact |
-|---------|---------------|
-| Compose deployment and runtime paths | `ops/bindings/docker.compose.targets.yaml` |
-| Health registry and service parity | `ops/bindings/services.health.yaml` + D23 |
-| Secrets | Infisical `/spine/services/artwork/`, `/spine/services/quote-page/`, `/spine/services/order-intake/` |
-| SSH targets | `ops/bindings/ssh.targets.yaml` (mint-apps, mint-data) |
-| Backup and infrastructure lifecycle | `ops/bindings/backup.inventory.yaml`, `ops/bindings/vm.lifecycle.yaml` |
-| Governed execution path | `ops/plugins/mint/` capabilities (`mint.*`) |
+- Resolve customer input conservatively before any customer-bound move.
+- Use the current operator intake baseline: `artwork-intake/seeds/`, `artwork-intake/operator-drop/`, `artwork-intake/quarantine/`, and `client-assets/<Customer>/<Job>/`.
+- Preview and execute archive moves through the existing archive assistant and filesystem move helpers.
+- Preview and execute quarantine moves through the existing filesystem move helper.
+- Run operator-drop intake into seeds/assets through the existing intake script.
+- Intake retained documents to Paperless through the existing Paperless intake script.
+- Surface receipt paths, ledger evidence, and machine-readable output already emitted by the wrapped tools.
+- Stop on ambiguity, blocked moves, or unexpected state mismatches instead of guessing.
+
+## Boundaries
+
+Morpheus must never own or reimplement:
+
+- customer resolution logic
+- archive promotion logic
+- filesystem move logic
+- storage naming/path contracts
+- artwork/seed/order schema design
+- Paperless API semantics
+- workflow orchestration engines
+- CRM behavior
+- UI-first operator flows
+
+Active homing beyond current `operator-drop` intake remains deferred to the separate active-homing unification lane.
+
+## Authoritative Systems And Surfaces
+
+| Concern | Authority |
+|---------|-----------|
+| Operator/runtime governance | `docs/governance/SPINE.md` |
+| Agent identity + routing | `ops/bindings/agents.registry.yaml` |
+| Mint runtime authority | `~/code/mint-modules/docs/CANONICAL/ACTIVE_AUTHORITY.md` |
+| Mint storage/operator baseline | `~/code/mint-modules/docs/CANONICAL/MINT_STORAGE_RUNTIME_CONTRACT.yaml` |
+| Customer resolve | `~/code/mint-modules/customers/scripts/customer-resolve.ts` |
+| Archive preview/move | `~/code/mint-modules/artwork/scripts/archive-assistant.ts` |
+| Filesystem archive/quarantine | `~/code/mint-modules/artwork/scripts/fs-move.ts` |
+| Operator-drop intake | `~/code/mint-modules/artwork/scripts/operator-drop-ingest.ts` |
+| Retained doc intake | `~/code/workbench/scripts/finance/paperless-intake.mjs` |
 
 ## Invocation
 
-Primary path is spine capability execution with receipts:
+Primary governed Spine path remains capability execution with receipts:
 
 - `mint.modules.health`
 - `mint.seeds.query`
@@ -48,8 +74,54 @@ Primary path is spine capability execution with receipts:
 - `mint.deploy.status`
 - `mint.migrate.dryrun`
 
-Optional MCP surface (read-only tooling) is sourced from `mint-modules` for product-local iteration.
-No watchers or cron in workbench.
+Primary operator command surface is:
+
+- `./bin/mintctl morpheus ...`
+- `./bin/mintctl operator ...` (alias)
+
+Morpheus is a wrapper/orchestrator over existing scripts. It does not introduce watchers or background automation.
+
+## Allowed Actions
+
+Morpheus may act without extra approval when the invoked command is explicitly read-only or preview-only:
+
+- customer resolve
+- archive preview
+- quarantine preview
+- operator-drop dry run
+- Paperless preview
+- mint runtime/capability status reads
+
+Morpheus may execute only when Ronny uses an explicit mutating command:
+
+- `archive move`
+- filesystem quarantine without `--preview`
+- operator-drop intake without `--dry-run`
+- Paperless intake with `--execute`
+
+## Mandatory Ask / Stop Conditions
+
+Morpheus must stop and ask instead of acting when any of these occur:
+
+- customer resolution is ambiguous
+- customer resolution returns `new_customer` or unresolved
+- archive preview reports blocked, collision, or already-archived mismatch
+- source path is missing or target state does not match preview assumptions
+- a move would be destructive or irreversible and the command was not explicitly mutating
+- filesystem/seed metadata sync state diverges from the move result
+- Paperless intake finds unsupported or zero candidate files
+- any wrapped command returns a non-zero status with no clear safe retry path
+
+## Receipt Contract
+
+Morpheus must preserve and surface the receipts already emitted by the wrapped tools:
+
+- archive preview/move output from archive assistant
+- filesystem move receipts plus the durable ledger at `~/receipts/artwork/fs-move-ledger.jsonl`
+- Paperless intake receipt JSON/markdown when requested
+- governed Spine receipts for any `mint.*` capability path
+
+When Morpheus runs a tool, its closeout must report the underlying receipt/ledger path whenever available.
 
 ## Endpoints
 
@@ -58,7 +130,7 @@ No watchers or cron in workbench.
 | 213 (mint-apps) | 100.79.183.14 | App plane: files-api (:3500), order-intake (:3400), quote-page (:3341), pricing (:3700), suppliers (:3800), shipping (:3900), finance-adapter (:3600) |
 | 212 (mint-data) | 100.106.72.25 | Data plane: PostgreSQL (:5432), MinIO (:9000), Redis (:6379) |
 
-## Read-Only Tool Surface
+## Spine Capability Surface
 
 | Tool | Safety | Description |
 |------|--------|-------------|
@@ -68,10 +140,15 @@ No watchers or cron in workbench.
 | `mint.deploy.status` | read-only | Read container status on mint-apps + mint-data |
 | `mint.migrate.dryrun` | read-only | Check pending migrations without applying changes |
 
-> **Mutation policy:** `mint.deploy.sync` is the single authorized mutation capability. Requires: `approval: manual`, single-module targeting, env preflight, source sync to committed ref, targeted compose deploy (`up -d --no-deps --build` for build-backed services), post-deploy runtime proof. See `~/code/mint-modules/docs/SOPs/MINT_DEPLOY_PROMOTION_SOP_V1.md`.
+> **Mutation policy:** `mint.deploy.sync` is the single authorized Spine mutation capability. It is separate from Morpheus operator file-routing work and still requires manual approval plus runtime proof. See `~/code/mint-modules/docs/SOPs/MINT_DEPLOY_PROMOTION_SOP_V1.md`.
 
-## Mutating Tool Surface
+## Minimum V1 Command Surface
 
-| Tool | Safety | Description |
-|------|--------|-------------|
-| `mint.deploy.sync` | mutating (manual) | Promote single module to VM 213 from committed ref via governed compose deploy |
+- `mintctl morpheus whoami`
+- `mintctl morpheus resolve-customer <query>`
+- `mintctl morpheus intake [--dry-run] [--source PATH]`
+- `mintctl morpheus archive <preview|move|batch> ...`
+- `mintctl morpheus quarantine [--preview] --source PATH [--sync-seed]`
+- `mintctl morpheus paperless --type <class> [--preview|--execute] <source>`
+
+The alias `mintctl operator ...` must resolve to the same command surface.
