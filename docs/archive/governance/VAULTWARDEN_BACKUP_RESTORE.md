@@ -171,7 +171,7 @@ Disposition policy:
 3. Escalate to a new high-severity gap if either condition is true:
    - `trash_ratio >= 50%` for two consecutive audits, or
    - `ciphers_trashed >= 400`.
-4. During cleanup windows, retain recovery candidates in folder `98-forensic-recovery` first, then permanently delete only confirmed stale entries.
+4. During cleanup windows, retain recovery candidates in folder `98-forensic-recovered` first, then permanently delete only confirmed stale entries via `vaultwarden.cleanup.window`.
 
 Current disposition (2026-02-26):
 

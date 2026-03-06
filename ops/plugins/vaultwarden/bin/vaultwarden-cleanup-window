@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+# vaultwarden.cleanup.window - Governed cleanup window for confirmed Vaultwarden duplicate debt.
+#
+# Default mode is dry-run. Execute mode performs the canonical two-phase cleanup:
+# 1. Permanently delete redundant trashed items already proven exact-content stale.
+# 2. Soft-delete exact duplicate active loser items to trash.
+#
+# Safety contract:
+# - Requires a committed duplicate-trash decision ledger JSON.
+# - Requires backup verification PASS before execute.
+# - Requires explicit execute flag + confirm phrase.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+INFISICAL_AGENT="$SPINE_ROOT/ops/tools/infisical-agent.sh"
+CONFIRM_PHRASE="GO-LIVE-VAULTWARDEN-CLEANUP"
+
+stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+INPUT=""
+PHASES="purge_trash,retire_active"
+EXECUTE=false
+CONFIRM_VALUE=""
+OUTPUT=""
+
+usage() {
+  cat <<USAGE
+Usage: vaultwarden-cleanup-window [options]
+
+Options:
+  --input <path>              Cleanup decision ledger JSON (default: latest duplicate-trash-decisions-*.json)
+  --phases <csv>              Comma-separated phases: purge_trash,retire_active (default: both)
+  --execute                   Perform live mutations (default: dry-run)
+  --confirm <phrase>          Required when --execute (expected: ${CONFIRM_PHRASE})
+  --output <path>             Receipt JSON path (default: receipts/audits/infra/vaultwarden-cleanup-window-<ts>.json)
+  -h, --help                  Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift; continue ;;
+    --input)
+      INPUT="${2:?--input requires path}"; shift 2 ;;
+    --phases)
+      PHASES="${2:?--phases requires csv}"; shift 2 ;;
+    --execute)
+      EXECUTE=true; shift ;;
+    --confirm)
+      CONFIRM_VALUE="${2:?--confirm requires phrase}"; shift 2 ;;
+    --output)
+      OUTPUT="${2:?--output requires path}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      stop "unknown arg: $1" ;;
+  esac
+done
+
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
+command -v bw >/dev/null 2>&1 || stop "missing dependency: bw CLI"
+[[ -x "$INFISICAL_AGENT" ]] || stop "missing infisical agent: $INFISICAL_AGENT"
+
+if [[ -z "$INPUT" ]]; then
+  INPUT="$(ls -1 "$SPINE_ROOT"/mailroom/state/vaultwarden-audit/duplicate-trash-decisions-*.json 2>/dev/null | sort | tail -n1 || true)"
+fi
+[[ -n "$INPUT" && -f "$INPUT" ]] || stop "cleanup decision input not found"
+
+IFS=',' read -r -a PHASE_LIST <<< "$PHASES"
+DO_PURGE=false
+DO_RETIRE=false
+for phase in "${PHASE_LIST[@]}"; do
+  phase="${phase// /}"
+  case "$phase" in
+    purge_trash) DO_PURGE=true ;;
+    retire_active) DO_RETIRE=true ;;
+    "") ;;
+    *) stop "invalid phase '$phase' (expected purge_trash and/or retire_active)" ;;
+  esac
+done
+[[ "$DO_PURGE" == "true" || "$DO_RETIRE" == "true" ]] || stop "no valid phases selected"
+
+if [[ "$EXECUTE" == "true" ]]; then
+  [[ -n "$CONFIRM_VALUE" ]] || stop "--execute requires --confirm <phrase>"
+  [[ "$CONFIRM_VALUE" == "$CONFIRM_PHRASE" ]] || stop "confirm phrase mismatch (expected '$CONFIRM_PHRASE')"
+fi
+
+TMP_DIR="$(mktemp -d)"
+PLAN_JSON="$TMP_DIR/cleanup-plan.json"
+ACTIVE_JSON="$TMP_DIR/active.json"
+TRASH_JSON="$TMP_DIR/trash.json"
+ACTIVE_IDS="$TMP_DIR/active-ids.txt"
+TRASH_IDS="$TMP_DIR/trash-ids.txt"
+READY_JSONL="$TMP_DIR/ready.jsonl"
+APPLIED_JSONL="$TMP_DIR/applied.jsonl"
+SKIPPED_JSONL="$TMP_DIR/skipped.jsonl"
+ERRORS_JSONL="$TMP_DIR/errors.jsonl"
+BACKUP_OUTPUT="$TMP_DIR/backup-verify.txt"
+
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+if [[ -z "$OUTPUT" ]]; then
+  mkdir -p "$SPINE_ROOT/receipts/audits/infra"
+  OUTPUT="$SPINE_ROOT/receipts/audits/infra/vaultwarden-cleanup-window-${TS}.json"
+fi
+
+SESSION=""
+BEFORE_COUNTS='{}'
+AFTER_COUNTS='{}'
+
+cleanup() {
+  if [[ -n "$SESSION" ]]; then
+    if declare -f vw_bw >/dev/null 2>&1; then
+      BW_SESSION="$SESSION" vw_bw lock --session "$SESSION" >/dev/null 2>&1 || true
+    fi
+  fi
+  if declare -f vw_bw >/dev/null 2>&1; then
+    vw_bw logout >/dev/null 2>&1 || true
+  fi
+  if declare -f vw_proxy_stop >/dev/null 2>&1; then
+    vw_proxy_stop || true
+  fi
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+python3 - "$INPUT" "$PLAN_JSON" <<'PY'
+import json
+import sys
+
+input_path, output_path = sys.argv[1:3]
+report = json.load(open(input_path, "r", encoding="utf-8"))
+decisions = report.get("decisions", {})
+summary = report.get("summary", {})
+policy_gate = report.get("policy_gate", {})
+
+seen = set()
+purge = []
+retire = []
+
+def add(rows, action, id_field, source):
+    target = purge if action == "purge_trash" else retire
+    for row in rows:
+        ids = row.get(id_field, []) or []
+        for item_id in ids:
+            item_id = str(item_id or "").strip()
+            if not item_id:
+                continue
+            key = (action, item_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            target.append({
+                "action": action,
+                "item_id": item_id,
+                "name": str(row.get("name") or ""),
+                "fingerprint": str(row.get("fingerprint") or ""),
+                "source": source,
+                "expected_state": "trashed" if action == "purge_trash" else "active",
+            })
+
+add(decisions.get("shadow_exact_pairs", []), "purge_trash", "shadow_trash_ids", "shadow_exact_pairs")
+add(decisions.get("shadow_multi_with_active_retire_groups", []), "purge_trash", "shadow_trash_ids", "shadow_multi_with_active_retire_groups")
+add(decisions.get("shadow_multi_history_only_groups", []), "purge_trash", "shadow_trash_ids", "shadow_multi_history_only_groups")
+add(decisions.get("trashed_only_exact_groups", []), "purge_trash", "purge_candidate_ids", "trashed_only_exact_groups")
+add(decisions.get("active_exact_groups", []), "retire_active", "active_retire_ids", "active_exact_groups")
+add(decisions.get("shadow_multi_with_active_retire_groups", []), "retire_active", "active_retire_ids", "shadow_multi_with_active_retire_groups")
+
+plan = {
+    "input_path": input_path,
+    "audit_id": report.get("audit_id", ""),
+    "input_summary": summary,
+    "policy_gate": policy_gate,
+    "summary": {
+        "purge_trash": len(purge),
+        "retire_active": len(retire),
+        "total": len(purge) + len(retire),
+    },
+    "phases": {
+        "purge_trash": purge,
+        "retire_active": retire,
+    },
+}
+
+json.dump(plan, open(output_path, "w", encoding="utf-8"), indent=2)
+PY
+
+if [[ "$EXECUTE" == "true" && "$DO_RETIRE" == "true" && "$DO_PURGE" != "true" ]]; then
+  if [[ "$(jq -r '.summary.retire_active // 0' "$PLAN_JSON")" != "0" ]]; then
+    stop "retire_active execute requires purge_trash phase in the same cleanup window"
+  fi
+fi
+
+# shellcheck source=../lib/proxy-session.sh
+source "$SCRIPT_DIR/../lib/proxy-session.sh"
+
+read_secret() {
+  local key="$1"
+  "$INFISICAL_AGENT" get-cached infrastructure prod "$key" --no-cache 2>/dev/null || true
+}
+
+refresh_state() {
+  BW_SESSION="$SESSION" vw_bw sync --session "$SESSION" >/dev/null 2>&1 || true
+  BW_SESSION="$SESSION" vw_bw list items --session "$SESSION" > "$ACTIVE_JSON"
+  BW_SESSION="$SESSION" vw_bw list items --trash --session "$SESSION" > "$TRASH_JSON"
+  jq -r '.[].id // empty' "$ACTIVE_JSON" | sort -u > "$ACTIVE_IDS"
+  jq -r '.[].id // empty' "$TRASH_JSON" | sort -u > "$TRASH_IDS"
+}
+
+capture_counts() {
+  local active trash total
+  active="$(jq 'length' "$ACTIVE_JSON" 2>/dev/null || echo 0)"
+  trash="$(jq 'length' "$TRASH_JSON" 2>/dev/null || echo 0)"
+  total=$((active + trash))
+  printf '{"active":%s,"trashed":%s,"total":%s}' "$active" "$trash" "$total"
+}
+
+record_ready() {
+  local action="$1" item_id="$2" name="$3" source="$4"
+  jq -nc --arg action "$action" --arg item_id "$item_id" --arg name "$name" --arg source "$source" \
+    '{action:$action,item_id:$item_id,name:$name,source:$source,result:"ready"}' >> "$READY_JSONL"
+}
+
+record_applied() {
+  local action="$1" item_id="$2" name="$3" source="$4" result="$5"
+  jq -nc --arg action "$action" --arg item_id "$item_id" --arg name "$name" --arg source "$source" --arg result "$result" \
+    '{action:$action,item_id:$item_id,name:$name,source:$source,result:$result}' >> "$APPLIED_JSONL"
+}
+
+record_skipped() {
+  local action="$1" item_id="$2" name="$3" source="$4" reason="$5"
+  jq -nc --arg action "$action" --arg item_id "$item_id" --arg name "$name" --arg source "$source" --arg reason "$reason" \
+    '{action:$action,item_id:$item_id,name:$name,source:$source,reason:$reason}' >> "$SKIPPED_JSONL"
+}
+
+record_error() {
+  local action="$1" item_id="$2" name="$3" source="$4" error="$5"
+  jq -nc --arg action "$action" --arg item_id "$item_id" --arg name "$name" --arg source "$source" --arg error "$error" \
+    '{action:$action,item_id:$item_id,name:$name,source:$source,error:$error}' >> "$ERRORS_JSONL"
+}
+
+: > "$READY_JSONL"
+: > "$APPLIED_JSONL"
+: > "$SKIPPED_JSONL"
+: > "$ERRORS_JSONL"
+
+SERVER_URL="$(read_secret VAULTWARDEN_BW_SERVER_URL)"
+CLIENT_ID="$(read_secret VAULTWARDEN_BW_CLIENTID)"
+CLIENT_SECRET="$(read_secret VAULTWARDEN_BW_CLIENTSECRET)"
+MASTER_PASSWORD="$(read_secret VAULTWARDEN_BW_MASTER_PASSWORD)"
+[[ -n "$SERVER_URL" && -n "$CLIENT_ID" && -n "$CLIENT_SECRET" && -n "$MASTER_PASSWORD" ]] || stop "missing Vaultwarden bw auth secrets in Infisical"
+
+if [[ "$EXECUTE" == "true" ]]; then
+  if ! "$SCRIPT_DIR/vaultwarden-backup-verify" >"$BACKUP_OUTPUT" 2>&1; then
+    cat "$BACKUP_OUTPUT" >&2 || true
+    stop "vaultwarden.backup.verify failed; cleanup window blocked"
+  fi
+fi
+
+vw_proxy_start || stop "could not start scope-rewriting proxy"
+vw_bw logout >/dev/null 2>&1 || true
+BW_CLIENTID="$CLIENT_ID" BW_CLIENTSECRET="$CLIENT_SECRET" vw_bw login --apikey >/dev/null 2>&1 || stop "bw login failed"
+SESSION="$(BW_PASSWORD="$MASTER_PASSWORD" vw_bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null || true)"
+[[ -n "$SESSION" ]] || stop "bw unlock failed"
+
+refresh_state
+BEFORE_COUNTS="$(capture_counts)"
+
+process_phase() {
+  local phase="$1"
+  local expected_file="$2"
+  local delete_mode="$3"
+
+  mapfile -t ROWS < <(jq -r --arg phase "$phase" '.phases[$phase][] | @base64' "$PLAN_JSON")
+  for row_b64 in "${ROWS[@]}"; do
+    local row_json item_id name source action
+    row_json="$(printf '%s' "$row_b64" | base64 --decode)"
+    item_id="$(jq -r '.item_id // ""' <<<"$row_json")"
+    name="$(jq -r '.name // ""' <<<"$row_json")"
+    source="$(jq -r '.source // ""' <<<"$row_json")"
+    action="$(jq -r '.action // ""' <<<"$row_json")"
+
+    [[ -n "$item_id" && -n "$action" ]] || {
+      record_skipped "$action" "$item_id" "$name" "$source" "missing_item_or_action"
+      continue
+    }
+
+    if ! grep -Fxq "$item_id" "$expected_file"; then
+      record_skipped "$action" "$item_id" "$name" "$source" "current_state_mismatch"
+      continue
+    fi
+
+    if [[ "$EXECUTE" != "true" ]]; then
+      record_ready "$action" "$item_id" "$name" "$source"
+      continue
+    fi
+
+    if [[ "$delete_mode" == "permanent" ]]; then
+      if BW_SESSION="$SESSION" vw_bw delete item "$item_id" --session "$SESSION" --permanent >/dev/null 2>&1; then
+        record_applied "$action" "$item_id" "$name" "$source" "purged"
+      else
+        record_error "$action" "$item_id" "$name" "$source" "bw permanent delete failed"
+      fi
+    else
+      if BW_SESSION="$SESSION" vw_bw delete item "$item_id" --session "$SESSION" >/dev/null 2>&1; then
+        record_applied "$action" "$item_id" "$name" "$source" "retired_to_trash"
+      else
+        record_error "$action" "$item_id" "$name" "$source" "bw soft delete failed"
+      fi
+    fi
+  done
+}
+
+if [[ "$DO_PURGE" == "true" ]]; then
+  process_phase "purge_trash" "$TRASH_IDS" "permanent"
+  if [[ "$EXECUTE" == "true" ]]; then
+    refresh_state
+  fi
+fi
+
+if [[ "$DO_RETIRE" == "true" ]]; then
+  process_phase "retire_active" "$ACTIVE_IDS" "soft"
+  if [[ "$EXECUTE" == "true" ]]; then
+    refresh_state
+  fi
+fi
+
+if [[ "$EXECUTE" == "true" ]]; then
+  AFTER_COUNTS="$(capture_counts)"
+else
+  AFTER_COUNTS="$BEFORE_COUNTS"
+fi
+
+python3 - "$PLAN_JSON" "$OUTPUT" "$EXECUTE" "$PHASES" "$INPUT" "$BEFORE_COUNTS" "$AFTER_COUNTS" "$READY_JSONL" "$APPLIED_JSONL" "$SKIPPED_JSONL" "$ERRORS_JSONL" "$BACKUP_OUTPUT" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+(
+    plan_path,
+    output_path,
+    execute_raw,
+    phases_csv,
+    input_path,
+    before_counts_raw,
+    after_counts_raw,
+    ready_jsonl,
+    applied_jsonl,
+    skipped_jsonl,
+    errors_jsonl,
+    backup_output_path,
+) = sys.argv[1:13]
+
+execute = execute_raw.lower() == "true"
+plan = json.load(open(plan_path, "r", encoding="utf-8"))
+before_counts = json.loads(before_counts_raw)
+after_counts = json.loads(after_counts_raw)
+
+def load_jsonl(path):
+    out = []
+    if not os.path.isfile(path):
+        return out
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            out.append(json.loads(line))
+    return out
+
+def count_by_action(rows):
+    out = {}
+    for row in rows:
+        action = row.get("action", "")
+        out[action] = out.get(action, 0) + 1
+    return out
+
+ready = load_jsonl(ready_jsonl)
+applied = load_jsonl(applied_jsonl)
+skipped = load_jsonl(skipped_jsonl)
+errors = load_jsonl(errors_jsonl)
+
+backup_verify = {"required": execute, "status": "skipped"}
+if execute:
+    backup_verify["status"] = "pass"
+    if os.path.isfile(backup_output_path):
+        with open(backup_output_path, "r", encoding="utf-8") as f:
+            lines = [line.rstrip("\n") for line in f.readlines()[:12]]
+        backup_verify["output_excerpt"] = lines
+
+receipt = {
+    "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "mode": "execute" if execute else "dry-run",
+    "input_path": input_path,
+    "phases": [p.strip() for p in phases_csv.split(",") if p.strip()],
+    "plan_summary": plan.get("summary", {}),
+    "input_summary": plan.get("input_summary", {}),
+    "policy_gate": plan.get("policy_gate", {}),
+    "backup_verify": backup_verify,
+    "before_counts": before_counts,
+    "after_counts": after_counts,
+    "ready_summary": count_by_action(ready),
+    "applied_summary": count_by_action(applied),
+    "skipped_summary": count_by_action(skipped),
+    "error_summary": count_by_action(errors),
+    "ready": ready,
+    "applied": applied,
+    "skipped": skipped,
+    "errors": errors,
+}
+
+with open(output_path, "w", encoding="utf-8") as f:
+  json.dump(receipt, f, indent=2)
+PY
+
+READY_COUNT="$(wc -l < "$READY_JSONL" | tr -d ' ')"
+APPLIED_COUNT="$(wc -l < "$APPLIED_JSONL" | tr -d ' ')"
+SKIPPED_COUNT="$(wc -l < "$SKIPPED_JSONL" | tr -d ' ')"
+ERROR_COUNT="$(wc -l < "$ERRORS_JSONL" | tr -d ' ')"
+
+echo "vaultwarden.cleanup.window"
+echo "mode: $([[ "$EXECUTE" == "true" ]] && echo execute || echo dry-run)"
+echo "input: $INPUT"
+echo "phases: $PHASES"
+echo "planned_purge_trash: $(jq -r '.summary.purge_trash // 0' "$PLAN_JSON")"
+echo "planned_retire_active: $(jq -r '.summary.retire_active // 0' "$PLAN_JSON")"
+if [[ "$EXECUTE" == "true" ]]; then
+  echo "applied: $APPLIED_COUNT"
+else
+  echo "ready: $READY_COUNT"
+fi
+echo "skipped: $SKIPPED_COUNT"
+echo "errors: $ERROR_COUNT"
+echo "receipt: $OUTPUT"
+
+if [[ "$EXECUTE" == "true" && "$ERROR_COUNT" != "0" ]]; then
+  exit 1
+fi

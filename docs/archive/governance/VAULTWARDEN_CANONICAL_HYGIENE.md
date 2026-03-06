@@ -13,12 +13,10 @@ classifies stale URLs, tests reachability, and produces a safe apply plan.
 ## Safety Contract
 
 - Default mode is read-only (`vaultwarden.uri.audit`, `vaultwarden.uri.healthcheck`, `vaultwarden.reconcile.report`).
-- Mutations are only allowed through `vaultwarden.reconcile.apply --execute --confirm GO-LIVE-VAULTWARDEN-CLI`.
-- Hard-delete is prohibited. Retirement uses soft-delete to trash only.
-- Apply scope is restricted to:
-  - URI update
-  - folder move
-  - soft-delete to trash
+- URI/folder hygiene mutations are only allowed through `vaultwarden.reconcile.apply --execute --confirm GO-LIVE-VAULTWARDEN-CLI`.
+- Cleanup-window trash purge and exact-duplicate retirement are only allowed through `vaultwarden.cleanup.window --execute --confirm GO-LIVE-VAULTWARDEN-CLEANUP`.
+- `vaultwarden.reconcile.apply` never permanently deletes items.
+- `vaultwarden.cleanup.window` is the only approved hard-delete surface, and only for confirmed redundant trash during an owner cleanup window.
 
 ## Canonical Policy Files
 
@@ -95,6 +93,32 @@ Execute specific item IDs only:
   --confirm GO-LIVE-VAULTWARDEN-CLI \
   --item-ids <item-id-1>,<item-id-2>
 ```
+
+## Cleanup Window
+
+Use this only after a committed duplicate/trash decision ledger exists and `vaultwarden.backup.verify` is `PASS`.
+
+Dry-run:
+
+```bash
+./bin/ops cap run vaultwarden.cleanup.window -- \
+  --input mailroom/state/vaultwarden-audit/duplicate-trash-decisions-YYYYMMDD.json
+```
+
+Execute cleanup window:
+
+```bash
+./bin/ops cap run vaultwarden.cleanup.window -- \
+  --input mailroom/state/vaultwarden-audit/duplicate-trash-decisions-YYYYMMDD.json \
+  --execute \
+  --confirm GO-LIVE-VAULTWARDEN-CLEANUP
+```
+
+Execution order is fixed:
+
+1. Permanently delete redundant trashed copies already proven stale.
+2. Soft-delete exact active duplicate losers to trash.
+3. Re-run `vaultwarden.vault.audit`.
 
 ## Safety Stops
 
