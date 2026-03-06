@@ -18,6 +18,10 @@ set -euo pipefail
 
 ROOT="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 DRY_RUN=0
+LOCK_HELD=0
+
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,15 +37,27 @@ done
 
 fail() { echo "projection.reconcile FAIL: $*" >&2; exit 1; }
 
+cleanup() {
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  return 0
+}
+
+trap cleanup EXIT INT TERM
+
 GEN_HEADER="$ROOT/bin/generators/gen-gate-registry-header.sh"
 SYNC="$ROOT/ops/plugins/docs/bin/docs-projection-sync"
 CONTROL_SYNC="$ROOT/ops/plugins/authority/bin/platform-control-surface-reconcile"
 VERIFY="$ROOT/ops/plugins/docs/bin/docs-projection-verify"
+CONTROL_BINDING="$ROOT/ops/bindings/platform.control.surfaces.yaml"
 
 [[ -x "$GEN_HEADER" ]] || fail "missing: $GEN_HEADER"
 [[ -x "$SYNC" ]]       || fail "missing: $SYNC"
 [[ -x "$CONTROL_SYNC" ]] || fail "missing: $CONTROL_SYNC"
 [[ -x "$VERIFY" ]]     || fail "missing: $VERIFY"
+[[ -f "$CONTROL_BINDING" ]] || fail "missing: $CONTROL_BINDING"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "[projection.reconcile] dry-run: checking for drift..."
@@ -70,21 +86,37 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
+if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+  acquire_git_lock projection_reconcile || exit 1
+  LOCK_HELD=1
+  export SPINE_GIT_LOCK_HELD=1
+fi
+
+spine_tx_init
+spine_tx_track "$ROOT/ops/bindings/gate.registry.yaml"
+spine_tx_track "$ROOT/AGENTS.md"
+spine_tx_track "$ROOT/CLAUDE.md"
+spine_tx_track "$ROOT/docs/governance/generated/ENTRY_SURFACE_GATE_METADATA.md"
+spine_tx_track "$ROOT/docs/governance/generated/BOOT_ENTRY_SURFACE.md"
+spine_tx_track "$CONTROL_BINDING"
+
 # ── Step 1: reconcile gate registry header ──
-echo "[projection.reconcile] reconciling gate registry header..."
-"$GEN_HEADER" || fail "gen-gate-registry-header.sh failed"
+if ! {
+  echo "[projection.reconcile] reconciling gate registry header..."
+  "$GEN_HEADER"
 
-# ── Step 2: sync entry-surface projections ──
-echo "[projection.reconcile] syncing entry-surface projections..."
-"$SYNC" || fail "docs-projection-sync failed"
+  echo "[projection.reconcile] syncing entry-surface projections..."
+  "$SYNC"
 
-# ── Step 3: reconcile platform control projection ──
-echo "[projection.reconcile] reconciling platform-control surfaces..."
-"$CONTROL_SYNC" --write || fail "platform-control-surface-reconcile failed"
+  echo "[projection.reconcile] reconciling platform-control surfaces..."
+  "$CONTROL_SYNC" --write
 
-# ── Step 4: verify everything is deterministic ──
-echo "[projection.reconcile] verifying projections..."
-"$VERIFY" || fail "docs-projection-verify failed (post-sync)"
+  echo "[projection.reconcile] verifying projections..."
+  "$VERIFY"
+}; then
+  spine_tx_rollback
+  fail "write transaction rolled back"
+fi
 
 echo "projection.reconcile"
 echo "status: OK"

@@ -5,6 +5,13 @@ ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 CONTRACT="$ROOT/ops/bindings/entry.boot.surface.contract.yaml"
 MODE="write"
 WRITE_SURFACES=0
+LOCK_HELD=0
+TMP_STARTUP=""
+TMP_GENERATED=""
+SURFACE_PLAN=""
+
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
 
 usage() {
   cat <<'USAGE'
@@ -30,6 +37,17 @@ done
 
 fail() { echo "gen-boot-entry-surface FAIL: $*" >&2; exit 1; }
 
+cleanup() {
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  rm -f "${TMP_STARTUP:-}" "${TMP_GENERATED:-}" "${SURFACE_PLAN:-}"
+  return 0
+}
+
+trap cleanup EXIT INT TERM
+
 command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 command -v rg >/dev/null 2>&1 || fail "missing dependency: rg"
 [[ -f "$CONTRACT" ]] || fail "missing contract: $CONTRACT"
@@ -44,16 +62,16 @@ UPDATED="$(yq e -r '.updated // ""' "$CONTRACT")"
 [[ -n "$GEN_REL" && "$GEN_REL" != "null" ]] || fail "contract missing generated_file"
 GEN_FILE="$ROOT/$GEN_REL"
 
-tmp_startup="$(mktemp)"
+TMP_STARTUP="$(mktemp)"
 {
   echo "$START_HEADING"
   echo
   echo "\`\`\`${START_SHELL}"
   yq e -r '.startup_block.commands[]' "$CONTRACT"
   echo "\`\`\`"
-} > "$tmp_startup"
+} > "$TMP_STARTUP"
 
-tmp_generated="$(mktemp)"
+TMP_GENERATED="$(mktemp)"
 {
   echo "# BOOT ENTRY SURFACE (generated)"
   echo "source_contract: ops/bindings/entry.boot.surface.contract.yaml"
@@ -62,7 +80,7 @@ tmp_generated="$(mktemp)"
   echo "post_work_verify_count: $(yq e '.post_work_verify.commands | length' "$CONTRACT")"
   echo "release_certification_count: $(yq e '.release_certification.commands | length' "$CONTRACT")"
   echo
-  cat "$tmp_startup"
+  cat "$TMP_STARTUP"
   echo
   echo "$(yq e -r '.post_work_verify.heading' "$CONTRACT")"
   echo
@@ -75,19 +93,18 @@ tmp_generated="$(mktemp)"
   echo "\`\`\`$(yq e -r '.release_certification.shell // "bash"' "$CONTRACT")"
   yq e -r '.release_certification.commands[]' "$CONTRACT"
   echo "\`\`\`"
-} > "$tmp_generated"
+} > "$TMP_GENERATED"
 
 mkdir -p "$(dirname "$GEN_FILE")"
 if [[ "$MODE" == "check" ]]; then
   [[ -f "$GEN_FILE" ]] || fail "generated file missing: $GEN_FILE"
-  if ! diff -u "$GEN_FILE" "$tmp_generated" >/dev/null 2>&1; then
+  if ! diff -u "$GEN_FILE" "$TMP_GENERATED" >/dev/null 2>&1; then
     fail "generated boot entry surface drift: $GEN_REL"
   fi
-else
-  cp "$tmp_generated" "$GEN_FILE"
 fi
 
 mapfile -t surfaces < <(yq e -r '.surfaces[]' "$CONTRACT")
+SURFACE_PLAN="$(mktemp)"
 for rel in "${surfaces[@]}"; do
   [[ -n "$rel" ]] || continue
   path="$ROOT/$rel"
@@ -97,21 +114,49 @@ for rel in "${surfaces[@]}"; do
   rg -n --fixed-strings "$END_MARKER" "$path" >/dev/null 2>&1 || fail "$rel missing marker: $END_MARKER"
 
   existing="$(awk -v s="$START_MARKER" -v e="$END_MARKER" '$0==s{f=1;next}$0==e{f=0;exit}f{print}' "$path")"
-  expected="$(cat "$tmp_startup")"
+  expected="$(cat "$TMP_STARTUP")"
 
   if [[ "$MODE" == "check" || "$WRITE_SURFACES" -eq 0 ]]; then
     [[ "$existing" == "$expected" ]] || fail "$rel startup block drift (run generator with --write-surfaces)"
   else
     tmp_surface="$(mktemp)"
-    awk -v s="$START_MARKER" -v e="$END_MARKER" -v blk="$tmp_startup" '
+    awk -v s="$START_MARKER" -v e="$END_MARKER" -v blk="$TMP_STARTUP" '
       $0==s {print; while ((getline line < blk) > 0) print line; in_block=1; next}
       $0==e {in_block=0; print; next}
       !in_block {print}
     ' "$path" > "$tmp_surface"
-    mv "$tmp_surface" "$path"
+    printf '%s\t%s\n' "$path" "$tmp_surface" >>"$SURFACE_PLAN"
   fi
 done
 
-rm -f "$tmp_startup" "$tmp_generated"
+if [[ "$MODE" != "check" ]]; then
+  if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+    acquire_git_lock entry_boot_projection || exit 1
+    LOCK_HELD=1
+    export SPINE_GIT_LOCK_HELD=1
+  fi
+
+  spine_tx_init
+  spine_tx_track "$GEN_FILE"
+  if [[ "$WRITE_SURFACES" -eq 1 ]]; then
+    while IFS=$'\t' read -r path _rendered; do
+      [[ -n "$path" ]] || continue
+      spine_tx_track "$path"
+    done <"$SURFACE_PLAN"
+  fi
+
+  if ! {
+    cp "$TMP_GENERATED" "$GEN_FILE"
+    if [[ "$WRITE_SURFACES" -eq 1 ]]; then
+      while IFS=$'\t' read -r path rendered; do
+        [[ -n "$path" ]] || continue
+        cp "$rendered" "$path"
+      done <"$SURFACE_PLAN"
+    fi
+  }; then
+    spine_tx_rollback
+    fail "write transaction rolled back"
+  fi
+fi
 
 echo "gen-boot-entry-surface PASS: $GEN_REL"

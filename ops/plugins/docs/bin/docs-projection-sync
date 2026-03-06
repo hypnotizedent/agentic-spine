@@ -2,9 +2,80 @@
 set -euo pipefail
 
 ROOT="${SPINE_CODE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+ENTRY_GEN="$ROOT/bin/generators/gen-entry-surface-gate-metadata.sh"
+BOOT_GEN="$ROOT/bin/generators/gen-boot-entry-surface.sh"
+VERIFY="$ROOT/ops/plugins/docs/bin/docs-projection-verify"
+LOCK_HELD=0
 
-"$ROOT/bin/generators/gen-entry-surface-gate-metadata.sh" --write-surfaces
-"$ROOT/bin/generators/gen-boot-entry-surface.sh" --write-surfaces
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
+
+usage() {
+  cat <<'USAGE'
+docs-projection-sync
+
+Usage:
+  docs-projection-sync [--check]
+USAGE
+}
+
+fail() {
+  echo "docs.projection.sync FAIL: $*" >&2
+  exit 1
+}
+
+cleanup() {
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  return 0
+}
+
+trap cleanup EXIT INT TERM
+
+MODE="write"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) MODE="check"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown arg: $1" ;;
+  esac
+done
+
+[[ -x "$ENTRY_GEN" ]] || fail "missing generator: $ENTRY_GEN"
+[[ -x "$BOOT_GEN" ]] || fail "missing generator: $BOOT_GEN"
+[[ -x "$VERIFY" ]] || fail "missing verifier: $VERIFY"
+
+if [[ "$MODE" == "check" ]]; then
+  "$VERIFY"
+  echo "docs.projection.sync"
+  echo "status: OK"
+  echo "mode: check"
+  exit 0
+fi
+
+if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+  acquire_git_lock docs_projection_sync || exit 1
+  LOCK_HELD=1
+  export SPINE_GIT_LOCK_HELD=1
+fi
+
+spine_tx_init
+spine_tx_track "$ROOT/AGENTS.md"
+spine_tx_track "$ROOT/CLAUDE.md"
+spine_tx_track "$ROOT/docs/governance/generated/ENTRY_SURFACE_GATE_METADATA.md"
+spine_tx_track "$ROOT/docs/governance/generated/BOOT_ENTRY_SURFACE.md"
+
+if ! {
+  "$ENTRY_GEN" --write-surfaces
+  "$BOOT_GEN" --write-surfaces
+  "$VERIFY" >/dev/null
+}; then
+  spine_tx_rollback
+  fail "write transaction rolled back"
+fi
 
 echo "docs.projection.sync"
 echo "status: OK"

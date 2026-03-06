@@ -4,6 +4,14 @@ set -euo pipefail
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 TOPOLOGY="$ROOT/ops/bindings/gate.execution.topology.yaml"
 REGISTRY="$ROOT/ops/bindings/gate.registry.yaml"
+DOMAIN_PROFILES="$ROOT/ops/bindings/gate.domain.profiles.yaml"
+VALIDATE="$ROOT/ops/plugins/verify/bin/gate-topology-validate"
+LOCK_HELD=0
+TMP_TOPOLOGY=""
+TMP_PROFILES=""
+
+source "$ROOT/ops/lib/git-lock.sh"
+source "$ROOT/ops/lib/governed-write-transaction.sh"
 
 usage() {
   cat <<'USAGE'
@@ -19,6 +27,15 @@ fail() {
   exit 1
 }
 
+cleanup() {
+  if [[ "$LOCK_HELD" -eq 1 ]]; then
+    release_git_lock || true
+  fi
+  spine_tx_cleanup
+  rm -f "${TMP_TOPOLOGY:-}" "${TMP_PROFILES:-}"
+  return 0
+}
+
 print_d128_trailers() {
   echo "D128 required commit trailers:"
   echo "Gate-Mutation: capability"
@@ -30,10 +47,15 @@ need_file() {
   [[ -f "$1" ]] || fail "missing file: $1"
 }
 
+trap cleanup EXIT INT TERM
+
 need_file "$TOPOLOGY"
 need_file "$REGISTRY"
+need_file "$DOMAIN_PROFILES"
+need_file "$VALIDATE"
 command -v yq >/dev/null 2>&1 || fail "missing required tool: yq"
 command -v jq >/dev/null 2>&1 || fail "missing required tool: jq"
+command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
 
 GATE_ID=""
 PRIMARY_DOMAIN=""
@@ -73,32 +95,147 @@ done
 
 yq e -r ".gates[] | select(.id == \"$GATE_ID\") | .id" "$REGISTRY" | grep -q "$GATE_ID" || fail "gate id '$GATE_ID' not found in registry"
 yq e -r ".domain_metadata[] | select(.domain_id == \"$PRIMARY_DOMAIN\") | .domain_id" "$TOPOLOGY" | grep -q "$PRIMARY_DOMAIN" || fail "domain '$PRIMARY_DOMAIN' not found in topology"
+yq e -r ".domains | keys | .[]" "$DOMAIN_PROFILES" | grep -q "^${PRIMARY_DOMAIN}$" || fail "domain '$PRIMARY_DOMAIN' not found in domain profiles"
 
 SECONDARY_JSON='[]'
 if [[ -n "$SECONDARY_DOMAINS" ]]; then
   SECONDARY_JSON="$(printf '%s' "$SECONDARY_DOMAINS" | jq -R 'split(",") | map(gsub("^ +| +$";"")) | map(select(length>0)) | unique')"
 fi
 
-exists="$(yq e -r ".gate_assignments[] | select(.gate_id == \"$GATE_ID\") | .gate_id" "$TOPOLOGY" | head -n1 || true)"
+TMP_TOPOLOGY="$(mktemp)"
+TMP_PROFILES="$(mktemp)"
+STAMP="$(date +%Y-%m-%d)"
 
-if [[ -n "$exists" ]]; then
-  SECONDARY_JSON="$SECONDARY_JSON" yq -i "
-    (.gate_assignments[] | select(.gate_id == \"$GATE_ID\")).primary_domain = \"$PRIMARY_DOMAIN\" |
-    (.gate_assignments[] | select(.gate_id == \"$GATE_ID\")).secondary_domains = (strenv(SECONDARY_JSON) | fromjson) |
-    (.gate_assignments[] | select(.gate_id == \"$GATE_ID\")).family = \"$FAMILY\"
-  " "$TOPOLOGY"
-else
-  SECONDARY_JSON="$SECONDARY_JSON" yq -i "
-    .gate_assignments += [{
-      \"gate_id\": \"$GATE_ID\",
-      \"primary_domain\": \"$PRIMARY_DOMAIN\",
-      \"secondary_domains\": (strenv(SECONDARY_JSON) | fromjson),
-      \"family\": \"$FAMILY\"
-    }]
-  " "$TOPOLOGY"
+python3 - "$TOPOLOGY" "$DOMAIN_PROFILES" "$TMP_TOPOLOGY" "$TMP_PROFILES" "$GATE_ID" "$PRIMARY_DOMAIN" "$SECONDARY_JSON" "$FAMILY" "$STAMP" <<'PY'
+from __future__ import annotations
+
+import collections
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+
+topology_path = Path(sys.argv[1])
+profiles_path = Path(sys.argv[2])
+topology_out = Path(sys.argv[3])
+profiles_out = Path(sys.argv[4])
+gate_id = sys.argv[5]
+primary_domain = sys.argv[6]
+secondary_domains = json.loads(sys.argv[7])
+family = sys.argv[8]
+stamp = sys.argv[9]
+
+
+def load_yaml(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise SystemExit(f"expected mapping YAML: {path}")
+    return data
+
+
+def gate_sort_key(value: str) -> tuple[int, str]:
+    if value.startswith("D") and value[1:].isdigit():
+        return (int(value[1:]), value)
+    return (10**9, value)
+
+
+topology = load_yaml(topology_path)
+profiles = load_yaml(profiles_path)
+
+domain_metadata = topology.get("domain_metadata") or []
+profile_domains = profiles.get("domains") or {}
+
+valid_domains = {row.get("domain_id") for row in domain_metadata if isinstance(row, dict)}
+if primary_domain not in valid_domains:
+    raise SystemExit(f"unknown topology domain: {primary_domain}")
+if primary_domain not in profile_domains:
+    raise SystemExit(f"unknown profile domain: {primary_domain}")
+
+normalized_secondaries = []
+seen = set()
+for domain in secondary_domains:
+    domain = str(domain).strip()
+    if not domain or domain == primary_domain or domain in seen:
+        continue
+    if domain not in valid_domains:
+        raise SystemExit(f"unknown secondary domain: {domain}")
+    seen.add(domain)
+    normalized_secondaries.append(domain)
+
+assignments = topology.get("gate_assignments") or []
+updated = False
+for row in assignments:
+    if not isinstance(row, dict):
+        continue
+    if row.get("gate_id") == gate_id:
+        row["primary_domain"] = primary_domain
+        row["secondary_domains"] = normalized_secondaries
+        row["family"] = family
+        updated = True
+        break
+
+if not updated:
+    assignments.append(
+        {
+            "gate_id": gate_id,
+            "primary_domain": primary_domain,
+            "secondary_domains": normalized_secondaries,
+            "family": family,
+        }
+    )
+
+assignments.sort(key=lambda row: gate_sort_key(str(row.get("gate_id", ""))))
+topology["gate_assignments"] = assignments
+topology["updated"] = stamp
+
+primary_counts = collections.Counter()
+for row in assignments:
+    domain_id = row.get("primary_domain")
+    if domain_id:
+        primary_counts[domain_id] += 1
+
+for row in domain_metadata:
+    if not isinstance(row, dict):
+        continue
+    domain_id = row.get("domain_id")
+    row["gate_count"] = int(primary_counts.get(domain_id, 0))
+
+for domain_id, domain_cfg in profile_domains.items():
+    if not isinstance(domain_cfg, dict):
+        continue
+    gate_ids = [str(item) for item in (domain_cfg.get("gate_ids") or []) if str(item).strip() and str(item) != gate_id]
+    if domain_id == primary_domain:
+        gate_ids.append(gate_id)
+    gate_ids = sorted(set(gate_ids), key=gate_sort_key)
+    domain_cfg["gate_ids"] = gate_ids
+
+profiles["updated_at"] = f"{stamp}T00:00:00Z"
+
+topology_out.write_text(yaml.safe_dump(topology, sort_keys=False, allow_unicode=False), encoding="utf-8")
+profiles_out.write_text(yaml.safe_dump(profiles, sort_keys=False, allow_unicode=False), encoding="utf-8")
+PY
+
+if [[ "${SPINE_GIT_LOCK_HELD:-0}" != "1" ]]; then
+  acquire_git_lock gate_topology || exit 1
+  LOCK_HELD=1
+  export SPINE_GIT_LOCK_HELD=1
 fi
 
-"$ROOT/ops/plugins/verify/bin/gate-topology-validate" >/dev/null
+spine_tx_init
+spine_tx_track "$TOPOLOGY"
+spine_tx_track "$DOMAIN_PROFILES"
+
+if ! {
+  cp "$TMP_TOPOLOGY" "$TOPOLOGY"
+  cp "$TMP_PROFILES" "$DOMAIN_PROFILES"
+  "$VALIDATE" >/dev/null
+}; then
+  spine_tx_rollback
+  fail "write transaction rolled back"
+fi
 
 echo "gate.topology.assign PASS: $GATE_ID -> primary=$PRIMARY_DOMAIN secondary=${SECONDARY_DOMAINS:-none} family=$FAMILY"
 print_d128_trailers
