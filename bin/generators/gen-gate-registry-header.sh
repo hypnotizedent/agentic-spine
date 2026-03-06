@@ -33,8 +33,6 @@ command -v yq >/dev/null 2>&1 || fail "missing dependency: yq"
 total="$(yq e '.gates | length' "$REGISTRY")"
 active="$(yq e '[.gates[] | select(.retired != true)] | length' "$REGISTRY")"
 retired="$(( total - active ))"
-active_blocking="$(yq e '[.gates[] | select(.retired != true and ((.mode // "enforce") != "report") and (.warn_only != true))] | length' "$REGISTRY")"
-active_report="$(yq e '[.gates[] | select(.retired != true and (((.mode // "enforce") == "report") or (.warn_only == true)))] | length' "$REGISTRY")"
 max_gate="$(yq e '.gates[].id' "$REGISTRY" | sed 's/^D//' | sort -n | tail -1)"
 [[ -n "$max_gate" ]] || max_gate=0
 
@@ -42,8 +40,6 @@ max_gate="$(yq e '.gates[].id' "$REGISTRY" | sed 's/^D//' | sort -n | tail -1)"
 cur_total="$(yq e '.gate_count.total // 0' "$REGISTRY")"
 cur_active="$(yq e '.gate_count.active // 0' "$REGISTRY")"
 cur_retired="$(yq e '.gate_count.retired // 0' "$REGISTRY")"
-cur_active_blocking="$(yq e '.gate_count.active_blocking // 0' "$REGISTRY")"
-cur_active_report="$(yq e '.gate_count.active_report // 0' "$REGISTRY")"
 
 # ── build description gate-name suffix ──
 # Extract the max gate from the current description for comparison
@@ -65,14 +61,6 @@ if [[ "$retired" -ne "$cur_retired" ]]; then
   drift=1
   reasons+=("gate_count.retired: $cur_retired -> $retired")
 fi
-if [[ "$active_blocking" -ne "$cur_active_blocking" ]]; then
-  drift=1
-  reasons+=("gate_count.active_blocking: $cur_active_blocking -> $active_blocking")
-fi
-if [[ "$active_report" -ne "$cur_active_report" ]]; then
-  drift=1
-  reasons+=("gate_count.active_report: $cur_active_report -> $active_report")
-fi
 if [[ "$max_gate" -ne "${cur_desc_max:-0}" ]]; then
   drift=1
   reasons+=("description max gate: D${cur_desc_max:-0} -> D${max_gate}")
@@ -85,13 +73,13 @@ if [[ "$MODE" == "check" ]]; then
     done
     fail "gate registry header stale (run gen-gate-registry-header.sh to fix)"
   fi
-  echo "gen-gate-registry-header PASS: header in sync (total=$total active=$active retired=$retired blocking=$active_blocking report=$active_report max=D$max_gate)"
+  echo "gen-gate-registry-header PASS: header in sync (total=$total active=$active retired=$retired max=D$max_gate)"
   exit 0
 fi
 
 # ── write mode: update header in place ──
 if [[ "$drift" -eq 0 ]]; then
-  echo "gen-gate-registry-header PASS: header already in sync (total=$total active=$active retired=$retired blocking=$active_blocking report=$active_report max=D$max_gate)"
+  echo "gen-gate-registry-header PASS: header already in sync (total=$total active=$active retired=$retired max=D$max_gate)"
   exit 0
 fi
 
@@ -99,8 +87,6 @@ fi
 yq e -i ".gate_count.total = $total" "$REGISTRY"
 yq e -i ".gate_count.active = $active" "$REGISTRY"
 yq e -i ".gate_count.retired = $retired" "$REGISTRY"
-yq e -i ".gate_count.active_blocking = $active_blocking" "$REGISTRY"
-yq e -i ".gate_count.active_report = $active_report" "$REGISTRY"
 
 # Update the description D1-DXXX range
 cur_desc="$(yq e -r '.description' "$REGISTRY")"
@@ -109,7 +95,7 @@ if [[ "$cur_desc" != "$new_desc" ]]; then
   yq e -i ".description = \"$(printf '%s' "$new_desc" | sed 's/"/\\"/g')\"" "$REGISTRY"
 fi
 
-echo "gen-gate-registry-header PASS: header updated (total=$total active=$active retired=$retired blocking=$active_blocking report=$active_report max=D$max_gate)"
+echo "gen-gate-registry-header PASS: header updated (total=$total active=$active retired=$retired max=D$max_gate)"
 for r in "${reasons[@]}"; do
   echo "  fixed: $r"
 done
