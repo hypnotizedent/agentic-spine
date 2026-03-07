@@ -24,7 +24,7 @@ Flying Dutchman is the top-level Mint orchestrator. It owns cross-repo coordinat
 
 ## Responsibilities
 
-- Run Mint-wide status, health, proof, and verify surfaces.
+- Run Mint-wide status, health, proof, verify, and deploy-sync surfaces.
 - Own Mint deploy/topology/orchestration language in Spine.
 - Route operator work to the correct employee:
   - Morpheus for customer/operator routing
@@ -55,8 +55,10 @@ Those belong to Morpheus, Fin, Artie, or the underlying Mint modules.
 
 ## Primary Commands
 
+- `./bin/ops cap run mint.live.baseline.status`
 - `./bin/ops cap run verify.pack.run mint`
 - `./bin/ops cap run mint.modules.health`
+- `./bin/ops cap run mint.runtime.proof`
 - `./bin/ops cap run mint.deploy.status`
 - `./bin/ops cap run mint.migrate.dryrun`
 - `./bin/ops cap run mint.deploy.sync`

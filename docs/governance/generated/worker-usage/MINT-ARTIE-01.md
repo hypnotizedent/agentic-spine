@@ -19,4 +19,4 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `ops/agents/artie-agent.contract.md`
 
 ## Capabilities
-- `mint.modules.health`
+- (none)

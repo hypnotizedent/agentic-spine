@@ -21,8 +21,9 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 
 ## Capabilities
 - `mint.deploy.status`
-- `mint.intake.validate`
+- `mint.deploy.sync`
+- `mint.live.baseline.status`
 - `mint.loop.daily`
 - `mint.migrate.dryrun`
 - `mint.modules.health`
-- `mint.seeds.query`
+- `mint.runtime.proof`
