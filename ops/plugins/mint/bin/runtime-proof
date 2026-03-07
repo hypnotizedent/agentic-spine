@@ -169,13 +169,26 @@ fi
 
 # 2) Shipping must not be placeholder stub
 shipping_key="$(get_container_key shipping || true)"
+missing_shipping_env=()
 if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+  emit_row "shipping.env" "FAIL" "target=$APP_TARGET_ID unreachable"
   emit_row "shipping.shop_address" "FAIL" "target=$APP_TARGET_ID unreachable"
   fail=1
 elif [[ -z "$shipping_key" ]]; then
   emit_row "shipping.api_key" "FAIL" "missing API_KEY from shipping container"
   fail=1
 else
+  for req_key in API_KEY DATABASE_URL EASYPOST_API_KEY EASYPOST_WEBHOOK_SECRET; do
+    if ! container_env_present shipping "$req_key"; then
+      missing_shipping_env+=("$req_key")
+    fi
+  done
+  if [[ "${#missing_shipping_env[@]}" -gt 0 ]]; then
+    emit_row "shipping.env" "FAIL" "missing ${missing_shipping_env[*]}"
+    fail=1
+  else
+    emit_row "shipping.env" "PASS" "required env present"
+  fi
   tmp_ship="$(mktemp)"
   set +e
   ship_http="$(curl -sS -m 10 -o "$tmp_ship" -w "%{http_code}" -H "x-api-key: $shipping_key" "$(app_http_url "$SHIPPING_PORT" "$SHIPPING_SHOP_PATH")")"
