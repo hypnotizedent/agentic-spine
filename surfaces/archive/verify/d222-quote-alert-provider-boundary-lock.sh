@@ -4,7 +4,7 @@
 # Enforces quote-created alerts to stay on Resend and blocks Microsoft/Stalwart drift.
 set -euo pipefail
 
-ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 PROVIDERS="$ROOT/ops/bindings/communications.providers.contract.yaml"
 SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
 N8N_WORKFLOWS="$ROOT/ops/plugins/n8n/bin/n8n-workflows"
