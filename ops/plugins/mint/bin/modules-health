@@ -18,6 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
 PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
@@ -42,21 +44,24 @@ MINT_DATA_USER="$(yq -r ".ssh.targets[] | select(.id == \"$DATA_TARGET_ID\") | .
 [[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "$APP_TARGET_ID not found in ssh.targets"
 [[ -n "$MINT_DATA_HOST" && "$MINT_DATA_HOST" != "null" ]] || stop "$DATA_TARGET_ID not found in ssh.targets"
 
+IFS=' ' read -r MINT_APPS_PROBE_HOST MINT_APPS_PROBE_PATH <<< "$(ssh_resolve_probe_host "$APP_TARGET_ID" || true)"
+IFS=' ' read -r MINT_DATA_PROBE_HOST MINT_DATA_PROBE_PATH <<< "$(ssh_resolve_probe_host "$DATA_TARGET_ID" || true)"
+
 echo "mint.modules.health"
 echo "probe.binding: $PROBE_BINDING"
-echo "$APP_TARGET_ID: ${MINT_APPS_USER}@${MINT_APPS_HOST} (VM $(yq -r '.targets.app_plane.vm_id // "?"' "$PROBE_BINDING"))"
-echo "$DATA_TARGET_ID: ${MINT_DATA_USER}@${MINT_DATA_HOST} (VM $(yq -r '.targets.data_plane.vm_id // "?"' "$PROBE_BINDING"))"
+echo "$APP_TARGET_ID: ${MINT_APPS_USER}@${MINT_APPS_HOST} (VM $(yq -r '.targets.app_plane.vm_id // "?"' "$PROBE_BINDING")) http=${MINT_APPS_PROBE_HOST:-unreachable} via=${MINT_APPS_PROBE_PATH:-unreachable}"
+echo "$DATA_TARGET_ID: ${MINT_DATA_USER}@${MINT_DATA_HOST} (VM $(yq -r '.targets.data_plane.vm_id // "?"' "$PROBE_BINDING")) http=${MINT_DATA_PROBE_HOST:-unreachable} via=${MINT_DATA_PROBE_PATH:-unreachable}"
 echo
 
 declare -a HTTP_ROWS=()
 while IFS=$'\t' read -r name port path; do
   [[ -z "$name" ]] && continue
-  HTTP_ROWS+=("$name|$APP_TARGET_ID|http://${MINT_APPS_HOST}:${port}${path}")
+  HTTP_ROWS+=("$name|$APP_TARGET_ID|$MINT_APPS_PROBE_HOST|$MINT_APPS_PROBE_PATH|$port|$path")
 done < <(yq -r '.targets.app_plane.http_checks[] | [.id, (.port|tostring), .health_path] | @tsv' "$PROBE_BINDING")
 
 while IFS=$'\t' read -r name port path; do
   [[ -z "$name" ]] && continue
-  HTTP_ROWS+=("$name|$DATA_TARGET_ID|http://${MINT_DATA_HOST}:${port}${path}")
+  HTTP_ROWS+=("$name|$DATA_TARGET_ID|$MINT_DATA_PROBE_HOST|$MINT_DATA_PROBE_PATH|$port|$path")
 done < <(yq -r '.targets.data_plane.http_checks[] | [.id, (.port|tostring), .health_path] | @tsv' "$PROBE_BINDING")
 
 SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
@@ -67,9 +72,15 @@ fail=0
 checked=0
 
 check_http() {
-  local name="$1" target_id="$2" url="$3"
+  local name="$1" target_id="$2" host="$3" path_used="$4" port="$5" path="$6"
   if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then return; fi
   checked=$((checked + 1))
+  if [[ -z "$host" ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "UNREACHABLE" "-" "target=$target_id"
+    fail=1
+    return
+  fi
+  local url="http://${host}:${port}${path}"
   local start_ms end_ms dur_ms http_code curl_exit
   start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   set +e
@@ -79,26 +90,31 @@ check_http() {
   end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   dur_ms=$((end_ms - start_ms))
   if [[ "$curl_exit" -eq 0 && "$http_code" == "200" ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "OK" "${dur_ms}ms" "target=$target_id"
+    printf "%-16s %-10s %-10s %s\n" "$name" "OK" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
   elif [[ "$curl_exit" -eq 0 ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "DEGRADED" "${dur_ms}ms" "target=$target_id http=$http_code"
+    printf "%-16s %-10s %-10s %s\n" "$name" "DEGRADED" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} http=$http_code"
     fail=1
   elif [[ "$curl_exit" -eq 28 ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "TIMEOUT" "${dur_ms}ms" "target=$target_id"
+    printf "%-16s %-10s %-10s %s\n" "$name" "TIMEOUT" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
     fail=1
   elif [[ "$curl_exit" -eq 7 ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "REFUSED" "${dur_ms}ms" "target=$target_id"
+    printf "%-16s %-10s %-10s %s\n" "$name" "REFUSED" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
     fail=1
   else
-    printf "%-16s %-10s %-10s %s\n" "$name" "FAIL" "${dur_ms}ms" "target=$target_id curl=$curl_exit"
+    printf "%-16s %-10s %-10s %s\n" "$name" "FAIL" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} curl=$curl_exit"
     fail=1
   fi
 }
 
 check_ssh_service() {
-  local name="$1" target_id="$2" host="$3" user="$4" cmd="$5"
+  local name="$1" target_id="$2" host="$3" path_used="$4" user="$5" cmd="$6"
   if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then return; fi
   checked=$((checked + 1))
+  if [[ -z "$host" ]]; then
+    printf "%-16s %-10s %-10s %s\n" "$name" "UNREACHABLE" "-" "target=$target_id"
+    fail=1
+    return
+  fi
   local start_ms end_ms dur_ms
   start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   set +e
@@ -109,22 +125,22 @@ check_ssh_service() {
   end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   dur_ms=$((end_ms - start_ms))
   if [[ "$rc" -eq 0 ]]; then
-    printf "%-16s %-10s %-10s %s\n" "$name" "OK" "${dur_ms}ms" "target=$target_id"
+    printf "%-16s %-10s %-10s %s\n" "$name" "OK" "${dur_ms}ms" "target=$target_id via=${path_used:-direct}"
   else
-    printf "%-16s %-10s %-10s %s\n" "$name" "FAIL" "${dur_ms}ms" "target=$target_id rc=$rc"
+    printf "%-16s %-10s %-10s %s\n" "$name" "FAIL" "${dur_ms}ms" "target=$target_id via=${path_used:-direct} rc=$rc"
     fail=1
   fi
 }
 
 # HTTP checks
 for row in "${HTTP_ROWS[@]}"; do
-  IFS='|' read -r name target_id url <<< "$row"
-  check_http "$name" "$target_id" "$url"
+  IFS='|' read -r name target_id host path_used port health_path <<< "$row"
+  check_http "$name" "$target_id" "$host" "$path_used" "$port" "$health_path"
 done
 
 while IFS=$'\t' read -r name cmd; do
   [[ -z "$name" ]] && continue
-  check_ssh_service "$name" "$DATA_TARGET_ID" "$MINT_DATA_HOST" "$MINT_DATA_USER" "$cmd"
+  check_ssh_service "$name" "$DATA_TARGET_ID" "$MINT_DATA_PROBE_HOST" "$MINT_DATA_PROBE_PATH" "$MINT_DATA_USER" "$cmd"
 done < <(yq -r '.targets.data_plane.ssh_checks[] | [.id, .command] | @tsv' "$PROBE_BINDING")
 
 echo

@@ -92,6 +92,35 @@ ssh_resolve_host_with_fallback() {
   return 1
 }
 
+# Resolve a stable probe host for health and verification surfaces.
+# Probe traffic should prefer the configured Tailscale IP when present because
+# operator clients are not guaranteed to be on the shop LAN.
+# Returns: "resolved_ip path_used" (space-separated)
+# path_used: tailscale | direct | unreachable
+ssh_resolve_probe_host() {
+  local target_id="$1"
+  local host ts_ip
+  host="$(ssh_resolve_host "$target_id")"
+  ts_ip="$(ssh_resolve_tailscale_ip "$target_id")"
+
+  if [[ -n "$ts_ip" && "$ts_ip" != "null" ]]; then
+    if [[ "$ts_ip" != "$host" ]]; then
+      printf '%s tailscale\n' "$ts_ip"
+    else
+      printf '%s direct\n' "$ts_ip"
+    fi
+    return 0
+  fi
+
+  if [[ -n "$host" && "$host" != "null" ]]; then
+    printf '%s direct\n' "$host"
+    return 0
+  fi
+
+  printf '\tunreachable\n'
+  return 1
+}
+
 # Resolve an HTTP URL to use the correct host IP with fallback.
 # Takes a URL with a LAN IP and the target_id, returns URL with resolved IP + path_used.
 # Returns: "resolved_url path_used" (space-separated)

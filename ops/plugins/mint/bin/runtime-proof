@@ -18,6 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
 PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
@@ -39,6 +41,9 @@ MINT_DATA_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$DATA_TARGET_ID\") | .
 MINT_DATA_USER="$(yq -r ".ssh.targets[] | select(.id == \"$DATA_TARGET_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
 [[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "$APP_TARGET_ID not found in ssh.targets"
 [[ -n "$MINT_DATA_HOST" && "$MINT_DATA_HOST" != "null" ]] || stop "$DATA_TARGET_ID not found in ssh.targets"
+
+IFS=' ' read -r MINT_APPS_PROBE_HOST MINT_APPS_PROBE_PATH <<< "$(ssh_resolve_probe_host "$APP_TARGET_ID" || true)"
+IFS=' ' read -r MINT_DATA_PROBE_HOST MINT_DATA_PROBE_PATH <<< "$(ssh_resolve_probe_host "$DATA_TARGET_ID" || true)"
 
 service_port() {
   local service="$1"
@@ -125,39 +130,55 @@ http_json_check() {
 
 get_container_key() {
   local container="$1"
-  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+  [[ -n "$MINT_APPS_PROBE_HOST" ]] || return 1
+  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_PROBE_HOST}" \
     "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= '/^API_KEY=/{sub(/^API_KEY=/,\"\" ); print; exit}'"
 }
 
 container_env_present() {
   local container="$1" key="$2"
-  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+  [[ -n "$MINT_APPS_PROBE_HOST" ]] || return 1
+  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_PROBE_HOST}" \
     "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= -v K='$key' '\$1==K && \$2!=\"\"{found=1} END{exit found?0:1}'"
+}
+
+app_http_url() {
+  local port="$1" route="$2"
+  [[ -n "$MINT_APPS_PROBE_HOST" ]] || return 1
+  printf 'http://%s:%s%s\n' "$MINT_APPS_PROBE_HOST" "$port" "$route"
 }
 
 echo "mint.runtime.proof"
 echo "probe.binding: $PROBE_BINDING"
-echo "$APP_TARGET_ID: ${MINT_APPS_USER}@${MINT_APPS_HOST}"
-echo "$DATA_TARGET_ID: ${MINT_DATA_USER}@${MINT_DATA_HOST}"
+echo "$APP_TARGET_ID: ${MINT_APPS_USER}@${MINT_APPS_HOST} http=${MINT_APPS_PROBE_HOST:-unreachable} via=${MINT_APPS_PROBE_PATH:-unreachable}"
+echo "$DATA_TARGET_ID: ${MINT_DATA_USER}@${MINT_DATA_HOST} http=${MINT_DATA_PROBE_HOST:-unreachable} via=${MINT_DATA_PROBE_PATH:-unreachable}"
 echo
 printf "%-28s %-8s %s\n" "CHECK" "STATE" "DETAIL"
 
 # 1) Pricing health
-http_json_check \
-  "pricing.health" \
-  "http://${MINT_APPS_HOST}:${PRICING_PORT}${PRICING_HEALTH}" \
-  '.status == "ok" and ((.service // .name // "") | test("pricing"; "i"))' \
-  "pricing health json ok"
+if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+  emit_row "pricing.health" "FAIL" "target=$APP_TARGET_ID unreachable"
+  fail=1
+else
+  http_json_check \
+    "pricing.health" \
+    "$(app_http_url "$PRICING_PORT" "$PRICING_HEALTH")" \
+    '.status == "ok" and ((.service // .name // "") | test("pricing"; "i"))' \
+    "pricing health json ok via=${MINT_APPS_PROBE_PATH:-direct}"
+fi
 
 # 2) Shipping must not be placeholder stub
 shipping_key="$(get_container_key shipping || true)"
-if [[ -z "$shipping_key" ]]; then
+if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+  emit_row "shipping.shop_address" "FAIL" "target=$APP_TARGET_ID unreachable"
+  fail=1
+elif [[ -z "$shipping_key" ]]; then
   emit_row "shipping.api_key" "FAIL" "missing API_KEY from shipping container"
   fail=1
 else
   tmp_ship="$(mktemp)"
   set +e
-  ship_http="$(curl -sS -m 10 -o "$tmp_ship" -w "%{http_code}" -H "x-api-key: $shipping_key" "http://${MINT_APPS_HOST}:${SHIPPING_PORT}${SHIPPING_SHOP_PATH}")"
+  ship_http="$(curl -sS -m 10 -o "$tmp_ship" -w "%{http_code}" -H "x-api-key: $shipping_key" "$(app_http_url "$SHIPPING_PORT" "$SHIPPING_SHOP_PATH")")"
   ship_rc=$?
   set -e
   if [[ "$ship_rc" -ne 0 || "$ship_http" != "200" ]]; then
@@ -174,13 +195,17 @@ fi
 
 # 3) Suppliers search + stock parity (behavioral; do not require seeded catalog rows)
 suppliers_key="$(get_container_key suppliers || true)"
-if [[ -z "$suppliers_key" ]]; then
+if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+  emit_row "suppliers.search" "FAIL" "target=$APP_TARGET_ID unreachable"
+  emit_row "suppliers.stock" "FAIL" "target=$APP_TARGET_ID unreachable"
+  fail=1
+elif [[ -z "$suppliers_key" ]]; then
   emit_row "suppliers.api_key" "FAIL" "missing API_KEY from suppliers container"
   fail=1
 else
   tmp_search="$(mktemp)"
   set +e
-  search_http="$(curl -sS -m 10 -o "$tmp_search" -w "%{http_code}" -H "x-api-key: $suppliers_key" "http://${MINT_APPS_HOST}:${SUPPLIERS_PORT}${SUPPLIERS_SEARCH_PATH}?q=PC61&limit=1")"
+  search_http="$(curl -sS -m 10 -o "$tmp_search" -w "%{http_code}" -H "x-api-key: $suppliers_key" "$(app_http_url "$SUPPLIERS_PORT" "${SUPPLIERS_SEARCH_PATH}?q=PC61&limit=1")")"
   search_rc=$?
   set -e
   if [[ "$search_rc" -ne 0 || "$search_http" != "200" ]]; then
@@ -200,7 +225,7 @@ else
     stock_path="${stock_path/\{sku\}/$sku}"
     tmp_stock="$(mktemp)"
     set +e
-    stock_http="$(curl -sS -m 10 -o "$tmp_stock" -w "%{http_code}" -H "x-api-key: $suppliers_key" "http://${MINT_APPS_HOST}:${SUPPLIERS_PORT}${stock_path}")"
+    stock_http="$(curl -sS -m 10 -o "$tmp_stock" -w "%{http_code}" -H "x-api-key: $suppliers_key" "$(app_http_url "$SUPPLIERS_PORT" "$stock_path")")"
     stock_rc=$?
     set -e
     if [[ "$stock_rc" -ne 0 || "$stock_http" != "200" ]]; then
@@ -219,7 +244,10 @@ fi
 
 # 4) Artwork upload prepare parity (legacy alias + fresh behavior)
 files_key="$(get_container_key files-api || true)"
-if [[ -z "$files_key" ]]; then
+if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+  emit_row "artwork.upload_prepare" "FAIL" "target=$APP_TARGET_ID unreachable"
+  fail=1
+elif [[ -z "$files_key" ]]; then
   emit_row "artwork.api_key" "FAIL" "missing API_KEY from files-api container"
   fail=1
 else
@@ -229,7 +257,7 @@ else
     -H "x-api-key: $files_key" \
     -H "content-type: application/json" \
     -d '{"visual_id":"30100","kind":"original","filename":"proof.png","content_type":"image/png","size_bytes":1024}' \
-    "http://${MINT_APPS_HOST}:${FILES_PORT}${ARTWORK_PREPARE_PATH}")"
+    "$(app_http_url "$FILES_PORT" "$ARTWORK_PREPARE_PATH")")"
   art_rc=$?
   set -e
   if [[ "$art_rc" -ne 0 || "$art_http" != "200" ]]; then
@@ -247,23 +275,29 @@ fi
 
 # 5) Payment health
 missing_payment_env=()
-for req_key in API_KEY DATABASE_URL STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET JWT_SECRET; do
-  if ! container_env_present payment "$req_key"; then
-    missing_payment_env+=("$req_key")
-  fi
-done
-if [[ "${#missing_payment_env[@]}" -gt 0 ]]; then
-  emit_row "payment.env" "FAIL" "missing ${missing_payment_env[*]}"
+if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+  emit_row "payment.env" "FAIL" "target=$APP_TARGET_ID unreachable"
+  emit_row "payment.health" "FAIL" "target=$APP_TARGET_ID unreachable"
   fail=1
 else
-  emit_row "payment.env" "PASS" "required env present"
-fi
+  for req_key in API_KEY DATABASE_URL STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET JWT_SECRET; do
+    if ! container_env_present payment "$req_key"; then
+      missing_payment_env+=("$req_key")
+    fi
+  done
+  if [[ "${#missing_payment_env[@]}" -gt 0 ]]; then
+    emit_row "payment.env" "FAIL" "missing ${missing_payment_env[*]}"
+    fail=1
+  else
+    emit_row "payment.env" "PASS" "required env present"
+  fi
 
-http_json_check \
-  "payment.health" \
-  "http://${MINT_APPS_HOST}:${PAYMENT_PORT}${PAYMENT_HEALTH}" \
-  '.status == "ok" and ((.service // "") | test("payment"; "i"))' \
-  "payment health json ok"
+  http_json_check \
+    "payment.health" \
+    "$(app_http_url "$PAYMENT_PORT" "$PAYMENT_HEALTH")" \
+    '.status == "ok" and ((.service // "") | test("payment"; "i"))' \
+    "payment health json ok via=${MINT_APPS_PROBE_PATH:-direct}"
+fi
 
 echo
 if [[ "$fail" -eq 1 ]]; then
