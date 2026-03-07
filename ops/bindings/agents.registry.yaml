@@ -325,7 +325,7 @@ agents:
     domain: mint
     human_name: "Morpheus"
     canonical_operator_id: "MINT-OPERATOR-01"
-    description: "Mint operator agent: customer resolve, operator intake, archive/quarantine routing, retained-doc intake, and governed mint capability access"
+    description: "Mint operator employee: customer asks, artwork routing, quoting/operator workflows, foldering, and order handoff prep"
     contract: "ops/agents/mint-agent.contract.md"
     implementation: "~/code/workbench/agents/mint-agent/"
     implementation_status: active
@@ -357,22 +357,12 @@ agents:
       - name: mint.intake.validate
         safety: read-only
         description: "Validate intake payload contract."
-      - name: mint.deploy.status
-        safety: read-only
-        description: "Check mint-apps and mint-data runtime status."
-      - name: mint.migrate.dryrun
-        safety: read-only
-        description: "Dry-run migration safety checks."
     capabilities:
       - mint.modules.health
       - mint.seeds.query
       - mint.intake.validate
-      - mint.deploy.status
-      - mint.migrate.dryrun
-      - mint.loop.daily
     write_scope:
       - ~/code/workbench/agents/mint-agent/
-      - ~/code/mint-modules/agents/mcp-server/
     project_binding:
       repo_path: "/Users/ronnyworks/code/mint-modules"
       project_id: "mint-modules"
@@ -410,6 +400,84 @@ agents:
       shipping:
         health_id: external
         url: "https://shipping.mintprints.com/health"
+
+  - id: flying-dutchman
+    name: "Flying Dutchman"
+    runner_capability: verify.pack.run
+    domain: mint
+    human_name: "Flying Dutchman"
+    canonical_operator_id: "MINT-ORCH-01"
+    description: "Spine-owned Mint orchestrator: verify, deploy, topology, orchestration, and sub-agent routing"
+    contract: "ops/agents/flying-dutchman.contract.md"
+    implementation: "~/code/workbench/agents/flying-dutchman/"
+    implementation_status: active
+    mcp_type: custom
+    runtime_binding_exempt_reason: "orchestrator wrapper; canonical authority lives in spine plugins and worker routing"
+    covers:
+      - mint-apps (VM 213)
+      - mint-data (VM 212)
+    services:
+      - files-api
+      - order-intake
+      - quote-page
+      - finance-adapter
+      - pricing
+      - shipping
+      - suppliers
+      - payment
+    capabilities:
+      - mint.modules.health
+      - mint.seeds.query
+      - mint.intake.validate
+      - mint.deploy.status
+      - mint.migrate.dryrun
+      - mint.loop.daily
+    write_scope:
+      - ~/code/workbench/agents/flying-dutchman/
+      - ~/code/workbench/scripts/root/operator/flying-dutchman.sh
+    gates:
+      - D49
+      - D23
+
+  - id: fin-agent
+    name: "Fin"
+    runner_capability: verify.pack.run
+    domain: mint
+    human_name: "Fin"
+    canonical_operator_id: "MINT-DOCS-01"
+    description: "Retained-doc / Paperless / invoice-doc employee for Mint"
+    contract: "ops/agents/fin-agent.contract.md"
+    implementation: "~/code/workbench/agents/fin/"
+    implementation_status: active
+    mcp_type: custom
+    runtime_binding_exempt_reason: "operator wrapper over Paperless intake and finance status surfaces"
+    capabilities:
+      - finance.stack.status
+    write_scope:
+      - ~/code/workbench/agents/fin/
+      - ~/code/workbench/scripts/root/operator/fin.sh
+    gates:
+      - D49
+
+  - id: artie-agent
+    name: "Artie"
+    runner_capability: verify.pack.run
+    domain: mint
+    human_name: "Artie"
+    canonical_operator_id: "MINT-PROOFS-01"
+    description: "Proofs / artwork prep / mockups employee for Mint"
+    contract: "ops/agents/artie-agent.contract.md"
+    implementation: "~/code/workbench/agents/artie/"
+    implementation_status: active
+    mcp_type: custom
+    runtime_binding_exempt_reason: "operator wrapper over product proof surfaces; no standalone MCP server"
+    capabilities:
+      - mint.modules.health
+    write_scope:
+      - ~/code/workbench/agents/artie/
+      - ~/code/workbench/scripts/root/operator/artie.sh
+    gates:
+      - D49
 
   - id: workbench-agent
     name: "Workbench Agent"
@@ -966,10 +1034,12 @@ routing_rules:
   - agent: mint-agent
     domains:
       - mint
-      - mint-modules
-      - product
       - artwork
       - intake
+      - quoting
+      - pricing
+      - suppliers
+      - operator
     keywords:
       - Morpheus
       - morpheus
@@ -979,16 +1049,73 @@ routing_rules:
       - seeds
       - artwork
       - quote
+      - pricing
+      - supplier
+      - suppliers
+      - finance-adapter
+      - mint-modules
+      - billable
       - intake
       - job
       - upload
-      - files-api
-      - mint-modules
-      - finance-adapter
-      - pricing
-      - shipping
-      - suppliers
-      - billable
+      - customer ask
+      - operator
+      - handoff
+      - customer resolve
+      - archive
+      - quarantine
+
+  - agent: flying-dutchman
+    domains:
+      - mint
+      - orchestration
+      - topology
+      - deploy
+    keywords:
+      - Flying Dutchman
+      - flying dutchman
+      - dutchman
+      - MINT-ORCH-01
+      - mint verify
+      - mint deploy
+      - mint topology
+      - mint orchestrator
+      - sub-agent
+
+  - agent: fin-agent
+    domains:
+      - documents
+      - mint
+      - invoice-docs
+      - paperless
+    keywords:
+      - Fin
+      - fin
+      - MINT-DOCS-01
+      - paperless
+      - invoice
+      - retained docs
+      - w-9
+      - workers comp
+      - bank statement
+      - tax document
+
+  - agent: artie-agent
+    domains:
+      - mint
+      - artwork
+      - proofs
+      - mockups
+    keywords:
+      - Artie
+      - artie
+      - MINT-PROOFS-01
+      - proof
+      - proofs
+      - mockup
+      - mockups
+      - artwork prep
+      - digital proofs
 
   - agent: workbench-agent
     domains:
