@@ -30,7 +30,7 @@ Morpheus is the terminal-first Mint operator agent. It wraps existing Mint and S
 - Preview and execute archive moves through the existing archive assistant and filesystem move helpers.
 - Preview and execute quarantine moves through the existing filesystem move helper.
 - Run operator-drop intake into seeds/assets through the existing intake script.
-- Intake retained documents to Paperless through the existing Paperless intake script.
+- Intake retained documents to Paperless through the smart Paperless intake helper (auto-detects single vs bulk imports).
 - Surface receipt paths, ledger evidence, and machine-readable output already emitted by the wrapped tools.
 - Stop on ambiguity, blocked moves, or unexpected state mismatches instead of guessing.
 
@@ -62,7 +62,7 @@ Active homing beyond current `operator-drop` intake remains deferred to the sepa
 | Archive preview/move | `~/code/mint-modules/artwork/scripts/archive-assistant.ts` |
 | Filesystem archive/quarantine | `~/code/mint-modules/artwork/scripts/fs-move.ts` |
 | Operator-drop intake | `~/code/mint-modules/artwork/scripts/operator-drop-ingest.ts` |
-| Retained doc intake | `~/code/workbench/scripts/finance/paperless-intake.mjs` |
+| Retained doc intake | `~/code/workbench/scripts/finance/paperless-intake.mjs` (smart single/bulk wrapper) |
 
 ## Invocation
 
@@ -144,11 +144,17 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 
 ## Minimum V1 Command Surface
 
+- `mintctl morpheus hello`
+- `mintctl morpheus start`
+- `mintctl morpheus where <active|archive|quarantine|paperless> ...`
+- `mintctl morpheus plan <active|archive|quarantine|paperless> ...`
 - `mintctl morpheus whoami`
 - `mintctl morpheus resolve-customer <query>`
 - `mintctl morpheus intake [--dry-run] [--source PATH]`
 - `mintctl morpheus archive <preview|move|batch> ...`
 - `mintctl morpheus quarantine [--preview] --source PATH [--sync-seed]`
 - `mintctl morpheus paperless --type <class> [--preview|--execute] <source>`
+  - Bulk options: `--concurrency N`, `--resume`, `--progress-interval N`
+  - Auto-detects bulk imports (>100 files) and optimizes execution
 
 The alias `mintctl operator ...` must resolve to the same command surface.
