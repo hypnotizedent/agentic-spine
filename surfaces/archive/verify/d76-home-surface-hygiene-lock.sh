@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 BINDING="$ROOT/ops/bindings/home-surface.allowlist.yaml"
 HOME_DIR="${HOME:-/Users/ronnyworks}"
 WORKBENCH_ROOT="${WORKBENCH_ROOT:-$HOME_DIR/code/workbench}"
@@ -54,7 +54,8 @@ if [[ -f "$CLAUDE_CFG" ]]; then
         allowed=false
         while IFS= read -r allowed_root; do
           [[ -z "$allowed_root" ]] && continue
-          if [[ "$mcp_root" == "$allowed_root"* ]]; then
+          normalized_allowed="${allowed_root%/}"
+          if [[ "$mcp_root" == "$normalized_allowed" ]] || [[ "$mcp_root" == "$normalized_allowed/"* ]]; then
             allowed=true
             break
           fi
@@ -75,6 +76,12 @@ for forbidden_dir in ops stacks; do
     VIOLATIONS+=("forbidden legacy directory exists: ~/$forbidden_dir")
   fi
 done
+
+# ── Check 3b: Retired Paperless SMB launchd helper must not remain active ──
+PAPERLESS_PLIST="$HOME_DIR/Library/LaunchAgents/works.ronny.smb-paperless.plist"
+if [[ -f "$PAPERLESS_PLIST" ]]; then
+  VIOLATIONS+=("retired Paperless SMB LaunchAgent still present: $PAPERLESS_PLIST")
+fi
 
 # ── Check 4: Uppercase code-dir violations in workbench executable surfaces ──
 # Build pattern dynamically to avoid D42 false positive on this file
