@@ -21,6 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 MINT_REPO="${MINT_REPO:-/Users/ronnyworks/code/mint-modules}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
@@ -65,9 +66,10 @@ fi
 MODULE="$(echo "$MODULES_CSV" | xargs)"
 [[ -n "$MODULE" ]] || stop "--modules cannot be empty"
 
-MINT_APPS_HOST="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .host' "$SSH_BINDING" | head -n1)"
 MINT_APPS_USER="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .user // "ubuntu"' "$SSH_BINDING" | head -n1)"
+read -r MINT_APPS_HOST MINT_APPS_PATH <<<"$(ssh_resolve_host_with_fallback "mint-apps" 1 || true)"
 [[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "mint-apps ssh target missing"
+[[ "$MINT_APPS_PATH" != "unreachable" ]] || stop "mint-apps unreachable via lan or tailscale"
 REMOTE_STACK_ROOT="/opt/stacks/mint-apps"
 REMOTE_ENV_FILE="${REMOTE_STACK_ROOT}/.env"
 
@@ -77,7 +79,7 @@ echo "mint.deploy.sync"
 echo "mint_repo: $MINT_REPO"
 echo "ref: $REF"
 echo "module: $MODULE"
-echo "target: ${MINT_APPS_USER}@${MINT_APPS_HOST}:${REMOTE_STACK_ROOT}"
+echo "target: ${MINT_APPS_USER}@${MINT_APPS_HOST}:${REMOTE_STACK_ROOT} (${MINT_APPS_PATH})"
 echo
 
 # Ensure ref is available and valid.
