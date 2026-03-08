@@ -378,8 +378,8 @@ get_project_id() {
       echo "$id"
     else
       log_error "Unknown project: $project"
-      log_info "Active: infrastructure mint-os-api n8n media-stack immich home-assistant ai-services"
-      log_info "Deprecated (reads require --allow-deprecated-read): finance-stack mint-os-vault"
+      log_info "Active: infrastructure n8n media-stack immich home-assistant ai-services"
+      log_info "Deprecated (reads require --allow-deprecated-read): mint-os-api finance-stack mint-os-vault"
       exit 1
     fi
   fi
@@ -807,16 +807,16 @@ Commands:
 
 Active Projects:
   infrastructure    (spine-bound, governed writes)
-  mint-os-api       (legacy product)
   n8n               (automation)
   media-stack       (media management)
   immich            (photo management)
   ai-services       (AI API keys)
 
 Deprecated Projects (reads blocked by default, writes blocked):
+  mint-os-api       (legacy_readonly — do not use for active runtime)
   home-assistant    (use infrastructure /spine/home/*)
   finance-stack     (use infrastructure /spine/services/finance)
-  mint-os-vault     (consolidation candidate)
+  mint-os-vault     (legacy_readonly — do not use for active runtime)
 
 Environment Variables:
   INFISICAL_UNIVERSAL_AUTH_CLIENT_ID      Client ID (default: 40b44e76-...)
@@ -839,14 +839,14 @@ Examples:
   infisical-agent.sh jwt-decode
   infisical-agent.sh list-recursive infrastructure prod
   infisical-agent.sh list n8n dev
-  infisical-agent.sh get mint-os-api prod JWT_SECRET
+  infisical-agent.sh get infrastructure prod FIREFLY_PAT
   infisical-agent.sh get-cached infrastructure prod CLOUDFLARE_API_TOKEN
   infisical-agent.sh get-cached infrastructure prod CLOUDFLARE_API_TOKEN --no-cache
   infisical-agent.sh cache-info
   infisical-agent.sh cache-clear
   infisical-agent.sh set n8n prod MS365_CLIENT_ID "your-client-id"
-  infisical-agent.sh export mint-os-api prod /tmp/api.env
-  infisical-agent.sh list finance-stack prod --allow-deprecated-read
+  infisical-agent.sh export infrastructure prod /tmp/infrastructure.env
+  infisical-agent.sh list infrastructure prod
 EOF
 }
 
