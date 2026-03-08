@@ -403,12 +403,13 @@ runtime_units:
       - vm-disk
     exclude_paths:
       - payload_regenerable
-    destination_lane: nas-offsite-vm
+    destination_lane: nas-home-local-exception
     schedule_class: daily-primary-est
     restore_class: tier1-small-state-dry-run-quarterly
     inventory_targets:
       - home-vm-100-ha-primary
     backup_admission_state: production_ready
+    description: "Home Assistant VM 100. ONLY permitted Synology exception per HA-only backup policy."
   - unit_id: vm-105-pihole-home
     kind: vm
     hostname: pihole-home
@@ -418,12 +419,13 @@ runtime_units:
       - vm-disk
     exclude_paths:
       - payload_regenerable
-    destination_lane: nas-offsite-vm
+    destination_lane: pve-vzdump-primary
     schedule_class: weekly-est
     restore_class: app-dry-run-monthly
     inventory_targets:
       - home-lxc-105-pihole-primary
-    backup_admission_state: production_ready
+    backup_admission_state: planned
+    description: "DEPRECATED 2026-03-08: Pi-hole LXC 105 removed from Synology exception set per HA-only policy. Target destination changed to pve-vzdump-primary (shop tank-backups plane), but home-lxc-105-pihole-primary target disabled pending migration decision."
   - unit_id: container-fleet-docker-host
     kind: container-fleet
     hostname: docker-host
@@ -564,15 +566,17 @@ runtime_units:
     include_paths:
       - /home/automation/stacks
       - /home/automation/backups/n8n-workflows
+      - /md1400/backup-cold/apps/infra-core/n8n
     exclude_paths:
       - payload_regenerable
-    destination_lane: nas-app-backups
+    destination_lane: r730xd-infra-core-backups
     schedule_class: daily-primary-est
     restore_class: app-dry-run-monthly
     inventory_targets:
       - vm-202-primary
       - app-n8n-workflows
     backup_admission_state: production_ready
+    description: "Automation stack (n8n workflows). App-level backups to 730XD infra-core plane. VM-level backup via vm-202-primary."
   - unit_id: container-fleet-finance-stack
     kind: container-fleet
     hostname: finance-stack
@@ -882,15 +886,14 @@ targets:
   # APP-LEVEL BACKUPS (NAS at house, Tailscale)
   # =============================================================================
   - name: app-infisical
-    enabled: false
+    enabled: true
     kind: file_glob
-    host: nas
-    base_path: "/volume1/backups/apps/infisical"
+    host: pve
+    base_path: "/md1400/backup-cold/apps/infra-core/infisical"
     glob: "*.sql.gz"
     stale_after_hours: 26
     classification: critical
-    description: "DISABLED 2026-03-08: Pending migration to r730xd-infra-core-backups (/md1400/backup-cold/apps/infra-core/infisical/). Runtime script migration required."
-    migration_target: "pve:/md1400/backup-cold/apps/infra-core/infisical/"
+    description: "Infisical app-level backup. Daily pg_dump replicated to the 730XD canonical infra-core backup plane."
   - name: app-mint-postgres
     enabled: true
     kind: file_glob
@@ -910,25 +913,23 @@ targets:
     classification: critical
     description: "Mint Postgres backup sanity manifest. Only synced after 730XD offsite verification succeeds. Migrated to 730XD 2026-03-08."
   - name: app-gitea
-    enabled: false
+    enabled: true
     kind: file_glob
-    host: nas
-    base_path: "/volume1/backups/apps/gitea"
+    host: pve
+    base_path: "/md1400/backup-cold/apps/dev-tools/gitea"
     glob: "*.sql.gz"
     stale_after_hours: 26
     classification: critical
-    description: "DISABLED 2026-03-08: Pending migration to r730xd-dev-tools-backups (/md1400/backup-cold/apps/dev-tools/gitea/). Runtime script migration required."
-    migration_target: "pve:/md1400/backup-cold/apps/dev-tools/gitea/"
+    description: "Gitea app-level backup. Daily database dump lands on the 730XD canonical dev-tools backup plane."
   - name: app-vaultwarden
-    enabled: false
+    enabled: true
     kind: file_glob
-    host: nas
-    base_path: "/volume1/backups/apps/vaultwarden"
+    host: pve
+    base_path: "/md1400/backup-cold/apps/infra-core/vaultwarden"
     glob: "*.tar.gz"
     stale_after_hours: 26
     classification: critical
-    description: "DISABLED 2026-03-08: Pending migration to r730xd-infra-core-backups (/md1400/backup-cold/apps/infra-core/vaultwarden/). Runtime script migration required."
-    migration_target: "pve:/md1400/backup-cold/apps/infra-core/vaultwarden/"
+    description: "Vaultwarden app-level backup. Daily tarball lands on the 730XD canonical infra-core backup plane."
   - name: app-home-assistant
     enabled: false
     kind: file_glob
@@ -946,7 +947,7 @@ targets:
     glob: "firefly-db-*.sql.gz"
     stale_after_hours: 26
     classification: critical
-    description: "Finance stack VM 211 app-level backup. Daily 06:20 via finance-stack-backup-730xd.sh; pg_dump -> 730XD canonical."
+    description: "Finance stack VM 211 app-level backup. Daily 06:20 via finance-stack-backup.sh; pg_dump -> 730XD canonical."
   - name: app-finance-sanity-manifest
     enabled: false
     kind: file_glob
@@ -965,27 +966,25 @@ targets:
     glob: "ghostfolio-db-*.sql.gz"
     stale_after_hours: 26
     classification: important
-    description: "Finance stack VM 211 app-level backup. Daily 06:20 via finance-stack-backup-730xd.sh; pg_dump -> 730XD canonical."
+    description: "Finance stack VM 211 app-level backup. Daily 06:20 via finance-stack-backup.sh; pg_dump -> 730XD canonical."
   - name: app-paperless-db
-    enabled: false
+    enabled: true
     kind: file_glob
-    host: nas
-    base_path: "/volume1/backups/apps/paperless"
+    host: pve
+    base_path: "/md1400/backup-cold/apps/finance/paperless"
     glob: "paperless-db-*.sql.gz"
     stale_after_hours: 26
     classification: critical
-    description: "DISABLED 2026-03-08: Pending migration to r730xd-finance-backups (/md1400/backup-cold/apps/finance/paperless/). Runtime script migration required. Blocked by GAP-OP-1515 (Paperless export timing issue)."
-    migration_target: "pve:/md1400/backup-cold/apps/finance/paperless/"
+    description: "Paperless database backup. Daily dump lands on the 730XD canonical finance backup plane."
   - name: app-paperless-export
-    enabled: false
+    enabled: true
     kind: file_glob
-    host: nas
-    base_path: "/volume1/backups/apps/paperless"
+    host: pve
+    base_path: "/md1400/backup-cold/apps/finance/paperless"
     glob: "paperless-export-*.zip"
     stale_after_hours: 26
     classification: critical
-    description: "DISABLED 2026-03-08: Pending migration to r730xd-finance-backups (/md1400/backup-cold/apps/finance/paperless/). Runtime script migration required. Blocked by GAP-OP-1515 (Paperless export timing issue)."
-    migration_target: "pve:/md1400/backup-cold/apps/finance/paperless/"
+    description: "Paperless export backup. Daily document_exporter archive lands on the 730XD canonical finance backup plane."
   - name: app-minio
     enabled: false
     kind: file_glob
@@ -996,14 +995,15 @@ targets:
     classification: important
     description: "Disabled: MinIO on VM 212 is 190GB. VM-level backup (vm-212-mint-data-primary) provides adequate recovery surface. App-level offsite deferred pending incremental mirror strategy or capacity expansion. Doctrine acceptance: large_state data_class permits VM-level-only backup for payload exceeding nightly offsite window."
   - name: app-n8n-workflows
-    enabled: true
+    enabled: false
     kind: file_glob
     host: automation-stack
     base_path: "/home/automation/backups/n8n-workflows"
     glob: "*/manifest.txt"
     stale_after_hours: 26
     classification: important
-    description: "n8n workflow JSON snapshots. Daily 03:00 via cron, 7-day retention. LOOP-N8N-AUTOMATION-RECOVERY-HARDENING-20260212."
+    description: "DISABLED 2026-03-08: Pending migration to r730xd-infra-core-backups (/md1400/backup-cold/apps/infra-core/n8n/). Currently monitors local backup; will be updated to monitor 730XD canonical location after runtime script migration."
+    migration_target: "pve:/md1400/backup-cold/apps/infra-core/n8n/"
   - name: app-media-config-download-stack
     enabled: true
     kind: file_glob
