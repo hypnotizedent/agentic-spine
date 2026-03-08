@@ -3,7 +3,7 @@
 # NOTE: enabled=false by default; flip true intentionally per target.
 # Classifications: critical (26h), important (48h), rebuildable (168h)
 # Status: authoritative
-# Last verified: 2026-03-05
+# Last verified: 2026-03-08
 # yq selectors for gate authoring:
 #   .targets[]              → array of target objects (NOT map-keyed)
 #   .targets[].name         → target identifier (.name NOT .id)
@@ -147,6 +147,9 @@ runtime_units:
     restore_class: app-dry-run-monthly
     inventory_targets:
       - vm-offsite-critical
+      - vm-211-finance-stack-offsite
+      - vm-213-mint-apps-offsite
+      - app-finance-sanity-manifest
       - app-infisical
       - app-gitea
       - app-vaultwarden
@@ -154,6 +157,8 @@ runtime_units:
       - app-ghostfolio
       - app-paperless-db
       - app-paperless-export
+      - app-mint-postgres
+      - app-mint-postgres-manifest
     backup_admission_state: production_ready
   - unit_id: vm-200-docker-host
     kind: vm
@@ -588,17 +593,20 @@ runtime_units:
   - unit_id: container-fleet-mint-data
     kind: container-fleet
     hostname: mint-data
-    backup_profile: vm-covered
+    backup_profile: tier1-small-state
     data_class: tier1_critical
     include_paths:
       - /opt/stacks/mint-data
+      - /volume1/backups/apps/mint-postgres
     exclude_paths:
       - payload_regenerable
-    destination_lane: pve-vzdump-primary
+    destination_lane: nas-app-backups
     schedule_class: daily-primary-est
-    restore_class: vm-dry-run-quarterly
+    restore_class: tier1-small-state-dry-run-quarterly
     inventory_targets:
       - vm-212-mint-data-primary
+      - app-mint-postgres
+      - app-mint-postgres-manifest
     backup_admission_state: production_ready
   - unit_id: container-fleet-mint-apps
     kind: container-fleet
@@ -758,11 +766,29 @@ targets:
     enabled: true
     kind: file_glob
     host: communications-stack
-    base_path: "/srv/mail-archiver/backups"
-    glob: "*mail-archiver*"
+    base_path: "/srv/mail-archiver/backups/last-good"
+    glob: "mail-archiver-*"
     stale_after_hours: 26
     classification: important
-    description: "Mail-archiver app-level backups (pg_dump) on communications-stack VM 214."
+    description: "Mail-archiver app-level backups (pg_dump) on communications-stack VM 214 (local)."
+  - name: app-mail-archiver-offsite
+    enabled: true
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/apps/mail-archiver"
+    glob: "mail-archiver-*.tar.gz"
+    stale_after_hours: 26
+    classification: important
+    description: "Mail-archiver NAS offsite backups (DB + uploads). Finance Stack Doctrine v1 compliance."
+  - name: app-stalwart-offsite
+    enabled: true
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/apps/stalwart"
+    glob: "stalwart-*.tar.gz"
+    stale_after_hours: 26
+    classification: important
+    description: "Stalwart NAS offsite backups (data volume + config). Finance Stack Doctrine v1 compliance."
   # =============================================================================
   # VM BACKUPS - OFFSITE (NAS at house, Tailscale) - daily rsync after vzdump
   # Shop upload ~10-20 Mbps — only critical small VMs synced (not VM 200 @ 186GB)
@@ -776,7 +802,43 @@ targets:
     glob: "vzdump-qemu-*.vma.zst"
     stale_after_hours: 48
     classification: important
-    description: "Covers VMs 204-210. VM 200 excluded (186GB, bandwidth prohibitive)."
+    description: "Aggregate NAS offsite lane for feasible shop vzdump artifacts. Use per-VM offsite targets for exact critical-service proof."
+  - name: vm-211-finance-stack-offsite
+    enabled: true
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/proxmox/vzdump/critical"
+    glob: "vzdump-qemu-211-*.vma.zst"
+    stale_after_hours: 48
+    classification: critical
+    description: "Exact offsite proof target for finance-stack VM 211 latest vzdump on NAS."
+  - name: vm-213-mint-apps-offsite
+    enabled: true
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/proxmox/vzdump/critical"
+    glob: "vzdump-qemu-213-*.vma.zst"
+    stale_after_hours: 48
+    classification: important
+    description: "Exact offsite proof target for mint-apps VM 213 latest vzdump on NAS."
+  - name: vm-212-mint-data-offsite
+    enabled: false
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/proxmox/vzdump/critical"
+    glob: "vzdump-qemu-212-*.vma.zst"
+    stale_after_hours: 72
+    classification: critical
+    description: "Disabled: mint-data VM 212 vzdump artifacts are 100GB-215GB and do not fit the nightly shop->NAS window. Requires app-level offsite lane."
+  - name: vm-214-communications-stack-offsite
+    enabled: false
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/proxmox/vzdump/critical"
+    glob: "vzdump-qemu-214-*.vma.zst"
+    stale_after_hours: 72
+    classification: important
+    description: "Disabled: communications-stack VM 214 vzdump artifacts approach 1TB and are not feasible for nightly offsite sync."
   # NOTE: VM 200 offsite disabled — 186GB backup exceeds shop upload capacity (~10-20 Mbps)
   - name: vm-200-docker-host-offsite
     enabled: false
@@ -824,14 +886,23 @@ targets:
     classification: critical
     description: "pg_dump from infra-core (cron 02:50 daily), rsync to NAS."
   - name: app-mint-postgres
-    enabled: false
+    enabled: true
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/apps/mint-postgres"
     glob: "*.sql.gz"
     stale_after_hours: 26
     classification: critical
-    description: "Disabled: legacy mint-os-postgres is tombstoned with docker-host. Remaining pricing-table handoff is preserved via staged export on mint-legacy; no active app-level backup surface remains."
+    description: "Mint data plane Postgres (VM 212). Daily pg_dump via /usr/local/bin/mint-postgres-backup.sh, rsync to NAS with verification. Activated 2026-03-08."
+  - name: app-mint-postgres-manifest
+    enabled: true
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/apps/mint-postgres"
+    glob: "mint-postgres-manifest-*.txt"
+    stale_after_hours: 26
+    classification: critical
+    description: "Mint Postgres backup sanity manifest. Only synced after offsite verification succeeds. Activated 2026-03-08."
   - name: app-gitea
     enabled: true
     kind: file_glob
@@ -867,6 +938,15 @@ targets:
     stale_after_hours: 26
     classification: critical
     description: "Finance stack VM 211 app-level backup. Daily 06:20 via /usr/local/bin/finance-stack-backup.sh; pg_dump -> NAS rsync."
+  - name: app-finance-sanity-manifest
+    enabled: true
+    kind: file_glob
+    host: nas
+    base_path: "/volume1/backups/apps/finance"
+    glob: "finance-backup-manifest-*.txt"
+    stale_after_hours: 26
+    classification: critical
+    description: "Finance backup quality proof. Daily 06:20 run must sync a sanity manifest only after offsite verification and empty-state checks pass."
   - name: app-ghostfolio
     enabled: true
     kind: file_glob
@@ -902,7 +982,7 @@ targets:
     glob: "*.tar.gz"
     stale_after_hours: 48
     classification: important
-    description: "Disabled: 86k+ objects across 8 active buckets. Vzdump VM-level backup (vm-200) provides coverage. App-level mc mirror deferred — not critical path."
+    description: "Disabled: MinIO on VM 212 is 190GB. VM-level backup (vm-212-mint-data-primary) provides adequate recovery surface. App-level offsite deferred pending incremental mirror strategy or capacity expansion. Doctrine acceptance: large_state data_class permits VM-level-only backup for payload exceeding nightly offsite window."
   - name: app-n8n-workflows
     enabled: true
     kind: file_glob
