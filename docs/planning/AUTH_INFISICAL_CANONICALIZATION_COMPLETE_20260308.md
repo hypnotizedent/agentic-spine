@@ -1,16 +1,23 @@
-# Auth Infisical Canonicalization - Complete Receipt
+# Auth Infisical Canonicalization - Status Report
 
 **Date:** 2026-03-08
-**Gap Closed:** GAP-OP-1512
-**Status:** ✅ COMPLETE AND PROVEN
+**Initial Gap:** GAP-OP-1512 (closed prematurely)
+**Current Status:** ✅ DURABLE DEPLOYMENT ESTABLISHED
 
 ---
 
 ## Executive Summary
 
-Auth service on mint-apps (100.79.183.14:4300) now runs entirely with Infisical-backed secrets. The host .env file NO LONGER contains AUTH_* secret keys. Canonical deployment path established via `ops/plugins/mint/bin/auth-deploy-infisical`.
+**CORRECTED STATUS:** Auth and files-api now have DURABLE Infisical-backed deployment via layered env files.
 
-**Key Achievement:** Auth is the first Mint module to achieve full Infisical canonicalization - secrets exist ONLY in Infisical, runtime does NOT read .env for auth secrets.
+**What Changed (2026-03-08 Second Wave):**
+- Initial attempt (auth-deploy-infisical) proved Infisical injection works but was NOT durable
+- Created machine-generated `.env.auth-secrets` on mint-apps (600 permissions, non-authoritative)
+- Docker compose now uses layered env files: `--env-file .env --env-file .env.auth-secrets`
+- Normal operator commands (restart, up -d, recreate) now work durably
+- Governed deployment paths: `mint.auth.secrets.sync` and `mint.auth.deploy`
+
+**Key Achievement:** Auth and files-api are the first Mint modules with durable Infisical-backed deployment. Infisical is source of truth, .env.auth-secrets is a machine-generated projection.
 
 ---
 
