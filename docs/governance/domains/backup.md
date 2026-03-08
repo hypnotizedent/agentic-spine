@@ -3,8 +3,13 @@
 Canonical domain policy for `backup`.
 
 - Authority: `docs/governance/SPINE.md`
+- Canonical inventory: `ops/bindings/backup.inventory.yaml`
 - Runtime contracts: `ops/bindings/domains/backup.bundle.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain backup`
+
+`backup.status` may return `BLOCKED` when a target is present in the canonical
+inventory but the current network/auth context cannot probe freshness from this
+machine.
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog

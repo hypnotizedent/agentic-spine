@@ -144,6 +144,7 @@ printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
 TOTAL=0
 OK=0
 DEGRADED=0
+BLOCKED=0
 NOW="$(_now_epoch)"
 
 while IFS=$'\t' read -r NAME HOST BASE_PATH GLOB STALE_HOURS SSH_TIMEOUT; do
@@ -175,6 +176,7 @@ while IFS=$'\t' read -r NAME HOST BASE_PATH GLOB STALE_HOURS SSH_TIMEOUT; do
   [[ -n "$TARGET_POLICY" && "$TARGET_POLICY" != "null" ]] || TARGET_POLICY="lan_first"
 
   if [[ "$TARGET_POLICY" == "lan_first" ]] && _is_off_lan_context_host "$SSH_HOST"; then
+    BLOCKED=$((BLOCKED+1))
     printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
       "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "off_lan_connectivity_context"
     continue
@@ -182,6 +184,7 @@ while IFS=$'\t' read -r NAME HOST BASE_PATH GLOB STALE_HOURS SSH_TIMEOUT; do
 
   # Passive mode avoids interactive tailscale SSH browser auth popups.
   if [[ "$TAILSCALE_PROBE_MODE" == "passive" && "$SSH_HOST" =~ ^100\. ]]; then
+    BLOCKED=$((BLOCKED+1))
     printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
       "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "machine_target_is_tailscale_ip"
     continue
@@ -228,11 +231,13 @@ echo "MTIME=$MTIME"
   if [[ $RC -ne 0 ]]; then
     REASON="$(_classify_ssh_error "$ERR")"
     if [[ "$REASON" == "tailscale_interactive_auth_required" || "$REASON" == "machine_target_is_tailscale_ip" ]]; then
+      BLOCKED=$((BLOCKED+1))
       printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
         "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "$REASON"
       continue
     fi
     if [[ "$TARGET_POLICY" == "lan_first" ]] && _is_contextual_off_lan_block "$SSH_HOST" "$REASON"; then
+      BLOCKED=$((BLOCKED+1))
       printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
         "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "off_lan_connectivity_context"
       continue
@@ -290,4 +295,8 @@ echo "MTIME=$MTIME"
 done <<< "$TARGET_LINES"
 
 echo
-echo "summary: $TOTAL targets | $OK ok | $DEGRADED degraded"
+echo "summary: $TOTAL targets | $OK ok | $DEGRADED degraded | $BLOCKED context_blocked"
+if [[ $BLOCKED -gt 0 ]]; then
+  echo "note: context_blocked targets are present in the canonical inventory, but freshness proof is unavailable from the current network/auth context."
+  echo "hint: rerun from a LAN-eligible host or an approved Tailscale-authenticated context to prove freshness."
+fi
