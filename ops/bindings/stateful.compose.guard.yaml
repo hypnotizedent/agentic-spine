@@ -1,0 +1,154 @@
+status: authoritative
+owner: "@ronny"
+last_verified: 2026-03-08
+scope: stateful-compose-destructive-guard
+version: 1
+
+defaults:
+  break_glass_phrase: "STATEFUL_BREAK_GLASS_ACK_20260308"
+  destructive_down_requires_break_glass: true
+  preflight_fail_requires_break_glass: true
+
+targets:
+  finance-stack:
+    stacks:
+      finance:
+        stateful: true
+        classification: critical
+        reason: "Firefly, Ghostfolio, Paperless, and shared Postgres state live under /mnt/data/finance."
+        proof_refs:
+          - backup.status
+          - finance.backup.status
+          - docs/archive/governance/FINANCE_STACK_BACKUP_RESTORE.md
+        guard_paths:
+          - path: /mnt/data/finance/postgres/base
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Primary Postgres cluster contents"
+          - path: /mnt/data/finance/paperless/media
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Paperless document media payload"
+      vouchervault:
+        stateful: true
+        classification: important
+        reason: "VoucherVault persists application data and must not be casually torn down."
+        guard_paths:
+          - path: /opt/stacks/vouchervault
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "VoucherVault stack root"
+
+  mint-data:
+    stacks:
+      mint-data:
+        stateful: true
+        classification: critical
+        reason: "Mint data plane stores PostgreSQL, MinIO, and Redis state under /mnt/data/mint-data."
+        proof_refs:
+          - backup.status
+          - ops/bindings/mint.storage.guard.policy.yaml
+        guard_paths:
+          - path: /mnt/data/mint-data/postgres/base
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Mint PostgreSQL cluster contents"
+          - path: /mnt/data/mint-data/minio/.minio.sys
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "MinIO metadata root"
+          - path: /mnt/data/mint-data/minio/client-assets
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Mint object payload root"
+          - path: /mnt/data/mint-data/redis
+            type: dir
+            require_exists: true
+            require_nonempty: false
+            description: "Redis append-only storage root"
+
+  communications-stack:
+    stacks:
+      communications-stack:
+        stateful: true
+        classification: important
+        reason: "Communications stack holds Stalwart and Mail-archiver persistent state."
+        proof_refs:
+          - backup.status
+          - docs/archive/governance/STALWART_BACKUP_RESTORE.md
+        guard_paths:
+          - path: /srv/mail-archiver/postgres-data/base
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Mail-archiver PostgreSQL cluster contents"
+          - path: /var/lib/docker/volumes/communications-stack_stalwart-data/_data
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Stalwart named-volume state"
+      mail-archiver:
+        stateful: true
+        classification: important
+        reason: "Mail-archiver data lives inside the communications-stack compose project."
+        guard_paths:
+          - path: /srv/mail-archiver/postgres-data/base
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Mail-archiver PostgreSQL cluster contents"
+
+  infra-core:
+    stacks:
+      vaultwarden:
+        stateful: true
+        classification: critical
+        reason: "Vaultwarden stores credential vault data under ./vw-data."
+        proof_refs:
+          - backup.status
+        guard_paths:
+          - path: /opt/stacks/vaultwarden/vw-data
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Vaultwarden persisted vault data"
+      secrets:
+        stateful: true
+        classification: critical
+        reason: "Infisical stores its PostgreSQL state in Docker local volume secrets_pg_data."
+        proof_refs:
+          - backup.status
+          - docs/archive/governance/INFISICAL_RESTORE_DRILL.md
+        guard_paths:
+          - path: /var/lib/docker/volumes/secrets_pg_data/_data/base
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Infisical PostgreSQL cluster contents"
+
+  dev-tools:
+    stacks:
+      gitea:
+        stateful: true
+        classification: critical
+        reason: "Gitea stores application and PostgreSQL state in Docker local volumes."
+        proof_refs:
+          - backup.status
+          - docs/archive/governance/GITEA_BACKUP_RESTORE.md
+        guard_paths:
+          - path: /var/lib/docker/volumes/gitea_gitea_data/_data
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Gitea application data volume"
+          - path: /var/lib/docker/volumes/gitea_gitea_postgres/_data/base
+            type: dir
+            require_exists: true
+            require_nonempty: true
+            description: "Gitea PostgreSQL cluster contents"
