@@ -28424,38 +28424,42 @@ gaps:
   notes: Filed via gaps.file at 2026-03-08T00:39:18Z
   parent_loop: LOOP-MINT-SHIPPING-PAYMENT-MONEY-TRACE-HARDENING-20260308
 - id: GAP-OP-1512
-  title: Infisical folder /spine/services/auth does not exist - auth secrets stored
-    in .env file as workaround
+  title: Auth runtime on mint-apps still consumes .env instead of Infisical-backed
+    injection
   discovered_by: auth-productionization-e2e
   discovered_at: '2026-03-08'
   type: missing-entry
   classification: missing-entry
-  doc: "Auth secrets rotation complete 2026-03-08, but Infisical migration blocked\
-    \ by API OAuth requirement.\n\nCURRENT STATE:\n- All 5 auth secrets ROTATED after\
-    \ leak discovery in completion receipt\n- Postgres password ROTATED (shared mint\
-    \ user credential)\n- Auth service HEALTHY on mint-apps:4300 with rotated secrets\n\
-    - Secrets stored in /opt/stacks/mint-apps/.env (URL-encoded postgres password)\n\
-    - Receipt redacted: mint-modules commit 53bce67\n\nBLOCKER:\n- Infisical API folder\
-    \ creation requires browser OAuth (returns Authentik redirect)\n- CLI cannot create\
-    \ /spine/services/auth folder programmatically\n- Attempted: infisical-agent.sh\
-    \ set, raw CLI, API curl - all blocked\n\nMANUAL STEPS TO COMPLETE CANONICALIZATION:\n\
-    1. Access Infisical web UI at https://secrets.ronny.works\n2. Navigate to infrastructure\
-    \ project → prod environment → /spine/services/\n3. Create folder 'auth'\n4. Add\
-    \ 5 secrets to /spine/services/auth:\n   - AUTH_DATABASE_URL (current rotated\
-    \ value from mint-apps .env)\n   - AUTH_API_KEY\n   - CUSTOMER_JWT_SECRET\n  \
-    \ - ADMIN_JWT_SECRET\n   - EMPLOYEE_JWT_SECRET\n5. Update mint-apps docker-compose\
-    \ to use: infisical run -- docker compose up -d auth\n6. Test auth health + customer\
-    \ login still works\n7. Remove auth secrets from /opt/stacks/mint-apps/.env\n\
-    8. Close this gap with evidence\n\nSECURITY POSTURE: IMPROVED (rotated secrets,\
-    \ redacted leak, but not yet fully canonical)\n"
-  description: 'Infisical folder /spine/services/auth does not exist - auth secrets
-    stored in .env file as workaround
+  doc: "Auth secrets rotation complete 2026-03-08. Follow-up verification proved\
+    \ the canonical CLI path works and the namespace now exists.\n\nCURRENT STATE:\n\
+    - All 5 auth secrets ROTATED after leak discovery in completion receipt\n- Postgres\
+    \ password ROTATED (shared mint user credential)\n- Auth service HEALTHY on mint-apps:4300\
+    \ with rotated secrets\n- Auth namespace exists in Infisical at infrastructure/prod\
+    \ /spine/services/auth\n- All 5 auth keys seeded there via CLI using universal-auth\
+    \ token + `infisical secrets folders create` + canonical agent writes\n- Runtime\
+    \ on mint-apps still loads auth secrets from /opt/stacks/mint-apps/.env\n- Receipt\
+    \ redacted: mint-modules commit 53bce67\n\nCORRECTION TO PRIOR CLAIM:\n- Browser\
+    \ OAuth / web UI was NOT required for folder creation\n- The failed terminal\
+    \ used the wrong surface (public OAuth-facing URL / wrong CLI path) and missed\
+    \ `infisical secrets folders create`\n- Canonical non-UI path is available via\
+    \ internal API URL from secrets.binding.yaml and universal-auth credentials\n\n\
+    REMAINING WORK TO CLOSE:\n1. Update mint-apps deploy/runtime to use Infisical-backed\
+    \ injection (`secrets.exec -- <ssh ... docker compose ...>` or equivalent governed\
+    \ path)\n2. Verify auth health + customer login still works with Infisical-backed\
+    \ runtime\n3. Remove AUTH_* keys from /opt/stacks/mint-apps/.env after proof\n\
+    4. Close this gap with evidence\n\nSECURITY POSTURE: IMPROVED (rotated secrets,\
+    \ leak redacted, namespace seeded). Remaining issue is runtime injection canonicalization,\
+    \ not folder creation.\n"
+  description: 'Auth runtime on mint-apps still consumes .env instead of Infisical-backed
+    injection. The canonical namespace /spine/services/auth now exists and contains
+    the 5 auth keys, but runtime has not yet switched off host .env.
 
     '
   severity: medium
   status: open
-  notes: 'PARTIAL FIX 2026-03-08: Secrets rotated, leak redacted, Infisical migration
-    blocked (OAuth). Runtime healthy but not canonical.'
+  notes: 'PARTIAL FIX 2026-03-08: Secrets rotated, leak redacted, /spine/services/auth
+    created via CLI, keys seeded via canonical agent. Remaining gap: mint-apps runtime
+    still .env-backed; no web UI required.'
   parent_loop: LOOP-AUTH-PRODUCTIONIZATION-E2E-20260308
 - id: GAP-OP-1513
   title: 'mail-archiver-backup.sh concurrent-run race condition: no lock mechanism
