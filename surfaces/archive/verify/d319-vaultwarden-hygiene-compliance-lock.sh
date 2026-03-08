@@ -3,16 +3,19 @@
 # D319: vaultwarden-hygiene-compliance-lock
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CANONICAL_HOSTS="$ROOT/ops/data/vaultwarden/canonical_hosts.yaml"
 FOLDER_TAXONOMY="$ROOT/ops/data/vaultwarden/folder_taxonomy.yaml"
 RECONCILE_RULES="$ROOT/ops/data/vaultwarden/reconcile_rules.yaml"
 RECOVERY_ACTIONS="$ROOT/ops/bindings/recovery.actions.yaml"
 BACKUP_INVENTORY="$ROOT/ops/bindings/backup.inventory.yaml"
 SERVICES_HEALTH="$ROOT/ops/bindings/services.health.yaml"
-BACKUP_RESTORE_DOC="$ROOT/docs/governance/VAULTWARDEN_BACKUP_RESTORE.md"
-HYGIENE_DOC="$ROOT/docs/governance/VAULTWARDEN_CANONICAL_HYGIENE.md"
-INFISICAL_CONTRACT="$ROOT/docs/governance/VAULTWARDEN_INFISICAL_CONTRACT.md"
+BACKUP_RESTORE_DOC="$ROOT/docs/archive/governance/VAULTWARDEN_BACKUP_RESTORE.md"
+HYGIENE_DOC="$ROOT/docs/archive/governance/VAULTWARDEN_CANONICAL_HYGIENE.md"
+INFISICAL_CONTRACT="$ROOT/docs/archive/governance/VAULTWARDEN_INFISICAL_CONTRACT.md"
+CLI_BOOTSTRAP="$ROOT/ops/plugins/vaultwarden/bin/vaultwarden-cli-auth-bootstrap"
+CLI_STATUS="$ROOT/ops/plugins/vaultwarden/bin/vaultwarden-cli-auth-status"
+CLI_PROXY_LIB="$ROOT/ops/plugins/vaultwarden/lib/proxy-session.sh"
 
 ERRORS=0
 err() {
@@ -39,6 +42,9 @@ need_file "$SERVICES_HEALTH"
 need_file "$BACKUP_RESTORE_DOC"
 need_file "$HYGIENE_DOC"
 need_file "$INFISICAL_CONTRACT"
+need_file "$CLI_BOOTSTRAP"
+need_file "$CLI_STATUS"
+need_file "$CLI_PROXY_LIB"
 
 if [[ "$ERRORS" -gt 0 ]]; then
   echo "D319 FAIL: $ERRORS precondition error(s)"
@@ -114,6 +120,17 @@ if [[ -d "$DRILL_DIR" ]]; then
 fi
 if [[ "$drill_found" -eq 0 ]]; then
   echo "  ADVISORY: no vaultwarden restore-drill receipt within ${DRILL_MAX_DAYS} days (check receipts/audits/infra/)" >&2
+fi
+
+# ── Check 8: Active CLI surfaces must not advertise raw bw->vault host auth ──
+if grep -Eq 'bw config server .*vault\.ronny\.works|bw config server .*vault-cli\.ronny\.works|Vaultwarden base URL for `bw` CLI|default: https://vault-cli\.ronny\.works' \
+  "$CLI_BOOTSTRAP" "$CLI_STATUS" "$CLI_PROXY_LIB"; then
+  err "Vaultwarden CLI surfaces still advertise a raw host endpoint instead of the local scope proxy"
+fi
+
+# ── Check 9: Proxy session must restore prior bw config ──
+if ! grep -q '_VW_PREV_BW_SERVER' "$CLI_PROXY_LIB"; then
+  err "proxy-session.sh missing prior bw server preservation"
 fi
 
 # ── Summary ──

@@ -26,6 +26,7 @@ _VW_PROXY_SCRIPT="$_VW_LIB_DIR/scope-proxy.py"
 _VW_PROXY_PID=""
 _VW_PROXY_PORT=""
 _VW_PROXY_OUTPUT=""
+_VW_PREV_BW_SERVER=""
 
 # Default: derive from services.health SSOT only; callers can override via env.
 _VW_SPINE_ROOT="$(cd "$_VW_LIB_DIR/../../../.." && pwd)"
@@ -112,6 +113,12 @@ vw_proxy_start() {
 
   [[ -n "$_VW_PROXY_PORT" ]] || { echo "STOP (2): could not determine proxy port" >&2; return 2; }
 
+  # Preserve the prior bw server config so proxy use does not leave the user's
+  # global CLI pinned to a dead localhost endpoint after the session ends.
+  if [[ -z "$_VW_PREV_BW_SERVER" ]]; then
+    _VW_PREV_BW_SERVER="$(bw config server 2>/dev/null | tail -n1 || true)"
+  fi
+
   # Configure bw to use the HTTPS proxy
   NODE_TLS_REJECT_UNAUTHORIZED=0 bw config server "https://127.0.0.1:${_VW_PROXY_PORT}" >/dev/null 2>&1
 
@@ -123,6 +130,10 @@ vw_proxy_stop() {
     kill "$_VW_PROXY_PID" 2>/dev/null || true
     wait "$_VW_PROXY_PID" 2>/dev/null || true
     _VW_PROXY_PID=""
+  fi
+  if [[ -n "$_VW_PREV_BW_SERVER" ]]; then
+    bw config server "$_VW_PREV_BW_SERVER" >/dev/null 2>&1 || true
+    _VW_PREV_BW_SERVER=""
   fi
   [[ -z "$_VW_PROXY_OUTPUT" ]] || rm -f "$_VW_PROXY_OUTPUT"
   _VW_PROXY_PORT=""
