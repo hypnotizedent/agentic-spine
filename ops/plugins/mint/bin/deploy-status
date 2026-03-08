@@ -19,6 +19,8 @@ SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
 COMPOSE_BINDING="$SPINE_ROOT/ops/bindings/docker.compose.targets.yaml"
 PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
@@ -51,11 +53,27 @@ for target in "${TARGETS[@]}"; do
   if [[ -n "$FILTER" && "$target" != "$FILTER" ]]; then continue; fi
   checked_targets=$((checked_targets + 1))
 
-  host="$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .host" "$SSH_BINDING" | head -n1)"
+  raw_host="$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .host" "$SSH_BINDING" | head -n1)"
   user="$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
-  [[ -n "$host" && "$host" != "null" ]] || { echo "$target: NOT FOUND in ssh.targets"; continue; }
+  port="$(yq -r ".ssh.targets[] | select(.id == \"$target\") | .port // 22" "$SSH_BINDING" | head -n1)"
+  [[ -n "$raw_host" && "$raw_host" != "null" ]] || { echo "$target: NOT FOUND in ssh.targets"; continue; }
 
-  echo "=== $target (${user}@${host}) ==="
+  resolve_result="$(ssh_resolve_host_with_fallback "$target" 2 || true)"
+  host="$(echo "$resolve_result" | awk '{print $1}')"
+  path_used="$(echo "$resolve_result" | awk '{print $2}')"
+  if [[ -z "$host" || "$path_used" == "unreachable" ]]; then
+    probe_result="$(ssh_resolve_probe_host "$target" || true)"
+    probe_host="$(echo "$probe_result" | awk '{print $1}')"
+    probe_path="$(echo "$probe_result" | awk '{print $2}')"
+    if [[ -n "$probe_host" && "$probe_path" != "unreachable" ]]; then
+      host="$probe_host"
+      path_used="$probe_path"
+    else
+      host="$raw_host"
+    fi
+  fi
+
+  echo "=== $target (${user}@${host} via=${path_used:-direct}) ==="
   stack_count="$(yq -r ".targets.\"$target\".stacks | length" "$COMPOSE_BINDING")"
   if [[ "$stack_count" == "null" || -z "$stack_count" || "$stack_count" == "0" ]]; then
     echo "STATUS: NO STACKS DECLARED IN BINDING"
@@ -70,7 +88,7 @@ for target in "${TARGETS[@]}"; do
     [[ -n "$stack_path" && "$stack_path" != "null" ]] || continue
 
     set +e
-    out="$(ssh "${SSH_OPTS[@]}" "${user}@${host}" \
+    out="$(ssh "${SSH_OPTS[@]}" -p "$port" "${user}@${host}" \
       "if [ -d \"$stack_path\" ]; then cd \"$stack_path\" && docker compose ps -a --format '{{.Name}}\t{{.State}}\t{{.Status}}\t{{.Image}}' 2>/dev/null; else echo '__STACK_PATH_MISSING__'; fi" 2>&1)"
     rc=$?
     set -e

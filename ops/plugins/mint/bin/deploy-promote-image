@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+# deploy-promote-image - Promote one prebuilt mint module image onto mint-apps.
+#
+# Canonical fast-path deploy lane:
+#   - no source sync
+#   - no on-host build
+#   - one module, one immutable tag
+#   - compose contract staged from repo to host
+#   - host pulls image and restarts only the target service
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+MINT_REPO="${MINT_REPO:-/Users/ronnyworks/code/mint-modules}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+command -v scp >/dev/null 2>&1 || stop "missing dependency: scp"
+
+[[ -d "$MINT_REPO" ]] || stop "mint-modules repo not found at $MINT_REPO"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+
+MODULE=""
+TAG=""
+RUN_PROOF=1
+DRY_RUN=0
+RUN_PUBLIC_CANARY=1
+
+usage() {
+  cat <<'USAGE'
+deploy-promote-image - Promote one prebuilt mint module image to mint-apps
+
+Usage:
+  deploy-promote-image --modules <module> --tag <immutable-tag> [--skip-proof] [--skip-public-canary] [--dry-run]
+
+Examples:
+  deploy-promote-image --modules pricing --tag fb11923
+  deploy-promote-image --modules suppliers --tag 2d40d62 --dry-run
+
+Notes:
+  - Single-module only.
+  - Stages the canonical compose file for the targeted runtime surface.
+  - Pulls a prebuilt image; never builds on mint-apps.
+  - Public-flow modules run ingress proof + targeted public canaries by default.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --modules)
+      MODULE="${2:-}"
+      shift 2
+      ;;
+    --tag)
+      TAG="${2:-}"
+      shift 2
+      ;;
+    --skip-proof)
+      RUN_PROOF=0
+      shift
+      ;;
+    --skip-public-canary)
+      RUN_PUBLIC_CANARY=0
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      stop "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$MODULE" ]] || stop "--modules is required"
+[[ -n "$TAG" ]] || stop "--tag is required"
+if [[ "$MODULE" == *","* ]]; then
+  stop "multi-module promotion rejected. Use --modules <single-module>."
+fi
+
+resolve_result="$(ssh_resolve_host_with_fallback "mint-apps" 2)" || true
+MINT_APPS_HOST="$(echo "$resolve_result" | awk '{print $1}')"
+MINT_APPS_PATH_USED="$(echo "$resolve_result" | awk '{print $2}')"
+MINT_APPS_USER="$(ssh_resolve_user "mint-apps" "ubuntu")"
+MINT_APPS_PORT="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .port // 22' "$SSH_BINDING" | head -n1)"
+[[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" && "$MINT_APPS_PATH_USED" != "unreachable" ]] || stop "mint-apps ssh target unreachable"
+
+REMOTE_STACK_ROOT="/opt/stacks/mint-apps"
+REMOTE_ENV_FILE="${REMOTE_STACK_ROOT}/.env"
+
+SSH_OPTS=(-o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+SCP_OPTS=(-o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR -P "$MINT_APPS_PORT")
+
+module_requires() {
+  case "$1" in
+    artwork)
+      echo "FILES_API_KEY MINIO_ACCESS_KEY MINIO_SECRET_KEY DATABASE_URL"
+      ;;
+    order-intake)
+      echo "ORDER_INTAKE_API_KEY"
+      ;;
+    quote-page)
+      echo "MINIO_ACCESS_KEY MINIO_SECRET_KEY RESEND_API_KEY"
+      ;;
+    finance-adapter)
+      echo "FINANCE_ADAPTER_API_KEY DATABASE_URL FIREFLY_API_URL FIREFLY_PAT"
+      ;;
+    pricing)
+      echo "PRICING_API_KEY PRICING_DATABASE_URL"
+      ;;
+    suppliers)
+      echo "SUPPLIERS_API_KEY SUPPLIERS_DATABASE_URL"
+      ;;
+    shipping)
+      echo "SHIPPING_API_KEY SHIPPING_DATABASE_URL SHIPPING_EASYPOST_API_KEY SHIPPING_EASYPOST_WEBHOOK_SECRET SHIPPING_FINANCE_ADAPTER_URL SHIPPING_FINANCE_ADAPTER_API_KEY"
+      ;;
+    payment)
+      echo "PAYMENT_API_KEY PAYMENT_DATABASE_URL PAYMENT_STRIPE_SECRET_KEY PAYMENT_STRIPE_WEBHOOK_SECRET PAYMENT_JWT_SECRET"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+MODULE_COMPOSE_SRC=""
+REMOTE_COMPOSE_DIR=""
+REMOTE_COMPOSE_FILE=""
+COMPOSE_SERVICE=""
+TAG_VAR=""
+IMAGE_NAME=""
+
+case "$MODULE" in
+  artwork)
+    MODULE_COMPOSE_SRC="$MINT_REPO/docker-compose.yml"
+    REMOTE_COMPOSE_DIR="$REMOTE_STACK_ROOT"
+    REMOTE_COMPOSE_FILE="$REMOTE_STACK_ROOT/docker-compose.yml"
+    COMPOSE_SERVICE="files-api"
+    TAG_VAR="ARTWORK_TAG"
+    IMAGE_NAME="artwork"
+    ;;
+  quote-page)
+    MODULE_COMPOSE_SRC="$MINT_REPO/docker-compose.yml"
+    REMOTE_COMPOSE_DIR="$REMOTE_STACK_ROOT"
+    REMOTE_COMPOSE_FILE="$REMOTE_STACK_ROOT/docker-compose.yml"
+    COMPOSE_SERVICE="quote-page"
+    TAG_VAR="QUOTE_PAGE_TAG"
+    IMAGE_NAME="quote-page"
+    ;;
+  order-intake)
+    MODULE_COMPOSE_SRC="$MINT_REPO/docker-compose.yml"
+    REMOTE_COMPOSE_DIR="$REMOTE_STACK_ROOT"
+    REMOTE_COMPOSE_FILE="$REMOTE_STACK_ROOT/docker-compose.yml"
+    COMPOSE_SERVICE="order-intake"
+    TAG_VAR="ORDER_INTAKE_TAG"
+    IMAGE_NAME="order-intake"
+    ;;
+  finance-adapter)
+    MODULE_COMPOSE_SRC="$MINT_REPO/docker-compose.yml"
+    REMOTE_COMPOSE_DIR="$REMOTE_STACK_ROOT"
+    REMOTE_COMPOSE_FILE="$REMOTE_STACK_ROOT/docker-compose.yml"
+    COMPOSE_SERVICE="finance-adapter"
+    TAG_VAR="FINANCE_ADAPTER_TAG"
+    IMAGE_NAME="finance-adapter"
+    ;;
+  pricing)
+    MODULE_COMPOSE_SRC="$MINT_REPO/pricing/docker-compose.yml"
+    REMOTE_COMPOSE_DIR="$REMOTE_STACK_ROOT/pricing"
+    REMOTE_COMPOSE_FILE="$REMOTE_STACK_ROOT/pricing/docker-compose.yml"
+    COMPOSE_SERVICE="pricing"
+    TAG_VAR="PRICING_TAG"
+    IMAGE_NAME="pricing"
+    ;;
+  suppliers)
+    MODULE_COMPOSE_SRC="$MINT_REPO/suppliers/docker-compose.yml"
+    REMOTE_COMPOSE_DIR="$REMOTE_STACK_ROOT/suppliers"
+    REMOTE_COMPOSE_FILE="$REMOTE_STACK_ROOT/suppliers/docker-compose.yml"
+    COMPOSE_SERVICE="suppliers"
+    TAG_VAR="SUPPLIERS_TAG"
+    IMAGE_NAME="suppliers"
+    ;;
+  shipping)
+    MODULE_COMPOSE_SRC="$MINT_REPO/shipping/docker-compose.yml"
+    REMOTE_COMPOSE_DIR="$REMOTE_STACK_ROOT/shipping"
+    REMOTE_COMPOSE_FILE="$REMOTE_STACK_ROOT/shipping/docker-compose.yml"
+    COMPOSE_SERVICE="shipping"
+    TAG_VAR="SHIPPING_TAG"
+    IMAGE_NAME="shipping"
+    ;;
+  payment)
+    MODULE_COMPOSE_SRC="$MINT_REPO/payment/docker-compose.yml"
+    REMOTE_COMPOSE_DIR="$REMOTE_STACK_ROOT/payment"
+    REMOTE_COMPOSE_FILE="$REMOTE_STACK_ROOT/payment/docker-compose.yml"
+    COMPOSE_SERVICE="payment"
+    TAG_VAR="PAYMENT_TAG"
+    IMAGE_NAME="payment"
+    ;;
+  *)
+    stop "unsupported module name: $MODULE"
+    ;;
+esac
+
+[[ -f "$MODULE_COMPOSE_SRC" ]] || stop "missing local compose contract: $MODULE_COMPOSE_SRC"
+
+echo "mint.deploy.promote"
+echo "mint_repo: $MINT_REPO"
+echo "module: $MODULE"
+echo "tag: $TAG"
+echo "service: $COMPOSE_SERVICE"
+echo "compose_src: $MODULE_COMPOSE_SRC"
+echo "target: ${MINT_APPS_USER}@${MINT_APPS_HOST}:${REMOTE_COMPOSE_FILE}"
+echo "target_resolution: ${MINT_APPS_PATH_USED}"
+echo
+
+echo "[0/4] Remote preflight..."
+ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "test -f '${REMOTE_ENV_FILE}' && test -d '${REMOTE_COMPOSE_DIR}'" \
+  || stop "missing remote env or compose dir for $MODULE"
+
+missing_env=()
+reqs="$(module_requires "$MODULE")"
+if [[ -n "$reqs" ]]; then
+  for key in $reqs; do
+    if ! ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+      "awk -F= -v k='${key}' '\$1==k && \$2!=\"\"{found=1} END{exit found?0:1}' '${REMOTE_ENV_FILE}'"; then
+      missing_env+=("${MODULE}:${key}")
+    fi
+  done
+fi
+if [[ "${#missing_env[@]}" -gt 0 ]]; then
+  printf "missing env keys for promotion:\n" >&2
+  printf "  - %s\n" "${missing_env[@]}" >&2
+  stop "env preflight failed"
+fi
+
+IMAGE_BASE="$(
+  ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "bash -s -- $(printf "%q" "$REMOTE_ENV_FILE")" <<'EOS'
+env_file="$1"
+awk -F= '$1=="MINT_IMAGE_BASE"{print substr($0, index($0, "=") + 1); exit}' "$env_file"
+EOS
+)"
+if [[ -z "$IMAGE_BASE" ]]; then
+  IMAGE_BASE="ghcr.io/hypnotizedent"
+fi
+IMAGE_REF="${IMAGE_BASE}/${IMAGE_NAME}:${TAG}"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "dry_run: true"
+  echo "would_pull: $IMAGE_REF"
+  echo "would_stage: $MODULE_COMPOSE_SRC -> ${REMOTE_COMPOSE_FILE}"
+  echo "would_set_tag: ${TAG_VAR}=${TAG} in ${REMOTE_ENV_FILE}"
+  echo "would_up: cd ${REMOTE_COMPOSE_DIR} && docker compose --env-file ${REMOTE_ENV_FILE} up -d --no-deps ${COMPOSE_SERVICE}"
+  if [[ "$RUN_PROOF" -eq 1 ]]; then
+    echo "would_prove: mint.deploy.status + mint.modules.health + mint.runtime.proof"
+    if [[ "$RUN_PUBLIC_CANARY" -eq 1 ]]; then
+      case "$MODULE" in
+        artwork|quote-page)
+          echo "would_prove_public: mint.public.ingress.proof + mint.public.canary quote"
+          ;;
+        payment)
+          echo "would_prove_public: mint.public.ingress.proof + mint.public.canary payment"
+          ;;
+        shipping)
+          echo "would_prove_public: mint.public.ingress.proof + mint.public.canary shipping"
+          ;;
+      esac
+    fi
+  else
+    echo "would_prove: mint.deploy.status + mint.modules.health"
+  fi
+  exit 0
+fi
+
+echo "[1/4] Pull immutable image..."
+ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "docker pull '${IMAGE_REF}'" \
+  || stop "image pull failed for ${IMAGE_REF}"
+
+echo "[2/4] Stage compose contract..."
+scp "${SCP_OPTS[@]}" "$MODULE_COMPOSE_SRC" "${MINT_APPS_USER}@${MINT_APPS_HOST}:${REMOTE_COMPOSE_FILE}" \
+  || stop "compose stage failed for $MODULE"
+
+ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+  "cd '${REMOTE_COMPOSE_DIR}' && docker compose --env-file '${REMOTE_ENV_FILE}' config --services >/dev/null" \
+  || stop "staged compose failed config validation for $MODULE"
+
+OLD_TAG="$(
+  ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "bash -s -- $(printf "%q" "$REMOTE_ENV_FILE") $(printf "%q" "$TAG_VAR")" <<'EOS'
+env_file="$1"
+key="$2"
+awk -F= -v k="$key" '$1==k{print substr($0, index($0, "=") + 1); exit}' "$env_file"
+EOS
+)"
+
+set_remote_tag() {
+  local value="$1"
+  ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+    "bash -s -- $(printf "%q" "$REMOTE_ENV_FILE") $(printf "%q" "$TAG_VAR") $(printf "%q" "$value")" <<'EOS'
+env_file="$1"
+key="$2"
+value="$3"
+tmp="${env_file}.tmp.$$"
+awk -F= -v k="$key" -v v="$value" 'BEGIN{done=0} $1==k{print k "=" v; done=1; next} {print} END{if(!done) print k "=" v}' "$env_file" > "$tmp"
+mv "$tmp" "$env_file"
+EOS
+}
+
+delete_remote_tag() {
+  ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+    "bash -s -- $(printf "%q" "$REMOTE_ENV_FILE") $(printf "%q" "$TAG_VAR")" <<'EOS'
+env_file="$1"
+key="$2"
+tmp="${env_file}.tmp.$$"
+awk -F= -v k="$key" '$1!=k{print}' "$env_file" > "$tmp"
+mv "$tmp" "$env_file"
+EOS
+}
+
+compose_up_target() {
+  ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+    "cd '${REMOTE_COMPOSE_DIR}' && docker compose --env-file '${REMOTE_ENV_FILE}' up -d --no-deps '${COMPOSE_SERVICE}'"
+}
+
+compose_rm_target() {
+  ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" \
+    "cd '${REMOTE_COMPOSE_DIR}' && docker compose --env-file '${REMOTE_ENV_FILE}' rm -sf '${COMPOSE_SERVICE}' >/dev/null 2>&1 || true; docker rm -f '${COMPOSE_SERVICE}' >/dev/null 2>&1 || true"
+}
+
+echo "[3/4] Update tag in authoritative env..."
+set_remote_tag "$TAG"
+
+echo "[4/4] Restart target service (no deps, no build)..."
+set +e
+deploy_output="$(compose_up_target 2>&1)"
+deploy_rc=$?
+set -e
+if [[ -n "$deploy_output" ]]; then
+  printf '%s\n' "$deploy_output"
+fi
+
+if [[ "$deploy_rc" -ne 0 ]] && grep -Fq "container name \"/${COMPOSE_SERVICE}\" is already in use" <<<"$deploy_output"; then
+  echo "info: compose recreate hit fixed container_name conflict; removing existing service container and retrying..."
+  compose_rm_target
+  set +e
+  deploy_output="$(compose_up_target 2>&1)"
+  deploy_rc=$?
+  set -e
+  if [[ -n "$deploy_output" ]]; then
+    printf '%s\n' "$deploy_output"
+  fi
+fi
+
+if [[ "$deploy_rc" -ne 0 ]]; then
+  echo "warn: deploy failed for ${MODULE}; restoring previous tag value" >&2
+  if [[ -n "$OLD_TAG" ]]; then
+    set_remote_tag "$OLD_TAG"
+  else
+    delete_remote_tag
+  fi
+  stop "compose up failed for $MODULE"
+fi
+
+echo "[post] Status + proof..."
+"$SPINE_ROOT/ops/plugins/mint/bin/deploy-status" || true
+"$SPINE_ROOT/ops/plugins/mint/bin/modules-health" || true
+if [[ "$RUN_PROOF" -eq 1 ]]; then
+  "$SPINE_ROOT/ops/plugins/mint/bin/runtime-proof"
+  if [[ "$RUN_PUBLIC_CANARY" -eq 1 ]]; then
+    case "$MODULE" in
+      artwork|quote-page)
+        "$SPINE_ROOT/ops/plugins/mint/bin/public-ingress-proof"
+        "$SPINE_ROOT/ops/plugins/mint/bin/public-canary" quote
+        ;;
+      payment)
+        "$SPINE_ROOT/ops/plugins/mint/bin/public-ingress-proof"
+        "$SPINE_ROOT/ops/plugins/mint/bin/public-canary" payment
+        ;;
+      shipping)
+        "$SPINE_ROOT/ops/plugins/mint/bin/public-ingress-proof"
+        "$SPINE_ROOT/ops/plugins/mint/bin/public-canary" shipping
+        ;;
+    esac
+  fi
+fi
+
+echo
+echo "status: OK"
+echo "note: promoted_image=${IMAGE_REF} module=${MODULE}"
+exit 0

@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# public-providers-reconcile - Reconcile live provider webhook registrations to the canonical Mint ingress contract.
+#
+# Mutating actions:
+# - Verifies Stripe payment webhook endpoint exists at canonical URL with required events
+# - Re-points EasyPost webhook endpoint to canonical URL when drift is found
+#
+# Usage:
+#   public-providers-reconcile
+#   public-providers-reconcile --dry-run
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SECRETS_EXEC="$SPINE_ROOT/ops/plugins/secrets/bin/secrets-exec"
+CONTRACT="$SPINE_ROOT/ops/bindings/mint.public.ingress.contract.yaml"
+
+DRY_RUN=0
+if [[ "${1:-}" == "--dry-run" ]]; then
+  DRY_RUN=1
+fi
+
+stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+[[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+read_contract_value() {
+  local provider="$1"
+  local field="$2"
+  python3 - "$CONTRACT" "$provider" "$field" <<'PY'
+import sys, yaml
+contract_path, provider_name, field_name = sys.argv[1:4]
+with open(contract_path, "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+for row in data.get("flows", []) or []:
+    if str(row.get("provider_name", "")).strip() == provider_name:
+        if field_name == "provider_expected_events":
+            print(",".join(str(x) for x in (row.get(field_name) or [])))
+        else:
+            print(str(row.get(field_name, "")).strip())
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+STRIPE_URL="$(read_contract_value stripe public_surface)"
+STRIPE_EVENTS="$(read_contract_value stripe provider_expected_events)"
+EASYPOST_URL="$(read_contract_value easypost public_surface)"
+
+echo "mint.public.providers.reconcile"
+echo "stripe_url: $STRIPE_URL"
+echo "easypost_url: $EASYPOST_URL"
+
+stripe_json="$(curl -sS -u "${PAYMENT_STRIPE_SECRET_KEY}:" "https://api.stripe.com/v1/webhook_endpoints?limit=100")"
+jq -e '.data | type == "array"' >/dev/null 2>&1 <<<"$stripe_json" || stop "unexpected Stripe webhook response"
+
+stripe_match_id="$(jq -r --arg url "$STRIPE_URL" '.data[]? | select(.url == $url) | .id' <<<"$stripe_json" | head -n1)"
+if [[ -z "$stripe_match_id" ]]; then
+  stop "Stripe webhook endpoint missing canonical url=$STRIPE_URL"
+fi
+
+stripe_missing_event=0
+IFS=',' read -r -a stripe_expected_events <<< "$STRIPE_EVENTS"
+for event_name in "${stripe_expected_events[@]}"; do
+  [[ -n "$event_name" ]] || continue
+  if ! jq -e --arg id "$stripe_match_id" --arg event "$event_name" '.data[]? | select(.id == $id) | .enabled_events[]? | select(. == $event)' >/dev/null 2>&1 <<<"$stripe_json"; then
+    stripe_missing_event=1
+    break
+  fi
+done
+if [[ "$stripe_missing_event" -eq 1 ]]; then
+  stop "Stripe webhook endpoint id=$stripe_match_id is missing required events"
+fi
+echo "stripe: OK id=$stripe_match_id"
+
+[[ -n "${SHIPPING_EASYPOST_WEBHOOK_SECRET:-}" ]] || stop "SHIPPING_EASYPOST_WEBHOOK_SECRET missing"
+
+list_easypost_webhooks() {
+  curl -sS -u "${SHIPPING_EASYPOST_API_KEY}:" "https://api.easypost.com/v2/webhooks"
+}
+
+easypost_json="$(list_easypost_webhooks)"
+jq -e '.webhooks | type == "array"' >/dev/null 2>&1 <<<"$easypost_json" || stop "unexpected EasyPost webhook response"
+
+canonical_hook_id="$(jq -r --arg url "$EASYPOST_URL" '
+  .webhooks[]?
+  | select((.disabled_at == null or .disabled_at == "") and .url == $url)
+  | .id
+' <<<"$easypost_json" | head -n1)"
+active_noncanonical_ids="$(jq -r --arg url "$EASYPOST_URL" '
+  .webhooks[]?
+  | select(.disabled_at == null or .disabled_at == "")
+  | select(.url != $url)
+  | .id
+' <<<"$easypost_json")"
+active_noncanonical_count="$(jq -r --arg url "$EASYPOST_URL" '
+  [.webhooks[]?
+    | select(.disabled_at == null or .disabled_at == "")
+    | select(.url != $url)
+  ] | length
+' <<<"$easypost_json")"
+
+if [[ -n "$canonical_hook_id" && "$active_noncanonical_count" == "0" ]]; then
+  echo "easypost: OK id=$canonical_hook_id"
+  echo "status: OK"
+  exit 0
+fi
+
+if [[ -z "$canonical_hook_id" && "$active_noncanonical_count" -gt 1 ]]; then
+  stop "EasyPost webhook drift is ambiguous; expected at most 1 active non-canonical hook, found $active_noncanonical_count"
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "dry_run: true"
+  if [[ -z "$canonical_hook_id" ]]; then
+    echo "would_create: url=$EASYPOST_URL"
+  fi
+  while IFS= read -r hook_id; do
+    [[ -n "$hook_id" ]] || continue
+    echo "would_delete: hook_id=$hook_id"
+  done <<< "$active_noncanonical_ids"
+  exit 0
+fi
+
+if [[ -z "$canonical_hook_id" ]]; then
+  create_payload="$(jq -n \
+    --arg url "$EASYPOST_URL" \
+    --arg secret "$SHIPPING_EASYPOST_WEBHOOK_SECRET" \
+    '{webhook: {url: $url, webhook_secret: $secret}}'
+  )"
+  create_json="$(curl -sS -u "${SHIPPING_EASYPOST_API_KEY}:" \
+    -H 'Content-Type: application/json' \
+    -X POST "https://api.easypost.com/v2/webhooks" \
+    -d "$create_payload")" || stop "failed to create EasyPost canonical webhook"
+  canonical_hook_id="$(jq -r '.id // ""' <<<"$create_json")"
+  [[ -n "$canonical_hook_id" ]] || stop "EasyPost webhook creation did not return an id"
+fi
+
+while IFS= read -r hook_id; do
+  [[ -n "$hook_id" ]] || continue
+  curl -sS -u "${SHIPPING_EASYPOST_API_KEY}:" \
+    -X DELETE "https://api.easypost.com/v2/webhooks/${hook_id}" >/dev/null \
+    || stop "failed to delete stale EasyPost webhook id=$hook_id"
+done <<< "$active_noncanonical_ids"
+
+post_reconcile_json="$(list_easypost_webhooks)"
+post_canonical_id="$(jq -r --arg url "$EASYPOST_URL" '
+  .webhooks[]?
+  | select((.disabled_at == null or .disabled_at == "") and .url == $url)
+  | .id
+' <<<"$post_reconcile_json" | head -n1)"
+post_noncanonical_count="$(jq -r --arg url "$EASYPOST_URL" '
+  [.webhooks[]?
+    | select(.disabled_at == null or .disabled_at == "")
+    | select(.url != $url)
+  ] | length
+' <<<"$post_reconcile_json")"
+
+[[ -n "$post_canonical_id" ]] || stop "EasyPost webhook reconcile did not converge to canonical URL"
+[[ "$post_noncanonical_count" == "0" ]] || stop "EasyPost webhook reconcile left $post_noncanonical_count active non-canonical hooks"
+
+echo "easypost: OK id=$post_canonical_id"
+echo "status: OK"
