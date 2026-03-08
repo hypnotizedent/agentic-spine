@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+# provider-canary - Real provider canaries for Mint shipping/payment.
+#
+# shipping:
+#   - live EasyPost rate quote
+#   - live label purchase
+#   - immediate refund request
+#   - history verification
+#
+# payment:
+#   - live Stripe checkout session creation
+#   - signed webhook delivery using live webhook secret
+#   - direct payment_records status verification
+#
+# Receipts are written under ~/code/.runtime/mint/receipts.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
+RECEIPTS_DIR="${RECEIPTS_DIR:-$HOME/code/.runtime/mint/receipts}"
+
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  provider-canary shipping [--confirm-live-label]
+  provider-canary payment
+  provider-canary all [--confirm-live-label]
+
+Notes:
+  - shipping buys a real EasyPost label in production mode, then immediately requests a refund.
+  - shipping is guarded; use --confirm-live-label or MINT_CANARY_CONFIRM_LIVE_LABEL=1.
+  - payment creates a real Stripe checkout session, then delivers a signed checkout.session.expired webhook.
+USAGE
+}
+
+stop() {
+  echo "STOP (2): $*" >&2
+  exit 2
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || stop "missing dependency: $1"
+}
+
+require_cmd yq
+require_cmd ssh
+require_cmd curl
+require_cmd jq
+require_cmd openssl
+require_cmd python3
+
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$PROBE_BINDING" ]] || stop "missing binding: $PROBE_BINDING"
+
+APP_TARGET_ID="$(yq -r '.targets.app_plane.ssh_target // ""' "$PROBE_BINDING")"
+[[ -n "$APP_TARGET_ID" && "$APP_TARGET_ID" != "null" ]] || stop "missing app plane target"
+
+APP_USER="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
+[[ -n "$APP_USER" && "$APP_USER" != "null" ]] || stop "missing app plane user"
+
+IFS=' ' read -r APP_PROBE_HOST APP_PROBE_PATH <<< "$(ssh_resolve_probe_host "$APP_TARGET_ID" || true)"
+[[ -n "$APP_PROBE_HOST" ]] || stop "unable to resolve probe host for $APP_TARGET_ID"
+
+SHIPPING_PORT="$(yq -r '.targets.app_plane.http_checks[] | select(.id == "shipping") | .port // ""' "$PROBE_BINDING" | head -n1)"
+PAYMENT_PORT="$(yq -r '.targets.app_plane.http_checks[] | select(.id == "payment") | .port // ""' "$PROBE_BINDING" | head -n1)"
+[[ -n "$SHIPPING_PORT" ]] || stop "missing shipping port"
+[[ -n "$PAYMENT_PORT" ]] || stop "missing payment port"
+
+SSH_OPTS=(-o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+
+mkdir -p "$RECEIPTS_DIR"
+
+container_env_value() {
+  local container="$1" key="$2"
+  ssh "${SSH_OPTS[@]}" "${APP_USER}@${APP_PROBE_HOST}" \
+    "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= -v K='$key' '\$1==K{sub(\$1\"=\",\"\"); print; exit}'"
+}
+
+app_http_url() {
+  local port="$1" route="$2"
+  printf 'http://%s:%s%s\n' "$APP_PROBE_HOST" "$port" "$route"
+}
+
+json_escape() {
+  python3 - <<'PY' "$1"
+import json,sys
+print(json.dumps(sys.argv[1]))
+PY
+}
+
+write_receipt() {
+  local output_path="$1" payload="$2"
+  python3 - <<'PY' "$output_path" "$payload"
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+payload = json.loads(sys.argv[2])
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+print(path)
+PY
+}
+
+run_shipping_canary() {
+  local confirm_live_label="${1:-0}"
+  if [[ "$confirm_live_label" != "1" && "${MINT_CANARY_CONFIRM_LIVE_LABEL:-0}" != "1" ]]; then
+    stop "shipping canary requires --confirm-live-label or MINT_CANARY_CONFIRM_LIVE_LABEL=1"
+  fi
+
+  local api_key
+  api_key="$(container_env_value shipping API_KEY)"
+  [[ -n "$api_key" ]] || stop "missing shipping API_KEY"
+
+  local rate_json
+  rate_json="$(curl -sS -m 20 \
+    -H "x-api-key: $api_key" \
+    -H 'content-type: application/json' \
+    -d '{"to_address":{"name":"Mint Canary","street1":"805 SE 1st Way","street2":"Ste 5","city":"Deerfield Beach","state":"FL","zip":"33441","country":"US","phone":"5619005432"},"parcel":{"weight_oz":4,"length":9,"width":6,"height":1}}' \
+    "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/rates")")"
+
+  local shipment_id rate_id rate_count
+  shipment_id="$(printf '%s' "$rate_json" | jq -r '.shipmentId // ""')"
+  rate_id="$(printf '%s' "$rate_json" | jq -r '.rates[0].id // ""')"
+  rate_count="$(printf '%s' "$rate_json" | jq -r '(.rates | length) // 0')"
+  [[ -n "$shipment_id" ]] || stop "shipping canary failed: missing shipmentId"
+  [[ -n "$rate_id" ]] || stop "shipping canary failed: missing rate id"
+  [[ "$rate_count" != "0" ]] || stop "shipping canary failed: no rates returned"
+
+  local label_json
+  label_json="$(curl -sS -m 30 \
+    -H "x-api-key: $api_key" \
+    -H 'content-type: application/json' \
+    -d "$(jq -cn --arg sid "$shipment_id" --arg rid "$rate_id" '{shipmentId:$sid, rateId:$rid, createdBy:"mint-provider-canary"}')" \
+    "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/labels")")"
+
+  local label_id tracking_number
+  label_id="$(printf '%s' "$label_json" | jq -r '.id // empty')"
+  tracking_number="$(printf '%s' "$label_json" | jq -r '.tracking_number // empty')"
+  [[ -n "$label_id" ]] || stop "shipping canary failed: label id missing"
+  [[ -n "$tracking_number" ]] || stop "shipping canary failed: tracking number missing"
+
+  local refund_json history_json
+  refund_json="$(curl -sS -m 20 -X POST \
+    -H "x-api-key: $api_key" \
+    "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/${label_id}/refund")")"
+  history_json="$(curl -sS -m 20 \
+    -H "x-api-key: $api_key" \
+    "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/history?page=1&limit=1")")"
+
+  local latest_tracking latest_refund
+  latest_tracking="$(printf '%s' "$history_json" | jq -r '.labels[0].tracking_number // empty')"
+  latest_refund="$(printf '%s' "$history_json" | jq -r '.labels[0].refund_status // empty')"
+  [[ "$latest_tracking" == "$tracking_number" ]] || stop "shipping canary failed: history latest tracking does not match"
+  [[ "$latest_refund" == "submitted" ]] || stop "shipping canary failed: refund status not submitted in history"
+
+  local ts receipt_path payload
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  receipt_path="$RECEIPTS_DIR/${ts}-shipping-provider-canary.json"
+  payload="$(jq -cn \
+    --arg ts "$ts" \
+    --arg probe_host "$APP_PROBE_HOST" \
+    --arg via "$APP_PROBE_PATH" \
+    --arg shipment_id "$shipment_id" \
+    --arg tracking_number "$tracking_number" \
+    --argjson rate "$rate_json" \
+    --argjson label "$label_json" \
+    --argjson refund "$refund_json" \
+    --argjson history "$history_json" \
+    '{kind:"shipping_provider_canary", timestamp:$ts, target_host:$probe_host, probe_path:$via, live_provider:"easypost", live_label_purchase:true, live_refund_requested:true, shipment_id:$shipment_id, tracking_number:$tracking_number, rate_response:$rate, label_response:$label, refund_response:$refund, history_response:$history}')"
+  write_receipt "$receipt_path" "$payload" >/dev/null
+  printf '%s\n' "$receipt_path"
+}
+
+run_payment_canary() {
+  local api_key webhook_secret
+  api_key="$(container_env_value payment API_KEY)"
+  webhook_secret="$(container_env_value payment STRIPE_WEBHOOK_SECRET)"
+  [[ -n "$api_key" ]] || stop "missing payment API_KEY"
+  [[ -n "$webhook_secret" ]] || stop "missing STRIPE_WEBHOOK_SECRET"
+
+  local order_id checkout_json
+  order_id="canary-$(date -u +%Y%m%dT%H%M%SZ)"
+  checkout_json="$(curl -sS -m 20 \
+    -H "x-api-key: $api_key" \
+    -H 'content-type: application/json' \
+    -d "$(jq -cn --arg oid "$order_id" '{order_id:$oid, amount_cents:100, currency:"usd", customer_email:"ops+mint-canary@mintprints.com", payment_type:"deposit", description:"Mint Stripe canary"}')" \
+    "$(app_http_url "$PAYMENT_PORT" "/api/v1/payments/checkout-session")")"
+
+  local session_id
+  session_id="$(printf '%s' "$checkout_json" | jq -r '.checkout_session_id // empty')"
+  [[ -n "$session_id" ]] || stop "payment canary failed: missing checkout session id"
+
+  local session_json
+  session_json="$(curl -sS -m 20 \
+    -H "x-api-key: $api_key" \
+    "$(app_http_url "$PAYMENT_PORT" "/api/v1/payments/checkout-session/${session_id}")")"
+  [[ "$(printf '%s' "$session_json" | jq -r '.id // empty')" == "$session_id" ]] || stop "payment canary failed: checkout session fetch mismatch"
+
+  local ts event_id payload sig header webhook_json db_json
+  ts="$(date +%s)"
+  event_id="evt_mint_canary_${ts}"
+  payload="$(jq -cn --arg evt "$event_id" --arg sid "$session_id" --arg oid "$order_id" --argjson created "$ts" '{id:$evt,object:"event",api_version:"2025-02-24.acacia",created:$created,type:"checkout.session.expired",data:{object:{id:$sid,object:"checkout.session",metadata:{order_id:$oid,payment_type:"deposit"}}},livemode:true,pending_webhooks:1,request:{id:"req_mint_canary",idempotency_key:null}}')"
+  sig="$(printf '%s' "${ts}.${payload}" | openssl dgst -sha256 -hmac "$webhook_secret" | awk '{print $2}')"
+  header="t=${ts},v1=${sig}"
+  webhook_json="$(curl -sS -m 20 \
+    -H "x-api-key: $api_key" \
+    -H 'content-type: application/json' \
+    -H "stripe-signature: $header" \
+    --data-binary "$payload" \
+    "$(app_http_url "$PAYMENT_PORT" "/api/v1/payments/webhooks/stripe")")"
+  [[ "$(printf '%s' "$webhook_json" | jq -r '.received // false')" == "true" ]] || stop "payment canary failed: webhook not acknowledged"
+
+  db_json="$(ssh "${SSH_OPTS[@]}" "${APP_USER}@${APP_PROBE_HOST}" "docker exec -e SESSION_ID='$session_id' -i payment node -e \"const pg=require('pg');(async()=>{const c=new pg.Client({connectionString:process.env.DATABASE_URL});await c.connect();const r=await c.query('select order_id,status,stripe_checkout_session_id from payment_records where stripe_checkout_session_id = \\\$1 order by created_at desc limit 1',[process.env.SESSION_ID]);console.log(JSON.stringify(r.rows[0]||null));await c.end();})().catch(e=>{console.error(e);process.exit(1)})\"")"
+  [[ "$(printf '%s' "$db_json" | jq -r '.status // empty')" == "cancelled" ]] || stop "payment canary failed: payment record not cancelled"
+
+  local ts_iso receipt_path receipt_payload
+  ts_iso="$(date -u +%Y%m%dT%H%M%SZ)"
+  receipt_path="$RECEIPTS_DIR/${ts_iso}-payment-provider-canary.json"
+  receipt_payload="$(jq -cn \
+    --arg ts "$ts_iso" \
+    --arg probe_host "$APP_PROBE_HOST" \
+    --arg via "$APP_PROBE_PATH" \
+    --arg order_id "$order_id" \
+    --arg session_id "$session_id" \
+    --argjson checkout "$checkout_json" \
+    --argjson session "$session_json" \
+    --argjson webhook "$webhook_json" \
+    --argjson payment_record "$db_json" \
+    '{kind:"payment_provider_canary", timestamp:$ts, target_host:$probe_host, probe_path:$via, live_provider:"stripe", real_checkout_session:true, webhook_delivery:"signed_synthetic_expired", order_id:$order_id, checkout_session_id:$session_id, checkout_response:$checkout, session_response:$session, webhook_response:$webhook, payment_record:$payment_record}')"
+  write_receipt "$receipt_path" "$receipt_payload" >/dev/null
+  printf '%s\n' "$receipt_path"
+}
+
+main() {
+  local mode="${1:-}"
+  local confirm_live_label=0
+  shift || true
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --confirm-live-label)
+        confirm_live_label=1
+        ;;
+      *)
+        stop "unknown arg: $1"
+        ;;
+    esac
+    shift
+  done
+
+  case "$mode" in
+    shipping)
+      run_shipping_canary "$confirm_live_label"
+      ;;
+    payment)
+      run_payment_canary
+      ;;
+    all)
+      run_shipping_canary "$confirm_live_label"
+      run_payment_canary
+      ;;
+    ""|-h|--help|help)
+      usage
+      ;;
+    *)
+      stop "unknown mode: $mode"
+      ;;
+  esac
+}
+
+main "$@"
