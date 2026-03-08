@@ -1,26 +1,26 @@
 # MINT UI/UX Home Model V1
 **Authority**: Canonical UI placement policy for Mint system
-**Status**: ACTIVE (PARTIAL - advisory only, no enforcement gates)
+**Status**: ACTIVE (enforcement in place)
 **Version**: 1.0
 **Effective**: 2026-03-08
 **Scope**: All Mint UI surfaces (customer, operator, admin)
 
 ---
 
-## Status: PARTIAL_CANONICALIZATION_WITH_EXACT_DRIFT
+## Status: MINT_UI_HOME_MODEL_CANONICALIZED ✅
 
 **What Is Landed**:
 - ✅ Advisory guidance in `mint-modules/AGENTS.md`
 - ✅ Module scope clarification in `mint-modules/quote-page/README.md`
 - ✅ 3-tier UI architecture defined
 - ✅ Legacy UI value assessed
+- ✅ **Enforcement gate active** (Gate 12: UI placement lock in mint-modules pre-commit)
 
-**What Is NOT Landed**:
-- ❌ No enforcement gates (pre-commit or verify)
-- ❌ Payment return pages still in `quote-page` (acknowledged temporary exception)
-- ❌ No `customer-portal`, `admin-portal`, or `production-portal` exist yet
+**What Remains (Acknowledged Temporary State)**:
+- ⚠️ Payment return pages still in `quote-page` (temporary exception until Wave 1)
+- ⏳ `customer-portal`, `admin-portal`, `production-portal` deferred (Waves 1-3)
 
-**Current State**: Guidance exists, enforcement deferred, violations acknowledged.
+**Current State**: Boundaries enforced, violations explicitly allowed as temporary exceptions, portals deferred.
 
 ---
 
@@ -116,19 +116,19 @@ Legacy ronny-ops apps are reference, not runtime authority. Must rewire to fresh
 
 ---
 
-## 6. What Remains To Complete Canonicalization
+## 6. Enforcement Status
 
-1. **Add minimal enforcement gate** (not just advisory text)
-   - Flag React/SPA files in module `public/`
-   - Flag cross-module customer pages in backend modules
-   - Pre-commit or verify gate
+✅ **Gate 12 Active** (mint-modules commit 80b9489):
+- Flags React/SPA files (`.jsx`, `.tsx`, `vite.config.*`) in module `public/`
+- Flags cross-module customer pages in backend modules
+- Flags new `public/` directories in backend API modules
+- Temporary exceptions: checkout-success.html, checkout-cancel.html in quote-page
 
-2. **Execute Wave 1** (customer portal foundation)
-   - Import legacy `web` app → `customer-portal/`
-   - Migrate payment return pages
-   - Validate rewire-to-fresh-slate pattern
-
-3. **Update this doc to ACTIVE** (when enforcement exists)
+**Next Wave** (Execute Wave 1 - customer portal foundation):
+1. Import legacy `web` app → `customer-portal/`
+2. Migrate payment return pages from quote-page to customer-portal
+3. Validate rewire-to-fresh-slate pattern
+4. Remove temporary exceptions from Gate 12
 
 ---
 
