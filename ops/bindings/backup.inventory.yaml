@@ -101,16 +101,8 @@ model:
       base_path: /volume1/backups
       max_total_gb: 1600
       max_file_count: 400
-      description: "Home-local exception for Home Assistant VM 100 and Pi-hole LXC 105 only (NOT business backups)"
-    nas-app-backups:
-      host: nas
-      base_path: /volume1/backups/apps
-      max_total_gb: 800
-      max_file_count: 5000
-      status: deprecated
-      superseded_by: "r730xd-*-backups lanes"
-      migration_complete: "2026-03-08"
-      description: "DEPRECATED: Business app backups migrated to 730XD canonical plane. Retained for 30-day grace period."
+      description: "Home-local exception for Home Assistant VM 100 ONLY. All business backups use r730xd-*-backups lanes."
+    # nas-app-backups REMOVED 2026-03-08: Fully deprecated, migration complete to 730XD canonical plane.
     media-config-backups:
       host_group:
         - download-stack
@@ -167,34 +159,11 @@ runtime_units:
     restore_class: vm-dry-run-quarterly
     inventory_targets:
       - home-vm-100-ha-primary
-      - home-lxc-105-pihole-primary
     backup_admission_state: production_ready
-  - unit_id: machine-nas
-    kind: machine
-    hostname: nas
-    backup_profile: offsite-target
-    data_class: large_state
-    include_paths:
-      - /volume1/backups
-    exclude_paths: []
-    destination_lane: nas-offsite-vm
-    schedule_class: daily-primary-est
-    restore_class: app-dry-run-monthly
-    inventory_targets:
-      - vm-offsite-critical
-      - vm-211-finance-stack-offsite
-      - vm-213-mint-apps-offsite
-      - app-finance-sanity-manifest
-      - app-infisical
-      - app-gitea
-      - app-vaultwarden
-      - app-firefly
-      - app-ghostfolio
-      - app-paperless-db
-      - app-paperless-export
-      - app-mint-postgres
-      - app-mint-postgres-manifest
-    backup_admission_state: production_ready
+    description: "Home hypervisor VM/LXC backups. ONLY Home Assistant VM 100 allowed per Synology exception policy."
+  # machine-nas REMOVED 2026-03-08: All business backup authority migrated to 730XD canonical plane.
+  # Only Home Assistant VM 100 remains on Synology per home-local exception policy.
+  # Former targets migrated to r730xd-*-backups lanes (finance, infra-core, dev-tools, communications).
   - unit_id: vm-200-docker-host
     kind: vm
     hostname: docker-host
@@ -900,26 +869,28 @@ targets:
     classification: critical
     description: "P0 tier. Daily 03:00. Artifact confirmed 2026-02-12 (8GB vzdump-qemu-100-2026_02_12-03_00_01.vma.zst)."
   - name: home-lxc-105-pihole-primary
-    enabled: true
+    enabled: false
     kind: file_glob
     host: proxmox-home
     base_path: "/mnt/pve/synology-backups/dump"
     glob: "vzdump-lxc-105-*.tar.zst"
     stale_after_hours: 168
     classification: rebuildable
-    description: "P2 tier. Weekly Sun 04:00. LXC stopped. GAP-OP-118 FIXED — tmpdir /var/tmp in jobs.cfg. Validated 2026-02-12 (345MB artifact)."
+    description: "DISABLED 2026-03-08: Removed from Synology exception set per HA-only policy. Pi-hole LXC 105 should use pve-vzdump-primary lane like other shop LXCs, not home Synology. Migration to 730XD tank-backups required."
+    migration_target: "pve:/tank/backups/vzdump/dump/"
   # =============================================================================
   # APP-LEVEL BACKUPS (NAS at house, Tailscale)
   # =============================================================================
   - name: app-infisical
-    enabled: true
+    enabled: false
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/apps/infisical"
     glob: "*.sql.gz"
     stale_after_hours: 26
     classification: critical
-    description: "pg_dump from infra-core (cron 02:50 daily), rsync to NAS."
+    description: "DISABLED 2026-03-08: Pending migration to r730xd-infra-core-backups (/md1400/backup-cold/apps/infra-core/infisical/). Runtime script migration required."
+    migration_target: "pve:/md1400/backup-cold/apps/infra-core/infisical/"
   - name: app-mint-postgres
     enabled: true
     kind: file_glob
@@ -939,22 +910,25 @@ targets:
     classification: critical
     description: "Mint Postgres backup sanity manifest. Only synced after 730XD offsite verification succeeds. Migrated to 730XD 2026-03-08."
   - name: app-gitea
-    enabled: true
+    enabled: false
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/apps/gitea"
     glob: "*.sql.gz"
     stale_after_hours: 26
     classification: critical
-    description: "gitea dump + pg_dump from dev-tools VM 206 (cron 02:55 daily), rsync to NAS."
+    description: "DISABLED 2026-03-08: Pending migration to r730xd-dev-tools-backups (/md1400/backup-cold/apps/dev-tools/gitea/). Runtime script migration required."
+    migration_target: "pve:/md1400/backup-cold/apps/dev-tools/gitea/"
   - name: app-vaultwarden
-    enabled: true
+    enabled: false
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/apps/vaultwarden"
     glob: "*.tar.gz"
     stale_after_hours: 26
     classification: critical
+    description: "DISABLED 2026-03-08: Pending migration to r730xd-infra-core-backups (/md1400/backup-cold/apps/infra-core/vaultwarden/). Runtime script migration required."
+    migration_target: "pve:/md1400/backup-cold/apps/infra-core/vaultwarden/"
   - name: app-home-assistant
     enabled: false
     kind: file_glob
@@ -974,14 +948,15 @@ targets:
     classification: critical
     description: "Finance stack VM 211 app-level backup. Daily 06:20 via finance-stack-backup-730xd.sh; pg_dump -> 730XD canonical."
   - name: app-finance-sanity-manifest
-    enabled: true
+    enabled: false
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/apps/finance"
     glob: "finance-backup-manifest-*.txt"
     stale_after_hours: 26
     classification: critical
-    description: "Finance backup quality proof. Daily 06:20 run must sync a sanity manifest only after offsite verification and empty-state checks pass."
+    description: "DISABLED 2026-03-08: Pending migration to r730xd-finance-backups (/md1400/backup-cold/apps/finance/). Runtime script migration required (finance-stack-backup.sh)."
+    migration_target: "pve:/md1400/backup-cold/apps/finance/"
   - name: app-ghostfolio
     enabled: true
     kind: file_glob
@@ -992,23 +967,25 @@ targets:
     classification: important
     description: "Finance stack VM 211 app-level backup. Daily 06:20 via finance-stack-backup-730xd.sh; pg_dump -> 730XD canonical."
   - name: app-paperless-db
-    enabled: true
+    enabled: false
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/apps/paperless"
     glob: "paperless-db-*.sql.gz"
     stale_after_hours: 26
     classification: critical
-    description: "Finance stack VM 211 app-level backup. Daily 06:20 via finance-stack-backup.sh; paperless DB dump -> NAS rsync."
+    description: "DISABLED 2026-03-08: Pending migration to r730xd-finance-backups (/md1400/backup-cold/apps/finance/paperless/). Runtime script migration required. Blocked by GAP-OP-1515 (Paperless export timing issue)."
+    migration_target: "pve:/md1400/backup-cold/apps/finance/paperless/"
   - name: app-paperless-export
-    enabled: true
+    enabled: false
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/apps/paperless"
     glob: "paperless-export-*.zip"
     stale_after_hours: 26
     classification: critical
-    description: "Finance stack VM 211 app-level backup. Daily 06:20 via finance-stack-backup.sh; paperless document_exporter zip -> NAS rsync."
+    description: "DISABLED 2026-03-08: Pending migration to r730xd-finance-backups (/md1400/backup-cold/apps/finance/paperless/). Runtime script migration required. Blocked by GAP-OP-1515 (Paperless export timing issue)."
+    migration_target: "pve:/md1400/backup-cold/apps/finance/paperless/"
   - name: app-minio
     enabled: false
     kind: file_glob

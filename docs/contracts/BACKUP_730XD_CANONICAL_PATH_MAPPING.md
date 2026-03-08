@@ -72,15 +72,15 @@
 - Proxmox vzdump jobs unchanged
 
 ### Home Backups → Synology (EXCEPTION)
-- Home Assistant VM 100: NAS (permanent home-local exception)
-- Pi-hole LXC 105: NAS (permanent home-local exception)
+- Home Assistant VM 100: NAS (permanent home-local exception, HA ONLY)
+- ~~Pi-hole LXC 105: NAS~~ REMOVED 2026-03-08 — migrated to pve-vzdump-primary
 
 ## Authority Update Required
 
-`ops/bindings/backup.inventory.yaml` must be updated:
-- Create new destination lanes pointing to `/md1400/backup-cold/apps/<domain>/`
-- Deprecate `nas-app-backups` lane
-- Keep `nas-home-local-exception` lane for HA/Pi-hole
+`ops/bindings/backup.inventory.yaml` COMPLETED 2026-03-08:
+- ✅ Created new destination lanes pointing to `/md1400/backup-cold/apps/<domain>/`
+- ✅ Deprecated `nas-app-backups` lane
+- ✅ Updated `nas-home-local-exception` lane for HA ONLY (Pi-hole removed)
 
 ## Verification Commands
 
