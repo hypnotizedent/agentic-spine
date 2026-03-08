@@ -1,9 +1,9 @@
 ---
-# Machine-readable Synology DS918+ Storage Manifest
+# Machine-readable Synology DS918+ storage manifest
 # Companion to: docs/governance/SYNOLOGY_918_STORAGE_MANIFEST_V1.md
-# Authority: authoritative (read-only audit snapshot)
+# Authority: authoritative
 # Last verified: 2026-03-08
-version: 1.0
+version: 1.1
 loop: LOOP-BACKUP-PLANE-CONSOLIDATION-730XD-E2E-20260308
 
 device:
@@ -15,290 +15,126 @@ device:
   capacity_free_tb: 11.8
   utilization_pct: 43
 
-storage_families:
-  - family_id: business-app-backups
-    path: /volume1/backups/apps/
-    total_size_gb: 1.3
-    owner_domain: business
-    current_use: active_parallel_authority
-    canonical_home: r730xd_md1400_backup_cold
-    migrated_to_730xd: true
-    retention_class: superseded_by_730xd_keep_temporarily
-    recommended_action: delete_after_30day_grace
-    detail: "Parallel authority violation: backups written to BOTH NAS and 730XD"
+canonical_roles:
+  - role_id: business-app-grace-mirror
+    canonical_authority: r730xd_md1400_backup_cold
+    synology_path_root: /volume1/backups/apps
+    current_use: legacy_grace_mirror_only
+    detail: "Business app backups are canonical on 730XD; NAS copies are retained during grace windows only."
+  - role_id: selective-shop-exact-offsite
+    canonical_authority: synology_exact_offsite
+    synology_path_root: /volume1/backups/proxmox/vzdump/critical
+    current_use: active
+    detail: "Selective exact-offsite remains active for the feasible shop VM subset."
+  - role_id: home-local-primary
+    canonical_authority: synology
+    synology_path_root: /volume1/backups/proxmox_backups/dump
+    current_use: active
+    detail: "Home-local primary backup surface for proxmox-home artifacts."
+  - role_id: home-personal-data
+    canonical_authority: synology
+    synology_path_root: /volume1
+    current_use: active
+    detail: "Immich, photo archives, media staging, documents, and homelab assets remain canonical on Synology."
 
-  - family_id: shop-vm-offsite
-    path: /volume1/backups/proxmox/vzdump/critical/
-    total_size_gb: 1007
-    owner_domain: business
-    current_use: active_incomplete
-    canonical_home: r730xd_tank_vzdump
-    migrated_to_730xd: false
-    retention_class: failed_offsite_deprecate
-    recommended_action: deprecate_offsite_sync
-    detail: "VM 211 incomplete, VM 213 missing entirely, unreliable shop upload bandwidth"
+business_app_grace_mirror:
+  canonical_recovery_plane:
+    finance: /md1400/backup-cold/apps/finance
+    infra_core: /md1400/backup-cold/apps/infra-core
+    dev_tools: /md1400/backup-cold/apps/dev-tools
+    mint_data: /md1400/backup-cold/apps/mint-data
+    communications: /md1400/backup-cold/apps/communications
+  services:
+    - service: finance
+      nas_path: /volume1/backups/apps/finance/
+      size: 4.1M
+      current_use: legacy_grace_mirror_only
+    - service: ghostfolio
+      nas_path: /volume1/backups/apps/ghostfolio/
+      size: 76K
+      current_use: legacy_grace_mirror_only
+    - service: paperless
+      nas_path: /volume1/backups/apps/paperless/
+      size: 951M
+      current_use: legacy_grace_mirror_only
+    - service: mint-postgres
+      nas_path: /volume1/backups/apps/mint-postgres/
+      size: 18M
+      current_use: legacy_grace_mirror_only
+    - service: stalwart
+      nas_path: /volume1/backups/apps/stalwart/
+      size: 3.1M
+      current_use: legacy_grace_mirror_only
+    - service: infisical
+      nas_path: /volume1/backups/apps/infisical/
+      size: 11M
+      current_use: legacy_grace_mirror_only
+    - service: vaultwarden
+      nas_path: /volume1/backups/apps/vaultwarden/
+      size: 33M
+      current_use: legacy_grace_mirror_only
+    - service: gitea
+      nas_path: /volume1/backups/apps/gitea/
+      size: 198M
+      current_use: legacy_grace_mirror_only
+    - service: mail-archiver
+      nas_path: /volume1/backups/apps/mail-archiver/
+      size: 0
+      current_use: empty_residue
+  r730xd_usage:
+    finance: 1.4G
+    infra_core: 49M
+    dev_tools: 332M
+    mint_data: 35M
+    communications: 5.9M
 
-  - family_id: home-vm-backups
-    path: /volume1/backups/proxmox_backups/dump/
-    total_size_gb: 170
-    owner_domain: home
-    current_use: active_canonical
-    canonical_home: synology
-    migrated_to_730xd: false
-    retention_class: canonical_home_local_keep
-    recommended_action: keep_canonical_exception
-    detail: "HA VM 100 + Pi-hole LXC 105, proxmox-home NFS mount"
+selective_shop_exact_offsite:
+  path: /volume1/backups/proxmox/vzdump/critical/
+  current_size: 1018G
+  runtime_status: active
+  hardened_on: 2026-03-08
+  hardening_detail: "pve vzdump-offsite-sync.sh now uses a lockfile; duplicate overlap was terminated after hardening."
+  feasible_vm_set:
+    - 204
+    - 205
+    - 206
+    - 207
+    - 209
+    - 210
+    - 211
+    - 213
+  latest_verified_artifacts:
+    vm_211: vzdump-qemu-211-2026_03_07-04_19_16.vma.zst
+    vm_213: vzdump-qemu-213-2026_03_07-05_26_14.vma.zst
+  exact_offsite_exceptions:
+    - vm_id: 212
+      rationale: "size-based exception; compensating app-level mint-postgres lane"
+    - vm_id: 214
+      rationale: "size-based exception; compensating app-level communications lanes"
+    - vm_id: 215
+      rationale: "not in current feasible exact-offsite set"
 
-  - family_id: immich-photo-library
-    path: /volume1/im2ch/
-    total_size_gb: 2355
-    owner_domain: personal
-    current_use: active_canonical
-    canonical_home: synology
-    migrated_to_730xd: false
-    retention_class: canonical_home_local_keep
-    recommended_action: keep_home_bound_workload
-    detail: "Personal photo library, home-local docker service"
+home_local_primary:
+  path: /volume1/backups/proxmox_backups/dump/
+  size: 60G
+  active_artifacts:
+    vm_100: vzdump-qemu-100-2026_03_08-03_00_02.vma.zst
+    lxc_105: vzdump-lxc-105-2026_03_08-04_00_02.tar.zst
+  policy_note: "VM 100 remains the active canonical Synology exception. LXC 105 artifacts may still exist on disk but are no longer authority-bearing."
 
-  - family_id: photo-keepers
-    path: /volume1/photo-keepers/
-    total_size_gb: 1946
-    owner_domain: personal
-    current_use: active_canonical
-    canonical_home: synology
-    migrated_to_730xd: false
-    retention_class: canonical_home_local_keep
-    recommended_action: keep_home_bound_workload
-    detail: "Personal photo archive (ronny 1.6T, mint 275G, hypno 30G)"
-
-  - family_id: media-staging
-    path: /volume1/media-staging/
-    total_size_gb: 602
-    owner_domain: personal
-    current_use: active_canonical
-    canonical_home: synology
-    migrated_to_730xd: false
-    retention_class: canonical_home_local_keep
-    recommended_action: keep_home_bound_workload
-    detail: "Download staging area, NFS mount for download/streaming stacks"
-
-  - family_id: documents
-    path: /volume1/documents/
-    total_size_gb: 81
-    owner_domain: personal
-    current_use: active_canonical
-    canonical_home: synology
-    migrated_to_730xd: false
-    retention_class: canonical_home_local_keep
-    recommended_action: keep_home_bound_workload
-    detail: "Personal documents (mint 77G, hypno 4.4G)"
-
-  - family_id: homelab
-    path: /volume1/homelab/
-    total_size_gb: 71
-    owner_domain: home
-    current_use: active_canonical
-    canonical_home: synology
-    migrated_to_730xd: false
-    retention_class: canonical_home_local_keep
-    recommended_action: keep_home_bound_workload
-    detail: "Proxmox homelab images/templates"
-
-  - family_id: legacy-backups
-    path: /volume1/backups/infrastructure/
-    total_size_gb: 3.1
-    owner_domain: business
-    current_use: stale
-    canonical_home: r730xd_md1400_backup_cold
-    migrated_to_730xd: true
-    retention_class: safe_to_delete_after_verified_retention
-    recommended_action: delete_after_30day_grace
-    detail: "Legacy pre-730XD infrastructure backups"
-
-business_app_backups:
-  - service: finance-firefly
-    nas_path: /volume1/backups/apps/finance/
-    nas_latest: 2026-03-08T12:17:26Z
-    r730xd_path: /md1400/backup-cold/apps/finance/firefly/
-    r730xd_latest: 2026-03-08T12:17:26Z
-    duplication_state: parallel_active
-
-  - service: finance-ghostfolio
-    nas_path: /volume1/backups/apps/ghostfolio/
-    nas_size_mb: 76
-    nas_latest: 2026-03-08T12:17:26Z
-    r730xd_path: /md1400/backup-cold/apps/finance/ghostfolio/
-    r730xd_latest: 2026-03-08T12:17:26Z
-    duplication_state: parallel_active
-
-  - service: finance-paperless
-    nas_path: /volume1/backups/apps/paperless/
-    nas_size_mb: 951
-    nas_latest: 2026-03-08T12:17:26Z
-    r730xd_path: /md1400/backup-cold/apps/finance/paperless/
-    r730xd_latest: 2026-03-08T12:17:26Z
-    duplication_state: parallel_active
-
-  - service: mint-postgres
-    nas_path: /volume1/backups/apps/mint-postgres/
-    nas_size_mb: 18
-    nas_latest: 2026-03-08T12:23:07Z
-    r730xd_path: /md1400/backup-cold/apps/mint-data/postgres/
-    r730xd_latest: 2026-03-08T13:10:04Z
-    duplication_state: parallel_active
-
-  - service: communications-stalwart
-    nas_path: /volume1/backups/apps/stalwart/
-    nas_size_mb: 3
-    nas_latest: 2026-03-08T12:39:46Z
-    r730xd_path: /md1400/backup-cold/apps/communications/stalwart/
-    r730xd_latest: 2026-03-08T13:09:36Z
-    duplication_state: parallel_active
-
-  - service: communications-mail-archiver
-    nas_path: /volume1/backups/apps/mail-archiver/
-    nas_size_mb: 0
-    nas_latest: null
-    r730xd_path: /md1400/backup-cold/apps/communications/mail-archiver/
-    r730xd_latest: null
-    duplication_state: inactive_both
-
-  - service: infra-core-infisical
-    nas_path: /volume1/backups/apps/infisical/
-    nas_size_mb: 11
-    nas_latest: 2026-03-08T11:47:54Z
-    r730xd_path: /md1400/backup-cold/apps/infra-core/infisical/
-    r730xd_latest: 2026-03-08T11:47:54Z
-    duplication_state: parallel_active
-
-  - service: infra-core-vaultwarden
-    nas_path: /volume1/backups/apps/vaultwarden/
-    nas_size_mb: 33
-    nas_latest: 2026-03-08T03:00:01Z
-    r730xd_path: /md1400/backup-cold/apps/infra-core/vaultwarden/
-    r730xd_latest: 2026-03-08T03:00:01Z
-    duplication_state: parallel_active
-
-  - service: dev-tools-gitea
-    nas_path: /volume1/backups/apps/gitea/
-    nas_size_mb: 198
-    nas_latest: 2026-03-08T11:48:55Z
-    r730xd_path: /md1400/backup-cold/apps/dev-tools/gitea/
-    r730xd_latest: 2026-03-08T11:48:55Z
-    duplication_state: parallel_active
-
-shop_vm_offsite_inventory:
-  - vm_id: 204
-    vm_name: infra-core
-    backup_state: active
-    latest_backup: 2026-03-07
-
-  - vm_id: 205
-    vm_name: observability
-    backup_state: active
-    latest_backup: 2026-03-07
-
-  - vm_id: 206
-    vm_name: dev-tools
-    backup_state: active
-    latest_backup: 2026-03-07
-
-  - vm_id: 207
-    vm_name: ai-consolidation
-    backup_state: active
-    latest_backup: 2026-03-07
-
-  - vm_id: 209
-    vm_name: download-stack
-    backup_state: active
-    latest_backup: 2026-03-07
-
-  - vm_id: 210
-    vm_name: streaming-stack
-    backup_state: active
-    latest_backup: 2026-03-07
-
-  - vm_id: 211
-    vm_name: finance-stack
-    backup_state: failed
-    latest_backup: null
-    detail: "Only .log and temp files (.kCYqkY, .uxySB0), rsync failed"
-
-  - vm_id: 213
-    vm_name: mint-apps
-    backup_state: failed
-    latest_backup: null
-    detail: "No backup files found on NAS"
-
-home_vm_backups:
-  - vm_id: 100
-    vm_name: homeassistant
-    backup_state: active
-    latest_backup: 2026-03-08
-    size_gb: 9.6
-
-  - vm_id: 105
-    vm_name: pihole-home
-    vm_type: lxc
-    backup_state: active
-    latest_backup: 2026-03-08
-    size_mb: 437
-
-nfs_exports:
-  - path: /volume1/backups
-    clients: 10.0.0.0/24
-    purpose: proxmox-home backup target
-
-  - path: /volume1/photo-keepers
-    clients: 10.0.0.0/24
-    purpose: personal photo access
-
-  - path: /volume1/im2ch
-    clients: [10.0.0.0/24, 192.168.12.0/24]
-    purpose: immich photo library
-
-  - path: /volume1/media-staging
-    clients: [10.0.0.139, 10.0.0.179]
-    purpose: media download/streaming stacks
-
-cleanup_projection:
-  current_used_tb: 8.2
-  after_cleanup_tb: 5.2
-  recovery_tb: 3.0
-  breakdown:
-    business_backups_duplicate: 1.2
-    shop_vm_offsite_failed: 1.0
-    legacy_backup_roots: 0.8
-
-future_role:
-  canonical_use:
-    - home_vm_backup_exception
-    - personal_media_archive
-    - download_staging
-    - nfs_provider_home_network
-  superseded_use:
-    - business_app_backup_authority
-    - shop_vm_offsite_target
-    - mint_finance_communications_backup
-
-gaps_filed:
-  - gap_id: TBD
-    type: parallel_backup_authority
-    description: "Business app backups written to BOTH NAS and 730XD"
-
-  - gap_id: TBD
-    type: incomplete_offsite_backup
-    description: "VM 211 finance-stack offsite backup incomplete (rsync temp files)"
-
-  - gap_id: TBD
-    type: missing_offsite_backup
-    description: "VM 213 mint-apps offsite backup missing entirely"
-
-audit_metadata:
-  audit_date: 2026-03-08
-  audit_method: read_only_ssh_inspection
-  agent: claude_sonnet_4.5
-  duration_minutes: 45
-  directories_inspected: 30
-  storage_families_classified: 25
-  next_audit_trigger: after_730xd_migration_finalized
+home_personal_data:
+  - path: /volume1/im2ch/
+    size: 2.3T
+    role: immich_photo_library
+  - path: /volume1/photo-keepers/
+    size: 1.9T
+    role: personal_photo_archive
+  - path: /volume1/media-staging/
+    size: 602G
+    role: media_staging
+  - path: /volume1/documents/
+    size: 81G
+    role: documents_archive
+  - path: /volume1/homelab/
+    size: 71G
+    role: homelab_assets

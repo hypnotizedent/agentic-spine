@@ -50,4 +50,4 @@ On-demand via Claude Desktop MCP. No watchers, no cron.
 
 | Service | Host | Notes |
 |---------|------|-------|
-| MintOS API | docker-host (VM 200) | Legacy stack — deferred from spine governance |
+| MintOS API | docker-host (VM 200) | Legacy hold only. Not authoritative for fresh-slate Mint modules, payments, invoices, or retained-doc workflows. |

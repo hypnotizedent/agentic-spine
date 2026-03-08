@@ -14,24 +14,36 @@ if [[ "$TARGET" != "finance-stack" ]]; then
   exit 1
 fi
 
-# Resolve finance-stack SSH target
-TARGET_HOST=$(ssh_resolve_host "$TARGET")
-if [[ "$TARGET_HOST" == "UNRESOLVED" ]]; then
+# Resolve finance-stack SSH target with LAN->Tailscale fallback.
+TARGET_RESULT="$(ssh_resolve_host_with_fallback "$TARGET" 2)" || true
+TARGET_HOST="$(echo "$TARGET_RESULT" | awk '{print $1}')"
+TARGET_PATH="$(echo "$TARGET_RESULT" | awk '{print $2}')"
+TARGET_USER="$(ssh_resolve_user "$TARGET" "ubuntu")"
+if [[ -z "$TARGET_HOST" || "$TARGET_PATH" == "unreachable" ]]; then
   echo "ERROR: Cannot resolve SSH target: $TARGET" >&2
   exit 1
 fi
+
+SSH_OPTS=(
+  -o ConnectTimeout=8
+  -o BatchMode=yes
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o LogLevel=ERROR
+)
 
 echo "=== finance.backup.run ==="
 echo "target: $TARGET"
 echo "mode: $MODE"
 echo "host: $TARGET_HOST"
+echo "path: $TARGET_PATH"
 echo ""
 
 # Execute governed backup script on remote host
-if ssh "$TARGET_HOST" "sudo /usr/local/bin/finance-stack-backup.sh" 2>&1; then
+if ssh "${SSH_OPTS[@]}" "${TARGET_USER}@${TARGET_HOST}" "sudo /usr/local/bin/finance-stack-backup.sh" 2>&1; then
   echo ""
   echo "status: SUCCESS"
-  echo "note: Finance backup completed with NAS verification"
+  echo "note: Finance backup completed with 730XD verification"
   exit 0
 else
   rc=$?

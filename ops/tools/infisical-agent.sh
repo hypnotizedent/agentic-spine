@@ -389,7 +389,7 @@ get_project_id() {
 infisical_auth() {
   if [[ -z "$INFISICAL_CLIENT_SECRET" ]]; then
     log_error "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET not set"
-    log_info "Get it from: ssh docker-host \"grep INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET ~/.bashrc\""
+    log_info "Hydrate the canonical Infisical Universal Auth environment via the Spine-governed secret path; do not fetch from legacy host shells."
     exit 1
   fi
 

@@ -33,8 +33,8 @@ companion_to: docs/governance/FINANCE_STACK_DOCTRINE_V1.md
 - [ ] **State Location**: Verify state paths exist and are non-empty:
   - `/mnt/data/finance/postgres/base` (Firefly, Ghostfolio, Paperless DB)
   - `/mnt/data/finance/paperless/media` (Paperless documents)
-- [ ] **NAS Connectivity**: Test SSH to `ronadmin@nas` (Tailscale `100.102.199.111`)
-- [ ] **Disk Space**: Check NAS `/volume1/backups/apps/` has adequate space
+- [ ] **730XD Connectivity**: Test SSH to `pve` and confirm `/md1400/backup-cold/apps/finance` is reachable
+- [ ] **Legacy Mirror Awareness**: If checking grace-path residue, treat Synology as non-canonical read-only evidence only
 
 ### Running Manual Backup
 
@@ -50,13 +50,13 @@ ssh finance-stack 'sudo /usr/local/bin/finance-stack-backup.sh'
 
 ### After Backup Completion
 
-- [ ] **Offsite Verification**: Confirm artifacts exist on NAS:
+- [ ] **Canonical Verification**: Confirm artifacts exist on 730XD:
   ```bash
-  ssh ronadmin@nas 'ls -lh /volume1/backups/apps/finance | head'
-  ssh ronadmin@nas 'ls -lh /volume1/backups/apps/ghostfolio | head'
-  ssh ronadmin@nas 'ls -lh /volume1/backups/apps/paperless | head'
+  ssh pve 'ls -lh /md1400/backup-cold/apps/finance/firefly | head'
+  ssh pve 'ls -lh /md1400/backup-cold/apps/finance/ghostfolio | head'
+  ssh pve 'ls -lh /md1400/backup-cold/apps/finance/paperless | head'
   ```
-- [ ] **Sanity Manifest**: Verify `finance-backup-manifest-*.txt` exists on NAS and contains plausible row/document counts
+- [ ] **Sanity Manifest**: Verify `finance-backup-manifest-*.txt` exists on 730XD and contains plausible row/document counts
 - [ ] **Artifact Sizes**: Verify artifact sizes are plausible (not suspiciously small):
   - Firefly DB: > 1MB (not 25KB empty-state)
   - Paperless DB: > 1MB
@@ -72,7 +72,7 @@ ssh finance-stack 'sudo /usr/local/bin/finance-stack-backup.sh'
 ### Before Restore Drill
 
 - [ ] **Restore Authority**: Confirm restore runbook exists at `docs/archive/governance/FINANCE_STACK_BACKUP_RESTORE.md`
-- [ ] **Restore Point**: Identify exact backup artifact to restore (timestamp, NAS path)
+- [ ] **Restore Point**: Identify exact backup artifact to restore (timestamp, 730XD path)
 - [ ] **Target Environment**: Confirm restore target (production VM 211 or test environment)
 - [ ] **Approval**: Get explicit operator approval for production restore
 - [ ] **Backup Current State**: Run manual backup BEFORE restore to preserve current state
@@ -82,7 +82,7 @@ ssh finance-stack 'sudo /usr/local/bin/finance-stack-backup.sh'
 Follow exact commands in `docs/archive/governance/FINANCE_STACK_BACKUP_RESTORE.md`:
 
 1. **Stop services**: `ssh finance-stack 'cd /opt/stacks/finance && docker-compose stop {service}'`
-2. **Copy artifacts**: `scp ronadmin@nas:/volume1/backups/apps/finance/{artifact} /tmp/`
+2. **Copy artifacts**: `scp pve:/md1400/backup-cold/apps/finance/{service}/{artifact} /tmp/`
 3. **Restore DB**: Use `docker exec` with `psql` or `document_importer`
 4. **Verify restoration**: Query row counts, check document availability
 5. **Restart services**: `ssh finance-stack 'cd /opt/stacks/finance && docker-compose start {service}'`
@@ -190,8 +190,8 @@ STATEFUL_BREAK_GLASS_ACK_20260308=1 ./bin/ops cap run docker.compose.down -- fin
 ### If Backup Failure Detected
 
 1. **Stop Cleanup**: Do NOT delete local staging artifacts
-2. **Investigate Transport**: Check SSH connectivity to NAS, review `/var/log/*-backup.log`
-3. **Manual Offsite Copy**: If transport failed, manually `rsync` artifacts to NAS
+2. **Investigate Transport**: Check SSH connectivity to `pve`, review `/var/log/*-backup.log`
+3. **Manual Offsite Copy**: If transport failed, manually `rsync` artifacts to 730XD
 4. **Verify Sanity**: Check artifact sizes and manifest before cleanup
 5. **Fix Root Cause**: Update backup script to fail loudly on offsite failure
 6. **Document**: File gap and link to incident loop
@@ -199,7 +199,7 @@ STATEFUL_BREAK_GLASS_ACK_20260308=1 ./bin/ops cap run docker.compose.down -- fin
 ### If State Loss Suspected
 
 1. **Freeze Operations**: Do NOT run compose down, do NOT delete volumes
-2. **Identify Last Good Backup**: Check NAS for latest valid artifact
+2. **Identify Last Good Backup**: Check 730XD for latest valid artifact
 3. **Verify Artifact Quality**: Restore to test environment first
 4. **Get Approval**: Explicit operator approval before production restore
 5. **Execute Restore**: Follow restore runbook exactly
@@ -247,7 +247,7 @@ Run monthly (first Sunday):
 
 - [ ] **All gates pass**: No FAIL status in verify output
 - [ ] **Backup freshness**: All critical targets within 26h threshold
-- [ ] **Offsite proof**: Finance sanity manifest exists on NAS
+- [ ] **Offsite proof**: Finance sanity manifest exists on 730XD
 - [ ] **Service health**: All finance services report healthy
 
 ---

@@ -19,7 +19,7 @@ Host + stack:
 
 Backup artifact: a compressed Postgres dump (`.sql.gz`) for the Infisical database.
 
-Automated: cron on infra-core runs daily at 02:50, dumps to local, rsync to NAS.
+Automated: cron on infra-core runs daily at 02:50, dumps to local, rsyncs to the 730XD canonical plane at `/md1400/backup-cold/apps/infra-core/infisical/`.
 
 Manual backup:
 
@@ -44,20 +44,20 @@ ls -lh "$out"
 '
 ```
 
-2. Copy the artifact to the NAS backup area via rsync (NAS is not locally mounted on infra-core):
+2. Copy the artifact to the 730XD canonical backup area via rsync:
 
 ```bash
 ssh infra-core '
 set -euo pipefail
 src="$(ls -1t /tmp/infisical-db-*.sql.gz | head -n 1)"
-rsync -avz "$src" nas:/volume1/backups/apps/infisical/
+rsync -avz "$src" root@pve:/md1400/backup-cold/apps/infra-core/infisical/
 '
 ```
 
-If `nas` is unreachable from infra-core, pull the dump to the MacBook first:
+If `pve` is unreachable from infra-core, pull the dump to the MacBook first:
 ```bash
 scp infra-core:/tmp/infisical-db-*.sql.gz /tmp/
-scp /tmp/infisical-db-*.sql.gz nas:/volume1/backups/apps/infisical/
+scp /tmp/infisical-db-*.sql.gz pve:/md1400/backup-cold/apps/infra-core/infisical/
 ```
 
 Notes:
@@ -73,7 +73,7 @@ Prerequisites:
 - The Infisical compose stack deployed at `/opt/stacks/secrets/`.
 - The `.env` file populated (from spine bootstrap or manual secret injection).
 
-1. Pick a dump file on NAS (or wherever you stored it), and copy it to `infra-core:/tmp/`.
+1. Pick a dump file on the 730XD canonical plane and copy it to `infra-core:/tmp/`.
 
 2. Stop Infisical application containers (leave Postgres running):
 

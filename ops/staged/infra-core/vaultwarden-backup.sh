@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# infisical-backup.sh — Daily pg_dump of Infisical database with verified 730XD sync
+# vaultwarden-backup.sh — Daily backup of vaultwarden data with verified 730XD sync
 set -euo pipefail
 
-BACKUP_DIR="/opt/backups/infisical/staging"
-ARCHIVE_DIR="/opt/backups/infisical/last-good"
+BACKUP_DIR="/opt/backups/vaultwarden/staging"
+ARCHIVE_DIR="/opt/backups/vaultwarden/last-good"
+VW_DATA="/opt/stacks/vaultwarden/vw-data"
 OFFSITE_USER="root"
 OFFSITE_HOST="pve"
-OFFSITE_BASE="/md1400/backup-cold/apps/infra-core/infisical"
-TIMESTAMP="$(date -u +%Y-%m-%dT%H%M%SZ)"
-BACKUP_FILE="infisical-db-${TIMESTAMP}.sql.gz"
-RETENTION_DAYS=14
-LOG="/var/log/infisical-backup.log"
+OFFSITE_BASE="/md1400/backup-cold/apps/infra-core/vaultwarden"
+TIMESTAMP="$(date -u +%Y-%m-%d_%H%M%S)"
+BACKUP_FILE="vaultwarden-backup-${TIMESTAMP}.tar.gz"
+KEEP_REMOTE_DAYS=14
+LOG="/var/log/vaultwarden-backup.log"
+LOCK_FILE="/var/lock/vaultwarden-backup.lock"
 SUCCESS_MARKER="$BACKUP_DIR/.sync-success"
-LOCK_FILE="/var/lock/infisical-backup.lock"
 RSYNC_SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=30"
 
 log() { echo "$(date -Is) $*" >>"$LOG"; }
@@ -37,12 +38,11 @@ trap cleanup EXIT
 mkdir -p "$BACKUP_DIR" "$ARCHIVE_DIR"
 rm -f "$SUCCESS_MARKER"
 
-log "=== infisical backup start (730XD offsite) ==="
+log "=== vaultwarden backup start (730XD canonical plane) ==="
 
-docker exec infisical-db pg_dump -U infisical infisical 2>>"$LOG" | gzip >"$BACKUP_DIR/$BACKUP_FILE"
+tar -czf "$BACKUP_DIR/$BACKUP_FILE" -C "$(dirname "$VW_DATA")" "$(basename "$VW_DATA")" 2>>"$LOG"
 if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
-  log "FAIL: pg_dump failed"
-  rm -f "$BACKUP_DIR/$BACKUP_FILE"
+  log "FAIL: tar failed"
   exit 1
 fi
 log "OK: created $BACKUP_FILE ($(du -h "$BACKUP_DIR/$BACKUP_FILE" | cut -f1))"
@@ -57,7 +57,7 @@ log "Ensuring 730XD directory exists..."
 $RSYNC_SSH "$OFFSITE_USER@$OFFSITE_HOST" "mkdir -p '$OFFSITE_BASE'"
 
 log "Syncing to 730XD..."
-rsync -az --timeout=120 -e "$RSYNC_SSH" "$BACKUP_DIR/$BACKUP_FILE" "$OFFSITE_USER@$OFFSITE_HOST:$OFFSITE_BASE/" >>"$LOG" 2>&1
+rsync -az -e "$RSYNC_SSH" "$BACKUP_DIR/$BACKUP_FILE" "$OFFSITE_USER@$OFFSITE_HOST:$OFFSITE_BASE/"
 if [[ $? -ne 0 ]]; then
   log "FAIL: 730XD sync failed"
   exit 1
@@ -69,11 +69,14 @@ if ! $RSYNC_SSH "$OFFSITE_USER@$OFFSITE_HOST" "test -f '$OFFSITE_BASE/$BACKUP_FI
   exit 1
 fi
 
+log "Pruning 730XD backups older than ${KEEP_REMOTE_DAYS} days..."
 $RSYNC_SSH "$OFFSITE_USER@$OFFSITE_HOST" \
-  "find '$OFFSITE_BASE' -name 'infisical-db-*.sql.gz' -mtime +${RETENTION_DAYS} -delete" >/dev/null 2>&1 || true
+  "find '$OFFSITE_BASE' -maxdepth 1 -name 'vaultwarden-backup-*.tar.gz' -mtime +${KEEP_REMOTE_DAYS} -delete" \
+  >/dev/null 2>&1 || true
 
-find "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
-cp -a "$BACKUP_DIR"/* "$ARCHIVE_DIR"/
+find "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -name 'vaultwarden-backup-*.tar.gz' -delete 2>/dev/null || true
+cp -a "$BACKUP_DIR/$BACKUP_FILE" "$ARCHIVE_DIR/"
 touch "$SUCCESS_MARKER"
 
-log "infisical backup SUCCEEDED — 730XD sync verified"
+log "vaultwarden backup SUCCEEDED — 730XD sync verified"
+exit 0

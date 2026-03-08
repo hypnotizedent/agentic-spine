@@ -3,6 +3,7 @@
 set -euo pipefail
 
 LOG="/var/log/vzdump-offsite-sync.log"
+LOCK_FILE="/var/lock/vzdump-offsite-sync.lock"
 NAS_USER="ronadmin"
 NAS_HOST="100.102.199.111"
 NAS_DIR="/volume1/backups/proxmox/vzdump/critical"
@@ -17,6 +18,12 @@ VMIDS="204 205 206 207 209 210 211 213"
 log() {
   echo "$(date -Is) $*" >>"$LOG"
 }
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log "SKIP: offsite sync already running"
+  exit 0
+fi
 
 log "=== offsite sync start ==="
 

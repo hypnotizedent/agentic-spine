@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# finance-backup-status - Read finance backup state (local staging + NAS + last-good)
+# finance-backup-status - Read finance backup state (local staging + 730XD canonical plane + legacy NAS mirror)
 set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
@@ -7,27 +7,48 @@ ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 source "$ROOT/ops/lib/ssh-resolve.sh"
 
 TARGET="finance-stack"
+PVE_RESULT="$(ssh_resolve_probe_host "pve" || true)"
+PVE_HOST="$(echo "$PVE_RESULT" | awk '{print $1}')"
+PVE_PATH="$(echo "$PVE_RESULT" | awk '{print $2}')"
+PVE_USER="$(ssh_resolve_user "pve" "root")"
+PVE_BASE="/md1400/backup-cold/apps/finance"
 NAS_USER="ronadmin"
 NAS_HOST="100.102.199.111"
 NAS_BASE="/volume1/backups/apps"
 
-# Resolve targets
-FINANCE_HOST=$(ssh_resolve_host "$TARGET")
-if [[ "$FINANCE_HOST" == "UNRESOLVED" ]]; then
+# Resolve targets with LAN->Tailscale fallback.
+FINANCE_RESULT="$(ssh_resolve_host_with_fallback "$TARGET" 2)" || true
+FINANCE_HOST="$(echo "$FINANCE_RESULT" | awk '{print $1}')"
+FINANCE_PATH="$(echo "$FINANCE_RESULT" | awk '{print $2}')"
+FINANCE_USER="$(ssh_resolve_user "$TARGET" "ubuntu")"
+if [[ -z "$FINANCE_HOST" || "$FINANCE_PATH" == "unreachable" ]]; then
   echo "ERROR: Cannot resolve finance-stack" >&2
   exit 1
 fi
 
+SSH_OPTS=(
+  -o ConnectTimeout=8
+  -o BatchMode=yes
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o LogLevel=ERROR
+)
+FINANCE_REF="${FINANCE_USER}@${FINANCE_HOST}"
+PVE_REF="${PVE_USER}@${PVE_HOST}"
+
 echo "=== finance.backup.status ==="
 echo "target: $TARGET"
 echo "finance_host: $FINANCE_HOST"
+echo "finance_path: $FINANCE_PATH"
+echo "pve_host: $PVE_HOST"
+echo "pve_path: $PVE_PATH"
 echo "nas_host: $NAS_HOST"
 echo ""
 
 # Check local staging artifacts
 echo "## Local staging (/mnt/backups/finance/staging on $TARGET)"
-if ssh "$FINANCE_HOST" "test -d /mnt/backups/finance/staging && ls -lh /mnt/backups/finance/staging/ 2>/dev/null" 2>/dev/null; then
-  ssh "$FINANCE_HOST" "ls -lh /mnt/backups/finance/staging/ | tail -10" 2>/dev/null || echo "  (empty or inaccessible)"
+if ssh "${SSH_OPTS[@]}" "$FINANCE_REF" "test -d /mnt/backups/finance/staging && ls -lh /mnt/backups/finance/staging/ 2>/dev/null" 2>/dev/null; then
+  ssh "${SSH_OPTS[@]}" "$FINANCE_REF" "ls -lh /mnt/backups/finance/staging/ | tail -10" 2>/dev/null || echo "  (empty or inaccessible)"
 else
   echo "  (no staging artifacts)"
 fi
@@ -35,18 +56,38 @@ echo ""
 
 # Check local last-good archive
 echo "## Local last-good (/mnt/backups/finance/last-good on $TARGET)"
-if ssh "$FINANCE_HOST" "test -d /mnt/backups/finance/last-good && ls -lh /mnt/backups/finance/last-good/ 2>/dev/null" 2>/dev/null; then
-  ssh "$FINANCE_HOST" "ls -lh /mnt/backups/finance/last-good/ | tail -10" 2>/dev/null || echo "  (empty or inaccessible)"
+if ssh "${SSH_OPTS[@]}" "$FINANCE_REF" "test -d /mnt/backups/finance/last-good && ls -lh /mnt/backups/finance/last-good/ 2>/dev/null" 2>/dev/null; then
+  ssh "${SSH_OPTS[@]}" "$FINANCE_REF" "ls -lh /mnt/backups/finance/last-good/ | tail -10" 2>/dev/null || echo "  (empty or inaccessible)"
 else
   echo "  (no last-good archive)"
 fi
 echo ""
 
-# Check NAS state
-echo "## NAS offsite backups ($NAS_HOST:$NAS_BASE)"
+# Check canonical 730XD state.
+echo "## 730XD canonical backups ($PVE_HOST:$PVE_BASE)"
+for subdir in firefly ghostfolio paperless; do
+  echo "### $subdir/"
+  if ssh "${SSH_OPTS[@]}" "$PVE_REF" "ls -lht '$PVE_BASE/$subdir/' 2>/dev/null | head -5" 2>/dev/null; then
+    :  # output already printed
+  else
+    echo "  (unreachable or empty)"
+  fi
+  echo ""
+done
+
+echo "### finance-manifest/"
+if ssh "${SSH_OPTS[@]}" "$PVE_REF" "ls -lht '$PVE_BASE'/finance-backup-manifest-*.txt 2>/dev/null | head -5" 2>/dev/null; then
+  :
+else
+  echo "  (unreachable or empty)"
+fi
+echo ""
+
+# Check legacy NAS mirror state during the grace window.
+echo "## Legacy NAS mirror (non-canonical grace surface: $NAS_HOST:$NAS_BASE)"
 for subdir in finance ghostfolio paperless; do
   echo "### $subdir/"
-  if ssh "$FINANCE_HOST" "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 $NAS_USER@$NAS_HOST 'ls -lht $NAS_BASE/$subdir/ | head -5' 2>/dev/null" 2>/dev/null; then
+  if ssh "${SSH_OPTS[@]}" "$FINANCE_REF" "ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 $NAS_USER@$NAS_HOST 'ls -lht $NAS_BASE/$subdir/ | head -5' 2>/dev/null" 2>/dev/null; then
     :  # output already printed
   else
     echo "  (unreachable or empty)"

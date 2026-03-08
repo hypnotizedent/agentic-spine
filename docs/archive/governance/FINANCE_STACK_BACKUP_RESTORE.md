@@ -32,16 +32,17 @@ The backup script creates four artifacts in a single run:
 4. Paperless export zip via `document_exporter`: `paperless-export-<ts>.zip`
 5. Finance backup sanity manifest: `finance-backup-manifest-<ts>.txt`
 
-Destination (NAS):
-- `/volume1/backups/apps/finance/`
-- `/volume1/backups/apps/ghostfolio/`
-- `/volume1/backups/apps/paperless/`
+Destination (730XD canonical plane):
+- `/md1400/backup-cold/apps/finance/firefly/`
+- `/md1400/backup-cold/apps/finance/ghostfolio/`
+- `/md1400/backup-cold/apps/finance/paperless/`
+- `/md1400/backup-cold/apps/finance/finance-backup-manifest-<ts>.txt`
 
 Success criteria:
 - Local artifact creation succeeds.
-- NAS connectivity succeeds.
+- 730XD connectivity succeeds.
 - Every artifact is copied offsite.
-- Every copied artifact is verified on NAS before staging cleanup.
+- Every copied artifact is verified on 730XD before staging cleanup.
 - Sanity checks do not indicate empty-state or severe regression unless explicit
   break-glass override is set with `FINANCE_BACKUP_ALLOW_REGRESSION=1`.
 
@@ -50,7 +51,7 @@ Failure behavior:
 - If sanity checks fail, the run fails before promoting new artifacts.
 - `last-good` is only updated after verified offsite success.
 
-Retention: 14 days (NAS-side prune after verification).
+Retention: 14 days (730XD-side prune after verification).
 
 Tracked in `ops/bindings/backup.inventory.yaml`:
 - `app-firefly`
@@ -69,9 +70,10 @@ ssh finance-stack 'sudo /usr/local/bin/finance-stack-backup.sh'
 Verify newest artifacts:
 
 ```bash
-ssh ronadmin@nas 'ls -lt /volume1/backups/apps/finance | head'
-ssh ronadmin@nas 'ls -lt /volume1/backups/apps/ghostfolio | head'
-ssh ronadmin@nas 'ls -lt /volume1/backups/apps/paperless | head'
+ssh pve 'ls -lt /md1400/backup-cold/apps/finance/firefly | head'
+ssh pve 'ls -lt /md1400/backup-cold/apps/finance/ghostfolio | head'
+ssh pve 'ls -lt /md1400/backup-cold/apps/finance/paperless | head'
+ssh pve 'ls -lt /md1400/backup-cold/apps/finance/finance-backup-manifest-*.txt | head'
 ssh finance-stack 'ls -lt /mnt/backups/finance/last-good | head'
 ```
 
@@ -90,6 +92,7 @@ Prereqs:
 - VM 211 restored/rebuilt.
 - Stack present at `/opt/stacks/finance`.
 - `.env` reconstructed from Infisical (`/spine/services/finance` and `/spine/services/paperless`).
+- Restore artifacts copied from the 730XD canonical plane to `/tmp/` on `finance-stack`.
 - Confirm the destructive guard contract before any compose mutation:
 
 ```bash

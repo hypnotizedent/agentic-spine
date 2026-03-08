@@ -41,7 +41,7 @@ Every finance service must have exactly one canonical source of truth for each o
 A backup run is NOT successful if:
 - Local artifacts were created but offsite copy failed
 - Transport succeeded but offsite verification was skipped
-- Artifacts exist on NAS but sanity checks were not performed
+- Artifacts exist on the canonical recovery plane but sanity checks were not performed
 - State regression indicators (empty databases, missing documents) were ignored
 
 **Required Contract**:
@@ -57,7 +57,7 @@ A backup run is NOT successful if:
 
 A finance service is NOT considered production-safe unless it has:
 
-- **Named Restore Point**: Exact artifact location on NAS with timestamp
+- **Named Restore Point**: Exact artifact location on the canonical recovery plane with timestamp
 - **Restore Proof Class**: Defined in `backup.inventory.yaml` (e.g., `tier1-small-state-dry-run-quarterly`)
 - **Restore Runbook**: Documented in `docs/archive/governance/` with exact commands
 - **Restore Drill Receipt**: Evidence of successful restore within the drill cadence window (quarterly for tier1-critical)
@@ -104,7 +104,7 @@ Every finance service must document and expose its critical data seams:
 
 - **Customer Identity**: Where customer records live, how they're backed up, what depends on them
 - **Payment State**: Active subscriptions, payment methods, transaction history location
-- **Document Store**: Invoice PDFs, receipts, tax documents (Paperless, S3, MinIO)
+- **Document Store**: Invoice PDFs, receipts, tax documents (Paperless for retained documents; MinIO only for active artwork assets)
 - **Ledger Truth**: Firefly transactions, Ghostfolio holdings, Mint pricing tables
 
 **Required Documentation**:
@@ -113,7 +113,7 @@ Every finance service must document and expose its critical data seams:
 - Restore procedure (which runbook, which artifacts)
 - Dependency chain (what breaks if this service is lost)
 
-**Example**: Paperless (`/mnt/data/finance/paperless/media` + `/mnt/data/finance/postgres/paperless` DB) backed up via `finance-stack-backup.sh` → NAS `/volume1/backups/apps/paperless/` → quarterly restore drill per `tier1-small-state-dry-run-quarterly`.
+**Example**: Paperless (`/mnt/data/finance/paperless/media` + `/mnt/data/finance/postgres/paperless` DB) backed up via `finance-stack-backup.sh` → 730XD `/md1400/backup-cold/apps/finance/paperless/` → quarterly restore drill per `tier1-small-state-dry-run-quarterly`.
 
 ### 7. Legacy Surfaces May Exist But Must Never Appear Canonical
 
@@ -134,7 +134,7 @@ For every critical finance service, Spine must be able to answer:
 
 1. **Where does state live?** (exact paths, exact containers, exact volumes)
 2. **How is it backed up?** (which script, which schedule, which inventory target)
-3. **Where is the offsite copy?** (NAS path, artifact name, freshness timestamp)
+3. **Where is the canonical recovery copy?** (730XD path, artifact name, freshness timestamp; plus second-hop mirror if one exists)
 4. **What is the current restore point?** (latest verified backup artifact with sanity proof)
 5. **What prevents destructive loss?** (stateful compose guard, break-glass requirement, preflight checks)
 
@@ -185,7 +185,7 @@ For every critical finance service, Spine must be able to answer:
 6. **Ambiguous state location**: Services with scattered or undocumented data paths
 7. **Parallel backup truth**: Multiple backup scripts or targets for the same service
 8. **Legacy canonical promotion**: Archived scripts appearing as production-ready surfaces
-9. **Offsite skipping**: Backup runs that skip verification of NAS copy
+9. **Recovery-plane skipping**: Backup runs that skip verification of the canonical 730XD copy
 10. **Empty-state blindness**: Backup runs that ignore suspicious state regressions
 
 ---
@@ -200,12 +200,10 @@ See companion document: `docs/governance/FINANCE_STACK_OPERATOR_CHECKLIST.md`
 
 - **Doctrine Version**: v1.0
 - **Last Verified**: 2026-03-08
-- **Active Finance Services**: 10 (Firefly, Ghostfolio, Paperless, VoucherVault, Mint Postgres, MinIO, Mail-archiver, Stalwart, Payment-Test, CC-Benefits-Tracker)
-- **Services in Safe State**: 2 (Infisical, Gitea)
-- **Services in Critical Risk**: 5 (Paperless, Firefly, Ghostfolio, Mint Postgres, MinIO)
-- **Services Needing Hardening**: 3 (Vaultwarden, Mail-archiver, Stalwart)
+- **Recovery Plane**: 730XD `pve:/md1400/backup-cold/apps/finance`
+- **Legacy Mirror**: Synology app paths may remain during grace windows, but they are not canonical authority
 - **Incident Trigger**: Paperless wipe on 2026-03-08 due to silent backup failure + unguarded compose mutation
-- **Hardening Deployed**: 2026-03-08 (stateful compose guards, offsite verification, sanity manifest, break-glass enforcement)
+- **Hardening Deployed**: 2026-03-08 (stateful compose guards, 730XD verification, sanity manifest, break-glass enforcement)
 
 ---
 

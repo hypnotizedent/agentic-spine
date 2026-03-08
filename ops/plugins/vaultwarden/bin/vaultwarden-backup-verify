@@ -2,7 +2,7 @@
 # vaultwarden.backup.verify — Read-only: verify Vaultwarden backup recency and integrity
 #
 # Checks:
-#   1. Latest backup exists on NAS
+#   1. Latest backup exists on the canonical 730XD plane
 #   2. Backup age is within threshold (default: 48 hours)
 #   3. Backup size is non-trivial (> 100KB)
 #   4. Sentinel file (db.sqlite3) is present inside the archive
@@ -31,8 +31,8 @@ command -v yq >/dev/null 2>&1 || _stop "missing dependency: yq"
 source "$SSH_RESOLVE_LIB"
 
 # ── Configuration ──
-NAS_HOST="nas"
-NAS_BACKUP_PATH="/volume1/backups/apps/vaultwarden"
+PVE_TARGET_ID="pve"
+PVE_BACKUP_PATH="/md1400/backup-cold/apps/infra-core/vaultwarden"
 MAX_AGE_HOURS="${VW_BACKUP_MAX_AGE_HOURS:-48}"
 MIN_SIZE_KB=100
 
@@ -54,10 +54,14 @@ elif [[ -n "$VW_HOST_TS" && "$VW_HOST_TS" != "$VW_HOST_LAN" ]] && \
     VW_PATH="tailscale"
     SSH_VW=(ssh "${SSH_BATCH_OPTS[@]}" "${VW_USER}@${VW_HOST}")
 fi
-SSH_NAS="ssh -o ConnectTimeout=10 -o BatchMode=yes ${NAS_HOST}"
+PVE_USER="$(ssh_resolve_user "$PVE_TARGET_ID" "root")"
+PVE_RESULT="$(ssh_resolve_probe_host "$PVE_TARGET_ID" || true)"
+PVE_HOST="$(echo "$PVE_RESULT" | awk '{print $1}')"
+PVE_PATH="$(echo "$PVE_RESULT" | awk '{print $2}')"
+SSH_PVE=(ssh "${SSH_BATCH_OPTS[@]}" "${PVE_USER}@${PVE_HOST}")
 
 echo "vaultwarden.backup.verify"
-echo "nas: $NAS_HOST:$NAS_BACKUP_PATH"
+echo "canonical: ${PVE_USER}@${PVE_HOST}:${PVE_BACKUP_PATH} (path: ${PVE_PATH:-unknown})"
 echo "source: ${VW_USER}@${VW_HOST} (path: ${VW_PATH:-unknown})"
 echo "threshold: ${MAX_AGE_HOURS}h"
 echo
@@ -65,32 +69,32 @@ echo
 FAILURES=0
 WARNINGS=0
 
-# ── Check 1: NAS connectivity ──
-if ! $SSH_NAS "echo OK" &>/dev/null; then
-    echo "FAIL: cannot SSH to NAS ($NAS_HOST)"
-    echo "hint: check SSH key and Tailscale/network connectivity"
+# ── Check 1: 730XD connectivity ──
+if ! "${SSH_PVE[@]}" "echo OK" &>/dev/null; then
+    echo "FAIL: cannot SSH to 730XD ($PVE_HOST)"
+    echo "hint: check SSH key and pve reachability"
     exit 1
 fi
-echo "OK: NAS reachable"
+echo "OK: 730XD reachable"
 
 # ── Check 2: Backup directory exists ──
-if ! $SSH_NAS "test -d '$NAS_BACKUP_PATH'"; then
-    echo "FAIL: backup directory not found: $NAS_BACKUP_PATH"
+if ! "${SSH_PVE[@]}" "test -d '$PVE_BACKUP_PATH'"; then
+    echo "FAIL: backup directory not found: $PVE_BACKUP_PATH"
     ((FAILURES++))
 fi
 
 # ── Check 3: Latest backup file ──
-LATEST=$($SSH_NAS "ls -1t '$NAS_BACKUP_PATH'/vaultwarden-backup-*.tar.gz 2>/dev/null | head -1" || echo "")
+LATEST=$("${SSH_PVE[@]}" "ls -1t '$PVE_BACKUP_PATH'/vaultwarden-backup-*.tar.gz 2>/dev/null | head -1" || echo "")
 
 if [[ -z "$LATEST" ]]; then
-    echo "FAIL: no backup files found in $NAS_BACKUP_PATH"
+    echo "FAIL: no backup files found in $PVE_BACKUP_PATH"
     ((FAILURES++))
 else
     LATEST_NAME=$(basename "$LATEST")
     echo "OK: latest backup: $LATEST_NAME"
 
     # ── Check 4: Backup age ──
-    LATEST_EPOCH=$($SSH_NAS "stat -c '%Y' '$LATEST' 2>/dev/null || stat -f '%m' '$LATEST' 2>/dev/null" || echo "0")
+    LATEST_EPOCH=$("${SSH_PVE[@]}" "stat -c '%Y' '$LATEST' 2>/dev/null || stat -f '%m' '$LATEST' 2>/dev/null" || echo "0")
     NOW_EPOCH=$(date +%s)
     AGE_HOURS=$(( (NOW_EPOCH - LATEST_EPOCH) / 3600 ))
 
@@ -102,17 +106,17 @@ else
     fi
 
     # ── Check 5: Backup size ──
-    SIZE_KB=$($SSH_NAS "du -k '$LATEST' 2>/dev/null" | cut -f1 || echo "0")
+    SIZE_KB=$("${SSH_PVE[@]}" "du -k '$LATEST' 2>/dev/null" | cut -f1 || echo "0")
     if (( SIZE_KB < MIN_SIZE_KB )); then
         echo "FAIL: backup size ${SIZE_KB}KB is below ${MIN_SIZE_KB}KB minimum"
         ((FAILURES++))
     else
-        SIZE_HUMAN=$($SSH_NAS "du -h '$LATEST' 2>/dev/null" | cut -f1)
+        SIZE_HUMAN=$("${SSH_PVE[@]}" "du -h '$LATEST' 2>/dev/null" | cut -f1)
         echo "OK: backup size: ${SIZE_HUMAN}"
     fi
 
     # ── Check 6: Sentinel inside archive (non-destructive listing) ──
-    HAS_DB=$($SSH_NAS "tar -tzf '$LATEST' 2>/dev/null | grep -c 'db.sqlite3'" || echo "0")
+    HAS_DB=$("${SSH_PVE[@]}" "tar -tzf '$LATEST' 2>/dev/null | grep -c 'db.sqlite3'" || echo "0")
     if [[ "$HAS_DB" == "0" ]]; then
         echo "FAIL: db.sqlite3 not found inside backup archive"
         ((FAILURES++))
@@ -122,8 +126,8 @@ else
 fi
 
 # ── Check 7: Backup count / retention ──
-BACKUP_COUNT=$($SSH_NAS "ls -1 '$NAS_BACKUP_PATH'/vaultwarden-backup-*.tar.gz 2>/dev/null | wc -l" | tr -d ' ')
-echo "INFO: $BACKUP_COUNT backups retained on NAS"
+BACKUP_COUNT=$("${SSH_PVE[@]}" "ls -1 '$PVE_BACKUP_PATH'/vaultwarden-backup-*.tar.gz 2>/dev/null | wc -l" | tr -d ' ')
+echo "INFO: $BACKUP_COUNT backups retained on 730XD"
 
 if (( BACKUP_COUNT < 2 )); then
     echo "WARN: fewer than 2 backups — retention risk"

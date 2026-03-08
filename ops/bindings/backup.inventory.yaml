@@ -33,11 +33,17 @@ model:
       cron: "15 * * * *"
       timezone: "America/New_York"
     daily-primary-est:
-      cron: "0 2 * * *"
+      cron: "0 1 * * *"
       timezone: "America/New_York"
+      note: "Shop daily-primary cadence. Exact windows are authoritative in ops/archive/bindings/backup.calendar.yaml."
+    daily-home-primary-est:
+      cron: "0 3 * * *"
+      timezone: "America/New_York"
+      note: "Home daily-primary cadence for proxmox-home and the Home Assistant Synology exception."
     daily-config-est:
       cron: "45 3 * * *"
       timezone: "America/New_York"
+      note: "Media/config cadence bucket. Exact windows live in ops/archive/bindings/backup.calendar.yaml."
     weekly-est:
       cron: "0 4 * * 0"
       timezone: "America/New_York"
@@ -101,7 +107,7 @@ model:
       base_path: /volume1/backups
       max_total_gb: 1600
       max_file_count: 400
-      description: "Home-local exception for Home Assistant VM 100 ONLY. All business backups use r730xd-*-backups lanes."
+      description: "Home-local exception for Home Assistant VM 100 and Pi-hole LXC 105. All business/shop backups use r730xd-*-backups lanes or pve-vzdump-primary."
     # nas-app-backups REMOVED 2026-03-08: Fully deprecated, migration complete to 730XD canonical plane.
     media-config-backups:
       host_group:
@@ -155,12 +161,12 @@ runtime_units:
       - /mnt/pve/synology-backups/dump
     exclude_paths: []
     destination_lane: pve-vzdump-primary
-    schedule_class: daily-primary-est
+    schedule_class: daily-home-primary-est
     restore_class: vm-dry-run-quarterly
     inventory_targets:
       - home-vm-100-ha-primary
     backup_admission_state: production_ready
-    description: "Home hypervisor VM/LXC backups. ONLY Home Assistant VM 100 allowed per Synology exception policy."
+    description: "Home hypervisor VM/LXC backups. Two allowed Synology exceptions: Home Assistant VM 100 and Pi-hole LXC 105."
   # machine-nas REMOVED 2026-03-08: All business backup authority migrated to 730XD canonical plane.
   # Only Home Assistant VM 100 remains on Synology per home-local exception policy.
   # Former targets migrated to r730xd-*-backups lanes (finance, infra-core, dev-tools, communications).
@@ -404,7 +410,7 @@ runtime_units:
     exclude_paths:
       - payload_regenerable
     destination_lane: nas-home-local-exception
-    schedule_class: daily-primary-est
+    schedule_class: daily-home-primary-est
     restore_class: tier1-small-state-dry-run-quarterly
     inventory_targets:
       - home-vm-100-ha-primary
@@ -425,7 +431,7 @@ runtime_units:
     inventory_targets:
       - home-lxc-105-pihole-primary
     backup_admission_state: planned
-    description: "DEPRECATED 2026-03-08: Pi-hole LXC 105 removed from Synology exception set per HA-only policy. Target destination changed to pve-vzdump-primary (shop tank-backups plane), but home-lxc-105-pihole-primary target disabled pending migration decision."
+    description: "Home Pi-hole LXC 105 (home-local Synology exception). This is one of two allowed home-local Synology exceptions alongside home-vm-100-ha-primary. Shop infrastructure uses pve-vzdump-primary."
   - unit_id: container-fleet-docker-host
     kind: container-fleet
     hostname: docker-host
@@ -873,15 +879,14 @@ targets:
     classification: critical
     description: "P0 tier. Daily 03:00. Artifact confirmed 2026-02-12 (8GB vzdump-qemu-100-2026_02_12-03_00_01.vma.zst)."
   - name: home-lxc-105-pihole-primary
-    enabled: false
+    enabled: true
     kind: file_glob
     host: proxmox-home
     base_path: "/mnt/pve/synology-backups/dump"
     glob: "vzdump-lxc-105-*.tar.zst"
     stale_after_hours: 168
     classification: rebuildable
-    description: "DISABLED 2026-03-08: Removed from Synology exception set per HA-only policy. Pi-hole LXC 105 should use pve-vzdump-primary lane like other shop LXCs, not home Synology. Migration to 730XD tank-backups required."
-    migration_target: "pve:/tank/backups/vzdump/dump/"
+    description: "Home Pi-hole LXC 105. One of two allowed home-local Synology exceptions (HA VM 100 + Pi-hole LXC 105). Fresh artifact confirmed 2026-03-08 (437M vzdump-lxc-105-2026_03_08-04_00_02.tar.zst)."
   # =============================================================================
   # APP-LEVEL BACKUPS (NAS at house, Tailscale)
   # =============================================================================

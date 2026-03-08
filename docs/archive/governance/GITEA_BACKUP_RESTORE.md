@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-24
+last_verified: 2026-03-08
 scope: app-backup-restore
 ---
 
@@ -17,10 +17,10 @@ Host + stack:
 
 ## Automated Backup
 
-An automated backup script is staged at `ops/staged/dev-tools/gitea-backup.sh`.
-Once deployed to `/usr/local/bin/gitea-backup.sh` on dev-tools with cron `55 2 * * *`,
-it runs daily producing both a gitea dump (zip) and pg_dump (sql.gz), then rsyncs to
-the NAS at `/volume1/backups/apps/gitea/` with 7-day retention.
+The automated backup script is deployed at `/usr/local/bin/gitea-backup.sh` on `dev-tools`
+with cron `55 2 * * *`. It runs daily producing both a Gitea dump (zip) and pg_dump
+(`.sql.gz`), then verifies sync to the 730XD canonical plane at
+`/md1400/backup-cold/apps/dev-tools/gitea/` with 7-day retention.
 
 Tracked in `backup.inventory.yaml` as `app-gitea`. Loop: LOOP-DEV-TOOLS-GITEA-STANDARDIZATION-20260209.
 
@@ -63,21 +63,22 @@ ls -lh "$out"
 '
 ```
 
-3. Move artifacts to NAS backup area:
+3. Move artifacts to the 730XD canonical backup area:
 
 ```bash
 ssh dev-tools '
 set -euo pipefail
-dst_dir="/volume1/backups/apps/gitea"
-sudo mkdir -p "$dst_dir"
-sudo mv /tmp/gitea-dump-*.zip "$dst_dir/" || true
-sudo mv /tmp/gitea-db-*.sql.gz "$dst_dir/" || true
-sudo ls -lt "$dst_dir" | head
+src_dump="$(ls -1t /tmp/gitea-dump-*.zip | head -n 1)"
+src_db="$(ls -1t /tmp/gitea-db-*.sql.gz | head -n 1)"
+dst_dir="/md1400/backup-cold/apps/dev-tools/gitea"
+ssh root@pve "mkdir -p '$dst_dir'"
+rsync -avz "$src_dump" "$src_db" "root@pve:${dst_dir}/"
+ssh root@pve "ls -lt '$dst_dir' | head"
 '
 ```
 
 Notes:
-- If `/volume1/...` is not mounted on `dev-tools`, copy the files to `nas` via `scp`/`rsync` instead.
+- If `pve` is unreachable from `dev-tools`, relay the files through the MacBook and push them to the same 730XD path.
 - Secrets of record live in Infisical (spine namespace); do not copy `.env` off-host.
 
 ## Restore (Disaster Recovery)
@@ -149,4 +150,3 @@ docker compose up -d gitea gitea-runner
 
 Minimum: quarterly restore test into a scratch instance (or after any major Gitea upgrade).
 Record evidence as a spine receipt + note in the relevant loop/gap.
-

@@ -44,4 +44,4 @@ On-demand via Claude Desktop MCP. No watchers, no cron.
 
 | Service | Host | Notes |
 |---------|------|-------|
-| Paperless-ngx | docker-host (VM 200) | Finance stack |
+| Paperless-ngx | finance-stack (VM 211) | Canonical runtime. This superseded contract is read-only only; use `finance-agent` / `fin-agent` for active retained-doc flows. |

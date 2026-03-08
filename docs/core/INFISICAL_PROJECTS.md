@@ -1,7 +1,7 @@
 # Infisical Projects (Canonical Map)
 
 > **Status:** authoritative
-> **Last verified:** 2026-02-17
+> **Last verified:** 2026-03-08
 
 **Purpose:** Prevent agent confusion. Agents MUST NOT guess which Infisical project to use.  
 **Rule:** The spine runtime binds exactly ONE project at a time via `ops/bindings/secrets.binding.yaml`.  
@@ -24,8 +24,8 @@
 
 ### Namespace Contract (Infrastructure/prod)
 
-- Legacy keys currently exist at root path: `/` (historical debt).
-- All new VM infra keys must be written under `/spine/*`.
+- Root path `/` is now **hard-zero** for active runtime work.
+- Active infrastructure and service keys live under `/spine/*`.
 - Caddy/Auth bootstrap namespace is fixed to:
   - `/spine/vm-infra/caddy-auth`
   - required keys: `AUTHENTIK_SECRET_KEY`, `AUTHENTIK_DB_PASSWORD`
@@ -33,20 +33,24 @@
   - `./bin/ops cap run secrets.namespace.status`
 - Policy source:
   - `ops/bindings/secrets.namespace.policy.yaml`
+- Live proof on 2026-03-08:
+  - `secrets.namespace.status`: root-path keys `0`
+  - `secrets.enforcement.status`: strict / hard_zero / deprecated alias writes disallowed
+  - `secrets.projects.status`: expected `9`, found `9`
 
 ---
 
 ## Project Catalog (SSOT)
 
-> **Source Attribution:** Seeded from `~/code/workbench/infra/data/secrets_inventory.json`.
-> The workbench inventory is the external SSOT for secret key counts and project lifecycle.
-> This table is a snapshot for spine context.
+> **Source Attribution:** This table is a spine-governed snapshot for agent discovery.
+> Live project parity is proved through `./bin/ops cap run secrets.projects.status`.
+> Workbench may contain historical reference material but is not the active authority for secret routing.
 
-Last updated: 2026-02-17
+Last updated: 2026-03-08
 
 | lifecycle | project_name | project_id | env | keys | notes |
 |---|---|---|---|---|---|
-| **ACTIVE** | **infrastructure** | `01ddd93a-e0f8-4c7c-ad9f-903d76ef94d9` | prod | ~48 | **CURRENT SPINE BINDING**. Cloudflare, GitHub, Azure, NAS, system infrastructure |
+| **ACTIVE** | **infrastructure** | `01ddd93a-e0f8-4c7c-ad9f-903d76ef94d9` | prod | `208` namespaced keys | **CURRENT SPINE BINDING**. Canonical active authority for Cloudflare, Vaultwarden, Authentik, finance/paperless, and shared infrastructure secrets. |
 | OVERLOADED | mint-os-api | `6c67b03e-ed17-4154-9a94-59837738e432` | prod | ~55 | Dashboard API, vendors, payments, Resend, Stripe. Proposed rename to 'mint-os' |
 | OVERLAPS | mint-os-vault | `66d149d6-f610-4ec3-a400-3ff42ea1aa75` | prod | ~8 | Overlaps with mint-os-api; consolidation candidate |
 | DELETE_CANDIDATE | mint-os-portal | `758e5db3-8d00-4ccf-8d91-aeaad0d6ed37` | prod | 0 | Empty project, delete candidate |

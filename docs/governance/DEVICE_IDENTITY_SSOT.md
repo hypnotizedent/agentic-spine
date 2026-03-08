@@ -1,7 +1,7 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-21
+last_verified: 2026-03-08
 verification_method: spine-capabilities
 scope: all-infrastructure
 github_issue: "#615"
@@ -16,7 +16,7 @@ parent_issues: ["#440", "#609", "#32", "#625"]
 > For service endpoints/ports/health routes → CHECK `docs/governance/SERVICE_REGISTRY.yaml`.
 > Before creating ANY new device/VM/service → FOLLOW THESE RULES.
 >
-> Last Verified: February 21, 2026
+> Last Verified: March 8, 2026
 
 ---
 
@@ -43,7 +43,7 @@ This document establishes:
 |---------|---------|----------|
 | `{function}` | `macbook` | Single-purpose devices |
 | `{function}-{location}` | `proxmox-home`, `immich-1` | When same function exists in multiple locations |
-| `{stack}-{role}` | `docker-host`, `download-stack` | VMs with clear stack ownership |
+| `{stack}-{role}` | `finance-stack`, `download-stack` | VMs with clear stack ownership |
 
 **Rules:**
 - Lowercase only, hyphens for separators
@@ -109,7 +109,8 @@ ping -c1 nas pihole-home ha
 | Switch mgmt IP | 192.168.1.2 (Dell N2024P) |
 | iDRAC | `idrac-shop` — 192.168.1.250 (LAN-only) |
 | Proxmox Host | `pve` (Dell R730XD) |
-| Production VMs | docker-host, infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); download-stack, streaming-stack (media split); immich-1 (deferred) |
+| Production VMs | infra-core, observability, dev-tools, ai-consolidation, automation-stack (core); finance-stack, mint-data, mint-apps (Mint); download-stack, streaming-stack (media split); immich-1 (deferred) |
+| Legacy hold VM | `docker-host` retained for forensic/rollback evidence only; not canonical for fresh-slate Mint |
 | NVR | `nvr-shop` — 192.168.1.216 (LAN-only) |
 | WiFi AP | `ap-shop` — 192.168.1.185 (LAN-only) |
 
@@ -145,7 +146,7 @@ Deep, mutable infra detail lives in the surviving live summaries:
 |------|-------------|----------|------|
 | macbook | 100.85.186.7 | Mobile | Workstation + Spine CLI (RAG deferred) |
 | pve | 100.96.211.33 | Shop | Proxmox VE (shop hypervisor) |
-| docker-host | 100.92.156.118 | Shop | Production docker (Mint OS) |
+| docker-host | 100.92.156.118 | Shop | Legacy hold / forensic-only Mint OS VM (non-canonical) |
 | infra-core | 100.92.91.128 | Shop | Core infra (Cloudflared, Pi-hole, Infisical, Vaultwarden, Authentik) |
 | observability | 100.120.163.70 | Shop | Observability (Prometheus, Grafana, Loki) |
 | dev-tools | 100.90.167.39 | Shop | Dev tools (Gitea, runner, postgres) |
@@ -182,7 +183,7 @@ Notes (Shop LAN-only endpoints):
 | VM | Canonical Name | LAN IP | VMID | MAC | Notes |
 |----|----------------|--------|------|-----|-------|
 | pve (hypervisor) | `pve` | 192.168.1.184 | — | 44:a8:42:22:2c:a6 | Proxmox host; NFS server |
-| docker-host (Mint OS) | `docker-host` | 192.168.1.200 | 200 | bc:24:11:bb:d0:b6 | Static IP (netplan). Mint OS production workloads. |
+| docker-host (legacy hold) | `docker-host` | 192.168.1.200 | 200 | bc:24:11:bb:d0:b6 | Static IP (netplan). Preserved for forensic/rollback evidence only; not canonical Mint authority. |
 | automation-stack | `automation-stack` | 192.168.1.110 | 202 | bc:24:11:31:bc:5a | Automation (n8n, Ollama, Open WebUI). DHCP lease at .110 (no VMID parity). |
 | immich (shop) | `immich` | 192.168.1.203 | 203 | bc:24:11:b8:e7:40 | Shop photos (Tailscale: `immich-1`). |
 | infra-core | `infra-core` | 192.168.1.204 | 204 | bc:24:11:19:84:3c | Static IP; Pi-hole DNS |
@@ -211,12 +212,14 @@ Notes (Shop LAN-only endpoints):
 tailscale status
 
 # Tier 1 health (critical infrastructure)
-for host in pve docker-host proxmox-home; do
+for host in pve infra-core proxmox-home; do
   echo "=== $host ===" && ssh -o ConnectTimeout=5 $host uptime 2>/dev/null || echo "UNREACHABLE"
 done
 
 # Service endpoints
-curl -s https://mintprints-api.ronny.works/health
+./bin/ops cap run mint.public.ingress.proof
+# Expected: canonical Mint public ingress receipt with fresh-slate targets
+
 curl -s https://secrets.ronny.works/api/status
 curl -s https://n8n.ronny.works/healthz
 ```
@@ -225,7 +228,6 @@ curl -s https://n8n.ronny.works/healthz
 
 | Dashboard | URL | Purpose |
 |-----------|-----|---------|
-| Mint OS Admin (legacy) | https://admin.mintprints.co | Legacy business operations |
 | Grafana | https://grafana.ronny.works | Monitoring |
 | n8n | https://n8n.ronny.works | Automation workflows |
 | Proxmox (Shop) | https://pve:8006 | VM management |
@@ -243,7 +245,6 @@ curl -s https://n8n.ronny.works/healthz
 |--------|-------------------|--------------|------|----------|--------------|
 | MacBook Pro M4 | `macbook` | 100.85.186.7 | Workstation + Spine CLI (RAG deferred) | Mobile | `ping macbook` |
 | Dell R730XD | `pve` | 100.96.211.33 | Proxmox Host (Shop) | Shop | `ssh pve uptime` |
-| docker-host VM | `docker-host` | 100.92.156.118 | Mint OS + Production | Shop | `ssh docker-host docker ps` |
 | infra-core VM | `infra-core` | 100.92.91.128 | Core Infra (VM 204) | Shop | `ssh infra-core docker ps` |
 | observability VM | `observability` | 100.120.163.70 | Observability (VM 205) | Shop | `ssh observability docker ps` |
 | Beelink Mini | `proxmox-home` | 100.103.99.62 | Proxmox Host (Home) | Home | `ssh proxmox-home uptime` |
@@ -277,6 +278,12 @@ curl -s https://n8n.ronny.works/healthz
 |--------|-------------------|--------------|------|----------|--------------|
 | immich-1 VM | `immich-1` | 100.114.101.50 | Photos (Shop) | Shop | `curl -s http://immich-1:2283/api/server/ping` |
 
+### Legacy Hold (Non-Canonical)
+
+| Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
+|--------|-------------------|--------------|------|----------|--------------|
+| docker-host VM | `docker-host` | 100.92.156.118 | Legacy Mint OS hold only; not authoritative for fresh-slate Mint | Shop | `ssh docker-host docker ps` |
+
 ### Tier 3: Home Services
 
 | Device | Tailscale Hostname | Tailscale IP | Role | Location | Verification |
@@ -302,7 +309,7 @@ curl -s https://n8n.ronny.works/healthz
 
 ```bash
 # Run from macbook - verifies core infrastructure
-for host in pve docker-host proxmox-home; do
+for host in pve infra-core proxmox-home; do
   echo "=== $host ==="
   ssh -o ConnectTimeout=5 $host uptime 2>/dev/null || echo "UNREACHABLE"
 done
@@ -312,7 +319,7 @@ done
 ```
 === pve ===
  14:32:01 up 5 days,  2:15,  0 users,  load average: 0.15, 0.20, 0.18
-=== docker-host ===
+=== infra-core ===
  14:32:02 up 5 days,  2:14,  0 users,  load average: 0.45, 0.38, 0.35
 === proxmox-home ===
  14:32:03 up 12 days,  4:22,  0 users,  load average: 0.08, 0.12, 0.10
@@ -321,9 +328,9 @@ done
 ### Service-Level Checks
 
 ```bash
-# Mint OS API
-curl -s https://mintprints-api.ronny.works/health
-# Expected: {"status":"ok"} or similar JSON
+# Canonical Mint public ingress
+./bin/ops cap run mint.public.ingress.proof
+# Expected: PASS receipt proving fresh-slate Mint public ingress
 
 # Infisical (Secrets)
 curl -s https://secrets.ronny.works/api/status
@@ -380,7 +387,7 @@ Stream Deck is configured for Home Assistant control only (see the Home Assistan
 | Key | Label | Action | Verification |
 |-----|-------|--------|--------------|
 | 0 | HEALTH | Run `scripts/verify-identity.sh` | Shows pass/fail on deck |
-| 1 | DOCKER | `ssh docker-host docker ps` | Container count |
+| 1 | INFRA | `ssh infra-core docker ps` | Container count |
 | 2 | PVE | `ssh pve qm list` | VM status |
 | 3 | N8N | Open `https://n8n.ronny.works` | Browser |
 | 4 | GRAFANA | Open `https://grafana.ronny.works` | Browser |
@@ -506,7 +513,6 @@ Use the loop ledger instead:
 ```
 CRITICAL HOSTS (Tier 1):
   macbook      100.85.186.7    Workstation + RAG
-  docker-host  100.92.156.118  Mint OS production
   infra-core   100.92.91.128   Core infra (VM 204)
   pve          100.96.211.33   Proxmox (shop)
   proxmox-home 100.103.99.62   Proxmox (home)
@@ -518,12 +524,11 @@ SUBNETS:
 
 QUICK CHECKS:
   tailscale status             # All devices
-  ssh docker-host docker ps    # Containers
+  ssh infra-core docker ps     # Core infra containers
   ssh pve qm list              # Shop VMs
   ssh proxmox-home pct list    # Home LXCs
 
 DASHBOARDS:
-  https://admin.mintprints.co   # Mint OS (legacy)
   https://grafana.ronny.works  # Monitoring
   https://n8n.ronny.works      # Automation
   https://secrets.ronny.works  # Infisical

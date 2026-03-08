@@ -41,29 +41,29 @@ ls -lh "$out"
 '
 ```
 
-2. Move the artifact to the NAS backup area (create the directory if needed):
+2. Move the artifact to the 730XD canonical backup area (create the directory if needed):
 
 ```bash
 ssh infra-core '
 set -euo pipefail
 ts="$(date -u +%Y-%m-%dT%H%M%SZ)"
 src="$(ls -1t /tmp/authentik-db-*.sql.gz | head -n 1)"
-dst_dir="/volume1/backups/apps/authentik"
-sudo mkdir -p "$dst_dir"
-sudo mv "$src" "$dst_dir/"
-sudo ls -lt "$dst_dir" | head
+dst_dir="/md1400/backup-cold/apps/infra-core/authentik"
+ssh root@pve "mkdir -p '$dst_dir'"
+rsync -avz "$src" "root@pve:${dst_dir}/"
+ssh root@pve "ls -lt '$dst_dir' | head"
 '
 ```
 
 Notes:
-- If `/volume1/...` is not mounted on `infra-core`, copy the file to `nas` via `scp`/`rsync` instead.
+- If `pve` is unreachable from `infra-core`, relay the file through the MacBook and push it to the same 730XD path.
 - Secrets of record live in Infisical (spine namespace); do not copy `.env` off-host.
 
 ## Restore (Disaster Recovery)
 
 Restore goal: replace the Authentik Postgres DB content with a known-good dump.
 
-1. Pick a dump file on NAS (or wherever you stored it), and copy it to `infra-core:/tmp/`.
+1. Pick a dump file on the 730XD canonical plane (or wherever you stored it), and copy it to `infra-core:/tmp/`.
 
 2. Stop Authentik application containers (leave Postgres running):
 
@@ -114,4 +114,3 @@ docker compose up -d authentik-server authentik-worker
 
 Minimum: quarterly restore test into a scratch environment (or after any major Authentik upgrade).
 Record evidence as a spine receipt + note in the relevant loop/gap.
-

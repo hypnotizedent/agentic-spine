@@ -21,9 +21,9 @@ Reference: `INFISICAL_BACKUP_RESTORE.md` (app-level backup/restore),
 Before starting the drill, confirm all prerequisites:
 
 - [ ] **Backup freshness**: Run `./bin/ops cap run backup.status` — `app-infisical` must show `ok` (not `stale`).
-- [ ] **Dump artifact exists**: Verify a recent `.sql.gz` on NAS:
+- [ ] **Dump artifact exists**: Verify a recent `.sql.gz` on the 730XD canonical plane:
   ```bash
-  ssh nas 'ls -lht /volume1/backups/apps/infisical/ | head -5'
+  ssh pve 'ls -lht /md1400/backup-cold/apps/infra-core/infisical/ | head -5'
   ```
 - [ ] **infra-core healthy**: Run `./bin/ops cap run services.health.status` — `infisical` endpoint must respond.
 - [ ] **No active incidents**: Confirm no open P0/P1 loops touching infra-core or secrets.
@@ -36,17 +36,17 @@ Before starting the drill, confirm all prerequisites:
 ```bash
 ssh infra-core '
 set -euo pipefail
-# Pull latest dump from NAS
-latest="$(ssh nas "ls -1t /volume1/backups/apps/infisical/*.sql.gz | head -1")"
-scp "nas:${latest}" /tmp/infisical-drill-restore.sql.gz
+# Pull latest dump from 730XD
+latest="$(ssh pve "ls -1t /md1400/backup-cold/apps/infra-core/infisical/*.sql.gz | head -1")"
+scp "pve:${latest}" /tmp/infisical-drill-restore.sql.gz
 ls -lh /tmp/infisical-drill-restore.sql.gz
 '
 ```
 
-If NAS is unreachable from infra-core, relay through MacBook:
+If `pve` is unreachable from infra-core, relay through MacBook:
 ```bash
-latest="$(ssh nas 'ls -1t /volume1/backups/apps/infisical/*.sql.gz | head -1')"
-scp "nas:${latest}" /tmp/infisical-drill-restore.sql.gz
+latest="$(ssh pve 'ls -1t /md1400/backup-cold/apps/infra-core/infisical/*.sql.gz | head -1')"
+scp "pve:${latest}" /tmp/infisical-drill-restore.sql.gz
 scp /tmp/infisical-drill-restore.sql.gz infra-core:/tmp/
 ```
 
@@ -160,11 +160,11 @@ Both must return clean results.
 
 ## Post-Drill: Record Evidence
 
-After completing the drill, create a receipt:
+After completing the drill, create a canonical report:
 
 ```bash
-mkdir -p receipts/dr
-cat > receipts/dr/INFISICAL_DR_RECERT_$(date -u +%Y%m%d).md << 'RECEIPT'
+mkdir -p mailroom/outbox/reports/restore-drills
+cat > mailroom/outbox/reports/restore-drills/INFISICAL_DR_RECERT_$(date -u +%Y%m%d).md << 'RECEIPT'
 ---
 type: dr-recertification
 service: infisical
@@ -179,7 +179,7 @@ operator: @ronny
 | Check | Result | Notes |
 |-------|--------|-------|
 | Backup freshness (backup.status) | PASS/FAIL | |
-| Dump artifact on NAS | PASS/FAIL | filename: |
+| Dump artifact on 730XD | PASS/FAIL | filename: |
 | Scratch DB restore | PASS/FAIL | duration: Xs |
 | Table count validation | PASS/FAIL | count: |
 | Project count validation | PASS/FAIL | count: |
@@ -205,13 +205,13 @@ operator: @ronny
 RECEIPT
 ```
 
-Fill in the template with actual drill results, then commit the receipt.
+Fill in the template with actual drill results, then commit the report.
 
 ## Failure Modes
 
 | Failure | Resolution |
 |---------|------------|
-| NAS unreachable | Relay dump through MacBook (Step 1 fallback) |
+| 730XD unreachable | Relay dump through MacBook (Step 1 fallback) |
 | Scratch DB restore errors | Check pg_dump version parity (Postgres container vs dump version) |
 | Table count = 0 | Dump may be empty or corrupt — check dump file size, re-dump from production |
 | Production health degraded post-drill | Scratch DB is isolated — no production impact expected. Check for resource contention. |

@@ -20,7 +20,7 @@ Host + stack:
 
 Backup artifact: a compressed tar.gz of the `vw-data/` directory (SQLite DB + attachments + config).
 
-Automated: cron on infra-core runs daily at 02:45, dumps to local, rsync to NAS.
+Automated: cron on infra-core runs daily at 02:45, dumps to local, rsyncs to the 730XD canonical plane at `/md1400/backup-cold/apps/infra-core/vaultwarden/`.
 
 Manual backup:
 
@@ -40,20 +40,20 @@ ls -lh "$out"
 '
 ```
 
-2. Copy the artifact to the NAS:
+2. Copy the artifact to the 730XD canonical plane:
 
 ```bash
 ssh infra-core '
 set -euo pipefail
 src="$(ls -1t /tmp/vaultwarden-backup-*.tar.gz | head -n 1)"
-rsync -avz "$src" ronadmin@nas:/volume1/backups/apps/vaultwarden/
+rsync -avz "$src" root@pve:/md1400/backup-cold/apps/infra-core/vaultwarden/
 '
 ```
 
-If `nas` is unreachable from infra-core, pull the dump to the MacBook first:
+If `pve` is unreachable from infra-core, pull the dump to the MacBook first:
 ```bash
 scp infra-core:/tmp/vaultwarden-backup-*.tar.gz /tmp/
-scp /tmp/vaultwarden-backup-*.tar.gz ronadmin@nas:/volume1/backups/apps/vaultwarden/
+scp /tmp/vaultwarden-backup-*.tar.gz pve:/md1400/backup-cold/apps/infra-core/vaultwarden/
 ```
 
 Notes:
@@ -70,7 +70,7 @@ Prerequisites:
 - The Vaultwarden compose stack deployed at `/opt/stacks/vaultwarden/`.
 - The `.env` file populated (ADMIN_TOKEN from Infisical at `/spine/vm-infra/vaultwarden/`).
 
-1. Pick a backup file on NAS and copy it to `infra-core:/tmp/`.
+1. Pick a backup file on the 730XD canonical plane and copy it to `infra-core:/tmp/`.
 
 2. Stop Vaultwarden:
 
@@ -150,7 +150,7 @@ ENVEOF
 
 If Vaultwarden is completely unavailable:
 
-1. Check the NAS for the most recent backup: `ssh ronadmin@nas 'ls -lt /volume1/backups/apps/vaultwarden/'`
+1. Check 730XD for the most recent backup: `ssh pve 'ls -lt /md1400/backup-cold/apps/infra-core/vaultwarden/'`
 2. If infra-core is dead, restore the VM from vzdump first, then apply the app-level restore above.
 3. Critical accounts may also be recoverable from browser password managers or mobile apps that cache vault data offline.
 4. The Vaultwarden admin panel (`/admin`) requires `ADMIN_TOKEN` — retrieve from Infisical or cached credentials.

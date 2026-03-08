@@ -64,13 +64,13 @@ ls -lh "$out"
 '
 ```
 
-3. Sync to NAS archive:
+3. Sync to the 730XD canonical archive path:
 
 ```bash
 ssh communications-stack '
 set -euo pipefail
-dst="ronadmin@100.102.199.111:/volume1/backups/apps/stalwart"
-ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ronadmin@100.102.199.111 "mkdir -p /volume1/backups/apps/stalwart"
+dst="root@pve:/md1400/backup-cold/apps/communications/stalwart"
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@pve "mkdir -p /md1400/backup-cold/apps/communications/stalwart"
 rsync -az --timeout=120 /tmp/stalwart-config-*.tar.gz "$dst/"
 rsync -az --timeout=120 /tmp/stalwart-data-*.tar.gz "$dst/"
 '

@@ -2,8 +2,8 @@
 # Status: authoritative
 # authority_state: authoritative
 # authority_concern: service_registry_surfaces
-# Last verified: 2026-03-05
-# Updated: 2026-03-05
+# Last verified: 2026-03-08
+# Updated: 2026-03-08
 #
 # Host IPs: Canonical source is DEVICE_IDENTITY_SSOT.md
 #           This registry defines WHAT services exist and WHERE they run.
@@ -11,8 +11,10 @@
 # reference only and are non-authoritative for runtime operations.
 #
 # Scope policy:
-#   IN SCOPE:  Shop-hosted services (pve VMs, docker-host). These have
-#              health bindings, docker compose targets, and SLA expectations.
+#   IN SCOPE:  Shop-hosted services on active authority hosts (purpose-built VMs).
+#              Legacy docker-host entries are preserved only as deprecated hold
+#              surfaces and are not authoritative for fresh-slate Mint runtime,
+#              retained docs, or active operator routing.
 #   OUT OF SCOPE: Home-site services (proxmox-home, pihole-home, download-home,
 #              hass). These are secondary/personal, Tailscale-only, no SLA.
 #              Tracked in ssh.targets.yaml for connectivity checks only.
@@ -46,7 +48,7 @@ services:
     container: mint-os-dashboard-api
     compose: ~/stacks/mint-os/docker-compose.yml
     status: deprecated
-    notes: "DEPRECATED — container name is mint-os-dashboard-api. Health probe disabled. Legacy secret authority retired; active secret authority is Spine-native infrastructure plus /spine/services/*."
+    notes: "DEPRECATED legacy hold API on docker-host. Health probe disabled. Legacy secret authority retired; active secret authority is Spine-native infrastructure plus /spine/services/*."
 
   mint-os-postgres:
     host: docker-host
@@ -54,40 +56,40 @@ services:
     container: mint-os-postgres
     compose: ~/stacks/mint-os/docker-compose.yml
     status: deprecated
-    notes: "DEPRECATED — still running with active dependents (files-api, quote-page, MCPJungle postgres MCP). Decommission blocked until dependents migrate."
+    notes: "DEPRECATED legacy data hold on docker-host. No fresh-slate Mint runtime depends on this database; preserve for forensic/rollback reads only until final retirement."
 
-  # ─── Mint OS Frontends (docker-host) — active, running ──────────────
+  # ─── Mint OS Frontends (docker-host) — legacy hold only ─────────────
   mint-os-admin:
     host: docker-host
     port: 3333
     container: mint-os-admin
     compose: ~/stacks/mint-os/docker-compose.frontends.yml
-    status: active
-    notes: "Mint OS admin frontend."
+    status: deprecated
+    notes: "DEPRECATED legacy hold frontend on docker-host. Not a canonical Mint operator surface; fresh-slate Mint authority is mint-apps + mint-data."
 
   mint-os-customer:
     host: docker-host
     port: 3334
     container: mint-os-customer
     compose: ~/stacks/mint-os/docker-compose.frontends.yml
-    status: active
-    notes: "Mint OS customer frontend."
+    status: deprecated
+    notes: "DEPRECATED legacy hold frontend on docker-host. Not canonical for customer-facing Mint flow."
 
   mint-os-production:
     host: docker-host
     port: 3336
     container: mint-os-production
     compose: ~/stacks/mint-os/docker-compose.frontends.yml
-    status: active
-    notes: "Mint OS production frontend."
+    status: deprecated
+    notes: "DEPRECATED legacy hold frontend on docker-host. Fresh-slate production flow authority lives on mint-apps + finance-stack."
 
   mint-os-kanban:
     host: docker-host
     port: 3337
     container: mint-os-kanban
     compose: ~/stacks/mint-os/docker-compose.frontends.yml
-    status: active
-    notes: "Mint OS kanban board."
+    status: deprecated
+    notes: "DEPRECATED legacy hold frontend on docker-host. Not a canonical Mint workflow surface."
 
   mint-os-job-estimator:
     host: docker-host
@@ -102,8 +104,8 @@ services:
     port: 16379
     container: mint-os-redis
     compose: ~/stacks/mint-os/docker-compose.yml
-    status: active
-    notes: "Redis for mint-os apps."
+    status: deprecated
+    notes: "DEPRECATED redis backing the docker-host legacy hold stack only. Not authoritative for active Mint runtime."
 
   minio:
     host: docker-host
@@ -113,11 +115,11 @@ services:
     compose: ~/stacks/storage/docker-compose.yml
     volume: /mnt/docker/mint-os-data/minio
     networks: [storage-network, mint-os-network]
-    status: active
+    status: deprecated
     notes: >
-      8 buckets (86k+ objects). Canonical via storage stack — decoupled from mint-os
-      app compose (LOOP-MINT-MINIO-FRESH-SLATE-CUTOVER-20260212). Volume on NFS.
-      Consumers: artwork-module (files-api), quote-page, dashboard-api, presigned URLs.
+      DEPRECATED legacy MinIO hold on docker-host. Active Mint MinIO authority is
+      mint-modules-minio on mint-data VM 212, and active Mint usage is artwork-only.
+      Invoice PDFs are not active MinIO truth; retained-doc authority is Paperless.
 
   mint-modules-postgres:
     host: mint-data
@@ -135,7 +137,7 @@ services:
     container: mint-modules-minio
     compose: /opt/stacks/mint-data/docker-compose.yml
     status: active
-    notes: "Mint data plane MinIO on VM 212 (fresh-slate)."
+    notes: "Mint data plane MinIO on VM 212 (fresh-slate). Canonical active Mint usage is artwork-only; retained invoices belong in Paperless."
 
   mint-modules-redis:
     host: mint-data
@@ -845,6 +847,7 @@ hosts:
     tailscale_ip: 100.92.156.118
     ssh: docker-host
     os: linux-mint
+    notes: "Legacy hold VM 200 only. Not authoritative for fresh-slate Mint runtime, finance, or retained-doc workflows."
 
   automation-stack:
     tailscale_ip: 100.98.70.70

@@ -45,4 +45,4 @@ On-demand via Claude Desktop MCP. No watchers, no cron.
 
 | Service | Host | Notes |
 |---------|------|-------|
-| Firefly III | docker-host (VM 200) | Finance stack |
+| Firefly III | finance-stack (VM 211) | Canonical runtime. This superseded contract is read-only only; use `finance-agent` for active governed finance flows. |
