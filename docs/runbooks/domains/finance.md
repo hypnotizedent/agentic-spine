@@ -3,6 +3,8 @@
 ## Scope
 Primary recovery flow for domain `finance`.
 
+**Finance Operations**: For backup, restore, runtime mutations, and operational procedures, see `docs/governance/FINANCE_STACK_OPERATOR_CHECKLIST.md`.
+
 ## Detect
 1. `./bin/ops cap run spine.log.query -- --since-hours 24 --domain finance --status failed`
 2. `./bin/ops cap run verify.run -- domain finance`

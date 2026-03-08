@@ -1,35 +1,56 @@
 ---
 status: authoritative
 owner: "@ronny"
-last_verified: 2026-02-25
+last_verified: 2026-03-08
 scope: app-backup-restore
+canonical_doctrine: docs/governance/FINANCE_STACK_DOCTRINE_V1.md
 ---
 
 # Finance Stack Backup + Restore (App-Level)
 
-Purpose: define a repeatable app-level backup/restore procedure for finance-stack
-(VM 211) services: Firefly III, Ghostfolio, and Paperless-ngx.
+**Canonical Doctrine**: See `docs/governance/FINANCE_STACK_DOCTRINE_V1.md` for non-negotiable finance stack governance rules.
+
+Purpose: define the authoritative backup, restore, and destructive-safety
+contract for finance-stack (VM 211) services: Firefly III, Ghostfolio, and
+Paperless-ngx.
 
 Host + stack:
 - Host: `finance-stack` (VM 211)
 - Compose: `/opt/stacks/finance/docker-compose.yml`
 - Runtime script: `/usr/local/bin/finance-stack-backup.sh`
 - Cron: `20 6 * * * /usr/local/bin/finance-stack-backup.sh >> /var/log/finance-stack-backup.log 2>&1`
+- Live data root: `/mnt/data/finance`
+- Local guarded staging: `/mnt/backups/finance/staging`
+- Local last-good archive: `/mnt/backups/finance/last-good`
 
 ## Automated Backup Contract
 
-The backup script performs four artifacts in a single run:
+The backup script creates four artifacts in a single run:
 1. Firefly DB dump: `firefly-db-<ts>.sql.gz`
 2. Ghostfolio DB dump: `ghostfolio-db-<ts>.sql.gz`
 3. Paperless DB dump: `paperless-db-<ts>.sql.gz`
 4. Paperless export zip via `document_exporter`: `paperless-export-<ts>.zip`
+5. Finance backup sanity manifest: `finance-backup-manifest-<ts>.txt`
 
 Destination (NAS):
 - `/volume1/backups/apps/finance/`
 - `/volume1/backups/apps/ghostfolio/`
 - `/volume1/backups/apps/paperless/`
 
-Retention: 14 days (script-side prune).
+Success criteria:
+- Local artifact creation succeeds.
+- NAS connectivity succeeds.
+- Every artifact is copied offsite.
+- Every copied artifact is verified on NAS before staging cleanup.
+- Sanity checks do not indicate empty-state or severe regression unless explicit
+  break-glass override is set with `FINANCE_BACKUP_ALLOW_REGRESSION=1`.
+
+Failure behavior:
+- If offsite copy fails, the run fails and staging is preserved.
+- If sanity checks fail, the run fails before promoting new artifacts.
+- `last-good` is only updated after verified offsite success.
+
+Retention: 14 days (NAS-side prune after verification).
 
 Tracked in `ops/bindings/backup.inventory.yaml`:
 - `app-firefly`
@@ -42,7 +63,7 @@ Tracked in `ops/bindings/backup.inventory.yaml`:
 Run immediately on VM 211:
 
 ```bash
-ssh finance-stack '/usr/local/bin/finance-stack-backup.sh'
+ssh finance-stack 'sudo /usr/local/bin/finance-stack-backup.sh'
 ```
 
 Verify newest artifacts:
@@ -51,7 +72,17 @@ Verify newest artifacts:
 ssh ronadmin@nas 'ls -lt /volume1/backups/apps/finance | head'
 ssh ronadmin@nas 'ls -lt /volume1/backups/apps/ghostfolio | head'
 ssh ronadmin@nas 'ls -lt /volume1/backups/apps/paperless | head'
+ssh finance-stack 'ls -lt /mnt/backups/finance/last-good | head'
 ```
+
+Break-glass backup override:
+
+```bash
+ssh finance-stack 'sudo FINANCE_BACKUP_ALLOW_REGRESSION=1 /usr/local/bin/finance-stack-backup.sh'
+```
+
+Use the override only when an operator has already validated that the apparent
+regression is expected and has recorded a receipt.
 
 ## Restore (Disaster Recovery)
 
@@ -59,6 +90,15 @@ Prereqs:
 - VM 211 restored/rebuilt.
 - Stack present at `/opt/stacks/finance`.
 - `.env` reconstructed from Infisical (`/spine/services/finance` and `/spine/services/paperless`).
+- Confirm the destructive guard contract before any compose mutation:
+
+```bash
+./ops/plugins/docker/bin/docker-compose-up finance-stack finance
+./ops/plugins/docker/bin/docker-compose-down finance-stack finance
+```
+
+Both commands should block protected empty-state/destructive actions unless
+break-glass is explicitly acknowledged.
 
 ### Firefly III restore (Postgres)
 
@@ -115,8 +155,11 @@ After backup or restore:
 
 ```bash
 ./bin/ops cap run backup.status
+./bin/ops cap run finance.backup.status
 ./bin/ops cap run finance.stack.status
 ```
 
 Confirm `app-firefly`, `app-ghostfolio`, `app-paperless-db`, and
-`app-paperless-export` are fresh in `backup.status`.
+`app-paperless-export` are fresh in `backup.status`, and confirm the newest
+finance manifest aligns with expected row/document counts before treating the
+run as a new recovery baseline.
