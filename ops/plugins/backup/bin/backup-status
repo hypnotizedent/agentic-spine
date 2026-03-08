@@ -133,6 +133,41 @@ _is_contextual_off_lan_block() {
   _is_off_lan_context_host "$host"
 }
 
+_resolve_ssh_ref() {
+  local target_id="$1"
+  local ssh_user="$2"
+  local ssh_host="$3"
+  local ssh_port="$4"
+  local ssh_timeout="$5"
+  local tailscale_ip="${6:-}"
+  local -a ssh_opts=(
+    -n
+    -o "ConnectTimeout=$ssh_timeout"
+    -o "StrictHostKeyChecking=$DEF_STRICT"
+    -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+    -o "NumberOfPasswordPrompts=0"
+    -o "LogLevel=ERROR"
+    -p "$ssh_port"
+  )
+  if [[ "$DEF_BATCH" == "true" ]]; then
+    ssh_opts+=(-o "BatchMode=yes")
+  fi
+
+  local -a candidates=("$target_id" "${ssh_user}@${ssh_host}")
+  if [[ -n "$tailscale_ip" && "$tailscale_ip" != "null" && "$tailscale_ip" != "$ssh_host" ]]; then
+    candidates+=("${ssh_user}@${tailscale_ip}")
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if ssh "${ssh_opts[@]}" "$candidate" "true" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 echo "backup.status"
 echo "binding: $BINDING_FILE"
 echo
@@ -163,6 +198,7 @@ while IFS=$'\t' read -r NAME HOST BASE_PATH GLOB STALE_HOURS SSH_TIMEOUT; do
   SSH_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .host // \"\"" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
   SSH_USER="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .user // \"\"" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
   SSH_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .port // ${DEF_PORT}" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
+  TAILSCALE_IP="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .tailscale_ip // \"\"" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
   TARGET_POLICY="$(yq -r ".ssh.targets[] | select(.id == \"$HOST\") | .access_policy // \"lan_first\"" "$SSH_TARGETS_FILE" 2>/dev/null | head -n1 || true)"
 
   if [[ -z "$SSH_HOST" || "$SSH_HOST" == "null" ]]; then
@@ -175,7 +211,14 @@ while IFS=$'\t' read -r NAME HOST BASE_PATH GLOB STALE_HOURS SSH_TIMEOUT; do
   [[ -n "$SSH_PORT" && "$SSH_PORT" != "null" ]] || SSH_PORT="$DEF_PORT"
   [[ -n "$TARGET_POLICY" && "$TARGET_POLICY" != "null" ]] || TARGET_POLICY="lan_first"
 
-  if [[ "$TARGET_POLICY" == "lan_first" ]] && _is_off_lan_context_host "$SSH_HOST"; then
+  SSH_REF="$(_resolve_ssh_ref "$HOST" "$SSH_USER" "$SSH_HOST" "$SSH_PORT" "$SSH_TIMEOUT" "$TAILSCALE_IP" || true)"
+  if [[ -n "$SSH_REF" ]]; then
+    SSH_USER_AT_HOST="$SSH_REF"
+  else
+    SSH_USER_AT_HOST="${SSH_USER}@${SSH_HOST}"
+  fi
+
+  if [[ -z "$SSH_REF" && "$TARGET_POLICY" == "lan_first" ]] && _is_off_lan_context_host "$SSH_HOST"; then
     BLOCKED=$((BLOCKED+1))
     printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
       "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "off_lan_connectivity_context"
@@ -183,7 +226,7 @@ while IFS=$'\t' read -r NAME HOST BASE_PATH GLOB STALE_HOURS SSH_TIMEOUT; do
   fi
 
   # Passive mode avoids interactive tailscale SSH browser auth popups.
-  if [[ "$TAILSCALE_PROBE_MODE" == "passive" && "$SSH_HOST" =~ ^100\. ]]; then
+  if [[ -z "$SSH_REF" && "$TAILSCALE_PROBE_MODE" == "passive" && "$SSH_HOST" =~ ^100\. ]]; then
     BLOCKED=$((BLOCKED+1))
     printf "%-22s %-14s %-28s %-24s %-22s %-9s %-8s %s\n" \
       "$NAME" "$HOST" "${BASE_PATH:0:28}" "-" "-" "-" "BLOCKED" "machine_target_is_tailscale_ip"
@@ -220,7 +263,7 @@ echo "MTIME=$MTIME"
       ssh_opts+=(-o "BatchMode=yes")
     fi
     ssh "${ssh_opts[@]}" \
-      "${SSH_USER}@${SSH_HOST}" "bash -c $(printf "%q" "$REMOTE_SCRIPT") -- $(printf "%q" "$BASE_PATH") $(printf "%q" "$GLOB")" \
+      "$SSH_USER_AT_HOST" "bash -c $(printf "%q" "$REMOTE_SCRIPT") -- $(printf "%q" "$BASE_PATH") $(printf "%q" "$GLOB")" \
       2>"$STDERR_FILE"
   )"
   RC=$?
@@ -279,13 +322,39 @@ echo "MTIME=$MTIME"
 
   STATUS="OK"
   REASON="ok"
+  if [[ "$HOST" == "pve" && "$BASE_PATH" == "/md1400/backup-cold/vzdump/pve" && "$NEWEST" =~ ^vzdump-(qemu|lxc)- ]]; then
+    SIZE_OUT="$(
+      ssh_opts=(
+        -n
+        -o "ConnectTimeout=$SSH_TIMEOUT"
+        -o "StrictHostKeyChecking=$DEF_STRICT"
+        -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+        -o "NumberOfPasswordPrompts=0"
+        -o "LogLevel=ERROR"
+        -p "$SSH_PORT"
+      )
+      if [[ "$DEF_BATCH" == "true" ]]; then
+        ssh_opts+=(-o "BatchMode=yes")
+      fi
+      ssh "${ssh_opts[@]}" "$SSH_USER_AT_HOST" \
+        "dest='$BASE_PATH/$NEWEST'; src='/tank/backups/vzdump/dump/$NEWEST'; test -f \"\$dest\" && test -f \"\$src\" && printf 'DEST=%s\nSRC=%s\n' \"\$(stat -c %s \"\$dest\")\" \"\$(stat -c %s \"\$src\")\"" \
+        2>/dev/null || true
+    )"
+    DEST_SIZE="$(echo "$SIZE_OUT" | sed -n 's/^DEST=//p' | head -n1)"
+    SRC_SIZE="$(echo "$SIZE_OUT" | sed -n 's/^SRC=//p' | head -n1)"
+    if [[ "$DEST_SIZE" =~ ^[0-9]+$ && "$SRC_SIZE" =~ ^[0-9]+$ && "$SRC_SIZE" -gt 0 && "$DEST_SIZE" -ne "$SRC_SIZE" ]]; then
+      STATUS="COPYING"
+      REASON="size_mismatch_copy_in_progress"
+      DEGRADED=$((DEGRADED+1))
+    fi
+  fi
   # compare as integers for stale threshold
   AGE_HRS_INT=$((AGE_SEC / 3600))
-  if [[ $AGE_HRS_INT -gt $STALE_HOURS ]]; then
+  if [[ "$STATUS" == "OK" && $AGE_HRS_INT -gt $STALE_HOURS ]]; then
     STATUS="STALE"
     REASON="stale"
     DEGRADED=$((DEGRADED+1))
-  else
+  elif [[ "$STATUS" == "OK" ]]; then
     OK=$((OK+1))
   fi
 
