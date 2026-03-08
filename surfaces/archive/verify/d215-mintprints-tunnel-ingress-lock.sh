@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TRIAGE: Enforce mintprints.com tunnel ingress rules exist with correct service targets.
+# TRIAGE: Enforce mintprints.com primary tunnel ingress rules exist with correct service targets.
 # D215: mintprints-tunnel-ingress-lock
 set -euo pipefail
 
@@ -46,7 +46,6 @@ ingress = cfg.get("ingress", [])
 expected = {
     "mintprints.com": "http://quote-page:3341",
     "www.mintprints.com": "http://quote-page:3341",
-    "customer.mintprints.com": "http://quote-page:3341",
 }
 
 found = {}
