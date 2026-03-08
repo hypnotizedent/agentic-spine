@@ -16,6 +16,7 @@ TIMESTAMP=$(date -u +%Y-%m-%dT%H%M%SZ)
 KEEP_LOCAL=3
 LOG_TAG="mail-archiver-backup"
 SUCCESS_MARKER="$BACKUP_STAGING/.sync-success"
+LOCK_FILE="/var/lock/mail-archiver-backup.lock"
 FAIL_COUNT=0
 
 OFFSITE_SSH_OPTS=(
@@ -37,6 +38,20 @@ offsite_ssh() {
   ssh "${OFFSITE_SSH_OPTS[@]}" "$OFFSITE_USER@$OFFSITE_HOST" "$@"
 }
 
+acquire_lock() {
+  exec 200>"$LOCK_FILE"
+  if ! flock -n 200; then
+    log "ERROR: Another backup is already running (lock file: $LOCK_FILE)"
+    log "ERROR: If this is incorrect, remove $LOCK_FILE manually"
+    exit 1
+  fi
+  echo $$ >&200
+}
+
+release_lock() {
+  rm -f "$LOCK_FILE"
+}
+
 cleanup() {
   local exit_code=$?
   if [[ -f "$SUCCESS_MARKER" ]]; then
@@ -46,8 +61,11 @@ cleanup() {
     log "ERROR: Backup failed (exit $exit_code) — preserving staging artifacts at $BACKUP_STAGING"
     log "ERROR: Most recent backup NOT synced to 730XD — manual intervention required"
   fi
+  release_lock
 }
 trap cleanup EXIT
+
+acquire_lock
 
 mkdir -p "$BACKUP_STAGING" "$BACKUP_ARCHIVE"
 rm -f "$SUCCESS_MARKER"

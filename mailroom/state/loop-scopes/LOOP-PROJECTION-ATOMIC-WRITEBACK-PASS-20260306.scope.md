@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-PROJECTION-ATOMIC-WRITEBACK-PASS-20260306
 created: 2026-03-06
-status: active
+status: closed
 owner: "@ronny"
 scope: projection
 priority: high
