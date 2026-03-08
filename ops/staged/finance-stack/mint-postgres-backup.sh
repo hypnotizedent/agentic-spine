@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # mint-postgres-backup.sh - App-level backup for VM 212 Mint Postgres
-# GOVERNANCE: tier1_critical backup with offsite NAS sync verification
+# DESTINATION: 730XD canonical backup plane (/md1400/backup-cold/apps/mint-data/postgres/)
+# GOVERNANCE: tier1_critical backup with 730XD offsite sync verification
 set -euo pipefail
 
 STACK_DIR="/opt/stacks/mint-data"
 BACKUP_STAGING="/mnt/backups/mint-postgres/staging"
 BACKUP_ARCHIVE="/mnt/backups/mint-postgres/last-good"
-NAS_USER="ronadmin"
-NAS_HOST="100.102.199.111"
-NAS_BASE="/volume1/backups/apps"
-NAS_IDENTITY_FILE="${NAS_IDENTITY_FILE:-/home/ubuntu/.ssh/id_ed25519}"
+OFFSITE_USER="root"
+OFFSITE_HOST="pve"
+OFFSITE_BASE="/md1400/backup-cold/apps/mint-data/postgres"
+OFFSITE_IDENTITY_FILE="${OFFSITE_IDENTITY_FILE:-/home/ubuntu/.ssh/id_ed25519}"
 RETENTION_DAYS=14
 TIMESTAMP="$(date -u +%Y-%m-%dT%H%M%SZ)"
 LOG_TAG="mint-postgres-backup"
@@ -17,33 +18,33 @@ SUCCESS_MARKER="$BACKUP_STAGING/.sync-success"
 ALLOW_REGRESSION="${MINT_BACKUP_ALLOW_REGRESSION:-0}"
 FAIL_COUNT=0
 
-NAS_SSH_OPTS=(
+OFFSITE_SSH_OPTS=(
   -o BatchMode=yes
   -o StrictHostKeyChecking=no
   -o UserKnownHostsFile=/dev/null
   -o LogLevel=ERROR
   -o ConnectTimeout=30
 )
-if [[ -n "$NAS_IDENTITY_FILE" && -r "$NAS_IDENTITY_FILE" ]]; then
-  NAS_SSH_OPTS+=(-i "$NAS_IDENTITY_FILE")
+if [[ -n "$OFFSITE_IDENTITY_FILE" && -r "$OFFSITE_IDENTITY_FILE" ]]; then
+  OFFSITE_SSH_OPTS+=(-i "$OFFSITE_IDENTITY_FILE")
 fi
-printf -v RSYNC_SSH '%q ' ssh "${NAS_SSH_OPTS[@]}"
+printf -v RSYNC_SSH '%q ' ssh "${OFFSITE_SSH_OPTS[@]}"
 RSYNC_SSH="${RSYNC_SSH% }"
 
 log() { logger -t "$LOG_TAG" "$*"; echo "[$(date -Iseconds)] $*"; }
 
-nas_ssh() {
-  ssh "${NAS_SSH_OPTS[@]}" "$NAS_USER@$NAS_HOST" "$@"
+offsite_ssh() {
+  ssh "${OFFSITE_SSH_OPTS[@]}" "$OFFSITE_USER@$OFFSITE_HOST" "$@"
 }
 
 cleanup() {
   local exit_code=$?
   if [[ -f "$SUCCESS_MARKER" ]]; then
-    log "NAS sync verified — cleaning staging area"
+    log "730XD offsite sync verified — cleaning staging area"
     rm -rf "$BACKUP_STAGING"
   elif (( exit_code != 0 )); then
     log "ERROR: Backup failed (exit $exit_code) — preserving staging artifacts at $BACKUP_STAGING"
-    log "ERROR: Most recent backup NOT synced to NAS — manual intervention required"
+    log "ERROR: Most recent backup NOT synced to 730XD — manual intervention required"
   fi
 }
 trap cleanup EXIT
@@ -162,6 +163,7 @@ enforce_sanity_guard() {
 
 log "=== mint-postgres-backup starting at $TIMESTAMP ==="
 log "Target: $PG_DB @ $CONTAINER_NAME"
+log "Destination: 730XD canonical backup plane ($OFFSITE_HOST:$OFFSITE_BASE)"
 
 postgres_dump="$BACKUP_STAGING/mint-postgres-${TIMESTAMP}.sql.gz"
 manifest_file="$BACKUP_STAGING/mint-postgres-manifest-${TIMESTAMP}.txt"
@@ -176,7 +178,7 @@ else
 fi
 
 if (( FAIL_COUNT > 0 )); then
-  log "ERROR: Phase 1 completed with $FAIL_COUNT failure(s) — aborting before NAS sync"
+  log "ERROR: Phase 1 completed with $FAIL_COUNT failure(s) — aborting before 730XD sync"
   exit 1
 fi
 
@@ -194,53 +196,49 @@ if ! enforce_sanity_guard "$manifest_file" "$latest_manifest"; then
 fi
 log "Backup sanity guard passed"
 
-log "=== Phase 2: NAS offsite sync ==="
-log "Testing NAS connectivity..."
-if ! nas_ssh "echo 'connectivity OK'" >/dev/null 2>&1; then
-  log "ERROR: Cannot reach NAS at $NAS_HOST — aborting sync"
+log "=== Phase 2: 730XD offsite sync ==="
+log "Testing 730XD connectivity..."
+if ! offsite_ssh "echo 'connectivity OK'" >/dev/null 2>&1; then
+  log "ERROR: Cannot reach 730XD at $OFFSITE_HOST — aborting sync"
   log "ERROR: Local backups preserved at $BACKUP_STAGING"
   exit 1
 fi
 
-log "Ensuring NAS backup directory exists..."
-if ! nas_ssh "mkdir -p '$NAS_BASE/mint-postgres'" >/dev/null 2>&1; then
-  log "ERROR: Failed to create NAS directory"
+log "Ensuring 730XD backup directory exists..."
+if ! offsite_ssh "mkdir -p '$OFFSITE_BASE'" >/dev/null 2>&1; then
+  log "ERROR: Failed to create 730XD directory"
   exit 1
 fi
 
-log "Syncing artifacts to NAS..."
+log "Syncing artifacts to 730XD..."
 sync_fail=0
-for artifact in \
-  "$postgres_dump:mint-postgres" \
-  "$manifest_file:mint-postgres"; do
-  src="${artifact%%:*}"
-  dest_subdir="${artifact##*:}"
-  if [[ ! -f "$src" ]]; then
-    log "WARN: Skipping missing artifact: $src"
+for artifact in "$postgres_dump" "$manifest_file"; do
+  if [[ ! -f "$artifact" ]]; then
+    log "WARN: Skipping missing artifact: $artifact"
     continue
   fi
-  log "  Syncing $(basename "$src") -> $dest_subdir/"
-  if ! rsync -az --timeout=120 -e "$RSYNC_SSH" "$src" "$NAS_USER@$NAS_HOST:$NAS_BASE/$dest_subdir/"; then
-    log "ERROR: rsync failed for $(basename "$src")"
+  log "  Syncing $(basename "$artifact") -> 730XD"
+  if ! rsync -az --timeout=120 -e "$RSYNC_SSH" "$artifact" "$OFFSITE_USER@$OFFSITE_HOST:$OFFSITE_BASE/"; then
+    log "ERROR: rsync failed for $(basename "$artifact")"
     sync_fail=$((sync_fail + 1))
   fi
 done
 
 if (( sync_fail > 0 )); then
-  log "ERROR: $sync_fail artifact(s) failed to sync to NAS"
+  log "ERROR: $sync_fail artifact(s) failed to sync to 730XD"
   log "ERROR: Local backups preserved at $BACKUP_STAGING for manual recovery"
   exit 1
 fi
 
-log "NAS sync complete — all artifacts transferred"
+log "730XD sync complete — all artifacts transferred"
 
-log "=== Phase 3: NAS verification ==="
+log "=== Phase 3: 730XD verification ==="
 verify_fail=0
 for expected in \
-  "mint-postgres/mint-postgres-${TIMESTAMP}.sql.gz" \
-  "mint-postgres/mint-postgres-manifest-${TIMESTAMP}.txt"; do
-  if ! nas_ssh "test -f '$NAS_BASE/$expected'" 2>/dev/null; then
-    log "ERROR: NAS verification failed — missing $expected"
+  "mint-postgres-${TIMESTAMP}.sql.gz" \
+  "mint-postgres-manifest-${TIMESTAMP}.txt"; do
+  if ! offsite_ssh "test -f '$OFFSITE_BASE/$expected'" 2>/dev/null; then
+    log "ERROR: 730XD verification failed — missing $expected"
     verify_fail=$((verify_fail + 1))
   else
     log "  Verified: $expected"
@@ -248,18 +246,18 @@ for expected in \
 done
 
 if (( verify_fail > 0 )); then
-  log "ERROR: NAS verification failed for $verify_fail artifact(s)"
+  log "ERROR: 730XD verification failed for $verify_fail artifact(s)"
   log "ERROR: Local backups preserved at $BACKUP_STAGING"
   exit 1
 fi
 
-log "NAS verification passed — all artifacts confirmed on NAS"
+log "730XD verification passed — all artifacts confirmed on 730XD"
 
-log "=== Phase 4: NAS retention cleanup ==="
-nas_ssh "bash -lc '
-    find \"$NAS_BASE/mint-postgres\" -name \"mint-postgres-*.sql.gz\" -mtime +$RETENTION_DAYS -delete 2>/dev/null || true
-    find \"$NAS_BASE/mint-postgres\" -name \"mint-postgres-manifest-*.txt\" -mtime +$RETENTION_DAYS -delete 2>/dev/null || true
-  '" >/dev/null 2>&1 || log "WARN: NAS retention cleanup encountered errors (non-fatal)"
+log "=== Phase 4: 730XD retention cleanup ==="
+offsite_ssh "bash -lc '
+    find \"$OFFSITE_BASE\" -name \"mint-postgres-*.sql.gz\" -mtime +$RETENTION_DAYS -delete 2>/dev/null || true
+    find \"$OFFSITE_BASE\" -name \"mint-postgres-manifest-*.txt\" -mtime +$RETENTION_DAYS -delete 2>/dev/null || true
+  '" >/dev/null 2>&1 || log "WARN: 730XD retention cleanup encountered errors (non-fatal)"
 
 log "Retention cleanup complete"
 
@@ -269,7 +267,7 @@ cp -a "$BACKUP_STAGING"/* "$BACKUP_ARCHIVE"/
 cp "$manifest_file" "$latest_manifest"
 touch "$SUCCESS_MARKER"
 
-log "mint-postgres backup SUCCEEDED — NAS sync verified, local archive updated"
+log "mint-postgres backup SUCCEEDED — 730XD sync verified, local archive updated"
 log "Local archive: $BACKUP_ARCHIVE"
-log "NAS location: $NAS_HOST:$NAS_BASE/mint-postgres"
+log "730XD location: $OFFSITE_HOST:$OFFSITE_BASE"
 exit 0
