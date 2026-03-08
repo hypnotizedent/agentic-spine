@@ -279,7 +279,8 @@ nfs: synology-backups
 ### Proxmox vzdump
 
 > **Backups ENABLED as of 2026-02-11.** 2 jobs enabled, 1 job intentionally disabled for stopped LXC 103.
-> See: [domains/backup.md](domains/backup.md) for the current backup policy surface.
+> See: [domains/backup.md](domains/backup.md) for backup domain entrypoints and
+> `PROXMOX_VM_SAFETY_DOCTRINE_V1.md` for the canonical home-vs-shop VM safety law.
 
 | Job | Tier | Target | Schedule | Retention | Storage | Enabled |
 |-----|------|--------|----------|-----------|---------|---------|
@@ -467,7 +468,9 @@ No open baseline loops. `OL_HOME_BASELINE_FINISH` closed 2026-02-07.
 
 | Document | Purpose |
 |----------|---------|
-| [domains/backup.md](domains/backup.md) | Backup policy and retained coverage |
+| [domains/backup.md](domains/backup.md) | Backup domain entrypoints |
+| `PROXMOX_VM_SAFETY_DOCTRINE_V1.md` | Canonical VM backup, offsite, exception, and restore-proof rules |
+| `PROXMOX_VM_OPERATOR_CHECKLIST.md` | Practical operator checklist for VM protection decisions |
 | [domains/home.md](domains/home.md) | Home-domain governance overview |
 | [DEVICE_IDENTITY_SSOT.md](DEVICE_IDENTITY_SSOT.md) | Device naming, Tailscale IPs |
 | [STACK_REGISTRY.yaml](STACK_REGISTRY.yaml) | Stack placement and host inventory |

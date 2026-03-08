@@ -2,6 +2,8 @@
 
 Canonical domain policy for `backup`.
 
+- **Doctrine**: `docs/governance/PROXMOX_VM_SAFETY_DOCTRINE_V1.md` (canonical VM primary/offsite/app-level/restore-proof law)
+- **Operator Checklist**: `docs/governance/PROXMOX_VM_OPERATOR_CHECKLIST.md` (operator checklist for VM protection and offsite exceptions)
 - Authority: `docs/governance/SPINE.md`
 - Canonical inventory: `ops/bindings/backup.inventory.yaml`
 - Runtime contracts: `ops/bindings/domains/backup.bundle.yaml`
