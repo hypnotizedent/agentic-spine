@@ -108,7 +108,7 @@ Legacy ronny-ops apps are reference, not runtime authority. Must rewire to fresh
 
 ## 5. Migration Waves (Deferred)
 
-- **Wave 0**: ✅ PARTIAL (guidance landed, no enforcement)
+- **Wave 0**: ✅ COMPLETE (guidance landed, Gate 12 enforcement active)
 - **Wave 1**: Customer portal (import legacy `web`, migrate payment pages)
 - **Wave 2**: Admin portal (import legacy `admin`)
 - **Wave 3**: Production portal (import legacy `production`)
