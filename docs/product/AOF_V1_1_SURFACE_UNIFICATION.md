@@ -152,8 +152,8 @@ become data, not just prose.
   endpoints:
     firefly:
       host: "100.76.153.100"
-      port: 8080
-      auth: infisical/infrastructure/prod/spine/services/finance/FIREFLY_ACCESS_TOKEN
+      port: 8090
+      auth: infisical/infrastructure/prod/spine/services/finance/FIREFLY_PAT
     paperless:
       host: "100.76.153.100"
       port: 8000

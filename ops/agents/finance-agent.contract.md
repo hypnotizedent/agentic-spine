@@ -122,9 +122,9 @@ npm install && npm run build
 # Secrets (Infisical infrastructure/prod at /spine/services/finance)
 # FIREFLY_PAT, GHOSTFOLIO_ACCESS_TOKEN, FINANCE_ADAPTER_API_KEY, SIMPLEFIN_TOKEN
 # Paperless: PAPERLESS_API_TOKEN at /spine/services/paperless
-# FIREFLY_URL=http://100.76.153.100:8080
+# FIREFLY_URL=https://finances.mintprints.com
 # PAPERLESS_URL=http://100.76.153.100:8000
-# GHOSTFOLIO_URL=http://100.76.153.100:3333
+# GHOSTFOLIO_URL=https://investments.mintprints.com
 ```
 
 ## Invocation

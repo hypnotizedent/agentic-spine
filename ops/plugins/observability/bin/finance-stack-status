@@ -3,7 +3,9 @@
 #
 # Probes: Firefly III, Paperless-ngx, Ghostfolio (optional), Mail Archiver
 # Host: finance-stack (VM 211, Tailscale 192.168.1.211)
-# Secrets: FIREFLY_PAT (legacy FIREFLY_ACCESS_TOKEN accepted), PAPERLESS_API_TOKEN, GHOSTFOLIO_ACCESS_TOKEN via infisical-agent.sh
+# Secrets: FIREFLY_PAT and PAPERLESS_API_TOKEN via infisical-agent.sh.
+# Ghostfolio runtime proof is host-local public info; portfolio reads remain a
+# separate optional surface.
 #
 # Usage:
 #   finance-stack-status
@@ -32,29 +34,10 @@ command -v jq >/dev/null 2>&1  || stop "missing dependency: jq"
 # ── Fetch auth tokens (best-effort, non-fatal) ──────────────────────────
 FIREFLY_TOKEN=""
 PAPERLESS_TOKEN=""
-GHOSTFOLIO_TOKEN=""
-
-resolve_secret() {
-  local project="$1"
-  local env="$2"
-  shift 2
-  local key value
-
-  for key in "$@"; do
-    value=$("$INFISICAL_AGENT" get "$project" "$env" "$key" 2>/dev/null) || value=""
-    if [[ -n "$value" ]]; then
-      printf '%s' "$value"
-      return 0
-    fi
-  done
-
-  return 1
-}
 
 if [[ -x "$INFISICAL_AGENT" ]]; then
-  FIREFLY_TOKEN=$(resolve_secret infrastructure prod FIREFLY_PAT FIREFLY_ACCESS_TOKEN) || FIREFLY_TOKEN=""
+  FIREFLY_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod FIREFLY_PAT 2>/dev/null) || FIREFLY_TOKEN=""
   PAPERLESS_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod PAPERLESS_API_TOKEN 2>/dev/null) || PAPERLESS_TOKEN=""
-  GHOSTFOLIO_TOKEN=$("$INFISICAL_AGENT" get infrastructure prod GHOSTFOLIO_ACCESS_TOKEN 2>/dev/null) || GHOSTFOLIO_TOKEN=""
 fi
 
 # Resolve mail-archiver host (on communications-stack VM 214, not finance-stack)
@@ -63,12 +46,12 @@ _MA_IP="$(echo "$_ma_result" | awk '{print $1}')"
 [[ -z "$_MA_IP" ]] && _MA_IP="192.168.1.26"
 
 # ── Service definitions ─────────────────────────────────────────────────
-# name|port|health_path|expected_code|host_ip_override|service_tier
+# name|url|expected_code|service_tier
 SERVICES=(
-  "firefly-iii|8080|/api/v1/about|302||required"
-  "paperless-ngx|8000|/api/|302||required"
-  "ghostfolio|3333|/|301||optional"
-  "mail-archiver|5100|/|302|${_MA_IP}|required"
+  "firefly-iii|http://${HOST_IP}:8090/api/v1/about|200|required"
+  "paperless-ngx|http://${HOST_IP}:8000/api/documents/?page_size=1|200|required"
+  "ghostfolio|http://${HOST_IP}:3340/api/v1/info|200|optional"
+  "mail-archiver|http://${_MA_IP}:5100/|302|required"
 )
 
 # ── Probe helper ────────────────────────────────────────────────────────
@@ -101,9 +84,7 @@ warn=0
 required_total=0
 
 for entry in "${SERVICES[@]}"; do
-  IFS='|' read -r name port path expect svc_ip_override service_tier <<< "$entry"
-  svc_host="${svc_ip_override:-$HOST_IP}"
-  url="http://${svc_host}:${port}${path}"
+  IFS='|' read -r name url expect service_tier <<< "$entry"
   detail=""
   status_kind="healthy"
 
@@ -118,23 +99,22 @@ for entry in "${SERVICES[@]}"; do
   case "$name" in
     firefly-iii)
       if [[ "$http_code" != "$expect" && -n "$FIREFLY_TOKEN" ]]; then
-        # With auth, /api/v1/about returns 200 instead of 302
         auth_code=$(probe_http "$url" "Authorization: Bearer ${FIREFLY_TOKEN}")
         if [[ "$auth_code" == "200" ]]; then
           http_code="200"
         fi
       fi
       if [[ -n "$FIREFLY_TOKEN" ]]; then
-        about_json=$(fetch_json "http://${svc_host}:${port}/api/v1/about" "Authorization: Bearer ${FIREFLY_TOKEN}")
+        about_json=$(fetch_json "http://${HOST_IP}:8090/api/v1/about" "Authorization: Bearer ${FIREFLY_TOKEN}")
         if [[ -n "$about_json" ]]; then
-          version=$(echo "$about_json" | jq -r '.data.version // empty' 2>/dev/null)
+          version=$(echo "$about_json" | jq -r '.data.version // empty' 2>/dev/null || true)
           if [[ -n "$version" ]]; then
             detail="version ${version}"
           fi
         fi
-        txn_list=$(fetch_json "http://${svc_host}:${port}/api/v1/transactions?limit=1" "Authorization: Bearer ${FIREFLY_TOKEN}")
+        txn_list=$(fetch_json "http://${HOST_IP}:8090/api/v1/transactions?limit=1" "Authorization: Bearer ${FIREFLY_TOKEN}")
         if [[ -n "$txn_list" ]]; then
-          txn_total=$(echo "$txn_list" | jq -r '.meta.pagination.total // empty' 2>/dev/null)
+          txn_total=$(echo "$txn_list" | jq -r '.meta.pagination.total // empty' 2>/dev/null || true)
           if [[ -n "$txn_total" ]]; then
             if [[ -n "$detail" ]]; then
               detail="${detail}, ${txn_total} transactions"
@@ -147,9 +127,13 @@ for entry in "${SERVICES[@]}"; do
       ;;
     paperless-ngx)
       if [[ -n "$PAPERLESS_TOKEN" ]]; then
-        doc_json=$(fetch_json "http://${svc_host}:${port}/api/documents/?page_size=1" "Authorization: Token ${PAPERLESS_TOKEN}")
+        auth_code=$(probe_http "$url" "Authorization: Token ${PAPERLESS_TOKEN}")
+        if [[ "$auth_code" == "200" ]]; then
+          http_code="200"
+        fi
+        doc_json=$(fetch_json "http://${HOST_IP}:8000/api/documents/?page_size=1" "Authorization: Token ${PAPERLESS_TOKEN}")
         if [[ -n "$doc_json" ]]; then
-          doc_count=$(echo "$doc_json" | jq -r '.count // empty' 2>/dev/null)
+          doc_count=$(echo "$doc_json" | jq -r '.count // empty' 2>/dev/null || true)
           if [[ -n "$doc_count" ]]; then
             detail="${doc_count} documents"
           fi
@@ -157,20 +141,17 @@ for entry in "${SERVICES[@]}"; do
       fi
       ;;
     ghostfolio)
-      if [[ -n "$GHOSTFOLIO_TOKEN" ]]; then
-        jwt_response=$(curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
-          -X POST "http://${svc_host}:${port}/api/v1/auth/anonymous" \
-          -H "Content-Type: application/json" \
-          -d "{\"accessToken\":\"${GHOSTFOLIO_TOKEN}\"}" 2>/dev/null) || jwt_response=""
-        ghostfolio_jwt=$(echo "$jwt_response" | jq -r '.authToken // empty' 2>/dev/null)
-        if [[ -n "$ghostfolio_jwt" ]]; then
-          detail="optional investment tracking, auth ok"
-        else
-          detail="optional investment tracking, auth failed"
-          status_kind="warn"
+      ghostfolio_info=$(curl -s --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+        -H "Accept: application/json" \
+        "http://${HOST_IP}:3340/api/v1/info" 2>/dev/null || echo "")
+      if [[ -n "$ghostfolio_info" ]]; then
+        ghostfolio_version=$(echo "$ghostfolio_info" | jq -r '.version // empty' 2>/dev/null || true)
+        detail="optional investment tracking"
+        if [[ -n "$ghostfolio_version" ]]; then
+          detail="${detail}, version ${ghostfolio_version}"
         fi
       else
-        detail="optional investment tracking, token unavailable"
+        detail="optional investment tracking, public info unavailable"
         status_kind="warn"
       fi
       ;;
