@@ -72,11 +72,20 @@ DEF_TO="$(yq e -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
 TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
 TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
 TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
+TARGET_TAILSCALE="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .tailscale_ip // \"\"" "$SSH_BINDING")"
 
 [[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host"
 
 SSH_OPTS="-p $TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-SSH_REF="${TARGET_USER}@${TARGET_HOST}"
+
+PVE_TARGET_ID="$(yq e -r '.model.destination_lanes."r730xd-communications-backups".host // "pve"' "$BACKUP_INVENTORY")"
+PVE_TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
+PVE_TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+PVE_TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
+PVE_TARGET_TAILSCALE="$(yq e -r ".ssh.targets[] | select(.id == \"$PVE_TARGET_ID\") | .tailscale_ip // \"\"" "$SSH_BINDING")"
+[[ -n "$PVE_TARGET_HOST" && "$PVE_TARGET_HOST" != "null" ]] || fail "ssh target '$PVE_TARGET_ID' missing host"
+PVE_SSH_OPTS="-p $PVE_TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+OFFSITE_BASE="$(yq e -r '.model.destination_lanes."r730xd-communications-backups".base_path // ""' "$BACKUP_INVENTORY")/mail-archiver"
 
 ERRORS=0
 WARNINGS=0
@@ -84,8 +93,35 @@ err() { echo "  FAIL: $*"; ERRORS=$((ERRORS + 1)); }
 warn() { echo "  WARN: $*"; WARNINGS=$((WARNINGS + 1)); }
 ok_msg() { echo "  OK: $*"; }
 
+resolve_ssh_ref() {
+  local id="$1"
+  local user="$2"
+  local host="$3"
+  local tailscale="$4"
+  local opts="$5"
+  local -a candidates=("${id}" "${user}@${host}")
+  if [[ -n "$tailscale" && "$tailscale" != "null" && "$tailscale" != "$host" ]]; then
+    candidates+=("${user}@${tailscale}")
+  fi
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if ssh $opts "$candidate" "true" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  echo "${user}@${host}"
+}
+
+SSH_REF="$(resolve_ssh_ref "$TARGET_ID" "$TARGET_USER" "$TARGET_HOST" "$TARGET_TAILSCALE" "$SSH_OPTS")"
+PVE_SSH_REF="$(resolve_ssh_ref "$PVE_TARGET_ID" "$PVE_TARGET_USER" "$PVE_TARGET_HOST" "$PVE_TARGET_TAILSCALE" "$PVE_SSH_OPTS")"
+
+comm_ssh() { ssh $SSH_OPTS "$SSH_REF" "$@"; }
+pve_ssh() { ssh $PVE_SSH_OPTS "$PVE_SSH_REF" "$@"; }
+
 echo "=== Mail-Archiver Backup Status ==="
 echo "target: $TARGET_ID ($SSH_REF)"
+echo "offsite_target: $PVE_TARGET_ID ($PVE_SSH_REF)"
 echo "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo ""
 
@@ -117,57 +153,140 @@ echo ""
 echo "=== Remote Backup Artifacts ==="
 
 BACKUP_BASE="/srv/mail-archiver/backups"
+LATEST_LOCAL_DB="$(comm_ssh "find '$BACKUP_BASE/last-good' -maxdepth 1 -type f -name 'mail-archiver-db-*.sql.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
+if [[ -z "$LATEST_LOCAL_DB" ]]; then
+  LATEST_LOCAL_DB="$(comm_ssh "find '$BACKUP_BASE' -maxdepth 1 -type f -name 'mail-archiver-db-*.sql.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
+fi
+LATEST_LOCAL_UPLOADS="$(comm_ssh "find '$BACKUP_BASE/last-good' -maxdepth 1 -type f -name 'mail-archiver-uploads-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
+if [[ -z "$LATEST_LOCAL_UPLOADS" ]]; then
+  LATEST_LOCAL_UPLOADS="$(comm_ssh "find '$BACKUP_BASE' -maxdepth 1 -type f -name 'mail-archiver-uploads-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
+fi
+LATEST_LOCAL_MANIFEST="$(comm_ssh "find '$BACKUP_BASE/last-good' -maxdepth 1 -type f -name 'mail-archiver-manifest-*.txt' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
+if [[ -z "$LATEST_LOCAL_MANIFEST" ]]; then
+  LATEST_LOCAL_MANIFEST="$(comm_ssh "find '$BACKUP_BASE' -maxdepth 1 -type f -name 'mail-archiver-manifest-*.txt' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
+fi
+REMOTE_NOW_SEC="$(comm_ssh "date +%s" 2>/dev/null || echo "0")"
 
-# Check postgres backup dir (artifacts are in flat backup dir, pattern: mail-archiver-db-*.sql.gz)
-PG_LS="$(ssh $SSH_OPTS "$SSH_REF" "ls -lt $BACKUP_BASE/mail-archiver-db-*.sql.gz 2>/dev/null | head -5" 2>/dev/null || echo "")"
-if [[ -n "$PG_LS" ]]; then
-  ok_msg "postgres backup directory has artifacts"
-  echo "$PG_LS" | while read -r line; do echo "    $line"; done
-
-  # Check latest file age
-  LATEST_AGE_SEC="$(ssh $SSH_OPTS "$SSH_REF" "stat -c '%Y' \$(ls -t $BACKUP_BASE/mail-archiver-db-*.sql.gz 2>/dev/null | head -1) 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
-  NOW_SEC="$(ssh $SSH_OPTS "$SSH_REF" "date +%s" 2>/dev/null || echo "0")"
-  if [[ "$LATEST_AGE_SEC" -gt 0 && "$NOW_SEC" -gt 0 ]]; then
-    AGE_HOURS=$(( (NOW_SEC - LATEST_AGE_SEC) / 3600 ))
-    echo "  latest_backup_age_hours: $AGE_HOURS"
+if [[ -n "$LATEST_LOCAL_DB" ]]; then
+  ok_msg "local mail-archiver DB artifact present"
+  echo "  latest_local_db: $LATEST_LOCAL_DB"
+  LOCAL_DB_BASENAME="$(basename "$LATEST_LOCAL_DB")"
+  LOCAL_DB_SIZE="$(comm_ssh "stat -c '%s' '$LATEST_LOCAL_DB' 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
+  echo "  latest_local_db_bytes: $LOCAL_DB_SIZE"
+  LATEST_AGE_SEC="$(comm_ssh "stat -c '%Y' '$LATEST_LOCAL_DB' 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
+  if [[ "$LATEST_AGE_SEC" -gt 0 && "$REMOTE_NOW_SEC" -gt 0 ]]; then
+    AGE_HOURS=$(( (REMOTE_NOW_SEC - LATEST_AGE_SEC) / 3600 ))
+    echo "  latest_local_db_age_hours: $AGE_HOURS"
     if [[ "$AGE_HOURS" -gt 48 ]]; then
-      warn "latest postgres backup is ${AGE_HOURS}h old (>48h)"
+      warn "latest local postgres backup is ${AGE_HOURS}h old (>48h)"
     else
-      ok_msg "latest postgres backup age within 48h window"
+      ok_msg "latest local postgres backup age within 48h window"
     fi
   fi
-
-  PG_COUNT="$(ssh $SSH_OPTS "$SSH_REF" "ls $BACKUP_BASE/mail-archiver-db-*.sql.gz 2>/dev/null | wc -l" 2>/dev/null | tr -d ' ' || echo "0")"
-  echo "  postgres_backup_count: $PG_COUNT"
 else
-  warn "no postgres backup artifacts found in $BACKUP_BASE"
+  err "no local postgres backup artifacts found in $BACKUP_BASE or $BACKUP_BASE/last-good"
 fi
 
-# Check uploads backup dir (artifacts are in flat backup dir, pattern: mail-archiver-uploads-*.tar.gz)
-UL_LS="$(ssh $SSH_OPTS "$SSH_REF" "ls -lt $BACKUP_BASE/mail-archiver-uploads-*.tar.gz 2>/dev/null | head -5" 2>/dev/null || echo "")"
-if [[ -n "$UL_LS" ]]; then
-  ok_msg "uploads backup directory has artifacts"
-  echo "$UL_LS" | while read -r line; do echo "    $line"; done
+if [[ -n "$LATEST_LOCAL_UPLOADS" ]]; then
+  ok_msg "local uploads artifact present"
+  echo "  latest_local_uploads: $LATEST_LOCAL_UPLOADS"
+  LOCAL_UPLOADS_BASENAME="$(basename "$LATEST_LOCAL_UPLOADS")"
 else
-  warn "no uploads backup artifacts found in $BACKUP_BASE"
+  warn "no local uploads artifact found in $BACKUP_BASE or $BACKUP_BASE/last-good"
+fi
+
+if [[ -n "$LATEST_LOCAL_MANIFEST" ]]; then
+  ok_msg "local manifest present"
+  echo "  latest_local_manifest: $LATEST_LOCAL_MANIFEST"
+  LOCAL_MANIFEST_BASENAME="$(basename "$LATEST_LOCAL_MANIFEST")"
+else
+  warn "no local manifest found in $BACKUP_BASE or $BACKUP_BASE/last-good"
+fi
+
+LATEST_OFFSITE_DB="$(pve_ssh "find '$OFFSITE_BASE' -maxdepth 1 -type f -name 'mail-archiver-db-*.sql.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
+LATEST_OFFSITE_UPLOADS="$(pve_ssh "find '$OFFSITE_BASE' -maxdepth 1 -type f -name 'mail-archiver-uploads-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
+LATEST_OFFSITE_MANIFEST="$(pve_ssh "find '$OFFSITE_BASE' -maxdepth 1 -type f -name 'mail-archiver-manifest-*.txt' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
+PVE_NOW_SEC="$(pve_ssh "date +%s" 2>/dev/null || echo "0")"
+if [[ -n "$LATEST_OFFSITE_DB" ]]; then
+  ok_msg "730XD offsite DB artifact present"
+  echo "  latest_offsite_db: $LATEST_OFFSITE_DB"
+  OFFSITE_DB_BASENAME="$(basename "$LATEST_OFFSITE_DB")"
+  OFFSITE_DB_SIZE="$(pve_ssh "stat -c '%s' '$LATEST_OFFSITE_DB' 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
+  echo "  latest_offsite_db_bytes: $OFFSITE_DB_SIZE"
+  OFFSITE_AGE_SEC="$(pve_ssh "stat -c '%Y' '$LATEST_OFFSITE_DB' 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
+  if [[ "$OFFSITE_AGE_SEC" -gt 0 && "$PVE_NOW_SEC" -gt 0 ]]; then
+    OFFSITE_AGE_HOURS=$(( (PVE_NOW_SEC - OFFSITE_AGE_SEC) / 3600 ))
+    echo "  latest_offsite_db_age_hours: $OFFSITE_AGE_HOURS"
+    if [[ "$OFFSITE_AGE_HOURS" -gt 48 ]]; then
+      warn "latest 730XD postgres backup is ${OFFSITE_AGE_HOURS}h old (>48h)"
+    else
+      ok_msg "latest 730XD postgres backup age within 48h window"
+    fi
+  fi
+  if [[ -n "${LOCAL_DB_BASENAME:-}" && "$OFFSITE_DB_BASENAME" != "$LOCAL_DB_BASENAME" ]]; then
+    err "latest offsite DB does not match latest local DB ($OFFSITE_DB_BASENAME != $LOCAL_DB_BASENAME)"
+  else
+    ok_msg "latest offsite DB matches latest local DB name"
+  fi
+  if [[ -n "${LOCAL_DB_SIZE:-}" && "$LOCAL_DB_SIZE" != "0" && "$OFFSITE_DB_SIZE" != "$LOCAL_DB_SIZE" ]]; then
+    err "latest offsite DB size does not match local DB size ($OFFSITE_DB_SIZE != $LOCAL_DB_SIZE)"
+  else
+    ok_msg "latest offsite DB size matches local DB size"
+  fi
+else
+  err "no 730XD offsite postgres artifact found in $OFFSITE_BASE"
+fi
+
+if [[ -n "$LATEST_OFFSITE_UPLOADS" ]]; then
+  ok_msg "730XD offsite uploads artifact present"
+  echo "  latest_offsite_uploads: $LATEST_OFFSITE_UPLOADS"
+  if [[ -n "${LOCAL_UPLOADS_BASENAME:-}" && "$(basename "$LATEST_OFFSITE_UPLOADS")" != "$LOCAL_UPLOADS_BASENAME" ]]; then
+    err "latest offsite uploads artifact does not match latest local uploads artifact"
+  fi
+else
+  err "no 730XD offsite uploads artifact found in $OFFSITE_BASE"
+fi
+
+if [[ -n "$LATEST_OFFSITE_MANIFEST" ]]; then
+  ok_msg "730XD offsite manifest present"
+  echo "  latest_offsite_manifest: $LATEST_OFFSITE_MANIFEST"
+  if [[ -n "${LOCAL_MANIFEST_BASENAME:-}" && "$(basename "$LATEST_OFFSITE_MANIFEST")" != "$LOCAL_MANIFEST_BASENAME" ]]; then
+    err "latest offsite manifest does not match latest local manifest"
+  fi
+else
+  err "no 730XD offsite manifest found in $OFFSITE_BASE"
 fi
 
 # ── 3. Cron job check ──
 echo ""
 echo "=== Cron Job Check ==="
-CRON_ENTRIES="$(ssh $SSH_OPTS "$SSH_REF" "sudo crontab -l 2>/dev/null | grep -iE 'pg_dump|mail-archiver' || echo ''" 2>/dev/null || echo "")"
-if [[ -n "$CRON_ENTRIES" ]]; then
-  ok_msg "cron entries found for mail-archiver backup"
-  echo "$CRON_ENTRIES" | while read -r line; do echo "    $line"; done
+EXPECTED_CRON_LINE="$PGDUMP_CRON root /usr/local/bin/mail-archiver-backup.sh >> /var/log/mail-archiver-backup.log 2>&1"
+CRON_FILE_CONTENT="$(comm_ssh "sudo -n cat /etc/cron.d/communications-backups 2>/dev/null || true" 2>/dev/null || true)"
+if [[ -n "$CRON_FILE_CONTENT" ]]; then
+  ok_msg "cron file present: /etc/cron.d/communications-backups"
+  echo "$CRON_FILE_CONTENT" | while read -r line; do echo "    $line"; done
 else
-  warn "no cron entries found for mail-archiver backup"
-  echo "  deploy_hint: See ops/bindings/mail.archiver.backup.contract.yaml for pg_dump job template"
+  err "missing /etc/cron.d/communications-backups"
+fi
+
+if echo "$CRON_FILE_CONTENT" | grep -Fq "$EXPECTED_CRON_LINE"; then
+  ok_msg "cron line matches schedule contract"
+else
+  err "cron line does not match schedule contract: $EXPECTED_CRON_LINE"
+fi
+
+USER_CRON_RESIDUE="$(comm_ssh "crontab -l 2>/dev/null | grep -E 'mail-archiver-backup.sh|stalwart-backup.sh' || true" 2>/dev/null || true)"
+if [[ -n "$USER_CRON_RESIDUE" ]]; then
+  warn "ubuntu user crontab still contains communications backup entries"
+  echo "$USER_CRON_RESIDUE" | while read -r line; do echo "    $line"; done
+else
+  ok_msg "ubuntu user crontab is clean for communications backups"
 fi
 
 # ── 4. DB size ──
 echo ""
 echo "=== Database Size ==="
-DB_SIZE="$(ssh $SSH_OPTS "$SSH_REF" "echo \"SELECT pg_size_pretty(pg_database_size('MailArchiver'));\" | sudo docker exec -i mail-archiver-db psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tr -d '[:space:]' || echo "unknown")"
+DB_SIZE="$(comm_ssh "echo \"SELECT pg_size_pretty(pg_database_size('MailArchiver'));\" | sudo -n docker exec -i mail-archiver-db psql -U mailuser -d MailArchiver -t -A" 2>/dev/null | tr -d '[:space:]' || echo "unknown")"
 echo "  db_size: $DB_SIZE"
 
 # ── Result ──

@@ -39,7 +39,7 @@ model:
     daily-home-primary-est:
       cron: "0 3 * * *"
       timezone: "America/New_York"
-      note: "Home daily-primary cadence for proxmox-home and the Home Assistant Synology exception."
+      note: "Home daily-primary cadence for proxmox-home source backups; canonical cold copies are promoted into md1400."
     daily-config-est:
       cron: "45 3 * * *"
       timezone: "America/New_York"
@@ -72,6 +72,7 @@ model:
       base_path: /tank/backups/vzdump/dump
       max_total_gb: 2500
       max_file_count: 120
+      description: "Local pve vzdump generation lane. Canonical cold copies are promoted from here into /md1400/backup-cold/vzdump/pve."
     r730xd-finance-backups:
       host: pve
       base_path: /md1400/backup-cold/apps/finance
@@ -102,12 +103,18 @@ model:
       max_total_gb: 1000
       max_file_count: 1000
       description: "Canonical 730XD backup plane for Dev-tools domain (Gitea)"
+    r730xd-media-config-backups:
+      host: pve
+      base_path: /md1400/backup-cold/apps/media-config
+      max_total_gb: 500
+      max_file_count: 1000
+      description: "Canonical 730XD backup plane for media config-state (download-stack, streaming-stack). Media payload remains regenerable."
     nas-home-local-exception:
       host: nas
       base_path: /volume1/backups
       max_total_gb: 1600
       max_file_count: 400
-      description: "Home-local exception for Home Assistant VM 100 and Pi-hole LXC 105. All business/shop backups use r730xd-*-backups lanes or pve-vzdump-primary."
+      description: "Home local-generation lane for proxmox-home artifacts. Canonical cold copies are promoted into /md1400/backup-cold/vzdump/home."
     # nas-app-backups REMOVED 2026-03-08: Fully deprecated, migration complete to 730XD canonical plane.
     media-config-backups:
       host_group:
@@ -123,7 +130,7 @@ model:
       host: pve
       base_path: md1400
       snapshot_retention_days: 14
-      description: "ZFS snapshot protection for archive-SMB datasets (ronny-projects 11.9G, mint-legacy 127G). Daily auto snapshots with 14-day retention."
+      description: "ZFS snapshot protection for archive-SMB datasets (ronny-projects 11.9G, mint-legacy 127G). Cron-managed daily snapshots via /etc/cron.d/archive-smb-snapshot with 14-day retention."
   backup_admission_states:
     - planned
     - production_ready
@@ -155,6 +162,7 @@ runtime_units:
       - vm-213-mint-apps-primary
       - vm-214-communications-stack-primary
       - vm-215-surveillance-stack-primary
+      - lxc-220-archive-smb-primary
     backup_admission_state: production_ready
   - unit_id: machine-proxmox-home
     kind: machine
@@ -165,15 +173,16 @@ runtime_units:
       - /etc/pve/jobs.cfg
       - /mnt/pve/synology-backups/dump
     exclude_paths: []
-    destination_lane: pve-vzdump-primary
+    destination_lane: nas-home-local-exception
     schedule_class: daily-home-primary-est
     restore_class: vm-dry-run-quarterly
     inventory_targets:
       - home-vm-100-ha-primary
+      - home-lxc-105-pihole-primary
     backup_admission_state: production_ready
-    description: "Home hypervisor VM/LXC backups. Two allowed Synology exceptions: Home Assistant VM 100 and Pi-hole LXC 105."
+    description: "Home hypervisor VM/LXC backups. Local generation occurs on proxmox-home; canonical cold copies are promoted into md1400."
   # machine-nas REMOVED 2026-03-08: All business backup authority migrated to 730XD canonical plane.
-  # Only Home Assistant VM 100 remains on Synology per home-local exception policy.
+  # Home systems may still generate local artifacts on Synology-backed storage, but governed cold copies are promoted into md1400.
   # Former targets migrated to r730xd-*-backups lanes (finance, infra-core, dev-tools, communications).
   - unit_id: vm-200-docker-host
     kind: vm
@@ -298,7 +307,7 @@ runtime_units:
       - /mnt/media
       - /mnt/docker/volumes/*/cache
       - /mnt/docker/volumes/*/tmp
-    destination_lane: media-config-backups
+    destination_lane: r730xd-media-config-backups
     schedule_class: daily-config-est
     restore_class: media-config-dry-run-monthly
     inventory_targets:
@@ -317,7 +326,7 @@ runtime_units:
       - /mnt/media
       - /mnt/docker/volumes/*/cache
       - /mnt/docker/volumes/*/tmp
-    destination_lane: media-config-backups
+    destination_lane: r730xd-media-config-backups
     schedule_class: daily-config-est
     restore_class: media-config-dry-run-monthly
     inventory_targets:
@@ -339,6 +348,7 @@ runtime_units:
     inventory_targets:
       - vm-211-finance-stack-primary
       - app-firefly
+      - app-finance-sanity-manifest
       - app-ghostfolio
       - app-paperless-db
       - app-paperless-export
@@ -420,7 +430,7 @@ runtime_units:
     inventory_targets:
       - home-vm-100-ha-primary
     backup_admission_state: production_ready
-    description: "Home Assistant VM 100. ONLY permitted Synology exception per HA-only backup policy."
+    description: "Home Assistant VM 100. Source generation remains on proxmox-home; canonical cold copy is promoted into md1400."
   - unit_id: vm-105-pihole-home
     kind: vm
     hostname: pihole-home
@@ -430,13 +440,32 @@ runtime_units:
       - vm-disk
     exclude_paths:
       - payload_regenerable
-    destination_lane: pve-vzdump-primary
+    destination_lane: nas-home-local-exception
     schedule_class: weekly-est
     restore_class: app-dry-run-monthly
     inventory_targets:
       - home-lxc-105-pihole-primary
-    backup_admission_state: planned
-    description: "Home Pi-hole LXC 105 (home-local Synology exception). This is one of two allowed home-local Synology exceptions alongside home-vm-100-ha-primary. Shop infrastructure uses pve-vzdump-primary."
+    backup_admission_state: production_ready
+    description: "Home Pi-hole LXC 105. Source generation remains on proxmox-home; canonical cold copy is promoted into md1400."
+  - unit_id: lxc-220-archive-smb
+    kind: lxc
+    hostname: archive-smb
+    backup_profile: vm-primary
+    data_class: tier1_critical
+    include_paths:
+      - rootfs
+      - /md1400/ronny-projects
+      - /md1400/mint-legacy
+    exclude_paths:
+      - payload_regenerable
+    destination_lane: r730xd-archive-smb-snapshots
+    schedule_class: daily-primary-est
+    restore_class: tier1-small-state-dry-run-quarterly
+    inventory_targets:
+      - lxc-220-archive-smb-primary
+      - app-archive-smb-snapshot-manifest
+    backup_admission_state: production_ready
+    description: "archive-smb LXC 220 rootfs plus authoritative md1400 live-share datasets (ronny-projects, mint-legacy). Rootfs backup via vzdump; dataset protection via md1400 snapshot manifests."
   - unit_id: container-fleet-docker-host
     kind: container-fleet
     hostname: docker-host
@@ -483,7 +512,7 @@ runtime_units:
       - /mnt/media
       - /mnt/docker/volumes/*/cache
       - /mnt/docker/volumes/*/tmp
-    destination_lane: media-config-backups
+    destination_lane: r730xd-media-config-backups
     schedule_class: daily-config-est
     restore_class: media-config-dry-run-monthly
     inventory_targets:
@@ -501,7 +530,7 @@ runtime_units:
       - /mnt/media
       - /mnt/docker/volumes/*/cache
       - /mnt/docker/volumes/*/tmp
-    destination_lane: media-config-backups
+    destination_lane: r730xd-media-config-backups
     schedule_class: daily-config-est
     restore_class: media-config-dry-run-monthly
     inventory_targets:
@@ -605,6 +634,7 @@ runtime_units:
     restore_class: tier1-small-state-dry-run-quarterly
     inventory_targets:
       - app-firefly
+      - app-finance-sanity-manifest
       - app-ghostfolio
       - app-paperless-db
       - app-paperless-export
@@ -661,22 +691,24 @@ runtime_units:
     backup_admission_state: production_ready
 targets:
   # =============================================================================
-  # VM BACKUPS - PRIMARY (pve R730xd) - daily vzdump, 26h threshold
+  # VM/LXC BACKUPS - CANONICAL COLD COPIES (md1400) - sourced from vzdump jobs
+  # Primary generation still occurs on local hypervisor storage, but the governed
+  # restore plane is md1400 cold storage.
   # =============================================================================
   - name: vm-200-docker-host-primary
-    enabled: false
+    enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-200-*.vma.zst"
-    stale_after_hours: 26
-    classification: critical
-    description: "Disabled 2026-03-06: docker-host is tombstoned and retained only for forensic recovery."
+    stale_after_hours: 720
+    classification: important
+    description: "docker-host tombstone/forensic cold-copy artifact on md1400. The VM is retained for recovery reference, not daily-changing production state."
   - name: vm-202-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-202-*.vma.zst"
     stale_after_hours: 26
     classification: critical
@@ -684,7 +716,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-204-*.vma.zst"
     stale_after_hours: 26
     classification: critical
@@ -692,7 +724,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-205-*.vma.zst"
     stale_after_hours: 26
     classification: important
@@ -700,7 +732,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-206-*.vma.zst"
     stale_after_hours: 26
     classification: important
@@ -708,7 +740,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-203-*.vma.zst"
     stale_after_hours: 26
     classification: important
@@ -716,7 +748,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-209-*.vma.zst"
     stale_after_hours: 26
     classification: important
@@ -724,7 +756,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-210-*.vma.zst"
     stale_after_hours: 26
     classification: important
@@ -732,7 +764,7 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-207-*.vma.zst"
     stale_after_hours: 26
     classification: critical
@@ -740,47 +772,56 @@ targets:
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-211-*.vma.zst"
     stale_after_hours: 26
     classification: critical
-    description: "Finance VM 211. Live — 9/9 containers (LOOP-FINANCE-VM-SEPARATION-20260211 complete)."
+    description: "Finance VM 211 cold-copy artifact on md1400. Source generation remains local vzdump on pve; canonical recovery copy is synced to /md1400/backup-cold/vzdump/pve."
   - name: vm-212-mint-data-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-212-*.vma.zst"
     stale_after_hours: 26
     classification: critical
-    description: "Mint data plane (fresh-slate). PostgreSQL + MinIO."
+    description: "Mint data plane cold-copy artifact on md1400. Source generation remains local vzdump on pve; canonical recovery copy is synced to /md1400/backup-cold/vzdump/pve."
   - name: vm-213-mint-apps-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-213-*.vma.zst"
     stale_after_hours: 26
     classification: important
-    description: "Mint app plane (fresh-slate). Stateless modules."
+    description: "Mint app plane cold-copy artifact on md1400. Source generation remains local vzdump on pve; canonical recovery copy is synced to /md1400/backup-cold/vzdump/pve."
   - name: vm-214-communications-stack-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-214-*.vma.zst"
     stale_after_hours: 26
     classification: important
-    description: "Communications stack VM 214 (Stalwart mail + mail-archiver). Enrolled in vzdump daily job."
+    description: "Communications stack VM 214 cold-copy artifact on md1400. Source generation remains local vzdump on pve; canonical recovery copy is synced to /md1400/backup-cold/vzdump/pve."
   - name: vm-215-surveillance-stack-primary
     enabled: true
     kind: file_glob
     host: pve
-    base_path: "/tank/backups/vzdump/dump"
+    base_path: "/md1400/backup-cold/vzdump/pve"
     glob: "vzdump-qemu-215-*.vma.zst"
     stale_after_hours: 26
     classification: important
-    description: "Surveillance stack VM 215 (Frigate/go2rtc). Active since 2026-03-05."
+    description: "Surveillance stack VM 215 cold-copy artifact on md1400. Source generation remains local vzdump on pve; canonical recovery copy is synced to /md1400/backup-cold/vzdump/pve."
+  - name: lxc-220-archive-smb-primary
+    enabled: true
+    kind: file_glob
+    host: pve
+    base_path: "/md1400/backup-cold/vzdump/pve"
+    glob: "vzdump-lxc-220-*.tar.zst"
+    stale_after_hours: 26
+    classification: critical
+    description: "archive-smb LXC 220 cold-copy artifact on md1400. Rootfs backup is synced to the md1400 canonical cold plane; authoritative live-share payload remains protected by snapshot manifests."
   - name: app-mail-archiver
     enabled: true
     kind: file_glob
@@ -789,7 +830,7 @@ targets:
     glob: "mail-archiver-*"
     stale_after_hours: 26
     classification: important
-    description: "Mail-archiver app-level backups (pg_dump) on communications-stack VM 214 (local)."
+    description: "Mail-archiver app-level recovery point on communications-stack VM 214 (local last-good DB dump + uploads + manifest)."
   - name: app-mail-archiver-offsite
     enabled: true
     kind: file_glob
@@ -798,7 +839,7 @@ targets:
     glob: "mail-archiver-db-*.sql.gz"
     stale_after_hours: 26
     classification: important
-    description: "Mail-archiver 730XD offsite backups (DB + uploads). Finance Stack Doctrine v1 compliance. Migrated to 730XD canonical backup plane 2026-03-08. First successful run in progress."
+    description: "Mail-archiver 730XD offsite backups on the canonical communications plane (DB dump + uploads + manifest under /md1400/backup-cold/apps/communications/mail-archiver)."
   - name: app-stalwart-offsite
     enabled: true
     kind: file_glob
@@ -808,38 +849,45 @@ targets:
     stale_after_hours: 26
     classification: important
     description: "Stalwart 730XD offsite backups (data volume + config). Finance Stack Doctrine v1 compliance. Migrated to 730XD canonical backup plane 2026-03-08."
+  - name: app-archive-smb-snapshot-manifest
+    enabled: true
+    kind: file_glob
+    host: pve
+    base_path: "/md1400/backup-cold/archive-smb/snapshots"
+    glob: "archive-smb-snapshot-*.txt"
+    stale_after_hours: 26
+    classification: critical
+    description: "Freshness manifest for archive-smb snapshot protection of md1400 live-share datasets (ronny-projects, mint-legacy)."
   # =============================================================================
-  # VM BACKUPS - OFFSITE (NAS at house, Tailscale) - daily rsync after vzdump
-  # Shop upload ~10-20 Mbps — only critical small VMs synced (not VM 200 @ 186GB)
-  # Sync script: /usr/local/bin/vzdump-offsite-sync.sh on pve (cron 09:00)
+  # LEGACY NAS OFFSITE TARGETS - disabled after md1400 canonicalization
   # =============================================================================
   - name: vm-offsite-critical
-    enabled: true
+    enabled: false
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/proxmox/vzdump/critical"
     glob: "vzdump-qemu-*.vma.zst"
     stale_after_hours: 48
     classification: important
-    description: "Aggregate NAS offsite lane for feasible shop vzdump artifacts. Use per-VM offsite targets for exact critical-service proof."
+    description: "Disabled 2026-03-08: md1400 canonical cold plane supersedes NAS vm-offsite-critical."
   - name: vm-211-finance-stack-offsite
-    enabled: true
+    enabled: false
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/proxmox/vzdump/critical"
     glob: "vzdump-qemu-211-*.vma.zst"
     stale_after_hours: 48
     classification: critical
-    description: "Exact offsite proof target for finance-stack VM 211 latest vzdump on NAS."
+    description: "Disabled 2026-03-08: finance-stack canonical cold copy now lands on md1400."
   - name: vm-213-mint-apps-offsite
-    enabled: true
+    enabled: false
     kind: file_glob
     host: nas
     base_path: "/volume1/backups/proxmox/vzdump/critical"
     glob: "vzdump-qemu-213-*.vma.zst"
     stale_after_hours: 48
     classification: important
-    description: "Exact offsite proof target for mint-apps VM 213 latest vzdump on NAS."
+    description: "Disabled 2026-03-08: mint-apps canonical cold copy now lands on md1400."
   - name: vm-212-mint-data-offsite
     enabled: false
     kind: file_glob
@@ -869,29 +917,28 @@ targets:
     classification: critical
     description: "Disabled: 186GB backup cannot fit in nightly offsite window at 10-20 Mbps."
   # =============================================================================
-  # HOME VM BACKUPS - PRIMARY (proxmox-home) - vzdump to NAS NFS
-  # Storage: synology-backups (NFS 10.0.0.150:/volume1/backups/proxmox_backups)
-  # Retention: keep-last=3 (P0), keep-last=2 (P2)
-  # Enabled: 2026-02-11 (LOOP-HOME-BACKUP-INFRASTRUCTURE-ENABLE-20260209)
+  # HOME VM/LXC BACKUPS - CANONICAL COLD COPIES (md1400) - sourced from proxmox-home
+  # Local generation on proxmox-home still lands on synology-backups; the governed
+  # restore plane is md1400 cold storage on pve.
   # =============================================================================
   - name: home-vm-100-ha-primary
     enabled: true
     kind: file_glob
-    host: proxmox-home
-    base_path: "/mnt/pve/synology-backups/dump"
+    host: pve
+    base_path: "/md1400/backup-cold/vzdump/home"
     glob: "vzdump-qemu-100-*.vma.zst"
     stale_after_hours: 26
     classification: critical
-    description: "P0 tier. Daily 03:00. Artifact confirmed 2026-02-12 (8GB vzdump-qemu-100-2026_02_12-03_00_01.vma.zst)."
+    description: "Home Assistant VM 100 canonical cold copy on md1400. Source generation remains local vzdump on proxmox-home; canonical recovery copy is synced to /md1400/backup-cold/vzdump/home."
   - name: home-lxc-105-pihole-primary
     enabled: true
     kind: file_glob
-    host: proxmox-home
-    base_path: "/mnt/pve/synology-backups/dump"
+    host: pve
+    base_path: "/md1400/backup-cold/vzdump/home"
     glob: "vzdump-lxc-105-*.tar.zst"
     stale_after_hours: 168
     classification: rebuildable
-    description: "Home Pi-hole LXC 105. One of two allowed home-local Synology exceptions (HA VM 100 + Pi-hole LXC 105). Fresh artifact confirmed 2026-03-08 (437M vzdump-lxc-105-2026_03_08-04_00_02.tar.zst)."
+    description: "Home Pi-hole LXC 105 canonical cold copy on md1400. Source generation remains local vzdump on proxmox-home; canonical recovery copy is synced to /md1400/backup-cold/vzdump/home."
   # =============================================================================
   # APP-LEVEL BACKUPS (NAS at house, Tailscale)
   # =============================================================================
@@ -959,15 +1006,14 @@ targets:
     classification: critical
     description: "Finance stack VM 211 app-level backup. Daily 06:20 via finance-stack-backup.sh; pg_dump -> 730XD canonical."
   - name: app-finance-sanity-manifest
-    enabled: false
+    enabled: true
     kind: file_glob
-    host: nas
-    base_path: "/volume1/backups/apps/finance"
+    host: pve
+    base_path: "/md1400/backup-cold/apps/finance"
     glob: "finance-backup-manifest-*.txt"
     stale_after_hours: 26
     classification: critical
-    description: "DISABLED 2026-03-08: Pending migration to r730xd-finance-backups (/md1400/backup-cold/apps/finance/). Runtime script migration required (finance-stack-backup.sh)."
-    migration_target: "pve:/md1400/backup-cold/apps/finance/"
+    description: "Finance stack backup manifest on the 730XD canonical finance plane. Produced by finance-stack-backup.sh and used to prove Firefly/Ghostfolio/Paperless bundle completeness."
   - name: app-ghostfolio
     enabled: true
     kind: file_glob
@@ -1005,33 +1051,32 @@ targets:
     classification: important
     description: "Disabled: MinIO on VM 212 is 190GB. VM-level backup (vm-212-mint-data-primary) provides adequate recovery surface. App-level offsite deferred pending incremental mirror strategy or capacity expansion. Doctrine acceptance: large_state data_class permits VM-level-only backup for payload exceeding nightly offsite window."
   - name: app-n8n-workflows
-    enabled: false
+    enabled: true
     kind: file_glob
-    host: automation-stack
-    base_path: "/home/automation/backups/n8n-workflows"
-    glob: "*/manifest.txt"
+    host: pve
+    base_path: "/md1400/backup-cold/apps/infra-core/n8n"
+    glob: "n8n-workflows-*.tar.gz"
     stale_after_hours: 26
     classification: important
-    description: "DISABLED 2026-03-08: Pending migration to r730xd-infra-core-backups (/md1400/backup-cold/apps/infra-core/n8n/). Currently monitors local backup; will be updated to monitor 730XD canonical location after runtime script migration."
-    migration_target: "pve:/md1400/backup-cold/apps/infra-core/n8n/"
+    description: "n8n workflow snapshot archive. Daily local workflow export on VM 202 is packaged and synced to the 730XD canonical backup plane."
   - name: app-media-config-download-stack
     enabled: true
     kind: file_glob
-    host: download-stack
-    base_path: "/mnt/docker/backups/media-config"
+    host: pve
+    base_path: "/md1400/backup-cold/apps/media-config/download-stack"
     glob: "download-stack-config-*.tar.gz"
     stale_after_hours: 30
     classification: critical
-    description: "Media config-state backups (download-stack). Includes /mnt/docker/volumes + /opt/appdata service metadata and excludes /mnt/media payload."
+    description: "Media config-state backups (download-stack). Synced to the 730XD canonical backup plane; media payload remains regenerable and excluded."
   - name: app-media-config-streaming-stack
     enabled: true
     kind: file_glob
-    host: streaming-stack
-    base_path: "/mnt/docker/backups/media-config"
+    host: pve
+    base_path: "/md1400/backup-cold/apps/media-config/streaming-stack"
     glob: "streaming-stack-config-*.tar.gz"
     stale_after_hours: 30
     classification: critical
-    description: "Media config-state backups (streaming-stack). Includes /mnt/docker/volumes + /opt/appdata service metadata and excludes /mnt/media payload."
+    description: "Media config-state backups (streaming-stack). Synced to the 730XD canonical backup plane; media payload remains regenerable and excluded."
   - name: device-ronny-macbook
     enabled: false
     kind: file_glob

@@ -15,23 +15,23 @@
 - **Utilization**: Empty (128K used) vs 33% used (2.8TB)
 - **Purpose**: Dedicated backup pool per naming convention
 - **Growth**: Massive headroom for app/business backup expansion
-- **VM Backups**: Remain at `/tank/backups/vzdump/dump/` (already canonical)
+- **Cold Copies**: md1400 now carries the canonical cold plane for both app backups and promoted VM/LXC artifacts
 
 ## Storage Architecture
 
 ### Two Separate ZFS Pools on 730XD
 
 #### Pool 1: tank/backups (8.4TB)
-- **Purpose**: VM vzdump backups (primary)
+- **Purpose**: Local hypervisor staging/source for VM vzdump generation
 - **Path**: `/tank/backups/vzdump/dump/`
 - **Usage**: 2.8TB (33%)
-- **Scope**: Proxmox VM/LXC backups
+- **Scope**: Proxmox VM/LXC backup source artifacts before md1400 cold promotion
 
 #### Pool 2: md1400/backup-cold (34TB)
-- **Purpose**: App-level business backups (canonical)
-- **Path**: `/md1400/backup-cold/apps/<domain>/<service>/`
+- **Purpose**: Canonical cold backup plane
+- **Path**: `/md1400/backup-cold/{apps,vzdump,...}`
 - **Usage**: 128K (essentially empty)
-- **Scope**: Finance, Mint, Communications, Infra-core, Dev-tools
+- **Scope**: Finance, Mint, Communications, Infra-core, Dev-tools, media config-state, n8n, archive-SMB snapshot manifests, promoted VM/LXC cold copies
 
 ## Canonical App Backup Paths
 
@@ -53,6 +53,14 @@
     └── gitea/
 ```
 
+## Canonical VM/LXC Cold Paths
+
+```
+/md1400/backup-cold/vzdump/
+├── pve/
+└── home/
+```
+
 ## Operator-Facing Path
 
 **NO ALIAS**: Use full path `/md1400/backup-cold/apps/` directly
@@ -67,21 +75,18 @@
 - Infra-core (Infisical, Vaultwarden): NAS → `/md1400/backup-cold/apps/infra-core/`
 - Dev-tools (Gitea): NAS → `/md1400/backup-cold/apps/dev-tools/gitea/`
 
-### VM Backups → tank (NO CHANGE)
-- All shop VMs continue using `/tank/backups/vzdump/dump/`
-- Proxmox vzdump jobs unchanged
-
-### Home Backups → Synology (EXCEPTION)
-- Home Assistant VM 100: NAS (permanent home-local exception)
-- Pi-hole LXC 105: NAS (permanent home-local exception)
-- **Policy**: Only these two home systems allowed on Synology. All business/shop infrastructure uses 730XD canonical plane.
+### VM/LXC Backups → md1400 Cold Copies
+- Shop/local vzdump generation remains on `/tank/backups/vzdump/dump/`
+- Canonical cold copies are promoted to `/md1400/backup-cold/vzdump/pve/`
+- Home/local vzdump generation remains on proxmox-home storage
+- Canonical cold copies are promoted to `/md1400/backup-cold/vzdump/home/`
 
 ## Authority Update Required
 
 `ops/bindings/backup.inventory.yaml` COMPLETED 2026-03-08:
 - ✅ Created new destination lanes pointing to `/md1400/backup-cold/apps/<domain>/`
 - ✅ Deprecated `nas-app-backups` lane (all business backups migrated to 730XD)
-- ✅ Updated `nas-home-local-exception` lane for HA VM 100 + Pi-hole LXC 105 (only these two home systems allowed)
+- ✅ Promoted home and shop VM/LXC cold targets toward md1400 canonical paths
 
 ## Verification Commands
 
@@ -92,8 +97,9 @@ ssh pve "ls -R /md1400/backup-cold/apps/"
 # Check capacity
 ssh pve "df -h | grep md1400"
 
-# Verify tank VM backups unchanged
-ssh pve "ls /tank/backups/vzdump/dump/ | wc -l"
+# Verify promoted VM/LXC cold copies
+ssh pve "ls /md1400/backup-cold/vzdump/pve | wc -l"
+ssh pve "ls /md1400/backup-cold/vzdump/home | wc -l"
 ```
 
 ## Implementation Evidence

@@ -1,7 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # mail-archiver-backup.sh — Daily backup of mail-archiver DB + uploads WITH 730XD OFFSITE
 # DESTINATION: 730XD canonical backup plane (/md1400/backup-cold/apps/communications/mail-archiver/)
-# GOVERNANCE: Finance Stack Doctrine v1 compliance (offsite verification required)
+# GOVERNANCE: Communications offsite doctrine (offsite verification required)
 set -euo pipefail
 
 BACKUP_DIR="/srv/mail-archiver/backups"
@@ -13,11 +13,9 @@ OFFSITE_HOST="pve"
 OFFSITE_BASE="/md1400/backup-cold/apps/communications/mail-archiver"
 OFFSITE_IDENTITY_FILE="${OFFSITE_IDENTITY_FILE:-/home/ubuntu/.ssh/id_ed25519}"
 TIMESTAMP=$(date -u +%Y-%m-%dT%H%M%SZ)
-KEEP_LOCAL=3
 LOG_TAG="mail-archiver-backup"
 SUCCESS_MARKER="$BACKUP_STAGING/.sync-success"
 LOCK_FILE="/var/lock/mail-archiver-backup.lock"
-FAIL_COUNT=0
 
 OFFSITE_SSH_OPTS=(
   -o BatchMode=yes
@@ -67,7 +65,7 @@ trap cleanup EXIT
 
 acquire_lock
 
-mkdir -p "$BACKUP_STAGING" "$BACKUP_ARCHIVE"
+install -d -m 755 "$BACKUP_STAGING" "$BACKUP_ARCHIVE"
 rm -f "$SUCCESS_MARKER"
 
 log "=== mail-archiver backup start (730XD offsite) ==="
@@ -133,7 +131,7 @@ for artifact in "$DB_DUMP" "$UPLOADS_ARCHIVE" "$MANIFEST_FILE"; do
     continue
   fi
   log "  Syncing $(basename "$artifact") -> 730XD"
-  if ! rsync -az --timeout=120 -e "$RSYNC_SSH" "$artifact" "$OFFSITE_USER@$OFFSITE_HOST:$OFFSITE_BASE/"; then
+  if ! rsync -a --partial --inplace --timeout=120 -e "$RSYNC_SSH" "$artifact" "$OFFSITE_USER@$OFFSITE_HOST:$OFFSITE_BASE/"; then
     log "ERROR: rsync failed for $(basename "$artifact")"
     sync_fail=$((sync_fail + 1))
   fi
@@ -170,11 +168,8 @@ fi
 log "730XD verification passed — all artifacts confirmed on 730XD"
 
 log "=== Phase 4: Retention cleanup ==="
-# Local retention
-ls -t "$BACKUP_DIR"/staging_archive/mail-archiver-db-*.sql.gz 2>/dev/null | tail -n +$((KEEP_LOCAL+1)) | xargs rm -f 2>/dev/null || true
-ls -t "$BACKUP_DIR"/staging_archive/mail-archiver-uploads-*.tar.gz 2>/dev/null | tail -n +$((KEEP_LOCAL+1)) | xargs rm -f 2>/dev/null || true
-
-# 730XD retention (14 days)
+# Local canonical recovery point is single-slot last-good; historical flat artifacts are preserved until separately pruned.
+# 730XD retention remains the authoritative multi-day offsite history.
 offsite_ssh "bash -lc '
     find \"$OFFSITE_BASE\" -name \"mail-archiver-db-*.sql.gz\" -mtime +14 -delete 2>/dev/null || true
     find \"$OFFSITE_BASE\" -name \"mail-archiver-uploads-*.tar.gz\" -mtime +14 -delete 2>/dev/null || true

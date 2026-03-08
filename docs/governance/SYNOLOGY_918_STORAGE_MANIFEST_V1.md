@@ -13,13 +13,13 @@ loop: LOOP-BACKUP-PLANE-CONSOLIDATION-730XD-E2E-20260308
 
 ## Executive Summary
 
-As of **2026-03-08**, the Synology has exactly three canonical roles:
+As of **2026-03-08**, the Synology has exactly three active roles:
 
-1. **Home-local primary backup surface** for `proxmox-home` VM/LXC artifacts.
-2. **Selective shop exact-offsite target** for the feasible VM subset under `/volume1/backups/proxmox/vzdump/critical/`.
+1. **Business-app grace mirror only** under `/volume1/backups/apps/*`; canonical cold recovery is on `pve:/md1400/backup-cold/apps/...`.
+2. **Home-local generation surface** for `proxmox-home` VM/LXC artifacts under `/volume1/backups/proxmox_backups/dump/`; canonical cold recovery is promoted to `pve:/md1400/backup-cold/vzdump/home/`.
 3. **Home/personal storage host** for Immich, photo archives, media staging, documents, and homelab payloads.
 
-The Synology is **not** the canonical business app backup authority. Those paths now exist only as a **legacy grace mirror** while the canonical recovery plane lives on the 730XD at `pve:/md1400/backup-cold/apps/...`.
+The Synology is **not** the canonical server-backup authority for shop or business workloads. Historical `/volume1/backups/proxmox/vzdump/critical/` residue may remain on disk, but the canonical cold recovery plane now lives on the 730XD under `pve:/md1400/backup-cold/...`.
 
 ## Device Snapshot
 
@@ -37,8 +37,8 @@ The Synology is **not** the canonical business app backup authority. Those paths
 | Surface | Current Role | Canonical Authority | Live Proof |
 |--------|--------------|---------------------|-----------|
 | `/volume1/backups/apps/*` | Legacy grace mirror only | 730XD `pve:/md1400/backup-cold/apps/*` | Fresh 730XD finance/infra/dev-tools/mint-data/communications artifacts on 2026-03-08 |
-| `/volume1/backups/proxmox/vzdump/critical/` | Selective exact-offsite for feasible shop VMs | Synology exact-offsite lane remains active | `vm-211` and `vm-213` artifacts present; offsite sync completed `2026-03-08 11:49:31 -04:00` |
-| `/volume1/backups/proxmox_backups/dump/` | Home-local primary backup surface | Synology | Latest `vm-100` artifact `2026-03-08`; latest `lxc-105` artifact still present `2026-03-08` |
+| `/volume1/backups/proxmox/vzdump/critical/` | Historical shop residue only | 730XD `pve:/md1400/backup-cold/vzdump/pve/` | Residual shop artifacts remain on disk; do not treat as active authority |
+| `/volume1/backups/proxmox_backups/dump/` | Home-local generation surface | 730XD `pve:/md1400/backup-cold/vzdump/home/` | Latest `vm-100` artifact `2026-03-08`; latest `lxc-105` artifact present `2026-03-08` |
 | `/volume1/im2ch`, `/volume1/photo-keepers`, `/volume1/media-staging`, `/volume1/documents`, `/volume1/homelab` | Home/personal canonical data | Synology | Live storage families remain mounted and in use |
 
 ## Business App Backup Mirror
@@ -65,9 +65,9 @@ Current canonical 730XD usage snapshot:
 - `mint-data`: `35M`
 - `communications`: `5.9M`
 
-## Shop Exact-Offsite Posture
+## Historical Shop Residue
 
-The shop exact-offsite lane on Synology remains **active for the feasible subset** and must not be described as deprecated.
+The old shop exact-offsite lane on Synology is now **historical residue only**. It may remain on disk during cleanup windows, but it is no longer the canonical authority surface.
 
 **Canonical feasible exact-offsite set**:
 - `204` `infra-core`
@@ -80,16 +80,14 @@ The shop exact-offsite lane on Synology remains **active for the feasible subset
 - `213` `mint-apps`
 
 **Current state**:
-- Exact-offsite root: `/volume1/backups/proxmox/vzdump/critical/`
+- Historical residue root: `/volume1/backups/proxmox/vzdump/critical/`
 - Current size: `1018G`
-- Latest verified `vm-211` artifact: `vzdump-qemu-211-2026_03_07-04_19_16.vma.zst`
-- Latest verified `vm-213` artifact: `vzdump-qemu-213-2026_03_07-05_26_14.vma.zst`
-- Duplicate offsite sync overlap was fixed on `2026-03-08` by adding a lockfile to `vzdump-offsite-sync.sh`
-- The surviving authoritative run completed with `OK vm-213` and `=== offsite sync done ===`
+- Latest visible residue includes `vm-211` and `vm-213` artifacts from the pre-md1400 lane
+- Canonical cold recovery for shop guests now lives on `pve:/md1400/backup-cold/vzdump/pve/`
 
-**Non-feasible / explicit exceptions**:
-- `vm-212` and `vm-214` remain size-based exact-offsite exceptions; app-level backup lanes are the compensating control.
-- `vm-215` is not part of the current exact-offsite set.
+**Historical notes**:
+- `vm-212` and `vm-214` previously relied on app-level compensating controls for the old Synology offsite lane.
+- `vm-215` was outside the feasible exact-offsite subset before the md1400 cutover.
 
 ## Home-Local Canonical Surface
 
@@ -111,14 +109,15 @@ Current home backup artifacts:
 
 Interpretation:
 
-- `vm-100` remains the active canonical Synology exception.
-- `lxc-105` still has a fresh artifact on disk, but policy has already moved it out of the active exception set; do not treat that residue as new authority.
+- `vm-100` and `lxc-105` remain the active home local-generation exceptions on Synology.
+- Canonical cold recovery for both is promoted into `/md1400/backup-cold/vzdump/home/`; Synology is the local generation surface, not the canonical cold plane.
 
 ## Deletion / Retention Posture
 
 Do **not** delete historical backups casually. Current operator posture is:
 
 - Keep `/volume1/backups/apps/*` as a short grace mirror only; do not treat it as canonical.
-- Keep `/volume1/backups/proxmox/vzdump/critical/` as the active exact-offsite surface for the feasible VM subset.
-- Keep home-local and personal data families on Synology.
+- Keep `/volume1/backups/proxmox/vzdump/critical/` only as historical residue until a governed cleanup lane retires it.
+- Keep `/volume1/backups/proxmox_backups/dump/` for home local-generation artifacts, with canonical cold copies promoted into md1400.
+- Keep home and personal data families on Synology.
 - Delete or retire stale legacy roots only through a separate governed cleanup lane with retention proof.

@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-# archive-smb-snapshot - ZFS snapshot protection for archive-SMB datasets
-# Datasets: md1400/ronny-projects, md1400/mint-legacy
-# Schedule: Daily via cron
-# Retention: 14 daily snapshots
+# archive-smb-snapshot.sh - Daily md1400 snapshot protection for archive-smb datasets
 set -euo pipefail
 
 DATASETS=(
   "md1400/ronny-projects"
   "md1400/mint-legacy"
 )
-RETENTION_DAYS=14
+RETENTION_DAYS="${RETENTION_DAYS:-14}"
 TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
 SNAPSHOT_PREFIX="auto-daily"
 MANIFEST_DIR="/md1400/backup-cold/archive-smb/snapshots"
@@ -19,32 +16,21 @@ log() { echo "[$(date -Iseconds)] $*"; }
 
 mkdir -p "$MANIFEST_DIR"
 
-# Create snapshots
 created_snapshots=()
 for dataset in "${DATASETS[@]}"; do
   snapshot_name="${dataset}@${SNAPSHOT_PREFIX}-${TIMESTAMP}"
-  if zfs snapshot "$snapshot_name"; then
-    log "OK: created $snapshot_name"
-    created_snapshots+=("$snapshot_name")
-  else
-    log "FAIL: failed to create $snapshot_name"
-    exit 1
-  fi
+  zfs snapshot "$snapshot_name"
+  created_snapshots+=("$snapshot_name")
+  log "OK: created $snapshot_name"
 done
 
-# Cleanup old snapshots (keep last RETENTION_DAYS)
 for dataset in "${DATASETS[@]}"; do
-  # List snapshots for this dataset, filter by prefix, sort by creation time, skip newest RETENTION_DAYS
-  old_snapshots="$(zfs list -t snapshot -H -o name -s creation | grep "^${dataset}@${SNAPSHOT_PREFIX}-" | head -n -"$RETENTION_DAYS" || true)"
-
+  old_snapshots="$(zfs list -t snapshot -H -o name -s creation | grep "^${dataset}@${SNAPSHOT_PREFIX}-" | head -n -"${RETENTION_DAYS}" || true)"
   if [[ -n "$old_snapshots" ]]; then
     while IFS= read -r snapshot; do
-      if zfs destroy "$snapshot"; then
-        log "OK: destroyed old snapshot $snapshot"
-      else
-        log "WARN: failed to destroy $snapshot"
-      fi
-    done <<< "$old_snapshots"
+      zfs destroy "$snapshot"
+      log "OK: destroyed old snapshot $snapshot"
+    done <<<"$old_snapshots"
   fi
 done
 
