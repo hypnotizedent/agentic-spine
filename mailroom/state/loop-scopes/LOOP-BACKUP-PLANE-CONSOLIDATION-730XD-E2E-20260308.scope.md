@@ -1,7 +1,7 @@
 ---
 loop_id: LOOP-BACKUP-PLANE-CONSOLIDATION-730XD-E2E-20260308
 created: 2026-03-08
-status: active
+status: closed
 owner: "@ronny"
 scope: backup
 priority: medium
@@ -159,3 +159,87 @@ Consolidate backup infrastructure to canonical 730XD plane for Mint/business/app
 **No Parallel Authority**: Only one canonical backup plane for business/app domains
 
 **Receipted Evidence**: All verification commands, destination listings, restore proofs, doc/script drift removal proofs
+
+## Closeout Summary
+
+### Terminal Delivered (Commits 8b50c98e, 411d581f)
+
+**Authority Changes** (`backup.inventory.yaml`):
+- `app-mint-postgres`: nas → pve (`/md1400/backup-cold/apps/mint-data/postgres`)
+- `app-mint-postgres-manifest`: nas → pve (`/md1400/backup-cold/apps/mint-data/postgres`)
+- `app-stalwart-offsite`: nas → pve (`/md1400/backup-cold/apps/communications/stalwart`)
+- `app-mail-archiver-offsite`: nas → pve (`/md1400/backup-cold/apps/communications/mail-archiver`)
+
+**Runtime Scripts Deployed**:
+- `mint-data` (VM 212): `/usr/local/bin/mint-postgres-backup.sh` → 730XD ✅ VERIFIED
+- `communications-stack` (VM 214): `/usr/local/bin/stalwart-backup.sh` → 730XD ✅ VERIFIED
+- `communications-stack` (VM 214): `/usr/local/bin/mail-archiver-backup.sh` → 730XD ⚠️ **RUNTIME ISSUE**
+
+**Supporting Artifacts**:
+- Receipt: `receipts/backup/stateful-hardening-730xd-integration-20260308.md`
+- Path model: `docs/contracts/BACKUP_730XD_CANONICAL_PATH_MAPPING.md`
+- Forensic audit: `docs/planning/BACKUP_SYNOLOGY_DS918_FORENSIC_AUDIT_20260308.md`
+
+**Final Status**: `PARTIAL_730XD_INTEGRATION_WITH_EXACT_RUNTIME_PENDING`
+
+### What Actually Works
+
+**Verified Migrations** (runtime proven, 730XD artifacts exist):
+- ✅ Mint Postgres: 18M dump verified on pve:/md1400/backup-cold/apps/mint-data/postgres/
+- ✅ Stalwart: 3.0M data + 12K config verified on pve:/md1400/backup-cold/apps/communications/stalwart/
+
+**Handoff**: "Mint + Stalwart migrated and verified; Mail-archiver runtime still unresolved; Finance not done."
+
+### Runtime Issues Still Open
+
+**Mail-Archiver (Communications Stack, VM 214)** ⚠️:
+- **Inventory updated**: `app-mail-archiver-offsite` points to 730XD
+- **Script deployed**: `/usr/local/bin/mail-archiver-backup.sh` targets `pve:/md1400/backup-cold/apps/communications/mail-archiver/`
+- **Problem**: Target directory on pve is EMPTY (as of closeout forensic)
+- **Concurrent runs detected**: Multiple `mail-archiver-backup.sh` / `pg_dump` processes active on VM 214
+- **No lock**: Script uses shared staging dir `/tmp/mail-archiver-backup/` with no mutex
+- **Overlap risk**: Concurrent runs can corrupt staging area, cause partial/failed syncs
+
+**Finance (VM 211)** ❌:
+- **Explicitly deferred**: Paperless `document_exporter` timing issue (command returns before zip fully written)
+- **Script exists**: `/Users/ronnyworks/code/agentic-spine/ops/staged/finance-stack/finance-stack-backup.sh` (NOT deployed to runtime)
+- **730XD paths ready**: `/md1400/backup-cold/apps/finance/{firefly,ghostfolio,paperless}/` exist but not active
+- **Services blocked**: Firefly, Ghostfolio, Paperless all deferred pending Paperless export fix
+
+### Residue (Still on NAS, Business Targets)
+
+**Unchanged from Previous State**:
+- `app-infisical` (nas, critical)
+- `app-gitea` (nas, critical)
+- `app-vaultwarden` (nas, critical)
+- `app-paperless-db` (nas, critical)
+- `app-paperless-export` (nas, critical)
+- `app-finance-sanity-manifest` (nas, critical)
+
+### Verification Not Closed
+
+**Runtime Freshness**: No `backup.status` run performed by terminal.
+
+**Restore Posture**: No restore proof from 730XD paths (even for Mint/Stalwart verified migrations).
+
+### Follow-Up Required
+
+**Immediate** (resolve runtime issues):
+1. **GAP-OP-1513**: mail-archiver concurrent-run race condition (high, runtime-bug)
+2. **GAP-OP-1514**: mail-archiver 730XD migration incomplete (high, runtime-bug)
+3. **GAP-OP-1515**: Finance Paperless export timing issue (medium, runtime-bug)
+
+**Deferred** (complete migration objective):
+4. Migrate remaining NAS-backed business targets (Infisical, Gitea, Vaultwarden)
+5. Run `backup.status` with runtime context to verify freshness
+6. Execute restore posture proof for migrated paths
+
+### Commits
+
+- `8b50c98e` — feat(backup): migrate Mint/Stalwart to 730XD, stage mail-archiver (runtime incomplete)
+- `411d581f` — docs(backup): add 730XD integration receipt for stateful hardening migration
+- `db5fa1fa` — feat(backup): complete Spine authority migration to 730XD canonical plane (earlier work, container-fleet moves)
+- `ebbae1e6` — feat(backup): complete Synology DS918+ forensic storage audit
+
+**Loop Status**: Closed (terminal editing session done)
+**Work Item Status**: Incomplete (Mint + Stalwart verified; Mail-archiver runtime unresolved; Finance not done)
