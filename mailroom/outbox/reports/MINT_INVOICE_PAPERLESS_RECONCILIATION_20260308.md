@@ -108,6 +108,22 @@ Latest live runtime snapshot after the `12`-worker restart:
 - Paperless document rows: `9,095`
 - live Paperless runtime env: `PAPERLESS_TASK_WORKERS=12`, `PAPERLESS_THREADS_PER_WORKER=1`
 
+### Latest exact checkpoint with queue-only residue
+
+Current exact DB-backed parity:
+
+- source corpus: `12,863`
+- live Paperless filename set: `9,277`
+- currently missing: `3,634`
+- consume backlog currently covers `3,768` filenames
+- `residual_not_in_consume=0`
+
+Meaning:
+
+- every currently-missing preserved invoice filename is now accounted for inside the canonical Paperless consume backlog
+- no secondary hidden missing batch remains outside the active intake queue
+- the remaining delta is queue drain only, not a discovery or routing seam
+
 ## Status
 
 Not closed yet at the time of this report write.

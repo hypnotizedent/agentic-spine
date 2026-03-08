@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# archive-smb-snapshot - ZFS snapshot protection for archive-SMB datasets
+# Datasets: md1400/ronny-projects, md1400/mint-legacy
+# Schedule: Daily via cron
+# Retention: 14 daily snapshots
+set -euo pipefail
+
+DATASETS=(
+  "md1400/ronny-projects"
+  "md1400/mint-legacy"
+)
+RETENTION_DAYS=14
+TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
+SNAPSHOT_PREFIX="auto-daily"
+
+log() { echo "[$(date -Iseconds)] $*"; }
+
+# Create snapshots
+for dataset in "${DATASETS[@]}"; do
+  snapshot_name="${dataset}@${SNAPSHOT_PREFIX}-${TIMESTAMP}"
+  if zfs snapshot "$snapshot_name"; then
+    log "OK: created $snapshot_name"
+  else
+    log "FAIL: failed to create $snapshot_name"
+    exit 1
+  fi
+done
+
+# Cleanup old snapshots (keep last RETENTION_DAYS)
+for dataset in "${DATASETS[@]}"; do
+  # List snapshots for this dataset, filter by prefix, sort by creation time, skip newest RETENTION_DAYS
+  old_snapshots="$(zfs list -t snapshot -H -o name -s creation | grep "^${dataset}@${SNAPSHOT_PREFIX}-" | head -n -"$RETENTION_DAYS" || true)"
+
+  if [[ -n "$old_snapshots" ]]; then
+    while IFS= read -r snapshot; do
+      if zfs destroy "$snapshot"; then
+        log "OK: destroyed old snapshot $snapshot"
+      else
+        log "WARN: failed to destroy $snapshot"
+      fi
+    done <<< "$old_snapshots"
+  fi
+done
+
+log "Archive-SMB snapshot cycle complete"
