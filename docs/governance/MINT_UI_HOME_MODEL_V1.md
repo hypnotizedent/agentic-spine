@@ -148,4 +148,4 @@ Legacy ronny-ops apps are reference, not runtime authority. Must rewire to fresh
 
 **END OF DOCUMENT**
 
-*Status: PARTIAL - advisory guidance exists, enforcement deferred, violations acknowledged*
+*Status: ACTIVE - enforcement gate landed, temporary exceptions documented, portals deferred*
