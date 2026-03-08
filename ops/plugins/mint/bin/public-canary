@@ -1,0 +1,423 @@
+#!/usr/bin/env bash
+# public-canary - Real public-flow canaries for Mint ingress.
+#
+# Flows:
+#   - quote submit through mintprints.com with downstream seed verification
+#   - Stripe checkout session creation through api.mintprints.com plus signed webhook replay
+#   - EasyPost signed webhook replay through api.mintprints.com with replay-safe state proof
+#
+# Usage:
+#   public-canary
+#   public-canary quote
+#   public-canary payment
+#   public-canary shipping
+#   public-canary all
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SECRETS_EXEC="$SPINE_ROOT/ops/plugins/secrets/bin/secrets-exec"
+CONTRACT="$SPINE_ROOT/ops/bindings/mint.public.ingress.contract.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
+
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  public-canary [quote|payment|shipping|all]
+USAGE
+}
+
+stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || stop "missing dependency: $1"
+}
+
+require_cmd curl
+require_cmd jq
+require_cmd openssl
+require_cmd python3
+require_cmd ssh
+require_cmd yq
+
+[[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$PROBE_BINDING" ]] || stop "missing binding: $PROBE_BINDING"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+MODE="${1:-all}"
+case "$MODE" in
+  all|quote|payment|shipping) ;;
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+  *)
+    stop "unknown mode: $MODE"
+    ;;
+esac
+
+APP_TARGET_ID="$(yq -r '.targets.app_plane.ssh_target // ""' "$PROBE_BINDING")"
+DATA_TARGET_ID="$(yq -r '.targets.data_plane.ssh_target // ""' "$PROBE_BINDING")"
+[[ -n "$APP_TARGET_ID" && "$APP_TARGET_ID" != "null" ]] || stop "missing app plane target"
+[[ -n "$DATA_TARGET_ID" && "$DATA_TARGET_ID" != "null" ]] || stop "missing data plane target"
+
+APP_USER="$(ssh_resolve_user "$APP_TARGET_ID" "ubuntu")"
+DATA_USER="$(ssh_resolve_user "$DATA_TARGET_ID" "ubuntu")"
+IFS=' ' read -r APP_HOST APP_PATH <<< "$(ssh_resolve_host_with_fallback "$APP_TARGET_ID" 2 || true)"
+IFS=' ' read -r DATA_HOST DATA_PATH <<< "$(ssh_resolve_host_with_fallback "$DATA_TARGET_ID" 2 || true)"
+[[ -n "$APP_HOST" && "$APP_PATH" != "unreachable" ]] || stop "app plane ssh target unreachable"
+[[ -n "$DATA_HOST" && "$DATA_PATH" != "unreachable" ]] || stop "data plane ssh target unreachable"
+
+APP_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .port // 22" "$SSH_BINDING" | head -n1)"
+DATA_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$DATA_TARGET_ID\") | .port // 22" "$SSH_BINDING" | head -n1)"
+SSH_OPTS=(-o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mint-public-canary.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+fail=0
+
+emit_row() {
+  local check="$1" state="$2" detail="$3"
+  printf "%-30s %-8s %s\n" "$check" "$state" "$detail"
+}
+
+read_flow_surface() {
+  local flow_id="$1"
+  python3 - "$CONTRACT" "$flow_id" <<'PY'
+import sys, yaml
+contract_path, flow_id = sys.argv[1:3]
+with open(contract_path, "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+for row in data.get("flows", []) or []:
+    if str(row.get("id", "")).strip() == flow_id:
+        print(str(row.get("public_surface", "")).strip())
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+container_env_value() {
+  local container="$1" key="$2"
+  ssh "${SSH_OPTS[@]}" -p "$APP_PORT" "${APP_USER}@${APP_HOST}" \
+    "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= -v K='$key' '\$1==K{sub(\$1\"=\",\"\"); print; exit}'"
+}
+
+mint_db_query() {
+  local sql="$1"
+  ssh "${SSH_OPTS[@]}" -p "$DATA_PORT" "${DATA_USER}@${DATA_HOST}" \
+    "docker exec -i mint-modules-postgres sh -lc 'PGPASSWORD=\"\${POSTGRES_PASSWORD:-}\" psql -At -v ON_ERROR_STOP=1 -U \"\${POSTGRES_USER:-mint}\" -d \"\${POSTGRES_DB:-mint_modules}\"'" <<< "$sql"
+}
+
+validate_uuid() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9a-fA-F-]{36}$ ]]
+}
+
+extract_location_header() {
+  local header_file="$1"
+  awk 'tolower($1)=="location:"{sub(/\r$/,"",$2); print $2; exit}' "$header_file"
+}
+
+url_join() {
+  python3 - "$1" "$2" <<'PY'
+from urllib.parse import urljoin
+import sys
+print(urljoin(sys.argv[1], sys.argv[2]))
+PY
+}
+
+map_shipping_status_to_easypost() {
+  case "$1" in
+    tracking_active) printf '%s\n' "pre_transit" ;;
+    in_transit) printf '%s\n' "in_transit" ;;
+    delivered) printf '%s\n' "delivered" ;;
+    *) printf '%s\n' "delivered" ;;
+  esac
+}
+
+run_quote_canary() {
+  local submit_url success_root canary_email canary_tag body_file head_file http_code location success_url seed_id seed_row success_code
+  submit_url="$(read_flow_surface quote-submit)"
+  success_root="$(read_flow_surface quote-success)"
+  canary_tag="mint-public-quote-$(date -u +%Y%m%dT%H%M%SZ)"
+  canary_email="ops-mint-public-canary@mintprints.com"
+  body_file="$TMP_DIR/quote.body"
+  head_file="$TMP_DIR/quote.headers"
+
+  set +e
+  http_code="$(curl -sS -o "$body_file" -D "$head_file" -w "%{http_code}" \
+    -X POST \
+    -F "name=Mint Public Canary" \
+    -F "email=${canary_email}" \
+    -F "company=Mint Canary" \
+    -F "product=PC61" \
+    -F "quantity=1" \
+    -F "decoration=screen_print" \
+    -F "notes=${canary_tag}" \
+    "$submit_url")"
+  local rc=$?
+  set -e
+  if [[ "$rc" -ne 0 || "$http_code" != "302" ]]; then
+    emit_row "quote.submit" "FAIL" "curl_rc=$rc http=$http_code"
+    fail=1
+    return
+  fi
+
+  location="$(extract_location_header "$head_file")"
+  if [[ -z "$location" ]]; then
+    emit_row "quote.submit" "FAIL" "missing redirect location"
+    fail=1
+    return
+  fi
+
+  seed_id="$(python3 - "$location" <<'PY'
+from urllib.parse import urlparse, parse_qs
+import sys
+qs = parse_qs(urlparse(sys.argv[1]).query)
+print((qs.get("seed") or [""])[0])
+PY
+)"
+  if ! validate_uuid "$seed_id"; then
+    emit_row "quote.submit" "FAIL" "invalid seed id from redirect"
+    fail=1
+    return
+  fi
+  emit_row "quote.submit" "PASS" "redirected seed=$seed_id"
+
+  success_url="$(url_join "$success_root" "$location")"
+  set +e
+  success_code="$(curl -sS -o "$TMP_DIR/quote.success" -w "%{http_code}" "$success_url")"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 || "$success_code" != "200" ]]; then
+    emit_row "quote.success" "FAIL" "curl_rc=$rc http=$success_code"
+    fail=1
+    return
+  fi
+  emit_row "quote.success" "PASS" "public success page reachable"
+
+  seed_row="$(mint_db_query "SELECT id || '|' || source || '|' || COALESCE(from_email,'') FROM artwork_seeds WHERE id = '$seed_id' LIMIT 1;")"
+  if [[ -z "$seed_row" ]]; then
+    emit_row "quote.seed" "FAIL" "seed not found in mint-data"
+    fail=1
+    return
+  fi
+
+  local found_id found_source found_email
+  IFS='|' read -r found_id found_source found_email <<< "$seed_row"
+  if [[ "$found_id" != "$seed_id" || "$found_source" != "quote_form" || "$found_email" != "$canary_email" ]]; then
+    emit_row "quote.seed" "FAIL" "unexpected seed row"
+    fail=1
+    return
+  fi
+  emit_row "quote.seed" "PASS" "seed persisted on mint-data"
+}
+
+run_payment_canary() {
+  local checkout_url webhook_url success_url cancel_url api_key webhook_secret order_id checkout_json checkout_session_id checkout_http session_http stripe_json success_ok cancel_ok ts event_id payload sig header webhook_http db_row db_event
+  checkout_url="$(read_flow_surface stripe-checkout-session)"
+  webhook_url="$(read_flow_surface stripe-webhook)"
+  success_url="$(read_flow_surface checkout-success)"
+  cancel_url="$(read_flow_surface checkout-cancel)"
+  api_key="$(container_env_value payment API_KEY)"
+  webhook_secret="$(container_env_value payment STRIPE_WEBHOOK_SECRET)"
+  [[ -n "$api_key" ]] || stop "missing payment API_KEY"
+  [[ -n "$webhook_secret" ]] || stop "missing payment STRIPE_WEBHOOK_SECRET"
+  [[ -n "${PAYMENT_STRIPE_SECRET_KEY:-}" ]] || stop "PAYMENT_STRIPE_SECRET_KEY missing"
+
+  order_id="mint-public-payment-$(date -u +%Y%m%dT%H%M%SZ)"
+  checkout_json="$TMP_DIR/payment.checkout.json"
+  set +e
+  checkout_http="$(curl -sS -o "$checkout_json" -w "%{http_code}" \
+    -H "x-api-key: $api_key" \
+    -H 'content-type: application/json' \
+    -d "$(jq -cn --arg oid "$order_id" '{order_id:$oid, amount_cents:100, currency:"usd", customer_email:"ops-mint-public-canary@mintprints.com", payment_type:"deposit", description:"Mint public canary"}')" \
+    "$checkout_url")"
+  local rc=$?
+  set -e
+  if [[ "$rc" -ne 0 || "$checkout_http" != "201" ]]; then
+    emit_row "payment.checkout" "FAIL" "curl_rc=$rc http=$checkout_http"
+    fail=1
+    return
+  fi
+
+  checkout_session_id="$(jq -r '.checkout_session_id // empty' "$checkout_json")"
+  if [[ -z "$checkout_session_id" ]]; then
+    emit_row "payment.checkout" "FAIL" "missing checkout_session_id"
+    fail=1
+    return
+  fi
+  emit_row "payment.checkout" "PASS" "session=$checkout_session_id"
+
+  set +e
+  session_http="$(curl -sS -o "$TMP_DIR/payment.session.json" -w "%{http_code}" \
+    -H "x-api-key: $api_key" \
+    "${checkout_url}/${checkout_session_id}")"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 || "$session_http" != "200" ]]; then
+    emit_row "payment.session" "FAIL" "curl_rc=$rc http=$session_http"
+    fail=1
+    return
+  fi
+  emit_row "payment.session" "PASS" "public session readback ok"
+
+  stripe_json="$(curl -sS -u "${PAYMENT_STRIPE_SECRET_KEY}:" "https://api.stripe.com/v1/checkout/sessions/${checkout_session_id}")"
+  success_ok="$(jq -r --arg url "$success_url" '((.success_url // "") | startswith($url)) and (.success_url | contains("session_id="))' <<<"$stripe_json")"
+  cancel_ok="$(jq -r --arg url "$cancel_url" '(.cancel_url // "") == $url' <<<"$stripe_json")"
+  if [[ "$success_ok" != "true" || "$cancel_ok" != "true" ]]; then
+    emit_row "payment.return_urls" "FAIL" "stripe session return urls non-canonical"
+    fail=1
+    return
+  fi
+  emit_row "payment.return_urls" "PASS" "checkout return urls canonical"
+
+  set +e
+  success_http="$(curl -sS -o "$TMP_DIR/payment.success" -w "%{http_code}" "$success_url")"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 || "$success_http" != "200" ]]; then
+    emit_row "payment.success_page" "FAIL" "curl_rc=$rc http=$success_http"
+    fail=1
+    return
+  fi
+  emit_row "payment.success_page" "PASS" "success page reachable"
+
+  set +e
+  cancel_http="$(curl -sS -o "$TMP_DIR/payment.cancel" -w "%{http_code}" "$cancel_url")"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 || "$cancel_http" != "200" ]]; then
+    emit_row "payment.cancel_page" "FAIL" "curl_rc=$rc http=$cancel_http"
+    fail=1
+    return
+  fi
+  emit_row "payment.cancel_page" "PASS" "cancel page reachable"
+
+  ts="$(date +%s)"
+  event_id="evt_mint_public_canary_${ts}"
+  payload="$(jq -cn --arg evt "$event_id" --arg sid "$checkout_session_id" --arg oid "$order_id" --argjson created "$ts" '{id:$evt,object:"event",api_version:"2025-02-24.acacia",created:$created,type:"checkout.session.expired",data:{object:{id:$sid,object:"checkout.session",metadata:{order_id:$oid,payment_type:"deposit"}}},livemode:true,pending_webhooks:1,request:{id:"req_mint_public_canary",idempotency_key:null}}')"
+  sig="$(printf '%s' "${ts}.${payload}" | openssl dgst -sha256 -hmac "$webhook_secret" | awk '{print $2}')"
+  header="t=${ts},v1=${sig}"
+  set +e
+  webhook_http="$(curl -sS -o "$TMP_DIR/payment.webhook.json" -w "%{http_code}" \
+    -H 'content-type: application/json' \
+    -H "stripe-signature: $header" \
+    --data-binary "$payload" \
+    "$webhook_url")"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 || "$webhook_http" != "200" ]]; then
+    emit_row "payment.webhook" "FAIL" "curl_rc=$rc http=$webhook_http"
+    fail=1
+    return
+  fi
+  if [[ "$(jq -r '.received // false' "$TMP_DIR/payment.webhook.json")" != "true" ]]; then
+    emit_row "payment.webhook" "FAIL" "webhook not acknowledged"
+    fail=1
+    return
+  fi
+  emit_row "payment.webhook" "PASS" "public webhook received"
+
+  db_row="$(mint_db_query "SELECT status FROM payment_records WHERE stripe_checkout_session_id = '$checkout_session_id' ORDER BY created_at DESC LIMIT 1;")"
+  db_event="$(mint_db_query "SELECT event_id FROM payment_webhook_events WHERE event_id = '$event_id' LIMIT 1;")"
+  if [[ "$db_row" != "cancelled" ]]; then
+    emit_row "payment.record" "FAIL" "payment status=$db_row"
+    fail=1
+    return
+  fi
+  if [[ "$db_event" != "$event_id" ]]; then
+    emit_row "payment.event" "FAIL" "webhook event not persisted"
+    fail=1
+    return
+  fi
+  emit_row "payment.record" "PASS" "payment record cancelled"
+  emit_row "payment.event" "PASS" "webhook event persisted"
+}
+
+run_shipping_canary() {
+  local webhook_url webhook_secret label_row tracking_number current_status easypost_status payload sig webhook_http after_status
+  webhook_url="$(read_flow_surface easypost-webhook)"
+  webhook_secret="$(container_env_value shipping EASYPOST_WEBHOOK_SECRET)"
+  [[ -n "$webhook_secret" ]] || stop "missing shipping EASYPOST_WEBHOOK_SECRET"
+
+  label_row="$(mint_db_query "SELECT tracking_number || '|' || status FROM shipping_labels WHERE tracking_number IS NOT NULL AND status IN ('tracking_active','in_transit','delivered') ORDER BY created_at DESC LIMIT 1;")"
+  if [[ -z "$label_row" ]]; then
+    label_row="$(mint_db_query "SELECT tracking_number || '|' || status FROM shipping_labels WHERE tracking_number IS NOT NULL ORDER BY created_at DESC LIMIT 1;")"
+  fi
+  if [[ -z "$label_row" ]]; then
+    emit_row "shipping.lookup" "FAIL" "no shipping label available for replay-safe proof"
+    fail=1
+    return
+  fi
+
+  IFS='|' read -r tracking_number current_status <<< "$label_row"
+  easypost_status="$(map_shipping_status_to_easypost "$current_status")"
+  payload="$(jq -cn --arg tc "$tracking_number" --arg st "$easypost_status" '{description:"tracker.updated",result:{tracking_code:$tc,status:$st,public_url:"https://track.easypost.com/dummy-canary"}}')"
+  sig="$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$webhook_secret" | awk '{print $2}')"
+
+  set +e
+  webhook_http="$(curl -sS -o "$TMP_DIR/shipping.webhook.json" -w "%{http_code}" \
+    -H 'content-type: application/json' \
+    -H "x-hmac-signature: $sig" \
+    -H "x-easypost-signature: $sig" \
+    --data-binary "$payload" \
+    "$webhook_url")"
+  local rc=$?
+  set -e
+  if [[ "$rc" -ne 0 || "$webhook_http" != "200" ]]; then
+    emit_row "shipping.webhook" "FAIL" "curl_rc=$rc http=$webhook_http"
+    fail=1
+    return
+  fi
+
+  if [[ "$(jq -r '.received // false' "$TMP_DIR/shipping.webhook.json")" != "true" ]]; then
+    emit_row "shipping.webhook" "FAIL" "webhook not acknowledged"
+    fail=1
+    return
+  fi
+
+  after_status="$(mint_db_query "SELECT status FROM shipping_labels WHERE tracking_number = '$tracking_number' ORDER BY created_at DESC LIMIT 1;")"
+  if [[ -z "$after_status" ]]; then
+    emit_row "shipping.state" "FAIL" "tracking row missing after webhook"
+    fail=1
+    return
+  fi
+  emit_row "shipping.webhook" "PASS" "public webhook received tracking=$tracking_number"
+  emit_row "shipping.state" "PASS" "status=$after_status replay_safe_from=$current_status"
+}
+
+echo "mint.public.canary"
+echo "contract: $CONTRACT"
+echo "app_target: ${APP_USER}@${APP_HOST} via=${APP_PATH}"
+echo "data_target: ${DATA_USER}@${DATA_HOST} via=${DATA_PATH}"
+echo
+printf "%-30s %-8s %s\n" "CHECK" "STATE" "DETAIL"
+
+if [[ "$MODE" == "all" || "$MODE" == "quote" ]]; then
+  run_quote_canary
+fi
+if [[ "$MODE" == "all" || "$MODE" == "payment" ]]; then
+  run_payment_canary
+fi
+if [[ "$MODE" == "all" || "$MODE" == "shipping" ]]; then
+  run_shipping_canary
+fi
+
+echo
+if [[ "$fail" -eq 1 ]]; then
+  echo "status: FAIL (public canary failed)"
+  exit 1
+fi
+echo "status: OK (public canary passed)"

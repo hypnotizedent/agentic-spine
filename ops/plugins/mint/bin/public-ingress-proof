@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# public-ingress-proof - Prove canonical Mint public ingress contract against live Cloudflare + provider state.
+#
+# Read-only checks:
+# - Cloudflare tunnel host -> backend target parity for Mint public hosts
+# - Public HTTP/webhook path reachability for canonical Mint flows
+# - Stripe/EasyPost provider registrations point at canonical public URLs
+#
+# Usage:
+#   public-ingress-proof
+#   public-ingress-proof <flow_id>
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SECRETS_EXEC="$SPINE_ROOT/ops/plugins/secrets/bin/secrets-exec"
+CONTRACT="$SPINE_ROOT/ops/bindings/mint.public.ingress.contract.yaml"
+CF_BINDING="$SPINE_ROOT/ops/bindings/cloudflare.inventory.yaml"
+CF_LIB="$SPINE_ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+FILTER_ID="${1:-}"
+
+stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+[[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+[[ -f "$CF_BINDING" ]] || stop "missing binding: $CF_BINDING"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
+command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+# shellcheck source=/dev/null
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+[[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]] || stop "CLOUDFLARE_ACCOUNT_ID missing"
+
+TUNNEL_NAME="$(python3 - "$CONTRACT" <<'PY'
+import sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+print((((data.get("network_model") or {}).get("public_edge") or {}).get("tunnel_name")) or "")
+PY
+)"
+[[ -n "$TUNNEL_NAME" ]] || stop "missing network_model.public_edge.tunnel_name"
+
+TUNNEL_ID="$(python3 - "$CF_BINDING" "$TUNNEL_NAME" <<'PY'
+import sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+for tunnel in data.get("tunnels", []):
+    if str(tunnel.get("name", "")).strip() == sys.argv[2]:
+        print(str(tunnel.get("id", "")).strip())
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+)" || stop "tunnel id not found for $TUNNEL_NAME"
+
+CONFIG_JSON="$(cf_api_get "${CF_API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations")" \
+  || stop "failed to fetch Cloudflare tunnel configuration"
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mint-public-ingress-proof.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+printf '%s\n' "$CONFIG_JSON" > "$TMP_DIR/cloudflare-config.json"
+
+python3 - "$CONTRACT" > "$TMP_DIR/expected-hosts.tsv" <<'PY'
+import sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+for row in data.get("hosts", []) or []:
+    hostname = str(row.get("hostname", "")).strip()
+    target = str(row.get("cloudflare_backend_target", "")).strip()
+    host_id = str(row.get("id", "")).strip()
+    if hostname and target:
+        print("\t".join([hostname, target, host_id]))
+PY
+
+python3 - "$TMP_DIR/cloudflare-config.json" > "$TMP_DIR/actual-hosts.tsv" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+result = data.get("result") or {}
+cfg = result.get("config") or result.get("configuration") or result
+for row in cfg.get("ingress", []) or []:
+    hostname = str(row.get("hostname", "")).strip()
+    service = str(row.get("service", "")).strip()
+    if hostname:
+      print("\t".join([hostname, service]))
+PY
+
+python3 - "$CONTRACT" "$FILTER_ID" > "$TMP_DIR/flows.tsv" <<'PY'
+import sys, yaml
+contract_path, filter_id = sys.argv[1], sys.argv[2].strip()
+with open(contract_path, "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+for row in data.get("flows", []) or []:
+    flow_id = str(row.get("id", "")).strip()
+    if filter_id and filter_id != flow_id:
+        continue
+    canary = row.get("canary") or {}
+    url = str(canary.get("url", "")).strip()
+    method = str(canary.get("method", "GET")).strip().upper()
+    statuses = ",".join(str(x) for x in (canary.get("expect_status") or []))
+    provider = str(row.get("provider_name", "")).strip()
+    events = ",".join(str(x) for x in (row.get("provider_expected_events") or []))
+    if flow_id and url and statuses:
+        print("\t".join([flow_id, method, url, statuses, provider, events]))
+PY
+
+echo "mint.public.ingress.proof"
+echo "contract: $CONTRACT"
+echo "tunnel: $TUNNEL_NAME"
+echo
+
+printf "%-28s %-8s %s\n" "CHECK" "STATE" "DETAIL"
+
+fail=0
+
+emit_row() {
+  local check="$1" state="$2" detail="$3"
+  printf "%-28s %-8s %s\n" "$check" "$state" "$detail"
+}
+
+while IFS=$'\t' read -r hostname expected_target host_id; do
+  [[ -n "$hostname" ]] || continue
+  actual_target="$(awk -F'\t' -v host="$hostname" '$1 == host {print $2; exit}' "$TMP_DIR/actual-hosts.tsv")"
+  if [[ -z "$actual_target" ]]; then
+    emit_row "cf.host.${host_id}" "FAIL" "missing hostname=$hostname"
+    fail=1
+  elif [[ "$actual_target" != "$expected_target" ]]; then
+    emit_row "cf.host.${host_id}" "FAIL" "hostname=$hostname got=$actual_target want=$expected_target"
+    fail=1
+  else
+    emit_row "cf.host.${host_id}" "PASS" "hostname=$hostname target=$expected_target"
+  fi
+done < "$TMP_DIR/expected-hosts.tsv"
+
+while IFS=$'\t' read -r flow_id method url statuses_csv provider_name provider_events; do
+  [[ -n "$flow_id" ]] || continue
+  http_code="$(curl -sS -o "$TMP_DIR/$flow_id.body" -w "%{http_code}" -X "$method" "$url" || true)"
+  expected_match=0
+  IFS=',' read -r -a expected_statuses <<< "$statuses_csv"
+  for expected in "${expected_statuses[@]}"; do
+    if [[ "$http_code" == "$expected" ]]; then
+      expected_match=1
+      break
+    fi
+  done
+  if [[ "$expected_match" -eq 1 ]]; then
+    emit_row "http.${flow_id}" "PASS" "method=$method url=$url http=$http_code"
+  else
+    emit_row "http.${flow_id}" "FAIL" "method=$method url=$url http=$http_code expected=$statuses_csv"
+    fail=1
+  fi
+done < "$TMP_DIR/flows.tsv"
+
+if [[ -z "$FILTER_ID" || "$FILTER_ID" == "stripe-webhook" ]]; then
+  stripe_row="$(awk -F'\t' '$5 == "stripe" {print; exit}' "$TMP_DIR/flows.tsv" || true)"
+  if [[ -n "$stripe_row" ]]; then
+    stripe_url="$(awk -F'\t' '{print $3}' <<<"$stripe_row")"
+    stripe_events="$(awk -F'\t' '{print $6}' <<<"$stripe_row")"
+    stripe_json="$(curl -sS -u "${PAYMENT_STRIPE_SECRET_KEY}:" "https://api.stripe.com/v1/webhook_endpoints?limit=100")"
+    if ! jq -e '.data | type == "array"' >/dev/null 2>&1 <<<"$stripe_json"; then
+      emit_row "provider.stripe" "FAIL" "unexpected Stripe response"
+      fail=1
+    else
+      stripe_match="$(jq -r --arg url "$stripe_url" '.data[]? | select(.url == $url) | .id' <<<"$stripe_json" | head -n1)"
+      if [[ -z "$stripe_match" ]]; then
+        emit_row "provider.stripe" "FAIL" "missing webhook url=$stripe_url"
+        fail=1
+      else
+        missing_events=0
+        IFS=',' read -r -a expected_events <<< "$stripe_events"
+        for event_name in "${expected_events[@]}"; do
+          [[ -n "$event_name" ]] || continue
+          if ! jq -e --arg id "$stripe_match" --arg event "$event_name" '.data[]? | select(.id == $id) | .enabled_events[]? | select(. == $event)' >/dev/null 2>&1 <<<"$stripe_json"; then
+            missing_events=1
+            break
+          fi
+        done
+        if [[ "$missing_events" -eq 1 ]]; then
+          emit_row "provider.stripe" "FAIL" "webhook id=$stripe_match missing expected events"
+          fail=1
+        else
+          emit_row "provider.stripe" "PASS" "webhook id=$stripe_match url=$stripe_url"
+        fi
+      fi
+    fi
+  fi
+fi
+
+if [[ -z "$FILTER_ID" || "$FILTER_ID" == "easypost-webhook" ]]; then
+  easypost_row="$(awk -F'\t' '$5 == "easypost" {print; exit}' "$TMP_DIR/flows.tsv" || true)"
+  if [[ -n "$easypost_row" ]]; then
+    easypost_url="$(awk -F'\t' '{print $3}' <<<"$easypost_row")"
+    easypost_json="$(curl -sS -u "${SHIPPING_EASYPOST_API_KEY}:" "https://api.easypost.com/v2/webhooks")"
+    if ! jq -e '.webhooks | type == "array"' >/dev/null 2>&1 <<<"$easypost_json"; then
+      emit_row "provider.easypost" "FAIL" "unexpected EasyPost response"
+      fail=1
+    else
+      easypost_match="$(jq -r --arg url "$easypost_url" '
+        .webhooks[]?
+        | select((.disabled_at == null or .disabled_at == "") and .url == $url)
+        | .id
+      ' <<<"$easypost_json" | head -n1)"
+      easypost_noncanonical_count="$(jq -r --arg url "$easypost_url" '
+        [.webhooks[]?
+          | select(.disabled_at == null or .disabled_at == "")
+          | select(.url != $url)
+        ] | length
+      ' <<<"$easypost_json")"
+      if [[ -z "$easypost_match" ]]; then
+        emit_row "provider.easypost" "FAIL" "missing webhook url=$easypost_url"
+        fail=1
+      elif [[ "$easypost_noncanonical_count" != "0" ]]; then
+        emit_row "provider.easypost" "FAIL" "active non-canonical webhooks remaining count=$easypost_noncanonical_count"
+        fail=1
+      else
+        emit_row "provider.easypost" "PASS" "webhook id=$easypost_match url=$easypost_url"
+      fi
+    fi
+  fi
+fi
+
+echo
+if [[ "$fail" -eq 1 ]]; then
+  echo "status: FAIL (public ingress proof failed)"
+  exit 1
+fi
+echo "status: OK (public ingress proof passed)"

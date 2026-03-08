@@ -1,0 +1,669 @@
+version: 1
+updated_at: "2026-03-08"
+owner: "@ronny"
+scope: mint-public-ingress
+
+network_model:
+  public_edge:
+    provider: cloudflare_tunnel
+    tunnel_name: homelab-tunnel
+    canonical_runtime_plane: mint-apps
+    canonical_entry_service: public-ingress
+    canonical_backend_target: http://100.79.183.14:8080
+    policy: "Canonical customer UX and provider webhook ingress terminates on mint-apps public-ingress; retained operator tools may publish direct tunnel targets when their runtime plane is not privately reachable from mint-apps."
+  private_runtime_network:
+    provider: tailscale
+    policy: "Private operator/runtime access only. Never canonical public provider ingress."
+  private_state_plane:
+    runtime_plane: mint-data
+    policy: "State plane only. No direct public app/provider ingress."
+  retained_private_planes:
+    - plane: finance-stack
+      policy: "Operator/public tools may remain owned here and may publish direct Cloudflare tunnel targets when mint-apps cannot privately reach the runtime."
+
+hosts:
+  - id: mintprints-apex
+    hostname: mintprints.com
+    class: customer_ux
+    canonical: true
+    compatibility_only: false
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: quote-page
+    runtime_owner_plane: mint-apps
+    ingress_backend_target: http://quote-page:3341
+    private_dependency_chain:
+      - files-api
+      - mint-modules-postgres
+      - mint-modules-minio
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: quote-form
+
+  - id: mintprints-www
+    hostname: www.mintprints.com
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: quote-page
+    runtime_owner_plane: mint-apps
+    ingress_backend_target: http://quote-page:3341
+    private_dependency_chain:
+      - files-api
+      - mint-modules-postgres
+      - mint-modules-minio
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: quote-form
+
+  - id: mintprints-customer
+    hostname: customer.mintprints.com
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: quote-page
+    runtime_owner_plane: mint-apps
+    ingress_backend_target: http://quote-page:3341
+    private_dependency_chain:
+      - files-api
+      - mint-modules-postgres
+      - mint-modules-minio
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: quote-form
+
+  - id: mintprints-customer-co
+    hostname: customer.mintprints.co
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: quote-page
+    runtime_owner_plane: mint-apps
+    ingress_backend_target: http://quote-page:3341
+    private_dependency_chain:
+      - files-api
+      - mint-modules-postgres
+      - mint-modules-minio
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: quote-form
+
+  - id: mintprints-api
+    hostname: api.mintprints.com
+    class: provider_webhook
+    canonical: true
+    compatibility_only: false
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: public-ingress
+    runtime_owner_plane: mint-apps
+    ingress_backend_target: http://public-ingress:8080
+    private_dependency_chain:
+      - payment
+      - shipping
+      - suppliers
+      - finance-adapter
+      - mint-modules-postgres
+    provider_registration_required: true
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: stripe-webhook
+
+  - id: pricing-host
+    hostname: pricing.mintprints.com
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: pricing
+    runtime_owner_plane: mint-apps
+    ingress_backend_target: http://pricing:3700
+    private_dependency_chain:
+      - mint-modules-postgres
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: pricing-health
+
+  - id: pricing-host-co
+    hostname: pricing.mintprints.co
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: pricing
+    runtime_owner_plane: mint-apps
+    ingress_backend_target: http://pricing:3700
+    private_dependency_chain:
+      - mint-modules-postgres
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: pricing-health
+
+  - id: estimator-host-co
+    hostname: estimator.mintprints.co
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: pricing
+    runtime_owner_plane: mint-apps
+    ingress_backend_target: http://pricing:3700
+    private_dependency_chain:
+      - mint-modules-postgres
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: pricing-health
+
+  - id: shipping-host
+    hostname: shipping.mintprints.com
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: shipping
+    runtime_owner_plane: mint-apps
+    ingress_backend_target: http://shipping:3900
+    private_dependency_chain:
+      - finance-adapter
+      - mint-modules-postgres
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: shipping-health
+
+  - id: shipping-host-co
+    hostname: shipping.mintprints.co
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: shipping
+    runtime_owner_plane: mint-apps
+    ingress_backend_target: http://shipping:3900
+    private_dependency_chain:
+      - finance-adapter
+      - mint-modules-postgres
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: shipping-health
+
+  - id: docs-host
+    hostname: docs.mintprints.com
+    class: operator_public_tool
+    canonical: true
+    compatibility_only: false
+    routing_layer: cloudflare_tunnel
+    publish_service_name: paperless-ngx-vm211
+    cloudflare_backend_target: http://paperless-ngx:8000
+    runtime_owner_service: paperless-ngx-vm211
+    runtime_owner_plane: finance-stack
+    ingress_backend_target: http://paperless-ngx:8000
+    private_dependency_chain:
+      - finance-postgres-vm211
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: finance-stack
+      compose_service: paperless-ngx
+      remote_compose_path: /opt/stacks/finance/docker-compose.yml
+    canary_flow_id: paperless-ui
+
+  - id: files-host
+    hostname: files.mintprints.com
+    class: customer_ux
+    canonical: true
+    compatibility_only: false
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: mint-modules-minio
+    runtime_owner_plane: mint-data
+    ingress_backend_target: http://100.106.72.25:9000
+    private_dependency_chain:
+      - mint-modules-minio
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: files-health
+
+  - id: files-host-co
+    hostname: files.mintprints.co
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: mint-modules-minio
+    runtime_owner_plane: mint-data
+    ingress_backend_target: http://100.106.72.25:9000
+    private_dependency_chain:
+      - mint-modules-minio
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: files-health
+
+  - id: minio-host
+    hostname: minio.mintprints.com
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: mint-modules-minio
+    runtime_owner_plane: mint-data
+    ingress_backend_target: http://100.106.72.25:9001
+    private_dependency_chain:
+      - mint-modules-minio
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: minio-console
+
+  - id: minio-host-co
+    hostname: minio.mintprints.co
+    class: compatibility_alias
+    canonical: false
+    compatibility_only: true
+    routing_layer: cloudflare_tunnel
+    publish_service_name: public-ingress
+    cloudflare_backend_target: http://100.79.183.14:8080
+    runtime_owner_service: mint-modules-minio
+    runtime_owner_plane: mint-data
+    ingress_backend_target: http://100.106.72.25:9001
+    private_dependency_chain:
+      - mint-modules-minio
+    provider_registration_required: false
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+      remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
+    canary_flow_id: minio-console
+
+flows:
+  - id: quote-form
+    public_surface: https://mintprints.com/quote
+    hostname: mintprints.com
+    path_scope: /quote
+    class: customer_ux
+    runtime_owner_service: quote-page
+    backend_target: http://quote-page:3341
+    private_dependency_chain:
+      - files-api
+      - mint-modules-postgres
+      - mint-modules-minio
+    provider_registration_required: false
+    canonical_secret_paths: []
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+    canary:
+      method: GET
+      url: https://mintprints.com/quote
+      expect_status: [200]
+
+  - id: quote-submit
+    public_surface: https://mintprints.com/quote/submit
+    hostname: mintprints.com
+    path_scope: /quote/submit
+    class: customer_ux
+    runtime_owner_service: quote-page
+    backend_target: http://quote-page:3341
+    private_dependency_chain:
+      - files-api
+      - mint-modules-postgres
+      - mint-modules-minio
+    provider_registration_required: false
+    canonical_secret_paths: []
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+    canary:
+      method: GET
+      url: https://mintprints.com/quote
+      expect_status: [200]
+
+  - id: quote-success
+    public_surface: https://mintprints.com/quote/success
+    hostname: mintprints.com
+    path_scope: /quote/success
+    class: customer_ux
+    runtime_owner_service: quote-page
+    backend_target: http://quote-page:3341
+    private_dependency_chain:
+      - files-api
+      - mint-modules-postgres
+      - mint-modules-minio
+    provider_registration_required: false
+    canonical_secret_paths: []
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+    canary:
+      method: GET
+      url: https://mintprints.com/quote/success
+      expect_status: [200]
+
+  - id: stripe-checkout-session
+    public_surface: https://api.mintprints.com/api/v1/payments/checkout-session
+    hostname: api.mintprints.com
+    path_scope: /api/v1/payments/checkout-session
+    class: customer_ux
+    runtime_owner_service: payment
+    backend_target: http://payment:4000
+    private_dependency_chain:
+      - finance-adapter
+      - mint-modules-postgres
+    provider_registration_required: false
+    canonical_secret_paths:
+      - /spine/services/payment/PAYMENT_STRIPE_SECRET_KEY
+    runtime_env_mappings:
+      - source: PAYMENT_CHECKOUT_SUCCESS_URL
+        target: CHECKOUT_SUCCESS_URL
+      - source: PAYMENT_CHECKOUT_CANCEL_URL
+        target: CHECKOUT_CANCEL_URL
+    deploy_mapping:
+      stack_id: mint-apps-payment
+      compose_service: payment
+    canary:
+      method: POST
+      url: https://api.mintprints.com/api/v1/payments/checkout-session
+      expect_status: [401, 403]
+
+  - id: checkout-success
+    public_surface: https://mintprints.com/checkout/success
+    hostname: mintprints.com
+    path_scope: /checkout/success
+    class: customer_ux
+    runtime_owner_service: quote-page
+    backend_target: http://quote-page:3341
+    private_dependency_chain:
+      - payment
+      - finance-adapter
+      - mint-modules-postgres
+    provider_registration_required: false
+    canonical_secret_paths: []
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+    canary:
+      method: GET
+      url: https://mintprints.com/checkout/success
+      expect_status: [200]
+
+  - id: checkout-cancel
+    public_surface: https://mintprints.com/checkout/cancel
+    hostname: mintprints.com
+    path_scope: /checkout/cancel
+    class: customer_ux
+    runtime_owner_service: quote-page
+    backend_target: http://quote-page:3341
+    private_dependency_chain:
+      - payment
+      - finance-adapter
+      - mint-modules-postgres
+    provider_registration_required: false
+    canonical_secret_paths: []
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+    canary:
+      method: GET
+      url: https://mintprints.com/checkout/cancel
+      expect_status: [200]
+
+  - id: stripe-webhook
+    public_surface: https://api.mintprints.com/api/v1/payments/webhooks/stripe
+    hostname: api.mintprints.com
+    path_scope: /api/v1/payments/webhooks/stripe
+    class: provider_webhook
+    runtime_owner_service: payment
+    backend_target: http://payment:4000
+    private_dependency_chain:
+      - finance-adapter
+      - mint-modules-postgres
+    provider_registration_required: true
+    provider_name: stripe
+    provider_registration_capability: mint.public.providers.reconcile
+    provider_expected_events:
+      - checkout.session.completed
+      - checkout.session.expired
+      - payment_intent.payment_failed
+      - payment_intent.succeeded
+    canonical_secret_paths:
+      - /spine/services/payment/PAYMENT_STRIPE_SECRET_KEY
+      - /spine/services/payment/PAYMENT_STRIPE_WEBHOOK_SECRET
+    runtime_env_mappings:
+      - source: PAYMENT_STRIPE_SECRET_KEY
+        target: STRIPE_SECRET_KEY
+      - source: PAYMENT_STRIPE_WEBHOOK_SECRET
+        target: STRIPE_WEBHOOK_SECRET
+      - source: PAYMENT_CHECKOUT_SUCCESS_URL
+        target: CHECKOUT_SUCCESS_URL
+      - source: PAYMENT_CHECKOUT_CANCEL_URL
+        target: CHECKOUT_CANCEL_URL
+    deploy_mapping:
+      stack_id: mint-apps-payment
+      compose_service: payment
+    canary:
+      method: POST
+      url: https://api.mintprints.com/api/v1/payments/webhooks/stripe
+      expect_status: [400]
+
+  - id: easypost-webhook
+    public_surface: https://api.mintprints.com/api/v1/shipping/webhooks/easypost
+    hostname: api.mintprints.com
+    path_scope: /api/v1/shipping/webhooks/easypost
+    class: provider_webhook
+    runtime_owner_service: shipping
+    backend_target: http://shipping:3900
+    private_dependency_chain:
+      - finance-adapter
+      - mint-modules-postgres
+    provider_registration_required: true
+    provider_name: easypost
+    provider_registration_capability: mint.public.providers.reconcile
+    canonical_secret_paths:
+      - /spine/services/shipping/SHIPPING_EASYPOST_API_KEY
+      - /spine/services/shipping/SHIPPING_EASYPOST_WEBHOOK_SECRET
+    runtime_env_mappings:
+      - source: SHIPPING_EASYPOST_API_KEY
+        target: EASYPOST_API_KEY
+      - source: SHIPPING_EASYPOST_WEBHOOK_SECRET
+        target: EASYPOST_WEBHOOK_SECRET
+    deploy_mapping:
+      stack_id: mint-apps-shipping
+      compose_service: shipping
+    canary:
+      method: POST
+      url: https://api.mintprints.com/api/v1/shipping/webhooks/easypost
+      expect_status: [400]
+
+  - id: pricing-health
+    public_surface: https://pricing.mintprints.com/health
+    hostname: pricing.mintprints.com
+    path_scope: /health
+    class: compatibility_alias
+    runtime_owner_service: pricing
+    backend_target: http://pricing:3700
+    private_dependency_chain:
+      - mint-modules-postgres
+    provider_registration_required: false
+    canonical_secret_paths: []
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: mint-apps-pricing
+      compose_service: pricing
+    canary:
+      method: GET
+      url: https://pricing.mintprints.com/health
+      expect_status: [200]
+
+  - id: shipping-health
+    public_surface: https://shipping.mintprints.com/health
+    hostname: shipping.mintprints.com
+    path_scope: /health
+    class: compatibility_alias
+    runtime_owner_service: shipping
+    backend_target: http://shipping:3900
+    private_dependency_chain:
+      - finance-adapter
+      - mint-modules-postgres
+    provider_registration_required: false
+    canonical_secret_paths: []
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: mint-apps-shipping
+      compose_service: shipping
+    canary:
+      method: GET
+      url: https://shipping.mintprints.com/health
+      expect_status: [200]
+
+  - id: paperless-ui
+    public_surface: https://docs.mintprints.com/
+    hostname: docs.mintprints.com
+    path_scope: /
+    class: operator_public_tool
+    runtime_owner_service: paperless-ngx-vm211
+    backend_target: http://paperless-ngx:8000
+    private_dependency_chain:
+      - finance-postgres-vm211
+    provider_registration_required: false
+    canonical_secret_paths:
+      - /spine/services/paperless/PAPERLESS_API_TOKEN
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: finance-stack
+      compose_service: paperless-ngx
+    canary:
+      method: GET
+      url: https://docs.mintprints.com/
+      expect_status: [200, 302]
+
+  - id: paperless-intake
+    public_surface: https://docs.mintprints.com/api/documents/post_document/
+    hostname: docs.mintprints.com
+    path_scope: /api/documents/post_document/
+    class: operator_public_tool
+    runtime_owner_service: paperless-ngx-vm211
+    backend_target: http://paperless-ngx:8000
+    private_dependency_chain:
+      - finance-postgres-vm211
+    provider_registration_required: false
+    canonical_secret_paths:
+      - /spine/services/paperless/PAPERLESS_API_TOKEN
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: finance-stack
+      compose_service: paperless-ngx
+    canary:
+      method: GET
+      url: https://docs.mintprints.com/api/
+      expect_status: [200, 302]
+
+  - id: files-health
+    public_surface: https://files.mintprints.com/minio/health/live
+    hostname: files.mintprints.com
+    path_scope: /minio/health/live
+    class: customer_ux
+    runtime_owner_service: mint-modules-minio
+    backend_target: http://100.106.72.25:9000
+    private_dependency_chain:
+      - mint-modules-minio
+    provider_registration_required: false
+    canonical_secret_paths: []
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+    canary:
+      method: GET
+      url: https://files.mintprints.com/minio/health/live
+      expect_status: [200]
+
+  - id: minio-console
+    public_surface: https://minio.mintprints.com/
+    hostname: minio.mintprints.com
+    path_scope: /
+    class: compatibility_alias
+    runtime_owner_service: mint-modules-minio
+    backend_target: http://100.106.72.25:9001
+    private_dependency_chain:
+      - mint-modules-minio
+    provider_registration_required: false
+    canonical_secret_paths: []
+    runtime_env_mappings: []
+    deploy_mapping:
+      stack_id: mint-apps
+      compose_service: public-ingress
+    canary:
+      method: GET
+      url: https://minio.mintprints.com/
+      expect_status: [200, 302]
+
+future_provider_surfaces:
+  suppliers:
+    status: inactive
+    note: "Suppliers has no canonical public provider webhook surface as of 2026-03-08."

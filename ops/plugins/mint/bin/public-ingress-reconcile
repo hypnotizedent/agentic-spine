@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# public-ingress-reconcile - Stage the canonical Mint public ingress runtime on mint-apps and align Cloudflare host routing.
+#
+# Mutating actions:
+# - stages mint-modules root compose + public-ingress nginx config onto mint-apps
+# - sets canonical payment return URL env keys in /opt/stacks/mint-apps/.env
+# - starts/restarts public-ingress on mint-apps
+# - updates Cloudflare tunnel ingress rules for all Mint contract hostnames
+#
+# Usage:
+#   public-ingress-reconcile
+#   public-ingress-reconcile --dry-run
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+MINT_REPO="${MINT_REPO:-$HOME/code/mint-modules}"
+SECRETS_EXEC="$SPINE_ROOT/ops/plugins/secrets/bin/secrets-exec"
+CONTRACT="$SPINE_ROOT/ops/bindings/mint.public.ingress.contract.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+CF_TUNNEL_SET="$SPINE_ROOT/ops/plugins/cloudflare/bin/cloudflare-tunnel-ingress-set"
+
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+DRY_RUN=0
+if [[ "${1:-}" == "--dry-run" ]]; then
+  DRY_RUN=1
+fi
+
+stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+[[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -x "$CF_TUNNEL_SET" ]] || stop "missing executable: $CF_TUNNEL_SET"
+[[ -f "$MINT_REPO/docker-compose.yml" ]] || stop "missing mint root compose: $MINT_REPO/docker-compose.yml"
+[[ -f "$MINT_REPO/public-ingress/nginx.conf" ]] || stop "missing ingress config: $MINT_REPO/public-ingress/nginx.conf"
+command -v scp >/dev/null 2>&1 || stop "missing dependency: scp"
+command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
+command -v python3 >/dev/null 2>&1 || stop "missing dependency: python3"
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+APP_TARGET_ID="mint-apps"
+APP_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .host // \"\"" "$SSH_BINDING" | head -n1)"
+APP_USER="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
+APP_PORT="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .port // 22" "$SSH_BINDING" | head -n1)"
+[[ -n "$APP_HOST" && "$APP_HOST" != "null" ]] || stop "mint-apps host missing in ssh binding"
+
+IFS=' ' read -r APP_PROBE_HOST APP_PROBE_PATH <<< "$(ssh_resolve_probe_host "$APP_TARGET_ID" || true)"
+if [[ -n "$APP_PROBE_HOST" ]]; then
+  APP_HOST="$APP_PROBE_HOST"
+fi
+
+REMOTE_ROOT="/opt/stacks/mint-apps"
+REMOTE_ENV_FILE="$REMOTE_ROOT/.env"
+REMOTE_COMPOSE_FILE="$REMOTE_ROOT/docker-compose.yml"
+REMOTE_INGRESS_DIR="$REMOTE_ROOT/public-ingress"
+REMOTE_INGRESS_FILE="$REMOTE_INGRESS_DIR/nginx.conf"
+REMOTE_SERVICE="public-ingress"
+REMOTE_SHARED_NETWORK="mint-modules"
+REMOTE_QUOTE_CONTAINER="quote-page"
+
+SSH_OPTS=(-o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+SCP_OPTS=(-P "$APP_PORT" -o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+set_remote_env_key() {
+  local key="$1"
+  local value="$2"
+  ssh "${SSH_OPTS[@]}" -p "$APP_PORT" "${APP_USER}@${APP_HOST}" \
+    "bash -s -- $(printf "%q" "$REMOTE_ENV_FILE") $(printf "%q" "$key") $(printf "%q" "$value")" <<'EOS'
+env_file="$1"
+key="$2"
+value="$3"
+tmp="${env_file}.tmp.$$"
+awk -F= -v k="$key" -v v="$value" 'BEGIN{done=0} $1==k{print k "=" v; done=1; next} {print} END{if(!done) print k "=" v}' "$env_file" > "$tmp"
+mv "$tmp" "$env_file"
+EOS
+}
+
+echo "mint.public.ingress.reconcile"
+echo "target: ${APP_USER}@${APP_HOST}"
+echo "compose: $REMOTE_COMPOSE_FILE"
+echo "ingress: $REMOTE_INGRESS_FILE"
+
+python3 - "$CONTRACT" > /tmp/mint-public-ingress-hosts.$$ <<'PY'
+import sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+for row in data.get("hosts", []) or []:
+    hostname = str(row.get("hostname", "")).strip()
+    target = str(row.get("cloudflare_backend_target", "")).strip()
+    if hostname and target:
+        print("\t".join([hostname, target]))
+PY
+HOSTS_FILE="/tmp/mint-public-ingress-hosts.$$"
+trap 'rm -f "$HOSTS_FILE"' EXIT
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "dry_run: true"
+  echo "would_stage: $MINT_REPO/docker-compose.yml -> $REMOTE_COMPOSE_FILE"
+  echo "would_stage: $MINT_REPO/public-ingress/nginx.conf -> $REMOTE_INGRESS_FILE"
+  echo "would_network_connect: container=$REMOTE_QUOTE_CONTAINER network=$REMOTE_SHARED_NETWORK"
+  echo "would_set_env: PAYMENT_CHECKOUT_SUCCESS_URL=https://mintprints.com/checkout/success"
+  echo "would_set_env: PAYMENT_CHECKOUT_CANCEL_URL=https://mintprints.com/checkout/cancel"
+  echo "would_up: cd $REMOTE_ROOT && docker compose --env-file $REMOTE_ENV_FILE up -d --no-deps $REMOTE_SERVICE"
+  while IFS=$'\t' read -r hostname target; do
+    [[ -n "$hostname" ]] || continue
+    echo "would_publish: $hostname -> $target"
+  done < "$HOSTS_FILE"
+  exit 0
+fi
+
+echo "[1/5] Stage public ingress contract on mint-apps..."
+ssh "${SSH_OPTS[@]}" -p "$APP_PORT" "${APP_USER}@${APP_HOST}" "mkdir -p '$REMOTE_INGRESS_DIR'" \
+  || stop "failed to create remote ingress dir"
+scp "${SCP_OPTS[@]}" "$MINT_REPO/docker-compose.yml" "${APP_USER}@${APP_HOST}:${REMOTE_COMPOSE_FILE}" \
+  || stop "failed to stage root compose"
+scp "${SCP_OPTS[@]}" "$MINT_REPO/public-ingress/nginx.conf" "${APP_USER}@${APP_HOST}:${REMOTE_INGRESS_FILE}" \
+  || stop "failed to stage ingress config"
+
+echo "[2/5] Ensure quote-page is on the shared app network..."
+ssh "${SSH_OPTS[@]}" -p "$APP_PORT" "${APP_USER}@${APP_HOST}" \
+  "bash -s -- '$REMOTE_SHARED_NETWORK' '$REMOTE_QUOTE_CONTAINER'" <<'EOS'
+network_name="$1"
+container_name="$2"
+attached="$(docker inspect "$container_name" --format "{{if index .NetworkSettings.Networks \"$network_name\"}}yes{{end}}" 2>/dev/null || true)"
+if [[ "$attached" != "yes" ]]; then
+  docker network connect "$network_name" "$container_name"
+fi
+EOS
+
+echo "[3/5] Set canonical payment return URLs..."
+set_remote_env_key "PAYMENT_CHECKOUT_SUCCESS_URL" "https://mintprints.com/checkout/success"
+set_remote_env_key "PAYMENT_CHECKOUT_CANCEL_URL" "https://mintprints.com/checkout/cancel"
+
+echo "[4/5] Validate and start public-ingress..."
+ssh "${SSH_OPTS[@]}" -p "$APP_PORT" "${APP_USER}@${APP_HOST}" \
+  "cd '$REMOTE_ROOT' && docker compose --env-file '$REMOTE_ENV_FILE' config --services >/dev/null && docker compose --env-file '$REMOTE_ENV_FILE' up -d --no-deps '$REMOTE_SERVICE'" \
+  || stop "failed to validate or start public-ingress"
+
+echo "[5/5] Align Cloudflare tunnel ingress..."
+while IFS=$'\t' read -r hostname target; do
+  [[ -n "$hostname" ]] || continue
+  "$CF_TUNNEL_SET" --hostname "$hostname" --service "$target" >/dev/null \
+    || stop "failed to publish Cloudflare ingress for $hostname"
+  echo "published: $hostname -> $target"
+done < "$HOSTS_FILE"
+
+echo "status: OK"
