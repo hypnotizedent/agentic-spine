@@ -98,6 +98,33 @@ emit_row() {
   printf "%-28s %-8s %s\n" "$check" "$state" "$note"
 }
 
+json_request_check() {
+  local name="$1" method="$2" url="$3" body="$4" jq_expr="$5" pass_note="$6"
+  shift 6
+  local tmp http
+  tmp="$(mktemp)"
+  set +e
+  http="$(curl -sS -m 10 -o "$tmp" -w "%{http_code}" -X "$method" "$@" -H "content-type: application/json" -d "$body" "$url")"
+  local rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    emit_row "$name" "FAIL" "curl_rc=$rc url=$url"
+    fail=1
+    rm -f "$tmp"
+    return
+  fi
+  if ! jq -e "$jq_expr" "$tmp" >/dev/null 2>&1; then
+    local details
+    details="$(head -c 160 "$tmp" | tr '\n' ' ')"
+    emit_row "$name" "FAIL" "http=$http json_assert_failed body=$details"
+    fail=1
+    rm -f "$tmp"
+    return
+  fi
+  emit_row "$name" "PASS" "$pass_note (http=$http)"
+  rm -f "$tmp"
+}
+
 http_json_check() {
   local name="$1" url="$2" jq_expr="$3" pass_note="$4"
   local tmp http
@@ -204,6 +231,41 @@ else
     emit_row "shipping.shop_address" "PASS" "non-placeholder address"
   fi
   rm -f "$tmp_ship"
+
+  tmp_history="$(mktemp)"
+  set +e
+  hist_http="$(curl -sS -m 10 -o "$tmp_history" -w "%{http_code}" -H "x-api-key: $shipping_key" "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/history?page=1&limit=1")")"
+  hist_rc=$?
+  set -e
+  if [[ "$hist_rc" -ne 0 || "$hist_http" != "200" ]]; then
+    details="$(head -c 160 "$tmp_history" | tr '\n' ' ')"
+    emit_row "shipping.history" "FAIL" "curl_rc=$hist_rc http=$hist_http body=$details"
+    fail=1
+  elif ! jq -e '(.labels | type == "array") and (.total | type == "number") and (.page | type == "number") and (.limit | type == "number")' "$tmp_history" >/dev/null 2>&1; then
+    emit_row "shipping.history" "FAIL" "history payload shape invalid"
+    fail=1
+  else
+    emit_row "shipping.history" "PASS" "history endpoint returns paginated json"
+  fi
+  rm -f "$tmp_history"
+
+  json_request_check \
+    "shipping.labels.invalid" \
+    "POST" \
+    "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/labels")" \
+    '{}' \
+    '.error != null' \
+    "invalid label request rejected" \
+    -H "x-api-key: $shipping_key"
+
+  json_request_check \
+    "shipping.easypost.invalid" \
+    "POST" \
+    "$(app_http_url "$SHIPPING_PORT" "/api/v1/shipping/webhooks/easypost")" \
+    '{}' \
+    '.error != null and .success == false' \
+    "invalid easypost signature rejected" \
+    -H "x-easypost-signature: invalid"
 fi
 
 # 3) Suppliers search + stock parity (behavioral; do not require seeded catalog rows)
@@ -293,6 +355,7 @@ if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
   emit_row "payment.health" "FAIL" "target=$APP_TARGET_ID unreachable"
   fail=1
 else
+  payment_key="$(get_container_key payment || true)"
   for req_key in API_KEY DATABASE_URL STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET JWT_SECRET; do
     if ! container_env_present payment "$req_key"; then
       missing_payment_env+=("$req_key")
@@ -310,6 +373,30 @@ else
     "$(app_http_url "$PAYMENT_PORT" "$PAYMENT_HEALTH")" \
     '.status == "ok" and ((.service // "") | test("payment"; "i"))' \
     "payment health json ok via=${MINT_APPS_PROBE_PATH:-direct}"
+
+  if [[ -z "$payment_key" ]]; then
+    emit_row "payment.api_key" "FAIL" "missing API_KEY from payment container"
+    fail=1
+  else
+    json_request_check \
+      "payment.checkout.invalid" \
+      "POST" \
+      "$(app_http_url "$PAYMENT_PORT" "/api/v1/payments/checkout-session")" \
+      '{}' \
+      '.error != null' \
+      "invalid checkout request rejected" \
+      -H "x-api-key: $payment_key"
+
+    json_request_check \
+      "payment.stripe.invalid" \
+      "POST" \
+      "$(app_http_url "$PAYMENT_PORT" "/api/v1/payments/webhooks/stripe")" \
+      '{}' \
+      '.error != null' \
+      "invalid stripe webhook rejected" \
+      -H "x-api-key: $payment_key" \
+      -H "stripe-signature: invalid"
+  fi
 fi
 
 echo

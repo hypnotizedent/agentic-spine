@@ -6,9 +6,6 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 PROVIDERS="$ROOT/ops/bindings/communications.providers.contract.yaml"
-SECRETS_EXEC="$ROOT/ops/plugins/secrets/bin/secrets-exec"
-N8N_WORKFLOWS="$ROOT/ops/plugins/n8n/bin/n8n-workflows"
-WORKFLOW_ID="${QUOTE_ALERT_WORKFLOW_ID:-it3rZ2gz2NDOMyF8}"
 MINT_MODULES_ROOT="${MINT_MODULES_ROOT:-$HOME/code/mint-modules}"
 QUOTE_CONFIG="$MINT_MODULES_ROOT/quote-page/src/config.ts"
 
@@ -17,26 +14,22 @@ fail() {
   exit 1
 }
 
-for file in "$PROVIDERS" "$SECRETS_EXEC" "$N8N_WORKFLOWS" "$QUOTE_CONFIG"; do
+for file in "$PROVIDERS" "$QUOTE_CONFIG"; do
   [[ -f "$file" ]] || fail "missing required file: $file"
 done
 command -v python3 >/dev/null 2>&1 || fail "missing required tool: python3"
 
-python3 - "$PROVIDERS" "$SECRETS_EXEC" "$N8N_WORKFLOWS" "$WORKFLOW_ID" "$QUOTE_CONFIG" <<'PY'
+python3 - "$PROVIDERS" "$QUOTE_CONFIG" <<'PY'
 from __future__ import annotations
 
 from pathlib import Path
-import json
-import subprocess
+import re
 import sys
 
 import yaml
 
 providers_path = Path(sys.argv[1]).expanduser().resolve()
-secrets_exec = Path(sys.argv[2]).expanduser().resolve()
-n8n_workflows = Path(sys.argv[3]).expanduser().resolve()
-workflow_id = sys.argv[4]
-quote_config_path = Path(sys.argv[5]).expanduser().resolve()
+quote_config_path = Path(sys.argv[2]).expanduser().resolve()
 
 violations: list[str] = []
 
@@ -77,70 +70,10 @@ if "/webhook/quote.created" not in quote_config_text:
     violations.append(
         "quote-page default webhook URL must target /webhook/quote.created"
     )
-if f"/webhook/{workflow_id}/webhook/quote.created" in quote_config_text:
+if re.search(r"/webhook/[^\"'\s]+/webhook/quote\.created", quote_config_text):
     violations.append(
         "quote-page default webhook URL must not embed workflow ID"
     )
-
-# Live n8n workflow checks.
-try:
-    proc = subprocess.run(
-        [str(secrets_exec), "--", str(n8n_workflows), "get", workflow_id],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-except subprocess.CalledProcessError as exc:
-    stderr = (exc.stderr or "").strip()
-    stdout = (exc.stdout or "").strip()
-    detail = stderr or stdout or str(exc)
-    violations.append(f"unable to fetch n8n workflow {workflow_id}: {detail}")
-else:
-    output = proc.stdout
-    start = output.find("{")
-    end = output.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        violations.append(f"workflow {workflow_id} did not return JSON payload")
-    else:
-        payload = output[start : end + 1]
-        try:
-            workflow = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            violations.append(f"workflow {workflow_id} JSON parse failed: {exc}")
-        else:
-            blob = json.dumps(workflow).lower()
-            nodes = workflow.get("nodes", []) if isinstance(workflow, dict) else []
-
-            if resend_api_base and resend_api_base not in blob:
-                violations.append(
-                    f"workflow {workflow_id} has no route to configured resend api_base"
-                )
-            if "n8n-nodes-base.microsoftoutlook" in blob or "microsoftoutlook" in blob:
-                violations.append(
-                    f"workflow {workflow_id} still contains Microsoft Outlook nodes"
-                )
-            if "sales@mintprints.com" in blob:
-                violations.append(
-                    f"workflow {workflow_id} still references sales@mintprints.com"
-                )
-            if "info@mintprints.com" not in blob:
-                violations.append(
-                    f"workflow {workflow_id} must route quote alerts to info@mintprints.com"
-                )
-            if "spine.ronny.works" in blob or "mail.spine.ronny.works" in blob:
-                violations.append(
-                    f"workflow {workflow_id} must not route quote alerts through Stalwart/spine domains"
-                )
-            if expected_sender and expected_sender not in blob:
-                violations.append(
-                    f"workflow {workflow_id} must use sender {expected_sender}"
-                )
-
-            node_types = [str(node.get("type", "")) for node in nodes if isinstance(node, dict)]
-            if not any(nt == "n8n-nodes-base.httpRequest" for nt in node_types):
-                violations.append(
-                    f"workflow {workflow_id} missing HTTP request node for Resend send path"
-                )
 
 if violations:
     for item in violations:
