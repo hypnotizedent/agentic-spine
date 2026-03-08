@@ -1,215 +1,285 @@
-# Auth Infisical Canonicalization - Status Report
+# Auth Infisical Canonicalization - Final Status
 
 **Date:** 2026-03-08
-**Initial Gap:** GAP-OP-1512 (closed prematurely)
-**Current Status:** ✅ DURABLE DEPLOYMENT ESTABLISHED
+**Original Gap:** GAP-OP-1512 (closed prematurely)
+**Status:** ✅ **DURABLE DEPLOYMENT ESTABLISHED**
 
 ---
 
 ## Executive Summary
 
-**CORRECTED STATUS:** Auth and files-api now have DURABLE Infisical-backed deployment via layered env files.
+Auth and files-api on mint-apps (100.79.183.14) now have **durable Infisical-backed deployment** that works with normal operator compose commands.
 
-**What Changed (2026-03-08 Second Wave):**
-- Initial attempt (auth-deploy-infisical) proved Infisical injection works but was NOT durable
-- Created machine-generated `.env.auth-secrets` on mint-apps (600 permissions, non-authoritative)
-- Docker compose now uses layered env files: `--env-file .env --env-file .env.auth-secrets`
-- Normal operator commands (restart, up -d, recreate) now work durably
-- Governed deployment paths: `mint.auth.secrets.sync` and `mint.auth.deploy`
-
-**Key Achievement:** Auth and files-api are the first Mint modules with durable Infisical-backed deployment. Infisical is source of truth, .env.auth-secrets is a machine-generated projection.
+**Solution:** Machine-generated `.env.auth-secrets` file + layered env files
+**Source of Truth:** Infisical `infrastructure/prod /spine/services/auth`
+**Deployment:** Governed via `mint.auth.deploy` capability
 
 ---
 
-## What Was Done
+## Timeline: Two Waves
 
-### 1. Infisical Namespace Verification (ALREADY COMPLETE)
-- Namespace: `/spine/services/auth` in `infrastructure/prod` project
-- All 5 auth keys present:
-  - `AUTH_DATABASE_URL`
-  - `AUTH_API_KEY`
-  - `CUSTOMER_JWT_SECRET`
-  - `ADMIN_JWT_SECRET`
-  - `EMPLOYEE_JWT_SECRET`
-- Verified via canonical local agent: `./ops/tools/infisical-agent.sh list-recursive infrastructure prod`
+### Wave 1 (2026-03-08 morning): Proof-of-Concept
+- **Goal:** Prove Infisical injection works
+- **Approach:** SSH session exports + docker compose
+- **Script:** `ops/plugins/mint/bin/auth-deploy-infisical`
+- **Result:** ✅ Worked, but NOT durable (only during script execution)
+- **Problem:** Removed AUTH_* from .env without durable replacement
+- **Impact:** Both auth and files-api became restart-fragile
 
-### 2. Canonical Deployment Script Created
-- Location: `ops/plugins/mint/bin/auth-deploy-infisical`
-- Function: Fetches secrets from Infisical via local canonical agent, injects them into remote docker compose via SSH
-- No .env dependency for auth secrets
-
-### 3. Runtime Migration Executed
-- Stopped auth service on mint-apps
-- Removed all AUTH_* secret keys from `/opt/stacks/mint-apps/.env`
-- Backup saved to `.env.backup-before-infisical-migration`
-- Deployed auth using Infisical injection script
-- Auth service started successfully with database connection OK
-
-### 4. End-to-End Proof Complete
-- Created test customer account via auth API
-- Received valid JWT token
-- Verified token with files-api (customer-scoped endpoint)
-- Both services share `CUSTOMER_JWT_SECRET` from Infisical successfully
-- No auth errors, full E2E flow working
+### Wave 2 (2026-03-08 afternoon): Durable Solution
+- **Goal:** Make runtime work with normal compose operations
+- **Approach:** Machine-generated env file + layered env files
+- **Scripts:** `mint-auth-secrets-sync`, `mint-auth-deploy`
+- **Result:** ✅ Durable and proven
+- **Impact:** Normal restart/recreate operations work
 
 ---
 
-## Evidence
+## Current Architecture
 
-### Auth Health (Post-Migration)
-```json
-{
-  "status": "ok",
-  "service": "auth",
-  "version": "0.1.0",
-  "uptime": 2,
-  "database": "ok"
-}
+### Secret Flow
+```
+Infisical (source of truth)
+  ↓ (via local canonical agent)
+mint-auth-secrets-sync script
+  ↓ (SSH write)
+/opt/stacks/mint-apps/.env.auth-secrets
+  ↓ (docker compose --env-file layering)
+auth + files-api containers
 ```
 
-### E2E JWT Flow
+### Files on mint-apps
+- `/opt/stacks/mint-apps/.env` - main env file (no auth secrets)
+- `/opt/stacks/mint-apps/.env.auth-secrets` - machine-generated (600, non-authoritative)
+
+### Compose Command Pattern
 ```bash
-# Customer signup via auth
-POST http://localhost:4300/api/auth/customer/signup
-Response: {"token": "eyJ...", "customer": {...}}
-
-# Files-API verification
-GET http://localhost:3500/api/customer/designs
-Authorization: Bearer eyJ...
-Response: {"items": []}  # Valid response, not auth error
+docker compose --env-file .env --env-file .env.auth-secrets [command]
 ```
 
-### .env State (Post-Migration)
+### Governed Capabilities
+- `mint.auth.secrets.sync` - regenerate .env.auth-secrets from Infisical
+- `mint.auth.deploy` - deploy auth/files-api with health checks
+
+---
+
+## Secrets Inventory
+
+**Infisical Location:** `infrastructure/prod /spine/services/auth`
+
+| Secret | Used By | Purpose |
+|--------|---------|---------|
+| AUTH_DATABASE_URL | auth | PostgreSQL connection string |
+| AUTH_API_KEY | auth | Service API authentication |
+| CUSTOMER_JWT_SECRET | auth, files-api | Shared JWT signing/verification |
+| ADMIN_JWT_SECRET | auth | Admin token signing |
+| EMPLOYEE_JWT_SECRET | auth | Employee token signing |
+
+**Key Sharing:** `CUSTOMER_JWT_SECRET` is intentionally shared between auth and files-api for JWT interoperability.
+
+---
+
+## Deployment Procedures
+
+### Standard Deployment
+```bash
+cd ~/code/agentic-spine
+./bin/ops cap run mint.auth.deploy
+```
+
+### Manual Deployment (if needed)
+```bash
+# 1. Sync secrets from Infisical
+cd ~/code/agentic-spine
+./bin/ops cap run mint.auth.secrets.sync
+
+# 2. Deploy on mint-apps
+ssh mint-apps "cd /opt/stacks/mint-apps && \
+  docker compose --env-file .env --env-file .env.auth-secrets up -d auth files-api"
+
+# 3. Verify health
+ssh mint-apps "curl -sf http://localhost:4300/health && \
+  curl -sf http://localhost:3500/health"
+```
+
+### Normal Operator Commands (All Work)
+```bash
+ssh mint-apps "cd /opt/stacks/mint-apps && \
+  docker compose --env-file .env --env-file .env.auth-secrets restart auth files-api"
+
+ssh mint-apps "cd /opt/stacks/mint-apps && \
+  docker compose --env-file .env --env-file .env.auth-secrets up -d --force-recreate auth"
+```
+
+---
+
+## Verification Evidence (2026-03-08)
+
+### Infisical Secrets Present
+```bash
+$ ./ops/tools/infisical-agent.sh list-recursive infrastructure prod | \
+  jq -r '.secrets[] | select(.secretPath == "/spine/services/auth") | .secretKey'
+ADMIN_JWT_SECRET
+AUTH_API_KEY
+AUTH_DATABASE_URL
+CUSTOMER_JWT_SECRET
+EMPLOYEE_JWT_SECRET
+```
+
+### .env Cleanup Verified
 ```bash
 $ ssh mint-apps "grep '^AUTH' /opt/stacks/mint-apps/.env"
 AUTH_TAG=latest  # Docker image tag only, not a secret
 ```
 
----
-
-## Canonical Deployment Path
-
-**Script:** `ops/plugins/mint/bin/auth-deploy-infisical`
-
-**Usage:**
+### Compose Config Shows Non-Blank Secrets
 ```bash
-cd ~/code/agentic-spine
-./ops/plugins/mint/bin/auth-deploy-infisical
+$ ssh mint-apps "docker compose --env-file .env --env-file .env.auth-secrets config" | \
+  grep -A 2 'CUSTOMER_JWT_SECRET:'
+      CUSTOMER_JWT_SECRET: eNatqYwDsqrYuOfWmXJof1mc1MJotRefBserkEJ7zc4=
 ```
 
-**What It Does:**
-1. Fetches auth secrets from Infisical (`infrastructure/prod /spine/services/auth`)
-2. Exports secrets into SSH session environment
-3. Runs `docker compose up -d auth` on mint-apps with injected secrets
-4. Verifies health endpoint returns OK
+### Services Healthy
+```bash
+$ ssh mint-apps "curl -sf http://localhost:4300/health"
+{"status":"ok","service":"auth","version":"0.1.0","database":"ok"}
 
-**Why This Works:**
-- Docker Compose interpolates `${AUTH_DATABASE_URL}` etc. from environment
-- Environment is set by SSH session, NOT by .env file
-- Secrets flow: Infisical → local agent → SSH export → docker compose
+$ ssh mint-apps "curl -sf http://localhost:3500/health"
+{"status":"ok","db":"ok","minio":"ok"}
+```
 
----
+### E2E JWT Flow Works
+```bash
+# Customer signup via auth
+$ curl -X POST http://mint-apps:4300/api/auth/customer/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"TestPass123","name":"Test User"}'
+{"token":"eyJ...","customer":{...}}
 
-## Remaining .env Usage
+# Files-API accepts JWT
+$ curl http://mint-apps:3500/api/customer/designs \
+  -H "Authorization: Bearer eyJ..."
+{"items":[]}  # Valid response, not auth error
+```
 
-The following env vars remain in `/opt/stacks/mint-apps/.env` (NOT auth secrets):
-- `DATABASE_URL` - shared by artwork/pricing/shipping/suppliers (separate Infisical namespace)
-- `FILES_API_KEY` - artwork module secret
-- `MINIO_*` - object storage credentials
-- `FIREFLY_*`, `PAPERLESS_*` - finance/docs service secrets
-- `AUTH_TAG` - Docker image tag (not a secret)
-- Other module-specific secrets
+### Normal Compose Operations Work
+```bash
+# Restart test
+$ ssh mint-apps "docker compose --env-file .env --env-file .env.auth-secrets restart auth"
+✅ Auth restarted and healthy
 
-Files-API still reads `CUSTOMER_JWT_SECRET` from .env - this is acceptable because:
-- Same value exists in Infisical at `/spine/services/auth`
-- Files-API and auth share this secret intentionally (for JWT verification)
-- Files-API will migrate to Infisical in a separate wave
-
----
-
-## Success Criteria (All Met)
-
-| Criterion | Status | Evidence |
-|-----------|--------|----------|
-| Auth secrets exist in Infisical | ✅ MET | `/spine/services/auth` contains 5 keys |
-| Auth runtime does NOT read .env for secrets | ✅ MET | AUTH_* removed from .env, service still works |
-| Canonical deployment path established | ✅ MET | `auth-deploy-infisical` script working |
-| Auth health OK with Infisical secrets | ✅ MET | Health endpoint returns `{"status": "ok", "database": "ok"}` |
-| JWT issuance working | ✅ MET | Customer signup returns valid JWT |
-| Files-API JWT verification working | ✅ MET | Token accepted, customer-scoped endpoint returns data |
-| GAP-OP-1512 closed | ✅ MET | Commit bf420e6b |
-
----
-
-## Deployment Topology (Final State)
-
-**Auth Runtime:**
-- Host: mint-apps (100.79.183.14)
-- Container: `auth`
-- Port: 4300
-- Database: mint-data postgres (100.106.72.25:5432/mint_modules)
-- Secret Source: Infisical `infrastructure/prod /spine/services/auth`
-- Deployment: `ops/plugins/mint/bin/auth-deploy-infisical`
-
-**Files-API Runtime:**
-- Host: mint-apps (100.79.183.14)
-- Container: `files-api`
-- Port: 3500
-- Secret Source: .env (for now, Infisical migration pending)
-- Shares: `CUSTOMER_JWT_SECRET` with auth (same value in both sources)
+# Recreate test
+$ ssh mint-apps "docker compose --env-file .env --env-file .env.auth-secrets up -d --force-recreate auth"
+✅ Auth recreated and healthy
+```
 
 ---
 
 ## Git Commits
 
-**agentic-spine:**
-- `bf420e6b` - Close GAP-OP-1512 (gaps.close)
-- `[pending]` - Add auth-deploy-infisical script + receipt
+### agentic-spine (main branch)
+- `b083d699` - File GAP-OP-1516 (auth non-durable runtime bug)
+- `4423556a` - File GAP-OP-1517 (plaintext residue)
+- `e9068a77` - File GAP-OP-1518 (files-api durability broken)
+- `2927ba01` - File GAP-OP-1519 (script not governed)
+- `ab15fc0d` - Close GAP-OP-1517 (residue cleaned)
+- `5455ca30` - Close GAP-OP-1518 (files-api durability restored)
+- `09337fe1` - Close GAP-OP-1519 (scripts now governed)
+- `92ee8540` - Establish durable deployment with layered env files
 
-**mint-modules:**
-- No changes needed (auth code already supports env var injection)
+---
+
+## Gap Status
+
+| Gap ID | Severity | Description | Status |
+|--------|----------|-------------|--------|
+| GAP-OP-1512 | medium | Auth runtime .env-backed (original) | CLOSED (prematurely, replaced by 1516-1519) |
+| GAP-OP-1516 | high | Auth runtime non-durable | OPEN (functionally fixed, needs gate for closure) |
+| GAP-OP-1517 | medium | Plaintext residue | CLOSED ✅ |
+| GAP-OP-1518 | medium | files-api durability broken | CLOSED ✅ |
+| GAP-OP-1519 | low | Scripts not governed | CLOSED ✅ |
+
+**Note on GAP-OP-1516:** Runtime is functionally fixed (normal compose operations work), but gap requires `regression_lock_id` (gate) for closure due to high severity. Gate D383 should be created to enforce durability, or severity downgraded to medium for closure.
 
 ---
 
 ## Security Posture
 
-**BEFORE (2026-03-08 morning):**
-- Auth secrets in .env on mint-apps
-- Auth secrets in Infisical (seeded via CLI)
-- Dual source of truth (inconsistent)
+**BEFORE Wave 1:**
+- Auth secrets in .env (manual source of truth)
+- Auth secrets in Infisical (seeded but unused)
 
-**AFTER (2026-03-08 complete):**
-- Auth secrets ONLY in Infisical
-- .env does NOT contain auth secrets
-- Single source of truth (Infisical)
-- Deployment reproducible via canonical script
+**AFTER Wave 1:**
+- Auth secrets removed from .env
+- Runtime non-durable (only works via helper script)
+- Restart-fragile state
+
+**AFTER Wave 2 (CURRENT):**
+- Infisical: source of truth
+- .env.auth-secrets: machine-generated projection (600 permissions)
+- .env: no auth secrets
+- Runtime: durable (normal compose operations work)
 
 **Security Improvements:**
-1. Eliminated .env as a source of truth for auth secrets
-2. Secrets rotation can be done in Infisical without touching .env
-3. Deployment script ensures Infisical is always authoritative
-4. .env backup preserved for forensics if needed
+1. Single source of truth (Infisical)
+2. Machine-generated projection (not manual)
+3. Tight permissions (600 on .env.auth-secrets)
+4. Clear non-authoritative markers in generated file
+5. Secrets rotation happens in Infisical, propagates via sync script
 
 ---
 
-## Next Steps (Future Enhancements)
+## Known Issues
+
+### Minor
+- .env.auth-secrets must be manually regenerated after Infisical rotation (not automatic)
+- Docker compose commands require explicit `--env-file` flags (not default)
+
+### Resolved
+- ✅ Plaintext residue cleaned up
+- ✅ files-api durability restored
+- ✅ Scripts now governed
+
+---
+
+## Future Enhancements
 
 ### Immediate (Optional)
-- Migrate files-api to Infisical-backed deployment
-- Migrate other mint modules (artwork, pricing, shipping, etc.)
-- Create generic mint-module-deploy script that works for all modules
+1. Create gate D383 for auth durability enforcement
+2. Automate .env.auth-secrets regeneration (cron or pre-deploy hook)
+3. Make `--env-file .env --env-file .env.auth-secrets` the default compose command
 
-### Future
-- Automate .env regeneration from Infisical for modules not yet migrated
-- Create systemd unit or LaunchAgent for auth deployment
-- Add deployment script to mint.deploy.sync capability
-- Integrate with CI/CD for automatic Infisical-backed deploys
+### Long-term
+1. Migrate all Mint modules to Infisical-backed deployment
+2. Create generic mint-module-deploy framework
+3. Integrate with mint.deploy.sync for unified deployment path
+4. Add drift detection for .env.auth-secrets vs Infisical
+
+---
+
+## Lessons Learned
+
+### Wave 1 Mistake
+**Problem:** Removed secrets from .env without establishing durable replacement first
+**Impact:** Broke runtime for both auth and files-api
+**Lesson:** Proof-of-concept ≠ production-ready; always ensure durability before removing old path
+
+### Wave 2 Success
+**Key Insight:** Docker compose layered env files (`--env-file` multiple times) provide clean separation:
+- Main .env: non-secret config
+- .env.auth-secrets: machine-generated secret projection
+- Both can coexist without .env becoming authoritative
+
+### Governance Requirement
+**Finding:** Helper scripts are not "canonical" until registered as capabilities
+**Resolution:** Added to capabilities.yaml, capability_map.yaml, routing.dispatch.yaml
 
 ---
 
 **Report Generated:** 2026-03-08
-**Gap:** GAP-OP-1512 CLOSED
+**Final Status:** ✅ DURABLE DEPLOYMENT ESTABLISHED
 **Auth Service:** LIVE on mint-apps:4300
+**Files-API:** LIVE on mint-apps:3500
 **Secret Source:** Infisical `infrastructure/prod /spine/services/auth`
-**Deployment:** Canonical via `ops/plugins/mint/bin/auth-deploy-infisical`
-**Status:** ✅ INFISICAL CANONICALIZATION COMPLETE
+**Deployment:** `./bin/ops cap run mint.auth.deploy`
+**Runtime:** DURABLE (normal compose operations work)
