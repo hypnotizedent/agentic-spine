@@ -6,7 +6,7 @@ Canonical domain policy for `mint`.
 - Runtime contracts: `ops/bindings/domains/mint.bundle.yaml`
 - Public ingress contract: `ops/bindings/mint.public.ingress.contract.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain mint`
-- Public deploy closeout: `mint.modules.health` -> `mint.runtime.proof` -> `mint.public.ingress.proof` -> `mint.public.canary`
+- Public deploy closeout: `mint.modules.health` -> `mint.runtime.proof` -> `mint.public.ingress.proof` -> `mint.quote.edge.reconcile` -> `mint.public.canary`
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog
@@ -22,6 +22,8 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | `mint.loop.daily` |
 | `mint.migrate.dryrun` |
 | `mint.modules.health` |
+| `mint.quote.edge.reconcile` |
+| `mint.quote.turnstile.reconcile` |
 | `mint.public.canary` |
 | `mint.public.ingress.proof` |
 | `mint.public.ingress.reconcile` |

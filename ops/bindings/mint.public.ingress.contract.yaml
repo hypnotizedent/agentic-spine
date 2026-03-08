@@ -336,6 +336,33 @@ hosts:
       remote_compose_path: /opt/stacks/mint-apps/docker-compose.yml
     canary_flow_id: minio-console
 
+quote_form_protection:
+  turnstile:
+    widget_name: mint-quote-form
+    mode: managed
+    expected_action: quote_submit
+    secret_env_keys:
+      site_key: QUOTE_PAGE_TURNSTILE_SITE_KEY
+      secret_key: QUOTE_PAGE_TURNSTILE_SECRET_KEY
+      allowed_hostnames: QUOTE_PAGE_TURNSTILE_ALLOWED_HOSTNAMES
+      action: QUOTE_PAGE_TURNSTILE_ACTION
+      canary_bypass_token: QUOTE_PAGE_CANARY_BYPASS_TOKEN
+  edge_rate_limits:
+    zone: mintprints.com
+    rules:
+      - id: quote-submit-rate-limit
+        description: mint-quote-submit-rate-limit
+        method: POST
+        exact_paths:
+          - /quote/submit
+          - /api/submit-quote
+        requests_per_period: 3
+        period: 10
+        mitigation_timeout: 10
+        response:
+          status_code: 429
+          content_type: application/json
+          content: '{"error":"Too many quote submissions. Please wait a few minutes and try again."}'
 flows:
   - id: quote-form
     public_surface: https://mintprints.com/quote
@@ -349,8 +376,17 @@ flows:
       - mint-modules-postgres
       - mint-modules-minio
     provider_registration_required: false
-    canonical_secret_paths: []
-    runtime_env_mappings: []
+    canonical_secret_paths:
+      - /spine/services/quote-page/QUOTE_PAGE_TURNSTILE_SITE_KEY
+      - /spine/services/quote-page/QUOTE_PAGE_TURNSTILE_ALLOWED_HOSTNAMES
+      - /spine/services/quote-page/QUOTE_PAGE_TURNSTILE_ACTION
+    runtime_env_mappings:
+      - source: QUOTE_PAGE_TURNSTILE_SITE_KEY
+        target: QUOTE_PAGE_TURNSTILE_SITE_KEY
+      - source: QUOTE_PAGE_TURNSTILE_ALLOWED_HOSTNAMES
+        target: QUOTE_PAGE_TURNSTILE_ALLOWED_HOSTNAMES
+      - source: QUOTE_PAGE_TURNSTILE_ACTION
+        target: QUOTE_PAGE_TURNSTILE_ACTION
     deploy_mapping:
       stack_id: mint-apps
       compose_service: public-ingress
@@ -371,8 +407,14 @@ flows:
       - mint-modules-postgres
       - mint-modules-minio
     provider_registration_required: false
-    canonical_secret_paths: []
-    runtime_env_mappings: []
+    canonical_secret_paths:
+      - /spine/services/quote-page/QUOTE_PAGE_TURNSTILE_SECRET_KEY
+      - /spine/services/quote-page/QUOTE_PAGE_CANARY_BYPASS_TOKEN
+    runtime_env_mappings:
+      - source: QUOTE_PAGE_TURNSTILE_SECRET_KEY
+        target: QUOTE_PAGE_TURNSTILE_SECRET_KEY
+      - source: QUOTE_PAGE_CANARY_BYPASS_TOKEN
+        target: QUOTE_PAGE_CANARY_BYPASS_TOKEN
     deploy_mapping:
       stack_id: mint-apps
       compose_service: public-ingress

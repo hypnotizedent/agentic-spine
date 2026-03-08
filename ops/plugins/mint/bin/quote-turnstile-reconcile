@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# quote-turnstile-reconcile - Ensure Cloudflare Turnstile + quote-page secret/env projection are aligned.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+SECRETS_EXEC="$SPINE_ROOT/ops/plugins/secrets/bin/secrets-exec"
+CONTRACT="$SPINE_ROOT/ops/bindings/mint.public.ingress.contract.yaml"
+CF_BINDING="$SPINE_ROOT/ops/bindings/cloudflare.inventory.yaml"
+SECRETS_BINDING="$SPINE_ROOT/ops/bindings/secrets.binding.yaml"
+SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+CF_LIB="$SPINE_ROOT/ops/plugins/cloudflare/lib/cloudflare-api.sh"
+
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+
+stop() { echo "STOP (2): $*" >&2; exit 2; }
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || stop "missing dependency: $1"
+}
+
+require_cmd jq
+require_cmd yq
+require_cmd python3
+require_cmd ssh
+require_cmd openssl
+require_cmd infisical
+
+[[ -f "$CONTRACT" ]] || stop "missing contract: $CONTRACT"
+[[ -f "$CF_BINDING" ]] || stop "missing binding: $CF_BINDING"
+[[ -f "$SECRETS_BINDING" ]] || stop "missing binding: $SECRETS_BINDING"
+[[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+
+if [[ -z "${SPINE_SECRETS_INJECTED:-}" ]]; then
+  export SPINE_SECRETS_INJECTED=1
+  exec "$SECRETS_EXEC" -- "$0" "$@"
+fi
+
+DRY_RUN=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    *) stop "unknown argument: $1" ;;
+  esac
+done
+
+# shellcheck source=/dev/null
+source "$CF_LIB"
+
+CF_API="${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}"
+cf_require_auth || exit $?
+ACCOUNT_ID="$(cf_account_id_resolve "$CF_BINDING" || true)"
+[[ -n "$ACCOUNT_ID" ]] || stop "unable to resolve Cloudflare account id"
+
+SECRET_API_URL="$(yq -r '.infisical.api_url // ""' "$SECRETS_BINDING")"
+SECRET_PROJECT_ID="$(yq -r '.infisical.project // ""' "$SECRETS_BINDING")"
+SECRET_ENV="$(yq -r '.infisical.environment // ""' "$SECRETS_BINDING")"
+[[ -n "$SECRET_API_URL" && -n "$SECRET_PROJECT_ID" && -n "$SECRET_ENV" ]] || stop "secrets binding incomplete"
+
+APP_USER="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | (.user // "ubuntu")' "$SSH_BINDING" | head -n1)"
+APP_PORT="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | (.port // 22)' "$SSH_BINDING" | head -n1)"
+read -r APP_HOST APP_PATH <<< "$(ssh_resolve_host_with_fallback "mint-apps" 2 || true)"
+[[ -n "$APP_HOST" && "$APP_PATH" != "unreachable" ]] || stop "mint-apps ssh target unreachable"
+REMOTE_ENV_FILE="/opt/stacks/mint-apps/.env"
+SSH_OPTS=(-o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+
+set_remote_env_key() {
+  local key="$1"
+  local value="$2"
+  ssh "${SSH_OPTS[@]}" -p "$APP_PORT" "${APP_USER}@${APP_HOST}" \
+    "bash -s -- $(printf "%q" "$REMOTE_ENV_FILE") $(printf "%q" "$key") $(printf "%q" "$value")" <<'EOS'
+env_file="$1"
+key="$2"
+value="$3"
+tmp="${env_file}.tmp.$$"
+awk -F= -v k="$key" -v v="$value" 'BEGIN{done=0} $1==k{print k "=" v; done=1; next} {print} END{if(!done) print k "=" v}' "$env_file" > "$tmp"
+mv "$tmp" "$env_file"
+EOS
+}
+
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mint-quote-turnstile.XXXXXX")"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+python3 - "$CONTRACT" > "$TMP_DIR/meta.env" <<'PY'
+import sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+turnstile = ((data.get("quote_form_protection") or {}).get("turnstile") or {})
+keys = turnstile.get("secret_env_keys") or {}
+print(f"WIDGET_NAME={turnstile.get('widget_name', 'mint-quote-form')}")
+print(f"WIDGET_MODE={turnstile.get('mode', 'managed')}")
+print(f"TURNSTILE_ACTION={turnstile.get('expected_action', 'quote_submit')}")
+print(f"SITE_KEY_ENV={keys.get('site_key', 'QUOTE_PAGE_TURNSTILE_SITE_KEY')}")
+print(f"SECRET_KEY_ENV={keys.get('secret_key', 'QUOTE_PAGE_TURNSTILE_SECRET_KEY')}")
+print(f"HOSTS_ENV={keys.get('allowed_hostnames', 'QUOTE_PAGE_TURNSTILE_ALLOWED_HOSTNAMES')}")
+print(f"ACTION_ENV={keys.get('action', 'QUOTE_PAGE_TURNSTILE_ACTION')}")
+print(f"CANARY_ENV={keys.get('canary_bypass_token', 'QUOTE_PAGE_CANARY_BYPASS_TOKEN')}")
+PY
+# shellcheck source=/dev/null
+source "$TMP_DIR/meta.env"
+
+python3 - "$CONTRACT" > "$TMP_DIR/hosts.txt" <<'PY'
+import sys, yaml
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = yaml.safe_load(handle) or {}
+for row in data.get("hosts", []) or []:
+    if str(row.get("runtime_owner_service", "")).strip() != "quote-page":
+        continue
+    hostname = str(row.get("hostname", "")).strip()
+    if hostname:
+        print(hostname)
+PY
+mapfile -t QUOTE_HOSTS < "$TMP_DIR/hosts.txt"
+[[ "${#QUOTE_HOSTS[@]}" -gt 0 ]] || stop "no quote hostnames found in contract"
+DOMAINS_JSON="$(printf '%s\n' "${QUOTE_HOSTS[@]}" | jq -R . | jq -s .)"
+ALLOWED_HOSTNAMES="$(paste -sd, "$TMP_DIR/hosts.txt")"
+
+widgets_json="$(cf_api_get_with_retry "${CF_API}/accounts/${ACCOUNT_ID}/challenges/widgets" )" \
+  || stop "failed to fetch Turnstile widgets"
+
+widget_matches="$(jq -r --arg name "$WIDGET_NAME" '[.result[]? | select(.name == $name)] | length' <<< "$widgets_json")"
+if [[ "$widget_matches" -gt 1 ]]; then
+  stop "multiple Turnstile widgets found with name=$WIDGET_NAME"
+fi
+widget_sitekey="$(jq -r --arg name "$WIDGET_NAME" '.result[]? | select(.name == $name) | .sitekey' <<< "$widgets_json" | head -n1)"
+
+widget_payload="$(jq -nc \
+  --arg name "$WIDGET_NAME" \
+  --arg mode "$WIDGET_MODE" \
+  --argjson domains "$DOMAINS_JSON" \
+  '{name:$name, mode:$mode, domains:$domains}')"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "mint.quote.turnstile.reconcile"
+  echo "dry_run: true"
+  echo "widget_name: $WIDGET_NAME"
+  echo "widget_mode: $WIDGET_MODE"
+  echo "domains: $ALLOWED_HOSTNAMES"
+  if [[ -n "$widget_sitekey" ]]; then
+    echo "would_update_widget: true"
+  else
+    echo "would_create_widget: true"
+  fi
+  echo "would_set_secret_path: /spine/services/quote-page"
+  echo "would_sync_remote_env: $REMOTE_ENV_FILE"
+  exit 0
+fi
+
+if [[ -n "$widget_sitekey" ]]; then
+  widget_response="$(cf_api_put "${CF_API}/accounts/${ACCOUNT_ID}/challenges/widgets/${widget_sitekey}" "$widget_payload")" \
+    || stop "failed to update Turnstile widget"
+else
+  widget_response="$(cf_api_post "${CF_API}/accounts/${ACCOUNT_ID}/challenges/widgets" "$widget_payload")" \
+    || stop "failed to create Turnstile widget"
+  widget_sitekey="$(jq -r '.result.sitekey // empty' <<< "$widget_response")"
+fi
+
+[[ -n "$widget_sitekey" ]] || stop "Turnstile widget sitekey missing from response"
+widget_secret="$(jq -r '.result.secret // empty' <<< "$widget_response")"
+if [[ -z "$widget_secret" ]]; then
+  widget_details="$(cf_api_get_with_retry "${CF_API}/accounts/${ACCOUNT_ID}/challenges/widgets/${widget_sitekey}")" \
+    || stop "failed to fetch Turnstile widget detail"
+  widget_secret="$(jq -r '.result.secret // empty' <<< "$widget_details")"
+fi
+[[ -n "$widget_secret" ]] || stop "Turnstile widget secret missing from Cloudflare response"
+
+EXISTING_CANARY_TOKEN="${!CANARY_ENV:-}"
+CANARY_BYPASS_TOKEN="${EXISTING_CANARY_TOKEN:-$(openssl rand -hex 32)}"
+
+cat > "$TMP_DIR/quote-page.env" <<EOF
+${SITE_KEY_ENV}=${widget_sitekey}
+${SECRET_KEY_ENV}=${widget_secret}
+${HOSTS_ENV}=${ALLOWED_HOSTNAMES}
+${ACTION_ENV}=${TURNSTILE_ACTION}
+${CANARY_ENV}=${CANARY_BYPASS_TOKEN}
+EOF
+
+infisical --domain "$SECRET_API_URL" secrets set \
+  --silent \
+  --projectId "$SECRET_PROJECT_ID" \
+  --env "$SECRET_ENV" \
+  --path "/spine/services/quote-page" \
+  --file "$TMP_DIR/quote-page.env" \
+  >/dev/null || stop "failed to write quote-page secrets"
+
+while IFS='=' read -r key value; do
+  [[ -n "$key" ]] || continue
+  set_remote_env_key "$key" "$value"
+done < "$TMP_DIR/quote-page.env"
+
+echo "mint.quote.turnstile.reconcile"
+echo "status: OK"
+echo "widget_name: $WIDGET_NAME"
+echo "widget_sitekey: ${widget_sitekey:0:8}..."
+echo "domains: $ALLOWED_HOSTNAMES"
+echo "secret_path: /spine/services/quote-page"
+echo "remote_env: $REMOTE_ENV_FILE"

@@ -147,24 +147,44 @@ map_shipping_status_to_easypost() {
 }
 
 run_quote_canary() {
-  local submit_url success_root canary_email canary_tag body_file head_file http_code location success_url seed_id seed_row success_code
+  local submit_url success_root canary_email canary_tag body_file head_file http_code location success_url seed_id seed_row success_code form_started_at canary_bypass_token
+  local -a curl_args
   submit_url="$(read_flow_surface quote-submit)"
   success_root="$(read_flow_surface quote-success)"
   canary_tag="mint-public-quote-$(date -u +%Y%m%dT%H%M%SZ)"
   canary_email="ops-mint-public-canary@mintprints.com"
   body_file="$TMP_DIR/quote.body"
   head_file="$TMP_DIR/quote.headers"
+  form_started_at="$(python3 - <<'PY'
+import time
+print(int(time.time() * 1000) - 5000)
+PY
+)"
+
+  curl_args=(
+    -X POST
+    -F "name=Mint Public Canary"
+    -F "email=${canary_email}"
+    -F "company=Mint Canary"
+    -F "product=PC61"
+    -F "quantity=1"
+    -F "decoration=screen_print"
+    -F "notes=${canary_tag}"
+    -F "form_started_at=${form_started_at}"
+    -F "company_website="
+    -F "project_reference="
+  )
+  canary_bypass_token="${QUOTE_PAGE_CANARY_BYPASS_TOKEN:-}"
+  if [[ -z "$canary_bypass_token" ]]; then
+    canary_bypass_token="$(container_env_value quote-page QUOTE_PAGE_CANARY_BYPASS_TOKEN || true)"
+  fi
+  if [[ -n "$canary_bypass_token" ]]; then
+    curl_args+=(-H "x-mint-canary-token: ${canary_bypass_token}")
+  fi
 
   set +e
   http_code="$(curl -sS -o "$body_file" -D "$head_file" -w "%{http_code}" \
-    -X POST \
-    -F "name=Mint Public Canary" \
-    -F "email=${canary_email}" \
-    -F "company=Mint Canary" \
-    -F "product=PC61" \
-    -F "quantity=1" \
-    -F "decoration=screen_print" \
-    -F "notes=${canary_tag}" \
+    "${curl_args[@]}" \
     "$submit_url")"
   local rc=$?
   set -e
