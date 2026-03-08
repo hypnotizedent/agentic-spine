@@ -18,6 +18,7 @@ Critical stateful services reviewed in this lane:
 Stateful backup posture is materially hardened and re-proved.
 
 - Finance stack backup scripts now cover Paperless/Firefly/Ghostfolio with fresh receipts.
+- Paperless runtime contract on finance-stack was corrected and redeployed through governed Spine surfaces so restart preserves state while using doc-backed OCR/worker settings.
 - Proxmox vzdump and offsite sync evidence is current.
 - Vaultwarden backup verification is current.
 - Infisical/Gitea/Stalwart backup/restore governance docs were refreshed in the same lane.
@@ -30,6 +31,9 @@ Stateful backup posture is materially hardened and re-proved.
 - Canonical backup status: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-120155__backup.status__Rx6az77684/receipt.md`
 - Vzdump schedule/status: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-114501__backup.vzdump.status__Rga4s26918/receipt.md`
 - Vaultwarden backup verify: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-112748__vaultwarden.backup.verify__R7eig84781/receipt.md`
+- Paperless compose sync: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-142847__secrets.exec__R0xsa82989/receipt.md`
+- Paperless governed restart: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-142905__docker.compose.up__R5tdd89755/receipt.md`
+- Post-restart finance-stack health: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-143123__services.health.status__Rj5ye46053/receipt.md`
 
 ## Hardened Files
 
@@ -40,6 +44,7 @@ Stateful backup posture is materially hardened and re-proved.
 - `/Users/ronnyworks/code/agentic-spine/ops/plugins/finance/bin/finance-backup-run`
 - `/Users/ronnyworks/code/agentic-spine/ops/plugins/finance/bin/finance-backup-status`
 - `/Users/ronnyworks/code/agentic-spine/ops/plugins/vaultwarden/bin/vaultwarden-backup-verify`
+- `/Users/ronnyworks/code/workbench/infra/compose/finance/docker-compose.yml`
 
 ## Governance / Doctrine Alignment
 
@@ -52,6 +57,8 @@ Stateful backup posture is materially hardened and re-proved.
 ## Restore / Safety Notes
 
 - Finance stack state is on VM 211 persistent volumes and is preserved across restart/redeploy.
+- Paperless restart/redeploy proof is current: compose sync + `docker.compose.up` + green `services.health.status` receipt after the runtime correction.
+- Paperless retained-doc queue drained to zero after the governed runtime correction; duplicate backfill residue was preserved in quarantine (`172` PDFs) rather than deleted.
 - Offsite copy and restore-aware posture are tracked through the backup receipts above.
 - Paperless incident root-cause and restore decision records remain preserved:
   - `/Users/ronnyworks/code/agentic-spine/mailroom/state/paperless-backup-incident/root-cause-receipt-20260308.md`

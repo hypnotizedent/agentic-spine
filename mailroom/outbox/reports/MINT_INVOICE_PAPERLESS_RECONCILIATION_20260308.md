@@ -43,13 +43,24 @@ comm -23 <source-list> <live-list>
 - Sample title/original filename proof: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-123905__secrets.exec__Ru02a17692/receipt.md`
 - Live canonical consume-lane proof (`570.pdf`): `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-130159__secrets.exec__Rfvup70829/receipt.md`
 - Finance-stack targeted health: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-133631__services.health.status__Rulzc31412/receipt.md`
+- Duplicate residual quarantine on finance-stack: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-142312__secrets.exec__R8e8u60206/receipt.md`
+- Paperless compose sync to canonical remote path: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-142847__secrets.exec__R0xsa82989/receipt.md`
+- Governed Paperless restart on VM 211: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-142905__docker.compose.up__R5tdd89755/receipt.md`
+- Post-redeploy finance-stack health: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-143123__services.health.status__Rj5ye46053/receipt.md`
+- Current residual requeues: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-143234__secrets.exec__Rf4fe74080/receipt.md`, `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-143427__secrets.exec__Rr4sb25656/receipt.md`
+- Final duplicate consume cleanup: `/Users/ronnyworks/code/agentic-spine/receipts/sessions/RCAP-20260308-152120__secrets.exec__Rygus86068/receipt.md`
 
 ## Backfill Hardening Applied
 
-- Paperless runtime tuned in `/Users/ronnyworks/code/workbench/infra/compose/finance/docker-compose.yml`
-  - `PAPERLESS_TASK_WORKERS=12`
+- Paperless runtime corrected in `/Users/ronnyworks/code/workbench/infra/compose/finance/docker-compose.yml`
+  - `PAPERLESS_OCR_MODE=skip`
+  - `PAPERLESS_OCR_SKIP_ARCHIVE_FILE=with_text`
+  - `PAPERLESS_TASK_WORKERS=4`
   - `PAPERLESS_THREADS_PER_WORKER=1`
-  - memory limit `4G`
+- Correction rationale:
+  - finance-stack exposes `4` CPU cores
+  - Paperless guidance warns not to exceed core-count with `task_workers * threads_per_worker`
+  - the earlier `12 x 1` worker budget and `skip_noarchive` OCR mode were replaced with the doc-backed runtime above
 - Local operator helpers hardened:
   - `/Users/ronnyworks/code/workbench/scripts/finance/paperless-intake.mjs`
   - `/Users/ronnyworks/code/workbench/scripts/finance/paperless-intake-bulk.mjs`
@@ -90,53 +101,82 @@ Latest live runtime snapshot after those residual requeues:
 - residual batch A files in consume: `114`
 - Paperless document rows: `8,443`
 
-### Latest exact checkpoint after worker bump
+### Queue-accounted checkpoint before runtime correction
 
 Current exact DB-backed parity:
 
 - source corpus: `12,863`
-- live Paperless filename set: `8,979`
-- currently missing: `3,932`
-- consume backlog currently covers `4,056` filenames
-- off-queue residual gap collapsed to `5` files and was re-queued into:
-  - `/mnt/data/finance/paperless/consume/invoice-backfill-residual-20260308e/`
+- live Paperless filename set: `10,300`
+- filename-missing set: `2,611`
+- filename-missing already present live by checksum: `108`
+- actual missing by checksum: `2,503`
+- consume backlog: `2,602`
+- `residual_not_in_consume=9`
+- `consume_not_in_missing=0`
+- those `9` out-of-queue filename residues were already present live by checksum, so the checksum-backed missing set was fully consume-accounted at that checkpoint
 
-Latest live runtime snapshot after the `12`-worker restart:
+### Latest corrected-runtime checkpoint
 
-- main backfill files still in consume: `3,816`
-- residual files still in consume: `134`
-- Paperless document rows: `9,095`
-- live Paperless runtime env: `PAPERLESS_TASK_WORKERS=12`, `PAPERLESS_THREADS_PER_WORKER=1`
-
-### Latest exact checkpoint with queue-only residue
-
-Current exact DB-backed parity:
+After correcting the Paperless OCR/worker contract and redeploying `paperless-ngx` on finance-stack:
 
 - source corpus: `12,863`
-- live Paperless filename set: `9,277`
-- currently missing: `3,634`
-- consume backlog currently covers `3,768` filenames
-- `residual_not_in_consume=0`
+- live Paperless filename set: `10,816`
+- filename-missing set: `2,095`
+- filename-missing already present live by checksum: `1`
+- actual missing by checksum: `2,094`
+- consume backlog: `2,106`
+- `residual_not_in_consume=7`
+- `consume_not_in_missing=18`
+- Paperless document rows: `10,829`
+- consume files on disk: `2,100`
+- quarantine files preserved: `154`
+- live Paperless runtime env: `PAPERLESS_OCR_MODE=skip`, `PAPERLESS_OCR_SKIP_ARCHIVE_FILE=with_text`, `PAPERLESS_TASK_WORKERS=4`, `PAPERLESS_THREADS_PER_WORKER=1`
 
 Meaning:
 
-- every currently-missing preserved invoice filename is now accounted for inside the canonical Paperless consume backlog
-- no secondary hidden missing batch remains outside the active intake queue
-- the remaining delta is queue drain only, not a discovery or routing seam
+- the historical MinIO-vs-Paperless truth seam is closed
+- the runtime bug in the Paperless worker/OCR contract is corrected and receipted
+- the remaining corpus delta is an active Paperless intake backlog on the canonical retained-doc lane, not a storage-authority ambiguity
+
+### Final closed checkpoint
+
+Final exact parity after the corrected runtime drained the queue and duplicate residue was quarantined:
+
+- source corpus: `12,863`
+- live Paperless filename set: `12,911`
+- filename-missing set: `0`
+- filename-missing already present live by checksum: `0`
+- actual missing by checksum: `0`
+- consume backlog: `0`
+- `residual_not_in_consume=0`
+- `consume_not_in_missing=0`
+- Paperless document rows: `12,911`
+- consume files on disk: `0`
+- quarantine files preserved: `172`
+
+Meaning:
+
+- the preserved historical invoice PDF corpus is now fully present in Paperless
+- the canonical Paperless consume lane is empty/clean after closure
+- duplicate backfill residue was preserved in quarantine instead of being deleted casually
 
 ## Status
 
-Not closed yet at the time of this report write.
+Closed.
 
 What is already proved:
 
 - the old invoice corpus is preserved
 - canonical Paperless intake works live
-- the backfill is actively draining on VM 211
+- the backfill completed on VM 211
 - the false "probably imported" state is eliminated
-- residual not-in-consume gaps are being explicitly re-queued
+- checksum-backed reconciliation reached zero missing residue
+- residual not-in-consume gaps were re-queued through governed receipts until closure
+- duplicate consume residue is preserved in Paperless quarantine rather than silently discarded
 
 Closure condition for this report:
 
-- DB-backed missing count reaches `0`, or
+- checksum-backed missing count reaches `0`, or
 - any remaining residue is isolated to a specific non-importable/manual class with exact evidence
+
+Closure condition reached: `missing_by_hash=0`.
