@@ -4,7 +4,7 @@
 > **Domain:** mint
 > **Owner:** @ronny
 > **Created:** 2026-03-06
-> **Last Updated:** 2026-03-08
+> **Last Updated:** 2026-03-09
 
 ---
 
@@ -52,6 +52,7 @@ Those belong to Morpheus, Fin, Artie, or the underlying Mint modules.
 | Topology / routing / worker map | `ops/bindings/agents.registry.yaml`, `ops/bindings/terminal.role.contract.yaml` |
 | Mint verify / deploy / health | `ops/plugins/mint/` |
 | Mint status projection / capture lineage | `ops/bindings/mint.module.status.projected.yaml`, `ops/bindings/mint.module.status.authority.contract.yaml` |
+| Mint order business truth | `ops/bindings/mint.order.truth.authority.yaml` |
 | Worker catalog projection | `ops/bindings/terminal.worker.catalog.yaml` |
 | Workbench launcher | `~/code/workbench/scripts/root/operator/flying-dutchman.sh` |
 

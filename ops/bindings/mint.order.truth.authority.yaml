@@ -1,0 +1,412 @@
+# Mint Order Truth Authority
+# Status: authoritative
+# Last verified: 2026-03-09
+# Scope: mint-order-business-truth
+
+version: 1
+updated_at: "2026-03-09"
+owner: "@ronny"
+status: authoritative
+scope: mint-order-business-truth
+supersedes:
+  - docs/planning/MINT_ORDER_LIFECYCLE_CONTRACT_V1.md
+
+purpose: >
+  Define the minimum canonical Mint business truth that future order-facing
+  modules must share before implementation. This authority separates intake
+  evidence, order truth, quote truth, revision lineage, artwork bindings, and
+  pricing snapshots so agents stop inventing parallel models.
+
+non_goals:
+  - authorizing a new runtime module
+  - authorizing direct writes to legacy mint_os tables
+  - authorizing a new legacy quotes table
+  - replacing artwork seed or artwork job tables
+  - replacing the draft-only customer communications barrier
+
+contracts:
+  mint_domain_doc: docs/governance/domains/mint.md
+  module_lifecycle_authority: ops/bindings/mint.module.lifecycle.authority.yaml
+  module_status_authority: ops/bindings/mint.module.status.authority.contract.yaml
+  master_inventory_registry: ops/bindings/master.inventory.registry.yaml
+  mint_modules_intake_schema: /Users/ronnyworks/code/mint-modules/order-intake/schema/customer-contract.schema.json
+  mint_modules_seed_linkage: /Users/ronnyworks/code/mint-modules/artwork/docs/SEED_LINKAGE_GUIDE.md
+  mint_modules_schema_truth: /Users/ronnyworks/code/mint-modules/docs/ARCHITECTURE/SCHEMA_TRUTH.md
+  mint_modules_database_ownership: /Users/ronnyworks/code/mint-modules/docs/ARCHITECTURE/DATABASE_OWNERSHIP.md
+  mint_modules_shared_types: /Users/ronnyworks/code/mint-modules/packages/shared-types/src/index.ts
+
+canonical_answers:
+  what_is_an_order: >
+    A Mint order is a governed business work item with a canonical order_id,
+    one current immutable order_revision, and explicit customer, fulfillment,
+    and financial state. It is not the raw intake seed, not the artwork job,
+    and not a quote.
+  what_is_a_quote: >
+    A Mint quote is a customer-facing commercial offer for exactly one
+    order_revision_id and one pricing_snapshot_id. A quote is derived from an
+    order; it is not the intake request itself.
+  when_does_intake_become_an_order: >
+    Intake becomes an order only when a governed actor promotes normalized
+    intake evidence into the first order_revision and assigns a canonical
+    order_id. Seed creation, artwork job creation, and alerting do not create
+    order truth by themselves.
+  how_are_revisions_represented: >
+    Business revisions are immutable order_revision records linked by
+    parent_revision_id and revision_index. A new order_revision is required
+    whenever customer intent, fulfillment facts, or artwork selection changes
+    in a material way.
+  how_are_artwork_design_refs_attached: >
+    Artwork is attached through immutable artwork_binding records scoped to a
+    canonical order_line_id within an order_revision. Bindings reference
+    existing seed_id, artwork_job_id, and asset references as evidence.
+  what_is_mutable_vs_immutable: >
+    Intake evidence, order revisions, quotes, pricing snapshots, artwork
+    bindings, and approval decisions are immutable. Mutable truth is limited to
+    current pointers and operator-owned working fields such as
+    order.current_revision_id, order.active_quote_id, assignment, and
+    provisional customer resolution.
+  what_is_the_canonical_normalization_path_for_human_channel_ingest: >
+    Human-channel input normalizes through the same customer-contract schema as
+    web intake, lands in artwork seed evidence, and only then may be promoted
+    into order truth. No email, phone, text, PDF, or manual flow may write
+    directly into quote or order truth without passing through the normalized
+    intake boundary.
+
+identity_model:
+  canonical_ids:
+    seed_id:
+      role: first-touch intake evidence id
+      type: uuid
+      canonical_truth: intake_only
+    artwork_job_id:
+      role: artwork operational ticket id
+      type: uuid
+      canonical_truth: artwork_operations_only
+    order_id:
+      role: canonical business order id
+      type: uuid
+      canonical_truth: order_entity
+    order_revision_id:
+      role: immutable business revision id
+      type: uuid
+      canonical_truth: order_revision
+    order_line_id:
+      role: stable line identity across order revisions
+      type: uuid
+      canonical_truth: order_line
+    quote_id:
+      role: canonical commercial offer id
+      type: uuid
+      canonical_truth: quote_entity
+    pricing_snapshot_id:
+      role: immutable pricing evidence id
+      type: uuid
+      canonical_truth: pricing_snapshot
+    artwork_binding_id:
+      role: immutable line-to-artwork binding id
+      type: uuid
+      canonical_truth: artwork_binding
+  non_canonical_aliases:
+    visual_id:
+      meaning: legacy mint_os order alias
+      rule: never primary business identity in future module contracts
+    quote_number:
+      meaning: customer-facing quote alias
+      rule: display alias only
+    job_number:
+      meaning: artwork/files-api ticket alias
+      rule: operational alias only
+    job_order_reference:
+      meaning: seed linkage helper alias
+      rule: evidence linkage only, never canonical order identity
+
+entity_model:
+  intake_seed:
+    truth_role: raw and normalized intake evidence
+    current_owner: artwork/files-api
+    canonical_truth: false
+    required_refs:
+      - seed_id
+      - source channel
+      - normalized customer-contract payload
+    guidance: >
+      A seed may later link to an order, but it is never itself the order.
+  artwork_job:
+    truth_role: operational artwork ticket and gate carrier
+    current_owner: artwork/files-api
+    canonical_truth: false
+    required_refs:
+      - artwork_job_id
+      - created_from_seed_id
+    guidance: >
+      Artwork jobs may exist before business order truth and must not be used as
+      a substitute for order identity.
+  customer_ref:
+    truth_role: business counterparty
+    canonical_truth: supporting
+    allowed_identity_states:
+      - provisional
+      - resolved
+    guidance: >
+      Order creation may begin with provisional customer identity, but quote
+      send, payment linking, and customer-facing history require resolved
+      customer_id ownership.
+  order:
+    truth_role: governed business work item
+    canonical_truth: true
+    required_fields:
+      - order_id
+      - current_revision_id
+      - customer_identity_state
+      - lifecycle_state
+      - payment_state
+      - intake_seed_refs
+    mutable_fields:
+      - current_revision_id
+      - active_quote_id
+      - assignment
+      - customer resolution pointer
+      - operator_working_notes
+  order_revision:
+    truth_role: immutable statement of customer intent and fulfillment facts
+    canonical_truth: true
+    required_fields:
+      - order_revision_id
+      - order_id
+      - revision_index
+      - parent_revision_id
+      - change_reason
+      - line_items
+      - delivery_commitment
+      - artwork_binding_refs
+      - intake_evidence_refs
+    guidance: >
+      Every material business change creates a new order_revision; old
+      revisions remain addressable and diffable.
+  quote:
+    truth_role: immutable commercial offer
+    canonical_truth: true
+    required_fields:
+      - quote_id
+      - order_id
+      - order_revision_id
+      - pricing_snapshot_id
+      - quote_state
+      - issued_at
+    guidance: >
+      Quotes are derived from order truth. Multiple quotes may reference the
+      same order revision, but each quote must point to one exact pricing
+      snapshot.
+  pricing_snapshot:
+    truth_role: immutable cost and margin evidence
+    canonical_truth: true
+    required_fields:
+      - pricing_snapshot_id
+      - order_revision_id
+      - supplier_inputs
+      - decoration_inputs
+      - pricing_policy_ref
+      - calculated_totals
+      - source_revision_markers
+    guidance: >
+      Price-only recalculation produces a new pricing_snapshot and may produce a
+      new quote without forcing a new order_revision.
+  artwork_binding:
+    truth_role: immutable line-to-artwork evidence
+    canonical_truth: true
+    required_fields:
+      - artwork_binding_id
+      - order_revision_id
+      - order_line_id
+      - binding_scope
+      - seed_refs
+      - asset_refs
+      - selection_state
+    guidance: >
+      Digital proofs consume artwork bindings, not raw folder guesses or
+      freeform filenames.
+
+promotion_boundary:
+  order_creation_threshold:
+    required:
+      - at least one intake_seed_ref
+      - at least one normalized line item candidate
+      - customer_id or provisional_customer_ref
+      - explicit operator or governed capability promotion
+    forbidden_shortcuts:
+      - seed creation alone
+      - artwork job creation alone
+      - alert email creation alone
+      - supplier lookup alone
+      - payment event alone
+  quote_creation_threshold:
+    required:
+      - order_id
+      - order_revision_id
+      - pricing_snapshot_id
+      - resolved customer contact route
+      - operator approval for customer-facing send
+
+state_models:
+  order_lifecycle_state:
+    allowed:
+      - draft
+      - quoted
+      - approved
+      - production
+      - fulfilled
+      - cancelled
+    transitions:
+      draft:
+        - quoted
+        - cancelled
+      quoted:
+        - approved
+        - draft
+        - cancelled
+      approved:
+        - production
+        - cancelled
+      production:
+        - fulfilled
+        - cancelled
+      fulfilled: []
+      cancelled: []
+  payment_state:
+    allowed:
+      - unpaid
+      - partially_paid
+      - paid
+      - refunded
+    guidance: >
+      Payment state is orthogonal to lifecycle_state and is projected from
+      payment/finance evidence rather than used as the primary order lifecycle.
+  quote_state:
+    allowed:
+      - draft
+      - sent
+      - accepted
+      - rejected
+      - expired
+      - superseded
+    transitions:
+      draft:
+        - sent
+        - superseded
+      sent:
+        - accepted
+        - rejected
+        - expired
+        - superseded
+      accepted:
+        - superseded
+      rejected:
+        - superseded
+      expired:
+        - superseded
+      superseded: []
+  artwork_binding_state:
+    allowed:
+      - unmapped
+      - mapped
+      - approved
+      - superseded
+
+revision_rules:
+  new_order_revision_required_when:
+    - line items are added, removed, or materially changed
+    - quantities or size breakdowns change
+    - garment, color, decoration method, or placement changes
+    - delivery commitment or deadline changes
+    - artwork selection, imprint mapping, or approved proof selection changes
+    - customer-facing assumptions change in a fulfillment-relevant way
+  new_order_revision_not_required_when:
+    - only pricing policy, margin, or supplier cost inputs change
+    - only operator notes or assignment change
+    - only status pointers change without business fact change
+  stable_identity_rules:
+    - order_line_id persists across revisions for the same business line
+    - removing a line creates a new revision that tombstones the line; it does not erase history
+    - quote supersession never mutates a historical quote into new business facts
+
+immutability_rules:
+  immutable_records:
+    - intake evidence once captured
+    - order_revision records
+    - quote records after issuance
+    - pricing_snapshot records
+    - artwork_binding records
+    - approval and supersession events
+  mutable_records:
+    - order.current_revision_id
+    - order.active_quote_id
+    - customer resolution pointer
+    - assignment
+    - operator working notes
+
+normalization_flow:
+  canonical_path:
+    - raw channel evidence captured or retained
+    - normalize into the customer-contract schema
+    - persist normalized facts into artwork seed evidence
+    - enrich seed linkage with customer and job/order aliases as evidence only
+    - promote to order truth by creating order + first order_revision
+    - calculate pricing_snapshot from order_revision
+    - issue quote from order_revision + pricing_snapshot
+  human_channel_rule: >
+    Email, PDF, phone transcript, text, social, and manual operator intake must
+    all normalize through the same customer-contract field names before business
+    order truth is created.
+  forbidden_paths:
+    - raw email directly to order table
+    - raw PDF directly to quote table
+    - artwork folder name directly to business order identity
+    - payment event directly rewriting customer intent
+
+legacy_bridge_constraints:
+  current_legacy_truth:
+    - legacy mint_os may persist quotes inside orders.status = quote
+    - visual_id remains a legacy alias surface
+    - current artwork/job tables remain valid operational evidence
+  forward_rule: >
+    Future Mint module APIs must preserve the canonical distinction between
+    intake seed, order, quote, pricing snapshot, and artwork binding even when
+    legacy persistence collapses some of those concerns into one table.
+
+blocked_module_dependency_matrix:
+  orders:
+    lifecycle_state: blocked_on_order_truth
+    requires:
+      - order entity definition
+      - order_revision immutability rules
+      - stable order_line_id semantics
+      - order lifecycle and payment state split
+      - promotion boundary from intake seed to order
+    contract_outcome: unblocked_for_contract_and_api_design
+  quotes:
+    lifecycle_state: blocked_on_order_truth
+    requires:
+      - quote entity definition
+      - quote state machine
+      - quote to order_revision linkage
+      - pricing_snapshot linkage
+      - supersession rules
+    contract_outcome: unblocked_for_contract_and_api_design
+  digital-proofs:
+    lifecycle_state: blocked_on_order_truth
+    requires:
+      - stable order_line_id semantics
+      - artwork_binding entity
+      - artwork binding state model
+      - rule that proof work targets order_revision evidence, not raw folder guesses
+    contract_outcome: unblocked_for_contract_and_line_binding_design
+
+agent_guidance:
+  default_read_path: ops/bindings/mint.order.truth.authority.yaml
+  operator_rule: >
+    If you cannot answer a Mint order/quote/revision question from this
+    authority, stop and register a contract gap before inventing a new field,
+    file format, or workflow.
+  implementation_split: >
+    Spine owns the canonical business truth contract. Mint product modules own
+    implementation details only after they conform to this contract.

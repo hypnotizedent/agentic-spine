@@ -4,9 +4,13 @@ owner: "@ronny"
 created: 2026-02-22
 scope: mint-order-lifecycle-contract-gate1
 loop_id: LOOP-MINT-ORDER-LIFECYCLE-PHASE0-CONTRACT-20260222
+superseded_by: ops/bindings/mint.order.truth.authority.yaml
 ---
 
 # MINT Order Lifecycle Contract V1 (Gate 1)
+
+Superseded for canonical order/quote/revision truth by
+`ops/bindings/mint.order.truth.authority.yaml`.
 
 Contract-only artifact. No runtime mutation.
 

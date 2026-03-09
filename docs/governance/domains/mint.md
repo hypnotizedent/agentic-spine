@@ -6,6 +6,7 @@ Canonical domain policy for `mint`.
 - Runtime contracts: `ops/bindings/domains/mint.bundle.yaml`
 - Public ingress contract: `ops/bindings/mint.public.ingress.contract.yaml`
 - **Status authority**: `ops/bindings/mint.module.status.projected.yaml` (read via `mint.module.status.show`)
+- **Order business truth authority**: `ops/bindings/mint.order.truth.authority.yaml`
 - Verify entrypoint: `./bin/ops cap run verify.run -- domain mint`
 - Public deploy closeout: `mint.modules.health` -> `mint.runtime.proof` -> `mint.public.ingress.proof` -> `mint.quote.edge.reconcile` -> `mint.public.canary`
 
@@ -20,6 +21,17 @@ Canonical domain policy for `mint`.
 - Explicit baseline: `mint.live.baseline.status`
 - Deep runtime proof: `mint.runtime.proof`
 - Refresh projection: `mint.module.status.projection.build`
+
+## Order Truth
+
+**Canonical business truth for future order-facing modules**:
+- Read `ops/bindings/mint.order.truth.authority.yaml`
+- Use it for order vs quote vs revision vs artwork-binding semantics
+- Do not infer business order truth from seed IDs, artwork job IDs, legacy `visual_id`, or code presence
+
+**Current implementation rule**:
+- `orders`, `quotes`, and `digital-proofs` remain blocked at the module level until they conform to the order-truth authority
+- Existing seed/artwork intake stays the normalized intake boundary; it is not the order entity
 
 <!-- DOMAIN_CAPABILITY_CATALOG_START -->
 ## Capability Catalog
