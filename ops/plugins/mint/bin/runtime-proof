@@ -53,12 +53,20 @@ IFS=' ' read -r MINT_DATA_PROBE_HOST MINT_DATA_PROBE_PATH <<< "$(ssh_resolve_pro
 IFS=' ' read -r MINT_APPS_SSH_HOST MINT_APPS_SSH_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "$APP_TARGET_ID" || true)"
 IFS=' ' read -r MINT_DATA_SSH_HOST MINT_DATA_SSH_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "$DATA_TARGET_ID" || true)"
 
+service_url() {
+  mint_service_url "$1"
+}
+
 service_port() {
   mint_service_port "$1"
 }
 
-service_health_path() {
-  mint_service_path "$1"
+service_base_url() {
+  local url port
+  url="$(mint_service_url "$1")"
+  port="$(mint_service_port "$1")"
+  [[ -z "$MINT_APPS_PROBE_HOST" ]] && return 1
+  printf 'http://%s:%s\n' "$MINT_APPS_PROBE_HOST" "$port"
 }
 
 proof_route() {
@@ -71,25 +79,27 @@ require_value() {
   [[ -n "$value" && "$value" != "null" ]] || stop "missing $label in $PROBE_BINDING"
 }
 
-PRICING_PORT="$(service_port pricing)"
-PRICING_HEALTH="$(service_health_path pricing)"
+PRICING_HEALTH_URL="$(service_url pricing)"
+PAYMENT_HEALTH_URL="$(service_url payment)"
+SHIPPING_BASE="$(service_base_url shipping)"
+SUPPLIERS_BASE="$(service_base_url suppliers)"
+FILES_BASE="$(service_base_url files-api)"
+PAYMENT_BASE="$(service_base_url payment)"
 SHIPPING_PORT="$(service_port shipping)"
 SUPPLIERS_PORT="$(service_port suppliers)"
 FILES_PORT="$(service_port files-api)"
 PAYMENT_PORT="$(service_port payment)"
-PAYMENT_HEALTH="$(service_health_path payment)"
 SHIPPING_SHOP_PATH="$(proof_route shipping_shop_address_path)"
 SUPPLIERS_SEARCH_PATH="$(proof_route suppliers_search_path)"
 SUPPLIERS_STOCK_TEMPLATE="$(proof_route suppliers_stock_path_template)"
 ARTWORK_PREPARE_PATH="$(proof_route artwork_upload_prepare_path)"
 
-require_value "$PRICING_PORT" "pricing port"
-require_value "$PRICING_HEALTH" "pricing health path"
-require_value "$SHIPPING_PORT" "shipping port"
-require_value "$SUPPLIERS_PORT" "suppliers port"
-require_value "$FILES_PORT" "files-api port"
-require_value "$PAYMENT_PORT" "payment port"
-require_value "$PAYMENT_HEALTH" "payment health path"
+require_value "$PRICING_HEALTH_URL" "pricing health url"
+require_value "$PAYMENT_HEALTH_URL" "payment health url"
+require_value "$SHIPPING_BASE" "shipping base url"
+require_value "$SUPPLIERS_BASE" "suppliers base url"
+require_value "$FILES_BASE" "files-api base url"
+require_value "$PAYMENT_BASE" "payment base url"
 require_value "$SHIPPING_SHOP_PATH" "shipping_shop_address_path"
 require_value "$SUPPLIERS_SEARCH_PATH" "suppliers_search_path"
 require_value "$SUPPLIERS_STOCK_TEMPLATE" "suppliers_stock_path_template"
@@ -182,12 +192,6 @@ mint_db_query() {
     "docker exec -i mint-modules-postgres sh -lc 'PGPASSWORD=\"\${POSTGRES_PASSWORD:-}\" psql -At -v ON_ERROR_STOP=1 -U \"\${POSTGRES_USER:-mint}\" -d \"\${POSTGRES_DB:-mint_modules}\"'" <<< "$sql"
 }
 
-app_http_url() {
-  local port="$1" route="$2"
-  [[ -n "$MINT_APPS_PROBE_HOST" ]] || return 1
-  printf 'http://%s:%s%s\n' "$MINT_APPS_PROBE_HOST" "$port" "$route"
-}
-
 echo "mint.runtime.proof"
 echo "services.binding: $SERVICES_BINDING"
 echo "probe.binding: $PROBE_BINDING"
@@ -197,13 +201,13 @@ echo
 printf "%-28s %-8s %s\n" "CHECK" "STATE" "DETAIL"
 
 # 1) Pricing health
-if [[ -z "$MINT_APPS_PROBE_HOST" ]]; then
+if [[ -z "$PRICING_HEALTH_URL" ]]; then
   emit_row "pricing.health" "FAIL" "target=$APP_TARGET_ID unreachable"
   fail=1
 else
   http_json_check \
     "pricing.health" \
-    "$(app_http_url "$PRICING_PORT" "$PRICING_HEALTH")" \
+    "$PRICING_HEALTH_URL" \
     '.status == "ok" and ((.service // .name // "") | test("pricing"; "i"))' \
     "pricing health json ok via=${MINT_APPS_PROBE_PATH:-direct}"
 fi
