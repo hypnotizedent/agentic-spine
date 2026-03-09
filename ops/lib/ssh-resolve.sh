@@ -59,9 +59,32 @@ ssh_resolve_access_policy() {
     "$_SSH_RESOLVE_BINDING" 2>/dev/null || echo "lan_first"
 }
 
+ssh_tcp_port_open() {
+  local host="$1"
+  local port="${2:-22}"
+  local timeout="${3:-3}"
+  [[ -n "$host" && "$host" != "null" ]] || return 1
+  python3 - "$host" "$port" "$timeout" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+timeout = float(sys.argv[3])
+
+try:
+    with socket.create_connection((host, port), timeout=timeout):
+        pass
+except OSError:
+    raise SystemExit(1)
+
+raise SystemExit(0)
+PY
+}
+
 # Resolve host with LAN→Tailscale fallback for lan_first targets.
 # Returns: "resolved_ip path_used" (space-separated)
-# path_used: lan | tailscale | direct
+# path_used: lan | tailscale | direct | unreachable
 ssh_resolve_host_with_fallback() {
   local target_id="$1"
   local timeout="${2:-3}"
@@ -70,11 +93,38 @@ ssh_resolve_host_with_fallback() {
   ts_ip="$(ssh_resolve_tailscale_ip "$target_id")"
   policy="$(ssh_resolve_access_policy "$target_id")"
 
-  if [[ "$policy" != "lan_first" ]]; then
-    # tailscale_required or lan_only: use host as-is
-    printf '%s direct\n' "$host"
-    return 0
-  fi
+  case "$policy" in
+    tailscale_required)
+      if [[ -n "$ts_ip" && "$ts_ip" != "null" ]]; then
+        if [[ "$ts_ip" != "$host" ]]; then
+          printf '%s tailscale\n' "$ts_ip"
+        else
+          printf '%s direct\n' "$ts_ip"
+        fi
+        return 0
+      fi
+      printf '%s unreachable\n' "$host"
+      return 1
+      ;;
+    lan_only)
+      if [[ -n "$host" && "$host" != "null" ]]; then
+        printf '%s lan\n' "$host"
+        return 0
+      fi
+      printf '%s unreachable\n' "$host"
+      return 1
+      ;;
+    lan_first|"")
+      ;;
+    *)
+      if [[ -n "$host" && "$host" != "null" ]]; then
+        printf '%s direct\n' "$host"
+        return 0
+      fi
+      printf '%s unreachable\n' "$host"
+      return 1
+      ;;
+  esac
 
   # LAN-first: try LAN, fall back to Tailscale
   if [[ -n "$host" ]] && ping -c 1 -W "$timeout" "$host" >/dev/null 2>&1; then
@@ -93,32 +143,71 @@ ssh_resolve_host_with_fallback() {
 }
 
 # Resolve a stable probe host for health and verification surfaces.
-# Probe traffic should prefer the configured Tailscale IP when present because
-# operator clients are not guaranteed to be on the shop LAN.
+# Probes must honor the same access policy contract as the rest of runtime
+# discovery to avoid LAN/Tailscale drift between status surfaces.
 # Returns: "resolved_ip path_used" (space-separated)
-# path_used: tailscale | direct | unreachable
+# path_used: lan | tailscale | direct | unreachable
 ssh_resolve_probe_host() {
   local target_id="$1"
-  local host ts_ip
+  local timeout="${2:-3}"
+  ssh_resolve_host_with_fallback "$target_id" "$timeout"
+}
+
+# Resolve host for SSH operations using actual TCP/22 reachability instead of
+# ICMP ping. This avoids deploy drift where a host answers ping but SSH is not
+# reachable on that path.
+# Returns: "resolved_ip path_used" (space-separated)
+# path_used: lan | tailscale | direct | unreachable
+ssh_resolve_ssh_host_with_fallback() {
+  local target_id="$1"
+  local timeout="${2:-3}"
+  local host ts_ip policy
   host="$(ssh_resolve_host "$target_id")"
   ts_ip="$(ssh_resolve_tailscale_ip "$target_id")"
+  policy="$(ssh_resolve_access_policy "$target_id")"
 
-  if [[ -n "$ts_ip" && "$ts_ip" != "null" ]]; then
-    if [[ "$ts_ip" != "$host" ]]; then
-      printf '%s tailscale\n' "$ts_ip"
-    else
-      printf '%s direct\n' "$ts_ip"
-    fi
-    return 0
-  fi
-
-  if [[ -n "$host" && "$host" != "null" ]]; then
-    printf '%s direct\n' "$host"
-    return 0
-  fi
-
-  printf '\tunreachable\n'
-  return 1
+  case "$policy" in
+    tailscale_required)
+      if [[ -n "$ts_ip" && "$ts_ip" != "null" ]] && ssh_tcp_port_open "$ts_ip" 22 "$timeout"; then
+        if [[ "$ts_ip" != "$host" ]]; then
+          printf '%s tailscale\n' "$ts_ip"
+        else
+          printf '%s direct\n' "$ts_ip"
+        fi
+        return 0
+      fi
+      printf '%s unreachable\n' "${ts_ip:-$host}"
+      return 1
+      ;;
+    lan_only)
+      if [[ -n "$host" && "$host" != "null" ]] && ssh_tcp_port_open "$host" 22 "$timeout"; then
+        printf '%s lan\n' "$host"
+        return 0
+      fi
+      printf '%s unreachable\n' "$host"
+      return 1
+      ;;
+    lan_first|"")
+      if [[ -n "$host" && "$host" != "null" ]] && ssh_tcp_port_open "$host" 22 "$timeout"; then
+        printf '%s lan\n' "$host"
+        return 0
+      fi
+      if [[ -n "$ts_ip" && "$ts_ip" != "$host" ]] && ssh_tcp_port_open "$ts_ip" 22 "$timeout"; then
+        printf '%s tailscale\n' "$ts_ip"
+        return 0
+      fi
+      printf '%s unreachable\n' "${host:-$ts_ip}"
+      return 1
+      ;;
+    *)
+      if [[ -n "$host" && "$host" != "null" ]] && ssh_tcp_port_open "$host" 22 "$timeout"; then
+        printf '%s direct\n' "$host"
+        return 0
+      fi
+      printf '%s unreachable\n' "$host"
+      return 1
+      ;;
+  esac
 }
 
 # Resolve an HTTP URL to use the correct host IP with fallback.
@@ -165,7 +254,8 @@ ssh_resolve_probe_via() {
 
 # Build SSH command array for a target, with optional ProxyJump.
 # Usage: ssh_build_cmd_with_fallback "communications-stack" -> prints ssh command string
-# Fallback chain: direct LAN -> direct Tailscale -> ProxyJump via probe_via target
+# Fallback chain: direct LAN (ssh reachable) -> direct Tailscale (ssh reachable)
+# -> ProxyJump via probe_via target
 #
 # ProxyJump fallback is attempted when probe_via is configured in ssh.targets.yaml.
 # For targets without probe_via, fallback stops at Tailscale.
@@ -177,7 +267,7 @@ ssh_build_cmd_with_fallback() {
   local target_id="$1"
   local timeout="${2:-5}"
   local result resolved_ip path_used
-  result="$(ssh_resolve_host_with_fallback "$target_id" "$timeout")" || true
+  result="$(ssh_resolve_ssh_host_with_fallback "$target_id" "$timeout")" || true
   resolved_ip="$(echo "$result" | awk '{print $1}')"
   path_used="$(echo "$result" | awk '{print $2}')"
   local user

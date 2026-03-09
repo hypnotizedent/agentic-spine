@@ -1,5 +1,5 @@
 ---
-status: complete
+status: superseded_historical
 created: 2026-03-09
 owner: "@ronny"
 scope: mint-runtime-gaps-audit
@@ -7,6 +7,13 @@ authority: runtime-admission-health-plane-wave
 ---
 
 # Mint Runtime Gaps Audit — 2026-03-09
+
+> Superseded interpretation: this audit captured a noisy point-in-time view before
+> runtime path-selection was normalized. The recurring “Mint/Firefly/Tailscale”
+> operator drift was traced to shared resolver policy divergence and ping-based SSH
+> host selection, not to a stable daily service outage. Current canonical truth is:
+> health probes honor the shared access-policy resolver, SSH deploy paths use
+> SSH/TCP reachability rather than ping, and strict-exit health checks are first-class.
 
 ## Executive Summary
 

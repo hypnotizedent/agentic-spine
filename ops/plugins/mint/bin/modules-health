@@ -11,6 +11,7 @@
 # Usage:
 #   modules-health              # check all mint endpoints
 #   modules-health <component>  # check specific component
+#   modules-health --strict-exit
 
 set -euo pipefail
 
@@ -29,7 +30,36 @@ command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
 [[ -f "$PROBE_BINDING" ]] || stop "missing binding: $PROBE_BINDING"
 
-FILTER="${1:-}"
+FILTER=""
+STRICT_EXIT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --strict-exit)
+      STRICT_EXIT=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  modules-health
+  modules-health <component>
+  modules-health --strict-exit
+
+Flags:
+  --strict-exit  Exit non-zero when any checked component is not OK.
+EOF
+      exit 0
+      ;;
+    *)
+      if [[ -n "$FILTER" ]]; then
+        stop "unknown argument: $1"
+      fi
+      FILTER="$1"
+      shift
+      ;;
+  esac
+done
 
 APP_TARGET_ID="$(yq -r '.targets.app_plane.ssh_target // ""' "$PROBE_BINDING")"
 DATA_TARGET_ID="$(yq -r '.targets.data_plane.ssh_target // ""' "$PROBE_BINDING")"
@@ -154,5 +184,9 @@ if [[ "$fail" -eq 1 ]]; then
   echo "status: FAIL (some components unhealthy)"
 else
   echo "status: OK (all components healthy)"
+fi
+
+if [[ "$STRICT_EXIT" -eq 1 && "$fail" -eq 1 ]]; then
+  exit 1
 fi
 exit 0
