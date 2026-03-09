@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# backup-home-restore-drill — governed scratch restore proof for home backup plane
+# Domain: backup
+# Safety: mutating
+# Approval: auto
+set -euo pipefail
+
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+BACKUP_SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
+BACKUP_INVENTORY="$ROOT/ops/bindings/backup.inventory.yaml"
+SSH_BINDING="$ROOT/ops/bindings/ssh.targets.yaml"
+RECEIPT_DIR="$ROOT/mailroom/outbox/reports/restore-drills"
+TARGET_ID=""
+INCLUDE_HA=0
+KEEP_ARTIFACTS=0
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
+
+need yq
+need jq
+need ssh
+[[ -f "$BACKUP_SCHEDULE" ]] || fail "missing backup schedule: $BACKUP_SCHEDULE"
+[[ -f "$BACKUP_INVENTORY" ]] || fail "missing backup inventory: $BACKUP_INVENTORY"
+[[ -f "$SSH_BINDING" ]] || fail "missing ssh binding: $SSH_BINDING"
+
+usage() {
+  cat <<'EOF'
+Usage: backup-home-restore-drill [--target <ssh-target>] [--include-ha] [--keep-artifacts]
+
+Runs a scratch restore of the latest canonical home backup artifacts (Pi-hole LXC 105,
+optionally HA VM 100) from Synology NAS to proxmox-home. Verifies scratch configs
+materialize, then cleans up and writes a single YAML receipt under
+mailroom/outbox/reports/restore-drills/.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --) shift ;;
+    --target|--ssh-id) TARGET_ID="${2:?--target requires a value}"; shift 2 ;;
+    --include-ha) INCLUDE_HA=1; shift ;;
+    --keep-artifacts) KEEP_ARTIFACTS=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+if [[ -z "$TARGET_ID" ]]; then
+  TARGET_ID="proxmox-home"
+fi
+
+DEF_USER="$(yq e -r '.ssh.defaults.user // "root"' "$SSH_BINDING")"
+DEF_PORT="$(yq e -r '.ssh.defaults.port // 22' "$SSH_BINDING")"
+DEF_TO="$(yq e -r '.ssh.defaults.connect_timeout_sec // 5' "$SSH_BINDING")"
+
+TARGET_HOST="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .host // \"\"" "$SSH_BINDING")"
+TARGET_USER="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .user // \"$DEF_USER\"" "$SSH_BINDING")"
+TARGET_PORT="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .port // $DEF_PORT" "$SSH_BINDING")"
+TARGET_TAILSCALE="$(yq e -r ".ssh.targets[] | select(.id == \"$TARGET_ID\") | .tailscale_ip // \"\"" "$SSH_BINDING")"
+[[ -n "$TARGET_HOST" && "$TARGET_HOST" != "null" ]] || fail "ssh target '$TARGET_ID' missing host"
+SSH_OPTS="-p $TARGET_PORT -o ConnectTimeout=${DEF_TO} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+resolve_ssh_ref() {
+  local id="$1"
+  local user="$2"
+  local host="$3"
+  local tailscale="$4"
+  local opts="$5"
+  local -a candidates=("${id}" "${user}@${host}")
+  if [[ -n "$tailscale" && "$tailscale" != "null" && "$tailscale" != "$host" ]]; then
+    candidates+=("${user}@${tailscale}")
+  fi
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if ssh $opts "$candidate" "true" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  echo "${user}@${host}"
+}
+
+pve_ssh_ref="$(resolve_ssh_ref "$TARGET_ID" "$TARGET_USER" "$TARGET_HOST" "$TARGET_TAILSCALE" "$SSH_OPTS")"
+pve_ssh() { ssh $SSH_OPTS "$pve_ssh_ref" "$@"; }
+
+yaml_quote() {
+  python3 - <<'PY' "$1"
+import json, sys
+print(json.dumps(sys.argv[1]))
+PY
+}
+
+BACKUP_SOURCE_BASE="/mnt/pve/synology-backups/dump"
+PIHOLE_GLOB="vzdump-lxc-105-*.tar.zst"
+HA_GLOB="vzdump-qemu-100-*.vma.zst"
+
+LATEST_PIHOLE_ARTIFACT="$(pve_ssh "find '$BACKUP_SOURCE_BASE' -maxdepth 1 -type f -name '$PIHOLE_GLOB' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" || true)"
+[[ -n "$LATEST_PIHOLE_ARTIFACT" ]] || fail "no Pi-hole artifact found matching $BACKUP_SOURCE_BASE/$PIHOLE_GLOB"
+
+LATEST_HA_ARTIFACT=""
+if [[ "$INCLUDE_HA" -eq 1 ]]; then
+  LATEST_HA_ARTIFACT="$(pve_ssh "find '$BACKUP_SOURCE_BASE' -maxdepth 1 -type f -name '$HA_GLOB' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" || true)"
+  [[ -n "$LATEST_HA_ARTIFACT" ]] || fail "no HA artifact found matching $BACKUP_SOURCE_BASE/$HA_GLOB"
+fi
+
+RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_DAY="$(date -u +%Y%m%d)"
+mkdir -p "$RECEIPT_DIR"
+RECEIPT_PATH="$RECEIPT_DIR/backup-home-restore-drill-${RUN_DAY}.yaml"
+
+PIHOLE_SCRATCH_CTID=9105
+HA_SCRATCH_VMID=9100
+
+PIHOLE_RESTORE_RESULT="FAIL"
+PIHOLE_RESTORE_ERROR=""
+PIHOLE_RESTORE_DURATION=""
+PIHOLE_CONFIG_MATERIALIZED=false
+
+HA_RESTORE_RESULT="SKIP"
+HA_RESTORE_ERROR=""
+HA_RESTORE_DURATION=""
+HA_CONFIG_MATERIALIZED=false
+
+set +e
+PIHOLE_RESTORE_START="$(date +%s)"
+pve_ssh "pct restore $PIHOLE_SCRATCH_CTID '$LATEST_PIHOLE_ARTIFACT' --storage local-lvm --force 1" >/dev/null 2>&1
+PIHOLE_RESTORE_RC=$?
+PIHOLE_RESTORE_END="$(date +%s)"
+PIHOLE_RESTORE_DURATION="$((PIHOLE_RESTORE_END - PIHOLE_RESTORE_START))s"
+set -e
+
+if [[ $PIHOLE_RESTORE_RC -eq 0 ]]; then
+  if pve_ssh "pct status $PIHOLE_SCRATCH_CTID" >/dev/null 2>&1; then
+    PIHOLE_CONFIG_MATERIALIZED=true
+    PIHOLE_RESTORE_RESULT="PASS"
+  else
+    PIHOLE_RESTORE_ERROR="restore exit 0 but pct status $PIHOLE_SCRATCH_CTID failed"
+  fi
+else
+  PIHOLE_RESTORE_ERROR="restore command failed with exit code $PIHOLE_RESTORE_RC"
+fi
+
+if [[ "$INCLUDE_HA" -eq 1 ]]; then
+  set +e
+  HA_RESTORE_START="$(date +%s)"
+  pve_ssh "qmrestore '$LATEST_HA_ARTIFACT' $HA_SCRATCH_VMID --storage local-lvm --force 1" >/dev/null 2>&1
+  HA_RESTORE_RC=$?
+  HA_RESTORE_END="$(date +%s)"
+  HA_RESTORE_DURATION="$((HA_RESTORE_END - HA_RESTORE_START))s"
+  set -e
+
+  if [[ $HA_RESTORE_RC -eq 0 ]]; then
+    if pve_ssh "qm status $HA_SCRATCH_VMID" >/dev/null 2>&1; then
+      HA_CONFIG_MATERIALIZED=true
+      HA_RESTORE_RESULT="PASS"
+    else
+      HA_RESTORE_ERROR="restore exit 0 but qm status $HA_SCRATCH_VMID failed"
+      HA_RESTORE_RESULT="FAIL"
+    fi
+  else
+    HA_RESTORE_ERROR="restore command failed with exit code $HA_RESTORE_RC"
+    HA_RESTORE_RESULT="FAIL"
+  fi
+fi
+
+if [[ "$KEEP_ARTIFACTS" -ne 1 ]]; then
+  if [[ "$PIHOLE_CONFIG_MATERIALIZED" == "true" ]]; then
+    pve_ssh "pct destroy $PIHOLE_SCRATCH_CTID" >/dev/null 2>&1 || true
+  fi
+  if [[ "$HA_CONFIG_MATERIALIZED" == "true" ]]; then
+    pve_ssh "qm destroy $HA_SCRATCH_VMID" >/dev/null 2>&1 || true
+  fi
+fi
+
+OVERALL_RESULT="FAIL"
+if [[ "$PIHOLE_RESTORE_RESULT" == "PASS" ]]; then
+  if [[ "$INCLUDE_HA" -eq 1 ]]; then
+    if [[ "$HA_RESTORE_RESULT" == "PASS" ]]; then
+      OVERALL_RESULT="PASS"
+    fi
+  else
+    OVERALL_RESULT="PASS"
+  fi
+fi
+
+{
+  echo "kind: backup_home_restore_drill"
+  echo "version: 1"
+  echo "generated_at: \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+  echo "result: $OVERALL_RESULT"
+  echo "target:"
+  echo "  ssh_target: $TARGET_ID"
+  echo "  ssh_ref: $(yaml_quote "$pve_ssh_ref")"
+  echo "artifacts:"
+  echo "  source_base: $(yaml_quote "$BACKUP_SOURCE_BASE")"
+  echo "  pihole_artifact: $(yaml_quote "$LATEST_PIHOLE_ARTIFACT")"
+  if [[ "$INCLUDE_HA" -eq 1 ]]; then
+    echo "  ha_artifact: $(yaml_quote "$LATEST_HA_ARTIFACT")"
+  else
+    echo "  ha_artifact: null"
+  fi
+  echo "restore:"
+  echo "  mode: scratch_nonprod"
+  echo "  keep_artifacts: $([[ "$KEEP_ARTIFACTS" -eq 1 ]] && echo true || echo false)"
+  echo "  pihole:"
+  echo "    scratch_ctid: $PIHOLE_SCRATCH_CTID"
+  echo "    result: $PIHOLE_RESTORE_RESULT"
+  echo "    duration: $(yaml_quote "$PIHOLE_RESTORE_DURATION")"
+  echo "    config_materialized: $PIHOLE_CONFIG_MATERIALIZED"
+  if [[ -n "$PIHOLE_RESTORE_ERROR" ]]; then
+    echo "    error: $(yaml_quote "$PIHOLE_RESTORE_ERROR")"
+  else
+    echo "    error: null"
+  fi
+  if [[ "$INCLUDE_HA" -eq 1 ]]; then
+    echo "  ha:"
+    echo "    scratch_vmid: $HA_SCRATCH_VMID"
+    echo "    result: $HA_RESTORE_RESULT"
+    echo "    duration: $(yaml_quote "$HA_RESTORE_DURATION")"
+    echo "    config_materialized: $HA_CONFIG_MATERIALIZED"
+    if [[ -n "$HA_RESTORE_ERROR" ]]; then
+      echo "      error: $(yaml_quote "$HA_RESTORE_ERROR")"
+    else
+      echo "      error: null"
+    fi
+  else
+    echo "  ha: null"
+  fi
+  echo "comparison:"
+  echo "  pihole_config_exists: $PIHOLE_CONFIG_MATERIALIZED"
+  if [[ "$INCLUDE_HA" -eq 1 ]]; then
+    echo "  ha_config_exists: $HA_CONFIG_MATERIALIZED"
+  else
+    echo "  ha_config_exists: null"
+  fi
+} >"$RECEIPT_PATH"
+
+echo "=== Home Restore Drill ==="
+echo "target: $TARGET_ID ($pve_ssh_ref)"
+echo "receipt: $RECEIPT_PATH"
+echo "result: $OVERALL_RESULT"
+echo "pihole: $PIHOLE_RESTORE_RESULT ($PIHOLE_RESTORE_DURATION)"
+if [[ "$INCLUDE_HA" -eq 1 ]]; then
+  echo "ha: $HA_RESTORE_RESULT ($HA_RESTORE_DURATION)"
+fi
+
+if [[ "$OVERALL_RESULT" != "PASS" ]]; then
+  exit 1
+fi
