@@ -8,12 +8,26 @@ SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 SPINE_CODE="${SPINE_CODE:-$SPINE_ROOT}"
 BINDINGS_DIR="$SPINE_ROOT/ops/bindings"
 CAP_RUNNER="$SPINE_CODE/bin/ops"
+SSH_RESOLVE="$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
-# VM definitions
-DOWNLOAD_STACK_IP="192.168.1.209"
-STREAMING_STACK_IP="192.168.1.210"
 SSH_USER="ubuntu"
 SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes"
+
+# shellcheck source=ops/lib/ssh-resolve.sh
+source "$SSH_RESOLVE"
+
+resolve_target_host() {
+  local target="$1"
+  local result host path
+  result="$(ssh_resolve_ssh_host_with_fallback "$target" 2)" || return 1
+  host="$(echo "$result" | awk '{print $1}')"
+  path="$(echo "$result" | awk '{print $2}')"
+  [[ -n "$host" && "$path" != "unreachable" ]] || return 1
+  printf '%s\n' "$host"
+}
+
+DOWNLOAD_STACK_IP="$(resolve_target_host "download-stack")"
+STREAMING_STACK_IP="$(resolve_target_host "streaming-stack")"
 
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo "MEDIA STACK STATUS"

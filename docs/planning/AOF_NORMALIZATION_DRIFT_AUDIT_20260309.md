@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-03-09
+updated_at: 2026-03-09
 owner: "@ronny"
 scope: aof-normalization-cross-plane-audit
 authority: runtime-admission-health-normalization-wave
@@ -10,250 +11,131 @@ authority: runtime-admission-health-normalization-wave
 
 ## Executive Summary
 
-Cross-plane audit reveals **5 classes of split semantics** causing runtime/health/deploy drift:
+Cross-plane normalization is complete for the active runtime/deploy/health control plane.
 
-1. **Dual reachability policies**: PING vs TCP/22 for host resolution
-2. **Duplicate probe bindings**: services.health.yaml vs mint.probe.targets.yaml
-3. **Hardcoded IPs**: Scattered across bindings and scripts
-4. **Inconsistent naming**: "-v2" suffix in one binding, not in another
-5. **Non-strict health surfaces**: Treated as assertions but don't fail-fast
+The recurring Firefly / Mint / SSH confusion traced back to one pattern:
+- health probes, deploy scripts, and helper surfaces were choosing hosts with different rules
+- Mint HTTP health metadata existed in two bindings
+- some operator-facing scripts still taught raw-IP workflows
+- assertion-grade health automation was not consistently using strict exit semantics
 
-## PHASE 1: Drift Inventory
+The canonical model is now:
+- `ops/lib/ssh-resolve.sh` is the only resolver contract
+- `ssh_resolve_ssh_host_with_fallback` is the SSH/deploy resolver
+- `ssh_resolve_host_with_fallback` is only for non-SSH host reachability
+- `ops/bindings/services.health.yaml` is the canonical HTTP health source
+- `ops/bindings/mint.probe.targets.yaml` carries only Mint-only non-HTTP metadata
+- assertion-grade automation uses `--strict-exit`
 
-### Split Semantic #1: Reachability Check Methods
+## Drift Classes Closed
 
-**Canonical resolver**: `ops/lib/ssh-resolve.sh`
+### 1. Resolver-policy split
 
-**Two resolution methods exist**:
-1. **PING-based** (`ssh_resolve_host_with_fallback`):
-   - Used by: 33 scripts
-   - Method: ICMP ping with 3s timeout
-   - Problem: Can show host "reachable" when SSH port 22 is blocked
-   - False positive risk: **HIGH**
+Fixed:
+- deploy and docker mutation scripts now use `ssh_resolve_ssh_host_with_fallback`
+- `D389` enforces TCP/22 resolver use for SSH deploy/mutation surfaces
 
-2. **TCP-based** (`ssh_resolve_ssh_host_with_fallback`):
-   - Used by: 1 script (mint deploy-sync-from-main)
-   - Method: Python socket.create_connection to port 22
-   - Accuracy: Tests actual SSH reachability
-   - False positive risk: **LOW**
+Result:
+- health/deploy no longer choose different reachability rules for the same target class
 
-**Drift impact**: Health probes using PING-based resolver can show services OK while SSH/deploy operations fail.
+### 2. Duplicate Mint HTTP probe truth
 
-**Evidence**:
-- finance-adapter showed OK in services.health.status (PING succeeded via Tailscale)
-- But SSH to VM 213 times out (TCP/22 blocked or slow)
-- This caused "green health but can't deploy" confusion
+Fixed:
+- Mint HTTP port/path definitions now derive from `ops/bindings/services.health.yaml`
+- `ops/lib/mint-health-surface.sh` is the projection helper
+- `ops/bindings/mint.probe.targets.yaml` no longer stores `http_checks`
+- `D390` enforces that projection model
 
-**Consumers of PING-based resolver**:
-```
-ops/plugins/docker/bin/docker-compose-status
-ops/plugins/finance/bin/finance-backup-status
-ops/plugins/infra/bin/infra-docker-host-status
-ops/plugins/media/bin/media-backup-create
-ops/plugins/observability/bin/* (multiple)
-ops/plugins/services/bin/services-health-status
-ops/plugins/mint/bin/modules-health
-... (33 total)
-```
+Result:
+- one canonical Mint HTTP health surface
+- no dual naming (`payment` vs `payment-v2`) inside active Mint health consumers
 
-**Consumers of TCP-based resolver**:
-```
-ops/plugins/mint/bin/deploy-sync-from-main (ONLY ONE)
-```
+### 3. Hardcoded operator IP residue
 
----
+Fixed for active operational scripts:
+- `payment-stripe-test-canary-inner` now resolves `mint-apps` through the shared resolver
+- `ghostfolio-portfolio-status` now derives host/port from `services.health.yaml`
+- `media-queue-reconcile` now derives Radarr from `services.health.yaml`
+- auth deploy helpers now resolve `mint-apps` through the shared resolver
 
-### Split Semantic #2: Duplicate Mint Probe Bindings
+Clarification:
+- authoritative inventory/binding files may still contain IP literals as canonical data
+- those are not parallel truth by themselves; the drift was operational scripts bypassing the resolver/binding layer
 
-**Two bindings for same services**:
+### 4. Non-strict assertion semantics
 
-1. **services.health.yaml** (global, 431 lines):
-   - Mint entries: files-api-v2, quote-page-v2, order-intake-v2, payment-v2, pricing-v2, suppliers-v2, shipping-v2, finance-adapter, mint-modules-minio
-   - Format: Hardcoded URLs like `http://192.168.1.213:4000/health`
-   - Host reference: `host: mint-apps` (maps to ssh.targets)
-   - Suffix: Uses "-v2"
+Fixed:
+- `lane-standard-run` now calls `services.health.status --strict-exit`
+- `loop-daily` now calls `mint.modules.health --strict-exit`
+- `D391` enforces strict assertion usage for those automation surfaces
 
-2. **mint.probe.targets.yaml** (Mint-only, 62 lines):
-   - Mint entries: files-api, quote-page, order-intake, payment, pricing, suppliers, shipping, finance-adapter, minio
-   - Format: `ssh_target: mint-apps` + `port: 4000` + `health_path: /health`
-   - Suffix: NO "-v2"
-   - Extra features: ssh_checks for postgres/redis
+Result:
+- assertion-grade automation now fails when health is degraded instead of only printing FAIL
 
-**Overlap**: 9 services appear in BOTH files with different naming and different URL construction methods.
+### 5. Stale doctrine teaching split semantics
 
-**Drift risk**: Changes to Mint service ports or paths must be updated in TWO places.
+Fixed:
+- `docs/planning/MINT_RUNTIME_PROBE_CONSISTENCY_20260226.md` is now superseded
+- `docs/planning/MINT_RUNTIME_GAPS_AUDIT_20260309.md` was already superseded by resolver normalization work
+- this document now records the completed boring model instead of an in-progress recommendation set
 
-**Example discrepancy**:
-- services.health.yaml: `payment-v2 | http://192.168.1.213:4000/health | mint-apps`
-- mint.probe.targets.yaml: `payment | port=4000 | health_path=/health | ssh_target=mint-apps`
-- ssh.targets.yaml: `mint-apps | host=192.168.1.213 | ts=100.79.183.14 | policy=lan_first`
+## Canonical Boring Model
 
-Both ultimately resolve to the same service, but through different paths.
+### Resolver rules
 
----
+- Use `ssh_resolve_ssh_host_with_fallback` for:
+  - deploy
+  - docker remote operations
+  - SSH-backed proofs
+  - SSH-backed mutation helpers
 
-### Split Semantic #3: Hardcoded IPs in Scripts
+- Use `ssh_resolve_probe_host` / `ssh_resolve_url_with_fallback` for:
+  - HTTP probe paths
+  - HTTP-only health surfaces
 
-**Hardcoded Tailscale IP**:
-- File: `ops/plugins/mint/bin/payment-stripe-test-canary-inner`
-- Line: `echo "   ssh ubuntu@100.79.183.14"`
-- Should use: `ssh_resolve_ref "mint-apps"`
+- Do not use ping-based resolution to decide SSH deploy reachability.
 
-**Hardcoded LAN IPs in bindings**:
-```
-ops/bindings/communications.stack.contract.yaml: lan_ip: "192.168.1.26"
-ops/bindings/infisical.backup.contract.yaml: lan_ip: 192.168.1.204
-ops/bindings/infra.relocation.plan.yaml: multiple 192.168.1.x CIDRs
-ops/bindings/infra.storage.placement.policy.yaml: source: "192.168.1.184:/tank/docker/download-stack"
-```
+### Health rules
 
-**Drift risk**: IP changes require updates in multiple files instead of one canonical source.
+- `services.health.yaml` is the global HTTP health authority
+- `mint.probe.targets.yaml` carries only:
+  - plane target ids
+  - VM ids
+  - Mint-only SSH checks
+  - proof routes
+  - claim policy
 
----
+### Assertion rules
 
-### Split Semantic #4: URL Construction Methods
+- human status surfaces may support non-strict output
+- automation/gates that treat health as an assertion must use `--strict-exit`
 
-**Method A** (services.health.yaml):
-- Hardcoded full URL in binding
-- services-health-status reads URL
-- Calls `ssh_resolve_url_with_fallback()` to replace LAN IP with resolved IP (LAN or Tailscale)
+## Gates
 
-**Method B** (mint.probe.targets.yaml):
-- Stores ssh_target + port + path separately
-- mint.modules.health resolves host first
-- Constructs URL dynamically: `http://${resolved_host}:${port}${path}`
+- `D389` `resolver-ssh-deployment-parity-lock`
+  - enforce TCP/22 resolver usage for SSH deploy/mutation scripts
 
-**Drift risk**: Changes to resolution logic affect Method A and B differently.
+- `D390` `mint-probe-health-projection-lock`
+  - enforce that Mint HTTP health truth lives only in `services.health.yaml`
 
----
+- `D391` `assertion-health-strictness-lock`
+  - enforce strict-exit semantics in assertion-grade automation surfaces
 
-### Split Semantic #5: Non-Strict Health Surfaces
+## Verification
 
-**Current behavior**:
-- `services.health.status` returns exit 0 even when endpoints timeout
-- Only fails with `--strict-exit` flag
-- Gates/automation assume "green = OK" but don't use strict mode
+Verified after normalization:
+- `D389`: PASS
+- `D390`: PASS
+- `D391`: PASS
+- `services.health.status --strict-exit`: PASS
+- `mint.modules.health --strict-exit`: PASS
 
-**Problem**:
-- Timeouts show as "TIMEOUT" in output but command succeeds
-- Automation treats this as "healthy" when it should be "degraded"
-- No gate enforces strict-exit semantics for assertion-grade surfaces
+## Final State
 
-**Evidence**:
-- finance-adapter: TIMEOUT 10054ms → exit 0 (should be exit 1)
-- firefly-iii: TIMEOUT 5062ms → exit 0 (should be exit 1)
+The active AOF control plane is now normalized enough that future agents should not have to guess:
+- which resolver to use
+- which Mint health binding is canonical
+- whether a passing health command is assertion-grade
+- whether a raw IP in an operator script is authoritative or drift
 
----
-
-## PHASE 2: Recommended Fixes
-
-### Fix #1: Converge to TCP-Based Resolver
-
-**Change**: Replace PING-based `ssh_resolve_host_with_fallback` with TCP-based `ssh_resolve_ssh_host_with_fallback` for all SSH/deploy operations.
-
-**Scope**: 33 scripts currently using PING-based resolver
-
-**Rationale**: SSH operations should test SSH reachability, not ICMP reachability.
-
-**Keep PING for**: HTTP-only health probes (no SSH needed)
-
-**Migration path**:
-1. Identify scripts that do SSH operations (deploy, docker, backup with SSH)
-2. Change to `ssh_resolve_ssh_host_with_fallback`
-3. Add gate to enforce this pattern
-
----
-
-### Fix #2: Consolidate or Project Mint Probes
-
-**Option A** (recommended): Project mint.probe.targets from services.health.yaml
-- Make mint.probe.targets.yaml a PROJECTION of services.health.yaml
-- Auto-generate it from canonical source
-- Add gate to enforce projection freshness
-
-**Option B**: Retire mint.probe.targets.yaml
-- Move all Mint probes to services.health.yaml only
-- Retire mint.modules.health capability
-- Use services.health.status with --host mint-apps instead
-
-**Rationale**: One source of truth, no naming drift, no duplicate updates.
-
----
-
-### Fix #3: Eliminate Hardcoded IPs
-
-**Change**: Replace all hardcoded IPs with ssh.targets.yaml references
-
-**Targets**:
-- payment-stripe-test-canary-inner: Use `ssh_resolve_ref "mint-apps"`
-- Contract bindings: Reference ssh_target_id instead of hardcoding lan_ip
-
-**Gate**: Detect hardcoded 192.168.x.x or 100.x.x.x in scripts/bindings
-
----
-
-### Fix #4: Strict-Exit for Assertion-Grade Surfaces
-
-**Change**: Add `--strict-exit` to all services.health.status calls in gates/automation
-
-**Scope**: Any capability or gate that treats health as an assertion
-
-**Gate**: Enforce that assertion-grade health surfaces use strict-exit semantics
-
----
-
-### Fix #5: Resolver Method Documentation
-
-**Change**: Document when to use PING vs TCP resolver
-
-**Rule**:
-- Use TCP-based resolver for: SSH operations, deploy, docker remote, backup/restore with SSH
-- Use PING-based resolver for: HTTP health probes only (no SSH dependency)
-- Never use ping for host selection in deploy operations
-
----
-
-## PHASE 3: Gates Needed
-
-### Gate D389: resolver-ssh-deployment-parity-lock
-- **Scope**: All deploy/mutation scripts
-- **Check**: Scripts that do SSH must use TCP-based resolver
-- **Enforcement**: Grep for `ssh.*@\|ssh_resolve_host_with_fallback` in deploy scripts
-- **Fix hint**: Use `ssh_resolve_ssh_host_with_fallback` for all SSH operations
-
-### Gate D390: mint-probe-binding-projection-lock
-- **Scope**: mint.probe.targets.yaml vs services.health.yaml
-- **Check**: Mint services in both bindings must match (names, ports, paths)
-- **Enforcement**: Parse both YAMLs, compare mint-apps/mint-data entries
-- **Fix hint**: Run projection script to regenerate mint.probe.targets from services.health
-
-### Gate D391: hardcoded-ip-elimination-lock
-- **Scope**: ops/plugins/**/*.sh, ops/bindings/*.yaml
-- **Check**: No hardcoded 192.168.x.x or 100.x.x.x IPs in ssh/deploy contexts
-- **Enforcement**: Grep for IP patterns, exclude URL contexts
-- **Fix hint**: Use ssh_resolve_* functions from ops/lib/ssh-resolve.sh
-
-### Gate D392: health-surface-strict-exit-lock
-- **Scope**: Capabilities flagged as assertion-grade
-- **Check**: Health capabilities used in gates must support and use --strict-exit
-- **Enforcement**: Check capability invocations in gates
-- **Fix hint**: Add --strict-exit to capability calls
-
----
-
-## Current Status
-
-- **Audit**: COMPLETE (this document)
-- **Fixes**: PENDING implementation
-- **Gates**: PENDING creation
-- **Verification**: PENDING re-run
-
----
-
-## Next Steps
-
-1. Implement Fix #1 (TCP resolver convergence) for deploy/mutation scripts
-2. Implement Fix #3 (eliminate hardcoded IPs) for identified targets
-3. Create gates D389-D392
-4. Re-run services.health.status with --strict-exit
-5. Verify drift is eliminated
+The remaining IP literals in authoritative binding data are intentional inventory, not split operational truth.

@@ -17,9 +17,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SERVICES_BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
 PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
+MINT_HEALTH_SURFACE="$SPINE_ROOT/ops/lib/mint-health-surface.sh"
 # shellcheck source=/dev/null
 source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+# shellcheck source=/dev/null
+source "$MINT_HEALTH_SURFACE"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
@@ -28,10 +32,12 @@ command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
 command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$SERVICES_BINDING" ]] || stop "missing binding: $SERVICES_BINDING"
 [[ -f "$PROBE_BINDING" ]] || stop "missing binding: $PROBE_BINDING"
+[[ -f "$MINT_HEALTH_SURFACE" ]] || stop "missing helper: $MINT_HEALTH_SURFACE"
 
-APP_TARGET_ID="$(yq -r '.targets.app_plane.ssh_target // ""' "$PROBE_BINDING")"
-DATA_TARGET_ID="$(yq -r '.targets.data_plane.ssh_target // ""' "$PROBE_BINDING")"
+APP_TARGET_ID="$(mint_probe_target_id app_plane)"
+DATA_TARGET_ID="$(mint_probe_target_id data_plane)"
 [[ -n "$APP_TARGET_ID" && "$APP_TARGET_ID" != "null" ]] || stop "missing app plane target in $PROBE_BINDING"
 [[ -n "$DATA_TARGET_ID" && "$DATA_TARGET_ID" != "null" ]] || stop "missing data plane target in $PROBE_BINDING"
 
@@ -44,15 +50,15 @@ MINT_DATA_USER="$(yq -r ".ssh.targets[] | select(.id == \"$DATA_TARGET_ID\") | .
 
 IFS=' ' read -r MINT_APPS_PROBE_HOST MINT_APPS_PROBE_PATH <<< "$(ssh_resolve_probe_host "$APP_TARGET_ID" || true)"
 IFS=' ' read -r MINT_DATA_PROBE_HOST MINT_DATA_PROBE_PATH <<< "$(ssh_resolve_probe_host "$DATA_TARGET_ID" || true)"
+IFS=' ' read -r MINT_APPS_SSH_HOST MINT_APPS_SSH_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "$APP_TARGET_ID" || true)"
+IFS=' ' read -r MINT_DATA_SSH_HOST MINT_DATA_SSH_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "$DATA_TARGET_ID" || true)"
 
 service_port() {
-  local service="$1"
-  yq -r ".targets.app_plane.http_checks[] | select(.id == \"$service\") | .port // \"\"" "$PROBE_BINDING" | head -n1
+  mint_service_port "$1"
 }
 
 service_health_path() {
-  local service="$1"
-  yq -r ".targets.app_plane.http_checks[] | select(.id == \"$service\") | .health_path // \"\"" "$PROBE_BINDING" | head -n1
+  mint_service_path "$1"
 }
 
 proof_route() {
@@ -157,16 +163,23 @@ http_json_check() {
 
 get_container_key() {
   local container="$1"
-  [[ -n "$MINT_APPS_PROBE_HOST" ]] || return 1
-  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_PROBE_HOST}" \
+  [[ -n "$MINT_APPS_SSH_HOST" ]] || return 1
+  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_SSH_HOST}" \
     "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= '/^API_KEY=/{sub(/^API_KEY=/,\"\" ); print; exit}'"
 }
 
 container_env_present() {
   local container="$1" key="$2"
-  [[ -n "$MINT_APPS_PROBE_HOST" ]] || return 1
-  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_PROBE_HOST}" \
+  [[ -n "$MINT_APPS_SSH_HOST" ]] || return 1
+  ssh "${SSH_OPTS[@]}" "${MINT_APPS_USER}@${MINT_APPS_SSH_HOST}" \
     "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= -v K='$key' '\$1==K && \$2!=\"\"{found=1} END{exit found?0:1}'"
+}
+
+mint_db_query() {
+  local sql="$1"
+  [[ -n "$MINT_DATA_SSH_HOST" ]] || return 1
+  ssh "${SSH_OPTS[@]}" "${MINT_DATA_USER}@${MINT_DATA_SSH_HOST}" \
+    "docker exec -i mint-modules-postgres sh -lc 'PGPASSWORD=\"\${POSTGRES_PASSWORD:-}\" psql -At -v ON_ERROR_STOP=1 -U \"\${POSTGRES_USER:-mint}\" -d \"\${POSTGRES_DB:-mint_modules}\"'" <<< "$sql"
 }
 
 app_http_url() {
@@ -176,9 +189,10 @@ app_http_url() {
 }
 
 echo "mint.runtime.proof"
+echo "services.binding: $SERVICES_BINDING"
 echo "probe.binding: $PROBE_BINDING"
-echo "$APP_TARGET_ID: ${MINT_APPS_USER}@${MINT_APPS_HOST} http=${MINT_APPS_PROBE_HOST:-unreachable} via=${MINT_APPS_PROBE_PATH:-unreachable}"
-echo "$DATA_TARGET_ID: ${MINT_DATA_USER}@${MINT_DATA_HOST} http=${MINT_DATA_PROBE_HOST:-unreachable} via=${MINT_DATA_PROBE_PATH:-unreachable}"
+echo "$APP_TARGET_ID: ${MINT_APPS_USER}@${MINT_APPS_HOST} http=${MINT_APPS_PROBE_HOST:-unreachable} via=${MINT_APPS_PROBE_PATH:-unreachable} ssh=${MINT_APPS_SSH_HOST:-unreachable}/${MINT_APPS_SSH_PATH:-unreachable}"
+echo "$DATA_TARGET_ID: ${MINT_DATA_USER}@${MINT_DATA_HOST} http=${MINT_DATA_PROBE_HOST:-unreachable} via=${MINT_DATA_PROBE_PATH:-unreachable} ssh=${MINT_DATA_SSH_HOST:-unreachable}/${MINT_DATA_SSH_PATH:-unreachable}"
 echo
 printf "%-28s %-8s %s\n" "CHECK" "STATE" "DETAIL"
 

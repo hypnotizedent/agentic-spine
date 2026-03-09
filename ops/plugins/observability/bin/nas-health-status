@@ -12,14 +12,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+# shellcheck source=ops/lib/ssh-resolve.sh
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
-NAS_HOST="100.102.199.111"
+NAS_HOST="${NAS_HOST:-$(ssh_resolve_ssh_host_with_fallback nas 2>/dev/null | awk '{print $1}')}"
 NAS_USER="ronadmin"
 SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
 [[ -f "$BINDING" ]] || stop "missing binding: $BINDING"
+[[ -n "$NAS_HOST" ]] || stop "cannot resolve nas SSH host"
 
 # --- SSH helper ---
 nas_ssh(){

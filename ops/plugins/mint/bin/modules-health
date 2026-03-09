@@ -18,9 +18,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SERVICES_BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
 PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
+MINT_HEALTH_SURFACE="$SPINE_ROOT/ops/lib/mint-health-surface.sh"
 # shellcheck source=/dev/null
 source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+# shellcheck source=/dev/null
+source "$MINT_HEALTH_SURFACE"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
@@ -28,7 +32,9 @@ command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
 command -v ssh >/dev/null 2>&1 || stop "missing dependency: ssh"
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$SERVICES_BINDING" ]] || stop "missing binding: $SERVICES_BINDING"
 [[ -f "$PROBE_BINDING" ]] || stop "missing binding: $PROBE_BINDING"
+[[ -f "$MINT_HEALTH_SURFACE" ]] || stop "missing helper: $MINT_HEALTH_SURFACE"
 
 FILTER=""
 STRICT_EXIT=0
@@ -61,38 +67,49 @@ EOF
   esac
 done
 
-APP_TARGET_ID="$(yq -r '.targets.app_plane.ssh_target // ""' "$PROBE_BINDING")"
-DATA_TARGET_ID="$(yq -r '.targets.data_plane.ssh_target // ""' "$PROBE_BINDING")"
+APP_TARGET_ID="$(mint_probe_target_id app_plane)"
+DATA_TARGET_ID="$(mint_probe_target_id data_plane)"
 [[ -n "$APP_TARGET_ID" && "$APP_TARGET_ID" != "null" ]] || stop "missing app plane target in $PROBE_BINDING"
 [[ -n "$DATA_TARGET_ID" && "$DATA_TARGET_ID" != "null" ]] || stop "missing data plane target in $PROBE_BINDING"
 
 MINT_APPS_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .host" "$SSH_BINDING" | head -n1)"
 MINT_DATA_HOST="$(yq -r ".ssh.targets[] | select(.id == \"$DATA_TARGET_ID\") | .host" "$SSH_BINDING" | head -n1)"
-MINT_APPS_USER="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
-MINT_DATA_USER="$(yq -r ".ssh.targets[] | select(.id == \"$DATA_TARGET_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
+MINT_APPS_USER="$(ssh_resolve_user "$APP_TARGET_ID" "ubuntu")"
+MINT_DATA_USER="$(ssh_resolve_user "$DATA_TARGET_ID" "ubuntu")"
 
 [[ -n "$MINT_APPS_HOST" && "$MINT_APPS_HOST" != "null" ]] || stop "$APP_TARGET_ID not found in ssh.targets"
 [[ -n "$MINT_DATA_HOST" && "$MINT_DATA_HOST" != "null" ]] || stop "$DATA_TARGET_ID not found in ssh.targets"
 
 IFS=' ' read -r MINT_APPS_PROBE_HOST MINT_APPS_PROBE_PATH <<< "$(ssh_resolve_probe_host "$APP_TARGET_ID" || true)"
 IFS=' ' read -r MINT_DATA_PROBE_HOST MINT_DATA_PROBE_PATH <<< "$(ssh_resolve_probe_host "$DATA_TARGET_ID" || true)"
+IFS=' ' read -r MINT_DATA_SSH_HOST MINT_DATA_SSH_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "$DATA_TARGET_ID" || true)"
 
 echo "mint.modules.health"
+echo "services.binding: $SERVICES_BINDING"
 echo "probe.binding: $PROBE_BINDING"
 echo "$APP_TARGET_ID: ${MINT_APPS_USER}@${MINT_APPS_HOST} (VM $(yq -r '.targets.app_plane.vm_id // "?"' "$PROBE_BINDING")) http=${MINT_APPS_PROBE_HOST:-unreachable} via=${MINT_APPS_PROBE_PATH:-unreachable}"
-echo "$DATA_TARGET_ID: ${MINT_DATA_USER}@${MINT_DATA_HOST} (VM $(yq -r '.targets.data_plane.vm_id // "?"' "$PROBE_BINDING")) http=${MINT_DATA_PROBE_HOST:-unreachable} via=${MINT_DATA_PROBE_PATH:-unreachable}"
+echo "$DATA_TARGET_ID: ${MINT_DATA_USER}@${MINT_DATA_HOST} (VM $(yq -r '.targets.data_plane.vm_id // "?"' "$PROBE_BINDING")) http=${MINT_DATA_PROBE_HOST:-unreachable} via=${MINT_DATA_PROBE_PATH:-unreachable} ssh=${MINT_DATA_SSH_HOST:-unreachable}/${MINT_DATA_SSH_PATH:-unreachable}"
 echo
 
 declare -a HTTP_ROWS=()
-while IFS=$'\t' read -r name port path; do
+while IFS=$'\t' read -r name plane; do
   [[ -z "$name" ]] && continue
-  HTTP_ROWS+=("$name|$APP_TARGET_ID|$MINT_APPS_PROBE_HOST|$MINT_APPS_PROBE_PATH|$port|$path")
-done < <(yq -r '.targets.app_plane.http_checks[] | [.id, (.port|tostring), .health_path] | @tsv' "$PROBE_BINDING")
-
-while IFS=$'\t' read -r name port path; do
-  [[ -z "$name" ]] && continue
-  HTTP_ROWS+=("$name|$DATA_TARGET_ID|$MINT_DATA_PROBE_HOST|$MINT_DATA_PROBE_PATH|$port|$path")
-done < <(yq -r '.targets.data_plane.http_checks[] | [.id, (.port|tostring), .health_path] | @tsv' "$PROBE_BINDING")
+  [[ "$(mint_service_enabled "$name")" == "true" ]] || continue
+  port="$(mint_service_port "$name")"
+  path="$(mint_service_path "$name")"
+  [[ -n "$port" && -n "$path" ]] || stop "missing canonical url components for $name in $SERVICES_BINDING"
+  case "$plane" in
+    app_plane)
+      HTTP_ROWS+=("$name|$APP_TARGET_ID|$MINT_APPS_PROBE_HOST|$MINT_APPS_PROBE_PATH|$port|$path")
+      ;;
+    data_plane)
+      HTTP_ROWS+=("$name|$DATA_TARGET_ID|$MINT_DATA_PROBE_HOST|$MINT_DATA_PROBE_PATH|$port|$path")
+      ;;
+    *)
+      stop "unknown mint http plane in helper: $plane"
+      ;;
+  esac
+done < <(mint_http_rows_tsv)
 
 SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
 
@@ -170,7 +187,7 @@ done
 
 while IFS=$'\t' read -r name cmd; do
   [[ -z "$name" ]] && continue
-  check_ssh_service "$name" "$DATA_TARGET_ID" "$MINT_DATA_PROBE_HOST" "$MINT_DATA_PROBE_PATH" "$MINT_DATA_USER" "$cmd"
+  check_ssh_service "$name" "$DATA_TARGET_ID" "$MINT_DATA_SSH_HOST" "$MINT_DATA_SSH_PATH" "$MINT_DATA_USER" "$cmd"
 done < <(yq -r '.targets.data_plane.ssh_checks[] | [.id, .command] | @tsv' "$PROBE_BINDING")
 
 echo

@@ -14,10 +14,15 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
+SSH_BINDING="${SPINE_ROOT}/ops/bindings/ssh.targets.yaml"
 SERVICES="auth,files-api"
 SKIP_SYNC=0
 SKIP_HEALTH=0
+
+# shellcheck source=/dev/null
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,12 +46,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+command -v jq >/dev/null 2>&1 || { echo "missing dependency: jq" >&2; exit 2; }
+command -v ssh >/dev/null 2>&1 || { echo "missing dependency: ssh" >&2; exit 2; }
+command -v yq >/dev/null 2>&1 || { echo "missing dependency: yq" >&2; exit 2; }
+[[ -f "$SSH_BINDING" ]] || { echo "missing binding: $SSH_BINDING" >&2; exit 2; }
+
 # Convert CSV to array
 IFS=',' read -ra SERVICE_ARRAY <<< "$SERVICES"
 
+MINT_APPS_USER="$(ssh_resolve_user "mint-apps" "ubuntu")"
+MINT_APPS_PORT="$(yq -r '.ssh.targets[] | select(.id == "mint-apps") | .port // 22' "$SSH_BINDING" | head -n1)"
+IFS=' ' read -r MINT_APPS_HOST MINT_APPS_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "mint-apps" 3 || true)"
+[[ -n "$MINT_APPS_HOST" && "$MINT_APPS_PATH" != "unreachable" ]] || { echo "mint-apps unreachable for deploy" >&2; exit 2; }
+SSH_OPTS=(-o ConnectTimeout=8 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR)
+
 echo "mint.auth.deploy"
 echo "services: ${SERVICES}"
-echo "target: mint-apps (100.79.183.14)"
+echo "target: ${MINT_APPS_USER}@${MINT_APPS_HOST} (${MINT_APPS_PATH})"
 echo ""
 
 # Step 1: Sync auth secrets from Infisical (unless skipped)
@@ -63,7 +79,7 @@ fi
 echo "[2/3] Deploying services..."
 for service in "${SERVICE_ARRAY[@]}"; do
   echo "  Deploying: $service"
-  ssh mint-apps "cd /opt/stacks/mint-apps && \
+  ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "cd /opt/stacks/mint-apps && \
     docker compose --env-file .env --env-file .env.auth-secrets up -d --no-deps $service"
 done
 echo ""
@@ -77,7 +93,7 @@ if [[ "$SKIP_HEALTH" -eq 0 ]]; then
       auth)
         echo "  auth: Waiting for startup..."
         sleep 3
-        HEALTH=$(ssh mint-apps "curl -sf http://localhost:4300/health" || echo '{"status":"error"}')
+        HEALTH=$(ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "curl -sf http://localhost:4300/health" || echo '{"status":"error"}')
         STATUS=$(echo "$HEALTH" | jq -r '.status // "error"')
         if [[ "$STATUS" == "ok" ]]; then
           echo "  auth: ✅ HEALTHY"
@@ -89,7 +105,7 @@ if [[ "$SKIP_HEALTH" -eq 0 ]]; then
       files-api)
         echo "  files-api: Waiting for startup..."
         sleep 3
-        HEALTH=$(ssh mint-apps "curl -sf http://localhost:3500/health" || echo '{"status":"error"}')
+        HEALTH=$(ssh "${SSH_OPTS[@]}" -p "$MINT_APPS_PORT" "${MINT_APPS_USER}@${MINT_APPS_HOST}" "curl -sf http://localhost:3500/health" || echo '{"status":"error"}')
         STATUS=$(echo "$HEALTH" | jq -r '.status // "error"')
         if [[ "$STATUS" == "ok" ]]; then
           echo "  files-api: ✅ HEALTHY"

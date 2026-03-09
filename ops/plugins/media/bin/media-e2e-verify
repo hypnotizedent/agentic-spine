@@ -72,21 +72,17 @@ command -v curl >/dev/null 2>&1 || { echo "MISSING_DEP: curl" >&2; exit 2; }
 DOWNLOAD_HOST="${DOWNLOAD_HOST:-}"
 STREAMING_HOST="${STREAMING_HOST:-}"
 if [[ -z "$DOWNLOAD_HOST" ]]; then
-  if type ssh_resolve_host_with_fallback &>/dev/null; then
-    DOWNLOAD_HOST="$(ssh_resolve_host_with_fallback download-stack 2>/dev/null | awk '{print $1}')"
-    [[ -z "$DOWNLOAD_HOST" ]] && DOWNLOAD_HOST="192.168.1.209"
-  else
-    DOWNLOAD_HOST="192.168.1.209"
+  if type ssh_resolve_probe_host &>/dev/null; then
+    DOWNLOAD_HOST="$(ssh_resolve_probe_host download-stack 2>/dev/null | awk '{print $1}')"
   fi
 fi
 if [[ -z "$STREAMING_HOST" ]]; then
-  if type ssh_resolve_host_with_fallback &>/dev/null; then
-    STREAMING_HOST="$(ssh_resolve_host_with_fallback streaming-stack 2>/dev/null | awk '{print $1}')"
-    [[ -z "$STREAMING_HOST" ]] && STREAMING_HOST="192.168.1.210"
-  else
-    STREAMING_HOST="192.168.1.210"
+  if type ssh_resolve_probe_host &>/dev/null; then
+    STREAMING_HOST="$(ssh_resolve_probe_host streaming-stack 2>/dev/null | awk '{print $1}')"
   fi
 fi
+[[ -n "$DOWNLOAD_HOST" ]] || { echo "STOP: cannot resolve download-stack probe host" >&2; exit 2; }
+[[ -n "$STREAMING_HOST" ]] || { echo "STOP: cannot resolve streaming-stack probe host" >&2; exit 2; }
 
 RADARR_PORT="${RADARR_PORT:-7878}"
 JELLYFIN_PORT="${JELLYFIN_PORT:-8096}"
@@ -142,9 +138,15 @@ check_filesystem_exists() {
     return
   fi
   local ssh_result
+  local download_ssh_host
+  download_ssh_host="$(ssh_resolve_ssh_host_with_fallback download-stack 2>/dev/null | awk '{print $1}')"
+  [[ -n "$download_ssh_host" ]] || {
+    echo '{"leg":"filesystem_exists","pass":false,"reason":"ssh_unreachable_or_file_missing"}'
+    return
+  }
   ssh_result="$(ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    "ubuntu@${DOWNLOAD_HOST}" "stat -c '%s' '${file_path}'" 2>/dev/null)" || {
+    "ubuntu@${download_ssh_host}" "stat -c '%s' '${file_path}'" 2>/dev/null)" || {
     echo '{"leg":"filesystem_exists","pass":false,"reason":"ssh_unreachable_or_file_missing"}'
     return
   }

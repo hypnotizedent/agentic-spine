@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Auth and files-api on mint-apps (100.79.183.14) now have **durable Infisical-backed deployment** that works with normal operator compose commands.
+Auth and files-api on `mint-apps` now have **durable Infisical-backed deployment** that works with normal operator compose commands.
 
 **Solution:** Machine-generated `.env.auth-secrets` file + layered env files
 **Source of Truth:** Infisical `infrastructure/prod /spine/services/auth`
@@ -21,7 +21,7 @@ Auth and files-api on mint-apps (100.79.183.14) now have **durable Infisical-bac
 ### Wave 1 (2026-03-08 morning): Proof-of-Concept
 - **Goal:** Prove Infisical injection works
 - **Approach:** SSH session exports + docker compose
-- **Script:** `ops/plugins/mint/bin/auth-deploy-infisical`
+- **Helper:** `ops/plugins/mint/bin/auth-deploy-infisical` (now superseded)
 - **Result:** ✅ Worked, but NOT durable (only during script execution)
 - **Problem:** Removed AUTH_* from .env without durable replacement
 - **Impact:** Both auth and files-api became restart-fragile
@@ -87,27 +87,27 @@ cd ~/code/agentic-spine
 ./bin/ops cap run mint.auth.deploy
 ```
 
-### Manual Deployment (if needed)
+### On-Host Manual Deployment (non-canonical fallback)
 ```bash
 # 1. Sync secrets from Infisical
 cd ~/code/agentic-spine
 ./bin/ops cap run mint.auth.secrets.sync
 
-# 2. Deploy on mint-apps
-ssh mint-apps "cd /opt/stacks/mint-apps && \
+# 2. Deploy from the mint-apps host shell
+cd /opt/stacks/mint-apps && \
   docker compose --env-file .env --env-file .env.auth-secrets up -d auth files-api"
 
 # 3. Verify health
-ssh mint-apps "curl -sf http://localhost:4300/health && \
+curl -sf http://localhost:4300/health && \
   curl -sf http://localhost:3500/health"
 ```
 
 ### Normal Operator Commands (All Work)
 ```bash
-ssh mint-apps "cd /opt/stacks/mint-apps && \
+cd /opt/stacks/mint-apps && \
   docker compose --env-file .env --env-file .env.auth-secrets restart auth files-api"
 
-ssh mint-apps "cd /opt/stacks/mint-apps && \
+cd /opt/stacks/mint-apps && \
   docker compose --env-file .env --env-file .env.auth-secrets up -d --force-recreate auth"
 ```
 

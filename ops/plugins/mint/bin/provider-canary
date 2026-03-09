@@ -19,11 +19,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 SSH_BINDING="$SPINE_ROOT/ops/bindings/ssh.targets.yaml"
+SERVICES_BINDING="$SPINE_ROOT/ops/bindings/services.health.yaml"
 PROBE_BINDING="$SPINE_ROOT/ops/bindings/mint.probe.targets.yaml"
 RECEIPTS_DIR="${RECEIPTS_DIR:-$HOME/code/.runtime/mint/receipts}"
+MINT_HEALTH_SURFACE="$SPINE_ROOT/ops/lib/mint-health-surface.sh"
 
 # shellcheck source=/dev/null
 source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
+# shellcheck source=/dev/null
+source "$MINT_HEALTH_SURFACE"
 
 usage() {
   cat <<'USAGE'
@@ -56,19 +60,23 @@ require_cmd openssl
 require_cmd python3
 
 [[ -f "$SSH_BINDING" ]] || stop "missing binding: $SSH_BINDING"
+[[ -f "$SERVICES_BINDING" ]] || stop "missing binding: $SERVICES_BINDING"
 [[ -f "$PROBE_BINDING" ]] || stop "missing binding: $PROBE_BINDING"
+[[ -f "$MINT_HEALTH_SURFACE" ]] || stop "missing helper: $MINT_HEALTH_SURFACE"
 
-APP_TARGET_ID="$(yq -r '.targets.app_plane.ssh_target // ""' "$PROBE_BINDING")"
+APP_TARGET_ID="$(mint_probe_target_id app_plane)"
 [[ -n "$APP_TARGET_ID" && "$APP_TARGET_ID" != "null" ]] || stop "missing app plane target"
 
-APP_USER="$(yq -r ".ssh.targets[] | select(.id == \"$APP_TARGET_ID\") | .user // \"ubuntu\"" "$SSH_BINDING" | head -n1)"
+APP_USER="$(ssh_resolve_user "$APP_TARGET_ID" "ubuntu")"
 [[ -n "$APP_USER" && "$APP_USER" != "null" ]] || stop "missing app plane user"
 
 IFS=' ' read -r APP_PROBE_HOST APP_PROBE_PATH <<< "$(ssh_resolve_probe_host "$APP_TARGET_ID" || true)"
+IFS=' ' read -r APP_SSH_HOST APP_SSH_PATH <<< "$(ssh_resolve_ssh_host_with_fallback "$APP_TARGET_ID" || true)"
 [[ -n "$APP_PROBE_HOST" ]] || stop "unable to resolve probe host for $APP_TARGET_ID"
+[[ -n "$APP_SSH_HOST" && "$APP_SSH_PATH" != "unreachable" ]] || stop "unable to resolve ssh host for $APP_TARGET_ID"
 
-SHIPPING_PORT="$(yq -r '.targets.app_plane.http_checks[] | select(.id == "shipping") | .port // ""' "$PROBE_BINDING" | head -n1)"
-PAYMENT_PORT="$(yq -r '.targets.app_plane.http_checks[] | select(.id == "payment") | .port // ""' "$PROBE_BINDING" | head -n1)"
+SHIPPING_PORT="$(mint_service_port shipping)"
+PAYMENT_PORT="$(mint_service_port payment)"
 [[ -n "$SHIPPING_PORT" ]] || stop "missing shipping port"
 [[ -n "$PAYMENT_PORT" ]] || stop "missing payment port"
 
@@ -78,7 +86,7 @@ mkdir -p "$RECEIPTS_DIR"
 
 container_env_value() {
   local container="$1" key="$2"
-  ssh "${SSH_OPTS[@]}" "${APP_USER}@${APP_PROBE_HOST}" \
+  ssh "${SSH_OPTS[@]}" "${APP_USER}@${APP_SSH_HOST}" \
     "docker inspect $container --format '{{range .Config.Env}}{{println .}}{{end}}' | awk -F= -v K='$key' '\$1==K{sub(\$1\"=\",\"\"); print; exit}'"
 }
 
@@ -218,7 +226,7 @@ run_payment_canary() {
     "$(app_http_url "$PAYMENT_PORT" "/api/v1/payments/webhooks/stripe")")"
   [[ "$(printf '%s' "$webhook_json" | jq -r '.received // false')" == "true" ]] || stop "payment canary failed: webhook not acknowledged"
 
-  db_json="$(ssh "${SSH_OPTS[@]}" "${APP_USER}@${APP_PROBE_HOST}" "docker exec -e SESSION_ID='$session_id' -i payment node -e \"const pg=require('pg');(async()=>{const c=new pg.Client({connectionString:process.env.DATABASE_URL});await c.connect();const r=await c.query('select order_id,status,stripe_checkout_session_id from payment_records where stripe_checkout_session_id = \\\$1 order by created_at desc limit 1',[process.env.SESSION_ID]);console.log(JSON.stringify(r.rows[0]||null));await c.end();})().catch(e=>{console.error(e);process.exit(1)})\"")"
+  db_json="$(ssh "${SSH_OPTS[@]}" "${APP_USER}@${APP_SSH_HOST}" "docker exec -e SESSION_ID='$session_id' -i payment node -e \"const pg=require('pg');(async()=>{const c=new pg.Client({connectionString:process.env.DATABASE_URL});await c.connect();const r=await c.query('select order_id,status,stripe_checkout_session_id from payment_records where stripe_checkout_session_id = \\\$1 order by created_at desc limit 1',[process.env.SESSION_ID]);console.log(JSON.stringify(r.rows[0]||null));await c.end();})().catch(e=>{console.error(e);process.exit(1)})\"")"
   [[ "$(printf '%s' "$db_json" | jq -r '.status // empty')" == "cancelled" ]] || stop "payment canary failed: payment record not cancelled"
 
   local ts_iso receipt_path receipt_payload

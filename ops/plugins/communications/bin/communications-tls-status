@@ -3,8 +3,11 @@ set -euo pipefail
 
 ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 JSON=0
-HOST="${STALWART_TLS_HOST:-192.168.1.26}"
+# shellcheck source=ops/lib/ssh-resolve.sh
+source "$ROOT/ops/lib/ssh-resolve.sh"
+HOST="${STALWART_TLS_HOST:-$(ssh_resolve_probe_host communications-stack 2>/dev/null | awk '{print $1}')}"
 TIMEOUT=10
+[[ -n "$HOST" ]] || { echo "ERROR: cannot resolve communications-stack probe host" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -18,7 +21,7 @@ Usage: communications-tls-status [--json] [--host HOST]
 Check TLS certificate status on Stalwart mail server endpoints.
 
 Probes: IMAPS (993), SMTPS (465), STARTTLS (587), HTTPS (8443)
-Default host: 192.168.1.26 (Tailscale), override via STALWART_TLS_HOST or --host.
+Default host: canonical communications-stack probe host from ssh.targets.yaml, override via STALWART_TLS_HOST or --host.
 
 Exit 0 on success, 1 if any endpoint unreachable or cert expiring within 7 days.
 USAGE

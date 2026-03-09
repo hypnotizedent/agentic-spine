@@ -343,9 +343,47 @@ echo "MTIME=$MTIME"
     DEST_SIZE="$(echo "$SIZE_OUT" | sed -n 's/^DEST=//p' | head -n1)"
     SRC_SIZE="$(echo "$SIZE_OUT" | sed -n 's/^SRC=//p' | head -n1)"
     if [[ "$DEST_SIZE" =~ ^[0-9]+$ && "$SRC_SIZE" =~ ^[0-9]+$ && "$SRC_SIZE" -gt 0 && "$DEST_SIZE" -ne "$SRC_SIZE" ]]; then
-      STATUS="COPYING"
-      REASON="size_mismatch_copy_in_progress"
-      DEGRADED=$((DEGRADED+1))
+      PREV_OUT="$(
+        ssh_opts=(
+          -n
+          -o "ConnectTimeout=$SSH_TIMEOUT"
+          -o "StrictHostKeyChecking=$DEF_STRICT"
+          -o "UserKnownHostsFile=$DEF_KNOWN_HOSTS"
+          -o "NumberOfPasswordPrompts=0"
+          -o "LogLevel=ERROR"
+          -p "$SSH_PORT"
+        )
+        if [[ "$DEF_BATCH" == "true" ]]; then
+          ssh_opts+=(-o "BatchMode=yes")
+        fi
+        ssh "${ssh_opts[@]}" "$SSH_USER_AT_HOST" \
+          "cd '$BASE_PATH' && prev=\$(ls -1t -- $GLOB 2>/dev/null | awk '\$0 != \"$NEWEST\" {print; exit}'); if [[ -n \"\$prev\" ]]; then printf 'PREV=%s\nPREV_MTIME=%s\n' \"\$prev\" \"\$(stat -c %Y \"\$prev\")\"; fi" \
+          2>/dev/null || true
+      )"
+      PREV_FILE="$(echo "$PREV_OUT" | sed -n 's/^PREV=//p' | head -n1)"
+      PREV_MTIME_EPOCH="$(echo "$PREV_OUT" | sed -n 's/^PREV_MTIME=//p' | head -n1)"
+      if [[ -n "$PREV_FILE" && "$PREV_MTIME_EPOCH" =~ ^[0-9]+$ ]]; then
+        PREV_AGE_SEC=$((NOW - PREV_MTIME_EPOCH))
+        [[ $PREV_AGE_SEC -lt 0 ]] && PREV_AGE_SEC=0
+        PREV_AGE_HRS_INT=$((PREV_AGE_SEC / 3600))
+        if [[ $PREV_AGE_HRS_INT -le $STALE_HOURS ]]; then
+          NEWEST="$PREV_FILE"
+          MTIME_EPOCH="$PREV_MTIME_EPOCH"
+          AGE_SEC="$PREV_AGE_SEC"
+          AGE_HRS="$(awk -v s="$AGE_SEC" 'BEGIN{printf "%.1f", s/3600.0}')"
+          MTIME_FMT="$(_fmt_iso_local "$MTIME_EPOCH")"
+          STATUS="OK"
+          REASON="copy_in_progress_last_good"
+        else
+          STATUS="COPYING"
+          REASON="size_mismatch_copy_in_progress"
+          DEGRADED=$((DEGRADED+1))
+        fi
+      else
+        STATUS="COPYING"
+        REASON="size_mismatch_copy_in_progress"
+        DEGRADED=$((DEGRADED+1))
+      fi
     fi
   fi
   # compare as integers for stale threshold

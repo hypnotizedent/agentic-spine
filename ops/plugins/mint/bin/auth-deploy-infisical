@@ -1,37 +1,15 @@
 #!/usr/bin/env bash
-# auth-deploy-with-infisical.sh - Deploy auth service with Infisical-backed secrets
+# auth-deploy-infisical - superseded proof-of-concept deploy helper
 #
-# This script demonstrates auth deployment with secrets sourced from Infisical,
-# NOT from the host .env file.
+# Superseded by:
+#   ./bin/ops cap run mint.auth.deploy
 #
-# Usage: ./auth-deploy-with-infisical.sh
+# The canonical durable path uses mint-auth-secrets-sync + mint-auth-deploy.
+# This helper intentionally refuses execution so agents do not rediscover the
+# old one-shot SSH export workflow.
 
 set -euo pipefail
 
-SPINE_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
-
-# Get auth secrets from Infisical via canonical local agent
-echo "Fetching auth secrets from Infisical..."
-SECRETS_JSON=$("$SPINE_ROOT/ops/tools/infisical-agent.sh" list-recursive infrastructure prod)
-
-# Extract auth secrets
-AUTH_DATABASE_URL=$(echo "$SECRETS_JSON" | jq -r '.secrets[] | select(.secretPath == "/spine/services/auth" and .secretKey == "AUTH_DATABASE_URL") | .secretValue')
-AUTH_API_KEY=$(echo "$SECRETS_JSON" | jq -r '.secrets[] | select(.secretPath == "/spine/services/auth" and .secretKey == "AUTH_API_KEY") | .secretValue')
-CUSTOMER_JWT_SECRET=$(echo "$SECRETS_JSON" | jq -r '.secrets[] | select(.secretPath == "/spine/services/auth" and .secretKey == "CUSTOMER_JWT_SECRET") | .secretValue')
-ADMIN_JWT_SECRET=$(echo "$SECRETS_JSON" | jq -r '.secrets[] | select(.secretPath == "/spine/services/auth" and .secretKey == "ADMIN_JWT_SECRET") | .secretValue')
-EMPLOYEE_JWT_SECRET=$(echo "$SECRETS_JSON" | jq -r '.secrets[] | select(.secretPath == "/spine/services/auth" and .secretKey == "EMPLOYEE_JWT_SECRET") | .secretValue')
-
-echo "Deploying auth service to mint-apps with Infisical-backed secrets..."
-ssh mint-apps "cd /opt/stacks/mint-apps && \
-  export AUTH_DATABASE_URL='$AUTH_DATABASE_URL' && \
-  export AUTH_API_KEY='$AUTH_API_KEY' && \
-  export CUSTOMER_JWT_SECRET='$CUSTOMER_JWT_SECRET' && \
-  export ADMIN_JWT_SECRET='$ADMIN_JWT_SECRET' && \
-  export EMPLOYEE_JWT_SECRET='$EMPLOYEE_JWT_SECRET' && \
-  docker compose up -d auth"
-
-echo "Checking auth health..."
-sleep 3
-ssh mint-apps "curl -sf http://localhost:4300/health | jq ."
-
-echo "✅ Auth deployed with Infisical-backed secrets"
+echo "STOP (2): auth-deploy-infisical is superseded." >&2
+echo "Use: ./bin/ops cap run mint.auth.deploy" >&2
+exit 2

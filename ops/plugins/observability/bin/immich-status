@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # immich-status - Read-only Immich instance health and summary
 #
-# Queries Immich REST API on immich (192.168.1.203:2283).
+# Queries Immich REST API using the canonical immich probe host.
 # API key sourced from Infisical (infrastructure/prod or immich/prod).
 #
 # Usage:
@@ -11,12 +11,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+# shellcheck source=ops/lib/ssh-resolve.sh
+source "$SPINE_ROOT/ops/lib/ssh-resolve.sh"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 
 command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
 
-IMMICH_HOST="192.168.1.203:2283"
+IMMICH_PROBE_HOST="$(ssh_resolve_probe_host immich 2>/dev/null | awk '{print $1}')"
+[[ -n "$IMMICH_PROBE_HOST" ]] || stop "cannot resolve immich probe host"
+IMMICH_HOST="${IMMICH_HOST:-${IMMICH_PROBE_HOST}:2283}"
 IMMICH_URL="http://${IMMICH_HOST}"
 INFISICAL_AGENT="${SPINE_ROOT}/ops/tools/infisical-agent.sh"
 CONNECT_TIMEOUT=5
