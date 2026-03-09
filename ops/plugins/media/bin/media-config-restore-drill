@@ -128,24 +128,32 @@ rm -rf "$drill_dir"
 mkdir -p "$drill_dir"
 
 # Find the service config path in archive (without extracting everything)
+# Disable pipefail to avoid SIGPIPE from grep -q
+set +o pipefail
 found_path=""
 if tar -tzf "$backup_file" | grep -q "^mnt/docker/volumes/${service}/config/"; then
   found_path="mnt/docker/volumes/${service}/config"
 elif tar -tzf "$backup_file" | grep -q "^opt/appdata/${service}/"; then
   found_path="opt/appdata/${service}"
 fi
+set -o pipefail
 
 [[ -n "$found_path" ]] || { echo "service config path not found in backup" >&2; exit 1; }
 
 # Verify key config file exists in archive
+set +o pipefail
 key_file_path="${found_path}/${config_key_file}"
 if ! tar -tzf "$backup_file" | grep -Fxq "$key_file_path"; then
+  set -o pipefail
   echo "key config file missing in archive: $config_key_file" >&2
   exit 2
 fi
+set -o pipefail
 
 # Count files in config directory within archive
+set +o pipefail
 file_count="$(tar -tzf "$backup_file" | grep "^${found_path}/" | grep -v '/$' | wc -l | tr -d ' ')"
+set -o pipefail
 [[ "$file_count" -gt 0 ]] || { echo "config directory empty in archive" >&2; exit 3; }
 
 # Extract only the key config file to verify it's valid
@@ -179,7 +187,7 @@ echo "=== Media Config Restore Drill ==="
 echo "timestamp: $RUN_TS"
 
 run_stack_drill "download-stack" "$download_stack_ssh" "radarr" "config.xml"
-run_stack_drill "streaming-stack" "$streaming_stack_ssh" "jellyfin" "system.xml"
+run_stack_drill "streaming-stack" "$streaming_stack_ssh" "jellyfin" "config/system.xml"
 
 ERROR_MSG="${ERROR_MSG%; }"
 
@@ -217,11 +225,13 @@ ERROR_MSG="${ERROR_MSG%; }"
   echo "  keep_artifacts: $([[ "$KEEP_ARTIFACTS" -eq 1 ]] && echo true || echo false)"
   echo "comparison:"
   echo "  download_stack:"
-  download_result="${DRILL_RESULTS[0]%%|*}"
-  echo "    result: $(yaml_quote "${download_result##*|}")"
+  download_result="${DRILL_RESULTS[0]#*|}"  # Remove stack name
+  download_result="${download_result%%|*}"  # Extract result field
+  echo "    result: $(yaml_quote "$download_result")"
   echo "  streaming_stack:"
-  streaming_result="${DRILL_RESULTS[1]%%|*}"
-  echo "    result: $(yaml_quote "${streaming_result##*|}")"
+  streaming_result="${DRILL_RESULTS[1]#*|}"  # Remove stack name
+  streaming_result="${streaming_result%%|*}"  # Extract result field
+  echo "    result: $(yaml_quote "$streaming_result")"
   if [[ -n "$ERROR_MSG" ]]; then
     echo "error: $(yaml_quote "$ERROR_MSG")"
   else
