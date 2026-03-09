@@ -1,0 +1,91 @@
+# Status: authoritative
+# Last verified: 2026-03-09
+
+version: 1
+updated_at: "2026-03-09"
+owner: "@ronny"
+scope: infisical-backup-restore
+
+runtime:
+  vm:
+    id: "204"
+    hostname: infra-core
+    lan_ip: 192.168.1.204
+    tailscale_ip: 100.92.91.128
+  stack: secrets
+  containers:
+    app: infisical
+    db: infisical-postgres
+
+backup_coverage:
+  vm_level:
+    enabled: true
+    schedule_id: pve-vzdump-daily
+    inventory_target: vm-204-infra-core-primary
+    vm_lifecycle_backup_target: vm-204-infra-core-primary
+    source_bindings:
+      - ops/bindings/backup.inventory.yaml
+      - ops/bindings/vm.lifecycle.yaml
+  app_level:
+    - id: postgres-dump
+      script_ref: /usr/local/bin/infisical-backup.sh
+      storage_path: /opt/backups/infisical
+      offsite_path: /md1400/backup-cold/apps/infra-core/infisical
+      file_pattern: "infisical-db-*.sql.gz"
+      retention_days: 30
+      schedule_cron: "0 6,18 * * *"
+      note: "Twice-daily pg_dump via root cron on infra-core. Syncs to md1400 cold storage."
+
+restore_sop:
+  objective: "Recover Infisical service and PostgreSQL database on VM 204 with bounded data loss."
+  rpo_hours: 24
+  rto_hours: 2
+  ordered_steps:
+    - "Validate latest vm-204 vzdump artifact exists and is recent."
+    - "Restore VM 204 snapshot if full host failure is involved."
+    - "Stop infisical and infisical-postgres containers."
+    - "Restore latest infisical-db pg_dump into infisical database."
+    - "Start containers and verify health endpoint plus authentication."
+    - "Run governed validation checks and capture receipts."
+
+restore_proof:
+  capability_ref: infra.infisical.restore.drill
+  schedule_id: infisical-restore-drill-quarterly
+  gate_id: D387
+  canonical_receipt_glob: mailroom/outbox/reports/restore-drills/infra-infisical-restore-drill-*.yaml
+  receipt_format: yaml_v1
+  freshness_days: 95
+  scope_mode: full_restore
+  comparison_targets:
+    - table_count
+    - project_count
+    - folder_count
+  expected_values:
+    table_count: 216
+    project_count: 9
+    folder_count: 55
+  note: "Quarterly governed drill restores scratch database from cold storage artifact and validates table/project/folder counts against canonical baseline from 2026-03-09 manual proof."
+
+verification:
+  post_restore_commands:
+    - "./bin/ops cap run services.health.status --id infisical-vm204"
+    - "./bin/ops cap run secrets.status"
+    - "./bin/ops cap run secrets.auth.status"
+  backup_status_command: "./bin/ops cap run backup.status"
+  restore_drill_command: "./bin/ops cap run infra.infisical.restore.drill"
+  restore_green_requires:
+    - fresh_passing_receipt
+    - D384
+
+cron_deploy_template:
+  description: |
+    Canonical runtime is root crontab on infra-core (VM 204).
+    Script handles pg_dump and offsite sync to pve:/md1400/backup-cold/.
+  actual_cron: "0 6,18 * * * /usr/local/bin/infisical-backup.sh >> /var/log/infisical-backup.log 2>&1"
+  note: "Script deployed at /usr/local/bin/infisical-backup.sh. Twice-daily schedule provides sub-12h RPO."
+
+references:
+  schedule_binding: ops/bindings/backup.schedule.yaml
+  infra_contract: ops/bindings/infra.core.baseline.contract.yaml
+  source_procedure: docs/archive/governance/INFISICAL_RESTORE_DRILL.md
+  closes_gaps: []
