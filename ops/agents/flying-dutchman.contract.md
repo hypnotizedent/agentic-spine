@@ -71,7 +71,10 @@ Those belong to Morpheus, Fin, Artie, or the underlying Mint modules.
 - `./bin/ops cap run mint.deploy.sync`
 - `./bin/ops cap run mint.quote.prepare` (operator-driven quote intake + orchestration)
 - `./bin/ops cap run mint.quote.show` (read quote_packet state for resumability)
-- `./bin/ops cap run mint.quote.render` (generate drafts; payment blocked on order_id)
+- `./bin/ops cap run mint.quote.render` (generate drafts; payment blocked on promotion)
+- `mint.quote.promote` (design-only: promote quote_packet to canonical order/revision/quote)
+- `mint.quote.generate_payment_link` (design-only: generate Stripe checkout URL after promotion)
+- `mint.quote.send` (blocked on payment link; see mint.quote.payment_bridge.authority.yaml)
 
 ## Related Employees
 

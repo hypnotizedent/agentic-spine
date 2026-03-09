@@ -17,14 +17,15 @@ purpose: >
 
   This authority defines the first real Mint agent business loop: intake →
   prepare (REAL customer resolution + service checks) → render (quote draft)
-  → BLOCKED at payment (requires checkout-without-order support).
+  → BLOCKED at payment until the governed promotion/payment bridge is
+  implemented.
 
   IMPLEMENTATION STATUS (2026-03-09):
     - Customer resolution: REAL (mint-modules customers service)
-    - Stock check: service-aware (blocked on missing product identifiers)
-    - Pricing: service-aware (blocked on missing complete inputs)
+    - Stock check: readiness detection REAL; execution blocked until suppliers bulk stock endpoint exists
+    - Pricing: REAL when normalized inputs + PRICING_API_KEY exist; otherwise blocked honestly
     - Quote draft: stub (inline summary, Printavo integration pending)
-    - Payment link: BLOCKED (payment module requires order_id)
+    - Payment link: BLOCKED pending quote_packet promotion to canonical order/revision/quote
     - Receipt tracking: REAL (appends SPINE_CAP_RUN_KEY receipts)
     - Packet index: REAL (runtime/domain-state/mint/quote-packets-index.yaml)
 
@@ -37,6 +38,8 @@ non_goals:
 
 contracts:
   order_truth_authority: ops/bindings/mint.order.truth.authority.yaml
+  line_item_normalization: ops/bindings/mint.quote.line_item.normalization.contract.yaml
+  payment_bridge_authority: ops/bindings/mint.quote.payment_bridge.authority.yaml
   module_lifecycle_authority: ops/bindings/mint.module.lifecycle.authority.yaml
   module_status_authority: ops/bindings/mint.module.status.authority.contract.yaml
   mint_domain_doc: docs/governance/domains/mint.md
@@ -88,15 +91,19 @@ quote_packet_schema:
         - source_timestamp
     line_items:
       type: array
-      description: Normalized line items for this quote
+      description: >
+        Normalized line items for this quote. Canonical field names and
+        completeness classes are defined by the line_item_normalization
+        contract.
       elements:
         - line_item_id (uuid)
+        - description (optional)
         - product_type
         - quantity
         - size_breakdown (optional)
         - decoration_method (optional)
         - placement (optional)
-        - notes (optional)
+        - operator_notes (optional)
     created_at:
       type: timestamp
       description: When this packet was created
@@ -243,12 +250,12 @@ lifecycle_model:
         - customer_ref.identity_state = resolved
         - pricing_snapshot exists
         - quote_draft_ref exists
-        - payment_ref exists
         - customer_message_draft exists
+        - payment bridge may still be pending; promotion/payment link generation is downstream of approval
       exit_conditions:
         - operator approval or rejection
     approved_to_send:
-      description: Operator approved, ready for send action
+      description: Operator approved, ready for promotion + payment/send orchestration
       allowed_transitions:
         - sent
         - needs_input
@@ -321,9 +328,8 @@ operational_rules:
   quote_send_approval:
     required:
       - explicit operator approval action
-      - state = approved_to_send
+      - state = ready_for_review
       - quote_draft_ref exists
-      - payment_ref exists
       - customer_message_draft exists
     forbidden:
       - automated send without approval
@@ -379,23 +385,61 @@ capability_surface:
   render:
     name: mint.quote.render
     description: Generate customer-facing artifacts (quote draft, customer message)
-    implementation_status: PARTIAL (quote draft stub, payment link BLOCKED)
+    implementation_status: PARTIAL (quote draft stub, payment blocked pending promotion/payment bridge implementation)
     inputs:
       - quote_packet_id (required)
     outputs:
       - quote_draft_ref (stub: inline summary, Printavo pending)
-      - payment_ref (BLOCKED: payment module requires order_id for checkout)
+      - payment_ref (BLOCKED: requires canonical order_id from promotion)
       - customer_message_draft (includes blocker note)
       - updated state (needs_input if payment blocked, NOT ready_for_review)
       - receipts (SPINE_CAP_RUN_KEY appended)
     safety: mutating
     blockers:
-      - payment link generation BLOCKED until payment module supports checkout-without-order
+      - payment link generation BLOCKED until quote_packet promotion to canonical order/revision/quote is implemented
+      - promotion path defined in mint.quote.payment_bridge.authority.yaml but not yet implemented
       - quote draft is inline stub, not Printavo integration
+  promote:
+    name: mint.quote.promote
+    description: Promote quote_packet to canonical order/revision/quote entities (design-only)
+    implementation_status: DESIGN_ONLY (not yet implemented)
+    authority_ref: ops/bindings/mint.quote.payment_bridge.authority.yaml
+    inputs:
+      - quote_packet_id (required)
+      - operator_approval (required, explicit)
+    outputs:
+      - order_id (canonical, created or linked)
+      - order_revision_id (canonical, first revision)
+      - quote_id (canonical, quote entity)
+      - pricing_snapshot_id (attached or created)
+      - quote_packet updated with canonical references
+    safety: mutating
+    approval_requirement: manual
+    blockers:
+      - order entity creation not yet implemented
+      - order revision creation not yet implemented
+      - quote entity creation not yet implemented
+      - requires cross-module orchestration
+  generate_payment_link:
+    name: mint.quote.generate_payment_link
+    description: Generate Stripe checkout URL for a promoted quote (design-only)
+    implementation_status: DESIGN_ONLY (not yet implemented)
+    authority_ref: ops/bindings/mint.quote.payment_bridge.authority.yaml
+    inputs:
+      - quote_id (required, canonical quote entity)
+    outputs:
+      - payment_link_url (Stripe checkout URL)
+      - checkout_session_id (Stripe session ID)
+      - quote_packet updated with payment_ref
+    safety: mutating
+    approval_requirement: auto (if quote already approved)
+    blockers:
+      - requires mint.quote.promote to be implemented first
   send:
     name: mint.quote.send
     description: Send quote to customer (approval-gated)
-    implementation_status: BLOCKED (payment link prerequisite not met)
+    implementation_status: BLOCKED (promotion + payment link prerequisites not met)
+    authority_ref: ops/bindings/mint.quote.payment_bridge.authority.yaml
     inputs:
       - quote_packet_id (required)
       - operator_approval (required, explicit)
@@ -407,7 +451,7 @@ capability_surface:
     approval_requirement: manual
     blockers:
       - cannot send quote without payment link
-      - payment link blocked on checkout-without-order support
+      - payment link blocked on mint.quote.promote and mint.quote.generate_payment_link implementation
 
 agent_guidance:
   default_read_path: ops/bindings/mint.quote.packet.authority.yaml

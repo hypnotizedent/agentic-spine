@@ -7,7 +7,8 @@
 # Mutating. Updates quote_packet with rendered artifacts.
 #
 # HONEST IMPLEMENTATION: Does NOT generate fake payment links.
-# Payment link generation is BLOCKED until payment module has checkout-without-order support.
+# Payment link generation is BLOCKED until quote_packet promotion to canonical
+# order/revision/quote and the governed payment bridge are implemented.
 
 set -euo pipefail
 
@@ -37,7 +38,7 @@ Outputs:
   - customer_message_draft
 
 BLOCKED:
-  - payment_ref generation (requires checkout-without-order in payment module)
+  - payment_ref generation (requires governed quote_packet promotion to canonical quote/order truth)
 
 Example:
   quote-render 550e8400-e29b-41d4-a716-446655440000
@@ -114,11 +115,11 @@ echo "  Quote draft: inline (Printavo integration pending)"
 
 # Step 2: Payment link generation - HONEST BLOCKED STATE
 echo "Step 2/3: Payment link generation..."
-echo "  BLOCKED: Payment module requires order_id for checkout"
-echo "  Reason: checkout-without-order support not yet implemented"
+echo "  BLOCKED: Payment module requires canonical order/quote truth before checkout"
+echo "  Reason: quote_packet promotion/payment bridge not yet implemented"
 
 PAYMENT_AMOUNT=$(yq '.pricing_snapshot.calculated_totals.total' "$PACKET_FILE")
-yq -i ".payment_ref = {\"payment_provider\": \"stripe\", \"payment_link_state\": \"blocked_requires_order_id\", \"payment_amount\": $PAYMENT_AMOUNT, \"payment_currency\": \"USD\", \"blocking_reason\": \"Payment module checkout requires order_id; quote-to-payment bridge not yet built\", \"resolution_path\": \"Implement checkout-without-order in payment module OR convert quote to order first\", \"generated_at\": \"$TIMESTAMP\"}" "$PACKET_FILE"
+yq -i ".payment_ref = {\"payment_provider\": \"stripe\", \"payment_link_state\": \"blocked_requires_order_id\", \"payment_amount\": $PAYMENT_AMOUNT, \"payment_currency\": \"USD\", \"blocking_reason\": \"Payment module checkout requires canonical order/quote truth; quote-to-payment bridge not yet implemented\", \"resolution_path\": \"Promote quote_packet to canonical order/revision/quote, then generate payment link via the governed payment bridge\", \"generated_at\": \"$TIMESTAMP\"}" "$PACKET_FILE"
 echo "  Payment link: BLOCKED (not faking Stripe URL)"
 
 # Step 3: Generate customer message draft
@@ -164,7 +165,7 @@ echo "quote_draft: generated"
 echo "payment_link: BLOCKED (requires order_id)"
 echo "customer_message: generated (with blocker note)"
 echo ""
-echo "next_step: Fix payment module checkout-without-order OR convert quote to order"
+echo "next_step: Implement quote_packet promotion + governed payment bridge"
 echo ""
 echo "packet_file: $PACKET_FILE"
 

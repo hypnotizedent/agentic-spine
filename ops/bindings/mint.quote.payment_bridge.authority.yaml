@@ -1,0 +1,255 @@
+# Mint Quote Payment Bridge Authority
+# Status: authoritative
+# Last verified: 2026-03-09
+# Scope: quote-to-payment-boundary
+
+version: 1
+updated_at: "2026-03-09"
+owner: "@ronny"
+status: authoritative
+scope: quote-to-payment-boundary
+
+purpose: >
+  Define the canonical promotion boundary from quote_packet (work object) to
+  payment-ready quote entity so Quote-to-Pay can generate real payment links
+  without inventing fake order_ids or violating order truth immutability rules.
+
+canonical_answers:
+  can_quote_packet_generate_payment_link: >
+    No. A quote_packet is a mutable work object. Payment links must be bound to
+    immutable canonical quote entities as defined in order truth authority.
+
+  what_entity_owns_payment_link: >
+    The canonical quote entity (quote_id) as defined in
+    mint.order.truth.authority.yaml. A quote references exactly one
+    order_revision_id and one pricing_snapshot_id. Payment is bound to the
+    quote, not the packet.
+
+  when_does_quote_packet_promote_to_quote: >
+    When all of these conditions are met:
+    - quote_packet.state = approved_to_send
+    - All line items are quote_ready (completeness class)
+    - pricing_snapshot exists
+    - customer_ref.identity_state = resolved
+    - quote_draft_ref exists
+    - No blocking gaps in open_gaps
+    
+    Promotion creates a canonical order (if not exists), order_revision, and
+    quote entity. The quote entity receives the quote_id.
+
+  does_payment_require_full_order: >
+    Yes, indirectly. Payment requires a canonical quote_id. A quote requires an
+    order_revision_id. An order_revision requires an order_id. Therefore,
+    payment promotion triggers the full order truth chain:
+    quote_packet → order → order_revision → quote → payment.
+
+promotion_boundary:
+  quote_packet_to_order:
+    trigger_conditions:
+      - quote_packet.state = approved_to_send
+      - All line items meet quote_ready completeness class
+      - customer_ref.identity_state = resolved
+
+    promotion_steps:
+      step_1_order_creation: Create canonical order entity if not exists
+      step_2_order_revision_creation: Create first order_revision with normalized line items
+      step_3_pricing_snapshot_attachment: Attach or create pricing_snapshot
+      step_4_quote_creation: Create canonical quote entity
+      step_5_quote_packet_update: Update quote_packet with canonical references
+
+  quote_to_payment:
+    trigger_conditions:
+      - quote_id exists (canonical quote entity)
+      - quote.quote_state = draft
+      - order_id exists
+
+    payment_link_generation:
+      endpoint: POST /api/v1/payments/checkout-session
+      required_inputs:
+        - order_id (canonical, from promotion)
+        - amount_cents (from pricing_snapshot)
+        - currency (default "usd")
+        - customer_email (from resolved customer_ref)
+
+forbidden_shortcuts:
+  no_fake_order_id:
+    description: Never generate payment link with invented order_id
+    enforcement: Payment module validation requires order_id exists in database
+    rejected_alternative: >
+      Payment module's POST /v2/checkout generates timestamp-based order_id on the
+      fly. This is rejected for Quote-to-Pay because it violates order truth
+      authority (canonical order_id must come from order entity creation, not
+      payment timestamps).
+
+  no_payment_before_promotion:
+    description: Never generate payment link before quote entity exists
+    enforcement: quote_packet.state cannot reach ready_for_send without quote_id
+
+  no_parallel_payment_models:
+    description: Never create payment records outside payment module
+    enforcement: Payment module is sole authority for PaymentRecord creation
+
+payment_endpoint_options:
+  option_a_rejected:
+    endpoint: POST /v2/checkout
+    model: Generate timestamp-based order_id within payment module
+    option_status: rejected
+    rejection_reason: >
+      This endpoint (lines 355-438 in payments-v2.ts) generates order_id from
+      Date.now() and visual_id from the timestamp. While functional for web form
+      intake, this violates the order truth authority which requires order_id to
+      come from canonical order entity creation. Quote-to-Pay must respect the
+      governed order creation boundary, not invent identifiers in the payment layer.
+
+  option_b_chosen:
+    endpoint: POST /api/v1/payments/checkout-session
+    model: Require pre-existing canonical order_id
+    option_status: chosen
+    rationale: >
+      This endpoint (lines 36-68 in checkout.ts) requires order_id as input and
+      validates it exists. This aligns with order truth authority and enables the
+      governed promotion path: quote_packet → order → order_revision → quote →
+      payment. The payment module becomes a consumer of order truth, not a
+      generator of it.
+
+  option_c_considered:
+    model: Payment against quote_id without order_id
+    option_status: considered_but_not_pursued
+    analysis: >
+      Theoretically, payment could be bound to quote_id directly if the payment
+      module were extended to support it. However, the current payment module
+      schema (PaymentRecord.order_id) is order-centric, and the checkout session
+      metadata uses order_id for reconciliation. Extending to quote_id would
+      require payment schema changes and webhook reconciliation updates. Since
+      quote requires order_revision which requires order anyway, pursuing
+      order-first alignment is simpler and preserves the existing payment contract.
+
+capability_roadmap:
+  mint.quote.promote:
+    capability_state: design_only
+    purpose: Promote quote_packet to canonical order/revision/quote entities
+    implementation_status: not_implemented
+    design_complete: true
+    inputs:
+      - quote_packet_id (required)
+      - operator_approval (required, explicit)
+    outputs:
+      - order_id (canonical, newly created or linked)
+      - order_revision_id (canonical, first revision)
+      - quote_id (canonical, quote entity)
+      - pricing_snapshot_id (attached or created)
+      - quote_packet updated with canonical references
+    safety: mutating
+    approval_requirement: manual
+    blockers:
+      - Order entity creation contract not yet implemented
+      - Order revision creation contract not yet implemented
+      - Quote entity creation contract not yet implemented
+      - Requires cross-module coordination (order-intake, pricing, payment)
+    pre_implementation_requirements:
+      - Order entity schema and API in mint-modules
+      - Order revision immutability enforcement
+      - Quote entity schema and API
+      - Promotion atomicity guarantee (all-or-nothing)
+      - Rollback or cleanup on partial failure
+
+  mint.quote.generate_payment_link:
+    capability_state: design_only
+    purpose: Generate Stripe checkout URL for a promoted quote
+    implementation_status: not_implemented
+    design_complete: true
+    inputs:
+      - quote_id (required, canonical quote entity)
+    outputs:
+      - payment_link_url (Stripe checkout URL)
+      - checkout_session_id (Stripe session ID)
+      - quote_packet updated with payment_ref
+    safety: mutating
+    approval_requirement: auto (if quote already approved_to_send)
+    blockers:
+      - Requires mint.quote.promote to be implemented first
+      - Requires quote entity to expose order_id, amount_cents, customer_email
+    dependencies:
+      - quote entity must exist with quote.order_id populated
+      - pricing_snapshot must exist with calculated_totals
+      - customer_ref must have resolved email
+    implementation_path: >
+      Call payment module POST /api/v1/payments/checkout-session with order_id
+      from quote.order_id, amount_cents from pricing_snapshot, customer_email
+      from resolved customer_ref. Store checkout_url and session_id in
+      quote_packet.payment_ref.
+
+  mint.quote.send:
+    capability_state: specified_but_blocked
+    purpose: Send quote to customer via email with payment link
+    implementation_status: specified_in_capabilities_yaml
+    blockers:
+      - Cannot send quote without payment link
+      - Payment link blocked on mint.quote.promote implementation
+      - Email send mechanism (comms stack) not yet wired
+    current_capability_entry: >
+      mint.quote.send exists in ops/capabilities.yaml (line 6049) but is blocked
+      on payment link prerequisite. Implementation must wait for promotion and
+      payment link generation.
+
+honest_implementation_status:
+  current_reality:
+    - quote_packet work object: IMPLEMENTED (prepare, show, render partial)
+    - customer resolution: IMPLEMENTED (via mint-modules customers)
+    - pricing integration: IMPLEMENTED (via mint-modules pricing)
+    - quote draft generation: IMPLEMENTED (inline stub, not Printavo)
+    - payment link generation: BLOCKED (requires order_id from promotion)
+    - quote send: BLOCKED (requires payment link)
+    - order entity creation: NOT IMPLEMENTED
+    - order revision creation: NOT IMPLEMENTED
+    - quote entity creation: NOT IMPLEMENTED
+    - promotion boundary: DESIGNED, NOT IMPLEMENTED
+
+  what_is_unblocked_in_design:
+    - Agents now know the governed promotion path exists
+    - Agents know payment requires order_id from canonical order entity
+    - Agents know not to invent order_id in payment layer
+    - Agents know quote_packet is a work object, not the quote entity
+    - Agents know the endpoint (POST /api/v1/payments/checkout-session)
+    - Agents know the capability names (mint.quote.promote, mint.quote.generate_payment_link)
+
+  what_remains_blocked_in_implementation:
+    - Actual order entity creation logic
+    - Actual order revision creation logic
+    - Actual quote entity creation logic
+    - Atomicity guarantee for promotion (all-or-nothing)
+    - Error handling and rollback on partial promotion failure
+    - Order/quote schema deployment in mint-modules database
+    - API surface in mint-modules for order/quote CRUD
+    - Cross-module orchestration for promotion workflow
+
+agent_guidance:
+  default_read_path: ops/bindings/mint.quote.payment_bridge.authority.yaml
+  quote_packet_vs_quote_distinction: >
+    quote_packet is a mutable work object agents use to prepare quotes.
+    quote entity is the immutable canonical truth created by promotion.
+    Payment links must bind to quote entities, not quote_packets.
+  when_to_stop: >
+    If an agent is asked to generate a payment link for a quote_packet, stop and
+    explain that promotion to canonical quote entity is required first. Reference
+    this authority and state that mint.quote.promote is design-only, not yet
+    implemented.
+  no_fake_order_id_ever: >
+    Never generate payment links with invented order_id values. Never use
+    timestamp-based order_id generation. Never bypass the promotion boundary.
+    If order_id is missing, the quote_packet has not been promoted and payment
+    link generation must wait.
+  resumability: >
+    Agents preparing quotes can resume work by reading mint.quote.show. If
+    quote_packet.state shows approved_to_send but quote_id is missing, the next
+    step is promotion (not yet implemented). Agents should surface this blocker
+    clearly to operators.
+
+conclusion: >
+  Quote-to-Pay has a complete design for governed payment link generation:
+  quote_packet → mint.quote.promote → order/revision/quote entities →
+  mint.quote.generate_payment_link → POST /api/v1/payments/checkout-session →
+  mint.quote.send. Implementation is blocked on order entity, order revision, and
+  quote entity creation logic in mint-modules. The payment module endpoint exists
+  and is ready to consume canonical order_id once promotion is implemented. No
+  fake order_id shortcuts are permitted.

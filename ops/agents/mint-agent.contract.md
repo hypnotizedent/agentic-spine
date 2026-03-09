@@ -146,7 +146,7 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | `mint.intake.validate` | read-only | Validate intake payload against order-intake contract |
 | `mint.quote.prepare` | mutating | Create or update quote_packet for operator-driven quote workflows |
 | `mint.quote.show` | read-only | Read quote_packet by ID for resumability and status |
-| `mint.quote.render` | read-only | Generate draft quote artifacts (blocked: payment link requires order_id) |
+| `mint.quote.render` | mutating | Generate draft quote artifacts (payment blocked until governed promotion/payment bridge exists) |
 
 ## Minimum V1 Command Surface
 
@@ -164,17 +164,22 @@ The alias `mintctl operator ...` must resolve to the same command surface.
 
 ## Quote-to-Pay Lane (Operator-Driven)
 
-**Status:** Partial — intake + pricing integrations real, payment link blocked
+**Status:** Partial — intake + pricing integrations real, payment link blocked on promotion
 
-**Authority:** `ops/bindings/mint.quote.packet.authority.yaml`
+**Authority:**
+- `ops/bindings/mint.quote.packet.authority.yaml` (quote_packet work object)
+- `ops/bindings/mint.quote.line_item.normalization.contract.yaml` (canonical line-item field set + completeness classes)
+- `ops/bindings/mint.quote.payment_bridge.authority.yaml` (promotion to payment boundary)
+- `ops/bindings/mint.order.truth.authority.yaml` (canonical order/revision/quote entities)
 
 Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capability surface:
 
 - **`mint.quote.prepare --customer "NAME"`** — Create or update quote_packet work object
-  - Orchestrates intake → pricing → suppliers (when unblocked)
+  - Orchestrates intake → pricing → suppliers readiness checks
   - Resumable: run multiple times as gaps are resolved
   - Gaps tracked in `quote_packet.open_gaps[]`
   - Work objects stored at `runtime/domain-state/mint/quote-packets/<PACKET_ID>.yaml`
+  - Line items must use the canonical field names/completeness classes from `mint.quote.line_item.normalization.contract.yaml`
 
 - **`mint.quote.show <PACKET_ID>`** — Read current quote_packet state
   - Shows resolved customer, intake seed, pricing details, open gaps
@@ -182,23 +187,31 @@ Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capab
 
 - **`mint.quote.render <PACKET_ID>`** — Generate draft quote artifacts
   - Produces quote draft text and message preview
-  - **Payment link BLOCKED** — payment module requires `order_id` for checkout
-  - Checkout-without-order not yet implemented (GAP-MINT-004)
+  - **Payment link BLOCKED** — requires canonical `order_id` from quote_packet promotion
+  - Promotion path: quote_packet → order → order_revision → quote → payment
+  - See `mint.quote.payment_bridge.authority.yaml` for promotion boundary design
 
 **Blockers:**
-- Suppliers module integration not yet active (GAP-MINT-003)
-- Payment checkout requires order_id (GAP-MINT-004)
-- Cannot generate working payment links until order-first checkout path exists
+- Suppliers stock execution not yet active (bulk stock endpoint missing)
+- **Payment requires promotion**: `mint.quote.promote` is design-only, not yet implemented
+- Cannot generate payment links until quote_packet promotes to canonical quote entity
+- Order entity, order revision, and quote entity creation not yet implemented
 
 **What Works:**
 - Customer resolution + intake seed creation via order-intake
-- Pricing calculations via pricing module
+- Pricing calculations via pricing module when normalized inputs + secrets exist
 - Gap-driven resumable workflow
 - Draft quote text generation (without payment link)
 
 **What Does NOT Work Yet:**
-- Suppliers cost lookups (module exists but not wired)
-- Payment link generation (blocked on checkout-without-order)
-- End-to-end quote → payment flow (stops at draft stage)
+- Suppliers stock execution (blocked on missing bulk endpoint)
+- Quote_packet promotion to canonical order/revision/quote (`mint.quote.promote` — design-only)
+- Payment link generation (`mint.quote.generate_payment_link` — design-only)
+- Quote send to customer (`mint.quote.send` — blocked on payment link)
+- End-to-end quote → payment flow (stops at draft stage before promotion)
 
-Morpheus should help operators prepare quotes as far as the real integrations allow, but must NOT overclaim working payment or complete Quote-to-Pay when gaps remain.
+**No Fake Order IDs:**
+Morpheus must NEVER generate payment links with invented `order_id` values. Payment module's POST `/v2/checkout` generates timestamp-based order_id, but this violates order truth authority. The governed path is: promotion → canonical order_id → payment link. See payment bridge authority for why timestamp-based order_id is rejected.
+
+**Resumability Guidance:**
+If `quote_packet.state = approved_to_send` but `quote_id` is missing, the next step is `mint.quote.promote` (not yet implemented). Surface this blocker clearly to operators instead of attempting workarounds.

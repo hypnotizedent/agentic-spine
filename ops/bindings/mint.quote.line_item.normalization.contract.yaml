@@ -1,0 +1,538 @@
+# Mint Quote Line Item Normalization Contract
+# Status: authoritative
+# Last verified: 2026-03-09
+# Scope: quote-to-pay-line-item-normalization
+
+version: 1
+updated_at: "2026-03-09"
+owner: "@ronny"
+status: authoritative
+scope: quote-to-pay-line-item-normalization
+
+purpose: >
+  Define the canonical line item field set and completeness classes for
+  Quote-to-Pay flows so agents can normalize intake input into supplier-ready,
+  pricing-ready, and quote-ready shapes without inventing alternate naming or
+  partial schemas.
+
+  This contract answers:
+  - What fields are required to create a line item?
+  - What fields are required for supplier stock lookup?
+  - What fields are required for pricing calculations?
+  - What fields are quote-ready vs. optional enrichment?
+  - What field names are canonical?
+  - What completeness classes can agents evaluate deterministically?
+
+contracts:
+  quote_packet_authority: ops/bindings/mint.quote.packet.authority.yaml
+  order_truth_authority: ops/bindings/mint.order.truth.authority.yaml
+  pricing_job_estimator: /Users/ronnyworks/code/mint-modules/pricing/src/types.ts
+  suppliers_search_api: /Users/ronnyworks/code/mint-modules/suppliers/src/routes/suppliers.ts
+
+canonical_field_set:
+  # Identity fields (required at creation)
+  line_item_id:
+    type: uuid
+    required_for: [creation_minimum]
+    description: Unique identifier for this line item within the quote_packet
+
+  product_type:
+    type: string
+    required_for: [creation_minimum, stock_lookup_ready, pricing_ready, quote_ready]
+    description: Product category (apparel/drinkware/bags/etc)
+    examples: ["t-shirt", "hoodie", "mug", "tote-bag"]
+
+  quantity:
+    type: integer
+    required_for: [creation_minimum, stock_lookup_ready, pricing_ready, quote_ready]
+    description: Number of units being quoted
+    validation: "> 0"
+
+  # Supplier lookup fields (stock check)
+  supplier_code:
+    type: string
+    required_for: [stock_lookup_ready]
+    optional_for: [pricing_ready, quote_ready]
+    description: Canonical supplier code (sanmar/ssactivewear/ascolour)
+    examples: ["sanmar", "ssactivewear", "ascolour"]
+    source_module: suppliers
+
+  supplier_sku:
+    type: string
+    required_for: [stock_lookup_ready]
+    optional_for: [pricing_ready, quote_ready]
+    description: Supplier's product SKU (variant-specific)
+    examples: ["PC54-BLACK-M", "G180-NAVY-L"]
+    source_module: suppliers
+
+  style_code:
+    type: string
+    required_for: []
+    optional_for: [stock_lookup_ready, pricing_ready, quote_ready]
+    description: Style identifier without color/size (brand base style)
+    examples: ["PC54", "G180"]
+    source_module: suppliers
+
+  brand:
+    type: string
+    required_for: []
+    optional_for: [stock_lookup_ready, pricing_ready, quote_ready]
+    description: Product brand
+    examples: ["Port & Company", "Gildan"]
+    source_module: suppliers
+
+  color:
+    type: string
+    required_for: []
+    optional_for: [stock_lookup_ready, pricing_ready, quote_ready]
+    description: Garment color
+    examples: ["black", "navy", "white"]
+
+  size_breakdown:
+    type: object
+    required_for: []
+    optional_for: [stock_lookup_ready, pricing_ready, quote_ready]
+    description: Quantity breakdown by size (S/M/L/XL/etc)
+    structure:
+      S: integer
+      M: integer
+      L: integer
+      XL: integer
+      "2XL": integer
+      "3XL": integer
+    example: {"M": 10, "L": 15, "XL": 5}
+
+  canonical_style_key:
+    type: string
+    required_for: []
+    optional_for: [stock_lookup_ready]
+    description: Normalized brand:style key for supplier overlap ranking
+    pattern: "{brand}:{style_code}"
+    examples: ["gildan:g180", "port_company:pc54"]
+    source_module: suppliers
+    derivation: "buildCanonicalStyleKey(brand, style_code)"
+
+  # Pricing inputs (job estimator)
+  decoration_method:
+    type: enum
+    required_for: [pricing_ready, quote_ready]
+    optional_for: []
+    allowed_values: [screen_print, embroidery, engraving, transfers]
+    description: Decoration/printing method
+    source_module: pricing
+    api_field: item_type
+
+  color_count:
+    type: integer
+    required_for: [pricing_ready, quote_ready]
+    optional_for: []
+    description: Number of print colors (affects pricing surcharges)
+    validation: ">= 0"
+    source_module: pricing
+    api_field: colors (or color_count as alias)
+
+  print_locations:
+    type: array[string]
+    required_for: [pricing_ready, quote_ready]
+    optional_for: []
+    description: Print locations (front/back/sleeve/pocket)
+    examples: [["front"], ["front", "back"], ["left-chest", "back"]]
+    source_module: pricing
+    api_field: locations
+
+  blanks_cost_cents:
+    type: integer
+    required_for: [pricing_ready, quote_ready]
+    optional_for: []
+    description: Blanks cost in cents (from supplier or fallback)
+    validation: ">= 0"
+    source_module: pricing
+    api_field: blanks_cost
+
+  supplier_source:
+    type: string
+    required_for: [pricing_ready, quote_ready]
+    optional_for: []
+    description: Supplier source for blanks (canonical code)
+    source_module: pricing
+    api_field: supplier_source
+
+  lead_time_days:
+    type: integer
+    required_for: [pricing_ready, quote_ready]
+    optional_for: []
+    description: Expected lead time in days
+    validation: ">= 0"
+    source_module: pricing
+    api_field: lead_time
+
+  graphic_size_inches:
+    type: object
+    required_for: []
+    optional_for: [pricing_ready, quote_ready]
+    description: Artwork dimensions for print size tier classification
+    structure:
+      width_in: number
+      height_in: number
+    source_module: pricing
+    required_for_methods: [screen_print, engraving, transfers]
+
+  size_tier_label:
+    type: enum
+    required_for: []
+    optional_for: [pricing_ready, quote_ready]
+    allowed_values: [small_print, standard_print, jumbo_print]
+    description: Print size classification
+    source_module: pricing
+    required_for_methods: [screen_print, engraving, transfers]
+
+  setup_mode:
+    type: enum
+    required_for: []
+    optional_for: [pricing_ready, quote_ready]
+    allowed_values: [new_setup, re_setup, none]
+    description: Setup fee applicability
+    source_module: pricing
+    required_for_methods: [screen_print, engraving, transfers]
+
+  # Optional enrichment fields
+  description:
+    type: string
+    required_for: []
+    optional_for: [creation_minimum, stock_lookup_ready, pricing_ready, quote_ready]
+    description: Human-readable line item description
+
+  operator_notes:
+    type: string
+    required_for: []
+    optional_for: [creation_minimum, stock_lookup_ready, pricing_ready, quote_ready]
+    description: Internal notes or operator instructions
+
+  artwork_binding_ref:
+    type: uuid
+    required_for: []
+    optional_for: [quote_ready]
+    description: Reference to artwork_binding entity if artwork is attached
+
+  source_confidence:
+    type: enum
+    required_for: []
+    optional_for: [stock_lookup_ready, pricing_ready, quote_ready]
+    allowed_values: [high, medium, low]
+    description: Confidence level of normalized field extraction
+
+  inventory_as_of_utc:
+    type: timestamp
+    required_for: []
+    optional_for: [stock_lookup_ready]
+    description: Timestamp when supplier inventory was last checked
+
+  pricing_snapshot_id:
+    type: uuid
+    required_for: []
+    optional_for: [quote_ready]
+    description: Reference to pricing module calculation result
+
+completeness_classes:
+  creation_minimum:
+    description: Minimum fields required to create a line_item in a quote_packet
+    required_fields:
+      - line_item_id
+      - product_type
+      - quantity
+    gap_on_missing: GAP-MINT-LINE-ITEM-CREATION-INCOMPLETE
+    use_case: Agent can initialize a line_item skeleton for progressive enrichment
+
+  stock_lookup_ready:
+    description: Fields required to query supplier inventory APIs
+    required_fields:
+      - line_item_id
+      - product_type
+      - quantity
+      - supplier_code
+      - supplier_sku
+    optional_fields:
+      - style_code
+      - brand
+      - color
+      - size_breakdown
+      - canonical_style_key
+      - inventory_as_of_utc
+    gap_on_missing: GAP-MINT-LINE-ITEM-STOCK-LOOKUP-INCOMPLETE
+    use_case: Agent can check supplier availability and lead times
+    module: suppliers
+    api_endpoint: /api/v1/suppliers/:code/products/:sku/stock
+
+  pricing_ready:
+    description: Fields required to calculate pricing via job estimator
+    required_fields:
+      - line_item_id
+      - product_type
+      - quantity
+      - decoration_method
+      - color_count
+      - print_locations
+      - blanks_cost_cents
+      - supplier_source
+      - lead_time_days
+    conditional_required:
+      # These fields are required for certain decoration methods
+      - field: graphic_size_inches
+        when: decoration_method in [screen_print, engraving, transfers]
+      - field: size_tier_label
+        when: decoration_method in [screen_print, engraving, transfers]
+      - field: setup_mode
+        when: decoration_method in [screen_print, engraving, transfers]
+    gap_on_missing: GAP-MINT-LINE-ITEM-PRICING-INCOMPLETE
+    use_case: Agent can generate job estimate with real pricing
+    module: pricing
+    api_endpoint: /api/v1/pricing/estimate
+
+  quote_ready:
+    description: Complete line item ready for quote draft and customer presentation
+    required_fields:
+      - line_item_id
+      - product_type
+      - quantity
+      - decoration_method
+      - color_count
+      - print_locations
+      - blanks_cost_cents
+      - supplier_source
+      - lead_time_days
+    conditional_required:
+      - field: graphic_size_inches
+        when: decoration_method in [screen_print, engraving, transfers]
+      - field: size_tier_label
+        when: decoration_method in [screen_print, engraving, transfers]
+      - field: setup_mode
+        when: decoration_method in [screen_print, engraving, transfers]
+    optional_enrichment:
+      - description
+      - operator_notes
+      - artwork_binding_ref
+      - pricing_snapshot_id
+      - supplier_code
+      - supplier_sku
+      - style_code
+      - brand
+      - color
+      - size_breakdown
+    gap_on_missing: GAP-MINT-LINE-ITEM-QUOTE-NOT-READY
+    use_case: Agent can render complete quote draft with all customer-facing details
+
+module_field_mapping:
+  suppliers_search:
+    description: Cross-supplier product search endpoint field mapping
+    endpoint: GET /api/v1/suppliers/search?q={query}
+    canonical_to_api:
+      supplier_code: supplier_code
+      supplier_sku: supplier_sku
+      style_code: style_code
+      brand: brand
+      canonical_style_key: canonical_style_key
+      blanks_cost_cents: piece_price (multiply by 100, nullable)
+      quantity: quantity_available
+    enrichment_outputs:
+      - inventory_fidelity_score
+      - overlap_rank
+      - in_stock
+
+  suppliers_stock:
+    description: Supplier product stock check by SKU
+    endpoint: GET /api/v1/suppliers/:code/products/:sku/stock
+    canonical_to_api:
+      supplier_code: supplier (path param)
+      supplier_sku: sku (path param)
+      size_breakdown: variants[] (aggregate from quantity_available per variant)
+    response_structure:
+      variants:
+        - color: string
+        - size: string
+        - quantity_available: integer
+        - warehouses: array (optional, high fidelity suppliers)
+      total_available: integer
+      warehouse_fidelity: object
+
+  pricing_job_estimator:
+    description: Job estimator pricing calculation endpoint
+    endpoint: POST /api/v1/pricing/estimate
+    canonical_to_api:
+      quantity: qty
+      decoration_method: item_type
+      color_count: colors (or color_count as alias)
+      print_locations: locations
+      blanks_cost_cents: blanks_cost (divide by 100)
+      supplier_source: supplier_source
+      lead_time_days: lead_time
+      graphic_size_inches: graphic_size_inches
+      size_tier_label: size_tier_label
+      setup_mode: setup_mode
+    response_structure:
+      estimate_id: uuid
+      correlation_id: string
+      pricing_snapshot_id: estimate_id (use as pricing_snapshot_id)
+      line_items: array (pricing breakdown)
+      normalized_request: object (echoes inputs)
+      confidence: "object (level: high|medium|low)"
+
+gap_emission_rules:
+  missing_supplier_identifiers:
+    gap_id: GAP-MINT-LINE-ITEM-STOCK-LOOKUP-INCOMPLETE
+    severity: blocking
+    description: Cannot check supplier stock without supplier_code + supplier_sku
+    resolution_path: >
+      Use suppliers search API to match product description/type to canonical
+      supplier products, or prompt operator for supplier selection.
+    emitted_when:
+      - completeness_class: stock_lookup_ready
+      - missing_fields: [supplier_code, supplier_sku]
+
+  missing_pricing_inputs:
+    gap_id: GAP-MINT-LINE-ITEM-PRICING-INCOMPLETE
+    severity: blocking
+    description: Cannot calculate pricing without complete job estimate inputs
+    resolution_path: >
+      Prompt operator for decoration_method, color_count, print_locations,
+      or derive from intake seed/artwork evidence.
+    emitted_when:
+      - completeness_class: pricing_ready
+      - missing_fields: [decoration_method, color_count, print_locations, blanks_cost_cents]
+
+  missing_quote_readiness:
+    gap_id: GAP-MINT-LINE-ITEM-QUOTE-NOT-READY
+    severity: blocking
+    description: Line item not ready for quote draft generation
+    resolution_path: >
+      Ensure pricing calculation completed successfully and all conditional
+      fields for the decoration_method are present.
+    emitted_when:
+      - completeness_class: quote_ready
+      - missing_any_required: true
+
+forbidden_aliases:
+  no_line_id: >
+    Do not use "line_id" as a shorthand for "line_item_id". The canonical
+    field name is "line_item_id" to avoid ambiguity with line entities in
+    other contexts.
+  no_sku_without_supplier: >
+    Do not use "sku" alone without specifying "supplier_sku". SKUs are
+    supplier-specific and must include supplier context.
+  no_colors_vs_color_count_ambiguity: >
+    The pricing API accepts both "colors" and "color_count" as aliases, but
+    agents should normalize to "color_count" for clarity. If both are provided,
+    they must match.
+  no_locations_vs_print_locations_ambiguity: >
+    The pricing API field is "locations", but the canonical agent-facing name
+    is "print_locations" to avoid confusion with physical locations.
+
+validation_rules:
+  quantity_positive: "quantity > 0"
+  color_count_nonnegative: "color_count >= 0"
+  blanks_cost_nonnegative: "blanks_cost_cents >= 0"
+  lead_time_nonnegative: "lead_time_days >= 0"
+  print_locations_nonempty: "print_locations.length > 0"
+  supplier_code_canonical: "supplier_code in [sanmar, ssactivewear, ascolour]"
+  decoration_method_valid: "decoration_method in [screen_print, embroidery, engraving, transfers]"
+  conditional_graphic_size: >
+    If decoration_method in [screen_print, engraving, transfers], then
+    graphic_size_inches is required.
+  conditional_setup_mode: >
+    If decoration_method in [screen_print, engraving, transfers], then
+    setup_mode is required.
+
+examples:
+  creation_minimum:
+    line_item_id: "550e8400-e29b-41d4-a716-446655440000"
+    product_type: "t-shirt"
+    quantity: 50
+
+  stock_lookup_ready:
+    line_item_id: "550e8400-e29b-41d4-a716-446655440000"
+    product_type: "t-shirt"
+    quantity: 50
+    supplier_code: "sanmar"
+    supplier_sku: "PC54-BLACK-M"
+    brand: "Port & Company"
+    style_code: "PC54"
+    color: "black"
+
+  pricing_ready:
+    line_item_id: "550e8400-e29b-41d4-a716-446655440000"
+    product_type: "t-shirt"
+    quantity: 50
+    decoration_method: "screen_print"
+    color_count: 2
+    print_locations: ["front", "back"]
+    blanks_cost_cents: 350
+    supplier_source: "sanmar"
+    lead_time_days: 7
+    graphic_size_inches:
+      width_in: 10.0
+      height_in: 8.0
+    size_tier_label: "standard_print"
+    setup_mode: "new_setup"
+
+  quote_ready:
+    line_item_id: "550e8400-e29b-41d4-a716-446655440000"
+    product_type: "t-shirt"
+    quantity: 50
+    decoration_method: "screen_print"
+    color_count: 2
+    print_locations: ["front", "back"]
+    blanks_cost_cents: 350
+    supplier_source: "sanmar"
+    lead_time_days: 7
+    graphic_size_inches:
+      width_in: 10.0
+      height_in: 8.0
+    size_tier_label: "standard_print"
+    setup_mode: "new_setup"
+    description: "50 black t-shirts with 2-color front/back print"
+    supplier_code: "sanmar"
+    supplier_sku: "PC54-BLACK-M"
+    brand: "Port & Company"
+    style_code: "PC54"
+    color: "black"
+    artwork_binding_ref: "660e8400-e29b-41d4-a716-446655440001"
+    pricing_snapshot_id: "770e8400-e29b-41d4-a716-446655440002"
+
+implementation_notes:
+  field_name_truth: >
+    The canonical field names defined here are authoritative for all
+    quote_packet line_items and agent documentation. If mint-modules APIs
+    use different names (qty vs quantity, locations vs print_locations),
+    agents must translate at the API boundary, not in the normalized model.
+  progressive_enrichment: >
+    Line items start at creation_minimum and progress toward quote_ready
+    as agents resolve gaps. The completeness_classes define explicit
+    checkpoints where agents can emit gaps and resume work.
+  module_api_stability: >
+    The pricing and suppliers modules are considered stable for these
+    field mappings as of 2026-03-09. If module APIs change, update the
+    module_field_mapping section and bump contract version.
+  blocked_quote_send: >
+    Quote-to-Pay currently stops at quote_ready because payment link
+    generation is BLOCKED (payment module requires order_id for checkout).
+    This contract defines line item readiness independent of that blocker.
+
+# Gate D395 required fields (simplified references to canonical_field_set above)
+supplier_lookup_fields:
+  - supplier_code
+  - supplier_sku
+  - style_code
+  - brand
+  - color
+  - size_breakdown
+  - canonical_style_key
+
+pricing_inputs:
+  - decoration_method
+  - color_count
+  - print_locations
+  - blanks_cost_cents
+  - supplier_source
+  - lead_time_days
+  - graphic_size_inches
+  - size_tier_label
+  - setup_mode
