@@ -31,6 +31,7 @@ mint_service_canonical_id() {
     quote-page|quote-page-v2) printf '%s\n' "quote-page-v2" ;;
     order-intake|order-intake-v2) printf '%s\n' "order-intake-v2" ;;
     finance-adapter) printf '%s\n' "finance-adapter" ;;
+    auth|auth-v1) printf '%s\n' "auth-v1" ;;
     pricing|pricing-v2) printf '%s\n' "pricing-v2" ;;
     suppliers|suppliers-v2) printf '%s\n' "suppliers-v2" ;;
     shipping|shipping-v2) printf '%s\n' "shipping-v2" ;;
@@ -102,6 +103,7 @@ files-api	app_plane
 quote-page	app_plane
 order-intake	app_plane
 finance-adapter	app_plane
+auth	app_plane
 pricing	app_plane
 suppliers	app_plane
 shipping	app_plane
