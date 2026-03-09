@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# TRIAGE: mint.module.status.show
+# Purpose: Read-only Mint module status from governed projection
+# Authority: ops/bindings/mint.module.status.projected.yaml
+# Pattern: Projection consumer (does NOT re-run expensive proof)
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+PROJECTION="$ROOT/ops/bindings/mint.module.status.projected.yaml"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  mint.module.status.show [--format summary|full|warnings|freshness]
+
+Reads governed Mint module status projection without re-running expensive proofs.
+
+Options:
+  --format summary     (default) Show high-level summary + warnings
+  --format full        Show complete projection (modules, baseline, proofs)
+  --format warnings    Show only warnings (if any)
+  --format freshness   Show projection freshness metadata
+
+Notes:
+  - Default read path for Mint status
+  - Does NOT re-run mint.runtime.proof
+  - To refresh projection, run: mint.module.status.projection.build
+  - Authority: ops/bindings/mint.module.status.projected.yaml
+USAGE
+}
+
+format="${1:---format}"
+if [[ "$format" == "--format" ]]; then
+  format="${2:-summary}"
+fi
+
+if [[ ! -f "$PROJECTION" ]]; then
+  echo "ERROR: projection not found at $PROJECTION" >&2
+  echo "Run: ./bin/ops cap run mint.module.status.projection.build" >&2
+  exit 1
+fi
+
+show_summary() {
+  echo "════════════════════════════════════════"
+  echo "MINT MODULE STATUS (from projection)"
+  echo "════════════════════════════════════════"
+  echo
+
+  local generated_at
+  generated_at=$(yq -r '.generated_at_utc' "$PROJECTION")
+  echo "Generated: $generated_at UTC"
+
+  local baseline_status
+  baseline_status=$(yq -r '.baseline.state' "$PROJECTION")
+  echo "Baseline:  $baseline_status"
+  echo
+
+  echo "Runtime Summary:"
+  yq -r '.summary | to_entries | .[] | "  " + .key + ": " + (.value | tostring)' "$PROJECTION"
+  echo
+
+  local warning_count
+  warning_count=$(yq -r '.warnings | length' "$PROJECTION")
+  if [[ "$warning_count" -gt 0 ]]; then
+    echo "⚠️  WARNINGS ($warning_count):"
+    yq -r '.warnings[] | "  - " + .' "$PROJECTION"
+    echo
+  fi
+
+  echo "────────────────────────────────────────"
+  echo "To refresh: mint.module.status.projection.build"
+  echo "For deep check: mint.runtime.proof"
+  echo "────────────────────────────────────────"
+}
+
+show_full() {
+  cat "$PROJECTION"
+}
+
+show_warnings() {
+  local warning_count
+  warning_count=$(yq -r '.warnings | length' "$PROJECTION")
+  if [[ "$warning_count" -eq 0 ]]; then
+    echo "No warnings."
+    exit 0
+  fi
+
+  echo "WARNINGS ($warning_count):"
+  yq -r '.warnings[] | "  - " + .' "$PROJECTION"
+}
+
+show_freshness() {
+  echo "Projection Freshness:"
+  yq -r '{
+    generated_at_utc,
+    source_capability,
+    latest_intake_ref,
+    source_receipts: (.source_receipts | length)
+  } | to_entries | .[] | "  " + .key + ": " + (.value | tostring)' "$PROJECTION"
+}
+
+case "$format" in
+  summary)
+    show_summary
+    ;;
+  full)
+    show_full
+    ;;
+  warnings)
+    show_warnings
+    ;;
+  freshness)
+    show_freshness
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "ERROR: unknown format '$format'" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
