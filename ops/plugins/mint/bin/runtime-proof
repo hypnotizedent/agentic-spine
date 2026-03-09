@@ -114,15 +114,36 @@ emit_row() {
   printf "%-28s %-8s %s\n" "$check" "$state" "$note"
 }
 
+curl_with_retry() {
+  local max_attempts=3 attempt=1 backoff=2
+  local tmp="$1"; shift
+  local http rc
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    set +e
+    http="$(curl -sS "$@" -o "$tmp" -w "%{http_code}")"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 && "$http" != "429" ]]; then
+      echo "$http"
+      return 0
+    fi
+    if [[ "$http" == "429" && "$attempt" -lt "$max_attempts" ]]; then
+      sleep "$backoff"
+      backoff=$((backoff * 2))
+    fi
+    attempt=$((attempt + 1))
+  done
+  echo "$http"
+  return "$rc"
+}
+
 json_request_check() {
   local name="$1" method="$2" url="$3" body="$4" jq_expr="$5" pass_note="$6"
   shift 6
-  local tmp http
+  local tmp http rc
   tmp="$(mktemp)"
-  set +e
-  http="$(curl -sS -m 10 -o "$tmp" -w "%{http_code}" -X "$method" "$@" -H "content-type: application/json" -d "$body" "$url")"
-  local rc=$?
-  set -e
+  http="$(curl_with_retry "$tmp" -m 10 -X "$method" "$@" -H "content-type: application/json" -d "$body" "$url")"
+  rc=$?
   if [[ "$rc" -ne 0 ]]; then
     emit_row "$name" "FAIL" "curl_rc=$rc url=$url"
     fail=1
@@ -143,12 +164,10 @@ json_request_check() {
 
 http_json_check() {
   local name="$1" url="$2" jq_expr="$3" pass_note="$4"
-  local tmp http
+  local tmp http rc
   tmp="$(mktemp)"
-  set +e
-  http="$(curl -sS -m 10 -o "$tmp" -w "%{http_code}" "$url")"
-  local rc=$?
-  set -e
+  http="$(curl_with_retry "$tmp" -m 10 "$url")"
+  rc=$?
   if [[ "$rc" -ne 0 ]]; then
     emit_row "$name" "FAIL" "curl_rc=$rc url=$url"
     fail=1
@@ -235,10 +254,8 @@ else
     emit_row "shipping.env" "PASS" "required env present"
   fi
   tmp_ship="$(mktemp)"
-  set +e
-  ship_http="$(curl -sS -m 10 -o "$tmp_ship" -w "%{http_code}" -H "x-api-key: $shipping_key" "${SHIPPING_BASE}${SHIPPING_SHOP_PATH}")"
+  ship_http="$(curl_with_retry "$tmp_ship" -m 10 -H "x-api-key: $shipping_key" "${SHIPPING_BASE}${SHIPPING_SHOP_PATH}")"
   ship_rc=$?
-  set -e
   if [[ "$ship_rc" -ne 0 || "$ship_http" != "200" ]]; then
     emit_row "shipping.shop_address" "FAIL" "curl_rc=$ship_rc http=$ship_http"
     fail=1
@@ -251,10 +268,8 @@ else
   rm -f "$tmp_ship"
 
   tmp_history="$(mktemp)"
-  set +e
-  hist_http="$(curl -sS -m 10 -o "$tmp_history" -w "%{http_code}" -H "x-api-key: $shipping_key" "${SHIPPING_BASE}/api/v1/shipping/history?page=1&limit=1")"
+  hist_http="$(curl_with_retry "$tmp_history" -m 10 -H "x-api-key: $shipping_key" "${SHIPPING_BASE}/api/v1/shipping/history?page=1&limit=1")"
   hist_rc=$?
-  set -e
   if [[ "$hist_rc" -ne 0 || "$hist_http" != "200" ]]; then
     details="$(head -c 160 "$tmp_history" | tr '\n' ' ')"
     emit_row "shipping.history" "FAIL" "curl_rc=$hist_rc http=$hist_http body=$details"
@@ -297,10 +312,8 @@ elif [[ -z "$suppliers_key" ]]; then
   fail=1
 else
   tmp_search="$(mktemp)"
-  set +e
-  search_http="$(curl -sS -m 10 -o "$tmp_search" -w "%{http_code}" -H "x-api-key: $suppliers_key" "${SUPPLIERS_BASE}${SUPPLIERS_SEARCH_PATH}?q=PC61&limit=1")"
+  search_http="$(curl_with_retry "$tmp_search" -m 10 -H "x-api-key: $suppliers_key" "${SUPPLIERS_BASE}${SUPPLIERS_SEARCH_PATH}?q=PC61&limit=1")"
   search_rc=$?
-  set -e
   if [[ "$search_rc" -ne 0 || "$search_http" != "200" ]]; then
     emit_row "suppliers.search" "FAIL" "curl_rc=$search_rc http=$search_http"
     fail=1
@@ -317,10 +330,8 @@ else
     stock_path="${SUPPLIERS_STOCK_TEMPLATE/\{code\}/$code}"
     stock_path="${stock_path/\{sku\}/$sku}"
     tmp_stock="$(mktemp)"
-    set +e
-    stock_http="$(curl -sS -m 10 -o "$tmp_stock" -w "%{http_code}" -H "x-api-key: $suppliers_key" "${SUPPLIERS_BASE}${stock_path}")"
+    stock_http="$(curl_with_retry "$tmp_stock" -m 10 -H "x-api-key: $suppliers_key" "${SUPPLIERS_BASE}${stock_path}")"
     stock_rc=$?
-    set -e
     if [[ "$stock_rc" -ne 0 || "$stock_http" != "200" ]]; then
       emit_row "suppliers.stock" "FAIL" "curl_rc=$stock_rc http=$stock_http code=$code sku=$sku"
       fail=1
@@ -345,14 +356,12 @@ elif [[ -z "$files_key" ]]; then
   fail=1
 else
   tmp_art="$(mktemp)"
-  set +e
-  art_http="$(curl -sS -m 10 -o "$tmp_art" -w "%{http_code}" \
+  art_http="$(curl_with_retry "$tmp_art" -m 10 \
     -H "x-api-key: $files_key" \
     -H "content-type: application/json" \
     -d '{"visual_id":"30100","kind":"original","filename":"proof.png","content_type":"image/png","size_bytes":1024}' \
     "${FILES_BASE}${ARTWORK_PREPARE_PATH}")"
   art_rc=$?
-  set -e
   if [[ "$art_rc" -ne 0 || "$art_http" != "200" ]]; then
     details="$(head -c 120 "$tmp_art" | tr '\n' ' ')"
     emit_row "artwork.upload_prepare" "FAIL" "curl_rc=$art_rc http=$art_http body=$details"
