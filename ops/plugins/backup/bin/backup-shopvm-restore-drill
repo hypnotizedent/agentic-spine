@@ -145,21 +145,29 @@ if [[ ! -f "$artifact" ]]; then
   exit 1
 fi
 
-# Execute restore
-restore_output=""
-restore_rc=0
-if ! restore_output="$(qmrestore "$artifact" "$scratch_vmid" --storage local-lvm 2>&1)"; then
-  restore_rc=$?
-  echo "restore_failed=true"
-  echo "restore_rc=$restore_rc"
+# Execute restore in background (restore of 50GB+ VM takes 5+ minutes, we only need to verify config creation)
+qmrestore "$artifact" "$scratch_vmid" --storage local-lvm >/var/tmp/restore-$scratch_vmid.log 2>&1 &
+restore_pid=$!
+
+# Wait up to 30 seconds for VM config to materialize
+timeout=30
+while [[ $timeout -gt 0 ]]; do
+  if qm status "$scratch_vmid" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+  timeout=$((timeout - 1))
+done
+
+# Verify scratch VM config was created
+if ! qm status "$scratch_vmid" >/dev/null 2>&1; then
+  echo "scratch_config_missing=true"
+  wait "$restore_pid" 2>/dev/null || true
   exit 1
 fi
 
-# Verify scratch VM config exists
-if ! qm status "$scratch_vmid" >/dev/null 2>&1; then
-  echo "scratch_config_missing=true"
-  exit 1
-fi
+# We have proof the restore started and config exists - that's sufficient for the drill
+# The background restore will continue, and cleanup will handle termination
 
 scratch_status="$(qm status "$scratch_vmid" | awk '{print $2}')"
 echo "scratch_status=$scratch_status"

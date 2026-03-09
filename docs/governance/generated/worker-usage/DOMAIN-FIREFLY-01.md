@@ -2,21 +2,21 @@
 status: generated
 owner: "@ronny"
 last_verified: 2026-03-09
-scope: worker-usage-mint-fin-01
+scope: worker-usage-domain-firefly-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
 
-# MINT-FIN-01 Usage Surface
+# DOMAIN-FIREFLY-01 Usage Surface
 
-- Terminal ID: `MINT-FIN-01`
+- Terminal ID: `DOMAIN-FIREFLY-01`
 - Terminal Type: `domain-runtime`
-- Status: `active`
-- Domain: `mint`
-- Agent ID: `fin-agent`
+- Status: `planned`
+- Domain: `finance`
+- Agent ID: `firefly-agent`
 - Verify Command: `./bin/ops cap run verify.pack.run finance`
 
 ## Write Scope
-- `ops/agents/fin-agent.contract.md`
+- `ops/agents/firefly-agent.contract.md`
 
 ## Capabilities (1)
 - `finance.stack.status`

@@ -4,7 +4,7 @@ set -euo pipefail
 
 # D386: backup-shopvm-restore-drill-freshness-lock
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BACKUP_SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
 CAP_MAP="$ROOT/ops/bindings/capability_map.yaml"
@@ -38,10 +38,10 @@ expected_capability="backup.shopvm.restore.drill"
 expected_receipt_glob="mailroom/outbox/reports/restore-drills/backup-shopvm-restore-drill-*.yaml"
 expected_freshness_days=35  # Monthly cadence + buffer
 
-cap_exists="$(yq -r ".\"$expected_capability\".command // \"\"" "$CAPABILITIES")"
+cap_exists="$(yq -r ".capabilities.\"$expected_capability\".command // \"\"" "$CAPABILITIES")"
 [[ -n "$cap_exists" && "$cap_exists" != "null" ]] || err "capabilities.yaml missing $expected_capability"
 
-cap_map_script="$(yq -r ".\"$expected_capability\".script // \"\"" "$CAP_MAP")"
+cap_map_script="$(yq -r ".capabilities.\"$expected_capability\".script // \"\"" "$CAP_MAP")"
 [[ "$cap_map_script" == "backup-shopvm-restore-drill" ]] || err "capability_map missing backup-shopvm-restore-drill mapping"
 
 schedule_enabled="$(yq -r '.jobs[] | select(.id == "backup-shopvm-restore-drill-monthly") | (.enabled // false) | tostring' "$BACKUP_SCHEDULE")"

@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-06
+last_verified: 2026-03-09
 scope: worker-usage-mint-dutchman-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -19,7 +19,7 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `ops/plugins/mint/`
 - `ops/agents/flying-dutchman.contract.md`
 
-## Capabilities
+## Capabilities (7)
 - `mint.deploy.status`
 - `mint.deploy.sync`
 - `mint.live.baseline.status`
@@ -27,3 +27,15 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 - `mint.migrate.dryrun`
 - `mint.modules.health`
 - `mint.runtime.proof`
+
+## Gates (6)
+- `D148`
+- `D225`
+- `D226`
+- `D235`
+- `D236`
+- `D260`
+
+## Boundaries
+- Runtime surface is generated from registration and role contracts.
+- Do not hand-edit this file; regenerate via the generator script.

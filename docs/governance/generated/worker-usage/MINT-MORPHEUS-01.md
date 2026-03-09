@@ -1,7 +1,7 @@
 ---
 status: generated
 owner: "@ronny"
-last_verified: 2026-03-06
+last_verified: 2026-03-09
 scope: worker-usage-mint-morpheus-01
 source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ---
@@ -18,7 +18,59 @@ source_catalog: ops/bindings/terminal.worker.catalog.yaml
 ## Write Scope
 - `ops/agents/mint-agent.contract.md`
 
-## Capabilities
+## Capabilities (3)
 - `mint.intake.validate`
 - `mint.modules.health`
 - `mint.seeds.query`
+
+## Gates (46)
+- `D124`
+- `D125`
+- `D126`
+- `D148`
+- `D16`
+- `D17`
+- `D18`
+- `D22`
+- `D23`
+- `D235`
+- `D236`
+- `D237`
+- `D238`
+- `D239`
+- `D241`
+- `D242`
+- `D243`
+- `D244`
+- `D245`
+- `D246`
+- `D247`
+- `D248`
+- `D249`
+- `D250`
+- `D252`
+- `D253`
+- `D254`
+- `D256`
+- `D258`
+- `D259`
+- `D260`
+- `D261`
+- `D262`
+- `D31`
+- `D42`
+- `D44`
+- `D48`
+- `D58`
+- `D62`
+- `D63`
+- `D67`
+- `D79`
+- `D80`
+- `D81`
+- `D84`
+- `D85`
+
+## Boundaries
+- Runtime surface is generated from registration and role contracts.
+- Do not hand-edit this file; regenerate via the generator script.
