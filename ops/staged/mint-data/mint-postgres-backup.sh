@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # mint-postgres-backup.sh - App-level backup for VM 212 Mint Postgres
+# Canonical staged surface: ops/staged/mint-data/
 # DESTINATION: 730XD canonical backup plane (/md1400/backup-cold/apps/mint-data/postgres/)
 # GOVERNANCE: tier1_critical backup with 730XD offsite sync verification
 set -euo pipefail
