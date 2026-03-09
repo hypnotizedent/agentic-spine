@@ -1,5 +1,14 @@
 # Stateful Hardening 730XD Integration Receipt
 
+> Superseded on 2026-03-09 by the post-green backup posture and restore-wave proofs.
+> This receipt captures the March 8 mid-migration state only.
+> Current canonical backup truth is in:
+> - `/Users/ronnyworks/code/agentic-spine/ops/bindings/backup.inventory.yaml`
+> - `/Users/ronnyworks/code/agentic-spine/ops/bindings/backup.posture.snapshot.yaml`
+> - `/Users/ronnyworks/code/agentic-spine/mailroom/outbox/reports/MINT_STATEFUL_SAFETY_BACKUP_POSTURE_20260308.md`
+> - `/Users/ronnyworks/code/agentic-spine/mailroom/outbox/reports/restore-drills/FIRST_RESTORE_WAVE_20260309.md`
+> - `/Users/ronnyworks/code/agentic-spine/mailroom/outbox/reports/restore-drills/BACKUP_SCRIPT_AUDIT_AND_RESTORE_WAVE_20260309.md`
+
 **Date**: 2026-03-08
 **Loop**: LOOP-BACKUP-PLANE-CONSOLIDATION-730XD-E2E-20260308
 **Related**: LOOP-PAPERLESS-STATEFUL-BACKUP-DESTRUCTIVE-GUARD-HARDENING-20260308
