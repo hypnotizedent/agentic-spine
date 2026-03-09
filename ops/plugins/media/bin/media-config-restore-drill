@@ -93,8 +93,9 @@ run_stack_drill() {
 
   local backup_root="/mnt/docker/backups/media-config"
   local latest_backup
+  # Prefer last-good subdirectory, fallback to parent directory
   latest_backup="$(ssh $SSH_OPTS "$ssh_ref" \
-    "find '$backup_root' -maxdepth 1 -type f -name '${stack}-config-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-" || true)"
+    "find '$backup_root/last-good' '$backup_root' -maxdepth 1 -type f -name '${stack}-config-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-" || true)"
 
   if [[ -z "$latest_backup" ]]; then
     echo "  $stack: FAIL (no backup found)"
@@ -127,18 +128,12 @@ rm -rf "$drill_dir"
 mkdir -p "$drill_dir"
 
 # Find the service config path in archive (without extracting everything)
-service_paths=(
-  "mnt/docker/volumes/${service}/config"
-  "opt/appdata/${service}"
-)
-
 found_path=""
-for sp in "${service_paths[@]}"; do
-  if tar -tzf "$backup_file" | grep -q "^${sp}/"; then
-    found_path="$sp"
-    break
-  fi
-done
+if tar -tzf "$backup_file" | grep -q "^mnt/docker/volumes/${service}/config/"; then
+  found_path="mnt/docker/volumes/${service}/config"
+elif tar -tzf "$backup_file" | grep -q "^opt/appdata/${service}/"; then
+  found_path="opt/appdata/${service}"
+fi
 
 [[ -n "$found_path" ]] || { echo "service config path not found in backup" >&2; exit 1; }
 

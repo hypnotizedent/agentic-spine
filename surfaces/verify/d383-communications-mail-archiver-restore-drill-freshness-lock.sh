@@ -2,7 +2,7 @@
 # TRIAGE: Enforce governed mail-archiver restore-proof freshness and PASS status before communications restore posture can be considered green.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT="${SPINE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 CONTRACT="$ROOT/ops/bindings/mail.archiver.backup.contract.yaml"
 SCHEDULE="$ROOT/ops/bindings/backup.schedule.yaml"
 CAPABILITIES="$ROOT/ops/capabilities.yaml"
@@ -45,13 +45,13 @@ expected_freshness_days="$(yq -r '.restore_proof.freshness_days // 35' "$CONTRAC
 [[ "$expected_receipt_glob" != "" && "$expected_receipt_glob" != "null" ]] || err "contract missing restore_proof.canonical_receipt_glob"
 [[ "$expected_freshness_days" =~ ^[0-9]+$ ]] || err "contract freshness_days is not numeric"
 
-cap_exists="$(yq -r ".\"$expected_capability\".command // \"\"" "$CAPABILITIES")"
+cap_exists="$(yq -r ".capabilities.\"$expected_capability\".command // \"\"" "$CAPABILITIES")"
 [[ -n "$cap_exists" && "$cap_exists" != "null" ]] || err "capabilities.yaml missing $expected_capability"
 
-cap_map_script="$(yq -r ".\"$expected_capability\".script // \"\"" "$CAP_MAP")"
+cap_map_script="$(yq -r ".capabilities.\"$expected_capability\".script // \"\"" "$CAP_MAP")"
 [[ "$cap_map_script" == "communications-mail-archiver-restore-drill" ]] || err "capability_map missing communications-mail-archiver-restore-drill mapping"
 
-routing_command="$(yq -r ".\"$expected_capability\".target.command // \"\"" "$ROUTING")"
+routing_command="$(yq -r ".dispatch.\"$expected_capability\".target.command // \"\"" "$ROUTING")"
 [[ "$routing_command" == "./ops/plugins/communications/bin/communications-mail-archiver-restore-drill" ]] || err "routing.dispatch missing communications restore drill route"
 
 manifest_has_cap="$(yq -r '.plugins[] | select(.name == "communications") | .capabilities[]' "$PLUGIN_MANIFEST" | grep -Fx "$expected_capability" || true)"

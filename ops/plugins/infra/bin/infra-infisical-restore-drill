@@ -119,48 +119,48 @@ ARTIFACT_TS="${ARTIFACT_TS%.sql.gz}"
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DAY="$(date -u +%Y%m%d)"
 DRILL_DB="infisical_drill"
-TEMP_DUMP="/tmp/infisical-drill-restore.sql.gz"
+TEMP_DUMP_REMOTE="/tmp/infisical-drill-restore.sql.gz"
+TEMP_DUMP_LOCAL="$(mktemp /tmp/infisical-drill-XXXXXX.sql.gz)"
 mkdir -p "$RECEIPT_DIR"
 RECEIPT_PATH="$RECEIPT_DIR/infra-infisical-restore-drill-${RUN_DAY}.yaml"
 
 REMOTE_OUTPUT_FILE="$(mktemp)"
 REMOTE_ERROR_FILE="$(mktemp)"
 cleanup_local() {
-  rm -f "$REMOTE_OUTPUT_FILE" "$REMOTE_ERROR_FILE"
+  rm -f "$REMOTE_OUTPUT_FILE" "$REMOTE_ERROR_FILE" "$TEMP_DUMP_LOCAL"
 }
 trap cleanup_local EXIT
 
+# Copy dump from pve to local machine, then to infra-core
+echo "Copying dump from pve to local..." >&2
+pve_ssh "cat '$LATEST_OFFSITE_DB'" > "$TEMP_DUMP_LOCAL" || fail "failed to copy dump from pve"
+echo "Copying dump from local to infra-core..." >&2
+cat "$TEMP_DUMP_LOCAL" | infra_ssh "cat > '$TEMP_DUMP_REMOTE'" || fail "failed to copy dump to infra-core"
+
 set +e
-infra_ssh "bash -s -- '$LATEST_OFFSITE_DB' '$TEMP_DUMP' '$DRILL_DB' '$KEEP_ARTIFACTS' '$pve_ssh_ref'" <<'REMOTE' >"$REMOTE_OUTPUT_FILE" 2>"$REMOTE_ERROR_FILE"
+infra_ssh "bash -s -- '$TEMP_DUMP_REMOTE' '$DRILL_DB' '$KEEP_ARTIFACTS'" <<'REMOTE' >"$REMOTE_OUTPUT_FILE" 2>"$REMOTE_ERROR_FILE"
 set -euo pipefail
-offsite_db="$1"
-temp_dump="$2"
-drill_db="$3"
-keep_artifacts="${4:-0}"
-pve_ref="$5"
+temp_dump="$1"
+drill_db="$2"
+keep_artifacts="${3:-0}"
 
 cleanup() {
   if [[ "$keep_artifacts" != "1" ]]; then
-    docker exec -i infisical-db psql -U infisical -d postgres -v ON_ERROR_STOP=1 <<SQL >/dev/null 2>&1 || true
-DROP DATABASE IF EXISTS "$drill_db";
-SQL
+    docker exec infisical-db psql -U infisical -d postgres -c "DROP DATABASE IF EXISTS $drill_db" >/dev/null 2>&1 || true
     rm -f "$temp_dump"
   fi
 }
 trap cleanup EXIT
 
-# Copy dump from pve to infra-core
-scp -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$pve_ref:$offsite_db" "$temp_dump" >/dev/null 2>&1
+# Source .env for POSTGRES_PASSWORD (needs sudo since root-owned)
+POSTGRES_PASSWORD="$(sudo grep '^POSTGRES_PASSWORD=' /opt/stacks/secrets/.env | cut -d= -f2-)"
+export POSTGRES_PASSWORD
 
-cd /opt/stacks/secrets
-set -a; source .env 2>/dev/null || true; set +a
-
-# Drop and create scratch DB
-docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" infisical-db \
-  psql -U infisical -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-DROP DATABASE IF EXISTS "$drill_db";
-CREATE DATABASE "$drill_db" OWNER infisical;
-SQL
+# Drop and create scratch DB (separate commands to avoid transaction block error)
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" infisical-db \
+  psql -U infisical -d postgres -c "DROP DATABASE IF EXISTS $drill_db" >/dev/null 2>&1
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" infisical-db \
+  psql -U infisical -d postgres -c "CREATE DATABASE $drill_db OWNER infisical" >/dev/null 2>&1
 
 # Restore dump into scratch DB
 gunzip -c "$temp_dump" | docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" infisical-db \
@@ -230,7 +230,7 @@ fi
   echo "restore:"
   echo "  mode: scratch_nonprod"
   echo "  database: $(yaml_quote "$DRILL_DB")"
-  echo "  temp_dump_path: $(yaml_quote "$TEMP_DUMP")"
+  echo "  temp_dump_path: $(yaml_quote "$TEMP_DUMP_REMOTE")"
   echo "  keep_artifacts: $([[ "$KEEP_ARTIFACTS" -eq 1 ]] && echo true || echo false)"
   echo "comparison:"
   echo "  table_count:"
