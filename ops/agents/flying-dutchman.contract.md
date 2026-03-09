@@ -69,6 +69,9 @@ Those belong to Morpheus, Fin, Artie, or the underlying Mint modules.
 - `./bin/ops cap run mint.deploy.promote`
 - `./bin/ops cap run mint.migrate.dryrun`
 - `./bin/ops cap run mint.deploy.sync`
+- `./bin/ops cap run mint.quote.prepare` (operator-driven quote intake + orchestration)
+- `./bin/ops cap run mint.quote.show` (read quote_packet state for resumability)
+- `./bin/ops cap run mint.quote.render` (generate drafts; payment blocked on order_id)
 
 ## Related Employees
 

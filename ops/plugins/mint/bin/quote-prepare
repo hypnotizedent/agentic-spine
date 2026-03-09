@@ -180,14 +180,34 @@ IDENTITY_STATE=$(yq '.customer_ref.identity_state' "$PACKET_FILE")
 if [[ "$IDENTITY_STATE" == "resolved" ]]; then
   echo "  Customer already resolved"
   CUSTOMER_RESOLVED=1
+
+  # Remove any stale customer-related gaps (condition improved)
+  yq -i 'del(.open_gaps[] | select(.gap_type | test("^customer_")))' "$PACKET_FILE"
 else
   # Attempt resolution via customer-resolve.ts
   if [[ -f "$CUSTOMER_RESOLVE_SCRIPT" ]]; then
     echo "  Calling customer-resolve.ts..."
 
-    # Call customer resolve script
-    RESOLVE_OUTPUT=$(cd "$MINT_MODULES_ROOT/customers" && npm run --silent customer:resolve -- --json "$CUSTOMER_QUERY" 2>/dev/null || echo '{"state":"error"}')
-    RESOLVE_STATE=$(echo "$RESOLVE_OUTPUT" | jq -r '.state')
+    # Get DATABASE_URL from Infisical for customers service
+    DATABASE_URL=""
+    if command -v "$SPINE_ROOT/ops/tools/infisical-agent.sh" >/dev/null 2>&1; then
+      DATABASE_URL=$("$SPINE_ROOT/ops/tools/infisical-agent.sh" secrets get --path /spine/services/customers --key CUSTOMERS_DATABASE_URL 2>/dev/null || echo "")
+    fi
+
+    if [[ -z "$DATABASE_URL" ]]; then
+      echo "  DATABASE_URL unavailable from Infisical"
+
+      # Remove other customer gap types
+      yq -i 'del(.open_gaps[] | select(.gap_type | test("^customer_") and .gap_type != "customer_db_unavailable"))' "$PACKET_FILE"
+
+      CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_db_unavailable")) | length' "$PACKET_FILE")
+      if [[ "$CUSTOMER_GAP_EXISTS" -eq 0 ]]; then
+        yq -i ".open_gaps += [{\"gap_id\": 4, \"gap_type\": \"customer_db_unavailable\", \"description\": \"Customer resolution requires CUSTOMERS_DATABASE_URL from Infisical\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Store CUSTOMERS_DATABASE_URL in /spine/services/customers Infisical path\"}]" "$PACKET_FILE"
+      fi
+    else
+      # Call customer resolve script with DATABASE_URL
+      RESOLVE_OUTPUT=$(cd "$MINT_MODULES_ROOT/customers" && DATABASE_URL="$DATABASE_URL" npm run --silent customer:resolve -- --json "$CUSTOMER_QUERY" 2>/dev/null || echo '{"state":"error"}')
+      RESOLVE_STATE=$(echo "$RESOLVE_OUTPUT" | jq -r '.state')
 
     case "$RESOLVE_STATE" in
       exact_match|normalized_match)
@@ -205,11 +225,17 @@ else
         fi
         yq -i ".customer_ref.match_reason = \"$MATCH_REASON\"" "$PACKET_FILE"
         CUSTOMER_RESOLVED=1
+
+        # Remove any stale customer-related gaps (condition improved)
+        yq -i 'del(.open_gaps[] | select(.gap_type | test("^customer_")))' "$PACKET_FILE"
         ;;
       ambiguous)
         echo "  Customer ambiguous (multiple matches)"
         CANDIDATES=$(echo "$RESOLVE_OUTPUT" | jq -c '.candidates')
         CANDIDATE_COUNT=$(echo "$CANDIDATES" | jq 'length')
+
+        # Remove other customer gap types (state changed)
+        yq -i 'del(.open_gaps[] | select(.gap_type | test("^customer_") and .gap_type != "customer_ambiguous"))' "$PACKET_FILE"
 
         # Check if gap already exists
         CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_ambiguous")) | length' "$PACKET_FILE")
@@ -220,6 +246,9 @@ else
       new_customer)
         echo "  New customer (no match found)"
 
+        # Remove other customer gap types (state changed)
+        yq -i 'del(.open_gaps[] | select(.gap_type | test("^customer_") and .gap_type != "customer_new"))' "$PACKET_FILE"
+
         # Check if gap already exists
         CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_new")) | length' "$PACKET_FILE")
         if [[ "$CUSTOMER_GAP_EXISTS" -eq 0 ]]; then
@@ -229,6 +258,9 @@ else
       invalid_input|error)
         echo "  Customer resolution failed: $RESOLVE_STATE"
 
+        # Remove other customer gap types (state changed)
+        yq -i 'del(.open_gaps[] | select(.gap_type | test("^customer_") and .gap_type != "customer_unresolved"))' "$PACKET_FILE"
+
         # Check if gap already exists
         CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_unresolved")) | length' "$PACKET_FILE")
         if [[ "$CUSTOMER_GAP_EXISTS" -eq 0 ]]; then
@@ -236,8 +268,12 @@ else
         fi
         ;;
     esac
+    fi
   else
     echo "  customer-resolve.ts not found: $CUSTOMER_RESOLVE_SCRIPT"
+
+    # Remove other customer gap types (state changed)
+    yq -i 'del(.open_gaps[] | select(.gap_type | test("^customer_") and .gap_type != "customer_unresolved"))' "$PACKET_FILE"
 
     # Check if gap already exists
     CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_unresolved")) | length' "$PACKET_FILE")
@@ -262,18 +298,61 @@ else
     if curl -s -f -m 5 "$SUPPLIERS_BASE_URL/health" > /dev/null 2>&1; then
       echo "  Suppliers service available"
 
-      # For now, mark as pending real integration since we need product codes
-      # Real integration requires canonical product identifiers (brand/style/sku)
-      yq -i ".inventory_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"supplier_results\": [], \"stock_check_state\": \"blocked_insufficient_identifiers\", \"stock_warnings\": [\"Line items need canonical supplier product codes for stock lookup\"], \"supplier_receipt_refs\": []}" "$PACKET_FILE"
+      # Check if stock check is already completed
+      EXISTING_STOCK_STATE=$(yq '.inventory_snapshot.stock_check_state // ""' "$PACKET_FILE")
+      if [[ "$EXISTING_STOCK_STATE" == "completed" ]]; then
+        echo "  Stock check already completed"
+        # Remove any stock-related gaps (condition improved)
+        yq -i 'del(.open_gaps[] | select(.gap_type | test("^stock_")))' "$PACKET_FILE"
+      else
+        # Extract line items and check for supplier identifiers
+        LINE_ITEMS=$(yq -o=json '.line_items' "$PACKET_FILE")
+        HAS_IDENTIFIERS=0
 
-      # Add gap for missing product identifiers
-      STOCK_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "stock_identifiers_missing")) | length' "$PACKET_FILE")
-      if [[ "$STOCK_GAP_EXISTS" -eq 0 ]]; then
-        yq -i ".open_gaps += [{\"gap_id\": 5, \"gap_type\": \"stock_identifiers_missing\", \"description\": \"Line items need canonical supplier product identifiers\", \"severity\": \"warning\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Add brand/style_code/supplier_sku to line items\"}]" "$PACKET_FILE"
+        # Check if ANY line item has supplier product identifiers
+        for idx in $(seq 0 $((LINE_COUNT - 1))); do
+          BRAND=$(echo "$LINE_ITEMS" | jq -r ".[$idx].brand // empty")
+          STYLE_CODE=$(echo "$LINE_ITEMS" | jq -r ".[$idx].style_code // empty")
+          SUPPLIER_SKU=$(echo "$LINE_ITEMS" | jq -r ".[$idx].supplier_sku // empty")
+
+          if [[ -n "$BRAND" || -n "$STYLE_CODE" || -n "$SUPPLIER_SKU" ]]; then
+            HAS_IDENTIFIERS=1
+            break
+          fi
+        done
+
+        if [[ "$HAS_IDENTIFIERS" -eq 0 ]]; then
+          echo "  Line items lack supplier product identifiers"
+          yq -i ".inventory_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"supplier_results\": [], \"stock_check_state\": \"blocked_insufficient_identifiers\", \"stock_warnings\": [\"Line items need canonical supplier product codes for stock lookup\"], \"supplier_receipt_refs\": []}" "$PACKET_FILE"
+
+          # Remove other stock gap types
+          yq -i 'del(.open_gaps[] | select(.gap_type | test("^stock_") and .gap_type != "stock_identifiers_missing"))' "$PACKET_FILE"
+
+          STOCK_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "stock_identifiers_missing")) | length' "$PACKET_FILE")
+          if [[ "$STOCK_GAP_EXISTS" -eq 0 ]]; then
+            yq -i ".open_gaps += [{\"gap_id\": 5, \"gap_type\": \"stock_identifiers_missing\", \"description\": \"Line items need canonical supplier product identifiers\", \"severity\": \"warning\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Add brand/style_code/supplier_sku to line items\"}]" "$PACKET_FILE"
+          fi
+        else
+          # HONEST BLOCKED STATE: Suppliers service has NO bulk stock check endpoint
+          echo "  Stock check blocked: suppliers service needs bulk stock endpoint"
+          yq -i ".inventory_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"stock_check_state\": \"blocked_api_missing\", \"supplier_results\": [], \"stock_warnings\": [\"Suppliers service needs POST /api/v1/stock/check bulk endpoint\"], \"supplier_receipt_refs\": []}" "$PACKET_FILE"
+
+          # Remove other stock gap types
+          yq -i 'del(.open_gaps[] | select(.gap_type | test("^stock_") and .gap_type != "stock_api_missing"))' "$PACKET_FILE"
+
+          STOCK_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "stock_api_missing")) | length' "$PACKET_FILE")
+          if [[ "$STOCK_GAP_EXISTS" -eq 0 ]]; then
+            yq -i ".open_gaps += [{\"gap_id\": 5, \"gap_type\": \"stock_api_missing\", \"description\": \"Suppliers service needs POST /api/v1/stock/check bulk endpoint for line item stock checks\", \"severity\": \"warning\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Add bulk stock check endpoint to mint-modules/suppliers service\"}]" "$PACKET_FILE"
+          fi
+        fi
       fi
     else
       echo "  Suppliers service unreachable"
       yq -i ".inventory_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"stock_check_state\": \"service_unavailable\", \"supplier_results\": [], \"stock_warnings\": [\"Suppliers service unreachable\"], \"supplier_receipt_refs\": []}" "$PACKET_FILE"
+
+      # Service unavailable doesn't warrant a gap (transient condition)
+      # But remove stale stock gaps that may no longer be accurate
+      yq -i 'del(.open_gaps[] | select(.gap_type | test("^stock_") and .gap_type != "stock_service_unavailable"))' "$PACKET_FILE"
     fi
   fi
 fi
@@ -293,20 +372,129 @@ else
     if curl -s -f -m 5 "$PRICING_BASE_URL/health" > /dev/null 2>&1; then
       echo "  Pricing service available"
 
-      # For now, mark as pending real integration since we need normalized pricing inputs
-      # Real integration requires complete job estimate fields
-      PRICING_SNAPSHOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-      yq -i ".pricing_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"pricing_snapshot_id\": \"$PRICING_SNAPSHOT_ID\", \"pricing_state\": \"blocked_insufficient_inputs\", \"line_item_prices\": [], \"decoration_prices\": [], \"calculated_totals\": {\"subtotal\": 0, \"tax\": 0, \"shipping\": 0, \"total\": 0}, \"pricing_receipt_refs\": [], \"confidence_level\": \"none\"}" "$PACKET_FILE"
+      # Check if pricing is already completed
+      EXISTING_PRICING_STATE=$(yq '.pricing_snapshot.pricing_state // ""' "$PACKET_FILE")
+      if [[ "$EXISTING_PRICING_STATE" == "completed" ]]; then
+        echo "  Pricing already completed"
+        # Remove any pricing-related gaps (condition improved)
+        yq -i 'del(.open_gaps[] | select(.gap_type | test("^pricing_")))' "$PACKET_FILE"
+      else
+        # Check if line items have sufficient pricing inputs
+        LINE_ITEMS=$(yq -o=json '.line_items' "$PACKET_FILE")
+        HAS_PRICING_INPUTS=0
 
-      # Add gap for missing pricing inputs
-      PRICING_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "pricing_inputs_insufficient")) | length' "$PACKET_FILE")
-      if [[ "$PRICING_GAP_EXISTS" -eq 0 ]]; then
-        yq -i ".open_gaps += [{\"gap_id\": 6, \"gap_type\": \"pricing_inputs_insufficient\", \"description\": \"Line items need complete pricing inputs (decoration method, placement, etc.)\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Add decoration_method, placement, colors to line items\"}]" "$PACKET_FILE"
+        for idx in $(seq 0 $((LINE_COUNT - 1))); do
+          PRODUCT_TYPE=$(echo "$LINE_ITEMS" | jq -r ".[$idx].product_type // empty")
+          QUANTITY=$(echo "$LINE_ITEMS" | jq -r ".[$idx].quantity // empty")
+          DECORATION_METHOD=$(echo "$LINE_ITEMS" | jq -r ".[$idx].decoration_method // empty")
+
+          if [[ -n "$PRODUCT_TYPE" && -n "$QUANTITY" && -n "$DECORATION_METHOD" ]]; then
+            HAS_PRICING_INPUTS=1
+            break
+          fi
+        done
+
+        if [[ "$HAS_PRICING_INPUTS" -eq 0 ]]; then
+          echo "  Line items lack pricing inputs"
+          PRICING_SNAPSHOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+          yq -i ".pricing_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"pricing_snapshot_id\": \"$PRICING_SNAPSHOT_ID\", \"pricing_state\": \"blocked_insufficient_inputs\", \"line_item_prices\": [], \"decoration_prices\": [], \"calculated_totals\": {\"subtotal\": 0, \"tax\": 0, \"shipping\": 0, \"total\": 0}, \"pricing_receipt_refs\": [], \"confidence_level\": \"none\"}" "$PACKET_FILE"
+
+          # Remove other pricing gap types
+          yq -i 'del(.open_gaps[] | select(.gap_type | test("^pricing_") and .gap_type != "pricing_inputs_insufficient"))' "$PACKET_FILE"
+
+          PRICING_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "pricing_inputs_insufficient")) | length' "$PACKET_FILE")
+          if [[ "$PRICING_GAP_EXISTS" -eq 0 ]]; then
+            yq -i ".open_gaps += [{\"gap_id\": 6, \"gap_type\": \"pricing_inputs_insufficient\", \"description\": \"Line items need complete pricing inputs (product_type, quantity, decoration_method)\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Add product_type, quantity, decoration_method to line items\"}]" "$PACKET_FILE"
+          fi
+        else
+          # REAL API INTEGRATION: Call pricing estimate API
+          echo "  Calling pricing estimate API..."
+
+          # Get API key from Infisical
+          PRICING_API_KEY=""
+          if command -v "$SPINE_ROOT/ops/tools/infisical-agent.sh" >/dev/null 2>&1; then
+            PRICING_API_KEY=$("$SPINE_ROOT/ops/tools/infisical-agent.sh" secrets get --path /spine/services/pricing --key PRICING_API_KEY 2>/dev/null || echo "")
+          fi
+
+          if [[ -z "$PRICING_API_KEY" ]]; then
+            echo "  PRICING_API_KEY unavailable"
+            PRICING_SNAPSHOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+            yq -i ".pricing_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"pricing_snapshot_id\": \"$PRICING_SNAPSHOT_ID\", \"pricing_state\": \"api_key_unavailable\", \"line_item_prices\": [], \"decoration_prices\": [], \"calculated_totals\": {\"subtotal\": 0, \"tax\": 0, \"shipping\": 0, \"total\": 0}, \"pricing_receipt_refs\": [], \"confidence_level\": \"none\"}" "$PACKET_FILE"
+
+            # Remove other pricing gap types
+            yq -i 'del(.open_gaps[] | select(.gap_type | test("^pricing_") and .gap_type != "pricing_api_key_unavailable"))' "$PACKET_FILE"
+
+            PRICING_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "pricing_api_key_unavailable")) | length' "$PACKET_FILE")
+            if [[ "$PRICING_GAP_EXISTS" -eq 0 ]]; then
+              yq -i ".open_gaps += [{\"gap_id\": 6, \"gap_type\": \"pricing_api_key_unavailable\", \"description\": \"Pricing API key not available from Infisical\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Store PRICING_API_KEY in /spine/services/pricing Infisical path\"}]" "$PACKET_FILE"
+            fi
+          else
+            # Build pricing request payload
+            PRICING_REQUEST=$(jq -n \
+              --argjson line_items "$LINE_ITEMS" \
+              --arg correlation_id "$PACKET_ID" \
+              --arg request_timestamp_utc "$TIMESTAMP" \
+              '{
+                line_items: $line_items,
+                correlation_id: $correlation_id,
+                request_timestamp_utc: $request_timestamp_utc
+              }')
+
+            # Call pricing API
+            PRICING_RESPONSE=$(curl -s -f -m 10 \
+              -H "X-API-Key: $PRICING_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "$PRICING_REQUEST" \
+              "$PRICING_BASE_URL/api/v1/pricing/estimate" 2>/dev/null || echo '{"error": "api_call_failed"}')
+
+            if echo "$PRICING_RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+              ERROR_MSG=$(echo "$PRICING_RESPONSE" | jq -r '.error // "api_call_failed"')
+              ERROR_CLASS=$(echo "$PRICING_RESPONSE" | jq -r '.classification // "unknown"')
+              echo "  Pricing API call failed: $ERROR_MSG ($ERROR_CLASS)"
+              PRICING_SNAPSHOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+              yq -i ".pricing_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"pricing_snapshot_id\": \"$PRICING_SNAPSHOT_ID\", \"pricing_state\": \"api_call_failed\", \"line_item_prices\": [], \"decoration_prices\": [], \"calculated_totals\": {\"subtotal\": 0, \"tax\": 0, \"shipping\": 0, \"total\": 0}, \"pricing_receipt_refs\": [], \"confidence_level\": \"none\", \"api_error\": \"$ERROR_MSG\", \"api_error_class\": \"$ERROR_CLASS\"}" "$PACKET_FILE"
+
+              # Remove other pricing gap types
+              yq -i 'del(.open_gaps[] | select(.gap_type | test("^pricing_") and .gap_type != "pricing_api_failed"))' "$PACKET_FILE"
+
+              PRICING_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "pricing_api_failed")) | length' "$PACKET_FILE")
+              if [[ "$PRICING_GAP_EXISTS" -eq 0 ]]; then
+                yq -i ".open_gaps += [{\"gap_id\": 6, \"gap_type\": \"pricing_api_failed\", \"description\": \"Pricing API call failed: $ERROR_MSG\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Check pricing service logs and line item data\", \"api_error_class\": \"$ERROR_CLASS\"}]" "$PACKET_FILE"
+              fi
+            else
+              echo "  Pricing calculated successfully"
+
+              # Parse pricing response and update packet
+              PRICING_SNAPSHOT_ID=$(echo "$PRICING_RESPONSE" | jq -r '.receipt.pricing_snapshot_id // "unknown"')
+              CALCULATED_TOTALS=$(echo "$PRICING_RESPONSE" | jq -c '.calculated_totals // {}')
+
+              # Parse calculated totals
+              SUBTOTAL=$(echo "$CALCULATED_TOTALS" | jq -r '.subtotal // 0')
+              TAX=$(echo "$CALCULATED_TOTALS" | jq -r '.tax // 0')
+              SHIPPING=$(echo "$CALCULATED_TOTALS" | jq -r '.shipping // 0')
+              TOTAL=$(echo "$CALCULATED_TOTALS" | jq -r '.total // 0')
+
+              # Update packet with real pricing data
+              yq -i ".pricing_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"pricing_snapshot_id\": \"$PRICING_SNAPSHOT_ID\", \"pricing_state\": \"completed\", \"line_item_prices\": [], \"decoration_prices\": [], \"calculated_totals\": {\"subtotal\": $SUBTOTAL, \"tax\": $TAX, \"shipping\": $SHIPPING, \"total\": $TOTAL}, \"pricing_receipt_refs\": [], \"confidence_level\": \"high\"}" "$PACKET_FILE"
+
+              # Store full pricing response as receipt reference (first 500 chars to avoid bloat)
+              RECEIPT_SUMMARY=$(echo "$PRICING_RESPONSE" | jq -c '.' | head -c 500)
+              yq -i ".pricing_snapshot.pricing_receipt_refs += [\"${RECEIPT_SUMMARY}...\"]" "$PACKET_FILE"
+
+              # Remove all pricing-related gaps (pricing succeeded)
+              yq -i 'del(.open_gaps[] | select(.gap_type | test("^pricing_")))' "$PACKET_FILE"
+            fi
+          fi
+        fi
       fi
     else
       echo "  Pricing service unreachable"
       PRICING_SNAPSHOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
       yq -i ".pricing_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"pricing_snapshot_id\": \"$PRICING_SNAPSHOT_ID\", \"pricing_state\": \"service_unavailable\", \"line_item_prices\": [], \"decoration_prices\": [], \"calculated_totals\": {\"subtotal\": 0, \"tax\": 0, \"shipping\": 0, \"total\": 0}, \"pricing_receipt_refs\": [], \"confidence_level\": \"none\"}" "$PACKET_FILE"
+
+      # Service unavailable doesn't warrant a gap (transient condition)
+      # But remove stale pricing gaps that may no longer be accurate
+      yq -i 'del(.open_gaps[] | select(.gap_type | test("^pricing_") and .gap_type != "pricing_service_unavailable"))' "$PACKET_FILE"
     fi
   fi
 fi

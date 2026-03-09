@@ -144,6 +144,9 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 | `mint.module.status.projection.build` | mutating | Refresh governed Mint runtime status projection + canonical ITK capture |
 | `mint.seeds.query` | read-only | Query artwork seed records on mint-data |
 | `mint.intake.validate` | read-only | Validate intake payload against order-intake contract |
+| `mint.quote.prepare` | mutating | Create or update quote_packet for operator-driven quote workflows |
+| `mint.quote.show` | read-only | Read quote_packet by ID for resumability and status |
+| `mint.quote.render` | read-only | Generate draft quote artifacts (blocked: payment link requires order_id) |
 
 ## Minimum V1 Command Surface
 
@@ -158,3 +161,44 @@ When Morpheus runs a tool, its closeout must report the underlying receipt/ledge
 - `mintctl morpheus shipping history [--page N] [--limit N]`
 
 The alias `mintctl operator ...` must resolve to the same command surface.
+
+## Quote-to-Pay Lane (Operator-Driven)
+
+**Status:** Partial — intake + pricing integrations real, payment link blocked
+
+**Authority:** `ops/bindings/mint.quote.packet.authority.yaml`
+
+Morpheus can orchestrate operator-driven quotes through the `mint.quote.*` capability surface:
+
+- **`mint.quote.prepare --customer "NAME"`** — Create or update quote_packet work object
+  - Orchestrates intake → pricing → suppliers (when unblocked)
+  - Resumable: run multiple times as gaps are resolved
+  - Gaps tracked in `quote_packet.open_gaps[]`
+  - Work objects stored at `runtime/domain-state/mint/quote-packets/<PACKET_ID>.yaml`
+
+- **`mint.quote.show <PACKET_ID>`** — Read current quote_packet state
+  - Shows resolved customer, intake seed, pricing details, open gaps
+  - Use `mint.quote.show --list` to see all packets
+
+- **`mint.quote.render <PACKET_ID>`** — Generate draft quote artifacts
+  - Produces quote draft text and message preview
+  - **Payment link BLOCKED** — payment module requires `order_id` for checkout
+  - Checkout-without-order not yet implemented (GAP-MINT-004)
+
+**Blockers:**
+- Suppliers module integration not yet active (GAP-MINT-003)
+- Payment checkout requires order_id (GAP-MINT-004)
+- Cannot generate working payment links until order-first checkout path exists
+
+**What Works:**
+- Customer resolution + intake seed creation via order-intake
+- Pricing calculations via pricing module
+- Gap-driven resumable workflow
+- Draft quote text generation (without payment link)
+
+**What Does NOT Work Yet:**
+- Suppliers cost lookups (module exists but not wired)
+- Payment link generation (blocked on checkout-without-order)
+- End-to-end quote → payment flow (stops at draft stage)
+
+Morpheus should help operators prepare quotes as far as the real integrations allow, but must NOT overclaim working payment or complete Quote-to-Pay when gaps remain.
