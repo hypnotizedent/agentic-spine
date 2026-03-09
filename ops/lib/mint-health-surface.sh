@@ -4,6 +4,11 @@
 # Global health authority lives in ops/bindings/services.health.yaml.
 # Mint-specific bindings should only carry non-HTTP metadata (targets, SSH checks,
 # proof routes). Do not duplicate Mint HTTP port/path definitions elsewhere.
+#
+# CRITICAL ANTI-PATTERN: Do NOT decompose canonical URLs and recompose with resolved hosts.
+# CORRECT: Use mint_service_url() directly for health checks.
+# INCORRECT: Extract port/path via mint_service_port/path, then rebuild with probe host.
+# This violates D390's principle that HTTP truth must come from services.health.yaml.
 
 _MINT_HEALTH_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 _MINT_HEALTH_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/services.health.yaml"
