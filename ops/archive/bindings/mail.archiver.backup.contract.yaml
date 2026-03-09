@@ -1,8 +1,8 @@
 # Status: authoritative
-# Last verified: 2026-03-08
+# Last verified: 2026-03-09
 
 version: 1
-updated_at: "2026-03-08"
+updated_at: "2026-03-09"
 owner: "@ronny"
 scope: mail-archiver-backup-restore
 
@@ -52,12 +52,59 @@ restore_sop:
     - "Start containers and verify health endpoint plus login."
     - "Run governed validation checks and capture receipts."
 
+manifest_contract:
+  version: 2
+  format: key_value
+  canonical_pattern: "mail-archiver-manifest-<YYYYMMDDTHHMMSSZ>.txt"
+  required_keys:
+    - manifest_version
+    - timestamp
+    - db_dump_bytes
+    - uploads_archive_bytes
+    - schema_public_table_count
+    - schema_mail_archiver_table_count
+    - public_ef_migrations_history_rows
+    - mail_archiver_archived_emails_rows
+    - mail_archiver_mail_accounts_rows
+    - mail_archiver_users_rows
+    - uploads_file_count
+  note: "Manifest metrics are produced by the canonical backup script. Transition backfills may rewrite the current latest manifest without re-running pg_dump, but steady-state truth must come from the backup path."
+
+restore_proof:
+  capability_ref: communications.mailarchiver.restore.drill
+  schedule_id: mail-archiver-restore-drill-monthly
+  gate_id: D383
+  canonical_receipt_glob: mailroom/outbox/reports/restore-drills/communications-mailarchiver-restore-drill-*.yaml
+  receipt_format: yaml_v1
+  freshness_days: 35
+  scope_mode: hybrid_schema_restore_artifact_scan
+  required_manifest_keys:
+    - schema_public_table_count
+    - schema_mail_archiver_table_count
+    - public_ef_migrations_history_rows
+    - mail_archiver_archived_emails_rows
+    - mail_archiver_mail_accounts_rows
+    - mail_archiver_users_rows
+    - uploads_file_count
+  comparison_targets:
+    - public.__EFMigrationsHistory
+    - mail_archiver.ArchivedEmails
+    - mail_archiver.MailAccounts
+    - mail_archiver.Users
+    - schema_public_table_count
+    - schema_mail_archiver_table_count
+  note: "Monthly governed drill restores scratch schema plus control-table data, extracts uploads, and validates ArchivedEmails row count from the canonical dump stream against the manifest."
+
 verification:
   post_restore_commands:
     - "./bin/ops cap run communications.stack.status"
     - "./bin/ops cap run verify.pack.run communications"
     - "./bin/ops cap run services.health.status --id mail-archiver-vm214"
   backup_status_command: "./bin/ops cap run communications.mailarchiver.backup.status"
+  restore_drill_command: "./bin/ops cap run communications.mailarchiver.restore.drill"
+  restore_green_requires:
+    - fresh_passing_receipt
+    - D383
 
 cron_deploy_template:
   description: |

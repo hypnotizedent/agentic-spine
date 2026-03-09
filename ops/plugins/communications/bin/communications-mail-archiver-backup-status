@@ -93,6 +93,43 @@ err() { echo "  FAIL: $*"; ERRORS=$((ERRORS + 1)); }
 warn() { echo "  WARN: $*"; WARNINGS=$((WARNINGS + 1)); }
 ok_msg() { echo "  OK: $*"; }
 
+required_manifest_keys=(
+  manifest_version
+  timestamp
+  db_dump_bytes
+  uploads_archive_bytes
+  schema_public_table_count
+  schema_mail_archiver_table_count
+  public_ef_migrations_history_rows
+  mail_archiver_archived_emails_rows
+  mail_archiver_mail_accounts_rows
+  mail_archiver_users_rows
+  uploads_file_count
+)
+
+validate_manifest_content() {
+  local label="$1"
+  local content="$2"
+  local key
+
+  if [[ -z "$content" ]]; then
+    err "$label manifest is empty or unreadable"
+    return
+  fi
+
+  if ! grep -Eq '^manifest_version=2$' <<<"$content"; then
+    err "$label manifest is missing manifest_version=2"
+  else
+    ok_msg "$label manifest_version=2"
+  fi
+
+  for key in "${required_manifest_keys[@]}"; do
+    if ! grep -Eq "^${key}=" <<<"$content"; then
+      err "$label manifest missing required key: $key"
+    fi
+  done
+}
+
 resolve_ssh_ref() {
   local id="$1"
   local user="$2"
@@ -153,22 +190,36 @@ echo ""
 echo "=== Remote Backup Artifacts ==="
 
 BACKUP_BASE="/srv/mail-archiver/backups"
-LATEST_LOCAL_DB="$(comm_ssh "find '$BACKUP_BASE/last-good' -maxdepth 1 -type f -name 'mail-archiver-db-*.sql.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
-if [[ -z "$LATEST_LOCAL_DB" ]]; then
-  LATEST_LOCAL_DB="$(comm_ssh "find '$BACKUP_BASE' -maxdepth 1 -type f -name 'mail-archiver-db-*.sql.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
-fi
-LATEST_LOCAL_UPLOADS="$(comm_ssh "find '$BACKUP_BASE/last-good' -maxdepth 1 -type f -name 'mail-archiver-uploads-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
-if [[ -z "$LATEST_LOCAL_UPLOADS" ]]; then
-  LATEST_LOCAL_UPLOADS="$(comm_ssh "find '$BACKUP_BASE' -maxdepth 1 -type f -name 'mail-archiver-uploads-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
-fi
-LATEST_LOCAL_MANIFEST="$(comm_ssh "find '$BACKUP_BASE/last-good' -maxdepth 1 -type f -name 'mail-archiver-manifest-*.txt' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
-if [[ -z "$LATEST_LOCAL_MANIFEST" ]]; then
-  LATEST_LOCAL_MANIFEST="$(comm_ssh "find '$BACKUP_BASE' -maxdepth 1 -type f -name 'mail-archiver-manifest-*.txt' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
+LOCAL_SET=""
+for candidate_dir in "$BACKUP_BASE/last-good" "$BACKUP_BASE/staging"; do
+  while IFS= read -r candidate_db; do
+    [[ -n "$candidate_db" ]] || continue
+    candidate_base="$(basename "$candidate_db")"
+    candidate_ts="${candidate_base#mail-archiver-db-}"
+    candidate_ts="${candidate_ts%.sql.gz}"
+    candidate_uploads="$candidate_dir/mail-archiver-uploads-${candidate_ts}.tar.gz"
+    candidate_manifest="$candidate_dir/mail-archiver-manifest-${candidate_ts}.txt"
+    if comm_ssh "test -f '$candidate_uploads' && test -f '$candidate_manifest'" >/dev/null 2>&1; then
+      LOCAL_SET="$candidate_dir|$candidate_ts|$candidate_db|$candidate_uploads|$candidate_manifest"
+      break 2
+    fi
+  done < <(comm_ssh "find '$candidate_dir' -maxdepth 1 -type f -name 'mail-archiver-db-*.sql.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-")
+done
+
+LATEST_LOCAL_DB=""
+LATEST_LOCAL_UPLOADS=""
+LATEST_LOCAL_MANIFEST=""
+LOCAL_SET_DIR=""
+LOCAL_SET_TIMESTAMP=""
+if [[ -n "$LOCAL_SET" ]]; then
+  IFS='|' read -r LOCAL_SET_DIR LOCAL_SET_TIMESTAMP LATEST_LOCAL_DB LATEST_LOCAL_UPLOADS LATEST_LOCAL_MANIFEST <<<"$LOCAL_SET"
 fi
 REMOTE_NOW_SEC="$(comm_ssh "date +%s" 2>/dev/null || echo "0")"
 
 if [[ -n "$LATEST_LOCAL_DB" ]]; then
   ok_msg "local mail-archiver DB artifact present"
+  echo "  local_set_dir: $LOCAL_SET_DIR"
+  echo "  local_set_timestamp: $LOCAL_SET_TIMESTAMP"
   echo "  latest_local_db: $LATEST_LOCAL_DB"
   LOCAL_DB_BASENAME="$(basename "$LATEST_LOCAL_DB")"
   LOCAL_DB_SIZE="$(comm_ssh "stat -c '%s' '$LATEST_LOCAL_DB' 2>/dev/null || echo 0" 2>/dev/null || echo "0")"
@@ -199,14 +250,22 @@ if [[ -n "$LATEST_LOCAL_MANIFEST" ]]; then
   ok_msg "local manifest present"
   echo "  latest_local_manifest: $LATEST_LOCAL_MANIFEST"
   LOCAL_MANIFEST_BASENAME="$(basename "$LATEST_LOCAL_MANIFEST")"
+  LOCAL_MANIFEST_CONTENT="$(comm_ssh "cat '$LATEST_LOCAL_MANIFEST'" 2>/dev/null || true)"
+  validate_manifest_content "local" "$LOCAL_MANIFEST_CONTENT"
 else
   warn "no local manifest found in $BACKUP_BASE or $BACKUP_BASE/last-good"
 fi
 
-LATEST_OFFSITE_DB="$(pve_ssh "find '$OFFSITE_BASE' -maxdepth 1 -type f -name 'mail-archiver-db-*.sql.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
-LATEST_OFFSITE_UPLOADS="$(pve_ssh "find '$OFFSITE_BASE' -maxdepth 1 -type f -name 'mail-archiver-uploads-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
-LATEST_OFFSITE_MANIFEST="$(pve_ssh "find '$OFFSITE_BASE' -maxdepth 1 -type f -name 'mail-archiver-manifest-*.txt' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-" 2>/dev/null || true)"
 PVE_NOW_SEC="$(pve_ssh "date +%s" 2>/dev/null || echo "0")"
+LATEST_OFFSITE_DB=""
+LATEST_OFFSITE_UPLOADS=""
+LATEST_OFFSITE_MANIFEST=""
+if [[ -n "${LOCAL_DB_BASENAME:-}" ]]; then
+  candidate="$OFFSITE_BASE/$LOCAL_DB_BASENAME"
+  if pve_ssh "test -f '$candidate'" 2>/dev/null; then
+    LATEST_OFFSITE_DB="$candidate"
+  fi
+fi
 if [[ -n "$LATEST_OFFSITE_DB" ]]; then
   ok_msg "730XD offsite DB artifact present"
   echo "  latest_offsite_db: $LATEST_OFFSITE_DB"
@@ -219,42 +278,48 @@ if [[ -n "$LATEST_OFFSITE_DB" ]]; then
     echo "  latest_offsite_db_age_hours: $OFFSITE_AGE_HOURS"
     if [[ "$OFFSITE_AGE_HOURS" -gt 48 ]]; then
       warn "latest 730XD postgres backup is ${OFFSITE_AGE_HOURS}h old (>48h)"
-    else
+  else
       ok_msg "latest 730XD postgres backup age within 48h window"
     fi
   fi
-  if [[ -n "${LOCAL_DB_BASENAME:-}" && "$OFFSITE_DB_BASENAME" != "$LOCAL_DB_BASENAME" ]]; then
-    err "latest offsite DB does not match latest local DB ($OFFSITE_DB_BASENAME != $LOCAL_DB_BASENAME)"
-  else
-    ok_msg "latest offsite DB matches latest local DB name"
-  fi
+  ok_msg "matching offsite DB matches latest local DB name"
   if [[ -n "${LOCAL_DB_SIZE:-}" && "$LOCAL_DB_SIZE" != "0" && "$OFFSITE_DB_SIZE" != "$LOCAL_DB_SIZE" ]]; then
     err "latest offsite DB size does not match local DB size ($OFFSITE_DB_SIZE != $LOCAL_DB_SIZE)"
   else
     ok_msg "latest offsite DB size matches local DB size"
   fi
 else
-  err "no 730XD offsite postgres artifact found in $OFFSITE_BASE"
+  err "no 730XD offsite postgres artifact found for latest local DB ($OFFSITE_BASE/${LOCAL_DB_BASENAME:-mail-archiver-db-*.sql.gz})"
 fi
 
+if [[ -n "${LOCAL_UPLOADS_BASENAME:-}" ]]; then
+  candidate="$OFFSITE_BASE/$LOCAL_UPLOADS_BASENAME"
+  if pve_ssh "test -f '$candidate'" 2>/dev/null; then
+    LATEST_OFFSITE_UPLOADS="$candidate"
+  fi
+fi
 if [[ -n "$LATEST_OFFSITE_UPLOADS" ]]; then
   ok_msg "730XD offsite uploads artifact present"
   echo "  latest_offsite_uploads: $LATEST_OFFSITE_UPLOADS"
-  if [[ -n "${LOCAL_UPLOADS_BASENAME:-}" && "$(basename "$LATEST_OFFSITE_UPLOADS")" != "$LOCAL_UPLOADS_BASENAME" ]]; then
-    err "latest offsite uploads artifact does not match latest local uploads artifact"
-  fi
+  ok_msg "matching offsite uploads artifact present for latest local uploads"
 else
-  err "no 730XD offsite uploads artifact found in $OFFSITE_BASE"
+  err "no 730XD offsite uploads artifact found for latest local uploads ($OFFSITE_BASE/${LOCAL_UPLOADS_BASENAME:-mail-archiver-uploads-*.tar.gz})"
 fi
 
+if [[ -n "${LOCAL_MANIFEST_BASENAME:-}" ]]; then
+  candidate="$OFFSITE_BASE/$LOCAL_MANIFEST_BASENAME"
+  if pve_ssh "test -f '$candidate'" 2>/dev/null; then
+    LATEST_OFFSITE_MANIFEST="$candidate"
+  fi
+fi
 if [[ -n "$LATEST_OFFSITE_MANIFEST" ]]; then
   ok_msg "730XD offsite manifest present"
   echo "  latest_offsite_manifest: $LATEST_OFFSITE_MANIFEST"
-  if [[ -n "${LOCAL_MANIFEST_BASENAME:-}" && "$(basename "$LATEST_OFFSITE_MANIFEST")" != "$LOCAL_MANIFEST_BASENAME" ]]; then
-    err "latest offsite manifest does not match latest local manifest"
-  fi
+  ok_msg "matching offsite manifest present for latest local manifest"
+  OFFSITE_MANIFEST_CONTENT="$(pve_ssh "cat '$LATEST_OFFSITE_MANIFEST'" 2>/dev/null || true)"
+  validate_manifest_content "730XD offsite" "$OFFSITE_MANIFEST_CONTENT"
 else
-  err "no 730XD offsite manifest found in $OFFSITE_BASE"
+  err "no 730XD offsite manifest found for latest local manifest ($OFFSITE_BASE/${LOCAL_MANIFEST_BASENAME:-mail-archiver-manifest-*.txt})"
 fi
 
 # ── 3. Cron job check ──
