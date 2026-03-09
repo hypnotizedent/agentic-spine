@@ -76,11 +76,6 @@ def ensure_dir(path: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="module-status-projection-build")
     parser.add_argument(
-        "--no-intake",
-        action="store_true",
-        help="Refresh projection only; skip ITK envelope emission.",
-    )
-    parser.add_argument(
         "--owner-agent",
         default="",
         help="Override owner_agent written into the ITK envelope.",
@@ -445,7 +440,7 @@ def main() -> None:
         or str((sequence_doc.get("auth_module") or {}).get("state") or "").strip()
         or "unknown"
     )
-    baseline_status = "green" if all(row["state"] == "GREEN" for row in baseline_rows_projection) else "red"
+    baseline_status = "GREEN" if all(row["state"] == "GREEN" for row in baseline_rows_projection) else "RED"
 
     summary = {
         "runtime_modules_expected": len(app_plane_modules),
@@ -502,46 +497,44 @@ def main() -> None:
         "warnings": warnings,
     }
 
-    intake_path: Path | None = None
-    if not args.no_intake:
-        stamp = now_utc().strftime("%Y%m%d")
-        suffix = now_utc().strftime("%H%M%S").lower()
-        intake_id = f"ITK-{stamp}-mint-module-status-{suffix}"
-        intake_path = stable_intake_path(intake_root, intake_id)
-        intake_doc = {
-            "intake_id": intake_path.stem,
-            "chain_step": "intake",
-            "domain_id": "mint",
-            "concern_id": "module_runtime_status",
-            "authority_path": rel(projection_path),
-            "master_row_id": str(contract["authority"]["master_row_id"]),
-            "intake_mode": str(contract["capture_policy"]["default_intake_mode"]),
-            "evidence_refs": [row["receipt_ref"] for row in receipt_chain] + [rel(CONTRACT_PATH), rel(projection_path)],
-            "requested_by": args.requested_by or str(contract["capture_policy"]["default_requested_by"]),
-            "owner_agent": args.owner_agent or str(contract["capture_policy"]["default_owner_agent"]),
-            "created_at": projection_generated_at,
-            "updated_at": projection_generated_at,
-            "source_capability": "mint.module.status.projection.build",
-            "projection_generated_at_utc": projection_generated_at,
-            "summary": summary,
-            "baseline": {
-                "state": baseline_status,
-                "auth_state": explicit_auth_state,
-            },
-            "module_snapshot": [
-                {
-                    "id": row["id"],
-                    "runtime_state": row["runtime_state"],
-                    "health_probe_state": row["health_probe_state"],
-                    "proof_state": row["proof_state"],
-                }
-                for row in app_plane_modules
-            ],
-            "change_summary": projection_doc["change_summary"],
-            "run_keys": {row["capability_id"]: row["run_key"] for row in receipt_chain},
-        }
-        intake_path.write_text(yaml_dump(intake_doc), encoding="utf-8")
-        projection_doc["latest_intake_ref"] = rel(intake_path)
+    stamp = now_utc().strftime("%Y%m%d")
+    suffix = now_utc().strftime("%H%M%S").lower()
+    intake_id = f"ITK-{stamp}-mint-module-status-{suffix}"
+    intake_path = stable_intake_path(intake_root, intake_id)
+    intake_doc = {
+        "intake_id": intake_path.stem,
+        "chain_step": "intake",
+        "domain_id": "mint",
+        "concern_id": "module_runtime_status",
+        "authority_path": rel(projection_path),
+        "master_row_id": str(contract["authority"]["master_row_id"]),
+        "intake_mode": str(contract["capture_policy"]["default_intake_mode"]),
+        "evidence_refs": [row["receipt_ref"] for row in receipt_chain] + [rel(CONTRACT_PATH), rel(projection_path)],
+        "requested_by": args.requested_by or str(contract["capture_policy"]["default_requested_by"]),
+        "owner_agent": args.owner_agent or str(contract["capture_policy"]["default_owner_agent"]),
+        "created_at": projection_generated_at,
+        "updated_at": projection_generated_at,
+        "source_capability": "mint.module.status.projection.build",
+        "projection_generated_at_utc": projection_generated_at,
+        "summary": summary,
+        "baseline": {
+            "state": baseline_status,
+            "auth_state": explicit_auth_state,
+        },
+        "module_snapshot": [
+            {
+                "id": row["id"],
+                "runtime_state": row["runtime_state"],
+                "health_probe_state": row["health_probe_state"],
+                "proof_state": row["proof_state"],
+            }
+            for row in app_plane_modules
+        ],
+        "change_summary": projection_doc["change_summary"],
+        "run_keys": {row["capability_id"]: row["run_key"] for row in receipt_chain},
+    }
+    intake_path.write_text(yaml_dump(intake_doc), encoding="utf-8")
+    projection_doc["latest_intake_ref"] = rel(intake_path)
 
     header = (
         "# Mint Module Status Projection\n"
@@ -553,8 +546,7 @@ def main() -> None:
 
     print("mint.module.status.projection.build")
     print(f"projection: {rel(projection_path)}")
-    if intake_path:
-        print(f"intake: {rel(intake_path)}")
+    print(f"intake: {rel(intake_path)}")
     print(f"baseline_status: {baseline_status}")
     print(f"auth_state: {explicit_auth_state}")
     print(f"runtime_modules_running: {running_modules}/{len(app_plane_modules)}")
