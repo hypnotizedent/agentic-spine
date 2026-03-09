@@ -126,10 +126,7 @@ trap cleanup EXIT
 rm -rf "$drill_dir"
 mkdir -p "$drill_dir"
 
-# Extract to temp location
-tar -xzf "$backup_file" -C "$drill_dir"
-
-# Find the service config path in extracted backup
+# Find the service config path in archive (without extracting everything)
 service_paths=(
   "mnt/docker/volumes/${service}/config"
   "opt/appdata/${service}"
@@ -137,25 +134,33 @@ service_paths=(
 
 found_path=""
 for sp in "${service_paths[@]}"; do
-  if [[ -d "$drill_dir/$sp" ]]; then
-    found_path="$drill_dir/$sp"
+  if tar -tzf "$backup_file" | grep -q "^${sp}/"; then
+    found_path="$sp"
     break
   fi
 done
 
 [[ -n "$found_path" ]] || { echo "service config path not found in backup" >&2; exit 1; }
 
-# Verify key config file exists
-if [[ ! -f "$found_path/$config_key_file" ]]; then
-  echo "key config file missing: $config_key_file" >&2
+# Verify key config file exists in archive
+key_file_path="${found_path}/${config_key_file}"
+if ! tar -tzf "$backup_file" | grep -Fxq "$key_file_path"; then
+  echo "key config file missing in archive: $config_key_file" >&2
   exit 2
 fi
 
-# Verify config is valid (basic structure check)
-file_count="$(find "$found_path" -type f | wc -l | tr -d ' ')"
-[[ "$file_count" -gt 0 ]] || { echo "config directory empty" >&2; exit 3; }
+# Count files in config directory within archive
+file_count="$(tar -tzf "$backup_file" | grep "^${found_path}/" | grep -v '/$' | wc -l | tr -d ' ')"
+[[ "$file_count" -gt 0 ]] || { echo "config directory empty in archive" >&2; exit 3; }
 
-echo "OK: restored $file_count files, key file verified"
+# Extract only the key config file to verify it's valid
+mkdir -p "$drill_dir/$(dirname "$key_file_path")"
+tar -xzf "$backup_file" -C "$drill_dir" "$key_file_path"
+
+# Verify extracted file is not empty
+[[ -s "$drill_dir/$key_file_path" ]] || { echo "extracted key file is empty" >&2; exit 4; }
+
+echo "OK: verified $file_count files in archive, key file extracted and valid"
 REMOTE_SCRIPT
 )"
   local rc=$?
