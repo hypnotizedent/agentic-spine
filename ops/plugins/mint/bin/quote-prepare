@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# quote-prepare - Create or update quote_packet by orchestrating intake/pricing/suppliers
+#
+# Usage:
+#   quote-prepare --customer <query> [OPTIONS]
+#   quote-prepare --packet-id <id> [OPTIONS]
+#
+# Mutating. Creates or updates quote_packet work objects.
+#
+# Options:
+#   --customer <query>       Customer name/email/query (required for new packets)
+#   --packet-id <id>         Update existing packet (optional)
+#   --seed-id <id>           Link to intake seed evidence (optional)
+#   --line-items <json>      JSON array of line items (optional)
+#   --skip-stock-check       Skip supplier stock checks (faster, for draft)
+#   --skip-pricing           Skip pricing calculation (faster, for draft)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+PACKETS_DIR="$SPINE_ROOT/runtime/domain-state/mint/quote-packets"
+AUTHORITY="$SPINE_ROOT/ops/bindings/mint.quote.packet.authority.yaml"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+fail(){ echo "FAIL (1): $*" >&2; exit 1; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v uuidgen >/dev/null 2>&1 || stop "missing dependency: uuidgen"
+[[ -f "$AUTHORITY" ]] || stop "authority not found: $AUTHORITY"
+
+# Ensure packets directory exists
+mkdir -p "$PACKETS_DIR"
+
+# Parse arguments
+CUSTOMER_QUERY=""
+PACKET_ID=""
+SEED_ID=""
+LINE_ITEMS_JSON=""
+SKIP_STOCK=0
+SKIP_PRICING=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --customer)
+      CUSTOMER_QUERY="$2"
+      shift 2
+      ;;
+    --packet-id)
+      PACKET_ID="$2"
+      shift 2
+      ;;
+    --seed-id)
+      SEED_ID="$2"
+      shift 2
+      ;;
+    --line-items)
+      LINE_ITEMS_JSON="$2"
+      shift 2
+      ;;
+    --skip-stock-check)
+      SKIP_STOCK=1
+      shift
+      ;;
+    --skip-pricing)
+      SKIP_PRICING=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  quote-prepare --customer <query> [OPTIONS]
+  quote-prepare --packet-id <id> [OPTIONS]
+
+Create or update a quote_packet by orchestrating intake/pricing/suppliers.
+
+Options:
+  --customer <query>       Customer name/email/query (required for new)
+  --packet-id <id>         Update existing packet
+  --seed-id <id>           Link to intake seed evidence
+  --line-items <json>      JSON array of line items
+  --skip-stock-check       Skip supplier stock checks
+  --skip-pricing           Skip pricing calculation
+
+Example:
+  quote-prepare --customer "Acme Corp" --line-items '[{"product_type":"tshirt","quantity":100}]'
+EOF
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      fail "unexpected argument: $1"
+      ;;
+  esac
+done
+
+# Validate inputs
+if [[ -z "$PACKET_ID" ]] && [[ -z "$CUSTOMER_QUERY" ]]; then
+  fail "either --customer or --packet-id is required"
+fi
+
+# Determine mode: create or update
+MODE="create"
+if [[ -n "$PACKET_ID" ]]; then
+  MODE="update"
+  PACKET_FILE="$PACKETS_DIR/quote_packet_${PACKET_ID}.yaml"
+  [[ -f "$PACKET_FILE" ]] || fail "packet not found: $PACKET_ID"
+else
+  # Generate new packet ID
+  PACKET_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+  PACKET_FILE="$PACKETS_DIR/quote_packet_${PACKET_ID}.yaml"
+fi
+
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Build quote_packet structure
+if [[ "$MODE" == "create" ]]; then
+  echo "Creating new quote_packet: $PACKET_ID"
+
+  # Initialize packet
+  cat > "$PACKET_FILE" <<EOF
+quote_packet_id: $PACKET_ID
+state: drafting
+customer_ref:
+  identity_state: provisional
+  customer_query: "$CUSTOMER_QUERY"
+source_refs: []
+line_items: []
+created_at: $TIMESTAMP
+updated_at: $TIMESTAMP
+created_by: mint.quote.prepare
+open_gaps: []
+receipts: []
+EOF
+
+  # Add seed_id if provided
+  if [[ -n "$SEED_ID" ]]; then
+    yq -i ".source_refs += [{\"seed_id\": \"$SEED_ID\", \"intake_channel\": \"web\", \"source_timestamp\": \"$TIMESTAMP\"}]" "$PACKET_FILE"
+  fi
+
+  # Add line_items if provided
+  if [[ -n "$LINE_ITEMS_JSON" ]]; then
+    # Parse JSON and add line_item_id to each item
+    echo "$LINE_ITEMS_JSON" | jq -c '.[] | . + {"line_item_id": (.|tostring|@uri)}' | while IFS= read -r LINE; do
+      LINE_ITEM_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+      LINE_UPDATED=$(echo "$LINE" | jq --arg id "$LINE_ITEM_ID" '. + {"line_item_id": $id}')
+      yq -i ".line_items += [$LINE_UPDATED]" "$PACKET_FILE"
+    done
+  fi
+else
+  echo "Updating existing quote_packet: $PACKET_ID"
+  yq -i ".updated_at = \"$TIMESTAMP\"" "$PACKET_FILE"
+fi
+
+# Orchestration: customer resolution
+echo "Step 1/4: Customer resolution..."
+CUSTOMER_RESOLVED=0
+CUSTOMER_GAP_EXISTS=0
+
+# Check if customer is already resolved
+IDENTITY_STATE=$(yq '.customer_ref.identity_state' "$PACKET_FILE")
+if [[ "$IDENTITY_STATE" == "resolved" ]]; then
+  echo "  Customer already resolved"
+  CUSTOMER_RESOLVED=1
+else
+  # Attempt resolution (stub - would call mint-modules customer-resolve)
+  echo "  Customer resolution: STUB (would call customer-resolve.ts)"
+  echo "  Customer remains provisional"
+
+  # Add gap if not already present
+  CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_unresolved")) | length' "$PACKET_FILE")
+  if [[ "$CUSTOMER_GAP_EXISTS" -eq 0 ]]; then
+    yq -i ".open_gaps += [{\"gap_id\": 1, \"gap_type\": \"customer_unresolved\", \"description\": \"Customer identity not resolved\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Use customer resolution capability or manual resolution\"}]" "$PACKET_FILE"
+  fi
+fi
+
+# Orchestration: stock check
+echo "Step 2/4: Supplier stock check..."
+if [[ "$SKIP_STOCK" -eq 1 ]]; then
+  echo "  Skipped (--skip-stock-check)"
+else
+  LINE_COUNT=$(yq '.line_items | length' "$PACKET_FILE")
+  if [[ "$LINE_COUNT" -eq 0 ]]; then
+    echo "  No line items to check"
+  else
+    echo "  Stock check: STUB (would call suppliers module)"
+    # Add inventory_snapshot stub
+    yq -i ".inventory_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"supplier_results\": [], \"stock_available\": true, \"stock_warnings\": [], \"supplier_receipt_refs\": []}" "$PACKET_FILE"
+  fi
+fi
+
+# Orchestration: pricing
+echo "Step 3/4: Pricing calculation..."
+if [[ "$SKIP_PRICING" -eq 1 ]]; then
+  echo "  Skipped (--skip-pricing)"
+else
+  LINE_COUNT=$(yq '.line_items | length' "$PACKET_FILE")
+  if [[ "$LINE_COUNT" -eq 0 ]]; then
+    echo "  No line items to price"
+  else
+    echo "  Pricing: STUB (would call pricing module)"
+    # Add pricing_snapshot stub
+    PRICING_SNAPSHOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    yq -i ".pricing_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"pricing_snapshot_id\": \"$PRICING_SNAPSHOT_ID\", \"line_item_prices\": [], \"decoration_prices\": [], \"calculated_totals\": {\"subtotal\": 0, \"tax\": 0, \"shipping\": 0, \"total\": 0}, \"pricing_receipt_refs\": [], \"confidence_level\": \"low\"}" "$PACKET_FILE"
+  fi
+fi
+
+# Step 4: State determination
+echo "Step 4/4: State determination..."
+BLOCKING_GAPS=$(yq '.open_gaps | map(select(.severity == "blocking")) | length' "$PACKET_FILE")
+CURRENT_STATE=$(yq '.state' "$PACKET_FILE")
+
+if [[ "$BLOCKING_GAPS" -gt 0 ]]; then
+  NEW_STATE="needs_input"
+  echo "  Blocking gaps found: $BLOCKING_GAPS"
+elif [[ "$CUSTOMER_RESOLVED" -eq 1 ]] && [[ -n "$(yq '.pricing_snapshot' "$PACKET_FILE")" ]] && [[ "$(yq '.pricing_snapshot' "$PACKET_FILE")" != "null" ]]; then
+  # Could be ready_for_review if render artifacts exist
+  if [[ -n "$(yq '.quote_draft_ref' "$PACKET_FILE")" ]] && [[ "$(yq '.quote_draft_ref' "$PACKET_FILE")" != "null" ]]; then
+    NEW_STATE="ready_for_review"
+  else
+    NEW_STATE="drafting"
+  fi
+else
+  NEW_STATE="drafting"
+fi
+
+if [[ "$NEW_STATE" != "$CURRENT_STATE" ]]; then
+  yq -i ".state = \"$NEW_STATE\"" "$PACKET_FILE"
+  echo "  State: $CURRENT_STATE -> $NEW_STATE"
+else
+  echo "  State: $NEW_STATE (unchanged)"
+fi
+
+# Calculate confidence
+ARTWORK_CONF="none"
+PRICING_CONF="none"
+STOCK_CONF="none"
+CUSTOMER_CONF="low"
+
+if [[ "$CUSTOMER_RESOLVED" -eq 1 ]]; then
+  CUSTOMER_CONF="high"
+fi
+
+if [[ -n "$(yq '.pricing_snapshot' "$PACKET_FILE")" ]] && [[ "$(yq '.pricing_snapshot' "$PACKET_FILE")" != "null" ]]; then
+  PRICING_CONF=$(yq '.pricing_snapshot.confidence_level' "$PACKET_FILE")
+fi
+
+if [[ -n "$(yq '.inventory_snapshot' "$PACKET_FILE")" ]] && [[ "$(yq '.inventory_snapshot' "$PACKET_FILE")" != "null" ]]; then
+  STOCK_CONF="medium"
+fi
+
+# Overall confidence
+if [[ "$CUSTOMER_CONF" == "high" ]] && [[ "$PRICING_CONF" == "high" ]] && [[ "$STOCK_CONF" != "none" ]]; then
+  OVERALL_CONF="high"
+elif [[ "$BLOCKING_GAPS" -gt 0 ]]; then
+  OVERALL_CONF="low"
+else
+  OVERALL_CONF="medium"
+fi
+
+yq -i ".confidence = {\"overall\": \"$OVERALL_CONF\", \"artwork_confidence\": \"$ARTWORK_CONF\", \"pricing_confidence\": \"$PRICING_CONF\", \"stock_confidence\": \"$STOCK_CONF\", \"customer_confidence\": \"$CUSTOMER_CONF\"}" "$PACKET_FILE"
+
+# Output summary
+echo ""
+echo "quote_packet_id: $PACKET_ID"
+echo "state: $NEW_STATE"
+echo "confidence:"
+echo "  overall: $OVERALL_CONF"
+echo "  customer: $CUSTOMER_CONF"
+echo "  pricing: $PRICING_CONF"
+echo "  stock: $STOCK_CONF"
+echo "open_gaps:"
+if [[ "$BLOCKING_GAPS" -gt 0 ]]; then
+  yq '.open_gaps[] | "  - " + .gap_type + ": " + .description' "$PACKET_FILE"
+else
+  echo "  - (none)"
+fi
+echo ""
+echo "packet_file: $PACKET_FILE"
+
+exit 0

@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# quote-send - Send quote to customer (approval-gated)
+#
+# Usage:
+#   quote-send <quote_packet_id>
+#
+# Mutating. Sends quote to customer and updates packet state to 'sent'.
+# Requires manual approval via cap.sh approval gate.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+PACKETS_DIR="$SPINE_ROOT/runtime/domain-state/mint/quote-packets"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+fail(){ echo "FAIL (1): $*" >&2; exit 1; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+command -v uuidgen >/dev/null 2>&1 || stop "missing dependency: uuidgen"
+
+# Parse arguments
+PACKET_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  quote-send <quote_packet_id>
+
+Send quote to customer. Requires manual approval.
+
+Preconditions:
+  - state must be 'approved_to_send' or 'ready_for_review'
+  - no blocking gaps
+  - customer_ref.identity_state = resolved
+  - quote_draft_ref must exist
+  - payment_ref must exist
+  - customer_message_draft must exist
+
+Example:
+  quote-send 550e8400-e29b-41d4-a716-446655440000
+EOF
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      if [[ -z "$PACKET_ID" ]]; then
+        PACKET_ID="$1"
+      else
+        fail "unexpected argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$PACKET_ID" ]]; then
+  fail "quote_packet_id required"
+fi
+
+PACKET_FILE="$PACKETS_DIR/quote_packet_${PACKET_ID}.yaml"
+[[ -f "$PACKET_FILE" ]] || fail "packet not found: $PACKET_ID"
+
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Validate preconditions
+STATE=$(yq '.state' "$PACKET_FILE")
+BLOCKING_GAPS=$(yq '.open_gaps | map(select(.severity == "blocking")) | length' "$PACKET_FILE")
+
+if [[ "$STATE" != "ready_for_review" ]] && [[ "$STATE" != "approved_to_send" ]]; then
+  fail "cannot send: packet state is '$STATE' (must be 'ready_for_review' or 'approved_to_send')"
+fi
+
+if [[ "$BLOCKING_GAPS" -gt 0 ]]; then
+  fail "cannot send: packet has $BLOCKING_GAPS blocking gaps"
+fi
+
+CUSTOMER_STATE=$(yq '.customer_ref.identity_state' "$PACKET_FILE")
+if [[ "$CUSTOMER_STATE" != "resolved" ]]; then
+  fail "cannot send: customer identity not resolved"
+fi
+
+DRAFT_EXISTS=$(yq '.quote_draft_ref' "$PACKET_FILE")
+if [[ "$DRAFT_EXISTS" == "null" ]] || [[ -z "$DRAFT_EXISTS" ]]; then
+  fail "cannot send: quote_draft_ref missing (run quote-render first)"
+fi
+
+PAYMENT_EXISTS=$(yq '.payment_ref' "$PACKET_FILE")
+if [[ "$PAYMENT_EXISTS" == "null" ]] || [[ -z "$PAYMENT_EXISTS" ]]; then
+  fail "cannot send: payment_ref missing (run quote-render first)"
+fi
+
+MESSAGE_EXISTS=$(yq '.customer_message_draft' "$PACKET_FILE")
+if [[ "$MESSAGE_EXISTS" == "null" ]] || [[ -z "$MESSAGE_EXISTS" ]]; then
+  fail "cannot send: customer_message_draft missing (run quote-render first)"
+fi
+
+echo "Sending quote_packet: $PACKET_ID"
+echo ""
+
+# Show customer message for approval context
+echo "Customer Message Preview:"
+echo "---"
+yq -r '.customer_message_draft' "$PACKET_FILE"
+echo "---"
+echo ""
+
+# Send action (stub - would integrate with email/notification system)
+echo "Send action: STUB (would send via email/notification system)"
+echo "  Customer: $(yq '.customer_ref.customer_query // .customer_ref.customer_id' "$PACKET_FILE")"
+echo "  Payment link: $(yq '.payment_ref.payment_link_url' "$PACKET_FILE")"
+echo "  Total: \$$(yq '.pricing_snapshot.calculated_totals.total' "$PACKET_FILE")"
+
+# Create canonical quote_id (stub - would integrate with order truth system)
+QUOTE_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+echo "  Quote ID (canonical): $QUOTE_ID (stub, order truth integration pending)"
+
+# Update packet
+yq -i ".state = \"sent\"" "$PACKET_FILE"
+yq -i ".sent_at = \"$TIMESTAMP\"" "$PACKET_FILE"
+yq -i ".updated_at = \"$TIMESTAMP\"" "$PACKET_FILE"
+yq -i ".quote_id = \"$QUOTE_ID\"" "$PACKET_FILE"
+
+echo ""
+echo "quote_packet_id: $PACKET_ID"
+echo "quote_id: $QUOTE_ID"
+echo "state: $STATE -> sent"
+echo "sent_at: $TIMESTAMP"
+echo "send_status: success (stub)"
+echo "next_step: Monitor for payment via payment module webhooks"
+echo ""
+echo "packet_file: $PACKET_FILE"
+
+exit 0

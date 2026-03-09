@@ -39,7 +39,6 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 
 | Capability |
 |---|
-| `mint.deploy.promote` |
 | `mint.deploy.status` |
 | `mint.deploy.sync` |
 | `mint.intake.validate` |
@@ -47,14 +46,7 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | `mint.loop.daily` |
 | `mint.migrate.dryrun` |
 | `mint.module.status.projection.build` |
-| `mint.module.status.show` |
 | `mint.modules.health` |
-| `mint.quote.edge.reconcile` |
-| `mint.quote.turnstile.reconcile` |
-| `mint.public.canary` |
-| `mint.public.ingress.proof` |
-| `mint.public.ingress.reconcile` |
-| `mint.public.providers.reconcile` |
 | `mint.runtime.proof` |
 | `mint.seeds.query` |
 <!-- DOMAIN_CAPABILITY_CATALOG_END -->

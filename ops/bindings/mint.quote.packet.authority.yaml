@@ -1,0 +1,402 @@
+# Mint Quote Packet Authority
+# Status: authoritative
+# Last verified: 2026-03-09
+# Scope: mint-quote-packet-work-object
+
+version: 1
+updated_at: "2026-03-09"
+owner: "@ronny"
+status: authoritative
+scope: mint-quote-packet-work-object
+
+purpose: >
+  Define the canonical quote_packet work object so agents can own the
+  Quote-to-Pay lane end-to-end. A quote_packet is NOT the canonical quote
+  entity (see mint.order.truth.authority.yaml); it is the operational work
+  unit that agents use to prepare, price, render, and send a quote.
+
+  This authority unblocks the first real Mint agent business loop: intake →
+  prepare → render → approve → send → paid.
+
+non_goals:
+  - replacing the canonical quote entity defined in order truth authority
+  - replacing order lifecycle or order_revision immutability rules
+  - replacing intake seed evidence or artwork job evidence
+  - implementing full order system or production scheduling
+  - solving digital-proofs or full customer portal
+
+contracts:
+  order_truth_authority: ops/bindings/mint.order.truth.authority.yaml
+  module_lifecycle_authority: ops/bindings/mint.module.lifecycle.authority.yaml
+  module_status_authority: ops/bindings/mint.module.status.authority.contract.yaml
+  mint_domain_doc: docs/governance/domains/mint.md
+
+relationship_to_order_truth:
+  quote_packet_vs_quote: >
+    A quote_packet is an agent-owned work object that may eventually produce
+    a canonical quote entity. The packet contains all the evidence, gaps,
+    and draft artifacts needed to prepare a quote. Once sent, the packet
+    references a canonical quote_id from the order truth model.
+  quote_packet_vs_order: >
+    A quote_packet may reference intake seed evidence and may trigger order
+    creation, but it is not itself an order. Order creation remains a
+    separate governed promotion boundary.
+  immutability: >
+    quote_packets are mutable work objects. They capture snapshots and
+    receipts from immutable sources (pricing_snapshot, supplier stock, intake
+    evidence) but the packet itself is the operational state that agents
+    update as work progresses.
+
+quote_packet_schema:
+  required_fields:
+    quote_packet_id:
+      type: uuid
+      description: Unique identifier for this quote_packet work object
+    state:
+      type: enum
+      allowed_values:
+        - drafting
+        - needs_input
+        - ready_for_review
+        - approved_to_send
+        - sent
+        - paid
+        - closed
+      description: Current lifecycle state of the packet
+    customer_ref:
+      type: object
+      description: Customer identity (provisional or resolved)
+      required_subfields:
+        - identity_state (provisional|resolved)
+        - customer_query or customer_id
+    source_refs:
+      type: array
+      description: References to intake seed evidence or manual input
+      elements:
+        - seed_id (optional)
+        - intake_channel (web|email|phone|manual)
+        - source_timestamp
+    line_items:
+      type: array
+      description: Normalized line items for this quote
+      elements:
+        - line_item_id (uuid)
+        - product_type
+        - quantity
+        - size_breakdown (optional)
+        - decoration_method (optional)
+        - placement (optional)
+        - notes (optional)
+    created_at:
+      type: timestamp
+      description: When this packet was created
+    updated_at:
+      type: timestamp
+      description: Last update timestamp
+    created_by:
+      type: string
+      description: Agent or operator who created this packet
+
+  optional_fields:
+    artwork_bindings:
+      type: array
+      description: References to artwork seed/asset evidence
+      elements:
+        - line_item_id
+        - seed_refs (array of seed_id)
+        - asset_refs (array of MinIO/file paths)
+        - artwork_job_refs (array of artwork_job_id)
+        - binding_state (unmapped|mapped|approved)
+    inventory_snapshot:
+      type: object
+      description: Supplier stock check results
+      structure:
+        - snapshot_timestamp
+        - supplier_results (array)
+        - stock_available (boolean per line item)
+        - stock_warnings (array)
+        - supplier_receipt_refs (array)
+    pricing_snapshot:
+      type: object
+      description: Pricing calculation results
+      structure:
+        - snapshot_timestamp
+        - pricing_snapshot_id (uuid, from pricing module)
+        - line_item_prices (array)
+        - decoration_prices (array)
+        - calculated_totals (object: subtotal, tax, shipping, total)
+        - pricing_receipt_refs (array)
+        - confidence_level (high|medium|low)
+    open_gaps:
+      type: array
+      description: Explicit gaps blocking readiness
+      elements:
+        - gap_id (sequential per packet)
+        - gap_type (missing_artwork|stock_unavailable|pricing_ambiguous|customer_unresolved|other)
+        - description
+        - severity (blocking|warning)
+        - discovered_at (timestamp)
+        - resolution_path (suggested action)
+    confidence:
+      type: object
+      description: Overall confidence metrics
+      structure:
+        - overall (high|medium|low)
+        - artwork_confidence (high|medium|low|none)
+        - pricing_confidence (high|medium|low|none)
+        - stock_confidence (high|medium|low|none)
+        - customer_confidence (high|medium|low|none)
+    quote_draft_ref:
+      type: object
+      description: Reference to rendered quote draft
+      structure:
+        - draft_type (printavo|pdf|inline)
+        - draft_id (optional, external system ID)
+        - draft_payload (optional, inline draft content)
+        - draft_url (optional)
+        - generated_at (timestamp)
+    payment_ref:
+      type: object
+      description: Reference to payment link/checkout
+      structure:
+        - payment_provider (stripe|other)
+        - payment_link_id (optional)
+        - payment_link_url (optional)
+        - payment_amount (decimal)
+        - payment_currency (USD)
+        - generated_at (timestamp)
+    customer_message_draft:
+      type: string
+      description: Draft customer-facing message for quote send
+    quote_id:
+      type: uuid
+      description: Canonical quote_id once quote is sent (references order truth quote entity)
+    order_id:
+      type: uuid
+      description: Canonical order_id if order promotion has occurred
+    order_revision_id:
+      type: uuid
+      description: Canonical order_revision_id if order promotion has occurred
+    sent_at:
+      type: timestamp
+      description: When the quote was sent to customer
+    paid_at:
+      type: timestamp
+      description: When payment was received
+    closed_at:
+      type: timestamp
+      description: When the packet was closed
+    closed_reason:
+      type: string
+      description: Why the packet was closed (sent_and_paid|cancelled|superseded)
+    receipts:
+      type: array
+      description: Spine capability receipt references
+      elements:
+        - receipt_path
+        - capability_name
+        - run_key
+        - executed_at
+
+lifecycle_model:
+  states:
+    drafting:
+      description: Initial state, agent is assembling normalized inputs
+      allowed_transitions:
+        - needs_input
+        - ready_for_review
+        - closed
+      entry_conditions:
+        - quote_packet_id assigned
+        - customer_ref initialized
+        - line_items initialized (may be empty)
+      exit_conditions:
+        - sufficient normalized input to proceed to needs_input or ready_for_review
+    needs_input:
+      description: Blocked on missing information (artwork, stock, customer resolution, pricing)
+      allowed_transitions:
+        - drafting
+        - ready_for_review
+        - closed
+      entry_conditions:
+        - at least one blocking gap in open_gaps
+      exit_conditions:
+        - all blocking gaps resolved or packet abandoned
+    ready_for_review:
+      description: All inputs resolved, awaiting operator approval to send
+      allowed_transitions:
+        - needs_input
+        - approved_to_send
+        - closed
+      entry_conditions:
+        - no blocking gaps
+        - customer_ref.identity_state = resolved
+        - pricing_snapshot exists
+        - quote_draft_ref exists
+        - payment_ref exists
+        - customer_message_draft exists
+      exit_conditions:
+        - operator approval or rejection
+    approved_to_send:
+      description: Operator approved, ready for send action
+      allowed_transitions:
+        - sent
+        - needs_input
+        - closed
+      entry_conditions:
+        - explicit operator approval
+      exit_conditions:
+        - send action executed or approval revoked
+    sent:
+      description: Quote sent to customer, awaiting payment
+      allowed_transitions:
+        - paid
+        - closed
+      entry_conditions:
+        - send action completed
+        - sent_at timestamp recorded
+        - quote_id assigned (canonical quote entity created)
+      exit_conditions:
+        - payment received or quote expired/cancelled
+    paid:
+      description: Customer paid, quote business loop complete
+      allowed_transitions:
+        - closed
+      entry_conditions:
+        - payment received via payment module
+        - paid_at timestamp recorded
+      exit_conditions:
+        - operator closes packet or auto-close after handoff
+    closed:
+      description: Terminal state, packet archived
+      allowed_transitions: []
+      entry_conditions:
+        - explicit operator close action OR
+        - auto-close after paid + order handoff OR
+        - cancellation/supersession
+      exit_conditions:
+        - none, terminal state
+
+  state_progression_rules:
+    normal_path:
+      - drafting → needs_input → drafting → ready_for_review → approved_to_send → sent → paid → closed
+    skip_needs_input:
+      - drafting → ready_for_review (if all inputs present immediately)
+    abort_path:
+      - drafting → closed
+      - needs_input → closed
+      - ready_for_review → closed
+    revision_path:
+      - ready_for_review → needs_input (if operator requests changes)
+      - approved_to_send → needs_input (if pre-send validation fails)
+
+operational_rules:
+  quote_packet_creation:
+    triggers:
+      - manual operator command (mint.quote.prepare)
+      - agent orchestration request
+    required_inputs:
+      - customer_ref (provisional or resolved)
+      - at least one line_item (may be incomplete)
+    forbidden_shortcuts:
+      - creating quote_packet from seed alone without normalization
+      - creating quote_packet without customer_ref
+  quote_packet_promotion_to_ready:
+    required:
+      - customer_ref.identity_state = resolved
+      - all line_items have stock checked
+      - pricing_snapshot exists with confidence >= medium
+      - no blocking gaps in open_gaps
+      - artwork_bindings exist or explicitly noted as not-required
+  quote_send_approval:
+    required:
+      - explicit operator approval action
+      - state = approved_to_send
+      - quote_draft_ref exists
+      - payment_ref exists
+      - customer_message_draft exists
+    forbidden:
+      - automated send without approval
+      - send with blocking gaps present
+  packet_closure:
+    auto_close_conditions:
+      - state = paid AND order handoff complete
+      - state = sent AND quote expired/superseded
+    manual_close_allowed:
+      - any state (operator discretion)
+
+storage_contract:
+  canonical_location:
+    path: runtime/domain-state/mint/quote-packets/
+    format: yaml
+    naming: quote_packet_<quote_packet_id>.yaml
+  projection_surface:
+    path: runtime/domain-state/mint/quote-packets-index.yaml
+    format: yaml
+    description: Queryable index of all quote_packets by state
+  receipt_storage:
+    path: receipts/mint/quote-packets/<quote_packet_id>/
+    format: capability receipts as per Spine contract
+
+capability_surface:
+  prepare:
+    name: mint.quote.prepare
+    description: Create or update a quote_packet by orchestrating intake/pricing/suppliers
+    inputs:
+      - customer_query (required)
+      - source_refs (optional)
+      - line_items (optional, may be derived from source_refs)
+    outputs:
+      - quote_packet_id
+      - state
+      - open_gaps
+      - confidence
+    safety: mutating
+  show:
+    name: mint.quote.show
+    description: Read a quote_packet by ID for resumability
+    inputs:
+      - quote_packet_id (required)
+    outputs:
+      - full quote_packet structure
+    safety: read-only
+  render:
+    name: mint.quote.render
+    description: Generate customer-facing artifacts (quote draft, payment link, message)
+    inputs:
+      - quote_packet_id (required)
+    outputs:
+      - quote_draft_ref
+      - payment_ref
+      - customer_message_draft
+      - updated state (ready_for_review if successful)
+    safety: mutating
+  send:
+    name: mint.quote.send
+    description: Send quote to customer (approval-gated)
+    inputs:
+      - quote_packet_id (required)
+      - operator_approval (required, explicit)
+    outputs:
+      - quote_id (canonical quote entity)
+      - sent_at timestamp
+      - updated state (sent)
+    safety: mutating
+    approval_requirement: manual
+
+agent_guidance:
+  default_read_path: ops/bindings/mint.quote.packet.authority.yaml
+  work_object_vs_entity: >
+    quote_packet is a work object, not a canonical entity. It lives in
+    runtime/domain-state/, not in authoritative bindings. It captures
+    operational state for agent resumability, not immutable business truth.
+  resumability: >
+    Agents must be able to resume work on a quote_packet by reading
+    mint.quote.show without opening markdown notes or session recaps.
+  gap_discipline: >
+    When blocked inputs are discovered, record them explicitly in open_gaps
+    with gap_type, severity, and resolution_path. Do not write prose capture
+    docs; update the packet state.
+  receipt_discipline: >
+    All capability executions that modify a quote_packet must append receipt
+    references to the receipts array. Do not create parallel documentation.

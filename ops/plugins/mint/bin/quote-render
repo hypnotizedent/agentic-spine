@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# quote-render - Generate customer-facing artifacts (quote draft, payment link, message)
+#
+# Usage:
+#   quote-render <quote_packet_id>
+#
+# Mutating. Updates quote_packet with rendered artifacts.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
+PACKETS_DIR="$SPINE_ROOT/runtime/domain-state/mint/quote-packets"
+
+stop(){ echo "STOP (2): $*" >&2; exit 2; }
+fail(){ echo "FAIL (1): $*" >&2; exit 1; }
+
+command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
+
+# Parse arguments
+PACKET_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  quote-render <quote_packet_id>
+
+Generate customer-facing artifacts for a quote_packet.
+
+Outputs:
+  - quote_draft_ref (inline draft payload)
+  - payment_ref (Stripe checkout link placeholder)
+  - customer_message_draft
+
+Example:
+  quote-render 550e8400-e29b-41d4-a716-446655440000
+EOF
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      if [[ -z "$PACKET_ID" ]]; then
+        PACKET_ID="$1"
+      else
+        fail "unexpected argument: $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$PACKET_ID" ]]; then
+  fail "quote_packet_id required"
+fi
+
+PACKET_FILE="$PACKETS_DIR/quote_packet_${PACKET_ID}.yaml"
+[[ -f "$PACKET_FILE" ]] || fail "packet not found: $PACKET_ID"
+
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Validate preconditions
+STATE=$(yq '.state' "$PACKET_FILE")
+BLOCKING_GAPS=$(yq '.open_gaps | map(select(.severity == "blocking")) | length' "$PACKET_FILE")
+
+if [[ "$BLOCKING_GAPS" -gt 0 ]]; then
+  fail "cannot render: packet has $BLOCKING_GAPS blocking gaps (state: $STATE)"
+fi
+
+CUSTOMER_STATE=$(yq '.customer_ref.identity_state' "$PACKET_FILE")
+if [[ "$CUSTOMER_STATE" != "resolved" ]]; then
+  fail "cannot render: customer identity not resolved (state: $CUSTOMER_STATE)"
+fi
+
+PRICING_EXISTS=$(yq '.pricing_snapshot' "$PACKET_FILE")
+if [[ "$PRICING_EXISTS" == "null" ]] || [[ -z "$PRICING_EXISTS" ]]; then
+  fail "cannot render: pricing_snapshot missing (run quote-prepare first)"
+fi
+
+echo "Rendering quote_packet: $PACKET_ID"
+
+# Step 1: Generate quote draft
+echo "Step 1/3: Generating quote draft..."
+
+CUSTOMER_QUERY=$(yq '.customer_ref.customer_query // .customer_ref.customer_id' "$PACKET_FILE")
+LINE_ITEMS_COUNT=$(yq '.line_items | length' "$PACKET_FILE")
+TOTAL=$(yq '.pricing_snapshot.calculated_totals.total' "$PACKET_FILE")
+
+# Build inline draft payload (stub - would integrate with Printavo API)
+DRAFT_SUMMARY="Quote Draft for $CUSTOMER_QUERY (Line Items: $LINE_ITEMS_COUNT, Total: \$$TOTAL)"
+
+yq -i ".quote_draft_ref = {\"draft_type\": \"inline\", \"draft_payload\": \"$DRAFT_SUMMARY\", \"generated_at\": \"$TIMESTAMP\"}" "$PACKET_FILE"
+echo "  Quote draft: inline (Printavo integration pending)"
+
+# Step 2: Generate payment link
+echo "Step 2/3: Generating payment link..."
+
+# Stub - would integrate with payment module (Stripe checkout session)
+PAYMENT_AMOUNT=$(yq '.pricing_snapshot.calculated_totals.total' "$PACKET_FILE")
+PAYMENT_LINK_PLACEHOLDER="https://checkout.stripe.com/c/pay/PLACEHOLDER"
+
+yq -i ".payment_ref = {\"payment_provider\": \"stripe\", \"payment_link_url\": \"$PAYMENT_LINK_PLACEHOLDER\", \"payment_amount\": $PAYMENT_AMOUNT, \"payment_currency\": \"USD\", \"generated_at\": \"$TIMESTAMP\"}" "$PACKET_FILE"
+echo "  Payment link: $PAYMENT_LINK_PLACEHOLDER (stub)"
+
+# Step 3: Generate customer message draft
+echo "Step 3/3: Generating customer message draft..."
+
+MESSAGE_DRAFT=$(cat <<EOF
+Hi $CUSTOMER_QUERY,
+
+Thank you for requesting a quote from Mint Prints!
+
+I've prepared your quote with $LINE_ITEMS_COUNT item(s). The total is \$$TOTAL.
+
+You can review and pay for your order here:
+$PAYMENT_LINK_PLACEHOLDER
+
+If you have any questions or need to make changes, just let me know!
+
+Best regards,
+Ronny
+Mint Prints
+EOF
+)
+
+yq -i ".customer_message_draft = \"$MESSAGE_DRAFT\"" "$PACKET_FILE"
+echo "  Customer message: generated"
+
+# Update state
+NEW_STATE="ready_for_review"
+yq -i ".state = \"$NEW_STATE\"" "$PACKET_FILE"
+yq -i ".updated_at = \"$TIMESTAMP\"" "$PACKET_FILE"
+
+echo ""
+echo "quote_packet_id: $PACKET_ID"
+echo "state: $STATE -> $NEW_STATE"
+echo "render_status: success"
+echo "next_step: Review quote and use 'mint.quote.send' to send (requires approval)"
+echo ""
+echo "packet_file: $PACKET_FILE"
+
+exit 0

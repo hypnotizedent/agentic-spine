@@ -15,9 +15,9 @@ Generated from `ops/capabilities.yaml` by `catalog-domain-sync`.
 | `homarr.config.generate` |
 | `media-content-snapshot-refresh` |
 | `media.backup.create` |
-| `media.backup.restore` |
 | `media.capacity.runway.status` |
 | `media.capacity.snapshot.build` |
+| `media.config.restore.drill` |
 | `media.e2e.verify` |
 | `media.health.check` |
 | `media.metrics.today` |
