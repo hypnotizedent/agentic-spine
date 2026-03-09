@@ -4,16 +4,18 @@ set -euo pipefail
 # TRIAGE: mint.module.status.show
 # Purpose: Read-only Mint module status from governed projection
 # Authority: ops/bindings/mint.module.status.projected.yaml
+# Lifecycle: ops/bindings/mint.module.lifecycle.authority.yaml
 # Pattern: Projection consumer (does NOT re-run expensive proof)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 PROJECTION="$ROOT/ops/bindings/mint.module.status.projected.yaml"
+LIFECYCLE="$ROOT/ops/bindings/mint.module.lifecycle.authority.yaml"
 
 usage() {
   cat <<'USAGE'
 Usage:
-  mint.module.status.show [--format summary|full|warnings|freshness]
+  mint.module.status.show [--format summary|full|warnings|freshness|lifecycle]
 
 Reads governed Mint module status projection without re-running expensive proofs.
 
@@ -22,12 +24,14 @@ Options:
   --format full        Show complete projection (modules, baseline, proofs)
   --format warnings    Show only warnings (if any)
   --format freshness   Show projection freshness metadata
+  --format lifecycle   Show module lifecycle classification (runtime vs future vs blocked)
 
 Notes:
   - Default read path for Mint status
   - Does NOT re-run mint.runtime.proof
   - To refresh projection, run: mint.module.status.projection.build
-  - Authority: ops/bindings/mint.module.status.projected.yaml
+  - Runtime authority: ops/bindings/mint.module.status.projected.yaml
+  - Lifecycle authority: ops/bindings/mint.module.lifecycle.authority.yaml
 USAGE
 }
 
@@ -101,6 +105,39 @@ show_freshness() {
   } | to_entries | .[] | "  " + .key + ": " + (.value | tostring)' "$PROJECTION"
 }
 
+show_lifecycle() {
+  if [[ ! -f "$LIFECYCLE" ]]; then
+    echo "ERROR: lifecycle authority not found at $LIFECYCLE" >&2
+    exit 1
+  fi
+
+  echo "════════════════════════════════════════"
+  echo "MINT MODULE LIFECYCLE CLASSIFICATION"
+  echo "════════════════════════════════════════"
+  echo
+  echo "Authority: ops/bindings/mint.module.lifecycle.authority.yaml"
+  echo
+  echo "RUNTIME_ACTIVE (deployed on VM 213):"
+  yq -r '.modules[] | select(.lifecycle_state == "runtime_active") | "  - " + .id + " (" + .route_exposure + ")"' "$LIFECYCLE"
+  echo
+  echo "FUTURE_HORIZON (planned, not blocked):"
+  yq -r '.modules[] | select(.lifecycle_state == "future_horizon") | "  - " + .id + " — " + .runtime_notes' "$LIFECYCLE"
+  echo
+  echo "BLOCKED_ON_ORDER_TRUTH (needs order system):"
+  yq -r '.modules[] | select(.lifecycle_state == "blocked_on_order_truth") | "  - " + .id + " — " + .runtime_notes' "$LIFECYCLE"
+  echo
+  echo "DEFERRED (covered by other systems):"
+  yq -r '.modules[] | select(.lifecycle_state == "deferred") | "  - " + .id + " — " + .runtime_notes' "$LIFECYCLE"
+  echo
+  echo "CONTRACT_ONLY (library/utility code):"
+  yq -r '.modules[] | select(.lifecycle_state == "contract_only") | "  - " + .id + " — " + .runtime_notes' "$LIFECYCLE"
+  echo
+  echo "────────────────────────────────────────"
+  echo "Rule: Code presence ≠ runtime presence"
+  echo "Only runtime_active modules are deployed"
+  echo "────────────────────────────────────────"
+}
+
 case "$format" in
   summary)
     show_summary
@@ -113,6 +150,9 @@ case "$format" in
     ;;
   freshness)
     show_freshness
+    ;;
+  lifecycle)
+    show_lifecycle
     ;;
   -h|--help|help)
     usage

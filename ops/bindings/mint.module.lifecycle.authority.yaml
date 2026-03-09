@@ -1,0 +1,222 @@
+# Mint Module Lifecycle Authority
+# Status: authoritative
+# Last verified: 2026-03-09
+# Scope: mint-module-lifecycle-classification
+#
+# Purpose: Single source of truth for Mint module lifecycle state so agents
+#          can distinguish runtime modules from future/blocked/deferred modules.
+#          Code presence does NOT imply runtime presence.
+#
+# Rule: Every Mint module must have exactly one lifecycle state.
+# Rule: Runtime projection surfaces only include runtime_active modules.
+# Rule: Future/horizon modules remain discoverable but outside live deploy/proof.
+
+version: 1
+updated_at: "2026-03-09"
+owner: "@ronny"
+status: authoritative
+scope: mint-module-lifecycle-classification
+
+taxonomy:
+  runtime_active:
+    description: >
+      Currently deployed and running on production app plane (VM 213).
+      Included in runtime projection, health probes, and proof checks.
+    inclusion_policy:
+      runtime_projection: true
+      health_probes: true
+      proof_checks: true
+      vm_lifecycle_services: true
+
+  future_horizon:
+    description: >
+      Planned architecture with code present but not yet deployed.
+      Not blocked on external dependencies; deployment is a timing decision.
+    inclusion_policy:
+      runtime_projection: false
+      health_probes: false
+      proof_checks: false
+      vm_lifecycle_services: false
+
+  blocked_on_order_truth:
+    description: >
+      High-value module blocked on order system canonical truth.
+      Cannot deploy until order state/lifecycle contracts exist.
+    inclusion_policy:
+      runtime_projection: false
+      health_probes: false
+      proof_checks: false
+      vm_lifecycle_services: false
+
+  contract_only:
+    description: >
+      Shared library, package, or utility code. Not a deployable service.
+      No runtime presence expected.
+    inclusion_policy:
+      runtime_projection: false
+      health_probes: false
+      proof_checks: false
+      vm_lifecycle_services: false
+
+  deferred:
+    description: >
+      Capability covered by other systems or not currently prioritized.
+      Code may exist but deployment is not planned near-term.
+    inclusion_policy:
+      runtime_projection: false
+      health_probes: false
+      proof_checks: false
+      vm_lifecycle_services: false
+
+modules:
+  - id: auth
+    lifecycle_state: runtime_active
+    route_exposure: internal_api
+    vm_id: 213
+    runtime_notes: JWT authentication service for customer/admin/employee tokens
+
+  - id: files-api
+    canonical_name: artwork
+    lifecycle_state: runtime_active
+    route_exposure: internal_api
+    vm_id: 213
+    runtime_notes: Artwork/file upload service with MinIO presigned URLs (alias artwork in codebase)
+
+  - id: quote-page
+    lifecycle_state: runtime_active
+    route_exposure: public_form
+    vm_id: 213
+    runtime_notes: Public quote request form with Turnstile protection
+
+  - id: order-intake
+    lifecycle_state: runtime_active
+    route_exposure: internal_api
+    vm_id: 213
+    runtime_notes: Order creation and intake coordination
+
+  - id: finance-adapter
+    lifecycle_state: runtime_active
+    route_exposure: internal_adapter
+    vm_id: 213
+    runtime_notes: Firefly III and Paperless integration for financial records
+
+  - id: pricing
+    lifecycle_state: runtime_active
+    route_exposure: internal_api
+    vm_id: 213
+    runtime_notes: Product pricing calculations with supplier data
+
+  - id: suppliers
+    lifecycle_state: runtime_active
+    route_exposure: internal_api
+    vm_id: 213
+    runtime_notes: Supplier catalog search and stock availability (SanMar, etc)
+
+  - id: shipping
+    lifecycle_state: runtime_active
+    route_exposure: internal_api
+    vm_id: 213
+    runtime_notes: Shipping label generation via EasyPost with webhook validation
+
+  - id: payment
+    lifecycle_state: runtime_active
+    route_exposure: provider_webhook
+    vm_id: 213
+    runtime_notes: Stripe checkout and webhook processing
+
+  - id: public-ingress
+    lifecycle_state: runtime_active
+    route_exposure: edge_proxy
+    vm_id: 213
+    runtime_notes: Nginx reverse proxy for public-facing services
+
+  - id: shopify-module
+    lifecycle_state: future_horizon
+    route_exposure: inbound_channel_bridge
+    vm_id: null
+    runtime_notes: Shopify channel integration (planned architecture, timing TBD)
+
+  - id: digital-proofs
+    lifecycle_state: blocked_on_order_truth
+    route_exposure: internal_worker
+    vm_id: null
+    runtime_notes: Digital proof generation blocked on order lifecycle contracts
+
+  - id: customer-portal
+    lifecycle_state: future_horizon
+    route_exposure: public_app
+    vm_id: null
+    runtime_notes: Customer self-service portal (planned, post-order-system)
+
+  - id: orders
+    lifecycle_state: blocked_on_order_truth
+    route_exposure: internal_api
+    vm_id: null
+    runtime_notes: Order management system (needs canonical order state contracts)
+
+  - id: quotes
+    lifecycle_state: blocked_on_order_truth
+    route_exposure: internal_api
+    vm_id: null
+    runtime_notes: Quote management system (needs order/quote lifecycle contracts)
+
+  - id: customers
+    lifecycle_state: deferred
+    route_exposure: internal_api
+    vm_id: null
+    runtime_notes: Customer management covered by auth + external CRM
+
+  - id: notifications
+    lifecycle_state: deferred
+    route_exposure: internal_adapter
+    vm_id: null
+    runtime_notes: N8N workflow automation covers notification needs
+
+  - id: reporting
+    lifecycle_state: deferred
+    route_exposure: internal_api
+    vm_id: null
+    runtime_notes: Reporting deferred; current needs met by Firefly III + Grafana
+
+  - id: packages
+    lifecycle_state: contract_only
+    route_exposure: none
+    vm_id: null
+    runtime_notes: Shared TypeScript packages (not a deployable service)
+
+  - id: tools
+    lifecycle_state: contract_only
+    route_exposure: none
+    vm_id: null
+    runtime_notes: Development utilities and scripts (not a deployable service)
+
+discovery:
+  mint_modules_repo: /Users/ronnyworks/code/mint-modules
+  codebase_directory_structure: >
+    Each module has its own directory with src/, docs/, docker-compose.yml,
+    and module.contract.yaml. Code presence indicates future intent, not runtime state.
+
+  runtime_deployment_surface: >
+    Production deployment uses per-module docker-compose.yml files on VM 213.
+    Only runtime_active modules are deployed. See mint.deploy.status capability.
+
+agent_guidance:
+  read_capability: mint.module.status.show
+  lifecycle_query: >
+    Use mint.module.lifecycle.authority.yaml to understand module classification.
+    Do NOT assume code presence = runtime presence.
+
+  when_to_use_projection_build: >
+    Only for governed refresh of projection surfaces. Day-to-day reads should use
+    mint.module.status.show which consumes the projection without triggering rebuild.
+
+  runtime_vs_horizon: >
+    runtime_active modules are in production and can be probed/tested.
+    future_horizon modules exist in code but are not deployed.
+    blocked_on_order_truth modules need order system contracts first.
+
+contracts:
+  authority_file: ops/bindings/mint.module.lifecycle.authority.yaml
+  projection_consumer: ops/bindings/mint.module.status.projected.yaml
+  vm_lifecycle_binding: ops/bindings/vm.lifecycle.yaml
+  module_status_authority: ops/bindings/mint.module.status.authority.contract.yaml
