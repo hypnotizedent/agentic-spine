@@ -95,14 +95,16 @@ declare -a HTTP_ROWS=()
 while IFS=$'\t' read -r name plane; do
   [[ -z "$name" ]] && continue
   [[ "$(mint_service_enabled "$name")" == "true" ]] || continue
-  url="$(mint_service_url "$name")"
+  resolve_result="$(mint_service_resolved_url "$name" 5 || true)"
+  url="$(printf '%s\n' "$resolve_result" | awk '{print $1}')"
+  resolved_path="$(printf '%s\n' "$resolve_result" | awk '{print $2}')"
   [[ -n "$url" ]] || stop "missing canonical url for $name in $SERVICES_BINDING"
   case "$plane" in
     app_plane)
-      HTTP_ROWS+=("$name|$APP_TARGET_ID|$MINT_APPS_PROBE_PATH|$url")
+      HTTP_ROWS+=("$name|$APP_TARGET_ID|${resolved_path:-$MINT_APPS_PROBE_PATH}|$url")
       ;;
     data_plane)
-      HTTP_ROWS+=("$name|$DATA_TARGET_ID|$MINT_DATA_PROBE_PATH|$url")
+      HTTP_ROWS+=("$name|$DATA_TARGET_ID|${resolved_path:-$MINT_DATA_PROBE_PATH}|$url")
       ;;
     *)
       stop "unknown mint http plane in helper: $plane"
@@ -117,6 +119,30 @@ printf "%-16s %-10s %-10s %s\n" "COMPONENT" "STATUS" "TIME" "NOTE"
 fail=0
 checked=0
 
+curl_health_with_retry() {
+  local url="$1"
+  local max_attempts=3
+  local attempt=1
+  local backoff=1
+  local http_code curl_exit
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    set +e
+    http_code="$(curl -fsS -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$url" 2>/dev/null)"
+    curl_exit=$?
+    set -e
+
+    if [[ "$curl_exit" -eq 0 || ( "$curl_exit" -ne 28 && "$curl_exit" -ne 7 ) || "$attempt" -eq "$max_attempts" ]]; then
+      printf '%s %s\n' "$http_code" "$curl_exit"
+      return 0
+    fi
+
+    sleep "$backoff"
+    backoff=$((backoff * 2))
+    attempt=$((attempt + 1))
+  done
+}
+
 check_http() {
   local name="$1" target_id="$2" path_used="$3" url="$4"
   if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then return; fi
@@ -128,10 +154,7 @@ check_http() {
   fi
   local start_ms end_ms dur_ms http_code curl_exit
   start_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
-  set +e
-  http_code="$(curl -fsS -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$url" 2>/dev/null)"
-  curl_exit=$?
-  set -e
+  read -r http_code curl_exit <<< "$(curl_health_with_retry "$url")"
   end_ms="$(python3 -c 'import time; print(int(time.time()*1000))')"
   dur_ms=$((end_ms - start_ms))
   if [[ "$curl_exit" -eq 0 && "$http_code" == "200" ]]; then

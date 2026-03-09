@@ -13,6 +13,7 @@
 _MINT_HEALTH_ROOT="${SPINE_ROOT:-$HOME/code/agentic-spine}"
 _MINT_HEALTH_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/services.health.yaml"
 _MINT_PROBE_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/mint.probe.targets.yaml"
+_MINT_HEALTH_SSH_BINDING="${_MINT_HEALTH_ROOT}/ops/bindings/ssh.targets.yaml"
 
 mint_probe_target_id() {
   local plane="$1"
@@ -52,6 +53,51 @@ mint_service_field() {
 
 mint_service_url() {
   mint_service_field "$1" "url"
+}
+
+mint_service_resolved_url() {
+  local component="$1"
+  local timeout="${2:-5}"
+  local url host resolve_result
+  url="$(mint_service_url "$component")"
+  host="$(mint_service_host_target "$component")"
+
+  if [[ -z "$url" ]]; then
+    printf '\n'
+    return 1
+  fi
+
+  if [[ -n "$host" && "$host" != "null" ]] && \
+     [[ -f "$_MINT_HEALTH_SSH_BINDING" ]] && \
+     declare -F ssh_resolve_url_with_fallback >/dev/null 2>&1 && \
+     yq -e ".ssh.targets[] | select(.id == \"$host\")" "$_MINT_HEALTH_SSH_BINDING" >/dev/null 2>&1; then
+    resolve_result="$(ssh_resolve_url_with_fallback "$url" "$host" "$timeout")" || true
+    if [[ -n "$resolve_result" ]]; then
+      printf '%s\n' "$resolve_result"
+      return 0
+    fi
+  fi
+
+  printf '%s unmapped\n' "$url"
+}
+
+mint_service_resolved_base_url() {
+  local component="$1"
+  local timeout="${2:-5}"
+  local resolve_result resolved_url
+  resolve_result="$(mint_service_resolved_url "$component" "$timeout" || true)"
+  resolved_url="$(printf '%s\n' "$resolve_result" | awk '{print $1}')"
+  python3 - "$resolved_url" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+url = sys.argv[1]
+parsed = urlparse(url)
+if not parsed.scheme or not parsed.netloc:
+    print("")
+else:
+    print(f"{parsed.scheme}://{parsed.netloc}")
+PY
 }
 
 mint_service_host_target() {
