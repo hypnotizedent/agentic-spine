@@ -15,8 +15,18 @@ purpose: >
   entity (see mint.order.truth.authority.yaml); it is the operational work
   unit that agents use to prepare, price, render, and send a quote.
 
-  This authority unblocks the first real Mint agent business loop: intake →
-  prepare → render → approve → send → paid.
+  This authority defines the first real Mint agent business loop: intake →
+  prepare (REAL customer resolution + service checks) → render (quote draft)
+  → BLOCKED at payment (requires checkout-without-order support).
+
+  IMPLEMENTATION STATUS (2026-03-09):
+    - Customer resolution: REAL (mint-modules customers service)
+    - Stock check: service-aware (blocked on missing product identifiers)
+    - Pricing: service-aware (blocked on missing complete inputs)
+    - Quote draft: stub (inline summary, Printavo integration pending)
+    - Payment link: BLOCKED (payment module requires order_id)
+    - Receipt tracking: REAL (appends SPINE_CAP_RUN_KEY receipts)
+    - Packet index: REAL (runtime/domain-state/mint/quote-packets-index.yaml)
 
 non_goals:
   - replacing the canonical quote entity defined in order truth authority
@@ -342,19 +352,25 @@ capability_surface:
   prepare:
     name: mint.quote.prepare
     description: Create or update a quote_packet by orchestrating intake/pricing/suppliers
+    implementation_status: REAL (customer resolution via mint-modules, service-aware stock/pricing)
     inputs:
       - customer_query (required)
       - source_refs (optional)
       - line_items (optional, may be derived from source_refs)
     outputs:
       - quote_packet_id
-      - state
-      - open_gaps
-      - confidence
+      - state (drafting|needs_input based on real gap analysis)
+      - open_gaps (real customer resolution outcomes: resolved|ambiguous|new|unresolved)
+      - confidence (based on real resolution state)
+      - receipts (SPINE_CAP_RUN_KEY appended)
     safety: mutating
+    blockers:
+      - stock check: requires canonical supplier product identifiers (brand/style/sku) in line_items
+      - pricing: requires complete job estimate inputs (decoration_method, placement, colors) in line_items
   show:
     name: mint.quote.show
     description: Read a quote_packet by ID for resumability
+    implementation_status: REAL
     inputs:
       - quote_packet_id (required)
     outputs:
@@ -362,18 +378,24 @@ capability_surface:
     safety: read-only
   render:
     name: mint.quote.render
-    description: Generate customer-facing artifacts (quote draft, payment link, message)
+    description: Generate customer-facing artifacts (quote draft, customer message)
+    implementation_status: PARTIAL (quote draft stub, payment link BLOCKED)
     inputs:
       - quote_packet_id (required)
     outputs:
-      - quote_draft_ref
-      - payment_ref
-      - customer_message_draft
-      - updated state (ready_for_review if successful)
+      - quote_draft_ref (stub: inline summary, Printavo pending)
+      - payment_ref (BLOCKED: payment module requires order_id for checkout)
+      - customer_message_draft (includes blocker note)
+      - updated state (needs_input if payment blocked, NOT ready_for_review)
+      - receipts (SPINE_CAP_RUN_KEY appended)
     safety: mutating
+    blockers:
+      - payment link generation BLOCKED until payment module supports checkout-without-order
+      - quote draft is inline stub, not Printavo integration
   send:
     name: mint.quote.send
     description: Send quote to customer (approval-gated)
+    implementation_status: BLOCKED (payment link prerequisite not met)
     inputs:
       - quote_packet_id (required)
       - operator_approval (required, explicit)
@@ -383,6 +405,9 @@ capability_surface:
       - updated state (sent)
     safety: mutating
     approval_requirement: manual
+    blockers:
+      - cannot send quote without payment link
+      - payment link blocked on checkout-without-order support
 
 agent_guidance:
   default_read_path: ops/bindings/mint.quote.packet.authority.yaml

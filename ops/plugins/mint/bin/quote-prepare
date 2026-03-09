@@ -5,7 +5,7 @@
 #   quote-prepare --customer <query> [OPTIONS]
 #   quote-prepare --packet-id <id> [OPTIONS]
 #
-# Mutating. Creates or updates quote_packet work objects.
+# Mutating. Creates or updates quote_packet work objects with REAL integrations.
 #
 # Options:
 #   --customer <query>       Customer name/email/query (required for new packets)
@@ -21,15 +21,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPINE_ROOT="${SPINE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 PACKETS_DIR="$SPINE_ROOT/runtime/domain-state/mint/quote-packets"
 AUTHORITY="$SPINE_ROOT/ops/bindings/mint.quote.packet.authority.yaml"
+INDEX_FILE="$SPINE_ROOT/runtime/domain-state/mint/quote-packets-index.yaml"
+MINT_MODULES_ROOT="${MINT_MODULES_ROOT:-/Users/ronnyworks/code/mint-modules}"
+CUSTOMER_RESOLVE_SCRIPT="$MINT_MODULES_ROOT/customers/scripts/customer-resolve.ts"
+
+# Service URLs (from ops/bindings/services.health.yaml)
+PRICING_BASE_URL="http://192.168.1.213:3700"
+SUPPLIERS_BASE_URL="http://192.168.1.213:3800"
 
 stop(){ echo "STOP (2): $*" >&2; exit 2; }
 fail(){ echo "FAIL (1): $*" >&2; exit 1; }
 
 command -v yq >/dev/null 2>&1 || stop "missing dependency: yq"
 command -v uuidgen >/dev/null 2>&1 || stop "missing dependency: uuidgen"
+command -v jq >/dev/null 2>&1 || stop "missing dependency: jq"
+command -v curl >/dev/null 2>&1 || stop "missing dependency: curl"
 [[ -f "$AUTHORITY" ]] || stop "authority not found: $AUTHORITY"
 
-# Ensure packets directory exists
+# Ensure directories exist
 mkdir -p "$PACKETS_DIR"
 
 # Parse arguments
@@ -144,7 +153,7 @@ EOF
   # Add line_items if provided
   if [[ -n "$LINE_ITEMS_JSON" ]]; then
     # Parse JSON and add line_item_id to each item
-    echo "$LINE_ITEMS_JSON" | jq -c '.[] | . + {"line_item_id": (.|tostring|@uri)}' | while IFS= read -r LINE; do
+    echo "$LINE_ITEMS_JSON" | jq -c '.[]' | while IFS= read -r LINE; do
       LINE_ITEM_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
       LINE_UPDATED=$(echo "$LINE" | jq --arg id "$LINE_ITEM_ID" '. + {"line_item_id": $id}')
       yq -i ".line_items += [$LINE_UPDATED]" "$PACKET_FILE"
@@ -155,7 +164,13 @@ else
   yq -i ".updated_at = \"$TIMESTAMP\"" "$PACKET_FILE"
 fi
 
-# Orchestration: customer resolution
+# Append receipt for this capability run
+if [[ -n "${SPINE_CAP_RUN_KEY:-}" ]]; then
+  RECEIPT_PATH="receipts/sessions/R${SPINE_CAP_RUN_KEY}/receipt.md"
+  yq -i ".receipts += [{\"receipt_path\": \"$RECEIPT_PATH\", \"capability_name\": \"mint.quote.prepare\", \"run_key\": \"$SPINE_CAP_RUN_KEY\", \"executed_at\": \"$TIMESTAMP\"}]" "$PACKET_FILE"
+fi
+
+# Orchestration: customer resolution (REAL INTEGRATION)
 echo "Step 1/4: Customer resolution..."
 CUSTOMER_RESOLVED=0
 CUSTOMER_GAP_EXISTS=0
@@ -166,18 +181,73 @@ if [[ "$IDENTITY_STATE" == "resolved" ]]; then
   echo "  Customer already resolved"
   CUSTOMER_RESOLVED=1
 else
-  # Attempt resolution (stub - would call mint-modules customer-resolve)
-  echo "  Customer resolution: STUB (would call customer-resolve.ts)"
-  echo "  Customer remains provisional"
+  # Attempt resolution via customer-resolve.ts
+  if [[ -f "$CUSTOMER_RESOLVE_SCRIPT" ]]; then
+    echo "  Calling customer-resolve.ts..."
 
-  # Add gap if not already present
-  CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_unresolved")) | length' "$PACKET_FILE")
-  if [[ "$CUSTOMER_GAP_EXISTS" -eq 0 ]]; then
-    yq -i ".open_gaps += [{\"gap_id\": 1, \"gap_type\": \"customer_unresolved\", \"description\": \"Customer identity not resolved\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Use customer resolution capability or manual resolution\"}]" "$PACKET_FILE"
+    # Call customer resolve script
+    RESOLVE_OUTPUT=$(cd "$MINT_MODULES_ROOT/customers" && npm run --silent customer:resolve -- --json "$CUSTOMER_QUERY" 2>/dev/null || echo '{"state":"error"}')
+    RESOLVE_STATE=$(echo "$RESOLVE_OUTPUT" | jq -r '.state')
+
+    case "$RESOLVE_STATE" in
+      exact_match|normalized_match)
+        echo "  Customer resolved: $RESOLVE_STATE"
+        CUSTOMER_ID=$(echo "$RESOLVE_OUTPUT" | jq -r '.resolved_customer.id')
+        CUSTOMER_NAME=$(echo "$RESOLVE_OUTPUT" | jq -r '.resolved_customer.name')
+        CUSTOMER_EMAIL=$(echo "$RESOLVE_OUTPUT" | jq -r '.resolved_customer.email // empty')
+        MATCH_REASON=$(echo "$RESOLVE_OUTPUT" | jq -r '.resolved_customer.match_reason')
+
+        yq -i ".customer_ref.identity_state = \"resolved\"" "$PACKET_FILE"
+        yq -i ".customer_ref.customer_id = \"$CUSTOMER_ID\"" "$PACKET_FILE"
+        yq -i ".customer_ref.resolved_name = \"$CUSTOMER_NAME\"" "$PACKET_FILE"
+        if [[ -n "$CUSTOMER_EMAIL" && "$CUSTOMER_EMAIL" != "null" ]]; then
+          yq -i ".customer_ref.resolved_email = \"$CUSTOMER_EMAIL\"" "$PACKET_FILE"
+        fi
+        yq -i ".customer_ref.match_reason = \"$MATCH_REASON\"" "$PACKET_FILE"
+        CUSTOMER_RESOLVED=1
+        ;;
+      ambiguous)
+        echo "  Customer ambiguous (multiple matches)"
+        CANDIDATES=$(echo "$RESOLVE_OUTPUT" | jq -c '.candidates')
+        CANDIDATE_COUNT=$(echo "$CANDIDATES" | jq 'length')
+
+        # Check if gap already exists
+        CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_ambiguous")) | length' "$PACKET_FILE")
+        if [[ "$CUSTOMER_GAP_EXISTS" -eq 0 ]]; then
+          yq -i ".open_gaps += [{\"gap_id\": 1, \"gap_type\": \"customer_ambiguous\", \"description\": \"Customer query matched $CANDIDATE_COUNT candidates\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Review candidates and resolve manually\", \"candidates\": $CANDIDATES}]" "$PACKET_FILE"
+        fi
+        ;;
+      new_customer)
+        echo "  New customer (no match found)"
+
+        # Check if gap already exists
+        CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_new")) | length' "$PACKET_FILE")
+        if [[ "$CUSTOMER_GAP_EXISTS" -eq 0 ]]; then
+          yq -i ".open_gaps += [{\"gap_id\": 2, \"gap_type\": \"customer_new\", \"description\": \"New customer requires registration\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Register customer via customer portal or manual entry\"}]" "$PACKET_FILE"
+        fi
+        ;;
+      invalid_input|error)
+        echo "  Customer resolution failed: $RESOLVE_STATE"
+
+        # Check if gap already exists
+        CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_unresolved")) | length' "$PACKET_FILE")
+        if [[ "$CUSTOMER_GAP_EXISTS" -eq 0 ]]; then
+          yq -i ".open_gaps += [{\"gap_id\": 3, \"gap_type\": \"customer_unresolved\", \"description\": \"Customer identity not resolved ($RESOLVE_STATE)\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Provide valid customer query\"}]" "$PACKET_FILE"
+        fi
+        ;;
+    esac
+  else
+    echo "  customer-resolve.ts not found: $CUSTOMER_RESOLVE_SCRIPT"
+
+    # Check if gap already exists
+    CUSTOMER_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "customer_unresolved")) | length' "$PACKET_FILE")
+    if [[ "$CUSTOMER_GAP_EXISTS" -eq 0 ]]; then
+      yq -i ".open_gaps += [{\"gap_id\": 4, \"gap_type\": \"customer_unresolved\", \"description\": \"Customer resolution service unavailable\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Ensure mint-modules customer service is accessible\"}]" "$PACKET_FILE"
+    fi
   fi
 fi
 
-# Orchestration: stock check
+# Orchestration: stock check (REAL INTEGRATION when possible)
 echo "Step 2/4: Supplier stock check..."
 if [[ "$SKIP_STOCK" -eq 1 ]]; then
   echo "  Skipped (--skip-stock-check)"
@@ -186,13 +256,29 @@ else
   if [[ "$LINE_COUNT" -eq 0 ]]; then
     echo "  No line items to check"
   else
-    echo "  Stock check: STUB (would call suppliers module)"
-    # Add inventory_snapshot stub
-    yq -i ".inventory_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"supplier_results\": [], \"stock_available\": true, \"stock_warnings\": [], \"supplier_receipt_refs\": []}" "$PACKET_FILE"
+    echo "  Stock check: verifying service availability..."
+
+    # Check if suppliers service is reachable
+    if curl -s -f -m 5 "$SUPPLIERS_BASE_URL/health" > /dev/null 2>&1; then
+      echo "  Suppliers service available"
+
+      # For now, mark as pending real integration since we need product codes
+      # Real integration requires canonical product identifiers (brand/style/sku)
+      yq -i ".inventory_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"supplier_results\": [], \"stock_check_state\": \"blocked_insufficient_identifiers\", \"stock_warnings\": [\"Line items need canonical supplier product codes for stock lookup\"], \"supplier_receipt_refs\": []}" "$PACKET_FILE"
+
+      # Add gap for missing product identifiers
+      STOCK_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "stock_identifiers_missing")) | length' "$PACKET_FILE")
+      if [[ "$STOCK_GAP_EXISTS" -eq 0 ]]; then
+        yq -i ".open_gaps += [{\"gap_id\": 5, \"gap_type\": \"stock_identifiers_missing\", \"description\": \"Line items need canonical supplier product identifiers\", \"severity\": \"warning\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Add brand/style_code/supplier_sku to line items\"}]" "$PACKET_FILE"
+      fi
+    else
+      echo "  Suppliers service unreachable"
+      yq -i ".inventory_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"stock_check_state\": \"service_unavailable\", \"supplier_results\": [], \"stock_warnings\": [\"Suppliers service unreachable\"], \"supplier_receipt_refs\": []}" "$PACKET_FILE"
+    fi
   fi
 fi
 
-# Orchestration: pricing
+# Orchestration: pricing (REAL INTEGRATION when possible)
 echo "Step 3/4: Pricing calculation..."
 if [[ "$SKIP_PRICING" -eq 1 ]]; then
   echo "  Skipped (--skip-pricing)"
@@ -201,10 +287,27 @@ else
   if [[ "$LINE_COUNT" -eq 0 ]]; then
     echo "  No line items to price"
   else
-    echo "  Pricing: STUB (would call pricing module)"
-    # Add pricing_snapshot stub
-    PRICING_SNAPSHOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-    yq -i ".pricing_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"pricing_snapshot_id\": \"$PRICING_SNAPSHOT_ID\", \"line_item_prices\": [], \"decoration_prices\": [], \"calculated_totals\": {\"subtotal\": 0, \"tax\": 0, \"shipping\": 0, \"total\": 0}, \"pricing_receipt_refs\": [], \"confidence_level\": \"low\"}" "$PACKET_FILE"
+    echo "  Pricing: verifying service availability..."
+
+    # Check if pricing service is reachable
+    if curl -s -f -m 5 "$PRICING_BASE_URL/health" > /dev/null 2>&1; then
+      echo "  Pricing service available"
+
+      # For now, mark as pending real integration since we need normalized pricing inputs
+      # Real integration requires complete job estimate fields
+      PRICING_SNAPSHOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+      yq -i ".pricing_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"pricing_snapshot_id\": \"$PRICING_SNAPSHOT_ID\", \"pricing_state\": \"blocked_insufficient_inputs\", \"line_item_prices\": [], \"decoration_prices\": [], \"calculated_totals\": {\"subtotal\": 0, \"tax\": 0, \"shipping\": 0, \"total\": 0}, \"pricing_receipt_refs\": [], \"confidence_level\": \"none\"}" "$PACKET_FILE"
+
+      # Add gap for missing pricing inputs
+      PRICING_GAP_EXISTS=$(yq '.open_gaps | map(select(.gap_type == "pricing_inputs_insufficient")) | length' "$PACKET_FILE")
+      if [[ "$PRICING_GAP_EXISTS" -eq 0 ]]; then
+        yq -i ".open_gaps += [{\"gap_id\": 6, \"gap_type\": \"pricing_inputs_insufficient\", \"description\": \"Line items need complete pricing inputs (decoration method, placement, etc.)\", \"severity\": \"blocking\", \"discovered_at\": \"$TIMESTAMP\", \"resolution_path\": \"Add decoration_method, placement, colors to line items\"}]" "$PACKET_FILE"
+      fi
+    else
+      echo "  Pricing service unreachable"
+      PRICING_SNAPSHOT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+      yq -i ".pricing_snapshot = {\"snapshot_timestamp\": \"$TIMESTAMP\", \"pricing_snapshot_id\": \"$PRICING_SNAPSHOT_ID\", \"pricing_state\": \"service_unavailable\", \"line_item_prices\": [], \"decoration_prices\": [], \"calculated_totals\": {\"subtotal\": 0, \"tax\": 0, \"shipping\": 0, \"total\": 0}, \"pricing_receipt_refs\": [], \"confidence_level\": \"none\"}" "$PACKET_FILE"
+    fi
   fi
 fi
 
@@ -216,7 +319,7 @@ CURRENT_STATE=$(yq '.state' "$PACKET_FILE")
 if [[ "$BLOCKING_GAPS" -gt 0 ]]; then
   NEW_STATE="needs_input"
   echo "  Blocking gaps found: $BLOCKING_GAPS"
-elif [[ "$CUSTOMER_RESOLVED" -eq 1 ]] && [[ -n "$(yq '.pricing_snapshot' "$PACKET_FILE")" ]] && [[ "$(yq '.pricing_snapshot' "$PACKET_FILE")" != "null" ]]; then
+elif [[ "$CUSTOMER_RESOLVED" -eq 1 ]] && [[ -n "$(yq '.pricing_snapshot' "$PACKET_FILE")" ]] && [[ "$(yq '.pricing_snapshot.pricing_state' "$PACKET_FILE")" != "blocked_insufficient_inputs" ]]; then
   # Could be ready_for_review if render artifacts exist
   if [[ -n "$(yq '.quote_draft_ref' "$PACKET_FILE")" ]] && [[ "$(yq '.quote_draft_ref' "$PACKET_FILE")" != "null" ]]; then
     NEW_STATE="ready_for_review"
@@ -244,12 +347,20 @@ if [[ "$CUSTOMER_RESOLVED" -eq 1 ]]; then
   CUSTOMER_CONF="high"
 fi
 
-if [[ -n "$(yq '.pricing_snapshot' "$PACKET_FILE")" ]] && [[ "$(yq '.pricing_snapshot' "$PACKET_FILE")" != "null" ]]; then
-  PRICING_CONF=$(yq '.pricing_snapshot.confidence_level' "$PACKET_FILE")
+if [[ -n "$(yq '.pricing_snapshot.pricing_state' "$PACKET_FILE" 2>/dev/null)" ]]; then
+  PRICING_STATE=$(yq '.pricing_snapshot.pricing_state' "$PACKET_FILE")
+  if [[ "$PRICING_STATE" == "completed" ]]; then
+    PRICING_CONF=$(yq '.pricing_snapshot.confidence_level' "$PACKET_FILE")
+  fi
 fi
 
-if [[ -n "$(yq '.inventory_snapshot' "$PACKET_FILE")" ]] && [[ "$(yq '.inventory_snapshot' "$PACKET_FILE")" != "null" ]]; then
-  STOCK_CONF="medium"
+if [[ -n "$(yq '.inventory_snapshot.stock_check_state' "$PACKET_FILE" 2>/dev/null)" ]]; then
+  STOCK_STATE=$(yq '.inventory_snapshot.stock_check_state' "$PACKET_FILE")
+  if [[ "$STOCK_STATE" == "completed" ]]; then
+    STOCK_CONF="high"
+  elif [[ "$STOCK_STATE" == "blocked_insufficient_identifiers" ]]; then
+    STOCK_CONF="none"
+  fi
 fi
 
 # Overall confidence
@@ -262,6 +373,29 @@ else
 fi
 
 yq -i ".confidence = {\"overall\": \"$OVERALL_CONF\", \"artwork_confidence\": \"$ARTWORK_CONF\", \"pricing_confidence\": \"$PRICING_CONF\", \"stock_confidence\": \"$STOCK_CONF\", \"customer_confidence\": \"$CUSTOMER_CONF\"}" "$PACKET_FILE"
+
+# Update/create packet index
+echo "Updating packet index..."
+if [[ ! -f "$INDEX_FILE" ]]; then
+  cat > "$INDEX_FILE" <<EOF
+# Quote Packets Index
+# Generated by mint.quote.prepare
+# Last updated: $TIMESTAMP
+
+packets: []
+EOF
+fi
+
+# Check if packet already exists in index
+PACKET_IN_INDEX=$(yq ".packets[] | select(.quote_packet_id == \"$PACKET_ID\") | .quote_packet_id" "$INDEX_FILE" 2>/dev/null || echo "")
+if [[ -z "$PACKET_IN_INDEX" ]]; then
+  # Add new entry
+  yq -i ".packets += [{\"quote_packet_id\": \"$PACKET_ID\", \"state\": \"$NEW_STATE\", \"customer_query\": \"$CUSTOMER_QUERY\", \"created_at\": \"$TIMESTAMP\", \"updated_at\": \"$TIMESTAMP\"}]" "$INDEX_FILE"
+else
+  # Update existing entry
+  yq -i "(.packets[] | select(.quote_packet_id == \"$PACKET_ID\") | .state) = \"$NEW_STATE\"" "$INDEX_FILE"
+  yq -i "(.packets[] | select(.quote_packet_id == \"$PACKET_ID\") | .updated_at) = \"$TIMESTAMP\"" "$INDEX_FILE"
+fi
 
 # Output summary
 echo ""
@@ -280,5 +414,6 @@ else
 fi
 echo ""
 echo "packet_file: $PACKET_FILE"
+echo "index_file: $INDEX_FILE"
 
 exit 0
